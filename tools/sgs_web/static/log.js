@@ -158,6 +158,9 @@ function describeRecord(record) {
       // M5-08d：横置 / 重置的状态变化在完整档也写人话（U1-05 的简易档由服务端叙事写）。
       return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.chained ? "横置" : "重置"}`;
     }
+    if (record.delta_type === "flipped_change") {
+      return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.flipped ? "翻面（背面朝上）" : "翻回正面"}`;
+    }
     if (record.delta_type === "wine_change") {
       return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.active ? "进入【酒】状态" : "【酒】加伤消失"}`;
     }
@@ -172,16 +175,21 @@ function describeRecord(record) {
 }
 
 /** 一条应答的人话。牌桌下发的 `action` 可能只有 `kind`（对手的应答被投影裁掉了细节），
- *  故先判"展开所需字段在不在"，再交给 :func:`actionLabel`——不为裁过的载荷猜内容。
+ *  故先判"展开所需字段在不在"：裁过的只说**中性中文**的动作类型（`ACTION_KIND_LABELS`），
+ *  不读英文构造子名、也不写「undefined」。
  *
  *  预发动确认在记录流里的形态就是复合 `ActivateSkill`（`picks` / `choices` 都在）；
  *  回放页的事件流把它摊开，用户才看得见"确认发动"选了什么。
  */
 function describeAction(action) {
   if (!action) return "？";
-  if ((action.kind === "UseCard" || action.kind === "PlayCard") && !action.card) return action.kind;
-  if (action.kind === "ArrangeCards" && !action.order) return action.kind;
-  if (action.kind === "SelectOption" && typeof action.choice !== "string") return action.kind;
+  const kind = action.kind;
+  const trimmed = ACTION_KIND_LABELS[kind] || "应答";
+  if ((kind === "UseCard" || kind === "PlayCard" || kind === "SubstituteJudgeCard") && !action.card) return trimmed;
+  if (kind === "ActivateSkill" && !action.skill_id && !action.skill_name) return trimmed;
+  if (kind === "ArrangeCards" && !action.order) return trimmed;
+  if (kind === "SelectOption" && typeof action.choice !== "string") return trimmed;
+  if (kind === "DiscardCards" && !(action.cards || []).length) return trimmed;
   let text = actionLabel(action);
   if (action.kind === "ActivateSkill" && action.choices && action.choices.length) {
     text += ` → ${action.choices.join("、")}`;
@@ -219,10 +227,25 @@ function timingLabel(timing) {
   return timing;
 }
 
+/** 区域引用 → 人话（U4-06 / D13）：有武将名时写**武将名**，否则退回「座位N」。
+ *
+ *  拆 / 顺的选择面（`options.js:unknownSlotGroups`）与完整档事件流共用这一处。视图读
+ *  `tableViewForRender()`：回放期就是逐事件派生的 live view，与表体同一份数据源。
+ */
 function zoneLabel(ref) {
   if (!ref) return "（初次）";
   const names = { deck: "牌堆", hand: "手牌", discard: "弃牌堆", processing: "处理区", equip: "装备区", judge: "判定区" };
-  const where = ref.seat === null || ref.seat === undefined ? "" : `座位${ref.seat} `;
+  let where = "";
+  if (ref.seat !== null && ref.seat !== undefined) {
+    const view = tableViewForRender();
+    const player = playerAt(view, ref.seat);
+    const hero = player ? String(heroNameOf(player, view) || "").trim() : "";
+    // 旧载荷没有 `hero_name` 时 `heroNameOf` 会退回目录 / 引擎 id：那不是「武将名」，
+    // 别把 id 写进玩家文案（fail-closed 到座位号）。
+    const assigned = view ? heroIdAt(view, ref.seat) : "";
+    const named = hero && hero !== "（无武将）" && hero !== assigned ? hero : "";
+    where = named ? `${named} ` : `座位${ref.seat} `;
+  }
   return `${where}${names[ref.zone] || ref.zone}`;
 }
 

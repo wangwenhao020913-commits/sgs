@@ -1,0 +1,210 @@
+{
+  "ai": "random",
+  "deck_profile": "basic_53",
+  "event_schema_version": 2,
+  "finished_at": "2026-10-29T03:31:59.438123",
+  "hero_pool": null,
+  "hero_pool_explicit": false,
+  "heroes": [
+    "zhangfei",
+    "guanyu"
+  ],
+  "human_seat": 0,
+  "pack_id": "standard",
+  "player_count": 2,
+  "rule_config": {
+    "first_seat": 0,
+    "player_count": 2,
+    "starting_hand_size": 4
+  },
+  "seed": 1,
+  "session_log": [],
+  "tape": [
+    {
+      "answers_seq": 16,
+      "card": {
+        "attack_range": null,
+        "card_id": 4,
+        "color": "black",
+        "name": "杀",
+        "rank": 8,
+        "slot": null,
+        "suit": "spade",
+        "type": "slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 29,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 51,
+      "card": {
+        "attack_range": null,
+        "card_id": 19,
+        "color": "black",
+        "name": "杀",
+        "rank": 5,
+        "slot": null,
+        "suit": "club",
+        "type": "slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 64,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 86,
+      "card": {
+        "attack_range": null,
+        "card_id": 29,
+        "color": "black",
+        "name": "杀",
+        "rank": 11,
+        "slot": null,
+        "suit": "club",
+        "type": "slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 99,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 121,
+      "kind": "EndPhase"
+    },
+    {
+      "answers_seq": 140,
+      "card": {
+        "attack_range": null,
+        "card_id": 47,
+        "color": "red",
+        "name": "桃",
+        "rank": 6,
+        "slot": null,
+        "suit": "heart",
+        "type": "peach",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 165,
+      "kind": "EndPhase"
+    },
+    {
+      "answers_seq": 170,
+      "cards": [
+        {
+          "attack_range": null,
+          "card_id": 33,
+          "color": "red",
+          "name": "闪",
+          "rank": 2,
+          "slot": null,
+          "suit": "diamond",
+          "type": "dodge",
+          "virtual_sources": []
+        },
+        {
+          "attack_range": null,
+          "card_id": 36,
+          "color": "red",
+          "name": "闪",
+          "rank": 4,
+          "slot": null,
+          "suit": "diamond",
+          "type": "dodge",
+          "virtual_sources": []
+        },
+        {
+          "attack_range": null,
+          "card_id": 44,
+          "color": "red",
+          "name": "闪",
+          "rank": 11,
+          "slot": null,
+          "suit": "diamond",
+          "type": "dodge",
+          "virtual_sources": []
+        }
+      ],
+      "kind": "DiscardCards"
+    },
+    {
+      "answers_seq": 187,
+      "card": {
+        "attack_range": null,
+        "card_id": 12,
+        "color": "red",
+        "name": "杀",
+        "rank": 8,
+        "slot": null,
+        "suit": "diamond",
+        "type": "slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 200,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 222,
+      "card": {
+        "attack_range": null,
+        "card_id": 26,
+        "color": "black",
+        "name": "杀",
+        "rank": 10,
+        "slot": null,
+        "suit": "club",
+        "type": "slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 235,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 249,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 251,
+      "kind": "Pass"
+    }
+  ],
+  "timeout_seconds": null,
+  "timeouts": 0,
+  "version": 1
+}

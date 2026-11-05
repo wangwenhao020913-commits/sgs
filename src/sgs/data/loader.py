@@ -23,22 +23,39 @@ from collections import Counter
 from collections.abc import Mapping
 from functools import lru_cache
 from importlib.resources import files
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import ValidationError
 
 from .errors import DataLoadError, LoadError
-from .models import Category, CardType, ContentPack, Deck, HeroTable
+from .models import (
+    Category,
+    CardType,
+    ContentPack,
+    Deck,
+    Hero,
+    HeroTable,
+    PlacementDecl,
+    SkillType,
+)
 
 __all__ = [
     "DEFAULT_PACK_ID",
     "HERO_SKILL_PREFIX",
+    "HERO_SUPPLEMENT_PACK_IDS",
     "KNOWN_HEROES_SCHEMA_VERSIONS",
     "KNOWN_SCHEMA_VERSIONS",
+    "card_category",
     "enabled_hero_ids",
+    "hero_card_skill_ids",
+    "hero_by_id",
+    "hero_placement_decl",
+    "hero_placement_decls",
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
+    "load_hero_tables",
     "load_heroes",
     "validate_content_pack",
     "validate_heroes",
@@ -60,6 +77,44 @@ KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 """
 
 DEFAULT_PACK_ID = "standard"
+
+HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
+    "jie",
+    "jie_mobile",
+    "feng",
+    "feng_mobile",
+    "huo_mobile",
+    "huo",
+    "homebrew",
+)
+"""与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
+
+界标准 29 名与标准 25 名**分开存**（ADR-006 的"分开存"这次真落），故
+``files/heroes.jie.json`` 是独立的一份 :class:`~sgs.data.models.HeroTable`，**不是**
+内容包（内容包管牌堆与牌名，武将包管武将面）。它由 :func:`load_hero_tables` 与内容包
+自己的表一起交给读取面：载体解析按同一个武将 id 查全部表，故界将能被构造局面直接发放。
+后续界将票只往这个文件追加条目（真名配将与默认将池属于票 12：票 12 起启用池 / 默认
+将池是**两张表的并集**，配将再按真名分组）。
+
+``jie_mobile`` 是**移动版**那一份（``files/heroes.jie_mobile.json``）：与 OL 系列
+**版本并存**——同一真名可以有 OL 版与移动版两条记录，版本字段分别是 ``jie-ol`` 与
+``jie-mobile``，显示名按"OL 不加后缀、移动版加「移动版」"命名（用户裁定）。所以扩展包
+不是"一个版本"，而是"每个版本一份表"；读取面（:func:`load_hero_tables`）按声明序并起来，
+缺表时才报错。
+
+``feng`` 是**神话再临·风包**那一份（``files/heroes.feng.json``，票 03 起）：它既不是标准版
+的"另一版本"、也不是移动版，而是一个**独立的系列包**——故单独一表、版本标记取 ``"feng"``。
+风包武将逐名追加到这张表；与界标准 / 移动版同一读取面（同一道三段校验、同一个默认将池）。
+
+``huo_mobile`` 是**神话再临·火包的移动版**那一份（``files/heroes.huo_mobile.json``，
+huo-dianwei-mobile 票 01 起）：与 ``feng_mobile`` 同一姿态——移动版独立成表、版本标记取
+``"huo-mobile"``、显示名加「移动版」后缀。火包武将逐个追加到这张表；将来做 **OL 火包**
+时另开 ``files/heroes.huo.json``（版本标记 ``"huo"``），两表并存、同真名可各持一版
+（用户裁定「移动版与 OL 系列版本并存」）。
+
+``homebrew`` 是**自制包**那一份（``files/heroes.homebrew.json``）：同样是一个独立系列包，
+版本标记取 ``"homebrew"``，显示名不带任何版本后缀（自制武将自带「韬·」系列前缀）。首个载体
+是韬·刘备自制版（真名刘备，与标准版同名 ⇒ 同一局仍只出一个）。"""
 
 HERO_SKILL_PREFIX = "hero."
 """武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。
@@ -87,6 +142,7 @@ _EXPECTED_BY_PYDANTIC_ERROR: dict[str, str] = {
     "extra_forbidden": "无多余字段",
     "enum": "枚举取值之一",
     "string_type": "字符串",
+    "string_too_short": "非空字符串",
     "int_type": "整数",
     "int_parsing": "可解析为整数的值",
     "bool_type": "布尔值",
@@ -589,6 +645,29 @@ def load_content_pack(
     return pack.model_copy(update={"deck_profile": deck_profile})
 
 
+@lru_cache(maxsize=None)
+def _card_category_table(pack_id: str) -> Mapping[str, Category]:
+    """``pack_id`` 的 ``card_type_id → 大类`` 只读表（按包缓存；``load_content_pack`` 本身也是缓存的）。"""
+    pack = load_content_pack(pack_id)
+    return MappingProxyType(
+        {card_type.id: card_type.category for card_type in pack.card_types}
+    )
+
+
+def card_category(pack_id: str, type_id: str) -> Category | None:
+    """``pack_id`` 内容包里 ``type_id`` 这张牌的**大类**；未知牌名返回 ``None``（M6 票 02）。
+
+    牌名大类（``basic`` / ``trick`` / ``equipment``）是**数据文件**的事实（`03` §2「卡牌数据模型」），
+    而运行期只有"这张牌是锦囊吗"这一个读取方（【集智】的非延时锦囊 / 【奇才】的锦囊）：
+    两者都拿 ``CardRef.type`` 来问，故这里按 ``pack_id`` 建一张只读表。
+
+    缓存只按 ``pack_id`` 分桶：``card_types`` 与 ``deck_profile`` 无关（档位只改牌堆组成）。
+    查不到牌名**不抛错**——fail-closed 返回 ``None``，调用方按"不是锦囊"处理（虚拟牌 /
+    未来新增牌名漏配时是"不发动"，不是崩）。
+    """
+    return _card_category_table(pack_id).get(type_id)
+
+
 # ---------------------------------------------------------------------------
 # 武将表：``heroes.<pack_id>.json`` 的定位、三段校验与只读查询（票 01）
 # ---------------------------------------------------------------------------
@@ -627,8 +706,30 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
         )
 
     seen_ids: set[str] = set()
+    seen_versions: dict[tuple[str, str], int] = {}
+    """（真名, 版本）→ 首次出现的条目下标：同一真名的同一版本只许有一条记录。"""
     for index, hero in enumerate(table.heroes):
         base = f"/heroes/{index}"
+
+        # M6 票 12：真名是配将的分组键。同一真名的**同一版本**出现两条记录时，"这一版是
+        # 哪名武将"就不再唯一；跨表的同一真名（标准关羽 / 界关羽）是不同版本，不受限。
+        version_key = (hero.true_name, hero.version)
+        first_index = seen_versions.get(version_key)
+        if first_index is not None:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/true_name",
+                    expected=(
+                        f"同一真名的同一版本只出现一次（真名「{hero.true_name}」/ 版本 "
+                        f"{hero.version!r} 已在 /heroes/{first_index} 出现）"
+                    ),
+                    got=repr(hero.true_name),
+                    rule_id="heroes.duplicate_true_name_version",
+                )
+            )
+        else:
+            seen_versions[version_key] = index
 
         if hero.id in seen_ids:
             errors.append(
@@ -681,7 +782,8 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
             if not hero.enabled:
                 continue
             full_id = hero_skill_id(hero.id, skill.id)
-            if CATALOG.get(full_id) is None:
+            definition = CATALOG.get(full_id)
+            if definition is None:
                 errors.append(
                     LoadError(
                         file=file,
@@ -689,6 +791,60 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                         expected=f"技能表里存在 {full_id}（已启用武将的技能引用必须闭合）",
                         got=repr(skill.id),
                         rule_id="hero.skill_missing",
+                    )
+                )
+                continue
+            # M6 票 10：放置类技能的三项声明（可见性 / 归还时机 / 附加效果）在**数据**里，
+            # "这条技能会往武将牌上放牌"在**代码**里（SkillDef.places_on_hero_card）。
+            # 两半必须同时成立：代码标了而数据没写 ⇒ 放置区没人负责归还；数据写了而代码
+            # 没标 ⇒ 声明了一条不存在的机制。两项都 fail-closed（D14 / S8 登记表检查）。
+            if definition.places_on_hero_card and skill.placement is None:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}",
+                        expected="placement：可见性 / 归还时机 / 有无附加效果三项声明",
+                        got="缺失",
+                        rule_id="heroes.placement_missing",
+                    )
+                )
+            elif skill.placement is not None and not definition.places_on_hero_card:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/placement",
+                        expected=f"{full_id} 是登记在案的放置类技能（SkillDef.places_on_hero_card）",
+                        got="声明了放置、技能定义没有登记",
+                        rule_id="heroes.placement_not_registered",
+                    )
+                )
+
+        # M6 票 06：☆ 的 ``granted_by`` 必须指向**同一武将**的一条**觉醒技**。
+        # 与技能引用闭合分开核对：觉醒技本身就在这份清单里，故不依赖"该技能已在
+        # ``CATALOG`` 里闭合"（那条只对启用的武将查）。
+        declared = {skill.id: skill for skill in hero.skills}
+        for skill_index, skill in enumerate(hero.skills):
+            if skill.granted_by is None:
+                continue
+            target = declared.get(skill.granted_by)
+            if target is None:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/granted_by",
+                        expected="同一武将技能清单里的一条觉醒技短 id",
+                        got=repr(skill.granted_by),
+                        rule_id="heroes.granted_by_unknown",
+                    )
+                )
+            elif target.skill_type is not SkillType.AWAKENING:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/granted_by",
+                        expected=f"「{skill.granted_by}」是觉醒技（☆ 只能由觉醒技获得）",
+                        got=target.skill_type.value,
+                        rule_id="heroes.granted_by_not_awakening",
                     )
                 )
 
@@ -744,26 +900,110 @@ def load_heroes(pack_id: str = DEFAULT_PACK_ID) -> HeroTable:
     return validate_heroes(text, file=file)
 
 
+def load_hero_tables(pack_id: str = DEFAULT_PACK_ID) -> tuple[HeroTable, ...]:
+    """``pack_id`` 的武将表**连同扩展武将包**（M6 票 04）：``(标准表, 界版表, …)``。
+
+    顺序 = :data:`HERO_SUPPLEMENT_PACK_IDS` 的声明序；每一份都各自走三段校验并各自缓存
+    （与 :func:`load_heroes` 同姿态）。这是"分开存、同一读取面"的唯一定义处：
+    :func:`hero_skill_ids` 读它，不在调用方各拼一份表名。
+    """
+    return tuple(
+        load_heroes(table_pack_id)
+        for table_pack_id in dict.fromkeys((pack_id, *HERO_SUPPLEMENT_PACK_IDS))
+    )
+
+
+def hero_by_id(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> Hero | None:
+    """按 id 跨**全部**武将表取武将（M6 票 12；M6 票 04 的"分开存、同一读取面"）。
+
+    配将的缺省将池是标准版 + 界版的并集，故开局初始化不能再只查内容包那张表：
+    ``build_initial`` 按抽到的 id 找武将数据（体力 / 势力 / 性别 / 真名）时走这里。
+    与 :func:`hero_skill_ids` 同姿态——未知 id 返回 ``None``，调用方 fail-closed。
+    """
+    for table in load_hero_tables(pack_id):
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return hero
+    return None
+
+
 def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
     """某武将的**全限定技能 id**（``hero.<武将 id>.<短 id>``，按数据文件里的顺序）。
 
+    查表面 = :func:`load_hero_tables`（内容包的表 + 扩展武将包的表）：界版武将与标准版
+    走同一道载体解析，故"两名界将可用"不需要第二份查找路径。
     未知 ``hero_id`` 返回空元组：调用方（载体解析）与"装备牌查不到技能定义即跳过"
     同姿态，不因一处未知引用把整局打断；数据侧的"漏配"由加载期校验负责拦。
     """
-    hero = load_heroes(pack_id).by_id(hero_id)
-    if hero is None:
-        return ()
-    return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+    for table in load_hero_tables(pack_id):
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+    return ()
+
+
+@lru_cache(maxsize=None)
+def hero_placement_decls(pack_id: str = DEFAULT_PACK_ID) -> Mapping[str, PlacementDecl]:
+    """**放置三项声明**的唯一读取面（M6 票 10；spec D14 / S8）。
+
+    返回 ``全限定技能 id → PlacementDecl``（只含**声明了** ``placement`` 的条目）。
+    引擎的"当前回合结束时整批归还"按它取 ``return_timing`` / ``extra_effect``；测试的
+    登记表检查按它核"每个 ``SkillDef.places_on_hero_card`` 都有一份声明"。
+    """
+    found: dict[str, PlacementDecl] = {}
+    for table in load_hero_tables(pack_id):
+        for hero in table.heroes:
+            for skill in hero.skills:
+                if skill.placement is not None:
+                    found[hero_skill_id(hero.id, skill.id)] = skill.placement
+    return MappingProxyType(found)
+
+
+def hero_placement_decl(
+    skill_id: str, *, pack_id: str = DEFAULT_PACK_ID
+) -> PlacementDecl | None:
+    """一条技能的三项声明；不是放置类技能（或数据里没有它）返回 ``None``。"""
+    return hero_placement_decls(pack_id).get(skill_id)
+
+
+@lru_cache(maxsize=None)
+def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
+    """某武将**武将牌上**（非 ☆）的全限定技能 id，按数据文件里的顺序（M6 票 06）。
+
+    与 :func:`hero_skill_ids` 的差别只有一处：**排除 ``granted_by`` 非空的 ☆ 条目**。
+    载体解析的武将牌那一路读本函数——☆ 技能的实例只来自"获得"来源
+    （``Player.granted_skills``），武将牌不产出它，故未觉醒时"没有这个技能"是结构事实，
+    不靠条件在派发期挡。``hero_skill_ids`` 仍回答"这名武将总共带哪些技能"（加载期闭合
+    校验与界面清单读它），两者共用同一份数据、不各抄一份名单。
+
+    **纯函数 + 进程级缓存**（票 16）：返回值只依赖 ``(hero_id, pack_id)``，而武将表由
+    :func:`load_heroes` 缓存、进程内不变，故 ``lru_cache`` 零语义风险——它是载体解析的
+    最热读取面（每局上万次），命中时省掉"遍历武将表 + 重建 tuple"。
+    """
+    for table in load_hero_tables(pack_id):
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return tuple(
+                hero_skill_id(hero.id, skill.id)
+                for skill in hero.skills
+                if skill.granted_by is None
+            )
+    return ()
 
 
 def enabled_hero_ids(
     table: HeroTable | None = None, *, pack_id: str = DEFAULT_PACK_ID
 ) -> tuple[str, ...]:
-    """``table`` 里**已启用**武将的 id（按数据文件顺序）；缺省读当前包的表（票 02）。
+    """**已启用**武将的 id（按数据文件顺序）；缺省读**全部**武将表（M6 票 12）。
 
     这是启用门控的**只读面**：发放段用它当"本局可发的武将池"的缺省来源，而
     :func:`validate_heroes` 用同一份 ``enabled`` 字段做条件化引用校验——两处读同一字段，
-    不各抄一份名单。``table`` 入参让"派生"这条判据能对一份注入的表单独验证。
+    不各抄一份名单。
+
+    ``table`` 入参让"派生"这条判据能对一份注入的表单独验证（仍只读那一张表）；不给时
+    读 :func:`load_hero_tables` 的**并集**（内容包表 + 扩展武将包）——票 12 起默认将池
+    是标准版与界版的全部启用版本（spec D19 的混合局），只读内容包那张表会让界将永远发
+    不出来。顺序 = 表的声明序、表内 = 数据文件顺序，故并集也是确定的。
     """
-    source = load_heroes(pack_id) if table is None else table
-    return tuple(hero.id for hero in source.heroes if hero.enabled)
+    tables = load_hero_tables(pack_id) if table is None else (table,)
+    return tuple(hero.id for source in tables for hero in source.heroes if hero.enabled)

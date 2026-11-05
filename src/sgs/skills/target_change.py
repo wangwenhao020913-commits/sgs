@@ -65,13 +65,45 @@ from sgs.timing import Timing
 from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
-__all__ = ["LIULI_FLOW", "LIULI", "MASHU", "target_change_skill_definitions"]
+__all__ = [
+    "JIE_LIULI",
+    "LIULI_FLOW",
+    "JIE_MASHU",
+    "JIE_YICONG",
+    "LIULI",
+    "MASHU",
+    "PANGDE_MASHU",
+    "target_change_skill_definitions",
+]
 
 MASHU = hero_skill_id("machao", "mashu")
 """马超【马术】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
 
+JIE_YICONG = hero_skill_id("jie_gongsunzan", "yicong")
+"""界公孙瓒【义从】的全限定技能 id（M6 票 18；§十九 L2229–L2230）。"""
+
+JIE_MASHU = hero_skill_id("jie_machao", "mashu")
+"""界马超【马术】的全限定技能 id（M6 票 04）：§十九 L2107 与标准版逐字相同。
+
+界版的第二条技能是【铁骑】（票 04 的第二个载体，住 :mod:`sgs.skills.response_window`）；
+【马术】本身没有版本差异，故两个 id 共用**同一个** ``DISTANCE`` 回调——"一个技能一条定义"
+不因武将版本分叉而成两份行为。"""
+
+PANGDE_MASHU = hero_skill_id("pangde_mobile", "mashu")
+"""火包·移动版庞德【马术】的全限定技能 id（huo-mobile-batch 票 01）。
+
+牌面与两条既有【马术】逐字相同（`D:\\SGS_HEROS\\神话再临-火包\\庞德\\技能.txt`）⇒ 用户
+2026-11-02 签"复用马超的马术"：**同一个** ``DISTANCE`` 回调、另立一条 ``SkillDef``（第三条
+同形实例，与 :data:`JIE_MASHU` 同一姿态）。"""
+
 LIULI = hero_skill_id("daqiao", "liuli")
 """大乔【流离】的全限定技能 id。"""
+
+JIE_LIULI = hero_skill_id("jie_daqiao", "liuli")
+"""界大乔【流离】的全限定技能 id（M6 票 17）：§十九 L2179–L2181 与标准版**逐字相同**。
+
+与标准【流离】共用同一条钩子 / 流水线（同一个回调、同一份步骤声明）：界版只是另一个武将
+id，行为不因版本分叉。"""
 
 _LIULI_USED = "liuli_used"
 """帧私有键：本次使用里【流离】已经转移过目标（重入不再问、不再转移）。"""
@@ -88,6 +120,20 @@ def _mashu_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any
     if ctx.owner != ctx.subject:
         return current
     return current - 1
+
+
+def _yicong_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """界公孙瓒【义从】的两条距离修正（§十九 L2229–L2230）。
+
+    ①"你计算与其他角色的距离 -1" ⇒ 持有者是**主体**时 −1（与【马术】同一条）；
+    ②"若你的体力值不大于 2，其他角色计算与你的距离 +1" ⇒ 持有者是**客体**且**当前
+    体力值**（不是体力上限）≤ 2 时 +1。两条互斥（主体与客体不可能同时是同一人）。
+    """
+    if ctx.owner == ctx.subject:
+        return current - 1
+    if ctx.owner == ctx.target and state.player(ctx.owner).hp <= 2:
+        return current + 1
+    return current
 
 
 # ---------------------------------------------------------------------------
@@ -264,13 +310,36 @@ LIULI_FLOW = SkillFlow(
 """
 
 
+def _liuli_definition(skill_id: str) -> SkillDef:
+    """【流离】的 :class:`SkillDef`；标准 / 界两个武将 id 各取一份（同一钩子 + 同一条流水线）。"""
+    return SkillDef(
+        skill_id=skill_id,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        skill_type=SkillType.NORMAL,
+        hooks=(
+            Hook(
+                Timing.USE_BECOME_TARGET,
+                condition=_liuli_condition,
+                flow=LIULI_FLOW,
+            ),
+        ),
+        requirement="弃一张牌，把【杀】转移给另一名角色",
+        step_requirements={
+            "card": "弃置一张牌（手牌 / 装备区）",
+            "seat": "选择将此【杀】转移给哪名其他角色",
+        },
+        preactivated=True,
+    )
+
+
 def target_change_skill_definitions() -> tuple[SkillDef, ...]:
-    """K 族【马术】与 M 族【流离】的 :class:`~sgs.skills.catalog.SkillDef`。
+    """K 族【马术】（标准 / 界两条）与 M 族【流离】（标准 / 界两条）的 :class:`SkillDef`。
 
     【马术】锁定（技能面写"锁定技"）⇒ ``locked=True``、落 ``DISTANCE`` 修饰器；
     【流离】非锁定（"你可以"）⇒ ``locked=False``、落 ``USE_BECOME_TARGET`` 钩子（票 08 起
-    该钩子声明 ``flow=LIULI_FLOW``）。两条 ``carrier = HERO``（优先级档由载体派生）、
-    ``skill_type = NORMAL``。
+    该钩子声明 ``flow=LIULI_FLOW``）。四条 ``carrier = HERO``（优先级档由载体派生）、
+    ``skill_type = NORMAL``。界版两条都是"同一份声明、另一个武将 id"（票 04 / 票 17）。
     """
     return (
         SkillDef(
@@ -281,23 +350,34 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
             modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
             requirement="计算与其他角色的距离时 -1",
         ),
+        # 界马超【马术】（M6 票 04）：牌面与标准版逐字相同 ⇒ 同一个回调、同一条链。
         SkillDef(
-            skill_id=LIULI,
-            locked=False,
+            skill_id=JIE_MASHU,
+            locked=True,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            hooks=(
-                Hook(
-                    Timing.USE_BECOME_TARGET,
-                    condition=_liuli_condition,
-                    flow=LIULI_FLOW,
-                ),
-            ),
-            requirement="弃一张牌，把【杀】转移给另一名角色",
-            step_requirements={
-                "card": "弃置一张牌（手牌 / 装备区）",
-                "seat": "选择将此【杀】转移给哪名其他角色",
-            },
-            preactivated=True,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
+            requirement="计算与其他角色的距离时 -1",
+        ),
+        # 火包·移动版庞德【马术】（huo-mobile-batch 票 01）：同一份牌面、同一个回调。
+        SkillDef(
+            skill_id=PANGDE_MASHU,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
+            requirement="计算与其他角色的距离时 -1",
+        ),
+        _liuli_definition(LIULI),
+        # 界大乔【流离】（M6 票 17）：牌面与标准版逐字相同 ⇒ 同一条钩子 / 流水线。
+        _liuli_definition(JIE_LIULI),
+        # 界公孙瓒【义从】（M6 票 18）：①主体侧 -1；②客体侧在体力 ≤ 2 时 +1。
+        SkillDef(
+            skill_id=JIE_YICONG,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _yicong_distance),),
+            requirement="①你计算与其他角色的距离 -1；②若你的体力值不大于 2，其他角色计算与你的距离 +1",
         ),
     )

@@ -12,12 +12,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import Enum
+from types import MappingProxyType
+from typing import NamedTuple
 
 __all__ = [
     "IDENTITY_LABELS",
     "IDENTITY_ROSTERS",
+    "MODE_SITES",
+    "MODE_SITE_SLOTS",
     "Identity",
     "Mode",
+    "ModeSite",
     "roster_for",
 ]
 
@@ -35,6 +40,83 @@ class Mode(str, Enum):
 
     IDENTITY = "identity"
     """身份局（座位数 4~8）。"""
+
+
+MODE_SITE_SLOTS: tuple[str, ...] = ("relation", "victory", "steps", "projection")
+"""``MODE_SITES`` 每行固定四格（顺序即表的读法）。
+
+四格各自回答什么、「不适用」怎么写、以及新增模式时要裁的那笔账，见
+``docs/agents/ai-adaptation.md`` §3.3——正文只放那一份，这里不抄第二份。
+"""
+
+
+class ModeSite(NamedTuple):
+    """``MODE_SITES`` 的一格：字符串引用（``"模块路径:属性路径"``）+ 一句理由。
+
+    ``refs`` 为空 = 本模式在这格上"不适用"，此时 ``reason`` 是一句**理由**。为什么用字符串
+    引用而不是直接 import（``data`` 不反向依赖 ``engine`` / ``agents``）、解析断言在哪，见
+    ``docs/agents/ai-adaptation.md`` §3.3。
+    """
+
+    refs: tuple[str, ...]
+    reason: str
+
+
+MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
+    {
+        Mode.NO_IDENTITY: MappingProxyType(
+            {
+                "relation": ModeSite(
+                    (),
+                    "不适用：无身份局不发放身份 ⇒ 没有队伍可认、也没有配比可减；`identity` 恒"
+                    "None，故 `sgs.agents.heuristic._identity_relation` 对别的座位恒答 (0, 0)"
+                    "（只有自己 (0, 1)）——AI 侧因此没有要读的 identity 面",
+                ),
+                "victory": ModeSite(
+                    ("sgs.engine.game:Engine.check_game_end",),
+                    "存活数 ≤ 1 直接判（票 13 §3）；该分支内联在唯一终局入口的 else 支，"
+                    "没有独立的纯求解器",
+                ),
+                "steps": ModeSite(
+                    ("sgs.engine.steps:build_steps",),
+                    "DEATH 帧用 `DEATH_STEPS`（不亮身份、不求身份胜负），其余帧两模式同表",
+                ),
+                "projection": ModeSite(
+                    (),
+                    "不适用：没有身份 ⇒ `PlayerView` 里不存在要抹掉的字段，投影无需派生",
+                ),
+            }
+        ),
+        Mode.IDENTITY: MappingProxyType(
+            {
+                "relation": ModeSite(
+                    ("sgs.agents.heuristic:_identity_relation",),
+                    "`PlayerPublic.identity`（本人 / 主公 / 已阵亡 / `identity_visible`）先从"
+                    "`IDENTITY_ROSTER` 里减掉，存活未知座位按人头均分得 `(P(敌), P(友))`"
+                    "（I1 身份保守档，票 21；只作权重、不硬判）；算不出就退回中性的 (0, 0)",
+                ),
+                "victory": ModeSite(
+                    ("sgs.engine.victory:solve_identity_outcome",),
+                    "按本批死亡事实 + 批次末存活集合求解（票 25 / 决策回票 14）；"
+                    "`Engine._solve_identity` 只是取状态再调它",
+                ),
+                "steps": ModeSite(
+                    ("sgs.engine.steps:build_steps",),
+                    "DEATH 帧用 `IDENTITY_DEATH_STEPS`（亮身份 → 记死亡事实 → 检测终局）",
+                ),
+                "projection": ModeSite(
+                    ("sgs.state.projection:_visible_identity",),
+                    "投影时就把不可见的身份抹成 None（票 13 §6）：'身份不泄露'是结构事实",
+                ),
+            }
+        ),
+    }
+)
+"""``Mode`` → 四个格子（票 17 的第三张登记表；断言住 ``tests/test_ai_adaptation.py``）。
+
+新增一个模式 = 给这里加一行、四格都要有答案（读法与责任划分见
+``docs/agents/ai-adaptation.md`` §3.3 与 §4）。
+"""
 
 
 class Identity(str, Enum):

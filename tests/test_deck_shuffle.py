@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from sgs.data import RuleConfig, load_content_pack
-from sgs.engine import Engine, RandomSource, dump_journal
+from sgs.engine import Engine, ai_stream, dump_journal
 from sgs.state import MoveReason, Phase, Zone
 
 from support import RecordingPlayer, SeatSpec, build_state, run_turns, run_until
@@ -29,7 +29,7 @@ class _QuietChoice:
 
     def __init__(self, noise: int = 0) -> None:
         self._noise = noise
-        self._rng = RandomSource(11).substream("ai")
+        self._rng = ai_stream(11, 0)
 
     def respond(self, query):
         for _ in range(self._noise):

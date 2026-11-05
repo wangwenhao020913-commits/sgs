@@ -13,13 +13,16 @@
 
 from __future__ import annotations
 
-__all__ = ["CATEGORY_MINIMUMS", "M1_CLASS", "M5_CLASS", "SLUG_CLASSES"]
+__all__ = ["CATEGORY_MINIMUMS", "M1_CLASS", "M5_CLASS", "M6_CLASS", "SLUG_CLASSES"]
 
 M1_CLASS = "m1-regression"
 """M1 六条回归基线的类标签：它们是回归网，不是身份局路径。"""
 
 M5_CLASS = "军争机制"
 """M5 的 8 条构造基准：每个新牌名 / A3 覆盖项至少落一条（M5-09a）。"""
+
+M6_CLASS = "界局机制"
+"""M6 的 5 条界局构造基准：spec §投影与记录流 的每类新原语至少落一条（票 20）。"""
 
 
 CATEGORY_MINIMUMS: dict[str, int] = {
@@ -32,9 +35,10 @@ CATEGORY_MINIMUMS: dict[str, int] = {
     "普通锦囊与打出": 4,
     "武将技能": 8,
     M5_CLASS: 8,
+    M6_CLASS: 5,
 }
-"""九类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条
-+ 8 条 M5 军争构造基准 = 50 条。"""
+"""十类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条
++ 8 条 M5 军争构造基准 + 5 条 M6 界局构造基准 = 55 条。"""
 
 
 SLUG_CLASSES: dict[str, tuple[str, ...]] = {
@@ -109,5 +113,11 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     "53-supply-shortage-skips-draw": (M5_CLASS,),
     "54-reforge-iron-chain": (M5_CLASS,),
     "55-fan-converts-normal-slash": (M5_CLASS,),
+    # ---- 10. 界局机制（M6 票 20：spec §投影与记录流 的每类新原语） ----
+    "56-jie-guanyu-yijue-suppress": (M6_CLASS,),
+    "57-jie-xushu-awakening": (M6_CLASS,),
+    "58-jie-luxun-hero-zone": (M6_CLASS,),
+    "59-jie-lvmeng-extra-turn": (M6_CLASS,),
+    "60-jie-zhenji-luoshen-tags": (M6_CLASS,),
 }
 """slug → 类（**每个 slug 至少一类**；新增基准必须在这里登记）。"""

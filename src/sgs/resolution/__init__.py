@@ -12,6 +12,11 @@ from .stack import (
     StepHost,
     StepTable,
 )
+from .events import (
+    EVENT_FRAME_INVALID,
+    invalidate_event_frame,
+    take_event_frame_invalid,
+)
 from .tags import (
     EMPTY_TAGS,
     USE_TAGS_KEY,
@@ -25,6 +30,7 @@ from .tags import (
 __all__ = (
     "Control",
     "EMPTY_TAGS",
+    "EVENT_FRAME_INVALID",
     "Frame",
     "Goto",
     "ResolutionStack",
@@ -37,4 +43,6 @@ __all__ = (
     "UseTags",
     "add_tag",
     "has_tag",
+    "invalidate_event_frame",
+    "take_event_frame_invalid",
 )

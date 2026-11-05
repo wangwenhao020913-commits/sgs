@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "pack_id": "huo_mobile",
+  "heroes": [
+    {
+      "id": "dianwei_mobile",
+      "name": "典韦移动版",
+      "true_name": "典韦",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qiangxi",
+          "name": "强袭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "pangde_mobile",
+      "name": "庞德移动版",
+      "true_name": "庞德",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "mashu",
+          "name": "马术",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "mengjin",
+          "name": "猛进",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "pangtong_mobile",
+      "name": "庞统移动版",
+      "true_name": "庞统",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "lianhuan",
+          "name": "连环",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "niepan",
+          "name": "涅槃",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "yuanshao_mobile",
+      "name": "袁绍移动版",
+      "true_name": "袁绍",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "luanji",
+          "name": "乱击",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "xueyi",
+          "name": "血裔",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "shen_zhouyu_mobile",
+      "name": "神周瑜移动版",
+      "true_name": "神周瑜",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qinyin",
+          "name": "琴音",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yeyan",
+          "name": "业炎",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "taishici",
+      "name": "太史慈标准版",
+      "true_name": "太史慈",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tianyi",
+          "name": "天义",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "xunyu",
+      "name": "荀彧标准版",
+      "true_name": "荀彧",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "quhu",
+          "name": "驱虎",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jieming",
+          "name": "节命",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

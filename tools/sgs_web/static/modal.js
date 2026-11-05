@@ -1,6 +1,7 @@
-/* SGS 前端 · 询问弹窗框架（U2-06 / spec D3）+ 武将详情检视窗（U1-06 / D8）。
+/* SGS 前端 · 询问弹窗框架（U2-06 / spec D3）+ 武将详情检视窗（U1-06 / D8）+ 弃牌堆面板
+ * （U4-05 / D11）。
  *
- * 两个窗口、两条纪律：
+ * 三个窗口、各自一条纪律：
  *
  *  - **`#t-dialog` = 询问弹窗**（唯一的询问表面容器）。标题 + 可选步骤提示 + 内容槽 +
  *    折叠按钮。**没有关闭按钮、没有 ESC 关闭、没有点背景关闭**——退出只有两条路：
@@ -9,6 +10,9 @@
  *    折叠只隐藏正文（标题 + 步骤提示 + 展开按钮留下），不改只读态。
  *  - **`#t-modal` = 武将详情**：唯一可叠加在询问弹窗之上的检视窗；它自己的关闭按钮 /
  *    ESC 只关它自己，底下的询问弹窗原样恢复；开合它不改变只读态。
+ *  - **`#t-discard-modal` = 弃牌堆面板**：只读检视窗，**自己的遮罩**（`#t-discard-backdrop`）
+ *    与关闭按钮 / ESC 三个出口。它不进只读判据、不改选择态；数据由
+ *    `table.js:renderDiscardPanel()` 从表体同一份视图画。
  *
  * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`）。另外两个
  * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形），
@@ -36,15 +40,76 @@ const DIALOG_KINDS = Object.freeze({
   choice: "choice",
   unknown: "unknown",
   reveal: "reveal",
+  suit: "suit",
+  distribution: "distribution",
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：星牌点选（1..k 张，提交后结算）。
+  heroPick: "heroPick",
 });
+
+/** 候选里有没有一条 `Pass`（判断"这一步能不能放弃"的**载荷**判据，不认技能 id）。 */
+function hasPassAction(pending) {
+  return ((pending && pending.legal_actions) || []).some(
+    (action) => action.kind === "Pass",
+  );
+}
+
+/** 同一时机的**激活面**（票 02）：一次 `SKILL_ACTIVATION` 里**有多条**技能候选。
+ *
+ * 判据只看候选条数（`legal_actions` 里 `ActivateSkill` 的条数 ≥ 2）——不认技能 id、也不读
+ * 本地面 `skill_ids`（候选集合本来就在 `legal_actions` 里）。故**单候选面（N = 1）永远
+ * 不进这里**：票 01 起引擎选完一条会带着"只剩剩下的"再问一次，那一问仍走今天的直提态
+ * （`selectedSkillAction` 原样），旧面一字不变（票 02 §3-3）。
+ *
+ * "这一问有没有清单"不是判据：清单只决定选中一条之后进入哪个面（预发动入口 / 直提态），
+ * 面本身只回答"这一轮有哪几条技能"。
+ */
+function isActivationFace(pending) {
+  if (!pending || pending.kind !== "SKILL_ACTIVATION") return false;
+  return (pending.legal_actions || []).filter(
+    (action) => action.kind === "ActivateSkill",
+  ).length >= 2;
+}
+
+/** 这一步的**表面**是不是激活面（唯一判据，票 02 + 复核修复 F2）。
+ *
+ * N ≥ 2 **且**本地没有打开某条候选的预发动清单。清单开着时这一步的表面是**牌桌**
+ * （清单的选牌 / 选座位在牌桌上点），激活面那条"面内出口"的读法（提交键留灰 + 面内
+ * 提示条）不适用。
+ *
+ * 两个消费方（`stepDialogKind` / `refreshSubmit`）必须读**同一个**谓词：F2 的 bug 就是
+ * `refreshSubmit` 只判 `isActivationFace`、漏了 `state.preactivation`，于是点开带清单的
+ * 候选之后提交键被置灰、提示条被改写成"点一条技能发动…"，清单填完也提不出去。
+ */
+function activationFaceSurface(pending) {
+  return !state.preactivation && isActivationFace(pending);
+}
 
 /** 这几类弹窗步骤**没有「放弃」**（spec D3 / 票 08 / 09 / 11）：即便引擎给了 `Pass`，
  *  界面也不读它——选择型、未知区域、亮牌三类都是"点内容即完成 / 必答"。
  *
  *  `renderRightActions` / `cancelAction` / `refreshSubmit` 三处原先各写一遍同一条析取；
  *  抽成这里是为了改一处即三处一致（评审 Standards：重复谓词）。
+ *
+ *  例外（用户裁定 2026-10-31）：①洛神连续判定；②**亮牌步的候选里真有 `Pass`**——
+ *  【攻心】的"然后你可以展示其中一张♥️牌"里的「可以」就是放弃出口（技能描述里带
+ *  「可以」的效果一定含放弃）。今天只有攻心有这种候选（五谷 / 遗计 / 火攻的亮牌步
+ *  都不带 `Pass`），故其余技能的行为不变；③**按花色取牌**（涉猎）：提交 / 放弃 / 超时
+ *  同义，右端「放弃」送出当前选择（见 `answer.js:submitRightAction` 的特判）。
  */
-function dialogDisablesPass(kind) {
+function dialogDisablesPass(kind, pending = null) {
+  // A1：洛神连续判定的亮牌确认是**可选**询问——「放弃」= Pass = 停止；不能被
+  // "亮牌弹窗一律没有放弃"的旧规则吞掉。
+  if (kind === DIALOG_KINDS.reveal && pending && isJudgmentRevealOption(pending)) {
+    return false;
+  }
+  // 票 01：亮牌步带 `Pass` ⇒ 允许放弃（与"技能描述里的『可以』必含放弃"同一条口径）。
+  if (kind === DIALOG_KINDS.reveal && pending && hasPassAction(pending)) {
+    return false;
+  }
+  // 票 01：涉猎的"提交 / 放弃 / 超时"同义，右端放弃由 `submitRightAction` 特判。
+  if (kind === DIALOG_KINDS.suit) {
+    return false;
+  }
   return kind === DIALOG_KINDS.choice
     || kind === DIALOG_KINDS.unknown
     || kind === DIALOG_KINDS.reveal;
@@ -71,17 +136,57 @@ function dialogDisablesPass(kind) {
 function stepDialogKind(pending) {
   if (!pending) return null;
   if (pending.kind === "ARRANGE") return DIALOG_KINDS.arrange;
+  // 票 05：计数式分配（【业炎】）——一张窗里给若干座位点计数，答案是一份"分配向量"。
+  if (pending.kind === "DISTRIBUTE") return DIALOG_KINDS.distribution;
+  // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 用**既有** `choice` 外壳（不新增种类：
+  // 一张窗选一条技能 / 末条「都不发动」，正是"选项闭集"）。`state.preactivation` 优先，
+  // 与 `dialogWantedKind` 同一次序——选中某条技能进入它自己的清单后，这一步的表面是
+  // **牌桌**（清单的选牌 / 选座位要在牌桌上点），不能再按"这一步是弹窗"冻结牌桌。
+  if (activationFaceSurface(pending)) return DIALOG_KINDS.choice;
   // 选择型（票 08）：服务端在载荷里给了选项标签（花色是第一个复用枚举），或选项 ≥4
   // （D3 的模板判据）⇒ 画弹窗。前端不按选项值自己判断"这是不是花色"——那会在这里
   // 长出第二份枚举表。
+  if (isWatchChoiceStep(pending)) return DIALOG_KINDS.choice;
   if (isChoiceStep(pending)) return DIALOG_KINDS.choice;
+  // 票 08（票 02 §4.2 B7）：展示武将牌的选项步——正文是一张武将牌 + 带描述的选项行，
+  // 用**既有** `choice` 外壳（不新增第七种 kind）。放在两条既有选择型判据**之后**：
+  // 它们的判据一字不改，新形状只补一条。
+  if (isShowHeroCardStep(pending)) return DIALOG_KINDS.choice;
   if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：选牌面的槽**全部**来自 HERO 区 ⇒ 弹窗。
+  // 判据只看载荷形状（槽的 ``ref.zone``），不认技能名。
+  if (isHeroZonePickStep(pending)) return DIALOG_KINDS.heroPick;
+  // 票 01：公开亮牌 + 每种花色至多 k 张（涉猎）——在亮牌判据之前，二者形状不同。
+  if (isSuitPickStep(pending)) return DIALOG_KINDS.suit;
   if (isRevealStep(pending)) return DIALOG_KINDS.reveal;
   return null;
 }
 
+/** **带观看授予的选项步**（韬·刘备【义起】）：牌面与选项按钮同一个窗。
+ *
+ * 判据只看载荷形状：`SELECT_OPTION` ∧ `revealed` 非空 ∧ 不是选座位形态（`option_seats`
+ * 为空）。牌面由 `renderOptionButtons` 画在按钮**上面**（只读、仅自己可见），窗一开
+ * 按钮就落在弹窗正文里（`applyDialogContentMode` 把 `#t-options` 搬进正文）。
+ */
+function isWatchChoiceStep(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  if (!Array.isArray(pending.revealed) || !pending.revealed.length) return false;
+  if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
+  return true;
+}
+
 /** 选择型模板的判据（D3）：`SELECT_OPTION` 且（有服务端选项标签 或 选项 ≥4），
  *  但**排除选座位形态**（`option_seats` 非空 = 牌桌上点武将，不是窗内列表）。 */
+/** 武将牌上的牌的点选步（huo-shenzhugeliang 票 02）：`SELECT_CARDS` 且**每一槽**都来自
+ *  `Zone.HERO` 的某个实例区（「星」/【谦逊】各自成区，由 `skill_instance` 区分）。
+ *  这类询问要与牌桌左下角面板区分开：用户的口径是**弹窗**。 */
+function isHeroZonePickStep(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  const slots = pending.slots || [];
+  if (!slots.length) return false;
+  return slots.every((slot) => slot.ref && slot.ref.zone === "hero");
+}
+
 function isChoiceStep(pending) {
   if (!pending || pending.kind !== "SELECT_OPTION") return false;
   if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
@@ -93,6 +198,20 @@ function isChoiceStep(pending) {
 function hasServerOptionLabels(pending) {
   const labels = pending && pending.option_labels;
   return !!labels && typeof labels === "object" && Object.keys(labels).length > 0;
+}
+
+/** 展示武将牌的选项步（票 08；票 02 §4.2 B7–B8）：判据**只看载荷形状**。
+ *
+ * `SELECT_OPTION` 且带 `pending.hero_card` 对象（服务端投影在"这次展示了一张武将牌"时
+ * 才加这个键，见票 07 的读取契约）。`hero_id` 为 null 的"这一次没有武将牌"**也有**这个键
+ * ⇒ 仍然进弹窗（副标题「第 k/m 张」+ 选项 2），只是正文不画武将块。
+ *
+ * 不认技能 id / 选项值：那是第二份真源；正文的每一行都读 `option_details`。
+ */
+function isShowHeroCardStep(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  const card = pending.hero_card;
+  return !!card && typeof card === "object";
 }
 
 /** 未知区域模板认得的区域（D3）：他人手牌 / 装备 / 判定三区。
@@ -169,7 +288,15 @@ function isHarvestActive(pending) {
  * 五谷的 AI 拿牌阶段要显示在人类屏幕上，见 `syncDialog` 的 harvest 例外）。
  */
 function isRevealStep(pending) {
-  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (!pending) return false;
+  // A1：洛神连续判定的继续询问 = 亮牌弹窗；`final:true` 是关窗帧，不画。
+  if (pending.judgment_reveal) {
+    const cards = pending.judgment_reveal.cards;
+    return pending.kind === "SELECT_OPTION"
+      && pending.judgment_reveal.final !== true
+      && Array.isArray(cards) && cards.length > 0;
+  }
+  if (pending.kind !== "SELECT_CARDS") return false;
   if (pending.dialog === DIALOG_KINDS.reveal) return true;
   if (!isHarvestActive(pending)) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
@@ -242,6 +369,9 @@ function dialogKeyFor(kind, pending) {
   // 会每拿一张就关窗重开。链键取**服务端派生**的 `harvest.key`（帧 + 牌 + 使用者），
   // 整段结算不变；没有它（合成载荷 / 非五谷亮牌）才退回 `kind:seq`，fail-visible 不猜链。
   if (kind === DIALOG_KINDS.reveal) {
+    // A1：洛神连续判定用服务端给出的循环键；同一循环内的每张判定牌共用这个窗口。
+    const chain = pending && pending.judgment_reveal && pending.judgment_reveal.chain_key;
+    if (chain) return `judge-reveal:${chain}`;
     const key = pending && pending.harvest && pending.harvest.key;
     if (key) return `reveal:${key}`;
   }
@@ -259,12 +389,31 @@ function dialogTitleFor(kind, pending) {
     return pa ? `预发动【${pa.name}】` : "预发动";
   }
   if (kind === DIALOG_KINDS.arrange) return "排列";
-  if (kind === DIALOG_KINDS.choice) return "选择";
+  if (kind === DIALOG_KINDS.heroPick) return "选择武将牌上的牌";
+  if (kind === DIALOG_KINDS.distribution) return "分配";
+  if (kind === DIALOG_KINDS.choice) {
+    // 展示武将牌（票 08）：标题 = 技能名（`context.name` 优先 / `view.skills` 兜底）。
+    if (isShowHeroCardStep(pending)) return heroCardTitle(pending);
+    // 同一时机的激活面（票 02）：一张面选一条技能——标题就是玩家要做的动作。
+    if (isActivationFace(pending)) return "选一条发动";
+    // 带观看授予的选项步（【义起】）标题写技能名：玩家一眼看出"这是谁在问"。
+    const watched = isWatchChoiceStep(pending);
+    const contextName = watched && pending.context && pending.context.name;
+    return contextName || "选择";
+  }
   if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
   if (kind === DIALOG_KINDS.reveal) {
     const title = pending && pending.harvest && pending.harvest.title;
     const contextName = pending && pending.context && pending.context.name;
     return title || contextName || "亮牌";
+  }
+  if (kind === DIALOG_KINDS.suit) {
+    // 票 01：结果态用提交那一刻记下的技能名（下一问的 `context` 已经不是涉猎了）。
+    if (suitResultActive() && state.suitResult && state.suitResult.title) {
+      return state.suitResult.title;
+    }
+    const contextName = pending && pending.context && pending.context.name;
+    return contextName || "亮牌";
   }
   return "询问";
 }
@@ -280,11 +429,14 @@ function showOptionsHome() {
 
 /** 武将详情窗口是否开着：真源是 `state.modal.heroSeat`（不是 DOM 的 hidden 属性）。
  *
- * 开窗判据与 `syncHeroModal` 同一条（回放 / 无视图时它不显示），故这里也读同一组条件；
- * `#t-modal.hidden` 只是这条状态的渲染结果，不能反过来当判据（评审 Standards：DOM 读法）。
+ * 开窗判据与 `syncHeroModal` 同一条（无视图时它不显示；牌桌事件回放不阻止），故这里也读
+ * 同一组条件；`#t-modal.hidden` 只是这条状态的渲染结果，不能反过来当判据（评审 Standards：
+ * DOM 读法）。
  */
 function heroDetailVisible() {
-  return state.modal.heroSeat !== null && !state.playback && !!state.view;
+  // 牌桌事件回放（`state.playback`）不阻止打开：`renderHeroDetailBody` 读同一个
+  // `tableViewForRender()`。这里只排除没有视图的首页。
+  return state.modal.heroSeat !== null && !!state.view;
 }
 
 /** 暗化层 / 页面态的唯一开关：询问弹窗**展开**或武将详情打开时显示。
@@ -323,6 +475,23 @@ function clearDialogReveal() {
   node.hidden = true;
 }
 
+/** 这一屏是不是**持久亮牌正文**：正文槽整个收起、折叠只隐藏亮牌节点。
+ *
+ * 两个条件缺一不可，判据在这里只写一次（`applyDialogCollapseChrome` 与
+ * `applyDialogContentMode` 都读它）：
+ *
+ * - `state.dialog.persistent` = **五谷的结算帧还活着**——结算期间表面会在牌桌与取牌步
+ *   之间来回换，这个标记只说明"帧还在"，不说明"这一屏在放亮牌"；
+ * - `state.dialog.kind === reveal` = **这一屏真的是亮牌**。
+ *
+ * 只看前者（票 23 报障）：五谷取牌之后紧跟【清俭】的"是否发动"，载荷里 `harvest` 仍在
+ * ⇒ `persistent` 被算成 true ⇒ 玩家点「进入预发动」后弹窗换了标题，正文槽却仍按亮牌
+ * 模式整体隐藏：步骤条与「下一步」全在看不见的正文里，屏幕上只剩空白大白框 + 灰按钮。
+ */
+function dialogRevealMode() {
+  return state.dialog.persistent && state.dialog.kind === DIALOG_KINDS.reveal;
+}
+
 /** 折叠按钮 / 重开入口的文案与可用态（只读判据不在这里）。
  *
  *  两种正文二选一：普通模式 = `#t-dialog-body`（折叠只隐藏它）；持久展示 =
@@ -331,7 +500,7 @@ function applyDialogCollapseChrome() {
   const body = $("t-dialog-body");
   const reveal = dialogRevealNode();
   const button = $("t-dialog-collapse");
-  if (state.dialog.persistent) {
+  if (dialogRevealMode()) {
     if (body) body.hidden = true;
     if (reveal) reveal.hidden = state.dialog.collapsed;
   } else {
@@ -360,7 +529,10 @@ function applyDialogContentMode(kind) {
   const body = $("t-dialog-body");
   const options = $("t-options");
   const reveal = dialogRevealNode();
-  const persistent = state.dialog.persistent && kind === DIALOG_KINDS.reveal;
+  // 与 `applyDialogCollapseChrome` **同一条判据**（票 23：两处各算一遍就会一边藏正文、
+  // 一边以为还在放亮牌）。这里的 `kind` 是本次要应用的正文种类，`state.dialog.kind`
+  // 在 `openDialogDom` / `updateDialogDom` 里已先写好，故两者一致。
+  const persistent = dialogRevealMode() && kind === DIALOG_KINDS.reveal;
   const pending = state.view ? state.view.pending : null;
   state.dialog.hintOverride = null;
   if (persistent && pending) {
@@ -379,6 +551,12 @@ function applyDialogContentMode(kind) {
     return;
   }
   clearDialogReveal();
+  // 票 08：展示武将牌的选项步——正文是**新的一段**（武将块 + 带描述的选项行）。它由
+  // `renderHeroCardBody` 画进共享的 `#t-options`（先把 `renderOptionButtons` 画的普通
+  // 按钮清掉），随后照常整体搬进正文槽，正文归属不改。
+  if (kind === DIALOG_KINDS.choice && isShowHeroCardStep(pending)) {
+    renderHeroCardBody(pending);
+  }
   if (options && body && options.parentNode !== body) body.appendChild(options);
 }
 
@@ -507,6 +685,30 @@ function closeDialogDom() {
   syncModalChrome();
 }
 
+/** 回放期：亮牌弹窗的**源结算帧出栈** ⇒ 当场收起（M6 报障 1）。
+ *
+ * 五谷整段结算跨多个询问（逐目标取牌 / 每个目标的无懈窗口），服务端每个响应只回到"下一个
+ * 询问"；而弹窗的开关只住 :func:`syncDialog`（每次 commit 才跑）。于是最后一批回放要播几十
+ * 条记录，弹窗一直挂到下一次询问提交——源牌早结算完了。
+ *
+ * 判据只读两条**记录流事实**：①弹窗键是五谷亮牌键（`reveal:harvest:<frame>:<card>:<source>`，
+ * 帧号由服务端派生）；②这条记录正是那个帧的 `pop`。其余亮牌（遗计等）没有帧号可对，照旧跟
+ * 询问生命周期走（fail-closed，不猜）。
+ */
+function syncPlaybackDialog(record) {
+  const dialog = $("t-dialog");
+  if (!dialog || dialog.hidden !== false) return;
+  if (!record || record.kind !== "frame" || record.op !== "pop") return;
+  const match = /^reveal:harvest:(\d+):/.exec(String(state.dialog.key || ""));
+  if (!match || Number(match[1]) !== Number(record.frame_id)) return;
+  closeDialogDom();
+  // 收窗同时把**正文格**清掉：亮牌格挂在 `#t-options` 上（取牌步），关窗时
+  // `showOptionsHome()` 会把它送回提示区——不清就一直挂到下一次询问（报障 3 的原样）。
+  // 此时问句文本已由起播的 `blankAskSurface()` 清过，故这里只管格子。
+  const options = $("t-options");
+  if (options) options.innerHTML = "";
+}
+
 /** 在每次 `renderPending` 末尾调用：按"当前步骤的表面"决定开 / 关 / 换内容。
  *
  * - 表面不是弹窗、也没有五谷的持久展示（且没有预发动本地态）⇒ 关；
@@ -534,14 +736,21 @@ function syncDialog() {
   const persistent = persistentRevealPending(pending) !== null;
   const harvestStepped = !!pending && isHarvestActive(pending)
     && stepDialogKind(pending) === DIALOG_KINDS.reveal;
-  const publicHarvest = harvestStepped || persistent;
-  const kind = state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending);
+  // 票 01：涉猎的亮牌在**公开处理区**，弹窗对所有人都在（非发动者只读）。
+  const publicSuit = !!pending && isSuitPickStep(pending);
+  const publicHarvest = harvestStepped || persistent || publicSuit;
+  // 票 01：提交后 2.5 秒的结果态**只在发动者本地**（`state.suitResult`），它压过下一问的
+  // 表面直到计时结束；计时结束后 `renderPending` 会重画真正的下一步。
+  const settle = suitResultActive();
+  const kind = settle
+    ? DIALOG_KINDS.suit
+    : (state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending));
   if (!kind) {
     closeDialogDom();
     syncHeroModal();
     return;
   }
-  const key = dialogKeyFor(kind, pending);
+  const key = settle ? "suit-result" : dialogKeyFor(kind, pending);
   if (key !== state.dialog.key || !state.dialog.open) {
     closeDialogDom();
     state.dialog.key = key;
@@ -555,6 +764,141 @@ function syncDialog() {
   syncHeroModal();
 }
 
+/* ------------------------------------------------------------ 展示武将牌的选项步（票 08） */
+
+/** 展示武将牌的选项步标题（票 08）：**技能名**，不新增标题键。
+ *
+ * 两个来源都是既有的：真实会话读 `query_context` 的 `context.name`；没有 context
+ * （409 裸 Query / 合成载荷）时按 `skill_id` 去 `view.skills`（`build_skills` 的产物）
+ * 找同一技能的展示名。都没有才退回中性「选择」——前端不抄技能名。
+ */
+function heroCardTitle(pending) {
+  const contextName = pending && pending.context && pending.context.name;
+  if (contextName) return contextName;
+  const skillId = pending && pending.skill_id;
+  const skills = (state.view && state.view.skills) || [];
+  const skill = skills.find((item) => item && item.skill_id === skillId);
+  return (skill && skill.name) || "选择";
+}
+
+/** 副标题「第 k/m 张」：k / m 全读服务端的 n-of-m。
+ *
+ * 分母恒 3 是**服务端**的保证（票 07 的载荷契约），界面不写死 3、也不数展示次数
+ * ——"展示恒为 3 次"由调用方（票 01）补足没有武将牌的那几次。
+ */
+function heroCardSubtitle(card) {
+  const index = card && card.index;
+  const total = card && card.total;
+  if (typeof index !== "number" || typeof total !== "number") return "";
+  return `第 ${index}/${total} 张`;
+}
+
+/** 这一行在 `legal_actions` 里的下标；-1 = 不是候选（置灰项只在载荷里，不可提交）。 */
+function heroCardChoiceIndex(pending, choice) {
+  const actions = (pending && pending.legal_actions) || [];
+  return actions.findIndex(
+    (action) => action.kind === "SelectOption"
+      && action.choice === choice
+      && !isRightAction(action),
+  );
+}
+
+/** 武将块（票 08）：势力徽记 + 名称 + `hp_max/hp_max` 点数条。
+ *
+ *  形状参照 `seat-view.js:heroBlockNode`，但**不含**技能清单（技能在下面的选项行里）。
+ *  展示的是"未加入游戏的武将牌"，没有当前体力 ⇒ 点数条按满体力画（复用同一个
+ *  `hpBarNode`，不另写一套点数 / 文案）。
+ */
+function heroCardBlockNode(card) {
+  const block = document.createElement("div");
+  block.className = "hero-card-block";
+  const head = document.createElement("div");
+  head.className = "hero-card-head";
+  if (card.kingdom_label) {
+    const kingdom = document.createElement("span");
+    kingdom.className = `kingdom ${card.kingdom || ""}`;
+    kingdom.textContent = card.kingdom_label;
+    kingdom.setAttribute("title", `势力：${card.kingdom_label}`);
+    head.appendChild(kingdom);
+  }
+  const name = document.createElement("span");
+  name.className = "hero-name";
+  name.textContent = card.name || card.hero_id || "未知武将";
+  head.appendChild(name);
+  block.appendChild(head);
+  const hpMax = Number(card.hp_max);
+  if (Number.isFinite(hpMax) && hpMax > 0) {
+    block.appendChild(hpBarNode({ hp: hpMax, hp_max: hpMax }));
+  }
+  return block;
+}
+
+/** 一行选项（票 08）：技能名 / 效果文本 + 描述正文；置灰行只展示、不接 click。
+ *
+ *  可提交性只看载荷：服务端的 `row.disabled`，以及这一行在不在 `legal_actions` 里
+ *  （`heroCardChoiceIndex` 找不到 = 引擎没发这条候选）——前端不猜"为什么不可选"。
+ */
+function heroCardRowNode(pending, row) {
+  const choice = row && row.choice;
+  const index = heroCardChoiceIndex(pending, choice);
+  const disabled = !row || row.disabled === true || index < 0;
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = disabled ? "hero-card-row dis" : "hero-card-row";
+  node.disabled = disabled;
+  node.setAttribute("data-choice", String(choice || ""));
+  const name = document.createElement("span");
+  name.className = "hero-card-row-name";
+  name.textContent = (row && row.text) || "";
+  node.appendChild(name);
+  if (row && row.description) {
+    // `descriptions.json` 的原文（服务端不截断、这里也不截断）。
+    const desc = document.createElement("div");
+    desc.className = "hero-card-desc";
+    desc.textContent = row.description;
+    node.appendChild(desc);
+  }
+  if (disabled) {
+    const blocked = document.createElement("span");
+    blocked.className = "hero-card-owned";
+    blocked.textContent = "不可选";
+    node.appendChild(blocked);
+    return node;
+  }
+  node.addEventListener("click", async () => {
+    await submitDialogChoice(pending, index);
+  });
+  return node;
+}
+
+/** 展示武将牌的选项步的**新正文段**（票 08；票 02 §4.2 B7）：由
+ *  `applyDialogContentMode` 在把 `#t-options` 搬进正文槽之前调用。
+ *
+ *  它先清掉 `renderOptionButtons` 画的普通按钮，再按服务端 `option_details` 的**原序**
+ *  画：副标题 + （有牌时）武将块 + 逐行选项。置灰项保留原位，只是 `.dis` + 不接 click；
+ *  选项 2 的文本（含具体 X）就来自效果行自己的 `text`。
+ *
+ *  `hero_card.hero_id` 为 null 的那一次没有武将块，但副标题与选项 2 照画：这是第四轮
+ *  裁定 1 的"缺的那几次"，一条都不能少。
+ */
+function renderHeroCardBody(pending) {
+  const box = $("t-options");
+  if (!box) return;
+  box.innerHTML = "";
+  box.classList.remove("suit-options");
+  const card = pending.hero_card || {};
+  const section = document.createElement("div");
+  section.className = "hero-card";
+  const sub = document.createElement("div");
+  sub.className = "hero-card-sub";
+  sub.textContent = heroCardSubtitle(card);
+  section.appendChild(sub);
+  if (card.hero_id) section.appendChild(heroCardBlockNode(card));
+  const rows = Array.isArray(pending.option_details) ? pending.option_details : [];
+  rows.forEach((row) => section.appendChild(heroCardRowNode(pending, row)));
+  box.appendChild(section);
+}
+
 /* ------------------------------------------------------------ 武将详情窗口 */
 
 /** 武将详情 = 叠加的检视窗：只按 `state.modal.heroSeat` 开 / 关 `#t-modal`。
@@ -562,7 +906,10 @@ function syncDialog() {
 function syncHeroModal() {
   const modal = $("t-modal");
   if (!modal) return;
-  if (state.playback || state.modal.heroSeat === null || !state.view) {
+  // 与 renderTable 走同一份视图：牌桌事件回放期间是 live view；回放页 / 首页没有
+  // 武将详情数据，仍收起。
+  const view = tableViewForRender();
+  if (state.modal.heroSeat === null || !view) {
     modal.hidden = true;
     const body = $("t-modal-body");
     if (body) {
@@ -573,28 +920,79 @@ function syncHeroModal() {
     return;
   }
   const title = $("t-modal-title");
-  const player = playerAt(state.view, state.modal.heroSeat);
-  if (title) title.textContent = player ? `武将详情 · ${heroNameOf(player, state.view)}` : "武将详情";
+  const player = playerAt(view, state.modal.heroSeat);
+  if (title) title.textContent = player ? `武将详情 · ${heroNameOf(player, view)}` : "武将详情";
   renderHeroDetailBody();
   modal.hidden = false;
   syncModalChrome();
 }
 
+/* ------------------------------------------------------------ 弃牌堆面板 */
+
+/** 弃牌堆面板的开合状态（U4-05 / D11）。
+ *
+ * 住这里的理由与武将详情同型：它是**用户**打开的只读检视窗，不跟询问 / pending 走；
+ * 开合不改变 `selectionEnabled()` / `stepDialogKind()`，也不写任何选择态。
+ * 正文由 `table.js:renderDiscardPanel()` 画（数据源与表体同一份视图），这里只开着 / 关着。
+ */
+let discardPanelOpen = false;
+
+function discardPanelIsOpen() {
+  return discardPanelOpen;
+}
+
+/** 窗口 / 自己的遮罩 / 顶栏按钮的显隐同步（唯一写 `hidden` 的地方）。 */
+function syncDiscardPanelChrome() {
+  const modal = $("t-discard-modal");
+  const backdrop = $("t-discard-backdrop");
+  const button = $("btn-discard");
+  if (modal) modal.hidden = !discardPanelOpen;
+  if (backdrop) backdrop.hidden = !discardPanelOpen;
+  if (button) button.setAttribute("aria-expanded", String(discardPanelOpen));
+}
+
+/** 打开面板：先画一帧再显示（不等下一次提交）。
+ *
+ * 不动 `state.focusCardId` / `state.picks` / `pending`，也不发请求。 */
+function openDiscardPanel() {
+  discardPanelOpen = true;
+  // 标题是静态文案，但仍在打开时写一次：真浏览器与烟测垫片（不解析 HTML 文本）
+  // 因此读到同一个值，不把文案藏进只对真 DOM 成立的地方。
+  const title = $("t-discard-title");
+  if (title) title.textContent = "弃牌堆";
+  renderDiscardPanel();
+  syncDiscardPanelChrome();
+}
+
+/** 关闭面板：只收起窗口与遮罩；不改任何选择态、不提交。 */
+function closeDiscardPanel() {
+  if (!discardPanelOpen) return;
+  discardPanelOpen = false;
+  syncDiscardPanelChrome();
+}
+
 /* ------------------------------------------------------------ 键盘 / 切页 / 装配 */
 
-/** document 的 keydown 入口：ESC **只**关武将详情（检视窗）。
+/** document 的 keydown 入口：ESC 先关弃牌堆面板，其次**只**关武将详情（检视窗）。
  *
- * 询问弹窗没有 ESC 出口（D3）：没开详情时这里什么都不做——不是"先 preventDefault 再
- * 找不到可关的东西"，ESC 在询问弹窗上就是 no-op。 */
+ * 两者互相独立：弃牌堆面板开着时 ESC 只收面板、不动武将详情；没有面板时才走详情。
+ * 询问弹窗没有 ESC 出口（D3）：两窗都没开时这里什么都不做——不是"先 preventDefault
+ * 再找不到可关的东西"，ESC 在询问弹窗上就是 no-op。 */
 function handleModalKey(event) {
   if (!event || (event.key !== "Escape" && event.key !== "Esc")) return;
+  if (discardPanelOpen) {
+    if (event.preventDefault) event.preventDefault();
+    closeDiscardPanel();
+    return;
+  }
   if (state.modal.heroSeat === null) return;
   if (event.preventDefault) event.preventDefault();
   closeHeroDetail();
 }
 
-/** 离开牌桌页 / 回放期间：收起两个窗口（不提交任何 action）。 */
+/** 离开牌桌页：收起三个窗口（不提交任何 action）。 */
 function closeModalForView() {
+  closeDiscardPanel();
   closeDialogDom();
   state.modal.heroSeat = null;
   syncHeroModal();
@@ -611,8 +1009,17 @@ function wireModal() {
   // 武将详情自己的关闭按钮：只关细节，不动询问弹窗。
   const close = $("t-modal-close");
   if (close) close.addEventListener("click", closeHeroDetail);
+  // 弃牌堆面板（U4-05 / D11）：顶栏按钮开；关闭按钮 / **自己的**遮罩关（不是
+  // `#t-modal-backdrop`，那一层没有点击监听）。三者都不改选择态、不发请求。
+  const discardOpen = $("btn-discard");
+  if (discardOpen) discardOpen.addEventListener("click", openDiscardPanel);
+  const discardClose = $("t-discard-close");
+  if (discardClose) discardClose.addEventListener("click", closeDiscardPanel);
+  const discardBackdrop = $("t-discard-backdrop");
+  if (discardBackdrop) discardBackdrop.addEventListener("click", closeDiscardPanel);
   document.addEventListener("keydown", handleModalKey);
-  // 初始两个窗口都收起（真浏览器由 HTML 的 hidden 属性保证；DOM 垫片不解析属性）。
+  // 初始三个窗口都收起（真浏览器由 HTML 的 hidden 属性保证；DOM 垫片不解析属性）。
   closeDialogDom();
   syncHeroModal();
+  syncDiscardPanelChrome();
 }

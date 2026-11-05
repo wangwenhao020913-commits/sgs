@@ -38,7 +38,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, Final
 
-from sgs.data import IDENTITY_LABELS, hero_skill_id, load_content_pack, load_heroes
+from sgs.data import IDENTITY_LABELS, hero_skill_id, load_content_pack, load_hero_tables
 from sgs.engine import record_json
 from sgs.state import CardRef
 
@@ -291,8 +291,12 @@ class _Narrator:
             self._card_reveal(record, seq)
         elif delta_type == "chained_change":
             self._chained_change(record, seq)
+        elif delta_type == "flipped_change":
+            self._flipped_change(record, seq)
         elif delta_type == "wine_change":
             self._wine_change(record, seq)
+        elif delta_type == "pindian":
+            self._pindian(record, seq)
         elif delta_type == "identity_reveal":
             label = _IDENTITY_BY_VALUE.get(str(record.get("identity")))
             if label is None:
@@ -318,6 +322,21 @@ class _Narrator:
         frame_id = record.get("frame_id")
         if isinstance(frame_id, int):
             self.reveal_frames[frame_id] = {"passed": False, "discarded": False}
+
+    def _flipped_change(self, record: dict[str, Any], seq: int) -> None:
+        """翻面 / 翻回正面：一行中文。跳过回合的因果**不**在这里解释（事件流只写状态）。"""
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        self._line(
+            seq,
+            [
+                *self._seat(seat),
+                _act(" 翻面（背面朝上）" if record.get("flipped") else " 翻回正面"),
+            ],
+        )
 
     def _chained_change(self, record: dict[str, Any], seq: int) -> None:
         """横置 / 重置（M5-03 的 ``chained_change``）：一行中文，不读牌名、不判原因。
@@ -446,6 +465,11 @@ class _Narrator:
                 # 重铸是**失去**不是弃置（M5-08b / §5.1.3）：事件流写「重铸」。
                 self._reforge(record, seq, cards)
                 return
+            if reason == "PINDIAN":
+                # 拼点牌置入弃牌堆：算失去、**不算弃置**（huo-taishici-xunyu 票 03 /
+                # `06` §5 的拼点裁定行）⇒ 事件流不写「弃置」。
+                self._pindian_card(record, seq, cards)
+                return
             if reason in ("USE", "JUDGE"):
                 return
             self._discard(record, seq, cards)
@@ -455,11 +479,17 @@ class _Narrator:
     def _gain(
         self, record: dict[str, Any], seq: int, cards: Sequence[Mapping[str, Any]]
     ) -> None:
+        """进手牌：**牌堆来源写「摸牌」**（D14 / U4-06），其余来源（顺 / 借刀 / 获得）写「获得」。
+
+        `GLOSSARY「获得」` 的规则定义不动：摸牌在规则上也算获得；这里只换玩家语言。
+        """
         to_zone = record.get("to_zone") or {}
         seat = to_zone.get("seat")
         if seat is None:
             return
-        segments = [*self._subject(seat), _act(" 获得")]
+        from_zone = record.get("from_zone") or {}
+        verb = " 摸牌" if from_zone.get("zone") == "deck" else " 获得"
+        segments = [*self._subject(seat), _act(verb)]
         if cards_visible(record, self.viewer):
             segments.extend(_cards(cards))
         else:
@@ -487,6 +517,48 @@ class _Narrator:
             ]
         else:
             segments = [*self._subject(owner), _act(" 弃置"), *_cards(cards)]
+        self._line(seq, segments)
+
+    def _pindian(
+        self, record: dict[str, Any], seq: int
+    ) -> None:
+        """一次拼点的揭晓（huo-taishici-xunyu 票 03）：双方各一张牌 + 每一对的结果。
+
+        平点 = 双方都没赢（规则第十二章 12.1 L1318–L1319 / 12.4），按「没赢」写。
+        """
+        initiator = record.get("initiator")
+        targets = tuple(record.get("targets") or ())
+        cards = tuple(record.get("cards") or ())
+        won = tuple(record.get("won") or ())
+        if initiator is None or not targets or len(cards) < len(targets) + 1:
+            return
+        for index, target in enumerate(targets):
+            subject = self._subject(initiator)
+            other = self._subject(target)
+            verdict = "赢" if index < len(won) and won[index] else "没赢"
+            self._line(
+                seq,
+                [
+                    *subject,
+                    _act(" 与 "),
+                    *other,
+                    _act(" 拼点："),
+                    *_cards((cards[0],)),
+                    _act(" vs "),
+                    *_cards((cards[index + 1],)),
+                    _act(f"——{verdict}"),
+                ],
+            )
+
+    def _pindian_card(
+        self, record: dict[str, Any], seq: int, cards: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """拼点牌置入弃牌堆：写「拼点牌…置入弃牌堆」，不写「弃置」。"""
+        owner = record.get("owner")
+        origin = (record.get("from_zone") or {}).get("seat")
+        if owner is None:
+            owner = origin
+        segments = [*self._subject(owner), _act(" 的拼点牌"), *_cards(cards), _act("置入弃牌堆")]
         self._line(seq, segments)
 
     def _reforge(
@@ -536,6 +608,9 @@ class _Narrator:
             self._line(seq, segments)
         elif kind == "PlayCard":
             self._line(seq, [*self._subject(actor), _act(" 打出"), *_cards((card,))])
+        elif kind == "SubstituteJudgeCard":
+            # 改判**不是打出**（feng-zhangjiao 票 02）：叙事写「改判」，与打出 / 使用分开。
+            self._line(seq, [*self._subject(actor), _act(" 改判 → "), *_cards((card,))])
 
     # -- 终局 ---------------------------------------------------------------
 
@@ -544,8 +619,12 @@ class _Narrator:
         side = record.get("side")
         winners = tuple(int(seat) for seat in record.get("winners") or ())
         segments: list[dict[str, Any]] = [_act("对局结束")]
+        reason = str(record.get("reason") or "")
         if result == "draw":
             segments.append(_act(" · 平局"))
+            if reason == "round_limit":
+                # 用户 2026-11-04：第 300 回合结束 = 平局（大战三百回合，鸣金收兵）。
+                segments.append(_act(" · 大战300回合不分胜负，鸣金收兵"))
         else:
             label = _SIDE_LABELS.get(str(side)) if side is not None else None
             if label is not None:
@@ -683,12 +762,13 @@ def _name_tables(pack_id: str) -> tuple[dict[str, str], dict[str, str]]:
     数据文件是只读进料；同一进程里反复生成叙事时不必每次重读 / 重校验。装备技能的
     中文名取它所依附的**装备牌名**（与 ``build_skills`` 同一条派生）。
     """
-    heroes = load_heroes(pack_id)
-    hero_names = {hero.id: hero.name for hero in heroes.heroes}
+    tables = load_hero_tables(pack_id)
+    hero_names = {hero.id: hero.name for table in tables for hero in table.heroes}
     skill_names: dict[str, str] = {}
-    for hero in heroes.heroes:
-        for skill in hero.skills:
-            skill_names[hero_skill_id(hero.id, skill.id)] = skill.name
+    for table in tables:
+        for hero in table.heroes:
+            for skill in hero.skills:
+                skill_names[hero_skill_id(hero.id, skill.id)] = skill.name
     for card_type in load_content_pack(pack_id).card_types:
         skill_names[f"equip.{card_type.id}"] = card_type.name
     return hero_names, skill_names

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "pack_id": "jie_mobile",
+  "heroes": [
+    {
+      "id": "jie_caoren_mobile",
+      "name": "界曹仁移动版",
+      "true_name": "曹仁",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jushou",
+          "name": "据守",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

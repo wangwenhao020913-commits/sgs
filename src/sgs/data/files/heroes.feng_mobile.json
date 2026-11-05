@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "pack_id": "feng_mobile",
+  "heroes": [
+    {
+      "id": "shen_guanyu_mobile",
+      "name": "神关羽移动版",
+      "true_name": "神关羽",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 5,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wushen",
+          "name": "武神",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "wuhun",
+          "name": "武魂",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "shen_lvmeng_mobile",
+      "name": "神吕蒙移动版",
+      "true_name": "神吕蒙",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shelie",
+          "name": "涉猎",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "gongxin",
+          "name": "攻心",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "yuji_mobile",
+      "name": "于吉移动版",
+      "true_name": "于吉",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guohuo",
+          "name": "蛊惑",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "zhangjiao_mobile",
+      "name": "张角移动版",
+      "true_name": "张角",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "leiji",
+          "name": "雷击",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "guidao",
+          "name": "鬼道",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "huangtian",
+          "name": "黄天",
+          "skill_type": "LORD"
+        }
+      ]
+    }
+  ]
+}

@@ -303,6 +303,59 @@ def test_wushuang_duel_a_full_pair_hands_the_response_to_the_other_side():
 
 
 # ---------------------------------------------------------------------------
+# ②b 无双（【决斗】的反向）：吕布**成为**别人的【决斗】目标时，加倍的是**对手**
+# ---------------------------------------------------------------------------
+
+
+def test_wushuang_duel_makes_lvbus_opponent_respond_with_two_slashes():
+    """吕布**被**【决斗】⇒ 吕布本人一张、**对手**（这次是使用者）每次两张（票 23 用户裁定）。
+
+    牌面 ② 的"该角色"= **跟吕布决斗的那一方**——标准版牌面把这一半直接写成"与你进行
+    【决斗】的角色每次需连续打出两张【杀】"。故吕布挨【决斗】时**不**加倍：他打出一张
+    就算通过，加倍落在对手身上。
+
+    判据：吕布打出一张【杀】后响应轮转到使用者，使用者必须连出**两张**；只出一张即不满足，
+    由【决斗】判负受伤（正是本用例断言的"两张"）。
+    """
+    duel, first, second = _cards("duel")[0], _cards("slash")[0], _cards("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(duel, second)),
+            SeatSpec(hand=(first,), hero="lvbu"),
+        ],
+        deck=_deck_excluding(duel, first, second),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, duel, 1)
+        if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
+            # 座位 0 = 使用者：这次响应只打一张，看它算不算"满足两次"。
+            return _find(query, lambda action: isinstance(action, PlayCard))
+        return None
+
+    def defender(query):
+        if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
+            return _find(query, lambda action: isinstance(action, PlayCard))
+        return None
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: e.state.player(0).hp < 4 or e.state.player(1).hp < 4,
+    )
+
+    asks = _respond_queries(engine, WindowCause.DUEL)
+    assert [query.actor for query in asks] == [1, 0, 0], (
+        "吕布先响应（**一张**即可，1 问），随后对手这次响应要问**两张**（2 问）"
+    )
+    assert engine.state.player(0).hp == 3, "对手只出一张【杀】不满足响应 ⇒ 对手受伤"
+    assert engine.state.player(1).hp == 4, "吕布一张就够了（无双不惩罚自己）"
+
+
+# ---------------------------------------------------------------------------
 # ③ 无双与提供者共存：【八卦阵】红算一张，两张可"真牌 + 八卦阵"
 # ---------------------------------------------------------------------------
 
@@ -359,6 +412,104 @@ def test_wushuang_a_red_eight_diagrams_counts_as_one_of_the_two_dodges():
         "每提供者只问一次：第二张不再给【八卦阵】"
     )
     assert engine.state.player(1).hp == 4, "两张都成功 ⇒ 抵消"
+
+
+def test_wushuang_a_real_dodge_first_still_offers_the_provider_for_the_second():
+    """票 03 §5-2（floor 按**需要牌事件**重置）：第一张【闪】用真牌 ⇒ 第二张仍可发动【八卦阵】。
+
+    【无双】要两张【闪】= **两次**需要牌事件（补充一手 §2.1.2.2(2)）：真牌是 ``CARD_USE``
+    （2，最低优先），若 floor 跨事件残留，第二张就会被自己的"不升档"挡掉——而规则只要求
+    **同一事件内**不升档。判据 = 第二问的面里【八卦阵】仍在，且红判定让它凑够两张、抵消
+    【杀】。
+    """
+    red_judge = _first_by_color("peach", black=False)
+    slash, state = _wushuang_provider_state(_cards("dodge")[0], red_judge)
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, slash, 1)
+        return None
+
+    faces: list[tuple[str, ...]] = []
+
+    def defender(query):
+        if query.kind == "DODGE":
+            faces.append(
+                tuple(
+                    action.skill_id
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            )
+            if len(faces) == 1:
+                return _find(query, lambda action: isinstance(action, UseCard))
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: _slash_done(e, slash),
+    )
+
+    assert len(faces) == 2, "两次需要牌事件各问一次"
+    assert "equip.eight_diagrams" in faces[1], (
+        "第一张【闪】用真牌 ⇒ 第二张的 floor 已重置，【八卦阵】仍可点："
+        f"实得第二问 {faces[1]}"
+    )
+    assert engine.state.player(1).hp == 4, "真牌 + 八卦阵凑够两张 ⇒ 抵消"
+
+
+def test_wushuang_a_real_slash_first_still_offers_guohuo_for_the_second():
+    """票 03 §5-2 的另一扇窗口（打出 / 使用响应）：【决斗】的两张【杀】之间 floor 也重置。
+
+    吕布【无双】②让对手每次响应要连出两张【杀】；于吉先打出**真【杀】**（``CARD_USE``），
+    第二张仍可发动【蛊惑】（武将档）——与【闪】窗口同一条"一次响应成立即重置"的读法，
+    落点不同：这里是 :func:`sgs.effects.ops._duel_accepted`。
+    """
+    duel, first, second = _cards("duel")[0], _cards("slash")[0], _cards("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(duel,), hero="lvbu"),
+            SeatSpec(hand=(first, second), hero="yuji_mobile"),
+        ],
+        deck=_deck_excluding(duel, first, second),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, duel, 1)
+        return None
+
+    faces: list[tuple[str, ...]] = []
+
+    def defender(query):
+        if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
+            faces.append(
+                tuple(
+                    action.skill_id
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            )
+            if len(faces) == 1:
+                return _find(query, lambda action: isinstance(action, PlayCard))
+            return None  # 第二张放弃：停止推进，面已经被记下
+        return None
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: e.state.player(1).hp < 4,
+    )
+
+    assert len(faces) == 2, "【无双】的两张【杀】= 两次需要牌事件"
+    assert "hero.yuji_mobile.guohuo" in faces[1], (
+        "第一张【杀】用真牌 ⇒ 第二张的 floor 已重置，【蛊惑】仍可点："
+        f"实得第二问 {faces[1]}"
+    )
 
 
 def test_wushuang_a_black_eight_diagrams_does_not_count():
@@ -585,6 +736,50 @@ def test_tieqi_multi_target_tag_stays_on_the_judged_target_only():
     assert engine.state.player(2).hp == 3, "放弃响应 ⇒ 照常受伤"
 
 
+def test_tieqi_red_on_the_second_target_also_seals_its_window():
+    """票 03 回归：多目标【杀】里**第 2 个**目标被判红也必须封住。
+
+    旧实现把逐目标档登记进"游标推进即清除"的键里，于是标签只在第 1 个目标生效；本用例把
+    判定次序反过来（黑 → 红），断言窗口**只**出现在非红的第 1 个目标上。
+    """
+    slash = _cards("slash")[0]
+    halberd = _cards("halberd")[0]
+    black_judge = _first_by_color("slash", black=True)
+    red_judge = _first_by_color("peach", black=False)
+
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(equip=(halberd,), hero="machao"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_two_judge_deck(black_judge, red_judge, used=(slash, halberd)),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == slash
+                and action.targets == (1, 2),
+            )
+        return _activate_on_skill(query)
+
+    players = [Scripted(attacker), Scripted(), Scripted()]
+    engine = _at_play_phase(Engine.from_state(state, seed=1), players)
+    _seed_hand(engine, 0, (slash,))
+    _advance(engine, players, lambda e: _slash_done(e, slash))
+
+    assert [query.actor for query in _queries(engine, "DODGE")] == [1], (
+        "第 1 个目标判定非红 ⇒ 窗口照常；第 2 个目标判红 ⇒ 窗口不出现"
+    )
+    assert engine.state.player(1).hp == 3, "放弃响应 ⇒ 照常受伤"
+    assert engine.state.player(2).hp == 3, "不可响应 ⇒ 照常受伤"
+
+
 def test_tieqi_tag_does_not_cross_into_the_next_use():
     """标签随本次使用消失：下一次使用同一张牌时窗口照常出现（票 08 §验收 7）。"""
     first_slash, second_slash = _cards("slash")[0], _cards("slash")[1]
@@ -664,23 +859,26 @@ def test_the_frame_tag_bag_is_idempotent_and_keeps_insertion_order():
     assert frame.data[WHOLE_FIELD_TAGS_KEY].global_tags == (Tag.PREVENTED,)
 
 
-def test_the_whole_field_tag_survives_a_per_target_cursor_advance():
-    """R4-Q1：只把**逐目标档**登记进 ``_PER_TARGET_FRAME_KEYS``（code-review C3）。
+def test_both_tag_tiers_survive_a_cursor_advance_without_crossing_targets():
+    """票 03：两档都随**本次使用**消失，游标推进**不**清除任何一档（`开发文档/03` §5「效果原语」原文）。
 
-    多目标【杀】里游标推进必须清掉逐目标档（否则标签会串到下一个目标），但**全场档**
-    （【寒冰剑】的 ``PREVENTED`` / 【贯石斧】的 ``SAVED`` 一类）作用于整次使用，必须跨
-    目标存活。两档因此分住两个 ``frame.data`` 键，只有逐目标那个登记进清除表。
+    逐目标档按 ``(座位, 标签)`` 键区分，故"不串目标"由**键**保证、不靠推进时整袋清除：
+    先给目标 1 打标签、推进到目标 2，目标 1 的条目仍在，但 ``has_tag(target=2)`` 不命中它。
+    旧行为（推进即清除）会让"在指定目标后一次性打完标签"的技能在第 2 个目标起丢失标签
+    ——标准 / 界【铁骑】与【烈弓】都因此有真实的多目标缺口（票 03 实测：黑 → 红两个判定时
+    两个目标都拿到了【闪】窗口）。
     """
-    assert USE_TAGS_KEY in _PER_TARGET_FRAME_KEYS, "逐目标档随游标推进清除"
-    assert WHOLE_FIELD_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "全场档不随游标推进清除"
+    assert USE_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "逐目标档不随游标推进清除"
+    assert WHOLE_FIELD_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "全场档也不随游标推进清除"
 
     frame = Frame(kind=FrameKind.RESOLVE, data={"targets": (1, 2), "cursor": 0})
     add_tag(frame, Tag.PREVENTED)  # 全场档
-    add_tag(frame, Tag.UNRESPONSIVE, target=1)  # 逐目标档
+    add_tag(frame, Tag.UNRESPONSIVE, target=1)  # 给**第 1 个**目标打的逐目标档
 
     resolve_advance(None, frame)
 
     assert frame.data["cursor"] == 1, "游标真的推进了（断言不空转）"
     assert has_tag(frame, Tag.PREVENTED, target=2), "全场档跨目标存活"
-    assert not has_tag(frame, Tag.UNRESPONSIVE, target=1), "逐目标档随游标推进被清除"
+    assert has_tag(frame, Tag.UNRESPONSIVE, target=1), "逐目标档也跨目标存活（本次使用内有效）"
+    assert not has_tag(frame, Tag.UNRESPONSIVE, target=2), "不串目标：目标 2 读不到目标 1 的标签"
 

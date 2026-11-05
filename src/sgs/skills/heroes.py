@@ -16,13 +16,18 @@ r"""武将技能的**定义**（票 03 起；全表登记归票 12）。
 赵云【龙胆】  【闪】、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
 大乔【国色】  方块牌、手牌∪装备     【乐不思蜀】          单源、``PLAY``
 华佗【急救】  红色牌、手牌∪装备     【桃】               单源、**限回合外**
+甄姬【倾国】  黑色**手牌**          【闪】               单源、``DODGE`` + ``RESPOND``
+甘宁【奇袭】  黑色牌、手牌∪装备     【过河拆桥】          单源、``PLAY``
+界关羽【武圣】 红色牌、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
+                                                      ＋②方块【杀】无距离限制
+                                                      （同一技能上的 ``TARGET_POOL``）
 ===========  ==================  ==================  ==============================
 
 **区域默认**（W4-3 / `GLOSSARY.md`）：五条牌面都只写"一张牌"，没有一条写"区域内的牌"
 或"场上的牌" ⇒ 源区一律是 :func:`_hand_equip`（手牌 ∪ 装备）。**不设统一的转化源区**，
 更不默认包含判定区；将来某条转化技的牌面真写了别的区域，改它自己那一行的 ``source_zone``。
 
-**五个谓词全部内联在回调里**（票 03 §要做什么 3）：颜色 / 花色 / 牌名（三者在
+**谓词全部内联在回调里**（票 03 §要做什么 3）：颜色 / 花色 / 牌名（三者在
 :func:`_convertible` 的谓词分支里）、区域（``card_ids`` 给出取牌区）、时机（回合外，
 :func:`_outside_turn` 读 ``state.turn_seat``）。**不建声明式 DSL**——回调自己声明
 "源筛选 + 目标牌名"，组合与合法性走 :mod:`sgs.skills.virtual` 的共享构造器。
@@ -35,14 +40,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Any
 
-from sgs.data import Color, SkillType, color_of_suit
+from sgs.data import Color, SkillType, Suit, color_of_suit, hero_skill_id
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
     Modifier,
     ModifierPoint,
+    TargetCount,
+    TargetRule,
     behavior_for,
     is_slash,
     locate,
@@ -52,6 +60,7 @@ from sgs.state import (
     GameState,
     PlayCard,
     QueryKind,
+    Reforge,
     Step,
     StepPool,
     UseCard,
@@ -66,7 +75,7 @@ from .catalog import (
     resolve_instances,
 )
 from .flow import seat_choice
-from .virtual import card_ids, single_conversion
+from .virtual import card_ids, single_conversion, virtual_candidates
 
 __all__ = [
     "CONVERSION_SKILLS",
@@ -74,6 +83,7 @@ __all__ = [
     "conversion_offers_by_source",
     "conversion_preactivations",
     "conversion_skill_definitions",
+    "is_forced_conversion",
     "is_transformed_action",
     "owned_conversion_skill_ids",
     "resolve_conversion_confirmation",
@@ -128,11 +138,20 @@ def _outside_turn(state: GameState, seat: int) -> bool:
 def _hand_equip(state: GameState, seat: int) -> tuple[int, ...]:
     """**区域默认**：手牌 ∪ 装备（牌面没写区域时按这一档读，`GLOSSARY.md`「区域默认」）。
 
-    判定区**不默认包含**（W4-3）：五条转化技的牌面都只写"一张牌 / 一张红色牌 / 一张
-    方块牌 / 一张【杀】/【闪】"，没有一条写"区域内的牌"或"场上的牌"，故一律落到
-    手牌 + 装备。区序固定（先手牌后装备），逐种子可复现。
+    判定区**不默认包含**（W4-3）：转化技的牌面都只写"一张牌 / 一张红色牌 / 一张方块牌 /
+    一张【杀】/【闪】"，没有一条写"区域内的牌"或"场上的牌"，故一律落到手牌 + 装备。
+    区序固定（先手牌后装备），逐种子可复现。
+
+    **例外由牌面自己声明**：M6 票 02 的【倾国】写的是"一张黑色**手牌**"，故它声明
+    :func:`_hand`（只有手牌），不套用本默认——区域默认是"牌面没写区域"时的那一档，
+    不是统一强制。
     """
     return card_ids(state, seat, Zone.HAND) + card_ids(state, seat, Zone.EQUIP)
+
+
+def _hand(state: GameState, seat: int) -> tuple[int, ...]:
+    """**手牌**（牌面明写"手牌"时的区域谓词；【倾国】是第一个消费者，§九 L978）。"""
+    return card_ids(state, seat, Zone.HAND)
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +168,55 @@ class ConversionSkill(HeroSkillDecl):
     predicate: Predicate
     scopes: tuple[CandidateScope, ...]
     outside_turn_only: bool = False
+    locked: bool = False
+    """是否**锁定技**（票 05 的加法；缺省 ``False`` = 既有转化技一字不改）。
+
+    转化技的"发动"本来就不问（它是候选入口），但锁定与否影响「所有非锁定技失效」的谓词
+    （【义绝】/【铁骑】）与形态表；神关羽【武神】是首个锁定转化技。
+
+    与 :attr:`forced` **正交**：``locked`` 是"锁定技"这一**规则类型**，``forced`` 是
+    "只能 / 可以"这一**效果类型**——别拿一个推另一个。
+    """
+
+    forced: bool = False
+    """是否**强制转化**（牌面写「**只能**将…当…使用 / 打出」；当前只有神关羽【武神】）。
+
+    "可以"型（缺省 ``False``：武圣 / 龙胆 / 国色 / 急救 / 丈八…）保留源牌的原用途，
+    转化只在**预发动**里发生；"只能"型（``True``）的源牌默认就是产物——界面据此把手牌
+    画成产物、点它直接进转化清单（``pending.transform_products[*].forced``）。
+
+    **不是** :attr:`locked` 的派生值：锁定技是另一条规则类型（失效 / 形态表读它），
+    这里回答的只是"源牌还能不能按原用途用"。原用途的**合法性**仍由该技能自己的
+    ``FORBIDDEN`` 修饰器承担（武神同时声明了它与 ``forced=True``），本字段只管默认形态。
+    """
+    modifiers: tuple[Modifier, ...] = ()
+    """这条转化技能**额外**的修饰器（M6 票 04 的加法；缺省空 = 既有六条一字不改）。
+
+    转化候选本身只落 ``CANDIDATES``；但界关羽【武圣】②"你使用**方块**【杀】无距离限制"是
+    同一张武将牌上的一条**连续型**效果，必须与转化入口共用同一个 ``SkillDef``（一个技能
+    一条定义），故在这里给声明面一个修饰器口子，由
+    :func:`conversion_skill_definitions` 合并进定义（合并 = 一份真源，不是两份拷贝）。
+    """
     requirement: str = ""
     """这条转化"需要玩家做什么"的人话（item 4）；`conversion_skill_definitions` 透进
     :attr:`~sgs.skills.catalog.SkillDef.requirement`（龙胆两个方向各一条 ⇒ 用"；"并起来）。"""
+
+    shared_with: tuple[str, ...] = ()
+    """**同一份牌面文本**也由这些武将 id 持有的那条转化技（M6 票 07 的加法；缺省空）。
+
+    界甘宁【奇袭】（§十九 L2145）与标准甘宁【奇袭】（§九 L1025）**逐字相同**，
+    故这里写 ``shared_with=("jie_ganning",)``——一条声明派生两个全限定技能 id，
+    而不是把同一行声明复制两份：源筛选 / 产物 / 时机只有一份真源，界版只是另一个
+    武将 id（与【克己】【马术】的"另一个武将 id"同一姿态）。
+    """
+
+    @property
+    def skill_ids(self) -> tuple[str, ...]:
+        """本声明的全部全限定技能 id：自己 + :attr:`shared_with`（按声明序）。"""
+        return tuple(
+            hero_skill_id(hero_id, self.short_id)
+            for hero_id in (self.hero_id, *self.shared_with)
+        )
 
     def select(self, state: GameState, seat: int) -> tuple[int, ...]:
         """本技能在当前局面下**筛好的**来源牌（区域谓词 + 牌面谓词 + 时机谓词）。"""
@@ -190,6 +255,11 @@ def _diamond(state: GameState, card_id: int) -> bool:
     return _convertible(state, card_id, suit="diamond")
 
 
+def _black(state: GameState, card_id: int) -> bool:
+    """颜色谓词：黑色牌（【倾国】§九 L978 / 【奇袭】§九 L1025）。"""
+    return _convertible(state, card_id, color=Color.BLACK)
+
+
 def _slash(state: GameState, card_id: int) -> bool:
     """牌名谓词：【杀】（【龙胆】的【杀】→【闪】）。
 
@@ -204,6 +274,183 @@ def _dodge(state: GameState, card_id: int) -> bool:
     return _convertible(state, card_id, card_type="dodge")
 
 
+def _product_in_pack(state: GameState, type_id: str) -> bool:
+    """这种牌名在**当前牌堆**里存在实体牌吗（界【龙胆】的 酒↔桃 方向用）。
+
+    牌堆档位是内容事实：标准 108 档没有【酒】（它随军争 160 档进入）。把一张【桃】转成
+    一张**牌堆里根本不存在的牌**时，虚拟牌的名字只能回落到 type id（界面上会出现
+    "wine"），且"使用一张牌堆外的牌"也不是这套数据的语义。故这两个方向只在产物牌名
+    有实体牌时产出候选；杀 / 闪 / 桃三个既有方向不受影响（标准包里都有实体牌）。
+    """
+    return any(card.type == type_id for card in state.cards)
+
+
+def _wine(state: GameState, card_id: int) -> bool:
+    """牌名谓词：【酒】（【龙胆】的【酒】→【桃】，§十九 L2099–L2100）。"""
+    return _convertible(state, card_id, card_type="wine") and _product_in_pack(state, "peach")
+
+
+def _peach_to_wine(state: GameState, card_id: int) -> bool:
+    """牌名谓词：【桃】（【龙胆】的【桃】→【酒】；产物牌名不在本档牌堆时不产出）。"""
+    return _convertible(state, card_id, card_type="peach") and _product_in_pack(state, "wine")
+
+
+def _diamond_slash_target_pool(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """界关羽【武圣】②：你使用**方块【杀】无距离限制**（§十九 L2084–L2086）。
+
+    落点是 ``TARGET_POOL``（"无距离限制" = 目标池豁免"距离 ≤ 攻击范围"这一条判据）：
+    把**全部其他存活座位**并进池子。用"并集"而不是直接返回全集，是为了不与链上**其它**
+    目标池修饰器打架——**修饰器管道序** ``(priority_class, skill_id, owner)``（= 解析序，不是
+    票 05 的派发链序）里后跑的回调（如
+    【空城】的剔除）仍能删掉不合法的目标；本回调只**补上**被攻击范围挡掉的那些。
+
+    牌面判据读 ``ctx.card`` 的**花色 + 族**：方块是 `CardRef.suit` 的牌面事实（转化牌
+    单源继承花色，故"方块牌当【杀】"同样命中）；族判据走 :func:`~sgs.effects.is_slash`
+    而不是牌型相等（火 / 雷【杀】同族）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    if ctx.card.suit != Suit.DIAMOND.value:
+        return current
+    everyone = tuple(
+        player.seat for player in state.players if player.alive and player.seat != ctx.subject
+    )
+    return tuple(dict.fromkeys((*current, *everyone)))
+
+
+def _heart(state: GameState, card_id: int) -> bool:
+    """牌名谓词：**红桃**（神关羽【武神】①的源筛选；花色不是颜色）。"""
+    return state.card(card_id).suit == Suit.HEART.value
+
+
+def _heart_slash_target_pool(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """神关羽【武神】②：你使用**红桃【杀】**无距离限制（与界武圣②同形）。
+
+    牌面判据 = ``ctx.card`` 的**花色 + 族**；单源转化继承来源花色，故"红桃手牌当【杀】"
+    也命中；族判据走 :func:`~sgs.effects.is_slash`（火 / 雷【杀】同族）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    if ctx.card.suit != Suit.HEART.value:
+        return current
+    everyone = tuple(
+        player.seat for player in state.players if player.alive and player.seat != ctx.subject
+    )
+    return tuple(dict.fromkeys((*current, *everyone)))
+
+
+def _wushen_forbidden(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """神关羽【武神】①：**红桃手牌**不能按原用途使用 / 打出（票 05 的 FORBIDDEN）。
+
+    只禁"这张牌此刻在手牌区、花色红桃、由持有者自己使用 / 打出"；转化【杀】入口不在
+    ``check_forbidden`` 的读取面上（它由 CANDIDATES 产出），故同牌仍能当【杀】。重铸 /
+    弃置 / 技能成本 / 他人把牌置入其装备区都不经过这个挂点（与【义绝】的读法同姿态）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if ctx.card.suit != Suit.HEART.value:
+        return current
+    if ctx.card.card_id not in state.player(ctx.subject).hand:
+        return current
+    return True
+
+
+LUANJI = hero_skill_id("yuanshao_mobile", "luanji")
+"""袁绍移动版【乱击】的全限定技能 id（huo-mobile-batch 票 03）。"""
+
+
+def _luanji_candidate(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """袁绍移动版【乱击】：出牌阶段把**两张花色相同的手牌**当【万箭齐发】使用。
+
+    多源转化（与【丈八蛇矛】同一台构造器）：按花色把手牌分组、组内取 C(n,2) 个来源组，
+    再交给 :func:`~sgs.skills.virtual.virtual_candidates`——"同花色"这条谓词内联在这里，
+    与 H 族"每个技能一个 ``CANDIDATES`` 回调"同一条纪律（候选构造只有一处实现）。
+
+    目标由产品定（【万箭齐发】= 全体其他存活角色），本回调不声明任何目标；```ctx.card``
+    非空的那一趟逐张牌循环不产出（整段在第二趟 ``ctx.card=None`` 里补）。
+    """
+    if ctx.card is not None or ctx.owner != ctx.subject:
+        return current
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    by_suit: dict[str | None, list[int]] = {}
+    for card_id in state.player(ctx.subject).hand:
+        by_suit.setdefault(state.card(card_id).suit, []).append(card_id)
+    groups = tuple(
+        combo for cards in by_suit.values() for combo in combinations(cards, 2)
+    )
+    if not groups:
+        return current
+    return (
+        *current,
+        *virtual_candidates(
+            state,
+            ctx,
+            target_type_id="arrow_barrage",
+            sources=groups,
+            scopes=(CandidateScope.PLAY,),
+        ),
+    )
+
+
+def _club_iron_chain(state: GameState, card_id: int) -> bool:
+    """花色谓词 + 产物闸门：**梅花手牌**，且本档牌堆里有【铁索连环】实体牌。
+
+    牌面「一张♣️手牌当【铁索连环】**使用**」——产物牌名不在本档牌堆时（默认
+    ``standard_108`` 一张都没有，只有军争 160 档有 6 张）不给"使用"方向：照界【龙胆】
+    酒 / 桃的既有口径（:func:`_product_in_pack`），否则会造出一张牌面名回落到
+    ``iron_chain`` 的虚拟牌，且"使用一张牌堆外的牌"不是这套数据的语义。
+    **重铸方向不受这条闸门影响**（它不产物虚拟牌，见 :func:`_lianhuan_reforge`）。
+    """
+    return _convertible(state, card_id, suit="club") and _product_in_pack(
+        state, "iron_chain"
+    )
+
+
+def _lianhuan_reforge(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """庞统移动版【连环】的**重铸**分支：出牌阶段给每张♣手牌补一条 ``Reforge`` 候选。
+
+    牌面「…当【铁索连环】**使用或重铸**」是**两条互斥的合法动作**（与【铁索连环】自己
+    在出牌阶段的候选排列同形），故不加 ``SELECT_OPTION``：使用 = 转化候选（``UseCard``
+    虚拟牌），重铸 = 本回调追加的 ``Reforge``。
+
+    - 「当【铁索连环】重铸」= 重铸**那张来源手牌**：虚拟牌从不落区域（``card_id < 0``
+      的牌 ``GameState.card`` fail-closed），而重铸的结算本来就是"这张实体牌进弃牌堆 +
+      摸一张"，两种读法可观测后果相同（票 02 R2）；
+    - 与原生重铸**去重**：牌堆里的♣【铁索连环】本身已经由 ``behavior_for(card).reforgeable``
+      产出同一条 ``Reforge``，这里跳过它，不让同一个动作出现两次（票 02 R4）；
+    - 只在出牌阶段（``CandidateScope.PLAY``）：账本「重铸 = 独立 ``Reforge`` Action」行的
+      "仅出牌阶段"是本技能的第一条"技能授予重铸"载体。
+    """
+    if ctx.card is not None or ctx.owner != ctx.subject:
+        return current
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    extra: list[Any] = []
+    for card_id in state.player(ctx.subject).hand:
+        card = state.card(card_id)
+        if card.suit != Suit.CLUB.value:
+            continue
+        if behavior_for(card).reforgeable:
+            continue
+        extra.append(Reforge(card=card, answers_seq=ctx.answers_seq))
+    return (*current, *extra)
+
+
 CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     # 关羽【武圣】：一张红色牌当【杀】使用或打出（规则 976）。
     ConversionSkill(
@@ -215,7 +462,39 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张红色牌当【杀】使用或打出",
     ),
+    # 界关羽【武圣】（M6 票 04，§十九 L2084–L2086）：①与标准版逐字相同（红牌当【杀】）；
+    # ②"你使用**方块**【杀】无距离限制"是同一技能的连续型效果，挂在 TARGET_POOL 上。
+    ConversionSkill(
+        hero_id="jie_guanyu",
+        short_id="wusheng",
+        target_type_id="slash",
+        source_zone=_hand_equip,
+        predicate=_red,
+        scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        modifiers=(Modifier(ModifierPoint.TARGET_POOL, _diamond_slash_target_pool),),
+        requirement="选择1张红色牌当【杀】使用或打出；方块【杀】无距离限制",
+    ),
+    # 神关羽【武神】（票 04 / 票 05；移动版牌面）：锁定转化 + 红桃手牌牌级禁令 + 红桃【杀】
+    # 无距离限制。产物按 Q&A 是**普通【杀】**（红桃火杀 / 雷杀也被转成普通杀）。
+    ConversionSkill(
+        hero_id="shen_guanyu_mobile",
+        short_id="wushen",
+        target_type_id="slash",
+        source_zone=_hand,
+        predicate=_heart,
+        scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        locked=True,
+        forced=True,
+        modifiers=(
+            Modifier(ModifierPoint.TARGET_POOL, _heart_slash_target_pool),
+            Modifier(ModifierPoint.FORBIDDEN, _wushen_forbidden),
+        ),
+        requirement="选择1张红桃手牌当【杀】使用或打出；使用红桃【杀】无距离限制",
+    ),
     # 赵云【龙胆】两条方向共用一个技能 id（规则 982）。
+    # M6 票 16：界赵云【龙胆】的 杀↔闪 两向与标准版**逐字相同**（§十九 L2098–L2100），
+    # 故经 ``shared_with`` 派生 ``hero.jie_zhaoyun.longdan``，不复制这两行；另加的
+    # 酒↔桃 两向是**另一份声明**（产物牌名不同），见下面两条。
     ConversionSkill(
         hero_id="zhaoyun",
         short_id="longdan",
@@ -224,6 +503,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_slash,
         scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
         requirement="选择1张【杀】当【闪】打出",
+        shared_with=("jie_zhaoyun",),
     ),
     ConversionSkill(
         hero_id="zhaoyun",
@@ -233,6 +513,29 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_dodge,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张【闪】当【杀】使用或打出",
+        shared_with=("jie_zhaoyun",),
+    ),
+    # 界赵云【龙胆】的 酒↔桃 两向（§十九 L2099–L2100）。【酒】当【桃】：出牌阶段可当
+    # 【桃】对自己使用（受伤时），濒死求桃窗口由 ``_transformed_peaches`` 按产物牌名取
+    # （该窗口不读 ``scopes``）。【桃】当【酒】：出牌阶段使用（每回合限一次由【酒】的
+    # 行为表收住，目标只能是自己）。
+    ConversionSkill(
+        hero_id="jie_zhaoyun",
+        short_id="longdan",
+        target_type_id="peach",
+        source_zone=_hand_equip,
+        predicate=_wine,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张【酒】当【桃】使用",
+    ),
+    ConversionSkill(
+        hero_id="jie_zhaoyun",
+        short_id="longdan",
+        target_type_id="wine",
+        source_zone=_hand_equip,
+        predicate=_peach_to_wine,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张【桃】当【酒】使用",
     ),
     # 大乔【国色】：一张方块牌当【乐不思蜀】使用（规则 1024）。
     ConversionSkill(
@@ -245,6 +548,8 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张方块牌当【乐不思蜀】使用",
     ),
     # 华佗【急救】：回合外一张红色牌当【桃】使用（规则 1041）。
+    # M6 票 18：界华佗【急救】与标准版**逐字相同**（§十九 L2199）⇒ 同一条声明经
+    # ``shared_with`` 派生 ``hero.jie_huatuo.jijiu``，不复制第二行。
     ConversionSkill(
         hero_id="huatuo",
         short_id="jijiu",
@@ -254,9 +559,80 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.PLAY,),
         outside_turn_only=True,
         requirement="选择1张红色牌当【桃】使用",
+        shared_with=("jie_huatuo",),
+    ),
+    # 甄姬【倾国】（M6 票 02）：一张**黑色手牌**当【闪】使用或打出（§九 L978）。
+    # 区域 = 只有手牌：牌面明写"手牌"，故不套 `_hand_equip` 的区域默认。
+    # M6 票 09：界甄姬【倾国】与标准版**逐字相同**（§十九 L2064–L2065）⇒ 同一条声明经
+    # ``shared_with`` 派生 ``hero.jie_zhenji.qingguo``，不复制第二行。
+    ConversionSkill(
+        hero_id="zhenji",
+        short_id="qingguo",
+        target_type_id="dodge",
+        source_zone=_hand,
+        predicate=_black,
+        scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
+        requirement="选择1张黑色手牌当【闪】使用或打出",
+        shared_with=("jie_zhenji",),
+    ),
+    # 甘宁【奇袭】（M6 票 03）：一张黑色牌当【过河拆桥】使用（§九 L1025）。
+    # 区域默认 = 手牌 ∪ 装备：牌面没写区域，按 `_hand_equip` 那一档读。
+    # M6 票 07：界甘宁【奇袭】牌面逐字相同（§十九 L2145）⇒ 同一条声明经 ``shared_with``
+    # 派生 ``hero.jie_ganning.qixi``，不复制第二行。
+    ConversionSkill(
+        hero_id="ganning",
+        short_id="qixi",
+        target_type_id="dismantlement",
+        source_zone=_hand_equip,
+        predicate=_black,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张黑色牌当【过河拆桥】使用",
+        shared_with=("jie_ganning",),
+    ),
+    # 火包·移动版庞统【连环】（huo-mobile-batch 票 02）：一张♣手牌当【铁索连环】**使用**
+    # 或**重铸**。使用 = 常规单源转化（走与真牌同一条使用链：牌名闸门 / 无懈 / 目标池 /
+    # 帷幕 / 奋威 / 集智……）；重铸 = 同一 ``SkillDef`` 上另挂一条 ``CANDIDATES`` 回调
+    # 追加 ``Reforge``（CANDIDATES 早已追加过非使用类动作的先例：八卦阵的 ``ActivateSkill``）。
+    ConversionSkill(
+        hero_id="pangtong_mobile",
+        short_id="lianhuan",
+        target_type_id="iron_chain",
+        source_zone=_hand,
+        predicate=_club_iron_chain,
+        scopes=(CandidateScope.PLAY,),
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, _lianhuan_reforge),),
+        requirement="选择1张♣手牌当【铁索连环】使用；或重铸这张手牌",
     ),
 )
-"""H 族四条技能（五条声明：龙胆两个方向各一条）的逐字声明（票 03 §表）。"""
+"""H 族五条技能（六条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
+甘宁那一行）的逐字声明（票 03 §表 + M6 票 02【倾国】/ 票 03【奇袭】/ 票 04 界关羽【武圣】/
+票 07 界甘宁【奇袭】）。"""
+
+
+_LUANJI_DEF = SkillDef(
+    skill_id=LUANJI,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    modifiers=(Modifier(ModifierPoint.CANDIDATES, _luanji_candidate),),
+    virtual_type_ids=("arrow_barrage",),
+    virtual_source_count=2,
+    requirement="选择两张花色相同的手牌当【万箭齐发】使用",
+)
+"""袁绍移动版【乱击】的独立定义（多源转化：两张同花色手牌 → 虚拟【万箭齐发】）。"""
+
+
+_FORCED_CONVERSION_SKILL_IDS: frozenset[str] = frozenset(
+    skill_id
+    for skill in CONVERSION_SKILLS
+    if skill.forced
+    for skill_id in skill.skill_ids
+)
+"""声明为**强制转化**（‘只能’型）的全部技能 id（当前只有 ``hero.shen_guanyu_mobile.wushen``）。
+
+由 :data:`CONVERSION_SKILLS` 的 :attr:`ConversionSkill.forced` 一次派生——不给"哪些技能
+默认画产物"留第二份名单。
+"""
 
 
 def _modifier(skill: ConversionSkill) -> Modifier:
@@ -288,9 +664,11 @@ def conversion_offers(
         if instance.owner == seat
     }
     return tuple(
-        (card_id, skill.skill_id)
+        (card_id, owned_id)
         for skill in CONVERSION_SKILLS
-        if skill.target_type_id == target_type_id and skill.skill_id in owned
+        if skill.target_type_id == target_type_id
+        for owned_id in skill.skill_ids
+        if owned_id in owned
         for card_id in skill.select(state, seat)
     )
 
@@ -345,6 +723,25 @@ def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, 
         if instance.owner == owner
         and card.type in instance.definition.virtual_type_ids
         and instance.definition.virtual_source_count == len(sources)
+    )
+
+
+def is_forced_conversion(state: GameState, owner: int, card: Any) -> bool:
+    """这张虚拟牌候选是不是**强制转化**（‘只能’型，如【武神】）转出来的产物。
+
+    归属仍读 :func:`_candidate_skill_ids`（与清单 / 确认**同一份**判据），再问声明上的
+    :attr:`ConversionSkill.forced` —— **不读** ``SkillDef.locked``：锁定技是另一条规则
+    类型（失效 / 形态表），"只能 / 可以"是效果类型，二者正交。
+
+    纯虚拟牌（``virtual_sources`` 为空，如八卦阵的视为【闪】）不属于任何转化技 ⇒ ``False``。
+    展示层（``sgs_web.projection``）用它给 ``transform_products[*].forced``：手牌区只把
+    ``True`` 的产物画成默认牌面；``False`` 的产物仍下发（预发动提示要写「将以【X】使用」）。
+    """
+    if not getattr(card, "virtual_sources", ()):
+        return False
+    return any(
+        skill_id in _FORCED_CONVERSION_SKILL_IDS
+        for skill_id in _candidate_skill_ids(state, owner, card)
     )
 
 
@@ -434,8 +831,18 @@ def resolve_conversion_confirmation(
       来源集合与目标集合的顺序无关（来源在 ``virtual_sources`` 里本就已排序）；
     - **是否需要目标步由清单回答**（``steps`` 里有没有 ``min > 0`` 的 ``seat`` 步）：
       有目标步 ⇒ 按**完整目标集**比较（先比原始选择个数——重复选择因此被拒——再比
-      去重后的集合，见 :func:`sgs.effects.target_sets_match`）；没有目标步 ⇒ 目标已被清单
-      判为唯一（或本就没有目标），不比较。同一条判据也是清单的形状；
+      去重后的集合，见 :func:`sgs.effects.target_sets_match`）；没有目标步 ⇒ 目标由牌
+      本身决定（huo-mobile-batch 票 07 的 :func:`_targets_are_decided_by_the_card`），
+      提交里**不该**带目标集，目标改由候选池给出——池是唯一真源，且同一组来源的目标集
+      必须**唯一**，否则报「这次转化缺少目标」（过期的那一份不会被替玩家选中）。
+      同一条判据也是清单的形状；
+    - **点击顺序**（huo-mobile-batch 票 06）：候选牌自己的行为表声明了
+      :attr:`~sgs.effects.CardBehavior.preserve_target_order`（当前 =【铁索连环】）时，
+      两种点击顺序在候选池里本就是**两条**动作（``_play_phase`` / ``virtual_card_use``
+      按 ``target_combos(..., ordered=True)`` 摊开），目标因此按 ``tuple(choices) ==
+      tuple(action.targets)`` 的**顺序**匹配——按集合匹配会永远拿到候选池里座位序那条
+      （实机报障 ③：产物先点 3 再点 1，结算仍按 (1, 3)）。其余牌保持集合比较（顺序无关），
+      判据读行为表，不按技能 id 特判；1 名目标时两种比较等价；
     - **W7-01b**：多目标组合同样走这里——``ActivateSkill(虚拟牌来源, 1..max 个目标)``
       解析成候选池里那条 ``UseCard(虚拟牌, targets=…)``；清单只表达"最多可选几个"，
       不在池里的组合由上面的比较拒绝。
@@ -457,6 +864,7 @@ def resolve_conversion_confirmation(
     if wanted_targets and not needs_target:
         return "这次转化没有目标步：来源之外的答案不被接受"
     source_matched = False
+    matched: list[Any] = []
     for action in candidates:
         card = getattr(action, "card", None)
         if card is None or not card.virtual_sources:
@@ -466,14 +874,34 @@ def resolve_conversion_confirmation(
         if tuple(sorted(int(source) for source in card.virtual_sources)) != wanted_sources:
             continue
         source_matched = True
-        if needs_target and not target_sets_match(
-            wanted_targets, getattr(action, "targets", ())
-        ):
-            continue
-        return action
+        if needs_target:
+            targets = tuple(int(target) for target in getattr(action, "targets", ()))
+            # M5-bugfix 的同一判据（huo-mobile-batch 票 06）：声明了
+            # ``preserve_target_order`` 的牌把两种点击顺序摊成两条候选，确认必须按
+            # **点击顺序**对回那一条；其余牌仍按集合比较（与点击顺序无关）。
+            if behavior_for(card).preserve_target_order:
+                if tuple(wanted_targets) != targets:
+                    continue
+            elif not target_sets_match(wanted_targets, targets):
+                continue
+        matched.append(action)
     if not source_matched:
         return "来源牌不合法：这组牌此刻不能这样转化"
-    return "目标不合法：这组来源没有那条目标"
+    if not matched:
+        return "目标不合法：这组来源没有那条目标"
+    if needs_target:
+        return matched[0]
+    # **没有目标步**（huo-mobile-batch 票 07）：目标由牌本身决定（全体存活 / 只对自己 /
+    # 无目标），提交里不含目标 ⇒ 目标集只能取自候选池，而它必须**唯一**：池里同一组来源
+    # 出现两条不同目标集（例如一份已经过期）时，替玩家挑一条就是把过期目标放行。
+    if len(
+        {
+            frozenset(int(target) for target in (getattr(action, "targets", None) or ()))
+            for action in matched
+        }
+    ) > 1:
+        return "这次转化缺少目标"
+    return matched[0]
 
 
 def conversion_preactivations(
@@ -496,7 +924,14 @@ def conversion_preactivations(
       目标数；``pool`` 按前序来源逐行给该来源组**全部组合的全部目标**（``seat:N``）。
       目标完全唯一（所有候选都是同一个单目标、或根本就没有目标）时不下发——求桃 /
       【万箭】 / 无方天的借刀等既有形状因此不变；出现多目标候选（W7 的方天式额外目标）
-      才下发，座位步在界面上是多选。
+      才下发，座位步在界面上是多选；
+    - **目标由牌本身决定时不下发目标步**（huo-mobile-batch 票 07）：本技能这次询问的
+      **全部**候选产物的行为表都判为"目标不由玩家选"
+      （:func:`_targets_are_decided_by_the_card`：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``
+      / ``self_only`` / 无目标）⇒ 清单只有来源步，确认只提交来源。判据读行为表，不在
+      技能 id 上特判；产物不止一种方向（界【龙胆】的【闪】当【杀】与【桃】当【酒】会在
+      同一问并存）时，只要有一个方向要玩家选，目标步就保留——那一步表达不了"按方向
+      分叉的清单形状"。
 
     **清单与候选同源**：张数、目标池、次数链（``check_count``）、区域与时机谓词都没有
     在这里重算一次——它们已经体现在"候选存在与否"里。空 dict = 这次询问没有可预发动的
@@ -511,6 +946,7 @@ def conversion_preactivations(
     """
     groups: dict[str, dict[tuple[int, ...], list[tuple[int, ...]]]] = {}
     source_zones: dict[int, Zone] = {}
+    target_rules: dict[str, set[TargetRule]] = {}
     for action in actions:
         card = getattr(action, "card", None)
         if card is None or not card.is_virtual:
@@ -522,17 +958,23 @@ def conversion_preactivations(
         skill_ids = _candidate_skill_ids(state, owner, card)
         if not skill_ids:
             continue
+        # 产物行为表（目标数来源是**牌面事实**）：清单要不要目标步由它回答（票 07）。
+        rule = behavior_for(card).target_rule
         for skill_id in skill_ids:
             rows = groups.setdefault(skill_id, {}).setdefault(sources, [])
             if targets not in rows:
                 rows.append(targets)
+            target_rules.setdefault(skill_id, set()).add(rule)
         for source in sources:
             source_zones.setdefault(source, locate(state, source).zone)
 
     out: dict[str, tuple[Step, ...]] = {}
     for skill_id in sorted(groups):
         steps = _manifest_steps(
-            groups[skill_id], source_zones, fixed_target=fixed_target
+            groups[skill_id],
+            source_zones,
+            target_rules[skill_id],
+            fixed_target=fixed_target,
         )
         if steps is not None:
             out[skill_id] = steps
@@ -542,6 +984,7 @@ def conversion_preactivations(
 def _manifest_steps(
     per_source: dict[tuple[int, ...], list[tuple[int, ...]]],
     source_zones: dict[int, Zone],
+    target_rules: Iterable[TargetRule],
     *,
     fixed_target: bool = False,
 ) -> tuple[Step, ...] | None:
@@ -560,7 +1003,18 @@ def _manifest_steps(
       借刀的被迫使用）**只在目标完全唯一时**省掉目标步——所有候选都是同一个单目标
       （或无目标）⇒ 没有可选的第二步。出现第二个目标、或任一组合的目标数 > 1（W7 的
       方天式多目标）⇒ 仍下发目标步（座位步因此可多选；借刀窗口的候选恒含 Bn，
-      ``(Bn,)`` 是候选排序的自然首条，故目标步首项 = Bn）。
+      ``(Bn,)`` 是候选排序的自然首条，故目标步首项 = Bn）。这条判据**优先于**下一条：
+      窗口里出现两份不同目标集时池已不自明，即使行为表判得出"目标由牌决定"也照旧下发
+      目标步——否则确认只能报「这次转化缺少目标」；
+    - **目标由牌本身决定时不下发目标步**（huo-mobile-batch 票 07）：``target_rules`` 是
+      本技能这次询问全部候选产物的 ``TargetRule``——**每一个**都判为"目标不由玩家选"
+      （:func:`_targets_are_decided_by_the_card`）⇒ 清单只有来源步。只要有一个产物
+      方向要玩家选目标（界【龙胆】的【闪】当【杀】与【桃】当【酒】可在同一问并存），
+      目标步照旧下发——一条步骤表达不了"按方向分叉"的清单；
+    - **合法来源组合**（huo-mobile-batch 票 10）：多来源步（``count > 1``）的来源步带出
+      ``Step.groups`` = ``per_source`` 的键（"哪几张能配成一组"），且只在**存在非法组合**
+      时才下发（任意 ``count`` 张都能配 ⇒ 省略，见 :func:`_source_groups`）。判据只读候选池
+      ——不看技能 id / 牌名，界面也不必自己判花色。
     """
     sizes = {len(sources) for sources in per_source}
     if len(sizes) != 1:
@@ -578,12 +1032,19 @@ def _manifest_steps(
             max=count,
             pool=(StepPool(when=(), options=options),),
             order=0,
+            groups=_source_groups(per_source, count, options),
         )
     ]
     combos = [targets for rows in per_source.values() for targets in rows]
     if not combos or all(not targets for targets in combos):
         return tuple(steps)
-    if fixed_target and _targets_are_truly_unique(combos):
+    # 窗口承载目标的判据**优先**（票 07 之后的次序修正）：``fixed_target`` 语境只认窗口里
+    # 的目标集是否唯一。不唯一时池已不自明，**不**走"目标由牌决定"的省步分支——否则确认
+    # 只能报「这次转化缺少目标」，而目标步本来可以让玩家选（票 07 之前的形状）。
+    if fixed_target:
+        if _targets_are_truly_unique(combos):
+            return tuple(steps)
+    elif all(_targets_are_decided_by_the_card(rule) for rule in target_rules):
         return tuple(steps)
     rows = [
         (
@@ -618,6 +1079,60 @@ def _manifest_steps(
     return tuple(steps)
 
 
+def _source_groups(
+    per_source: dict[tuple[int, ...], list[tuple[int, ...]]],
+    count: int,
+    options: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    """来源步的**合法来源组合**（huo-mobile-batch 票 10；``Step.groups`` 的唯一写方）。
+
+    判据只读**候选池**：``per_source`` 的键就是引擎认的"能一起提交"的来源组（多源转化按
+    谓词分组时，键 = 组内那几张实体牌），这里原样转成文本 id（与 ``StepPool.options`` 同一
+    口径），故"同花色的一对"这类规则**不在界面 / 不按技能 id 特判**。
+
+    两条收窄：
+
+    - ``count <= 1`` ⇒ 空：单来源步没有"组合"可言（缺省 = 全组合合法，旧载荷逐字段不变）；
+    - 任意 ``count`` 张都能配（案例 = 【丈八蛇矛】的"任意两张"，``per_source`` 里 C(n,2) 个
+      键全在）⇒ 空：下发一串"每一对都在里面"的数据没有信息量，界面退回旧行为。
+
+    ``options`` 是全组合的参照集：它的 ``count`` 元子集 = "这些候选里所有可能的搭配"。
+    """
+    if count <= 1:
+        return ()
+    legal = {frozenset(sources) for sources in per_source}
+    everything = {
+        frozenset(combo)
+        for combo in combinations(
+            tuple(int(option) for option in options), count
+        )
+    }
+    if legal == everything:
+        return ()
+    return tuple(tuple(str(source) for source in sources) for sources in per_source)
+
+
+def _targets_are_decided_by_the_card(target_rule: TargetRule) -> bool:
+    """这张牌的产物是否**由牌本身决定目标集**（清单因此没有目标步，票 07）。
+
+    判据只读行为表（:attr:`~sgs.effects.CardBehavior.target_rule` 的
+    ``TargetCount`` 档），**不在技能 id 上特判**：
+
+    - ``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``：目标是按座位规则算出来的全体存活角色
+      （含 / 不含使用者），玩家没有可选的第二步（【万箭齐发】/【桃园结义】）；
+    - ``self_only``：产物只能指向自己（【酒】/出牌阶段的【桃】），同样没有第二步；
+    - ``rated_targets == 0``：这张牌本来就没有目标（【闪】/【无懈可击】）。
+
+    区间目标（【铁索连环】1–2 名）与额定 ≥1 名（【杀】/【顺手牵羊】1 名）仍要玩家选，
+    返回 ``False``——它们的目标步照旧留在清单里。
+    """
+    if target_rule.is_range:
+        return False
+    if target_rule.count is not TargetCount.RATED:
+        return True
+    return target_rule.self_only or target_rule.rated_targets == 0
+
+
 def _targets_are_truly_unique(combos: Iterable[tuple[int, ...]]) -> bool:
     """这些候选组合是否都是**同一个单目标**（``fixed_target`` 语境省掉目标步的判据）。
 
@@ -636,22 +1151,33 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
     （id 唯一）：两条声明的修饰器**合并进同一条定义**，故"一个技能只产一种构造子"与
     "一个 id 一条定义"两件事同时成立。
 
-    非锁定（技能面写了"你可以"）：发动是询问出来的；``skill_type = NORMAL``（都不是
-    主公技）；``carrier = HERO`` ⇒ 优先级档由载体派生（武将档先于装备档）。
+    锁定与否**按声明**（``ConversionSkill.locked``；缺省 False = 既有转化技不变）：
+    转化入口本身不问，但锁定技不受「所有非锁定技失效」影响；``skill_type = NORMAL``；
+    ``carrier = HERO`` ⇒ 优先级档由载体派生（武将档先于装备档）。
     """
     grouped: dict[str, list[ConversionSkill]] = {}
     for skill in CONVERSION_SKILLS:
-        grouped.setdefault(skill.skill_id, []).append(skill)
-    return tuple(
+        for skill_id in skill.skill_ids:
+            grouped.setdefault(skill_id, []).append(skill)
+    definitions = tuple(
         SkillDef(
             skill_id=skill_id,
-            locked=False,
+            locked=skills[0].locked,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            modifiers=tuple(_modifier(skill) for skill in skills),
+            modifiers=tuple(
+                dict.fromkeys(
+                    modifier
+                    for skill in skills
+                    for modifier in (_modifier(skill), *skill.modifiers)
+                )
+            ),
             # 龙胆两个方向各一条声明 ⇒ 文案用"；"并起来；虚拟牌名去重后收成元组。
             requirement="；".join(skill.requirement for skill in skills),
             virtual_type_ids=tuple(dict.fromkeys(skill.target_type_id for skill in skills)),
         )
         for skill_id, skills in grouped.items()
     )
+    # 多源转化是**配对谓词**（"两张花色相同"），单源声明的 `predicate` 表达不了 ⇒ 另立
+    # 一条独立定义（与【丈八蛇矛】同一台 `virtual_candidates` 构造器）。
+    return (*definitions, _LUANJI_DEF)

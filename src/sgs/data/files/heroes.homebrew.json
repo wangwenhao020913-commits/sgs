@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "pack_id": "homebrew",
+  "heroes": [
+    {
+      "id": "tao_liubei",
+      "name": "韬·刘备自制版",
+      "true_name": "刘备",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "homebrew",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "congtao",
+          "name": "从讨",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yiqi",
+          "name": "义起",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "wuming",
+      "name": "无名自制版",
+      "true_name": "无名",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 2,
+      "version": "homebrew",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tiancheng",
+          "name": "天成",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

@@ -13,15 +13,17 @@
 - **两档**：**全场档**（``target=None``，标签作用于整次使用 / 整个帧）与**逐目标档**
   （带目标座位）两档；``has_tag`` 带目标时"全场档也算命中"。
 
-两档**分住两个帧私有键**（R4-Q1 的绑定读法，code-review C3）：
+两档**分住两个帧私有键**（R4-Q1 的绑定读法，code-review C3），且**都不登记**进
+``engine.steps._PER_TARGET_FRAME_KEYS``：
 
-- :data:`USE_TAGS_KEY`（``target_tags``）**登记**在 ``engine.steps._PER_TARGET_FRAME_KEYS``
-  里，逐目标游标推进时被结构性清除；
-- :data:`WHOLE_FIELD_TAGS_KEY`（``global_tags``）**刻意不登记**——全场档作用于整次使用的
-  每一个目标，多目标【杀】推进游标时必须存活。
+- :data:`USE_TAGS_KEY`（``target_tags``）按 ``(目标座位, 标签)`` 键值对读取，``has_tag`` 带
+  目标时只命中本目标 ⇒ **标签不串目标**，游标推进时**不需要**清除。票 03 之前它登在清除表
+  里，于是"在指定目标后一次性打完标签"的技能（【铁骑】/【烈弓】）在第 2 个目标起会丢标签
+  ——与 `开发文档/03` §5「效果原语」的"随**本次使用**结束即结构性消失"相左，属实现缺陷，已修。
+- :data:`WHOLE_FIELD_TAGS_KEY`（``global_tags``）作用于整次使用的每一个目标。
 
-早先两档共用一个键，于是"推进游标"会连全场档一起清掉（票 08 登记的被迫读法）；
-C3 按 R4-Q1 的原文把只登记逐目标档这条兑现成结构性事实。
+两档因此都随**本次使用结束**（帧出栈）结构性消失；早先"推进游标即整袋清除"的读法
+（票 08 的被迫选择）作废。
 
 帧私有数据不进记录流（``engine/journal.py`` 不记 ``frame.data``），故挂标签不改任何既有基准。
 """
@@ -90,8 +92,9 @@ EMPTY_TAGS = UseTags()
 USE_TAGS_KEY = "use_tags"
 """帧私有槽名：**逐目标档**帧标签（``UseTags.target_tags``）在 ``frame.data`` 里的键。
 
-它登记在 ``engine.steps._PER_TARGET_FRAME_KEYS`` 里，故逐目标游标推进时被结构性清除
-（R4-Q1：只登记逐目标档，不靠手工 ``del``）。
+**不**登记在 ``engine.steps._PER_TARGET_FRAME_KEYS`` 里：条目按目标座位区分，读取侧
+（:func:`has_tag` 带 ``target``）只命中本目标，故推进游标时无须清除；标签随本次使用
+（帧出栈）消失。票 03 之前它被整袋清除，多目标【杀】里第 2 个目标起的响应窗口会丢标签。
 """
 
 WHOLE_FIELD_TAGS_KEY = "use_whole_field_tags"

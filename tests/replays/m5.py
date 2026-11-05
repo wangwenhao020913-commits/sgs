@@ -145,6 +145,15 @@ def _end_phase(query: Query, action: Action) -> bool:
     return isinstance(action, EndPhase)
 
 
+def _activate(skill_id: str) -> Callable[[Query, Action], bool]:
+    """「是否发动」窗口里选**这条技能**的骨架候选（零步技能的交互形态；票 09）。"""
+
+    def matches(query: Query, action: Action) -> bool:
+        return isinstance(action, ActivateSkill) and action.skill_id == skill_id
+
+    return matches
+
+
 def _rules(player_count: int) -> RuleConfig:
     return RuleConfig(player_count=player_count, first_seat=0)
 
@@ -318,7 +327,11 @@ def _plan_54(pack: ContentPack) -> Plan:
 
 
 def _plan_55(pack: ContentPack) -> Plan:
-    """55：朱雀羽扇把普通【杀】转化成火【杀】（朱雀 / 属性）。"""
+    """55：朱雀羽扇把普通【杀】转化成火【杀】（朱雀 / 属性）。
+
+    票 09 起羽扇是**询问式**（"当你使用普通【杀】时，可以将其转化为火【杀】"）：先装扇、
+    再用普通【杀】，引擎在使用时开一次「是否发动」窗口（零步 ⇒ 骨架候选，没有可填的清单）。
+    """
     fan = _one(pack, "vermilion_feather_fan")
     slash = _one(pack, "slash")
     return Plan(
@@ -328,12 +341,12 @@ def _plan_55(pack: ContentPack) -> Plan:
         ),
         steps=(
             Step(0, "PLAY_PHASE", _use("vermilion_feather_fan"), label="座位 0 装上羽扇"),
-            Step(0, "PLAY_PHASE", _end_phase, label="本回合收手"),
+            Step(0, "PLAY_PHASE", _use("slash", targets=(1,)), label="用普通【杀】打座位 1"),
             Step(
                 0,
-                "PLAY_PHASE",
-                manifest="equip.vermilion_feather_fan",
-                label="按清单确认羽扇转化",
+                "SKILL_ACTIVATION",
+                _activate("equip.vermilion_feather_fan"),
+                label="确认羽扇转化（骨架候选）",
             ),
         ),
     )

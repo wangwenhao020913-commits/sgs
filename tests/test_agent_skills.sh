@@ -404,6 +404,61 @@ if ! touches_width_probe resolved quiet "src/a.py, tests/b.py, tools/c.py"; then
 fi
 if ! scan_issue_touches "$PWD"; then fail=1; fi
 
+# AI 适配契约（票 17 / spec §4.1）：三份 AI 文档进仓，正文只放一份，指针各留一行。
+# 这里核"文档在 + 四节正文在 + 指针在"；笔记式的判据正文不抄第二份（漂移的源头）。
+for ai_doc in docs/agents/ai-adaptation.md docs/agents/ai-versions.md \
+  docs/agents/acceptance-ai.md; do
+  check_exists "$ai_doc"
+done
+check_file docs/agents/ai-adaptation.md "新机制票 checklist" "新机制票 checklist"
+check_file docs/agents/ai-adaptation.md "新模式票 checklist" "新模式票 checklist"
+check_file docs/agents/ai-adaptation.md "三张登记表" "三张登记表"
+check_file docs/agents/ai-adaptation.md "维护责任表" "维护责任表"
+check_file AGENTS.md "docs/agents/ai-adaptation.md" "AI 适配契约指针"
+check_file AGENTS.md "docs/agents/ai-versions.md" "AI 版本台账指针"
+check_file AGENTS.md "docs/agents/acceptance-ai.md" "AI 实机验收指针"
+check_file docs/agents/skill-authoring/batch-ticket.md "docs/agents/ai-adaptation.md" "一将一票的适配指针"
+
+# 合成反例：把指针 / 文档正文从副本里拿掉，上面的断言必须变红（防新增检查空转通过）。
+pointer_removal_goes_red() { # $1=源文件 $2=字面串
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  grep -vF "$2" "$1" > "$probe/stripped.md" || true
+  out="$(check_file "$probe/stripped.md" "$2" "指针" 2>&1 || true)"
+  rm -rf "$probe"
+  out_is_red "$out"
+}
+
+missing_doc_goes_red() {
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  out="$(check_exists "$probe/no-such-doc.md" 2>&1 || true)"
+  rm -rf "$probe"
+  out_is_red "$out"
+}
+
+if ! pointer_removal_goes_red AGENTS.md "docs/agents/ai-adaptation.md"; then
+  echo "FAIL: 合成反例未变红：删掉 AGENTS.md 的 AI 适配指针未被判红"
+  fail=1
+fi
+if ! pointer_removal_goes_red AGENTS.md "docs/agents/ai-versions.md"; then
+  echo "FAIL: 合成反例未变红：删掉 AGENTS.md 的版本台账指针未被判红"
+  fail=1
+fi
+if ! pointer_removal_goes_red docs/agents/skill-authoring/batch-ticket.md \
+  "docs/agents/ai-adaptation.md"; then
+  echo "FAIL: 合成反例未变红：删掉一将一票的适配指针未被判红"
+  fail=1
+fi
+if ! pointer_removal_goes_red docs/agents/ai-adaptation.md "维护责任表"; then
+  echo "FAIL: 合成反例未变红：删掉适配契约的维护责任表未被判红"
+  fail=1
+fi
+if ! missing_doc_goes_red; then
+  echo "FAIL: 合成反例未变红：缺少文档未被判红（check_exists 空转）"
+  fail=1
+fi
+
 # 防再漏（票 05）：探针不得改动仓库工作树，也不得在仓库根留 .wb_probe.* 残留。
 # 断言本身也要有反面自检（覆盖元断言），防 find / 比较失效时空转通过。
 if ! probe_discipline_check "$REPO_TREE_BEFORE"; then fail=1; fi

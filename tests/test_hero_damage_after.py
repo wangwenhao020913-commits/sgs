@@ -20,16 +20,18 @@
 
 from __future__ import annotations
 
-from sgs.data import load_content_pack
+from sgs.data import Suit, load_content_pack
 from sgs.engine import Engine
 from sgs.resolution import Tag, add_tag
 from sgs.state import (
     EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     Phase,
     SelectCards,
     SelectCardsQuery,
+    SelectOption,
     UseCard,
     Zone,
     ZoneRef,
@@ -37,13 +39,16 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type
+from support import SeatSpec, build_state, cards_of_type, deck_excluding
 
 PACK = load_content_pack(deck_profile="standard_108")
 
 JIANXIONG = "hero.caocao.jianxiong"
 FANKUI = "hero.simayi.fankui"
 YIJI = "hero.guojia.yiji"
+LIANYING = "hero.luxun.lianying"
+QINGJIAN = "hero.jie_xiahoudun.qingjian"
+"""跨座位的两条 ``MOVE_AFTER`` 钩子（§4.16 两级顺序回归用；票 05）。"""
 
 DAMAGE_AFTER_TAKE = Timing.DAMAGE_AFTER_TAKE
 
@@ -1367,3 +1372,482 @@ def test_foreign_damage_does_not_offer_jianxiong_to_the_unhurt_owner():
     assert _activation_count(engine, JIANXIONG) == 0, (
         "受伤的是座位 1、装【奸雄】的是座位 0（曹操）⇒ 不该问"
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 夏侯惇【刚烈】（M6 P0 票 01）：受伤后判定，非红桃 ⇒ **伤害来源**二选一
+#
+# 官方 §九 L960–961：「当你受到伤害后，你可以进行判定，若结果不为红桃，则伤害来源
+# 选择一项：弃置两张手牌，或受到你造成的 1 点伤害。」
+#
+# 与同族三条的差别只有两处，都在**询问面**上：判定结果要看**花色**（红桃终止；方块是
+# 红色但**不**终止），且选项 / 选牌问的是**伤害来源**（``actor`` = 来源，不是技能持有者）。
+# ---------------------------------------------------------------------------
+
+GANGLIE = "hero.xiahoudun.ganglie"
+
+HEARTS = Suit.HEART
+DIAMOND = Suit.DIAMOND
+SPADE = Suit.SPADE
+
+GANGGLIE_OPTIONS = ("discard_two", "take_damage")
+"""【刚烈】的两个选项文本：弃置两张手牌 / 受到你造成的 1 点伤害。"""
+
+
+def _suit_card(suit: Suit, *, used: set[int] | None = None) -> int:
+    """标准 108 张里第一张 ``suit`` 花色的牌 id（判定牌可控用）。"""
+    used = used or set()
+    for index, card in enumerate(PACK.deck.cards):
+        if card.suit is suit and index not in used:
+            return index
+    raise AssertionError(f"标准 108 张里没有 {suit} 花色的牌")
+
+
+class _GanglieSource:
+    """伤害来源的脚本：应答【刚烈】的选项步与"弃两张手牌"的选牌步。"""
+
+    def __init__(self, *, choice: str | None = None) -> None:
+        self.choice = choice
+        self.options: list = []
+        self.selections: list = []
+
+    def respond(self, query):
+        if query.kind == "SELECT_OPTION" and str(query.skill_id).startswith("ganglie"):
+            self.options.append(query)
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == self.choice:
+                    return action
+            return query.legal_actions[0]
+        if query.kind == "SELECT_CARDS":
+            self.selections.append(query)
+            for action in query.legal_actions:
+                if isinstance(action, SelectCards) and len(action.picks) == 2:
+                    return action
+            raise AssertionError("【刚烈】的「弃两张手牌」没有两选的候选")
+        return _pass_or_first(query)
+
+
+def _ganglie_engine(
+    *,
+    judge_suit: Suit = SPADE,
+    source_hand: tuple[int, ...] = (),
+    target: int = 1,
+    holder: int = 1,
+    source: int | None = 0,
+    seats: int = 2,
+    amount: int = 1,
+    choice: str | None = None,
+):
+    """压一个 DAMAGE 子帧（打向 ``target``），推进到**该帧出栈**。
+
+    ``holder`` 座位是夏侯惇；``target`` 是挨打的人（正例两者相同，反例用它造"别人挨打"）。
+    牌堆顶 = ``judge_suit`` 的一张 ⇒【刚烈】的判定结果可控。
+    返回 ``(engine, 来源脚本, 判定牌 id)``。
+    """
+    judge = _suit_card(judge_suit)
+    channel = _cards("slash")[0]
+    specs = [SeatSpec() for _ in range(seats)]
+    if source is not None:
+        specs[source] = SeatSpec(hand=tuple(source_hand))
+    specs[holder] = SeatSpec(hero="xiahoudun")
+    used = {judge, channel, *source_hand}
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    state = build_state(
+        pack=PACK,
+        seats=specs,
+        deck=(judge, *deck),
+        processing=(channel,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    source_player = _GanglieSource(choice=choice)
+    players = [Scripted() for _ in range(seats)]
+    if source is not None:
+        players[source] = source_player
+    frame = engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": source,
+            "targets": (target,),
+            "card": state.card(channel),
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": target,
+            "channel": state.card(channel),
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": amount,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "frame"
+            and record.op == "pop"
+            and record.frame_id == frame.frame_id
+            for record in e.records
+        ),
+    )
+    return engine, source_player, judge
+
+
+def _damage_deal_records(engine) -> list[tuple[int | None, tuple[int, ...]]]:
+    """``DAMAGE_DEAL`` 时机记录的 ``(actor, targets)`` 序列。"""
+    return [
+        (record.actor, tuple(record.targets))
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+
+
+def test_ganglie_does_nothing_when_the_judgment_is_a_heart():
+    """红桃 ⇒ 判定终止，**连"二选一"都不问**（规则"若结果不为红桃"）。"""
+    hand = tuple(_cards("dodge")[:2])
+    engine, source, judge = _ganglie_engine(
+        judge_suit=HEARTS, source_hand=hand, choice="take_damage"
+    )
+
+    assert _activation_count(engine, GANGLIE) == 1, "受伤后问一次「是否发动」"
+    assert source.options == [], "红桃 ⇒ 不结算，不向伤害来源发选项询问"
+    assert engine.state.player(0).hp == 4, "伤害来源不掉血"
+    assert engine.state.player(0).hand == list(hand), "伤害来源不弃牌"
+    assert judge in engine.state.discard, "判定牌照常入弃牌堆"
+
+
+def test_ganglie_a_diamond_is_not_a_heart_so_the_source_takes_one_damage():
+    """方块是**红色但不是红桃** ⇒ 仍要结算（"不为红桃"不是"为黑色"）。"""
+    hand = tuple(_cards("dodge")[:2])
+    engine, source, _judge = _ganglie_engine(
+        judge_suit=DIAMOND, source_hand=hand, choice="take_damage"
+    )
+
+    assert len(source.options) == 1, "非红桃 ⇒ 向伤害来源发一次二选一"
+    assert source.options[0].options == GANGGLIE_OPTIONS
+    assert source.options[0].actor == 0, "问的是**伤害来源**，不是技能持有者"
+    assert engine.state.player(0).hp == 3, "选「受到你造成的 1 点伤害」⇒ 来源掉 1 点"
+    assert engine.state.player(0).hand == list(hand), "没选弃牌 ⇒ 手牌一张不少"
+    assert _damage_deal_records(engine) == [(0, (1,)), (1, (0,))], (
+        "第二次伤害的来源（actor）必须是夏侯惇，目标必须是伤害来源"
+    )
+
+
+def test_ganglie_a_spade_makes_the_source_discard_two_hand_cards():
+    """黑桃 ⇒ 非红桃；选「弃置两张手牌」⇒ 来源自己选牌、进弃牌堆，他不掉血。"""
+    hand = tuple(_cards("dodge")[:2])
+    engine, source, judge = _ganglie_engine(
+        judge_suit=SPADE, source_hand=hand, choice="discard_two"
+    )
+
+    assert len(source.options) == 1
+    assert source.options[0].options == GANGGLIE_OPTIONS
+    assert len(source.selections) == 1, "弃两张手牌要问来源选哪两张"
+    assert source.selections[0].actor == 0
+    assert len(engine.state.player(0).hand) == 0
+    assert set(hand) <= set(engine.state.discard)
+    assert engine.state.player(0).hp == 4
+    assert judge in engine.state.discard
+
+
+def test_ganglie_offers_only_the_damage_option_when_the_source_has_one_hand_card():
+    """手牌不足两张 ⇒ 只剩「受到 1 点伤害」一个选项（规则允不出的选项不给）。"""
+    hand = (_cards("dodge")[0],)
+    engine, source, _judge = _ganglie_engine(
+        judge_suit=SPADE, source_hand=hand, choice="take_damage"
+    )
+
+    assert len(source.options) == 1
+    assert source.options[0].options == ("take_damage",)
+    assert engine.state.player(0).hand == list(hand), "不够两张 ⇒ 不弃牌"
+    assert engine.state.player(0).hp == 3
+
+
+def test_ganglie_is_not_offered_when_the_damage_has_no_source():
+    """无来源伤害（【闪电】一类）⇒ 没有"伤害来源"可问 ⇒ 不发动（连询问都不发）。"""
+    engine, _source, _judge = _ganglie_engine(source=None, seats=2)
+
+    assert _activation_count(engine, GANGLIE) == 0
+    assert not any(
+        record.kind == "query" and record.query.kind == "SELECT_OPTION"
+        for record in engine.records
+    )
+
+
+def test_ganglie_is_not_offered_when_someone_else_takes_the_damage():
+    """**别人受伤 ⇒ 夏侯惇不被问**（条件必须自校"受伤的是不是持有者"）。"""
+    engine, _source, _judge = _ganglie_engine(target=2, holder=1, seats=3)
+
+    assert _activation_count(engine, GANGLIE) == 0
+    assert engine.state.player(2).hp == 3, "别人照常掉血（伤害本身不受影响）"
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 同一时机多名角色：**先逐角色**（当前回合角色起逆时针），同一角色内部才按优先级
+#    规则原文 = `三国杀详细规则.txt` §4.16「同一时机涉及多个角色时的两级顺序」（票 04
+#    落地）；本票（05）把它落到派发链序上。回归住在本文件是票面指定的落点（§5）——
+#    与上面那条「NEAR_DEATH 先于 DAMAGE_AFTER」同属"时机次序"判据家族。
+# ---------------------------------------------------------------------------
+
+
+def _multi_actor_move_engine():
+    """一次 ``hand(2) → hand(3)`` 的移动同时点亮**两个不同座位**的 ``MOVE_AFTER`` 钩子。
+
+    局面（`.scratch/flow-resume-step-cancel/probe_order_multi_actor.py` 已证可达）：
+
+    - 座位 0 = 当前回合角色，无技能；
+    - 座位 1 = 无技能；
+    - 座位 2 = 标陆逊，手里**恰好一张** ⇒ 失去最后的手牌 ⇒ 【连营】；
+    - 座位 3 = 界夏侯惇 ⇒ 摸牌阶段外获得牌 ⇒ 【清俭】。
+
+    真实对局里这个移动形状就是【反馈】（把伤害来源的一张牌搬进自己手牌）；这里直接经
+    移动入口复刻它，省掉"先造成伤害再答两问"的脚手架。返回 ``(engine, players, asks)``，
+    ``asks`` 是**询问序列本身**（``(actor, skill_id)`` 按记录流先后）。
+    """
+    card = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(hand=(card,), hero="luxun"),
+            SeatSpec(hero="jie_xiahoudun"),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [Scripted() for _ in range(4)]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.PHASE_PLAY_START
+            for record in e.records
+        ),
+    )
+    engine.move_in_frame(
+        None,
+        engine.state.refs((card,)),
+        to_zone=ZoneRef(Zone.HAND, 3),
+        reason=MoveReason.LOSE,
+        owner=3,
+        actor=3,
+    )
+
+    def asks() -> list[tuple[int, str]]:
+        return [
+            (record.query.actor, record.query.skill_id)
+            for record in engine.records
+            if record.kind == "query"
+            and record.query.kind == "SKILL_ACTIVATION"
+            and record.query.skill_id in (LIANYING, QINGJIAN)
+        ]
+
+    _advance(engine, players, lambda e: len(asks()) == 2)
+    return engine, players, asks
+
+
+def test_a_multi_actor_move_after_is_asked_seat_by_seat_from_the_turn_seat():
+    """同一时机两个座位都能派发 ⇒ 先问环上更早的座位（座位 2，不是字典序更小的座位 3）。
+
+    规则（§4.16 两级顺序）：**先逐角色**——从当前回合角色起逆时针，对每一名角色处理完
+    这个时机，再轮到下一名角色；**同一角色内部**多个技能才按优先级选一条。两级不可
+    互换：不是"先按优先级把不同角色的技能排成一队"。当前回合角色 = 座位 0 ⇒ 环是
+    ``0 → 1 → 2 → 3`` ⇒ 座位 2 先被问。
+
+    旧实现按实例全序 ``(priority_class, skill_id, owner)`` 派发，两条都是武将档（0）
+    ⇒ 比 ``skill_id``：``hero.jie_xiahoudun.qingjian`` < ``hero.luxun.lianying``
+    ⇒ **座位 3 先被问**，与座次顺序相反。
+
+    判据比较**询问序列本身**（`CODING_STANDARDS.md` §4：不 ``sorted()`` / 不去重）：
+    先问谁、问的是哪条技能，两件事实一起断。
+    """
+    _engine, _players, asks = _multi_actor_move_engine()
+
+    assert asks() == [(2, LIANYING), (3, QINGJIAN)], (
+        "同一 MOVE_AFTER 上两名角色都能派发时，链序必须按「当前回合角色起逆时针」"
+        f"逐角色（座位 2 先于座位 3）；实得询问序列 {asks()}"
+    )
+
+
+def _equipment_vs_hero_move_engine():
+    """一次 ``equip(2) → hand(3)`` 同时点亮两个**档位方向与座次方向相反**的 ``MOVE_AFTER`` 钩子。
+
+    上一条形状（``hand(2) → hand(3)``）的两条钩子**同是武将档**（0），故它只钉住了"不按
+    ``skill_id`` 排"这一半；「两级**不可互换**」（§4.16）还要求"不按优先级把不同角色的技能
+    排成一队"。要分辨这一半，档位方向必须与座次方向相反。钩子清单里只有 6 条
+    ``MOVE_AFTER``，能凑出这个形状的配对只有一对（白银狮子是装备档、界【清俭】是武将档）：
+
+    白银狮子只住在 ``standard_ex_160`` 档，故本用例自带这个档（档位纪律：显式选档）。局面：
+
+    - 座位 0 = 当前回合角色，无技能；座位 1 无技能；
+    - 座位 2 = 已受伤（2/4）且装着**白银狮子**（``equip.silver_lion``，
+      ``priority_class = 1`` **装备档**）⇒ 失去它 ⇒ 压 ``RECOVER`` 帧回复 1 点；
+    - 座位 3 = 界夏侯惇（``hero.jie_xiahoudun.qingjian``，``priority_class = 0`` **武将档**）
+      ⇒ 这张牌进了自己的手牌区 ⇒ 【清俭】的"是否发动"询问。
+
+    座位环 = ``0 → 1 → 2 → 3``（``turn_seat = 0``）：**座位优先** ⇒ 座位 2 的装备钩子先
+    落（压 ``RECOVER`` 帧）；**优先级优先** ⇒ 座位 3 的武将钩子先落（先发【清俭】询问）。
+
+    返回 ``(engine, players, order, hp_deltas)``：``order`` 是记录流里这两件事的先后
+    （原样读记录流，不 ``sorted()`` / 不去重）。
+    """
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    silver = cards_of_type(pack, "silver_lion")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(hp=2, hp_max=4, equip=(silver,)),
+            SeatSpec(hero="jie_xiahoudun"),
+        ],
+        deck=deck_excluding(pack, silver),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    # 本判据只读**次序**，故【清俭】一律不发动（答 ``Pass``）：它的选择面与次序无关。
+    players = [Scripted(activate=False) for _ in range(4)]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.PHASE_PLAY_START
+            for record in e.records
+        ),
+    )
+    engine.move_in_frame(
+        None,
+        engine.state.refs((silver,)),
+        to_zone=ZoneRef(Zone.HAND, 3),
+        reason=MoveReason.LOSE,
+        owner=3,
+        actor=3,
+    )
+
+    def order() -> list[tuple]:
+        marks: list[tuple] = []
+        for record in engine.records:
+            if (
+                record.kind == "frame"
+                and record.op == "push"
+                and record.frame_kind is FrameKind.RECOVER
+            ):
+                marks.append(("silver_lion_recover",))
+            elif (
+                record.kind == "query"
+                and record.query.kind == "SKILL_ACTIVATION"
+                and record.query.skill_id == QINGJIAN
+            ):
+                marks.append(("qingjian_ask", record.query.actor))
+        return marks
+
+    def hp_deltas() -> list[tuple[int, int, int]]:
+        return [
+            (record.seat, record.before, record.after)
+            for record in engine.records
+            if record.kind == "delta" and record.delta_type == "hp_change"
+        ]
+
+    # 回复帧的结算在派发让出**之后**，故推进到"回复真的落到 hp 上"为止：
+    # 那时两件事都已进记录流，次序已定格。
+    _advance(engine, players, lambda e: bool(hp_deltas()))
+    return engine, players, order, hp_deltas
+
+
+def test_a_seat_major_chain_beats_priority_class_across_role_boundaries():
+    """§4.16 两级顺序**不可互换**：座位环名次先于``priority_class``，即使优先级相反。
+
+    座位 2 = 白银狮子（装备档 1）、座位 3 = 界【清俭】（武将档 0），两者在同一次
+    ``equip(2) → hand(3)`` 上同时触发，座次方向（2 在 3 之前）与档位方向（0 在 1 之前）
+    **相反**。§4.16 明写「不是『先按优先级把不同角色的技能排成一队』」⇒ 必须是座位 2 的
+    ``RECOVER`` 帧先进记录流，界【清俭】的询问在后。
+
+    判据比较**记录流次序本身**（`CODING_STANDARDS.md` §4：不 ``sorted()`` / 不去重）：
+    两件事的先后就是这条判据要断的东西，故直接比序列。
+    """
+    _engine, _players, order, hp_deltas = _equipment_vs_hero_move_engine()
+
+    assert order() == [("silver_lion_recover",), ("qingjian_ask", 3)], (
+        "座位 2（装备档 1）与座位 3（武将档 0）在同一次移动上同时触发时，链序必须"
+        "**先逐角色**（座位 2 先于座位 3），不许按 priority_class 把两名角色排成一队；"
+        f"实得记录流次序 {order()}"
+    )
+    # 座位 2 的钩子不是空响：回复真的落了 hp（2 → 3），故上面那条"RECOVER 帧在询问之前"
+    # 断的是真事件；【清俭】答的是 Pass，故没有第二条 hp 变动。
+    assert hp_deltas() == [(2, 2, 3)]
+
+
+def test_yiji_does_not_move_the_same_cards_again_when_the_receiver_relocates_one():
+    """【遗计】交出两张 ⇒ 收牌人的【清俭】把其中一张转交别人，遗计**不得再搬一遍**。
+
+    ``move_in_frame`` 返回 ``"stay"`` 的意思是「牌**已经搬完**了，只是『失去牌后』的钩子
+    挂起了」（它的重入守卫是 ``_MOVE_DONE`` + "牌已在目标区"两个条件）。旧实现把「这一批
+    已交出」的进度记在这次移动**之后**，于是重入时又搬一遍——而此时【清俭】已经把其中一张
+    搬去了别的座位，两张的来源区不同 ⇒ ``ValueError: 一次 move_card 只能有一个来源区域``
+    （wuming 票 01 的 5 人局实测：郭嘉 + 界夏侯惇 同场，新武将入池改变了发将 ⇒ 既有崩溃被
+    踩到。本用例把那条路径钉成 2 人构造局面，不依赖种子）。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_xiahoudun"), SeatSpec(hero="guojia")],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    handled: dict[str, int] = {}
+
+    def yiji_select(query, _index):
+        """一次把两张交给座位 0（界夏侯惇 = 【清俭】的持有者、本次移动的收牌人）。"""
+        if query.kind == "SELECT_OPTION":
+            return _yiji_give_to(0)(query)
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0, 1)
+        )
+
+    def qingjian_select(query, _index):
+        """【清俭】从刚到手的两张里挑一张，转交给**座位 1**（郭嘉）。"""
+        if query.kind != "SELECT_CARDS":
+            wanted = "seat:1"
+            return next(
+                action
+                for action in query.legal_actions
+                if getattr(action, "choice", None) == wanted
+            )
+        index = next(
+            i
+            for i, slot in enumerate(query.slots)
+            if slot.card is not None and slot.card.card_id in set(top)
+        )
+        handled["moved"] = query.slots[index].card.card_id
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (index,)
+        )
+
+    players = [Scripted(qingjian_select), Scripted(yiji_select)]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    relocated = handled["moved"]
+    survivor = next(card_id for card_id in top if card_id != relocated)
+    assert relocated in engine.state.player(1).hand, "【清俭】把这张转交给了郭嘉"
+    assert survivor in engine.state.player(0).hand, "另一张留在收牌人手里（没被再搬一次）"
+    assert _total_cards(engine.state) == len(PACK.deck.cards), "牌守恒仍成立"
+    assert engine.state.deck == list(deck[2:]), "两张亮牌没有回到牌堆"

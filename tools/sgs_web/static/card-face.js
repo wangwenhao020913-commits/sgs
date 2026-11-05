@@ -64,12 +64,27 @@ function cardFace(pending, card) {
     };
   }
   if (isOwnHandSinglePick(pending)) {
-    // 火攻的同花色弃牌（M5-08a）：只有面里那几张（同花色）可点；点一张即提交。
+    // 单张自己区域面（火攻 / 铁骑等同花色弃牌）：只有面里那几张可点；点一张即提交。
     const slots = pending.slots || [];
     const slotIndex = slots.findIndex(
       (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
     );
     return { selectable: slotIndex >= 0, selected: false, picked: false, slotIndex };
+  }
+  if (isOwnZonePick(pending)) {
+    // 多张自己区域面（结姻两张 / 贯石斧两张等）：点牌收进 `picks`，点「提交」送出。
+    const slots = pending.slots || [];
+    const slotIndex = slots.findIndex(
+      (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
+    );
+    const picked = slotIndex >= 0 && state.picks.includes(slotIndex);
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    return {
+      selectable: slotIndex >= 0 && (picked || state.picks.length < Math.max(1, total[1])),
+      selected: false,
+      picked,
+      slotIndex,
+    };
   }
   if (isDiscardPick(pending)) {
     const picked = state.picks.includes(card.card_id);
@@ -79,17 +94,38 @@ function cardFace(pending, card) {
     };
   }
   if (state.preactivation) {
+    const pa = state.preactivation;
     const options = preactivationCardOptions(pending);
-    const answer = state.preactivation.answers[state.preactivation.cursor];
+    const answer = pa.answers[pa.cursor];
+    const picked = Boolean(answer && answer.values.includes(card.card_id));
+    const offered = options !== undefined
+      && (options === null || options.includes(String(card.card_id)));
+    // 票 10（多来源步的 `groups`）：已选的牌恒可点（再点 = 取消）；其余牌还要能**落进**
+    // 某一组合法来源才可点 ⇒ 点过 ♦9杀 之后 ♠ / ♣ 直接置灰，凑不出不同花色的一对
+    // （§4 的死路从源头消失）。`groups` 缺省 ⇒ 与改前逐张一致。
+    const selectable = offered && (picked
+      || preactivationGroupAccepts(pa, pa.cursor, answer ? answer.values : [], card.card_id));
     return {
-      selectable: options === undefined ? false : (options === null || options.includes(String(card.card_id))),
+      selectable,
       selected: false,
-      picked: Boolean(answer && answer.values.includes(card.card_id)),
+      picked,
       slotIndex: -1,
     };
   }
-  // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单，而不是设焦点 / 去候选索引里查。
+  // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单。同一张牌**还**有技能授予的重铸时
+  // 点牌先给焦点（见 :func:`activateCard`，票 05）——故有无重铸都要画选中态：焦点落在这张
+  // 牌上却没有视觉反馈会让玩家以为没点中。
   if (cardPreactivationManifest(pending, card)) {
+    return {
+      selectable: true,
+      selected: state.focusCardId === card.card_id,
+      picked: false,
+      slotIndex: -1,
+    };
+  }
+  // **强制转化**的手牌（‘只能’型，神关羽【武神】）：手牌区画的是产物（「转」+ 属性色），
+  // 点它 = 进入该技能的转化清单（来源步预选这张牌），再点座位提交。没有直接候选也点得动。
+  if (pending && convertedForm(pending, card.card_id)) {
     return { selectable: true, selected: false, picked: false, slotIndex: -1 };
   }
   const selectable = pending
@@ -104,6 +140,11 @@ function cardFace(pending, card) {
  *
  * 牌桌选择入口的**总闸**：只读态（D8，当前步骤的表面是弹窗）里一次都不分派；被分派到的
  * 四个函数也各自再问一次 `selectionEnabled()`（它们还有别的调用方，例如键盘 / 烟测）。
+ *
+ * **牌名级预发动与重铸并存**（票 05 / 缺陷 A）：`cardPreactivationManifest` 原先排在这里、
+ * 无条件抢在 `toggleFocus` 之前，于是一张♣【借刀杀人】永远只进清单、设不上 `focusCardId`，
+ * 而重铸入口只认焦点 ⇒ 「重铸」永远不出现。现在只有**没有**重铸候选的牌才由点牌进清单；
+ * 两者都有的牌点牌 = 设焦点，清单入口由 `options.js:renderReforgeEntry` 并列渲染。
  */
 function activateCard(pending, card, face) {
   if (!selectionEnabled()) return;
@@ -115,9 +156,32 @@ function activateCard(pending, card, face) {
     if (face.slotIndex >= 0) submitOwnHandSinglePick(pending, face.slotIndex);
     return;
   }
+  if (isOwnZonePick(pending)) {
+    if (face.slotIndex >= 0) {
+      toggleSlotPick(pending, face.slotIndex);
+      renderTable();
+      renderPending(state.view);
+    }
+    return;
+  }
   if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }
   if (state.preactivation) { togglePreativationCard(card.card_id); return; }
   const manifest = cardPreactivationManifest(pending, card);
-  if (manifest) { enterCardPreativation(pending, card, manifest); return; }
+  if (manifest) {
+    // 票 05 / 缺陷 A：一张♣【借刀杀人】同时有**牌名级预发动**（两步清单）与技能授予的
+    // **重铸**（【连环】）时，清单先手会把重铸入口挡死——重铸入口只认 `focusCardId`
+    // （`options.js:renderReforgeEntry`），而进清单永远设不上焦点。有重铸候选就给焦点，
+    // 清单改由控件区并列的「使用【X】」入口进入（`renderReforgeEntry`，落法 = 并存）；
+    // 没有重铸候选的牌维持"点牌 = 进清单"（借刀的本行不变）。
+    if (reforgeAction(pending, card.card_id) === null) {
+      enterCardPreativation(pending, card, manifest);
+      return;
+    }
+  }
+  // 强制转化（‘只能’型）：有产物、且这张牌此刻没有直接候选 ⇒ 点它 = 走转化清单。
+  if (convertedForm(pending, card.card_id) && !cardSelectable(pending, card.card_id)) {
+    enterConvertedForm(pending, card);
+    return;
+  }
   toggleFocus(card.card_id);
 }

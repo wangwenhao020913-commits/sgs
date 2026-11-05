@@ -20,16 +20,17 @@ M1 四类询问（``PLAY_PHASE`` / ``DODGE`` / ``PEACH`` / ``DISCARD``）各一�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, TypeAdapter, model_serializer
 
-from sgs.data import Identity, Kingdom
+from sgs.data import Color, Identity, Kingdom
 from sgs.timing import Timing
 
-from .models import CardRef, Phase, Zone, ZoneRef, _FrozenModel
+from .models import CardRef, Marker, Phase, Zone, ZoneRefField, _FrozenModel
 
 __all__ = [
     "Action",
@@ -42,7 +43,9 @@ __all__ = [
     "DodgeContext",
     "DodgeQuery",
     "EndPhase",
+    "HeroCardRef",
     "Pass",
+    "PeachContext",
     "PeachQuery",
     "PlayCard",
     "PlayPhaseQuery",
@@ -60,11 +63,13 @@ __all__ = [
     "SelectOptionContext",
     "SelectOptionQuery",
     "SelectionSpec",
+    "RejudgeOffer",
     "SkillActivationContext",
     "SkillActivationQuery",
     "Slot",
     "Step",
     "StepPool",
+    "SubstituteJudgeCard",
     "UseCard",
     "WindowCause",
     "parse_action",
@@ -89,6 +94,7 @@ class QueryKind(str, Enum):
     SKILL_ACTIVATION = "SKILL_ACTIVATION"
     SELECT_OPTION = "SELECT_OPTION"
     ARRANGE = "ARRANGE"
+    DISTRIBUTE = "DISTRIBUTE"
 
 
 class WindowCause(str, Enum):
@@ -99,7 +105,9 @@ class WindowCause(str, Enum):
     打出一张牌（【护驾】/【激将】），与"这张牌自己的响应窗口"（``DODGE`` / ``DUEL`` 等）
     分列，使记录流里读得出"这次询问来自求助"。
     票 11（M3）加 ``REJUDGE``：**改判窗口**的成因——判定牌生效前，有改判能力的角色
-    打出一张手牌代替之（`11.3`）；它挂在判定帧上、可循环重开，与效果自己的响应窗口分列。
+    **用一张牌代替 / 替换**之（`11.3`；feng-zhangjiao 票 02 起候选是
+    :class:`SubstituteJudgeCard`，不是打出）；它挂在判定帧上、可循环重开，与效果自己的
+    响应窗口分列。
     """
 
     NULLIFY = "NULLIFY"
@@ -112,15 +120,32 @@ class WindowCause(str, Enum):
 
 
 class RespondMode(str, Enum):
-    """响应窗口要求的是**打出**还是**使用**（票 19 §1 的候选型别分野）。
+    """响应窗口要求的是**打出**、**使用**，还是**改判**（票 19 §1；feng-zhangjiao 票 02 加第三档）。
 
     打出（南蛮 / 万箭 / 决斗）⇒ 候选 ``PlayCard``；借刀杀人的"使用【杀】"⇒ 候选 ``UseCard``
-    （目标由 ``use_targets`` 给出）。``mode`` 只用于**生成候选**，不进记录——记录里读得出
-    候选是哪种构造子。
+    （目标由 ``use_targets`` 给出）；**改判**（【鬼才】标 / 界、【鬼道】）⇒ 候选
+    :class:`SubstituteJudgeCard`——它不是打出：不压 PLAY 帧、不触发"打出时 / 使用后"钩子，
+    引擎压一个 ``FrameKind.REJUDGE`` 改判事件帧。``mode`` 只用于**生成候选**，
+    不进记录——记录里读得出候选是哪种构造子。
     """
 
     PLAY = "PLAY"
     USE = "USE"
+    REJUDGE = "REJUDGE"
+
+
+@dataclass(frozen=True, slots=True)
+class RejudgeOffer:
+    """改判窗口里**一条技能**的候选声明（feng-zhangjiao 票 02；不进记录流）。
+
+    一个座位可以有多条改判技能（当前最多一条）：每条各自回答三件事——候选取自哪几个区、
+    要不要按颜色筛选；原判定牌的去向由 :class:`~sgs.skills.catalog.SkillDef` 的
+    ``rejudge_original_to`` 回答（窗口按 ``skill_id`` 现查）。``color`` 为 ``None`` = 不限颜色。
+    """
+
+    skill_id: str
+    zones: tuple[Zone, ...] = (Zone.HAND,)
+    color: Color | None = None
 
 
 class Slot(_FrozenModel):
@@ -130,7 +155,7 @@ class Slot(_FrozenModel):
     如他人手牌）。Action 用**面内位置**引用槽位，故不泄露隐藏牌面。
     """
 
-    ref: ZoneRef
+    ref: ZoneRefField
     card: CardRef | None = None
 
 
@@ -139,6 +164,12 @@ class SelectionSpec(_FrozenModel):
 
     ``optional`` / ``sequential`` 是效果属性，M2 的拆、顺、五谷都取 ``(1, 1)`` 且非依次；
     字段按"M3 只许增"保留在协议里。
+
+    ``max_per_suit``（神吕蒙移动版【涉猎】的加法）：**每种花色至多取几张**（``None`` =
+    不约束）。它约束的是**候选生成**（``effects/actions.py:_select_cards`` 只枚举满足它的
+    组合），不是界面层的灰显——界面读同一个字段把"同花色的其余牌"置灰。缺省 ``None``
+    **不进序列化**（与 ``StepPool.max`` 同姿态）：``SelectionSpec`` 随 ``SelectCardsQuery``
+    落记录流，多一个 ``"max_per_suit": null`` 会让所有带选牌询问的金录像字节变化。
     """
 
     zones: tuple[Zone, ...]
@@ -146,6 +177,14 @@ class SelectionSpec(_FrozenModel):
     per_zone: tuple[tuple[Zone, int, int], ...] = ()
     optional: bool = False
     sequential: bool = False
+    max_per_suit: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if data.get("max_per_suit") is None:
+            data.pop("max_per_suit", None)
+        return data
 
 
 class StepPool(_FrozenModel):
@@ -165,17 +204,26 @@ class StepPool(_FrozenModel):
     （【方天画戟】只放宽"最后一张手牌"的转化源）。``options`` 只回答"哪些目标能点"，
     不回答"最多点几个"，故逐来源上限必须由行自己带出——界面据此把可选数收在该来源的
     合法数目内。值不进记录流（清单整体 ``exclude``），且缺省 ``None`` 时不序列化。
+
+    ``disabled``（票 04 §3）：``options`` 里**显示但不可选**的那些。选项原本只有"在不在
+    候选里"两态，而【蛊惑】的牌名弹窗要"列全牌堆名、把这个名字此刻用不了的那几项置灰"
+    ——"列出来"是提示（"此刻没有合法目标"），"选不了"是合法性，两件事各由一格回答。
+    **校验器与它同源**（:func:`sgs.skills.flow._assign_activation` 拒绝 disabled 里的项），
+    故置灰不是靠界面挡的。缺省空元组**不进序列化**（与 ``max`` 同姿态）。
     """
 
     when: tuple[str, ...] = ()
     options: tuple[str, ...] = ()
     max: int | None = None
+    disabled: tuple[str, ...] = ()
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)
         if data.get("max") is None:
             data.pop("max", None)
+        if not data.get("disabled"):
+            data.pop("disabled", None)
         return data
 
 
@@ -210,6 +258,26 @@ class Step(_FrozenModel):
     与 ``pool`` 同姿态：清单整体在询问字段里 ``exclude``，故**不进记录流**。
     """
 
+    groups: tuple[tuple[str, ...], ...] = ()
+    """多来源步的**合法来源组合**（huo-mobile-batch 票 10）：每个元素是一组能**一起提交**的
+    来源牌 id（十进制文本，与 ``StepPool.options`` 同一口径），由服务端从候选池派生
+    （:func:`sgs.skills.heroes._manifest_steps`：``per_source`` 的键就是合法组），故界面不必
+    自己判花色 / 牌名——它只回答"哪几张能配成一组"。
+
+    只给 ``min == max > 1`` 的来源步，且**只有存在非法组合时**才下发：任意 ``count`` 张都能
+    配成一组（【丈八蛇矛】的"任意两张"）时省略——缺省 / 空 = "每个组合都合法"，旧载荷因此
+    逐字段不变。**不进记录流**（清单整体 ``exclude``）；查看者不是询问者时由
+    :func:`sgs_web.projection._mask_foreign_preactivations` 与 ``pool[*].options`` 一起抹掉
+    （来源牌 id 是询问者的手牌）。
+    """
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if not data.get("groups"):
+            data.pop("groups", None)
+        return data
+
 
 @dataclass(frozen=True, slots=True)
 class RespondContext:
@@ -217,6 +285,26 @@ class RespondContext:
 
     ``providers_used`` 只在"需要【闪】"的响应窗口里用（票 10 §5.5 / 票 30）：把它记的
     技能 id 从候选里去掉，实现"每提供者只问一次"。
+
+    ``zones`` = 候选牌取自**应答者的哪几个区**（缺省只有手牌）。改判窗口是唯一会放宽的
+    消费者：标准【鬼才】"用一张**手牌**"、界【鬼才】"用**一张牌**"、张角【鬼道】"一张**黑色**
+    牌"⇒ 界版 / 鬼道带装备区，由 :func:`sgs.skills.rejudge_offers` 从技能定义派生。
+    **不进记录流**（与 ``cause`` / ``required`` 同为候选生成载荷）。
+
+    ``rejudge_offers`` = **改判窗口**每条技能各自的一条声明（feng-zhangjiao 票 02）：
+    候选按它逐条枚举（区 + 颜色），产出的构造子是 :class:`SubstituteJudgeCard`。
+    只服务 ``mode = REJUDGE``；其余窗口恒空。**不进记录流**（同上）。
+
+    ``declared`` = 这扇**收集式**窗口已经收到过一条声明（票 03）：赢家已定（首个声明者），
+    后面再声明的牌**不会进结算**。提供者（【蛊惑】）据此收口——它的产物是扣置一张手牌换来的，
+    让它在赢家已定之后还发候选，玩家点下去只会白扣一张牌。**不进记录流**（同上）。
+
+    ``floor`` = 本次需要牌**事件**里已经定下的优先级档（票 03 §4-2；档越小越优先，
+    ``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``）。候选生成口据此执行"不升档"：
+    档 < ``floor`` 的候选不进面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的时机了）。
+    窗口在"这一次响应成立"处把它清回 0（``_dodge_window`` 的 ``dodges_done`` 每加一、
+    【决斗】每收下一次响应）——floor 的粒度是**一个需要牌事件**，不是整扇窗口（补充一手
+    §2.1.2.2(2) 的"每时机一次响应机会"+ §4.2.2 的 ❶❷❸）。**不进记录流**（同上）。
     """
 
     cause: WindowCause
@@ -226,6 +314,10 @@ class RespondContext:
     mode: RespondMode = RespondMode.PLAY
     use_targets: tuple[int, ...] = ()
     providers_used: tuple[str, ...] = ()
+    zones: tuple[Zone, ...] = (Zone.HAND,)
+    declared: bool = False
+    rejudge_offers: tuple[RejudgeOffer, ...] = ()
+    floor: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,9 +348,31 @@ class DodgeContext:
 
     "每提供者只问一次"（票 10 §5）：【八卦阵】判定未通过后，再次询问同一个"需要【闪】"
     的窗口时必须不再提供它。载荷只装**已经问过**的技能 id，候选生成器据此过滤。
+
+    ``floor`` = 本次**需要【闪】事件**里已经定下的优先级档（票 03 §4-2，语义与
+    :attr:`RespondContext.floor` 逐字相同）：档 < ``floor`` 的候选不进面，档值越小越优先。
+    ``_dodge_window`` 在 ``dodges_done`` 每加一处把它清回 0——【无双】的两张【闪】是
+    **两次**需要牌事件，第二张的 floor 从头开始（补充一手 §2.1.2.2(2)）。**不进记录流**。
     """
 
     providers_used: tuple[str, ...] = ()
+    floor: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PeachContext:
+    """``PEACH`` 候选生成的类型化载荷（票 03 §4）：本次求桃里已定下的优先级档 ``floor``。
+
+    求桃窗口此前没有载荷（候选只由真牌 / 转化源构成）；票 03 起它也有**提供者**
+    （【蛊惑】"扣置一张手牌当【桃】"），故与另外三扇需要牌窗口走**同一道**"不升档"闸门，
+    载荷与 :class:`DodgeContext` 同形（档 < ``floor`` 的候选不进面；档越小越优先）。
+
+    求桃的"这一次响应成立"= :func:`sgs.engine.steps._peach_use`（回复结算开始的那一刻）：
+    在那之后要么脱离濒死、要么回退开新窗（同一帧内的**新**事件），floor 都在那里清回 0。
+    **不进记录流**（:class:`PeachQuery` 的序列化字段一个不加）。
+    """
+
+    floor: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,10 +380,15 @@ class SkillActivationContext:
     """``SKILL_ACTIVATION`` 候选生成的类型化载荷（票 19 §5 / 票 30；W6-06a 收窄）。
 
     发动 = **一次询问**：``optional`` 决定候选里有没有 ``Pass``（"可以 / 必须"是效果属性，
-    与 ``locked`` 正交）；候选恒为**一条裸 ``ActivateSkill``** —— 成本 / 载荷在发动后由
+    与 ``locked`` 正交）；候选为**裸 ``ActivateSkill``** —— 成本 / 载荷在发动后由
     ``SkillFlow`` 的步骤询问。``min_picks`` / ``max_picks`` / ``slots`` 仍随冻结报文
     ``SkillActivationQuery`` 下传（A-4 协议清理另立票）；当前生产者恒传 ``0 / 0 / ()``，
     保 15 份录像逐字节。``zones`` / ``card_types`` 一类候选烘焙字段已在 W6-06a 删除。
+
+    票 01（同一时机的激活结算）把"一条面"从单技能扩成**本轮的全部候选**：``candidates``
+    带档、``floor`` / ``used`` 是闸门的两个输入（判据在
+    :func:`~sgs.effects.actions.activation_allowed`，本结构只承载事实）。三者缺省为空 /
+    ``0`` / 空 ⇒ 旧构造（单候选 ``skill_id``）的候选逐条不变。
     """
 
     skill_id: str
@@ -284,6 +403,32 @@ class SkillActivationContext:
     应答的前缀步骤；后续换成别人应答的段（反间猜花色 / 挑牌）仍然逐步询问。空元组 =
     这条技能此刻没有可下发的预发动清单（未迁移 / 选取面不可见 / 池为空）。
     """
+    candidates: tuple[tuple[str, int], ...] = ()
+    """本轮同一张面上的**全部候选**：``(技能 id, 优先级档)``，按链序（票 01 §4-2）。
+
+    空元组 = 只有一个 ``skill_id``（旧构造 / 单候选面）——候选生成器按单条展开，
+    与改造前逐字节相同。档用 ``int(priority_class)``：``HERO=0`` / ``EQUIPMENT=1`` /
+    ``CARD_USE=2``（越小越先），闸门据此判"不升档"。
+    """
+    floor: int = 0
+    """**不升档**闸门（票 01 §4-3）：档 < ``floor`` 的候选不进面。
+
+    初值 = 最高档（``HERO`` = 0，故首轮全部档都进面）；每选定一条后 ``floor = 它的档``，
+    低档照进、高档不再进（选过装备档之后武将档不再上脸）。本 pass 结束即随帧私有游标清。
+    """
+    used: tuple[str, ...] = ()
+    """本座位本 pass **已经跑过**的技能 id（每技能一次；票 01 §4-6）。
+
+    与 ``floor`` 同属闸门的第二个输入：已跑过的技能不再进面——"每技能一次"由这个显式集合
+    兑现，不再靠答案缓存当去重手段。
+    """
+    preactivations: tuple[tuple[str, tuple[Step, ...]], ...] = ()
+    """按候选分发的预发动清单（票 01；票 02 的读取面）：``(技能 id, 清单)`` 有序对。
+
+    与 :attr:`preactivation` 同源（都由 ``SkillFlow.steps`` 渲染），区别只在**粒度**：
+    单候选面上两者内容相同，多候选面只有这里能回答"每条候选各自的清单"。接入层
+    （:func:`sgs_web.projection.pending_payload`）据此逐候选下发；**不进记录流**。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,11 +438,41 @@ class SelectOptionContext:
     ``optional`` 是**取消能力**的显式开关（票 00 / N4）：缺省 ``False`` ⟹ 强制闭集，
     候选一条不多（雌雄双股剑、遗计"交给谁"的既有口径不变）；置 ``True`` 才多一条
     ``Pass``，供"发动后中途取消、取消不消耗技能使用次数"的技能流水线用。
+
+    **展示面**（票 07；票 02 §4.2 B2）三件都是可选、缺省为"没有"：
+
+    - ``disabled``：**显示但不可选**的选项（如"已拥有的技能"）——它们在
+      :attr:`options` 里保留原位，但**不进** ``legal_actions``（与 ``StepPool.disabled``
+      同语义，走逐步询问这条面）；
+    - ``option_texts``：**引擎给**的选项显示文本（键 = 选项 id）；武将牌上的技能行不给，
+      由投影从数据表派生名字与描述（见 :attr:`SelectOptionQuery.option_texts`）；
+    - ``hero_card``：本次询问展示的**武将牌**（id + n-of-m）；``hero_id=None`` = 这一次
+      没有武将牌（池子抽空，只给技能自己的那一行）。
     """
 
     skill_id: str
     options: tuple[str, ...]
     optional: bool = False
+    disabled: tuple[str, ...] = ()
+    option_texts: Mapping[str, str] = field(default_factory=dict)
+    hero_card: "HeroCardRef | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class DistributeContext:
+    """``DISTRIBUTE`` 候选生成的类型化载荷（huo-shenzhouyu-mobile 票 05）。
+
+    这是**计数式分配**这一询问形状（一张弹窗里给若干座位各配一个可累加计数）的
+    全部输入：可分配的座位（座位升序）、合计上限、单座上限。候选 = 「每座 0..单座上限、
+    合计 ≤ 上限」的**全量枚举**（4 人局 35 条、8 人局 165 条）；枚举出的 ``counts`` 省略
+    0 值、按座位升序，故全 0 的那一条的键最小、恒排在 ``legal_actions[0]``——超时兜底
+    （:func:`sgs_web.timeout.fallback_action` 的"取第一个候选"）因此天然是"不分配"。
+    """
+
+    skill_id: str
+    seats: tuple[int, ...]
+    max_total: int = 3
+    per_seat_max: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,13 +490,27 @@ class ArrangeContext:
 
     count: int
     split: int | None = None
+    enumerate_candidates: bool = True
+    """是否**枚举**全部排列 × 切分点（huo-shenzhugeliang 票 02 的加法）。
+
+    ``True`` = 既有行为（观星 ≤ 5 张、恂恂 4 张定切分，候选 ≤ 720 条）；``False`` = 只给
+    一条**恒等兜底**（= 不改变现状），界面自己构造答案、服务端做结构校验——服务的是
+    "面内张数太大、全枚举不可接受"的两行交换（七星：星 ≤ 7 + 手牌可到 10+ ⇒ 最坏 19,448
+    条组合）。与 ``count`` / ``split`` 一样**不进询问记录**（``_build_query`` 对 ``ARRANGE``
+    不序列化本载荷），故既有金录像逐字节不变。
+    """
 
 
 class PlayerPublic(_FrozenModel):
     """公开区里的一个座位：对手只暴露手牌**数**，身份按可见性规则给出。
 
     ``equip`` / ``judge`` 是**公开信息**且逐座位（票 08 §6）。手牌上限**不在这里**：
-    它由当前体力值派生（``effects.hand_limit``），不新增冗余字段。
+    它是**派生量**（M6 票 08 的双轴：``effects.hand_limit`` 在查询期算"体力值 → 替换式 →
+    加式"），不新增冗余字段。
+
+    ``hand_count`` 是**公开的"手牌数"**，恒 = ``len(hand)``：牌标签（M6 票 09）**不改变**
+    这个数字——"不带排除计数标签的张数"是弃牌阶段的另一个查询（``effects.hand_count``），
+    两者互不替换（spec D11），故这里不读标签、也不新增字段。
     ``identity`` 只对**本人 / 主公 / 已死亡者**可见，其余为 ``None``（票 13 §6）：
     投影时就把不可见的身份抹掉，"身份不泄露"因此是可断言的不变量。
 
@@ -335,6 +524,13 @@ class PlayerPublic(_FrozenModel):
     由 ``sgs_web.display.seat_display`` 翻成 ``hero_name`` / ``kingdom`` / ``kingdom_label``
     补进**网页载荷**（U1-02 的座位卡读这三个键）；``chained`` / ``wine_active`` 同样由
     ``decorate_snapshot`` 补。会话顶层的 ``heroes`` 名单仍是逐座位武将 id 的真源。
+
+    ``hero_zone_count``（票 27）是**武将牌上的牌**的**公开张数**：与 ``hand_count`` /
+    牌堆数同级的公开信息，恒 =
+    ``sum(len(zone.cards) for zone in player.hero_cards.values())``。一个座位可能同时挂着
+    多个放置技能实例的区（【谦逊】/ 将来的【破军】/【七星】），因此是**求和**而不是逐个实例
+    各报一份；跨座位的区算在**宿主**（武将牌的主人）这一行，不是放置技能的持有者。牌面
+    只有宿主本人拿得到（``PlayerView.hero_zone_cards``），他人只拿张数。
     """
 
     seat: int
@@ -344,17 +540,36 @@ class PlayerPublic(_FrozenModel):
     alive: bool
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
+    hero_zone_count: int = Field(default=0, exclude=True)
+    """这个座位的**武将牌上有几张牌**（票 27；跨座位的区算宿主）。
+
+    与 ``chained`` / ``hero`` 同一条纪律：``exclude`` **不进记录流**，标准 47 条金录像
+    逐字节不变。区的**牌面**只给宿主本人（:attr:`PlayerView.hero_zone_cards`），张数
+    则是公开信息（守恒量的一项，AI 记牌读它）。
+    """
     chained: bool = Field(default=False, exclude=True)
     """横置状态（U1-04 下发的座位事实；M5-03 起由铁索连环 / 传导重置真实写入）。
 
     ``exclude`` 与 ``hero`` / ``kingdom`` 同一条纪律：**不进记录流**，标准 47 条金录像
     逐字节不变。它由 ``visible_snapshot`` 经 ``display.decorate_snapshot`` 写进网页载荷。
     """
+    flipped: bool = Field(default=False, exclude=True)
+    """武将牌是否**背面朝上**（翻面；本票的翻面机制）。
+
+    同 ``chained``：``exclude`` 不进记录流，网页载荷由展示层补下。
+    """
     wine_active: bool = Field(default=False, exclude=True)
     """【酒】的下一张【杀】+1 是否生效（U1-04 下发的座位事实；M5-04 起由 ``【酒】`` 写入、
     回合末清空，每次变化落一条 ``wine_change``）。
 
     同 ``chained``：``exclude`` 不进记录流，网页载荷由展示层补下。
+    """
+    markers: tuple[Marker, ...] = Field(default=(), exclude=True)
+    """座位身上的**标记实例**（票 06；用户 Q6）。
+
+    公开信息（显示在目标武将牌上），但 ``exclude`` **不进记录流**（同 ``chained`` /
+    ``hero``）：变化经 ``marker_change`` delta 下发，网页载荷由 ``display.seat_display``
+    补成带来源 / 说明的展示项；AI 的读点登记在 ``_AI_READ_POINTS``。
     """
     identity: Identity | None = None
     hero: str | None = Field(default=None, exclude=True)
@@ -366,6 +581,11 @@ class PlayerView(_FrozenModel):
 
     牌堆只给**剩余数量**、不给顺序；``discard`` 按置入序（先入在前）；
     ``processing``（处理区）是公开区，按置入序（票 07 §3）。
+
+    ``hero_zone_cards``（票 27）是**本人武将牌上的牌面**，与 ``self_hand`` 对称：只有自己
+    当宿主的区（``Player.hero_cards``）会进来，他人武将牌上的牌只经
+    :attr:`PlayerPublic.hero_zone_count` 给张数。与 M6 的 2026-10 口径一致——牌面只给宿主，
+    未登记 / 畸形的区同一默认（不是整块 fail-closed）。``exclude``：不进记录流，金录像不变。
     """
 
     seat: int
@@ -376,6 +596,14 @@ class PlayerView(_FrozenModel):
     processing: tuple[CardRef, ...]
     turn_seat: int | None
     phase: Phase | None
+    hero_zone_cards: tuple[CardRef, ...] = Field(default=(), exclude=True)
+    """**本人**武将牌上的牌面（票 27）。
+
+    与 ``self_hand`` 对称，是本人视角的"本人区里的牌"；他人武将牌上的牌不在任何
+    ``PlayerView`` 里（张数走 :attr:`PlayerPublic.hero_zone_count`）。区键 = （座位, 技能
+    实例），同一座位可有多个区；跨座位的区只有在查看者是宿主时才进来。``exclude``：不进
+    记录流（47 条金录像逐字节不变），但进询问、是 AI 记牌的"已出现的牌"之一。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +662,21 @@ class PlayCard(_ActionBase):
     card: CardRef
 
 
+class SubstituteJudgeCard(_ActionBase):
+    """**改判**：用这张牌代替 / 替换正在生效前的判定牌（feng-zhangjiao 票 02）。
+
+    必须与 ``PlayCard`` 分开（用户 2026-11-02 裁定："代替 / 替换走特殊的改判事件帧，
+    不要走打出"）：打出只发生在"确认一张牌 → 处理区 → 弃牌堆"的牌响应里，且只认**手牌**；
+    改判可以拿**装备区**的牌，也不触发任何"打出时 / 使用后"钩子。载荷：
+    ``skill_id`` = 由哪条技能（【鬼才】标 / 界、【鬼道】）发动——代替 / 替换与颜色筛选都
+    由那条技能的声明回答，窗口不另判；``card`` = 这张实体牌。
+    """
+
+    kind: Literal["SubstituteJudgeCard"] = "SubstituteJudgeCard"
+    skill_id: str
+    card: CardRef
+
+
 class Reforge(_ActionBase):
     """重铸（M5-03 / 决策 D6）：这张牌离开手牌进弃牌堆，摸一张；**不是使用**。
 
@@ -477,6 +720,18 @@ class SelectOption(_ActionBase):
     choice: str
 
 
+class Distribute(_ActionBase):
+    """计数式分配（huo-shenzhouyu-mobile 票 05；首个载体 = 神周瑜【业炎】）。
+
+    ``counts`` = ``((座位, 点数), ...)``：**座位升序、省略 0**，空元组 = 一个点都不分配。
+    座位是公开事实，故记录流里读得出"你把几点给了谁"；每一问的合法集合由引擎全量枚举
+    （成员判定照旧），客户端按本地计数拼出同一条再在候选里查。
+    """
+
+    kind: Literal["Distribute"] = "Distribute"
+    counts: tuple[tuple[int, int], ...] = ()
+
+
 class ArrangeCards(_ActionBase):
     """排列（票 10 §②）：``order`` = **全部 X 个面内位置**的一个排列，``split`` = 前几张放牌堆顶。
 
@@ -497,11 +752,13 @@ Action = Annotated[
     | EndPhase
     | DiscardCards
     | PlayCard
+    | SubstituteJudgeCard
     | Reforge
     | SelectCards
     | ActivateSkill
     | SelectOption
-    | ArrangeCards,
+    | ArrangeCards
+    | Distribute,
     Field(discriminator="kind"),
 ]
 
@@ -577,6 +834,12 @@ class _QueryBase(_FrozenModel):
         data = handler(self)
         if not self.revealed:
             data.pop("revealed", None)
+        # 票 07：``SELECT_OPTION`` 的展示载荷缺省**不落盘**——空值不出现在记录流里，
+        # 既有询问记录因此逐字节不变（与 ``revealed`` 同一姿态）。键只在这些子类上存在，
+        # 对其余询问是 no-op。
+        for absent in ("hero_card", "option_texts", "disabled"):
+            if absent in data and not data[absent]:
+                data.pop(absent)
         return data
 
 
@@ -663,11 +926,16 @@ class SelectCardsQuery(_QueryBase):
 
 
 class SkillActivationQuery(_QueryBase):
-    """是否发动（票 19 §5 / 票 30）：候选恒一条裸 ``ActivateSkill``；载荷由技能步骤问。
+    """是否发动（票 19 §5 / 票 30）：候选是**本轮的一到多条**裸 ``ActivateSkill``。
 
     ``min_picks`` / ``max_picks`` / ``slots`` 是 **A-4 待清理的冻结报文**：当前生产者恒传
     ``0 / 0 / ()``（W6-06a 删除了候选烘焙路径），但 15 份录像逐字节带着这三个字段，
     故协议清理另立票。
+
+    **序列化面一个字段都不改**（票 01 的 Q6=B）：同一时机只有一个候选时，本询问的
+    ``skill_id`` / ``optional`` / 冻结报文与候选 / 询问时机全都不变 ⇒ 47 条金录像逐字节。
+    多候选面上"这一轮有哪些候选"由 ``legal_actions`` 承载（候选集合本来就在记录里），
+    另加的两个字段都是 ``exclude=True`` 的**本地面**（票 01 §5）。
     """
 
     kind: Literal["SKILL_ACTIVATION"] = "SKILL_ACTIVATION"
@@ -680,15 +948,82 @@ class SkillActivationQuery(_QueryBase):
     """被动入口的**预发动清单**（W4-1）：空元组 = 这条技能此刻没有可下发的清单。
 
     与 :attr:`PlayPhaseQuery.preactivations` 同姿态：**不进记录流**，由接入层显式下发。
+    多候选面上它是**代表候选**（``skill_id``）那份；逐候选的清单在
+    :attr:`activation_preactivations`。
+    """
+    skill_ids: tuple[str, ...] = Field(default=(), exclude=True)
+    """**本轮候选的技能 id 清单**（票 01 §5；与 ``preactivation`` 同姿态）。
+
+    空元组 = 本询问不是由派发环的 pass 产出的（旧构造）；由 pass 产出时恒非空——单候选面
+    = ``(skill_id,)``，多候选面 = 全部候选。**不进记录流**：候选集合已由 ``legal_actions``
+    承载，这份清单只给接入层 / 本地消费者读。
+    """
+    activation_preactivations: dict[str, tuple[Step, ...]] = Field(
+        default_factory=dict, exclude=True
+    )
+    """**按候选分发**的预发动清单（票 01；票 02 的读取面）：技能 id → 清单。
+
+    与 :attr:`preactivation` 同源、只改粒度：单候选面上两者内容相同（旧面一字不变），
+    多候选面上前端按选中的候选取自己那一份。**不进记录流**（``exclude``，与
+    ``PlayPhaseQuery.transform_preactivations`` 同一姿态），由接入层显式下发。
     """
 
 
+class HeroCardRef(_FrozenModel):
+    """一次询问**展示的武将牌**与它在本次展示里的序号（票 07；票 02 §4.2 B2）。
+
+    只有"是哪张 + 第几张 / 共几张"三个事实——势力 / 名称 / 体力上限**不在这里**：它们是
+    数据表的公开事实，由投影按 ``hero_id`` 派生下发（票 02 §4.2 B4）。本结构进询问记录，
+    故回放 / 排查看得到"这一问问的是哪张武将牌、第几次展示"。
+
+    ``hero_id=None`` = 这一次**没有武将牌**（可抽真名不足；01 的"展示恒为 3 次"里缺的那
+    几次），此时 ``index`` / ``total`` 仍给出 n-of-m（分母恒为 3）。
+    """
+
+    hero_id: str | None = None
+    index: int = 1
+    """本次展示的序号（1 基；"第 k/m 张"的 k）。"""
+    total: int = 1
+    """本次展示的**分母**（"第 k/m 张"的 m；缺牌的那几次它也不缩水）。"""
+
+
 class SelectOptionQuery(_QueryBase):
-    """选项二选一（票 12 §Q6 / 票 30）：生产者 = 【雌雄双股剑】，选择权在**目标**。"""
+    """选项二选一（票 12 §Q6 / 票 30）：生产者 = 【雌雄双股剑】，选择权在**目标**。
+
+    **展示载荷**（票 07；票 02 §4.2 B2–B3）三个字段都可选，缺省**不序列化**（既有询问记录
+    逐字节不变）：
+
+    - ``disabled``：显示但不可选的选项（置灰）——保留在 :attr:`options` 的原位，
+      **只**不在 ``legal_actions`` 里；
+    - ``option_texts``：引擎给的选项显示文本（键 = 选项 id）。**约定**：有文本的行是
+      技能自己的效果选项（选项 2 的"摸 X 张"这类动态文案由引擎算）；**没有**文本的行是
+      "武将牌上的一条技能"，名字与描述由投影从数据表 + ``descriptions.json`` 派生；
+    - ``hero_card``：本次展示的武将牌（id / 第几张 / 共几张）。
+
+    :attr:`options` 仍是**全部**选项（含置灰），因为它是展示面的真源；可提交性由
+    ``legal_actions`` 表达。
+    """
 
     kind: Literal["SELECT_OPTION"] = "SELECT_OPTION"
     skill_id: str
     options: tuple[str, ...]
+    disabled: tuple[str, ...] = ()
+    option_texts: dict[str, str] = Field(default_factory=dict)
+    hero_card: HeroCardRef | None = None
+
+
+class DistributeQuery(_QueryBase):
+    """计数式分配（huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数。
+
+    ``seats`` / ``max_total`` / ``per_seat_max`` 都是**公开事实**（谁在座上、能分几个），
+    故随询问下发；界面据它画计数行，服务端据同一份枚举候选。
+    """
+
+    kind: Literal["DISTRIBUTE"] = "DISTRIBUTE"
+    skill_id: str
+    seats: tuple[int, ...]
+    max_total: int = 3
+    per_seat_max: int = 3
 
 
 class ArrangeQuery(_QueryBase):
@@ -700,6 +1035,13 @@ class ArrangeQuery(_QueryBase):
     """
 
     kind: Literal["ARRANGE"] = "ARRANGE"
+    structural: bool = Field(default=False, exclude=True)
+    """不枚举档：答案**由界面构造**、只做结构校验（huo-shenzhugeliang 票 02）。
+
+    ``True`` 时本询问的 ``legal_actions`` 只有一条恒等兜底（= 什么都不换），界面可以提交
+    **任何**形状合法的 ``ArrangeCards``（引擎在 :meth:`Engine.ask_arrange` 校验 order 是
+    排列、split 与声明一致）。``exclude=True`` ⇒ 不进记录流，既有 47 条金录像逐字节不变。
+    """
 
 
 Query = Annotated[
@@ -711,6 +1053,7 @@ Query = Annotated[
     | SelectCardsQuery
     | SkillActivationQuery
     | SelectOptionQuery
-    | ArrangeQuery,
+    | ArrangeQuery
+    | DistributeQuery,
     Field(discriminator="kind"),
 ]

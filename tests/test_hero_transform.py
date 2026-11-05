@@ -26,6 +26,8 @@ from sgs.effects import (
     DamageNature,
     ModifierContext,
     ModifierPoint,
+    TargetCount,
+    TargetRule,
     apply_modifiers,
     legal_actions_for,
     locate,
@@ -36,6 +38,7 @@ from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
     VirtualSourceError,
+    kind_source_ceiling,
     preactivation_for,
     transformed_card,
     transformed_slash,
@@ -46,6 +49,7 @@ from sgs.skills.virtual import LEGACY_KIND_COUNT
 from sgs.state import (
     ActivateSkill,
     FrameKind,
+    Phase,
     PlayCard,
     PlayPhaseQuery,
     QueryKind,
@@ -120,6 +124,31 @@ def _respond(required: str, *, mode: RespondMode = RespondMode.PLAY, targets: tu
 
 
 # ---------------------------------------------------------------------------
+# 效果类型：‘只能’型转化 vs ‘可以’型转化（报障 2026-10-31）
+# ---------------------------------------------------------------------------
+
+
+def test_only_wushen_is_declared_as_a_forced_conversion():
+    """‘只能’型转化只有武神；分界是 ``ConversionSkill.forced``，**不是** ``locked``。
+
+    两条判据正交：``locked`` 是“锁定技”这一规则类型（「所有非锁定技失效」/ 形态表读它）；
+    ``forced`` 是**效果类型**——源牌只能当产物（武神），还是保留原用途、转化只在预发动里
+    发生（武圣 / 龙胆 / 国色 / 急救 / 丈八）。将来新增“只能”型转换必须显式改这张表，
+    不能借锁定与否顺带推出。
+    """
+    from sgs.skills.heroes import CONVERSION_SKILLS
+
+    forced = {
+        skill_id
+        for skill in CONVERSION_SKILLS
+        if skill.forced
+        for skill_id in skill.skill_ids
+    }
+
+    assert forced == {"hero.shen_guanyu_mobile.wushen"}, forced
+
+
+# ---------------------------------------------------------------------------
 # id 派生：单源 / 多源 / 纯虚拟三类不撞（验收 1 / 4；票 03 §要做什么 1）
 # ---------------------------------------------------------------------------
 
@@ -166,20 +195,23 @@ def test_different_source_sets_get_different_ids_for_the_same_target_name():
 def test_the_id_derivation_is_injective_over_every_kind_and_source_count():
     """步长不再假设"最多两张来源"的**穷举判据**（票 03 §要做什么 1 / §验收 4）。
 
-    对 ``kind`` 的全部取值 × ``0..MAX_VIRTUAL_SOURCES`` 张来源 × 若干 ``card_count``
+    对 ``kind`` 的全部取值 × 各段 ``0..上界`` 张来源 × 若干 ``card_count``
     逐个算 id，断言**两两不同**——旧的 ``(card_count+1)**2`` 步长在第 3 张来源上就会撞。
     来源 id 取 ``1..size``（合法牌 id 的**非零**前缀）；``card_count`` 因此都取
     ``>= MAX_VIRTUAL_SOURCES + 1``，否则 ``1..size`` 会越过 ``base`` 这一位、不再是
     合法来源。兼容段（``kind < 2``）逐字保留旧算式，故它的 id **只由来源集合决定、
     与牌堆张数无关**（``card_count`` 只是那里的进制）：
     跨牌堆的撞因此只查**泛化段**（``kind >= 2``）——本票新引入的那一半。
+    来源上界读 :func:`kind_source_ceiling`：M6 票 03 的追加段（``DISMANTLEMENT``）在
+    108 张档只到 6 张，不再套用共享段的 7。
     """
     count = len(PACK.deck.cards)
     global_seen: set[int] = set()
     for card_count in (MAX_VIRTUAL_SOURCES + 1, 53, count):
         seen: set[int] = set()
         for kind in range(len(VirtualKind)):
-            for size in range(MAX_VIRTUAL_SOURCES + 1):
+            ceiling = kind_source_ceiling(kind, card_count)
+            for size in range(ceiling + 1):
                 sources = tuple(range(1, size + 1))
                 card_id = virtual_card_id(kind=kind, sources=sources, card_count=card_count)
                 assert card_id < 0
@@ -213,7 +245,7 @@ def test_the_generalized_namespace_does_not_overlap_the_legacy_one():
     generalized_min = min(
         virtual_card_id(kind=kind, sources=tuple(range(size)), card_count=count)
         for kind in range(LEGACY_KIND_COUNT, len(VirtualKind))
-        for size in range(MAX_VIRTUAL_SOURCES + 1)
+        for size in range(kind_source_ceiling(kind, count) + 1)
     )
 
     assert generalized_min < legacy_max, "两段都在负数区，泛化段必须更负（区间不相交）"
@@ -378,6 +410,7 @@ def test_wusheng_respects_the_slash_count_limit_like_a_real_slash():
         seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
         deck=_deck_excluding(RED_PEACH),
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 1
 
@@ -563,6 +596,7 @@ def test_using_a_longdan_converted_slash_counts_against_the_slash_use_limit():
         seats=[SeatSpec(hand=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
         deck=_deck_excluding(RED_DODGE),
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 1
 
@@ -896,6 +930,198 @@ def test_the_guose_virtual_indulgence_still_opens_a_nullify_window_offering_null
         for action in window.legal_actions
         if isinstance(action, (UseCard, PlayCard))
     } == {"nullify"}, "无懈窗口只收【无懈可击】"
+
+
+# ---------------------------------------------------------------------------
+# 倾国（甄姬）：一张**黑色手牌**当【闪】使用或打出（M6 票 02；§九 L978）
+#
+# 与武圣 / 国色的差别只有**区域**：牌面写的是"一张黑色**手牌**"，故源区是手牌
+# **只有手牌**（装备区的黑牌不是源——区域默认的例外，写在声明表的 ``source_zone``）。
+# ---------------------------------------------------------------------------
+
+QINGGUO = "hero.zhenji.qingguo"
+
+
+def test_qingguo_offers_a_black_hand_card_as_a_dodge():
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(BLACK_SLASH,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    virtual = _virtual(legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1), "dodge")
+
+    assert [action.card.virtual_sources for action in virtual] == [(BLACK_SLASH,)]
+    assert virtual[0].card.color is Color.BLACK, "单源转化继承原牌颜色"
+
+
+def test_qingguo_rejects_a_red_hand_card():
+    """反例：红色手牌不是源（判据是黑色，不是"任意一张手牌"）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+
+    assert not _virtual(legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1), "dodge")
+    assert not _virtual(
+        legal_actions_for(
+            state, 0, QueryKind.RESPOND, answers_seq=1, payload=_respond("dodge")
+        ),
+        "dodge",
+    )
+
+
+def test_qingguo_source_is_hand_only_not_the_equipment_zone():
+    """区域：牌面写"黑色**手牌**" ⇒ 装备区的黑牌不是源（与武圣 / 国色的区域默认相反）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(BLACK_SLASH,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    assert not _virtual(legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1), "dodge")
+
+
+def test_qingguo_is_offered_in_the_play_out_response_window():
+    """「使用**或打出**」：万箭 / 南蛮的 ``RESPOND`` 窗口同样给黑手牌当【闪】。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(BLACK_SLASH,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    actions = legal_actions_for(
+        state, 0, QueryKind.RESPOND, answers_seq=1, payload=_respond("dodge")
+    )
+
+    assert [action.card.virtual_sources for action in _virtual(actions, "dodge")] == [
+        (BLACK_SLASH,)
+    ]
+
+
+def test_a_real_slash_opens_the_dodge_window_where_zhenji_offers_a_black_hand_card():
+    """**真【杀】** 打来时的整局链：甄姬的黑手牌在 ``DODGE`` 窗口里作为转化【闪】出现。
+
+    W4-fix-2 起转化牌已从暴露面收回：这一问的合法形态是清单（``transform_preactivations``）
+    里的一条来源步，提交 ``ActivateSkill(来源)`` 由引擎解析成那条 ``UseCard``。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_SLASH,)),
+            SeatSpec(hand=(BLACK_SLASH,), hero="zhenji"),
+        ],
+        deck=_deck_excluding(RED_SLASH, BLACK_SLASH),
+        turn_seat=0,
+    )
+    windows: list = []
+
+    def attacker(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, RED_SLASH, 1)
+        return None
+
+    def zhenji(query):
+        if query.kind == QueryKind.DODGE:
+            windows.append(query)
+            steps = query.transform_preactivations.get(QINGGUO)
+            assert steps, "倾国必须在【闪】窗口的清单里"
+            assert steps[0].pool[0].options == (str(BLACK_SLASH),)
+            return ActivateSkill(
+                skill_id=QINGGUO,
+                picks=(BLACK_SLASH,),
+                choices=(),
+                answers_seq=query.seq,
+            )
+        return None
+
+    engine = _run(state, [Scripted(attacker), Scripted(zhenji)], _use_frame_popped)
+
+    assert len(windows) == 1, "真【杀】照常开【闪】窗口"
+    assert BLACK_SLASH not in engine.state.player(1).hand, (
+        "转化【闪】的来源黑手牌走正常的使用路径离手"
+    )
+    assert engine.state.player(1).hp == 4, "黑手牌当【闪】成功抵消了这张【杀】"
+
+
+# ---------------------------------------------------------------------------
+# 奇袭（甘宁）：一张黑色牌当【过河拆桥】使用（M6 票 03；§九 L1025）
+#
+# 形态与国色同族：单源转化、只在 ``PLAY`` 语境；差别是**来源谓词是颜色（黑）**、
+# 产物是带目标的即时锦囊（目标池走真【过河拆桥】的 ``check_targets``）。
+# ---------------------------------------------------------------------------
+
+QIXI = "hero.ganning.qixi"
+
+
+def _qixi_state(*, owner_hand=(), owner_equip=(), target_hand=(RED_DODGE,)):
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=owner_hand, equip=owner_equip, hero="ganning"),
+            SeatSpec(hand=target_hand),
+        ],
+        deck=_deck_excluding(*owner_hand, *owner_equip, *target_hand),
+        turn_seat=0,
+    )
+
+
+def test_qixi_offers_a_black_card_as_dismantlement():
+    """正面：黑色手牌进候选、产物是【过河拆桥】，目标是区域里有牌的那名角色。"""
+    state = _qixi_state(owner_hand=(BLACK_SLASH,))
+
+    virtual = _virtual_uses(_play_candidates(state), "dismantlement")
+
+    assert [action.card.virtual_sources for action in virtual] == [(BLACK_SLASH,)]
+    assert virtual[0].card.color is Color.BLACK, "单源转化继承原牌颜色"
+    assert virtual[0].card.name == "过河拆桥"
+    assert virtual[0].targets == (1,), "目标池走与真【过河拆桥】同一套 check_targets"
+
+
+def test_qixi_source_zone_default_is_hand_plus_equip():
+    """区域默认：牌面只写"一张黑色牌" ⇒ 手牌 ∪ 装备（判定区的黑牌不是源）。"""
+    equip_state = _qixi_state(owner_equip=(BLACK_SLASH,))
+
+    assert _sources(_play_candidates(equip_state), "dismantlement") == {(BLACK_SLASH,)}
+
+    judge_state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(judge=(BLACK_SLASH,), hero="ganning"),
+            SeatSpec(hand=(RED_DODGE,)),
+        ],
+        deck=_deck_excluding(BLACK_SLASH, RED_DODGE),
+        turn_seat=0,
+    )
+    assert not _virtual(_play_candidates(judge_state), "dismantlement"), (
+        "判定区的黑牌不是【奇袭】的源（区域默认不包含判定区）"
+    )
+
+
+def test_qixi_rejects_a_red_card():
+    """反例：红色牌不是源（判据是黑色，不是"任意一张牌"）。"""
+    state = _qixi_state(owner_hand=(RED_PEACH,))
+
+    assert not _virtual(_play_candidates(state), "dismantlement"), (
+        "红色牌不能当【过河拆桥】"
+    )
+
+
+def test_qixi_manifest_takes_the_black_source_then_the_dismantlement_target():
+    """清单：1. 一张黑色牌（手牌）；2. 这张【过河拆桥】的目标（区域里有牌的角色）。"""
+    state = _qixi_state(owner_hand=(BLACK_SLASH,))
+
+    steps = _manifest(state, _virtual_actions(state), QIXI)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert tuple(steps[0].pool[0].options) == (str(BLACK_SLASH),)
+    assert tuple(steps[0].zones) == (Zone.HAND,)
+    assert [option for row in steps[1].pool for option in row.options] == ["seat:1"]
 
 
 # ---------------------------------------------------------------------------
@@ -2257,6 +2483,35 @@ def test_a_synthetic_multi_target_manifest_keeps_the_fixed_window_shape_when_tar
     assert tuple(target.pool[0].options) == ("seat:2", "seat:1", "seat:3"), (
         "候选恒含 Bn ⇒ 逐来源组的目标并集首项就是 Bn（借刀指定的目标）"
     )
+
+
+def test_a_synthetic_multi_target_manifest_keeps_the_seat_step_for_a_non_unique_fixed_window():
+    """窗口承载目标时，**目标集不唯一**照样下发目标步——即使产物全是"目标由牌决定"的牌。
+
+    ``fixed_target=True`` 的判据是"窗口里的候选目标集是否唯一"，它**优先于**票 07 的
+    "目标由牌本身决定"（``ALL_ALIVE`` / ``self_only`` / 无目标）。两套判据叠在同一个技能上
+    （产物全是全体存活牌）、而池里带两份不同目标集（合成反例：一份已过期）时，票 07 的
+    省步分支会把目标步吞掉，确认端只能报「这次转化缺少目标」；票 07 之前的行为——池不
+    自明就让人选——才是对的。
+    """
+    from sgs.skills.heroes import _manifest_steps
+
+    source = _cards("slash")[0]
+    steps = _manifest_steps(
+        {(source,): [(1, 2, 3), (1, 2)]},
+        {source: Zone.HAND},
+        {TargetRule(count=TargetCount.ALL_ALIVE)},
+        fixed_target=True,
+    )
+
+    assert steps is not None
+    assert [step.name for step in steps] == ["card", "seat"], (
+        "窗口目标集不唯一 ⇒ 目标步必须在（票 07 之前的形状），"
+        f"实得 {[step.name for step in steps]}"
+    )
+    seat = steps[1]
+    assert (seat.min, seat.max) == (1, 3)
+    assert tuple(seat.pool[0].options) == ("seat:1", "seat:2", "seat:3")
 
 
 def test_a_synthetic_multi_target_confirmation_resolves_by_the_full_target_set():

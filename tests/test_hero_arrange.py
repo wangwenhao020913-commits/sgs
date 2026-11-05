@@ -408,7 +408,7 @@ def test_the_default_random_participant_can_answer_the_arrangement_query():
     且整局能继续（一次观星不把对局卡死）。
     """
     import sgs.agents as agents
-    from sgs.engine import RandomSource
+    from sgs.engine import ai_stream
 
     from support import run_turns
 
@@ -426,9 +426,9 @@ def test_the_default_random_participant_can_answer_the_arrangement_query():
             return self._inner.respond(query)
 
     engine = _prepare_engine(hero=ZHUGELIANG, seats=2)
-    ai_stream = RandomSource(7).substream("ai")
     players = [
-        _ActivateThenRandom(agents.RandomPlayer(ai_stream)) for _ in range(2)
+        _ActivateThenRandom(agents.RandomPlayer(ai_stream(7, seat)))
+        for seat in range(2)
     ]
     run_turns(engine, players, turns=1)
 

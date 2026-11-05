@@ -38,6 +38,10 @@ PACK = load_content_pack(deck_profile="basic_53")
 
 
 def test_the_zone_enum_is_exactly_the_six_m2_zones():
+    """M2 的六个区 + M6 票 10 的「武将牌上的牌」（``hero``，真区域、按实例再分片）。
+
+    函数名沿用 M2 的节点名；M6 票 10 只加一个取值，既有的六个一字不改。
+    """
     assert {zone.value for zone in Zone} == {
         "deck",
         "hand",
@@ -45,11 +49,16 @@ def test_the_zone_enum_is_exactly_the_six_m2_zones():
         "processing",
         "equip",
         "judge",
+        "hero",
     }
 
 
 def test_move_reasons_are_exactly_the_m2_values_plus_reforge():
-    """M5-03 追加 ``REFORGE``（重铸：不算弃置、算失去，§5.1.3）；其余六个 M2 取值不变。"""
+    """M5-03 追加 ``REFORGE``（重铸：不算弃置、算失去，§5.1.3）；其余六个 M2 取值不变。
+
+    huo-taishici-xunyu 票 03 追加 ``PINDIAN``（拼点扣置：算失去、**不算弃置**，规则
+    §十二 12.7 L1372–L1374；见 `06`（§5「程序化约定与偏离一手」）的拼点裁定行）。
+    """
     assert {reason.value for reason in MoveReason} == {
         "DRAW",
         "USE",
@@ -58,6 +67,7 @@ def test_move_reasons_are_exactly_the_m2_values_plus_reforge():
         "JUDGE",
         "LOSE",
         "REFORGE",
+        "PINDIAN",
     }
 
 
@@ -337,3 +347,59 @@ def test_a_teardown_move_without_a_character_subject_has_no_belonging():
     )
 
     assert delta.owner is None
+
+
+def test_a_move_that_lands_on_the_deck_top_writes_the_tuple_order_from_the_top():
+    """票 02：落点进原语——进牌堆的移动可以直接**成为牌堆顶**（一次跨区移动）。
+
+    多张牌沿用 :func:`~sgs.effects.place_on_deck` 的既有口径：元组顺序即自顶向下
+    （``cards[0]`` 在最上）。落点随 delta 一起返回（``to_top``），钩子与 fuzz 重建器读的
+    都是这一份事实——不需要调用方再补一次同区重排。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(0, 1)), SeatSpec()],
+        deck=tuple(range(2, len(PACK.deck.cards))),
+    )
+    original = tuple(state.deck)
+
+    delta = move_card(
+        state,
+        EffectContext(actor=0),
+        state.refs((1, 0)),
+        to_zone=ZoneRef(Zone.DECK),
+        reason=MoveReason.PUT,
+        owner=0,
+        to_top=True,
+    )
+
+    assert state.deck[:2] == [1, 0], "元组顺序即自顶向下（cards[0] 在最上）"
+    assert tuple(state.deck[2:]) == original, "原有牌堆整体下移，内部顺序不变"
+    assert state.player(0).hand == [], "牌离开了来源手牌（一次移动，不是两步）"
+    assert (delta.from_zone, delta.to_zone, delta.reason, delta.owner) == (
+        ZoneRef(Zone.HAND, 0),
+        ZoneRef(Zone.DECK),
+        MoveReason.PUT,
+        0,
+    )
+    assert delta.to_top is True
+    assert "to_top" in delta.model_dump(), "落点随 delta 返回（记录 / 钩子读同一份）"
+
+
+def test_landing_on_top_is_only_legal_for_the_deck():
+    """只有牌堆有"顶"：其它目标区传 ``to_top`` 是编程错误，且在**搬牌之前**就拒绝。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(hand=(0,)), SeatSpec()], deck=(1, 2))
+
+    with pytest.raises(ValueError, match="只有进牌堆"):
+        move_card(
+            state,
+            EffectContext(actor=0),
+            state.refs((0,)),
+            to_zone=ZoneRef(Zone.HAND, 1),
+            reason=MoveReason.LOSE,
+            owner=0,
+            to_top=True,
+        )
+
+    assert state.player(0).hand == [0], "拒绝发生在搬牌之前（不留半个副作用）"
+    assert state.player(1).hand == []

@@ -34,7 +34,7 @@ from sgs.skills import (
     rejudge_capable_seats,
     rejudge_skill_ids,
 )
-from sgs.state import ActivateSkill, EndPhase, Pass, PlayCard, WindowCause
+from sgs.state import ActivateSkill, EndPhase, Pass, SubstituteJudgeCard, WindowCause
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_turns
@@ -152,7 +152,8 @@ def _play(query, card_id: int):
         return None
     return _find(
         query,
-        lambda action: isinstance(action, PlayCard) and action.card.card_id == card_id,
+        lambda action: isinstance(action, SubstituteJudgeCard)
+        and action.card.card_id == card_id,
     )
 
 

@@ -96,11 +96,18 @@ def _actions_by_name(payload: dict) -> dict[str, dict]:
 
 
 def test_the_client_builders_round_trip_through_the_server_action_parser() -> None:
-    """借刀预发动 / UseCard / PlayCard：桥的产出全部被 ``parse_action`` 接受。"""
+    """两条预发动 / UseCard / PlayCard：桥的产出全部被 ``parse_action`` 接受。
+
+    ``two_step_preactivation`` 是票 04 §3 加的那条：两步清单（选牌 → 选项）拼出的
+    ``ActivateSkill(picks, choices)``——`picks` 是实体牌 id、`choices` 是**选项文本**
+    （不是座位），与借刀那条（``UseCard`` + ``designations``）是两种不同的复合动作。
+    """
     payload = _probe_payload()
     actions = _actions_by_name(payload)
     assert set(actions) == {
         "borrowed_sword_preactivation",
+        "two_step_preactivation",
+        "seat_order_preactivation",
         "use_card",
         "play_card",
     }, f"探针用例集合变了：{sorted(actions)}"
@@ -121,6 +128,18 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
     assert action.designations == (2,)
     assert action.answers_seq == 93
 
+    composite = actions["two_step_preactivation"]
+    assert composite["kind"] == "ActivateSkill"
+    assert set(composite) == {"kind", "skill_id", "picks", "choices", "answers_seq"}, (
+        f"复合动作的载荷只有这五格（展示字段一个都不许上行）：{sorted(composite)}"
+    )
+    assert composite["picks"] == [52] and composite["choices"] == ["杀"]
+    parsed_composite = parse_action(composite)
+    assert parsed_composite.skill_id == "hero.yuji_mobile.guohuo"
+    assert parsed_composite.picks == (52,)
+    assert parsed_composite.choices == ("杀",)
+    assert parsed_composite.answers_seq == 96
+
     use = actions["use_card"]
     assert use["kind"] == "UseCard" and set(use["card"]) == CARD_REF_KEYS
     parsed_use = parse_action(use)
@@ -131,6 +150,30 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
     assert play["kind"] == "PlayCard" and set(play["card"]) == CARD_REF_KEYS
     parsed_play = parse_action(play)
     assert parsed_play.card.card_id == 53
+
+
+def test_a_conversion_preactivation_carries_the_click_order_into_choices() -> None:
+    """预发动座位步的**点击顺序**原样进 ``choices``（huo-mobile-batch 票 06 / 报障 ③）。
+
+    探针用**真实**的 ``preactivation.js:selectPreativationSeat`` 在【连环】产物的
+    1–2 目标步上先点座位 3、再点座位 1；载荷的 ``choices`` 必须保持这个先后。服务端的
+    :func:`sgs.skills.resolve_conversion_confirmation` 对声明了
+    ``preserve_target_order`` 的产物按 ``tuple(choices) == tuple(action.targets)`` 匹配
+    ——界面排一次序（或这里转成集合），就永远落到座位序那条候选：实机报障即此。
+    """
+    payload = _probe_payload()
+    action = _actions_by_name(payload)["seat_order_preactivation"]
+
+    assert action["kind"] == "ActivateSkill"
+    assert action["skill_id"] == "hero.pangtong_mobile.lianhuan"
+    assert action["picks"] == [52], "来源牌就是被点的那张♣手牌"
+    assert action["choices"] == ["seat:3", "seat:1"], (
+        "点击顺序原样上行（先点 3 再点 1）；按座位序归一化会变成 ['seat:1', 'seat:3']"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.picks == (52,)
+    assert parsed.choices == ("seat:3", "seat:1"), "服务端模型也按序列读这份顺序"
 
 
 def test_a_decorated_card_payload_is_rejected_by_the_server_model() -> None:
@@ -159,4 +202,4 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 3
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 5

@@ -17,8 +17,15 @@ from dataclasses import dataclass, field
 from typing import Final, Literal
 
 from sgs.agents import HeuristicPlayer, Participant, RandomPlayer
-from sgs.data import ContentPack, RuleConfig, load_content_pack, validate_rule_config
-from sgs.engine import Engine, RandomSource, new_seed
+from sgs.data import (
+    ContentPack,
+    HeroDealConfig,
+    HeroPick,
+    RuleConfig,
+    load_content_pack,
+    validate_rule_config,
+)
+from sgs.engine import Engine, ai_stream, new_seed
 from sgs.state import Action, Query
 
 __all__ = [
@@ -118,6 +125,7 @@ class Session:
         hero_pool: Sequence[str] | None | Literal["enabled"] = "enabled",
         heroes: Sequence[str] = (),
         my_hero: str | None = None,
+        banned_heroes: Sequence[str] = (),
         timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
         pack: ContentPack | None = None,
         session_id: str = "",
@@ -128,6 +136,11 @@ class Session:
             hero_pool = None  # 显式武将优先；池不参与（引擎在 heroes 非空时直接早退）
         if my_hero is not None and not isinstance(my_hero, str):
             raise ValueError(f"点将的武将 id 必须是字符串：{my_hero!r}")
+        if isinstance(banned_heroes, str) or not isinstance(banned_heroes, Sequence):
+            raise ValueError(f"禁将集合必须是武将 id 的数组：{banned_heroes!r}")
+        for hero_id in banned_heroes:
+            if not isinstance(hero_id, str) or not hero_id:
+                raise ValueError(f"禁将的武将 id 必须是非空字符串：{hero_id!r}")
         rule_config: RuleConfig = validate_rule_config({"player_count": player_count})
         if not 0 <= human_seat < rule_config.player_count:
             raise ValueError(f"人类座位非法：{human_seat}（本局座位 0..{rule_config.player_count - 1}）")
@@ -161,24 +174,29 @@ class Session:
             if hero_pool == "enabled"
             else (None if hero_pool is None else tuple(hero_pool))
         )
-        # 点将（票 19）：人类座位预指派一名，其余座位从**去掉它**的池里随机发。
+        # 点将（票 19）+ 禁将（M6 票 13）：两者都是**会话配置**（引擎的 ``HeroDealConfig``），
+        # 与种子一起冻结、不进记录流。点将是单座位手选；禁将是版本粒度、只作用于随机配将，
+        # 手选**无视**禁将（玩家点中哪版就发哪版），但手选先占真名、别的座位不再抽到它。
         # 钉的座位是 ``human_seat`` 而不是字面的 0——开局页的「我的座位」可选，
-        # 缺省 0 时才与"座位 0 指定"逐字等价。``None`` = 不点将（纯随机，默认路径不变）。
+        # 缺省 0 时才与"座位 0 指定"逐字等价。``my_hero=None`` = 不点将（纯随机，默认路径不变）。
         self.my_hero: str | None = my_hero
+        self.banned_heroes: tuple[str, ...] = tuple(dict.fromkeys(banned_heroes))
+        picks: tuple[HeroPick, ...] = (
+            () if my_hero is None else (HeroPick(seat=human_seat, hero=my_hero),)
+        )
+        self.hero_config = HeroDealConfig(banned_heroes=self.banned_heroes, picks=picks)
         self.engine = Engine.new_game(
             seed=self.seed,
             rule_config=rule_config,
             pack=content,
             heroes=self.heroes,
             hero_pool=self.hero_pool,
-            pinned_hero=self.my_hero,
-            pinned_seat=human_seat,
+            hero_config=self.hero_config,
         )
 
-        self._ai_stream = RandomSource(self.seed).substream("ai")
         self._halt_player = _HaltPlayer(self)
         players: list[Participant] = [
-            self._make_ai() if seat != human_seat else self._halt_player
+            self._make_ai(seat) if seat != human_seat else self._halt_player
             for seat in range(rule_config.player_count)
         ]
         self.participants: tuple[Participant, ...] = tuple(players)
@@ -309,10 +327,11 @@ class Session:
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _make_ai(self) -> Participant:
+    def _make_ai(self, seat: int) -> Participant:
+        stream = ai_stream(self.seed, seat)
         if self.ai == "heuristic":
-            return HeuristicPlayer(self._ai_stream)
-        return RandomPlayer(self._ai_stream)
+            return HeuristicPlayer(stream)
+        return RandomPlayer(stream)
 
 
 def create_session(**kwargs: object) -> Session:

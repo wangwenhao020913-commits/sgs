@@ -1,0 +1,656 @@
+{
+  "schema_version": 1,
+  "pack_id": "jie",
+  "heroes": [
+    {
+      "id": "jie_guanyu",
+      "name": "界关羽",
+      "true_name": "关羽",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wusheng",
+          "name": "武圣",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yijue",
+          "name": "义绝",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_machao",
+      "name": "界马超",
+      "true_name": "马超",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "mashu",
+          "name": "马术",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "tieqi",
+          "name": "铁骑",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhangfei",
+      "name": "界张飞",
+      "true_name": "张飞",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "paoxiao",
+          "name": "咆哮",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "tishen",
+          "name": "替身",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "jie_xushu",
+      "name": "界徐庶",
+      "true_name": "徐庶",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zhuhai",
+          "name": "诛害",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qianxue",
+          "name": "潜心",
+          "skill_type": "AWAKENING"
+        },
+        {
+          "id": "jianyan",
+          "name": "荐言",
+          "skill_type": "NORMAL",
+          "granted_by": "qianxue"
+        }
+      ]
+    },
+    {
+      "id": "jie_lvmeng",
+      "name": "界吕蒙",
+      "true_name": "吕蒙",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "keji",
+          "name": "克己",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qinxue",
+          "name": "勤学",
+          "skill_type": "AWAKENING"
+        },
+        {
+          "id": "gongxin",
+          "name": "攻心",
+          "skill_type": "NORMAL",
+          "granted_by": "qinxue"
+        },
+        {
+          "id": "botu",
+          "name": "博图",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_ganning",
+      "name": "界甘宁",
+      "true_name": "甘宁",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qixi",
+          "name": "奇袭",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fenwei",
+          "name": "奋威",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "jie_diaochan",
+      "name": "界貂蝉",
+      "true_name": "貂蝉",
+      "kingdom": "qun",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "lijian",
+          "name": "离间",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "biyue",
+          "name": "闭月",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhouyu",
+      "name": "界周瑜",
+      "true_name": "周瑜",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "yingzi",
+          "name": "英姿",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fanjian",
+          "name": "反间",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_xiahoudun",
+      "name": "界夏侯惇",
+      "true_name": "夏侯惇",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "ganglie",
+          "name": "刚烈",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qingjian",
+          "name": "清俭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_huangyueying",
+      "name": "界黄月英",
+      "true_name": "黄月英",
+      "kingdom": "shu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jizhi",
+          "name": "集智",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qicai",
+          "name": "奇才",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhenji",
+      "name": "界甄姬",
+      "true_name": "甄姬",
+      "kingdom": "wei",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "luoshen",
+          "name": "洛神",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qingguo",
+          "name": "倾国",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_luxun",
+      "name": "界陆逊",
+      "true_name": "陆逊",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qianxun",
+          "name": "谦逊",
+          "skill_type": "NORMAL",
+          "placement": {
+            "visibility": "public",
+            "return_timing": "turn_end",
+            "extra_effect": false
+          }
+        },
+        {
+          "id": "lianying",
+          "name": "连营",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_caocao",
+      "name": "界曹操",
+      "true_name": "曹操",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jianxiong",
+          "name": "奸雄",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "hujia",
+          "name": "护驾",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "jie_simayi",
+      "name": "界司马懿",
+      "true_name": "司马懿",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "fankui",
+          "name": "反馈",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "guicai",
+          "name": "鬼才",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhangliao",
+      "name": "界张辽",
+      "true_name": "张辽",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tuxi",
+          "name": "突袭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_xuchu",
+      "name": "界许褚",
+      "true_name": "许褚",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "luoyi",
+          "name": "裸衣",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_guojia",
+      "name": "界郭嘉",
+      "true_name": "郭嘉",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tiandu",
+          "name": "天妒",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yiji",
+          "name": "遗计",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_lidian",
+      "name": "界李典",
+      "true_name": "李典",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "xunxun",
+          "name": "恂恂",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "wangxi",
+          "name": "忘隙",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_liubei",
+      "name": "界刘备",
+      "true_name": "刘备",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "rende",
+          "name": "仁德",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jijiang",
+          "name": "激将",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhaoyun",
+      "name": "界赵云",
+      "true_name": "赵云",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "longdan",
+          "name": "龙胆",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yajiao",
+          "name": "涯角",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhugeliang",
+      "name": "界诸葛亮",
+      "true_name": "诸葛亮",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guanxing",
+          "name": "观星",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "kongcheng",
+          "name": "空城",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_sunquan",
+      "name": "界孙权",
+      "true_name": "孙权",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zhiheng",
+          "name": "制衡",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jiuyuan",
+          "name": "救援",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "jie_huanggai",
+      "name": "界黄盖",
+      "true_name": "黄盖",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "kurou",
+          "name": "苦肉",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "zhaxiang",
+          "name": "诈降",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_daqiao",
+      "name": "界大乔",
+      "true_name": "大乔",
+      "kingdom": "wu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guose",
+          "name": "国色",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "liuli",
+          "name": "流离",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_sunshangxiang",
+      "name": "界孙尚香",
+      "true_name": "孙尚香",
+      "kingdom": "wu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jieyin",
+          "name": "结姻",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "xiaoji",
+          "name": "枭姬",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_huatuo",
+      "name": "界华佗",
+      "true_name": "华佗",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jijiu",
+          "name": "急救",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "chuli",
+          "name": "除疠",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_lvbu",
+      "name": "界吕布",
+      "true_name": "吕布",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 5,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wushuang",
+          "name": "无双",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "liyu",
+          "name": "利驭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_huaxiong",
+      "name": "界华雄",
+      "true_name": "华雄",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 6,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "yaowu",
+          "name": "耀武",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "shizhan",
+          "name": "势斩",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_gongsunzan",
+      "name": "界公孙瓒",
+      "true_name": "公孙瓒",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qiaomeng",
+          "name": "趫猛",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yicong",
+          "name": "义从",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

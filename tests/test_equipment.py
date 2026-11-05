@@ -24,7 +24,7 @@ from sgs.effects import (
     targets_within_attack_range,
 )
 from sgs.engine import Engine
-from sgs.state import FrameKind, QueryKind, UseCard
+from sgs.state import FrameKind, Phase, QueryKind, UseCard
 from sgs.timing import Timing
 
 from support import RecordingPlayer, SeatSpec, build_state, cards_of_type, run_until
@@ -330,8 +330,14 @@ def test_crossbow_lifts_the_slash_per_turn_limit_for_its_holder():
         pack=PACK,
         seats=[SeatSpec(equip=(CROSSBOW,), hand=(slash,)), SeatSpec()],
         turn_seat=0,
+        phase=Phase.PLAY,
     )
-    unarmed = build_state(pack=PACK, seats=[SeatSpec(hand=(slash,)), SeatSpec()], turn_seat=0)
+    unarmed = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec()],
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
 
     armed.player(0).card_use_counts["slash"] = 3
     unarmed.player(0).card_use_counts["slash"] = 1
@@ -356,6 +362,7 @@ def test_a_second_slash_is_still_offered_with_the_crossbow():
         pack=PACK,
         seats=[SeatSpec(equip=(CROSSBOW,), hand=(SLASH[0], SLASH[1])), SeatSpec()],
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 1
 
@@ -371,6 +378,7 @@ def test_a_second_slash_is_not_offered_without_the_crossbow():
         pack=PACK,
         seats=[SeatSpec(hand=(SLASH[0], SLASH[1])), SeatSpec()],
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 1
 

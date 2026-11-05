@@ -3,14 +3,14 @@
 覆盖清单 = 「时机节点 → 覆盖它的基准或用例」的映射，定义在
 ``tests/support/timing_coverage.py``。本文件把它变成判决，断言四件事：
 
-1. 清单的键集**恰等于** dispatch 白名单（54 个可从记录流观测的节点）；
+1. 清单的键集**恰等于** dispatch 白名单（56 个可从记录流观测的节点）；
 2. 清单里声明的**每一个**来源都真的 dispatch 它声称覆盖的节点（实测，不靠声明）；
 3. 所有来源的记录流并集**恰等于**白名单（既 ⊇ 也不多）；
-4. 18 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
+4. 16 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
 
 **"⊇ 64" 的重述**（票 18 已登记、票 25 落地、票 32 定格）：64 个已实现类里有 11 个 L2
 边界 / 阶段间节点结构性地不 dispatch、记录流不可见，故机械判据是
-「53 个可见节点 == 白名单」+「11 个空日志节点结构性存在且从不出现」。
+「53 个 M2 可见节点 == 白名单 − 解封批次」+「11 个空日志节点结构性存在且从不出现」。
 枚举本身的两组划分见 ``tests/test_timing.py``，这里只管"实测覆盖"。
 """
 
@@ -21,7 +21,7 @@ from sgs.timing import DISPATCH_WHITELIST, EMPTY_LOG, ENUM_ONLY, IMPLEMENTED, Ti
 from support.timing_coverage import ALL_SOURCES, COVERAGE, dispatched
 
 WHITELIST = frozenset(timing.value for timing in DISPATCH_WHITELIST)
-"""53 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
+"""56 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
 
 
 def _collected() -> frozenset[str]:
@@ -47,30 +47,64 @@ def test_every_declared_source_really_dispatches_the_node_it_covers():
 def test_the_union_of_actual_record_streams_is_exactly_the_dispatch_whitelist():
     collected = _collected()
 
-    assert collected >= WHITELIST, "65 个已实现里可从记录流观测的那些，一个不漏"
+    assert collected >= WHITELIST, "67 个已实现里可从记录流观测的那些，一个不漏"
     assert collected == WHITELIST, "也不得多：白名单之外的节点不得被 dispatch"
 
 
-M2_DISPATCH_WHITELIST = frozenset(
-    timing.value for timing in DISPATCH_WHITELIST if timing is not Timing.MOVE_AFTER
+M3_UNSEALED: frozenset[str] = frozenset({Timing.MOVE_AFTER.value})
+"""M3 的解封增量（票 07 / ADR-010 的"解封集合 = 白名单增量"）。"""
+
+WUMING_UNSEALED: frozenset[str] = frozenset(
+    {Timing.MAXLIFE_INCREASE_BEFORE.value, Timing.MAXLIFE_INCREASE_AFTER.value}
 )
-"""M2 的 53 个：M3 的解封增量只有一个（票 07 / ADR-010 的"解封集合 = 白名单增量"）。"""
+"""wuming 票 04 的解封增量：L11 的**加**体力上限二时机（减侧两个不解封，见 C4）。"""
+
+PINDIAN_UNSEALED: frozenset[str] = frozenset(
+    {Timing.RANK_COMPARE_ON.value, Timing.RANK_COMPARE_RESULT_AFTER.value}
+)
+"""huo-taishici-xunyu 票 03 的解封增量：L15 的拼点二时机（RANK_COMPARE 帧的步骤表派发）。"""
+
+M2_DISPATCH_WHITELIST = frozenset(
+    timing.value
+    for timing in DISPATCH_WHITELIST
+    if timing.value not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED
+)
+"""M2 的 53 个：今天的白名单减去两批解封（M3 一个 + wuming 两个）。"""
 
 
 def test_the_unsealed_set_is_exactly_the_move_after_node():
-    """ADR-010 的机械判据：``解封集合 = 白名单增量 = {MOVE_AFTER}``（票 07）。
+    """ADR-010 的机械判据：M3 的 ``解封集合 = 白名单增量 = {MOVE_AFTER}``（票 07）。
 
-    M3 是 milestone 中性名里唯一一次枚举位解封，且**只解封 after**——``MOVE_BEFORE``
-    继续留在枚举位。这条断言把"例外清单"钉成集合等式，而不是靠人读 diff。
+    M3 的那批**只解封 after**——``MOVE_BEFORE`` 继续留在枚举位。此后的解封批次由
+    :data:`WUMING_UNSEALED` 单列（wuming 票 04），故本判据在"白名单 − M2 − wuming 批"
+    上仍然成立；"两批之外没有第三个增量"由 M2 基线恒 53 个看住。
     """
-    unsealed = frozenset(timing.value for timing in DISPATCH_WHITELIST) - M2_DISPATCH_WHITELIST
+    whitelist = {timing.value for timing in DISPATCH_WHITELIST}
+    m3_unsealed = whitelist - M2_DISPATCH_WHITELIST - WUMING_UNSEALED - PINDIAN_UNSEALED
 
-    assert unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
-    assert Timing.MOVE_BEFORE.value not in {
-        timing.value for timing in DISPATCH_WHITELIST
-    }, "移动前继续留枚举位（M3 无载体）"
-    assert len(M2_DISPATCH_WHITELIST) == 53, "M2 基线恰 53 个"
+    assert m3_unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
+    assert Timing.MOVE_BEFORE.value not in whitelist, "移动前继续留枚举位（M3 无载体）"
+    assert len(M2_DISPATCH_WHITELIST) == 53, "M2 基线恰 53 个（解封批次之外没有第三个增量）"
     assert Timing.MOVE_AFTER in COVERAGE, "解封的节点必须有实测来源"
+
+
+def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
+    """wuming 票 04：解封增量为「加体力上限」二时机；减侧两个**一条也不进**白名单。
+
+    前者的机械含义 = 记录流里真的能看到 ``MAXLIFE_INCREASE_BEFORE/AFTER``（来源 = 构造
+    局面 ``position:maxlife``）；后者是 C4 的边界（不迁 ``reduce_hp_max``、不动既有
+    觉醒技的 ``hp_max_change.frame_id``）。
+    """
+    whitelist = {timing.value for timing in DISPATCH_WHITELIST}
+    wuming_unsealed = whitelist - M2_DISPATCH_WHITELIST - M3_UNSEALED - PINDIAN_UNSEALED
+
+    assert wuming_unsealed == WUMING_UNSEALED
+    assert {
+        Timing.MAXLIFE_DECREASE_BEFORE.value,
+        Timing.MAXLIFE_DECREASE_AFTER.value,
+    }.isdisjoint(whitelist), "减体力上限二时机继续留枚举位（票 04 C4）"
+    for timing in (Timing.MAXLIFE_INCREASE_BEFORE, Timing.MAXLIFE_INCREASE_AFTER):
+        assert timing in COVERAGE, "解封的节点必须有实测来源"
 
 
 PHASE_START_NODES = (
@@ -114,7 +148,10 @@ def test_m3_unseals_no_phase_start_node():
 
 
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
-    assert len(WHITELIST) == 54, "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）"
+    assert len(WHITELIST) == 58, (
+        "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
+        " + huo-taishici-xunyu 票 03 的拼点二时机"
+    )
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
         timing.value for timing in IMPLEMENTED
@@ -131,7 +168,7 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     collected = _collected()
 
     assert collected.isdisjoint({timing.value for timing in ENUM_ONLY}), (
-        "18 个枚举位只留位，M3 一次都不 dispatch"
+        "14 个枚举位只留位（含减体力上限二时机），一次都不 dispatch"
     )
     assert collected.isdisjoint({timing.value for timing in EMPTY_LOG}), (
         "11 个空日志节点结构性存在，但记录流里不出现"

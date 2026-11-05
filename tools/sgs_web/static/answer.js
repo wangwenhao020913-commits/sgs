@@ -100,13 +100,83 @@ function maybeAutoSubmitArrange(view) {
   return submitAction();
 }
 
+/** 票 05：计数式分配的最终答案动作——本地计数 → 候选里那条 `Distribute`。
+ *
+ *  空计数（一个点都没分）是最小键那条候选，故"随时可提交"天然成立：`buildAction`
+ *  永不为空 ⇒ 右端「提交」恒可点。找不到同一条候选时返回 `null`（界面不发明动作）。
+ */
+function distributionAction(pending) {
+  const counts = distributionCounts(pending);
+  const pairs = Object.keys(counts || {})
+    .map((key) => [Number(key), Number(counts[key]) || 0])
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => left[0] - right[0]);
+  const wanted = JSON.stringify(pairs);
+  return ((pending && pending.legal_actions) || []).find(
+    (candidate) => candidate.kind === "Distribute"
+      && JSON.stringify(
+        (candidate.counts || []).map(([seat, count]) => [Number(seat), Number(count)]),
+      ) === wanted,
+  ) || null;
+}
+
+/** 票 05：到了**该自动提交当前计数**的时刻吗（与观星 / 涉猎同一个提前量）。 */
+function distributionAutoSubmitDue(view) {
+  const pending = view && view.pending;
+  if (!pending || pending.kind !== "DISTRIBUTE") return false;
+  if (view !== state.view) return false;
+  if (state.playback || (view && view.finished)) return false;
+  if (!isOwnPending(pending, view)) return false;
+  if (state.distributionAutoSeq === pending.seq) return false;
+  if (state.submitBusy || state.preactivation) return false;
+  const remain = arrangeAutoSubmitRemain(view);
+  if (remain === null || remain > ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS) return false;
+  return buildAction() !== null;
+}
+
+/** 票 05：到点就把**当前计数**提交出去（服务端先到点则按全 0 代答）。 */
+function maybeAutoSubmitDistribution(view) {
+  if (!state.sessionId) return false;
+  if (!distributionAutoSubmitDue(view)) return false;
+  state.distributionAutoSeq = view.pending.seq;
+  return submitAction();
+}
+
+/** 票 01：涉猎的选牌面到了**该自动提交当前选择**的时刻吗（与观星同一个提前量）。
+ *
+ * 用户裁定"提交、超时或放弃完全相同，会获得当前已经排列好的获得牌"：服务端看不到本地
+ * 选择，只能由前端在剩余 ≤2 秒时把**当前**选择发出去；服务端先到点则按空选择（0 张）
+ * 代答（`legal_actions[0]` = 空 picks）。四条闸门与 :func:`arrangeAutoSubmitDue` 同形。
+ */
+function suitAutoSubmitDue(view) {
+  const pending = view && view.pending;
+  if (!pending || !isSuitPickStep(pending)) return false;
+  if (view !== state.view) return false;
+  if (state.playback || (view && view.finished)) return false;
+  if (!isOwnPending(pending, view)) return false;
+  if (state.suitAutoSeq === pending.seq) return false;
+  if (state.submitBusy || state.preactivation) return false;
+  const remain = arrangeAutoSubmitRemain(view);
+  if (remain === null || remain > ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS) return false;
+  return buildAction() !== null;
+}
+
+/** 到点就提交**一次**当前选择（先落 `suitAutoSeq` 再发请求，失败不重试）。 */
+function maybeAutoSubmitSuit(view) {
+  if (!state.sessionId) return false;
+  if (!suitAutoSubmitDue(view)) return false;
+  state.suitAutoSeq = view.pending.seq;
+  return submitAction();
+}
+
 /** 倒计时（U1-03）：进度条 + 剩余秒 + 默认动作；只显示**自己的**人类询问。
  *
  * 时间锚点住在 `state.pendingClock`（同一 `pending.seq` 轮询刷新不重置）。真正
  * 代答在服务端（`timeout.py`）；本函数对**所有非排列询问**都只读，不提交、不刷新、
- * 不碰 `legal_actions`。**唯一例外**是观星排列（`ARRANGE`）：到时限前
- * :data:`ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS` 秒，前端自动提交一次当前排列
- * （spec D9.3 / 票 07，见 :func:`arrangeAutoSubmitDue`）。
+ * 不碰 `legal_actions`。**两个例外**：观星排列（`ARRANGE`）与涉猎的按花色取牌
+ * （`SELECT_CARDS + max_per_suit`）——到时限前
+ * :data:`ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS` 秒，前端自动提交一次当前选择
+ * （spec D9.3 / 票 07；票 01 的涉猎同一条"当前选择"语义）。
  */
 function renderCountdown(view) {
   const box = $("t-countdown");
@@ -144,8 +214,16 @@ function renderCountdown(view) {
   if (label) {
     label.textContent = (pending.prompt_display && pending.prompt_display.default_label) || "";
   }
-  // 票 07：唯一例外——排列到点自动提交（其它询问在这里恒为 false，零请求）。
-  return maybeAutoSubmitArrange(view);
+  // 票 07 / 票 01：两个前端代答例外——排列与涉猎的按花色取牌（其它询问恒 false，零请求）。
+  // 返回**提交的 Promise**（不是 true）：调用方 `await renderCountdown(...)` 要等 POST 回来，
+  // 否则 409 的刷新还没发生就被断言"没刷新"。
+  const arranging = maybeAutoSubmitArrange(view);
+  if (arranging) return arranging;
+  const suiting = maybeAutoSubmitSuit(view);
+  if (suiting) return suiting;
+  const distributing = maybeAutoSubmitDistribution(view);
+  if (distributing) return distributing;
+  return false;
 }
 
 /* ------------------------------------------------------------------ 提交 */
@@ -201,9 +279,18 @@ function buildAction() {
   // 排列（W6-03）：由服务端下发的 `arrange` 规格 + 本地双行布局拼一条 `ArrangeCards`。
   // **键序**必须是 answers_seq 在前（见 :func:`arrangeAction`），否则下面的逐字段自检会拒。
   if (pending.kind === "ARRANGE") return arrangeAction(pending);
+  // 计数式分配（票 05）：按本地计数拼出候选里那条 `Distribute`（不手拼服务器没发的东西）。
+  if (pending.kind === "DISTRIBUTE") return distributionAction(pending);
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
-  const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: state.picks.slice() }) : action);
+  //
+  // **顺序无关**（2026-11-03 实机报障）：候选由引擎按 `combinations(...)` 枚举 ⇒ 面内位置
+  // **升序**；而 `state.picks` 记的是**点击顺序**。多选面（≥2 张：业炎的四色成本 / 界遗计
+  // 一次两张 / 涉猎）从右往左点会拼出降序 picks，逐字段自检找不到那条候选 ⇒ 「选择非法」、
+  // 提交键永远灰着。选牌语义是**集合**（"这四张"不关心先后），故这里按升序规范化，与弃牌
+  // 分支 `state.picks.slice().sort(...)` 的既有口径一致。
+  const canonicalPicks = () => state.picks.slice().sort((left, right) => left - right);
+  const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: canonicalPicks() }) : action);
   // 弃牌阶段：候选带的是 `cards`（不是单张 `card`），按"已选手牌集合"反查那一条。
   // 这条必须在 `directAction` **之前**：弃牌可能恰好只有一条候选（必须全弃），
   // 但那也不该在玩家点牌之前就显示成"将提交"。
@@ -254,7 +341,7 @@ function buildAction() {
     const isTargetStep = (action) =>
       action.card
       && String(action.card.card_id) === String(entry.card.card_id)
-      && (action.kind === "UseCard" || action.kind === "PlayCard");
+      && (action.kind === "UseCard" || action.kind === "PlayCard" || action.kind === "SubstituteJudgeCard");
     const inClickOrder = (action) => {
       const targets = (action.targets || []);
       return targets.length === clicked.length
@@ -283,6 +370,12 @@ function buildAction() {
 async function submitRightAction(kind) {
   if (state.playback || state.submitBusy) return;
   const pending = state.view ? state.view.pending : null;
+  // 票 01：涉猎的右端「放弃」**不是一条候选**——它与「提交」同义（提交当前选择），
+  // 故不查 `rightActionIndex`，直接走同一条提交路径（`buildAction` 按 `state.picks` 造）。
+  if (kind === RIGHT_ACTION_KINDS.pass && pending && isSuitPickStep(pending)) {
+    await submitAction();
+    return;
+  }
   const index = rightActionIndex(pending, kind);
   if (index < 0) return;
   // 票 07：排列没有可用布局（规格缺失 / 顺序不完整）时不要退回成"送 Pass"。
@@ -331,8 +424,13 @@ async function submitAction(restoreSelection = null) {
   const cardEntry = Boolean(state.preactivation && state.preactivation.cardEntry);
   const composite = state.preactivation !== null
     && (action.kind === "ActivateSkill" || (cardEntry && action.kind === "UseCard"));
+  // 排列的**不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，答案由界面的
+  // 两行布局拼出来 —— 服务端在收答案时做结构校验（order 是排列、split 与声明一致）。
+  const structuralArrange = action.kind === "ArrangeCards"
+    && Boolean(pending.arrange && pending.arrange.enumerate === false);
   if (
     !composite
+    && !structuralArrange
     && !pending.legal_actions.some((candidate) => JSON.stringify(candidate) === JSON.stringify(action))
   ) {
     // 最后一道自检：造出来的必须**逐字段**是候选里的那一条（否则引擎会拒，且错在界面）。
@@ -342,6 +440,15 @@ async function submitAction(restoreSelection = null) {
   }
   // U2-03：POST 在飞 = 提示区四键全部禁用（快照留到结束）；轮询刷新也让路（见 refresh）。
   const viewBefore = state.view;
+  // 票 01：涉猎提交后在本机留 2.5 秒结果态——先把"交出去的那五张 + 选了哪几张 + 技能名"
+  // 定格下来（`resetSelection()` 会清 `state.picks`，不能等请求回来再读）。
+  const suitSettle = isSuitPickStep(pending)
+    ? {
+      cards: (pending.slots || []).map((slot) => slot.card),
+      picked: state.picks.slice(),
+      title: (pending.context && pending.context.name) || "亮牌",
+    }
+    : null;
   freezeActionButtons();
   state.submitBusy = true;
   try {
@@ -352,6 +459,13 @@ async function submitAction(restoreSelection = null) {
     state.submitBusy = false;
     releaseActionButtons(false);
     resetSelection();
+    if (suitSettle) {
+      state.suitResult = { ...suitSettle, until: Date.now() + 2500 };
+      if (state.suitResultTimer) {
+        window.clearTimeout(state.suitResultTimer);
+        state.suitResultTimer = null;
+      }
+    }
     applyView(body);
   } catch (error) {
     state.submitBusy = false;

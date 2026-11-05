@@ -23,6 +23,7 @@ from typing import Any
 from sgs.data import Color, Identity, Kingdom, RuleConfig, color_of_suit, load_content_pack
 from sgs.effects import (
     DamageNature,
+    ModifierRole,
     attack_range,
     check_count,
     check_targets,
@@ -34,11 +35,13 @@ from sgs.effects import (
 from sgs.engine import Engine
 from sgs.skills import preactivation_for, validate_flow_activation
 from sgs.skills.catalog import GREEN_DRAGON_FLOW
+from sgs.timing import Timing
 from sgs.state import (
     ActivateSkill,
     EndPhase,
     FrameKind,
     Pass,
+    Phase,
     PlayCard,
     QueryKind,
     RespondContext,
@@ -91,12 +94,13 @@ def _specs_used(specs) -> list[int]:
     return [card for spec in specs for card in (*spec.hand, *spec.equip, *spec.judge)]
 
 
-def _state(specs, *, turn_seat: int = 0, deck=None):
+def _state(specs, *, turn_seat: int = 0, deck=None, phase=None):
     return build_state(
         pack=PACK,
         seats=specs,
         deck=deck if deck is not None else _deck_excluding(*_specs_used(specs)),
         turn_seat=turn_seat,
+        phase=phase,
         rule_config=RuleConfig(first_seat=0),
     )
 
@@ -155,6 +159,13 @@ def _end_or_pass(query):
     return _find(query, lambda action: isinstance(action, Pass))
 
 
+class _EndPhaseOrPass:
+    """收尾参与者：能结束出牌阶段就结束，否则放弃 / 取第一个候选。"""
+
+    def respond(self, query):
+        return _end_or_pass(query)
+
+
 class _Scripted:
     """把一个 ``respond(query)`` 函数包成 :func:`run_until` 认的参与者。"""
 
@@ -195,175 +206,175 @@ def _use_chain_done(engine) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def test_the_fan_offers_a_normal_slash_as_a_fire_slash_in_the_play_phase():
-    """普通【杀】进候选、产物是火【杀】；单源继承原牌的花色 / 点数 / 颜色。"""
+def _fan_query_count(queries) -> int:
+    return sum(
+        1
+        for query in queries
+        if query.kind == "SKILL_ACTIVATION"
+        and getattr(query, "skill_id", None) == "equip.vermilion_feather_fan"
+    )
+
+
+def _use_slash_then_fan(*, activate: bool, seat: int = 0, target: int = 1):
+    """座位 ``seat`` 用普通【杀】打 ``target``；羽扇询问按 ``activate`` 答。"""
     state = _state(
         [
-            SeatSpec(
-                hand=(SLASH[0], FIRE_SLASH[0], THUNDER_SLASH[0], PEACH[0]),
-                equip=(FAN[0],),
-            ),
-            SeatSpec(),
+            SeatSpec(hand=(SLASH[0],), equip=(FAN[0],)),
+            SeatSpec(hp=4, hp_max=4),
         ]
     )
-    origin = state.card(SLASH[0])
-
-    virtual = _virtual(_play_candidates(state), "fire_slash")
-
-    assert virtual, "装备朱雀羽扇且手里有普通【杀】⇒ 追加火【杀】候选"
-    assert _virtual_sources(_play_candidates(state), "fire_slash") == {(SLASH[0],)}, (
-        "只有普通【杀】作来源：火杀 / 雷杀 / 桃都不是朱雀羽扇的源"
-    )
-    product = virtual[0].card
-    assert product.is_virtual and product.card_id < 0
-    assert product.name == "火杀"
-    assert (product.suit, product.rank, product.color) == (
-        origin.suit,
-        origin.rank,
-        origin.color,
-    ), "单源转化继承来源牌的花色 / 点数 / 颜色"
-
-
-def test_the_fan_converts_only_normal_slashes_never_fire_or_thunder():
-    """源筛选是**普通【杀】**：属性【杀】与其它牌都不进来源集合（成对反例）。"""
-    state = _state(
-        [
-            SeatSpec(
-                hand=(FIRE_SLASH[0], THUNDER_SLASH[0], PEACH[0], SLASH[0]),
-                equip=(FAN[0],),
-            ),
-            SeatSpec(),
-        ]
-    )
-
-    sources = _virtual_sources(_play_candidates(state), "fire_slash")
-
-    assert sources == {(SLASH[0],)}
-    assert (FIRE_SLASH[0],) not in sources, (
-        "火【杀】不能再被羽扇转化：产物是火杀，来源必须是普通杀"
-    )
-    assert (THUNDER_SLASH[0],) not in sources
-    assert (PEACH[0],) not in sources
-
-
-def test_the_fire_slash_product_has_attack_range_four():
-    """羽毛扇的攻击范围 4 在牌面数据里（M5-01a），火【杀】候选因此够得着距离 3。"""
-    state = _state(
-        [SeatSpec(hand=(SLASH[0],), equip=(FAN[0],))] + [SeatSpec() for _ in range(5)]
-    )
-
-    assert attack_range(state, 0) == 4
-    combinations = {
-        action.targets
-        for action in _virtual(_play_candidates(state), "fire_slash")
-        if isinstance(action, UseCard)
-    }
-
-    assert (3,) in combinations, "6 人桌上面向座位 3 的距离是 3 ≤ 攻击范围 4"
-
-
-FAN_SKILL = "equip.vermilion_feather_fan"
-
-
-def _confirm_fan_preactivation(query):
-    """出牌阶段按**预发动清单**确认朱雀羽扇（与 H 族转化同一条接入路径，W4-fix-2）。
-
-    来源取清单来源步的第一个选项、目标取目标池的第一项——与界面"点技能 → 选牌 →
-    选目标 → 确认"同形，交出去的是 ``ActivateSkill(来源, 目标)``。
-    """
-    if query.kind not in (QueryKind.PLAY_PHASE, QueryKind.RESPOND):
-        return None
-    steps = query.transform_preactivations.get(FAN_SKILL)
-    if not steps:
-        return None
-    source = int(steps[0].pool[0].options[0])
-    choices: tuple[str, ...] = ()
-    if len(steps) > 1:
-        seat = steps[1].pool[0].options[0].removeprefix("seat:")
-        choices = (f"seat:{seat}",)
-    return ActivateSkill(
-        skill_id=FAN_SKILL, picks=(source,), choices=choices, answers_seq=query.seq
-    )
-
-
-def test_the_fan_product_deals_fire_damage_and_sends_the_source_to_the_discard_pile():
-    """产物火【杀】按产物牌型的行为表结算：FIRE 伤害、来源实体【杀】进弃牌堆。"""
-    state = _state([SeatSpec(hand=(SLASH[0],), equip=(FAN[0],)), SeatSpec()])
     engine = _FrameSpy.from_state(state, seed=1)
+    queries: list = []
 
     def attacker(query):
-        action = _confirm_fan_preactivation(query)
-        if action is not None:
-            return action
+        queries.append(query)
+        if query.kind == QueryKind.PLAY_PHASE:
+            return (
+                _find(
+                    query,
+                    lambda action: isinstance(action, UseCard)
+                    and action.card.card_id == SLASH[0]
+                    and action.targets == (target,),
+                )
+                or _end_or_pass(query)
+            )
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            if getattr(query, "skill_id", None) == "equip.vermilion_feather_fan":
+                if activate:
+                    return _find(query, lambda action: isinstance(action, ActivateSkill))
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(query, lambda action: isinstance(action, ActivateSkill)) or _end_or_pass(query)
         return _end_or_pass(query)
 
-    run_until(engine, [_Scripted(attacker), _EndPhaseOrPass()], _use_chain_done)
+    run_until(
+        engine,
+        [_Scripted(attacker), _EndPhaseOrPass()],
+        _use_chain_done,
+    )
+    return engine, queries
 
+
+def test_the_fan_offers_a_normal_slash_as_a_fire_slash_in_the_play_phase():
+    """使用时问一次；确认 ⇒ 这次使用的牌变成火【杀】（产物 + 来源实体牌）。"""
+    engine, queries = _use_slash_then_fan(activate=True)
+    assert _fan_query_count(queries) == 1, "普通【杀】的使用触发一次羽扇询问"
     damage = _damage_payloads(engine)
-    assert len(damage) == 1, "一次火【杀】恰好压出一个伤害帧"
-    assert damage[0]["nature"] is DamageNature.FIRE, "产物是本票的 FIRE 声明"
-    assert damage[0]["chain"] is False
+    assert len(damage) == 1
+    assert damage[0]["nature"] is DamageNature.FIRE
     assert damage[0]["channel"].type == "fire_slash"
     assert damage[0]["channel"].is_virtual
     assert damage[0]["channel"].virtual_sources == (SLASH[0],)
-    assert SLASH[0] in engine.state.discard, "来源实体【杀】走既有虚拟源移动路径进弃牌堆"
+    assert SLASH[0] in engine.state.discard
     assert engine.state.player(1).hp == 3
 
 
-class _EndPhaseOrPass:
-    """最小合法应答：出牌阶段结束、响应与濒死放弃、其余取第一个候选。"""
+def test_the_fan_declined_keeps_the_slash_normal():
+    engine, queries = _use_slash_then_fan(activate=False)
+    assert _fan_query_count(queries) == 1
+    damage = _damage_payloads(engine)
+    assert damage and damage[0]["nature"] is not DamageNature.FIRE
+    assert damage[0]["channel"].type == "slash"
+    assert engine.state.player(1).hp == 3
 
-    def respond(self, query):
-        if query.kind == QueryKind.PLAY_PHASE:
+
+def test_the_fan_converts_only_normal_slashes_never_fire_or_thunder():
+    """火 / 雷【杀】不是"普通【杀】"⇒ 不问、不转。"""
+    for card in (FIRE_SLASH[0], THUNDER_SLASH[0]):
+        state = _state(
+            [SeatSpec(hand=(card,), equip=(FAN[0],)), SeatSpec()]
+        )
+        engine = _FrameSpy.from_state(state, seed=1)
+        queries: list = []
+
+        def attacker(query):
+            queries.append(query)
+            if query.kind == QueryKind.PLAY_PHASE:
+                return (
+                    _find(
+                        query,
+                        lambda action: isinstance(action, UseCard)
+                        and action.card.card_id == card
+                        and action.targets == (1,),
+                    )
+                    or _end_or_pass(query)
+                )
             return _end_or_pass(query)
-        pass_action = _find(query, lambda action: isinstance(action, Pass))
-        if pass_action is not None:
-            return pass_action
-        return _end_or_pass(query)
+
+        run_until(engine, [_Scripted(attacker), _EndPhaseOrPass()], _use_chain_done)
+        assert _fan_query_count(queries) == 0
+        damage = _damage_payloads(engine)
+        assert damage and damage[0]["channel"].type in ("fire_slash", "thunder_slash")
 
 
-def test_the_fan_product_is_respondable_to_barbarian_duel_and_borrowed_sword():
-    """打出的两种语境都覆盖：南蛮 / 决斗（PLAY）与借刀（USE，目标固定为 Bn）。"""
+def test_the_fan_product_deals_fire_damage_and_sends_the_source_to_the_discard_pile():
+    """产物火【杀】按产物牌型结算：FIRE 伤害、来源实体【杀】进弃牌堆。"""
+    engine, _queries = _use_slash_then_fan(activate=True)
+    damage = _damage_payloads(engine)
+    assert damage[0]["nature"] is DamageNature.FIRE
+    assert SLASH[0] in engine.state.discard
+    assert engine.state.player(1).hp == 3
+
+
+def _use_wusheng_then_fan(*, activate: bool):
+    """关羽【武圣】把红桃【桃】当【杀】使用；羽扇对**转化后的普通【杀】**再转火。"""
+    red = next(
+        card_id
+        for card_id in PEACH
+        if color_of_suit(PACK.deck.cards[card_id].suit) is Color.RED
+    )
     state = _state(
         [
-            SeatSpec(),
-            SeatSpec(
-                hand=(SLASH[0], FIRE_SLASH[0], THUNDER_SLASH[0], PEACH[0]),
-                equip=(FAN[0],),
-            ),
-            SeatSpec(),
+            SeatSpec(hero="guanyu", hand=(red,), equip=(FAN[0],)),
+            SeatSpec(hp=4, hp_max=4),
         ]
     )
+    engine = _FrameSpy.from_state(state, seed=1)
+    queries: list = []
 
-    barbarian = _respond_candidates(state, 1, _respond("slash"))
-    duel = _respond_candidates(state, 1, _respond("slash", cause=WindowCause.DUEL))
-    borrowed = _respond_candidates(
-        state,
-        1,
-        _respond(
-            "slash",
-            mode=RespondMode.USE,
-            targets=(2,),
-            cause=WindowCause.BORROWED_SWORD,
-        ),
-    )
+    def attacker(query):
+        queries.append(query)
+        if query.kind == QueryKind.PLAY_PHASE:
+            steps = (query.transform_preactivations or {}).get("hero.guanyu.wusheng")
+            if steps:
+                # 选**手牌里的红桃【桃】**当来源（不选装备区的羽扇：选它会把羽扇本身
+                # 当来源搬走，羽扇的技能实例随之离场，问不到羽扇）。
+                options = {int(option) for option in steps[0].pool[0].options}
+                assert red in options
+                choices = ()
+                if len(steps) > 1:
+                    choices = (f"seat:{steps[1].pool[0].options[0][len('seat:'):]}",)
+                return ActivateSkill(
+                    skill_id="hero.guanyu.wusheng",
+                    picks=(red,),
+                    choices=choices,
+                    answers_seq=query.seq,
+                )
+            return _end_or_pass(query)
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            if getattr(query, "skill_id", None) == "equip.vermilion_feather_fan":
+                if activate:
+                    return _find(query, lambda action: isinstance(action, ActivateSkill))
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(query, lambda action: isinstance(action, ActivateSkill)) or _end_or_pass(query)
+        return _end_or_pass(query)
 
-    for actions, cause in ((barbarian, WindowCause.BARBARIAN_INVASION), (duel, WindowCause.DUEL)):
-        virtual = _virtual(actions, "fire_slash")
-        assert virtual and isinstance(virtual[0], PlayCard), (
-            f"{cause} 窗口里羽扇产物是**打出**（PlayCard）"
-        )
-        assert virtual[0].card.virtual_sources == (SLASH[0],)
-
-    borrowed_virtual = _virtual(borrowed, "fire_slash")
-    assert borrowed_virtual and isinstance(borrowed_virtual[0], UseCard)
-    assert borrowed_virtual[0].targets == (2,), "借刀窗口固定 Bn=2"
-    assert borrowed_virtual[0].card.virtual_sources == (SLASH[0],)
+    run_until(engine, [_Scripted(attacker), _EndPhaseOrPass()], _use_chain_done)
+    return engine, queries, red
 
 
-def test_the_fan_conversion_can_be_confirmed_in_the_barbarian_response_window():
-    """响应窗口的转化也走**预发动清单**（W4-fix-2）：羽扇在南蛮窗口确认后打出火【杀】。"""
-    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+def test_the_fan_converts_a_transformed_plain_slash():
+    """武圣的普通【杀】产物也能被羽扇再转成火【杀】（用户口径：虚拟 / 转化过都算）。"""
+    engine, queries, red = _use_wusheng_then_fan(activate=True)
+    assert _fan_query_count(queries) == 1
+    damage = _damage_payloads(engine)
+    assert damage and damage[0]["nature"] is DamageNature.FIRE
+    assert damage[0]["channel"].type == "fire_slash"
+    assert damage[0]["channel"].virtual_sources == (red,)
+
+
+def test_the_fan_does_not_ask_when_the_slash_is_played_in_a_barbarian_window():
+    """**打出**不是"使用"：南蛮响应里打出的普通【杀】不问羽扇（用户裁定）。"""
+    barbarian = BARBARIAN[0]
     state = _state(
         [
             SeatSpec(hand=(barbarian,)),
@@ -372,8 +383,10 @@ def test_the_fan_conversion_can_be_confirmed_in_the_barbarian_response_window():
         ]
     )
     engine = Engine.from_state(state, seed=1)
+    queries: list = []
 
     def attacker(query):
+        queries.append(query)
         if query.kind == QueryKind.PLAY_PHASE:
             return (
                 _find(
@@ -385,83 +398,39 @@ def test_the_fan_conversion_can_be_confirmed_in_the_barbarian_response_window():
             )
         return _end_or_pass(query)
 
-    def confirm(query):
-        action = _confirm_fan_preactivation(query)
-        if action is not None:
-            return action
+    def defender(query):
+        queries.append(query)
+        if query.kind == QueryKind.RESPOND:
+            return (
+                _find(
+                    query,
+                    lambda action: isinstance(action, PlayCard)
+                    and action.card.card_id == SLASH[0],
+                )
+                or _end_or_pass(query)
+            )
         return _end_or_pass(query)
 
     run_until(
         engine,
-        [_Scripted(attacker), _Scripted(confirm), _EndPhaseOrPass()],
-        _use_chain_done,
+        [_Scripted(attacker), _Scripted(defender), _EndPhaseOrPass()],
+        lambda e: any(
+            record.kind == "timing"
+            and record.timing is Timing.DAMAGE_AFTER_TAKE
+            for record in e.records
+        ),
     )
-
-    played = [
-        record.action
-        for record in engine.records
-        if record.kind == "action"
-        and isinstance(record.action, (UseCard, PlayCard))
-        and record.action.card.type == "fire_slash"
-        and record.action.card.is_virtual
-    ]
-    assert played, "南蛮窗口里按清单确认的羽扇产物必须被打出（火【杀】）"
-    assert engine.state.player(1).hp == 4, "按清单打出的火【杀】免除了南蛮的伤害"
-    assert engine.state.player(2).hp == 3, "没打出的座位照常受伤"
-    assert SLASH[0] in engine.state.discard, "来源实体【杀】进弃牌堆"
+    assert _fan_query_count(queries) == 0, "打出侧不询问羽扇"
+    assert engine.state.player(1).hp == 4, "打出的【杀】免除了南蛮伤害"
+    assert engine.state.player(2).hp == 3
 
 
-def test_the_fan_does_not_change_the_products_of_wusheng_longdan_or_the_serpent_spear():
-    """武圣 / 龙胆 / 丈八蛇矛的产物仍是普通【杀】（不带属性）——羽扇只加自己的产物。"""
-    wusheng = _state(
-        [
-            SeatSpec(
-                hand=(RED_PEACH, BLACK_SLASH),
-                equip=(FAN[0],),
-                hero="guanyu",
-            ),
-            SeatSpec(),
-        ]
+def test_the_fire_slash_product_has_attack_range_four():
+    """羽扇的攻击范围 4 在牌面数据里；换牌不改变这次使用的目标。"""
+    state = _state(
+        [SeatSpec(hand=(SLASH[0],), equip=(FAN[0],))] + [SeatSpec() for _ in range(5)]
     )
-    assert _virtual_sources(_play_candidates(wusheng), "slash") == {
-        (RED_PEACH,),
-        (FAN[0],),
-    }, (
-        "武圣的红牌产物是普通【杀】（红桃【桃】与红色装备按区域默认都是合法来源）"
-    )
-    assert _virtual_sources(_play_candidates(wusheng), "fire_slash") == {
-        (BLACK_SLASH,)
-    }, "羽扇只吃普通【杀】——武圣的产物不会被二次转成火【杀】"
-
-    longdan = _state(
-        [
-            SeatSpec(
-                hand=(DODGE[0], SLASH[0]),
-                equip=(FAN[0],),
-                hero="zhaoyun",
-            ),
-            SeatSpec(),
-        ]
-    )
-    assert _virtual_sources(_play_candidates(longdan), "slash") == {(DODGE[0],)}, (
-        "龙胆的【闪】→【杀】产物仍是普通【杀】"
-    )
-    assert _virtual_sources(_play_candidates(longdan), "fire_slash") == {(SLASH[0],)}, (
-        "同一张【杀】：龙胆把它转成【闪】，羽扇把它转成火【杀】，两条改写各自独立"
-    )
-
-    serpent = _state(
-        [
-            SeatSpec(hand=(PEACH[0], PEACH[1]), equip=(SERPENT[0],)),
-            SeatSpec(),
-        ]
-    )
-    assert _virtual_sources(_play_candidates(serpent), "slash") == {
-        tuple(sorted((PEACH[0], PEACH[1])))
-    }
-    assert not _virtual(_play_candidates(serpent), "fire_slash"), (
-        "丈八蛇矛的产物是普通【杀】，不会变成火【杀】"
-    )
+    assert attack_range(state, 0) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -746,9 +715,13 @@ def test_the_crossbow_lifts_the_slash_limit_for_fire_and_thunder_slashes():
         [
             SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0]), equip=(CROSSBOW[0],)),
             SeatSpec(),
-        ]
+        ],
+        phase=Phase.PLAY,
     )
-    bare = _state([SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0])), SeatSpec()])
+    bare = _state(
+        [SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0])), SeatSpec()],
+        phase=Phase.PLAY,
+    )
 
     armed.player(0).card_use_counts["slash"] = 3
     bare.player(0).card_use_counts["slash"] = 1
@@ -1090,11 +1063,23 @@ def test_liuli_diverts_a_fire_slash_but_not_a_non_slash_card():
 
 
 def test_wushuang_requires_two_responses_for_a_fire_slash_but_not_for_a_trick():
-    """无双的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗都要两张响应。"""
+    """无双的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗都要两张响应。
+
+    【决斗】那一档要带 ``role=TARGET``（票 23）：``target`` = 这张【决斗】**指定的目标**
+    （座位 1），``role=TARGET`` 说明这一问的响应者就是他；座位 0 是吕布 ⇒ 加倍落在对手
+    身上 ⇒ 2。
+    """
     state = _state([SeatSpec(hero="lvbu"), SeatSpec()])
     for card_id in (SLASH[0], FIRE_SLASH[0], THUNDER_SLASH[0], DUEL[0]):
         assert (
-            response_count(state, source=0, card=state.card(card_id), target=1) == 2
+            response_count(
+                state,
+                source=0,
+                card=state.card(card_id),
+                target=1,
+                role=ModifierRole.TARGET,
+            )
+            == 2
         ), f"{state.card(card_id).name} 触发无双：需要两张响应"
     assert (
         response_count(state, source=0, card=state.card(BARBARIAN[0]), target=1) == 1

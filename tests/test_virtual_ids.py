@@ -22,10 +22,17 @@ from sgs.skills import (
     ModifierContext,
     VirtualKind,
     VirtualSourceError,
+    kind_source_ceiling,
     transformed_card,
     virtual_card_id,
 )
-from sgs.skills.virtual import LEGACY_KIND_COUNT, WIRE_INT_LIMIT, virtual_candidates
+from sgs.skills.virtual import (
+    BLOCK_KIND_COUNT,
+    LEGACY_KIND_COUNT,
+    TAIL_KIND_START,
+    WIRE_INT_LIMIT,
+    virtual_candidates,
+)
 
 from support import SeatSpec, build_state
 from test_skills import PACK
@@ -39,10 +46,20 @@ BASE = len(PACK.deck.cards) + 1
 KINDS = tuple(range(len(VirtualKind)))
 
 FIRE_KIND = int(VirtualKind.FIRE_SLASH)
-"""M5-05b 新增的火【杀】命名空间（本票唯一允许追加的 kind）。"""
+"""M5-05b 新增的火【杀】命名空间（M5 唯一允许追加的 kind）。"""
+
+DISMANTLEMENT_KIND = int(VirtualKind.DISMANTLEMENT)
+"""M6 票 03【奇袭】新增的【过河拆桥】命名空间：M5 之后的第一个追加段。"""
+
+WINE_KIND = int(VirtualKind.WINE)
+"""M6 票 16【龙胆】新增的【酒】命名空间：追加段的段起点已越过线上上限，故走尾部紧凑段。"""
 
 STANDARD_108_BLOCK = 8 * 109**7
-"""108 张 / 7 张来源的泛化段容量（W4 冻结值；追加 kind 后一字不改）。"""
+"""108 张 / 7 张来源的泛化段容量（W4 冻结值；追加 kind 后一字不改）。
+
+块容量按**共享冻结段**（:data:`BLOCK_KIND_COUNT` 个 kind）的 7 张来源紧界取；
+追加 kind 只加段数，不移动旧 id。
+"""
 
 MILITARY_160_BLOCK = 7 * 161**6
 """160 张 / 6 张来源的泛化段容量（M5-01a 的收紧；追加 kind 后一字不改）。"""
@@ -58,6 +75,20 @@ def _capacity(source_count: int, base: int = BASE) -> int:
     return (source_count + 1) * base**source_count
 
 
+def _best_source_count(kind: int, block: int, base: int = BASE) -> int:
+    """该段**撑得住**的最大来源张数（独立复算：``kind*block + _capacity(L) < 线内``）。
+
+    与实现的 :func:`kind_source_ceiling` 同一条不等式，但这里不读实现——段起点
+    ``kind * block`` 加上该张数的编码上界必须仍 ``< WIRE_INT_LIMIT``。
+    """
+    admissible = [
+        source_count
+        for source_count in range(1, MAX_VIRTUAL_SOURCES + 2)
+        if kind * block + _capacity(source_count, base) < WIRE_INT_LIMIT
+    ]
+    return max(admissible)
+
+
 def _over_limit_sources() -> tuple[int, ...]:
     return tuple(range(MAX_VIRTUAL_SOURCES + 1))
 
@@ -68,31 +99,77 @@ def _over_limit_sources() -> tuple[int, ...]:
 
 
 def test_the_source_ceiling_is_the_largest_the_wire_limit_allows():
-    """``MAX_VIRTUAL_SOURCES`` = 使**全部 kind 段**仍 ``< WIRE_INT_LIMIT`` 的最大来源张数。"""
+    """``MAX_VIRTUAL_SOURCES`` = 使**共享冻结段**（6 个 kind）仍 ``< WIRE_INT_LIMIT`` 的最大张数。
+
+    段数读 :data:`BLOCK_KIND_COUNT` 而不是 ``len(Kinds)``：M6 票 03 追加的第十个段不参与
+    旧块布局的界推（``BLOCK_KIND_COUNT`` 若跟着变成 7，108 张档会收紧到 6 并挪动旧 id）。
+    """
     assert BASE == 109, "标准包 108 张 ⇒ 进制 109（本票的界推以此为准）"
+    assert BLOCK_KIND_COUNT == int(VirtualKind.FIRE_SLASH) + 1, (
+        "共享冻结段 = SLASH … FIRE_SLASH（M5-05b 时的段布局）"
+    )
     admissible = [
         source_count
         for source_count in range(1, 32)
-        if len(KINDS) * _capacity(source_count) < WIRE_INT_LIMIT
+        if BLOCK_KIND_COUNT * _capacity(source_count) < WIRE_INT_LIMIT
     ]
     assert admissible, "至少允许一张来源"
     assert MAX_VIRTUAL_SOURCES == max(admissible), (
         f"来源上限应是从 WIRE_INT_LIMIT 反推的最大值 {max(admissible)}，实际 {MAX_VIRTUAL_SOURCES}"
     )
-    assert len(KINDS) * _capacity(MAX_VIRTUAL_SOURCES) < WIRE_INT_LIMIT
-    assert len(KINDS) * _capacity(MAX_VIRTUAL_SOURCES + 1) >= WIRE_INT_LIMIT, (
+    assert BLOCK_KIND_COUNT * _capacity(MAX_VIRTUAL_SOURCES) < WIRE_INT_LIMIT
+    assert BLOCK_KIND_COUNT * _capacity(MAX_VIRTUAL_SOURCES + 1) >= WIRE_INT_LIMIT, (
         "再多一张来源就越过 WIRE_INT_LIMIT——上限必须紧到这一步"
     )
 
 
-def test_every_allowed_kind_and_source_count_stays_under_the_wire_limit():
-    """``kind`` 全部取值 × 来源 ``0..MAX`` 张的**端点**：``|id| < WIRE_INT_LIMIT``（断言）。"""
-    count = len(PACK.deck.cards)
-    source_sets: list[tuple[int, ...]] = [()]
-    for size in range(1, MAX_VIRTUAL_SOURCES + 1):
-        source_sets.append(tuple(range(size)))  # 最小来源（编码最小）
-        source_sets.append(tuple(range(count - size, count)))  # 最大来源（编码最大）
+def test_every_kind_has_its_own_wire_safe_source_ceiling():
+    """每个 kind 的来源上界都线内；前两类按剩余空间收紧，尾部段按声明容量取。
+
+    M6 票 03 / 票 16 起 kind 被分成三类：
+
+    - 共享冻结段（0–5）读牌堆上限 7；
+    - 追加段（6）挂在旧段之后，段起点 ``1 + kind * block`` 已逼近 ``2**53``，故按剩余
+      空间逐段收窄（108 张档的 ``DISMANTLEMENT`` 段 = 6）；
+    - 尾部紧凑段（7…）的段起点改用兼容段之后的空隙，段容量按**声明的来源上界** 2 取
+      （见 :data:`sgs.skills.virtual.TAIL_SOURCE_CEILING`）——它不是"紧到下一张就越界"，
+      而是"只承载单源 / 双源转化"的声明式收窄。
+
+    判据与实现的 :func:`kind_source_ceiling` 同一条不等式，但这里从
+    :data:`STANDARD_108_BLOCK` **独立复算**，不读实现。
+    """
+    tail_offset = LEGACY_KIND_COUNT * BASE**2
+    tail_block = (2 + 1) * BASE**2
     for kind in KINDS:
+        if kind >= TAIL_KIND_START:
+            assert kind_source_ceiling(kind, 108) == 2, (kind, "尾部段恒 2 张")
+            start = tail_offset + (kind - TAIL_KIND_START) * tail_block
+            assert start + _capacity(2) < WIRE_INT_LIMIT, f"kind={kind} 的尾部段越线"
+            continue
+        expected = min(MAX_VIRTUAL_SOURCES, _best_source_count(kind, STANDARD_108_BLOCK))
+        assert kind_source_ceiling(kind, 108) == expected, (kind, expected)
+        assert (
+            kind * STANDARD_108_BLOCK + _capacity(expected) < WIRE_INT_LIMIT
+        ), f"kind={kind} 的 {expected} 张内必须仍在线内"
+        assert (
+            kind * STANDARD_108_BLOCK + _capacity(expected + 1) >= WIRE_INT_LIMIT
+        ), f"kind={kind} 的上界必须紧到 {expected + 1} 张就越界"
+
+    assert kind_source_ceiling(DISMANTLEMENT_KIND, 108) == 6
+    assert kind_source_ceiling(DISMANTLEMENT_KIND, 108) < kind_source_ceiling(
+        int(VirtualKind.PEACH), 108
+    ), "追加段比共享段更早撞线：这是它单独收窄的理由"
+
+
+def test_every_allowed_kind_and_source_count_stays_under_the_wire_limit():
+    """``kind`` 全部取值 × 该段的``0..上界``张**端点**：``|id| < WIRE_INT_LIMIT``（断言）。"""
+    count = len(PACK.deck.cards)
+    for kind in KINDS:
+        ceiling = kind_source_ceiling(kind, count)
+        source_sets: list[tuple[int, ...]] = [()]
+        for size in range(1, ceiling + 1):
+            source_sets.append(tuple(range(size)))  # 最小来源（编码最小）
+            source_sets.append(tuple(range(count - size, count)))  # 最大来源（编码最大）
         for sources in source_sets:
             card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
             assert abs(card_id) < WIRE_INT_LIMIT, (
@@ -126,13 +203,13 @@ def test_single_source_ids_are_pairwise_distinct_over_the_whole_deck():
             seen[card_id] = (kind, sources)
 
 
-def _generalized_samples(count: int) -> set[tuple[int, ...]]:
-    """泛化段的抽样：含 ``0`` 的组合 + 最小 / 最大 / 进位三类端点（0..MAX 张）。"""
+def _generalized_samples(count: int, ceiling: int) -> set[tuple[int, ...]]:
+    """泛化段的抽样：含 ``0`` 的组合 + 该段上界内的最小 / 最大 / 进位端点。"""
     sample = (0, 1, 2, 53, 106, 107)
     source_sets: set[tuple[int, ...]] = set()
-    for size in range(0, len(sample) + 1):
+    for size in range(0, min(len(sample), ceiling) + 1):
         source_sets.update(combinations(sample, size))
-    for size in range(1, MAX_VIRTUAL_SOURCES + 1):
+    for size in range(1, ceiling + 1):
         source_sets.add(tuple(range(size)))  # 最小端点（编码最小）
         source_sets.add(tuple(range(count - size, count)))  # 最大端点（编码最大）
         source_sets.add(tuple(sorted((0, *range(count - size + 1, count)))))  # 进位端点
@@ -140,13 +217,14 @@ def _generalized_samples(count: int) -> set[tuple[int, ...]]:
 
 
 def test_generalized_ids_are_pairwise_distinct_for_every_source_count():
-    """``kind >= 2``：0..MAX 张的抽样与端点逐对不等，且 ``|id| < WIRE_INT_LIMIT``。"""
+    """``kind >= 2``：各段 ``0..上界`` 张的抽样与端点逐对不等，且 ``|id| < WIRE_INT_LIMIT``。"""
     count = len(PACK.deck.cards)
     seen: dict[int, tuple[int, tuple[int, ...]]] = {}
     for kind in KINDS:
         if kind < 2:
             continue
-        for sources in sorted(_generalized_samples(count)):
+        ceiling = kind_source_ceiling(kind, count)
+        for sources in sorted(_generalized_samples(count, ceiling)):
             card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
             assert abs(card_id) < WIRE_INT_LIMIT, (kind, sources, card_id)
             assert card_id not in seen, (
@@ -274,7 +352,10 @@ def test_the_military_160_deck_narrows_the_source_ceiling_but_keeps_ids_safe():
     )
 
     for kind in KINDS:
-        for sources in ((), (0,), (0, 1), tuple(range(ceiling))):
+        kind_ceiling = kind_source_ceiling(kind, count)
+        sizes = dict.fromkeys((0, 1, 2, min(2, kind_ceiling), kind_ceiling))
+        for size in sizes:
+            sources = tuple(range(size))
             card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
             assert abs(card_id) < WIRE_INT_LIMIT, (kind, sources, card_id)
 
@@ -400,10 +481,53 @@ def test_the_fire_slash_kind_is_wire_safe_and_does_not_collide_with_the_old_kind
                 seen[card_id] = (kind, sources)
 
 
+def test_appending_the_dismantlement_kind_opens_segment_six_without_moving_old_ids():
+    """M6 票 03：``DISMANTLEMENT`` 整段排在火【杀】段之后，旧 id 与块容量一字不改。
+
+    段起点 = ``1 + 6 * block``；只承载【奇袭】的单来源转化（上界 6 由
+    :func:`kind_source_ceiling` 收紧），故整段仍在线内。旧泛化段（kind 2–5）的冻结算式值
+    在这一条里同时复核——追加 kind 不移动它们。
+    """
+    count = 108
+    block = STANDARD_108_BLOCK
+    assert (
+        abs(virtual_card_id(kind=DISMANTLEMENT_KIND, sources=(), card_count=count))
+        == 1 + 6 * block
+    )
+    assert (
+        abs(
+            virtual_card_id(kind=DISMANTLEMENT_KIND, sources=(18,), card_count=count)
+        )
+        == 1 + 6 * block + (1 * 109 + 18)
+    )
+    assert (1 + 6 * block) < WIRE_INT_LIMIT, "段起点本身仍在线内（否则追加段无从谈起）"
+    # 旧 kind 的冻结值不受影响（与 test_the_standard_108_ids_stay_on_the_frozen_seven_source_block 同源）。
+    assert (
+        virtual_card_id(kind=2, sources=(18,), card_count=108)
+        == -2_924_862_593_306_832
+    )
+    assert virtual_card_id(kind=4, sources=(), card_count=108) == -(1 + 4 * block)
+
+    old_min = abs(virtual_card_id(kind=FIRE_KIND, sources=(), card_count=count))
+    new_min = abs(virtual_card_id(kind=DISMANTLEMENT_KIND, sources=(), card_count=count))
+    assert new_min > old_min, "新段整段排在旧段之后"
+
+
 def test_the_source_ceilings_stay_seven_for_108_and_six_for_160_after_the_new_kind():
-    """追加 kind 后来源上限的读数不变：108 = 7、160 = 6（每个 kind 都产得出 id）。"""
-    for count, ceiling in ((108, 7), (160, 6)):
+    """追加 kind 后**共享段**的读数不变（108 = 7、160 = 6），追加段按自己的段起点收窄。
+
+    ``DISMANTLEMENT`` 是 M5-05b 之后的第一个追加段：108 张档的段起点
+    ``1 + 6 * block ≈ 8.77e15`` 只剩约 ``2.3e14`` 的线内空间 ⇒ 上界 6（7 张就越线）；
+    160 张档本来就只到 6，追加段与共享段同值。
+    """
+    assert kind_source_ceiling(int(VirtualKind.PEACH), 108) == 7
+    assert kind_source_ceiling(int(VirtualKind.PEACH), 160) == 6
+    assert kind_source_ceiling(DISMANTLEMENT_KIND, 108) == 6
+    assert kind_source_ceiling(DISMANTLEMENT_KIND, 160) == 6
+
+    for count in (108, 160):
         for kind in KINDS:
+            ceiling = kind_source_ceiling(kind, count)
             virtual_card_id(
                 kind=kind, sources=tuple(range(ceiling)), card_count=count
             )
@@ -434,3 +558,51 @@ def test_a_fire_slash_virtual_product_is_constructible_in_the_160_deck():
     assert product.card_id != transformed_card(state, (source,), "slash").card_id, (
         "同一来源的普通【杀】产物与火【杀】产物必须分处两个 kind 段"
     )
+
+
+# ---------------------------------------------------------------------------
+# M6 票 16：尾部紧凑段（【酒】段）——追加段已无空间，新 kind 住兼容段之后的空隙
+# ---------------------------------------------------------------------------
+
+
+def test_the_tail_kind_uses_the_gap_after_the_legacy_namespace():
+    """尾部段的 id 落在兼容段之后、泛化段之前：旧 id 一字不动、新旧两段不相交。"""
+    count = 108
+    legacy_end = 1 + LEGACY_KIND_COUNT * BASE**2
+    generalized_start = 1 + LEGACY_KIND_COUNT * STANDARD_108_BLOCK
+
+    assert kind_source_ceiling(WINE_KIND, count) == 2, "尾部段按声明的来源上界收窄"
+    empty = abs(virtual_card_id(kind=WINE_KIND, sources=(), card_count=count))
+    single = abs(
+        virtual_card_id(kind=WINE_KIND, sources=(count - 1,), card_count=count)
+    )
+    two = abs(
+        virtual_card_id(kind=WINE_KIND, sources=(count - 1, count - 2), card_count=count)
+    )
+
+    assert empty == legacy_end, "尾部段紧接兼容段之后"
+    assert empty < single < two < generalized_start, "整段落在两段之间的空隙里"
+    # 旧 kind 的冻结值一字不动（与 test_the_standard_108_ids_stay_on_the_frozen_seven_source_block 同源）。
+    assert (
+        virtual_card_id(kind=2, sources=(18,), card_count=108)
+        == -2_924_862_593_306_832
+    )
+
+
+def test_the_tail_kind_is_wire_safe_and_single_source_is_constructible_in_the_160_deck():
+    """160 档：单源【桃】当【酒】的产物 id 在线内，且与所有旧 kind 不撞。"""
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    state = build_state(pack=pack, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = next(card.card_id for card in state.cards if card.type == "peach")
+
+    product = transformed_card(state, (source,), "wine")
+
+    assert product.type == "wine" and product.is_virtual
+    assert product.name == "酒", "产物牌名读实体牌（不是 type id）"
+    assert abs(product.card_id) < WIRE_INT_LIMIT
+    other_kinds = {
+        virtual_card_id(kind=kind, sources=(source,), card_count=160)
+        for kind in KINDS
+        if kind != WINE_KIND and kind_source_ceiling(kind, 160) >= 1
+    }
+    assert product.card_id not in other_kinds, "与所有旧 kind 的单源 id 两两不等"

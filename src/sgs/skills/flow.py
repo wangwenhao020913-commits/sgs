@@ -67,6 +67,7 @@ __all__ = [
     "Arrange",
     "AskIdentity",
     "DeckTopArrange",
+    "TwoRowArrange",
     "FixedSplit",
     "FlowAnswers",
     "FlowEffect",
@@ -201,6 +202,7 @@ class PickCards:
     ``(state, frame, owner, answers)`` —— 【贯石斧】据此排除**这张技能对应的装备牌自己**
     （用户裁定，偏离官方 FAQ）：身份取 ``SkillInstance.source.card_id`` 的实例解析结果，
     不写死牌名。
+
     """
 
     zones: tuple[Zone, ...]
@@ -218,6 +220,17 @@ class PickCards:
         tuple[int, ...]
         | Callable[[GameState, Any, int, FlowAnswers], tuple[int, ...]]
     ) = ()
+    hero_zone: str | Callable[[GameState, Any, int, FlowAnswers], str] | None = None
+    """**武将牌上的牌**的区键（huo-shenzhugeliang 票 02 的加法；缺省 ``None`` = 不选它）。
+
+    ``Zone.HERO`` 是唯一需要"技能实例"这第二维的区域（``GameState.zone`` 缺它直接
+    fail-closed，见 ``src/sgs/state/models.py``：「星」与【谦逊】是两个互不相干的区）。
+    ``PickCards.zones`` 只带 ``Zone`` 枚举维，故用本字段补那一维：非 ``None`` 时这一步的
+    唯一区域 = ``ZoneRef(Zone.HERO, face, <本字段>)``（``face`` = 铺面的那个座位），
+    ``zones`` 只作为"这是个区域步"的声明（传 ``(Zone.HERO,)``）。
+
+    可调用档收 ``(state, frame, owner, answers)``：区键与应答者 / 前序答案有关时用它。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,14 +286,44 @@ class PickSeats:
     actor: ActorRef = None
 
 
+OptionChoices = (
+    tuple[str, ...] | Callable[[GameState, Any, int, "FlowAnswers"], tuple[str, ...]]
+)
+"""选项步的闭集：定值元组，或 ``(state, frame, owner, answers) -> tuple[str, ...]``。
+
+可调用档（票 23 的加法）服务"可选哪几项取决于**前序答案**"的技能：界【结姻】的
+「弃置一张手牌 / 将一张装备牌置入其装备区」两选一，第二步可不可行取决于**第一步选中的
+那名男性角色**的装备区空槽（牌面定了"置入"不能替换已有装备）。与 :attr:`PickCards.face`
+同一姿态：渲染清单、铺菜单、校验复合动作三处都读同一份解析结果。
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class PickOption:
-    """选项步骤：问一次 ``SELECT_OPTION``（闭集 ``options``，选中文本原样进答案）。"""
+    """选项步骤：问一次 ``SELECT_OPTION``（闭集 ``options``，选中文本原样进答案）。
 
-    options: tuple[str, ...]
+    ``revealed``（韬·刘备【义起】的加法）：把本次询问**授予应答者**的牌面一起下发
+    （:meth:`Engine.ask_option` 的 ``revealed``）。投影按"``SELECT_OPTION`` ∧ ``revealed``
+    非空"这个**形状**开选择型弹窗：牌面画在弹窗里（只读），选项按钮也画在同一弹窗。
+    可调用档收 ``(state, frame, owner, answers)``，发问前现算——【义起】"观看弃牌堆顶 x 张
+    再选一种类型"因此是**一问**：先看到牌，再点一个类型（不用分两步、也填不进预发动清单）。
+
+    ``disabled``（票 04 §3）：``options`` 里**显示但不可选**的那些（与 ``options`` 同形态，
+    可调用档收同样的四个参数，按**前序答案**现算）。"列出名字"与"这个能选"是两件事：
+    【蛊惑】的牌名弹窗要列全牌堆名（用户 Q1A），而"此刻没有合法目标"的名字只能置灰。
+    置灰**不是界面纪律**：`manifest` 把它下发进 ``StepPool.disabled``，
+    :func:`_assign_activation` 的逐步校验**拒绝**其中的项（fail-closed），故不点界面也提交不了。
+    """
+
+    options: OptionChoices
     actor: ActorRef = None
     optional: bool = True
     key: str = "option"
+    revealed: (
+        tuple[CardRef, ...]
+        | Callable[[GameState, Frame, int, FlowAnswers], tuple[CardRef, ...]]
+    ) = ()
+    disabled: OptionChoices = ()
 
 
 ArrangeCount = int | Callable[[GameState, Frame], int]
@@ -364,6 +407,51 @@ class DeckTopArrange:
 
 
 @dataclass(frozen=True, slots=True)
+class TwoRowArrange:
+    """**两行交换**的排列规格（huo-shenzhugeliang 票 02；首个载体 = 神诸葛亮【七星】）。
+
+    与 :class:`DeckTopArrange` 的差别只有三处：
+
+    - 牌**不是**从牌堆顶看来的：``cards`` 自己回答这一面摆哪些牌（七星 = 武将牌上的
+      「星」＋手牌，两者对宿主都是可见事实）；
+    - 两行是**两个具名行**（牌面之外的事实），切分点由 ``top`` 现算 —— 七星取"交换前的
+      星数"，于是**上排张数恒定** ⇒ 上下交换必然等量（"替换等量的星"由规格保证，不靠
+      技能代码再校验一遍）；
+    - ``enumerate_candidates=False``：候选**不枚举**（答案空间是 `C(总张数, 星数)`，最坏
+      19,448 条），只给一条恒等兜底；界面自己构造答案，服务端只做结构校验
+      （:meth:`Engine.ask_arrange` 的 ``ArrangeCards`` 合法性检查）。
+      ``reorder=False``：界面上**只能上下交换、行内不可调序**（用户 2026-11-04 Q4：
+      手牌顺序与星顺序都没有影响）。
+    """
+
+    count: ArrangeCount
+    top: ArrangeCount
+    cards: Callable[[GameState, Any], tuple[CardRef, ...]]
+    top_label: str
+    bottom_label: str
+    enumerate_candidates: bool = False
+    reorder: bool = False
+
+    def count_of(self, state: GameState, frame: Any) -> int:
+        """本次面内张数（可调用档在这里求值）。"""
+        value = self.count
+        return int(value(state, frame) if callable(value) else value)
+
+    def top_of(self, state: GameState, frame: Any) -> int:
+        """上排（星）张数 —— 也是本次 ``ArrangeCards.split``。"""
+        value = self.top
+        return int(value(state, frame) if callable(value) else value)
+
+    def cards_of(self, state: GameState, frame: Any) -> tuple[CardRef, ...]:
+        """这一面要摆的牌（**顺序即两行的初始顺序**：先上排、后下排）。"""
+        return tuple(self.cards(state, frame))
+
+    def split_point(self, count: int) -> int | None:
+        """``DeckTopArrange`` 的同一接口：两行规格恒定切成 ``top`` 张牌。"""
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class Arrange:
     """排列步骤（W6-02）：看牌堆顶 ``spec.count`` 张，问一次 ``ARRANGE``，答案原样进 ``answers``。
 
@@ -390,7 +478,7 @@ class Arrange:
     """
 
     key: str
-    spec: DeckTopArrange
+    spec: DeckTopArrange | TwoRowArrange
     actor: ActorRef = None
 
 
@@ -484,6 +572,15 @@ def _resolve_face(ref: ActorRef, state: GameState, frame: Any, owner: int, answe
     return int(ref)
 
 
+def _resolve_options(
+    choices: OptionChoices, state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """把 ``PickOption.options`` 解析成**此刻的闭集**（可调用档按前序答案现算）。"""
+    if callable(choices):
+        return tuple(choices(state, frame, owner, answers))
+    return tuple(choices)
+
+
 def _flow_actor(
     step: FlowStep, state: GameState, frame: Any, owner: int, answers: FlowAnswers
 ) -> int:
@@ -525,9 +622,75 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
 
 
-def _zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
+def _zone_cards(state: GameState, ref: Any) -> list[int]:
+    """坐标 → 区里的牌；**武将牌上的区还没建**时按空区读（不是编程错误）。
+
+    `GameState.zone` 对"区不存在"是 fail-closed 的（目的地必须先由放置入口建区）。但
+    「星」这类区可能**还没建**：构造局面直接给了武将（`GAME_START` 的扣置没跑过），
+    或技能已失去（规则 §15.2：失去技能不影响区，但区本身可以不存在）。取牌面时把
+    "没有这个区"读成空区，才能让"没星可移"走到既有的**取消**路径（不发空询问）。
+    """
+    if ref.zone is Zone.HERO:
+        instance = getattr(ref, "skill_instance", None)
+        if instance is None:
+            return []
+        seat = getattr(ref, "seat", None)
+        if seat is None:
+            return []
+        return list(state.hero_zone(seat, instance))
+    return list(state.zone(ref))
+
+
+def zone_refs(seat: int, zones: tuple[Zone | Any, ...]) -> tuple[Any, ...]:
+    """把步骤的区域声明**坐标化**（huo-shenzhugeliang 票 02）。
+
+    ``zones`` 里的元素可以是 ``Zone`` 枚举（缺省坐标 = ``(zone, seat)``），也可以已经是
+    ``ZoneRef``（带 ``skill_instance`` 的武将牌上的牌区、或**另一个座位**的区）。两种都
+    收，是因为 ``PickCards.zones`` 的既有声明是枚举元组（145 条技能一字不改），而"武将牌
+    上的牌"必须多带一维。座位为 ``None`` 的 ``ZoneRef`` 按 ``seat`` 补齐。
+    """
+    out: list[Any] = []
+    for zone in zones:
+        if isinstance(zone, ZoneRef):
+            out.append(zone if zone.seat is not None else ZoneRef(zone.zone, seat, zone.skill_instance))
+        else:
+            out.append(ZoneRef(zone, seat))
+    return tuple(out)
+
+
+def _step_zones(
+    step: PickCards,
+    state: GameState,
+    face: int,
+    frame: Any = None,
+    owner: int | None = None,
+    answers: FlowAnswers | None = None,
+) -> tuple[Any, ...]:
+    """``PickCards`` 这一步此刻的区域坐标（``hero_zone`` 在这里补上实例键）。"""
+    raw = step.hero_zone
+    if raw is None:
+        return zone_refs(face, step.zones)
+    key = raw(state, frame, face if owner is None else owner, answers or {}) if callable(raw) else str(raw)
+    return (ZoneRef(Zone.HERO, face, key),)
+
+
+def _zone_pool_size(state: GameState, seat: int, zones: tuple[Zone | Any, ...]) -> int:
     """``zones`` 此刻对 ``seat`` 铺出的槽位数（``PickCards.hi=None`` 的解析真源）。"""
-    return sum(len(state.zone(ZoneRef(zone, seat))) for zone in zones)
+    return sum(len(_zone_cards(state, ref)) for ref in zone_refs(seat, zones))
+
+
+def _hi_of(
+    step: PickCards,
+    state: GameState,
+    frame: Any,
+    owner: int,
+    answers: FlowAnswers,
+) -> int | None:
+    """这一步的上限：定值 / 可调用档 / ``None``（= 全部可选，由池现算）。"""
+    hi = step.hi
+    if callable(hi):
+        return int(hi(state, frame, owner, answers))
+    return hi
 
 
 def zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
@@ -561,8 +724,8 @@ def _filtered_zone_pool_size(
     """
     return sum(
         1
-        for zone in zones
-        for card_id in state.zone(ZoneRef(zone, seat))
+        for ref in zone_refs(seat, zones)
+        for card_id in _zone_cards(state, ref)
         if _kept_by_filters(state.card(card_id), card_id, card_types, slot_kinds, exclude_cards)
     )
 
@@ -645,6 +808,20 @@ def _filter_face(
     )
 
 
+def _revealed_cards(
+    step: Any, state: Any, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[CardRef, ...]:
+    """本步**授予应答者**的牌面（``PickOption.revealed`` 的求值口）。
+
+    定值档原样返回；可调用档收 ``(state, frame, owner, answers)`` —— 与 ``face`` /
+    ``exclude_cards`` 的可调用档同一条求值纪律（发问前现算，不抽随机数、不落 delta）。
+    """
+    source = step.revealed
+    if callable(source):
+        return tuple(source(state, frame, owner, answers))
+    return tuple(source)
+
+
 def _flow_step_cards(
     host: Any,
     frame: Any,
@@ -673,7 +850,19 @@ def _flow_step_cards(
     **铺面必须惰性**（``build_face`` 闭包）：``selection_face(reveal_hand=False)`` 铺隐藏
     槽时会消耗 ``select`` 子流的随机数，而 :meth:`Engine.ask_selection` 只在**第一次**
     调用它（帧内记忆）。这里若提前铺好，"每次重入消耗一次随机数"会让既有录像分叉。
+
+    **先认已接受的答案，再碰状态**（本 effort 票 01）：这一步问过就原样采用那份答案，
+    ``actor`` / ``face`` / 黑名单 / 过滤后的池一格都不读。挂起续跑时 effect 已经改过这些
+    判据要读的状态（【攻心】把目标最后一张手牌搬进牌堆），按活状态重算会把"已经发生过
+    副作用的发动"误判成 ``"cancel"``（"零副作用"）；这一步的答案与发问时**同键同源**
+    （:meth:`Engine.accepted_selection` 与 :meth:`Engine.ask_selection` 同一份缓存）。
     """
+    cache_key = ask_key_of(step, frame)
+    accepted = host.accepted_selection(frame, owner=ask_owner, key=cache_key)
+    if accepted is not None:
+        if len(accepted) < step.lo:
+            return "cancel", ()
+        return "ok", tuple(int(card_id) for card_id in accepted)
     actor = _flow_actor(step, host.state, frame, owner, answers)
     face = (
         actor
@@ -682,15 +871,13 @@ def _flow_step_cards(
     )
     if face == ():
         return "cancel", ()
-    cache_key = ask_key_of(step, frame)
     excluded = _excluded_card_ids(step, host.state, frame, owner, answers)
-    hi = (
-        step.hi
-        if step.hi is not None
-        else _filtered_zone_pool_size(
-            host.state, face, step.zones, step.card_types, step.slot_kinds, excluded
+    zones = _step_zones(step, host.state, face, frame, owner, answers)
+    hi = _hi_of(step, host.state, frame, owner, answers)
+    if hi is None:
+        hi = _filtered_zone_pool_size(
+            host.state, face, zones, step.card_types, step.slot_kinds, excluded
         )
-    )
     if (step.card_types or step.slot_kinds or excluded) and hi < step.lo:
         # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
         # 同时也挡住 ``(lo, hi) = (1, 0)`` 这种会让 `_select_cards` 的 range 为空的形状。
@@ -703,7 +890,12 @@ def _flow_step_cards(
         timing=timing,
         spec=SelectionSpec(zones=step.zones, total=(step.lo, hi), optional=step.optional),
         build_face=lambda: _filter_face(
-            *host.selection_face(face, step.zones, reveal_hand=step.reveal_hand),
+            # 没有 ``hero_zone`` 时把**原始声明**交给铺面口（145 条既有技能与测试里的
+            # 铺面夹具都按 ``Zone`` 枚举实现）；只有武将牌上的牌才需要坐标那一维。
+            *host.selection_face(
+                face, zones if step.hero_zone is not None else step.zones,
+                reveal_hand=step.reveal_hand,
+            ),
             step.card_types,
             step.slot_kinds,
             excluded,
@@ -841,11 +1033,27 @@ def _flow_step_seats(
     timing: Timing,
     ask_owner: Any,
 ) -> tuple[str, object]:
-    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。"""
+    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。
+
+    **先认已接受的答案，再算池**（本 effort 票 01）：这一问若已经答过，答案就是这一步的
+    裁决，``pool`` 一次都不算。挂起续跑时 effect 已经改过 ``pool`` 要读的状态（【攻心】
+    把目标最后一张手牌搬进牌堆 ⇒ "手牌非空的其他角色"池里没有目标了），按活状态现算会
+    把"已经发生过副作用的发动"误判成 ``"cancel"``（``run_flow`` 把它读成"零副作用、技能
+    可再发动"）。答案缓存与 :meth:`Engine.ask_option` **同键同源**
+    （:meth:`Engine.accepted_option`），故"重跑 steps 不重发询问"这条既有设计不变，只是
+    把"现算 pool"从重入路径上摘掉了。
+    """
     del ask_owner  # 座位步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
     chosen: list[int] = []
     while len(chosen) < step.hi:
+        option_id = _flow_option_id(frame, step.key, len(chosen), multi=step.hi > 1)
+        accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
+        if accepted is not None:
+            if isinstance(accepted, Pass):
+                break
+            chosen.append(option_seat(accepted))
+            continue
         pool = tuple(
             int(seat)
             for seat in step.pool(host.state, frame, owner, tuple(chosen))
@@ -858,7 +1066,7 @@ def _flow_step_seats(
             frame,
             actor,
             timing,
-            skill_id=_flow_option_id(frame, step.key, len(chosen), multi=step.hi > 1),
+            skill_id=option_id,
             options=tuple(seat_choice(seat) for seat in pool),
             optional=step.optional,
         )
@@ -881,18 +1089,40 @@ def _flow_step_option(
     timing: Timing,
     ask_owner: Any,
 ) -> tuple[str, object]:
-    """跑一步选项询问：返回三态 + 选项文本。"""
+    """跑一步选项询问：返回三态 + 选项文本。
+
+    **先认已接受的答案，再解析闭集**（本 effort 票 01）：``options`` / ``disabled`` /
+    ``revealed`` 都可按活状态现算（界【结姻】那类"可选项取决于目标状态"），故挂起续跑时
+    现算可能得到空闭集 ⇒ 把已经发生过副作用的发动误判成 ``"cancel"``。这一步问过就原样
+    采用那份答案；答案缓存与 :meth:`Engine.ask_option` 同键同源。
+    """
     del ask_owner  # 选项步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
-    if not step.options:
+    option_id = _flow_option_id(frame, step.key, 0, multi=False)
+    accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
+    if accepted is not None:
+        if isinstance(accepted, Pass):
+            return "cancel", ""
+        return "ok", accepted.choice
+    options = _resolve_options(step.options, host.state, frame, owner, answers)
+    blocked = _resolve_options(step.disabled, host.state, frame, owner, answers)
+    if blocked:
+        # 置灰项在**另两处**已经出不去（清单画灰、复合动作被校验器拒收），但逐步询问这条
+        # 路（未翻预发动的流水线 / 被动技）的候选就是 ``ask_option`` 的选项 —— 把置灰项
+        # 留在里面等于给出一条"点了必被拒"的候选。故这里也按同一份解析结果收窄。
+        options = tuple(text for text in options if text not in blocked)
+    if not options:
+        # 此刻一项都执行不了（例如【结姻】的目标装备区没有空槽、手里也没有手牌）⇒
+        # 与"空池"同一条纪律：不发没有候选的询问，整条流水线取消（零副作用）。
         return "cancel", ""
     answer = host.ask_option(
         frame,
         actor,
         timing,
-        skill_id=_flow_option_id(frame, step.key, 0, multi=False),
-        options=step.options,
+        skill_id=option_id,
+        options=options,
         optional=step.optional,
+        revealed=_revealed_cards(step, host.state, frame, owner, answers),
     )
     if host.suspended(answer):
         return "stay", ""
@@ -953,12 +1183,34 @@ def _flow_step_arrange(
     """
     actor = _flow_actor(step, host.state, frame, owner, answers)
     cache = frame.data.setdefault(ARRANGE_CARDS_KEY, {})
+    spec = step.spec
+    if isinstance(spec, TwoRowArrange):
+        # 两行交换（huo-shenzhugeliang 票 02）：牌由规格自己回答，不碰牌堆。
+        if ask_owner not in cache:
+            cache[ask_owner] = spec.cards_of(host.state, frame)
+        cards: tuple[CardRef, ...] = cache[ask_owner]
+        if not cards:
+            return "cancel", None
+        top = spec.top_of(host.state, frame)
+        if spec.count_of(host.state, frame) != len(cards) or not 0 <= top <= len(cards):
+            raise ValueError("TwoRowArrange 的张数 / 上排张数与实际牌面不符（声明写错了）")
+        action = host.ask_arrange(
+            frame,
+            actor,
+            timing,
+            cards=cards,
+            split=top,
+            enumerate_candidates=spec.enumerate_candidates,
+        )
+        if host.suspended(action):
+            return "stay", None
+        return "ok", action
     if ask_owner not in cache:
-        count = step.spec.count
+        count = spec.count
         if callable(count):
             count = count(host.state, frame)
         cache[ask_owner] = host.peek_deck(frame, int(count))
-    cards: tuple[CardRef, ...] = cache[ask_owner]
+    cards = cache[ask_owner]
     if not cards:
         return "cancel", None
     action = host.ask_arrange(
@@ -966,7 +1218,7 @@ def _flow_step_arrange(
         actor,
         timing,
         cards=cards,
-        split=step.spec.split_point(len(cards)),
+        split=spec.split_point(len(cards)),
     )
     if host.suspended(action):
         return "stay", None
@@ -1037,11 +1289,16 @@ def _with_answers(frame: Any, answers: FlowAnswers) -> _ActivationFrame:
 
 
 def _answer_shape(step: FlowStep, value: object) -> object:
-    """清单渲染期的代表值 → 答案形状（效果读到的形状）。"""
+    """清单渲染期的代表值 → 答案形状（效果读到的形状）。
+
+    选项步的答案是**文本**（不是座位 / 牌 id 的元组），且代表值一律以"单值元组"传入
+    （:func:`_prior_contexts` 的形状）⇒ 先按步骤类型分流，再解元组——反过来会把
+    ``"jieyin_discard_hand"`` 当牌 id 转整数。
+    """
+    if isinstance(step, PickOption):
+        return str(value[0]) if isinstance(value, tuple) else str(value)
     if isinstance(value, tuple):
         return tuple(int(item) for item in value)
-    if isinstance(step, PickOption):
-        return value
     return (int(value),)
 
 
@@ -1073,8 +1330,8 @@ def _card_options(
         step, state, frame, face if owner is None else owner, answers or {}
     )
     out: list[int] = []
-    for zone in step.zones:
-        for card_id in state.zone(ZoneRef(zone, face)):
+    for ref in _step_zones(step, state, face, frame, owner, answers):
+        for card_id in _zone_cards(state, ref):
             if _kept_by_filters(
                 state.card(card_id), card_id, step.card_types, step.slot_kinds, excluded
             ):
@@ -1101,7 +1358,12 @@ def card_pool_size(
         step, state, frame, seat if owner is None else owner, answers or {}
     )
     return _filtered_zone_pool_size(
-        state, seat, step.zones, step.card_types, step.slot_kinds, excluded
+        state,
+        seat,
+        _step_zones(step, state, seat, frame, owner, answers),
+        step.card_types,
+        step.slot_kinds,
+        excluded,
     )
 
 
@@ -1149,6 +1411,21 @@ def _hidden_face(step: PickCards, face: object, owner: int) -> bool:
     return face != owner and Zone.HAND in step.zones
 
 
+# 步骤的"最多几个答案"：``PickCards`` / ``PickSeats`` 有 ``hi``，**选项步没有**（恒 1 个）。
+# 清单按前序答案逐行展开时会问"这一步是不是多选"，故统一从这里读，不给每个步骤类型各写一次。
+_STEP_MAX_KEY = "hi"
+
+
+def _step_max(step: FlowStep) -> int | None:
+    """这一步最多要几个答案（``None`` = 不设上限，如【制衡】的任意张）。"""
+    return getattr(step, _STEP_MAX_KEY, 1)
+
+
+def _step_min(step: FlowStep) -> int:
+    """这一步最少要几个答案（选项步恒 1）。"""
+    return getattr(step, "lo", 1)
+
+
 def _sampled_answers(step: FlowStep, values: tuple[object, ...]) -> list[object]:
     """一个前序步骤的**代表答案**：单值 ＋ 满选 ＋ 前 ``lo`` 个（去重、保序）。
 
@@ -1159,10 +1436,12 @@ def _sampled_answers(step: FlowStep, values: tuple[object, ...]) -> list[object]
     if not values:
         return []
     out: list[object] = [(value,) for value in values]
-    take = step.hi if step.hi is not None else len(values)
+    maximum = _step_max(step)
+    take = maximum if maximum is not None else len(values)
     out.append(tuple(values[:take]))
-    if step.lo and step.lo != take:
-        out.append(tuple(values[: step.lo]))
+    lo = _step_min(step)
+    if lo and lo != take:
+        out.append(tuple(values[:lo]))
     return list(dict.fromkeys(out))
 
 
@@ -1172,9 +1451,10 @@ def _prior_contexts(
     """前序步骤的代表答案组合；超过 ``limit`` ⇒ ``None``（退化）。"""
     per_step: list[list[object]] = []
     for step, values in domains:
+        maximum = _step_max(step)
         answers = (
             _sampled_answers(step, values)
-            if step.hi is None or step.hi > 1
+            if maximum is None or maximum > 1
             else [(value,) for value in values]
         )
         if not answers:
@@ -1203,22 +1483,28 @@ def _when_texts(
     return tuple(texts)
 
 
-def _pool_rows(rows: list[tuple[tuple[str, ...], tuple[str, ...]]]) -> tuple[StepPool, ...]:
+def _pool_rows(
+    rows: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]],
+) -> tuple[StepPool, ...]:
     """去重后转成协议形状（保留首次出现的次序，确定性）。
 
-    若所有前序组合给出的候选**完全相同**，收成一行 ``when=()``："这一步的池与前序选择
-    无关"——比逐项重复 N 遍更小，也让接入层不必为无关的前序选择找行。
+    每行是 ``(when, options, disabled)``：``disabled`` 只有选项步会填（置灰项，见
+    :class:`PickOption` 的 ``disabled``），其余步骤一律空元组。
+
+    若所有前序组合给出的候选**完全相同**（含义上的相同：候选与置灰项都一样），收成一行
+    ``when=()``："这一步的池与前序选择无关"——比逐项重复 N 遍更小，也让接入层不必为无关的
+    前序选择找行。
     """
-    if rows and len({options for _when, options in rows}) == 1:
-        return (StepPool(when=(), options=rows[0][1]),)
-    seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    if rows and len({(options, disabled) for _when, options, disabled in rows}) == 1:
+        return (StepPool(when=(), options=rows[0][1], disabled=rows[0][2]),)
+    seen: set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
     out: list[StepPool] = []
-    for when, options in rows:
-        key = (when, options)
+    for when, options, disabled in rows:
+        key = (when, options, disabled)
         if key in seen:
             continue
         seen.add(key)
-        out.append(StepPool(when=when, options=options))
+        out.append(StepPool(when=when, options=options, disabled=disabled))
     return tuple(out)
 
 
@@ -1338,6 +1624,12 @@ def manifest(
         }
 
     for index, step in enumerate(flow.steps):
+        if getattr(step, "revealed", ()):
+            # 观看授予的步骤**不能在清单里填表**：玩家要先在弹窗里看到那几张牌，才选得出
+            # 这一步的答案；清单是"发动前一次填完"的形态，没有"看到"这一环。
+            # 故含观看步的流水线整条不下发清单（与含 ``Arrange`` 同一条纪律）——
+            # 【义起】因此走"点技能按钮 → 引擎逐步问"，而不是预发动入口。
+            return ()
         if isinstance(step, Arrange):
             # 排列无法用 ``Step.pool`` 表达（候选 = 全部排列 × 切分点，不是可选池），
             # 故含 ``Arrange`` 的流水线**整条不下发清单**：观星因此不翻预发动。
@@ -1351,7 +1643,10 @@ def manifest(
         degraded = combos is None
         if degraded:
             combos = [{}]
-        multi_prior = any(step.hi is None or step.hi > 1 for step, _ in domains)
+        multi_prior = any(
+            _step_max(prior) is None or (_step_max(prior) or 0) > 1
+            for prior, _ in domains
+        )
         rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         values: list[object] = []
 
@@ -1371,20 +1666,26 @@ def manifest(
                 if not hidden and len(options) < step.lo:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(str(card_id) for card_id in options)))
+                rows.append((when, tuple(str(card_id) for card_id in options), ()))
                 values.extend(options)
             # 前序是多选步时，``when`` 只能按**单个**选项取键；若池确实随它变，
             # 逐选项行就与"选中的那几张"对不上 ⇒ 退化成一行空候选（校验器仍按真池裁决）。
             if multi_prior:
-                if not rows or len({options for _when, options in rows}) > 1:
+                if (
+                    not rows
+                    or len({(options, disabled) for _when, options, disabled in rows}) > 1
+                ):
                     return ()
-                rows = [((), rows[0][1])]
+                rows = [((), rows[0][1], rows[0][2])]
+            widths = [len(options) for _when, options, _disabled in rows]
             maximum = (
-                min(step.hi, max((len(row) for _, row in rows), default=0))
+                min(step.hi, max(widths, default=0))
                 if step.hi is not None
-                else max((len(row) for _, row in rows), default=0)
+                else max(widths, default=0)
             )
-            if maximum < step.lo:
+            if maximum < step.lo or maximum == 0:
+                # 0 张可选 = 这一步填不出任何答案（``lo = hi = 0`` 的"只看不选"步）：
+                # 清单里只会多出一个空步骤。整条不下发。
                 return ()
             steps.append(
                 Step(
@@ -1414,15 +1715,15 @@ def manifest(
                 if not pool and not domains:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(seat_choice(seat) for seat in pool)))
+                rows.append((when, tuple(seat_choice(seat) for seat in pool), ()))
                 values.extend(pool)
             if multi_prior:
                 if not rows:
                     rows = []
-                elif len({options for _when, options in rows}) > 1:
+                elif len({(options, disabled) for _when, options, disabled in rows}) > 1:
                     rows = []
                 else:
-                    rows = [((), rows[0][1])]
+                    rows = [((), rows[0][1], rows[0][2])]
             if step.ordered and step.hi > 1:
                 # 有序多选座位步的第二问依赖**本步已选**的座位；清单只能表达第一问，
                 # 故不下发候选索引（执行器按 ``chosen`` 逐步问，校验器也按真池验）。
@@ -1440,19 +1741,40 @@ def manifest(
             domains.append((step, tuple(dict.fromkeys(values))))
 
         elif isinstance(step, PickOption):
-            if not step.options:
-                return ()
+            # 可调用档按**前序答案**现算（票 23）：同一技能的选项集可能随第一步选中的人变
+            # （【结姻】的目标装备区有没有空槽）。逐组合各算一次，行键沿用 ``when``。
+            option_rows: list[
+                tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+            ] = []
+            option_values: list[object] = []
+            for combo in combos:
+                answers = answer_map(combo)
+                framed = _with_answers(base, answers)
+                choices = _resolve_options(step.options, state, framed, owner, answers)
+                if not choices:
+                    return ()
+                disabled = _resolve_options(step.disabled, state, framed, owner, answers)
+                when = _when_texts(domains, combo) if combo else ()
+                option_rows.append((when, choices, disabled))
+                option_values.extend(choices)
+            if multi_prior:
+                shapes = {
+                    (choices, disabled) for _when, choices, disabled in option_rows
+                }
+                if not option_rows or len(shapes) > 1:
+                    return ()
+                option_rows = [((), option_rows[0][1], option_rows[0][2])]
             steps.append(
                 Step(
                     name=step.key,
                     min=1,
                     max=1,
-                    pool=(StepPool(when=(), options=tuple(step.options)),),
+                    pool=_pool_rows(option_rows),
                     order=index,
                     wording=wording(step),
                 )
             )
-            domains.append((step, tuple(step.options)))
+            domains.append((step, tuple(dict.fromkeys(option_values))))
 
         elif isinstance(step, PickProvide):
             for combo in combos:
@@ -1463,18 +1785,27 @@ def manifest(
                 if len(options) < step.lo:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(str(card_id) for card_id in options)))
+                rows.append((when, tuple(str(card_id) for card_id in options), ()))
                 values.extend(options)
             if multi_prior:
-                if not rows or len({options for _when, options in rows}) > 1:
+                if (
+                    not rows
+                    or len({(options, disabled) for _when, options, disabled in rows}) > 1
+                ):
                     return ()
-                rows = [((), rows[0][1])]
+                rows = [((), rows[0][1], rows[0][2])]
             steps.append(
                 Step(
                     name=step.key,
                     zones=step.zones,
                     min=step.lo,
-                    max=min(step.hi, max((len(row) for _, row in rows), default=0)),
+                    max=min(
+                        step.hi,
+                        max(
+                            (len(options) for _when, options, _disabled in rows),
+                            default=0,
+                        ),
+                    ),
                     pool=_pool_rows(rows),
                     order=index,
                     wording=wording(step),
@@ -1528,6 +1859,12 @@ def _assign_activation(
     pick_index = 0
     choice_index = 0
     for index, step in enumerate(flow.steps):
+        if getattr(step, "revealed", ()):
+            # 观看授予的步骤**不能在清单里填表**：玩家要先在弹窗里看到那几张牌，才选得出
+            # 这一步的答案；清单是"发动前一次填完"的形态，没有"看到"这一环。
+            # 故含观看步的流水线整条不下发清单（与含 ``Arrange`` 同一条纪律）——
+            # 【义起】因此走"点技能按钮 → 引擎逐步问"，而不是预发动入口。
+            return ()
         if isinstance(step, Arrange):
             break
         framed = _with_answers(base, answers)
@@ -1595,8 +1932,16 @@ def _assign_activation(
                 return answers, f"步骤 {step.key} 需要一个选项"
             text = choices[choice_index]
             choice_index += 1
-            if check and text not in step.options:
-                return answers, f"步骤 {step.key} 的选项 {text!r} 不在闭集内"
+            if check:
+                framed = _with_answers(base, answers)
+                legal = _resolve_options(step.options, state, framed, owner, answers)
+                if text not in legal:
+                    return answers, f"步骤 {step.key} 的选项 {text!r} 不在闭集内"
+                # 置灰项**在闭集里但不可选**（票 04 §3）：界面画灰是提示，这里才是判据。
+                # 与 ``options`` 读同一份前序答案（可调用档按刚选的那张牌现算）。
+                blocked = _resolve_options(step.disabled, state, framed, owner, answers)
+                if text in blocked:
+                    return answers, f"步骤 {step.key} 的选项 {text!r} 此刻不可选"
             answers[step.key] = text
 
         elif isinstance(step, PickProvide):
@@ -1676,6 +2021,22 @@ picks（同一张【杀】的 RESOLVE 帧上先后开两次接缝就撞到这个
 """
 
 
+_EFFECT_STARTED = "flow_effect_started"
+"""帧私有：**已经开始跑 ``effect``** 的流水线名集合（本 effort 票 01 的 ``"cancel"`` 约束）。
+
+``run_flow`` 在调 ``effect`` 之前把 ``flow.name`` 加进来，那次发动真正收尾（``effect``
+返回的不是 ``"stay"``）时清掉。于是"这条流水线的 effect 已经开始"这条事实可判 —— 挂起
+续跑时它还留着，而 ``"cancel"`` 的语义（"一个副作用都不产生、技能可再发动"）此时已经
+不成立：再把发动报成取消就是把**已经改过状态**的结算丢掉（本 effort 的实机 bug 就是
+【攻心】的置顶尾巴整个丢失）。
+
+**为什么是集合而不是一个标记**：同一帧上可以先后（甚至嵌套）跑多条流水线（一张【杀】的
+RESOLVE 帧先【流离】、之后青龙 / 斧的接缝），一条的 effect 开始不该让另一条的 ``"cancel"``
+变成错误。**为什么按名字而不是帧 / 栈位置**：续跑的载体帧可能是从派发帧**复制**出来的
+临时帧（``Engine._resume_frame``），名字跨这份复制仍指同一次发动。
+"""
+
+
 def _activation_belongs(activation: Mapping[str, object], frame: Any, flow: SkillFlow) -> bool:
     """这份预填的复合动作是**这条流水线自己**的吗（帧内 ``activation`` 会跨技能存活）。
 
@@ -1685,10 +2046,16 @@ def _activation_belongs(activation: Mapping[str, object], frame: Any, flow: Skil
     「被抵消时」接缝（青龙 / 贯石斧）。没有归属判据时，后一条流水线会拿到前一条技能的
     载荷去索引自己的选取面（牌 id 不在面里 ⇒ ``KeyError``）。
     """
+    recorded_flow = activation.get("flow")
+    if recorded_flow is not None:
+        # 提交时由引擎按登记表解析出的**流水线名**：界版的流水线名带 ``jie_`` 前缀，
+        # 与技能 id 的短名不相等（M6 票 16 的界【仁德】/界【突袭】），故优先读它。
+        return str(recorded_flow) == flow.name
     recorded = activation.get("skill_id", frame.data.get("skill_id"))
     if recorded is None:
         return True  # 旧形态没有归属字段：保持"谁读谁用"的原行为，不 fail-closed
-    return str(recorded).rsplit(".", 1)[-1] == flow.name
+    short = str(recorded).rsplit(".", 1)[-1]
+    return short == flow.name or flow.name.endswith(f"_{short}")
 
 
 def run_flow(
@@ -1703,8 +2070,20 @@ def run_flow(
     """执行一条 :class:`SkillFlow`。
 
     帧内**不需要额外游标**：每一步的询问都由 ``ask_answers`` 帧内缓存重入（票 01 的姿态），
-    故重入时从头重跑一边步骤既不会发第二次询问、也不会重复副作用；``answers`` 每次重建，
+    故重入时从头重跑一遍步骤既不会发第二次询问、也不会重复副作用；``answers`` 每次重建，
     效果拿到的永远是"已经全部提交"的那一份。
+
+    **重入时每一步先认它已接受的答案、再算池**（本 effort 票 01）：执行器的三态裁决因此
+    不受 ``effect`` 已经改过的状态影响 —— 这正是"从头重跑"能成立的前提。旧实现先按**活
+    状态**现算 ``pool`` / 选项闭集，effect 一旦把池读的东西搬走（【攻心】的 hand→DECK），
+    续跑就会把已经发生过副作用的发动判成 ``"cancel"``。
+
+    ``"cancel"`` 因此与"``effect`` 还没跑"**绑死**：本帧里这条流水线的 ``effect`` 一旦
+    开始（哪怕它随后挂起），后续步骤再判 ``"cancel"`` 就不是"零副作用"，而是把一次
+    已经改过状态的发动报成"技能可再发动"。这种形状只可能是步骤的询问标识在挂起期间
+    变了（缓存认不出来），故实现**显式失败**（``RuntimeError``）而不是静默返回 ``None``。
+    标记住在帧私有数据里（不进记录流），按流水线名记；某次发动真正收尾时清掉，故同一帧里
+    同一条流水线的第二次发动仍能正常取消。
 
     ``owner``（票 07）：发动者 —— 缺省（``_UNSET``）读 ``frame.data["source"]``（主动技的
     SKILL 帧）；**被动技**在钩子 / 接缝里没有"发动者"，由派发环显式传 ``instance.owner``。
@@ -1751,6 +2130,7 @@ def run_flow(
                 )
             )
         prefilled = dict(cache[cache_key])
+    started: set[str] = frame.data.setdefault(_EFFECT_STARTED, set())
     for index, step in enumerate(flow.steps):
         # 清单渲染器与执行器共用的通道：池 / 面回调若依赖前序答案，从这里读同一份
         # （预填的复合动作与逐步询问两条路都写它，故声明只写一次）。
@@ -1764,12 +2144,27 @@ def run_flow(
         if status == "stay":
             return "stay"
         if status == "cancel":
+            if flow.name in started:
+                raise RuntimeError(
+                    f"流水线 {flow.name!r} 的 effect **已经开始**（挂起后被续跑），步骤 "
+                    f"{step.key!r} 却要把这次发动判成 'cancel'。'cancel' 的语义是"
+                    "『一个副作用都不产生、技能可再发动』，而这次发动已经改过状态了 —— "
+                    "续跑的步骤必须先采用它已接受的答案（Engine.accepted_selection / "
+                    "Engine.accepted_option），不能按活状态重算池。"
+                )
             # 取消：一个副作用都不产生（提交点不落、``effect`` 不跑），技能可再发动。
             return None
         answers[step.key] = value
     if on_commit is not None:
         on_commit()
-    return flow.effect(host, frame, answers)
+    started.add(flow.name)
+    control = flow.effect(host, frame, answers)
+    if control != "stay":
+        # 这次发动**收尾**了：清掉标记，否则同一帧里同一条流水线的**第二次发动**
+        # （合法：W4-fix-6 的"同一帧同一技能两份载荷"）若真的取消，会被误判成
+        # "effect 已经开始"。挂起（``"stay"``）时标记留着 —— 那次发动还没跑完。
+        started.discard(flow.name)
+    return control
 
 
 def zero_step_effect(handler: Callable[[Any, Any], Any]) -> FlowEffect:

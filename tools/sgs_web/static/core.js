@@ -62,7 +62,8 @@ const DESCRIPTION_FALLBACK = "暂无描述";
 /** `CardRef` 的字段闭集（M5-bugfix）：与服务端 ``sgs.state.CardRef`` 逐字一致。
  *
  * 跨语言没有共享常量的通道，故这是**唯一**的 JS 副本；改服务端模型 = 两头一起改。
- * 提交 ``UseCard.card`` / ``PlayCard.card`` 时只能带这九个键——服务端模型是
+ * 提交 ``UseCard.card`` / ``PlayCard.card`` / ``SubstituteJudgeCard.card`` 时只能带这九个键
+ * ——服务端模型是
  * ``extra="forbid"``，多一个 ``display_name`` / ``attribute`` / ``description`` 就是
  * ``UseCard.card.attribute Extra inputs are not permitted``（借刀预发动的报障原样）。
  */
@@ -119,6 +120,54 @@ function skillKindLabel(skill) {
   return passive ? "被动技" : "主动技";
 }
 
+/** 技能按钮上的**名字**（报障 2026-11-01）：底部技能区是固定 **3 列 × 6 行**的等大网格，
+ *  格子宽度不再由名字长度决定，故按钮只见名字的前 :data:`SKILL_NAME_MAX_CHARS` 个字，
+ *  超出截断加省略号；完整名字 / 类别 / 状态仍由 `renderSkills` 写进 `title` 与 `aria-label`，
+ *  截断不丢信息（悬停 / 读屏照样读得到）。
+ *
+ *  按**字**切（`Array.from`）而不是按 UTF-16 码元：代理对不会被切一半。
+ *  名字缺失时返回空串（fail-visible：按钮上就是空的，不编名字）。 */
+const SKILL_NAME_MAX_CHARS = 3;
+
+function shortSkillName(name) {
+  const chars = Array.from(String(name === undefined || name === null ? "" : name));
+  if (chars.length <= SKILL_NAME_MAX_CHARS) return chars.join("");
+  return `${chars.slice(0, SKILL_NAME_MAX_CHARS).join("")}…`;
+}
+
+/** 技能**三态**的徽标文案（M6 票 19；`player.skills[].state` 是稳定报文值）。
+ *
+ * - `suppressed` = **失效**：有但被挡住（实例还在，作用域到期恢复）；
+ * - `lost` = **失去**：没了（实例不再存在且不可恢复）；
+ * - `active`（或缺字段）= 不出徽标，不制造噪声；未登记的值同样不出字（fail-closed）。
+ *
+ * 文案只住这一处：武将详情与技能按钮区读同一份，两处不会各写一套。
+ */
+const SKILL_STATE_LABELS = { suppressed: "失效", lost: "失去" };
+
+function skillStateLabel(skill) {
+  return SKILL_STATE_LABELS[(skill && skill.state) || ""] || "";
+}
+
+/** ☆ 技能标记（M6 票 19）：觉醒后由某条觉醒技**获得**的技能（服务端 `star`）。
+ *  未觉醒时它根本不在清单里（载体解析的事实），故这里只负责"出现之后怎么标"。 */
+function skillStarLabel(skill) {
+  return skill && skill.star ? "☆" : "";
+}
+
+/** 武将 id → 中文名：目录（`GET /api/heroes`，标准 + 界版的启用并集）是服务端唯一的
+ *  名单来源（M6 票 19）。服务端已把 `hero_name` 翻好；这里只服务**旧载荷 / 合成视图**
+ *  （没有 `hero_name`）与回放页的座位名——缺目录 / 未知 id 时退回 id，**不编名字**。 */
+function heroDisplayName(heroId) {
+  if (!heroId) return "";
+  for (const group of state.heroCatalog || []) {
+    for (const version of group.versions || []) {
+      if (version.id === heroId) return version.name;
+    }
+  }
+  return String(heroId);
+}
+
 /** `Phase` 枚举的字面值 → 中文阶段名。
  *
  * 枚举值（`prepare` / `judge` / `draw` / `play` / `discard` / `finish`）是**稳定报文值**，
@@ -166,17 +215,21 @@ const SEAT_PREFIX = "seat:";
  */
 const FREE_SPLIT = "free";
 
-/** 事件回放的步长档位（毫秒）：每一条事件在事件流 / 效果区停留这么久。
+/** 事件回放的步长档位（毫秒）：每一条事件在事件流 / 效果区停留的**基准**。
  *
  * 报障 3：AI 一回合的结算在一次响应里全部返回，界面**一次性**画完，于是【杀】【闪】
  * 【桃】在效果区一闪而过。改成逐条回放后，牌会在效果区停满一个步长。
  * **严格顺序**（用户裁定）：这一批播完才提交新的快照与询问，故播放期间禁掉提交。
  *
- * 步长改成牌桌上的按钮（0.05–0.5 秒，点一下换一档）；缺省 **0.2 秒**（U3-05 / D13：
- * 逐事件更新全表之后，0.1 秒看不完一条），**不记住**——刷新/换局回默认，故它只住内存
- * （`state.eventDelayMs`），不落 localStorage。
+ * U4-02（spec D7 / D8）：整条记录的间隔不再等于固定步长，而是
+ * `base + dur(记录) × (base / 100)`（`session.js:delayOf`）——`base` 既是**下限**，
+ * 也是该条动画的**缩放因子**（50ms 档 = 0.5×，300ms 档 = 3×）；没有动画的记录只吃 `base`。
+ *
+ * 步长改成牌桌上的按钮（0.03–0.3 秒五档，点一下换一档）；缺省 **0.1 秒**，
+ * **不记住**——刷新/换局回默认（`anim.ini` 的 `base_step` 只决定加载时的初始档），
+ * 故它只住内存（`state.eventDelayMs`），不落 localStorage。
  */
-const DELAY_STEPS_MS = [50, 100, 200, 300, 400, 500];
+const DELAY_STEPS_MS = [30, 50, 100, 200, 300];
 
 const state = {
   sessionId: null,
@@ -188,11 +241,13 @@ const state = {
   selectedTargets: [], // 已选目标座位
   selectedOption: null,// 内部选中态：选中的 legal_action 下标（技能 / 小选项 / 右端动作）
   picks: [],           // 手选槽位下标 / 弃牌 card_id / 提供面的面内位置
-  arrange: null,       // 排列（W6-03）：{key,cards,count,free,fixed,top,bottom,selected,dragging}
+  // 排列（W6-03 / 票 01）：{key,cards,count,free,fixed,top,bottom,selected,dragging,
+  // dragNode,nodes,preview,geometry}；后四个是拖拽期的纯 DOM 引用 / 折叠几何，不进载荷。
+  arrange: null,
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
   playback: null,      // 事件回放：{body, records, index, querySeat, live}
-  eventDelayMs: 200,   // 回放步长（牌桌按钮切档）；缺省 0.2s **不随档位表首位走**
+  eventDelayMs: 100,   // 回放步长（牌桌按钮切档）；缺省 0.1s **不随档位表首位走**
   effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
   revealedCards: [],   // M5-08a：公开亮牌（card_reveal delta / pending.reveal）；按帧在舞台显示
   targetLines: [],     // U3-03：正在播的目标线（{node, from, to, enteredAt}）；由 effects.js 维护
@@ -206,6 +261,16 @@ const state = {
   // 纪律的唯一例外。这里只记"已经自动提交过哪一问"（`pending.seq`）：重复的倒计时
   // tick / 重复渲染不会发第二次；网络失败也不重试（服务端超时兜底）。
   arrangeAutoSeq: null,
+  // 票 01：涉猎的"提交 / 放弃 / 超时"同义——到时限前由前端提交**当前选择**（与观星同一
+  // 个提前量）。`suitAutoSeq` 记"已经自动提交过哪一问"；`suitResult` 是提交成功后本地的
+  // 2.5 秒结果态（`{cards, picked, until, title}`，仅发动者的屏幕）。
+  suitAutoSeq: null,
+  // 票 05：计数式分配（`DISTRIBUTE`）的本地计数 `{seq, counts: {seat: n}}`；
+  // 超时由前端把**当前计数**提交出去（与服务端全 0 兜底同一条语义）。
+  distribution: null,
+  distributionAutoSeq: null,
+  suitResult: null,
+  suitResultTimer: null,
   // U2-06：询问弹窗（`#t-dialog`）的本地态。`kind` = `stepDialogKind()` 的种类或
   // `"preactivation"`（预发动清单借同一个容器，但仍是牌桌表面）；`key` = 当前窗口实例
   // （同一问的重复渲染保留折叠，换问关旧开新）；`collapsed` 只改遮挡、不参与只读判据。
@@ -225,7 +290,8 @@ const state = {
   modal: { heroSeat: null },
   runs: [],
   replay: null,
-  heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
+  heroCatalog: [],     // 将池目录：按真名分组的启用版本（`GET /api/heroes`；票 13 起分组）
+  heroPools: null,     // 将池预设的本地编辑态 `{slots, active, selected}`（票 13；服务端存档在 runs/）
   deckCatalog: [],     // 牌堆档位列表（`GET /api/decks`）；标签 / 说明也由服务端下发
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）

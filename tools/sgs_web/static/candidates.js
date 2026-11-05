@@ -42,6 +42,37 @@ function cardEntry(pending, cardId) {
   return cardIndex(pending)[String(aliases[0].card_id)] || null;
 }
 
+/** 自己的手牌里牌号为 ``cardId`` 的那张**展示副本**；找不到返回 ``null``。
+ *
+ * 展示字段（`display_name` / `type` / `description`）只挂在快照的牌面上：`legal_actions`
+ * 里的牌故意不带它们（会随提交上行，见 `core.js:cardName`）。故"这张牌有什么入口"这类
+ * 只读判断要先回到快照里取牌面。
+ */
+function selfHandCard(cardId) {
+  const hand = (state.view && state.view.snapshot && state.view.snapshot.self_hand) || [];
+  return hand.find((card) => String(card.card_id) === String(cardId)) || null;
+}
+
+/** 这张手牌此刻被**强制转化**成什么（‘只能’型转化，如神关羽【武神】）。
+ *
+ * 只读服务端 `pending.transform_products` 的 ``forced`` 标记（声明面 =
+ * `ConversionSkill.forced`，**不是**锁定与否）：手牌区据此把源牌画成产物牌面
+ * （右上角「转」、悬停列出源牌），点它进转化清单。
+ *
+ * ‘可以’型（武圣 / 龙胆 / 国色 / 急救 / 丈八 / 羽扇）的产物**仍会下发**——预发动提示要
+ * 写「将以【X】使用」——但 ``forced === false``：手牌保持**原牌**，原用途照常可用，
+ * 转化只经技能预发动。缺字段 / 不是 ``true`` ⇒ 不画（fail-closed，不把原牌吞成产物）。
+ */
+function convertedForm(pending, cardId) {
+  for (const product of (pending && pending.transform_products) || []) {
+    if (product.forced !== true) continue;
+    for (const source of product.source_cards || []) {
+      if (String(source.card_id) === String(cardId)) return product;
+    }
+  }
+  return null;
+}
+
 /** 这张牌此刻点不点得动：候选索引里有它才有候选（唯一判据，不读规则）。 */
 function cardSelectable(pending, cardId) {
   return cardEntry(pending, cardId) !== null;
@@ -88,28 +119,39 @@ function isDiscardPick(pending) {
   return Boolean(pending) && pending.kind === "DISCARD";
 }
 
-/** **只从自己的手里选一张**的牌桌步（M5-08a 的【火攻】同花色弃牌）。
+/** **从自己的手牌 / 装备区里选牌**的牌桌步（火攻 / 铁骑 / 青囊 / 结姻等）。
  *
- * 形状全部读载荷：`SELECT_CARDS`、**服务端下发了一个已亮出的牌**（`pending.reveal`，
- * 火攻弃牌步的公开事实）、上限 1、面里每一槽都是**应答者本人**的手牌且牌面可见，且这一步
- * 不是「提供一张 B」/ 弹窗模板。命中时点一张手牌 = **一次提交**（与亮牌模板的「选完即提交」
- * 同一口径），右端「放弃」是另一个合法出口；没有多选态要清、也没有第二个提交点。
- * 判据只是**渲染路径**，不裁决合法性（候选仍由 `legal_actions` 给）；`pending.reveal`
- * 把"可选一张自己的手牌"里这一类（青囊 / 结姻 / 雌雄的普通选牌）挡在外面。
+ * 形状全部读载荷：`SELECT_CARDS`、面里每一槽都是**应答者本人**的手牌或装备区、牌面可见，
+ * 且这一步不是「提供一张 B」/ 弹窗模板。命中时不再铺左下角选择面，而是在牌桌的牌面上
+ * 直接点选；单张选择点一张即提交，多张选择点选后由「提交」送出。判据只是**渲染路径**，
+ * 不裁决合法性（候选仍由 `legal_actions` 给）。
  */
-function isOwnHandSinglePick(pending) {
+function isOwnZonePick(pending) {
   if (!pending || pending.kind !== "SELECT_CARDS") return false;
-  if (!pending.reveal || !pending.reveal.card) return false;
   if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
   const slots = pending.slots || [];
-  if (!slots.length || selectionCap(pending) !== 1) return false;
+  if (!slots.length) return false;
+  const zones = (pending.spec && pending.spec.zones) || [];
+  if (!zones.every((zone) => zone === "hand" || zone === "equip")) return false;
   return slots.every((slot) => {
     const ref = slot && slot.ref;
     return Boolean(ref)
       && Number(ref.seat) === Number(pending.actor)
-      && ref.zone === "hand"
+      && (ref.zone === "hand" || ref.zone === "equip")
       && Boolean(slot.card);
   });
+}
+
+/** 只选一张的自己区域面：点一张即提交（与多张选择的"点选 + 提交"分开）。 */
+function isOwnHandSinglePick(pending) {
+  return isOwnZonePick(pending) && selectionCap(pending) === 1;
+}
+
+/** 这一类「自己区域内选牌」是否包含装备区（决定提示文案 / 装备槽是否接点击）。 */
+function ownPickHasEquip(pending) {
+  return ((pending && pending.slots) || []).some(
+    (slot) => slot && slot.ref && slot.ref.zone === "equip",
+  );
 }
 
 /** 出牌阶段 / 响应窗口下"哪些座位此刻可点"（**数据**给的，不是 CSS 猜的）。
@@ -148,6 +190,41 @@ function sourceConversionHint(pending) {
   return `将以【${cardName(product)}】使用。`;
 }
 
+/** 牌名级清单**要玩家一步步选什么**的名词短语（只读清单形状：不认牌名、不认技能）。
+ *
+ * 载体是 `pending.card_preactivations[card.type]`（票 05）：清单由服务端下发，"这一步选
+ * 什么"由该步自己的形状回答——`card` = 来源牌、`seat` = 座位（持有者 / 目标）、
+ * `option` = 选项文本。两处**通用**入口（「使用【X】」按钮的 title 与重铸提示条）共用
+ * 这一句：同一张牌可能只有来源步、也可能来源 + 目标两步，文案跟着清单走，不写死任何
+ * 一张牌的形状（`options.js:renderCardPreativationEntry` / 本文件的 :func:`reforgeHint`）。
+ */
+function preactivationPickWording(manifest) {
+  const kinds = new Set((manifest || []).map((step) => preactivationStepKind(step)));
+  const picks = [];
+  if (kinds.has("card")) picks.push("来源牌");
+  if (kinds.has("seat")) picks.push("座位（玩家 / 目标）");
+  if (kinds.has("option")) picks.push("选项");
+  return picks.length ? picks.join("与") : "每一步";
+}
+
+/** 焦点手牌没有目标可点时的提示：它可能还有**重铸**这条独立动作（M5-08b / 票 05）。
+ *
+ * 重铸不算使用、没有目标：这类牌（【连环】授予重铸的♣牌）点牌后「提交」恒灰，出口是
+ * 控件区那条 ``Reforge``。同一张牌**还**有牌名级预发动（服务端下发的清单）时，使用方向
+ * 走并列的「使用【X】」入口——两句话都说清，玩家才知道该点哪个。
+ */
+function reforgeHint(pending) {
+  const action = reforgeAction(pending, state.focusCardId);
+  if (!action) return "本窗口无需指定目标。";
+  const name = cardName(action.card);
+  const manifest = cardPreactivationManifest(pending, selfHandCard(state.focusCardId));
+  if (manifest) {
+    return `点「使用【${name}】」按清单逐步选${preactivationPickWording(manifest)}；`
+      + `点「重铸【${name}】」弃置并摸一张（不算使用）。`;
+  }
+  return `这张牌此刻只可重铸：点「重铸【${name}】」弃置并摸一张（不算使用）。`;
+}
+
 /** 目标区的一句人话（不推荐、不排序，只说"还差什么"）。 */
 function pickerTargetHint(pending) {
   if (!isHandPick(pending)) return "";
@@ -156,7 +233,7 @@ function pickerTargetHint(pending) {
   if (!entry) return "";
   let suffix = "";
   if (entry.max_targets === 0) {
-    suffix = "本窗口无需指定目标。";
+    suffix = reforgeHint(pending);
   } else if (autoCombo(pending, state.focusCardId)) {
     suffix = "目标由规则唯一确定，已自动选中（点牌可整张取消）。";
   } else {

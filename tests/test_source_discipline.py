@@ -512,6 +512,11 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "CardRef",
             "DiscardCards",
             "DiscardQuery",
+            # 神周瑜移动版【业炎】的计数式分配（huo-shenzhouyu-mobile 票 05）：候选构造子 +
+            # 询问模型，都是**可见面**（与已允许的 SelectOption / SelectOptionQuery 同源）。
+            "Distribute",
+            "DistributeQuery",
+
             "DodgeQuery",
             "EndPhase",
             "Pass",
@@ -529,7 +534,15 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "SelectOption",
             "SelectOptionQuery",
             "SkillActivationQuery",
+            # huo-dianwei-mobile 票 01：`CardRef.slot` 的枚举（**可见面**的一部分，
+            # 与已允许的 CardRef 同源；不是全知状态 / 规则表）。
+            "SlotKind",
+            # feng-zhangjiao 票 02：改判窗口的候选构造子（与 PlayCard 同为可见动作面）。
+            "SubstituteJudgeCard",
             "UseCard",
+            # 票 18（D1）：无懈窗口的 `RespondQuery.cause` 就是它；AI 按 `NULLIFY` 分派
+            # 目标化判据。它是询问自带面的一部分，不是全知状态。
+            "WindowCause",
         }
     ),
 }

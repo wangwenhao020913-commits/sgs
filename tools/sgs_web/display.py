@@ -31,13 +31,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sgs.data import IDENTITY_LABELS, HeroTable, Suit, color_of_suit
-from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query, SelectCards
+from sgs.data import (
+    IDENTITY_LABELS,
+    Hero,
+    HeroTable,
+    Suit,
+    color_of_suit,
+    hero_skill_id,
+)
+from sgs.state import CardRef, EndPhase, HeroCardRef, Pass, PlayerPublic, Query, SelectCards
 
-from .descriptions import card_description
+from .descriptions import card_description, skill_description
 from .timeout import fallback_action, yiji_give_self_choice
 
 __all__ = [
@@ -50,6 +57,10 @@ __all__ = [
     "card_payload",
     "decorate_pending",
     "decorate_snapshot",
+    "hero_card_display",
+    "hero_in_tables",
+    "hidden_guohuo_payload",
+    "option_details",
     "prompt_display",
     "seat_display",
     "suit_labels",
@@ -61,7 +72,7 @@ CARD_KINDS: tuple[str, ...] = ("normal", "virtual", "transformed")
 CARD_ATTRIBUTES: tuple[str, ...] = ("普通", "火焰", "雷电")
 """牌面的属性（中文展示值；U1-02 的卡面据此分色）。"""
 
-KINGDOM_LABELS: dict[str, str] = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群"}
+KINGDOM_LABELS: dict[str, str] = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群", "shen": "神"}
 """势力枚举值 → 中文展示值（`GLOSSARY.md`「势力」：中文只出现在渲染层）。"""
 
 _SUIT_TEXT: dict[Suit, tuple[str, str]] = {
@@ -184,11 +195,41 @@ def card_payload(
     return payload
 
 
+def hidden_guohuo_payload(
+    card_id: int, declared_type: str, *, lookup: Mapping[int, CardRef] | None
+) -> dict[str, Any]:
+    """**未验明**的扣置牌要画的牌面：只给"声明的牌名"，花色 / 点数一概不给。
+
+    【蛊惑】的扣置牌在验明之前是哪一张还不是公开事实（详见
+    :func:`sgs_web.projection.concealed_guohuo_cards`）。这里把它画成一张"**待验明**"的
+    虚拟牌：
+
+    - 牌名 / 属性 / 描述都取**声明的那张牌**——声明本身是公开事实（`card_display` 也只按
+      ``type`` 算这三样），与真牌同一条展示契约；
+    - ``suit`` / ``rank`` / ``color`` **置空**：来源牌的花色会泄露真假（♥ 判据决定这张牌
+      作不作废），故连花色也不给；
+    - ``concealed=True`` 是**只读标记**，前端据此不画花色点数角标（缺字段时本来就画不出），
+      并知道这是一张还没验明的牌。
+    """
+    name = declared_type
+    for card in (lookup or {}).values():
+        if card.type == declared_type:
+            name = card.name
+            break
+    shown = CardRef(card_id=-abs(card_id) - 1, type=declared_type, name=name)
+    payload = shown.model_dump(mode="json")
+    payload.update(card_display(shown, lookup=lookup))
+    payload["card_id"] = card_id
+    payload["concealed"] = True
+    return payload
+
+
 def _processing_display(
     cards: Any,
     *,
     lookup: Mapping[int, CardRef] | None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef],
+    concealed: Mapping[int, str] | None = None,
 ) -> list[Any]:
     """处理区要画的牌：**正在结算的虚拟 / 转化牌**顶掉它们的来源实体牌。
 
@@ -197,6 +238,11 @@ def _processing_display(
     ``virtual_sources`` 把来源整组换成那张虚拟牌。纯虚拟牌没有来源、从不进区域，
     在它结算期间直接追加进处理区。同一个来源组只换一次；来源不齐（已有一张离场）
     就不换，避免把半组来源错画成产物。
+
+    ``concealed``（UI1/UI2 + 用户 2026-11-02 口径）：未验明的【蛊惑】扣置牌**对谁都**
+    画成"声明的牌名"（:func:`hidden_guohuo_payload`）——**扣置者自己也算"谁"**。
+    舞台只回答"这张牌现在**对场上公开的是什么**"，答案在验明那一刻变一次，与查看者无关。
+    扣置者本来就认识那张牌，画两套只会让同一张牌在舞台与事件流里各说一套。
     """
     if not isinstance(cards, list):
         return cards
@@ -223,6 +269,15 @@ def _processing_display(
         covered.update(sources)
     out: list[Any] = []
     for index, card in enumerate(cards):
+        hidden = None
+        if isinstance(card, dict) and concealed:
+            card_id = int(card.get("card_id", 0))
+            declared = concealed.get(card_id)
+            if declared is not None:
+                hidden = hidden_guohuo_payload(card_id, declared, lookup=lookup)
+        if hidden is not None:
+            out.append(hidden)
+            continue
         replacement = replacements.get(index)
         if replacement is not None:
             out.append(replacement)
@@ -234,7 +289,10 @@ def _processing_display(
 
 
 def seat_display(
-    player: PlayerPublic, *, heroes: HeroTable | None = None
+    player: PlayerPublic,
+    *,
+    heroes: HeroTable | Sequence[HeroTable] | None = None,
+    players: Sequence[PlayerPublic] | None = None,
 ) -> dict[str, Any]:
     """座位卡的展示字段：横置 / 酒状态 + 身份标签 + 武将名称 / 势力。
 
@@ -243,15 +301,15 @@ def seat_display(
     回放 / 合成载荷兜底。
 
     ``hero_name`` / ``kingdom`` / ``kingdom_label``（U1-02）：引擎只给武将 id
-    （``PlayerPublic.hero``）与势力枚举；``heroes`` 是 :func:`sgs.data.load_heroes` 的
-    武将表，给了才翻得出中文名，缺表 / 未发放武将时给 ``None``（界面退回「（无武将）」）。
+    （``PlayerPublic.hero``）与势力枚举；``heroes`` 是武将表——**可以是多张**（M6 票 19：
+    标准表 + 界版包），引擎配将的默认池是两者的并集，只查一张表会让界将退回引擎 id。
+    缺表 / 未发放武将时给 ``None``（界面退回「（无武将）」）。
     """
-    hero = None
-    if heroes is not None and player.hero:
-        hero = heroes.by_id(player.hero)
+    hero = hero_in_tables(heroes, player.hero)
     kingdom = player.kingdom.value if player.kingdom is not None else None
     return {
         "chained": bool(player.chained),
+        "flipped": bool(player.flipped),
         "wine_active": bool(player.wine_active),
         "identity_label": (
             IDENTITY_LABELS.get(player.identity) if player.identity is not None else None
@@ -259,7 +317,139 @@ def seat_display(
         "hero_name": hero.name if hero is not None else None,
         "kingdom": kingdom,
         "kingdom_label": KINGDOM_LABELS.get(kingdom) if kingdom is not None else None,
+        "markers": [
+            _marker_payload(marker, players=players, heroes=heroes)
+            for marker in tuple(player.markers)
+        ],
     }
+
+
+def _marker_payload(
+    marker: Any,
+    *,
+    players: Sequence[PlayerPublic] | None,
+    heroes: HeroTable | Sequence[HeroTable] | None,
+) -> dict[str, Any]:
+    """一条标记的**展示项**（票 06；用户 Q6）。
+
+    文本 = 名称 + 数量（前端画 `名称×数量`）；悬停 = 来源（座位 + 武将 + 技能名）+
+    效果说明（有才加）。来源座位可能不是当前座位，``players`` 是同一份投影的座位列表；
+    技能名从武将表按全限定 id 的短 id 找 ``HeroSkill.name``，找不到退回短 id。
+    """
+    source_hero_id = None
+    if players is not None and 0 <= marker.source_seat < len(players):
+        source_hero_id = players[marker.source_seat].hero
+    hero = hero_in_tables(heroes, source_hero_id)
+    hero_name = hero.name if hero is not None else (source_hero_id or "无武将")
+    short_id = marker.source_skill_id.rsplit(".", 1)[-1]
+    skill_name = short_id
+    if hero is not None:
+        for skill in hero.skills:
+            if skill.id == short_id:
+                skill_name = skill.name
+                break
+    source_label = f"座位 {marker.source_seat + 1} {hero_name}·{skill_name}"
+    return {
+        "name": marker.name,
+        "count": marker.count,
+        "max_count": marker.max_count,
+        "source_seat": marker.source_seat,
+        "source_skill_id": marker.source_skill_id,
+        "source_label": source_label,
+        "description": marker.description,
+    }
+
+
+def hero_in_tables(
+    heroes: HeroTable | Sequence[HeroTable] | None, hero_id: str | None
+) -> Hero | None:
+    """按武将 id 在**一张或多张**武将表里取武将；取不到返回 ``None``（不编名字）。
+
+    单一读取面（M6 票 19）：默认池是标准 + 界版的并集，故"id → 武将"的解析必须能跨表。
+    接受单张表（既有调用方 / 测试）或表的序列；``None`` / 未发放武将一律 ``None``。
+    """
+    if heroes is None or not hero_id:
+        return None
+    tables = (heroes,) if isinstance(heroes, HeroTable) else tuple(heroes)
+    for table in tables:
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return hero
+    return None
+
+
+def hero_card_display(
+    heroes: HeroTable | Sequence[HeroTable] | None, card: HeroCardRef | None
+) -> dict[str, Any] | None:
+    """一次询问**展示的武将牌**的展示字段（票 07；票 02 §4.2 B4）：服务端派生。
+
+    引擎只给"是哪张 + 第几张 / 共几张"（:class:`~sgs.state.HeroCardRef`），势力 / 名称 /
+    体力上限是数据表的公开事实，在这里补齐——前端不查表、也不抄第二份武将数据。
+
+    ``card is None``（这一问不展示武将牌）⇒ ``None``，调用方**不加**这个键（既有询问载荷
+    逐字节不变）。``card.hero_id is None``（池子抽空的那一次）⇒ 只有 n-of-m，武将块三要素
+    全是 ``None``（界面只画"第 k/m 张"与效果行）。未知 id 与"没有武将牌"同形：不编名字。
+
+    读取方 = :func:`sgs_web.projection.pending_payload` 的 ``hero_card`` 键（UI 票 08）。
+    """
+    if card is None:
+        return None
+    hero = hero_in_tables(heroes, card.hero_id)
+    kingdom = hero.kingdom.value if hero is not None else None
+    return {
+        "hero_id": card.hero_id,
+        "index": card.index,
+        "total": card.total,
+        "name": hero.name if hero is not None else None,
+        "kingdom": kingdom,
+        "kingdom_label": KINGDOM_LABELS.get(kingdom) if kingdom is not None else None,
+        "hp_max": hero.hp_max if hero is not None else None,
+    }
+
+
+def option_details(
+    query: Query, *, heroes: HeroTable | Sequence[HeroTable] | None = None
+) -> list[dict[str, Any]] | None:
+    """``SELECT_OPTION`` 的**每一行选项**（票 07；票 02 §4.2 B4）：服务端派生、不按查看者裁剪。
+
+    一行 = ``{choice, text, description, skill_id, disabled}``，与 ``query.options`` **同序**
+    （置灰项保留原位）。三件事实各有唯一真源：
+
+    - 技能行（选项 id 在**这张武将牌**的技能清单里）：``text`` = 数据表的 ``HeroSkill.name``，
+      ``description`` = ``descriptions.json`` 的**原文、不截断**，``skill_id`` = 该 id；
+    - 非技能行（技能自己的效果，如"增加 1 点体力上限…摸 X 张牌"）：``text`` = 引擎随询问
+      给的文本（X 这类动态数字只有引擎算得出来），``description`` / ``skill_id`` 为 ``None``；
+    - ``disabled``：引擎随询问给的置灰标记（不在 ``legal_actions`` 里）。
+
+    ``query`` 没有 ``options``（不是选项询问）⇒ ``None``——调用方按"新字段在用时才加键"
+    的判据决定加不加，既有询问载荷因此逐字节不变。``heroes`` 给的是武将表（M6 票 19 起可
+    多张）；``None`` 时技能行退化成"用选项 id 当文本"，不会编名字。
+    """
+    options = getattr(query, "options", None)
+    if options is None:
+        return None
+    card = getattr(query, "hero_card", None)
+    hero = hero_in_tables(heroes, card.hero_id) if card is not None else None
+    names: dict[str, str] = {}
+    if hero is not None:
+        names = {hero_skill_id(hero.id, skill.id): skill.name for skill in hero.skills}
+    texts = dict(getattr(query, "option_texts", None) or {})
+    disabled = frozenset(getattr(query, "disabled", None) or ())
+    rows: list[dict[str, Any]] = []
+    for choice in options:
+        skill_name = names.get(choice) if isinstance(choice, str) else None
+        rows.append(
+            {
+                "choice": choice,
+                "text": texts.get(choice) or skill_name or choice,
+                "description": (
+                    skill_description(choice) if skill_name is not None else None
+                ),
+                "skill_id": choice if skill_name is not None else None,
+                "disabled": choice in disabled,
+            }
+        )
+    return rows
 
 
 def prompt_display(query: Query) -> dict[str, Any]:
@@ -357,21 +547,28 @@ def decorate_snapshot(
     players: tuple[PlayerPublic, ...] | list[PlayerPublic],
     *,
     lookup: Mapping[int, CardRef] | None = None,
-    heroes: HeroTable | None = None,
+    heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
     ``players`` 与载荷里的 ``players`` 同序（投影按座位序输出）；座位字段由
     :func:`seat_display` 给出，卡面字段由 :func:`card_display` 给出。``heroes``
-    是武将表（U1-02 的 ``hero_name`` 要用），缺省时名称留空、界面退回 id。
+    是武将表（U1-02 的 ``hero_name`` 要用；M6 票 19 起是**多张表**——标准 + 界版包，
+    与配将池同源），缺省时名称留空、界面退回 id。
     ``virtual_cards`` 是**当前正在结算**的虚拟 / 转化牌（U1-07）：``processing``
     按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
+    ``concealed`` 是**未验明**的【蛊惑】扣置牌（:func:`sgs_web.projection.concealed_guohuo_cards`）：
+    ``processing`` 里那几张改画"声明的牌名"（对谁都不给源牌牌面）。
     """
     for key in ("self_hand", "discard"):
         payload[key] = _extend_card_list(payload.get(key), lookup=lookup)
     payload["processing"] = _processing_display(
-        payload.get("processing"), lookup=lookup, virtual_cards=virtual_cards
+        payload.get("processing"),
+        lookup=lookup,
+        virtual_cards=virtual_cards,
+        concealed=concealed,
     )
     seated = payload.get("players")
     if isinstance(seated, list):
@@ -380,7 +577,7 @@ def decorate_snapshot(
                 player_payload[key] = _extend_card_list(
                     player_payload.get(key), lookup=lookup
                 )
-            player_payload.update(seat_display(player, heroes=heroes))
+            player_payload.update(seat_display(player, heroes=heroes, players=players))
     return payload
 
 
@@ -389,8 +586,9 @@ def decorate_pending(
     query: Query,
     *,
     lookup: Mapping[int, CardRef] | None = None,
-    heroes: HeroTable | None = None,
+    heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""
     for entry in (payload.get("candidate_index") or {}).values():
@@ -412,6 +610,7 @@ def decorate_pending(
             lookup=lookup,
             heroes=heroes,
             virtual_cards=virtual_cards,
+            concealed=concealed,
         )
     # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
     payload["prompt_display"] = prompt_display(query) if query.legal_actions else None

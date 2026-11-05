@@ -1,14 +1,15 @@
-"""武将发放、体力上限与可见性（票 02）。
+"""武将发放、体力上限与可见性（票 02；M6 票 12 扩到真名配将）。
 
 落点（与票 01 同姿态）：**公开接缝**——``build_initial`` 的开局参数、``sgs.skills`` 的
 ``resolve_instances``、``sgs.state.project`` 的 ``PlayerView``，以及产品 CLI。不测私有函数。
 
-票 02 尚未启用任何武将（那是票 12），故随机发放用 **``hero_pool`` 显式换池**表达：
+票 02 尚未启用任何武将（那时是票 12 的事），故随机发放用 **``hero_pool`` 显式换池**表达：
 池是入参、不走数据文件的 ``enabled`` 名单，这样"发放"这套机器在本票可测，而
 "数据文件里启用谁"仍留给定票。
 
-票 12 起数据文件里的启用池非空（16 名），故 ``hero_pool=()`` 的那条断言改判为
-"从启用池里真发得出牌"；显式换池的路径一字未动。
+M6 票 12 起 ``hero_pool=()`` = **默认将池**（标准版 + 界版的启用版本并集，spec D19 的
+混合局），配将从"版本"改到"**真名**"：先抽不同真名、再抽版本；禁将 / 手选走
+``HeroDealConfig``（会话配置，不进记录流）。显式换池的旧路径一字未动。
 """
 
 from __future__ import annotations
@@ -25,19 +26,30 @@ import pytest
 from sgs.data import (
     Gender,
     Hero,
+    HeroDealConfig,
+    HeroDealError,
+    HeroPick,
     HeroSkill,
     Identity,
     Kingdom,
     RuleConfig,
     enabled_hero_ids,
+    hero_by_id,
     load_content_pack,
     load_heroes,
 )
 from sgs.engine import INITIAL_HP, Engine, RandomSource, build_initial
-from sgs.skills import resolve_instances
+from sgs.skills import blocked_true_names, resolve_instances
 from sgs.state import project
 
-from support import SeatSpec, build_state
+from support import (
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    declare_death,
+    deck_excluding,
+    run_turns,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PACK = load_content_pack(deck_profile="standard_108")
@@ -59,6 +71,7 @@ def _build(
     hero_pool=None,
     pinned_hero=None,
     pinned_seat=0,
+    hero_config=None,
 ):
     """``build_initial`` 的薄包装：只取状态，规则配置按人数造。"""
     state, _ = build_initial(
@@ -69,6 +82,7 @@ def _build(
         hero_pool=hero_pool,
         pinned_hero=pinned_hero,
         pinned_seat=pinned_seat,
+        hero_config=hero_config,
     )
     return state
 
@@ -181,29 +195,57 @@ def test_an_unknown_hero_id_is_rejected():
     assert "nobody" in str(caught.value)
 
 
+def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
+    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 + 火包移动版 5 + 火包 OL 1 + 自制包 2 = **70**）。
+
+    这是 spec D19「默认将池全开 ⇒ 默认对局是混合局」在数据层的落点：``enabled_hero_ids``
+    缺省（不给表）时读 :func:`load_hero_tables` 的并集，而不是只读内容包那一张表。
+    注入单表的调用（如 ``serve.hero_catalog``）仍是那张表的门控，语义不变。
+    """
+    standard = load_heroes()
+    jie = load_heroes("jie")
+    jie_mobile = load_heroes("jie_mobile")
+    feng = load_heroes("feng")
+    feng_mobile = load_heroes("feng_mobile")
+    huo_mobile = load_heroes("huo_mobile")
+    huo = load_heroes("huo")
+    homebrew = load_heroes("homebrew")
+    expected = tuple(
+        hero.id
+        for table in (
+            standard,
+            jie,
+            jie_mobile,
+            feng,
+            feng_mobile,
+            huo_mobile,
+            huo,
+            homebrew,
+        )
+        for hero in table.heroes
+        if hero.enabled
+    )
+
+    assert enabled_hero_ids() == expected
+    assert len(expected) == 72
+    assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
+    assert "jie_guanyu" in expected and "guanyu" in expected
+    assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
+    assert "weiyan" in expected, "风包魏延（feng-weiyan 票 01）同表入池"
+    assert "xiahouyuan" in expected, "风包夏侯渊（feng-xiahouyuan 票 01）同表入池"
+    assert "shen_guanyu_mobile" in expected, "风包移动版同理（`08`：神关羽移动版独开一栏）"
+    assert "shen_lvmeng_mobile" in expected, "票 01：神吕蒙移动版同表"
+    assert "tao_liubei" in expected, "自制包：韬·刘备自制版（真名刘备，与标准版同真名）"
+    assert "wuming" in expected, "自制包：无名自制版（wuming 票 01；新真名「无名」）"
+    assert "dianwei_mobile" in expected, "火包移动版（huo-dianwei-mobile 票 01）也进默认池"
+
+
 def test_enabled_hero_ids_reads_the_table_enablement():
-    """启用门控的只读面：票 12 起数据文件里有 16 名启用 ⇒ 启用池恰是那 16 名。"""
+    """启用门控的只读面：M6 票 03 的 P0 收口后标准 25 名全部启用 ⇒ 启用池恰是 25 名。"""
     ids = enabled_hero_ids(HEROES)
 
-    assert len(ids) == 16
-    assert set(ids) == {
-        "caocao",
-        "simayi",
-        "guojia",
-        "liubei",
-        "guanyu",
-        "zhaoyun",
-        "machao",
-        "zhugeliang",
-        "sunquan",
-        "zhouyu",
-        "luxun",
-        "daqiao",
-        "sunshangxiang",
-        "huatuo",
-        "lvbu",
-        "diaochan",
-    }
+    assert len(ids) == 25
+    assert set(ids) == {hero.id for hero in HEROES.heroes}, "启用池 = 整张标准武将表"
     assert all(HEROES.by_id(hero_id).enabled for hero_id in ids)
 
     # 派生判据本身（"读的是 enabled 字段"）：造一张只启用第一名的表，池随之收缩。
@@ -224,14 +266,272 @@ def test_enabled_hero_ids_reads_the_table_enablement():
     assert isinstance(HEROES.heroes[0].skills[0], HeroSkill)
 
 
+def test_every_enabled_hero_is_dealable_from_the_default_pool():
+    """M6 P0 收口（票 03）+ 票 12 混合池：默认将池真的**发得出每一名**（72 名逐名点将）。
+
+    判据比"池里有 61 个 id"强一层：逐个把目标武将当点将、其余座位仍从**默认启用池**
+    （``hero_pool=()``）随机——69 次都要成功落到座位 0，且其余座位不得重复抽到同一名
+    **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
+    """
+    ids = enabled_hero_ids()
+    assert len(ids) == 72
+
+    for hero_id in ids:
+        heroes = _heroes_of(
+            _build(seed=5, player_count=2, hero_pool=(), pinned_hero=hero_id)
+        )
+        assert heroes[0] == hero_id, f"默认启用池发不出 {hero_id}"
+        assert heroes[1] != hero_id, "其余座位不得重复抽到已点武将"
+        other = hero_by_id(heroes[1])
+        assert other is not None and other.enabled
+        assert other.true_name != hero_by_id(hero_id).true_name, (
+            "点将先占真名：其余座位不得抽到同一真名的另一版"
+        )
+
+
 def test_an_empty_explicit_pool_means_the_data_file_enabled_pool():
-    """``hero_pool=()`` = 换用数据文件的启用池；票 12 起该池非空，故 4 人局发得出 4 名。"""
+    """``hero_pool=()`` = 换用数据文件的启用池；票 12 起该池是标准 + 界的**混合池**。"""
     state = _build(seed=5, player_count=4, hero_pool=())
 
     dealt = _heroes_of(state)
 
     assert len(set(dealt)) == 4, "不重复抽取"
-    assert set(dealt) <= set(enabled_hero_ids(HEROES))
+    assert set(dealt) <= set(enabled_hero_ids()), "从启用池（两张表的并集）里发"
+    true_names = {hero_by_id(hero_id).true_name for hero_id in dealt}
+    assert len(true_names) == 4, "同一真名不会占两个座位"
+
+
+# ---------------------------------------------------------------------------
+# 真名配将（票 12）：两段抽样 / 禁将 / 手选 / 真名池 fail-closed
+# ---------------------------------------------------------------------------
+
+# 池里三名武将、两个真名：曹操单版 + 关羽的标准 / 界两版。
+MIXED_POOL = ("guanyu", "jie_guanyu", "caocao")
+
+
+def _build_with(config, *, seed: int, seat_count: int, pool=MIXED_POOL):
+    return _heroes_of(
+        _build(seed=seed, player_count=seat_count, hero_pool=pool, hero_config=config)
+    )
+
+
+def test_an_explicit_lineup_with_two_versions_of_one_true_name_is_refused():
+    """构造期不变量对**全显式**同样成立：同一真名至多一个座位，不因"显式指定"绕过。"""
+    with pytest.raises(HeroDealError) as caught:
+        _build(seed=5, player_count=2, heroes=("guanyu", "jie_guanyu"))
+
+    assert "同一个真名" in str(caught.value)
+
+
+def test_two_versions_of_one_true_name_cannot_fill_two_seats():
+    """两段抽样的第一段以**真名**为不放回单位：池里只有标关羽 + 界关羽 ⇒ 真名池只有 1。
+
+    2 个座位要 2 个**不同真名**，故必须 fail-closed；退化成"抽两个不同版本"会让同一名
+    武将在一局里出现两次（GLOSSARY「真名」/「真名池」）。
+    """
+    with pytest.raises(ValueError) as caught:
+        _build(seed=7, player_count=2, hero_pool=("guanyu", "jie_guanyu"))
+
+    assert "真名池" in str(caught.value)
+    assert "guanyu" in str(caught.value), "报错要带上将池内容，好定位"
+
+
+def test_a_true_name_never_takes_two_seats_even_when_both_versions_are_in_the_pool():
+    """两段抽样（验收原句）：池里同时有标关羽与界关羽，多局抽样仍**只出其一**。
+
+    判据两层：每一局里两版不同时出现、两个座位是两个不同真名；跨 24 局两版都真的被
+    抽到过（否则"只出其一"可能只是抽样没轮到另一版）。
+    """
+    dealt: list[str] = []
+    for seed in range(24):
+        heroes = _build_with(HeroDealConfig(), seed=seed, seat_count=2)
+        assert not {"guanyu", "jie_guanyu"} <= set(heroes), (
+            f"同一真名的两版不该同时占两个座位：{heroes}"
+        )
+        assert len({hero_by_id(hero_id).true_name for hero_id in heroes}) == 2
+        dealt.extend(heroes)
+
+    assert "guanyu" in dealt and "jie_guanyu" in dealt, "两版都必须真的抽得到（版本抽签在工作）"
+
+
+def test_banning_the_standard_version_keeps_the_true_name_on_the_jie_version():
+    """禁标留界（正例）：关羽这个真名仍可抽到，但抽到就只能是界版。
+
+    池 = {标关羽, 界关羽, 曹操}，禁掉标准关羽；2 个座位多局抽样。判据两条：
+    标准关羽一次都不出现；界关羽在某一局真的被抽到过（否则"仍可抽到"只是空话）。
+    """
+    config = HeroDealConfig(banned_heroes=("guanyu",))
+    dealt = [
+        hero
+        for seed in range(24)
+        for hero in _build_with(config, seed=seed, seat_count=2)
+    ]
+
+    assert "guanyu" not in dealt, "被禁的版本不得发出"
+    assert "jie_guanyu" in dealt, "关羽这个真名必须仍可抽到，且只能落到界版"
+
+
+def test_banning_every_version_removes_the_true_name_from_the_pool():
+    """反例：把关羽两版都禁掉 ⇒ 真名池只剩曹操，2 个座位不够 ⇒ fail-closed。"""
+    config = HeroDealConfig(banned_heroes=("guanyu", "jie_guanyu"))
+
+    with pytest.raises(ValueError) as caught:
+        _build_with(config, seed=7, seat_count=2)
+
+    assert "真名池不足" in str(caught.value)
+    assert "2 个座位" in str(caught.value)
+
+
+def test_a_manual_pick_ignores_the_ban_and_reserves_its_true_name():
+    """手选无视禁将、且**先占真名**：点名标准关羽（已被禁）照发，别人拿不到界关羽。
+
+    池 = {标关羽, 界关羽, 曹操}，禁掉标准关羽，座位 1 手选标准关羽。座位 0 只能拿到曹操
+    ——界关羽是"同一个真名的另一版"，即使未被禁也不得出现。
+    """
+    config = HeroDealConfig(
+        banned_heroes=("guanyu",),
+        picks=(HeroPick(seat=1, hero="guanyu"),),
+    )
+
+    for seed in range(16):
+        heroes = _build_with(config, seed=seed, seat_count=2)
+        assert heroes[1] == "guanyu", "手选无视禁将：点名的版本照发"
+        assert heroes[0] == "caocao", (
+            f"手选先占真名，座位 0 不得拿到同一真名的另一版，实得 {heroes}"
+        )
+
+
+def test_a_pick_whose_whole_true_name_group_is_banned_still_lands_and_reserves_it():
+    """手选的真名**所有版本都被禁**时同样成立：点名的那版照发、真名照样被占。"""
+    config = HeroDealConfig(
+        banned_heroes=("guanyu", "jie_guanyu"),
+        picks=(HeroPick(seat=0, hero="guanyu"),),
+    )
+
+    heroes = _build_with(config, seed=3, seat_count=2)
+
+    assert heroes == ("guanyu", "caocao")
+
+
+def test_two_picks_that_share_a_true_name_are_refused():
+    """构造期不变量：同一真名至多一个座位——两个手选撞真名即拒（不静默挑一个）。"""
+    config = HeroDealConfig(
+        picks=(HeroPick(seat=0, hero="guanyu"), HeroPick(seat=1, hero="jie_guanyu"))
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _build_with(config, seed=3, seat_count=2)
+
+    assert "同一个真名" in str(caught.value)
+    assert "关羽" in str(caught.value)
+
+
+def test_a_pick_beyond_the_seat_range_is_refused():
+    config = HeroDealConfig(picks=(HeroPick(seat=4, hero="guanyu"),))
+
+    with pytest.raises(ValueError) as caught:
+        _build_with(config, seed=3, seat_count=2)
+
+    assert "手选座位越界" in str(caught.value)
+
+
+def test_an_unknown_ban_is_refused_instead_of_silently_ignored():
+    """禁将集合来自将池面板；未知 id 多半是拼写错——静默忽略等于没禁成。"""
+    config = HeroDealConfig(banned_heroes=("nobody",))
+
+    with pytest.raises(ValueError) as caught:
+        _build_with(config, seed=3, seat_count=2)
+
+    assert "nobody" in str(caught.value)
+
+
+def test_a_pick_outside_the_pool_is_refused_with_the_config_form():
+    config = HeroDealConfig(picks=(HeroPick(seat=0, hero="diaochan"),))
+
+    with pytest.raises(ValueError) as caught:
+        _build_with(config, seed=3, seat_count=2)
+
+    assert "diaochan" in str(caught.value), "手选只限池内，报错要带被拒的 id"
+
+
+def test_the_same_seed_and_config_reproduce_the_same_deal():
+    config = HeroDealConfig(
+        banned_heroes=("diaochan",),
+        picks=(HeroPick(seat=2, hero="guanyu"),),
+    )
+
+    first = _build_with(config, seed=17, seat_count=4, pool=enabled_hero_ids())
+    second = _build_with(config, seed=17, seat_count=4, pool=enabled_hero_ids())
+
+    assert first == second
+    assert first[2] == "guanyu"
+    assert len({hero_by_id(hero_id).true_name for hero_id in first}) == 4
+
+
+def test_the_session_config_never_enters_the_record_stream():
+    """禁将 / 手选是**会话配置**：同种子下换配置只改发将，记录流逐字节不变。
+
+    与 ``hero_assignments`` 同一条纪律（武将不是牌、没有 delta）：这条判据是"47 条标准
+    金录像不被默认混合池动到"的机制前提。
+    """
+    from sgs.engine import dump_journal
+
+    plain, plain_records = build_initial(
+        seed=23, rule_config=RuleConfig(player_count=4), pack=PACK, hero_pool=()
+    )
+    configured, configured_records = build_initial(
+        seed=23,
+        rule_config=RuleConfig(player_count=4),
+        pack=PACK,
+        hero_pool=(),
+        hero_config=HeroDealConfig(banned_heroes=("diaochan",)),
+    )
+
+    assert dump_journal(plain_records) == dump_journal(configured_records)
+    assert [player.hand for player in plain.players] == [
+        player.hand for player in configured.players
+    ]
+
+
+def test_the_engine_constructor_accepts_the_session_config_and_refuses_an_impossible_pool():
+    """引擎侧 fail-closed 的公开接缝：``Engine.new_game`` 接受会话配置、真名池不足即拒。
+
+    2 个座位 + 手选关羽 ⇒ 剩余真名（曹操）刚好够；4 个座位 ⇒ 同一个配置必须拒绝构造。
+    """
+    config = HeroDealConfig(picks=(HeroPick(seat=0, hero="guanyu"),))
+    engine = Engine.new_game(
+        seed=5,
+        rule_config=RuleConfig(player_count=2),
+        pack=PACK,
+        hero_pool=MIXED_POOL,
+        hero_config=config,
+    )
+    assert [player.hero for player in engine.state.players] == ["guanyu", "caocao"]
+
+    with pytest.raises(HeroDealError) as caught:
+        Engine.new_game(
+            seed=5,
+            rule_config=RuleConfig(player_count=4),
+            pack=PACK,
+            hero_pool=MIXED_POOL,
+            hero_config=config,
+        )
+
+    assert "真名池不足" in str(caught.value)
+
+
+def test_the_default_game_is_a_mixed_standard_and_jie_pool():
+    """spec D19：默认将池全开，默认对局是混合局（同真名仍至多一个座位）。"""
+    dealable = set(enabled_hero_ids())
+    seen: set[str] = set()
+    for seed in range(12):
+        heroes = _heroes_of(_build(seed=seed, player_count=8, hero_pool=()))
+        assert len(set(heroes)) == 8
+        assert set(heroes) <= dealable
+        assert len({hero_by_id(hero_id).true_name for hero_id in heroes}) == 8
+        seen.update(heroes)
+
+    assert any(hero_id.startswith("jie_") for hero_id in seen), "默认局必须真能发出界版"
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +800,124 @@ def test_the_gender_field_is_filled_from_the_hero_data():
         Gender.FEMALE,
         Gender.MALE,
     ]
+
+
+# ---------------------------------------------------------------------------
+# 武将牌真名屏蔽集合（票 05；票 02 §4.5 E1–E5）
+# ---------------------------------------------------------------------------
+
+
+def _two_seat_state(*heroes: str):
+    """两人无身份局；``heroes`` 按座位序给（缺省 = 两座都不发武将）。"""
+    lineup = heroes if heroes else (None, None)
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=hero) for hero in lineup],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+
+
+def test_the_drawn_true_names_are_stored_in_draw_order_and_released_only_on_request():
+    """E1 / E3：**抽走**那一半存进状态——抽走序、去重、引擎活动不自动清空。"""
+    state = _two_seat_state()
+    engine = Engine.from_state(state, seed=7)
+
+    assert state.drawn_true_names == (), "GameState 的默认值 = 空元组（没有初始化点）"
+    assert engine.note_drawn_true_name("刘备") is True
+    assert engine.note_drawn_true_name("曹操") is True
+    assert state.drawn_true_names == ("刘备", "曹操"), "顺序 = 抽走序（插入序、确定性）"
+    assert engine.note_drawn_true_name("刘备") is False
+    assert state.drawn_true_names == ("刘备", "曹操"), "同一真名不重复占位"
+    assert "刘备" in blocked_true_names(state), "抽到的真名立刻进屏蔽集合"
+
+    # 引擎真的跑一个回合也不清它：这个集合没有复位点（不是"本回合"作用域）。
+    run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
+    assert state.drawn_true_names == ("刘备", "曹操")
+    assert "刘备" in blocked_true_names(state), "释放之前一直含"
+
+    assert engine.release_drawn_true_name("刘备") is True
+    assert state.drawn_true_names == ("曹操",)
+    assert "刘备" not in blocked_true_names(state), "释放后立刻可抽"
+    # 释放过的真名可以再次被抽到（重入 / 左慈重置那类流程的前提）。
+    assert engine.note_drawn_true_name("刘备") is True
+    assert state.drawn_true_names == ("曹操", "刘备")
+
+
+def test_releasing_a_name_that_is_not_drawn_is_a_no_op_that_emits_nothing():
+    """E3 的幂等面：不存在的名字返回 ``False``，状态与记录流一个字节都不动。"""
+    state = _two_seat_state()
+    engine = Engine.from_state(state, seed=7)
+    before = engine.records
+
+    assert engine.release_drawn_true_name("刘备") is False
+    assert engine.release_drawn_true_name("刘备") is False, "重复释放仍是空操作"
+
+    assert state.drawn_true_names == ()
+    assert engine.records == before, "两个写入口都不进记录流、不发 delta"
+
+    engine.note_drawn_true_name("刘备")
+    engine.release_drawn_true_name("刘备")
+    assert engine.records == before, "记录流在写入 / 释放前后逐条相同"
+
+
+def test_the_blocked_true_names_are_the_drawn_half_plus_the_seated_half():
+    """E2 / E5：在场那一半**派生**——发到座位的武将不进 ``drawn_true_names``。"""
+    state = _build(seed=7, player_count=4, hero_pool=POOL)
+
+    assert state.drawn_true_names == (), "在场武将不写进存储字段（没有初始化点）"
+    assert blocked_true_names(state) == {
+        hero_by_id(player.hero).true_name for player in state.players
+    }
+
+    Engine.from_state(state, seed=7).note_drawn_true_name("刘备")
+    assert "刘备" in blocked_true_names(state), "抽走的一半与派生的一半并集"
+    assert blocked_true_names(state) == {
+        hero_by_id(player.hero).true_name for player in state.players
+    } | {"刘备"}
+
+
+def test_a_game_without_heroes_blocks_nobody():
+    """E5：无武将模式 ⇒ 空集合（M2 基准因此逐字节不变）。"""
+    state = _two_seat_state()
+
+    assert state.drawn_true_names == ()
+    assert blocked_true_names(state) == frozenset()
+
+
+def test_the_blocked_true_name_of_a_seat_is_the_data_true_name_not_the_hero_id():
+    """E2 与 §4.5「不新增实现」：真名经数据层取——同一真名的各版本共用一个屏蔽位。"""
+    state = _two_seat_state("jie_guanyu", "diaochan")
+
+    blocked = blocked_true_names(state)
+
+    assert blocked == {"关羽", "貂蝉"}
+    assert "jie_guanyu" not in blocked
+
+
+def test_a_dead_hero_stays_blocked_until_the_death_settlement_closes_the_window():
+    """E2 / 用户第四轮第 3 条：阵亡在**死亡结算收尾**才解除，不在死亡入口就解除。"""
+    state = _two_seat_state("guanyu", "diaochan")
+    engine = Engine.from_state(state, seed=7)
+    dying = state.player(1)
+    assert "貂蝉" in blocked_true_names(state)
+
+    declare_death(engine, 1)
+    assert dying.alive is False
+    # 走进死亡结算的「阵亡时」窗口（步数上限只为防死循环：窗口没开 = 用例前提失效）。
+    for _ in range(32):
+        if dying.death_time_skills_active:
+            break
+        engine._step()
+    else:
+        pytest.fail("死亡结算没有打开技能窗口，本用例的前提不成立")
+    assert "貂蝉" in blocked_true_names(state), "死亡入口与结算窗口内仍占着武将牌"
+
+    while not engine.finished:
+        engine._step()
+    assert dying.death_time_skills_active is False
+    assert "貂蝉" not in blocked_true_names(state), "死亡结算收尾后才解除"
 
 
 # ---------------------------------------------------------------------------

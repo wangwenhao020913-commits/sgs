@@ -11,7 +11,9 @@
 ``POST``         ``/api/sessions``                   建局；返回首个挂起与快照
 ``GET``          ``/api/sessions/<id>?after=&logs=`` 取增量；**顺带判定超时**
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
-``GET``          ``/api/heroes``                     开局页点将列表（启用池的 id + 名称）
+``GET``          ``/api/heroes``                     开局页将池（启用并集、按真名分组的版本）
+``GET``          ``/api/hero-presets``               将池存档（5 个常驻槽位 + 活动槽位）
+``POST``         ``/api/hero-presets``               保存某个槽位并置为活动（覆盖该槽位）
 ``GET``          ``/api/decks``                      开局页牌堆档位列表（内容包 decks 的键 + 文案）
 ``GET``          ``/api/runs``                       录像列表
 ``GET``          ``/api/runs/<name>``                某局录像（meta + 记录流）
@@ -24,11 +26,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
+from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
 
 if __package__ in (None, ""):  # pragma: no cover - 直接 `python tools/sgs_web/serve.py` 时
@@ -40,12 +44,17 @@ from sgs_web import REPO_ROOT, ensure_engine_importable
 
 ensure_engine_importable()
 
-from sgs.data import DataLoadError, enabled_hero_ids, load_content_pack, load_heroes  # noqa: E402
+from sgs.data import DataLoadError, enabled_hero_ids, hero_by_id, load_content_pack  # noqa: E402
 from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
+    concealed_by_later_reveal,
+    concealed_guohuo_cards,
+    decorate_records_card_tags,
+    live_tag_deltas_after,
     pending_payload,
+    query_actor_map,
     skill_events_after,
     visible_record,
     visible_snapshot,
@@ -59,11 +68,31 @@ from sgs_web.session import (  # noqa: E402
 )
 from sgs_web.timeout import fallback_action  # noqa: E402
 
-__all__ = ["GameRegistry", "deck_catalog", "hero_catalog", "make_server", "main"]
+__all__ = [
+    "HERO_POOL_SLOTS",
+    "GameRegistry",
+    "deck_catalog",
+    "hero_catalog",
+    "load_hero_presets",
+    "make_server",
+    "main",
+    "save_hero_presets",
+]
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8100
 DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
+
+HERO_POOL_SLOTS: Final = 5
+"""将池存档的槽位个数（M6 票 13 / spec D6）：常驻 5 个，选中即编辑、保存覆盖当前槽位。"""
+
+HERO_PRESETS_FILENAME: Final = "hero-presets.json"
+DEFAULT_HERO_PRESETS_PATH: Final = DEFAULT_RUNS_DIR / HERO_PRESETS_FILENAME
+"""将池存档的落点：与 serve 的录像 / pid / log 同处（``runs/``，gitignored，spec D6）。
+
+文件是**服务端本地状态**，不进记录流、不进录像侧车——它只是"上次保存的将池"。
+"""
+
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -81,19 +110,117 @@ _SAVED: set[str] = set()
 """
 
 
-def hero_catalog() -> list[dict[str, str]]:
-    """开局页点将列表的只读面（票 19）：**启用池**的 ``id`` + 名称，按数据文件顺序。
+def hero_catalog() -> list[dict[str, object]]:
+    """开局页将池的只读面（M6 票 13）：**启用版本并集**按**真名**分组。
 
-    池的来源与发放段**同源**（``enabled_hero_ids`` 读同一个 ``enabled`` 字段），
-    所以"列表里点得到的"与"引擎发得出的"不会各抄一份名单而漂开。
+    与发放段**同源**：版本清单来自 ``enabled_hero_ids``（标准 + 界版的启用并集，票 12
+    起默认混合池），跨表取武将走 ``hero_by_id``，故"面板上画出来的"与"引擎发得出的"
+    不会各抄一份名单而漂开。分组键是数据里的 ``true_name``（**不从显示名剥前缀**：4 名
+    只有界版的武将没有可剥的"界"前缀）——同一真名的标准 / 界两版落在同一行，界面因此能
+    自解释"同一真名一局只出一个"。
+
+    组的顺序 = 真名在启用池里首次出现的顺序；组内版本顺序 = 数据文件顺序（标准表在前、
+    界版包在后）。``versions`` 里带 ``id`` / 显示名 / 版本标记：禁将是**版本粒度**
+    （票 12 D5），界面按 ``id`` 划掉一格、按 ``true_name`` 判断这一行还有没有可用版本。
     """
-    table = load_heroes()
-    catalog: list[dict[str, str]] = []
-    for hero_id in enabled_hero_ids(table):
-        hero = table.by_id(hero_id)
-        assert hero is not None  # enabled_hero_ids 只从这张表里挑，找不到就是上游违约
-        catalog.append({"id": hero.id, "name": hero.name})
-    return catalog
+    groups: dict[str, list[dict[str, str]]] = {}
+    for hero_id in enabled_hero_ids():
+        hero = hero_by_id(hero_id)
+        assert hero is not None  # enabled_hero_ids 只从武将表里挑，找不到就是上游违约
+        groups.setdefault(hero.true_name, []).append(
+            {"id": hero.id, "name": hero.name, "version": hero.version}
+        )
+    return [
+        {"true_name": true_name, "versions": versions}
+        for true_name, versions in groups.items()
+    ]
+
+
+def _empty_presets() -> dict[str, Any]:
+    """5 个空槽位 + 活动槽位 0（每次新建，避免调用方共享同一份可变列表）。"""
+    return {
+        "slot_count": HERO_POOL_SLOTS,
+        "active": 0,
+        "slots": [{"banned_heroes": []} for _ in range(HERO_POOL_SLOTS)],
+    }
+
+
+def _known_hero_ids() -> set[str]:
+    """可被禁的版本全集 = 启用池（与 :func:`hero_catalog` / 发放段同源）。"""
+    return set(enabled_hero_ids())
+
+
+def load_hero_presets(path: Path = DEFAULT_HERO_PRESETS_PATH) -> dict[str, Any]:
+    """读将池存档；返回 ``{"slot_count", "active", "slots"}``（``slots[i].banned_heroes``）。
+
+    文件缺失 / 坏 JSON / 结构不符 ⇒ **5 个空槽**：存档是本地便利状态，读不动不该把
+    开局页炸掉（保存会覆盖它）。旧文件里已不在启用池的武将 id 在读取时丢掉——它们
+    禁不出任何东西，留着只会让下一次建局 fail-closed 报一个玩家看不懂的错。
+    """
+    presets = _empty_presets()
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return presets
+    if not isinstance(raw, dict):
+        return presets
+    slots = raw.get("slots")
+    if not isinstance(slots, list) or len(slots) != HERO_POOL_SLOTS:
+        return presets
+    known = _known_hero_ids()
+    cleaned: list[dict[str, list[str]]] = []
+    for slot in slots:
+        banned = slot.get("banned_heroes") if isinstance(slot, dict) else None
+        if not isinstance(banned, list):
+            return presets
+        kept: list[str] = []
+        for hero_id in banned:
+            if isinstance(hero_id, str) and hero_id in known and hero_id not in kept:
+                kept.append(hero_id)
+        cleaned.append({"banned_heroes": kept})
+    active = raw.get("active")
+    if isinstance(active, bool) or not isinstance(active, int) or not 0 <= active < HERO_POOL_SLOTS:
+        active = 0
+    presets["active"] = active
+    presets["slots"] = cleaned
+    return presets
+
+
+def save_hero_presets(
+    *,
+    slot: object,
+    banned_heroes: Sequence[object],
+    path: Path = DEFAULT_HERO_PRESETS_PATH,
+) -> dict[str, Any]:
+    """保存某个槽位（**覆盖**该槽位）并置为 active；返回保存后的全量存档。
+
+    这是将池存档的唯一写入口：槽位越界 / 未知武将 id 一律 ``ValueError``（HTTP 层映射
+    400）且**不落盘**——半份存档比没存档更难查。写盘先 ``.tmp`` 再 ``os.replace``，
+    与录像落盘同一条纪律（进程被杀不留半份）。
+    """
+    if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot < HERO_POOL_SLOTS:
+        raise ValueError(f"将池槽位必须是 0..{HERO_POOL_SLOTS - 1} 的整数：{slot!r}")
+    if isinstance(banned_heroes, str) or not isinstance(banned_heroes, Sequence):
+        raise ValueError(f"禁将集合必须是武将 id 的数组：{banned_heroes!r}")
+    known = _known_hero_ids()
+    cleaned: list[str] = []
+    for hero_id in banned_heroes:
+        if not isinstance(hero_id, str) or hero_id not in known:
+            raise ValueError(f"禁将里有未知武将 id：{hero_id!r}")
+        if hero_id not in cleaned:
+            cleaned.append(hero_id)
+    presets = load_hero_presets(path)
+    presets["slots"][slot] = {"banned_heroes": cleaned}
+    presets["active"] = slot
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"schema_version": 1, **presets}, ensure_ascii=False, sort_keys=True, indent=2
+    )
+    tmp = target.with_name(f"{target.name}.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, target)
+    return presets
 
 
 DECK_PROFILE_DISPLAY: dict[str, tuple[str, str]] = {
@@ -134,7 +261,22 @@ class GameRegistry:
     def __init__(self, runs_dir: Path | None = None) -> None:
         self.sessions: dict[str, Session] = {}
         self.runs_dir = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
+        self.presets_path = self.runs_dir / HERO_PRESETS_FILENAME
         self._counter = 0
+
+    # -- 将池存档（M6 票 13） ----------------------------------------------
+
+    def hero_presets(self) -> dict[str, Any]:
+        """读 5 个常驻槽位 + 上次保存的 active（开局页自动加载它）。"""
+        return load_hero_presets(self.presets_path)
+
+    def save_hero_presets(self, body: dict[str, Any]) -> dict[str, Any]:
+        """保存一个槽位并置为 active；**校验只在模块函数**（唯一写入口）里做。"""
+        return save_hero_presets(
+            slot=body.get("slot"),
+            banned_heroes=body.get("banned_heroes", []),
+            path=self.presets_path,
+        )
 
     # -- 建局 ---------------------------------------------------------------
 
@@ -153,6 +295,9 @@ class GameRegistry:
             ai=str(body.get("ai", "heuristic")),
             human_seat=int(body.get("human_seat", 0)),
             my_hero=body.get("my_hero") or None,
+            # 禁将（M6 票 13）：**版本粒度、只作用于随机配将**；随建局请求冻结进会话配置，
+            # 不读本地存档——存档只是开局页的编辑器初值，玩家点了「开始」就以当时的集合为准。
+            banned_heroes=body.get("banned_heroes") or (),
             timeout_seconds=body.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             pack=pack,
             session_id=f"s{self._counter}",
@@ -179,11 +324,40 @@ class GameRegistry:
     def view(self, session: Session, *, after: int, logs_after: int) -> dict[str, Any]:
         """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。"""
         all_records = session.records()
+        window = session.records_after(after)
+        # U4-06 / D13：`action` 记录按查看者放行——只有人类座位自己的应答展开细节。
+        # 应答者 = `answers_seq` 指向的那次询问的 actor；映射取**全量**记录（询问可能
+        # 早于 `after` 游标），展开只对窗口里的记录做。
+        query_actors = query_actor_map(all_records)
+        # 掩码按"**这批记录里**谁在验明之前就在处理区"算，而不是只按当下的结算栈算：
+        # 一次没有目标步的【蛊惑】会在同一批记录里走完扣置 → 验明，等这批下发时栈上已经
+        # 不剩什么，只看栈就会把扣置那条搬牌记录连同**源牌牌面**一起发出去（用户实机
+        # 报障 2026-11-02 §2 的残留）。两半同源：栈上还挂着的（画"声明的牌名"）+ 本窗口
+        # 里先进处理区、后被亮出的（只掩码）。
+        concealed = {
+            **concealed_by_later_reveal(window, session.engine.state),
+            **concealed_guohuo_cards(session.engine),
+        }
         records = [
             payload
-            for record in session.records_after(after)
-            if (payload := visible_record(record, viewer=session.human_seat)) is not None
+            for record in window
+            if (
+                payload := visible_record(
+                    record,
+                    viewer=session.human_seat,
+                    query_actors=query_actors,
+                    state=session.engine.state,
+                    # UI1/UI2：未验明的【蛊惑】扣置牌**不给牌面**（处理区是公开区，
+                    # 但扣置是"背面朝上"进去的）——事件流与舞台同一份判据。
+                    concealed=concealed,
+                )
+            )
+            is not None
         ]
+        snapshot = visible_snapshot(session)
+        # 标签 delta 仍不进人类记录流（`visible_record` 裁掉）；这张牌的**可见**增删
+        # 另走展示通道，前端据此逐事件更新 live view，不必等下一次询问。
+        decorate_records_card_tags(records, session.engine.state, session.human_seat)
         return {
             "session_id": session.session_id,
             "seed": session.seed,
@@ -196,10 +370,17 @@ class GameRegistry:
             "finished": session.finished,
             "cursor": session.next_cursor(after),
             "log_seq": session.log_seq,
-            "snapshot": visible_snapshot(session),
+            "snapshot": snapshot,
             "skills": build_skills(session, session.human_seat),
             "pending": pending_payload(session),
             "records": records,
+            "live_deltas": live_tag_deltas_after(
+                window,
+                after=after,
+                state=session.engine.state,
+                snapshot=snapshot,
+                viewer=session.human_seat,
+            ),
             # U1-05 叙事契约：简易事件流的条目由服务端生成、按查看者过滤；前端只渲染。
             # 游标复用记录流的 `after`——条目自带产生它的记录 `seq`，两批拼接 = 全量。
             "narrative": narrative_after(
@@ -310,6 +491,9 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/heroes":
                 self._send_json(200, {"heroes": hero_catalog()})
                 return
+            if parsed.path == "/api/hero-presets":
+                self._send_json(200, {"presets": self.registry.hero_presets()})
+                return
             if parsed.path == "/api/decks":
                 self._send_json(200, {"decks": deck_catalog()})
                 return
@@ -343,6 +527,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(error)})
             return
         try:
+            if parsed.path == "/api/hero-presets":
+                self._send_json(200, {"presets": self.registry.save_hero_presets(body)})
+                return
             if parsed.path == "/api/sessions":
                 session = self.registry.create(body)
                 self._send_json(200, self.registry.view(session, after=-1, logs_after=0))

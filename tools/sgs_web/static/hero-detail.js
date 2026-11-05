@@ -7,6 +7,8 @@
  *  - 详情里武将技能在上、分割线、装备技能在下；技能多 / 描述长时滚轮翻阅；
  *  - 关闭按钮 / ESC 只关它自己（U2-06 起它是**唯一**可叠加的检视窗：盖在询问弹窗上，
  *    关掉后底下的询问弹窗原样恢复）；倒计时不暂停、窗口内不显示；
+ *  - **任何时候**都能开：询问态、牌桌事件回放（`state.playback`）、无 pending 的快照态；
+ *    回放**页**没有牌桌武将块、也不绑定这个入口；
  *  - 阵亡武将也能点开。
  *
  * 纪律：
@@ -46,20 +48,51 @@ function bindHeroDetailContext(node, seatOf) {
   });
 }
 
+/** 一条技能行：名称 / ☆ / 类别 / **三态徽标** / 描述全文。
+ *
+ * M6 票 19（spec「UI：☆ 技能标识、失效 / 失去标识」）：
+ * - ☆ = 觉醒后**获得**的技能（服务端 `star`）；
+ * - `state = suppressed` ⇒ 徽标「失效」+ `.state-suppressed`："有但被挡住"；
+ * - `state = lost` ⇒ 徽标「失去」+ `.state-lost`（CSS 划掉名字）："没了"；
+ * - `active` ⇒ 不挂徽标（不制造噪声）。
+ *
+ * 判据全读服务端字段，本函数不裁决技能是否生效。
+ */
 function detailSkillRow(skill) {
   const row = document.createElement("div");
-  row.className = "detail-skill";
+  const state = (skill && skill.state) || "active";
+  const stateLabel = skillStateLabel(skill);
+  row.className = `detail-skill state-${state}`;
   row.setAttribute("data-skill-id", skill.skill_id);
+  row.setAttribute("data-state", state);
   const head = document.createElement("div");
   head.className = "skill-head";
   const name = document.createElement("span");
   name.className = "skill-name";
   name.textContent = skill.name || skill.skill_id;
+  head.appendChild(name);
+  const star = skillStarLabel(skill);
+  if (star) {
+    const mark = document.createElement("span");
+    mark.className = "skill-star";
+    mark.textContent = star;
+    mark.setAttribute("title", "☆ 技能：觉醒后获得");
+    head.appendChild(mark);
+  }
   const type = document.createElement("span");
   type.className = "skill-type";
   type.textContent = skillKindLabel(skill);
-  head.appendChild(name);
   head.appendChild(type);
+  if (stateLabel) {
+    const badge = document.createElement("span");
+    badge.className = `skill-state ${state}`;
+    badge.textContent = stateLabel;
+    badge.setAttribute(
+      "title",
+      state === "lost" ? "失去：技能已不在，且不可恢复" : "失效：技能还在，作用域到期即恢复",
+    );
+    head.appendChild(badge);
+  }
   const text = document.createElement("p");
   text.textContent = skillDescription(skill);
   row.appendChild(head);
@@ -96,7 +129,9 @@ function renderHeroDetailBody() {
     && String(state.modal.heroSeat) === previousSeat;
   const scrollTop = sameSeat ? (Number(body.scrollTop) || 0) : 0;
   body.innerHTML = "";
-  const view = state.view;
+  // 与 renderTable 同一份视图：牌桌事件回放期间读 live view（pending 收起、快照已派生），
+  // 不读旧的 state.view，否则详情会停在上一问的画面。
+  const view = tableViewForRender();
   const seat = state.modal.heroSeat;
   if (!view || !view.snapshot || seat === null) return;
   const player = playerAt(view, seat);
@@ -129,7 +164,7 @@ function renderHeroDetailBody() {
   const meta = document.createElement("span");
   meta.className = "detail-meta";
   meta.textContent = `座位 ${player.seat} · ${player.alive ? "存活" : "阵亡"}`
-    + ` · 手牌 ${Number(player.hand_count) || 0}`
+    + ` · 手牌：${handReading(player)}`
     + ` · 体力 ${Math.max(0, Number(player.hp) || 0)}/${Math.max(0, Number(player.hp_max) || 0)}`;
   head.appendChild(meta);
   root.appendChild(head);
@@ -150,13 +185,16 @@ function renderHeroDetailBody() {
 
 /** 打开一个座位的详情：只记本地座位号并交给 `syncHeroModal` 开窗。
  *
- * 回放期间不开（回放页没有这份详情数据，且播放是严格顺序的）。
+ * 牌桌事件回放期间也开：读 `tableViewForRender()`（live view），不是拒绝 `state.playback`。
  * **不动**询问弹窗（`#t-dialog`）的任何状态：详情是叠加的检视窗，关掉它时底下原样恢复。
  */
 function openHeroDetail(seat) {
-  if (state.playback || !state.view || !state.view.snapshot) return;
+  // 牌桌事件回放期间 `tableViewForRender` 把 pending 收起，但武将块仍是当前可见的
+  // 座位；详情应跟这张表走（`state.liveView`），不能因为 playback 就拒绝。
+  const view = tableViewForRender();
+  if (!view || !view.snapshot) return;
   if (seat === null || seat === undefined) return;
-  if (!playerAt(state.view, seat)) return;
+  if (!playerAt(view, seat)) return;
   state.modal.heroSeat = Number(seat);
   syncHeroModal();
 }

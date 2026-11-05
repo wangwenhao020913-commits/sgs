@@ -53,9 +53,72 @@ function isRightAction(action) {
 
 /* ------------------------------------------------------------ 询问渲染 */
 
+/** **清空询问面**：提示文本 / 询问文本 / 技能串 / 目标提示 / 选项格 / 询问弹窗。
+ *
+ * 回放期演的是"上一问**已经答完**"之后发生的事（`session.js:applyView` 在起播时调用）：
+ * 旧询问的这几样都不再属于当前这一步。此前只有 `#t-prompt` / `#t-choice` 被清，其余
+ * 五样一直挂到**下一次** `renderPending` 才被冲掉——那一问可能隔着几十条记录，于是：
+ * 观星的排列弹窗在效果演完前一直留在场上、五谷的亮牌格留在提示区、其它座位的询问来了
+ * 提示区还是上一问的技能文案（M6 实机报障的三条同源症状）。
+ *
+ * **亮牌窗例外**：`state.dialog.kind` 是 `reveal` 时窗口与它的正文都留着——亮牌是公开 /
+ * 授予的牌面展示，记录流还会往里追加（洛神的连续判定靠 `refreshJudgmentReveal` 把 JUDGE
+ * 记录接在已开的窗口上；五谷的持久亮牌跨整个结算）。它自己的出口有两条：源结算帧出栈
+ * （`modal.js:syncPlaybackDialog`）或下一问提交（`syncDialog`）。持久亮牌模式下正文画在
+ * `#t-dialog-reveal`、`#t-options` 留在提示区 ⇒ 那份仍属于上一问，照样清。
+ */
+function blankAskSurface() {
+  const prompt = $("t-prompt");
+  if (prompt) prompt.textContent = "";
+  const choice = $("t-choice");
+  if (choice) choice.textContent = "";
+  const hints = $("t-skill-hints");
+  if (hints) hints.textContent = "";
+  const targetHint = $("t-target-hint");
+  if (targetHint) targetHint.textContent = "";
+  const promptSkills = $("t-prompt-skills");
+  if (promptSkills) promptSkills.innerHTML = "";
+  const options = $("t-options");
+  const body = $("t-dialog-body");
+  // 正文这时**挂在弹窗正文槽里**吗（`renderPending` 的分派器把它写进 `#t-options`，
+  // `modal.js:applyDialogContentMode` 再把它搬进正文槽）——亮牌窗的累积正文就在那儿。
+  const bodyOwnsOptions = !!options && !!body && options.parentNode === body;
+  // 票 01：涉猎的 2.5 秒结果态也跨"提交后的这一批回放"保留（与亮牌窗同一条理由：
+  // 起播即让位会把刚刷新的结果当场收掉，玩家看不到"拿走了哪几张"）。
+  const keepDialog = state.dialog.open
+    && (state.dialog.kind === DIALOG_KINDS.reveal
+      || (state.dialog.kind === DIALOG_KINDS.suit && suitResultActive()));
+  if (!keepDialog) {
+    // 弹窗收起时 `closeDialogDom()` 会把 `#t-options` 搬回提示区，故清格子放在它**之后**：
+    // 上一问的排列面 / 选项 / 槽位不跟着回到提示条上。
+    closeDialogDom();
+    if (options) options.innerHTML = "";
+    return;
+  }
+  if (!bodyOwnsOptions && options) options.innerHTML = "";
+}
+
 /** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
 function renderPending(view) {
   const pending = view && view.pending;
+  // 票 01：涉猎提交后的 2.5 秒结果态（仅发动者本地）。它**压过**下一问的表面直到计时
+  // 结束：牌桌已按新视图重画，询问面留在这里展示"拿走了哪几张"；计时结束再画真正的下一步。
+  if (!state.playback && suitResultActive()) {
+    renderSuitResult();
+    setActionLabels(false, false);
+    resetRightActions();
+    resetCountdown();
+    syncDialog();
+    enforceActionFreeze();
+    if (!state.suitResultTimer) {
+      state.suitResultTimer = window.setTimeout(() => {
+        state.suitResultTimer = null;
+        state.suitResult = null;
+        renderPending(state.view);
+      }, Math.max(0, state.suitResult.until - Date.now()));
+    }
+    return;
+  }
   syncPendingClock(view);
   // 重新渲染的界面是四键状态的**新真源**：丢弃上一次提交留下的冻结快照（请求还在飞时
   // `submitBusy` 为真，快照留着由 `enforceActionFreeze()` 继续压住四键）。
@@ -121,6 +184,10 @@ function renderPending(view) {
     if (stepDialogKind(pending) === DIALOG_KINDS.reveal) {
       renderReveal(pending, { interactive: false });
     }
+    // 票 01：涉猎的亮牌在公开处理区——其他人也看得到这条弹窗（只读；五张牌面公开）。
+    if (stepDialogKind(pending) === DIALOG_KINDS.suit) {
+      renderSuitPick(pending, { interactive: false });
+    }
     $("t-choice").textContent = "";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
@@ -135,9 +202,12 @@ function renderPending(view) {
   if (kind === "picker") renderPicker(pending);
   else if (kind === "discard") renderDiscard(pending);
   else if (kind === "preactivation") renderPreativation(pending);
+  // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 一张面选一条发动（末条「都不发动」）。
+  else if (kind === "activation-face") renderActivationFace(pending, actions);
   else if (kind === "preactivation-entry") renderPreativationEntry(pending);
   else if (kind === "seat") renderSeatPick(pending);
   else if (kind === "own-hand-pick") renderOwnHandPick(pending);
+  else if (kind === "own-zone-pick") renderOwnZonePick(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
     // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
@@ -155,6 +225,16 @@ function renderPending(view) {
   else if (kind === "skill") renderDirectSkill(pending, actions);
   // `SELECT_OPTION` 的非座位形态：一选项一个按钮的专用小选项组（不是候选列表）。
   else if (kind === "options") renderOptionButtons(pending);
+  // 单选项可选确认（B1）：唯一选项自动选中，不画选项按钮；出口 = 提交 / 右端放弃。
+  else if (kind === "option-confirm") renderOptionConfirm(pending);
+  // 洛神连续判定的亮牌确认（A1）：同一弹窗换牌 + 单选项确认。
+  else if (kind === "judge-reveal") renderJudgmentReveal(pending);
+  else if (kind === "distribution") {
+    // 计数式分配（票 05）：强制、无取消——唯一出口是右端「提交」（随时可点）。
+    $("btn-cancel").hidden = true;
+    $("btn-cancel").disabled = true;
+    renderDistribution(pending);
+  }
   else if (kind === "arrange") {
     // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
     $("btn-cancel").hidden = true;
@@ -209,6 +289,42 @@ function setActionLabels(inPreativation, passiveEntry, arrange = false) {
   }
 }
 
+/** 单选项可选确认（B1）：`SELECT_OPTION` 的候选里**恰有一个** `SelectOption`，且还有
+ *  一条 `Pass`。这是"做 / 不做"的确认形状（洛神的「是否继续」、涯角的「是否弃牌」、
+ *  界限的「是否弃置」），界面不再画那一个选项按钮：唯一选项自动选中，「提交」送它、
+ *  「放弃」送 `Pass`。
+ *
+ *  判据只读 `legal_actions` 的形状：不认技能 id、不认选项值；有两个以上选项的询问仍走
+ *  小选项按钮组，选择型（`option_labels` / ≥4）仍走自己的弹窗。选座位形态另走 `seat`。
+ */
+function isSingleOptionalOption(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
+  const actions = pending.legal_actions || [];
+  const options = actions.filter(
+    (action) => action.kind === "SelectOption" && !isRightAction(action),
+  );
+  return options.length === 1
+    && actions.some((action) => action.kind === "Pass");
+}
+
+/** A1：洛神连续判定的**亮牌确认**（服务端派生 `judgment_reveal.cards`）。
+ *
+ *  `judgment_reveal.final !== true` ⇒ 这一问仍是循环里的"看本次已翻出的判定牌，提交继续 /
+ *  放弃停止"；`cards` 是**有序累积**（第一张到当前这张），前一张不消失。
+ *  `final === true` ⇒ 循环已结束、只用于关窗（不画弹窗）。判据只看服务端字段，不认技能名。
+ */
+function isJudgmentRevealOption(pending) {
+  const cards = pending && pending.judgment_reveal
+    ? pending.judgment_reveal.cards
+    : null;
+  return !!pending
+    && pending.kind === "SELECT_OPTION"
+    && !!pending.judgment_reveal
+    && pending.judgment_reveal.final !== true
+    && Array.isArray(cards) && cards.length > 0;
+}
+
 /** 这次询问该走哪条渲染路径。
  *
  * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标；
@@ -217,6 +333,8 @@ function setActionLabels(inPreativation, passiveEntry, arrange = false) {
  * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
  * - `preactivation` / `preactivation-entry`：清单驱动的本地态 / 被动入口；
  * - `seat` / `options`：`SELECT_OPTION` 的选座位形态 / 小选项按钮组；
+ * - `option-confirm`：单选项可选确认（B1；只画「提交 / 放弃」）；
+ * - `judge-reveal`：洛神连续判定的亮牌确认（A1；弹窗 + 单选项确认）；
  * - `skill`：技能候选的直提态（无清单，如 B 形"是否发动"）；
  * - `direct`：唯一且无需选目标的候选 —— 不铺按钮，只说"将提交：…"；
  * - `unsupported`：没有专用面 —— fail-closed（不退回候选列表，不发明合法性）。
@@ -228,6 +346,15 @@ function renderKind(pending, actions) {
   // 引擎为 `SELECT_CARDS` 只生成**一条**候选（`SelectCards` + 全部 picks 的组合是前端拼的），
   // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
   if (isOwnHandSinglePick(pending)) return "own-hand-pick";
+  if (isOwnZonePick(pending)) return "own-zone-pick";
+  // 空选择面 = 引擎仍要发的那条"只能放弃"询问（如【铁骑】没有同花色牌）：不铺空面板，
+  // 只走唯一候选（Pass）的直提态；没有可选动作则 fail-closed。
+  // 票 01：【攻心】的"观看"在没有红桃时也是空选择面——表面仍是亮牌弹窗，要画整副手牌
+  // （正文在 `renderSlots` → `renderReveal`），不能退化成"将提交：放弃"的空弹窗。
+  if (pending.kind === "SELECT_CARDS" && !(pending.slots || []).length) {
+    if (stepDialogKind(pending) === DIALOG_KINDS.reveal) return "slots";
+    return directAction(pending) ? "direct" : "unsupported";
+  }
   if (pending.kind === "SELECT_CARDS") return "slots";
   // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
   if (pending.kind === "DISCARD") return "discard";
@@ -235,13 +362,27 @@ function renderKind(pending, actions) {
   // 规格缺失（409 裸 Query / 无技能定义）时也只走这条路径，由 `renderArrange` 画
   // "排列不可用"（fail-closed），**不**退回候选列表猜一个顺序。
   if (pending.kind === "ARRANGE") return "arrange";
+  // 票 05：计数式分配（【业炎】）——窗内逐座位计数，不铺候选、不点牌桌。
+  if (pending.kind === "DISTRIBUTE") return "distribution";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preactivation) return "preactivation";
+  // 同一时机的激活面（票 02）：本轮 N ≥ 2 条技能候选 ⇒ 一张面选一条发动（末条
+  // 「都不发动」）。判据只看候选条数（`isActivationFace`），**排在被动入口之前**——
+  // 代表候选（`pending.skill_id`）可能正好是已翻预发动的那条，但这一问的答案不是它。
+  // 单候选面（N = 1）掉到下面既有的两条支路（直提态 / 预发动入口），一字不变。
+  if (isActivationFace(pending)) return "activation-face";
   // 被动入口（W4-2）：已翻预发动的技能在时机上只发一次询问并随询问下发清单。界面给它
   // 一个**入口**（技能按钮）与一条"放弃"（= `Pass`），不把骨架候选画成"发动技能 XXX"。
   if (isPassivePreativation(pending)) return "preactivation-entry";
   // `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：**取消选项按钮**，只点场上武将。
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) return "seat";
+  // 洛神连续判定的亮牌确认（A1）：弹窗显示本张判定牌，同时仍是单选项确认。
+  if (isJudgmentRevealOption(pending)) return "judge-reveal";
+  // 单选项可选确认（B1）：唯一 `SelectOption` + 一条 `Pass` = 「提交 / 放弃」两出口，
+  // 不再画那一个选项按钮。判据只看候选形状（选项条数 + Pass），不认技能 id；
+  // 涯角 / 界限等既有单选项可选技能自动套同一形态。选择型（`option_labels` / ≥4）
+  // 仍走自己的弹窗，不抢。
+  if (isSingleOptionalOption(pending) && !isChoiceStep(pending)) return "option-confirm";
   // 其余 `SELECT_OPTION`（花色 / 二选一）：专用的小选项按钮组。
   if (pending.kind === "SELECT_OPTION" && actions.some((action) => action.kind === "SelectOption")) {
     return "options";
@@ -315,7 +456,7 @@ function cancelAction(pending) {
   // 即便引擎给了 Pass，界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"
   // （这里的 null 让 `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
   const kind = stepDialogKind(pending);
-  if (dialogDisablesPass(kind)) return null;
+  if (dialogDisablesPass(kind, pending)) return null;
   return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
 }
 
@@ -450,6 +591,77 @@ function renderPreativationEntry(pending) {
   $("btn-submit").disabled = true;
 }
 
+/** 同一时机的**激活面**（票 02）：一张面选一条发动。
+ *
+ * 每一行 = 一条 `ActivateSkill` 候选（**不是**右端动作），文案 = 技能名 + 描述
+ * （`view.skills[*]` 的展示事实；前端不抄中文名、不编描述）。末条「都不发动」只在
+ * `legal_actions` 里**真有 `Pass`** 时铺——判据是候选，**不认技能 id**。
+ *
+ * 选中一条之后按**这条候选自己的**清单分流（`preactivationManifest` 读
+ * `activation_preactivations`）：有清单 ⇒ 进入它的预发动（清单 = 这次发动的成本 / 目标，
+ * 在牌桌表面逐步选）；无清单 ⇒ 这条裸 `ActivateSkill` 本身就是答案，**一击即提交**
+ * （与选择型弹窗的"点一个选项即提交"同一交互；服务端随后按技能自己的流程继续问）。
+ *
+ * 两个出口都在面内（行点击 / 末条「都不发动」），故右端的「提交 / 放弃」在这张面上
+ * 不承担出口（`refreshSubmit` 把提交键留灰；这张面走 `choice` 外壳，右端放弃按既有
+ * `dialogDisablesPass` 的口径不铺——「都不发动」不是右端那个通用「放弃」）。
+ */
+function renderActivationFace(pending, actions) {
+  const skills = (state.view && state.view.skills) || [];
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = "选一条技能发动；都不发动就点末条。";
+  actions
+    .filter((action) => action.kind === "ActivateSkill")
+    .forEach((action) => {
+      const skill = skills.find((item) => item && item.skill_id === action.skill_id) || null;
+      const name = (skill && skill.name) || skillActionName(action) || action.skill_id;
+      const manifest = preactivationManifest(pending, action.skill_id);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "hero-card-row";
+      row.setAttribute("data-skill-id", String(action.skill_id));
+      const label = document.createElement("span");
+      label.className = "hero-card-row-name";
+      label.textContent = name;
+      row.appendChild(label);
+      // 描述是 `descriptions.json` 的原文（服务端下发，界面不裁剪）——缺省时只画技能名。
+      const description = skill && skill.description;
+      if (description) {
+        const body = document.createElement("div");
+        body.className = "hero-card-desc";
+        body.textContent = description;
+        row.appendChild(body);
+      }
+      row.addEventListener("click", async () => {
+        if (state.playback || state.submitBusy) return;
+        if (manifest) {
+          enterPreativation(
+            skill || { skill_id: action.skill_id, name, preactivated: false },
+            manifest,
+          );
+          return;
+        }
+        await submitDialogChoice(pending, actions.indexOf(action));
+      });
+      $("t-options").appendChild(row);
+    });
+  // 末条「都不发动」：候选里真有 `Pass` 才铺（「可以都不发动」由引擎的 `optional` 聚合
+  // 决定，界面只读候选集合）。它与其它「放弃」是同一个动作：送出那条 `Pass`。
+  if (actions.some((action) => action.kind === RIGHT_ACTION_KINDS.pass)) {
+    const giveUp = document.createElement("button");
+    giveUp.type = "button";
+    giveUp.className = "opt";
+    giveUp.textContent = "都不发动";
+    giveUp.addEventListener("click", async () => {
+      if (state.playback || state.submitBusy) return;
+      await submitRightAction(RIGHT_ACTION_KINDS.pass);
+    });
+    $("t-options").appendChild(giveUp);
+  }
+  // 面里的行就是出口：底部两键不承担这一步（提交键由 `refreshSubmit` 统一留灰）。
+  $("btn-cancel").disabled = true;
+}
+
 /** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁" / 【离间】选使用者与目标）：只点场上武将。 */
 function renderSeatPick(pending) {
   const hint = $("t-target-hint");
@@ -528,6 +740,39 @@ function refreshSubmit(pending) {
   // 故这一支按既有 `selectionError` / `buildAction` 算可点态（判据仍是"能造出候选里真有
   // 的那条 Action"），不把提交键恒置灰。
   const dialogKind = stepDialogKind(pending);
+  // 同一时机的激活面（票 02）：出口在**面内**（每条技能行一击即提交 / 末条「都不发动」），
+  // 底部「提交」不承担这一步（两个提交点会让"选一条"变成"选一条再按一次"）。
+  // 判据与 `stepDialogKind` 共用 `activationFaceSurface`：点开某条候选的清单之后这一步的
+  // 表面是**牌桌**，提交键要按清单的 `ready` 算（复核修复 F2：只判 N ≥ 2 会让清单永远
+  // 提不出去——提交键恒灰、提示条被改写成面内那句）。
+  if (activationFaceSurface(pending)) {
+    $("btn-submit").disabled = true;
+    $("t-choice").textContent = state.lastRejectReason
+      || "点一条技能发动；不发动就点「都不发动」。";
+    return;
+  }
+  // 票 01：按花色取牌（涉猎）——「提交」恒可点（0 张也合法）；「放弃」在右端，与提交同义，
+  // 由 `answer.js:submitRightAction` 特判成"提交当前选择"。
+  if (dialogKind === DIALOG_KINDS.suit) {
+    const ready = buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    $("t-choice").textContent = state.lastRejectReason
+      || `点选每种花色至多一张（已选 ${state.picks.length} 张）；`
+      + "点「提交」或右端「放弃」都按当前选择结算。";
+    return;
+  }
+  // A1：洛神亮牌确认——弹窗里没有可选卡，出口是「提交 / 放弃」；按唯一选项的正常提交态算。
+  if (isJudgmentRevealOption(pending)) {
+    const selected = state.selectedOption === null
+      ? null
+      : (pending.legal_actions || [])[state.selectedOption];
+    const blocked = selected === null ? null : selectionError(selected, pending);
+    const ready = blocked === null && buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    $("t-choice").textContent = state.lastRejectReason
+      || (ready ? "可以提交。" : "点右端「提交」继续，或「放弃」停止。");
+    return;
+  }
   if (dialogKind === DIALOG_KINDS.reveal && isPickRevealStep(pending)) {
     const selected = state.selectedOption === null
       ? null
@@ -548,14 +793,25 @@ function refreshSubmit(pending) {
     }
     return;
   }
-  // 只从自己手里选一张（M5-08a）：点手牌即提交；唯一出口是内容点击或右端「放弃」。
-  if (isOwnHandSinglePick(pending)) {
+  // 票 01：可选亮牌（攻心）——点一张即提交（`submitRevealPick`），「提交」键不是出口；
+  // 没有可点的红桃时唯一出口是右端「放弃」。
+  if (dialogKind === DIALOG_KINDS.reveal && hasPassAction(pending)) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason
-      || "点一张亮起的手牌即提交；也可以点右端「放弃」。";
+      || ((pending.slots || []).length
+        ? "点一张红桃牌即展示；也可以点右端「放弃」。"
+        : "没有可展示的红桃牌，点右端「放弃」结束。");
     return;
   }
-  if (dialogDisablesPass(dialogKind)) {
+  // 只从自己手牌 / 装备区选一张（火攻 / 铁骑等）：点牌即提交；出口是内容点击或右端「放弃」。
+  if (isOwnHandSinglePick(pending)) {
+    $("btn-submit").disabled = true;
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    $("t-choice").textContent = state.lastRejectReason
+      || `点一张亮起的${where}即提交；也可以点右端「放弃」。`;
+    return;
+  }
+  if (dialogDisablesPass(dialogKind, pending)) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason
       || (dialogKind === DIALOG_KINDS.choice
@@ -569,17 +825,34 @@ function refreshSubmit(pending) {
   const blocked = selected === null ? null : selectionError(selected, pending);
   const ready = blocked === null && buildAction() !== null;
   $("btn-submit").disabled = !ready;
+  if (isOwnZonePick(pending)) {
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    $("t-choice").textContent = state.lastRejectReason
+      || blocked
+      || (ready ? "可以提交。" : `点选${where}（已选 ${state.picks.length} 张）。`);
+    return;
+  }
   if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
   if (blocked) { $("t-choice").textContent = blocked; return; }
   if (state.preactivation) {
     const pa = state.preactivation;
     // 复合动作：填完就交（服务端校验器裁决）；转化技的本地入口：填完还得**查得到候选**
     // （查不到 = 这组来源 / 目标此刻不合法，按钮不给点）。
-    $("btn-submit").disabled = !preactivationReady(pa) || buildAction() === null;
-    if (!preactivationReady(pa)) {
-      $("t-choice").textContent = pa.cursor >= pa.steps.length
-        ? "清单里还有步骤没填完。"
-        : preactivationStepHint(pa, pending);
+    //
+    // 票 10：**来源是不是合法组合**另判（`Step.groups`）——清单填完不等于这组来源能一起
+    // 转化。缺省 `groups` 的步恒真；有 `groups` 时，陈旧 / 合成载荷也过不了这道闸，
+    // 「提交」不会亮、更不会发出一条注定 400 的 `ActivateSkill`。
+    const legal = preactivationSourcesLegal(pa);
+    const ready = preactivationReady(pa);
+    $("btn-submit").disabled = !legal || !ready || buildAction() === null;
+    if (!legal) {
+      // 通用文案（不认牌名 / 花色）：说清这一组不能一起转化，出口 = 取消再重选。
+      $("t-choice").textContent = PREACTIVATION_GROUP_HINT;
+    } else if (!ready) {
+      // 未填完 = 说**同一句**步骤提示（标题 `#t-target-hint` 读的也是它）：光标到末尾但
+      // 还有空步时它会指回第一个空步，不再出现标题说「清单已填完」、页脚说「还有步骤
+      // 没填完」的矛盾（票 08）。
+      $("t-choice").textContent = preactivationStepHint(pa, pending);
     } else {
       $("t-choice").textContent = pa.cardEntry
         ? "可以确认使用（提交一次带附带指定 [持刀者, Bn] 的使用）。"

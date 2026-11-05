@@ -136,7 +136,7 @@ def test_a_hero_skill_takes_the_hero_priority_class_and_sorts_before_equipment(m
     hero_index = [instance.skill_id for instance in instances].index(HUJIA)
     equip_index = [instance.skill_id for instance in instances].index("equip.crossbow")
     assert hero_index < equip_index, (
-        "武将档（HERO=0）先于装备档（EQUIPMENT=1），由链序直接表达，不靠特判"
+        "武将档（HERO=0）先于装备档（EQUIPMENT=1），由优先级值序直接表达，不靠特判"
     )
 
 
@@ -256,13 +256,24 @@ def test_lord_skill_allowed_reads_the_definition_field(monkeypatch):
 def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
     """注入一条主公技定义 ⇒ 派生集合**非空且含它**（手抄空集过不了这条）。
 
-    票 09 起真实 ``CATALOG`` 已有三条主公技（护驾 / 激将 / 救援），故期望集合要含它们；
-    注入点仍是同一条派生路径（``SkillDef.skill_type``）。
+    票 09 起真实 ``CATALOG`` 已有三条主公技（护驾 / 激将 / 救援），M6 票 14 又加界【护驾】；
+    M6 票 16 再加界【激将】；注入点仍是同一条派生路径（``SkillDef.skill_type``）。
     """
     _install(monkeypatch, _hero_def())
 
     assert lord_skill_ids() == frozenset(
-        {HUJIA, "hero.liubei.jijiang", "hero.sunquan.jiuyuan"}
+        {
+            HUJIA,
+            "hero.jie_caocao.hujia",
+            "hero.liubei.jijiang",
+            "hero.jie_liubei.jijiang",
+            "hero.sunquan.jiuyuan",
+            "hero.jie_sunquan.jiuyuan",
+            # feng-zhangjiao 票 01：张角移动版【黄天】（主公技）
+            "hero.zhangjiao_mobile.huangtian",
+            # huo-mobile-batch 票 03：袁绍移动版【血裔】（主公技）
+            "hero.yuanshao_mobile.xueyi",
+        }
     )
 
 

@@ -17,7 +17,7 @@
     "state", "applyView", "renderPending", "buildAction", "submitAction",
     "loadRuns", "openReplay", "renderReplay", "renderLog", "phaseLabel",
     "cardUsable", "cardCandidates", "clearSelection", "renderTable", "actionLabel", "renderSkills",
-    "PHASE_LABELS", "keepRecord", "timingLabel",
+    "ACTION_KIND_LABELS", "PHASE_LABELS", "keepRecord", "timingLabel",
     // 手选（票 01）：候选索引 + 焦点/目标 + 自动选中 + 渲染路径分派
     "cardIndex", "cardEntry", "cardSelectable", "isLegalCombo", "autoCombo",
     "pickerSeats", "pickerTargetHint", "toggleFocus", "selectTarget",
@@ -33,6 +33,8 @@
     "preactivationManifest", "enterPreativation", "togglePreativationCard",
     "advancePreativation", "selectPreativationSeat", "selectPreativationOption",
     "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
+    // 票 08：清单"填完没有"的唯一判据（ready / 步骤提示 / 重选落点同读）
+    "firstUnfilledPreativationStep",
     "preactivationStepKind", "preactivationOptions", "preactivationCardOptions",
     "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
     // W7-01b：清单座位步多选（max > min）+ 借刀窗口首项（Bn）预选 / 必选
@@ -45,11 +47,13 @@
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
     // U3-01 / D5：舞台项寿命的纯函数——烟测直接喂 `now` 断 visible / fading / gone（D15）
     "stageLane",
+    // U4-03 / D9：批量停留的纯函数（0.5×(N+1) 秒）——烟测直接喂 N（缺省按 1）。
+    "stageHoldMs",
     // W4-6：回放页（全区域增量重建 / 询问面板 / play-pause / 步长 / 空壳引导）
     "renderEffectCards", "replayStep", "replaySeek", "toggleReplayPlay", "stopReplayPlay",
     "renderRunList", "runRow",
     // 票 14：「提供一张 B」的就地渲染 + 置灰纯函数（cardFace）
-    "isProvide", "provideSlotIndex", "cardFace", "activateCard", "renderProvide", "toggleProvidePick",
+    "isProvide", "provideSlotIndex", "cardFace", "cardFaceNode", "activateCard", "renderProvide", "toggleProvidePick",
     // 票 15：选择面的张数上限（读服务端 spec.total）+ 槽位点选（【遗计】一次两张 / 取消）
     "selectionCap", "toggleSlotPick",
     // 弃牌阶段的点手牌收进待弃置集合（U2-05 只读态要逐入口钉 no-op）
@@ -60,6 +64,10 @@
     "arrangeRowOf", "arrangeMoveTo", "arrangePick", "arrangeDrop",
     // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
+    // 票 13：将池预设——5 槽切换 / 编辑 / 保存，真名分组渲染，真名池不足的拒绝判据
+    "heroVersions", "heroPools", "loadHeroPools", "saveHeroPool", "currentBans",
+    "renderPoolSlots", "renderHeroPool", "selectPoolSlot", "togglePoolBan",
+    "poolBlockReason", "syncPoolHint",
     // M5-01b：开局页牌堆档位——列表拉取（选项/文案全来自服务端 GET /api/decks）
     "loadDeckCatalog", "fillDeckOptions",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
@@ -83,6 +91,16 @@
     "reforgeAction", "renderReforgeEntry", "submitReforge", "describeRecord",
     // M5-bugfix（借刀预发动）：展示卡 → 纯 CardRef 的唯一投影口
     "bareCardRef",
+    // M6 票 19：混合池武将名（目录兜底）/ 技能三态徽标 / 逐事件派生的轮次与额外回合
+    "heroDisplayName", "skillStateLabel", "applyLiveDelta",
+    // U4-01（D1/D2/D3/D5/D6）：飞行层——分类表时长 / ini 载入 / 起飞前量源 / 重绘后起飞。
+    "animDefaults", "animConfig", "animParseIni", "animLoadConfig",
+    "animReady", "animOnConfig", "animPlanFlight", "animLaunchFlight", "durationOf",
+    // U4-02（D7/D8）：节奏 = base + 该条动画 × base/100（纯函数，烟测直接喂 {base, record}）。
+    "delayOf",
+    // huo-taishici-xunyu 票 04：拼点弹窗——载荷派生 / 回放入口 / 停留常量（只读展示面）。
+    "pindianPlan", "applyPindianDelta", "showPindian", "hidePindian",
+    "PINDIAN_HOLD_MS", "PINDIAN_VERDICTS",
   ];
   const out = {};
   for (const name of names) {
@@ -92,6 +110,9 @@
   // 原始入口（不自动冲刷回放）：观察中间态的用例用它。
   out.applyViewRaw = out.applyView;
   const rawSubmit = out.submitAction;
+  // 文件头注释早就写了 `applyViewRaw` / `submitActionRaw` 这一对；后者此前没挂上，
+  // 于是"提交之后、整批回放还没播完"的中间态在烟测里观察不到（M6 报障的红命令要用）。
+  out.submitActionRaw = rawSubmit;
   out.applyView = (body) => {
     out.applyViewRaw(body);
     if (out.flushPlayback) out.flushPlayback();

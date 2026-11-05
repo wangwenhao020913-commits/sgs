@@ -17,23 +17,35 @@ D 族的形态差别只有一处：它**不建帧、也不产候选**，而是�
   （与【八卦阵】"选中才惰性压判定帧"同款先例）；
 - **"失去"与移动原因无关**（R5-Q3）：判定只看 ``from_zone`` / ``to_zone`` / 移动后的持有，
   不看 :class:`~sgs.state.MoveReason`——使用 / 打出 / 弃置 / 交给 / 被获得 / **重铸** / 顶替
-  全算，**摸牌不算**（牌堆 → 手牌）。M5-03 的 ``MoveReason.REFORGE``（铁索重铸）因此
+  全算，**摸牌不算失去**（牌堆 → 手牌，票 24 的 Q1 只把摸牌算进"获得"）。
+  M5-03 的 ``MoveReason.REFORGE``（铁索重铸）因此
   照常触发【连营】/【枭姬】：本族**不按原因过滤**，也不新增"弃置触发"的第二条通道——
   将来若出现弃置类触发，它必须显式比较 ``MoveEvent.reason``、把 REFORGE 排除在外。
 
-两条技能的逐字语义（票 07 §要做什么 6 的表）：
+两条技能的逐字语义（票 07 §要做什么 6 的表 + 票 23 的触发粒度）：
 
 =========================  ======  ==================================================
 技能                        锁定    触发条件
 =========================  ======  ==================================================
-陆逊【连营】                非锁定   ``from_zone == HAND ∧ to_zone != HAND ∧`` 移动后手牌为空
+陆逊【连营】                非锁定   ``loses_card``（离开自己的手牌区）∧ 移动后手牌为空
 孙尚香【枭姬】              非锁定   ``from_zone == EQUIP``（含顶替：先旧后新的旧装备那条）
 =========================  ======  ==================================================
 
+两条的**触发次数**不同，且差别就在牌面的量词（`06`（§5「程序化约定与偏离一手」）的默认读法
+（三））：【枭姬】写"失去装备区里的**一张**牌"⇒ 一次搬 N 张要触发 **N 次**
+（:attr:`MoveAfterSkill.trigger_count` / :func:`_lost_equipment_count`）；【连营】写"失去
+**最后的手牌**"（无限定词）⇒ 一次失去只触发**一次**（D-9，布尔判据 :func:`_emptied_hand`）。
+
+**失去判据只有一份**（票 07）：标版 :func:`_emptied_hand` 与界版
+``hero_zone._lost_last_hand`` 都读 :func:`loses_card`——去向不限，
+"交给别人"算失去，唯一但书是手牌 → **自己的**手牌（重排一类）。界版原先自己写了一份
+"去向是手牌就排除"的判据，与标版相反（漏触发），已按用户 2026-11-03 的裁定收敛。
+
 两条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的，故 :func:`_dispatch` 会
-先发一次 ``SKILL_ACTIVATION`` 询问。**这一族的钩子不得暂停**（不调 ``ask``、不压提问帧）：
-``Engine.move_in_frame`` 的返回形状是 ``None``，钩子返回 ``"stay"`` 无处安放——本票的两条
-技能都只做"摸 N 张"这一件同步事（牌堆重洗也是一次同步 delta），故约束天然成立。
+先发一次 ``SKILL_ACTIVATION`` 询问。钩子**可以**提问并挂起：``move_in_frame`` 返回
+``"stay"`` 时引擎把它压进 ``_move_pending`` **栈**，由 :meth:`Engine._flush_pending_move`
+用**续跑帧**接着跑（M6 票 08 起；界【连营】的逐座选人与界【枭姬】的逐张再发动都走这条）。
+嵌套挂起（摸牌钩子里再触发"获得牌后"）自票 25 起按**后进先出**续跑。
 """
 
 from __future__ import annotations
@@ -41,13 +53,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType
-from sgs.effects import CarrierKind
-from sgs.state import CardRef, GameState, MoveReason, Zone, ZoneRef
+from sgs.data import SkillType, card_category
+from sgs.effects import CarrierKind, locate
+from sgs.resolution import Control
+from sgs.state import CardRef, GameState, MoveReason, Pass, Phase, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import (
     MATCH_OWNER_KEY,
+    RUNNING_SKILL_KEY,
     HeroSkillDecl,
     Hook,
     SkillDef,
@@ -55,23 +69,39 @@ from .catalog import (
     SkillSource,
     SkillSourceKind,
     dispatch_timing,
+    mark_skill_used_this_turn,
     resolve_instances,
+    skill_used_this_turn,
 )
-from .flow import SkillFlow, zero_step_effect
+from .flow import PickCards, PickSeats, SkillFlow, zero_step_effect
 
 __all__ = [
+    "JIE_QINGJIAN",
     "LIANYING_FLOW",
     "MOVE_AFTER_SKILLS",
     "MOVE_EVENT_KEY",
     "MoveAfterSkill",
     "MoveEvent",
+    "QINGJIAN_FLOW",
     "XIAOJI_FLOW",
     "dispatch_move_after",
+    "gains_card",
     "lost_equipment_instances",
+    "loses_card",
     "move_after_providers",
     "move_after_skill_definitions",
     "move_event",
 ]
+
+_AGAIN_OPTION = "skill_again"
+"""逐张触发技能（【枭姬】）第 2 张起的"是否再发动一次"里那个唯一选项的取值。
+
+与 ``seat:N`` 一类取值同姿态：只是**这一个询问**内的取值，不是领域概念、不进记录流的
+语义层，也不直接显示。界面按**候选形状**渲染——「一个 ``SelectOption`` + 一条 ``Pass``」=
+单选项确认（`tools/sgs_web/static/pending.js:isSingleOptionalOption`），画成「提交 / 放弃」
+两个出口、标题取技能声明的 `requirement`（【枭姬】=「摸两张牌」），故**不需要**再加中文
+标签；「放弃」= 到此为止（牌面写的是"至多 X 次"）。
+"""
 
 MOVE_EVENT_KEY = "move_event"
 """帧私有槽名：本次 ``MOVE_AFTER`` 的载荷（:class:`MoveEvent`）。
@@ -89,6 +119,9 @@ class MoveEvent:
     ``owner`` = 这次移动的**归属角色**（判定牌 = 被判定者、弃置 / 使用 = 弃置者 / 使用者、
     摸牌 = 摸牌者），``actor`` = **操使者**（效果的执行人，可能不是归属者）。
     ``after_holder`` = **移动后的持有者座位**：``to_zone.seat`` 就是它（共享区为 ``None``）。
+    ``to_top`` = 落点（票 02）：这次移动**在落点就写进牌堆顶**时为 ``True``（缺省 = 接在
+    目标区尾部）。牌在钩子被派发**之前**就已经落在那里，故钩子读 ``state.deck`` 与读这个
+    字段看到的是同一件事；其它目标区没有"顶"，恒为 ``False``。
     """
 
     cards: tuple[CardRef, ...]
@@ -98,6 +131,17 @@ class MoveEvent:
     owner: int | None
     after_holder: int | None
     actor: int | None
+    causer: int | None = None
+    """**这次移动的发起人**（M6 票 08 的加法；缺省 ``None`` = 未声明）。
+
+    与 ``actor`` 不是一回事：弃置类效果常把 ``actor`` 写成**牌的归属者**（【寒冰剑】的
+    目标"弃置自己的牌"、界【刚烈】的"你弃置来源的一张牌"都这样），而"是不是**其他角色**
+    弃置的"只有发起人说得清。引擎在"装备区 → 弃牌堆"的移动前把**当时正在跑的技能持有者**
+    （没有技能时退回帧的 ``source``）填进来，供事件接缝判"其他角色"；移动后的常规
+    ``MOVE_AFTER`` 载荷不带它（缺省 ``None``）。
+    """
+    to_top: bool = False
+    """落点（票 02 的加法；缺省 ``False``）：这次移动是否把牌写进了牌堆**顶**。"""
 
     @property
     def card_ids(self) -> tuple[int, ...]:
@@ -174,11 +218,11 @@ def move_after_providers(
     )
 
 
-def dispatch_move_after(host: Any, frame: Any) -> None:
+def dispatch_move_after(host: Any, frame: Any) -> Control:
     """在当前帧上派发 ``MOVE_AFTER``（引擎的 ``move_in_frame`` 在 ``move_card`` 之后调它）。
 
-    守卫在 ``Engine.move_in_frame`` 一侧已经判过，这里只做通用派发；返回值被刻意丢弃——
-    本族的钩子不得暂停（见模块 docstring）。
+    守卫在 ``Engine.move_in_frame`` 一侧已经判过，这里只做通用派发。返回值原样上抛：
+    本族的钩子**可以**提问并挂起，由 :meth:`Engine._flush_pending_move` 的续跑帧接着跑。
 
     M5-05a 起**刚离开装备区的装备**也参与本次派发（:func:`lost_equipment_instances`）：
     它们是"这一次移动"的提供者，而不是当前状态里的装备。
@@ -189,6 +233,174 @@ def dispatch_move_after(host: Any, frame: Any) -> None:
         Timing.MOVE_AFTER,
         extra_instances=lost_equipment_instances(host.state, move_event(frame)),
     )
+
+
+# ---------------------------------------------------------------------------
+# 界夏侯惇【清俭】（M6 票 08）：**别人的回合**获得牌 ⇒ 交给另一名角色 ⇒ 当前回合角色 +X
+#
+# §十九 L2042–L2045：
+#
+#     每回合限一次，当你于你的摸牌阶段外获得牌后，你可以展示任意张牌并将这些牌交给
+#     一名其他角色，然后当前回合角色本回合的手牌上限 +X（X 为给出的牌包含的类别数）。
+#
+# 三段判据都不认牌名：
+#
+# - **获得** = 移到自己的手牌（来源不限：牌堆的摸牌也算，票 24 裁定 Q1 / 票 25 落地）；
+# - **"于你的摸牌阶段外"** = 不是"当前回合是你 ∧ 阶段是摸牌"（在别人的回合里摸到牌
+#   也算"你的摸牌阶段外"）；
+# - **每回合限一次** = ``skill_state`` 的 :data:`~sgs.skills.catalog._TURN_USED` 位
+#   （清俭在**任何人的**回合都可能触发，故不能复用"本出牌阶段"的阶段位）。
+#
+# 加式落在**当前回合角色**身上（不是清俭的持有者）——这是 D11 双轴的"跨座位"那一半；
+# 作用对象是提交那一刻的 ``state.turn_seat``，此后不重定向（`06`（§5「程序化约定与偏离一手」） 登记了"中途阵亡"的
+# 裁定），增量记在 :attr:`~sgs.state.Player.hand_limit_bonus`、回合末过期。
+# ---------------------------------------------------------------------------
+
+JIE_QINGJIAN = "hero.jie_xiahoudun.qingjian"
+"""界夏侯惇【清俭】的全限定技能 id（§十九 L2042–L2045）。"""
+
+_QINGJIAN_BONUS_KEY = "qingjian_bonus"
+"""帧私有：+X 与"本回合已用"位已经落过（搬牌挂起后的续跑不重复加）。"""
+
+_QINGJIAN_GIVEN_KEY = "qingjian_given"
+"""帧私有：那批牌已经交出去（重入不重搬）。"""
+
+_QINGJIAN_REVEALED_KEY = "qingjian_revealed"
+"""帧私有：那批牌已经展示过（重入不重复落 ``card_reveal``）。"""
+
+_QINGJIAN_GROUPS_KEY = "qingjian_groups"
+"""帧私有：选中的牌按**来源区域**分组后的 ``[(zone, (card_id, ...)), ...]``。
+
+``move_card`` 一次只能有一个来源区（手牌 / 装备区各一批）；分组也在帧内定格，
+重入不重算。
+"""
+
+_QINGJIAN_MOVED_KEY = "qingjian_moved"
+"""帧私有：已搬完的来源组数（搬牌内联挂起后据此续搬，不重搬已完成的组）。"""
+
+
+def _other_alive_seats(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """【清俭】"交给一名**其他**角色"的目标池：除持有者外的存活座位（座位序）。
+
+    签名与 :data:`~sgs.skills.flow.SeatPool` 对齐（``chosen`` 对单选无意义）。
+    """
+    del frame, chosen
+    return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
+
+
+def gains_card(event: MoveEvent | None, seat: int) -> bool:
+    """这张牌这次移动对 ``seat`` 算不算**获得牌**（票 24 的唯一判据）。
+
+    仅一句：**进入了自己的手牌区**（来源不限）。别人的手牌 / 装备区 / 判定区、处理区、
+    弃牌堆、牌堆、武将牌上的牌，进手牌都算；**进装备区不算获得**（Q3：置入装备区是"置入"）。
+
+    **来源不限**：牌堆（摸牌）也算——用户在票 24 裁定 Q1"摸牌也算获得"，票 25 把嵌套
+    挂起改成栈之后落地，故【清俭】吃【重铸】/【无中生有】/【连营】的摸牌。
+    """
+    if event is None:
+        return False
+    return event.to_zone.zone is Zone.HAND and event.to_zone.seat == seat
+
+
+def loses_card(event: MoveEvent | None, seat: int) -> bool:
+    """这张牌这次移动对 ``seat`` 算不算**失去牌**（票 24 的唯一判据）。
+
+    仅一句：**从自己的手牌区或装备区离开**。去向不限、原因不限 —— 弃牌堆 / 处理区 /
+    别人手牌 / 别人的装备区 / 武将牌上全算（用户裁定 Q2：**交给别人的手牌也算失去**；
+    重铸同样算，见 :class:`~sgs.state.MoveReason.REFORGE`）。**判定区、武将牌上的牌、
+    处理区的判定牌离开都不算**（Q4 / Q5）。
+    """
+    if event is None or event.from_zone.seat != seat:
+        return False
+    if event.from_zone.zone is Zone.EQUIP:
+        return True
+    if event.from_zone.zone is not Zone.HAND:
+        return False
+    # 手牌 → 自己的手牌（重排一类）没有离开，不算失去；其余去向都算。
+    return not (event.to_zone.zone is Zone.HAND and event.to_zone.seat == seat)
+
+
+def _qingjian_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**获得牌后**、不在自己的摸牌阶段、且本回合还没用过。
+
+    持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写）；
+    获得判据读本次移动的载荷（:func:`move_event`）。不成立就连"是否发动"都不问。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    if not gains_card(move_event(frame), owner):
+        return False
+    state = host.state
+    if state.turn_seat == owner and state.phase is Phase.DRAW:
+        return False
+    return not skill_used_this_turn(state, owner, JIE_QINGJIAN)
+
+
+def _qingjian_effect(host: Any, frame: Any, answers: Any) -> Any:
+    """提交点：展示并交出选中的牌，然后给**当前回合角色** +X（X = 类别数）。
+
+    交出那一步可能内联派发"失去牌后"并挂起（接收者若也有"失去牌后"类技能），故
+    "已经给过 / 已经加过"各一个帧私有游标：续跑既不重搬也不重复加。类别数读数据层
+    的 :func:`~sgs.data.card_category`（基本 / 锦囊 / 装备三档），不抄牌名清单。
+    """
+    owner = frame.data["skill_owner"]
+    cards = tuple(int(card_id) for card_id in answers["card"])
+    target = int(answers["seat"][0])
+    state = host.state
+    if not frame.data.get(_QINGJIAN_REVEALED_KEY):
+        frame.data[_QINGJIAN_REVEALED_KEY] = True
+        for card_id in cards:
+            host.reveal_card(frame, owner, state.card(card_id))
+    if not frame.data.get(_QINGJIAN_GIVEN_KEY):
+        groups = frame.data.get(_QINGJIAN_GROUPS_KEY)
+        if groups is None:
+            buckets: dict[Zone, list[int]] = {}
+            for card_id in cards:
+                buckets.setdefault(locate(state, card_id).zone, []).append(card_id)
+            groups = tuple((zone, tuple(ids)) for zone, ids in buckets.items())
+            frame.data[_QINGJIAN_GROUPS_KEY] = groups
+        moved = int(frame.data.get(_QINGJIAN_MOVED_KEY, 0))
+        while moved < len(groups):
+            _zone, card_ids = groups[moved]
+            control = host.move_in_frame(
+                frame,
+                state.refs(card_ids),
+                to_zone=ZoneRef(Zone.HAND, target),
+                reason=MoveReason.PUT,
+                owner=target,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+            moved += 1
+            frame.data[_QINGJIAN_MOVED_KEY] = moved
+        frame.data[_QINGJIAN_GIVEN_KEY] = True
+    if not frame.data.get(_QINGJIAN_BONUS_KEY):
+        frame.data[_QINGJIAN_BONUS_KEY] = True
+        state = host.state
+        categories = {
+            card_category(state.pack_id, state.card(card_id).type) for card_id in cards
+        }
+        if state.turn_seat is not None:
+            host.add_hand_limit_bonus(state.turn_seat, len(categories))
+        mark_skill_used_this_turn(state, owner, JIE_QINGJIAN)
+    return None
+
+
+QINGJIAN_FLOW = SkillFlow(
+    name="qingjian",
+    steps=(
+        # 「展示任意张牌」：牌前没写区域 ⇒ 默认手牌 + 装备区（至少 1 张；"给空"不是成本）。
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=None, key="card"),
+        # 「交给一名其他角色」：不能给自己。
+        PickSeats(lo=1, hi=1, pool=_other_alive_seats, key="seat"),
+    ),
+    effect=_qingjian_effect,
+)
+"""【清俭】的两步流水线：展示任意手牌 / 装备 → 交给一名其他角色 → 当前回合角色 +X。"""
 
 
 # ---------------------------------------------------------------------------
@@ -203,15 +415,29 @@ class MoveAfterSkill(HeroSkillDecl):
     ``flow``（W6-01）：零步技能的 ``SkillFlow``（``steps=()``），与
     :class:`~sgs.skills.damage_after.DamageAfterSkill` 的字段同形；旧回调
     :meth:`handle` 保留并由 flow 的 ``effect`` 原样转调。
+
+    ``trigger_count``（票 23 的加法，缺省 ``None`` = 一次移动至多触发一次）是**逐张触发**的
+    判据：牌面写"失去装备区里的**一张**牌"时，一次搬一**批**牌要按张数各触发一次
+    （【枭姬】，D-8 官方明确）；写"失去**最后的手牌**"时问的是"这次移动"这一个事实
+    （【连营】/界【连营】），故两条技能**不能共用**一个布尔判据。
     """
 
     draws: int
     trigger: Any
     flow: Any = None
+    trigger_count: Any = None
+
+    def activation_count(self, state: GameState, move: MoveEvent, owner: int | None) -> int:
+        """这次移动对这条技能成立**几次**（缺省 = 布尔判据的 0 / 1）。"""
+        if owner is None:
+            return 0
+        if self.trigger_count is None:
+            return 1 if self.trigger(state, move, owner) else 0
+        return int(self.trigger_count(state, move, owner))
 
     def fires(self, state: GameState, move: MoveEvent, owner: int | None) -> bool:
         """本次移动对这条技能（持有者 ``owner``）算不算"失去"（只看区域与**移动后**的持有）。"""
-        return owner is not None and bool(self.trigger(state, move, owner))
+        return self.activation_count(state, move, owner) > 0
 
     def condition(self, host: Any, frame: Any) -> bool:
         """钩子触发条件（``Hook.condition``）：不成立就连"是否发动"询问都不发。
@@ -225,24 +451,76 @@ class MoveAfterSkill(HeroSkillDecl):
             return False
         return self.fires(host.state, move, frame.data.get(MATCH_OWNER_KEY))
 
-    def handle(self, host: Any, frame: Any) -> None:
-        """钩子回调：条件成立则摸 ``draws`` 张（短摸 ⇒ 平局，与摸牌阶段同口径）。"""
-        host.draw_for_hand(frame, frame.data["skill_owner"], self.draws)
+    def handle(self, host: Any, frame: Any) -> Any:
+        """钩子回调：条件成立则摸 ``draws`` 张（短摸 ⇒ 平局，与摸牌阶段同口径）。
+
+        **逐张触发的技能**（``trigger_count`` 非空，目前只有【枭姬】）在这里补齐"至多 X 次"：
+        派发环已经问过第 1 张的"是否发动"，其余每张各再问一次（``optional`` 的
+        ``SELECT_OPTION``，答放弃即停 = "至多"）。游标 ``<skill id>:act:<这批牌>`` 记**已经
+        摸过几次**，且**在摸牌之前**前进——摸牌可能内联派发别的"失去牌后"并挂起，续跑据此
+        既不重问、也不重摸；按"这批牌"分桶则让同一帧的两次独立失去互不干扰。
+        """
+        owner = frame.data["skill_owner"]
+        move = move_event(frame)
+        # **正在跑的是哪一条实例**（标 / 界各一份声明、共用同一条流水线）：``self`` 是
+        # 流水线绑定的那条声明（界【枭姬】复用的是标版的 flow ⇒ ``self`` 恒为标版），
+        # 故询问标识与游标都必须读派发环写下的"这一次是谁在跑"，否则界版的"再来一次"
+        # 会记成标版的询问、两个武将还共用一个游标。
+        skill_id = str(frame.data.get(RUNNING_SKILL_KEY) or self.skill_id)
+        total = (
+            1
+            if self.trigger_count is None
+            else self.activation_count(host.state, move, owner)
+        )
+        # 游标**按这批牌**分桶，不按帧（票 23 评审）：同一帧里可以有多次移动（【顶替】的
+        # 先旧后新、【寒冰剑】逐张弃两张），每次都是一个独立的时机实例。只按技能 id 分桶
+        # 会让第二次移动读到第一次的游标（`done >= total`）而**静默不摸**。同一批牌不可能
+        # 离开装备区两次，故"这批牌的 id"就是这次时机的唯一键；挂起续跑读的是同一个
+        # ``MoveEvent``，键不变、缓存照旧命中。
+        key = (
+            f"{skill_id}:act:"
+            f"{','.join(str(card_id) for card_id in (move.card_ids if move else ()))}"
+        )
+        done = int(frame.data.get(key, 0))
+        while done < total:
+            if done:
+                # 第 2 张起：每一张都是一次**独立**的"是否发动"（官方：至多发动 X 次）。
+                answer = host.ask_option(
+                    frame,
+                    owner,
+                    Timing.MOVE_AFTER,
+                    skill_id=f"{skill_id}:again:{done}",
+                    options=(_AGAIN_OPTION,),
+                    optional=True,
+                )
+                if host.suspended(answer):
+                    return "stay"
+                if isinstance(answer, Pass):
+                    break
+            frame.data[key] = done + 1
+            # 摸牌也算「获得牌」（票 24 的 Q1）：摸出来的牌可能触发别人的【清俭】并挂起
+            # （票 25 的嵌套挂起）。挂起时**原样上抛**——游标已在摸牌之前前进，续跑从
+            # 下一张接着摸；吞掉 ``"stay"`` 会让下一张的摸牌在待答询问之上再发一问。
+            if host.draw_for_hand(frame, owner, self.draws) == "stay":
+                return "stay"
+            done += 1
+        return None
 
 
 def _emptied_hand(state: GameState, move: MoveEvent, owner: int) -> bool:
     """陆逊【连营】的触发条件（票 07 §要做什么 6 的表，第一行）。
 
-    ``from_zone == HAND ∧ to_zone != HAND ∧`` **移动后** ``hand`` 为空。判定读移动后的
-    状态：``move_card`` 已经在派发之前跑完，故"手牌为空"就是移动后的手牌。
+    :func:`loses_card`（来源是自己的手牌区、去向不是**自己的**手牌——交给别人的手牌照算）
+    ∧ **移动后** ``hand`` 为空。判定读移动后的状态：``move_card`` 已经在派发之前跑完，
+    故"手牌为空"就是移动后的手牌。
 
     **只认技能持有者本人**（票 14 §2）：失去牌的那个座位取 ``move.from_zone.seat``
     （"归属" ``move.owner`` 在【顺手牵羊】一类里写的是**拿走牌的人**），它必须等于
     ``owner``——否则别人掉光手牌会把陆逊的【连营】点亮。
     """
-    if move.from_zone.zone is not Zone.HAND or move.to_zone.zone is Zone.HAND:
+    if not loses_card(move, owner):
         return False
-    if move.from_zone.seat != owner:
+    if move.from_zone.zone is not Zone.HAND:
         return False
     return not state.player(owner).hand
 
@@ -256,9 +534,29 @@ def _lost_equipment(state: GameState, move: MoveEvent, owner: int) -> bool:
 
     **只认技能持有者本人**（票 14 §2）：``from_zone.seat == owner``（同【连营】，
     不用"归属" ``move.owner``——拆 / 顺写的是操使者）。
+
+    逐张触发的**次数**见 :func:`_lost_equipment_count`；本函数是它的布尔版，两者共用
+    同一句区域判据。
     """
     del state
-    return move.from_zone.zone is Zone.EQUIP and move.from_zone.seat == owner
+    return move.from_zone.zone is Zone.EQUIP and loses_card(move, owner)
+
+
+def _lost_equipment_count(state: GameState, move: MoveEvent, owner: int) -> int:
+    """【枭姬】这次移动触发**几次** = 从**自己的装备区**失去的**张数**（D-8，官方明确）。
+
+    牌面是"当你失去装备区里的**一张**牌后"⇒ 逐张触发；而一次弃置 / 一次【寒冰剑】都只搬
+    **一批**牌（一次 ``move_card``），故次数要数 ``len(move.cards)``，不能把"一次移动"当成
+    "一次失去"。《官方规则集》「依次」条的原文举例就是「装备区里有 X 张牌的主公孙尚香……
+    一次性弃置所有的牌，然后至多可以发动 X 次【枭姬】摸 2X 张牌」。
+
+    反面对照：陆逊【连营】问的是"失去**最后的手牌**"这**一个**事实（D-9：一次失去只触发
+    一次），故它用布尔判据 :func:`_emptied_hand`，不走本函数——同一批移动对两条技能是
+    "N 次"与"1 次"的差别，这正是 :attr:`MoveAfterSkill.trigger_count` 存在的理由。
+    """
+    if not _lost_equipment(state, move, owner):
+        return 0
+    return len(move.cards)
 
 
 # W6-01 / W6-07：零步流水线的 effect 由 :func:`sgs.skills.flow.zero_step_effect` 生成，
@@ -295,15 +593,28 @@ _LIANYING = MoveAfterSkill(
 )
 _XIAOJI = MoveAfterSkill(
     # 孙尚香【枭姬】：当你失去装备区里的一张牌后，你可以摸两张牌（规则 1054）。
+    # **逐张触发**：一次失去两张 ⇒ 至多发动两次（票 23 按 D-8 的官方「依次」条落
+    # ``trigger_count``；旧实现把"一次移动"当成"一次失去"，只触发一次）。
     hero_id="sunshangxiang",
     short_id="xiaoji",
     draws=2,
     trigger=_lost_equipment,
     flow=XIAOJI_FLOW,
+    trigger_count=_lost_equipment_count,
+)
+_JIE_XIAOJI = MoveAfterSkill(
+    # 界孙尚香【枭姬】（M6 票 17）：§十九 L2193 与标准版**逐字相同** ⇒ 同一个触发谓词、
+    # 同一条零步流水线（界版只是另一个武将 id；"失去装备区里的一张牌"的判据只有一份）。
+    hero_id="jie_sunshangxiang",
+    short_id="xiaoji",
+    draws=2,
+    trigger=_lost_equipment,
+    flow=XIAOJI_FLOW,
+    trigger_count=_lost_equipment_count,
 )
 
-MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI)
-"""D 族两条技能的逐字声明（票 07 §要做什么 6 的表）。"""
+MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI, _JIE_XIAOJI)
+"""D 族三条技能的逐字声明（票 07 §要做什么 6 的表 + M6 票 17 界孙尚香【枭姬】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "lianying": "摸一张牌",
@@ -313,12 +624,14 @@ _REQUIREMENTS: dict[str, str] = {
 
 
 def move_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """D 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """D 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    两条都是**非锁定技**（技能面写了"你可以"，故 ``locked=False``：发动是询问出来的）；
+    三条都是**非锁定技**（技能面写了"你可以"，故 ``locked=False``：发动是询问出来的）；
     ``carrier = HERO`` ⇒ 优先级档由载体派生；``skill_type = NORMAL``（都不是主公技）。
+    M6 票 08 的【清俭】不走 :class:`MoveAfterSkill` 的"摸 N 张"声明（它的效果是两步
+    流水线），故单独构造一条。
     """
-    return tuple(
+    declarations = tuple(
         SkillDef(
             skill_id=skill.skill_id,
             locked=False,
@@ -330,4 +643,28 @@ def move_after_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in MOVE_AFTER_SKILLS
+    )
+    return (
+        *declarations,
+        SkillDef(
+            skill_id=JIE_QINGJIAN,
+            locked=False,
+            # 已翻预发动（W4-2 的被动侧，与【流离】同规格）：首步选**自己**的手牌 / 装备区，
+            # 清单渲得出来 ⇒ 界面走清单入口。不翻的后果不是"退化成分步问"，而是**死路**：
+            # 被动技按钮按 U1-06 不接 click，浮动入口又要求条目带这个键（票 23 报障）。
+            preactivated=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(
+                    Timing.MOVE_AFTER,
+                    condition=_qingjian_condition,
+                    flow=QINGJIAN_FLOW,
+                ),
+            ),
+            requirement=(
+                "当你于你的摸牌阶段外获得牌后，可以展示任意张牌交给一名其他角色，"
+                "令当前回合角色本回合的手牌上限 +X（X 为给出的牌包含的类别数）"
+            ),
+        ),
     )

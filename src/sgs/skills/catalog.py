@@ -3,7 +3,8 @@
 一张装备 = 一个 :class:`SkillDef`（稳定 id = ``equip.<牌名 id>``），内部可带多条
 :class:`Hook`（键 = 时机枚举本身）、多条 :class:`Seam`（帧内接缝）与多条
 :class:`Modifier`（六个挂点）。M3 票 01 起，**武将牌**成为与装备区并列的载体
-（``CarrierKind.HERO``、``SkillSourceKind.HERO_CARD``、``SkillDef.skill_type`` 的身份门控），
+（``CarrierKind.HERO``、``SkillSourceKind.HERO_CARD``、``SkillDef.skill_type`` 的身份门控；
+M3 起该门控**只作用于此来源**——wuming 票 06 收窄到"武将牌载体"，获得的主公技不受身份限制），
 故同一套定义 / 派发路径服务两类载体。定义目录 :data:`CATALOG` 是**模块级不可变**的；
 "谁持有哪一份"由 :func:`resolve_instances` 在派发时按**载体**
 （装备区 ∪ 虚拟授予 ∪ 武将牌）解析，不做 per-player 实例注册。
@@ -28,12 +29,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
-from sgs.data import Color, Identity, SkillType, color_of_suit, hero_skill_id, hero_skill_ids
+from sgs.data import (
+    Color,
+    Identity,
+    SkillType,
+    card_tag_spec,
+    color_of_suit,
+    hero_card_skill_ids,
+    hero_skill_id,
+)
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -42,6 +51,7 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     PriorityClass,
+    activation_allowed,
     behavior_for,
     check_targets,
     is_slash,
@@ -52,13 +62,17 @@ from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import (
     ActivateSkill,
     CardRef,
+    CardTag,
     FrameKind,
     GameState,
     MoveReason,
+    Player,
     SelectionSpec,
+    SkillSuppressionPredicate,
     SlotKind,
     Zone,
     ZoneRef,
+    seats_from,
 )
 from sgs.timing import Timing
 
@@ -71,20 +85,34 @@ from .flow import (
     card_pool_size,
     provide_face,
     run_flow,
+    zero_step_effect,
 )
-from .virtual import card_ids, grouped_candidates, single_conversion
+from .virtual import (
+    card_ids,
+    grouped_candidates,
+    pure_virtual_card,
+    single_conversion,
+    transformed_card,
+)
 
 __all__ = [
     "ACTIVATION_PLANS",
     "CATALOG",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
+    "DAMAGE_DEAL_POINT_KEY",
+    "DAMAGE_DEAL_RECORDED_KEY",
+    "PASS_STATE_KEY",
+    "ActivationCandidate",
     "ActivationPlan",
     "Hook",
     "HookCondition",
     "HeroSkillDecl",
+    "MATCH_ACTOR_KEY",
     "MATCH_OWNER_KEY",
     "RUNNING_SKILL_KEY",
+    "SKILL_JUDGMENT_CARD_KEY",
+    "RejudgeOriginal",
     "Seam",
     "SeamKind",
     "SkillDef",
@@ -92,18 +120,28 @@ __all__ = [
     "SkillSource",
     "SkillSourceKind",
     "activation_plan",
+    "awakening_skill_awakened",
     "damage_point_index",
     "dispatch_seam",
     "dispatch_timing",
+    "hero_card_zone_key",
     "instance_key",
     "is_equipped",
+    "limited_skill_used",
     "lord_skill_allowed",
     "lord_skill_ids",
+    "mark_limited_skill_used",
+    "mark_skill_used_this_turn",
+    "placement_skill_ids",
+    "prune_card_tags",
     "prune_skill_state",
     "rejudge_skill_ids",
+    "reset_turn_skill_state",
     "reset_phase_skill_state",
     "resolve_instances",
     "same_kingdom",
+    "skill_used_this_turn",
+    "terminate_activation_pass",
     "timing_hooks_present",
 ]
 
@@ -127,18 +165,29 @@ class SeamKind(str, Enum):
     """
 
     SLASH_CANCELED = "SLASH_CANCELED"
+    EQUIPMENT_DISCARD = "EQUIPMENT_DISCARD"
+    """**装备区 → 弃牌堆**的移动事件（M6 票 08）：界的【奇才】②在它自己的帧里取消它。
+
+    接缝只为**会进入弃牌堆的装备区移动**派发（结构过滤，见 ``Engine.move_in_frame``）；
+    "谁在弃置"由载荷 :attr:`~sgs.skills.move_after.MoveEvent.causer` 给出，技能回调据此
+    判"其他角色"。事件帧无效的机制符号住 :mod:`sgs.resolution.events`。"""
 
 
 class SkillSourceKind(str, Enum):
-    """技能实例的**来源**种类（票 07 §6 的带标签联合）。
+    """技能实例的**来源**种类（票 07 §6 的带标签联合；M6 票 04 补第四种）。
 
     ``HERO_CARD``（票 01）是**武将牌**：它不是实体牌，故只为它记 ``skill_id``，
-    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。
+    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。它是**唯一**受身份门控的来源
+    （wuming 票 06：只有武将牌上的主公技会被"非主公"挡掉）。``GRANTED``（M6 票 04）是
+    运行时**获得**的技能（`GLOSSARY.md`「技能来源」的第四种）：同样不是牌，
+    只记 ``skill_id``，实例由 :func:`resolve_instances` 读 ``Player.granted_skills`` 产出；
+    获得来的主公技**不受身份限制**。
     """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
     VIRTUAL_GRANT = "VIRTUAL_GRANT"
     HERO_CARD = "HERO_CARD"
+    GRANTED = "GRANTED"
 
 
 HookCondition: TypeAlias = Callable[[Any, Frame], bool]
@@ -171,6 +220,19 @@ class Hook:
     condition: HookCondition | None = None
     per_point: bool = False
     flow: SkillFlow | None = None
+    forced: bool = False
+    """这一条钩子**不问**"是否发动"、满足条件即执行（huo-shenzhugeliang 票 04）。
+
+    它服务的是「一条非锁定技里既有可选段、又有强制段」：牌面写「结束阶段，你可以…」的那一段
+    要问，而同一句话里的「当该角色受到火焰伤害时，此伤害 +1」「…防止之」（监听）与
+    「标记来源的下个回合开始时消失」（清扫）是**强制**的（牌面没有「可以」）。今天"问不问"
+    只有整条技能的 :attr:`SkillDef.locked` 一个来源，而 `locked` 同时被"所有非锁定技失效"
+    的谓词读取（:func:`_skill_is_suppressed`）——拿它当"不问"会让这条非锁定技免疫失效。
+
+    所以这一位只回答"这一条钩子要不要先问"，**不影响** :func:`_skill_is_suppressed`：
+    非锁定技的强制段照样会随实例失效而停摆（神诸葛亮的【狂风】【大雾】正是要这个语义）。
+    缺省 ``False`` ⇒ 既有 145 条技能逐字节不变。
+    """
 
     def __post_init__(self) -> None:
         if (self.handler is None) == (self.flow is None):
@@ -188,6 +250,17 @@ class Seam:
     def __post_init__(self) -> None:
         if (self.handler is None) == (self.flow is None):
             raise ValueError(f"{self.kind.value} 上的接缝必须恰有 handler / flow 之一")
+
+
+class RejudgeOriginal(str, Enum):
+    """被换下的**原判定牌**去哪（feng-zhangjiao 票 02；规则 §11.3 L1259–L1261 的两分）。
+
+    - ``DISCARD``（**代替**，缺省）：原判定牌置入弃牌堆，改判者不获得——【鬼才】标 / 界；
+    - ``HAND``（**替换**）：**改判者获得**原判定牌——张角【鬼道】。
+    """
+
+    DISCARD = "DISCARD"
+    HAND = "HAND"
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +289,31 @@ class SkillDef:
     能力是**定义上的显式标记**（不是 ``skill_type`` 的取值，也不是一张会漂移的 id 名单）：
     :func:`rejudge_skill_ids` 由它派生 ``sgs.skills.REJUDGE_SKILL_IDS``，判定帧的改判
     应答者队列由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义字段得座位集合。
+    """
+
+    rejudge_zones: tuple[Zone, ...] = (Zone.HAND,)
+    """改判窗口的候选牌取自哪几个区（M6 票 14 的加法；缺省 = 一张**手牌**）。
+
+    牌面差别：标准【鬼才】（§九 L958）「用一张**手牌**代替之」；界【鬼才】（§十九
+    L2021）「用**一张牌**代替之」——`参考资料/界限突破-界标准包武将资料.md` 记作
+    "鬼才由'一张手牌'放宽为'一张牌'"，故界版带装备区。判定帧的 ``RESPOND`` 窗口按
+    :func:`~sgs.skills.rejudge_offers` 现算，引擎不认识任何具体技能 id。
+    """
+
+    rejudge_card_color: Color | None = None
+    """改判候选的**颜色筛选**（feng-zhangjiao 票 02 的加法；缺省 ``None`` = 不限）。
+
+    张角【鬼道】「用一张**黑色**牌替换之」⇒ ``Color.BLACK``（黑桃 / 梅花）。筛选在
+    :func:`~sgs.skills.rejudge_offers` 派生进窗口载荷，候选生成器按它逐张判色；
+    筛选后**没有候选就不发这一问**（`edge-cases.md` 总纪律 1）。
+    """
+
+    rejudge_original_to: RejudgeOriginal = RejudgeOriginal.DISCARD
+    """被换下的**原判定牌**去哪（feng-zhangjiao 票 02 的加法；缺省 = 进弃牌堆）。
+
+    规则 §11.3 L1259–L1261 的两分：**代替**（【鬼才】）⇒ 原判定牌置入弃牌堆、改判者不获得；
+    **替换**（【鬼道】）⇒ 改判者获得原判定牌。引擎在改判事件帧里按本字段搬原牌，
+    不认识技能 id。
     """
 
     preactivated: bool = False
@@ -264,12 +362,34 @@ class SkillDef:
     ``ConversionSkill.target_type_id`` / 蛇矛的目标牌名，不是第二份真源。
     """
 
+    places_on_hero_card: bool = False
+    """这条技能是否**把牌置于武将牌上**（M6 票 10；spec D14 的代码侧声明）。
+
+    数据侧的 ``HeroSkill.placement``（可见性 / 归还时机 / 有无附加效果）与它是**同一条
+    事实的两半**，加载期双向核对：代码标了而数据没写 ⇒ ``heroes.placement_missing``；
+    数据写了而代码没标 ⇒ ``heroes.placement_not_registered``。由它派生的
+    :data:`~sgs.skills.PLACEMENT_SKILL_IDS` 是"哪些技能会开区"的唯一名单。
+
+    缺省 ``False``：既有 88 条定义一字不改；M6 唯一载体是界陆逊【谦逊】。
+    """
+
     virtual_source_count: int = 1
     """这条技能的虚拟牌候选**每次消耗几张来源牌**（W4-3 的清单归属判据）。
 
     H 族单源转化恒 1；【丈八蛇矛】是 2。候选本身不带技能归属，故"这两张来源的虚拟牌是
     谁转出来的"只能由声明回答——张数本来就是候选构造的参数（``grouped_candidates`` 的
     ``group_size``），这里只是把它暴露出来，不是第二份判据。
+    """
+
+    per_round_limit: bool = False
+    """这条技能有没有**每轮限 X 次**（M6 票 11 的加法，默认 ``False`` ⇒ 既有 88 条一字不改）。
+
+    "轮次"是引擎状态（``GameState.round``），但**只有带每轮限次的技能会读它**：本字段是
+    :func:`round_limit_present` 的唯一判据——记录流只在这种对局里落 ``turn_change``
+    （没有读者时轮次不改变任何规则结果，标准 47 条金录像因此逐字节不变）。
+    M6 的唯一载体是界吕蒙【博图】（X = 存活角色数且至多 3，**每次发动时重算**，见
+    `06`（§5「程序化约定与偏离一手」））；每轮已用次数住
+    :attr:`~sgs.state.GameState.round_use_counts`，轮次 +1 时清空。
     """
 
     @property
@@ -336,10 +456,50 @@ class ActivationPlan:
     ``max_picks`` 四个无生产者字段已在 W6-06a 删除。`SkillActivationQuery` 的
     ``min_picks`` / ``max_picks`` / ``slots`` 仍是冻结报文（A-4 另立票；当前生产者恒传
     ``0 / 0 / ()``，15 份录像逐字节）。
+
+    ``actor``（M6 票 14 的加法，缺省 ``None`` = 技能持有者）：这一问**由谁应答**。
+    【护驾】②的牌面是"当**其他**魏势力角色于其回合外使用或打出【闪】时，**其**可以令你
+    摸一张牌"——决定者是事件的当事角色，受益者（``skill_owner``）仍是技能持有者。它是
+    座位号而不是布尔：同一个技能在不同帧上可以由不同的人决定，故取值由计划的构造方
+    按帧算（:func:`~sgs.skills.lord_request.jie_hujia_activation_plan`）。
     """
 
     optional: bool = True
     available: bool = True
+    actor: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationCandidate:
+    """同一张面上的一个**可发动项**（票 01 §4 的结算单位）。
+
+    派发环每轮把本座位"有东西可派发"的实例收成这批候选：实例、这一轮算出的计划、条件成立
+    的那几条项、以及"要不要问"。档**由实例定义派生**（``priority_class``），不另存字段——
+    闸门（:func:`~sgs.effects.activation_allowed`）读的是同一份声明。
+
+    ``forced=True`` = **强制段**（锁定技 / 觉醒技 / 逐条 ``Hook.forced``）：不问、不上脸，
+    本档轮到它时直接跑；``False`` = 进"是否发动"的面。``False`` 但含 ``Hook.forced`` 项的
+    **混合实例**仍上一次脸；那些强制项在 ``Pass`` 之后照跑（见 :func:`_mandatory_entries`）。
+    """
+
+    instance: SkillInstance
+    plan: ActivationPlan
+    items: tuple[Any, ...]
+    forced: bool
+
+    @property
+    def skill_id(self) -> str:
+        return self.instance.skill_id
+
+    @property
+    def tier(self) -> int:
+        """优先级档（``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``，**越小越先**）。"""
+        return int(self.instance.definition.priority_class)
+
+    @property
+    def actor(self) -> int:
+        """这一项**由谁应答**：计划指定者优先，否则是技能持有者（缺省口径）。"""
+        return self.instance.owner if self.plan.actor is None else int(self.plan.actor)
 
 
 # ---------------------------------------------------------------------------
@@ -380,19 +540,50 @@ def rejudge_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozense
     )
 
 
-def _identity_gates_out(definition: SkillDef, identity: Identity | None) -> bool:
-    """身份门控：主公技而持有者不是主公 ⇒ 该实例**不产出**（票 01 §身份门控）。"""
+def placement_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozenset[str]:
+    """``catalog`` 里全部**放置类技能**的 id（M6 票 10；D14 的代码侧登记）。
+
+    与 :func:`rejudge_skill_ids` 同构：``sgs.skills.PLACEMENT_SKILL_IDS`` 只是 import 期
+    快照，"会不会往武将牌上放牌"的唯一真源是 :attr:`SkillDef.places_on_hero_card`；
+    加载期按它核"每条放置类技能都有一份数据声明"，引擎在
+    :meth:`Engine.place_on_hero_card` 入口按它 fail-closed。传 ``catalog`` 让派生可对
+    一份注入的表单独验证。
+    """
+    source = CATALOG if catalog is None else catalog
+    return frozenset(
+        definition.skill_id
+        for definition in source.values()
+        if definition.places_on_hero_card
+    )
+
+
+def _identity_gates_out(
+    definition: SkillDef, identity: Identity | None, source: SkillSource
+) -> bool:
+    """身份门控：**武将牌载体**上的主公技而持有者不是主公 ⇒ 该实例**不产出**（票 01）。
+
+    门控的**作用范围只有武将牌**（``source.kind is SkillSourceKind.HERO_CARD``，wuming 票 06 /
+    票 02 §4.4 D1，用户 2026-11-03 第三轮 Q15）：系统只按身份决定"**从不从武将牌上派发**"。
+    其余三种来源——``GRANTED``（运行时获得）、``EQUIPMENT_CARD``、``VIRTUAL_GRANT``——**不拦**：
+    获得的主公技任何身份都能发动（存在"能获得别人主公技"的武将，故必须是通用规则，不按技能
+    特判）。身份缺失（``None``，无身份局）对武将牌载体按"不是主公"处理，与既有语义一致。
+    """
+    if source.kind is not SkillSourceKind.HERO_CARD:
+        return False
     return _is_lord_skill(definition) and identity is not Identity.LORD
 
 
 def lord_skill_allowed(identity: Identity | None, skill_id: str) -> bool:
-    """主公技门控的**只读谓词**：`(身份 == 主公) ∧ (技能定义的类型 == 主公技)`（票 01）。
+    """主公技门控的**武将牌侧**只读谓词：`(身份 == 主公) ∧ (类型 == 主公技)`（票 01）。
 
-    与 :func:`_identity_gates_out` 共用 :func:`_is_lord_skill` 这一个判据，故谓词与派发
-    不会各写一份而漂移。规范落点是 :func:`resolve_instances`（非主公 ⇒ 实例不产出，
-    语义 = 武将牌上根本没有）；本函数只回答"能不能用"，不产出、不驱动派发，给
-    `03` §6「技能分类与过滤」的**过滤链首项**与测试提供可读谓词。未知 ``skill_id``
-    （如 M2 的装备技能）恒 ``False``。
+    它只回答"**这张武将牌上**能不能有这个技能"——身份门控的作用范围就是武将牌载体
+    （wuming 票 06：`GRANTED` / `EQUIPMENT_CARD` / `VIRTUAL_GRANT` 不被拦，获得的主公技
+    任何身份都能发动），故本函数**不是**"这条技能此刻能不能用"的谓词。与
+    :func:`_identity_gates_out` 共用 :func:`_is_lord_skill` 这一个判据，故谓词与派发不会
+    各写一份而漂移；规范落点仍是 :func:`resolve_instances`（非主公的**武将牌**上 ⇒ 实例不
+    产出，语义 = 武将牌上根本没有）。本函数不产出、不驱动派发，给 `03` §6「技能分类与过滤」
+    的**过滤链首项**、投影的武将牌循环与测试提供可读谓词。未知 ``skill_id``（如 M2 的装备
+    技能）恒 ``False``。
     """
     definition = CATALOG.get(skill_id)
     return definition is not None and _is_lord_skill(definition) and identity is Identity.LORD
@@ -412,23 +603,219 @@ def _add_instance(
     )
 
 
-def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
-    """解析全部**存活实例**，按链序 ``(priority_class, skill_id, owner)`` 全序。
+def _skill_is_suppressed(player: Player, instance: SkillInstance) -> bool:
+    """``player`` 的座位级失效记录挡不挡 ``instance``（唯一读取方）。
+
+    ``ALL_NON_LOCKED`` 只覆盖**非锁定技**：锁定技是"满足条件即强制发动"的一类效果标记
+    （官方 `A/rule_forced.txt:5`，见 :class:`SkillDef.locked` 的注释），与"能不能被失效"
+    是两件事——牌面写"其所有**非锁定**技失效"，故锁定技照常产出。
+
+    **来源过滤**（用户裁定，票 09）：失效不作用于**装备牌带来的技能**——实体装备
+    （``EQUIPMENT_CARD``）与虚拟装备（``VIRTUAL_GRANT`` 且定义是装备技能）都免疫；
+    武将牌（``HERO_CARD``）与运行时获得（``GRANTED``，含觉醒 ☆ 技）照常失效。
+
+    ``VIRTUAL_GRANT`` **不是**只用于虚拟装备：既有测试构造也会用它授予武将技能，故这里
+    按**定义**是否为装备技能区分，不能把整个来源一刀切。来源种类无法判断时 **fail-closed
+    = 不失效**（不让未知实例被误锁）。
+    """
+    source = instance.source.kind
+    if source is SkillSourceKind.EQUIPMENT_CARD:
+        return False
+    if source is SkillSourceKind.VIRTUAL_GRANT:
+        if (
+            instance.definition.carrier is CarrierKind.EQUIPMENT
+            or instance.definition.virtual_slot is not None
+        ):
+            return False
+        # 非装备的虚拟授予：不是"装备牌带来的技能"，继续按武将技能处理。
+    elif source not in (SkillSourceKind.HERO_CARD, SkillSourceKind.GRANTED):
+        return False
+    return any(
+        record.predicate is SkillSuppressionPredicate.ALL_NON_LOCKED
+        and not instance.definition.locked
+        for record in player.suppressed_skills
+    )
+
+
+_PLAYER_KEY_FIELDS = (
+    "seat",
+    "identity",
+    "alive",
+    "death_time_skills_active",
+    "equip",
+    "virtual_equipment",
+    "hero",
+    "granted_skills",
+    "lost_skills",
+    "suppressed_skills",
+)
+"""内容键里**座位级**字段的顺序，与 :func:`_player_key_values` 的元组一一对应（票 16）。
+
+``seat`` 也在表里：解析用它写实例的 ``owner``。``Player.seat`` 按模型定义等于它在
+``GameState.players`` 里的下标，但键按**读点**覆盖，不为"这条不变量应该成立"开例外。
+
+**新增读点必须同步加入键**：:func:`_resolve_instances_uncached` 每多读一个 ``GameState`` /
+``Player`` 字段，就要把它加进 :func:`_player_key_values`（座位级）或 :func:`_resolve_key`
+（局面级），否则内容键会漏掉这一位、把两个不同局面当成同一个缓存项。这份字段表同时是
+键覆盖单测的输入（按它逐项"只改这一位 ⇒ 键必变"，并从副本里删一项验证检查会变红）。
+"""
+
+_RESOLVE_CACHE_LIMIT = 512
+"""缓存条数上限（spec §3.3）：进程级、按插入序淘汰，不跨局无限增长。"""
+
+_RESOLVE_CACHE: dict[tuple, tuple[SkillInstance, ...]] = {}
+"""内容键 → 解析结果（冻结 tuple，可安全共享；票 16）。"""
+
+_RESOLVE_CACHE_TABLE: object = None
+"""缓存所属的技能表对象（与 :data:`CATALOG` 做 ``is`` 比对）。
+
+:data:`CATALOG` 是模块级不可变表，但测试 / 工具会整体替换它（合成定义，见
+``test_hero_catalog.py``）：表一换，缓存里 ``SkillInstance.definition`` 指向的就是另一张表
+⇒ 必须整批作废。用 ``is`` 而不是 ``id()``——源码纪律禁止把对象地址当键
+（``tests/test_source_discipline.py``）。
+"""
+
+_RESOLVE_CACHE_HITS = 0
+_RESOLVE_CACHE_MISSES = 0
+
+
+def _resolve_cache_counters() -> tuple[int, int]:
+    """``(hits, misses)`` 的进程累计值（只读；票 16 的命中率下限从这里读）。
+
+    命中率 = ``Δhits / (Δhits + Δmisses)``，测试取两次读数的差来算。它**不是引擎开关**：
+    未命中一律走 :func:`_resolve_instances_uncached`，缓存只省重算。
+    """
+    return _RESOLVE_CACHE_HITS, _RESOLVE_CACHE_MISSES
+
+
+def _player_key_values(state: GameState, player: Player) -> tuple:
+    """``resolve_instances`` 读到的**座位级**状态位，顺序 = :data:`_PLAYER_KEY_FIELDS`。
+
+    装备区记 ``(card_id, 牌 type)`` 两份：实例来源带 ``card_id``，而定义按 ``card.type``
+    查（spec §3.3），少一份就会把"换了牌面的同一张装备"当成同一个键。
+    """
+    return (
+        player.seat,
+        player.identity,
+        player.alive,
+        player.death_time_skills_active,
+        tuple((card_id, state.card(card_id).type) for card_id in player.equip),
+        tuple(player.virtual_equipment),
+        player.hero,
+        tuple(player.granted_skills),
+        tuple(player.lost_skills),
+        tuple(
+            (record.skill_id, record.scope, record.predicate)
+            for record in player.suppressed_skills
+        ),
+    )
+
+
+def _resolve_key(state: GameState, include_suppressed: bool) -> tuple:
+    """内容键：``resolve_instances`` **实际读到的全部状态位**（spec §3.3）。
+
+    形状 = ``(pack_id, include_suppressed, 每座位一个元组)``；座位级字段见
+    :data:`_PLAYER_KEY_FIELDS`（含 ``seat``——解析用它写实例的 ``owner``）。键是纯值元组：
+    不用裸 ``hash()`` / ``id()``、不迭代 ``set``（源码纪律）。
+    """
+    return (
+        state.pack_id,
+        include_suppressed,
+        tuple(_player_key_values(state, player) for player in state.players),
+    )
+
+
+def _cache_resolved(key: tuple, resolved: tuple[SkillInstance, ...]) -> None:
+    """记一条解析结果；满 :data:`_RESOLVE_CACHE_LIMIT` 时按**插入序**淘汰最旧的一条。
+
+    淘汰用 ``pop(..., None)`` 而不是 ``del``：接入层（``tools/sgs_web``）是多线程 HTTP
+    服务，两条线程同时未命中时可能挑中同一条淘汰——``pop`` 带默认值不会因此抛
+    ``KeyError``。引擎本身仍是单线程语义（ADR-011 / 源码纪律），这里只是不让缓存的
+    边界条件在接入层变成异常。
+    """
+    if len(_RESOLVE_CACHE) >= _RESOLVE_CACHE_LIMIT:
+        oldest = next(iter(_RESOLVE_CACHE), None)
+        if oldest is not None:
+            _RESOLVE_CACHE.pop(oldest, None)
+    _RESOLVE_CACHE[key] = resolved
+
+
+def resolve_instances(
+    state: GameState, *, include_suppressed: bool = False
+) -> tuple[SkillInstance, ...]:
+    """全部**存活实例**（**解析序** ``(priority_class, skill_id, owner)``）——带内容键缓存的入口。
+
+    解析序是**集合的确定性次序**，不是派发链序：派发按 §4.16 的"先逐角色"另排一次
+    （:func:`_chain_order`，唯一实现）。解析结果的消费者按集合 / 按座位内部次序读，故
+    两者不冲突；**不要**把回合座位读进这里（那会把 ``turn_seat`` 拉进内容键）。
+
+    解析口径逐字见 :func:`_resolve_instances_uncached`（载体并集 → 去重 → 减失去 →
+    过失效谓词 → 排序，身份门控同处兑现）；本函数只加一层**语义不变**的缓存（票 16）：
+
+    - 键 = :func:`_resolve_key`，覆盖解析读到的**全部状态位**；命中返回同一个冻结 tuple
+      （``SkillInstance`` 是 frozen + slots），未命中走原实现。
+    - 缓存进程级、固定 :data:`_RESOLVE_CACHE_LIMIT` 条、按插入序淘汰；不新增
+      ``GameState`` 字段、不在写入口 bump——正确性靠"键覆盖读点"的构造。
+    - :data:`CATALOG` 被整体替换（测试注入合成定义）时整批作废。
+
+    **新增读点必须同步加入键**：这里多读一个状态位，就把它加进
+    :func:`_player_key_values` / :func:`_resolve_key`，否则两个不同局面会共用一条缓存。
+    """
+    global _RESOLVE_CACHE_TABLE, _RESOLVE_CACHE_HITS, _RESOLVE_CACHE_MISSES
+    if _RESOLVE_CACHE_TABLE is not CATALOG:
+        _RESOLVE_CACHE.clear()
+        _RESOLVE_CACHE_TABLE = CATALOG
+    key = _resolve_key(state, include_suppressed)
+    cached = _RESOLVE_CACHE.get(key)
+    if cached is not None:
+        _RESOLVE_CACHE_HITS += 1
+        return cached
+    _RESOLVE_CACHE_MISSES += 1
+    resolved = _resolve_instances_uncached(state, include_suppressed=include_suppressed)
+    _cache_resolved(key, resolved)
+    return resolved
+
+
+def _resolve_instances_uncached(
+    state: GameState, *, include_suppressed: bool = False
+) -> tuple[SkillInstance, ...]:
+    """解析全部**存活实例**，按**解析序** ``(priority_class, skill_id, owner)`` 全序。
+
+    **解析序 ≠ 派发链序**：后者按 §4.16「先逐角色（当前回合角色起逆时针），角色内部再按
+    优先级」排（:func:`_chain_order`）。这里排序只为让集合输出确定、可逐条对照缓存差分，
+    且**不读** ``state.turn_seat``（内容键因此不含它）。
 
     载体 = 装备区里的实体牌（``source = EQUIPMENT_CARD``）∪ 座位的虚拟授予
     （``source = VIRTUAL_GRANT``，不占牌守恒）∪ **武将牌**（``source = HERO_CARD``，
-    票 01：读 ``player.hero`` 经 ``sgs.data.hero_skill_ids`` 取该武将的技能清单）。
+    票 01：读 ``player.hero`` 经 ``sgs.data.hero_skill_ids`` 取该武将的技能清单）∪
+    **获得**（``source = GRANTED``，M6 票 04：读 ``player.granted_skills``）。
     同一 ``(owner, skill_id)`` 只留**最早出现的来源**（票 07 §6 的去重口径）；
     两名角色各有同一技能时是**两个实例**。
 
-    **身份门控在派发侧的唯一兑现处**是这里（票 01 §身份门控 / `03` §6「技能分类与过滤」）：
-    主公技而持有者不是主公 ⇒ **该实例不产出**——不进实例集合、不进候选、不进修饰器链、不落
-    ``skill_state``、不进记录流。语义是"武将牌上根本没有这个技能"，不是"有但不生效"。
-    ``player.hero is None``（无武将模式）时**根本不查武将数据**，故 M2 的输出逐字节不变。
+    **解析顺序钉死**（M6 票 04 / spec §Implementation Decisions「技能运行时」）：
+    载体并集 → 去重 → **减失去** → **过失效谓词**。后两步是座位级的（`Player.lost_skills`
+    / `Player.suppressed_skills`）：失去的实例不再产出且不可恢复；失效的实例仍在，
+    但被谓词挡在解析之外（不产出候选、不进修饰器链、不触发钩子），作用域到期即恢复。
+
+    ``include_suppressed`` 只服务 :func:`prune_skill_state`：清 per-instance 状态时
+    "暂时失效"不等于"来源消失"，把失效实例算成死实例会顺手抹掉它的"已用"计数——
+    失效恢复后那条限定技就能再发动一次。默认 ``False`` = 只回答"此刻真正**在解析中**的
+    实例"。
+
+    **身份门控在派发侧的唯一兑现处**是这里（票 01 §身份门控 / `03` §6「技能分类与过滤」；
+    wuming 票 06 收窄到武将牌载体）：**武将牌上**的主公技而持有者不是主公 ⇒ **该实例不产出**
+    ——不进实例集合、不进候选、不进修饰器链、不落 ``skill_state``、不进记录流。语义是
+    "武将牌上根本没有这个技能"，不是"有但不生效"。``GRANTED`` / ``EQUIPMENT_CARD`` /
+    ``VIRTUAL_GRANT`` 三种来源**不受身份限制**（获得的主公技任何身份都能发动，见
+    :func:`_identity_gates_out`）。``player.hero is None``（无武将模式）时**根本不查武将
+    数据**，故 M2 的输出逐字节不变。
+
+    本函数是**无缓存**实现（缓存未命中的唯一落点，也是键覆盖单测的对照臂）；对外入口是
+    :func:`resolve_instances`——两者结果必须逐条相同，这正是票 16 的差分判据。
     """
     found: list[SkillInstance] = []
     for player in state.players:
-        if not player.alive:
+        if not player.alive and not player.death_time_skills_active:
             continue
         for card_id in player.equip:
             card = state.card(card_id)
@@ -449,29 +836,54 @@ def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
                     definition,
                     SkillSource(SkillSourceKind.VIRTUAL_GRANT, skill_id=grant),
                 )
-        if player.hero is None:
-            continue
-        for skill_id in hero_skill_ids(player.hero, pack_id=state.pack_id):
+        if player.hero is not None:
+            # M6 票 06：☆ 技能**不**是武将牌载体 —— 它们只来自"获得"来源
+            # （``hero_card_skill_ids`` 已排除 ``granted_by`` 非空的条目），故未觉醒时
+            # "没有这个技能"是结构事实，不靠条件在派发期挡。
+            for skill_id in hero_card_skill_ids(player.hero, pack_id=state.pack_id):
+                definition = CATALOG.get(skill_id)
+                if definition is not None:
+                    _add_instance(
+                        found,
+                        player.seat,
+                        definition,
+                        SkillSource(SkillSourceKind.HERO_CARD, skill_id=skill_id),
+                    )
+        # 获得排在最后：同 `(owner, skill_id)` 的去重留**最早**来源，故"武将牌上本来就有"
+        # 的那一份优先于后来又授予的同名技能（获得一份已有的技能不改变实例身份）。
+        for skill_id in player.granted_skills:
             definition = CATALOG.get(skill_id)
             if definition is not None:
                 _add_instance(
                     found,
                     player.seat,
                     definition,
-                    SkillSource(SkillSourceKind.HERO_CARD, skill_id=skill_id),
+                    SkillSource(SkillSourceKind.GRANTED, skill_id=skill_id),
                 )
     deduped: list[SkillInstance] = []
     seen: list[tuple[int, str]] = []
     for instance in found:
-        if _identity_gates_out(instance.definition, state.player(instance.owner).identity):
+        if _identity_gates_out(
+            instance.definition, state.player(instance.owner).identity, instance.source
+        ):
             continue
         key = (instance.owner, instance.skill_id)
         if key in seen:
             continue
         seen.append(key)
         deduped.append(instance)
-    deduped.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
-    return tuple(deduped)
+    alive: list[SkillInstance] = []
+    for instance in deduped:
+        player = state.player(instance.owner)
+        if instance.skill_id in player.lost_skills:
+            continue
+        if not include_suppressed and _skill_is_suppressed(player, instance):
+            continue
+        alive.append(instance)
+    # **解析序**（集合的确定性次序），不是派发链序：链序按 §4.16「先逐角色」由
+    # :func:`_chain_order` 在派发环里排。这里不读 ``state.turn_seat``，内容键因此不含它。
+    alive.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
+    return tuple(alive)
 
 
 def timing_hooks_present(state: GameState, timing: Timing) -> bool:
@@ -496,6 +908,268 @@ def instance_key(instance: SkillInstance) -> str:
     return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
 
 
+def round_limit_present(state: GameState, catalog: Mapping[str, SkillDef] | None = None) -> bool:
+    """本局此刻有没有「每轮限 X 次」的**载体**（M6 票 11）。
+
+    轮次变化只在有读者时进记录流（见 :class:`~sgs.state.TurnChangeDelta`）：没有载体的对局
+    里轮次不改变任何规则结果，记录流保持与 M5 逐字相同 ⇒ 标准 47 条金录像逐字节不变。
+    判据读**存活实例**的定义字段（:attr:`SkillDef.per_round_limit`），不读一张会漂移的
+    名单；**暂时失效也算**（``include_suppressed=True``）——失效恢复后它照样要读轮次。
+    ``catalog`` 入参只为让机械检查注入合成定义；缺省读**当前**的 :data:`CATALOG`。
+    """
+    source = CATALOG if catalog is None else catalog
+    return any(
+        source[instance.skill_id].per_round_limit
+        for instance in resolve_instances(state, include_suppressed=True)
+        if instance.skill_id in source
+    )
+
+
+def hero_card_zone_key(owner: int, skill_id: str) -> str:
+    """**武将牌上的牌区的键**（M6 票 10）：（座位, 技能实例）的规范文本。
+
+    ``owner`` = **放置技能实例的持有者**（不是扣牌的宿主座位——宿主由 ``Player`` 回答）。
+    实例身份取 ``(owner, skill_id)``：载体解析对同一 owner 同一技能只留**一个**实例
+    （``resolve_instances`` 的去重口径），故这就是"技能实例"的规范身份；**不含来源**
+    （``instance_key`` 的第三段）——规则 15.2 明说失去技能不影响武将牌上的牌，区不随
+    来源种类 / 存亡改键。
+    """
+    return f"{owner}:{skill_id}"
+
+
+# ---------------------------------------------------------------------------
+# per-instance 状态的**位布局**（票 07 §6 的键 + M6 票 05 的"整局已用"位）
+# ---------------------------------------------------------------------------
+
+_GIVEN_TO_SHIFT = 6
+"""「本阶段已给过的目标座位」位的起始位（M6 票 16；位 6..13 = 座位 0..7）。
+
+低 6 位已被 A 族三个阶段位 + 限定技整局位 + 觉醒位 + 每回合已用位占满，故从第 6 位起。
+内建上限 8 座（``RuleConfig.player_count`` 的闭集为 2/4/5/6/7/8），与这里一致。
+"""
+
+_GIVEN_TO_MASK = 0xFF << _GIVEN_TO_SHIFT
+"""界刘备【仁德】的"本阶段已给过这些座位"位段（座位号 = 位序号 - ``_GIVEN_TO_SHIFT``）。"""
+
+_USED_SECOND = 1 << 14
+"""**本出牌阶段"第二次"已用**位（M6 票 18；界华雄【势斩】"出牌阶段限两次"）。
+
+位 14 是 :data:`_GIVEN_TO_MASK`（6..13）之后的下一个空闲位。它与 A 族的 ``_USED``
+**成对**读出"本阶段用了几次"：两者都落 = 2 次，只落 ``_USED`` = 1 次。作用域仍是
+**本出牌阶段**，故并入 :data:`_PHASE_STATE_MASK`；没有"限两次"的技能从不写这一位。
+"""
+
+_HUANGTIAN_SHIFT = 15
+"""张角【黄天】的"本阶段这名群势力角色已经交过牌"位段的起始位（feng-zhangjiao 票 02）。
+
+位 15..22 = 发动座位 0..7。**为什么键在张角身上、位在发动者身上**：黄天的次数是"每名
+群势力角色每出牌阶段一次"，不是"张角每阶段一次"；而 ``prune_skill_state`` 会在**每次
+搬牌**后删掉"没有存活实例的键"（发动者名下没有黄天实例），故计数必须落在**张角**的
+实例键上、用座位位段区分发动者——与【仁德】的 :data:`_GIVEN_TO_MASK` 同一姿态。
+"""
+
+_HUANGTIAN_MASK = 0xFF << _HUANGTIAN_SHIFT
+"""张角【黄天】的"本阶段已交过牌的座位"位段（座位号 = 位序号 - ``_HUANGTIAN_SHIFT``）。"""
+
+_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK | _USED_SECOND | _HUANGTIAN_MASK
+"""``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
+``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段 + 界华雄【势斩】的"第二次已用"位，
+见 :mod:`sgs.skills.active`）。
+
+:func:`reset_phase_skill_state` 只清这一掩码里的位：M6 票 05 起 ``skill_state`` 还有
+**跨阶段**的位（限定技的"整局已用"），整段 ``clear()`` 会让限定技复活。
+``tests/test_hero_active.py` 有一条机械检查钉住"掩码 == 上述几段位的并集"。
+
+M6 票 16 起同一个掩码还含**界刘备【仁德】的"本阶段已给过的目标座位"**位
+（:data:`_GIVEN_TO_MASK`）：它同样是"本出牌阶段"的作用域——每位角色在本阶段只能被
+仁德指定一次，下个出牌阶段重新可给。M6 票 18 起还含**界华雄【势斩】的第二次已用位**
+（:data:`_USED_SECOND`）。
+"""
+
+_LIMITED_USED = 0b1000
+"""**限定技整局已用**位（M6 票 05；§四 L350–L355「限定技：整局游戏中只能发动一次」）。
+
+与 A 族的阶段位同处一个整数字段（票 04 预留的"已用"键位），但**永不**被出牌阶段复位；
+随实例键一起：来源消失（``prune_skill_state``）才清，暂时失效不清（``include_suppressed``）。
+"""
+
+
+_AWAKENED = 0b1_0000
+"""**觉醒技已觉醒**位（M6 票 06；§四 4.12「觉醒技：满足条件时强制发动，通常为一次性转变」）。
+
+与 A 族的阶段位（``_PHASE_STATE_MASK``）和限定技的"已用"位（``_LIMITED_USED``）同处
+一个整数字段、**互不重叠**：出牌阶段复位只清阶段位，觉醒位跨整局保留，只有实例真的
+消失（``prune_skill_state``）才随键清掉。
+"""
+
+
+_TURN_USED = 0b10_0000
+"""**每回合限一次**的"本回合已用"位（M6 票 08；界夏侯惇【清俭】的第一个消费者）。
+
+作用域 = **一个游戏回合**（不是"自己的出牌阶段"）：清俭可以在**别人的回合**里由"获得牌"
+触发，故它不能复用 A 族的阶段位（``_PHASE_STATE_MASK``）——那些位在 ``PHASE_PLAY_START``
+就清了。位与其它三段互不重叠；复位走 :func:`reset_turn_skill_state`（引擎的
+``_clear_turn_effects`` 统一调用），整局位 / 觉醒位不受影响。
+"""
+
+
+def _instance_used_this_turn(state: GameState, instance: SkillInstance) -> bool:
+    """``instance`` 的**本回合已用**位（只看位，不解析实例）。"""
+    return bool(state.skill_state.get(instance_key(instance), 0) & _TURN_USED)
+
+
+def _mark_used_this_turn(state: GameState, instance: SkillInstance) -> None:
+    """给实例落"本回合已用"位（非"每回合限一次"的技能由调用方自己保证不落）。"""
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | _TURN_USED
+
+
+def skill_used_this_turn(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 本回合是否已经发动过（M6 票 08 的只读面）。
+
+    与 :func:`limited_skill_used` / :func:`awakening_skill_awakened` 同姿态：按存活实例
+    （``include_suppressed=True``——失效 ≠ 没用过）读 :data:`_TURN_USED` 位。没有这条
+    实例时恒 ``False``。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return _instance_used_this_turn(state, instance)
+    return False
+
+
+def mark_skill_used_this_turn(state: GameState, seat: int, skill_id: str) -> None:
+    """给 ``seat`` 的 ``skill_id`` 落"本回合已用"位（技能层调用；实例不在则零动作）。"""
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            _mark_used_this_turn(state, instance)
+            return
+
+
+def reset_turn_skill_state(state: GameState) -> None:
+    """清理**本回合**的 per-instance 技能状态（M6 票 08；引擎回合末统一调用）。
+
+    只清 :data:`_TURN_USED` 位：整局位（限定技"已用"）与觉醒位保留，"每回合限一次"的
+    技能因此每个游戏回合都能重新发动一次。与 :func:`reset_phase_skill_state` 同形
+    （按掩码清、键清空即删）。
+    """
+    for key in list(state.skill_state):
+        remaining = state.skill_state[key] & ~_TURN_USED
+        if remaining:
+            state.skill_state[key] = remaining
+        else:
+            del state.skill_state[key]
+
+
+# ---------------------------------------------------------------------------
+# 「每轮限 X 次」的计数（M6 票 11 的界吕蒙【博图】）
+# ---------------------------------------------------------------------------
+
+
+def round_skill_uses(state: GameState, seat: int, skill_id: str) -> int:
+    """``seat`` 的 ``skill_id`` **本轮**已发动几次（M6 票 11 的只读面）。
+
+    与 :func:`skill_used_this_turn` 同姿态：按存活实例（``include_suppressed=True``
+    ——失效 ≠ 没用过）取实例键、读 :attr:`~sgs.state.GameState.round_use_counts`。
+    没有这条实例时恒 ``0``。**上限 X 不在本函数里**——"每轮限几次"是牌面事实
+    （【博图】是"存活角色数且至多 3"，每次发动时重算），由技能自己的 ``available`` 判。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return state.round_use_counts.get(instance_key(instance), 0)
+    return 0
+
+
+def mark_round_skill_used(state: GameState, seat: int, skill_id: str) -> None:
+    """给 ``seat`` 的 ``skill_id`` 记一次**本轮已发动**（技能层调用；实例不在则零动作）。"""
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            key = instance_key(instance)
+            state.round_use_counts[key] = state.round_use_counts.get(key, 0) + 1
+            return
+
+
+def reset_round_skill_state(state: GameState) -> None:
+    """清空**本轮**的每轮次数（M6 票 11；引擎在轮次 +1 时调用，唯一复位点）。
+
+    计数本身就是"本轮"的，故整段清空；**额外回合不经过这里**——这正是"额外回合不会
+    刷新每轮限 X 次"的机械保证（见 :meth:`~sgs.engine.Engine._advance_turn`）。
+    """
+    state.round_use_counts.clear()
+
+
+def _instance_awakened(state: GameState, instance: SkillInstance) -> bool:
+    """``instance`` 的**已觉醒**位是否已落（只看位，不解析实例）。"""
+    return bool(state.skill_state.get(instance_key(instance), 0) & _AWAKENED)
+
+
+def _mark_awakened(state: GameState, instance: SkillInstance) -> None:
+    """给**觉醒技**实例落"已觉醒"位（非觉醒技零动作 ⇒ 既有技能不写 ``skill_state``）。"""
+    if instance.definition.skill_type is not SkillType.AWAKENING:
+        return
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | _AWAKENED
+
+
+def _instance_used_once(state: GameState, instance: SkillInstance) -> bool:
+    """``instance`` 的**已用**位是否已落（只看位，不解析实例；限定技的读取方专用）。"""
+    return bool(state.skill_state.get(instance_key(instance), 0) & _LIMITED_USED)
+
+
+def _mark_used_once(state: GameState, instance: SkillInstance) -> None:
+    """给**限定技**实例落"整局已用"位（非限定技**零动作** ⇒ 既有技能不写 ``skill_state``）。"""
+    if instance.definition.skill_type is not SkillType.LIMITED:
+        return
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | _LIMITED_USED
+
+
+def limited_skill_used(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 这条**限定技**整局是否已经发动过（M6 票 05 的只读面）。
+
+    判据 = 该 ``(owner, skill_id)`` 的存活实例在 ``skill_state`` 里的 :data:`_LIMITED_USED`
+    位。用 ``include_suppressed=True`` 解析：**失效 ≠ 来源消失**，暂时被挡住的限定技照样
+    "已经用过"（否则失效恢复后能再发动一次）。没有这条实例 / 不是限定技时恒 ``False``。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return _instance_used_once(state, instance)
+    return False
+
+
+def mark_limited_skill_used(state: GameState, seat: int, skill_id: str) -> bool:
+    """给 ``seat`` 的 ``skill_id`` 落"整局已用"位（M6 票 05 的**写入面**；M6 票 11 的读面对称）。
+
+    与只读的 :func:`limited_skill_used` 同姿态（``include_suppressed=True`` 解析）：被动侧的
+    写入口是 :func:`_dispatch` 里的 :func:`_mark_used_once`（它手上有实例）；**主动侧**没有
+    派发环，故由 A 族的提交点经本函数落位（韬·刘备【义起】是第一个限定主动技）。
+    没有该实例 / 不是限定技时**零动作**并返回 ``False``（与 :func:`_mark_used_once` 的
+    "非限定技零动作"同一条纪律）。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            if instance.definition.skill_type is not SkillType.LIMITED:
+                return False
+            _mark_used_once(state, instance)
+            return True
+    return False
+
+
+def awakening_skill_awakened(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 这条**觉醒技**是否已经觉醒过（M6 票 06 的只读面）。
+
+    判据 = 该 ``(owner, skill_id)`` 的存活实例在 ``skill_state`` 里的
+    :data:`_AWAKENED` 位。与 :func:`limited_skill_used` 同姿态：用
+    ``include_suppressed=True`` 解析（**失效 ≠ 未觉醒**——暂时被挡住不复活觉醒）；
+    没有这条实例 / 不是觉醒技时恒 ``False``。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            if instance.definition.skill_type is not SkillType.AWAKENING:
+                return False
+            return _instance_awakened(state, instance)
+    return False
+
+
 def same_kingdom(state: GameState, a: int, b: int) -> bool:
     """``a`` 与 ``b`` 是不是**同一势力**（票 09 §要做什么 1 的只读小工具）。
 
@@ -513,25 +1187,85 @@ def same_kingdom(state: GameState, a: int, b: int) -> bool:
     return left is not None and left is right
 
 
+def prune_card_tags(state: GameState) -> list[tuple[int, object]]:
+    """清理**来源实例已消失**的牌标签（M6 票 09；D12 的第四项声明）。
+
+    判据 = 标签类型声明 ``disappears_with_source`` ∧ 它的来源实例
+    ``(owner, skill_id)`` 不在 :func:`resolve_instances` 的结果里。
+
+    **"失效"也算来源消失**：:func:`resolve_instances` 默认扣掉被失效谓词挡住的实例，
+    故失效【洛神】时标签一并清除、计数立刻恢复（票 09 的验收）。这与
+    :func:`prune_skill_state` 的"暂时失效不算来源消失"**方向相反**，因为两者问的不是
+    同一件事：per-instance 状态（"限定技已用"）在失效恢复后必须还在；而标签是连续型
+    效果的产物，来源查不到就不再成立。
+
+    没有声明 ``disappears_with_source`` 的类型（遗珠式"到被使用 / 打出为止"）不在这里被
+    清：它的到期由自己的清除触发（:meth:`~sgs.engine.Engine.clear_card_tags`）回答。
+
+    没有标签时**零动作**（先短路再看实例）：这个方法随每次牌移动都会跑，常规局里
+    ``card_tags`` 恒空，前缀守卫让"没标签"的路径不付第二次 ``resolve_instances``。
+
+    返回值 = 被清掉的 ``(card_id, CardTag)`` 列表（按清除顺序）：调用方（引擎）据此在
+    记录流里落 ``tag_remove``（M6 票 20）。纯状态函数仍不碰记录流。
+    """
+    if not state.card_tags:
+        return []
+    live = {
+        (instance.owner, instance.skill_id)
+        for instance in resolve_instances(state)
+    }
+    removed: list[tuple[int, object]] = []
+    for card_id in list(state.card_tags):
+        tags = state.card_tags[card_id]
+        gone = tuple(
+            tag
+            for tag in tags
+            if card_tag_spec(tag.tag_type).disappears_with_source
+            and (tag.owner, tag.skill_id) not in live
+        )
+        if not gone:
+            continue
+        kept = tuple(tag for tag in tags if tag not in gone)
+        if kept:
+            state.card_tags[card_id] = kept
+        else:
+            del state.card_tags[card_id]
+        removed.extend((card_id, tag) for tag in gone)
+    return removed
+
+
 def prune_skill_state(state: GameState) -> None:
-    """清理**来源已消失**的 per-instance 状态（票 07 §6 的"随 source 清理"）。"""
-    live = {instance_key(instance) for instance in resolve_instances(state)}
+    """清理**来源已消失**的 per-instance 状态（票 07 §6 的"随 source 清理"）。
+
+    ``include_suppressed=True``：暂时失效的实例**仍算活着**（M6 票 04）——把它的
+    ``skill_state`` 一起清掉，会让"失效恢复后限定技又能再发动一次"。这里只清
+    "实例真的没了"（载体消失 / 已失去）的那些键。
+    """
+    live = {
+        instance_key(instance)
+        for instance in resolve_instances(state, include_suppressed=True)
+    }
     for key in list(state.skill_state):
         if key not in live:
             del state.skill_state[key]
 
 
 def reset_phase_skill_state(state: GameState) -> None:
-    """清理**本出牌阶段**的 per-instance 技能状态（票 04 §要做什么 2）。
+    """清理**本出牌阶段**的 per-instance 技能状态（票 04 §要做什么 2；M6 票 05 收窄）。
 
     与"座位自己的 ``TURN_START`` 清空 ``card_use_counts``"同一重置口径（票 07 §6），
-    只是节拍落在 ``PHASE_PLAY_START``：M3 里 ``skill_state`` 的**唯一写入者**是 A 族
-    "出牌阶段限一次"（含【仁德】"首次达两张"）的计数，故按阶段整体清空即等于
-    "每阶段限一次"的复位。装备技能不写 ``skill_state``；限定技 / 觉醒技的"已用"键
-    按 ADR-008 改判 M5、M3 无载体——真出现**跨阶段**的 per-instance 状态时，这里必须
-    升级成带作用域的清理（本函数是那个唯一的升级点）。
+    只是节拍落在 ``PHASE_PLAY_START``。票 04 时 ``skill_state`` 的**唯一写入者**是 A 族
+    "出牌阶段限一次"（含【仁德】"首次达两张"）的计数，故整段 ``clear()`` 就是复位；
+    M6 票 05 起同一个字段里还有**跨阶段**的位（限定技的"整局已用"，:data:`_LIMITED_USED`），
+    整段清空会让【替身】下一回合又能发动一次。故这里改成**按作用域掩码**清：
+    只清 :data:`_PHASE_STATE_MASK` 里的阶段位，其余位（以及只剩这些位的键）保留。
     """
-    state.skill_state.clear()
+    for key in list(state.skill_state):
+        remaining = state.skill_state[key] & ~_PHASE_STATE_MASK
+        if remaining:
+            state.skill_state[key] = remaining
+        else:
+            del state.skill_state[key]
 
 
 def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
@@ -566,6 +1300,20 @@ MATCH_OWNER_KEY = "hook_owner"
 """
 
 
+MATCH_ACTOR_KEY = "hook_actor"
+"""帧私有槽名：**条件求值期这一次派发的对象**（`06`（§5「程序化约定与偏离一手」）韬·刘备行）。
+
+逐目标的时机（``USE_BECOME_TARGET`` 这类"时机外层、目标内层"的派发）每次只服务**一个**
+目标，而 ``Hook.condition(host, frame)`` 拿不到派发参数 —— 帧上只有**整份** ``targets``，
+读不出"这一次是谁"。故 :meth:`~sgs.engine.Engine.emit_frame_timing` 在派发前把本次
+``actor`` 写进这个槽、派发后还原（与 ``_DISPATCH_SCOPE`` 同姿态）。
+
+它与 :data:`MATCH_OWNER_KEY` 是两条正交的事实（"我是谁" vs "这一次落在谁身上"），
+与 :data:`skill_owner`（回调执行期才写）同理分开。不读它的技能因此零行为变化；帧私有
+数据不进记录流，既有基准逐字节不受影响。
+"""
+
+
 RUNNING_SKILL_KEY = "running_skill"
 """帧私有槽名：**正在执行**的钩子 / 接缝所属技能 id（code-review 复核）。
 
@@ -574,6 +1322,16 @@ RUNNING_SKILL_KEY = "running_skill"
 交给郭嘉、【反馈】又拿郭嘉那张——同一张牌、同一个目标区、同一帧内序号），此时唯一能
 区分"同一次移动的重入"与"另一次移动"的就是**是哪个技能在跑**。派发环在调每个 handler
 前写它，重入时同一个 handler 会写回同一个值，故它是稳定的重入坐标。
+"""
+
+
+SKILL_JUDGMENT_CARD_KEY = "skill_judgment_card"
+"""帧私有槽名：技能触发的一次判定**结算后**，那张判定牌本身回写进发起帧（M6 票 01）。
+
+引擎一直把判定结果回写成 ``skill_result``（红 = 成功，供【八卦阵】/【铁骑】读）；
+【刚烈】的"不为红桃"需要**花色**（方块是红色但不终止），布尔读不出来，故同一次回写
+再带上判定牌。帧私有数据不进记录流，既有基准逐字节不受影响；读它的技能用后即弹掉，
+避免随 ``dict(frame.data)`` 流进子帧被别的窗口误读。
 """
 
 
@@ -607,26 +1365,386 @@ def _instances_for(
 
     临时实例是"刚刚失去的装备"（:func:`~sgs.skills.move_after.lost_equipment_instances`）：
     它们已经不在装备区、故不在 :func:`resolve_instances` 的集合里，但这一次 ``MOVE_AFTER``
-    仍要替它们派发。合并后仍按 ``(priority_class, skill_id, owner)`` 全序；同一
-    ``(owner, skill_id)`` 以存活实例为准（临时实例不重复派发）。身份门控对临时实例同样生效
-    （与 :func:`resolve_instances` 同一条判据）。
+    仍要替它们派发。同一 ``(owner, skill_id)`` 以存活实例为准（临时实例不重复派发）。身份
+    门控对临时实例同样生效（与 :func:`resolve_instances` 同一条判据；判据只认**武将牌载体**，
+    而临时实例都是失去的装备 ⇒ 不拦）。
+
+    **本函数只做并集**：链序（先逐角色、角色内部再按优先级）由 :func:`_chain_order` 在
+    派发环里落**唯一一次**——这里再排一遍就成了第二份判据。
     """
     instances = list(resolve_instances(state))
     if not extra_instances:
         return tuple(instances)
     seen = {(instance.owner, instance.skill_id) for instance in instances}
     for instance in extra_instances:
-        if _identity_gates_out(instance.definition, state.player(instance.owner).identity):
+        if _identity_gates_out(
+            instance.definition, state.player(instance.owner).identity, instance.source
+        ):
             continue
         key = (instance.owner, instance.skill_id)
         if key in seen:
             continue
         seen.add(key)
         instances.append(instance)
-    instances.sort(
-        key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner)
-    )
     return tuple(instances)
+
+
+def _chain_order(
+    state: GameState, instances: tuple[SkillInstance, ...]
+) -> tuple[SkillInstance, ...]:
+    """本次派发的**链序**——全项目唯一一处实现（§4.16 两级顺序；票 05）。
+
+    规则原文（`三国杀详细规则.txt` §4.16「同一时机涉及多个角色时的两级顺序」）：**先逐
+    角色**——从当前回合角色开始、按逆时针方向，对每一名角色处理完这个时机，再轮到下一名
+    角色；**同一角色内部**若有多个技能 / 效果，再按「武将技能 > 装备技能 > 使用牌」选一条
+    结算。两级**不可互换**：不是"先按优先级把不同角色的技能排成一队"。
+
+    故键 = ``(座位环名次, priority_class, skill_id, owner)``：座位环名次读
+    :func:`~sgs.state.seats_from`（座位环的唯一真源，与 :func:`~sgs.state.order_targets`
+    同一读法），后三段是**同一角色内部**的原全序——第一段只在跨角色时起作用，后三段只在
+    角色内部起作用，互不越权。不在存活环上的座位（死亡时技能窗口里的死者）排在环上座位
+    之后、段内仍按角色内部全序，故对任何输入都是确定的全序。
+
+    **为什么链序落在这里、而不是 :func:`resolve_instances` 的排序键上**：解析入口带内容键
+    缓存，把 ``state.turn_seat`` 拉进解析就得同步加一位键（否则两个只差回合座位的局面会
+    共用一条缓存）；而解析结果的消费者里只有**派发**要这条判据（``timing_hooks_present``、
+    失效 / 状态清理、修饰器链都按集合或座位内部次序读）。链序在真正消费它的地方
+    （:func:`_dispatch`）落一次，判据仍只有**一处实现**。
+    """
+    ring = seats_from(state, state.turn_seat, len(state.players))
+    rank = {seat: index for index, seat in enumerate(ring)}
+    return tuple(
+        sorted(
+            instances,
+            key=lambda item: (
+                rank.get(item.owner, len(rank)),
+                int(item.definition.priority_class),
+                item.skill_id,
+                item.owner,
+            ),
+        )
+    )
+
+
+PASS_STATE_KEY = "skill_pass"
+"""帧私有：同一时机激活结算的**轮次游标**（票 01 §6），键 = ``(timing.value, key, 层号)``。
+
+每一项是本座位这一趟的进度：``pass_seat``（座位环下标）、``pass_round``（本座位已结算的
+轮数）、``pass_floor``（不升档闸门）、``pass_used``（本座位已跑过的技能 id）、
+``pass_phase``（``start`` / ``forced`` / ``ask`` / ``run`` / ``mandatory``）、``pass_forced``
+（本轮强制段）、``pass_forced_at``（跑到第几条）、``pass_optional``（本轮可选项；``None`` =
+问之前要按活状态重估）、``pass_chosen``（本轮选中的那一条）、``pass_terminated``（R5 收口）
+与 ``pass_mandatory``（``Pass`` 之后还要跑的强制段，每项 = ``(候选, 只跑强制项)``）/
+``pass_mandatory_at``（跑到第几条）。
+
+**为什么必须住帧私有**：挂起重入时派发环从头再跑，进度只能由帧里的**显式**游标表达；
+靠"重新算候选集合"隐式表达会在效果结算后答错轮（票 01 §6）。帧私有 ⇒ 不进记录流，
+既有基准的字节不受影响；`dict(frame.data)` 的续跑副本共享同一个 dict 对象，故游标跟着
+续跑帧一起走。
+
+**为什么键里有"层号"**：同键派发可以**嵌套**——`MOVE_AFTER` 的键对整帧恒为
+``"MOVE_AFTER"``，而钩子的效果（摸牌 / 搬牌）会就地再压一次同键派发。嵌套的那一趟是
+**新的一次时机实例**（新的事件载荷），不能续跑外层游标（否则外层的 ``pass_chosen``
+会被再跑一遍 → 无限递归）。层号 = 进入时栈上同键派发的个数，见 :data:`PASS_ACTIVE_KEY`。
+"""
+
+PASS_ACTIVE_KEY = "_skill_pass_active"
+"""帧私有：**当前同步调用栈上**的 pass 身份（元组，最内层在末尾）。
+
+``"stay"`` 会展开 Python 调用栈，故这个标记必须随 ``finally`` 一起弹出 / 下次重入再压：
+它表达的是"此刻**正在跑**哪几趟 pass"，不是"这个帧上有过哪些 pass"。续跑帧
+（`dict(frame.data)` 的副本）在建立那一刻继承这份栈，于是嵌套挂起的那一趟仍能按同一个
+层号续跑（见 :func:`_pass_scope` / :func:`_current_pass_scope`）。
+"""
+
+
+def _pass_id(timing: Timing, key: str) -> tuple[str, str]:
+    """一次派发的 pass 身份：``(时机, 派发键)``（层号在 :func:`_pass_scope` 里加）。"""
+    return (timing.value, key)
+
+
+def _pass_scope(frame: Frame, timing: Timing, key: str) -> tuple[str, str, int]:
+    """**进入**一趟 pass 的作用域：同键嵌套按"栈上已有几层"编号。
+
+    调用方必须在退出（含 ``"stay"``）时把 :data:`PASS_ACTIVE_KEY` 弹回去——见
+    :func:`_dispatch` 的 ``finally``。
+    """
+    pass_id = _pass_id(timing, key)
+    active = frame.data.get(PASS_ACTIVE_KEY) or ()
+    scope = (*pass_id, active.count(pass_id))
+    frame.data[PASS_ACTIVE_KEY] = (*active, pass_id)
+    return scope
+
+
+def _leave_pass_scope(frame: Frame) -> None:
+    """退出当前 pass（``finally`` 里调）：只弹自己那一层。"""
+    active = frame.data.get(PASS_ACTIVE_KEY) or ()
+    if not active:
+        return
+    remaining = active[:-1]
+    if remaining:
+        frame.data[PASS_ACTIVE_KEY] = remaining
+    else:
+        frame.data.pop(PASS_ACTIVE_KEY, None)
+
+
+def _current_pass_scope(
+    frame: Frame, timing: Timing, key: str
+) -> tuple[str, str, int]:
+    """**正在跑**的那一趟 pass 的作用域（效果体调 :func:`terminate_activation_pass` 用）。
+
+    效果体在派发环里跑，故栈上最内层的同键身份就是它自己那一趟；没在 pass 里调
+    （栈上没有同键身份）时退回第 0 层——那是"这一帧上还没有 pass"的默认槽。
+    """
+    pass_id = _pass_id(timing, key)
+    active = frame.data.get(PASS_ACTIVE_KEY) or ()
+    return (*pass_id, max(active.count(pass_id) - 1, 0))
+
+
+def _new_pass_state() -> dict[str, Any]:
+    """一趟 pass 的初始游标：从座位环第 0 席、第 0 轮、最高档（``HERO`` = 0）起算。"""
+    return {
+        "pass_seat": 0,
+        "pass_round": 0,
+        "pass_floor": 0,
+        "pass_used": (),
+        "pass_phase": "start",
+        "pass_forced": (),
+        "pass_forced_at": 0,
+        "pass_optional": None,
+        "pass_chosen": None,
+        "pass_terminated": False,
+        "pass_mandatory": (),
+        "pass_mandatory_at": 0,
+    }
+
+
+def _pass_state(frame: Frame, scope: tuple[str, str, int]) -> dict[str, Any]:
+    """取（必要时建）本趟 pass 的游标。"""
+    states = frame.data.setdefault(PASS_STATE_KEY, {})
+    state = states.get(scope)
+    if state is None:
+        state = _new_pass_state()
+        states[scope] = state
+    return state
+
+
+def _close_pass(frame: Frame, scope: tuple[str, str, int]) -> None:
+    """本趟 pass 结束：清掉游标（`floor` 的"本 pass 结束即清"就落在这里）。"""
+    states = frame.data.get(PASS_STATE_KEY)
+    if states is None:
+        return
+    states.pop(scope, None)
+    if not states:
+        frame.data.pop(PASS_STATE_KEY, None)
+
+
+def _pass_next_seat(state: dict[str, Any]) -> None:
+    """本座位这个时机处理完：座位游标 +1，轮次 / 档 / 已用**对下一座位**重新起算。"""
+    state["pass_seat"] += 1
+    state["pass_round"] = 0
+    state["pass_floor"] = 0
+    state["pass_used"] = ()
+    state["pass_phase"] = "start"
+    state["pass_forced"] = ()
+    state["pass_forced_at"] = 0
+    state["pass_optional"] = None
+    state["pass_chosen"] = None
+    state["pass_mandatory"] = ()
+    state["pass_mandatory_at"] = 0
+
+
+def terminate_activation_pass(frame: Frame, *, timing: Timing, key: str) -> None:
+    """R5 **终止即收口**的显式出口（票 01 §4-7）：先发动者的效果终止此时机 ⇒ 其余作废。
+
+    效果体（钩子回调 / 流水线 effect）在**自己的**时机实例里调用它：本座位 / 本时机剩下的
+    候选（含还没轮到的强制段）一概不再发动，派发环在下一个边界直接收口。规则出处 =
+    补充一手 §2.1.2.2(2) 的注意条（"先发动者的效果若终止此时机，其余候选作废"）。
+
+    本票只给判据位（暂不接任何技能）：调用方把**派发键**原样给出——``dispatch_timing``
+    的键是 ``timing.value``（逐点时机带 ``":<点>"`` 后缀）、``dispatch_seam`` 的键是
+    ``"seam:<kind>"``。效果体知道自己在哪个时机实例里，故不在这里猜；同键嵌套时按
+    "正在跑的那一层"记账（:func:`_current_pass_scope`）。
+    """
+    _pass_state(frame, _current_pass_scope(frame, timing, key))[
+        "pass_terminated"
+    ] = True
+
+
+def _activation_candidates(
+    host: Any,
+    frame: Frame,
+    match: Any,
+    *,
+    seat: int,
+    extra_instances: tuple[SkillInstance, ...],
+    floor: int,
+    used: tuple[str, ...],
+) -> tuple[ActivationCandidate, ...]:
+    """本座位这一刻的全部候选（票 01 §4-2）：条件成立、付得起、且过闸门的那些。
+
+    **每轮重解析**（Q5=A）：调用方每轮都重新调 :func:`_instances_for`，故时机中途
+    ``grant_skill`` 得到的新实例本轮即可发动。闸门（:func:`~sgs.effects.activation_allowed`）
+    与候选生成口共用同一份判据——不升档（档 < ``floor`` 的不进面）+ 每技能一次（``used``
+    记过的不进面）。
+
+    座位环与角色内部的档 / 次序复用 :func:`_chain_order` 的同一份判据：这里只按座位过滤，
+    不另排一遍。
+    """
+    found: list[ActivationCandidate] = []
+    for instance in _chain_order(host.state, _instances_for(host.state, extra_instances)):
+        if instance.owner != seat:
+            continue
+        items = match(instance)
+        if not items:
+            continue
+        limited = instance.definition.skill_type is SkillType.LIMITED
+        awakening = instance.definition.skill_type is SkillType.AWAKENING
+        if limited and _instance_used_once(host.state, instance):
+            # 限定技**整局一次**（§四 L350–L355）：已用 ⇒ 不再产出候选、不再发"是否发动"
+            # 询问、不进记录流的询问视角。判定放在"有东西可派发"之后，故普通技能的
+            # 每一条派发路径一字不改；"整局已用"与 locked / 非锁定正交（这条门在提问之前）。
+            continue
+        if awakening and _instance_awakened(host.state, instance):
+            # 觉醒技是**一次性转变**：已觉醒 ⇒ 不再派发（与限定技的"已用"同一位置）。
+            continue
+        if not activation_allowed(
+            instance.skill_id,
+            int(instance.definition.priority_class),
+            floor=floor,
+            used=used,
+        ):
+            continue
+        # ``available`` 是"这一刻这条技能成不成立"（阶段 / 回合归属、代价够不够），
+        # 与"要不要问"是两条正交的轴：锁定技 / 觉醒技不问，但**同样要过这一道门**。
+        # 缺了它，界【英姿】这类锁定阶段技会在别人的摸牌阶段替自己摸牌。
+        plan = activation_plan(host.state, frame, instance)
+        if not plan.available:
+            continue
+        # 「要不要问」有两层（票 04）：整条技能的 `locked` / 觉醒技，与**逐条钩子**的
+        # `Hook.forced`。后者服务"一条非锁定技里既有可选段、又有强制段"——强制段不问，
+        # 但它仍然随实例失效而停摆（`forced` 不进 :func:`_skill_is_suppressed`）。
+        forced = all(
+            instance.definition.locked
+            or awakening
+            or bool(getattr(item, "forced", False))
+            for item in items
+        )
+        found.append(
+            ActivationCandidate(
+                instance=instance, plan=plan, items=tuple(items), forced=forced
+            )
+        )
+    return tuple(found)
+
+
+def _run_items(
+    host: Any,
+    frame: Frame,
+    candidate: ActivationCandidate,
+    items: tuple[Any, ...],
+    timing: Timing,
+    key: str,
+) -> Control:
+    """跑一个候选里的**这些项**：``"stay"`` = 还在跑，``None`` = 全跑完。
+
+    :func:`_run_candidate`（整条候选）与 ``Pass`` 之后的混合实例（只跑强制项）共用这一份
+    重入口径：挂起重入时从头重跑同一批项，各 item 的 runner 自己按帧私有游标续跑。
+    """
+    for item in items:
+        # ``MATCH_OWNER_KEY`` 是"这次派发落在谁身上"：候选是**批量**求值条件的，游标最后
+        # 停在别的实例上，故跑之前必须按本候选重写一次（条件 / 回调都读它自校持有者）。
+        frame.data[MATCH_OWNER_KEY] = candidate.instance.owner
+        _enter_skill_keys(frame, candidate.instance, key)
+        control = _run_item(host, frame, item, candidate.instance, timing)
+        if control == "stay":
+            return control
+        _leave_skill_keys(frame, key)
+        if control is not None:
+            return control
+    return None
+
+
+def _run_candidate(
+    host: Any, frame: Frame, candidate: ActivationCandidate, timing: Timing, key: str
+) -> Control:
+    """跑一个候选的**全部项**（"派发选中的一条"）：与改造前的逐项循环同形。
+
+    ``"stay"`` = 这条技能还在跑：键与还原点都留着，重入时按游标续跑同一个候选；
+    跑完（非 ``"stay"``）才落限定 / 觉醒的"已用 / 已觉醒"位——effect 挂起时重入必须还能
+    续跑同一个实例，先落位会让重入把实例自己挡掉。
+    """
+    control = _run_items(host, frame, candidate, candidate.items, timing, key)
+    if control is not None:
+        return control
+    definition = candidate.instance.definition
+    if definition.skill_type is SkillType.LIMITED:
+        _mark_used_once(host.state, candidate.instance)
+    if definition.skill_type is SkillType.AWAKENING:
+        _mark_awakened(host.state, candidate.instance)
+    return None
+
+
+def _mandatory_entries(
+    host: Any,
+    frame: Frame,
+    match: Any,
+    *,
+    seat: int,
+    extra_instances: tuple[SkillInstance, ...],
+    used: tuple[str, ...],
+) -> tuple[tuple[ActivationCandidate, bool], ...]:
+    """``Pass`` 之后**仍然必须跑**的强制段（复核修复 F1；票 01 §4-5 / §4-6）。
+
+    ``Pass`` 结束的是这名角色的**选择**，不是它的强制效果。条目按链序（=
+    :func:`_activation_candidates` 的顺序）排列，每项是 ``(候选, 只跑强制项)``：
+
+    - ``forced=True`` 的候选（锁定技 / 觉醒技 / 整条技能全是强制段）⇒ ``(候选, False)``：
+      整条照跑——``locked`` / 觉醒这个开关已经把它自己的每一项都变成强制；
+    - **混合实例**（有 ``Hook.forced``、也有可选段）⇒ ``(只含强制项的候选, True)``：可选段
+      跳过、强制项照跑，且**不算一次发动**（限定 / 觉醒的"已用 / 已觉醒"位不落）——与改造前
+      ``if not (forced or accepted): continue`` 同口径。
+
+    "不升档"闸门按 ``floor=0`` 传：它约束的是**玩家能选什么**，不是强制效果该不该跑。
+    "每技能一次"（``used``）仍然生效，故同一个强制段不会跑第二遍。
+    """
+    candidates = _activation_candidates(
+        host,
+        frame,
+        match,
+        seat=seat,
+        extra_instances=extra_instances,
+        floor=0,
+        used=used,
+    )
+    entries: list[tuple[ActivationCandidate, bool]] = []
+    for candidate in candidates:
+        if candidate.forced:
+            entries.append((candidate, False))
+            continue
+        forced_items = tuple(
+            item for item in candidate.items if bool(getattr(item, "forced", False))
+        )
+        if forced_items:
+            entries.append((replace(candidate, items=forced_items), True))
+    return tuple(entries)
+
+
+def _seat_ring(host: Any, extra_instances: tuple[SkillInstance, ...]) -> tuple[int, ...]:
+    """本趟 pass 的**座位环**：存活环 + 死亡结算窗口里的死者（票 01 §4-1）。
+
+    规则 §4.16 的逐角色顺序只对**存活环**有定义，读法唯一（:func:`~sgs.state.seats_from`，
+    与 :func:`_chain_order` 的第一段同源）。``DEATH_ON`` / 死亡窗口里的 ``MOVE_AFTER`` /
+    ``DEATH_AFTER`` 还要派发**刚死的那名角色本人**的实例（``death_time_skills_active``，
+    票 10）：它们不在存活环上，故把"能解析出实例、却不在环上"的座位按座位号升序接在环尾
+    ——改造前由 :func:`_chain_order` 把这类座位排在环上座位之后，这里保留同一条口径。
+    """
+    ring = seats_from(host.state, host.state.turn_seat, len(host.state.players))
+    in_ring = set(ring)
+    present = {
+        instance.owner for instance in _instances_for(host.state, extra_instances)
+    }
+    return (*ring, *sorted(present - in_ring))
 
 
 def _dispatch(
@@ -638,37 +1756,191 @@ def _dispatch(
     key: str,
     extra_instances: tuple[SkillInstance, ...] = (),
 ) -> Control:
-    """钩子与接缝共用的派发环（唯一一份）：锁定直接跑，非锁定先问"是否发动"。
+    """钩子与接缝共用的派发环（唯一一份）：**逐角色、一次选一条、选完重估**。
 
-    **只有答 ``ActivateSkill`` 才执行**——``Pass``（不发动）与 ``plan.available=False``
-    （付不起）都跳过；这是"非锁定技的发动是询问出来的"这条规则（`GLOSSARY.md` 的**发动**）
-    的唯一落点。暂停 = ``"stay"`，重入时整条链从头跑，但 `ask` 的应答按帧内键缓存。
+    规则出处：仓内 §4.16 L443–L466（逐角色 / 同档内次序归玩家）+ 补充一手 §2.1.2.2(2) /
+    §2.1.2.3（一次一个 / 不升档 / 每技能一次 / 终止即收口）。改造前是"按 ``skill_id`` 定序
+    逐个实例问"，每实例一条裸 ``ActivateSkill``；现在**每个座位一轮一次询问**，面上是本轮
+    全部可选项（票 01 §4 / §5）。
+
+    每轮（= 一次"选一条"）的顺序：
+
+    1. **重解析**（:func:`_activation_candidates`）：本座位条件成立、付得起、过闸门的候选；
+    2. **强制段按档跑**（``locked`` / 觉醒 / ``Hook.forced``）：不问、不上脸；只跑**当前最高
+       优先档**（``min(tier)``）的那几条——票 01 §4-5「在本档轮到它时」；跑完再重新收集，
+       更低档的强制段留到下一轮（同档内"强制段先于可选项"是本仓的登记口径）；
+    3. **可选项合成一张面**问一次（面**跨档**，票 01 §8-3）；``Pass`` = 结束本座位的
+       **选择**，剩下的强制段由 :func:`_mandatory_entries` 接着跑（强制效果不随 ``Pass``
+       消失），跑完才轮到下一个座位；
+    4. 派发选中的那一条 → 记 ``pass_used``、``pass_floor`` 落到它的档 → 下一轮。
+
+    **重入**（§6）：进度只由 :data:`PASS_STATE_KEY` 的显式游标表达——``"stay"`` 回来时
+    既不重发询问、也不重跑已完成的项；**不靠"重算候选集合"外推进度**（候选集合在效果
+    结算后可能变，隐式进度会答错轮）。
 
     ``extra_instances``（M5-05a）只由"失去牌后"的派发传入：刚离开装备区的装备技能仍是
     这一次移动的提供者（见 :func:`_instances_for`）。
+
+    **嵌套**：同键派发可以嵌套（``MOVE_AFTER`` 的钩子摸牌会就地再压一次同键派发）。嵌套的
+    那一趟用**新的一层**作用域（:func:`_pass_scope`），故不会续跑外层游标；``finally``
+    退出时把自己那一层弹出——``"stay"`` 也走 ``finally``，续跑时重新压同一层号。
     """
-    for instance in _instances_for(host.state, extra_instances):
-        items = match(instance)
-        if not items:
-            continue
-        if not instance.definition.locked:
-            plan = activation_plan(host.state, frame, instance)
-            if not plan.available:
+    scope = _pass_scope(frame, timing, key)
+    try:
+        state = _pass_state(frame, scope)
+        ring = _seat_ring(host, extra_instances)
+        while True:
+            if state["pass_terminated"] or state["pass_seat"] >= len(ring):
+                # R5 收口 / 全座位处理完：本趟 pass 结束，游标清掉。
+                _close_pass(frame, scope)
+                return None
+            seat = ring[state["pass_seat"]]
+            if state["pass_phase"] == "start":
+                candidates = _activation_candidates(
+                    host,
+                    frame,
+                    match,
+                    seat=seat,
+                    extra_instances=extra_instances,
+                    floor=state["pass_floor"],
+                    used=state["pass_used"],
+                )
+                if not candidates:
+                    # 本座位这个时机没有可发动的了 ⇒ 轮到下一个座位（§4.16 逐角色）。
+                    _pass_next_seat(state)
+                    continue
+                # 强制段**按档**跑（票 01 §4-5「在本档轮到它时」）：一轮只跑"当前最高优先
+                # 档"的那几条，跑完再重新收集、把可选项按活状态合成一张面（面跨档，§8-3）。
+                tier = min(candidate.tier for candidate in candidates)
+                forced = tuple(
+                    candidate
+                    for candidate in candidates
+                    if candidate.forced and candidate.tier == tier
+                )
+                state["pass_forced"] = forced
+                state["pass_forced_at"] = 0
+                state["pass_optional"] = None
+                state["pass_phase"] = "forced" if forced else "ask"
                 continue
-            active = host.ask_skill_activation(frame, instance, timing, plan, key=key)
-            if host.suspended(active):
-                return "stay"
-            if not isinstance(active, ActivateSkill):
+            if state["pass_phase"] == "forced":
+                forced = state["pass_forced"]
+                while state["pass_forced_at"] < len(forced):
+                    candidate = forced[state["pass_forced_at"]]
+                    control = _run_candidate(host, frame, candidate, timing, key)
+                    if control == "stay":
+                        return control
+                    if control is not None:
+                        _close_pass(frame, scope)
+                        return control
+                    state["pass_used"] = (*state["pass_used"], candidate.skill_id)
+                    state["pass_forced_at"] += 1
+                # 强制段跑完之后再看可选项：条件在这一刻重判（票 01 §4 的"轮到时判"）。
+                state["pass_optional"] = None
+                state["pass_phase"] = "ask"
                 continue
-        for item in items:
-            frame.data["skill_owner"] = instance.owner
-            # 移动的重入判据要认"哪个技能在跑"（两个提供者可以发出参数相同的移动）；
-            # 重入时同一个 handler 写回同一个值，故它稳定。
-            frame.data[RUNNING_SKILL_KEY] = instance.skill_id
-            control = _run_item(host, frame, item, instance, timing)
-            if control is not None:
+            if state["pass_phase"] == "ask":
+                optional = state["pass_optional"]
+                if optional is None:
+                    optional = tuple(
+                        candidate
+                        for candidate in _activation_candidates(
+                            host,
+                            frame,
+                            match,
+                            seat=seat,
+                            extra_instances=extra_instances,
+                            floor=state["pass_floor"],
+                            used=state["pass_used"],
+                        )
+                        if not candidate.forced
+                    )
+                    state["pass_optional"] = optional
+                if not optional:
+                    # 本档可选项跑完了，但**更低档的强制段**还没跑（强制段一轮跑一档）：
+                    # 回 ``start`` 重新收集，让它在本轮开头跑；``start`` 无候选时才轮到下一个
+                    # 座位（§4.16 逐角色）。
+                    state["pass_phase"] = "start"
+                    continue
+                active = host.ask_skill_activation(
+                    frame,
+                    optional,
+                    timing,
+                    key=key,
+                    depth=scope[2],
+                    seat=seat,
+                    round=state["pass_round"],
+                    floor=state["pass_floor"],
+                    used=state["pass_used"],
+                )
+                if host.suspended(active):
+                    return "stay"
+                if not isinstance(active, ActivateSkill):
+                    # ``Pass`` = 结束本座位的**选择**（票 01 §4-6）——不是它的强制效果：还没
+                    # 跑的强制段（全强制候选 + 混合实例的 ``Hook.forced`` 项）按链序接着跑，
+                    # 跑完才轮到下一个座位（复核修复 F1；票 01 §4-5「在本档轮到它时」）。
+                    state["pass_mandatory"] = _mandatory_entries(
+                        host,
+                        frame,
+                        match,
+                        seat=seat,
+                        extra_instances=extra_instances,
+                        used=state["pass_used"],
+                    )
+                    state["pass_mandatory_at"] = 0
+                    state["pass_phase"] = "mandatory"
+                    continue
+                chosen = next(
+                    (
+                        candidate
+                        for candidate in optional
+                        if candidate.skill_id == active.skill_id
+                    ),
+                    None,
+                )
+                if chosen is None:
+                    # 候选集合是**唯一的合法面**（:func:`legal_actions_for`）：走到这里说明
+                    # 应答绕过了成员判定，fail-closed 比默默换一条更接近"不可观测的错"。
+                    raise RuntimeError(f"应答的技能不在本轮候选里：{active.skill_id!r}")
+                state["pass_chosen"] = chosen
+                state["pass_phase"] = "run"
+                continue
+            if state["pass_phase"] == "mandatory":
+                # ``Pass`` 之后：把还没跑的强制段按链序跑完（票 01 §4-5 的复核读法）。
+                mandatory = state["pass_mandatory"]
+                while state["pass_mandatory_at"] < len(mandatory):
+                    candidate, forced_only = mandatory[state["pass_mandatory_at"]]
+                    control = (
+                        _run_items(host, frame, candidate, candidate.items, timing, key)
+                        if forced_only
+                        else _run_candidate(host, frame, candidate, timing, key)
+                    )
+                    if control == "stay":
+                        return control
+                    if control is not None:
+                        _close_pass(frame, scope)
+                        return control
+                    state["pass_used"] = (*state["pass_used"], candidate.skill_id)
+                    state["pass_mandatory_at"] += 1
+                # 强制段跑完 = 这个座位的时机结束：``Pass`` 之后不再重开选择（§4-6）。
+                _pass_next_seat(state)
+                continue
+            # 阶段机的最后一相：跑本轮选中的那一条（挂起重入时从这里续跑）。
+            chosen = state["pass_chosen"]
+            assert chosen is not None, "run 阶段必有选中项（阶段机不变量）"
+            control = _run_candidate(host, frame, chosen, timing, key)
+            if control == "stay":
                 return control
-    return None
+            if control is not None:
+                _close_pass(frame, scope)
+                return control
+            state["pass_used"] = (*state["pass_used"], chosen.skill_id)
+            # 不升档（§2.1.2.3）：档只降不升——选定这一档之后，更优先的档不再进面。
+            state["pass_floor"] = chosen.tier
+            state["pass_round"] += 1
+            state["pass_chosen"] = None
+            state["pass_phase"] = "start"
+    finally:
+        _leave_pass_scope(frame)
 
 
 def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timing: Timing) -> Control:
@@ -687,6 +1959,56 @@ def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timin
     return item.handler(host, frame)
 
 
+_SKILL_KEYS_PRIOR = "_skill_keys_prior"
+"""帧私有：:data:`RUNNING_SKILL_KEY` 与 ``skill_owner`` 的**还原点**，按派发键记账。
+
+帧私有 ⇒ 不进记录流、不参与任何规则判据，只服务"回调跑完就还原"这条纪律。**按派发键
+（``timing.value`` / ``seam:<kind>``）记账**而不是"进一次记一次"：同一条技能挂起后
+（``"stay"``）派发环会从头重入，若重入时把**上一次的残留**当成还原点，还原就成了空操作
+——那正是 M6 实机报障的根因（界【集智】的无懈窗口仍显示集智文案）。
+"""
+
+
+def _enter_skill_keys(frame: Frame, instance: SkillInstance, key: str) -> None:
+    """回调前：写下"此刻在跑哪条技能 / 它的持有者"，并记下**第一次进入前**的事实。"""
+    priors = frame.data.get(_SKILL_KEYS_PRIOR)
+    if priors is None:
+        priors = {}
+        frame.data[_SKILL_KEYS_PRIOR] = priors
+    priors.setdefault(
+        key,
+        (
+            RUNNING_SKILL_KEY in frame.data,
+            frame.data.get(RUNNING_SKILL_KEY),
+            "skill_owner" in frame.data,
+            frame.data.get("skill_owner"),
+        ),
+    )
+    frame.data["skill_owner"] = instance.owner
+    # 移动的重入判据要认"哪个技能在跑"（两个提供者可以发出参数相同的移动）；
+    # 重入时同一个 handler 写回同一个值，故它稳定。
+    frame.data[RUNNING_SKILL_KEY] = instance.skill_id
+
+
+def _leave_skill_keys(frame: Frame, key: str) -> None:
+    """回调**跑完**（不是悬起）：把两个键还原成进入前的事实，并销掉这一份还原点。"""
+    priors = frame.data.get(_SKILL_KEYS_PRIOR)
+    prior = priors.pop(key, None) if priors is not None else None
+    if priors is not None and not priors:
+        frame.data.pop(_SKILL_KEYS_PRIOR, None)
+    if prior is None:
+        return
+    had_skill, skill_id, had_owner, owner = prior
+    if had_skill:
+        frame.data[RUNNING_SKILL_KEY] = skill_id
+    else:
+        frame.data.pop(RUNNING_SKILL_KEY, None)
+    if had_owner:
+        frame.data["skill_owner"] = owner
+    else:
+        frame.data.pop("skill_owner", None)
+
+
 def dispatch_timing(
     host: Any,
     frame: Frame,
@@ -694,11 +2016,13 @@ def dispatch_timing(
     *,
     extra_instances: tuple[SkillInstance, ...] = (),
 ) -> Control:
-    """在 ``timing`` 上按链序派发钩子；**第一个返回非 ``None`` 的钩子即短路**。
+    """在 ``timing`` 上派发钩子：逐角色、一次选一条、选完重估；**第一个返回非 ``None``
+    的钩子即短路**（与改造前同）。
 
     答案缓存键带上 :func:`~sgs.skills.damage_after.damage_point_index`（票 05）：逐点触发的
     时机里"第 1 点"与"第 2 点"是**两个**时机实例，非锁定技在每一轮各自问一次"是否发动"；
-    其余时机里该序号恒为 0，键与既有形态逐字相同（M2 基准不受影响）。
+    其余时机里该序号恒为 0，键与既有形态逐字相同（M2 基准不受影响）。pass 游标
+    （:data:`PASS_STATE_KEY`）用同一个键，故两个时机实例的轮次互不串味。
 
     ``extra_instances``（M5-05a）：本次派发额外参与的**临时实例**（失去装备派发用）；
     缺省为空 ⇒ 既有调用点的行为与集合逐字不变。
@@ -718,7 +2042,10 @@ def dispatch_seam(host: Any, frame: Frame, kind: SeamKind) -> Control:
     """在帧内接缝 ``kind`` 上派发；键是接缝名而**不是时机**（票 30）。
 
     发动询问仍发生在当前帧所处的时机里（接缝都嵌在 C2），故 ``timing`` 只作询问记录的
-    语境；**答案缓存键用接缝名**，与同时机上的真钩子互不串味。
+    语境；**答案缓存键与 pass 游标用接缝名**，与同时机上的真钩子互不串味。
+
+    与 :func:`dispatch_timing` **共用** :func:`_dispatch`，故接缝候选同样带档、同样过
+    "不升档 / 每技能一次"的闸门、同样逐角色（票 01 §6 的硬要求）。
     """
     return _dispatch(
         host,
@@ -873,6 +2200,8 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             "equip.ice_sword": _ice_sword_plan,
             "equip.qilin_bow": _qilin_bow_plan,
             hero_skill_id("machao", "tieqi"): _tieji_plan,
+            # 界马超【铁骑】（M6 票 04）：发动前提与标准版逐字相同（自己的【杀】指定了目标）。
+            hero_skill_id("jie_machao", "tieqi"): _tieji_plan,
         }
     )
 )
@@ -936,7 +2265,7 @@ def _renwang_effectiveness(state: GameState, ctx: ModifierContext, current: Any)
     """仁王盾：锁定技，**黑色的【杀】对你无效**（`A/flow_use.txt:79`）。
 
     【青釭剑】的"无视防具"通过在 ``EFFECTIVENESS`` 链上先置 ``ignore_armor`` 标志实现
-    （票 07 §3 的窄结论：不建通用抑制机制）；链序保证青釭剑（``equip.qinggang_sword``）
+    （票 07 §3 的窄结论：不建通用抑制机制）；**修饰器管道序**保证青釭剑（``equip.qinggang_sword``）
     先于仁王盾（``equip.renwang_shield``）执行。
     """
     del state
@@ -964,7 +2293,7 @@ def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any)
     "无视防具"是**防具的整体效果**，不只第一条链：:func:`~sgs.effects.damage_amount`
     只建**一个** ``ModifierContext``，三条链经 ``replace(ctx, role=...)`` 共用同一个
     可变 ``flags`` 字典——这里置一次就够，后两条链的防具回调读到的是同一份标志。
-    链序仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前），
+    **修饰器管道序**仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前），
     故第一次（``EFFECTIVENESS``）派发就把标志写进了共享字典。
     """
     del state
@@ -1058,20 +2387,44 @@ def _lost_this_equipment(card_type_id: str) -> HookCondition:
     return condition
 
 
-def _silver_lion_lost(host: Any, frame: Frame) -> None:
-    """失去白银狮子：**走正常 RECOVER 帧**回复 1 点（不直接改 HP）。
+def _silver_lion_lost(host: Any, frame: Frame) -> Control:
+    """失去白银狮子：**走正常 RECOVER 帧**回复 1 点（不直接改 HP），压完**让出**给子帧。
 
     压帧而不是原地写 ``hp``：回复量的修正（``RECOVER_AMOUNT``）、体力上限夹取与
     ``RECOVER_VALUE`` / ``RECOVER_AFTER`` 两个时机都仍由 :mod:`sgs.engine.steps` 的
     ``RECOVER`` 步骤表统一处理——与【桃】/【桃园结义】/主动技的回复是同一条流程。
     持有者 = :data:`skill_owner`（``_dispatch`` 在回调前写入）。
+
+    **压帧 = 让出**（票 03）：本钩子是在**别人的效果体里**由移动内联派发的（界【苦肉】：
+    弃一张牌 → 失去 1 点体力）。压完子帧若 ``return None``，那个效果体会以为"这次移动
+    没事了"，接着把自己的帧压在 ``RECOVER`` **上面**——帧栈后进先出，回复因此被顶到后面
+    （1 体力界黄盖先进濒死、求桃）。``"stay"`` 把控制权交回驱动循环：``_step`` 先
+    ``_flush_pending_move``（续跑 = 重新派发本钩子，下面那条游标命中、零动作），再
+    ``stack.step()`` 处理**栈顶**的 ``RECOVER`` ⇒ 回复先于效果体后续的动作。
+
+    帧私有游标（``silver_lion:recovered:<这批牌>``）**在压帧之前**写：续跑会重入**同一次**
+    移动的派发，没有游标就会压第二张 ``RECOVER``（回复两次）。键按**这批牌**分桶，与
+    【枭姬】的 ``<skill>:act:<cards>`` 同款：同一帧里两次独立失去装备是两个时机实例，
+    只按技能 id 分桶会让第二次读到第一次的游标而静默不回复。
     """
     owner = frame.data["skill_owner"]
+    # 延迟导入：``move_after`` 在 catalog **文件末尾**才并入技能表（模块级循环）。
+    from .move_after import move_event
+
+    event = move_event(frame)
+    key = "silver_lion:recovered:" + ",".join(
+        str(card_id) for card_id in (event.card_ids if event is not None else ())
+    )
+    if frame.data.get(key):
+        # 这次"失去装备"的时机已经做过（``_flush_pending_move`` 的续跑重入）。
+        return None
+    frame.data[key] = True
     host.push_frame(
         FrameKind.RECOVER,
         {"source": owner, "targets": (owner,), "card": None, "amount": 1},
         timing=Timing.RECOVER_VALUE,
     )
+    return "stay"
 
 
 def _scimitar_no_hand_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -1197,34 +2550,53 @@ def _normal_slash(state: GameState, card_id: int) -> bool:
     return state.card(card_id).type == "slash"
 
 
-def _vermilion_fan_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """朱雀羽扇：一张普通【杀】当火【杀】**使用或打出**（M5-05b；D2 / D8 / D9）。
+def _fan_is_normal_slash(state: GameState, card: Any) -> bool:
+    """朱雀羽扇的触发条件：**普通【杀】**（牌型相等，不是杀族判据）。
 
-    与 H 族单源转化**同一份**候选构造（:func:`~sgs.skills.virtual.single_conversion`）：
-    - 源 = **普通【杀】**（手牌 ∪ 装备，`GLOSSARY.md`「区域默认」）；
-    - 产物牌型 ``fire_slash``——FIRE 伤害由**产物牌型的行为表**声明（M5-02），故本技能
-      没有第二套属性通道；
-    - 语境 = ``PLAY`` + ``RESPOND``：出牌阶段使用，南蛮 / 决斗 / 借刀的响应窗口打出；
-    - 来源实体牌由引擎的虚拟源移动路径（``Engine._move_virtual_sources``）进弃牌堆。
+    真实牌走 :func:`_normal_slash`（已登记的 normal-only 站点）；虚拟 / 转化牌按产物
+    ``card.type == "slash"`` 判——武圣 / 龙胆 / 丈八蛇矛 / 武神的普通【杀】产物都能被
+    再转成火【杀】（用户口径："无论是否转化、转化过几次、是否虚拟"）。
     """
-    sources = tuple(
-        card_id
-        for card_id in (
-            card_ids(state, ctx.subject, Zone.HAND)
-            + card_ids(state, ctx.subject, Zone.EQUIP)
-        )
-        if _normal_slash(state, card_id)
-    )
-    return (
-        *current,
-        *single_conversion(
-            state,
-            ctx,
-            target_type_id="fire_slash",
-            cards=sources,
-            scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
-        ),
-    )
+    if card.is_virtual:
+        return card.type == "slash"
+    return _normal_slash(state, card.card_id)
+
+
+def _fan_condition(host: Any, frame: Any) -> bool:
+    """朱雀羽扇：**持有者自己使用**普通【杀】时问一次（不认"打出"，用户本轮裁定）。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    card = frame.data.get("card")
+    if card is None:
+        return False
+    return _fan_is_normal_slash(host.state, card)
+
+
+def _fan_effect(host: Any, frame: Any) -> None:
+    """把**这次使用的**普通【杀】换成虚拟火【杀】（来源 = 原牌的实体来源）。
+
+    真实牌：来源 = 它自己；虚拟 / 转化牌：来源 = 它的 ``virtual_sources``（武神的红桃
+    手牌、丈八的两张手牌……）；纯虚拟无来源：用 ``pure_virtual_card``。原牌仍按使用 / 打出
+    收尾进弃牌堆（虚拟牌由 ``_move_virtual_sources`` 搬来源）。
+    """
+    card = frame.data.get("card")
+    if card is None:
+        return None
+    sources = tuple(card.virtual_sources) if card.is_virtual else (card.card_id,)
+    if sources:
+        frame.data["card"] = transformed_card(host.state, sources, "fire_slash")
+    else:
+        frame.data["card"] = pure_virtual_card(host.state, "fire_slash")
+    return None
+
+
+VERMILION_FAN_FLOW = SkillFlow(
+    name="vermilion_feather_fan",
+    steps=(),
+    effect=zero_step_effect(_fan_effect),
+)
+"""朱雀羽扇的零步流水线：只问"是否发动"，确认后把帧里的牌换成火【杀】。"""
 
 
 # ---------------------------------------------------------------------------
@@ -1320,7 +2692,12 @@ def _double_sword(host: Any, frame: Frame) -> Control:
                         # 由挂起的派发先消费那条应答（票 14 §1）。
                         return "stay"
         else:
-            host.draw_for_hand(frame, source, 1)
+            # 这一摸可能触发【清俭】并挂起（票 24：摸牌算获得）：游标先落，挂起原样上抛。
+            cursor += 1
+            frame.data["double_sword_cursor"] = cursor
+            if host.draw_for_hand(frame, source, 1) == "stay":
+                return "stay"
+            continue
         cursor += 1
         frame.data["double_sword_cursor"] = cursor
     return None
@@ -1776,6 +3153,10 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="弃置目标装备区里的一匹坐骑",
         hooks=(Hook(Timing.DAMAGE_DEAL, flow=QILIN_BOW_FLOW),),
         step_requirements={"card": "弃置目标装备区里的一匹坐骑（只能选坐骑）"},
+        # M6 票 23 报障：与【青龙偃月刀】/【贯石斧】同档——首步铺目标的**装备区**（公开区域，
+        # 坐骑是可见的），`_qilin_bow_plan` 的 `available` 又保证目标确有坐骑 ⇒ 清单恒渲得出。
+        # 不翻的后果是界面死路：清单在、开关没开 ⇒ 画不出「进入预发动」。
+        preactivated=True,
     ),
     _equip(
         "ice_sword",
@@ -1869,9 +3250,14 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
     _equip(
         "vermilion_feather_fan",
         locked=False,
-        requirement="你可以将一张普通【杀】当【火杀】使用或打出",
-        modifiers=(Modifier(ModifierPoint.CANDIDATES, _vermilion_fan_candidate),),
-        virtual_type_ids=("fire_slash",),
+        requirement="当你使用普通【杀】时，你可以将其转化为火【杀】",
+        hooks=(
+            Hook(
+                Timing.USE_ON_USE,
+                condition=_fan_condition,
+                flow=VERMILION_FAN_FLOW,
+            ),
+        ),
     ),
     _equip(
         "hualiu",
@@ -1885,20 +3271,28 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 # `heroes` / `active` 反向 import 本模块的 SkillDef / ModifierContext，故这一行必须晚于
 # 那两者的定义（见 CATALOG 的 docstring）。
 from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
-from .active import active_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .active import (  # noqa: E402  （末尾 import 是刻意的）
+    GUOHUO,
+    active_skill_definitions,
+    guohuo_provider,
+)
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
     response_window_skill_definitions,
 )
 from .lord_request import (  # noqa: E402  （末尾 import 是刻意的）
+    lord_request_activation_plans,
     lord_skill_definitions,
+    register_provider,
 )
 from .arrange import (  # noqa: E402  （末尾 import 是刻意的）
     arrange_activation_plans,
     arrange_skill_definitions,
 )
 from .damage_after import (  # noqa: E402  （末尾 import 是刻意的）
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
     damage_after_skill_definitions,
@@ -1915,6 +3309,46 @@ from .phase_body import (  # noqa: E402  （末尾 import 是刻意的）
 from .target_change import (  # noqa: E402  （末尾 import 是刻意的）
     target_change_skill_definitions,
 )
+from .limits import (  # noqa: E402  （末尾 import 是刻意的）
+    limits_activation_plans,
+    limits_skill_definitions,
+)
+from .use_after import (  # noqa: E402  （末尾 import 是刻意的）
+    use_after_skill_definitions,
+)
+from .judgment_loop import (  # noqa: E402  （末尾 import 是刻意的）
+    judgment_loop_activation_plans,
+    judgment_loop_skill_definitions,
+)
+from .awakening import (  # noqa: E402  （末尾 import 是刻意的）
+    awakening_activation_plans,
+    awakening_skill_definitions,
+)
+from .negation import negation_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .hero_zone import (  # noqa: E402  （末尾 import 是刻意的）
+    hero_zone_skill_definitions,
+)
+from .life_after import (  # noqa: E402  （末尾 import 是刻意的）
+    life_after_skill_definitions,
+)
+from .death_after import (  # noqa: E402  （末尾 import 是刻意的）
+    death_after_skill_definitions,
+)
+from .near_death import (  # noqa: E402  （末尾 import 是刻意的）
+    near_death_skill_definitions,
+)
+from .start import (  # noqa: E402  （末尾 import 是刻意的）
+    start_skill_definitions,
+)
+from .shen_zhugeliang import (  # noqa: E402  （末尾 import 是刻意的）
+    shen_zhugeliang_skill_definitions,
+)
+
+# **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
+# 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
+# 质疑，最后才决定这张牌算不算数。登记点必须是**这里**：`active.py` 与 `lord_request.py`
+# 互相不认识（都反向 import 本模块），只有本文件末尾两个模块都已 import 完。
+register_provider(GUOHUO, guohuo_provider)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(
@@ -1923,11 +3357,16 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             **arrange_activation_plans(),
             **rejudge_activation_plans(),
             **phase_body_activation_plans(),
+            **judgment_loop_activation_plans(),
+            **awakening_activation_plans(),
+            **lord_request_activation_plans(),
+            **limits_activation_plans(),
         }
     )
 )
-"""G 族（票 10）、I 族（票 11）与 L 族（票 12）的发动形态并入后的**完整**注册表：
-与 :data:`CATALOG` 同一合并姿态。"""
+"""G 族（票 10）、I 族（票 11）、L 族（票 12）、J 族（M6 票 02）、F 族（M6 票 14 的
+界【护驾】②：应答者 = 使用 / 打出【闪】的那个角色）与 P 族（huo-mobile-batch 票 01 的
+【猛进】）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1945,12 +3384,23 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *rejudge_skill_definitions(),
             *phase_body_skill_definitions(),
             *target_change_skill_definitions(),
+            *limits_skill_definitions(),
+            *use_after_skill_definitions(),
+            *judgment_loop_skill_definitions(),
+            *awakening_skill_definitions(),
+            *negation_skill_definitions(),
+            *hero_zone_skill_definitions(),
+            *life_after_skill_definitions(),
+            *death_after_skill_definitions(),
+            *near_death_skill_definitions(),
+            *start_skill_definitions(),
+            *shen_zhugeliang_skill_definitions(),
         )
     }
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐）**共用同一张表**：
+装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条、票 05 起 46 条、票 06 起 52 条、票 07 起 56 条、票 08 起 62 条、票 09 起 64 条、票 10 起 66 条、票 11 起 67 条、票 14 起 73 条、票 15 起 77 条、票 16 起 83 条、票 17 起 91 条、wuming 票 01 起 **92 条** = 合计 114 条）**共用同一张表**：
 载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
 （而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由

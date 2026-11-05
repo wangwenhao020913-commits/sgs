@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from sgs.data import Suit
-from sgs.resolution import Frame
+from sgs.resolution import Frame, Tag, has_tag
 from sgs.state import (
     ActivateSkill,
     FrameKind,
@@ -46,8 +46,9 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .behaviors import DamageNature
-from .modifiers import response_count
+from .actions import need_card_floor, reset_need_card_floor
+from .behaviors import SLASH_FAMILY_KEY, DamageNature
+from .modifiers import responder_role, response_count
 
 __all__ = ("OPS",)
 
@@ -476,13 +477,32 @@ def resolve_fire_attack(host: Any, frame: Frame) -> Any:
     return None
 
 
-def _duel_accepted(op: dict[str, Any], *, other: int, required: int) -> str:
-    """一次**成立**的【决斗】响应：累加已出张数，攒够所需张数就把响应权交给对方。"""
+def _duel_accepted(
+    frame: Frame, op: dict[str, Any], *, seat: int, other: int, required: int
+) -> str:
+    """一次**成立**的【决斗】响应：累加已出张数，攒够所需张数就把响应权交给对方。
+
+    这也是【决斗】窗口"**这一次需要牌事件成立**"的落点（票 03 §4-3）：一张【杀】成立即清掉
+    该座位的不升档 floor——【无双】的"每次响应两张【杀】"是**两次**需要牌事件（补充一手
+    §2.1.2.2(2) 的"每时机一次响应机会"），第二张仍可从任意档起手（第一张用真牌，第二张
+    照样能发动提供者）。
+    """
+    reset_need_card_floor(frame, seat)
     op["duel_plays"] = op.get("duel_plays", 0) + 1
     if op["duel_plays"] >= required:
         op["duel_plays"] = 0
         op["duel_turn"] = other
     return "stay"
+
+
+def _play_produced(host: Any, card: Any, *, source: int) -> None:
+    """把提供者交回的**产物牌**按 L6 打出（虚拟牌，无目标）。
+
+    ``card is None`` = 没有产物可交付：主公技式提供者（【护驾】/【激将】）的表达式是
+    "另一个角色打出 / 使用了一张牌"，那张牌**已经由代打者付清**，窗口只欠一条"需要已满足"。
+    """
+    if card is not None:
+        host.play_card(card, source=source, timing=Timing.PLAY_DECLARE)
 
 
 def resolve_duel(host: Any, frame: Frame) -> Any:
@@ -498,6 +518,11 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     **提供者（【激将】）**：候选里的 ``ActivateSkill`` 走技能层通用派发（票 09）；它可能跨
     多次重入（逐个问同势力角色），故窗口顶部先 :meth:`advance_provider` 重入它，收尾后再决定
     这次响应成不成立。同势力角色代打的【杀】是**真打出**、不占其使用次数。
+
+    **不可响应**（M6 票 07）：帧标签袋的**全场档**带 ``Tag.UNRESPONSIVE``（界貂蝉【离间】）
+    ⇒ 这一问**不发生**，当前响应方直接判负。落点读的是同一个标签、同一份语义
+    （"这一次使用不响应"），不另立"离间专用"分支；逐目标档（【铁骑】）不在此读，
+    因为它说的是"这个目标不能出【闪】"。
     """
     source = frame.data["source"]
     op = frame.data.setdefault("op", {})
@@ -506,15 +531,38 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         op["duel_plays"] = 0
     turn = op["duel_turn"]
     other = source if turn != source else host.current_target(frame)
+    # 两个座位事实一起给（票 23）：``target`` = 这张【决斗】**指定的目标**（整场不变），
+    # ``role`` = 这一问的响应者是**目标**还是**使用者**。【无双】②改的是"吕布的对手"每轮
+    # 的张数，而那个对手可能是使用者、也可能是目标，故修饰器要的是"谁在响应 + 谁是目标"
+    # 这一对事实，引擎里不出现技能名。
+    designated = host.current_target(frame)
     required = response_count(
-        host.state, source=source, card=frame.data.get("card"), target=turn
+        host.state,
+        source=source,
+        card=frame.data.get("card"),
+        target=designated,
+        role=responder_role(turn, designated),
     )
-    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
+    if has_tag(frame, Tag.UNRESPONSIVE):
+        # **响应窗口不产生**（M6 票 07 的否定分类第 4 层）：这张【决斗】整次使用被标成
+        # "不可响应"（界貂蝉【离间】挂的是**全场档**），故轮到谁打【杀】都不问——当前
+        # 响应方直接判负、受到对方 1 点伤害。这与"被抵消"不同：决斗**照常结算**，只是
+        # 它的响应窗口整个不产生。
+        #
+        # 只读**全场档**（不带 ``target=``）：逐目标档是"这个目标不能出【闪】"的【铁骑】
+        # 语义（挂在【杀】的目标上），不能被读成"整场决斗不许出【杀】"——否则【铁骑】
+        # 在【决斗】使用上被误触发时（它的触发条件只看时机、不看牌名）会静默改写决斗。
+        _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
+        return None
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_AFTER_EFFECT
+    )
     if control is not None:
         return control
     if satisfied is not None:
         if satisfied:
-            return _duel_accepted(op, other=other, required=required)
+            _play_produced(host, produced, source=turn)
+            return _duel_accepted(frame, op, seat=turn, other=other, required=required)
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
     action = host.ask_respond(
@@ -531,20 +579,25 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         return "stay"
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=turn, timing=Timing.PLAY_DECLARE)
-        return _duel_accepted(op, other=other, required=required)
+        return _duel_accepted(frame, op, seat=turn, other=other, required=required)
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
             raise NotImplementedError(
                 f"【决斗】窗口没有判定式提供者：{action.skill_id!r}（票 09）"
             )
-        control, satisfied = host.start_provider(
-            frame, action.skill_id, turn, Timing.RESOLVE_AFTER_EFFECT
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            turn,
+            Timing.RESOLVE_AFTER_EFFECT,
+            required=SLASH_FAMILY_KEY,
         )
         if control is not None:
             return control
         if satisfied:
-            return _duel_accepted(op, other=other, required=required)
+            _play_produced(host, produced, source=turn)
+            return _duel_accepted(frame, op, seat=turn, other=other, required=required)
         return "stay"
     _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
     return None
@@ -571,6 +624,13 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     【枭姬】摸两张会提问），挂起的续跑重新进入本 op；``ask`` 的应答缓存是一次性的，
     没有 :data:`_BORROWED_SWORD_RESOLVED` 就会把同一个窗口再问一遍——实机缺陷的根因。
     标记在拿到应答 / 判定 auto-b **之后**才写，故首次询问挂起时不受影响。
+
+    **提供者（票 03 的 C1 缺口第二段）**：候选里的 ``ActivateSkill``（【蛊惑】"扣置一张
+    手牌当【杀】"）同样满足这扇窗口；产物由**本窗口**交付——目标恒为 Bn（``use_targets``），
+    故 ``start_use(产物, source=holder, targets=(Bn,))``，与真牌分支逐字同形。作废
+    （``satisfied=False``）⇒ 回到真牌窗口（该提供者已被 ``providers_used`` 过滤），
+    真牌也没有则走 auto-b。方天画戟式的**额外目标不做**：提供者的产物没有目标步，
+    借刀窗口对它的语义就是"只打 Bn"（票 03 的裁定）。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
@@ -589,15 +649,39 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             "借刀的附带指定恰好一个 Bn（W5-02b）：入口只经清单，缺失即 fail-closed"
         )
     use_targets = (int(designations[0]),)
+
+    def _use_at_bn(card: Any) -> None:
+        """a 支成立：持刀者使用一张【杀】打向 Bn（真牌与提供者产物同一份交付）。"""
+        frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
+        host.start_use(
+            card,
+            source=holder,
+            targets=use_targets,
+            use_timing=Timing.RESOLVE_AFTER_EFFECT,
+        )
+
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_AFTER_EFFECT
+    )
+    if control is not None:
+        return control
+    if satisfied and produced is not None:
+        _use_at_bn(produced)
+        return None
+    providers_used = tuple(frame.data.get("providers_used", ()))
     offers = [
         action
         for action in host.respond_candidates(
             holder,
             cause=WindowCause.BORROWED_SWORD,
-            required="slash",
+            required=SLASH_FAMILY_KEY,
             target=holder,
             mode=RespondMode.USE,
             use_targets=use_targets,
+            providers_used=providers_used,
+            # 与下面那次真询问**同一个** floor（票 03 §4-2）：预览若漏了它，闸门挡掉的
+            # 提供者仍会被当成"a 可行"，auto-b 就判错。
+            floor=need_card_floor(frame, holder),
         )
         if not isinstance(action, Pass)
     ]
@@ -609,13 +693,34 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         holder,
         Timing.RESOLVE_AFTER_EFFECT,
         cause=WindowCause.BORROWED_SWORD,
-        required="slash",
+        required=SLASH_FAMILY_KEY,
         target=holder,
         window_frame=frame.frame_id,
         mode=RespondMode.USE,
         use_targets=use_targets,
+        providers_used=providers_used,
     )
     if host.suspended(action):
+        return "stay"
+    if isinstance(action, ActivateSkill):
+        frame.data.setdefault("providers_used", []).append(action.skill_id)
+        if not host.provider_registered(action.skill_id):
+            # 与【决斗】同一道闸：没有惰性判定式的提供者 ⇒ fail-closed。
+            raise NotImplementedError(
+                f"借刀窗口没有判定式提供者：{action.skill_id!r}（票 03）"
+            )
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            holder,
+            Timing.RESOLVE_AFTER_EFFECT,
+            required=SLASH_FAMILY_KEY,
+        )
+        if control is not None:
+            return control
+        if satisfied and produced is not None:
+            _use_at_bn(produced)
+            return None
         return "stay"
     if isinstance(action, UseCard):
         frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
@@ -663,12 +768,17 @@ def _resist_or_damage(
     （短路式），代打是真打出。
     """
     target = host.current_target(frame)
-    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_AFTER_EFFECT
+    )
     if control is not None:
         return control
     if satisfied is not None:
         if satisfied:
-            return None  # 需要被满足 ⇒ 不受伤害
+            # 需要被满足 ⇒ 不受伤害。产物按**打出**交付（L6）：提供者交回的是虚拟牌，
+            # 与真牌分支的 ``PlayCard`` 走同一条链；没有产物 = 别人已经打出过一张。
+            _play_produced(host, produced, source=target)
+            return None
         # 未满足 ⇒ 落回真牌窗口（该提供者已被 ``providers_used`` 过滤）
     if required == "dodge" and "skill_result" in frame.data:
         if frame.data.pop("skill_result"):
@@ -691,12 +801,17 @@ def _resist_or_damage(
         if not host.provider_registered(action.skill_id):
             host.open_skill_judgment(frame, target, action.skill_id)
             return "stay"
-        control, satisfied = host.start_provider(
-            frame, action.skill_id, target, Timing.RESOLVE_AFTER_EFFECT
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            target,
+            Timing.RESOLVE_AFTER_EFFECT,
+            required=required,
         )
         if control is not None:
             return control
         if satisfied:
+            _play_produced(host, produced, source=target)
             return None
         return "stay"
     if isinstance(action, PlayCard):
@@ -754,10 +869,17 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
     """【五谷丰登】生效后：当前目标从**剩余**亮牌里取一张进手牌。
 
     被无效 / 被无懈而跳过者不占份额（票 15 §5）：无效者根本走不到 C4、被无懈者归票 28。
+
+    **目标在取牌前阵亡**（死亡发生在无懈窗口 / 前序目标的结算里，或目标表在"使用时"
+    就冻结了）：死者不再被问，也不把它那一份 PUT 进死者的手牌——留在处理区的亮牌由
+    :func:`finish_harvest` 一并弃掉，与"被无懈跳过者不占份额"同一姿态。漏了这一条，
+    死者会在取牌询问里把一张牌收进手牌（`tests/test_fuzz.py` 的阵亡者三区为空判红）。
     """
     if frame.data.get("use_terminated"):
         return None
     target = host.current_target(frame)
+    if not host.state.player(target).alive:
+        return None
     revealed = tuple(frame.data.get("revealed", ()))
 
     def build_face() -> tuple[tuple[Slot, ...], tuple[int, ...]]:

@@ -13,7 +13,10 @@
      见 :mod:`sgs_web.visibility`；
    - ``deck_shuffle`` 的整副洗后牌序只给数量（``card_count``）；``identity_deal`` 的开局
      暗发只放行本人 / 主公（其余 ``identity: null``，亮明 / 阵亡走 ``identity_reveal``）；
-   - ``action`` / ``timing`` / 其余 ``delta`` / ``frame`` / ``game_end`` 是公开事实，原样下发。
+   - ``action`` 记录是**公开事实**的只有 `kind` / `answers_seq` / `accepted`：**具体选了什么**
+     只对人类座位自己的那条应答展开（U4-06 / spec D13）；展开时另补接入层展示表的中文技能名
+     ``skill_name``；
+   - ``timing`` / 其余 ``delta`` / ``frame`` / ``game_end`` 原样下发。
 """
 
 from __future__ import annotations
@@ -22,20 +25,39 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from sgs.data import hero_skill_id, load_content_pack, load_heroes
-from sgs.effects import response_count
+from sgs.data import (
+    SkillType,
+    hero_by_id,
+    hero_skill_id,
+    load_content_pack,
+    load_hero_tables,
+)
+from sgs.effects import hand_limit, responder_role, response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
     FREE_SPLIT,
+    JIE_LUOSHEN,
     LORD_SKILL_IDS,
+    LUOSHEN,
     SEAT_PREFIX,
     ModifierPoint,
     conversion_offers_by_source,
+    is_forced_conversion,
     lord_skill_allowed,
     resolve_instances,
 )
-from sgs.state import CardRef, FrameKind, Query, Reforge, WindowCause, Zone, project
+from sgs.state import (
+    CardRef,
+    FrameKind,
+    MoveReason,
+    Query,
+    QueryKind,
+    Reforge,
+    WindowCause,
+    Zone,
+    project,
+)
 from sgs.timing import Timing
 
 from .descriptions import skill_description
@@ -44,20 +66,33 @@ from .display import (
     card_payload,
     decorate_pending,
     decorate_snapshot,
+    hero_card_display,
+    hidden_guohuo_payload,
+    option_details,
     suit_labels,
 )
 from .session import Session
-from .visibility import cards_visible, deck_cards_visible, identity_visible
+from .visibility import (
+    cards_visible,
+    deck_cards_visible,
+    identity_visible,
+    tag_visible,
+)
 
 __all__ = [
     "HARVEST_REQUIREMENT",
     "build_skills",
     "candidate_index",
+    "concealed_by_later_reveal",
+    "concealed_guohuo_cards",
+    "decorate_records_card_tags",
     "harvest_state",
+    "live_tag_deltas_after",
     "option_seats",
     "option_source",
     "pending_payload",
     "query_context",
+    "seat_hero_zones",
     "seat_skill_display",
     "serialize_record",
     "skill_events_after",
@@ -98,8 +133,147 @@ def _active_virtual_cards(engine: Any) -> tuple[Any, ...]:
     return tuple(out)
 
 
+def concealed_guohuo_cards(engine: Any) -> dict[int, str]:
+    """**未验明**的【蛊惑】扣置牌：``源牌 id → 声明的牌型 id``。
+
+    【蛊惑】的扣置是"**背面朝上**放进处理区"的：验明（``Engine.reveal_card``）之前，
+    这张牌是哪张**还不属于公开事实**。而处理区是**全局公开区**（`sgs_web/visibility.py`
+    的区域判据），不特别处理就会把源牌牌面下发给所有人 —— 那等于当场告诉所有人真假
+    （用户实机报障 2026-11-02）。故展示层读结算栈上技能写下的公开事实：
+
+    - ``guohuo_source``（扣置段）：处理区里那一张是哪张实体牌；
+    - ``guohuo_name``（声明段）：它**被声明成**什么牌 —— 这是可以公开的那部分；
+    - ``guohuo_revealed``（验明段）：``True`` = 已经亮过，牌面从此公开。
+
+    验明之后本函数不再返回这一张，于是"公开"照旧从 ``card_reveal`` 那一刻开始。
+
+    **"谁扣的"不再是这份判据的输入**（用户 2026-11-02 口径）：舞台与事件流对**任何人**
+    （含扣置者自己）都只公开"声明的牌名"，故这里只回答"这张牌验明了没有、它被声明成
+    什么牌"，没有第二个消费者需要记扣置者的座位。
+    """
+    out: dict[int, str] = {}
+    for frame in engine.stack.frames:
+        data = frame.data
+        source = data.get("guohuo_source")
+        declared = data.get("guohuo_name")
+        if source is None or declared is None:
+            continue
+        if data.get("guohuo_revealed"):
+            continue
+        out[int(source)] = str(declared)
+    return out
+
+
+def concealed_by_later_reveal(records: Iterable[object], state: Any = None) -> dict[int, str]:
+    """**本批记录里**"先进了处理区、之后才被公开亮出"的牌：``源牌 id → ""``。
+
+    :func:`concealed_guohuo_cards` 读的是**当下**的结算栈，只回答"现在还挂在栈上的未验明牌"。
+    但记录流是**回看**：一次**没有目标步**的【蛊惑】（无中生有 / 万箭齐发一类）会在同一批
+    记录里走完"扣置 → 质疑 → 验明 → 结算 / 作废"，等这批记录下发时栈上早已不剩什么，
+    扣置那条 ``card_move`` 于是带着**源牌牌面**直接下发；前端把它画进"处理中"的舞台格，
+    看起来就像"验明之前就亮了源牌"（用户实机报障 2026-11-02 §2 的残留：有目标步时人会停在
+    目标询问上、那一批记录赶在验明之前下发，所以只有"不用指定目标"的牌看得出来）。
+
+    这里按**记录自己的次序**回答同一件事：先进处理区、后被亮出的那张牌，在那条搬牌记录里
+    就是"还没验明"的。判定不认技能 id（任何"处理区里的牌被公开亮出"都符合），故不会给别
+    的技能添特例。
+
+    值 = **声明的牌型 id**（能解出来时）：这批记录里就有扣置者自己的复合动作
+    （`ActivateSkill.picks / .choices`），`choices[0]` 是声明的**显示名**，按牌名反查牌型
+    （与 `_guohuo_declaration_table` 同一张底表）。解不出来（旧形态 / 记录不全）⇒ ``""``
+    —— 那时只回答"要不要掩码"，画家退回"只给张数"。
+    """
+    # 声明的牌型：**扣置者自己提交的复合动作**就在这批记录里（`ActivateSkill` 的
+    # `picks` = 扣置的那张、`choices[0]` = 声明的**显示名**）。有 `state` 时按牌名反查
+    # 牌型 id（与 `_guohuo_declaration_table` 同一张底表）；查不到 ⇒ 不猜，退回"只给张数"。
+    declared: dict[int, str] = {}
+    if state is not None:
+        type_of_name = {card.name: card.type for card in state.cards}
+        for record in records:
+            action = getattr(record, "action", None)
+            picks = getattr(action, "picks", ()) or ()
+            choices = getattr(action, "choices", ()) or ()
+            if not picks or not choices:
+                continue
+            type_id = type_of_name.get(str(choices[0]))
+            if type_id is None:
+                continue
+            for card_id in picks:
+                declared[int(card_id)] = type_id
+    revealed_at: dict[int, int] = {}
+    for record in records:
+        if getattr(record, "delta_type", None) != "card_reveal":
+            continue
+        card = getattr(record, "card", None)
+        seq = getattr(record, "seq", None)
+        if card is None or not isinstance(seq, int):
+            continue
+        revealed_at[int(card.card_id)] = seq
+    out: dict[int, str] = {}
+    for record in records:
+        if getattr(record, "delta_type", None) != "card_move":
+            continue
+        # 只认**扣置**那一串形状：手牌 → 处理区、原因 ``LOSE``。普通使用是 ``USE``、
+        # 判定 / 摸牌走的是别的区域 —— 它们都是公开事实，不能被这条掩码顺手抹掉
+        # （`tests/test_m5_no_leak.py` 的逐类判据会红）。
+        from_zone = getattr(record, "from_zone", None)
+        to_zone = getattr(record, "to_zone", None)
+        seq = getattr(record, "seq", None)
+        if (
+            from_zone is None
+            or from_zone.zone is not Zone.HAND
+            or to_zone is None
+            or to_zone.zone is not Zone.PROCESSING
+            or getattr(record, "reason", None) is not MoveReason.LOSE
+            or not isinstance(seq, int)
+        ):
+            continue
+        for card in getattr(record, "cards", ()) or ():
+            card_id = int(card.card_id)
+            revealed = revealed_at.get(card_id)
+            if revealed is not None and seq < revealed:
+                out[card_id] = declared.get(card_id, "")
+    return out
+
+
+def _concealed_hidden(
+    raw: Mapping[str, Any],
+    viewer: int | None,
+    concealed: Mapping[int, str] | None,
+) -> bool | None:
+    """这条记录里的牌面是不是**未验明的【蛊惑】扣置牌**（是 ⇒ 不下发牌面）。
+
+    只有一条"移动的牌**全部**是未验明的扣置牌"时才算隐藏；混合移动（扣置牌与别的牌
+    同批）照旧按区域判据下发——那种批次里本仓还不会出现，宁少判一档也不改既有口径。
+    ``viewer is None``（全知通道）不裁。
+
+    **扣置者自己也不放行**（用户 2026-11-02 口径，与舞台
+    :func:`sgs_web.display._processing_display` 同一处口径）：事件的"这条移动搬的是哪些牌"
+    在验明之前对场上就只公开到张数，扣置者本来就认识那张牌，给他另开一档只会让同一件事
+    在舞台与事件流里各说一套。``viewer`` 仍参与判据，但只回答"是不是全知通道"。
+    """
+    if not concealed or viewer is None:
+        return None
+    cards = raw.get("cards")
+    if not cards:
+        return None
+    ids: list[int] = []
+    for card in cards:
+        if not isinstance(card, dict) or "card_id" not in card:
+            return None
+        card_id = int(card["card_id"])
+        if concealed.get(card_id) is None:
+            return None
+        ids.append(card_id)
+    return bool(ids)
+
+
 def _transform_products(
-    query: Query, *, lookup: dict[int, Any] | None = None
+    query: Query,
+    *,
+    lookup: dict[int, Any] | None = None,
+    state: Any | None = None,
+    owner: int | None = None,
 ) -> list[dict[str, Any]]:
     """转化清单的**产物索引**（U1-07）：正在这次询问里的全部产物牌面。
 
@@ -107,6 +281,13 @@ def _transform_products(
     是红 / 黑 / 无，必须读这份展示派生。数据只来自**本次询问内部的转化候选**
     （``Query.transform_actions``）——它们已经从 ``legal_actions`` 收回，不会重新打开
     "手牌直接点一下就当【杀】"的老路径。
+
+    ``forced``（报障 2026-10-31）：这份产物是不是**强制转化**（‘只能’型，如【武神】）
+    转出来的。手牌区只把 ``forced=True`` 的产物画成默认牌面（点它进转化清单）；
+    ‘可以’型（武圣 / 龙胆 / 国色 / 急救 / 丈八 / 羽扇）的产物**仍下发**（预发动提示要读
+    牌名 / 颜色），但 ``forced=False`` —— 源牌保持原样，转化只走技能预发动。判据读
+    声明 :attr:`~sgs.skills.heroes.ConversionSkill.forced`（**不是** ``locked``）；
+    拿不到引擎（409 的裸 ``Query``）时降级为 ``False``（fail-closed，不画产物）。
 
     按产物 ``card_id`` 去重（同一来源组 / 同一目标类型只出现一次）。界面按选中来源
     牌组匹配（与 `session.js:sourceGroupKey` 同一份分组规则）；若同一组来源牌能产出
@@ -120,14 +301,43 @@ def _transform_products(
             continue
         if card.card_id in out:
             continue
-        out[card.card_id] = card_payload(card, lookup=lookup)
+        payload = card_payload(card, lookup=lookup)
+        payload["forced"] = bool(
+            state is not None
+            and owner is not None
+            and is_forced_conversion(state, owner, card)
+        )
+        out[card.card_id] = payload
     return list(out.values())
 
 
+SKILL_STATES: tuple[str, ...] = ("active", "suppressed", "lost")
+"""技能在详情里的**三态**（M6 票 19；稳定报文值）。
+
+- ``active``：技能在武将牌上、且参与解析；
+- ``suppressed``：**失效**——实例还在（武将牌上看得见），但被座位级谓词挡在解析之外，
+  作用域到期即恢复（`GLOSSARY.md`「技能失效」）：界面要画"有但被挡住"；
+- ``lost``：**失去**——实例不再存在且不可恢复，但武将面的技能清单一字未动（规则 15.2 /
+  「技能失去」）：界面要画"没了"。
+"""
+
+
 def _skill_entry(
-    definition: Any, name: str, *, skill_type: str | None = None
+    definition: Any,
+    name: str,
+    *,
+    skill_type: str | None = None,
+    star: bool = False,
+    state: str = "active",
 ) -> dict[str, Any]:
-    """技能条目的**公共只读键**（可操作清单 / 详情清单共用，避免两边各抄一份）。"""
+    """技能条目的**公共只读键**（可操作清单 / 详情清单共用，避免两边各抄一份）。
+
+    ``star``（M6 票 06 / 票 19）：这条技能是 **☆ 技能**（觉醒后由某条觉醒技获得）；
+    ``state``：见 :data:`SKILL_STATES`。两个键都是**公开事实**（武将牌上的技能是明置的），
+    不含当前询问 / 手牌，故可对任意座位下发。
+    """
+    if state not in SKILL_STATES:  # pragma: no cover - 闭集，防御性守卫
+        raise ValueError(f"未知的技能状态 {state!r}（可选 {SKILL_STATES}）")
     return {
         "skill_id": definition.skill_id,
         "name": name,
@@ -135,8 +345,194 @@ def _skill_entry(
         or getattr(definition.skill_type, "value", str(definition.skill_type)),
         "locked": bool(definition.locked),
         "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
+        "star": bool(star),
+        "state": state,
         "description": skill_description(definition.skill_id),
     }
+
+
+def _card_tag_payloads(state: Any, card_id: Any, viewer: int | None) -> list[dict[str, str]]:
+    """一张**牌面可见**的牌上的标签；``label`` 取来源技能的展示名（不写死中文）。"""
+    try:
+        card_id = int(card_id)
+    except (TypeError, ValueError):
+        return []
+    if card_id < 0:  # 虚拟牌从不持久存在，也就没有牌标签
+        return []
+    out: list[dict[str, str]] = []
+    for tag in state.tags_of(card_id):
+        if not tag_visible(tag.tag_type.value, viewer, face_visible=True):
+            continue
+        out.append(
+            {
+                "skill_id": tag.skill_id,
+                "label": _skill_display_name(state, tag.skill_id) or tag.skill_id,
+            }
+        )
+    return out
+
+
+def _decorate_card_tags(card: Any, state: Any, viewer: int | None) -> None:
+    """给一份**已确认牌面可见**的卡面 dict 补 ``tags``；没有标签不造空键。"""
+    if not isinstance(card, dict) or "card_id" not in card:
+        return
+    tags = _card_tag_payloads(state, card.get("card_id"), viewer)
+    if tags:
+        card["tags"] = tags
+
+
+def _decorate_snapshot_card_tags(
+    payload: dict[str, Any], state: Any, viewer: int | None
+) -> None:
+    """快照里所有**已下发的牌面**补标签（隐藏区的牌本来就不在载荷里）。"""
+    for key in ("self_hand", "discard", "processing"):
+        for card in payload.get(key) or []:
+            _decorate_card_tags(card, state, viewer)
+    for player in payload.get("players") or []:
+        for key in ("equip", "judge"):
+            for card in player.get(key) or []:
+                _decorate_card_tags(card, state, viewer)
+        for zone in player.get("hero_zones") or []:
+            for card in zone.get("cards") or []:
+                _decorate_card_tags(card, state, viewer)
+
+
+def _decorate_pending_card_tags(
+    payload: dict[str, Any], state: Any, viewer: int | None
+) -> None:
+    """询问载荷里所有**已下发的牌面**补标签；``legal_actions`` 不碰。"""
+    for entry in (payload.get("candidate_index") or {}).values():
+        if isinstance(entry, dict):
+            _decorate_card_tags(entry.get("card"), state, viewer)
+    for slot in payload.get("slots") or []:
+        if isinstance(slot, dict):
+            _decorate_card_tags(slot.get("card"), state, viewer)
+    for key in ("revealed", "transform_products"):
+        for card in payload.get(key) or []:
+            _decorate_card_tags(card, state, viewer)
+    reveal = payload.get("reveal")
+    if isinstance(reveal, dict):
+        _decorate_card_tags(reveal.get("card"), state, viewer)
+    judgment = payload.get("judgment_reveal")
+    if isinstance(judgment, dict):
+        _decorate_card_tags(judgment.get("card"), state, viewer)
+        for card in judgment.get("cards") or []:
+            _decorate_card_tags(card, state, viewer)
+    harvest = payload.get("harvest")
+    if isinstance(harvest, dict):
+        _decorate_card_tags(harvest.get("card"), state, viewer)
+        for card in harvest.get("revealed") or []:
+            _decorate_card_tags(card, state, viewer)
+    view = payload.get("view")
+    if isinstance(view, dict):
+        _decorate_snapshot_card_tags(view, state, viewer)
+
+
+def _visible_card_ids(payload: Mapping[str, Any]) -> set[int]:
+    """一份快照里**已经下发牌面**的牌 id（标签可见性的现成判据）。"""
+    ids: set[int] = set()
+    for key in ("self_hand", "discard", "processing"):
+        for card in payload.get(key) or []:
+            if isinstance(card, Mapping) and card.get("card_id") is not None:
+                ids.add(int(card["card_id"]))
+    for player in payload.get("players") or []:
+        if not isinstance(player, Mapping):
+            continue
+        for key in ("equip", "judge"):
+            for card in player.get(key) or []:
+                if isinstance(card, Mapping) and card.get("card_id") is not None:
+                    ids.add(int(card["card_id"]))
+        for zone in player.get("hero_zones") or []:
+            if not isinstance(zone, Mapping):
+                continue
+            for card in zone.get("cards") or []:
+                if isinstance(card, Mapping) and card.get("card_id") is not None:
+                    ids.add(int(card["card_id"]))
+    return ids
+
+
+def decorate_records_card_tags(
+    records: list[dict[str, Any]], state: Any, viewer: int | None
+) -> None:
+    """给人类 ``records`` 里**已下发牌面**的牌补标签（只改网页载荷）。
+
+    ``tag_add`` / ``tag_remove`` 本身仍被 :func:`visible_record` 裁掉；但一次
+    ``card_move`` 可能把带标签的牌搬进手牌 / 弃牌堆，前端逐事件追加这份牌面时
+    需要标签跟着牌走。这里只补 ``tags``，不改牌的位置 / 数量，也不改记录类型。
+    """
+    for record in records:
+        if not isinstance(record, dict) or record.get("kind") != "delta":
+            continue
+        delta_type = record.get("delta_type")
+        if delta_type == "card_move":
+            for card in record.get("cards") or []:
+                _decorate_card_tags(card, state, viewer)
+        elif delta_type == "card_reveal":
+            _decorate_card_tags(record.get("card"), state, viewer)
+
+
+def _live_record_value(record: Any, name: str, default: Any = None) -> Any:
+    """模型 / 已序列化 dict 两种形状读同一个字段。"""
+    if isinstance(record, Mapping):
+        return record.get(name, default)
+    return getattr(record, name, default)
+
+
+def live_tag_deltas_after(
+    records: Iterable[Any],
+    *,
+    after: int,
+    state: Any,
+    snapshot: Mapping[str, Any],
+    viewer: int | None,
+) -> list[dict[str, Any]]:
+    """把人类记录流里被裁掉的**可见牌标签增删**转成展示用的 live delta。
+
+    只服务网页载荷的逐事件 live view（``live_deltas``），**不进入** ``records``：
+    人类记录流里的 ``tag_add`` / ``tag_remove`` 保持原样裁掉。每条载荷带服务端
+    从技能目录派生的 ``tag.label``，前端不建技能 id → 中文名表。
+
+    可见性复用**快照里已经下发的牌面**：``snapshot`` 里没有的牌（他人手牌 / 牌堆）
+    连 live delta 都不发；``FACE_VISIBLE`` 因此不会从这条旁路泄露牌面或标签名。
+    顺序按记录 ``seq``，由前端与同批记录一起逐事件消费。
+    """
+    visible = _visible_card_ids(snapshot)
+    out: list[dict[str, Any]] = []
+    for record in records:
+        if _live_record_value(record, "kind") != "delta":
+            continue
+        seq = _live_record_value(record, "seq")
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        delta_type = _live_record_value(record, "delta_type")
+        if delta_type not in ("tag_add", "tag_remove"):
+            continue
+        card = _live_record_value(record, "card")
+        card_id = (
+            card.get("card_id")
+            if isinstance(card, Mapping)
+            else getattr(card, "card_id", None)
+        )
+        if card_id is None or int(card_id) not in visible:
+            continue
+        tag_type = _live_record_value(record, "tag_type")
+        tag_type_value = getattr(tag_type, "value", tag_type)
+        if not tag_visible(tag_type_value, viewer, face_visible=True):
+            continue
+        skill_id = str(_live_record_value(record, "skill_id"))
+        out.append(
+            {
+                "kind": "delta",
+                "delta_type": str(delta_type),
+                "seq": int(seq),
+                "card_id": int(card_id),
+                "tag": {
+                    "skill_id": skill_id,
+                    "label": _skill_display_name(state, skill_id) or skill_id,
+                },
+            }
+        )
+    return out
 
 
 def visible_snapshot(session: Session) -> dict[str, Any]:
@@ -144,7 +540,8 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
 
     这是 ``tests/test_web.py`` 的"不泄露"判据盯住的那个对象：对手只有 ``hand_count``、
     身份只出现"本人 / 主公 / 已阵亡 / ``identity_visible`` 为真"四种可见情形、牌堆只有
-    数量无顺序。
+    数量无顺序。``hand_limit``（票 09 的手牌读数上限）也在这里，但它是**允许字段**：
+    只由公开事实派生，与 ``hand_count`` 同级，不含隐藏牌面信息。
     """
     state = session.engine.state
     view = project(state, session.human_seat)
@@ -156,15 +553,107 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         payload,
         view.players,
         lookup=_card_lookup(state),
-        heroes=load_heroes(session.pack.pack_id),
+        heroes=load_hero_tables(session.pack.pack_id),
         virtual_cards=_active_virtual_cards(session.engine),
+        # UI1/UI2：验明之前的【蛊惑】扣置牌**不给牌面**（处理区是全局公开区，这里按
+        # "它不是公开事实"处理），舞台改画**声明的牌名**。
+        concealed=concealed_guohuo_cards(session.engine),
     )
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
     # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
     # 顶层带 `available` / `ui.convert_sources`，读的是**查看者当前询问与手牌**。
     for player_payload, player in zip(payload["players"], view.players, strict=True):
         player_payload["skills"] = seat_skill_display(session, player.seat)
+        # M6 票 19 / 用户口径：武将牌上的牌区——**标签全体可见、牌只给宿主**；
+        # 未登记区同一默认（标签退回技能 id），可见性只在服务端裁。
+        player_payload["hero_zones"] = seat_hero_zones(
+            session, player.seat, viewer=session.human_seat
+        )
+        # B：武将块上的状态标签（手牌上限加式 / 裸衣）。纯网页显示字段，不进 PlayerView。
+        player_payload["hero_tags"] = seat_hero_tags(state.player(player.seat))
+        # 票 09：手牌读数「手牌：张数/上限」。上限是**派生量**（体力值 → 替换链 → 加式），
+        # 前端不自己算（那会是第二份真源）⇒ 与 `hero_tags` 同姿态只补进**网页载荷**：
+        # 不进 `PlayerPublic` / `PlayerView`（AI 读面要登记读点表，记录流也不该多字节）。
+        player_payload["hand_limit"] = hand_limit(state, state.player(player.seat))
+    # 牌面标签：只给**已下发的牌面**补 tags；隐藏区的牌不在载荷里，故连标签也没有。
+    _decorate_snapshot_card_tags(payload, state, session.human_seat)
+    # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进
+    # 自然指针），但 ``PlayerView`` 里**没有**它——加进去会改 47 条金录像的记录字节
+    # （票 11 已核）。故与技能清单同姿态：只在本函数里补进**网页载荷**，记录流不动。
+    payload["round"] = int(state.round)
+    payload["turn_extra"] = bool(state.turn_extra)
     return payload
+
+
+def seat_hero_zones(
+    session: Session, seat: int, *, viewer: int | None
+) -> list[dict[str, Any]]:
+    """一个座位**武将牌上的牌区**（M6 票 19 / spec §区域；2026-10 用户口径修订）。
+
+    口径：
+
+    - 区键 = （座位, 技能实例）。座位 = 武将牌的主人（**可跨座位**：牌可以扣在别人身上），
+      技能实例 = 放置技能的持有者 + 技能 id；`Player.hero_cards` 的键已经是规范文本。
+    - **标签全体可见**：每个非空区都下发 ``skill_id`` / ``skill_name`` / ``owner``；
+      未登记区没有中文名时退回 ``skill_id``（fail-visible，不猜名字）。
+    - **牌默认只有宿主可见**：``cards`` 只在 ``viewer == seat``（宿主）或 ``viewer is None``
+      （全知通道）时填；非宿主拿到空数组——不是把牌发给客户端再用 CSS 藏。旧
+      ``PlacementDecl.visibility`` 不再决定本载荷的牌面可见性（用户口径：只认宿主）。
+    - **只画有牌的区**：空区在引擎里是合法且被保留的（规则 15.2：失去技能不影响区），
+      但界面不需要一行空框。
+    - 牌面走**同一份卡面契约**（``display.card_payload``）：牌名 / 属性 / 描述与别处一致。
+    - 这些牌不在手牌区，故公开的 ``hand_count`` 不因它们变化（票面验收）。
+    """
+    state = session.engine.state
+    player = state.player(seat)
+    lookup = _card_lookup(state)
+    host_view = viewer is None or int(viewer) == int(seat)
+    out: list[dict[str, Any]] = []
+    for zone in player.hero_cards.values():
+        if not zone.cards:
+            continue
+        cards: list[dict[str, Any]] = []
+        if host_view:
+            for card_id in zone.cards:
+                try:
+                    card = state.card(card_id)
+                except (KeyError, IndexError):  # pragma: no cover - 牌守恒由引擎保证
+                    continue
+                card_payload_dict = card_payload(card, lookup=lookup)
+                _decorate_card_tags(card_payload_dict, state, viewer)
+                cards.append(card_payload_dict)
+        out.append(
+            {
+                "skill_id": zone.skill_id,
+                "skill_name": (
+                    _skill_display_name(state, zone.skill_id) or zone.skill_id
+                ),
+                "owner": int(zone.owner),
+                "count": len(zone.cards),
+                "cards": cards,
+            }
+        )
+    return out
+
+
+def seat_hero_tags(player: Any) -> list[dict[str, Any]]:
+    """武将块上的**状态标签**（B；纯显示层，不进 ``PlayerView`` / 记录流）。
+
+    读引擎座位上的公开状态字段，只给标签名，不把效果文案抄到每张牌上：
+
+    - ``Player.hand_limit_bonus`` 非 0 ⇒ 「手牌上限+N」；
+    - ``Player.luoyi_active`` / ``Player.luoyi_until_next_turn`` ⇒ 「裸衣」（标准 / 界两个
+      作用域字段同一条标签；不给【杀】/【决斗】逐张画“伤害+1”）。
+    """
+    tags: list[dict[str, Any]] = []
+    bonus = int(getattr(player, "hand_limit_bonus", 0) or 0)
+    if bonus:
+        tags.append({"tag": "hand_limit_bonus", "label": f"手牌上限{bonus:+d}"})
+    if getattr(player, "luoyi_active", False) or getattr(
+        player, "luoyi_until_next_turn", False
+    ):
+        tags.append({"tag": "luoyi", "label": "裸衣"})
+    return tags
 
 
 def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
@@ -175,27 +664,51 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
     - **武将技能**读公开武将面（``Hero.skills``），**不**经 ``resolve_instances``——
       后者只解析**存活实例**（死者不能发动技能），而阵亡武将的详情仍要开得出来；
       主公技照旧按 ``player.identity`` 门控（非主公的武将牌上没有它）。
+    - **☆ 技能**（``HeroSkill.granted_by`` 非空）**觉醒后才出现**：它的实例只来自
+      "获得"（``Player.granted_skills``），未获得时武将牌上根本没有它——这不是"有但
+      不生效"，故这里按 ``granted_skills`` 决定列不列，而不是把武将面的三条全铺出来。
+    - **三态**（M6 票 19）：``lost`` = 在 ``Player.lost_skills`` 里（武将面不删，故仍列）；
+      ``suppressed`` = 实例还在、但被座位级失效记录挡在解析之外（锁定技不受影响）——
+      判据与引擎同源：``resolve_instances`` 解析两次（含 / 不含失效）再作差。
     - **装备技能** = 装备区里的实体牌（``equip.<牌名 id>``）+ ``virtual_equipment``
-      的虚拟授予（不占牌守恒，如【八阵】）。顺序 = 武将技能 → 实体装备 → 虚拟装备。
+      的虚拟授予（不占牌守恒，如【八阵】）。顺序 = 武将技能 → 获得（☆）→ 实体装备 →
+      虚拟装备。
     - **只读展示**：不带 ``available`` / ``preactivated`` / ``ui.convert_sources``；
       那三样会读出当前询问与本人手牌，给到别的座位就是暗置信息。``ui.passive``
       是技能定义上的公开类别，详情用它标「被动技」。
     """
     state = session.engine.state
     player = state.player(seat)
-    heroes = load_heroes(state.pack_id)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    resolved = {instance.skill_id for instance in resolve_instances(state) if instance.owner == seat}
+    with_suppressed = {
+        instance.skill_id
+        for instance in resolve_instances(state, include_suppressed=True)
+        if instance.owner == seat
+    }
+    suppressed = with_suppressed - resolved
+    lost = set(player.lost_skills)
+    granted = set(player.granted_skills)
 
-    def add(definition: Any, name: str | None) -> None:
+    def state_of(skill_id: str) -> str:
+        if skill_id in lost:
+            return "lost"
+        if skill_id in suppressed:
+            return "suppressed"
+        return "active"
+
+    def add(definition: Any, name: str | None, *, star: bool = False) -> None:
         if definition is None or name is None or definition.skill_id in seen:
             return
         seen.add(definition.skill_id)
-        entry = _skill_entry(definition, name)
+        entry = _skill_entry(
+            definition, name, star=star, state=state_of(definition.skill_id)
+        )
         entry["ui"] = {"passive": _is_passive_skill(definition)}
         out.append(entry)
 
-    hero = heroes.by_id(player.hero) if player.hero else None
+    hero = hero_by_id(player.hero, pack_id=state.pack_id) if player.hero else None
     if hero is not None:
         for skill in hero.skills:
             skill_id = hero_skill_id(hero.id, skill.id)
@@ -206,7 +719,25 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
                 player.identity, skill_id
             ):
                 continue
-            add(definition, skill.name)
+            # ☆ 技能只来自"获得"：未获得时武将牌上没有它（载体解析的结构事实）。
+            if skill.granted_by is not None and skill_id not in granted:
+                continue
+            add(definition, skill.name, star=skill.granted_by is not None)
+    # 武将面之外的**获得**技能（如将来"获得别人的技能"）：名字只能从数据表反查。
+    for skill_id in player.granted_skills:
+        if skill_id in seen:
+            continue
+        definition = CATALOG.get(skill_id)
+        if definition is None:
+            continue
+        short = skill_id.rsplit(".", 1)[-1]
+        star = bool(
+            hero is not None
+            and any(
+                skill.id == short and skill.granted_by is not None for skill in hero.skills
+            )
+        )
+        add(definition, _skill_display_name(state, skill_id) or short, star=star)
     for card_id in player.equip:
         card = state.card(card_id)
         add(CATALOG.get(f"equip.{card.type}"), _card_type_name(state, card.type))
@@ -231,13 +762,18 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     - **谁的技能**：技能实例由 ``sgs.skills.resolve_instances`` 解析，它已经含身份门控
       （非主公的武将牌上**没有**主公技），故"有的技能"不是前端猜的；
     - **什么类型**：``locked`` 是官方"牌面有没有『可以』"的逐字判据，中文名与
-      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；W4-fix-3 起
+      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；"获得"来的
+      技能（载体 ``GRANTED``，如【义起】授予的【武圣】【咆哮】）在**本人**武将面上没有
+      条目，名字按目录反查（:func:`_skill_display_name`，与详情页同一份）；W4-fix-3 起
       ``ui.passive`` 另标"触发技"（有钩子 / 接缝且无主动入口，见
       :func:`_is_passive_skill`）——**不改** ``skill_type`` 的语义；
     - **此刻能不能用**：`available` = 当前挂起的询问里有没有针对这个技能的
       ``ActivateSkill`` 候选。**不去问引擎"这个技能满不满足条件"**——那是第二条真源。
 
-    只列 ``seat`` 自己的**可操作**实例（带可用性 / 转化来源）；武将详情用的**公开只读**
+    清单还保留 ``state = suppressed`` 的非锁定技：实例仍在武将牌上，只是被座位级失效
+    记录挡在解析之外。它不可发动、也不给转化来源，但界面要在按钮上画"有但被挡住"
+    （禁止图标）——不能让它整条消失。``lost`` 是另一种语义（实例不再存在），仍不列。
+    只列 ``seat`` 自己的实例（带可用性 / 转化来源）；武将详情用的**公开只读**
     清单是 :func:`seat_skill_display`——它按武将牌 + 装备区给所有座位，不含可用性，
     故不会把当前询问或本人手牌带给别人。
     """
@@ -262,25 +798,52 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     hand = tuple(state.player(seat).hand)
     virtual = _virtual_index(pending, state, owner=seat) if pending is not None else {}
     hero_id = state.players[seat].hero
-    names: dict[str, tuple[str, str]] = {}
+    names: dict[str, tuple[str, str, bool]] = {}
     if hero_id is not None:
-        hero = load_heroes(state.pack_id).by_id(hero_id)
+        hero = hero_by_id(hero_id, pack_id=state.pack_id)
         if hero is not None:
             # 武将面里的技能 id 是**短名**（`guose`），而实例上的 `skill_id` 带命名空间
-            # （`hero.daqiao.guose`）；两边靠**末段**对上，别去猜前缀。
+            # （`hero.daqiao.guose`）；两边靠**末段**对上，别去猜前缀。第三项 = ☆ 标记
+            # （M6 票 19：觉醒后出现的技能在按钮上也标出来）。
             names = {
-                skill.id.rsplit(".", 1)[-1]: (skill.name, getattr(skill.skill_type, "value", str(skill.skill_type)))
+                skill.id.rsplit(".", 1)[-1]: (
+                    skill.name,
+                    getattr(skill.skill_type, "value", str(skill.skill_type)),
+                    skill.granted_by is not None,
+                )
                 for skill in hero.skills
             }
 
+    # 失效 = 含失效解析时还在、正常解析时不在（与 `seat_skill_display` 同一判据）：
+    # 不能只拿正常解析的结果遍历，否则被【铁骑】封锁的技能会从按钮区整条消失。
+    resolved_ids = {
+        instance.skill_id for instance in resolve_instances(state) if instance.owner == seat
+    }
     out: list[dict[str, Any]] = []
-    for instance in resolve_instances(state):
-        if instance.owner != seat:
-            continue
+    asked_here = pending is not None and int(getattr(pending, "actor", -1)) == seat
+    for instance in resolve_instances(state, include_suppressed=True):
+        cross_seat = instance.owner != seat
         definition = instance.definition
+        # 跨座位授予（feng-zhangjiao 票 01：张角【黄天】——别的座位的技能、此刻发给我）。
+        # 两条准入，缺一不列，**其余别人的技能一条都不列**（否则每个座位都会看到全场技能）：
+        #   ① 这一问是问我、且候选里真有这条技能 ⇒ 列出来（可点亮）；
+        #   ② **主公技授予同势力座位**：同势力的座位**恒列**（`available` 照旧读候选，
+        #      没有可交的牌 ⇒ 画灰）。用户实机报障（2026-11-02 验收）：手里没有
+        #      【闪】/【闪电】时这条技能整条消失，玩家看不出"技能在、只是我这会儿没牌可交"。
+        #      它不是信息泄露：主公技在武将面公开，且这些座位本来就是它的合法发动者。
+        lord_grant = (
+            cross_seat
+            and definition.skill_type is SkillType.LORD
+            and state.player(seat).kingdom is not None
+            and state.player(seat).kingdom is state.player(instance.owner).kingdom
+        )
+        if cross_seat and not (lord_grant or (asked_here and instance.skill_id in offered)):
+            continue
+        suppressed = (not cross_seat) and instance.skill_id not in resolved_ids
         short_id = instance.skill_id.rsplit(".", 1)[-1]
-        name, skill_type = names.get(
-            short_id, (None, getattr(definition.skill_type, "value", str(definition.skill_type)))
+        name, skill_type, star = names.get(
+            short_id,
+            (None, getattr(definition.skill_type, "value", str(definition.skill_type)), False),
         )
         if name is None and definition.skill_id.startswith("equip."):
             # 装备技能没有**武将面**的名字：中文名取它所依附的**装备牌名**
@@ -288,17 +851,35 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             # 分别标注（报障：装备技能此前整条被略去）。
             name = _card_type_name(state, definition.skill_id[len("equip.") :])
         if name is None:
+            # **获得**来的技能没有**本人**武将面可查：``names`` 只索引持有者的武将牌
+            # （短 id → 名字），而"获得别人的技能"（韬·刘备【义起】授予的 ☆【武圣】
+            # /【咆哮】）的短 id 根本不在那张表里。此前这里直接 ``continue``，于是
+            # 授予之后按钮区一条都不出现（武将详情页看得见，因为那边走的是
+            # :func:`seat_skill_display` 的 ``_skill_display_name`` 反查）——用户实机
+            # 报障：义起发动后没有【武圣】【咆哮】，两条都点不到。
+            name = _skill_display_name(state, instance.skill_id)
+        if name is None:
             continue
-        entry = _skill_entry(definition, name, skill_type=skill_type)
+        entry = _skill_entry(
+            definition,
+            name,
+            skill_type=skill_type,
+            star=star,
+            state="suppressed" if suppressed else "active",
+        )
+        ui = _skill_ui(definition, actions, hand, virtual)
+        if suppressed:
+            # 失效时没有任何入口：转化来源也不能画（否则按钮看起来还能点）。
+            ui["convert_sources"] = []
         entry.update(
             {
-                "available": definition.skill_id in offered,
+                "available": False if suppressed else definition.skill_id in offered,
                 # W4-2：这条技能是否已翻到预发动。界面据此**只**走清单入口（不再把骨架
                 # 候选画成"发动技能 XXX"选项）；它是声明上的开关，不是第二条合法性判据。
-                "preactivated": bool(definition.preactivated),
+                "preactivated": False if suppressed else bool(definition.preactivated),
                 # 界面怎么摆这个技能：转化来源牌（【龙胆】）。**纯表现层派生**，只读候选与
                 # 实例声明，不参与任何合法性判定。
-                "ui": _skill_ui(definition, actions, hand, virtual),
+                "ui": ui,
             }
         )
         out.append(entry)
@@ -385,7 +966,7 @@ def _seat_name(state: Any, seat: int) -> str | None:
     """座位上的武将中文名（没发武将 / 未知武将 ⇒ ``None``，不编名字）。"""
     hero_id = state.player(seat).hero
     if hero_id:
-        hero = load_heroes(state.pack_id).by_id(hero_id)
+        hero = hero_by_id(hero_id, pack_id=state.pack_id)
         if hero is not None and hero.name:
             return hero.name
     return None
@@ -417,12 +998,12 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
         return _card_type_name(state, head[len("equip.") :])
     parts = head.split(".")
     short = parts[-1]
-    heroes = load_heroes(state.pack_id)
+    heroes = load_hero_tables(state.pack_id)
     if len(parts) >= 3 and parts[0] == "hero":
-        hero = heroes.by_id(parts[1])
+        hero = hero_by_id(parts[1], pack_id=state.pack_id)
         pool = (hero,) if hero is not None else ()
     else:
-        pool = heroes.heroes
+        pool = tuple(hero for table in heroes for hero in table.heroes)
     for hero in pool:
         if hero is None:
             continue
@@ -481,6 +1062,33 @@ def _nullified_frame(engine: Any, data: dict[str, Any]) -> dict[str, Any]:
             return data
         data = parent.data
     return data
+
+
+def _distribution_payload(engine: Any, query: Query | None) -> dict[str, Any] | None:
+    """``DISTRIBUTE`` 询问的**展示事实**：每个可分配座位的人话标签 + 两个上限。
+
+    字段：``seats`` = ``[{"seat", "name", "label", "max"}]``（座位升序，与候选枚举同序）、
+    ``max_total`` / ``per_seat_max``。上限本身也在询问模型里（同一份真源），这里重复下发
+    只为让界面读一处；非 ``DISTRIBUTE`` 的询问返回 ``None``（键恒在，读取方契约）。
+    """
+    if query is None or getattr(query, "kind", None) != QueryKind.DISTRIBUTE.value:
+        return None
+    state = engine.state
+    per_seat = int(getattr(query, "per_seat_max", 3))
+    seats = tuple(getattr(query, "seats", ()) or ())
+    return {
+        "max_total": int(getattr(query, "max_total", 3)),
+        "per_seat_max": per_seat,
+        "seats": [
+            {
+                "seat": int(seat),
+                "name": _seat_name(state, int(seat)),
+                "label": _seat_label(state, int(seat)),
+                "max": per_seat,
+            }
+            for seat in seats
+        ],
+    }
 
 
 def option_seats(query: Query) -> dict[str, int]:
@@ -702,14 +1310,50 @@ def _need_text(verb: str, card_name: str, need: int) -> str:
 
 
 def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
-    """本窗口需要几张：唯一真源 :func:`sgs.effects.response_count`（【无双】= 2）。"""
+    """本窗口需要几张：唯一真源 :func:`sgs.effects.response_count`（【无双】= 2）。
+
+    ``role``（票 23）与引擎侧同一口径：**应答者就是这张牌指定的目标**时标 ``TARGET``。
+    【无双】②（【决斗】）只给"被决斗的一方"加张数，故这一位不能省——省掉会把"吕布被
+    【决斗】"那一半的界面文档写成"需要打出【杀】"，与结算（两张）不一致。
+    """
     source = data.get("source")
     if source is None:
         return 1
-    target = getattr(query, "target", None)
-    if target is None:
-        target = getattr(query, "actor", None)
-    return int(response_count(engine.state, source=source, card=data.get("card"), target=target))
+    # 两个座位事实与引擎同形（票 23）：``target`` = 这张牌**指定的目标**（载荷的
+    # ``targets[0]``），``role`` = 这一问的响应者（询问的 ``target``，缺省问的人）是不是
+    # 那个目标。【无双】②改的是"吕布的对手"每轮的张数，故界面必须和结算读同一对事实，
+    # 否则"吕布被【决斗】"时文案会写成吕布要两张。
+    responder = getattr(query, "target", None)
+    if responder is None:
+        responder = getattr(query, "actor", None)
+    targets = tuple(int(seat) for seat in (data.get("targets") or ()))
+    designated = targets[0] if targets else None
+    return int(
+        response_count(
+            engine.state,
+            source=source,
+            card=data.get("card"),
+            target=designated,
+            role=responder_role(responder, designated),
+        )
+    )
+
+
+def _rejudge_requirement(engine: Any, query: Query) -> str:
+    """改判窗口的"需要做什么"：读**应答座位**当前活着的改判技能定义（不写死一句）。
+
+    标准【鬼才】"用一张**手牌**"（§九 L958）、界【鬼才】"用**一张牌**"（§十九 L2037）、
+    张角【鬼道】"用一张**黑色**牌替换"（feng-zhangjiao 票 02）
+    ——两版文案不同，而界面按"本窗口文案 == 该技能声明的 ``requirement``"认领那个只说明
+    入口（`tools/sgs_web/static/table.js:rejudgeWindowEntry`），写死会让界版对不上。
+    找不到定义（构造局面 / 事件外的预览）时退回标准版文案，与 M5 起的既有字符串逐字相同。
+    """
+    fallback = "用一张手牌，代替此判定牌"
+    actor = int(getattr(query, "actor", -1))
+    for instance in resolve_instances(engine.state):
+        if instance.owner == actor and instance.definition.rejudge_capable:
+            return instance.definition.requirement or fallback
+    return fallback
 
 
 def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) -> str | None:
@@ -770,7 +1414,7 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
             card = {"slash": "【杀】", "dodge": "【闪】"}.get(required, "一张牌")
             return f"需要打出{card}"
         if cause is WindowCause.REJUDGE:
-            return "打出一张手牌，代替此判定牌"
+            return _rejudge_requirement(engine, query)
     return None
 
 
@@ -1146,7 +1790,9 @@ def _preactivation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
 def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     """查看者不是询问者时，抹掉清单里**属于询问者**的牌面（W4-1；与观看私密同一条纪律）。
 
-    覆盖技能清单与附带指定清单（``card_preactivations``，W5-02b）两份载体。清单的选牌步
+    覆盖技能清单（``preactivations``）、附带指定清单（``card_preactivations``，W5-02b）、
+    单份清单（``preactivation``）与**逐候选**清单（``activation_preactivations``，票 02）
+    四份载体。清单的选牌步
     候选用的是**实体牌 id**（本人手牌的 id）——把整份清单原样发给别人就等于泄露手牌。
     这里按步类型收窄：
 
@@ -1154,34 +1800,52 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     - 选座位 / 选项步 ⇒ ``when`` 里的前序答案（可能含被选中的牌 id）清空，候选（公开的
       ``seat:N`` / 选项文本）并成一行保留。
 
+    ``Step.groups``（huo-mobile-batch 票 10 的合法来源组合）与 ``pool[*].options``
+    **同一条泄露面**：每个元素都是询问者手里的实体牌 id。故两步**都**整格抹掉（不是置空
+    数组——缺省 / 空在读取方那里的语义是"每个组合都合法"；非询问者没有可提交的清单，
+    用最省的那一档即可）。
+
     这条只在**非询问者**路径上生效；产品调用点（``Session`` 的 ``human_seat`` 就是询问者）
     不受影响。与 :func:`_mask_watched_faces` 同姿态：fail-closed（查看者缺失即按非询问者）。
     """
 
     def mask(steps: list[dict[str, Any]]) -> None:
         for step in steps:
+            # 先抹来源组合（只可能出现在选牌步上，但漏一条分支就是一条泄露面）。
+            step.pop("groups", None)
             if step.get("zones"):
                 step["pool"] = [
                     {**entry, "options": []} for entry in (step.get("pool") or [])
                 ]
                 continue
             options: list[Any] = []
+            disabled: list[Any] = []
             row_max: int | None = None
             for entry in step.get("pool") or []:
                 for option in entry.get("options") or []:
                     if option not in options:
                         options.append(option)
+                for blocked in entry.get("disabled") or []:
+                    if blocked not in disabled:
+                        disabled.append(blocked)
                 if isinstance(entry.get("max"), int):
                     row_max = entry["max"] if row_max is None else max(row_max, entry["max"])
             masked_row: dict[str, Any] = {"when": [], "options": options}
             if row_max is not None:
                 # 逐来源上限是公开形状（来源已抹掉 ⇒ 只能取各行最大，与 Step.max 同量级）。
                 masked_row["max"] = row_max
+            if disabled:
+                # 置灰项也是**公开形状**（哪些名字此刻用不了，不含前序牌的任何信息）：
+                # 合并成一行后取并集——宁可多画几个灰的，也不要把"点了必被拒"的名字
+                # 画成可点的（与 `_assign_activation` 的 fail-closed 同向）。
+                masked_row["disabled"] = disabled
             step["pool"] = [masked_row]
 
     for steps in (payload.get("preactivations") or {}).values():
         mask(steps)
     for steps in (payload.get("card_preactivations") or {}).values():
+        mask(steps)
+    for steps in (payload.get("activation_preactivations") or {}).values():
         mask(steps)
     mask(payload.get("preactivation") or [])
 
@@ -1238,6 +1902,13 @@ def _arrange_spec(
         return None
     frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
     frame = frames[-1] if frames else None
+    if frame is None:
+        # 帧外时机（`GAME_START` / `PHASE_DRAW_END` / `PHASE_FINISH` …）：帧住在
+        # `_turn_data`、不在结算栈上。声明回调（张数 / 切分 / 牌面）读帧私有事实
+        # （谁在放牌），故这里要把它取回来——否则规格恒为 None、界面 fail-closed。
+        provider = getattr(engine, "phase_body_frame", None)
+        if callable(provider):
+            frame = provider()
     data = frame.data if frame is not None else {}
     skill_id = _skill_of_query(engine, query, data)
     definition = _definition_of(engine.state, skill_id) if skill_id is not None else None
@@ -1249,6 +1920,23 @@ def _arrange_spec(
     if not known or declared != count:
         # 声明张数不可判定，或与实际发到的牌数不同 ⇒ 规格对不上，不拿它猜。
         return None
+    if hasattr(spec, "top_of"):
+        # **两行交换**（huo-shenzhugeliang 票 02；首个载体 = 神诸葛亮【七星】）：两行是
+        # 具名的（「星」/「手牌」），切分点由声明的 ``top`` 现算，答案由界面构造
+        # （``enumerate=False``）且行内不可调序（``reorder=False``）。
+        try:
+            top = int(spec.top_of(engine.state, frame))
+        except Exception:  # noqa: BLE001 —— 声明回调异常一律折算成"判定不了"
+            return None
+        if not 0 <= top <= count:
+            return None
+        return {
+            "count": count,
+            "split": {"top": top, "bottom": count - top},
+            "rows": {"top": spec.top_label, "bottom": spec.bottom_label},
+            "enumerate": bool(spec.enumerate_candidates),
+            "reorder": bool(spec.reorder),
+        }
     split_spec = getattr(spec, "split", None)
     split: str | dict[str, int]
     if split_spec == FREE_SPLIT:
@@ -1440,6 +2128,143 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
     }
 
 
+_LUOSHEN_REPEAT_PREFIX = "luoshen:repeat:"
+
+
+def _record_enum_text(value: Any) -> str:
+    """记录里的枚举 / 字符串统一成文本（``MoveReason.JUDGE`` → ``"JUDGE"``）。"""
+    return str(getattr(value, "value", value) or "")
+
+
+def _record_judge_card(record: Any) -> CardRef | None:
+    """一条 ``card_move`` 是不是"判定牌进处理区"；是则返回那张判定牌。"""
+    if getattr(record, "kind", None) != "delta":
+        return None
+    if getattr(record, "delta_type", None) != "card_move":
+        return None
+    if _record_enum_text(getattr(record, "reason", None)).upper() != "JUDGE":
+        return None
+    to_zone = getattr(record, "to_zone", None)
+    if _record_enum_text(getattr(to_zone, "zone", None)).lower() != "processing":
+        return None
+    cards = tuple(getattr(record, "cards", ()) or ())
+    return cards[0] if len(cards) == 1 else None
+
+
+def _judge_cards(records: Iterable[Any], after_seq: int, before_seq: int) -> list[CardRef]:
+    """一段记录流里按 seq 排序的全部判定牌（``card_move(reason=JUDGE, to=processing)``）。"""
+    found: list[tuple[int, CardRef]] = []
+    for record in records:
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq <= after_seq or seq >= before_seq:
+            continue
+        card = _record_judge_card(record)
+        if card is not None:
+            found.append((seq, card))
+    found.sort(key=lambda pair: pair[0])
+    return [card for _seq, card in found]
+
+
+def _judgment_card_payload(engine: Any, card: CardRef, lookup: Mapping[int, CardRef] | None) -> dict[str, Any]:
+    try:
+        ref = engine.state.card(int(card.card_id))
+    except Exception:  # noqa: BLE001 - 展示派生 fail-visible：牌表缺项时用记录里的 CardRef
+        ref = card
+    return card_payload(ref, lookup=lookup)
+
+
+def judgment_reveal_state(
+    engine: Any,
+    query: Query,
+    lookup: Mapping[int, CardRef] | None,
+) -> dict[str, Any] | None:
+    """A1：洛神连续判定的**纯显示层派生**（不进记录流 / 06 / 金录像）。
+
+    读取的都只是服务端已有事实：记录流里的 ``SKILL_ACTIVATION`` 询问（本次循环的起点）、
+    ``SELECT_OPTION`` 继续询问、以及 ``card_move(reason=JUDGE, to=processing)`` 的判定牌。
+
+    - 继续询问 ⇒ ``{chain_key, cards, final: False}``：``cards`` = **本次循环从第一张到
+      当前这张**的全部判定牌（按判定顺序，前一张不丢）；
+      ``chain_key = judge-loop:<activation seq>``，同一轮循环内不变；
+    - 循环结束（红牌 / 放弃）后的**第一条同座位询问** ⇒ ``{chain_key, cards, final: True}``：
+      ``cards`` 仍含本次循环的全部判定牌（红牌终止时含红牌）；前端据此关闭弹窗；
+      ``final`` 的语义就是"循环已结束、请关窗"，不表示"还属于循环"；
+    - 没有下一份 pending（局终 / 死亡 / 换会话）⇒ 本字段不出现，前端在 ``pending == null``
+      或 ``viewStartsNewSession`` 时关窗（`syncDialog` 的既有生命周期，不新增定时器）。
+
+    取不到激活询问 / 判定牌时返回 ``None``（fail-closed，不猜链）。
+    """
+    records = tuple(getattr(engine, "records", ()) or ())
+    current_seq = int(getattr(query, "seq", -1) or -1)
+    if current_seq < 0:
+        return None
+
+    activation_seq: int | None = None
+    for record in records:
+        if getattr(record, "kind", None) != "query":
+            continue
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq > current_seq:
+            continue
+        inner = getattr(record, "query", None)
+        if inner is None or str(getattr(inner, "kind", "")) != "SKILL_ACTIVATION":
+            continue
+        if str(getattr(inner, "skill_id", "")) in (LUOSHEN, JIE_LUOSHEN):
+            activation_seq = seq
+    if activation_seq is None:
+        return None
+
+    last_continue: int | None = None
+    for record in records:
+        if getattr(record, "kind", None) != "query":
+            continue
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq <= activation_seq or seq > current_seq:
+            continue
+        inner = getattr(record, "query", None)
+        if inner is None:
+            continue
+        if str(getattr(inner, "skill_id", "")).startswith(_LUOSHEN_REPEAT_PREFIX):
+            last_continue = seq
+
+    chain_key = f"judge-loop:{activation_seq}"
+    if str(getattr(query, "skill_id", "")).startswith(_LUOSHEN_REPEAT_PREFIX):
+        cards = _judge_cards(records, activation_seq, current_seq)
+        if not cards:
+            return None
+        return {
+            "chain_key": chain_key,
+            "cards": [_judgment_card_payload(engine, card, lookup) for card in cards],
+            "final": False,
+        }
+
+    if last_continue is None:
+        return None
+    actor = int(getattr(query, "actor", -1) or -1)
+    first_after: int | None = None
+    for record in records:
+        if getattr(record, "kind", None) != "query":
+            continue
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq <= last_continue:
+            continue
+        inner = getattr(record, "query", None)
+        if inner is None or int(getattr(inner, "actor", -1) or -1) != actor:
+            continue
+        first_after = seq
+        break
+    if first_after != current_seq:
+        return None
+    cards = _judge_cards(records, activation_seq, current_seq)
+    if not cards:
+        return None
+    return {
+        "chain_key": chain_key,
+        "cards": [_judgment_card_payload(engine, card, lookup) for card in cards],
+        "final": True,
+    }
+
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -1493,6 +2318,14 @@ def pending_payload(
         getattr(query, "card_preactivations", None) or {}
     )
     payload["preactivation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
+    # **逐候选**的预发动清单（票 01 的 ``SkillActivationQuery.activation_preactivations``；
+    # 票 02 的读取面 = ``preactivation.js:preactivationManifest``）：同一时机有 N 条技能
+    # 候选时，每条候选各有自己的一份清单，界面按**选中的那条**取；单候选面上它与上面的
+    # ``preactivation`` 同源（旧面一字不变）。同样是 ``exclude=True`` 的本地面 ⇒ 接入层
+    # 显式下发；键恒在（没有清单时给空表），读取方不必先判键存在。
+    payload["activation_preactivations"] = _preactivation_payload(
+        getattr(query, "activation_preactivations", None) or {}
+    )
     if foreign:
         _mask_foreign_preactivations(payload)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。
@@ -1507,6 +2340,15 @@ def pending_payload(
     # W6-07：牌面**不在这里重发**——前端读同一份载荷的 ``revealed``（评审 J9）。
     payload["arrange"] = (
         _arrange_spec(session.engine, query, payload.get("revealed") or [])
+        if isinstance(session, Session)
+        else None
+    )
+    # 计数式分配（huo-shenzhouyu-mobile 票 05；首个载体 = 神周瑜【业炎】）：
+    # 询问模型已带 ``seats`` / ``max_total`` / ``per_seat_max``（公开事实），这里只补
+    # **展示事实**（座位的人话标签）。与 ``option_seats`` 同姿态：派生、不进记录流；
+    # 取不到引擎（409 里的裸 ``Query``）⇒ ``None``，界面 fail-closed 画"分配不可用"。
+    payload["distribution"] = (
+        _distribution_payload(session.engine, query)
         if isinstance(session, Session)
         else None
     )
@@ -1555,6 +2397,10 @@ def pending_payload(
         if str(query.kind) == "SELECT_CARDS" and payload.get("revealed")
         else None
     )
+    # A1：洛神连续判定的显示层派生（`{chain_key, card, final}`）。只从记录流 / 引擎已有
+    # 事实派生，**不进记录流 / 06 / 金录像**；查看者不是挂起者时为 None（fail-closed）。
+    # 字段键恒在（读取方契约），无循环时为 None。
+    payload["judgment_reveal"] = None
     # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
     # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
     payload["provide_type"] = getattr(query, "provide_type", None)
@@ -1577,6 +2423,10 @@ def pending_payload(
         lookup = _card_lookup(session.engine.state)
     else:
         lookup = card_lookup_from_query(query)
+    if isinstance(session, Session) and same_viewer:
+        payload["judgment_reveal"] = judgment_reveal_state(
+            session.engine, query, lookup
+        )
     # 弃牌步的公开亮牌：只发给使用者本人（他是这一步的应答者）；牌来自帧载荷，不进记录流。
     if (
         fire_attack is not None
@@ -1589,11 +2439,35 @@ def pending_payload(
             "card": card_payload(fire_attack["revealed"], lookup=lookup),
         }
     # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
-    heroes = load_heroes(session.pack.pack_id) if isinstance(session, Session) else None
+    heroes = load_hero_tables(session.pack.pack_id) if isinstance(session, Session) else None
+    # 票 07（票 02 §4.2 B4）：**展示武将牌**的询问——武将块（势力 / 名称 / 体力上限）、
+    # 每条选项的显示文本 / 技能描述（descriptions.json 原文、不截断）/ 置灰标记，全部
+    # 服务端派生、**不按查看者裁剪**（武将牌是公开事实，第二轮 R6）。
+    #
+    # 只有在**新字段真的在用**时才加键：既有询问载荷（雌雄双股剑 / 遗计"交给谁"等）
+    # 因此逐字节不变。裸 Query（409）拿不到会话的包，但武将牌堆的缺省池就是**全部**武将
+    # 表（``enabled_hero_ids()`` 的读法），故照样派生得出来——界面不会因 409 而丢名字。
+    hero_tables = heroes if heroes is not None else load_hero_tables()
+    shown_hero = getattr(query, "hero_card", None)
+    if shown_hero is not None:
+        payload["hero_card"] = hero_card_display(hero_tables, shown_hero)
+    if str(query.kind) == "SELECT_OPTION" and (
+        shown_hero is not None
+        or getattr(query, "disabled", ())
+        or getattr(query, "option_texts", None)
+    ):
+        payload["option_details"] = option_details(query, heroes=hero_tables)
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
     # 界面要写「将以【X】使用」只能读这份派生；不是查看者的询问 ⇒ 空列表（fail-closed）。
     payload["transform_products"] = (
-        _transform_products(query, lookup=lookup) if same_viewer else []
+        _transform_products(
+            query,
+            lookup=lookup,
+            state=session.engine.state if isinstance(session, Session) else None,
+            owner=int(query.actor),
+        )
+        if same_viewer
+        else []
     )
     decorate_pending(
         payload,
@@ -1603,15 +2477,65 @@ def pending_payload(
         virtual_cards=(
             _active_virtual_cards(session.engine) if isinstance(session, Session) else ()
         ),
+        # UI1/UI2：内嵌视角里的处理区同样不给未验明的扣置牌牌面。
+        concealed=(
+            concealed_guohuo_cards(session.engine) if isinstance(session, Session) else None
+        ),
     )
+    if isinstance(session, Session) and same_viewer:
+        # 只给**自己的**询问载荷补标签；foreign（409 里附带的别人的现状）连标签也不带。
+        _decorate_pending_card_tags(payload, session.engine.state, viewer)
     return payload
 
 
-def visible_record(record: object, *, viewer: int | None = None) -> dict[str, Any] | None:
+def query_actor_map(records: Iterable[object]) -> dict[int, int]:
+    """记录流里的 ``query.seq → query.actor``（应答者的唯一真源）。
+
+    ``ActionRecord`` 自己**不带座位**：一次应答是谁做的，看它的 ``answers_seq`` 指向的
+    那次 ``query``（记录流里已下发的公开事实）。``serve.GameRegistry.view`` 拿这张表判断
+    一条 action 是不是查看者自己的；``skill_events_after`` 用同一判据给派生事件找座位。
+
+    ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具）。这里只读
+    ``seq`` / ``query.actor`` 两个字段，**不**把整条询问（含候选 / 视角）序列化一遍——
+    ``GameRegistry.view`` 每次取增量都会调它，整条序列化会把一次刷新放大成几十毫秒。
+    """
+    actors: dict[int, int] = {}
+    for record in records:
+        if isinstance(record, Mapping):
+            if record.get("kind") != "query":
+                continue
+            query = record.get("query")
+            seq = record.get("seq")
+            actor = query.get("actor") if isinstance(query, Mapping) else None
+        else:
+            if getattr(record, "kind", None) != "query":
+                continue
+            query = getattr(record, "query", None)
+            seq = getattr(record, "seq", None)
+            actor = getattr(query, "actor", None)
+        if isinstance(seq, int) and isinstance(actor, int):
+            actors[seq] = actor
+    return actors
+
+
+def visible_record(
+    record: object,
+    *,
+    viewer: int | None = None,
+    query_actors: Mapping[int, int] | None = None,
+    state: Any = None,
+    concealed: Mapping[int, str] | None = None,
+) -> dict[str, Any] | None:
     """把一条记录转成**查看者可下发**的 JSON；``None`` = 这一条不下发。
 
     ``viewer`` = 人类座位（``serve.GameRegistry.view`` 传 ``session.human_seat``）；
     ``None`` = 没有查看者 / 全知——**不裁剪**（内部调用与测试需要原始记录）。
+
+    ``query_actors`` = :func:`query_actor_map` 的结果（``query.seq → actor``）。有它才判得出
+    一条 ``action`` 是不是查看者自己的：**只有自己的应答展开** ``card`` / ``choices`` /
+    ``picks`` / ``targets`` / ``skill_id`` 等细节；别人的仍裁成 ``{kind, answers_seq}``。
+    没有映射（或映射里查不到）时 fail-closed：按别人的应答裁剪。``state`` 只在展开自己的
+    ``ActivateSkill`` 时用来补 :func:`_skill_display_name` 的中文名 ``skill_name``。
 
     ``card_move`` 的牌面按 spec §6 A3 的**区域可见性**脱敏（M5-09c）：公开区
     （弃牌堆 / 处理区 / 装备区 / 判定区）照常下发牌面；隐藏区（牌堆 / 手牌）之间的移动，
@@ -1641,11 +2565,59 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
             card = raw.get("card")
             if isinstance(card, dict):
                 raw["card"] = card_payload(CardRef.model_validate(card))
+        elif delta_type == "pindian":
+            # 拼点揭晓是公开事实（huo-taishici-xunyu 票 03 / 04）：两张牌按**正常卡面**
+            # 下发——补展示字段（牌名 / 属性 / 转化来源 / 描述），牌上**有标签**时一并带上。
+            # 拼点弹窗因此与手牌 / 舞台 / 亮牌共用同一个 `cardFaceNode`，不另起一套牌面。
+            cards = raw.get("cards")
+            if isinstance(cards, list):
+                lookup = _card_lookup(state) if state is not None else None
+                upgraded: list[Any] = []
+                for card in cards:
+                    if not isinstance(card, dict):
+                        upgraded.append(card)
+                        continue
+                    payload = card_payload(CardRef.model_validate(card), lookup=lookup)
+                    # 标签要读引擎状态；没有 state（裸询问 / 单测）时不猜、不造空键。
+                    if state is not None:
+                        _decorate_card_tags(payload, state, viewer)
+                    upgraded.append(payload)
+                raw["cards"] = upgraded
         elif delta_type == "card_move" and raw.get("cards"):
-            if not cards_visible(raw, viewer):
+            hidden_seats = _concealed_hidden(raw, viewer, concealed)
+            if hidden_seats is not None:
+                # UI1/UI2：这张牌是**未验明**的【蛊惑】扣置牌 ⇒ **源牌牌面不下发**。
+                # 画**声明的牌名**（无花色点数 + `concealed` 标记）——声明本身是公开事实，
+                # 舞台与事件流因此照旧是"于吉把牌当【无中生有】扣置"这条故事线；解不出
+                # 声明的牌型（旧形态记录）时退回"只给张数"。
+                raw["card_count"] = len(raw["cards"])
+                lookup = _card_lookup(state) if state is not None else None
+                shown = [
+                    hidden_guohuo_payload(
+                        int(card["card_id"]), concealed[int(card["card_id"])], lookup=lookup
+                    )
+                    if concealed.get(int(card["card_id"]))
+                    else None
+                    for card in raw["cards"]
+                    if isinstance(card, dict) and "card_id" in card
+                ]
+                raw["cards"] = [entry for entry in shown if entry is not None]
+            elif not cards_visible(raw, viewer):
                 # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
                 raw["card_count"] = len(raw["cards"])
                 raw["cards"] = []
+            else:
+                # 公开区的移动牌也要**完整的卡面契约**（display_name / attribute / kind /
+                # source_cards / description）。舞台是拿 card_move 建舞台项的：只给裸
+                # CardRef 时它只能读数据名（"火杀""雷杀"两个字、没有属性 ⇒ 画成黑色），
+                # 同一张牌在手牌里是蓝的、在台上是黑的（用户实机报障 2026-10-31）。
+                lookup = _card_lookup(state) if state is not None else None
+                raw["cards"] = [
+                    card_payload(CardRef.model_validate(card), lookup=lookup)
+                    if isinstance(card, dict)
+                    else card
+                    for card in raw["cards"]
+                ]
         elif delta_type == "deck_shuffle" and raw.get("cards"):
             # A3：牌堆只给数量。整副洗后牌序是引擎 / 回放的全知事实，不是人类载荷。
             if not deck_cards_visible(viewer):
@@ -1655,19 +2627,66 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
             # A3：开局暗发。本人 / 主公可见，其余置空；亮明 / 阵亡走 identity_reveal。
             if not identity_visible(raw, viewer):
                 raw["identity"] = None
+        elif delta_type in ("tag_add", "tag_remove"):
+            # spec §投影与记录流：标签的可见性由**标签类型**的登记表回答。记录流这条通道
+            # 不传 ``face_visible``，故 FACE_VISIBLE 的标签 delta 仍整条裁掉；网页展示
+            # 载荷另由 ``_card_tag_payloads`` 按牌面可见补 tags。手牌数两条都不改。
+            if not tag_visible(raw.get("tag_type"), viewer):
+                return None
+    if kind == "timing" and raw.get("cards"):
+        # 时机记录带的牌面也是**公开事实**（这次使用 / 判定亮出的那张牌）。补同一份展示
+        # 契约（display_name / attribute / kind / source_cards / description）——不补的话
+        # 舞台只能读记录里的数据名（"火杀""雷杀"两个字、没有属性 ⇒ 画成黑色），
+        # 而卡面契约要求"单字【杀】+ 属性色"（用户实机报障 2026-10-31）。
+        lookup = _card_lookup(state) if state is not None else None
+        raw["cards"] = [
+            card_payload(CardRef.model_validate(card), lookup=lookup)
+            if isinstance(card, dict)
+            else card
+            for card in raw["cards"]
+        ]
     if kind == "action":
-        # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
+        # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开
+        # （spec D13）。``ActionRecord`` 不带座位 ⇒ 座位取 ``answers_seq`` 指向的询问 actor；
+        # 查不到 / 不是查看者 ⇒ fail-closed，保持 `{kind, answers_seq}`。
         action = raw.get("action")
         if isinstance(action, dict):
-            raw["action"] = {"kind": action.get("kind"), "answers_seq": action.get("answers_seq")}
+            actor = (query_actors or {}).get(action.get("answers_seq"))
+            own = (
+                viewer is not None
+                and actor is not None
+                and int(actor) == int(viewer)
+            )
+            if viewer is not None and not own:
+                raw["action"] = {
+                    "kind": action.get("kind"),
+                    "answers_seq": action.get("answers_seq"),
+                }
+            elif own and state is not None and action.get("kind") == "ActivateSkill":
+                # 技能名与技能飘字同源（接入层展示表）；查不到就不加键，前端退回
+                # `view.skills` 再退回 skill_id（fail-visible，不猜名字）。
+                name = _skill_display_name(state, str(action.get("skill_id") or ""))
+                if name:
+                    action["skill_name"] = name
     return raw
 
 
 def serialize_record(
-    record: object, *, viewer: int | None = None
+    record: object,
+    *,
+    viewer: int | None = None,
+    query_actors: Mapping[int, int] | None = None,
+    state: Any = None,
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
-    return visible_record(record, viewer=viewer)
+    return visible_record(
+        record,
+        viewer=viewer,
+        query_actors=query_actors,
+        state=state,
+        concealed=concealed,
+    )
 
 
 def skill_events_after(
@@ -1691,17 +2710,15 @@ def skill_events_after(
     形状走同一份派生。**不使用** ``picks``（那是成本牌），技能与目标都是公开事实，
     不需要按查看者过滤。
     """
-    query_actors: dict[int, int] = {}
+    records = list(records)
+    # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
+    query_actors = query_actor_map(records)
     events: list[dict[str, Any]] = []
     for raw in records:
         record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
         kind = record.get("kind")
         seq = record.get("seq")
         if kind == "query":
-            query = record.get("query") or {}
-            actor = query.get("actor")
-            if isinstance(seq, int) and isinstance(actor, int):
-                query_actors[seq] = actor
             continue
         if kind != "action" or not record.get("accepted"):
             continue

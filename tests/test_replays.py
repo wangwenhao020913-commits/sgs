@@ -24,7 +24,8 @@ from sgs.engine import (
     dump_journal,
     read_journal,
 )
-from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause
+from sgs.skills import blocked_true_names
+from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause, Zone
 
 from support import play_standard
 
@@ -290,6 +291,26 @@ def test_replaying_the_tape_reproduces_the_journal_byte_for_byte(tmp_path):
     assert dump_journal(replayed.records) == engine.journal()
 
 
+def test_replaying_a_no_hero_tape_keeps_the_drawn_true_names_empty(tmp_path):
+    """票 05（E5）：无武将模式的一局里 ``drawn_true_names`` 一直是**空元组**。
+
+    "没有任何初始化点"的判据：同一盘磁带重跑一遍，新字段仍空、派生集合仍空，而记录流
+    逐字节不变。有武将的座位同样不写这个字段（在场那一半是派生的，见
+    ``tests/test_hero_dealing.py::test_the_blocked_true_names_are_the_drawn_half_plus_the_seated_half``）。
+    """
+    engine = play_standard(seed=7)
+    path = _write(tmp_path / "game.jsonl", engine.journal())
+    seed, tape = tape_from_journal(read_journal(path))
+
+    replayed = Engine.new_game(seed=seed, rule_config=RuleConfig(), pack=PACK)
+    player = TapePlayer(tape)
+    replayed.run([player, player])
+
+    assert replayed.state.drawn_true_names == ()
+    assert blocked_true_names(replayed.state) == frozenset()
+    assert dump_journal(replayed.records) == engine.journal()
+
+
 def test_tape_player_reports_a_divergence_when_the_tape_runs_out(tmp_path):
     engine = play_standard(seed=7)
     path = _write(tmp_path / "game.jsonl", engine.journal())
@@ -513,6 +534,9 @@ SCRIPTED_BASELINES = tuple(scenarios.SCRIPTED_SCENARIOS)
 M5_BASELINES = tuple(scenarios.M5_SCENARIOS)
 """M5 的 8 条**构造局面**基准（M5-09a / spec §6 A3）：覆盖 11 个新牌名与 10 个覆盖项。"""
 
+M6_BASELINES = tuple(scenarios.M6_SCENARIOS)
+"""M6 的 5 条**界局构造**基准（票 20）：覆盖 spec §投影与记录流 的新原语。"""
+
 M2_BASELINES = tuple(
     name
     for name in distribution.SLUG_CLASSES
@@ -520,6 +544,7 @@ M2_BASELINES = tuple(
     and name not in set(M3_BASELINES)
     and name not in set(SCRIPTED_BASELINES)
     and name not in set(M5_BASELINES)
+    and name not in set(M6_BASELINES)
 )
 """M2 的 27 条基准：分布表里除 M1 六条、M3 八条、脚本专项与 M5 八条以外的全部 slug
 （票 32 §1）。
@@ -547,6 +572,7 @@ def test_the_baseline_distribution_meets_every_category_minimum() -> None:
     assert not shortfalls, f"分布判据未达标（实得 / 最少）：{shortfalls}"
     assert counts[distribution.M1_CLASS] == len(FROZEN_BASELINES)
     assert counts[distribution.M5_CLASS] == len(M5_BASELINES), "M5 军争机制类必须恰 8 条"
+    assert counts[distribution.M6_CLASS] == len(M6_BASELINES), "M6 界局机制类必须恰 5 条"
 
 
 def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
@@ -559,7 +585,7 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ) - set(M5_BASELINES), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
+    ) - set(M5_BASELINES) - set(M6_BASELINES), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
     assert set(M5_BASELINES) == set(scenarios.M5_SCENARIOS) == set(goals.M5_GOALS), (
         "M5 的 8 条构造基准必须与场景表、判据表三方相等"
     )
@@ -568,6 +594,9 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     )
     assert set(SCRIPTED_BASELINES) == set(scenarios.SCRIPTED_SCENARIOS), (
         "票 17 起的脚本专项基准必须与场景表相等"
+    )
+    assert set(M6_BASELINES) == set(scenarios.M6_SCENARIOS) == set(goals.M6_GOALS), (
+        "M6 的 5 条界局构造基准必须与场景表、判据表三方相等"
     )
 
 
@@ -593,6 +622,32 @@ def test_every_m5_baseline_has_an_after_the_fact_goal() -> None:
     assert {scenarios.SCENARIOS[slug].deck_profile for slug in M5_BASELINES} == {
         "standard_ex_160"
     }, "M5 的每条基准都必须是 standard_ex_160 档"
+
+
+def test_every_m6_baseline_has_an_after_the_fact_goal() -> None:
+    """M6 的 5 条界局构造基准各有事后判据，且判据覆盖 spec §投影与记录流 的新原语。"""
+    assert set(M6_BASELINES) == set(goals.M6_GOALS), (
+        "M6 构造基准集合与 goals.M6_GOALS 的键集必须相等"
+    )
+    required = {
+        "skill_suppress",
+        "hp_max_change",
+        "skill_gain",
+        "tag_add",
+        "tag_remove",
+        "turn_change",
+    }
+    covered: set[str] = set()
+    zones: set[Zone] = set()
+    for slug in M6_BASELINES:
+        for record in read_journal(REPLAYS_DIR / f"{slug}.jsonl"):
+            if record.kind != "delta":
+                continue
+            covered.add(record.delta_type)
+            if record.delta_type == "card_move":
+                zones.update((record.from_zone.zone, record.to_zone.zone))
+    assert required <= covered, f"M6 金录像没有覆盖全部新原语：缺 {sorted(required - covered)}"
+    assert Zone.HERO in zones, "M6 金录像必须有一条 HERO 区域的移动（武将牌上的牌）"
 
 
 def test_the_preactivation_cancel_equals_the_not_activating_path() -> None:
@@ -989,9 +1044,9 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "33-borrowed-sword-use-slash": (1149248, "e69ee120a8e4f3df3beebd29f8ee80b78f652482e29422faf21b9cd3b702aecb"),
     "34-dismantle-or-snatch-equip-judge": (802508, "672687163dfa779b39f0794e3e4c64de6d72bfc88af91f09fe91f9648ddede2c"),
     "35-hero-damage-points": (465008, "053c6a7fd33d4e018c643c2d0de0772ca4ce20f56ff3f9f4660f51f89d760d35"),
-    "36-hero-rejudge-cycle": (1236540, "121ec584347982627ffa4f60e6ffcd803529bf4892f9949b58621ae31c808ae3"),
-    "37-hero-lord-request": (1464704, "f618bb97447c1ddf15e278d9a9b6d947e66848f68a472ed72b15c75871b8d619"),
-    "38-hero-lost-cards": (857328, "3ed01389ce128ccc2591a4adfdaafca4d74087dac372e9e8407bb5cdae5ec251"),
+    "36-hero-rejudge-cycle": (1228848, "9d80fa3751927bc33bd3f1c2861405a89631ef2ce4e281032002331b74729e97"),
+    "37-hero-lord-request": (1430299, "66ad3ef3d6b8a06ac7a44bc109ec0671fc2f6cae4d98d291ac79dc0b181e306c"),
+    "38-hero-lost-cards": (857045, "8e7dad34b0e4b5bf4c4d032efa28d8ab402dfcf5cbff66699b3a27131fb524a9"),
     "39-hero-target-pool": (2586144, "3409eb95b9a2460fc9b844e5eb521fe537f6c2f600630c11bd4b18fc400ed928"),
     "40-hero-wushuang": (359502, "ebfbda32bae631d9533396ac3e5eab51e8c75e7f0c778c86709c668a70b90ca7"),
     "41-hero-guanxing": (815491, "3cd14e5c0364b9cff3ff0f3ca3b396e871ba158363434e96af54944dde62db7f"),
@@ -1006,8 +1061,21 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
 
 **故意写死**：M5 只许**新增**军争基准，标准 108 的 47 条必须逐字节不变。这张表把
 "不变"钉成门禁判据——任何重录、格式化或手改都会让对应条目变红；改它 = 一次显式决定
-（本 effort 的 D14 明确禁止）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
+（本 effort 的 D14 明确禁止，**唯一例外是下面那次经用户批准的重基线**，其判据与覆盖都
+在下面写明）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
 这张表钉的是 47 条的**文件字节**，两者互补。
+
+**唯一一次显式重基线（2026-11-03，票 06，用户批准）**：``38-hero-lost-cards`` 的字节由
+``(857328, 3ed0138…5ec251)`` 改为 ``(857045, 8e7dad3…524a9)``。原因是修「使用装备牌」的顶替
+路径：「失去装备后」的钩子（本盘是【枭姬】）让出之后，新装备的 ``PUT`` 必须等它结算完才
+入槽；旧录像恰好录下了错的次序（新装备先入槽、再问【枭姬】），且旧实现吞掉 ``"stay"`` 时
+多记了一条 ``MOVE_AFTER``。重录**只**重跑这一条（``scenarios.record("38-hero-lost-cards")``），
+其余 46 条一字未动，判据不放宽；38 在 ``goals.py`` 里的判据（D 族失去牌后）重录后仍命中。
+**重录 = 放弃一条覆盖**（`CODING_STANDARDS.md` §5）：旧录像原先钉住的那条**次序**覆盖由两条
+直接测试接手——`tests/test_m5_equipment.py::test_replacing_silver_lion_recovers_before_the_new_equipment_enters`
+（顶替白银狮子：旧装备离场 → 回复 → 新装备入槽，逐条比记录流序列）与
+`tests/test_hero_move_after.py::test_xiaoji_fires_on_replacement_even_though_the_equipment_is_not_discarded`
+（顶替算失去装备、但不算弃置 ⇒【枭姬】恰好触发一次，且新装备的 ``PUT`` 排在【枭姬】之后）。
 """
 
 

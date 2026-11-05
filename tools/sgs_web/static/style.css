@@ -73,6 +73,29 @@ button.primary:hover:not(:disabled) { color: #fff; opacity: .92; }
 button.ghost { background: transparent; }
 button:disabled { opacity: .4; cursor: not-allowed; }
 
+/* 将池预设（M6 票 13 / spec D6）：5 个常驻槽位 + 按真名分组的版本格。
+ * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。 */
+.pool-slots { display: flex; flex-wrap: wrap; gap: 8px; }
+.pool-slot.active { box-shadow: 0 0 0 3px var(--accent-soft); }
+.pool-slot.active::after { content: " ★"; color: var(--accent); }
+.pool-slots .pool-slot.on.active::after { color: #fff; }
+.hero-pool {
+  display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
+  max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 6px;
+}
+.pool-row {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.pool-name { flex: 0 0 64px; font-size: 13px; color: var(--dim); }
+.pool-version { padding: 2px 10px; border-radius: 999px; background: #fff; font-size: 13px; }
+.pool-version.banned {
+  opacity: .38; text-decoration: line-through; background: var(--bg);
+}
+.pool-version.banned:hover:not(:disabled) { color: var(--dim); border-color: var(--line); }
+.pool-row.all-banned .pool-name { opacity: .45; }
+#pool-hint.warn { color: #a15c00; font-weight: 600; }
+
 .seats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .seat {
   border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff;
@@ -125,15 +148,42 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   font-variant-numeric: tabular-nums; line-height: 1;
 }
 .card.face .cname {
-  position: absolute; left: 2px; right: 2px; top: calc(43 * var(--dsu));
-  text-align: center; font-size: calc(21 * var(--dsu)); font-weight: 700;
-  letter-spacing: .06em; line-height: 1.15;
+  position: absolute; left: 1px; right: 1px; top: calc(43 * var(--dsu));
+  /* U4-06b / U4-07（spec D13）：手牌与舞台共用 88 设计单位宽的卡面。可读内宽 =
+   * 88 − 左右边框各 1 − 左右内缩各 1 = 84；20 号 + .01em 的四字牌名 = 80.8 ≤ 84，
+   * 1258 壳宽（`--dsu` ≈ .79）也放得下。U4-06b 的 2px 内缩让内宽只剩 82，实机在
+   * 1258 壳宽仍出省略号——U4-07 实机验收时改回 1px / .01em。 */
+  text-align: center; font-size: calc(20 * var(--dsu)); font-weight: 700;
+  letter-spacing: .01em; line-height: 1.15;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .card.face .ctype {
   position: absolute; left: 2px; right: 2px; bottom: calc(8 * var(--dsu));
   text-align: center; font-size: calc(9 * var(--dsu)); line-height: 1.3; color: var(--dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 牌面标签（票 11）：来源技能名只读服务端 `card.tags`；卡面中心 2 列网格，
+ * 每行 2 个、超出换行；两行装不下时由 JS 末位收成 +N。pointer-events: none
+ * 保证标签不让整张牌面变成可点目标。 */
+.card.face .card-tags {
+  position: absolute; left: calc(5 * var(--dsu)); right: calc(5 * var(--dsu));
+  top: calc(69 * var(--dsu));
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(2 * var(--dsu)); justify-items: center; align-content: start;
+  pointer-events: none;
+}
+.card.face .card-tag {
+  max-width: 100%; padding: 0 calc(3 * var(--dsu)); border-radius: 999px;
+  border: 1px solid rgba(156, 43, 27, .35); background: var(--accent-soft);
+  color: var(--accent); font-size: calc(8 * var(--dsu)); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card.face .card-tag-more { border-style: dashed; background: transparent; }
+.cards.mini .card.face .card-tags {
+  left: 2px; right: 2px; top: calc(35 * var(--dsu)); gap: 1px;
+}
+.cards.mini .card.face .card-tag {
+  padding: 0 1px; font-size: calc(6 * var(--dsu)); line-height: 1.35;
 }
 .card.face.attr-fire .cname { color: #b3261e; }
 .card.face.attr-thunder .cname { color: #1d4e9c; }
@@ -229,6 +279,34 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #f2efe9; cursor: pointer;
 }
 .arrange-slot:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+/* 拖拽预览（票 01）：鼠标拽着一张牌时，其它牌为它让道——落点上插一个与卡面同尺寸的
+ * 占位格；拖动源被抽出文档流（空出来的那一格正好由占位格顶上，行宽不涨、不换行）。
+ * 固定切分的跨行拖动没有空槽可让，改用「交换」角标标出这一下会换哪张。 */
+.arrange-placeholder {
+  flex: 0 0 calc(88 * var(--dsu));
+  width: calc(88 * var(--dsu)); height: calc(124 * var(--dsu));
+  border: 2px dashed var(--accent); border-radius: 7px;
+  background: var(--accent-soft);
+  pointer-events: none;
+  animation: arrange-placeholder-in .12s ease-out;
+}
+.arrange-card.swap {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 3px var(--accent), 0 7px 14px rgba(43, 36, 28, .18);
+}
+.arrange-card.swap::after {
+  content: "交换"; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0 calc(7 * var(--dsu));
+  border-radius: 99px; background: var(--accent); color: #fff;
+  font-size: calc(11 * var(--dsu)); font-weight: 700; line-height: 1.7; white-space: nowrap;
+  pointer-events: none;
+}
+.arrange-card.dragging { position: absolute; opacity: 0; pointer-events: none; }
+@keyframes arrange-placeholder-in {
+  from { opacity: 0; transform: scale(.9); }
+  to { opacity: 1; transform: scale(1); }
+}
 .arrange-unavailable { padding: 8px 0; }
 
 .options { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
@@ -237,6 +315,45 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; cursor: pointer;
 }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
+
+/* 计数式分配（神周瑜移动版【业炎】；huo-shenzhouyu-mobile 票 05）：一行一个座位 + 计数徽标，
+ * 底下「重置」。宽度撑满弹窗正文，计数用等宽数字（点几次都看得出）。 */
+.opt.distribution-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.distribution-count {
+  min-width: 1.4em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.opt.distribution-reset {
+  margin-top: 6px;
+}
+/* 置灰不可选（票 04 §3）：选项**列出来**但点不动——蛊惑的牌名弹窗里"此刻没有合法目标"
+ * 的那几个。与 `.card.dis` 同一姿态（降透明度 + 禁用光标），没有 hover 反馈。 */
+.opt.dis {
+  opacity: .38; cursor: not-allowed; background: transparent; color: var(--dim);
+  border-style: dashed;
+}
+.opt.dis:hover { color: var(--dim); }
+/* 长选项清单（预发动里十几个牌名）：**紧凑多列**铺开，不必滚动就能一眼找完。
+ * 判据在 `preactivation.js`（候选个数 > OPTION_COMPACT_MIN 才加这个类）；子节点形状不变
+ * —— 选项按钮仍是 `#t-options` 的直接子节点，只有布局换成分行等宽的格子。 */
+.options.opt-compact {
+  flex-direction: row; flex-wrap: wrap; align-items: stretch; gap: 6px;
+}
+.options.opt-compact > .opt {
+  flex: 0 0 calc(33.333% - 6px); min-width: 0;
+  padding: 5px 8px; text-align: center; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* 步骤条那一行（`.cards`）总是独占整行，不被挤进格子里。 */
+.options.opt-compact > .cards { flex: 0 0 100%; }
 /* 选择型弹窗（U2-08 / spec D3）：选项 ≥4 或复用枚举（花色）走 2×2 按钮网格。
  * 中文名 / 符号 / 红黑**全部**来自服务端 `option_labels`，这里只负责版式与颜色落地。 */
 .options.suit-options {
@@ -282,6 +399,19 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .skill.locked, .skill.passive { background: #e8e8ea; color: #8c8f98; border-color: #d3d4d9; }
 .skill.unavailable { background: #3f3f3f; color: #d7d7d7; border-color: #333; }
+/* 失效（"有但被挡住"，如【铁骑】之后）：保留按钮并画禁止图标。图标绝对定位在右侧，
+ * 预留 padding 不压住技能名；颜色用现有强调红，不引外部图片。 */
+.skill.suppressed {
+  position: relative; padding-right: calc(22 * var(--dsu));
+  background: var(--accent-soft); border-color: var(--accent); color: var(--dim);
+}
+.skill.suppressed .skill-ban {
+  position: absolute; right: calc(4 * var(--dsu)); top: 50%;
+  transform: translateY(-50%);
+  width: calc(13 * var(--dsu)); height: calc(13 * var(--dsu));
+  display: inline-flex; color: var(--accent); pointer-events: none;
+}
+.skill.suppressed .skill-ban svg { width: 100%; height: 100%; display: block; }
 .skill.ready {
   background: #e7f5ec; border-color: #1d6b3a; color: #14532b; font-weight: 600; cursor: pointer;
 }
@@ -339,6 +469,12 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .topbar-center .round { font-weight: 700; }
 .topbar-center .round #t-round { font-weight: 700; font-variant-numeric: tabular-nums; }
+/* M6 票 19：额外回合提示（票 11 的 turn_extra；自然回合不挂）。 */
+.topbar-center .extra-turn {
+  font-size: 11px; font-weight: 700; color: #8a5a00;
+  border: 1px solid #d9b45c; border-radius: 999px; padding: 1px 7px;
+  background: #fdf3d8;
+}
 .topbar-center .sep { color: var(--line); }
 .topbar-right { flex: 1 1 auto; justify-content: flex-end; position: relative; }
 .ratio { font-size: 12px; color: var(--ink); letter-spacing: .02em; }
@@ -348,6 +484,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   border-radius: 7px; padding: 2px 8px; background: #fff; white-space: nowrap;
 }
 .topbar-right .count span { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+/* U4-05 / D11：「弃牌 N」是按钮（开只读面板），外观与「牌堆」那枚计数一致；
+ * `font: inherit` 挡住浏览器给 button 的默认字体，尺寸由上面那条 `.count` 定。 */
+.topbar-right button.count { font: inherit; font-size: 12px; cursor: pointer; }
+.topbar-right button.count:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .icon-btn {
   font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line);
   background: #fff; border-radius: 7px; color: var(--dim); cursor: pointer;
@@ -384,7 +524,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
  * 对手 210×150（左 110 / 右 100）；自己 292×210（左 162 / 右 130）。
  * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。
  * U2-02 / D6：对手的 +8%（228×163）在 8 人环上与相邻座位重叠（40° 相邻角的 |dy| ≈ 158.3 < 163），
- * 故对手**外形保持 210×150、只放大内容**（判定 33 / 装备 42 / 槽位字 10 / 标签 9）。 */
+ * 故对手**外形保持 210×150、只放大内容**（判定 36 / 装备 42 / 槽位字 10 / 标签 9）。 */
 .ring .seat {
   position: absolute;
   width: 13.125%;                 /* 210 / 1600 设计舞台 */
@@ -477,13 +617,19 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   pointer-events: none; z-index: 3;
 }
 .seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
-.seat.dead { opacity: .72; }
-/* 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
+/* 阵亡与翻面**共用同一档置灰**（用户裁定：翻面的置灰程度与阵亡完全一致）。
+ * 两者写在同一条规则里，配比因此不会漂：翻面唯一的差别是**没有文字**。
+ * 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
  * 三态叠加时两个状态就只剩一个可见。 */
-.seat.dead .hero-block::after {
-  content: ""; position: absolute; inset: 0; z-index: 1;
+.seat.dead, .seat.flipped { opacity: .72; }
+.seat.dead .hero-block::after,
+.flipped-layer {
+  position: absolute; inset: 0; z-index: 1;
   background: rgba(120, 116, 108, .35); pointer-events: none;
 }
+/* 阵亡的覆盖层是伪元素（需要 content 才会生成）；翻面用一个带 title 的真实节点，
+ * 因为它只在自己被翻面时存在，且要挂「翻面（背面朝上…）」的提示。 */
+.seat.dead .hero-block::after { content: ""; }
 .dead-tag {
   position: absolute; inset: 0; z-index: 4;
   display: flex; align-items: center; justify-content: center;
@@ -503,7 +649,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   padding: 5px; background: #fbf6ea; overflow: hidden;
 }
 /* U2-02 / D6：对手内容 +8%（外形回退不变，见座位卡块注释）。 */
-.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(33 * var(--dsu)); }
+.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(36 * var(--dsu)); }
 .seat .equip-grid {
   display: grid; grid-template-columns: 1fr 1fr;
   grid-auto-rows: calc(42 * var(--dsu)); gap: 4px; flex: 1 1 auto;
@@ -513,23 +659,86 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   min-width: 0; height: calc(42 * var(--dsu));
   border: 1px dashed var(--line); border-radius: 5px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  text-align: center; padding: 1px 2px; overflow: hidden;
+  text-align: center; padding: calc(1 * var(--dsu)) calc(1 * var(--dsu)); overflow: hidden;
   font: inherit; font-size: calc(10 * var(--dsu)); line-height: 1.2;
   color: var(--ink); background: rgba(255, 255, 255, .55);
 }
-.mini-slot.judge-slot { height: calc(33 * var(--dsu)); }
+.mini-slot.judge-slot { height: calc(36 * var(--dsu)); }
 .mini-slot.empty { color: #9b8f7d; background: #e9e2d6; border-color: #d3c8b6; }
 .mini-slot.filled { border-style: solid; border-color: #c8b795; background: #fffdf8; cursor: help; }
 .mini-slot.judge-slot.filled { border-color: #c39a5f; background: #fff8e9; }
-.mini-slot .slot-k { font-size: calc(9 * var(--dsu)); color: #9b8f7d; }
+.mini-slot .slot-k { font-size: calc(9 * var(--dsu)); line-height: 1.1; color: #9b8f7d; }
+/* U4-06 / D13：槽内可用宽 ≈ 36 设计单位（对手装备两列）/ ≈ 21（判定三等分）。
+   牌名**允许折行**（balance 均分两行），四字 / 五字全名放得下；槽名常显在上行，
+   不靠 tooltip 兜底。字号仍是继承来的 10 / 13（判定槽折两行后高度要收一点）。 */
 .mini-slot .slot-v {
-  display: block; max-width: 100%; font-weight: 600;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: block; max-width: 100%; font-weight: 600; line-height: 1.1;
+  white-space: normal; overflow-wrap: anywhere; text-wrap: balance;
+}
+.mini-slot.judge-slot.filled .slot-k { font-size: calc(8 * var(--dsu)); line-height: 1.1; }
+.mini-slot.judge-slot.filled .slot-v {
+  font-size: calc(9 * var(--dsu)); line-height: 1.15;
 }
 button.mini-slot { cursor: pointer; }
 .mini-slot.sel { border-color: var(--accent); background: var(--accent-soft); }
 .mini-slot.picked { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 2px var(--ok); }
 .mini-slot.dis { opacity: .4; cursor: not-allowed; }
+
+/* M6 票 19：武将牌上的牌区（一个放置区一个**标签**，画在**武将块**里）。
+   「可跨座位」由座位卡的宿主决定，「可多人并存」= 同一座位多行。
+   标签全体可见；只有宿主拿到的 cards 非空，点 / 悬停才展开牌面（非宿主没有牌容器）。
+   座位卡固定尺寸，展开的牌面限高纵向滚动（不撑破盒子）。 */
+.hero-zones { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; min-height: 0; }
+.hero-zones[hidden] { display: none; }
+.hero-zone-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding-bottom: 1px; border-top: 1px dashed #d8cbb4;
+}
+.hero-zone-tag {
+  flex: 0 0 auto; max-width: 7em; padding: 0 4px;
+  border: 1px solid #b89f74; border-radius: 4px; background: #fffaf0;
+  font-size: calc(9 * var(--dsu)); font-weight: 600; color: #7d6b52;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
+}
+.hero-zone-tag.static { cursor: default; color: #9a9188; }
+.hero-zone-tag[aria-expanded="true"] { border-color: #8b6b3e; color: var(--ink); }
+.hero-zone-cards {
+  display: flex; flex-wrap: wrap; gap: 2px; max-width: 100%;
+  max-height: calc(58 * var(--dsu)); overflow-y: auto;
+}
+.hero-zone-cards[hidden] { display: none; }
+.hero-zone-card {
+  flex: 0 0 auto;
+  max-width: 4.2em; padding: 0 4px;
+  border: 1px solid #b89f74; border-radius: 4px; background: #fffaf0;
+  font-size: calc(9 * var(--dsu)); font-weight: 600; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.self .hero-zone-tag, .self .hero-zone-card { font-size: calc(11 * var(--dsu)); }
+
+/* 票 06：标记（与武将牌上的牌区同骨架、异色；文本 = 名称×数量）。
+   标记不是牌，没有展开的牌容器；悬停 = 来源（+ 效果说明）。 */
+.marker-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding-bottom: 1px; border-top: 1px dashed #cbbad0;
+}
+.marker-tag {
+  flex: 0 0 auto; max-width: 8em; padding: 0 4px;
+  border: 1px solid #9d7bb0; border-radius: 4px; background: #f7f0fb;
+  font-size: calc(9 * var(--dsu)); font-weight: 600; color: #6c4f7e;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.self .marker-tag { font-size: calc(11 * var(--dsu)); }
+/* B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 */
+.hero-tags { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0; }
+.hero-tags[hidden] { display: none; }
+.hero-tag {
+  padding: 0 4px; border: 1px solid #c9b48f; border-radius: 999px;
+  background: #f7efdf; color: #7d6b52;
+  font-size: calc(9 * var(--dsu)); font-weight: 600; white-space: nowrap;
+}
+.self .hero-tags .hero-tag { font-size: calc(11 * var(--dsu)); }
 
 /* 行高亮：金框行动中 / 加粗绿外圈可指定 / 绿内圈 + 填充已选 / 悬停浅绿。 */
 .seat.turn {
@@ -612,8 +821,21 @@ button.mini-slot { cursor: pointer; }
   border-left-color: #9a9188;
   filter: saturate(.55);
 }
-/* 淡出 1 秒（D5）：节点在淡出期间保留，到点由 JS 移除；`animScale = 0` 时不会画到这一帧。 */
-.stage-card.fading { opacity: 0; transition: opacity 1s ease-out; }
+/* 淡出 1 秒（D5）：节点在淡出期间保留，到点由 JS 移除；`animScale = 0` 时不会画到这一帧。
+ * 必须用 @keyframes，而不是 transition：舞台项可能在**首次渲染时就已进入淡出**
+ * （回放缓冲 / 帧 pop 与产生它的记录同批），新节点没有"opacity 1 → 0"的已生效起点，
+ * transition 不会播放，卡面直接跳没。动画从 `from` 的 opacity 1 起播，不依赖旧值。
+ * 重绘时节点会被 appendChild 移出再插入（动画会从头播），故 table.js 的
+ * `syncStageCardFade` 用负 `animation-delay` 把进度续到 `now − fadeAt`。
+ * 时长与 session.js:STAGE_FADE_MS 相同（1000ms）。 */
+.stage-card.fading {
+  opacity: 0;
+  animation: stage-card-fade 1s ease-out 1 forwards;
+}
+@keyframes stage-card-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
 .stage-center .context {
   margin: 2px 0 0; width: 100%; font-size: 11px; text-align: center;
   /* 处理中 / 展示 / 弃牌三段拼接后最多 2 行（省略号）；40% 宽下也不越过 360 上限。 */
@@ -707,6 +929,42 @@ button.mini-slot { cursor: pointer; }
   text-shadow: 0 1px calc(2 * var(--dsu)) rgba(43, 36, 28, .35);
   animation: skill-float-rise 2s ease-out 1 forwards;
 }
+
+/* ---------- 飞行层（U4-01 / D1 / D2）：与舞台区互不依赖的牌面副本 ---------- */
+
+/* 覆盖整个牌桌壳、不吃指针、裁在壳内；层级高于目标线（15）与技能飘字（16）、
+ * 低于弹窗（60）。起 / 落点是**起飞那一刻**量一次的视口坐标，位置写死成
+ * left/top + translate，之后不跟随任何重绘（D1）。 */
+.anim-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 18;
+}
+.anim-flight {
+  position: absolute;
+  margin: 0;
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  will-change: transform, opacity;
+  /* D12：飞行器只加运动、不加光。卡面自己的 `.card.face` 阴影是**同一张牌面**的既有
+   * 样式，不在这里另加 filter / box-shadow / outline——D12 的证据看这一条规则。 */
+}
+/* 时间表回退提示（D8）：一行，固定左下；正常时 `hidden` 不占位。 */
+.anim-note {
+  position: fixed;
+  left: 8px;
+  bottom: 8px;
+  z-index: 9999;
+  max-width: 60%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(32, 26, 18, .82);
+  color: #f5efe3;
+  font: 12px/1.4 system-ui;
+  pointer-events: none;
+}
 @keyframes skill-float-rise {
   0% {
     transform: translate(-50%, -100%) translateY(0);
@@ -716,6 +974,37 @@ button.mini-slot { cursor: pointer; }
     transform: translate(-50%, -100%) translateY(calc(-20 * var(--dsu)));
     opacity: 0;
   }
+}
+
+/* ---------- 阶段 / 回合飘字层（U4-04 / D10）：判定 / 装备区上方，不占步长 ---------- */
+
+/* 覆盖整个牌桌壳、不吃指针、裁在壳内；层级高于技能名飘字（16），低于飞行器（18）与
+ * 弹窗（60）。锚在该座位的判定 / 装备区上方——**不是**武将块正上方（那里是技能名飘字），
+ * 两层各走各的锚，于是同座位"发动技能 + 阶段切换"同时发生也不叠。层由 anim.js 动态建出。 */
+.anim-phase-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 17;
+}
+/* 位置由 anim.js 写死成 left（= 水平中心）/ top（= 底边），尺寸 / 内边距 / 圆角走设计
+ * 单位；浅底药丸只为压住牌面与槽位的花纹，配色与技能名飘字同族（金色字，深一档保证
+ * 在浅底上可读），不加光晕（D12：只加运动、不加光）。 */
+.anim-phase-float {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  font-size: calc(15 * var(--dsu));
+  font-weight: 700;
+  color: #8a6b2f;
+  background: rgba(255, 252, 242, .88);
+  border: 1px solid rgba(217, 180, 92, .55);
+  padding: calc(2 * var(--dsu)) calc(9 * var(--dsu));
+  border-radius: calc(999 * var(--dsu));
+  text-shadow: 0 1px calc(2 * var(--dsu)) rgba(43, 36, 28, .28);
+  pointer-events: none;
+  will-change: transform, opacity;
 }
 
 /* 白光（D9）：武将块内 0.6s 扫过；粗 8 / 细 3 设计单位、细带晚 0.12s，左上 → 右下，
@@ -875,9 +1164,9 @@ button.mini-slot { cursor: pointer; }
   max-height: 3.8em;
 }
 
-.hand-head { display: flex; align-items: baseline; gap: 8px; padding: 0 calc(2 * var(--dsu)); }
-.hand-head .tag { margin-left: 0; font-size: calc(11 * var(--dsu)); }
-.hand-head .dim { font-size: calc(11 * var(--dsu)); }
+/* 手牌区**不留标题行**（票 23 报障：那行「手牌 N 张」把提示条挤到压住牌面顶部的
+ * 花色 / 点数上）。整块再往下 6 个设计单位：把高度让给会长高的提示条，牌面顶部的
+ * 花色 / 点数因此不再被遮。 */
 .hand {
   flex: 1 1 auto; min-height: 0;
   display: flex; flex-wrap: nowrap; align-items: flex-end; gap: calc(6 * var(--dsu));
@@ -886,17 +1175,47 @@ button.mini-slot { cursor: pointer; }
   justify-content: safe center;
   overflow-x: auto; overflow-y: hidden;
   padding: calc(2 * var(--dsu));
+  margin-bottom: calc(-6 * var(--dsu));
 }
 .hand .card { flex: 0 0 auto; line-height: 1.2; }
 
+/* 技能按钮区（报障 2026-11-01）：**固定 3 列 × 6 行**的等大网格，一技能一格。
+ *
+ * 旧版是 `display:flex; flex-wrap:wrap`，按钮按名字宽度自己撑、逐行换行；面板只有 10.5%
+ * 宽 ⇒ 技能一多就被挤出可视区（用户实机报障"技能区显示不全"）。改成网格后：列宽/行高
+ * 都由面板给出（`minmax(0, 1fr)` ⇒ 每格等宽、六行等高），格子里只放技能名（前 3 个字，
+ * 超出省略——名字长度不再影响排版）。多出 18 条的（现役武将都到不了）按同一份等分往下排：
+ * 每格仍等大，只是每行略矮——「显示不全」改成「都看得见」，而不是把后面的裁掉。
+ * `.kind` 副行（类别 + 预发动 / 转化 / 可发动徽标）在这里**隐藏**：它仍在下发的报文与
+ * 节点里（`aria-label` / `title` 读），只是不占格子。 */
 #t-skills {
-  flex: 0 0 10.5%;
-  min-width: 88px;
-  align-content: flex-end;
+  flex: 0 0 13%;
+  min-width: calc(120 * var(--dsu));
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(6, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: calc(4 * var(--dsu));
   overflow-y: auto;
   padding-bottom: 2px;
 }
-#t-skills .skill { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+#t-skills .skill {
+  /* `min-width: 0` 是省略号的前提：网格项默认 min-width:auto，长内容会顶宽列。 */
+  min-width: 0; width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 calc(2 * var(--dsu));
+  border-radius: calc(6 * var(--dsu));
+  font-size: calc(13 * var(--dsu));
+  line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#t-skills .skill .kind { display: none; }
+/* 失效格要留出禁止图标的位置（图标绝对定位在右侧，别压住名字）。 */
+#t-skills .skill.suppressed { padding-right: calc(13 * var(--dsu)); }
+#t-skills .skill.suppressed .skill-ban {
+  right: calc(2 * var(--dsu));
+  width: calc(11 * var(--dsu)); height: calc(11 * var(--dsu));
+}
 
 /* 自己的座位块（U1-02）：292×210 设计尺寸，左武将块 + 右判定 / 装备区（右块 130）。 */
 .seat.self {
@@ -938,12 +1257,16 @@ button.mini-slot { cursor: pointer; }
   padding: 8px; background: #fbf6ea;
   overflow: hidden;
 }
-/* U2-02 / D6：自己武将块**外形 292×210 不变**、内容放大（判定 48 / 装备 60 / 槽位字 13 / 标签 12）。 */
-.self .judge-row { flex: 0 0 calc(48 * var(--dsu)); gap: 4px; }
+/* U2-02 / D6：自己武将块**外形 292×210 不变**、内容放大（判定 52 / 装备 60 / 槽位字 13 / 标签 12）。
+   U4-06 / D13：槽内可用宽 ≈ 47 设计单位（装备两列）/ ≈ 28（判定三等分）——牌名折两行
+   （balance），四字 / 五字全名放得下；槽名（标签 12 / 判定 12）保留。 */
+.self .judge-row { flex: 0 0 calc(52 * var(--dsu)); gap: 4px; }
 .self .equip-grid { grid-auto-rows: calc(60 * var(--dsu)); gap: 5px; }
 .self .mini-slot { height: calc(60 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
-.self .mini-slot.judge-slot { height: calc(48 * var(--dsu)); }
+.self .mini-slot.judge-slot { height: calc(52 * var(--dsu)); }
 .self .mini-slot .slot-k { font-size: calc(12 * var(--dsu)); }
+.self .mini-slot.judge-slot.filled .slot-k { font-size: calc(12 * var(--dsu)); line-height: 1.1; }
+.self .mini-slot.judge-slot.filled .slot-v { font-size: calc(13 * var(--dsu)); line-height: 1.15; }
 
 /* ---------- 事件流浮层 ---------- */
 
@@ -1039,6 +1362,26 @@ button.mini-slot { cursor: pointer; }
 .modal-body .options { margin: 0; }
 .modal-body .arrange-row + .arrange-row { margin-top: 10px; }
 
+/* ---------- 弃牌堆面板（U4-05 / D11）：只读检视窗，自己的遮罩可点关闭 ----------
+ * 几何沿用 `.modal` 的舞台区；层级在询问 / 详情窗之上（它是用户主动翻出来的
+ * 顶层检视窗）。**不复用 `#t-modal-backdrop`**：那一层是 `pointer-events: none` 的
+ * 暗化层，没有点击关闭（U2 的固定断言）。这里的遮罩自己吃指针，点是关闭出口。 */
+.discard-backdrop {
+  position: absolute; left: 0; right: 0; top: 6.2%; bottom: 27.5%;
+  z-index: 64;
+  background: rgba(28, 26, 23, .42);
+  pointer-events: auto;
+}
+.discard-backdrop[hidden] { display: none !important; }
+.discard-modal { z-index: 65; }
+.discard-summary {
+  flex: 0 0 auto;
+  padding: 6px 14px; border-bottom: 1px solid var(--line);
+  font-size: 12px; color: var(--dim);
+}
+.discard-body { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+.discard-body .discard-card { flex: 0 0 auto; }
+
 /* ---------- 询问弹窗（U2-06 / spec D3）：标题 + 步骤提示 + 内容槽 + 折叠 ----------
  * 与武将详情窗口同一套几何（舞台区正中、正文可滚、容器不吃指针），但语义完全不同：
  * **没有关闭按钮**，ESC / 点背景都不关；提交 / 取消 / 结束出牌 / 放弃只在提示条右端，
@@ -1096,6 +1439,51 @@ button.mini-slot { cursor: pointer; }
 .dialog-body .options { margin: 0; }
 .dialog-body .arrange-row + .arrange-row { margin-top: 10px; }
 
+/* ---------- 展示武将牌的选项步（票 08；票 02 §4.2 B7–B8） ----------
+ * 正文段 = 副标题「第 k/m 张」+ 武将块（势力徽记 / 名称 / hp_max 点数条）+ 带描述的
+ * 选项行。版式与座位卡同源（`.kingdom` / `.hp-bar` 直接复用），但**不含技能清单**——
+ * 技能就是下面的选项行。描述是 descriptions.json 的原文：不裁剪、不省略。 */
+.hero-card { display: flex; flex-direction: column; gap: 10px; }
+.hero-card-sub {
+  font-size: 12px; color: var(--dim); letter-spacing: .04em;
+  font-variant-numeric: tabular-nums;
+}
+.hero-card-block {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, #fffdf7 0%, #f4ead8 100%);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.hero-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hero-card .hero-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 16px; font-weight: 700; letter-spacing: .04em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hero-card-block .hp-bar { margin-top: 0; }
+.hero-card-block .hp-seg { width: calc(13 * var(--dsu)); height: calc(9 * var(--dsu)); }
+.hero-card-block .hp-num { font-size: calc(12 * var(--dsu)); }
+.hero-card-row {
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%;
+  text-align: left; border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px; background: #fff; color: var(--ink);
+  cursor: pointer; font: inherit;
+}
+.hero-card-row:hover:not(.dis) { border-color: var(--accent); }
+.hero-card-row-name { font-size: 14px; font-weight: 700; }
+.hero-card-desc {
+  font-size: 12px; line-height: 1.55; color: var(--dim);
+  white-space: pre-wrap;
+}
+.hero-card-row.dis { opacity: .45; cursor: not-allowed; background: #f4eee2; }
+.hero-card-owned {
+  align-self: flex-start;
+  padding: 0 6px; border-radius: 999px;
+  font-size: 11px; line-height: 1.6;
+  color: var(--dim); background: #e8dfcf;
+}
+
 /* ---------- 亮牌模板（U2-11 五谷 / 票 12 遗计复用；spec D3 / D4） ----------
  * 正文 = 全部亮牌（按亮牌顺序，被拿走的牌**留在原位**）+ 左下角目标条。
  * 被拿走的牌置灰、牌面仍可读，右下角标写拿牌者座位号；目标条按拿牌顺序四态：
@@ -1107,6 +1495,12 @@ button.mini-slot { cursor: pointer; }
   cursor: default; opacity: .55; filter: grayscale(1);
   box-shadow: none;
 }
+/* 票 01：涉猎的按花色取牌——同花色已被选走的牌置灰（不可点）；结果态的未获得牌同形。 */
+.card.face.reveal-card.dim {
+  cursor: default; opacity: .38; filter: grayscale(1);
+  box-shadow: none;
+}
+.suit-pick .reveal-cards { justify-content: center; }
 .card.face.taken .taken-by {
   position: absolute; right: calc(4 * var(--dsu)); bottom: calc(5 * var(--dsu));
   min-width: calc(24 * var(--dsu)); padding: 1px calc(4 * var(--dsu));
@@ -1169,11 +1563,77 @@ button.mini-slot { cursor: pointer; }
 .hero-detail .detail-skill p {
   margin: 4px 0 0; font-size: calc(12 * var(--dsu)); line-height: 1.55; color: #4e4438;
 }
+/* M6 票 19：☆ 技能标记 + 失效 / 失去的视觉区分（"有但被挡住" vs "没了"）。 */
+.hero-detail .detail-skill .skill-star {
+  color: #b8860b; font-weight: 700; font-size: calc(12 * var(--dsu));
+}
+.hero-detail .detail-skill .skill-state {
+  font-size: calc(10 * var(--dsu)); border-radius: 999px; padding: 0 6px;
+  border: 1px solid var(--line);
+}
+.hero-detail .detail-skill.state-suppressed .skill-name { color: #8a8579; }
+.hero-detail .detail-skill.state-suppressed .skill-state {
+  color: #6b6255; border-color: #c9c1b3; background: #efece6;
+}
+.hero-detail .detail-skill.state-lost .skill-name { color: #9a938a; text-decoration: line-through; }
+.hero-detail .detail-skill.state-lost .skill-state {
+  color: #8a4a3a; border-color: #d6b3a8; background: #f7e9e4;
+}
 .hero-detail .detail-divider { height: 1px; background: var(--line); margin: 8px 0 2px; }
 .hero-detail .detail-empty { padding: 3px 0 5px; font-size: calc(12 * var(--dsu)); color: var(--dim); }
 
 /* 武将详情是**叠加的检视窗**（D8）：没有单独的"全壳阻断遮罩"——遮罩只有一层暗化层，
  * 开合详情不改变只读态（是否只读由这一步的表面决定，见 modal.js:selectionEnabled）。 */
+
+/* ---------- 拼点弹窗（huo-taishici-xunyu 票 04 / R7）：全场可见的只读结果面 ----------
+ * 它不是询问面（不进 `stepDialogKind`、不挡牌桌、没有提交按钮）：选牌仍走牌桌表面点自己的
+ * 手牌。几何与询问弹窗同族（舞台区正中），但**不吃指针**——拼点揭晓后可能立刻轮到人类操作
+ * 别的步骤，弹窗只是展示 3 秒。左 1 个固定槽 = 发起者的拼点牌，右 1..N 行 = 各被拼点者的
+ * 牌 + 结果标签（赢 / 没赢 / 都没赢）。z-index 低于询问弹窗：真的开着别的一问时，那一问在上。 */
+.pindian-popup {
+  position: absolute; left: 0; right: 0; top: 6.2%; bottom: 27.5%;
+  z-index: 58;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.pindian-popup[hidden] { display: none !important; }
+.pindian-window {
+  display: flex; flex-direction: column;
+  gap: calc(10 * var(--dsu));
+  padding: calc(12 * var(--dsu)) calc(16 * var(--dsu));
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(43, 36, 28, .32);
+}
+.pindian-title {
+  margin: 0; font-size: calc(15 * var(--dsu)); letter-spacing: .06em;
+  text-align: center;
+}
+.pindian-body { display: flex; align-items: center; gap: calc(14 * var(--dsu)); }
+.pindian-vs { color: var(--dim); font-size: calc(13 * var(--dsu)); }
+.pindian-targets { display: flex; flex-direction: column; gap: calc(10 * var(--dsu)); }
+/* 一个玩家块 = 上方结果 + 中间卡面 + 下方「座位号 武将名」（1v1 两块并排）。 */
+.pindian-player {
+  display: flex; flex-direction: column; align-items: center;
+  gap: calc(4 * var(--dsu));
+}
+.pindian-slot { display: flex; align-items: center; justify-content: center; }
+/* 结果在**卡面上方**：定高一行，赢字变多长都不推牌。 */
+.pindian-verdict {
+  min-height: calc(18 * var(--dsu));
+  font-size: calc(13 * var(--dsu)); font-weight: 700; letter-spacing: .10em;
+  line-height: calc(18 * var(--dsu));
+}
+.pindian-verdict.win { color: var(--ok); }
+.pindian-verdict.lose { color: var(--accent); }
+.pindian-verdict.tie { color: var(--dim); }
+/* 归属在**卡面下方**：座位号 + 武将名（与座位卡同源的名字）。 */
+.pindian-who {
+  font-size: calc(11 * var(--dsu)); color: var(--dim);
+  max-width: calc(120 * var(--dsu));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 @media (max-height: 560px) {
   .table-hint { display: block; }

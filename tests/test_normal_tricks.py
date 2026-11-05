@@ -31,6 +31,7 @@ from sgs.state import (
     PlayCard,
     PlayPhaseQuery,
     QueryKind,
+    RespondQuery,
     SelectCards,
     StepPool,
     UseCard,
@@ -211,9 +212,10 @@ def _resolve_frame_id(engine: Engine) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_the_nine_query_kinds_and_the_window_causes_are_defined():
-    """票 30 把 ``QueryKind`` 从 6 类扩到 8 类（+ 发动 / 选项），票 10 再加 ``ARRANGE``（排列）；
-    M1 四类与票 27 两类不动（闭集只许增，与 ``WindowCause`` 同一姿态）。"""
+def test_the_ten_query_kinds_and_the_window_causes_are_defined():
+    """票 30 把 ``QueryKind`` 从 6 类扩到 8 类（+ 发动 / 选项），票 10 再加 ``ARRANGE``（排列），
+    huo-shenzhouyu-mobile 票 05 再加 ``DISTRIBUTE``（计数式分配）；M1 四类与票 27 两类不动
+    （闭集只许增，与 ``WindowCause`` 同一姿态）。"""
     assert {kind.value for kind in QueryKind} == {
         "PLAY_PHASE",
         "DODGE",
@@ -224,6 +226,7 @@ def test_the_nine_query_kinds_and_the_window_causes_are_defined():
         "SKILL_ACTIVATION",
         "SELECT_OPTION",
         "ARRANGE",
+        "DISTRIBUTE",
     }
     assert {cause.value for cause in WindowCause} == {
         "NULLIFY",
@@ -633,6 +636,154 @@ def test_borrowed_sword_hands_over_the_weapon_when_refused(pack):
 
 
 # ---------------------------------------------------------------------------
+# W5-04：次数限制只在持刀者**自己的出牌阶段**生效（用户裁定 2026-10-30）
+# ---------------------------------------------------------------------------
+
+
+def _borrowed_in_another_turn(
+    pack, *, holder_used: int, holder_slashes: int = 2, borrowed_count: int = 1
+):
+    """座位 0 的回合：手里 ``borrowed_count`` 张借刀；座位 1 持刀（雌雄双股剑）+ 若干【杀】。
+
+    ``holder_used`` = 持刀者**自己上一回合**用掉的【杀】数，故意留在 ``slash`` 计数键上——
+    W5-04 的实机根因就是那个陈旧计数被"别人回合里的借刀窗口"读到了。
+    攻击范围 2 在 3 人环上覆盖 0 / 2 两个座位，Bn = 2 恒为合法【杀】目标。
+    """
+    borrowed = cards_of_type(pack, "borrowed_sword")[:borrowed_count]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    slashes = cards_of_type(pack, "slash")[:holder_slashes]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=tuple(borrowed)),
+            SeatSpec(hand=tuple(slashes), equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(pack, *borrowed, weapon, *slashes),
+        turn_seat=0,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    state.player(1).card_use_counts["slash"] = holder_used
+    return Engine.from_state(state, seed=1), weapon, slashes
+
+
+def _pass_players(count: int = 3) -> list[_Planned]:
+    """只回答"结束阶段 / 放弃"的脚本玩家（座位数 = ``count``）。"""
+    return [_Planned(_Plan(play="__none__", played=True)) for _ in range(count)]
+
+
+def _borrowed_designation(
+    query, *, designations: tuple[int, ...] = (2,)
+) -> UseCard | None:
+    """本次出牌阶段询问的内部池里"借刀 + [持刀者 1, Bn]"那条动作（不在池里则 ``None``）。"""
+    for action in getattr(query, "designation_actions", ()):
+        if isinstance(action, UseCard) and action.designations == designations:
+            return action
+    return None
+
+
+def _submit_borrowed(engine, *, designations: tuple[int, ...] = (2,)) -> None:
+    """停在座位 0 的出牌阶段询问上 ⇒ 提交"借刀 + [持刀者 1, Bn]"。"""
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery), f"应停在出牌阶段询问，实得 {query!r}"
+    action = _borrowed_designation(query, designations=designations)
+    assert action is not None, "本次出牌阶段询问里没有 [持刀者 1, Bn] 的借刀动作"
+    engine.submit(action)
+
+
+def test_a_slash_used_in_an_earlier_turn_does_not_close_the_borrowed_sword_window(pack):
+    """W5-04：持刀者**上一回合**用过【杀】，本回合（座位 0 的回合）被借刀。
+
+    借刀窗口必须仍给出"对 Bn 使用【杀】"的候选（不是 auto-b）；持刀者由此不交出武器。
+    先红时以 ``xfail(strict=True)`` 落地（``08f222a``），修复提交摘掉标记。
+    """
+    engine, weapon, _slashes = _borrowed_in_another_turn(pack, holder_used=1)
+    players = _pass_players()
+    run_until(engine, players, lambda e: e.pending is not None)
+    _submit_borrowed(engine)
+    run_until(
+        engine,
+        players,
+        lambda e: bool(_windows(e, WindowCause.BORROWED_SWORD))
+        or weapon not in e.state.player(1).equip,
+    )
+
+    window = engine.pending
+    assert isinstance(window, RespondQuery) and window.cause is WindowCause.BORROWED_SWORD, (
+        "陈旧的【杀】计数不得把 a 变成不可行（auto-b）：必须开窗口问 a / b"
+    )
+    uses = [action for action in window.legal_actions if isinstance(action, UseCard)]
+    assert uses and {action.targets for action in uses} == {(2,)}, (
+        "a = 持刀者对 Bn 使用一张【杀】"
+    )
+
+    engine.submit(uses[0])
+    run_until(engine, players, lambda e: _use_settled(e, "slash"))
+
+    assert weapon in engine.state.player(1).equip, "出【杀】者不交出武器"
+    assert engine.state.player(2).hp == 3, "Bn 受到 1 点伤害"
+
+
+class _BorrowRepeatedly:
+    """座位 0 的出牌阶段脚本：每次都用一张借刀（指定 [持刀者 1, Bn 2]），没有就结束阶段。"""
+
+    def __init__(self, *, designations: tuple[int, ...] = (2,)) -> None:
+        self.designations = designations
+        self.plays = 0
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            action = _borrowed_designation(query, designations=self.designations)
+            if action is not None:
+                self.plays += 1
+                return action
+            return _find(query, EndPhase)
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _slash_uses_settled(engine) -> int:
+    """已结算完的【杀】张数（按 ``RESOLVE_AFTER_END`` 的牌面事实数，借刀本身不算）。"""
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.type == "slash" for card in record.cards)
+    )
+
+
+def test_two_borrowed_swords_in_one_other_turn_both_let_the_holder_use_a_slash(pack):
+    """用户裁定："在其他角色回合不考虑出杀次数"——同一个别人的回合里两次借刀都允许。
+
+    第二次借刀时持刀者的 ``slash`` 计数已经是 1（第一次被迫使用的【杀】记在同一个键上）；
+    按裁定它仍不是限制条件，故两刀都打得出去、武器不交出。
+    """
+    engine, weapon, _slashes = _borrowed_in_another_turn(
+        pack, holder_used=0, holder_slashes=2, borrowed_count=2
+    )
+    borrower = _BorrowRepeatedly()
+    holder = _Planned(_Plan(play="__none__", played=True, respond="use", use_target=2))
+    players = [borrower, holder, *_pass_players(1)]
+
+    run_until(
+        engine,
+        players,
+        lambda e: _slash_uses_settled(e) >= 2 or weapon not in e.state.player(1).equip,
+    )
+
+    assert borrower.plays == 2, "座位 0 的两张借刀都用了"
+    assert len(_windows(engine, WindowCause.BORROWED_SWORD)) == 2, (
+        "同一个别人的回合里两次借刀都要问持刀者 a / b"
+    )
+    assert _slash_uses_settled(engine) == 2, "两刀都真的打出去了"
+    assert engine.state.player(2).hp == 2, "Bn 连吃两刀"
+    assert weapon in engine.state.player(1).equip, "两次都出【杀】⇒ 武器不交出"
+
+
+# ---------------------------------------------------------------------------
 # W5-02a 借刀：附带指定（暗发布）
 # ---------------------------------------------------------------------------
 
@@ -989,6 +1140,9 @@ class _BorrowedHost:
 
     def current_target(self, frame):
         return 1
+
+    def advance_provider(self, frame, timing):
+        return None, None, None
 
     def respond_candidates(self, actor, **kwargs):
         return self.offers

@@ -7,6 +7,7 @@ from .positions import (
     build_state,
     cards_of_type,
     declare_death,
+    deck_excluding,
     play_phase_peach_engine,
     play_standard,
     run_turns,
@@ -30,8 +31,13 @@ ACCEPTANCE_SEEDS: tuple[int, ...] = tuple(range(136, 168))
 **W4-fix-2（转化技只经预发动）又重选一次**：转化候选从 ``legal_actions`` 收回后，**随机档**
 的可选面变小、盲选质量上升（``104..135`` 上随机 9/32 → 14/32），启发式档持平（17/32），
 批内优势从 8 掉到 3。判据 ``≥ len//8 = 4`` 不放宽，按本仓纪律**重新选种**为相邻的
-``136..167``：当前引擎下启发式 24/32、随机 15/32，优势 **9**；128 局整批的相对优势仍是
+``136..167``：当时引擎下启发式 24/32、随机 15/32，优势 **9**；128 局整批的相对优势
 0.25（87/128 vs 55/128）。
+
+**票 12（每座位 ``ai:<seat>`` 子流）后重读**：32 种子批仍是 ``136..167``，判据不变——
+**启发式 22/32 vs 随机 16/32（优势 6 ≥ 4）**。128 局验收带按仓纪律换到 ``5000..5127``
+（88/128 vs 51/128 = 0.289），旧 128 批 ``104..231`` 降为趋势批（78/128 vs 58/128 =
+0.156，只作诊断）。详细选种理由见 ``test_heuristic_ai.RATE_SEEDS`` 的 docstring。
 使用者：``test_all_ai_games.SEEDS``、``test_heuristic_ai`` 的 32 种子扫描与胜率对比。"""
 
 __all__ = (
@@ -44,6 +50,7 @@ __all__ = (
     "build_state",
     "cards_of_type",
     "declare_death",
+    "deck_excluding",
     "find_action",
     "play_phase_peach_engine",
     "play_standard",

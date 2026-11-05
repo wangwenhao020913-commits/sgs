@@ -23,9 +23,10 @@ RUNS="$TMP/runs"
 mkdir -p "$RUNS"
 PID=""
 FIXPID=""
+M6PID=""
 
 cleanup() {
-  for child in "$PID" "$FIXPID"; do
+  for child in "$PID" "$FIXPID" "$M6PID"; do
     if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
       kill "$child" 2>/dev/null || true
       wait "$child" 2>/dev/null || true
@@ -86,10 +87,11 @@ if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --pro
   exit 1
 fi
 
-# ② 一整局 8 人身份局，人类座位逐个经 HTTP 应答
-echo "=== 正局：8 人，逐问经 HTTP 应答 ==="
+# ② 一整局 8 人身份局，人类座位逐个经 HTTP 应答（默认将池 = 标准版 + 界版的**混合池**，
+# 故这里同时断言本局真的抽到两版武将 = spec P1-2 的"混合池 8 人界局"）。
+echo "=== 正局：8 人，逐问经 HTTP 应答（混合池） ==="
 if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" \
-      --seed 20261012 --players 8 --max-answers 3000; then
+      --seed 20261012 --players 8 --max-answers 3000 --expect-mixed; then
   echo "FAIL: 端到端对局未通过"
   echo "--- 服务输出 ---"
   cat "$LOG"
@@ -234,6 +236,36 @@ fi
 kill "$FIXPID" 2>/dev/null || true
 wait "$FIXPID" 2>/dev/null || true
 FIXPID=""
+
+# ⑥e M6 票 20：三条**构造 tape**（觉醒 / 额外回合 / 区域放置），各至少一次真实往返。
+# 局面由 `tests/support/m6_fixture_server.py` 提供（档位 standard_108，不依赖随机种子）；
+# 人类座位在每条 tape 里都经 HTTP 应答自己触发的"是否发动" / 选项询问，判据由
+# `web_client.m6_fixed_tapes` 的 observe 在响应体上核对（觉醒 = 上限 -1 + ☆ 技能；
+# 额外回合 = turn_change(extra=true)；区域放置 = 快照里的 hero_zones）。
+echo "=== M6 固定 tape：觉醒 / 额外回合 / 区域放置（构造局面，真 HTTP） ==="
+M6LOG="$TMP/m6-fixtures.log"
+"$PYTHON" tests/support/m6_fixture_server.py --port 0 --runs-dir "$RUNS" > "$M6LOG" 2>&1 &
+M6PID=$!
+M6URL=""
+for _ in $(seq 1 60); do
+  M6URL="$(sed -n 's/.*\(http:\/\/127\.0\.0\.1:[0-9][0-9]*\/\).*/\1/p' "$M6LOG" 2>/dev/null | head -1)"
+  [ -n "$M6URL" ] && break
+  if ! kill -0 "$M6PID" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if [ -z "$M6URL" ]; then
+  echo "FAIL: M6 固定 tape 服务没有在预期时间内打印监听地址"
+  cat "$M6LOG" 2>/dev/null || true
+  exit 1
+fi
+if ! "$PYTHON" tests/support/web_client.py --base "$M6URL" --tape m6_fixed; then
+  echo "FAIL: M6 固定 tape（觉醒 / 额外回合 / 区域放置）未通过"
+  cat "$M6LOG" 2>/dev/null || true
+  exit 1
+fi
+kill "$M6PID" 2>/dev/null || true
+wait "$M6PID" 2>/dev/null || true
+M6PID=""
 
 # ⑦ `--host 0.0.0.0` 必须真的绑全部网卡（WSL 里从 Windows 打开界面就靠它）。
 # 只多起一个进程、只发两个请求，然后立刻杀掉——它防的是"host 参数被写死回环"这种回归。

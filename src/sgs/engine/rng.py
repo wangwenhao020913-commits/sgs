@@ -5,8 +5,11 @@
 
 - 根 = ``random.Random``（Mersenne Twister），不用模块级 ``random``（隐式共享状态）。
 - 子流 = 名字哈希派生（与创建顺序无关）：M1 两条 ``shuffle`` / ``ai``，M2 增身份发放
-  ``identity``（票 13 §3）；隐藏槽乱序的 ``select`` 由票 19 落地
-  （`GLOSSARY.md` §子流：M2 增身份发放与隐藏槽乱序）。
+  ``identity``（票 13 §3）；隐藏槽乱序的 ``select`` 由票 19 落地；随机 AI 自票 12 起
+  按座位分名 ``ai:<seat>``（``ai_stream``），一个座位多取数不改写其他座位；
+  **武将牌堆抽取**走 ``hero_cards``（``hero_cards_stream``，票 07），**懒取**——不抽
+  武将牌的对局一个随机数都不从这里取，既有金录像因此逐字节不变。
+  （`GLOSSARY.md` §子流：M2 增身份发放与隐藏槽乱序；随机 AI 按座位分名。）
 - 洗牌自己写 Fisher–Yates + 无偏取数：不押在运行时的 ``shuffle`` / 播种实现细节上
   （官方只保证 ``random()`` 的跨版本一致，其余明说 subject to change）。
 """
@@ -17,7 +20,14 @@ import hashlib
 import random
 import secrets
 
-__all__ = ["SUBSTREAM_DOMAIN", "RandomSource", "new_seed"]
+__all__ = [
+    "HERO_CARDS_SUBSTREAM",
+    "SUBSTREAM_DOMAIN",
+    "RandomSource",
+    "ai_stream",
+    "hero_cards_stream",
+    "new_seed",
+]
 
 SEED_LIMIT = 1 << 64
 
@@ -86,3 +96,42 @@ class RandomSource:
         for i in range(len(items) - 1, 0, -1):
             j = self.randbelow(i + 1)
             items[i], items[j] = items[j], items[i]
+
+
+def ai_stream(seed: int, seat: int) -> RandomSource:
+    """每个座位一条 ``ai:<seat>`` 子流（票 12；spec §2.10）。
+
+    旧口径是全桌共用 ``substream("ai")``：一条随机队列，任意座位多取一次数都会平移
+    其余座位的抽签位置（票 03 实测：一次多余取数改写他座应答的中位数 **195 条/局**）。
+    按座位名派生后，一个座位多问一次只影响它自己——这是后续 A/B 读数可比的技术前提。
+
+    ``seat`` 是 0 基座位号；这里只拒绝负数与非整数，座位数的上界由调用方的
+    建座循环（``range(player_count)``）保证。
+    """
+    if isinstance(seat, bool) or not isinstance(seat, int):
+        raise ValueError(f"座位必须是整数，得到 {type(seat).__name__}")
+    if seat < 0:
+        raise ValueError(f"座位不能为负，得到 {seat!r}")
+    return RandomSource(seed).substream(f"ai:{seat}")
+
+
+HERO_CARDS_SUBSTREAM = "hero_cards"
+"""武将牌堆抽取的**专用子流名**（票 07；票 02 §4.2 B1）。
+
+与 ``hero``（开局配将）分开：开局配将抽的是"这一局谁上场"（座位池 = 将池 / 禁将 +
+手选），而本子流抽的是"从**未加入游戏的武将牌堆**里翻出几张给人看"（池 = 全库真名 −
+屏蔽集合）。两条语义不同，共用一条子流会让"抽过一张武将牌"平移整局配将的抽签位置。
+
+**懒取**：派生是名字哈希的纯函数（不消耗任何既有子流），且只有
+:meth:`~sgs.engine.game.Engine.draw_hero_cards` 首次真的抽牌时才派生并取数——
+不抽武将牌的对局一个随机数都不从这里取，既有金录像因此逐字节不变。
+"""
+
+
+def hero_cards_stream(seed: int) -> RandomSource:
+    """武将牌堆抽取的子流（票 07）：调用方 = ``Engine.draw_hero_cards``（懒取）。
+
+    同 :func:`ai_stream` 的姿态：只做名字派生，不碰 ``shuffle`` / ``identity`` /
+    ``select`` / ``hero`` 任何一条的位置。
+    """
+    return RandomSource(seed).substream(HERO_CARDS_SUBSTREAM)

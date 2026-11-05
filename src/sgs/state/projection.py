@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from sgs.data import Identity
 
-from .models import GameState, Player
+from .models import CardRef, GameState, Player
 from .protocol import PlayerPublic, PlayerView
 
 __all__ = ["project"]
@@ -34,12 +34,43 @@ def _visible_identity(player: Player, *, viewer: int) -> Identity | None:
     return None
 
 
+def _hero_zone_facts(
+    state: GameState, player: Player, *, with_faces: bool
+) -> tuple[int, tuple[CardRef, ...]]:
+    """一个座位武将牌上的 ``(公开张数, 本人牌面)``（票 27）。
+
+    - **张数公开**：同一座位多个放置技能实例的区**求和**（跨座位的区算宿主）；
+    - **牌面只给宿主**：与 M6 的 2026-10 口径一致
+      （``tools/sgs_web/visibility.py::hero_zone_ref_visible``），未登记 / 畸形的区同一默认；
+      他人视角只拿张数（``with_faces=False``，不构造 ``CardRef``）。
+    - 区之间**没有规则先后**：这里按区键排序只为可重现，顺序不是契约（AI 只数张数）。
+    """
+    count = 0
+    cards: list[CardRef] = []
+    for skill_instance in sorted(player.hero_cards):
+        zone = state.hero_zone(player.seat, skill_instance)
+        count += len(zone)
+        if with_faces:
+            cards.extend(state.refs(zone))
+    return count, tuple(cards)
+
+
 def project(state: GameState, seat: int) -> PlayerView:
     """投影出 ``seat`` 这一参与者能看到的棋盘信息。
 
     武将 id 与势力是**公开信息**（标准版武将牌明置；`04`（§2「信息可见性」）），故逐座位照搬；
     ``identity`` 仍走 :func:`_visible_identity` 的过滤（票 02 §可见性 8：过滤逻辑一字不改）。
+
+    武将牌上的牌（票 27）：逐座位给**张数**（公开，守恒量的一项）；牌面只给查看者自己当
+    宿主的区（:func:`_hero_zone_facts`），与 M6 的 2026-10 口径一致。两者都 ``exclude``，
+    不进记录流。
     """
+    hero_zone_facts = {
+        player.seat: _hero_zone_facts(
+            state, player, with_faces=player.seat == seat
+        )
+        for player in state.players
+    }
     players = tuple(
         PlayerPublic(
             seat=player.seat,
@@ -49,7 +80,10 @@ def project(state: GameState, seat: int) -> PlayerView:
             alive=player.alive,
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
+            hero_zone_count=hero_zone_facts[player.seat][0],
             chained=player.chained,
+            flipped=player.flipped,
+            markers=player.markers,
             wine_active=player.wine_active,
             identity=_visible_identity(player, viewer=seat),
             hero=player.hero,
@@ -67,4 +101,5 @@ def project(state: GameState, seat: int) -> PlayerView:
         processing=state.refs(state.processing),
         turn_seat=state.turn_seat,
         phase=state.phase,
+        hero_zone_cards=hero_zone_facts[seat][1],
     )

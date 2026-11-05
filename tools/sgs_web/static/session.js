@@ -25,8 +25,19 @@ const STAGE_ZONE_LABELS = {
   judge: "判定",
 };
 
-/** 寿命口径（D5）：无帧停留 1s、淡出 1s；任何舞台项兜底 30s。 */
-const STAGE_HOLD_MS = 1000;
+/** 舞台停留（D9 / U4-03）：`0.5 × (N+1)` 秒，N = **产生该舞台项的那条记录**的牌数。
+ *
+ * N 只由产生它的记录决定（记在 `item.stage.batch`）：换组 / 跨 `commit` 都不重算，
+ * 依次发生的两条移动各按 N=1 计（第二次交牌不会并进第一批）。
+ * 缺省 / 非法 N 按 1 计（= U3 的单张停留 1s，现行回归不破）。
+ * 淡出时长不在这里：它固定 `STAGE_FADE_MS`，`animScale` 只缩淡出、不缩停留。
+ */
+function stageHoldMs(batch) {
+  const count = Number(batch);
+  return 500 * ((Number.isFinite(count) && count > 0 ? count : 1) + 1);
+}
+
+/** 淡出时长（D5 / D9）：停留结束后整体淡出 1s；任何舞台项兜底 30s（丢 pop 时不留幽灵）。 */
 const STAGE_FADE_MS = 1000;
 const STAGE_MAX_MS = 30000;
 
@@ -43,20 +54,26 @@ function stageNow() {
   return Date.now();
 }
 
-/** 舞台项 = 卡面 + 一条道 + 来源 + 决定它活多久的结算帧。
+/** 舞台项 = 卡面 + 一条道 + 来源 + 决定它活多久的结算帧 / 批量。
  *
  * 字段住在 `item.stage` 里（不是散在卡面上）：判定是**纯函数**
- * :func:`stageLane`，只读这三个数——`enteredAt` / `fadeAt` / 承载帧。
+ * :func:`stageLane`，只读 `enteredAt` / `fadeAt`；`batch` 只参与算停留
+ * （:func:`stageHoldMs`），在**创建**时按产生它的那条记录写下、之后不重算。
  * ``fadeAt === null`` = 还在等承载帧的 `pop`；兜底由 `enteredAt + 30s` 接住。
  */
 function stageItem(card, options = {}) {
   const now = options.enteredAt === undefined ? stageNow() : options.enteredAt;
   const frameId = Number(options.frameId) || 0;
   const lane = options.lane || "processing";
+  // 没有产生记录（快照补项 / 询问自带亮牌）时按 N=1：与 U3 的单张停留一致。
+  const batch = options.batch === undefined
+    ? 1
+    : Math.max(1, Math.floor(Number(options.batch) || 1));
   let fadeAt = options.fadeAt;
   if (fadeAt === undefined) {
-    // 处理中：离开处理区 / 承载帧 pop 才起算；展示与弃牌：无帧固定 1s 停留，有帧等 pop。
-    fadeAt = lane === "processing" || frameId > 0 ? null : now + STAGE_HOLD_MS;
+    // 处理中：离开处理区 / 承载帧 pop 才起算；展示与弃牌：无帧从入台起停 0.5(N+1)，
+    // 有帧等 pop（D9：pop 时刻 + 0.5(N+1)）。
+    fadeAt = lane === "processing" || frameId > 0 ? null : now + stageHoldMs(batch);
   }
   return {
     ...card,
@@ -66,6 +83,7 @@ function stageItem(card, options = {}) {
     stage: {
       lane,
       frameId,
+      batch,
       enteredAt: now,
       fadeAt,
       fromZone: options.fromZone || null,
@@ -138,10 +156,12 @@ function stageFromZoneOf(cards, cardId) {
   return stageFromZoneMap(cards).get(String(cardId)) || null;
 }
 
-/** 舞台项开始淡出的时刻（D5）：有 `fadeAt` 用它，否则兜底 = 入台 + 30s。
+/** 舞台项开始淡出的时刻（D5 / D9）：有 `fadeAt` 用它，否则兜底 = 入台 + 30s。
  *
  *  判定（:func:`stageLane`）与计时器（:func:`nextStageDeadline`）共用这一处算式：
  *  两边各写一份，兜底口径一旦漂移，就会出现"判定说还在、计时器说该走了"。
+ *  30s 兜底**只接丢 pop**（`fadeAt === null`）：已经算出的停留即使超过 30s（极大的 N）
+ *  也照 D9 的 `0.5(N+1)` 走，不被这个兜底截断——它不是停留上限。
  */
 function stageFadeAt(stage) {
   const enteredAt = Number(stage.enteredAt) || 0;
@@ -165,13 +185,21 @@ function stageLane(item, now) {
   return "visible";
 }
 
-/** 承载帧 `pop` 到了：把挂在这帧上的舞台项推进 1s 淡出（已开始的保持原锚点）。 */
+/** 承载帧 `pop` 到了（D9）：挂在这帧上的舞台项从 pop 起停 `0.5(N+1)` 秒，到点再 1s 淡出
+ *  （已排定的保持原锚点）。停留按各舞台项**自己的 batch** 算：同一帧里来自不同记录的项
+ *  可以停不一样久；同一条记录的 N 张同刻入台 ⇒ 同刻 pop ⇒ 同刻开始淡出。
+ *
+ *  两个入口共用（`applyEffectDelta` / `applyRevealDelta` 的 pop 分支）：两处各写一份
+ *  停留公式迟早会漂移。
+ */
 function stageStartFade(items, frameId, now) {
   for (const item of items || []) {
     const stage = item && item.stage;
     if (!stage) continue;
     if (String(stage.frameId) !== String(frameId)) continue;
-    if (stage.fadeAt === null || stage.fadeAt === undefined) stage.fadeAt = now;
+    if (stage.fadeAt === null || stage.fadeAt === undefined) {
+      stage.fadeAt = now + stageHoldMs(stage.batch);
+    }
   }
 }
 
@@ -184,7 +212,10 @@ function stageStartFade(items, frameId, now) {
 function stageAttachDiscard(item, frameId) {
   item.stage.lane = "discard";
   item.stage.frameId = frameId;
-  item.stage.fadeAt = frameId > 0 ? null : item.stage.enteredAt + STAGE_HOLD_MS;
+  // D9：batch 在创建时由产生该舞台项的那条记录写下；换组不重算（沿用首次入台的那一批）。
+  item.stage.fadeAt = frameId > 0
+    ? null
+    : item.stage.enteredAt + stageHoldMs(item.stage.batch);
 }
 
 /** 舞台项的入台顺序（D3：三组按入台顺序排在**一个**换行流里，不按组分行）。 */
@@ -252,14 +283,85 @@ function viewStartsNewSession(body) {
   return body.session_id !== state.view.session_id;
 }
 
+/** 新局开局的**回放底稿**：权威快照 → "发牌前"的骨架（M6 报障 2）。
+ *
+ * 建局响应带的是**整段开局**（发牌 + 若干 AI 回合，直到人类第一个询问），`snapshot` 是这段
+ * 跑完后的局面。要让这段按正常步长逐条演（既不能拿上一局的视图当底稿、也不能一次性冲完），
+ * 底稿必须是**开局前**：身份未发、手牌 0、体力满、装备 / 判定 / 武将牌区空、牌堆 0
+ * （由首条 `deck_shuffle` 的 `card_count` 写回）、阶段与回合空、没有询问。
+ *
+ * **保留**的只有开局前就公开、且整段不变的东西：座位、武将、技能。其余全部交给记录里的
+ * `identity_deal` / `deck_shuffle` / `card_move` / `hp_change` / 时机（见 `applyLiveDelta`）。
+ * 所以"有没有上一局"不再影响这一批的底稿与节奏——两条路走同一份初始化。
+ */
+function openingLiveView(body) {
+  const view = cloneLiveView(body);
+  const snapshot = view.snapshot;
+  snapshot.players = (snapshot.players || []).map((player) => ({
+    ...player,
+    identity: null,
+    identity_label: null,
+    hand_count: 0,
+    hp: Number(player.hp_max ?? player.hp) || 0,
+    equip: [],
+    judge: [],
+    hero_zones: [],
+    hero_tags: [],
+    chained: false,
+    flipped: false,
+    wine_active: false,
+    alive: true,
+  }));
+  snapshot.self_hand = [];
+  snapshot.discard = [];
+  snapshot.processing = [];
+  snapshot.deck_count = 0;
+  snapshot.phase = null;
+  snapshot.turn_seat = null;
+  snapshot.turn_extra = false;
+  snapshot.round = 1;
+  view.pending = null;
+  return view;
+}
+
 /* ------------------------------------------------ 回放期逐事件全表更新（U3-05 / D11） */
+
+/** 技能增删的两条 delta（M6 票 04）：`skill_gain` / `skill_lose`。 */
+const SKILL_DELTA_TYPES = new Set(["skill_gain", "skill_lose"]);
+
+/** 这条可见记录是不是**技能增删**（`:func:`adoptSkillLists` 的触发判据）。 */
+function isSkillDeltaRecord(record) {
+  return Boolean(record) && record.kind === "delta" && SKILL_DELTA_TYPES.has(record.delta_type);
+}
+
+/** 起播前把**技能清单**换成这一批的终态（`body` 里的权威清单）。
+ *
+ * 为什么技能不走逐事件派生：`skill_gain` / `skill_lose` 只带 `skill_id`，而按钮区要
+ * 名字 / 类别 / 徽标 / 可用性、详情要三态——全在快照里，客户端拼不出来第二条真源。
+ * 于是回放期若继续按 live view 的旧 `skills` 画，整段回放都在显示**上一份**清单：
+ * 韬·刘备【义起】实机报障（2026-11-01）"失去【从讨】之后按钮区还写着【从讨】、
+ * 也没有【武圣】【咆哮】"就是这个窗口（详情页同样是旧的——两处都读 live view）。
+ *
+ * 只覆盖两处**纯清单**字段：按钮区顶层 `skills` 与每座位 `players[].skills`（详情用）。
+ * 技能是明置的公开事实，且它们本来就不做逐张动画，故提前装终态不会提前泄露任何牌面；
+ * 牌面 / 体力 / 区域仍逐事件走 `applyLiveDelta`。
+ */
+function adoptSkillLists(liveView, body) {
+  if (!liveView || !body) return;
+  liveView.skills = (body.skills || []).slice();
+  const fresh = (body.snapshot && body.snapshot.players) || [];
+  for (const player of (liveView.snapshot && liveView.snapshot.players) || []) {
+    const same = fresh.find((item) => Number(item.seat) === Number(player.seat));
+    if (same && Array.isArray(same.skills)) player.skills = same.skills.slice();
+  }
+}
 
 /** 一份新的 **live view**：从最近一次提交的视图复制出牌桌会用到的可变容器。
  *
  * 它只属于回放期：每条记录把**可见**变化写进它（见 :func:`applyLiveDelta`），`renderTable`
  * 从它重绘；`commitView` 到时用权威快照整份覆盖。深拷贝的是牌桌会改写的容器
- * （`players` 及其装备 / 判定区、`self_hand`、`discard`、`processing`），故逐事件派生
- * **绝不改** `state.view` 的权威快照。
+ * （`players` 及其装备 / 判定区 / 武将牌上的牌区、`self_hand`、`discard`、`processing`），
+ * 故逐事件派生（含标签增删）**绝不改** `state.view` 的权威快照。
  */
 function cloneLiveView(body) {
   const view = { ...body };
@@ -271,6 +373,10 @@ function cloneLiveView(body) {
       ...player,
       equip: (player.equip || []).slice(),
       judge: (player.judge || []).slice(),
+      hero_zones: (player.hero_zones || []).map((zone) => ({
+        ...zone,
+        cards: (zone.cards || []).slice(),
+      })),
     })),
     self_hand: (snapshot.self_hand || []).slice(),
     discard: (snapshot.discard || []).slice(),
@@ -311,6 +417,79 @@ function liveRemoveCards(list, cards) {
   return (list || []).filter((item) => !gone.has(String(item.card_id)));
 }
 
+/** 把展示通道的标签 delta 与**可见记录**按 `seq` 合并，交给同一条逐事件回放。
+ *
+ * `live_deltas` 是服务端从被记录流裁掉（但牌面已公开）的 `tag_add` / `tag_remove`
+ * 派生的网页载荷；它没有对应的 `records` 条目，故这里按 `seq` 插进回放序列，并打
+ * `live_only`。`stepPlayback` 只对它们更新 live view，不写事件流 / 舞台 / 技能演出。
+ */
+function mergeLiveDeltas(records, liveDeltas) {
+  const events = (liveDeltas || [])
+    .filter((event) => event && Number.isFinite(Number(event.seq)))
+    .slice()
+    .sort((left, right) => Number(left.seq) - Number(right.seq));
+  if (!events.length) return records || [];
+  const out = [];
+  let next = 0;
+  for (const record of records || []) {
+    const seq = Number(record && record.seq);
+    while (next < events.length && Number.isFinite(seq)
+      && Number(events[next].seq) <= seq) {
+      out.push({ ...events[next], kind: "delta", live_only: true });
+      next += 1;
+    }
+    out.push(record);
+  }
+  while (next < events.length) {
+    out.push({ ...events[next], kind: "delta", live_only: true });
+    next += 1;
+  }
+  return out;
+}
+
+/** live view 里所有可能带牌面的列表（手牌 / 弃牌堆 / 处理区 / 装备 / 判定 / 武将牌区）。 */
+function liveCardLists(view) {
+  const snapshot = view && view.snapshot;
+  if (!snapshot) return [];
+  const lists = [snapshot.self_hand, snapshot.discard, snapshot.processing];
+  for (const player of snapshot.players || []) {
+    lists.push(player.equip, player.judge);
+    for (const zone of player.hero_zones || []) lists.push(zone.cards);
+  }
+  return lists.filter((list) => Array.isArray(list));
+}
+
+/** 在一张**已经下发牌面**的牌上就地加 / 撤一个标签（live view 用，替换卡片对象）。
+ *
+ * 标签值由服务端 `live_deltas.tag` 给出（`skill_id` + 派生好的 `label`）；前端不按
+ * 技能 id 查中文名。找不到这张牌（隐藏 / 还没进表）= 零动作，不猜它属于谁。
+ */
+function liveUpdateCardTags(view, cardId, tag, adding) {
+  if (!tag || !tag.skill_id) return;
+  const wanted = String(cardId);
+  const skillId = String(tag.skill_id);
+  for (const list of liveCardLists(view)) {
+    for (let index = 0; index < list.length; index += 1) {
+      const card = list[index];
+      if (!card || String(card.card_id) !== wanted) continue;
+      let tags = Array.isArray(card.tags) ? card.tags.slice() : [];
+      if (adding) {
+        const at = tags.findIndex(
+          (item) => item && String(item.skill_id) === skillId);
+        if (at >= 0) tags[at] = tag;
+        else tags.push(tag);
+      } else {
+        tags = tags.filter(
+          (item) => !item || String(item.skill_id) !== skillId);
+      }
+      const next = { ...card };
+      if (tags.length) next.tags = tags;
+      else delete next.tags;
+      list[index] = next;
+    }
+  }
+}
+
 /** 一条记录对 live view 的**可见**贡献（D11）：只写记录里真有的派生事实。
  *
  * 可派生：体力（`hp_change.after`）、手牌数（`card_move` 的牌面 / `card_count`）、自己的
@@ -330,6 +509,20 @@ function applyLiveDelta(record, view = state.liveView) {
   const players = snapshot.players || [];
   const playerAt = (seat) => players.find((player) => Number(player.seat) === Number(seat));
   if (record.kind === "delta") {
+    if (record.delta_type === "tag_add" || record.delta_type === "tag_remove") {
+      const cardId = record.card_id !== undefined && record.card_id !== null
+        ? record.card_id
+        : (record.card && record.card.card_id);
+      const tag = record.tag || (
+        record.skill_id
+          ? { skill_id: record.skill_id, label: record.label || record.skill_id }
+          : null
+      );
+      if (cardId !== undefined && cardId !== null && tag) {
+        liveUpdateCardTags(view, cardId, tag, record.delta_type === "tag_add");
+      }
+      return view;
+    }
     if (record.delta_type === "hp_change") {
       const player = playerAt(record.seat);
       if (player) player.hp = Number(record.after);
@@ -340,9 +533,61 @@ function applyLiveDelta(record, view = state.liveView) {
       if (player) player.chained = Boolean(record.chained);
       return view;
     }
+    if (record.delta_type === "flipped_change") {
+      const player = playerAt(record.seat);
+      if (player) player.flipped = Boolean(record.flipped);
+      return view;
+    }
+    if (record.delta_type === "marker_change") {
+      // 票 06：标记数量变化（绝对值；0 = 移除）。live view 只改数量 / 增删条目，
+      // 来源标签与说明由下一次快照（服务端 seat_display）补齐。
+      const player = playerAt(record.seat);
+      if (!player) return view;
+      const markers = (player.markers || []).slice();
+      const at = markers.findIndex(
+        (marker) => marker.name === record.name
+          && Number(marker.source_seat) === Number(record.source_seat)
+          && marker.source_skill_id === record.source_skill_id,
+      );
+      const count = Number(record.count) || 0;
+      if (count <= 0) {
+        if (at >= 0) markers.splice(at, 1);
+      } else if (at >= 0) {
+        markers[at] = { ...markers[at], count };
+      } else {
+        markers.push({
+          name: record.name,
+          count,
+          source_seat: Number(record.source_seat),
+          source_skill_id: record.source_skill_id,
+          source_label: `座位 ${Number(record.source_seat) + 1}`,
+          description: null,
+        });
+      }
+      player.markers = markers;
+      return view;
+    }
     if (record.delta_type === "wine_change") {
       const player = playerAt(record.seat);
       if (player) player.wine_active = Boolean(record.active);
+      return view;
+    }
+    if (record.delta_type === "turn_change") {
+      // M6 票 11 的回合边界事实（票 19 起界面消费）：额外回合**不推进自然指针**，
+      // 故轮次只在这里更新、不按 TURN_START 数（那样同一个座位连开两个回合会误进一轮）。
+      // 公开事实（回合座位 + 轮次都在明面上），无需按可见性裁剪。
+      snapshot.round = Number(record.round);
+      snapshot.turn_extra = Boolean(record.extra);
+      return view;
+    }
+    if (record.delta_type === "identity_deal") {
+      // 开局发身份（M6 报障 2 的开局回放）：`identity` 为 null = 这名座位对你不可见。
+      // 与下面的 `identity_reveal` 同一条写入口（翻译点仍只有 `identityLabel` 一处）。
+      const player = playerAt(record.seat);
+      if (player) {
+        player.identity = record.identity ?? null;
+        player.identity_label = identityLabel(record.identity);
+      }
       return view;
     }
     if (record.delta_type === "identity_reveal") {
@@ -365,6 +610,10 @@ function applyLiveDelta(record, view = state.liveView) {
         if (to.zone === "deck") {
           snapshot.deck_count = Number(snapshot.deck_count) + liveMoveCount(record);
         }
+      } else if (!from.zone && to.zone === "deck") {
+        // **开局洗牌**（`from_zone = null`）：牌堆张数就是这一条给的。开局底稿的
+        // `deck_count` 是 0（发牌前），这里把它写回，后面的发牌 / 摸牌才会往下减。
+        snapshot.deck_count = liveMoveCount(record);
       }
       return view;
     }
@@ -439,10 +688,16 @@ function applyView(body) {
   // U1-05：叙事条目随视图增量下发（服务端已按查看者过滤）。先收进本地序列，
   // 再按记录回放的进度逐条铺——不在前端补事实 / 判断隐藏信息。
   for (const entry of body.narrative || []) state.narrative.push(entry);
-  const incoming = body.records || [];
-  const first = state.view === null;
+  // `live_deltas` = 被人类记录流裁掉、但牌面已公开的标签增删（网页展示通道）。
+  // 与可见记录按 seq 合并后走同一条逐事件回放；它们不写事件流 / 舞台。
+  const incoming = mergeLiveDeltas(body.records || [], body.live_deltas || []);
+  const newSession = viewStartsNewSession(body);
+  // **开局批** = 换会话 + 带 `header`（无 seq 的那条只在 `after < 0` 的建局响应里下发）。
+  // 用它认出"这一批从发牌前开始"，而不是看"这一页之前有没有打过一局"——两条路必须走
+  // 同一份初始化、同一个节奏（M6 报障 2）。
+  const opening = newSession && incoming.some((record) => record.kind === "header");
   // U3-01 / D5.5：换会话时舞台整块作废——上一局的牌不能在**回放新局记录之前**还留在台上。
-  if (viewStartsNewSession(body)) {
+  if (newSession) {
     state.effectCards = [];
     state.revealedCards = [];
     // U3-04：上一局还没触发的技能发动事件不属于新局（DOM 侧由 commit 的清屏兜底）。
@@ -464,32 +719,51 @@ function applyView(body) {
     commitView(body);
     return;
   }
-  const previous = viewStartsNewSession(body)
+  const previous = newSession
     ? []
     : (state.view && state.view.snapshot ? state.view.snapshot.processing || [] : []);
   state.effectCards = mergeEffectCards(previous);
-  // U3-05（D11）：逐事件派生的 live view 从**最近一次提交**的视图起算（深拷贝，绝不改权威
-  // 快照）。开局那一批没有上一份提交视图（牌桌本来是空的、且整批即时冲刷），
-  // `playback.live = false`：只逐事件派生舞台，表体等 `commitView`。
-  const live = state.view !== null;
-  if (live) state.liveView = cloneLiveView(state.view);
+  // U3-05（D11）：逐事件派生的 live view 从中途的上一份提交视图起算（深拷贝，绝不改权威
+  // 快照）。**开局批**没有"中途底稿"：它的底稿是 :func:`openingLiveView` 倒推出来的发牌前
+  // 骨架，故新局的开局批也 `live = true`——表体随记录逐条长出来，而不是等 commit 才出现。
+  const live = opening || state.view !== null;
+  if (live) state.liveView = opening ? openingLiveView(body) : cloneLiveView(state.view);
+  if (live && incoming.some(isSkillDeltaRecord)) adoptSkillLists(state.liveView, body);
   state.playback = {
     body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live,
   };
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
-  $("t-choice").textContent = "";
   // 回放期间倒计时与右端动作都收起：`state.view` 还停在上一条询问，继续画会误导。
   resetCountdown();
   resetRightActions();
-  // 回放期间**响应文本清空**：它属于"下方询问界面"的那一问，等播完、新询问提交后再显示。
-  // 描述文本不在这里清——它由 renderProcessing 按效果区逐事件改写。
-  $("t-prompt").textContent = "";
-  // 第一条也等满一个步长再出现：每个事件之间的间隔就是当前的步长档。
+  // 回放期间**整个询问面让位**（提示文本 / 技能串 / 目标提示 / 选项格 / 询问弹窗）：它们
+  // 属于"下方询问界面"的上一问，等这一批播完、新询问提交后再画。只清一两样会让其余几样
+  // 挂到下一次 `renderPending` 才消失（M6 实机报障）。描述文本不在这里清——它由
+  // `renderProcessing` 按效果区逐事件改写；五谷的持久亮牌也留着，见 `blankAskSurface`。
+  blankAskSurface();
+  // 开局：先把新局的骨架画上（旧局的武将 / 手牌 / 判定装备一帧都不留在屏上），再按正常
+  // 步长逐条演。顶栏的种子 / 座位也属于新局，不等 commit 再换。
+  if (opening) {
+    $("t-seed").textContent = String(body.seed);
+    $("t-seat").textContent = String(body.human_seat);
+    renderTable();
+  }
+  // 第一条也等满一个基准步长再出现；之后每条记录的间隔由**上一条**的 `delayOf` 算
+  // （U4-02 / D7：base + 该条动画时长 × base/100）。
   playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
-  // **开局**是唯一不等节奏的：此前牌桌上一片空白，逐条播开局事件只是空屏五秒。
-  // 直接把记录走完（日志照收），让牌桌立刻有局面可看。
-  if (first) flushPlayback();
+}
+
+/** U4-02（spec D7 / D8）：一条记录占用的回放步长 = `base + dur(记录) × (base / 100)`。
+ *
+ * **纯函数**：`base` 由调用方给（缺省读当前档位），不读时钟、不改 `state.eventDelayMs`
+ * ——原型在播放里改档位是 bug，档位只由按钮 / `anim.ini` 的初始档决定。
+ * `dur` 来自 `anim.js:durationOf`（没有动画 / 不飞 / 未登记 = 0），故阶段 / 回合飘字这类
+ * 非阻塞记录只吃 `base`；`base` 同时是下限与动画缩放因子（50ms 档 0.5×、300ms 档 3×）。
+ * 回放页不接飞行层（D15），仍只用 `state.eventDelayMs`。
+ */
+function delayOf(record, base = state.eventDelayMs) {
+  return Math.round(base + durationOf(record) * base / 100);
 }
 
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
@@ -504,36 +778,69 @@ function stepPlayback(immediate) {
     return;
   }
   const record = playback.records[playback.index];
-  if (record.kind === "query") {
-    playback.querySeat = record.query.actor;
-    state.lastQuerySeat = record.query.actor;
+  const liveOnly = Boolean(record.live_only);
+  let flightPlan = null;
+  if (!liveOnly) {
+    if (record.kind === "query") {
+      playback.querySeat = record.query.actor;
+      state.lastQuerySeat = record.query.actor;
+    }
+    state.logRecords.push(record);
+    // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
+    if (logMode() === "simple") appendNarrativeThrough(record.seq);
+    else appendLog(record, playback.querySeat);
+    // 同一条记录的两个舞台入口共用**一个** now：`pop` 那一批的 `fadeAt` 是
+    // `now + 停留` 算出来的，两个入口各调一次 `Date.now()` 就可能跨毫秒 ⇒ 同一批
+    // "同刻淡出"差 1ms（烟测 U3-01t 的 `fadeAt` 相等断言因此偶发红）。
+    const stageAt = stageNow();
+    state.effectCards = applyEffectDelta(record, state.effectCards, undefined, stageAt);
+    state.revealedCards = applyRevealDelta(record, state.revealedCards, stageAt);
+    // 拼点弹窗（huo-taishici-xunyu 票 04）：拼点是不使用不打出的对抗事件，结果只有
+    // `pindian` delta 承载 ⇒ 弹窗跟这条记录走。只读、全场可见（AI 打 AI 也弹）；停留
+    // 3 秒由 `pindian.js` 自己排，不进回放步长。
+    applyPindianDelta(record);
+    // M6 报障 1：亮牌弹窗跟**源结算帧**走——那个帧 pop 的这条记录一到就收起，不等整批
+    // 播完（五谷的取牌步 / 无懈窗口跨多个响应，最后一批能有几十条记录）。
+    syncPlaybackDialog(record);
+    // U4-01（D1 / D2）飞行层 / U4-04（D10）阶段飘字：两条动效都在**重绘之前**规划。
+    // 飞行器起飞前量**源**——这一步还没重绘，舞台卡 / 手牌 / 槽位都还在原处，落点等
+    // 重绘之后再量并同步起飞（见本函数末尾）；阶段飘字只放画面：不排计时器、不改步长
+    // （`durationOf` 对非牌移动恒为 0，见本函数末尾的 `delayOf`）。
+    // D7：把当前档位作为**动画缩放因子**交给飞行层；`delayOf` 的等待在末尾用同一个 base，
+    // 两处同源，50ms 档才会"动画与间隔一起缩"。
+    flightPlan = animPlanFlight(record, state.eventDelayMs);
+    animPlanPhase(record);
   }
-  state.logRecords.push(record);
-  // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
-  if (logMode() === "simple") appendNarrativeThrough(record.seq);
-  else appendLog(record, playback.querySeat);
-  state.effectCards = applyEffectDelta(record, state.effectCards);
-  state.revealedCards = applyRevealDelta(record, state.revealedCards);
   // U3-05（D11）：每条记录先把**可见**变化写进 live view，再**从它**重绘全表——手牌数 /
   // 自己的手牌面 / 体力 / 装备与判定区 / 牌堆与弃牌数 / 横置 / 酒 / 身份 / 阵亡 /
-  // 回合与阶段都随事件走，不再等整批播完提交。
+  // 回合与阶段都随事件走，不再等整批播完提交。标签 delta 只走这一条，不写事件流。
   if (playback.live && state.liveView) {
     applyLiveDelta(record, state.liveView);
     // renderTable 末尾就是舞台重绘（`renderProcessing`），播放期也走同一条口。
     renderTable();
-  } else {
+  } else if (!liveOnly) {
     // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
     renderProcessing();
   }
-  // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
-  // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
-  // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
-  applyRecordEffects(record, playback.querySeat);
-  // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
-  fireSkillEventsThrough(record.seq);
-  scrollLogToBottom();
+  // U4-01（D1 / D2）：重绘之后才量**落点**（新槽位 / 新舞台卡这时才在 DOM 里），并同步
+  // 起飞——不排计时器、不改 `state.eventDelayMs`；节奏见末尾的 `delayOf(record)`。
+  if (flightPlan) animLaunchFlight(flightPlan);
+  if (!liveOnly) {
+    // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
+    // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
+    // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
+    applyRecordEffects(record, playback.querySeat);
+    // A1：洛神连续判定——弹窗已开着时，用刚进处理区的判定牌续上同一个窗口。
+    // 只读 JUDGE 帧 + `card_move(reason=JUDGE)` 这两条服务端事实，不认技能名；舞台已由
+    // `applyEffectDelta` 照常派生（弹窗不往舞台上加卡）。
+    const judgedCard = judgmentCardFromRecord(record);
+    if (judgedCard) refreshJudgmentReveal(judgedCard);
+    // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
+    fireSkillEventsThrough(record.seq);
+    scrollLogToBottom();
+  }
   playback.index += 1;
-  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
+  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), delayOf(record));
 }
 
 /** 把整批回放**立刻**跑完（测试与"收到新视图前先收尾"用）。 */
@@ -618,9 +925,11 @@ function processingProductFor(cards, products = state.processingProducts) {
  * 服务端已按展示契约补好牌面字段（``visible_record``）。
  *
  * 牌组作为参数传入、返回值就是新牌组：牌桌与回放页各持一份。
+ *
+ * ``now`` 是**测试用的时钟注入**（缺省 ``stageNow()``）：两条列表的 pop / 入台要在同一
+ * 个时刻上比较时，测试传同一个 ``now``，不读真实时钟、也不等计时器（D15 / 标准 §4）。
  */
-function applyRevealDelta(record, cards = state.revealedCards) {
-  const now = stageNow();
+function applyRevealDelta(record, cards = state.revealedCards, now = stageNow()) {
   const fromZones = stageFromZoneMap(cards || []);
   const held = (cards || []).filter((item) => stageLane(item, now) !== "gone");
   // 来源表跟着牌组走（D2 / D10）：展示项也要能在"从快照补项"时找回首次来源。
@@ -641,10 +950,14 @@ function applyRevealDelta(record, cards = state.revealedCards) {
   }
   const fromZone = { seat: record.seat, zone: "hand" };
   stageRememberFromZone(held, card.card_id, fromZone);
+  // D9：展示项也记下产生它的这条亮牌记录的牌数（今天一条 `card_reveal` 记录一张），
+  // 换组 / 跨 commit 不重算。
+  const batch = Array.isArray(record.cards) && record.cards.length ? record.cards.length : 1;
   held.push({
     ...stageItem(card, {
       lane: "showcase",
       frameId,
+      batch,
       enteredAt: now,
       fromZone,
     }),
@@ -661,8 +974,10 @@ function applyRevealDelta(record, cards = state.revealedCards) {
  * - **弃牌**：``card_move`` 且 `to_zone.zone === "discard"` 且原因 = 弃置 / 重铸 / 装备
  *   替换 / 拆顺；使用（USE）与判定（JUDGE）**不进弃牌组**，只从处理中淡出。
  *
- * **寿命**（D5）：有承载帧的展示 / 弃牌停在帧 ``pop`` 后 1s 淡出；处理中的牌离开处理区
- * 即 1s 淡出；无帧的弃牌入台 1s 停留 + 1s 淡出；任何项兜底 30s。换组沿用同一条舞台项
+ * **寿命**（D5 / D9）：有承载帧的展示 / 弃牌停在帧 ``pop`` 后 0.5(N+1) 秒再 1s 淡出；
+ * 处理中的牌离开处理区即 1s 淡出（U3 D5 的离区分支，D9 不改它）；无帧的弃牌入台
+ * 0.5(N+1) 秒停留 + 1s 淡出；任何项兜底 30s。N 来自**产生该舞台项的那条记录**，
+ * 记在 ``item.stage.batch`` 上，换组 / 跨 commit 都不重算。换组沿用同一条舞台项
  * （不重新落位）；淡出期间同一张牌再入台 = 撤旧项、重新落位（D5.6）。
  *
  * **承载帧的 kind 来自记录流**（D6）：`frame_kind` 只随 ``FrameRecord(push)`` 下发，
@@ -675,9 +990,16 @@ function applyRevealDelta(record, cards = state.revealedCards) {
  *
  * **牌组作为参数传入、返回值就是新牌组**：牌桌与回放页各持一份，派生函数不读 / 不写
  * ``state.effectCards``。
+ *
+ * ``now`` 是**测试用的时钟注入**（缺省 ``stageNow()``）：两条列表的 pop / 入台要在同一
+ * 个时刻上比较时，测试传同一个 ``now``，不读真实时钟、也不等计时器（D15 / 标准 §4）。
  */
-function applyEffectDelta(record, effectCards = state.effectCards, products = state.processingProducts) {
-  const now = stageNow();
+function applyEffectDelta(
+  record,
+  effectCards = state.effectCards,
+  products = state.processingProducts,
+  now = stageNow(),
+) {
   const previous = effectCards || [];
   const frameKinds = stageFrameKindMap(previous);
   const fromZones = stageFromZoneMap(previous);
@@ -688,6 +1010,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
   if (!record) return held;
   if (record.kind === "timing") {
     applyUseTiming(record, held);
+    applyConvertedProduct(record, held);
     return held;
   }
   if (record.kind === "frame") {
@@ -703,6 +1026,9 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
   const from = record.from_zone || {};
   const to = record.to_zone || {};
   const frameId = stageFrameOf(record);
+  // D9：同一条移动的 N 张一起入台 ⇒ 停留 0.5(N+1) 秒。N 与飞行层同一个口径
+  // （可见牌 = `cards.length`，隐藏区 = `card_count`）；记在创建出的舞台项上，之后不重算。
+  const batch = Math.max(1, liveMoveCount(record));
   const carryingFrameKind = stageFrameKindOf(held, frameId);
   const byId = (cardId) => held.find((item) => String(item.card_id) === String(cardId));
   // 转化牌：离场的是它的来源实体牌，台上那一条是**产物**。来源牌不再单独落位。
@@ -745,6 +1071,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
         // 淡出期间同一张牌再次入台：撤旧项、新项重新落位（D5.6）。
         existing.stage.lane = "processing";
         existing.stage.frameId = frameId;
+        existing.stage.batch = batch;
         existing.stage.enteredAt = now;
         existing.stage.fadeAt = null;
         existing.stage.fromZone = from;
@@ -758,6 +1085,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
       held.push(stageItem(card, {
         lane: "processing",
         frameId,
+        batch,
         enteredAt: now,
         fromZone: from,
         source: record.reason === "USE" ? record.owner : null,
@@ -778,6 +1106,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
       held.push(stageItem(card, {
         lane: "discard",
         frameId,
+        batch,
         enteredAt: now,
         fromZone: from,
         source: record.owner,
@@ -785,6 +1114,35 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
     }
   }
   return held;
+}
+
+/** 时机记录里的**转化产物**：这次使用结算时换成了哪张牌（朱雀羽扇 / 转化技）。
+ *
+ * 服务端在 `USE_ON_USE` 之后把帧里的牌换成产物，其后的每个时机记录都带 `cards = [产物]`
+ * （`virtual_sources` 指回来源实体牌）。舞台项是在 `card_move` 时按**来源实体牌**建的，
+ * 不换的话台上一直是原牌——用户实机：羽扇把普通【杀】转成火【杀】，舞台仍画普通【杀】。
+ *
+ * 判据只读记录（不读规则、不查技能表）：产物带 `virtual_sources`、且这些来源正是台上
+ * 那张牌 ⇒ 只把**牌面**换成产物。位置 / 使用者 / 目标 / 承载帧仍跟着台上那一条；
+ * 之后"离场"的 `card_move` 带的是来源实体牌，靠换过来的 `virtual_sources` 照样命中。
+ */
+function applyConvertedProduct(record, effectCards = state.effectCards) {
+  const now = stageNow();
+  const held = (effectCards || []).filter(
+    (item) => item.stage && item.stage.lane === "processing" && stageLane(item, now) === "visible",
+  );
+  for (const product of record.cards || []) {
+    if (!product || !Array.isArray(product.virtual_sources) || !product.virtual_sources.length) continue;
+    const sources = product.virtual_sources.map(String);
+    const item = held.find(
+      (entry) => sources.includes(String(entry.card_id))
+        || (entry.virtual_sources || []).some((source) => sources.includes(String(source))),
+    );
+    if (!item) continue;
+    const stage = item.stage;
+    Object.assign(item, product);
+    item.stage = stage;
+  }
 }
 
 /** 时机记录对描述文本的两个贡献：认领这次使用的目标、更新"当前结算到谁"。
@@ -851,6 +1209,8 @@ function mergeEffectCards(cards) {
     if (out.some((item) => String(item.card_id) === String(card.card_id))) continue;
     out.push(stageItem(card, {
       lane: "processing",
+      // 快照补出来的牌**没有产生它的记录**（D9）⇒ 按 N=1 计；跨 commit 不重算。
+      batch: 1,
       enteredAt: now,
       fromZone: stageFromZoneOf(out, card.card_id),
     }));

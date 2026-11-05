@@ -21,9 +21,11 @@
   **DEATH** 子帧（票 22）——死亡结算作为原子单元跑完，濒死帧与整条伤害链留给终局清栈。
 - **DEATH 帧**（票 22 / 票 25）：L13 裁剪后的死亡段，**按模式分叉**。无身份局四段
   （`DEATH_REVEAL_IDENTITY_BEFORE` 不入表、不 dispatch）；身份局五段——入表并把身份
-  亮明成一条 ``identity_reveal``（在时机 dispatch 之后、胜负检测之前）。`DEATH_ON` 先
-  执行 Ⅰ.a（弃置死者区域里的牌）再执行 Ⅱ 奖惩；检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，
-  只记暂定胜负、不在那里终止（批次关闭由引擎的 DEATH 出栈逻辑宣布）。
+  亮明成一条 ``identity_reveal``（在时机 dispatch 之后、胜负检测之前）。`DEATH_ON` 只
+  dispatch 死亡时技能；Ⅰ.a（弃置死者区域里的牌）与 Ⅱ 奖惩在紧随其后的**非 dispatch 步**
+  （`death_settle_cards`，票 33 拆开：奖惩里的搬牌会挂起，续跑不许重发 `DEATH_ON` 记录）。
+  检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，只记暂定胜负、不在那里终止（批次关闭由引擎的
+  DEATH 出栈逻辑宣布）。
 - **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
 - **JUDGE 帧**（票 26）：L14 三个时机；四步 = 取牌入处理区（复用摸牌原语、沿用 ``shuffle``
   子流、不算摸牌）→ 改判循环窗口（``RESPOND`` + ``WindowCause.REJUDGE``：每次替代后重开、
@@ -40,7 +42,9 @@ from typing import Any, Protocol
 from sgs.data import Identity, Mode
 from sgs.effects import (
     DODGE_RESPONSE_CARD,
+    NEED_CARD_FLOOR_KEY,
     NULLIFY_RESPONSE_CARD,
+    PEACH_RESPONSE_CARD,
     DamageNature,
     EffectStep,
     FinalZone,
@@ -48,29 +52,45 @@ from sgs.effects import (
     behavior_for,
     damage_amount,
     is_slash,
+    ModifierRole,
+    need_card_floor,
     recover_amount,
+    reset_need_card_floor,
     response_count,
     target_is_effective,
 )
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable, Tag, has_tag
 from sgs.skills import (
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
+    JIE_JIUYUAN_REPLACED_KEY,
+    QIANXUN_PLACED_KEY,
+    RejudgeOriginal,
     SeamKind,
     activate_skill,
     rejudge_capable_seats,
+    rejudge_offers,
+    target_is_ineffective,
     virtual_dodge,
 )
 from sgs.state import (
+    LIFE_DECREASE_DAMAGE_KEY,
     ActivateSkill,
     CardRef,
+    PindianDelta,
     DodgeContext,
     FrameKind,
     GameState,
     MoveReason,
-    PlayCard,
+    Pass,
+    PeachContext,
     QueryKind,
     RespondMode,
+    RejudgeOffer,
+    SelectionSpec,
+    SubstituteJudgeCard,
     UseCard,
     WindowCause,
     Zone,
@@ -100,11 +120,13 @@ class FrameHost(StepHost, Protocol):
 
     def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any: ...
 
+    def note_damage_dealt(self, seat: int) -> bool: ...
+
     def move_used_card_to_processing(self, frame: Frame) -> Control: ...
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
 
-    def move_used_card_to_equip_zone(self, frame: Frame) -> None: ...
+    def move_used_card_to_equip_zone(self, frame: Frame) -> Control: ...
 
     def move_processing_card_to_discard(self, frame: Frame) -> None: ...
 
@@ -114,9 +136,9 @@ class FrameHost(StepHost, Protocol):
 
     def discard_judge_card(self, frame: Frame) -> None: ...
 
-    def substitute_judge_card(self, frame: Frame, *, seat: int, new_card: CardRef) -> Control: ...
-
-    def resume_judge_substitution(self, frame: Frame) -> Control: ...
+    def substitute_judge_card(
+        self, frame: Frame, *, seat: int, new_card: CardRef, skill_id: str
+    ) -> Control: ...
 
     def apply_judge_after(self, frame: Frame) -> None: ...
 
@@ -126,11 +148,15 @@ class FrameHost(StepHost, Protocol):
 
     def enter_death(self, frame: Frame, seat: int) -> Frame: ...
 
+    def pass_away(self, frame: Frame, seat: int) -> Frame: ...
+
+    def outcome_decided(self) -> bool: ...
+
     def discard_dead_cards(self, frame: Frame) -> None: ...
 
     def reveal_dead_identity(self, frame: Frame) -> None: ...
 
-    def apply_death_rewards(self, frame: Frame) -> None: ...
+    def apply_death_rewards(self, frame: Frame) -> Control: ...
 
     def record_death_fact(self, frame: Frame) -> None: ...
 
@@ -142,11 +168,54 @@ class FrameHost(StepHost, Protocol):
 
     def provider_registered(self, skill_id: str) -> bool: ...
 
-    def advance_provider(self, frame: Frame, timing: Timing) -> Any: ...
+    def advance_provider(self, frame: Frame, timing: Timing) -> Any:
+        """``(control, satisfied, card)``：重入当前在展开的提供者（见 ``sgs.skills``）。"""
+        ...
 
-    def start_provider(self, frame: Frame, skill_id: str, actor: int, timing: Timing) -> Any: ...
+    def start_provider(
+        self, frame: Frame, skill_id: str, actor: int, timing: Timing, *, required: str
+    ) -> Any:
+        """``(control, satisfied, card)``：开始一次提供者展开；``required`` = 要哪张牌。"""
+        ...
 
     def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None: ...
+
+    def ask_selection(
+        self,
+        frame: Frame,
+        *,
+        owner: Any,
+        key: str,
+        actor: int,
+        timing: Timing,
+        spec: Any,
+        face: Any = None,
+        revealed: Sequence[CardRef] = (),
+        provide_type: str | None = None,
+        ask_when_empty: bool = False,
+    ) -> Any: ...
+
+    def suspended(self, value: Any) -> bool: ...
+
+    def selection_face(
+        self, seat: int, zones: tuple[Any, ...], *, reveal_hand: bool = False
+    ) -> tuple[tuple[Any, ...], tuple[int, ...]]: ...
+
+    def move_in_frame(
+        self,
+        frame: Frame,
+        cards: tuple[CardRef, ...],
+        *,
+        to_zone: ZoneRef,
+        reason: MoveReason,
+        owner: int | None,
+        actor: int | None = None,
+        to_top: bool = False,
+    ) -> Control: ...
+
+    def emit_frame_delta(self, frame: Frame, delta: Any) -> None: ...
+
+    def note_pindian_result(self, frame: Frame) -> None: ...
 
     def ask_query(
         self,
@@ -154,6 +223,7 @@ class FrameHost(StepHost, Protocol):
         actor: int,
         timing: Timing,
         *,
+        frame: Frame | None = None,
         dying: int | None = None,
         payload: Any = None,
     ) -> Any: ...
@@ -170,9 +240,30 @@ class FrameHost(StepHost, Protocol):
         window_frame: int = 0,
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
+        zones: tuple[Zone, ...] = (Zone.HAND,),
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
     ) -> Any: ...
 
+    def respond_candidates(
+        self,
+        actor: int,
+        *,
+        cause: WindowCause,
+        mode: RespondMode = RespondMode.PLAY,
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+    ) -> tuple[Any, ...]: ...
+
     def suspended(self, value: Any) -> bool: ...
+
+    def selection_face(
+        self, seat: int, zones: tuple[Any, ...], *, reveal_hand: bool = False
+    ) -> tuple[tuple[Any, ...], tuple[int, ...]]: ...
+
+    def accepted_selection(
+        self, frame: Frame, *, owner: Any, key: str
+    ) -> tuple[int, ...] | None: ...
+
+    def accepted_option(self, frame: Frame, *, skill_id: str, actor: int) -> Any | None: ...
 
     def start_use(
         self,
@@ -185,7 +276,7 @@ class FrameHost(StepHost, Protocol):
     ) -> Frame: ...
 
     def recover_from_peach(
-        self, frame: Frame, action: UseCard, *, asker: int, dying: int
+        self, frame: Frame, card: CardRef, *, asker: int, dying: int
     ) -> None: ...
 
     def apply_effects(
@@ -193,6 +284,10 @@ class FrameHost(StepHost, Protocol):
     ) -> Any: ...
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> Any: ...
+
+    def apply_hp_max_change(self, frame: Frame, seat: int, value: int) -> Any:
+        """把体力上限写成 ``value`` 并落一条 ``hp_max_change``（``MAXLIFE`` 帧的写入口）。"""
+        ...
 
     def move_in_frame(
         self,
@@ -203,9 +298,12 @@ class FrameHost(StepHost, Protocol):
         reason: MoveReason,
         owner: int | None,
         actor: int | None = None,
-    ) -> Control: ...
+        to_top: bool = False,
+    ) -> Control:
+        """``to_top``（票 02）：落点即牌堆顶的同一次移动，不进牌堆尾（见 ``Engine``）。"""
+        ...
 
-    def draw_for_hand(self, frame: Frame, seat: int, n: int) -> bool: ...
+    def draw_for_hand(self, frame: Frame, seat: int, n: int) -> bool | str: ...
 
     def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool: ...
 
@@ -368,6 +466,13 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
     发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）；装备牌**留装备区**
     （``final_zone = EQUIP``，票 12 §2）：同槽已有牌则先被"顶替"出去（``LOSE``，不算弃置）。
     票 27 在这里补跑本牌的 ``timing_ops``（【五谷丰登】把亮牌中剩余的牌置入弃牌堆）。
+
+    **顶替的返回值必须透传**（票 06，``CODING_STANDARDS.md`` §3.1）：搬旧装备会内联派发
+    "失去装备后"（白银狮子压 ``RECOVER`` 帧）并让出。吞掉这个 ``"stay"`` 就会在同一趟里
+    接着把新装备 ``PUT`` 入槽——记录流次序变成"新装备入场 → 回复"，而 `hp` 数值与帧数都
+    不变，旧回归看不见。重入时 ``after_end_done`` 仍是假（它在这段**之后**才落位），故本步
+    原地重跑；"这次同槽扫描已经做过"由引擎侧帧私有游标 ``_EQUIP_SLOT_SCANNED`` 守住，不会把
+    刚入槽的新装备当旧装备再搬一遍。
     """
     behavior = behavior_for(frame.data["card"])
     if behavior.is_delayed:
@@ -375,10 +480,12 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
         return None
     if not frame.data.get("after_end_done"):
         if behavior.final_zone is FinalZone.EQUIP:
-            host.move_used_card_to_equip_zone(frame)
+            equip_control = host.move_used_card_to_equip_zone(frame)
+            if equip_control is not None:
+                return equip_control
         else:
             host.move_processing_card_to_discard(frame)
-        control = _emit(
+        emit_control = _emit(
             host,
             frame,
             Timing.RESOLVE_AFTER_END,
@@ -386,8 +493,8 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
             cards=(frame.data["card"],),
         )
         frame.data["after_end_done"] = True
-        if control is not None:
-            return control
+        if emit_control is not None:
+            return emit_control
     return host.apply_timing_ops(frame, Timing.RESOLVE_AFTER_END)
 
 
@@ -415,6 +522,12 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
     无效 ⇒ **终止对该目标的结算**、直接推进游标（**不进 C2，故没有无懈窗口**）；
     有效 ⇒ 照常走 C2–C5。时机本身照记——它就是这个检测点。
 
+    判据有两个来源、同一个终止点：既有的牌面 / 修饰器链
+    （:func:`~sgs.effects.target_is_effective`），以及 M6 票 07 的**目标级否定**
+    （:func:`~sgs.skills.target_is_ineffective`，【奋威】在 B5 写进帧私有键）。前者
+    回答"这张牌本来对谁无效"，后者回答"这张牌这一次对谁被技能判无效"——两层语义在
+    :mod:`GLOSSARY` 里同属「无效」，故共用同一个出口。
+
     C1 的 ``actor`` 保持 M1 的**使用者**（C3–C5 才是当前目标），故 1v1 基准逐字节不变。
     """
     targets = tuple(frame.data["targets"])
@@ -428,8 +541,14 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
     )
     if control is not None:
         return control
-    if targets and not target_is_effective(
-        host.state, frame.data["card"], frame.data["source"], current
+    if targets and (
+        # **目标级无效**（M6 票 07 的否定分类第 2 层）：【奋威】在 B5 把"本次使用对其中
+        # 任意名目标无效"写进帧私有键；这里与既有的"牌面 / 修饰器判无效"共用同一个
+        # 终止点——终止对该目标的结算，故**不开** C2 的无懈窗口。
+        target_is_ineffective(frame, current)
+        or not target_is_effective(
+            host.state, frame.data["card"], frame.data["source"], current
+        )
     ):
         return Goto(CURSOR_PC)
     return None
@@ -533,33 +652,65 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
 
     **提供者可能跨多次重入**（求助窗口逐个问人）：引擎在窗口顶部先 :meth:`advance_provider`
     重入它，收尾后再按它写回的"是否满足"记一次成功（票 09）。
+
+    **产物由本窗口交付**（票 03）：提供者交回的那张虚拟【闪】与真【闪】走**同一条**使用链
+    （``start_use``），收尾共用 :func:`_accept`；没有产物 = 主公技式（别人已打出过一张），
+    只记一次成功、不压帧。
+
+    **优先级档**（票 03 §4-2 / §4-3）：本窗口读 :func:`~sgs.effects.need_card_floor` 写进
+    ``DodgeContext``——选中一条之后档由 :meth:`~sgs.engine.Engine.ask_query` 记进承载帧，
+    更高优先（更小档）的候选下一次不再进面。曹操先发动【八卦阵】（装备档）⇒ 判定黑 ⇒
+    下一次询问里没有〖护驾〗（武将档），而真【闪】（使用牌档）照旧可点；floor 在
+    :func:`_accept` 里清回最高档，故【无双】的第二张【闪】仍可发动【八卦阵】。
     """
+    # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
+    # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
+    # 那一侧，读不读这一位都不变，但契约要写全。
     required = response_count(
-        host.state, source=frame.data["source"], card=frame.data["card"], target=target
+        host.state,
+        source=frame.data["source"],
+        card=frame.data["card"],
+        target=target,
+        role=ModifierRole.TARGET,
     )
     done = frame.data.get("dodges_done", 0)
-    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_BEFORE_EFFECT)
+
+    def _accept(card: CardRef | None, *, use_timing: Timing | None = None) -> None:
+        """一次【闪】响应成立：攒够所需张数即把本层标成被抵消。
+
+        产物牌（提供者交回的那张虚拟【闪】）走与真【闪】**同一条**使用链；``None`` = 提供者
+        没有交付产物（主公技式：别人已经打出过一张，牌已经付清，窗口不必再压帧）。
+
+        **这里是唯一一处"这一次需要牌事件成立"的落点**（票 03 §4-3）：``dodges_done`` 每加
+        一即把不升档的 floor 清回最高档——【无双】的两张【闪】是**两次**需要牌事件，第二张
+        仍可从任意档起手（第一张用真牌，第二张照样能发动【八卦阵】）。
+        """
+        nonlocal done
+        done += 1
+        frame.data["dodges_done"] = done
+        reset_need_card_floor(frame, target)
+        if done >= required:
+            frame.data["canceled"] = True
+        if card is not None:
+            host.start_use(
+                card, source=target, targets=(), use_timing=use_timing
+            )
+
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_BEFORE_EFFECT
+    )
     if control is not None:
         return control
     if satisfied is not None:
         if satisfied:
-            done += 1
-            frame.data["dodges_done"] = done
-            if done >= required:
-                frame.data["canceled"] = True
+            _accept(produced)
         return "stay"
     if "skill_result" in frame.data:
         success = frame.data.pop("skill_result")
         if success:
             # "视为使用【闪】"仍是**一次**使用：走与真牌同一条使用链（票 08 的一手读法）。
-            done += 1
-            frame.data["dodges_done"] = done
-            if done >= required:
-                frame.data["canceled"] = True
-            host.start_use(
+            _accept(
                 virtual_dodge(host.state),
-                source=target,
-                targets=(),
                 use_timing=Timing.RESOLVE_BEFORE_EFFECT,
             )
             return "stay"
@@ -568,7 +719,11 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         QueryKind.DODGE,
         target,
         Timing.RESOLVE_BEFORE_EFFECT,
-        payload=DodgeContext(providers_used=providers_used),
+        frame=frame,
+        payload=DodgeContext(
+            providers_used=providers_used,
+            floor=need_card_floor(frame, target),
+        ),
     )
     if host.suspended(action):
         return "stay"
@@ -577,24 +732,22 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         if not host.provider_registered(action.skill_id):
             host.open_skill_judgment(frame, target, action.skill_id)
             return "stay"
-        control, satisfied = host.start_provider(
-            frame, action.skill_id, target, Timing.RESOLVE_BEFORE_EFFECT
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            target,
+            Timing.RESOLVE_BEFORE_EFFECT,
+            required=DODGE_RESPONSE_CARD,
         )
         if control is not None:
             return control
         if satisfied:
-            done += 1
-            frame.data["dodges_done"] = done
-            if done >= required:
-                frame.data["canceled"] = True
+            _accept(produced)
         return "stay"
     if isinstance(action, UseCard) and action.card.type == DODGE_RESPONSE_CARD:
-        done += 1
-        frame.data["dodges_done"] = done
-        if done >= required:
-            frame.data["canceled"] = True
         # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
-        host.start_use(action.card, source=target, targets=())
+        # 与另两条成功分支共用 ``_accept``：计一次成功 + 清 floor 只写在那里。
+        _accept(action.card)
     else:
         # ``Pass``，或一张**不是【闪】**的 ``UseCard``（B1 的第二道闸）：候选已按
         # ``required`` 牌名收口（``actions._required_hand``），这里不再 fail-open——
@@ -612,8 +765,17 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
     ``RESOLVE`` 帧，于是嵌套就是"帧上叠帧"——**不新增帧类型**。赢家那张牌记住它指向
     "本帧 + 当前目标"（``cancel_target``），出栈时由引擎把那一层标成被抵消。
 
-    声明**按询问序追加**，故首个声明者就是优先级最高者（应答者区间 =
+    声明**按询问序追加**，故首个声明者就是最高优先级者（应答者区间 =
     当前回合角色起逆时针、按座位序，票 15 §2）；输家的声明不耗牌、不压任何帧。
+
+    **提供者（票 03 的 C1 缺口第三段）**：候选里的 ``ActivateSkill`` 走技能层通用派发，
+    它的产物（【蛊惑】扣置的牌当成的虚拟【无懈可击】）**只算一条声明**——与真牌同一姿态
+    进 ``response_declared``，此刻不耗牌、不压帧；真正的使用由下面的赢家分支统一发起。
+    这是六扇窗口里**唯一**"产物先记账、后交付"的一扇：收集式是"先声明、收齐后由优先者
+    使用"，赢家未定时谁都不该把牌用掉。
+
+    声明已存在时**不再派发提供者**（``declared`` 随询问下传，候选面据此收口）：赢家已定，
+    再扣置一张牌只会让那张牌白白离开手牌——质疑段已经答过，可它不会进结算。
     """
     if frame.data.get("response_used"):
         # 赢家的响应牌使用已完整结算：出栈传播（若成功）会先被上面的 ``canceled``
@@ -627,23 +789,50 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
         frame.data["response_declared"] = []
     askers: tuple[int, ...] = frame.data["response_askers"]
     while frame.data["response_next"] < len(askers):
-        asker = askers[frame.data["response_next"]]
-        action = host.ask_respond(
-            frame,
-            asker,
-            Timing.RESOLVE_BEFORE_EFFECT,
-            cause=WindowCause.NULLIFY,
-            required=NULLIFY_RESPONSE_CARD,
-            target=target,
-            window_frame=frame.frame_id,
-            mode=RespondMode.USE,
+        index = frame.data["response_next"]
+        asker = askers[index]
+        # 提供者可能跨多次重入（扣置搬牌 / 逐座位质疑 / 扣体力压子帧）：先接着走。
+        control, satisfied, produced = host.advance_provider(
+            frame, Timing.RESOLVE_BEFORE_EFFECT
         )
-        if host.suspended(action):
-            return "stay"
-        frame.data["response_next"] += 1
-        if isinstance(action, UseCard):
-            # **声明**：行动被接受，但此刻不耗牌、不压 USE 帧（票 19 §9.4）。
-            frame.data["response_declared"].append((asker, action.card))
+        if control is not None:
+            return control
+        if satisfied is None:
+            action = host.ask_respond(
+                frame,
+                asker,
+                Timing.RESOLVE_BEFORE_EFFECT,
+                cause=WindowCause.NULLIFY,
+                required=NULLIFY_RESPONSE_CARD,
+                target=target,
+                window_frame=frame.frame_id,
+                mode=RespondMode.USE,
+                declared=bool(frame.data["response_declared"]),
+            )
+            if host.suspended(action):
+                return "stay"
+            if isinstance(action, ActivateSkill):
+                if not host.provider_registered(action.skill_id):
+                    # 与【决斗】同一道闸：没有惰性判定式的提供者 ⇒ fail-closed。
+                    raise NotImplementedError(
+                        f"无懈窗口没有判定式提供者：{action.skill_id!r}（票 03）"
+                    )
+                control, satisfied, produced = host.start_provider(
+                    frame,
+                    action.skill_id,
+                    asker,
+                    Timing.RESOLVE_BEFORE_EFFECT,
+                    required=NULLIFY_RESPONSE_CARD,
+                )
+                if control is not None:
+                    return control
+            elif isinstance(action, UseCard):
+                # **声明**：行动被接受，但此刻不耗牌、不压 USE 帧（票 19 §9.4）。
+                frame.data["response_declared"].append((asker, action.card))
+        if satisfied and produced is not None:
+            # 提供者的产物同样是**声明**（不是使用）：由下面的赢家分支统一交付。
+            frame.data["response_declared"].append((asker, produced))
+        frame.data["response_next"] = index + 1
     declared: list[tuple[int, CardRef]] = frame.data["response_declared"]
     if not declared:
         frame.data["canceled"] = False
@@ -712,18 +901,23 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "response_declared",
     "response_used",
     "providers_used",
+    NEED_CARD_FLOOR_KEY,
     "skill_result",
     "dodges_done",
-    "use_tags",
     "axe_used",
     "gdb_used",
     "provider_skill",
     "provider_actor",
     "provider_satisfied",
+    "provider_required",
+    "provider_card",
     "lord_request",
     "_pending_timing",
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
+    QIANXUN_PLACED_KEY,
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
 
@@ -732,17 +926,23 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
 集中列在这里，使"新加一个按目标分槽的键"只需改这一处。
 
-票 08 追加两个按目标分槽的键：``dodges_done``（本次响应窗口已攒够几张）与 ``use_tags``
-（帧标签袋的**逐目标档**——登在这里使"逐目标档随游标推进自动清除"是结构性的、不靠手工
-``del``）。**全场档**住 :data:`sgs.resolution.WHOLE_FIELD_TAGS_KEY`，**刻意不登在这里**：
-它作用于整次使用的每一个目标，多目标【杀】推进游标时必须存活（R4-Q1 只要求登记逐目标档；
-code-review C3 把两档拆成两个帧私有键，见 ``tests/test_hero_response_window.py``）。
+票 08 追加 ``dodges_done``（本次响应窗口已攒够几张）。``use_tags``（帧标签袋的**逐目标
+档**）**刻意不登在这里**（票 03 修）：``UseTags.target_tags`` 是 ``(目标座位, 标签)`` 的
+键值对，``has_tag(..., target=...)`` 只命中本目标的条目，**标签本身不串目标**——所以不需要
+（也不能）在游标推进时整袋清掉。早先登在这里时，一条在"指定目标后"一次性打完标签的技能
+（【铁骑】/【烈弓】）会给第 2 个目标起的响应窗口丢失标签；`开发文档/03` §5「效果原语」与账本
+「帧标签」行写的一直是"随**本次使用**结束即结构性消失"，故这是实现缺陷修复。
+**全场档**住 :data:`sgs.resolution.WHOLE_FIELD_TAGS_KEY`，同样不登在这里（它作用于整次使用
+的每一个目标）。见 ``tests/test_hero_response_window.py``。
 票 09 再追加提供者展开的四个键（``provider_skill`` / ``provider_actor`` /
 ``provider_satisfied`` / ``lord_request``）：它们是**一次求助窗口**的进度，多目标【杀】里
 必须逐目标重来，否则后一个目标会捡到前一个目标的应答者区间。
 票 05 追加逐点触发的两个键（``damage_point_index`` / ``damage_recorded``）：DAMAGE 帧今天
 恒单目标（多目标由行为表逐目标各压一个子帧），登在这里是姿态上的一致——真出现"一帧多目标"
 时它们同样必须逐目标重来。
+票 03（需要牌窗口的档位闸门）追加 :data:`sgs.effects.NEED_CARD_FLOOR_KEY`：它是**逐座位**
+分槽的"不升档"游标，但每扇窗口都挂在本帧的**某个目标**上（【闪】/ 求桃 / 响应窗口逐个
+目标开），故同样必须随游标推进清掉——否则第 2 个目标会继承第 1 个目标选过的档。
 """
 
 
@@ -807,14 +1007,17 @@ def _emit_damage(
 
 
 def damage_deal(host: FrameHost, frame: Frame) -> Control:
-    """**造成伤害时**：本帧逐点触发的两个帧私有键在这里重置（票 05）。
+    """**造成伤害时**：本帧逐点触发的四个帧私有键在这里重置（票 05 / M6 票 15）。
 
     "本帧第几点 / 记过没有"是**帧级**事实，故在帧的第一步显式清零：同一份载荷字典被复用、
-    或某个调用点先写过这两个键时，后一次伤害不会接着前一次的轮次跑（帧私有数据不进记录流，
-    这一步对 M2 逐字节无影响）。
+    或某个调用点先写过这些键时，后一次伤害不会接着前一次的轮次跑（帧私有数据不进记录流，
+    这一步对 M2 逐字节无影响）。票 15 追加**造成伤害后**一侧的两个键（与受到侧分列），
+    否则两次伤害之间的 ``DAMAGE_AFTER_DEAL`` 会误读上一帧的游标。
     """
     frame.data[DAMAGE_POINT_KEY] = 0
     frame.data.pop(DAMAGE_RECORDED_KEY, None)
+    frame.data.pop(DAMAGE_DEAL_POINT_KEY, None)
+    frame.data.pop(DAMAGE_DEAL_RECORDED_KEY, None)
     return _emit_damage(host, frame, Timing.DAMAGE_DEAL, frame.data["source"])
 
 
@@ -875,6 +1078,11 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
     frame.data["amount"] = amount
     frame.data[CHAIN_RESET_KEY] = reset
     frame.data[CHAIN_TRIGGER_KEY] = reset and not bool(frame.data.get("chain"))
+    source = frame.data.get("source")
+    if amount > 0 and not has_tag(frame, Tag.PREVENTED) and source is not None:
+        # M6 票 06【诛害】的判据：**造成过伤害**（数值定稿且 > 0、未被防止）。
+        # 在"受到伤害时"整步之后记，故被【寒冰剑】一类效果防止的伤害不算。
+        host.note_damage_dealt(int(source))
     return None
 
 
@@ -893,13 +1101,58 @@ def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
             "source": frame.data["source"],
             "amount": frame.data["amount"],
             CHAIN_RESET_KEY: bool(frame.data.get(CHAIN_RESET_KEY)),
+            # 实机报障 2026-10-31：伤害带来的扣减 ≠「失去体力」。帧照压、L8 三个时机照发
+            # （记录形态不变），但挂在 LIFE_DECREASE_AFTER 的技能要能把它排除掉（【诈降】）。
+            LIFE_DECREASE_DAMAGE_KEY: True,
         },
         timing=Timing.LIFE_DECREASE_BEFORE,
     )
 
 
 def damage_after_deal(host: FrameHost, frame: Frame) -> Control:
-    return _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
+    """**造成伤害后**：按伤害值**逐点**派发（M6 票 15，与 ``DAMAGE_AFTER_TAKE`` 同范式）。
+
+    票 15 之前这里每次伤害事件只派发一轮——当时挂在此时机上的只有觉醒技【潜心】，牌面是
+    "当你造成伤害后"（每次事件一次）。【忘隙】的牌面是"造成 **1 点**伤害后"，逐点因此是
+    **技能定义上的事实**（``03`` §4），把 ``Hook.per_point`` 的既有判据扩展到此时机：为真
+    的钩子每一轮都有机会，为假的只在第一轮（读取 :func:`~sgs.skills.damage_after.
+    damage_point_index` 的同一处过滤）。
+
+    循环沿用 ``DAMAGE_AFTER_TAKE`` 的形状：
+
+    - **时机记录恰好一条**（与既有基准逐字节一致）：第 1 轮落记录，第 2 轮起
+      ``emit_record=False``；
+    - 轮次写进 ``DAMAGE_POINT_KEY``（技能回调与派发答案键都读它），**跑完交还 0**——
+      ``DAMAGE_AFTER_TAKE`` 在同一帧里紧接着从第 0 点起跑，不接造成侧的尾数；
+    - 造成侧自己的续跑游标另存 :data:`~sgs.skills.DAMAGE_DEAL_POINT_KEY`：某轮提问让出
+      控制权（返回 ``"stay"``）后重入从这一轮接着跑，不重记也不跳点；
+    - 伤害值 ≤ 0 或被防止时与旧行为逐字相同：只落一条记录、一轮都不派发（【潜心】的
+      既有语义不变）。
+    """
+    amount = frame.data["amount"]
+    if amount <= 0 or has_tag(frame, Tag.PREVENTED):
+        return _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
+    point = frame.data.get(DAMAGE_DEAL_POINT_KEY, 0)
+    while point < amount:
+        frame.data[DAMAGE_DEAL_POINT_KEY] = point
+        # ``damage_point_index`` / 答案缓存键 / ``Hook.per_point`` 都读这一个点号。
+        frame.data[DAMAGE_POINT_KEY] = point
+        control = _emit_damage(
+            host,
+            frame,
+            Timing.DAMAGE_AFTER_DEAL,
+            frame.data["source"],
+            emit_record=not frame.data.get(DAMAGE_DEAL_RECORDED_KEY),
+        )
+        if control is not None:
+            # 让出控制权（钩子提问）：本轮尚未标成已派发，重入时同一轮继续。
+            return control
+        frame.data[DAMAGE_DEAL_RECORDED_KEY] = True
+        point += 1
+        frame.data[DAMAGE_DEAL_POINT_KEY] = point
+    # 交还给 ``damage_after_take``：它按同一个点号从 0 起逐点派发。
+    frame.data[DAMAGE_POINT_KEY] = 0
+    return None
 
 
 def damage_after_take(host: FrameHost, frame: Frame) -> Control:
@@ -1024,12 +1277,45 @@ def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
 
 
 def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
-    """**扣减体力后**：照常空实现收尾。
+    """**扣减体力后**：按失去的数值**逐点**派发（huo-shenzhouyu-mobile 票 04）。
+
+    账本 `06`（§5「程序化约定与偏离一手」）的「界【诈降】『失去 1 点体力后』按逐点触发」一行逐字写着
+    "等出现一次失去 ≥2 点的载体时必须改成逐点"——【业炎】的代价「失去 3 点体力」就是
+    那个载体。范式与 :func:`damage_after_take` 逐字同形：
+
+    - 一条 ``LIFE_DECREASE`` 帧仍然只落**一条**时机记录（逐点只是"这条记录内派发多轮"）；
+    - 轮次写进 ``DAMAGE_POINT_KEY``（技能回调与派发答案键都读它），
+      ``DAMAGE_RECORDED_KEY`` 保证重入不重复记录；
+    - ``Hook.per_point`` 为真的钩子每轮都有机会，为假的只在第 0 轮（既有语义不变）；
+    - 某一轮里钩子提问让出控制权（返回 ``"stay"``）⇒ 本轮未标已派发，重入继续本轮。
+
+    **伤害来源的扣减**（``damage_push_life_decrease`` 压的那条）走同一个循环：它没有
+    ``per_point`` 钩子（【诈降】按牌面只认真正的失去体力），每轮派发都是空集合 ⇒
+    行为与记录形态都不变。
 
     无人救的死亡路径上这一步**不会被走到**——濒死帧在"濒死结算结束后"直接压入 DEATH
     子帧并留在栈上，整条伤害链（含本帧）由终局清栈统一丢弃（票 22）；救回时才回到这里。
     """
-    return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+    amount = int(frame.data.get("amount", 1))
+    if amount <= 0:
+        return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+    point = int(frame.data.get(DAMAGE_POINT_KEY, 0))
+    while point < amount:
+        frame.data[DAMAGE_POINT_KEY] = point
+        control = _emit(
+            host,
+            frame,
+            Timing.LIFE_DECREASE_AFTER,
+            actor=frame.data["target"],
+            emit_record=not frame.data.get(DAMAGE_RECORDED_KEY),
+        )
+        if control is not None:
+            # 让出控制权（钩子提问）：本轮尚未标成已派发，重入时同一轮继续。
+            return control
+        frame.data[DAMAGE_RECORDED_KEY] = True
+        point += 1
+        frame.data[DAMAGE_POINT_KEY] = point
+    return None
 
 
 LIFE_DECREASE_STEPS = (
@@ -1098,6 +1384,18 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
     上升**且仍 < 1 ⇒ 记 ``window_start`` 为那名响应者并 ``Goto`` 回 :func:`near_death_at`
     开新窗。检测点在响应结算之后，故体力写入本来就已经发生、判据零新增钩子；
     ``pending_response`` 在每次重入时先取走，因而"结算未回复"的分支天然干净。
+
+    **提供者（票 03 的 C1 缺口第一段）**：候选里的 ``ActivateSkill`` 与真牌占**同一个槽位**
+    ——真牌由本窗口自己压 ``recover_from_peach``（回复结算插在濒死之下），提供者交回的
+    产物牌也走同一条收尾（:func:`_peach_use`）。作废（``satisfied=False``：产物从未被使用）
+    与「放弃」同路 ⇒ ``next`` 前进、窗口问下一个座位；提供者说不出产物（主公技式的
+    "别人已经付过了"）在求桃窗口没有可交付的【桃】，同样按放弃处理。官方规则集的濒死例
+    （``glossary_flow.txt:67``）逐字写着于吉可以在濒死结算里【蛊惑】用【桃】——这扇窗口是
+    这条技能的**必需**窗口。
+
+    重入次序：提供者会跨多次重入（扣置搬牌内联「失去牌后」、逐座位质疑、扣体力压子帧），
+    故每轮先 :meth:`advance_provider` 接着上次的地方走，只有"当前没有在展开的提供者"时
+    才发新询问。
     """
     target = frame.data["target"]
     pending = frame.data.pop("pending_response", None)
@@ -1112,15 +1410,62 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
     while frame.data["next"] < len(frame.data["askers"]):
         idx = frame.data["next"]
         asker = frame.data["askers"][idx]
-        action = host.ask_query(QueryKind.PEACH, asker, Timing.NEAR_DEATH_AT, dying=target)
-        if host.suspended(action):
-            return "stay"
-        if isinstance(action, UseCard):
-            frame.data["pending_response"] = (idx, host.state.player(target).hp)
-            host.recover_from_peach(frame, action, asker=asker, dying=target)
-            return "stay"  # 响应链出栈后重入本步：此处判回退
+        control, satisfied, produced = host.advance_provider(
+            frame, Timing.NEAR_DEATH_AT
+        )
+        if control is not None:
+            return control
+        if satisfied is None:
+            action = host.ask_query(
+                QueryKind.PEACH,
+                asker,
+                Timing.NEAR_DEATH_AT,
+                frame=frame,
+                dying=target,
+                payload=PeachContext(floor=need_card_floor(frame, asker)),
+            )
+            if host.suspended(action):
+                return "stay"
+            if isinstance(action, ActivateSkill):
+                if not host.provider_registered(action.skill_id):
+                    # 求桃窗口没有"选中才惰性判定"的提供者（【八卦阵】那类只服务【闪】），
+                    # 撞到即编程错误，不静默当成放弃。
+                    raise NotImplementedError(
+                        f"求桃窗口没有判定式提供者：{action.skill_id!r}（票 03）"
+                    )
+                control, satisfied, produced = host.start_provider(
+                    frame,
+                    action.skill_id,
+                    asker,
+                    Timing.NEAR_DEATH_AT,
+                    required=PEACH_RESPONSE_CARD,
+                )
+                if control is not None:
+                    return control
+            elif isinstance(action, UseCard):
+                return _peach_use(host, frame, asker=asker, target=target, card=action.card)
+            else:
+                frame.data["next"] = idx + 1
+                continue
+        if satisfied and produced is not None:
+            return _peach_use(host, frame, asker=asker, target=target, card=produced)
         frame.data["next"] = idx + 1
     return None
+
+
+def _peach_use(host: FrameHost, frame: Frame, *, asker: int, target: int, card: CardRef) -> Control:
+    """求桃窗口**消费一张【桃】**：真牌与提供者产物共用这一份收尾。
+
+    ``pending_response`` 记的是"哪个座位 + 回复前的体力"：响应链出栈后重入本步，由它决定
+    "继续问下一个人"还是"开新窗口"（体力严格上升但仍 < 1）。故这里必须记在压帧**之前**。
+
+    这也是求桃窗口"**这一次需要牌事件成立**"的落点（票 03 §4-3）：那张【桃】开始回复，
+    本次需要牌事件结束，不升档的 floor 清回最高档（回退开的新窗是**新**事件）。
+    """
+    frame.data["pending_response"] = (int(frame.data["next"]), host.state.player(target).hp)
+    reset_need_card_floor(frame)
+    host.recover_from_peach(frame, card, asker=asker, dying=target)
+    return "stay"  # 响应链出栈后重入本步：此处判回退
 
 
 def near_death_after(host: FrameHost, frame: Frame) -> Control:
@@ -1170,7 +1515,8 @@ def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, 
 #   - 无身份局（1v1）四段：``DEATH_REVEAL_IDENTITY_BEFORE`` **不入表**（无身份牌）；
 #   - 身份局五段：``DEATH_REVEAL_IDENTITY_BEFORE`` 入表并亮明身份（主公也照发）；
 #   - ``DEATH_REVEAL_IDENTITY_AFTER`` 是唯一胜负检测点；
-#   - ``DEATH_ON`` = 死亡时技能 → Ⅰ.a 系统处理牌 → Ⅱ 奖惩（票 14 §4 的段序）；
+#   - ``DEATH_ON`` = 死亡时技能（只 dispatch）；Ⅰ.a 系统处理牌 → Ⅱ 奖惩在下一格
+#     ``death_settle_cards``（非 dispatch 步，票 33 的段序落点 / 挂起续跑边界）；
 #   - ``DEATH_BEFORE_START`` 定格 killer、主公死亡优先于回合结束；
 #   - ``DEATH_AFTER`` 空实现。
 # 检测点只置 ``pending_outcome``、**不**终止：同批最后一次 ``DEATH_AFTER`` 之后才宣布
@@ -1233,14 +1579,43 @@ def death_reveal_identity_after(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
-def death_on(host: FrameHost, frame: Frame) -> Control:
-    """死亡时：先 dispatch（M2 无死亡时技能），再 Ⅰ.a 系统处理牌、最后 Ⅱ 奖惩。"""
-    control = _emit_death(host, frame, Timing.DEATH_ON)
-    if control is not None:
-        return control
-    host.discard_dead_cards(frame)
-    host.apply_death_rewards(frame)
+def death_time_window_open(host: FrameHost, frame: Frame) -> Control:
+    """「阵亡时」空节点（票 10）：把**当前死者本人**的技能放回解析窗口，不 dispatch。
+
+    ``alive`` 在死亡入口已经是 ``False``（胜负 / 距离 / 人数正确）；本步只把
+    ``death_time_skills_active`` 置真，让 ``resolve_instances`` 在窗口内（DEATH_ON /
+    官方弃牌奖惩 / DEATH_AFTER）还能产出这名死者的实例。窗口不是按时机塞实例——它是
+    一个显式状态位；窗口外（TURN_END / 亮身份 / 死亡结算之后）死者仍静默。
+    """
+    host.state.player(frame.data["target"]).death_time_skills_active = True
     return None
+
+
+def death_time_window_close(host: FrameHost, frame: Frame) -> Control:
+    """「失去技能」收尾（票 10）：DEATH_AFTER 之后关窗；死者本人此后不再产出实例。"""
+    host.state.player(frame.data["target"]).death_time_skills_active = False
+    return None
+
+
+def death_on(host: FrameHost, frame: Frame) -> Control:
+    """死亡时：dispatch 死亡时技能（窗口内；首个载体是神关羽【武魂】②）。"""
+    return _emit_death(host, frame, Timing.DEATH_ON)
+
+
+def death_settle_cards(host: FrameHost, frame: Frame) -> Control:
+    """死亡时的收尾：Ⅰ.a 系统处理牌 → Ⅱ 死亡奖惩（**非 dispatch 步**，票 33）。
+
+    与 :func:`death_on` 分成两步是**结构性**的：主公杀忠臣的弃置自票 33 起经移动入口
+    派发 ``MOVE_AFTER``，钩子提问会把这一步挂起、等应答到达后**重入同一个步骤**。
+    若 Ⅰ.a / Ⅱ 还挂在 ``DEATH_ON`` 那一步里，重入会把 `DEATH_ON` 的时机记录再发一遍
+    ——``_pending_timing`` 的幂等只覆盖"派发本身挂起"这一种，而这里挂起发生在派发
+    **已经完成之后**。时机记录因此必须留在前一步（派发一次、只落一条）。
+
+    ``apply_death_rewards`` 的返回值原样透传：奖惩里的搬牌挂起时，驱动循环必须带着
+    待答询问停在这里，而不是继续把死亡结算跑完。
+    """
+    host.discard_dead_cards(frame)
+    return host.apply_death_rewards(frame)
 
 
 def death_after(host: FrameHost, frame: Frame) -> Control:
@@ -1251,19 +1626,30 @@ def death_after(host: FrameHost, frame: Frame) -> Control:
 DEATH_STEPS = (
     Step(death_before_start, Timing.DEATH_BEFORE_START),
     Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
+    Step(death_time_window_open),
     Step(death_on, Timing.DEATH_ON),
+    Step(death_settle_cards),
     Step(death_after, Timing.DEATH_AFTER),
+    Step(death_time_window_close),
 )
-"""无身份局（1v1）的死亡段：M1 的四段，与既有一字不差。"""
+"""无身份局（1v1）的死亡段：M1 的四个时机，记录流与既有一字不差。
+
+``death_time_window_open`` / ``death_time_window_close`` 不对应任何时机枚举位（票 10）：
+它们只开关"死者本人的技能窗口"，不产记录；`death_settle_cards` 同样是非 dispatch 步
+（票 33 的Ⅰ.a / Ⅱ 挂起续跑边界）。
+"""
 
 IDENTITY_DEATH_STEPS = (
     Step(death_before_start, Timing.DEATH_BEFORE_START),
     Step(death_reveal_identity_before, Timing.DEATH_REVEAL_IDENTITY_BEFORE),
     Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
+    Step(death_time_window_open),
     Step(death_on, Timing.DEATH_ON),
+    Step(death_settle_cards),
     Step(death_after, Timing.DEATH_AFTER),
+    Step(death_time_window_close),
 )
-"""身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）。"""
+"""身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）+ 奖惩收尾步（票 33）。"""
 
 
 # ---- JUDGE 帧：L14 三个时机 + 取牌 / 后果（票 26 / 决策回票 10）------------
@@ -1324,20 +1710,17 @@ def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
     1. 真 dispatch 一次 ``JUDGE_CARD_BEFORE_EFFECT``（既有语义不变；M2 无改判技能
        ⇒ 队列恒空、无询问、无额外日志节点）。时机记录**每个判定帧只落一次**
        （``REJUDGE_EMITTED`` 守卫重入；循环重开不改时点序，票 11 §验收 7）。
-    2. 先把上一次替代的**在途进度**收尾（``resume_judge_substitution``；code-review C2：
-       替代的第一段移动可能因内联钩子提问而挂起，而 ``_rejudge_window`` 已把这个座位
-       记进"已问过"、不会再次进来），再在 :func:`_rejudge_window` 里逐个问**有改判能力**
-       的座位（``WindowCause.REJUDGE``、``required=None``、``mode=PLAY`` = 打出一张**手牌**
-       代替之）；每次替代后窗口重开，直到无人再替代。
+    2. 再在 :func:`_rejudge_window` 里逐个问**有改判能力**的座位（``WindowCause.REJUDGE``、
+       ``required=None``、``mode=REJUDGE`` = **用一张牌代替 / 替换**判定牌；候选声明由
+       :func:`~sgs.skills.rejudge_offers` 按该座位的技能定义现算——标准【鬼才】只有手牌、
+       界【鬼才】另有装备区、张角【鬼道】只收黑色牌）；每次替代压一个 :class:`FrameKind.REJUDGE`
+       改判事件帧，帧出栈后本步重入、窗口重开，直到无人再替代。
     """
     if not frame.data.get(REJUDGE_EMITTED):
         control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
         if control is not None:
             return control
         frame.data[REJUDGE_EMITTED] = True
-    control = host.resume_judge_substitution(frame)
-    if control is not None:
-        return control
     return _rejudge_window(host, frame)
 
 
@@ -1346,11 +1729,15 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
 
     循环口径（三处都必要）：
 
-    - **重开**：选中 ``PlayCard`` ⇒ :meth:`~sgs.engine.steps.FrameHost.substitute_judge_card`
-      把新牌变成判定牌（新的"生效前"），下一轮按新的局面重扫应答者；
+    - **重开**：选中 ``SubstituteJudgeCard`` ⇒
+      :meth:`~sgs.engine.steps.FrameHost.substitute_judge_card` 把新牌变成判定牌
+      （**新的"生效前"**）并压一个 **REJUDGE 改判事件帧**，下一轮按新的局面重扫应答者；
     - **每座位一次**：``REJUDGE_ASKED`` 记录已问过的座位，故同一座位不因循环被问第二次；
     - **绑帧与重滤**：每轮都从 ``rejudge_askers(存活座位, 有能力座位)`` 现算——窗口内
-      有人死亡时，死者自动从区间里消失（"冻结元组"是 M2 濒死窗口的口径，不搬到这里）。
+      有人死亡时，死者自动从区间里消失（"冻结元组"是 M2 濒死窗口的口径，不搬到这里）；
+    - **空候选不问**：某座位这一轮**没有可用来改判的牌**（没手牌 / 【鬼道】没有黑色牌）
+      ⇒ 先算一遍候选，只有 ``Pass`` 就不发这一问、直接记进"已问过"
+      （`edge-cases.md` 总纪律 1：绝不发一条玩家无法合法应答的询问）。
 
     ``ask_respond`` 的帧内应答缓存让挂起重入续跑同一次询问；``asked`` 在**应答到达后**
     才追加，故重入时仍选中同一座位、消费那条应答。
@@ -1361,6 +1748,16 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
         seat = next((candidate for candidate in askers if candidate not in asked), None)
         if seat is None:
             return None
+        offers = rejudge_offers(host.state, seat)
+        preview = host.respond_candidates(
+            seat,
+            cause=WindowCause.REJUDGE,
+            mode=RespondMode.REJUDGE,
+            rejudge_offers=offers,
+        )
+        if not any(not isinstance(candidate, Pass) for candidate in preview):
+            asked.append(seat)
+            continue
         action = host.ask_respond(
             frame,
             seat,
@@ -1368,13 +1765,16 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
             cause=WindowCause.REJUDGE,
             required=None,
             window_frame=frame.frame_id,
-            mode=RespondMode.PLAY,
+            mode=RespondMode.REJUDGE,
+            rejudge_offers=offers,
         )
         if host.suspended(action):
             return "stay"
         asked.append(seat)
-        if isinstance(action, PlayCard):
-            control = host.substitute_judge_card(frame, seat=seat, new_card=action.card)
+        if isinstance(action, SubstituteJudgeCard):
+            control = host.substitute_judge_card(
+                frame, seat=seat, new_card=action.card, skill_id=action.skill_id
+            )
             if control is not None:
                 return control
 
@@ -1399,6 +1799,70 @@ JUDGE_STEPS = (
 """判定帧四步；``judge_finish`` **非 dispatch**（入弃牌堆是动作，没有对应时机节点）。"""
 
 
+# ---- REJUDGE 帧：改判事件（feng-zhangjiao 票 02）-----------------------------
+#
+# 用户 2026-11-02 裁定：**代替 / 替换走特殊的改判事件帧，不要走打出**。打出只发生在
+# "手牌 → 处理区 → 弃牌堆"的牌响应里（走 L6、触发「打出时」钩子），而改判可以拿**装备区**
+# 的牌、也不触发任何"打出 / 使用"钩子——故它有自己的事件帧，帧内两段移动：
+#   1. 新牌 → 处理区（`reason = JUDGE`，它成为新的判定牌；归属 = 被判定者）；
+#   2. 原判定牌 → 弃牌堆（**代替**，缺省）或 → **改判者手牌**（**替换**，`reason = PUT`）。
+# 去向由改判技能的定义字段 `rejudge_original_to` 回答，帧只读动作自带的 `skill_id`。
+
+REJUDGE_NEW_MOVED = "rejudge_new_moved"
+"""帧私有键：**新牌**那一段已经搬过（挂起重入时不重搬）。
+
+与 MOVER 的既有范式一致（``_advance_judge_substitution``）：标志在调搬牌**之前**落，
+故 ``move_in_frame`` 因内联钩子提问返回 ``"stay"`` 后，重入直接进第二段。
+"""
+
+
+def rejudge_substitute(host: FrameHost, frame: Frame) -> Control:
+    """改判事件帧的唯一（**非 dispatch**）步：搬两段牌。
+
+    - 第一段：``new`` → 处理区。归属 = **被判定者**（判定牌不为主人拥有，§11.6）。
+    - 第二段：``old`` → 弃牌堆 / 改判者手牌。**原牌已不在处理区**（被【天妒】一类拿走）
+      ⇒ 这一段跳过，不是错误——改判既已生效，原牌的去向由那次获得决定。
+    """
+    subject = frame.data["subject"]
+    seat = frame.data["seat"]
+    if not frame.data.get(REJUDGE_NEW_MOVED):
+        frame.data[REJUDGE_NEW_MOVED] = True
+        control = host.move_in_frame(
+            frame,
+            (frame.data["new"],),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.JUDGE,
+            owner=subject,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+    old = frame.data["old"]
+    if old.card_id not in host.state.processing:
+        return None
+    if frame.data.get("original_to") == RejudgeOriginal.HAND.value:
+        return host.move_in_frame(
+            frame,
+            (old,),
+            to_zone=ZoneRef(Zone.HAND, seat),
+            reason=MoveReason.PUT,
+            owner=seat,
+            actor=seat,
+        )
+    return host.move_in_frame(
+        frame,
+        (old,),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.JUDGE,
+        owner=subject,
+        actor=subject,
+    )
+
+
+REJUDGE_STEPS = (Step(rejudge_substitute, None),)
+"""改判事件帧：一个非 dispatch 步（改判没有自己的时机枚举位，它是判定帧的一个子事件）。"""
+
+
 # ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
 
 
@@ -1409,11 +1873,18 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
     目标值由本帧算，原语只负责写（票 07 §1）。回复量本身先过
     :func:`~sgs.effects.recover_amount` 链（票 09 的 ``RECOVER_AMOUNT``，缺省 1）——
     【救援】在此把"其他吴势力角色对孙权用【桃】"的回复量改成 2。
+
+    **回复被替换**（M6 票 17 的界孙权【救援】"改为令你回复 1 点体力"）：钩子在
+    ``RECOVER_VALUE`` 里写 :data:`~sgs.skills.JIE_JIUYUAN_REPLACED_KEY` 并压好主公的
+    RECOVER 子帧。子帧出栈后本步重入，这里**跳过体力写入与 ``RECOVER_AFTER``**（目标没有
+    回复过体力），整帧就此收尾；"然后摸一张"由钩子自己在第二次进入时补上。
     """
     target = frame.data["targets"][0]
     control = _emit(host, frame, Timing.RECOVER_VALUE, actor=target)
     if control is not None:
         return control
+    if frame.data.get(JIE_JIUYUAN_REPLACED_KEY):
+        return Goto(len(RECOVER_STEPS))
     amount = recover_amount(
         host.state,
         source=frame.data["source"],
@@ -1434,6 +1905,85 @@ RECOVER_STEPS = (
     Step(recover_value, Timing.RECOVER_VALUE),
     Step(recover_after, Timing.RECOVER_AFTER),
 )
+
+
+# ---- MAXLIFE 帧：L11 的加 / 减体力上限（wuming 票 04）------------------------
+#
+# 规则 §4.15 L429–L439：**加体力上限**与**减体力上限**是**两个独立流程**，各只有
+# 「前 / 后」两个时机，没有「增减体力上限时」。故帧私有带 `direction` + `amount`，
+# 步骤表按方向选时机对，`build_steps` 只登记一张表：
+#
+#   ① 派发 `MAXLIFE_INCREASE_BEFORE` → ② 落上限 + `hp_max_change` →
+#   ③ 派发 `MAXLIFE_INCREASE_AFTER`（减侧换成 `MAXLIFE_DECREASE_*`，其余同形）。
+#
+# **本票只接"加"**（唯一入口 `Engine.raise_hp_max`）：减侧分支写好但**暂无调用者**——
+# 既有 `Engine.reduce_hp_max`（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进来，
+# `MAXLIFE_DECREASE_*` 也**不解封**（迁会改既有 `hp_max_change.frame_id` 并多两条时机
+# 记录 ⇒ 金录像字节变化）。将来迁移时**只换调用点**，本表不必再动。
+
+MAXLIFE_INCREASE = "increase"
+MAXLIFE_DECREASE = "decrease"
+"""``FrameKind.MAXLIFE`` 帧私有的 ``direction`` 取值（加 / 减是两个独立流程，§4.15）。"""
+
+
+def _maxlife_timings(direction: str) -> tuple[Timing, Timing]:
+    """方向 → （前, 后）两个时机；未知方向是编程错误（fail-closed，不落半套流程）。"""
+    if direction == MAXLIFE_INCREASE:
+        return Timing.MAXLIFE_INCREASE_BEFORE, Timing.MAXLIFE_INCREASE_AFTER
+    if direction == MAXLIFE_DECREASE:
+        return Timing.MAXLIFE_DECREASE_BEFORE, Timing.MAXLIFE_DECREASE_AFTER
+    raise ValueError(f"未知的体力上限变化方向 {direction!r}（只认 increase / decrease）")
+
+
+def maxlife_before(host: FrameHost, frame: Frame) -> Control:
+    """① 派发「加 / 减体力上限前」（规则 L429–L439 的"前"）。"""
+    before, _ = _maxlife_timings(frame.data["direction"])
+    return _emit(host, frame, before, actor=frame.data["target"])
+
+
+def maxlife_apply(host: FrameHost, frame: Frame) -> None:
+    """② 落体力上限并落一条 ``hp_max_change``（``amount`` = 幅度，恒正）。
+
+    **加上限不同步体力**：规则只有减侧的"减上限前体力值等于上限 ⇒ 同步调整到新上限"
+    （L436–437；只下调、不回血）；"增加上限并回复 1 点"的回复是技能的第二段，走既有
+    回复原语（``RECOVER`` 帧），本帧不替调用方回血（票 04 C5）。
+
+    减侧分支与 :meth:`~sgs.engine.Engine.reduce_hp_max` 逐条同语义（含"满体力同步下调"
+    与"上限减为 0 无载体"的 fail-closed 守卫），故将来迁移只换调用点。
+    """
+    seat = frame.data["target"]
+    amount = int(frame.data["amount"])
+    player = host.state.player(seat)
+    before_max, before_hp = player.hp_max, player.hp
+    after_max = (
+        before_max + amount
+        if frame.data["direction"] == MAXLIFE_INCREASE
+        else before_max - amount
+    )
+    if after_max < 1:
+        raise ValueError(
+            f"体力上限 {before_max} 减 {amount} 后为 {after_max}："
+            "上限减为 0 的直接死亡流程未落地（今天没有该档载体）"
+        )
+    host.apply_hp_max_change(frame, seat, after_max)
+    if after_max < before_max and before_hp == before_max:
+        # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
+        host.apply_hp_change(frame, seat, after_max)
+
+
+def maxlife_after(host: FrameHost, frame: Frame) -> Control:
+    """③ 派发「加 / 减体力上限后」（规则 L430–L439 的"后"：结算【伤逝】【威重】等技能）。"""
+    _, after = _maxlife_timings(frame.data["direction"])
+    return _emit(host, frame, after, actor=frame.data["target"])
+
+
+MAXLIFE_STEPS = (
+    Step(maxlife_before, Timing.MAXLIFE_INCREASE_BEFORE),
+    Step(maxlife_apply, None),
+    Step(maxlife_after, Timing.MAXLIFE_INCREASE_AFTER),
+)
+"""L11 事件帧：前 → 落上限 → 后三格（``timing`` 只是子帧 ``return_to`` 的标签；
+真正派发哪个时机由帧私有 ``direction`` 决定，减侧两个时机今天不解封）。"""
 
 
 # ---- PLAY 帧：L6 两个时机（票 19 §2：打出必须独立）---------------------------
@@ -1514,13 +2064,225 @@ def reforge_lose_card(host: FrameHost, frame: Frame) -> Control:
 
 
 def reforge_draw(host: FrameHost, frame: Frame) -> Control:
-    """重铸第二步：摸一张牌（与其它摸牌同一 ``shuffle`` 子流、同一短摸口径）。"""
-    host.draw_for_hand(frame, frame.data["source"], 1)
+    """重铸第二步：摸一张牌（与其它摸牌同一 ``shuffle`` 子流、同一短摸口径）。
+
+    摸牌也算「获得牌」（票 24）之后，这一摸可能触发【清俭】并挂起；帧步**必须**把
+    ``"stay"`` 原样返回，否则本步被当成"完成"、MOVE 帧出栈，待答询问失去归属。
+    """
+    if host.draw_for_hand(frame, frame.data["source"], 1) == "stay":
+        return "stay"
     return None
 
 
 MOVE_STEPS = (Step(reforge_lose_card, None), Step(reforge_draw, None))
 """重铸帧：两个非 dispatch 的步骤（``None`` = 不对应任何时机枚举位）。"""
+
+
+# ---------------------------------------------------------------------------
+# RANK_COMPARE 帧（huo-taishici-xunyu 票 03）：拼点
+#
+# 规则第十二章（L1309–L1380）：两名**有手牌**的角色各以一张**手牌**比较点数；平点 = 双方
+# 都没赢；拼点不是使用 / 打出、但**属于失去牌**；拼点牌置入弃牌堆（与「弃置」不同）。
+#
+# **本仓的落地口径（票 03 的用户裁定 + 建模决定）**：选牌阶段牌**还留在各自手牌里**
+# （这样"扣置"不需要第二个隐藏区——处理区是公开区，提前搬进去会让对手提前看到牌面），
+# 全部参与者答完后**一次性**搬入处理区（``reason = PINDIAN``，即"因拼点失去一张牌"，
+# 内联派发「失去牌后」⇒ 用最后一张手牌拼点照常触发【连营】）、立刻亮出并比点、派发
+# ``RANK_COMPARE_RESULT_AFTER``、再把两张牌置入弃牌堆。见 `03-c1-pindian.md`。
+# ---------------------------------------------------------------------------
+
+RANK_COMPARE_ON_EMITTED = "rank_compare_on_emitted"
+"""帧私有：``RANK_COMPARE_ON`` 已派发（重入不再发）。"""
+
+RANK_COMPARE_PICKED = "rank_compare_picked"
+"""帧私有：``{座位: 拼点牌 card_id}``；插入序 = 发起者、再按 ``targets`` 序。"""
+
+RANK_COMPARE_PLACE_CURSOR = "rank_compare_place_cursor"
+"""帧私有：已搬入处理区的参与者个数（搬牌可能因「失去牌后」钩子挂起）。"""
+
+RANK_COMPARE_PLACED = "rank_compare_placed"
+"""帧私有：所有拼点牌都已在处理区（下一步才是亮出）。"""
+
+RANK_COMPARE_RESULTS = "rank_compare_results"
+"""帧私有：``((target_seat, won), ...)``，与 ``targets`` 对齐；平点 = ``won`` 假。"""
+
+RANK_COMPARE_RESULT_EMITTED = "rank_compare_result_emitted"
+"""帧私有：``RANK_COMPARE_RESULT_AFTER`` 已派发。"""
+
+RANK_COMPARE_ABORTED = "rank_compare_aborted"
+"""帧私有：拼点中止（参与者没有手牌——候选阶段已挡，帧内兜底，零副作用）。"""
+
+RANK_COMPARE_DISCARD_CURSOR = "rank_compare_discard_cursor"
+"""帧私有：已置入弃牌堆的拼点牌个数。"""
+
+_ASK_RANK_COMPARE = "pindian"
+"""拼点选牌的**询问位置**（``ask_selection`` 的 ``owner``；逐参与者用不同 ``key``）。"""
+
+
+def _rank_compare_order(frame: Frame) -> tuple[int, ...]:
+    """参与拼点的座位序：发起者在先，被拼点者按 ``targets`` 声明序。"""
+    return (int(frame.data["initiator"]), *tuple(int(seat) for seat in frame.data["targets"]))
+
+
+def rank_compare_announce(host: FrameHost, frame: Frame) -> Control:
+    """派发 ``RANK_COMPARE_ON``（"进行拼点时"，规则 12.3 L1340）一次。"""
+    if frame.data.get(RANK_COMPARE_ON_EMITTED):
+        return None
+    frame.data[RANK_COMPARE_ON_EMITTED] = True
+    return host.emit_frame_timing(
+        frame, Timing.RANK_COMPARE_ON, actor=int(frame.data["initiator"])
+    )
+
+
+def rank_compare_pick(host: FrameHost, frame: Frame) -> Control:
+    """逐参与者要一张**手牌**（不可放弃；超时兜底由接入层取候选第一张）。"""
+    picked: dict[int, int] = frame.data.setdefault(RANK_COMPARE_PICKED, {})
+    order = _rank_compare_order(frame)
+    for index, seat in enumerate(order):
+        if seat in picked:
+            continue
+        if not host.state.player(seat).hand:
+            # 发起者 / 目标必须有手牌才能拼点（规则 12.1 L1317）；候选阶段已挡，
+            # 帧内再兜一次：没有牌就整条中止（零副作用），后续步骤一律跳过。
+            frame.data[RANK_COMPARE_ABORTED] = True
+            return None
+        got = host.ask_selection(
+            frame,
+            owner=_ASK_RANK_COMPARE,
+            key=f"pindian:{index}",
+            actor=seat,
+            timing=Timing.RANK_COMPARE_ON,
+            spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=False),
+            build_face=lambda: host.selection_face(seat, (Zone.HAND,), reveal_hand=True),
+        )
+        if host.suspended(got):
+            return "stay"
+        if not got:
+            return None
+        picked[seat] = int(got[0])
+    return None
+
+
+def rank_compare_place(host: FrameHost, frame: Frame) -> Control:
+    """把全部拼点牌**手牌 → 处理区**（``reason = PINDIAN``，算失去不算弃置）。"""
+    if frame.data.get(RANK_COMPARE_ABORTED) or frame.data.get(RANK_COMPARE_PLACED):
+        return None
+    order = _rank_compare_order(frame)
+    picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
+    cursor = int(frame.data.get(RANK_COMPARE_PLACE_CURSOR, 0))
+    while cursor < len(order):
+        seat = order[cursor]
+        card_id = picked[seat]
+        if card_id in host.state.processing:
+            cursor += 1
+            frame.data[RANK_COMPARE_PLACE_CURSOR] = cursor
+            continue
+        control = host.move_in_frame(
+            frame,
+            (host.state.card(card_id),),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.PINDIAN,
+            owner=seat,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+        cursor += 1
+        frame.data[RANK_COMPARE_PLACE_CURSOR] = cursor
+    frame.data[RANK_COMPARE_PLACED] = True
+    return None
+
+
+def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
+    """亮出并比点：写结果、发 ``pindian`` delta、把结果回写发起帧。"""
+    if frame.data.get(RANK_COMPARE_ABORTED):
+        if RANK_COMPARE_RESULTS not in frame.data:
+            frame.data[RANK_COMPARE_RESULTS] = ()
+            host.note_pindian_result(frame)
+        return None
+    if RANK_COMPARE_RESULTS in frame.data:
+        return None
+    state = host.state
+    picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
+    initiator = int(frame.data["initiator"])
+    base = state.card(picked[initiator]).rank
+    results: list[tuple[int, bool]] = []
+    ties: list[bool] = []
+    for seat in frame.data["targets"]:
+        seat = int(seat)
+        other = state.card(picked[seat]).rank
+        # 点数大者赢；点数相同 ⇒ 双方都"没赢"（规则 12.1 L1318–L1319）。
+        won = base is not None and other is not None and base > other
+        ties.append(base is not None and other is not None and base == other)
+        results.append((seat, won))
+    frame.data[RANK_COMPARE_RESULTS] = tuple(results)
+    order = _rank_compare_order(frame)
+    host.emit_frame_delta(
+        frame,
+        PindianDelta(
+            title=str(frame.data.get("title", "")),
+            initiator=initiator,
+            targets=tuple(int(seat) for seat in frame.data["targets"]),
+            cards=tuple(state.card(picked[seat]) for seat in order),
+            won=tuple(won for _seat, won in results),
+            # 平点 = 双方都没赢：`won` 只有两态，展示面的「都没赢」只能靠这一位
+            # （用户 2026-11-04 的 R7 口径；前端不比较点数）。
+            tied=tuple(ties),
+        ),
+    )
+    host.note_pindian_result(frame)
+    return None
+
+
+def rank_compare_result(host: FrameHost, frame: Frame) -> Control:
+    """派发 ``RANK_COMPARE_RESULT_AFTER``（"赢 / 没赢后"，规则 12.3 L1341）一次。"""
+    if frame.data.get(RANK_COMPARE_ABORTED) or frame.data.get(RANK_COMPARE_RESULT_EMITTED):
+        return None
+    frame.data[RANK_COMPARE_RESULT_EMITTED] = True
+    return host.emit_frame_timing(
+        frame, Timing.RANK_COMPARE_RESULT_AFTER, actor=int(frame.data["initiator"])
+    )
+
+
+def rank_compare_discard(host: FrameHost, frame: Frame) -> Control:
+    """拼点牌**处理区 → 弃牌堆**（``reason = PINDIAN``；不是"弃置"）。"""
+    if frame.data.get(RANK_COMPARE_ABORTED):
+        return None
+    order = _rank_compare_order(frame)
+    picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
+    cursor = int(frame.data.get(RANK_COMPARE_DISCARD_CURSOR, 0))
+    while cursor < len(order):
+        seat = order[cursor]
+        card_id = picked[seat]
+        if card_id not in host.state.processing:
+            cursor += 1
+            frame.data[RANK_COMPARE_DISCARD_CURSOR] = cursor
+            continue
+        control = host.move_in_frame(
+            frame,
+            (host.state.card(card_id),),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.PINDIAN,
+            owner=seat,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+        cursor += 1
+        frame.data[RANK_COMPARE_DISCARD_CURSOR] = cursor
+    return None
+
+
+RANK_COMPARE_STEPS = (
+    Step(rank_compare_announce, Timing.RANK_COMPARE_ON),
+    Step(rank_compare_pick, None),
+    Step(rank_compare_place, None),
+    Step(rank_compare_reveal, None),
+    Step(rank_compare_result, Timing.RANK_COMPARE_RESULT_AFTER),
+    Step(rank_compare_discard, None),
+)
+"""拼点帧六步：派发 ON → 逐参与者选牌 → 扣置（处理区）→ 亮出比点 → 派发 RESULT_AFTER →
+置入弃牌堆。后四步都是"动作"，不对应时机枚举位。"""
 
 
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
@@ -1536,5 +2298,8 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
         FrameKind.DEATH: IDENTITY_DEATH_STEPS if mode is Mode.IDENTITY else DEATH_STEPS,
         FrameKind.RECOVER: RECOVER_STEPS,
+        FrameKind.MAXLIFE: MAXLIFE_STEPS,
         FrameKind.JUDGE: JUDGE_STEPS,
+        FrameKind.REJUDGE: REJUDGE_STEPS,
+        FrameKind.RANK_COMPARE: RANK_COMPARE_STEPS,
     }

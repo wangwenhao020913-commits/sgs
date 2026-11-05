@@ -13,7 +13,15 @@ from typing import Any
 
 import pytest
 
-from sgs.data import ContentPack, DataLoadError, LoadError, load_content_pack, validate_content_pack
+from sgs.data import (
+    Category,
+    ContentPack,
+    DataLoadError,
+    LoadError,
+    card_category,
+    load_content_pack,
+    validate_content_pack,
+)
 from sgs.effects import (
     CARD_BEHAVIORS,
     CallOp,
@@ -85,6 +93,20 @@ def test_loads_the_standard_108_profile_with_all_its_declarations():
     assert len(expect.by_type) == 32
     assert expect.by_suit == {"heart": 27, "diamond": 27, "spade": 27, "club": 27}
     assert expect.by_category == {"basic": 53, "trick": 36, "equipment": 19}
+
+
+def test_card_category_reads_the_card_kind_from_the_pack():
+    """M6 票 02：``card_category`` 是"这张牌是锦囊吗"的唯一读取口（【集智】/【奇才】）。
+
+    牌名大类来自数据文件而不是牌名白名单：基础牌 / 锦囊 / 装备各取一张，未知牌名
+    fail-closed 返回 ``None``（调用方按"不是锦囊"处理）。
+    """
+    assert card_category("standard", "slash") is Category.BASIC
+    assert card_category("standard", "wine") is Category.BASIC
+    assert card_category("standard", "duel") is Category.TRICK
+    assert card_category("standard", "indulgence") is Category.TRICK
+    assert card_category("standard", "axe") is Category.EQUIPMENT
+    assert card_category("standard", "no_such_card") is None
 
 
 def test_the_default_profile_is_selected_by_the_pack_and_can_be_overridden():

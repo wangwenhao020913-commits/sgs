@@ -30,7 +30,7 @@ from sgs.effects import (
 from sgs.engine import Engine
 from sgs.skills import catalog as catalog_module
 from sgs.skills.catalog import SkillDef
-from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard
+from sgs.state import EndPhase, FrameKind, MoveReason, Pass, QueryKind, UseCard, Zone
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type
@@ -505,6 +505,26 @@ def _hp_deltas(engine):
     ]
 
 
+def _equip_replacement_order(engine):
+    """顶替路径的三类关键记录，**按记录流原样**取出（票 06 §5 / `CODING_STANDARDS.md` §4）。
+
+    旧装备离开装备区 / ``hp`` 变化 / 新装备进入装备区各是唯一事件，故这条列表就是
+    "顶替这条路径"的次序本身——不 ``sorted``、不去重、不取集合。
+    """
+    order = []
+    for record in engine.records:
+        if record.kind != "delta":
+            continue
+        if record.delta_type == "card_move":
+            if record.reason is MoveReason.LOSE and record.from_zone.zone is Zone.EQUIP:
+                order.append(("leave", tuple(card.card_id for card in record.cards)))
+            elif record.reason is MoveReason.PUT and record.to_zone.zone is Zone.EQUIP:
+                order.append(("enter", tuple(card.card_id for card in record.cards)))
+        elif record.delta_type == "hp_change":
+            order.append(("hp", record.seat, record.before, record.after))
+    return order
+
+
 # ---------------------------------------------------------------------------
 # 白银狮子（二）：失去装备时回复 1 点（走正常 RECOVER 帧）
 # ---------------------------------------------------------------------------
@@ -528,6 +548,36 @@ def test_losing_silver_lion_recovers_one_through_the_recover_frame():
         record.kind == "timing" and record.timing is Timing.RECOVER_VALUE
         for record in engine.records
     ), "RECOVER_VALUE 时机照常派发"
+
+
+def test_replacing_silver_lion_recovers_before_the_new_equipment_enters():
+    """票 06：用**新**装备牌顶替白银狮子时，它"失去装备 ⇒ 回复 1 点"要先结算完。
+
+    记录流次序必须是：旧装备进弃牌堆 → ``hp x→x+1``（RECOVER 帧的结算）→ 新装备进装备区。
+    修前 ``move_used_card_to_equip_zone`` 丢掉旧装备那次移动的 ``"stay"``，于是同一趟里
+    接着把新装备 ``PUT`` 进槽——记录流里新装备的 ``card_move`` 排在 ``hp_change`` **之前**
+    （``hp`` 数值与帧数都不变，故旧回归看不见）。
+    """
+    engine = _play_cards(
+        [
+            SeatSpec(hp=1, hp_max=4, equip=(SILVER[0],), hand=(EIGHT_DIAGRAMS[0],)),
+            SeatSpec(),
+        ],
+        (EIGHT_DIAGRAMS[0],),
+    )
+
+    assert _equip_replacement_order(engine) == [
+        ("leave", (SILVER[0],)),
+        ("hp", 0, 1, 2),
+        ("enter", (EIGHT_DIAGRAMS[0],)),
+    ], "次序 = 旧装备离场 → 回复 → 新装备入场（比较序列本身，不排序）"
+    # 本票只修**顺序**：`hp` 的数值与 `RECOVER` 帧数一个是 1 → 2、一个是恰好一张，都不许变。
+    assert engine.state.player(0).hp == 2
+    assert _hp_deltas(engine) == [(0, 1, 2)]
+    assert len(_frames(engine, FrameKind.RECOVER)) == 1
+    # 顶替恰好发生一次：装备区只剩新装备，旧装备在弃牌堆里只有那一张。
+    assert engine.state.player(0).equip == [EIGHT_DIAGRAMS[0]], "新防具顶替白银狮子"
+    assert engine.state.discard.count(SILVER[0]) == 1
 
 
 def test_losing_another_equipment_while_wearing_silver_lion_does_not_recover():
@@ -699,7 +749,7 @@ def _trick_on_equipment(
     """座位 0 对座位 1 的装备用一张拆 / 顺；选择面取唯一合法项（目标只有这一张牌）。
 
     ``attacker_equip``：顺手牵羊要过距离闸门；目标是【骅骝】时距离 1 + 1 = 2，故给使用者
-    先装一张 −1 进攻马，把距离压回 1（这两条修饰器本来就该按既有链序叠加）。
+    先装一张 −1 进攻马，把距离压回 1（这两条修饰器本来就该按既有的修饰器管道序叠加）。
     """
     state = _state(
         [

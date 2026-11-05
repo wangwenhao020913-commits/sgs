@@ -192,17 +192,29 @@ ALLOWLIST: dict[Site, Rule] = {
         "_damage_to",
         'if card.type == "slash":',
     ): Rule(NORMAL, 1, "藤甲只免疫**普通**杀（火杀 +1 / 雷杀照常）——有意 normal-only，与 _VINE_ARMOR_IMMUNE 同口径"),
+    (
+        "src/sgs/agents/heuristic.py",
+        "_DECK_TABLE",
+        '"slash": 30,',
+    ): Rule(NORMAL, 3, "记牌的牌堆档位表按**牌名**逐项记数：'slash' 就是普通【杀】，火 / 雷各有自己的一行（三档各一处，不是判族站点）"),
+    (
+        "src/sgs/agents/heuristic.py",
+        "_POOL_SLASH_TYPES",
+        '_POOL_SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})',
+    ): Rule(
+        FAMILY,
+        1,
+        "C2（票 23）的未知牌期望把档位表的**牌名**折成族价：这一行就是族登记表"
+        "（火 / 雷杀与普通杀同价），新加第五条【杀】时它与 _DECK_TABLE 的反查一起红",
+    ),
+    (
+        "src/sgs/agents/heuristic.py",
+        "_pool_card_value",
+        'return _CARD_VALUES["slash"]',
+    ): Rule(FAMILY, 1, "档位表牌名经族登记判定是【杀】后回落到族价（与 _card_value 同一口径）"),
     # ---- effects/actions.py：响应候选的语境分派 ----
-    (
-        "src/sgs/effects/actions.py",
-        "_respond",
-        'if ctx.required in ("slash", "dodge"):',
-    ): Rule(FAMILY, 1, "required 是**请求牌名**；成员判定在下游 satisfies_required，这里只决定追加哪趟转化候选"),
-    (
-        "src/sgs/effects/actions.py",
-        "_respond",
-        'scope = CandidateScope.RESPOND if ctx.required == "slash" else CandidateScope.DODGE',
-    ): Rule(FAMILY, 1, "同上：按请求牌名选 CandidateScope，不筛具体牌面"),
+    # 票 03 起那一行改成按 `SLASH_FAMILY_KEY` 选 `CandidateScope`（不再有 "slash" 字面量，
+    # 故本清单里没有对应站点）：请求牌名仍是**族请求**，成员判定仍在下游 `satisfies_required`。
     # ---- effects/behaviors.py：杀族计数键与行为表 ----
     (
         "src/sgs/effects/behaviors.py",
@@ -235,11 +247,8 @@ ALLOWLIST: dict[Site, Rule] = {
         "resolve_duel",
         'required="slash",',
     ): Rule(FAMILY, 1, "决斗的响应请求是杀族请求；ask_respond 的候选成员判定走 satisfies_required"),
-    (
-        "src/sgs/effects/ops.py",
-        "resolve_borrowed_sword",
-        'required="slash",',
-    ): Rule(FAMILY, 2, "借刀两处请求（offers 预检 / 真询问）都是杀族请求，成员判定同 satisfies_required"),
+    # 借刀的两处请求（offers 预检 / 真询问）票 03 起读 `SLASH_FAMILY_KEY`（同一个线上取值，
+    # 不再写字面量），故本清单里没有对应站点；提供者那条分支读同一份常量。
     (
         "src/sgs/effects/ops.py",
         "resolve_barbarian_invasion",
@@ -255,7 +264,12 @@ ALLOWLIST: dict[Site, Rule] = {
         "src/sgs/skills/catalog.py",
         "_normal_slash",
         'return state.card(card_id).type == "slash"',
-    ): Rule(NORMAL, 1, "朱雀羽扇的**源筛选**：只收普通杀，避免产物属性按来源递归漂移（题面点名的 normal-only）"),
+    ): Rule(NORMAL, 1, "朱雀羽扇的**触发条件**（实体牌侧）：只收普通杀，避免产物属性按来源递归漂移（题面点名的 normal-only）"),
+    (
+        "src/sgs/skills/catalog.py",
+        "_fan_is_normal_slash",
+        'return card.type == "slash"',
+    ): Rule(NORMAL, 1, "朱雀羽扇的触发条件（虚拟 / 转化牌侧）：产物牌型必须是普通【杀】"),
     (
         "src/sgs/skills/catalog.py",
         "_SKILL_DEFS",
@@ -276,12 +290,34 @@ ALLOWLIST: dict[Site, Rule] = {
         "GREEN_DRAGON_FLOW",
         'type_id="slash",',
     ): Rule(FAMILY, 1, "PickProvide 的面同样经 satisfies_required 过滤（与 _green_dragon_plan 同源）"),
+    # ---- skills/phase_body.py：夏侯渊【神速】的虚拟【杀】（feng-xiahouyuan 票 01）----
+    (
+        "src/sgs/skills/phase_body.py",
+        "_shensu_use_slash",
+        'card = pure_virtual_card(host.state, "slash")',
+    ): Rule(NORMAL, 1, "【神速】每选一项视为使用一张**普通**【杀】——这是**产物**牌型（牌面逐字），有意 normal-only；族判据走产物行为表，不在这里判"),
+    # ---- skills/heroes.py：转化产物 ----
+    # ---- skills/active.py：界刘备【仁德】的"视为使用一张基本牌"（M6 票 16）----
+    (
+        "src/sgs/skills/active.py",
+        "_JIE_RENDE_BASIC_TYPES",
+        'JIE_RENDE_BASIC_SLASH: "slash",',
+    ): Rule(NORMAL, 1, "界【仁德】视为使用的【杀】**产物**是普通杀牌型——有意 normal-only"),
+    (
+        "src/sgs/skills/active.py",
+        "_jie_rende_effect",
+        'if type_id == "slash":',
+    ): Rule(NORMAL, 1, "按产物牌型决定要不要选目标（普通杀需要目标；桃/酒只对自己）"),
     # ---- skills/heroes.py：转化产物 ----
     (
         "src/sgs/skills/heroes.py",
         "CONVERSION_SKILLS",
         'target_type_id="slash",',
-    ): Rule(NORMAL, 2, "武圣 / 龙胆的转化**产物**是普通杀牌型；源谓词 _slash 才用 is_slash（方向相反）"),
+    ): Rule(
+        NORMAL,
+        4,
+        "武圣（标准 / 界）/ 龙胆 / 神关羽【武神】的转化**产物**是普通杀牌型；源谓词才用 is_slash（方向相反）",
+    ),
     # ---- skills/lord_request.py ----
     (
         "src/sgs/skills/lord_request.py",
@@ -290,9 +326,25 @@ ALLOWLIST: dict[Site, Rule] = {
     ): Rule(FAMILY, 1, "激将的请求牌名是杀族；候选 / 响应成员判定走 satisfies_required"),
     (
         "src/sgs/skills/lord_request.py",
-        "lord_request_skill_definitions",
-        'requirement={"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required],',
+        "_lord_request_definition",
+        'requirement = {"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required]',
     ): Rule(FAMILY, 1, "按 required 取文案（请求牌名，不筛牌面；护驾 / 激将各一档）"),
+    # ---- skills/lord_request.py：界【激将】①②（M6 票 16）----
+    (
+        "src/sgs/skills/lord_request.py",
+        "JIE_JIJIANG_LORD",
+        'required="slash",',
+    ): Rule(FAMILY, 1, "界【激将】①的请求牌名是杀族；候选 / 响应成员判定走 satisfies_required"),
+    (
+        "src/sgs/skills/lord_request.py",
+        "JIE_JIJIANG_ECHO",
+        'card_type="slash",',
+    ): Rule(FAMILY, 1, "界【激将】②的牌面判据走 satisfies_required（火 / 雷 / 转化杀同族）"),
+    (
+        "src/sgs/skills/lord_request.py",
+        "_lord_echo_requirement",
+        '"slash": "当你需要使用或打出【杀】时，你可以令其他蜀势力角色依次选择是否打出一张【杀】",',
+    ): Rule(FAMILY, 1, "按 required 取 ① 的文案（请求牌名，不筛牌面）"),
     # ---- skills/response_window.py / target_pool.py：声明闭集 ----
     (
         "src/sgs/skills/response_window.py",
@@ -300,10 +352,41 @@ ALLOWLIST: dict[Site, Rule] = {
         'card_types=("slash", "duel"),',
     ): Rule(FAMILY, 1, "声明闭集按 satisfies_required 逐项匹配（05b-fix：火 / 雷杀也求两张）"),
     (
+        "src/sgs/skills/response_window.py",
+        "ResponseCountSkill.response_count",
+        'if "slash" in self.card_types and satisfies_required(ctx.card, "slash"):',
+    ): Rule(
+        FAMILY,
+        2,
+        "票 23 把牌名闭集拆成【杀】/【决斗】两条分支（两半改的是不同的一方）；"
+        "这一行本身出现两个字面量（成员测试 + 判族实参），故计数为 2；"
+        "【杀】这一支仍走 satisfies_required ⇒ 火 / 雷 / 转化杀同族",
+    ),
+    (
         "src/sgs/skills/target_pool.py",
         "TARGET_POOL_SKILLS",
         'card_types=("slash", "duel"),',
-    ): Rule(FAMILY, 1, "空城的牌名闭集同样走 satisfies_required（火 / 雷杀也进不了目标池）"),
+    ): Rule(
+        FAMILY,
+        2,
+        "空城（标准 / 界）的牌名闭集同样走 satisfies_required（火 / 雷杀也进不了目标池）",
+    ),
+    # ---- skills/awakening.py：界徐庶【诛害】（M6 票 06） ----
+    (
+        "src/sgs/skills/awakening.py",
+        "ZHUHAI_FLOW",
+        'card_types=("slash",),',
+    ): Rule(FAMILY, 1, "【诛害】可用的【杀】按**家族**判（PickCards 的 card_types 走 satisfies_required：火 / 雷 / 转化杀同族）"),
+    (
+        "src/sgs/skills/awakening.py",
+        "_zhuhai_illegal_cards",
+        'if not satisfies_required(card, "slash"):',
+    ): Rule(FAMILY, 1, "距离 / 次数闸门逐张判「是不是【杀】」同样按家族（火 / 雷 / 转化杀与普通杀同一条使用规则）"),
+    (
+        "src/sgs/skills/awakening.py",
+        "_zhuhai_plan",
+        'and satisfies_required(state.card(card_id), "slash")',
+    ): Rule(FAMILY, 1, "available 判据与选择面同源（family-aware，避免「计划问、步骤却付不起」）"),
     # ---- skills/virtual.py：虚拟牌命名空间与产物 ----
     (
         "src/sgs/skills/virtual.py",
@@ -394,6 +477,8 @@ M5_FIX_ANCHORS: tuple[tuple[str, str, str], ...] = (
     ("src/sgs/skills/target_pool.py", "TARGET_POOL_SKILLS", FAMILY),
     # 05b：朱雀羽扇的**源筛选**有意只收普通【杀】（产物属性不递归漂移）。
     ("src/sgs/skills/catalog.py", "_normal_slash", NORMAL),
+    # 票 09：询问式触发后，虚拟 / 转化牌侧同样只认普通【杀】。
+    ("src/sgs/skills/catalog.py", "_fan_is_normal_slash", NORMAL),
     # 藤甲只免疫普通【杀】——有意 normal-only。
     ("src/sgs/skills/catalog.py", "_VINE_ARMOR_IMMUNE_CARD_TYPES", NORMAL),
     # 转化**产物**有意是普通【杀】牌型（武圣 / 龙胆 / 丈八 / 蛇矛）。
@@ -438,7 +523,7 @@ def test_no_comparison_against_the_bare_slash_literal_remains_unclassified() -> 
     }
     assert comparisons, "全树扫不到任何牌型比较——扫描器失效"
     owners = {site[1] for site, _ in comparisons}
-    assert owners == {"_normal_slash", "_damage_to"}, (
+    assert owners == {"_normal_slash", "_fan_is_normal_slash", "_damage_to"}, (
         "牌型相等比较只许出现在朱雀羽扇的源筛选与藤甲免疫建模里，实得："
         f"{sorted(owners)}"
     )

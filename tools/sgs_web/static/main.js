@@ -6,18 +6,40 @@
 
 /* ------------------------------------------------------------------ 装配 */
 
-/** 牌桌按钮：在 0.05–0.5 秒之间切一档回放步长（缺省 0.2，不记住；U3-05 / D13）。 */
+/** 玩家点过步长按钮之后，`anim.ini` 的 `base_step` 不再覆盖当前档（U4-02 / D8）。
+ *
+ * 只住内存：刷新页面会重新读 ini 并重建这个 flag（与"不落 localStorage"同一口径）。
+ */
+let delayPinnedByPlayer = false;
+
+/** 牌桌按钮：在 0.03–0.3 秒之间切一档回放步长（缺省 0.1，不记住）。 */
 function cycleDelay() {
+  delayPinnedByPlayer = true;
   const at = DELAY_STEPS_MS.indexOf(state.eventDelayMs);
   state.eventDelayMs = DELAY_STEPS_MS[(at + 1) % DELAY_STEPS_MS.length];
   updateDelayButton();
 }
 
+/** `anim.ini` 的 `base_step` → **初始**档位（U4-02 / D8）。
+ *
+ * 只在玩家还没点过按钮时生效；值必须落在 `DELAY_STEPS_MS` 里——缺键 / 手改成别的数字
+ * 一律忽略并保留缺省 100（`animConfig` 缺键时回的就是 100）。返回是否真的改了档位。
+ * 飞行层只负责"表读完了"（`animOnConfig`），播放节奏仍住这几个文件。
+ */
+function applyIniBaseStep(config) {
+  if (delayPinnedByPlayer) return false;
+  const value = Number(config && config.base_step);
+  if (!DELAY_STEPS_MS.includes(value)) return false;
+  state.eventDelayMs = value;
+  updateDelayButton();
+  return true;
+}
+
 function updateDelayButton() {
-  // 0.05s 是亚 0.1 秒挡：一位小数会被 toFixed(1) 抹成 "0.1"，与 0.1 挡撞字，故两位。
+  // 0.03 / 0.05 是亚 0.1 秒挡：一位小数会被 toFixed(1) 抹成 "0.1"，与 0.1 挡撞字，故两位。
   const seconds = state.eventDelayMs / 1000;
   const text = `步长 ${seconds < 0.1 ? seconds.toFixed(2) : seconds.toFixed(1)}s`;
-  // 牌桌与回放页共用同一份步长状态、同一组六档（W4-6）。
+  // 牌桌与回放页共用同一份步长状态、同一组五档（W4-6）。
   for (const id of ["btn-delay", "btn-r-delay"]) {
     const button = $(id);
     if (button) button.textContent = text;
@@ -39,12 +61,18 @@ function wireOverlayToggle(button, panel, onOpen) {
 
 function wire() {
   seedOptions();
-  $("in-players").addEventListener("change", seedOptions);
+  $("in-players").addEventListener("change", () => {
+    seedOptions();
+    syncPoolHint();  // 座位数变了，真名池够不够要重算
+  });
   $("in-pointjiang").addEventListener("change", syncPointjiang);
+  $("in-my-hero").addEventListener("change", syncPoolHint);
   syncPointjiang();
   loadHeroCatalog();
+  loadHeroPools();
   loadDeckCatalog();
   $("lobby-form").addEventListener("submit", startGame);
+  $("btn-pool-save").addEventListener("click", saveHeroPool);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；
   // 这里只按 NAV_BUTTONS 逐个挂同一份处理器。回放入口就是导航三键之一，旧图标按钮已删。
   const openReplayPage = () => {
@@ -91,6 +119,9 @@ function wire() {
   });
   $("btn-r-delay").addEventListener("click", cycleDelay);
   updateDelayButton();
+  // U4-02（D7 / D8）：`anim.ini` 的 `base_step` 只决定**加载时**的初始档。订阅飞行层的
+  // "表读完了"口；玩家点过按钮之后，ini 的覆盖由 `applyIniBaseStep` 里的 flag 挡住。
+  if (typeof animOnConfig === "function") animOnConfig(applyIniBaseStep);
   $("btn-r-first").addEventListener("click", () => replaySeek(0));
   $("btn-r-prev").addEventListener("click", () => replayStep(-1));
   $("btn-r-next").addEventListener("click", () => replayStep(1));

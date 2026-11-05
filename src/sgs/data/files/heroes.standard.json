@@ -5,6 +5,7 @@
     {
       "id": "caocao",
       "name": "曹操",
+      "true_name": "曹操",
       "kingdom": "wei",
       "gender": "male",
       "hp_max": 4,
@@ -18,6 +19,7 @@
     {
       "id": "simayi",
       "name": "司马懿",
+      "true_name": "司马懿",
       "kingdom": "wei",
       "gender": "male",
       "hp_max": 3,
@@ -31,36 +33,40 @@
     {
       "id": "xiahoudun",
       "name": "夏侯惇",
+      "true_name": "夏侯惇",
       "kingdom": "wei",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "ganglie", "name": "刚烈", "skill_type": "NORMAL" }]
     },
     {
       "id": "zhangliao",
       "name": "张辽",
+      "true_name": "张辽",
       "kingdom": "wei",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "tuxi", "name": "突袭", "skill_type": "NORMAL" }]
     },
     {
       "id": "xuchu",
       "name": "许褚",
+      "true_name": "许褚",
       "kingdom": "wei",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "luoyi", "name": "裸衣", "skill_type": "NORMAL" }]
     },
     {
       "id": "guojia",
       "name": "郭嘉",
+      "true_name": "郭嘉",
       "kingdom": "wei",
       "gender": "male",
       "hp_max": 3,
@@ -74,11 +80,12 @@
     {
       "id": "zhenji",
       "name": "甄姬",
+      "true_name": "甄姬",
       "kingdom": "wei",
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "qingguo", "name": "倾国", "skill_type": "NORMAL" },
         { "id": "luoshen", "name": "洛神", "skill_type": "NORMAL" }
@@ -87,6 +94,7 @@
     {
       "id": "liubei",
       "name": "刘备",
+      "true_name": "刘备",
       "kingdom": "shu",
       "gender": "male",
       "hp_max": 4,
@@ -100,6 +108,7 @@
     {
       "id": "guanyu",
       "name": "关羽",
+      "true_name": "关羽",
       "kingdom": "shu",
       "gender": "male",
       "hp_max": 4,
@@ -110,16 +119,18 @@
     {
       "id": "zhangfei",
       "name": "张飞",
+      "true_name": "张飞",
       "kingdom": "shu",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "paoxiao", "name": "咆哮", "skill_type": "NORMAL" }]
     },
     {
       "id": "zhaoyun",
       "name": "赵云",
+      "true_name": "赵云",
       "kingdom": "shu",
       "gender": "male",
       "hp_max": 4,
@@ -130,6 +141,7 @@
     {
       "id": "machao",
       "name": "马超",
+      "true_name": "马超",
       "kingdom": "shu",
       "gender": "male",
       "hp_max": 4,
@@ -143,6 +155,7 @@
     {
       "id": "zhugeliang",
       "name": "诸葛亮",
+      "true_name": "诸葛亮",
       "kingdom": "shu",
       "gender": "male",
       "hp_max": 3,
@@ -156,11 +169,12 @@
     {
       "id": "huangyueying",
       "name": "黄月英",
+      "true_name": "黄月英",
       "kingdom": "shu",
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "jizhi", "name": "集智", "skill_type": "NORMAL" },
         { "id": "qicai", "name": "奇才", "skill_type": "NORMAL" }
@@ -169,6 +183,7 @@
     {
       "id": "sunquan",
       "name": "孙权",
+      "true_name": "孙权",
       "kingdom": "wu",
       "gender": "male",
       "hp_max": 4,
@@ -182,36 +197,40 @@
     {
       "id": "ganning",
       "name": "甘宁",
+      "true_name": "甘宁",
       "kingdom": "wu",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "qixi", "name": "奇袭", "skill_type": "NORMAL" }]
     },
     {
       "id": "lvmeng",
       "name": "吕蒙",
+      "true_name": "吕蒙",
       "kingdom": "wu",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "keji", "name": "克己", "skill_type": "NORMAL" }]
     },
     {
       "id": "huanggai",
       "name": "黄盖",
+      "true_name": "黄盖",
       "kingdom": "wu",
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "kurou", "name": "苦肉", "skill_type": "NORMAL" }]
     },
     {
       "id": "zhouyu",
       "name": "周瑜",
+      "true_name": "周瑜",
       "kingdom": "wu",
       "gender": "male",
       "hp_max": 3,
@@ -225,6 +244,7 @@
     {
       "id": "daqiao",
       "name": "大乔",
+      "true_name": "大乔",
       "kingdom": "wu",
       "gender": "female",
       "hp_max": 3,
@@ -238,6 +258,7 @@
     {
       "id": "luxun",
       "name": "陆逊",
+      "true_name": "陆逊",
       "kingdom": "wu",
       "gender": "male",
       "hp_max": 3,
@@ -251,6 +272,7 @@
     {
       "id": "sunshangxiang",
       "name": "孙尚香",
+      "true_name": "孙尚香",
       "kingdom": "wu",
       "gender": "female",
       "hp_max": 3,
@@ -264,6 +286,7 @@
     {
       "id": "huatuo",
       "name": "华佗",
+      "true_name": "华佗",
       "kingdom": "qun",
       "gender": "male",
       "hp_max": 3,
@@ -277,6 +300,7 @@
     {
       "id": "lvbu",
       "name": "吕布",
+      "true_name": "吕布",
       "kingdom": "qun",
       "gender": "male",
       "hp_max": 4,
@@ -287,6 +311,7 @@
     {
       "id": "diaochan",
       "name": "貂蝉",
+      "true_name": "貂蝉",
       "kingdom": "qun",
       "gender": "female",
       "hp_max": 3,

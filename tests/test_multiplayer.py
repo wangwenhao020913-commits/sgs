@@ -15,7 +15,7 @@ import pytest
 
 import sgs.agents as agents
 from sgs.data import Identity, RuleConfig, load_content_pack
-from sgs.engine import Engine, RandomSource
+from sgs.engine import Engine, ai_stream
 
 PACK = load_content_pack(deck_profile="standard_108")
 SPEED_SEED = 7
@@ -31,8 +31,7 @@ SIDE_IDENTITIES: dict[str, frozenset[Identity]] = {
 def _run(count: int) -> Engine:
     rule_config = RuleConfig(player_count=count)
     engine = Engine.new_game(seed=SPEED_SEED, rule_config=rule_config, pack=PACK)
-    ai_stream = RandomSource(SPEED_SEED).substream("ai")
-    engine.run([agents.RandomPlayer(ai_stream) for _ in range(count)])
+    engine.run([agents.RandomPlayer(ai_stream(SPEED_SEED, seat)) for seat in range(count)])
     return engine
 
 

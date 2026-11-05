@@ -113,6 +113,15 @@ DODGE_RESPONSE_CARD = "dodge"
 【闪】候选（B1 的根因之一）。
 """
 
+PEACH_RESPONSE_CARD = "peach"
+"""求桃窗口里可用的牌名（票 03 的提供者 ``required``）。
+
+它只用于**提供者**那一侧（"这扇窗口要一张什么牌"→ ``PROVIDER_REQUIRED_KEY``）：真牌候选
+仍走 :func:`~sgs.effects.actions._peach` 的**语境**判据（``UseContext.NEAR_DEATH`` + 濒死者
+作目标），因为濒死窗口要的不止【桃】这一种牌名（【酒】只对**自己**有效），不是"一张叫什么
+名的牌"。故它与上面两条同住行为表，但只服务提供者的声明范围。
+"""
+
 
 class FinalZone(str, Enum):
     """结算完实体牌的**最终去向区**（票 09 §6）。
@@ -585,7 +594,9 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "fire_slash": _slash_variant("fire_slash", nature=DamageNature.FIRE),
     "thunder_slash": _slash_variant("thunder_slash", nature=DamageNature.THUNDER),
     # 酒：自己 + 出牌阶段 / 濒死；出牌阶段置加伤（M5-04 的 resolve_wine），濒死自救走
-    # 求桃窗口的统一回复（与【桃】同一骨架），两种用法共用一个每回合一次的计数键。
+    # 求桃窗口的统一回复（与【桃】同一骨架）。两种用法是**两条轴**：出牌阶段增伤每回合
+    # 一次（``UseLimit``）；濒死自救**无次数限制、也不记账**（``recover_from_peach`` 传
+    # ``counts=False``，候选侧 ``_peach`` 对 ``near_death_self_only`` 不查次数）。
     "wine": CardBehavior(
         card_type_id="wine",
         use_timings=(_PLAY_PHASE, _NEAR_DEATH),

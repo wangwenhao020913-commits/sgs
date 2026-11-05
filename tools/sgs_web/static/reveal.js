@@ -35,9 +35,16 @@ function revealData(pending) {
   const harvest = pending && pending.harvest && typeof pending.harvest === "object"
     ? pending.harvest
     : {};
-  const cards = Array.isArray(harvest.revealed)
-    ? harvest.revealed
-    : (Array.isArray(pending && pending.revealed) ? pending.revealed : []);
+  // A1：洛神连续判定的**累积**判定牌由服务端派生字段给出，优先于其它亮牌来源。
+  const judged = pending && pending.judgment_reveal
+    && Array.isArray(pending.judgment_reveal.cards)
+    ? pending.judgment_reveal.cards
+    : null;
+  const cards = judged && judged.length
+    ? judged
+    : (Array.isArray(harvest.revealed)
+      ? harvest.revealed
+      : (Array.isArray(pending && pending.revealed) ? pending.revealed : []));
   const targets = Array.isArray(harvest.targets) ? harvest.targets : [];
   return {
     cards,
@@ -76,6 +83,10 @@ function revealHintText(pending, interactive) {
   const requirement = (pending && pending.context && pending.context.requirement)
     || data.hint
     || "从亮出的牌里选择";
+  // A1：洛神连续判定的亮牌确认——卡片只读，出口在右端「提交（继续）/ 放弃（停止）」。
+  if (isJudgmentRevealOption(pending)) {
+    return `${requirement}：点右端「提交」继续，或「放弃」停止。`;
+  }
   if (isPickRevealStep(pending)) {
     if (!interactive) return `${requirement}：等待其他座位响应…`;
     const total = (pending.spec && pending.spec.total) || [1, 1];
@@ -83,6 +94,15 @@ function revealHintText(pending, interactive) {
     const most = Math.max(least, Number(total[1]) || least);
     const howMany = least === most ? `选 ${least} 张` : `选 ${least}~${most} 张`;
     return `${requirement}：${howMany}后点右端「提交」（已选 ${state.picks.length} 张）。`;
+  }
+  // 票 01：亮牌步的候选里真有 `Pass`（攻心）⇒ 「放弃」是合法出口；没有可点的红桃时
+  // 弹窗只展示整副手牌，提示直接指向「放弃」。
+  if (pending && pending.dialog === DIALOG_KINDS.reveal && hasPassAction(pending)) {
+    if (!interactive) return `${requirement}：等待其他座位响应…`;
+    if (!((pending.slots || []).length)) {
+      return `${requirement}：没有可展示的红桃牌，点右端「放弃」结束。`;
+    }
+    return `${requirement}：点一张红桃牌即展示；也可以点右端「放弃」。`;
   }
   if (interactive) return `${requirement}：点一张亮牌即提交。`;
   const current = data.current;
@@ -254,4 +274,144 @@ async function submitRevealPick(pending, slotIndex) {
     return;
   }
   await submitAction(before);
+}
+
+/* ------------------------------------------------------------ 按花色取牌（涉猎） */
+
+/** 判据：**公开亮牌 + 每种花色至多 k 张**的选牌步（神吕蒙移动版【涉猎】）。
+ *
+ * 只吃载荷形状，不认技能 id：`SELECT_CARDS` ∧ `spec.max_per_suit` 有值 ∧ 槽位全在处理区
+ * （公开亮牌，`_mask_watched_faces` 对 processing 槽位不抹牌面 ⇒ 非发动者也看得到五张）。
+ * 与亮牌模板（`dialog = "reveal"`）分开：那一步是"观看授予 / 五谷目标条"，没有花色槽。
+ */
+function isSuitPickStep(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  const spec = pending.spec || {};
+  if (!spec.max_per_suit) return false;
+  const slots = pending.slots || [];
+  if (!slots.length) return false;
+  return slots.every((slot) => slot.ref && slot.ref.zone === "processing");
+}
+
+/** 一个槽此刻的状态：`picked`（已选，可再点取消）/ `taken`（同花色已被选走 ⇒ 置灰）/
+ *  `free`。判据只读 `state.picks` 与槽位牌面的花色。 */
+function suitSlotState(pending, index) {
+  if (state.picks.includes(index)) return "picked";
+  const slot = pending.slots[index];
+  const suit = slot && slot.card ? slot.card.suit : null;
+  if (suit === null) return "free";
+  const cap = Number((pending.spec || {}).max_per_suit) || 1;
+  const same = state.picks.filter((at) => {
+    const other = pending.slots[at];
+    return other && other.card && other.card.suit === suit;
+  }).length;
+  return same >= cap ? "taken" : "free";
+}
+
+/** 点一张：已选 ⇒ 取消；同花色未满 ⇒ 选中；同花色已满 ⇒ 无动作（界面已置灰）。 */
+function toggleSuitPick(pending, index) {
+  if (state.playback || state.submitBusy) return;
+  if (!isSuitPickStep(pending)) return;
+  const at = state.picks.indexOf(index);
+  if (at >= 0) {
+    state.picks.splice(at, 1);
+  } else if (suitSlotState(pending, index) === "free") {
+    state.picks.push(index);
+    state.picks.sort((a, b) => a - b);
+  } else {
+    return;
+  }
+  state.lastRejectReason = "";
+  renderPending(state.view);
+}
+
+/** 这一步的步骤提示：规则话术读 `context.requirement`（服务端），前端只补"怎么点"。 */
+function suitPickHint(pending, interactive) {
+  const requirement = (pending && pending.context && pending.context.requirement) || "";
+  const prefix = requirement ? `${requirement}：` : "";
+  if (!interactive) return `${prefix}等待该座位选择…`;
+  return `${prefix}点选每种花色至多一张（已选 ${state.picks.length} 张）；`
+    + "点已选的牌可取消；点「提交」或右端「放弃」都按当前选择结算。";
+}
+
+/** 正文：一行亮出的牌；已选高亮、同花色其余置灰；非发动者只读。 */
+function renderSuitPick(pending, opts = {}) {
+  const box = opts.container || $("t-options");
+  const interactive = opts.interactive !== false && isOwnPending(pending);
+  if (opts.promptHint !== false) {
+    const hint = $("t-target-hint");
+    if (hint) hint.textContent = suitPickHint(pending, interactive);
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "reveal suit-pick";
+  wrap.classList.add("reveal", "suit-pick");
+  const row = document.createElement("div");
+  row.className = "cards reveal-cards";
+  row.classList.add("cards", "reveal-cards");
+  (pending.slots || []).forEach((slot, index) => {
+    const entry = slot.card;
+    if (!entry) return;
+    const status = suitSlotState(pending, index);
+    const pickable = interactive && status !== "taken";
+    const node = cardFaceNode(entry, {
+      static: !pickable,
+      onClick: pickable ? () => toggleSuitPick(pending, index) : undefined,
+    });
+    node.classList.add("reveal-card");
+    node.setAttribute("data-slot-index", String(index));
+    node.setAttribute("data-suit", String(entry.suit || ""));
+    if (status === "picked") {
+      node.classList.add("sel");
+      node.setAttribute("data-picked", "true");
+    }
+    if (status === "taken") {
+      node.classList.add("dim");
+      node.setAttribute("data-dim", "true");
+    }
+    row.appendChild(node);
+  });
+  wrap.appendChild(row);
+  box.appendChild(wrap);
+  if (opts.bodyClass !== false) {
+    const body = $("t-dialog-body");
+    if (body) body.classList.add("reveal-body");
+  }
+}
+
+/** 提交后的 2.5 秒结果态（仅发动者本地）：获得的牌保持高亮、其余置灰。 */
+function renderSuitResult() {
+  const result = state.suitResult;
+  const box = $("t-options");
+  if (!result || !box) return;
+  box.innerHTML = "";
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = "已提交：亮起的牌被获得，置灰的牌置入弃牌堆。";
+  const wrap = document.createElement("div");
+  wrap.className = "reveal suit-pick";
+  wrap.classList.add("reveal", "suit-pick");
+  const row = document.createElement("div");
+  row.className = "cards reveal-cards";
+  row.classList.add("cards", "reveal-cards");
+  (result.cards || []).forEach((entry, index) => {
+    const node = cardFaceNode(entry, { static: true });
+    node.classList.add("reveal-card");
+    node.setAttribute("data-slot-index", String(index));
+    node.setAttribute("data-suit", String(entry.suit || ""));
+    if ((result.picked || []).includes(index)) {
+      node.classList.add("sel");
+    } else {
+      node.classList.add("dim");
+      node.setAttribute("data-dim", "true");
+    }
+    row.appendChild(node);
+  });
+  wrap.appendChild(row);
+  box.appendChild(wrap);
+  if ($("t-dialog-body")) $("t-dialog-body").classList.add("reveal-body");
+}
+
+/** 结果态是否还在展示（2.5 秒窗口）。 */
+function suitResultActive() {
+  const result = state.suitResult;
+  return !!result && Date.now() < result.until;
 }

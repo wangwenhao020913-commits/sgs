@@ -64,6 +64,17 @@
       <span id="lobby-hint" class="dim"></span>
     </div>
   </form>
+  <!-- 将池（M6 票 13 / spec D6）：5 个常驻预设槽位 + 按真名分组的版本格。
+       槽位按钮与版本格都由 lobby.js 按服务端下发的目录 / 存档渲染；这里只留挂载点。 -->
+  <section id="hero-pool-panel" class="panel">
+    <h2>将池预设</h2>
+    <div id="pool-slots" class="pool-slots" aria-label="将池槽位"></div>
+    <div class="row">
+      <button id="btn-pool-save" type="button">保存到槽位 1</button>
+      <span id="pool-hint" class="dim"></span>
+    </div>
+    <div id="hero-pool" class="hero-pool" aria-label="将池"></div>
+  </section>
   <section class="panel">
     <h2>已有录像</h2>
     <div id="run-list" class="runs"></div>
@@ -85,13 +96,20 @@
       </div>
       <div class="topbar-center">
         <span class="round">第 <span id="t-round">—</span> 轮</span>
+        <!-- M6 票 11 / 票 19：额外回合提示（额外回合不推进自然指针，顶栏轮次不变）。
+             显隐只由服务端快照的 `turn_extra` 决定（`table.js:renderTable`）。 -->
+        <span id="t-extra-turn" class="extra-turn" hidden>额外回合</span>
         <span class="sep">·</span>
         <span class="tag">回合计</span><code id="t-phase"></code>
         <span class="tag">轮到</span><code id="t-turn"></code>
       </div>
       <div class="topbar-right">
         <span class="count" title="牌堆剩余">牌堆 <span id="t-deck"></span></span>
-        <span class="count" title="弃牌堆">弃牌 <span id="t-discard"></span></span>
+        <!-- U4-05 / D11：弃牌数变成按钮，点开只读的弃牌堆面板；计数口仍是内层
+             `#t-discard`（`renderTable` 只写这个 span），顺序 / 样式与「牌堆」一致。 -->
+        <button id="btn-discard" type="button" class="count" title="弃牌堆（点开查看）"
+                aria-haspopup="dialog" aria-controls="t-discard-modal"
+                aria-expanded="false">弃牌 <span id="t-discard"></span></button>
         <button id="btn-settings" type="button" class="icon-btn" title="牌桌设置">设置</button>
         <!-- U2-01：导航三键（D7 右端顺序：牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放）。
              无会话时「牌桌」禁用；当前页高亮由 core.js:show() 统一维护。 -->
@@ -104,7 +122,7 @@
             <span class="tag">座位</span> <code id="t-seat"></code>
           </div>
           <div class="settings-row">
-            <button id="btn-delay" type="button" class="ghost" title="事件逐条回放的步长（0.05–0.5 秒，点一下换一档）">步长 0.1s</button>
+            <button id="btn-delay" type="button" class="ghost" title="事件逐条回放的步长（0.03–0.3 秒，点一下换一档）">步长 0.1s</button>
             <button id="btn-takeover" type="button" class="ghost" title="到时限由服务端确定性代答">请服务端判定</button>
             <button id="btn-refresh" type="button" class="ghost">刷新</button>
           </div>
@@ -162,10 +180,8 @@
             <span id="t-choice" class="dim"></span>
           </div>
         </div>
-        <div class="hand-head">
-          <span class="tag">手牌</span>
-          <span id="t-hand-count" class="dim"></span>
-        </div>
+        <!-- 手牌区**不留标题行**（票 23 报障）：那行「手牌 N 张」把提示条挤到压住牌面
+             顶部的花色 / 点数上；张数在别处已经有了（自己的武将块 `#t-self-hand`）。 -->
         <div id="t-hand" class="cards hand"></div>
       </div>
       <div id="t-skills" class="skills"></div>
@@ -181,8 +197,12 @@
           </div>
           <div id="t-self-hp" class="hp-bar"></div>
           <div id="t-self-tags" class="seat-tags"></div>
+          <!-- M6 票 19：武将牌上的牌区（每个放置区一行；没有区时整块隐藏）。 -->
+          <div id="t-self-hero-zones" class="hero-zones" hidden></div>
+          <!-- B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 -->
+          <div id="t-self-hero-tags" class="hero-tags" hidden></div>
           <div class="seat-foot">
-            <span>手牌 <b id="t-self-hand">0</b></span>
+            <span>手牌：<b id="t-self-hand">0/0</b></span>
             <span>座位 <b id="t-self-seatno">0</b></span>
           </div>
           <div id="t-self-chain" class="chain-line" hidden title="横置（连环状态）"></div>
@@ -246,13 +266,47 @@
       </div>
     </div>
 
+    <!-- 弃牌堆面板（U4-05 / D11）：只读检视窗（标题 + 关闭 + 可滚正文），数据源与表体
+         同一份视图。**自己的遮罩**：`#t-modal-backdrop` 属于询问弹窗 / 武将详情，那一层
+         没有点击监听（U2 断言），"点背景 = 关闭"只适用于这里的窗口。 -->
+    <div id="t-discard-backdrop" class="discard-backdrop" hidden></div>
+    <div id="t-discard-modal" class="modal discard-modal" role="dialog" aria-modal="true"
+         aria-labelledby="t-discard-title" hidden>
+      <div class="modal-window discard-window">
+        <div class="modal-head">
+          <h2 id="t-discard-title" class="modal-title">弃牌堆</h2>
+          <button id="t-discard-close" type="button" class="ghost" title="关闭（Esc）">关闭</button>
+        </div>
+        <div id="t-discard-summary" class="discard-summary">共 0 张</div>
+        <div id="t-discard-body" class="modal-body discard-body"></div>
+      </div>
+    </div>
+
     <!-- 目标线层（U3-03 / D8.1）：覆盖整个牌桌壳的 SVG（`inset: 0`、无 viewBox、不吃指针），
          在座位与底部面板之上、弹窗之下。端点只在画线时读一次布局（窗口变化不影响已在播的线）。 -->
     <svg id="t-target-lines" class="target-lines" aria-hidden="true"></svg>
 
+    <!-- 拼点弹窗（huo-taishici-xunyu 票 04 / 用户 2026-11-04 的 R7）：**全场可见的只读结果面**。
+         它不是询问面——`stepDialogKind` 不认它、牌桌照常可点、没有提交按钮（选牌仍走牌桌
+         表面点自己的手牌）。内容由 `pindian.js` 从 `pindian` delta 画：左 1 个固定槽 =
+         发起者的拼点牌、右 1..N 行 = 各被拼点者的牌 + 结果（赢 / 没赢 / 都没赢）；停留 3 秒
+         由 `PINDIAN_HOLD_MS` 排一次计时器（服务端不阻塞）。 -->
+    <div id="t-pindian" class="pindian-popup" role="status" aria-live="polite" hidden>
+      <div class="pindian-window">
+        <h2 id="t-pindian-title" class="pindian-title"></h2>
+        <div id="t-pindian-body" class="pindian-body"></div>
+      </div>
+    </div>
+
     <!-- 技能名层（U3-04 / D9）：发动者武将块上方的飘字（金色加粗，2s 上浮 20 设计单位）。
          独立一层是必须的：武将块用 `overflow: hidden` 裁白光，飘字住进去会被一起裁掉。 -->
     <div id="t-skill-floats" class="skill-floats" aria-hidden="true"></div>
+
+    <!-- 飞行层（U4-01 / D1）：与舞台区互不依赖的覆盖层，z 高于目标线 / 技能飘字。
+         每张移动的牌一个牌面副本；起 / 落点只在起飞那一刻量一次，之后不跟随重绘。 -->
+    <div id="t-anim-flights" class="anim-layer" aria-hidden="true"></div>
+    <!-- 飞行时间表提示（U4-01 / D8）：anim.ini 缺键 / 解析失败时**一行**，正常时隐藏。 -->
+    <div id="t-anim-note" class="anim-note" hidden></div>
   </div>
 </main>
 
@@ -290,7 +344,7 @@
         <button id="btn-r-play" type="button" class="ghost" title="播放 / 暂停">▶ 播放</button>
         <button id="btn-r-next" type="button" class="ghost" title="下一条">▶|</button>
         <button id="btn-r-last" type="button" class="ghost" title="跳到结尾">⏭</button>
-        <button id="btn-r-delay" type="button" class="ghost" title="回放逐条停留的步长（0.05–0.5 秒，点一下换一档）">步长 0.1s</button>
+        <button id="btn-r-delay" type="button" class="ghost" title="回放逐条停留的步长（0.03–0.3 秒，点一下换一档）">步长 0.1s</button>
         <span id="r-pos" class="dim"></span>
       </div>
     </div>
@@ -345,12 +399,17 @@
 <script src="options.js"></script>
 <!-- 亮牌模板（U2-11 五谷 / 票 12 遗计复用）：`renderReveal` + 目标条；判据仍在 modal.js。 -->
 <script src="reveal.js"></script>
+<!-- 拼点弹窗（huo-taishici-xunyu 票 04）：`pindian` delta → 全场可见的只读结果面。
+     挂在 `session.js:stepPlayback` 的记录流上；`cardFaceNode` 来自 card-view.js，故排在其后。 -->
+<script src="pindian.js"></script>
 <script src="modal.js"></script>
 <script src="hero-detail.js"></script>
 <script src="arrange.js"></script>
 <script src="answer.js"></script>
 <script src="log.js"></script>
 <script src="replay.js"></script>
+<!-- U4-01（D1）：飞行层。必须排在 main.js 之前：test_web_static 契约要求 main.js 是清单最后一份。 -->
+<script src="anim.js"></script>
 <script src="main.js"></script>
 </body>
 </html>

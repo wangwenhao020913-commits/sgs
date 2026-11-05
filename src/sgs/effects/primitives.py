@@ -82,6 +82,11 @@ def locate(state: GameState, card_id: int) -> ZoneRef:
             return ZoneRef(Zone.EQUIP, player.seat)
         if card_id in player.judge:
             return ZoneRef(Zone.JUDGE, player.seat)
+        # 武将牌上的牌是**真区域**（M6 票 10）：坐标带 （座位, 技能实例），故逐区找，
+        # 同一座位的两个放置区不会互相遮挡。
+        for instance, zone in player.hero_cards.items():
+            if card_id in zone.cards:
+                return ZoneRef(Zone.HERO, player.seat, instance)
     if card_id in state.discard:
         return ZoneRef(Zone.DISCARD)
     if card_id in state.processing:
@@ -121,16 +126,28 @@ def move_card(
     to_zone: ZoneRef,
     reason: MoveReason,
     owner: int | None,
+    to_top: bool = False,
 ) -> CardMoveDelta:
     """把一批牌从各自（同一个）来源区域移到目标区域坐标，返回一条变化事件。
 
     ``owner`` 是这次移动的**归属角色**（判定牌 = 被判定者、弃置 / 使用 = 弃置者 /
     使用者、摸牌 = 摸牌者、装备置入 = 持有者）；"无角色主体"的移动（如终局收尾）
     传 ``None``。``ctx`` 只提供结算主体信息，本原语不读结算栈。
+
+    ``to_top``（票 02 的落点）：**成为牌堆顶**。多张牌沿用
+    :func:`~sgs.effects.place_on_deck` 的既有口径——元组顺序即自顶向下（``cards[0]``
+    在最上）。只有进牌堆的移动才有"顶"，其它目标区传 ``True`` 是编程错误（``ValueError``，
+    在**搬牌之前**就拒绝，不留半个副作用）。落点随 :class:`~sgs.state.CardMoveDelta`
+    落记录（``to_top``），故调用方**不得**再补一次 ``place_on_deck``：那会把"进牌堆"与
+    "置于顶"拆成两步，中间可以被一个挂起的钩子劈开。
     """
     card_ids = tuple(card.card_id for card in cards)
     if not card_ids:
         raise ValueError("空的一批牌不构成一次移动操作")
+    if to_top and to_zone.zone is not Zone.DECK:
+        raise ValueError(
+            f"只有进牌堆的移动才有'置于顶'的落点，得到目标区 {to_zone.zone.value}"
+        )
 
     source = locate(state, card_ids[0])
     for card_id in card_ids[1:]:
@@ -147,10 +164,18 @@ def move_card(
         for card_id in card_ids:
             state.virtual_judge.pop(card_id, None)
 
-    if to_zone.zone is Zone.EQUIP:
+    if to_top:
+        state.deck[:0] = card_ids
+    elif to_zone.zone is Zone.EQUIP:
         _place_into_equipment(state, to_zone, cards)
     else:
         state.zone(to_zone).extend(card_ids)
+    if to_zone.zone is Zone.DISCARD:
+        # 本回合"置入弃牌堆的牌含哪几种花色"（M6 票 11 的【博图】判据）：记在**唯一的搬牌
+        # 原语**里，而不是各调用点自己记——裁定是"计入本回合**所有来源**置入的牌"
+        # （`06`（§5「程序化约定与偏离一手」）），任何一条没接上的来源都会让技能静默不
+        # 发动。花色与来源 / 原因无关。
+        state.note_discard_suits(cards)
 
     return CardMoveDelta(
         cards=cards,
@@ -158,6 +183,7 @@ def move_card(
         to_zone=to_zone,
         reason=reason,
         owner=owner,
+        to_top=to_top,
     )
 
 

@@ -28,9 +28,10 @@ import pytest
 from sgs.data import RuleConfig, load_content_pack
 from sgs.effects import CARD_BEHAVIORS, FinalZone, ResponseWindow, legal_actions_for
 from sgs.engine import Engine, dump_journal, read_journal
-from sgs.engine.steps import _dodge_window
+from sgs.engine.steps import _collected_response_window, _dodge_window
 from sgs.resolution import Frame
 from sgs.state import (
+    ActivateSkill,
     DodgeContext,
     EndPhase,
     FrameKind,
@@ -744,9 +745,9 @@ class _DodgeWindowHost:
         self.used = []
 
     def advance_provider(self, frame, timing):
-        return None, None
+        return None, None, None
 
-    def ask_query(self, kind, actor, timing, payload=None):
+    def ask_query(self, kind, actor, timing, *, frame=None, payload=None):
         return self.answer
 
     def suspended(self, action):
@@ -755,7 +756,7 @@ class _DodgeWindowHost:
     def provider_registered(self, skill_id):
         raise AssertionError("本用例不提供提供者")
 
-    def start_provider(self, frame, skill_id, actor, timing):
+    def start_provider(self, frame, skill_id, actor, timing, *, required):
         raise AssertionError("本用例不提供提供者")
 
     def open_skill_judgment(self, frame, seat, skill_id):
@@ -789,3 +790,52 @@ def test_a_nullify_cannot_be_the_dodge_that_cancels_a_slash(pack):
     assert frame.data.get("dodges_done", 0) == 0, "【无懈可击】不算一次【闪】"
     assert frame.data["canceled"] is False, "【无懈可击】不能抵消【杀】"
     assert host.used == [], "【无懈可击】不能被当成【闪】压进使用链"
+
+
+class _NullifyWindowHost:
+    """``_collected_response_window`` 的最小宿主：窗口那一问交回一条 ``ActivateSkill``。
+
+    票 02 的 fail-closed 反例：应答归属修好之后，窗口仍要拒绝"没有惰性判定式提供者"的
+    ``ActivateSkill``——**不得**静默当成 Pass。提供者路径全部设成"不该被调用"。
+    """
+
+    def __init__(self, state, answer) -> None:
+        self.state = state
+        self.answer = answer
+
+    def advance_provider(self, frame, timing):
+        return None, None, None
+
+    def ask_respond(self, frame, actor, timing, **kwargs):
+        return self.answer
+
+    def suspended(self, action):
+        return False
+
+    def provider_registered(self, skill_id):
+        return False
+
+    def start_provider(self, frame, skill_id, actor, timing, *, required):
+        raise AssertionError("未登记的 ActivateSkill 不许走提供者派发")
+
+
+def test_a_nullify_window_still_rejects_an_activation_without_a_provider(pack):
+    """真的没有提供者回调的 ``ActivateSkill`` 仍 fail-closed（不静默当 Pass）。"""
+    state = _response_state(pack)
+    frame = Frame(
+        kind=FrameKind.RESOLVE,
+        data={
+            "source": 0,
+            "card": state.card(cards_of_type(pack, "duel")[0]),
+            "targets": (1,),
+        },
+        frame_id=7,
+    )
+    host = _NullifyWindowHost(
+        state, ActivateSkill(skill_id="hero.jie_simayi.fankui", answers_seq=1)
+    )
+
+    with pytest.raises(NotImplementedError, match="无懈窗口没有判定式提供者"):
+        _collected_response_window(host, frame, 1)
+
+    assert frame.data.get("response_declared") == [], "被拒绝的声明不许进声明表"

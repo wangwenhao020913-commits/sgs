@@ -59,6 +59,7 @@ __all__ = [
     "VirtualSourceError",
     "card_ids",
     "grouped_candidates",
+    "kind_source_ceiling",
     "pure_virtual_card",
     "single_conversion",
     "transformed_card",
@@ -84,6 +85,41 @@ class VirtualKind(IntEnum):
     INDULGENCE = 3
     DUEL = 4
     FIRE_SLASH = 5
+    DISMANTLEMENT = 6
+    WINE = 7
+    """【酒】（M6 票 16 的龙胆「桃当酒」）：**尾部紧凑段**的第一个 kind。
+
+    追加段挂在 ``kind * block`` 之后，而 108 张档的 ``kind = 7`` 段起点已经
+    ``> WIRE_INT_LIMIT``（7 * 1.46e15 ≈ 1.02e16 > 2**53）。故从这里起的 kind 改用
+    :func:`_tail_segment_start` 的紧凑段：段容量只需（来源张数 + 1）× 进制的平方，
+    且整段落在**兼容段与泛化段之间的未用空隙**里——旧 id 一字不动。
+    """
+
+    # 移动版于吉【蛊惑】（用户 2026-11-01）是**第一条"任意牌名"**的转化技：它的产物覆盖
+    # 全部基本牌 + 普通锦囊牌，故这些牌名全部需要一段命名空间。追加段只增不改：旧 id
+    # （0–7 段）一字不动，尾部紧凑段按 :func:`_tail_segment_start` 依次排开。
+    THUNDER_SLASH = 8
+    SNATCH = 9
+    BARBARIAN_INVASION = 10
+    ARROW_BARRAGE = 11
+    PEACH_GARDEN = 12
+    HARVEST = 13
+    EX_NIHILO = 14
+    BORROWED_SWORD = 15
+    NULLIFY = 16
+    FIRE_ATTACK = 17
+    IRON_CHAIN = 18
+
+
+BLOCK_KIND_COUNT = 6
+"""**共享冻结段布局**的 kind 数（``SLASH`` … ``FIRE_SLASH``，即 ``kind < 6``）。
+
+``MAX_VIRTUAL_SOURCES = 7`` 是按这六段一起塞进 :data:`WIRE_INT_LIMIT` 反推的紧界
+（``6 * 8 * 109**7 ≈ 8.77e15 < 2**53``）；每段的**块容量** ``(7+1) * base**7`` 因此
+按六段冻结。M6 票 03 起**追加**的 kind（``kind >= 6``）挂在旧段之后（``1 + kind *
+block``），段起点已逼近线上整数上限，故每一段另有自己的来源张数上界
+（:func:`kind_source_ceiling`）——**块容量与旧 id 一字不改**。
+"""
 
 
 LEGACY_KIND_COUNT = 2
@@ -103,10 +139,26 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "indulgence": VirtualKind.INDULGENCE,
     "duel": VirtualKind.DUEL,
     "fire_slash": VirtualKind.FIRE_SLASH,
+    "dismantlement": VirtualKind.DISMANTLEMENT,
+    "wine": VirtualKind.WINE,
+    # 移动版于吉【蛊惑】的产物牌名（基本牌 + 普通锦囊，用户 2026-11-01）：
+    "thunder_slash": VirtualKind.THUNDER_SLASH,
+    "snatch": VirtualKind.SNATCH,
+    "barbarian_invasion": VirtualKind.BARBARIAN_INVASION,
+    "arrow_barrage": VirtualKind.ARROW_BARRAGE,
+    "peach_garden": VirtualKind.PEACH_GARDEN,
+    "harvest": VirtualKind.HARVEST,
+    "ex_nihilo": VirtualKind.EX_NIHILO,
+    "borrowed_sword": VirtualKind.BORROWED_SWORD,
+    "nullify": VirtualKind.NULLIFY,
+    "fire_attack": VirtualKind.FIRE_ATTACK,
+    "iron_chain": VirtualKind.IRON_CHAIN,
 }
 """目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】；
-M5-05b 加朱雀羽扇的火【杀】产物）。雷杀当前没有生产者，故**不登记**——空段会白占
-``KIND_COUNT``，把 108 的来源上限从 7 压到 6 并移动旧泛化段。"""
+M5-05b 加朱雀羽扇的火【杀】产物；M6 票 03 加【奇袭】的【过河拆桥】；M6 票 16 加界【龙胆】
+的【桃】当【酒】——它走尾部紧凑段，因为追加段的段起点已经越过线上上限）。雷杀当前没有
+生产者，故**不登记**——空段会白占 ``KIND_COUNT``，把 108 的来源上限从 7 压到 6 并移动
+旧泛化段。"""
 
 KIND_COUNT = len(VirtualKind)
 """命名空间的段数（只读事实；id 算式不读它，构造期的上界检查读它作为段数）。"""
@@ -123,9 +175,9 @@ WIRE_INT_LIMIT = 2**53
 MAX_VIRTUAL_SOURCES = 7
 """虚拟牌的**来源张数上界**（108 张基准包；票 03 §验收 4；W4-fix-1 由 :data:`WIRE_INT_LIMIT` 反推）。
 
-:func:`_generalized_block` 的一段容量是 ``(MAX+1) * base**MAX``（紧界），而全体 id 的
-上界是 ``KIND_COUNT * block``；标准包 ``base = 109``、``KIND_COUNT = 6``（M5-05b 追加
-火【杀】段后）时
+:func:`_generalized_block` 的一段容量是 ``(MAX+1) * base**MAX``（紧界），而共享冻结段
+（:data:`BLOCK_KIND_COUNT` 个 kind）的全体 id 上界是 ``BLOCK_KIND_COUNT * block``；
+标准包 ``base = 109``、共享段 = 6 个 kind（M5-05b 追加火【杀】段后）时
 
 - ``MAX = 7``：``6 * 8 * 109**7 ≈ 8.77e15 < 2**53 ≈ 9.01e15`` ✓
 - ``MAX = 8``：``6 * 9 * 109**8 ≈ 1.07e18`` ✗
@@ -140,6 +192,11 @@ MAX_VIRTUAL_SOURCES = 7
 160 张的实际上界 6 仍远大于本里程碑的最多两张来源（【丈八蛇矛】）。超过上界的来源集合
 由 :func:`transformed_card` / :func:`virtual_card_id` 抛 :class:`VirtualSourceError`
 （构造期可定位错误），而不是静默产出撞 id 或会被浏览器变形的虚拟牌。
+
+**追加 kind 的来源上界**（M6 票 03 起）：``kind >= BLOCK_KIND_COUNT`` 的段挂在旧段之后，
+段起点 ``1 + kind * block`` 已逼近线上整数上限，故每段按
+:func:`kind_source_ceiling` 单独收窄（108 张档的 ``DISMANTLEMENT`` 段 = 6 张，而不是 7）。
+``MAX_VIRTUAL_SOURCES`` 仍是**共享冻结段**的上界，也是各段上界的取值上限。
 """
 
 
@@ -157,24 +214,69 @@ def _base(card_count: int) -> int:
 
 
 def _source_ceiling_for_base(base: int) -> int:
-    """本副牌堆**撑得住**的来源张数上界：``min(MAX_VIRTUAL_SOURCES, 撑得住的最大 m)``。
+    """共享冻结段**撑得住**的来源张数上界：``min(MAX_VIRTUAL_SOURCES, 撑得住的最大 m)``。
 
     109 进制下 7 张是紧上界；牌堆变大（M5 的 160 张 ⇒ ``base = 161``）时
     ``base**7`` 让 7 张来源的编码越过 :data:`WIRE_INT_LIMIT`，故按同一条界取满足
-    ``KIND_COUNT * (m+1) * base**m < WIRE_INT_LIMIT`` 的最大 ``m``。**上限恒为
+    ``BLOCK_KIND_COUNT * (m+1) * base**m < WIRE_INT_LIMIT`` 的最大 ``m``。**上限恒为
     :data:`MAX_VIRTUAL_SOURCES`**：更小的牌堆（53 张 ⇒ ``base = 54``）数学上能容纳
     8 张，但兼容段 / 既有金录像按 7 冻结，不因牌堆变小而改大。
+
+    段数读 :data:`BLOCK_KIND_COUNT`（共享冻结段的 6 个 kind），**不是**
+    ``len(VirtualKind)``：M6 票 03 追加的 kind 不参与旧块布局的界推，它另有自己的
+    :func:`kind_source_ceiling`。若这里读成 7 个 kind，108 张档会收紧到 6 张并挪动
+    旧泛化段的全部 id（国色 / 急救等既有的虚拟牌字节就变了）。
 
     下限是 **2**：兼容段的 ``_fold_legacy`` 用 ``base**2`` 作段步长，两来源的兼容 id
     必须仍在线内。``m = 2`` 都撑不住时 fail-closed，抛 :class:`VirtualSourceError`
     ——不静默产 id。
     """
     for sources in range(MAX_VIRTUAL_SOURCES, 1, -1):
-        if KIND_COUNT * (sources + 1) * base**sources < WIRE_INT_LIMIT:
+        if BLOCK_KIND_COUNT * (sources + 1) * base**sources < WIRE_INT_LIMIT:
             return sources
     raise VirtualSourceError(
         f"virtual_card_id: 当前进制撑不住任何来源张数——base={base}"
         f"（牌堆 {base - 1} 张）时连两张来源的编码都越过线上整数上限 {WIRE_INT_LIMIT}"
+    )
+
+
+def kind_source_ceiling(kind: int, card_count: int) -> int:
+    """某一段（``kind``）在给定牌堆下的**来源张数上界**（线格式硬约束）。
+
+    共享冻结段（``kind < BLOCK_KIND_COUNT``）直接读 :func:`_source_ceiling_for_base`
+    的牌堆上界；追加段（``kind >= BLOCK_KIND_COUNT``）的段起点是 ``1 + kind * block``，
+    剩余线内空间更小，故按同一不等式从牌堆上界往下收窄：
+
+    ``kind * block + (L + 1) * base**L < WIRE_INT_LIMIT``
+
+    （``L`` = 来源张数；``(L + 1) * base**L`` 是该段 ``L`` 张来源的可能编码上界。
+    ``block`` 仍按**共享段**的紧界取——追加段不移动旧 id，也不改块容量。）
+
+    108 张档（``base = 109``、``block ≈ 1.46e15``）下 ``DISMANTLEMENT``（kind = 6）的
+    段起点 ``≈ 8.77e15``，只剩约 ``2.3e14`` 的线内空间：``L = 7`` 的 7 张来源会越过
+    ``2**53``，``L = 6`` 仍在界内 ⇒ 上界 6。160 张档同样 6（与共享段相同）。
+
+    **尾部紧凑段**（M6 票 16 起，``kind >= TAIL_KIND_START``）：追加段的段起点
+    ``kind * block`` 已经超出线上上限（108 张档的 ``kind = 7`` ⇒ ``≈ 1.02e16 > 2**53``），
+    故这类 kind 改用落在兼容段与泛化段之间空隙里的紧凑段（:func:`_tail_source_ceiling`），
+    上界按同一不等式在该空隙里反推（108 / 160 档都是 2）。
+    """
+    if kind >= TAIL_KIND_START:
+        base = _base(card_count)
+        _tail_segment_start(base, kind)  # 段不相交的构造期校验（越界即抛）
+        return _tail_source_ceiling(base)
+    base = _base(card_count)
+    shared = _source_ceiling_for_base(base)
+    if kind < BLOCK_KIND_COUNT:
+        return shared
+    block = _generalized_block(base=base, source_ceiling=shared)
+    start = kind * block
+    for sources in range(shared, 1, -1):
+        if start + (sources + 1) * base**sources < WIRE_INT_LIMIT:
+            return sources
+    raise VirtualSourceError(
+        f"virtual_card_id: kind={kind}（牌堆 {card_count} 张）的段起点 {start} 之后"
+        f"连两张来源的编码都越过线上整数上限 {WIRE_INT_LIMIT}"
     )
 
 
@@ -196,6 +298,9 @@ def virtual_card_id(
       :func:`_generalized_block`。全体 id 因此严格小于
       ``KIND_COUNT * (MAX_VIRTUAL_SOURCES + 1) * base ** MAX_VIRTUAL_SOURCES``，
       而来源上限 :data:`MAX_VIRTUAL_SOURCES` 正是按它 ``< WIRE_INT_LIMIT`` 反推的。
+    - ``kind >= TAIL_KIND_START``（M6 票 16 起）走**尾部紧凑段**：追加段的段起点已经
+      越过线上上限，故这些 kind 落在兼容段与泛化段之间的空隙里
+      （:func:`_tail_segment_start`），整段不与任何旧 id 相交。
 
     两段区间互不重叠：泛化段的起点 ``1 + 2 * block`` 大于兼容段的上界
     ``1 + base ** 2``（``block = (ceiling+1) * base**ceiling > base**2``，``ceiling >= 2``）。
@@ -209,7 +314,7 @@ def virtual_card_id(
     不破；``card_count`` 仍作进制用（"来源张数上限"那层由每副牌堆的实际上界显式承担）。
     """
     base = _base(card_count)
-    ceiling = _source_ceiling_for_base(base)
+    ceiling = kind_source_ceiling(kind, card_count)
     # 空来源是**合法的**（纯虚拟牌走这一段）；"转化牌至少一张来源"由
     # :func:`transformed_card` 把关，id 派生本身不区分二者。
     _validate_source_count(sources, max_sources=ceiling, target="virtual_card_id")
@@ -217,7 +322,11 @@ def virtual_card_id(
         mixed = _fold_legacy(base=base, sources=sources)
         return -(1 + kind * base * base + mixed)
     mixed = _fold(base=base, sources=sources)
-    block = _generalized_block(base=base, source_ceiling=ceiling)
+    if kind >= TAIL_KIND_START:
+        return -(1 + _tail_segment_start(base, kind) + mixed)
+    block = _generalized_block(
+        base=base, source_ceiling=_source_ceiling_for_base(base)
+    )
     return -(1 + kind * block + mixed)
 
 
@@ -234,6 +343,64 @@ def _generalized_block(*, base: int, source_ceiling: int | None = None) -> int:
     """
     ceiling = _source_ceiling_for_base(base) if source_ceiling is None else source_ceiling
     return (ceiling + 1) * base**ceiling
+
+
+TAIL_KIND_START = int(VirtualKind.WINE)
+"""**尾部紧凑段**的起点 kind（M6 票 16 的龙胆「桃当酒」是第一个消费者）。"""
+
+TAIL_SOURCE_CEILING = 2
+"""尾部紧凑段每段的来源张数上界（实际松紧由 :func:`_tail_source_ceiling` 按进制重算）。
+
+酒 / 桃 都是**单源**转化，2 已留出余量；容量按 ``(m + 1) * base**m`` 取紧界，故整段只占
+``3 * base**2`` 个数——放进兼容段与泛化段之间的空隙里，几十亿个追加 kind 也不会撞到
+``2 * block`` 的泛化段起点。
+"""
+
+
+def _tail_offset(base: int) -> int:
+    """尾部紧凑段的第一个字节偏移：紧接**兼容段**（``kind 0..1``）之后。
+
+    兼容段的 id 落在 ``[1, 1 + LEGACY_KIND_COUNT * base**2)``；泛化段从
+    ``1 + LEGACY_KIND_COUNT * block`` 起算。两者之间是一条从未被使用的空隙（兼容段的段
+    步长只有 ``base**2``），尾部段就住这里——旧 id 因此一字不动。
+    """
+    return LEGACY_KIND_COUNT * base * base
+
+
+def _tail_source_ceiling(base: int) -> int:
+    """尾部紧凑段在当前进制下的来源张数上界（按线上整数上限反推，与共享段同一不等式）。"""
+    offset = _tail_offset(base)
+    for sources in range(TAIL_SOURCE_CEILING, 0, -1):
+        if offset + (sources + 1) * base**sources < WIRE_INT_LIMIT:
+            return sources
+    raise VirtualSourceError(
+        f"virtual_card_id: 尾部紧凑段在 base={base} 下连一张来源都撑不住"
+        f"（越过线上整数上限 {WIRE_INT_LIMIT}）"
+    )
+
+
+def _tail_block(base: int) -> int:
+    """尾部紧凑段一段的容量：``(m + 1) * base**m``（``m`` = 该进制的尾部来源上界）。"""
+    ceiling = _tail_source_ceiling(base)
+    return (ceiling + 1) * base**ceiling
+
+
+def _tail_segment_start(base: int, kind: int) -> int:
+    """尾部 kind 的段起点（``_fold`` 混合值之前的绝对偏移）。
+
+    整段必须仍落在兼容段与泛化段之间的空隙里：``start + block <= 2 * block``（泛化段从
+    ``1 + 2 * block`` 起算）。越界说明用户代码登记了一个荒唐的 ``VirtualKind`` 值，在
+    构造期抛——不静默产出撞 id 的牌。
+    """
+    block = _tail_block(base)
+    start = _tail_offset(base) + (kind - TAIL_KIND_START) * block
+    generalized = LEGACY_KIND_COUNT * _generalized_block(base=base)
+    if start + block > generalized:
+        raise VirtualSourceError(
+            f"virtual_card_id: kind={kind} 的尾部段 [{start}, {start + block}) 越出"
+            f"兼容段与泛化段之间的空隙（上限 {generalized}）"
+        )
+    return start
 
 
 def _fold(*, base: int, sources: tuple[int, ...]) -> int:
@@ -307,15 +474,16 @@ def transformed_card(
     - ``virtual_sources`` 记来源实体牌 id（**排序后**，故枚举序不影响 id）；
     - 负 id 判据不变（:attr:`CardRef.is_virtual`）。
 
-    ``sources`` 为空或超过本副牌堆的来源上界（108 张 ⇒ 7、160 张 ⇒ 6，见
-    :func:`_source_ceiling_for_base`）时抛 :class:`VirtualSourceError`
-    ——"不产生撞 id 的虚拟牌"这条靠**构造期**兜住，而不是靠调用方自律。
+    ``sources`` 为空或超过**该牌名所在段**的来源上界（108 张档的共享段 ⇒ 7、
+    ``DISMANTLEMENT`` 段 ⇒ 6；160 张档 ⇒ 6，见 :func:`kind_source_ceiling`）时抛
+    :class:`VirtualSourceError`——"不产生撞 id 的虚拟牌"这条靠**构造期**兜住，
+    而不是靠调用方自律。
     """
     _require_sources(sources, target=transformed_card.__name__)
-    ceiling = _source_ceiling_for_base(_base(len(state.cards)))
+    kind = _kind_of(target_type_id)
+    ceiling = kind_source_ceiling(int(kind), len(state.cards))
     _validate_source_count(sources, max_sources=ceiling, target=transformed_card.__name__)
     ids = tuple(sorted(sources))
-    kind = _kind_of(target_type_id)
     first = state.card(ids[0])
     single = len(ids) == 1
     return CardRef(
@@ -447,21 +615,28 @@ def virtual_card_use(
         if check_count(state, seat, card):
             return []
         pool = check_targets(state, seat, card)
-        rule = behavior_for(card).target_rule
-        count = rule.target_count(len(pool))
-        if count <= 0:
+        behavior = behavior_for(card)
+        rule = behavior.target_rule
+        # **目标数区间要照真牌摊开**（huo-mobile-batch 票 02）：【铁索连环】是
+        # ``min_targets=1 / max_targets=2``，真牌走 ``_play_phase`` 的
+        # ``rule.target_range`` ⇒ 1 个与 2 个目标的组合都在候选里。转化产物的第一张
+        # 区间牌就是【连环】，若这里仍按"至少 N 个"取单值，1–2 名目标会被压成"恰好 1 名"
+        # ——与真牌不是同一条合法性检测。
+        low, high = rule.target_range(len(pool))
+        if low <= 0 or high < low:
             return []
-        high = count
-        if rule.count is TargetCount.RATED:
+        if rule.count is TargetCount.RATED and not rule.is_range:
             high = apply_modifiers(
                 ModifierPoint.TARGET_COUNT,
                 state,
                 ModifierContext(subject=seat, card=card),
-                count,
+                high,
             )
         return [
             UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
-            for combo in target_combos(pool, count, high)
+            for combo in target_combos(
+                pool, low, high, ordered=behavior.preserve_target_order
+            )
         ]
     if ctx.scope is CandidateScope.DODGE:
         targets = tuple((target,) for target in check_targets(state, seat, card)) or ((),)
@@ -534,15 +709,15 @@ def virtual_candidates(
     ``move_card`` 不落记录，会让记录流重建的牌堆与活状态分叉（票 14 的 fuzz 开启武将后
     实测：从装备区转化【杀】后，下一次从弃牌堆的移动对不上重建结果）。
 
-    来源张数超过**本副牌堆**的上界（108 张 ⇒ 7、160 张 ⇒ 6，与
-    :func:`transformed_card` 读同一个 :func:`_source_ceiling_for_base`）时在这里就抛
-    :class:`VirtualSourceError`，不把 7 张组放行到构造器才失败。
+    来源张数超过**该产物所在段**的上界（108 张档的共享段 ⇒ 7、``DISMANTLEMENT`` 段 ⇒ 6；
+    160 张档 ⇒ 6，与 :func:`transformed_card` 读同一个 :func:`kind_source_ceiling`）时在
+    这里就抛 :class:`VirtualSourceError`，不把越界组放行到构造器才失败。
     """
     if ctx.card is not None or ctx.owner != ctx.subject:
         return []
     if ctx.scope not in scopes:
         return []
-    ceiling = _source_ceiling_for_base(_base(len(state.cards)))
+    ceiling = kind_source_ceiling(int(_kind_of(target_type_id)), len(state.cards))
     actions: list[Any] = []
     for group in sources:
         _validate_source_count(group, max_sources=ceiling, target="virtual_candidates")

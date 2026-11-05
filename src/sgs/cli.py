@@ -27,7 +27,7 @@ from sgs.engine import (
     Engine,
     IllegalActionError,
     JournalRecord,
-    RandomSource,
+    ai_stream,
     new_seed,
 )
 from sgs.state import CardRef, Zone, ZoneRef
@@ -41,7 +41,7 @@ def _csv(raw: str) -> tuple[str, ...]:
 
 
 def _player(name: str, stream) -> Participant:
-    """按档位名造一个参与者；两档共用同一个 ``ai`` 子流（票 13 §档位）。"""
+    """按档位名造一个参与者；传进来的是该座位自己的 ``ai:<seat>`` 子流（票 12）。"""
     if name == "heuristic":
         return HeuristicPlayer(stream)
     return RandomPlayer(stream)
@@ -99,9 +99,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     seed = args.seed if args.seed is not None else new_seed()
-    # 种子闸门只在唯一随机源里有第二份；这里直接借它的报错，不再抄一遍值域。
+    # 种子闸门只在唯一随机源里有第二份；这里借 ai_stream 的报错（不另抄值域），
+    # 顺便把每座位的子流一次建好。
     try:
-        source = RandomSource(seed)
+        streams = [
+            ai_stream(seed, seat) for seat in range(rule_config.player_count)
+        ]
     except ValueError as error:
         print(f"种子非法：{error}", file=sys.stderr)
         return 1
@@ -123,9 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     except HeroDealError as error:
         print(f"武将发放非法：{error}", file=sys.stderr)
         return 1
-    ai_stream = source.substream("ai")
     participants: list[Participant] = [
-        _player(args.ai, ai_stream) for _ in range(rule_config.player_count)
+        _player(args.ai, stream) for stream in streams
     ]
     try:
         engine.run(participants)
@@ -169,6 +171,10 @@ def render(record: JournalRecord) -> str:
             # 横置 / 解除横置（M5-03）：只作调试转写；面向玩家的措辞归 M5-08d。
             state = "横置" if record.chained else "解除横置"
             return f"#{record.seq:<4} 连环 座位={record.seat} {state}"
+        if record.delta_type == "flipped_change":
+            # 翻面：只作调试转写；面向玩家的措辞归网页叙事 / 事件流。
+            state = "翻面（背面朝上）" if record.flipped else "翻回正面"
+            return f"#{record.seq:<4} 翻面 座位={record.seat} {state}"
         if record.delta_type == "wine_change":
             # 【酒】加伤（M5-04）：只作调试转写；面向玩家的措辞归 M5-08d。
             state = "加伤生效" if record.active else "加伤解除"
@@ -186,7 +192,21 @@ def render(record: JournalRecord) -> str:
                 f"#{record.seq:<4} 亮明身份 座位={record.seat} "
                 f"{IDENTITY_LABELS[record.identity]}"
             )
-        return f"#{record.seq:<4} 洗牌 {_zone_label(record.from_zone)}→牌堆 {_cards(record.cards)}"
+        if record.delta_type == "hp_max_change":
+            # 体力上限变化（觉醒技的"减 1 点体力上限"）：只作调试转写。
+            return (
+                f"#{record.seq:<4} 体力上限 座位={record.seat} "
+                f"{record.before}→{record.after}（{record.amount:+d}）"
+            )
+        if record.delta_type == "deck_shuffle":
+            return (
+                f"#{record.seq:<4} 洗牌 {_zone_label(record.from_zone)}→牌堆 "
+                f"{_cards(record.cards)}"
+            )
+        # 其余 delta（标记 / 技能授予与失去 / 帧标签 / 轮次…）不专门转写：只报类型与序号，
+        # **不猜字段**。这里是旧的 `deck_shuffle` 兜底分支，任何未覆盖的 delta 都会在读
+        # `from_zone` 时炸掉——换池后 seed 7 的 5 人局出现觉醒技，才把它暴露出来。
+        return f"#{record.seq:<4} {record.delta_type}"
     if kind == "query":
         candidates = "、".join(action.kind for action in record.query.legal_actions)
         return (

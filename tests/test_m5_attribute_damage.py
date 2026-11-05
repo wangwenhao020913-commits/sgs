@@ -15,7 +15,7 @@ from sgs.data import Color, color_of_suit, load_content_pack
 from sgs.effects import DamageNature, check_count
 from sgs.engine import Engine
 from sgs.skills import transformed_card
-from sgs.state import CardRef, FrameKind, Pass, QueryKind, UseCard
+from sgs.state import CardRef, FrameKind, Pass, Phase, QueryKind, UseCard
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_until
@@ -259,6 +259,7 @@ def test_normal_fire_and_thunder_slashes_read_the_same_per_turn_slash_counter():
         seats=[SeatSpec(), SeatSpec()],
         deck=_deck_excluding_cards(*_slash_cards().values()),
         turn_seat=0,
+        phase=Phase.PLAY,
     )
 
     state.player(0).card_use_counts["slash"] = 1
@@ -288,6 +289,7 @@ def test_a_transformed_slash_product_reads_the_shared_slash_counter():
         seats=[SeatSpec(hand=(red_source, black_source)), SeatSpec()],
         deck=_deck_excluding_cards(red_source, black_source),
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     products = [
         transformed_card(state, (red_source,), "slash"),

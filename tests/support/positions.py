@@ -12,7 +12,19 @@ from dataclasses import dataclass, field
 from sgs.data import ContentPack, Gender, Identity, Kingdom, RuleConfig, load_content_pack
 from sgs.engine import Engine, instantiate_cards
 from sgs.resolution import Frame
-from sgs.state import FrameKind, GameState, Phase, Player, Query, UseCard
+from sgs.state import (
+    ActivateSkill,
+    EndPhase,
+    FrameKind,
+    GameState,
+    Pass,
+    Phase,
+    Player,
+    Query,
+    SelectCards,
+    SelectOption,
+    UseCard,
+)
 from sgs.timing import Timing
 
 __all__ = [
@@ -23,8 +35,11 @@ __all__ = [
     "SequenceHalt",
     "build_state",
     "cards_of_type",
+    "deck_excluding",
     "declare_death",
     "move_after_engine",
+    "pindian_engine",
+    "maxlife_engine",
     "play_phase_peach_engine",
     "play_standard",
     "run_turns",
@@ -58,6 +73,18 @@ class SeatSpec:
 def cards_of_type(pack: ContentPack, type_id: str) -> list[int]:
     """按数据表顺序给出某牌名的全部 ``card_id``。"""
     return [index for index, card in enumerate(pack.deck.cards) if card.type == type_id]
+
+
+def deck_excluding(pack: ContentPack, *used: int) -> tuple[int, ...]:
+    """牌堆序去掉已经发到座位上的牌（``build_state(deck=...)`` 的常用写法）。
+
+    界将各单测原先各带一份逐字节相同的实现（M6）；这里收成唯一实现，调用方传自己的
+    ``PACK``——不给 ``pack`` 参数就分不清 108 / 160 档。
+    """
+    excluded = set(used)
+    return tuple(
+        card_id for card_id in range(len(pack.deck.cards)) if card_id not in excluded
+    )
 
 
 def build_state(
@@ -135,17 +162,18 @@ def play_standard(seed: int = 7, *, pack: ContentPack | None = None, ai: str = "
     需要"跑到第 N 个回合为止"的结构性单测请用 :func:`run_turns`。
 
     ``ai``（票 13）选参与者档位：``"random"``（缺省，M2 基准与确定性探针的口径）或
-    ``"heuristic"``（规则启发式）；两档共用同一个 ``ai`` 子流。
+    ``"heuristic"``（规则启发式）；两档都按座位走 ``ai:<seat>`` 子流（票 12）。
     """
     import sgs.agents as agents
-    from sgs.engine import RandomSource
+    from sgs.engine import ai_stream
 
     resolved_pack = pack if pack is not None else load_content_pack(deck_profile=M1_DECK_PROFILE)
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=resolved_pack)
-    ai_stream = RandomSource(seed).substream("ai")
     player = agents.HeuristicPlayer if ai == "heuristic" else agents.RandomPlayer
-    participants = [player(ai_stream) for _ in range(rule_config.player_count)]
+    participants = [
+        player(ai_stream(seed, seat)) for seat in range(rule_config.player_count)
+    ]
     engine.run(participants)
     return engine
 
@@ -304,6 +332,41 @@ class _MoveAfterPlayer:
         return _end_phase_or_first(query)
 
 
+def maxlife_engine(seed: int = 7):
+    """场景 9（wuming 票 04）：``Engine.raise_hp_max`` 推一个 ``MAXLIFE`` 帧并跑完。
+
+    L11 的"加体力上限"的**首个真实载体 = 票 01 的【天成】**（`src/sgs/skills/start.py`）；这里
+    仍用直接调**唯一写入口**的构造局面，因为它给出**最小帧 + 两条时机记录**的定长记录流：
+    一次上限变化就是一条 ``MAXLIFE`` 帧、``MAXLIFE_INCREASE_BEFORE`` / ``_AFTER`` 各一条，
+    正好当 :data:`~sgs.timing.DISPATCH_WHITELIST` 那两个节点的**实测来源**（【天成】的记录流
+    还混着展示 / 询问 / 回复，不是这个节点的最小证据）。座位 0 = 3 上限 / 2 体力（已受伤），
+    加 1 点 ⇒ 上限 4、体力不动。
+
+    先跑 L0「游戏开始时」派发再调写入口：``Engine.from_state`` 的 ``_started`` 是假，
+    不先 `_step` 一次的话帧会压在任何开局记录之前（记录次序仍是合法的，但场景意图是
+    "游戏内的上限变化"）。减侧两个时机不在本场景里——它们今天不解封。
+    """
+    state = build_state(
+        pack=load_content_pack(deck_profile=M1_DECK_PROFILE),
+        seats=[SeatSpec(hp=2, hp_max=3), SeatSpec()],
+        deck=tuple(range(10)),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    engine._step()  # L0 派发（GAME_START）：开局那一步，不碰结算栈
+    engine.raise_hp_max(0, 1)
+    for _ in range(20):
+        if not engine.stack:
+            break
+        engine._step()
+    assert any(
+        record.kind == "timing" and record.timing is Timing.MAXLIFE_INCREASE_AFTER
+        for record in engine.records
+    ), "场景没跑完 MAXLIFE 帧：加体力上限后的时机必须真的落进记录流"
+    return engine
+
+
 def play_phase_peach_engine(seed: int = 1):
     """场景 7：座位 0 体力 3（未满）且手握一张【桃】，在**出牌阶段主动**使用它回复。
 
@@ -342,3 +405,67 @@ def declare_death(engine: Engine, seat: int, *, killer: int | None = None) -> No
     """
     frame = Frame(kind=FrameKind.NEAR_DEATH, data={"target": seat, "damage_source": killer})
     engine.enter_death(frame, seat)
+
+
+class PindianPlayer:
+    """出牌阶段发动【天义】→ 选座位 1 → 拼点选第一张；其余最小合法应答。
+
+    仅用于场景 10（:func:`pindian_engine`）：它把 ``RANK_COMPARE`` 帧跑完，给出
+    ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER`` 两个节点的**最小实测来源**。
+    """
+
+    def respond(self, query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == "hero.taishici.tianyi":
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == "SELECT_OPTION":
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == "seat:1":
+                    return action
+        if query.kind == "SELECT_CARDS":
+            for action in query.legal_actions:
+                if isinstance(action, SelectCards):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def pindian_engine(seed: int = 7):
+    """场景 10（huo-taishici-xunyu 票 03）：太史慈【天义】跑一次拼点。
+
+    座位 0 = 太史慈（手里一张全场点数最高的牌）、座位 1 一张最低的 ⇒ 拼点必分胜负；
+    记录流里出现 ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER`` 各一条与一条
+    ``pindian`` delta。这是 L15 两个节点的**实测来源**（`tests/test_timing_coverage.py`）。
+    """
+    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
+    order = sorted(range(len(pack.deck.cards)), key=lambda cid: pack.deck.cards[cid].rank)
+    high, low = order[-1], order[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=(high,), hero="taishici"),
+            SeatSpec(hp=4, hp_max=4, hand=(low,)),
+        ],
+        deck=tuple(cid for cid in range(len(pack.deck.cards)) if cid not in (high, low)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    players = [PindianPlayer(), PindianPlayer()]
+    for _ in range(2_000):
+        if any(
+            record.kind == "timing" and record.timing is Timing.RANK_COMPARE_RESULT_AFTER
+            for record in engine.records
+        ):
+            return engine
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        engine.submit(players[engine.pending.actor].respond(engine.pending))
+    raise AssertionError("场景没跑出拼点：RANK_COMPARE_RESULT_AFTER 必须真的落进记录流")

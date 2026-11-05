@@ -31,7 +31,7 @@ from sgs.effects import (
 )
 from sgs.engine import Engine
 from sgs.resolution import Step
-from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard, alive_seats
+from sgs.state import EndPhase, FrameKind, Pass, Phase, QueryKind, UseCard, alive_seats
 from sgs.timing import FORBIDDEN_TIMING_NAMES, Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_until
@@ -43,13 +43,15 @@ DODGE = cards_of_type(PACK, "dodge")
 PEACH = cards_of_type(PACK, "peach")
 
 
-def _state(*, hand_a=(), hand_b=(), hp_a=4, hp_b=4, deck=(), seats=2):
+def _state(*, hand_a=(), hand_b=(), hp_a=4, hp_b=4, deck=(), seats=2, phase=None):
     specs = [SeatSpec(hp=hp_a, hand=tuple(hand_a))]
     if seats > 1:
         specs.append(SeatSpec(hp=hp_b, hand=tuple(hand_b)))
     for _ in range(seats - len(specs)):
         specs.append(SeatSpec())
-    return build_state(pack=PACK, seats=specs, deck=tuple(deck), turn_seat=0)
+    return build_state(
+        pack=PACK, seats=specs, deck=tuple(deck), turn_seat=0, phase=phase
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +236,7 @@ def test_peach_is_offered_in_the_play_phase_only_below_full_hp_and_targets_self(
 
 
 def test_l3_checks_are_named_after_the_official_steps_and_agree_with_the_candidates():
-    healthy = _state(hand_a=(SLASH[0],))
+    healthy = _state(hand_a=(SLASH[0],), phase=Phase.PLAY)
 
     assert check_forbidden(healthy, 0, healthy.card(SLASH[0])) is False
     assert check_count(healthy, 0, healthy.card(SLASH[0])) is False
@@ -556,8 +558,8 @@ def test_apply_hp_refuses_a_value_above_the_hp_max():
 def test_hand_limit_is_zero_when_hp_is_at_or_below_zero():
     state = _state(hp_a=-1, hand_a=(SLASH[0], PEACH[0]))
 
-    assert hand_limit(state.player(0)) == 0, "官方：体力值 ≤ 0 时读作 0，手牌上限最小 0"
-    assert discard_count(state.player(0)) == len(state.player(0).hand), (
+    assert hand_limit(state, state.player(0)) == 0, "官方：体力值 ≤ 0 时读作 0，手牌上限最小 0"
+    assert discard_count(state, state.player(0)) == len(state.player(0).hand), (
         "体力为负时也必须给得出弃牌候选（不能要求弃超过手里的张数）"
     )
 

@@ -48,10 +48,16 @@ from typing import Any
 from sgs.data import SkillType, hero_skill_id
 from sgs.effects import CarrierKind, place_on_deck
 from sgs.resolution import Frame
-from sgs.state import ArrangeCards, CardRef, GameState, alive_seats
+from sgs.state import ArrangeCards, CardRef, GameState, Phase, alive_seats
 from sgs.timing import Timing
 
-from .catalog import ActivationPlan, Hook, SkillDef
+from .catalog import (
+    ActivationPlan,
+    Hook,
+    SkillDef,
+    mark_skill_used_this_turn,
+    skill_used_this_turn,
+)
 from .flow import (
     Arrange,
     DeckTopArrange,
@@ -65,6 +71,11 @@ __all__ = [
     "GUANXING_ARRANGE",
     "GUANXING_FLOW",
     "GUANXING_MAX",
+    "JIE_GUANXING",
+    "JIE_GUANXING_ARRANGE",
+    "JIE_GUANXING_FLOW",
+    "JIE_GUANXING_FULL",
+    "JIE_GUANXING_SMALL",
     "arrange_activation_plans",
     "arrange_skill_definitions",
 ]
@@ -96,7 +107,7 @@ def _guanxing_plan(state: GameState, frame: Frame, instance: Any) -> ActivationP
 
 def arrange_activation_plans() -> dict[str, Any]:
     """G 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。"""
-    return {GUANXING: _guanxing_plan}
+    return {GUANXING: _guanxing_plan, JIE_GUANXING: _jie_guanxing_plan}
 
 
 def _guanxing_count(state: GameState, frame: Frame) -> int:
@@ -158,12 +169,114 @@ GUANXING_FLOW = SkillFlow(
 """
 
 
+# ---------------------------------------------------------------------------
+# 界诸葛亮【观星】（M6 票 16）：五张（存活 < 4 时三张）+ 全置底 ⇒ 结束阶段再次观星
+#
+# §十九 L2113–L2116：
+#
+#     观星：准备阶段，你可以观看牌堆顶的五张牌（当存活角色数小于 4 时改为三张），
+#           然后将这些牌以任意顺序置于牌堆顶或牌堆底。若你将这些牌均置于牌堆底，
+#           你可以于结束阶段再次"观星"。
+#
+# 与标准【观星】的三处差异（其余全部复用：同一条 ``Arrange`` 执行器、同一份「顶段 /
+# 底段」放回原语、同一条自由切分）：
+#
+# - **张数**：标准版是 ``min(存活数, 5)``；界版是"存活 < 4 ⇒ 3、否则 5"（4 人局是 5 张，
+#   比标准版多一张）；
+# - **第二次观星**：准备阶段的观星**全部置底**（``ArrangeCards.split == 0``）时，本回合
+#   的结束阶段再挂一次同一条流水线。判据住「本回合已用位」（``_TURN_USED``）：它恰是
+#   "本回合"的作用域，回合末复位 ⇒ 不需要新状态字段；
+# - **第二次的张数重算**：``Arrange`` 步在**每一次**询问时现读存活角色数（`06`（§5「程序化约定与偏离一手」） 的裁定），
+#   故两次观星之间有人阵亡时第二次按新的存活数看牌。
+# ---------------------------------------------------------------------------
+
+JIE_GUANXING = hero_skill_id("jie_zhugeliang", "guanxing")
+"""界诸葛亮【观星】的全限定技能 id（§十九 L2113–L2116）。"""
+
+JIE_GUANXING_FULL = 5
+"""存活角色数 ≥ 4 时的观星张数（§十九 L2114）。"""
+
+JIE_GUANXING_SMALL = 3
+"""存活角色数 < 4 时的观星张数（§十九 L2114–L2115）。"""
+
+JIE_GUANXING_SMALL_ALIVE = 4
+"""「存活角色数小于 4」那个阈值的字面值（与竞品无关，是牌面事实）。"""
+
+_JIE_DONE_KEY = "jie_guanxing_done"
+"""放回完成的帧私有幂等位（与标准版同姿态：续跑不重复放回）。"""
+
+
+def _jie_guanxing_count(state: GameState, frame: Frame) -> int:
+    """界观星的 X：存活 < 4 ⇒ 3，否则 5（§十九 L2114–L2115）。
+
+    ``frame`` 只是 :class:`DeckTopArrange` 的统一签名，不用；每次 ``Arrange`` 步执行时
+    现算，故**结束阶段的第二次观星**按那一刻的存活角色数重算（`06`（§5「程序化约定与偏离一手」） 的裁定）。
+    """
+    del frame
+    alive = len(alive_seats(state))
+    return JIE_GUANXING_SMALL if alive < JIE_GUANXING_SMALL_ALIVE else JIE_GUANXING_FULL
+
+
+JIE_GUANXING_ARRANGE = DeckTopArrange(count=_jie_guanxing_count)
+"""界观星的牌堆顶排列规格：张数按存活数 3 / 5、**自由切分**（可全部置底）。"""
+
+
+def _jie_guanxing_effect(host: Any, frame: Frame, answers: FlowAnswers) -> None:
+    """按 ``ArrangeCards`` 放回；**全部置底**时记「本回合已用位」供结束阶段再观星。
+
+    读的是答案里的 ``split``（``0`` = 全部置底）。位走
+    :func:`~sgs.skills.catalog.mark_skill_used_this_turn`：它的作用域就是"本回合"，
+    回合末复位——与"准备阶段全部置底才可以在**本回合**结束阶段再来一次"同寿命。
+    """
+    if frame.data.get(_JIE_DONE_KEY):
+        return None
+    action = answers[_CARDS_STEP]
+    assert isinstance(action, ArrangeCards)  # 候选只有 ArrangeCards，成员判定已保证
+    _apply_arrangement(
+        host.state,
+        watched_cards(frame, JIE_GUANXING_FLOW, _CARDS_STEP),
+        action.order,
+        action.split,
+    )
+    if action.split == 0:
+        mark_skill_used_this_turn(
+            host.state, frame.data["skill_owner"], JIE_GUANXING
+        )
+    frame.data[_JIE_DONE_KEY] = True
+    return None
+
+
+JIE_GUANXING_FLOW = SkillFlow(
+    name="jie_guanxing",
+    steps=(Arrange(key=_CARDS_STEP, spec=JIE_GUANXING_ARRANGE),),
+    effect=_jie_guanxing_effect,
+)
+"""界【观星】的一步流水线：排列（张数按存活数 3 / 5，自由切分）→ 放回。"""
+
+
+def _jie_guanxing_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
+    """界观星的发动前提：自己的准备阶段恒可；自己的结束阶段只在**本回合全部置底**过时可。
+
+    两个时机共用同一个 ``SkillDef``（同一张武将牌上的一条技能），故形态按
+    ``state.phase`` 分流：准备阶段是普通观星；结束阶段是"再次观星"，前提读本回合已用位
+    （准备阶段那次全部置底时由效果落位，`:func:`_jie_guanxing_effect`）。
+    """
+    del frame
+    if instance.owner != state.turn_seat:
+        return ActivationPlan(available=False)
+    if state.phase is Phase.FINISH:
+        return ActivationPlan(
+            available=skill_used_this_turn(state, instance.owner, JIE_GUANXING)
+        )
+    return ActivationPlan()
+
+
 def arrange_skill_definitions() -> tuple[SkillDef, ...]:
-    """G 族的技能定义（本票只有【观星】一条；【遗计】归票 05 并复用同一通道）。
+    """G 族的技能定义（【观星】标准 + 界两版；【遗计】归票 05 并复用同一通道）。
 
     非锁定（技能面写了"你可以"）、``carrier = HERO``（优先级档由载体派生）、
     ``skill_type = NORMAL``（不是主公技）。``deck_arrange`` 与流水线里的 ``Arrange`` 步
-    引用**同一个** :data:`GUANXING_ARRANGE` 对象（票 03 的投影读它）。
+    引用**同一个**对象（票 03 的投影读它）。
     """
     return (
         SkillDef(
@@ -174,5 +287,20 @@ def arrange_skill_definitions() -> tuple[SkillDef, ...]:
             hooks=(Hook(Timing.PHASE_PREPARE, flow=GUANXING_FLOW),),
             deck_arrange=GUANXING_ARRANGE,
             requirement="观看牌堆顶若干张牌，以任意顺序放回牌堆顶 / 牌堆底",
+        ),
+        SkillDef(
+            skill_id=JIE_GUANXING,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(Timing.PHASE_PREPARE, flow=JIE_GUANXING_FLOW),
+                Hook(Timing.PHASE_FINISH, flow=JIE_GUANXING_FLOW),
+            ),
+            deck_arrange=JIE_GUANXING_ARRANGE,
+            requirement=(
+                "观看牌堆顶五张牌（存活角色数小于 4 时改为三张），以任意顺序置于牌堆顶 / "
+                "牌堆底；若均置于牌堆底，可以于结束阶段再次观星"
+            ),
         ),
     )

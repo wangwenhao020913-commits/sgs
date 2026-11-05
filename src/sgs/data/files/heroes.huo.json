@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "pack_id": "huo",
+  "heroes": [
+    {
+      "id": "shen_zhugeliang",
+      "name": "神诸葛亮",
+      "true_name": "神诸葛亮",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "huo",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qixing",
+          "name": "七星",
+          "skill_type": "NORMAL",
+          "placement": {
+            "visibility": "hidden",
+            "return_timing": "never",
+            "extra_effect": true
+          }
+        },
+        {
+          "id": "kuangfeng",
+          "name": "狂风",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "dawu",
+          "name": "大雾",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

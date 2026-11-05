@@ -82,10 +82,19 @@ function initialArrange(pending, spec, key) {
     count,
     free,
     fixed,
+    // 两行交换（huo-shenzhugeliang 票 02）：行标签与"能不能行内调序"都来自载荷。
+    rows: spec.rows || null,
+    reorder: spec.reorder !== false,
     top: Array.from({ length: topCount }, (_, at) => at),
     bottom: Array.from({ length: count - topCount }, (_, at) => topCount + at),
     selected: null,
     dragging: null,
+    // 拖拽期的**纯 DOM** 引用（票 01 的落点预览）：拖动源节点、两行容器与当前预览。
+    // 它们不进载荷、不参与 `buildAction`；每次重绘由 :func:`renderArrange` 重新挂一遍。
+    dragNode: null,
+    nodes: null,
+    preview: null,
+    geometry: null,
   };
 }
 
@@ -125,27 +134,315 @@ function arrangeRowOf(layout, index) {
   return null;
 }
 
-/** 把 `index` 移到 `row`：`beforeIndex` = 插到那张牌之前，`null` = 该行末尾。
- * 固定切分只允许**行内**排序（跨行会破坏服务端声明的 top / bottom），越界即拒绝。 */
-function arrangeMoveTo(index, row, beforeIndex) {
+/** 这一行的面内位置数组（未知行 ⇒ `null`）：拖拽判据里"行 → 数组"的唯一一处。 */
+function arrangeRowCards(layout, row) {
+  if (!layout) return null;
+  if (row === "top") return layout.top;
+  if (row === "bottom") return layout.bottom;
+  return null;
+}
+
+/** 这一行的 DOM 句柄 `{row, cards}`（没重绘过 ⇒ `null`）：预览只碰这一份。 */
+function arrangeRowNodes(layout, row) {
+  if (!layout || !layout.nodes) return null;
+  if (row === "top") return layout.nodes.top;
+  if (row === "bottom") return layout.nodes.bottom;
+  return null;
+}
+
+/** 拖拽落点必须 `preventDefault`：否则浏览器不允许 drop（冒泡上来的也一样）。 */
+function arrangeAllowDrop(event) {
+  if (event && event.preventDefault) event.preventDefault();
+}
+
+/** 排列的**移动判据**（唯一一份）：把面内位置 `index` 落到 `row` 的 `anchor` 之前
+ * （`anchor === null` / `undefined` = 该行末尾）。返回要实施的计划；`null` = 这一下
+ * 不合法、或落到自己身上（不产生移动）。
+ *
+ * - **自由切分**（观星）：一律插入——跨行插入后两行张数会变，`split` 由上行张数重算，
+ *   仍然落在服务端候选集里（自由切分的候选覆盖每种切分）；
+ * - **固定切分**（恂恂）：行内仍是插入（排序，一行张数不变）；**跨行 = 两张互换**
+ *   （上行的牌落到下行那张的位置、下行的牌落到上行那张的位置）。两行张数必须恒等于
+ *   声明值，否则提交的 `split` 与服务端候选（只有 `split = top` 那一种）对不上；
+ * - 固定切分跨行的 `anchor` 只用来**认目标牌**：`null`（落到行容器）= 该行末尾那张
+ *   （行是满的，没有空槽可追加）；目标行是空的 ⇒ 没有可换的牌，拒绝。
+ *
+ * 拖拽与点选（:func:`arrangePick`）、空槽点击 / 行容器落点（:func:`arrangeDrop`）
+ * 全部走这一份判据，两条手势的语义因此一致。
+ */
+function arrangeMovePlan(index, row, anchor) {
   const layout = state.arrange;
-  if (!layout || !Number.isInteger(index)) return false;
+  const target = arrangeRowCards(layout, row);
+  if (!target) return null;
+  if (!Number.isInteger(index) || index < 0 || index >= layout.count) return null;
   const from = arrangeRowOf(layout, index);
-  if (from === null || (from !== row && !layout.free)) return false;
-  const source = from === "top" ? layout.top : layout.bottom;
-  source.splice(source.indexOf(index), 1);
-  const target = row === "top" ? layout.top : layout.bottom;
-  if (beforeIndex === null || beforeIndex === undefined || beforeIndex < 0) {
-    target.push(index);
-  } else {
-    const at = target.indexOf(beforeIndex);
-    target.splice(at < 0 ? target.length : at, 0, index);
+  if (from === null) return null;
+  const at = anchor === undefined ? null : anchor;
+  if (at !== null && target.indexOf(at) < 0) return null;
+  if (at === index) return null;                     // 落到自己身上：不动（不再"甩到行末"）
+  if (layout.reorder === false && from === row) {
+    // 两行交换（七星）：**只上下交换、行内不调序**（用户 2026-11-04 Q4）。
+    return null;
   }
+  if (layout.free || from === row) {
+    return { kind: "insert", index, row, anchor: at };
+  }
+  const partner = at === null ? target[target.length - 1] : at;
+  if (partner === undefined) return null;            // 目标行空着：固定切分没有可换的牌
+  return { kind: "swap", index, row, partner };
+}
+
+/** 实施 :func:`arrangeMovePlan` 的计划：只改本地布局（`top` / `bottom`），不碰 DOM 与载荷。 */
+function arrangeApplyPlan(plan) {
+  const layout = state.arrange;
+  const source = arrangeRowCards(layout, arrangeRowOf(layout, plan.index));
+  const target = arrangeRowCards(layout, plan.row);
+  if (!source || !target) return false;
+  const at = source.indexOf(plan.index);
+  if (plan.kind === "swap") {
+    const other = target.indexOf(plan.partner);
+    if (other < 0) return false;
+    source[at] = plan.partner;
+    target[other] = plan.index;
+    return true;
+  }
+  source.splice(at, 1);
+  const anchor = plan.anchor === null ? -1 : target.indexOf(plan.anchor);
+  target.splice(anchor < 0 ? target.length : anchor, 0, plan.index);
   return true;
 }
 
+/** 把 `index` 移到 `row` 的 `anchor` 之前（`null` = 该行末尾）。
+ * 判据住 :func:`arrangeMovePlan`（自由切分 = 插入；固定切分跨行 = 互换，张数不变）。 */
+function arrangeMoveTo(index, row, anchor) {
+  const plan = arrangeMovePlan(index, row, anchor);
+  if (!plan) return false;
+  return arrangeApplyPlan(plan);
+}
+
+/** 拖拽开始时的**折叠几何**（票 01 的落点判定只认它）：拖动源先被抽出文档流，再把两行的
+ *  行框与每张牌的矩形量一遍（源自己不参与）。
+ *
+ *  为什么不在每次 `dragover` 现读"指针底下是哪个节点"：预览本身要插占位格、让牌移位，
+ *  指针底下的节点于是跟着变 —— 按当前节点判落点会形成回环（占位格恰好跑到指针下 ⇒ 判成
+ *  "行末" ⇒ 整行再让一次 ⇒ 又回到原处），实机表现就是其它牌一直闪。落点改成**坐标对这份
+ *  折叠几何的纯函数**之后，预览怎么动都不会反过来改判据（实机报障 2026-10-30）。 */
+function arrangeMeasure(layout) {
+  if (!layout.nodes) return null;
+  const rows = {};
+  for (const row of ["top", "bottom"]) {
+    const nodes = arrangeRowNodes(layout, row);
+    if (!nodes) { rows[row] = null; continue; }
+    const box = nodes.cards.getBoundingClientRect();
+    const cards = [];
+    for (const index of arrangeRowCards(layout, row)) {
+      if (index === layout.dragging) continue;      // 拖动源已不在流里：它那格不算落点
+      const node = arrangeCardNodeIn(nodes.cards, index);
+      if (!node) continue;
+      const rect = node.getBoundingClientRect();
+      if (!rect || !(Number(rect.width) > 0)) continue;
+      cards.push({
+        index,
+        left: rect.left,
+        right: rect.left + Number(rect.width),
+        middle: rect.left + Number(rect.width) / 2,
+      });
+    }
+    rows[row] = { box, cards };
+  }
+  return { rows };
+}
+
+/** 折叠几何**只量一次**（第一次 `dragover`，或没收到 `dragover` 就直接 drop 的那一下）。
+ *  量之前先把拖动源抽出文档流（`.dragging`），量到的就是"源已经让出位置"的稳定布局；
+ *  这也正是拖影的保险：`dragstart` 时不动样式，浏览器拍完拖影才在这里收走源。 */
+function arrangeEnsureGeometry(layout) {
+  if (layout.geometry) return layout.geometry;
+  if (layout.dragNode) layout.dragNode.classList.add("dragging");
+  layout.geometry = arrangeMeasure(layout) || { rows: {} };
+  return layout.geometry;
+}
+
+/** 指针落在哪一行：按两行**行框**的纵向中点取最近（行间空隙 / 行标签都算给最近的那行）。 */
+function arrangeRowAt(geometry, clientY) {
+  const rows = geometry && geometry.rows;
+  if (!rows) return null;
+  let best = null;
+  for (const row of ["top", "bottom"]) {
+    const info = rows[row];
+    if (!info || !info.box) continue;
+    const distance = Math.abs(clientY - (Number(info.box.top) + Number(info.box.height) / 2));
+    if (!best || distance < best.distance) best = { row, distance };
+  }
+  return best ? best.row : null;
+}
+
+/** 指针 x 在这一行**折叠后**的插入边界：插到第一张"中点在指针右边"的牌之前；中点在指针
+ *  左边的都不算 ⇒ 行末（`null`）。落在牌面左 / 右半边因此天然就是"放到它前 / 后"。 */
+function arrangeAnchorAt(rowInfo, clientX) {
+  for (const card of rowInfo.cards) {
+    if (clientX < card.middle) return card.index;
+  }
+  return null;
+}
+
+/** 固定切分跨行时的**交换对象**：指针底下那张牌；落在牌与牌之间 / 行容器空白处取离指针
+ *  最近的那张（落到行末空白 = 该行末尾那张——行是满的，没有空槽可追加）。 */
+function arrangeSwapPartner(rowInfo, clientX) {
+  const cards = rowInfo.cards;
+  if (!cards.length) return null;
+  for (const card of cards) {
+    if (clientX >= card.left && clientX <= card.right) return card.index;
+  }
+  let best = null;
+  for (const card of cards) {
+    const distance = Math.abs(clientX - card.middle);
+    if (!best || distance < best.distance) best = { index: card.index, distance };
+  }
+  return best.index;
+}
+
+/** 拖拽落点计划（唯一判据的**坐标版**）：指针 → 行 / 插入边界 / 交换对象，再交给
+ *  :func:`arrangeMovePlan`。没有坐标（合成事件）⇒ `null`（不猜、不动）。 */
+function arrangePlanFromPoint(layout, clientX, clientY) {
+  const dragging = layout.dragging;
+  if (dragging === null || dragging === undefined) return null;
+  if (typeof clientX !== "number" || typeof clientY !== "number") return null;
+  const geometry = arrangeEnsureGeometry(layout);
+  const row = arrangeRowAt(geometry, clientY);
+  if (row === null) return null;
+  const rowInfo = geometry.rows[row];
+  if (!rowInfo) return null;
+  const crossRow = arrangeRowOf(layout, dragging) !== row;
+  const anchor = !layout.free && crossRow
+    ? arrangeSwapPartner(rowInfo, clientX)
+    : arrangeAnchorAt(rowInfo, clientX);
+  return arrangeMovePlan(dragging, row, anchor);
+}
+
+/** 行容器里 `data-card-index` 为 `index` 的牌节点（预览用；`null` = 没找到）。 */
+function arrangeCardNodeIn(box, index) {
+  if (!box) return null;
+  return Array.from(box.children).find(
+    (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index)) || null;
+}
+
+/** 清掉拖拽预览（占位格 / 交换高亮 / 行高亮）：只动 DOM，不动布局。 */
+function arrangePreviewClear() {
+  const layout = state.arrange;
+  const preview = layout && layout.preview;
+  if (!preview) return;
+  if (preview.placeholder && preview.placeholder.parentNode) {
+    preview.placeholder.parentNode.removeChild(preview.placeholder);
+  }
+  if (preview.swapNode) preview.swapNode.classList.remove("swap");
+  for (const row of ["top", "bottom"]) {
+    const nodes = arrangeRowNodes(layout, row);
+    if (nodes) nodes.row.classList.remove("drop");
+  }
+  layout.preview = null;
+}
+
+/** 把占位格放到这一行的**落点**上：有锚 = 插到那张牌之前；没有锚（行末）= 插到所有牌
+ *  之后、**空槽之前**。自由切分的空槽恒排在牌的后面，占位格若跟着追加到整行末尾，
+ *  "落到格子里"这一下就看错位了（真落点还在空槽之前）。 */
+function arrangeInsertPlaceholder(cards, anchor, placeholder) {
+  if (anchor) {
+    cards.insertBefore(placeholder, anchor);
+    return;
+  }
+  const firstSlot = Array.from(cards.children).find(
+    (node) => node.getAttribute && node.getAttribute("data-empty") === "1");
+  if (firstSlot) cards.insertBefore(placeholder, firstSlot);
+  else cards.appendChild(placeholder);
+}
+
+/** 拖拽中的**动态落点预览**（票 01）：鼠标拽着一张牌时，其它牌为它让道。
+ *
+ * - **插入**（自由切分 / 行内排序）：在落点上插一个与卡面同尺寸的占位格，那一行从落点
+ *   起整体让开一格——玩家在放下之前就看得到会落在谁前 / 谁后；
+ * - **交换**（固定切分跨行）：两行张数不变、没有空槽可让，改为给**会换走的那张牌**挂
+ *   交换高亮（`::after` 写「交换」），别让玩家猜这一下换哪张。
+ *
+ * 这里只改 DOM、**不跑** `renderPending`：整面重绘会把拖动源换成新节点，真浏览器里会
+ * 当场中断拖拽。 */
+function arrangePreview(plan) {
+  const layout = state.arrange;
+  if (!layout || !layout.nodes) return;
+  const key = plan
+    ? `${plan.kind}:${plan.row}:${plan.kind === "swap" ? plan.partner : plan.anchor}`
+    : "none";
+  if (layout.preview && layout.preview.key === key) return;
+  arrangePreviewClear();
+  const preview = { key, placeholder: null, swapNode: null };
+  layout.preview = preview;
+  if (!plan) return;
+  const row = arrangeRowNodes(layout, plan.row);
+  if (!row) return;
+  row.row.classList.add("drop");
+  if (plan.kind === "swap") {
+    preview.swapNode = arrangeCardNodeIn(row.cards, plan.partner);
+    if (preview.swapNode) preview.swapNode.classList.add("swap");
+    return;
+  }
+  const placeholder = document.createElement("div");
+  placeholder.className = "arrange-placeholder";
+  placeholder.setAttribute("data-row", plan.row);
+  placeholder.setAttribute("aria-hidden", "true");
+  preview.placeholder = placeholder;
+  arrangeInsertPlaceholder(
+    row.cards,
+    plan.anchor === null ? null : arrangeCardNodeIn(row.cards, plan.anchor),
+    placeholder,
+  );
+}
+
+/** 拖拽经过（行容器上的 `dragover`；牌 / 空槽的事件会冒泡到这里）：坐标算计划 → 画预览。
+ *
+ *  拖动源被抽出文档流（`.dragging`）在 :func:`arrangeEnsureGeometry` 里、**比 `dragstart`
+ *  晚一步**，免得浏览器在 `dragstart` 之后拍的拖影被一起藏掉；抽走的那一格正好由占位格
+ *  顶上，行宽不涨、不换行。 */
+function arrangeHover(event) {
+  const layout = state.arrange;
+  if (!layout || layout.dragging === null || layout.dragging === undefined) return;
+  arrangePreview(arrangePlanFromPoint(layout, event && event.clientX, event && event.clientY));
+}
+
+/** 拖拽放下（行容器上的 `drop`）：按同一份坐标判据落地 → 清拖拽态 → 重绘。
+ *  没有坐标 / 没有合法落点 = 不动（只收掉预览，拖拽取消）。 */
+function arrangeCommitDrag(event) {
+  const layout = state.arrange;
+  const pending = state.view ? state.view.pending : null;
+  if (state.playback || !pending || pending.kind !== "ARRANGE" || !layout) return;
+  if (layout.dragging === null || layout.dragging === undefined) return;
+  const plan = arrangePlanFromPoint(layout, event && event.clientX, event && event.clientY);
+  arrangePreviewClear();
+  if (plan) arrangeApplyPlan(plan);
+  layout.dragging = null;
+  layout.dragNode = null;
+  layout.geometry = null;
+  layout.selected = null;
+  renderPending(state.view);
+}
+
+/** 拖拽结束（放下 / 取消都走这里）：预览是纯 DOM 手法，模型没被它改过 ⇒ 取消时重绘一次
+ *  就整体复原；成功放下时 `dragging` 已在本步清空，这里不再重绘。已点选的牌不清掉
+ *  （取消拖拽不该顺手丢掉用户上一手的点选）。 */
+function arrangeDragEnd() {
+  const layout = state.arrange;
+  if (!layout) return;
+  const dragging = layout.dragging;
+  arrangePreviewClear();
+  layout.dragging = null;
+  layout.dragNode = null;
+  layout.geometry = null;
+  if ((dragging === null || dragging === undefined) || !state.view) return;
+  renderPending(state.view);
+}
+
 /** 点牌 / 点空槽：第一下**选中**，第二下把它移到目标位置（同行的牌 = 插到它前面；
- * 另一行的牌 = 跨行插入；空槽 = 追加到那一行末尾）。拖动之外的点击 / 键盘后备。 */
+ * 另一行的牌 = 按 :func:`arrangeMovePlan` 插入 / 互换；空槽 = 追加到那一行末尾）。
+ * 拖动之外的点击 / 键盘后备。 */
 function arrangePick(index) {
   const pending = state.view ? state.view.pending : null;
   const layout = state.arrange;
@@ -162,8 +459,12 @@ function arrangePick(index) {
   renderPending(state.view);
 }
 
-/** 落到某一行（拖拽的 drop / 空槽点击）：把当前拖动或选中的牌移过去。 */
-function arrangeDrop(row, beforeIndex) {
+/** **点选手势**的落点（空槽点击 / 桥上的直接调用）：把当前拖动或选中的牌移过去。
+ *  拖拽的落点不走这里——那条路径由 :func:`arrangeCommitDrag` 按坐标算计划。
+ *
+ * `anchor` = 目标行里的**落点锚**（插到它之前；`null` = 该行末尾 / 固定切分时
+ * 认「该行末尾那张」为交换对象）。 */
+function arrangeDrop(row, anchor) {
   const pending = state.view ? state.view.pending : null;
   const layout = state.arrange;
   if (state.playback || !pending || pending.kind !== "ARRANGE" || !layout) return;
@@ -171,8 +472,10 @@ function arrangeDrop(row, beforeIndex) {
     ? layout.dragging
     : layout.selected;
   if (from === null || from === undefined) return;
-  arrangeMoveTo(from, row, beforeIndex);
+  arrangePreviewClear();
+  arrangeMoveTo(from, row, anchor);
   layout.dragging = null;
+  layout.dragNode = null;
   layout.selected = null;
   renderPending(state.view);
 }
@@ -182,7 +485,9 @@ function arrangeDrop(row, beforeIndex) {
  * 票 07（spec D6）：牌面与手牌 / 处理区**同一套 88×124**（:func:`cardFaceNode`），不再
  * 画成紧凑的 `.card` 芯片。拖拽与点击两种搬牌手势都保留：`draggable` + 四个 drag 事件；
  * 点击走 :func:`arrangePick`（第一下选中、第二下移到目标位置）。
- */
+ *
+ * 票 01：拖拽落点按指针坐标判（见 :func:`arrangePlanFromPoint`）——落在牌面中点的右半边
+ * 就是"放到它后面"，不再一律插到它前面；本节点只负责起拖 / 收尾，落点由行容器统一算。 */
 function arrangeCardNode(layout, index) {
   const card = layout.cards[index];
   const chip = cardFaceNode(card, { selected: layout.selected === index });
@@ -194,29 +499,18 @@ function arrangeCardNode(layout, index) {
   chip.addEventListener("dragstart", (event) => {
     if (state.playback) return;
     layout.dragging = index;
+    layout.dragNode = chip;
+    layout.preview = null;
+    layout.geometry = null;
     if (event && event.dataTransfer && event.dataTransfer.setData) {
       event.dataTransfer.setData("text/plain", String(index));
     }
   });
-  chip.addEventListener("dragend", () => { layout.dragging = null; });
-  chip.addEventListener("dragover", (event) => {
-    if (event && event.preventDefault) event.preventDefault();
-  });
-  chip.addEventListener("drop", (event) => {
-    if (event && event.preventDefault) event.preventDefault();
-    const row = arrangeRowOf(layout, index);
-    const from = layout.dragging !== null && layout.dragging !== undefined
-      ? layout.dragging
-      : layout.selected;
-    if (from !== null && from !== undefined && row !== null) arrangeMoveTo(from, row, index);
-    layout.dragging = null;
-    layout.selected = null;
-    renderPending(state.view);
-  });
+  chip.addEventListener("dragend", () => arrangeDragEnd());
   return chip;
 }
 
-/** 排列面的一个空槽：点 / 拖到它 = 追加到这一行的末尾。 */
+/** 排列面的一个空槽：点它 = 追加到这一行的末尾（拖到它上面由行容器统一收）。 */
 function arrangeSlotNode(row) {
   const chip = document.createElement("button");
   chip.type = "button";
@@ -225,17 +519,15 @@ function arrangeSlotNode(row) {
   chip.setAttribute("data-row", row);
   chip.textContent = "空槽";
   chip.addEventListener("click", () => arrangeDrop(row, null));
-  chip.addEventListener("dragover", (event) => {
-    if (event && event.preventDefault) event.preventDefault();
-  });
-  chip.addEventListener("drop", (event) => {
-    if (event && event.preventDefault) event.preventDefault();
-    arrangeDrop(row, null);
-  });
   return chip;
 }
 
-/** 双行容器：标签行（牌堆顶 / 牌堆底）+ 牌 / 空槽行；整行也是拖拽落点（追加到行末）。 */
+/** 双行容器：标签行（牌堆顶 / 牌堆底）+ 牌 / 空槽行。
+ *
+ *  **拖拽的唯一落点就是行容器**：牌 / 空槽 / 占位格的 `dragover` 与 `drop` 都冒泡到这里，
+ *  落点由 :func:`arrangePlanFromPoint` 按指针坐标对**折叠几何**算（牌上按中线分前后，行末
+ *  空白 = 该行末尾；固定切分跨行 = 与指针下 / 最近那张互换）。这样预览怎么让牌移位，都不会
+ *  反过来改判据（实机闪烁的根因）。行高亮跟着预览走（见 :func:`arrangePreview`）。 */
 function arrangeRowNode(name, label, hint) {
   const row = document.createElement("div");
   row.className = "arrange-row";
@@ -253,14 +545,12 @@ function arrangeRowNode(name, label, hint) {
   row.appendChild(head);
   row.appendChild(cards);
   row.addEventListener("dragover", (event) => {
-    if (event && event.preventDefault) event.preventDefault();
-    row.classList.add("drop");
+    arrangeAllowDrop(event);
+    arrangeHover(event);
   });
-  row.addEventListener("dragleave", () => row.classList.remove("drop"));
   row.addEventListener("drop", (event) => {
-    if (event && event.preventDefault) event.preventDefault();
-    row.classList.remove("drop");
-    arrangeDrop(name, null);
+    arrangeAllowDrop(event);
+    arrangeCommitDrag(event);
   });
   return { row, cards };
 }
@@ -300,12 +590,24 @@ function renderArrange(pending) {
     state.arrange = initialArrange(pending, spec, arrangeKey(pending, spec));
   }
   const layout = state.arrange;
-  const top = arrangeRowNode("top", "牌堆顶", "（左 = 最上）");
+  const rows = layout.rows || {};
+  const topLabel = rows.top || "牌堆顶";
+  const bottomLabel = rows.bottom || "牌堆底";
+  const top = arrangeRowNode("top", topLabel, layout.rows ? "" : "（左 = 最上）");
   const bottom = arrangeRowNode(
     "bottom",
-    "牌堆底",
-    layout.free ? "（左起接在现有牌堆底之下）" : `（固定 ${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）`,
+    bottomLabel,
+    layout.rows
+      ? `（固定 ${layout.fixed ? layout.fixed.top : layout.top.length} / ${layout.fixed ? layout.fixed.bottom : layout.bottom.length}：只能上下交换）`
+      : layout.free
+        ? "（左起接在现有牌堆底之下）"
+        : `（固定 ${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）`,
   );
+  // 重绘后旧节点全部作废：预览 / 拖动源的 DOM 引用要跟着换（票 01）。
+  layout.nodes = { top, bottom };
+  layout.preview = null;
+  layout.dragNode = null;
+  layout.geometry = null;
   box.appendChild(top.row);
   box.appendChild(bottom.row);
   for (const index of layout.top) top.cards.appendChild(arrangeCardNode(layout, index));
@@ -318,9 +620,16 @@ function renderArrange(pending) {
     bottom.cards.appendChild(arrangeSlotNode("bottom"));
   }
   if (hint) {
-    const how = layout.free
-      ? "拖动卡牌在牌堆顶 / 牌堆底之间切换，行内拖动排序；也可先点一张牌再点目标位置。"
-      : "固定切分：只能在上行 / 下行内排序（跨行移动会改变服务端声明的张数）。";
+    // 票 01：固定切分不再说"只能行内排序"——跨行拖动是**互换**，两行张数不变。
+    const how = layout.reorder === false
+      ? `只交换「${topLabel}」与「${bottomLabel}」两行之间的牌：拖一张到另一行的牌上 = 两张互换；`
+        + "行内顺序不变（也可先点一张牌再点另一行的牌）。"
+      : layout.free
+        ? "拖动卡牌在牌堆顶 / 牌堆底之间切换：落在牌的左 / 右半边 = 放到它前 / 后；行内也是这样排序。"
+          + "也可先点一张牌再点目标位置。"
+        : `上下两行张数固定（${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）：`
+          + "拖动可交换上下两行的牌（拖到另一行的牌上 = 两张互换），行内拖动排序；"
+          + "也可先点一张牌再点目标位置。";
     // 票 07：出口说明按**实际候选**说话（文案唯一一份住 :func:`arrangeExitHint`）。
     hint.textContent = `${how} ${arrangeExitHint(pending)}`;
   }

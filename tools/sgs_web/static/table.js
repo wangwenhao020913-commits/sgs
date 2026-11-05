@@ -59,9 +59,10 @@ function identityRatioText(playerCount) {
 
 /** 当前是第几轮：**显示用**的计数——同一座位第二次 `TURN_START` 即进入下一轮。
  *
- * 引擎侧没有轮次计数器（`PlayerView` 只给 `turn_seat` / `phase`），阵亡座位会跳过回合；
- * 因此不能用"次数 ÷ 人数"（那会在最后一人的回合就提前进轮）。按「本轮已经行动过的座位」
- * 记：座位重复出现 = 转了一圈。顶栏不拿它做任何判据，等 U2 有服务端轮次字段再换。
+ * M6 票 11 起引擎有真正的轮次（`state.round`，额外回合不推进自然指针），票 19 起由
+ * 投影下发 `snapshot.round`；本函数只在**旧录像 / 合成视图**（没有那个键）时兜底：
+ * 按「本轮已经行动过的座位」记，座位重复出现 = 转了一圈。两种数法都只是显示，
+ * 顶栏不拿它做任何判据。
  */
 function roundNumber(records) {
   let round = 1;
@@ -77,6 +78,15 @@ function roundNumber(records) {
     seen.add(seat);
   }
   return round;
+}
+
+/** 顶栏轮次文本：服务端 `snapshot.round`（引擎事实）优先，缺键时退回本地数法。 */
+function roundLabelOf(snapshot, records) {
+  const server = snapshot ? snapshot.round : null;
+  if (server !== null && server !== undefined && Number.isFinite(Number(server))) {
+    return String(Number(server));
+  }
+  return String(roundNumber(records));
 }
 
 /** 座位交互态的类全集 / `applySeatState` 住 `seat-view.js`（U1-02）；环上与底部面板共用一份。 */
@@ -173,13 +183,17 @@ function renderSelfSeat(view, ctx) {
   fillSeatTags($("t-self-tags"), ctx.flagsFor(player, classes));
   if ($("t-self-chain")) $("t-self-chain").hidden = !player.chained;
   if ($("t-self-dead")) $("t-self-dead").hidden = Boolean(player.alive);
-  $("t-self-hand").textContent = String(player.hand_count);
+  // 票 09：与对手座位卡 / 武将详情同一句话「手牌：张数/上限」（读数由 seat-view.js 派生）。
+  $("t-self-hand").textContent = handReading(player);
   $("t-self-seatno").textContent = String(player.seat);
   const zones = $("t-self-zones");
   if (zones) {
     zones.innerHTML = "";
     for (const row of sideBlockRows(player, ctx)) zones.appendChild(row);
   }
+  // M6 票 19：武将牌上的牌区画在**武将块**里（与对手块同一个渲染口）。
+  fillHeroZones($("t-self-hero-zones"), player);
+  fillHeroTags($("t-self-hero-tags"), player);
 }
 
 /** 顶栏那块公开身份配比：2 人局（无身份局）整块隐藏。 */
@@ -222,10 +236,14 @@ function renderTable() {
   $("t-discard").textContent = String((snapshot.discard || []).length);
   const rounds = $("t-round");
   if (rounds) {
-    rounds.textContent = String(roundNumber(
+    rounds.textContent = roundLabelOf(
+      snapshot,
       state.logRecords.length ? state.logRecords : (view.records || []),
-    ));
+    );
   }
+  // M6 票 19：额外回合提示（票 11 的 `turn_extra`）。自然回合不挂这个标记。
+  const extraTurn = $("t-extra-turn");
+  if (extraTurn) extraTurn.hidden = !snapshot.turn_extra;
   renderIdentityPanel(snapshot.players.length);
 
   const pendingNow = view.pending || null;
@@ -262,6 +280,7 @@ function renderTable() {
     ...(player.alive ? [] : ["dead"]),
     ...(isTurnSeat(player.seat) ? ["turn"] : []),
     ...(player.chained ? ["chained"] : []),
+    ...(player.flipped ? ["flipped"] : []),
     ...(player.wine_active ? ["wine"] : []),
     ...extra,
   ];
@@ -280,7 +299,9 @@ function renderTable() {
   if (!state.playback) state.effectCards = mergeEffectCards(snapshot.processing || []);
   renderProcessing();
 
-  $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
+  // 手牌区的标题行（旧 `#t-hand-count`）已删（票 23 报障）：它占的那一行高度让提示条
+  // 越长越压住牌面顶部的花色 / 点数。手牌张数照旧看自己的武将块（`#t-self-hand`，
+  // 由座位渲染写入 `hand_count`），这里不再重复一遍。
   const hand = $("t-hand");
   hand.innerHTML = "";
   for (const card of snapshot.self_hand) {
@@ -290,9 +311,12 @@ function renderTable() {
     const face = state.playback
       ? { selectable: false, selected: false, picked: false, slotIndex: -1 }
       : cardFace(pendingNow, card);
+    // 被**强制转化**的手牌（武神）：画产物牌面（「转」+ 属性色），但身份仍是那张源牌
+    // ——`card_id` 覆盖回源牌，点选 / 提交 / 置灰都还按源牌走。
+    const form = state.playback ? null : convertedForm(pendingNow, card.card_id);
     hand.appendChild(
       cardChip(
-        card, face.selected, false, face.selectable,
+        form ? { ...form, card_id: card.card_id } : card, face.selected, false, face.selectable,
         () => activateCard(pendingNow, card, face), face.picked,
       ),
     );
@@ -300,6 +324,45 @@ function renderTable() {
   renderSkills(view);
   // 提示区左栏的技能按钮组：与底部技能区同一份清单 / 判据（U2-04），additive。
   renderPromptSkills(view);
+  // U4-05（D11）：弃牌堆面板开着时，每次提交 / 回放步都从同一份视图重画（关着时 no-op）。
+  renderDiscardPanel();
+}
+
+/* --------------------------------------------------- 弃牌堆面板（U4-05 / D11） */
+
+/** 只读面板正文：时间倒序（最新在上），每行一张牌面（花色 + 点数 + 名）。
+ *
+ * 开合状态住 `modal.js`（`discardPanelIsOpen()`），本函数在关着时 **no-op**，
+ * 因而可以直接挂在 `renderTable()` 的末尾做"面板开着时每次提交 / 回放步自动重画"。
+ *
+ * 数据源与表体同一份视图（`tableViewForRender()`）：回放期间是逐事件派生的 live view，
+ * 其余是权威视图；**不**读引擎 / 记录流，也不给来源座位 / 区域。服务端
+ * `snapshot.discard` 按**置入序**给牌面，反转即时间倒序。
+ */
+function renderDiscardPanel() {
+  if (!discardPanelIsOpen()) return;
+  const view = tableViewForRender();
+  const snapshot = view && view.snapshot;
+  const discard = (snapshot && snapshot.discard) || [];
+  const summary = $("t-discard-summary");
+  if (summary) summary.textContent = `共 ${discard.length} 张`;
+  const body = $("t-discard-body");
+  if (!body) return;
+  body.innerHTML = "";
+  body.scrollTop = 0;
+  if (!discard.length) {
+    const empty = document.createElement("p");
+    empty.className = "dim discard-empty";
+    empty.textContent = "弃牌堆里还没有牌。";
+    body.appendChild(empty);
+    return;
+  }
+  // N 多时纯滚动（CSS：正文 `overflow-y: auto`），不做分组、不做分页。
+  for (const card of [...discard].reverse()) {
+    const face = cardFaceNode(card, { static: true });
+    face.classList.add("discard-card");
+    body.appendChild(face);
+  }
 }
 
 /* --------------------------------------------------- 中央舞台（U3-01 / D2–D5） */
@@ -444,11 +507,37 @@ function stageCardNode(item, heroNameOf) {
   return node;
 }
 
+/** 淡出动画的**续播锚点**：把 CSS `animation` 直接推到 `now − fadeAt` 的位置。
+ *
+ * `renderEffectCards` 每次重绘都会把节点 `appendChild` 回容器（保持入台顺序）；对已有
+ * 子节点而言这是"移出再插入"——浏览器的 CSS animation 会**从头播**，表现为淡出过程中
+ * 反复闪回 opacity 1。负 `animation-delay` 让每次插入都从"该在的那一帧"开始：`now`
+ * 越大 delay 越负，进度单调前进。淡出中新出生的节点同样适用，不依赖上一帧的计算样式。
+ *
+ * 时长与 `style.css` 的 1s / `session.js:STAGE_FADE_MS` 同一份；`animScale` 只缩 JS
+ * 寿命（`stageLane`），不缩 CSS 动画。
+ */
+function syncStageCardFade(node, item, now) {
+  if (!node || !node.style) return;
+  const stage = item && item.stage;
+  if (!stage || stageLane(item, now) !== "fading") {
+    node.style.animationDelay = "";
+    return;
+  }
+  const at = Number(now);
+  const elapsed = Number.isFinite(at)
+    ? Math.max(0, Math.min(STAGE_FADE_MS, at - Number(stageFadeAt(stage))))
+    : 0;
+  node.style.animationDelay = `-${elapsed}ms`;
+}
+
 /** 更新一张已经在台上的卡面：道 / 淡出类 / 底行 / 展示者角标（只改变的部分）。 */
 function updateStageCardNode(node, item, now, heroNameOf) {
   const stage = item.stage;
   node.setAttribute("data-stage-lane", stage.lane);
-  node.classList.toggle("fading", stageLane(item, now) === "fading");
+  const lane = stageLane(item, now);
+  node.classList.toggle("fading", lane === "fading");
+  syncStageCardFade(node, item, now);
   node.classList.toggle("revealed-card", stage.lane === "showcase");
   const label = stageZoneLabel(item, heroNameOf);
   // 真 DOM 的 `node.children` 是 HTMLCollection（无 `.find`）；`Array.from` 对数组同样成立。
@@ -466,10 +555,60 @@ function updateStageCardNode(node, item, now, heroNameOf) {
   }
 }
 
+/** A1：一条记录是不是"判定牌进处理区"，是则返回刚入台的判定牌。
+ *
+ * 只读服务端事实：`card_move(reason=JUDGE, to=processing)` + 承载帧 `frame_kind=JUDGE`
+ * （由 `applyEffectDelta` 已记在 `state.effectCards` 的帧表上）。不认技能 id。
+ */
+function judgmentCardFromRecord(record) {
+  if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return null;
+  if (String(record.reason) !== "JUDGE") return null;
+  const to = record.to_zone || {};
+  if (String(to.zone) !== "processing") return null;
+  const cards = record.cards || [];
+  if (cards.length !== 1) return null;
+  const frameId = stageFrameOf(record);
+  if (!frameId || stageFrameKindOf(state.effectCards, frameId) !== "JUDGE") return null;
+  return (state.effectCards || []).find(
+    (item) => String(item.card_id) === String(cards[0].card_id),
+  ) || cards[0];
+}
+
+/** A1：弹窗已开着时，把新判定牌**追加**到同一个窗口（不关窗、不重开、不覆盖前一张）。
+ *
+ * 只更新**弹窗正文**（`#t-options` 里的亮牌模板）；选中态 / 提交 / 放弃 / 提示条动作都不动。
+ * 追加的是服务端 `card_move(reason=JUDGE)` 这条事实（最后一张红牌没有继续询问，只能走
+ * 记录流）；下一份 pending 的 `judgment_reveal.cards` 是服务端聚合的权威顺序，提交时
+ * `renderPending` 会用它整份覆盖，故这里只做"已开窗口的即时追加"，不写规则。
+ */
+function refreshJudgmentReveal(card) {
+  if (!card || !state.dialog || !state.dialog.open) return;
+  if (state.dialog.kind !== DIALOG_KINDS.reveal) return;
+  const pending = state.view ? state.view.pending : null;
+  if (!pending || !pending.judgment_reveal || pending.judgment_reveal.final) return;
+  const box = $("t-options");
+  if (!box) return;
+  const cards = Array.isArray(pending.judgment_reveal.cards)
+    ? pending.judgment_reveal.cards
+    : [];
+  const known = cards.some(
+    (entry) => String(entry.card_id) === String(card.card_id),
+  );
+  const nextCards = known ? cards : [...cards, card];
+  box.innerHTML = "";
+  renderReveal({
+    ...pending,
+    judgment_reveal: { ...pending.judgment_reveal, cards: nextCards },
+  });
+  syncDialogHint();
+}
+
 /** 把舞台项画进任意容器（牌桌 / 回放页共用这一份渲染）。
  *
- * 按 `data-stage-key`（= card_id）**复用节点**：淡出因此是靠同一个节点上的 CSS 过渡，
- * 而不是每个事件步重建一屏（重建会让过渡从头开始）；被淡出结束的项真的从父节点移除。
+ * 按 `data-stage-key`（= card_id）**复用节点**：淡出不重建一屏；但每次为了保持入台顺序
+ * 都会 `appendChild`（已有子节点 = 移出再插入），CSS `animation` 会从头播。故淡出进度
+ * 由 :func:`syncStageCardFade` 的负 `animation-delay` 续上，重绘只前进、不回 opacity 1。
+ * 被淡出结束的项真的从父节点移除。
  * 空舞台仍画「（空）」占位（U1-02 的既有读法）。
  */
 function renderEffectCards(box, items, now = stageNow(), heroNameOf = stageHeroNameOf) {
@@ -506,12 +645,41 @@ function renderEffectCards(box, items, now = stageNow(), heroNameOf = stageHeroN
   for (const node of ordered) box.appendChild(node);
 }
 
-/** 技能按钮右下角的状态补充（预发动 / 点它转化 / 可发动）；详情模态不读它。 */
+/** 技能按钮右下角的状态补充（预发动 / 点它转化 / 可发动）；详情模态不读它。
+ *
+ * 徽标只描述**这一问给的入口**：有清单 ⇒ 预发动；已翻预发动、这一问给的却是一条普通
+ * 候选（【蛊惑】的提供者入口）⇒ 仍是"可发动"，不冒充清单入口。 */
 function skillBadgeText(skill, manifest, convertCards) {
   if (!skill) return "";
-  if (skill.preactivated || manifest) return " · 预发动";
+  if (manifest) return " · 预发动";
   if (convertCards.length) return " · 点它转化";
   return skill.available ? " · 可发动" : "";
+}
+
+/** 给技能按钮补上服务端三态（`active` / `suppressed` / `lost`）。
+ *
+ * 只有 `suppressed` 需要额外画禁止图标：它是"有但被挡住"（实例还在武将牌上，只是被
+ * 【铁骑】等效果挡在解析之外），与"此刻不给入口"（`available=false`）和"失去"都不同。
+ * 图标是内联 SVG（不引外部图片），颜色取现有强调红 `var(--accent)`；`aria-hidden`
+ * 避免读屏重复，按钮的 `aria-label` 负责念出「名称（失效）」。
+ */
+function applySkillState(button, skill) {
+  const skillState = (skill && skill.state) || "active";
+  button.setAttribute("data-state", skillState);
+  if (skillState !== "suppressed") return;
+  button.classList.add("suppressed");
+  button.setAttribute("aria-label", `${skill.name}（${skillStateLabel(skill)}）`);
+  button.setAttribute("title", `${skillStateLabel(skill)}：${skillDescription(skill)}`);
+  const mark = document.createElement("span");
+  mark.className = "skill-ban";
+  // 垫片的 className / classList 不联动；两处都写，真 DOM 与烟测同一条判据。
+  mark.classList.add("skill-ban");
+  mark.setAttribute("aria-hidden", "true");
+  mark.innerHTML = '<svg viewBox="0 0 16 16" focusable="false">'
+    + '<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.6"/>'
+    + '<line x1="3.6" y1="12.4" x2="12.4" y2="3.6" stroke="currentColor"'
+    + ' stroke-width="1.6" stroke-linecap="round"/></svg>';
+  button.appendChild(mark);
 }
 
 /** 一条技能**在这份询问里**的可点性与点击动作；底部技能区与提示区技能组共用这一处。
@@ -522,7 +690,8 @@ function skillBadgeText(skill, manifest, convertCards) {
  *   `ActivateSkill` 候选 / 转化来源 / 转化清单任一在（与 `view.skills.available` 同源）。
  *   清单有两类消费者（W4-2 / W4-3）：已翻到预发动的技能（`preactivated`）= **复合动作**
  *   清单；转化技 = **本地入口**清单——两者都由 `pending.preactivations[skill_id]` 下发。
- * - `inert`：被动技（`ui.passive`）/ 锁定技——按钮只说明（悬停出描述），不接 click；
+ * - `suppressed`：服务端标明技能失效——即使询问里碰巧还有同名入口也不许点；
+ * - `inert`：失效 / 被动技（`ui.passive`）/ 锁定技——按钮只说明（悬停出描述），不接 click；
  * - `clickable` = `usable && !inert`。回放期间 `handler` 为 `null`（外观不变）。
  *
  * 点击动作与旧入口完全一致：清单 → 进入预发动；转化来源 → 切来源模式；
@@ -532,14 +701,25 @@ function skillOffer(pending, skill) {
   const ui = skill.ui || {};
   const convertCards = ui.convert_sources || [];
   const preactivated = Boolean(skill.preactivated);
-  const manifest = preactivationManifest(pending, skill.skill_id);
-  const usable = isOwnPending(pending) && (
-    preactivated
-      ? Boolean(manifest)
-      : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
+  const suppressed = skill.state === "suppressed";
+  // 失效优先于一切入口：即使这份询问里还留着同名清单，也不显示"预发动"。
+  const manifest = suppressed ? null : preactivationManifest(pending, skill.skill_id);
+  // **已翻预发动 ≠ "只能走清单"**：同一条技能可以有第二个入口——【蛊惑】的"需要牌时"
+  // 就是**提供者**：它在【闪】/【无懈可击】/濒死这些窗口里是一条普通的 `ActivateSkill`
+  // 候选（`_guohuo_provider_offers`），与出牌阶段那份清单是两条路。判据只看**这一问给了
+  // 哪种入口**：有清单 ⇒ 复合动作入口；没有清单但服务端说可用（`skill.available` = 这一问
+  // 里有它的骨架候选）⇒ 直提态。故不能按 `preactivated` 一刀切成"只认清单"——那会让
+  // 提供者入口在响应窗口里整片变灰（用户实机报障 2026-11-02）。
+  const usable = !suppressed && isOwnPending(pending) && (
+    Boolean(manifest) || Boolean(skill.available) || convertCards.length > 0
   );
   const passive = Boolean(ui.passive);
-  const inert = Boolean(skill.locked) || passive;
+  // 锁定技也可以是**转化入口**（神关羽【武神】既是锁定技、又是‘只能’型转化）。这类
+  // "锁定"没有"是否发动"要问，但玩家仍要挑来源牌与目标 ⇒ 按钮必须点得动。判据只读
+  // "这一问有没有下发清单"，纯锁定技 / 被动技（无清单、无转化来源）照旧只做说明。
+  // 注意：这里读的是 `locked`（规则类型，管失效与三态），**不是** `forced`（‘只能 / 可以’）。
+  const lockedEntry = Boolean(skill.locked) && Boolean(manifest) && !passive;
+  const inert = suppressed || (Boolean(skill.locked) && !lockedEntry) || passive;
   const clickable = usable && !inert;
   let handler = null;
   if (clickable && pending && !state.playback) {
@@ -554,7 +734,9 @@ function skillOffer(pending, skill) {
       if (index >= 0) handler = () => selectSkillCandidate(index);
     }
   }
-  return { convertCards, preactivated, manifest, usable, passive, inert, clickable, handler };
+  return {
+    convertCards, preactivated, manifest, suppressed, usable, passive, inert, clickable, handler,
+  };
 }
 
 /** 选中一条 `ActivateSkill` 候选 = 技能直提态（「将提交：发动【X】」）。
@@ -573,6 +755,8 @@ function selectSkillCandidate(index) {
  * 纪律：
  * - **被动 / 锁定技**（`ui.passive` / `locked`）按钮只做说明：左键 / 右键都不动作，
  *   悬停出描述（U1-06）。被动预发动的入口在提示条的浮动选项行，不靠点按钮；
+ * - **失效**（`state = suppressed`）：按钮保留并画禁止图标（见 :func:`applySkillState`），
+ *   不可点；它不是"此刻不可用"（深灰）——失效是"有但被挡住"；
  * - 可发动的主动技 / 装备技：绿（`.ready`）且可点；此刻不可用：深灰（`.unavailable`）；
  * - 清单顺序由服务端给（武将在前、装备在后），这里**只渲染**，不自己重排。
  *
@@ -580,6 +764,12 @@ function selectSkillCandidate(index) {
  * 清单驱动的本地态（确认 = 复合动作、取消零提交），不再去 `legal_actions` 里找
  * 骨架候选（已翻的技能连骨架都没有）。未翻的技能照旧：转化技点它进入来源模式，其余
  * 点一下 = 选中那条 `ActivateSkill` 候选。判据与点击动作都住在 :func:`skillOffer`。
+ *
+ * **格子（报障 2026-11-01）**：底部技能区是**固定 3 列 × 6 行**的等大网格（CSS 里
+ * `#t-skills`），故按钮上只放名字的前 3 个字（:func:`shortSkillName`）；类别 / 徽标
+ * 副行（`.kind`）由 CSS 隐藏但仍在节点里，完整名字 + 类别 + 徽标写进 `aria-label`，
+ * 悬停描述照旧读 `title`。多于 18 条（现役武将到不了）按同一份等分继续往下排，仍等大、
+ * 一个都不裁——面板的格高来自 CSS，JS 只负责顺序与标签。
  */
 function renderSkills(view) {
   const box = $("t-skills");
@@ -609,25 +799,39 @@ function renderSkills(view) {
     // 悬停全文（U1-04b / U1-06）：技能详情 / 悬停都读服务端下发的同一份 description；
     // 缺条目时显式「暂无描述」，不留空 title，也不在 JS 里抄文案。
     button.setAttribute("title", skillDescription(skill));
-    if (preactivated) button.setAttribute("data-preactivated", "true");
-    if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
-    if (manifest) button.setAttribute("data-preactivation", String(manifest.length));
+    if (!offer.suppressed) {
+      if (preactivated) button.setAttribute("data-preactivated", "true");
+      if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
+      if (manifest) button.setAttribute("data-preactivation", String(manifest.length));
+    }
     const kind = skillKindLabel(skill);
-    const badge = preactivated
-      ? (manifest ? " · 预发动" : "")
+    const badge = offer.suppressed
+      ? ""
       : skillBadgeText(skill, manifest, convertCards);
-    button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
+    // M6 票 19：☆ 技能（觉醒后获得）在按钮名字前标出来；未觉醒时它不在清单里。
+    const star = skillStarLabel(skill);
+    if (star) button.setAttribute("data-star", "true");
+    // 报障 2026-11-01：格子是固定 3 列 × 6 行的等大网格 ⇒ 名字**只放前 3 个字**
+    //（`shortSkillName`，超出加省略号）；类别 / 状态副行仍留在节点里给悬停与读屏用
+    //（`#t-skills .kind` 由 CSS 隐藏），完整名字 + 类别 + 徽标进 `aria-label`。
+    const shownName = star ? `${star} ${shortSkillName(skill.name)}` : shortSkillName(skill.name);
+    button.innerHTML = `${shownName}<span class="kind">${kind}${badge}</span>`;
+    button.setAttribute("aria-label", `${skill.name}（${kind}${badge}）`);
+    applySkillState(button, skill);
     if (offer.handler) button.addEventListener("click", offer.handler);
     box.appendChild(button);
   }
 }
 
-/** 改判窗口的**只说明**入口文案：【鬼才】的选择是「点一张手牌 → 提交」，没有第二套选择方式。 */
-const REJUDGE_ENTRY_HINT = "点一张手牌打出，然后点「提交」（改判不需要选目标）。";
+/** 改判窗口的**只说明**入口文案：两版【鬼才】与张角【鬼道】的选择都是「选一张牌 → 提交」，
+ * 没有第二套选择方式。标准版候选只给手牌、界版还含装备区（M6 票 14）、【鬼道】只收黑色牌
+ * （feng-zhangjiao 票 02），故这里说「一张牌」而不是「一张手牌」——文案对三版都成立。 */
+const REJUDGE_ENTRY_HINT = "选一张牌，然后点「提交」（改判不是打出，也不需要选目标）。";
 
 /** 这条技能是不是**改判窗口**（`RESPOND` / `REJUDGE`）里的那个只说明入口。
  *
- * 改判窗口的候选是手牌的 `PlayCard`（没有 `ActivateSkill`），所以 `available` 恒为假
+ * 改判窗口的候选是 `SubstituteJudgeCard`（不是 `PlayCard`、也没有 `ActivateSkill`），
+ * 所以 `available` 恒为假
  * ——底部技能区的旧判据看不见它。这里只做一次**服务端字符串相等**：询问的
  * `context.requirement`（这一步要做什么）与本技能的 `ui.requirement`（技能声明上的
  * 需要做什么）写成同一句时，说明这条技能就是当前窗口的来源。它不是合法性判据：
@@ -636,7 +840,7 @@ const REJUDGE_ENTRY_HINT = "点一张手牌打出，然后点「提交」（改�
 function rejudgeWindowEntry(pending, skill) {
   if (!pending || pending.kind !== "RESPOND" || pending.cause !== "REJUDGE") return false;
   const ui = skill.ui || {};
-  if (skill.locked || ui.passive) return false;
+  if (skill.state === "suppressed" || skill.locked || ui.passive) return false;
   const requirement = pending.context && pending.context.requirement;
   return Boolean(requirement) && ui.requirement === requirement;
 }
@@ -675,6 +879,7 @@ function renderPromptSkills(view) {
     if (windowEntry) button.setAttribute("data-window-entry", "true");
     button.setAttribute("title", windowEntry ? REJUDGE_ENTRY_HINT : skillDescription(skill));
     button.textContent = skill.name;
+    applySkillState(button, skill);
     if (offer.handler) button.addEventListener("click", offer.handler);
     else if (windowEntry && !state.playback) {
       // 只把"怎么点"写明白：不选中候选、不改焦点、不发请求（不是第二套选择方式）。

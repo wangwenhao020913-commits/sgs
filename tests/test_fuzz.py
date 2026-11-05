@@ -21,7 +21,7 @@
 
 1. **活状态层**：``_FuzzEngine`` 覆写记录流的唯一出口 ``_emit``，每写出一条记录就在**活
    ``GameState``** 上验体力范围 / 区域互斥 /（边界上的）手牌上限 / 座位级三区约束；
-2. **记录流层**：从 ``delta`` 重建六区（座位级）并与终局活状态互校——"状态变了却没有
+2. **记录流层**：从 ``delta`` 重建全部区域（座位级 / 武将牌上的牌按技能实例）并与终局活状态互校——"状态变了却没有
    ``delta``"（`01` 原则 6 的漏记）由此被抓到。
 
 本文件另有一组"fuzz 本身不空转"的元测试：对**人为破坏**的局面断言检查器确实报错。
@@ -34,22 +34,34 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Final
 
 import pytest
 
 import sgs.agents as agents
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
-from sgs.engine import Engine, JournalRecord, QueryRecord, RandomSource, TimingRecord
+from sgs.effects import hand_count, hand_limit
+from sgs.engine import (
+    CardMoveRecord,
+    DeckShuffleRecord,
+    Engine,
+    JournalRecord,
+    QueryRecord,
+    TimingRecord,
+    ai_stream,
+)
 from sgs.skills import CANDIDATE_CAP
 from sgs.state import (
     ActivateSkill,
     ArrangeCards,
     CardRef,
     DiscardCards,
+    Distribute,
     EndPhase,
     FrameKind,
     GameState,
+    MoveReason,
     Pass,
     PlayPhaseQuery,
     SelectCards,
@@ -170,11 +182,10 @@ def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _Fuz
     # 开局那几条记录（初次洗牌 + 发牌）由 ``build_initial`` 直接构造、不走 ``_emit``，
     # 故在这里补一次活状态检查；其后每条记录由 ``_emit`` 覆写逐一检查。
     _check_live_invariants(engine, None)
-    ai_stream = RandomSource(seed).substream("ai")
     remaining = [QUERY_BUDGET]
     participants = [
-        _BudgetedPlayer(agents.RandomPlayer(ai_stream), remaining, deadline)
-        for _ in range(players)
+        _BudgetedPlayer(agents.RandomPlayer(ai_stream(seed, seat)), remaining, deadline)
+        for seat in range(players)
     ]
     try:
         engine.run(participants)
@@ -196,6 +207,23 @@ def _play_and_check(seed: int, *, players: int, deadline: float | None = None) -
 # ---------------------------------------------------------------------------
 
 
+def _hp_clamp_pending(player, record: JournalRecord | None) -> bool:
+    """上一条记录是否是"满体力减上限"的第一半：体力值待随之下调（M6 票 06）。
+
+    ``Engine.reduce_hp_max`` 在"减上限前满体力"时按规则 L436–437 先落 ``hp_max_change``、
+    再落 ``hp_change``；检查器跑在两条之间，故只放行**这一个形状**（该座的记录、它的
+    ``before`` 恰等于当前体力、``after`` 恰等于当前上限）。
+    """
+    return (
+        record is not None
+        and getattr(record, "kind", None) == "delta"
+        and getattr(record, "delta_type", None) == "hp_max_change"
+        and record.seat == player.seat
+        and record.before == player.hp
+        and record.after == player.hp_max
+    )
+
+
 def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) -> None:
     state = engine.state
     seed = engine.game_seed
@@ -206,7 +234,13 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         # 在"伤害 / 扣减体力 / 濒死"结算在栈上时：3 点闪电把 1~2 体力打到 −1/−2 的那一刻，
         # 负体力先落进状态、濒死帧随后才压（票 20 §6）。阵亡者保留死亡时的负体力，
         # 故对 ``alive == False`` 不再要求。
-        if player.hp > player.hp_max:
+        #
+        # M6 票 06 的**减体力上限**（觉醒技）引入一个**逐记录的瞬态**：满体力时减上限按
+        # 规则 L436–437 要"同时把体力值调整至新上限"，引擎因此先落 ``hp_max_change``、
+        # 再落 ``hp_change`` 两条 delta。检查器跑在**每条记录之后**，在两条之间会看到
+        # ``hp == 旧上限 > 新上限``——这是上一条记录自己声明的待调整状态，不是漏洞。
+        # 判据收窄到"上一条记录恰为该座的 hp_max_change、且它的 before == 当前 hp"。
+        if player.hp > player.hp_max and not _hp_clamp_pending(player, record):
             _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} 超过上限 {player.hp_max}")
         if player.hp < 0 and player.alive and not _hp_may_be_negative(engine):
             _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} < 0 却没有伤害 / 濒死帧在栈上")
@@ -237,26 +271,32 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         if len(names) != len(set(names)):
             _fail(seed, n, record, f"座位 {player.seat} 判定区同名牌重复：{names}")
 
-    # 区域互斥：一张实体牌任一时刻只在一个区域（六个区：三个共享区 + 每座位三区）。
+    # 区域互斥：一张实体牌任一时刻只在一个区域（七个区：三个共享区 + 每座位三区 +
+    # **武将牌上的牌**——M6 票 10 的真区域，按（座位, 技能实例）再分桶）。
     everywhere = [*state.deck, *state.discard, *state.processing]
     for player in state.players:
         everywhere.extend(player.hand)
         everywhere.extend(player.equip)
         everywhere.extend(player.judge)
+        for zone in player.hero_cards.values():
+            everywhere.extend(zone.cards)
     if len(everywhere) != len(state.cards) or len(set(everywhere)) != len(everywhere):
         _fail(seed, n, record, "区域互斥被破坏：有实体牌丢失或同时出现在多个区域")
 
-    # 手牌上限 = 当前体力值，只在**边界处属于谁的座位**上断言（摸牌途中允许超上限；
-    # 对手的手牌要到它自己回合的弃牌阶段才受约束）。每个座位都会在自己回合的
-    # `PHASE_DISCARD_END` / `TURN_AFTER_END` 被检查到。
+    # 手牌上限只看**弃牌阶段末**（边界处属于谁的座位）：摸牌途中允许超上限；对手的手牌
+    # 要到它自己回合的弃牌阶段才受约束。M6 票 08 起上限是**双轴查询**（`hand_limit`：
+    # 体力 → 替换链 → 加式，如【英姿】的"上限 = 体力上限"、【清俭】/【集智】的 +X），
+    # 计数也换成 `hand_count`（M6 票 09：排除计数标签）——不再写死 `len(hand) > hp`。
+    # 这里读的就是弃牌阶段同一个查询，故"能留下来"与"不被判红"是同一份判据。
     if _is_hand_limit_point(record) and state.turn_seat is not None:
         player = state.player(state.turn_seat)
-        if player.alive and len(player.hand) > player.hp:
+        if player.alive and hand_count(state, player) > hand_limit(state, player):
             _fail(
                 seed,
                 n,
                 record,
-                f"回合边界座位 {player.seat} 手牌 {len(player.hand)} 超过体力 {player.hp}",
+                f"回合边界座位 {player.seat} 手牌计数 {hand_count(state, player)}"
+                f" 超过上限 {hand_limit(state, player)}",
             )
 
     _check_candidate_cap(record, seed, n)
@@ -388,8 +428,15 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
         "（票 04 迁移后【制衡】的任意张走这里；询问级候选，非技能层两维组合）",
         lambda action: isinstance(action, SelectCards),
     ),
+    _ExemptFamily(
+        "Distribute",
+        "计数式分配（`DISTRIBUTE`）的分配向量：每座 0..单座上限、合计 ≤ 上限的一维枚举"
+        "（8 人局 C(11,3) = 165）。与 ``ArrangeCards`` 同一类**询问级**候选——它是"
+        "一张弹窗的答案域，不是技能层两维相乘（huo-shenzhouyu-mobile 票 05）",
+        lambda action: isinstance(action, Distribute),
+    ),
 )
-"""五条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
+"""六条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
 
 顺序 = 票 10 的文档顺序；增删一条必须同时改这里与元测试的样本表，
 故"悄悄放宽审计"会直接判红。
@@ -397,7 +444,7 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
 
 
 def _is_one_dimensional_enumeration(action: object) -> bool:
-    """五族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
+    """六族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
     return any(family.matches(action) for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES)
 
 
@@ -531,10 +578,12 @@ def _ids(record: JournalRecord) -> list[int]:
 
 @dataclass
 class _Piles:
-    """从 ``delta`` 重建的六个区域；逐座位的三区按座位分装（票 08 §7 / 票 16 §2）。
+    """从 ``delta`` 重建的区域；逐座位的三区按座位分装（票 08 §7 / 票 16 §2）。
 
     区域坐标带座位，故重建是**座位级**的：``from_zone`` / ``to_zone`` 直接给出座位，
-    手牌 / 装备区 / 判定区各归各座，不再是"全局手牌池"。
+    手牌 / 装备区 / 判定区各归各座，不再是"全局手牌池"。M6 票 10 的**武将牌上的牌**
+    再按（座位, 技能实例）分桶（``hero[seat][skill_instance]``），与 ``HeroCardZone``
+    的区键同形。
     """
 
     seats: int
@@ -544,6 +593,7 @@ class _Piles:
     hands: list[list[int]] = field(default_factory=list)
     equip: list[list[int]] = field(default_factory=list)
     judge: list[list[int]] = field(default_factory=list)
+    hero: list[dict[str, list[int]]] = field(default_factory=list)
     slots: dict[int, SlotKind | None] = field(default_factory=dict)
     """每条记录内联的牌面槽位（``card_id`` → ``slot``），供装备区按槽位枚举序重建。"""
 
@@ -556,6 +606,7 @@ class _Piles:
             + sum(len(pile) for pile in self.hands)
             + sum(len(pile) for pile in self.equip)
             + sum(len(pile) for pile in self.judge)
+            + sum(len(cards) for zones in self.hero for cards in zones.values())
         )
 
     def reset(self, cards: list[int]) -> None:
@@ -565,6 +616,7 @@ class _Piles:
         self.hands = [[] for _ in range(self.seats)]
         self.equip = [[] for _ in range(self.seats)]
         self.judge = [[] for _ in range(self.seats)]
+        self.hero = [{} for _ in range(self.seats)]
 
     def _pile(self, ref: ZoneRef) -> list[int]:
         if ref.zone is Zone.DECK:
@@ -581,6 +633,10 @@ class _Piles:
             return self.equip[ref.seat]
         if ref.zone is Zone.JUDGE:
             return self.judge[ref.seat]
+        if ref.zone is Zone.HERO:
+            if ref.skill_instance is None:
+                raise AssertionError("武将牌上的牌区缺技能实例坐标")
+            return self.hero[ref.seat].setdefault(ref.skill_instance, [])
         raise AssertionError(f"未知区域：{ref.zone!r}")
 
     def take(self, record: JournalRecord, seed: int) -> None:
@@ -596,9 +652,19 @@ class _Piles:
             pile.remove(card_id)
 
     def place(self, record: JournalRecord) -> None:
+        """把这条移动落到重建的目标区上；**落点由记录自己回答**（``to_top``）。
+
+        跨区移动进牌堆时的落点写在 delta 里（``to_top=True`` = 成为牌堆新顶，元组顺序即
+        自顶向下）。重建器不再从"上一条 ``SelectOption(deck_top)``"推断落点：那种补偿在
+        引擎没真的置顶时会静默改写重建结果（票 01 的实机种子就是这么来的）。
+        """
         ref = record.to_zone
         pile = self._pile(ref)
-        pile.extend(_ids(record))
+        ids = _ids(record)
+        if ref.zone is Zone.DECK and record.to_top:
+            pile[:0] = ids
+        else:
+            pile.extend(ids)
         if ref.zone is Zone.EQUIP:
             # 装备区存储序 = 槽位枚举序（票 12 §Q2）；重放器必须复刻，否则座位级互校会误报。
             order = list(SlotKind)
@@ -630,6 +696,11 @@ class _Piles:
         :func:`sgs.skills.arrange._apply_arrangement` 的两次 ``place_on_deck``。
         """
         ids = [card.card_id for card in cards]
+        if any(card_id not in self.deck for card_id in ids):
+            # **不是牌堆顶排列**：神诸葛亮【七星】的两行交换授予的是「星」+ 手牌（都不在牌堆里），
+            # 它的两次搬牌已由 `card_move` 记过；这里再"落到牌堆"会把牌凭空加进重建堆
+            # （huo-shenzhugeliang 票 02：fuzz 的守恒不变量先抓到）。
+            return
         top = [ids[index] for index in action.order[: action.split]]
         bottom = [ids[index] for index in action.order[action.split :]]
         for batch, to_top in ((top, True), (bottom, False)):
@@ -643,7 +714,7 @@ class _Piles:
 
 
 def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> None:
-    """从 ``delta`` 重建六个区域，逐条查牌守恒，再与终局活状态互校。
+    """从 ``delta`` 重建全部区域，逐条查牌守恒，再与终局活状态互校。
 
     区域坐标带座位 ⇒ 重建是**座位级**的（票 16 §2：重放器补座位级重建），
     故"手牌 / 装备区 / 判定区归错座位"也能被抓到，而不只是池级守恒。
@@ -656,17 +727,13 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
         if record.kind == "query" and record.query.kind == "ARRANGE":
             arranged = tuple(record.query.revealed)
             continue
-        if (
-            record.kind == "action"
-            and getattr(record, "accepted", False)
-            and isinstance(record.action, ArrangeCards)
-            and arranged
-        ):
-            # 排列是**同一区域内部**的重排（无 delta，见 `place_on_deck`），故重建器要
-            # 在这个行动记录处自己把牌堆顺序改过来（票 14 §4）。
-            piles.arrange(record.action, arranged)
-            arranged = ()
-            continue
+        if record.kind == "action" and getattr(record, "accepted", False):
+            if isinstance(record.action, ArrangeCards) and arranged:
+                # 排列是**同一区域内部**的重排（无 delta，见 `place_on_deck`），故重建器要
+                # 在这个行动记录处自己把牌堆顺序改过来（票 14 §4）。
+                piles.arrange(record.action, arranged)
+                arranged = ()
+                continue
         if record.kind != "delta":
             continue
         piles.note_slots(record)
@@ -686,7 +753,7 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
                 seed,
                 n,
                 record,
-                f"牌守恒被破坏：六个区域合计 {piles.total} 张，应为 {CARD_COUNT} 张",
+                f"牌守恒被破坏：全部区域合计 {piles.total} 张，应为 {CARD_COUNT} 张",
             )
 
     if piles.deck != engine.state.deck:
@@ -702,6 +769,21 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
             _fail(seed, n, None, f"座位 {seat} 装备区与从 delta 重建的结果不一致")
         if piles.judge[seat] != player.judge:
             _fail(seed, n, None, f"座位 {seat} 判定区与从 delta 重建的结果不一致")
+        rebuilt_hero = {
+            key: cards for key, cards in piles.hero[seat].items() if cards
+        }
+        expected_hero = {
+            key: list(zone.cards)
+            for key, zone in player.hero_cards.items()
+            if zone.cards
+        }
+        if rebuilt_hero != expected_hero:
+            _fail(
+                seed,
+                n,
+                None,
+                f"座位 {seat} 武将牌上的牌区与从 delta 重建的结果不一致",
+            )
     if sorted(
         [
             *piles.deck,
@@ -710,6 +792,12 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
             *(card_id for pile in piles.hands for card_id in pile),
             *(card_id for pile in piles.equip for card_id in pile),
             *(card_id for pile in piles.judge for card_id in pile),
+            *(
+                card_id
+                for zones in piles.hero
+                for cards in zones.values()
+                for card_id in cards
+            ),
         ]
     ) != list(range(CARD_COUNT)):
         _fail(seed, n, None, "牌守恒被破坏：并非每张实体牌恰在一个区域")
@@ -771,6 +859,67 @@ def test_random_games_satisfy_the_invariants():
         played += 1
 
     assert played == game_limit
+
+
+def test_the_seeded_eight_player_gongxin_deck_top_replays():
+    """回归：seed=7322422061626536934 / 8 人的界吕蒙【攻心】把红桃置于牌堆顶。
+
+    这一局最早会在最终"牌堆与 delta 重建互校"判红：检查器只看到 hand→deck 的
+    ``card_move``，把牌追加到重建牌堆**底**；引擎随后走 ``place_on_deck(to_top=True)``
+    把它移到牌堆**顶**（顺序变化不产 delta）。这不是初始化问题——``_fail(record=None)``
+    只是最终互校的报错位置标签。
+
+    票 02 起补偿已删，但**这条种子今天不再走到【攻心】置顶**（票 01 的行为修复改变了
+    这一局的走向：实测 0 次【攻心】发动，故也 0 条 ``deck_top``）。它现在钉的是"删掉
+    重建器补偿之后，一条普通 8 人局的逐记录互校仍然全绿"，不是"落点来自记录"——
+    后者由 :func:`test_the_rebuilder_takes_the_landing_spot_from_the_delta`（合成记录流）
+    与 ``tests/test_hero_jie.py::test_gongxin_deck_top_is_one_atomic_move_that_records_the_landing_spot``
+    钉住。
+    """
+    _play_and_check(7322422061626536934, players=8, deadline=time.monotonic() + 120)
+
+
+def test_the_seeded_eight_player_gongxin_deck_top_survives_the_lianying_suspension():
+    """回归（本 effort 票 01）：seed=15211799974272561945 / 8 人——【攻心】置顶**挂起续跑**。
+
+    与上一条的差别是这次真的**挂起**：那张红桃是座位 3 的**最后一张手牌**，hand→DECK 的移动
+    因此触发会提问的【连营】（``MOVE_AFTER``），``effect`` 停在"移动已记、``place_on_deck``
+    未跑"。续跑时流水线从头重跑第一步，按**活状态**重算的座位池（"手牌非空的其他角色"）已经
+    不含座位 3 ⇒ 整条流被判 ``"cancel"``（"零副作用、技能可再发动"）⇒ ``effect`` 不再重入，
+    牌停在**牌堆底**。终局互校因此判红："牌堆与从 delta 重建的结果不一致"（重建器按
+    ``SelectOption(deck_top)`` 补偿、把牌落到堆顶，引擎却没置顶）。
+
+    红/绿口径：修复前 ``_play_and_check`` 抛 :class:`FuzzInvariantError`（就是 ``probe_red.py``
+    的那一条），修复后整局不变量全绿；"牌真的在牌堆顶"这一条由
+    ``tests/test_hero_jie.py::test_gongxin_deck_top_lands_on_top_after_a_suspending_move_after_hook``
+    直接断言在 ``state.deck[0]`` 上。
+
+    票 02 起补偿已删（落点只从 delta 的 ``to_top`` 读）。**这条种子只证"删掉补偿后不再
+    炸"，证不了"落点真的来自记录"**：这一局走到 3 次 ``deck_top``，但那三张牌后来都被
+    摸走 / 被重洗冲掉了顺序差（``merge_reshuffle`` 按记录还原整段新顺序），故"落点写错"
+    在终局牌堆上看不出来。真正的判据是合成用例
+    :func:`test_the_rebuilder_takes_the_landing_spot_from_the_delta`。
+    """
+    _play_and_check(15211799974272561945, players=8, deadline=time.monotonic() + 120)
+
+
+def test_the_seeded_harvest_target_that_dies_before_its_pick_is_skipped():
+    """回归（合并门禁的 fuzz 抓到；**预现存于** `201046a`，与本 effort 的改动无关）：
+    seed=18174453931029153341 / 8 人。
+
+    五谷丰登的逐目标是"使用时"冻结的目标表；目标 1 在轮到自己取牌前已经阵亡（前面那条
+    伤害 / 濒死结算把它打死，无懈窗口随后才收尾）。旧实现仍向死者发 ``SELECT_CARDS``，
+    把一张【闪】从处理区 ``PUT`` 进**死者手牌** ⇒ "阵亡者三区为空"判红（seq≈2503）。
+    修复 = :func:`sgs.effects.ops.pick_harvest` 跳过阵亡目标：它那一份留在处理区，由
+    ``finish_harvest`` 一并弃掉（与"被无懈跳过者不占份额"同一姿态）。
+
+    这一局只钉"死者不再拿牌"；不重录任何基准、不改 `tests/replays/`。
+    """
+    engine = _play_and_check(
+        18174453931029153341, players=8, deadline=time.monotonic() + 120
+    )
+    assert engine.state.players[1].alive is False, "这个种子必须真的走到座位 1 阵亡"
+    assert not engine.state.players[1].hand, "阵亡者三区为空"
 
 
 def test_the_player_rotation_covers_the_six_identity_branches():
@@ -848,6 +997,33 @@ def test_the_live_checker_catches_hp_above_the_maximum():
         _check_live_invariants(engine, engine.records[-1])
 
 
+def test_the_live_checker_allows_the_paired_clamp_after_a_full_hp_max_reduction():
+    """M6 票 06 的觉醒减上限：``hp_max_change`` 与 ``hp_change`` 之间的瞬态是合法的。
+
+    正例 = 上一条记录恰为满体力减上限（``before == 当前 hp``）；反例 = 体力高于那个
+    ``before``，或记录不是该座的 ``hp_max_change``——两种都仍然判红（判据没有放宽）。
+    """
+    from sgs.engine import HpMaxChangeRecord
+
+    engine = _play(1)
+    player = engine.state.players[0]
+    before = 4
+    player.hp = before
+    player.hp_max = before - 1
+    reduction = HpMaxChangeRecord(
+        seq=1, frame_id=0, depth=0, seat=player.seat, before=before, after=before - 1, amount=1
+    )
+
+    _check_live_invariants(engine, reduction)  # 瞬态：体力仍等于旧上限
+
+    player.hp = before - 1
+    _check_live_invariants(engine, reduction)  # 调整完 ⇒ 常态
+
+    player.hp = before + 1
+    with pytest.raises(FuzzInvariantError, match="超过上限"):
+        _check_live_invariants(engine, reduction)
+
+
 def test_the_live_checker_catches_a_hand_over_the_limit_at_the_discard_phase_end():
     state = build_state(
         pack=PACK,
@@ -869,8 +1045,15 @@ def test_the_live_checker_catches_a_dead_player_holding_cards():
     engine = _play(1)
     victim = engine.state.players[1]
     victim.alive = False
-    victim.hand.append(engine.state.deck[0])
-    engine.state.deck.remove(engine.state.deck[0])
+    # 本用例只借一张**真实存在**的实体牌（区域来源不影响「阵亡者三区为空」这条判据）；
+    # 种子的对局走向会随规则实现变化，牌堆可能恰好被摸空（票 01 的 N 候选面就改了这一局的
+    # 随机轨迹），故按"牌堆 → 弃牌堆"的次序取。
+    card_id = (engine.state.deck or engine.state.discard)[-1]
+    if card_id in engine.state.deck:
+        engine.state.deck.remove(card_id)
+    else:
+        engine.state.discard.remove(card_id)
+    victim.hand.append(card_id)
 
     with pytest.raises(FuzzInvariantError, match="已阵亡"):
         _check_live_invariants(engine, engine.records[-1])
@@ -882,6 +1065,73 @@ def test_the_replay_check_catches_live_state_drifting_from_the_deltas():
 
     with pytest.raises(FuzzInvariantError, match="不一致"):
         _replay_deltas_and_cross_check(engine, engine.game_seed, engine.game_players)
+
+
+def test_the_rebuilder_takes_the_landing_spot_from_the_delta():
+    """重建器的落点**只读 delta**（``to_top``）：删掉 ``SelectOption(deck_top)`` 特判后仍成立。
+
+    合成一条最小记录流：开局洗牌 → 牌堆顶那张进手牌（座位 0）→ 同一次移动进牌堆**顶**
+    （"置于牌堆顶"的跨区形状）。``to_top=True`` 的重建必须与活状态一致；把落点改成缺省
+    （``False``）就**必须**判红——否则"删掉特判"没有判据。
+
+    为什么需要这条合成用例：两条实机种子的牌堆中途被重洗，顺序差的记忆会被冲掉
+    （``merge_reshuffle`` 按记录还原整段新顺序），故它们只证"不再补偿也不炸"，证不了
+    "落点真的来自记录"。
+    """
+    card = 0  # 牌 id 就是数据表下标
+    deck_order = (card, *(card_id for card_id in range(CARD_COUNT) if card_id != card))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=deck_order,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    deck_ref = ZoneRef(Zone.DECK)
+    hand_ref = ZoneRef(Zone.HAND, 0)
+    records: list[JournalRecord] = [
+        DeckShuffleRecord(
+            seq=1,
+            frame_id=0,
+            depth=0,
+            cards=state.refs(deck_order),
+            from_zone=None,
+            to_zone=deck_ref,
+        ),
+        CardMoveRecord(
+            seq=2,
+            frame_id=0,
+            depth=0,
+            cards=(state.card(card),),
+            from_zone=deck_ref,
+            to_zone=hand_ref,
+            reason=MoveReason.DRAW,
+            owner=0,
+        ),
+        CardMoveRecord(
+            seq=3,
+            frame_id=0,
+            depth=0,
+            cards=(state.card(card),),
+            from_zone=hand_ref,
+            to_zone=deck_ref,
+            reason=MoveReason.PUT,
+            owner=0,
+            to_top=True,
+        ),
+    ]
+
+    # 绿：记录说了落点，重建牌堆 == 活牌堆（[card, *其余]）。
+    _replay_deltas_and_cross_check(
+        SimpleNamespace(records=records, state=state), 1, 2
+    )
+
+    # 红：同一条移动不带落点（缺省 = 追加到牌堆尾）⇒ 重建与活状态不一致。
+    without = records[:2] + [records[2].model_copy(update={"to_top": False})]
+    with pytest.raises(FuzzInvariantError, match="牌堆与从 delta 重建的结果不一致"):
+        _replay_deltas_and_cross_check(
+            SimpleNamespace(records=without, state=state), 1, 2
+        )
 
 
 def test_the_failure_message_carries_the_seed_the_player_count_and_the_step():
@@ -1015,14 +1265,16 @@ def test_the_by_design_cap_exemption_is_empty_after_the_rende_migration():
 
 
 def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
-    """五族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6）。
+    """六族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6 + 票 05）。
 
     这条是豁免规则的机械覆盖：
-    ① 表恰五条、每条都有非空理由；
+    ① 表恰六条、每条都有非空理由；
     ② 每条理由对应的候选样本**命中**该族判据；
     ③ 每条样本哪怕堆到 ``CANDIDATE_CAP + 1`` 也不报错（= 真的被放行）。
     """
-    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 5, "豁免表恰五族（C6 的裁定 + 票 04 的 SelectCards）"
+    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 6, (
+        "豁免表恰六族（C6 的裁定 + 票 04 的 SelectCards + 票 05 的 Distribute）"
+    )
     assert all(family.rationale for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES), (
         "每条豁免都必须写明『为什么不是两维技能组合』"
     )
@@ -1049,6 +1301,9 @@ def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
         ],
         "SelectCards": [
             SelectCards(picks=(0,), answers_seq=1) for _ in range(over_cap)
+        ],
+        "Distribute": [
+            Distribute(counts=((0, 1),), answers_seq=1) for _ in range(over_cap)
         ],
     }
 

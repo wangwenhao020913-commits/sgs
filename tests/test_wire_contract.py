@@ -47,6 +47,7 @@ from sgs.skills.flow import provide_face  # noqa: E402
 from sgs.skills.virtual import (  # noqa: E402
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
+    kind_source_ceiling,
     virtual_card_id,
 )
 from sgs.state import (  # noqa: E402
@@ -131,16 +132,21 @@ def _check_actions(raw: dict[str, Any], actions: Any, *, where: str) -> None:
         )
 
 
-def _source_cases(card_count: int) -> list[tuple[int, ...]]:
-    """代表性来源形状：空 / 单张 / 两张 / 满额 / 取最高 id（最坏折叠值）。"""
+def _source_cases(card_count: int, kind: int) -> list[tuple[int, ...]]:
+    """代表性来源形状：空 / 单张 / 两张 / 该段满额 / 取最高 id（最坏折叠值）。
+
+    "满额"读**该 kind 的段上界**（M6 票 03 起追加段比共享段更早撞线：
+    ``DISMANTLEMENT`` 在 108 张档只到 6，见 :func:`kind_source_ceiling`）。
+    """
     top = card_count - 1
+    ceiling = kind_source_ceiling(kind, card_count)
     return [
         (),
         (0,),
         (top,),
         (0, top),
-        tuple(range(MAX_VIRTUAL_SOURCES)),
-        (top,) * MAX_VIRTUAL_SOURCES,
+        tuple(range(ceiling)),
+        (top,) * ceiling,
     ]
 
 
@@ -162,7 +168,7 @@ def test_every_kind_and_source_shape_stays_a_js_safe_integer() -> None:
             virtual_card_id(kind=int(kind), sources=sources, card_count=card_count),
         )
         for kind in VirtualKind
-        for sources in _source_cases(card_count)
+        for sources in _source_cases(card_count, int(kind))
     ]
     # **最坏值先判**：越界时先报 |id| 最大的那一组（基线 f8794cd 上就是 kind>=2 的天文数）。
     cases.sort(key=lambda row: abs(row[1]), reverse=True)
@@ -175,7 +181,7 @@ def test_every_kind_and_source_shape_stays_a_js_safe_integer() -> None:
         assert round_tripped == value, f"{what}: 往返后值变了（{round_tripped} != {value}）"
         _assert_wire_safe(value, what)
 
-    assert len(cases) == len(VirtualKind) * len(_source_cases(card_count))
+    assert sum(len(_source_cases(card_count, int(kind))) for kind in VirtualKind) == len(cases)
 
 
 # ---------------------------------------------------------------------------

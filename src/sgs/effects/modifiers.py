@@ -48,15 +48,23 @@ class CandidateScope(str, Enum):
     """一次 ``CANDIDATES`` 派发发生在哪种"需要牌"语境（票 30）。
 
     ``CARD`` = 逐张牌的常规候选（M1 姿态、``ctx.card`` 非空）；``PLAY`` / ``DODGE`` /
-    ``RESPOND`` = 整段候选期的**通用追加**（虚拟牌不绑实体手牌）。用枚举而不是裸字符串：
-    写入端（``effects/actions.py``）与读取端（``skills/catalog.py``）共享同一个闭集，
-    新增语境只改这一处。
+    ``RESPOND`` / ``PEACH`` / ``NULLIFY`` = 整段候选期的**通用追加**（虚拟牌不绑实体手牌）。
+    用枚举而不是裸字符串：写入端（``effects/actions.py``）与读取端（``skills/catalog.py``）
+    共享同一个闭集，新增语境只改这一处。
+
+    四类"需要牌"语境的差别只在**窗口要什么**：``PLAY`` 是出牌阶段（任意牌）、``DODGE`` 是
+    【杀】的【闪】窗口、``RESPOND`` 是打出 / 使用的响应窗口（``respond_required`` 说牌名）、
+    ``PEACH`` 是濒死求【桃】、``NULLIFY`` 是无懈的收集式窗口。**提供者**（【蛊惑】）按它
+    收窄声明范围；``PEACH`` / ``NULLIFY`` 是票 03 的加法（那两扇窗口此前根本没有
+    ``CANDIDATES`` 派发）。
     """
 
     CARD = "CARD"
     PLAY = "PLAY"
     DODGE = "DODGE"
     RESPOND = "RESPOND"
+    PEACH = "PEACH"
+    NULLIFY = "NULLIFY"
 
 
 class CarrierKind(str, Enum):
@@ -73,8 +81,9 @@ class CarrierKind(str, Enum):
 class PriorityClass(IntEnum):
     """修饰器链的**优先级档**：武将 > 装备 > 使用牌（`02` §3.5(3) / 票 07 §6）。
 
-    值序即链序（越小越先），故"武将档先于装备档"由排序直接表达，不靠特判。M2 的载体
-    只有装备档，另两档是链序定义的一部分（票 29 的清单明列三档）。
+    值序即**修饰器管道序**（越小越先；这条管道走 ``resolve_instances`` 的解析序，与票 05 的
+    派发链序是两条链），故"武将档先于装备档"由排序直接表达，不靠特判。M2 的载体
+    只有装备档，另两档是优先级档定义的一部分（票 29 的清单明列三档）。
     """
 
     HERO = 0
@@ -100,12 +109,29 @@ def priority_class_of(carrier: CarrierKind) -> PriorityClass:
 class ModifierPoint(str, Enum):
     """修饰器的**挂点**（票 07 §3）；M3 只许增。
 
-    - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩）；
+    - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩 / 【咆哮】）；
+    - ``DISTANCE_LIMIT``：本牌**额定距离上限**（M6 票 02 的加法；【奇才】把锦囊的
+      ``TargetRule.max_distance`` 豁免成"无上限"）。``current`` 从 ``max_distance`` 起，
+      返回 ``None`` ⇒ 这次使用的距离条件整体豁免。只在 ``max_distance is not None`` 的牌上
+      派发——【杀】的"距离 ≤ 攻击范围"是另一条判据（``needs_distance``），不在本挂点，
+      故【奇才】不会顺带放宽【杀】；
+    - ``HAND_LIMIT_REPLACE``：**手牌上限的替换式**（M6 票 08 的加法，spec D11 的
+      "上限修正链"第二段）。``current`` 从**当前体力值**（下限 0）起，回调返回替换后的
+      上限——界周瑜【英姿】② 的「手牌上限 = 体力上限」与袁绍移动版【血裔】的「查询期
+      持续加 2×其他存活群势力角色数」是仅有的两个消费者（huo-mobile-batch 票 03 / 08
+      读法 A：**持续加式可以挂在替换链上**，回调在 ``current`` 上加）。**一次性**加式
+      **不**走本挂点：它是 D9 的一次性效果，住 ``Player.hand_limit_bonus``、查询期由
+      :func:`~sgs.effects.hand_limit` 在替换链之后再加，故「来源技能失去 / 失效后
+      替换式立刻消失、已落的一次性增量不撤回」是结构事实，不靠回调自己判；
     - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
     - ``TARGET_COUNT``：本牌**最大目标数**（方天画戟 +2；只对 ``TargetCount.RATED``
       的牌查链，见下）；
     - ``DISTANCE``：座位距离（六坐骑：客体 +1 / 主体 −1）；
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
+    - ``FORBIDDEN``：L3.1"这张牌不能按原用途使用 / 打出"（票 05；神关羽【武神】①）。
+      ``current`` 从 ``False`` 起，回调把"这一张此刻必须被禁"写成 ``True``；空链恒
+      ``False``，故既有技能零变化。它只覆盖"使用 / 打出"——弃置、重铸、技能成本、
+      他人把牌置入装备区都不经过这个挂点；
     - ``CANDIDATES``：候选行动的追加（丈八蛇矛 / 八卦阵的候选注入）；
     - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
     - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）；
@@ -118,7 +144,7 @@ class ModifierPoint(str, Enum):
     ``TARGET_COUNT`` 的语义（W7-01）：查询期修正"本牌**最大**目标数"，``current`` 从
     **额定目标数**起（``TargetRule.rated_targets``；【借刀杀人】的被迫使用窗口 base = 1，
     不是池大小），回调返回新的最大值（方天 = ``current + 2``，未来天义 = ``current + 1``
-    ——可叠加）；链序仍是 ``(priority_class, skill_id, owner)``。**只对
+    ——可叠加）；**修饰器管道序**仍是 ``(priority_class, skill_id, owner)``。**只对
     ``TargetCount.RATED`` 的牌生效**：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``（南蛮 /
     万箭 / 桃园 / 五谷）的目标数由候选池决定，查链会造出**非法子集**，故读者
     （``_play_phase`` / ``_respond`` 的 USE 趟 / ``virtual_card_use``）只在 RATED 档派发。
@@ -131,10 +157,13 @@ class ModifierPoint(str, Enum):
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
+    DISTANCE_LIMIT = "DISTANCE_LIMIT"
+    HAND_LIMIT_REPLACE = "HAND_LIMIT_REPLACE"
     TARGET_POOL = "TARGET_POOL"
     TARGET_COUNT = "TARGET_COUNT"
     DISTANCE = "DISTANCE"
     EFFECTIVENESS = "EFFECTIVENESS"
+    FORBIDDEN = "FORBIDDEN"
     CANDIDATES = "CANDIDATES"
     RESPONSE_COUNT = "RESPONSE_COUNT"
     RECOVER_AMOUNT = "RECOVER_AMOUNT"
@@ -180,7 +209,7 @@ class ModifierContext:
       一次"据此实现；
     - ``flags``：链**内部**的旁路标志（【青釭剑】置 ``ignore_armor``、【仁王盾】读它）。
       它是同一次查询里的临时便签，不是状态；用可变 ``dict`` 让链上先跑的回调能影响
-      后跑的回调（链序 = ``(priority_class, skill_id)``，青釭剑在仁王盾之前）。
+      后跑的回调（**修饰器管道序** = ``(priority_class, skill_id)``，青釭剑在仁王盾之前）。
     """
 
     subject: int
@@ -200,6 +229,12 @@ class ModifierContext:
     respond_required: str | None = None
     respond_mode: RespondMode | None = None
     respond_targets: tuple[int, ...] = ()
+    respond_declared: bool = False
+    """这扇**收集式**窗口已经收到过一条声明（票 03）：赢家已定，提供者的产物不会进结算。
+
+    读者只有提供者的 ``CANDIDATES`` 回调（【蛊惑】）：它必须在这之后闭嘴——产物是**扣置一张
+    手牌**换来的，赢家已定时再发候选就是白扣一张牌。真牌候选不受影响（真牌声明不耗牌）。
+    """
     flags: dict[str, Any] = field(default_factory=dict)
     nature: DamageNature | None = None
     """本次伤害的**属性**（M5-05a 的加法；``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP`` 用）。
@@ -223,9 +258,11 @@ def apply_modifiers(
 ) -> Any:
     """在 ``point`` 挂点上跑**链式管道**：``current`` 逐条交给命中的回调，返回终值。
 
-    链序 = ``(priority_class, skill_id, owner)``（由 :func:`sgs.skills.resolve_instances`
-    排好）；``ctx.owner`` 在派发时按当前实例填写，回调据此判定"本实例是否作用于本次
-    查询"。没有命中任何修饰器时**原样返回**（故 `basic_53` 的 M1 行为逐字节不变）。
+    **修饰器管道序** = ``resolve_instances`` 的**解析序** ``(priority_class, skill_id,
+    owner)``（那条链与"派发链序"是两回事：后者按 §4.16「先逐角色、角色内部再按优先级」
+    由 `sgs.skills.catalog._chain_order` 排，只管钩子 / 接缝的询问次序）。``ctx.owner``
+    在派发时按当前实例填写，回调据此判定"本实例是否作用于本次查询"。没有命中任何修饰器时
+    **原样返回**（故 `basic_53` 的 M1 行为逐字节不变）。
     """
     from sgs.skills import resolve_instances
 
@@ -242,7 +279,12 @@ def apply_modifiers(
 
 
 def response_count(
-    state: GameState, *, source: int, card: CardRef | None, target: int | None = None
+    state: GameState,
+    *,
+    source: int,
+    card: CardRef | None,
+    target: int | None = None,
+    role: ModifierRole = ModifierRole.SUBJECT,
 ) -> int:
     """本次响应窗口**需要几张**（缺省 1，票 08 §要做什么 1–2）。
 
@@ -250,9 +292,28 @@ def response_count(
     ``resolve_duel``），故"需连续两张【闪】/【杀】"由一个修饰值表达，引擎里不出现技能名。
     ``ctx.subject`` = **本次使用的来源**（谁用的牌），修饰器回调据此比对自己是不是
     那张牌的使用者；``ctx.card`` = 本次使用的牌（牌名读它）。
+
+    ``target`` 在 `RESPONSE_COUNT` 语境里是**这张牌指定的目标**（整场不变）；``role``
+    （票 23 的加法，缺省 ``SUBJECT``）说明**这一问的响应者扮演谁**：``TARGET`` = 响应者就是
+    那个指定的目标，``SUBJECT`` = 响应者是牌的使用者。两个事实合起来才能问出"这一问的响应者
+    是不是对手"。目前唯一的读者是【无双】②（【决斗】）：牌面把"两张【杀】"加在**吕布的对手**
+    身上，而对手可能是使用者、也可能是目标（"成为其他角色【决斗】的目标后"），只比
+    ``owner == subject`` 会漏掉反向那一半。
     """
-    ctx = ModifierContext(subject=source, target=target, card=card)
+    ctx = ModifierContext(subject=source, target=target, card=card, role=role)
     return apply_modifiers(ModifierPoint.RESPONSE_COUNT, state, ctx, 1)
+
+
+def responder_role(target: int | None, designated: int | None) -> ModifierRole:
+    """本次响应窗口里**响应者扮演谁**：就是这张牌指定的目标 ⇒ ``TARGET``，否则 ``SUBJECT``。
+
+    :func:`response_count` 的 ``role`` 实参由它派生，引擎侧（【决斗】结算按"当前该谁响应"
+    与"被决斗者"）与网页侧（询问的 ``target`` 与载荷的 ``targets[0]``）**读同一句判据**——
+    两处各写一次"相等比较"，就是同一条规则的第二份实现。
+    """
+    if target is None or designated is None:
+        return ModifierRole.SUBJECT
+    return ModifierRole.TARGET if target == designated else ModifierRole.SUBJECT
 
 
 def recover_amount(
@@ -310,7 +371,7 @@ def damage_amount(
     ``nature``（M5-05a）是 DAMAGE 帧的属性（由 ``steps.damage_finalize_amount`` 原样传入），
     只进 ``ctx.nature`` 供目标侧回调读（藤甲火焰 +1）；属性本身不落到牌上。
 
-    链序仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
+    **修饰器管道序**仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
     （标准 108 无任何伤害数值修饰器 ⇒ 逐字节不变）。
     """
     ctx = ModifierContext(

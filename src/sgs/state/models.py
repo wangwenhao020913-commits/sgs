@@ -11,28 +11,74 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
-from sgs.data import Color, Gender, Identity, Kingdom, RuleConfig
+from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 
 __all__ = [
     "CardRef",
+    "CardTag",
     "FrameKind",
     "GameState",
+    "HeroCardZone",
+    "LIFE_DECREASE_DAMAGE_KEY",
+    "Marker",
     "MoveReason",
     "Phase",
     "Player",
+    "SkillSuppression",
+    "SkillSuppressionPredicate",
+    "SkillSuppressionScope",
     "SlotKind",
     "Zone",
     "ZoneRef",
+    "ZoneRefField",
 ]
 
 
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class SkillSuppressionScope(str, Enum):
+    """技能失效记录的**作用域**（M6 票 04；`GLOSSARY.md`「技能失效」）。
+
+    M6 只有一档：``TURN`` = 本回合（回合末由 ``Engine._clear_turn_effects`` 清掉）。
+    记录带作用域而不是裸布尔，是因为"失效可恢复"的那一半取决于**何时**恢复——条件撤销
+    可能是回合末、也可能是某张牌离场；把作用域放进记录，清理点就不必逐技能特判。
+    """
+
+    TURN = "turn"
+
+
+class SkillSuppressionPredicate(str, Enum):
+    """技能失效记录的**谓词**：它挡住该座位的哪些技能实例（M6 票 04）。
+
+    ``ALL_NON_LOCKED`` = "其所有非锁定技失效"（【义绝】/【铁骑】的牌面用语）。
+    谓词是**座位级**的：一条记录覆盖该座位名下此刻与**此后获得**的全部非锁定技
+    （票面 D10 的"失效率不逐技能展开"）；锁定技不受它影响。用户裁定（票 09）：
+    这里的"技能"只指**武将技能**，装备牌 / 虚拟装备带来的技能不在其列。
+    """
+
+    ALL_NON_LOCKED = "all_non_locked"
+
+
+class SkillSuppression(_FrozenModel):
+    """一个座位的**失效记录**（M6 票 04）：``GLOSSARY.md``「技能失效」的实例形状。
+
+    ``skill_id`` = **施加失效的那条技能**的实例 id（【义绝】/【铁骑】）——不是被挡住的
+    技能；一条记录覆盖整个座位，故这里不会逐技能展开。"谁让它失效的"由这条技能实例的
+    持有者推出，不另存一个座位号。
+    """
+
+    skill_id: str
+    scope: SkillSuppressionScope = SkillSuppressionScope.TURN
+    predicate: SkillSuppressionPredicate = SkillSuppressionPredicate.ALL_NON_LOCKED
 
 
 class SlotKind(str, Enum):
@@ -87,10 +133,12 @@ class CardRef(_FrozenModel):
 
 
 class Zone(str, Enum):
-    """实体牌所在的区域种类（票 08 §1）。
+    """实体牌所在的区域种类（票 08 §1；M6 票 10 增 ``HERO``）。
 
     ``HAND`` / ``EQUIP`` / ``JUDGE`` 是**逐座位**的区，座位在 :class:`ZoneRef` 坐标里；
-    ``DECK`` / ``DISCARD`` / ``PROCESSING`` 是共享区。
+    ``DECK`` / ``DISCARD`` / ``PROCESSING`` 是共享区。``HERO``（武将牌上的牌）是**按
+    （座位, 技能实例）再分片**的逐座位区：座位答"扣在谁的武将牌上"，技能实例答"哪个技能
+    放的"（spec D14；同一座位可同时存在多个相互独立的放置区）。
     """
 
     DECK = "deck"
@@ -99,23 +147,99 @@ class Zone(str, Enum):
     PROCESSING = "processing"
     EQUIP = "equip"
     JUDGE = "judge"
+    HERO = "hero"
+
+
+class HeroCardZone(BaseModel):
+    """**武将牌上的一个放置区**（M6 票 10；`GLOSSARY.md`「武将牌上的牌」）。
+
+    区键 = （座位, 技能实例）：座位是 :class:`Player.hero_cards` 的宿主（扣在谁的武将牌
+    上，可跨座位），技能实例由字典的键回答（``owner:skill_id``，见
+    ``skills.hero_card_zone_key``）。**不同技能实例的区彼此独立**：牌的归还 / 可见性 /
+    附加效果都由各自的声明决定，不会串到别的区。
+
+    规则性质（`三国杀详细规则.txt` §十五）：这些牌是"移出游戏的牌"，不为任何角色所拥有、
+    不在手牌 / 装备 / 判定 / 牌堆 / 弃牌堆 / 处理区，故**不算手牌**、不计入手牌上限，
+    也不能被拆 / 顺指定。区在**失去技能时不受影响**（规则 15.2 明文），故这里的字段是
+    技能的**身份**（持有者 + 技能 id），不引用运行期 ``SkillInstance``（那个会随失去消失）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_id: str
+    """放置它的技能 id（全限定）——归还时机 / 附加效果按它查数据声明。"""
+
+    owner: int
+    """放置它的技能实例的**持有者**座位（归还的收件人；与宿主座位可不同）。"""
+
+    cards: list[int] = Field(default_factory=list)
+    """区里的实体牌 id（按置入序；与其它区域一样，列表就是区域的真源）。"""
+
+
+class CardTag(_FrozenModel):
+    """挂在一张牌上的**持久事实**（M6 票 09；spec D12 / §标签）。
+
+    形状 = **（标签类型、来源实例）**：标签类型是 ``sgs.data`` 的登记闭集
+    （:class:`~sgs.data.CardTagType`，四项声明住 :data:`~sgs.data.CARD_TAG_TYPES`）；
+    来源实例用 ``(owner, skill_id)`` 标识——载体解析（``resolve_instances``）按同一对字段
+    去重，故它是"哪一个技能实例"的规范身份，不随来源种类（武将牌 / 装备 / 获得）漂移。
+
+    **与所在区域无关**：标签存在 :attr:`GameState.card_tags` 里，不随牌移动被搬走或清掉；
+    牌在牌堆顶 / 手牌 / 弃牌堆都照样带着它。清除只由**登记表声明的触发**（:class:`CardTagClear`）
+    或"来源实例消失"（``disappears_with_source``）决定。
+
+    只挂在**实体牌**上（``card_id >= 0``）：虚拟牌从不进任何区域、也不持久存在。
+    """
+
+    tag_type: CardTagType
+    owner: int
+    """来源实例的持有者座位。"""
+
+    skill_id: str
+    """来源实例的技能 id（全限定，如 ``hero.jie_zhenji.luoshen``）。"""
+
 
 
 @dataclass(frozen=True, slots=True)
 class ZoneRef:
-    """**区域坐标**（票 08 §1）：区种类 + 座位。
+    """**区域坐标**（票 08 §1；M6 票 10 增第三个维度 ``skill_instance``）。
 
-    ``seat`` 只对 ``HAND`` / ``EQUIP`` / ``JUDGE`` 有意义，共享区为 ``None``。
+    ``seat`` 只对 ``HAND`` / ``EQUIP`` / ``JUDGE`` / ``HERO`` 有意义，共享区为 ``None``。
+    ``skill_instance`` 只对 ``HERO`` 有意义（放置技能的实例键；其余区为 ``None``）。
     坐标说的是"**区域**在谁那里"，不是"牌归谁"——判定区的牌坐标带座位，但牌本身
     仍"不为任何角色所拥有"（规则 11.6）；"归谁"由 :class:`CardMoveDelta.owner` 回答。
 
     冻结值类型（用 ``dataclass`` 而非 pydantic）：pydantic 把 stdlib dataclass 字段
     序列化成 ``{"zone": ..., "seat": ...}``（``seat`` 显式写出，含 ``null``），
     与 ``CardRef`` 的平铺形状一致，且允许位置构造 ``ZoneRef(Zone.HAND, 0)``。
+    第三个字段**只在武将牌上的牌区出现**：:data:`ZoneRefField` 的写出去掉 ``None`` 的
+    那一档，故非 ``HERO`` 区的记录字节与 M2 逐字相同。
     """
 
     zone: Zone
     seat: int | None = None
+    skill_instance: str | None = None
+
+
+def _zone_ref_wire(value: ZoneRef) -> dict[str, Any]:
+    """``ZoneRef`` 的记录形态：``zone`` / ``seat`` 恒写，``skill_instance`` 仅在 HERO 区写。
+
+    ``seat`` 显式写出（含 ``null``）是 M2 冻结口径（票 08 §7）；新增的第三维**不能**
+    让 47 条标准金录像多出一个 ``"skill_instance": null``——那会改既有记录字节，故这一档
+    只透出非 ``None`` 的实例键。
+    """
+    data: dict[str, Any] = {"zone": value.zone.value, "seat": value.seat}
+    if value.skill_instance is not None:
+        data["skill_instance"] = value.skill_instance
+    return data
+
+
+ZoneRefField = Annotated[ZoneRef, PlainSerializer(_zone_ref_wire, return_type=dict)]
+"""在**记录模型**（delta / 选择面槽位）里引用 :class:`ZoneRef` 的字段类型。
+
+序列化器只在这里挂（而不是把 ``ZoneRef`` 换成 pydantic 模型）：``ZoneRef`` 保持
+dataclass 的位置构造与冻结语义，字段形状仍在 ``models`` 一处声明。
+"""
 
 
 class MoveReason(str, Enum):
@@ -140,6 +264,17 @@ class MoveReason(str, Enum):
     "失去"一侧的判据与 :class:`MoveReason` 无关（``move_after`` 只看区域与移动后的持有），
     故 REFORGE 照常触发【连营】/【枭姬】；"弃置"类触发若出现，必须显式比较原因、把
     REFORGE 排除在外。事件流据此写「重铸」，不写「弃置」。
+    """
+
+    PINDIAN = "PINDIAN"
+    """拼点扣置（huo-taishici-xunyu 票 03）：手牌 → 处理区（扣置）→ 弃牌堆。
+
+    规则第十二章 12.2 L1323 / 12.7 L1372–L1374：拼点 = **因拼点失去一张牌**，
+    但拼点牌进入弃牌堆**不算「弃置」**。故它与 ``DISCARD``、``LOSE`` 都不同：
+
+    - 「失去牌后」类钩子（【连营】）按**区域**判、**不看** :class:`MoveReason`
+      （``skills/move_after.py`` 的中心纪律）⇒ 用最后一张手牌拼点照常触发【连营】；
+    - 「弃置」类触发必须显式把 ``PINDIAN`` 排除在外（比较 reason 的站点要逐条核）。
     """
 
 
@@ -178,6 +313,54 @@ class FrameKind(str, Enum):
     MAXLIFE = "MAXLIFE"
     RANK_COMPARE = "RANK_COMPARE"
     SKILL = "SKILL"
+    REJUDGE = "REJUDGE"
+    """**改判事件帧**（feng-zhangjiao 票 02）：一次"用一张牌代替 / 替换判定牌"。
+
+    用户 2026-11-02 裁定：改判**不是打出**（打出只发生在"手牌 → 处理区"的牌响应里，
+    界【鬼才】/【鬼道】允许拿**装备区**的牌，而装备区的牌根本不能打出）。故它有自己的
+    事件帧：帧内两段移动（新牌 → 处理区成为判定牌；原牌 → 弃牌堆（**代替**）/
+    改判者手牌（**替换**）），不派发任何"打出时 / 使用后"钩子。帧私有载荷：
+    ``subject`` / ``seat`` / ``skill_id`` / ``old`` / ``new`` / ``original_to``。
+    """
+
+
+LIFE_DECREASE_DAMAGE_KEY = "life_decrease_from_damage"
+"""``FrameKind.LIFE_DECREASE`` 帧的**来源判据**（实机报障 2026-10-31）：``True`` = 这次体力
+扣减是**伤害**带来的，**不是**「失去体力」。
+
+官方把「受到伤害」与「失去体力」当两件事：伤害链里确实压一次 ``LIFE_DECREASE`` 子帧（L8 的
+三个时机照常派发），但那是"扣减体力"，不是「失去体力」。挂在 ``LIFE_DECREASE_AFTER`` 的技能
+（界黄盖【诈降】）必须读这个键把两者分开——只按时机挂会让"被打 1 点"触发"失去 1 点体力后"
+（用户实机复现的原样）。
+
+缺省（没有这个键）= 真正意义上的「失去体力」：【苦肉】/【反间】这类技能自己压的帧。
+帧私有载荷不进记录流，故这条判据不改变任何金录像的字节。
+"""
+
+
+class Marker(_FrozenModel):
+    """一个座位身上的**标记实例**（票 06；用户 Q6 裁定）。
+
+    字段 = 名称 / 来源（座位 + 全限定技能 id）/ 数量 / 上限 / 效果 / 效果说明 + 寿命策略。
+    名字用中文（「梦魇」这类），**没有 id**；同一目标上 `(name, source_seat,
+    source_skill_id)` 相同的标记合并成一条，来源不同则分列。标记不是牌：不进任何区域、
+    不计手牌数 / 上限，不能被拆 / 顺 / 无懈；失去技能不移除（规则 §14.3）。
+
+    ``effect`` / ``description`` 本批只存不接线（梦魇都为空；将来大雾一类"标记自身效果"
+    需要标记驱动的派发，另行开票）。``clear_on_source_death`` 是寿命策略（梦魇 True）：
+    来源座位身死时与死者的弃牌同一钩子清空；目标身死则无条件清空（规则 §14.4 / 用户规则 7）。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    source_seat: int
+    source_skill_id: str
+    count: int = Field(ge=1)
+    max_count: int | None = None
+    effect: str | None = None
+    description: str | None = None
+    clear_on_source_death: bool = False
 
 
 class Player(BaseModel):
@@ -189,26 +372,137 @@ class Player(BaseModel):
     hp: int
     hp_max: int
     alive: bool = True
+    death_time_skills_active: bool = False
+    """死亡时技能窗口（票 10）：死者本人的技能在阵亡结算里**暂时**可解析。
+
+    ``alive=False`` 仍在死亡入口立即落（胜负 / 距离 / 人数必须看见死者）；本字段只把
+    "技能可解析"从"活着"里拆出来：死亡段在「阵亡时」空节点把它置真、在「失去技能」收尾
+    置假（`DEATH_ON` / `DEATH_AFTER` 与官方弃牌 / 奖惩在窗口内）。窗口只对**当前死亡者**
+    打开；先前死亡者在各自收尾已关窗，仍静默。
+
+    读点只有 :func:`sgs.skills.resolve_instances` 的实例过滤（以及它的缓存键）；不发
+    delta、不进投影 / 记录流——它不是可见状态，只是解析期的一次窗口。
+    """
+    markers: tuple[Marker, ...] = ()
+    """座位身上的**标记实例**（票 06；用户 Q6 裁定）。
+
+    按插入序（同种子逐字节复现）；同一 `(name, source_seat, source_skill_id)` 合并成一条。
+    公开信息（显示在目标武将牌上），但**不进记录流**（投影 `exclude`），变化经
+    ``marker_change`` delta 下发；阵亡清点在 :meth:`Engine.discard_dead_cards`（死亡弃牌
+    同一钩子）。标记不是牌，故不在任何 ``Zone`` 里。
+    """
     hand: list[int] = Field(default_factory=list)
     equip: list[int] = Field(default_factory=list)
     """装备区（一个整体区）；列表序 = 槽位枚举序（票 12 §Q2），每槽至多一张。"""
     judge: list[int] = Field(default_factory=list)
     """判定区（**先入在前**）；"最后置入"的读取端用 ``reversed()`` 表达（票 08 §8）。"""
+    hero_cards: dict[str, HeroCardZone] = Field(default_factory=dict)
+    """**武将牌上的牌**的全部放置区（M6 票 10；spec D14）：区键 → 区。
+
+    区键 = 放置技能的**实例键** ``owner:skill_id``（``skills.hero_card_zone_key`` 是唯一
+    派生处）：座位 = 这张武将牌的主人（扣牌的目标，可跨座位），键里的 ``owner`` = 放置技能
+    的持有者。字典按插入序（同种子逐字节复现），空区**保留**（规则 15.2：失去技能不影响
+    武将牌上的牌，区本身不随一次归还消失；再次放置进同一个键）。
+
+    这些牌**不在手牌区**，故手牌数 / 手牌上限 / 拆顺的候选都自动不含它们（票面验收）。
+    写入唯一入口 :meth:`Engine.place_on_hero_card`；回合末归还由
+    :meth:`Engine.return_hero_card_zones` 按数据声明做，阵亡清区在
+    :meth:`Engine.discard_dead_cards`。
+    """
     chained: bool = False
     """是否横置（铁索连环）。
 
     U1-04 先落座位字段；**M5-03 接线**：写入唯一入口是 ``Engine.set_chained``（铁索连环的
     toggle 与属性伤害的"结算后立即重置"），每次变化发一条 ``chained_change`` delta。
     """
+    flipped: bool = False
+    """武将牌是否**背面朝上**（翻面；票 1 的翻面机制）。
+
+    与 :attr:`chained` 是**两个独立状态**（规则集 13.1 / 13.3：横置管属性伤害连环、翻面管
+    跳过回合，可以同时存在）。写入唯一入口 ``Engine.set_flipped``，每次变化发一条
+    ``flipped_change`` delta。读点两处：回合环的"回合开始前"——背面朝上的角色在那里
+    翻回正面，然后**整个回合被跳过**（规则集 13.2）；以及 AI 的【据守】打分器（票 22：
+    已翻面 ⇒ 这次翻面是翻回正面、不跳回合 ⇒ 恒发动；正面 1 体力 ⇒ Pass）。
+    """
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
     每次变化发一条 ``wine_change`` delta）。"""
+    luoyi_active: bool = False
+    """【裸衣】的"本回合【杀】/【决斗】伤害 +1"是否生效（M6 票 01）。
+
+    写入唯一入口 ``Engine.set_luoyi_active``（许褚的摸牌阶段写入、回合末清空）；读点是
+    :func:`sgs.skills.phase_body._luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT`` 回调。
+    **不发 delta**：与 ``wine_active`` 不同，目前没有任何 JSON 读者（网页座位卡不读它、
+    记录流不写它），回放按同一条 ``SKILL_ACTIVATION`` 动作重跑即可重建；等出现 UI 读取方
+    时再补 ``luoyi_change`` delta（同时要登记 no-leak 判据）。
+    """
+    luoyi_until_next_turn: bool = False
+    """界【裸衣】的"直到你的下个回合开始【杀】/【决斗】基础伤害 +1"是否生效（M6 票 14）。
+
+    与标准版【裸衣】（``luoyi_active``）**分字段**：两者作用域不同——标准版到**本回合结束**，
+    界版到**你的下个回合开始**（§十九 L2051–L2055），故不能共用"回合末清空"的清理点。
+    写入唯一入口 ``Engine.set_luoyi_until_next_turn``（界许褚的摸牌阶段写入）；清理点 =
+    该座位自己的 ``TURN_START``（:meth:`Engine._turn_start`）——那正是"你的下个回合开始"。
+    读点是 :func:`sgs.skills.phase_body._jie_luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT``
+    回调。**不发 delta**：与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一条
+    ``SKILL_ACTIVATION`` 动作重跑即可重建）。
+    """
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 
     只存总已用次数：额定 / 额外两个上限记在行为表里，M1 的判定只用总数（票 07 §6）。
     键通常是牌型 id，也可以是行为表声明的**共用键**（M5-02：普通【杀】/ 火【杀】/
     雷【杀】共用 ``"slash"``）；读写的唯一真源是 ``CardBehavior.count_key``。
+    """
+    slash_in_play_phase: bool = False
+    """本回合**出牌阶段内**是否使用或打出过【杀】（M6 票 03 的【克己】）。
+
+    写在**当前回合角色自己的出牌阶段**里（``Engine.start_use`` 的"使用"与
+    ``Engine.play_card`` 的"打出"两个入口）：判据是牌面事实（``is_slash``，火 / 雷 /
+    转化 / 虚拟【杀】同族）∧ ``state.phase is Phase.PLAY`` ∧ ``source == state.turn_seat``。
+    复位点是 :meth:`Engine._phase_play_start`（每个出牌阶段开始时清掉，被【乐不思蜀】
+    跳过时也清），故"本阶段"的作用域不跨回合。
+
+    **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，记录流里的使用 / 打出
+    动作已足以在回放时重建它。
+    """
+    zhaxiang_active: bool = False
+    """界黄盖【诈降】的"本阶段"效果是否生效（M6 票 17；§十九 L2164–L2167）。
+
+    牌面："然后若此时是你的出牌阶段，你本阶段：使用红色【杀】无距离限制且不能被【闪】
+    响应、使用【杀】的次数上限 +1。"写入唯一入口 ``Engine.set_zhaxiang_active``（诈降的
+    ``LIFE_DECREASE_AFTER`` 钩子在"此刻是我的出牌阶段"时置位）；**清理点 = 出牌阶段结束**
+    （:meth:`Engine._phase_play_end`，``_phase_play_start`` 再兜一次）——与
+    ``slash_in_play_phase`` 的"阶段起点复位"不同："本阶段"的效果必须在阶段**结束**就消失，
+    否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到这三条加成。
+
+    读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_POOL`` / ``COUNT_LIMIT`` /
+    ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
+    """
+    tianyi_won: bool = False
+    tianyi_lost: bool = False
+    """太史慈【天义】的"本阶段"拼点结果（huo-taishici-xunyu 票 01；两条互斥的座位布尔）。
+
+    ``tianyi_won`` = 拼点**赢**（三条加成生效：次数上限 +1 / 无距离限制 / 目标数上限 +1）；
+    ``tianyi_lost`` = **没赢**（平点也算没赢）⇒ 本阶段不能**使用**【杀】（仍可**打出**）。
+    两个都为假 = 本阶段尚未发动。
+
+    写入唯一入口 ``Engine.set_tianyi_state(seat, won)``；**清理点 = 出牌阶段结束**
+    （:meth:`Engine._phase_play_end`，``_phase_play_start`` 再兜一次）——与
+    ``zhaxiang_active`` 同一作用域（牌面写"然后你本阶段根据拼点结果获得对应效果"）。
+    读点是 :mod:`sgs.skills.active` 的三条修饰器回调。**不发 delta**：与
+    ``zhaxiang_active`` 同姿态（没有 JSON 读者，回放按同一次拼点重建）。
+    """
+    damage_dealt_this_turn: bool = False
+    """本回合是否**造成过伤害**（M6 票 06 的【诛害】判据：§十九 L2127–L2129）。
+
+    写入唯一入口 :meth:`Engine.note_damage_dealt`（伤害数值定稿且 > 0、未被防止、
+    有来源时由伤害帧调一次）；作用域 = **本回合**，回合末由
+    :meth:`Engine._clear_turn_effects` 把所有座位的这一位清掉。判据是"本回合**造成过**
+    伤害"而不是"最近一次伤害的来源"，故一次成立即保持到回合末。
+
+    **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，回放按同一条伤害结算
+    重建（本字段不进记录流）。
     """
     identity: Identity | None = None
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。
@@ -250,6 +544,65 @@ class Player(BaseModel):
     `装备区` 只放实体牌，`已装备` = 实体装备 ∪ 虚拟授予（由 ``skills.is_equipped`` 求并集）。
     M2 没有生产者（【八阵】类技能属 M3），字段是接口位。
     """
+    granted_skills: list[str] = Field(default_factory=list)
+    """**获得**的技能 id（第四种技能来源，M6 票 04；`GLOSSARY.md`「技能来源」）。
+
+    与装备区 / 虚拟授予 / 武将牌三种载体并列，由 :meth:`Engine.grant_skill` 写入；
+    载体解析读它产出 ``SkillSourceKind.GRANTED`` 实例。M6 没有"获得技能"的武将
+    （觉醒技的 ☆ 技能由票 06 用同一个入口授予），故本票只以构造测试钉住形状。
+    """
+    lost_skills: list[str] = Field(default_factory=list)
+    """**已失去**的技能 id（M6 票 04；`GLOSSARY.md`「技能失去」）。
+
+    失去 = 实例**不再存在**且不可恢复：载体解析在去重之后减去这一份，故武将牌上的技能
+    清单一字未动、实例照样不产出，连续型效果（距离 / 目标池）随之消失。写入唯一入口
+    :meth:`Engine.lose_skill`；M6 无载体（断肠 / 左慈留给后续里程碑）。
+    """
+    suppressed_skills: list[SkillSuppression] = Field(default_factory=list)
+    """**失效**记录（M6 票 04；`GLOSSARY.md`「技能失效」）：座位级的条件记录。
+
+    载体解析的最后一道：实例仍在，但被谓词挡在解析之外（不产出候选、不进修饰器链、
+    不触发钩子）；作用域到期后恢复。失效率是**座位级**的，一条记录覆盖该座位此后获得的
+    非锁定**武将**技能（装备牌 / 虚拟装备带来的技能不失效，用户裁定票 09）；锁定技不受
+    ``ALL_NON_LOCKED`` 影响。写入唯一入口 :meth:`Engine.suppress_skills`，回合末由
+    ``Engine._clear_turn_effects`` 清掉。
+    """
+    hand_card_prohibited: bool = False
+    """本回合**不能使用或打出手牌**（M6 票 04 的【义绝】黑色分支）。
+
+    座位级、回合末清理；候选生成在 :func:`sgs.effects.legal_actions_for` 的**唯一**闸门里
+    读它（使用 / 打出的候选按来源区过滤，弃置 / 重铸等不是"使用或打出"的动作照常）。
+    **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条技能动作重跑即可重建。
+    """
+    heart_slash_bonus_against: list[int] = Field(default_factory=list)
+    """本回合"**你使用红桃【杀】对其造成的伤害 +1**"的目标座位（【义绝】黑色分支）。
+
+    由 :meth:`Engine.add_heart_slash_bonus` 追加、回合末清空；读取方是【义绝】技能定义上的
+    ``DAMAGE_DEAL_AMOUNT`` 修饰器（查询期从活着的实例算，失去 / 失效即消失）。**不发
+    delta**：与 ``hand_card_prohibited`` 同一条理由。
+    """
+    paoxiao_bonus: bool = False
+    """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。
+
+    写入唯一入口 :meth:`Engine.set_paoxiao_bonus`：自己使用的【杀】被【闪】抵消时置真、
+    那次伤害结算完（``DAMAGE_AFTER_TAKE``，伤害 > 0）置假；回合末与下一回合起点各清一次
+    （与【酒】/【裸衣】同一收尾点）。这是 D9 的**一次性效果**：作用座位 = 自己、增量固定、
+    过期 = 回合末，**不随技能实例存亡撤回**（故住座位而不是 ``skill_state``）。
+    **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条【闪】的应答重建。
+    """
+    hand_limit_bonus: int = 0
+    """本回合**手牌上限的加式增量**（M6 票 08；spec D11 / D9 的第二轴）。
+
+    写入唯一入口 :meth:`Engine.add_hand_limit_bonus`（【清俭】作用于**当前回合角色**，
+    【集智】作用于自己）；读取方是 :func:`sgs.effects.hand_limit` 的加式段。形状 =
+    D9 的**一次性效果**（作用座位、增量、过期 = 回合末）：增量住**座位**、不随来源技能
+    的失去 / 失效撤回，回合末由 :meth:`Engine._clear_turn_effects` 清空。
+
+    作用座位就是**落增量时**的 ``state.turn_seat``（【清俭】）/ 技能持有者本人（【集智】），
+    此后**不再重定向**：当前回合角色中途阵亡时，增量仍记在那个座位名下（死者不再弃牌，
+    读不到它），回合末与其它 ``TURN`` 作用域的状态一起清掉。**不发 delta**：与
+    ``paoxiao_bonus`` 同姿态——没有 JSON 读者，回放按同一条技能动作重建。
+    """
 
 
 class GameState(BaseModel):
@@ -279,13 +632,127 @@ class GameState(BaseModel):
     """
     turn_seat: int | None = None
     phase: Phase | None = None
+    round: int = 1
+    """当前**轮次**（M6 票 11；spec D13 / §回合与轮次）：自然回合转完一圈 +1，从 1 起。
+
+    "轮"是 M6 新立的概念：`三国杀详细规则.txt` §三 3.8 把它定成"从当前回合角色开始，
+    经过其余角色各一个回合、再次回到当前回合角色之前"。自然指针
+    （:attr:`next_seat`）只在**非额外回合**结束时前进，回到本轮起始座位
+    （:attr:`round_start_seat`）时轮次 +1——额外回合因此不会刷新「每轮限 X 次」。
+
+    只有「每轮限 X 次」的技能读它（M6 = 界吕蒙【博图】），但**记录流只在有读者时**才落
+    ``turn_change``（见该 delta 的注释）：没有读者时轮次不改变任何规则结果，
+    标准 47 条金录像因此逐字节不变。
+    """
+
+    round_start_seat: int | None = None
+    """本轮**起始座位**（轮次判据的锚点；``None`` = 还没定，人为局面从当前回合起算）。
+
+    判据不是"回到它"而是"自然指针在座位环上**转过**它"：本轮起点座位可能在本轮中途
+    阵亡，那时"回到它"永远不会发生、轮次会卡死；越过它同样意味着这一圈走完了
+    （:meth:`Engine._advance_turn`）。
+    """
+
+    next_seat: int | None = None
+    """**自然指针**：下一个**自然**回合的座位（M6 票 11 / spec D13）。
+
+    只在**非额外回合**结束时前进（:meth:`Engine._advance_turn`）：额外回合出栈接管时它
+    一动不动，故"额外回合插在自然下家之前"而不是把它挤掉。``None`` = 第一个回合还没结束。
+    """
+
+    turn_extra: bool = False
+    """当前回合是不是**额外回合**（M6 票 11）。
+
+    回合结束时据此决定自然指针要不要前进：额外回合结束**不**推进它，否则额外回合会被
+    当成"又走了一圈"，把「每轮限 X 次」无限刷新。
+    """
+
+    extra_turns: list[int] = Field(default_factory=list)
+    """**额外回合待执行栈**（M6 票 11 / spec D13）：回合结束时压入，下个回合开始时弹出。
+
+    显式栈而不是"插队改 turn_seat"：压栈点与接管点因此各只有一处，且额外回合可以连续
+    叠加（X > 1 时同一轮里能连拿几个）。弹出顺序 = **LIFO**（最后压入的那个紧接当前
+    回合，官方"插在当前回合之后"的直读）；轮到已阵亡的座位时直接丢弃（没有它的回合）。
+    """
+
+    round_use_counts: dict[str, int] = Field(default_factory=dict)
+    """**本轮**的「每轮限 X 次」已用次数（M6 票 11）：实例键 → 次数。
+
+    与 :attr:`skill_state` 的位图分列而不是再挤一位：位图存"有没有用过"，而每轮限次是
+    **计数**（X 可以大于 1，【博图】的 X = 存活角色数且至多 3），一位表达不了。键 = 实例键
+    （``skills.instance_key``，与 ``skill_state`` 同一套身份）；写入口
+    ``skills.mark_round_skill_used``，读入口 ``skills.round_skill_uses``，
+    **唯一复位点** = 轮次 +1（``skills.reset_round_skill_state``）——额外回合不经过它，
+    故额外回合不会刷新每轮次数（票面核心反例）。**不发 delta**：每轮次数可由记录流里的
+    ``turn_change``（轮次）+ 发动动作重放重建，且它没有任何 JSON 读者。
+    """
+
+    discard_suits_this_turn: list[str] = Field(default_factory=list)
+    """**本回合**置入弃牌堆的牌出现过的花色（M6 票 11 的【博图】判据；按首次出现序、去重）。
+
+    判据的读取方只有一处：界吕蒙【博图】"若本回合置入弃牌堆的牌中包含四种花色"。裁定
+    （`06`（§5「程序化约定与偏离一手」））是**计入本回合所有来源置入的牌**——阵亡者清区、
+    主公杀忠臣的弃置、【铁索】重铸、判定牌入弃牌堆……都算，故写入点在**搬牌原语**
+    （:func:`sgs.effects.move_card`）里，而不是各调用点自己记：少了那一道，任何一条没接上
+    的来源都会让技能静默不发动。复位点 = 下一个回合的 ``TURN_START``（额外回合也各有一份：
+    作用域 = **一个回合**，不是一轮）。
+    """
+
+    def note_discard_suits(self, cards: Iterable[CardRef]) -> None:
+        """记下这一批**进入弃牌堆**的牌的花色（M6 票 11 的唯一写入口）。
+
+        按首次出现序去重（本项目禁无序容器参与顺序，源码纪律 §3）；花色为空（纯虚拟牌）
+        的牌不占位——它们从不进弃牌堆。
+        """
+        for card in cards:
+            suit = card.suit
+            if suit is not None and suit not in self.discard_suits_this_turn:
+                self.discard_suits_this_turn.append(suit)
+
     skill_state: dict[str, int] = Field(default_factory=dict)
-    """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 计数（如"已用次数"）。
+    """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 位图（"已用次数"等）。
 
     实例键 = ``(owner, skill_id, source)`` 的规范文本（``skills.instance_key``）；
-    来源消失（装备离场）时由 ``skills.prune_skill_state`` 清理。M2 的 17 条装备没有
-    持久状态，故本字段实际恒空——它是"M3 只许增"的接口位，形状在此钉死。
+    位布局住 :mod:`sgs.skills.catalog`（唯一声明处）：低位是 A 族**本出牌阶段**的阶段位
+    （``PHASE_PLAY_START`` 只清它们），高位是限定技的**整局已用**位（永不随阶段复位）。
+    来源消失（装备离场 / 技能失去）时由 ``skills.prune_skill_state`` 清理——暂时失效不算
+    来源消失；M2 的 17 条装备没有持久状态，故本字段实际恒空。
     """
+    card_tags: dict[int, tuple[CardTag, ...]] = Field(default_factory=dict)
+    """**牌标签**：``card_id → 该牌上的标签（按加入序）``（M6 票 09；spec D12）。
+
+    标签是**牌**的持久事实、**与区域无关**（:class:`CardTag` 的注释）：牌从手牌进弃牌堆，
+    标签不会被搬走或清掉。主键是实体牌 id（虚拟牌恒不带标签），值一律用 ``tuple`` 保序、
+    不用 ``set``（同种子逐字节复现，源码纪律 §3）。
+
+    **不进记录流**（门票 09 未分配 delta）：回放按同一条技能决策重跑即可重建；写入唯一入口
+    :meth:`~sgs.engine.Engine.add_card_tag`，清除走声明触发的唯一入口
+    :meth:`~sgs.engine.Engine.clear_card_tags` 与 ``skills.prune_card_tags``。
+    """
+    drawn_true_names: tuple[str, ...] = ()
+    """**已被抽走**的武将牌真名（票 05；票 02 §4.5 E1）：从武将牌堆抽走、本局不再可抽的那部分。
+
+    只存"抽走"这**一半**；"在场"那一半由 :func:`sgs.skills.blocked_true_names` 从座位
+    派生——座位上的真名不需要存（阵亡在死亡结算收尾后自动解除），而被抽走的必须存
+    （否则重入会重抽、左慈也没法解除）。
+
+    顺序 = **抽走序**（插入序、去重），故同种子逐字节复现。**不进记录流、不发 delta**：
+    没有 JSON 读者，回放按同一份决策序列重跑引擎即可重建。写入 / 释放的唯一入口是
+    :meth:`~sgs.engine.Engine.note_drawn_true_name` /
+    :meth:`~sgs.engine.Engine.release_drawn_true_name`。
+
+    **没有任何初始化点**（E5）：无武将模式 ⇒ 恒空元组 ⇒ M2 基准逐字节不变；有武将的
+    座位同样不写它（在场是派生出来的，见上）。
+    """
+
+    def tags_of(self, card_id: int) -> tuple[CardTag, ...]:
+        """一张牌上的全部标签（没有 = 空元组，按加入序）。"""
+        return self.card_tags.get(card_id, ())
+
+    def has_card_tag(self, card_id: int, tag_type: CardTagType) -> bool:
+        """这张牌有没有某个**类型**的标签（读取方的唯一谓词）。"""
+        return any(tag.tag_type is tag_type for tag in self.tags_of(card_id))
+
 
     def player(self, seat: int) -> Player:
         return self.players[seat]
@@ -306,7 +773,10 @@ class GameState(BaseModel):
     def zone(self, ref: ZoneRef) -> list[int]:
         """区域坐标 → 该区域的 ``card_id`` 列表（唯一入口，原语只经它改区域）。
 
-        共享区（牌堆 / 弃牌堆 / 处理区）忽略座位；逐座位的三个区必须给出座位。
+        共享区（牌堆 / 弃牌堆 / 处理区）忽略座位；逐座位的区必须给出座位；武将牌上的牌区
+        还必须给出**技能实例**（区键的第二维，缺了会落进"同一张表"、把两个技能的区串了）。
+        区**必须先存在**（放置入口 :meth:`Engine.place_on_hero_card` 建区）——目的地不存在
+        时在这里 fail-closed，而不是悄悄造一个没有技能身份的区。
         """
         if ref.zone is Zone.DECK:
             return self.deck
@@ -323,4 +793,25 @@ class GameState(BaseModel):
             return player.equip
         if ref.zone is Zone.JUDGE:
             return player.judge
+        if ref.zone is Zone.HERO:
+            if ref.skill_instance is None:
+                raise ValueError(
+                    "武将牌上的牌区按技能实例独立，区域坐标必须带 skill_instance"
+                )
+            zone = player.hero_cards.get(ref.skill_instance)
+            if zone is None:
+                raise ValueError(
+                    f"座位 {ref.seat} 的武将牌上没有 {ref.skill_instance!r} 这个放置区"
+                    "（先由 Engine.place_on_hero_card 建立）"
+                )
+            return zone.cards
         raise ValueError(f"未知区域：{ref.zone!r}")
+
+    def hero_zone(self, seat: int, skill_instance: str) -> tuple[int, ...]:
+        """座位 ``seat`` 的武将牌上、``skill_instance`` 那个区里的牌（没有该区 = 空元组）。
+
+        读访问器（不建区、不变状态）：投影（票 19）与构造局面测试都经它读，不必知道
+        ``hero_cards`` 的内部形状。
+        """
+        zone = self.player(seat).hero_cards.get(skill_instance)
+        return () if zone is None else tuple(zone.cards)

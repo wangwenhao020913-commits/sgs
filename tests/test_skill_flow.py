@@ -24,7 +24,7 @@ import pytest
 
 from sgs.data import load_content_pack
 from sgs.engine import Engine
-from sgs.effects import legal_actions_for
+from sgs.effects import EffectContext, legal_actions_for, move_card
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.active import ActiveSkill
 from sgs.skills.preactivation import _build_flows, preactivated_skill_ids
@@ -34,10 +34,12 @@ from sgs.skills.flow import (
     DeckTopArrange,
     FixedSplit,
     PickCards,
+    PickOption,
     PickProvide,
     PickSeats,
     SkillFlow,
     _flow_step_cards,
+    _flow_step_option,
     manifest,
     run_flow,
     validate_flow_activation,
@@ -48,6 +50,7 @@ from sgs.state import (
     ArrangeCards,
     ArrangeContext,
     FrameKind,
+    MoveReason,
     Pass,
     QueryKind,
     SelectCards,
@@ -258,6 +261,11 @@ def test_run_flow_needs_an_integer_owner_and_reads_the_frame_source_by_default()
             return value == "SUSPEND"
 
         @staticmethod
+        def accepted_selection(frame, *, owner, key):
+            del frame, owner, key
+            return None  # 夹具不模拟续跑：这一问还没答过
+
+        @staticmethod
         def selection_face(seat, zones, *, reveal_hand):
             del reveal_hand
             slots, card_ids = [], []
@@ -268,7 +276,10 @@ def test_run_flow_needs_an_integer_owner_and_reads_the_frame_source_by_default()
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+        def ask_selection(
+            frame, *, owner, key, actor, timing, spec, build_face,
+            revealed=(), ask_when_empty=False,
+        ):
             del frame, owner, key, timing, spec
             build_face()
             seen["actor"] = actor
@@ -385,6 +396,11 @@ def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
             return value == "SUSPEND"
 
         @staticmethod
+        def accepted_selection(frame, *, owner, key):
+            del frame, owner, key
+            return None  # 夹具不模拟续跑：这一问还没答过
+
+        @staticmethod
         def selection_face(seat, zones, *, reveal_hand):
             del reveal_hand
             slots, card_ids = [], []
@@ -395,7 +411,10 @@ def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+        def ask_selection(
+            frame, *, owner, key, actor, timing, spec, build_face,
+            revealed=(), ask_when_empty=False,
+        ):
             del frame, owner, key, actor, timing
             slots, _card_ids = build_face()
             seen["total"] = spec.total
@@ -449,6 +468,11 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
             return value == "SUSPEND"
 
         @staticmethod
+        def accepted_selection(frame, *, owner, key):
+            del frame, owner, key
+            return None  # 夹具不模拟续跑：这一问还没答过
+
+        @staticmethod
         def selection_face(seat, zones, *, reveal_hand):
             del reveal_hand
             slots, card_ids = [], []
@@ -459,7 +483,10 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+        def ask_selection(
+            frame, *, owner, key, actor, timing, spec, build_face,
+            revealed=(), ask_when_empty=False,
+        ):
             del frame, owner, key, actor, timing
             slots, _card_ids = build_face()
             seen["total"] = spec.total
@@ -1320,3 +1347,548 @@ def test_a_synthetic_fixed_split_consumer_runs_the_arrange_step():
         )
         == 1
     ), "重入命中 ask_arrange 的帧内缓存，不重发询问"
+
+
+# ---------------------------------------------------------------------------
+# ⑧ PickOption.revealed（票 01 自制包）：选项步把观看授予透传给引擎
+# ---------------------------------------------------------------------------
+
+
+def test_pick_option_forwards_the_revealed_grant():
+    """``PickOption.revealed`` 原样传给 ``Engine.ask_option``（票 01，【义起】的观看+三选一）。
+
+    观看授予是"先看到这几张牌，再点一项"的**同一问**：执行器若不透传，弹窗里就没有牌面，
+    玩家只能盲选类型。定值档与可调用档各验一次（用户裁定的观看张数是**现算**的，
+    故可调用档才是真路径）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+    )
+    watched = (state.card(state.deck[0]), state.card(state.deck[1]))
+    seen: dict[str, object] = {}
+
+    class _Host:
+        def __init__(self) -> None:
+            self.state = state
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def accepted_option(frame, *, skill_id, actor):
+            del frame, skill_id, actor
+            return None  # 夹具不模拟续跑：这一问还没答过
+
+        @staticmethod
+        def ask_option(
+            frame, actor, timing, *, skill_id, options, optional=False, revealed=(),
+        ):
+            del frame, actor, timing, skill_id, options, optional
+            seen["revealed"] = tuple(card.card_id for card in revealed)
+            return _Choice()
+
+    class _Choice:
+        choice = "a"
+
+    host = _Host()
+    fixed = PickOption(options=("a", "b"), optional=False, key="type", revealed=watched)
+    _flow_step_option(host, _Frame(source=0), fixed, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 0))
+    assert seen["revealed"] == tuple(card.card_id for card in watched)
+
+    dynamic = PickOption(
+        options=("a", "b"),
+        optional=False,
+        key="type",
+        revealed=lambda _state, _frame, _owner, _answers: watched,
+    )
+    _flow_step_option(host, _Frame(source=0), dynamic, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 1))
+    assert seen["revealed"] == tuple(card.card_id for card in watched), "可调用档也现算透传"
+
+
+# ---------------------------------------------------------------------------
+# ⑨ PickOption.disabled（票 04 §3）：选项**显示但不可选**
+# ---------------------------------------------------------------------------
+
+
+def _option_flow(*, options, disabled=()):
+    """一条"选一项"的探针流水线（票 04 §3 的置灰通道：清单 + 校验器各读一份）。"""
+    captured: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        captured.update(answers)
+        return None
+
+    flow = SkillFlow(
+        name="option_probe",
+        steps=(
+            PickOption(options=options, disabled=disabled, optional=False, key="name"),
+        ),
+        effect=effect,
+    )
+    return flow, captured
+
+
+def test_manifest_renders_the_disabled_options_of_a_row():
+    """``PickOption.disabled`` 进 ``StepPool.disabled``：选项**在候选里**但不可选。
+
+    置灰与"不在候选里"是两件事：界要把名字**列出来**（"此刻没有合法目标"是一条提示），
+    而合法性仍由候选集合回答。故 ``options`` 恒为全量闭集，``disabled`` 只多带一份"这些
+    点不动"。读取方 = 前端 ``preactivation.js`` 的选项按钮（见 ui_smoke 的合成载荷）。
+    """
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow, _captured = _option_flow(options=("a", "b", "c"), disabled=("b",))
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[0].pool == (
+        StepPool(when=(), options=("a", "b", "c"), disabled=("b",)),
+    )
+
+
+def test_manifest_keeps_the_full_option_set_when_every_option_is_disabled():
+    """全被置灰也**不**退化成"没有清单"：清单照样下发，界面照旧列出名字（都是灰的）。"""
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow, _captured = _option_flow(options=("a", "b"), disabled=("a", "b"))
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[0].pool == (
+        StepPool(when=(), options=("a", "b"), disabled=("a", "b")),
+    )
+
+
+def test_the_disabled_payload_is_omitted_when_the_row_has_none():
+    """没有置灰项 ⇒ ``disabled`` **不进序列化**（与 ``StepPool.max`` 同一姿态）。
+
+    清单里绝大多数行都没有置灰项，恒发一个空数组会改掉既有载荷的字节形状。
+    """
+    step = Step(name="name", min=1, max=1, order=0, pool=(StepPool(options=("a",)),))
+
+    row = step.model_dump(mode="json")["pool"][0]
+
+    assert "disabled" not in row
+    grayed = Step(
+        name="name",
+        min=1,
+        max=1,
+        order=0,
+        pool=(StepPool(options=("a",), disabled=("b",)),),
+    ).model_dump(mode="json")["pool"][0]
+    assert grayed["disabled"] == ["b"]
+
+
+def test_validate_activation_rejects_a_disabled_option():
+    """置灰选项**不许靠界面挡**：校验器 fail-closed，与候选同源。
+
+    复合动作是"提交即接受"的通道（不看 ``legal_actions``），故"点不动"必须在这里也成立——
+    否则改一个前端状态就能提交一个"此刻用不了"的声明。
+    """
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow, captured = _option_flow(options=("a", "b"), disabled=("b",))
+
+    error = validate_flow_activation(flow, state, 0, (), ("b",))
+
+    assert error is not None and "b" in error, f"置灰选项必须被拒（首个原因）：{error}"
+    assert captured == {}, "被拒的动作一个副作用都不产生"
+    assert validate_flow_activation(flow, state, 0, (), ("a",)) is None
+
+
+def test_the_disabled_set_is_recomputed_from_the_prior_answers():
+    """可调用档按**前序答案**现算（与 ``options`` 同形态）：蛊惑的牌名步就是这一档。
+
+    同一张牌名闭集在不同来源牌下"能不能用"不同（产物继承来源牌的花色 / 点数 ⇒ 目标池
+    会变），故置灰项必须与候选**同一条链路**：清单渲染、校验、界面三处读同一份解析结果。
+    """
+    card = _cards("slash")[0]
+
+    def disabled(state, frame, owner, answers):
+        del state, frame, owner
+        return ("b",) if answers["prior"] == (card,) else ()
+
+    def options(state, frame, owner, answers):
+        del state, frame, owner
+        return ("a", "b")
+
+    flow = SkillFlow(
+        name="option_probe_dynamic",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="prior"),
+            PickOption(
+                options=options,
+                disabled=disabled,
+                optional=False,
+                key="name",
+            ),
+        ),
+        effect=_noop,
+    )
+    state = _manifest_state(hand=(card,))
+
+    steps = manifest(flow, state, 0)
+
+    assert [(row.options, row.disabled) for row in steps[1].pool] == [
+        (("a", "b"), ("b",))
+    ], "置灰项按前序答案（那张来源牌）现算"
+
+
+def test_the_step_by_step_ask_never_offers_a_disabled_option():
+    """逐步询问那条路也要认置灰（票 04 §3）：``ask_option`` 的候选 = ``options`` − ``disabled``。
+
+    置灰在**三处**收口：清单画灰、复合动作被校验器拒收、以及这里（未翻预发动的流水线 /
+    被动技的逐步问）。少了第三条，玩家会在真正的询问里看到并选中一个"点了必被拒"的选项。
+    """
+    asked: dict[str, object] = {}
+
+    class _Choice:
+        choice = "a"
+
+    class _Host:
+        state = None
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def accepted_option(frame, *, skill_id, actor):
+            del frame, skill_id, actor
+            return None  # 夹具不模拟续跑：这一问还没答过
+
+        @staticmethod
+        def ask_option(frame, actor, timing, *, skill_id, options, optional=False, revealed=()):
+            del frame, actor, timing, skill_id, optional, revealed
+            asked["options"] = tuple(options)
+            return _Choice()
+
+    _Host.state = _manifest_state(hand=(_cards("slash")[0],))
+    step = PickOption(
+        options=("a", "b", "c"), disabled=("b",), optional=False, key="name"
+    )
+
+    status, value = _flow_step_option(
+        _Host(), _Frame(source=0), step, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 0)
+    )
+
+    assert status == "ok" and value == "a"
+    assert asked["options"] == ("a", "c"), "置灰的那一项不下发给询问"
+
+
+def test_a_disabled_option_can_read_the_frame_during_validation():
+    """校验期的置灰回调拿得到**真帧**（票 04 §3；原先这一支把 GameState 当帧传）。
+
+    可调用档的签名是 ``(state, frame, owner, answers)``，而 `_assign_activation` 的选项步
+    曾经把 ``state`` 当帧塞进 ``_with_answers``——回调在那里读 ``frame.data`` 会拿到空字典。
+    这里让置灰回调**硬读**一个只有真帧才有的键：读不到就 KeyError，正好红。
+    """
+    card = _cards("slash")[0]
+    state = _manifest_state(hand=(card,))
+
+    def disabled(state, frame, owner, answers):
+        del state, owner, answers
+        return ("b",) if frame.data.get("probe_marker") else ()
+
+    flow = SkillFlow(
+        name="option_probe_frame",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+            PickOption(options=("a", "b"), disabled=disabled, optional=False, key="name"),
+        ),
+        effect=_noop,
+    )
+
+    class _RealFrame:
+        """只有 ``data`` 的真帧替身：`_with_answers` 会把它原样透传下去。"""
+
+        def __init__(self) -> None:
+            self.data = {"source": 0, "probe_marker": True}
+
+    error = validate_flow_activation(
+        flow, state, 0, (card,), ("b",), frame=_RealFrame()
+    )
+
+    assert error is not None and "b" in error, (
+        f"置灰回调读到了真帧里的标记 ⇒ 'b' 必须被判不可选，实得 {error!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⑮ 续跑：先认**已接受的答案**，再算池（本 effort 票 01）
+#
+# 形状 = 实机 bug（【攻心】"置于牌堆顶"）：effect 已经改过步骤池要读的那份状态
+# （hand→DECK 的移动触发了会提问的【连营】⇒ 挂起），续跑时**按活状态现算**的池已经空了
+# ⇒ 步骤 `"cancel"` ⇒ `run_flow` 按"零副作用"返回 None ⇒ effect 不再重入、尾巴丢失。
+# ---------------------------------------------------------------------------
+
+
+def _resume_engine(*, target_hand: tuple[int, ...]):
+    """座位 0 = 发动者，座位 1 = 目标（``target_hand`` 是它的全部手牌）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hand=target_hand)],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in set(target_hand)
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=3)
+    frame = engine.push_frame(
+        FrameKind.SKILL,
+        {"source": 0, "targets": (), "skill_id": "hero.probe.resume"},
+        timing=Timing.PHASE_PLAY_IDLE,
+    )
+    return engine, frame
+
+
+def _answer_pending(engine, predicate, what: str) -> None:
+    """把当前挂起的询问按 ``predicate`` 挑一条候选答掉。"""
+    query = engine.pending
+    assert query is not None, f"期望『{what}』的询问挂起，实际没有挂起的询问"
+    action = next((item for item in query.legal_actions if predicate(item)), None)
+    assert action is not None, f"『{what}』的候选里没有期望的答案：{query.legal_actions}"
+    engine.submit(action)
+
+
+def _move_target_last_card(engine) -> int:
+    """把目标（座位 1）唯一那张手牌搬进牌堆（**追加到牌堆底**，故只有置顶那一行能救它）。
+
+    这是实机 bug 的因果本身：effect 先 ``move_in_frame(..., to_zone=DECK)``，随后才
+    ``place_on_deck(to_top=True)``；移动那一行挂起 ⇒ 续跑时目标手牌已空。
+    """
+    card_id = engine.state.player(1).hand[0]
+    move_card(
+        engine.state,
+        EffectContext(actor=0),
+        (engine.state.card(card_id),),
+        to_zone=ZoneRef(Zone.DECK),
+        reason=MoveReason.PUT,
+        owner=1,
+    )
+    return card_id
+
+
+def test_a_resumed_seat_step_uses_the_accepted_answer_instead_of_recomputing_the_pool():
+    """座位步：effect 改过池读的状态后，续跑必须采用已接受的座位、重入 effect。
+
+    时序复刻实机 bug（【攻心】）：**第 1 次** ``run_flow`` 发问挂起 → 应答 → **第 2 次**
+    续跑（引擎本来就会重入）采用那条应答、跑 effect、effect 里的移动又挂起（这里用
+    ``return "stay"`` 表示）→ 目标最后一张手牌在挂起期间被搬走 → **第 3 次**续跑。
+
+    修复前第 3 次按活状态重算 pool ⇒ 空池 ⇒ ``"cancel"`` ⇒ ``run_flow`` 返回 ``None``
+    （"零副作用"）⇒ effect **不再重入**：只被调用一次、池被读了两次（第 2 次读到 0 张）。
+    断言因此是"effect 进了两次、池只读到 1 张各一次"，不是"返回值不是 cancel"——取消与
+    走完都返回 ``None``，只看返回值会被骗过去。
+    """
+    target = _cards("peach")[0]
+    engine, frame = _resume_engine(target_hand=(target,))
+    pool_reads: list[int] = []
+    captured: list[dict] = []
+
+    def pool(state, frame_, owner, chosen):
+        del frame_, owner, chosen
+        pool_reads.append(len(state.player(1).hand))
+        return (1,) if state.player(1).hand else ()
+
+    def effect(host, frame_, answers):
+        captured.append(dict(answers))
+        # 第一次跑就挂起（真实形状：effect 里的 hand→DECK 移动让出了控制权）。
+        return "stay" if len(captured) == 1 else None
+
+    flow = SkillFlow(
+        name="seat_resume",
+        steps=(PickSeats(lo=1, hi=1, pool=pool, optional=False, key="seat"),),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "座位步发问后挂起"
+    _answer_pending(
+        engine, lambda action: getattr(action, "choice", None) == "seat:1", "选座位"
+    )
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "effect 跑了一次就挂起"
+    _move_target_last_card(engine)
+    assert engine.state.player(1).hand == []
+
+    assert run_flow(engine, frame, flow, owner=0) is None
+    assert captured == [{"seat": (1,)}, {"seat": (1,)}], (
+        "续跑必须采用**已接受**的座位答案并**重入** effect；"
+        f"实际 effect 调用 = {captured}（只有一条 = 整条流被当成 cancel 了）"
+    )
+    assert pool_reads == [1, 1], (
+        "续跑不再按活状态重算池：池只在应答落地前算过（两次都在目标还有手牌时）；"
+        f"实际每次读到的目标手牌数 = {pool_reads}"
+    )
+
+
+def test_a_resumed_card_step_uses_the_accepted_cards_instead_of_re_filtering_the_pool():
+    """选牌步 + 白名单：过滤后的池在续跑时为空也不许把整条流判成 cancel。
+
+    ``hi=None``（"全部可选牌"）+ ``card_types`` / ``slot_kinds`` / ``exclude_cards`` 让执行器
+    在**发问之前**就按活状态算一次"过滤后还够不够 ``lo``"（同样是现算池的一种；写死 ``hi``
+    时这条短路不生效，故 ``hi=None`` 是必需的夹具成分）。
+    """
+    slash = _cards("slash")[0]
+    engine, frame = _resume_engine(target_hand=(slash,))
+    captured: list[dict] = []
+
+    def effect(host, frame_, answers):
+        captured.append(dict(answers))
+        return "stay" if len(captured) == 1 else None
+
+    flow = SkillFlow(
+        name="card_resume",
+        steps=(
+            PickCards(
+                zones=(Zone.HAND,),
+                lo=1,
+                hi=None,
+                card_types=("slash",),
+                optional=False,
+                key="cost",
+                face=lambda state, frame_, owner, answers: 1,
+            ),
+        ),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "选牌步发问后挂起"
+    _answer_pending(
+        engine, lambda action: isinstance(action, SelectCards) and action.picks == (0,), "选牌"
+    )
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "effect 跑了一次就挂起"
+    _move_target_last_card(engine)
+
+    assert run_flow(engine, frame, flow, owner=0) is None
+    assert captured == [{"cost": (slash,)}, {"cost": (slash,)}], (
+        "续跑必须采用**已接受**的牌并**重入** effect；"
+        f"实际 effect 调用 = {captured}（只有一条 = 过滤后的池空了就被判 cancel）"
+    )
+
+
+def test_a_resumed_option_step_uses_the_accepted_option_instead_of_re_resolving_it():
+    """选项步：可调用档 ``options`` 现算的闭集在续跑时为空也不许取消整条流。
+
+    界【结姻】那类"可选哪几项取决于前序答案 / 目标状态"的选项步走的就是这条现算路径；
+    effect 一旦改过那份状态，续跑现算就会得到空闭集。
+    """
+    peach = _cards("peach")[0]
+    engine, frame = _resume_engine(target_hand=(peach,))
+    captured: list[dict] = []
+
+    def options(state, frame_, owner, answers):
+        del frame_, owner, answers
+        return ("keep", "give") if state.player(1).hand else ()
+
+    def effect(host, frame_, answers):
+        captured.append(dict(answers))
+        return "stay" if len(captured) == 1 else None
+
+    flow = SkillFlow(
+        name="option_resume",
+        steps=(
+            PickOption(options=options, optional=False, key="mode"),
+        ),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "选项步发问后挂起"
+    _answer_pending(
+        engine, lambda action: getattr(action, "choice", None) == "give", "选一项"
+    )
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "effect 跑了一次就挂起"
+    _move_target_last_card(engine)
+
+    assert run_flow(engine, frame, flow, owner=0) is None
+    assert captured == [{"mode": "give"}, {"mode": "give"}], (
+        "续跑必须采用**已接受**的选项并**重入** effect；"
+        f"实际 effect 调用 = {captured}（只有一条 = 现算的选项集空了就被判 cancel）"
+    )
+
+
+def test_a_cancel_after_the_effect_started_is_a_hard_error():
+    """``"cancel"`` 的语义 = "零副作用、技能没发生"；effect 已经开始之后**不许**再走它。
+
+    这不是可达的正常路径（上面的三步都先认已接受的答案）——它是一条**契约兜底**：若某一步
+    的询问标识在挂起期间变了（这里显式把 ``cache_key`` 从 ``round:0`` 改到 ``round:1``），
+    池又已经空了，实现只能**显式失败**，不能把"已经改过状态的发动"报成"取消、可再发动"。
+    见 `CODING_STANDARDS.md` §3（挂起幂等）与本 effort 的 spec「范围」第 2 条。
+    """
+    slash = _cards("slash")[0]
+    engine, frame = _resume_engine(target_hand=(slash,))
+    frame.data["round"] = 0
+    effect_runs: list[str] = []
+
+    def effect(host, frame_, answers):
+        effect_runs.append("run")
+        # 第一次跑就挂起（真实形状：effect 里的移动让出了控制权）。
+        return "stay" if len(effect_runs) == 1 else None
+
+    flow = SkillFlow(
+        name="guard_resume",
+        steps=(
+            PickCards(
+                zones=(Zone.HAND,),
+                lo=1,
+                hi=1,
+                optional=False,
+                key="cost",
+                cache_key=lambda frame_: f"round:{frame_.data['round']}",
+                face=lambda state, frame_, owner, answers: 1,
+            ),
+        ),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "选牌步发问后挂起"
+    _answer_pending(
+        engine, lambda action: isinstance(action, SelectCards) and action.picks == (0,), "选牌"
+    )
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "effect 跑了一次就挂起"
+
+    _move_target_last_card(engine)
+    frame.data["round"] = 1  # 询问名变了 ⇒ 已接受的那份答案不再是"这一问"的
+
+    with pytest.raises(RuntimeError, match="cancel"):
+        run_flow(engine, frame, flow, owner=0)
+    assert len(effect_runs) == 1, "显式失败：不再重入 effect（effect 也没有第二次副作用）"
+
+
+def test_an_empty_pool_on_the_first_run_still_cancels_with_zero_side_effects():
+    """真·空池（第一次执行时就没有候选）仍走 ``"cancel"`` 且**真的零副作用**（§6 边界）。
+
+    修复不能把"取消"这条正常出口一并收掉：池从一开始就空 ⇒ 不发没有候选的询问、
+    effect 不跑、什么都不改。
+    """
+    engine, frame = _resume_engine(target_hand=())
+    captured: list[dict] = []
+
+    def effect(host, frame_, answers):
+        captured.append(dict(answers))
+        return None
+
+    flow = SkillFlow(
+        name="empty_pool",
+        steps=(
+            PickSeats(
+                lo=1,
+                hi=1,
+                pool=lambda state, f, owner, chosen: (1,) if state.player(1).hand else (),
+                optional=False,
+                key="seat",
+            ),
+        ),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) is None, "池从一开始就空 ⇒ 取消"
+    assert captured == [], "取消 = effect 不跑"
+    assert engine.pending is None, "不发没有候选的询问"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_OPTION
+    ], "空池不发询问（记录流里一条 SELECT_OPTION 都没有）"

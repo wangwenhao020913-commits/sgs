@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable, Sequence
 from itertools import combinations, permutations
 from typing import Any
 
+from sgs.data import CardTagReader, card_tag_spec
 from sgs.state import (
     Action,
     ActivateSkill,
@@ -27,10 +28,14 @@ from sgs.state import (
     ArrangeContext,
     CardRef,
     DiscardCards,
+    Distribute,
+    DistributeContext,
     DodgeContext,
     EndPhase,
     GameState,
     Pass,
+    PeachContext,
+    Phase,
     PlayCard,
     Player,
     QueryKind,
@@ -42,19 +47,26 @@ from sgs.state import (
     SelectOption,
     SelectOptionContext,
     SkillActivationContext,
+    SubstituteJudgeCard,
     SlotKind,
     UseCard,
+    Zone,
+    ZoneRef,
     alive_seats,
     seats_from,
 )
 from sgs.timing import Timing
 
 from .behaviors import (
+    SLASH_FAMILY_KEY,
     CardBehavior,
     DODGE_RESPONSE_CARD,
+    NULLIFY_RESPONSE_CARD,
+    PEACH_RESPONSE_CARD,
     TargetCount,
     UseContext,
     behavior_for,
+    is_slash,
     satisfies_required,
 )
 from .modifiers import (
@@ -62,12 +74,15 @@ from .modifiers import (
     ModifierContext,
     ModifierPoint,
     ModifierRole,
+    PriorityClass,
     apply_modifiers,
 )
 
 __all__ = [
     "EFFECTIVENESS",
+    "NEED_CARD_FLOOR_KEY",
     "TARGET_FILTERS",
+    "activation_allowed",
     "attack_range",
     "check_count",
     "check_forbidden",
@@ -77,28 +92,75 @@ __all__ = [
     "discard_count",
     "distance",
     "forced_use_targets",
+    "hand_count",
     "hand_limit",
+    "is_own_play_phase",
     "legal_actions_for",
+    "need_card_floor",
+    "need_card_tier",
     "needs_designation",
+    "record_need_card_choice",
+    "reset_need_card_floor",
     "seat_distance",
     "target_combos",
     "target_is_effective",
     "targets_within_attack_range",
+    "tier_not_downgraded",
 ]
 
 
-def hand_limit(player: Player) -> int:
-    """手牌上限 = **体力值**（票 07 §4 的规则**公式**；M1 无修正项）。
+def hand_limit(state: GameState, player: Player) -> int:
+    """手牌上限的**双轴**查询（M6 票 08；spec D11）。
 
-    官方把"体力"（可小于 0）与作为参数读取的"体力值"分开：体力降到 0 或更低时，
-    体力值读作 0，且手牌上限经过修正后最小值为 0 —— 故这里取 ``max(hp, 0)``。
+    两段、各自一个真源（`三国杀详细规则.txt` §四 L334–L336）：
+
+    1. **上限修正链**：``max(当前体力值, 0)`` → ``HAND_LIMIT_REPLACE`` 修饰器链（界周瑜
+       【英姿】② 的"手牌上限 = 体力上限"是唯一消费者；查询期从**活着的实例**算，故
+       体力上限变化、技能失去 / 失效都立刻反映）；
+    2. **加式**：``Player.hand_limit_bonus``（【清俭】跨座位、【集智】自身；D9 的一次性
+       效果，带回合作用域、不随来源消失撤回）。
+
+    最后再夹一次下限 0：官方把"体力"（可小于 0）与作为参数读取的"体力值"分开——体力降到
+    0 或更低时体力值读作 0，且手牌上限经过修正后最小值为 0。
+
+    **不是**"手牌计数"：计数是另一个查询（:func:`hand_count`——排除计数标签，票 09 的
+    标签轴），spec D11 明写"上限与计数是两个查询，互不替换"。
     """
-    return max(player.hp, 0)
+    base = max(player.hp, 0)
+    ctx = ModifierContext(subject=player.seat, target=player.seat)
+    replaced = apply_modifiers(ModifierPoint.HAND_LIMIT_REPLACE, state, ctx, base)
+    return max(int(replaced) + player.hand_limit_bonus, 0)
 
 
-def discard_count(player: Player) -> int:
-    """弃牌阶段须弃置的张数；``<= 0`` 表示无需弃牌（也不发询问）。"""
-    return len(player.hand) - hand_limit(player)
+def hand_count(state: GameState, player: Player) -> int:
+    """**手牌计数** = 手牌中**不带"排除计数"标签**的张数（M6 票 09；spec D12 / §标签）。
+
+    标签类型在 ``sgs.data.CARD_TAG_TYPES`` 里声明**读取方**：只有 ``reader == HAND_COUNT``
+    的类型参与这里的排除，其余类型（将来出现的别的读取方）不影响计数。判据逐张读
+    :meth:`~sgs.state.GameState.tags_of`——标签与区域无关，故这里不做"牌在哪"的判断；
+    形状分类（本回合 / 在某区域期间 / 到被使用为止）由各标签类型的**清除触发**负责，
+    不在读取方特判（"在某区域期间"的那一类本来也只会在该区域的牌上被计数读到）。
+
+    这个数**只用于**弃牌阶段（:func:`discard_count`）；投影里的公开"手牌数"仍是
+    ``len(hand)``（spec §投影与记录流：标签的增删不改变那个公开数字）。
+    """
+    return sum(
+        1
+        for card_id in player.hand
+        if not any(
+            card_tag_spec(tag.tag_type).reader is CardTagReader.HAND_COUNT
+            for tag in state.tags_of(card_id)
+        )
+    )
+
+
+def discard_count(state: GameState, player: Player) -> int:
+    """弃牌阶段须弃置的张数；``<= 0`` 表示无需弃牌（也不发询问）。
+
+    计数 = :func:`hand_count`（排除带"不计入"标签的牌，票 09），上限 =
+    :func:`hand_limit`（票 08 的双轴）：两个查询各走各的，不互相替换（spec D11）。
+    """
+    return hand_count(state, player) - hand_limit(state, player)
 
 
 def distance(state: GameState, a: int, b: int) -> int:
@@ -187,13 +249,35 @@ def attack_range(
 
 
 def check_forbidden(state: GameState, seat: int, card: CardRef) -> bool:
-    """L3.1 ``USE_CHECK_FORBIDDEN``：``True`` = 禁止使用。
+    """L3.1 ``USE_CHECK_FORBIDDEN``：``True`` = 禁止使用 / 打出这张牌（按**原用途**）。
 
-    M2 没有"禁止使用"类效果（装备效果全部落在修饰器 / 钩子 / 接缝三层），故恒 ``False``；
-    函数保留（票 07 §4），**M3 技能长在这里**，而不是在候选生成器里加分支（票 12 §Q7）。
+    走 :data:`~sgs.effects.ModifierPoint.FORBIDDEN` 修饰器链：``current`` 从 ``False``
+    起，链上空无一物时原样返回 ``False``（既有技能零变化）；神关羽【武神】①在链上把
+    "红桃手牌"写成 ``True``（票 05）。只覆盖"使用 / 打出"——弃置、重铸、技能成本、
+    他人置入装备区都不经过这里。
     """
-    del state, seat, card
-    return False
+    return bool(
+        apply_modifiers(
+            ModifierPoint.FORBIDDEN,
+            state,
+            ModifierContext(subject=seat, card=card),
+            False,
+        )
+    )
+
+
+def is_own_play_phase(state: GameState, seat: int) -> bool:
+    """``seat`` 此刻是否在**自己的**出牌阶段（``turn_seat == seat`` ∧ ``phase is Phase.PLAY``）。
+
+    这是一条**事实判据**，有两个读点、各服务一条规则：
+
+    - :func:`check_count` 的【杀】作用域（W5-04 用户裁定）：次数限制只在这里生效；
+    - ``Engine._note_play_phase_slash`` 的"本阶段使用 / 打出过【杀】"事实（M6 票 03
+      的【克己】）。
+
+    两处读同一个谓词，免得"自己的出牌阶段"被各写一份、改一处忘一处。
+    """
+    return state.turn_seat == seat and state.phase is Phase.PLAY
 
 
 def check_count(state: GameState, seat: int, card: CardRef) -> bool:
@@ -204,9 +288,22 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
 
     已用次数读**行为表声明的计数键**（``CardBehavior.count_key``）：普通【杀】/ 火【杀】/
     雷【杀】共用 ``"slash"``，转化 / 虚拟【杀】按产物牌型（也是 ``"slash"``）读同一键。
-    """
 
+    **【杀】族的适用范围（W5-04 用户裁定 2026-10-30）**：§17.10 A2（L1836）写"只有『于
+    出牌阶段的空闲时间点使用【杀】』才受次数限制"（§3.5 L183–L185 / §17.1 L1659 只是未加
+    限定的默认额度），故次数限制只约束**他自己出牌阶段**的主动使用；响应、其他阶段、
+    其他角色回合里的使用**不查次数**（计数键照常记账，只是不再当限制读）。即【杀】族只在
+    ``turn_seat == seat`` ∧ ``phase is Phase.PLAY``（:func:`is_own_play_phase`）时读计数。
+    借刀窗口发生在**另一个角色**的回合，那里读到的 ``"slash"`` 是持刀者**上一回合**的陈旧
+    值——读它会把"a 可行"误判成 auto-b（W5-04 的实机根因）。
+
+    **不**在回合起点清空其他座位的计数：陈旧值只是不再被错误的窗口读到，该座位自己的
+    ``TURN_START`` 重置保持原样（清算别人的计数会掩盖"限制有适用范围"这条规则边界）。
+    其他牌（【酒】等）的计数语义不动。
+    """
     behavior = behavior_for(card)
+    if is_slash(behavior) and not is_own_play_phase(state, seat):
+        return False
     limit = behavior.use_limit
     rated = apply_modifiers(
         ModifierPoint.COUNT_LIMIT,
@@ -228,7 +325,9 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
 
     票 27 把**目标池限制**拆成两半，都不给 ``TargetRule`` 加面向具体牌名的布尔：
 
-    - **额定距离上限** ``rule.max_distance``（【顺手牵羊】= 1，与武器无关）；
+    - **额定距离上限** ``rule.max_distance``（【顺手牵羊】= 1，与武器无关），过
+      :data:`~sgs.skills.ModifierPoint.DISTANCE_LIMIT` 链（M6 票 02 的加法；
+      【奇才】把锦囊的这条上限豁免成"不限"，返回 ``None`` 即完全不查距离）；
     - **附加谓词** ``behavior.target_filters``（【过河拆桥】/【顺手牵羊】"区域里有牌"、
       【借刀杀人】"有武器且有合法【杀】目标"），经 :data:`TARGET_FILTERS` 注册表解析。
 
@@ -245,6 +344,17 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             return ()
         pool: list[int] = [seat]
     else:
+        # 额定距离上限先过 DISTANCE_LIMIT 链（M6 票 02）：``None`` = 这次使用**豁免距离**
+        # （【奇才】），否则从 ``rule.max_distance`` 起逐条修正。链在候选生成期求值，
+        # 与 TARGET_POOL 同一姿态；无修饰器时原值返回，故既有牌型的池逐字节不变。
+        max_distance = rule.max_distance
+        if max_distance is not None:
+            max_distance = apply_modifiers(
+                ModifierPoint.DISTANCE_LIMIT,
+                state,
+                ModifierContext(subject=seat, card=card),
+                max_distance,
+            )
         pool = []
         for player in state.players:
             if not player.alive:
@@ -255,9 +365,9 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
                 state, seat
             ):
                 continue
-            if rule.max_distance is not None and distance(
+            if max_distance is not None and distance(
                 state, seat, player.seat
-            ) > rule.max_distance:
+            ) > max_distance:
                 continue
             pool.append(player.seat)
     if behavior.is_delayed:
@@ -568,29 +678,41 @@ def legal_actions_for(
     *,
     answers_seq: int,
     dying: int | None = None,
-    payload: RespondContext | SelectContext | DodgeContext | SkillActivationContext | SelectOptionContext | None = None,
+    payload: RespondContext | SelectContext | DodgeContext | PeachContext | SkillActivationContext | SelectOptionContext | DistributeContext | None = None,
 ) -> tuple[Action, ...]:
     """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
 
     ``dying`` 只在 ``PEACH`` 询问下需要：濒死语境里【桃】的合法目标是**濒死者**
     而不是应答者自己，故目标不走行为表的目标规则（票 07 §4 / 票 21 §7）。
     票 27 的新 kind 走**类型化 ``payload``**（票 19 §4）；票 30 再补三类。
+
+    **需要（使用 / 打出）牌窗口的档位闸门**（票 03 §4-2）：四扇窗口（【闪】/ 求桃 /
+    打出·使用响应 / 无懈）的候选在生成之后统一过"不升档"——档 < ``payload.floor`` 的
+    候选不进面。闸门放在这里而不是各窗口里：本函数是全部询问候选的**唯一生成口**，
+    四扇窗口因此不可能只有三扇接线。其余询问走别的 ``payload``、也**不跑**这条闸门，
+    故它们的候选一条不动（改判窗口同样不跑：改判不是"使用 / 打出"）。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
     elif kind is QueryKind.DISCARD:
         candidates = _discard(state, seat, answers_seq)
     elif kind is QueryKind.DODGE:
-        providers_used = payload.providers_used if isinstance(payload, DodgeContext) else ()
-        candidates = _dodge(state, seat, answers_seq, providers_used)
+        ctx = payload if isinstance(payload, DodgeContext) else DodgeContext()
+        candidates = _dodge(state, seat, answers_seq, ctx.providers_used)
+        candidates = _above_floor(candidates, floor=ctx.floor)
     elif kind is QueryKind.PEACH:
         if dying is None:
             raise ValueError("PEACH 询问必须给出濒死者座位")
+        ctx = payload if isinstance(payload, PeachContext) else PeachContext()
         candidates = _peach(state, seat, dying, answers_seq)
+        candidates = _above_floor(candidates, floor=ctx.floor)
     elif kind is QueryKind.RESPOND:
         if not isinstance(payload, RespondContext):
             raise ValueError("RESPOND 询问必须给出 RespondContext")
         candidates = _respond(state, seat, answers_seq, payload)
+        if payload.mode is not RespondMode.REJUDGE:
+            # 改判不是"使用 / 打出"（它不压 USE 帧、不触发使用后钩子），故不在这条通道上。
+            candidates = _above_floor(candidates, floor=payload.floor)
     elif kind is QueryKind.SELECT_CARDS:
         if not isinstance(payload, SelectContext):
             raise ValueError("SELECT_CARDS 询问必须给出 SelectContext")
@@ -607,9 +729,41 @@ def legal_actions_for(
         if not isinstance(payload, ArrangeContext):
             raise ValueError("ARRANGE 询问必须给出 ArrangeContext")
         candidates = _arrange(answers_seq, payload)
+    elif kind is QueryKind.DISTRIBUTE:
+        if not isinstance(payload, DistributeContext):
+            raise ValueError("DISTRIBUTE 询问必须给出 DistributeContext")
+        candidates = _distribute(answers_seq, payload)
     else:
         raise ValueError(f"还没有 {kind.value} 询问的候选生成器")
+    if state.player(seat).hand_card_prohibited:
+        # 【义绝】黑色分支（M6 票 04）：该座位本回合**不能使用或打出手牌**。判据放在这里
+        # 而不是各窗口里：``legal_actions_for`` 是全部询问候选的**唯一生成口**，故
+        # 出牌 / 【闪】 / 求桃 / 响应四类窗口一次收口，不会漏掉任何一个。只删"使用 / 打出
+        # 手牌"的动作：弃置、重铸、技能发动都不是"使用或打出"，照常保留。
+        candidates = [
+            action
+            for action in candidates
+            if not _uses_hand_card(state, seat, action)
+        ]
     return tuple(sorted(candidates, key=_sort_key))
+
+
+def _uses_hand_card(state: GameState, seat: int, action: Action) -> bool:
+    """这个动作是不是"**使用或打出手牌**"（`Player.hand_card_prohibited` 的唯一判据）。
+
+    - 实体牌：牌本身此刻在手牌区；
+    - 转化 / 虚拟牌：只要**任一来源牌**在该座位手牌区，就算"打出手牌"（单源转化是自然
+      形态；【丈八蛇矛】两张手牌同理）。纯虚拟牌（无实体来源，如【八卦阵】的视为【闪】）
+      不是手牌 ⇒ 不受禁令影响。
+    """
+    if not isinstance(action, (UseCard, PlayCard)):
+        # 重铸 / 弃置 / 技能发动都**不是**"使用或打出"：``Reforge`` 也带 ``card`` 字段，
+        # 故这里必须按构造子收口，不能按"有没有 card"判。
+        return False
+    card = action.card
+    source_ids = card.virtual_sources if card.is_virtual else (card.card_id,)
+    hand = state.player(seat).hand
+    return any(source_id in hand for source_id in source_ids)
 
 
 def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
@@ -692,9 +846,9 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 
 
 def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
-    """弃牌阶段：任意"手牌数 − 体力值"张子集，全枚举（票 07 §4）。"""
+    """弃牌阶段：任意"手牌计数 − 手牌上限"张子集，全枚举（票 07 §4 / 票 09）。"""
     player = state.player(seat)
-    count = discard_count(player)
+    count = discard_count(state, player)
     if count <= 0:
         return []
     return [
@@ -729,6 +883,8 @@ def _dodge(
             answers_seq=answers_seq,
             providers_used=providers_used,
             scope=CandidateScope.DODGE,
+            # 窗口"要一张什么牌"与另外三档同源：提供者（【蛊惑】）按它收窄声明范围。
+            respond_required=DODGE_RESPONSE_CARD,
         ),
         tuple(actions),
     )
@@ -753,8 +909,16 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     - ``TargetRule.near_death_self_only`` 的牌（【酒】）只在**濒死者自己**被问时进候选；
       【桃】不声明它，故"他人对濒死者出【桃】"不受影响。——单靠 ``self_only`` 会误伤
       【桃】（它的 ``self_only`` 只描述出牌阶段的目标池）。
-    - 次数上限照走 ``check_count``：本回合已用过【酒】（无论出牌阶段加伤还是上一次濒死
-      自救）⇒ 这次求桃不再给【酒】候选，出牌阶段与濒死自救因此共用**同一个**计数键。
+    - 次数上限：**濒死自救不查次数**（用户 2026-11-02 裁定）。【酒】的两种用法是两条轴——
+      出牌阶段增伤每回合一次；濒死自救**无次数限制、也不占用那一次**（黄盖本回合喝过酒
+      增伤，苦肉进入濒死后照样能喝酒自救，且可连喝到脱离濒死）。故 ``near_death_self_only``
+      的牌跳过 ``check_count``；【桃】本来无次数上限，查与不查等价。
+
+    **提供者路径**（票 03）：除了真牌，**"需要牌时"的提供者**（【蛊惑】扣置一张手牌当【桃】）
+    也在这里产出候选——它走 ``CANDIDATES`` 的 ``PEACH`` 语境，与真牌同一个槽位。它**不是**
+    转化技：受理时已经扣置 / 质疑 / 验明完毕，故不进下面那条"确认即定死"的通道。
+    它的**牌名候选**读同一份语境判据（见 `skills/active.py:_guohuo_response_names`）：
+    濒死者本人是于吉时【酒】与【桃】都在声明表里。
 
     **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
     也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
@@ -767,9 +931,28 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
         UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.NEAR_DEATH)
         if (seat == dying or not behavior_for(card).target_rule.near_death_self_only)
-        and not check_count(state, seat, card)
+        and (  # 濒死自救**不查次数**（用户 2026-11-02 裁定，见上面的 docstring）
+            behavior_for(card).target_rule.near_death_self_only
+            or not check_count(state, seat, card)
+        )
     ]
     actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
+    # "需要牌时"的**提供者**（票 03）：同【闪】窗口那一趟整段追加——【蛊惑】扣置一张手牌
+    # 当【桃】（无人质疑 /（真 且 ♥）才是，否则作废）。它不是转化技：受理时**已经**验明完毕，故不进
+    # ``transform_preactivations`` 那条"确认即定死"的通道。
+    actions = list(
+        apply_modifiers(
+            ModifierPoint.CANDIDATES,
+            state,
+            ModifierContext(
+                subject=seat,
+                answers_seq=answers_seq,
+                scope=CandidateScope.PEACH,
+                respond_required=PEACH_RESPONSE_CARD,
+            ),
+            tuple(actions),
+        )
+    )
     actions.append(Pass(answers_seq=answers_seq))
     return actions
 
@@ -798,13 +981,16 @@ def _transformed_peaches(
 def _respond(
     state: GameState, seat: int, answers_seq: int, ctx: RespondContext
 ) -> list[Action]:
-    """响应窗口：手牌里满足 ``required`` 的牌各一个候选，放弃恒在最后。
+    """响应窗口：``ctx.zones`` 里满足 ``required`` 的牌各一个候选，放弃恒在最后。
 
-    取牌走 :func:`_required_hand`——**与【闪】窗口同一道牌名闸门**（B1）。``required``
-    是牌名（``slash`` / ``dodge`` / ``nullify``），不是询问种类：同一个函数服务南蛮 /
-    万箭 / 决斗 / 借刀 / 无懈五种语境，按 ``QueryKind`` 分支就会漏掉其中一类。
+    取牌走 :func:`_required_cards`（缺省就是 :func:`_required_hand`）——**与【闪】窗口
+    同一道牌名闸门**（B1）。``required`` 是牌名（``slash`` / ``dodge`` / ``nullify``），
+    不是询问种类：同一个函数服务南蛮 / 万箭 / 决斗 / 借刀 / 无懈五种语境，按 ``QueryKind``
+    分支就会漏掉其中一类。``ctx.zones`` 缺省 ``(HAND,)``；改判窗口按座位技能定义放宽到
+    装备区（界【鬼才】"打出一张牌"，M6 票 14）。
 
-    - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
+    - ``mode = PLAY``（南蛮 / 万箭 / 决斗 / 改判）：候选是 ``PlayCard``（打出，无目标、
+      不占次数）；
     - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
       并按 L3.2 校验出牌次数。**窗口固定了目标**（借刀的 Bn）时先问
       :func:`forced_use_targets`"够不够得着 Bn"（W5-02b 的 a 可行性 / auto-b 语义），
@@ -816,8 +1002,24 @@ def _respond(
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
+    if ctx.mode is RespondMode.REJUDGE:
+        # 改判窗口（feng-zhangjiao 票 02）：**逐技能**枚举，一条技能一种构造子。
+        # 候选是 `SubstituteJudgeCard`（不是 `PlayCard`）：它不是打出，引擎据此压一个
+        # REJUDGE 事件帧。颜色筛选由技能声明派生（【鬼道】= 黑色），区也由它给。
+        rejudge: list[Action] = []
+        for offer in ctx.rejudge_offers:
+            for card in _required_cards(state, seat, None, offer.zones):
+                if offer.color is not None and card.color is not offer.color:
+                    continue
+                rejudge.append(
+                    SubstituteJudgeCard(
+                        skill_id=offer.skill_id, card=card, answers_seq=answers_seq
+                    )
+                )
+        rejudge.append(Pass(answers_seq=answers_seq))
+        return rejudge
     actions: list[Action] = []
-    for card in _required_hand(state, seat, ctx.required):
+    for card in _required_cards(state, seat, ctx.required, ctx.zones):
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
@@ -859,10 +1061,12 @@ def _respond(
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:
             actions.append(PlayCard(card=card, answers_seq=answers_seq))
-    if ctx.required in ("slash", "dodge"):
+    scope = _respond_scope(ctx.required)
+    if scope is not None:
         # 【丈八蛇矛】的转化【杀】可**打出**、【八卦阵】可"视为打出【闪】"（票 10 §5.5 /
-        # 票 30）：整段候选期追加一趟 CANDIDATES。"每提供者只问一次"由这里的通用过滤兜底。
-        scope = CandidateScope.RESPOND if ctx.required == "slash" else CandidateScope.DODGE
+        # 票 30）、【蛊惑】可"扣置一张手牌当它"（票 03）：整段候选期追加一趟 CANDIDATES。
+        # "每提供者只问一次"由这里的通用过滤兜底；收集式窗口的"赢家已定"由
+        # ``respond_declared`` 收口（提供者的产物是扣置一张牌换来的，不能白扣）。
         generated = apply_modifiers(
             ModifierPoint.CANDIDATES,
             state,
@@ -875,6 +1079,7 @@ def _respond(
                 respond_required=ctx.required,
                 respond_mode=ctx.mode,
                 respond_targets=tuple(ctx.use_targets),
+                respond_declared=ctx.declared,
             ),
             tuple(actions),
         )
@@ -889,6 +1094,22 @@ def _respond(
     return actions
 
 
+def _respond_scope(required: str | None) -> CandidateScope | None:
+    """响应窗口按**请求牌名**选 ``CANDIDATES`` 的语境；``None`` = 这一趟不派发。
+
+    杀族请求与【闪】共用原有两档（火 / 雷【杀】与转化牌因此同形）；【无懈可击】是票 03
+    的加法——它是**收集式**窗口（先声明、赢家才使用），故独占 ``NULLIFY`` 一档：
+    提供者在那里的产物只能算"声明"，与打出 / 使用两档的交付方式都不同。
+    """
+    if required == SLASH_FAMILY_KEY:
+        return CandidateScope.RESPOND
+    if required == DODGE_RESPONSE_CARD:
+        return CandidateScope.DODGE
+    if required == NULLIFY_RESPONSE_CARD:
+        return CandidateScope.NULLIFY
+    return None
+
+
 def _select_cards(
     state: GameState, seat: int, answers_seq: int, ctx: SelectContext
 ) -> list[Action]:
@@ -897,32 +1118,188 @@ def _select_cards(
     ``spec.zones`` 已由调用方用于铺选择面，``per_zone`` / ``sequential`` 是 M3 的扩展点
     （票 19 §3 的"M3 只许增"）。M2 的三张选牌牌都是"取满 1 张"的强制选择，
     故候选恰是每个槽位一个单张；池为空时调用方**不构造询问**（票 19 §6）。
+
+    ``spec.max_per_suit``（神吕蒙移动版【涉猎】）：只枚举**每种花色至多 k 张**的组合。
+    判据是**候选生成期**的（不是界面灰显）：不在候选里的组合，引擎会拒；界面读同一份
+    候选把同花色的其余牌置灰。槽位没有牌面（隐藏槽）时无法判花色——那种询问不该设这个
+    字段，故按"不拦"处理（fail-open 只会在配置错误时出现，不会让非法组合进候选）。
     """
     del state, seat
     low, high = ctx.spec.total
+    per_suit = ctx.spec.max_per_suit
+
+    def allowed(picks: tuple[int, ...]) -> bool:
+        if per_suit is None:
+            return True
+        counts: dict[str, int] = {}
+        for index in picks:
+            card = ctx.slots[index].card
+            suit = None if card is None else card.suit
+            if suit is None:
+                continue
+            counts[suit] = counts.get(suit, 0) + 1
+            if counts[suit] > per_suit:
+                return False
+        return True
+
     actions: list[Action] = [
         SelectCards(picks=picks, answers_seq=answers_seq)
         for count in range(low, min(high, len(ctx.slots)) + 1)
         for picks in combinations(range(len(ctx.slots)), count)
+        if allowed(picks)
     ]
     if ctx.spec.optional:
         actions.append(Pass(answers_seq=answers_seq))
     return actions
 
 
+NEED_CARD_FLOOR_KEY = "need_card_floor"
+"""帧私有键：四扇**需要（使用 / 打出）牌**窗口的不升档游标（票 03 §4-2），按座位分槽。
+
+形态 = ``{座位: int}``（缺项 = 0 = 最高档）。"不升档"是**逐角色**的（仓内 §4.16 L443
+"先逐角色、角色内部再按优先级"），故：求桃 / 无懈 / 势力求助逐个应答者、【决斗】双方轮流
+——同一帧里会有多个座位的档，挤在一个 int 里会串味。
+
+floor 的粒度是**一个需要牌事件**（补充一手 §4.2.2 的 ❶ ②③ + §2.1.2.2(2) 的"每时机一次
+响应机会"）：选了提供者而它**没通过**时 floor 留着（曹操先发动【八卦阵】⇒ 没有〖护驾〗的
+时机了）；**这一次响应成立**时清回 0（【无双】的两张【闪】是两次事件）。清点由各窗口的
+成功分支调 :func:`reset_need_card_floor`。
+
+**帧私有**（不进记录流）；它是**逐目标**分槽的状态，故必须登记在
+:data:`sgs.engine.steps._PER_TARGET_FRAME_KEYS`——否则同一帧的下一个目标会继承上一个目标的
+档（与 ``providers_used`` / ``dodges_done`` 同姿态）。
+"""
+
+
+def tier_not_downgraded(tier: int, floor: int) -> bool:
+    """**不升档**（补充一手 §2.1.2.3）：档值越小越优先，故闸门 = ``tier >= floor``。
+
+    小于 ``floor`` 的档（= 比上一次更高优先）不再进面，同档与更低优先的档照进。这一行
+    判据由两处消费：票 01 的 :func:`activation_allowed`（同一时机的激活结算）与票 03 的
+    四个需要牌窗口（:func:`_above_floor`）。写在**一处**，两边不可能对"高档 / 低档"给出
+    相反的读法。
+    """
+    return int(tier) >= int(floor)
+
+
+def need_card_tier(action: Action) -> int:
+    """一条"需要（使用 / 打出）牌"候选的**优先级档**（票 03 §4-1）。
+
+    - 真牌 / 转化牌（``UseCard`` / ``PlayCard``）= ``CARD_USE``（2）：窗口要的是**一张牌**，
+      牌从手牌来还是从装备区 / 转化来，不改变这一档；
+    - ``ActivateSkill``（提供者）= 该技能定义声明的 :attr:`~sgs.skills.SkillDef.priority_class`：
+      【八卦阵】= **装备档**（1），【护驾】/【激将】/【蛊惑】= **武将档**（0）。声明只有
+      一份（由载体派生），本函数不另判——也不在这里写技能 id 名单。
+
+    档是**定义**的属性、不是局面属性，故判据不读 ``GameState``。提供者候选必然来自一条
+    **解析得到的实例**（``CANDIDATES`` 链只遍历 :func:`sgs.skills.resolve_instances` 的
+    产物），故"目录里没有这条定义"是编程错误：**不 fail-open**（那会静默放过一条低档
+    提供者），让 ``KeyError`` 冒泡。
+    """
+    if not isinstance(action, ActivateSkill):
+        return int(PriorityClass.CARD_USE)
+    from sgs.skills import catalog as catalog_module
+
+    return int(catalog_module.CATALOG[action.skill_id].priority_class)
+
+
+def _above_floor(candidates: Iterable[Action], *, floor: int) -> list[Action]:
+    """过"不升档"闸门：``Pass`` 恒留，其余按 :func:`need_card_tier` 判。
+
+    ``floor <= 0``（= 初值 / 最高档）时没有可挡的候选，原样返回：其余询问的 ``payload``
+    没有 ``floor``、四扇窗口的首问也是 0，故这条闸门在常态下零开销、零变化。
+    """
+    if int(floor) <= 0:
+        return list(candidates)
+    return [
+        action
+        for action in candidates
+        if isinstance(action, Pass)
+        or tier_not_downgraded(need_card_tier(action), floor)
+    ]
+
+
+def need_card_floor(frame: Any, seat: int) -> int:
+    """``seat`` 在这扇需要牌窗口里**已经定下**的优先级档（读 :data:`NEED_CARD_FLOOR_KEY`）。
+
+    缺项 = 0 = 最高档（首问一律全档上脸）。
+    """
+    floors = frame.data.get(NEED_CARD_FLOOR_KEY)
+    if not floors:
+        return 0
+    return int(floors.get(seat, 0))
+
+
+def record_need_card_choice(frame: Any, seat: int, action: Action) -> None:
+    """记下这一次应答选中的**档**：下一次询问据此"不升档"（``Pass`` 不记）。
+
+    调用点只在引擎**拿到应答之后**的统一收口处（``Engine.ask_query`` 的【闪】/ 求桃 与
+    ``Engine.ask_respond`` 的真牌 / 无懈窗口）：窗口随后按"这一次响应成不成立"决定是否
+    :func:`reset_need_card_floor`——提供者没通过时 floor 留着（曹操例），成立时清掉
+    （【无双】的第二张【闪】）。``Pass`` 不记：玩家放弃之后没有"上一档"可谈。
+    """
+    if isinstance(action, Pass):
+        return
+    floors = frame.data.setdefault(NEED_CARD_FLOOR_KEY, {})
+    floors[seat] = need_card_tier(action)
+
+
+def reset_need_card_floor(frame: Any, seat: int | None = None) -> None:
+    """一次需要牌**事件成立**：把 ``seat`` 的 floor 清回 0（``seat=None`` = 清整个帧）。
+
+    "事件成立"的落点由各窗口自己判（它才知道"这一次响应"怎么算成立）：
+    【闪】/【决斗】= 每收下一张牌（【无双】的两张 = 两次事件），求桃 = 那张【桃】开始回复。
+    """
+    if seat is None:
+        frame.data.pop(NEED_CARD_FLOOR_KEY, None)
+        return
+    floors = frame.data.get(NEED_CARD_FLOOR_KEY)
+    if floors:
+        floors.pop(seat, None)
+
+
+def activation_allowed(
+    skill_id: str, tier: int, *, floor: int, used: Sequence[str]
+) -> bool:
+    """**同一时机激活结算**闸门的唯一判据（票 01 §4-3）：两关。
+
+    1. **不升档**（补充一手 §2.1.2.3）：选的这一条 "优先级须在不超过上次的前提下最高"。
+       档值越小越先（``HERO=0 < EQUIPMENT=1 < CARD_USE=2``），故闸门 = ``tier >= floor``：
+       小于 ``floor`` 的档（= 比上次更高优先）不再进面，同档与更低的档照进。
+       这一关的实现是 :func:`tier_not_downgraded`——票 03 的四个需要牌窗口读**同一行**。
+    2. **每技能一次**（补充一手 §2.1.2.2(2)）：本座位本 pass 已经跑过的技能不再进面。
+       ``used`` 是**显式**记录（:attr:`~sgs.state.SkillActivationContext.used`），不再靠
+       答案缓存当去重手段。
+
+    两个输入都由派发环（:func:`sgs.skills.catalog._dispatch`）写进类型化载荷；本函数是
+    候选生成口（:func:`legal_actions_for`）与派发环**共用**的那一份判据——两处各写一遍
+    就会在"这一轮到底能选什么"上漂移。
+    """
+    return tier_not_downgraded(tier, floor) and skill_id not in used
+
+
 def _skill_activation(
     seat: int, answers_seq: int, ctx: SkillActivationContext
 ) -> list[Action]:
-    """"是否发动"：一次询问、候选恒一条**裸** ``ActivateSkill``（票 19 §5 / 票 30；W6-06a）。
+    """"是否发动"：一次询问、**本轮的全部候选**各一条裸 ``ActivateSkill``（票 01 §4）。
 
-    成本 / 载荷由发动后的 ``SkillFlow`` 步骤询问，故这里不再按 ``min_picks`` /
-    ``max_picks`` 把"取 k 张面内位置"的组合烘进 ``picks``（那条两维路径随
-    ``ActivationPlan`` 的载荷字段一起删除，见 W6-06a）。``optional`` 决定放弃候选
-    （"可以 / 必须"是效果属性，与 ``locked`` 正交）。
+    ``ctx.candidates`` 空 ⇒ 旧构造的单候选面（只展开 ``ctx.skill_id``），与改造前逐字节
+    相同；非空 ⇒ 按 ``(技能 id, 档)`` 逐条展开，并过 :func:`activation_allowed` 的两关闸门
+    （``floor`` / ``used``）。成本 / 载荷仍由发动后的 ``SkillFlow`` 步骤询问，故候选依旧
+    不烘焙 ``picks`` / ``choices``（W6-06a）。``optional`` 决定放弃候选——"可以 / 必须"是
+    效果属性，与 ``locked`` 正交。
     """
     del seat
+    if ctx.candidates:
+        faces = tuple(
+            skill_id
+            for skill_id, tier in ctx.candidates
+            if activation_allowed(skill_id, tier, floor=ctx.floor, used=ctx.used)
+        )
+    else:
+        faces = (ctx.skill_id,)
     actions: list[Action] = [
-        ActivateSkill(skill_id=ctx.skill_id, answers_seq=answers_seq)
+        ActivateSkill(skill_id=skill_id, answers_seq=answers_seq) for skill_id in faces
     ]
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))
@@ -932,14 +1309,21 @@ def _skill_activation(
 def _select_option(
     seat: int, answers_seq: int, ctx: SelectOptionContext
 ) -> list[Action]:
-    """选项闭集：每个选项一个候选（缺省**强制选择**，没有 ``Pass``，票 12 §Q6）。
+    """选项闭集：每个**可选中**的选项一个候选（缺省**强制选择**，没有 ``Pass``，票 12 §Q6）。
 
     ``ctx.optional``（票 00 / N4）才多一条 ``Pass``——它是"取消这一步"的合法应答，
     供发动后的技能流水线用；缺省 ``False``，故既有消费者候选一字不变。
+
+    ``ctx.disabled``（票 07；票 02 §4.2 B3）是**显示但不可选**的选项：它们保留在询问的
+    ``options`` 里（投影画成置灰行），但**不进候选**——与 ``StepPool.disabled`` 同语义
+    （"列出来但选不了"），只是走逐步询问这条面。缺省空元组 ⇒ 候选逐条不变。
     """
     del seat
+    disabled = frozenset(ctx.disabled)
     actions: list[Action] = [
-        SelectOption(choice=option, answers_seq=answers_seq) for option in ctx.options
+        SelectOption(choice=option, answers_seq=answers_seq)
+        for option in ctx.options
+        if option not in disabled
     ]
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))
@@ -958,6 +1342,12 @@ def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
     候选（观星与票 10 逐条相同）；整数 = **固定切分**，只给这一个置顶张数。固定值越界
     （``split > count``）是声明 / 实际张数对不上的编程错误 ⇒ fail-closed，不静默截断。
     """
+    if not getattr(ctx, "enumerate_candidates", True):
+        # **不枚举档**（huo-shenzhugeliang 票 02）：只给一条恒等兜底 —— 上排 = 面内前
+        # ``split`` 张（= 交换前的星），即"什么都不换"。界面自己构造答案（结构校验在
+        # :meth:`Engine.ask_arrange`），超时 / AI 的默认因此是**零副作用**的恒等排列。
+        split = 0 if ctx.split is None else int(ctx.split)
+        return [ArrangeCards(order=tuple(range(ctx.count)), split=split, answers_seq=answers_seq)]
     if ctx.split is None:
         splits: tuple[int, ...] = tuple(range(ctx.count + 1))
     else:
@@ -974,6 +1364,31 @@ def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
     ]
 
 
+def _distribute(answers_seq: int, ctx: DistributeContext) -> list[Action]:
+    """计数式分配：**每座 0..``per_seat_max``、合计 ≤ ``max_total``** 的全量枚举。
+
+    顺序即语义的一部分：``counts`` 省略 0 值，故"一个点都不分配"的 ``counts=()``
+    在 :func:`_sort_key` 下键最小、恒排第一——超时兜底取 ``legal_actions[0]`` 因此
+    是"不分配"（确定性、零副作用）。规模：4 人局 35 条、8 人局 165 条（组合数
+    ``C(n + max_total, max_total)``），只在一次【业炎】里出现。
+    """
+    seats = tuple(ctx.seats)
+    limit = max(0, int(ctx.per_seat_max))
+    budget = max(0, int(ctx.max_total))
+    candidates: list[Action] = []
+
+    def walk(index: int, remaining: int, counts: tuple[tuple[int, int], ...]) -> None:
+        if index == len(seats):
+            candidates.append(Distribute(counts=counts, answers_seq=answers_seq))
+            return
+        seat = seats[index]
+        for count in range(0, min(remaining, limit) + 1):
+            walk(index + 1, remaining - count, counts + ((seat, count),) if count else counts)
+
+    walk(0, budget, ())
+    return candidates
+
+
 def _required_hand(
     state: GameState, seat: int, required: str | None
 ) -> list[CardRef]:
@@ -981,6 +1396,8 @@ def _required_hand(
 
     **这是所有"需要某张牌"的响应窗口共用的候选闸门**（B1）：``_dodge``（【闪】）与
     ``_respond``（打出【杀】/ 打出【闪】/ 借刀的使用【杀】/【无懈可击】）都从这里取牌。
+    改判窗口另有 :func:`_required_cards` 的 ``zones`` 档（界【鬼才】"打出一张牌"，
+    M6 票 14 起装备区的牌也进候选）。
 
     判据是**牌名**而不是 :class:`~sgs.state.QueryKind`：【闪】窗口是独立的 ``DODGE``，
     其余五类挤在 ``RESPOND`` 里；按询问种类分支会让 DODGE 绕过闸门（B1 的根因）。
@@ -991,16 +1408,33 @@ def _required_hand(
     共享计数键放宽——火【杀】/ 雷【杀】因此出现在南蛮 / 决斗 / 借刀的响应窗口里；其余
     ``required`` 仍逐字相等）。
 
-    ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**手牌。
+    ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**牌。
+    """
+    return _required_cards(state, seat, required, (Zone.HAND,))
+
+
+def _required_cards(
+    state: GameState,
+    seat: int,
+    required: str | None,
+    zones: tuple[Zone, ...],
+) -> list[CardRef]:
+    """``zones`` 各区里**能当** ``required`` 牌名的实体牌（区序 = ``zones``，区内保持原序）。
+
+    ``zones`` 缺省只有手牌（所有既有窗口）；放宽到装备区只有改判窗口一个消费者：界
+    【鬼才】（§十九 L2037）"打出一张牌"⇒ 手牌 ∪ 装备区，标准版（§九 L958）"一张手牌"
+    ⇒ 只有手牌。区域读 :meth:`~sgs.state.GameState.zone`（唯一入口），不直接摸
+    ``Player`` 的字段——将来多一个候选区时只改 payload，不改这里。
     """
     cards: list[CardRef] = []
-    for card_id in state.player(seat).hand:
-        card = state.card(card_id)
-        if required is not None and not satisfies_required(card, required):
-            continue
-        if check_forbidden(state, seat, card):
-            continue
-        cards.append(card)
+    for zone in zones:
+        for card_id in state.zone(ZoneRef(zone, seat)):
+            card = state.card(card_id)
+            if required is not None and not satisfies_required(card, required):
+                continue
+            if check_forbidden(state, seat, card):
+                continue
+            cards.append(card)
     return cards
 
 
@@ -1037,6 +1471,11 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         return (0, (action.card.card_id, *action.targets), action.kind)
     if isinstance(action, PlayCard):
         return (0, (action.card.card_id,), action.kind)
+    if isinstance(action, SubstituteJudgeCard):
+        # 改判候选（feng-zhangjiao 票 02）：与 `PlayCard` 同档（先按牌 id），**必须**
+        # 排在 `Pass` 之前——漏了这一支就落进兜底键 `(1, …)`，与 `Pass` 同档且
+        # `"Pass" < "SubstituteJudgeCard"` ⇒ "放弃"跑到首位（与票 03 的活锁同一类）。
+        return (0, (action.card.card_id,), action.kind)
     if isinstance(action, Reforge):
         # 重铸带牌实例但没有目标：与其它带牌的构造子同档（先按牌 id），仍排在
         # ``EndPhase``（兜底键）之前——"结束阶段排最后"的既有口径不破（M5-03）。
@@ -1058,6 +1497,10 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         return (0, action.picks, action.kind, action.choices)
     if isinstance(action, DiscardCards):
         return (0, tuple(card.card_id for card in action.cards), action.kind)
+    if isinstance(action, Distribute):
+        # 计数式分配（票 05）：键 = 计数元组本身 ⇒ 全 0 的 ``()`` 最小、恒排首位
+        # （超时兜底 = 不分配）。同一询问里只有这一族，故族内定序即全局定序。
+        return (0, action.counts, action.kind)
     if isinstance(action, ArrangeCards):
         # 排列候选只与排列候选同处一个询问，故键只需在族内定序（票 10）：显式写出
         # ``order`` / ``split``，不靠 `permutations` 的生成顺序当隐式约定。

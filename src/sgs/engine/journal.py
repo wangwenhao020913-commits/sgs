@@ -24,13 +24,23 @@ from sgs.state import (
     CardRef,
     CardRevealDelta,
     ChainedChangeDelta,
+    PindianDelta,
+    FlippedChangeDelta,
     DeckShuffleDelta,
     Delta,
     FrameKind,
     HpChangeDelta,
+    HpMaxChangeDelta,
     IdentityDealDelta,
     IdentityRevealDelta,
+    MarkerChangeDelta,
     Query,
+    SkillGainDelta,
+    SkillLoseDelta,
+    SkillSuppressDelta,
+    TagAddDelta,
+    TagRemoveDelta,
+    TurnChangeDelta,
     WineChangeDelta,
 )
 from sgs.timing import Timing
@@ -44,19 +54,29 @@ __all__ = [
     "ActionRecord",
     "CardMoveRecord",
     "CardRevealRecord",
+    "PindianRecord",
     "ChainedChangeRecord",
+    "FlippedChangeRecord",
+    "MarkerChangeRecord",
     "DeckShuffleRecord",
     "DeltaRecord",
     "FrameRecord",
     "GameEndRecord",
     "Header",
     "HpChangeRecord",
+    "HpMaxChangeRecord",
     "IdentityDealRecord",
     "IdentityRevealRecord",
     "JournalRecord",
     "MalformedAction",
     "QueryRecord",
+    "SkillGainRecord",
+    "SkillLoseRecord",
+    "SkillSuppressRecord",
+    "TagAddRecord",
+    "TagRemoveRecord",
     "TimingRecord",
+    "TurnChangeRecord",
     "WineChangeRecord",
     "dump_journal",
     "read_journal",
@@ -118,8 +138,35 @@ class HpChangeRecord(HpChangeDelta):
     depth: int
 
 
+class HpMaxChangeRecord(HpMaxChangeDelta):
+    """一次**体力上限**变化（M6 票 06）：觉醒技"减 1 点体力上限"。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class ChainedChangeRecord(ChainedChangeDelta):
     """一次横置状态变化（M5-03）：铁索的 toggle 与属性伤害命中的"结算后立即重置"。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class FlippedChangeRecord(FlippedChangeDelta):
+    """一次翻面状态变化：技能把武将牌翻过去 / 回合开始前翻回正面。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class MarkerChangeRecord(MarkerChangeDelta):
+    """一次标记数量变化（票 06）：获得 / 清空（`count=0`）。"""
 
     kind: Literal["delta"] = "delta"
     seq: int
@@ -136,6 +183,63 @@ class WineChangeRecord(WineChangeDelta):
     depth: int
 
 
+class SkillGainRecord(SkillGainDelta):
+    """一次**技能获得**（M6 票 04）：运行时授予的第四种来源。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class SkillLoseRecord(SkillLoseDelta):
+    """一次**技能失去**（M6 票 04）：实例不再存在、不可恢复。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class SkillSuppressRecord(SkillSuppressDelta):
+    """一次**技能失效 / 恢复**（M6 票 04）：座位级记录被加上或撤掉。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class TagAddRecord(TagAddDelta):
+    """一张实体牌被挂上一个标签（M6 票 20）：spec §投影与记录流「标签增删」。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class TagRemoveRecord(TagRemoveDelta):
+    """一张实体牌的标签被清除（M6 票 20）：回合末 / 随来源消失 / 使用或打出。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class TurnChangeRecord(TurnChangeDelta):
+    """一个**回合边界**的事实（M6 票 11）：额外回合开始 / 轮次变化。
+
+    直接落在回合环（帧外、``frame_id = 0``），故坐标与既有的回合级记录一致。
+    """
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class DeckShuffleRecord(DeckShuffleDelta):
     kind: Literal["delta"] = "delta"
     seq: int
@@ -145,6 +249,19 @@ class DeckShuffleRecord(DeckShuffleDelta):
 
 class CardRevealRecord(CardRevealDelta):
     """一张手牌成为公开事实（M5-06）：【火攻】亮出的那一张，牌仍留在手里。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class PindianRecord(PindianDelta):
+    """一次拼点的揭晓（huo-taishici-xunyu 票 03）：拼点弹窗与结果展示的数据面。
+
+    全场可见：揭晓后牌面即公开事实；扣置阶段两张牌还在各自手牌里，故此前没有任何一条
+    delta 带它们的面。
+    """
 
     kind: Literal["delta"] = "delta"
     seq: int
@@ -173,12 +290,22 @@ class IdentityRevealRecord(IdentityRevealDelta):
 DeltaRecord = Annotated[
     CardMoveRecord
     | HpChangeRecord
+    | HpMaxChangeRecord
     | ChainedChangeRecord
+    | FlippedChangeRecord
+    | MarkerChangeRecord
     | WineChangeRecord
     | CardRevealRecord
+    | PindianRecord
     | DeckShuffleRecord
     | IdentityDealRecord
-    | IdentityRevealRecord,
+    | IdentityRevealRecord
+    | SkillGainRecord
+    | SkillLoseRecord
+    | SkillSuppressRecord
+    | TagAddRecord
+    | TagRemoveRecord
+    | TurnChangeRecord,
     Field(discriminator="delta_type"),
 ]
 
@@ -292,16 +419,36 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return CardMoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, HpChangeDelta):
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, HpMaxChangeDelta):
+        return HpMaxChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, ChainedChangeDelta):
         return ChainedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, FlippedChangeDelta):
+        return FlippedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, MarkerChangeDelta):
+        return MarkerChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, WineChangeDelta):
         return WineChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, CardRevealDelta):
         return CardRevealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, PindianDelta):
+        return PindianRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityDealDelta):
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityRevealDelta):
         return IdentityRevealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, SkillGainDelta):
+        return SkillGainRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, SkillLoseDelta):
+        return SkillLoseRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, SkillSuppressDelta):
+        return SkillSuppressRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, TagAddDelta):
+        return TagAddRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, TagRemoveDelta):
+        return TagRemoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, TurnChangeDelta):
+        return TurnChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     return DeckShuffleRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
 
 

@@ -20,8 +20,48 @@
  * 禁用与否只看"这条在不在 ``legal_actions`` 里"，前端不重算"为什么不可支付"
  * （那是引擎的规则）。
  */
+/** 单选项可选确认（B1）：唯一 `SelectOption` 自动选中，不再画选项按钮。
+ *
+ *  出口 = 提示条右端「提交」（送唯一选项）与「放弃」（送 `Pass`）。判据住在
+ *  `pending.js:isSingleOptionalOption`（只看候选形状），本函数只摆版面 / 设选中态。
+ *  取消键（清空选择）在这一形态没有意义，隐藏它，避免与右端「放弃」成为两个同义出口。
+ */
+function renderOptionConfirm(pending) {
+  const actions = pending.legal_actions || [];
+  const index = actions.findIndex(
+    (action) => action.kind === "SelectOption" && !isRightAction(action),
+  );
+  if (index >= 0) state.selectedOption = index;
+  const requirement = (pending.context && pending.context.requirement) || "";
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `${requirement}${requirement ? "：" : ""}`
+      + "点右端「提交」确认，或「放弃」取消。";
+  }
+  $("btn-cancel").hidden = true;
+  $("btn-cancel").disabled = true;
+}
+
+/** A1：洛神连续判定的亮牌确认 = 单选项确认 + 亮牌模板。
+ *
+ *  `renderOptionConfirm` 负责自动选中唯一选项 / 隐藏取消键 / 写"提交 / 放弃"提示；
+ *  `renderReveal` 再把 `judgment_reveal.cards`（有序累积）画进同一个 `#t-options`。
+ *  卡片是**只读**的：`renderReveal` 按 `pending.slots` 决定可点性；这一问没有槽位，
+ *  所以不会把点击判成提交——提交 / 放弃始终只在提示条右端。
+ */
+function renderJudgmentReveal(pending) {
+  renderOptionConfirm(pending);
+  renderReveal(pending);
+}
+
 function renderOptionButtons(pending) {
   const box = $("t-options");
+  // 票 01（自制包·韬·刘备【义起】）：这一问带着**观看授予**（`revealed`）——先把牌面画在
+  // 按钮上面（只读、仅自己可见），再摆 3 个类型按钮。与洛神"亮牌 + 单选项确认"共用同一个
+  // 容器（`#t-options`，随后整体搬进弹窗正文）。
+  if ((pending.revealed || []).length) {
+    renderReveal(pending, { interactive: false, promptHint: false });
+  }
   const dialog = stepDialogKind(pending) === DIALOG_KINDS.choice;
   if (dialog) box.classList.add("suit-options");
   if (dialog) {
@@ -72,19 +112,99 @@ function renderOptionButtons(pending) {
   $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
 }
 
+/** 计数式分配的本地计数（票 05）：同一 `pending.seq` 内跨重绘保留；换问即清零。
+ *
+ * 计数是**本地态**（服务端看不到玩家点了几次），提交时由 :func:`distributionAction`
+ * 拼成候选里那条 `Distribute`；超时同理——前端先把手上的计数交出去，服务端先到点则按
+ * 全 0 代答（`legal_actions[0]`）。
+ */
+function distributionCounts(pending) {
+  const seq = pending && pending.seq !== undefined && pending.seq !== null ? pending.seq : null;
+  if (!state.distribution || state.distribution.seq !== seq) {
+    state.distribution = { seq, counts: {} };
+  }
+  return state.distribution.counts;
+}
+
+/** 当前分配合计（点数总和）。 */
+function distributionTotal(counts) {
+  return Object.values(counts || {}).reduce(
+    (sum, value) => sum + (Number(value) || 0),
+    0,
+  );
+}
+
+/** 计数式分配面（神周瑜移动版【业炎】；huo-shenzhouyu-mobile 票 05）。
+ *
+ *  逐座位一行：点一行 = 计数 +1（合计到上限 / 单座到上限后该行不可点）；
+ *  底下「重置」清零；右端「提交」恒可点（全 0 也是合法分配）。
+ *  与 `renderOptionButtons` 同一个容器（`#t-options`，随后整体搬进弹窗正文）。
+ */
+function renderDistribution(pending) {
+  const box = $("t-options");
+  if (!box) return;
+  const info = pending.distribution || {};
+  const seats = Array.isArray(info.seats) ? info.seats : [];
+  const maxTotal = Number(info.max_total) || 0;
+  const perSeat = Number(info.per_seat_max) || 0;
+  const counts = distributionCounts(pending);
+  const total = distributionTotal(counts);
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `点一行 = 计数 +1；合计至多 ${maxTotal} 点`
+      + `（单座至多 ${perSeat} 点）；可「重置」，随时「提交」。`;
+  }
+  seats.forEach((entry) => {
+    const seat = Number(entry.seat);
+    const label = entry.label
+      || (entry.name ? `${entry.seat}号位${entry.name}` : `${entry.seat}号位`);
+    const count = Number(counts[seat] || 0);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt distribution-row";
+    button.disabled = total >= maxTotal || count >= perSeat;
+    const name = document.createElement("span");
+    name.className = "distribution-name";
+    name.textContent = label;
+    const badge = document.createElement("span");
+    badge.className = "distribution-count";
+    badge.textContent = String(count);
+    button.appendChild(name);
+    button.appendChild(badge);
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      counts[seat] = count + 1;
+      state.lastRejectReason = "";
+      renderPending(state.view);
+    });
+    box.appendChild(button);
+  });
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "opt distribution-reset";
+  reset.textContent = "重置";
+  reset.disabled = total === 0;
+  reset.addEventListener("click", () => {
+    state.distribution = { seq: pending.seq, counts: {} };
+    state.lastRejectReason = "";
+    renderPending(state.view);
+  });
+  box.appendChild(reset);
+}
+
 /** 这一面要画哪些选项值（M5-bugfix）：一次性二选一画**完整的一对**，其余只画候选真有的。
  *
- * 配对来自**已知的一次性选项标签**（:data:`OPTION_LABELS`）——只要候选里有其中一项，
- * 就把整对都画出来；另一项是否可提交仍只看它在不在 ``legal_actions`` 里（引擎裁决），
- * 这里只决定"要不要把另一条画成禁用"。没有一次性选项的步骤（花色等复用枚举）原样。
+ * 配对来自 :data:`OPTION_PAIRS`——只要候选里有同一对的一项，就把整对都画出来；另一项
+ * 是否可提交仍只看它在不在 ``legal_actions`` 里（引擎裁决），这里只决定"要不要把另一条
+ * 画成禁用"。没有一次性选项的步骤（花色等复用枚举）原样，且不会把别的技能的配对摊进来。
  */
 function optionChoices(pending) {
   const legal = ((pending && pending.legal_actions) || [])
     .filter((action) => action.kind === "SelectOption" && !isRightAction(action))
     .map((action) => action.choice);
-  const known = Object.keys(OPTION_LABELS);
-  if (!known.some((choice) => legal.includes(choice))) return legal;
-  return [...new Set([...known, ...legal])];
+  const pair = OPTION_PAIRS.find((choices) => choices.some((choice) => legal.includes(choice)));
+  if (!pair) return legal;
+  return [...new Set([...pair, ...legal])];
 }
 
 /** 服务端下发的选项标签（`{值: {name, symbol, color}}`）；没有就是 `null`。 */
@@ -114,9 +234,9 @@ async function submitDialogChoice(pending, index) {
   await submitAction(before);
 }
 
-/** 一次性二选一的**中文标签**（U2-04）：【雌雄双股剑】的 `discard_one` / `draw_one`。
+/** 一次性二选一的**中文标签**（U2-04）：雌雄双股剑 / 界许褚【裸衣】。
  *
- * 这两个是**一次性**的小选项（spec D3「≤3 且一次性 ⇒ 提示区左侧按钮」），中文名写在
+ * 这些是**一次性**的小选项（spec D3「≤3 且一次性 ⇒ 提示区左侧按钮」），中文名写在
  * 这里；可复用的枚举（花色 / 【杀】的类型 / 锦囊牌名）中文标签属服务端展示契约：
  * 票 08 起花色由载荷的 `option_labels` 下发（见 :func:`optionLabel`），前端不另抄第二份。
  * 查不到标签的值原样显示（fail-visible，不猜中文）。
@@ -131,7 +251,41 @@ async function submitDialogChoice(pending, index) {
 const OPTION_LABELS = Object.freeze({
   discard_one: "弃置 1 张手牌",
   draw_one: "令其摸一张牌",
+  // 界许褚【裸衣】（用户裁定）：亮出三张后的「获得 / 不获得」。
+  luoyi_gain: "获得",
+  luoyi_skip: "不获得",
+  // 攻心（票 01；界吕蒙 ☆ / 神吕蒙移动版共用）：展示红桃后的二选一。
+  discard: "弃置此牌",
+  deck_top: "将此牌置于牌堆顶",
+  // 韬·刘备自制版【从讨】：另一张的去处（两项恒可执行、不可放弃）。
+  congtao_discard: "置入弃牌堆",
+  congtao_deck_top: "放回牌堆顶",
+  // 韬·刘备自制版【义起】：类型三选一（恒三项，必须选一项）。
+  basic: "基本牌",
+  trick: "锦囊牌",
+  equipment: "装备牌",
+  // 风包·移动版于吉【蛊惑】：其他角色逐个表态（两选项，必答；"相信"就是放弃质疑）。
+  guohuo_doubt: "质疑",
+  guohuo_trust: "相信",
+  // 风包夏侯渊【神速】：一至两项（三档单选项；"两项都选"是【1】+【2】）。
+  shensu_skip_judge_draw: "【1】跳过判定阶段和摸牌阶段",
+  shensu_skip_play_equip: "【2】跳过出牌阶段并弃置一张装备牌",
+  shensu_both: "两项都选",
+  // 火包移动版典韦【强袭】（huo-dianwei-mobile 票 01）：代价二选一（可以放弃）。
+  qiangxi_lose_hp: "失去1点体力",
+  qiangxi_discard_weapon: "弃置一张武器牌",
 });
+
+/** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。
+ *
+ * 不能把 :data:`OPTION_LABELS` 的所有键一把摊开：两张技能各有各的一对，摊开会让
+ * 【雌雄双股剑】的询问多出两个永远禁用的「获得 / 不获得」。配对是**通用**的展示
+ * 形状，不按技能 id 分支；合法性仍只看候选里有没有那一条。
+ */
+const OPTION_PAIRS = Object.freeze([
+  Object.freeze(["discard_one", "draw_one"]),
+  Object.freeze(["luoyi_gain", "luoyi_skip"]),
+]);
 
 /** 选项按钮上的文字：已知的一次性选项用中文；其余选项保留**原值**（复用标签待票 08）。 */
 function optionText(choice, pending) {
@@ -176,13 +330,42 @@ function selectionError(action, pending) {
   return null;
 }
 
-/** 技能候选的动作短语（U2-03 直提态）：技能名读服务端下发的 `view.skills`，
- *  前端不在这里抄中文名；查不到时退回技能 id（fail-visible，不猜名字）。 */
-function skillActionLabel(action) {
+/** 动作种类 → 中文短语（U4-06 / D13）。
+ *
+ * 投影只把**人类自己的**应答展开；别人的 action 只剩 `kind` / `answers_seq`。事件流与
+ * 中央「当前动作」因此必须能读**裁过的**载荷：这里给每个已知种类一句中性中文，
+ * **不**回退到英文构造子名（`UseCard` / `ArrangeCards` / `SelectOption`），也不猜细节。
+ */
+const ACTION_KIND_LABELS = Object.freeze({
+  UseCard: "使用牌",
+  PlayCard: "打出牌",
+  SubstituteJudgeCard: "改判",
+  ActivateSkill: "发动技能",
+  SelectCards: "选牌",
+  SelectOption: "做出选择",
+  ArrangeCards: "排列手牌",
+  DiscardCards: "弃牌",
+  Reforge: "重铸",
+  EndPhase: "结束出牌阶段",
+  Pass: "放弃",
+});
+
+/** 技能动作的中文名：`action.skill_name`（服务端接入层展示表）优先；旧载荷退回
+ *  `view.skills` 的展示名；都查不到才退回 skill_id（fail-visible，前端不新建映射）。 */
+function skillActionName(action) {
+  if (action && action.skill_name) return action.skill_name;
   const skill = (((state.view && state.view.skills) || []).find(
     (item) => item.skill_id === action.skill_id,
   ));
-  return `发动【${skill && skill.name ? skill.name : action.skill_id}】`;
+  if (skill && skill.name) return skill.name;
+  return action.skill_id || null;
+}
+
+/** 技能候选的动作短语（U2-03 直提态）：技能名读服务端下发的 `view.skills`，
+ *  前端不在这里抄中文名；查不到时退回技能 id（fail-visible，不猜名字）。 */
+function skillActionLabel(action) {
+  const name = skillActionName(action);
+  return name ? `发动【${name}】` : "发动技能";
 }
 
 function actionLabel(action) {
@@ -190,13 +373,18 @@ function actionLabel(action) {
     const targets = action.targets && action.targets.length ? ` → 座位 ${action.targets.join("、")}` : "";
     return `使用【${cardName(action.card)}】${targets}`;
   }
+  if (action.kind === "SubstituteJudgeCard") {
+    // 改判**不是打出**（feng-zhangjiao 票 02）：事件流写「改判【…】」，不写「打出 / 使用」。
+    return action.card ? `改判【${cardName(action.card)}】` : "改判";
+  }
   if (action.kind === "Reforge") {
     // 重铸不是使用（M5-08b / D6）：事件流与任何候选文案都写「重铸」，不落英文构造子名。
     // 投影对**别人的**应答会裁掉 card（只留 kind / answers_seq）：没有牌面时只写动作。
     return action.card ? `重铸【${cardName(action.card)}】` : "重铸";
   }
   if (action.kind === "ActivateSkill") {
-    return `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
+    const picks = action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : "";
+    return `${skillActionLabel(action)}${picks}`;
   }
   if (action.kind === "SelectCards") return "选牌";
   if (action.kind === "SelectOption") {
@@ -207,7 +395,7 @@ function actionLabel(action) {
   if (action.kind === "DiscardCards") return `弃牌（${(action.cards || []).length} 张）`;
   if (action.kind === "EndPhase") return "结束出牌阶段";
   if (action.kind === "Pass") return "放弃";
-  return action.kind;
+  return ACTION_KIND_LABELS[action.kind] || "应答";
 }
 
 /** 右端动作在候选里的下标；`-1` = 当前询问没有这一条（按钮隐藏）。 */
@@ -228,13 +416,17 @@ function renderRightActions(pending, view = state.view) {
   const dialogKind = pending ? stepDialogKind(pending) : null;
   // 弹窗步骤没有「放弃」：判据与 `cancelAction` / `refreshSubmit` 共用一处
   // （`modal.js:dialogDisablesPass`，评审 Standards：重复谓词）。
-  const dialogWithoutPass = dialogDisablesPass(dialogKind);
+  const dialogWithoutPass = dialogDisablesPass(dialogKind, pending);
   const endIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.endPhase) : -1;
+  // 票 01：涉猎的「放弃」不是一条 `Pass` 候选，而是"提交当前选择"的第二个出口（与「提交」
+  // 同义）。它不走候选下标，单独标记；点击由 `answer.js:submitRightAction` 特判。
+  const suitForm = own && !!pending && isSuitPickStep(pending);
   const passIndex = own && !dialogWithoutPass
     ? rightActionIndex(pending, RIGHT_ACTION_KINDS.pass)
     : -1;
   // 被动入口的「取消」本身就是「放弃」（送出那条 Pass）：不再复制一个同义的右端按钮。
   const cancelIsPass = passIndex >= 0 && isPassivePreativation(pending);
+  const passVisible = passIndex >= 0 || suitForm;
   const end = $("btn-end-phase");
   const pass = $("btn-pass");
   if (end) {
@@ -242,11 +434,13 @@ function renderRightActions(pending, view = state.view) {
     end.disabled = state.playback || endIndex < 0;
   }
   if (pass) {
-    pass.hidden = passIndex < 0 || cancelIsPass;
-    pass.disabled = state.playback || passIndex < 0 || cancelIsPass;
-    pass.textContent = passIndex >= 0
-      ? alternativeLabel(pending, pending.legal_actions[passIndex])
-      : "放弃";
+    pass.hidden = !passVisible || cancelIsPass;
+    pass.disabled = state.playback || !passVisible || cancelIsPass;
+    pass.textContent = suitForm
+      ? "放弃"
+      : (passIndex >= 0
+        ? alternativeLabel(pending, pending.legal_actions[passIndex])
+        : "放弃");
   }
 }
 
@@ -261,22 +455,46 @@ function resetRightActions() {
   }
 }
 
-/** 只从自己手里选一张的**牌桌步**（M5-08a 火攻同花色弃牌）：不铺槽位块，直接点手牌。
+/** 只从自己手牌 / 装备区选一张的**牌桌步**（火攻 / 铁骑同花色弃牌）：不铺槽位块，直接点牌。
  *
- * 提交键恒灰（点手牌就是一次提交）；「放弃」在右端，是候选里真有的那条 `Pass`。
+ * 提交键恒灰（点牌就是一次提交）；「放弃」在右端，是候选里真有的那条 `Pass`。
  */
 function renderOwnHandPick(pending) {
   const index = (pending.legal_actions || []).findIndex((action) => action.kind === "SelectCards");
   if (index >= 0) state.selectedOption = index;
   const hint = $("t-target-hint");
   if (hint) {
-    const requirement = (pending.context && pending.context.requirement) || "选择一张手牌";
-    hint.textContent = `${requirement}：点一张亮起的手牌即提交；也可以点右端「放弃」。`;
+    const requirement = (pending.context && pending.context.requirement) || "选择一张牌";
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    hint.textContent = `${requirement}：点一张亮起的${where}即提交；也可以点右端「放弃」。`;
   }
   $("btn-cancel").disabled = true;
 }
 
-/** 只从自己手里选一张：点一张手牌 = **恰一条** `SelectCards`（面内位置）。
+/** 从自己手牌 / 装备区选**多张**的牌桌步（结姻两张 / 贯石斧两张等）：同样不铺槽位块。
+ *
+ * 点牌 = 收进 / 移出 `state.picks`（面内位置）；「提交」按候选骨架补 `picks` 后送出，
+ * 右端「放弃」是候选里真有的那条 `Pass`。
+ */
+function renderOwnZonePick(pending) {
+  const index = (pending.legal_actions || []).findIndex(
+    (action) => action.kind === "SelectCards");
+  if (index >= 0) state.selectedOption = index;
+  const hint = $("t-target-hint");
+  if (hint) {
+    const requirement = (pending.context && pending.context.requirement) || "选择牌";
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    const least = Math.max(1, Number(total[0]) || 1);
+    const most = Math.max(least, Number(total[1]) || least);
+    const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
+    hint.textContent = `${requirement}：点选${where}中的 ${howMany}，再点「提交」；`
+      + "也可以点右端「放弃」。";
+  }
+  $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
+}
+
+/** 只从自己手牌 / 装备区选一张：点一张牌 = **恰一条** `SelectCards`（面内位置）。
  *
  * 送出的仍是 `legal_actions` 里的那条骨架（`buildAction` 补 `picks`），不手拼 Action；
  * 与未知区域 / 亮牌模板的「一击即提交」同一姿态。合成载荷 / 尚未建局时只留内部态。
@@ -321,6 +539,11 @@ function reforgeAction(pending, cardId) {
  * 只在手选路（出牌阶段）且**已选中一张可重铸的牌**时出现；按钮点一下即提交一条
  * ``Reforge``（见 :func:`submitReforge`）。它不铺目标、不进目标选择，也不开门。
  * 弹窗步骤里 `selectionEnabled()` 为假，入口不出现（只读判据不另写一份）。
+ *
+ * **牌名级预发动与重铸并存**（票 05 / 缺陷 A 的落法 = 并存）：♣【借刀杀人】这类牌同时有
+ * `pending.card_preactivations` 的两步清单与【连环】授予的 ``Reforge``。点牌给焦点后
+ * （`card-face.js:activateCard`），这里除了「重铸」再并列一个「使用【X】」——清单仍是
+ * **使用**的入口，不进重铸；把重铸塞进清单会与"重铸不是使用"的口径打架。
  */
 function renderReforgeEntry(pending) {
   if (!isHandPick(pending) || state.focusCardId === null) return;
@@ -334,6 +557,29 @@ function renderReforgeEntry(pending) {
   button.textContent = `重铸【${cardName(action.card)}】`;
   button.title = "重铸：弃置这张牌并摸一张牌（不算使用，不消耗使用次数）。";
   button.addEventListener("click", () => submitReforge(pending, action));
+  $("t-options").appendChild(button);
+  renderCardPreativationEntry(pending, action.card);
+}
+
+/** 焦点手牌若**另有**牌名级预发动（服务端下发的清单），并列一个「使用【X】」入口（票 05）。
+ *
+ * 点牌已改由重铸入口接管（见 `card-face.js:activateCard`），使用方向不能再没有入口——
+ * 裸【借刀杀人】在 `legal_actions` 里**没有** ``UseCard`` 候选（`tests/test_web.py` 钉），
+ * 清单就是它唯一的使用路径。判据只读服务端下发的 `pending.card_preactivations[card.type]`，
+ * 前端不认牌名。
+ */
+function renderCardPreativationEntry(pending, card) {
+  const manifest = cardPreactivationManifest(pending, card);
+  if (!manifest) return;
+  // 优先用快照里的**展示副本**（候选里那张牌故意不带 `display_*`，见 `core.js:cardName`）。
+  const shown = selfHandCard(card.card_id) || card;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "opt";
+  button.setAttribute("data-preactivation-card", String(card.card_id));
+  button.textContent = `使用【${cardName(shown)}】`;
+  button.title = `按清单逐步选${preactivationPickWording(manifest)}；重铸不走清单。`;
+  button.addEventListener("click", () => enterCardPreativation(pending, shown, manifest));
   $("t-options").appendChild(button);
 }
 
@@ -364,6 +610,11 @@ function renderSlots(pending) {
   // 亮牌模板（票 11 五谷 / 票 12 遗计）：全部亮牌 + 目标条；**不**走下面那条
   // 「隐藏区域的槽位只有位置」的旧选择面（公开处理区的牌面是可见的）。
   const dialogKind = stepDialogKind(pending);
+  // 票 01：按花色取牌（涉猎）——一行公开亮牌 + 同花色置灰，单独一个模板。
+  if (dialogKind === DIALOG_KINDS.suit) {
+    renderSuitPick(pending, { interactive: true });
+    return;
+  }
   if (dialogKind === DIALOG_KINDS.reveal) {
     renderReveal(pending, { interactive: true });
     return;
@@ -373,6 +624,12 @@ function renderSlots(pending) {
   // 下面的既有槽位面——它们各有自己的模板（票 11 / 12）。
   if (dialogKind === DIALOG_KINDS.unknown) {
     renderUnknownZone(pending);
+    return;
+  }
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：与常规卡牌**同一套牌面**（花色 / 点数 / 牌名
+  // / 类型行 / 悬停说明），点一张 = 选中它；提交走既有的 `isSingleOptionalOption` / 候选条。
+  if (dialogKind === DIALOG_KINDS.heroPick) {
+    renderHeroZonePick(pending);
     return;
   }
   const box = $("t-options");
@@ -399,6 +656,48 @@ function renderSlots(pending) {
       renderPending(state.view);
     });
     row.appendChild(chip);
+  });
+  box.appendChild(row);
+}
+
+/** 武将牌上的牌点选（huo-shenzhugeliang 票 02）：一行**完整牌面**（`cardFaceNode`），点选即
+ *  进 `state.picks`；与其余选择面的按钮语义相同（选中 → 右端「提交」/ 单张即点即提交）。
+ *
+ *  与 :func:`renderSlots` 的通用槽位面的差别只有牌面：那些是"隐藏区域只有位置"或"公开
+ *  亮牌"，这里是**宿主看得见的**自己武将牌上的牌（「星」），故按常规卡面画花色 / 点数。 */
+function renderHeroZonePick(pending) {
+  const box = $("t-options");
+  const heading = document.createElement("div");
+  heading.className = "small";
+  const cap = selectionCap(pending);
+  const pickText = cap === 1 ? "选择一张" : `选择一至 ${cap} 张`;
+  heading.textContent = `武将牌上的牌（只有你可见）：这一步${pickText}，点选后提交。`;
+  box.appendChild(heading);
+  const row = document.createElement("div");
+  row.className = "cards";
+  (pending.slots || []).forEach((slot, index) => {
+    if (!slot.card) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "card";
+      chip.textContent = "？";
+      chip.addEventListener("click", () => {
+        toggleSlotPick(pending, index);
+        renderPending(state.view);
+      });
+      row.appendChild(chip);
+      return;
+    }
+    row.appendChild(
+      cardFaceNode(slot.card, {
+        selected: state.picks.includes(index),
+        bottomLine: "武将牌上",
+        onClick: () => {
+          toggleSlotPick(pending, index);
+          renderPending(state.view);
+        },
+      }),
+    );
   });
   box.appendChild(row);
 }
@@ -534,7 +833,11 @@ function selectionCap(pending) {
  */
 function toggleSlotPick(pending, index) {
   // 选择面槽位是牌桌选择入口（D8）：只读态里 no-op，与点牌 / 点座共用一条判据。
-  if (!selectionEnabled()) return;
+  // 例外：武将牌上的牌点选（huo-shenzhugeliang 票 02）的**正文就在弹窗里**，此时
+  // `selectionEnabled()` 为假（弹窗开着 = 牌桌不可选）——但那一面必须可点。
+  if (!selectionEnabled() && stepDialogKind(state.view ? state.view.pending : null) !== DIALOG_KINDS.heroPick) {
+    return;
+  }
   const at = state.picks.indexOf(index);
   if (at >= 0) {
     state.picks.splice(at, 1);
