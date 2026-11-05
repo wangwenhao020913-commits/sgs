@@ -16177,6 +16177,51 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `floats=${floats().length} pending=${(ui.state.skillEvents || []).length}`
       + ` sweeps=${allHeroBlocks().filter((b) => hasClass(b, "skill-sweep")).length}`);
 
+  // ---- lei 票 06：**锁定技**（【父荫】这类不问"是否发动"的）也要演出 ----
+  // 载荷与响应体同形：`skill_events` 由服务端从引擎的发动缓冲派生（记录面没有
+  // `ActivateSkill` 应答），seq 锚在那条派发它的 `timing` 记录上。前端判据一字不改——
+  // 这里断的就是"同键同型喂进去就演出"，没有为技能名 / 技能 id 加分支。
+  const becomeTarget = (seq, actor, source, targets) => ({
+    kind: "timing", timing: "USE_AFTER_BECOME_TARGET", seq, frame_id: 5, depth: 1,
+    actor, source, targets, cards: [],
+  });
+  loadSkillBatch(
+    [query(1, 1), becomeTarget(2, 1, 2, [1])],
+    [skillEvent(2, 1, "父荫", [])],
+  );
+  step(2);
+  check("U3-04k 锁定技的发动事件（没有激活应答）：父荫在持有者武将块飘字 + 白光，不画线",
+    floats().length === 1
+      && floats()[0].textContent === "父荫"
+      && attr(floats()[0], "data-skill-seat") === "1"
+      && hasClass(heroBlockOf(1), "skill-sweep")
+      && lineNodes().length === 0,
+    `floats=${floats().map((item) => item.textContent).join(",")}`
+      + ` sweep=${hasClass(heroBlockOf(1), "skill-sweep")} lines=${lineNodes().length}`);
+
+  // ---- lei 票 06：**转化技**（【武圣】这类确认后走普通 UseCard 的）同样演出 ----
+  // 记录部分与 U3-04g 同形（query → UseCard）；区别只在服务端多下发了一条
+  // `skill_events`。于是"使用牌本身不飘技能名"仍然成立（U3-04g），而转化技这次使用会飘
+  // ——前端不需要知道这条使用是哪条技能转的。白光按发动那一步读（animScale = 0 时到点即
+  // 摘类，与 U3-04c 同一姿态）。
+  loadSkillBatch(
+    [query(1, 2), useAction(2)],
+    [{ seq: 2, seat: 2, skill_id: "hero.guanyu.wusheng", name: "武圣", targets: [0] }],
+  );
+  step(2);
+  const convertSweep = hasClass(heroBlockOf(2), "skill-sweep");
+  check("U3-04l 转化技的发动事件：武圣在发动者武将块飘字 + 白光，并画线到目标",
+    floats().length === 1
+      && floats()[0].textContent === "武圣"
+      && attr(floats()[0], "data-skill-seat") === "2"
+      && convertSweep
+      && lineNodes().length === 1
+      && attr(lineNodes()[0], "data-line-from") === "2"
+      && attr(lineNodes()[0], "data-line-to") === "0",
+    `floats=${floats().map((item) => item.textContent).join(",")}`
+      + ` sweep=${convertSweep}`
+      + ` lines=${lineNodes().map((item) => `${attr(item, "data-line-from")}->${attr(item, "data-line-to")}`).join(",")}`);
+
   ui.state.effectCards = [];
   ui.state.revealedCards = [];
   ui.state.animScale = 1;

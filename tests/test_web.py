@@ -9987,6 +9987,375 @@ def test_skill_events_do_not_special_case_which_skill_specifies_targets() -> Non
 
 
 # ---------------------------------------------------------------------------
+# lei 票 06：**非修饰类**技能的每一次发动都要产 `skill_events`（用户 2026-11-05 口径）
+#
+# U3-04 起这条通道只派生「已接受、且 `kind == ActivateSkill`」的动作记录——于是两类技能
+# 一条都不产：
+#   1. **锁定技**（【父荫】）：没有"是否发动"询问，派发环直接跑 handler，记录里没有应答；
+#   2. **转化技**（【武圣】/【国色】）：确认被解析成**普通使用**（`_conversion_confirmation`
+#      落的是解析后的 `UseCard`），记录里没有技能归属。
+# 本票把两类补进**同一条**通道，判据仍读公共事实、仍落在现有 `skill_events` 形状上
+# （前端一字不改，未来新技能自动获得特效）：
+#
+#   A. 记录流：已接受、且**点名了技能**的动作（`ActivateSkill` / `SubstituteJudgeCard`）；
+#   B. 引擎的发动缓冲 `Engine.skill_activations`：派发环对**真正跑过**的每个非修饰类技能
+#      （锁定技 / 强制段同路径）追加一条；转化技在候选被接受、进入使用链时追加一条。
+#
+# 修饰器-only 技能没有"发动瞬间"，因此不会被 B 记到（它们从不经过派发环）。
+# ---------------------------------------------------------------------------
+
+
+def _fuyin_engine() -> Engine:
+    """诸葛瞻（座位 0）被座位 1 的【杀】指定：**父荫生效**（锁定技，没有激活询问）。
+
+    与 `tests/test_hero_lei.py::test_fuyin_makes_the_first_slash_ineffective` 同一局面：
+    走到【杀】结算完就停（不进罪论的结束阶段），记录流里因此**一条 `ActivateSkill`
+    都没有**——这正是本条要钉的：特效不能靠激活应答。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            # 手牌 0 张：生效时点（B6）的手牌数比较恒成立（使用者手里至少还有摸牌阶段的牌）。
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3, hand=()),
+            SeatSpec(hand=(slash,)),
+        ],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id != slash),
+        turn_seat=1,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    class _Attacker:
+        def __init__(self) -> None:
+            self.played = False
+
+        def respond(self, query):
+            kind = str(getattr(query.kind, "value", query.kind))
+            if kind == "PLAY_PHASE" and not self.played:
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == "slash":
+                        self.played = True
+                        return action
+            return query.legal_actions[0]
+
+    class _Victim:
+        """成为【杀】的目标：自己的出牌阶段直接结束、技能一律不发动、**【闪】窗口放弃**
+        （故"没有掉体力"只能是父荫）；其余询问取第一个合法项。
+
+        不发动技能是为了让手牌数保持"不大于使用者"——父荫的触发条件之一。
+        """
+
+        def respond(self, query):
+            kind = str(getattr(query.kind, "value", query.kind))
+            if kind == "PLAY_PHASE":
+                return next(
+                    action for action in query.legal_actions if isinstance(action, EndPhase)
+                )
+            if kind in ("SKILL_ACTIVATION", "DODGE"):
+                return next(
+                    action for action in query.legal_actions if isinstance(action, Pass)
+                )
+            return query.legal_actions[0]
+
+    attacker = _Attacker()
+    victim = _Victim()
+
+    def _slash_resolved(engine: Engine) -> bool:
+        return any(
+            getattr(record, "kind", None) == "timing"
+            and record.timing == Timing.RESOLVE_AFTER_END
+            and any(card.type == "slash" for card in record.cards)
+            for record in engine.records
+        )
+
+    run_queries(engine, [victim, attacker], _slash_resolved)
+    assert engine.state.player(0).hp == 3, "父荫生效：这张【杀】对诸葛瞻无效（没掉体力）"
+    return engine
+
+
+def test_skill_events_cover_a_locked_skill_that_never_asks_to_activate() -> None:
+    """【父荫】：锁定技（派发环直接跑 handler）也要产一条发动事件。
+
+    记录流里**没有** `ActivateSkill` 应答 ⇒ 这条只能来自引擎的发动缓冲；`seq` 锚在产生它
+    的那条记录上（这里是 `USE_AFTER_BECOME_TARGET` 的 `timing` 记录）。
+    """
+    from sgs_web.projection import skill_events_after
+
+    engine = _fuyin_engine()
+    accepted = [
+        record.action.kind
+        for record in engine.records
+        if getattr(record, "kind", None) == "action"
+        and getattr(record, "accepted", False)
+    ]
+    assert "ActivateSkill" not in accepted, (
+        f"父荫生效这一路不该有激活应答（否则这条用例证明不了什么）：{accepted}"
+    )
+
+    timing_seq = [
+        record.seq
+        for record in engine.records
+        if getattr(record, "kind", None) == "timing"
+        and record.timing == Timing.USE_AFTER_BECOME_TARGET
+        and record.actor == 0
+    ]
+    assert len(timing_seq) == 1, "父荫生效的那次派发先落一条 USE_AFTER_BECOME_TARGET 记录"
+
+    events = skill_events_after(
+        engine.records,
+        after=-1,
+        state=engine.state,
+        activations=engine.skill_activations,
+    )
+    fuyin = [event for event in events if event["skill_id"] == "hero.zhugezhan.fuyin"]
+    assert len(fuyin) == 1, f"父荫生效必须恰好产一条发动事件：{events}"
+    assert fuyin[0] == {
+        "seq": timing_seq[0],  # 锚在产生它的那条记录（派发前刚落下的 timing 记录）
+        "seat": 0,  # 技能持有者＝这次成为目标的人
+        "skill_id": "hero.zhugezhan.fuyin",
+        "name": "父荫",  # 中文名仍取接入层展示表
+        "targets": [],  # 锁定技没有"指定目标"，只飘名 + 白光
+    }, fuyin[0]
+
+
+def _wusheng_engine(*, submit: str) -> Engine:
+    """关羽（座位 0）用【武圣】把一张红【闪】当【杀】对座位 1 使用。
+
+    ``submit`` 选**哪条提交路**（两条路的记录面都只有普通使用，都没有技能归属）：
+
+    - ``"confirm"``：人类 / 界面的路——`ActivateSkill(武圣, picks, choices)` 由服务端
+      解析成 `UseCard(虚拟杀, (1,))`；
+    - ``"direct"``：回放磁带 / AI 的路——直接提交内部池（`transform_actions`）里的那条。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="guanyu", hp=4, hp_max=4, hand=(dodge,)),
+            SeatSpec(hand=()),
+        ],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id != dodge),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    used: dict[str, object] = {}
+
+    class _Guanyu:
+        def respond(self, query):
+            kind = str(getattr(query.kind, "value", query.kind))
+            if kind == "PLAY_PHASE" and "action" not in used:
+                if submit == "confirm":
+                    used["action"] = ActivateSkill(
+                        skill_id="hero.guanyu.wusheng",
+                        picks=(dodge,),
+                        choices=("seat:1",),
+                        answers_seq=query.seq,
+                    )
+                else:
+                    used["action"] = next(
+                        action
+                        for action in query.transform_actions
+                        if action.card.type == "slash" and action.targets == (1,)
+                    )
+                return used["action"]
+            return query.legal_actions[0]
+
+    class _Victim:
+        def respond(self, query):
+            return query.legal_actions[-1]
+
+    run_queries(
+        engine,
+        [_Guanyu(), _Victim()],
+        lambda e: "action" in used and e.pending is None,
+    )
+    engine.submitted = used["action"]  # 测试用：保留本次提交，便于断言"走的是哪条路"
+    return engine
+
+
+def test_skill_events_cover_a_conversion_skill_that_becomes_a_plain_use() -> None:
+    """转化技（【武圣】）：确认被解析成普通 `UseCard`，记录面没有技能归属 ⇒
+    引擎在候选被接受、进入使用链时记一条；两条提交路（界面确认 / 内部池直提）都覆盖。
+    """
+    from sgs_web.projection import skill_events_after
+
+    for path in ("confirm", "direct"):
+        engine = _wusheng_engine(submit=path)
+        accepted = [
+            record.action
+            for record in engine.records
+            if getattr(record, "kind", None) == "action"
+            and getattr(record, "accepted", False)
+        ]
+        assert [getattr(action, "kind", None) for action in accepted] == ["UseCard"], (
+            f"{path} 这条路的记录面只有普通使用（没有 ActivateSkill）：{accepted}"
+        )
+        assert accepted[0].card.is_virtual, "落账的是虚拟牌（转化产物）"
+
+        events = skill_events_after(
+            engine.records,
+            after=-1,
+            state=engine.state,
+            activations=engine.skill_activations,
+        )
+        wusheng = [event for event in events if event["skill_id"] == "hero.guanyu.wusheng"]
+        assert len(wusheng) == 1, f"{path}：转化技必须恰好产一条发动事件：{events}"
+        assert isinstance(wusheng[0]["seq"], int), "seq 与 records 同一套游标"
+        assert wusheng[0]["seat"] == 0, wusheng[0]
+        assert wusheng[0]["name"] == "武圣", wusheng[0]
+        assert wusheng[0]["targets"] == [1], (
+            f"{path}：使用牌的目标是公开事实，可以直接画线：{wusheng[0]}"
+        )
+
+
+def test_skill_events_cover_an_accepted_action_that_names_its_skill() -> None:
+    """判据是「**已接受的动作点名了技能**」，不按动作种类打表。
+
+    `SubstituteJudgeCard`（【鬼才】/【鬼道】）自带 `skill_id`，但它不是 `ActivateSkill`：
+    旧判据把它整类漏掉，与技能名无关。改判没有"指定目标"的口径 ⇒ `targets` 空。
+    """
+    from sgs_web.projection import skill_events_after
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, player_count=2).engine.state
+    records = [
+        {"kind": "query", "seq": 1, "query": {"actor": 0}},
+        {
+            "kind": "action",
+            "seq": 2,
+            "accepted": True,
+            "action": {
+                "kind": "SubstituteJudgeCard",
+                "answers_seq": 1,
+                "skill_id": "hero.simayi.guicai",
+            },
+        },
+    ]
+    events = skill_events_after(records, after=-1, state=state)
+    assert [(event["skill_id"], event["name"], event["targets"]) for event in events] == [
+        ("hero.simayi.guicai", "鬼才", []),
+    ], f"改判的动作自带技能归属，应当照样产一条：{events}"
+
+
+def test_an_unknown_locked_skill_gets_the_effect_without_any_table(monkeypatch) -> None:
+    """**通用性**：一条"仓里谁都不认识"的锁定技，只凭声明就自动有特效。
+
+    这条防的是"判据里混进技能白名单"：合成一条 ``locked`` 技能（登记进 ``CATALOG`` +
+    授予座位），它挂一个什么都不做的 ``handler``——真实引擎派发环跑它，接入层照样产出
+    ``{seat, skill_id, name(=skill_id 回退), targets: []}``。没有任何一处按技能名 / 技能 id
+    分支，未来新技能因此自动被覆盖。
+    """
+    from types import MappingProxyType
+
+    from sgs.skills import CarrierKind, Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+    from sgs_web.projection import skill_events_after
+
+    synthetic = "test.lei06.synthetic_locked"
+
+    def _noop(host, frame):  # noqa: ANN001 - 与 handler 协议一致
+        return None
+
+    definitions = dict(catalog_module.CATALOG)
+    definitions[synthetic] = SkillDef(
+        skill_id=synthetic,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.PHASE_DRAW, handler=_noop),),
+    )
+    monkeypatch.setattr(catalog_module, "CATALOG", MappingProxyType(definitions))
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(60, 108)),
+        turn_seat=0,
+        phase=Phase.DRAW,
+    )
+    state.player(0).granted_skills.append(synthetic)
+    engine = Engine.from_state(state, seed=3)
+    # 走到"合成技能真的跑过一次"为止（它挂在 PHASE_DRAW 上，两次 _step 内就到）。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: len(e.skill_activations) > 0,
+    )
+
+    events = skill_events_after(
+        engine.records,
+        after=-1,
+        state=engine.state,
+        activations=engine.skill_activations,
+    )
+    ours = [event for event in events if event["skill_id"] == synthetic]
+    assert len(ours) == 1, f"合成锁定技必须恰好产一条发动事件（不靠技能白名单）：{events}"
+    assert ours[0]["seat"] == 0, ours[0]
+    assert ours[0]["name"] == synthetic, "展示表里没有它就退回 skill_id（fail-visible）"
+    assert ours[0]["targets"] == [], ours[0]
+
+
+def test_every_non_modifier_catalog_skill_has_an_activation_channel() -> None:
+    """**通用性**：遍历技能定义（``CATALOG``），每条**非修饰类**技能都落在一条
+    「产出发动事实」的载体上 —— 未来的新技能因此自动有特效，不靠人记。
+
+    判据只读声明的**载体**（不读技能名）：
+
+    - ``hooks`` / ``seams`` ⇒ 派发环跑它：锁定技 / 觉醒技 / 强制段走引擎的发动缓冲，
+      其余走已接受的 ``ActivateSkill``（两条汇进同一个 ``skill_events`` 通道）；
+    - ``virtual_type_ids`` ⇒ 转化技（候选被接受时引擎记一条）；
+    - ``rejudge_capable`` ⇒ 改判（``SubstituteJudgeCard`` 自带 ``skill_id``）；
+    - 在 ``ACTIVATION_PLANS`` 里 ⇒ 出牌阶段的主动技（``ActivateSkill`` 记录）。
+
+    只有 ``modifiers`` 的**纯修饰器**技能没有独立的"发动瞬间"（用户口径允许不画），故
+    豁免——它们从不经过派发环，缓冲也不会记到它们。将来若出现**第六种载体机制**而没接上
+    上面四条通道之一，这条会红：那时必须同时补上"它怎么产出发动事实"，否则新技能会静默
+    没有特效。
+    """
+    from sgs.skills import ACTIVATION_PLANS, CATALOG
+
+    channels: dict[str, tuple[str, ...]] = {}
+    for skill_id, definition in CATALOG.items():
+        carried = tuple(
+            name
+            for name, present in (
+                ("派发环（钩子 / 接缝）", bool(definition.hooks or definition.seams)),
+                ("转化技", bool(definition.virtual_type_ids)),
+                ("改判", bool(definition.rejudge_capable)),
+                ("出牌阶段主动技", skill_id in ACTIVATION_PLANS),
+            )
+            if present
+        )
+        channels[skill_id] = carried
+
+    uncovered = {
+        skill_id: definition
+        for skill_id, definition in CATALOG.items()
+        if not channels[skill_id] and not definition.modifiers
+    }
+    assert not uncovered, (
+        "这些技能既没有发动载体、也不是纯修饰器 ⇒ 它们的发动**没有**任何公共事实可派生：\n"
+        + "\n".join(
+            f"  - {skill_id}：hooks={definition.hooks} seams={definition.seams} "
+            f"virtual={definition.virtual_type_ids} modifiers={definition.modifiers}"
+            for skill_id, definition in uncovered.items()
+        )
+        + "\n  接上「派发环 / 转化 / 改判 / 主动技」之一，或说明它为什么不算一次发动。"
+    )
+
+    # 豁免不是空话：纯修饰器技能确实在目录里（否则上面那条判据覆盖不到豁免的反面）。
+    modifier_only = [
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if not channels[skill_id] and definition.modifiers
+    ]
+    assert modifier_only, "目录里应当有纯修饰器技能（它们没有发动瞬间，本条豁免的正是它们）"
+
+
+# ---------------------------------------------------------------------------
 # U4-06（spec D13）：`action` 记录按 viewer 放行**人类座位自己的**应答
 #
 # `ActionRecord` 不带座位：应答者 = 它的 `answers_seq` 指向的那次 `query` 的 actor

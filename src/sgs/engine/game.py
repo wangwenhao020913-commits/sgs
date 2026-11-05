@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -84,6 +85,7 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     conversion_preactivations,
+    conversion_skill_ids,
     flow_for,
     hero_card_zone_key,
     is_transformed_action,
@@ -460,6 +462,38 @@ class Outcome(BaseModel):
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class SkillActivation:
+    """一次**技能发动**的公共事实（lei 票 06）：谁、哪条技能、打给谁、锚在哪条记录。
+
+    它**不是**记录流的一条记录：47 条金录像的冻结字节不许动（E1），而锁定技（派发环直接
+    跑 handler、不发激活询问）与转化技（确认被解析成**普通使用**）在记录面本来就没有技能
+    归属。于是引擎把"这一次真的跑了哪条技能"记进一份**帧外**的只增缓冲（
+    :attr:`Engine.skill_activations`），接入层
+    （``sgs_web.projection.skill_events_after``）把它与记录流里"点名了技能的动作"合成同一条
+    ``skill_events`` 通道——前端判据因此一字不改，**未来新技能自动获得特效**。
+
+    它**只服务表现层**：规则层一个读者都没有（不进帧私有数据、不参与任何判据），也不消耗
+    随机数 ⇒ 既有金录像逐字节不变。
+    """
+
+    seq: int
+    """锚点 = 产生这次发动的那条**记录**的 ``seq``（前端回放到它时演出）。
+
+    取"此刻最后一条记录的序号"：锁定技在派发前刚落下 ``timing`` 记录（或它自己的效果体
+    已经发了 delta），两种都落在同一个回放步里，前端按 ``seq`` 释放事件的语义不变。
+    """
+
+    seat: int
+    """发动者座位 = 技能实例的**持有者**（不是帧的 ``source``：伤害来源 / 牌的使用者）。"""
+
+    skill_id: str
+    """技能的全限定 id（中文名由接入层展示表回答，引擎不自建映射）。"""
+
+    targets: tuple[int, ...] = ()
+    """这次发动指定 / 作用的目标（公开事实）；空元组 = 不画线（只飘名 + 白光）。"""
+
+
 def _card_from_hand(state: GameState, source: int, card: CardRef) -> bool:
     """这张使用 / 打出的牌此刻是不是**手牌**（M6 票 16 的界【涯角】判据）。
 
@@ -680,6 +714,19 @@ class Engine:
 
         self._conversion_answer: Action | None = None
         """最近一次**转化技确认**解析出的普通使用 / 打出动作（W4-fix-2）。"""
+        self._skill_activations: list[SkillActivation] = []
+        """**技能发动**的只增缓冲（lei 票 06；表现层专用，不进记录流）。
+
+        两个追加点都是"技能真的跑了"这件事本身，不按技能名打表：
+
+        - :meth:`~sgs.skills.catalog.dispatch_timing` 的派发环跑完一条**没经过激活应答**的
+          候选（锁定技 / 觉醒技 / ``Hook.forced`` 强制段）⇒
+          ``sgs.skills.catalog._run_candidate`` 追加一条；
+        - 转化技的候选被接受、进入使用链时（``Engine.submit`` 的两条提交路）追加一条。
+
+        经过 ``SKILL_ACTIVATION`` 应答的主动 / 触发技**不**在这里再记一遍：它们在记录流里
+        有已接受的 ``ActivateSkill``，接入层仍从那份公共事实派生（既有行为逐字不变）。
+        """
         self._started = False
         self._l0_in_progress = False
         """L0 派发（:meth:`_start`）**是否已经开始过**。
@@ -806,6 +853,39 @@ class Engine:
     @property
     def records(self) -> tuple[JournalRecord, ...]:
         return tuple(self._records)
+
+    @property
+    def skill_activations(self) -> tuple[SkillActivation, ...]:
+        """**技能发动**的派生面（lei 票 06）：只增缓冲的只读视图。
+
+        纯内存派生态：不进 ``records``、不进会话载荷、不消耗随机数 ⇒ 47 条金录像逐字节
+        不变。缺省为空元组的读取方（例如只喂静态 jsonl 录像的回放）因此只少这一路表现，
+        规则与记录面一概不受影响。
+        """
+        return tuple(self._skill_activations)
+
+    def note_skill_activation(
+        self, *, seat: int, skill_id: str, targets: Sequence[int] = ()
+    ) -> None:
+        """记一次**真正跑过**的非修饰类技能发动（lei 票 06；表现层专用）。
+
+        只由两处调用，都是"技能真的跑了 / 转化真的成立了"这个事实本身，**不按技能名打表**：
+
+        - 派发环跑完一条**没经过激活应答**的候选（锁定技 / 觉醒技 / 强制段）；
+        - 转化技的候选被接受、进入使用链时（记录面只有普通使用，没有技能归属）。
+
+        ``seq`` 取**此刻最后一条记录**的序号：回放走到它时演出，与 ``skill_events`` 既有的
+        "按记录序号释放"语义一致。这也保证它一定落在本批记录里（``seq > after`` 恒成立），
+        不会在轮询里被重复下发。
+        """
+        self._skill_activations.append(
+            SkillActivation(
+                seq=self._last_seq,
+                seat=int(seat),
+                skill_id=str(skill_id),
+                targets=tuple(int(target) for target in targets),
+            )
+        )
 
     def journal(self) -> str:
         """canonical JSONL（唯一序列化器的入口）；关记录时是空串。"""
@@ -4406,11 +4486,29 @@ class Engine:
                 self._emit(
                     ActionRecord(seq=self._next_seq(), accepted=True, action=resolved)
                 )
+                # lei 票 06：转化技的**记录面只有普通使用**（没有技能归属），故在候选被接受、
+                # 进入使用链的这一刻把"哪条技能转过这张牌"记进引擎的发动缓冲 —— 目标取解析
+                # 后的动作自己的 `targets`（公开事实），不做第二份推导。
+                self.note_skill_activation(
+                    seat=pending.actor,
+                    skill_id=action.skill_id,
+                    targets=getattr(resolved, "targets", ()),
+                )
                 self._answer_to(resolved)
                 return
             if action in pending.transform_actions:
                 # 回放磁带 / 程序化提交：转化动作不在**暴露面**里，但仍是本次询问的合法池。
                 self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
+                # lei 票 06：这条路没有"哪条技能"的提交意图（提交的就是候选本身），归属按
+                # 与清单 / 确认**同一份**判据（`conversion_skill_ids`）从卡面 + 拥有的实例回答。
+                for skill_id in conversion_skill_ids(
+                    self.state, pending.actor, action.card
+                ):
+                    self.note_skill_activation(
+                        seat=pending.actor,
+                        skill_id=skill_id,
+                        targets=getattr(action, "targets", ()),
+                    )
                 self._answer_to(action)
                 return
             failure = self._structured_activation_failure(action, pending)

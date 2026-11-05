@@ -50,8 +50,9 @@
 | `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 手牌数 / 装备 / 阶段 / 标记数量 `marker_change` …）。 |
 | `poll()` | `session.js` | 2s 静默轮询；idle 只更新时钟，不重绘、不清选择；失败静默。 |
 | `drawTargetLines(actor, targets, now)` | `effects.js` | 每个目标一条金色 SVG 线（跳过自己 / 阵亡）；端点只读一次布局。 |
-| `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。 |
+| `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。**不判断"哪些技能该有特效"**：`event` 由服务端下发（见下一条），前端只画。 |
 | `fireSkillEventsThrough(seq)` | `effects.js` | 回放到某条记录时释放 `state.skillEvents` 队列。 |
+| `skill_events_after(records, after, state, activations)` | `projection.py` | **技能特效的唯一判据**（U3-04 / D8.2 + lei 票 06）：`{seq, seat, skill_id, name, targets}` 由两条公共事实合成——① 未裁剪记录里**已接受且点名了技能**的动作（`ActivateSkill` / `SubstituteJudgeCard`）；② 引擎的发动缓冲 `Engine.skill_activations`（**记录面没有技能归属**的锁定技与转化技）。跑 `bash tests/smoke-web.sh`，用例在 `tests/support/ui_smoke.mjs` 的 U3-04*（U3-04k 锁定技 / U3-04l 转化技）。 |
 | `syncTransientEffects()` | `effects.js` | 座位重建后补回仍在播的高亮 / 体力闪 / 白光；顺手收掉过期目标线。 |
 | `animPlanFlight(record)` | `anim.js` | 飞行层**起飞前**：查分类表、不飞 / 未登记判定、量一次源矩形（`stepPlayback` 在 `applyEffectDelta` 之后、重绘之前调）。 |
 | `animLaunchFlight(plan)` | `anim.js` | 飞行层**重绘之后**：量落点并同步起飞；起 / 落点缺失静默跳过（层上留 `data-anim-missing`）。 |
