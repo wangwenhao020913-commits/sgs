@@ -49,11 +49,13 @@ from sgs.state import (
     SkillActivationContext,
     SubstituteJudgeCard,
     SlotKind,
+    SEALED_ZONE_JUDGE,
     UseCard,
     Zone,
     ZoneRef,
     alive_seats,
     seats_from,
+    zone_sealed,
 )
 from sgs.timing import Timing
 
@@ -342,6 +344,10 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
         me = state.player(seat)
         if not me.alive or (rule.requires_wounded_self and me.hp >= me.hp_max):
             return ()
+        # 废除区域（lei-batch 票 02；用户 2026-11-05 裁定）：装备牌的使用目标是"自己的
+        # 那个装备槽"——该槽位（或整个装备区）被封印 ⇒ 这张装备牌不能用。
+        if card.slot is not None and zone_sealed(me, card.slot.value):
+            return ()
         pool: list[int] = [seat]
     else:
         # 额定距离上限先过 DISTANCE_LIMIT 链（M6 票 02）：``None`` = 这次使用**豁免距离**
@@ -371,7 +377,14 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
                 continue
             pool.append(player.seat)
     if behavior.is_delayed:
-        pool = [target for target in pool if not _same_named_in_judge(state, target, card)]
+        pool = [
+            target
+            for target in pool
+            # 废除区域（lei-batch 票 02）：判定区被封印的角色**不是延时锦囊的合法目标**
+            # （乐不思蜀 / 兵粮寸断不落、闪电越过——后者另见 `delayed_settle_target`）。
+            if not zone_sealed(state.player(target), SEALED_ZONE_JUDGE)
+            and not _same_named_in_judge(state, target, card)
+        ]
     pool = [
         target
         for target in pool
@@ -666,6 +679,9 @@ def delayed_settle_target(state: GameState, card: CardRef, subject: int) -> int 
         return None
     ring = seats_from(state, subject, len(state.players))
     for target in ring[1:] + ring[:1]:
+        # 废除区域（lei-batch 票 02）：判定区被封印的角色**越过**（闪电不停在他那里）。
+        if zone_sealed(state.player(target), SEALED_ZONE_JUDGE):
+            continue
         if not _same_named_in_judge(state, target, card):
             return target
     return subject

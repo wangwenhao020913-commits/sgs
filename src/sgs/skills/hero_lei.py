@@ -44,8 +44,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
-from sgs.effects import CarrierKind
+from sgs.data import Category, SkillType, card_category, hero_skill_id
+from sgs.effects import CarrierKind, behavior_for
 from sgs.state import (
     GameState,
     Marker,
@@ -56,11 +56,13 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
-from .flow import FlowAnswers, PickSeats, SkillFlow
+from .catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY, Hook, SkillDef
+from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
 __all__ = [
+    "CONGJIAN",
     "LEI_SKILL_DEFS",
+    "ZHANGXIU",
     "ZHENGKU",
     "ZHENGKU_CAP",
     "ZHENGKU_MARK",
@@ -305,8 +307,172 @@ _ZHENGKU = SkillDef(
 )
 """郝昭【镇骨】的完整声明（一条技能、两条钩子：发起 + 两次强制结算）。"""
 
-LEI_SKILL_DEFS: tuple[SkillDef, ...] = (_ZHENGKU,)
-"""雷包已落地的武将技能（逐票追加；包脚手架归 01 票）。"""
+
+# ---------------------------------------------------------------------------
+# 张绣【从谏】（lei-batch 票 02；用户 2026-11-05 签「从谏，很好没有问题」）
+#
+# 牌面（逐字）：
+#
+#     当你成为目标数大于1的普通锦囊牌的目标时，你可以交给一名其他目标角色一张牌。
+#     若你给出的牌为装备牌，则你摸两张牌，否则你摸一张牌。
+#
+# 形状 = 多步「选牌 → 座位」（`hero.daqiao.liuli` 同时机、同步骤序）：
+#
+# - 时机 `USE_BECOME_TARGET`（成为目标时，逐目标派发）：条件自校"**这一步问的是我**"
+#   （`MATCH_OWNER_KEY == actor`，与【流离】同一判据），再判牌是**普通锦囊**（大类是
+#   锦囊 ∧ 非延时，转化 / 虚拟牌按产物牌型判）且目标数 > 1，且我手上 / 装备区有牌、
+#   且还有一个其他目标（池空不发询问）；
+# - 给出的「一张牌」= 手牌 + 装备区（账本「一张牌」行）；`move_in_frame` 交给对方
+#   （`MoveReason.PUT`，与【遗计】同一"给牌"口径）⇒ 会内联派发"失去牌后"钩子，故
+#   帧内游标保证重入不重搬；
+# - 摸牌数按**给出的那张牌**的牌型判（装备牌摸 2、否则摸 1），与它从哪个区给出无关。
+# ---------------------------------------------------------------------------
+
+ZHANGXIU = "zhangxiu"
+
+CONGJIAN = hero_skill_id(ZHANGXIU, "congjian")
+"""张绣【从谏】的全限定技能 id。"""
+
+_CONGJIAN_GIVEN = "congjian_given"
+"""帧私有：那张牌已经交出去了（重入不重搬）。"""
+
+_CONGJIAN_DREW = "congjian_drew"
+"""帧私有：摸牌已经结算（重入不重摸）。"""
+
+_CONGJIAN_CARD_TYPE = "congjian_card_type"
+"""帧私有：交出去的那张牌的牌型（摸牌支路按它判 2 / 1）。"""
+
+
+def _congjian_targets(frame: Any) -> tuple[int, ...]:
+    """这张牌**已指定的全部目标**（含自己——自己是不是目标由条件判）。"""
+    return tuple(int(seat) for seat in frame.data.get("targets", ()))
+
+
+def _congjian_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """「一名其他目标角色」：这张牌的其他目标、存活、不含自己。"""
+    del chosen
+    return tuple(
+        seat
+        for seat in _congjian_targets(frame)
+        if int(seat) != int(owner) and state.player(int(seat)).alive
+    )
+
+
+def _is_ordinary_trick(state: GameState, card: Any) -> bool:
+    """「普通锦囊牌」= 大类是锦囊 ∧ **非延时**（转化 / 虚拟牌按产物牌型判）。"""
+    if card_category(state.pack_id, card.type) is not Category.TRICK:
+        return False
+    return not behavior_for(card).is_delayed
+
+
+def _congjian_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**我**成为一张多目标普通锦囊牌的目标，且我付得起、还有人可给。
+
+    四个前提缺一不可（缺哪个都**不发询问**，`edge-cases.md` 总纪律 1）：
+    ① 我是这张牌的目标（`MATCH_OWNER_KEY in targets`，与【流离】同一判据——派发环对每个
+    存活实例求值一次，漏掉这一条就会"任何人成为目标、张绣都问一遍"）；② 牌是普通锦囊；
+    ③ 目标数 > 1；④ 我有牌可给、且至少一名其他目标。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    if frame.data.get(MATCH_ACTOR_KEY) != owner:
+        # 派发环逐目标各问一次（`USE_BECOME_TARGET` 每次只服务一个目标）；
+        # 不是"这一次轮到我"就闭嘴，否则一张多目标锦囊会把同一个持有者问两次。
+        return False
+    if int(owner) not in _congjian_targets(frame):
+        return False
+    card = frame.data.get("card")
+    if card is None or not _is_ordinary_trick(host.state, card):
+        return False
+    if len(_congjian_targets(frame)) < 2:
+        return False
+    me = host.state.player(int(owner))
+    if not me.hand and not me.equip:
+        return False
+    return bool(_congjian_pool(host.state, frame, int(owner), ()))
+
+
+def _congjian_apply(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：把选中的牌交给选中的目标 → 按牌型摸 2 / 摸 1（两段各有游标）。"""
+    owner = int(frame.data["skill_owner"])
+    state = host.state
+    if not frame.data.get(_CONGJIAN_GIVEN):
+        picked = tuple(int(card_id) for card_id in answers.get("card", ()))
+        seat = next(iter(int(value) for value in answers.get("seat", ())), None)
+        if not picked or seat is None:
+            return None
+        control = host.move_in_frame(
+            frame,
+            state.refs(picked),
+            to_zone=ZoneRef(Zone.HAND, seat),
+            reason=MoveReason.PUT,
+            owner=seat,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_CONGJIAN_GIVEN] = True
+        frame.data[_CONGJIAN_CARD_TYPE] = state.card(picked[0]).type
+    if not frame.data.get(_CONGJIAN_DREW):
+        equipment = (
+            card_category(state.pack_id, frame.data[_CONGJIAN_CARD_TYPE])
+            is Category.EQUIPMENT
+        )
+        if host.draw_for_hand(frame, owner, 2 if equipment else 1) == "stay":
+            return "stay"
+        frame.data[_CONGJIAN_DREW] = True
+    return None
+
+
+CONGJIAN_FLOW = SkillFlow(
+    name="congjian",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            optional=False,
+            key="card",
+        ),
+        PickSeats(lo=1, hi=1, pool=_congjian_pool, optional=False, key="seat"),
+    ),
+    effect=_congjian_apply,
+)
+"""【从谏】的两步流水线：选一张牌（手牌 / 装备）→ 选一名其他目标。"""
+
+_CONGJIAN = SkillDef(
+    skill_id=CONGJIAN,
+    locked=False,
+    # 已翻预发动：首步选**自己**的手牌 / 装备区 ⇒ 清单渲得出来（`shapes.md` §4 准入表第 1 行）。
+    preactivated=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(
+            Timing.USE_BECOME_TARGET,
+            condition=_congjian_condition,
+            flow=CONGJIAN_FLOW,
+        ),
+    ),
+    requirement=(
+        "当你成为目标数大于1的普通锦囊牌的目标时，你可以交给一名其他目标角色一张牌。"
+        "若你给出的牌为装备牌，则你摸两张牌，否则你摸一张牌。"
+    ),
+    step_requirements={
+        "card": "交给一名其他目标角色一张牌",
+        "seat": "选择交给哪名其他目标角色",
+    },
+)
+"""张绣【从谏】的完整声明。"""
+
+LEI_SKILL_DEFS: tuple[SkillDef, ...] = (_ZHENGKU, _CONGJIAN)
+"""雷包已落地的武将技能（逐票追加；包脚手架归 01 票）。
+
+【雄乱】（张绣）住 `active.py` 的 A 族（它是出牌阶段主动技，候选 / 发动主体都归那一族）。
+"""
 
 
 def lei_skill_definitions() -> tuple[SkillDef, ...]:

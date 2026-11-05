@@ -773,7 +773,7 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (73, 47), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」））"
+    assert (len(pool), len(true_names)) == (74, 48), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」））"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
@@ -787,15 +787,15 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     assert (
         len({hero_by_id(hero_id).true_name for hero_id in heroes}) == M6_CLOSEOUT_PLAYERS
     ), "同一真名占了两个座位"
-    # 池里有六个版本标记（standard / jie-ol / jie-mobile / feng / feng-mobile / huo /
-    # huo-mobile / homebrew）：判据是**这一局不是单包**（≥2 个版本标记）。不再写死
+    # 池里有八个版本标记（standard / jie-ol / jie-mobile / feng / feng-mobile / huo /
+    # huo-mobile / homebrew / lei）：判据是**这一局不是单包**（≥2 个版本标记）。不再写死
     # "必须抽到某个界版"——池每加一名武将都会重排 RNG，4 人局不保证每次都抽到界版
     # （huo-shenzhugeliang 加火包 OL 后 seed 140 正是这种局面）；"标准 + 界并存"由
     # `test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions` 在**池**
     # 那一层钉住，本用例只钉"发出来的一局是混合的"。
-    assert "standard" in versions and len(versions) >= 2, (
-        f"这一局不是混合池：{versions}"
-    )
+    # lei-batch 票 02 起连"标准版必在场"也不再写死：池到 74 之后 seed 144 的这一局
+    # 全是扩展包武将（jie / feng / huo / lei）——那仍是混合局，判据回到"≥2 个版本标记"。
+    assert len(versions) >= 2, f"这一局不是混合池：{versions}"
 
     # ① 跑完
     assert engine.finished, "必达终局"

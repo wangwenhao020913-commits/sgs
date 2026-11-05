@@ -507,10 +507,11 @@ const SMOKE_BANNED = catalogVersions
   .map((hero) => hero.id)
   .filter((id) => !SMOKE_ROSTER.includes(id));
 // wuming 票 01：自制包加「无名自制版」（新真名「无名」）⇒ 真名 42 → 43、版本 68 → 69。
-// lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
+// lei-batch 票 02：雷包再加张绣（新真名「张绣」）⇒ 47 / 73 → 48 / 74。
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 火包 OL + 自制包，按真名分组）",
   // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈标准版 / 荀彧标准版 ⇒ 45 / 71 → 46 / 72。
-  ui.state.heroCatalog.length === 47 && catalogVersions.length === 73,
+  // lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
+  ui.state.heroCatalog.length === 48 && catalogVersions.length === 74,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

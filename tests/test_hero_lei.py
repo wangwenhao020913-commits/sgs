@@ -21,18 +21,23 @@
 from __future__ import annotations
 
 from sgs.data import load_content_pack
+from sgs.effects import check_targets, delayed_settle_target, legal_actions_for
 from sgs.engine import Engine
 from sgs.state import (
     ActivateSkill,
     EndPhase,
+    FrameKind,
     Pass,
     Phase,
+    QueryKind,
     SelectCards,
     SelectOption,
+    SlotKind,
+    UseCard,
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, run_queries
+from support import SeatSpec, build_state, cards_of_type, run_queries
 
 PACK = load_content_pack(deck_profile="standard_108")
 ZHENGKU = "hero.haozhao.zhengku"
@@ -305,3 +310,302 @@ def test_the_second_settlement_is_skipped_when_the_targets_turn_is_skipped():
     _run_turns(engine, players, turns=3)
     assert [count for _seat, count in _marker_counts(engine)] == [2, 1, 0]
     assert _markers(engine, 1) == []
+
+
+# ---------------------------------------------------------------------------
+# 废除区域原语（lei-batch 票 02 的框架面；用户 2026-11-05 裁定）
+#
+# 语义 = 「区域内牌先强制弃置，然后区域被废除」+「恢复区域」+ 三条读取面：
+# 装备牌不能使用 / 置入被封印的槽位；判定区被封印的角色不是延时锦囊的合法目标、
+# 闪电越过它。这些是**框架**的判据，故与英雄无关（本段只用构造局面）。
+# ---------------------------------------------------------------------------
+
+
+def _seal_engine(*, equip: tuple[int, ...] = (), judge: tuple[int, ...] = ()):
+    """座位 0 带指定装备 / 判定牌的局面；座位 1 用来验证"目标池"一侧。"""
+    used = {*equip, *judge}
+    deck = tuple(card_id for card_id in range(60, 108) if card_id not in used)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=HERO, hand=(0,), equip=equip, judge=judge),
+            SeatSpec(),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return Engine.from_state(state, seed=7)
+
+
+def _frame(engine):
+    """压一个最小 SKILL 帧，让"废除"的弃牌移动有地方挂。"""
+    return engine.push_frame(
+        FrameKind.SKILL, {"skill_owner": 0}, timing=Timing.PHASE_FINISH
+    )
+
+
+def test_abolish_judge_discards_the_zones_cards_then_seals_it():
+    lightning = cards_of_type(PACK, "lightning")[0]
+    engine = _seal_engine(judge=(lightning,))
+    engine.abolish_zone(_frame(engine), 0, "judge")
+
+    assert engine.state.player(0).judge == [], "区域里的牌先被强制弃置"
+    assert lightning in engine.state.discard, "弃置的牌进了弃牌堆"
+    assert "judge" in engine.state.player(0).sealed_zones
+    assert engine.restore_zone(None, 0, "judge") is True
+    assert engine.state.player(0).sealed_zones == ()
+    assert engine.restore_zone(None, 0, "judge") is False, "重复恢复是零动作"
+
+
+def test_abolish_equip_discards_every_equipment_and_blocks_using_equipment():
+    weapon = cards_of_type(PACK, "crossbow")[0]
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    engine = _seal_engine(equip=(weapon, armor))
+    engine.abolish_zone(_frame(engine), 0, "equip")
+
+    assert engine.state.player(0).equip == []
+    assert {weapon, armor} <= set(engine.state.discard)
+    # 手牌里再抽一张装备牌：装备区被封印 ⇒ 用不了。
+    spare = next(
+        card_id
+        for card_id in range(60, 108)
+        if engine.state.card(card_id).slot is not None
+    )
+    assert check_targets(engine.state, 0, engine.state.card(spare)) == ()
+
+
+def test_a_sealed_weapon_slot_blocks_weapons_but_not_armor():
+    weapon = cards_of_type(PACK, "crossbow")[0]
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    engine = _seal_engine()
+    assert engine.state.card(weapon).slot is SlotKind.WEAPON
+    engine.state.player(0).sealed_zones = ("weapon",)
+
+    assert check_targets(engine.state, 0, engine.state.card(weapon)) == ()
+    assert check_targets(engine.state, 0, engine.state.card(armor)) == (0,)
+
+
+def test_a_judge_sealed_seat_is_not_a_legal_target_of_a_delayed_trick():
+    indulgence = cards_of_type(PACK, "indulgence")[0]
+    engine = _seal_engine()
+    engine.state.player(1).sealed_zones = ("judge",)
+    card = engine.state.card(indulgence)
+
+    pool = check_targets(engine.state, 0, card)
+    assert 1 not in pool, "判定区被封印的角色不是延时锦囊的合法目标"
+    assert 0 not in pool, "延时锦囊不以自己为目标"
+
+
+def test_lightning_skips_a_judge_sealed_seat():
+    lightning = cards_of_type(PACK, "lightning")[0]
+    engine = _seal_engine()
+    engine.state.player(1).sealed_zones = ("judge",)
+    card = engine.state.card(lightning)
+
+    # 座位 0 的闪电判完非 ♠2–9 ⇒ 顺延：座位 1 被封印 ⇒ 越过它回到座位 0。
+    assert delayed_settle_target(engine.state, card, 0) == 0
+
+
+def test_put_equipment_card_does_not_fire_into_a_sealed_slot():
+    """界【结姻】的"置入装备区"：目标槽位被废除 ⇒ 置入不发动。"""
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    engine = _seal_engine()
+    engine.state.player(1).sealed_zones = ("armor",)
+    engine.state.player(0).hand.append(armor)
+
+    frame = _frame(engine)
+    result = engine.put_equipment_card(
+        frame, holder=1, card=engine.state.card(armor), actor=0
+    )
+    assert result is None, "置入被废除的槽位是零动作"
+    assert engine.state.player(1).equip == []
+    assert armor in engine.state.player(0).hand, "牌留在原处"
+
+
+# ---------------------------------------------------------------------------
+# 张绣【雄乱】/【从谏】（lei-batch 票 02；用户 2026-11-05 签）
+# ---------------------------------------------------------------------------
+
+
+def _zhangxiu_state(*, equip=(), judge=(), hand=(), others=()):
+    used = {*equip, *judge, *hand, *others}
+    deck = tuple(card_id for card_id in range(60, 108) if card_id not in used)
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhangxiu", hand=hand, equip=equip, judge=judge),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+
+def _play_phase(engine, players):
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and str(getattr(e.pending, "kind", "")) == "PLAY_PHASE",
+    )
+    return engine.pending
+
+
+def test_xiongluan_seals_both_zones_and_applies_its_two_effects():
+    """雄乱：废除判定区与装备区（牌先弃置）→ 其不能用牌 + 我对其无距离与次数限制。"""
+    weapon = cards_of_type(PACK, "crossbow")[0]
+    lightning = cards_of_type(PACK, "lightning")[0]
+    engine = Engine.from_state(
+        _zhangxiu_state(equip=(weapon,), judge=(lightning,)), seed=7
+    )
+    players = [Scripted(activate=False) for _ in range(3)]
+    query = _play_phase(engine, players)
+    manifest = tuple(query.preactivations.get("hero.zhangxiu.xiongluan", ()))
+    assert manifest, "雄乱已翻预发动：清单要渲得出来（一步选人）"
+
+    engine.submit(
+        ActivateSkill(
+            skill_id="hero.zhangxiu.xiongluan",
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    # 提交后引擎从 SKILL 帧继续推进（预发动是"确认 = 填表"，动作已经交出去了）。
+    run_queries(
+        engine, players, lambda e: bool(e.state.player(0).sealed_zones)
+    )
+    player0 = engine.state.player(0)
+    assert player0.sealed_zones == ("judge", "equip"), "两个区域都封印"
+    assert player0.judge == [] and player0.equip == [], "区域里的牌先被强制弃置"
+    assert engine.state.player(1).hand_card_prohibited is True, "其不能使用或打出手牌"
+    assert player0.xiongluan_target == 1, "本回合对其使用牌无距离与次数限制"
+    # 装备区封印 ⇒ 装备牌不能再用（手牌里的装备也进不了候选）。
+    spare = next(
+        card_id
+        for card_id in range(60, 108)
+        if engine.state.card(card_id).slot is SlotKind.ARMOR
+    )
+    assert check_targets(engine.state, 0, engine.state.card(spare)) == ()
+
+
+def test_xiongluan_is_no_longer_offered_once_both_zones_are_sealed():
+    """隐藏 cost：区域都封印了 ⇒ 清单渲不出、候选也没有（即使限定位被恢复）。"""
+    engine = Engine.from_state(_zhangxiu_state(), seed=7)
+    engine.state.player(0).sealed_zones = ("judge", "equip")
+    players = [Scripted(activate=False) for _ in range(3)]
+    query = _play_phase(engine, players)
+
+    assert "hero.zhangxiu.xiongluan" not in dict(query.preactivations)
+    assert not any(
+        isinstance(action, ActivateSkill)
+        and action.skill_id == "hero.zhangxiu.xiongluan"
+        for action in query.legal_actions
+    )
+
+
+def test_xiongluan_waives_distance_and_count_limits_against_the_chosen_target():
+    """效果①：距离按目标收窄；次数侧落成"本回合无次数上限"（见模块里的口径说明）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _zhangxiu_state(hand=(slash,))
+    state.player(0).card_use_counts["slash"] = 9  # 额度用尽
+    before = tuple(
+        action
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    )
+    assert before == (), "额度用尽 ⇒ 没有【杀】候选"
+
+    state.player(0).xiongluan_target = 1
+    after = tuple(
+        action
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    )
+    assert any(1 in action.targets for action in after), "雄乱目标重新可打（次数豁免）"
+
+
+def _congjian_engine():
+    """座位 1 用【五谷丰登】⇒ 座位 0（张绣）成为多目标普通锦囊的目标。"""
+    harvest = cards_of_type(PACK, "harvest")[0]
+    gift = cards_of_type(PACK, "slash")[0]
+    deck = tuple(card_id for card_id in range(60, 108) if card_id not in {harvest, gift})
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhangxiu", hand=(gift,)),
+            SeatSpec(hand=(harvest,)),
+        ],
+        deck=deck,
+        turn_seat=1,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    return engine, harvest, gift
+
+
+class _CongjianResponder:
+    """座位 1 打出【五谷丰登】；座位 0 用复合动作发动【从谏】（``picks`` = 当时手牌第一张）。"""
+
+    def __init__(self, *, giver: bool, engine=None) -> None:
+        self.giver = giver
+        self.engine = engine
+        self.asked: list = []
+        self.record_start: int | None = None
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if self.giver and kind == "SKILL_ACTIVATION":
+            self.asked.append(query)
+            if str(getattr(query, "skill_id", "")) == "hero.zhangxiu.congjian":
+                self.record_start = len(self.engine.records)
+                hand = self.engine.state.player(0).hand
+                return ActivateSkill(
+                    skill_id="hero.zhangxiu.congjian",
+                    picks=(hand[0],),
+                    choices=("seat:1",),
+                    answers_seq=query.seq,
+                )
+            return next(
+                action for action in query.legal_actions if isinstance(action, Pass)
+            )
+        if kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and len(action.targets) == 2:
+                    return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, (SelectCards, SelectOption)):
+                return action
+        return query.legal_actions[0]
+
+
+def test_congjian_gives_a_card_and_draws_one_for_a_non_equipment_gift():
+    engine, harvest, gift = _congjian_engine()
+    seat0 = _CongjianResponder(giver=True, engine=engine)
+    seat1 = _CongjianResponder(giver=False)
+    run_queries(
+        engine,
+        [seat0, seat1],
+        lambda e: gift in e.state.player(1).hand,
+    )
+
+    assert harvest not in engine.state.player(1).hand, "座位 1 打出了五谷丰登"
+    assert seat0.asked, "从谏问过座位 0"
+    assert gift in engine.state.player(1).hand, "给出的牌到了另一名目标手里"
+    assert gift not in engine.state.player(0).hand
+    # 摸牌支路：从发动那一刻起的记录流里，给座位 0 的 DRAW 恰好一条（非装备牌 ⇒ 摸 1）。
+    assert seat0.record_start is not None
+    draws = [
+        record
+        for record in engine.records[seat0.record_start :]
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason.value == "DRAW"
+        and record.to_zone.seat == 0
+    ]
+    assert len(draws) == 1, f"非装备牌 ⇒ 摸一张（实得 {len(draws)} 条摸牌记录）"

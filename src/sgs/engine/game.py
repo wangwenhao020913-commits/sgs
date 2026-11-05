@@ -170,10 +170,14 @@ from sgs.state import (
     WineChangeDelta,
     Zone,
     ZoneRef,
+    SEALED_ZONE_EQUIP,
+    SEALED_ZONE_IDS,
+    SEALED_ZONE_JUDGE,
     next_alive_seat,
     order_targets,
     parse_action,
     project,
+    zone_sealed,
 )
 from sgs.timing import Timing
 
@@ -1913,6 +1917,11 @@ class Engine:
             # **幂等**：这次置入已经搬完，只因内联派发（发动者自己的【枭姬】）挂起而重入 —
             # 目标槽位现在当然"已被占"，那是本函数刚刚放进去的那张牌。
             return None
+        if card.slot is not None and zone_sealed(
+            self.state.player(holder), card.slot.value
+        ):
+            # 废除区域（lei-batch 票 02）：目标槽位 / 整个装备区被封印 ⇒ 置入不发动。
+            return None
         occupied = [
             card_id
             for card_id in self.state.player(holder).equip
@@ -3650,6 +3659,76 @@ class Engine:
         )
         return True
 
+    # -- 废除区域（lei-batch 票 02；用户 2026-11-05 裁定「废除区域 / 恢复区域」）----
+
+    def abolish_zone(
+        self, frame: Frame | None, seat: int, zone_id: str
+    ) -> Control:
+        """**废除一个区域**：区域内牌先强制弃置，再落封印位（唯一写入口）。
+
+        用户裁定的流程 = 「区域里的牌先被强制弃置，然后这个区域被废除」；可被
+        :meth:`restore_zone` 恢复。``zone_id`` ∈ :data:`~sgs.state.SEALED_ZONE_IDS`：
+
+        - ``judge`` / ``equip``（整个装备区）/ 四个装备槽位；``equip`` 覆盖全部槽位；
+        - 弃哪些牌：``judge`` ⇒ 判定区全部；``equip`` ⇒ 装备区全部；槽位 ⇒ 该槽那一张；
+        - 弃置走 ``MoveReason.DISCARD``（**失去牌**派发照常，【连营】/【枭姬】一类钩子会
+          被问），因此本方法可能返回 ``"stay"``（挂起）——调用方原样透传；重入时目标区域
+          已空、封印位已落，天然幂等。
+
+        **不发 delta**：目前没有 JSON 读取方（见 ``Player.sealed_zones`` 的注释）；但那次
+        弃牌移动照常进记录流，故回放能重建"牌被弃置"这一半。
+        """
+        if zone_id not in SEALED_ZONE_IDS:
+            raise ValueError(f"不是可废除的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")
+        player = self.state.player(seat)
+        if zone_id in player.sealed_zones:
+            return None
+        if frame is None and self.stack.frames:
+            # 帧外调用（构造局面 / 引擎自排）：可挂的移动是当前栈顶那一帧。
+            frame = self.stack.top
+        if frame is None:
+            raise ValueError("废除区域必须先弃置区域里的牌，帧外调用无法搬牌")
+        victims: tuple[int, ...] = ()
+        if zone_id == SEALED_ZONE_JUDGE:
+            victims = tuple(player.judge)
+        elif zone_id == SEALED_ZONE_EQUIP:
+            victims = tuple(player.equip)
+        else:
+            victims = tuple(
+                card_id
+                for card_id in player.equip
+                if self.state.card(card_id).slot is SlotKind(zone_id)
+            )
+        if victims:
+            control = self.move_in_frame(
+                frame,
+                self.state.refs(victims),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=seat,
+                actor=seat,
+            )
+            if control == "stay":
+                return "stay"
+        player.sealed_zones = (*player.sealed_zones, zone_id)
+        return None
+
+    def restore_zone(self, frame: Frame | None, seat: int, zone_id: str) -> bool:
+        """**恢复一个区域**（用户 2026-11-05 裁定的「恢复区域」事件）：去掉封印位。
+
+        不搬任何牌（恢复只改状态）；已恢复 / 从未废除 ⇒ 零动作返回 ``False``。
+        """
+        del frame
+        if zone_id not in SEALED_ZONE_IDS:
+            raise ValueError(f"不是可恢复的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")
+        player = self.state.player(seat)
+        if zone_id not in player.sealed_zones:
+            return False
+        player.sealed_zones = tuple(
+            value for value in player.sealed_zones if value != zone_id
+        )
+        return True
+
     def add_marker(
         self,
         frame: Frame | None,
@@ -4121,6 +4200,7 @@ class Engine:
                     depth=self.stack.depth,
                 )
             player.hand_card_prohibited = False
+            player.xiongluan_target = None
             player.heart_slash_bonus_against.clear()
             player.damage_dealt_this_turn = False
             player.hand_limit_bonus = 0

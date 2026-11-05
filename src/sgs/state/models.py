@@ -31,6 +31,9 @@ __all__ = [
     "MoveReason",
     "Phase",
     "Player",
+    "SEALED_ZONE_EQUIP",
+    "SEALED_ZONE_IDS",
+    "SEALED_ZONE_JUDGE",
     "SkillSuppression",
     "SkillSuppressionPredicate",
     "SkillSuppressionScope",
@@ -38,6 +41,7 @@ __all__ = [
     "Zone",
     "ZoneRef",
     "ZoneRefField",
+    "zone_sealed",
 ]
 
 
@@ -92,6 +96,44 @@ class SlotKind(str, Enum):
     HORSE_DEFENSE = "horse_defense"
     HORSE_OFFENSE = "horse_offense"
     TREASURE = "treasure"
+
+
+SEALED_ZONE_JUDGE = "judge"
+"""被废除的区域 id：**判定区**（延时锦囊不落、角色不是延时锦囊的合法目标）。"""
+
+SEALED_ZONE_EQUIP = "equip"
+"""被废除的区域 id：**装备区**（整个区；覆盖全部装备槽位）。"""
+
+SEALED_ZONE_IDS: frozenset[str] = frozenset(
+    {
+        SEALED_ZONE_JUDGE,
+        SEALED_ZONE_EQUIP,
+        SlotKind.WEAPON.value,
+        SlotKind.ARMOR.value,
+        SlotKind.HORSE_DEFENSE.value,
+        SlotKind.HORSE_OFFENSE.value,
+    }
+)
+"""``Player.sealed_zones`` 的**闭集**（lei-batch 票 02；用户 2026-11-05 裁定）。
+
+「废除判定区 / 装备区 / 武器槽 / 防具槽 / 坐骑槽 / 进攻马槽 / 防御马槽」是**同一种事件**
+（「废除区域」），取值就是这张表；「恢复区域」把对应的位去掉。宝物槽位当前不启用，故不在
+闭集里（ADR-006）。"""
+
+
+def zone_sealed(player: "Player", zone_id: str) -> bool:
+    """该座位这个区域是否**被废除**。
+
+    ``equip`` 封印覆盖全部装备槽位（整个装备区没了）；单个槽位的封印只看**自己**那一位——
+    封印武器槽不等于废除装备区，防具槽照常可用。
+    """
+    if zone_id in player.sealed_zones:
+        return True
+    if zone_id == SEALED_ZONE_EQUIP:
+        return False
+    if zone_id in {slot.value for slot in SlotKind}:
+        return SEALED_ZONE_EQUIP in player.sealed_zones
+    return False
 
 
 class CardRef(_FrozenModel):
@@ -427,6 +469,22 @@ class Player(BaseModel):
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
     每次变化发一条 ``wine_change`` delta）。"""
+    sealed_zones: tuple[str, ...] = ()
+    """被**废除（封印）**的区域（lei-batch 票 02；用户 2026-11-05 裁定的「废除区域」事件）。
+
+    取值是 :data:`SEALED_ZONE_IDS` 的闭集：``judge`` / ``equip``（整个装备区）/
+    ``weapon`` / ``armor`` / ``horse_offense`` / ``horse_defense``。写入**唯一入口**是
+    ``Engine.abolish_zone`` / ``Engine.restore_zone``：废除 = 先把该区域里的牌强制弃置
+    （进弃牌堆、``MoveReason.DISCARD``），再落这一位；恢复 = 去掉这一位。
+
+    读点（三条系统规则，`Engine` 与 :func:`~sgs.effects.check_targets` 各一半）：
+    装备区 / 对应槽位封印 ⇒ 该角色不能**使用**装备牌、也不能把牌**置入**它；
+    判定区封印 ⇒ 它不是延时锦囊的合法目标（【闪电】转移时越过它）。
+
+    **不发 delta**（与 ``hand_card_prohibited`` / ``luoyi_active`` 同姿态）：目前没有
+    JSON 读取方；等网页要画封印图标时再补 delta 并登记 no-leak 判据。状态本身不进记录流，
+    但"废除"那一串弃牌移动照常进记录流，故回放可重建。
+    """
     luoyi_active: bool = False
     """【裸衣】的"本回合【杀】/【决斗】伤害 +1"是否生效（M6 票 01）。
 
@@ -573,6 +631,15 @@ class Player(BaseModel):
     座位级、回合末清理；候选生成在 :func:`sgs.effects.legal_actions_for` 的**唯一**闸门里
     读它（使用 / 打出的候选按来源区过滤，弃置 / 重铸等不是"使用或打出"的动作照常）。
     **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条技能动作重跑即可重建。
+    """
+    xiongluan_target: int | None = None
+    """本回合**我对这名角色使用牌无距离与次数限制**（张绣【雄乱】的效果①）。
+
+    写入方 = 【雄乱】的提交点（一次发动只写一个座位）；回合末由
+    ``Engine._clear_turn_effects`` 清掉。读取方是同一条技能定义上的两个修饰器：
+    ``TARGET_POOL``（把他补回候选池 ⇒ 豁免距离 / 攻击范围）与 ``CANDIDATES``
+    （次数额度用尽时仍给出"只指定他"的候选 ⇒ 豁免次数）。**不发 delta**：与
+    ``hand_card_prohibited`` 同姿态（回放按同一条技能动作重跑即可重建）。
     """
     heart_slash_bonus_against: list[int] = Field(default_factory=list)
     """本回合"**你使用红桃【杀】对其造成的伤害 +1**"的目标座位（【义绝】黑色分支）。

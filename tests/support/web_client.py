@@ -342,7 +342,7 @@ def fire_attack_tape(base: str) -> int:
                 "timeout_seconds": None,
                 "deck_profile": "standard_ex_160",
                 # 见 docstring：钉死加武将前的将池（版本粒度、只作用于随机配将）。
-                "banned_heroes": ["haozhao"],
+                "banned_heroes": ["haozhao", "zhangxiu"],
             },
         )
         if status != 200:
