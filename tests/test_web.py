@@ -4145,6 +4145,107 @@ def test_the_real_two_skill_face_carries_the_key_and_both_candidates() -> None:
     )
 
 
+def test_the_engine_writes_a_manifest_per_candidate_on_the_activation_face(monkeypatch) -> None:
+    """复核修复 F3（`CODING_STANDARDS.md` §6）：逐候选清单的**写方在引擎**，投影只是转发。
+
+    相邻两条用例各占一半：手搭 :class:`SkillActivationQuery` 的那条只证明投影会转发，
+    真会话那条又恰好是空表（狂风 / 大雾未翻预发动）。于是"引擎写过这个键"从未与
+    "投影转发了这个键"在**同一形状**上配对（§6 的 M4 同型错）。
+
+    这里让两条**合成**技能翻到预发动、各带一条非空 flow，由
+    ``Engine.ask_skill_activation`` 真的渲出逐候选清单，再把**引擎产出的**那条询问交给
+    ``pending_payload``——本用例里一个手搭询问都没有。
+    """
+    from types import MappingProxyType
+
+    import sgs.engine.game as game_module
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, PickOption, SkillDef, SkillFlow
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills import preactivation as preactivation_module
+
+    alpha, beta = "hero.fake.face_alpha", "hero.fake.face_beta"
+
+    def declared(skill_id: str, option: str) -> SkillDef:
+        """一条已翻预发动的合成技能：``GAME_START`` 上一条单步 flow ⇒ 清单渲得出来。"""
+        flow = SkillFlow(
+            name=f"fake_manifest_{option}",
+            steps=(PickOption(options=(option,), key=option),),
+            effect=lambda host, frame, answers: None,
+        )
+        return SkillDef(
+            skill_id=skill_id,
+            locked=False,
+            preactivated=True,
+            carrier=CarrierKind.HERO,
+            hooks=(Hook(Timing.GAME_START, flow=flow),),
+        )
+
+    declarations = {alpha: declared(alpha, "only_alpha"), beta: declared(beta, "only_beta")}
+    # 三处都按**生产形状**注入：目录里的声明、`preactivated` 开关、由声明派生的 flow 登记表。
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, **declarations}),
+    )
+    monkeypatch.setattr(
+        preactivation_module,
+        "FLOWS",
+        MappingProxyType(
+            {
+                **preactivation_module.FLOWS,
+                alpha: ((Timing.GAME_START, declarations[alpha].hooks[0].flow),),
+                beta: ((Timing.GAME_START, declarations[beta].hooks[0].flow),),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        game_module, "preactivated_skill_ids", lambda: frozenset({alpha, beta})
+    )
+
+    engine = Engine.new_game(
+        seed=7, rule_config=RuleConfig(player_count=2), pack=_context_pack()
+    )
+    engine.grant_skill(0, alpha)
+    engine.grant_skill(0, beta)
+    for _ in range(400):
+        if engine.pending is not None:
+            break
+        engine._step()
+
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION, (
+        f"开局应当停在两条技能的那张面上：实得 {getattr(query, 'kind', None)}"
+    )
+    face = tuple(
+        action.skill_id for action in query.legal_actions if isinstance(action, ActivateSkill)
+    )
+    assert face == (alpha, beta), f"同一时机两条候选在一张面上（同档按 id）：实得 {face}"
+
+    manifests = query.activation_preactivations
+    assert set(manifests) == {alpha, beta}, (
+        f"引擎给**每条**候选都渲了清单；实得 {sorted(manifests)}"
+    )
+    assert [step.name for step in manifests[alpha]] == ["only_alpha"]
+    assert [step.name for step in manifests[beta]] == ["only_beta"]
+
+    payload = pending_payload(query, human_seat=0)
+
+    assert payload is not None
+    forwarded = payload["activation_preactivations"]
+    assert set(forwarded) == {alpha, beta}, (
+        "投影把引擎写下的两条都转发（读取方 = preactivation.js）；"
+        f"实得 {sorted(forwarded)}"
+    )
+    assert [step["name"] for step in forwarded[alpha]] == ["only_alpha"]
+    assert [step["name"] for step in forwarded[beta]] == ["only_beta"]
+
+    raw = json.loads(query.model_dump_json())
+    assert "activation_preactivations" not in raw and "skill_ids" not in raw, (
+        "两个本地面仍不进记录流：读取方读到 ≠ 记录流里有"
+    )
+
+
 def test_the_per_candidate_manifests_stay_out_of_the_record_stream() -> None:
     """票 02 §5：逐候选清单**不进记录流**（否则 47 条金录像一起变红）。"""
     from sgs.state import SkillActivationQuery

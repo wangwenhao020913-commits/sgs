@@ -70,7 +70,7 @@ from sgs.timing import (
     Timing,
 )
 
-from support import SeatSpec, build_state, cards_of_type, run_queries
+from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_queries
 
 PACK = load_content_pack(deck_profile="basic_53")
 """合成技能 / 构造局面用最小牌堆档（与其它构造局面单测同一档）。"""
@@ -1027,6 +1027,244 @@ def test_a_forced_segment_runs_before_the_optional_face_without_asking(monkeypat
 
     assert script.faces == [(FAKE_A,)], "锁定技不上脸：面里只有可选项"
     assert order == ["forced", "optional"], "强制段先跑，然后才问可选项"
+    assert len(_activation_queries(engine)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 复核修复（F1）：强制段**按档**跑（不是"轮次开头一次全跑"），`Pass` 只结束**选择**
+#
+# 票 01 §4-5 的原话是「强制段…**在本档轮到它时**直接跑」，spec §5 又要求本 effort 不改
+# 档间次序（武将 > 装备 > 使用牌）。改造把它读成了"全部强制段在轮次开头一次跑完"，
+# 于是真实碰撞里【枭姬】（HERO 档、可选）与【白银狮子】（EQUIPMENT 档、锁定）同时命中一次
+# `MOVE_AFTER` 时，锁定回复抢在可选择面**之前**结算——与 HEAD 的逐档次序相反。
+# ---------------------------------------------------------------------------
+
+XIAOJI = "hero.sunshangxiang.xiaoji"
+"""真实形状里的武将档可选项（【枭姬】；白银狮子是装备档的锁定提供者）。"""
+
+FAKE_FORCED_HERO = "hero.fake.forced_hero"
+FAKE_FORCED_EQUIP = "hero.fake.forced_equip"
+FAKE_MIXED = "hero.fake.face_mixed"
+"""合成形状：两条不同档的锁定技（逐档跑）、一条"可选段 + 强制段"的混合技能。"""
+
+
+def _silver_lion_engine():
+    """孙尚香穿着【白银狮子】、手里一张新防具：用新防具顶替会**同时失去白银狮子**。
+
+    白银狮子只在 ``standard_ex_160`` 档里；座位 0 = 孙尚香 ⇒ 这一次 ``MOVE_AFTER`` 同时命中
+    两条提供者：武将档的【枭姬】（可选）与装备档的白银狮子（锁定、``MOVE_AFTER``）。
+    """
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    silver = cards_of_type(pack, "silver_lion")[0]
+    armor = cards_of_type(pack, "eight_diagrams")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=2, hp_max=4, equip=(silver,), hero="sunshangxiang"),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(pack, silver, armor),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.state.player(0).hand[:] = [armor]
+    return engine, armor
+
+
+class _ReplaceSilverLion:
+    """出牌阶段只用那张新防具（顶替白银狮子）；技能询问一律「放弃」。"""
+
+    def __init__(self, armor: int) -> None:
+        self.armor = armor
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            return next(
+                action for action in query.legal_actions if isinstance(action, Pass)
+            )
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == self.armor:
+                    return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        return next(
+            (action for action in query.legal_actions if isinstance(action, Pass)),
+            query.legal_actions[0],
+        )
+
+
+def _silver_lion_order(engine) -> list[tuple]:
+    """这次失去的结算次序：面 → （``RECOVER`` 帧压栈）→ 体力变化。
+
+    记录流原样取出（`CODING_STANDARDS.md` §4：不 ``sorted`` / 不取集合）。
+    """
+    order: list[tuple] = []
+    for record in engine.records:
+        if record.kind == "query" and record.query.kind == QueryKind.SKILL_ACTIVATION:
+            if XIAOJI in _face_of(record.query):
+                order.append(("ask", XIAOJI))
+        elif (
+            record.kind == "frame"
+            and record.frame_kind is FrameKind.RECOVER
+            and record.op == "push"
+        ):
+            order.append(("recover", "push"))
+        elif (
+            record.kind == "delta"
+            and record.delta_type == "hp_change"
+            and record.seat == 0
+        ):
+            order.append(("hp", record.before, record.after))
+    return order
+
+
+def _silver_lion_hp_changed(engine) -> bool:
+    return any(entry[0] == "hp" for entry in _silver_lion_order(engine))
+
+
+def _recover_pushes(engine) -> int:
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "frame"
+        and record.frame_kind is FrameKind.RECOVER
+        and record.op == "push"
+    )
+
+
+def test_a_locked_equipment_segment_waits_for_the_higher_tier_face():
+    """复核修复 F1（档序）：【枭姬】先上脸，白银狮子**轮到自己那一档**才结算。
+
+    真实形状：座位 0 = 孙尚香 + 【白银狮子】，出牌阶段用新防具顶替 ⇒ 一次 ``MOVE_AFTER``
+    同时命中两条提供者。修前"强制段在轮次开头一次跑完"把锁定回复（压 ``RECOVER`` 帧）
+    排在面**之前**；修后强制段只跑"当前最高优先档"的那几条 ⇒ 武将档（0）的面先问，
+    装备档（1）的锁定段要等面答完。判据比较**记录序本身**（§4）。
+    """
+    engine, armor = _silver_lion_engine()
+    script = _ReplaceSilverLion(armor)
+    _drive(engine, script, lambda e: bool(_activation_queries(e)))
+
+    query = engine.pending
+    assert _face_of(query) == (XIAOJI,), f"面里只有武将档那条可选项：实得 {_face_of(query)}"
+    assert _silver_lion_order(engine) == [("ask", XIAOJI)], (
+        "白银狮子此刻还没结算：强制段在**它的档**轮到它时才跑（问完可选项之后）；"
+        f"实得 {_silver_lion_order(engine)}"
+    )
+
+    engine.submit(
+        next(action for action in query.legal_actions if isinstance(action, ActivateSkill))
+    )
+    _drive(engine, script, lambda e: _silver_lion_hp_changed(e))
+
+    assert _silver_lion_order(engine) == [
+        ("ask", XIAOJI),
+        ("recover", "push"),
+        ("hp", 2, 3),
+    ], f"面 → 装备档的回复：实得 {_silver_lion_order(engine)}"
+    assert engine.state.player(0).hp == 3, "选了枭姬也不能把白银狮子的强制段吞掉"
+    assert _recover_pushes(engine) == 1, "强制段恰好结算一次"
+
+
+def test_a_pass_on_the_face_still_runs_the_pending_mandatory_segment():
+    """复核修复 F1（`Pass`）：问句放弃了，白银狮子的锁定回复照跑。
+
+    ``Pass`` 结束的是这名角色的**选择**，不是它的强制效果（票 01 §4-6 + §4-5 复核读法）。
+    修前 `Pass` 直接 ``_pass_next_seat`` ⇒ 更低档的锁定段整段丢掉；这里把"放弃"与
+    "回复照样落地"配成同一条记录序判据。
+    """
+    engine, armor = _silver_lion_engine()
+    script = _ReplaceSilverLion(armor)
+    _drive(engine, script, lambda e: bool(_activation_queries(e)))
+
+    query = engine.pending
+    assert _silver_lion_order(engine) == [("ask", XIAOJI)]
+    engine.submit(next(action for action in query.legal_actions if isinstance(action, Pass)))
+    _drive(engine, script, lambda e: _silver_lion_hp_changed(e))
+
+    assert _silver_lion_order(engine) == [
+        ("ask", XIAOJI),
+        ("recover", "push"),
+        ("hp", 2, 3),
+    ], f"放弃只结束选择，强制段照跑：实得 {_silver_lion_order(engine)}"
+    assert engine.state.player(0).hp == 3
+    assert _recover_pushes(engine) == 1, "放弃之后强制段恰好跑一次"
+
+
+def test_the_forced_segments_of_different_tiers_run_their_own_tier(monkeypatch):
+    """复核修复 F1（逐档循环）：两条不同档的锁定技都要跑到，且按档序。
+
+    没有可选项时"只跑当前最高优先档"意味着**一轮跑一档**：武将档先跑，回环重收集后
+    装备档再跑。少了回环（或把空面直接当成"这个座位结束了"）第二条会被静默吞掉。
+    """
+    from sgs.skills import Hook, SkillDef
+
+    order: list[str] = []
+
+    def locked(skill_id, carrier, label):
+        return SkillDef(
+            skill_id=skill_id,
+            locked=True,
+            carrier=carrier,
+            hooks=(
+                Hook(Timing.GAME_START, lambda host, frame: order.append(label)),
+            ),
+        )
+
+    _install_fake_skills(
+        monkeypatch,
+        locked(FAKE_FORCED_HERO, CarrierKind.HERO, "hero"),
+        locked(FAKE_FORCED_EQUIP, CarrierKind.EQUIPMENT, "equip"),
+    )
+    engine = _activation_engine(FAKE_FORCED_HERO, FAKE_FORCED_EQUIP)
+    script = _FaceScript()
+
+    _drive(engine, script, lambda e: order == ["hero", "equip"])
+
+    assert order == ["hero", "equip"], "武将档的强制段先于装备档（档序，不是 id 序）"
+    assert script.faces == [], "两条都是强制段：一张面都不给"
+
+
+def test_a_mixed_instance_runs_its_forced_item_after_the_player_passes(monkeypatch):
+    """复核修复 F1（混合实例）：一条技能里既有可选段又有强制段 ⇒ 放弃后强制项照跑。
+
+    牌面写「你可以…」的那一段要问；同一句话里没有「可以」的那几句（监听 / 清扫）不问。
+    ``Pass`` 只跳过**可选段**——改造前 HEAD 的 ``if not (forced or accepted): continue``
+    就是这条，票 01 的"Pass = 结束本座位"把它整条吞掉了。
+    """
+    from sgs.skills import Hook, SkillDef
+
+    ran: list[str] = []
+    mixed = SkillDef(
+        skill_id=FAKE_MIXED,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        hooks=(
+            Hook(
+                Timing.GAME_START,
+                handler=lambda host, frame: ran.append("forced"),
+                forced=True,
+            ),
+            Hook(Timing.GAME_START, handler=lambda host, frame: ran.append("optional")),
+        ),
+    )
+    _install_fake_skills(monkeypatch, mixed)
+    engine = _activation_engine(FAKE_MIXED)
+    script = _FaceScript(None)  # 对这条技能的"是否发动"答放弃
+
+    _drive(
+        engine,
+        script,
+        lambda e: bool(ran)
+        or (e.pending is not None and e.pending.kind != QueryKind.SKILL_ACTIVATION),
+    )
+
+    assert script.faces == [(FAKE_MIXED,)], (
+        "混合实例仍要问一次（可选段）——面上只有它自己那条候选；"
+        f"实得 {script.faces}"
+    )
+    assert ran == ["forced"], "放弃只跳过可选段：强制段照跑，可选项不跑"
     assert len(_activation_queries(engine)) == 1
 
 

@@ -742,7 +742,10 @@ function refreshSubmit(pending) {
   const dialogKind = stepDialogKind(pending);
   // 同一时机的激活面（票 02）：出口在**面内**（每条技能行一击即提交 / 末条「都不发动」），
   // 底部「提交」不承担这一步（两个提交点会让"选一条"变成"选一条再按一次"）。
-  if (isActivationFace(pending)) {
+  // 判据与 `stepDialogKind` 共用 `activationFaceSurface`：点开某条候选的清单之后这一步的
+  // 表面是**牌桌**，提交键要按清单的 `ready` 算（复核修复 F2：只判 N ≥ 2 会让清单永远
+  // 提不出去——提交键恒灰、提示条被改写成面内那句）。
+  if (activationFaceSurface(pending)) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason
       || "点一条技能发动；不发动就点「都不发动」。";

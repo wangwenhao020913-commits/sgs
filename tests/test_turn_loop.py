@@ -463,9 +463,10 @@ GAME_START_SKILL = "hero.fake.game_start"
 GAME_START_SKILL_B = "hero.fake.game_start_b"
 """合成 L0 技能的 id（只活在 ``CATALOG`` 注入里）；两个座位各一条 ⇒ 必须是两个 id。
 
-``ask_skill_activation`` 的帧内答案缓存键 = ``(skill_id, key)``、**不含座位**，故同一个 id
-授予两个座位时第二次派发会直接读到第一个座位的答案、不再发问——那是既有缓存口径，本票
-不碰；要观测"逐座位派发"就得给两条不同的 id。
+``ask_skill_activation`` 的帧内答案缓存键 = ``(timing, 派发键, 嵌套层号, 座位, 轮次)``
+（票 01 起把座位 / 轮次 / 层号并进键里；改造前是 ``(skill_id, key)``、不含座位）。故
+"同一条 id 授给两个座位"不再是缓存问题：两问各有各的槽。本用例用两条不同 id 只是按座位
+各声明一条钩子（``observed`` 记的是 ``skill_owner``），判据落在**派发次序**上。
 """
 
 _GAME_START_OPTION = "draw-one"

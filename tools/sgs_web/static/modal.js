@@ -70,6 +70,20 @@ function isActivationFace(pending) {
   ).length >= 2;
 }
 
+/** 这一步的**表面**是不是激活面（唯一判据，票 02 + 复核修复 F2）。
+ *
+ * N ≥ 2 **且**本地没有打开某条候选的预发动清单。清单开着时这一步的表面是**牌桌**
+ * （清单的选牌 / 选座位在牌桌上点），激活面那条"面内出口"的读法（提交键留灰 + 面内
+ * 提示条）不适用。
+ *
+ * 两个消费方（`stepDialogKind` / `refreshSubmit`）必须读**同一个**谓词：F2 的 bug 就是
+ * `refreshSubmit` 只判 `isActivationFace`、漏了 `state.preactivation`，于是点开带清单的
+ * 候选之后提交键被置灰、提示条被改写成"点一条技能发动…"，清单填完也提不出去。
+ */
+function activationFaceSurface(pending) {
+  return !state.preactivation && isActivationFace(pending);
+}
+
 /** 这几类弹窗步骤**没有「放弃」**（spec D3 / 票 08 / 09 / 11）：即便引擎给了 `Pass`，
  *  界面也不读它——选择型、未知区域、亮牌三类都是"点内容即完成 / 必答"。
  *
@@ -128,7 +142,7 @@ function stepDialogKind(pending) {
   // 一张窗选一条技能 / 末条「都不发动」，正是"选项闭集"）。`state.preactivation` 优先，
   // 与 `dialogWantedKind` 同一次序——选中某条技能进入它自己的清单后，这一步的表面是
   // **牌桌**（清单的选牌 / 选座位要在牌桌上点），不能再按"这一步是弹窗"冻结牌桌。
-  if (!state.preactivation && isActivationFace(pending)) return DIALOG_KINDS.choice;
+  if (activationFaceSurface(pending)) return DIALOG_KINDS.choice;
   // 选择型（票 08）：服务端在载荷里给了选项标签（花色是第一个复用枚举），或选项 ≥4
   // （D3 的模板判据）⇒ 画弹窗。前端不按选项值自己判断"这是不是花色"——那会在这里
   // 长出第二份枚举表。

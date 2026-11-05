@@ -4402,6 +4402,93 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!giveUpSent && giveUpSent.kind === "Pass", JSON.stringify(giveUpSent));
 }
 
+/* ㉿W4-5（复核修复 F2）N ≥ 2 激活面里**带清单的那条候选**：进入清单后提交键不能被打灰。
+ *
+ * 复现：点带清单的那条 ⇒ `enterPreativation` 重绘**同一张** N ≥ 2 的询问；`refreshSubmit`
+ * 只判 `isActivationFace`（漏了 `state.preactivation`）⇒ 提交键被置灰、提示条被改写成
+ * "点一条技能发动…"，清单填完了也提不出去。今天没有活的 N ≥ 2 面带清单，故它一直潜伏。
+ * 判据两半：①有清单：进入 → 清单可见 → 填完 ⇒ 提交键可点、提示不是激活面那句；
+ * ②没清单：一击即提交（既有"点一个选项即提交"的语义不变）。
+ */
+{
+  const alphaSteps = [
+    { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["41"] }], wording: "先付甲的代价" },
+  ];
+  const mixedFacePending = {
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 1320,
+    prompt: "是否发动该技能？", skill_id: "demo.alpha",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "demo.alpha", answers_seq: 1320, picks: [], choices: [] },
+      { kind: "ActivateSkill", skill_id: "demo.beta", answers_seq: 1320, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: 1320 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {},
+    preactivation: alphaSteps,
+    // 只有甲带清单：乙选中就是那条裸 `ActivateSkill`（一击即提交）。
+    activation_preactivations: { "demo.alpha": alphaSteps },
+  };
+  const skillOf = (skillId, name) => ({
+    skill_id: skillId, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    available: true, preactivated: true, description: `${name}的描述`,
+    ui: { requirement: "", convert_sources: [] },
+  });
+  const mixedView = synthView(mixedFacePending);
+  mixedView.skills = [skillOf("demo.alpha", "示例甲"), skillOf("demo.beta", "示例乙")];
+  mixedView.snapshot.self_hand = [synthCard(41, "杀")];
+  const showMixedFace = () => {
+    ui.state.view = mixedView;
+    ui.state.sessionId = "smoke-missing-session";
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(mixedView);
+  };
+  const mixedRows = () => Array.from($("t-options").children);
+  const mixedRow = (text) => mixedRows()
+    .find((node) => new RegExp(text).test(node.textContent || ""));
+  const activationHint = "点一条技能发动";
+
+  showMixedFace();
+  await clickAndWait(mixedRow("示例甲"));
+  check("㉿AF12 点带清单的候选 ⇒ 进入它自己的清单（表面切到预发动、步骤可见）",
+    !!ui.state.preactivation && ui.state.preactivation.skillId === "demo.alpha"
+      && ui.renderKind(mixedView.pending, mixedView.pending.legal_actions) === "preactivation"
+      && mixedRows().some((node) => String(node.textContent || "").trim() === "下一步"),
+    `skillId=${ui.state.preactivation && ui.state.preactivation.skillId}`
+      + ` kind=${ui.renderKind(mixedView.pending, mixedView.pending.legal_actions)}`
+      + ` rows=${JSON.stringify(mixedRows().map((n) => String(n.textContent || "").trim()))}`);
+  check("㉿AF13 清单没填完之前提交键仍不可点（ready 判据照旧）",
+    $("btn-submit").disabled === true,
+    `disabled=${$("btn-submit").disabled} hint="${$("t-choice").textContent}"`);
+
+  const mixedChip = Array.from($("t-hand").children)[0];
+  for (const fn of mixedChip ? mixedChip.listeners.click || [] : []) {
+    fn({ target: mixedChip });
+  }
+  // 选牌步的"下一步"（与既有预发动用例同一条交互）：填满才放行，光标走到末尾才算 ready。
+  const nextButton = mixedRows()
+    .find((node) => String(node.textContent || "").trim() === "下一步");
+  for (const fn of (nextButton || { listeners: {} }).listeners.click || []) {
+    fn({ target: nextButton });
+  }
+  check("㉿AF14 清单填完 ⇒ 提交键**可点**、提示不是激活面那句（F2 的回归）",
+    $("btn-submit").disabled === false
+      && !String($("t-choice").textContent || "").includes(activationHint)
+      && /可以确认发动/.test($("t-choice").textContent || ""),
+    `disabled=${$("btn-submit").disabled} hint="${$("t-choice").textContent}"`);
+
+  showMixedFace();
+  const beforeNoManifest = calls.length;
+  await clickAndWait(mixedRow("示例乙"));
+  const noManifestSent = calls.length > beforeNoManifest
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿AF15 没清单的候选仍是一击即提交（不被打灰的提交键挡住）",
+    !!noManifestSent && noManifestSent.kind === "ActivateSkill"
+      && noManifestSent.skill_id === "demo.beta",
+    JSON.stringify(noManifestSent));
+}
+
 /* ㉿W4-4（票 02）**收窄面**：选完一条之后引擎**再问一次**，只剩剩下的那条 + `Pass`。
  *
  * 票 01 的派发环是"一次选一条"⇒ 同一时机不会把 N 条一起问第二遍；第二问只剩没选过的。
