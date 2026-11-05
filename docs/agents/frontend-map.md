@@ -20,11 +20,11 @@
 | `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
 | `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装；选项步的**置灰不可选**（`preactivationDisabled` 读 `StepPool.disabled`，画 `.dis` + 不接 click；票 04 §3）；多来源步的**合法来源组合**（`preactivationGroups` 读 `Step.groups`：卡面 / 「下一步」/ 「提交」三处同一判据，凑不成一组的来源既选不出也交不出；huo-mobile-batch 票 10）。 |
 | `interaction.js` | 点选：卡面芯片、点牌设焦点、点座位选目标、弃牌点选。 |
-| `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）。 |
+| `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）；**同一时机的激活面**（`renderActivationFace`：一条 `SKILL_ACTIVATION` 有 ≥2 条 `ActivateSkill` 候选时铺"选一条发动"的逐技能行 + 末条「都不发动」，退出判据是候选里的 `Pass`；选中哪条就按 `activation_preactivations[skill_id]` 进它自己的清单，没有清单则一击即提交；`skill-face` 只在这个形状出现，单候选面仍走直提态）。 |
 | `options.js` | 选项按钮组、选择面槽位、「提供一张 B」、Action 文案与右端动作下标；**计数式分配面**（`renderDistribution`：逐座位计数 + 「重置」，本地计数住 `state.distribution`；huo-shenzhouyu-mobile 票 05）。 |
 | `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；**按花色取牌**（涉猎：一行式、同花色置灰、2.5 秒结果态 `renderSuitResult`）；**带观看授予的选项步**（韬·刘备【义起】：`SELECT_OPTION` + `revealed` ⇒ 选择型弹窗里牌面只读、3 个类型按钮同窗，`options.js:renderOptionButtons` 画牌）；判据仍住 `modal.js`。 |
 | `pindian.js` | 拼点弹窗（huo-taishici-xunyu 票 04）：`pindian` delta → **全场可见的只读结果面**（左 1 个固定槽 = 发起者的拼点牌，右 1..N 行 = 各被拼点者的牌 + 赢 / 没赢 / 都没赢）。判据只看 `delta_type`（不认技能 id / 座位）；`applyPindianDelta(record)` 由 `session.js:stepPlayback` 每条记录调一次，`PINDIAN_HOLD_MS = 3000` 排一次计时器；不进 `stepDialogKind`、不挡牌桌、没有提交按钮。 |
-| `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`、计数式分配的 `distribution`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）；**展示武将牌的选项步**（票 08：`.hero-card` 正文段 = 副标题「第 k/m 张」+ 武将块 + 带描述的选项行，复用 `choice` 外壳，不新增第七种 kind；判据 `isShowHeroCardStep` 只看载荷 `hero_card`）。 |
+| `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`、计数式分配的 `distribution`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）；**展示武将牌的选项步**（票 08：`.hero-card` 正文段 = 副标题「第 k/m 张」+ 武将块 + 带描述的选项行，复用 `choice` 外壳，不新增第七种 kind；判据 `isShowHeroCardStep` 只看载荷 `hero_card`）；**同一时机的激活面**（`isActivationFace`：候选里 ≥2 条 `ActivateSkill` ⇒ 复用 `choice` 外壳、标题「选一条发动」；进入某条技能的清单后按本地态让位给牌桌表面）。 |
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
 | `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`；三个前端代答例外（观星 `ARRANGE` / 涉猎 `suit` / 计数式分配 `DISTRIBUTE` 到点提交当前选择）；涉猎提交后的 2.5 秒结果态。 |

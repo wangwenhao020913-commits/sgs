@@ -4031,6 +4031,191 @@ def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
     assert payload["preactivations"] == {}, "被动入口没有「技能 id → 清单」那张表"
 
 
+# ---------------------------------------------------------------------------
+# 票 02：同一时机的激活面——N ≥ 2 条候选时**逐候选**下发各自的预发动清单
+# ---------------------------------------------------------------------------
+
+DAWU = "hero.shen_zhugeliang.dawu"
+KUANGFENG = "hero.shen_zhugeliang.kuangfeng"
+
+
+def _session_at_a_two_skill_activation_face() -> Session:
+    """真会话：神诸葛亮的结束阶段——【狂风】【大雾】同为 ``PHASE_FINISH`` ⇒ 一张面两条候选。
+
+    ``heroes=("shen_zhugeliang", ...)`` 直接把神诸葛亮钉在人类座位上（不点将也确定）；
+    其余询问取超时兜底（排列 = 恒等、技能 = 放弃），故驱动是确定性的。
+    """
+    session = Session(
+        seed=7,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        heroes=("shen_zhugeliang", "zhouyu"),
+        human_seat=0,
+    )
+    for _ in range(400):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到结束阶段的激活面")
+        if pending.kind == "SKILL_ACTIVATION" and sum(
+            1 for action in pending.legal_actions if action.kind == "ActivateSkill"
+        ) >= 2:
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("400 次应答内没走到「同一时机两条技能」的激活面")
+
+
+def test_the_activation_face_forwards_a_manifest_per_candidate() -> None:
+    """票 02 §3-2：逐候选清单经 ``pending_payload`` 下发（读取方 = ``preactivation.js``）。
+
+    ``SkillActivationQuery.activation_preactivations`` 是**本地面**（``exclude=True``）：
+    接入层必须显式转发，否则前端只能看到代表候选那一份（``preactivation``）——
+    多候选面上选中另一条时就会展开成**别人的**清单。
+
+    这里是**投影那一半**的判据（与 :func:`test_the_pending_payload_forwards_a_passive_activation_manifest`
+    同姿态：用同一个询问模型的形状钉跨线契约；生产侧写方由引擎的
+    ``ask_skill_activation`` 负责）。
+    """
+    from sgs.state import SkillActivationQuery
+
+    state = build_state(
+        pack=_context_pack(),
+        seats=[SeatSpec(hand=(), hero="sunquan"), SeatSpec()],
+        turn_seat=0,
+    )
+    card_step = Step(name="card", zones=(Zone.HAND,), min=1, max=1,
+                     pool=(StepPool(when=(), options=("7",)),), order=0)
+    seat_step = Step(name="seat", zones=(), min=1, max=1,
+                     pool=(StepPool(when=(), options=("seat:1",)),), order=0)
+    query = SkillActivationQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_FINISH,
+        prompt="是否发动该技能？",
+        legal_actions=(
+            ActivateSkill(skill_id="demo.alpha", answers_seq=1),
+            ActivateSkill(skill_id="demo.beta", answers_seq=1),
+            Pass(answers_seq=1),
+        ),
+        view=project(state, 0),
+        skill_id="demo.alpha",
+        skill_ids=("demo.alpha", "demo.beta"),
+        preactivation=(card_step,),
+        activation_preactivations={"demo.alpha": (card_step,), "demo.beta": (seat_step,)},
+    )
+
+    payload = pending_payload(query, human_seat=0)
+
+    assert payload is not None
+    manifests = payload["activation_preactivations"]
+    assert set(manifests) == {"demo.alpha", "demo.beta"}, (
+        "两条候选各自的那一份都要到得了（键 = 候选的技能 id）"
+    )
+    assert manifests["demo.alpha"][0]["name"] == "card"
+    assert manifests["demo.beta"][0]["name"] == "seat", "选中 beta 时不能读到 alpha 的清单"
+    assert payload["preactivation"][0]["name"] == "card", (
+        "单值 `preactivation` 仍是代表候选（第一条）那份——旧读取方一字不改"
+    )
+
+
+def test_the_real_two_skill_face_carries_the_key_and_both_candidates() -> None:
+    """**生产路径**的一条 N = 2 激活面（神诸葛亮：狂风 / 大雾，同为结束阶段）。
+
+    ``ask_skill_activation`` 的逐候选清单只对**已翻预发动**的技能渲染；狂风 / 大雾都不是
+    （它们的步骤由钩子里的 ``SkillFlow`` 逐步问），故这张面上 ``activation_preactivations``
+    是**空表**。这里钉两件事：键恒在（读取方不必先判键存在）、候选集合本来就在
+    ``legal_actions``（含那条 `Pass` 出口）。
+    """
+    session = _session_at_a_two_skill_activation_face()
+
+    payload = pending_payload(session)
+
+    assert payload is not None and payload["kind"] == "SKILL_ACTIVATION"
+    candidates = [
+        action["skill_id"]
+        for action in payload["legal_actions"]
+        if action["kind"] == "ActivateSkill"
+    ]
+    assert sorted(candidates) == sorted([DAWU, KUANGFENG]), candidates
+    assert [action["kind"] for action in payload["legal_actions"]].count("Pass") == 1, (
+        "「都不发动」的入口由这条 Pass 决定，不是界面自己加的"
+    )
+    assert payload["activation_preactivations"] == {}, (
+        "两条都是钩子驱动的触发技（未翻预发动）⇒ 没有逐候选清单；键仍在"
+    )
+
+
+def test_the_per_candidate_manifests_stay_out_of_the_record_stream() -> None:
+    """票 02 §5：逐候选清单**不进记录流**（否则 47 条金录像一起变红）。"""
+    from sgs.state import SkillActivationQuery
+
+    state = build_state(
+        pack=_context_pack(),
+        seats=[SeatSpec(hand=(), hero="sunquan"), SeatSpec()],
+        turn_seat=0,
+    )
+    step = Step(name="card", zones=(Zone.HAND,), min=1, max=1,
+                pool=(StepPool(when=(), options=("7",)),), order=0)
+    query = SkillActivationQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_FINISH,
+        prompt="是否发动该技能？",
+        legal_actions=(
+            ActivateSkill(skill_id="demo.alpha", answers_seq=1),
+            ActivateSkill(skill_id="demo.beta", answers_seq=1),
+        ),
+        view=project(state, 0),
+        skill_id="demo.alpha",
+        skill_ids=("demo.alpha", "demo.beta"),
+        preactivation=(step,),
+        activation_preactivations={"demo.alpha": (step,), "demo.beta": (step,)},
+    )
+
+    raw = json.loads(query.model_dump_json())
+
+    assert "activation_preactivations" not in raw and "skill_ids" not in raw, (
+        "两个本地面都不进序列化面（候选集合本来就在 legal_actions）"
+    )
+
+
+def test_a_foreign_viewer_does_not_get_the_actors_hand_from_a_per_candidate_manifest() -> None:
+    """逐候选清单与 ``preactivation`` 是**同一条泄露面**：换一个查看者也要抹掉牌面候选。"""
+    from sgs.state import SkillActivationQuery
+
+    state = build_state(
+        pack=_context_pack(),
+        seats=[SeatSpec(hand=(), hero="sunquan"), SeatSpec()],
+        turn_seat=0,
+    )
+    card_step = Step(name="card", zones=(Zone.HAND,), min=1, max=1,
+                     pool=(StepPool(when=(), options=("7",)),), order=0)
+    seat_step = Step(name="seat", zones=(), min=1, max=1,
+                     pool=(StepPool(when=("7",), options=("seat:1",)),), order=1)
+    query = SkillActivationQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_FINISH,
+        prompt="是否发动该技能？",
+        legal_actions=(ActivateSkill(skill_id="demo.alpha", answers_seq=1),),
+        view=project(state, 0),
+        skill_id="demo.alpha",
+        skill_ids=("demo.alpha",),
+        preactivation=(card_step, seat_step),
+        activation_preactivations={"demo.alpha": (card_step, seat_step)},
+    )
+
+    payload = pending_payload(query, human_seat=1)
+
+    masked = payload["activation_preactivations"]["demo.alpha"]
+    assert masked[0]["zones"] == ["hand"], "区域 / 张数这些公开形状仍下发"
+    assert all(not row["options"] for row in masked[0]["pool"]), "选牌候选被抹掉"
+    assert all(not row["when"] for row in masked[1]["pool"]), (
+        "座位步的前序答案（可能含被选中的牌 id）也必须抹掉"
+    )
+    assert masked[1]["pool"][0]["options"], "公开的目标候选照常保留"
+
+
 def test_the_skill_entry_is_available_through_the_manifest_and_carries_the_switch() -> None:
     """W4-2：可用性只剩清单（骨架候选已删），且技能条目带上 `preactivated` 供界面分流。"""
     session = _session_at_rende_play_phase()

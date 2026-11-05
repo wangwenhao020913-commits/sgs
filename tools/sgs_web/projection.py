@@ -1790,7 +1790,9 @@ def _preactivation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
 def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     """查看者不是询问者时，抹掉清单里**属于询问者**的牌面（W4-1；与观看私密同一条纪律）。
 
-    覆盖技能清单与附带指定清单（``card_preactivations``，W5-02b）两份载体。清单的选牌步
+    覆盖技能清单（``preactivations``）、附带指定清单（``card_preactivations``，W5-02b）、
+    单份清单（``preactivation``）与**逐候选**清单（``activation_preactivations``，票 02）
+    四份载体。清单的选牌步
     候选用的是**实体牌 id**（本人手牌的 id）——把整份清单原样发给别人就等于泄露手牌。
     这里按步类型收窄：
 
@@ -1842,6 +1844,8 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     for steps in (payload.get("preactivations") or {}).values():
         mask(steps)
     for steps in (payload.get("card_preactivations") or {}).values():
+        mask(steps)
+    for steps in (payload.get("activation_preactivations") or {}).values():
         mask(steps)
     mask(payload.get("preactivation") or [])
 
@@ -2314,6 +2318,14 @@ def pending_payload(
         getattr(query, "card_preactivations", None) or {}
     )
     payload["preactivation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
+    # **逐候选**的预发动清单（票 01 的 ``SkillActivationQuery.activation_preactivations``；
+    # 票 02 的读取面 = ``preactivation.js:preactivationManifest``）：同一时机有 N 条技能
+    # 候选时，每条候选各有自己的一份清单，界面按**选中的那条**取；单候选面上它与上面的
+    # ``preactivation`` 同源（旧面一字不变）。同样是 ``exclude=True`` 的本地面 ⇒ 接入层
+    # 显式下发；键恒在（没有清单时给空表），读取方不必先判键存在。
+    payload["activation_preactivations"] = _preactivation_payload(
+        getattr(query, "activation_preactivations", None) or {}
+    )
     if foreign:
         _mask_foreign_preactivations(payload)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。

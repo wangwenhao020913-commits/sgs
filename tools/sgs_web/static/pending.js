@@ -202,6 +202,8 @@ function renderPending(view) {
   if (kind === "picker") renderPicker(pending);
   else if (kind === "discard") renderDiscard(pending);
   else if (kind === "preactivation") renderPreativation(pending);
+  // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 一张面选一条发动（末条「都不发动」）。
+  else if (kind === "activation-face") renderActivationFace(pending, actions);
   else if (kind === "preactivation-entry") renderPreativationEntry(pending);
   else if (kind === "seat") renderSeatPick(pending);
   else if (kind === "own-hand-pick") renderOwnHandPick(pending);
@@ -364,6 +366,11 @@ function renderKind(pending, actions) {
   if (pending.kind === "DISTRIBUTE") return "distribution";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preactivation) return "preactivation";
+  // 同一时机的激活面（票 02）：本轮 N ≥ 2 条技能候选 ⇒ 一张面选一条发动（末条
+  // 「都不发动」）。判据只看候选条数（`isActivationFace`），**排在被动入口之前**——
+  // 代表候选（`pending.skill_id`）可能正好是已翻预发动的那条，但这一问的答案不是它。
+  // 单候选面（N = 1）掉到下面既有的两条支路（直提态 / 预发动入口），一字不变。
+  if (isActivationFace(pending)) return "activation-face";
   // 被动入口（W4-2）：已翻预发动的技能在时机上只发一次询问并随询问下发清单。界面给它
   // 一个**入口**（技能按钮）与一条"放弃"（= `Pass`），不把骨架候选画成"发动技能 XXX"。
   if (isPassivePreativation(pending)) return "preactivation-entry";
@@ -584,6 +591,77 @@ function renderPreativationEntry(pending) {
   $("btn-submit").disabled = true;
 }
 
+/** 同一时机的**激活面**（票 02）：一张面选一条发动。
+ *
+ * 每一行 = 一条 `ActivateSkill` 候选（**不是**右端动作），文案 = 技能名 + 描述
+ * （`view.skills[*]` 的展示事实；前端不抄中文名、不编描述）。末条「都不发动」只在
+ * `legal_actions` 里**真有 `Pass`** 时铺——判据是候选，**不认技能 id**。
+ *
+ * 选中一条之后按**这条候选自己的**清单分流（`preactivationManifest` 读
+ * `activation_preactivations`）：有清单 ⇒ 进入它的预发动（清单 = 这次发动的成本 / 目标，
+ * 在牌桌表面逐步选）；无清单 ⇒ 这条裸 `ActivateSkill` 本身就是答案，**一击即提交**
+ * （与选择型弹窗的"点一个选项即提交"同一交互；服务端随后按技能自己的流程继续问）。
+ *
+ * 两个出口都在面内（行点击 / 末条「都不发动」），故右端的「提交 / 放弃」在这张面上
+ * 不承担出口（`refreshSubmit` 把提交键留灰；这张面走 `choice` 外壳，右端放弃按既有
+ * `dialogDisablesPass` 的口径不铺——「都不发动」不是右端那个通用「放弃」）。
+ */
+function renderActivationFace(pending, actions) {
+  const skills = (state.view && state.view.skills) || [];
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = "选一条技能发动；都不发动就点末条。";
+  actions
+    .filter((action) => action.kind === "ActivateSkill")
+    .forEach((action) => {
+      const skill = skills.find((item) => item && item.skill_id === action.skill_id) || null;
+      const name = (skill && skill.name) || skillActionName(action) || action.skill_id;
+      const manifest = preactivationManifest(pending, action.skill_id);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "hero-card-row";
+      row.setAttribute("data-skill-id", String(action.skill_id));
+      const label = document.createElement("span");
+      label.className = "hero-card-row-name";
+      label.textContent = name;
+      row.appendChild(label);
+      // 描述是 `descriptions.json` 的原文（服务端下发，界面不裁剪）——缺省时只画技能名。
+      const description = skill && skill.description;
+      if (description) {
+        const body = document.createElement("div");
+        body.className = "hero-card-desc";
+        body.textContent = description;
+        row.appendChild(body);
+      }
+      row.addEventListener("click", async () => {
+        if (state.playback || state.submitBusy) return;
+        if (manifest) {
+          enterPreativation(
+            skill || { skill_id: action.skill_id, name, preactivated: false },
+            manifest,
+          );
+          return;
+        }
+        await submitDialogChoice(pending, actions.indexOf(action));
+      });
+      $("t-options").appendChild(row);
+    });
+  // 末条「都不发动」：候选里真有 `Pass` 才铺（「可以都不发动」由引擎的 `optional` 聚合
+  // 决定，界面只读候选集合）。它与其它「放弃」是同一个动作：送出那条 `Pass`。
+  if (actions.some((action) => action.kind === RIGHT_ACTION_KINDS.pass)) {
+    const giveUp = document.createElement("button");
+    giveUp.type = "button";
+    giveUp.className = "opt";
+    giveUp.textContent = "都不发动";
+    giveUp.addEventListener("click", async () => {
+      if (state.playback || state.submitBusy) return;
+      await submitRightAction(RIGHT_ACTION_KINDS.pass);
+    });
+    $("t-options").appendChild(giveUp);
+  }
+  // 面里的行就是出口：底部两键不承担这一步（提交键由 `refreshSubmit` 统一留灰）。
+  $("btn-cancel").disabled = true;
+}
+
 /** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁" / 【离间】选使用者与目标）：只点场上武将。 */
 function renderSeatPick(pending) {
   const hint = $("t-target-hint");
@@ -662,6 +740,14 @@ function refreshSubmit(pending) {
   // 故这一支按既有 `selectionError` / `buildAction` 算可点态（判据仍是"能造出候选里真有
   // 的那条 Action"），不把提交键恒置灰。
   const dialogKind = stepDialogKind(pending);
+  // 同一时机的激活面（票 02）：出口在**面内**（每条技能行一击即提交 / 末条「都不发动」），
+  // 底部「提交」不承担这一步（两个提交点会让"选一条"变成"选一条再按一次"）。
+  if (isActivationFace(pending)) {
+    $("btn-submit").disabled = true;
+    $("t-choice").textContent = state.lastRejectReason
+      || "点一条技能发动；不发动就点「都不发动」。";
+    return;
+  }
   // 票 01：按花色取牌（涉猎）——「提交」恒可点（0 张也合法）；「放弃」在右端，与提交同义，
   // 由 `answer.js:submitRightAction` 特判成"提交当前选择"。
   if (dialogKind === DIALOG_KINDS.suit) {

@@ -53,6 +53,23 @@ function hasPassAction(pending) {
   );
 }
 
+/** 同一时机的**激活面**（票 02）：一次 `SKILL_ACTIVATION` 里**有多条**技能候选。
+ *
+ * 判据只看候选条数（`legal_actions` 里 `ActivateSkill` 的条数 ≥ 2）——不认技能 id、也不读
+ * 本地面 `skill_ids`（候选集合本来就在 `legal_actions` 里）。故**单候选面（N = 1）永远
+ * 不进这里**：票 01 起引擎选完一条会带着"只剩剩下的"再问一次，那一问仍走今天的直提态
+ * （`selectedSkillAction` 原样），旧面一字不变（票 02 §3-3）。
+ *
+ * "这一问有没有清单"不是判据：清单只决定选中一条之后进入哪个面（预发动入口 / 直提态），
+ * 面本身只回答"这一轮有哪几条技能"。
+ */
+function isActivationFace(pending) {
+  if (!pending || pending.kind !== "SKILL_ACTIVATION") return false;
+  return (pending.legal_actions || []).filter(
+    (action) => action.kind === "ActivateSkill",
+  ).length >= 2;
+}
+
 /** 这几类弹窗步骤**没有「放弃」**（spec D3 / 票 08 / 09 / 11）：即便引擎给了 `Pass`，
  *  界面也不读它——选择型、未知区域、亮牌三类都是"点内容即完成 / 必答"。
  *
@@ -107,6 +124,11 @@ function stepDialogKind(pending) {
   if (pending.kind === "ARRANGE") return DIALOG_KINDS.arrange;
   // 票 05：计数式分配（【业炎】）——一张窗里给若干座位点计数，答案是一份"分配向量"。
   if (pending.kind === "DISTRIBUTE") return DIALOG_KINDS.distribution;
+  // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 用**既有** `choice` 外壳（不新增种类：
+  // 一张窗选一条技能 / 末条「都不发动」，正是"选项闭集"）。`state.preactivation` 优先，
+  // 与 `dialogWantedKind` 同一次序——选中某条技能进入它自己的清单后，这一步的表面是
+  // **牌桌**（清单的选牌 / 选座位要在牌桌上点），不能再按"这一步是弹窗"冻结牌桌。
+  if (!state.preactivation && isActivationFace(pending)) return DIALOG_KINDS.choice;
   // 选择型（票 08）：服务端在载荷里给了选项标签（花色是第一个复用枚举），或选项 ≥4
   // （D3 的模板判据）⇒ 画弹窗。前端不按选项值自己判断"这是不是花色"——那会在这里
   // 长出第二份枚举表。
@@ -358,6 +380,8 @@ function dialogTitleFor(kind, pending) {
   if (kind === DIALOG_KINDS.choice) {
     // 展示武将牌（票 08）：标题 = 技能名（`context.name` 优先 / `view.skills` 兜底）。
     if (isShowHeroCardStep(pending)) return heroCardTitle(pending);
+    // 同一时机的激活面（票 02）：一张面选一条技能——标题就是玩家要做的动作。
+    if (isActivationFace(pending)) return "选一条发动";
     // 带观看授予的选项步（【义起】）标题写技能名：玩家一眼看出"这是谁在问"。
     const watched = isWatchChoiceStep(pending);
     const contextName = watched && pending.context && pending.context.name;

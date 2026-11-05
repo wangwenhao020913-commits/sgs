@@ -104,15 +104,27 @@ const OPTION_COMPACT_MIN = 6;
 
 /* ------------------------------------------------------------ 预发动（W4-1） */
 
-/** 一条技能此刻的预发动清单：主动入口 = `pending.preactivations[skill_id]`，
- * 被动入口 = `pending.preactivation`。两者都由服务端按 `SkillFlow.steps` 渲染。
+/** 一条技能此刻的预发动清单（票 01 / 02）：**逐候选**表优先，单份 / 单技能表兜底。
  *
- * 载荷键与询问模型字段同名（``preactivations`` / ``preactivation``，W5-00 统一拼写）；
- * 服务端 `pending_payload` 下发同样的键。
+ * 四种载体，读取顺序就是"离这一问最近的那一份"：
+ *
+ *  1. `pending.activation_preactivations[skill_id]` —— **逐候选**清单（票 01 的
+ *     `SkillActivationQuery.activation_preactivations`；票 02 的读取面）。同一时机的
+ *     N ≥ 2 条技能候选各有自己的一份，界面按**选中的那条候选**取；单候选面上它与
+ *     第 3 条同源，故旧面的渲染结果一字不变。
+ *  2. `pending.preactivations[skill_id]` —— 主动入口的表（出牌阶段 / 转化技，W4-1）。
+ *  3. `pending.preactivation` —— 被动入口的**单份**清单（W4-1；票 01 起它只是**代表
+ *     候选**那一份，多候选面上不能拿它替代第 1 条）。
+ *  4. `null` —— 这一问没有这个技能的清单。
+ *
+ * 载荷键与询问模型字段同名（``preactivations`` / ``preactivation`` /
+ * ``activation_preactivations``，W5-00 统一拼写）；服务端 `pending_payload` 下发同样的键。
  * 这条跨线契约由 `tests/test_web.py` 与 `tests/support/ui_smoke.mjs` 两侧各钉一次。
  */
 function preactivationManifest(pending, skillId) {
   if (!pending) return null;
+  const perCandidate = pending.activation_preactivations || {};
+  if (perCandidate[skillId] && perCandidate[skillId].length) return perCandidate[skillId];
   const table = pending.preactivations || {};
   if (table[skillId] && table[skillId].length) return table[skillId];
   if (

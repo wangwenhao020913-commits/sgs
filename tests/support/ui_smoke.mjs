@@ -4297,6 +4297,172 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       + ` disabled=${next3 ? next3.disabled : "no-button"}`);
 }
 
+/* ㉿W4-3（票 02）同一时机的激活面：一张面选一条发动（N ≥ 2 条技能候选）。
+ *
+ * 01 落地后一条 `SKILL_ACTIVATION` 里会有**多条** `ActivateSkill` 候选（同一时机同一角色
+ * 的可发动技能）。今天的直提态只在「恰好一条」时成立，N ≥ 2 会落到「没有可用的界面」。
+ * 这里喂一份与服务端同形的合成载荷（`activation_preactivations` = 逐候选清单），钉住：
+ *
+ *   ① 面 = 「选一条发动」，每条候选一行（技能名 + 描述），末条「都不发动」；
+ *   ② 「都不发动」的有无**只由 `legal_actions` 里的 `Pass` 决定**（不认技能 id）；
+ *   ③ 选中哪条，展开的就是**哪条**的清单（`activation_preactivations[skill_id]`）——
+ *      不能退化成代表候选那份 `preactivation`。
+ */
+{
+  const alphaSteps = [
+    { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["41"] }], wording: "先付甲的代价" },
+  ];
+  const betaSteps = [
+    { name: "seat", zones: [], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["seat:1"] }], wording: "选乙的目标" },
+  ];
+  const facePending = (withPass) => ({
+    kind: "SKILL_ACTIVATION", actor: 0, seq: withPass ? 1300 : 1301,
+    prompt: "是否发动该技能？", skill_id: "demo.alpha",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "demo.alpha", answers_seq: 1300, picks: [], choices: [] },
+      { kind: "ActivateSkill", skill_id: "demo.beta", answers_seq: 1300, picks: [], choices: [] },
+      ...(withPass ? [{ kind: "Pass", answers_seq: 1300 }] : []),
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {},
+    preactivation: alphaSteps,
+    activation_preactivations: { "demo.alpha": alphaSteps, "demo.beta": betaSteps },
+  });
+  const faceSkill = (skillId, name, description) => ({
+    skill_id: skillId, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    available: true, preactivated: true, description,
+    ui: { requirement: "", convert_sources: [] },
+  });
+  const showFace = (withPass = true) => {
+    const view = synthView(facePending(withPass));
+    view.skills = [
+      faceSkill("demo.alpha", "示例甲", "甲的技能描述"),
+      faceSkill("demo.beta", "示例乙", "乙的技能描述"),
+    ];
+    view.snapshot.self_hand = [synthCard(41, "杀")];
+    ui.state.view = view;
+    ui.state.sessionId = "smoke-missing-session";
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    return view;
+  };
+  const faceRows = () => Array.from($("t-options").children);
+  const faceTexts = () => faceRows().map((node) => String(node.textContent || ""));
+
+  const face = showFace(true);
+  check("㉿AF1 N=2 的激活面走「选一条发动」（不再落到『没有可用的界面』）",
+    ui.renderKind(face.pending, face.pending.legal_actions) === "activation-face"
+      && ui.stepDialogKind(face.pending) === ui.DIALOG_KINDS.choice,
+    `kind=${ui.renderKind(face.pending, face.pending.legal_actions)}`
+      + ` dialog=${ui.stepDialogKind(face.pending)}`);
+  check("㉿AF2 面的正文在询问弹窗里，标题「选一条发动」",
+    $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "选一条发动"
+      && faceRows().length === 3,
+    `hidden=${$("t-dialog").hidden} title="${$("t-dialog-title").textContent}"`
+      + ` rows=${JSON.stringify(faceTexts())}`);
+  check("㉿AF3 每条候选一行 = 技能名 + 描述，末条「都不发动」",
+    faceTexts().length === 3
+      && /示例甲/.test(faceTexts()[0]) && /甲的技能描述/.test(faceTexts()[0])
+      && /示例乙/.test(faceTexts()[1]) && /乙的技能描述/.test(faceTexts()[1])
+      && faceTexts()[2].trim() === "都不发动",
+    `rows=${JSON.stringify(faceTexts())}`);
+
+  await clickAndWait(faceRows()[0]);
+  check("㉿AF4 选中甲 ⇒ 展开的是甲自己的清单（不是代表候选那份的复制品）",
+    !!ui.state.preactivation
+      && ui.state.preactivation.skillId === "demo.alpha"
+      && ui.state.preactivation.steps[0].wording === "先付甲的代价",
+    `skillId=${ui.state.preactivation && ui.state.preactivation.skillId}`
+      + ` wording="${ui.state.preactivation && ui.state.preactivation.steps[0].wording}"`);
+
+  showFace(true);
+  await clickAndWait(faceRows()[1]);
+  check("㉿AF5 选中乙 ⇒ 换成乙自己的清单（按选中的 skill_id 取）",
+    !!ui.state.preactivation
+      && ui.state.preactivation.skillId === "demo.beta"
+      && ui.state.preactivation.steps[0].wording === "选乙的目标",
+    `skillId=${ui.state.preactivation && ui.state.preactivation.skillId}`
+      + ` wording="${ui.state.preactivation && ui.state.preactivation.steps[0].wording}"`);
+
+  showFace(false);
+  check("㉿AF6 候选里没有 Pass ⇒ 末条「都不发动」不铺（判据是候选，不是技能 id）",
+    faceRows().length === 2 && !faceTexts().some((text) => /都不发动/.test(text)),
+    `rows=${JSON.stringify(faceTexts())}`);
+
+  showFace(true);
+  const beforeGiveUp = calls.length;
+  await clickAndWait(faceRows()[2]);
+  const giveUpSent = calls.length > beforeGiveUp
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿AF7 「都不发动」= 送出面里那条 Pass 候选",
+    !!giveUpSent && giveUpSent.kind === "Pass", JSON.stringify(giveUpSent));
+}
+
+/* ㉿W4-4（票 02）**收窄面**：选完一条之后引擎**再问一次**，只剩剩下的那条 + `Pass`。
+ *
+ * 票 01 的派发环是"一次选一条"⇒ 同一时机不会把 N 条一起问第二遍；第二问只剩没选过的。
+ * 这一问的候选数 = 1，**不走激活面**（§3-3「单候选不得变样」）：今天 N = 1 的直提态
+ * 原样（`selectedSkillAction` 那条裸 `ActivateSkill` = 剩下的技能），已选的那条不再进面，
+ * 「都不发动」由候选里那条 `Pass`（右端「放弃」）承担——候选里没有 `Pass` 时它就不出现。
+ */
+{
+  const skillEntry = (skillId, name) => ({
+    skill_id: skillId, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    available: false, preactivated: false, description: `${name}的描述`,
+    ui: { requirement: "", convert_sources: [] },
+  });
+  const narrowedPending = {
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 1310,
+    prompt: "是否发动该技能？", skill_id: "demo.beta",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "demo.beta", answers_seq: 1310, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: 1310 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [], activation_preactivations: {},
+  };
+  const view = synthView(narrowedPending);
+  // 两条技能都还在**武将**上（投影的 `view.skills` 不按候选裁），只是这条面里只剩乙。
+  view.skills = [skillEntry("demo.alpha", "示例甲"), skillEntry("demo.beta", "示例乙")];
+  ui.state.view = view;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  // 「这一步的问句面」= 提示条 + 目标提示 + 询问文本 + 弹窗标题 + 选项格（技能按钮区不算）。
+  const askText = () => [
+    $("t-prompt").textContent, $("t-choice").textContent, $("t-target-hint").textContent,
+    $("t-dialog-title").textContent, $("t-options").text(),
+  ].join("  ");
+
+  check("㉿AF8 收窄面 = N=1 的今天直提态（不铺选择面、弹窗已关）",
+    ui.renderKind(narrowedPending, narrowedPending.legal_actions) === "skill"
+      && $("t-options").children.length === 0
+      && $("t-dialog").hidden === true,
+    `kind=${ui.renderKind(narrowedPending, narrowedPending.legal_actions)}`
+      + ` rows=${$("t-options").children.length} dialogHidden=${$("t-dialog").hidden}`);
+  check("㉿AF9 面里只剩另一条（已选的那条不再出现，剩下的那条写明将提交）",
+    /示例乙/.test(askText()) && !/示例甲/.test(askText())
+      && /将提交：发动【示例乙】/.test($("t-choice").textContent),
+    `ask="${askText().replace(/\s+/g, " ").trim()}"`);
+  check("㉿AF10 收窄面的「都不发动」= 候选里那条 Pass 的右端「放弃」",
+    $("btn-pass").hidden === false && $("btn-pass").textContent === "放弃"
+      && ui.rightActionIndex(narrowedPending, "Pass") === 1,
+    `hidden=${$("btn-pass").hidden} text="${$("btn-pass").textContent}"`
+      + ` index=${ui.rightActionIndex(narrowedPending, "Pass")}`);
+
+  const beforeNarrowed = calls.length;
+  await clickAndWait($("btn-pass"));
+  const narrowedSent = calls.length > beforeNarrowed
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿AF11 收窄面点「放弃」= 送出一条 Pass（时机消费，不再重问）",
+    !!narrowedSent && narrowedSent.kind === "Pass", JSON.stringify(narrowedSent));
+}
+
 /* ⑦ W4-2：转化模式切换的**宽松保留**（切换后已选源牌仍合法则保留、不合法才清空）。
  */
 {
