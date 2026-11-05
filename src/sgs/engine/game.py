@@ -3759,8 +3759,10 @@ class Engine:
           被问），因此本方法可能返回 ``"stay"``（挂起）——调用方原样透传；重入时目标区域
           已空、封印位已落，天然幂等。
 
-        **不发 delta**：目前没有 JSON 读取方（见 ``Player.sealed_zones`` 的注释）；但那次
-        弃牌移动照常进记录流，故回放能重建"牌被弃置"这一半。
+        **不发 delta**（lei 票 05 复核）：网页画的是**投影**（``PlayerPublic.sealed_zones``
+        → ``sgs_web.projection.visible_snapshot``），每次从状态重算；记录流不含投影，那次
+        弃牌移动照常进记录流，故回放按动作重跑即可重建。补 delta 的那条路因此没走
+        （不必登记 no-leak 八类、47 条金录像一字不改）。
         """
         if zone_id not in SEALED_ZONE_IDS:
             raise ValueError(f"不是可废除的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")

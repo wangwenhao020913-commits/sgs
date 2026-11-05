@@ -684,6 +684,23 @@ button.mini-slot { cursor: pointer; }
 .mini-slot.picked { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 2px var(--ok); }
 .mini-slot.dis { opacity: .4; cursor: not-allowed; }
 
+/* lei 票 05：被废除（封印）的判定 / 装备区。视觉语言与「技能失效」同一套
+  （`.skill.suppressed` 的 `.skill-ban` svg，见 `table.js: applySkillState`）：
+  **区块形状不变**——判定行 / 装备格 / 单槽仍是原来的节点，只在右上角叠一个红色禁止
+  角标。整区封印画在判定行 / 装备格上，单槽封印画在槽自己身上（判据住 `seat-view.js`
+  的 `markSealedZone`，只读服务端下发的 `sealed_zones`）。 */
+.zone-sealed { position: relative; }
+.zone-sealed .zone-ban {
+  position: absolute; right: calc(1 * var(--dsu)); top: calc(1 * var(--dsu));
+  width: calc(13 * var(--dsu)); height: calc(13 * var(--dsu));
+  display: inline-flex; color: var(--accent); pointer-events: none;
+}
+.zone-sealed .zone-ban svg { width: 100%; height: 100%; display: block; }
+/* 槽很窄（判定槽约 21 / 装备槽约 36 设计单位）：角标收一档，不压住槽名与牌名。 */
+.mini-slot.zone-sealed .zone-ban {
+  right: 0; top: 0; width: calc(10 * var(--dsu)); height: calc(10 * var(--dsu));
+}
+
 /* M6 票 19：武将牌上的牌区（一个放置区一个**标签**，画在**武将块**里）。
    「可跨座位」由座位卡的宿主决定，「可多人并存」= 同一座位多行。
    标签全体可见；只有宿主拿到的 cards 非空，点 / 悬停才展开牌面（非宿主没有牌容器）。

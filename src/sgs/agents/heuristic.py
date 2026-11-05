@@ -2936,6 +2936,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 ),
                 "equip": (True, "装备区牌面：防具 / 武器 / 白银狮子的实际伤害；也进 ``_visible_cards``"),
                 "judge": (True, "判定区是公开信息，进 ``_visible_cards``（选牌步的可见面）"),
+                "sealed_zones": (
+                    False,
+                    "lei 票 05：被废除的区域不参与 v1 打分——目标合法性 / 装备可用已由引擎"
+                    "（``check_targets`` / ``put_equipment_card``）裁掉，AI 拿到的候选里没有"
+                    "无效动作；将来要给'废掉对方装备区'估值时再翻转这一行",
+                ),
                 "chained": (True, "【铁索连环】打分读横置状态（``exclude=True``，但询问自带）"),
                 "flipped": (
                     True,

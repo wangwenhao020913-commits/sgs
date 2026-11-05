@@ -540,6 +540,20 @@ class PlayerPublic(_FrozenModel):
     alive: bool
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
+    sealed_zones: tuple[str, ...] = Field(default=(), exclude=True)
+    """被**废除（封印）**的区域（lei 票 05 下发；取值 = ``SEALED_ZONE_IDS`` 的闭集）。
+
+    **公开事实**（牌桌上人人可见谁的哪个区域被废除了）：``judge`` / ``equip``（整个装备区）/
+    ``weapon`` / ``armor`` / ``horse_offense`` / ``horse_defense``，与
+    :attr:`sgs.state.models.Player.sealed_zones` 同名同值——投影只**照搬**，不另造名单。
+    座位卡的判定 / 装备区据此叠**红色禁止角标**（``tools/sgs_web/static/seat-view.js`` 的
+    ``.zone-sealed`` / ``.zone-ban``）：``equip`` 封整区，四个槽位 id 封单槽。
+
+    ``exclude`` 与 ``chained`` / ``wine_active`` 同一条纪律：**不进记录流**，标准 47 条金录像
+    逐字节不变；网页载荷由 ``tools/sgs_web/projection.py`` 的 ``visible_snapshot`` 补下（与
+    ``hero_zones`` / ``hand_limit`` 同姿态）。**不发 delta**：投影每次从状态重算，回放按动作
+    重跑即可重建（与 ``Player.sealed_zones`` 是同一条裁定）。
+    """
     hero_zone_count: int = Field(default=0, exclude=True)
     """这个座位的**武将牌上有几张牌**（票 27；跨座位的区算宿主）。
 

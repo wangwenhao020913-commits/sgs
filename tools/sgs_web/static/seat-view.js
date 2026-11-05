@@ -374,6 +374,36 @@ function fillHeroTags(box, player) {
   }
 }
 
+/** 一个区域被废除（封印）时的**红色禁止角标**（lei 票 05）。
+ *
+ * 视觉语言与「技能失效」同一套（`table.js: applySkillState` 的 `.skill-ban` svg、
+ * `style.css` 的 `.skill.suppressed`）：**不新增区块形状**——判定行 / 装备格 / 单槽仍是原来
+ * 的节点，只叠一个右上角标（`.zone-sealed` + `.zone-ban`）。判据只读服务端下发的
+ * `players[].sealed_zones`（与状态闭集同名）：`equip` 封**整个装备区**、四个槽位 id 封
+ * **单槽**；前端不另建一份区域名单。
+ */
+function zoneSealMark() {
+  const mark = document.createElement("span");
+  mark.className = "zone-ban";
+  // 垫片的 className / classList 不联动；两处都写（同 `applySkillState`）。
+  mark.classList.add("zone-ban");
+  mark.setAttribute("aria-hidden", "true");
+  mark.innerHTML = '<svg viewBox="0 0 16 16" focusable="false">'
+    + '<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.6"/>'
+    + '<line x1="3.6" y1="12.4" x2="12.4" y2="3.6" stroke="currentColor"'
+    + ' stroke-width="1.6" stroke-linecap="round"/></svg>';
+  return mark;
+}
+
+/** 给一个区域节点叠禁止角标；``label`` 是中文区名（写进悬停全文，不写新文案层）。 */
+function markSealedZone(node, label) {
+  node.classList.add("zone-sealed");
+  node.setAttribute("data-sealed", "true");
+  node.setAttribute("title", `${label}已废除（封印）`);
+  node.appendChild(zoneSealMark());
+  return node;
+}
+
 /** 右侧判定 / 装备区（两个容器，`data-zone` 落在行上——与旧读取口一致）。
  *  **武将牌上的牌区**不在这里：它画在**武将块**里（见 :func:`heroZoneRows`），
  *  因为座位卡的右侧块装不下【谦逊】整手牌那样的行。 */
@@ -391,6 +421,10 @@ function sideBlockRows(player, ctx) {
   // `zones` / pool 都在 `preactivationCardPickable` 里读；目标座位的槽因此也要接点击。
   const preactivationPick = (zone, card) =>
     preactivationCardPickable(ctx.pendingNow, card, zone);
+  // lei 票 05：封印闭集只读服务端下发的 `players[].sealed_zones`（与状态同名同值）。
+  const sealedZones = new Set((player && player.sealed_zones) || []);
+  const judgeSealed = sealedZones.has("judge");
+  const equipSealed = sealedZones.has("equip");
   const judge = document.createElement("div");
   judge.className = "judge-row";
   judge.setAttribute("data-zone", "judge");
@@ -403,18 +437,26 @@ function sideBlockRows(player, ctx) {
       ctx,
     }));
   }
+  // 判定区被废除：角标叠在**整个判定行**上（三个槽一起作废，不是逐槽一个）。
+  if (judgeSealed) markSealedZone(judge, "判定区");
   const equip = document.createElement("div");
   equip.className = "equip-grid";
   equip.setAttribute("data-zone", "equip");
   equip.setAttribute("data-seat", String(player.seat));
   for (const layout of equipSlotLayout(player.equip)) {
-    equip.appendChild(miniSlotNode({
+    const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
       interactive: baseInteractive || equipPick || preactivationPick("equip", layout.card),
       ctx,
-    }));
+    });
+    // 整区封印由装备格画一次角标；单槽封印（将来才有载体）画在槽自己身上，不叠两层。
+    if (!equipSealed && sealedZones.has(layout.slot)) {
+      markSealedZone(slotNode, `${EQUIP_SLOT_LABELS[layout.slot] || "装备"}槽`);
+    }
+    equip.appendChild(slotNode);
   }
+  if (equipSealed) markSealedZone(equip, "装备区");
   return [judge, equip];
 }
 

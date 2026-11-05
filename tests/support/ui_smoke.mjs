@@ -1891,7 +1891,9 @@ const synthView = (pending) => ({
   snapshot: {
     seat: 0, phase: "play", turn_seat: 0,
     players: [0, 1, 2].map((seat) => ({
-      seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [], identity: null,
+      seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+      // lei 票 05：键恒在（新局 = 空列表），与真投影同形；各用例按需改这一格。
+      sealed_zones: [], identity: null,
     })),
     self_hand: [synthCard(1, "杀")],
     deck_count: 50, discard: [],
@@ -2015,6 +2017,83 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     [zoneRow(0, "equip"), zoneRow(0, "judge"), zoneRow(1, "judge")]
       .filter(Boolean)
       .every((row) => Array.from(row.children || []).every((chip) => !(chip.listeners.click || []).length)));
+}
+
+/* ============ lei 票 05：被废除（封印）的判定 / 装备区叠红色禁止角标 ============
+ *
+ * 判据只读服务端下发的 `players[].sealed_zones`（自 `PlayerPublic` 下发，与状态闭集
+ * 同名）：`judge` / `equip` 封**整区**、`weapon` 等四个槽位 id 封**单槽**。**区域形状
+ * 不变**——判定行 / 装备格 / 单槽还是原来的节点，只在右上角多一个 `.zone-ban`
+ * （视觉语言照「技能失效」的 `.skill-ban`，见 `table.js: applySkillState`）。
+ * 两侧都断言：封印的画角标，未封印的**一个都不许有**。
+ */
+{
+  const sealedView = synthView({
+    kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [], candidate_index: {}, context: null, option_seats: {},
+  });
+  // 0 号位（本人）：判定区 + 装备区整区封印（【雄乱】的形状）。
+  sealedView.snapshot.players[0].sealed_zones = ["judge", "equip"];
+  // 1 号位：显式空列表 = 未封印（服务端新局每个人都带这个键）。
+  sealedView.snapshot.players[1].sealed_zones = [];
+  // 2 号位：单槽封印（闭集里的槽位 id；当前还没有载体，渲染先留好）。
+  sealedView.snapshot.players[2].sealed_zones = ["weapon"];
+  ui.state.view = sealedView;
+  ui.resetSelection();
+  ui.renderTable();
+  const selfSeat = ui.state.view.snapshot.seat;
+  const findZone = (node, zone) => {
+    if (!node || !node.children) return null;
+    for (const child of node.children) {
+      if (child.getAttribute && child.getAttribute("data-zone") === zone) return child;
+      const found = findZone(child, zone);
+      if (found) return found;
+    }
+    return null;
+  };
+  const zoneRow = (seat, zone) => {
+    const box = Number(seat) === Number(selfSeat) ? $("t-self-zones") : seatBox(seat);
+    return box ? findZone(box, zone) : null;
+  };
+  const slotsOf = (row) => Array.from((row && row.children) || [])
+    .filter((node) => node.getAttribute && node.getAttribute("data-slot"));
+  const slotsWith = (row, name) => slotsOf(row).filter((slot) => slot.classList.contains(name));
+  // 该区域节点自身 + 后代里一共几个禁止角标（角标是子节点，不是新的区块）。
+  const bansIn = (node, out = []) => {
+    if (!node || !node.children) return out;
+    for (const child of node.children) {
+      if (child.classList && child.classList.contains("zone-ban")) out.push(child);
+      bansIn(child, out);
+    }
+    return out;
+  };
+  const judge0 = zoneRow(0, "judge");
+  const equip0 = zoneRow(0, "equip");
+  const judge1 = zoneRow(1, "judge");
+  const equip1 = zoneRow(1, "equip");
+  const equip2 = zoneRow(2, "equip");
+  check("㉿ZB1 判定区被封印 ⇒ 判定行带 zone-sealed 且画 1 个禁止角标",
+    !!judge0 && judge0.classList.contains("zone-sealed") && bansIn(judge0).length === 1,
+    `judge0 类=${JSON.stringify([...(judge0 ? judge0.classList.set : [])])} ban=${bansIn(judge0).length}`);
+  check("㉿ZB2 装备区被封印 ⇒ 装备格带 zone-sealed 且画 1 个禁止角标",
+    !!equip0 && equip0.classList.contains("zone-sealed") && bansIn(equip0).length === 1,
+    `equip0 类=${JSON.stringify([...(equip0 ? equip0.classList.set : [])])} ban=${bansIn(equip0).length}`);
+  check("㉿ZB3 未封印（显式空列表）⇒ 判定区 / 装备区都不画角标",
+    !!judge1 && !!equip1
+      && !judge1.classList.contains("zone-sealed") && bansIn(judge1).length === 0
+      && !equip1.classList.contains("zone-sealed") && bansIn(equip1).length === 0,
+    `judge1 ban=${bansIn(judge1).length} equip1 ban=${bansIn(equip1).length}`);
+  check("㉿ZB4 单槽封印（weapon）⇒ 只有武器槽画角标，装备格本身不封",
+    !!equip2 && !equip2.classList.contains("zone-sealed")
+      && bansIn(equip2).length === 1
+      && slotsWith(equip2, "zone-sealed").length === 1
+      && slotsWith(equip2, "zone-sealed")[0].getAttribute("data-slot") === "weapon",
+    `equip2 ban=${bansIn(equip2).length} 封槽=${JSON.stringify(slotsOf(equip2).map((s) => [s.getAttribute("data-slot"), s.classList.contains("zone-sealed")]))}`);
+  check("㉿ZB5 封印不发明新区块：判定仍 3 槽 / 装备仍 4 槽，角标是区域的子节点",
+    slotsOf(judge0).length === 3 && slotsOf(equip0).length === 4
+      && judge0.getAttribute("data-zone") === "judge"
+      && equip0.getAttribute("data-zone") === "equip",
+    `judge=${slotsOf(judge0).length} 槽 / equip=${slotsOf(equip0).length} 槽`);
 }
 
 // ② 弃牌阶段：从手牌点选，直到"未选张数 == 手牌上限"（= 选够 `pending.count` 张）。

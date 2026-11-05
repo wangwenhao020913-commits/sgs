@@ -5175,6 +5175,72 @@ def test_the_public_seat_reads_chained_and_wine_from_engine_state() -> None:
 
 
 # ---------------------------------------------------------------------------
+# lei 票 05：被废除的区域（封印）随投影下发，座位卡据此画红色禁止角标
+# ---------------------------------------------------------------------------
+
+
+def test_the_public_seat_exposes_empty_sealed_zones_by_default() -> None:
+    """新局每个座位都带 ``sealed_zones`` 空列表：键恒在，界面据此"不画角标"。"""
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    snapshot = visible_snapshot(session)
+
+    assert "sealed_zones" in PlayerPublic.model_fields, (
+        "封印是公开事实，必须进 PlayerPublic；否则网页就只能另拿一份真源"
+    )
+    assert snapshot["players"], "快照必须有座位"
+    for player in snapshot["players"]:
+        assert player["sealed_zones"] == [], (
+            f"座位 {player['seat']} 的封印默认不是空：{player}"
+        )
+
+
+def test_the_web_snapshot_delivers_sealed_zones_through_the_real_write_entry() -> None:
+    """封印前后两侧：``Engine.abolish_zone`` 写入 ⇒ 投影下发 ``judge`` + ``equip``。
+
+    票面二选一取**不发 delta**（理由在票的 ``## Answer``）：投影每次从状态重算，记录流
+    一字不改；那条纪律的机械面就在本用例末尾——字段只在网页载荷里，不进记录流的序列化。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4), SeatSpec(hp=4)],
+        deck=tuple(range(10)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    # 废除区域在**帧内**才允许（弃牌移动要挂帧；本用例两个区都是空的，帧只为满足入口契约）。
+    engine.stack.push(Frame(kind=FrameKind.RESOLVE))
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    before = visible_snapshot(session)
+    assert before["players"][0]["sealed_zones"] == [], "封印前：空"
+    assert before["players"][1]["sealed_zones"] == [], "封印前：空（另一侧）"
+
+    assert engine.abolish_zone(None, 0, "judge") is None
+    assert engine.abolish_zone(None, 0, "equip") is None
+
+    after = visible_snapshot(session)
+    assert after["players"][0]["sealed_zones"] == ["judge", "equip"], (
+        "封印后：判定区 + 装备区，取值与状态闭集同名"
+    )
+    assert after["players"][1]["sealed_zones"] == [], "封印只属于被点名的座位"
+    # 公开事实：**别人**的视角也带它（不是"只有本人知道"的隐藏信息）。
+    assert project(engine.state, 1).players[0].sealed_zones == ("judge", "equip")
+
+    # 投影从状态现算：恢复一个区域 ⇒ 下一次快照就少一项（不需要任何重复计算 / 缓存）。
+    assert engine.restore_zone(None, 0, "judge") is True
+    restored = visible_snapshot(session)
+    assert restored["players"][0]["sealed_zones"] == ["equip"]
+
+    # **不进记录流**（PlayerPublic 上的 ``exclude=True``）：47 条金录像逐字节不变。
+    serialized = project(engine.state, 0).model_dump(mode="json")
+    assert "sealed_zones" not in serialized["players"][0], (
+        f"封印字段进了记录流的序列化面：{serialized['players'][0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # U1-04 展示契约：纯函数（牌面 / 提示条）
 # ---------------------------------------------------------------------------
 

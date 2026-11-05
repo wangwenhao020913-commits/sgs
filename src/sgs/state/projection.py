@@ -64,6 +64,9 @@ def project(state: GameState, seat: int) -> PlayerView:
     武将牌上的牌（票 27）：逐座位给**张数**（公开，守恒量的一项）；牌面只给查看者自己当
     宿主的区（:func:`_hero_zone_facts`），与 M6 的 2026-10 口径一致。两者都 ``exclude``，
     不进记录流。
+
+    被废除的区域（lei 票 05）：``sealed_zones`` 照搬状态里的闭集（公开事实，不做可见性
+    过滤）；它同样 ``exclude``，由 ``sgs_web.projection.visible_snapshot`` 补进网页载荷。
     """
     hero_zone_facts = {
         player.seat: _hero_zone_facts(
@@ -80,6 +83,7 @@ def project(state: GameState, seat: int) -> PlayerView:
             alive=player.alive,
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
+            sealed_zones=player.sealed_zones,
             hero_zone_count=hero_zone_facts[player.seat][0],
             chained=player.chained,
             flipped=player.flipped,
