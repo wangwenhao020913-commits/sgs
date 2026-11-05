@@ -114,9 +114,13 @@ _ZHENGKU_SETTLED = "zhengku_settled"
 
 
 def _other_alive_seats(
-    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers | None = None
 ) -> tuple[int, ...]:
-    """目标池：「一名其他角色」= 存活且不是持有者（默认读法（二）②）。"""
+    """「一名其他角色」的池：存活且不是持有者（默认读法（二）②）。
+
+    流水线步（``pool=`` 回调）与【罪论】X = 0 收尾段共用这一份：后者不在流水线里、
+    没有答案集，``answers`` 缺省为 ``None``（本函数只 ``del`` 两个载荷参数）。
+    """
     del frame, answers
     return tuple(
         player.seat for player in state.players if player.alive and player.seat != owner
@@ -501,9 +505,9 @@ def lei_skill_definitions() -> tuple[SkillDef, ...]:
 
 
 # ---------------------------------------------------------------------------
-# 诸葛瞻（lei-batch 票 03；用户 2026-11-05 签）——本段先落**判据函数**，技能声明等
-# 「两行排列弹窗」（C3 新 DOM 形状）就位后与【父荫】同票注册（一将一提交：诸葛瞻的每条
-# 技能都要在 CATALOG 闭合才允许 enabled）。
+# 诸葛瞻（lei-batch 票 03；用户 2026-11-05 签）——判据函数先落（`384d9ed`），【罪论】/
+# 【父荫】随后在 `a0e0aeb` 同票注册进 ``LEI_SKILL_DEFS``（一将一提交：诸葛瞻的两条技能
+# 一起在 CATALOG 闭合后才 enabled）。
 #
 # 罪论（逐字）：
 #
@@ -681,11 +685,7 @@ def _zuilun_apply(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         return None
     victim = frame.data.get(_ZUILUN_VICTIM)
     if victim is None:
-        pool = tuple(
-            player.seat
-            for player in host.state.players
-            if player.alive and player.seat != owner
-        )
+        pool = _other_alive_seats(host.state, frame, owner)
         if not pool:
             frame.data[_ZUILUN_DONE] = True
             return None

@@ -102,7 +102,7 @@ SEALED_ZONE_JUDGE = "judge"
 """被废除的区域 id：**判定区**（延时锦囊不落、角色不是延时锦囊的合法目标）。"""
 
 SEALED_ZONE_EQUIP = "equip"
-"""被废除的区域 id：**装备区**（整个区；覆盖全部装备槽位）。"""
+"""被废除的区域 id：**装备区**（整个区；覆盖 :data:`SEALED_ZONE_IDS` 里的全部装备槽位）。"""
 
 SEALED_ZONE_IDS: frozenset[str] = frozenset(
     {
@@ -120,18 +120,31 @@ SEALED_ZONE_IDS: frozenset[str] = frozenset(
 （「废除区域」），取值就是这张表；「恢复区域」把对应的位去掉。宝物槽位当前不启用，故不在
 闭集里（ADR-006）。"""
 
+_SEALED_EQUIP_SLOTS: frozenset[str] = frozenset(
+    slot.value for slot in SlotKind if slot.value in SEALED_ZONE_IDS
+)
+"""**单个装备槽位**的封印闭集：直接取 :data:`SEALED_ZONE_IDS` 与 ``SlotKind`` 的交集。
+
+不另抄一张槽位表——``zone_sealed`` 的槽位判据与 ``abolish_zone`` 的可废除闭集因此
+**同一份真源**：给闭集加一个槽位，两个函数一起看到；宝物槽位不在闭集（ADR-006），
+也就不在这里。
+"""
+
 
 def zone_sealed(player: "Player", zone_id: str) -> bool:
     """该座位这个区域是否**被废除**。
 
-    ``equip`` 封印覆盖全部装备槽位（整个装备区没了）；单个槽位的封印只看**自己**那一位——
-    封印武器槽不等于废除装备区，防具槽照常可用。
+    ``equip`` 封印覆盖**闭集里的**全部装备槽位（整个装备区没了）；单个槽位的封印只看
+    **自己**那一位——封印武器槽不等于废除装备区，防具槽照常可用。
+
+    **宝物槽位（``treasure``）的口径**：ADR-006 下宝物槽位不启用、不在
+    :data:`SEALED_ZONE_IDS`，故整个装备区封印**不**把 ``treasure`` 读成已封印
+    （``_SEALED_EQUIP_SLOTS`` 是从闭集派生的，不另写一份含 ``treasure`` 的名单）。
+    将来启用宝物槽时，必须同时把它加进 ``SEALED_ZONE_IDS``——本函数随之自动覆盖。
     """
     if zone_id in player.sealed_zones:
         return True
-    if zone_id == SEALED_ZONE_EQUIP:
-        return False
-    if zone_id in {slot.value for slot in SlotKind}:
+    if zone_id in _SEALED_EQUIP_SLOTS:
         return SEALED_ZONE_EQUIP in player.sealed_zones
     return False
 
@@ -639,8 +652,9 @@ class Player(BaseModel):
 
     写入方 = 【雄乱】的提交点（一次发动只写一个座位）；回合末由
     ``Engine._clear_turn_effects`` 清掉。读取方是同一条技能定义上的两个修饰器：
-    ``TARGET_POOL``（把他补回候选池 ⇒ 豁免距离 / 攻击范围）与 ``CANDIDATES``
-    （次数额度用尽时仍给出"只指定他"的候选 ⇒ 豁免次数）。**不发 delta**：与
+    ``TARGET_POOL``（把他补回候选池 ⇒ 豁免距离 / 攻击范围）与 ``COUNT_EXEMPT``
+    （``ModifierContext.use_targets`` ⊆ {他} ⇒ 这一次使用不受次数上限；候选生成期由
+    ``check_count`` 的目标维度收窄，不是把整张牌放行）。**不发 delta**：与
     ``hand_card_prohibited`` 同姿态（回放按同一条技能动作重跑即可重建）。
     """
     heart_slash_bonus_against: list[int] = Field(default_factory=list)

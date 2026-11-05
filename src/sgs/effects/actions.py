@@ -296,9 +296,12 @@ def check_count(
 
     **目标维度**（lei-batch 票 04；02b 读法 A）：``targets`` 是**这一次使用**已经定下的
     目标集合——给了它，就再问一次 :data:`~sgs.skills.ModifierPoint.COUNT_EXEMPT`
-    （雄乱「你对其使用牌无次数限制」按目标判：目标集合 ⊆ {其} 才豁免）。**不给**
-    （缺省）是"这张牌还准不准用"这个问题，按目标豁免的回调不参与 ⇒ 整张牌照常超额，
-    候选生成器（``_play_phase``）据此把目标池收窄到被豁免的角色。既有消费者
+    （雄乱「你对其使用牌无次数限制」按目标判：目标集合 ⊆ {其} 才豁免）。``None``（缺省）
+    与 ``()`` **不可折叠**：``None`` = **没有目标维度**（问的是"这张牌还准不准用"，
+    按目标豁免的回调不参与 ⇒ 整张牌照常超额，候选生成器 ``_play_phase`` 据此把目标池
+    收窄到被豁免的角色）；``()`` = **有目标维度但这一次使用的目标集合为空** ⇒ 照常派发
+    ``COUNT_EXEMPT``（由回调按自己的牌面口径判）。这个区别经
+    :attr:`~sgs.effects.ModifierContext.use_targets` 原样传给回调。既有消费者
     （咆哮 / 连弩 / 诈降 / 天义）都不传目标，故行为与加本参数前逐字相同。
 
     已用次数读**行为表声明的计数键**（``CardBehavior.count_key``）：普通【杀】/ 火【杀】/
@@ -320,7 +323,7 @@ def check_count(
     if is_slash(behavior) and not is_own_play_phase(state, seat):
         return False
     limit = behavior.use_limit
-    ctx = ModifierContext(subject=seat, card=card, use_targets=targets or ())
+    ctx = ModifierContext(subject=seat, card=card, use_targets=targets)
     rated = apply_modifiers(ModifierPoint.COUNT_LIMIT, state, ctx, limit.rated)
     if rated is None:
         return False

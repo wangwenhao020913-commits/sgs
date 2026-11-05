@@ -4558,7 +4558,8 @@ QUHU_FLOW = SkillFlow(
 #   区域内牌先强制弃置、再落封印；
 # - 「你对其使用牌无距离与次数限制」= **按目标收窄**（只对那名角色）：
 #   * 距离侧 = `TARGET_POOL` 修饰器把他补回候选池（豁免距离 / 攻击范围）；
-#   * 次数侧 = `CANDIDATES` 修饰器在次数额度用尽时仍给出"只指定他"的候选；
+#   * 次数侧 = `COUNT_EXEMPT` 修饰器按 `ModifierContext.use_targets` 判（目标集合 ⊆ {他}
+#     才豁免；候选生成期由 `check_count` 的目标维度收窄，不是整张牌放行）；
 # - 「其不能使用或打出手牌」复用【义绝】的座位级禁令（本回合，回合末清）。
 # ---------------------------------------------------------------------------
 
@@ -4567,11 +4568,6 @@ XIONGLUAN = hero_skill_id("zhangxiu", "xiongluan")
 
 _XIONGLUAN_ZONES = (SEALED_ZONE_JUDGE, SEALED_ZONE_EQUIP)
 """雄乱废除的两个区域：判定区 + 装备区（装备区封印覆盖全部装备槽位）。"""
-
-
-def _xiongluan_other_alive(state: GameState, owner: int) -> tuple[int, ...]:
-    """「一名其他角色」的池：存活且不是持有者。"""
-    return tuple(player.seat for player in state.players if player.alive and player.seat != owner)
 
 
 def _xiongluan_available(state: GameState, owner: int) -> bool:
@@ -4586,7 +4582,7 @@ def _xiongluan_offers(state: GameState, ctx: ModifierContext, current: Any) -> A
         return current
     if not _xiongluan_available(state, ctx.subject):
         return current
-    if not _xiongluan_other_alive(state, ctx.subject):
+    if not _other_alive_seats(state, ctx.subject):
         return current
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
@@ -4598,7 +4594,7 @@ def _xiongluan_pool(
     del frame, answers
     if not _xiongluan_available(state, owner):
         return ()
-    return _xiongluan_other_alive(state, owner)
+    return _other_alive_seats(state, owner)
 
 
 def _xiongluan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
@@ -4651,7 +4647,8 @@ def _xiongluan_count_exempt(state: GameState, ctx: ModifierContext, current: Any
     ``ctx.use_targets`` 是候选生成期**已经定下的目标集合**（``check_count`` 的目标维度，
     lei-batch 票 04）：牌面的"你对其使用牌无次数限制"指到的是那名角色，故
 
-    - 空集合（这次使用没有目标）= 与"其"无关 ⇒ 照常计次；
+    - ``()`` = **有目标维度但这一次使用没有目标** ⇒ 与"其"无关 ⇒ 照常计次
+      （``None`` = 没有目标维度，``check_count`` 根本不派发本挂点）；
     - 集合里出现任何一个别人 ⇒ 照常计次（多目标牌只在"目标集合 ⊆ {其}"时豁免——
       02b §4 读法 A：一次使用同时打别人时那句豁免覆盖不到别人）；
     - ``ctx.owner == ctx.subject`` 是"这条技能属于使用者本人"的自校，与【咆哮】同姿态

@@ -14,9 +14,20 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 from sgs.data import load_content_pack
-from sgs.effects import check_count, check_targets, legal_actions_for
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierPoint,
+    check_count,
+    check_targets,
+    legal_actions_for,
+)
 from sgs.engine import Engine
+from sgs.skills import catalog as catalog_module
+from sgs.skills.catalog import SkillDef
 from sgs.state import EndPhase, Pass, Phase, QueryKind, UseCard
 from sgs.timing import Timing
 
@@ -301,4 +312,82 @@ def test_qicai_does_not_widen_the_slash_attack_range():
 
     assert check_targets(state, 0, state.card(slash)) == (1, 3), (
         "【杀】的距离条件不受奇才影响（邻居 1 / 3；距离 2 的座位够不到）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 目标维度（lei-batch 票 04 的 ``COUNT_EXEMPT``）：``None`` 与 ``()`` 不可折叠
+# ---------------------------------------------------------------------------
+
+
+def _install(monkeypatch, *definitions: SkillDef) -> None:
+    """把构造的技能并进 ``catalog.CATALOG``（与 ``tests/test_hero_skills.py`` 同姿态）。"""
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, **{d.skill_id: d for d in definitions}}),
+    )
+
+
+def test_check_count_keeps_no_target_dimension_distinct_from_an_empty_target_set(
+    monkeypatch,
+):
+    """``check_count(targets=...)``：``None`` = 没有目标维度（不问豁免），``()`` = 有维度但空（照常问）。
+
+    ``modifiers.py`` 明文"别把'未给'读成'目标集合为空 ⇒ 豁免'"。两条记录面一起钉：
+
+    - ``COUNT_LIMIT`` 一定派发，回调读到的 ``ctx.use_targets`` 必须分别是 ``None`` /
+      ``()`` / ``(1,)``——旧实现把 ``None`` 写成 ``()``，回调无法区分"未给"与"给了空集合"；
+    - ``COUNT_EXEMPT`` 只在**给了目标维度**时派发：``None`` 不进链，``()`` 照常进链
+      （这份构造的修饰器把显式空集合读成豁免——产品里没有这种牌，它只钉派发契约）。
+    """
+    seen: list[tuple[int, ...] | None] = []
+    exempt_seen: list[tuple[int, ...] | None] = []
+
+    def limit_handler(state, ctx, current):
+        del state
+        seen.append(ctx.use_targets)
+        return current
+
+    def exempt_handler(state, ctx, current):
+        del state
+        exempt_seen.append(ctx.use_targets)
+        return True if ctx.use_targets == () else current
+
+    fake = SkillDef(
+        skill_id="test.count_context_target_dimension",
+        locked=True,
+        carrier=CarrierKind.EQUIPMENT,
+        modifiers=(
+            Modifier(ModifierPoint.COUNT_LIMIT, limit_handler),
+            Modifier(ModifierPoint.COUNT_EXEMPT, exempt_handler),
+        ),
+    )
+    _install(monkeypatch, fake)
+    slash = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), virtual_equipment=(fake.skill_id,)),
+            SeatSpec(),
+        ],
+        deck=_deck_without(PACK, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    state.player(0).card_use_counts["slash"] = 1  # 额度用尽（额定每回合 1 张）
+
+    assert check_count(state, 0, state.card(slash)) is True, (
+        "没有目标维度 ⇒ 不问 COUNT_EXEMPT ⇒ 照常超额"
+    )
+    assert check_count(state, 0, state.card(slash), targets=()) is False, (
+        "空目标集合是**显式给出的目标维度** ⇒ 照常派发；回调把'这次使用没有目标'读成豁免"
+    )
+    assert check_count(state, 0, state.card(slash), targets=(1,)) is True
+
+    assert seen == [None, (), (1,)], (
+        "ctx.use_targets 必须原样保留调用方给的目标维度（None ≠ ()）"
+    )
+    assert exempt_seen == [(), (1,)], (
+        "COUNT_EXEMPT 只在给了目标维度时派发：None 不进链，() 与 (1,) 进链"
     )

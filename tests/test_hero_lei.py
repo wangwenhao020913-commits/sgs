@@ -25,9 +25,11 @@ from sgs.effects import (
     check_count,
     check_targets,
     delayed_settle_target,
+    distance,
     legal_actions_for,
 )
 from sgs.engine import Engine
+from sgs.resolution import Frame
 from sgs.state import (
     ActivateSkill,
     ArrangeCards,
@@ -37,12 +39,14 @@ from sgs.state import (
     Pass,
     Phase,
     QueryKind,
+    SEALED_ZONE_IDS,
     SelectCards,
     SelectOption,
     SlotKind,
     UseCard,
     Zone,
     ZoneRef,
+    zone_sealed,
 )
 from sgs.timing import Timing
 
@@ -389,8 +393,9 @@ def test_a_sealed_weapon_slot_blocks_weapons_but_not_armor():
     armor = cards_of_type(PACK, "eight_diagrams")[0]
     engine = _seal_engine()
     assert engine.state.card(weapon).slot is SlotKind.WEAPON
-    engine.state.player(0).sealed_zones = ("weapon",)
+    engine.abolish_zone(_frame(engine), 0, "weapon")
 
+    assert engine.state.player(0).sealed_zones == ("weapon",)
     assert check_targets(engine.state, 0, engine.state.card(weapon)) == ()
     assert check_targets(engine.state, 0, engine.state.card(armor)) == (0,)
 
@@ -398,7 +403,7 @@ def test_a_sealed_weapon_slot_blocks_weapons_but_not_armor():
 def test_a_judge_sealed_seat_is_not_a_legal_target_of_a_delayed_trick():
     indulgence = cards_of_type(PACK, "indulgence")[0]
     engine = _seal_engine()
-    engine.state.player(1).sealed_zones = ("judge",)
+    engine.abolish_zone(_frame(engine), 1, "judge")
     card = engine.state.card(indulgence)
 
     pool = check_targets(engine.state, 0, card)
@@ -409,7 +414,7 @@ def test_a_judge_sealed_seat_is_not_a_legal_target_of_a_delayed_trick():
 def test_lightning_skips_a_judge_sealed_seat():
     lightning = cards_of_type(PACK, "lightning")[0]
     engine = _seal_engine()
-    engine.state.player(1).sealed_zones = ("judge",)
+    engine.abolish_zone(_frame(engine), 1, "judge")
     card = engine.state.card(lightning)
 
     # 座位 0 的闪电判完非 ♠2–9 ⇒ 顺延：座位 1 被封印 ⇒ 越过它回到座位 0。
@@ -420,7 +425,7 @@ def test_put_equipment_card_does_not_fire_into_a_sealed_slot():
     """界【结姻】的"置入装备区"：目标槽位被废除 ⇒ 置入不发动。"""
     armor = cards_of_type(PACK, "eight_diagrams")[0]
     engine = _seal_engine()
-    engine.state.player(1).sealed_zones = ("armor",)
+    engine.abolish_zone(_frame(engine), 1, "armor")
     engine.state.player(0).hand.append(armor)
 
     frame = _frame(engine)
@@ -432,21 +437,42 @@ def test_put_equipment_card_does_not_fire_into_a_sealed_slot():
     assert armor in engine.state.player(0).hand, "牌留在原处"
 
 
+def test_the_sealed_slot_closed_set_is_the_single_source_for_zone_sealed():
+    """``zone_sealed`` 的槽位闭集 = ``SEALED_ZONE_IDS`` ∩ ``SlotKind``（ADR-006）。
+
+    整个装备区封印覆盖闭集里的四个槽位；宝物槽位当前**不启用**、不在闭集 ⇒ 不把
+    ``treasure`` 读成已封印。将来启用宝物槽时，必须同时把它加进 ``SEALED_ZONE_IDS``
+    （两处闭集只留一份真源）。
+    """
+    engine = _seal_engine()
+    player = engine.state.player(0)
+    assert not any(zone_sealed(player, slot.value) for slot in SlotKind)
+    engine.abolish_zone(_frame(engine), 0, "equip")
+
+    covered = {slot.value for slot in SlotKind if slot.value in SEALED_ZONE_IDS}
+    assert covered == {"weapon", "armor", "horse_defense", "horse_offense"}
+    for slot in SlotKind:
+        assert zone_sealed(player, slot.value) is (slot.value in covered), (
+            f"{slot.value}：槽位闭集必须与 SEALED_ZONE_IDS 同一份真源"
+        )
+    assert zone_sealed(player, "treasure") is False, "宝物槽不启用、不在闭集 ⇒ 不算封印"
+    assert zone_sealed(player, "equip") is True
+    assert zone_sealed(player, "judge") is False
+
+
 # ---------------------------------------------------------------------------
 # 张绣【雄乱】/【从谏】（lei-batch 票 02；用户 2026-11-05 签）
 # ---------------------------------------------------------------------------
 
 
-def _zhangxiu_state(*, equip=(), judge=(), hand=(), others=()):
+def _zhangxiu_state(*, equip=(), judge=(), hand=(), others=(), seat_count=3):
     used = {*equip, *judge, *hand, *others}
     deck = tuple(card_id for card_id in range(60, 108) if card_id not in used)
+    seats = [SeatSpec(hero="zhangxiu", hand=hand, equip=equip, judge=judge)]
+    seats.extend(SeatSpec() for _ in range(seat_count - 1))
     return build_state(
         pack=PACK,
-        seats=[
-            SeatSpec(hero="zhangxiu", hand=hand, equip=equip, judge=judge),
-            SeatSpec(),
-            SeatSpec(),
-        ],
+        seats=seats,
         deck=deck,
         turn_seat=0,
         phase=Phase.PLAY,
@@ -503,7 +529,12 @@ def test_xiongluan_seals_both_zones_and_applies_its_two_effects():
 def test_xiongluan_is_no_longer_offered_once_both_zones_are_sealed():
     """隐藏 cost：区域都封印了 ⇒ 清单渲不出、候选也没有（即使限定位被恢复）。"""
     engine = Engine.from_state(_zhangxiu_state(), seed=7)
-    engine.state.player(0).sealed_zones = ("judge", "equip")
+    # 两个区都是空的 ⇒ 没有牌要搬；仍走**唯一写入口** ``abolish_zone``。帧在这里只是
+    # 搬牌凭证（不入栈）：``_play_phase`` 后面要驱动真正的阶段帧。
+    frame = Frame(kind=FrameKind.SKILL, data={"skill_owner": 0})
+    assert engine.abolish_zone(frame, 0, "judge") is None
+    assert engine.abolish_zone(frame, 0, "equip") is None
+    assert engine.state.player(0).sealed_zones == ("judge", "equip")
     players = [Scripted(activate=False) for _ in range(3)]
     query = _play_phase(engine, players)
 
@@ -527,14 +558,13 @@ def test_xiongluan_multi_target_card_counts_unless_only_the_chosen_target():
     state.player(0).xiongluan_target = 1
 
     def combos():
+        # 断**引擎给出的次序本身**（§4：次序断言不许先 sorted()/set()/Counter() 归一化）。
         return tuple(
-            sorted(
-                action.targets
-                for action in legal_actions_for(
-                    state, 0, QueryKind.PLAY_PHASE, answers_seq=1
-                )
-                if isinstance(action, UseCard) and action.card.type == "slash"
+            action.targets
+            for action in legal_actions_for(
+                state, 0, QueryKind.PLAY_PHASE, answers_seq=1
             )
+            if isinstance(action, UseCard) and action.card.type == "slash"
         )
 
     assert combos() == ((1,), (1, 2), (2,)), (
@@ -587,47 +617,56 @@ def test_xiongluan_count_waiver_is_per_target():
     slash = cards_of_type(PACK, "slash")[0]
     state = _zhangxiu_state(hand=(slash,))
     state.player(0).card_use_counts["slash"] = 9  # 额度用尽
+
+    def slash_candidates():
+        return tuple(
+            action.targets
+            for action in legal_actions_for(
+                state, 0, QueryKind.PLAY_PHASE, answers_seq=1
+            )
+            if isinstance(action, UseCard) and action.card.type == "slash"
+        )
+
+    assert slash_candidates() == (), "额度用尽且没有雄乱目标 ⇒ 没有【杀】候选"
     assert check_count(state, 0, state.card(slash)) is True
 
     state.player(0).xiongluan_target = 1
     assert check_count(state, 0, state.card(slash)) is True, (
         "不给目标维度 ⇒ 问的是'整张牌还准不准用'，答案仍是超额"
     )
-    candidates = tuple(
-        action.targets
-        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
-        if isinstance(action, UseCard) and action.card.type == "slash"
-    )
-    assert candidates == ((1,),), (
+    assert slash_candidates() == ((1,),), (
         "次数用尽时仍枚举目标，只保留被豁免角色那组（不再出现对别人的组合）"
     )
     assert check_count(state, 0, state.card(slash), targets=(1,)) is False
     assert check_count(state, 0, state.card(slash), targets=(2,)) is True
 
 
-def test_xiongluan_waives_distance_and_count_limits_against_the_chosen_target():
-    """效果①：距离与**次数**都按目标收窄（票 04 把次数侧从"整次豁免"改成按目标）。
+def test_xiongluan_waives_distance_against_the_chosen_target():
+    """效果①的**距离**半边：攻击范围 1 够不着距离 2 的座位 2；雄乱点名后只把它补回池。
 
-    口径变更（lei-batch 票 04，02b 读法 A）：加雄乱目标之前额度用尽 ⇒ 没有【杀】候选；
-    加上之后只多出"以那名角色为目标"的那一组，**不**把对别人的【杀】也放出来。
+    次数半边由 `test_xiongluan_count_waiver_is_per_target` 钉——两条用例各断各的那一半，
+    不再用"距离与次数"的名字只断次数（§4：名字承诺的那条判据要真断）。
     """
     slash = cards_of_type(PACK, "slash")[0]
-    state = _zhangxiu_state(hand=(slash,))
-    state.player(0).card_use_counts["slash"] = 9  # 额度用尽
-    before = tuple(
-        action.targets
-        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
-        if isinstance(action, UseCard) and action.card.type == "slash"
+    state = _zhangxiu_state(hand=(slash,), seat_count=4)
+    assert distance(state, 0, 2) == 2, (
+        "前提：4 座局里 0 到 2 的距离是 2（攻击范围 1 够不着）"
     )
-    assert before == (), "额度用尽 ⇒ 没有【杀】候选"
 
-    state.player(0).xiongluan_target = 1
-    after = tuple(
-        action.targets
-        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
-        if isinstance(action, UseCard) and action.card.type == "slash"
+    def candidates():
+        return tuple(
+            action.targets
+            for action in legal_actions_for(
+                state, 0, QueryKind.PLAY_PHASE, answers_seq=1
+            )
+            if isinstance(action, UseCard) and action.card.type == "slash"
+        )
+
+    assert candidates() == ((1,), (3,)), "距离 2 的座位 2 不在【杀】的目标池里"
+    state.player(0).xiongluan_target = 2
+    assert candidates() == ((1,), (2,), (3,)), (
+        "雄乱点名 ⇒ 距离豁免只把座位 2 补回池（1 / 3 的次序不变）"
     )
-    assert after == ((1,),), "只有对雄乱目标的【杀】回来（对别人的照常超额）"
 
 
 def _congjian_engine():

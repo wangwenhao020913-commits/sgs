@@ -731,7 +731,7 @@ def test_the_m6_jie_qun_heroes_finish_a_full_ai_game_cleanly_and_replay():
 # M6 票 22（收口 / spec P2-2）：**8 个固定种子**的 8 人**混合池**全 AI 局
 # ---------------------------------------------------------------------------
 
-M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 144, 140, 141, 142, 143)
+M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 145, 140, 141, 142, 143)
 """spec P2-2 的 **8 个固定种子**（票 22 收口批；原取 32 种子验收批的前 8 个）。
 
 写死而不是从 :data:`~support.ACCEPTANCE_SEEDS` 切片：种子批本身是验收内容，
@@ -742,6 +742,13 @@ M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 144, 140, 141, 142, 143)
 **没有标准版** ⇒ 违反本测试自己的"混合池"判据（判据未放宽）。按同一判据在 32 种子验收批
 里从 144 起重扫，**144** 是首个命中（`feng` / `feng-mobile` / `jie-mobile` / `jie-ol` /
 `standard` 五版齐、8 名互异、零非法应答、跑完）。替换只换种子，不换判据。
+
+**2026-11-05 再换 1 个种子**（`lei-batch` 票 02 加雷包张绣 ⇒ 默认池 74 / 48；
+票 03 加雷包诸葛瞻 ⇒ 75 / 49）：原种子 144 在新池下抽到的 8 名全是扩展包武将
+（`jie-ol` / `jie-mobile` / `feng` / `huo` / `huo-mobile` / `lei`），**没有标准版**
+⇒ 再次违反同一条"混合池"判据（判据未放宽，见本用例的严格断言）。按同一判据从 144 起
+重扫，**145** 是首个命中（`standard` / `feng` / `feng-mobile` / `huo-mobile` / `jie-ol`
+五版齐、8 名互异、零非法应答、跑完）。替换只换种子，不换判据。
 """
 
 M6_CLOSEOUT_PLAYERS = 8
@@ -787,15 +794,18 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     assert (
         len({hero_by_id(hero_id).true_name for hero_id in heroes}) == M6_CLOSEOUT_PLAYERS
     ), "同一真名占了两个座位"
-    # 池里有八个版本标记（standard / jie-ol / jie-mobile / feng / feng-mobile / huo /
-    # huo-mobile / homebrew / lei）：判据是**这一局不是单包**（≥2 个版本标记）。不再写死
-    # "必须抽到某个界版"——池每加一名武将都会重排 RNG，4 人局不保证每次都抽到界版
-    # （huo-shenzhugeliang 加火包 OL 后 seed 140 正是这种局面）；"标准 + 界并存"由
+    # 池里有九个版本标记（standard / jie-ol / jie-mobile / feng / feng-mobile / huo /
+    # huo-mobile / homebrew / lei）：判据是**这一局不是单包**（≥2 个版本标记）**且标准版
+    # 在场**——池每加一名武将都会重排 RNG，"必须抽到某个界版"不写死（huo-shenzhugeliang
+    # 加火包 OL 后 seed 140 正是这种局面）；"标准 + 界并存"由
     # `test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions` 在**池**
     # 那一层钉住，本用例只钉"发出来的一局是混合的"。
-    # lei-batch 票 02 起连"标准版必在场"也不再写死：池到 74 之后 seed 144 的这一局
-    # 全是扩展包武将（jie / feng / huo / lei）——那仍是混合局，判据回到"≥2 个版本标记"。
-    assert len(versions) >= 2, f"这一局不是混合池：{versions}"
+    # lei-batch 票 02 把池加到 74（票 03 ⇒ 75）之后，旧种子 144 抽到一局全扩展包
+    # （jie / feng / huo / lei）——**没有标准版**。按 §5 换种子（144 → 145），判据恢复为
+    # "标准版必在场"：判据不许放宽，种子可以换。
+    assert "standard" in versions and len(versions) >= 2, (
+        f"这一局不是混合池：{versions}"
+    )
 
     # ① 跑完
     assert engine.finished, "必达终局"

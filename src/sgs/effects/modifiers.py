@@ -224,13 +224,16 @@ class ModifierContext:
     target: int | None = None
     role: ModifierRole = ModifierRole.SUBJECT
     card: CardRef | None = None
-    use_targets: tuple[int, ...] = ()
-    """这次**使用**已定下的目标集合（``()`` = 未给目标维度 / 这次使用没有目标）。
+    use_targets: tuple[int, ...] | None = None
+    """这次**使用**已定下的目标集合：``None`` = **没有目标维度**，``()`` = **有目标维度
+    但集合为空**（两者不可折叠）。
 
     唯一的读者是 :data:`ModifierPoint.COUNT_EXEMPT` 的回调（lei-batch 票 04）：次数上限
     是"这张牌还能用几次"，而「你对其使用牌无次数限制」是按**这一次使用对谁**豁免，
     故目标维度只能由调用方（``check_count(..., targets=...)``）在问"这一次行不行"时给。
-    ``check_count`` 不给目标时它是 ``()``——**别**把"未给"读成"目标集合为空 ⇒ 豁免"。
+    ``check_count`` **不给**目标时它是 ``None``，且该挂点**不派发**——**别**把"未给"读成
+    "目标集合为空 ⇒ 豁免"；反过来，拿到 ``()`` 时它是调用方**显式给出**的空集合，回调
+    不能把这次派发当成"未给"（要不要因此豁免，是回调自己的牌面口径）。
     """
     owner: int = -1
     skill_id: str = ""
