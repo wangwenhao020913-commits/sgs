@@ -738,6 +738,50 @@ def test_discarding_a_card_is_tracked_for_the_turn_and_reset_after_it():
     assert state.player(0).discarded_this_turn is False, "回合结束后复位"
 
 
+def test_replacing_equipment_is_losing_not_discarding():
+    """**替换装备不算弃置、是失去原装备**（用户 2026-11-05 签；lei-batch 票 07 §2）。
+
+    与上一条配对：那一条钉「弃置 ⇒ 置真 / 回合末复位」，本条钉顶替**不走弃置**——同槽
+    已有牌时 ``move_used_card_to_equip_zone`` 先让旧牌以 ``LOSE`` 出区、再把新牌 ``PUT``
+    入槽（`src/sgs/engine/steps.py` 的注释只是散文，这条断言才是会红的那一半）。故
+    「本回合未弃置过牌」检测器（``Player.discarded_this_turn``，【罪论】选项 2 的判据）
+    在顶替之后仍为假；将来有人把顶替改成 ``DISCARD``，这里的两条断言会一起变红。
+    """
+    old_horse = cards_of_type(PACK, "chitu")[0]
+    new_horse = cards_of_type(PACK, "dawan")[0]
+    used = {old_horse, new_horse}
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=HERO, equip=(old_horse,)), SeatSpec()],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id not in used),
+        processing=(new_horse,),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    assert state.card(old_horse).slot is state.card(new_horse).slot is (
+        SlotKind.HORSE_OFFENSE
+    ), "两张牌必须争同一个槽位，否则走不到顶替"
+    engine = Engine.from_state(state, seed=7)
+    # 真路径的帧形状：使用帧的 data 里带 card / source，由步骤把牌从处理区搬进装备区。
+    frame = engine.start_use(state.card(new_horse), source=0, targets=())
+    assert engine.move_used_card_to_equip_zone(frame) is None
+
+    moves = [
+        (record.from_zone.zone.value, record.to_zone.zone.value, record.reason.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] in ([old_horse], [new_horse])
+    ]
+    assert moves == [("equip", "discard", "LOSE"), ("processing", "equip", "PUT")], (
+        f"顶替 = 旧装备先失去（LOSE）、新装备再置入（PUT），实得 {moves}"
+    )
+    assert old_horse not in state.player(0).equip, "旧装备已出区"
+    assert old_horse in state.discard
+    assert new_horse in state.player(0).equip, "新装备进了同一槽位"
+    assert state.player(0).discarded_this_turn is False, "顶替不算弃置 ⇒ 检测器不为真"
+
+
 # ---------------------------------------------------------------------------
 # 诸葛瞻（lei-batch 票 03）——判据函数先行（技能声明等两行排列弹窗就位后同票注册）
 # ---------------------------------------------------------------------------
