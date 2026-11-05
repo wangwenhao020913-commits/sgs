@@ -2858,7 +2858,10 @@ def test_tianyi_tie_counts_as_not_winning():
     engine = Engine.from_state(state, seed=1)
     run_queries(engine, [_TianyiDriver(want=0), PassPlayer()], _tianyi_resolved)
 
-    assert _pindian_delta(engine).won == (False,)
+    delta = _pindian_delta(engine)
+    assert delta.won == (False,), "平点 ⇒ 发起者「没赢」"
+    # 平点与"输"都落 `won=False`；展示面要画「都没赢」就必须有独立的一位（票 04）。
+    assert delta.tied == (True,), "平点单独标出来（前端不比点数）"
     assert engine.state.player(0).tianyi_lost
 
 

@@ -617,6 +617,40 @@ _MONKEY_PATCH_RE = re.compile(r"\b(applyEffectDelta|stepPlayback|commitView)\s*=
 _STEP_PLAYBACK_RE = re.compile(r"function stepPlayback\(immediate\) \{(?P<body>.*?)\n\}", re.S)
 
 
+def test_pindian_popup_is_a_read_only_overlay_driven_by_the_record_stream() -> None:
+    """拼点弹窗（huo-taishici-xunyu 票 04）：新脚本进清单、停留 3 秒、只由记录流驱动。
+
+    这条钉的是**接线**（渲染行为与 1v1 / 1vN / 平点三态由 `ui_smoke.mjs` 的票 04 组钉）：
+    `pindian.js` 在 `index.html` 清单里、排在 `main.js` 之前；停留常量是 3000；入口只有
+    `session.js:stepPlayback` 里的一次 `applyPindianDelta(record)`；它是**只读展示面**，
+    不进询问面的种类表（`modal.js:DIALOG_KINDS` 里没有 `pindian`）。
+    """
+    srcs = _script_srcs()
+    assert "pindian.js" in srcs, f"index.html 必须加载拼点弹窗脚本：{srcs}"
+    assert srcs.index("pindian.js") < srcs.index("main.js"), "pindian.js 必须排在 main.js 之前"
+    # `cardFaceNode` 是它唯一的卡面来源（card-view.js），故必须排在 card-view.js 之后。
+    assert srcs.index("card-view.js") < srcs.index("pindian.js"), "pindian.js 要用 cardFaceNode"
+
+    pindian = (STATIC_DIR / "pindian.js").read_text(encoding="utf-8")
+    assert "const PINDIAN_HOLD_MS = 3000;" in pindian, "停留时长必须是 3 秒（R7 用户口径）"
+    assert 'record.delta_type !== "pindian"' in pindian, "判据只看 delta_type"
+
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    assert body.count("applyPindianDelta(record)") == 1, (
+        "拼点弹窗只该由 stepPlayback 的记录流驱动一次："
+        f"{body.count('applyPindianDelta(record)')}"
+    )
+
+    modal = (STATIC_DIR / "modal.js").read_text(encoding="utf-8")
+    start = modal.find("const DIALOG_KINDS = Object.freeze({")
+    assert start >= 0, "modal.js 里找不到 DIALOG_KINDS"
+    kinds = modal[start : modal.find("});", start)]
+    assert "pindian" not in kinds, "拼点弹窗不是询问面：不得进 DIALOG_KINDS"
+
+
 def test_anim_scripts_are_wired_and_the_prototype_is_gone() -> None:
     """`anim.js` 进清单、排在 `main.js` 之前；原型文件与运行时接管全部移除。"""
     srcs = _script_srcs()

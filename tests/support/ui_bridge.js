@@ -98,6 +98,9 @@
     "animReady", "animOnConfig", "animPlanFlight", "animLaunchFlight", "durationOf",
     // U4-02（D7/D8）：节奏 = base + 该条动画 × base/100（纯函数，烟测直接喂 {base, record}）。
     "delayOf",
+    // huo-taishici-xunyu 票 04：拼点弹窗——载荷派生 / 回放入口 / 停留常量（只读展示面）。
+    "pindianPlan", "applyPindianDelta", "showPindian", "hidePindian",
+    "PINDIAN_HOLD_MS", "PINDIAN_VERDICTS",
   ];
   const out = {};
   for (const name of names) {

@@ -2187,11 +2187,13 @@ def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
     initiator = int(frame.data["initiator"])
     base = state.card(picked[initiator]).rank
     results: list[tuple[int, bool]] = []
+    ties: list[bool] = []
     for seat in frame.data["targets"]:
         seat = int(seat)
         other = state.card(picked[seat]).rank
         # 点数大者赢；点数相同 ⇒ 双方都"没赢"（规则 12.1 L1318–L1319）。
         won = base is not None and other is not None and base > other
+        ties.append(base is not None and other is not None and base == other)
         results.append((seat, won))
     frame.data[RANK_COMPARE_RESULTS] = tuple(results)
     order = _rank_compare_order(frame)
@@ -2203,6 +2205,9 @@ def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
             targets=tuple(int(seat) for seat in frame.data["targets"]),
             cards=tuple(state.card(picked[seat]) for seat in order),
             won=tuple(won for _seat, won in results),
+            # 平点 = 双方都没赢：`won` 只有两态，展示面的「都没赢」只能靠这一位
+            # （用户 2026-11-04 的 R7 口径；前端不比较点数）。
+            tied=tuple(ties),
         ),
     )
     host.note_pindian_result(frame)

@@ -673,6 +673,7 @@ def _delta_records() -> dict[str, object]:
             targets=(1,),
             cards=(REVEALED_CARD, HIDDEN_CARD),
             won=(True,),
+            tied=(False,),
         ),
         "identity_deal": IdentityDealRecord(
             seq=107, frame_id=0, depth=0, seat=1, identity=Identity.REBEL
@@ -810,6 +811,7 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
                 card["card_id"] for card in raw["cards"]
             ]
             assert payload["won"] == [True]
+            assert payload["tied"] == [False], "平点位也是公开事实，照发"
         elif delta_type == "identity_reveal":
             # 阵亡亮明身份是公开事实（A3 的 revealed / dead 那一支）。
             assert payload["identity"] == "rebel"

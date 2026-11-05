@@ -795,6 +795,10 @@ function stepPlayback(immediate) {
     const stageAt = stageNow();
     state.effectCards = applyEffectDelta(record, state.effectCards, undefined, stageAt);
     state.revealedCards = applyRevealDelta(record, state.revealedCards, stageAt);
+    // 拼点弹窗（huo-taishici-xunyu 票 04）：拼点是不使用不打出的对抗事件，结果只有
+    // `pindian` delta 承载 ⇒ 弹窗跟这条记录走。只读、全场可见（AI 打 AI 也弹）；停留
+    // 3 秒由 `pindian.js` 自己排，不进回放步长。
+    applyPindianDelta(record);
     // M6 报障 1：亮牌弹窗跟**源结算帧**走——那个帧 pop 的这条记录一到就收起，不等整批
     // 播完（五谷的取牌步 / 无懈窗口跨多个响应，最后一批能有几十条记录）。
     syncPlaybackDialog(record);

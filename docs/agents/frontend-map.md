@@ -23,6 +23,7 @@
 | `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）。 |
 | `options.js` | 选项按钮组、选择面槽位、「提供一张 B」、Action 文案与右端动作下标；**计数式分配面**（`renderDistribution`：逐座位计数 + 「重置」，本地计数住 `state.distribution`；huo-shenzhouyu-mobile 票 05）。 |
 | `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；**按花色取牌**（涉猎：一行式、同花色置灰、2.5 秒结果态 `renderSuitResult`）；**带观看授予的选项步**（韬·刘备【义起】：`SELECT_OPTION` + `revealed` ⇒ 选择型弹窗里牌面只读、3 个类型按钮同窗，`options.js:renderOptionButtons` 画牌）；判据仍住 `modal.js`。 |
+| `pindian.js` | 拼点弹窗（huo-taishici-xunyu 票 04）：`pindian` delta → **全场可见的只读结果面**（左 1 个固定槽 = 发起者的拼点牌，右 1..N 行 = 各被拼点者的牌 + 赢 / 没赢 / 都没赢）。判据只看 `delta_type`（不认技能 id / 座位）；`applyPindianDelta(record)` 由 `session.js:stepPlayback` 每条记录调一次，`PINDIAN_HOLD_MS = 3000` 排一次计时器；不进 `stepDialogKind`、不挡牌桌、没有提交按钮。 |
 | `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`、计数式分配的 `distribution`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）；**展示武将牌的选项步**（票 08：`.hero-card` 正文段 = 副标题「第 k/m 张」+ 武将块 + 带描述的选项行，复用 `choice` 外壳，不新增第七种 kind；判据 `isShowHeroCardStep` 只看载荷 `hero_card`）。 |
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
@@ -56,6 +57,7 @@
 | `animLaunchFlight(plan)` | `anim.js` | 飞行层**重绘之后**：量落点并同步起飞；起 / 落点缺失静默跳过（层上留 `data-anim-missing`）。 |
 | `animPlanPhase(record)` | `anim.js` | 阶段 / 回合飘字（U4-04）：`timing` 记录 → 判定 / 装备区上方的「XX阶段开始 / 轮到 X」；`durationOf` 对非牌移动恒 0，不占步长。 |
 | `renderDiscardPanel()` | `table.js` | 弃牌堆面板（U4-05）正文：从 `tableViewForRender()` 的同一份视图按时间倒序画牌面，`renderTable` 末尾顺带刷新。 |
+| `applyPindianDelta(record)` | `pindian.js` | 拼点弹窗（票 04）：一条 `pindian` delta → 弹窗开 3 秒；只读、全场可见（AI 打 AI 也弹），不读 `state.dialog`。 |
 | `openDiscardPanel()` | `modal.js` | 顶栏「弃牌 N」的点击入口：开 `#t-discard-modal`（复用模态壳，点背景 / Esc 关）。 |
 
 ## 页面层

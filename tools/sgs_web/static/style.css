@@ -1585,6 +1585,48 @@ button.mini-slot { cursor: pointer; }
 /* 武将详情是**叠加的检视窗**（D8）：没有单独的"全壳阻断遮罩"——遮罩只有一层暗化层，
  * 开合详情不改变只读态（是否只读由这一步的表面决定，见 modal.js:selectionEnabled）。 */
 
+/* ---------- 拼点弹窗（huo-taishici-xunyu 票 04 / R7）：全场可见的只读结果面 ----------
+ * 它不是询问面（不进 `stepDialogKind`、不挡牌桌、没有提交按钮）：选牌仍走牌桌表面点自己的
+ * 手牌。几何与询问弹窗同族（舞台区正中），但**不吃指针**——拼点揭晓后可能立刻轮到人类操作
+ * 别的步骤，弹窗只是展示 3 秒。左 1 个固定槽 = 发起者的拼点牌，右 1..N 行 = 各被拼点者的
+ * 牌 + 结果标签（赢 / 没赢 / 都没赢）。z-index 低于询问弹窗：真的开着别的一问时，那一问在上。 */
+.pindian-popup {
+  position: absolute; left: 0; right: 0; top: 6.2%; bottom: 27.5%;
+  z-index: 58;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.pindian-popup[hidden] { display: none !important; }
+.pindian-window {
+  display: flex; flex-direction: column;
+  gap: calc(10 * var(--dsu));
+  padding: calc(12 * var(--dsu)) calc(16 * var(--dsu));
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(43, 36, 28, .32);
+}
+.pindian-title {
+  margin: 0; font-size: calc(15 * var(--dsu)); letter-spacing: .06em;
+  text-align: center;
+}
+.pindian-body { display: flex; align-items: center; gap: calc(12 * var(--dsu)); }
+.pindian-vs { color: var(--dim); font-size: calc(13 * var(--dsu)); }
+.pindian-targets { display: flex; flex-direction: column; gap: calc(8 * var(--dsu)); }
+.pindian-slot {
+  display: flex; flex-direction: column; align-items: center;
+  gap: calc(4 * var(--dsu));
+}
+.pindian-seat { font-size: calc(11 * var(--dsu)); color: var(--dim); }
+.pindian-pair { display: flex; align-items: center; gap: calc(8 * var(--dsu)); }
+.pindian-verdict {
+  min-width: calc(44 * var(--dsu));
+  font-size: calc(13 * var(--dsu)); font-weight: 700; letter-spacing: .06em;
+}
+.pindian-verdict.win { color: var(--ok); }
+.pindian-verdict.lose { color: var(--accent); }
+.pindian-verdict.tie { color: var(--dim); }
+
 @media (max-height: 560px) {
   .table-hint { display: block; }
 }

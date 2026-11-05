@@ -20223,4 +20223,93 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `${JSON.stringify(starPick)} picks=${JSON.stringify(ui.state.picks)} chips=${chips.length}`);
 }
 
+/* ============ 票 04（合成记录）：拼点弹窗——全场可见的只读结果面 ============
+ *
+ * 判据读**服务端 `pindian` delta 的形状**（`state/deltas.py:PindianDelta` 逐字段：title /
+ * initiator / targets / cards / won / tied），渲染走生产入口 `applyPindianDelta`
+ * （`session.js:stepPlayback` 每条记录调一次）。弹窗**不是询问面**：不进 `stepDialogKind`、
+ * 没有可点节点（选牌仍走牌桌）、停留 3 秒。
+ */
+{
+  const pinCard = (id, name, suit, rank) => {
+    const card = synthCard(id, name);
+    card.suit = suit;
+    card.rank = rank;
+    card.color = suit === "heart" || suit === "diamond" ? "red" : "black";
+    return card;
+  };
+  const initiator = pinCard(901, "杀", "heart", 12);
+  const winner = pinCard(902, "闪", "spade", 9);
+  const sameRank = pinCard(903, "桃", "diamond", 12);
+  const pindianRecord = (overrides = {}) => ({
+    kind: "delta", delta_type: "pindian", seq: 9510, frame_id: 42, depth: 3,
+    title: "天义", initiator: 0, targets: [1], cards: [initiator, winner],
+    won: [true], tied: [false],
+    ...overrides,
+  });
+  const popup = $("t-pindian");
+  const popupBody = $("t-pindian-body");
+  const isSlot = (node) => hasClassText(node, "pindian-slot");
+  const initiatorSlot = () => Array.from(popupBody.children).find(isSlot) || null;
+  const targetRows = () => {
+    const column = Array.from(popupBody.children)
+      .find((node) => hasClassText(node, "pindian-targets"));
+    return column ? Array.from(column.children) : [];
+  };
+
+  // ① 1v1 赢：标题 = 发动技能名；左 1 个固定槽 = 发起者、右 1 行 = 被拼点者；标签「赢」
+  const opened = ui.applyPindianDelta(pindianRecord());
+  const firstRow = targetRows()[0] || null;
+  check("票04-1 拼点弹窗：全场可见 + 标题 = 发动技能名 + 左 1 固定槽 / 右 1 行",
+    opened === true && popup.hidden === false
+      && $("t-pindian-title").textContent === "天义"
+      && !!initiatorSlot() && initiatorSlot().getAttribute("data-role") === "initiator"
+      && targetRows().length === 1
+      && !!firstRow && hasClassText(firstRow, "pindian-pair")
+      && Array.from(firstRow.children).some(isSlot),
+    `opened=${opened} hidden=${popup.hidden} title="${$("t-pindian-title").textContent}" rows=${targetRows().length}`);
+  check("票04-2 左槽 = 发起者的牌（♥Q 杀）、右行 = 被拼点者的牌（♠9 闪）+ 结果「赢」",
+    !!initiatorSlot() && initiatorSlot().text().includes("♥")
+      && initiatorSlot().text().includes("Q") && initiatorSlot().text().includes("杀")
+      && !!firstRow && firstRow.text().includes("♠") && firstRow.text().includes("9")
+      && firstRow.text().includes("闪")
+      && firstRow.getAttribute("data-verdict") === "win"
+      && firstRow.text().includes("赢"),
+    `initiator="${initiatorSlot() ? initiatorSlot().text() : ""}" row="${firstRow ? firstRow.text() : ""}" verdict=${firstRow ? firstRow.getAttribute("data-verdict") : ""}`);
+  check("票04-3 停留 3 秒 = 前端展示（PINDIAN_HOLD_MS，服务端不阻塞）",
+    ui.PINDIAN_HOLD_MS === 3000 && latestTimerDelay() === 3000,
+    `hold=${ui.PINDIAN_HOLD_MS} timer=${latestTimerDelay()}`);
+
+  // ② 平点：标签「都没赢」读服务端 `tied` 位（前端不比较点数）
+  ui.applyPindianDelta(pindianRecord({ cards: [initiator, sameRank], won: [false], tied: [true] }));
+  check("票04-4 平点标「都没赢」（读 tied，不在前端比点数）",
+    targetRows()[0].getAttribute("data-verdict") === "tie"
+      && targetRows()[0].text().includes("都没赢"),
+    `verdict=${targetRows()[0].getAttribute("data-verdict")} text="${targetRows()[0].text()}"`);
+
+  // ③ 1vN：左槽只画一次 + 每个被拼点者一行（一对一个结果标签）
+  ui.applyPindianDelta(pindianRecord({
+    targets: [1, 2], cards: [initiator, winner, sameRank],
+    won: [true, false], tied: [false, false],
+  }));
+  check("票04-5 1vN：左 1 个固定槽 + 右 2 行、2 个结果标签（发起者的牌只画一次）",
+    targetRows().length === 2
+      && targetRows()[0].getAttribute("data-verdict") === "win"
+      && targetRows()[1].getAttribute("data-verdict") === "lose"
+      && targetRows()[1].text().includes("没赢"),
+    `rows=${targetRows().length} verdicts=${targetRows().map((r) => r.getAttribute("data-verdict")).join(",")}`);
+
+  // ④ 只读：不进询问面判据、弹窗里没有一个可点节点（选牌仍走牌桌）
+  const clickables = [popupBody, ...Array.from(popupBody.children)]
+    .flatMap((node) => [node, ...Array.from(node.children || [])])
+    .filter((node) => (node.listeners.click || []).length);
+  check("票04-6 只读：DIALOG_KINDS 里没有 pindian、弹窗内没有可点节点",
+    !Object.values(ui.DIALOG_KINDS).includes("pindian") && clickables.length === 0,
+    `clickables=${clickables.length} kinds=${Object.keys(ui.DIALOG_KINDS).join(",")}`);
+
+  // ⑤ 判据只看 `delta_type`：别的记录一律不弹窗
+  const ignored = ui.applyPindianDelta({ kind: "delta", delta_type: "hp_change", seq: 1 });
+  check("票04-7 非拼点记录不弹窗（判据只看 delta_type）", ignored === false, `ignored=${ignored}`);
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

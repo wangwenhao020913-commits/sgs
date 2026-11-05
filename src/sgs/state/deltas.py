@@ -208,6 +208,10 @@ class PindianDelta(_FrozenModel):
       序一一对应（1 位发起者 vs N 位被拼点者）；
     - ``won``：与 ``targets`` 对齐的布尔；**平点 = 双方都没赢**（规则 12.1 L1318–L1319 /
       12.4 L1345–L1353）⇒ 平点时 ``won`` 为假；
+    - ``tied``：与 ``targets`` 对齐的**平点**位——``won`` 只有两态，平点与"输"都落
+      ``won=False``；展示面要区分「都没赢」（用户 2026-11-04 的 R7 口径）就必须有这一位，
+      否则前端只能拿两张牌的点数自己比一次（那会把规则的比较搬第二份到界面上）。缺省空
+      元组 = 旧记录没有这个事实（按"没赢"画）；
     - ``title``：发动拼点的技能名（弹窗标题；服务端给，前端不拼）。
 
     **全场可见**（揭晓后牌面即公开事实）；揭晓前没有任何一条 delta 带这两张牌的面——
@@ -220,6 +224,7 @@ class PindianDelta(_FrozenModel):
     targets: tuple[int, ...]
     cards: tuple[CardRef, ...]
     won: tuple[bool, ...]
+    tied: tuple[bool, ...] = ()
 
 
 class DeckShuffleDelta(_FrozenModel):
