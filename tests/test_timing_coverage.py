@@ -59,10 +59,15 @@ WUMING_UNSEALED: frozenset[str] = frozenset(
 )
 """wuming 票 04 的解封增量：L11 的**加**体力上限二时机（减侧两个不解封，见 C4）。"""
 
+PINDIAN_UNSEALED: frozenset[str] = frozenset(
+    {Timing.RANK_COMPARE_ON.value, Timing.RANK_COMPARE_RESULT_AFTER.value}
+)
+"""huo-taishici-xunyu 票 03 的解封增量：L15 的拼点二时机（RANK_COMPARE 帧的步骤表派发）。"""
+
 M2_DISPATCH_WHITELIST = frozenset(
     timing.value
     for timing in DISPATCH_WHITELIST
-    if timing.value not in M3_UNSEALED | WUMING_UNSEALED
+    if timing.value not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED
 )
 """M2 的 53 个：今天的白名单减去两批解封（M3 一个 + wuming 两个）。"""
 
@@ -75,7 +80,7 @@ def test_the_unsealed_set_is_exactly_the_move_after_node():
     上仍然成立；"两批之外没有第三个增量"由 M2 基线恒 53 个看住。
     """
     whitelist = {timing.value for timing in DISPATCH_WHITELIST}
-    m3_unsealed = whitelist - M2_DISPATCH_WHITELIST - WUMING_UNSEALED
+    m3_unsealed = whitelist - M2_DISPATCH_WHITELIST - WUMING_UNSEALED - PINDIAN_UNSEALED
 
     assert m3_unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
     assert Timing.MOVE_BEFORE.value not in whitelist, "移动前继续留枚举位（M3 无载体）"
@@ -91,7 +96,7 @@ def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
     觉醒技的 ``hp_max_change.frame_id``）。
     """
     whitelist = {timing.value for timing in DISPATCH_WHITELIST}
-    wuming_unsealed = whitelist - M2_DISPATCH_WHITELIST - M3_UNSEALED
+    wuming_unsealed = whitelist - M2_DISPATCH_WHITELIST - M3_UNSEALED - PINDIAN_UNSEALED
 
     assert wuming_unsealed == WUMING_UNSEALED
     assert {
@@ -143,8 +148,9 @@ def test_m3_unseals_no_phase_start_node():
 
 
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
-    assert len(WHITELIST) == 56, (
+    assert len(WHITELIST) == 58, (
         "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
+        " + huo-taishici-xunyu 票 03 的拼点二时机"
     )
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
@@ -162,7 +168,7 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     collected = _collected()
 
     assert collected.isdisjoint({timing.value for timing in ENUM_ONLY}), (
-        "16 个枚举位只留位（含减体力上限二时机），一次都不 dispatch"
+        "14 个枚举位只留位（含减体力上限二时机），一次都不 dispatch"
     )
     assert collected.isdisjoint({timing.value for timing in EMPTY_LOG}), (
         "11 个空日志节点结构性存在，但记录流里不出现"

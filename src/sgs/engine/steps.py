@@ -76,6 +76,7 @@ from sgs.state import (
     LIFE_DECREASE_DAMAGE_KEY,
     ActivateSkill,
     CardRef,
+    PindianDelta,
     DodgeContext,
     FrameKind,
     GameState,
@@ -84,6 +85,7 @@ from sgs.state import (
     QueryKind,
     RespondMode,
     RejudgeOffer,
+    SelectionSpec,
     SubstituteJudgeCard,
     UseCard,
     WindowCause,
@@ -174,6 +176,43 @@ class FrameHost(StepHost, Protocol):
 
     def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None: ...
 
+    def ask_selection(
+        self,
+        frame: Frame,
+        *,
+        owner: Any,
+        key: str,
+        actor: int,
+        timing: Timing,
+        spec: Any,
+        face: Any = None,
+        revealed: Sequence[CardRef] = (),
+        provide_type: str | None = None,
+        ask_when_empty: bool = False,
+    ) -> Any: ...
+
+    def suspended(self, value: Any) -> bool: ...
+
+    def selection_face(
+        self, seat: int, zones: tuple[Any, ...], *, reveal_hand: bool = False
+    ) -> tuple[tuple[Any, ...], tuple[int, ...]]: ...
+
+    def move_in_frame(
+        self,
+        frame: Frame,
+        cards: tuple[CardRef, ...],
+        *,
+        to_zone: ZoneRef,
+        reason: MoveReason,
+        owner: int | None,
+        actor: int | None = None,
+        to_top: bool = False,
+    ) -> Control: ...
+
+    def emit_frame_delta(self, frame: Frame, delta: Any) -> None: ...
+
+    def note_pindian_result(self, frame: Frame) -> None: ...
+
     def ask_query(
         self,
         kind: QueryKind,
@@ -211,6 +250,10 @@ class FrameHost(StepHost, Protocol):
     ) -> tuple[Any, ...]: ...
 
     def suspended(self, value: Any) -> bool: ...
+
+    def selection_face(
+        self, seat: int, zones: tuple[Any, ...], *, reveal_hand: bool = False
+    ) -> tuple[tuple[Any, ...], tuple[int, ...]]: ...
 
     def accepted_selection(
         self, frame: Frame, *, owner: Any, key: str
@@ -2015,6 +2058,208 @@ MOVE_STEPS = (Step(reforge_lose_card, None), Step(reforge_draw, None))
 """重铸帧：两个非 dispatch 的步骤（``None`` = 不对应任何时机枚举位）。"""
 
 
+# ---------------------------------------------------------------------------
+# RANK_COMPARE 帧（huo-taishici-xunyu 票 03）：拼点
+#
+# 规则第十二章（L1309–L1380）：两名**有手牌**的角色各以一张**手牌**比较点数；平点 = 双方
+# 都没赢；拼点不是使用 / 打出、但**属于失去牌**；拼点牌置入弃牌堆（与「弃置」不同）。
+#
+# **本仓的落地口径（票 03 的用户裁定 + 建模决定）**：选牌阶段牌**还留在各自手牌里**
+# （这样"扣置"不需要第二个隐藏区——处理区是公开区，提前搬进去会让对手提前看到牌面），
+# 全部参与者答完后**一次性**搬入处理区（``reason = PINDIAN``，即"因拼点失去一张牌"，
+# 内联派发「失去牌后」⇒ 用最后一张手牌拼点照常触发【连营】）、立刻亮出并比点、派发
+# ``RANK_COMPARE_RESULT_AFTER``、再把两张牌置入弃牌堆。见 `03-c1-pindian.md`。
+# ---------------------------------------------------------------------------
+
+RANK_COMPARE_ON_EMITTED = "rank_compare_on_emitted"
+"""帧私有：``RANK_COMPARE_ON`` 已派发（重入不再发）。"""
+
+RANK_COMPARE_PICKED = "rank_compare_picked"
+"""帧私有：``{座位: 拼点牌 card_id}``；插入序 = 发起者、再按 ``targets`` 序。"""
+
+RANK_COMPARE_PLACE_CURSOR = "rank_compare_place_cursor"
+"""帧私有：已搬入处理区的参与者个数（搬牌可能因「失去牌后」钩子挂起）。"""
+
+RANK_COMPARE_PLACED = "rank_compare_placed"
+"""帧私有：所有拼点牌都已在处理区（下一步才是亮出）。"""
+
+RANK_COMPARE_RESULTS = "rank_compare_results"
+"""帧私有：``((target_seat, won), ...)``，与 ``targets`` 对齐；平点 = ``won`` 假。"""
+
+RANK_COMPARE_RESULT_EMITTED = "rank_compare_result_emitted"
+"""帧私有：``RANK_COMPARE_RESULT_AFTER`` 已派发。"""
+
+RANK_COMPARE_ABORTED = "rank_compare_aborted"
+"""帧私有：拼点中止（参与者没有手牌——候选阶段已挡，帧内兜底，零副作用）。"""
+
+RANK_COMPARE_DISCARD_CURSOR = "rank_compare_discard_cursor"
+"""帧私有：已置入弃牌堆的拼点牌个数。"""
+
+_ASK_RANK_COMPARE = "pindian"
+"""拼点选牌的**询问位置**（``ask_selection`` 的 ``owner``；逐参与者用不同 ``key``）。"""
+
+
+def _rank_compare_order(frame: Frame) -> tuple[int, ...]:
+    """参与拼点的座位序：发起者在先，被拼点者按 ``targets`` 声明序。"""
+    return (int(frame.data["initiator"]), *tuple(int(seat) for seat in frame.data["targets"]))
+
+
+def rank_compare_announce(host: FrameHost, frame: Frame) -> Control:
+    """派发 ``RANK_COMPARE_ON``（"进行拼点时"，规则 12.3 L1340）一次。"""
+    if frame.data.get(RANK_COMPARE_ON_EMITTED):
+        return None
+    frame.data[RANK_COMPARE_ON_EMITTED] = True
+    return host.emit_frame_timing(
+        frame, Timing.RANK_COMPARE_ON, actor=int(frame.data["initiator"])
+    )
+
+
+def rank_compare_pick(host: FrameHost, frame: Frame) -> Control:
+    """逐参与者要一张**手牌**（不可放弃；超时兜底由接入层取候选第一张）。"""
+    picked: dict[int, int] = frame.data.setdefault(RANK_COMPARE_PICKED, {})
+    order = _rank_compare_order(frame)
+    for index, seat in enumerate(order):
+        if seat in picked:
+            continue
+        if not host.state.player(seat).hand:
+            # 发起者 / 目标必须有手牌才能拼点（规则 12.1 L1317）；候选阶段已挡，
+            # 帧内再兜一次：没有牌就整条中止（零副作用），后续步骤一律跳过。
+            frame.data[RANK_COMPARE_ABORTED] = True
+            return None
+        got = host.ask_selection(
+            frame,
+            owner=_ASK_RANK_COMPARE,
+            key=f"pindian:{index}",
+            actor=seat,
+            timing=Timing.RANK_COMPARE_ON,
+            spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=False),
+            build_face=lambda: host.selection_face(seat, (Zone.HAND,), reveal_hand=True),
+        )
+        if host.suspended(got):
+            return "stay"
+        if not got:
+            return None
+        picked[seat] = int(got[0])
+    return None
+
+
+def rank_compare_place(host: FrameHost, frame: Frame) -> Control:
+    """把全部拼点牌**手牌 → 处理区**（``reason = PINDIAN``，算失去不算弃置）。"""
+    if frame.data.get(RANK_COMPARE_ABORTED) or frame.data.get(RANK_COMPARE_PLACED):
+        return None
+    order = _rank_compare_order(frame)
+    picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
+    cursor = int(frame.data.get(RANK_COMPARE_PLACE_CURSOR, 0))
+    while cursor < len(order):
+        seat = order[cursor]
+        card_id = picked[seat]
+        if card_id in host.state.processing:
+            cursor += 1
+            frame.data[RANK_COMPARE_PLACE_CURSOR] = cursor
+            continue
+        control = host.move_in_frame(
+            frame,
+            (host.state.card(card_id),),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.PINDIAN,
+            owner=seat,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+        cursor += 1
+        frame.data[RANK_COMPARE_PLACE_CURSOR] = cursor
+    frame.data[RANK_COMPARE_PLACED] = True
+    return None
+
+
+def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
+    """亮出并比点：写结果、发 ``pindian`` delta、把结果回写发起帧。"""
+    if frame.data.get(RANK_COMPARE_ABORTED):
+        if RANK_COMPARE_RESULTS not in frame.data:
+            frame.data[RANK_COMPARE_RESULTS] = ()
+            host.note_pindian_result(frame)
+        return None
+    if RANK_COMPARE_RESULTS in frame.data:
+        return None
+    state = host.state
+    picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
+    initiator = int(frame.data["initiator"])
+    base = state.card(picked[initiator]).rank
+    results: list[tuple[int, bool]] = []
+    for seat in frame.data["targets"]:
+        seat = int(seat)
+        other = state.card(picked[seat]).rank
+        # 点数大者赢；点数相同 ⇒ 双方都"没赢"（规则 12.1 L1318–L1319）。
+        won = base is not None and other is not None and base > other
+        results.append((seat, won))
+    frame.data[RANK_COMPARE_RESULTS] = tuple(results)
+    order = _rank_compare_order(frame)
+    host.emit_frame_delta(
+        frame,
+        PindianDelta(
+            title=str(frame.data.get("title", "")),
+            initiator=initiator,
+            targets=tuple(int(seat) for seat in frame.data["targets"]),
+            cards=tuple(state.card(picked[seat]) for seat in order),
+            won=tuple(won for _seat, won in results),
+        ),
+    )
+    host.note_pindian_result(frame)
+    return None
+
+
+def rank_compare_result(host: FrameHost, frame: Frame) -> Control:
+    """派发 ``RANK_COMPARE_RESULT_AFTER``（"赢 / 没赢后"，规则 12.3 L1341）一次。"""
+    if frame.data.get(RANK_COMPARE_ABORTED) or frame.data.get(RANK_COMPARE_RESULT_EMITTED):
+        return None
+    frame.data[RANK_COMPARE_RESULT_EMITTED] = True
+    return host.emit_frame_timing(
+        frame, Timing.RANK_COMPARE_RESULT_AFTER, actor=int(frame.data["initiator"])
+    )
+
+
+def rank_compare_discard(host: FrameHost, frame: Frame) -> Control:
+    """拼点牌**处理区 → 弃牌堆**（``reason = PINDIAN``；不是"弃置"）。"""
+    if frame.data.get(RANK_COMPARE_ABORTED):
+        return None
+    order = _rank_compare_order(frame)
+    picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
+    cursor = int(frame.data.get(RANK_COMPARE_DISCARD_CURSOR, 0))
+    while cursor < len(order):
+        seat = order[cursor]
+        card_id = picked[seat]
+        if card_id not in host.state.processing:
+            cursor += 1
+            frame.data[RANK_COMPARE_DISCARD_CURSOR] = cursor
+            continue
+        control = host.move_in_frame(
+            frame,
+            (host.state.card(card_id),),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.PINDIAN,
+            owner=seat,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+        cursor += 1
+        frame.data[RANK_COMPARE_DISCARD_CURSOR] = cursor
+    return None
+
+
+RANK_COMPARE_STEPS = (
+    Step(rank_compare_announce, Timing.RANK_COMPARE_ON),
+    Step(rank_compare_pick, None),
+    Step(rank_compare_place, None),
+    Step(rank_compare_reveal, None),
+    Step(rank_compare_result, Timing.RANK_COMPARE_RESULT_AFTER),
+    Step(rank_compare_discard, None),
+)
+"""拼点帧六步：派发 ON → 逐参与者选牌 → 扣置（处理区）→ 亮出比点 → 派发 RESULT_AFTER →
+置入弃牌堆。后四步都是"动作"，不对应时机枚举位。"""
+
+
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
     """按模式装配步骤表：只有 DEATH 帧的形状分叉（票 25）。"""
     return {
@@ -2031,4 +2276,5 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.MAXLIFE: MAXLIFE_STEPS,
         FrameKind.JUDGE: JUDGE_STEPS,
         FrameKind.REJUDGE: REJUDGE_STEPS,
+        FrameKind.RANK_COMPARE: RANK_COMPARE_STEPS,
     }

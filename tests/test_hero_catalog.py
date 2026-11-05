@@ -203,9 +203,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 148
+    assert len(CATALOG) == 151
     assert len(equipment) == 22
-    assert len(heroes) == 126
+    assert len(heroes) == 129
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -229,7 +229,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 126
+    assert len(expected) == 129
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -999,6 +999,9 @@ SKILL_FILES: dict[str, str] = {
     "hero.zhugeliang.guanxing": "test_hero_arrange.py",
     # 火包 OL（神诸葛亮）：三条技能共用一支测试文件
     "hero.shen_zhugeliang.qixing": "test_hero_huo.py",
+    "hero.taishici.tianyi": "test_hero_huo.py",
+    "hero.xunyu.quhu": "test_hero_huo.py",
+    "hero.xunyu.jieming": "test_hero_huo.py",
     "hero.shen_zhugeliang.kuangfeng": "test_hero_huo.py",
     "hero.shen_zhugeliang.dawu": "test_hero_huo.py",
     "hero.zhugeliang.kongcheng": "test_hero_target_pool.py",
@@ -1465,6 +1468,8 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.sunshangxiang.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
         # huo-mobile-batch 票 02：庞统移动版【涅槃】——濒死的是我（NEAR_DEATH 帧的 target）。
         "hero.pangtong_mobile.niepan": (_HookFrame(target=ME),),
+        # huo-taishici-xunyu 票 02：荀彧【节命】——受伤的是我（逐点触发的 B 族同形）。
+        "hero.xunyu.jieming": (_HookFrame(target=ME),),
         # huo-shenzhouyu-mobile 票 01/03：神周瑜移动版【琴音】——帧的 source 是我（我的
         # 弃牌阶段）、本阶段弃置了 2 张手牌。
         "hero.shen_zhouyu_mobile.qinyin": (
@@ -1745,6 +1750,11 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.diaochan.lijian": "主动技能",
     "hero.sunshangxiang.jieyin": "主动技能",
     "hero.jie_guanyu.yijue": "主动技能",
+    # huo-taishici-xunyu 票 01：太史慈【天义】是"选目标 → 拼点 → 落位"的主动技
+    "hero.taishici.tianyi": "主动技能",
+    # huo-taishici-xunyu 票 02：荀彧【驱虎】= 主动技；【节命】= 逐点触发的钩子 + 座位步
+    "hero.xunyu.quhu": "主动技能",
+    "hero.xunyu.jieming": "触发技能",
     # M6 票 08：界【反间】是两步主动技（手牌 → 目标；提交点里目标二选一）
     "hero.jie_zhouyu.fanjian": "主动技能",
     # M6 票 16：界【仁德】是两步主动技（给任意张 → 本阶段未给过的角色），另有
@@ -1974,8 +1984,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # （雷击，两条钩子同一条流水线）、能力位 2 → 3（鬼道）。
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】⇒ 主动技能 21 → 22。
     # huo-mobile-batch 票 01：庞德【马术】+【猛进】⇒ 锁定技 31 → 32、触发技能 15 → 16。
-    "主动技能": 22,
-    "触发技能": 19,
+    # huo-taishici-xunyu 票 01：太史慈【天义】⇒ 主动技能 22 → 23。
+    "主动技能": 24,
+    "触发技能": 20,
     "零步技能": 29,
     "排列技能": 4,
     "多轮技能": 14,
@@ -2022,7 +2033,7 @@ SHAPE_COUNTS: dict[str, int] = {
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（66 条 = 20 + 14 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（69 条 = 22 + 15 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -2091,7 +2102,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 148
+    assert len(SKILL_SHAPE) == len(CATALOG) == 151
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2208,7 +2219,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """73 在内 / 72 在外（145 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """79 在内 / 72 在外（151 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2220,7 +2231,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 76
+    assert len(inside) == 79
     assert len(outside) == 72
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

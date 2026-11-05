@@ -87,6 +87,7 @@ from .catalog import (
 from .flow import (
     FlowAnswers,
     PickCards,
+    PickSeats,
     SkillFlow,
     option_seat,
     seat_choice,
@@ -1610,7 +1611,82 @@ KUANGGU_DEF = SkillDef(
 """
 
 
+# ---------------------------------------------------------------------------
+# 火包·移动版·荀彧【节命】（huo-taishici-xunyu 票 02）
+#
+#     当你受到1点伤害后，你可以令一名角色将手牌摸至体力上限（至多摸至五张）。
+#
+# 形状 = B 族逐点钩子（``DamageAfterSkill(per_point=True)``）+ 单步 ``PickSeats`` +
+# ``effect`` 里手写摸牌（``Engine.draw_for_hand``，既有做法，不是第六种机制）。
+#
+# 数值口径 = **用户 2026-11-04 裁定的读法 B**：手牌终值 = ``min(体力上限, 5)``；
+# 摸牌数 = ``max(0, 终值 − 现有手牌)``。依据：官方移动版站「摸至X张（X为其体力上限且
+# 最多为5）」、官方规则集 3.0「补至X张（X为其体力上限且至多为5）」，且界荀彧同短 id 的
+# 重写「摸X张，然后其将手牌弃置至X张（X为其体力上限且至多为5）」终值同样是 X。
+# ---------------------------------------------------------------------------
+
+JIEMING = hero_skill_id("xunyu", "jieming")
+"""荀彧【节命】的全限定技能 id。"""
+
+JIEMING_CAP = 5
+"""「至多摸至五张」的上限（读法 B：**手牌终值**的上限）。"""
+
+
+def _jieming_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**受伤的是荀彧自己**（B 族的共同前提，``_hurt_owner`` 的唯一判据）。"""
+    del host
+    return _hurt_owner(frame)
+
+
+def _jieming_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """目标池：**全部存活角色（含自己）**——「一名角色」按默认读法（二）①。
+
+    槽位恒非空（至少持有者自己活着），故不会出现"没有候选的询问"。
+    """
+    del frame, owner, chosen
+    return tuple(player.seat for player in state.players if player.alive)
+
+
+def _jieming_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：把目标的手牌摸至 ``min(体力上限, 5)``（读法 B）。"""
+    seat = next(iter(int(value) for value in answers.get("seat", ())), None)
+    if seat is None:
+        return None
+    player = host.state.player(seat)
+    cap = min(player.hp_max, JIEMING_CAP)
+    need = max(0, cap - len(player.hand))
+    if not need:
+        # 手牌已在上限：仍是**合法发动**（G2「付得起但没收益」），只是摸 0 张。
+        return None
+    if host.draw_for_hand(frame, seat, need) == "stay":
+        return "stay"
+    return None
+
+
+JIEMING_FLOW = SkillFlow(
+    name="jieming",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_jieming_pool, optional=False, key="seat"),
+    ),
+    effect=_jieming_effect,
+)
+"""【节命】的一步流水线：选一名角色（含自己）→ 把手牌摸至 ``min(体力上限, 5)``。"""
+
+
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
+    # 荀彧【节命】（火包·移动版）：逐点触发 → 选一名角色（含自己）→ 手牌摸至 min(上限, 5)。
+    DamageAfterSkill(
+        "xunyu",
+        "jieming",
+        True,
+        _jieming_condition,
+        None,
+        JIEMING_FLOW,
+        requirement="令一名角色将手牌摸至体力上限（至多摸至五张）",
+        step_requirements={"seat": "选择一名角色，令其将手牌摸至体力上限（至多摸至五张）"},
+    ),
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。
     # W6-01：零步技能迁 ``run_flow``（模块级 ``JIANXIONG_FLOW``），行为与旧回调逐字等价。
     DamageAfterSkill("caocao", "jianxiong", False, _jianxiong_condition, None, JIANXIONG_FLOW),

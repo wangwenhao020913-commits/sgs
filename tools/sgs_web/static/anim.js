@@ -175,6 +175,10 @@ const ANIM_FLIGHT_RULES = [
   { reason: "PUT", to: "discard", kind: "discard" },
   /* 摸牌：牌堆 → 手牌（对手摸牌走隐藏侧：牌背 + card_count）。 */
   { reason: "DRAW", to: "hand", kind: "draw" },
+  /* 拼点扣置（huo-taishici-xunyu 票 03）：拼点牌手牌 → 处理区，按"使用"同一飞行；
+     置入弃牌堆沿用上面那条 processing → discard 的通配（不飞）。 */
+  { reason: "PINDIAN", to: "processing", kind: "use" },
+  { reason: "PINDIAN", to: "discard", kind: "discard" },
   /* 使用 / 判定亮牌：手牌 / 牌堆 / 判定区 → 处理区。 */
   { reason: "USE", to: "processing", kind: "use" },
   { reason: "PUT", to: "processing", kind: "use" },

@@ -69,11 +69,13 @@ def test_implemented_and_enum_only_partition_the_whole_table():
     implemented = set(IMPLEMENTED)
     enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 67, (
+    assert len(implemented) == 69, (
         "M2 已实现类 64 + M3 解封的 1 个（票 07）+ wuming 票 04 解封的 2 个"
+        " + huo-taishici-xunyu 票 03 解封的拼点二时机"
     )
-    assert len(enum_only) == 16, (
+    assert len(enum_only) == 14, (
         "枚举位 19 − M3 的 `MOVE_AFTER` − wuming 票 04 的加体力上限二时机"
+        " − 票 03 的拼点二时机"
     )
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
@@ -83,12 +85,13 @@ def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_se
     dispatch = set(DISPATCH_WHITELIST)
     empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 56, (
+    assert len(dispatch) == 58, (
         "M2 dispatch 白名单 53 + M3 的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
+        " + 票 03 的拼点二时机"
     )
     assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)
-    assert dispatch | empty_log == set(IMPLEMENTED), "56 + 11 复原 67 个已实现类"
+    assert dispatch | empty_log == set(IMPLEMENTED), "58 + 11 复原 69 个已实现类"
     assert dispatch | empty_log | set(ENUM_ONLY) == set(Timing)
 
 

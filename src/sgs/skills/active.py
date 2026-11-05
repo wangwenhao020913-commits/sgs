@@ -2329,15 +2329,40 @@ def _qiangxi_weapon_cards(state: GameState, owner: int) -> tuple[int, ...]:
     )
 
 
+def _qiangxi_discardable_weapons(state: GameState, owner: int) -> tuple[int, ...]:
+    """可弃、且**弃掉之后仍够得着人**的武器牌（"付不起就不进候选"）。
+
+    弃武器是**代价**：范围按付完之后重算（:func:`_qiangxi_target_pool` 的 ``excluding``）。
+    若某张武器正是唯一撑起范围的那张，而剩下的距离又超过无武器范围 **1**，弃掉它就没有
+    目标可选——那一档是**死路**：结算整条取消、阶段位不落，而候选还在 ⇒ 人工/AI 会反复
+    发动同一条。【强袭】在 2026-11-05 的 128 局胜率批（seed 5003）上真撞到这条死循环：
+    典韦装备【丈八蛇矛】（范围 3）、唯一对手距 2（挂了 +1 坐骑），弃矛后范围回落 1 ⇒ 反复
+    取消。收窄成"弃后仍有人可打"既保住 O1 的收窄姿态，也把死路从**候选**这一层拿掉。
+
+    判定与目标池同源：两处都读 :func:`_qiangxi_target_pool`，技能层不另抄距离公式。
+    """
+    return tuple(
+        card_id
+        for card_id in _qiangxi_weapon_cards(state, owner)
+        if _qiangxi_target_pool(state, owner, (card_id,))
+    )
+
+
 def _qiangxi_weapon_face(host: Any, owner: int) -> Any:
-    """弃武器面的**收窄**：自己的手牌 + 装备区，再按"是不是武器牌"过滤（槽位与 id 同序）。"""
+    """弃武器面的**收窄**：自己的手牌 + 装备区，再按"是不是武器牌"过滤（槽位与 id 同序）。
+
+    过滤集与 :func:`_qiangxi_options` **同一份**（``_qiangxi_discardable_weapons``）：选项
+    承诺"弃了还能打"，选面就不该给出一张弃了没目标的武器——两边各写一份判据就会让
+    选项与选面漂移。
+    """
     slots, card_ids = host.selection_face(
         owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
     )
+    discardable = set(_qiangxi_discardable_weapons(host.state, owner))
     kept = [
         (slot, card_id)
         for slot, card_id in zip(slots, card_ids, strict=True)
-        if _qiangxi_is_weapon(host.state, host.state.card(card_id))
+        if card_id in discardable
     ]
     return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
 
@@ -2357,13 +2382,14 @@ def _qiangxi_target_pool(
 def _qiangxi_options(
     state: GameState, frame: Any, owner: int, answers: FlowAnswers
 ) -> tuple[str, ...]:
-    """代价选项的闭集（可调用档）：**没有武器牌时"弃置一张武器牌"不出现**（O1 收窄）。
+    """代价选项的闭集（可调用档）：**没有武器牌（或弃掉它也没目标）时，那一项不出现**。
 
-    失去体力恒可付（1 体力也能失去、进濒死），故本步恒有候选。【神速】的
-    ``_shensu_options`` 是同一个收窄姿态。
+    「没有武器牌」是第一层 O1 收窄；第二层是"弃了也够不着人"——死路不进候选，见
+    :func:`_qiangxi_discardable_weapons`。失去体力恒可付（1 体力也能失去、进濒死），
+    故本步恒有候选。【神速】的 ``_shensu_options`` 是同一个收窄姿态。
     """
     del frame, answers
-    if not _qiangxi_weapon_cards(state, owner):
+    if not _qiangxi_discardable_weapons(state, owner):
         return (QIANGXI_LOSE_HP,)
     return (QIANGXI_LOSE_HP, QIANGXI_DISCARD_WEAPON)
 
@@ -2419,10 +2445,10 @@ def _qiangxi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     if target is None:
         pool = _qiangxi_target_pool(state, owner, cost)
         if not pool:
-            # 弃掉的正是那把撑起范围的武器、且范围内已无别人 ⇒ 整条取消、零副作用。
-            # **防御分支**：只要场上还有别的存活角色，最近的那家恒在距离 1（距离按**存活**
-            # 座位数算），而弃武器后范围至少回到 1 ⇒ 这一支实际走不到；留着是为了"池永远
-            # 非空"不成为一条隐式前提（将来若出现减范围的共享原语，这里不该是空指针）。
+            # 弃掉的正是那把撑起范围的武器、且剩下的距离超过无武器范围 1（对手挂 +1 坐骑
+            # 即可）⇒ 整条取消、零副作用。**候选面已把这条死路挡掉**
+            # （:func:`_qiangxi_discardable_weapons`），故这里只兜"构造局面直接调 effect"与
+            # 将来出现减范围共享原语的情形——不把"池永远非空"当成隐式前提。
             return None
         answer = host.ask_option(
             frame,
@@ -4240,7 +4266,306 @@ _YEYAN = ActiveSkill(
     },
 )
 
+# ---------------------------------------------------------------------------
+# 火包·移动版·太史慈【天义】（huo-taishici-xunyu 票 01）
+#
+#     出牌阶段限一次，你可以与一名角色拼点，然后你本阶段根据拼点结果获得对应效果：
+#     若你赢，则你使用【杀】的次数上限+1、使用【杀】无距离限制、使用【杀】的目标数上限+1，
+#     否则你不能使用【杀】。
+#
+# 形状 = A 族主动技 + ``PickSeats`` 单步 + ``effect`` 里发起拼点（``Engine.rank_compare``）、
+# 拿到结果后写**座位三态**（``tianyi_won`` / ``tianyi_lost``，见 ``Player`` 的两个字段）。
+# 三条效果都是**连续型修饰器**（读座位状态，不落牌 / 不落标记）：
+#
+# - ``COUNT_LIMIT``：赢 ⇒ ``current + 1``；没赢 ⇒ **0**（只挡**使用**，不挡**打出**——
+#   牌面写的是"不能使用【杀】"，账本 774④ 把使用与打出分列）；
+# - ``TARGET_POOL``：赢 ⇒ 把全部其他存活座位并入池（"无距离限制" = 目标集豁免，
+#   **不是**把 ``DISTANCE`` 改 0，账本 827 行）；
+# - ``TARGET_COUNT``：赢 ⇒ ``current + 1``（与方天画戟 +2 同一条加式链）。
+#
+# 作用域 = **本阶段**（移动版牌面）；清理点与界【诈降】同一处（``_phase_play_end``）。
+# ---------------------------------------------------------------------------
+
+TIANYI = hero_skill_id("taishici", "tianyi")
+"""太史慈【天义】的全限定技能 id。"""
+
+TIANYI_TITLE = "天义"
+"""拼点弹窗的标题（发动拼点的技能名）。"""
+
+_TIANYI_DONE_KEY = "tianyi_done"
+"""帧私有：这一次发动已经按拼点结果落位（续跑不重复置位）。"""
+
+
+def _tianyi_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """拼点目标池：**其他 + 存活 + 有手牌**（规则第十二章 12.1 L1315 / 12.2 L1322 / 12.7 L1370）。
+
+    发起者自己没手牌时整条不可发动（12.1 L1317 的前置条件），由 :func:`_tianyi_offers`
+    与这里各挡一次。
+    """
+    del frame, chosen
+    if not state.player(owner).hand:
+        return ()
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner and player.hand
+    )
+
+
+def _tianyi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段限一次 + 自己与至少一名其他角色都有手牌。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _tianyi_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _tianyi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：发起拼点 → 按结果写座位三态（"本阶段"效果由修饰器读）。"""
+    owner = int(frame.data["source"])
+    if frame.data.get(_TIANYI_DONE_KEY):
+        return None
+    if "pindian_result" not in frame.data:
+        targets = tuple(int(seat) for seat in answers.get("seat", ()))
+        if not targets:
+            return None
+        host.rank_compare(
+            frame,
+            initiator=owner,
+            targets=targets,
+            skill_id=TIANYI,
+            title=TIANYI_TITLE,
+        )
+        return "stay"
+    won = bool((frame.data.get("pindian_won") or (False,))[0])
+    host.set_tianyi_state(owner, won)
+    frame.data[_TIANYI_DONE_KEY] = True
+    return None
+
+
+TIANYI_FLOW = SkillFlow(
+    name="tianyi",
+    steps=(PickSeats(lo=1, hi=1, pool=_tianyi_targets, key="seat"),),
+    effect=_tianyi_effect,
+)
+"""【天义】的一步流水线：选一名有手牌的其他角色 → 拼点 → 按结果落位。"""
+
+
+def _tianyi_won(state: GameState, owner: int) -> bool:
+    return bool(state.player(owner).tianyi_won)
+
+
+def _tianyi_lost(state: GameState, owner: int) -> bool:
+    return bool(state.player(owner).tianyi_lost)
+
+
+def _tianyi_count_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``COUNT_LIMIT``：赢 ⇒ +1；没赢 ⇒ 0（只挡使用，见模块头）。"""
+    if ctx.owner != ctx.subject or ctx.card is None or not is_slash(behavior_for(ctx.card)):
+        return current
+    if _tianyi_lost(state, ctx.owner):
+        return 0
+    if not _tianyi_won(state, ctx.owner):
+        return current
+    if current is None:
+        return None
+    return int(current) + 1
+
+
+def _tianyi_no_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_POOL``：赢 ⇒ 本阶段使用【杀】**无距离限制**（目标集并集）。"""
+    if ctx.owner != ctx.subject or ctx.card is None or not is_slash(behavior_for(ctx.card)):
+        return current
+    if not _tianyi_won(state, ctx.owner):
+        return current
+    everyone = tuple(
+        player.seat for player in state.players if player.alive and player.seat != ctx.subject
+    )
+    return tuple(dict.fromkeys((*current, *everyone)))
+
+
+def _tianyi_target_count(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_COUNT``：赢 ⇒ 使用【杀】的目标数上限 +1（加式，与方天 +2 同链）。"""
+    if ctx.owner != ctx.subject or ctx.card is None or not is_slash(behavior_for(ctx.card)):
+        return current
+    if not _tianyi_won(state, ctx.owner):
+        return current
+    return int(current) + 1
+
+
+TIANYI_MODIFIERS: tuple[Modifier, ...] = (
+    Modifier(ModifierPoint.COUNT_LIMIT, _tianyi_count_limit),
+    Modifier(ModifierPoint.TARGET_POOL, _tianyi_no_distance),
+    Modifier(ModifierPoint.TARGET_COUNT, _tianyi_target_count),
+)
+"""【天义】的三条连续型修饰器（读座位三态，不落标记）。"""
+
+
+# ---------------------------------------------------------------------------
+# 火包·移动版·荀彧【驱虎】（huo-taishici-xunyu 票 02）
+#
+#     出牌阶段限一次，你可以与一名体力值大于你的角色拼点，若你赢，则该角色对其攻击范围内
+#     你选择的一名角色造成1点伤害，否则其对你造成1点伤害。
+#
+# 用户 2026-11-04 裁定：赢段的承受者是**另一名角色**（相对拼点目标"其"）——**不能是 A
+# 本身**、**可以是荀彧**；按移动版措辞实现（OL 页写"你选择的一名角色"，差异登记在账本）。
+#
+# 形状 = A 族主动技 + ``PickSeats`` 单步 + ``effect`` 里的拼点与**条件分支**（赢 → 手写
+# 座位询问选承受者；没赢 → 直接对荀彧造成伤害）。伤害来源 = 拼点目标 A、无渠道牌、无属性。
+# ---------------------------------------------------------------------------
+
+QUHU = hero_skill_id("xunyu", "quhu")
+"""荀彧【驱虎】的全限定技能 id。"""
+
+QUHU_TITLE = "驱虎"
+"""拼点弹窗的标题（发动拼点的技能名）。"""
+
+_QUHU_DONE_KEY = "quhu_done"
+_QUHU_STAGE_KEY = "quhu_stage"
+_QUHU_TARGET_KEY = "quhu_target"
+_QUHU_RECEIVER_KEY = "quhu_receiver"
+_QUHU_RECEIVER_ASK = "hero.xunyu.quhu:receiver"
+
+
+def _quhu_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """拼点目标：**体力值大于你**的其他存活、有手牌的角色（「一名角色」含自己，但
+    "体力值大于你"自体不成立，故实际不含自己）。"""
+    del frame, chosen
+    owner_player = state.player(owner)
+    if not owner_player.hand:
+        # 拼点必须各出一张**手牌**（规则 12.1 L1317）：自己没牌 ⇒ 整条不可发动。
+        return ()
+    hp = owner_player.hp
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner and player.hand and player.hp > hp
+    )
+
+
+def _quhu_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    if not _can_offer(state, ctx):
+        return current
+    if not _quhu_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _quhu_burn(
+    host: Any, frame: Any, *, source: int, target: int
+) -> None:
+    """拼点目标 A 对 ``target`` 造成 1 点伤害（无渠道牌、无属性；来源 = A）。"""
+    host.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": source,
+            "targets": (target,),
+            "card": None,
+            "channel": None,
+            "use_timing": frame.data.get("use_timing"),
+            "target": target,
+            "nature": None,
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+
+def _quhu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：拼点 → 赢则选承受者造成伤害；没赢则 A 对荀彧造成 1 点伤害。"""
+    owner = int(frame.data["source"])
+    if frame.data.get(_QUHU_DONE_KEY):
+        return None
+    targets = tuple(int(seat) for seat in answers.get("seat", ()))
+    if not targets:
+        return None
+    stage = frame.data.get(_QUHU_STAGE_KEY, "pindian")
+    if stage == "pindian":
+        if "pindian_result" not in frame.data:
+            host.rank_compare(
+                frame,
+                initiator=owner,
+                targets=targets,
+                skill_id=QUHU,
+                title=QUHU_TITLE,
+            )
+            return "stay"
+        frame.data[_QUHU_TARGET_KEY] = targets[0]
+        won = bool((frame.data.get("pindian_won") or (False,))[0])
+        frame.data[_QUHU_STAGE_KEY] = "win" if won else "lose"
+        stage = frame.data[_QUHU_STAGE_KEY]
+    target = int(frame.data[_QUHU_TARGET_KEY])
+    if stage == "lose":
+        frame.data[_QUHU_DONE_KEY] = True
+        _quhu_burn(host, frame, source=target, target=owner)
+        return "stay"
+    receiver = frame.data.get(_QUHU_RECEIVER_KEY)
+    if receiver is None:
+        pool = targets_within_attack_range(host.state, target)
+        if not pool:
+            # 赢但攻击范围内没有任何其他角色 ⇒ 效果落空（拼点牌照样失去）。
+            frame.data[_QUHU_DONE_KEY] = True
+            return None
+        choice = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=_QUHU_RECEIVER_ASK,
+            options=tuple(f"seat:{seat}" for seat in pool),
+        )
+        if host.suspended(choice):
+            return "stay"
+        receiver = int(str(choice.choice).split(":", 1)[1])
+        frame.data[_QUHU_RECEIVER_KEY] = receiver
+    frame.data[_QUHU_DONE_KEY] = True
+    _quhu_burn(host, frame, source=target, target=int(receiver))
+    return "stay"
+
+
+QUHU_FLOW = SkillFlow(
+    name="quhu",
+    steps=(PickSeats(lo=1, hi=1, pool=_quhu_targets, key="seat"),),
+    effect=_quhu_effect,
+)
+"""【驱虎】的一步流水线：选拼点目标 → 拼点 → 按结果分支（赢选承受者 / 没赢挨打）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
+    # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
+    ActiveSkill(
+        "xunyu",
+        "quhu",
+        _quhu_offers,
+        flow=QUHU_FLOW,
+        requirement=(
+            "与一名体力值大于你的角色拼点：若你赢，该角色对其攻击范围内你选择的一名角色"
+            "（不能是该角色本身，可以是你）造成 1 点伤害；否则其对你造成 1 点伤害"
+        ),
+        step_requirements={
+            "seat": "选择一名体力值大于你、且有手牌的角色拼点",
+            "receiver": "选择该角色攻击范围内的一名角色承受 1 点伤害（不能是该角色本身）",
+        },
+    ),
+    # 太史慈【天义】（火包·移动版）：与一名有手牌的其他角色拼点 → 本阶段三条修饰器（赢）
+    # 或不能使用【杀】（没赢）。拼点帧由 03 票解封（`Engine.rank_compare`）。
+    ActiveSkill(
+        "taishici",
+        "tianyi",
+        _tianyi_offers,
+        flow=TIANYI_FLOW,
+        extra_modifiers=TIANYI_MODIFIERS,
+        requirement=(
+            "与一名有手牌的其他角色拼点：若你赢，你本阶段使用【杀】的次数上限+1、"
+            "无距离限制、目标数上限+1；否则你本阶段不能使用【杀】"
+        ),
+        step_requirements={"seat": "选择一名有手牌的其他角色拼点"},
+    ),
     # 韬·刘备【义起】（自制包）：**A 族第一条限定技**。观看弃牌堆顶 x 张（x = 张数整除 10）→
     # 恒 3 项类型选 1（不可放弃）→ 获得该类所有牌 → 失去武将牌上除【义起】外的技能 →
     # 获得标准版【武圣】【咆哮】（用户 2026-10-31 逐条裁定）。不翻预发动：首步是"看弃牌堆"

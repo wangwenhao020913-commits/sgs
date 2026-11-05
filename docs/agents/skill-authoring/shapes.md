@@ -109,6 +109,8 @@
 | `PLAY_ON_PLAY` | 打出牌时（界护驾/界激将 ②） |
 | `RESOLVE_EFFECT` | 生效时（界谦逊） |
 | `JUDGE_CARD_AFTER_EFFECT` | 判定牌生效后（天妒） |
+| `RANK_COMPARE_ON` | **进行拼点时**（huo-taishici-xunyu 票 03 解封）：`RANK_COMPARE` 帧的第一步派发；拼点先由技能发起（`Engine.rank_compare`），故「谁会拼点」不落枚举表 |
+| `RANK_COMPARE_RESULT_AFTER` | **拼点结果后**（赢 / 没赢；票 03）：结果写回发起帧之后、拼点牌置入弃牌堆之前派发；平点 = 双方都没赢 |
 | `RECOVER_VALUE` | 回复数值确定时（界救援） |
 | `DEATH_ON` | **死亡时**技能（神关羽移动版【武魂】②：死者本人的判定 / 直接致死）——`10` 起死者在这个窗口内仍可解析，`pass_away` 收口后静默 |
 | `NEAR_DEATH_ENTER` | **濒死时**技能（庞统移动版【涅槃】：huo-mobile-batch 票 02 的首载体）——NEAR_DEATH 帧的**第一步**，在求桃窗口（`NEAR_DEATH_AT`）**之前**派发；帧外事件（任何人的回合都可能发生），效果在这里结算完 ⇒ 体力回到 1 以上时求桃窗口直接早退 |
@@ -184,7 +186,7 @@
 | `DEATH` | 死亡结算 |
 | `LIFE_LOSE` | 失去体力上限 |
 | `MAXLIFE` | **体力上限变化事件帧**（wuming 票 04 解封「加」侧）：三步 = ① 派发 `MAXLIFE_INCREASE_BEFORE` → ② 落上限 + `emit_delta(HpMaxChangeDelta(amount=+N))` → ③ 派发 `MAXLIFE_INCREASE_AFTER`。帧私有带 `direction` + `amount`（`HpMaxChangeDelta.amount` 恒为幅度，方向由 `before` / `after` 读出）；唯一写入口 `Engine.raise_hp_max`（首个调用者 = 票 01 的【天成】，`src/sgs/skills/start.py`）。**不同步体力**（「满体力同步下调」只属于减侧）；"减"分支写好但**暂无调用者**——`reduce_hp_max` 不迁、`MAXLIFE_DECREASE_*` 不解封 |
-| `RANK_COMPARE` | 拼点类的比较帧 |
+| `RANK_COMPARE` | **拼点事件帧**（huo-taishici-xunyu 票 03 解封）：派发 `RANK_COMPARE_ON` → 逐参与者选一张手牌（不可放弃）→ 扣置处理区（`MoveReason.PINDIAN`，内联派发「失去牌后」）→ 亮出比点 + `pindian` delta + 结果回写发起帧（`pindian_result` / `pindian_won`）→ 派发 `RANK_COMPARE_RESULT_AFTER` → 两张牌置入弃牌堆（同一 `PINDIAN` 原因）。平点 = 双方都没赢；参与者缺手牌 ⇒ 整条中止（零副作用） |
 | `REJUDGE` | **改判事件帧**（feng-zhangjiao 票 02）：一次"用一张牌代替 / 替换判定牌"。帧内两段移动（新牌 → 处理区；原牌 → 弃牌堆（**代替**）/ 改判者手牌（**替换**）），不派发任何"打出时 / 使用后"钩子。判据：动作是 `SubstituteJudgeCard`（不是 `PlayCard`），去向由 `SkillDef.rejudge_original_to` 回答 |
 
 ### 3.7 步骤类型
@@ -269,8 +271,8 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 档 | 现象 | 例子 |
 |---|---|---|
 | 无 | 全树没有对应字段 / 帧 / 时机 | **标记**（没有通用的"标记"概念，技能要计数就落座位布尔字段） |
-| 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **拼点**（L15 只留枚举位，`RANK_COMPARE` 帧型空转） |
-| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁） |
+| 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **标记**（没有通用的标记机制，技能要计数就落座位布尔字段）；**减体力上限**（`MAXLIFE_DECREASE_*` 留位、`reduce_hp_max` 未迁进帧） |
+| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁）；**拼点**（huo-taishici-xunyu 票 03：`RANK_COMPARE` 帧 + `RANK_COMPARE_ON` / `RANK_COMPARE_RESULT_AFTER` 解封 + 新 `MoveReason.PINDIAN` + `pindian` delta；首个载体 = 火包·OL 太史慈【天义】、荀彧【驱虎】） |
 
 判定完：
 

@@ -44,6 +44,7 @@ from sgs.data import Identity, RuleConfig, load_content_pack  # noqa: E402
 from sgs.engine import (  # noqa: E402
     CardMoveRecord,
     CardRevealRecord,
+    PindianRecord,
     ChainedChangeRecord,
     FlippedChangeRecord,
     DeckShuffleRecord,
@@ -183,18 +184,18 @@ def _card_move_visible_to(card_move: dict, viewer: int) -> bool:
     """一张牌移动的牌面**是否该**对 ``viewer`` 可见（spec §6 A3 的判据，独立写一遍）。"""
     source = card_move["from_zone"]
     target = card_move["to_zone"]
+    # 武将牌上的牌（M6 票 10 / huo-shenzhugeliang 票 01）：**牌面只给宿主**（用户 2026-10
+    # 口径，`tools/sgs_web/visibility.py::hero_zone_ref_visible`）⇒ 宿主本人看得见自己的
+    # 「星」/【谦逊】的牌，别人只拿张数。这一档**优先于**"公开区"（服务端 `cards_visible`
+    # 的先手分支：只要移动任一侧是 hero，就按宿主判，不再让"来源/去向是公开区"绕开裁剪）。
+    if source["zone"] == "hero" or target["zone"] == "hero":
+        hero_ref = target if target["zone"] == "hero" else source
+        return hero_ref.get("seat") == viewer
     if source["zone"] in LOG_PUBLIC_ZONES or target["zone"] in LOG_PUBLIC_ZONES:
         return True
     if target["zone"] == "hand" and target.get("seat") == viewer:
         return True
     if source["zone"] == "hand" and source.get("seat") == viewer:
-        return True
-    # 武将牌上的牌（M6 票 10 / huo-shenzhugeliang 票 01）：**牌面只给宿主**（用户 2026-10
-    # 口径，`tools/sgs_web/visibility.py::hero_zone_ref_visible`）⇒ 宿主本人看得见自己的
-    # 「星」/【谦逊】的牌，别人只拿张数。
-    if source["zone"] == "hero" and source.get("seat") == viewer:
-        return True
-    if target["zone"] == "hero" and target.get("seat") == viewer:
         return True
     return False
 
@@ -354,7 +355,9 @@ def test_the_served_view_payload_filters_hidden_card_moves_for_the_human_seat() 
         ):
             stats["hidden_hand_to_hand"] += 1
             assert not visible
-        if source["zone"] in LOG_PUBLIC_ZONES or target["zone"] in LOG_PUBLIC_ZONES:
+        if (
+            source["zone"] in LOG_PUBLIC_ZONES or target["zone"] in LOG_PUBLIC_ZONES
+        ) and source["zone"] != "hero" and target["zone"] != "hero":
             stats["public"] += 1
             assert visible
     assert stats["other_draw"] >= 1, f"下发口没有他人摸牌样本：{stats}"
@@ -659,6 +662,18 @@ def _delta_records() -> dict[str, object]:
         "card_reveal": CardRevealRecord(
             seq=106, frame_id=0, depth=0, seat=1, card=REVEALED_CARD
         ),
+        # huo-taishici-xunyu 票 03 的拼点揭晓：**公开事实**（揭晓后牌面即公开），
+        # 两张牌的面都必须照发——被顺手藏掉反而是错。
+        "pindian": PindianRecord(
+            seq=118,
+            frame_id=0,
+            depth=0,
+            title="天义",
+            initiator=0,
+            targets=(1,),
+            cards=(REVEALED_CARD, HIDDEN_CARD),
+            won=(True,),
+        ),
         "identity_deal": IdentityDealRecord(
             seq=107, frame_id=0, depth=0, seat=1, identity=Identity.REBEL
         ),
@@ -742,8 +757,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 17, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 17 种写）："
+    assert len(schema_types) == 18, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 18 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
@@ -789,6 +804,12 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
             # 公开事实：亮出的那一张照发，且按既有展示契约补好牌名。
             assert payload["card"]["card_id"] == raw["card"]["card_id"]
             assert payload["card"].get("display_name")
+        elif delta_type == "pindian":
+            # 拼点揭晓是公开事实：两张牌的面与结果都照发。
+            assert [card["card_id"] for card in payload["cards"]] == [
+                card["card_id"] for card in raw["cards"]
+            ]
+            assert payload["won"] == [True]
         elif delta_type == "identity_reveal":
             # 阵亡亮明身份是公开事实（A3 的 revealed / dead 那一支）。
             assert payload["identity"] == "rebel"

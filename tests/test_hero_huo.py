@@ -27,6 +27,7 @@ from sgs.skills import CATALOG, resolve_conversion_confirmation
 from sgs.skills.shen_zhugeliang import star_zone_key
 from sgs.state import (
     ActivateSkill,
+    MoveReason,
     ArrangeCards,
     EndPhase,
     Pass,
@@ -109,6 +110,7 @@ class _QiangxiDriver:
         self.saw_candidate: list[bool] = []
         self.cost_options: list[tuple[str, ...]] = []
         self.target_options: list[tuple[str, ...]] = []
+        self.weapon_faces: list[tuple[int, ...]] = []
         self.extra_asks: list[str] = []
 
     def respond(self, query):
@@ -169,6 +171,13 @@ class _QiangxiDriver:
                 action for action in query.legal_actions if isinstance(action, SelectOption)
             )
         if query.kind == QueryKind.SELECT_CARDS:
+            self.weapon_faces.append(
+                tuple(
+                    slot.card.card_id
+                    for slot in query.slots
+                    if slot.card is not None and slot.card.slot is SlotKind.WEAPON
+                )
+            )
             index = self._weapon_slot(query)
             return next(
                 action
@@ -436,6 +445,66 @@ def test_qiangxi_offers_both_cost_options_with_a_weapon() -> None:
     _run(state, driver, _after_the_skill)
 
     assert driver.cost_options == [(LOSE_HP, DISCARD_WEAPON)]
+
+
+def test_qiangxi_hides_the_weapon_option_that_leaves_no_target() -> None:
+    """弃掉唯一撑范围的武器之后够不着人 ⇒ 那一档**不进候选**（死循环回归）。
+
+    2 人桌、对手挂 +1 坐骑（的卢）⇒ 距离 2。青釭剑（范围 2）在装备区时够得着，弃掉它
+    范围回落 1 ⇒ 「弃置一张武器牌」那一档是**死路**：结算整条取消、阶段位不落，而候选
+    还在 ⇒ 人工 / AI 会反复发动同一条（2026-11-05 的 128 局胜率批在 seed 5003 上真撞到：
+    典韦对荀彧这类 2 人残局里打了两万步还没出这一轮）。收窄后只剩「失去1点体力」，
+    技能照常结算。
+    """
+    weapon = QINGGANG
+    horse = _cards("dilu")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=HERO, equip=(weapon,)), SeatSpec(equip=(horse,))],
+        deck=deck_excluding(PACK, weapon, horse),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    driver = _QiangxiDriver(cost=LOSE_HP, target=1)
+
+    engine = _run(state, driver, _after_the_skill)
+
+    assert driver.activations == 1, "技能本身仍可发动（当前范围够得着）"
+    assert driver.cost_options == [(LOSE_HP,)], "弃了也没目标的武器档不进候选"
+    assert engine.state.player(0).hp == 3, "失去体力那一档照常付"
+    assert engine.state.player(1).hp == 3, "1 点伤害照常结算"
+    assert list(engine.state.player(0).equip) == [weapon], "武器没被弃（那一档根本没出现）"
+
+
+def test_qiangxi_weapon_face_lists_only_the_weapons_that_still_reach() -> None:
+    """两张武器、只有一张弃了还够得着 ⇒ 选面只列那一张（选项与选面同一份判据）。
+
+    装备区青釭剑（范围 2）+ 手牌诸葛连弩（范围 1）：弃连弩不影响范围 ⇒ 可弃；弃青釭剑
+    会让范围回落到 1 < 距离 2 ⇒ 不可弃。选面因此只该出现连弩——选项说"弃了还能打"，
+    选面就不该给出一张弃了没目标的武器。
+    """
+    weapon = QINGGANG
+    spare = CROSSBOW
+    horse = _cards("dilu")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=HERO, hand=(spare,), equip=(weapon,)),
+            SeatSpec(equip=(horse,)),
+        ],
+        deck=deck_excluding(PACK, weapon, spare, horse),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    driver = _QiangxiDriver(cost=DISCARD_WEAPON, weapon=spare, target=1)
+
+    engine = _run(state, driver, _after_the_skill)
+
+    assert driver.cost_options == [(LOSE_HP, DISCARD_WEAPON)], "有可弃的武器 ⇒ 两项都在"
+    assert driver.weapon_faces == [(spare,)], "选面只列弃后仍够得着的那张"
+    assert list(engine.state.player(0).equip) == [weapon], "弃的是手牌里的连弩"
+    assert spare not in engine.state.player(0).hand, "连弩离开手牌（进弃牌堆）"
+    assert engine.state.player(1).hp == 3, "1 点伤害照常结算"
 
 
 def test_qiangxi_declining_the_cost_changes_nothing() -> None:
@@ -2609,3 +2678,458 @@ def test_dawu_marks_carry_no_self_effect():
 
     marker = Marker(name="大雾", source_seat=0, source_skill_id=DAWU_SKILL, count=1)
     assert marker.effect is None and marker.description is None
+
+
+# ---------------------------------------------------------------------------
+# 火包·移动版·太史慈【天义】（huo-taishici-xunyu 票 01）
+#
+#     出牌阶段限一次，你可以与一名角色拼点，然后你本阶段根据拼点结果获得对应效果：
+#     若你赢，则你使用【杀】的次数上限+1、使用【杀】无距离限制、使用【杀】的目标数上限+1，
+#     否则你不能使用【杀】。
+#
+# 拼点 = ``RANK_COMPARE`` 帧（huo-taishici-xunyu 票 03）：两张手牌因拼点失去 → 亮出比点
+# → 置入弃牌堆；「本阶段」的三条效果读座位三态（``tianyi_won`` / ``tianyi_lost``）。
+# ---------------------------------------------------------------------------
+
+TIANYI = "hero.taishici.tianyi"
+LIANYING = "hero.jie_luxun.lianying"
+
+
+def _rank(card_id: int) -> int:
+    return PACK.deck.cards[card_id].rank
+
+
+def _high_low_cards() -> tuple[int, int]:
+    """牌堆里点数最高 / 最低的两张（拼点必分胜负，且不依赖随机）。"""
+    order = sorted(range(len(PACK.deck.cards)), key=lambda cid: PACK.deck.cards[cid].rank)
+    return order[-1], order[0]
+
+
+def _tianyi_state(hand0, hand1, *, hero0: str = "taishici", hero1: str = "luxun"):
+    used = (*hand0, *hand1)
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=tuple(hand0), hero=hero0),
+            SeatSpec(hp=4, hp_max=4, hand=tuple(hand1), hero=hero1),
+        ],
+        deck=tuple(cid for cid in range(len(PACK.deck.cards)) if cid not in used),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+
+def _decline_rest(query):
+    """其余询问取最小合法应答（响应放弃 / 出牌阶段结束 / 第一个候选）。"""
+    if query.kind == QueryKind.PLAY_PHASE:
+        return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    return query.legal_actions[0]
+
+
+class _TianyiDriver:
+    """发动一次【天义】：选座位 → 拼点选牌（``want`` = 指定牌 id；``None`` = 第一张）。"""
+
+    def __init__(self, *, target: int = 1, want: int | None = None) -> None:
+        self.target = target
+        self.want = want
+        self.activations = 0
+        self.offered: list[bool] = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == TIANYI:
+                    self.activations += 1
+                    self.offered.append(True)
+                    return action
+            self.offered.append(False)
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id or "").startswith(
+            "tianyi"
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == f"seat:{self.target}":
+                    return action
+            return _decline_rest(query)
+        if query.kind == QueryKind.SELECT_CARDS:
+            for action in query.legal_actions:
+                if not isinstance(action, SelectCards):
+                    continue
+                slot = query.slots[action.picks[0]]
+                card_id = None if slot.card is None else slot.card.card_id
+                if self.want is None or card_id == self.want:
+                    return action
+            return _decline_rest(query)
+        return _decline_rest(query)
+
+
+def _saw_pindian(engine) -> bool:
+    return any(getattr(record, "delta_type", None) == "pindian" for record in engine.records)
+
+
+def _tianyi_resolved(engine) -> bool:
+    """拼点跑完且结果已落座位三态（技能效果的最后一步）。"""
+    player = engine.state.player(0)
+    return bool(player.tianyi_won or player.tianyi_lost)
+
+
+def _pindian_delta(engine):
+    return next(
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "pindian"
+    )
+
+
+def test_tianyi_runs_a_pindian_frame_and_records_the_reveal():
+    """拼点 = 帧 + 两条时机 + 一条 ``pindian`` delta；两张牌以 ``PINDIAN`` 原因离开手牌。"""
+    high, low = _high_low_cards()
+    state = _tianyi_state((high,), (low,))
+    engine = Engine.from_state(state, seed=1)
+    driver = _TianyiDriver(want=high)
+
+    run_queries(engine, [driver, PassPlayer()], _tianyi_resolved)
+
+    assert driver.activations == 1
+    assert ran_timing(engine, Timing.RANK_COMPARE_ON)
+    assert ran_timing(engine, Timing.RANK_COMPARE_RESULT_AFTER)
+
+    delta = _pindian_delta(engine)
+    assert delta.title == "天义"
+    assert delta.initiator == 0
+    assert delta.targets == (1,)
+    assert delta.cards[0].card_id == high and delta.cards[1].card_id == low
+    assert delta.won == (True,)
+
+    moves = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+    ]
+    pindian_moves = [move for move in moves if move.reason is MoveReason.PINDIAN]
+    assert {move.to_zone.zone for move in pindian_moves} == {"processing", "discard"}
+    assert engine.state.player(0).tianyi_won
+    assert not engine.state.player(0).tianyi_lost
+
+
+def test_tianyi_winning_raises_the_slash_limit_and_target_count():
+    """赢 ⇒ ``COUNT_LIMIT`` 1→2、``TARGET_COUNT`` 1→2、``TARGET_POOL`` 并入全部其他座位。"""
+    from sgs.effects import ModifierContext, ModifierPoint, apply_modifiers, check_count
+
+    high, low = _high_low_cards()
+    state = _tianyi_state((high,), (low,))
+    engine = Engine.from_state(state, seed=1)
+    run_queries(engine, [_TianyiDriver(want=high), PassPlayer()], _tianyi_resolved)
+
+    slash = cards_of_type(PACK, "slash")[0]
+    ctx = ModifierContext(subject=0, card=engine.state.card(slash))
+    assert apply_modifiers(ModifierPoint.COUNT_LIMIT, engine.state, ctx, 1) == 2
+    assert apply_modifiers(ModifierPoint.TARGET_COUNT, engine.state, ctx, 1) == 2
+    assert check_count(engine.state, 0, engine.state.card(slash)) is False
+
+
+def test_tianyi_losing_blocks_using_slash_but_not_playing_it():
+    """没赢 ⇒ ``COUNT_LIMIT`` 归 0（只挡**使用**）；``FORBIDDEN`` 不动，仍可**打出**。"""
+    from sgs.effects import check_count, check_forbidden
+
+    high, low = _high_low_cards()
+    state = _tianyi_state((low,), (high,))
+    engine = Engine.from_state(state, seed=1)
+    run_queries(engine, [_TianyiDriver(want=low), PassPlayer()], _tianyi_resolved)
+
+    assert engine.state.player(0).tianyi_lost
+    assert not engine.state.player(0).tianyi_won
+    slash = cards_of_type(PACK, "slash")[0]
+    assert check_count(engine.state, 0, engine.state.card(slash)) is True
+    assert check_forbidden(engine.state, 0, engine.state.card(slash)) is False
+
+
+def test_tianyi_tie_counts_as_not_winning():
+    """平点 = 双方都没赢（规则第十二章 12.1 L1318–L1319）⇒ 太史慈吃"没赢"分支。"""
+    same_rank = [
+        cid for cid in range(len(PACK.deck.cards))
+        if PACK.deck.cards[cid].rank == PACK.deck.cards[0].rank and cid != 0
+    ]
+    assert same_rank, "牌堆里应有同点数的两张牌"
+    state = _tianyi_state((0,), (same_rank[0],))
+    engine = Engine.from_state(state, seed=1)
+    run_queries(engine, [_TianyiDriver(want=0), PassPlayer()], _tianyi_resolved)
+
+    assert _pindian_delta(engine).won == (False,)
+    assert engine.state.player(0).tianyi_lost
+
+
+def test_tianyi_is_not_offered_without_a_hand_card_target():
+    """目标池 = 其他 + 存活 + 有手牌：没有那样的角色 ⇒ 候选里没有【天义】。"""
+    high, _low = _high_low_cards()
+    state = _tianyi_state((high,), ())
+    engine = Engine.from_state(state, seed=1)
+    driver = _TianyiDriver()
+
+    run_queries(engine, [driver, PassPlayer()], lambda e: bool(driver.offered))
+
+    assert driver.offered and driver.offered[0] is False
+
+
+def test_tianyi_losing_the_last_hand_card_triggers_lianying():
+    """拼点 = 失去牌：界陆逊用最后一张手牌拼点 ⇒ 触发【连营】。"""
+    high, low = _high_low_cards()
+
+    class _LianyingPlayer:
+        """接受【连营】的发动，其余最小应答。"""
+
+        def __init__(self) -> None:
+            self.asked = 0
+
+        def respond(self, query):
+            if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == LIANYING:
+                self.asked += 1
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == LIANYING:
+                        return action
+            return _decline_rest(query)
+
+    state = _tianyi_state((high,), (low,), hero1="jie_luxun")
+    engine = Engine.from_state(state, seed=1)
+    lianying = _LianyingPlayer()
+
+    def _lianying_drew(engine) -> bool:
+        return _tianyi_resolved(engine) and any(
+            getattr(record, "delta_type", None) == "card_move"
+            and record.to_zone.zone == "hand"
+            and record.to_zone.seat == 1
+            for record in engine.records
+        )
+
+    run_queries(engine, [_TianyiDriver(want=high), lianying], _lianying_drew)
+
+    assert lianying.asked == 1, "失去最后一张手牌必须真的触发【连营】询问"
+    assert len(engine.state.player(1).hand) == 1, "连营摸了一张"
+
+
+# ---------------------------------------------------------------------------
+# 火包·移动版·荀彧：驱虎 / 节命（huo-taishici-xunyu 票 02）
+#
+#     驱虎：出牌阶段限一次，你可以与一名体力值大于你的角色拼点，若你赢，则该角色对其攻击
+#           范围内你选择的一名角色（不能是该角色本身，可以是你）造成1点伤害，否则其对你
+#           造成1点伤害。
+#     节命：当你受到1点伤害后，你可以令一名角色将手牌摸至体力上限（至多摸至五张）。
+# ---------------------------------------------------------------------------
+
+QUHU = "hero.xunyu.quhu"
+JIEMING = "hero.xunyu.jieming"
+
+
+def _quhu_state(hand0, hand1, hand2=(), *, hp0: int = 3, hp1: int = 4, hp2: int = 4):
+    used = (*hand0, *hand1, *hand2)
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=hp0, hp_max=3, hand=tuple(hand0), hero="xunyu"),
+            SeatSpec(hp=hp1, hp_max=4, hand=tuple(hand1)),
+            SeatSpec(hp=hp2, hp_max=4, hand=tuple(hand2)),
+        ],
+        deck=tuple(cid for cid in range(len(PACK.deck.cards)) if cid not in used),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+
+class _QuhuDriver:
+    """发动一次【驱虎】：选拼点目标 → 拼点选牌 → 赢段选承受者（``receiver``）。"""
+
+    def __init__(self, *, target: int = 1, want: int | None = None, receiver: int = 2):
+        self.target = target
+        self.want = want
+        self.receiver = receiver
+        self.activations = 0
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == QUHU:
+                    self.activations += 1
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == QueryKind.SELECT_OPTION and "quhu" in str(query.skill_id or ""):
+            wanted = (
+                f"seat:{self.receiver}"
+                if "receiver" in str(query.skill_id)
+                else f"seat:{self.target}"
+            )
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == wanted:
+                    return action
+            return _decline_rest(query)
+        if query.kind == QueryKind.SELECT_CARDS:
+            for action in query.legal_actions:
+                if not isinstance(action, SelectCards):
+                    continue
+                slot = query.slots[action.picks[0]]
+                card_id = None if slot.card is None else slot.card.card_id
+                if self.want is None or card_id == self.want:
+                    return action
+            return _decline_rest(query)
+        return _decline_rest(query)
+
+
+def test_quhu_winning_lets_the_target_damage_a_chosen_other_character():
+    """赢段：A 对其攻击范围内的**另一名角色** B 造成 1 点伤害（伤害来源 = A）。"""
+    high, low = _high_low_cards()
+    state = _quhu_state((high,), (low,), ())
+    engine = Engine.from_state(state, seed=1)
+    driver = _QuhuDriver(want=high, receiver=2)
+
+    run_queries(
+        engine,
+        [driver, PassPlayer(), PassPlayer()],
+        lambda e: e.state.player(2).hp < 4,
+    )
+
+    assert driver.activations == 1
+    assert engine.state.player(2).hp == 3
+    assert engine.state.player(0).hp == 3, "荀彧没有受伤（赢段伤害打在 B 身上）"
+    assert engine.state.player(1).hp == 4
+
+
+def test_quhu_losing_makes_the_target_damage_xunyu():
+    """没赢：拼点目标 A 对荀彧造成 1 点伤害。"""
+    high, low = _high_low_cards()
+    state = _quhu_state((low,), (high,), ())
+    engine = Engine.from_state(state, seed=1)
+    driver = _QuhuDriver(want=low)
+
+    run_queries(
+        engine,
+        [driver, PassPlayer(), PassPlayer()],
+        lambda e: e.state.player(0).hp < 3,
+    )
+
+    assert engine.state.player(0).hp == 2, "没赢 ⇒ A 对荀彧造成 1 点伤害"
+
+
+def test_quhu_receiver_pool_excludes_the_pindian_target_but_keeps_xunyu():
+    """用户 2026-11-04：B ≠ A、**B 可以是荀彧**——承受者池 = A 攻击范围内的其他存活角色。"""
+    high, low = _high_low_cards()
+    state = _quhu_state((high,), (low,), ())
+    engine = Engine.from_state(state, seed=1)
+    driver = _QuhuDriver(want=high, receiver=0)
+    seen: list[tuple[str, ...]] = []
+
+    class _Recorder(_QuhuDriver):
+        def respond(self, query):
+            if query.kind == QueryKind.SELECT_OPTION and "quhu" in str(query.skill_id or ""):
+                seen.append(tuple(query.options))
+            return super().respond(query)
+
+    run_queries(
+        engine,
+        [_Recorder(want=high, receiver=0), PassPlayer(), PassPlayer()],
+        lambda e: e.state.player(0).hp < 3,
+    )
+
+    assert seen and set(seen[-1]) == {"seat:0", "seat:2"}, (
+        "承受者池：A 本身（座位 1）排除，荀彧（座位 0）与第三座（座位 2）都在"
+    )
+    assert engine.state.player(0).hp == 2, "B 可以是荀彧本人"
+
+
+def _jieming_engine(*, amount: int = 1, hand1=(0,), hp1: int = 4):
+    """压一个打在荀彧（座位 0）身上的 ``DAMAGE`` 子帧。"""
+    deck = tuple(cid for cid in range(len(PACK.deck.cards)) if cid not in hand1)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, hp_max=3, hand=(), hero="xunyu"),
+            SeatSpec(hp=hp1, hp_max=4, hand=tuple(hand1)),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": None,
+            "channel": None,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 0,
+            "nature": None,
+            "chain": False,
+            "amount": amount,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    return engine
+
+
+class _JiemingDriver:
+    """接受【节命】并选 ``seat`` 当目标；其余最小应答。"""
+
+    def __init__(self, *, seat: int = 1) -> None:
+        self.seat = seat
+        self.activations = 0
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIEMING:
+            self.activations += 1
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIEMING:
+                    return action
+        if query.kind == QueryKind.SELECT_OPTION and "jieming" in str(query.skill_id or ""):
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == f"seat:{self.seat}":
+                    return action
+        return _decline_rest(query)
+
+
+def test_jieming_fills_the_target_hand_to_the_cap():
+    """读法 B：手牌终值 = min(体力上限, 5)——目标 4 上限、1 张手牌 ⇒ 摸 3 张。"""
+    hand1 = (cards_of_type(PACK, "slash")[0],)
+    engine = _jieming_engine(hand1=hand1)
+    driver = _JiemingDriver(seat=1)
+
+    run_queries(
+        engine,
+        [driver, PassPlayer()],
+        lambda e: len(e.state.player(1).hand) == 4,
+    )
+
+    assert driver.activations == 1
+    assert len(engine.state.player(1).hand) == 4
+
+
+def test_jieming_triggers_once_per_damage_point():
+    """「受到**1 点**伤害后」⇒ 一次 2 点伤害问两次（逐点）。"""
+    hand1 = tuple(cards_of_type(PACK, "slash")[:1])
+    engine = _jieming_engine(amount=2, hand1=hand1)
+    driver = _JiemingDriver(seat=1)
+
+    run_queries(
+        engine,
+        [driver, PassPlayer()],
+        lambda e: driver.activations >= 2,
+    )
+
+    assert driver.activations == 2
+
+
+def test_jieming_draws_nothing_when_the_target_is_already_full():
+    """手牌已到上限 ⇒ 摸 0 张，发动仍合法（G2「付得起但没收益」）。"""
+    hand1 = tuple(cards_of_type(PACK, "slash")[:4])
+    engine = _jieming_engine(hand1=hand1)
+    driver = _JiemingDriver(seat=1)
+
+    run_queries(
+        engine,
+        [driver, PassPlayer()],
+        lambda e: driver.activations >= 1,
+    )
+
+    assert len(engine.state.player(1).hand) == 4

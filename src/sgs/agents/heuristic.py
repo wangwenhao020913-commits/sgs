@@ -1835,6 +1835,22 @@ def _is_fire_attack_discard(query: SelectCardsQuery) -> bool:
     )
 
 
+_PINDIAN_SKILLS: frozenset[str] = frozenset(
+    {"hero.taishici.tianyi", "hero.xunyu.quhu"}
+)
+"""拼点选牌的技能 id（huo-taishici-xunyu 票 01 / 02）：两张手牌比点数。
+
+与普通选牌的**打分方向相反**：普通选自己的牌 = 付成本（越便宜越好），拼点要**赢**
+（点数越大越好，平点 = 没赢）。`docs/agents/ai-adaptation.md` §1 把拼点列为"复用
+SELECT_CARDS 会语义反转"的反例，这一条就是它要求的独立分支。
+"""
+
+
+def _is_pindian_pick(query: Query) -> bool:
+    """这一步是不是"为拼点选一张手牌"。"""
+    return isinstance(query, SelectCardsQuery) and (query.skill_id or "") in _PINDIAN_SKILLS
+
+
 def _score_select_cards(query: Query, action: Action) -> float:
     """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。
 
@@ -1857,12 +1873,17 @@ def _score_select_cards(query: Query, action: Action) -> float:
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
     committed = _is_committed_skill_step(query)
     short = _step_skill_short(query) if committed else ""
+    pindian = _is_pindian_pick(query)
     fire_attack_discard = not committed and _is_fire_attack_discard(query)
     total = 0.0
     for index in action.picks:
         if not 0 <= index < len(query.slots):
             return _ILLEGAL_PENALTY
         slot = query.slots[index]
+        if pindian:
+            # 拼点：按**点数**给分（A=1 … K=13），赢的那一侧收益远大于省一张贵牌。
+            total += float(slot.card.rank or 0)
+            continue
         if fire_attack_discard:
             total += _FIRE_ATTACK_DISCARD_VALUE - _card_value(slot.card)
             continue
@@ -2061,6 +2082,9 @@ _HOSTILE_SEAT_STEPS = (
     # 典韦移动版【强袭】（huo-dianwei-mobile 票 01）：选的是**挨 1 点伤害的人**——不登记
     # AI 会把【强袭】的伤害砸在队友身上。
     "hero.dianwei_mobile.qiangxi:",
+    # 荀彧【驱虎】（huo-taishici-xunyu 票 02）：赢段的座位步选的是**挨 A 的 1 点伤害的人**
+    # （全限定 skill_id `hero.xunyu.quhu:receiver`）——不登记会落进"帮盟友"的缺省分支。
+    "hero.xunyu.quhu:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -3616,6 +3640,23 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _score_huangtian,
         "主公技：发动者是**别的座位**——交出一张【闪】/【闪电】的收益归张角、成本归自己；"
         "按主公的身份关系打分（明敌人不给、其余给正分）",
+    ),
+    # huo-taishici-xunyu 票 02：火包移动版荀彧的两条
+    "hero.xunyu.quhu": (
+        _constant(1.5),
+        "拼点：赢则让 A 打 B 1 点（B 的座位由 _HOSTILE_SEAT_STEPS 挑敌人），"
+        "没赢自己挨 1 点——按期望给略正",
+    ),
+    "hero.xunyu.jieming": (
+        _constant(2.5),
+        "受伤后免费给一名角色把手牌补到 min(体力上限, 5)：净赚若干张，恒发动",
+    ),
+    # huo-taishici-xunyu 票 01：火包移动版太史慈【天义】——拼点赢则本阶段三条加成
+    # （次数上限 +1 / 无距离 / 目标数 +1），没赢只是不能使用【杀】；净收益为正。
+    "hero.taishici.tianyi": (
+        _constant(2.0),
+        "拼点：赢则本阶段三条【杀】加成（高收益），没赢只禁使用【杀】⇒ 恒该发动；"
+        "选哪张牌由 _score_select_cards 的拼点分支按点数打分",
     ),
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】
     "hero.dianwei_mobile.qiangxi": (

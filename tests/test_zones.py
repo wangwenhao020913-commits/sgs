@@ -54,7 +54,11 @@ def test_the_zone_enum_is_exactly_the_six_m2_zones():
 
 
 def test_move_reasons_are_exactly_the_m2_values_plus_reforge():
-    """M5-03 追加 ``REFORGE``（重铸：不算弃置、算失去，§5.1.3）；其余六个 M2 取值不变。"""
+    """M5-03 追加 ``REFORGE``（重铸：不算弃置、算失去，§5.1.3）；其余六个 M2 取值不变。
+
+    huo-taishici-xunyu 票 03 追加 ``PINDIAN``（拼点扣置：算失去、**不算弃置**，规则
+    §十二 12.7 L1372–L1374；见 `06`（§5「程序化约定与偏离一手」）的拼点裁定行）。
+    """
     assert {reason.value for reason in MoveReason} == {
         "DRAW",
         "USE",
@@ -63,6 +67,7 @@ def test_move_reasons_are_exactly_the_m2_values_plus_reforge():
         "JUDGE",
         "LOSE",
         "REFORGE",
+        "PINDIAN",
     }
 
 

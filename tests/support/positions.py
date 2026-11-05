@@ -12,7 +12,19 @@ from dataclasses import dataclass, field
 from sgs.data import ContentPack, Gender, Identity, Kingdom, RuleConfig, load_content_pack
 from sgs.engine import Engine, instantiate_cards
 from sgs.resolution import Frame
-from sgs.state import FrameKind, GameState, Phase, Player, Query, UseCard
+from sgs.state import (
+    ActivateSkill,
+    EndPhase,
+    FrameKind,
+    GameState,
+    Pass,
+    Phase,
+    Player,
+    Query,
+    SelectCards,
+    SelectOption,
+    UseCard,
+)
 from sgs.timing import Timing
 
 __all__ = [
@@ -26,6 +38,7 @@ __all__ = [
     "deck_excluding",
     "declare_death",
     "move_after_engine",
+    "pindian_engine",
     "maxlife_engine",
     "play_phase_peach_engine",
     "play_standard",
@@ -392,3 +405,67 @@ def declare_death(engine: Engine, seat: int, *, killer: int | None = None) -> No
     """
     frame = Frame(kind=FrameKind.NEAR_DEATH, data={"target": seat, "damage_source": killer})
     engine.enter_death(frame, seat)
+
+
+class PindianPlayer:
+    """出牌阶段发动【天义】→ 选座位 1 → 拼点选第一张；其余最小合法应答。
+
+    仅用于场景 10（:func:`pindian_engine`）：它把 ``RANK_COMPARE`` 帧跑完，给出
+    ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER`` 两个节点的**最小实测来源**。
+    """
+
+    def respond(self, query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == "hero.taishici.tianyi":
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == "SELECT_OPTION":
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == "seat:1":
+                    return action
+        if query.kind == "SELECT_CARDS":
+            for action in query.legal_actions:
+                if isinstance(action, SelectCards):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def pindian_engine(seed: int = 7):
+    """场景 10（huo-taishici-xunyu 票 03）：太史慈【天义】跑一次拼点。
+
+    座位 0 = 太史慈（手里一张全场点数最高的牌）、座位 1 一张最低的 ⇒ 拼点必分胜负；
+    记录流里出现 ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER`` 各一条与一条
+    ``pindian`` delta。这是 L15 两个节点的**实测来源**（`tests/test_timing_coverage.py`）。
+    """
+    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
+    order = sorted(range(len(pack.deck.cards)), key=lambda cid: pack.deck.cards[cid].rank)
+    high, low = order[-1], order[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=(high,), hero="taishici"),
+            SeatSpec(hp=4, hp_max=4, hand=(low,)),
+        ],
+        deck=tuple(cid for cid in range(len(pack.deck.cards)) if cid not in (high, low)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    players = [PindianPlayer(), PindianPlayer()]
+    for _ in range(2_000):
+        if any(
+            record.kind == "timing" and record.timing is Timing.RANK_COMPARE_RESULT_AFTER
+            for record in engine.records
+        ):
+            return engine
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        engine.submit(players[engine.pending.actor].respond(engine.pending))
+    raise AssertionError("场景没跑出拼点：RANK_COMPARE_RESULT_AFTER 必须真的落进记录流")

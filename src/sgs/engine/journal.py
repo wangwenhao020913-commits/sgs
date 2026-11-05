@@ -24,6 +24,7 @@ from sgs.state import (
     CardRef,
     CardRevealDelta,
     ChainedChangeDelta,
+    PindianDelta,
     FlippedChangeDelta,
     DeckShuffleDelta,
     Delta,
@@ -53,6 +54,7 @@ __all__ = [
     "ActionRecord",
     "CardMoveRecord",
     "CardRevealRecord",
+    "PindianRecord",
     "ChainedChangeRecord",
     "FlippedChangeRecord",
     "MarkerChangeRecord",
@@ -254,6 +256,19 @@ class CardRevealRecord(CardRevealDelta):
     depth: int
 
 
+class PindianRecord(PindianDelta):
+    """一次拼点的揭晓（huo-taishici-xunyu 票 03）：拼点弹窗与结果展示的数据面。
+
+    全场可见：揭晓后牌面即公开事实；扣置阶段两张牌还在各自手牌里，故此前没有任何一条
+    delta 带它们的面。
+    """
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class IdentityDealRecord(IdentityDealDelta):
     """一次身份发放（票 13 §3 / 票 24）：开局逐座各一条、落在发牌之前。"""
 
@@ -281,6 +296,7 @@ DeltaRecord = Annotated[
     | MarkerChangeRecord
     | WineChangeRecord
     | CardRevealRecord
+    | PindianRecord
     | DeckShuffleRecord
     | IdentityDealRecord
     | IdentityRevealRecord
@@ -415,6 +431,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return WineChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, CardRevealDelta):
         return CardRevealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, PindianDelta):
+        return PindianRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityDealDelta):
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityRevealDelta):

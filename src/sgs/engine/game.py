@@ -416,7 +416,12 @@ _TURN_SEAT = _TurnSeat()
 """
 
 _BooleanPlayerFlag = Literal[
-    "luoyi_active", "luoyi_until_next_turn", "paoxiao_bonus", "zhaxiang_active"
+    "luoyi_active",
+    "luoyi_until_next_turn",
+    "paoxiao_bonus",
+    "zhaxiang_active",
+    "tianyi_won",
+    "tianyi_lost",
 ]
 """座位级布尔技能状态的字段闭集（:meth:`Engine._set_player_flag` 的 ``field``）。"""
 
@@ -2629,6 +2634,61 @@ class Engine:
                 return
         raise RuntimeError(f"判定发起帧 {parent_id} 不在栈上；结算栈被破坏")
 
+    def rank_compare(
+        self,
+        frame: Frame,
+        *,
+        initiator: int,
+        targets: tuple[int, ...],
+        skill_id: str,
+        title: str,
+    ) -> None:
+        """发起一次**拼点**（huo-taishici-xunyu 票 03）：压 ``RANK_COMPARE`` 子帧。
+
+        调用方（技能）在拿到结果前 ``return "stay"``；结果由 :meth:`note_pindian_result`
+        回写到**发起帧**的 ``pindian_result`` / ``pindian_won``（与 ``skill_result`` 同姿态）。
+
+        规则第十二章 L1309–L1380：双方各一张**手牌**、平点双方都没赢、不是使用 / 打出、
+        属于失去牌、不吃【无懈】、不是判定。``title`` = 弹窗标题（发动拼点的技能名）。
+        """
+        self.push_frame(
+            FrameKind.RANK_COMPARE,
+            {
+                "initiator": int(initiator),
+                "targets": tuple(int(seat) for seat in targets),
+                "skill_id": skill_id,
+                "title": title,
+                "activation_parent": frame.frame_id,
+            },
+            timing=Timing.RANK_COMPARE_ON,
+        )
+
+    def note_pindian_result(self, frame: Frame) -> None:
+        """把拼点结果回写到**发起帧**（``pindian_result`` / ``pindian_won``）。
+
+        发起帧与判定同形态：可能是栈上的 SKILL / 钩子帧，也可能是**不压栈**的阶段体帧
+        （住 ``_turn_data``，``frame_id`` 恒 0）——后者按"正在跑哪条技能"对上号。
+        """
+        results = tuple(frame.data.get("rank_compare_results", ()))
+        parent_id = frame.data.get("activation_parent")
+        for candidate in reversed(self.stack.frames):
+            if candidate.frame_id == parent_id:
+                candidate.data["pindian_result"] = results
+                candidate.data["pindian_won"] = tuple(won for _seat, won in results)
+                return
+        skill_id = frame.data.get("skill_id")
+        for value in self._turn_data.values():
+            if (
+                isinstance(value, Frame)
+                and value.frame_id == parent_id
+                and value.data.get(RUNNING_SKILL_KEY) == skill_id
+            ):
+                value.data["pindian_result"] = results
+                value.data["pindian_won"] = tuple(won for _seat, won in results)
+                return
+        raise RuntimeError(f"拼点发起帧 {parent_id} 不在栈上；结算栈被破坏")
+
+
     def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any:
         """跑绑定在这个时机上的调用型步骤（票 27 的 ``CardBehavior.timing_ops``）。
 
@@ -3755,6 +3815,24 @@ class Engine:
     def _clear_zhaxiang_active(self, seat: int) -> None:
         """把界【诈降】的"本阶段"效果清掉（出牌阶段起止各调一次，幂等）。"""
         self._clear_player_flag(seat, "zhaxiang_active")
+
+    def set_tianyi_state(self, seat: int, won: bool) -> None:
+        """写一个座位的【天义】"本阶段"拼点结果（huo-taishici-xunyu 票 01 的唯一写入口）。
+
+        ``won=True`` ⇒ ``tianyi_won``（三条加成）；``won=False`` ⇒ ``tianyi_lost``
+        （本阶段不能**使用**【杀】）。两条互斥，写入时一并落位。
+
+        清理点 = **该座位的出牌阶段结束**（:meth:`_phase_play_end`，``_phase_play_start``
+        再兜一次），与 :meth:`set_zhaxiang_active` 同一作用域（牌面写"然后你本阶段…"）。
+        **不发 delta**：没有 JSON 读者，回放按同一次拼点重建。
+        """
+        self._set_player_flag(seat, "tianyi_won", won)
+        self._set_player_flag(seat, "tianyi_lost", not won)
+
+    def _clear_tianyi_state(self, seat: int) -> None:
+        """把【天义】的"本阶段"拼点结果清掉（出牌阶段起止各调一次，幂等）。"""
+        self._clear_player_flag(seat, "tianyi_won")
+        self._clear_player_flag(seat, "tianyi_lost")
 
     # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
 
@@ -5283,6 +5361,8 @@ class Engine:
             # M6 票 17【诈降】：正常收尾在 ``_phase_play_end``；这里再兜一次（上一阶段异常
             # 中断时不让"本阶段"跨进新阶段）。
             self._clear_zhaxiang_active(self.state.turn_seat)
+            # huo-taishici-xunyu 票 01【天义】：同一作用域（"本阶段"），同一套兜底。
+            self._clear_tianyi_state(self.state.turn_seat)
         if self._turn_data.pop("skip_play", False):
             # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
             # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
@@ -5331,6 +5411,8 @@ class Engine:
         # 出牌阶段起点）——否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到加成。
         if self.state.turn_seat is not None:
             self._clear_zhaxiang_active(self.state.turn_seat)
+            # huo-taishici-xunyu 票 01【天义】：同一清理点（"然后你本阶段…"）。
+            self._clear_tianyi_state(self.state.turn_seat)
 
     def _phase_discard_start(self) -> str | None:
         """弃牌阶段开始：发 ``PHASE_DISCARD_START``，有阶段体钩子（【克己】）时惰性建帧。

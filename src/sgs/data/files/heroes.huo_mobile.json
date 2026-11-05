@@ -106,6 +106,45 @@
           "skill_type": "LIMITED"
         }
       ]
+    },
+    {
+      "id": "taishici",
+      "name": "太史慈标准版",
+      "true_name": "太史慈",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tianyi",
+          "name": "天义",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "xunyu",
+      "name": "荀彧标准版",
+      "true_name": "荀彧",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "quhu",
+          "name": "驱虎",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jieming",
+          "name": "节命",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

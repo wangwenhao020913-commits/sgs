@@ -15,6 +15,7 @@ from .deltas import (
     IdentityDealDelta,
     IdentityRevealDelta,
     MarkerChangeDelta,
+    PindianDelta,
     SkillGainDelta,
     SkillLoseDelta,
     SkillSuppressDelta,

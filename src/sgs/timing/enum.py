@@ -255,10 +255,13 @@ IMPLEMENTED: tuple[Timing, ...] = (
     Timing.JUDGE_ON,
     Timing.JUDGE_CARD_BEFORE_EFFECT,
     Timing.JUDGE_CARD_AFTER_EFFECT,
+    # L15：拼点二时机（huo-taishici-xunyu 票 03 解封；RANK_COMPARE 帧的步骤表 dispatch）
+    Timing.RANK_COMPARE_ON,
+    Timing.RANK_COMPARE_RESULT_AFTER,
     # L16：牌移动事件（票 07 的 M3 唯一解封；**只解封 after**，`MOVE_BEFORE` 继续留枚举位）
     Timing.MOVE_AFTER,
 )
-"""已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 = 67）：流程真的会走到（允许空实现 / 空日志）。
+"""已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 + huo-taishici-xunyu 票 03 解封 2 = 69）：流程真的会走到（允许空实现 / 空日志）。
 
 M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对称解封）：它在
 :meth:`~sgs.engine.game.Engine.move_in_frame` 这个**唯一移动入口**里内联派发，且只在
@@ -277,10 +280,12 @@ _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
 ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
-"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 = 16）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
+"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 − huo-taishici-xunyu 票 03 解封 2 = 14）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
 
 M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；wuming 票 04 再移走
-``MAXLIFE_INCREASE_BEFORE/AFTER`` 两个（"加"侧真的 dispatch，"减"侧仍无载体）。其余 16 个仍无载体。
+``MAXLIFE_INCREASE_BEFORE/AFTER`` 两个（"加"侧真的 dispatch，"减"侧仍无载体）；huo-taishici-xunyu
+票 03 再移走 L15 的 ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER``（``RANK_COMPARE`` 帧的
+步骤表 dispatch）。其余 14 个仍无载体。
 """
 
 EMPTY_LOG: tuple[Timing, ...] = (

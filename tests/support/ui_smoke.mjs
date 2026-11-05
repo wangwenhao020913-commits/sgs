@@ -508,7 +508,8 @@ const SMOKE_BANNED = catalogVersions
   .filter((id) => !SMOKE_ROSTER.includes(id));
 // wuming 票 01：自制包加「无名自制版」（新真名「无名」）⇒ 真名 42 → 43、版本 68 → 69。
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 火包 OL + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 44 && catalogVersions.length === 70,
+  // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈标准版 / 荀彧标准版 ⇒ 45 / 71 → 46 / 72。
+  ui.state.heroCatalog.length === 46 && catalogVersions.length === 72,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -7303,8 +7304,13 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   // wuming 票 01：默认池加了「无名自制版」之后发将会重排——旧 seed 20261012 的这一局
   // 会让无名落在别人身上、L0 的【天成】展示询问成为会话第一个可见询问（不是 Pass 窗口）。
   // 按本仓纪律**重新选种**（不放宽判据）：20261013 的同一局不含无名、首问仍只有一条 Pass。
+  // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈 / 荀彧两个真名，发将再重排——
+  // 这一局的首问变成神诸葛亮【七星】的两行交换（不可放弃的 ARRANGE）。本条只测
+  // "重放窗口的四键 / 一次 POST / 409 刷新"，与池子无关：**钉死禁用名单**把新真名排除，
+  // 恢复 20261013 的旧发将（同 SMOKE_ROSTER 的处置，不放宽判据）。
   const fresh = await post("/api/sessions", {
     player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261013,
+    banned_heroes: ["taishici", "xunyu"],
   });
   await openSession(fresh);
   ui.renderPending(ui.state.view);
@@ -7325,6 +7331,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   // 409：下一次 /answer 回 409；刷新取回的新询问换成"只有 EndPhase"的出牌阶段。
   const fresh2 = await post("/api/sessions", {
     player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261013,
+    banned_heroes: ["taishici", "xunyu"],
   });
   await openSession(fresh2);
   ui.renderPending(ui.state.view);

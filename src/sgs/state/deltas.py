@@ -41,6 +41,7 @@ __all__ = [
     "HpMaxChangeDelta",
     "IdentityDealDelta",
     "IdentityRevealDelta",
+    "PindianDelta",
     "SkillGainDelta",
     "SkillLoseDelta",
     "SkillSuppressDelta",
@@ -197,6 +198,30 @@ class CardRevealDelta(_FrozenModel):
     card: CardRef
 
 
+class PindianDelta(_FrozenModel):
+    """一次**拼点**的揭晓（huo-taishici-xunyu 票 03）：拼点弹窗与结果展示的数据面。
+
+    拼点不是使用 / 打出（规则第十二章 12.3 L1336），它的"结果"没有别的记录形态可承载：
+    两条时机记录只给时点、``card_move`` 只给搬运。故这是**结果本身**的唯一公开事实：
+
+    - ``initiator`` / ``targets`` / ``cards``：牌序 = 发起者的拼点牌在前，其余按 ``targets``
+      序一一对应（1 位发起者 vs N 位被拼点者）；
+    - ``won``：与 ``targets`` 对齐的布尔；**平点 = 双方都没赢**（规则 12.1 L1318–L1319 /
+      12.4 L1345–L1353）⇒ 平点时 ``won`` 为假；
+    - ``title``：发动拼点的技能名（弹窗标题；服务端给，前端不拼）。
+
+    **全场可见**（揭晓后牌面即公开事实）；揭晓前没有任何一条 delta 带这两张牌的面——
+    扣置阶段它们**还留在各自手牌里**（本仓把"扣置"与"揭晓"合并在同一步做）。
+    """
+
+    delta_type: Literal["pindian"] = "pindian"
+    title: str
+    initiator: int
+    targets: tuple[int, ...]
+    cards: tuple[CardRef, ...]
+    won: tuple[bool, ...]
+
+
 class DeckShuffleDelta(_FrozenModel):
     """一次洗牌置换；``cards`` 是**洗后**自顶向下的牌堆顺序，不记洗前顺序。
 
@@ -344,6 +369,7 @@ Delta = Annotated[
     | MarkerChangeDelta
     | WineChangeDelta
     | CardRevealDelta
+    | PindianDelta
     | DeckShuffleDelta
     | IdentityDealDelta
     | IdentityRevealDelta

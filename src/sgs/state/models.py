@@ -266,6 +266,17 @@ class MoveReason(str, Enum):
     REFORGE 排除在外。事件流据此写「重铸」，不写「弃置」。
     """
 
+    PINDIAN = "PINDIAN"
+    """拼点扣置（huo-taishici-xunyu 票 03）：手牌 → 处理区（扣置）→ 弃牌堆。
+
+    规则第十二章 12.2 L1323 / 12.7 L1372–L1374：拼点 = **因拼点失去一张牌**，
+    但拼点牌进入弃牌堆**不算「弃置」**。故它与 ``DISCARD``、``LOSE`` 都不同：
+
+    - 「失去牌后」类钩子（【连营】）按**区域**判、**不看** :class:`MoveReason`
+      （``skills/move_after.py`` 的中心纪律）⇒ 用最后一张手牌拼点照常触发【连营】；
+    - 「弃置」类触发必须显式把 ``PINDIAN`` 排除在外（比较 reason 的站点要逐条核）。
+    """
+
 
 class Phase(str, Enum):
     """回合的六个阶段（票 01 L2）。"""
@@ -467,6 +478,20 @@ class Player(BaseModel):
 
     读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_POOL`` / ``COUNT_LIMIT`` /
     ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
+    """
+    tianyi_won: bool = False
+    tianyi_lost: bool = False
+    """太史慈【天义】的"本阶段"拼点结果（huo-taishici-xunyu 票 01；两条互斥的座位布尔）。
+
+    ``tianyi_won`` = 拼点**赢**（三条加成生效：次数上限 +1 / 无距离限制 / 目标数上限 +1）；
+    ``tianyi_lost`` = **没赢**（平点也算没赢）⇒ 本阶段不能**使用**【杀】（仍可**打出**）。
+    两个都为假 = 本阶段尚未发动。
+
+    写入唯一入口 ``Engine.set_tianyi_state(seat, won)``；**清理点 = 出牌阶段结束**
+    （:meth:`Engine._phase_play_end`，``_phase_play_start`` 再兜一次）——与
+    ``zhaxiang_active`` 同一作用域（牌面写"然后你本阶段根据拼点结果获得对应效果"）。
+    读点是 :mod:`sgs.skills.active` 的三条修饰器回调。**不发 delta**：与
+    ``zhaxiang_active`` 同姿态（没有 JSON 读者，回放按同一次拼点重建）。
     """
     damage_dealt_this_turn: bool = False
     """本回合是否**造成过伤害**（M6 票 06 的【诛害】判据：§十九 L2127–L2129）。
