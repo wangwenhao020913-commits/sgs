@@ -87,6 +87,7 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "huo",
     "homebrew",
     "lei",
+    "jie_feng_mobile",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 

@@ -296,7 +296,7 @@ def audit(hits: Counter[Site], sites: dict[Site, Rule]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 登记表（当前全树 15 处 / 13 组；M6 票 17 之后的真实状态）
+# 登记表（当前全树 16 处 / 14 组；jie-feng-batch 票 01 之后的真实状态）
 # ---------------------------------------------------------------------------
 
 SITES: dict[Site, Rule] = {
@@ -438,6 +438,17 @@ SITES: dict[Site, Rule] = {
         "【烈弓】满足条件的目标（手牌数 ≥ 体力值 或 ≤ 攻击范围）不能使用【闪】响应（票 03；逐目标档）",
     ),
     (
+        "src/sgs/skills/response_window.py",
+        "_jie_liegong_mobile",
+        UNRESPONSIVE_TOKEN,
+        "add_tag(frame, Tag.UNRESPONSIVE, target=target)",
+    ): Rule(
+        "response-window-not-produced",
+        1,
+        "界黄忠移动版【烈弓】② 条件 1（手牌数 ≥ 其手牌数）⇒ 该目标不能响应此【杀】"
+        "（逐目标档；jie-feng-batch 票 01）",
+    ),
+    (
         "src/sgs/skills/life_after.py",
         "_zhaxiang_unresponsive",
         UNRESPONSIVE_TOKEN,
@@ -490,7 +501,7 @@ SITES: dict[Site, Rule] = {
         "【青釭剑】无视防具 = 让对方的『无效』不生效（否定之否定），不是四层里的否定站点",
     ),
 }
-"""当前全树的否定站点登记（15 处出现 / 13 组）。"""
+"""当前全树的否定站点登记（16 处出现 / 14 组）。"""
 
 
 # ---------------------------------------------------------------------------

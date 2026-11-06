@@ -54,6 +54,7 @@ from sgs.effects import (
     ModifierRole,
     attack_range,
     behavior_for,
+    distance,
     is_slash,
     satisfies_required,
 )
@@ -80,6 +81,8 @@ from .catalog import (
 from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
+    "JIE_LIEGONG_MOBILE",
+    "JIE_LIEGONG_MOBILE_FLOW",
     "JIE_TIEQI",
     "JIE_WUSHUANG",
     "LIEGONG",
@@ -442,6 +445,161 @@ LIEGONG_FLOW = SkillFlow(name="liegong", steps=(), effect=zero_step_effect(LIEGO
 """
 
 
+# ---------------------------------------------------------------------------
+# 界黄忠移动版【烈弓】（jie-feng-batch 票 01；口径 = 移动版）
+#
+#     ①你对你计算与其距离不大于你的【杀】点数的其他角色使用此【杀】无距离限制；
+#     ②当你使用【杀】指定一名角色为目标后，你可以根据下列条件执行相应的效果：
+#       1.若你的手牌数不小于其手牌数，该角色不能响应此【杀】；
+#       2.若你的体力值不大于其体力值，此【杀】对其造成的基础伤害+1。
+#
+# 与标版【烈弓】的三处不同（标版是「出牌阶段内 + 手牌数/攻击范围 ⇒ 不能闪」）：
+# - **不限阶段**：牌面没有「出牌阶段内」⇒ 借刀杀人逼出的【杀】也触发（标版不触发）；
+# - **①距离豁免**：距 ≤ 点数 ⇒ 目标进池（`TARGET_POOL` 并集，界武圣② 同姿态）；
+# - **②两分支各自生效**：条件 1 打 `UNRESPONSIVE`、条件 2 记「本次使用 + 该目标 +1」。
+#
+# 用户 2026-11-06 签字轮：①=并集；无点数【杀】⇒ ① 不生效（`01a` 裁定 A）；②的「基础伤害
+# +1」与 OL「伤害值 +1」同落 `DAMAGE_DEAL_AMOUNT`（账本 L788）。口径 = **移动版**，故武将
+# 显示名带「移动版」后缀、技能 id 走 `jie_huangzhong_mobile`（与 `jie_caoren_mobile` 同形）。
+# ---------------------------------------------------------------------------
+
+JIE_LIEGONG_MOBILE = hero_skill_id("jie_huangzhong_mobile", "liegong")
+"""界黄忠移动版【烈弓】的全限定技能 id。"""
+
+
+def _jie_liegong_mobile_qualifying(
+    state: GameState, owner: int, targets: tuple[int, ...]
+) -> tuple[int, ...]:
+    """满足**任一**条件的目标（条件 1：你的手牌数 ≥ 其手牌数；条件 2：你的体力 ≤ 其体力）。"""
+    hand = len(state.player(owner).hand)
+    hp = state.player(owner).hp
+    return tuple(
+        target
+        for target in targets
+        if len(state.player(target).hand) <= hand or state.player(target).hp >= hp
+    )
+
+
+def _jie_liegong_mobile_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**我自己**使用的【杀】指定了目标、且至少一个目标满足任一分支。
+
+    不加阶段判据（牌面没有「出牌阶段内」）⇒ 借刀杀人逼出的【杀】同样触发；
+    "目标全都够不上"时连「是否发动」都不发（与标版同一条纪律）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    card = frame.data.get("card")
+    if card is None or not is_slash(behavior_for(card)):
+        return False
+    targets = tuple(frame.data.get("targets", ()))
+    return bool(_jie_liegong_mobile_qualifying(host.state, int(owner), targets))
+
+
+def _jie_liegong_mobile(host: Any, frame: Frame) -> Control:
+    """效果：条件 1 的目标打逐目标档 ``UNRESPONSIVE``；条件 2 的目标记「本次使用 +1」。
+
+    不搬牌、不提问 ⇒ 不挂起；``add_tag`` 与 :meth:`Engine.add_liegong_bonus` 都幂等。
+    条件在**触发时现算并定格**：标签立即落帧、+1 记成「(牌 id, 目标)」，之后目标回复体力
+    不会撤销已答过的效果（G9）。
+    """
+    state = host.state
+    owner = int(frame.data["skill_owner"])
+    card = frame.data.get("card")
+    card_id = int(card.card_id) if card is not None else None
+    hand = len(state.player(owner).hand)
+    hp = state.player(owner).hp
+    for target in tuple(frame.data.get("targets", ())):
+        player = state.player(target)
+        if len(player.hand) <= hand:
+            add_tag(frame, Tag.UNRESPONSIVE, target=target)
+        if card_id is not None and player.hp >= hp:
+            host.add_liegong_bonus(owner, card_id, target)
+    return None
+
+
+JIE_LIEGONG_MOBILE_FLOW = SkillFlow(
+    name="jie_liegong_mobile", steps=(), effect=zero_step_effect(_jie_liegong_mobile)
+)
+"""界烈弓的零步流水线（模块级具名常量；名字不能与标版 `liegong` 相同）。"""
+
+
+def _jie_liegong_mobile_no_distance(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """``TARGET_POOL``：距 ≤ 本次【杀】点数的其他角色不受距离限制（**并集**写法）。
+
+    与界关羽【武圣】② / 界黄盖【诈降】同一姿态：只**补**被攻击范围挡掉的座位，链上其它
+    剔除类修饰器（【空城】/界【谦逊】）仍能删目标——本技能的 skill_id（`hero.jie_huangzhong_mobile.liegong`）
+    排在 `hero.jie_zhugeliang.kongcheng` / `hero.zhugeliang.kongcheng` **之前**，故并集先跑、
+    剔除后跑（账本 L828 的【神速】顺序坑在这里是有利方向）。
+    **无点数 ⇒ 不补**（`01a` 裁定 A：无点数时这个比较不成立）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    rank = ctx.card.rank
+    if rank is None:
+        return current
+    extra = tuple(
+        player.seat
+        for player in state.players
+        if player.alive
+        and player.seat != ctx.subject
+        and distance(state, ctx.subject, player.seat) <= int(rank)
+    )
+    return tuple(dict.fromkeys((*current, *extra)))
+
+
+def _jie_liegong_mobile_damage_bonus(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """``DAMAGE_DEAL_AMOUNT``：本次使用里对**满足条件 2 的目标** +1（来源侧）。
+
+    作用域 = **本次使用 + 该目标**：只认 ``(渠道牌 id, 目标)`` 与座位记录一致的那一条，
+    因此不会像【义绝】那样让本回合后续的【杀】白拿 +1。``chain=True`` 的传导帧不派发
+    来源侧链，故传导不跟 +1。数值只有加减（账本 L788 / 默认读法（二）⑥）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None or ctx.target is None:
+        return current
+    record = state.player(ctx.owner).liegong_bonus
+    if record is None or record[0] != int(ctx.card.card_id):
+        return current
+    if int(ctx.target) not in record[1]:
+        return current
+    return current + 1
+
+
+def _jie_liegong_mobile_cleanup_condition(host: Any, frame: Frame) -> bool:
+    """清扫钩子的条件：**这次使用就是我记过账的那张牌**（不问、只清）。
+
+    读 ``MATCH_OWNER_KEY`` 自校"关于我"，与其它带条件钩子同一纪律；牌 id 对不上时不动
+    （别人的使用 / 别的牌）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    record = host.state.player(int(owner)).liegong_bonus
+    if record is None:
+        return False
+    card = frame.data.get("card")
+    return card is not None and int(card.card_id) == record[0]
+
+
+def _jie_liegong_mobile_cleanup(host: Any, frame: Frame) -> Control:
+    """``RESOLVE_AFTER_END``（一次使用结算完后）：清掉本次使用的记账。
+
+    为什么不用 ``DAMAGE_AFTER_TAKE`` 逐目标消费：被【闪】抵消 / 伤害被防止时根本没有
+    DAMAGE 帧，记账会滞留；``RESOLVE_AFTER_END`` 在 USE 帧最后一步、一次使用恰跑一次
+    （多目标也只有一个 USE 帧），故它是"本次使用结束"的准确落点。
+    """
+    owner = frame.data.get("skill_owner")
+    if owner is not None:
+        host.clear_liegong_bonus(int(owner))
+    return None
+
+
 RESPONSE_WINDOW_SKILLS: tuple[ResponseCountSkill | FrameTagSkill, ...] = (
     WUSHUANG,
     TIEQI,
@@ -454,8 +612,18 @@ _REQUIREMENTS: dict[str, str] = {
     "tieqi": "判定；红色则该目标不能使用【闪】响应此【杀】",
     "jie_tieqi": "令目标本回合非锁定技失效并判定：除非其弃置一张同花色牌，否则不能使用【闪】响应此【杀】",
     "liegong": "出牌阶段使用【杀】指定目标后，若其手牌数不小于你的体力值或不大于你的攻击范围，其不能使用【闪】响应此【杀】",
+    "jie_liegong_mobile": (
+        "①你对你计算与其距离不大于你的【杀】点数的其他角色使用此【杀】无距离限制；"
+        "②当你使用【杀】指定一名角色为目标后，你可以根据下列条件执行相应的效果："
+        "1.若你的手牌数不小于其手牌数，该角色不能响应此【杀】；"
+        "2.若你的体力值不大于其体力值，此【杀】对其造成的基础伤害+1。"
+    ),
 }
-"""E 族各条的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""E 族各条的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。
+
+`jie_liegong_mobile` = 界黄忠移动版【烈弓】的**牌面逐字**（用户 2026-11-06 签字：与
+`技能.txt` 拼接逐字相等，仅去行首全角缩进；规范确认门要求 `requirement` 与本表同一份字符串）。
+"""
 
 
 def response_window_skill_definitions() -> tuple[SkillDef, ...]:
@@ -512,5 +680,37 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
                 Hook(LIEGONG.timing, condition=_liegong_condition, flow=LIEGONG_FLOW),
             ),
             requirement=_REQUIREMENTS["liegong"],
+        ),
+        # 界黄忠移动版【烈弓】（jie-feng-batch 票 01；用户 2026-11-06 签）：
+        # ① TARGET_POOL 并集（距 ≤ 点数；无点数不生效）+ ② 零步钩子（逐目标封闪 / 记 +1）
+        # + RESOLVE_AFTER_END 清扫钩子（本次使用结束清掉 +1 记账）。
+        SkillDef(
+            skill_id=JIE_LIEGONG_MOBILE,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(
+                    Timing.USE_AFTER_DESIGNATE_TARGET,
+                    condition=_jie_liegong_mobile_condition,
+                    flow=JIE_LIEGONG_MOBILE_FLOW,
+                ),
+                Hook(
+                    Timing.RESOLVE_AFTER_END,
+                    condition=_jie_liegong_mobile_cleanup_condition,
+                    handler=_jie_liegong_mobile_cleanup,
+                    forced=True,
+                ),
+            ),
+            modifiers=(
+                Modifier(
+                    ModifierPoint.TARGET_POOL, _jie_liegong_mobile_no_distance
+                ),
+                Modifier(
+                    ModifierPoint.DAMAGE_DEAL_AMOUNT,
+                    _jie_liegong_mobile_damage_bonus,
+                ),
+            ),
+            requirement=_REQUIREMENTS["jie_liegong_mobile"],
         ),
     )

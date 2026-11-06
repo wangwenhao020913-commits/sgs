@@ -4204,6 +4204,27 @@ class Engine:
         if target not in bonus:
             bonus.append(target)
 
+    def add_liegong_bonus(self, seat: int, card_id: int, target: int) -> None:
+        """记下"**本次使用** ``seat`` 用这张牌对 ``target`` 的伤害 +1"（界黄忠移动版【烈弓】②）。
+
+        唯一写入方是【烈弓】② 的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子（只记满足「你的体力值
+        不大于其体力值」的目标）；读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器，
+        按 ``(牌 id, 目标)`` 精确命中。作用域 = **本次使用**（不是本回合）：清理点 = 本次使用
+        结束时（``RESOLVE_AFTER_END`` 清扫钩子）与回合末兜底（:meth:`_clear_turn_effects`）。
+        同一次使用里反复写入是幂等的。**不发 delta**（同 ``add_heart_slash_bonus``）。
+        """
+        player = self.state.player(seat)
+        record = player.liegong_bonus
+        if record is not None and record[0] == int(card_id):
+            if int(target) not in record[1]:
+                player.liegong_bonus = (record[0], (*record[1], int(target)))
+            return
+        player.liegong_bonus = (int(card_id), (int(target),))
+
+    def clear_liegong_bonus(self, seat: int) -> None:
+        """清掉 ``seat`` 的【烈弓】② 本次使用记账（``RESOLVE_AFTER_END`` 清扫钩子）。"""
+        self.state.player(seat).liegong_bonus = None
+
     def add_hand_limit_bonus(self, seat: int, amount: int) -> None:
         """给 ``seat`` 记一笔**本回合的手牌上限加式增量**（M6 票 08 的唯一写入口）。
 
@@ -4313,6 +4334,9 @@ class Engine:
             player.hand_card_prohibited = False
             player.xiongluan_target = None
             player.heart_slash_bonus_against.clear()
+            # 界【烈弓】② 的"本次使用"记账：正常由 RESOLVE_AFTER_END 清扫钩子清；这里兜底
+            # （使用流程被异常中断 / 构造局面直接写字段时下一回合从干净状态起）。
+            player.liegong_bonus = None
             player.damage_dealt_this_turn = False
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False

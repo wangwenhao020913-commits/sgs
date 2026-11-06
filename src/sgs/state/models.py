@@ -664,6 +664,19 @@ class Player(BaseModel):
     ``DAMAGE_DEAL_AMOUNT`` 修饰器（查询期从活着的实例算，失去 / 失效即消失）。**不发
     delta**：与 ``hand_card_prohibited`` 同一条理由。
     """
+    liegong_bonus: tuple[int, tuple[int, ...]] | None = None
+    """**本次使用**的「界烈弓② 对该目标 +1 伤害」记账：``(渠道牌 id, 目标座位元组)``。
+
+    写入唯一入口 :meth:`Engine.add_liegong_bonus`（界黄忠移动版【烈弓】② 的
+    ``USE_AFTER_DESIGNATE_TARGET`` 钩子，只记满足「你的体力值不大于其体力值」的目标）；
+    读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器（按 ``(牌 id, 目标)`` 精确
+    命中，**不**串到本回合后续的【杀】）。清理 = 本次使用结束时（``RESOLVE_AFTER_END``
+    清扫钩子）与回合末（:meth:`Engine._clear_turn_effects` 兜底）。
+
+    与 :attr:`heart_slash_bonus_against`（【义绝】，**本回合**）**分字段**：作用域不同，
+    与 :attr:`luoyi_until_next_turn` 的分字段同一条理由。**不发 delta**：没有 JSON 读者，
+    回放按同一条技能动作重跑即可重建。
+    """
     paoxiao_bonus: bool = False
     """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。
 

@@ -4019,6 +4019,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(3.0),
         "使用【杀】指定目标后封【闪】：条件多由当前体力 / 攻击范围自动满足，助这一刀命中",
     ),
+    # 界限突破-风包·移动版（jie-feng-batch 票 01）
+    "hero.jie_huangzhong_mobile.liegong": (
+        _constant(3.0),
+        "使用【杀】指定目标后：满足条件 1 封【闪】、满足条件 2 该目标受 +1 伤害；"
+        "**没有成本**（两个判据都由引擎现算，AI 只答是否发动）⇒ 恒发动",
+    ),
     # 自制包·韬·刘备自制版（2026-10-31 票 01）
     "hero.tao_liubei.congtao": (
         _constant(4.0),

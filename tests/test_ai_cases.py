@@ -2456,3 +2456,82 @@ def test_s3_qiangxi_targets_the_enemy_not_the_ally():
         assert answer.choice == f"seat:{QIANGXI_ENEMY_SEAT}", (
             f"该打反贼（座位 {QIANGXI_ENEMY_SEAT}），实得 {answer.choice!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 界黄忠移动版【烈弓】（jie-feng-batch 票 01）：AI 在触发问上答「发动」
+# ---------------------------------------------------------------------------
+
+JIE_LIEGONG = "hero.jie_huangzhong_mobile.liegong"
+JIE_HUANGZHONG = "jie_huangzhong_mobile"
+
+
+def test_jie_liegong_ai_activates_the_trigger_without_cost() -> None:
+    """无成本的正收益触发问 ⇒ AI 必须答发动（SKILL_VALUES 常量为正，不靠抽签）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    peach = cards_of_type(PACK, "peach")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=JIE_HUANGZHONG), SeatSpec(hp=3)],
+        deck=deck_excluding(PACK, slash, peach, dodge),
+        turn_seat=0,
+    )
+
+    class Script:
+        def __init__(self) -> None:
+            self.played = False
+            self.answer = None
+
+        def respond(self, query):
+            if query.kind == "PLAY_PHASE" and not self.played:
+                action = find_action(
+                    query,
+                    lambda action: isinstance(action, UseCard)
+                    and action.card.card_id == slash
+                    and tuple(action.targets) == (1,),
+                )
+                if action is not None:
+                    self.played = True
+                    return action
+                return find_action(query, lambda action: isinstance(action, EndPhase)) or (
+                    query.legal_actions[0]
+                )
+            if query.kind == "SKILL_ACTIVATION" and query.skill_id == JIE_LIEGONG:
+                self.answer = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+                return self.answer
+            if query.kind == "PLAY_PHASE":
+                return find_action(query, lambda action: isinstance(action, EndPhase)) or (
+                    query.legal_actions[0]
+                )
+            return find_action(query, lambda action: isinstance(action, Pass)) or (
+                query.legal_actions[0]
+            )
+
+    script = Script()
+    engine = Engine.from_state(state, seed=1)
+    players = [script, PassPlayer()]
+    run_queries(
+        engine,
+        players,
+        lambda running: any(
+            record.kind == "timing"
+            and record.timing is Timing.PHASE_PLAY_START
+            for record in running.records
+        ),
+    )
+    owner = engine.state.player(0)
+    owner.hand[:] = [slash, peach]
+    owner.hp = 4
+    target = engine.state.player(1)
+    target.hand[:] = [dodge]
+    target.hp = 3
+    run_queries(
+        engine,
+        players,
+        lambda running: slash in running.state.discard and not running.stack,
+    )
+
+    assert isinstance(script.answer, ActivateSkill), f"AI 该答发动，实得 {script.answer!r}"
+    assert script.answer.skill_id == JIE_LIEGONG
+    assert engine.state.player(1).hp == 2, "封【闪】+ 1 点伤害"
