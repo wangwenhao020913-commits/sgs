@@ -6261,6 +6261,60 @@ def test_the_detail_skill_list_distinguishes_star_suppressed_and_lost_skills() -
     }["hero.jie_machao.tieqi"] == "lost", "三态没有从 visible_snapshot 下发到前端"
 
 
+def test_a_granted_skill_that_was_lost_is_not_listed_at_all() -> None:
+    """**外来**技能失去之后整条不列（用户 2026-11-06 验收口径）。
+
+    两条不同的"失去"必须分开：
+
+    - **武将牌上的技能**被失去（刘备【义起】失去【从讨】）⇒ 仍列出 + 标 ``lost`` +
+      划掉名字——"牌上本来有它，现在它没了"是玩家要看见的事实（用户明说这是好设计）；
+    - **别人给你的技能**（``Player.granted_skills`` 里进来过、武将牌上从来没有）失去
+      ⇒ **整条不列**：它从来没写在牌上，留一行划掉的痕迹只会让人以为"我的武将牌丢了个
+      技能"。判据读同一条 ``Player.lost_skills``，区分只在"武将面上有没有这个条目"。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="tao_caocao"), SeatSpec(hp=4, hero="guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, pending=None)
+
+    # ① 座位 1（关羽）获得一份【倡义】（复制）⇒ 详情里出现，状态 active。
+    engine.grant_skill(1, "hero.tao_caocao.changyi")
+    by_id = {entry["skill_id"]: entry for entry in seat_skill_display(session, 1)}
+    assert "hero.tao_caocao.changyi" in by_id, "获得的技能在详情里要看得见"
+    assert by_id["hero.tao_caocao.changyi"]["state"] == "active"
+
+    # ② 他失去它 ⇒ **整条不列**（不是标成 lost）。
+    engine.lose_skill(1, "hero.tao_caocao.changyi")
+    ids = {entry["skill_id"] for entry in seat_skill_display(session, 1)}
+    assert "hero.tao_caocao.changyi" not in ids, (
+        f"外来技能失去后不该留痕：{sorted(ids)}"
+    )
+    assert ids == {"hero.guanyu.wusheng"}, "他武将牌上的技能一条都不受影响"
+
+    # ③ 对照：**武将牌上**的【倡义】失去 ⇒ 仍列出并标 lost（曹操自己的那一份）。
+    engine.lose_skill(0, "hero.tao_caocao.changyi")
+    by_id = {entry["skill_id"]: entry for entry in seat_skill_display(session, 0)}
+    assert by_id["hero.tao_caocao.changyi"]["state"] == "lost", (
+        "武将牌上的技能失去仍要看得见（划掉 + 失去标签）"
+    )
+    assert by_id["hero.tao_caocao.hongzhi"]["state"] == "active"
+
+    # ④ 读取方走真实产出路径：`visible_snapshot` 也不该把那条外来技能下发。
+    session.pack = pack
+    session.human_seat = 0
+    snapshot = visible_snapshot(session)
+    seat_one_payload = next(entry for entry in snapshot["players"] if entry["seat"] == 1)
+    assert {
+        entry["skill_id"] for entry in seat_one_payload["skills"]
+    } == {"hero.guanyu.wusheng"}, "可见快照不能把「获得又失去」的技能带出去"
+
+
 def test_the_actionable_skill_list_marks_a_star_skill_and_keeps_the_key_set() -> None:
     """技能按钮区（可操作清单）也带 ☆ 标记：觉醒后出现的技能在按钮上同样标出来。"""
     from types import SimpleNamespace

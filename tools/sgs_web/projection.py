@@ -676,6 +676,9 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
     - **三态**（M6 票 19）：``lost`` = 在 ``Player.lost_skills`` 里（武将面不删，故仍列）；
       ``suppressed`` = 实例还在、但被座位级失效记录挡在解析之外（锁定技不受影响）——
       判据与引擎同源：``resolve_instances`` 解析两次（含 / 不含失效）再作差。
+      **``lost`` 只对"武将牌上原有"的技能生效**：``Player.granted_skills`` 里的**外来**技能
+      失去之后整条不列（用户 2026-11-06 验收口径——留一行划掉的名字会让人以为武将牌丢了
+      个技能，而它从来没写在牌上）。
     - **装备技能** = 装备区里的实体牌（``equip.<牌名 id>``）+ ``virtual_equipment``
       的虚拟授予（不占牌守恒，如【八阵】）。顺序 = 武将技能 → 获得（☆）→ 实体装备 →
       虚拟装备。
@@ -732,6 +735,12 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
     # 武将面之外的**获得**技能（如将来"获得别人的技能"）：名字只能从数据表反查。
     for skill_id in player.granted_skills:
         if skill_id in seen:
+            continue
+        if skill_id in lost:
+            # **外来**技能失去之后整条不列（用户 2026-11-06 验收口径）：它的武将牌上
+            # 从来没有这一条，"划掉 + 失去标签"只该留给**牌上原有**的技能（上面那一支，
+            # 如【义起】失去【从讨】）。两者读同一条 ``Player.lost_skills``，区分只在
+            # "武将面上有没有这个条目"。
             continue
         definition = CATALOG.get(skill_id)
         if definition is None:
