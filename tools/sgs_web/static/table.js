@@ -718,7 +718,13 @@ function skillOffer(pending, skill) {
   // "锁定"没有"是否发动"要问，但玩家仍要挑来源牌与目标 ⇒ 按钮必须点得动。判据只读
   // "这一问有没有下发清单"，纯锁定技 / 被动技（无清单、无转化来源）照旧只做说明。
   // 注意：这里读的是 `locked`（规则类型，管失效与三态），**不是** `forced`（‘只能 / 可以’）。
-  const lockedEntry = Boolean(skill.locked) && Boolean(manifest) && !passive;
+  //
+  // **裸骨架候选也算入口**（用户实机报障 2026-11-06：卧龙诸葛【八阵】在【闪】窗口里
+  // 提示条写着效果、按钮却整片锁死 = 死路）。锁定技没有流水线 ⇒ 没有清单，但服务端
+  // 确实在这一问里给了它的 `ActivateSkill`（`skill.available`）⇒ 点一下 = 选中那条候选
+  // （与真【八卦阵】的装备按钮同一条直提态）。纯锁定 / 被动技两者皆无 ⇒ 仍只做说明。
+  const lockedEntry = Boolean(skill.locked) && !passive
+    && Boolean(manifest || skill.available);
   const inert = suppressed || (Boolean(skill.locked) && !lockedEntry) || passive;
   const clickable = usable && !inert;
   let handler = null;

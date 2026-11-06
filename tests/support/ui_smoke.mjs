@@ -990,14 +990,17 @@ if (partial) {
   if (skillCase) await replayTo(skillCase);
   else await newSession(7);   // 没找到前置时也留一个带技能的局面
 
-  check("㉿4a 锁定/被动技是银灰且**不可点**（引擎在时机上派发，点了没意义）", (() => {
-    const locked = ui.state.view.skills.filter((s) => s.locked);
-    if (!locked.length) return true;  // 该武将没有锁定技时不判
+  // 锁定技的按钮**只有"这一问里没有它的候选"时**才必须不可点：`available` 为真的锁定技
+  // （卧龙诸葛【八阵】在【闪】窗口里）是**真入口**，点一下 = 选中那条 `ActivateSkill`
+  // （用户实机报障 2026-11-06 修；正例见下方 ㉿4g）。
+  check("㉿4a 没有候选的锁定/被动技是银灰且**不可点**（引擎在时机上派发，点了没意义）", (() => {
+    const locked = ui.state.view.skills.filter((s) => s.locked && !s.available);
+    if (!locked.length) return true;  // 该武将没有（此刻无候选的）锁定技时不判
     return locked.every((s) => {
       const b = Array.from($("t-skills").children).find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
       return b && b.classList.contains("locked") && b.disabled === true;
     });
-  })(), `锁定技 ${ui.state.view.skills.filter((s) => s.locked).map((s) => s.name).join("、") || "（无）"}`);
+  })(), `锁定技 ${ui.state.view.skills.filter((s) => s.locked && !s.available).map((s) => s.name).join("、") || "（无）"}`);
 
   check("㉿4b 当前不满足的主动技是深灰且不可点", (() => {
     const off = ui.state.view.skills.filter((s) => !s.locked && !s.available);
@@ -1065,6 +1068,69 @@ if (partial) {
   check("㉿4f 装备技能标注为「装备技」且锁定态不可点",
     !!equipButton && equipButton.text().includes("装备技") && equipButton.disabled === true,
     equipButton ? equipButton.text() : "按钮缺失");
+  // **锁定技的裸骨架候选**（用户实机报障 2026-11-06：卧龙诸葛【八阵】在【闪】窗口里
+  // 提示条写着效果、按钮却整片锁死 = 死路）。合成一份同形状的视图：锁定技 + 这一问给了
+  // 它的 `ActivateSkill`、且**没有清单**（八阵没有流水线）⇒ 按钮必须可点、点一下 = 选中
+  // 那条候选、提交出去的就是它。
+  {
+    const dodgePending = {
+      kind: "DODGE", actor: 0, seq: 9101,
+      prompt: "以你为目标的【杀】生效前：是否使用【闪】？",
+      prompt_display: { text: "以你为目标的【杀】生效前：是否使用【闪】？", default_label: "" },
+      legal_actions: [
+        { kind: "ActivateSkill", skill_id: "hero.wolong_zhugeliang.bazhen", answers_seq: 9101 },
+        { kind: "Pass", answers_seq: 9101 },
+      ],
+      candidate_index: {}, option_seats: {}, context: { requirement: "判定为红则视为使用【闪】" },
+      preactivations: {}, transform_preactivations: {}, transform_actions: [],
+    };
+    const bazhenView = {
+      ...realSkillsView,
+      pending: dodgePending,
+      skills: [
+        {
+          skill_id: "hero.wolong_zhugeliang.bazhen", name: "八阵", skill_type: "NORMAL",
+          locked: true, carrier: "HERO", available: true,
+          ui: { requirement: "判定为红则视为使用【闪】", description: "锁定技，当你装备区没有防具牌时，你视为装备着【八卦阵】。" },
+        },
+      ],
+    };
+    ui.state.view = bazhenView;
+    ui.renderSkills(bazhenView);
+    const bazhenButton = Array.from($("t-skills").children)
+      .find((c) => c.getAttribute && c.getAttribute("data-skill-id") === "hero.wolong_zhugeliang.bazhen");
+    check("㉿4g 锁定技在这一问里有裸骨架候选 ⇒ 按钮**可点**（八阵在【闪】窗口里；报障 2026-11-06）",
+      !!bazhenButton && bazhenButton.disabled === false && bazhenButton.classList.contains("ready"),
+      `存在=${!!bazhenButton} disabled=${bazhenButton && bazhenButton.disabled} ready=${bazhenButton && bazhenButton.classList.contains("ready")}`);
+    if (bazhenButton) {
+      (bazhenButton.listeners.click || []).forEach((fn) => fn({ target: bazhenButton }));
+      check("㉿4g 点它 = 选中那条 ActivateSkill（与真【八卦阵】的装备按钮同一条直提态）",
+        ui.state.selectedOption === 0,
+        `selectedOption=${ui.state.selectedOption}`);
+      const before = calls.length;
+      await ui.submitAction();
+      const sent = calls.slice(before).find((c) => c.path.includes("/answer"));
+      const sentAction = sent && sent.body ? sent.body.action : null;
+      check("㉿4g 提交的正是八阵的候选",
+        sentAction !== null && sentAction.kind === "ActivateSkill"
+          && sentAction.skill_id === "hero.wolong_zhugeliang.bazhen",
+        `sent=${JSON.stringify(sentAction && { kind: sentAction.kind, skill_id: sentAction.skill_id })}`);
+    }
+    // 反例：同一形态但这一问**没有**它的候选（`available: false`）⇒ 仍只做说明（U1-06）。
+    ui.renderSkills({
+      ...bazhenView,
+      pending: { ...dodgePending, legal_actions: [{ kind: "Pass", answers_seq: 9101 }] },
+      skills: [{ ...bazhenView.skills[0], available: false }],
+    });
+    const bazhenOff = Array.from($("t-skills").children)
+      .find((c) => c.getAttribute && c.getAttribute("data-skill-id") === "hero.wolong_zhugeliang.bazhen");
+    check("㉿4g 锁定技在这一问里**没有**候选 ⇒ 仍只做说明（不可点）",
+      !!bazhenOff && bazhenOff.disabled === true && bazhenOff.classList.contains("locked"),
+      `存在=${!!bazhenOff} disabled=${bazhenOff && bazhenOff.disabled}`);
+    ui.state.view = realSkillsView;
+    ui.resetSelection();
+  }
+
   ui.renderSkills(realSkillsView);
 
   await openSession(await post("/api/sessions", {
@@ -7837,22 +7903,36 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     })(),
     `convertSkill=${ui.state.convertSkill}`);
 
-  check("U2-04f 被动 / 锁定技在组里但不可点（三态不变：被动银灰、锁定银灰、无 click）",
+  // **被动技**仍只做说明（U1-06）；**锁定技要看这一问有没有它的候选**——有裸骨架候选的
+  // （【八阵】在【闪】窗口里）必须能点，没有的仍只做说明（用户实机报障 2026-11-06 之前
+  // 这里把两者一刀切，正是死路的来源）。锁定**转化**技走下一条用例。
+  check("U2-04f 被动技在组里但不可点（被动银灰、无 click）；有候选的锁定技可点 = 选中那条候选",
     (() => {
       ui.resetSelection();
       ui.renderTable();
       ui.renderPending(view);
       const passive = promptSkill("hero.demo.passive");
-      const locked = promptSkill("hero.demo.locked");
       const before = calls.length;
       const option = ui.state.selectedOption;
       clickNode(passive);
-      clickNode(locked);
-      return !!passive && passive.disabled === true && passive.classList.contains("passive")
-        && !!locked && locked.disabled === true && locked.classList.contains("locked")
+      const passiveOk = !!passive && passive.disabled === true
+        && passive.classList.contains("passive")
         && ui.state.selectedOption === option && calls.length === before;
+      const locked = promptSkill("hero.demo.locked");
+      const cached = ui.state.selectedOption;
+      clickNode(locked);
+      const wantIndex = view.pending.legal_actions.findIndex(
+        (action) => action.kind === "ActivateSkill" && action.skill_id === "hero.demo.locked",
+      );
+      const lockedOk = !!locked && locked.disabled === false
+        && locked.classList.contains("locked")
+        && ui.state.selectedOption === wantIndex && wantIndex >= 0
+        && $("t-choice").textContent.includes("将提交：发动【锁定技】");
+      ui.resetSelection();
+      void cached;
+      return passiveOk && lockedOk;
     })(),
-    `passive=${promptSkill("hero.demo.passive").disabled}/${[...promptSkill("hero.demo.passive").classList.set].join(",")} locked=${promptSkill("hero.demo.locked").disabled}`);
+    `passive=${promptSkill("hero.demo.passive").disabled} locked=${promptSkill("hero.demo.locked").disabled} option=${ui.state.selectedOption}`);
 
   check("U2-04f2 锁定**转化**技（这一问下发了清单）可点 = 进入清单（锁定技按钮只做说明，不适用于锁定转化）",
     (() => {
