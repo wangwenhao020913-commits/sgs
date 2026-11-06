@@ -40,6 +40,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "tao_caocao",
+      "name": "韬·曹操自制版",
+      "true_name": "曹操",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "homebrew",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "hongzhi",
+          "name": "鸿志",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "changyi",
+          "name": "倡义",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

@@ -634,6 +634,13 @@ def test_pindian_popup_is_a_read_only_overlay_driven_by_the_record_stream() -> N
     pindian = (STATIC_DIR / "pindian.js").read_text(encoding="utf-8")
     assert "const PINDIAN_HOLD_MS = 3000;" in pindian, "停留时长必须是 3 秒（R7 用户口径）"
     assert 'record.delta_type !== "pindian"' in pindian, "判据只看 delta_type"
+    # 生效点数（tao-caocao 票 03）：`ranks` 只读服务端给的数字、不比较、不自己加。
+    assert "pindian-point" in pindian, "被技能调过点数时要画出生效点数"
+    assert "Number(" not in pindian and "parseInt(" not in pindian, (
+        "前端不解析 / 不比较点数：点数原样来自 delta 的 ranks"
+    )
+    style = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    assert ".pindian-point" in style, "生效点数的那一行要有样式"
 
     session = _SESSION_JS.read_text(encoding="utf-8")
     match = _STEP_PLAYBACK_RE.search(session)

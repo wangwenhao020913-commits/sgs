@@ -100,7 +100,7 @@ DOD_ITEMS: dict[int, DoDItem] = {
             "tests/data/test_load_validation.py::test_loads_standard_content_pack",
             "tests/data/test_load_validation.py::test_loads_the_standard_108_profile_with_all_its_declarations",
             # 时机枚举与 dispatch 白名单（票 17 §3 / 票 32 §3）
-            "tests/test_timing.py::test_enum_has_exactly_83_nodes",
+            "tests/test_timing.py::test_enum_has_exactly_84_nodes",
             "tests/test_timing_coverage.py::test_the_union_of_actual_record_streams_is_exactly_the_dispatch_whitelist",
             # 六区模型（判定区 / 装备区）与区域坐标（票 08 / 票 21）
             "tests/test_zones.py::test_the_basic_53_cards_carry_no_equipment_slot",

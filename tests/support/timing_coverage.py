@@ -150,11 +150,12 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     # ---- L11 体力上限：wuming 票 04 解封**加**侧二时机，来源是构造局面单测 ----
     Timing.MAXLIFE_INCREASE_BEFORE: (MAXLIFE_SCENE,),
     Timing.MAXLIFE_INCREASE_AFTER: (MAXLIFE_SCENE,),
-    # ---- L15 拼点：huo-taishici-xunyu 票 03 解封二时机，来源是构造局面单测 ----
+    # ---- L15 拼点：huo-taishici-xunyu 票 03 解封二时机 + tao-caocao 票 03 的扣置后时机 ----
     Timing.RANK_COMPARE_ON: (PINDIAN_SCENE,),
+    Timing.RANK_COMPARE_PLACED: (PINDIAN_SCENE,),
     Timing.RANK_COMPARE_RESULT_AFTER: (PINDIAN_SCENE,),
 }
-"""56 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+"""59 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
 
 
 @lru_cache(maxsize=None)

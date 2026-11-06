@@ -199,7 +199,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import RandomSource, hero_cards_stream
-from .steps import CHAIN_TRIGGER_KEY, MAXLIFE_INCREASE, build_steps
+from .steps import CHAIN_TRIGGER_KEY, MAXLIFE_INCREASE, RANK_COMPARE_BOOST, build_steps
 from .victory import DeathFact, Side, solve_identity_outcome
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
@@ -2832,17 +2832,24 @@ class Engine:
         )
 
     def note_pindian_result(self, frame: Frame) -> None:
-        """把拼点结果回写到**发起帧**（``pindian_result`` / ``pindian_won``）。
+        """把拼点结果回写到**发起帧**（``pindian_result`` / ``pindian_won`` / ``pindian_tied``）。
 
         发起帧与判定同形态：可能是栈上的 SKILL / 钩子帧，也可能是**不压栈**的阶段体帧
         （住 ``_turn_data``，``frame_id`` 恒 0）——后者按"正在跑哪条技能"对上号。
+
+        ``pindian_tied``（tao-caocao 票 03）：与 ``targets`` 对齐的**平点**位。``won`` 只有
+        两态（平点与"输"都是假），而牌面写「若其没赢」的读法**必须**区分"平点"与"对方赢"
+        （规则 12.1 L1318–L1319 平点双方都没赢）——技能侧因此要读这一位。三个键同一条写入
+        路径、同一个帧；不读它的技能**零行为变化**（帧私有，不进记录流）。
         """
         results = tuple(frame.data.get("rank_compare_results", ()))
+        tied = tuple(frame.data.get("rank_compare_ties", ()))
         parent_id = frame.data.get("activation_parent")
         for candidate in reversed(self.stack.frames):
             if candidate.frame_id == parent_id:
                 candidate.data["pindian_result"] = results
                 candidate.data["pindian_won"] = tuple(won for _seat, won in results)
+                candidate.data["pindian_tied"] = tied
                 return
         skill_id = frame.data.get("skill_id")
         for value in self._turn_data.values():
@@ -2853,8 +2860,26 @@ class Engine:
             ):
                 value.data["pindian_result"] = results
                 value.data["pindian_won"] = tuple(won for _seat, won in results)
+                value.data["pindian_tied"] = tied
                 return
         raise RuntimeError(f"拼点发起帧 {parent_id} 不在栈上；结算栈被破坏")
+
+    def boost_pindian(self, frame: Frame, seat: int, amount: int = 1) -> None:
+        """把 ``seat`` 的**本次拼点点数**加 ``amount``（tao-caocao 票 03 的唯一写入口）。
+
+        调用者 = 挂在 ``RANK_COMPARE_PLACED``（牌扣置入处理区后、亮出前）上的技能；规则
+        12.3 L1337–L1340 把这一段列为"拼点期间可以发动技能"的窗口。点数比较读**生效点数**
+        （规则 12.2 L1326–L1327，含 1..13 的上下限钳制），故调整落在帧私有
+        :data:`~sgs.engine.steps.RANK_COMPARE_BOOST`（``{座位: 增量}``）上——**不改牌面**、
+        不进记录流；``pindian`` delta 的 ``ranks`` 是该事实的公开面。
+
+        重复调用可叠加（同一次拼点里多个技能各加各的）；``amount <= 0`` 是空动作。
+        """
+        if amount <= 0:
+            return
+        boosts: dict[int, int] = frame.data.setdefault(RANK_COMPARE_BOOST, {})
+        seat = int(seat)
+        boosts[seat] = boosts.get(seat, 0) + int(amount)
 
 
     def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any:
@@ -5691,14 +5716,30 @@ class Engine:
         )
         return "stay"
 
-    def _phase_play_end(self) -> None:
-        self.emit_timing(Timing.PHASE_PLAY_END, actor=self.state.turn_seat)
+    def _phase_play_end(self) -> Control:
+        """**出牌阶段结束时**（L2）：帧外时机，派发点与其余阶段体同形（tao-caocao 票 02）。
+
+        与 :meth:`_phase_draw_end` / :meth:`_phase_discard_end` 逐字同一姿态：
+        ``_dispatch_phase_body`` 惰性建帧（没有注册在该时机上的实例时**一个帧都不建** ⇒
+        记录流与既有实现逐字节相同），有钩子时给它一条不压栈、可提问、可跨重入续跑的持久帧。
+
+        被【乐不思蜀】跳过的出牌阶段**不经过本步**（``_phase_play_start`` 的 ``_skip_to``）
+        ⇒「出牌阶段结束时」这个时点整段不存在、挂在上面的技能不触发（与【兵粮寸断】跳过
+        摸牌阶段时 ``PHASE_DRAW_END`` 的既有口径一致）。
+
+        "本阶段"作用域的清理排在本步**之后**：技能在"出牌阶段结束时"看到的本阶段事实仍是
+        完整的那一份（清理不早于这个时点）。
+        """
+        control = self._dispatch_phase_body(Timing.PHASE_PLAY_END, "phase_play_end")
+        if control == "stay":
+            return "stay"
         # M6 票 17 界【诈降】：三条加成的"本阶段"作用域在阶段**结束**就清掉（不是等下一个
         # 出牌阶段起点）——否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到加成。
         if self.state.turn_seat is not None:
             self._clear_zhaxiang_active(self.state.turn_seat)
             # huo-taishici-xunyu 票 01【天义】：同一清理点（"然后你本阶段…"）。
             self._clear_tianyi_state(self.state.turn_seat)
+        return None
 
     def _phase_discard_start(self) -> str | None:
         """弃牌阶段开始：发 ``PHASE_DISCARD_START``，有阶段体钩子（【克己】）时惰性建帧。

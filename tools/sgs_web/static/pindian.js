@@ -32,18 +32,28 @@ const PINDIAN_HOLD_MS = 3000;
  * 其后按 `targets` 序一一对应；`won` / `tied` 与 `targets` 对齐。`tied` 缺失（旧记录）按
  * 空元组处理 ⇒ 那一对画「没赢」，不猜平点。
  */
+/** 第 ``index`` 个**生效点数**；不是数字 ⇒ ``null``（旧记录 / 缺字段 ⇒ 不画）。 */
+function _pindianRank(ranks, index) {
+  const value = ranks[index];
+  return typeof value === "number" ? value : null;
+}
+
 function pindianPlan(record) {
   if (!record || record.kind !== "delta" || record.delta_type !== "pindian") return null;
   const cards = Array.isArray(record.cards) ? record.cards : [];
   const targets = Array.isArray(record.targets) ? record.targets : [];
   const won = Array.isArray(record.won) ? record.won : [];
   const tied = Array.isArray(record.tied) ? record.tied : [];
+  // ``ranks`` = **生效点数**（与 ``cards`` 对齐；tao-caocao 票 03）。它只在"这一次拼点
+  // 被技能调过点数"之后才出现在新记录里；缺省空元组 ⇒ 不画点数（旧记录不猜）。
+  const ranks = Array.isArray(record.ranks) ? record.ranks : [];
   if (!record.title || !targets.length) return null;
   if (cards.length < targets.length + 1) return null;
   return {
     title: String(record.title),
     initiator: record.initiator,
     initiatorCard: cards[0],
+    initiatorRank: _pindianRank(ranks, 0),
     // 每一**对**的两个结果：发起者的「赢 / 没赢」= `won`；被拼点者的 = 反过来，
     // **平点两人都没赢**（`tied`）——所以被拼点者的标签不能简单取反，必须读 `tied`。
     pairs: targets.map((seat, index) => {
@@ -53,6 +63,7 @@ function pindianPlan(record) {
       return {
         seat,
         card: cards[index + 1],
+        rank: _pindianRank(ranks, index + 1),
         state: isTie ? "tie" : (isWin ? "win" : "lose"),
         initiatorVerdict: isWin ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose,
         targetVerdict: targetWin ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose,
@@ -78,7 +89,7 @@ function pindianSeatLabel(seat) {
  * 卡面走 `card-view.js:cardFaceNode`（与手牌 / 舞台 / 亮牌同一套渲染）：花色点数、虚拟 /
  * 转化角标、**牌上的标签**（`card.tags`，服务端下发）都由它画，这里不另做牌面。
  */
-function pindianPlayer({ seat, card, role, verdict, state: verdictState, title = "" }) {
+function pindianPlayer({ seat, card, role, verdict, state: verdictState, title = "", point = null }) {
   const player = document.createElement("div");
   player.className = `pindian-player ${role}`;
   player.setAttribute("data-seat", String(seat));
@@ -96,6 +107,17 @@ function pindianPlayer({ seat, card, role, verdict, state: verdictState, title =
   slot.setAttribute("data-role", role);
   if (card) slot.appendChild(cardFaceNode(card, { static: true }));
   player.appendChild(slot);
+
+  // **生效点数**（服务端给的 `pindian` delta 的 `ranks`）：只有新记录才画。牌面上的点数
+  // 是牌自己的事实，被技能调过之后两者会不一样——不画出来就成了"5 点输给 4 点"的错觉。
+  // 前端不比较点数、也不自己加：数字原样来自服务端。
+  if (typeof point === "number") {
+    const rankNode = document.createElement("span");
+    rankNode.className = "pindian-point";
+    rankNode.setAttribute("data-seat", String(seat));
+    rankNode.textContent = `点数 ${point}`;
+    player.appendChild(rankNode);
+  }
 
   const who = document.createElement("span");
   who.className = "pindian-who";
@@ -124,6 +146,7 @@ function renderPindian(plan) {
     verdict: initiatorState === "win" ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose,
     state: initiatorState,
     title: wins && wins < plan.pairs.length ? "与多名角色拼点：并非每一对都赢" : "",
+    point: plan.initiatorRank,
   }));
   const versus = document.createElement("span");
   versus.className = "pindian-vs";
@@ -139,6 +162,7 @@ function renderPindian(plan) {
       verdict: pair.targetVerdict,
       state: pair.state === "tie" ? "tie" : (pair.targetVerdict === PINDIAN_VERDICTS.win ? "win" : "lose"),
       title: pair.title,
+      point: pair.rank,
     }));
   });
   body.appendChild(rows);

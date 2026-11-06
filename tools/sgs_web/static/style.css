@@ -1645,6 +1645,12 @@ button.mini-slot { cursor: pointer; }
 .pindian-verdict.win { color: var(--ok); }
 .pindian-verdict.lose { color: var(--accent); }
 .pindian-verdict.tie { color: var(--dim); }
+/* **生效点数**（tao-caocao 票 03）：被技能调过点数的拼点牌，牌面点数与它不再相同，
+   故单独一行写出来（服务端给的事实，前端不自己算）。 */
+.pindian-point {
+  font-size: calc(11 * var(--dsu)); font-weight: 700; color: var(--accent);
+  letter-spacing: .04em;
+}
 /* 归属在**卡面下方**：座位号 + 武将名（与座位卡同源的名字）。 */
 .pindian-who {
   font-size: calc(11 * var(--dsu)); color: var(--dim);

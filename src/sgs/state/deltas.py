@@ -213,6 +213,11 @@ class PindianDelta(_FrozenModel):
       否则前端只能拿两张牌的点数自己比一次（那会把规则的比较搬第二份到界面上）。缺省空
       元组 = 旧记录没有这个事实（按"没赢"画）；
     - ``title``：发动拼点的技能名（弹窗标题；服务端给，前端不拼）。
+    - ``ranks``：与 ``cards`` 对齐的**生效点数**（tao-caocao 票 03）——"牌扣置入处理区后、
+      亮出前"有技能可以调整点数（``RANK_COMPARE_PLACED`` + ``Engine.boost_pindian``），
+      而牌面点数已经印在卡面上：不把生效点数给出来，弹窗就会出现"5 点输给 4 点"的错觉。
+      服务端已经把规则 12.2 第 4 步的上下限（1..13）钳过；本字段只是**事实**，不参与判定。
+      缺省空元组 = 旧记录没有这个事实（前端不画点数，也不猜）。
 
     **全场可见**（揭晓后牌面即公开事实）；揭晓前没有任何一条 delta 带这两张牌的面——
     扣置阶段它们**还留在各自手牌里**（本仓把"扣置"与"揭晓"合并在同一步做）。
@@ -225,6 +230,7 @@ class PindianDelta(_FrozenModel):
     cards: tuple[CardRef, ...]
     won: tuple[bool, ...]
     tied: tuple[bool, ...] = ()
+    ranks: tuple[int | None, ...] = ()
 
 
 class DeckShuffleDelta(_FrozenModel):

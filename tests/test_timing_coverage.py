@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from sgs.timing import DISPATCH_WHITELIST, EMPTY_LOG, ENUM_ONLY, IMPLEMENTED, Timing
 
-from support.timing_coverage import ALL_SOURCES, COVERAGE, dispatched
+from support.timing_coverage import ALL_SOURCES, COVERAGE, PINDIAN_SCENE, dispatched
 
 WHITELIST = frozenset(timing.value for timing in DISPATCH_WHITELIST)
 """56 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
@@ -64,12 +64,15 @@ PINDIAN_UNSEALED: frozenset[str] = frozenset(
 )
 """huo-taishici-xunyu 票 03 的解封增量：L15 的拼点二时机（RANK_COMPARE 帧的步骤表派发）。"""
 
+TAOCAOCAO_UNSEALED: frozenset[str] = frozenset({Timing.RANK_COMPARE_PLACED.value})
+"""tao-caocao 票 03 的增量：L15 新增并解封的「拼点牌扣置入处理区后、亮出前」时机。"""
+
 M2_DISPATCH_WHITELIST = frozenset(
     timing.value
     for timing in DISPATCH_WHITELIST
-    if timing.value not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED
+    if timing.value not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED | TAOCAOCAO_UNSEALED
 )
-"""M2 的 53 个：今天的白名单减去两批解封（M3 一个 + wuming 两个）。"""
+"""M2 的 53 个：今天的白名单减去四批解封（M3 一个 + wuming 两个 + 拼点两个 + 拼点扣置一个）。"""
 
 
 def test_the_unsealed_set_is_exactly_the_move_after_node():
@@ -80,7 +83,13 @@ def test_the_unsealed_set_is_exactly_the_move_after_node():
     上仍然成立；"两批之外没有第三个增量"由 M2 基线恒 53 个看住。
     """
     whitelist = {timing.value for timing in DISPATCH_WHITELIST}
-    m3_unsealed = whitelist - M2_DISPATCH_WHITELIST - WUMING_UNSEALED - PINDIAN_UNSEALED
+    m3_unsealed = (
+        whitelist
+        - M2_DISPATCH_WHITELIST
+        - WUMING_UNSEALED
+        - PINDIAN_UNSEALED
+        - TAOCAOCAO_UNSEALED
+    )
 
     assert m3_unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
     assert Timing.MOVE_BEFORE.value not in whitelist, "移动前继续留枚举位（M3 无载体）"
@@ -96,7 +105,13 @@ def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
     觉醒技的 ``hp_max_change.frame_id``）。
     """
     whitelist = {timing.value for timing in DISPATCH_WHITELIST}
-    wuming_unsealed = whitelist - M2_DISPATCH_WHITELIST - M3_UNSEALED - PINDIAN_UNSEALED
+    wuming_unsealed = (
+        whitelist
+        - M2_DISPATCH_WHITELIST
+        - M3_UNSEALED
+        - PINDIAN_UNSEALED
+        - TAOCAOCAO_UNSEALED
+    )
 
     assert wuming_unsealed == WUMING_UNSEALED
     assert {
@@ -105,6 +120,28 @@ def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
     }.isdisjoint(whitelist), "减体力上限二时机继续留枚举位（票 04 C4）"
     for timing in (Timing.MAXLIFE_INCREASE_BEFORE, Timing.MAXLIFE_INCREASE_AFTER):
         assert timing in COVERAGE, "解封的节点必须有实测来源"
+
+
+def test_the_taocaocao_unseal_is_exactly_the_pindian_placed_node():
+    """tao-caocao 票 03：解封增量为「拼点牌扣置后」一个节点，且有实测来源。
+
+    机械含义 = 记录流里真的能看到 ``RANK_COMPARE_PLACED``（来源 = 构造局面
+    ``position:pindian`` 的一次拼点）；它必须排在 ``RANK_COMPARE_ON`` 之后、
+    ``RANK_COMPARE_RESULT_AFTER`` 之前（扣置后、亮出前）。
+    """
+    whitelist = {timing.value for timing in DISPATCH_WHITELIST}
+    taocaocao_unsealed = (
+        whitelist
+        - M2_DISPATCH_WHITELIST
+        - M3_UNSEALED
+        - WUMING_UNSEALED
+        - PINDIAN_UNSEALED
+    )
+
+    assert taocaocao_unsealed == TAOCAOCAO_UNSEALED
+    assert Timing.RANK_COMPARE_PLACED in COVERAGE, "解封的节点必须有实测来源"
+    stream = dispatched(PINDIAN_SCENE)
+    assert Timing.RANK_COMPARE_PLACED.value in stream, "拼点帧必须真的派发这个时机"
 
 
 PHASE_START_NODES = (
@@ -148,9 +185,9 @@ def test_m3_unseals_no_phase_start_node():
 
 
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
-    assert len(WHITELIST) == 58, (
+    assert len(WHITELIST) == 59, (
         "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
-        " + huo-taishici-xunyu 票 03 的拼点二时机"
+        " + huo-taishici-xunyu 票 03 的拼点二时机 + tao-caocao 票 03 的拼点扣置时机"
     )
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
@@ -162,7 +199,7 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     """实测判据：来源覆盖 M2 的全部行为面（回合环 / 使用 / 伤害 / 濒死 / 死亡 / 回复 /
     重洗 / 判定 / 身份 / 打出），故"一个不冒"是跑出来的，不是声明出来的。
 
-    引擎侧**不**加白名单守卫：记录流 schema 对 83 个节点都合法（后续里程碑填位用），
+    引擎侧**不**加白名单守卫：记录流 schema 对 84 个节点都合法（后续里程碑填位用），
     把常量硬编码进 ``Engine`` 会让后续的 dispatch 被误挡。
     """
     collected = _collected()

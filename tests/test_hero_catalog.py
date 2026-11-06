@@ -209,9 +209,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 156
+    assert len(CATALOG) == 158
     assert len(equipment) == 22
-    assert len(heroes) == 134
+    assert len(heroes) == 136
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -236,7 +236,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 134
+    assert len(expected) == 136
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1291,6 +1291,19 @@ def _shen_zhugeliang_probe_state() -> GameState:
     return state
 
 
+def _changyi_probe_state() -> GameState:
+    """【倡义】的正面对照：**双方都有手牌**，且"这一次的回合角色"是座位 2。
+
+    ``PHASE_PLAY_END`` 那条钩子的条件要"回合角色 ≠ 持有者"，故帧的 ``source`` = 座位 2：
+    持有者是 ME 时条件成立；把持有者换成座位 2 就变成"自己回合的出牌阶段结束时"⇒ 假。
+    """
+    hand = tuple(cards_of_type(PACK, "dodge")[:2])
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hand=(hand[0],)), SeatSpec(hand=(hand[1],))],
+    )
+
+
 def _congjian_probe_state() -> GameState:
     """【从谏】的正面对照：ME 手里有牌（"付得起"这一半），另有两名存活角色当"其他目标"。"""
     return build_state(
@@ -1419,6 +1432,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _zhengku_probe_state()
     if skill_id == "hero.zhangxiu.congjian":
         return _congjian_probe_state()
+    if skill_id == "hero.tao_caocao.changyi":
+        return _changyi_probe_state()
     if skill_id.startswith("hero.shen_zhugeliang."):
         return _shen_zhugeliang_probe_state()
     return _probe_state()
@@ -1600,6 +1615,19 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # lei-batch 票 03：诸葛瞻【罪论】（自己的结束阶段）/【父荫】（这一次的目标是我，
         # 牌是一张【杀】；正面对照的手牌数 0 ≤ 使用者 1）。
         "hero.zhugezhan.zuilun": (_HookFrame(source=ME),),
+        # 自制包·韬·曹操：两条技能的**四条**带条件钩子。
+        # - 【鸿志】的 ①/② 都自校"这一回合是我的"，② 另外要"场上没有【倡义】"（合成局面
+        #   没有武将牌载体 ⇒ 场上确实没有，见 ``_probe_state``）；
+        # - 【倡义】的触发窗口自校"回合角色不是我"（帧 source = 座位 2），
+        #   段 2（点数 +X）自校"这一次拼点里有我"（发起者 = ME）。
+        "hero.tao_caocao.hongzhi": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME),
+        ),
+        "hero.tao_caocao.changyi": (
+            _HookFrame(source=OTHER),
+            _HookFrame(initiator=ME, targets=(0,)),
+        ),
         "hero.zhugezhan.fuyin": (
             _HookFrame(
                 **{MATCH_ACTOR_KEY: ME},
@@ -2049,6 +2077,10 @@ SKILL_SHAPE: dict[str, str] = {
     # 【父荫】= 锁定技（不问发动、目标级无效）。
     "hero.zhugezhan.zuilun": "排列技能",
     "hero.zhugezhan.fuyin": "锁定技",
+    # tao-caocao 票 01：自制包·韬·曹操【鸿志】= 锁定技（两条帧外时机钩子、不问发动、无流水线）；
+    # 【倡义】= 帧外时机钩子 + 手写段机（拼点 → 授予 → 二选一，没有 ``SkillFlow``）⇒ 多轮技能格。
+    "hero.tao_caocao.hongzhi": "锁定技",
+    "hero.tao_caocao.changyi": "多轮技能",
 }
 """145 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2072,8 +2104,10 @@ SHAPE_COUNTS: dict[str, int] = {
     "触发技能": 22,
     "零步技能": 29,
     "排列技能": 5,
-    "多轮技能": 14,
-    "锁定技": 35,
+    # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
+    # ⇒ 多轮技能 14 → 15。
+    "多轮技能": 15,
+    "锁定技": 36,
     "转化技": 15,
     "能力位": 3,
     "候选生成器": 1,
@@ -2185,7 +2219,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 156
+    assert len(SKILL_SHAPE) == len(CATALOG) == 158
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2271,7 +2305,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     }
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 14
+    assert len(multi_round) == 15
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -2315,7 +2349,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 83
-    assert len(outside) == 73
+    assert len(outside) == 75
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

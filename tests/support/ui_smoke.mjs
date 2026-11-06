@@ -511,7 +511,8 @@ const SMOKE_BANNED = catalogVersions
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 火包 OL + 自制包，按真名分组）",
   // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈标准版 / 荀彧标准版 ⇒ 45 / 71 → 46 / 72。
   // lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
-  ui.state.heroCatalog.length === 49 && catalogVersions.length === 75,
+  // tao-caocao 票 01：自制包加韬·曹操自制版（真名「曹操」已在池里）⇒ 真名不变、版本 75 → 76。
+  ui.state.heroCatalog.length === 49 && catalogVersions.length === 76,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -20714,7 +20715,26 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && whoOf(vnRows[1]).textContent.startsWith("2号位"),
     `left="${verdictOf(vnLeft).textContent}" rows=${vnRows.map((r) => verdictOf(r).textContent).join(",")}`);
 
-  // ④ 只读：不进询问面判据、弹窗里没有一个可点节点（选牌仍走牌桌）
+  // ④ 生效点数（tao-caocao 票 03）：delta 带 `ranks` 时两个槽位各画一行「点数 N」；
+  //    不带（旧记录）⇒ 一行都不画，也**不**拿牌面点数去猜——牌面点数与生效点数可以不同。
+  const pointOf = (block) => {
+    if (!block) return null;
+    return Array.from(block.children).find((node) => hasClassText(node, "pindian-point")) || null;
+  };
+  ui.applyPindianDelta(pindianRecord({ ranks: [7, 6] }));
+  const boostLeft = initiatorBlock();
+  const boostRight = targetBlocks()[0] || null;
+  check("票04-10 生效点数：delta 带 ranks ⇒ 两块各写「点数 7 / 点数 6」（牌面仍是 Q / ♠9）",
+    !!pointOf(boostLeft) && pointOf(boostLeft).textContent === "点数 7"
+      && !!pointOf(boostRight) && pointOf(boostRight).textContent === "点数 6"
+      && cardOf(boostLeft).text().includes("Q") && cardOf(boostRight).text().includes("9"),
+    `left="${pointOf(boostLeft) ? pointOf(boostLeft).textContent : ""}" right="${pointOf(boostRight) ? pointOf(boostRight).textContent : ""}"`);
+  ui.applyPindianDelta(pindianRecord());
+  check("票04-11 旧记录（没有 ranks）：一行点数都不画（前端不拿牌面点数猜）",
+    pointOf(initiatorBlock()) === null && pointOf(targetBlocks()[0] || null) === null,
+    `left=${!!pointOf(initiatorBlock())} right=${!!pointOf(targetBlocks()[0] || null)}`);
+
+  // ⑤ 只读：不进询问面判据、弹窗里没有一个可点节点（选牌仍走牌桌）
   const clickables = [popupBody, ...Array.from(popupBody.children)]
     .flatMap((node) => [node, ...Array.from(node.children || [])])
     .flatMap((node) => [node, ...Array.from(node.children || [])])
@@ -20723,7 +20743,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     !Object.values(ui.DIALOG_KINDS).includes("pindian") && clickables.length === 0,
     `clickables=${clickables.length} kinds=${Object.keys(ui.DIALOG_KINDS).join(",")}`);
 
-  // ⑤ 判据只看 `delta_type`：别的记录一律不弹窗
+  // ⑥ 判据只看 `delta_type`：别的记录一律不弹窗
   const ignored = ui.applyPindianDelta({ kind: "delta", delta_type: "hp_change", seq: 1 });
   check("票04-9 非拼点记录不弹窗（判据只看 delta_type）", ignored === false, `ignored=${ignored}`);
 }

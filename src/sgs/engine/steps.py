@@ -217,6 +217,17 @@ class FrameHost(StepHost, Protocol):
 
     def note_pindian_result(self, frame: Frame) -> None: ...
 
+    def boost_pindian(self, frame: Frame, seat: int, amount: int) -> None:
+        """把 ``seat`` 的**本次拼点点数**加 ``amount``（tao-caocao 票 03）。
+
+        调用点 = 挂在 ``RANK_COMPARE_PLACED`` 上的技能（"牌扣置入处理区后、亮出前"）：
+        规则 12.2 L1326–L1327 的点数比较读**生效点数**，故技能改的是这里，不是牌面。
+        写入的是帧私有 ``RANK_COMPARE_BOOST``（``{座位: 增量}``），**不进记录流**；
+        亮出比点时按 ``min(13, max(1, 牌面 + 增量))`` 参与比较（规则 12.2 第 4 步的
+        上下限处理）。
+        """
+        ...
+
     def ask_query(
         self,
         kind: QueryKind,
@@ -2103,8 +2114,32 @@ RANK_COMPARE_PLACE_CURSOR = "rank_compare_place_cursor"
 RANK_COMPARE_PLACED = "rank_compare_placed"
 """帧私有：所有拼点牌都已在处理区（下一步才是亮出）。"""
 
+RANK_COMPARE_BOOST = "rank_compare_boost"
+"""帧私有：``{座位: 增量}``——本次拼点里被技能调整过的点数（tao-caocao 票 03）。
+
+写入面只有 :meth:`Engine.boost_pindian`（挂在 ``RANK_COMPARE_PLACED`` 上的技能调用）；
+读取面只有 :func:`rank_compare_reveal` 的比点。帧私有 ⇒ **不进记录流**。
+"""
+
+RANK_COMPARE_ADJUST_EMITTED = "rank_compare_adjust_emitted"
+"""帧私有：``RANK_COMPARE_PLACED`` 已派发（重入不再发）。"""
+
+RANK_COMPARE_FLOOR = 1
+"""点数的下限（规则 12.2 L1326–L1327：A = 1，小于 A 视为 A）。"""
+
+RANK_COMPARE_CEIL = 13
+"""点数的上限（同上：K = 13，大于 K 视为 K）。"""
+
 RANK_COMPARE_RESULTS = "rank_compare_results"
 """帧私有：``((target_seat, won), ...)``，与 ``targets`` 对齐；平点 = ``won`` 假。"""
+
+RANK_COMPARE_TIES = "rank_compare_ties"
+"""帧私有：与 ``targets`` 对齐的**平点**位（tao-caocao 票 03）。
+
+`RANK_COMPARE_RESULTS` 的 ``won`` 只有两态（平点与"没赢"都是假），而「若其没赢」这类
+牌面读法必须把平点与"对方赢"分开（规则 12.1 L1318–L1319：平点双方都没赢）⇒ 另一条
+同长元组随结果一起写、一起回写发起帧（``Engine.note_pindian_result`` 的 ``pindian_tied``）。
+"""
 
 RANK_COMPARE_RESULT_EMITTED = "rank_compare_result_emitted"
 """帧私有：``RANK_COMPARE_RESULT_AFTER`` 已派发。"""
@@ -2193,11 +2228,51 @@ def rank_compare_place(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
+def rank_compare_adjust(host: FrameHost, frame: Frame) -> Control:
+    """派发 ``RANK_COMPARE_PLACED``（"牌扣置入处理区后、亮出前"）一次（tao-caocao 票 03）。
+
+    规则 12.3 L1337–L1340：「拼点期间可以发动技能：在『牌扣置入处理区后（失去牌后）』
+    以及『拼点牌亮出后』均可插入发动相关技能」。本步就是**前一个窗口**——两张牌都已在
+    处理区，点数还没比。挂在这个时机上的技能可以问一句、再经
+    :meth:`FrameHost.boost_pindian` 调整点数（`RANK_COMPARE_BOOST` 帧私有）。
+
+    中止（参与者没手牌）⇒ 整段不存在：不派发，与其余后置步骤同一道闸。
+    """
+    if frame.data.get(RANK_COMPARE_ABORTED) or frame.data.get(RANK_COMPARE_ADJUST_EMITTED):
+        return None
+    if not frame.data.get(RANK_COMPARE_PLACED):
+        return None
+    # "已派发"位**在派发返回之后**才置：这里的钩子会提问（"点数 +X 吗"），挂起重入时
+    # 本步必须**再派发一次**才能让那条钩子续跑（`emit_frame_timing` 的 `_pending_timing`
+    # 负责"记录只落一条"）。
+    control = host.emit_frame_timing(
+        frame, Timing.RANK_COMPARE_PLACED, actor=int(frame.data["initiator"])
+    )
+    if control == "stay":
+        return "stay"
+    frame.data[RANK_COMPARE_ADJUST_EMITTED] = True
+    return None
+
+
+def _pindian_rank(frame: Frame, seat: int, card: Any) -> int | None:
+    """``seat`` 的**生效点数** = 牌面点数 + 技能增量，再按规则钳到 [1, 13]。
+
+    规则 12.2 L1326–L1327：「点数的上下限处理：大于 K 视为 K，小于 A 视为 A」。
+    牌面点数本身为空（纯虚拟牌）时返回 ``None``——比点按"不能比"处理（与既有语义一致）。
+    """
+    rank = card.rank
+    if rank is None:
+        return None
+    boost = int((frame.data.get(RANK_COMPARE_BOOST) or {}).get(seat, 0))
+    return max(RANK_COMPARE_FLOOR, min(RANK_COMPARE_CEIL, int(rank) + boost))
+
+
 def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
     """亮出并比点：写结果、发 ``pindian`` delta、把结果回写发起帧。"""
     if frame.data.get(RANK_COMPARE_ABORTED):
         if RANK_COMPARE_RESULTS not in frame.data:
             frame.data[RANK_COMPARE_RESULTS] = ()
+            frame.data[RANK_COMPARE_TIES] = ()
             host.note_pindian_result(frame)
         return None
     if RANK_COMPARE_RESULTS in frame.data:
@@ -2205,17 +2280,18 @@ def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
     state = host.state
     picked: dict[int, int] = frame.data[RANK_COMPARE_PICKED]
     initiator = int(frame.data["initiator"])
-    base = state.card(picked[initiator]).rank
+    base = _pindian_rank(frame, initiator, state.card(picked[initiator]))
     results: list[tuple[int, bool]] = []
     ties: list[bool] = []
     for seat in frame.data["targets"]:
         seat = int(seat)
-        other = state.card(picked[seat]).rank
+        other = _pindian_rank(frame, seat, state.card(picked[seat]))
         # 点数大者赢；点数相同 ⇒ 双方都"没赢"（规则 12.1 L1318–L1319）。
         won = base is not None and other is not None and base > other
         ties.append(base is not None and other is not None and base == other)
         results.append((seat, won))
     frame.data[RANK_COMPARE_RESULTS] = tuple(results)
+    frame.data[RANK_COMPARE_TIES] = tuple(ties)
     order = _rank_compare_order(frame)
     host.emit_frame_delta(
         frame,
@@ -2228,6 +2304,11 @@ def rank_compare_reveal(host: FrameHost, frame: Frame) -> Control:
             # 平点 = 双方都没赢：`won` 只有两态，展示面的「都没赢」只能靠这一位
             # （用户 2026-11-04 的 R7 口径；前端不比较点数）。
             tied=tuple(ties),
+            # 生效点数（与 `cards` 对齐）：被技能调过时要画得出"5 点为什么赢 / 输"。
+            # 缺省空元组 = 旧记录没有这个事实（前端退回牌面，不猜）。
+            ranks=tuple(
+                _pindian_rank(frame, seat, state.card(picked[seat])) for seat in order
+            ),
         ),
     )
     host.note_pindian_result(frame)
@@ -2277,12 +2358,13 @@ RANK_COMPARE_STEPS = (
     Step(rank_compare_announce, Timing.RANK_COMPARE_ON),
     Step(rank_compare_pick, None),
     Step(rank_compare_place, None),
+    Step(rank_compare_adjust, Timing.RANK_COMPARE_PLACED),
     Step(rank_compare_reveal, None),
     Step(rank_compare_result, Timing.RANK_COMPARE_RESULT_AFTER),
     Step(rank_compare_discard, None),
 )
-"""拼点帧六步：派发 ON → 逐参与者选牌 → 扣置（处理区）→ 亮出比点 → 派发 RESULT_AFTER →
-置入弃牌堆。后四步都是"动作"，不对应时机枚举位。"""
+"""拼点帧七步：派发 ON → 逐参与者选牌 → 扣置（处理区）→ 派发 PLACED（扣置后、亮出前，
+技能可在此调整点数）→ 亮出比点 → 派发 RESULT_AFTER → 置入弃牌堆。"""
 
 
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:

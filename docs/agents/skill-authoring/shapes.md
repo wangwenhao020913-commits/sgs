@@ -97,6 +97,7 @@
 | `PHASE_DISCARD_END` | **弃牌阶段结束时**（神周瑜移动版【琴音】= 首个载体，huo-shenzhouyu-mobile 票 03）：与 `PHASE_FINISH` 同一条惰性派发（`_dispatch_phase_body`）；帧私有 `discard_phase_hand_discards` = 本阶段弃牌步实际弃置的手牌数，钩子条件读它 |
 | `PHASE_DRAW_END` | **摸牌阶段结束时**（神诸葛亮【七星】② = 首个载体，huo-shenzhugeliang 票 03）：`_phase_draw_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。被【兵粮寸断】跳过的摸牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发 |
 | `PHASE_FINISH` | 结束阶段（闭月、观星二段、诛害、勤学二段） |
+| `PHASE_PLAY_END` | **出牌阶段结束时**（韬·曹操【倡义】= 首个载体，tao-caocao 票 02）：`_phase_play_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。**"本阶段"作用域的清理排在本步之后**；被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发（与【兵粮寸断】跳摸牌阶段的 `PHASE_DRAW_END` 同一口径） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
 | `DAMAGE_AFTER_TAKE` | 受到伤害后（奸雄、反馈、遗计、刚烈、忘隙、耀武）——**注意 `per_point`** |
@@ -111,7 +112,8 @@
 | `RESOLVE_EFFECT` | 生效时（界谦逊） |
 | `JUDGE_CARD_AFTER_EFFECT` | 判定牌生效后（天妒） |
 | `RANK_COMPARE_ON` | **进行拼点时**（huo-taishici-xunyu 票 03 解封）：`RANK_COMPARE` 帧的第一步派发；拼点先由技能发起（`Engine.rank_compare`），故「谁会拼点」不落枚举表 |
-| `RANK_COMPARE_RESULT_AFTER` | **拼点结果后**（赢 / 没赢；票 03）：结果写回发起帧之后、拼点牌置入弃牌堆之前派发；平点 = 双方都没赢 |
+| `RANK_COMPARE_PLACED` | **拼点牌扣置入处理区后、亮出前**（韬·曹操【倡义】的「点数 +X」= 首个载体，tao-caocao 票 03；规则 12.3 L1337–L1340 的"拼点期间可以发动技能"窗口）：`RANK_COMPARE` 帧在 `place` 与 `reveal` 之间派发。此时机上的技能可经 `Engine.boost_pindian` 加**生效点数**（`rank_compare_reveal` 按牌面 + 增量算、再按规则 12.2 钳到 1..13），`pindian` delta 的 `ranks` 是该事实的公开面 |
+| `RANK_COMPARE_RESULT_AFTER` | **拼点结果后**（赢 / 没赢；票 03）：结果写回发起帧之后、拼点牌置入弃牌堆之前派发；平点 = 双方都没赢（**平点事实经 `pindian_tied` 回写发起帧**，tao-caocao 票 03——`pindian_won` 只有两态） |
 | `RECOVER_VALUE` | 回复数值确定时（界救援） |
 | `DEATH_ON` | **死亡时**技能（神关羽移动版【武魂】②：死者本人的判定 / 直接致死）——`10` 起死者在这个窗口内仍可解析，`pass_away` 收口后静默 |
 | `NEAR_DEATH_ENTER` | **濒死时**技能（庞统移动版【涅槃】：huo-mobile-batch 票 02 的首载体）——NEAR_DEATH 帧的**第一步**，在求桃窗口（`NEAR_DEATH_AT`）**之前**派发；帧外事件（任何人的回合都可能发生），效果在这里结算完 ⇒ 体力回到 1 以上时求桃窗口直接早退 |

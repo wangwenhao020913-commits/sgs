@@ -1,7 +1,8 @@
 """权威时机表（票 01 研究产物的枚举落地）。
 
-83 个节点一次建全。**M2 定格**（票 17 §3 / 票 32）：**64 个**是已实现类
-（其中若干是**空实现**：dispatch 了但无效果），**19 个**是只留枚举位类。
+83 个节点一次建全（tao-caocao 票 03 追加 ``RANK_COMPARE_PLACED`` ⇒ 今天 84）。**M2 定格**
+（票 17 §3 / 票 32）：**64 个**是已实现类（其中若干是**空实现**：dispatch 了但无效果），
+**19 个**是只留枚举位类。
 
 在已实现类之上再落一层**记录流可观测性**（票 18 的登记：L2 边界与阶段间节点不
 dispatch、不记）：
@@ -12,10 +13,11 @@ dispatch、不记）：
   票 18 已登记此口径）。覆盖清单以 :data:`DISPATCH_WHITELIST` 为白名单，见
   ``tests/support/timing_coverage.py``。
 
-以上三个数字是 **M2 定格**。此后两批解封：M3 的 ``MOVE_AFTER``（票 07）与 wuming 票 04
-的 ``MAXLIFE_INCREASE_BEFORE/AFTER``（加体力上限一侧）——今天的实测计数见
-:data:`IMPLEMENTED` / :data:`DISPATCH_WHITELIST` / :data:`ENUM_ONLY` 的 docstring，
-账本在 ``06`` §5「程序化约定与偏离一手」的"时机四轴计数"段。
+以上三个数字是 **M2 定格**。此后逐批解封：M3 的 ``MOVE_AFTER``（票 07）、wuming 票 04
+的 ``MAXLIFE_INCREASE_BEFORE/AFTER``（加体力上限一侧）、huo-taishici-xunyu 票 03 的拼点
+二时机，以及 tao-caocao 票 03 的 ``RANK_COMPARE_PLACED``（拼点牌扣置后、亮出前）——今天的
+实测计数见 :data:`IMPLEMENTED` / :data:`DISPATCH_WHITELIST` / :data:`ENUM_ONLY` 的
+docstring，账本在 ``06`` §5「程序化约定与偏离一手」的"时机四轴计数"段。
 
 纪律：
 
@@ -155,9 +157,10 @@ class Timing(str, Enum):
     JUDGE_CARD_BEFORE_EFFECT = ("JUDGE_CARD_BEFORE_EFFECT", 14, 2)
     JUDGE_CARD_AFTER_EFFECT = ("JUDGE_CARD_AFTER_EFFECT", 14, 3)
 
-    # ---- L15 拼点事件（只留枚举位）-------------------------------------------
+    # ---- L15 拼点事件 --------------------------------------------------------
     RANK_COMPARE_ON = ("RANK_COMPARE_ON", 15, 1)
-    RANK_COMPARE_RESULT_AFTER = ("RANK_COMPARE_RESULT_AFTER", 15, 2)
+    RANK_COMPARE_PLACED = ("RANK_COMPARE_PLACED", 15, 2)
+    RANK_COMPARE_RESULT_AFTER = ("RANK_COMPARE_RESULT_AFTER", 15, 3)
 
     # ---- L16 牌移动事件（M1 不建时机，只留枚举位）----------------------------
     MOVE_BEFORE = ("MOVE_BEFORE", 16, 1)
@@ -255,13 +258,18 @@ IMPLEMENTED: tuple[Timing, ...] = (
     Timing.JUDGE_ON,
     Timing.JUDGE_CARD_BEFORE_EFFECT,
     Timing.JUDGE_CARD_AFTER_EFFECT,
-    # L15：拼点二时机（huo-taishici-xunyu 票 03 解封；RANK_COMPARE 帧的步骤表 dispatch）
+    # L15：拼点三时机（huo-taishici-xunyu 票 03 解封前两个；tao-caocao 票 03 追加
+    # ``RANK_COMPARE_PLACED`` = 拼点牌扣置后、亮出前——规则 12.3 L1337–L1340 的
+    # 「拼点期间可以发动技能：在『牌扣置入处理区后（失去牌后）』以及『拼点牌亮出后』
+    # 均可插入发动相关技能」）
     Timing.RANK_COMPARE_ON,
+    Timing.RANK_COMPARE_PLACED,
     Timing.RANK_COMPARE_RESULT_AFTER,
     # L16：牌移动事件（票 07 的 M3 唯一解封；**只解封 after**，`MOVE_BEFORE` 继续留枚举位）
     Timing.MOVE_AFTER,
 )
-"""已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 + huo-taishici-xunyu 票 03 解封 2 = 69）：流程真的会走到（允许空实现 / 空日志）。
+"""已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 + huo-taishici-xunyu 票 03 解封 2
++ tao-caocao 票 03 解封 1 = 70）：流程真的会走到（允许空实现 / 空日志）。
 
 M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对称解封）：它在
 :meth:`~sgs.engine.game.Engine.move_in_frame` 这个**唯一移动入口**里内联派发，且只在
@@ -280,7 +288,8 @@ _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
 ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
-"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 − huo-taishici-xunyu 票 03 解封 2 = 14）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
+"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 − huo-taishici-xunyu 票 03 解封 2
+− tao-caocao 票 03 解封 1 + 该票新增 1 个 = 14）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
 
 M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；wuming 票 04 再移走
 ``MAXLIFE_INCREASE_BEFORE/AFTER`` 两个（"加"侧真的 dispatch，"减"侧仍无载体）；huo-taishici-xunyu
@@ -323,9 +332,10 @@ _EMPTY_LOG_MEMBERS = frozenset(EMPTY_LOG)
 DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
     timing for timing in IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
 )
-"""**dispatch 白名单**（M2 定格 53 + M3 解封 1 + wuming 票 04 解封 2 = 56）：真的会 dispatch、可在记录流里观测的节点。
+"""**dispatch 白名单**（M2 定格 53 + M3 解封 1 + wuming 票 04 解封 2
++ huo-taishici-xunyu 票 03 解封 2 + tao-caocao 票 03 解封 1 = 59）：真的会 dispatch、可在记录流里观测的节点。
 
-= 67 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
+= 70 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
 它声明的基准 / 用例产出的记录流里实测出现。
 """
