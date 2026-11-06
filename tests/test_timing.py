@@ -1735,3 +1735,115 @@ def test_the_need_card_gate_reads_the_same_floor_in_all_four_windows():
         assert "hero.yuji_mobile.guohuo" not in providers(face), (
             f"{kind} 窗口的武将档提供者同样被 floor=1 挡掉"
         )
+
+
+# ---------------------------------------------------------------------------
+# 同座位同档的多段强制效果：结算顺序归玩家（lei-shenganning 票 95）
+#
+# 用户 2026-11-07 口径：锁定侧与非锁定侧**不混同一张面**；全锁定面**有 Pass**（语义 = 剩下按
+# 默认次序跑完）；全非锁定且都不可放弃的面**没有 Pass**（必须选一条）；只有一段时仍不问。
+# ---------------------------------------------------------------------------
+
+
+def _forced_pair(monkeypatch, *, locked: bool, tag: str):
+    """造两条同座位同档的 ``GAME_START`` 强制段；返回 ``(id_a, id_b, order)``。"""
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+
+    order: list[str] = []
+    first = f"hero.fake.{tag}_a"
+    second = f"hero.fake.{tag}_b"
+    definitions = []
+    for skill_id in (first, second):
+        def handler(host, frame, skill_id=skill_id):
+            del host, frame
+            order.append(skill_id)
+            return None
+
+        definitions.append(
+            SkillDef(
+                skill_id=skill_id,
+                locked=locked,
+                carrier=CarrierKind.HERO,
+                hooks=(Hook(Timing.GAME_START, handler=handler, forced=True),),
+            )
+        )
+    _install_fake_skills(monkeypatch, *definitions)
+    return first, second, order
+
+
+def _face_has_pass(query) -> bool:
+    return any(isinstance(action, Pass) for action in query.legal_actions)
+
+
+def test_two_forced_segments_of_one_seat_ask_the_order(monkeypatch):
+    """两条**非锁定**强制段撞同一时机 ⇒ 同一张面、**没有 Pass**、选谁先跑谁先跑。"""
+    first, second, order = _forced_pair(monkeypatch, locked=False, tag="order")
+    engine = _activation_engine(first, second)
+    script = _FaceScript(second, first)
+
+    _drive(engine, script, lambda e: order == [second, first])
+
+    assert script.faces == [(first, second)], "两条强制段同上一张面（次序按链序）"
+    assert not _face_has_pass(_activation_queries(engine)[0]), (
+        "全非锁定且都不可放弃 ⇒ 面里没有 Pass（必须选一条）"
+    )
+
+
+def test_a_single_forced_segment_does_not_ask(monkeypatch):
+    """只有一段强制段 ⇒ 仍不问、直接跑（与票 01 / 既有录像逐字节同形）。"""
+    first, _second, order = _forced_pair(monkeypatch, locked=False, tag="single")
+    engine = _activation_engine(first)
+    script = _FaceScript()
+
+    _drive(engine, script, lambda e: order == [first])
+
+    assert script.faces == [], "一段强制段不上脸"
+    assert not _activation_queries(engine), "也不落 SKILL_ACTIVATION 询问"
+
+
+def test_a_locked_order_face_has_pass_and_runs_the_rest_by_default(monkeypatch):
+    """锁定侧的面**有** Pass（用户口径：没有放弃选项，出口 = 剩下按默认次序跑完）。"""
+    first, second, order = _forced_pair(monkeypatch, locked=True, tag="lorder")
+    engine = _activation_engine(first, second)
+    script = _FaceScript(None)  # 右端出口 = 剩下按默认次序跑完
+
+    _drive(engine, script, lambda e: order == [first, second])
+
+    assert script.faces == [(first, second)]
+    assert _face_has_pass(_activation_queries(engine)[0]), "全锁定面有 Pass（= 默认次序）"
+
+
+def test_a_pass_on_a_mixed_face_declines_the_optional_and_keeps_the_forced(monkeypatch):
+    """非锁定侧：可放弃的段与 ``Hook.forced`` 段**同面**；Pass 只放弃可放弃的那些。"""
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+
+    order: list[str] = []
+    forced_id = "hero.fake.mix_forced"
+    optional_id = "hero.fake.mix_optional"
+    forced = SkillDef(
+        skill_id=forced_id,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        hooks=(
+            Hook(
+                Timing.GAME_START,
+                handler=lambda host, frame: order.append("forced"),
+                forced=True,
+            ),
+        ),
+    )
+    optional = _fake_skill(
+        optional_id, handler=lambda host, frame: order.append("optional")
+    )
+    _install_fake_skills(monkeypatch, forced, optional)
+    engine = _activation_engine(forced_id, optional_id)
+    script = _FaceScript(None)
+
+    _drive(engine, script, lambda e: order == ["forced"])
+
+    assert set(script.faces[0]) == {forced_id, optional_id}, "两段同面（先选哪条归玩家）"
+    assert _face_has_pass(_activation_queries(engine)[0]), (
+        "面里有可放弃的段 ⇒ 有 Pass，它只放弃那一段"
+    )

@@ -1542,6 +1542,7 @@ def _new_pass_state() -> dict[str, Any]:
         "pass_forced": (),
         "pass_forced_at": 0,
         "pass_optional": None,
+        "pass_allow_pass": None,
         "pass_chosen": None,
         "pass_terminated": False,
         "pass_mandatory": (),
@@ -1579,6 +1580,7 @@ def _pass_next_seat(state: dict[str, Any]) -> None:
     state["pass_forced"] = ()
     state["pass_forced_at"] = 0
     state["pass_optional"] = None
+    state["pass_allow_pass"] = None
     state["pass_chosen"] = None
     state["pass_mandatory"] = ()
     state["pass_mandatory_at"] = 0
@@ -1791,6 +1793,33 @@ def _mandatory_entries(
     return tuple(entries)
 
 
+def _locked_like(candidate: ActivationCandidate) -> bool:
+    """这一项是不是**锁定侧**（锁定技 / 觉醒技）的强制段（lei-shenganning 票 95）。
+
+    排序面按（载体档, 是否锁定）分子队列：锁定侧与非锁定侧**不混在同一张面**上
+    （用户 2026-11-07 口径的前提"同一时间排队的要么都是锁定技、要么都不是"由构造成立）。
+    ``Hook.forced`` 挂在**非锁定**技上时属于非锁定侧。
+    """
+    definition = candidate.instance.definition
+    return definition.locked or definition.skill_type is SkillType.AWAKENING
+
+
+def _face_allows_pass(face: tuple[ActivationCandidate, ...]) -> bool:
+    """这张"顺序 / 发动面"要不要给 ``Pass``（lei-shenganning 票 95 的用户口径）。
+
+    - 面里有**可以放弃的**段 ⇒ 给：``Pass`` 只放弃这些，不可放弃的段随后按默认次序跑完；
+    - 全是不可放弃的段：**锁定侧**给（语义 = 剩下按默认次序跑完），**非锁定侧不给**
+      （劫营③ + 镇骨这种"都得跑、先跑哪个由你定"的面必须选一条）。
+
+    "可以放弃"= 不是强制段 ∧ 计划里 `optional`；**强制段的 `plan.optional` 是缺省 True**，
+    故不能只看计划（否则劫营③ + 镇骨会被误判成"有可放弃的段"）。
+    """
+    if any((not candidate.forced) and candidate.plan.optional for candidate in face):
+        return True
+    return all(_locked_like(candidate) for candidate in face)
+
+
+
 def _seat_ring(host: Any, extra_instances: tuple[SkillInstance, ...]) -> tuple[int, ...]:
     """本趟 pass 的**座位环**：存活环 + 死亡结算窗口里的死者（票 01 §4-1）。
 
@@ -1872,16 +1901,53 @@ def _dispatch(
                     continue
                 # 强制段**按档**跑（票 01 §4-5「在本档轮到它时」）：一轮只跑"当前最高优先
                 # 档"的那几条，跑完再重新收集、把可选项按活状态合成一张面（面跨档，§8-3）。
+                #
+                # **同座位同档的多段强制效果由玩家选先后**（lei-shenganning 票 95）：按
+                # （载体档, 是否锁定）分成两个子队列，一个子队列里 ≥2 段就出面——
+                #   · 全锁定（locked / 觉醒）⇒ 面**有** Pass，语义 = "剩下按默认次序跑完"；
+                #   · 全非锁定（`Hook.forced` 段 + 可以放弃的段共面）⇒ 面里有可放弃的段才给
+                #     Pass（Pass 只放弃这些，强制段随后照跑）；全是不可放弃的段 ⇒ **没有**
+                #     Pass，必须选一条（劫营③ + 镇骨）；
+                #   · 单段强制 ⇒ 仍不问、直接跑（与票 01 逐字节同形）。
                 tier = min(candidate.tier for candidate in candidates)
-                forced = tuple(
-                    candidate
-                    for candidate in candidates
-                    if candidate.forced and candidate.tier == tier
+                same_tier = tuple(
+                    candidate for candidate in candidates if candidate.tier == tier
                 )
-                state["pass_forced"] = forced
-                state["pass_forced_at"] = 0
-                state["pass_optional"] = None
-                state["pass_phase"] = "forced" if forced else "ask"
+                locked_mandatory = tuple(
+                    candidate
+                    for candidate in same_tier
+                    if candidate.forced and _locked_like(candidate)
+                )
+                open_mandatory = tuple(
+                    candidate
+                    for candidate in same_tier
+                    if candidate.forced and not _locked_like(candidate)
+                )
+                declinable = tuple(
+                    candidate for candidate in candidates if not candidate.forced
+                )
+                if len(locked_mandatory) >= 2:
+                    state["pass_optional"] = locked_mandatory
+                    state["pass_allow_pass"] = True
+                    state["pass_phase"] = "ask"
+                    continue
+                if locked_mandatory:
+                    state["pass_forced"] = locked_mandatory
+                    state["pass_forced_at"] = 0
+                    state["pass_optional"] = None
+                    state["pass_phase"] = "forced"
+                    continue
+                face = declinable + open_mandatory
+                if open_mandatory and len(face) < 2:
+                    # 只有一段、且它不可放弃 ⇒ 不问（既有"强制段直接跑"）。
+                    state["pass_forced"] = open_mandatory
+                    state["pass_forced_at"] = 0
+                    state["pass_optional"] = None
+                    state["pass_phase"] = "forced"
+                    continue
+                state["pass_optional"] = face
+                state["pass_allow_pass"] = _face_allows_pass(face)
+                state["pass_phase"] = "ask"
                 continue
             if state["pass_phase"] == "forced":
                 forced = state["pass_forced"]
@@ -1905,6 +1971,7 @@ def _dispatch(
                 continue
             if state["pass_phase"] == "ask":
                 optional = state["pass_optional"]
+                allow_pass = state["pass_allow_pass"]
                 if optional is None:
                     optional = tuple(
                         candidate
@@ -1920,6 +1987,7 @@ def _dispatch(
                         if not candidate.forced
                     )
                     state["pass_optional"] = optional
+                    allow_pass = _face_allows_pass(optional)
                 if not optional:
                     # 本档可选项跑完了，但**更低档的强制段**还没跑（强制段一轮跑一档）：
                     # 回 ``start`` 重新收集，让它在本轮开头跑；``start`` 无候选时才轮到下一个
@@ -1936,6 +2004,7 @@ def _dispatch(
                     round=state["pass_round"],
                     floor=state["pass_floor"],
                     used=state["pass_used"],
+                    allow_pass=allow_pass,
                 )
                 if host.suspended(active):
                     return "stay"

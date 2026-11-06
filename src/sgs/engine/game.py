@@ -2558,6 +2558,7 @@ class Engine:
         round: int = 0,
         floor: int = 0,
         used: tuple[str, ...] = (),
+        allow_pass: bool | None = None,
     ) -> Any:
         """发一次 ``SKILL_ACTIVATION`` 询问：**本轮的全部候选**各一条裸 ``ActivateSkill``。
 
@@ -2586,9 +2587,16 @@ class Engine:
         first = candidates[0]
         actor = first.actor
         skill_ids = tuple(candidate.skill_id for candidate in candidates)
-        # 「可以 / 必须」是效果属性（与 ``locked`` 正交）：面里只要有一条"必须发动"，整张面
-        # 就没有 ``Pass``（少给一条会让它退化成"可以放弃"）。
-        optional = all(candidate.plan.optional for candidate in candidates)
+        # 「可以 / 必须」是效果属性（与 ``locked`` 正交）：缺省口径 = 面里只要有一条"必须发动"，
+        # 整张面就没有 ``Pass``（少给一条会让它退化成"可以放弃"）。
+        # ``allow_pass``（lei-shenganning 票 95）由派发环**显式**给：同座位同档的多段强制效果
+        # 合成"顺序面"时，全锁定侧给 ``Pass``（= 剩下按默认次序跑完）、全非锁定且都不可放弃
+        # **不给**（必须选一条）、面里有可放弃的段则给（`Pass` 只放弃那些，强制段随后照跑）。
+        optional = (
+            all(candidate.plan.optional for candidate in candidates)
+            if allow_pass is None
+            else bool(allow_pass)
+        )
         # 清单只随**已翻预发动**的技能下发（与 PLAY_PHASE 删骨架同一个开关）。界面按这同一个
         # 开关找入口（`preactivation.js:preactivatedSkill`）：清单在、开关没开 ⇒ 浮动按钮画
         # 不出、被动技按钮又不接 click ⇒ 这一问没有任何入口（票 23 报障）。没翻的技能改走

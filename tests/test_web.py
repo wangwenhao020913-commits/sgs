@@ -4048,6 +4048,11 @@ def _session_at_a_two_skill_activation_face() -> Session:
 
     ``heroes=("shen_zhugeliang", ...)`` 直接把神诸葛亮钉在人类座位上（不点将也确定）；
     其余询问取超时兜底（排列 = 恒等、技能 = 放弃），故驱动是确定性的。
+
+    **必须钉在 ``PHASE_FINISH``**（lei-shenganning 票 95）：同一时机的两段**强制**效果现在也
+    合成一张"先结哪一条"的面（【狂风】【大雾】的 ``TURN_START`` 到期清扫就是这种面，而且
+    两段都不可放弃 ⇒ 面上**没有** Pass）。这张用例钉的是"可选段的两候选面带 Pass"，故不能
+    停在那种强制面上。
     """
     session = Session(
         seed=7,
@@ -4061,9 +4066,11 @@ def _session_at_a_two_skill_activation_face() -> Session:
         pending = session.pending
         if pending is None:
             raise AssertionError("会话提前结束，没走到结束阶段的激活面")
-        if pending.kind == "SKILL_ACTIVATION" and sum(
-            1 for action in pending.legal_actions if action.kind == "ActivateSkill"
-        ) >= 2:
+        if (
+            pending.kind == "SKILL_ACTIVATION"
+            and getattr(pending, "timing", None) == Timing.PHASE_FINISH
+            and sum(1 for action in pending.legal_actions if action.kind == "ActivateSkill") >= 2
+        ):
             return session
         session.submit_answer(fallback_action(pending))
     raise AssertionError("400 次应答内没走到「同一时机两条技能」的激活面")

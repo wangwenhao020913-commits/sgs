@@ -4020,3 +4020,60 @@ def test_shuangxiong_is_offered_only_in_its_own_draw_phase():
     )
 
     assert probe.Asked == 0, "不是自己的摸牌阶段 ⇒ 这条实例连「是否发动」都不问"
+
+
+def test_the_two_expiry_hooks_share_an_order_face_without_a_pass():
+    """【狂风】【大雾】的 ``TURN_START`` 到期清扫撞同一时机 ⇒ 一张"先清哪一条"的面、**没有** Pass。
+
+    lei-shenganning 票 95 的用户口径：同一时机的多段**技能**效果由玩家选顺序；两段都不可放弃
+    （都是 ``Hook.forced``、且都不是锁定技）⇒ 面上没有「放弃」，必须选一条。
+    """
+    from sgs.state import Marker
+
+    engine = _shen_engine(seed=7, seats=2)
+    engine.state.player(1).markers = (
+        Marker(
+            name="狂风",
+            source_seat=0,
+            source_skill_id=KUANGFENG_SKILL,
+            count=1,
+            clear_on_source_death=True,
+        ),
+        Marker(
+            name="大雾",
+            source_seat=0,
+            source_skill_id=DAWU_SKILL,
+            count=1,
+            clear_on_source_death=True,
+        ),
+    )
+    player = _ShenDriver(activate_skills=(DAWU_SKILL,))
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: not e.state.player(1).markers,
+    )
+
+    faces = [query for query in player.queries if query.kind == QueryKind.SKILL_ACTIVATION]
+    order_face = next(
+        query
+        for query in faces
+        if {
+            action.skill_id
+            for action in query.legal_actions
+            if isinstance(action, ActivateSkill)
+        }
+        == {KUANGFENG_SKILL, DAWU_SKILL}
+    )
+    assert not any(isinstance(action, Pass) for action in order_face.legal_actions), (
+        "两段都不可放弃 ⇒ 面上没有「放弃」出口（用户 2026-11-07 口径）"
+    )
+    assert not engine.state.player(1).markers, "两条清扫都跑完了"
+    removed = [
+        record.name
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "marker_change"
+        and record.count == 0
+    ]
+    assert removed == ["大雾", "狂风"], f"按玩家选的顺序结算；实得 {removed}"
