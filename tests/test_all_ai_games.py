@@ -731,7 +731,7 @@ def test_the_m6_jie_qun_heroes_finish_a_full_ai_game_cleanly_and_replay():
 # M6 票 22（收口 / spec P2-2）：**8 个固定种子**的 8 人**混合池**全 AI 局
 # ---------------------------------------------------------------------------
 
-M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 145, 140, 141, 142, 143)
+M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 146, 145, 140, 141, 142, 143)
 """spec P2-2 的 **8 个固定种子**（票 22 收口批；原取 32 种子验收批的前 8 个）。
 
 写死而不是从 :data:`~support.ACCEPTANCE_SEEDS` 切片：种子批本身是验收内容，
@@ -749,6 +749,12 @@ M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 145, 140, 141, 142, 143)
 ⇒ 再次违反同一条"混合池"判据（判据未放宽，见本用例的严格断言）。按同一判据从 144 起
 重扫，**145** 是首个命中（`standard` / `feng` / `feng-mobile` / `huo-mobile` / `jie-ol`
 五版齐、8 名互异、零非法应答、跑完）。替换只换种子，不换判据。
+
+**2026-11-06 再换 1 个种子**（`huo-wolong-yanliang` 票 01 加火包 OL 卧龙诸葛 ⇒ 默认池
+79 / 50）：原种子 138 在新池下抽到的 8 名全是扩展包武将（`huo` / `huo-mobile` /
+`feng-mobile` / `jie-ol` / `lei`），**没有标准版** ⇒ 再次违反同一条"混合池"判据
+（判据未放宽）。按同一判据重扫 32 种子验收批（144 / 154 / 166 也各有一项不合格），
+**146** 是首个命中（8 名互异、零非法应答、跑完）。替换只换种子，不换判据。
 """
 
 M6_CLOSEOUT_PLAYERS = 8
@@ -780,7 +786,7 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (78, 49), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」）；tao-caocao 票 01 加自制包韬·曹操自制版 1 个 ⇒ 76 / 49（真名「曹操」已在池里））"
+    assert (len(pool), len(true_names)) == (79, 50), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」）；tao-caocao 票 01 加自制包韬·曹操自制版 1 个 ⇒ 76 / 49（真名「曹操」已在池里）；huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 1 个 ⇒ 79 / 50（新真名「卧龙诸葛」））"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)

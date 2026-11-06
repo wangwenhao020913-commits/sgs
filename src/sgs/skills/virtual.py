@@ -606,7 +606,10 @@ def virtual_card_use(
       再拿**完整** :func:`check_targets` 池 + :func:`target_combos` 造
       ``(Bn,) + 0..2`` 个其它目标的组合（W7-02：与 ``_respond`` 的 USE 趟同形，
       ``TARGET_COUNT`` 链读在同一处）；空预选集 = 无目标的响应使用（无懈一类的形状）；
-    - ``DODGE``：无目标的 ``UseCard``（真实【闪】的候选正是这么生成的）。
+    - ``DODGE``：无目标的 ``UseCard``（真实【闪】的候选正是这么生成的）；
+    - ``NULLIFY``：**无懈的收集式窗口**里的无目标 ``UseCard``（huo-wolong-yanliang 票 03
+      读法 A）：真实【无懈可击】的候选正是这么生成的，转化牌只在窗口里记一条**声明**，
+      由赢家分支统一使用。牌名闸门 = :func:`~sgs.effects.satisfies_required`。
 
     **本函数只读状态、不移动任何牌**：来源牌的移出由 :func:`virtual_candidates` 在整批
     候选算完之后统一做一次（否则先算的那组候选会改变后算那组看到的目标状态）。
@@ -686,6 +689,18 @@ def virtual_card_use(
                 for combo in combos
             ]
         return [PlayCard(card=card, answers_seq=ctx.answers_seq)]
+    if ctx.scope is CandidateScope.NULLIFY:
+        # **无懈的收集式窗口**（huo-wolong-yanliang 票 03 读法 A，用户 2026-11-06 裁）：
+        # 转化族在这一档的产物是**无目标**的使用——真实【无懈可击】的候选正是这么来的；
+        # 它在窗口里只算一条**声明**（``_collected_response_window`` 的
+        # ``response_declared``），此刻不耗牌、不压帧，收齐后由赢家分支统一 ``start_use``。
+        #
+        # 牌名闸门与 ``RESPOND`` 分支共用 :func:`~sgs.effects.satisfies_required`：
+        # 产物牌型必须当得了窗口要的那一张（本窗口的 ``respond_required`` 恒 = 牌名 id）。
+        # **不检查次数**：无懈没有使用次数上限，转化牌与真实牌同一条链（规则 §16.4）。
+        if ctx.respond_required is None or not satisfies_required(card, ctx.respond_required):
+            return []
+        return [UseCard(card=card, targets=(), answers_seq=ctx.answers_seq)]
     return []
 
 

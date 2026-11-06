@@ -512,7 +512,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈标准版 / 荀彧标准版 ⇒ 45 / 71 → 46 / 72。
   // lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
   // tao-caocao 票 01：自制包加韬·曹操自制版（真名「曹操」已在池里）⇒ 真名不变、版本 75 → 76。
-  ui.state.heroCatalog.length === 49 && catalogVersions.length === 78,
+  ui.state.heroCatalog.length === 50 && catalogVersions.length === 79,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -7643,9 +7643,11 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   // 这一局的首问变成神诸葛亮【七星】的两行交换（不可放弃的 ARRANGE）。本条只测
   // "重放窗口的四键 / 一次 POST / 409 刷新"，与池子无关：**钉死禁用名单**把新真名排除，
   // 恢复 20261013 的旧发将（同 SMOKE_ROSTER 的处置，不放宽判据）。
+  // huo-wolong-yanliang 票 01：火包 OL 再加卧龙诸葛（新真名）⇒ 同一局又重排、首问变成
+  // 【天成】的展示询问（不是 Pass 窗口）⇒ 把新版本也钉进禁用名单，恢复该局的旧发将。
   const fresh = await post("/api/sessions", {
     player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261013,
-    banned_heroes: ["taishici", "xunyu"],
+    banned_heroes: ["taishici", "xunyu", "wolong_zhugeliang"],
   });
   await openSession(fresh);
   ui.renderPending(ui.state.view);
@@ -7666,7 +7668,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   // 409：下一次 /answer 回 409；刷新取回的新询问换成"只有 EndPhase"的出牌阶段。
   const fresh2 = await post("/api/sessions", {
     player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261013,
-    banned_heroes: ["taishici", "xunyu"],
+    banned_heroes: ["taishici", "xunyu", "wolong_zhugeliang"],
   });
   await openSession(fresh2);
   ui.renderPending(ui.state.view);

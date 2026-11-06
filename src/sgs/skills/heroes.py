@@ -57,10 +57,12 @@ from sgs.effects import (
     target_sets_match,
 )
 from sgs.state import (
+    ActivateSkill,
     GameState,
     PlayCard,
     QueryKind,
     Reforge,
+    SlotKind,
     Step,
     StepPool,
     UseCard,
@@ -78,6 +80,7 @@ from .flow import seat_choice
 from .virtual import card_ids, single_conversion, virtual_candidates
 
 __all__ = [
+    "BAZHEN",
     "CONVERSION_SKILLS",
     "conversion_offers",
     "conversion_offers_by_source",
@@ -88,6 +91,7 @@ __all__ = [
     "owned_conversion_skill_ids",
     "resolve_conversion_confirmation",
     "transform_candidates",
+    "wolong_zhugeliang_skill_definitions",
 ]
 
 ZoneFilter = Callable[[GameState, int], tuple[int, ...]]
@@ -293,6 +297,18 @@ def _wine(state: GameState, card_id: int) -> bool:
 def _peach_to_wine(state: GameState, card_id: int) -> bool:
     """牌名谓词：【桃】（【龙胆】的【桃】→【酒】；产物牌名不在本档牌堆时不产出）。"""
     return _convertible(state, card_id, card_type="peach") and _product_in_pack(state, "wine")
+
+
+def _red_fire_attack(state: GameState, card_id: int) -> bool:
+    """颜色谓词 + 产物闸门：红色手牌，且本档牌堆里有【火攻】实体牌。
+
+    牌面「一张红色手牌当【火攻】**使用**」——产物牌名不在本档牌堆时（默认
+    ``standard_108`` 一张都没有，只有军争 160 档有 3 张）不给该方向：照
+    :func:`_product_in_pack` 的既有口径（界【龙胆】酒 / 桃、庞统移动版【连环】的 R5），
+    否则会造出一张牌面名回落到 ``fire_attack`` 的虚拟锦囊（用户 2026-11-06 随
+    huo-wolong-yanliang 票 01 §7 R3 再签）。
+    """
+    return _red(state, card_id) and _product_in_pack(state, "fire_attack")
 
 
 def _diamond_slash_target_pool(
@@ -603,10 +619,41 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         modifiers=(Modifier(ModifierPoint.CANDIDATES, _lianhuan_reforge),),
         requirement="选择1张♣手牌当【铁索连环】使用；或重铸这张手牌",
     ),
+    # 火包·OL 卧龙诸葛【火计】（huo-wolong-yanliang 票 01 §2）：出牌阶段，一张红色**手牌**
+    # 当【火攻】**使用**。牌面明写「手牌」⇒ 只有手牌（不套 `_hand_equip` 的区域默认，账本
+    # 「区域默认读法（W4-3）」）；产物走真【火攻】同一条使用链（目标须有手牌、可被无懈、
+    # 亮 1 张 + 可选弃同花色造成 1 点火焰伤害）。
+    #
+    # **产物牌名不在本档牌堆时不给该方向**（`hero.pangtong_mobile.lianhuan` 的 R5，
+    # 用户 2026-11-02 已签）：默认 ``standard_108`` 一张【火攻】都没有 ⇒ 本技能在该档
+    # 整条不亮；``standard_ex_160`` 正常可用（用户 2026-11-06 随票 01 §7 R3 再签）。
+    ConversionSkill(
+        hero_id="wolong_zhugeliang",
+        short_id="huoji",
+        target_type_id="fire_attack",
+        source_zone=_hand,
+        predicate=_red_fire_attack,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张红色手牌当【火攻】使用",
+    ),
+    # 火包·OL 卧龙诸葛【看破】（huo-wolong-yanliang 票 03 读法 A）：「一张黑色手牌当
+    # 【无懈可击】使用」。**没有出牌阶段那一档**：【无懈可击】是响应牌
+    # （``rated_targets=0`` + ``use_timings`` 只含生效前），出牌阶段没有合法目标 ⇒ 不产
+    # 候选（不发空询问）。唯一语境 = **无懈的收集式窗口**（``CandidateScope.NULLIFY``），
+    # 产物是无目标使用、在窗口里只记一条**声明**，收齐后由赢家分支统一使用。
+    ConversionSkill(
+        hero_id="wolong_zhugeliang",
+        short_id="kanpo",
+        target_type_id="nullify",
+        source_zone=_hand,
+        predicate=_black,
+        scopes=(CandidateScope.NULLIFY,),
+        requirement="选择1张黑色手牌当【无懈可击】使用",
+    ),
 )
-"""H 族五条技能（六条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
-甘宁那一行）的逐字声明（票 03 §表 + M6 票 02【倾国】/ 票 03【奇袭】/ 票 04 界关羽【武圣】/
-票 07 界甘宁【奇袭】）。"""
+"""H 族七条技能（八条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
+甘宁那一行；火包 OL 卧龙诸葛【火计】【看破】两条）的逐字声明（票 03 §表 + M6 票 02【倾国】/
+票 03【奇袭】/ 票 04 界关羽【武圣】/ 票 07 界甘宁【奇袭】/ huo-wolong-yanliang 票 01 §2·§3）。"""
 
 
 _LUANJI_DEF = SkillDef(
@@ -620,6 +667,65 @@ _LUANJI_DEF = SkillDef(
     requirement="选择两张花色相同的手牌当【万箭齐发】使用",
 )
 """袁绍移动版【乱击】的独立定义（多源转化：两张同花色手牌 → 虚拟【万箭齐发】）。"""
+
+
+BAZHEN = hero_skill_id("wolong_zhugeliang", "bazhen")
+"""火包·OL 卧龙诸葛【八阵】的全限定技能 id。"""
+
+
+def _bazhen_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """八阵：装备区里**没有实体防具牌**时，把自己追加进"需要【闪】"的候选。
+
+    形状与 :func:`~sgs.skills.catalog._eight_diagrams_candidate` **逐条同构**（huo-wolong-
+    yanliang 票 01 §1 的"读法 Q"）：同一条 ``CANDIDATES`` 回调、同一条引擎通用判定路——
+
+    - ``ctx.scope is DODGE`` ∧ ``ctx.owner == ctx.subject``：只往**需要者自己**的【闪】窗口里
+      追加（与真【八卦阵】的两条自校判据相同：跨座位注入是合法用法，本技能不用它）；
+    - 条件读**实体**装备区槽位，**不读** ``is_equipped``（用户 2026-11-06 随票 01 §7 R2 签）：
+      后者是"实体装备 ∪ 虚拟授予"，而八阵若将来落虚拟装备位就会**自指成真**、条件失效；
+      今天 ``is_equipped`` 在 ``src/`` 里零生产读点，故由本判据自己守住这条纪律；
+    - 命中后追加一条 ``ActivateSkill(skill_id=ctx.skill_id)``（= 本技能自己的 id）：引擎在
+      【闪】窗口见到**未登记提供者**的 ``ActivateSkill`` 就压判定帧（``open_skill_judgment``），
+      判红 ⇒ ``skill_result=True`` ⇒ 与真【八卦阵】走**同一条** ``_accept(virtual_dodge(...))``
+      使用链。故八阵**不新增**任何"视为使用"机制，也不写座位状态；
+    - 连续型（`edge-cases.md` 2.5 的 M2）⇒ **查询期算**：每次开窗现读装备区，"装备区一变
+      立刻跟着变"是结构事实，没有事件接缝要同步。
+    """
+    if ctx.scope is not CandidateScope.DODGE:
+        return current
+    if ctx.owner != ctx.subject:
+        return current
+    if any(
+        state.card(card_id).slot is SlotKind.ARMOR
+        for card_id in state.player(ctx.subject).equip
+    ):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def wolong_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
+    """火包·OL 卧龙诸葛的**非转化**技能定义（当前只有【八阵】一条）。
+
+    【火计】/【看破】是转化技，走 :data:`CONVERSION_SKILLS` 那一份声明（同一张表、同一族
+    构造子）；本函数只收"不是转化声明"的那一条，故三条技能仍各一条 ``SkillDef``。
+
+    八阵是**锁定技**（牌面写「锁定技」）⇒ 派发环的 forced 分支不问"是否发动"
+    （`shapes.md` §2 的锁定技变体注）；``skill_type = NORMAL``（锁定不是技能类型）；
+    ``carrier = HERO`` ⇒ 优先级档由载体派生（武将档）。
+
+    ``requirement`` 取**效果句**「判定为红则视为使用【闪】」而不是牌面全文：它在【闪】窗口里
+    与真正的【八卦阵】并排出现，两处文案不同会让玩家以为是两件事（票 01 §1 询问剧本）。
+    """
+    return (
+        SkillDef(
+            skill_id=BAZHEN,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.CANDIDATES, _bazhen_candidate),),
+            requirement="判定为红则视为使用【闪】",
+        ),
+    )
 
 
 _FORCED_CONVERSION_SKILL_IDS: frozenset[str] = frozenset(

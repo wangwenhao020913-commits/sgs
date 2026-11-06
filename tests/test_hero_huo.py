@@ -20,10 +20,18 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack, load_hero_tables
+from sgs.data import (
+    Color,
+    Identity,
+    Kingdom,
+    RuleConfig,
+    color_of_suit,
+    load_content_pack,
+    load_hero_tables,
+)
 from sgs.effects import distance, hand_limit
 from sgs.engine import Engine, IllegalActionError
-from sgs.skills import CATALOG, resolve_conversion_confirmation
+from sgs.skills import CATALOG, is_equipped, resolve_conversion_confirmation
 from sgs.skills.shen_zhugeliang import star_zone_key
 from sgs.state import (
     ActivateSkill,
@@ -32,6 +40,7 @@ from sgs.state import (
     EndPhase,
     Pass,
     Phase,
+    PlayCard,
     QueryKind,
     Reforge,
     SelectCards,
@@ -39,7 +48,7 @@ from sgs.state import (
     SlotKind,
     UseCard,
 )
-from sgs.state import FrameKind
+from sgs.state import FrameKind, WindowCause
 from sgs.timing import Timing
 
 from support import (
@@ -48,8 +57,10 @@ from support import (
     build_state,
     cards_of_type,
     deck_excluding,
+    find_action,
     ran_timing,
     run_queries,
+    run_until,
 )
 
 PACK = load_content_pack(deck_profile="standard_108")
@@ -3138,3 +3149,607 @@ def test_jieming_draws_nothing_when_the_target_is_already_full():
     )
 
     assert len(engine.state.player(1).hand) == 4
+
+
+# ---------------------------------------------------------------------------
+# huo-wolong-yanliang 票 01：火包·OL 卧龙诸葛【八阵】【火计】【看破】
+#
+# 牌面（用户 `D:\SGS_HEROS\神话再临-火包\卧龙诸葛\技能.txt`，逐字）：
+#
+#     八阵  锁定技，当你装备区没有防具牌时，你视为装备着【八卦阵】。
+#     火计  出牌阶段，你可以将一张红色手牌当【火攻】使用。
+#     看破  你可以将一张黑色手牌当【无懈可击】使用。
+#
+# 用户 2026-11-06 签的判据（票 01 §7 R1–R5）：八阵走**候选模型**（不写虚拟装备位）；
+# 条件读**实体**装备区槽位；火计照【连环】R5 口径（本档牌堆没有【火攻】⇒ 不产出候选）；
+# 看破按 03 号裁定票的读法 A 落（转化族补 `NULLIFY` 出口）。
+# ---------------------------------------------------------------------------
+
+WOLONG = "wolong_zhugeliang"
+BAZHEN = "hero.wolong_zhugeliang.bazhen"
+HUOJI = "hero.wolong_zhugeliang.huoji"
+KANPO = "hero.wolong_zhugeliang.kanpo"
+
+
+def _slashes(count: int) -> list[int]:
+    return _cards("slash")[:count]
+
+
+def _trick(type_id: str) -> int:
+    return _cards(type_id)[0]
+
+
+def _colored_cards(type_id: str, color: Color) -> list[int]:
+    """某牌名里全部指定**颜色**的牌（颜色读牌面，不抄花色表）。"""
+    return [
+        card_id
+        for card_id in _cards(type_id)
+        if color_of_suit(PACK.deck.cards[card_id].suit) is color
+    ]
+
+
+def _deck_with_top(pack, top: int, *used: int) -> tuple[int, ...]:
+    """牌堆序：``top`` 在**顶上**（技能自己的判定先抽它），其余按数据表序。"""
+    used_ids = {top, *used}
+    return (top,) + tuple(
+        card_id for card_id in range(len(pack.deck.cards)) if card_id not in used_ids
+    )
+
+
+def _deck_with_tops(pack, tops: tuple[int, ...], *used: int) -> tuple[int, ...]:
+    """牌堆序：``tops`` 逐张压在顶上（本局面**会先走摸牌阶段**，故先钉住摸到的几张）。"""
+    used_ids = {*tops, *used}
+    return tuple(tops) + tuple(
+        card_id for card_id in range(len(pack.deck.cards)) if card_id not in used_ids
+    )
+
+
+def _deltas(engine, delta_type: str) -> list:
+    """记录流里指定类型的 delta（``engine.records`` 的 ``delta_type``）。"""
+    return [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == delta_type
+    ]
+
+
+class _SlashScript:
+    """座位脚本：出牌阶段打一张【杀】；【闪】窗口按开关选【八阵】；其余取最小合法应答。"""
+
+    def __init__(self, *, slash: int | None = None, target: int | None = None, bazhen: bool = False):
+        self.slash = slash
+        self.target = target
+        self.bazhen = bazhen
+        self.played = False
+        self.dodges: list[object] = []
+        self.bazhen_used = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and self.slash is not None and not self.played:
+            action = find_action(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == self.slash
+                and tuple(action.targets) == (self.target,),
+            )
+            if action is not None:
+                self.played = True
+                return action
+        if query.kind == QueryKind.DODGE:
+            self.dodges.append(query)
+            if self.bazhen:
+                action = find_action(
+                    query,
+                    lambda action: isinstance(action, ActivateSkill)
+                    and action.skill_id == BAZHEN,
+                )
+                if action is not None:
+                    self.bazhen_used = True
+                    return action
+        return PassPlayer().respond(query)
+
+
+def _dodge_state(*, top: int, defender_hand=(), defender_equip=(), virtual_equipment=()):
+    """座位 0 出一张【杀】打座位 1（卧龙诸葛）；判定牌 = ``top``。
+
+    回合仍从摸牌阶段跑起（``phase=PLAY`` 只放阶段指针），故牌堆顶先压**两张黑牌**当
+    座位 0 摸到的两张——否则判定抽到的是被摸走之后的那张，颜色不受控。
+    """
+    slash = _slashes(1)[0]
+    drawn = tuple(
+        card_id
+        for card_id in _colored_cards("slash", Color.BLACK)
+        if card_id != slash
+    )[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), identity=Identity.LORD),
+            SeatSpec(
+                hero=WOLONG,
+                hand=tuple(defender_hand),
+                equip=tuple(defender_equip),
+                virtual_equipment=tuple(virtual_equipment),
+                identity=Identity.REBEL,
+            ),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        deck=_deck_with_tops(
+            PACK, (*drawn, top), slash, *defender_hand, *defender_equip
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    return state, slash
+
+
+def _run_slash(state, slash: int, *, bazhen: bool):
+    """座位 0 出【杀】打座位 1；跑到那张【杀】进弃牌堆且结算栈清空。"""
+    engine = Engine.from_state(state, seed=1)
+    attacker = _SlashScript(slash=slash, target=1)
+    defender = _SlashScript(bazhen=bazhen)
+    return (
+        run_until(
+            engine,
+            [attacker, defender, PassPlayer(), PassPlayer()],
+            lambda e: slash in e.state.discard and not e.stack,
+        ),
+        attacker,
+        defender,
+    )
+
+
+def test_bazhen_is_locked_and_has_no_activation_question():
+    """牌面写「锁定技」⇒ 形状不变但那一问不发（`shapes.md` §2 的锁定技变体注）。"""
+    assert CATALOG[BAZHEN].locked is True
+    red = _judge_card(Color.RED)
+    state, slash = _dodge_state(top=red)
+    _, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert defender.dodges, "【闪】窗口照常开"
+    assert not [
+        query
+        for query in (
+            record.query
+            for record in Engine.from_state(state, seed=1).records
+            if record.kind == "query"
+        )
+        if query.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(query, "skill_id", None) == BAZHEN
+    ], "锁定技不问「是否发动」"
+
+
+def test_bazhen_offers_a_dodge_judgment_when_the_armor_zone_is_empty():
+    """装备区里没有防具牌 ⇒ 【闪】窗口多出一条【八阵】候选。"""
+    red = _judge_card(Color.RED)
+    state, slash = _dodge_state(top=red)
+    _, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert defender.dodges, "防御方拿到一次【闪】询问"
+    assert find_action(
+        defender.dodges[0],
+        lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+    ), "没有实体防具 ⇒ 八阵候选在【闪】窗口里"
+
+
+def test_bazhen_is_silent_when_a_physical_armor_is_equipped():
+    """装了实体防具 ⇒ 条件不成立、连候选都不产出（不发空询问）。"""
+    red = _judge_card(Color.RED)
+    armor = _cards("eight_diagrams")[0]
+    state, slash = _dodge_state(top=red, defender_equip=(armor,))
+    _, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert defender.dodges, "【闪】窗口照常开（真【闪】/放弃仍在）"
+    assert (
+        find_action(
+            defender.dodges[0],
+            lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+        )
+        is None
+    ), "装备区里有实体防具牌 ⇒ 八阵不产出"
+
+
+def test_bazhen_reads_the_physical_armor_zone_not_is_equipped():
+    """条件读**实体**槽位：虚拟授予让 `is_equipped` 为真，但八阵照样产出。"""
+    red = _judge_card(Color.RED)
+    state, slash = _dodge_state(top=red, virtual_equipment=("equip.eight_diagrams",))
+
+    assert is_equipped(state, 1, SlotKind.ARMOR) is True, "虚拟【八卦阵】进了「已装备」并集"
+
+    _, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert find_action(
+        defender.dodges[0],
+        lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+    ), "物理防具槽为空 ⇒ 八阵仍然产出（不把虚拟授予算成防具牌）"
+
+
+def _judge_card(color: Color) -> int:
+    """判定牌：牌堆里第一张该颜色的牌（**排除出牌者的那张【杀】**——同一张牌不能既在
+    手里又在牌堆顶）。"""
+    played = _slashes(1)[0]
+    for card_id, card in enumerate(PACK.deck.cards):
+        if card_id != played and color_of_suit(card.suit) is color:
+            return card_id
+    raise AssertionError(f"本档没有{color}牌")
+
+
+def test_bazhen_red_judgment_is_a_used_dodge():
+    """判定为红 ⇒ 视为使用一张【闪】，【杀】被抵消、不造成伤害。"""
+    red = _judge_card(Color.RED)
+    state, slash = _dodge_state(top=red)
+    engine, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert defender.bazhen_used is True
+    assert engine.state.player(1).hp == 4, "判红 ⇒ 视为使用【闪】⇒ 【杀】不造成伤害"
+    assert engine.state.player(1).hand == [], "八阵不耗手牌（产物是纯虚拟【闪】）"
+
+
+def test_bazhen_black_judgment_does_not_cancel_the_slash():
+    """判定为黑 ⇒ 不抵消，【杀】照常结算。"""
+    black = _judge_card(Color.BLACK)
+    state, slash = _dodge_state(top=black)
+    engine, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert defender.bazhen_used is True
+    assert engine.state.player(1).hp == 3, "判黑 ⇒ 【杀】照常造成 1 点伤害"
+
+
+def test_bazhen_is_offered_once_per_dodge_window():
+    """【无双】要两张【闪】：八阵在同一窗口里只出现一次（`providers_used` 的既有口径）。"""
+    red = _judge_card(Color.RED)
+    red2 = _judge_card(Color.RED)
+    slash = _slashes(1)[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="lvbu", hand=(slash,), identity=Identity.LORD),
+            SeatSpec(hero=WOLONG, identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        deck=_deck_with_top(PACK, red, slash, red2),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    attacker = _SlashScript(slash=slash, target=1)
+    defender = _SlashScript(bazhen=True)
+    engine = run_until(
+        engine,
+        [attacker, defender, PassPlayer(), PassPlayer()],
+        lambda e: slash in e.state.discard and not e.stack,
+    )
+
+    assert len(defender.dodges) >= 2, "【无双】⇒ 同一窗口至少问两次【闪】"
+    assert find_action(
+        defender.dodges[0],
+        lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+    ), "第一次可以发动"
+    assert (
+        find_action(
+            defender.dodges[1],
+            lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+        )
+        is None
+    ), "同一窗口的第二次不再给八阵（每提供者只问一次）"
+    assert engine.state.player(1).hp == 3, "只挡了第一张【闪】，第二张没挡 ⇒ 照常受伤"
+
+
+# ---------------------------------------------------------------------------
+# 【火计】：出牌阶段，一张红色**手牌**当【火攻】**使用**
+# ---------------------------------------------------------------------------
+
+class _PlayScript:
+    """座位脚本：出牌阶段按脚本提交一个动作（转化确认 = ``ActivateSkill(来源, 目标)``）。"""
+
+    def __init__(self, *, skill: str | None = None, picks=(), choices=(), card=None, targets=()):
+        self.skill = skill
+        self.picks = tuple(picks)
+        self.choices = tuple(choices)
+        self.card = card
+        self.targets = tuple(targets)
+        self.played = False
+        self.queries: list[object] = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and not self.played:
+            self.queries.append(query)
+            if self.skill is not None:
+                steps = (getattr(query, "transform_preactivations", None) or {}).get(
+                    self.skill, ()
+                )
+                if steps:
+                    self.played = True
+                    return ActivateSkill(
+                        skill_id=self.skill,
+                        picks=self.picks,
+                        choices=self.choices,
+                        answers_seq=query.seq,
+                    )
+            elif self.card is not None:
+                action = find_action(
+                    query,
+                    lambda action: isinstance(action, (UseCard, PlayCard))
+                    and action.card.card_id == self.card
+                    and tuple(getattr(action, "targets", ())) == self.targets,
+                )
+                if action is not None:
+                    self.played = True
+                    return action
+        return PassPlayer().respond(query)
+
+
+def _play_phase_query(pack, seats, *, tops=()):
+    """跑到座位 0 的出牌阶段询问即停，返回那条询问（候选面 = 有没有转化入口）。
+
+    ``tops`` 是牌堆顶的显式牌：本局面**会先走摸牌阶段**（``build_state(phase=PLAY)``
+    只是把阶段指针放在出牌阶段，回合仍从头跑），故必须把摸到的两张也钉住，否则它们的
+    颜色会混进"手里的转化来源"。
+    """
+    used = [card_id for spec in seats for card_id in (*spec.hand, *spec.equip, *tops)]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(tops)
+        + tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id not in used),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    probe = _PlayScript()
+    run_queries(
+        engine,
+        [probe, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: bool(probe.queries),
+    )
+    return engine, probe.queries[0]
+
+
+def test_huoji_converts_a_red_hand_card_on_the_160_deck():
+    """160 档有【火攻】实体牌 ⇒ 一张红色手牌给出一条转化入口。"""
+    red = _colored_cards("slash", Color.RED)[0]
+    tops = tuple(_colored_cards("slash", Color.BLACK)[:2])
+    _, query = _play_phase_query(
+        PACK_160,
+        [
+            SeatSpec(hero=WOLONG, hand=(red,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        tops=tops,
+    )
+
+    steps = (getattr(query, "transform_preactivations", None) or {}).get(HUOJI)
+    assert steps, "红色手牌 ⇒ 火计的转化清单渲得出来"
+    assert [step.name for step in steps] == ["card", "seat"], "来源步 → 目标步"
+
+
+def test_huoji_is_absent_without_a_red_hand_card():
+    """手里只有黑牌 ⇒ 没有来源 ⇒ 整条不亮（不发空清单）。"""
+    blacks = _colored_cards("slash", Color.BLACK)
+    black, tops = blacks[0], tuple(blacks[1:3])
+    _, query = _play_phase_query(
+        PACK_160,
+        [
+            SeatSpec(hero=WOLONG, hand=(black,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        tops=tops,
+    )
+
+    assert not (getattr(query, "transform_preactivations", None) or {}).get(HUOJI)
+
+
+def test_huoji_takes_hand_cards_only_not_equipment():
+    """牌面明写「手牌」⇒ 装备区里的红色牌不算来源（不套区域默认）。"""
+    red_equip = _colored_cards("crossbow", Color.RED)[0]
+    tops = tuple(_colored_cards("slash", Color.BLACK)[:2])
+    _, query = _play_phase_query(
+        PACK_160,
+        [
+            SeatSpec(hero=WOLONG, equip=(red_equip,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        tops=tops,
+    )
+
+    assert not (getattr(query, "transform_preactivations", None) or {}).get(HUOJI), (
+        "红色装备牌不能当【火攻】的来源"
+    )
+
+
+def test_huoji_is_absent_when_the_deck_has_no_fire_attack():
+    """108 档牌堆里一张【火攻】都没有 ⇒ 照【连环】R5 口径不产出该方向。"""
+    red = _colored_cards("slash", Color.RED)[0]
+    tops = tuple(_colored_cards("slash", Color.BLACK)[:2])
+    _, query = _play_phase_query(
+        PACK,
+        [
+            SeatSpec(hero=WOLONG, hand=(red,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        tops=tops,
+    )
+
+    assert not (getattr(query, "transform_preactivations", None) or {}).get(HUOJI)
+
+
+def test_huoji_product_goes_through_the_real_fire_attack_chain():
+    """产物走真【火攻】同一条使用链：目标须有手牌、结算先问「亮一张手牌」。"""
+    red = _colored_cards("slash", Color.RED)[0]
+    target_card = _cards("slash")[1]
+    tops = tuple(_colored_cards("slash", Color.BLACK)[:2])
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=WOLONG, hand=(red,), identity=Identity.LORD),
+            SeatSpec(hand=(target_card,), identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        deck=_deck_with_tops(PACK_160, tops, red, target_card),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    driver = _PlayScript(skill=HUOJI, picks=(red,), choices=("seat:1",))
+    run_until(
+        engine,
+        [driver, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: bool(_deltas(e, "card_reveal")),
+    )
+
+    assert driver.played is True, "转化确认被接受"
+    assert _deltas(engine, "card_reveal"), "虚拟【火攻】与真牌同一条结算链（目标先亮一张手牌）"
+    assert red in engine.state.discard, "来源实体牌照常进弃牌堆"
+    assert engine.state.player(1).hp == 4, "使用者放弃弃同花色 ⇒ 不造成伤害"
+
+
+# ---------------------------------------------------------------------------
+# 【看破】：一张黑色**手牌**当【无懈可击】**使用**（只在无懈的收集式窗口）
+# ---------------------------------------------------------------------------
+
+
+class _NullifyScript:
+    """座位脚本：出牌阶段打一张锦囊；无懈窗口按开关用【看破】声明。"""
+
+    def __init__(self, *, trick: int | None = None, target: int | None = None, kanpo_card: int | None = None):
+        self.trick = trick
+        self.target = target
+        self.kanpo_card = kanpo_card
+        self.played = False
+        self.responses: list[object] = []
+        self.kanpo_used = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and self.trick is not None and not self.played:
+            action = find_action(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == self.trick
+                and tuple(action.targets) == (self.target,),
+            )
+            if action is not None:
+                self.played = True
+                return action
+        if query.kind == QueryKind.RESPOND:
+            self.responses.append(query)
+            if (
+                self.kanpo_card is not None
+                and getattr(query, "cause", None) is WindowCause.NULLIFY
+            ):
+                steps = (getattr(query, "transform_preactivations", None) or {}).get(KANPO, ())
+                if steps:
+                    self.kanpo_used = True
+                    return ActivateSkill(
+                        skill_id=KANPO,
+                        picks=(self.kanpo_card,),
+                        choices=(),
+                        answers_seq=query.seq,
+                    )
+        return PassPlayer().respond(query)
+
+
+def _nullify_state(*, wolong_hand, target_hand=()):
+    """座位 0 对座位 1（卧龙诸葛）使用【过河拆桥】；无懈窗口会逐个问存活角色。
+
+    ``wolong_hand`` 与 ``target_hand`` 都发给**座位 1**（它既是目标的受害者、也是可能的
+    无懈应答者）。
+    """
+    trick = _trick("dismantlement")
+    hand = tuple(wolong_hand) + tuple(target_hand)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(trick,), identity=Identity.LORD),
+            SeatSpec(hero=WOLONG, hand=hand, identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        deck=deck_excluding(PACK, trick, *hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    return state, trick
+
+
+def test_kanpo_declares_a_nullify_in_the_collected_window():
+    """黑色手牌 ⇒ 无懈窗口里出现【看破】的声明入口，且它真的抵消了那张锦囊。"""
+    black = _colored_cards("slash", Color.BLACK)[0]
+    target_card = _cards("slash")[1]
+    state, trick = _nullify_state(wolong_hand=(black,), target_hand=(target_card,))
+    engine = Engine.from_state(state, seed=1)
+    caster = _NullifyScript(trick=trick, target=1)
+    wolong = _NullifyScript(kanpo_card=black)
+    engine = run_until(
+        engine,
+        [caster, wolong, PassPlayer(), PassPlayer()],
+        lambda e: trick in e.state.discard and not e.stack,
+    )
+
+    assert wolong.responses, "无懈窗口会问到卧龙诸葛"
+    assert wolong.kanpo_used is True
+    assert list(engine.state.player(1).hand) == [target_card], (
+        "锦囊被抵消 ⇒ 目标没有被拆牌；离开手牌的只有看破的那张来源牌"
+    )
+    assert black in engine.state.discard, "来源实体牌进弃牌堆（转化牌的一条使用链）"
+
+
+def test_kanpo_is_absent_without_a_black_hand_card():
+    """手里没有黑牌 ⇒ 窗口里没有【看破】入口（不发空清单）。"""
+    red = _colored_cards("slash", Color.RED)[0]
+    target_card = _cards("slash")[1]
+    state, trick = _nullify_state(wolong_hand=(red,), target_hand=(target_card,))
+    engine = Engine.from_state(state, seed=1)
+    caster = _NullifyScript(trick=trick, target=1)
+    wolong = _NullifyScript(kanpo_card=red)
+    engine = run_until(
+        engine,
+        [caster, wolong, PassPlayer(), PassPlayer()],
+        lambda e: trick in e.state.discard and not e.stack,
+    )
+
+    assert wolong.responses, "窗口照常问到它"
+    assert all(
+        not (getattr(query, "transform_preactivations", None) or {}).get(KANPO)
+        for query in wolong.responses
+        if getattr(query, "cause", None) is WindowCause.NULLIFY
+    ), "只有红牌 ⇒ 看破没有候选"
+    assert len(engine.state.player(1).hand) == 1, "没有抵消 ⇒ 目标失去一张手牌"
+
+
+def test_kanpo_is_absent_in_the_play_phase():
+    """出牌阶段没有【无懈可击】的合法目标 ⇒ 整条不出现（不给死路入口）。"""
+    blacks = _colored_cards("slash", Color.BLACK)
+    black, tops = blacks[0], tuple(blacks[1:3])
+    _, query = _play_phase_query(
+        PACK,
+        [
+            SeatSpec(hero=WOLONG, hand=(black,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        tops=tops,
+    )
+
+    assert not (getattr(query, "transform_preactivations", None) or {}).get(KANPO)
+    assert not any(
+        isinstance(action, (UseCard, PlayCard))
+        and getattr(action.card, "type", None) == "nullify"
+        for action in query.legal_actions
+    )

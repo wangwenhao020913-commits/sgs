@@ -210,15 +210,17 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     逐点触发**的伤害后技能与固定切分的摸牌阶段排列），票 16 起 83（界刘备
     【仁德】/【激将】、界赵云【龙胆】/【涯角】、界诸葛亮【观星】/【空城】 = 首个
     "每名角色限一次 + 视为使用基本牌"的给牌技、首个"尾部紧凑段"虚拟牌与首个
-    "结束阶段再次观星"的双时机排列技能）。
+    "结束阶段再次观星"的双时机排列技能）。huo-wolong-yanliang 票 01 起 164
+    （火包·OL 卧龙诸葛【八阵】/【火计】/【看破】 = 首个"锁定技只往别人的【闪】窗口里
+    补一条候选"的载体，也是转化族在**无懈的收集式窗口**里的首个载体）。
     函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 161
+    assert len(CATALOG) == 164
     assert len(equipment) == 22
-    assert len(heroes) == 139
+    assert len(heroes) == 142
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -244,7 +246,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 139
+    assert len(expected) == 142
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1153,6 +1155,10 @@ SKILL_FILES: dict[str, str] = {
     # jie-feng-batch 票 02：界魏延移动版【狂骨】【奇谋】。
     "hero.jie_weiyan_mobile.kuanggu": "test_hero_jie_feng.py",
     "hero.jie_weiyan_mobile.qimou": "test_hero_jie_feng.py",
+    # huo-wolong-yanliang 票 01：火包·OL 卧龙诸葛（八阵 / 火计 / 看破）。
+    "hero.wolong_zhugeliang.bazhen": "test_hero_huo.py",
+    "hero.wolong_zhugeliang.huoji": "test_hero_huo.py",
+    "hero.wolong_zhugeliang.kanpo": "test_hero_huo.py",
 }
 """启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
@@ -2004,6 +2010,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_diaochan.biyue": "零步技能",
     "equip.ice_sword": "多轮技能",
     "equip.double_sword": "多轮技能",
+    # huo-wolong-yanliang 票 01：火包·OL 卧龙诸葛
+    #   八阵 = 锁定技（"视为装备"是连续型条件，只往别人的【闪】窗口补候选，没有询问）；
+    #   火计 / 看破 = 转化声明（单源、`CANDIDATES` 注入，没有"是否发动"那一问）。
+    "hero.wolong_zhugeliang.bazhen": "锁定技",
+    "hero.wolong_zhugeliang.huoji": "转化技",
+    "hero.wolong_zhugeliang.kanpo": "转化技",
     # 锁定技 22（locked=True，含带目标池 / 修饰器的锁定技；M5-01a 的 4 件军争装备占位）
     "equip.crossbow": "锁定技",
     "equip.qinggang_sword": "锁定技",
@@ -2153,9 +2165,11 @@ SHAPE_COUNTS: dict[str, int] = {
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
+    # huo-wolong-yanliang 票 01：卧龙诸葛【八阵】（锁定技 + 候选生成器）⇒ 锁定技 36 → 37；
+    # 【火计】【看破】两条转化声明 ⇒ 转化技 15 → 17。
     "多轮技能": 16,
-    "锁定技": 36,
-    "转化技": 15,
+    "锁定技": 37,
+    "转化技": 17,
     "能力位": 3,
     "候选生成器": 1,
     "候选提供者": 5,
@@ -2266,7 +2280,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 161
+    assert len(SKILL_SHAPE) == len(CATALOG) == 164
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2383,7 +2397,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """83 在内 / 73 在外（156 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """85 在内 / 79 在外（164 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2396,7 +2410,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 85
-    assert len(outside) == 76
+    assert len(outside) == 79
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

@@ -3744,6 +3744,17 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "一张♣手牌当【铁索连环】使用或重铸：多一条使用路径 + 一条重铸出口，保守为正；"
         "重铸分支的打分由 _score_reforge 按牌值扣项",
     ),
+    # huo-wolong-yanliang 票 01：火包·OL 卧龙诸葛【火计】【看破】。
+    "hero.wolong_zhugeliang.huoji": (
+        _constant(2.0),
+        "一张红色手牌当【火攻】：多一条**伤害**路径（1 点火焰），按牌价保守为正；"
+        "代价是那张红手牌本身（转化来源进弃牌堆）",
+    ),
+    "hero.wolong_zhugeliang.kanpo": (
+        _constant(2.0),
+        "一张黑色手牌当【无懈可击】：只在无懈的收集式窗口出现（问到的都是锦囊要被抵消"
+        "的时点），代价是那张黑手牌，恒为正",
+    ),
     "hero.pangtong_mobile.niepan": (
         _constant(9.0),
         "限定技：濒死时弃区域所有牌、复原、摸三张、回复至 3 点——一局一条命，问到就发动",

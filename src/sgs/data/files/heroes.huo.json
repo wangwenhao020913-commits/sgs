@@ -33,6 +33,33 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "wolong_zhugeliang",
+      "name": "卧龙诸葛",
+      "true_name": "卧龙诸葛",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "huo",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "bazhen",
+          "name": "八阵",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "huoji",
+          "name": "火计",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "kanpo",
+          "name": "看破",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

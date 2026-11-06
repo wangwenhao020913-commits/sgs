@@ -3202,6 +3202,30 @@ def _coverage_lianhuan():
     return state, _play_phase_with_preactivations(state)
 
 
+def _coverage_huoji():
+    """160 档：卧龙诸葛把一张红色手牌当【火攻】**使用**。
+
+    源牌取一张**出牌阶段用不出去**的红色手牌（红色【无懈可击】）：否则 AI 会直接按原用途
+    用它，这条覆盖就测不到清单填表（与武圣 / 国色同一条口径）。产物【火攻】只在 160 档
+    有实体牌（108 档照【连环】R5 口径不产出候选）。
+    """
+    red = next(
+        index
+        for index, card in enumerate(PACK_EX_160.deck.cards)
+        if card.type == "nullify" and color_of_suit(card.suit) is Color.RED
+    )
+    deck = tuple(
+        index for index in range(len(PACK_EX_160.deck.cards)) if index != red
+    )
+    state = build_state(
+        pack=PACK_EX_160,
+        seats=[SeatSpec(hand=(red,), hero="wolong_zhugeliang"), SeatSpec(hand=(_ids("slash")[0],))],
+        deck=deck,
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state)
+
+
 LUANJI = "hero.yuanshao_mobile.luanji"
 """袁绍移动版【乱击】（huo-mobile-batch 票 03；票 07 起清单**没有**目标步）。"""
 
@@ -3272,6 +3296,8 @@ _TRANSFORM_COVERAGE_CASES = (
     # 票 07 起它的清单**没有目标步**（目标由【万箭齐发】的 ALL_ALIVE 决定）⇒ 这条覆盖
     # 同时逼着"来源组自己过池成员校验"（见 `_luanji_mixed_suit_hand`）。
     ("乱击", "hero.yuanshao_mobile.luanji", _coverage_luanji, "arrow_barrage"),
+    # huo-wolong-yanliang 票 01：卧龙诸葛【火计】（红色手牌 → 虚拟【火攻】；只在 160 档有产物）
+    ("火计", "hero.wolong_zhugeliang.huoji", _coverage_huoji, "fire_attack"),
 )
 """``(标签, 技能 id, 场景构造, 解析出的虚拟牌名)``：五条转化技（龙胆两方向各一）。"""
 

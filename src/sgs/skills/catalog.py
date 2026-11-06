@@ -3100,6 +3100,7 @@ def _equip(
     virtual_source_count: int = 1,
     step_requirements: Mapping[str, str] | None = None,
     preactivated: bool = False,
+    virtual_slot: SlotKind | None = None,
 ) -> SkillDef:
     """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。
 
@@ -3110,6 +3111,9 @@ def _equip(
     复合动作一次提交（骨架候选是"是否发动"那一问，保留）。
     ``virtual_source_count``（W4-3）：虚拟牌候选每次消耗几张来源牌——【丈八蛇矛】是 2，
     其余（含一切非转化技）恒 1；清单归属据此区分"两张来源的【杀】是谁转出来的"。
+    ``virtual_slot``（huo-wolong-yanliang 票 01）：这张装备**被"视为装备"时占哪个槽位**
+    （"视为装备着【八卦阵】"类技能的读侧）。缺省 ``None`` = 既有 22 条定义一字不改；今天
+    唯一声明者是【八卦阵】（防具）。它只被 :func:`is_equipped` 的虚拟授予那一半读到。
     """
     return SkillDef(
         skill_id=f"equip.{card_type_id}",
@@ -3123,6 +3127,7 @@ def _equip(
         virtual_type_ids=virtual_type_ids,
         virtual_source_count=virtual_source_count,
         preactivated=preactivated,
+        virtual_slot=virtual_slot,
     )
 
 
@@ -3211,6 +3216,11 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=False,
         requirement="判定为红则视为使用【闪】",
         modifiers=(Modifier(ModifierPoint.CANDIDATES, _eight_diagrams_candidate),),
+        # 被"视为装备"时占**防具**槽（huo-wolong-yanliang 票 01；读侧 = is_equipped）：
+        # 卧龙诸葛【八阵】的牌面就是"视为装备着【八卦阵】"，故这条装备技能必须回答
+        # "它算哪个槽位的防具"。本批**不**产出虚拟授予（八阵走候选模型），这一位只让
+        # `is_equipped` 在将来真出现虚拟授予时答得对。
+        virtual_slot=SlotKind.ARMOR,
     ),
     _equip(
         "renwang_shield",
@@ -3310,7 +3320,10 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 # 武将技能定义（票 03 的 H 族、票 04 的 A 族；票 12 起全表）在**文件末尾**并入：
 # `heroes` / `active` 反向 import 本模块的 SkillDef / ModifierContext，故这一行必须晚于
 # 那两者的定义（见 CATALOG 的 docstring）。
-from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .heroes import (  # noqa: E402  （末尾 import 是刻意的）
+    conversion_skill_definitions,
+    wolong_zhugeliang_skill_definitions,
+)
 from .active import (  # noqa: E402  （末尾 import 是刻意的）
     GUOHUO,
     active_skill_definitions,
@@ -3420,6 +3433,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
         for definition in (
             *_SKILL_DEFS,
             *conversion_skill_definitions(),
+            *wolong_zhugeliang_skill_definitions(),
             *active_skill_definitions(),
             *target_pool_skill_definitions(),
             *move_after_skill_definitions(),
