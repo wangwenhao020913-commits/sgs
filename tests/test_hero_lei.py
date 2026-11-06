@@ -50,7 +50,14 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type, run_queries
+from support import (
+    PassPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    ran_timing,
+    run_queries,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 ZHENGKU = "hero.haozhao.zhengku"
@@ -1067,3 +1074,872 @@ def test_fuyin_makes_the_first_slash_ineffective():
     )
     assert attacker.played
     assert engine.state.player(0).hp == 3, "此牌对父荫持有者无效（没有掉体力）"
+
+
+# ---------------------------------------------------------------------------
+# 神甘宁【魄袭】【劫营】（lei-shenganning 票 01；用户 2026-11-07 逐条签）
+#
+# 牌面（逐字，见票面 §0）：
+#
+#     魄袭：出牌阶段限一次，你可以观看一名其他角色的手牌，且你可以弃置你与其手牌中共计
+#           四张不同花色的牌，然后若你以此法被弃置的牌数为：0 减 1 点体力上限；1 结束
+#           出牌阶段且本回合手牌上限-1；3 回复 1 点体力；4 摸四张牌。
+#     劫营：①回合开始时，若场上没有角色有"营"标记，你获得"营"标记；②结束阶段，你可以
+#           将"营"标记交给一名其他角色；③有"营"标记的其他角色的回合结束时，移去"营"
+#           标记，然后你获得其所有手牌。
+#           【"营"标记：摸牌阶段多摸一张、出牌阶段使用【杀】次数上限+1、手牌上限+1。】
+#
+# 用户裁定的三处（票面 §R）：① 1 档 = 玩家点「结束出牌阶段」同一效果（框架票 92）；
+# ② 选牌面 = 两行观看面（框架票 93）；③ 营的三个加成是**标记自身效果**（框架票 94）、
+# 不进同时机顺序选择（框架票 95）。
+# ---------------------------------------------------------------------------
+
+SHEN_GANNING = "shen_ganning"
+POXI = "hero.shen_ganning.poxi"
+JIEYING = "hero.shen_ganning.jieying"
+JIEYING_EFFECT = "hero.shen_ganning.jieying_mark"
+YING = "营"
+SUITS = ("spade", "heart", "club", "diamond")
+
+
+def _by_suit(*, excluded: tuple[int, ...] = ()) -> dict[str, int]:
+    """四种花色各取一张（牌堆数据序，确定性）。"""
+    found: dict[str, int] = {}
+    for card_id, card in enumerate(PACK.deck.cards):
+        if card_id in excluded or card.suit in found:
+            continue
+        found[card.suit] = card_id
+        if len(found) == len(SUITS):
+            break
+    return found
+
+
+def _cards(*, suits: tuple[str, ...] = SUITS, excluded: tuple[int, ...] = ()) -> tuple[int, ...]:
+    pick = _by_suit(excluded=excluded)
+    return tuple(pick[suit] for suit in suits)
+
+
+def _ganning_state(
+    *,
+    mine: tuple[int, ...] = (),
+    theirs: tuple[int, ...] = (),
+    other: tuple[int, ...] = (),
+    seats: int = 2,
+    their_hero: str | None = None,
+    my_hp: int = 6,
+    my_hp_max: int | None = None,
+    their_hp: int = 8,
+    turn_seat: int = 0,
+    phase=Phase.PLAY,
+    their_judge: tuple[int, ...] = (),
+    deck_top: tuple[int, ...] = (),
+):
+    """神甘宁（座位 0）+ 目标（座位 1）；体力 6 = 牌面（`SeatSpec` 缺省是 4，必须显式给）。"""
+    used = {*mine, *theirs, *other, *their_judge, *deck_top}
+    rest = tuple(card_id for card_id in range(60, 108) if card_id not in used)
+    specs = [
+        SeatSpec(
+            hero=SHEN_GANNING,
+            hp=my_hp,
+            hp_max=my_hp if my_hp_max is None else my_hp_max,
+            hand=mine,
+        ),
+        SeatSpec(
+            hero=their_hero,
+            hp=their_hp,
+            hp_max=their_hp,
+            hand=theirs,
+            judge=their_judge,
+        ),
+    ]
+    if seats >= 3:
+        specs.append(SeatSpec(hp=4, hp_max=4, hand=other))
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=(*deck_top, *rest),
+        turn_seat=turn_seat,
+        phase=phase,
+    )
+
+
+class _Ganning:
+    """座位 0 的脚本：出牌阶段发动【魄袭】；选牌面按 ``picks`` 提交；结束阶段是否交出「营」。"""
+
+    def __init__(
+        self,
+        *,
+        picks: tuple[int, ...] | None = None,
+        activate: bool = True,
+        give_away: bool = True,
+        seat: str = "seat:1",
+    ) -> None:
+        self.picks = picks
+        self.activate = activate
+        self.give_away = give_away
+        self.seat = seat
+        self.activations: list = []
+        self.selections: list = []
+        self.offers: list = []
+        self.played = False
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "SKILL_ACTIVATION" and str(query.skill_id) == JIEYING:
+            self.activations.append(query)
+            if self.give_away:
+                return next(
+                    a for a in query.legal_actions if isinstance(a, ActivateSkill)
+                )
+            return next(a for a in query.legal_actions if isinstance(a, Pass))
+        if kind == "SELECT_OPTION":
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and str(action.choice) == self.seat:
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, SelectOption))
+        if kind == "SELECT_CARDS":
+            self.selections.append(query)
+            slots = {
+                slot.card.card_id: index
+                for index, slot in enumerate(query.slots)
+                if slot.card is not None
+            }
+            if self.picks is None:
+                for action in query.legal_actions:
+                    if isinstance(action, Pass):
+                        return action
+                return query.legal_actions[0]
+            # 引擎的 `SelectCards` 候选按面内位置**升序**枚举（票 93 的提交纪律），
+            # 故提交前排序——与前端 `toggleWatchPick` 的规范化同一口径。
+            return SelectCards(
+                picks=tuple(sorted(slots[card_id] for card_id in self.picks)),
+                answers_seq=query.seq,
+            )
+        if kind == "PLAY_PHASE":
+            if self.activate and not self.played:
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == POXI:
+                        self.played = True
+                        self.offers.append(query)
+                        return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        return query.legal_actions[0]
+
+
+def _ying(engine, holder: int, *, source: int = 0) -> None:
+    """给 ``holder`` 放一枚「营」（与 ① 的写入面同一组参数）。"""
+    engine.add_marker(
+        None,
+        holder,
+        name=YING,
+        source_seat=source,
+        source_skill_id=JIEYING,
+        count=1,
+        effect=JIEYING_EFFECT,
+        clear_on_source_death=True,
+        clear_on_source_skill_lost=True,
+    )
+
+
+def _marker_changes(engine) -> list[tuple[int, str, int]]:
+    return [
+        (record.seat, record.name, record.count)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "marker_change"
+        and record.name == YING
+    ]
+
+
+def _moves(engine, *, reason, to_zone: Zone | None = None, seat: int | None = None) -> list:
+    out = []
+    for record in engine.records:
+        if record.kind != "delta" or record.delta_type != "card_move":
+            continue
+        if record.reason is not reason:
+            continue
+        if to_zone is not None and record.to_zone.zone is not to_zone:
+            continue
+        if seat is not None and record.to_zone.seat != seat:
+            continue
+        out.append(record)
+    return out
+
+
+def _poxi_engine(state, *, picks=None, activate=True, seat="seat:1"):
+    engine = Engine.from_state(state, seed=7)
+    return engine, _Ganning(picks=picks, activate=activate, seat=seat)
+
+
+# --- 魄袭 ---------------------------------------------------------------
+
+
+def test_poxi_target_pool_is_other_alive_with_hand_cards():
+    """目标池 = 其他 + 存活 + **手牌非空**（没有牌的人看不了，也不该出现在选座候选里）。"""
+    from sgs.skills.active import _poxi_targets
+
+    state = _ganning_state(mine=(0,), theirs=(10,), other=(20,), seats=3)
+    assert _poxi_targets(state, 0) == (1, 2)
+    state.player(2).hand = []
+    assert _poxi_targets(state, 0) == (1,), "手牌空 ⇒ 不进池"
+    state.player(1).alive = False
+    assert _poxi_targets(state, 0) == ()
+
+
+def test_poxi_is_not_offered_without_a_watched_target():
+    """一个可观看的目标都没有 ⇒ 候选不产出、按钮不出现（零副作用）。"""
+    state = _ganning_state(mine=(0, 1), theirs=())
+    engine, player = _poxi_engine(state)
+    run_queries(engine, [player, PassPlayer()], lambda e: e.state.phase is Phase.DISCARD)
+    assert player.offers == [], "池空 ⇒ 连「发动魄袭」这一条都不出现"
+
+
+def test_poxi_still_watches_when_no_four_suits():
+    """凑不出四色 ⇒ 仍发一条**空选择面**（看得见目标整副手牌），出口只有「放弃」。"""
+    hearts = tuple(
+        card_id for card_id, card in enumerate(PACK.deck.cards) if card.suit == "heart"
+    )[:2]
+    state = _ganning_state(theirs=hearts)
+    engine, player = _poxi_engine(state, picks=None)
+    run_queries(engine, [player, PassPlayer()], lambda e: bool(player.selections))
+    query = player.selections[0]
+    assert query.slots == (), "凑不出四色 ⇒ 空选择面（只有 Pass）"
+    assert [type(action).__name__ for action in query.legal_actions] == ["Pass"]
+    assert [card.card_id for card in query.revealed] == list(hearts), (
+        "整副被观看的手牌仍在 revealed 里（空面约定：只含**上行**那一手）"
+    )
+
+
+def test_poxi_timeout_passes_without_any_tier_effect():
+    """「超时 = 放弃」⇒ 不弃置、不结算任何分档。
+
+    引擎侧只认 `Pass`（超时的**落点**由接入层给：`tools/sgs_web/timeout.py` 的
+    `FALLBACK_ORDER` 让 `Pass` 优先，钉在
+    `tests/test_web.py::test_the_two_row_watch_face_times_out_to_pass` —— 那一面与本技能的
+    询问面同一形状）。故这里答 `Pass`，断言"零副作用"。
+    """
+    cards = _cards()
+    state = _ganning_state(theirs=cards)
+    engine, player = _poxi_engine(state, picks=None)
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: bool(player.selections)
+        and ran_timing(e, Timing.PHASE_DISCARD_START),
+    )
+    assert engine.state.player(1).hand == list(cards), "一张没弃"
+    assert engine.state.player(0).hp_max == 6, "0 档效果不发生"
+    assert engine.state.discard == [], "弃牌堆为空"
+
+
+def test_poxi_zero_cards_cuts_the_max_hp():
+    """0 档（四张全来自对方手牌）⇒ 你减少 1 点体力上限。"""
+    cards = _cards()
+    state = _ganning_state(theirs=cards)
+    engine, player = _poxi_engine(state, picks=cards)
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: bool(player.selections) and e.state.player(0).hp_max != 6,
+    )
+    assert engine.state.player(0).hp_max == 5
+    assert set(engine.state.discard) == set(cards), "四张都进了弃牌堆"
+
+
+def test_poxi_zero_cards_stops_at_a_max_hp_of_one():
+    """0 档在**体力上限已为 1** 时停手：本仓没有"上限减为 0 ⇒ 直接死亡"的流程。
+
+    这不是规则读法，是**防御性**的边界（`reduce_hp_max` 在该越界点按设计抛错）：技能不许
+    把进程炸掉，故这一档变成零效果，其余结算（弃置四张、出牌阶段照常）不受影响。
+    """
+    cards = _cards()
+    state = _ganning_state(theirs=cards, my_hp=1, my_hp_max=1)
+    engine, player = _poxi_engine(state, picks=cards)
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: len(_moves(e, reason=MoveReason.DISCARD)) == 1,
+    )
+    assert engine.state.player(0).hp_max == 1, "上限已是 1 ⇒ 0 档不执行（不抛错）"
+    assert sorted(engine.state.discard) == sorted(cards), "弃置照常发生"
+
+
+def test_poxi_one_card_ends_the_play_phase_and_cuts_the_hand_limit():
+    """1 档（只有 1 张来自我）⇒ 结束出牌阶段 + 本回合手牌上限 -1（框架票 92 的挂起语义）。"""
+    pick = _by_suit()
+    mine = (pick["spade"],)
+    theirs = (pick["heart"], pick["club"], pick["diamond"])
+    state = _ganning_state(mine=mine, theirs=theirs)
+    engine, player = _poxi_engine(state, picks=(*mine, *theirs))
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: ran_timing(e, Timing.PHASE_DISCARD_START) or e.finished,
+    )
+    assert player.offers, "构造：这一次确实是发动过的"
+    assert engine.state.player(0).hand_limit_bonus == -1, "本回合手牌上限 -1"
+    assert ran_timing(engine, Timing.PHASE_PLAY_END), "出牌阶段就此结束（走进结束边界）"
+    played = [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.PLAY_PHASE.value
+    ]
+    assert len(played) == 1, (
+        f"结束出牌阶段后不再问第二问（与玩家点「结束出牌阶段」同一效果）；实得 {len(played)} 问"
+    )
+
+
+def test_poxi_two_cards_from_self_has_no_effect():
+    """2 档：牌面三平台都没有【2】⇒ 只有弃置发生、没有后续。"""
+    pick = _by_suit()
+    mine = (pick["spade"], pick["heart"])
+    theirs = (pick["club"], pick["diamond"])
+    state = _ganning_state(mine=mine, theirs=theirs)
+    engine, player = _poxi_engine(state, picks=(*mine, *theirs))
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: len(_moves(e, reason=MoveReason.DISCARD)) == 2,
+        limit=200,
+    )
+    assert engine.state.player(0).hp_max == 6, "2 档不碰上上限"
+    assert engine.state.player(0).hand_limit_bonus == 0, "也不动手牌上限"
+    assert set(engine.state.discard) == set((*mine, *theirs)), "弃置照常发生"
+
+
+def test_poxi_three_cards_recovers_one_hp():
+    """3 档（3 张来自我）⇒ 你回复 1 点体力。"""
+    pick = _by_suit()
+    mine = (pick["spade"], pick["heart"], pick["club"])
+    theirs = (pick["diamond"],)
+    state = _ganning_state(mine=mine, theirs=theirs, my_hp=4, my_hp_max=6)
+    engine, player = _poxi_engine(state, picks=(*mine, *theirs))
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: bool(player.selections) and e.state.player(0).hp == 5,
+    )
+    assert engine.state.player(0).hp == 5, "回复 1 点"
+
+
+def test_poxi_three_cards_at_full_hp_is_a_legal_no_op():
+    """3 档在**满体力**时回复落空，但弃置与结算照常（不是"卡片不能选"）。"""
+    pick = _by_suit()
+    mine = (pick["spade"], pick["heart"], pick["club"])
+    theirs = (pick["diamond"],)
+    state = _ganning_state(mine=mine, theirs=theirs, my_hp=6, my_hp_max=6)
+    engine, player = _poxi_engine(state, picks=(*mine, *theirs))
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: len(_moves(e, reason=MoveReason.DISCARD)) == 2,
+    )
+    assert engine.state.player(0).hp == 6, "满体力 ⇒ 回复落空（不是非法动作）"
+    assert set(engine.state.discard) == set((*mine, *theirs)), "四张照常弃置"
+
+
+def test_poxi_four_cards_draws_four():
+    """4 档（四张全来自我）⇒ 你摸四张牌（一条摸牌移动）。"""
+    pick = _by_suit()
+    mine = tuple(pick[suit] for suit in SUITS)
+    theirs = (_by_suit(excluded=mine)["spade"],)
+    state = _ganning_state(mine=mine, theirs=theirs)
+    engine, player = _poxi_engine(state, picks=mine)
+
+    def _drew_four(engine) -> bool:
+        return any(
+            len(move.cards) == 4
+            for move in _moves(engine, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=0)
+        )
+
+    run_queries(engine, [player, PassPlayer()], _drew_four)
+    # 起手的摸牌阶段也会摸（3 张：摸 2 + 「营」的标记加成 1），故这里认"**有一条** 4 张的摸牌"。
+    assert _drew_four(engine), "4 档 ⇒ 一次摸四张（一条 card_move）"
+
+
+def test_poxi_discards_both_hands_in_two_moves():
+    """四张跨两副手牌 ⇒ 必须拆成**两次**搬牌（`move_card` 拒绝跨来源的一次搬牌）。"""
+    pick = _by_suit()
+    mine = (pick["spade"], pick["heart"])
+    theirs = (pick["club"], pick["diamond"])
+    state = _ganning_state(mine=mine, theirs=theirs)
+    engine, player = _poxi_engine(state, picks=(*mine, *theirs))
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: len(_moves(e, reason=MoveReason.DISCARD)) == 2,
+        limit=200,
+    )
+    discards = _moves(engine, reason=MoveReason.DISCARD)
+    assert len(discards) == 2, f"两次搬牌（我方 / 对方各一次）；实得 {len(discards)}"
+    assert {record.from_zone.seat for record in discards} == {0, 1}
+    assert sorted(
+        card.card_id for record in discards for card in record.cards
+    ) == sorted((*mine, *theirs))
+
+
+class _Accepts:
+    """被动入口一律发动（阶段体 / 钩子的「是否发动」问都答发动），其余走最小合法应答。"""
+
+    def respond(self, query):
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "ActivateSkill":
+                return action
+        return PassPlayer().respond(query)
+
+
+def test_poxi_resumes_without_discarding_twice():
+    """G7：弃置内联派发"失去牌后"（对方的【连营】）⇒ 续跑既不重搬、也不重复触发。"""
+    cards = _cards()
+    state = _ganning_state(theirs=cards, their_hero="luxun")
+    engine, player = _poxi_engine(state, picks=cards)
+    run_queries(
+        engine,
+        [player, _Accepts()],
+        lambda e: ran_timing(e, Timing.PHASE_DISCARD_START) or e.finished,
+    )
+    discards = _moves(engine, reason=MoveReason.DISCARD)
+    assert len(discards) == 1, f"只搬一次（续跑不重搬）；实得 {len(discards)}"
+    assert len(discards[0].cards) == 4
+    assert len(engine.state.player(1).hand) == 1, "【连营】摸的那一张还在（没有被二次搬走）"
+
+
+# --- 劫营 ---------------------------------------------------------------
+
+
+def test_jieying_gains_the_marker_at_the_turn_start():
+    """① 自己的回合开始时，场上没有「营」⇒ 自己获得一枚（强制段，不问）。"""
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=(10,)), seed=7)
+    player = _Ganning(activate=False, give_away=False)
+    _run_turns(engine, [player, _Accepts()], turns=1)
+    assert [marker.name for marker in engine.state.player(0).markers] == [YING], (
+        "回合开始时获得「营」（② 放弃了，故它留在我身上）"
+    )
+    assert _marker_changes(engine)[0] == (0, YING, 1)
+    marker = engine.state.player(0).markers[0]
+    assert marker.effect == JIEYING_EFFECT, "标记带着**自身效果**的定义 id"
+    assert marker.clear_on_source_death and marker.clear_on_source_skill_lost, (
+        "两条寿命策略都在（来源阵亡 / 来源失去【劫营】）"
+    )
+    assert player.activations, "① 是强制段 ⇒ 不问；这一条问的是 ②（结束阶段交营）"
+
+
+def test_jieying_does_not_grant_a_second_marker():
+    """① 的闸门 = **场上**没有「营」（别人身上有也照挡，否则交出营之后每个回合都再得一枚）。"""
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=(10,)), seed=7)
+    _ying(engine, 1)
+    player = _Ganning(activate=False)
+    _run_turns(engine, [player, _Accepts()], turns=1)
+    assert engine.state.player(0).markers == (), "我自己不再获得（场上已经有营）"
+    assert [marker.name for marker in engine.state.player(1).markers] == [YING]
+    assert _marker_changes(engine) == [(1, YING, 1)], "① 一个标记都没发"
+
+
+def test_jieying_give_away_is_not_offered_without_the_marker():
+    """② 的闸门 = **营在我身上**：营在别人身上时，我的结束阶段连问都不发（零副作用）。
+
+    构造：营在座位 1（② 之前先交出去，或 ① 之前就在别人身上）；我的结束阶段照常到达，
+    但「是否发动」那一问不出现——否则玩家会看到一个"发动了也交不出去"的按钮。
+    """
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=(10,)), seed=7)
+    _ying(engine, 1)
+    player = _Ganning(activate=False)
+    _run_turns(engine, [player, _Accepts()], turns=1)
+    assert ran_timing(engine, Timing.PHASE_FINISH), "构造：我的结束阶段确实跑过"
+    assert player.activations == [], "营不在我身上 ⇒ ② 不问"
+
+
+def test_jieying_marker_transfer_needs_another_alive_seat():
+    """② 的两个前提之池：营在我身上，但**没有其他存活角色** ⇒ 不问（零副作用）。"""
+    from sgs.skills.hero_lei import _jieying_hand_over_condition
+
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=(10,)), seed=7)
+    _ying(engine, 0)
+    frame = _Frame(hook_owner=0, source=0)
+    assert _jieying_hand_over_condition(_Host(engine.state), frame) is True
+    engine.state.player(1).alive = False
+    engine.state.player(1).hand = []
+    assert _jieying_hand_over_condition(_Host(engine.state), frame) is False
+
+
+def test_jieying_takes_the_holders_hand_at_turn_end():
+    """③ 有营的其他角色回合结束时 ⇒ 移去营，然后**一次搬牌**拿走其所有手牌。"""
+    theirs = (10, 11, 12)
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=theirs), seed=7)
+    player = _Ganning(activate=False)
+    _run_turns(engine, [player, _Accepts()], turns=2)
+
+    assert not [m for m in engine.state.player(1).markers if m.name == YING]
+    assert set(theirs) <= set(engine.state.player(0).hand), "其所有手牌归我"
+    moves = _moves(engine, reason=MoveReason.PUT, to_zone=Zone.HAND, seat=0)
+    assert len(moves) == 1, f"一次搬牌拿走整副手牌（不逐张触发 ③）；实得 {len(moves)} 次"
+    assert set(theirs) <= {card.card_id for card in moves[0].cards}, (
+        "搬的是他的**整副**手牌（含摸牌阶段摸到的那些）"
+    )
+    assert _marker_changes(engine) == [
+        (0, YING, 1),
+        (1, YING, 1),
+        (0, YING, 0),
+        (1, YING, 0),
+    ], "① 挂在我身上 → ② 交给他（先加后移）→ ③ 移去"
+
+
+def test_jieying_takes_nothing_when_the_holder_has_no_hand():
+    """G2：持有者**没有手牌**时 ③ 仍然发生——只移去「营」，不搬任何牌。
+
+    直接驱动 ③ 的回调（引擎即 host）：真局里持有者在自己的回合会摸牌，故"回合末 0 手牌"
+    要么是他把牌花光了（本测不构造那条长链），要么是构造局面。这里只钉"零手牌不崩、不搬"。
+    """
+    from sgs.skills.hero_lei import _jieying_take
+
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=()), seed=7)
+    _ying(engine, 1)
+    frame = engine.push_frame(
+        FrameKind.SKILL, {"skill_owner": 0, "source": 1}, timing=Timing.TURN_END
+    )
+    assert _jieying_take(engine, frame) is None
+    assert engine.state.player(1).markers == (), "标记照常移去"
+    assert not _moves(engine, reason=MoveReason.PUT, to_zone=Zone.HAND, seat=0), (
+        "没有手牌 ⇒ 不产生搬牌"
+    )
+
+
+def test_jieying_and_zhengku_force_an_order_at_turn_end():
+    """③ 与【镇骨】同一时点（`TURN_END`）：两条都不可放弃 ⇒ 面**没有 Pass**，必须选一条。"""
+    engine = Engine.from_state(
+        _ganning_state(mine=(0, 1), theirs=(10, 11, 12)), seed=7
+    )
+    engine.grant_skill(0, ZHENGKU)
+    _ying(engine, 1)
+    engine.add_marker(
+        None,
+        1,
+        name=MARK,
+        source_seat=0,
+        source_skill_id=ZHENGKU,
+        count=1,
+        clear_on_source_death=True,
+    )
+    orders: list = []
+
+    class _Order:
+        """【劫营】② 答发动；同一时机的两条强制段（劫营③ / 镇骨）⇒ 先结劫营。"""
+
+        def respond(self, query):
+            kind = str(getattr(query.kind, "value", query.kind))
+            if kind == "SKILL_ACTIVATION":
+                picks = [
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                ]
+                if len(picks) >= 2:
+                    orders.append(query)
+                    return next(
+                        action for action in picks if action.skill_id == JIEYING
+                    )
+                if picks:
+                    return picks[0]
+                return PassPlayer().respond(query)
+            if kind == "SELECT_OPTION":
+                return PassPlayer().respond(query)
+            if kind == "PLAY_PHASE":
+                return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+            return PassPlayer().respond(query)
+
+    player = _Order()
+    _run_turns(engine, [player, _Accepts()], turns=2)
+
+    assert orders, "同一时机的两条强制段 ⇒ 出一张「先结哪一条」的面"
+    assert not any(
+        action.__class__.__name__ == "Pass" for action in orders[0].legal_actions
+    ), "两条都不可放弃 ⇒ 面里没有 Pass（必须选一条）"
+    assert {
+        str(action.skill_id)
+        for action in orders[0].legal_actions
+    } == {JIEYING, ZHENGKU}
+    # 先劫营 ⇒ 对方手牌被拿空；随后【镇骨】把他摸回与我相同（差值 ≥ 1 时）。
+    assert engine.state.player(1).markers == (), "两条的标记都结算掉了"
+
+
+def _play_phases(engine) -> int:
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.PHASE_PLAY_START
+    )
+
+
+def test_jieying_extra_draw_skips_a_skipped_draw_phase():
+    """标记自身效果·摸牌：持有者的摸牌阶段一次摸 3 张；被【兵粮寸断】跳过时整段不存在。
+
+    构造：座位 1 先持营（`_ying`，与 ① 的写入面同一组参数），跑到**座位 1 的出牌阶段**
+    （第 2 个 `PHASE_PLAY_START`）为止——那之后 ③ 会拿走它的手牌，故只看摸牌结果。
+    """
+    # 对照组（108 档）：座位 1 持营 ⇒ 摸牌阶段摸 3 张（2 + 营的 1）。
+    plain = Engine.from_state(_ganning_state(mine=(0,), theirs=(10,)), seed=7)
+    _ying(plain, 1)
+    run_queries(plain, [_Accepts(), _Accepts()], lambda e: _play_phases(e) >= 2)
+    draws = _moves(plain, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=1)
+    assert [len(move.cards) for move in draws] == [3], (
+        f"2 + 营的 1 = **一次**摸 3 张；实得 {[len(m.cards) for m in draws]}"
+    )
+
+    # 跳过：判定区有【兵粮寸断】且判非梅花 ⇒ 摸牌阶段整段不存在 ⇒ +1 无从生效。
+    # （【兵粮寸断】只在 160 档的牌堆里 ⇒ 这一半用 160 档建局。）
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    shortage = cards_of_type(pack, "supply_shortage")[0]
+    judge = next(
+        card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.suit != "club" and card_id not in (shortage, 0, 1)
+    )
+    used = {shortage, judge, 0, 1}
+    deck = (judge, *(c for c in range(len(pack.deck.cards)) if c not in used))
+    built = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero=SHEN_GANNING, hp=6, hp_max=6, hand=(0,)),
+            SeatSpec(hp=8, hp_max=8, hand=(1,), judge=(shortage,)),
+        ],
+        deck=deck,
+    )
+    skipped = Engine.from_state(built, seed=7)
+    _ying(skipped, 1)
+    run_queries(skipped, [_Accepts(), _Accepts()], lambda e: _play_phases(e) >= 2)
+    assert skipped.state.player(1).hand == [1], "一张都没摸（+1 无处生效）"
+    assert skipped.state.player(1).hand_limit_bonus == 0, "标记本身没有被顺手撤掉"
+
+
+def test_jieying_slash_limit_only_binds_the_holders_play_phase():
+    """标记自身效果·【杀】次数：只给**持有者**自己的出牌阶段 +1 点上限，不改别人的。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    engine = Engine.from_state(_ganning_state(mine=(slash, 1)), seed=7)
+    card = engine.state.card(slash)
+    # 出牌阶段由 `check_count` 自己判（【杀】只在"自己的出牌阶段"当限制读），故把局面摆到
+    # 座位 0 的出牌阶段，再用"已用 1 张"区分上限 1 / 2。
+    engine.state.player(0).card_use_counts["slash"] = 1
+    assert check_count(engine.state, 0, card) is True, "没有营 ⇒ 上限 1、已用 1 ⇒ 超额"
+    _ying(engine, 0)
+    assert check_count(engine.state, 0, card) is False, "有营 ⇒ 上限 2、已用 1 ⇒ 还能出"
+
+    # 别人身上没有营 ⇒ 别人不吃这条加成（把回合 / 阶段摆到座位 1，让他受次数约束）。
+    other = Engine.from_state(_ganning_state(mine=(slash, 1)), seed=7)
+    _ying(other, 0)
+    other.state.turn_seat = 1
+    other.state.phase = Phase.PLAY
+    other.state.player(1).card_use_counts["slash"] = 1
+    assert check_count(other.state, 1, other.state.card(slash)) is True, (
+        "营在座位 0 身上 ⇒ 座位 1 的上限仍是 1"
+    )
+
+
+def test_jieying_hand_limit_returns_after_the_marker_leaves():
+    """标记自身效果·手牌上限：查询期**持续加式**，标记一走立刻消失。"""
+    from sgs.effects import hand_limit
+
+    engine = Engine.from_state(_ganning_state(mine=(0, 1)), seed=7)
+    base = hand_limit(engine.state, engine.state.player(0))
+    _ying(engine, 0)
+    bumped = hand_limit(engine.state, engine.state.player(0))
+    assert bumped == base + 1, f"手牌上限 +1（{base} → {bumped}）"
+    engine.remove_marker(
+        None, 0, name=YING, source_seat=0, source_skill_id=JIEYING
+    )
+    assert hand_limit(engine.state, engine.state.player(0)) == base, "标记一走即恢复"
+
+
+def test_jieying_turn_end_move_resumes_without_double_moving():
+    """G7：③ 的"获得所有手牌"内联派发"失去牌后"（【连营】）⇒ 续跑不重搬。"""
+    theirs = (10, 11, 12)
+    engine = Engine.from_state(
+        _ganning_state(mine=(0,), theirs=theirs, their_hero="luxun"), seed=7
+    )
+    player = _Ganning(activate=False)
+    _run_turns(engine, [player, _Accepts()], turns=2)
+
+    moves = _moves(engine, reason=MoveReason.PUT, to_zone=Zone.HAND, seat=0)
+    assert len(moves) == 1, f"只搬一次；实得 {len(moves)}"
+    assert set(theirs) <= {card.card_id for card in moves[0].cards}
+    assert len(engine.state.player(1).hand) == 1, "【连营】摸的那一张留在对方手里"
+
+
+def test_jieying_marker_survives_a_skipped_turn():
+    """G9：持有者的回合被翻面跳过 ⇒ 该回合没有 `TURN_END`，③ 顺延到下一个真实回合末。
+
+    计数只认 ``TURN_AFTER_END``（被跳过的回合**连这条记录都不发**），故翻面之后的
+    `turns=2` 停在**我的第 2 个回合末**——那一轮正是"跳过"发生的位置。
+    """
+    engine = Engine.from_state(_ganning_state(mine=(0,), theirs=(10, 11)), seed=7)
+    player = _Ganning(activate=False)
+    _run_turns(engine, [player, _Accepts()], turns=1)  # 我的回合：① 得营、② 交给座位 1
+    assert _marker_changes(engine) == [(0, YING, 1), (1, YING, 1), (0, YING, 0)], (
+        "构造：我获得、又交出（先加后移 ⇒ 我这一枚归 0）"
+    )
+
+    engine.set_flipped(None, 1, True)  # 座位 1 的下个回合整轮跳过（翻回正面、不发 TURN_END）
+    _run_turns(engine, [player, _Accepts()], turns=2)
+    assert _marker_changes(engine) == [(0, YING, 1), (1, YING, 1), (0, YING, 0)], (
+        "跳过的那一轮不结算 ③（标记留着）"
+    )
+    assert [marker.name for marker in engine.state.player(1).markers] == [YING]
+    assert set((10, 11)) <= set(engine.state.player(1).hand), "手牌也没被拿走"
+
+    _run_turns(engine, [player, _Accepts()], turns=3)  # 座位 1 的下一个**真实**回合
+    assert _marker_changes(engine)[-1] == (1, YING, 0), "顺延到下一个真实回合末才移去"
+    assert set((10, 11)) <= set(engine.state.player(0).hand), "那一次照常拿走其所有手牌"
+
+
+def _hand_limit(engine, seat: int) -> int:
+    from sgs.effects import hand_limit
+
+    return hand_limit(engine.state, engine.state.player(seat))
+
+
+def test_the_ying_marker_keeps_its_buffs_while_jieying_is_suppressed():
+    """框架票 94 的 M1：【劫营】失效（被无效）⇒ 营还在、**三个加成**照常（用户 2026-11-07 裁）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    engine = Engine.from_state(_ganning_state(mine=(slash, 1)), seed=7)
+    _ying(engine, 0)
+    base_limit = _hand_limit(engine, 0)
+    engine.state.player(0).card_use_counts["slash"] = 1
+
+    engine.suppress_skills(0, "hero.anyone.tieqi")
+
+    assert [marker.name for marker in engine.state.player(0).markers] == [YING], (
+        "失效**不动标记**"
+    )
+    assert _marker_changes(engine) == [(0, YING, 1)], "失效不发 marker_change"
+    assert _hand_limit(engine, 0) == base_limit, "手牌上限 +1 照常"
+    assert check_count(engine.state, 0, engine.state.card(slash)) is False, (
+        "【杀】次数上限 +1 照常"
+    )
+    # 第三条（摸牌 +1）在这条路的**实跑**里看：失效之后走一遍自己的摸牌阶段。
+    suppressed = Engine.from_state(_ganning_state(mine=(0,)), seed=7)
+    _ying(suppressed, 0)
+    suppressed.suppress_skills(0, "hero.anyone.tieqi")
+    run_queries(suppressed, [_Accepts(), _Accepts()], lambda e: _play_phases(e) >= 1)
+    draws = _moves(suppressed, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=0)
+    assert [len(move.cards) for move in draws] == [3], (
+        "失效后摸牌仍是 2 + 营的 1（= 一次摸 3 张）"
+    )
+
+
+def test_losing_jieying_removes_the_ying_marker():
+    """框架票 94 的 M2：来源**失去**【劫营】⇒ 标记移除、加成消失。"""
+    engine = Engine.from_state(_ganning_state(mine=(0,)), seed=7)
+    base = _hand_limit(engine, 1)
+    _ying(engine, 1)
+    assert _hand_limit(engine, 1) == base + 1, "构造：标记在时有 +1"
+
+    assert engine.lose_skill(0, JIEYING) is True
+
+    assert engine.state.player(1).markers == (), "标记被移除了"
+    assert _marker_changes(engine)[-1] == (1, YING, 0), "走唯一写入口（绝对值 0）"
+    assert _hand_limit(engine, 1) == base, "加成随之消失"
+
+
+def test_the_marker_effect_ignores_suppression_on_either_side():
+    """框架票 94 的 M8：**持有者**被失效时营的加成照常，而他自己那条技能**真的**停了。
+
+    持有者 = 周瑜（有【英姿】，非锁定 ⇒ 可被失效）：失效后摸牌阶段少掉英姿那 +1，
+    营的那 +1 仍在 ⇒ 一次摸 3 张（而不是 4）。
+    """
+    engine = Engine.from_state(
+        _ganning_state(mine=(0,), theirs=(10,), their_hero="zhouyu"), seed=7
+    )
+    base = _hand_limit(engine, 1)
+    _ying(engine, 1)
+    assert _hand_limit(engine, 1) == base + 1, "构造：标记在时有 +1"
+    engine.suppress_skills(1, "hero.anyone.tieqi")
+    assert _hand_limit(engine, 1) == base + 1, "持有者自己被失效 ⇒ 营的加成照常"
+
+    # 失效的作用域是**本回合**：先走完座位 0 的回合，再在他的回合里施加，才盖得住他的摸牌阶段。
+    run_queries(engine, [_Accepts(), _Accepts()], lambda e: _completed_turns(e) >= 1)
+    engine.suppress_skills(1, "hero.anyone.tieqi")
+    run_queries(engine, [_Accepts(), _Accepts()], lambda e: _play_phases(e) >= 2)
+    draws = _moves(engine, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=1)
+    assert [len(move.cards) for move in draws] == [3], (
+        "英姿被失效（少 1）+ 营照常（多 1）⇒ 一次摸 3 张；实得 "
+        f"{[len(m.cards) for m in draws]}"
+    )
+
+
+def test_yingzi_and_the_ying_marker_add_up_to_one_draw():
+    """框架票 94 的 M6：界【英姿】（基础 +1）与营（基础 +1）叠加 ⇒ 一次摸 4 张。"""
+    engine = Engine.from_state(
+        _ganning_state(mine=(0,), theirs=(10,), their_hero="jie_zhouyu"), seed=7
+    )
+    _ying(engine, 1)
+    run_queries(engine, [_Accepts(), _Accepts()], lambda e: _play_phases(e) >= 2)
+    draws = _moves(engine, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=1)
+    assert [len(move.cards) for move in draws] == [4], (
+        f"2 + 英姿 1 + 营 1 = 一次摸 4 张；实得 {[len(m.cards) for m in draws]}"
+    )
+
+
+def test_the_marker_buff_never_asks_for_an_order():
+    """框架票 95 的 T7：标记自身效果**不进**同时机顺序面（周瑜【英姿】与营同在摸牌阶段）。"""
+    engine = Engine.from_state(
+        _ganning_state(mine=(0,), theirs=(10,), their_hero="zhouyu"), seed=7
+    )
+    _ying(engine, 1)
+    asked: list = []
+
+    class _Yingzi:
+        def respond(self, query):
+            kind = str(getattr(query.kind, "value", query.kind))
+            if kind == "SKILL_ACTIVATION":
+                asked.append(query)
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill):
+                        return action
+                return PassPlayer().respond(query)
+            return _Accepts().respond(query)
+
+    run_queries(engine, [_Accepts(), _Yingzi()], lambda e: _play_phases(e) >= 2)
+    assert asked, "【英姿】照常问一次"
+    assert all(str(query.skill_id) == "hero.zhouyu.yingzi" for query in asked), (
+        f"同一时机只有【英姿】那一条技能效果；实得 {[str(q.skill_id) for q in asked]}"
+    )
+    assert JIEYING_EFFECT not in {
+        str(action.skill_id)
+        for query in asked
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill)
+    }, "标记自身效果从不出现在「先结哪一条」的面里"
+    draws = _moves(engine, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=1)
+    assert [len(move.cards) for move in draws] == [4], (
+        "英姿 1 + 营 1 + 基础 2 ⇒ 一次摸 4 张（两条加成走同一条写入口）"
+    )
+
+
+def test_poxi_four_card_draw_resumes_after_a_gaining_hook():
+    """G7：4 档的"摸四张"内联派发"获得牌后"（【清俭】）⇒ 续跑不重摸、也不再结算一次分档。"""
+    from sgs.skills.move_after import JIE_QINGJIAN
+
+    mine = tuple(_by_suit()[suit] for suit in SUITS)
+    theirs = (_by_suit(excluded=mine)["spade"],)
+    engine, player = _poxi_engine(_ganning_state(mine=mine, theirs=theirs), picks=mine)
+    engine.grant_skill(0, JIE_QINGJIAN)
+    asked: list = []
+
+    class _Decline:
+        """除【清俭】那一问（答放弃）之外全部交给【魄袭】的脚本玩家。"""
+
+        def respond(self, query):
+            if str(getattr(query, "skill_id", "")) == JIE_QINGJIAN:
+                asked.append(query)
+                return PassPlayer().respond(query)
+            return player.respond(query)
+
+    run_queries(
+        engine,
+        [_Decline(), PassPlayer()],
+        lambda e: bool(player.selections) and bool(asked),
+    )
+    assert asked, "构造：【清俭】在摸完四张后确实问过（这一次摸牌因此挂起过）"
+    draws = _moves(engine, reason=MoveReason.DRAW, to_zone=Zone.HAND, seat=0)
+    assert [len(move.cards) for move in draws].count(4) == 1, (
+        f"摸四张只发生一次；实得 {[len(m.cards) for m in draws]}"
+    )

@@ -6091,11 +6091,17 @@ def _initial_player(
     该断言同票改判为 ``test_the_gender_field_is_filled_from_the_hero_data``。
     """
     hp_max = INITIAL_HP if hero is None else hero.hp_max
+    # 初始体力值（lei-shenganning 票 01）：武将数据可以声明"开局体力低于上限"（神甘宁 3/6）。
+    # **没声明 = 满体力**（= 上限，与引入本字段之前逐字节一致）。
+    hp = hp_max if hero is None or hero.hp is None else hero.hp
     if identity is Identity.LORD:
+        # 主公的 +1 **上限与体力各加一**（用户 2026-11-07 口径）：3/3 → 4/4、3/6 → 4/7。
+        # 对满体力武将来说两条轴一起 +1，"体力 = 上限"照旧成立（既有断言不变）。
         hp_max += 1
+        hp += 1
     return Player(
         seat=seat,
-        hp=hp_max,
+        hp=min(hp, hp_max),
         hp_max=hp_max,
         identity=identity,
         identity_visible=identity is Identity.LORD,

@@ -485,7 +485,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 80 and len(catalog) == 51, (
+    assert len(flat) == 81 and len(catalog) == 52, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -2804,6 +2804,42 @@ def test_the_session_view_keeps_a_suppressed_skill_for_the_button_icon() -> None
     suppressed = wusheng(registry.view(session, after=-1, logs_after=0))
     assert suppressed["state"] == "suppressed", "响应体没有失效态，前端画不出禁止图标"
     assert suppressed["available"] is False
+
+
+def test_the_marker_own_effect_is_not_listed_as_a_skill() -> None:
+    """「营」的**标记自身效果**不是技能：按钮区 / 武将详情都不列它（lei-shenganning 票 01）。
+
+    它的效果由 `Marker.effect` 指向的那条定义**照常生效**，但持有者并没有"学会"任何东西——
+    列进按钮区就会出现一个点不动的幻影技能（名字还只能是短 id `jieying_mark`）。
+    """
+    from sgs_web.projection import build_skills, seat_skill_display
+
+    session = Session(
+        seed=7,
+        ai="heuristic",
+        timeout_seconds=None,
+        player_count=8,
+        my_hero="shen_ganning",
+    )
+    seat = session.human_seat
+    session.engine.add_marker(
+        None,
+        seat,
+        name="营",
+        source_seat=seat,
+        source_skill_id="hero.shen_ganning.jieying",
+        count=1,
+        effect="hero.shen_ganning.jieying_mark",
+        clear_on_source_death=True,
+        clear_on_source_skill_lost=True,
+    )
+
+    listed = {entry["skill_id"] for entry in build_skills(session, seat)}
+    assert "hero.shen_ganning.jieying" in listed, "构造：这一座位真的拥有【劫营】（标记的来源）"
+    assert "hero.shen_ganning.jieying_mark" not in listed, "标记自身效果不进技能按钮区"
+    assert {entry["skill_id"] for entry in seat_skill_display(session, seat)}.isdisjoint(
+        {"hero.shen_ganning.jieying_mark"}
+    ), "武将详情也不列它"
 
 
 def test_every_skill_entry_carries_type_lock_and_availability() -> None:
@@ -7054,7 +7090,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 165, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 168, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

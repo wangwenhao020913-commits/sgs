@@ -756,6 +756,19 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                 )
             )
 
+        # 初始体力值（lei-shenganning 票 01）：可缺省（= 满体力），写了就必须是 1..上限 的整数
+        # ——否则开局就造出一个"体力 > 上限"或"开局即濒死"的座位。
+        if hero.hp is not None and not 1 <= hero.hp <= hero.hp_max:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/hp",
+                    expected="1..hp_max 的整数（初始体力值；缺省 = 满体力）",
+                    got=repr(hero.hp),
+                    rule_id="hero.hp_range",
+                )
+            )
+
         if not hero.skills:
             errors.append(
                 LoadError(

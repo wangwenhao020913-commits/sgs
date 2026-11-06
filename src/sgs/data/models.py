@@ -254,6 +254,16 @@ class Hero(_FrozenModel):
     kingdom: Kingdom
     gender: Gender
     hp_max: int
+    hp: int | None = None
+    """**初始体力值**（lei-shenganning 票 01 的加法；缺省 ``None`` = 满体力 = ``hp_max``）。
+
+    极少数武将的开局体力**低于**体力上限（神甘宁：上限 6、初始 3），这不是技能效果、也不是
+    已结算的失去体力，而是牌面上的"初始体力值"。故它住在**武将数据**上，由
+    :func:`~sgs.engine.build_initial` 的开局座位直接写进 ``Player.hp``：不压帧、不发 delta
+    （初始体力不进记录流，与 ``hp_max`` 同一姿态）。
+
+    主公的 +1 是**上限与体力各加一**（用户 2026-11-07 口径）：3/3 → 4/4、3/6 → 4/7。
+    """
     skills: tuple[HeroSkill, ...]
     version: str
     """版本标记：标准版 ``"standard"`` / 界限突破·OL 口径 ``"jie-ol"``（ADR-006 的 OL 口径）/

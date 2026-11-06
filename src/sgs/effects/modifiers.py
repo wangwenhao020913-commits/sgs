@@ -72,10 +72,17 @@ class CarrierKind(str, Enum):
 
     M2 只有装备区；M3 加 **``HERO``**（武将牌，票 01）。``IDENTITY`` 按 `03` §4「技能描述模型」的冻结面
     是"只许增"的下一个加法，M3 **不落载体**——主公技的载体是**武将牌**、不是身份牌。
+
+    ``MARKER``（lei-shenganning 票 94 的接线 + 01 票的首个载体）= **标记自身的效果定义**：
+    它不是任何角色"拥有"的技能，而是 ``Marker.effect`` 指向的那条效果声明；实例由
+    :func:`~sgs.skills.resolve_instances` 按 ``Player.markers`` 产出（``SkillSourceKind.MARKER``），
+    ``owner`` = 标记**持有者**。故它既不在武将面上、也不在装备区里，``carrier`` 单列一档
+    （否则"武将技能 = 数据表技能清单"这条不变量会被一条不是技能的条目撑破）。
     """
 
     EQUIPMENT = "EQUIPMENT"
     HERO = "HERO"
+    MARKER = "MARKER"
 
 
 class PriorityClass(IntEnum):
@@ -89,6 +96,15 @@ class PriorityClass(IntEnum):
     HERO = 0
     EQUIPMENT = 1
     CARD_USE = 2
+    MARKER = 3
+    """**标记自身效果**（`CarrierKind.MARKER`，lei-shenganning 票 01）。排最后一档——理由两条：
+    标记的加成本来就最后叠加；而 :func:`~sgs.skills.catalog._dispatch` 的排序面按
+    （档, 是否锁定）分子队列，标记效果与武将档 / 装备档的段**不在同一子队列** ⇒ 不会为
+    "先结英姿还是先结营"发一张面（用户 2026-11-07：「标记自身效果不进派发环」）。
+
+    **不为它复用 `CARD_USE`**：那一档的语义是"真牌 / 转化牌候选"（`effects/actions.py` 的
+    `need_card_tier`），标记效果不是任何牌候选——借来用会让两处读者各自猜它的意思。
+    """
 
 
 WINE_DAMAGE_BONUS = 1
@@ -98,6 +114,7 @@ WINE_DAMAGE_BONUS = 1
 _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
     CarrierKind.EQUIPMENT: PriorityClass.EQUIPMENT,
     CarrierKind.HERO: PriorityClass.HERO,
+    CarrierKind.MARKER: PriorityClass.MARKER,
 }
 
 

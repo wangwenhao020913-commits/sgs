@@ -62,6 +62,29 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "shen_ganning",
+      "name": "神甘宁",
+      "true_name": "神甘宁",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 6,
+      "hp": 3,
+      "version": "lei",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "poxi",
+          "name": "魄袭",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jieying",
+          "name": "劫营",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

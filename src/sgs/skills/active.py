@@ -114,6 +114,8 @@ __all__ = [
     "CANDIDATE_CAP",
     "JIE_LIJIAN",
     "JIE_LIJIAN_FLOW",
+    "POXI_CARDS",
+    "POXI_FLOW",
     "ActiveSkill",
     "Arrange",
     "PickCards",
@@ -4826,6 +4828,250 @@ _QIMOU = ActiveSkill(
 )
 
 
+# ---------------------------------------------------------------------------
+# 神甘宁【魄袭】（lei-shenganning 票 01；用户 2026-11-07 逐条签）
+#
+# 牌面（逐字；OL 现行文本 = 用户 `技能.txt`）：
+#
+#     魄袭
+#     　出牌阶段限一次，你可以观看一名其他角色的手牌，且你可以弃置你与其手牌中共计四张
+#     不同花色的牌，然后若你以此法被弃置的牌数为：
+#     　【0】你减少1点体力上限；
+#     　【1】你结束出牌阶段且你本回合的手牌上限-1；
+#     　【3】你回复1点体力；
+#     　【4】你摸四张牌。
+#
+# 用户 2026-11-07 的两条裁定（`.scratch/lei-shenganning/issues/90-poxi-gaps.md`）：
+#
+# - **1 档的「你结束出牌阶段」= 玩家点「结束出牌阶段」的同一效果**（框架票 92 的受管写入口
+#   `Engine.end_play_phase`，**不是** `skip_play_phase`）。
+# - **选牌面 = 两行观看面**（框架票 93）：上行 = 目标手牌、下行 = 自己的手牌，四色各一张才
+#   可提交；**超时 = 放弃**（`tools/sgs_web/timeout.py` 的 `Pass` 优先天然给出）⇒ 不弃置、
+#   **不结算任何分档**。
+#
+# 形状 = **手写主体**（`shapes.md` §2）：`PickSeats` 装前一步、段机住在 `effect` 里
+# （观看 + 四色选牌 → 两次搬牌 → 按「你的张数」分档）。样板 = `hero.shen_lvmeng_mobile.gongxin`
+# （观看 / `revealed` / `ask_when_empty`）+ `hero.haozhao.zhengku`（提交点分支 + 帧内游标）。
+#
+# 与【攻心】的**两处刻意差别**（票面 §1 的询问剧本）：
+#
+# 1. 候选面是**两人手牌的并集**（`Slot` 的 `ref.seat` 分两个座位），不是目标一人的红桃；
+# 2. 凑不出四色时仍发一条**空选择面**（`ask_when_empty=True`）：弹窗里看得见目标的整副手牌，
+#    出口只有「放弃」——四色的判定在**候选生成期**（`SelectionSpec.max_per_suit`），故这里
+#    自己判一次"拿不拿得出四色"，拿不出就铺空面（否则面里全是选不齐的牌，玩家会一直点到超时）。
+#
+# 弃置张数由「**你的**张数」定（0 / 1 / 2 / 3 / 4，其中 **2 无效果**——三平台牌面都没有【2】）：
+# 牌面**没有**"一张 / 1 点"这类限定词 ⇒ 一次发动按**事件**结算一次（默认读法（三）），
+# 不是逐张触发四次。
+# ---------------------------------------------------------------------------
+
+POXI_CARDS = 4
+"""「共计四张不同花色的牌」= **恰好 4 张、四色各一**（票面 §1 的读法表）。"""
+
+_ASK_POXI = "hero.shen_ganning.poxi.cards"
+"""手写询问位置：【魄袭】四色选牌那一问（``owner`` 必填，见 ``Engine.ask_selection``）。"""
+
+_POXI_PLAN = "poxi_plan"
+"""帧私有：发牌前的两份手牌快照 + "四色凑得出吗"（重入不重算，也不重新判空面）。"""
+
+_POXI_MINE_MOVED = "poxi_mine_moved"
+"""帧私有：我自己那几张已经进弃牌堆（重入不重搬）。"""
+
+_POXI_THEIR_MOVED = "poxi_theirs_moved"
+"""帧私有：目标那几张已经进弃牌堆（重搬会触发两次"失去牌后"）。"""
+
+_POXI_SETTLED = "poxi_settled"
+"""帧私有：分档效果已经落了（重入不重结算）。"""
+
+
+def _poxi_targets(state: GameState, owner: int) -> tuple[int, ...]:
+    """可以观看的对象：**其他存活且手牌非空**的角色（观看的前置条件，与【攻心】同形）。"""
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner and player.hand
+    )
+
+
+def _poxi_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    del frame, chosen
+    return _poxi_targets(state, owner)
+
+
+def _poxi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：本阶段没用过 ∧ 有可观看的其他角色（池空 ⇒ 连"发动"都不出现）。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _poxi_targets(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _poxi_plan(
+    state: GameState, owner: int, target: int
+) -> tuple[tuple[int, ...], tuple[int, ...], bool]:
+    """发牌前的快照：``(我的手牌, 目标手牌, 四色凑得出吗)``。
+
+    "凑得出四色"= 两副手牌里**四种花色都有**且合计至少 4 张——满足它时，候选枚举
+    （`total=(4,4)` + `max_per_suit=1`）必然产得出至少一种四色各一的组合；不满足时整面
+    只会有 `Pass`，故按空面铺（见 :func:`_poxi_effect`）。
+    """
+    mine = tuple(state.player(owner).hand)
+    theirs = tuple(state.player(target).hand)
+    suits = {state.card(card_id).suit for card_id in (*theirs, *mine)}
+    return mine, theirs, len(suits) == len(Suit) and len(mine) + len(theirs) >= POXI_CARDS
+
+
+def _poxi_face(
+    state: GameState, owner: int, target: int, mine: tuple[int, ...], theirs: tuple[int, ...]
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """选择面 = **两副手牌的并集**：上行目标（在前）、下行自己（在后），行序由 `ref.seat` 分。"""
+    slots = tuple(
+        Slot(ref=ZoneRef(Zone.HAND, seat), card=state.card(card_id))
+        for seat, card_id in (
+            *((target, card_id) for card_id in theirs),
+            *((owner, card_id) for card_id in mine),
+        )
+    )
+    return slots, tuple(slot.card.card_id for slot in slots)
+
+
+def _poxi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：观看 + 四色选牌 → 两次搬牌（我方 / 对方各一次）→ 按"你的张数"分档。
+
+    四张来自两副手牌，而一次 ``move_card`` 只认**一个来源区**（`effects/primitives.py` 的
+    "一次搬牌只能有一个来源区域"）⇒ 必须拆成两次搬牌。每次搬牌都会内联派发"失去牌后"
+    （【连营】/【枭姬】）而挂起，故重入纪律按 **G7（挂起续跑）** 落：两个段落各一个帧私有
+    游标（在搬牌**之前**落），分档效果另有一个收尾游标。
+
+    「可以」的出口 = 候选里的 `Pass`（超时兜底同义）：**不弃置、不结算任何分档**。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    target = int(answers["seat"][0])
+    plan = frame.data.get(_POXI_PLAN)
+    if plan is None:
+        plan = _poxi_plan(state, owner, target)
+        frame.data[_POXI_PLAN] = plan
+    mine, theirs, four_suits = plan
+    if four_suits:
+        slots, card_ids = _poxi_face(state, owner, target, mine, theirs)
+        revealed = state.refs((*theirs, *mine))
+    else:
+        # 凑不出四色：**空选择面**（只有「放弃」），但整副被观看的手牌仍授予观看者
+        # （票 93 的空面约定：`revealed` 只含**上行**那一手）。
+        slots, card_ids = (), ()
+        revealed = state.refs(theirs)
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_POXI,
+        key=f"poxi:{target}",
+        actor=owner,
+        timing=Timing.PHASE_PLAY_IDLE,
+        spec=SelectionSpec(
+            zones=(Zone.HAND,),
+            total=(POXI_CARDS, POXI_CARDS),
+            optional=True,
+            max_per_suit=1,
+        ),
+        face=(slots, card_ids),
+        revealed=revealed,
+        ask_when_empty=True,
+    )
+    if host.suspended(picked):
+        return "stay"
+    chosen = tuple(int(card_id) for card_id in picked)
+    if not chosen:
+        # 「可以」⇒ 放弃（含空面 / 超时）：一次弃置都不发生，**分档效果一个都不结算**。
+        return None
+    own = set(mine)
+    my_picks = tuple(card_id for card_id in chosen if card_id in own)
+    their_picks = tuple(card_id for card_id in chosen if card_id not in own)
+    # 游标在搬牌**之前**落：`move_in_frame` 是"先搬完、再内联派发失去牌后"，钩子挂起时
+    # 这一次搬牌已经发生，续跑不得再来一遍。
+    if my_picks and not frame.data.get(_POXI_MINE_MOVED):
+        frame.data[_POXI_MINE_MOVED] = True
+        control = host.move_in_frame(
+            frame,
+            state.refs(my_picks),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    if their_picks and not frame.data.get(_POXI_THEIR_MOVED):
+        frame.data[_POXI_THEIR_MOVED] = True
+        control = host.move_in_frame(
+            frame,
+            state.refs(their_picks),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=target,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    if frame.data.get(_POXI_SETTLED):
+        return None
+    frame.data[_POXI_SETTLED] = True
+    return _poxi_tier(host, frame, owner, len(my_picks))
+
+
+def _poxi_tier(host: Any, frame: Any, owner: int, count: int) -> Any:
+    """「你以此法被弃置的牌数」→ 分档效果（**2 档无效果**：牌面没有【2】，什么都不做）。
+
+    游标在**效果之前**落（`_POXI_SETTLED`）：3 档压子帧、4 档摸牌都可能挂起，重入时不得
+    再结算一次。
+    """
+    state = host.state
+    if count == 0:
+        # 上限减为 0 的直接死亡流程未落地（`reduce_hp_max` 会抛），故兜一道：见票面 §1 的
+        # 「体力上限归零按既有口径」——本仓不新增死亡边界，只在那个越界点上停手。
+        if state.player(owner).hp_max > 1:
+            host.reduce_hp_max(frame, owner, 1)
+        return None
+    if count == 1:
+        host.add_hand_limit_bonus(owner, -1)
+        host.end_play_phase(owner)
+        return None
+    if count == 3:
+        _push_recover(host, frame, source=owner, target=owner)
+        return None
+    if count == POXI_CARDS:
+        if host.draw_for_hand(frame, owner, POXI_CARDS) == "stay":
+            return "stay"
+    # 2 档：只有弃置发生、没有后续（牌面三平台都没有【2】）。
+    return None
+
+
+POXI_FLOW = SkillFlow(
+    name="poxi",
+    steps=(PickSeats(lo=1, hi=1, pool=_poxi_pool, optional=False, key="seat"),),
+    effect=_poxi_effect,
+)
+"""【魄袭】的一步流水线 + 手写主体：选一名其他角色 → 观看 + 四色选牌 → 分档结算。
+
+**不翻预发动**（`shapes.md` §4 的准入表）：首步读的是**别人的手牌**（隐藏面），清单渲不出。
+"""
+
+_POXI = ActiveSkill(
+    "shen_ganning",
+    "poxi",
+    _poxi_offers,
+    flow=POXI_FLOW,
+    requirement=(
+        "出牌阶段限一次，你可以观看一名其他角色的手牌，且你可以弃置你与其手牌中共计四张"
+        "不同花色的牌，然后若你以此法被弃置的牌数为：0，你减少1点体力上限；1，你结束"
+        "出牌阶段且你本回合的手牌上限-1；3，你回复1点体力；4，你摸四张牌。"
+    ),
+    step_requirements={"seat": "观看一名其他角色的手牌"},
+)
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
@@ -5094,6 +5340,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 界魏延移动版【奇谋】（jie-feng-batch 票 02）：A 族限定技 + 单步选 X（中文选项）；
     # 失去 X 点体力 → 本回合距离 -X / 本阶段【杀】上限 +X。不翻预发动。
     _QIMOU,
+    # 神甘宁【魄袭】（lei-shenganning 票 01）：A 族主动技 + 手写主体（观看 + 四色选牌 →
+    # 两次搬牌 → 按"你的张数"分档）。不翻预发动（首步读别人的手牌，清单渲不出）。
+    _POXI,
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/

@@ -1783,9 +1783,22 @@ def test_every_equipment_card_has_a_skill_and_vice_versa():
         if definition.carrier is CarrierKind.HERO
     }
 
+    # lei-shenganning 票 01 起多出**第三类**目录条目：标记自身效果的定义
+    # （`carrier = CarrierKind.MARKER`，`Marker.effect` 指向它）。它不是任何角色"拥有"的
+    # 技能，故不进上面两半；三分区仍然覆盖整张 `CATALOG`。
+    markers = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier is CarrierKind.MARKER
+    }
+
     assert equipment == {f"equip.{card_type}" for card_type in EQUIPMENT_CARD_TYPE_IDS}
     assert not equipment & heroes, "两类载体的技能 id 前缀各一套，不相交"
-    assert set(CATALOG) == equipment | heroes
+    assert not markers & (equipment | heroes), "标记效果定义与技能两半不相交"
+    assert set(CATALOG) == equipment | heroes | markers
+    assert markers == {"hero.shen_ganning.jieying_mark"}, (
+        "唯一一条标记自身效果的定义（「营」）；新增一条要同时想清楚它在界面上的归属"
+    )
     assert {
         "hero.guanyu.wusheng",
         "hero.zhaoyun.longdan",

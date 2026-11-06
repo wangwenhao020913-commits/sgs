@@ -42,6 +42,7 @@ from sgs.skills import (
     LUOSHEN,
     SEAT_PREFIX,
     ModifierPoint,
+    SkillSourceKind,
     conversion_offers_by_source,
     is_forced_conversion,
     lord_skill_allowed,
@@ -837,6 +838,13 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     asked_here = pending is not None and int(getattr(pending, "actor", -1)) == seat
     for instance in resolve_instances(state, include_suppressed=True):
+        if instance.source.kind is SkillSourceKind.MARKER:
+            # **标记自身效果**不是技能（lei-shenganning 票 01）：它由 ``Marker.effect`` 指向
+            # 一条效果定义，持有者并没有"学会"任何东西——列进按钮区就会出现一个
+            # 点不动的幻影技能（名字还只能是短 id）。效果本身照常生效（实例由
+            # ``resolve_instances`` 产出，钩子 / 修饰器读它），这里只把它挡在**技能清单**
+            # 这一面之外。``seat_skill_display`` 走的是武将面 / 装备区，本来就看不到它。
+            continue
         cross_seat = instance.owner != seat
         definition = instance.definition
         # 跨座位授予（feng-zhangjiao 票 01：张角【黄天】——别的座位的技能、此刻发给我）。

@@ -220,9 +220,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 165
+    assert len(CATALOG) == 168
     assert len(equipment) == 22
-    assert len(heroes) == 143
+    assert len(heroes) == 145
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -248,7 +248,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 143
+    assert len(expected) == 145
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1469,6 +1469,20 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _changyi_probe_state()
     if skill_id.startswith("hero.shen_zhugeliang."):
         return _shen_zhugeliang_probe_state()
+    if skill_id == "hero.shen_ganning.jieying":
+        # ②「营在我身上」、③「营在回合角色身上」⇒ 两枚标记各就各位（①的"场上无营"
+        # 读局面、放在回调里，故不影响本对照）。
+        state = _probe_state()
+        ying = Marker(
+            name="营",
+            source_seat=ME,
+            source_skill_id="hero.shen_ganning.jieying",
+            count=1,
+            effect="hero.shen_ganning.jieying_mark",
+        )
+        state.player(ME).markers = (ying,)
+        state.player(0).markers = (ying,)
+        return state
     return _probe_state()
 
 
@@ -1771,6 +1785,15 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "equip.vermilion_feather_fan": (
             _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
+        # lei-shenganning 票 01：神甘宁【劫营】的三条钩子各一条"关于我"的判据——
+        # ① 我的回合开始；② 我的结束阶段；③ 别人的回合结束时（回合角色带着**我放的**营）。
+        "hero.shen_ganning.jieying": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME),
+            _HookFrame(source=0),
+        ),
+        # 「营」的**标记自身效果**：只有持有者自己的摸牌阶段才多摸一张。
+        "hero.shen_ganning.jieying_mark": (_HookFrame(source=ME),),
     }
 
 
@@ -2145,8 +2168,14 @@ SKILL_SHAPE: dict[str, str] = {
     # 【倡义】= 帧外时机钩子 + 手写段机（拼点 → 授予 → 二选一，没有 ``SkillFlow``）⇒ 多轮技能格。
     "hero.tao_caocao.hongzhi": "锁定技",
     "hero.tao_caocao.changyi": "多轮技能",
+    # lei-shenganning 票 01：神甘宁【魄袭】= A 族主动技 + 手写主体（观看 + 四色选牌）；
+    # 【劫营】= 三条钩子 + 一步选座流水线（触发技能）；`jieying_mark` 是**标记自身效果**
+    # 的定义（`carrier = MARKER`，手写钩子 + 两个修饰器、无流水线）⇒ 多轮技能格。
+    "hero.shen_ganning.poxi": "主动技能",
+    "hero.shen_ganning.jieying": "触发技能",
+    "hero.shen_ganning.jieying_mark": "多轮技能",
 }
-"""145 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""168 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -2165,15 +2194,18 @@ SHAPE_COUNTS: dict[str, int] = {
     # huo-taishici-xunyu 票 01：太史慈【天义】⇒ 主动技能 22 → 23。
     # lei-batch 票 01：郝昭【镇骨】⇒ 触发技能 20 → 21。
     # jie-feng-batch 票 01：界黄忠移动版【烈弓】⇒ 零步技能 29 → 30。
-    "主动技能": 26,
-    "触发技能": 22,
+    # lei-shenganning 票 01：神甘宁【魄袭】⇒ 主动技能 26 → 27；【劫营】（三条钩子、
+    # 一步选座流水线）⇒ 触发技能 22 → 23；「营」的**标记自身效果**（`carrier = MARKER`，
+    # 手写钩子 + 两个修饰器、没有流水线）⇒ 多轮技能 16 → 17。
+    "主动技能": 27,
+    "触发技能": 23,
     "零步技能": 30,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
     # huo-wolong-yanliang 票 01：卧龙诸葛【八阵】（锁定技 + 候选生成器）⇒ 锁定技 36 → 37；
     # 【火计】【看破】两条转化声明 ⇒ 转化技 15 → 17。
-    "多轮技能": 16,
+    "多轮技能": 17,
     "锁定技": 37,
     "转化技": 18,
     "能力位": 3,
@@ -2284,9 +2316,9 @@ def _flow_backed_active_ids() -> frozenset[str]:
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 165
+    assert len(SKILL_SHAPE) == len(CATALOG) == 168
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2376,7 +2408,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     }
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 16
+    assert len(multi_round) == 17
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -2419,8 +2451,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 85
-    assert len(outside) == 80
+    assert len(inside) == 87
+    assert len(outside) == 81
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

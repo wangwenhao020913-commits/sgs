@@ -3,6 +3,14 @@
 本模块只装**雷包**的武将技能声明；族级原语（钩子 / 步骤流水线 / 标记 / 摸牌）一律
 复用既有实现，不新增机制。
 
+**模块内的技能归属**（一条技能住哪一族，就住那个模块）：
+
+- 郝昭【镇骨】/ 张绣【从谏】/ 诸葛瞻【罪论】【父荫】/ 神甘宁【劫营】= 本模块（钩子 + 流水线）；
+- 张绣【雄乱】/ 神甘宁【魄袭】= A 族，住 :mod:`sgs.skills.active`（出牌阶段主动技的候选 /
+  发动主体都归那一族）；
+- 神甘宁「营」的**标记自身效果**（``hero.shen_ganning.jieying_mark``）= 本模块，但它不是
+  技能：`Marker.effect` 指向它，`carrier = CarrierKind.MARKER`，武将面 / 技能按钮区都不列。
+
 【镇骨】（郝昭，魏 / 男 / 4 体力；牌面权威 = 用户录入 ``技能.txt``，逐字）：
 
     结束阶段，你可以选择一名其他角色，你的回合结束时和该角色的下个回合结束时，
@@ -45,7 +53,14 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
-from sgs.effects import CarrierKind, behavior_for, is_slash, place_on_deck
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierPoint,
+    behavior_for,
+    is_slash,
+    place_on_deck,
+)
 from sgs.state import (
     ArrangeCards,
     FrameKind,
@@ -81,7 +96,11 @@ from .flow import (
 
 __all__ = [
     "CONGJIAN",
+    "JIEYING",
+    "JIEYING_EFFECT",
+    "JIEYING_MARK",
     "LEI_SKILL_DEFS",
+    "SHEN_GANNING",
     "ZHANGXIU",
     "ZHENGKU",
     "ZHENGKU_CAP",
@@ -774,3 +793,362 @@ _FUYIN = SkillDef(
 
 LEI_SKILL_DEFS = (*LEI_SKILL_DEFS, _ZUILUN, _FUYIN)
 """雷包已落地的武将技能（逐票追加）：镇骨 / 从谏 / 罪论 / 父荫（雄乱住 A 族）。"""
+
+
+# ---------------------------------------------------------------------------
+# 神甘宁【劫营】（lei-shenganning 票 01；用户 2026-11-07 逐条签）
+#
+# 牌面（逐字；OL 现行文本，见票面 §0.1 的三平台对照）：
+#
+#     劫营
+#     　①回合开始时，若场上没有角色有“营”标记，你获得“营”标记；
+#     　②结束阶段，你可以将“营”标记交给一名其他角色；
+#     　③有“营”标记的其他角色的回合结束时，移去“营”标记，然后你获得其所有手牌。
+#     　【“营”标记：你于摸牌阶段多摸一张牌、出牌阶段使用【杀】的次数上限+1、
+#     　  且你本回合手牌上限+1。】
+#
+# 用户 2026-11-07 的两条裁定（`.scratch/lei-shenganning/issues/91-jieying-platform.md`）：
+#
+# - **③ 的时机 = 「回合结束时」**（`TURN_END`，与郝昭【镇骨】同一时点；移动版「回合结束后」
+#   已登记为平台差异、**不实现**）。两条技能在同一个 `TURN_END` 撞上时**由该座位自选顺序**
+#   （框架票 95）：它们都是不可放弃的强制段 ⇒ 那一张面**没有 Pass**、必须选一条。
+# - **营的三个加成是「标记本身的效果」**（框架票 94）：`Marker.effect` 指向下面那条
+#   **效果定义**（`carrier = MARKER`），不是本技能的钩子 / 修饰器 ⇒ **【劫营】失效（被无效）
+#   也照常享受**；寿命由两条策略给：来源**阵亡**（`clear_on_source_death`）或来源**失去**
+#   【劫营】（`clear_on_source_skill_lost`）。失效不动标记。
+#
+# 标记记法：全场**最多一枚**「营」（① 只在场上没有营时发）。它的 `source_seat` 恒是
+# 神甘宁（`count` 恒 1，不做计数），持有者随 ② 转移；③ 之后清空 —— 于是"谁有营"只需
+# 读持有者身上的那枚标记。
+#
+# 记法带来的一个直接后果：① 的"场上没有角色有营"按**标记名**全场判（含别人身上的），
+# 而不是"我自己没有"——否则神甘宁把营交出去之后，自己每个回合开始都会再获得一枚。
+# ---------------------------------------------------------------------------
+
+SHEN_GANNING = "shen_ganning"
+"""神甘宁的武将 id（【魄袭】住 A 族 `active.py`，与【雄乱】同一姿态：出牌阶段主动技的
+候选 / 发动主体都归那一族）。"""
+
+JIEYING = hero_skill_id(SHEN_GANNING, "jieying")
+"""神甘宁【劫营】的全限定技能 id。"""
+
+JIEYING_MARK = "营"
+"""【劫营】标记名（中文，与「镇骨」「梦魇」同姿态）。"""
+
+JIEYING_EFFECT = hero_skill_id(SHEN_GANNING, "jieying_mark")
+"""「营」的**标记自身效果**定义 id（框架票 94 的 `Marker.effect`）。
+
+它是 `CATALOG` 里的一条 `carrier = CarrierKind.MARKER` 定义：**不是**神甘宁拥有的技能
+（武将面上没有它、按钮区也不列），只在有「营」标记时由 `resolve_instances` 按标记产出。
+"""
+
+
+def _ying_markers(state: GameState, seat: int, holder: int) -> Marker | None:
+    """``holder`` 身上由 ``seat`` 的【劫营】放的那枚「营」标记（没有 ⇒ ``None``）。"""
+    for marker in state.player(holder).markers:
+        if marker.name == JIEYING_MARK and marker.source_seat == seat:
+            return marker
+    return None
+
+
+def _ying_anywhere(state: GameState) -> bool:
+    """场上**有没有角色**带「营」标记（① 的触发前提；按标记名判，不看来源）。"""
+    return any(
+        marker.name == JIEYING_MARK
+        for player in state.players
+        for marker in player.markers
+    )
+
+
+def _jieying_grant_condition(host: Any, frame: Any) -> bool:
+    """① 的"关于我"判据：**自己的**回合开始（强制段，不问"是否发动"）。
+
+    ``TURN_START`` 是每个座位都会派发的帧外时机，故必须自校"这一步是我的回合开始"
+    （与神诸葛亮【狂风】的到期清扫同一判据）。
+
+    "场上有没有「营」"读的是**局面**、不是"这一步是不是我的"——它放在回调里（见
+    :func:`_jieying_grant`）而不是这里：钩子条件要能被"持有者自校"的机械检查逐条证伪
+    （`tests/test_hero_catalog.py` 的 `_owner_probes`），而局面前提会让同一条技能的三条
+    钩子互相排斥（①要求场上无营，②③要求场上有营）。
+    """
+    del host
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return owner is not None and frame.data.get("source") == owner
+
+
+def _jieying_grant(host: Any, frame: Any) -> Any:
+    """① 的强制段：场上没有「营」时，自己获得一枚（带标记自身效果与两条寿命策略）。
+
+    「若场上没有角色有营标记」= 按**标记名**全场判（含**别人**身上的那一枚）：神甘宁把营
+    交出去之后，自己每个回合开始都不该再获得一枚。
+    """
+    owner = int(frame.data["skill_owner"])
+    if _ying_anywhere(host.state):
+        return None
+    host.add_marker(
+        frame,
+        owner,
+        name=JIEYING_MARK,
+        source_seat=owner,
+        source_skill_id=JIEYING,
+        count=1,
+        effect=JIEYING_EFFECT,
+        clear_on_source_death=True,
+        clear_on_source_skill_lost=True,
+    )
+    return None
+
+
+def _jieying_hand_over_condition(host: Any, frame: Any) -> bool:
+    """② 的触发条件：**自己的**结束阶段 ∧ 营在我身上 ∧ 还有一名其他存活角色。
+
+    「可以」⇒ 非锁定（派发环会先问"是否发动"）；池空时连问都不发（`edge-cases.md` 总纪律 1）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if _ying_markers(host.state, int(owner), int(owner)) is None:
+        return False
+    return bool(_other_alive_seats(host.state, frame, int(owner)))
+
+
+def _jieying_hand_over(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """② 的提交点：先把营交给选中的人，再从自己身上移去（同一枚标记，来源不变）。
+
+    先加后移是刻意的：两次写入之间没有钩子会跑，但"场上瞬间没有营"不该出现——① 的判据
+    读全场，这条次序让它永远读不到那个瞬时态。
+    """
+    owner = int(frame.data["skill_owner"])
+    target = next(iter(int(value) for value in answers.get("seat", ())), None)
+    if target is None:
+        return None
+    host.add_marker(
+        frame,
+        target,
+        name=JIEYING_MARK,
+        source_seat=owner,
+        source_skill_id=JIEYING,
+        count=1,
+        effect=JIEYING_EFFECT,
+        clear_on_source_death=True,
+        clear_on_source_skill_lost=True,
+    )
+    host.remove_marker(
+        frame,
+        owner,
+        name=JIEYING_MARK,
+        source_seat=owner,
+        source_skill_id=JIEYING,
+    )
+    return None
+
+
+JIEYING_FLOW = SkillFlow(
+    name="jieying",
+    steps=(
+        PickSeats(
+            lo=1,
+            hi=1,
+            pool=_other_alive_seats,
+            optional=False,
+            key="seat",
+        ),
+    ),
+    effect=_jieying_hand_over,
+)
+"""【劫营】② 的一步流水线：选一名其他存活角色 → 把「营」交给他。"""
+
+
+def _jieying_take_condition(host: Any, frame: Any) -> bool:
+    """③ 的触发条件：**别人的**回合结束时，他带着**我放的**「营」。
+
+    两个"不是"：回合角色不能是我自己（牌面写「有营标记的**其他**角色」）；营的来源必须是
+    我（别人的【劫营】放的营不归我拿）。两者都不成立时连钩子都不跑。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    turn = frame.data.get("source")
+    if owner is None or turn is None or int(turn) == int(owner):
+        return False
+    return _ying_markers(host.state, int(owner), int(turn)) is not None
+
+
+def _jieying_take(host: Any, frame: Any) -> Any:
+    """③ 的强制段：移去「营」，然后**我获得他所有手牌**（一次搬牌，不逐张触发 ③）。
+
+    「然后」的次序是牌面写死的：先移标记（此刻起他不再享受三个加成——三个加成是标记自身
+    效果、随标记存续），再搬牌。搬牌会内联派发"失去牌后"（【连营】/【枭姬】）而挂起，
+    故两个段落各有帧私有游标：重入既不重移标记、也不重搬牌（G7）。
+    """
+    owner = int(frame.data["skill_owner"])
+    turn = int(frame.data["source"])
+    if not frame.data.get(_JIEYING_TAKEN):
+        frame.data[_JIEYING_TAKEN] = True
+        host.remove_marker(
+            frame,
+            turn,
+            name=JIEYING_MARK,
+            source_seat=owner,
+            source_skill_id=JIEYING,
+        )
+    cards = frame.data.get(_JIEYING_CARDS)
+    if cards is None:
+        # 搬哪些牌**发牌时定格**：搬牌会内联派发"失去牌后"，对方在那时可能摸到新牌
+        # （【连营】）；重入时再读一次手牌就会把那几张新牌也搬走（G7 的实机形态）。
+        cards = tuple(host.state.player(turn).hand)
+        frame.data[_JIEYING_CARDS] = cards
+    if not cards or frame.data.get(_JIEYING_MOVED):
+        return None
+    # 游标在搬牌**之前**落：`move_in_frame` 是"先搬完、再内联派发钩子"，钩子挂起时
+    # 这一次搬牌已经发生，续跑不得再来一遍。
+    frame.data[_JIEYING_MOVED] = True
+    control = host.move_in_frame(
+        frame,
+        host.state.refs(cards),
+        to_zone=ZoneRef(Zone.HAND, owner),
+        reason=MoveReason.PUT,
+        owner=owner,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    return None
+
+
+_JIEYING_TAKEN = "jieying_marker_removed"
+"""帧私有：③ 的「移去营」已经落过（重入不重移）。"""
+
+_JIEYING_CARDS = "jieying_hand_cards"
+"""帧私有：③ 要搬的那批牌（发牌时定格；重入不重新读手牌）。"""
+
+_JIEYING_MOVED = "jieying_hand_moved"
+"""帧私有：③ 的「获得其所有手牌」已经搬过（游标在搬牌**之前**落；搬牌可能挂起）。"""
+
+
+# ---------------------------------------------------------------------------
+# 「营」的**标记自身效果**（框架票 94 的接线；用户 2026-11-07：「这个是标记本身的效果…
+# 所以就算劫营这个技能失效了，依然享受以上所说的 3 种加成」）
+#
+# 三条加成各落一个既有挂点，**不新增机制**：
+#   ① 摸牌阶段多摸一张 ⇒ `PHASE_DRAW` 强制钩子 + `set_draw_phase_count`（**折进基础张数**，
+#      与【英姿】同一个数：一次摸 N 张，不是"摸 N 再摸 1"）；
+#   ② 出牌阶段【杀】的次数上限 +1 ⇒ `COUNT_LIMIT` 修饰器（只改【杀】族，照【咆哮】）；
+#   ③ 本回合手牌上限 +1 ⇒ `HAND_LIMIT_REPLACE` 的**持续加式**（账本 L852 血裔口径）。
+#
+# 三条都自校"实例的持有者就是被查询 / 正在摸牌的那个座位"（`ctx.owner == ctx.subject`、
+# `MATCH_OWNER_KEY == source`）：修饰器链遍历全体存活实例，缺这一条会替所有人改值。
+# ---------------------------------------------------------------------------
+
+
+def _ying_draw_condition(host: Any, frame: Any) -> bool:
+    """①' 「摸牌阶段多摸一张」只给**持有者自己的**摸牌阶段。
+
+    ``hook_owner`` = 标记持有者（条件求值期由派发环写），``source`` = 当前回合角色；两者不
+    相等时这张加成与他无关——缺这一条会替全场每个摸牌的人各加一张。
+    """
+    del host
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return owner is not None and frame.data.get("source") == owner
+
+
+def _ying_extra_draw(host: Any, frame: Any) -> Any:
+    """①' 把本阶段的基础摸牌数 +1（`set_draw_phase_count` 是唯一写入口）。"""
+    seat = int(frame.data["skill_owner"])
+    host.set_draw_phase_count(seat, host.draw_phase_count() + 1)
+    return None
+
+
+def _ying_slash_limit(state: GameState, ctx: Any, current: Any) -> Any:
+    """②' 「出牌阶段使用【杀】的次数上限+1」——只改【杀】族、只改持有者本人的次数。
+
+    牌面判据走 :func:`~sgs.effects.is_slash`（火 / 雷 / 转化 / 虚拟【杀】同族，照【咆哮】）。
+    回合外 `check_count` 本就不把【杀】当限制读（规则 §3.5 L182–L187 / 账本 L796），故这里
+    不再判阶段——多改的那 1 点在那里没有读者。
+    """
+    del state
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    if current is None:
+        # 无次数限制（【诸葛连弩】/【咆哮】）保持无限——**不加**在 None 上。
+        return None
+    return int(current) + 1
+
+
+def _ying_hand_limit(state: GameState, ctx: Any, current: Any) -> Any:
+    """③' 「本回合手牌上限+1」——查询期的**持续加式**（标记一走即消失，不是一次性加式）。"""
+    del state
+    if ctx.owner != ctx.subject:
+        return current
+    return current + 1
+
+
+_JIEYING_MARK_EFFECT = SkillDef(
+    skill_id=JIEYING_EFFECT,
+    locked=False,
+    # 载体单列一档：它不是任何角色"拥有"的技能（见 `CarrierKind.MARKER` 的 docstring）。
+    carrier=CarrierKind.MARKER,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(
+            Timing.PHASE_DRAW,
+            handler=_ying_extra_draw,
+            condition=_ying_draw_condition,
+            forced=True,
+        ),
+    ),
+    modifiers=(
+        Modifier(ModifierPoint.COUNT_LIMIT, _ying_slash_limit),
+        Modifier(ModifierPoint.HAND_LIMIT_REPLACE, _ying_hand_limit),
+    ),
+    requirement="摸牌阶段多摸一张牌；出牌阶段使用【杀】的次数上限+1；手牌上限+1",
+)
+"""「营」的三条自身加成（`Marker.effect` 指向这里）。
+
+`locked=False` + `Hook.forced=True`：钩子不问"是否发动"（标记的加成不由玩家选），但这条
+定义**不是锁定技**——失效与否由载体决定（`SkillSourceKind.MARKER` 永不受失效影响）。
+"""
+
+
+_JIEYING = SkillDef(
+    skill_id=JIEYING,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        # ① 回合开始时（强制段：牌面没有「可以」）。
+        Hook(
+            Timing.TURN_START,
+            handler=_jieying_grant,
+            condition=_jieying_grant_condition,
+            forced=True,
+        ),
+        # ② 结束阶段（「可以」⇒ 可选段 + 一步选座流水线）。
+        Hook(
+            Timing.PHASE_FINISH,
+            flow=JIEYING_FLOW,
+            condition=_jieying_hand_over_condition,
+        ),
+        # ③ 回合结束时（强制段；与【镇骨】同一时点 ⇒ 同一座位同时触发时由玩家选顺序）。
+        Hook(
+            Timing.TURN_END,
+            handler=_jieying_take,
+            condition=_jieying_take_condition,
+            forced=True,
+        ),
+    ),
+    requirement=(
+        "回合开始时，若场上没有角色有“营”标记，你获得“营”标记；结束阶段，"
+        "你可以将“营”标记交给一名其他角色；有“营”标记的其他角色的回合结束时，"
+        "移去“营”标记，然后你获得其所有手牌"
+    ),
+    step_requirements={"seat": "将“营”标记交给一名其他角色"},
+)
+"""神甘宁【劫营】的完整声明（一条技能、三条钩子；标记自身效果住 :data:`_JIEYING_MARK_EFFECT`）。"""
+
+LEI_SKILL_DEFS = (*LEI_SKILL_DEFS, _JIEYING, _JIEYING_MARK_EFFECT)
+"""雷包已落地的武将技能（逐票追加）：镇骨 / 从谏 / 罪论 / 父荫 / 劫营 + 「营」的标记效果。
+
+【魄袭】（神甘宁）住 `active.py` 的 A 族；`hero.shen_ganning.jieying_mark` 是**标记自身
+效果的定义**（`carrier = MARKER`），不是武将技能，但它同样在 `CATALOG` 里。
+"""
