@@ -677,6 +677,20 @@ class Player(BaseModel):
     与 :attr:`luoyi_until_next_turn` 的分字段同一条理由。**不发 delta**：没有 JSON 读者，
     回放按同一条技能动作重跑即可重建。
     """
+    qimou_distance_x: int = 0
+    """本回合「你计算与其他角色的距离 -X」的 X（界魏延移动版【奇谋】）。
+
+    写入唯一入口 :meth:`Engine.set_qimou`（发动结算完落位）；读取方是同一条技能定义上的
+    ``DISTANCE`` 修饰器（主体侧）。清理点 = 回合末（:meth:`Engine._clear_turn_effects`）。
+    **不发 delta**：与 ``liegong_bonus`` 同姿态。
+    """
+    qimou_count_x: int = 0
+    """本阶段「使用【杀】的次数上限 +X」的 X（界魏延移动版【奇谋】）。
+
+    与 :attr:`qimou_distance_x` **分字段**：作用域不同（本阶段 vs 本回合）——次数字段在
+    出牌阶段结束时由 :meth:`Engine._phase_play_end` 清掉，距离字段活到回合末。读取方是
+    ``COUNT_LIMIT`` 修饰器（只对【杀】族；无次数限制者保持 ``None``）。**不发 delta**。
+    """
     paoxiao_bonus: bool = False
     """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。
 

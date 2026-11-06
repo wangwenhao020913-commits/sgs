@@ -274,6 +274,9 @@ const OPTION_LABELS = Object.freeze({
   // 火包移动版典韦【强袭】（huo-dianwei-mobile 票 01）：代价二选一（可以放弃）。
   qiangxi_lose_hp: "失去1点体力",
   qiangxi_discard_weapon: "弃置一张武器牌",
+  // 界限突破-风包·移动版界魏延【狂骨】（jie-feng-batch 票 02）：每点二选一（必答）。
+  kuanggu_heal: "回复1点体力",
+  kuanggu_draw: "摸一张牌",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

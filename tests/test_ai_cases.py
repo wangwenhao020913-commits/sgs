@@ -2535,3 +2535,56 @@ def test_jie_liegong_ai_activates_the_trigger_without_cost() -> None:
     assert isinstance(script.answer, ActivateSkill), f"AI 该答发动，实得 {script.answer!r}"
     assert script.answer.skill_id == JIE_LIEGONG
     assert engine.state.player(1).hp == 2, "封【闪】+ 1 点伤害"
+
+
+JIE_QIMOU = "hero.jie_weiyan_mobile.qimou"
+JIE_WEIYAN = "jie_weiyan_mobile"
+
+
+def test_jie_qimou_ai_activates_and_takes_the_smallest_x() -> None:
+    """界魏延移动版【奇谋】：AI 会发动，并在 X 的中文选项里取最小的 1（不随机送死）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=JIE_WEIYAN, hp=4), SeatSpec()],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: any(
+            record.kind == "timing"
+            and record.timing is Timing.PHASE_PLAY_START
+            for record in running.records
+        ),
+    )
+    # 手牌清空 ⇒ 出牌阶段只剩【奇谋】与「结束出牌阶段」，AI 的选择无歧义。
+    engine.state.player(0).hand.clear()
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    play = engine.pending
+    action = HeuristicPlayer(ai_stream(0, play.actor)).respond(play)
+    assert isinstance(action, ActivateSkill) and action.skill_id == JIE_QIMOU, (
+        f"AI 该发动【奇谋】，实得 {action!r}"
+    )
+    # AI 可能把 X 一并填进复合动作（预发动清单形态），也可能分两步问；两条路都接受，
+    # 判据只看"它选了最小 X"的结果。
+    assert not action.choices or action.choices == ("失去1点体力",), (
+        f"AI 该取最小 X=1，实得 {action.choices!r}"
+    )
+    engine.submit(action)
+    for _ in range(40):
+        if engine.state.player(0).qimou_distance_x:
+            break
+        if engine.pending is None:
+            engine._step()
+        else:
+            engine.submit(PassPlayer().respond(engine.pending))
+
+    assert engine.state.player(0).hp == 3
+    assert engine.state.player(0).qimou_distance_x == 1

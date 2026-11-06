@@ -98,6 +98,8 @@ from .virtual import pure_virtual_card
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
     "JIE_GANGLIE",
+    "JIE_KUANGGU_MOBILE",
+    "JIE_KUANGGU_MOBILE_DEF",
     "JIE_JIANXIONG",
     "JIE_JIANXIONG_FLOW",
     "JIE_LIYU",
@@ -1612,6 +1614,136 @@ KUANGGU_DEF = SkillDef(
 
 
 # ---------------------------------------------------------------------------
+# 界魏延移动版【狂骨】（jie-feng-batch 票 02；口径 = 移动版、显示名带「移动版」后缀）
+#
+#     当你对一名角色造成1点伤害后，若其扣减体力前你计算与其的距离不大于1，
+#     你可以选择一项：1.回复1点体力；2.摸一张牌。
+#
+# 用户 2026-11-06 签字轮：**非锁定**（每点先问「是否发动」）；**每点各问一次选项**
+# （选项答案键只含 skill_id + `_DISPATCH_SCOPE`，而逐点派发不写 scope ⇒ 手写询问的
+# `skill_id` 必须带点号）；满体力两项都列出、不置灰（回复 = 零效果）；牌堆空选摸牌 =
+# 短摸判平局。距离仍按**扣减体力前**定格（规则 §4.15 L412 + 账本「【狂骨】的距离按扣减
+# 体力前取值」），快照键与标版分开。
+# ---------------------------------------------------------------------------
+
+JIE_KUANGGU_MOBILE = hero_skill_id("jie_weiyan_mobile", "kuanggu")
+"""界魏延移动版【狂骨】的全限定技能 id。"""
+
+JIE_KUANGGU_MOBILE_DISTANCE_KEY = "jie_kuanggu_mobile_distance"
+"""帧私有：**扣减体力前**「你计算与其的距离」（与标版的 `kuanggu_distance` 分开）。"""
+
+JIE_KUANGGU_MOBILE_DONE_KEY = "jie_kuanggu_mobile_done"
+"""帧私有槽名前缀：本点的选项已经问过（再带点号，逐点各一份）。"""
+
+JIE_KUANGGU_MOBILE_DRAWN_KEY = "jie_kuanggu_mobile_drawn"
+"""帧私有槽名前缀：本点的「摸一张牌」已经执行（再带点号；摸牌可能挂起）。"""
+
+KUANGGU_HEAL = "kuanggu_heal"
+"""选项 1：回复 1 点体力（标签在 `tools/sgs_web/static/options.js:OPTION_LABELS`）。"""
+
+KUANGGU_DRAW = "kuanggu_draw"
+"""选项 2：摸一张牌。"""
+
+
+def _jie_kuanggu_mobile_snapshot(host: Any, frame: Any) -> None:
+    """``DAMAGE_TAKE``：把「扣减体力前」的距离写进本次伤害帧（照抄标版的手法）。"""
+    owner = int(frame.data["skill_owner"])
+    target = frame.data["target"]
+    frame.data[JIE_KUANGGU_MOBILE_DISTANCE_KEY] = distance(
+        host.state, owner, int(target)
+    )
+
+
+def _jie_kuanggu_mobile_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**我是伤害来源** ∧ 受伤者存在 ∧ 扣减体力前距离 ≤ 1。"""
+    if not _kuanggu_deals(host, frame):
+        return False
+    snapshot = frame.data.get(JIE_KUANGGU_MOBILE_DISTANCE_KEY)
+    return snapshot is not None and int(snapshot) <= KUANGGU_RANGE
+
+
+def _jie_kuanggu_mobile(host: Any, frame: Any) -> Any:
+    """效果：逐点问「选择一项」——回复 1 点体力（走 ``RECOVER`` 子帧）或摸一张牌。
+
+    选项询问的 ``skill_id`` 带**点号**（``hero.jie_weiyan_mobile.kuanggu:opt:<点号>``）：
+    选项答案键 = ``(option, skill_id, actor, _DISPATCH_SCOPE)``，而逐点派发不写 scope ⇒
+    没有点号时第 2 点会命中第 1 点的答案、玩家不会再被问（``tests/test_hero_jie_feng.py``
+    的 `test_jie_kuanggu_asks_the_choice_again_for_the_second_point` 钉住）。
+    """
+    state = host.state
+    owner = int(frame.data["skill_owner"])
+    point = damage_point_index(frame)
+    done_key = f"{JIE_KUANGGU_MOBILE_DONE_KEY}:{point}"
+    if frame.data.get(done_key):
+        return None
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.DAMAGE_AFTER_DEAL,
+        skill_id=f"{JIE_KUANGGU_MOBILE}:opt:{point}",
+        options=(KUANGGU_HEAL, KUANGGU_DRAW),
+        optional=False,
+    )
+    if host.suspended(answer):
+        return "stay"
+    frame.data[done_key] = True
+    if getattr(answer, "choice", "") == KUANGGU_HEAL:
+        player = state.player(owner)
+        if player.hp >= player.hp_max:
+            # 满体力时不回复（规则 §4.15 L426）：不压帧、零 delta。
+            return None
+        host.push_frame(
+            FrameKind.RECOVER,
+            {
+                "source": owner,
+                "targets": (owner,),
+                "card": None,
+                "use_timing": frame.data.get("use_timing"),
+                "amount": 1,
+            },
+            timing=Timing.RECOVER_VALUE,
+        )
+        return "stay"
+    drawn_key = f"{JIE_KUANGGU_MOBILE_DRAWN_KEY}:{point}"
+    if not frame.data.get(drawn_key):
+        control = host.draw_for_hand(frame, owner, 1)
+        frame.data[drawn_key] = True
+        if control == "stay":
+            return "stay"
+    return None
+
+
+JIE_KUANGGU_MOBILE_DEF = SkillDef(
+    skill_id=JIE_KUANGGU_MOBILE,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        # ① 扣减体力前定格距离（记账、**不问** ⇒ `forced=True`）。
+        Hook(
+            Timing.DAMAGE_TAKE,
+            handler=_jie_kuanggu_mobile_snapshot,
+            condition=_kuanggu_deals,
+            forced=True,
+        ),
+        # ② 造成伤害后逐点问「是否发动」→ 发动后逐点问「选择一项」。
+        Hook(
+            Timing.DAMAGE_AFTER_DEAL,
+            handler=_jie_kuanggu_mobile,
+            condition=_jie_kuanggu_mobile_condition,
+            per_point=True,
+        ),
+    ),
+    requirement=(
+        "当你对一名角色造成1点伤害后，若其扣减体力前你计算与其的距离不大于1，"
+        "你可以选择一项：1.回复1点体力；2.摸一张牌。"
+    ),
+    step_requirements={"opt": "选择一项：1.回复1点体力；2.摸一张牌"},
+)
+"""界【狂骨】一条定义：非锁定 + 两条钩子（定格距离 / 逐点询问），无流水线步骤。"""
+
+
+# ---------------------------------------------------------------------------
 # 火包·移动版·荀彧【节命】（huo-taishici-xunyu 票 02）
 #
 #     当你受到1点伤害后，你可以令一名角色将手牌摸至体力上限（至多摸至五张）。
@@ -1864,4 +1996,4 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
         )
         for skill in DAMAGE_AFTER_SKILLS
     )
-    return (*declared, KUANGGU_DEF)
+    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF)

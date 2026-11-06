@@ -4225,6 +4225,22 @@ class Engine:
         """清掉 ``seat`` 的【烈弓】② 本次使用记账（``RESOLVE_AFTER_END`` 清扫钩子）。"""
         self.state.player(seat).liegong_bonus = None
 
+    def set_qimou(self, seat: int, amount: int) -> None:
+        """落「界魏延移动版【奇谋】」的两段座位修饰：距离 -X（本回合）/ 次数 +X（本阶段）。
+
+        唯一写入方是【奇谋】的提交点（失去体力子帧出栈后）；读取方是同一条技能定义上的
+        ``DISTANCE`` / ``COUNT_LIMIT`` 修饰器。两个字段**分开存**（作用域不同）：次数在
+        出牌阶段结束时由 :meth:`_phase_play_end` 清，距离活到回合末
+        （:meth:`_clear_turn_effects`）。**不发 delta**：与 ``liegong_bonus`` 同姿态。
+        """
+        player = self.state.player(seat)
+        player.qimou_distance_x = int(amount)
+        player.qimou_count_x = int(amount)
+
+    def _clear_qimou_count(self, seat: int) -> None:
+        """清掉「本阶段使用【杀】次数上限 +X」那一轴（出牌阶段结束时）。"""
+        self.state.player(seat).qimou_count_x = 0
+
     def add_hand_limit_bonus(self, seat: int, amount: int) -> None:
         """给 ``seat`` 记一笔**本回合的手牌上限加式增量**（M6 票 08 的唯一写入口）。
 
@@ -4337,6 +4353,10 @@ class Engine:
             # 界【烈弓】② 的"本次使用"记账：正常由 RESOLVE_AFTER_END 清扫钩子清；这里兜底
             # （使用流程被异常中断 / 构造局面直接写字段时下一回合从干净状态起）。
             player.liegong_bonus = None
+            # 界魏延移动版【奇谋】的两个作用域：次数那一轴正常在出牌阶段末单独清；这里
+            # 把两轴都兜底清掉（回合结束是一切"本回合 / 本阶段"的收尾点）。
+            player.qimou_distance_x = 0
+            player.qimou_count_x = 0
             player.damage_dealt_this_turn = False
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
@@ -5763,6 +5783,9 @@ class Engine:
             self._clear_zhaxiang_active(self.state.turn_seat)
             # huo-taishici-xunyu 票 01【天义】：同一清理点（"然后你本阶段…"）。
             self._clear_tianyi_state(self.state.turn_seat)
+            # jie-feng-batch 票 02 界魏延移动版【奇谋】：「本阶段使用【杀】上限 +X」在阶段末
+            # 清（距离那一轴活到回合末，见 `_clear_turn_effects`）。
+            self._clear_qimou_count(self.state.turn_seat)
         return None
 
     def _phase_discard_start(self) -> str | None:

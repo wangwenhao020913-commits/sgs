@@ -1959,6 +1959,17 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         #   （约 1.4）。两者接近，摸牌那格分略高：X 越大手牌收益越大，而弃牌那格的分随 X 走低。
         "changyi:draw": 1.2,
         "changyi:punish": 0.8,
+        # 界魏延移动版【狂骨】（jie-feng-batch 票 02）：每点二选一，必答。
+        # 「摸一张牌」永不空转（满体力时回复是零收益），故略高于回复。
+        "kuanggu_heal": 1.5,
+        "kuanggu_draw": 2.0,
+        # 界魏延移动版【奇谋】（jie-feng-batch 票 02）：动态 X 的中文选项值。
+        # X 越大自伤越重（体力 ≤ 1 时技能本身就不发动）；登记 1..4 四档，X=1 最高 ⇒
+        # AI 取最小自伤；> 4 的档位今天不可达（体力上限 4），未登记也仍是 0 < 1.0。
+        "失去1点体力": 1.0,
+        "失去2点体力": -0.6,
+        "失去3点体力": -1.2,
+        "失去4点体力": -1.8,
     }
 )
 
@@ -3408,6 +3419,24 @@ def _score_shensu(query: Query, action: Action, view: PlayerView) -> float:
     return -1.0
 
 
+def _score_qimou(query: Query, action: Action, view: PlayerView) -> float:
+    """界魏延移动版【奇谋】（jie-feng-batch 票 02）：限定技，按"值不值得用"判。
+
+    - **体力 ≤ 1** ⇒ 失去任意点体力都会进濒死 ⇒ −1.0（低于 Pass = 0.0）；
+    - 否则正分（限定技值得用；具体 X 由 `_OPTION_VALUES` 挑最小的那一档）。
+
+    读的都是公开面（自己的体力）；不碰隐藏信息。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    me = next((player for player in view.players if player.seat == view.seat), None)
+    if me is None or not me.alive:
+        return _UNKNOWN_SKILL_VALUE
+    if me.hp <= 1:
+        return -1.0
+    return 1.0
+
+
 def _score_qiangxi(query: Query, action: Action, view: PlayerView) -> float:
     """移动版典韦【强袭】（huo-dianwei-mobile 票 01）：1 点伤害，代价在下一步里挑。
 
@@ -4024,6 +4053,17 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(3.0),
         "使用【杀】指定目标后：满足条件 1 封【闪】、满足条件 2 该目标受 +1 伤害；"
         "**没有成本**（两个判据都由引擎现算，AI 只答是否发动）⇒ 恒发动",
+    ),
+    # 界限突破-风包·移动版·界魏延（jie-feng-batch 票 02）
+    "hero.jie_weiyan_mobile.kuanggu": (
+        _constant(2.0),
+        "造成 1 点伤害后（距离 ≤ 1）**每点各问一次**：发动后二选一（选项分值见 "
+        "`_OPTION_VALUES`）；没有成本 ⇒ 恒发动",
+    ),
+    "hero.jie_weiyan_mobile.qimou": (
+        _score_qimou,
+        "限定技：体力 ≤ 1 时不发动（自伤会进濒死），否则正分；X 取最小（选项分值见 "
+        "`_OPTION_VALUES`），距离 -X / 【杀】上限 +X 本回合有效",
     ),
     # 自制包·韬·刘备自制版（2026-10-31 票 01）
     "hero.tao_liubei.congtao": (

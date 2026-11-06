@@ -18,6 +18,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_weiyan_mobile",
+      "name": "界魏延移动版",
+      "true_name": "魏延",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "kuanggu",
+          "name": "狂骨",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qimou",
+          "name": "奇谋",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

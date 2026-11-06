@@ -4687,6 +4687,145 @@ _XIONGLUAN = ActiveSkill(
 )
 
 
+# ---------------------------------------------------------------------------
+# 界魏延移动版【奇谋】（jie-feng-batch 票 02；口径 = 移动版，**不摸牌**）
+#
+#     限定技，出牌阶段，你可以失去任意点体力，然后你：本回合计算与其他角色的距离-X，
+#     本阶段使用【杀】的次数上限+X（X为你以此法失去的体力值）。
+#
+# 用户 2026-11-06 签字：X 的选项集 = **1..当前体力**（0 不出现；**当前体力为 0 时不能
+# 发动**——「不屈」类技能可能让角色 0 体力存活）；上限 = 当前体力（`X = 当前体力` 允许，
+# 真的进濒死，与【苦肉】同口径）；失去体力 ≠ 受到伤害（不触发【狂骨】）。
+#
+# 选项值直接用中文（X 是动态量，**读不到** `OPTION_LABELS`；选项按钮的 `optionText`
+# 回退到选项值本身，零前端改动——与【蛊惑】的「显示名 → 牌型 id」同姿态）。
+# ---------------------------------------------------------------------------
+
+QIMOU = hero_skill_id("jie_weiyan_mobile", "qimou")
+"""界魏延移动版【奇谋】的全限定技能 id。"""
+
+_QIMOU_LOST = "qimou_lost"
+"""帧私有：本次发动的「失去 X 点体力」子帧已经压过（重入只收尾）。"""
+
+_QIMOU_DONE = "qimou_done"
+"""帧私有：两段修饰已经落位（重入不重复写座位字段）。"""
+
+
+def _qimou_choices(hp: int) -> tuple[str, ...]:
+    """X 的选项闭集（1..当前体力，中文文本即选项值）。"""
+    return tuple(f"失去{amount}点体力" for amount in range(1, int(hp) + 1))
+
+
+def _qimou_amount(choice: str) -> int:
+    """从选项文本读回 X（「失去2点体力」→ 2）。"""
+    return int(str(choice).removeprefix("失去").removesuffix("点体力"))
+
+
+def _qimou_options(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """``PickOption`` 的可调用档：按**当前体力**现算 X 的选项集。"""
+    del frame, answers
+    return _qimou_choices(state.player(owner).hp)
+
+
+def _qimou_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段（限定技的整局位由通用闸管）+ **当前体力 ≥ 1**。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if state.player(ctx.subject).hp <= 0:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _qimou_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：先失去 X 点体力（压 ``LIFE_DECREASE`` 子帧），出栈后落两段座位修饰。
+
+    行序 = 牌面「失去…，然后你：…」（代价在前）。被自己的代价打死 ⇒ 技能就此结束
+    （两段修饰都不落，照抄界【苦肉】的 ``if not alive: return None``）。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    choice = answers.get("option")
+    if not choice:
+        return None
+    amount = _qimou_amount(str(choice))
+    if amount <= 0:
+        return None
+    if not frame.data.get(_QIMOU_LOST):
+        frame.data[_QIMOU_LOST] = True
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {
+                "target": owner,
+                "source": None,  # 失去体力：没有伤害来源
+                "amount": amount,
+            },
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    if frame.data.get(_QIMOU_DONE) or not state.player(owner).alive:
+        return None
+    frame.data[_QIMOU_DONE] = True
+    host.set_qimou(owner, amount)
+    return None
+
+
+def _qimou_distance(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """``DISTANCE``：本回合**你计算与其他角色的距离 -X**（主体侧，与【马术】同侧）。"""
+    if ctx.owner != ctx.subject:
+        return current
+    amount = state.player(ctx.owner).qimou_distance_x
+    if not amount:
+        return current
+    return current - amount
+
+
+def _qimou_extra_slash(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """``COUNT_LIMIT``：本阶段使用【杀】的次数上限 +X（无次数限制者保持无限）。"""
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    amount = state.player(ctx.owner).qimou_count_x
+    if not amount:
+        return current
+    if current is None:
+        return None
+    return int(current) + amount
+
+
+QIMOU_FLOW = SkillFlow(
+    name="qimou",
+    steps=(PickOption(options=_qimou_options, optional=False, key="option"),),
+    effect=_qimou_effect,
+    # 限定技的"一次"是**整局**，不落 `_USED` 阶段位（整局位由提交点落）。
+    once_per_phase=False,
+)
+"""【奇谋】单步流水线：选 X（中文选项）→ 失去体力 → 落两段修饰。"""
+
+_QIMOU = ActiveSkill(
+    "jie_weiyan_mobile",
+    "qimou",
+    _qimou_offers,
+    flow=QIMOU_FLOW,
+    skill_type=SkillType.LIMITED,
+    requirement=(
+        "限定技，出牌阶段，你可以失去任意点体力，然后你：本回合计算与其他角色的距离-X，"
+        "本阶段使用【杀】的次数上限+X（X为你以此法失去的体力值）。"
+    ),
+    step_requirements={"option": "选择失去的体力值 X（1..当前体力）"},
+    extra_modifiers=(
+        Modifier(ModifierPoint.DISTANCE, _qimou_distance),
+        Modifier(ModifierPoint.COUNT_LIMIT, _qimou_extra_slash),
+    ),
+)
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
@@ -4952,6 +5091,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 张绣【雄乱】（lei-batch 票 02）：A 族限定技 + 预发动（选人后确认才发动）；
     # 代价 = 废除自己的判定区与装备区（隐藏发动 cost：至少 1 个区域还能被废除）。
     _XIONGLUAN,
+    # 界魏延移动版【奇谋】（jie-feng-batch 票 02）：A 族限定技 + 单步选 X（中文选项）；
+    # 失去 X 点体力 → 本回合距离 -X / 本阶段【杀】上限 +X。不翻预发动。
+    _QIMOU,
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/

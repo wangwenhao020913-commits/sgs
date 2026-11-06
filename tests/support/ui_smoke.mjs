@@ -512,7 +512,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈标准版 / 荀彧标准版 ⇒ 45 / 71 → 46 / 72。
   // lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
   // tao-caocao 票 01：自制包加韬·曹操自制版（真名「曹操」已在池里）⇒ 真名不变、版本 75 → 76。
-  ui.state.heroCatalog.length === 49 && catalogVersions.length === 77,
+  ui.state.heroCatalog.length === 49 && catalogVersions.length === 78,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

@@ -30,6 +30,7 @@ from sgs.state import (
     EndPhase,
     Pass,
     Phase,
+    SelectOption,
     UseCard,
     WindowCause,
 )
@@ -100,12 +101,17 @@ class Script:
         activate=True,
         dodge=False,
         skill_id: str = JIE_LIEGONG,
+        options=(),
+        option_prefix: str = "",
     ) -> None:
         self.plays = [tuple(play) for play in plays]
         self.activate = activate
         self.dodge = dodge
         self.skill_id = skill_id
+        self.option_prefix = option_prefix
+        self.options = list(options)
         self.asks = 0
+        self.option_asks = 0
 
     def respond(self, query):
         if query.kind == "PLAY_PHASE" and self.plays:
@@ -142,6 +148,22 @@ class Script:
                 or _find(query, lambda action: isinstance(action, Pass))
                 or query.legal_actions[0]
             )
+        if (
+            query.kind == "SELECT_OPTION"
+            and self.option_prefix
+            and str(getattr(query, "skill_id", "")).startswith(self.option_prefix)
+        ):
+            self.option_asks += 1
+            wanted = self.options.pop(0) if self.options else ""
+            if wanted:
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectOption)
+                    and action.choice == wanted,
+                ) or query.legal_actions[0]
+            return _find(
+                query, lambda action: isinstance(action, SelectOption)
+            ) or query.legal_actions[0]
         if query.kind == "DODGE":
             if self.dodge:
                 return _find(
@@ -633,3 +655,459 @@ def test_jie_liegong_fires_in_another_turn_where_the_standard_one_does_not() -> 
 
     assert len(_asks(jie_engine)) == 1, "界版：别人回合里的被迫【杀】也触发"
     assert _asks(standard_engine, "hero.huangzhong.liegong") == [], "标版：不触发"
+
+
+# ===========================================================================
+# jie-feng-batch 票 02：界魏延移动版【狂骨】【奇谋】
+# ===========================================================================
+
+JIE_KUANGGU = "hero.jie_weiyan_mobile.kuanggu"
+JIE_QIMOU = "hero.jie_weiyan_mobile.qimou"
+JIE_WEIYAN = "jie_weiyan_mobile"
+
+
+def test_jie_weiyan_mobile_is_in_the_default_pool() -> None:
+    """界魏延移动版：真名「魏延」、显示名带「移动版」后缀、两条技能。"""
+    from sgs.data import hero_by_id
+
+    hero = hero_by_id(JIE_WEIYAN)
+    assert hero is not None
+    assert hero.name == "界魏延移动版"
+    assert hero.true_name == "魏延"
+    assert hero.version == "jie-feng-mobile"
+    assert hero.hp_max == 4
+    assert [skill.id for skill in hero.skills] == ["kuanggu", "qimou"]
+
+
+def _kuanggu_engine(
+    *,
+    pack=PACK,
+    card: int,
+    owner_hp: int = 3,
+    owner_equip=(),
+    target_hp: int = 4,
+    target_hand=(),
+    target_equip=(),
+    target: int = 1,
+    seats: int = 2,
+    activate=True,
+    options=(),
+    dodge: bool = False,
+):
+    """界魏延移动版出【杀】打 ``target``；到出牌阶段后摆好手牌 / 体力，跑到结算栈空。"""
+    all_seats = [
+        SeatSpec(hero=JIE_WEIYAN),
+        *[
+            SeatSpec(
+                hp=target_hp if index == target else 4,
+                hand=tuple(target_hand) if index == target else (),
+                equip=tuple(target_equip) if index == target else (),
+            )
+            for index in range(1, seats)
+        ],
+    ]
+    used = [card, *owner_equip, *target_hand, *target_equip]
+    state = build_state(
+        pack=pack,
+        seats=all_seats,
+        deck=deck_excluding(pack, *used),
+        turn_seat=0,
+    )
+    players = [
+        Script(
+            plays=((card, (target,), ()),),
+            activate=activate,
+            skill_id=JIE_KUANGGU,
+            options=options,
+            option_prefix=JIE_KUANGGU + ":opt:",
+        ),
+        *[Script(dodge=dodge) for _ in range(seats - 1)],
+    ]
+    engine = Engine.from_state(state, seed=1)
+    run_queries(engine, players, _to_play_phase)
+    owner = engine.state.player(0)
+    owner.hand[:] = [card]
+    owner.hp = owner_hp
+    owner.equip[:] = list(owner_equip)
+    victim = engine.state.player(target)
+    victim.hand[:] = list(target_hand)
+    victim.hp = target_hp
+    run_until(engine, players, lambda e: card in e.state.discard and not e.stack)
+    return engine
+
+
+SLASH = _cards("slash")[0]
+DODGE = _cards("dodge")[0]
+PEACH = _cards("peach")[0]
+
+
+def test_jie_kuanggu_can_choose_the_draw() -> None:
+    """距离 1 造成 1 点伤害后：选「摸一张牌」⇒ 手牌 +1、体力不变。"""
+    engine = _kuanggu_engine(
+        card=SLASH, options=("kuanggu_draw",), owner_hp=3, target_hp=4
+    )
+
+    assert len(_asks(engine, JIE_KUANGGU)) == 1, "非锁定 ⇒ 问一次「是否发动」"
+    assert engine.state.player(0).hp == 3
+    assert len(engine.state.player(0).hand) == 1, "出掉【杀】后又摸一张"
+
+
+def test_jie_kuanggu_can_choose_the_heal() -> None:
+    """选「回复1点体力」⇒ 走 ``RECOVER`` 帧、体力 +1。"""
+    engine = _kuanggu_engine(
+        card=SLASH, options=("kuanggu_heal",), owner_hp=2, target_hp=4
+    )
+
+    assert engine.state.player(0).hp == 3
+    assert any(
+        record.kind == "timing" and record.timing is Timing.RECOVER_VALUE
+        for record in engine.records
+    ), "回复走回复体力事件"
+
+
+def test_jie_kuanggu_full_hp_heal_is_a_no_op() -> None:
+    """满体力选回复 ⇒ 不压帧、零 delta（规则 §4.15 L426）。"""
+    engine = _kuanggu_engine(
+        card=SLASH, options=("kuanggu_heal",), owner_hp=4, target_hp=4
+    )
+
+    assert engine.state.player(0).hp == 4
+    assert not any(
+        record.kind == "timing" and record.timing is Timing.RECOVER_VALUE
+        for record in engine.records
+    ), "满体力不回复 ⇒ 不产生回复事件"
+
+
+def test_jie_kuanggu_both_options_stay_legal_at_full_hp() -> None:
+    """满体力时两项都列出、不置灰（用户 2026-11-06 签）。"""
+    engine = _kuanggu_engine(
+        card=SLASH, options=("kuanggu_draw",), owner_hp=4, target_hp=4
+    )
+
+    query = next(
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SELECT_OPTION"
+        and str(record.query.skill_id).startswith(JIE_KUANGGU + ":opt:")
+    )
+    choices = [
+        action.choice
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert choices == ["kuanggu_heal", "kuanggu_draw"]
+    assert list(getattr(query, "disabled", ())) == [], "不置灰"
+
+
+def test_jie_kuanggu_asks_the_activation_once_per_point() -> None:
+    """「1 点伤害后」⇒ 2 点伤害问两次「是否发动」。"""
+    scimitar = cards_of_type(MILITARY, "ancient_scimitar")[0]
+    slash = _military_cards("slash")[0]
+    engine = _kuanggu_engine(
+        pack=MILITARY,
+        card=slash,
+        owner_equip=(scimitar,),
+        owner_hp=2,
+        target_hp=4,
+        target_hand=(),
+        options=("kuanggu_draw", "kuanggu_heal"),
+    )
+
+    assert engine.state.player(1).hp == 2, "古锭刀对空手目标 +1 ⇒ 2 点伤害"
+    assert len(_asks(engine, JIE_KUANGGU)) == 2, "2 点 ⇒ 两次「是否发动」"
+    assert engine.state.player(0).hp == 3, "第 2 点选了回复（2 → 3）"
+    assert len(engine.state.player(0).hand) == 1, "第 1 点选了摸牌"
+
+
+def test_jie_kuanggu_asks_the_choice_again_for_the_second_point() -> None:
+    """**本技能最重要的断言**：第 1 点选摸牌、第 2 点选回复 ⇒ 两个效果各自发生。
+
+    把选项询问 `skill_id` 里的点号去掉 ⇒ 第 2 点命中第 1 点的答案 ⇒ 变成两次摸牌
+    （手牌 2、体力不变）⇒ 本条红。
+    """
+    scimitar = cards_of_type(MILITARY, "ancient_scimitar")[0]
+    slash = _military_cards("slash")[0]
+    engine = _kuanggu_engine(
+        pack=MILITARY,
+        card=slash,
+        owner_equip=(scimitar,),
+        owner_hp=2,
+        target_hp=4,
+        target_hand=(),
+        options=("kuanggu_draw", "kuanggu_heal"),
+    )
+
+    assert engine.state.player(0).hp == 3, "第 2 点的回复生效"
+    assert len(engine.state.player(0).hand) == 1, "第 1 点的摸牌生效（不是第二次回复）"
+    option_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SELECT_OPTION"
+        and str(record.query.skill_id).startswith(JIE_KUANGGU + ":opt:")
+    ]
+    assert len(option_queries) == 2, "每点各问一次选项"
+    assert [query.skill_id for query in option_queries] == [
+        f"{JIE_KUANGGU}:opt:0",
+        f"{JIE_KUANGGU}:opt:1",
+    ]
+
+
+def test_jie_kuanggu_snapshot_hook_never_asks() -> None:
+    """定格距离那条钩子是 ``forced=True``：距离 2 的伤害一条询问都不发。"""
+    weapon = _cards("axe")[0]
+    slash = _cards("slash")[0]
+    engine = _kuanggu_engine(
+        card=slash,
+        owner_equip=(weapon,),
+        owner_hp=3,
+        target_hp=4,
+        target=2,
+        seats=4,
+    )
+
+    assert engine.state.player(2).hp == 3, "伤害照常结算"
+    assert _asks(engine, JIE_KUANGGU) == [], "距离 2 ⇒ 条件假、连问都不问"
+    assert engine.state.player(0).hp == 3
+
+
+def test_jie_kuanggu_uses_the_distance_before_the_hp_deduction() -> None:
+    """相邻 +【的卢】且被这一击打死：扣减体力前距离 2 ⇒ 不触发（现算会算成 1）。"""
+    weapon = _cards("axe")[0]
+    horse = _cards("dilu")[0]
+    slash = _cards("slash")[0]
+    engine = _kuanggu_engine(
+        card=slash,
+        owner_equip=(weapon,),
+        owner_hp=3,
+        target_hp=1,
+        target_equip=(horse,),
+        seats=4,
+    )
+
+    assert not engine.state.player(1).alive, "这一击把目标打死了"
+    assert engine.state.player(0).hp == 3, "快照距离 2 ⇒ 狂骨不触发"
+
+
+# ---------------------------------------------------------------------------
+# 界魏延移动版【奇谋】
+# ---------------------------------------------------------------------------
+
+from sgs.effects import ModifierContext, ModifierPoint, apply_modifiers, distance  # noqa: E402
+from sgs.skills import limited_skill_used  # noqa: E402
+from support import PassPlayer  # noqa: E402
+
+
+class QimouScript:
+    """出牌阶段点【奇谋】→ 选 X；其余询问能结束阶段就结束、否则放弃。"""
+
+    def __init__(self, *, choice: str = "", use: bool = True) -> None:
+        self.choice = choice
+        self.use = use
+        self.used = False
+
+    def respond(self, query):
+        if query.kind == "PLAY_PHASE" and self.use and not self.used:
+            action = _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == JIE_QIMOU,
+            )
+            if action is not None:
+                self.used = True
+                return action
+        if query.kind == "SELECT_OPTION" and str(
+            getattr(query, "skill_id", "")
+        ).startswith("qimou:"):
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == self.choice,
+            ) or query.legal_actions[0]
+        if query.kind == "PLAY_PHASE":
+            return _find(query, lambda action: isinstance(action, EndPhase)) or (
+                query.legal_actions[0]
+            )
+        return _find(query, lambda action: isinstance(action, Pass)) or (
+            query.legal_actions[0]
+        )
+
+
+def _qimou_setup(*, hp: int = 4, seats: int = 2, equip=(), pack=PACK, use=True):
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero=JIE_WEIYAN, hp=hp, equip=tuple(equip)),
+            *[SeatSpec() for _ in range(seats - 1)],
+        ],
+        deck=deck_excluding(pack, *equip),
+        turn_seat=0,
+    )
+    script = QimouScript(use=use)
+    players = [script, *[PassPlayer() for _ in range(seats - 1)]]
+    engine = Engine.from_state(state, seed=1)
+    return engine, players, script
+
+
+def _to_play_query(engine, players):
+    run_queries(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    return engine.pending
+
+
+def _qimou_use(*, hp: int = 4, choice: str = "失去2点体力", seats: int = 2, equip=(), pack=PACK):
+    engine, players, script = _qimou_setup(hp=hp, seats=seats, equip=equip, pack=pack)
+    script.choice = choice
+    _to_play_query(engine, players)
+    run_queries(
+        engine,
+        players,
+        lambda running: running.state.player(0).qimou_distance_x > 0
+        or not running.state.player(0).alive
+        or running.finished,
+    )
+    return engine, players, script
+
+
+def test_jie_qimou_offers_one_option_per_hp() -> None:
+    """体力 3 ⇒ X 的选项 = 1..3（没有 0 档），且按钮文本是中文。"""
+    engine, players, _script = _qimou_setup(hp=3)
+    query = _to_play_query(engine, players)
+    action = _find(
+        query,
+        lambda action: isinstance(action, ActivateSkill) and action.skill_id == JIE_QIMOU,
+    )
+    assert action is not None, "出牌阶段应出现【奇谋】候选"
+    engine.submit(action)
+    while engine.pending is None:
+        engine._step()
+
+    option_query = engine.pending
+    assert option_query is not None and option_query.kind == "SELECT_OPTION"
+    assert option_query.skill_id == "qimou:option"
+    assert [
+        action.choice
+        for action in option_query.legal_actions
+        if isinstance(action, SelectOption)
+    ] == ["失去1点体力", "失去2点体力", "失去3点体力"]
+
+
+def test_jie_qimou_has_no_candidate_at_zero_hp() -> None:
+    """当前体力为 0（「不屈」类技能造成的存活）⇒ 候选不出现（用户 2026-11-06 签）。"""
+    engine, players, _script = _qimou_setup(hp=0)
+    query = _to_play_query(engine, players)
+
+    assert not [
+        action
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIE_QIMOU
+    ], "0 体力时没有合法的「失去 1 点」⇒ 技能不能发动"
+
+
+def test_jie_qimou_loses_the_chosen_hp_and_applies_both_bonuses() -> None:
+    """X=2：体力 -2；本回合距离 -2（下限 1）；本阶段【杀】上限 +2。"""
+    engine, _players, _script = _qimou_use(hp=4, choice="失去2点体力")
+
+    assert engine.state.player(0).hp == 2
+    assert engine.state.player(0).qimou_distance_x == 2
+    assert engine.state.player(0).qimou_count_x == 2
+    assert distance(engine.state, 0, 1) == 1, "距离下限 1"
+    assert (
+        apply_modifiers(
+            ModifierPoint.COUNT_LIMIT,
+            engine.state,
+            ModifierContext(subject=0, card=engine.state.card(SLASH)),
+            1,
+        )
+        == 3
+    ), "基础上限 1 + X 2"
+
+
+def test_jie_qimou_is_only_offered_once_per_game() -> None:
+    """限定技：用完之后不再出现候选，整局位已落。"""
+    engine, players, script = _qimou_use(hp=4, choice="失去2点体力")
+
+    assert limited_skill_used(engine.state, 0, JIE_QIMOU) is True
+    query = _to_play_query(engine, players)
+    assert not [
+        action
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIE_QIMOU
+    ]
+
+
+def test_jie_qimou_keeps_an_unlimited_slash_cap_unlimited() -> None:
+    """装备【诸葛连弩】时次数上限是 ``None``（无限）⇒ +X 仍保持无限。"""
+    crossbow = _cards("crossbow")[0]
+    engine, _players, _script = _qimou_use(
+        hp=4, choice="失去2点体力", equip=(crossbow,)
+    )
+
+    assert (
+        apply_modifiers(
+            ModifierPoint.COUNT_LIMIT,
+            engine.state,
+            ModifierContext(subject=0, card=engine.state.card(SLASH)),
+            1,
+        )
+        is None
+    ), "无限上限 +X 仍是无限"
+
+
+def test_jie_qimou_distance_never_drops_below_one() -> None:
+    """六座环、X=3：距离 3 的座位被压到下限 1。"""
+    engine, _players, _script = _qimou_use(hp=4, choice="失去3点体力", seats=6)
+
+    assert distance(engine.state, 0, 3) == 1
+
+
+def test_jie_qimou_slash_bonus_expires_when_the_play_phase_ends() -> None:
+    """「本阶段」的次数 +X 在出牌阶段结束时清；距离那一轴还在。"""
+    engine, players, _script = _qimou_use(hp=4, choice="失去2点体力")
+
+    run_queries(
+        engine,
+        players,
+        lambda running: any(
+            record.kind == "timing"
+            and record.timing is Timing.PHASE_DISCARD_START
+            for record in running.records
+        ),
+    )
+
+    assert engine.state.player(0).qimou_count_x == 0, "本阶段结束 ⇒ 次数加成一并清"
+    assert engine.state.player(0).qimou_distance_x == 2, "距离加成活到回合末"
+
+
+def test_jie_qimou_distance_expires_at_turn_end() -> None:
+    """「本回合」的距离 -X 在回合末清。"""
+    engine, players, _script = _qimou_use(hp=4, choice="失去2点体力")
+
+    run_queries(
+        engine,
+        players,
+        lambda running: running.state.turn_seat == 1,
+    )
+
+    assert engine.state.player(0).qimou_distance_x == 0
+
+
+def test_jie_qimou_death_from_the_cost_stops_the_skill() -> None:
+    """X = 当前体力且没救回 ⇒ 技能就此结束，两段修饰都不落。"""
+    engine, _players, _script = _qimou_use(hp=1, choice="失去1点体力")
+
+    assert not engine.state.player(0).alive
+    assert engine.state.player(0).qimou_distance_x == 0
+    assert engine.state.player(0).qimou_count_x == 0
+
+
+def test_jie_qimou_hp_loss_does_not_trigger_kuanggu() -> None:
+    """「失去体力」≠「受到伤害」：奇谋的代价不触发【狂骨】。"""
+    engine, _players, _script = _qimou_use(hp=4, choice="失去2点体力")
+
+    assert _asks(engine, JIE_KUANGGU) == []
