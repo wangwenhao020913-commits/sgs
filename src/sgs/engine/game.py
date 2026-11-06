@@ -3876,6 +3876,7 @@ class Engine:
         effect: str | None = None,
         description: str | None = None,
         clear_on_source_death: bool = False,
+        clear_on_source_skill_lost: bool = False,
     ) -> bool:
         """给 ``seat`` 加一枚/几枚标记（票 06 的唯一写入口）。
 
@@ -3883,6 +3884,11 @@ class Engine:
         追加。每次真实变化发一条 ``marker_change``（绝对值）；没有变化（已达上限等）返回
         ``False`` 且不发 delta。标记是公开事实（投影 ``PlayerPublic.markers``），但投影面
         ``exclude``、不进记录流的询问视角；变化本身经 delta 进记录流。
+
+        ``effect``（lei-shenganning 票 94）：标记**自身的效果**定义 id —— 非空时
+        :func:`~sgs.skills.resolve_instances` 会以 ``MARKER`` 载体产出实例（不受技能失效
+        影响）。``clear_on_source_skill_lost``：来源**失去**放置它的那条技能时移除本标记
+        （与 ``clear_on_source_death`` 并列的另一条寿命策略）。
         """
         player = self.state.player(seat)
         for index, marker in enumerate(player.markers):
@@ -3914,6 +3920,7 @@ class Engine:
             effect=effect,
             description=description,
             clear_on_source_death=clear_on_source_death,
+            clear_on_source_skill_lost=clear_on_source_skill_lost,
         )
         player.markers = (*player.markers, marker)
         self._emit_marker_change(frame, seat, marker)
@@ -4170,6 +4177,11 @@ class Engine:
         也随之消失。"不可恢复"由**解析顺序**兑现：之后再 ``grant_skill`` 同一个 id，实例
         仍在"减失去"那一步被减掉（记录照写，但那是一次可见的无效授予）。
         失去让 per-instance 状态随来源一起清掉（``prune_skill_state``）。
+
+        **标记的两条寿命策略之一是这一处**（lei-shenganning 票 94）：``clear_on_source_skill_lost``
+        的标记在"来源失去放置它的那条技能"时一并移除（``marker_change`` 绝对值 0）；
+        **失效（:meth:`suppress_skills`）一个字都不碰标记**——用户 2026-11-07 裁定
+        "被无效不影响，营标记还在"。
         """
         player = self.state.player(seat)
         if skill_id in player.lost_skills:
@@ -4183,7 +4195,31 @@ class Engine:
         prune_skill_state(self.state)
         # 牌标签的第四项声明（M6 票 09）：来源实例真的消失 ⇒ 随来源消失的标签一并清掉。
         self._prune_card_tags()
+        self._drop_markers_of_lost_skill(frame, seat, skill_id)
         return True
+
+    def _drop_markers_of_lost_skill(
+        self, frame: Frame | None, seat: int, skill_id: str
+    ) -> None:
+        """来源失去技能 ⇒ 移除它放的、声明了 ``clear_on_source_skill_lost`` 的标记（票 94）。
+
+        只动 ``source_seat == seat`` 且 ``source_skill_id == skill_id`` 的那些；每个真实移除
+        各发一条 ``marker_change``（与 :meth:`remove_marker` 同一写入面，故记录形态不变）。
+        """
+        for holder in self.state.players:
+            for marker in tuple(holder.markers):
+                if (
+                    marker.source_seat == seat
+                    and marker.source_skill_id == skill_id
+                    and marker.clear_on_source_skill_lost
+                ):
+                    self.remove_marker(
+                        frame,
+                        holder.seat,
+                        name=marker.name,
+                        source_seat=marker.source_seat,
+                        source_skill_id=marker.source_skill_id,
+                    )
 
     def suppress_skills(
         self,

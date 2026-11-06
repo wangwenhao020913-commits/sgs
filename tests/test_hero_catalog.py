@@ -2445,3 +2445,101 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
         | (flow_backed & (locked | providers | conversions))
     ) == outside
     assert ZERO_STEP_SKILL_IDS and set(ZERO_STEP_SKILL_IDS) <= inside
+
+
+# ---------------------------------------------------------------------------
+# 标记自身效果（lei-shenganning 票 94）
+#
+# 用户 2026-11-07 裁定："这个是标记本身的效果……所以就算劫营这个技能失效了，依然享受以上所说的
+# 3 种加成。营标记的寿命：标记来源角色阵亡 / 标记来源角色的【劫营】失去（被无效不影响，营标记还在）"。
+# 判据 = 标记带 `effect` ⇒ 以 `MARKER` 载体产出实例（**永不受失效影响**）；来源失去该技能时
+# 按寿命策略移除。
+# ---------------------------------------------------------------------------
+
+
+def _marker_effect_catalog(monkeypatch, effect_id: str = "test.marker_effect"):
+    """往 CATALOG 里塞一条**标记效果定义**（只为证明载体会被解析，不承载真实机制）。"""
+    from sgs.effects import CarrierKind, Modifier, ModifierPoint
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills.catalog import SkillDef
+
+    def handler(state, ctx, current):
+        return current
+
+    fake = SkillDef(
+        skill_id=effect_id,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        modifiers=(Modifier(ModifierPoint.COUNT_LIMIT, handler),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, effect_id: fake}),
+    )
+    return effect_id
+
+
+def _marker(effect: str | None, *, name: str = "营", clear_on_source_skill_lost: bool = True):
+    return Marker(
+        name=name,
+        source_seat=0,
+        source_skill_id="hero.shen_ganning.jieying",
+        count=1,
+        effect=effect,
+        clear_on_source_skill_lost=clear_on_source_skill_lost,
+    )
+
+
+def test_a_marker_carries_its_own_effect_and_suppression_does_not_stop_it(monkeypatch):
+    from sgs.skills import resolve_instances
+    from sgs.skills.catalog import SkillSourceKind
+
+    effect_id = _marker_effect_catalog(monkeypatch)
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    state.player(1).markers = (_marker(effect_id),)
+
+    instances = [item for item in resolve_instances(state) if item.skill_id == effect_id]
+    assert len(instances) == 1, "标记带 effect ⇒ 产出**恰好一条**实例"
+    assert instances[0].owner == 1, "实例的 owner = 标记**持有者**（不是来源）"
+    assert instances[0].source.kind is SkillSourceKind.MARKER
+    assert instances[0].source.skill_id == "hero.shen_ganning.jieying", (
+        "来源记『放置这枚标记的那条技能』"
+    )
+
+    engine = Engine.from_state(state, seed=1)
+    engine.suppress_skills(1, "hero.anyone.applying")
+    assert engine.state.player(1).markers == state.player(1).markers, (
+        "失效**不动标记**（用户：被无效不影响，营标记还在）"
+    )
+    assert any(item.skill_id == effect_id for item in resolve_instances(engine.state)), (
+        "失效也**不停标记效果**（用户：就算劫营失效，依然享受加成）"
+    )
+
+
+def test_losing_the_source_skill_removes_only_the_markers_that_ask_for_it(monkeypatch):
+    from sgs.skills import resolve_instances
+
+    effect_id = _marker_effect_catalog(monkeypatch)
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    state.player(1).markers = (
+        _marker(effect_id),
+        _marker(None, name="测试·不随技能失去", clear_on_source_skill_lost=False),
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    engine.lose_skill(0, "hero.shen_ganning.jieying")
+
+    names = tuple(marker.name for marker in engine.state.player(1).markers)
+    assert names == ("测试·不随技能失去",), f"只移除声明了那条寿命策略的标记；实得 {names}"
+    assert not [item for item in resolve_instances(engine.state) if item.skill_id == effect_id], (
+        "标记没了 ⇒ 它的效果实例也没了"
+    )
+    removed = [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "marker_change"
+    ]
+    assert [(record.name, record.count) for record in removed] == [("营", 0)], (
+        "移除走唯一写入口 ⇒ 照常落一条 marker_change（绝对值 0）"
+    )

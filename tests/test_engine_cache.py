@@ -159,6 +159,26 @@ def _lost_added(state):
     return _with_player(state, 1, lost_skills=["hero.guanyu.wusheng"])
 
 
+def _marker_added(state):
+    """加一枚带**自身效果**的标记（票 94：标记进内容键，故键必变）。"""
+    from sgs.state import Marker
+
+    return _with_player(
+        state,
+        1,
+        markers=[
+            *state.players[1].markers,
+            Marker(
+                name="测试营",
+                source_seat=0,
+                source_skill_id="hero.shen_ganning.jieying",
+                count=1,
+                effect="hero.shen_ganning.jieying_mark",
+            ),
+        ],
+    )
+
+
 def _seat_dead(state):
     return _with_player(state, 1, alive=False)
 
@@ -234,6 +254,7 @@ _KEY_CASES = (
     ("hero_cleared", _base_state, _hero_cleared, False),
     ("granted_skill_added", _base_state, _granted_added, False),
     ("lost_skill_added", _base_state, _lost_added, False),
+    ("marker_added", _base_state, _marker_added, False),
     ("suppression_added", _base_state, _suppression_added, False),
     (
         "suppression_skill_id_changed",
@@ -299,6 +320,7 @@ _FIELD_CASE_LABELS = {
         "suppression_scope_changed",
         "suppression_predicate_changed",
     ),
+    "markers": ("marker_added",),
 }
 """``_PLAYER_KEY_FIELDS`` 的每一项 → 钉住它的用例（字段表与用例表的机械对应）。"""
 

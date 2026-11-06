@@ -399,11 +399,16 @@ class Marker(_FrozenModel):
     字段 = 名称 / 来源（座位 + 全限定技能 id）/ 数量 / 上限 / 效果 / 效果说明 + 寿命策略。
     名字用中文（「梦魇」这类），**没有 id**；同一目标上 `(name, source_seat,
     source_skill_id)` 相同的标记合并成一条，来源不同则分列。标记不是牌：不进任何区域、
-    不计手牌数 / 上限，不能被拆 / 顺 / 无懈；失去技能不移除（规则 §14.3）。
+    不计手牌数 / 上限，不能被拆 / 顺 / 无懈；**被无效（suppressed）不动标记**（规则 §14.3）。
 
-    ``effect`` / ``description`` 本批只存不接线（梦魇都为空；将来大雾一类"标记自身效果"
-    需要标记驱动的派发，另行开票）。``clear_on_source_death`` 是寿命策略（梦魇 True）：
-    来源座位身死时与死者的弃牌同一钩子清空；目标身死则无条件清空（规则 §14.4 / 用户规则 7）。
+    ``effect`` / ``description`` 是**标记自身效果**的声明面（lei-shenganning 票 94 起接线）：
+    ``effect`` 存一个 ``CATALOG`` 里的**效果定义 id**（与技能 id 同形），该定义由
+    :func:`sgs.skills.resolve_instances` 以 ``MARKER`` 载体产出实例——**不受技能失效影响**
+    （用户 2026-11-07 裁定："这个标记本身具有效果，所以就算劫营这个技能失效了，依然享受
+    以上所说的3种加成"），标记不在 ⇒ 实例不在。两条寿命策略：``clear_on_source_death``
+    （来源座位身死时清空，梦魇 True）与 ``clear_on_source_skill_lost``（来源**失去**放置它的
+    那条技能时清空，营 True；"被无效不影响，营标记还在"——用户 2026-11-07）。目标身死则
+    无条件清空（规则 §14.4 / 用户规则 7）。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -416,6 +421,7 @@ class Marker(_FrozenModel):
     effect: str | None = None
     description: str | None = None
     clear_on_source_death: bool = False
+    clear_on_source_skill_lost: bool = False
 
 
 class Player(BaseModel):

@@ -942,3 +942,52 @@ def test_end_play_phase_of_another_seat_is_a_no_op():
         "调的是座位 1，当前回合角色是座位 0 ⇒ 座位 0 的出牌阶段不受影响；"
         f"实得 {actor.play_queries} 问"
     )
+
+
+# ---------------------------------------------------------------------------
+# 「摸牌阶段多摸一张」= 折进基础摸牌数（lei-shenganning 票 94）
+#
+# 用户 2026-11-07 裁定："一次摸3张牌，英姿也该如此，不是摸2+摸1而是直接摸3"。
+# 判据 = 摸牌阶段只发**一条** `card_move`（DRAW）且张数是 3；旧形状是 2 + 1 两条。
+# ---------------------------------------------------------------------------
+
+
+class _AcceptsSkills(RecordingPlayer):
+    """能发动就发动（阶段体技能的问法是 `ActivateSkill` + `Pass`），其余走默认。"""
+
+    def respond(self, query):
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "ActivateSkill":
+                return action
+        return super().respond(query)
+
+
+def _draw_moves(engine, seat: int) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DRAW
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == seat
+    ]
+
+
+def test_yingzi_folds_into_one_three_card_draw():
+    """【英姿】把基础摸牌数 +1 ⇒ 摸牌阶段一次摸 3 张（一条 `card_move`）。"""
+    state = build_state(
+        pack=load_content_pack(deck_profile="standard_108"),
+        seats=[SeatSpec(hero="zhouyu"), SeatSpec(hero="lvmeng")],
+        deck=tuple(range(20)),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_turns(engine, [_AcceptsSkills(), RecordingPlayer()], turns=1)
+
+    draws = _draw_moves(engine, 0)
+    assert len(draws) == 1, f"摸牌阶段应当只有一条摸牌移动；实得 {len(draws)} 条"
+    assert len(draws[0].cards) == 3, (
+        f"英姿 ⇒ 一次摸 3 张（不是摸 2 再摸 1）；实得 {len(draws[0].cards)} 张"
+    )

@@ -182,12 +182,18 @@ class SkillSourceKind(str, Enum):
     运行时**获得**的技能（`GLOSSARY.md`「技能来源」的第四种）：同样不是牌，
     只记 ``skill_id``，实例由 :func:`resolve_instances` 读 ``Player.granted_skills`` 产出；
     获得来的主公技**不受身份限制**。
+
+    ``MARKER``（lei-shenganning 票 94）是**标记自身效果**：实例由 ``Player.markers`` 里
+    ``effect`` 非空的那条标记产出，``skill_id`` 记**放置该标记的那条技能**（= 标记的
+    ``source_skill_id``，便于在 ``instance_key`` 里分清"哪条技能放的这枚标记"）。
+    它是**唯一不受技能失效影响**的来源（用户 2026-11-07 裁定：标记本身有效果，技能失效也照常）。
     """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
     VIRTUAL_GRANT = "VIRTUAL_GRANT"
     HERO_CARD = "HERO_CARD"
     GRANTED = "GRANTED"
+    MARKER = "MARKER"
 
 
 HookCondition: TypeAlias = Callable[[Any, Frame], bool]
@@ -592,7 +598,7 @@ def lord_skill_allowed(identity: Identity | None, skill_id: str) -> bool:
 def _add_instance(
     found: list[SkillInstance], owner: int, definition: SkillDef, source: SkillSource
 ) -> None:
-    """记一条载体命中（三种载体公用；``skill_id`` 一律取定义上的那份，不另传）。"""
+    """记一条载体命中（四种载体公用；``skill_id`` 一律取定义上的那份，不另传）。"""
     found.append(
         SkillInstance(
             owner=owner,
@@ -615,10 +621,14 @@ def _skill_is_suppressed(player: Player, instance: SkillInstance) -> bool:
     武将牌（``HERO_CARD``）与运行时获得（``GRANTED``，含觉醒 ☆ 技）照常失效。
 
     ``VIRTUAL_GRANT`` **不是**只用于虚拟装备：既有测试构造也会用它授予武将技能，故这里
-    按**定义**是否为装备技能区分，不能把整个来源一刀切。来源种类无法判断时 **fail-closed
-    = 不失效**（不让未知实例被误锁）。
+    按**定义**是否为装备技能区分，不能把整个来源一刀切。``MARKER``（票 94）**永不受失效
+    影响**——用户 2026-11-07 裁定"这个标记本身具有效果，所以就算劫营这个技能失效了，依然
+    享受以上所说的3种加成"；这里写成显式分支，不靠"未知来源 fail-closed"的副作用。
+    来源种类无法判断时 **fail-closed = 不失效**（不让未知实例被误锁）。
     """
     source = instance.source.kind
+    if source is SkillSourceKind.MARKER:
+        return False
     if source is SkillSourceKind.EQUIPMENT_CARD:
         return False
     if source is SkillSourceKind.VIRTUAL_GRANT:
@@ -648,6 +658,7 @@ _PLAYER_KEY_FIELDS = (
     "granted_skills",
     "lost_skills",
     "suppressed_skills",
+    "markers",
 )
 """内容键里**座位级**字段的顺序，与 :func:`_player_key_values` 的元组一一对应（票 16）。
 
@@ -693,6 +704,8 @@ def _player_key_values(state: GameState, player: Player) -> tuple:
 
     装备区记 ``(card_id, 牌 type)`` 两份：实例来源带 ``card_id``，而定义按 ``card.type``
     查（spec §3.3），少一份就会把"换了牌面的同一张装备"当成同一个键。
+    ``markers``（票 94）整条进键：标记带 ``effect`` ⇒ 解析产出标记载体实例，而标记实例是
+    冻结模型（可哈希）且**没有**别的键位能表达"这一枚标记在不在"。
     """
     return (
         player.seat,
@@ -708,6 +721,7 @@ def _player_key_values(state: GameState, player: Player) -> tuple:
             (record.skill_id, record.scope, record.predicate)
             for record in player.suppressed_skills
         ),
+        tuple(player.markers),
     )
 
 
@@ -859,6 +873,22 @@ def _resolve_instances_uncached(
                     player.seat,
                     definition,
                     SkillSource(SkillSourceKind.GRANTED, skill_id=skill_id),
+                )
+        # **标记自身效果**（lei-shenganning 票 94）：标记带 ``effect`` ⇒ 它就是一条效果实例。
+        # 排在最后是刻意的：同 `(owner, skill_id)` 去重留**最早**来源，故"武将牌上 / 获得来的"
+        # 同名技能优先于标记带来的那一份；标记效果定义通常是独立 id，不会撞。
+        for marker in player.markers:
+            if not marker.effect:
+                continue
+            definition = CATALOG.get(marker.effect)
+            if definition is not None:
+                _add_instance(
+                    found,
+                    player.seat,
+                    definition,
+                    SkillSource(
+                        SkillSourceKind.MARKER, skill_id=marker.source_skill_id
+                    ),
                 )
     deduped: list[SkillInstance] = []
     seen: list[tuple[int, str]] = []

@@ -158,6 +158,15 @@ class PhaseBodySkill(HeroSkillDecl):
 
     timing: Timing
     draws: int = 0
+    """额外摸 ``N`` 张（**独立的一次摸牌**；【闭月】这类"摸一张牌"用它）。"""
+    draw_phase_bonus: int = 0
+    """**摸牌阶段的基础摸牌数 +N**（lei-shenganning 票 94；【英姿】/界【英姿】用它）。
+
+    与 :attr:`draws` 是两件事：``draws`` 追加一次摸牌（两条 ``card_move``），本字段把张数
+    **折进基础数**（``_phase_draw`` 一次摸 3 张 ⇒ 一条 ``card_move``）。用户 2026-11-07 裁定：
+    "一次摸3张牌，英姿也该如此，不是摸2+摸1而是直接摸3"。写入口是
+    :meth:`~sgs.engine.Engine.set_draw_phase_count`，故与标记自身效果（同一条写入口）自然叠加。
+    """
     flow: Any = None
     modifiers: tuple[Modifier, ...] = ()
     available: Callable[[GameState, int], bool] | None = None
@@ -214,8 +223,16 @@ class PhaseBodySkill(HeroSkillDecl):
     """
 
     def handler(self, host: Any, frame: Frame) -> Control:
-        """阶段体钩子：是否发动已由派发器问过；这里把 ``draws`` 张摸进持有者手里。"""
-        host.draw_for_hand(frame, frame.data["skill_owner"], self.draws)
+        """阶段体钩子：是否发动已由派发器问过；这里把效果兑现。
+
+        两个张数字段是**两条不同的路**（票 94）：``draw_phase_bonus`` 改写本阶段的基础摸牌数
+        （一次摸 N 张），``draws`` 追加一次摸牌（【闭月】"摸一张牌"）。
+        """
+        owner = frame.data["skill_owner"]
+        if self.draw_phase_bonus:
+            host.set_draw_phase_count(owner, host.draw_phase_count() + self.draw_phase_bonus)
+        if self.draws:
+            host.draw_for_hand(frame, owner, self.draws)
         return None
 
 
@@ -245,10 +262,11 @@ BIYUE_FLOW = SkillFlow(name="biyue", steps=(), effect=zero_step_effect(_biyue_de
 
 _YINGZI = PhaseBodySkill(
     # 周瑜【英姿】：摸牌阶段，你可以多摸一张牌（规则 1018）。
+    # 票 94：改成**基础摸牌数 +1**（一次摸 3 张），不是"摸 2 再摸 1"（用户 2026-11-07 裁定）。
     hero_id="zhouyu",
     short_id="yingzi",
     timing=Timing.PHASE_DRAW,
-    draws=1,
+    draw_phase_bonus=1,
     flow=YINGZI_FLOW,
 )
 
@@ -267,11 +285,11 @@ def _jie_yingzi_hand_limit(state: GameState, ctx: ModifierContext, current: Any)
 
 _JIE_YINGZI = PhaseBodySkill(
     # 界周瑜【英姿】（§十九 L2168–L2170）：锁定技，①摸牌阶段你多摸一张牌；
-    # ②你的手牌上限等于体力上限（X = 体力上限）。
+    # ②你的手牌上限等于体力上限（X = 体力上限）。票 94：①同样折进基础摸牌数。
     hero_id="jie_zhouyu",
     short_id="yingzi",
     timing=Timing.PHASE_DRAW,
-    draws=1,
+    draw_phase_bonus=1,
     flow=YINGZI_FLOW,
     modifiers=(Modifier(ModifierPoint.HAND_LIMIT_REPLACE, _jie_yingzi_hand_limit),),
     locked=True,
