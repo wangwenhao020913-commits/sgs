@@ -212,15 +212,17 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     "每名角色限一次 + 视为使用基本牌"的给牌技、首个"尾部紧凑段"虚拟牌与首个
     "结束阶段再次观星"的双时机排列技能）。huo-wolong-yanliang 票 01 起 164
     （火包·OL 卧龙诸葛【八阵】/【火计】/【看破】 = 首个"锁定技只往别人的【闪】窗口里
-    补一条候选"的载体，也是转化族在**无懈的收集式窗口**里的首个载体）。
+    补一条候选"的载体，也是转化族在**无懈的收集式窗口**里的首个载体），票 02 起 165
+    （火包·OL 颜良文丑【双雄】 = 首个"阶段体自己开判定、再把判定结果的颜色交给一条
+    ``CANDIDATES`` 修饰器"的载体）。
     函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 164
+    assert len(CATALOG) == 165
     assert len(equipment) == 22
-    assert len(heroes) == 142
+    assert len(heroes) == 143
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -246,7 +248,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 142
+    assert len(expected) == 143
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1159,6 +1161,7 @@ SKILL_FILES: dict[str, str] = {
     "hero.wolong_zhugeliang.bazhen": "test_hero_huo.py",
     "hero.wolong_zhugeliang.huoji": "test_hero_huo.py",
     "hero.wolong_zhugeliang.kanpo": "test_hero_huo.py",
+    "hero.yanliang_wenchou.shuangxiong": "test_hero_huo.py",
 }
 """启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
@@ -2016,6 +2019,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.wolong_zhugeliang.bazhen": "锁定技",
     "hero.wolong_zhugeliang.huoji": "转化技",
     "hero.wolong_zhugeliang.kanpo": "转化技",
+    # 双雄 = 阶段体（`PHASE_DRAW`）+ 一条 `CANDIDATES`（本回合的颜色转化）；机械判据按
+    # "声明了 `virtual_type_ids`"落「转化技」格（与【连环】同一姿态：转化那一半与钩子共存）。
+    "hero.yanliang_wenchou.shuangxiong": "转化技",
     # 锁定技 22（locked=True，含带目标池 / 修饰器的锁定技；M5-01a 的 4 件军争装备占位）
     "equip.crossbow": "锁定技",
     "equip.qinggang_sword": "锁定技",
@@ -2169,7 +2175,7 @@ SHAPE_COUNTS: dict[str, int] = {
     # 【火计】【看破】两条转化声明 ⇒ 转化技 15 → 17。
     "多轮技能": 16,
     "锁定技": 37,
-    "转化技": 17,
+    "转化技": 18,
     "能力位": 3,
     "候选生成器": 1,
     "候选提供者": 5,
@@ -2280,7 +2286,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 164
+    assert len(SKILL_SHAPE) == len(CATALOG) == 165
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2325,10 +2331,14 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         # 锁定技按**类型**单列一格（界【英姿】带一条零步阶段体流水线也是锁定技），
         # 故零步格排除锁定技——与"觉醒技单列"同一条互斥纪律。
         # 同理：候选提供者（界【护驾】）带 ② 的零步钩子，仍按"提供者"单列一格。
+        # huo-wolong-yanliang 票 02：【双雄】是"零步阶段体 + 转化那一半"的第一条——
+        # 它同时满足"零步"与"声明了 virtual_type_ids"两条机械判据，而本表一格一技：
+        # 取**转化**那一格（与【连环】同姿态——转化是它的主格，零步只是执行形状）。
         if _flow_steps(skill_id) == ()
         and skill_id not in awakening
         and skill_id not in providers
         and not CATALOG[skill_id].locked
+        and not CATALOG[skill_id].virtual_type_ids
     )
     arranged = skills(lambda definition: definition.deck_arrange is not None)
     locked = skills(
@@ -2397,7 +2407,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """85 在内 / 79 在外（164 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """85 在内 / 80 在外（165 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2410,7 +2420,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 85
-    assert len(outside) == 79
+    assert len(outside) == 80
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉
@@ -2424,10 +2434,14 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
         skill_id for skill_id in CATALOG if flow_for(skill_id) is not None
     }
     # 候选提供者（界【护驾】带 ② 的零步钩子）也排除——与锁定技同一条"按格单列"。
-    assert flow_backed - locked - providers == inside
+    # **转化那一半带流水线的**同样排除（huo-wolong-yanliang 票 02：【双雄】= 零步阶段体 +
+    # `CANDIDATES`，形态表按"转化"单列一格）——与锁定技 / 提供者同一条互斥纪律。
+    conversions = {
+        skill_id for skill_id in CATALOG if CATALOG[skill_id].virtual_type_ids
+    }
+    assert flow_backed - locked - providers - conversions == inside
     assert (
         {skill_id for skill_id in CATALOG if flow_for(skill_id) is None}
-        | (flow_backed & locked)
-        | (flow_backed & providers)
+        | (flow_backed & (locked | providers | conversions))
     ) == outside
     assert ZERO_STEP_SKILL_IDS and set(ZERO_STEP_SKILL_IDS) <= inside

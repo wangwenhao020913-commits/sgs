@@ -3226,6 +3226,32 @@ def _coverage_huoji():
     return state, _play_phase_with_preactivations(state)
 
 
+def _coverage_shuangxiong():
+    """颜良文丑【双雄】：本回合判定为红 ⇒ 黑手牌可以当【决斗】使用。
+
+    颜色这一位用**真实写入口**（``Engine.set_shuangxiong_judge_color``）写进去，不直接改
+    字段；源牌取一张**出牌阶段用不出去**的黑牌（黑【无懈可击】），否则 AI 会直接按原用途
+    用它（与武圣 / 国色 / 火计的覆盖同一条口径）。
+    """
+    black = next(
+        card_id
+        for card_id in _ids("nullify")
+        if color_of_suit(PACK.deck.cards[card_id].suit) is Color.BLACK
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(black,), hero="yanliang_wenchou"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(black),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.set_shuangxiong_judge_color(0, Color.RED)
+    return engine.state, _play_phase_with_preactivations(engine.state)
+
+
 LUANJI = "hero.yuanshao_mobile.luanji"
 """袁绍移动版【乱击】（huo-mobile-batch 票 03；票 07 起清单**没有**目标步）。"""
 
@@ -3298,6 +3324,9 @@ _TRANSFORM_COVERAGE_CASES = (
     ("乱击", "hero.yuanshao_mobile.luanji", _coverage_luanji, "arrow_barrage"),
     # huo-wolong-yanliang 票 01：卧龙诸葛【火计】（红色手牌 → 虚拟【火攻】；只在 160 档有产物）
     ("火计", "hero.wolong_zhugeliang.huoji", _coverage_huoji, "fire_attack"),
+    # huo-wolong-yanliang 票 02：颜良文丑【双雄】（本回合判红 ⇒ 黑手牌 → 虚拟【决斗】；
+    # bespoke `CANDIDATES` 回调 + 座位级颜色，与 H 族声明表无关）
+    ("双雄", "hero.yanliang_wenchou.shuangxiong", _coverage_shuangxiong, "duel"),
 )
 """``(标签, 技能 id, 场景构造, 解析出的虚拟牌名)``：五条转化技（龙胆两方向各一）。"""
 

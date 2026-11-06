@@ -3755,6 +3755,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "一张黑色手牌当【无懈可击】：只在无懈的收集式窗口出现（问到的都是锦囊要被抵消"
         "的时点），代价是那张黑手牌，恒为正",
     ),
+    "hero.yanliang_wenchou.shuangxiong": (
+        _constant(2.0),
+        "摸牌阶段把 2 张额定摸牌换成 1 次判定 + 判定牌 + 本回合的颜色转化：代价是少摸"
+        "一张，收益是**确定**拿到 1 张牌加一条【决斗】路径（判色事前未知 ⇒ 不按颜色"
+        "条件化），保守为正",
+    ),
     "hero.pangtong_mobile.niepan": (
         _constant(9.0),
         "限定技：濒死时弃区域所有牌、复原、摸三张、回复至 3 点——一局一条命，问到就发动",

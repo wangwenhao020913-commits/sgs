@@ -46,8 +46,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import Category, SkillType, Suit, card_category, hero_skill_id
+from sgs.data import Category, SkillType, Suit, card_category, color_of_suit, hero_skill_id
 from sgs.effects import (
+    CandidateScope,
     CarrierKind,
     Modifier,
     ModifierContext,
@@ -55,6 +56,7 @@ from sgs.effects import (
     apply_modifiers,
     behavior_for,
     is_slash,
+    locate,
     place_on_deck,
 )
 from sgs.resolution import Control, Frame
@@ -73,6 +75,8 @@ from sgs.timing import Timing
 
 from .catalog import (
     MATCH_OWNER_KEY,
+    RUNNING_SKILL_KEY,
+    SKILL_JUDGMENT_CARD_KEY,
     ActivationPlan,
     HeroSkillDecl,
     Hook,
@@ -92,7 +96,7 @@ from .flow import (
     watched_cards,
     zero_step_effect,
 )
-from .virtual import pure_virtual_card
+from .virtual import pure_virtual_card, virtual_candidates
 
 __all__ = [
     "BIYUE_FLOW",
@@ -119,6 +123,8 @@ __all__ = [
     "PhaseBodySkill",
     "SHELIE",
     "SHELIE_FLOW",
+    "SHUANGXIONG",
+    "SHUANGXIONG_FLOW",
     "SHENSU",
     "SHENSU_BOTH",
     "SHENSU_FLOW",
@@ -173,6 +179,18 @@ class PhaseBodySkill(HeroSkillDecl):
     只有 ``condition`` 拿得到它。既有十六条声明不传 ⇒ ``Hook`` 的 condition 为
     ``None``（恒真），行为逐字节不变。
     """
+    virtual_type_ids: tuple[str, ...] = ()
+    """这条阶段体技能**能转化出哪些虚拟牌名**（huo-wolong-yanliang 票 02 的加法）。
+
+    缺省空元组 ⇒ 既有十七条声明一字不改。非空时透进
+    :attr:`~sgs.skills.catalog.SkillDef.virtual_type_ids`：转化清单的技能归属
+    （:func:`~sgs.skills.heroes.owned_conversion_skill_ids` /
+    ``_candidate_skill_ids``）读它，故带转化那一半的阶段体技能（【双雄】）必须声明。
+    """
+
+    virtual_source_count: int = 1
+    """这条阶段体技能的虚拟牌**每次消耗几张来源牌**（缺省 1 = 单源转化）。"""
+
     per_round_limit: bool = False
     """这条技能有没有**每轮限 X 次**（M6 票 11；缺省 ``False`` ⇒ 既有九条声明一字不改）。
 
@@ -1503,6 +1521,140 @@ _QINYIN = PhaseBodySkill(
     ),
 )
 
+# ---------------------------------------------------------------------------
+# 颜良文丑【双雄】（huo-wolong-yanliang 票 02，火包·OL）
+#
+#     摸牌阶段，你可以改为进行一次判定，然后你获得此判定牌。若如此做，本回合你可以将
+#     任意一张与判定结果颜色不同的手牌当【决斗】使用。
+#
+# 形状 = `shapes.md` §2 第 53 行「钩子 + 修饰器」：**判定后写一个座位级事实（颜色），
+# 再由 `CANDIDATES` 修饰器在查询期读它**。载体是阶段体（`PHASE_DRAW`），故仍用
+# `PhaseBodySkill` 声明；转化那半是同一个 `SkillDef` 上的第二条修饰器（与【连环】同姿态）。
+# ---------------------------------------------------------------------------
+
+SHUANGXIONG = hero_skill_id("yanliang_wenchou", "shuangxiong")
+"""火包·OL 颜良文丑【双雄】的全限定技能 id。"""
+
+_STAGE_KEY = "shuangxiong_stage"
+"""帧私有：本次发动的进度（``judge`` → ``gain`` → 完成）。"""
+
+_GAINED_KEY = "shuangxiong_gained"
+"""帧私有：本次拿到的判定牌（续跑不重拿）。"""
+
+
+def _shuangxiong_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：整段替换本次摸牌 → 一次判定 → 获得判定牌 → 记下判定结果的颜色。
+
+    「改为」是**整段替换**（与【涉猎】同一条：先 ``set_draw_phase_count(owner, 0)``），
+    判定走技能自己的判定帧（``open_skill_judgment`` + ``RUNNING_SKILL_KEY``：阶段体帧的
+    ``frame_id`` 恒 0，回写靠"正在跑哪个技能"找发起帧，见 `Engine.note_skill_judgment`）。
+
+    「获得此判定牌」抄【洛神】的形状：判定帧出栈时那张牌已进弃牌堆，故按 ``locate`` 守卫
+    搬回手牌（被【天妒】一类先拿走的则不搬，免得对同一张牌搬出 ``hand → hand`` 的幻影
+    移动）。「本回合」的作用域由
+    :meth:`~sgs.engine.Engine.set_shuangxiong_judge_color` 写进座位状态、回合末清。
+    """
+    owner = frame.data["skill_owner"]
+    stage = frame.data.get(_STAGE_KEY)
+    if stage is None:
+        # 「改为」：先把本阶段的摸牌数改成 0，再压判定帧（顺序与【涉猎】一致）。
+        host.set_draw_phase_count(owner, 0)
+        frame.data[_STAGE_KEY] = "judge"
+        host.open_skill_judgment(
+            frame, owner, frame.data.get(RUNNING_SKILL_KEY, SHUANGXIONG)
+        )
+        return "stay"
+    if stage == "judge":
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        frame.data.pop("skill_result", None)
+        if judge_card is None:
+            frame.data[_STAGE_KEY] = "done"
+            return None
+        frame.data[_GAINED_KEY] = judge_card
+        frame.data[_STAGE_KEY] = "gain"
+        stage = "gain"
+    if stage == "gain":
+        card = frame.data[_GAINED_KEY]
+        frame.data[_STAGE_KEY] = "done"
+        if locate(host.state, card.card_id) != ZoneRef(Zone.HAND, owner):
+            control = host.move_in_frame(
+                frame,
+                (card,),
+                to_zone=ZoneRef(Zone.HAND, owner),
+                reason=MoveReason.PUT,
+                owner=owner,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+        frame.data.pop(_GAINED_KEY, None)
+        color = color_of_suit(card.suit)
+        if color is not None:
+            host.set_shuangxiong_judge_color(owner, color)
+    return None
+
+
+SHUANGXIONG_FLOW = SkillFlow(name="shuangxiong", steps=(), effect=_shuangxiong_effect)
+"""【双雄】的零步流水线：[是否发动] → 判定 → 获得判定牌 → 记下颜色（无步骤）。"""
+
+
+def _shuangxiong_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """【双雄】的转化候选：本回合判定结果颜色**不同**的手牌，一张当【决斗】**使用**。
+
+    三条早退与【乱击】的 bespoke 回调同形（``ctx.card is not None``／``ctx.owner !=
+    ctx.subject``／只认出牌阶段）：转化入口只在出牌阶段的询问里补候选，别的地方不产生。
+
+    **已知偏离**（账本 06 §5.2 有一行 `偏离一手`）：这个候选来源挂在**技能实例**上，
+    故「失去所有武将技能」之后本回合的转化入口随之消失——一手（《规则集》第二章 L195）
+    要求的是"依然能执行"。座位状态 ``shuangxiong_judge_color`` 不被撤回，缺的是"与实例
+    解耦的候选来源"这条原语（架构缺口票 06）。
+
+    **不走 `ConversionSkill` 声明**：那份声明的 ``predicate`` 只拿得到牌 id（
+    ``(state, card_id) -> bool``），读不出"本回合的判定颜色"这个**座位级**事实。
+
+    颜色谓词与 :func:`~sgs.skills.heroes._convertible` 同一处读法：牌面事实取
+    ``CardRef.color``，空则按花色派生（实体牌的 ``color`` 字段通常是空的）。
+    空集（判定红 + 手里全红）⇒ ``sources=()`` ⇒ 零候选、清单不出现（`edge-cases.md` 的 G1）。
+    """
+    if ctx.card is not None or ctx.owner != ctx.subject:
+        return current
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    color = state.player(ctx.subject).shuangxiong_judge_color
+    if color is None:
+        return current
+    sources = tuple(
+        (card_id,)
+        for card_id in state.player(ctx.subject).hand
+        if color_of_suit(state.card(card_id).suit) is not color
+    )
+    if not sources:
+        return current
+    return (
+        *current,
+        *virtual_candidates(
+            state,
+            ctx,
+            target_type_id="duel",
+            sources=sources,
+            scopes=(CandidateScope.PLAY,),
+        ),
+    )
+
+
+_SHUANGXIONG = PhaseBodySkill(
+    # 颜良文丑【双雄】：摸牌阶段，你可以改为进行一次判定，然后你获得此判定牌；
+    # 若如此做，本回合你可以将一张与判定结果颜色不同的手牌当【决斗】使用。
+    hero_id="yanliang_wenchou",
+    short_id="shuangxiong",
+    timing=Timing.PHASE_DRAW,
+    flow=SHUANGXIONG_FLOW,
+    modifiers=(Modifier(ModifierPoint.CANDIDATES, _shuangxiong_candidate),),
+    virtual_type_ids=("duel",),
+)
+"""【双雄】的声明（阶段体 + 随身 `CANDIDATES` 修饰器 + 产物牌名【决斗】）。"""
+
+
 PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _YINGZI,
     _JIE_YINGZI,
@@ -1521,6 +1673,7 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _SHELIE,
     _SHENSU,
     _QINYIN,
+    _SHUANGXIONG,
 )
 """L 族十三条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
@@ -1543,6 +1696,10 @@ _REQUIREMENTS: dict[str, str] = {
         "回合开始时，你可以选择一至两项：【1】跳过判定阶段和摸牌阶段；"
         "【2】跳过出牌阶段并弃置一张装备牌。你每以此法选择一项，"
         "便视为你使用一张无距离限制的普通【杀】"
+    ),
+    "shuangxiong": (
+        "改为进行一次判定，然后你获得此判定牌；本回合你可以将一张与判定结果颜色不同的"
+        "手牌当【决斗】使用"
     ),
     "qinyin": (
         "弃牌阶段结束时，若你于此阶段内弃置过至少两张手牌，"
@@ -1623,6 +1780,8 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
             per_round_limit=skill.per_round_limit,
+            virtual_type_ids=skill.virtual_type_ids,
+            virtual_source_count=skill.virtual_source_count,
         )
         for skill in PHASE_BODY_SKILLS
     )

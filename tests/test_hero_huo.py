@@ -3753,3 +3753,270 @@ def test_kanpo_is_absent_in_the_play_phase():
         and getattr(action.card, "type", None) == "nullify"
         for action in query.legal_actions
     )
+
+
+# ---------------------------------------------------------------------------
+# huo-wolong-yanliang 票 02：火包·OL 颜良文丑【双雄】
+#
+# 牌面（用户 `D:\SGS_HEROS\神话再临-火包\颜良文丑\技能.txt`，逐字）：
+#
+#     双雄  摸牌阶段，你可以改为进行一次判定，然后你获得此判定牌。若如此做，本回合你可以
+#           将任意一张与判定结果颜色不同的手牌当【决斗】使用。
+#
+# 用户 2026-11-06 签的判据：形状 = 钩子 + 修饰器；「改为」= 整段替换摸牌（0 张）；
+# 判定牌在**判定牌生效后**取得（改判时以改判后那张为准）；「任意一张」的数量恒 1；
+# 只手牌、颜色**不同**；作用域 `TURN`（回合末清）。
+# **已知偏离**（账本 06 §5.1 有行）：失去技能后本回合的转化入口随实例消失
+# （《规则集》第二章 L195 要求"延时类效果仍可执行"，本仓没有那种原语，见票 06）。
+# ---------------------------------------------------------------------------
+
+YANLIANG = "yanliang_wenchou"
+SHUANGXIONG = "hero.yanliang_wenchou.shuangxiong"
+
+
+def _shuangxiong_state(*, hand, top, others=()):
+    """座位 0 = 颜良文丑，出牌阶段；牌堆顶 = ``top``（判定牌）。
+
+    回合仍从摸牌阶段跑起，但【双雄】自己会把摸牌数改成 0 ⇒ 只有 ``top`` 会被判定抽走。
+    为了让"判定抽到 ``top``"，先压两张黑牌给**可能**的摸牌兜底（若答"放弃"）。
+    """
+    deck = (top,) + tuple(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in {top, *hand}
+    )
+    seats = [
+        SeatSpec(hero=YANLIANG, hand=tuple(hand), identity=Identity.LORD),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.DRAW,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+class _Shuangxiong:
+    """座位 0 的脚本：摸牌阶段答"发动 / 放弃"，出牌阶段按开关提交一次转化确认。"""
+
+    def __init__(self, *, activate: bool = True, picks=(), choices=()):
+        self.activate = activate
+        self.picks = tuple(picks)
+        self.choices = tuple(choices)
+        self.Asked = 0
+        self.play_queries: list[object] = []
+        self.converted = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            if getattr(query, "skill_id", None) == SHUANGXIONG:
+                self.Asked += 1
+                target = find_action(
+                    query,
+                    lambda action: isinstance(action, ActivateSkill)
+                    and action.skill_id == SHUANGXIONG,
+                )
+                if target is not None and self.activate:
+                    return target
+        if query.kind == QueryKind.PLAY_PHASE:
+            self.play_queries.append(query)
+            steps = (getattr(query, "transform_preactivations", None) or {}).get(
+                SHUANGXIONG, ()
+            )
+            if steps and self.picks and not self.converted:
+                self.converted = True
+                return ActivateSkill(
+                    skill_id=SHUANGXIONG,
+                    picks=self.picks,
+                    choices=self.choices,
+                    answers_seq=query.seq,
+                )
+        return PassPlayer().respond(query)
+
+
+def _run_shuangxiong(engine, driver):
+    return run_until(
+        engine,
+        [driver, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: bool(driver.play_queries) and e.state.turn_seat != 0,
+    )
+
+
+def test_shuangxiong_replaces_the_draw_with_a_judgment_and_gains_the_card():
+    """「改为进行一次判定」⇒ 不摸两张、判定牌进手牌（整段替换）。"""
+    red = _colored_cards("dodge", Color.RED)[0]
+    hand = (_colored_cards("slash", Color.BLACK)[0],)
+    state = _shuangxiong_state(hand=hand, top=red)
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=True)
+    run_queries(
+        engine,
+        [driver, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: bool(driver.play_queries),
+    )
+
+    assert driver.Asked == 1, "摸牌阶段问一次「是否发动」"
+    assert sorted(engine.state.player(0).hand) == sorted([*hand, red]), (
+        "不摸那两张额定牌，只获得判定牌"
+    )
+    assert engine.state.player(0).shuangxiong_judge_color is Color.RED
+
+
+def test_shuangxiong_declining_draws_two_and_offers_no_duel():
+    """答「放弃」⇒ 零副作用：照常摸两张、没有任何转化入口。"""
+    top = _colored_cards("dodge", Color.RED)[0]
+    state = _shuangxiong_state(hand=(), top=top)
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=False)
+    run_queries(engine, [driver, PassPlayer(), PassPlayer(), PassPlayer()], lambda e: e.state.turn_seat != 0)
+
+    assert len(engine.state.player(0).hand) == 2, "放弃 ⇒ 正常摸两张"
+    assert engine.state.player(0).shuangxiong_judge_color is None
+    assert not (getattr(driver.play_queries[0], "transform_preactivations", None) or {}).get(
+        SHUANGXIONG
+    ), "没有判定结果 ⇒ 没有转化入口"
+
+
+def test_shuangxiong_offers_only_cards_of_the_other_color():
+    """判定为红 ⇒ 只有**黑色**手牌能当【决斗】；红牌不在候选里。"""
+    red_judge = _colored_cards("dodge", Color.RED)[0]
+    blacks = _colored_cards("slash", Color.BLACK)
+    reds = [card for card in _colored_cards("peach", Color.RED) if card != red_judge]
+    hand = (blacks[0], blacks[1], reds[0])
+    state = _shuangxiong_state(hand=hand, top=red_judge)
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=True)
+    run_queries(engine, [driver, PassPlayer(), PassPlayer(), PassPlayer()], lambda e: bool(driver.play_queries))
+
+    steps = driver.play_queries[0].transform_preactivations[SHUANGXIONG]
+    source_step = steps[0]
+    assert source_step.name == "card"
+    offered = set(source_step.pool[0].options)
+    assert offered == {str(blacks[0]), str(blacks[1])}, "只列与判定结果颜色不同的手牌（红牌不在内）"
+
+
+def test_shuangxiong_offers_no_duel_when_every_hand_card_matches_the_judge_color():
+    """判定为红、手里全红 ⇒ 空集 ⇒ 该入口整条不出现（不发空清单）。"""
+    red_judge = _colored_cards("dodge", Color.RED)[0]
+    red_hand = [card for card in _colored_cards("peach", Color.RED) if card != red_judge][:1]
+    state = _shuangxiong_state(hand=tuple(red_hand), top=red_judge)
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=True)
+    run_queries(engine, [driver, PassPlayer(), PassPlayer(), PassPlayer()], lambda e: bool(driver.play_queries))
+
+    assert not (driver.play_queries[0].transform_preactivations or {}).get(SHUANGXIONG)
+
+
+def test_shuangxiong_converts_a_black_hand_card_into_a_duel():
+    """黑色手牌当【决斗】**使用**：走真牌同一条链（目标必须是其他角色）。"""
+    red_judge = _colored_cards("dodge", Color.RED)[0]
+    black = _colored_cards("slash", Color.BLACK)[0]
+    state = _shuangxiong_state(hand=(black,), top=red_judge)
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=True, picks=(black,), choices=("seat:1",))
+    run_until(
+        engine,
+        [driver, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: black in e.state.discard,
+    )
+
+    assert driver.converted is True, "转化确认被接受"
+    assert black in engine.state.discard, "来源实体牌进弃牌堆"
+
+
+def test_shuangxiong_judge_color_expires_at_turn_end():
+    """「本回合」⇒ 回合末清回 None（作用域 = 一个回合）。"""
+    red_judge = _colored_cards("dodge", Color.RED)[0]
+    state = _shuangxiong_state(hand=(), top=red_judge)
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=True)
+    run_queries(
+        engine,
+        [driver, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: bool(driver.play_queries),
+    )
+
+    assert engine.state.player(0).shuangxiong_judge_color is Color.RED
+    # 跑到下一位的回合（= 0 号回合结束的收尾点已跑过）
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: e.state.turn_seat == 2,
+    )
+    assert engine.state.player(0).shuangxiong_judge_color is None
+
+
+def test_shuangxiong_is_silent_when_the_draw_phase_is_skipped_by_supply_shortage():
+    """被【兵粮寸断】跳过摸牌阶段 ⇒ 整个时点不存在，双雄连问都不问。
+
+    【兵粮寸断】是军争牌 ⇒ 本用例用 160 档。
+    """
+    shortage = cards_of_type(PACK_160, "supply_shortage")[0]
+    top = next(
+        card_id
+        for card_id in range(len(PACK_160.deck.cards))
+        if card_id != shortage
+        and color_of_suit(PACK_160.deck.cards[card_id].suit) is Color.RED
+    )
+    seats = [
+        SeatSpec(hero=YANLIANG, identity=Identity.LORD, judge=(shortage,)),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    state = build_state(
+        pack=PACK_160,
+        seats=seats,
+        deck=(top,)
+        + tuple(
+            card_id
+            for card_id in range(len(PACK_160.deck.cards))
+            if card_id not in {top, shortage}
+        ),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    driver = _Shuangxiong(activate=True)
+    run_queries(
+        engine,
+        [driver, PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: e.state.turn_seat != 0,
+    )
+
+    assert driver.Asked == 0, "摸牌阶段被跳过 ⇒ 不问「是否发动」"
+    assert engine.state.player(0).shuangxiong_judge_color is None
+
+
+def test_shuangxiong_is_offered_only_in_its_own_draw_phase():
+    """别人的摸牌阶段不问（牌面没写"1 名角色的回合"⇒ 默认读法（二）④）。"""
+    red_judge = _colored_cards("dodge", Color.RED)[0]
+    seats = [
+        SeatSpec(identity=Identity.LORD),
+        SeatSpec(hero=YANLIANG, identity=Identity.REBEL),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, red_judge),
+        turn_seat=0,
+        phase=Phase.DRAW,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    probe = _Shuangxiong(activate=True)
+    run_queries(
+        engine,
+        [PassPlayer(), probe, PassPlayer(), PassPlayer()],
+        lambda e: e.state.turn_seat == 1,
+    )
+
+    assert probe.Asked == 0, "不是自己的摸牌阶段 ⇒ 这条实例连「是否发动」都不问"

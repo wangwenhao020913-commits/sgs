@@ -515,7 +515,7 @@ def fire_attack_tape(base: str) -> int:
 # seed 65 不受影响）。
 # ---------------------------------------------------------------------------
 
-_WINE_TAPE_SEED = 8
+_WINE_TAPE_SEED = 65
 """出牌阶段那段：首问就是人类出牌阶段、起始手牌里恰一张【酒】。
 
 huo-shenzhugeliang 票 01（默认池 69/43 → 70/44）再换池：seed 65 的首问变成了 DODGE
@@ -523,11 +523,13 @@ huo-shenzhugeliang 票 01（默认池 69/43 → 70/44）再换池：seed 65 的�
 standard_ex_160 / 人类 0：首问 = 出牌阶段、恰一张【酒】、目标为自己）。
 
 huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸葛）再换池：seed 71 的
-首问不再是人类出牌阶段，按同一判据（同一固定策略、命中断言逐字未改）重扫，命中
-**8 / 46 / 65 / 84**（46 已被【火攻】tape 占用），取首个未在用的 **seed 8**
-（探针 `.scratch/huo-wolong-yanliang/scan_wine_seed.py`）。"""
+首问不再是人类出牌阶段，按同一判据（同一固定策略、命中断言逐字未改）重扫，取首个未在用的
+**seed 8**（探针 `.scratch/huo-wolong-yanliang/scan_wine_seed.py`）。
 
-_WINE_TAPE_NEAR_DEATH_SEED = 37
+票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
+**46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
+
+_WINE_TAPE_NEAR_DEATH_SEED = 27
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再加太史慈标准版 / 荀彧标准版）
@@ -537,7 +539,11 @@ huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再�
 
 tao-caocao 票 01（默认池 75/49 → 76/49，自制包加韬·曹操自制版）再换池：seed 16 的对局在
 出现自救窗口前结束，按同一判据从 1 起重扫到首个命中 **seed 37**（同一固定策略、同一命中
-判据：人类 0 血 + 求桃窗口里的【酒】目标恒为自己）。"""
+判据：人类 0 血 + 求桃窗口里的【酒】目标恒为自己）。
+
+huo-wolong-yanliang 票 01 / 02（默认池 78/49 → 79/50 → 80/51）再换池：seed 37 的对局在出现
+自救窗口前结束，按同一判据重扫（探针 `.scratch/huo-wolong-yanliang/scan_wine_near_death_seed.py`），
+命中 **1 / 4 / 16 / 27 / 36 …**，取首个未在用的 **seed 27**。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:

@@ -746,6 +746,16 @@ def _modifier(skill: ConversionSkill) -> Modifier:
     return Modifier(ModifierPoint.CANDIDATES, skill.candidate)
 
 
+_H_FAMILY_SKILL_IDS: frozenset[str] = frozenset(
+    skill_id for skill in CONVERSION_SKILLS for skill_id in skill.skill_ids
+)
+"""H 族声明表覆盖的技能 id（由 :data:`CONVERSION_SKILLS` 派生，不另抄名单）。
+
+用于把"**不在**声明表里的转化"从单来源归属的兜底里认出来：装备转化技（朱雀羽扇）与
+bespoke 回调的武将转化（火包·OL 颜良文丑【双雄】——它的颜色判据读座位状态，
+``ConversionSkill.predicate`` 的签名表达不了）都走那条兜底。"""
+
+
 def conversion_offers(
     state: GameState, seat: int, target_type_id: str
 ) -> tuple[tuple[int, str], ...]:
@@ -822,14 +832,16 @@ def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, 
     sources = tuple(int(source) for source in card.virtual_sources)
     if len(sources) == 1:
         offered = conversion_offers_by_source(state, owner, card.type).get(sources[0], ())
-        # 装备转化技（M5-05b 的朱雀羽扇）不在 H 族声明表里：来源谓词内联在
-        # ``CANDIDATES`` 回调里，声明上只有产物牌名，故按"产物牌名 + 单来源"归属
-        # ——候选存在本身已证明来源筛过（清单与确认都从这份内部候选池派生）。
+        # **不在 H 族声明表里**的转化按"产物牌名 + 单来源"归属：装备转化技（M5-05b 的
+        # 朱雀羽扇）与 bespoke 回调的武将转化（huo-wolong-yanliang 票 02 的【双雄】——
+        # 它的颜色判据读座位状态）。它们的来源谓词内联在 ``CANDIDATES`` 回调里，声明上只有
+        # 产物牌名与张数 ⇒ 候选存在本身已证明来源筛过（清单与确认都从这份内部候选池派生）。
+        # H 族的技能由上面的 ``offered`` 回答，故这里按声明表扣掉，避免同一条判据两份来源。
         declared = tuple(
             instance.skill_id
             for instance in resolve_instances(state)
             if instance.owner == owner
-            and instance.source.kind is SkillSourceKind.EQUIPMENT_CARD
+            and instance.skill_id not in _H_FAMILY_SKILL_IDS
             and card.type in instance.definition.virtual_type_ids
             and instance.definition.virtual_source_count == 1
         )

@@ -520,6 +520,25 @@ class Player(BaseModel):
     回调。**不发 delta**：与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一条
     ``SKILL_ACTIVATION`` 动作重跑即可重建）。
     """
+    shuangxiong_judge_color: Color | None = None
+    """【双雄】本回合"判定结果的颜色"（huo-wolong-yanliang 票 02 的唯一写入口面）。
+
+    ``None`` = 本回合没有【双雄】的延时类效果；红 / 黑 = 已发动且判定结果的颜色。牌面：
+    「摸牌阶段，你可以改为进行一次判定，然后你获得此判定牌。若如此做，**本回合**你可以将
+    任意一张与判定结果**颜色不同**的手牌当【决斗】使用」。
+
+    写入唯一入口 :meth:`Engine.set_shuangxiong_judge_color`（双雄自己的判定帧出栈后写）；
+    清理点 = :meth:`Engine._clear_turn_effects`（作用域 ``TURN``）。读点是
+    :func:`sgs.skills.phase_body._shuangxiong_candidate` 的 ``CANDIDATES`` 回调。
+    **不发 delta**：与 ``luoyi_active`` 同姿态——判定牌本身已经进记录流（技能自己的
+    判定），颜色由它派生，回放按同一条 ``SKILL_ACTIVATION`` 动作重跑即可重建。
+
+    **已知偏离**（账本 06 §5.1 有行，用户 2026-11-06 裁）：这一位与**座位**绑定、不随技能
+    实例消失，但**候选入口**仍由双雄实例的 ``CANDIDATES`` 修饰器提供 ⇒ 失去技能后入口随之
+    消失。《三国杀规则集》第二章 L195 的例（「失去其所有武将技能，但是〖双雄〗的延时类效果
+    依然能执行」）要求的是"入口也不消失"，本仓没有那种原语（架构缺口见
+    `.scratch/huo-wolong-yanliang/issues/06-skill-instance-decoupled-candidate-source.md`）。
+    """
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 

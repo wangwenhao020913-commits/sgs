@@ -4041,6 +4041,20 @@ class Engine:
         """把一个座位的【裸衣】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
         self._clear_player_flag(seat, "luoyi_active")
 
+    def set_shuangxiong_judge_color(self, seat: int, color: Color | None) -> bool:
+        """写一个座位的【双雄】"本回合判定结果的颜色"（huo-wolong-yanliang 票 02 唯一写入口）。
+
+        写入点 = 双雄自己的判定帧出栈之后（判红 / 判黑都算"若如此做"成立）；回合末由
+        :meth:`_clear_turn_effects` 清回 ``None``（作用域 ``TURN``）。**不发 delta**：
+        与 ``luoyi_active`` 同姿态——判定牌本身已经进记录流，颜色由它派生，回放按同一条
+        ``SKILL_ACTIVATION`` 动作重跑即可重建。返回值 = 状态真的变了吗（幂等）。
+        """
+        player = self.state.player(seat)
+        if player.shuangxiong_judge_color == color:
+            return False
+        player.shuangxiong_judge_color = color
+        return True
+
     def set_luoyi_until_next_turn(self, seat: int, active: bool) -> bool:
         """写一个座位的**界**【裸衣】"直到你的下个回合开始"加伤状态（M6 票 14 的唯一写入口）。
 
@@ -4361,6 +4375,8 @@ class Engine:
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
             player.hand_limit_bonus = 0
+            # 【双雄】本回合的转化许可（huo-wolong-yanliang 票 02）：作用域 = 一个回合。
+            player.shuangxiong_judge_color = None
             self._clear_paoxiao_bonus(player.seat)
         # 牌标签的"本回合不计入"（M6 票 09）：与其它 ``TURN`` 作用域状态同一收尾点，
         # 走声明触发的唯一入口（逐类型读登记表，不在这里特判标签类型）。
