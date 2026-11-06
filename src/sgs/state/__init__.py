@@ -35,6 +35,9 @@ from .models import (
     MoveReason,
     Phase,
     Player,
+    SEALED_ZONE_EQUIP,
+    SEALED_ZONE_IDS,
+    SEALED_ZONE_JUDGE,
     SkillSuppression,
     SkillSuppressionPredicate,
     SkillSuppressionScope,
@@ -42,6 +45,7 @@ from .models import (
     Zone,
     ZoneRef,
     ZoneRefField,
+    zone_sealed,
 )
 from .projection import project
 from .protocol import (
@@ -165,6 +169,10 @@ __all__ = (
     "SkillSuppressionPredicate",
     "SkillSuppressionScope",
     "Slot",
+    "SEALED_ZONE_EQUIP",
+    "SEALED_ZONE_IDS",
+    "SEALED_ZONE_JUDGE",
+    "zone_sealed",
     "Step",
     "StepPool",
     "SlotKind",

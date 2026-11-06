@@ -541,7 +541,9 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     这是 ``tests/test_web.py`` 的"不泄露"判据盯住的那个对象：对手只有 ``hand_count``、
     身份只出现"本人 / 主公 / 已阵亡 / ``identity_visible`` 为真"四种可见情形、牌堆只有
     数量无顺序。``hand_limit``（票 09 的手牌读数上限）也在这里，但它是**允许字段**：
-    只由公开事实派生，与 ``hand_count`` 同级，不含隐藏牌面信息。
+    只由公开事实派生，与 ``hand_count`` 同级，不含隐藏牌面信息。``sealed_zones``
+    （lei 票 05 的被废除区域）也是**允许字段**：它是公开区事实（谁的哪个区被废除了），
+    取值原样取自 ``PlayerPublic``，界面据此画红色禁止角标。
     """
     state = session.engine.state
     view = project(state, session.human_seat)
@@ -575,6 +577,10 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         # 前端不自己算（那会是第二份真源）⇒ 与 `hero_tags` 同姿态只补进**网页载荷**：
         # 不进 `PlayerPublic` / `PlayerView`（AI 读面要登记读点表，记录流也不该多字节）。
         player_payload["hand_limit"] = hand_limit(state, state.player(player.seat))
+        # lei 票 05：被废除（封印）的区域。`PlayerPublic.sealed_zones` 是**公开事实**但
+        # `exclude=True`（不进记录流）⇒ 与 `hero_zones` / `hand_limit` 同姿态在这里补进
+        # 网页载荷；值**原样**取自投影（不重算、不另造名单），座位卡据此叠红色禁止角标。
+        player_payload["sealed_zones"] = list(player.sealed_zones)
     # 牌面标签：只给**已下发的牌面**补 tags；隐藏区的牌不在载荷里，故连标签也没有。
     _decorate_snapshot_card_tags(payload, state, session.human_seat)
     # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进
@@ -1936,6 +1942,7 @@ def _arrange_spec(
             "rows": {"top": spec.top_label, "bottom": spec.bottom_label},
             "enumerate": bool(spec.enumerate_candidates),
             "reorder": bool(spec.reorder),
+            "startsOnTop": bool(getattr(spec, "starts_on_top", False)),
         }
     split_spec = getattr(spec, "split", None)
     split: str | dict[str, int]
@@ -2690,25 +2697,43 @@ def serialize_record(
 
 
 def skill_events_after(
-    records: Iterable[object], *, after: int, state: Any
+    records: Iterable[object],
+    *,
+    after: int,
+    state: Any,
+    activations: Iterable[Any] = (),
 ) -> list[dict[str, Any]]:
     """从**未裁剪**的记录流派生技能发动事件（spec D8.2）：``seq > after`` 的那几条。
 
-    这条通道只补「记录流里已有、但 ``records`` 的 action 裁剪把细节藏掉了」的那部分：
-    已接受（``accepted === true``）且 ``action.kind === "ActivateSkill"`` 的动作。
-    其余动作（含使用牌 / 打出牌，以及被拒的应答）一条都不产。
+    判据是"**这一次技能真的发动了**"这条公共事实，两个来源合成**同一条**通道：
 
-    - ``seat`` = **应答那次询问的 actor**。``ActionRecord`` 自己不带座位，但它的
-      ``answers_seq`` 指向产生它的那次 ``query`` 记录（记录流已下发的公开事实）；
-      不从手牌 / 目标等隐藏信息反推。
-    - ``targets`` = ``action.choices`` 里以 ``seat:`` 开头的选项（``flow.py`` 的规范编码），
-      按出现顺序；没有指定目标的发动（制衡 / 装备技等）是空列表。
+    1. **记录流**：已接受（``accepted === true``）且动作**点名了技能**的记录
+       （动作里有非空 ``skill_id``）。今天有两种载体——``ActivateSkill``（主动 / 触发 /
+       阶段体 / 提供者，载荷被 ``records`` 的 action 裁剪藏掉了，这里补回来）与
+       ``SubstituteJudgeCard``（改判的【鬼才】/【鬼道】）。判据**不按动作种类打表**：
+       将来的动作只要点名技能就自动进来。使用牌 / 打出牌 / 选牌不点名技能 ⇒ 一条都不产。
+    2. **引擎的发动缓冲** ``Engine.skill_activations``（lei 票 06）：**记录面没有技能归属**
+       的两类技能由引擎在"真的跑了"的那一刻记账——**锁定技**（派发环直接跑 handler，
+       没有"是否发动"询问）与**转化技**（确认被解析成普通 ``UseCard`` / ``PlayCard``）。
+       这条同样是"谁真的跑了"，不是按技能名打表；修饰器-only 技能从不经过派发环，故不会
+       被记到（它们没有独立的"发动瞬间"）。
+    修饰器（``ModifierPoint``）那类纯规则 / 数值修饰因此**天然**不产事件。
+
+    - ``seat`` = **发动者座位**。记录流里取**应答那次询问的 actor**（``ActionRecord`` 不
+      自带座位，但它的 ``answers_seq`` 指向产生它的那次 ``query`` 记录——记录流已下发的
+      公开事实）；缓冲里由引擎按下发时就记下的技能持有者给。
+    - ``targets`` = 这次发动**指定 / 作用的目标**（``seat:`` 前缀的选项按出现顺序；转化技
+      取解析后动作自己的 ``targets``）；没有指定目标的发动（制衡 / 装备技 / 锁定技）是空
+      列表——前端只飘名 + 白光，不画线。
     - ``name`` = 接入层展示表的中文名（与 ``build_skills`` / 叙事同源）；查不到时退回
       ``skill_id``，不让前端自建映射。
 
     ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具），两种
     形状走同一份派生。**不使用** ``picks``（那是成本牌），技能与目标都是公开事实，
     不需要按查看者过滤。
+
+    ``activations`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路
+    表现（锁定技 / 转化技不飘字），记录流那一路照旧——这是缓冲**不进记录流**的必然边界。
     """
     records = list(records)
     # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
@@ -2723,7 +2748,11 @@ def skill_events_after(
         if kind != "action" or not record.get("accepted"):
             continue
         action = record.get("action")
-        if not isinstance(action, Mapping) or action.get("kind") != "ActivateSkill":
+        if not isinstance(action, Mapping):
+            continue
+        # 判据 = "这条已接受的动作**点名了技能**"（不按动作种类打表）：`ActivateSkill` 与
+        # `SubstituteJudgeCard` 今天都满足；使用牌 / 打出牌 / 选牌没有这个键。
+        if not str(action.get("skill_id") or ""):
             continue
         if not isinstance(seq, int) or seq <= after:
             continue
@@ -2745,4 +2774,24 @@ def skill_events_after(
                 "targets": targets,
             }
         )
+    # 引擎的发动缓冲（记录面没有技能归属的那两类）：座位是"跑这条技能的人"，seq 锚在
+    # 产生它的那条记录上，两条通道因此可以按同一套回放游标合成一条队列。
+    for activation in activations or ():
+        seq = getattr(activation, "seq", None)
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        skill_id = str(getattr(activation, "skill_id", "") or "")
+        if not skill_id:
+            continue
+        events.append(
+            {
+                "seq": seq,
+                "seat": getattr(activation, "seat", None),
+                "skill_id": skill_id,
+                "name": _skill_display_name(state, skill_id) or skill_id,
+                "targets": [int(target) for target in getattr(activation, "targets", ())],
+            }
+        )
+    # 两路按记录序号合并（稳定排序：同 seq 保持"记录流在前"的既有次序）。
+    events.sort(key=lambda event: event["seq"])
     return events

@@ -31,6 +31,9 @@ __all__ = [
     "MoveReason",
     "Phase",
     "Player",
+    "SEALED_ZONE_EQUIP",
+    "SEALED_ZONE_IDS",
+    "SEALED_ZONE_JUDGE",
     "SkillSuppression",
     "SkillSuppressionPredicate",
     "SkillSuppressionScope",
@@ -38,6 +41,7 @@ __all__ = [
     "Zone",
     "ZoneRef",
     "ZoneRefField",
+    "zone_sealed",
 ]
 
 
@@ -92,6 +96,57 @@ class SlotKind(str, Enum):
     HORSE_DEFENSE = "horse_defense"
     HORSE_OFFENSE = "horse_offense"
     TREASURE = "treasure"
+
+
+SEALED_ZONE_JUDGE = "judge"
+"""被废除的区域 id：**判定区**（延时锦囊不落、角色不是延时锦囊的合法目标）。"""
+
+SEALED_ZONE_EQUIP = "equip"
+"""被废除的区域 id：**装备区**（整个区；覆盖 :data:`SEALED_ZONE_IDS` 里的全部装备槽位）。"""
+
+SEALED_ZONE_IDS: frozenset[str] = frozenset(
+    {
+        SEALED_ZONE_JUDGE,
+        SEALED_ZONE_EQUIP,
+        SlotKind.WEAPON.value,
+        SlotKind.ARMOR.value,
+        SlotKind.HORSE_DEFENSE.value,
+        SlotKind.HORSE_OFFENSE.value,
+    }
+)
+"""``Player.sealed_zones`` 的**闭集**（lei-batch 票 02；用户 2026-11-05 裁定）。
+
+「废除判定区 / 装备区 / 武器槽 / 防具槽 / 坐骑槽 / 进攻马槽 / 防御马槽」是**同一种事件**
+（「废除区域」），取值就是这张表；「恢复区域」把对应的位去掉。宝物槽位当前不启用，故不在
+闭集里（ADR-006）。"""
+
+_SEALED_EQUIP_SLOTS: frozenset[str] = frozenset(
+    slot.value for slot in SlotKind if slot.value in SEALED_ZONE_IDS
+)
+"""**单个装备槽位**的封印闭集：直接取 :data:`SEALED_ZONE_IDS` 与 ``SlotKind`` 的交集。
+
+不另抄一张槽位表——``zone_sealed`` 的槽位判据与 ``abolish_zone`` 的可废除闭集因此
+**同一份真源**：给闭集加一个槽位，两个函数一起看到；宝物槽位不在闭集（ADR-006），
+也就不在这里。
+"""
+
+
+def zone_sealed(player: "Player", zone_id: str) -> bool:
+    """该座位这个区域是否**被废除**。
+
+    ``equip`` 封印覆盖**闭集里的**全部装备槽位（整个装备区没了）；单个槽位的封印只看
+    **自己**那一位——封印武器槽不等于废除装备区，防具槽照常可用。
+
+    **宝物槽位（``treasure``）的口径**：ADR-006 下宝物槽位不启用、不在
+    :data:`SEALED_ZONE_IDS`，故整个装备区封印**不**把 ``treasure`` 读成已封印
+    （``_SEALED_EQUIP_SLOTS`` 是从闭集派生的，不另写一份含 ``treasure`` 的名单）。
+    将来启用宝物槽时，必须同时把它加进 ``SEALED_ZONE_IDS``——本函数随之自动覆盖。
+    """
+    if zone_id in player.sealed_zones:
+        return True
+    if zone_id in _SEALED_EQUIP_SLOTS:
+        return SEALED_ZONE_EQUIP in player.sealed_zones
+    return False
 
 
 class CardRef(_FrozenModel):
@@ -427,6 +482,24 @@ class Player(BaseModel):
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
     每次变化发一条 ``wine_change`` delta）。"""
+    sealed_zones: tuple[str, ...] = ()
+    """被**废除（封印）**的区域（lei-batch 票 02；用户 2026-11-05 裁定的「废除区域」事件）。
+
+    取值是 :data:`SEALED_ZONE_IDS` 的闭集：``judge`` / ``equip``（整个装备区）/
+    ``weapon`` / ``armor`` / ``horse_offense`` / ``horse_defense``。写入**唯一入口**是
+    ``Engine.abolish_zone`` / ``Engine.restore_zone``：废除 = 先把该区域里的牌强制弃置
+    （进弃牌堆、``MoveReason.DISCARD``），再落这一位；恢复 = 去掉这一位。
+
+    读点（三条系统规则，`Engine` 与 :func:`~sgs.effects.check_targets` 各一半）：
+    装备区 / 对应槽位封印 ⇒ 该角色不能**使用**装备牌、也不能把牌**置入**它；
+    判定区封印 ⇒ 它不是延时锦囊的合法目标（【闪电】转移时越过它）。
+
+    **网页看得见**（lei 票 05）：投影面 ``PlayerPublic.sealed_zones`` 照搬这一位，座位卡的
+    判定 / 装备区据此叠红色禁止角标（``tools/sgs_web/static/seat-view.js``）。**仍不发
+    delta**（lei 票 05 复核后的二选一）：投影每次从状态重算，记录流不含投影；"废除"那一串
+    弃牌移动照常进记录流，回放按动作重跑即可重建——按"网页要画封印图标就补 delta"的旧
+    承诺因此不再成立，no-leak 八类也不用为此多登记一行。
+    """
     luoyi_active: bool = False
     """【裸衣】的"本回合【杀】/【决斗】伤害 +1"是否生效（M6 票 01）。
 
@@ -574,6 +647,16 @@ class Player(BaseModel):
     读它（使用 / 打出的候选按来源区过滤，弃置 / 重铸等不是"使用或打出"的动作照常）。
     **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条技能动作重跑即可重建。
     """
+    xiongluan_target: int | None = None
+    """本回合**我对这名角色使用牌无距离与次数限制**（张绣【雄乱】的效果①）。
+
+    写入方 = 【雄乱】的提交点（一次发动只写一个座位）；回合末由
+    ``Engine._clear_turn_effects`` 清掉。读取方是同一条技能定义上的两个修饰器：
+    ``TARGET_POOL``（把他补回候选池 ⇒ 豁免距离 / 攻击范围）与 ``COUNT_EXEMPT``
+    （``ModifierContext.use_targets`` ⊆ {他} ⇒ 这一次使用不受次数上限；候选生成期由
+    ``check_count`` 的目标维度收窄，不是把整张牌放行）。**不发 delta**：与
+    ``hand_card_prohibited`` 同姿态（回放按同一条技能动作重跑即可重建）。
+    """
     heart_slash_bonus_against: list[int] = Field(default_factory=list)
     """本回合"**你使用红桃【杀】对其造成的伤害 +1**"的目标座位（【义绝】黑色分支）。
 
@@ -590,9 +673,18 @@ class Player(BaseModel):
     过期 = 回合末，**不随技能实例存亡撤回**（故住座位而不是 ``skill_state``）。
     **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条【闪】的应答重建。
     """
+    discarded_this_turn: bool = False
+    """本回合**弃置过牌**（lei-batch 票 03 的框架面；诸葛瞻【罪论】选项 2 的内置检测器）。
+
+    用户 2026-11-05 裁定：「未弃置过牌」= 技能拥有者于**自身回合内**弃置牌时置 ``False``
+    的检测器、**自身回合结束后**复位。落点 = :meth:`Engine.move_in_frame` 的
+    ``reason is DISCARD`` 分支（``actor`` 是弃置者：自己被拆牌 / 被别人弃置不算"你弃置"，
+    与【过河拆桥】一类"别人动手"的口径一致）。复位点与 ``damage_dealt_this_turn`` 同一处
+    （``Engine._clear_turn_effects``）——那正是"回合结束后"，不需要新时机。
+    **不发 delta**：与 ``hand_card_prohibited`` 同姿态。
+    """
     hand_limit_bonus: int = 0
     """本回合**手牌上限的加式增量**（M6 票 08；spec D11 / D9 的第二轴）。
-
     写入唯一入口 :meth:`Engine.add_hand_limit_bonus`（【清俭】作用于**当前回合角色**，
     【集智】作用于自己）；读取方是 :func:`sgs.effects.hand_limit` 的加式段。形状 =
     D9 的**一次性效果**（作用座位、增量、过期 = 回合末）：增量住**座位**、不随来源技能

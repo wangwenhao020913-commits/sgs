@@ -106,6 +106,7 @@
 | `USE_ON_USE` | 使用牌时（集智） |
 | `USE_AFTER_DESIGNATE_TARGET` | 使用并指定目标后（铁骑、奋威、无双类） |
 | `USE_BECOME_TARGET` | 成为目标时（流离） |
+| `USE_AFTER_BECOME_TARGET` | **成为目标后**（B6；目标已定、不会再被转移）：诸葛瞻【父荫】是首个载体（「此牌对你无效」= 目标级无效，逐目标派发、`MATCH_ACTOR_KEY` = 这一次的目标） |
 | `PLAY_ON_PLAY` | 打出牌时（界护驾/界激将 ②） |
 | `RESOLVE_EFFECT` | 生效时（界谦逊） |
 | `JUDGE_CARD_AFTER_EFFECT` | 判定牌生效后（天妒） |
@@ -128,11 +129,12 @@
 | 修饰点 | 归属 |
 |---|---|
 | `CANDIDATES` | 补候选（转化技 / 护驾 / 激将 / 蛊惑）。语境由 `CandidateScope` 区分：`PLAY`（出牌阶段）、`DODGE`（【闪】）、`RESPOND`（打出 / 使用的响应窗口）、`PEACH`（濒死求【桃】）、`NULLIFY`（无懈的收集式窗口）、`CARD`（逐张牌的常规候选）。"这扇窗口要一张什么牌"随 `ModifierContext.respond_required` 下传（六扇窗口都填；`DODGE` 恒为 `dodge`） |
-| `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降） |
+| `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降）。**补目标能放宽"自用牌"**（给【无中生有】/【桃】一类 `TargetRule.self_only` 的牌加别人，是"可对别人使用自用牌"类技能的模板）——但补目标前先分清自己豁免的是**距离**还是**目标合法性**：雄乱（`hero.zhangxiu.xiongluan`）只豁免距离与次数，故回调按 `TargetRule.self_only` 收窄（lei-batch 票 04 的缺陷 B：不加这道守卫，雄乱生效时【无中生有】/【桃】就能指定雄乱目标） |
 | `TARGET_COUNT` | 额定目标数（方天画戟类） |
 | `DISTANCE` | 座位距离（马术、义从、坐骑） |
 | `DISTANCE_LIMIT` | 额定距离上限（奇才） |
 | `COUNT_LIMIT` | 使用次数上限（咆哮、诈降、酒） |
+| `COUNT_EXEMPT` | **按目标集合**豁免次数上限（雄乱「你对其使用牌无次数限制」）：`current` 从 `False` 起，回调把"这一次使用不受上限约束"写成 `True`；**只在 `check_count(..., targets=...)` 时派发**（`ModifierContext.use_targets` = 这一次使用已定下的目标集合），候选生成器的第一次询问（"整张牌还准不准用"）不派发它——超额时由 `_play_phase` 把目标池收窄到被豁免的角色 |
 | `HAND_LIMIT_REPLACE` | 手牌上限的**查询期修正链**：替换式（界英姿②「手牌上限 = 体力上限」）+ **持续加式**（袁绍移动版【血裔】「上限 + 2×其他存活群势力角色数」，huo-mobile-batch 票 03 / 08 读法 A）——加式在 `current` 上加；**一次性**加式（`Player.hand_limit_bonus`）不走本挂点 |
 | `EFFECTIVENESS` | 效果生效性（仁王盾 / 青釭剑一类） |
 | `RESPONSE_COUNT` | 本次响应的张数（无双） |
@@ -270,9 +272,9 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 
 | 档 | 现象 | 例子 |
 |---|---|---|
-| 无 | 全树没有对应字段 / 帧 / 时机 | **标记**（没有通用的"标记"概念，技能要计数就落座位布尔字段） |
-| 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **标记**（没有通用的标记机制，技能要计数就落座位布尔字段）；**减体力上限**（`MAXLIFE_DECREASE_*` 留位、`reduce_hp_max` 未迁进帧） |
-| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁）；**拼点**（huo-taishici-xunyu 票 03：`RANK_COMPARE` 帧 + `RANK_COMPARE_ON` / `RANK_COMPARE_RESULT_AFTER` 解封 + 新 `MoveReason.PINDIAN` + `pindian` delta；首个载体 = 火包·OL 太史慈【天义】、荀彧【驱虎】） |
+| 无 | 全树没有对应字段 / 帧 / 时机 | （当前为空；曾登记过的"标记"已解封，见下行） |
+| 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **减体力上限**（`MAXLIFE_DECREASE_*` 留位、`reduce_hp_max` 未迁进帧）；**废除 / 恢复区域的时机**（「废除前 / 废除后」在补充一手里有名，`Timing` 里没有——`Engine.abolish_zone` 只做事件本身，不派发时机） |
+| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **标记**（`Player.markers` + `Engine.add_marker` / `remove_marker` + `marker_change` delta，账本 L800；首批载体 = 神诸葛亮【狂风】【大雾】/ 神关羽【武魂】，雷包【镇骨】用同一机制做"欠账到点结算"）；**横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**废除 / 恢复区域**（lei-batch 票 02：`Player.sealed_zones` + `Engine.abolish_zone` / `restore_zone`（区域内牌先强制弃置、再落封印）；读点 = `check_targets` 的装备牌与延时锦囊两条系统规则、`put_equipment_card`、闪电转移；首个载体 = 雷包·张绣【雄乱】）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁）；**拼点**（huo-taishici-xunyu 票 03：`RANK_COMPARE` 帧 + `RANK_COMPARE_ON` / `RANK_COMPARE_RESULT_AFTER` 解封 + 新 `MoveReason.PINDIAN` + `pindian` delta；首个载体 = 火包·OL 太史慈【天义】、荀彧【驱虎】） |
 
 判定完：
 

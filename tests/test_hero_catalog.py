@@ -41,6 +41,7 @@ from sgs.state import (
     CardRef,
     EndPhase,
     GameState,
+    Marker,
     MoveReason,
     Pass,
     Phase,
@@ -86,6 +87,10 @@ HUO_HEROES = load_heroes("huo")
 HOMEBREW_HEROES = load_heroes("homebrew")
 """**自制包**那一份（韬·刘备自制版）：独立系列包，版本字段 ``homebrew``，真名「刘备」
 （与标准版同名 ⇒ 同一局仍只出一个）。"""
+
+LEI_HEROES = load_heroes("lei")
+"""**神话再临·雷包**那一份（lei-batch 票 01 起）：独立系列包，版本字段 ``lei``，
+显示名不加版本后缀（郝昭 / 镇骨；后续张绣 / 诸葛瞻逐票追加）。"""
 
 # 25 名启用武将（票 12 §落地表的 16 行 + M6 票 01 的魏三名 + 票 02 的魏/蜀三名 +
 # 票 03 的吴三名 —— P0 收口：整张标准表全开）。
@@ -136,6 +141,7 @@ HUO_MOBILE_ENABLED = tuple(
 )
 HUO_ENABLED = tuple(hero.id for hero in HUO_HEROES.heroes if hero.enabled)
 HOMEBREW_ENABLED = tuple(hero.id for hero in HOMEBREW_HEROES.heroes if hero.enabled)
+LEI_ENABLED = tuple(hero.id for hero in LEI_HEROES.heroes if hero.enabled)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -203,9 +209,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 151
+    assert len(CATALOG) == 156
     assert len(equipment) == 22
-    assert len(heroes) == 129
+    assert len(heroes) == 134
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -221,6 +227,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             HUO_MOBILE_HEROES,
             HUO_HEROES,
             HOMEBREW_HEROES,
+            LEI_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -229,7 +236,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 129
+    assert len(expected) == 134
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -242,6 +249,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(HUO_MOBILE_ENABLED)
         | set(HUO_ENABLED)
         | set(HOMEBREW_ENABLED)
+        | set(LEI_ENABLED)
     )
     for definition in CATALOG.values():
         if definition.carrier.value != "HERO":
@@ -1283,6 +1291,38 @@ def _shen_zhugeliang_probe_state() -> GameState:
     return state
 
 
+def _congjian_probe_state() -> GameState:
+    """【从谏】的正面对照：ME 手里有牌（"付得起"这一半），另有两名存活角色当"其他目标"。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hand=(_PROBE_TRICK_CARD,)),
+            SeatSpec(),
+        ],
+        processing=(_PROBE_PROCESSING_SLASH,),
+    )
+
+
+def _zhengku_probe_state() -> GameState:
+    """【镇骨】的正面对照：座位 1（ME）身上有一枚**来源是 ME** 的「镇骨」欠账。
+
+    结算钩子的条件读的是标记记账（"这笔欠账是不是来源是我的"）——持有者换成座位 2 之后，
+    场上没有任何"来源是座位 2"的欠账 ⇒ 条件必须翻假。
+    """
+    state = _probe_state()
+    state.player(ME).markers = (
+        Marker(
+            name="镇骨",
+            source_seat=ME,
+            source_skill_id="hero.haozhao.zhengku",
+            count=2,
+            clear_on_source_death=True,
+        ),
+    )
+    return state
+
+
 def _hujia_probe_state() -> GameState:
     """界【护驾】②的正面对照：ME（座位 1）与【闪】的使用者（座位 0）都是**魏**势力。
 
@@ -1375,6 +1415,10 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _liegong_probe_state()
     if skill_id == "hero.jie_huanggai.zhaxiang":
         return _zhaxiang_probe_state()
+    if skill_id == "hero.haozhao.zhengku":
+        return _zhengku_probe_state()
+    if skill_id == "hero.zhangxiu.congjian":
+        return _congjian_probe_state()
     if skill_id.startswith("hero.shen_zhugeliang."):
         return _shen_zhugeliang_probe_state()
     return _probe_state()
@@ -1534,6 +1578,33 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
                 card=state.card(_PROBE_CHANNEL_SLASH),
                 targets=(0,),
                 source=0,
+            ),
+        ),
+        # lei-batch 票 01：郝昭【镇骨】——两条条件钩子都自校"这一步的回合角色是谁"：
+        # 发起 = 我的结束阶段；结算 = 我 / 目标的回合末（记账在标记上：持有者换人后，
+        # 场上没有"来源是他"的欠账 ⇒ 必须翻假）。
+        "hero.haozhao.zhengku": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME),
+        ),
+        # lei-batch 票 02：张绣【从谏】——条件自校"这一步问的是我"（MATCH_OWNER_KEY == actor），
+        # 牌是一张**普通锦囊**（过河拆桥，非延时）、目标两个（含我）。
+        "hero.zhangxiu.congjian": (
+            _HookFrame(
+                **{MATCH_ACTOR_KEY: ME},
+                source=0,
+                targets=(ME, 0),
+                card=state.card(_PROBE_TRICK_CARD),
+            ),
+        ),
+        # lei-batch 票 03：诸葛瞻【罪论】（自己的结束阶段）/【父荫】（这一次的目标是我，
+        # 牌是一张【杀】；正面对照的手牌数 0 ≤ 使用者 1）。
+        "hero.zhugezhan.zuilun": (_HookFrame(source=ME),),
+        "hero.zhugezhan.fuyin": (
+            _HookFrame(
+                **{MATCH_ACTOR_KEY: ME},
+                source=0,
+                card=state.card(_PROBE_CHANNEL_SLASH),
             ),
         ),
         "hero.jie_caocao.hujia": (
@@ -1952,6 +2023,9 @@ SKILL_SHAPE: dict[str, str] = {
     # （主动技能格）。
     "hero.shen_zhouyu_mobile.qinyin": "触发技能",
     "hero.shen_zhouyu_mobile.yeyan": "零步技能",
+    # lei-batch 票 01：郝昭【镇骨】= 结束阶段发起（一步选人流水线）+ 回合结束时强制结算，
+    # 有 ``SkillFlow``、有钩子、``deck_arrange`` 为空 ⇒ 触发技能格。
+    "hero.haozhao.zhengku": "触发技能",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
     # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
@@ -1967,6 +2041,14 @@ SKILL_SHAPE: dict[str, str] = {
     # 循环（流水线语言没有循环步骤），但那一半住在 `SkillFlow.effect` 里，不是"手写钩子"
     # ⇒ 不进「多轮技能」格。原来的「手写主动技」一格因此**消失**（它唯一的成员就是这条）。
     "hero.yuji_mobile.guohuo": "主动技能",
+    # lei-batch 票 02：张绣【雄乱】= A 族限定技 + 预发动（一步选人流水线、无钩子）⇒ 主动技能格；
+    # 【从谏】= 成为目标时的钩子 + 两步流水线（选牌 → 座位）⇒ 触发技能格。
+    "hero.zhangxiu.xiongluan": "主动技能",
+    "hero.zhangxiu.congjian": "触发技能",
+    # lei-batch 票 03：诸葛瞻【罪论】= 排列规格（deck_arrange）+ 一步流水线 ⇒ 排列技能格；
+    # 【父荫】= 锁定技（不问发动、目标级无效）。
+    "hero.zhugezhan.zuilun": "排列技能",
+    "hero.zhugezhan.fuyin": "锁定技",
 }
 """145 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -1985,12 +2067,13 @@ SHAPE_COUNTS: dict[str, int] = {
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】⇒ 主动技能 21 → 22。
     # huo-mobile-batch 票 01：庞德【马术】+【猛进】⇒ 锁定技 31 → 32、触发技能 15 → 16。
     # huo-taishici-xunyu 票 01：太史慈【天义】⇒ 主动技能 22 → 23。
-    "主动技能": 24,
-    "触发技能": 20,
+    # lei-batch 票 01：郝昭【镇骨】⇒ 触发技能 20 → 21。
+    "主动技能": 25,
+    "触发技能": 22,
     "零步技能": 29,
-    "排列技能": 4,
+    "排列技能": 5,
     "多轮技能": 14,
-    "锁定技": 34,
+    "锁定技": 35,
     "转化技": 15,
     "能力位": 3,
     "候选生成器": 1,
@@ -2102,7 +2185,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 151
+    assert len(SKILL_SHAPE) == len(CATALOG) == 156
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2219,7 +2302,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """79 在内 / 72 在外（151 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """83 在内 / 73 在外（156 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2231,8 +2314,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 79
-    assert len(outside) == 72
+    assert len(inside) == 83
+    assert len(outside) == 73
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

@@ -1665,16 +1665,47 @@ def _run_items(
     return None
 
 
+def _note_activation(host: Any, candidate: ActivationCandidate) -> None:
+    """把"这条技能**真的跑了**"记进引擎的发动缓冲（lei 票 06）。
+
+    判据只有"它跑了、而且这一轮**没有**经 ``SKILL_ACTIVATION`` 应答"这两条公共事实：
+    锁定技 / 觉醒技 / ``Hook.forced`` 强制段都是这样跑的（派发环直接调 ``handler``），
+    记录流里因此既没有应答也没有技能归属。经过激活应答的那一支**不**再记——它在记录流里
+    已有已接受的 ``ActivateSkill``，接入层照旧从那份公共事实派生（既有表现逐字不变）。
+
+    引擎侧只服务表现层：不进记录流、不进帧私有数据、不消耗随机数（见
+    :class:`~sgs.engine.SkillActivation`）。缓冲缺失时（非引擎的测试替身）静默跳过。
+    """
+    note = getattr(host, "note_skill_activation", None)
+    if note is None:
+        return
+    note(seat=candidate.instance.owner, skill_id=candidate.skill_id)
+
+
 def _run_candidate(
-    host: Any, frame: Frame, candidate: ActivationCandidate, timing: Timing, key: str
+    host: Any,
+    frame: Frame,
+    candidate: ActivationCandidate,
+    timing: Timing,
+    key: str,
+    *,
+    announce: bool = False,
 ) -> Control:
     """跑一个候选的**全部项**（"派发选中的一条"）：与改造前的逐项循环同形。
 
     ``"stay"`` = 这条技能还在跑：键与还原点都留着，重入时按游标续跑同一个候选；
     跑完（非 ``"stay"``）才落限定 / 觉醒的"已用 / 已觉醒"位——effect 挂起时重入必须还能
     续跑同一个实例，先落位会让重入把实例自己挡掉。
+
+    ``announce``（lei 票 06）= 这条候选**不是**由激活应答选中的（派发环的强制段 /
+    ``Pass`` 之后补跑的强制段）：跑完记一条发动事实，供接入层的技能特效通道读。
+    挂起重入时只在**跑完的那一次**记一条（``"stay"`` 直接返回，不记）。
     """
     control = _run_items(host, frame, candidate, candidate.items, timing, key)
+    if control == "stay":
+        return control
+    if announce:
+        _note_activation(host, candidate)
     if control is not None:
         return control
     definition = candidate.instance.definition
@@ -1826,7 +1857,11 @@ def _dispatch(
                 forced = state["pass_forced"]
                 while state["pass_forced_at"] < len(forced):
                     candidate = forced[state["pass_forced_at"]]
-                    control = _run_candidate(host, frame, candidate, timing, key)
+                    # 强制段（锁定技 / 觉醒技 / Hook.forced）不问发动 ⇒ 跑完记一条发动事实
+                    # （lei 票 06：这类技能在记录流里没有 ActivateSkill 应答）。
+                    control = _run_candidate(
+                        host, frame, candidate, timing, key, announce=True
+                    )
                     if control == "stay":
                         return control
                     if control is not None:
@@ -1906,16 +1941,20 @@ def _dispatch(
                 continue
             if state["pass_phase"] == "mandatory":
                 # ``Pass`` 之后：把还没跑的强制段按链序跑完（票 01 §4-5 的复核读法）。
+                # 这一相里跑的全部是**没有经过激活应答**的强制段 ⇒ 都记一条发动事实
+                # （lei 票 06；混合实例的强制项走 ``_run_items``，故在这里补记）。
                 mandatory = state["pass_mandatory"]
                 while state["pass_mandatory_at"] < len(mandatory):
                     candidate, forced_only = mandatory[state["pass_mandatory_at"]]
                     control = (
                         _run_items(host, frame, candidate, candidate.items, timing, key)
                         if forced_only
-                        else _run_candidate(host, frame, candidate, timing, key)
+                        else _run_candidate(host, frame, candidate, timing, key, announce=True)
                     )
                     if control == "stay":
                         return control
+                    if forced_only:
+                        _note_activation(host, candidate)
                     if control is not None:
                         _close_pass(frame, scope)
                         return control
@@ -1925,6 +1964,7 @@ def _dispatch(
                 _pass_next_seat(state)
                 continue
             # 阶段机的最后一相：跑本轮选中的那一条（挂起重入时从这里续跑）。
+            # **不记**发动事实：它由已接受的 ``ActivateSkill`` 记录承载（既有通道）。
             chosen = state["pass_chosen"]
             assert chosen is not None, "run 阶段必有选中项（阶段机不变量）"
             control = _run_candidate(host, frame, chosen, timing, key)
@@ -3343,6 +3383,9 @@ from .start import (  # noqa: E402  （末尾 import 是刻意的）
 from .shen_zhugeliang import (  # noqa: E402  （末尾 import 是刻意的）
     shen_zhugeliang_skill_definitions,
 )
+from .hero_lei import (  # noqa: E402  （末尾 import 是刻意的）
+    lei_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -3395,6 +3438,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *near_death_skill_definitions(),
             *start_skill_definitions(),
             *shen_zhugeliang_skill_definitions(),
+            *lei_skill_definitions(),
         )
     }
 )

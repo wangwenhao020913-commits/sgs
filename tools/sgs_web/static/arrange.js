@@ -75,7 +75,7 @@ function initialArrange(pending, spec, key) {
   const count = cards.length;
   const free = spec.split === FREE_SPLIT;
   const fixed = free ? null : { top: Number(spec.split.top), bottom: Number(spec.split.bottom) };
-  const topCount = free ? count : fixed.top;
+  const topCount = spec.startsOnTop || free ? count : fixed.top;
   return {
     key,
     cards,
@@ -85,6 +85,7 @@ function initialArrange(pending, spec, key) {
     // 两行交换（huo-shenzhugeliang 票 02）：行标签与"能不能行内调序"都来自载荷。
     rows: spec.rows || null,
     reorder: spec.reorder !== false,
+    startsOnTop: Boolean(spec.startsOnTop),
     top: Array.from({ length: topCount }, (_, at) => at),
     bottom: Array.from({ length: count - topCount }, (_, at) => topCount + at),
     selected: null,
@@ -184,7 +185,7 @@ function arrangeMovePlan(index, row, anchor) {
     // 两行交换（七星）：**只上下交换、行内不调序**（用户 2026-11-04 Q4）。
     return null;
   }
-  if (layout.free || from === row) {
+  if (layout.free || layout.startsOnTop || from === row) {
     return { kind: "insert", index, row, anchor: at };
   }
   const partner = at === null ? target[target.length - 1] : at;

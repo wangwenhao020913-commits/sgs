@@ -343,6 +343,17 @@ SITES: dict[Site, Rule] = {
         "【奋威】把『本次使用对其中任意名目标无效』写进使用帧（本票的唯一写入口）",
     ),
     (
+        "src/sgs/skills/hero_lei.py",
+        "fuyin_effect",
+        TARGET_INVALID_WRITE_TOKEN,
+        "mark_targets_ineffective(frame, (owner,))",
+    ): Rule(
+        "target-level-invalid",
+        1,
+        "诸葛瞻【父荫】『此牌对你无效』= 目标级无效（B6『成为目标后』写入、C1 读取）；"
+        "与【奋威】同一写入口，触发者换成目标自己（锁定技）",
+    ),
+    (
         "src/sgs/engine/steps.py",
         "resolve_start",
         TARGET_INVALID_READ_TOKEN,

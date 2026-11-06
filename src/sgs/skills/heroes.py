@@ -691,6 +691,17 @@ def conversion_offers_by_source(
     return {source: tuple(skill_ids) for source, skill_ids in grouped.items()}
 
 
+def conversion_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, ...]:
+    """一张**转化牌**归属哪些该座位拥有的转化技（公开名）。
+
+    与清单渲染 / 确认校验**同一份**判据（:func:`_candidate_skill_ids`）：转化候选本身不带
+    技能归属（``UseCard`` / ``CardRef`` 是冻结报文），故"这张牌是谁转的"只能由声明回答。
+    引擎在"转化候选被**直接**接受"那条路上用它把发动事实记进发动缓冲（lei 票 06）——
+    接入层的技能特效通道因此不按卡面 / 技能名自己猜。
+    """
+    return _candidate_skill_ids(state, owner, card)
+
+
 def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, ...]:
     """一张**虚拟牌候选**归属哪些已拥有的转化技（清单渲染的技能归属判据）。
 

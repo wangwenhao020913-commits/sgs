@@ -80,9 +80,12 @@ from sgs.state import (
     MoveReason,
     Pass,
     RespondMode,
+    SEALED_ZONE_EQUIP,
+    SEALED_ZONE_JUDGE,
     SelectionSpec,
     Slot,
     SlotKind,
+    UseCard,
     Zone,
     ZoneRef,
     alive_seats,
@@ -4536,6 +4539,154 @@ QUHU_FLOW = SkillFlow(
 """【驱虎】的一步流水线：选拼点目标 → 拼点 → 按结果分支（赢选承受者 / 没赢挨打）。"""
 
 
+# ---------------------------------------------------------------------------
+# 张绣【雄乱】（lei-batch 票 02；用户 2026-11-05 签）
+#
+# 牌面（逐字）：
+#
+#     雄乱
+#     　限定技，出牌阶段，你可以废除你的判定区和装备区并选择一名其他角色，
+#       然后本回合：你对其使用牌无距离与次数限制、其不能使用或打出手牌。
+#
+# 用户 2026-11-05 的裁定：
+#
+# - 发动步骤 = 点技能进入**预发动** → 第一步选 1 名其他角色 → 确认才发动；
+# - **隐藏发动 cost**：自身至少有一个还能被废除的区域（判定区 / 装备区）。发动完两个区
+#   都封印了 ⇒ 即使有人恢复限定技的"整局已用"位，也**再不能发动**——故可用性读的是
+#   "区域是否已封印"，不是限定位；实现落在座位池上（池空 ⇒ 清单渲不出 ⇒ 没有入口）；
+# - 「废除区域」是**同一种事件**（票 02 的框架面 `Engine.abolish_zone` / `restore_zone`）：
+#   区域内牌先强制弃置、再落封印；
+# - 「你对其使用牌无距离与次数限制」= **按目标收窄**（只对那名角色）：
+#   * 距离侧 = `TARGET_POOL` 修饰器把他补回候选池（豁免距离 / 攻击范围）；
+#   * 次数侧 = `COUNT_EXEMPT` 修饰器按 `ModifierContext.use_targets` 判（目标集合 ⊆ {他}
+#     才豁免；候选生成期由 `check_count` 的目标维度收窄，不是整张牌放行）；
+# - 「其不能使用或打出手牌」复用【义绝】的座位级禁令（本回合，回合末清）。
+# ---------------------------------------------------------------------------
+
+XIONGLUAN = hero_skill_id("zhangxiu", "xiongluan")
+"""张绣【雄乱】的全限定技能 id。"""
+
+_XIONGLUAN_ZONES = (SEALED_ZONE_JUDGE, SEALED_ZONE_EQUIP)
+"""雄乱废除的两个区域：判定区 + 装备区（装备区封印覆盖全部装备槽位）。"""
+
+
+def _xiongluan_available(state: GameState, owner: int) -> bool:
+    """隐藏发动 cost：至少一个区域还能被废除（两个都封印 ⇒ 这张牌再也发不动）。"""
+    player = state.player(owner)
+    return any(zone_id not in player.sealed_zones for zone_id in _XIONGLUAN_ZONES)
+
+
+def _xiongluan_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段 + 本人 + 还有可废除的区域 + 有合法目标（限定位由外层闸管）。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _xiongluan_available(state, ctx.subject):
+        return current
+    if not _other_alive_seats(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _xiongluan_pool(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """目标池：其他存活角色；**区域已全封印 ⇒ 空池**（清单渲不出 ⇒ 没有入口）。"""
+    del frame, answers
+    if not _xiongluan_available(state, owner):
+        return ()
+    return _other_alive_seats(state, owner)
+
+
+def _xiongluan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：废除判定区与装备区（区域里的牌先弃置）→ 两条本回合效果。"""
+    state = host.state
+    owner = int(frame.data["source"])
+    seat = next(iter(int(value) for value in answers.get("seat", ())), None)
+    if seat is None:
+        return None
+    for zone_id in _XIONGLUAN_ZONES:
+        # 幂等：已封印 / 已空 ⇒ 零动作；弃牌挂起时原样透传，重入不会重复搬牌。
+        control = host.abolish_zone(frame, owner, zone_id)
+        if control == "stay":
+            return "stay"
+    host.set_hand_card_prohibition(seat, True)
+    state.player(owner).xiongluan_target = seat
+    return None
+
+
+XIONGLUAN_FLOW = SkillFlow(
+    name="xiongluan",
+    steps=(PickSeats(lo=1, hi=1, pool=_xiongluan_pool, optional=False, key="seat"),),
+    effect=_xiongluan_effect,
+)
+"""【雄乱】的一步流水线：选一名其他角色（确认即发动）。"""
+
+
+def _xiongluan_distance_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_POOL`` 回调：把我对其使用牌的目标补回池里（距离 / 攻击范围豁免）。
+
+    **只放宽距离，不放宽目标合法性**（lei-batch 票 04 的缺陷 B）：``TARGET_POOL`` 这个手法
+    本身能**给自用牌补目标**（将来"可以对别人使用【无中生有】/【桃】"类技能的模板，故不删
+    这个能力）；但雄乱的牌面只豁免"距离与次数"，而【无中生有】/【桃】/【酒】/装备牌的
+    "只能对自己"（:attr:`~sgs.effects.TargetRule.self_only`）是**目标规则**，不在这两条
+    豁免里——不给这道守卫，雄乱生效时这些牌就能指定雄乱目标（用户实机发现）。
+    """
+    if ctx.card is None or behavior_for(ctx.card).target_rule.self_only:
+        return current
+    target = state.player(ctx.subject).xiongluan_target
+    if target is None or target in current:
+        return current
+    if not state.player(target).alive:
+        return current
+    return (*current, target)
+
+
+def _xiongluan_count_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``COUNT_EXEMPT`` 回调：**这一次使用**的目标集合 ⊆ {雄乱目标} ⇒ 不受次数上限。
+
+    ``ctx.use_targets`` 是候选生成期**已经定下的目标集合**（``check_count`` 的目标维度，
+    lei-batch 票 04）：牌面的"你对其使用牌无次数限制"指到的是那名角色，故
+
+    - ``()`` = **有目标维度但这一次使用没有目标** ⇒ 与"其"无关 ⇒ 照常计次
+      （``None`` = 没有目标维度，``check_count`` 根本不派发本挂点）；
+    - 集合里出现任何一个别人 ⇒ 照常计次（多目标牌只在"目标集合 ⊆ {其}"时豁免——
+      02b §4 读法 A：一次使用同时打别人时那句豁免覆盖不到别人）；
+    - ``ctx.owner == ctx.subject`` 是"这条技能属于使用者本人"的自校，与【咆哮】同姿态
+      （链遍历全体存活实例，缺这一条会替别人豁免）。
+
+    只在 ``check_count(..., targets=...)`` 时派发，故"整张牌还准不准用"那个问题（候选
+    生成的第一次询问）仍读到超额——``_play_phase`` 据此把目标池收窄到被豁免的角色，
+    而不是把整张牌放行。
+    """
+    if ctx.owner != ctx.subject or not ctx.use_targets:
+        return current
+    target = state.player(ctx.subject).xiongluan_target
+    if target is None or not state.player(target).alive:
+        return current
+    if any(seat != target for seat in ctx.use_targets):
+        return current
+    return True
+
+
+_XIONGLUAN = ActiveSkill(
+    "zhangxiu",
+    "xiongluan",
+    _xiongluan_offers,
+    flow=XIONGLUAN_FLOW,
+    skill_type=SkillType.LIMITED,
+    preactivated=True,
+    extra_modifiers=(
+        Modifier(ModifierPoint.TARGET_POOL, _xiongluan_distance_pool),
+        Modifier(ModifierPoint.COUNT_EXEMPT, _xiongluan_count_exempt),
+    ),
+    requirement=(
+        "限定技，出牌阶段，你可以废除你的判定区和装备区并选择一名其他角色，"
+        "然后本回合：你对其使用牌无距离与次数限制、其不能使用或打出手牌"
+    ),
+    step_requirements={"seat": "选择一名其他角色"},
+)
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
@@ -4798,6 +4949,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ),
     # 神周瑜移动版【业炎】（huo-shenzhouyu-mobile 票 01）：A 族限定技 + 计数式分配弹窗。
     _YEYAN,
+    # 张绣【雄乱】（lei-batch 票 02）：A 族限定技 + 预发动（选人后确认才发动）；
+    # 代价 = 废除自己的判定区与装备区（隐藏发动 cost：至少 1 个区域还能被废除）。
+    _XIONGLUAN,
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/

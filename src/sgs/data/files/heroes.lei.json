@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "pack_id": "lei",
+  "heroes": [
+    {
+      "id": "haozhao",
+      "name": "郝昭",
+      "true_name": "郝昭",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "lei",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zhengku",
+          "name": "镇骨",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "zhangxiu",
+      "name": "张绣",
+      "true_name": "张绣",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "lei",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "xiongluan",
+          "name": "雄乱",
+          "skill_type": "LIMITED"
+        },
+        {
+          "id": "congjian",
+          "name": "从谏",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "zhugezhan",
+      "name": "诸葛瞻",
+      "true_name": "诸葛瞻",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "lei",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zuilun",
+          "name": "罪论",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fuyin",
+          "name": "父荫",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

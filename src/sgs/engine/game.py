@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -84,6 +85,7 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     conversion_preactivations,
+    conversion_skill_ids,
     flow_for,
     hero_card_zone_key,
     is_transformed_action,
@@ -170,10 +172,14 @@ from sgs.state import (
     WineChangeDelta,
     Zone,
     ZoneRef,
+    SEALED_ZONE_EQUIP,
+    SEALED_ZONE_IDS,
+    SEALED_ZONE_JUDGE,
     next_alive_seat,
     order_targets,
     parse_action,
     project,
+    zone_sealed,
 )
 from sgs.timing import Timing
 
@@ -456,6 +462,38 @@ class Outcome(BaseModel):
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class SkillActivation:
+    """一次**技能发动**的公共事实（lei 票 06）：谁、哪条技能、打给谁、锚在哪条记录。
+
+    它**不是**记录流的一条记录：47 条金录像的冻结字节不许动（E1），而锁定技（派发环直接
+    跑 handler、不发激活询问）与转化技（确认被解析成**普通使用**）在记录面本来就没有技能
+    归属。于是引擎把"这一次真的跑了哪条技能"记进一份**帧外**的只增缓冲（
+    :attr:`Engine.skill_activations`），接入层
+    （``sgs_web.projection.skill_events_after``）把它与记录流里"点名了技能的动作"合成同一条
+    ``skill_events`` 通道——前端判据因此一字不改，**未来新技能自动获得特效**。
+
+    它**只服务表现层**：规则层一个读者都没有（不进帧私有数据、不参与任何判据），也不消耗
+    随机数 ⇒ 既有金录像逐字节不变。
+    """
+
+    seq: int
+    """锚点 = 产生这次发动的那条**记录**的 ``seq``（前端回放到它时演出）。
+
+    取"此刻最后一条记录的序号"：锁定技在派发前刚落下 ``timing`` 记录（或它自己的效果体
+    已经发了 delta），两种都落在同一个回放步里，前端按 ``seq`` 释放事件的语义不变。
+    """
+
+    seat: int
+    """发动者座位 = 技能实例的**持有者**（不是帧的 ``source``：伤害来源 / 牌的使用者）。"""
+
+    skill_id: str
+    """技能的全限定 id（中文名由接入层展示表回答，引擎不自建映射）。"""
+
+    targets: tuple[int, ...] = ()
+    """这次发动指定 / 作用的目标（公开事实）；空元组 = 不画线（只飘名 + 白光）。"""
+
+
 def _card_from_hand(state: GameState, source: int, card: CardRef) -> bool:
     """这张使用 / 打出的牌此刻是不是**手牌**（M6 票 16 的界【涯角】判据）。
 
@@ -676,6 +714,19 @@ class Engine:
 
         self._conversion_answer: Action | None = None
         """最近一次**转化技确认**解析出的普通使用 / 打出动作（W4-fix-2）。"""
+        self._skill_activations: list[SkillActivation] = []
+        """**技能发动**的只增缓冲（lei 票 06；表现层专用，不进记录流）。
+
+        两个追加点都是"技能真的跑了"这件事本身，不按技能名打表：
+
+        - :meth:`~sgs.skills.catalog.dispatch_timing` 的派发环跑完一条**没经过激活应答**的
+          候选（锁定技 / 觉醒技 / ``Hook.forced`` 强制段）⇒
+          ``sgs.skills.catalog._run_candidate`` 追加一条；
+        - 转化技的候选被接受、进入使用链时（``Engine.submit`` 的两条提交路）追加一条。
+
+        经过 ``SKILL_ACTIVATION`` 应答的主动 / 触发技**不**在这里再记一遍：它们在记录流里
+        有已接受的 ``ActivateSkill``，接入层仍从那份公共事实派生（既有行为逐字不变）。
+        """
         self._started = False
         self._l0_in_progress = False
         """L0 派发（:meth:`_start`）**是否已经开始过**。
@@ -802,6 +853,39 @@ class Engine:
     @property
     def records(self) -> tuple[JournalRecord, ...]:
         return tuple(self._records)
+
+    @property
+    def skill_activations(self) -> tuple[SkillActivation, ...]:
+        """**技能发动**的派生面（lei 票 06）：只增缓冲的只读视图。
+
+        纯内存派生态：不进 ``records``、不进会话载荷、不消耗随机数 ⇒ 47 条金录像逐字节
+        不变。缺省为空元组的读取方（例如只喂静态 jsonl 录像的回放）因此只少这一路表现，
+        规则与记录面一概不受影响。
+        """
+        return tuple(self._skill_activations)
+
+    def note_skill_activation(
+        self, *, seat: int, skill_id: str, targets: Sequence[int] = ()
+    ) -> None:
+        """记一次**真正跑过**的非修饰类技能发动（lei 票 06；表现层专用）。
+
+        只由两处调用，都是"技能真的跑了 / 转化真的成立了"这个事实本身，**不按技能名打表**：
+
+        - 派发环跑完一条**没经过激活应答**的候选（锁定技 / 觉醒技 / 强制段）；
+        - 转化技的候选被接受、进入使用链时（记录面只有普通使用，没有技能归属）。
+
+        ``seq`` 取**此刻最后一条记录**的序号：回放走到它时演出，与 ``skill_events`` 既有的
+        "按记录序号释放"语义一致。这也保证它一定落在本批记录里（``seq > after`` 恒成立），
+        不会在轮询里被重复下发。
+        """
+        self._skill_activations.append(
+            SkillActivation(
+                seq=self._last_seq,
+                seat=int(seat),
+                skill_id=str(skill_id),
+                targets=tuple(int(target) for target in targets),
+            )
+        )
 
     def journal(self) -> str:
         """canonical JSONL（唯一序列化器的入口）；关记录时是空串。"""
@@ -1912,6 +1996,11 @@ class Engine:
         if card.card_id in self.state.player(holder).equip:
             # **幂等**：这次置入已经搬完，只因内联派发（发动者自己的【枭姬】）挂起而重入 —
             # 目标槽位现在当然"已被占"，那是本函数刚刚放进去的那张牌。
+            return None
+        if card.slot is not None and zone_sealed(
+            self.state.player(holder), card.slot.value
+        ):
+            # 废除区域（lei-batch 票 02）：目标槽位 / 整个装备区被封印 ⇒ 置入不发动。
             return None
         occupied = [
             card_id
@@ -3114,6 +3203,10 @@ class Engine:
             depth=self.stack.depth,
         )
         prune_skill_state(self.state)
+        # 「本回合弃置过牌」检测器（lei-batch 票 03；诸葛瞻【罪论】选项 2）：
+        # 弃置者是 ``actor``（自己被拆 / 被别人弃置不算"你弃置"），回合末复位。
+        if reason is MoveReason.DISCARD and actor is not None and delta.cards:
+            self.state.player(actor).discarded_this_turn = True
         # 牌移动后同样核一次来源：装备 / 获得来源离场时，随来源消失的标签立刻清掉
         # （M6 票 09；武将技能失去 / 失效另走各自写入口的同一次清理）。
         self._prune_card_tags()
@@ -3650,6 +3743,78 @@ class Engine:
         )
         return True
 
+    # -- 废除区域（lei-batch 票 02；用户 2026-11-05 裁定「废除区域 / 恢复区域」）----
+
+    def abolish_zone(
+        self, frame: Frame | None, seat: int, zone_id: str
+    ) -> Control:
+        """**废除一个区域**：区域内牌先强制弃置，再落封印位（唯一写入口）。
+
+        用户裁定的流程 = 「区域里的牌先被强制弃置，然后这个区域被废除」；可被
+        :meth:`restore_zone` 恢复。``zone_id`` ∈ :data:`~sgs.state.SEALED_ZONE_IDS`：
+
+        - ``judge`` / ``equip``（整个装备区）/ 四个装备槽位；``equip`` 覆盖全部槽位；
+        - 弃哪些牌：``judge`` ⇒ 判定区全部；``equip`` ⇒ 装备区全部；槽位 ⇒ 该槽那一张；
+        - 弃置走 ``MoveReason.DISCARD``（**失去牌**派发照常，【连营】/【枭姬】一类钩子会
+          被问），因此本方法可能返回 ``"stay"``（挂起）——调用方原样透传；重入时目标区域
+          已空、封印位已落，天然幂等。
+
+        **不发 delta**（lei 票 05 复核）：网页画的是**投影**（``PlayerPublic.sealed_zones``
+        → ``sgs_web.projection.visible_snapshot``），每次从状态重算；记录流不含投影，那次
+        弃牌移动照常进记录流，故回放按动作重跑即可重建。补 delta 的那条路因此没走
+        （不必登记 no-leak 八类、47 条金录像一字不改）。
+        """
+        if zone_id not in SEALED_ZONE_IDS:
+            raise ValueError(f"不是可废除的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")
+        player = self.state.player(seat)
+        if zone_id in player.sealed_zones:
+            return None
+        if frame is None and self.stack.frames:
+            # 帧外调用（构造局面 / 引擎自排）：可挂的移动是当前栈顶那一帧。
+            frame = self.stack.top
+        if frame is None:
+            raise ValueError("废除区域必须先弃置区域里的牌，帧外调用无法搬牌")
+        victims: tuple[int, ...] = ()
+        if zone_id == SEALED_ZONE_JUDGE:
+            victims = tuple(player.judge)
+        elif zone_id == SEALED_ZONE_EQUIP:
+            victims = tuple(player.equip)
+        else:
+            victims = tuple(
+                card_id
+                for card_id in player.equip
+                if self.state.card(card_id).slot is SlotKind(zone_id)
+            )
+        if victims:
+            control = self.move_in_frame(
+                frame,
+                self.state.refs(victims),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=seat,
+                actor=seat,
+            )
+            if control == "stay":
+                return "stay"
+        player.sealed_zones = (*player.sealed_zones, zone_id)
+        return None
+
+    def restore_zone(self, frame: Frame | None, seat: int, zone_id: str) -> bool:
+        """**恢复一个区域**（用户 2026-11-05 裁定的「恢复区域」事件）：去掉封印位。
+
+        不搬任何牌（恢复只改状态）；已恢复 / 从未废除 ⇒ 零动作返回 ``False``。
+        """
+        del frame
+        if zone_id not in SEALED_ZONE_IDS:
+            raise ValueError(f"不是可恢复的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")
+        player = self.state.player(seat)
+        if zone_id not in player.sealed_zones:
+            return False
+        player.sealed_zones = tuple(
+            value for value in player.sealed_zones if value != zone_id
+        )
+        return True
+
     def add_marker(
         self,
         frame: Frame | None,
@@ -4121,8 +4286,11 @@ class Engine:
                     depth=self.stack.depth,
                 )
             player.hand_card_prohibited = False
+            player.xiongluan_target = None
             player.heart_slash_bonus_against.clear()
             player.damage_dealt_this_turn = False
+            # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
+            player.discarded_this_turn = False
             player.hand_limit_bonus = 0
             self._clear_paoxiao_bonus(player.seat)
         # 牌标签的"本回合不计入"（M6 票 09）：与其它 ``TURN`` 作用域状态同一收尾点，
@@ -4320,11 +4488,29 @@ class Engine:
                 self._emit(
                     ActionRecord(seq=self._next_seq(), accepted=True, action=resolved)
                 )
+                # lei 票 06：转化技的**记录面只有普通使用**（没有技能归属），故在候选被接受、
+                # 进入使用链的这一刻把"哪条技能转过这张牌"记进引擎的发动缓冲 —— 目标取解析
+                # 后的动作自己的 `targets`（公开事实），不做第二份推导。
+                self.note_skill_activation(
+                    seat=pending.actor,
+                    skill_id=action.skill_id,
+                    targets=getattr(resolved, "targets", ()),
+                )
                 self._answer_to(resolved)
                 return
             if action in pending.transform_actions:
                 # 回放磁带 / 程序化提交：转化动作不在**暴露面**里，但仍是本次询问的合法池。
                 self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
+                # lei 票 06：这条路没有"哪条技能"的提交意图（提交的就是候选本身），归属按
+                # 与清单 / 确认**同一份**判据（`conversion_skill_ids`）从卡面 + 拥有的实例回答。
+                for skill_id in conversion_skill_ids(
+                    self.state, pending.actor, action.card
+                ):
+                    self.note_skill_activation(
+                        seat=pending.actor,
+                        skill_id=skill_id,
+                        targets=getattr(action, "targets", ()),
+                    )
                 self._answer_to(action)
                 return
             failure = self._structured_activation_failure(action, pending)

@@ -431,6 +431,12 @@ class TwoRowArrange:
     bottom_label: str
     enumerate_candidates: bool = False
     reorder: bool = False
+    starts_on_top: bool = False
+    """初始摆放：`True` = **全部牌先放在上排、下排只画空槽**（lei-batch 票 03 的加法）。
+
+    缺省 `False` = 按 ``top`` / ``bottom`` 先把两行铺开（【七星】的姿态：上行本来就是「星」）。
+    罪论要的是"上排三张、下排 X 个空槽、必须自己把 X 张移下去"，故声明 ``True``。
+    """
 
     def count_of(self, state: GameState, frame: Any) -> int:
         """本次面内张数（可调用档在这里求值）。"""

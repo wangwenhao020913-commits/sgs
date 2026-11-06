@@ -390,11 +390,16 @@ class GameRegistry:
                 heroes=session.hero_assignments,
                 pack_id=session.pack.pack_id,
             ),
-            # U3-04 / D8.2：技能发动是**派生通道**，不是记录流的新事实——从**未裁剪**的
-            # 记录里取「已接受、kind = ActivateSkill」的那几条，补上被 `visible_record`
-            # 裁掉的 skill_id / choices；与 `records` 共用同一个 `after` 游标。
+            # U3-04 / D8.2 + lei 票 06：技能发动是**派生通道**，不是记录流的新事实——
+            # 两路合成同一条 `skill_events`：① 未裁剪记录里「已接受、动作点名了技能」的
+            # 那几条（补上被 `visible_record` 裁掉的 skill_id / choices）；② 引擎的发动缓冲
+            # `Engine.skill_activations`（记录面没有技能归属的锁定技 / 转化技）。与
+            # `records` 共用同一个 `after` 游标。
             "skill_events": skill_events_after(
-                all_records, after=after, state=session.engine.state
+                all_records,
+                after=after,
+                state=session.engine.state,
+                activations=session.engine.skill_activations,
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }

@@ -2909,6 +2909,49 @@ def _coverage_jie_liuli():
     return state, query, frame
 
 
+def _coverage_xiongluan():
+    """lei-batch 票 02：张绣【雄乱】——出牌阶段、区域都还能被废除 ⇒ 清单渲得出（一步选人）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="zhangxiu"), SeatSpec(), SeatSpec()],
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_congjian():
+    """lei-batch 票 02：张绣【从谏】——我是一张多目标普通锦囊的目标，手上有牌可给。
+
+    首步"交给一张牌"选**自己的**手牌 / 装备区 ⇒ 清单渲得出（与【清俭】同一档）。
+    """
+    trick = _ids("harvest")[0]
+    gift = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhangxiu", hand=(gift,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(trick, gift),
+        turn_seat=0,
+    )
+    frame = _ActivationFrame(
+        source=0,
+        actor=0,
+        targets=(0, 1),
+        card=state.card(trick),
+        skill_owner=0,
+    )
+    query = _passive_preactivation_query(
+        state,
+        0,
+        "hero.zhangxiu.congjian",
+        timing=Timing.USE_BECOME_TARGET,
+        frame=frame,
+    )
+    return state, query, frame
+
+
 def _coverage_jie_qingjian():
     """M6 票 23 报障：界夏侯惇【清俭】补翻预发动——两步都落在**自己**区域。
 
@@ -3000,6 +3043,9 @@ _COVERAGE_CASES = {
     "hero.yuji_mobile.guohuo": _coverage_guohuo,
     # M6 票 23 报障：界夏侯惇【清俭】补翻预发动（首步选**自己**的手牌 / 装备 ⇒ 清单恒渲得出）。
     "hero.jie_xiahoudun.qingjian": _coverage_jie_qingjian,
+    # lei-batch 票 02：张绣【雄乱】（A 族限定技，已翻预发动）/【从谏】（触发技，已翻预发动）。
+    "hero.zhangxiu.xiongluan": _coverage_xiongluan,
+    "hero.zhangxiu.congjian": _coverage_congjian,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,
