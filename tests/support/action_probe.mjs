@@ -6,10 +6,11 @@
  * 真实构造器，输出的就是浏览器会发的那条 JSON。
  *
  * 加载纪律与 `ui_smoke.mjs` 同姿态：脚本清单来自 `index.html` 的 `<script src>` 顺序；
- * 这里只取 `buildAction` / 预发动点击 的依赖闭包（core → candidates → preactivation →
- * pending → reveal → modal → arrange → answer），不加载 `main.js`（它在末尾 `wire()`，
- * 需要 DOM）。`reveal.js` / `modal.js` 只为 `selectPreativationSeat` 的只读态判据
- * （`selectionEnabled` → `stepDialogKind`）——判据走真的那份，不在探针里另写。
+ * 这里只取 `buildAction` / 预发动点击 / 两行观看点选 的依赖闭包（core → candidates →
+ * preactivation → pending → **options** → reveal → modal → arrange → answer），不加载
+ * `main.js`（它在末尾 `wire()`，需要 DOM）。`options.js` 只为 `selectionCap`（两行面的
+ * 选中上限），`reveal.js` / `modal.js` 只为只读态判据与点选入口（`selectionEnabled` →
+ * `stepDialogKind`）——判据走真的那份，不在探针里另写。
  * 两个**渲染**入口（`renderTable` / `renderPending`）换成空实现：DOM 垫片只在
  * `ui_smoke.mjs` 里有，本探针只断"点击 → 载荷"，不断渲染。桥会检查每个名字真的存在：
  * 少一个就抛错，而不是让 Python 侧收到 `undefined` 后误判。
@@ -24,6 +25,7 @@ const NEEDED = [
   "candidates.js",
   "preactivation.js",
   "pending.js",
+  "options.js",
   "reveal.js",
   "modal.js",
   "arrange.js",
@@ -200,6 +202,52 @@ ui.state.view = {
 const play = ui.buildAction();
 if (!play) throw new Error("buildAction 没拼出 PlayCard（直取路径夹具失效）");
 
+/* 票 93：两行观看手牌（`SELECT_CARDS` + `spec.max_per_suit` + 槽位跨两座）。
+ * 用**真实**的 `reveal.js:toggleWatchPick` 按**倒序**点四张（3 → 1 → 2 → 0）；送出的
+ * `SelectCards.picks` 必须是**面内位置升序**（与点击顺序无关）——与 `buildAction` 的
+ * 既有规范化同一条纪律。 */
+context.renderTable = () => {};
+context.renderPending = () => {};
+resetState();
+const watchCard = (cardId, name, suit, color) => ({
+  card_id: cardId,
+  type: name === "杀" ? "slash" : "dodge",
+  name,
+  suit,
+  rank: 7,
+  slot: null,
+  attack_range: null,
+  color,
+  virtual_sources: [],
+});
+const watchPending = {
+  kind: "SELECT_CARDS",
+  actor: 0,
+  seq: 98,
+  prompt: "请从选择面里选择牌。",
+  legal_actions: [{ kind: "SelectCards", picks: [], answers_seq: 98 }],
+  candidate_index: {},
+  virtual_index: {},
+  option_seats: {},
+  context: null,
+  preactivations: {},
+  preactivation: [],
+  slots: [
+    { ref: { zone: "hand", seat: 1 }, card: watchCard(61, "杀", "spade", "black") },
+    { ref: { zone: "hand", seat: 0 }, card: watchCard(62, "闪", "heart", "red") },
+    { ref: { zone: "hand", seat: 1 }, card: watchCard(63, "酒", "diamond", "red") },
+    { ref: { zone: "hand", seat: 0 }, card: watchCard(64, "桃", "club", "black") },
+  ],
+  spec: { zones: ["hand"], total: [4, 4], max_per_suit: 1 },
+  revealed: [],
+  dialog: "watchTwoRows",
+};
+ui.state.view = { human_seat: 0, pending: watchPending };
+ui.state.selectedOption = 0;
+for (const index of [3, 1, 2, 0]) ui.toggleWatchPick(watchPending, index);
+const watch = ui.buildAction();
+if (!watch) throw new Error("buildAction 没拼出两行观看面的 SelectCards（点击夹具失效）");
+
 /* 复合技能动作：两条步骤（选牌 → 选项）→ `ActivateSkill(picks, choices)`（票 04 §3）。
  * 与借刀那条的区别只在载荷形状：`picks` 是实体牌 id、`choices` 是选项文本（不是座位），
  * 这是蛊惑的两步清单（扣置哪张 → 声明成什么牌）拼出来的那条。 */
@@ -311,6 +359,7 @@ process.stdout.write(
       { name: "seat_order_preactivation", action: clickOrdered },
       { name: "use_card", action: use },
       { name: "play_card", action: play },
+      { name: "watch_two_rows", action: watch },
     ],
     decorated,
   }),

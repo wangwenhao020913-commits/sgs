@@ -188,6 +188,10 @@ function renderPending(view) {
     if (stepDialogKind(pending) === DIALOG_KINDS.suit) {
       renderSuitPick(pending, { interactive: false });
     }
+    // 票 93：两行观看面的位置是公开形状——非应答者也画两行、牌面为「?」、不给 click。
+    if (stepDialogKind(pending) === DIALOG_KINDS.watchTwoRows) {
+      renderWatchRows(pending, { interactive: false });
+    }
     $("t-choice").textContent = "";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
@@ -353,6 +357,9 @@ function renderKind(pending, actions) {
   // （正文在 `renderSlots` → `renderReveal`），不能退化成"将提交：放弃"的空弹窗。
   if (pending.kind === "SELECT_CARDS" && !(pending.slots || []).length) {
     if (stepDialogKind(pending) === DIALOG_KINDS.reveal) return "slots";
+    // 票 93：凑不出四色的**空选择面**仍要画上行的整副手牌（牌面在 `revealed` 里），
+    // 出口只有「放弃」——不能退化成"将提交：放弃"的空弹窗。
+    if (stepDialogKind(pending) === DIALOG_KINDS.watchTwoRows) return "slots";
     return directAction(pending) ? "direct" : "unsupported";
   }
   if (pending.kind === "SELECT_CARDS") return "slots";
@@ -457,6 +464,9 @@ function cancelAction(pending) {
   // （这里的 null 让 `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
   const kind = stepDialogKind(pending);
   if (dialogDisablesPass(kind, pending)) return null;
+  // 票 93：两行观看面的「放弃」只住**右端**（它送出候选里那条 `Pass`）；左端取消键仍是
+  // "清空本地选择"（`cancelOrClear` 的既有语义），不替玩家送 Pass。
+  if (kind === DIALOG_KINDS.watchTwoRows) return null;
   return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
 }
 
@@ -759,6 +769,29 @@ function refreshSubmit(pending) {
     $("t-choice").textContent = state.lastRejectReason
       || `点选每种花色至多一张（已选 ${state.picks.length} 张）；`
       + "点「提交」或右端「放弃」都按当前选择结算。";
+    return;
+  }
+  // 票 93：两行观看手牌——「提交」只在**四色各一**（picks 凑满 `spec.total` 下限）时可点；
+  // 同花色在界面上已被置灰消掉，故不需要"选了 4 张但花色重复 ⇒ 拒收"这一档（票面 §2.2）。
+  // 空选择面（凑不出四色）只有右端「放弃」一个出口，明话说清（否则玩家会一直点牌）。
+  if (dialogKind === DIALOG_KINDS.watchTwoRows) {
+    const required = watchRequiredCount(pending);
+    const duplicate = watchDuplicateCardId(pending);
+    const empty = !((pending.slots || []).length);
+    const ready = !duplicate && !empty && state.picks.length >= required
+      && buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    if (state.lastRejectReason) {
+      $("t-choice").textContent = state.lastRejectReason;
+    } else if (duplicate) {
+      $("t-choice").textContent = WATCH_DUPLICATE_MESSAGE;
+    } else if (empty) {
+      $("t-choice").textContent = WATCH_EMPTY_MESSAGE;
+    } else {
+      $("t-choice").textContent = ready
+        ? "可以提交。"
+        : `必须四种花色各一张才能提交（已选 ${state.picks.length}/${required} 张）。`;
+    }
     return;
   }
   // A1：洛神亮牌确认——弹窗里没有可选卡，出口是「提交 / 放弃」；按唯一选项的正常提交态算。

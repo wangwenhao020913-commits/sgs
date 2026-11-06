@@ -110,6 +110,7 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "seat_order_preactivation",
         "use_card",
         "play_card",
+        "watch_two_rows",
     }, f"探针用例集合变了：{sorted(actions)}"
 
     borrowed = actions["borrowed_sword_preactivation"]
@@ -176,6 +177,29 @@ def test_a_conversion_preactivation_carries_the_click_order_into_choices() -> No
     assert parsed.choices == ("seat:3", "seat:1"), "服务端模型也按序列读这份顺序"
 
 
+def test_the_two_row_watch_face_submits_an_ascending_select_cards() -> None:
+    """两行观看手牌（票 93）：动作形状**不变**（仍是 `SelectCards` + `picks`）。
+
+    探针用真实的 `reveal.js:toggleWatchPick` 按倒序（3 → 1 → 2 → 0）点四张不同花色的牌，
+    送出的 `picks` 必须是**面内位置升序**——引擎按升序枚举 `SELECT_CARDS` 的组合，
+    点击顺序若原样上行，逐字段自检会找不到候选。
+    """
+    action = _actions_by_name(_probe_payload())["watch_two_rows"]
+
+    assert action["kind"] == "SelectCards"
+    assert set(action) == {"kind", "picks", "answers_seq"}, (
+        f"两行面的动作仍是 SelectCards 的三格：{sorted(action)}"
+    )
+    assert action["picks"] == [0, 1, 2, 3], (
+        "picks 必须规范化成升序（与点击顺序无关）：" f"{action['picks']}"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.kind == "SelectCards"
+    assert parsed.picks == (0, 1, 2, 3)
+    assert parsed.answers_seq == 98
+
+
 def test_a_decorated_card_payload_is_rejected_by_the_server_model() -> None:
     """合成反例：**同一张卡**的展示形态不能被 ``parse_action`` 接受（= 报障的 400）。
 
@@ -202,4 +226,4 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 5
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 6

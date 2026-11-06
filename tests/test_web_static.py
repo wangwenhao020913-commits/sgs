@@ -1249,9 +1249,9 @@ def _js_function(source: str, name: str) -> str:
 def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> None:
     """新 DOM 形状的静态部分（行为归 `ui_smoke.mjs`，真浏览器归票面「复现配方」）。
 
-    票 08 的硬约束是**只加正文段**：
+    票 08 的硬约束是**只加正文段**（后续票各加自己的种类名）：
 
-    - 不新增第七种外壳：`DIALOG_KINDS` 仍是六种，展示武将牌这一步判成 `choice`；
+    - 本票不新增外壳：展示武将牌这一步判成 `choice`（第七条 / 第八条由后续票加）；
     - 判据只看载荷形状：`isShowHeroCardStep` 读 `pending.hero_card`（不认技能 id）；
       `hero_id=null` 的"这一次没有武将牌"也有这个键 ⇒ 仍进弹窗，只是不画武将块；
     - 新正文段的节点 / 类名：`.hero-card`（段）→ `.hero-card-sub`（第 k/m 张）+
@@ -1270,9 +1270,11 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
         "arrange", "choice", "unknown", "reveal", "suit", "distribution",
         # huo-shenzhugeliang 票 02：武将牌上的牌点选（星牌弹窗）——第七条。
         "heroPick",
+        # lei-shenganning 票 93：两行观看手牌（上行目标 / 下行自己，四色各一）——第八条。
+        "watchTwoRows",
     ], (
         "票 08 只加正文段（展示武将牌复用 choice）；第七条由 huo-shenzhugeliang 票 02 加"
-        f"（武将牌上的牌点选）：{keys}"
+        f"（武将牌上的牌点选）；第八条由 lei-shenganning 票 93 加（两行观看手牌）：{keys}"
     )
 
     predicate = _js_function(modal, "isShowHeroCardStep")
@@ -1377,3 +1379,99 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
     assert "line-clamp" not in desc_rule and "text-overflow" not in desc_rule, (
         f"描述不许省略 / 截断：{desc_rule}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 票 93（lei-shenganning）：两行观看手牌的静态判据
+# ---------------------------------------------------------------------------
+
+
+def test_the_two_row_watch_face_reads_the_shape_and_max_per_suit_from_the_payload() -> None:
+    """行为归 `ui_smoke.mjs`（票 93-W1..W14 / B1 / B2），这里只钉静态判据：
+
+    - `DIALOG_KINDS` 的第八种 `watchTwoRows`，`stepDialogKind` 只加一条分支；
+    - 判据读载荷形状：`SELECT_CARDS` + `spec.max_per_suit` + 恰好两个座位（含自己）；
+      正常面的观看授予证据 = `revealed` 非空 **或** 服务端显式标记 `dialog`（非应答者的
+      `revealed` 已被抹空，§3 B4）；空槽位只认显式标记（凑不出四色的空选择面，fail-closed）；
+    - 置暗 / 上限**复用**涉猎的 `suitSlotState`，它读 `spec.max_per_suit`——前端不写死
+      "同花色一张"（票面 §2.2 / DoD）；提交下限读 `spec.total`；
+    - 空面 / 重复槽位的两句提示**只写一份**（`WATCH_EMPTY_MESSAGE` /
+      `WATCH_DUPLICATE_MESSAGE`，`pending.js:refreshSubmit` 与步骤提示共用）；
+    - 正文 = 两行（`.watch-row`，行序目标在上、自己在下）+ `cardFaceNode`（自带 `tags`）；
+      空选择面画 `revealed` 的整副手牌；行内横向滚动（`flex-wrap: nowrap`）。
+    """
+    modal = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+    reveal = _strip_js_comments((STATIC_DIR / "reveal.js").read_text(encoding="utf-8"))
+    pending = _strip_js_comments((STATIC_DIR / "pending.js").read_text(encoding="utf-8"))
+
+    predicate = _js_function(modal, "isWatchTwoRowsStep")
+    assert 'pending.kind !== "SELECT_CARDS"' in predicate, predicate
+    assert "spec.max_per_suit" in predicate, f"判据读面自己的花色上限：{predicate}"
+    assert "seats.size !== 2" in predicate, f"两行 = 恰好两个座位：{predicate}"
+    assert "seats.has(Number(pending.actor))" in predicate, (
+        f"两行里必须有一行是自己的手牌：{predicate}"
+    )
+    assert "pending.dialog === DIALOG_KINDS.watchTwoRows" in predicate, (
+        f"空选择面只认服务端显式标记（fail-closed）：{predicate}"
+    )
+    assert "(pending.revealed || []).length" in predicate, (
+        f"正常面仍要观看授予的证据（revealed 非空或显式标记）：{predicate}"
+    )
+    assert re.search(
+        r"isWatchTwoRowsStep\(pending\)\) return DIALOG_KINDS\.watchTwoRows", modal
+    ), "stepDialogKind 必须在涉猎 / 亮牌之前加这一条分支"
+
+    suit_state = _js_function(reveal, "suitSlotState")
+    assert "max_per_suit" in suit_state, (
+        f"置暗 / 上限读服务端 spec.max_per_suit，不写死：{suit_state}"
+    )
+    toggle = _js_function(reveal, "toggleWatchPick")
+    assert "suitSlotState(pending, index)" in toggle, (
+        f"点选 / 置灰复用涉猎那一份（不另写一套）：{toggle}"
+    )
+
+    required = _js_function(reveal, "watchRequiredCount")
+    assert "spec" in required and "total" in required, (
+        f"提交下限读 spec.total，不写死：{required}"
+    )
+    assert "WATCH_DEFAULT_TOTAL" in required, (
+        f"缺省兜底也要是一个具名常量（当前面的 4 张），不在函数体里裸写：{required}"
+    )
+
+    render = _js_function(reveal, "renderWatchRows")
+    assert '"watch-row"' in render, f"两行各自一个 .watch-row 段：{render}"
+    assert '"data-watch-row"' in render, "行角色写进 data-watch-row（测垫片按它找行）"
+    assert "cardFaceNode(" in render, "牌面走 cardFaceNode（tags 由它照画）"
+    assert "unknownSlotNode()" in render, "非应答者的槽位画「?」、不接 click"
+    assert "suitSlotState(pending, index)" in render, render
+    assert "toggleWatchPick(pending, index)" in render, "点牌 = 切换选中（不是一击提交）"
+    assert "row.entries" in render and "row.cards" in render, (
+        "正常面读槽位、空选择面读 revealed 的整副手牌"
+    )
+
+    rows = _js_function(reveal, "watchRows")
+    assert "revealed" in rows, f"空选择面的整副手牌来自 revealed：{rows}"
+    assert '"target"' in rows and '"self"' in rows, "行角色 = 目标 / 自己"
+    assert "Number(pending.actor)" in rows, "自己那一行按询问者认"
+    assert "return [{" in rows, (
+        "空选择面仍要返回上行的行数据（非应答者牌面被抹空时只留行标签，不能整个不画）："
+        f"{rows}"
+    )
+
+    # 文案只住一处：两句提示都是常量，`pending.js:refreshSubmit` 与步骤提示都读它们。
+    assert 'const WATCH_EMPTY_MESSAGE = "凑不出四种花色' in reveal, reveal
+    assert 'const WATCH_DUPLICATE_MESSAGE = "选择面里出现了重复的牌' in reveal, reveal
+    assert "WATCH_EMPTY_MESSAGE" in pending and "WATCH_DUPLICATE_MESSAGE" in pending, (
+        "页脚 t-choice 与步骤提示必须读同一组常量（不各写一份文案）"
+    )
+    assert reveal.count("凑不出四种花色") == 1, (
+        "空面文案在产品脚本里只允许出现在常量定义那一处"
+    )
+
+    hint = _js_function(reveal, "watchRowsHint")
+    assert "WATCH_EMPTY_MESSAGE" in hint, f"空选择面必须明说只能放弃：{hint}"
+    assert "已选" in hint, f"提示条给已选计数：{hint}"
+
+    rule = _css_rule(".watch-row .cards")
+    assert re.search(r"flex-wrap:\s*nowrap", rule), f"行内不换行：{rule}"
+    assert re.search(r"overflow-x:\s*auto", rule), f"超过一屏横向滚动：{rule}"

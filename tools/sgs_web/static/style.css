@@ -1518,6 +1518,16 @@ button.mini-slot { cursor: pointer; }
   box-shadow: none;
 }
 .suit-pick .reveal-cards { justify-content: center; }
+/* 两行观看手牌（lei-shenganning 票 93）：上行目标手牌 / 下行自己的手牌，行内**横向滚动**
+ * （票面 §3 B3：不换行成第二行，否则与"两行"的语义冲突）；行标签在上、牌面仍是同一套 88×124。 */
+.watch-row {
+  border: 1px dashed var(--line); border-radius: 10px; padding: 6px 9px;
+  background: #fbfaf7;
+}
+.watch-row + .watch-row { margin-top: 8px; }
+.watch-row-head { margin-bottom: 5px; font-weight: 600; font-size: 13px; color: var(--dim); }
+.watch-row .cards { margin: 0; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+.watch-row .cards .card.face { flex: 0 0 auto; }
 .card.face.taken .taken-by {
   position: absolute; right: calc(4 * var(--dsu)); bottom: calc(5 * var(--dsu));
   min-width: calc(24 * var(--dsu)); padding: 1px calc(4 * var(--dsu));

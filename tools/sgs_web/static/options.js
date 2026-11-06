@@ -613,6 +613,11 @@ function renderSlots(pending) {
   // 亮牌模板（票 11 五谷 / 票 12 遗计）：全部亮牌 + 目标条；**不**走下面那条
   // 「隐藏区域的槽位只有位置」的旧选择面（公开处理区的牌面是可见的）。
   const dialogKind = stepDialogKind(pending);
+  // 票 93：两行观看手牌——上行目标手牌、下行自己的手牌；同花色置灰、四色各一才可提交。
+  if (dialogKind === DIALOG_KINDS.watchTwoRows) {
+    renderWatchRows(pending, { interactive: true });
+    return;
+  }
   // 票 01：按花色取牌（涉猎）——一行公开亮牌 + 同花色置灰，单独一个模板。
   if (dialogKind === DIALOG_KINDS.suit) {
     renderSuitPick(pending, { interactive: true });

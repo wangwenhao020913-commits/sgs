@@ -8212,6 +8212,142 @@ def test_the_public_processing_slots_survive_foreign_masking_but_watched_faces_d
     assert masked["revealed"] == [], "观看授予照旧不下发"
 
 
+def _two_row_watch_query(pack, *, actor: int = 0, target: int = 1):
+    """构造一条**两行观看手牌**形状的 ``SELECT_CARDS`` 询问（票 93 的框架面；本票不带技能）。
+
+    两副手牌各两张、``spec.total=(4,4)`` 且 ``max_per_suit=1``；``revealed`` = 两副手牌的
+    并集（服务端授予应答者观看的那一份）。槽位顺序 = 载荷顺序（目标在前、自己在前为
+    "行内顺序 = 载荷顺序"的固定读法服务）。
+    """
+    own = tuple(cards_of_type(pack, "slash")[:2])
+    theirs = tuple(cards_of_type(pack, "dodge")[:2])
+    used = set(own) | set(theirs)
+    deck = tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id not in used)
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hand=own), SeatSpec(hp=4, hand=theirs)],
+        deck=deck,
+    )
+    seq = 77
+    query = SelectCardsQuery(
+        seq=seq,
+        actor=actor,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择牌。",
+        legal_actions=(
+            SelectCards(picks=(0, 1, 2, 3), answers_seq=seq),
+            Pass(answers_seq=seq),
+        ),
+        view=project(state, actor),
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(4, 4), max_per_suit=1),
+        slots=tuple(
+            Slot(ref=ZoneRef(Zone.HAND, seat), card=state.card(card_id))
+            for seat, card_ids in ((target, theirs), (actor, own))
+            for card_id in card_ids
+        ),
+        revealed=tuple(state.card(card_id) for card_id in (*own, *theirs)),
+    )
+    return state, query, own, theirs
+
+
+def test_the_two_row_watch_face_is_marked_and_masks_the_foreign_view() -> None:
+    """票 93（§2.1 / §3 B4）：**两行观看面**的标记按原始询问的形状定，牌面仍按查看者收口。
+
+    正反两面都断（`CODING_STANDARDS.md` §6）：应答者拿到两副手牌的牌面；非应答者拿到
+    **同样的两行位置**（公开形状：哪两个座位的手牌在面里、要不要四色）但牌面全是 ``None``。
+    """
+    pack = _context_pack()
+    state, query, own, theirs = _two_row_watch_query(pack)
+
+    watcher = pending_payload(query, human_seat=0)
+    assert watcher["dialog"] == "watchTwoRows", "应答者：两行观看面的显式标记"
+    assert [slot["ref"]["seat"] for slot in watcher["slots"]] == [1, 1, 0, 0], (
+        "槽位顺序 = 载荷顺序（行序由前端按 ref.seat 分两行）"
+    )
+    assert {slot["card"]["card_id"] for slot in watcher["slots"]} == set(own) | set(theirs)
+    assert {card["card_id"] for card in watcher["revealed"]} == set(own) | set(theirs)
+    assert watcher["spec"]["max_per_suit"] == 1
+
+    stranger = pending_payload(query, human_seat=1)
+    assert stranger["dialog"] == "watchTwoRows", (
+        "形状是公开事实：非应答者也画两行位置（牌面另由 masking 抹掉）"
+    )
+    assert [slot["ref"]["seat"] for slot in stranger["slots"]] == [1, 1, 0, 0]
+    assert all(slot["card"] is None for slot in stranger["slots"]), (
+        f"非应答者不得看到任一手牌面：{stranger['slots']}"
+    )
+    assert stranger["revealed"] == []
+
+    # 空选择面（凑不出四色）：没有槽位可分，靠服务端显式标记进入同一模板（§2.2）。
+    empty = SelectCardsQuery(
+        seq=78,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择牌。",
+        legal_actions=(Pass(answers_seq=78),),
+        view=project(state, 0),
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(4, 4), max_per_suit=1),
+        slots=(),
+        revealed=(state.card(theirs[0]),),
+    )
+    assert pending_payload(empty, human_seat=0)["dialog"] == "watchTwoRows"
+    assert pending_payload(empty, human_seat=1)["dialog"] == "watchTwoRows"
+
+
+def test_the_two_row_watch_face_carries_card_tags_on_the_watched_hand() -> None:
+    """用户明示（票 93 §2.1）：上行每张牌必须带服务端下发的 ``card.tags``——**不**因为
+    它是别人的手牌就不发。标签可见性仍走 `visibility.tag_visible` 的既有口径。"""
+    from sgs.data import CardTagType
+    from sgs.state import CardTag
+
+    pack = _context_pack()
+    state, query, _own, theirs = _two_row_watch_query(pack)
+    tagged = theirs[0]
+    state.card_tags[tagged] = (
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=1,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = _web_session_for(engine, human_seat=0)
+    engine.pending = query
+
+    payload = pending_payload(session)
+    target_slot = next(
+        slot
+        for slot in payload["slots"]
+        if slot["ref"]["seat"] == 1
+        and slot["card"]
+        and slot["card"]["card_id"] == tagged
+    )
+    assert target_slot["card"]["tags"] == [
+        {"skill_id": "hero.jie_zhenji.luoshen", "label": "洛神"}
+    ], "上行（别人的手牌）也要带标签；标签可见性沿用 tag_visible"
+
+    # 非应答者：牌面被抹，标签随牌面一起不给（不是"另开一条标签面"）。
+    session.human_seat = 1
+    engine.pending = query
+    stranger = pending_payload(session)
+    assert all(slot["card"] is None for slot in stranger["slots"])
+    assert "洛神" not in json.dumps(stranger, ensure_ascii=False)
+
+
+def test_the_two_row_watch_face_times_out_to_pass() -> None:
+    """票 93 §2.2 / §3 B5：超时 = **放弃**。
+
+    兜底优先级本来就是 `Pass` 优先，只要这一问的候选里有 `Pass`（技能侧 ``optional=True``）
+    就天然落在这里；**不**在超时模块里加按模板的特判（那是第二份规则）。
+    """
+    pack = _context_pack()
+    _state, query, _own, _theirs = _two_row_watch_query(pack)
+
+    fallback = fallback_action(query)
+    assert isinstance(fallback, Pass)
+    assert fallback.answers_seq == 77
+
+
 def test_harvest_state_is_none_when_no_harvest_frame_is_on_the_stack() -> None:
     """没有五谷结算帧 ⇒ ``None``；调用方（前端）据此 fail-closed 不开亮牌弹窗。"""
     engine, driver = _harvest_game()

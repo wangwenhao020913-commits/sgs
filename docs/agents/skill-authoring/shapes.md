@@ -264,6 +264,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 分配弹窗（计数式） | 弹窗：逐座位一行计数（点一次 +1）、「重置」、右端「提交」恒可点 | `modal.js:stepDialogKind`（`distribution`） | `hero.shen_zhouyu_mobile.yeyan`（huo-shenzhouyu-mobile 票 05） |
 | 两行交换（排列面·**不枚举**） | 弹窗：上排「星」/ 下排「手牌」，只上下交换、行内不调序；答案由界面构造、服务端只校验形状 | `modal.js:stepDialogKind`（`arrange`）+ `projection._arrange_spec` 下发 `rows` / `enumerate: false` / `reorder: false` | `hero.shen_zhugeliang.qixing`（huo-shenzhugeliang 票 02；外壳同 `hero.jie_lidian.xunxun`） |
 | 武将牌上的牌点选（弹窗） | 弹窗：一行牌（**牌面对宿主可见**），点选后提交 | `modal.js:stepDialogKind`（`heroPick`，判据 = 槽的 `ref.zone === "hero"`） | `hero.shen_zhugeliang.kuangfeng` / `.dawu`（huo-shenzhugeliang 票 02） |
+| 两行观看选择面（弹窗） | 弹窗：上行被观看角色的手牌 / 下行自己的手牌；同花色置灰（两行一起算）、四色各一才可提交；右端「放弃」= 候选里的 `Pass`（超时同义），凑不出四色时只剩「放弃」 | `modal.js:stepDialogKind`（`watchTwoRows`；判据 = `SELECT_CARDS` + `spec.max_per_suit` + 槽位恰好跨两个座位且含询问者；空选择面认服务端 `dialog` 标记）；渲染 = `reveal.js:renderWatchRows`，置灰复用 `reveal.js:suitSlotState` | 框架票 93（lei-shenganning）；首个技能载体将是神甘宁【魄袭】（**尚未进仓**） |
 | fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
 
 **套不套用要写出来**：第 3 步反查出的相似技能就是模板源。套用 ⇒ 票面写它的 id 与抄哪一行；

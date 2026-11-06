@@ -415,3 +415,205 @@ function suitResultActive() {
   const result = state.suitResult;
   return !!result && Date.now() < result.until;
 }
+
+/* ------------------------------------------------------------ 两行观看手牌（票 93） */
+
+/** 空选择面（凑不出四色）/ 重复槽位的提示文案：**唯一一份**。
+ *
+ *  `watchRowsHint`（步骤提示）与 `pending.js:refreshSubmit`（页脚 `t-choice`）读同一组常量，
+ *  两处不会各写一份、各自漂。 */
+const WATCH_EMPTY_MESSAGE = "凑不出四种花色，只能点右端「放弃」结束。";
+const WATCH_DUPLICATE_MESSAGE = "选择面里出现了重复的牌（数据异常），这一步无法提交。";
+
+/** 两行面的**行数据**：按 `slots[].ref.seat` 分两行（行序 = 目标在上、自己在下的固定次序，
+ *  行内顺序 = 载荷顺序）。空选择面（凑不出四色）没有槽位可分 ⇒ 只画上行：整副被观看的
+ *  手牌在 `revealed` 里（与【攻心】"空选择面也要看牌"同一口径）。
+ *
+ *  **空面的 `revealed` 约定只含上行那一手**（被观看角色的手牌）——正常面的 `revealed` 是
+ *  两副手牌的并集（同一份观看授予），空面没有座位形状可分，故由技能侧只授予上行那一手。
+ *  非应答者的 `revealed` 已被抹空 ⇒ 仍画上行的标签、0 张牌（位置不是已知事实）。
+ *
+ *  这是从载荷到行的**纯拆分**：不认技能名、不猜牌面，判据仍住 `modal.js:isWatchTwoRowsStep`。
+ *  行的牌面**不另开一份源**：正常面读 `slots[].card`（抹后的载荷里它就是 `null`），空面读
+ *  `revealed`。
+ */
+function watchRows(pending) {
+  const slots = (pending && pending.slots) || [];
+  if (!slots.length) {
+    return [{
+      role: "target",
+      seat: null,
+      entries: [],
+      cards: ((pending && pending.revealed) || []).slice(),
+    }];
+  }
+  const groups = [];
+  const bySeat = new Map();
+  slots.forEach((slot, index) => {
+    const seat = slot && slot.ref ? slot.ref.seat : null;
+    const key = seat === null || seat === undefined ? "?" : String(seat);
+    let group = bySeat.get(key);
+    if (!group) {
+      group = { seat, entries: [] };
+      bySeat.set(key, group);
+      groups.push(group);
+    }
+    group.entries.push({ slot, index });
+  });
+  const actor = Number(pending.actor);
+  const target = groups.find((group) => Number(group.seat) !== actor) || null;
+  const self = groups.find((group) => Number(group.seat) === actor) || null;
+  // 目标在上、自己在下的**固定行序**（用户口径）；判据保证两组都存在，退化面照载荷顺序画。
+  const ordered = [];
+  if (target) ordered.push({ ...target, role: "target" });
+  if (self) ordered.push({ ...self, role: "self" });
+  return ordered.map((row) => ({
+    ...row,
+    cards: row.entries.map((entry) => entry.slot && entry.slot.card).filter(Boolean),
+  }));
+}
+
+/** 行标签（用户 2026-11-07 的措辞）：应答者看到「座N·目标手牌」/「你的手牌」；
+ *  非应答者只画公开形状，两行都写「座N·手牌」——那不是"你的"手牌。 */
+function watchRowLabel(row, own) {
+  if (row.seat === null || row.seat === undefined) return "目标手牌";
+  if (!own) return `座${row.seat}·手牌`;
+  return row.role === "self" ? "你的手牌" : `座${row.seat}·目标手牌`;
+}
+
+/** 提交至少要几张：读服务端 `spec.total` 的下限（当前形状 = 4；缺省兜底也按 4，见
+ *  `WATCH_DEFAULT_TOTAL`）。四色各一由置灰保证，不写"同花色一张"的常量。 */
+const WATCH_DEFAULT_TOTAL = [4, 4];
+
+function watchRequiredCount(pending) {
+  const total = (pending && pending.spec && pending.spec.total) || WATCH_DEFAULT_TOTAL;
+  return Math.max(1, Number(total[0]) || 1);
+}
+
+/** 同一 `card_id` 在面里出现两次 = 引擎数据错误（两张牌物理上分属两个座位）：画两次也不
+ *  该能提交（票面 §3 B2）。返回重复的 `card_id`（字符串）或 `null`。 */
+function watchDuplicateCardId(pending) {
+  const seen = new Set();
+  for (const slot of (pending && pending.slots) || []) {
+    const card = slot && slot.card;
+    if (!card || card.card_id === null || card.card_id === undefined) continue;
+    const key = String(card.card_id);
+    if (seen.has(key)) return key;
+    seen.add(key);
+  }
+  return null;
+}
+
+/** 点一张：已选 ⇒ 取消；同花色未满 ⇒ 选中；同花色已满 ⇒ 无动作（界面已置灰）。
+ *
+ *  槽位状态与【涉猎】**同一份**判据 `suitSlotState`（`picked` / `taken` / `free`；上限读
+ *  `spec.max_per_suit`，**两行一起算**）——这里不另写一套，也不写死"同花色一张"。 */
+function toggleWatchPick(pending, index) {
+  if (state.playback || state.submitBusy) return;
+  if (!isWatchTwoRowsStep(pending)) return;
+  const at = state.picks.indexOf(index);
+  if (at >= 0) {
+    state.picks.splice(at, 1);
+  } else if (suitSlotState(pending, index) === "free") {
+    if (state.picks.length >= selectionCap(pending)) return;
+    state.picks.push(index);
+    // 引擎的 `SelectCards` 候选按面内位置**升序**枚举；选中序与点击顺序无关、必须保持升序
+    // （与 `toggleSuitPick` / `answer.js:buildAction` 同一条纪律）。
+    state.picks.sort((left, right) => left - right);
+  } else {
+    return;
+  }
+  state.lastRejectReason = "";
+  renderPending(state.view);
+}
+
+/** 这一步的步骤提示：规则话术读 `context.requirement`（服务端），前端只补"怎么点"。
+ *  空选择面（凑不出四色）**必须明说**只能放弃，否则玩家会一直点牌、永远到不了四张。 */
+function watchRowsHint(pending, interactive) {
+  const requirement = (pending && pending.context && pending.context.requirement) || "";
+  const prefix = requirement ? `${requirement}：` : "";
+  if (!interactive) return `${prefix}等待该座位选择…`;
+  if (!((pending && pending.slots) || []).length) {
+    return `${prefix}${WATCH_EMPTY_MESSAGE}`;
+  }
+  if (watchDuplicateCardId(pending)) {
+    return `${prefix}${WATCH_DUPLICATE_MESSAGE}`;
+  }
+  const required = watchRequiredCount(pending);
+  return `${prefix}点牌选中 / 再点取消；必须四种花色各一张（已选 ${state.picks.length}/${required}）`
+    + "才能提交；点右端「放弃」结束。";
+}
+
+/** 正文：两行牌（上行目标手牌 / 下行自己的手牌），每行 = 行标签 + 一行 `cardFaceNode`
+ *  （卡面自带 `tags`，来源技能标记照画）。已选 ⇒ `.sel`；同花色其余牌（两行都算）⇒ `.dim`
+ *  且不接 click；非应答者的牌面是「?」、不给 click。
+ *
+ *  `opts.interactive === false` = 非应答者（牌面照画 / 位置照画，一律不接 click）。
+ *  行内超过一屏时**横向滚动**（`.watch-row .cards` 的 `flex-wrap: nowrap`），不换行成
+ *  第二行——"两行"是面的语义（票面 §3 B3）。
+ */
+function renderWatchRows(pending, opts = {}) {
+  const own = isOwnPending(pending);
+  const interactive = opts.interactive !== false && own;
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = watchRowsHint(pending, interactive);
+  const wrap = document.createElement("div");
+  wrap.className = "reveal watch-two-rows";
+  for (const row of watchRows(pending)) {
+    const section = document.createElement("section");
+    section.className = "watch-row";
+    section.setAttribute("data-watch-row", row.role === "self" ? "self" : "target");
+    if (row.seat !== null && row.seat !== undefined) {
+      section.setAttribute("data-seat", String(row.seat));
+    }
+    const head = document.createElement("div");
+    head.className = "watch-row-head";
+    head.textContent = watchRowLabel(row, own);
+    section.appendChild(head);
+    const cards = document.createElement("div");
+    cards.className = "cards reveal-cards";
+    if (row.entries.length) {
+      for (const entry of row.entries) {
+        const slot = entry.slot;
+        const index = entry.index;
+        const status = suitSlotState(pending, index);
+        const pickable = interactive && status !== "taken";
+        let node;
+        if (slot && slot.card) {
+          node = cardFaceNode(slot.card, {
+            static: !pickable,
+            onClick: pickable ? () => toggleWatchPick(pending, index) : undefined,
+          });
+        } else {
+          // 非应答者 / 牌面被抹：位置照画、牌面「?」、不给 click（票面 §3 B4）。
+          node = unknownSlotNode();
+        }
+        node.classList.add("reveal-card");
+        node.setAttribute("data-slot-index", String(index));
+        if (slot && slot.card && slot.card.suit) {
+          node.setAttribute("data-suit", String(slot.card.suit));
+        }
+        if (status === "picked") {
+          node.classList.add("sel");
+          node.setAttribute("data-picked", "true");
+        }
+        if (status === "taken") {
+          node.classList.add("dim");
+          node.setAttribute("data-dim", "true");
+        }
+        cards.appendChild(node);
+      }
+    } else {
+      // 空选择面：整副被观看的手牌只读显示（没有可点的槽，出口只有「放弃」）。
+      // 非应答者这里没有牌面（`revealed` 已被抹空）⇒ 只留行标签。
+      for (const card of row.cards) {
+        const node = cardFaceNode(card, { static: true });
+        node.classList.add("reveal-card");
+        cards.appendChild(node);
+      }
+    }
+    section.appendChild(cards);
+    wrap.appendChild(section);
+  }
+  $("t-options").appendChild(wrap);
+}

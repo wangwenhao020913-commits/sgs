@@ -11400,10 +11400,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // ---- ① 外壳：仍是 `choice`（**不为武将牌另立 kind**），标题来自技能名 ----
   // 种类总数在 huo-shenzhugeliang 票 02 之后是 7（新增 `heroPick` = 武将牌上的牌点选），
-  // 本条判的仍是"武将牌弹窗**不**占用一个专用 kind"。
+  // lei-shenganning 票 93 再加第八种 `watchTwoRows`（两行观看手牌）。本条判的仍是
+  // "武将牌弹窗**不**占用一个专用 kind"。
   render(heroView(heroCardPending()));
   check("U1-08a 武将牌弹窗 = 既有选择型外壳（不另立 kind）：标题「天成」、正文在弹窗里",
-    Object.keys(ui.DIALOG_KINDS).length === 7
+    Object.keys(ui.DIALOG_KINDS).length === 8
       && !("hero" in ui.DIALOG_KINDS)
       && ui.stepDialogKind(ui.state.view.pending) === "choice"
       && $("t-dialog").hidden === false
@@ -20829,6 +20830,308 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   // ⑥ 判据只看 `delta_type`：别的记录一律不弹窗
   const ignored = ui.applyPindianDelta({ kind: "delta", delta_type: "hp_change", seq: 1 });
   check("票04-9 非拼点记录不弹窗（判据只看 delta_type）", ignored === false, `ignored=${ignored}`);
+}
+
+/* ============ 票 93（合成载荷）：两行观看手牌——上行目标 / 下行自己、四色各一 ============
+ *
+ * 判据只读载荷形状（`SELECT_CARDS` ∧ `spec.max_per_suit` ∧ 槽位恰好跨两个座位、含自己），
+ * 不认技能 id（首个技能载体是神甘宁【魄袭】，本票不带技能）。这一块钉界面的**读法**：
+ * 两行 / 上行牌标记 / 同花色置灰（两行一起算）/ 四色各一才可提交 / 点已选取消 /
+ * 右端「放弃」= 候选里那条 `Pass` / 空选择面（凑不出四色）只有放弃 + 一句明话。
+ */
+{
+  const watchCard = (id, name, suit, tags = []) => {
+    const card = synthCard(id, name);
+    card.suit = suit;
+    card.rank = 7;
+    card.color = suit === "heart" || suit === "diamond" ? "red" : "black";
+    if (tags.length) card.tags = tags;
+    return card;
+  };
+  // 目标座 1：【♠杀】（带来源技能标记）+【♥桃】；自己：♦闪 + ♣酒 + ♥桃（与目标同花色）。
+  //「四色」= ♠♥♦♣ 齐全；♥ 在**两行**各有一张 ⇒ 置灰判据必须跨行算。
+  const watchTargetCards = [
+    watchCard(1101, "杀", "spade", [{ skill_id: "hero.test.tag", label: "测试标记" }]),
+    watchCard(1102, "桃", "heart"),
+  ];
+  const watchSelfCards = [
+    watchCard(1103, "闪", "diamond"),
+    watchCard(1104, "酒", "club"),
+    watchCard(1105, "桃", "heart"),
+  ];
+  const watchSlots = [
+    ...watchTargetCards.map((card) => ({ ref: { zone: "hand", seat: 1 }, card })),
+    ...watchSelfCards.map((card) => ({ ref: { zone: "hand", seat: 0 }, card })),
+  ];
+  const watchAction = { kind: "SelectCards", picks: [0, 1, 2, 3], answers_seq: 9801 };
+  const watchPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 9801, prompt: "请从选择面里选择牌。",
+    legal_actions: [
+      { kind: "SelectCards", picks: [], answers_seq: 9801 },
+      watchAction,
+      { kind: "Pass", answers_seq: 9801 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: "观看测试", targets: [1],
+      requirement: "观看其手牌，选择四张花色各不相同的牌", skill_hints: [],
+    },
+    preactivations: {}, preactivation: [],
+    slots: watchSlots,
+    spec: { zones: ["hand"], total: [4, 4], max_per_suit: 1, optional: true },
+    revealed: watchTargetCards.slice(),   // 观看授予（服务端同形；非应答者会被抹空）
+    dialog: "watchTwoRows",
+  };
+  const watchView = synthView(watchPending);
+  watchView.snapshot.self_hand = watchSelfCards;
+  watchView.snapshot.players[0].hand_count = watchSelfCards.length;
+  watchView.snapshot.players[1].hand_count = watchTargetCards.length;
+
+  const watchFindAll = (root, predicate) => {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children || []) {
+        if (predicate(child)) out.push(child);
+        walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  };
+  const watchRows = () => watchFindAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-watch-row") !== undefined);
+  const watchSlotNode = (index) => watchFindAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-slot-index") === String(index))[0] || null;
+  const watchTagTexts = () => watchFindAll($("t-options"), (node) => node.classList
+    && node.classList.contains("card-tag")).map((node) => node.textContent);
+  const watchCardTagOf = (cardId) => watchFindAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-card-id") === String(cardId)
+    && node.classList && node.classList.contains("reveal-card"))[0] || null;
+
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.suitResult = null;
+  ui.state.view = watchView;
+  ui.renderTable();
+  ui.renderPending(watchView);
+
+  const watchRowEls = watchRows();
+  const headText = (row) => (row && row.children[0] ? row.children[0].textContent : "");
+  check("票 93-W1 两行观看面 = 新弹窗（watchTwoRows），上行目标、下行自己（固定行序）",
+    ui.stepDialogKind(watchPending) === ui.DIALOG_KINDS.watchTwoRows
+      && !$("t-dialog").hidden
+      && $("t-dialog-title").textContent === "观看测试"
+      && watchRowEls.length === 2
+      && watchRowEls[0].getAttribute("data-seat") === "1"
+      && watchRowEls[1].getAttribute("data-seat") === "0"
+      && headText(watchRowEls[0]) === "座1·目标手牌"
+      && headText(watchRowEls[1]) === "你的手牌",
+    `kind=${ui.stepDialogKind(watchPending)} rows=${watchRowEls.length} `
+      + `head0=${headText(watchRowEls[0])} head1=${headText(watchRowEls[1])}`);
+
+  const watchSlotCount = watchSlots.filter(
+    (slot, index) => !!watchFindAll($("t-options"), (node) => node.getAttribute
+      && node.getAttribute("data-slot-index") === String(index)).length,
+  ).length;
+  check("票 93-W2 两行共 5 张可点牌面（上行 2 + 下行 3），按卡面渲染（带花色 / 点数 / 牌名）",
+    watchSlotCount === 5
+      && !!watchCardTagOf(1101) && watchCardTagOf(1101).text().includes("♠")
+      && watchCardTagOf(1101).text().includes("杀")
+      && !!watchCardTagOf(1105) && watchCardTagOf(1105).text().includes("♥"),
+    `slots=${watchSlotCount} card1101="${watchCardTagOf(1101) ? watchCardTagOf(1101).text() : ""}"`);
+
+  check("票 93-W3 上行牌标记可见（服务端 card.tags 照画，不因为是别人的手牌就丢）",
+    watchTagTexts().includes("测试标记"),
+    `tags=${JSON.stringify(watchTagTexts())}`);
+
+  check("票 93-W4 未满 4 张「提交」灰着；右端「放弃」在（候选里的 Pass）",
+    $("btn-submit").disabled === true && $("btn-pass").hidden === false
+      && $("btn-pass").textContent === "放弃"
+      && $("t-target-hint").textContent.includes("已选 0/4"),
+    `submit=${$("btn-submit").disabled} pass=${$("btn-pass").hidden} `
+      + `hint=${$("t-target-hint").textContent}`);
+
+  // 点一张目标行的 ♥ ⇒ 自己行那张 ♥ 同时置灰且**点不动**（两行一起算）。
+  await clickAndWait(watchCardTagOf(1102));
+  const dimHeart = watchCardTagOf(1105);
+  check("票 93-W5 点一张 ⇒ 同花色其余牌（两行都算）置暗、不接 click",
+    ui.state.picks.length === 1 && ui.state.picks[0] === 1
+      && watchCardTagOf(1102).getAttribute("data-picked") === "true"
+      && !!dimHeart && dimHeart.getAttribute("data-dim") === "true"
+      && !(dimHeart.listeners.click || []).length,
+    `picks=${JSON.stringify(ui.state.picks)} dim=${dimHeart && dimHeart.getAttribute("data-dim")}`);
+  await clickAndWait(dimHeart);
+  check("票 93-W6 置暗牌点了不改变选择",
+    JSON.stringify(ui.state.picks) === "[1]", JSON.stringify(ui.state.picks));
+
+  // 点已选的那张 = 取消；同花色另一张重新亮起。
+  await clickAndWait(watchCardTagOf(1102));
+  check("票 93-W7 点已选的牌 = 取消选中，同花色另一张重新亮起",
+    ui.state.picks.length === 0 && watchCardTagOf(1105).getAttribute("data-dim") !== "true"
+      && !!(watchCardTagOf(1105).listeners.click || []).length,
+    JSON.stringify(ui.state.picks));
+
+  // 四色各一：♠(0) ＋ ♥(1) ＋ ♦(2) ＋ ♣(3) ⇒ 提交可点，送出的仍是 SelectCards（升序 picks）。
+  for (const index of [1, 0, 3, 2]) await clickAndWait(watchSlotNode(index));
+  check("票 93-W8 四色各一 ⇒ 「提交」可点；已选计数读 4/4",
+    ui.state.picks.length === 4 && $("btn-submit").disabled === false
+      && $("t-target-hint").textContent.includes("已选 4/4"),
+    `picks=${JSON.stringify(ui.state.picks)} submit=${$("btn-submit").disabled}`);
+  ui.state.sessionId = "smoke-missing-session";
+  const beforeWatchSubmit = calls.length;
+  const watchBuilt = ui.buildAction();
+  await clickAndWait($("btn-submit"));
+  const watchAnswers = calls
+    .slice(beforeWatchSubmit)
+    .filter((call) => call.path.includes("/answer"));
+  check("票 93-W9 提交 = 候选里那条 SelectCards（picks 规范化升序，与点击顺序无关）",
+    !!watchBuilt && JSON.stringify(watchBuilt.picks) === "[0,1,2,3]"
+      && watchAnswers.length === 1
+      && JSON.stringify(watchAnswers[0].body.action) === JSON.stringify(watchAction),
+    `built=${JSON.stringify(watchBuilt)} answers=${JSON.stringify(watchAnswers[0]
+      && watchAnswers[0].body.action)}`);
+
+  // 右端「放弃」= 候选里那条 Pass（不是"提交当前选择"）。
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.renderPending(watchView);
+  ui.state.sessionId = "smoke-missing-session";
+  const beforeWatchPass = calls.length;
+  await clickAndWait($("btn-pass"));
+  const watchPass = calls
+    .slice(beforeWatchPass)
+    .filter((call) => call.path.includes("/answer"))
+    .map((call) => call.body.action)[0];
+  check("票 93-W10 点「放弃」送出的就是候选里的那条 Pass（超时兜底同一条）",
+    !!watchPass && watchPass.kind === "Pass"
+      && watchPass.answers_seq === 9801,
+    JSON.stringify(watchPass));
+
+  // 非应答者：两行照画**位置**、牌面「?」、不给 click（§3 B4）。
+  const foreignSlots = watchSlots.map((slot) => ({ ref: slot.ref, card: null }));
+  const foreignPending = {
+    ...watchPending, actor: 1, seq: 9802,
+    legal_actions: [{ kind: "Pass", answers_seq: 9802 }],
+    slots: foreignSlots, revealed: [],
+  };
+  const foreignView = synthView(foreignPending);
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = foreignView;
+  ui.renderTable();
+  ui.renderPending(foreignView);
+  const foreignRows = watchRows();
+  const unknownSlots = watchFindAll($("t-options"), (node) => node.classList
+    && node.classList.contains("unknown"));
+  check("票 93-W11 非应答者：两行照画位置、牌面全是「?」、一个都不接 click",
+    ui.stepDialogKind(foreignPending) === ui.DIALOG_KINDS.watchTwoRows
+      && !$("t-dialog").hidden
+      && foreignRows.length === 2 && unknownSlots.length === 5
+      && unknownSlots.every((node) => !(node.listeners.click || []).length)
+      && $("btn-pass").hidden === true,
+    `rows=${foreignRows.length} unknown=${unknownSlots.length} passHidden=${$("btn-pass").hidden}`);
+
+  // 空选择面（凑不出四色）：仍画上行的整副手牌；出口只有「放弃」，且提示必须说清。
+  const emptyPending = {
+    ...watchPending, seq: 9803,
+    legal_actions: [{ kind: "Pass", answers_seq: 9803 }],
+    slots: [], revealed: watchTargetCards.slice(),
+  };
+  const emptyView = synthView(emptyPending);
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = emptyView;
+  ui.renderTable();
+  ui.renderPending(emptyView);
+  const emptyRows = watchRows();
+  const emptyFaces = watchFindAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-card-id") !== undefined);
+  check("票 93-W12 凑不出四色（空选择面）：整副手牌仍可见、「提交」灰着、明说只能放弃",
+    emptyRows.length === 1
+      && emptyRows[0].children[0].textContent === "目标手牌"
+      && emptyFaces.length === 2 && $("btn-submit").disabled === true
+      && $("t-target-hint").textContent.includes("凑不出四种花色")
+      && $("t-choice").textContent.includes("凑不出四种花色")
+      && $("btn-pass").hidden === false,
+    `rows=${emptyRows.length} faces=${emptyFaces.length} `
+      + `hint=${$("t-target-hint").textContent} choice=${$("t-choice").textContent}`);
+
+  // 非应答者 + 空选择面：服务端显式标记仍在，但牌面（revealed）已被抹空 ⇒ 仍画上行标签、
+  // 0 张牌；不能因为"没有牌可画"就把弹窗整个吞掉（Python 侧把这条标记当回答，前端要消费它）。
+  const foreignEmptyPending = {
+    ...foreignPending, seq: 9806,
+    slots: [], revealed: [],
+    legal_actions: [{ kind: "Pass", answers_seq: 9806 }],
+  };
+  const foreignEmptyView = synthView(foreignEmptyPending);
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = foreignEmptyView;
+  ui.renderTable();
+  ui.renderPending(foreignEmptyView);
+  const foreignEmptyRows = watchRows();
+  check("票 93-W13 非应答者 + 空选择面：仍画上行标签（牌面已抹 ⇒ 0 张），提示等待",
+    ui.stepDialogKind(foreignEmptyPending) === ui.DIALOG_KINDS.watchTwoRows
+      && !$("t-dialog").hidden
+      && foreignEmptyRows.length === 1
+      && foreignEmptyRows[0].children[0].textContent === "目标手牌"
+      && watchFindAll($("t-options"), (node) => node.getAttribute
+        && node.getAttribute("data-card-id") !== undefined).length === 0
+      && $("t-target-hint").textContent.includes("等待该座位选择"),
+    `rows=${foreignEmptyRows.length} hint=${$("t-target-hint").textContent}`);
+
+  // 生命周期（§7 的多步回放口径）：一批记录在播时询问面让位（关窗），播完按新询问重开。
+  const lifecyclePending = { ...watchPending, seq: 9807 };
+  const lifecycleBody = synthView(lifecyclePending);
+  lifecycleBody.records = [{ seq: 9807, kind: "timing", timing: "PHASE_PLAY", actor: 0 }];
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = watchView;
+  ui.applyViewRaw(lifecycleBody);
+  const closedDuringPlayback = $("t-dialog").hidden === true;
+  ui.flushPlayback();
+  check("票 93-W14 生命周期：回放期间两行面让位（关窗），播完按新询问重开",
+    closedDuringPlayback && $("t-dialog").hidden === false
+      && ui.stepDialogKind(lifecyclePending) === ui.DIALOG_KINDS.watchTwoRows
+      && watchRows().length === 2,
+    `during=${closedDuringPlayback} after=${$("t-dialog").hidden} rows=${watchRows().length}`);
+
+  // B1：只有自己一只手的退化面 ⇒ 不套两行模板（fail-closed 回落到既有槽位面），不崩。
+  const oneRowPending = {
+    ...watchPending, seq: 9804,
+    slots: watchSelfCards.map((card) => ({ ref: { zone: "hand", seat: 0 }, card })),
+  };
+  const oneRowView = synthView(oneRowPending);
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = oneRowView;
+  ui.renderTable();
+  ui.renderPending(oneRowView);
+  check("票 93-B1 只有一手的退化面不画两行（判据要求恰好两个座位）",
+    ui.stepDialogKind(oneRowPending) === null && watchRows().length === 0,
+    `kind=${ui.stepDialogKind(oneRowPending)} rows=${watchRows().length}`);
+
+  // B2：同一 card_id 出现两次（引擎数据错误）⇒ 画得出、但不许提交。
+  const duplicatePending = {
+    ...watchPending, seq: 9805,
+    slots: [
+      { ref: { zone: "hand", seat: 1 }, card: watchTargetCards[0] },
+      { ref: { zone: "hand", seat: 1 }, card: watchTargetCards[0] },
+      { ref: { zone: "hand", seat: 0 }, card: watchSelfCards[0] },
+      { ref: { zone: "hand", seat: 0 }, card: watchSelfCards[1] },
+    ],
+  };
+  const duplicateView = synthView(duplicatePending);
+  ui.state.sessionId = null;
+  ui.state.picks = [0, 1, 2, 3];
+  ui.state.view = duplicateView;
+  ui.renderTable();
+  ui.renderPending(duplicateView);
+  check("票 93-B2 重复槽位（同一 card_id 两次）画得出但「提交」恒灰，提示说数据异常",
+    $("btn-submit").disabled === true
+      && $("t-choice").textContent.includes("重复"),
+    `submit=${$("btn-submit").disabled} choice=${$("t-choice").textContent}`);
+  ui.state.picks = [];
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

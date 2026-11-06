@@ -2281,6 +2281,49 @@ def judgment_reveal_state(
     }
 
 
+def _two_row_watch_face(query: Query) -> bool:
+    """这一步是不是**两行观看手牌**的选牌面（lei-shenganning 票 93 的框架面）。
+
+    判据只读**询问形状**，不认技能 id：
+
+    - ``SELECT_CARDS`` ∧ ``spec.max_per_suit`` 有值（"每种花色至多一张"这条约束是面自己的
+      声明，不是技能名）；
+    - 槽位**恰好跨两个座位**，且其中一个是询问者自己 ⇒ 上行 = 对方手牌、下行 = 自己的手牌；
+      只有一手（目标 0 手牌，票面说"不该出现"）⇒ 不套本模板、整面 fallback（§3 B1）；
+    - 槽位为空 = 凑不出四色的**空选择面**（引擎 ``ask_when_empty=True``）：整副被观看的手牌
+      仍在 ``revealed`` 里，仍开这个模板，只有「放弃」一个出口。**空面的 ``revealed`` 约定
+      只含上行（被观看角色）那一手**——正常面的 ``revealed`` 才是两副手牌的并集（观看授予）。
+
+    判据跑在 ``_mask_watched_faces`` **之前**读原始询问：``revealed`` 是授予应答者的观看
+    通道，非应答者的载荷里已被抹空；但"这一步是两行观看面"是**公开形状**（哪两个座位的手牌
+    在面里、要不要四色），非应答者也要按两行画位置（票面 §3 B4）。牌面本身仍只由
+    ``_mask_watched_faces`` 决定，本函数不碰任何牌面。
+
+    与前端 :func:`modal.js:isWatchTwoRowsStep` 读的是**同一形状**、但读取面不同：这里拿到
+    未抹的询问（``revealed`` 恒在），前端拿到的是抹后的载荷（非应答者的 ``revealed`` 为空，
+    只能靠服务端下发的 ``dialog`` 标记补上"这是观看面"的证据）。
+    """
+    if str(getattr(query, "kind", "")) != "SELECT_CARDS":
+        return False
+    spec = getattr(query, "spec", None)
+    if spec is None or not getattr(spec, "max_per_suit", None):
+        return False
+    if not getattr(query, "revealed", ()):
+        return False
+    slots = getattr(query, "slots", ()) or ()
+    if not slots:
+        return True
+    seats: set[int] = set()
+    for slot in slots:
+        ref = getattr(slot, "ref", None)
+        if ref is None or getattr(ref, "seat", None) is None:
+            return False
+        seats.add(int(ref.seat))
+    if len(seats) != 2:
+        return False
+    return int(query.actor) in seats
+
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -2404,15 +2447,24 @@ def pending_payload(
     # ``SELECT_CARDS`` 且这一问带着**授予的牌面**（``revealed`` 非空，票 15 的私密观看通道）。
     # 当前唯一生产者是【遗计】的牌堆顶两张；将来同形状的观看技能自动套同一模板。
     #
-    # 只在**查看者就是挂起者**时给（上面 :func:`_mask_watched_faces` 已把别人的 ``revealed``
-    # 抹空，故这里读的是抹后的载荷）：它不是牌面数据，也不必发给他人的屏幕——别人的那一份
-    # 连"这一步是私密亮牌"都不需要知道。取不到查看者（409 裸 ``Query`` 且没声明）同样为
-    # ``None``（fail-closed）。键恒在；**不进记录流 / 金录像**（纯派生展示字段）。
-    payload["dialog"] = (
-        "reveal"
-        if str(query.kind) == "SELECT_CARDS" and payload.get("revealed")
-        else None
-    )
+    # 票 93：**两行观看手牌**（上行对方手牌 / 下行自己手牌、四色各一张）是同一通道上的
+    # 另一种面。标记按**原始询问**算（见 :func:`_two_row_watch_face`），先于 ``revealed``
+    # 的抹除：形状是公开事实，非应答者也要按两行画位置。
+    if _two_row_watch_face(query):
+        payload["dialog"] = "watchTwoRows"
+        # 不另下发 `rows`：`slots` 已经是唯一真源（`ref.seat` 分两行即可），再序列化一份
+        # 同一组牌面会让"哪一份是真源"变含混（与 `_arrange_spec` 不重发 `revealed` 同一条）。
+    else:
+        # 其余情况**只在查看者就是挂起者**时给（上面 :func:`_mask_watched_faces` 已把别人的
+        # ``revealed`` 抹空，故这里读的是抹后的载荷）：它不是牌面数据，也不必发给他人的
+        # 屏幕——别人的那一份连"这一步是私密亮牌"都不需要知道。取不到查看者（409 裸
+        # ``Query`` 且没声明）同样为 ``None``（fail-closed）。键恒在；**不进记录流 / 金录像**
+        # （纯派生展示字段）。
+        payload["dialog"] = (
+            "reveal"
+            if str(query.kind) == "SELECT_CARDS" and payload.get("revealed")
+            else None
+        )
     # A1：洛神连续判定的显示层派生（`{chain_key, card, final}`）。只从记录流 / 引擎已有
     # 事实派生，**不进记录流 / 06 / 金录像**；查看者不是挂起者时为 None（fail-closed）。
     # 字段键恒在（读取方契约），无循环时为 None。

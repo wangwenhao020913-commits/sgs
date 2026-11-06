@@ -44,6 +44,9 @@ const DIALOG_KINDS = Object.freeze({
   distribution: "distribution",
   // 武将牌上的牌（huo-shenzhugeliang 票 02）：星牌点选（1..k 张，提交后结算）。
   heroPick: "heroPick",
+  // 两行观看手牌（lei-shenganning 票 93）：上行被观看角色的手牌、下行自己的手牌；
+  // 同花色置灰、必须四色各一张才可提交（首张技能票 = 神甘宁【魄袭】）。
+  watchTwoRows: "watchTwoRows",
 });
 
 /** 候选里有没有一条 `Pass`（判断"这一步能不能放弃"的**载荷**判据，不认技能 id）。 */
@@ -156,6 +159,9 @@ function stepDialogKind(pending) {
   // 武将牌上的牌（huo-shenzhugeliang 票 02）：选牌面的槽**全部**来自 HERO 区 ⇒ 弹窗。
   // 判据只看载荷形状（槽的 ``ref.zone``），不认技能名。
   if (isHeroZonePickStep(pending)) return DIALOG_KINDS.heroPick;
+  // 票 93：两行观看手牌——槽位恰好跨两个座位（含自己）且 `spec.max_per_suit` 有值。
+  // 排在涉猎 / 亮牌之前：它也是 `SELECT_CARDS` + `max_per_suit`，但槽位在**两副手牌**里。
+  if (isWatchTwoRowsStep(pending)) return DIALOG_KINDS.watchTwoRows;
   // 票 01：公开亮牌 + 每种花色至多 k 张（涉猎）——在亮牌判据之前，二者形状不同。
   if (isSuitPickStep(pending)) return DIALOG_KINDS.suit;
   if (isRevealStep(pending)) return DIALOG_KINDS.reveal;
@@ -185,6 +191,42 @@ function isHeroZonePickStep(pending) {
   const slots = pending.slots || [];
   if (!slots.length) return false;
   return slots.every((slot) => slot.ref && slot.ref.zone === "hero");
+}
+
+/** 两行观看手牌（lei-shenganning 票 93）的**唯一判据**：判据只吃载荷形状，不认技能 id。
+ *
+ *  - `SELECT_CARDS` ∧ `spec.max_per_suit` 有值（"每种花色至多一张"是面自己的声明）；
+ *  - 槽位**恰好跨两个座位**，且其中一个是询问者自己（`pending.actor`）⇒ 上行对方手牌、
+ *    下行自己的手牌。**只有一手**（目标 0 手牌，票面说"不该出现"）时两行不成立 ⇒
+ *    **整面 fallback** 到既有槽位面，不画一行（票面 §3 B1 的二者取一，选这一档）；
+ *  - 槽位为空 = 凑不出四色的**空选择面**（引擎 `ask_when_empty`）：服务端用
+ *    `pending.dialog = "watchTwoRows"` 标记它，牌面在 `pending.revealed` 里（与【攻心】
+ *    "空选择面也要看牌"同一口径）。没有标记时**不**抢其它模板（fail-closed）。
+ *
+ * 票面 §2.1 的触发形状还要求"`revealed` 非空"。前端读的是**抹后**的载荷：非应答者的
+ * `revealed` 已被抹空、只剩座位形状与服务端标记，故这里把"`revealed` 非空 **或** 显式
+ * 标记"当作观看授予的证据（§3 B4 要非应答者也画两行位置）。投影侧面对未抹的询问，
+ * 判据另见 `projection.py:_two_row_watch_face`（它恒有 `revealed`）。
+ *
+ * 只看形状不看牌面：非应答者的载荷里 `slots[].card` 已被抹成空，座位仍在 ⇒ 照画两行
+ * 位置、牌面为「?」（票面 §3 B4；点不点得动另由 `isOwnPending` 决定）。
+ */
+function isWatchTwoRowsStep(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  const spec = pending.spec || {};
+  if (!spec.max_per_suit) return false;
+  const explicit = pending.dialog === DIALOG_KINDS.watchTwoRows;
+  const slots = pending.slots || [];
+  if (!slots.length) return explicit;
+  if (!explicit && !(pending.revealed || []).length) return false;
+  const seats = new Set();
+  for (const slot of slots) {
+    const ref = slot && slot.ref;
+    if (!ref || ref.seat === null || ref.seat === undefined) return false;
+    seats.add(Number(ref.seat));
+  }
+  if (seats.size !== 2) return false;
+  return seats.has(Number(pending.actor));
 }
 
 function isChoiceStep(pending) {
@@ -391,6 +433,12 @@ function dialogTitleFor(kind, pending) {
   if (kind === DIALOG_KINDS.arrange) return "排列";
   if (kind === DIALOG_KINDS.heroPick) return "选择武将牌上的牌";
   if (kind === DIALOG_KINDS.distribution) return "分配";
+  // 票 93：两行观看面的标题 = 技能展示名（服务端 `context.name`），没有时给中性文案；
+  // 行标签才写"这是谁的手牌"（见 `reveal.js:watchRowLabel`）。
+  if (kind === DIALOG_KINDS.watchTwoRows) {
+    const contextName = pending && pending.context && pending.context.name;
+    return contextName || "观看手牌";
+  }
   if (kind === DIALOG_KINDS.choice) {
     // 展示武将牌（票 08）：标题 = 技能名（`context.name` 优先 / `view.skills` 兜底）。
     if (isShowHeroCardStep(pending)) return heroCardTitle(pending);
@@ -738,7 +786,10 @@ function syncDialog() {
     && stepDialogKind(pending) === DIALOG_KINDS.reveal;
   // 票 01：涉猎的亮牌在**公开处理区**，弹窗对所有人都在（非发动者只读）。
   const publicSuit = !!pending && isSuitPickStep(pending);
-  const publicHarvest = harvestStepped || persistent || publicSuit;
+  // 票 93：两行观看面的**两行位置**是公开形状（观看本身公开），非应答者也要看到两行、
+  // 牌面为「?」且不可点（§3 B4）；应答者的牌面由 `_mask_watched_faces` 收口。
+  const publicWatch = !!pending && stepDialogKind(pending) === DIALOG_KINDS.watchTwoRows;
+  const publicHarvest = harvestStepped || persistent || publicSuit || publicWatch;
   // 票 01：提交后 2.5 秒的结果态**只在发动者本地**（`state.suitResult`），它压过下一问的
   // 表面直到计时结束；计时结束后 `renderPending` 会重画真正的下一步。
   const settle = suitResultActive();
