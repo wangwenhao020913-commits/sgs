@@ -12,7 +12,9 @@
 | `docs/agents/skill-authoring/edge-cases.md` | 极端情况：按形状分组的"必须回答的问题"清单 |
 | `docs/agents/skill-authoring/batch-ticket.md` | 票面骨架：一将一票、DoD、门禁与提交节奏 |
 
-工具（只读）：`tools/dump_catalog.py`（形状指纹与封闭集）、`tools/similar_skills.py`（相似技能反查）。
+工具（只读）：`tools/dump_catalog.py`（形状指纹与封闭集）、`tools/similar_skills.py`（相似技能反查）、
+`tools/pool_census.py`（将池构成清单：**加武将 / 改池后先跑它**，一次列出「哪些断言写死了版本 /
+真名 / 技能数 / 形态格」并逐站点对账；`--check` 不一致即非零退出，`--json` 机读）。
 
 ---
 

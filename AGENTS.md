@@ -121,6 +121,8 @@
 `docs/agents/skill-authoring/edge-cases.md`（极端情况清单）、
 `docs/agents/skill-authoring/batch-ticket.md`（票面骨架与 DoD）。
 
-两份只读工具：`.venv/bin/python tools/dump_catalog.py`（形状指纹 / 反查 / 封闭集枚举）、
-`.venv/bin/python tools/similar_skills.py --like <技能 id>`（相似技能反查）。
+三份只读工具：`.venv/bin/python tools/dump_catalog.py`（形状指纹 / 反查 / 封闭集枚举）、
+`.venv/bin/python tools/similar_skills.py --like <技能 id>`（相似技能反查）、
+`.venv/bin/python tools/pool_census.py`（将池构成清单：**加武将 / 改池后先跑它**，`--check`
+不一致即非零退出——口径见 `docs/agents/skill-authoring.md` 的工具那一行）。
 开工前跑 `.venv/bin/pytest -q tests/test_skill_authoring_docs.py`：它红 = 框架变了而文档没跟上。
