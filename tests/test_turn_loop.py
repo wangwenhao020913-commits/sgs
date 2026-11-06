@@ -815,3 +815,130 @@ def test_the_no_hook_game_start_record_is_byte_identical_to_the_frozen_replay():
         for other in engine.records
         if other.kind == "frame" and other.seq < first_turn.seq
     ], "没有 L0 钩子 ⇒ 一个帧都不建"
+
+
+# ---------------------------------------------------------------------------
+# 「结束出牌阶段」的受管写入口（lei-shenganning 票 92）
+#
+# 用户 2026-11-07 裁定："就像是玩家点击结束回合按钮那样，直接结束出牌阶段。并非跳过，而是结束"。
+# 落点 = ``Engine.end_play_phase``（`_phase_play_idle` 消费）——与玩家回 ``EndPhase`` 同一条
+# 收尾路径；与 ``skip_play_phase``（只在 ``_phase_play_start`` 消费）不是一个时点。
+#
+# 写入口只该在**结算**里被调用（技能效果 / 钩子），不是在被问的玩家那里——故下面用
+# "座位 1 在【闪】窗口里替座位 0 结束出牌阶段"来模拟：那正是"出牌阶段里的一次子结算"。
+# ---------------------------------------------------------------------------
+
+
+def _play_phase_action(query):
+    """出牌阶段里一条**非结束**的合法动作（用一张牌）。"""
+    for action in query.legal_actions:
+        if getattr(action, "kind", None) != "EndPhase":
+            return action
+    return next(
+        action for action in query.legal_actions if getattr(action, "kind", None) == "EndPhase"
+    )
+
+
+class _PlaysCards:
+    """一直出第一张能用的牌；从不结束阶段（结束只可能来自 ``end_play_phase``）。"""
+
+    def __init__(self) -> None:
+        self.play_queries = 0
+        self._fallback = RecordingPlayer()
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            self.play_queries += 1
+            return _play_phase_action(query)
+        return self._fallback.respond(query)
+
+
+class _EndsSomebodysPlayPhase:
+    """在**自己的第一次响应窗口**里替 ``seat`` 结束出牌阶段（模拟一次子结算里的技能效果）。
+
+    座位 1 的【闪】窗口落在座位 0 用【杀】的结算里 ⇒ 正是"出牌阶段之内、子帧之中"。
+    ``seat=None`` = 对照组（什么都不调）。
+    """
+
+    def __init__(self, engine, *, seat: int | None) -> None:
+        self.engine = engine
+        self.seat = seat
+        self.calls = 0
+        self._fallback = RecordingPlayer()
+
+    def respond(self, query):
+        if query.kind == QueryKind.DODGE and self.calls == 0 and self.seat is not None:
+            self.calls += 1
+            self.engine.end_play_phase(self.seat)
+        return self._fallback.respond(query)
+
+
+def _slash_position():
+    """座位 0 手里一张【杀】（id 10 = basic_53 的【杀】），牌堆是 0..9。"""
+    return _small_position(deck=tuple(range(10)), hand_a=(10,))
+
+
+def _used_cards(engine) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.USE
+    ]
+
+
+def test_end_play_phase_finishes_the_idle_loop_like_the_button():
+    engine = Engine.from_state(_slash_position(), seed=1)
+    actor = _PlaysCards()
+    other = _EndsSomebodysPlayPhase(engine, seat=0)
+    run_turns(engine, [actor, other], turns=1)
+
+    assert other.calls == 1, "【闪】窗口确实出现过（那张【杀】真的结算了）"
+    assert _used_cards(engine), "那张【杀】照常用了（效果是在这一段结算完之后才收尾）"
+    assert actor.play_queries == 1, (
+        "子结算里结束了出牌阶段 ⇒ 不该再来第二问；"
+        f"实得 {actor.play_queries} 问"
+    )
+    first_turn = _timings(engine, before=_first_turn_after_end(engine))
+    assert Timing.PHASE_PLAY_END in first_turn and Timing.PHASE_DISCARD_START in first_turn, (
+        "结束之后照常走 出牌阶段结束时 → 弃牌阶段"
+    )
+    assert first_turn.count(Timing.PHASE_PLAY_IDLE) == 1, "本回合只进一次出牌阶段空闲步"
+
+
+def test_without_end_play_phase_the_idle_loop_asks_again():
+    """对照：同样出那张【杀】，但不调写入口 ⇒ 出牌阶段会**再问一次**（标志才是原因）。"""
+    engine = Engine.from_state(_slash_position(), seed=1)
+    actor = _PlaysCards()
+    other = _EndsSomebodysPlayPhase(engine, seat=None)
+    run_turns(engine, [actor, other], turns=1)
+
+    assert actor.play_queries >= 2, (
+        "没有受管写入口时，出牌阶段用完牌后照常再问一次；"
+        f"实得 {actor.play_queries} 问"
+    )
+
+
+def test_end_play_phase_is_a_no_op_before_the_play_phase():
+    """与 ``skip_play_phase`` 的区别：阶段**还没开始**时调用 ⇒ 什么都不发生。"""
+    engine = Engine.from_state(_slash_position(), seed=1)
+    engine.end_play_phase(0)  # 局面还在准备阶段（``_small_position`` 的 phase=PREPARE）
+    actor = _PlaysCards()
+    run_turns(engine, [actor, RecordingPlayer()], turns=1)
+
+    assert actor.play_queries >= 2, "出牌阶段照常进行（不是跳过，也不是结束）"
+
+
+def test_end_play_phase_of_another_seat_is_a_no_op():
+    """别人的回合里调用 ⇒ 静默 no-op（不是编程错误，只是没有效果）。"""
+    engine = Engine.from_state(_slash_position(), seed=1)
+    actor = _PlaysCards()
+    other = _EndsSomebodysPlayPhase(engine, seat=1)
+    run_turns(engine, [actor, other], turns=1)
+
+    assert other.calls == 1, "【闪】窗口确实出现过"
+    assert actor.play_queries >= 2, (
+        "调的是座位 1，当前回合角色是座位 0 ⇒ 座位 0 的出牌阶段不受影响；"
+        f"实得 {actor.play_queries} 问"
+    )

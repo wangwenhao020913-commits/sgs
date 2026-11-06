@@ -3036,6 +3036,29 @@ class Engine:
         if self.state.turn_seat == seat:
             self._turn_data["skip_discard"] = True
 
+    def end_play_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**当前**出牌阶段立刻结束（= 玩家点「结束出牌阶段」的同一效果）。
+
+        与 :meth:`skip_play_phase` 的区别只在**时点**：跳过消费在 :meth:`_phase_play_start`
+        （阶段还没开始），本方法消费在 :meth:`_phase_play_idle`（阶段**之内**）——当前这一段
+        结算完之后，本步直接收尾，``PHASE_PLAY_END`` → 弃牌阶段 → … 照常（与玩家自己回
+        ``EndPhase`` 走同一条收尾路径，不重发询问、不新增记录）。
+
+        只对**当前回合角色**、且**出牌阶段正在进行中**时生效；其余情形静默 no-op（在别人的
+        回合 / 别的阶段调用不是编程错误，只是没有效果）。状态住 ``_turn_data``（引擎私有、
+        每回合清空），故不新增 ``Timing`` / 帧 / delta。
+
+        **调用位置**：在**结算**里调（技能效果 / 钩子 / 使用的子结算），不要在被问的玩家的
+        ``respond`` 里调——``Engine.ask`` 是"先拿应答、再回到步骤里应用"的两段式，中途打的
+        标志会让那一条应答失去落点（那一问等于没答）。技能效果都跑在子帧里，天然满足这条。
+
+        载体 = 神甘宁【魄袭】的 1 档「你结束出牌阶段」（lei-shenganning 票 92；用户 2026-11-07
+        裁定："就像是玩家点击结束回合按钮那样，直接结束出牌阶段。并非跳过，而是结束"）。
+        """
+        if self.state.turn_seat != seat or self.state.phase is not Phase.PLAY:
+            return
+        self._turn_data["play_over"] = True
+
     def set_draw_phase_count(self, seat: int, count: int) -> None:
         """把 ``seat`` 本回合摸牌阶段的**基础摸牌数**改成 ``count``（M6 票 01 的加法）。
 
@@ -5750,6 +5773,10 @@ class Engine:
         if not self._turn_data.get("play_idle_emitted"):
             self.emit_timing(Timing.PHASE_PLAY_IDLE, actor=seat)
             self._turn_data["play_idle_emitted"] = True
+        if self._turn_data.pop("play_over", False):
+            # 「结束出牌阶段」的受管写入口（:meth:`end_play_phase`）在上一段结算里被效果调用：
+            # 本步与玩家自己回 ``EndPhase`` 走**同一条**收尾（lei-shenganning 票 92）。
+            return None
         action = self.ask(
             lambda seq: self._build_query(QueryKind.PLAY_PHASE, seat, Timing.PHASE_PLAY_IDLE, seq),
             identity=self._ask_identity(QueryKind.PLAY_PHASE, seat, None),
