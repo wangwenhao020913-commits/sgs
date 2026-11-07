@@ -80,8 +80,7 @@ from sgs.state import (
     MoveReason,
     Pass,
     RespondMode,
-    SEALED_ZONE_EQUIP,
-    SEALED_ZONE_JUDGE,
+    SEALED_SLOT_IDS,
     SelectionSpec,
     Slot,
     SlotKind,
@@ -4550,14 +4549,14 @@ QUHU_FLOW = SkillFlow(
 #     　限定技，出牌阶段，你可以废除你的判定区和装备区并选择一名其他角色，
 #       然后本回合：你对其使用牌无距离与次数限制、其不能使用或打出手牌。
 #
-# 用户 2026-11-05 的裁定：
+# 用户 2026-11-05 的裁定（票 03 起补上 2026-11-07 的逐槽粒度）：
 #
 # - 发动步骤 = 点技能进入**预发动** → 第一步选 1 名其他角色 → 确认才发动；
-# - **隐藏发动 cost**：自身至少有一个还能被废除的区域（判定区 / 装备区）。发动完两个区
-#   都封印了 ⇒ 即使有人恢复限定技的"整局已用"位，也**再不能发动**——故可用性读的是
-#   "区域是否已封印"，不是限定位；实现落在座位池上（池空 ⇒ 清单渲不出 ⇒ 没有入口）；
-# - 「废除区域」是**同一种事件**（票 02 的框架面 `Engine.abolish_zone` / `restore_zone`）：
-#   区域内牌先强制弃置、再落封印；
+# - **隐藏发动 cost**：自身至少有一个还能被废除的**槽**（判定 3 + 装备 4 = 7）。7 槽全封 ⇒
+#   即使有人恢复限定技的"整局已用"位，也**再不能发动**——故可用性读的是"槽是否已封印"，
+#   不是限定位；实现落在座位池上（池空 ⇒ 清单渲不出 ⇒ 没有入口）；
+# - 「废除」是**一个事件**（lukang-mobile 票 03 的框架面 `Engine.abolish_slots` /
+#   `restore_slots`，状态粒度 = 槽）：槽里牌先强制弃置（按来源区分组搬牌）、再落封印；
 # - 「你对其使用牌无距离与次数限制」= **按目标收窄**（只对那名角色）：
 #   * 距离侧 = `TARGET_POOL` 修饰器把他补回候选池（豁免距离 / 攻击范围）；
 #   * 次数侧 = `COUNT_EXEMPT` 修饰器按 `ModifierContext.use_targets` 判（目标集合 ⊆ {他}
@@ -4568,18 +4567,22 @@ QUHU_FLOW = SkillFlow(
 XIONGLUAN = hero_skill_id("zhangxiu", "xiongluan")
 """张绣【雄乱】的全限定技能 id。"""
 
-_XIONGLUAN_ZONES = (SEALED_ZONE_JUDGE, SEALED_ZONE_EQUIP)
-"""雄乱废除的两个区域：判定区 + 装备区（装备区封印覆盖全部装备槽位）。"""
+_XIONGLUAN_SLOTS = SEALED_SLOT_IDS
+"""雄乱废除的**七个槽**（lukang-mobile 票 03 的逐槽口径）：判定区 3 槽 + 装备区 4 槽。
+
+牌面「废除你的判定区和装备区」仍是"两个区域"，但**一个废除事件**落的是这 7 个槽
+（用户 2026-11-07）；`Engine.abolish_slots` 一次调用 = 一个事件、按来源区分组搬牌。
+"""
 
 
 def _xiongluan_available(state: GameState, owner: int) -> bool:
-    """隐藏发动 cost：至少一个区域还能被废除（两个都封印 ⇒ 这张牌再也发不动）。"""
+    """隐藏发动 cost：至少一个槽还能被废除（7 槽全封 ⇒ 这张牌再也发不动）。"""
     player = state.player(owner)
-    return any(zone_id not in player.sealed_zones for zone_id in _XIONGLUAN_ZONES)
+    return any(slot not in player.sealed_zones for slot in _XIONGLUAN_SLOTS)
 
 
 def _xiongluan_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """候选：出牌阶段 + 本人 + 还有可废除的区域 + 有合法目标（限定位由外层闸管）。"""
+    """候选：出牌阶段 + 本人 + 还有可废除的槽 + 有合法目标（限定位由外层闸管）。"""
     if not _can_offer(state, ctx, once_per_phase=False):
         return current
     if not _xiongluan_available(state, ctx.subject):
@@ -4600,17 +4603,19 @@ def _xiongluan_pool(
 
 
 def _xiongluan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：废除判定区与装备区（区域里的牌先弃置）→ 两条本回合效果。"""
+    """提交点：**一个事件**废除 7 个槽（3 判定 + 4 装备；槽里的牌先弃置）→ 两条本回合效果。
+
+    用户 2026-11-07 的逐槽口径：一次调用 = 一个废除事件（`Engine.abolish_slots`），不再
+    分两次按"整区"废。幂等：已封印的槽不重落、已空的槽不重搬；弃牌挂起时原样透传。
+    """
     state = host.state
     owner = int(frame.data["source"])
     seat = next(iter(int(value) for value in answers.get("seat", ())), None)
     if seat is None:
         return None
-    for zone_id in _XIONGLUAN_ZONES:
-        # 幂等：已封印 / 已空 ⇒ 零动作；弃牌挂起时原样透传，重入不会重复搬牌。
-        control = host.abolish_zone(frame, owner, zone_id)
-        if control == "stay":
-            return "stay"
+    control = host.abolish_slots(frame, owner, _XIONGLUAN_SLOTS)
+    if control == "stay":
+        return "stay"
     host.set_hand_card_prohibition(seat, True)
     state.player(owner).xiongluan_target = seat
     return None

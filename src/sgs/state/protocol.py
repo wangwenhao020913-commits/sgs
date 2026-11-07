@@ -541,7 +541,8 @@ class PlayerPublic(_FrozenModel):
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
     sealed_zones: tuple[str, ...] = Field(default=(), exclude=True)
-    """被**废除（封印）**的区域（lei 票 05 下发；取值 = ``SEALED_ZONE_IDS`` 的闭集）。
+    """被**废除（封印）**的**槽**（lei 票 05 下发、lukang-mobile 票 03 改成逐槽；取值 =
+    ``SEALED_SLOT_IDS`` 的闭集：``judge_1..3`` + 四个装备槽）。
 
     **公开事实**（牌桌上人人可见谁的哪个区域被废除了）：``judge`` / ``equip``（整个装备区）/
     ``weapon`` / ``armor`` / ``horse_offense`` / ``horse_defense``，与

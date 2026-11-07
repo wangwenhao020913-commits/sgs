@@ -98,55 +98,80 @@ class SlotKind(str, Enum):
     TREASURE = "treasure"
 
 
+JUDGE_SLOTS: tuple[str, ...] = ("judge_1", "judge_2", "judge_3")
+"""**判定区的三个槽位**（lukang-mobile 票 03；用户 2026-11-07 裁定的逐槽口径）。
+
+判定区在规则里是一个区域，界面与"同一判定区不能有两张同名延时锦囊"（账本 L626）把它
+固定成三格：今天的三种延时锦囊（乐不思蜀 / 兵粮寸断 / 闪电）恰好各占一格。**位置**本身
+没有规则含义（读取面只回答"这个位置能不能放牌"），槽数因此与界面布局同源——将来某个包
+加出第四种延时锦囊时，这里与 `tools/sgs_web/static/seat-view.js:judgeSlotLayout` 一起加。
+"""
+
+EQUIP_SLOTS: tuple[str, ...] = (
+    SlotKind.WEAPON.value,
+    SlotKind.ARMOR.value,
+    SlotKind.HORSE_OFFENSE.value,
+    SlotKind.HORSE_DEFENSE.value,
+)
+"""**装备区的四个槽位**（顺序 = 界面从左到右：武器 / 防具 / 攻马 / 防马）。
+
+宝物槽位当前不启用（ADR-006），故不在这张表里；将来启用时加进来，读取面与
+`abolish_slots` 的闭集一起看到。
+"""
+
+SEALED_SLOT_IDS: tuple[str, ...] = (*JUDGE_SLOTS, *EQUIP_SLOTS)
+"""``Player.sealed_zones`` 的**槽位闭集**（7 个；顺序 = 判定 3 + 装备 4）。
+
+lukang-mobile 票 03 起，「废除」的**状态粒度 = 槽**（用户 2026-11-07）：雄乱的一次发动 =
+一个事件废除这 7 个槽；决堰的一次发动 = 一个事件废除 1 或 2 个装备槽。**不再有** `judge` /
+`equip` 两个"整区"取值——"某区被废除"改由 :func:`judge_zone_sealed` /
+:func:`equip_zone_sealed` **派生**（该区的槽全被封印）。
+"""
+
+SEALED_ZONE_IDS: frozenset[str] = frozenset(SEALED_SLOT_IDS)
+"""槽位闭集的 set 形态（`Engine.abolish_slots` / `restore_slots` 的校验用；同一份真源）。"""
+
 SEALED_ZONE_JUDGE = "judge"
-"""被废除的区域 id：**判定区**（延时锦囊不落、角色不是延时锦囊的合法目标）。"""
+"""**整区**名：不是状态值，只作读取面的兼容入口（:func:`zone_sealed` 把它读成
+"3 个判定槽全封"）。``Player.sealed_zones`` 里**永远不出现**它（票 03 起状态粒度 = 槽）。"""
 
 SEALED_ZONE_EQUIP = "equip"
-"""被废除的区域 id：**装备区**（整个区；覆盖 :data:`SEALED_ZONE_IDS` 里的全部装备槽位）。"""
+"""**整区**名：同 :data:`SEALED_ZONE_JUDGE`，读取面兼容入口（4 个装备槽全封）。"""
 
-SEALED_ZONE_IDS: frozenset[str] = frozenset(
-    {
-        SEALED_ZONE_JUDGE,
-        SEALED_ZONE_EQUIP,
-        SlotKind.WEAPON.value,
-        SlotKind.ARMOR.value,
-        SlotKind.HORSE_DEFENSE.value,
-        SlotKind.HORSE_OFFENSE.value,
-    }
-)
-"""``Player.sealed_zones`` 的**闭集**（lei-batch 票 02；用户 2026-11-05 裁定）。
 
-「废除判定区 / 装备区 / 武器槽 / 防具槽 / 坐骑槽 / 进攻马槽 / 防御马槽」是**同一种事件**
-（「废除区域」），取值就是这张表；「恢复区域」把对应的位去掉。宝物槽位当前不启用，故不在
-闭集里（ADR-006）。"""
+def judge_zone_sealed(player: "Player") -> bool:
+    """判定区是否处于**封印状态** = 三个判定槽**全部**被封印。
 
-_SEALED_EQUIP_SLOTS: frozenset[str] = frozenset(
-    slot.value for slot in SlotKind if slot.value in SEALED_ZONE_IDS
-)
-"""**单个装备槽位**的封印闭集：直接取 :data:`SEALED_ZONE_IDS` 与 ``SlotKind`` 的交集。
+    读取面用它与旧的"整区 `judge`"对齐：延时锦囊的目标规则、闪电的转移都问这一句；
+    只封 1～2 个判定槽（今天的载体不会产生）**不**等于判定区被废除。
+    """
+    return all(slot in player.sealed_zones for slot in JUDGE_SLOTS)
 
-不另抄一张槽位表——``zone_sealed`` 的槽位判据与 ``abolish_zone`` 的可废除闭集因此
-**同一份真源**：给闭集加一个槽位，两个函数一起看到；宝物槽位不在闭集（ADR-006），
-也就不在这里。
-"""
+
+def equip_zone_sealed(player: "Player") -> bool:
+    """装备区是否处于**封印状态** = 四个装备槽**全部**被封印。"""
+    return all(slot in player.sealed_zones for slot in EQUIP_SLOTS)
 
 
 def zone_sealed(player: "Player", zone_id: str) -> bool:
-    """该座位这个区域是否**被废除**。
+    """该座位这个**区 / 槽**是否被废除（读取面的唯一判据）。
 
-    ``equip`` 封印覆盖**闭集里的**全部装备槽位（整个装备区没了）；单个槽位的封印只看
-    **自己**那一位——封印武器槽不等于废除装备区，防具槽照常可用。
+    - 槽位 id（`weapon` / `armor` / `horse_offense` / `horse_defense` / `judge_1..3`）：
+      只看**自己**那一位——封印武器槽不等于废除装备区，防具槽照常可用；
+    - 整区名（`judge` / `equip`）：**兼容入口**，读成"该区的槽全封"（派生，不存状态）；
+    - 其它值一律 ``False``（fail-closed）。
 
     **宝物槽位（``treasure``）的口径**：ADR-006 下宝物槽位不启用、不在
-    :data:`SEALED_ZONE_IDS`，故整个装备区封印**不**把 ``treasure`` 读成已封印
-    （``_SEALED_EQUIP_SLOTS`` 是从闭集派生的，不另写一份含 ``treasure`` 的名单）。
-    将来启用宝物槽时，必须同时把它加进 ``SEALED_ZONE_IDS``——本函数随之自动覆盖。
+    :data:`SEALED_SLOT_IDS`，故它既不能被废除、也不会被读成已封印。
     """
-    if zone_id in player.sealed_zones:
-        return True
-    if zone_id in _SEALED_EQUIP_SLOTS:
-        return SEALED_ZONE_EQUIP in player.sealed_zones
+    if zone_id in SEALED_ZONE_IDS:
+        return zone_id in player.sealed_zones
+    if zone_id == SEALED_ZONE_JUDGE:
+        return judge_zone_sealed(player)
+    if zone_id == SEALED_ZONE_EQUIP:
+        return equip_zone_sealed(player)
     return False
+
 
 
 class CardRef(_FrozenModel):
@@ -489,12 +514,16 @@ class Player(BaseModel):
     """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
     每次变化发一条 ``wine_change`` delta）。"""
     sealed_zones: tuple[str, ...] = ()
-    """被**废除（封印）**的区域（lei-batch 票 02；用户 2026-11-05 裁定的「废除区域」事件）。
+    """被**废除（封印）**的**槽位**（lei-batch 票 02 立、lukang-mobile 票 03 改成逐槽）。
 
-    取值是 :data:`SEALED_ZONE_IDS` 的闭集：``judge`` / ``equip``（整个装备区）/
-    ``weapon`` / ``armor`` / ``horse_offense`` / ``horse_defense``。写入**唯一入口**是
-    ``Engine.abolish_zone`` / ``Engine.restore_zone``：废除 = 先把该区域里的牌强制弃置
-    （进弃牌堆、``MoveReason.DISCARD``），再落这一位；恢复 = 去掉这一位。
+    取值是 :data:`SEALED_SLOT_IDS` 的闭集（7 个）：判定区 ``judge_1`` / ``judge_2`` /
+    ``judge_3`` + 装备区 ``weapon`` / ``armor`` / ``horse_offense`` / ``horse_defense``。
+    **没有** ``judge`` / ``equip`` 两个"整区"取值——它们只是读取面的兼容名
+    （:func:`judge_zone_sealed` / :func:`equip_zone_sealed`，= 该区的槽全被封）。
+
+    写入**唯一入口**是 ``Engine.abolish_slots`` / ``Engine.restore_slots``：**一次调用 =
+    一个废除事件**（雄乱 = 7 槽、决堰 = 1～2 槽）；废除 = 先把这些槽里的牌强制弃置
+    （进弃牌堆、``MoveReason.DISCARD``，按来源区分组搬牌），再落这些位；恢复 = 去掉这些位。
 
     读点（三条系统规则，`Engine` 与 :func:`~sgs.effects.check_targets` 各一半）：
     装备区 / 对应槽位封印 ⇒ 该角色不能**使用**装备牌、也不能把牌**置入**它；

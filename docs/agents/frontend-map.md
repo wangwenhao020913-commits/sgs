@@ -15,7 +15,7 @@
 | `candidates.js` | 候选索引的**只读**查询：`cardEntry` / `cardSelectable` / `isLegalCombo` / `autoCombo`；不重建索引。**自己区域的直选判据** `isOwnZonePick`（选自己的手牌/装备 ⇒ 牌面直选、不铺左下角面板；票 14）也在这里。 |
 | `card-view.js` | 卡面绘制（花色 / 点数 / 牌名 / 类型行 / 悬停全文），纯展示。 |
 | `card-face.js` | 卡面状态的纯函数：选中 / 置灰 / 槽位、`isProvide` / `provideSlotIndex`。 |
-| `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**武将牌上的牌区**（`heroZoneRows`，标签带张数）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**被废除（封印）的判定 / 装备区**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发，与状态闭集同名）叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；`equip` 封整区、`weapon` / `armor` / `horse_*` 封单槽，**区域形状不变**；lei 票 05）。 |
+| `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**武将牌上的牌区**（`heroZoneRows`，标签带张数）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**被废除（封印）的槽**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发；**票 03 起是槽 id**：判定 `judge_1..3`（`judgeSlotLayout` 的 `sealKey`，写成 `data-slot-key`；`data-slot="judge"` 仍是 `anim.js` 的落位锚点）+ 装备四槽）**逐槽**叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；**每个被废除的槽各画一个**，判定行 / 装备格本身不再画，**区域形状不变**；lukang-mobile 票 03 取代 lei 票 05 的"整区一个"）。 |
 | `table.js` | 环桌布局与表体渲染：`tableViewForRender`、`renderTable`、`renderProcessing`、`renderSkills`。 |
 | `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
 | `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装；选项步的**置灰不可选**（`preactivationDisabled` 读 `StepPool.disabled`，画 `.dis` + 不接 click；票 04 §3）；多来源步的**合法来源组合**（`preactivationGroups` 读 `Step.groups`：卡面 / 「下一步」/ 「提交」三处同一判据，凑不成一组的来源既选不出也交不出；huo-mobile-batch 票 10）。 |

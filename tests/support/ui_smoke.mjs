@@ -2089,12 +2089,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       .every((row) => Array.from(row.children || []).every((chip) => !(chip.listeners.click || []).length)));
 }
 
-/* ============ lei 票 05：被废除（封印）的判定 / 装备区叠红色禁止角标 ============
+/* ============ 被废除（封印）的**槽**各叠一个红色禁止角标（lukang-mobile 票 03）============
  *
- * 判据只读服务端下发的 `players[].sealed_zones`（自 `PlayerPublic` 下发，与状态闭集
- * 同名）：`judge` / `equip` 封**整区**、`weapon` 等四个槽位 id 封**单槽**。**区域形状
- * 不变**——判定行 / 装备格 / 单槽还是原来的节点，只在右上角多一个 `.zone-ban`
- * （视觉语言照「技能失效」的 `.skill-ban`，见 `table.js: applySkillState`）。
+ * 判据只读服务端下发的 `players[].sealed_zones`（自 `PlayerPublic` 下发，票 03 起是**槽 id**：
+ * 判定 `judge_1..3` + 装备 `weapon` / `armor` / `horse_offense` / `horse_defense`）。
+ * **每个被废除的槽各画一个** `.zone-ban`——判定行 / 装备格**本身不再画**；
+ * 形状不变：判定仍 3 槽、装备仍 4 槽（槽节点多了 `data-slot-key` 作封印判据）。
  * 两侧都断言：封印的画角标，未封印的**一个都不许有**。
  */
 {
@@ -2102,11 +2102,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
     legal_actions: [], candidate_index: {}, context: null, option_seats: {},
   });
-  // 0 号位（本人）：判定区 + 装备区整区封印（【雄乱】的形状）。
-  sealedView.snapshot.players[0].sealed_zones = ["judge", "equip"];
-  // 1 号位：显式空列表 = 未封印（服务端新局每个人都带这个键）。
-  sealedView.snapshot.players[1].sealed_zones = [];
-  // 2 号位：单槽封印（闭集里的槽位 id；当前还没有载体，渲染先留好）。
+  // 0 号位（本人）：7 个槽全封（【雄乱】的形状）。
+  sealedView.snapshot.players[0].sealed_zones = [
+    "judge_1", "judge_2", "judge_3",
+    "weapon", "armor", "horse_offense", "horse_defense",
+  ];
+  // 1 号位：只封 1 个判定槽 ⇒ 判定区**不**算被废除（派生口径），装备区一个角标都没有。
+  sealedView.snapshot.players[1].sealed_zones = ["judge_2"];
+  // 2 号位：只封武器槽（决堰 / 将来的单槽载体）。
   sealedView.snapshot.players[2].sealed_zones = ["weapon"];
   ui.state.view = sealedView;
   ui.resetSelection();
@@ -2128,7 +2131,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const slotsOf = (row) => Array.from((row && row.children) || [])
     .filter((node) => node.getAttribute && node.getAttribute("data-slot"));
   const slotsWith = (row, name) => slotsOf(row).filter((slot) => slot.classList.contains(name));
-  // 该区域节点自身 + 后代里一共几个禁止角标（角标是子节点，不是新的区块）。
+  // 该区域节点后代里一共几个禁止角标（角标是槽的子节点，不是新的区块）。
   const bansIn = (node, out = []) => {
     if (!node || !node.children) return out;
     for (const child of node.children) {
@@ -2142,28 +2145,44 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const judge1 = zoneRow(1, "judge");
   const equip1 = zoneRow(1, "equip");
   const equip2 = zoneRow(2, "equip");
-  check("㉿ZB1 判定区被封印 ⇒ 判定行带 zone-sealed 且画 1 个禁止角标",
-    !!judge0 && judge0.classList.contains("zone-sealed") && bansIn(judge0).length === 1,
+  check("㉿ZB1 判定区 3 槽全封 ⇒ **每个**判定槽各 1 个角标、判定行本身不带 zone-sealed",
+    !!judge0 && !judge0.classList.contains("zone-sealed")
+      && bansIn(judge0).length === 3
+      && slotsWith(judge0, "zone-sealed").length === 3
+      && slotsOf(judge0).every((slot) => slot.classList.contains("zone-sealed")),
     `judge0 类=${JSON.stringify([...(judge0 ? judge0.classList.set : [])])} ban=${bansIn(judge0).length}`);
-  check("㉿ZB2 装备区被封印 ⇒ 装备格带 zone-sealed 且画 1 个禁止角标",
-    !!equip0 && equip0.classList.contains("zone-sealed") && bansIn(equip0).length === 1,
+  check("㉿ZB2 装备区 4 槽全封 ⇒ **每个**装备槽各 1 个角标、装备格本身不带 zone-sealed",
+    !!equip0 && !equip0.classList.contains("zone-sealed")
+      && bansIn(equip0).length === 4
+      && slotsWith(equip0, "zone-sealed").length === 4,
     `equip0 类=${JSON.stringify([...(equip0 ? equip0.classList.set : [])])} ban=${bansIn(equip0).length}`);
-  check("㉿ZB3 未封印（显式空列表）⇒ 判定区 / 装备区都不画角标",
-    !!judge1 && !!equip1
-      && !judge1.classList.contains("zone-sealed") && bansIn(judge1).length === 0
-      && !equip1.classList.contains("zone-sealed") && bansIn(equip1).length === 0,
-    `judge1 ban=${bansIn(judge1).length} equip1 ban=${bansIn(equip1).length}`);
-  check("㉿ZB4 单槽封印（weapon）⇒ 只有武器槽画角标，装备格本身不封",
+  check("㉿ZB3 装备区未封印（该座位只有一个判定槽被封）⇒ 装备一个角标都不画",
+    !!equip1 && bansIn(equip1).length === 0
+      && !equip1.classList.contains("zone-sealed"),
+    `equip1 ban=${bansIn(equip1).length}`);
+  check("㉿ZB4 只封 1 个槽（weapon）⇒ 只有武器槽画角标",
     !!equip2 && !equip2.classList.contains("zone-sealed")
       && bansIn(equip2).length === 1
       && slotsWith(equip2, "zone-sealed").length === 1
       && slotsWith(equip2, "zone-sealed")[0].getAttribute("data-slot") === "weapon",
     `equip2 ban=${bansIn(equip2).length} 封槽=${JSON.stringify(slotsOf(equip2).map((s) => [s.getAttribute("data-slot"), s.classList.contains("zone-sealed")]))}`);
-  check("㉿ZB5 封印不发明新区块：判定仍 3 槽 / 装备仍 4 槽，角标是区域的子节点",
+  check("㉿ZB5 封印不发明新区块：判定仍 3 槽 / 装备仍 4 槽（角标是槽的子节点）",
     slotsOf(judge0).length === 3 && slotsOf(equip0).length === 4
       && judge0.getAttribute("data-zone") === "judge"
       && equip0.getAttribute("data-zone") === "equip",
     `judge=${slotsOf(judge0).length} 槽 / equip=${slotsOf(equip0).length} 槽`);
+  check("㉿ZB6 判定槽带 data-slot-key（judge_1..3）作封印判据，data-slot 仍是 judge（anim 锚点）",
+    slotsOf(judge0).length === 3
+      && slotsOf(judge0).every((slot) => slot.getAttribute("data-slot") === "judge")
+      && JSON.stringify(slotsOf(judge0).map((slot) => slot.getAttribute("data-slot-key")))
+        === JSON.stringify(["judge_1", "judge_2", "judge_3"]),
+    `判定槽键=${JSON.stringify(slotsOf(judge0).map((slot) => [slot.getAttribute("data-slot"), slot.getAttribute("data-slot-key")]))}`);
+  check("㉿ZB7 只封 1 个判定槽（judge_2）⇒ 只有那一格有角标，判定行 / 另两格都没有",
+    !!judge1 && !judge1.classList.contains("zone-sealed")
+      && bansIn(judge1).length === 1
+      && slotsWith(judge1, "zone-sealed").length === 1
+      && slotsWith(judge1, "zone-sealed")[0].getAttribute("data-slot-key") === "judge_2",
+    `judge1 ban=${bansIn(judge1).length} 封槽=${JSON.stringify(slotsWith(judge1, "zone-sealed").map((s) => s.getAttribute("data-slot-key")))}`);
 }
 
 // ② 弃牌阶段：从手牌点选，直到"未选张数 == 手牌上限"（= 选够 `pending.count` 张）。

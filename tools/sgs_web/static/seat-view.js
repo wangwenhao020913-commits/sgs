@@ -165,10 +165,20 @@ function fillSeatTags(node, flags) {
   }
 }
 
-/** 判定区固定 3 槽（乐不思蜀 / 闪电 / 兵粮寸断；同名不能重复）；多余的不画。 */
+/** 判定区固定 3 槽（乐不思蜀 / 闪电 / 兵粮寸断；同名不能重复）；多余的不画。
+ *
+ * ``sealKey`` 是**封印判据**用的槽 id（`judge_1..3`，与状态闭集同名）：lukang-mobile 票 03
+ * 起"废除"的状态粒度 = 槽，界面**逐槽**叠禁用角标。``slot`` 仍是渲染键 `"judge"`——
+ * `anim.js` 拿 `data-slot="judge"` 当节点锚点（空判定槽的落位动画），不能改。
+ */
 function judgeSlotLayout(cards) {
   const list = cards || [];
-  return [0, 1, 2].map((index) => ({ zone: "judge", slot: "judge", card: list[index] || null }));
+  return [0, 1, 2].map((index) => ({
+    zone: "judge",
+    slot: "judge",
+    sealKey: `judge_${index + 1}`,
+    card: list[index] || null,
+  }));
 }
 
 /** 装备区固定四槽：武器 / 防具 / 攻马 / 防马。
@@ -202,13 +212,14 @@ function equipSlotLayout(cards) {
  *  槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
  */
 function miniSlotNode(options) {
-  const { zone, slot, card, interactive, ctx } = options;
+  const { zone, slot, sealKey, card, interactive, ctx } = options;
   const judge = zone === "judge";
   const node = document.createElement(interactive && card ? "button" : "div");
   if (node.tagName === "BUTTON") node.type = "button";
   node.className = `mini-slot ${judge ? "judge-slot" : "equip-slot"} ${card ? "filled" : "empty"}`;
   node.setAttribute("data-zone", zone);
   node.setAttribute("data-slot", slot);
+  if (sealKey) node.setAttribute("data-slot-key", sealKey);
   const label = document.createElement("span");
   label.className = "slot-k";
   label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
@@ -379,8 +390,8 @@ function fillHeroTags(box, player) {
  * 视觉语言与「技能失效」同一套（`table.js: applySkillState` 的 `.skill-ban` svg、
  * `style.css` 的 `.skill.suppressed`）：**不新增区块形状**——判定行 / 装备格 / 单槽仍是原来
  * 的节点，只叠一个右上角标（`.zone-sealed` + `.zone-ban`）。判据只读服务端下发的
- * `players[].sealed_zones`（与状态闭集同名）：`equip` 封**整个装备区**、四个槽位 id 封
- * **单槽**；前端不另建一份区域名单。
+ * `players[].sealed_zones`（lukang-mobile 票 03 起是**槽 id**）：判定 `judge_1..3` +
+ * 装备四槽，**每个被废除的槽各画一个**（不再有"整区一个"的形态）；前端不另建区域名单。
  */
 function zoneSealMark() {
   const mark = document.createElement("span");
@@ -395,7 +406,7 @@ function zoneSealMark() {
   return mark;
 }
 
-/** 给一个区域节点叠禁止角标；``label`` 是中文区名（写进悬停全文，不写新文案层）。 */
+/** 给一个槽节点叠禁止角标；``label`` 是中文槽名（写进悬停全文，不写新文案层）。 */
 function markSealedZone(node, label) {
   node.classList.add("zone-sealed");
   node.setAttribute("data-sealed", "true");
@@ -421,24 +432,26 @@ function sideBlockRows(player, ctx) {
   // `zones` / pool 都在 `preactivationCardPickable` 里读；目标座位的槽因此也要接点击。
   const preactivationPick = (zone, card) =>
     preactivationCardPickable(ctx.pendingNow, card, zone);
-  // lei 票 05：封印闭集只读服务端下发的 `players[].sealed_zones`（与状态同名同值）。
+  // 封印闭集只读服务端下发的 `players[].sealed_zones`（lukang-mobile 票 03 起是**槽 id**：
+  // 判定 `judge_1..3` + 装备 `weapon` / `armor` / `horse_offense` / `horse_defense`）。
   const sealedZones = new Set((player && player.sealed_zones) || []);
-  const judgeSealed = sealedZones.has("judge");
-  const equipSealed = sealedZones.has("equip");
   const judge = document.createElement("div");
   judge.className = "judge-row";
   judge.setAttribute("data-zone", "judge");
   judge.setAttribute("data-seat", String(player.seat));
   for (const layout of judgeSlotLayout(player.judge)) {
-    judge.appendChild(miniSlotNode({
+    const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
       interactive: baseInteractive || preactivationPick("judge", layout.card),
       ctx,
-    }));
+    });
+    // 逐槽一个角标（三个判定槽各画一个；判定行本身不再画）。
+    if (sealedZones.has(layout.sealKey)) {
+      markSealedZone(slotNode, "判定槽");
+    }
+    judge.appendChild(slotNode);
   }
-  // 判定区被废除：角标叠在**整个判定行**上（三个槽一起作废，不是逐槽一个）。
-  if (judgeSealed) markSealedZone(judge, "判定区");
   const equip = document.createElement("div");
   equip.className = "equip-grid";
   equip.setAttribute("data-zone", "equip");
@@ -450,13 +463,12 @@ function sideBlockRows(player, ctx) {
       interactive: baseInteractive || equipPick || preactivationPick("equip", layout.card),
       ctx,
     });
-    // 整区封印由装备格画一次角标；单槽封印（将来才有载体）画在槽自己身上，不叠两层。
-    if (!equipSealed && sealedZones.has(layout.slot)) {
+    // 装备槽同样**逐槽**一个角标（装备格本身不画）。
+    if (sealedZones.has(layout.slot)) {
       markSealedZone(slotNode, `${EQUIP_SLOT_LABELS[layout.slot] || "装备"}槽`);
     }
     equip.appendChild(slotNode);
   }
-  if (equipSealed) markSealedZone(equip, "装备区");
   return [judge, equip];
 }
 

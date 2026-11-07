@@ -172,9 +172,8 @@ from sgs.state import (
     WineChangeDelta,
     Zone,
     ZoneRef,
-    SEALED_ZONE_EQUIP,
+    JUDGE_SLOTS,
     SEALED_ZONE_IDS,
-    SEALED_ZONE_JUDGE,
     next_alive_seat,
     order_targets,
     parse_action,
@@ -3822,49 +3821,65 @@ class Engine:
         )
         return True
 
-    # -- 废除区域（lei-batch 票 02；用户 2026-11-05 裁定「废除区域 / 恢复区域」）----
+    # -- 废除槽位（lei-batch 票 02 立、lukang-mobile 票 03 改成**逐槽**；用户 2026-11-07）--
 
-    def abolish_zone(
-        self, frame: Frame | None, seat: int, zone_id: str
+    def abolish_slots(
+        self, frame: Frame | None, seat: int, slots: tuple[str, ...]
     ) -> Control:
-        """**废除一个区域**：区域内牌先强制弃置，再落封印位（唯一写入口）。
+        """**一个废除事件**：这些槽全部进入封印状态；槽里的牌先强制弃置（唯一写入口）。
 
-        用户裁定的流程 = 「区域里的牌先被强制弃置，然后这个区域被废除」；可被
-        :meth:`restore_zone` 恢复。``zone_id`` ∈ :data:`~sgs.state.SEALED_ZONE_IDS`：
+        用户 2026-11-07 的口径：废除的**状态粒度 = 槽**——雄乱的一次发动 = 一个事件废除
+        判定区 3 槽 + 装备区 4 槽（共 7 槽）；决堰的一次发动 = 一个事件废除 1～2 个装备槽。
+        ``judge`` / ``equip`` 是**只读的整区兼容名**（= 该区的槽全封），传进来即
+        ``ValueError``：它们的并存会让"一次事件"的粒度重新变成区。
 
-        - ``judge`` / ``equip``（整个装备区）/ 四个装备槽位；``equip`` 覆盖全部槽位；
-        - 弃哪些牌：``judge`` ⇒ 判定区全部；``equip`` ⇒ 装备区全部；槽位 ⇒ 该槽那一张；
+        - ``slots`` ⊆ :data:`~sgs.state.SEALED_SLOT_IDS`；重复的槽按一次算；
+        - 已经封印的槽是幂等的：新槽为空 ⇒ 零动作；只搬**新槽**里的牌；
+        - 搬牌**按来源区归组**（一次 ``move_in_frame`` 只能有一个来源区）：判定区的牌一次、
+          装备区的牌一次；判定区只在**三个判定槽全部**进入封印后才整区弃置（今天唯一的
+          载体就是 7 槽一次，与既有行为逐字节相同）；
         - 弃置走 ``MoveReason.DISCARD``（**失去牌**派发照常，【连营】/【枭姬】一类钩子会
-          被问），因此本方法可能返回 ``"stay"``（挂起）——调用方原样透传；重入时目标区域
-          已空、封印位已落，天然幂等。
+          被问），因此本方法可能返回 ``"stay"``（挂起）——调用方原样透传；重入时已空的槽
+          不再搬、封印位最后一次性落，天然幂等。
 
         **不发 delta**（lei 票 05 复核）：网页画的是**投影**（``PlayerPublic.sealed_zones``
         → ``sgs_web.projection.visible_snapshot``），每次从状态重算；记录流不含投影，那次
-        弃牌移动照常进记录流，故回放按动作重跑即可重建。补 delta 的那条路因此没走
-        （不必登记 no-leak 八类、47 条金录像一字不改）。
+        弃牌移动照常进记录流，故回放按动作重跑即可重建。
         """
-        if zone_id not in SEALED_ZONE_IDS:
-            raise ValueError(f"不是可废除的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")
+        if not slots:
+            raise ValueError("废除至少要给一个槽位")
+        unknown = [slot for slot in slots if slot not in SEALED_ZONE_IDS]
+        if unknown:
+            raise ValueError(
+                f"不是可废除的槽位：{unknown!r}（闭集 {sorted(SEALED_ZONE_IDS)}；"
+                "judge / equip 是整区兼容名，不是状态值）"
+            )
         player = self.state.player(seat)
-        if zone_id in player.sealed_zones:
+        new_slots = tuple(
+            slot for slot in dict.fromkeys(slots) if slot not in player.sealed_zones
+        )
+        if not new_slots:
             return None
         if frame is None and self.stack.frames:
             # 帧外调用（构造局面 / 引擎自排）：可挂的移动是当前栈顶那一帧。
             frame = self.stack.top
         if frame is None:
-            raise ValueError("废除区域必须先弃置区域里的牌，帧外调用无法搬牌")
-        victims: tuple[int, ...] = ()
-        if zone_id == SEALED_ZONE_JUDGE:
-            victims = tuple(player.judge)
-        elif zone_id == SEALED_ZONE_EQUIP:
-            victims = tuple(player.equip)
-        else:
-            victims = tuple(
-                card_id
-                for card_id in player.equip
-                if self.state.card(card_id).slot is SlotKind(zone_id)
-            )
-        if victims:
+            raise ValueError("废除槽位必须先弃置槽里的牌，帧外调用无法搬牌")
+        after = (*player.sealed_zones, *new_slots)
+        judge_victims: tuple[int, ...] = (
+            tuple(player.judge)
+            if all(slot in after for slot in JUDGE_SLOTS)
+            else ()
+        )
+        equip_victims: tuple[int, ...] = tuple(
+            card_id
+            for card_id in player.equip
+            if self.state.card(card_id).slot is not None
+            and self.state.card(card_id).slot.value in new_slots
+        )
+        for victims in (judge_victims, equip_victims):
+            if not victims:
+                continue
             control = self.move_in_frame(
                 frame,
                 self.state.refs(victims),
@@ -3875,23 +3890,26 @@ class Engine:
             )
             if control == "stay":
                 return "stay"
-        player.sealed_zones = (*player.sealed_zones, zone_id)
+        player.sealed_zones = tuple(dict.fromkeys((*player.sealed_zones, *new_slots)))
         return None
 
-    def restore_zone(self, frame: Frame | None, seat: int, zone_id: str) -> bool:
-        """**恢复一个区域**（用户 2026-11-05 裁定的「恢复区域」事件）：去掉封印位。
+    def restore_slots(self, frame: Frame | None, seat: int, slots: tuple[str, ...]) -> bool:
+        """**恢复**这些槽位（用户 2026-11-05 裁定的「恢复区域」事件的逐槽形态）。
 
-        不搬任何牌（恢复只改状态）；已恢复 / 从未废除 ⇒ 零动作返回 ``False``。
+        不搬任何牌（恢复只改状态）；已恢复 / 从未废除 ⇒ 零动作（整体返回 ``False``）。
         """
         del frame
-        if zone_id not in SEALED_ZONE_IDS:
-            raise ValueError(f"不是可恢复的区域：{zone_id!r}（闭集 {sorted(SEALED_ZONE_IDS)}）")
+        unknown = [slot for slot in slots if slot not in SEALED_ZONE_IDS]
+        if unknown:
+            raise ValueError(
+                f"不是可恢复的槽位：{unknown!r}（闭集 {sorted(SEALED_ZONE_IDS)}；"
+                "judge / equip 是整区兼容名，不是状态值）"
+            )
         player = self.state.player(seat)
-        if zone_id not in player.sealed_zones:
+        kept = tuple(value for value in player.sealed_zones if value not in set(slots))
+        if kept == player.sealed_zones:
             return False
-        player.sealed_zones = tuple(
-            value for value in player.sealed_zones if value != zone_id
-        )
+        player.sealed_zones = kept
         return True
 
     def add_marker(

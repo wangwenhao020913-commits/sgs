@@ -5241,8 +5241,8 @@ def test_the_public_seat_exposes_empty_sealed_zones_by_default() -> None:
         )
 
 
-def test_the_web_snapshot_delivers_sealed_zones_through_the_real_write_entry() -> None:
-    """封印前后两侧：``Engine.abolish_zone`` 写入 ⇒ 投影下发 ``judge`` + ``equip``。
+def test_the_web_snapshot_delivers_sealed_slots_through_the_real_write_entry() -> None:
+    """封印前后两侧：``Engine.abolish_slots`` 写入 ⇒ 投影下发 **7 个槽 id**（票 03）。
 
     票面二选一取**不发 delta**（理由在票的 ``## Answer``）：投影每次从状态重算，记录流
     一字不改；那条纪律的机械面就在本用例末尾——字段只在网页载荷里，不进记录流的序列化。
@@ -5264,21 +5264,22 @@ def test_the_web_snapshot_delivers_sealed_zones_through_the_real_write_entry() -
     assert before["players"][0]["sealed_zones"] == [], "封印前：空"
     assert before["players"][1]["sealed_zones"] == [], "封印前：空（另一侧）"
 
-    assert engine.abolish_zone(None, 0, "judge") is None
-    assert engine.abolish_zone(None, 0, "equip") is None
+    seven = ["judge_1", "judge_2", "judge_3", "weapon", "armor",
+             "horse_offense", "horse_defense"]
+    assert engine.abolish_slots(None, 0, tuple(seven)) is None
 
     after = visible_snapshot(session)
-    assert after["players"][0]["sealed_zones"] == ["judge", "equip"], (
-        "封印后：判定区 + 装备区，取值与状态闭集同名"
+    assert after["players"][0]["sealed_zones"] == seven, (
+        "封印后：7 个槽 id（判定 3 + 装备 4），不是 judge / equip 两个整区名"
     )
     assert after["players"][1]["sealed_zones"] == [], "封印只属于被点名的座位"
     # 公开事实：**别人**的视角也带它（不是"只有本人知道"的隐藏信息）。
-    assert project(engine.state, 1).players[0].sealed_zones == ("judge", "equip")
+    assert project(engine.state, 1).players[0].sealed_zones == tuple(seven)
 
-    # 投影从状态现算：恢复一个区域 ⇒ 下一次快照就少一项（不需要任何重复计算 / 缓存）。
-    assert engine.restore_zone(None, 0, "judge") is True
+    # 投影从状态现算：恢复一个槽 ⇒ 下一次快照就少一项（不需要任何重复计算 / 缓存）。
+    assert engine.restore_slots(None, 0, ("judge_1",)) is True
     restored = visible_snapshot(session)
-    assert restored["players"][0]["sealed_zones"] == ["equip"]
+    assert restored["players"][0]["sealed_zones"] == seven[1:]
 
     # **不进记录流**（PlayerPublic 上的 ``exclude=True``）：47 条金录像逐字节不变。
     serialized = project(engine.state, 0).model_dump(mode="json")

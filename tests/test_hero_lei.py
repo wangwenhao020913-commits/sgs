@@ -39,13 +39,16 @@ from sgs.state import (
     Pass,
     Phase,
     QueryKind,
-    SEALED_ZONE_IDS,
+    EQUIP_SLOTS,
+    JUDGE_SLOTS,
+    SEALED_SLOT_IDS,
     SelectCards,
     SelectOption,
     SlotKind,
     UseCard,
     Zone,
     ZoneRef,
+    judge_zone_sealed,
     zone_sealed,
 )
 from sgs.timing import Timing
@@ -365,28 +368,31 @@ def _frame(engine):
     )
 
 
-def test_abolish_judge_discards_the_zones_cards_then_seals_it():
+def test_abolish_judge_slots_discard_the_judge_zone_then_seal_all_three_slots():
+    """判定区 3 槽**一次事件**全封 ⇒ 判定区里的牌先强制弃置。"""
     lightning = cards_of_type(PACK, "lightning")[0]
     engine = _seal_engine(judge=(lightning,))
-    engine.abolish_zone(_frame(engine), 0, "judge")
+    engine.abolish_slots(_frame(engine), 0, JUDGE_SLOTS)
 
-    assert engine.state.player(0).judge == [], "区域里的牌先被强制弃置"
+    assert engine.state.player(0).judge == [], "槽里的牌先被强制弃置"
     assert lightning in engine.state.discard, "弃置的牌进了弃牌堆"
-    assert "judge" in engine.state.player(0).sealed_zones
-    assert engine.restore_zone(None, 0, "judge") is True
+    assert engine.state.player(0).sealed_zones == JUDGE_SLOTS, "三个判定槽各落一位"
+    assert judge_zone_sealed(engine.state.player(0)) is True
+    assert engine.restore_slots(None, 0, JUDGE_SLOTS) is True
     assert engine.state.player(0).sealed_zones == ()
-    assert engine.restore_zone(None, 0, "judge") is False, "重复恢复是零动作"
+    assert engine.restore_slots(None, 0, JUDGE_SLOTS) is False, "重复恢复是零动作"
 
 
-def test_abolish_equip_discards_every_equipment_and_blocks_using_equipment():
+def test_abolish_equip_slots_discard_every_equipment_and_block_using_equipment():
     weapon = cards_of_type(PACK, "crossbow")[0]
     armor = cards_of_type(PACK, "eight_diagrams")[0]
     engine = _seal_engine(equip=(weapon, armor))
-    engine.abolish_zone(_frame(engine), 0, "equip")
+    engine.abolish_slots(_frame(engine), 0, EQUIP_SLOTS)
 
     assert engine.state.player(0).equip == []
     assert {weapon, armor} <= set(engine.state.discard)
-    # 手牌里再抽一张装备牌：装备区被封印 ⇒ 用不了。
+    assert engine.state.player(0).sealed_zones == EQUIP_SLOTS
+    # 手牌里再抽一张装备牌：四个槽都被封印 ⇒ 用不了。
     spare = next(
         card_id
         for card_id in range(60, 108)
@@ -400,31 +406,42 @@ def test_a_sealed_weapon_slot_blocks_weapons_but_not_armor():
     armor = cards_of_type(PACK, "eight_diagrams")[0]
     engine = _seal_engine()
     assert engine.state.card(weapon).slot is SlotKind.WEAPON
-    engine.abolish_zone(_frame(engine), 0, "weapon")
+    engine.abolish_slots(_frame(engine), 0, ("weapon",))
 
     assert engine.state.player(0).sealed_zones == ("weapon",)
     assert check_targets(engine.state, 0, engine.state.card(weapon)) == ()
     assert check_targets(engine.state, 0, engine.state.card(armor)) == (0,)
 
 
-def test_a_judge_sealed_seat_is_not_a_legal_target_of_a_delayed_trick():
+def test_one_judge_slot_alone_does_not_seal_the_judge_zone():
+    """只封 1 个判定槽**不**等于判定区被废除（票 03 的派生口径）。"""
     indulgence = cards_of_type(PACK, "indulgence")[0]
     engine = _seal_engine()
-    engine.abolish_zone(_frame(engine), 1, "judge")
+    engine.abolish_slots(_frame(engine), 1, ("judge_2",))
+    card = engine.state.card(indulgence)
+    assert engine.state.player(1).sealed_zones == ("judge_2",)
+    assert judge_zone_sealed(engine.state.player(1)) is False
+    assert 1 in check_targets(engine.state, 0, card), "判定区未全封 ⇒ 仍是合法目标"
+
+
+def test_a_judge_zone_sealed_seat_is_not_a_legal_target_of_a_delayed_trick():
+    indulgence = cards_of_type(PACK, "indulgence")[0]
+    engine = _seal_engine()
+    engine.abolish_slots(_frame(engine), 1, JUDGE_SLOTS)
     card = engine.state.card(indulgence)
 
     pool = check_targets(engine.state, 0, card)
-    assert 1 not in pool, "判定区被封印的角色不是延时锦囊的合法目标"
+    assert 1 not in pool, "判定区被封印（3 槽全封）的角色不是延时锦囊的合法目标"
     assert 0 not in pool, "延时锦囊不以自己为目标"
 
 
 def test_lightning_skips_a_judge_sealed_seat():
     lightning = cards_of_type(PACK, "lightning")[0]
     engine = _seal_engine()
-    engine.abolish_zone(_frame(engine), 1, "judge")
+    engine.abolish_slots(_frame(engine), 1, JUDGE_SLOTS)
     card = engine.state.card(lightning)
 
-    # 座位 0 的闪电判完非 ♠2–9 ⇒ 顺延：座位 1 被封印 ⇒ 越过它回到座位 0。
+    # 座位 0 的闪电判完非 ♠2–9 ⇒ 顺延：座位 1 的判定区被封印 ⇒ 越过它回到座位 0。
     assert delayed_settle_target(engine.state, card, 0) == 0
 
 
@@ -432,7 +449,7 @@ def test_put_equipment_card_does_not_fire_into_a_sealed_slot():
     """界【结姻】的"置入装备区"：目标槽位被废除 ⇒ 置入不发动。"""
     armor = cards_of_type(PACK, "eight_diagrams")[0]
     engine = _seal_engine()
-    engine.abolish_zone(_frame(engine), 1, "armor")
+    engine.abolish_slots(_frame(engine), 1, ("armor",))
     engine.state.player(0).hand.append(armor)
 
     frame = _frame(engine)
@@ -444,32 +461,32 @@ def test_put_equipment_card_does_not_fire_into_a_sealed_slot():
     assert armor in engine.state.player(0).hand, "牌留在原处"
 
 
-def test_the_sealed_slot_closed_set_is_the_single_source_for_zone_sealed():
-    """``zone_sealed`` 的槽位闭集 = ``SEALED_ZONE_IDS`` ∩ ``SlotKind``（ADR-006）。
+def test_the_sealed_slot_closed_set_is_the_seven_slots_and_rejects_zone_names():
+    """``sealed_zones`` 的闭集 = **7 个槽**（判定 3 + 装备 4）；整区名不是状态值。
 
-    整个装备区封印覆盖闭集里的四个槽位；宝物槽位当前**不启用**、不在闭集 ⇒ 不把
-    ``treasure`` 读成已封印。将来启用宝物槽时，必须同时把它加进 ``SEALED_ZONE_IDS``
-    （两处闭集只留一份真源）。
+    lukang-mobile 票 03（用户 2026-11-07）：`judge` / `equip` 两个整区取值**退役**——
+    传进写入口即 ``ValueError``；读取面 ``zone_sealed`` 把它们读成"该区的槽全封"（派生）。
+    宝物槽位当前**不启用**（ADR-006），故既不能被废除、也不会被读成已封印。
     """
     engine = _seal_engine()
     player = engine.state.player(0)
-    assert not any(zone_sealed(player, slot.value) for slot in SlotKind)
-    engine.abolish_zone(_frame(engine), 0, "equip")
+    assert SEALED_SLOT_IDS == (*JUDGE_SLOTS, *EQUIP_SLOTS)
+    assert not any(zone_sealed(player, slot) for slot in SEALED_SLOT_IDS)
+    engine.abolish_slots(_frame(engine), 0, EQUIP_SLOTS)
 
-    covered = {slot.value for slot in SlotKind if slot.value in SEALED_ZONE_IDS}
-    assert covered == {"weapon", "armor", "horse_defense", "horse_offense"}
-    for slot in SlotKind:
-        assert zone_sealed(player, slot.value) is (slot.value in covered), (
-            f"{slot.value}：槽位闭集必须与 SEALED_ZONE_IDS 同一份真源"
-        )
+    for slot in EQUIP_SLOTS:
+        assert zone_sealed(player, slot) is True, f"{slot}：四个装备槽各落一位"
     assert zone_sealed(player, "treasure") is False, "宝物槽不启用、不在闭集 ⇒ 不算封印"
-    assert zone_sealed(player, "equip") is True
+    assert zone_sealed(player, "equip") is True, "整区兼容名 = 该区的槽全封"
     assert zone_sealed(player, "judge") is False
 
+    # 整区名**不是**状态值：写入口拒收（提示两个名字只是只读兼容名）。
+    import pytest
 
-# ---------------------------------------------------------------------------
-# 张绣【雄乱】/【从谏】（lei-batch 票 02；用户 2026-11-05 签）
-# ---------------------------------------------------------------------------
+    with pytest.raises(ValueError):
+        engine.abolish_slots(_frame(engine), 0, ("equip",))
+    with pytest.raises(ValueError):
+        engine.restore_slots(None, 0, ("judge",))
 
 
 def _zhangxiu_state(*, equip=(), judge=(), hand=(), others=(), seat_count=3):
@@ -496,8 +513,8 @@ def _play_phase(engine, players):
     return engine.pending
 
 
-def test_xiongluan_seals_both_zones_and_applies_its_two_effects():
-    """雄乱：废除判定区与装备区（牌先弃置）→ 其不能用牌 + 我对其无距离与次数限制。"""
+def test_xiongluan_seals_the_seven_slots_and_applies_its_two_effects():
+    """雄乱：**一个事件**废除 7 个槽（牌先弃置）→ 其不能用牌 + 我对其无距离与次数限制。"""
     weapon = cards_of_type(PACK, "crossbow")[0]
     lightning = cards_of_type(PACK, "lightning")[0]
     engine = Engine.from_state(
@@ -520,7 +537,9 @@ def test_xiongluan_seals_both_zones_and_applies_its_two_effects():
         engine, players, lambda e: bool(e.state.player(0).sealed_zones)
     )
     player0 = engine.state.player(0)
-    assert player0.sealed_zones == ("judge", "equip"), "两个区域都封印"
+    assert player0.sealed_zones == (*JUDGE_SLOTS, *EQUIP_SLOTS), (
+        "一个事件落 7 个槽（判定 3 + 装备 4），不是两个整区"
+    )
     assert player0.judge == [] and player0.equip == [], "区域里的牌先被强制弃置"
     assert engine.state.player(1).hand_card_prohibited is True, "其不能使用或打出手牌"
     assert player0.xiongluan_target == 1, "本回合对其使用牌无距离与次数限制"
@@ -533,15 +552,15 @@ def test_xiongluan_seals_both_zones_and_applies_its_two_effects():
     assert check_targets(engine.state, 0, engine.state.card(spare)) == ()
 
 
-def test_xiongluan_is_no_longer_offered_once_both_zones_are_sealed():
-    """隐藏 cost：区域都封印了 ⇒ 清单渲不出、候选也没有（即使限定位被恢复）。"""
+def test_xiongluan_is_no_longer_offered_once_all_seven_slots_are_sealed():
+    """隐藏 cost：7 个槽全封 ⇒ 清单渲不出、候选也没有（即使限定位被恢复）。"""
     engine = Engine.from_state(_zhangxiu_state(), seed=7)
-    # 两个区都是空的 ⇒ 没有牌要搬；仍走**唯一写入口** ``abolish_zone``。帧在这里只是
+    # 两个区都是空的 ⇒ 没有牌要搬；仍走**唯一写入口** ``abolish_slots``。帧在这里只是
     # 搬牌凭证（不入栈）：``_play_phase`` 后面要驱动真正的阶段帧。
     frame = Frame(kind=FrameKind.SKILL, data={"skill_owner": 0})
-    assert engine.abolish_zone(frame, 0, "judge") is None
-    assert engine.abolish_zone(frame, 0, "equip") is None
-    assert engine.state.player(0).sealed_zones == ("judge", "equip")
+    assert engine.abolish_slots(frame, 0, JUDGE_SLOTS) is None
+    assert engine.abolish_slots(frame, 0, EQUIP_SLOTS) is None
+    assert engine.state.player(0).sealed_zones == (*JUDGE_SLOTS, *EQUIP_SLOTS)
     players = [Scripted(activate=False) for _ in range(3)]
     query = _play_phase(engine, players)
 
