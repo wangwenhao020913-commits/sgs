@@ -89,6 +89,7 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "lei",
     "lei_mobile",
     "jie_feng_mobile",
+    "lin_mobile",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 
@@ -117,7 +118,14 @@ huo-dianwei-mobile 票 01 起）：与 ``feng_mobile`` 同一姿态——移动�
 
 ``homebrew`` 是**自制包**那一份（``files/heroes.homebrew.json``）：同样是一个独立系列包，
 版本标记取 ``"homebrew"``，显示名不带任何版本后缀（自制武将自带「韬·」系列前缀）。首个载体
-是韬·刘备自制版（真名刘备，与标准版同名 ⇒ 同一局仍只出一个）。"""
+是韬·刘备自制版（真名刘备，与标准版同名 ⇒ 同一局仍只出一个）。
+
+``lin_mobile`` 是**神话再临·林包的移动版**那一份（``files/heroes.lin_mobile.json``，
+lin-batch 票 01 起）：与 ``lei_mobile`` / ``feng_mobile`` 同一姿态——移动版独立成表、
+版本标记取 ``"lin-mobile"``、显示名加「移动版」后缀、真名与 OL 版共用（神曹操移动版 /
+真名「神曹操」，两条技能【归心】【飞影】）。林将逐个追加到这张表；将来做 **OL 林包**时
+另开 ``files/heroes.lin.json``（版本标记 ``"lin"``），两表并存、同真名可各持一版
+（用户裁定「移动版与 OL 系列版本并存」）。"""
 
 HERO_SKILL_PREFIX = "hero."
 """武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。

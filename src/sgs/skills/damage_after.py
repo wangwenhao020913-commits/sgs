@@ -74,6 +74,7 @@ from sgs.state import (
     Zone,
     ZoneRef,
     alive_seats,
+    seats_from,
 )
 from sgs.timing import Timing
 
@@ -1744,6 +1745,141 @@ JIE_KUANGGU_MOBILE_DEF = SkillDef(
 
 
 # ---------------------------------------------------------------------------
+# 神话再临·林包·移动版·神曹操【归心】（lin-batch 票 01）
+#
+#     归心
+#     　当你受到1点伤害后，你可以获得每名其他角色区域里的一张牌，然后你翻面。
+#
+# 口径（用户 2026-11-08 两轮裁定的**移动版**文本，见 `.scratch/lin-batch/issues/01-shen-caocao.md`
+# §R 与 `01b` 的 `## Answer`）：
+#
+# - **选择获得**（不是 OL 现行的「随机获得」）⇒ 逐座位**未知区域弹窗**、由神曹操自选 1 张；
+# - **「区域里」= 三区**（手牌 + 装备 + 判定），`reveal_hand=False`
+#   （账本默认读法（一）③ / `06` L674 / 规则 L1280；与【趫猛】【利驭】【涯角】逐字同形）；
+# - **Q1 = B**：全场无人有牌也照发「是否发动」（翻面是 toggle，背面朝上时"只翻面"有收益）；
+# - **Q2 = A**：发动后**不可**逐座少拿（`optional=False`、候选里没有 ``Pass``）；
+# - **Q3 = A**：逐座位顺序 = **从持有者下家起的座位序**（`seats_from` 的座位环读法）。
+#
+# 形状 = **手写钩子**（逐点 + 变长逐座位循环，没有 ``SkillFlow``）⇒ 形态表「多轮技能」格，
+# 与【遗计】/ 界魏延移动版【狂骨】同格（`shapes.md` §2 第 51 行）。翻面不另算形状：它是
+# 状态位（`Engine.set_flipped`，唯一写入口），与【据守】同一条。
+#
+# **两个游标**（票面 §1 边界 G7）：① 本点已取的**座位集合**（帧私有、带点号）；
+# ② 搬牌的完成由 `move_in_frame` 自己的重入守卫保证（"牌已在目标区"）。选牌询问的帧内键
+# 带 **点号 + 座位号**（`guixin:<点号>:<座位号>`）—— 否则第 2 个座位会命中第 1 个座位的
+# 答案（`06` L645 记下的那个坑，L899 的逐点答案键同一条纪律）。
+# ---------------------------------------------------------------------------
+
+GUIXIN = hero_skill_id("shen_caocao_mobile", "guixin")
+"""神曹操移动版【归心】的全限定技能 id（lin-batch 票 01）。"""
+
+GUIXIN_TAKEN_KEY = "guixin_taken"
+"""帧私有槽名前缀：本点伤害里【归心】**已经取过**的座位（槽名再带点号）。"""
+
+GUIXIN_FLIPPED_KEY = "guixin_flipped"
+"""帧私有槽名前缀：本点的翻面已经落过（再带点号；重入不重翻）。"""
+
+_ASK_GUIXIN_PICK = "hero.shen_caocao_mobile.guixin.pick"
+"""手写询问位置（票 22）：【归心】逐座位"从三区里挑一张"的那次 ``ask_selection``。"""
+
+_GUIXIN_ZONES: tuple[Zone, ...] = (Zone.HAND, Zone.EQUIP, Zone.JUDGE)
+"""「区域里」= **三区**（账本默认读法（一）③）：手牌 + 装备区 + 判定区，一起铺成一张面。"""
+
+
+def _guixin_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**受伤的是持有者自己**（``_hurt_owner``，B 族的共同前提）。
+
+    **Q1 = B**（用户裁定）：这里**不**判"全场有没有牌"——「可以」的放弃出口只在发动那一问，
+    而翻面是 toggle，背面朝上时"只翻面"本身有收益。场上无牌时照发问、发动后取 0 张。
+    """
+    del host
+    return _hurt_owner(frame)
+
+
+def _guixin_seats(state: GameState, owner: int) -> tuple[int, ...]:
+    """此刻的座位池：**从持有者下家起**的座位序里、三区任一有牌的**其他**角色。
+
+    顺序读 :func:`~sgs.state.seats_from` 的座位环读法（起点 = 持有者下家，用户 Q3 = A）；
+    它**只给存活座位**，故这里只需再判两件事：「不是自己」与「三区里有牌」（R3：无牌跳过，
+    同趫猛那句 ``if not (player.hand or player.equip or player.judge)``）。
+
+    **每轮现算**（票面 §1 边界 G9）：搬牌会内联派发「失去牌后」的钩子，可能把某人打死或
+    改变某座位的牌，故池不能预先快照。
+    """
+    total = len(state.players)
+    pool: list[int] = []
+    for seat in seats_from(state, (owner + 1) % total, total):
+        if seat == owner:
+            continue
+        player = state.player(seat)
+        if player.hand or player.equip or player.judge:
+            pool.append(seat)
+    return tuple(pool)
+
+
+def _guixin(host: Any, frame: Any) -> Any:
+    """神曹操【归心】：逐座位（座位序）从三区自选 1 张 → 收完**翻面**（逐点触发）。
+
+    手写循环的骨架抄【遗计】：帧私有游标按**点号**分桶，重入既不重问已答过的座位、也不
+    重搬已搬过的牌；每次进入都**重算座位池**（跳过已取座位 / 无牌座位 / 已死座位）。
+    座位全部处理完才翻面——牌面写的是「**然后**你翻面」，翻面是效果的末段。
+    """
+    owner = int(frame.data["skill_owner"])
+    point = damage_point_index(frame)
+    taken_key = f"{GUIXIN_TAKEN_KEY}:{point}"
+    flip_key = f"{GUIXIN_FLIPPED_KEY}:{point}"
+    while True:
+        taken: tuple[int, ...] = tuple(frame.data.get(taken_key, ()))
+        seat = next(
+            (s for s in _guixin_seats(host.state, owner) if s not in taken), None
+        )
+        if seat is None:
+            break
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_GUIXIN_PICK,
+            # **点号 + 座位号**：帧内答案键 = (询问位置, 询问名)，缺一段就会串味（L645 / L899）。
+            key=f"guixin:{point}:{seat}",
+            actor=owner,
+            timing=Timing.DAMAGE_AFTER_TAKE,
+            # 恰好 1 张（G3）、发动后不可逐座放弃（Q2 = A）⇒ ``optional=False``、没有 ``Pass``。
+            spec=SelectionSpec(zones=_GUIXIN_ZONES, total=(1, 1), optional=False),
+            # 三区选取面，走引擎的同一个 ``selection_face``（手牌隐藏槽 / 装备与判定可见槽）。
+            build_face=lambda seat=seat: host.selection_face(
+                seat, _GUIXIN_ZONES, reveal_hand=False
+            ),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            # 防御分支：``optional=False`` 时引擎不会给出空答案；宿主级直调回调的测试若硬塞
+            # 空元组，按"这一座跳过"处理而不是死循环。
+            frame.data[taken_key] = (*taken, seat)
+            continue
+        # 进度**先落、再搬牌**（与【遗计】同一条理由）：``move_in_frame`` 返回 ``"stay"`` 的
+        # 意思是「牌已经搬完了，只是『失去牌后』的钩子挂起了」，重入时不能再问 / 再搬一次。
+        frame.data[taken_key] = (*taken, seat)
+        control = host.move_in_frame(
+            frame,
+            host.state.refs(picked),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    if frame.data.get(flip_key):
+        return None
+    if host.finished:
+        return None
+    # 「然后你翻面」= **toggle**（正 ↔ 背；L783）。翻面不是牌、不在任何区域，故不进牌守恒。
+    host.set_flipped(frame, owner, not host.state.player(owner).flipped)
+    frame.data[flip_key] = True
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 火包·移动版·荀彧【节命】（huo-taishici-xunyu 票 02）
 #
 #     当你受到1点伤害后，你可以令一名角色将手牌摸至体力上限（至多摸至五张）。
@@ -1924,6 +2060,18 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
             "不为装备牌则其摸一张牌，否则视为你对该角色指定的另一名其他角色使用一张【决斗】"
         ),
         step_requirements={"card": "获得受伤角色区域内的一张牌"},
+    ),
+    # 神曹操移动版【归心】（lin-batch 票 01）：逐点 → 逐座位（座位序）从三区自选 1 张 →
+    # 翻面。**手写回调**（变长逐座位循环，没有 ``SkillFlow``），与【遗计】同一条手写形。
+    # 范围 = **每名**其他角色（不是"一名"）⇒ 没有 ``PickSeats`` 步；「区域里」= 三区。
+    DamageAfterSkill(
+        "shen_caocao_mobile",
+        "guixin",
+        True,
+        _guixin_condition,
+        _guixin,
+        requirement="当你受到1点伤害后，你可以获得每名其他角色区域里的一张牌，然后你翻面。",
+        step_requirements={"card": "获得一名其他角色区域里的一张牌"},
     ),
 )
 """B 族技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 / 08 / 14 / 15 的界版）。"""

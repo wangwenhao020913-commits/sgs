@@ -29,6 +29,7 @@ from sgs.skills import hero_card_zone_key
 from sgs.state import (
     ActivateSkill,
     EndPhase,
+    FrameKind,
     Pass,
     Phase,
     SelectCards,
@@ -47,6 +48,7 @@ from support import (
     cards_of_type,
     deck_excluding,
     find_action,
+    ran_timing,
     run_queries,
 )
 
@@ -2710,3 +2712,81 @@ def test_lukang_huairou_ai_reforges_an_equipment_card() -> None:
         lambda running: armor in running.state.discard,
     )
     assert armor in engine.state.discard
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·神曹操（lin-batch 票 01）：【归心】在"已背面朝上"时照发动
+# ---------------------------------------------------------------------------
+
+SHEN_CAOCAO = "shen_caocao_mobile"
+GUIXIN = "hero.shen_caocao_mobile.guixin"
+
+
+def test_shen_caocao_guixin_ai_activates_while_already_back_facing() -> None:
+    """【归心】：已背面朝上时这一手是**翻回正面**的收益 ⇒ AI 照发动，并把每座的牌点走。
+
+    这是票面 §A 第 6 格点名的"不犯已知的蠢"用例（`SKILL_VALUES` 的 `_score_guixin`：
+    背面朝上 ⇒ ``gains + 1.0``，恒为正）。判据两条：AI 在「是否发动」上答
+    ``ActivateSkill``（不是 ``Pass``）；**每一个**座位的 ``SELECT_CARDS`` 上都给出非空
+    ``picks``（每座恰好 1 张，Q2 = A 没有逐座放弃出口）。
+    """
+    channel = cards_of_type(PACK, "slash")[5]
+    slash = cards_of_type(PACK, "slash")[1]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=SHEN_CAOCAO, hp=3, hp_max=3),
+            SeatSpec(hand=(slash, dodge)),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, channel, slash, dodge),
+        processing=(channel,),
+        turn_seat=0,
+    )
+    state.player(0).flipped = True
+    engine = Engine.from_state(state, seed=1)
+    channel_ref = state.card(channel)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": channel_ref,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 0,
+            "channel": channel_ref,
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    activation = None
+    picks: list = []
+    for _ in range(2_000):
+        if ran_timing(engine, Timing.DAMAGE_END):
+            break
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        if query.kind == "SKILL_ACTIVATION" and str(query.skill_id) == GUIXIN:
+            activation = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            engine.submit(activation)
+            continue
+        if query.kind == "SELECT_CARDS":
+            action = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            picks.append(action)
+            engine.submit(action)
+            continue
+        engine.submit(PassPlayer().respond(query))
+
+    assert isinstance(activation, ActivateSkill) and activation.skill_id == GUIXIN, (
+        f"AI 该发动【归心】（背面朝上时可翻回正面），实得 {activation!r}"
+    )
+    assert len(picks) == 1, f"有牌的座位各一问答，实得 {len(picks)}"
+    assert all(tuple(action.picks) for action in picks), "每座都要交出一张"
+    assert len(engine.state.player(0).hand) == 1, "拿到的牌进了神曹操的手牌"
+    assert engine.state.player(0).flipped is False, "这一手把他翻回正面"

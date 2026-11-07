@@ -485,7 +485,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 83 and len(catalog) == 54, (
+    assert len(flat) == 84 and len(catalog) == 55, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -504,7 +504,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         "tao-caocao 票 01 加自制包韬·曹操自制版 ⇒ 76 / 49（真名曹操已在池里 ⇒ 真名数不变）；"
         "jie-feng-batch / lei-batch 的界黄忠移动版·界魏延移动版 / 雷包三将 ⇒ 78 / 49；"
         "huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 ⇒ 79 / 50（新真名「卧龙诸葛」+1）；"
-        "票 02 加火包 OL 颜良文丑 ⇒ 80 / 51（新真名「颜良文丑」+1）"
+        "票 02 加火包 OL 颜良文丑 ⇒ 80 / 51（新真名「颜良文丑」+1）；"
+        "lin-batch 票 01 加林包移动版神曹操 ⇒ 84 / 55（新真名「神曹操」+1）"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -3648,6 +3649,90 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     )
     assert payload["spec"]["optional"] is False
     assert payload["prompt_display"]["default_label"] == "超时将自动选择第一张亮牌"
+
+
+def _guixin_real_session() -> Session:
+    """一条**真会话**：真引擎 + 真 ``DAMAGE`` 帧，停在【归心】逐座位的选牌步（lin-batch 票 01）。
+
+    与 :func:`_yiji_real_session` 同一条理由：随机建局走不到【归心】，但会话壳、派发环、
+    ``pending_payload`` 这条读取方链路一字不换 —— 要证的是"**手写询问**（没有 ``SkillFlow``
+    的钩子）也一样读得到 ``step_requirements``"，这是票面 §1 询问剧本第三条明写的口径。
+    """
+    pack = _context_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    given = cards_of_type(pack, "slash")[1]
+    armor = cards_of_type(pack, "eight_diagrams")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(equip=(armor,), hand=(given,)),
+            SeatSpec(hero="shen_caocao_mobile"),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {slash, given, armor}
+        ),
+        processing=(slash,),
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(_ScriptedSeat() for _ in range(2))
+    session.engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 0,
+            "targets": (1,),
+            "card": state.card(slash),
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 1,
+            "channel": state.card(slash),
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _advance_to_the_yiji_card_step(session)
+    return session
+
+
+def test_a_real_session_reaches_the_guixin_card_step_as_an_unknown_zone_dialog() -> None:
+    """【归心】的三区选牌面在生产帧形状下真的走到读取方（lin-batch 票 01）。
+
+    钉三件事（``CODING_STANDARDS.md`` §6 的读取方纪律）：
+
+    1. **手写询问**也读得到逐步文案 —— 询问不带 ``skill_id``、帧上只有派发环写的
+       ``running_skill``，``projection._step_requirement`` 的 ``SELECT_CARDS`` 分支照样命中
+       ``step_requirements["card"]``（票面 §1“手写询问也读得到”）；
+    2. **未知区域弹窗**的两个前提都在载荷里：`spec.zones` = 手牌 / 装备 / 判定三区、
+       全部槽位来自**同一个别的座位**、`total` 上界 1（`modal.js:isUnknownZoneStep` 逐条读）；
+    3. 发动后**不可逐座放弃**（Q2 = A）⇒ 候选里没有 ``Pass``。
+    """
+    session = _guixin_real_session()
+    query = session.pending
+
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert query.skill_id is None, "手写询问的选牌步不带 skill_id（真实形状）"
+    data = session.engine.stack.frames[-1].data
+    assert data.get("running_skill") == "hero.shen_caocao_mobile.guixin"
+    assert "skill_id" not in data
+
+    session.human_seat = int(query.actor)
+    payload = pending_payload(session)
+
+    assert payload is not None and payload["context"] is not None
+    assert payload["context"]["requirement"] == "获得一名其他角色区域里的一张牌", (
+        "手写询问的逐步文案必须真的被读到（退回一句话 summary 就说明判据又读错了键）"
+    )
+    assert payload["spec"]["zones"] == ["hand", "equip", "judge"], "三区选取面"
+    assert payload["spec"]["total"] == [1, 1], "恰好一张"
+    assert payload["spec"]["optional"] is False
+    seats = {slot["ref"]["seat"] for slot in payload["slots"]}
+    assert seats == {0}, "每一槽都来自同一个别的座位（未知区域弹窗的判据）"
+    assert all(action["kind"] != "Pass" for action in payload["legal_actions"]), (
+        "Q2 = A：发动后不可逐座放弃，界面没有『放弃』键"
+    )
 
 
 def _jizhi_nullify_session() -> Session:
@@ -7091,7 +7176,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 174, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 176, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

@@ -70,6 +70,7 @@ __all__ = [
     "LIULI_FLOW",
     "JIE_MASHU",
     "JIE_YICONG",
+    "FEIYING",
     "LIULI",
     "MASHU",
     "PANGDE_MASHU",
@@ -95,6 +96,14 @@ PANGDE_MASHU = hero_skill_id("pangde_mobile", "mashu")
 牌面与两条既有【马术】逐字相同（`D:\\SGS_HEROS\\神话再临-火包\\庞德\\技能.txt`）⇒ 用户
 2026-11-02 签"复用马超的马术"：**同一个** ``DISTANCE`` 回调、另立一条 ``SkillDef``（第三条
 同形实例，与 :data:`JIE_MASHU` 同一姿态）。"""
+
+FEIYING = hero_skill_id("shen_caocao_mobile", "feiying")
+"""神曹操移动版【飞影】的全限定技能 id（lin-batch 票 01）。
+
+牌面（用户 `技能.txt`，逐字）：「锁定技，其他角色计算与你的距离+1。」与移动版官网
+（`sanguosha.cn` 的 hero-detail-143）逐字相同；一将成名官网写作「其他角色与你的距离+1」
+（省了「计算」二字，同义）⇒ **无平台差异**、不构成 A1：本技能没有任何可被平台文本翻转的
+结算量（客体侧 +1，无分支、无数值档位）。"""
 
 LIULI = hero_skill_id("daqiao", "liuli")
 """大乔【流离】的全限定技能 id。"""
@@ -134,6 +143,20 @@ def _yicong_distance(state: GameState, ctx: ModifierContext, current: Any) -> An
     if ctx.owner == ctx.target and state.player(ctx.owner).hp <= 2:
         return current + 1
     return current
+
+
+def _feiying_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """神曹操移动版【飞影】的 ``DISTANCE`` 回调：持有者当**客体**时 +1（lin-batch 票 01）。
+
+    逐字同义于界【义从】②的那三行，**去掉** ``hp <= 2`` 判据——飞影是**无条件常驻**的
+    锁定技（牌面只有一个分句，没有"若…"前提）。方向是**客体侧**（「其他角色**计算与你的**
+    距离 +1」⇒ 被算的是持有者）：抄【马术】的 ``ctx.subject`` 判据就等于"我算别人 −1"，
+    方向正好相反。下限 1 由距离管道在链后夹住（:func:`~sgs.effects.distance`），本回调不自己夹。
+    """
+    del state
+    if ctx.owner != ctx.target:
+        return current
+    return current + 1
 
 
 # ---------------------------------------------------------------------------
@@ -379,5 +402,15 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.DISTANCE, _yicong_distance),),
             requirement="①你计算与其他角色的距离 -1；②若你的体力值不大于 2，其他角色计算与你的距离 +1",
+        ),
+        # 神曹操移动版【飞影】（lin-batch 票 01）：纯修饰器 + 锁定 ⇒ 客体侧无条件 +1。
+        # 声明形状抄【马术】，**判据方向抄【义从】②**（`ctx.owner == ctx.target`）。
+        SkillDef(
+            skill_id=FEIYING,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _feiying_distance),),
+            requirement="锁定技，其他角色计算与你的距离+1。",
         ),
     )

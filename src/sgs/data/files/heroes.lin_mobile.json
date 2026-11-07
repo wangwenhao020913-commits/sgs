@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "lin_mobile",
+  "heroes": [
+    {
+      "id": "shen_caocao_mobile",
+      "name": "神曹操移动版",
+      "true_name": "神曹操",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "lin-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guixin",
+          "name": "归心",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "feiying",
+          "name": "飞影",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

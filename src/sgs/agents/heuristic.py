@@ -3666,6 +3666,39 @@ def _score_huangtian(query: Query, action: Action, view: PlayerView) -> float:
     return 2.0 * (1.0 - enemy)
 
 
+def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
+    """神曹操移动版【归心】（lin-batch 票 01）：逐座位各拿一张 + **翻面**。
+
+    **有代价**：翻面是 toggle（L783）——正面朝上时这一手会把自己翻过去，下个回合开始前
+    翻回正面并**跳过整个回合**（规则 13.2）；已经背面朝上时，这一手反而是**翻回正面**的
+    收益。故 ``SKILL_VALUES`` 只回答"值不值得发动"：取几张读**公开面**
+    （``view.players[*]`` 的 ``alive`` / ``hand_count`` / ``equip`` / ``judge`` 判"这一座
+    有没有牌可拿"），翻过去还是翻回来读 ``view.players[self].flipped``；**挑哪一张**由
+    通用的 ``SELECT_CARDS`` 打分器按牌面处理（``action.picks`` 不进这一问）。
+
+    数值：``gains`` = 有牌的其他存活角色数。背面朝上 ⇒ ``gains + 1.0``；正面朝上 ⇒
+    ``gains − 1.5``（跳过自己下个回合的代价）；全场无牌（Q1 = B 的"只为翻面"）⇒
+    背面 +1.0 / 正面 −1.0。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    me = next((player for player in view.players if player.seat == view.seat), None)
+    if me is None or not me.alive:
+        return _UNKNOWN_SKILL_VALUE
+    gains = sum(
+        1
+        for player in view.players
+        if player.seat != view.seat
+        and player.alive
+        and (player.hand_count or player.equip or player.judge)
+    )
+    if me.flipped:
+        return float(gains) + 1.0
+    if not gains:
+        return -1.0
+    return float(gains) - 1.5
+
+
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
@@ -4202,6 +4235,18 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "输了必须二选一——弃至少 X 张换 1 点伤害、或摸 X 张并失去此技能。两条出口都不致命，"
         "且每轮只有一次、拼点点数还能 +X（段 2 恒选）⇒ 恒发动为正（读 view 只用公开面："
         "候选出现即说明双方都有手牌、本轮还没用过）",
+    ),
+    # 林包·移动版·神曹操（lin-batch 票 01）：【归心】有一次发动 = 逐座位各拿一张 + 翻面
+    # （toggle），故按"能拿几张 vs 跳过下个回合"权衡；【飞影】是锁定技 ⇒ 不要求条目
+    # （`_missing_entries` 跳过 `definition.locked`，与马术 / 义从同一姿态）。
+    "hero.shen_caocao_mobile.guixin": (
+        _score_guixin,
+        "受到 1 点伤害后**每点各问一次**：发动后按座位序从每名有牌的其他角色区域里各拿"
+        "一张，然后**翻面**（toggle）。有代价：正面朝上时下个回合开始前翻回并**跳过整个"
+        "回合**，背面朝上时反而是翻回正面的收益。读 `view.players` 的存活 / `hand_count` /"
+        "`equip` / `judge` 判每座有没有牌可拿（`gains`），读 `view.players[self].flipped`"
+        "判翻过去还是翻回来；挑哪张由 SELECT_CARDS 打分器按牌面处理（`action.picks` 不进"
+        "这一问）。gains = 0 且正面朝上 ⇒ 不发（跳过回合不划算）",
     ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。

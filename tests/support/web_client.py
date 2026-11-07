@@ -325,6 +325,22 @@ def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -
     return actions[0], "first"
 
 
+_FIRE_TAPE_BANNED_HEROES = (
+    # 雷包（lei-batch 票 01）。
+    "haozhao",
+    "zhangxiu",
+    "zhugezhan",
+    # 神话再临·林包·移动版（lin-batch 票 01 / 02 / 03）：新武将进默认池会重排随机配将。
+    "shen_caocao_mobile",
+)
+"""火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
+
+新武将进默认池时**往这里追加**（见 :func:`fire_attack_tape` 的 docstring）：tape 钉的是
+火攻的界面与记录流，不是将池；重扫 seed 会把"加武将"和"tape 改坏"两件事混成一次红。
+林包三将分票落地，故 02 / 03 也各追加自己那一行（`sunjian_mobile` / `xuhuang_mobile`）。
+"""
+
+
 def fire_attack_tape(base: str) -> int:
     """两条固定种子的火攻 tape；全部经真 HTTP，任何违规立即 FAIL。
 
@@ -333,6 +349,10 @@ def fire_attack_tape(base: str) -> int:
     让"整局没摸到【火攻】"变成假红（真发生过：加郝昭后 seed=37 那一局不再用出火攻）。
     故这里显式禁掉后加的雷包武将，把局面钉回原来的 72 人池。**再加武将时把它加进这条
     禁将清单**，不要重扫种子。
+
+    lin-batch（神话再临·林包·移动版，神曹操 / 孙坚 / 徐晃）同样按这条规矩追加：新武将进默认池
+    会重排随机配将，tape 钉的是火攻的界面与记录流、不是将池 —— 加 `_FIRE_TAPE_BANNED_HEROES`，
+    **不重扫 seed**。
     """
     failures = 0
     for seed, target_self, expect_discard in _FIRE_TAPES:
@@ -347,7 +367,7 @@ def fire_attack_tape(base: str) -> int:
                 "timeout_seconds": None,
                 "deck_profile": "standard_ex_160",
                 # 见 docstring：钉死加武将前的将池（版本粒度、只作用于随机配将）。
-                "banned_heroes": ["haozhao", "zhangxiu", "zhugezhan"],
+                "banned_heroes": _FIRE_TAPE_BANNED_HEROES,
             },
         )
         if status != 200:

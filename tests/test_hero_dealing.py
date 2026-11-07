@@ -213,6 +213,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     lei = load_heroes("lei")
     lei_mobile = load_heroes("lei_mobile")
     jie_feng_mobile = load_heroes("jie_feng_mobile")
+    lin_mobile = load_heroes("lin_mobile")
     expected = tuple(
         hero.id
         for table in (
@@ -227,13 +228,14 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
             lei,
             lei_mobile,
             jie_feng_mobile,
+            lin_mobile,
         )
         for hero in table.heroes
         if hero.enabled
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 83
+    assert len(expected) == 84
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -253,6 +255,9 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     assert (
         "jie_weiyan_mobile" in expected
     ), "界限突破-风包·移动版·界魏延（jie-feng-batch 票 02）也进默认池"
+    assert (
+        "shen_caocao_mobile" in expected
+    ), "林包·移动版·神曹操（lin-batch 票 01）也进默认池"
 
 
 def test_enabled_hero_ids_reads_the_table_enablement():
@@ -289,7 +294,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 83
+    assert len(ids) == 84
 
     for hero_id in ids:
         heroes = _heroes_of(
