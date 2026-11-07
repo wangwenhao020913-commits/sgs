@@ -111,6 +111,12 @@ class VirtualKind(IntEnum):
     NULLIFY = 16
     FIRE_ATTACK = 17
     IRON_CHAIN = 18
+    SUPPLY_SHORTAGE = 19
+    """【兵粮寸断】（lin-batch 票 03 的徐晃移动版【断粮】）：尾部紧凑段的第二个消费者。
+
+    追加段只增不改：这是**新的一段**，旧的 0–18 段一字不动（尾部段按
+    :func:`_tail_segment_start` 依次排开，段起点随 kind 走，不与任何旧 id 相交）。
+    """
 
 
 BLOCK_KIND_COUNT = 6
@@ -155,6 +161,8 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "nullify": VirtualKind.NULLIFY,
     "fire_attack": VirtualKind.FIRE_ATTACK,
     "iron_chain": VirtualKind.IRON_CHAIN,
+    # lin-batch 票 03：徐晃移动版【断粮】的产物（单源转化 → 延时锦囊）。
+    "supply_shortage": VirtualKind.SUPPLY_SHORTAGE,
 }
 """目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】；
 M5-05b 加朱雀羽扇的火【杀】产物；M6 票 03 加【奇袭】的【过河拆桥】；M6 票 16 加界【龙胆】

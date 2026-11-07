@@ -33,8 +33,16 @@
 
 from __future__ import annotations
 
-from sgs.data import RuleConfig, load_content_pack
-from sgs.effects import distance
+from sgs.data import (
+    Category,
+    Color,
+    RuleConfig,
+    Suit,
+    card_category,
+    color_of_suit,
+    load_content_pack,
+)
+from sgs.effects import ModifierPoint, check_targets, distance, legal_actions_for
 from sgs.engine import Engine
 from sgs.skills import CATALOG, flow_for
 from sgs.state import (
@@ -44,9 +52,12 @@ from sgs.state import (
     MoveReason,
     Pass,
     Phase,
+    PlayCard,
+    QueryKind,
     SelectCards,
     SelectOption,
     SkillSuppression,
+    UseCard,
     Zone,
 )
 from sgs.timing import Timing
@@ -1326,3 +1337,525 @@ def test_sunjian_mobile_is_the_wu_general_of_the_mobile_lin_pack():
     assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("wu", "male", 4)
     assert hero.enabled is True
     assert [f"hero.{hero.id}.{skill.id}" for skill in hero.skills] == [YINGHUN]
+
+
+# ===========================================================================
+# §4 徐晃移动版【断粮】（lin-batch 票 03）
+#
+# 牌面（`…/徐晃/技能.txt`，逐字；口径 = **移动版**，见票面 §0.1）：
+#
+#     断粮
+#     　①你可以将一张黑色非锦囊牌当【兵粮寸断】使用；
+#     　②你对距离为2的其他角色使用【兵粮寸断】无距离限制。
+#
+# 用户 2026-11-08 的裁定（票面 §0.2 / §1 询问剧本）：
+#
+# - **移动版口径、没有【截辎】**（OL 现行 / OL 官网 / 一将成名才有那一条）；
+# - **② 的合法目标 = 距离 ≤ 2**（距离 ≥ 3 仍不合法，**不是**"完全无距离限制"），落点 =
+#   `DISTANCE_LIMIT` 的 `max(current, 2)`，`current is None` 时原样返回 `None`；
+# - **`standard_108` 档牌堆里没有【兵粮寸断】** ⇒ 整条不产出候选（Q2 = A，账本 L938）。
+#
+# 判据全走**外部缝**：`legal_actions_for` 的候选面 / `check_targets` / 引擎下发的
+# `transform_preactivations` 清单 / 记录流与终局状态。**不 mock、不旁路候选**。
+# ===========================================================================
+
+XUHUANG = "xuhuang_mobile"
+DUANLIANG = "hero.xuhuang_mobile.duanliang"
+QICAI = "hero.huangyueying.qicai"
+JIZHI = "hero.huangyueying.jizhi"
+JIE_JIZHI = "hero.jie_huangyueying.jizhi"
+XIAOJI = "hero.sunshangxiang.xiaoji"
+
+DUANLIANG_REQUIREMENT = (
+    "选择1张黑色非锦囊牌当【兵粮寸断】使用；"
+    "你对距离为2的其他角色使用【兵粮寸断】无距离限制"
+)
+
+PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""军争 160 档：**【兵粮寸断】**（2 张）只在这一档里 ⇒ 断粮的产物在这一档才有实体牌。"""
+
+SHORTAGE_160 = tuple(cards_of_type(PACK_160, "supply_shortage"))
+FILLERS = (2, 3)
+"""座位 0 摸牌阶段摸到的两张（红【闪】：出牌阶段用不出去 ⇒ 不干扰候选面的读数）。"""
+
+
+def _find_160(*, category: Category, color: Color, exclude: tuple[int, ...] = ()) -> int:
+    """按 (大类, 颜色) 取一张牌（数据表顺序 ⇒ 确定性，不依赖洗牌）。
+
+    大类读数据文件的 :func:`sgs.data.card_category`（唯一真源），颜色读
+    :func:`sgs.data.color_of_suit`——"非锦囊"的判据与实现同为"不是 ``trick`` 大类"。
+    """
+    excluded = set(exclude)
+    for card_id, card in enumerate(PACK_160.deck.cards):
+        if card_id in excluded:
+            continue
+        if card_category(PACK_160.pack_id, card.type) is not category:
+            continue
+        if color_of_suit(card.suit) is not color:
+            continue
+        return card_id
+    raise AssertionError(f"军争 160 张里找不到 {color}/{category} 的牌")
+
+
+BLACK_BASIC = _find_160(category=Category.BASIC, color=Color.BLACK)
+"""黑【杀】（♠）：**基本牌** ⇒ 「非锦囊」的源。"""
+
+BLACK_EQUIP = _find_160(category=Category.EQUIPMENT, color=Color.BLACK)
+"""黑装备牌（♠【青釭剑】）：装备牌同样是「非锦囊」的源（装/换装备都不影响它是源）。"""
+
+BLACK_TRICK = _find_160(category=Category.TRICK, color=Color.BLACK)
+"""黑锦囊（♣【决斗】）：**不是**源（「非锦囊」把它排除）。"""
+
+RED_BASIC = _find_160(category=Category.BASIC, color=Color.RED)
+"""红基本牌（♥【闪】）：颜色不符 ⇒ 不是源。"""
+
+
+def _duanliang_state(
+    *,
+    hand: tuple[int, ...] = (),
+    equip: tuple[int, ...] = (),
+    judge: tuple[int, ...] = (),
+    seats: int = 2,
+    dead: tuple[int, ...] = (),
+    hero: str | None = XUHUANG,
+    pack=PACK_160,
+):
+    """座位 0 = 徐晃移动版（``hero=None`` 换人做对照）；座位 1 可带判定区；其余空座。"""
+    specs = [SeatSpec(hero=hero, hand=tuple(hand), equip=tuple(equip))]
+    for seat in range(1, seats):
+        specs.append(
+            SeatSpec(
+                judge=tuple(judge) if seat == 1 else (),
+                alive=seat not in dead,
+            )
+        )
+    return build_state(
+        pack=pack,
+        seats=specs,
+        deck=deck_excluding(pack, *hand, *equip, *judge),
+        turn_seat=0,
+    )
+
+
+def _play_candidates(state, seat: int = 0):
+    """出牌阶段的**内部候选池**（与 ``test_hero_transform.py`` 的外缝同一处）。"""
+    return legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=1)
+
+
+def _virtual_shortage(actions) -> list:
+    """候选里【断粮】转出来的**虚拟【兵粮寸断】**（``card_id < 0`` = 虚拟牌）。"""
+    return [
+        action
+        for action in actions
+        if isinstance(action, (UseCard, PlayCard))
+        and action.card.card_id < 0
+        and action.card.type == "supply_shortage"
+    ]
+
+
+def _shortage_targets(actions) -> set[int]:
+    """虚拟【兵粮寸断】的可指定目标（每个候选一条目标组合、单目标 ⇒ 取首项）。"""
+    return {int(action.targets[0]) for action in _virtual_shortage(actions)}
+
+
+def _timings(engine, timing: Timing) -> list[int]:
+    """某时机 dispatch 过的座位序（记录流的公开面）。"""
+    return [
+        int(record.actor)
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is timing
+        and record.actor is not None
+    ]
+
+
+def _moves(engine, *, reason: MoveReason, to_zone: Zone | None = None) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is reason
+        and (to_zone is None or record.to_zone.zone is to_zone)
+    ]
+
+
+class _DuanliangUser:
+    """座位脚本：出牌阶段用【断粮】把 ``source`` 当【兵粮寸断】指到 ``target``。
+
+    ``accept`` = 允许**真的发动**的技能 id 集合（本票借它让中继技能 ——【枭姬】/【集智】——
+    发声，从而看得见"失去装备后"与"使用锦囊时"两条接缝）；``asked`` 记下**全部**被问过的
+    技能 id（"没被问"与"问了但放弃"是两件事，前者才是"技能不适用"）。
+    不做断粮的座位（``source=None``）只回最小合法应答。
+    """
+
+    def __init__(
+        self,
+        *,
+        source: int | None = None,
+        target: int = 1,
+        accept: tuple[str, ...] = (),
+    ) -> None:
+        self.source = source
+        self.target = target
+        self.accept = frozenset(accept)
+        self.used = False
+        self.asked: list[str] = []
+        self.activations: list[str] = []
+        self.play_queries: list = []
+        """自己收到的 ``PLAY_PHASE`` 询问（清单就在它上面 ⇒ 断言"清单里有没有这条技能"）。"""
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "PLAY_PHASE":
+            self.play_queries.append(query)
+        if kind == "PLAY_PHASE" and not self.used and self.source is not None:
+            steps = (getattr(query, "transform_preactivations", None) or {}).get(DUANLIANG)
+            if steps:
+                card_step = next(step for step in steps if step.name == "card")
+                options = tuple(int(option) for option in card_step.pool[0].options)
+                assert self.source in options, f"源牌不在清单的来源步里：{options}"
+                self.used = True
+                return ActivateSkill(
+                    skill_id=DUANLIANG,
+                    picks=(self.source,),
+                    choices=(f"seat:{self.target}",),
+                    answers_seq=query.seq,
+                )
+        if kind == "SKILL_ACTIVATION":
+            skill_id = str(getattr(query, "skill_id", "") or "")
+            self.asked.append(skill_id)
+            activate = next(
+                (action for action in query.legal_actions if isinstance(action, ActivateSkill)),
+                None,
+            )
+            if skill_id in self.accept and activate is not None:
+                self.activations.append(skill_id)
+                return activate
+        for action in query.legal_actions:
+            if isinstance(action, (EndPhase, Pass)):
+                return action
+        return query.legal_actions[0]
+
+
+def _deck_with_judge(*, judge: int, used: tuple[int, ...] = ()) -> tuple[int, ...]:
+    """牌堆：座位 0 的摸牌阶段摸走 :data:`FILLERS`，座位 1 的判定摸到 ``judge``。"""
+    rest = tuple(
+        card_id
+        for card_id in range(len(PACK_160.deck.cards))
+        if card_id not in {judge, *FILLERS, *used}
+    )
+    return (*FILLERS, judge, *rest)
+
+
+def _play_started(engine, seat: int) -> bool:
+    """该座位自己的**出牌阶段**已经开始（``PHASE_PLAY_START`` 已 dispatch 给他）。"""
+    return seat in _timings(engine, Timing.PHASE_PLAY_START)
+
+
+def _run_duanliang(
+    *,
+    hand: tuple[int, ...] = (),
+    equip: tuple[int, ...] = (),
+    source: int | None,
+    judge: int | None = None,
+    grants: tuple[str, ...] = (),
+    accept: tuple[str, ...] = (),
+    stop=None,
+):
+    """真引擎：跑到 ``stop``（缺省 = 座位 1 的出牌阶段开始）。
+
+    座位 0 是徐晃移动版、``hand`` / ``equip`` 给源牌；``grants`` 是**获得**的技能
+    （``granted_skills``：本票用它把【枭姬】/【集智】装到同一座位上造接缝）。
+    """
+    judge_card = (
+        _find_160(category=Category.BASIC, color=Color.RED, exclude=FILLERS)
+        if judge is None
+        else judge
+    )
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=XUHUANG, hand=tuple(hand), equip=tuple(equip)),
+            SeatSpec(),
+        ],
+        deck=_deck_with_judge(judge=judge_card, used=(*hand, *equip)),
+        turn_seat=0,
+    )
+    state.player(0).granted_skills.extend(grants)
+    engine = Engine.from_state(state, seed=1)
+    user = _DuanliangUser(source=source, accept=accept)
+    run_queries(
+        engine,
+        [user, _DuanliangUser()],
+        stop if stop is not None else (lambda current: _play_started(current, 1)),
+    )
+    return engine, user
+
+
+# ---------------------------------------------------------------------------
+# §4 断粮 —— ① 源筛选（黑色 ∧ 非锦囊 ∧ 手牌 ∪ 装备）
+# ---------------------------------------------------------------------------
+
+
+def test_duanliang_is_not_offered_without_a_black_non_trick_card():
+    """G1 付不起：手里只有**红**基本牌 ⇒ 候选阶段就不产出（不是发空询问）。"""
+    state = _duanliang_state(hand=(RED_BASIC,))
+
+    assert not _virtual_shortage(_play_candidates(state)), (
+        "红包不是源（①写的是「黑色」）⇒ 没有候选，清单里连这条技能都不该出现"
+    )
+
+
+def test_duanliang_does_not_convert_a_black_trick():
+    """「非锦囊」= 基本 ∪ 装备：黑色**锦囊**不是源（延时类也在锦囊大类里，一并排除）。"""
+    state = _duanliang_state(hand=(BLACK_TRICK,))
+
+    assert not _virtual_shortage(_play_candidates(state)), (
+        "黑色锦囊不是【断粮】的源（三类牌里只排除 trick 那一类）"
+    )
+
+
+def test_duanliang_offers_a_black_equipment_card_from_the_equip_zone():
+    """区域默认（W4-3）：牌面没写区域 ⇒ 手牌 ∪ 装备；判定区**不默认包含**。"""
+    equip_state = _duanliang_state(equip=(BLACK_EQUIP,))
+
+    virtual = _virtual_shortage(_play_candidates(equip_state))
+    assert virtual, "装备区的黑装备牌是源（与【奇袭】同一档的区域默认）"
+    assert {action.card.virtual_sources for action in virtual} == {(BLACK_EQUIP,)}
+
+    judge_state = _duanliang_state()
+    judge_state.player(0).judge.append(BLACK_EQUIP)
+    assert not _virtual_shortage(_play_candidates(judge_state)), (
+        "判定区的牌不是源：区域默认不包含判定区（账本 L674 / L775②）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §4 断粮 —— ② 目标池（距离 ≤ 2 = 用户 2026-11-08 的裁定）
+# ---------------------------------------------------------------------------
+
+
+def test_duanliang_is_not_offered_without_a_legal_target():
+    """G2 付得起但没收益：其他座位全死了 ⇒ 目标池空 ⇒ 整条不出现（零副作用）。"""
+    state = _duanliang_state(hand=(BLACK_BASIC,), seats=3, dead=(1, 2))
+
+    assert not _virtual_shortage(_play_candidates(state)), (
+        "一个合法目标都没有 ⇒ 不产出候选（与 G1 同一条纪律：不发没有候选的询问）"
+    )
+
+
+def test_duanliang_target_pool_is_other_alive_seats_at_distance_at_most_two():
+    """合法目标 = 其他 + 存活 + **距离 ≤ 2**；自己与死者永不在池里。"""
+    state = _duanliang_state(hand=(BLACK_BASIC,), seats=6, dead=(5,))
+
+    assert _shortage_targets(_play_candidates(state)) == {1, 2, 3, 4}, (
+        "座位 2 / 3 都在距离 2 以内（② 放宽的正是这一格）；座位 5 已死、自己不在池里"
+    )
+    assert distance(state, 0, 2) == 2 and distance(state, 0, 3) == 2
+
+
+def test_duanliang_keeps_distance_three_illegal():
+    """距离 ≥ 3 仍不合法（用户裁的**不是**"完全无距离限制"）。"""
+    state = _duanliang_state(hand=(BLACK_BASIC,), seats=7)
+
+    assert distance(state, 0, 3) == 3 and distance(state, 0, 4) == 3, "前提：这两座确实是距离 3"
+    assert _shortage_targets(_play_candidates(state)) == {1, 2, 5, 6}, (
+        "距离 3 的座位 3 / 4 不可选（② 只放宽到 2）"
+    )
+
+
+def test_duanliang_distance_exemption_covers_real_and_converted_supply_shortage():
+    """② 对**真实的**与**转化出的**【兵粮寸断】都生效（判据按牌名，不按来源）。"""
+    converted = _duanliang_state(hand=(BLACK_BASIC,), seats=7)
+    assert _shortage_targets(_play_candidates(converted)) == {1, 2, 5, 6}
+
+    real = SHORTAGE_160[0]
+    real_state = _duanliang_state(hand=(real,), seats=7)
+    assert check_targets(real_state, 0, real_state.card(real)) == (1, 2, 5, 6), (
+        "真牌的额定距离也从 1 放宽到 2（同一条 DISTANCE_LIMIT 链）"
+    )
+
+    plain = _duanliang_state(hero=None, hand=(real,), seats=7)
+    assert check_targets(plain, 0, plain.card(real)) == (1, 6), (
+        "没有这条技能的人：额定距离仍是 1（② 是**主体侧**的修饰器）"
+    )
+
+
+def test_duanliang_does_not_narrow_a_fully_exempt_distance_chain():
+    """M3：链上已有 `None`（完全豁免，如【奇才】）⇒ 原样返回 `None`，不许收窄成 2。"""
+    real = SHORTAGE_160[0]
+    state = _duanliang_state(hand=(real,), seats=7)
+    state.player(0).granted_skills.append(QICAI)
+
+    assert check_targets(state, 0, state.card(real)) == (1, 2, 3, 4, 5, 6), (
+        "【奇才】已经把距离条件整条豁免 ⇒ 距离 3 的座位也合法；【断粮】不许把它收窄回 2"
+    )
+
+    control = _duanliang_state(hand=(real,), seats=7)
+    assert check_targets(control, 0, control.card(real)) == (1, 2, 5, 6), (
+        "对照：链上没有 `None` 时 ② 只放宽到 2（证明上一行不是「本来就合法」）"
+    )
+
+
+def test_duanliang_cannot_target_a_character_with_a_supply_shortage_in_the_judge_zone():
+    """C5：判定区**已有同名**【兵粮寸断】的目标不是合法目标（候选阶段就剔除）。"""
+    real = SHORTAGE_160[0]
+    state = _duanliang_state(hand=(BLACK_BASIC,), seats=4, judge=(real,))
+
+    assert _shortage_targets(_play_candidates(state)) == {2, 3}, (
+        "座位 1 的判定区已有同名 ⇒ 不是候选（不发「选了没用」的询问）"
+    )
+    assert check_targets(state, 0, state.card(real)) == (2, 3), (
+        "真牌同一条链：同名守卫对转化牌与真牌一视同仁"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §4 断粮 —— 产物（单源转化：继承源牌花色 / 点数 / 颜色；产物牌名 = 兵粮寸断）
+# ---------------------------------------------------------------------------
+
+
+def test_duanliang_product_inherits_the_source_suit_and_rank():
+    """G6：单源转化**继承源牌的花色 / 点数 / 颜色**（规则 §16.3；属性不继承，与锦囊无关）。"""
+    state = _duanliang_state(hand=(BLACK_EQUIP,))
+    origin = state.card(BLACK_EQUIP)
+
+    virtual = _virtual_shortage(_play_candidates(state))
+
+    assert virtual and virtual[0].card.suit == origin.suit
+    assert virtual[0].card.rank == origin.rank
+    assert virtual[0].card.color is Color.BLACK
+    assert virtual[0].card.name == state.card(SHORTAGE_160[0]).name, "产物牌名 =【兵粮寸断】"
+
+
+# ---------------------------------------------------------------------------
+# §4 断粮 —— 效果链（置入判定区 → 判定非梅花 ⇒ 跳过摸牌阶段；既有真牌链，不新写）
+# ---------------------------------------------------------------------------
+
+
+def _judge_of(suit: Suit) -> int:
+    """按判定花色取一张具体牌（判定花色由测试显式指定，不依赖洗牌）。"""
+    for card_id, card in enumerate(PACK_160.deck.cards):
+        if card_id in {*SHORTAGE_160, *FILLERS}:
+            continue
+        if card.suit is suit:
+            return card_id
+    raise AssertionError(f"军争 160 张里找不到 {suit} 的牌")
+
+
+def test_duanliang_only_skips_the_draw_phase_on_a_non_club_judgment():
+    """判定**非梅花** ⇒ 跳过目标摸牌阶段；**梅花** ⇒ 照常摸两张（真牌既有链）。"""
+    skipped, _ = _run_duanliang(hand=(BLACK_BASIC,), source=BLACK_BASIC, judge=_judge_of(Suit.SPADE))
+    normal, _ = _run_duanliang(hand=(BLACK_BASIC,), source=BLACK_BASIC, judge=_judge_of(Suit.CLUB))
+
+    assert _timings(skipped, Timing.PHASE_DRAW) == [0], (
+        "座位 1 的摸牌阶段整段不存在（连边界也不发）：只留下座位 0 自己那一次"
+    )
+    assert _timings(normal, Timing.PHASE_DRAW) == [0, 1], "梅花 ⇒ 座位 1 照常摸牌"
+    assert skipped.state.player(1).hand == [], "非梅花 ⇒ 一张牌都没摸"
+    assert len(normal.state.player(1).hand) == 2, "梅花 ⇒ 照常摸两张"
+
+    put = [record for record in _moves(skipped, reason=MoveReason.PUT) if record.to_zone.zone is Zone.JUDGE]
+    assert [(record.to_zone.seat, record.owner) for record in put] == [(1, 0)], (
+        "使用当时就置入目标判定区（L4；判定推迟到目标自己的判定阶段）"
+    )
+    assert BLACK_BASIC in skipped.state.discard, "判定结算完，来源牌进弃牌堆"
+
+
+def test_duanliang_does_not_trigger_jizhi():
+    """两版【集智】都不触发：标准版只排除**延时类**、界版只排除**转化**——断粮两样都占。"""
+    for skill_id in (JIZHI, JIE_JIZHI):
+        engine, user = _run_duanliang(
+            hand=(BLACK_BASIC,), source=BLACK_BASIC, grants=(skill_id,)
+        )
+
+        assert skill_id not in user.asked, (
+            f"{skill_id} 不该被问：产物是**延时类锦囊**（标准版排除它）且是**转化牌**"
+            "（界版排除它）"
+        )
+        assert len(engine.state.player(0).hand) == len(FILLERS), "没有额外的集智摸牌"
+
+
+def test_duanliang_resumes_after_an_equipment_loss_hook():
+    """G7：源牌从装备区搬出处理区 ⇒ 内联派发"失去装备后"（【枭姬】）⇒ 续跑不重搬。"""
+    engine, user = _run_duanliang(
+        equip=(BLACK_EQUIP,),
+        source=BLACK_EQUIP,
+        grants=(XIAOJI,),
+        accept=(XIAOJI,),
+        stop=lambda current: BLACK_EQUIP in current.state.player(1).judge,
+    )
+
+    assert XIAOJI in user.asked and XIAOJI in user.activations, (
+        "源牌离开装备区就是一次「失去牌」（账本 L795）⇒【枭姬】应当被问、且这次发动了"
+    )
+    assert len(engine.state.player(0).hand) == len(FILLERS) + 2, (
+        "枭姬摸两张：摸牌阶段的 2 张 + 枭姬的 2 张"
+    )
+    assert BLACK_EQUIP not in engine.state.player(0).equip, "源牌已离开装备区"
+    assert engine.state.virtual_judge.get(BLACK_EQUIP) is not None, (
+        "判定区里那张牌代表的是**虚拟**【兵粮寸断】（virtual_judge 记着映射）"
+    )
+    assert not engine.state.processing, "处理区不留卡住的牌（续跑把同一次移动收尾了）"
+
+
+def test_duanliang_is_offered_on_the_160_deck_and_not_on_the_108_deck():
+    """Q2 = A（账本 L938）：`standard_108` 档没有【兵粮寸断】实体牌 ⇒ 整条不产出。"""
+    offered, user = _run_duanliang(hand=(BLACK_BASIC,), source=BLACK_BASIC)
+    assert user.play_queries, "座位 0 的出牌阶段应当被问过"
+    first = user.play_queries[0]
+    assert DUANLIANG in (first.transform_preactivations or {}), (
+        "军争 160 档：清单里有断粮"
+    )
+
+    state_108 = _duanliang_state(hand=(BLACK_BASIC,), pack=PACK)
+    assert not _virtual_shortage(_play_candidates(state_108)), (
+        "标准 108 档的牌堆里一张【兵粮寸断】都没有 ⇒ 不产出该方向（`_card_name` 会回落到"
+        " 英文 id，那样的虚拟牌不是本仓的语义）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §4 断粮 —— 形状 / 数据面
+# ---------------------------------------------------------------------------
+
+
+def test_duanliang_is_a_single_source_conversion_with_a_distance_limit_modifier():
+    """形状：一条**转化声明**（`CANDIDATES`）＋ 一个 `DISTANCE_LIMIT` 修饰器，无钩子 / 流水线。"""
+    definition = CATALOG[DUANLIANG]
+
+    assert definition.virtual_type_ids == ("supply_shortage",), "产物牌名 =【兵粮寸断】"
+    assert definition.virtual_source_count == 1, "单源（恒 1 张）"
+    assert definition.locked is False and definition.preactivated is False
+    assert {modifier.point for modifier in definition.modifiers} == {
+        ModifierPoint.CANDIDATES,
+        ModifierPoint.DISTANCE_LIMIT,
+    }, "① 走 CANDIDATES（转化入口）、② 走 DISTANCE_LIMIT（额定距离放宽）"
+    assert not definition.hooks and not definition.seams, "本技能不挂钩子 / 接缝"
+    assert flow_for(DUANLIANG) is None, "转化声明没有流水线 ⇒ 步骤语言**外**"
+
+
+def test_duanliang_requirement_names_both_halves():
+    """一句话文案 = ①「选择1张…当…使用」＋ ②「…无距离限制」（同一句，转化技没有逐步文案）。"""
+    definition = CATALOG[DUANLIANG]
+
+    assert definition.requirement == DUANLIANG_REQUIREMENT
+    assert definition.step_requirements is None, (
+        "转化技只透 requirement（conversion_skill_definitions 不写 step_requirements）"
+    )
+
+
+def test_the_xuhuang_mobile_hero_is_in_the_default_pool():
+    """数据面：徐晃移动版那一行与 `heroes.lin_mobile.json` 同源（`hero.<武将 id>.<短 id>`）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    hero = hero_by_id(XUHUANG)
+    assert hero is not None
+    assert hero.name == "徐晃移动版"
+    assert hero.true_name == "徐晃"
+    assert hero.version == "lin-mobile"
+    assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("wei", "male", 4)
+    assert hero.enabled is True
+    assert [f"hero.{hero.id}.{skill.id}" for skill in hero.skills] == [DUANLIANG]
+    assert XUHUANG in enabled_hero_ids(), "启用 ⇒ 进默认池（林包移动版按独立版本并存）"

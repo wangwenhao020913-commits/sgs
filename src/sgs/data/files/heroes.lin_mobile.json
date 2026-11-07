@@ -40,6 +40,23 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "xuhuang_mobile",
+      "name": "徐晃移动版",
+      "true_name": "徐晃",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "lin-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "duanliang",
+          "name": "断粮",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

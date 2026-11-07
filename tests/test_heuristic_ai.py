@@ -3310,6 +3310,35 @@ def _coverage_shuangxiong():
     return engine.state, _play_phase_with_preactivations(engine.state)
 
 
+def _coverage_duanliang():
+    """160 档：徐晃移动版把一张**黑色装备牌**当【兵粮寸断】**使用**。
+
+    产物只在军争 160 档有实体牌（``standard_108`` 照 Q2 = A 整条不产出）；源牌取一张
+    **黑色装备牌**放在**装备区**——装备区的牌在出牌阶段没有"按原用途打出去"这一条竞品
+    候选（与武圣 / 国色 / 火计取"用不出去的源牌"同一条口径），故这条覆盖测到的确实是
+    清单填表。目标由座位步给（3 座：座位 1 / 2 都在距离 2 以内）。
+    """
+    sword = next(
+        index
+        for index, card in enumerate(PACK_EX_160.deck.cards)
+        if card.type == "qinggang_sword"
+    )
+    deck = tuple(
+        index for index in range(len(PACK_EX_160.deck.cards)) if index != sword
+    )
+    state = build_state(
+        pack=PACK_EX_160,
+        seats=[
+            SeatSpec(equip=(sword,), hero="xuhuang_mobile"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state)
+
+
 LUANJI = "hero.yuanshao_mobile.luanji"
 """袁绍移动版【乱击】（huo-mobile-batch 票 03；票 07 起清单**没有**目标步）。"""
 
@@ -3385,6 +3414,8 @@ _TRANSFORM_COVERAGE_CASES = (
     # huo-wolong-yanliang 票 02：颜良文丑【双雄】（本回合判红 ⇒ 黑手牌 → 虚拟【决斗】；
     # bespoke `CANDIDATES` 回调 + 座位级颜色，与 H 族声明表无关）
     ("双雄", "hero.yanliang_wenchou.shuangxiong", _coverage_shuangxiong, "duel"),
+    # lin-batch 票 03：徐晃移动版【断粮】（黑非锦囊 → 虚拟【兵粮寸断】；只在 160 档有产物）
+    ("断粮", "hero.xuhuang_mobile.duanliang", _coverage_duanliang, "supply_shortage"),
 )
 """``(标签, 技能 id, 场景构造, 解析出的虚拟牌名)``：五条转化技（龙胆两方向各一）。"""
 

@@ -232,9 +232,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 177
+    assert len(CATALOG) == 178
     assert len(equipment) == 22, "装备不变：本票两条都是武将技"
-    assert len(heroes) == 153
+    assert len(heroes) == 154
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -262,7 +262,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 153
+    assert len(expected) == 154
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2101,6 +2101,9 @@ SKILL_SHAPE: dict[str, str] = {
     # 双雄 = 阶段体（`PHASE_DRAW`）+ 一条 `CANDIDATES`（本回合的颜色转化）；机械判据按
     # "声明了 `virtual_type_ids`"落「转化技」格（与【连环】同一姿态：转化那一半与钩子共存）。
     "hero.yanliang_wenchou.shuangxiong": "转化技",
+    # lin-batch 票 03：神话再临·林包·移动版徐晃【断粮】= 单源转化（`CANDIDATES`）+ ② 的
+    # `DISTANCE_LIMIT` 修饰器（额定距离 1 → 2，同一张武将牌上的连续型效果）。
+    "hero.xuhuang_mobile.duanliang": "转化技",
     # 锁定技 22（locked=True，含带目标池 / 修饰器的锁定技；M5-01a 的 4 件军争装备占位）
     "equip.crossbow": "锁定技",
     "equip.qinggang_sword": "锁定技",
@@ -2284,9 +2287,10 @@ SHAPE_COUNTS: dict[str, int] = {
     # lin-batch 票 01：神曹操移动版【归心】（手写逐座位循环、无流水线）⇒ 多轮技能 19 → 20；
     # 【飞影】（锁定技 + 纯修饰器）⇒ 锁定技 37 → 38。
     # lin-batch 票 02：孙坚移动版【英魂】（准备阶段钩子 + 两步流水线）⇒ 触发技能 23 → 24。
+    # lin-batch 票 03：徐晃移动版【断粮】（单源转化声明 + 距离修饰器）⇒ 转化技 18 → 19。
     "多轮技能": 20,
     "锁定技": 38,
-    "转化技": 18,
+    "转化技": 19,
     "能力位": 3,
     "候选生成器": 1,
     "候选提供者": 5,
@@ -2397,7 +2401,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 177
+    assert len(SKILL_SHAPE) == len(CATALOG) == 178
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2531,7 +2535,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 92
-    assert len(outside) == 85
+    assert len(outside) == 86
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

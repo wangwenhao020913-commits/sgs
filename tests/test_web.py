@@ -485,7 +485,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 85 and len(catalog) == 56, (
+    assert len(flat) == 86 and len(catalog) == 57, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -506,7 +506,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         "huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 ⇒ 79 / 50（新真名「卧龙诸葛」+1）；"
         "票 02 加火包 OL 颜良文丑 ⇒ 80 / 51（新真名「颜良文丑」+1）；"
         "lin-batch 票 01 加林包移动版神曹操 ⇒ 84 / 55（新真名「神曹操」+1）；"
-        "lin-batch 票 02 加林包移动版孙坚 ⇒ 85 / 56（新真名「孙坚」+1）"
+        "lin-batch 票 02 加林包移动版孙坚 ⇒ 85 / 56（新真名「孙坚」+1）；"
+        "lin-batch 票 03 加林包移动版徐晃 ⇒ 86 / 57（新真名「徐晃」+1）"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -2758,9 +2759,12 @@ def test_the_session_view_carries_the_human_seats_skills() -> None:
     # 判据（未放宽）：人类座位发到**标准版**武将（界将的显示归票 19，名称解析仍读内容包表）。
     # M6 票 18 换池（版本 50 → 54）后 20261001 的人类是界夏侯惇，按同一判据
     # （人类座位发到**标准版**武将）重扫到 20261002；神吕蒙移动版进池（57 → 58）后
-    # 20261002 的人类是**非主公的曹操**（缺【护驾】）⇒ 按同一判据重扫到 **20260991**（吕蒙）。
+    # 20261002 的人类是**非主公的曹操**（缺【护驾】）⇒ 按同一判据重扫到 20260991（吕蒙）。
+    # lin-batch 票 03 再把默认池加到 86 / 57（加林包移动版徐晃）后，20260991 的人类成了
+    # **界吕蒙**（非标准版）⇒ 按同一条判据重扫（20260990 … 20260952 各自落在别的扩展版
+    # 武将上），**20260989** 是首个命中（标准版许褚【裸衣】）。替换只换种子，不换判据。
     session = registry.create(
-        {"player_count": 8, "ai": "heuristic", "seed": 20260991, "timeout_seconds": None}
+        {"player_count": 8, "ai": "heuristic", "seed": 20260989, "timeout_seconds": None}
     )
     payload = registry.view(session, after=-1, logs_after=0)
 
@@ -7245,7 +7249,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 177, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 178, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

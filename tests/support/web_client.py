@@ -333,6 +333,7 @@ _FIRE_TAPE_BANNED_HEROES = (
     # 神话再临·林包·移动版（lin-batch 票 01 / 02 / 03）：新武将进默认池会重排随机配将。
     "shen_caocao_mobile",
     "sunjian_mobile",
+    "xuhuang_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 

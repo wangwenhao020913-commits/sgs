@@ -38,6 +38,7 @@ from sgs.state import (
     SkillActivationQuery,
     UseCard,
     WindowCause,
+    Zone,
     project,
 )
 from sgs.timing import Timing
@@ -2880,4 +2881,131 @@ def test_sunjian_yinghun_ai_aims_at_the_enemy_and_denies_cards() -> None:
     )
     assert not _moves(2, MoveReason.DRAW) and not _moves(2, MoveReason.DISCARD), (
         "AI 不该把英魂指向身份未知的座位 2"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·徐晃（lin-batch 票 03）：【断粮】在 160 档发动、在 108 档不去试
+# ---------------------------------------------------------------------------
+
+XUHUANG_MOBILE = "xuhuang_mobile"
+DUANLIANG = "hero.xuhuang_mobile.duanliang"
+
+PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""军争 160 档：**【兵粮寸断】**只在这一档里（默认 108 档一张都没有 ⇒ Q2 = A 整条不亮）。"""
+
+DUANLIANG_FILLERS = (2, 3)
+"""座位 0 摸牌阶段摸到的两张（红【闪】：出牌阶段用不出去 ⇒ 不给 AI 竞品候选）。"""
+
+
+def _find_judge_card(pack, exclude: tuple[int, ...] = ()) -> int:
+    """一张非梅花的判定牌（花色与断粮的胜负无关；避开已用牌，免得牌堆里出现同一个 id）。"""
+    used = {*DUANLIANG_FILLERS, *exclude}
+    for card_id, card in enumerate(pack.deck.cards):
+        if card_id in used:
+            continue
+        if card.suit != "club":
+            return card_id
+    raise AssertionError("牌堆里找不到非梅花牌")
+
+
+def _duanliang_engine(*, pack, equip: tuple[int, ...]) -> Engine:
+    """座位 0 = 徐晃移动版（``equip`` 里一张黑色非锦囊牌）+ 座位 1；跑到座位 0 的出牌阶段。
+
+    源牌放**装备区**而不是手牌：手牌的黑色装备牌会先被 AI 装上去（装备分高于断粮的常量值），
+    那样这条用例测的就不是"会不会发动断粮"了。装备区的牌在出牌阶段**没有**按原用途用出去
+    这一条竞品候选 ⇒ 候选面只剩断粮与结束阶段，判据是确定性的。
+    牌堆前两张固定是 :data:`DUANLIANG_FILLERS`，故摸牌阶段的收益与局势无关、逐种子可复现。
+    """
+    judge = _find_judge_card(pack, exclude=equip)
+    rest = tuple(
+        card_id
+        for card_id in range(len(pack.deck.cards))
+        if card_id not in {*equip, *DUANLIANG_FILLERS, judge}
+    )
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero=XUHUANG_MOBILE, equip=tuple(equip)), SeatSpec()],
+        deck=(*DUANLIANG_FILLERS, judge, *rest),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE"
+        and e.pending.actor == 0,
+    )
+    query = engine.pending
+    assert query is not None and str(getattr(query.kind, "value", query.kind)) == "PLAY_PHASE"
+    assert query.actor == 0
+    return engine
+
+
+def test_xuhuang_duanliang_ai_activates_on_the_160_deck() -> None:
+    """160 档：【断粮】的清单在，AI **发动**它（复合动作 = 来源 + 目标），牌进目标判定区。"""
+    black_equip = next(
+        index
+        for index, card in enumerate(PACK_160.deck.cards)
+        if card.type == "qinggang_sword"
+    )
+    engine = _duanliang_engine(pack=PACK_160, equip=(black_equip,))
+    query = engine.pending
+
+    assert DUANLIANG in (query.transform_preactivations or {}), "160 档该有断粮的预发动清单"
+
+    action = HeuristicPlayer(ai_stream(0, 0)).respond(query)
+
+    assert isinstance(action, ActivateSkill) and action.skill_id == DUANLIANG, (
+        f"AI 该发动【断粮】（无代价、恒为正），实得 {action!r}"
+    )
+    assert action.picks and action.choices, "复合动作要同时填来源与目标"
+
+    engine.submit(action)
+    # 使用要结算完才置入判定区：先把引擎推到"那张虚拟【兵粮寸断】已经落进判定区"。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: any(
+            record.kind == "delta"
+            and record.delta_type == "card_move"
+            and record.reason is MoveReason.PUT
+            and record.to_zone.zone is Zone.JUDGE
+            for record in e.records
+        ),
+    )
+
+    put = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.PUT
+    ]
+    assert [(record.to_zone.seat, record.owner) for record in put] == [(1, 0)], (
+        "转出来的【兵粮寸断】置入座位 1 的判定区（归属 = 使用者）"
+    )
+    assert engine.state.virtual_judge, "判定区那张实体牌代表一张**虚拟**牌"
+    assert black_equip not in engine.state.player(0).equip, "源牌（装备区那张）已经用出去了"
+
+
+def test_xuhuang_duanliang_ai_does_not_even_try_on_the_108_deck() -> None:
+    """108 档：产物牌名不在牌堆 ⇒ 清单里连这条技能都没有（AI 没有可填的东西）。"""
+    black_equip = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.type == "qinggang_sword"
+    )
+    engine = _duanliang_engine(pack=PACK, equip=(black_equip,))
+    query = engine.pending
+
+    assert DUANLIANG not in (query.transform_preactivations or {}), (
+        "标准 108 档没有【兵粮寸断】实体牌 ⇒ 断粮不产出候选（账本 L938 口径）"
+    )
+
+    action = HeuristicPlayer(ai_stream(0, 0)).respond(query)
+
+    assert not (isinstance(action, ActivateSkill) and action.skill_id == DUANLIANG), (
+        f"AI 不该在 108 档试这条技能，实得 {action!r}"
     )

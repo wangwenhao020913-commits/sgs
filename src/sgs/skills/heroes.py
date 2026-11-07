@@ -43,7 +43,15 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Any
 
-from sgs.data import Color, SkillType, Suit, color_of_suit, hero_skill_id
+from sgs.data import (
+    Category,
+    Color,
+    SkillType,
+    Suit,
+    card_category,
+    color_of_suit,
+    hero_skill_id,
+)
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -313,6 +321,65 @@ def _red_fire_attack(state: GameState, card_id: int) -> bool:
     return _red(state, card_id) and _product_in_pack(state, "fire_attack")
 
 
+def _black_non_trick(state: GameState, card_id: int) -> bool:
+    """颜色 + 大类谓词 + 产物闸门：黑色、**大类不是锦囊**，且本档牌堆里有【兵粮寸断】。
+
+    林包·移动版徐晃【断粮】①「你可以将一张**黑色非锦囊牌**当【兵粮寸断】使用」：
+
+    - **黑色**读 :func:`_black`（颜色派生自花色，唯一真源 ``CardRef.color``）；
+    - **非锦囊**读数据文件的牌名大类（:func:`sgs.data.card_category`，与【奇才】/【集智】
+      同一个读取方）：三类牌是 基本 / 锦囊 / 装备 ⇒「非锦囊」= 基本 ∪ 装备。**延时锦囊
+      一并排除**——延时类不是第四类，它是锦囊大类里 ``final_zone is JUDGE`` 的那几支
+      （``CardBehavior.is_delayed``），故这里不需要第二份名单；
+    - **产物闸门**（用户 2026-11-08 裁的 Q2 = A，账本 L938）：``standard_108`` 档牌堆里
+      一张【兵粮寸断】都没有（它只在军争 ``standard_ex_160`` 的 2 张里）⇒ 该档整条不亮；
+      否则虚拟牌的牌面名只能回落到 ``supply_shortage``（:func:`_card_name` 的实体牌回退）。
+      先例 = 【火计】/ 界【龙胆】的酒桃两向 / 庞统移动版【连环】的 R5。
+
+    颜色判据先行短路：红牌不必再去查牌名大类。
+    """
+    if not _black(state, card_id):
+        return False
+    if card_category(state.pack_id, state.card(card_id).type) is Category.TRICK:
+        return False
+    return _product_in_pack(state, "supply_shortage")
+
+
+DUANLIANG_DISTANCE = 2
+"""【断粮】② 放宽后的合法距离上限（用户 2026-11-08 裁：距离 2 可用、距离 3 仍不合法）。"""
+
+
+def _duanliang_distance_limit(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """林包·移动版徐晃【断粮】②：``DISTANCE_LIMIT`` 的**额定距离 1 → 2**（连续型）。
+
+    牌面「你对**距离为2**的其他角色使用【兵粮寸断】无距离限制」——用户 2026-11-08 裁定
+    合法目标 = **距离 ≤ 2**（距离 ≥ 3 仍不合法），故回调返回 ``max(current, 2)`` 而
+    **不是** ``None``（与【奇才】/【决堰】"完全豁免"那一档不同：那两个返回 ``None``）。
+
+    四道判据（与 :func:`~sgs.skills.limits._qicai_distance_limit` 同姿态）：
+
+    1. ``ctx.owner != ctx.subject`` ⇒ 不是**自己**使用 ⇒ 原样返回（M1 主体侧）；
+    2. ``ctx.card is None`` ⇒ 没有渠道牌 ⇒ 原样返回（fail-closed）；
+    3. 渠道牌名不是 ``supply_shortage`` ⇒ 原样返回（② 只管【兵粮寸断】）；
+    4. ``current is None`` ⇒ 链上已有"完全无距离限制"的效果（【奇才】/【决堰】）⇒
+       **保持 ``None``**，不许收窄成 2（M3）。
+
+    渠道牌按**产物牌名**判，故真实【兵粮寸断】与转化出的【兵粮寸断】走同一条链。
+    连续型效果每次 ``check_targets`` 现算，不落座位状态、不发 delta
+    （``edge-cases.md`` 2.5 的 M2）。
+    """
+    del state
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if ctx.card.type != "supply_shortage":
+        return current
+    if current is None:
+        return None
+    return max(current, DUANLIANG_DISTANCE)
+
+
 def _diamond_slash_target_pool(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
@@ -564,6 +631,35 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_diamond,
         scopes=(CandidateScope.PLAY,),
         requirement="选择1张方块牌当【乐不思蜀】使用",
+    ),
+    # 林包·移动版徐晃【断粮】（lin-batch 票 03；牌面权威 = 用户 `技能.txt`，口径 = **移动版**）：
+    #
+    #     ①你可以将一张黑色非锦囊牌当【兵粮寸断】使用；
+    #     ②你对距离为2的其他角色使用【兵粮寸断】无距离限制。
+    #
+    # 与【国色】同一条 ``ConversionSkill`` 形状（同一张单源转化 → **延时锦囊**），只换三格：
+    # 产物 ``supply_shortage`` / 源谓词 ``_black_non_trick``（黑色 ∧ 非锦囊 + 产物闸门）/
+    # requirement。**没有【截辎】**：那一条只出现在 OL 现行 / OL 官网 / 一将成名，用户
+    # 2026-11-08 裁"移动版、没有截辎"（票面 §0.1 / §0.2）。
+    #
+    # ② 是**同一张武将牌上的连续型效果**，故与界关羽【武圣】② 同姿态挂在同一条声明的
+    # ``modifiers`` 上——挂点选 ``DISTANCE_LIMIT``（额定距离，返回 ``max(current, 2)``）
+    # 而不是 ``TARGET_POOL``：兵粮寸断走的是 ``TargetRule.max_distance``，并集写法会绕过
+    # 坐骑修正、还要在回调里重算一遍 ``distance()``（同一事实写两份）。
+    ConversionSkill(
+        hero_id="xuhuang_mobile",
+        short_id="duanliang",
+        target_type_id="supply_shortage",
+        source_zone=_hand_equip,
+        predicate=_black_non_trick,
+        scopes=(CandidateScope.PLAY,),
+        modifiers=(
+            Modifier(ModifierPoint.DISTANCE_LIMIT, _duanliang_distance_limit),
+        ),
+        requirement=(
+            "选择1张黑色非锦囊牌当【兵粮寸断】使用；"
+            "你对距离为2的其他角色使用【兵粮寸断】无距离限制"
+        ),
     ),
     # 华佗【急救】：回合外一张红色牌当【桃】使用（规则 1041）。
     # M6 票 18：界华佗【急救】与标准版**逐字相同**（§十九 L2199）⇒ 同一条声明经
