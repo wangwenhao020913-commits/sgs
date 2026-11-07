@@ -228,3 +228,80 @@ function cardFaceNode(card, opts = {}) {
   }
   return node;
 }
+
+/* ------------------------------------------------ 跟随鼠标的卡牌预览（用户 2026-11-07） */
+
+/** 预览层相对指针的偏移（px）：右下各 16，不让小弹窗压住指针本身。 */
+const CARD_PREVIEW_OFFSET = 16;
+
+/** 一次预览最多画几张（武将牌上的牌区可能很多；超出的收成一行说明，不铺满整屏）。 */
+const CARD_PREVIEW_LIMIT = 10;
+
+/** 画一张牌的**常规卡面**（`cardFaceNode`，标签 / 转化 / 虚拟都照常）或者一行说明。
+ *
+ * 层是 `#t-card-preview`（index.html 里的覆盖层，`pointer-events: none`）：本模块只管
+ * 内容与可见性，**跟随鼠标**由 :func:`moveCardPreview` 在 `mousemove` 上更新 `left/top`。
+ * 调用方（`seat-view.js` 的装备 / 判定槽与武将牌上的牌区）只传牌面 + 指针事件。
+ */
+function showCardPreview(cards, event) {
+  const box = $("t-card-preview");
+  if (!box) return;
+  const list = (Array.isArray(cards) ? cards : []).filter(Boolean);
+  box.innerHTML = "";
+  for (const card of list.slice(0, CARD_PREVIEW_LIMIT)) {
+    box.appendChild(cardFaceNode(card, { static: true }));
+  }
+  const hidden = list.length - CARD_PREVIEW_LIMIT;
+  if (hidden > 0) {
+    const more = document.createElement("div");
+    more.className = "card-preview-note";
+    more.textContent = `还有 ${hidden} 张`;
+    box.appendChild(more);
+  }
+  box.hidden = list.length === 0;
+  moveCardPreview(event);
+}
+
+/** 只有一行说明的预览（非宿主看不到牌面时用它，保持"按可见性绘制"）。 */
+function showCardPreviewNote(text, event) {
+  const box = $("t-card-preview");
+  if (!box) return;
+  box.innerHTML = "";
+  const note = document.createElement("div");
+  note.className = "card-preview-note";
+  note.textContent = text;
+  box.appendChild(note);
+  box.hidden = false;
+  moveCardPreview(event);
+}
+
+/** 让预览跟着指针走（右下偏移 16px）。缺指针坐标（键盘 / 合成事件）时保持原位。
+ *
+ * 贴边翻转：右下放不下时改到指针左上（`offsetWidth/Height` 与 `innerWidth/Height` 在
+ * 测试垫片里是 0 ⇒ 不翻转，断言仍读固定偏移）。 */
+function moveCardPreview(event) {
+  const box = $("t-card-preview");
+  if (!box || box.hidden) return;
+  const x = Number(event && event.clientX);
+  const y = Number(event && event.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const width = Number(box.offsetWidth) || 0;
+  const height = Number(box.offsetHeight) || 0;
+  const viewW = Number(window.innerWidth) || 0;
+  const viewH = Number(window.innerHeight) || 0;
+  let left = x + CARD_PREVIEW_OFFSET;
+  let top = y + CARD_PREVIEW_OFFSET;
+  if (width && viewW && left + width > viewW) {
+    left = Math.max(0, x - width - CARD_PREVIEW_OFFSET);
+  }
+  if (height && viewH && top + height > viewH) {
+    top = Math.max(0, y - height - CARD_PREVIEW_OFFSET);
+  }
+  box.style.left = `${left}px`;
+  box.style.top = `${top}px`;
+}
+
+function hideCardPreview() {
+  const box = $("t-card-preview");
+  if (box) box.hidden = true;
+}

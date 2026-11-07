@@ -64,6 +64,8 @@
     "arrangeRowOf", "arrangeMoveTo", "arrangePick", "arrangeDrop",
     // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
+    // 用户 2026-11-07：装备 / 判定槽的简略牌面（花色点数 / 转）与跟随鼠标的卡牌预览
+    "miniSlotNode", "showCardPreview", "moveCardPreview", "hideCardPreview",
     // 票 13：将池预设——5 槽切换 / 编辑 / 保存，真名分组渲染，真名池不足的拒绝判据
     "heroVersions", "heroPools", "loadHeroPools", "saveHeroPool", "currentBans",
     "renderPoolSlots", "renderHeroPool", "selectPoolSlot", "togglePoolBan",

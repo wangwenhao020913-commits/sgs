@@ -202,11 +202,15 @@ function equipSlotLayout(cards) {
   return slots;
 }
 
-/** 一个判定 / 装备槽：空槽画暗色占位；有牌画**槽名 + 牌名**（U4-06 / D13）。
+/** 一个判定 / 装备槽：空槽画暗色占位；有牌画**简略牌面**（牌名 + 花色点数）+
+ *  跟随鼠标的常规卡面预览（用户 2026-11-07）。
  *
- *  槽名常显（判定 / 武器 / 防具 / 攻马 / 防马）：判定槽只有侧栏三等分那么宽，有牌时若
- *  只剩牌名，玩家读不出"这是判定区"；装备槽同理要读得出落在哪个槽。牌名在窄槽里折行
- *  （见 `style.css`），不靠 `title` 兜底。
+ *  - 槽名：判定槽**常显**（窄槽读不出"这是判定区"）；装备槽**只在空槽**显示
+ *    （武器 / 防具 / 攻马 / 防马），有装备时让位给牌面；
+ *  - 有牌：牌名（窄槽折行，见 `style.css`）+ 花色点数（单源 / 实体牌才有）；
+ *    转化牌右上角标「转」，常规卡面上的标签 / 虚拟标记仍由预览负责；
+ *  - 悬停：`#t-card-preview` 里画 `cardFaceNode` 的**常规卡面**并跟随鼠标；原生的
+ *    `title` 去掉（同一条信息只留一个读法）。
  *
  *  ``interactive`` 只在**本人**的"提供一张 B / 预发动"面里为真（票 14 / W4-1）：
  *  槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
@@ -223,16 +227,35 @@ function miniSlotNode(options) {
   const label = document.createElement("span");
   label.className = "slot-k";
   label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
-  node.appendChild(label);
+  // 判定槽常显槽名；装备槽只在空槽显示（有装备时不写武器 / 防具 / 攻马 / 防马）。
+  if (judge || !card) node.appendChild(label);
   if (!card) return node;
   node.setAttribute("data-card-id", String(card.card_id));
-  // 悬停全文（U1-02）：装备区 / 判定区的牌与手牌、处理区读**同一份**服务端描述。
-  // 槽很窄，牌名可能折行；标题里带全名，悬停能确认是哪张牌（但不是唯一的读法）。
-  node.setAttribute("title", `${cardName(card)}\n${cardDescription(card)}`);
+  // 简略表现：花色 + 点数（实体牌 / 单源转化有这两项；多源转化与虚拟牌没有）。
+  const suitRank = card.suit
+    ? `${suitSymbol(card.suit)}${rankLabel(card.rank)}`
+    : "";
+  if (suitRank) {
+    const suit = document.createElement("span");
+    suit.className = "slot-suit";
+    suit.textContent = suitRank;
+    node.appendChild(suit);
+  }
+  if (cardKind(card) === "transformed") {
+    const corner = document.createElement("span");
+    corner.className = "slot-trans";
+    corner.textContent = "转";
+    corner.setAttribute("title", "转化牌");
+    node.appendChild(corner);
+  }
   const value = document.createElement("span");
   value.className = "slot-v";
   value.textContent = cardName(card);
   node.appendChild(value);
+  // 悬停 = 常规卡面预览（标签 / 转化 / 虚拟都在 `cardFaceNode` 里画），跟随鼠标。
+  node.addEventListener("mouseenter", (event) => showCardPreview([card], event));
+  node.addEventListener("mousemove", (event) => moveCardPreview(event));
+  node.addEventListener("mouseleave", () => hideCardPreview());
   if (interactive) {
     const face = cardFace(ctx.pendingNow, card);
     if (face.selected) node.classList.add("sel");
@@ -246,18 +269,19 @@ function miniSlotNode(options) {
   return node;
 }
 
-/** **武将牌上的牌区**（M6 票 10 / 票 19；2026-10 用户口径）：一个区一个**标签**。
+/** **武将牌上的牌区**（M6 票 10 / 票 19；用户 2026-11-07 改悬停预览）：一个区一个**标签**。
  *
  * 服务端已裁好牌面可见性（`hero_zones[].cards` 非空 = 宿主可见；空数组 = 非宿主）：
  * - 标签（`skill_name`，未登记区退回 skill_id）**全体可见**；
- * - 宿主：标签可点 / 悬停展开，展开后列出区里的牌；默认收起；
- * - 非宿主：只有标签，**没有牌容器、没有展开入口**（前端不拿 CSS 藏牌）；
+ * - 宿主：**悬停**标签 ⇒ 跟随鼠标的常规卡面预览（区里的每张牌一张；`cardFaceNode`：
+ *   标签 / 转化 / 虚拟都照常画），不悬停就不显示——**没有点击展开**（点击不再"依次
+ *   展示牌名"，那是 2026-10 的旧口径，用户 2026-11-07 取消）；
+ * - 非宿主：只有标签；悬停得到一行说明（`牌面仅宿主可见`）——前端不拿 CSS 藏牌；
  * - 可跨座位 / 可多人并存：每个区一行，落在**宿主座位**的武将块里；
  * - 这些牌不在手牌区，故 `hand_count` 不含它们——界面不另算。
  *
  * DOM 形状：`.hero-zone-row[data-zone=hero][data-seat][data-skill-id][data-cards-visible]`
- * + `.hero-zone-tag`（宿主 `<button aria-expanded>` / 非宿主 `<span class=static>`）
- * + 宿主才有的 `.hero-zone-cards[hidden]` / `.hero-zone-card[data-card-id]`。
+ * + `.hero-zone-tag`（宿主 / 非宿主同为 `<span>`；牌面只在预览层里画，行内不再挂牌节点）。
  * 空区不下发（服务端只给有牌的区），故这里不需要空占位。
  */
 function heroZoneRows(player) {
@@ -275,51 +299,23 @@ function heroZoneRows(player) {
     row.setAttribute("data-count", String(zoneCount));
     const labelText = zone.skill_name || zone.skill_id || "武将牌上";
     let tag;
-    let cardsBox = null;
     if (hostVisible) {
-      tag = document.createElement("button");
-      tag.type = "button";
+      tag = document.createElement("span");
       tag.className = "hero-zone-tag";
-      tag.setAttribute("aria-expanded", "false");
-      tag.setAttribute("title", `${labelText}（${zoneCount} 张）：点击或悬停查看牌`);
-      cardsBox = document.createElement("div");
-      cardsBox.className = "hero-zone-cards";
-      cardsBox.hidden = true;
-      const setOpen = (open) => {
-        cardsBox.hidden = !open;
-        row.setAttribute("data-open", open ? "true" : "false");
-        tag.setAttribute("aria-expanded", String(open));
-      };
-      let pinned = false;
-      tag.addEventListener("click", (event) => {
-        if (event && event.stopPropagation) event.stopPropagation();
-        pinned = !pinned;
-        setOpen(pinned);
-      });
-      tag.addEventListener("mouseenter", () => setOpen(true));
-      tag.addEventListener("mouseleave", () => {
-        if (!pinned) setOpen(false);
-      });
+      tag.addEventListener("mouseenter", (event) => showCardPreview(cards, event));
+      tag.addEventListener("mousemove", (event) => moveCardPreview(event));
+      tag.addEventListener("mouseleave", () => hideCardPreview());
     } else {
       tag = document.createElement("span");
       tag.className = "hero-zone-tag static";
-      tag.setAttribute("title", `${labelText}（${zoneCount} 张；牌面仅宿主可见）`);
+      tag.addEventListener("mouseenter", (event) => showCardPreviewNote(
+        `牌面仅宿主可见（${zoneCount} 张）`, event));
+      tag.addEventListener("mousemove", (event) => moveCardPreview(event));
+      tag.addEventListener("mouseleave", () => hideCardPreview());
     }
     tag.setAttribute("data-tag", labelText);
     tag.textContent = `${labelText} ${zoneCount}`;
     row.appendChild(tag);
-    if (cardsBox) {
-      for (const card of cards) {
-        const chip = document.createElement("span");
-        chip.className = "hero-zone-card";
-        chip.setAttribute("data-card-id", String(card.card_id));
-        // 悬停全文与手牌 / 装备 / 处理区**同一份**服务端描述（U1-04b）。
-        chip.setAttribute("title", `${cardName(card)}\n${cardDescription(card)}`);
-        chip.textContent = cardName(card);
-        cardsBox.appendChild(chip);
-      }
-      row.appendChild(cardsBox);
-    }
     rows.push(row);
   }
   return rows;

@@ -656,7 +656,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   align-content: start;
 }
 .mini-slot {
-  min-width: 0; height: calc(42 * var(--dsu));
+  min-width: 0; height: calc(42 * var(--dsu)); position: relative;
   border: 1px dashed var(--line); border-radius: 5px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; padding: calc(1 * var(--dsu)) calc(1 * var(--dsu)); overflow: hidden;
@@ -678,6 +678,20 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .mini-slot.judge-slot.filled .slot-k { font-size: calc(8 * var(--dsu)); line-height: 1.1; }
 .mini-slot.judge-slot.filled .slot-v {
   font-size: calc(9 * var(--dsu)); line-height: 1.15;
+}
+/* 用户 2026-11-07：简略表现加花色点数；转化牌右上角「转」。两样都在槽**里面**，
+   槽的尺寸（42 / 36，自己的 60 / 52）一字不改。 */
+.mini-slot .slot-suit {
+  display: block; max-width: 100%; font-size: calc(9 * var(--dsu)); line-height: 1.05;
+  color: #7d6f5c; letter-spacing: 0;
+}
+.mini-slot.judge-slot .slot-suit { font-size: calc(8 * var(--dsu)); }
+.mini-slot .slot-trans {
+  position: absolute; right: calc(1 * var(--dsu)); top: calc(1 * var(--dsu));
+  padding: 0 calc(1 * var(--dsu)); border-radius: 3px;
+  background: var(--accent); color: #fff;
+  font-size: calc(8 * var(--dsu)); line-height: 1.25; font-weight: 700;
+  pointer-events: none;
 }
 button.mini-slot { cursor: pointer; }
 .mini-slot.sel { border-color: var(--accent); background: var(--accent-soft); }
@@ -703,8 +717,8 @@ button.mini-slot { cursor: pointer; }
 
 /* M6 票 19：武将牌上的牌区（一个放置区一个**标签**，画在**武将块**里）。
    「可跨座位」由座位卡的宿主决定，「可多人并存」= 同一座位多行。
-   标签全体可见；只有宿主拿到的 cards 非空，点 / 悬停才展开牌面（非宿主没有牌容器）。
-   座位卡固定尺寸，展开的牌面限高纵向滚动（不撑破盒子）。 */
+   标签全体可见；牌面**只在悬停预览里**画（用户 2026-11-07：取消点击展开 / 依次展示牌名；
+   非宿主悬停得到一行「牌面仅宿主可见」）。 */
 .hero-zones { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; min-height: 0; }
 .hero-zones[hidden] { display: none; }
 .hero-zone-row {
@@ -716,23 +730,23 @@ button.mini-slot { cursor: pointer; }
   border: 1px solid #b89f74; border-radius: 4px; background: #fffaf0;
   font-size: calc(9 * var(--dsu)); font-weight: 600; color: #7d6b52;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  cursor: pointer;
+  cursor: help;
 }
 .hero-zone-tag.static { cursor: default; color: #9a9188; }
-.hero-zone-tag[aria-expanded="true"] { border-color: #8b6b3e; color: var(--ink); }
-.hero-zone-cards {
-  display: flex; flex-wrap: wrap; gap: 2px; max-width: 100%;
-  max-height: calc(58 * var(--dsu)); overflow-y: auto;
+.self .hero-zone-tag { font-size: calc(11 * var(--dsu)); }
+
+/* 卡牌预览层（用户 2026-11-07）：跟随鼠标的常规卡面（88×124），不吃点击。 */
+.card-preview {
+  position: fixed; z-index: 55; pointer-events: none;
+  display: flex; flex-wrap: wrap; gap: calc(6 * var(--dsu));
+  max-width: calc(560 * var(--dsu));
+  padding: calc(6 * var(--dsu));
+  background: rgba(255, 253, 247, .97);
+  border: 1px solid #c8b795; border-radius: 8px;
+  box-shadow: 0 10px 26px rgba(43, 36, 28, .22);
 }
-.hero-zone-cards[hidden] { display: none; }
-.hero-zone-card {
-  flex: 0 0 auto;
-  max-width: 4.2em; padding: 0 4px;
-  border: 1px solid #b89f74; border-radius: 4px; background: #fffaf0;
-  font-size: calc(9 * var(--dsu)); font-weight: 600; color: var(--ink);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.self .hero-zone-tag, .self .hero-zone-card { font-size: calc(11 * var(--dsu)); }
+.card-preview[hidden] { display: none; }
+.card-preview-note { font-size: calc(12 * var(--dsu)); color: #6b5f4d; align-self: center; }
 
 /* 票 06：标记（与武将牌上的牌区同骨架、异色；文本 = 名称×数量）。
    标记不是牌，没有展开的牌容器；悬停 = 来源（+ 效果说明）。 */

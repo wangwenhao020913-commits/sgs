@@ -6822,12 +6822,76 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(seat1, "equip-slot").map((slot) => attr(slot, "data-slot")).join(",")
         === "weapon,armor,horse_offense,horse_defense",
     `judge=${byClass(seat1, "judge-slot").length} equip=${byClass(seat1, "equip-slot").map((s) => attr(s, "data-slot")).join(",")}`);
-  check("U1-02h2 槽里的牌画牌名；空槽画槽名（判定 / 武器 / 防具 / 攻马 / 防马）",
+  check("U1-02h2 槽里的牌画牌名 + 花色点数；有装备时**不**显示武器/防具/攻马/防马，空槽才显示；判定槽常显",
     seat1.text().includes("八卦阵") && seat1.text().includes("闪电")
       && seat2.text().includes("赤兔")
-      && byClass(seat1, "equip-slot").filter((slot) => byClass(slot, "slot-k").length > 0)
-        .every((slot) => /武器|防具|攻马|防马/.test(slot.text())),
+      && (() => {
+        const slots = byClass(seat1, "equip-slot");
+        const filled = slots.filter((slot) => hasClass(slot, "filled"));
+        const empty = slots.filter((slot) => hasClass(slot, "empty"));
+        const judge = byClass(seat1, "judge-slot")[0];
+        return filled.length === 1
+          && byClass(filled[0], "slot-k").length === 0
+          && byClass(filled[0], "slot-suit").length === 1
+          && filled[0].text().includes("♠7")
+          && empty.length === 3
+          && empty.every((slot) => byClass(slot, "slot-k").some(
+            (label) => /武器|防具|攻马|防马/.test(label.textContent)))
+          && byClass(judge, "slot-suit").length === 1
+          && byClass(judge, "slot-k").length === 1;
+      })(),
     `seat1="${seat1.text().replace(/\s+/g, " ").trim()}"`);
+
+  // 用户 2026-11-07：转化牌（多源转化的乐不思蜀 / 兵粮寸断等）在简略表现里右上角标「转」。
+  const transformed = card(27, "乐不思蜀", {
+    type: "indulgence", kind: "transformed", suit: null, rank: null,
+    virtual_sources: [synthCard(25, "乐不思蜀")],
+  });
+  const transSlot = ui.miniSlotNode({
+    zone: "judge", slot: "judge", sealKey: "judge_1", card: transformed,
+    interactive: false, ctx: {},
+  });
+  check("U1-02h3 转化牌在判定 / 装备槽右上角标「转」；普通牌没有；多源转化没有花色点数",
+    byClass(transSlot, "slot-trans").length === 1
+      && byClass(transSlot, "slot-trans")[0].textContent === "转"
+      && byClass(transSlot, "slot-suit").length === 0
+      && byClass(transSlot, "slot-v")[0].textContent === "乐不思蜀",
+    `trans=${byClass(transSlot, "slot-trans").map((n) => n.textContent)} suit=${byClass(transSlot, "slot-suit").length}`);
+
+  // 用户 2026-11-07：悬停装备 / 判定区的牌 = 跟随鼠标的常规卡面小弹窗（title 不再是唯一读法）。
+  const armorSlot = byClass(seat1, "equip-slot").find(
+    (slot) => attr(slot, "data-slot") === "armor");
+  const fireMouse = (node, name, event) => (node.listeners[name] || []).forEach(
+    (fn) => fn(event || { target: node, clientX: 120, clientY: 140 }));
+  fireMouse(armorSlot, "mouseenter");
+  const preview = $("t-card-preview");
+  const entered = {
+    hidden: preview.hidden,
+    left: preview.style.left,
+    top: preview.style.top,
+    faces: byClass(preview, "card").length,
+    ids: byClass(preview, "card").map((node) => node.getAttribute("data-card-id")),
+  };
+  fireMouse(armorSlot, "mousemove", { target: armorSlot, clientX: 200, clientY: 240 });
+  const followed = { left: preview.style.left, top: preview.style.top };
+  fireMouse(armorSlot, "mouseleave");
+  const leftHidden = preview.hidden;
+  check("U1-02h4 悬停装备 / 判定牌 = 跟随鼠标的卡面小弹窗；移动跟着走，离开即收",
+    !entered.hidden && entered.faces === 1 && entered.ids.join(",") === "22"
+      && entered.left === "136px" && entered.top === "156px"
+      && followed.left === "216px" && followed.top === "256px"
+      && leftHidden === true,
+    `entered=${JSON.stringify(entered)} followed=${JSON.stringify(followed)} hidden=${leftHidden}`);
+
+  ui.showCardPreview([{
+    ...armor,
+    tags: [{ skill_id: "hero.feng_yujin.dingluan", label: "定乱" }],
+  }], { clientX: 10, clientY: 10 });
+  const taggedPreview = byClass($("t-card-preview"), "card-tag").map((node) => node.textContent);
+  ui.hideCardPreview();
+  check("U1-02h5 预览走常规卡牌渲染：牌上的标签（如「定乱」）照常可见",
+    taggedPreview.includes("定乱"),
+    `tags=${JSON.stringify(taggedPreview)}`);
 
   check("U1-02i 身份：暗置显示 ?、主公明置、阵亡亮明；自己恒可见（全称，`GLOSSARY「身份」`四值）",
     byClass(seat1, "identity-badge").some((b) => b.textContent === "?")
@@ -6942,12 +7006,22 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   show(table());
 
   const liveSeat1 = seatBox(1);
-  check("U1-02o2 卡面悬停 title 读服务端描述（手牌 / 装备 / 判定 / 处理区同一份）",
+  const previewTitleAfterHover = (slot) => {
+    if (!slot) return null;
+    (slot.listeners.mouseenter || []).forEach(
+      (fn) => fn({ target: slot, clientX: 0, clientY: 0 }));
+    const faces = Array.from($("t-card-preview").children).filter(
+      (node) => String(node.className || "").split(/\s+/).includes("card"));
+    const title = faces.length ? faces[0].getAttribute("title") : null;
+    ui.hideCardPreview();
+    return title;
+  };
+  check("U1-02o2 卡面悬停读服务端描述（手牌 / 处理区的 title；装备 / 判定走预览卡面同一份描述）",
     handCard.getAttribute("title") === slash.description
-      && byClass(liveSeat1, "equip-slot").find((s) => attr(s, "data-card-id") === "22").getAttribute("title")
-        === `八卦阵\n${armor.description}`
-      && byClass(liveSeat1, "judge-slot").find((s) => attr(s, "data-card-id") === "24").getAttribute("title")
-        === `闪电\n${lightning.description}`
+      && previewTitleAfterHover(byClass(liveSeat1, "equip-slot").find(
+        (s) => attr(s, "data-card-id") === "22")) === armor.description
+      && previewTitleAfterHover(byClass(liveSeat1, "judge-slot").find(
+        (s) => attr(s, "data-card-id") === "24")) === lightning.description
       && byClass($("t-processing"), "card")[0].getAttribute("title") === lightning.description,
     `hand="${handCard.getAttribute("title")}"`);
 
@@ -10192,13 +10266,20 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     [0, 1, 2].map((seat) => `${seat}:${seatHighlighted(seat)}`).join(" "));
 
   /* ---- ③ 检视照常：悬停 title / 右键详情 ---- */
-  check("U2-05c 只读态里悬停照常：手牌与装备槽的 title 仍是服务端描述",
+  check("U2-05c 只读态里悬停照常：手牌的 title 与装备槽的预览卡面仍是服务端描述",
     handChip().getAttribute("title") === "【杀】的全文描述"
       && (() => {
         const slot = selfEquipChip();
-        return !!slot && /青釭剑/.test(slot.getAttribute("title") || "");
+        if (!slot) return false;
+        (slot.listeners.mouseenter || []).forEach(
+          (fn) => fn({ target: slot, clientX: 0, clientY: 0 }));
+        const faces = Array.from($("t-card-preview").children).filter(
+          (node) => String(node.className || "").split(/\s+/).includes("card"));
+        const title = faces.length ? faces[0].getAttribute("title") : "";
+        ui.hideCardPreview();
+        return /青釭剑/.test(title);
       })(),
-    `hand="${handChip().getAttribute("title")}" equip="${selfEquipChip() && selfEquipChip().getAttribute("title")}"`);
+    `hand="${handChip().getAttribute("title")}"`);
   // 检视还包括顶栏 / 事件流：弹窗开着时都不 inert、都能点（D8）。
   (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
   const logOpenedWhileReadonly = $("t-log-panel").hidden === false;
@@ -17167,46 +17248,70 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const selfZoneTag = selfZoneRow
     ? Array.from(selfZoneRow.children).find((node) => hasClass(node, "hero-zone-tag"))
     : null;
-  const selfZoneCardsBox = selfZoneRow
-    ? Array.from(selfZoneRow.children).find((node) => hasClass(node, "hero-zone-cards"))
-    : null;
-  const cardsHiddenBefore = Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden);
+  const selfZonesBox = $("t-self-hero-zones");
+  const previewFaces = () => Array.from($("t-card-preview").children).filter(
+    (node) => String(node.className || "").split(/\s+/).includes("card"));
+  const hoverTag = (tag, event) => {
+    if (!tag) return;
+    (tag.listeners.mouseenter || []).forEach(
+      (fn) => fn(event || { target: tag, clientX: 100, clientY: 120 }));
+  };
+  hoverTag(selfZoneTag);
+  const selfPreview = {
+    hidden: $("t-card-preview").hidden,
+    ids: previewFaces().map((node) => node.getAttribute("data-card-id")),
+    left: $("t-card-preview").style.left,
+    top: $("t-card-preview").style.top,
+  };
+  // 用户 2026-11-07：点击不再"在武将块上依次展示牌名"——标签上没有 click 监听、行里没有牌容器。
   if (selfZoneTag) {
     (selfZoneTag.listeners.click || []).forEach(
       (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
   }
-  const selfZoneCards = selfZoneCardsBox
-    ? Array.from(selfZoneCardsBox.children).filter(
-      (node) => node.getAttribute("data-card-id"))
-    : [];
-  const selfZonesBox = $("t-self-hero-zones");
-  check("㉉M6-6 自己的武将牌上区域 = 一个标签；点开才列出区里的牌",
+  const afterClick = { hidden: $("t-card-preview").hidden, faces: previewFaces().length };
+  if (selfZoneTag) {
+    (selfZoneTag.listeners.mouseleave || []).forEach((fn) => fn({ target: selfZoneTag }));
+  }
+  const hiddenAfterLeave = $("t-card-preview").hidden;
+  check("㉉M6-6 自己的武将牌上区域 = 一个标签；悬停出跟随鼠标的常规卡面预览，点击不再展开",
     !!selfZoneRow && selfZonesBox.hidden === false
       && selfZoneRow.getAttribute("data-skill-id") === "hero.jie_luxun.qianxun"
       && selfZoneRow.getAttribute("data-cards-visible") === "true"
       && !!selfZoneTag && selfZoneTag.textContent === "谦逊 2"
-      && cardsHiddenBefore && !!selfZoneCardsBox && selfZoneCardsBox.hidden === false
-      && selfZoneCards.map((node) => node.getAttribute("data-card-id")).join(",") === "21,22",
+      && (selfZoneTag.listeners.click || []).length === 0
+      && !Array.from(selfZoneRow.children).some(
+        (node) => hasClass(node, "hero-zone-cards"))
+      && selfPreview.hidden === false
+      && selfPreview.ids.join(",") === "21,22"
+      && selfPreview.left === "116px" && selfPreview.top === "136px"
+      && afterClick.hidden === false && afterClick.faces === 2
+      && hiddenAfterLeave === true,
     selfZoneRow ? selfZoneRow.text().replace(/\s+/g, " ").trim() : "没有 hero 行");
-  // 再点一次收起；悬停展开、离开收起（宿主）。
-  if (selfZoneTag) {
-    (selfZoneTag.listeners.click || []).forEach(
-      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
+
+  // 非宿主：同一区只有标签；悬停给一行说明（牌面按可见性不给）。
+  const seat2Box = rowOf($("t-seats"), "data-seat", "2");
+  const nonHostRow = rowOf(seat2Box, "data-skill-id", "hero.jie_xusheng.pojun");
+  const nonHostTag = nonHostRow
+    ? Array.from(nonHostRow.children).find((node) => hasClass(node, "hero-zone-tag"))
+    : null;
+  hoverTag(nonHostTag);
+  const nonHostPreview = {
+    hidden: $("t-card-preview").hidden,
+    text: $("t-card-preview").text(),
+    faces: previewFaces().length,
+  };
+  if (nonHostTag) {
+    (nonHostTag.listeners.mouseleave || []).forEach((fn) => fn({ target: nonHostTag }));
   }
-  const closedAfterSecondClick = Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden);
-  if (selfZoneTag) {
-    (selfZoneTag.listeners.mouseenter || []).forEach(
-      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
-  }
-  const openOnHover = Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden === false);
-  if (selfZoneTag) {
-    (selfZoneTag.listeners.mouseleave || []).forEach(
-      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
-  }
-  check("㉉M6-6b 区标签：再点收起、悬停展开、离开收起（只宿主有这套展开）",
-    closedAfterSecondClick && openOnHover
-      && Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden),
-    `closed=${closedAfterSecondClick} hover=${openOnHover}`);
+  check("㉉M6-6b 非宿主：标签照常可见，悬停只给「牌面仅宿主可见」一行、不画牌面",
+    !!nonHostRow && nonHostRow.getAttribute("data-cards-visible") === "false"
+      && !!nonHostTag && nonHostTag.textContent === "破军 2"
+      && nonHostPreview.hidden === false
+      && nonHostPreview.faces === 0
+      && nonHostPreview.text.includes("牌面仅宿主可见（2 张）")
+      && $("t-card-preview").hidden === true,
+    `row=${nonHostRow ? nonHostRow.getAttribute("data-cards-visible") : "none"}`
+      + ` text="${nonHostPreview.text}"`);
   // 票 06：标记与武将牌上的牌区同骨架、异色；文本 = 名称×数量，悬停 = 来源。
   const selfMarkerRow = selfZonesBox
     ? rowOf(selfZonesBox, "data-zone", "marker")
@@ -19381,12 +19486,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const seat1 = seatBox(1);
   const judgeSlot = byClass(seat1, "judge-slot").find((node) => attr(node, "data-card-id"));
   const equipSlot = byClass(seat1, "equip-slot").find((node) => attr(node, "data-card-id"));
-  check("U4-06e 满槽保留槽名 + 牌名：判定槽 =「判定 + 兵粮寸断」，装备槽 =「武器 + 方天画戟」",
+  check("U4-06e 满槽：牌名 + 花色点数；装备槽有牌时不再写槽名，判定槽仍写「判定」",
     !!judgeSlot && !!equipSlot
       && judgeSlot.textContent.includes("判定")
       && judgeSlot.textContent.includes("兵粮寸断")
-      && equipSlot.textContent.includes("武器")
-      && equipSlot.textContent.includes("方天画戟"),
+      && equipSlot.textContent.includes("方天画戟")
+      && !equipSlot.textContent.includes("武器")
+      && byClass(equipSlot, "slot-suit").length === 1,
     `judge="${judgeSlot ? judgeSlot.textContent : ""}"`
       + ` equip="${equipSlot ? equipSlot.textContent : ""}"`);
 

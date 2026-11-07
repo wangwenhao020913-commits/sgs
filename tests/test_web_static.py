@@ -1064,7 +1064,7 @@ def test_discard_panel_uses_the_shared_modal_shell_with_its_own_clickable_backdr
 
 
 # ---------------------------------------------------------------------------
-# U4-06（spec D13）：判定 / 装备槽放得下四字牌名，且满槽保留槽名
+# U4-06（spec D13）：判定 / 装备槽放得下四字牌名；用户 2026-11-07 起装备槽有牌时不写槽名
 # ---------------------------------------------------------------------------
 # 1258px 视口（--dsu = 0.786）下：对手装备槽内容宽 ≈ 36 设计单位（侧栏 100 的两列），
 # 四字牌名 @10 = 40 ⇒ 必须允许折行（两行 = 22 设计单位，42 高的槽放得下）；判定槽内容宽
@@ -1124,18 +1124,21 @@ def test_slot_labels_leave_room_for_four_character_card_names() -> None:
     assert re.search(r"line-height:\s*1\.15", self_value), self_value
 
 
-def test_filled_mini_slots_keep_the_zone_label_in_the_dom() -> None:
-    """满槽的 DOM = 槽名 + 牌名：`slot-k` 必须在 `!card` 提前返回**之前**挂上。"""
+def test_mini_slots_show_the_equip_label_only_when_empty() -> None:
+    """用户 2026-11-07：装备槽**有牌时不写**武器 / 防具 / 攻马 / 防马，空槽才写；判定槽常写。
+
+    行为断言在 `tests/support/ui_smoke.mjs` 的 U1-02h2 / U4-06e；这里钉源码里的分支形状，
+    防止"顺手把 label 又挂回满槽"。
+    """
     seat_view = _strip_js_comments((STATIC_DIR / "seat-view.js").read_text(encoding="utf-8"))
     node = re.search(r"function miniSlotNode\(options\) \{(?P<body>.*?)\n\}", seat_view, re.S)
     assert node is not None, "seat-view.js 里找不到 miniSlotNode()"
     body = node.group("body")
-    append_label = body.find('label.className = "slot-k"')
-    append_to_node = body.find("node.appendChild(label)")
-    early_return = body.find("if (!card) return node;")
-    assert append_label >= 0 and append_to_node >= 0, "满槽必须也画出槽名（slot-k）"
-    assert 0 <= append_label < append_to_node < early_return, (
-        "slot-k 必须在空槽分支之前挂上——否则满槽只剩牌名，读不出这是判定区 / 哪个装备槽"
+    assert "if (judge || !card) node.appendChild(label);" in body, (
+        "槽名的挂载必须按「判定槽常显 / 装备槽只在空槽」的条件来"
+    )
+    assert body.find("node.appendChild(label)") < body.find("if (!card) return node;"), (
+        "空槽仍要画出槽名（判定 / 武器 / 防具 / 攻马 / 防马）"
     )
     assert 'label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空"' in body, (
         "槽名的文字必须来自「判定」/ 装备槽标签（不新建一份映射）"

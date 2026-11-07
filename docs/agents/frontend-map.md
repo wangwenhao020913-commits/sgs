@@ -13,9 +13,9 @@
 | `lobby.js` | 开局页表单（人数 / 点将 / 牌堆档位）、`POST /api/sessions`、`loadHeroCatalog` / `loadDeckCatalog`。 |
 | `session.js` | 会话生命周期与派生：`applyView` / `commitView`、事件回放 `stepPlayback`、舞台三组、live view、轮询（见下节）。 |
 | `candidates.js` | 候选索引的**只读**查询：`cardEntry` / `cardSelectable` / `isLegalCombo` / `autoCombo`；不重建索引。**自己区域的直选判据** `isOwnZonePick`（选自己的手牌/装备 ⇒ 牌面直选、不铺左下角面板；票 14）也在这里。 |
-| `card-view.js` | 卡面绘制（花色 / 点数 / 牌名 / 类型行 / 悬停全文），纯展示。 |
+| `card-view.js` | 卡面绘制（花色 / 点数 / 牌名 / 类型行 / 悬停全文），纯展示；**跟随鼠标的卡牌预览**（`showCardPreview` / `moveCardPreview` / `hideCardPreview`，层 `#t-card-preview`；用户 2026-11-07：装备 / 判定槽与武将牌上的牌区共用这一口，贴边翻转）。 |
 | `card-face.js` | 卡面状态的纯函数：选中 / 置灰 / 槽位、`isProvide` / `provideSlotIndex`。 |
-| `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**武将牌上的牌区**（`heroZoneRows`，标签带张数）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**被废除（封印）的槽**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发；**票 03 起是槽 id**：判定 `judge_1..3`（`judgeSlotLayout` 的 `sealKey`，写成 `data-slot-key`；`data-slot="judge"` 仍是 `anim.js` 的落位锚点）+ 装备四槽）**逐槽**叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；**每个被废除的槽各画一个**，判定行 / 装备格本身不再画，**区域形状不变**；lukang-mobile 票 03 取代 lei 票 05 的"整区一个"）。 |
+| `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**判定 / 装备槽的简略牌面**（`miniSlotNode`：牌名 + 花色点数、转化牌右上角「转」；装备槽**有牌时不写**武器 / 防具 / 攻马 / 防马，判定槽常写；悬停走 `#t-card-preview` 的常规卡面），**武将牌上的牌区**（`heroZoneRows`，标签带张数与**悬停预览**——2026-11-07 起点击不再展开；非宿主悬停只给「牌面仅宿主可见」）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**被废除（封印）的槽**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发；**票 03 起是槽 id**：判定 `judge_1..3`（`judgeSlotLayout` 的 `sealKey`，写成 `data-slot-key`；`data-slot="judge"` 仍是 `anim.js` 的落位锚点）+ 装备四槽）**逐槽**叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；**每个被废除的槽各画一个**，判定行 / 装备格本身不再画，**区域形状不变**；lukang-mobile 票 03 取代 lei 票 05 的"整区一个"）。 |
 | `table.js` | 环桌布局与表体渲染：`tableViewForRender`、`renderTable`、`renderProcessing`、`renderSkills`。 |
 | `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
 | `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装；选项步的**置灰不可选**（`preactivationDisabled` 读 `StepPool.disabled`，画 `.dis` + 不接 click；票 04 §3）；多来源步的**合法来源组合**（`preactivationGroups` 读 `Step.groups`：卡面 / 「下一步」/ 「提交」三处同一判据，凑不成一组的来源既选不出也交不出；huo-mobile-batch 票 10）。 |
@@ -33,7 +33,7 @@
 | `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；阶段 / 回合飘字（U4-04）的 `#t-anim-phase` 层与 `animPlanPhase` 也在这里；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |
 | `main.js` | `wire()` 事件绑定、回放步长按钮、启动；必须是最后一份脚本。 |
 
-`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights`）+ 脚本顺序；
+`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights` / `#t-card-preview`）+ 脚本顺序；
 弃牌堆面板的模态挂载点 `#t-discard-modal`（含自己的 `#t-discard-backdrop`，正文由 `table.js:renderDiscardPanel` 画）
 也在这里；`style.css` 是样式与设计单位，动效时长 / 尺寸的机械断言在 `tests/test_web_static.py`。
 

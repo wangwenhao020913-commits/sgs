@@ -307,6 +307,10 @@
     <div id="t-anim-flights" class="anim-layer" aria-hidden="true"></div>
     <!-- 飞行时间表提示（U4-01 / D8）：anim.ini 缺键 / 解析失败时**一行**，正常时隐藏。 -->
     <div id="t-anim-note" class="anim-note" hidden></div>
+
+    <!-- 卡牌预览层（用户 2026-11-07）：悬停装备 / 判定区的牌、武将牌上的牌时，跟随鼠标的
+         常规卡面（`cardFaceNode`：标签 / 转化 / 虚拟照常画）。`pointer-events: none`，不吃牌桌点击。 -->
+    <div id="t-card-preview" class="card-preview" aria-hidden="true" hidden></div>
   </div>
 </main>
 
