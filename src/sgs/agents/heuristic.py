@@ -1913,6 +1913,12 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # 还能摸一张），换来的压制弱一些 ⇒ 略低于伤害的分。
         "jieyue_damage": 1.4,
         "jieyue_mark": 0.8,
+        # 陆抗移动版【决堰】（lukang-mobile 票 01）：三栏都是"永久废槽换一条本阶段 / 本回合
+        # 收益"，故按即时变现强弱给分——摸三张 + 手牌上限最直接（2.5）；+3 次【杀】要求手里
+        # 真有【杀】（2.0）；"无距离限制"要看场上距离，最容易白拿（1.5）。
+        "duanyan_armor": 2.5,
+        "duanyan_weapon": 2.0,
+        "duanyan_horses": 1.5,
         # 界刘备【仁德】（M6 票 16）：本阶段第二张换来的"视为使用一张基本牌"。
         # 【桃】最稳（回血），【杀】次之（要目标），【酒】只有在能补刀时才值（保守给低）。
         "basic_slash": 2.0,
@@ -4173,6 +4179,22 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "出牌阶段限一次：令攻击范围内一名有牌的其他角色交给你一张牌（净赚一张），然后二选一"
         "（弃牌打 1 点伤害 / 标记并送还封杀）。发动本身无代价 ⇒ 恒为正；两条出口的分值见"
         "`_OPTION_VALUES` 的 `jieyue_damage` / `jieyue_mark`",
+    ),
+    # 陆抗移动版（lukang-mobile 票 01）：【决堰】用**永久**废一个装备槽换一条本阶段 / 本回合
+    # 收益（恒有权衡 ⇒ 保守给正）；【破势】是觉醒技（强制发动、没有候选可挑）；☆【怀柔】是
+    # 1 换 1 的牌质过滤（弃一张装备牌摸一张），略高于放弃。
+    "hero.lukang_mobile.duanyan": (
+        _constant(1.8),
+        "永久废一个装备槽换本阶段 / 本回合一条收益：代价与收益都在明面上，保守给正；"
+        "三栏的相对分见 `_OPTION_VALUES` 的 `duanyan_*`",
+    ),
+    "hero.lukang_mobile.poshi": (
+        _constant(0.0),
+        "觉醒技：条件满足即强制发动，没有候选可挑（0 分只表示'不参与选择'）",
+    ),
+    "hero.lukang_mobile.huairou": (
+        _constant(0.6),
+        "弃一张装备牌摸一张（牌质过滤，1 换 1）：略高于放弃，但不如直接出牌",
     ),
     "hero.tao_caocao.changyi": (
         _constant(2.0),

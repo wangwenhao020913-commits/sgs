@@ -2909,6 +2909,26 @@ def _coverage_jie_liuli():
     return state, query, frame
 
 
+def _coverage_huairou():
+    """陆抗移动版 ☆【怀柔】（lukang-mobile 票 01）：觉醒后**已持有**它，手里一张装备牌。
+
+    ☆ 技能的实例只来自 ``granted_skills``（武将牌载体被 ``granted_by`` 排除），故这里直接
+    记一笔"已获得"——与觉醒后的真实局面同形（票 01 的测试另有觉醒链路）。
+    """
+    armor = _ids("eight_diagrams")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="lukang_mobile", equip=(armor,)), SeatSpec()],
+        deck=_deck_excluding(armor),
+        turn_seat=0,
+    )
+    # 觉醒后的真实局面：☆【怀柔】已获得、【决堰】已失去；装备牌放在**装备区**（手牌里能
+    # 直接"使用"的装备会让 AI 先挑使用那条路）。
+    state.player(0).granted_skills.append("hero.lukang_mobile.huairou")
+    state.player(0).lost_skills.append("hero.lukang_mobile.duanyan")
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_xiongluan():
     """lei-batch 票 02：张绣【雄乱】——出牌阶段、区域都还能被废除 ⇒ 清单渲得出（一步选人）。"""
     state = build_state(
@@ -3046,6 +3066,8 @@ _COVERAGE_CASES = {
     # lei-batch 票 02：张绣【雄乱】（A 族限定技，已翻预发动）/【从谏】（触发技，已翻预发动）。
     "hero.zhangxiu.xiongluan": _coverage_xiongluan,
     "hero.zhangxiu.congjian": _coverage_congjian,
+    # lukang-mobile 票 01：陆抗移动版 ☆【怀柔】（已翻预发动：选自己的 1 张装备牌 → 重铸）。
+    "hero.lukang_mobile.huairou": _coverage_huairou,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,

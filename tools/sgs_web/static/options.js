@@ -281,6 +281,10 @@ const OPTION_LABELS = Object.freeze({
   // 只剩兜底的「放弃」）。
   jieyue_mark: "标记并交给该角色",
   jieyue_damage: "弃置并造成伤害",
+  // 陆抗移动版【决堰】（lukang-mobile 票 01）：三种装备栏（发动后必答、无「放弃」）。
+  duanyan_weapon: "武器栏",
+  duanyan_armor: "防具栏",
+  duanyan_horses: "两个坐骑栏",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

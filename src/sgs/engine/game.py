@@ -4363,6 +4363,29 @@ class Engine:
         """清掉「本阶段使用【杀】次数上限 +X」那一轴（出牌阶段结束时）。"""
         self.state.player(seat).qimou_count_x = 0
 
+    def set_duanyan_slash_bonus(self, seat: int, amount: int) -> None:
+        """**陆抗移动版【决堰】·武器栏**：本阶段使用【杀】的次数上限 +``amount``。
+
+        写入唯一入口（【决堰】的提交点）；作用域 = **本阶段**（出牌阶段结束时
+        :meth:`_phase_play_end` 清，回合末再兜一次）。读取方是同一条技能定义上的
+        ``COUNT_LIMIT`` 修饰器（只加【杀】族；无次数限制者保持 ``None``）。**不发 delta**：
+        与 ``set_qimou`` 同姿态——没有 JSON 读者，回放按同一条技能动作重建。
+        """
+        self.state.player(seat).duanyan_slash_bonus = int(amount)
+
+    def _clear_duanyan_slash_bonus(self, seat: int) -> None:
+        """清掉【决堰】·武器栏那一轴（出牌阶段结束时）。"""
+        self.state.player(seat).duanyan_slash_bonus = 0
+
+    def set_duanyan_no_distance(self, seat: int, active: bool) -> None:
+        """**陆抗移动版【决堰】·两个坐骑栏**：本回合「使用牌无距离限制」的开关。
+
+        写入唯一入口（【决堰】的提交点）；作用域 = **本回合**（回合末由
+        :meth:`_clear_turn_effects` 清）。读取方是同一条技能定义上的 ``TARGET_POOL`` 与
+        ``DISTANCE_LIMIT`` 两条修饰器。**不发 delta**：与 ``set_duanyan_slash_bonus`` 同姿态。
+        """
+        self.state.player(seat).duanyan_no_distance = bool(active)
+
     def add_hand_limit_bonus(self, seat: int, amount: int) -> None:
         """给 ``seat`` 记一笔**本回合的手牌上限加式增量**（M6 票 08 的唯一写入口）。
 
@@ -4504,6 +4527,10 @@ class Engine:
             # 把两轴都兜底清掉（回合结束是一切"本回合 / 本阶段"的收尾点）。
             player.qimou_distance_x = 0
             player.qimou_count_x = 0
+            # lukang-mobile 票 01 陆抗移动版【决堰】：次数那一轴正常在出牌阶段末清；本回合
+            # 无距离限制那一轴活到回合末。两轴都在这里兜底。
+            player.duanyan_slash_bonus = 0
+            player.duanyan_no_distance = False
             player.damage_dealt_this_turn = False
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
@@ -5985,6 +6012,8 @@ class Engine:
             # jie-feng-batch 票 02 界魏延移动版【奇谋】：「本阶段使用【杀】上限 +X」在阶段末
             # 清（距离那一轴活到回合末，见 `_clear_turn_effects`）。
             self._clear_qimou_count(self.state.turn_seat)
+            # lukang-mobile 票 01 陆抗移动版【决堰】·武器栏：牌面写「此阶段内」，同一收尾点。
+            self._clear_duanyan_slash_bonus(self.state.turn_seat)
         return None
 
     def _phase_discard_start(self) -> str | None:

@@ -79,6 +79,7 @@ from sgs.state import (
     GameState,
     MoveReason,
     Pass,
+    Reforge,
     RespondMode,
     SEALED_SLOT_IDS,
     SelectionSpec,
@@ -5361,6 +5362,291 @@ _JIEYUE = ActiveSkill(
 """锋·于禁【节钺】的声明（A 族；不翻预发动——首步是选座位，直提态 + 逐步问就够）。"""
 
 
+# ---------------------------------------------------------------------------
+# 陆抗移动版【决堰】/ ☆【怀柔】（lukang-mobile 票 01；用户 2026-11-07 逐条签）
+#
+# 牌面（逐字；`D:\SGS_HEROS\神话再临-雷包\陆抗\技能.txt`，移动版）：
+#
+#     决堰
+#     　出牌阶段限一次，你可以废除你装备区里的一种装备栏，然后执行对应的选项：
+#       【武器栏】，此阶段内你使用【杀】的次数上限+3；
+#       【防具栏】，摸三张牌且本回合的手牌上限+3；
+#       【两个坐骑栏】，本回合你使用牌无距离限制。
+#
+#     ☆ 怀柔
+#     　出牌阶段，你可以重铸装备牌。
+#
+# 用户 2026-11-07 签字的四条口径：
+#
+# - 【决堰】的「使用牌无距离限制」= **含【杀】**（攻击范围照免）+ **含【锦囊】**（【顺手
+#   牵羊】/【兵粮寸断】的额定距离）——实现 = `TARGET_POOL`（只对【杀】族并入全体其他存活
+#   座位，与【诈降】/【天义】同一手法）+ `DISTANCE_LIMIT`（有额定距离的牌返回 ``None``）；
+# - 废除 = **一个事件**废除该栏的槽（武器 1 / 防具 1 / 两个坐骑 2），走票 03 的
+#   `Engine.abolish_slots`；
+# - 「可以」= 整条发动可选；发动之后**必须**选一项（选项步无 `Pass`）；四个槽全封 ⇒ 连入口
+#   都不出现（补充一手 Q5：所有装备栏都被废除后不能发动【决堰】）；
+# - 【怀柔】= **点技能进预发动 → 点自己的手牌 / 装备区 1 张装备牌 → 提交即重铸**（用户原话），
+#   重铸语义复用引擎的 `Reforge` / `MOVE` 帧，不另写"弃置 + 摸一张"。
+# ---------------------------------------------------------------------------
+
+DUANYAN = hero_skill_id("lukang_mobile", "duanyan")
+"""陆抗移动版【决堰】的全限定技能 id。"""
+
+DUANYAN_WEAPON = "duanyan_weapon"
+DUANYAN_ARMOR = "duanyan_armor"
+DUANYAN_HORSES = "duanyan_horses"
+"""【决堰】三种装备栏的**选项 id**（中文标签在 `options.js:OPTION_LABELS`）。"""
+
+_DUANYAN_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (DUANYAN_WEAPON, (SlotKind.WEAPON.value,)),
+    (DUANYAN_ARMOR, (SlotKind.ARMOR.value,)),
+    (DUANYAN_HORSES, (SlotKind.HORSE_OFFENSE.value, SlotKind.HORSE_DEFENSE.value)),
+)
+"""选项 → 该栏的槽位（【两个坐骑栏】= 两个槽；用户 2026-11-07「1 个或 2 个装备槽」）。"""
+
+DUANYAN_SLASH_BONUS = 3
+"""【武器栏】的次数上限增量（「+3」）。"""
+
+DUANYAN_DRAW = 3
+"""【防具栏】的摸牌数（「摸三张牌」）。"""
+
+DUANYAN_HAND_LIMIT = 3
+"""【防具栏】的本回合手牌上限加式（「本回合的手牌上限+3」）。"""
+
+_DUANYAN_DRAWN = "duanyan_drawn"
+"""帧私有：摸三张已经做过（重入不重摸）。"""
+
+_DUANYAN_DONE = "duanyan_done"
+"""帧私有：效果段已经落位（重入不重复写座位字段）。"""
+
+
+def _duanyan_columns(state: GameState, owner: int) -> tuple[str, ...]:
+    """此刻还能废除的装备栏（每个栏至少有一个槽**没被封印**）。
+
+    已经封满的栏不再出现在选项里（"这个名字此刻不存在"用 `options` 的可调用档收窄，
+    不是置灰）；四个槽全封 ⇒ 空元组 ⇒ 技能按钮不出现（补充一手 Q5）。
+    """
+    sealed = set(state.player(owner).sealed_zones)
+    return tuple(
+        column
+        for column, slots in _DUANYAN_COLUMNS
+        if any(slot not in sealed for slot in slots)
+    )
+
+
+def _duanyan_options(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """``PickOption`` 的可调用档：按此刻的封印状态现算三个候选栏。"""
+    del frame, answers
+    return _duanyan_columns(state, owner)
+
+
+def _duanyan_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段限一次 + 至少一个装备栏还能废除。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _duanyan_columns(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _duanyan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：**先废除该栏**（一个事件；槽里牌先弃置）→ 再执行对应效果。
+
+    行序 = 牌面「废除…，然后执行对应的选项」（代价在前）。废除走
+    :meth:`~sgs.engine.Engine.abolish_slots`（票 03 的逐槽写入口）：已封印的槽是幂等的，
+    故重入时再调一次是零动作。挂起游标：摸三张一次（``_DUANYAN_DRAWN``）、效果段一次
+    （``_DUANYAN_DONE``）。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    column = str(answers.get("column") or "")
+    slots = dict(_DUANYAN_COLUMNS).get(column)
+    if not slots:
+        return None
+    control = host.abolish_slots(frame, owner, slots)
+    if control == "stay":
+        return "stay"
+    if frame.data.get(_DUANYAN_DONE):
+        return None
+    if column == DUANYAN_WEAPON:
+        host.set_duanyan_slash_bonus(owner, DUANYAN_SLASH_BONUS)
+    elif column == DUANYAN_ARMOR:
+        if not frame.data.get(_DUANYAN_DRAWN):
+            frame.data[_DUANYAN_DRAWN] = True
+            control = host.draw_for_hand(frame, owner, DUANYAN_DRAW)
+            if not control:
+                return None  # 短摸即平局（G10）
+            if control == "stay":
+                return "stay"
+        host.add_hand_limit_bonus(owner, DUANYAN_HAND_LIMIT)
+    else:  # 两个坐骑栏
+        host.set_duanyan_no_distance(owner, True)
+    frame.data[_DUANYAN_DONE] = True
+    return None
+
+
+DUANYAN_FLOW = SkillFlow(
+    name="duanyan",
+    steps=(PickOption(options=_duanyan_options, optional=False, key="column"),),
+    effect=_duanyan_effect,
+)
+"""【决堰】的单步流水线：选一个装备栏（1～3 项、恒非空、无 `Pass`）→ 废除 + 对应效果。"""
+
+
+def _duanyan_slash_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``COUNT_LIMIT``：【武器栏】「此阶段内你使用【杀】的次数上限+3」。"""
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    amount = state.player(ctx.owner).duanyan_slash_bonus
+    if not amount:
+        return current
+    if current is None:
+        return None
+    return int(current) + amount
+
+
+def _duanyan_no_distance_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_POOL``：【两个坐骑栏】「使用牌无距离限制」的**【杀】**那一轴。
+
+    与【诈降】/【天义】同一手法（并入全体其他存活座位 = 不查攻击范围）。只对【杀】族生效：
+    其它牌的"距离"走 ``DISTANCE_LIMIT``（见下一条）——并入会**放宽目标合法性**（例：
+    【顺手牵羊】的"区域里有牌"），那是另一回事。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not state.player(ctx.owner).duanyan_no_distance:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    others = tuple(
+        player.seat for player in state.players if player.alive and player.seat != ctx.subject
+    )
+    return tuple(dict.fromkeys((*current, *others)))
+
+
+def _duanyan_no_distance_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``DISTANCE_LIMIT``：【两个坐骑栏】的**额定距离**豁免（【顺手牵羊】/【兵粮寸断】等）。
+
+    只在 ``max_distance is not None`` 的牌上派发（见 :func:`check_targets`），故"无距离
+    限制"在这里读作"不查距离"（返回 ``None``），与【奇才】同一姿态。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not state.player(ctx.owner).duanyan_no_distance:
+        return current
+    return None
+
+
+_DUANYAN = ActiveSkill(
+    "lukang_mobile",
+    "duanyan",
+    _duanyan_offers,
+    flow=DUANYAN_FLOW,
+    requirement=(
+        "出牌阶段限一次，你可以废除你装备区里的一种装备栏，然后执行对应的选项："
+        "【武器栏】，此阶段内你使用【杀】的次数上限+3；【防具栏】，摸三张牌且本回合的"
+        "手牌上限+3；【两个坐骑栏】，本回合你使用牌无距离限制"
+    ),
+    step_requirements={"column": "废除你装备区里的一种装备栏（然后执行对应的选项）"},
+    extra_modifiers=(
+        Modifier(ModifierPoint.COUNT_LIMIT, _duanyan_slash_limit),
+        Modifier(ModifierPoint.TARGET_POOL, _duanyan_no_distance_pool),
+        Modifier(ModifierPoint.DISTANCE_LIMIT, _duanyan_no_distance_limit),
+    ),
+)
+
+
+HUAJROU = hero_skill_id("lukang_mobile", "huairou")
+"""陆抗移动版 ☆【怀柔】的全限定技能 id（由【破势】觉醒后获得）。"""
+
+_HUAJROU_PUSHED = "huairou_pushed"
+"""帧私有：重铸的 ``MOVE`` 子帧已经压过（重入不再压第二次）。"""
+
+_EQUIP_SLOT_KINDS: tuple[SlotKind, ...] = (
+    SlotKind.WEAPON,
+    SlotKind.ARMOR,
+    SlotKind.HORSE_OFFENSE,
+    SlotKind.HORSE_DEFENSE,
+)
+"""「装备牌」的判据 = 牌面带装备槽位（宝物槽不启用，ADR-006）。"""
+
+
+def _huairou_equipment_cards(state: GameState, owner: int) -> tuple[int, ...]:
+    """自己**手牌 + 装备区**里能重铸的装备牌。
+
+    账本 L775 的「装备牌」读法（手牌 + 装备区里的装备牌）；补充一手 Q7 明说**已装备的**
+    也能重铸，故装备区那一路是本技能的必需面。
+    """
+    player = state.player(owner)
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if state.card(card_id).slot is not None
+    )
+
+
+def _huairou_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段（**不限次**）+ 至少有一张装备牌可重铸。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _huairou_equipment_cards(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _huairou_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：把选中的那张装备牌**重铸**（压 ``Reforge`` 的 ``MOVE`` 帧：弃置 + 摸一张）。
+
+    重铸不是使用 ⇒ 复用引擎的 :meth:`~sgs.engine.Engine.start_reforge`（同一个 ``MOVE``
+    帧两步：``reforge_lose_card`` → ``reforge_draw``），不另写"弃置 + 摸一张"。
+    """
+    if frame.data.get(_HUAJROU_PUSHED):
+        return None
+    picks = tuple(answers.get("card") or ())
+    if not picks:
+        return None
+    card = host.state.card(int(picks[0]))
+    if card.slot is None:
+        return None
+    frame.data[_HUAJROU_PUSHED] = True
+    # ``Reforge`` 的 ``answers_seq`` 只进候选的稳定键（这里压的是 MOVE 帧、不吃候选键），
+    # 故取 0：重铸不是"使用"，也没有第二个应答面。
+    host.start_reforge(Reforge(card=card, answers_seq=0), source=int(frame.data["source"]))
+    return "stay"
+
+
+HUAJROU_FLOW = SkillFlow(
+    name="huairou",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            optional=False,
+            key="card",
+            slot_kinds=_EQUIP_SLOT_KINDS,
+        ),
+    ),
+    effect=_huairou_effect,
+    once_per_phase=False,
+)
+"""【怀柔】的单步流水线：选 1 张自己的装备牌（手牌 / 装备区）→ 重铸。"""
+
+_HUAJROU = ActiveSkill(
+    "lukang_mobile",
+    "huairou",
+    _huairou_offers,
+    flow=HUAJROU_FLOW,
+    preactivated=True,
+    requirement="出牌阶段，你可以重铸装备牌",
+    step_requirements={"card": "重铸一张装备牌（手牌 / 装备区）"},
+)
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
@@ -5635,6 +5921,12 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 锋·于禁【节钺】（feng-yujin 票 01）：两步流水线（选角色 → 目标交出）+
     # 手写二选一（标记并交给 / 弃置并伤害）。
     _JIEYUE,
+    # 陆抗移动版【决堰】（lukang-mobile 票 01）：单步选装备栏（1～3 项、可动态）→
+    # 一个事件废除该栏的槽 + 三条"本阶段 / 本回合"效果。不翻预发动（与【奇谋】同档）。
+    _DUANYAN,
+    # 陆抗移动版 ☆【怀柔】（lukang-mobile 票 01）：单步选自己的 1 张装备牌（手牌 / 装备区）
+    # → 重铸。翻预发动（首步选自己的牌 ⇒ 清单渲得出，装备槽天然可点）。
+    _HUAJROU,
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/

@@ -43,6 +43,7 @@ from sgs.effects import (
     satisfies_required,
 )
 from sgs.state import (
+    EQUIP_SLOTS,
     FrameKind,
     GameState,
     MoveReason,
@@ -64,6 +65,8 @@ __all__ = [
     "LVMENG_GONGXIN",
     "LVMENG_QINXUE",
     "QIANXUE_FLOW",
+    "LUKANG_POSHI",
+    "POSHI_FLOW",
     "QINXUE_FLOW",
     "XUSHU_JIANYAN",
     "XUSHU_QIANXUE",
@@ -272,6 +275,97 @@ QINXUE_FLOW = SkillFlow(name="qinxue", steps=(), effect=_qinxue_effect)
 
 
 # ---------------------------------------------------------------------------
+# 陆抗移动版【破势】（lukang-mobile 票 01；用户 2026-11-07 逐条签）
+#
+# 牌面（逐字）：
+#
+#     破势
+#     　觉醒技，准备阶段，若你的装备栏均被废除或体力值为1，你减1点体力上限并将手牌摸至
+#       体力上限，然后你失去技能“决堰”并获得技能“怀柔”。
+#
+# 口径：
+#
+# - **自己的**准备阶段（默认读法（二）④）；觉醒技 = 强制，不发「是否发动」；
+# - 「装备栏均被废除」= **四个装备槽全被封印**（票 03 的逐槽口径），或体力值为 1（**或**）；
+# - 减上限**不兜底**（票 04）：上限 1 时照减到 0 ⇒ 直接死亡，其余段不再结算（"减死即
+#   收尾"）；摸至体力上限按**减之后**的 ``hp_max`` 算（账本 L888 的"终值"口径）；
+# - 「失去技能“决堰”」走 :meth:`~sgs.engine.Engine.lose_skill`，「获得技能“怀柔”」走
+#   :meth:`~sgs.engine.Engine.grant_skill`（☆ 技能的实例只来自 ``granted_skills``）。
+# ---------------------------------------------------------------------------
+
+LUKANG_POSHI = hero_skill_id("lukang_mobile", "poshi")
+"""陆抗移动版【破势】的全限定技能 id。"""
+
+LUKANG_DUANYAN = hero_skill_id("lukang_mobile", "duanyan")
+"""被【破势】失去的那条技能（【决堰】）。"""
+
+LUKANG_HUAJROU = hero_skill_id("lukang_mobile", "huairou")
+"""被【破势】授予的 ☆ 技能（【怀柔】）。"""
+
+_POSHI_HP_MAX = "poshi_hp_max"
+"""帧私有：减 1 点体力上限已经做过（重入不重减）。"""
+
+_POSHI_DRAWN = "poshi_drawn"
+"""帧私有：手牌已经摸至体力上限（重入不重摸）。"""
+
+_POSHI_SWAPPED = "poshi_swapped"
+"""帧私有：已经失去【决堰】并获得【怀柔】（重入不重复）。"""
+
+
+def _poshi_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**自己的**准备阶段 ∧（四个装备槽全封 **或** 体力值为 1）。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if frame.data.get(_AWAKENING_COMMITTED) == owner:
+        return True  # 在飞：effect 已经提交，重入不再重算条件
+    player = host.state.player(int(owner))
+    if player.hp == 1:
+        return True
+    return all(slot in player.sealed_zones for slot in EQUIP_SLOTS)
+
+
+def _poshi_effect(host: Any, frame: Any, answers: Any) -> Any:
+    """提交点：减上限 → 摸至体力上限 → 失去【决堰】→ 获得 ☆【怀柔】。
+
+    行序 = 牌面「你减1点体力上限并将手牌摸至体力上限，然后你失去…并获得…」。
+    "减死即收尾"（票 04）：上限照减（不兜底）；减到 0 ⇒ 角色直接死亡、``DEATH`` 帧已压栈
+    ⇒ ``return "stay"``，重入时已阵亡 ⇒ 其余段不再结算。
+    """
+    del answers
+    owner = frame.data["skill_owner"]
+    frame.data[_AWAKENING_COMMITTED] = owner
+    state = host.state
+    if not frame.data.get(_POSHI_HP_MAX):
+        frame.data[_POSHI_HP_MAX] = True
+        host.reduce_hp_max(frame, owner, 1)
+        if not state.player(owner).alive:
+            return "stay"
+    player = state.player(owner)
+    if not player.alive:
+        # 减上限把持有者减死之后的残余段：摸牌 / 失去 / 获得都不再结算（规则 4.18）。
+        return None
+    if not frame.data.get(_POSHI_DRAWN):
+        frame.data[_POSHI_DRAWN] = True
+        need = max(0, player.hp_max - len(player.hand))
+        if need:
+            control = host.draw_for_hand(frame, owner, need)
+            if not control:
+                return None  # 短摸即平局
+            if control == "stay":
+                return "stay"
+    if not frame.data.get(_POSHI_SWAPPED):
+        frame.data[_POSHI_SWAPPED] = True
+        host.lose_skill(owner, LUKANG_DUANYAN, frame=frame)
+        host.grant_skill(owner, LUKANG_HUAJROU, frame=frame)
+    return None
+
+
+POSHI_FLOW = SkillFlow(name="poshi", steps=(), effect=_poshi_effect)
+"""【破势】的零步流水线：强制派发 ⇒ 减上限 ⇒ 摸至 ⇒ 失去【决堰】+ 获得 ☆【怀柔】。"""
+
+
+# ---------------------------------------------------------------------------
 # 界徐庶【诛害】：其他角色的结束阶段，若其本回合造成过伤害 ⇒ 你可以对其使用一张【杀】
 # ---------------------------------------------------------------------------
 
@@ -431,6 +525,23 @@ def awakening_skill_definitions() -> tuple[SkillDef, ...]:
             ),
             requirement=_REQUIREMENTS["qinxue"],
             step_requirements=_STEP_REQUIREMENTS["qinxue"],
+        ),
+        SkillDef(
+            skill_id=LUKANG_POSHI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.AWAKENING,
+            hooks=(
+                Hook(
+                    Timing.PHASE_PREPARE,
+                    flow=POSHI_FLOW,
+                    condition=_poshi_condition,
+                ),
+            ),
+            requirement=(
+                "觉醒技，准备阶段，若你的装备栏均被废除或体力值为1，你减1点体力上限并将"
+                "手牌摸至体力上限，然后你失去技能“决堰”并获得技能“怀柔”"
+            ),
         ),
         SkillDef(
             skill_id=XUSHU_ZHUHAI,

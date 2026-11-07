@@ -84,6 +84,10 @@ HUO_HEROES = load_heroes("huo")
 """**神话再临·火包的 OL 版**那一份（huo-shenzhugeliang 票 01 起）：独立系列包，版本字段
 ``huo``，显示名不加后缀（神诸葛亮 / 七星 / 狂风 / 大雾）。"""
 
+LEI_MOBILE_HEROES = load_heroes("lei_mobile")
+"""**神话再临·雷包的移动版**那一份（lukang-mobile 票 01 起）：独立表、版本字段
+``lei-mobile``，显示名加「移动版」后缀（陆抗移动版 / 决堰 / 破势 / ☆怀柔）。"""
+
 HOMEBREW_HEROES = load_heroes("homebrew")
 """**自制包**那一份（韬·刘备自制版）：独立系列包，版本字段 ``homebrew``，真名「刘备」
 （与标准版同名 ⇒ 同一局仍只出一个）。"""
@@ -146,6 +150,7 @@ HUO_MOBILE_ENABLED = tuple(
 HUO_ENABLED = tuple(hero.id for hero in HUO_HEROES.heroes if hero.enabled)
 HOMEBREW_ENABLED = tuple(hero.id for hero in HOMEBREW_HEROES.heroes if hero.enabled)
 LEI_ENABLED = tuple(hero.id for hero in LEI_HEROES.heroes if hero.enabled)
+LEI_MOBILE_ENABLED = tuple(hero.id for hero in LEI_MOBILE_HEROES.heroes if hero.enabled)
 JIE_FENG_MOBILE_ENABLED = tuple(
     hero.id for hero in JIE_FENG_MOBILE_HEROES.heroes if hero.enabled
 )
@@ -220,9 +225,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 171
+    assert len(CATALOG) == 174
     assert len(equipment) == 22
-    assert len(heroes) == 147
+    assert len(heroes) == 150
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -239,6 +244,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             HUO_HEROES,
             HOMEBREW_HEROES,
             LEI_HEROES,
+            LEI_MOBILE_HEROES,
             JIE_FENG_MOBILE_HEROES,
         )
         for hero in table.heroes
@@ -248,7 +254,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 147
+    assert len(expected) == 150
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -262,6 +268,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(HUO_ENABLED)
         | set(HOMEBREW_ENABLED)
         | set(LEI_ENABLED)
+        | set(LEI_MOBILE_ENABLED)
         | set(JIE_FENG_MOBILE_ENABLED)
     )
     for definition in CATALOG.values():
@@ -1496,6 +1503,13 @@ def _probe_state_for(skill_id: str) -> GameState:
         return state
     if skill_id == "hero.feng_yujin.dingluan":
         return _dingluan_probe_state()
+    if skill_id == "hero.lukang_mobile.poshi":
+        # 正面对照：ME 体力 1（条件「或体力值为1」成立；装备栏不必全封）。
+        return build_state(
+            pack=PACK,
+            seats=[SeatSpec(hand=(_PROBE_SOURCE_CARD,)), SeatSpec(hp=1), SeatSpec()],
+            processing=(_PROBE_PROCESSING_SLASH,),
+        )
     return _probe_state()
 
 
@@ -1587,6 +1601,8 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.sunshangxiang.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
         # huo-mobile-batch 票 02：庞统移动版【涅槃】——濒死的是我（NEAR_DEATH 帧的 target）。
         "hero.pangtong_mobile.niepan": (_HookFrame(target=ME),),
+        # lukang-mobile 票 01：陆抗移动版【破势】——**我的**准备阶段（帧的 source 是我）。
+        "hero.lukang_mobile.poshi": (_HookFrame(source=ME),),
         # huo-taishici-xunyu 票 02：荀彧【节命】——受伤的是我（逐点触发的 B 族同形）。
         "hero.xunyu.jieming": (_HookFrame(target=ME),),
         # huo-shenzhouyu-mobile 票 01/03：神周瑜移动版【琴音】——帧的 source 是我（我的
@@ -2204,8 +2220,14 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.feng_yujin.jieyue": "主动技能",
     "hero.feng_yujin.dingluan": "多轮技能",
     "hero.feng_yujin.dingluan_mark": "多轮技能",
+    # lukang-mobile 票 01：陆抗移动版【决堰】= A 族主动技（单步选装备栏 + 三条本阶段/本回合
+    # 效果）；☆【怀柔】= A 族主动技 + 预发动（选自己的 1 张装备牌 → 重铸）；
+    # 【破势】= 觉醒技（准备阶段强制 + 零步流水线）。
+    "hero.lukang_mobile.duanyan": "主动技能",
+    "hero.lukang_mobile.huairou": "主动技能",
+    "hero.lukang_mobile.poshi": "觉醒技",
 }
-"""168 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -2227,7 +2249,7 @@ SHAPE_COUNTS: dict[str, int] = {
     # lei-shenganning 票 01：神甘宁【魄袭】⇒ 主动技能 26 → 27；【劫营】（三条钩子、
     # 一步选座流水线）⇒ 触发技能 22 → 23；「营」的**标记自身效果**（`carrier = MARKER`，
     # 手写钩子 + 两个修饰器、没有流水线）⇒ 多轮技能 16 → 17。
-    "主动技能": 28,
+    "主动技能": 30,
     "触发技能": 23,
     "零步技能": 30,
     "排列技能": 5,
@@ -2241,7 +2263,7 @@ SHAPE_COUNTS: dict[str, int] = {
     "能力位": 3,
     "候选生成器": 1,
     "候选提供者": 5,
-    "觉醒技": 2,
+    "觉醒技": 3,
 }
 """每格的条数（spec §4.4；M6 票 18 后
 17 + 13 + 26 + 3 + 13 + 30 + 13 + 2 + 1 + 5 + 2 = 125）。
@@ -2348,7 +2370,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 171
+    assert len(SKILL_SHAPE) == len(CATALOG) == 174
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2469,7 +2491,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """85 在内 / 80 在外（165 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """91 在内 / 83 在外（174 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2481,7 +2503,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 88
+    assert len(inside) == 91
     assert len(outside) == 83
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

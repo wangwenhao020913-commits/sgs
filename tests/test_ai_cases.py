@@ -2588,3 +2588,125 @@ def test_jie_qimou_ai_activates_and_takes_the_smallest_x() -> None:
 
     assert engine.state.player(0).hp == 3
     assert engine.state.player(0).qimou_distance_x == 1
+
+
+# ---------------------------------------------------------------------------
+# 陆抗移动版（lukang-mobile 票 01）：【决堰】的栏选择 / ☆【怀柔】的重铸
+# ---------------------------------------------------------------------------
+
+LUKANG_MOBILE = "lukang_mobile"
+LUKANG_DUANYAN = "hero.lukang_mobile.duanyan"
+LUKANG_HUAJROU = "hero.lukang_mobile.huairou"
+
+
+def test_lukang_duanyan_ai_picks_the_armor_column() -> None:
+    """【决堰】：AI 会发动，并在三栏里挑**摸三张 + 手牌上限**那一栏（`_OPTION_VALUES` 最高）。"""
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=LUKANG_MOBILE, equip=(armor,)), SeatSpec()],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id != armor
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: any(
+            record.kind == "timing"
+            and record.timing is Timing.PHASE_PLAY_START
+            for record in running.records
+        ),
+    )
+    # 手牌清空 ⇒ 出牌阶段只剩【决堰】与「结束出牌阶段」，AI 的选择无歧义。
+    engine.state.player(0).hand.clear()
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    play = engine.pending
+    action = HeuristicPlayer(ai_stream(0, play.actor)).respond(play)
+    assert isinstance(action, ActivateSkill) and action.skill_id == LUKANG_DUANYAN, (
+        f"AI 该发动【决堰】，实得 {action!r}"
+    )
+    engine.submit(action)
+    if action.choices:
+        # 常见形态：AI 从预发动清单里把选项一并填进复合动作。
+        assert action.choices == ("duanyan_armor",), (
+            f"AI 该挑『防具栏』（摸三张 + 手牌上限），实得 {action.choices!r}"
+        )
+    else:
+        # 兜底形态：引擎逐步问，AI 再答一次（不交给脚本玩家，它会一并答掉）。
+        while engine.pending is None and not engine.finished:
+            engine._step()
+        assert engine.pending is not None and engine.pending.kind == "SELECT_OPTION", (
+            f"发动后该问「废除哪一种装备栏」，实得 {engine.pending!r}"
+        )
+        option = HeuristicPlayer(ai_stream(0, engine.pending.actor)).respond(engine.pending)
+        assert getattr(option, "choice", None) == "duanyan_armor", (
+            f"AI 该挑『防具栏』（摸三张 + 手牌上限），实得 {option!r}"
+        )
+        engine.submit(option)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: "armor" in running.state.player(0).sealed_zones,
+    )
+    assert "armor" in engine.state.player(0).sealed_zones
+
+
+def test_lukang_huairou_ai_reforges_an_equipment_card() -> None:
+    """☆【怀柔】：AI 会填预发动清单（选那张装备牌）并完成重铸。
+
+    装备牌放在**装备区**（不在手牌）：否则 AI 会先考虑"把【八卦阵】装备上"这条更直接的路。
+    """
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=LUKANG_MOBILE, equip=(armor,)), SeatSpec()],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id != armor
+        ),
+        turn_seat=0,
+    )
+    state.player(0).granted_skills.append(LUKANG_HUAJROU)
+    # 觉醒后的真实局面：【决堰】已被【破势】失去（否则 AI 会先挑决堰——它的分值更高）。
+    state.player(0).lost_skills.append(LUKANG_DUANYAN)
+    engine = Engine.from_state(state, seed=1)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: any(
+            record.kind == "timing"
+            and record.timing is Timing.PHASE_PLAY_START
+            for record in running.records
+        ),
+    )
+    engine.state.player(0).hand.clear()
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    play = engine.pending
+    action = HeuristicPlayer(ai_stream(0, play.actor)).respond(play)
+    assert isinstance(action, ActivateSkill) and action.skill_id == LUKANG_HUAJROU, (
+        f"AI 该发动☆【怀柔】，实得 {action!r}"
+    )
+    assert tuple(action.picks) == (armor,), f"清单要填那一张装备牌，实得 {action.picks!r}"
+    engine.submit(action)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: armor in running.state.discard,
+    )
+    assert armor in engine.state.discard

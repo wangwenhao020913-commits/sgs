@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sgs.data import load_content_pack
 from sgs.effects import (
     check_count,
@@ -1991,3 +1993,316 @@ def test_poxi_four_card_draw_resumes_after_a_gaining_hook():
     assert [len(move.cards) for move in draws].count(4) == 1, (
         f"摸四张只发生一次；实得 {[len(m.cards) for m in draws]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 陆抗移动版【决堰】/【破势】/ ☆【怀柔】（lukang-mobile 票 01；用户 2026-11-07 逐条签）
+#
+# 牌面（逐字）：
+#
+#     决堰
+#     　出牌阶段限一次，你可以废除你装备区里的一种装备栏，然后执行对应的选项：
+#       【武器栏】，此阶段内你使用【杀】的次数上限+3；
+#       【防具栏】，摸三张牌且本回合的手牌上限+3；
+#       【两个坐骑栏】，本回合你使用牌无距离限制。
+#
+#     破势
+#     　觉醒技，准备阶段，若你的装备栏均被废除或体力值为1，你减1点体力上限并将手牌摸至
+#       体力上限，然后你失去技能“决堰”并获得技能“怀柔”。
+#
+#     ☆ 怀柔
+#     　出牌阶段，你可以重铸装备牌。
+#
+# 口径（票 01 的询问剧本）：废除 = **一个事件**废除该栏的槽（票 03）；「无距离限制」= 含
+# 【杀】攻击范围 + 含【锦囊】额定距离；减上限**不兜底**（票 04）；【怀柔】= 预发动选 1 张
+# 自己的装备牌（手牌 / 装备区）→ 重铸。
+# ---------------------------------------------------------------------------
+
+LUKANG = "lukang_mobile"
+DUANYAN = "hero.lukang_mobile.duanyan"
+POSHI = "hero.lukang_mobile.poshi"
+HUAJROU = "hero.lukang_mobile.huairou"
+
+DUANYAN_WEAPON = "duanyan_weapon"
+DUANYAN_ARMOR = "duanyan_armor"
+DUANYAN_HORSES = "duanyan_horses"
+
+
+def _lukang_state(
+    *,
+    hp: int = 4,
+    hp_max: int = 4,
+    hand: tuple[int, ...] = (),
+    equip: tuple[int, ...] = (),
+    seats: int = 2,
+):
+    """``seats`` 人局：座位 0 = 陆抗移动版（其余座位无武将）。"""
+    used = set(hand) | set(equip)
+    deck = tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in used)
+    specs = [SeatSpec(hp=hp, hp_max=hp_max, hand=hand, equip=equip, hero=LUKANG)]
+    specs += [SeatSpec(hp=4) for _ in range(seats - 1)]
+    return build_state(pack=PACK, seats=specs, deck=deck, turn_seat=0)
+
+
+def _lukang_players(engine):
+    return [PassPlayer() for _ in range(len(engine.state.players))]
+
+
+def _lukang_play(engine):
+    players = _lukang_players(engine)
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    )
+    return engine.pending
+
+
+def _lukang_submit_duanyan(engine, choice: str):
+    """发动【决堰】并选一个装备栏，跑回下一次出牌阶段询问。"""
+    players = _lukang_players(engine)
+    query = _lukang_play(engine)
+    engine.submit(ActivateSkill(skill_id=DUANYAN, answers_seq=query.seq))
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind != QueryKind.PLAY_PHASE.value,
+    )
+    assert str(engine.pending.skill_id) == "duanyan:column", engine.pending
+    option = next(
+        action
+        for action in engine.pending.legal_actions
+        if getattr(action, "kind", "") == "SelectOption"
+        and getattr(action, "choice", "") == choice
+    )
+    engine.submit(option)
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    )
+    return engine
+
+
+def _lukang_awaken(*, hp: int = 1, hp_max: int = 4, hand: tuple[int, ...] = (), equip: tuple[int, ...] = (), seats: int = 2):
+    """让【破势】在准备阶段觉醒，跑回出牌阶段询问（返回 ``engine``，``pending`` 即那一问）。"""
+    engine = Engine.from_state(
+        _lukang_state(hp=hp, hp_max=hp_max, hand=hand, equip=equip, seats=seats), seed=7
+    )
+    _lukang_play(engine)
+    return engine
+
+
+def test_duanyan_weapon_column_seals_the_slot_and_raises_the_slash_limit():
+    """【武器栏】：废除武器槽（武器先弃置）+ 本阶段【杀】次数上限 +3（阶段末清）。"""
+    weapon = cards_of_type(PACK, "crossbow")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    engine = Engine.from_state(_lukang_state(hand=(slash,), equip=(weapon,)), seed=7)
+    _lukang_submit_duanyan(engine, DUANYAN_WEAPON)
+
+    player = engine.state.player(0)
+    assert player.sealed_zones == ("weapon",), "一个事件只封武器槽（不是整个装备区）"
+    assert player.equip == [] and weapon in engine.state.discard, "槽里的牌先强制弃置"
+    assert player.duanyan_slash_bonus == 3
+    # 基础上限 1 + 3 = 4：用掉 1 张仍能再用，用掉 4 张才超额。
+    player.card_use_counts["slash"] = 1
+    assert check_count(engine.state, 0, engine.state.card(slash)) is False
+    player.card_use_counts["slash"] = 4
+    assert check_count(engine.state, 0, engine.state.card(slash)) is True
+    # 「此阶段内」：出牌阶段一结束就清（补充一手 Q6：下一回合不再有）。
+    end = next(
+        action for action in engine.pending.legal_actions if action.kind == "EndPhase"
+    )
+    engine.submit(end)
+    run_queries(
+        engine,
+        _lukang_players(engine),
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.DISCARD.value,
+    )
+    assert engine.state.player(0).duanyan_slash_bonus == 0, "阶段末清掉那一轴"
+
+
+def test_duanyan_armor_column_draws_three_and_raises_the_hand_limit():
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    engine = Engine.from_state(_lukang_state(equip=(armor,)), seed=7)
+    query = _lukang_play(engine)
+    before = len(engine.state.player(0).hand)
+    players = _lukang_players(engine)
+    engine.submit(ActivateSkill(skill_id=DUANYAN, answers_seq=query.seq))
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind != QueryKind.PLAY_PHASE.value,
+    )
+    engine.submit(
+        next(
+            action
+            for action in engine.pending.legal_actions
+            if getattr(action, "choice", "") == DUANYAN_ARMOR
+        )
+    )
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    )
+
+    player = engine.state.player(0)
+    assert player.sealed_zones == ("armor",)
+    assert armor in engine.state.discard
+    assert len(player.hand) == before + 3, "摸三张（恰好 3）"
+    assert player.hand_limit_bonus == 3, "本回合手牌上限 +3"
+
+
+def test_duanyan_horses_column_seals_two_slots_and_waives_distance_for_slash_and_tricks():
+    """【两个坐骑栏】：**一个事件**废除两个槽 ⇒ 本回合【杀】不查攻击范围、【锦囊】不查距离。"""
+    offense = cards_of_type(PACK, "chitu")[0]
+    defense = cards_of_type(PACK, "jueying")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    snatch = cards_of_type(PACK, "snatch")[0]
+    state = _lukang_state(hand=(slash, snatch), equip=(offense, defense), seats=4)
+    # 座位 2 有手牌：【顺手牵羊】的"区域里有牌"这条目标谓词与距离判据无关，先让它过闸。
+    state.player(2).hand.append(cards_of_type(PACK, "dodge")[0])
+    engine = Engine.from_state(state, seed=7)
+    _lukang_submit_duanyan(engine, DUANYAN_HORSES)
+
+    player = engine.state.player(0)
+    assert player.sealed_zones == ("horse_offense", "horse_defense"), "两槽一次事件"
+    assert {offense, defense} <= set(engine.state.discard)
+    assert player.duanyan_no_distance is True
+    # 座位 2 距离 2 > 攻击范围 1：平时够不着，骑栏效果下进池。
+    assert 2 in check_targets(engine.state, 0, engine.state.card(slash))
+    assert 2 in check_targets(engine.state, 0, engine.state.card(snatch)), "额定距离 1 被豁免"
+
+
+def test_duanyan_offers_only_the_columns_that_are_still_available():
+    engine = Engine.from_state(_lukang_state(), seed=7)
+    # 游离帧（不入栈）：两个槽都是空的，帧只是"搬牌凭证"；push 进去会被回合环当成技能帧跑。
+    carrier = Frame(kind=FrameKind.SKILL, data={"skill_owner": 0})
+    assert engine.abolish_slots(carrier, 0, ("weapon", "armor")) is None
+    query = _lukang_play(engine)
+    engine.submit(ActivateSkill(skill_id=DUANYAN, answers_seq=query.seq))
+    run_queries(
+        engine,
+        _lukang_players(engine),
+        lambda e: e.pending is not None and e.pending.kind != QueryKind.PLAY_PHASE.value,
+    )
+    options = [
+        action.choice
+        for action in engine.pending.legal_actions
+        if getattr(action, "kind", "") == "SelectOption"
+    ]
+    assert options == [DUANYAN_HORSES], "已封满的栏不再列出（不是置灰）"
+
+
+def test_duanyan_is_not_offered_once_every_slot_is_sealed():
+    """补充一手 Q5：所有装备栏都被废除 ⇒ 连技能按钮都不出现。"""
+    engine = Engine.from_state(_lukang_state(), seed=7)
+    carrier = Frame(kind=FrameKind.SKILL, data={"skill_owner": 0})
+    assert engine.abolish_slots(carrier, 0, EQUIP_SLOTS) is None
+    query = _lukang_play(engine)
+    assert not any(
+        isinstance(action, ActivateSkill) and action.skill_id == DUANYAN
+        for action in query.legal_actions
+    ), "四槽全封 ⇒ 没有可废除的栏 ⇒ 候选不出现"
+
+
+def test_poshi_awakens_when_every_equipment_slot_is_sealed():
+    """装备栏均被废除 ⇒ 觉醒：减 1 上限、手牌摸至上限、失去【决堰】、获得 ☆【怀柔】。"""
+    engine = Engine.from_state(_lukang_state(seats=2), seed=7)
+    carrier = Frame(kind=FrameKind.SKILL, data={"skill_owner": 0})
+    assert engine.abolish_slots(carrier, 0, EQUIP_SLOTS) is None
+    _lukang_play(engine)
+
+    player = engine.state.player(0)
+    assert (player.hp, player.hp_max) == (3, 3), "满体力减上限 ⇒ 体力同步下调（规则 L436–437）"
+    assert len(player.hand) == 3 + 2, "摸至体力上限 3，然后摸牌阶段 +2"
+    assert player.lost_skills == [DUANYAN]
+    assert player.granted_skills == [HUAJROU]
+
+
+def test_poshi_awakens_at_one_hp_even_with_slots_left():
+    """「或体力值为1」：装备栏还在也照样觉醒。"""
+    engine = _lukang_awaken(hp=1)
+    player = engine.state.player(0)
+    assert (player.hp, player.hp_max) == (1, 3)
+    assert player.granted_skills == [HUAJROU]
+    assert player.sealed_zones == (), "装备栏没被动过（只减上限 + 换技能）"
+
+
+def test_poshi_at_max_hp_one_dies_after_the_max_hp_drop():
+    """票 04 的 0 档：上限 1 时**照减**到 0 ⇒ 直接死亡，其余段不结算（不兜底）。"""
+    engine = Engine.from_state(_lukang_state(hp=1, hp_max=1), seed=7)
+    run_queries(
+        engine,
+        _lukang_players(engine),
+        lambda e: not e.state.player(0).alive or e.finished,
+    )
+    player = engine.state.player(0)
+    assert (player.alive, player.hp, player.hp_max) == (False, 0, 0)
+    assert player.granted_skills == [], "减死之后不再授予 ☆【怀柔】"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing.value.startswith("NEAR_DEATH")
+    ], "上限归零不进濒死"
+
+
+def test_huairou_reforges_a_hand_equipment_card():
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    engine = _lukang_awaken(hp=1, hand=(armor,))
+    query = engine.pending
+    assert HUAJROU in dict(query.preactivations), "已翻预发动：清单要渲得出来"
+    before = len(engine.state.player(0).hand)
+    engine.submit(ActivateSkill(skill_id=HUAJROU, picks=(armor,), answers_seq=query.seq))
+    run_queries(
+        engine,
+        _lukang_players(engine),
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    )
+    assert armor in engine.state.discard, "重铸 = 弃置这张牌"
+    assert len(engine.state.player(0).hand) == before - 1 + 1, "弃置一张 + 摸一张"
+
+
+def test_huairou_reforges_an_equipped_card():
+    """补充一手 Q7：**已装备**的牌也能重铸（手牌 + 装备区）。"""
+    weapon = cards_of_type(PACK, "crossbow")[0]
+    engine = _lukang_awaken(hp=1, equip=(weapon,))
+    assert engine.state.player(0).equip == [weapon]
+    query = engine.pending
+    engine.submit(ActivateSkill(skill_id=HUAJROU, picks=(weapon,), answers_seq=query.seq))
+    run_queries(
+        engine,
+        _lukang_players(engine),
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    )
+    assert engine.state.player(0).equip == []
+    assert weapon in engine.state.discard
+    assert weapon not in engine.state.player(0).hand
+
+
+def test_huairou_is_not_offered_without_equipment_cards():
+    engine = _lukang_awaken(hp=1)
+    player = engine.state.player(0)
+    player.hand = [cards_of_type(PACK, "slash")[0]]
+    player.equip = []
+    candidates = legal_actions_for(
+        engine.state, 0, QueryKind.PLAY_PHASE, answers_seq=999
+    )
+    assert not any(
+        isinstance(action, ActivateSkill) and action.skill_id == HUAJROU
+        for action in candidates
+    ), "没有装备牌 ⇒ 连候选都不进池"
+
+
+def test_huairou_rejects_a_non_equipment_card():
+    engine = _lukang_awaken(hp=1)
+    player = engine.state.player(0)
+    slash = cards_of_type(PACK, "slash")[0]
+    player.hand.append(slash)
+    query = engine.pending
+    with pytest.raises(Exception):
+        engine.submit(
+            ActivateSkill(skill_id=HUAJROU, picks=(slash,), answers_seq=query.seq)
+        )
+    assert slash in player.hand, "非装备牌不是合法载荷（校验器拒收）"

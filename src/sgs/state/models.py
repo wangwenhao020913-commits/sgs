@@ -745,6 +745,22 @@ class Player(BaseModel):
     出牌阶段结束时由 :meth:`Engine._phase_play_end` 清掉，距离字段活到回合末。读取方是
     ``COUNT_LIMIT`` 修饰器（只对【杀】族；无次数限制者保持 ``None``）。**不发 delta**。
     """
+    duanyan_slash_bonus: int = 0
+    """本阶段「使用【杀】的次数上限 +N」的 N（陆抗移动版【决堰】·武器栏；lukang-mobile 票 01）。
+
+    写入唯一入口 :meth:`Engine.set_duanyan_slash_bonus`（【决堰】提交点）；**清理点 = 出牌
+    阶段结束**（:meth:`Engine._phase_play_end`，与【奇谋】的 ``qimou_count_x`` 同一个收尾点），
+    回合末再兜一次。读取方是同一条技能定义上的 ``COUNT_LIMIT`` 修饰器（只对【杀】族；
+    无次数限制者保持 ``None``）。**不发 delta**：与 ``qimou_count_x`` 同姿态。
+    """
+    duanyan_no_distance: bool = False
+    """本回合「使用牌无距离限制」是否生效（【决堰】·两个坐骑栏；lukang-mobile 票 01）。
+
+    写入唯一入口 :meth:`Engine.set_duanyan_no_distance`；**清理点 = 回合末**
+    （:meth:`Engine._clear_turn_effects`——牌面写「本回合」）。读取方是同一条技能定义上的两条
+    修饰器：``TARGET_POOL``（【杀】族把全体其他存活座位并入池 = 豁免攻击范围，与【诈降】
+    同一手法）与 ``DISTANCE_LIMIT``（有额定距离上限的牌返回 ``None`` = 豁免距离）。**不发 delta**。
+    """
     paoxiao_bonus: bool = False
     """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。
 
