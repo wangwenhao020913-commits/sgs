@@ -421,9 +421,15 @@ class CardTagReader(str, Enum):
     M6 只有一处读取方：``HAND_COUNT`` = 弃牌阶段的**手牌计数**
     （``sgs.effects.hand_count``：手牌中不带"排除计数"标签的张数）。手牌**上限**
     （``sgs.effects.hand_limit``）是另一个查询，两者互不替换（spec D11）。
+
+    ``FORBIDDEN_AS_SLASH``（feng-yujin 票 03）= **这张牌不能作为【杀】使用 / 打出**：
+    读点是"这张牌能不能占据【杀】这个牌名"的两条路——原用途（``effects/actions.py`` 的
+    候选闸门，含"本来就是【杀】"的那一档）与转化候选（``skills/virtual.py`` 的
+    ``virtual_candidates``，含多来源；``skills/heroes.conversion_offers`` 的界面归属面）。
     """
 
     HAND_COUNT = "hand_count"
+    FORBIDDEN_AS_SLASH = "forbidden_as_slash"
 
 
 class CardTagClear(str, Enum):
@@ -434,7 +440,9 @@ class CardTagClear(str, Enum):
 
     - ``TURN_END``：回合末（``Engine._clear_turn_effects``）——洛神式"本回合不计入"；
     - ``LEAVE_ZONE``：该牌离开标签声明所在的那个区域时——黠慧式"在手牌期间"；
-    - ``USED_OR_PLAYED``：该牌被使用或打出时——遗珠式"到被使用 / 打出为止"。
+    - ``USED_OR_PLAYED``：该牌被使用或打出时——遗珠式"到被使用 / 打出为止"；
+    - ``ENTER_DISCARD``：该牌**进入弃牌堆**时（feng-yujin 票 03；【定乱】的"直到进入弃牌堆"）。
+      清除点在移动入口的**派发之后**（先让标签自身效果读到它，再清），逐张按移动后的落点判。
 
     与"是否随来源实例消失"是**两个轴**：前者按时间 / 事件到期，后者按来源技能存亡撤销。
     """
@@ -442,6 +450,7 @@ class CardTagClear(str, Enum):
     TURN_END = "turn_end"
     LEAVE_ZONE = "leave_zone"
     USED_OR_PLAYED = "used_or_played"
+    ENTER_DISCARD = "enter_discard"
 
 
 class CardTagVisibility(str, Enum):
@@ -463,12 +472,16 @@ class CardTagType(str, Enum):
 
     - ``LUOSHEN_HAND``：**本回合不计入**（洛神式；M6 唯一活载体 = 界甄姬【洛神】）；
     - ``ZONE_HAND``：**在某区域（手牌）期间不计入**（黠慧式；M6 无载体，只登记形状）；
-    - ``UNTIL_PLAYED``：**到被使用 / 打出为止**（遗珠式；M6 无载体，只登记形状）。
+    - ``UNTIL_PLAYED``：**到被使用 / 打出为止**（遗珠式；M6 无载体，只登记形状）；
+    - ``DINGLUAN``：**【定乱】牌**（feng-yujin 票 03；首个"禁令 + 进入弃牌堆 + 自身效果"
+      三合一的新形状）：不能作为【杀】使用 / 打出、进入弃牌堆即清、非因使用 / 打出进弃牌堆
+      时拥有者摸 1 张。活载体 = 锋·于禁【定乱】【节钺】，效果定义 = ``hero.feng_yujin.dingluan_mark``。
     """
 
     LUOSHEN_HAND = "luoshen_hand"
     ZONE_HAND = "zone_hand"
     UNTIL_PLAYED = "until_played"
+    DINGLUAN = "dingluan"
 
 
 class CardTagSpec(_FrozenModel):
@@ -476,6 +489,12 @@ class CardTagSpec(_FrozenModel):
 
     ``carrier`` 是 M6 的活载体技能 id（无载体 = ``None``）：登记表据此回答"这一类形状
     此刻由谁生产"，``tests/test_tags.py`` 会把它与 ``CATALOG`` 对账。
+
+    ``effect``（feng-yujin 票 03）= **标签自身效果**的定义 id（``CATALOG`` 里一条
+    ``carrier = CarrierKind.CARD_TAG`` 的效果声明，**不是任何角色拥有的技能**）。
+    与 ``Marker.effect`` 同姿态：实例由 ``resolve_instances`` 按牌上的标签产出
+    （``SkillSourceKind.CARD_TAG``），**不随来源技能存亡 / 失效**——牌面写"直到进入弃牌堆"，
+    故效果只随标签消失而消失。缺省 ``None`` = 这类标签没有自身效果。
     """
 
     reader: CardTagReader
@@ -483,6 +502,7 @@ class CardTagSpec(_FrozenModel):
     visibility: CardTagVisibility
     disappears_with_source: bool
     carrier: str | None = None
+    effect: str | None = None
 
 
 CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
@@ -512,6 +532,18 @@ CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
             clear_trigger=CardTagClear.USED_OR_PLAYED,
             visibility=CardTagVisibility.FACE_VISIBLE,
             disappears_with_source=False,
+        ),
+        # 【定乱】（feng-yujin 票 03；用户 2026-11-07 签「全部按建议」）：禁令 + 进入弃牌堆
+        # 即清 + 标签自身效果三合一。可见性取 **PUBLIC**（标记与"展示"是同一动作的两面）；
+        # 不随来源消失（`disappears_with_source=False`）——牌面写"直到进入弃牌堆"，
+        # 于禁身死 / 失去技能都不撤回标记；效果走 `effect`（不受技能失效影响）。
+        CardTagType.DINGLUAN: CardTagSpec(
+            reader=CardTagReader.FORBIDDEN_AS_SLASH,
+            clear_trigger=CardTagClear.ENTER_DISCARD,
+            visibility=CardTagVisibility.PUBLIC,
+            disappears_with_source=False,
+            carrier="hero.feng_yujin.dingluan",
+            effect="hero.feng_yujin.dingluan_mark",
         ),
     }
 )

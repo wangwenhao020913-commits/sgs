@@ -1245,7 +1245,7 @@ def test_wine_uses_the_existing_damage_modifier_points_and_no_new_timing():
     # M5-04 本身不新增时机节点；「83」是当时的定格数，此后 tao-caocao 票 03 追加了
     # ``RANK_COMPARE_PLACED``（拼点牌扣置后、亮出前）⇒ 今天是 84。判据仍是"这条技能
     # 不新增时机"，故只跟着定格数走、不放宽任何其它断言。
-    assert len(list(Timing)) == 84, "M5-04 不新增时机节点（83 是当时的定格数）"
+    assert len(list(Timing)) == 85, "M5-04 不新增时机节点（83 是当时的定格数；feng-yujin 票 02 再 +1）"
     assert not {"nature", "damage_type", "attribute", "element"} & set(CardRef.model_fields), (
         "加伤是效果不是牌面事实（ADR-003）"
     )

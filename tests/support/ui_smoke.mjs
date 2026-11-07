@@ -512,7 +512,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // huo-taishici-xunyu 票 01 / 02：火包移动版再加太史慈标准版 / 荀彧标准版 ⇒ 45 / 71 → 46 / 72。
   // lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
   // tao-caocao 票 01：自制包加韬·曹操自制版（真名「曹操」已在池里）⇒ 真名不变、版本 75 → 76。
-  ui.state.heroCatalog.length === 52 && catalogVersions.length === 81,
+  ui.state.heroCatalog.length === 53 && catalogVersions.length === 82,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -960,7 +960,10 @@ if (partial) {
   // 先扫出"某个种子的出牌阶段里有技能可发动"，**记下步数**——断言前用 `replayTo` 回到那个局面。
   // （老写法在扫到更早的种子后 `break` 出内层循环、外层又跑到最后一个种子，断言就落在了别的局面上。）
   let skillCase = null;
-  for (const seed of [7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67]) {
+  // feng-yujin 票 01 加池后（默认池 82 / 53）同批种子的配将整体后移了一位：原列表的头几位
+  // 落到"没有可点主动技"的武将上 ⇒ 扫描列表前补四个新池下的命中种子（2 = 界周瑜【反间】、
+  // 8 = 界大乔【国色】、14 = 典韦移动版【强袭】、20 = 神甘宁【魄袭】）。判据不变。
+  for (const seed of [2, 8, 14, 20, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67]) {
     await newSession(seed);
     for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
       const pending = ui.state.view.pending;
@@ -1017,7 +1020,7 @@ if (partial) {
     return skills.length > 0 && buttons.length === skills.length;
   })(), `按钮 ${Array.from($("t-skills").children).filter((c) => c.tagName === "BUTTON").length} 个 / 清单 ${(ui.state.view.skills || []).length} 条`);
 
-  check("㉿4 找到一个技能可发动的前置", skillCase !== null, skillCase ? `seed=${skillCase.seed} 可发动=${skillCase.offered.map((s) => s.name).join("、")}` : "10 个种子内没找到");
+  check("㉿4 找到一个技能可发动的前置", skillCase !== null, skillCase ? `seed=${skillCase.seed} 可发动=${skillCase.offered.map((s) => s.name).join("、")}` : "扫描列表内的种子都没找到");
 
   if (skillCase) {
     const target = skillCase.offered[0];

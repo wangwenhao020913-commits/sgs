@@ -38,7 +38,9 @@ from sgs.effects import (
     behavior_for,
     check_count,
     check_targets,
+    forbidden_as_slash,
     forced_use_targets,
+    is_slash,
     satisfies_required,
     target_combos,
 )
@@ -737,6 +739,13 @@ def virtual_candidates(
     for group in sources:
         _validate_source_count(group, max_sources=ceiling, target="virtual_candidates")
         card = transformed_card(state, group, target_type_id)
+        if is_slash(behavior_for(card)) and any(
+            # 【定乱】牌不能作为转化【杀】的源牌（R4=A；**多来源**也算——丈八的两张里
+            # 任意一张带标记，整组「当【杀】」不合法）。
+            forbidden_as_slash(state, state.card(card_id))
+            for card_id in group
+        ):
+            continue
         if ctx.scope is CandidateScope.RESPOND and (
             ctx.respond_required is None
             or not satisfies_required(card, ctx.respond_required)

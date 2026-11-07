@@ -179,6 +179,22 @@ def _marker_added(state):
     )
 
 
+def _card_tag_added(state):
+    """给一张牌挂一枚标签（feng-yujin 票 03：标签进内容键，故键必变）。"""
+    from sgs.data import CardTagType
+    from sgs.state import CardTag
+
+    updated = state.model_copy(deep=True)
+    updated.card_tags[int(state.players[0].equip[0])] = (
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=0,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    return updated
+
+
 def _seat_dead(state):
     return _with_player(state, 1, alive=False)
 
@@ -280,6 +296,7 @@ _KEY_CASES = (
     ("seat_changed", _base_state, _seat_changed, False),
     ("pack_id_changed", _base_state, _pack_id_changed, False),
     ("include_suppressed", _base_state, _unchanged_state, True),
+    ("card_tag_added", _base_state, _card_tag_added, False),
 )
 """键覆盖的用例表：每个字段一条"只改这一位"。
 
@@ -324,8 +341,15 @@ _FIELD_CASE_LABELS = {
 }
 """``_PLAYER_KEY_FIELDS`` 的每一项 → 钉住它的用例（字段表与用例表的机械对应）。"""
 
-_TOP_LEVEL_CASE_LABELS = ("pack_id_changed", "include_suppressed")
-"""局面级两位的用例（不在 ``_PLAYER_KEY_FIELDS`` 里）。"""
+_TOP_LEVEL_CASE_LABELS = (
+    "pack_id_changed",
+    "include_suppressed",
+    "card_tag_added",
+)
+"""局面级三位的用例（不在 ``_PLAYER_KEY_FIELDS`` 里）。
+
+``card_tag_added``（feng-yujin 票 03）钉住键里的**牌标签**那一位：``CardTagSpec.effect``
+让解析按标签产出效果实例，故标签集合是解析读到的状态位。"""
 
 _KEY_ONLY_CASES = frozenset({"suppression_scope_changed", "suppression_predicate_changed"})
 """只用于**键构造**断言的用例：记录里的值绕过了枚举校验，引擎状态里造不出来。"""
@@ -347,8 +371,13 @@ def _key_without_player_field(dropped: str):
     index = _PLAYER_KEY_FIELDS.index(dropped)
 
     def key(state, include_suppressed):
-        pack_id, flag, players = _resolve_key(state, include_suppressed)
-        return (pack_id, flag, tuple(bits[:index] + bits[index + 1 :] for bits in players))
+        pack_id, flag, players, card_tags = _resolve_key(state, include_suppressed)
+        return (
+            pack_id,
+            flag,
+            tuple(bits[:index] + bits[index + 1 :] for bits in players),
+            card_tags,
+        )
 
     return key
 

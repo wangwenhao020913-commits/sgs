@@ -153,15 +153,18 @@ def test_reading_an_unregistered_tag_type_fails_closed() -> None:
         card_tag_spec(_ProbeTagType.UNREGISTERED)  # type: ignore[arg-type]
 
 
-def test_the_three_m6_shapes_are_registered_with_one_live_carrier() -> None:
-    """spec §标签：M6 至少登记三类，只有"本回合不计入"有载体（界甄姬【洛神】）。"""
+def test_every_tag_shape_is_registered_and_its_carrier_anchor_is_live() -> None:
+    """spec §标签：M6 三类 + feng-yujin 票 03 的【定乱】（4 类 / 2 个活载体）。"""
     specs = {tag_type: CARD_TAG_TYPES[tag_type] for tag_type in TAG_TYPES}
     carriers = {tag_type: spec.carrier for tag_type, spec in specs.items()}
     live = [tag_type for tag_type, carrier in carriers.items() if carrier is not None]
 
-    assert len(specs) == 3, sorted(specs)
-    assert live == [CardTagType.LUOSHEN_HAND], "M6 只有一个活载体（界甄姬【洛神】）"
+    assert len(specs) == 4, sorted(specs)
+    assert set(live) == {CardTagType.LUOSHEN_HAND, CardTagType.DINGLUAN}, (
+        "两个活载体：界甄姬【洛神】（本回合不计入）与锋·于禁【定乱】（禁令 + 进入弃牌堆）"
+    )
     assert carriers[CardTagType.LUOSHEN_HAND] == "hero.jie_zhenji.luoshen"
+    assert carriers[CardTagType.DINGLUAN] == "hero.feng_yujin.dingluan"
 
     turned = specs[CardTagType.LUOSHEN_HAND]
     assert turned.clear_trigger is CardTagClear.TURN_END
@@ -175,6 +178,15 @@ def test_the_three_m6_shapes_are_registered_with_one_live_carrier() -> None:
     until = specs[CardTagType.UNTIL_PLAYED]
     assert until.clear_trigger is CardTagClear.USED_OR_PLAYED, "遗珠式：到被使用 / 打出为止"
     assert until.visibility is CardTagVisibility.FACE_VISIBLE
+
+    # feng-yujin 票 03：【定乱】= 禁令 + 进入弃牌堆即清 + 公开 + 不随来源消失 + 标签自身效果。
+    dingluan = specs[CardTagType.DINGLUAN]
+    assert dingluan.reader is CardTagReader.FORBIDDEN_AS_SLASH
+    assert dingluan.clear_trigger is CardTagClear.ENTER_DISCARD
+    assert dingluan.visibility is CardTagVisibility.PUBLIC
+    assert dingluan.disappears_with_source is False, "牌面写'直到进入弃牌堆'：于禁身死不撤回标记"
+    assert dingluan.effect == "hero.feng_yujin.dingluan_mark", "标签自身效果的声明面"
+    assert dingluan.effect in CATALOG, "效果定义必须真的在 CATALOG 里" 
 
     # 载体锚点与 ``CATALOG`` 对账：登记表说"由谁生产"，技能表里就必须真有那一条。
     for tag_type, spec in specs.items():

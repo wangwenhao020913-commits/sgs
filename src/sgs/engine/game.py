@@ -179,6 +179,7 @@ from sgs.state import (
     order_targets,
     parse_action,
     project,
+    seats_from,
     zone_sealed,
 )
 from sgs.timing import Timing
@@ -779,6 +780,14 @@ class Engine:
         技能钩子，故不进记录流：回放重跑引擎时会按同一份状态重建。
         """
         self._turn_data: dict[str, Any] = {}
+        self._round_start_pending: bool = True
+        """「每轮开始时」还欠一次派发（feng-yujin 票 02；首个载体 = 锋·于禁【定乱】）。
+
+        第 1 轮由 :meth:`_start` 之后的第一次 :meth:`_step_turn` 兑现；此后每轮在
+        :meth:`_finish_round_and_advance` 的"轮次 +1"处重新置真。**没有载体时不落任何
+        记录**（:meth:`_dispatch_round_start` 先探 ``timing_hooks_present``），标准对局的
+        记录流因此逐字节不变。
+        """
         self._turn_steps: tuple[Callable[[], Any], ...] = (
             self._turn_before_start,
             self._turn_start,
@@ -1122,6 +1131,9 @@ class Engine:
                 owner=seat,
             )
             self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+            # 阵亡清区**不派发** MOVE_AFTER（票 33 的有意缺口）⇒ 标签自身效果不触发；
+            # 但"进入弃牌堆即止"的寿命仍要兑现（否则牌重洗后还带着【定乱】）。
+            self._clear_enter_discard_tags(delta.cards)
         self._clear_dead_markers(frame, seat)
         frame.data[_DEAD_CARDS_CLEARED] = True
 
@@ -3280,6 +3292,10 @@ class Engine:
             key=key,
             frame_id=frame.frame_id if frame is not None else 0,
         )
+        if control != "stay" and to_zone.zone is Zone.DISCARD:
+            # 标签的"进入弃牌堆即止"（feng-yujin 票 03）：排在本批的 MOVE_AFTER **整条派发
+            # 之后**（标签自身效果要先读到它）。挂起的那一趟由续跑点补做。
+            self._clear_enter_discard_tags(cards)
         return "stay" if control == "stay" else None
 
     @staticmethod
@@ -4368,7 +4384,9 @@ class Engine:
             )
         )
 
-    def clear_card_tags(self, trigger: CardTagClear) -> int:
+    def clear_card_tags(
+        self, trigger: CardTagClear, *, cards: tuple[int, ...] | None = None
+    ) -> int:
         """按**清除触发**清标签（M6 票 09；D12 的"生存期"唯一执行入口）。
 
         逐张牌留下"触发不等于 ``trigger``"的标签，清空即删掉该牌的表项；返回清掉的条数。
@@ -4376,11 +4394,20 @@ class Engine:
         ``USED_OR_PLAYED`` 这两类形状**无载体**，触发点随后续里程碑的载体一起接
         （形状由 ``tests/test_tags.py`` 的构造测试钉住）。**不发 delta**：与
         ``set_hand_card_prohibition`` 同姿态——没有 JSON 读者，回放按同一条技能决策重建。
+
+        ``cards``（feng-yujin 票 03）：**只清这批牌**。``ENTER_DISCARD`` 走这一档——它逐张
+        按"这张牌进入了弃牌堆"判，不能按 trigger 全局清（还有别的牌带着同类标签在手牌 /
+        装备区）。缺省 ``None`` = 既有行为（按 trigger 清全部）。
         """
         if not self.state.card_tags:
             return 0
         removed = 0
-        for card_id in list(self.state.card_tags):
+        targets = (
+            list(self.state.card_tags)
+            if cards is None
+            else [card_id for card_id in cards if card_id in self.state.card_tags]
+        )
+        for card_id in targets:
             tags = self.state.card_tags[card_id]
             gone = tuple(
                 tag
@@ -4401,6 +4428,20 @@ class Engine:
         """清掉来源实例已消失的标签，并逐条落 ``tag_remove``（M6 票 20 / 票 09 的清理入口）。"""
         for card_id, tag in prune_card_tags(self.state):
             self._emit_tag(TagRemoveDelta, card_id, tag)
+
+    def _clear_enter_discard_tags(self, cards: tuple[Any, ...]) -> None:
+        """这批牌进入弃牌堆后，清掉 ``CardTagClear.ENTER_DISCARD`` 的标签（feng-yujin 票 03）。
+
+        **调用点必须在 MOVE_AFTER 派发完成之后**：标签自身效果（【定乱】的"非因使用 / 打出
+        而进入弃牌堆 ⇒ 拥有者摸 1 张"）要先读到标签，再让它消失。逐张按 ``cards`` 清，不按
+        trigger 全局清（别的牌身上的同类标签还在手牌 / 装备区）。无标签时**零动作**。
+        """
+        if not self.state.card_tags or not cards:
+            return
+        self.clear_card_tags(
+            CardTagClear.ENTER_DISCARD,
+            cards=tuple(int(card.card_id) for card in cards),
+        )
 
     def _clear_turn_effects(self) -> None:
         """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②、
@@ -5247,6 +5288,9 @@ class Engine:
             if carrying is not None:
                 carrying.data.pop("_pending_move_timing", None)
             self._move_pending.pop()
+            if event.to_zone.zone is Zone.DISCARD:
+                # 挂起那一趟的"进入弃牌堆即止"（feng-yujin 票 03）：派发跑完才清。
+                self._clear_enter_discard_tags(event.cards)
 
     def _step(self) -> None:
         if self.finished:
@@ -5344,6 +5388,13 @@ class Engine:
         raise RuntimeError("身份局必须先发出一个主公座位（票 13 §4）")
 
     def _step_turn(self) -> None:
+        if self._round_start_pending:
+            # 「每轮开始时」（feng-yujin 票 02）：落在**本轮第一个自然回合的回合开始前**
+            # 之前。派发完也收在这里（与 ``_start`` 同姿态）：下一次 ``_step`` 才起跑本回合。
+            if self._dispatch_round_start() == "stay":
+                return
+            self._round_start_pending = False
+            return
         if self._turn_is_over():
             # 非主公在**自己的回合**内阵亡 ⇒ 剩余阶段整体跳过（票 14 §4 / `flow_death`
             # "死亡结算开始前：若不是主公，则结束其回合"）。死亡段已在 ``DEATH_BEFORE_START``
@@ -5432,6 +5483,9 @@ class Engine:
             return
         state.round += 1
         state.round_start_seat = nxt
+        # 「每轮开始时」欠一次派发（feng-yujin 票 02）：记在**轮次 +1 的那一刻**，由下一次
+        # ``_step_turn`` 兑现（本轮第一回合的回合开始前之前）；额外回合不经过这里 ⇒ 不触发。
+        self._round_start_pending = True
         # 每轮次数随轮次清空（M6 票 11）：清在**新轮开始之前**，故新一轮的第一次
         # 发动读到的就是 0；额外回合不经过这里，故它不会刷新它们。
         reset_round_skill_state(state)
@@ -5524,6 +5578,39 @@ class Engine:
         # 准备阶段体照记；有技能钩子（M3 的【观星】式）时惰性建帧派发（票 10 §③）。
         self.state.phase = Phase.PREPARE
         return self._dispatch_phase_body(Timing.PHASE_PREPARE, "phase_prepare")
+
+    def _dispatch_round_start(self) -> Control:
+        """「每轮开始时」的帧外派发（feng-yujin 票 02；首个载体 = 锋·于禁【定乱】）。
+
+        与 :meth:`_dispatch_phase_body` 同一姿态（不压栈的持久帧、可提问、可 ``"stay"``
+        原地重入），差别只有两处：
+
+        - **惰性更硬**：没有 ``ROUND_START`` 载体时**连时机记录都不落**（阶段体那一套是
+          "空实现照记"——但轮边界每局每轮都有，照记会改掉全部标准金录像）；有载体时落
+          **一条** ``ROUND_START`` 记录（``actor=None``：轮边界不属于任何座位）；
+        - **座位环从本轮起始座位起**（``round_start_seat``），不是当前回合角色——【定乱】
+          这类**共享技**按座位序逐个问（``SkillDef.shared``），起点必须是"本轮谁先"。
+        """
+        from sgs.skills import dispatch_timing, timing_hooks_present
+
+        if not timing_hooks_present(self.state, Timing.ROUND_START):
+            self._turn_data.pop("round_start", None)
+            return None
+        store = self._turn_data
+        if "round_start" not in store:
+            self.emit_timing(Timing.ROUND_START, actor=None)
+            store["round_start"] = Frame(
+                kind=FrameKind.RESOLVE,
+                data={"source": None, "targets": (), "card": None},
+                frame_id=0,
+            )
+        frame = store["round_start"]
+        start = self.state.round_start_seat
+        ring = seats_from(self.state, start, len(self.state.players))
+        control = dispatch_timing(self, frame, Timing.ROUND_START, ring=ring)
+        if control == "stay":
+            return "stay"
+        return None
 
     def _dispatch_phase_body(
         self,

@@ -220,9 +220,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 168
+    assert len(CATALOG) == 171
     assert len(equipment) == 22
-    assert len(heroes) == 145
+    assert len(heroes) == 147
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -248,7 +248,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 145
+    assert len(expected) == 147
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1802,6 +1802,15 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
         "M6 票 07：触发条件关于**这张牌**（锦囊 ∧ ≥2 个目标），不关于持有者——"
         "任何角色使用的多目标锦囊都要问界甘宁；没有『我』可自校（与『关于我』的钩子正交）"
     ),
+    "hero.feng_yujin.dingluan": (
+        "feng-yujin 票 01：**共享技**——判据里的『我』是座位环上**被问的那个座位**"
+        "（`ASK_SEAT_KEY`），不是技能持有者（持有者 = 于禁，但每个角色都能发动一次）；"
+        "『是不是已发动过』按座位位段判，与 MATCH_OWNER_KEY 无关"
+    ),
+    "hero.feng_yujin.dingluan_mark": (
+        "feng-yujin 票 01：【定乱】牌的**标签自身效果**——触发条件关于『这批牌身上有没有我的"
+        "标签』（MoveEvent + 牌标签），『拥有者』由移动的来源区回答；没有『我』可自校"
+    ),
 }
 """**豁免表**：技能 id → "为什么它的条件不需要持有者判据"。
 
@@ -1827,9 +1836,11 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
     票 07 起第一条合法例外是【奋威】（条件关于"这张牌"）。这条挡住"顺手往例外里塞一条"
     而没人看见：增删条目都要同步这条断言。
     """
-    assert set(EXEMPT_OWNER_SELF_CHECK) == {"hero.jie_ganning.fenwei"}, (
-        "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
-    )
+    assert set(EXEMPT_OWNER_SELF_CHECK) == {
+        "hero.jie_ganning.fenwei",
+        "hero.feng_yujin.dingluan",
+        "hero.feng_yujin.dingluan_mark",
+    }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
         assert reason.strip(), f"{skill_id} 的豁免理由不能为空"
         assert skill_id in CATALOG, f"{skill_id} 不在 CATALOG 里"
@@ -2174,6 +2185,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.shen_ganning.poxi": "主动技能",
     "hero.shen_ganning.jieying": "触发技能",
     "hero.shen_ganning.jieying_mark": "多轮技能",
+    # feng-yujin 票 01：自制包·锋·于禁【节钺】= A 族主动技（两步流水线 + 手写二选一）；
+    # 【定乱】= 帧外时机（ROUND_START）上的**共享技**、手写主体（无 SkillFlow）⇒ 多轮格；
+    # 「【定乱】牌」的标签自身效果 = 手写 MOVE_AFTER 钩子（CarrierKind.CARD_TAG）⇒ 多轮格。
+    "hero.feng_yujin.jieyue": "主动技能",
+    "hero.feng_yujin.dingluan": "多轮技能",
+    "hero.feng_yujin.dingluan_mark": "多轮技能",
 }
 """168 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2197,7 +2214,7 @@ SHAPE_COUNTS: dict[str, int] = {
     # lei-shenganning 票 01：神甘宁【魄袭】⇒ 主动技能 26 → 27；【劫营】（三条钩子、
     # 一步选座流水线）⇒ 触发技能 22 → 23；「营」的**标记自身效果**（`carrier = MARKER`，
     # 手写钩子 + 两个修饰器、没有流水线）⇒ 多轮技能 16 → 17。
-    "主动技能": 27,
+    "主动技能": 28,
     "触发技能": 23,
     "零步技能": 30,
     "排列技能": 5,
@@ -2205,7 +2222,7 @@ SHAPE_COUNTS: dict[str, int] = {
     # ⇒ 多轮技能 14 → 15。
     # huo-wolong-yanliang 票 01：卧龙诸葛【八阵】（锁定技 + 候选生成器）⇒ 锁定技 36 → 37；
     # 【火计】【看破】两条转化声明 ⇒ 转化技 15 → 17。
-    "多轮技能": 17,
+    "多轮技能": 19,
     "锁定技": 37,
     "转化技": 18,
     "能力位": 3,
@@ -2318,7 +2335,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 168
+    assert len(SKILL_SHAPE) == len(CATALOG) == 171
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2408,7 +2425,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     }
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 17
+    assert len(multi_round) == 19
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -2451,8 +2468,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 87
-    assert len(outside) == 81
+    assert len(inside) == 88
+    assert len(outside) == 83
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

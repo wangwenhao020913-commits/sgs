@@ -49,9 +49,11 @@ from sgs.effects import (
     CarrierKind,
     Modifier,
     ModifierPoint,
+    CARD_BEHAVIORS,
     TargetCount,
     TargetRule,
     behavior_for,
+    forbidden_as_slash,
     is_slash,
     locate,
     target_sets_match,
@@ -779,14 +781,21 @@ def conversion_offers(
         for instance in resolve_instances(state)
         if instance.owner == seat
     }
-    return tuple(
-        (card_id, owned_id)
-        for skill in CONVERSION_SKILLS
-        if skill.target_type_id == target_type_id
-        for owned_id in skill.skill_ids
-        if owned_id in owned
-        for card_id in skill.select(state, seat)
-    )
+    # 【定乱】牌不能作为转化【杀】的源牌（feng-yujin 票 03 / R4=A）：界面归属面与真候选
+    # 同一条判据（否则界面画出按钮、引擎却产不出候选）。
+    product_is_slash = is_slash(CARD_BEHAVIORS[target_type_id])
+    offers: list[tuple[int, str]] = []
+    for skill in CONVERSION_SKILLS:
+        if skill.target_type_id != target_type_id:
+            continue
+        for owned_id in skill.skill_ids:
+            if owned_id not in owned:
+                continue
+            for card_id in skill.select(state, seat):
+                if product_is_slash and forbidden_as_slash(state, state.card(card_id)):
+                    continue
+                offers.append((card_id, owned_id))
+    return tuple(offers)
 
 
 def conversion_offers_by_source(

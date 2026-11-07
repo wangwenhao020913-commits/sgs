@@ -838,7 +838,10 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     asked_here = pending is not None and int(getattr(pending, "actor", -1)) == seat
     for instance in resolve_instances(state, include_suppressed=True):
-        if instance.source.kind is SkillSourceKind.MARKER:
+        if instance.source.kind in (
+            SkillSourceKind.MARKER,
+            SkillSourceKind.CARD_TAG,
+        ):
             # **标记自身效果**不是技能（lei-shenganning 票 01）：它由 ``Marker.effect`` 指向
             # 一条效果定义，持有者并没有"学会"任何东西——列进按钮区就会出现一个
             # 点不动的幻影技能（名字还只能是短 id）。效果本身照常生效（实例由

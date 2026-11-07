@@ -88,6 +88,7 @@ __all__ = [
     "attack_range",
     "check_count",
     "check_forbidden",
+    "forbidden_as_slash",
     "check_targets",
     "delayed_settle_target",
     "designation_actions_for",
@@ -265,6 +266,22 @@ def check_forbidden(state: GameState, seat: int, card: CardRef) -> bool:
             ModifierContext(subject=seat, card=card),
             False,
         )
+    )
+
+
+def forbidden_as_slash(state: GameState, card: CardRef) -> bool:
+    """这张牌是不是带「不能当作【杀】使用 / 打出」的标签（feng-yujin 票 03，【定乱】）。
+
+    读取方 = :attr:`~sgs.data.CardTagReader.FORBIDDEN_AS_SLASH`（登记表声明，读点不认技能名）。
+    与 :func:`check_forbidden` **正交**：那条只管"原用途"（武神），这条管"能不能占据【杀】
+    这个牌名"——包括它本来就是【杀】的那一档（读点见 :func:`_usable_hand`）与转化（见
+    ``virtual_candidates`` / ``conversion_offers`` / ``provide_face`` 的同一判据）。
+
+    只读标签、不读座位：标签挂在牌上，与牌在谁手里无关。无标签时零成本。
+    """
+    return any(
+        card_tag_spec(tag.tag_type).reader is CardTagReader.FORBIDDEN_AS_SLASH
+        for tag in state.tags_of(card.card_id)
     )
 
 
@@ -1498,6 +1515,13 @@ def _required_cards(
                 continue
             if check_forbidden(state, seat, card):
                 continue
+            if (
+                required is not None
+                and required == SLASH_FAMILY_KEY
+                and forbidden_as_slash(state, card)
+            ):
+                # 【定乱】牌不能作为【杀】打出（南蛮 / 决斗 / 借刀 / 闪以外的响应窗口）。
+                continue
             cards.append(card)
     return cards
 
@@ -1509,9 +1533,13 @@ def _usable_hand(
     usable: list[CardRef] = []
     for card_id in state.player(seat).hand:
         card = state.card(card_id)
-        if not _usable_in(behavior_for(card), context, timing):
+        behavior = behavior_for(card)
+        if not _usable_in(behavior, context, timing):
             continue
         if check_forbidden(state, seat, card):
+            continue
+        if is_slash(behavior) and forbidden_as_slash(state, card):
+            # 【定乱】牌不能作为【杀】使用——包括它本来就是【杀】的那一档（R4=A）。
             continue
         usable.append(card)
     return usable

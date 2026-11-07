@@ -108,6 +108,7 @@
 | `USE_AFTER_DESIGNATE_TARGET` | 使用并指定目标后（铁骑、奋威、无双类） |
 | `USE_BECOME_TARGET` | 成为目标时（流离） |
 | `USE_AFTER_BECOME_TARGET` | **成为目标后**（B6；目标已定、不会再被转移）：诸葛瞻【父荫】是首个载体（「此牌对你无效」= 目标级无效，逐目标派发、`MATCH_ACTOR_KEY` = 这一次的目标） |
+| `ROUND_START` | **每轮开始时**（自制包·锋·于禁【定乱】= 首个载体，feng-yujin 票 02）：轮边界（本轮第一个自然回合的「回合开始前」之前），帧外派发点 `Engine._dispatch_round_start`，座位环从**本轮起始座位**起；**惰性**——没有载体时一条记录都不落（标准 47 条金录像逐字节不变）。额外回合不推进轮次 ⇒ 不触发。 |
 | `PLAY_ON_PLAY` | 打出牌时（界护驾/界激将 ②） |
 | `RESOLVE_EFFECT` | 生效时（界谦逊） |
 | `RESOLVE_AFTER_END` | **使用结算结束后**（界黄忠移动版【烈弓】② 的「本次使用 + 该目标 +1」记账清扫 = 首个载体，jie-feng-batch 票 01）：USE 帧的**最后一步** `use_after_end` 派发一次（多目标也只有一个 USE 帧，故它是"本次使用结束"的准确落点）；与逐目标的 `RESOLVE_END` / `RESOLVE_AFTER_END`（RESOLVE 帧里逐目标）不是同一个时点 |

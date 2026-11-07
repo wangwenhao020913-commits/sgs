@@ -77,8 +77,8 @@ PACK = load_content_pack(deck_profile="basic_53")
 """合成技能 / 构造局面用最小牌堆档（与其它构造局面单测同一档）。"""
 
 
-def test_enum_has_exactly_84_nodes():
-    assert len(Timing) == 84
+def test_enum_has_exactly_85_nodes():
+    assert len(Timing) == 85
 
 
 def test_value_is_the_bare_identifier_so_layer_never_lands_on_disk():
@@ -96,14 +96,16 @@ def test_implemented_and_enum_only_partition_the_whole_table():
     implemented = set(IMPLEMENTED)
     enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 70, (
+    assert len(implemented) == 71, (
         "M2 已实现类 64 + M3 解封的 1 个（票 07）+ wuming 票 04 解封的 2 个"
         " + huo-taishici-xunyu 票 03 解封的拼点二时机"
         " + tao-caocao 票 03 解封的 `RANK_COMPARE_PLACED`"
+        " + feng-yujin 票 02 新增的 `ROUND_START`"
     )
     assert len(enum_only) == 14, (
         "枚举位 19 − M3 的 `MOVE_AFTER` − wuming 票 04 的加体力上限二时机"
         " − 票 03 的拼点二时机 − tao-caocao 的拼点三时机 + 该票新增的 1 个"
+        "（feng-yujin 票 02 的 `ROUND_START` 是新成员、直接进已实现类）"
     )
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
@@ -113,9 +115,10 @@ def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_se
     dispatch = set(DISPATCH_WHITELIST)
     empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 59, (
+    assert len(dispatch) == 60, (
         "M2 dispatch 白名单 53 + M3 的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
         " + 票 03 的拼点二时机 + tao-caocao 票 03 的 `RANK_COMPARE_PLACED`"
+        " + feng-yujin 票 02 的 `ROUND_START`"
     )
     assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)

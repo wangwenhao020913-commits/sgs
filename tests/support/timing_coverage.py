@@ -55,6 +55,7 @@ from .positions import (
     move_after_engine,
     pindian_engine,
     play_phase_peach_engine,
+    round_start_engine,
     turn_loop_engine,
 )
 
@@ -67,6 +68,7 @@ PLAY_PHASE_PEACH = "position:play-phase-peach"
 MOVE_AFTER_SCENE = "position:move-after"
 MAXLIFE_SCENE = "position:maxlife"
 PINDIAN_SCENE = "position:pindian"
+ROUND_START_SCENE = "position:round-start"
 
 
 def _baseline(slug: str) -> str:
@@ -88,6 +90,8 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.GAME_INITIAL_HAND_DEALING: (B01,),
     Timing.GAME_START: (TURN_LOOP,),
     # ---- L1 / L2：构造局面单测 8（回合阶段轮换，含判定阶段空过） ----
+    # feng-yujin 票 02：轮边界是新成员（「每轮开始时」），首个载体 = 锋·于禁【定乱】。
+    Timing.ROUND_START: (ROUND_START_SCENE,),
     Timing.TURN_BEFORE_START: (TURN_LOOP,),
     Timing.TURN_START: (TURN_LOOP,),
     Timing.PHASE_PREPARE: (TURN_LOOP,),
@@ -155,7 +159,7 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.RANK_COMPARE_PLACED: (PINDIAN_SCENE,),
     Timing.RANK_COMPARE_RESULT_AFTER: (PINDIAN_SCENE,),
 }
-"""59 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+"""60 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
 
 
 @lru_cache(maxsize=None)
@@ -174,6 +178,8 @@ def stream_records(source_id: str):
         return maxlife_engine().records
     if source_id == PINDIAN_SCENE:
         return pindian_engine().records
+    if source_id == ROUND_START_SCENE:
+        return round_start_engine().records
     raise KeyError(f"未知的覆盖来源：{source_id!r}")
 
 

@@ -60,6 +60,12 @@ class Timing(str, Enum):
     GAME_INITIAL_HAND_DEALING = ("GAME_INITIAL_HAND_DEALING", 0, 2)
     GAME_START = ("GAME_START", 0, 3)
 
+    # ---- L0.5 轮级（轮的边界；feng-yujin 票 02） ------------------------------
+    # 「每轮开始时」不在官方 83/84 节点表里，但自制牌面会写（锋·于禁【定乱】）。
+    # 落成 L1.0：**回合级的最前一项**（本轮第一个自然回合的「回合开始前」之前）——
+    # 轮次 +1 的那一刻（``Engine._finish_round_and_advance``），额外回合不推进轮次。
+    ROUND_START = ("ROUND_START", 1, 0)
+
     # ---- L1 回合级 -----------------------------------------------------------
     TURN_BEFORE_START = ("TURN_BEFORE_START", 1, 1)
     TURN_START = ("TURN_START", 1, 2)
@@ -183,7 +189,8 @@ IMPLEMENTED: tuple[Timing, ...] = (
     # L0：发牌与开局（票 13 §2）
     Timing.GAME_INITIAL_HAND_DEALING,
     Timing.GAME_START,
-    # L1：回合轮换的起点与"回合内/外"分界
+    # L1：回合轮换的起点与"回合内/外"分界（轮边界在回合级之前，feng-yujin 票 02）
+    Timing.ROUND_START,
     Timing.TURN_BEFORE_START,
     Timing.TURN_START,
     # L2：全部 25 个阶段节点（空阶段只发阶段体，阶段间不 dispatch）
@@ -333,7 +340,8 @@ DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
     timing for timing in IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
 )
 """**dispatch 白名单**（M2 定格 53 + M3 解封 1 + wuming 票 04 解封 2
-+ huo-taishici-xunyu 票 03 解封 2 + tao-caocao 票 03 解封 1 = 59）：真的会 dispatch、可在记录流里观测的节点。
++ huo-taishici-xunyu 票 03 解封 2 + tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1 = 60）：
+真的会 dispatch、可在记录流里观测的节点。
 
 = 70 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在

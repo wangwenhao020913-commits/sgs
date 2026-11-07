@@ -277,6 +277,10 @@ const OPTION_LABELS = Object.freeze({
   // 界限突破-风包·移动版界魏延【狂骨】（jie-feng-batch 票 02）：每点二选一（必答）。
   kuanggu_heal: "回复1点体力",
   kuanggu_draw: "摸一张牌",
+  // 自制包·锋·于禁【节钺】（feng-yujin 票 01）：两支二选一（正常必答；自身无牌时
+  // 只剩兜底的「放弃」）。
+  jieyue_mark: "标记并交给该角色",
+  jieyue_damage: "弃置并造成伤害",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

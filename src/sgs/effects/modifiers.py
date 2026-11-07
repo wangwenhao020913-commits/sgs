@@ -78,11 +78,17 @@ class CarrierKind(str, Enum):
     :func:`~sgs.skills.resolve_instances` 按 ``Player.markers`` 产出（``SkillSourceKind.MARKER``），
     ``owner`` = 标记**持有者**。故它既不在武将面上、也不在装备区里，``carrier`` 单列一档
     （否则"武将技能 = 数据表技能清单"这条不变量会被一条不是技能的条目撑破）。
+
+    ``CARD_TAG``（feng-yujin 票 03）= **牌标签自身效果**（``CardTagSpec.effect`` 指向的那条
+    效果声明）：同样不是任何角色"拥有"的技能，实例由 ``resolve_instances`` 按
+    ``GameState.card_tags`` 产出（``SkillSourceKind.CARD_TAG``）。与 ``MARKER`` 同一姿态单列
+    一档——它的"宿主"是**牌**，可能在任何区（含共享区），故连座位都不固定。
     """
 
     EQUIPMENT = "EQUIPMENT"
     HERO = "HERO"
     MARKER = "MARKER"
+    CARD_TAG = "CARD_TAG"
 
 
 class PriorityClass(IntEnum):
@@ -97,6 +103,7 @@ class PriorityClass(IntEnum):
     EQUIPMENT = 1
     CARD_USE = 2
     MARKER = 3
+    CARD_TAG = 4
     """**标记自身效果**（`CarrierKind.MARKER`，lei-shenganning 票 01）。排最后一档——理由两条：
     标记的加成本来就最后叠加；而 :func:`~sgs.skills.catalog._dispatch` 的排序面按
     （档, 是否锁定）分子队列，标记效果与武将档 / 装备档的段**不在同一子队列** ⇒ 不会为
@@ -104,6 +111,9 @@ class PriorityClass(IntEnum):
 
     **不为它复用 `CARD_USE`**：那一档的语义是"真牌 / 转化牌候选"（`effects/actions.py` 的
     `need_card_tier`），标记效果不是任何牌候选——借来用会让两处读者各自猜它的意思。
+
+    ``CARD_TAG``（``CarrierKind.CARD_TAG``，feng-yujin 票 03）排在最后：与 ``MARKER`` 同一
+    理由（不是牌候选、不参与"先结英姿还是先结营"的面），只是宿主从"座位"换成"牌"。
     """
 
 
@@ -115,6 +125,7 @@ _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
     CarrierKind.EQUIPMENT: PriorityClass.EQUIPMENT,
     CarrierKind.HERO: PriorityClass.HERO,
     CarrierKind.MARKER: PriorityClass.MARKER,
+    CarrierKind.CARD_TAG: PriorityClass.CARD_TAG,
 }
 
 

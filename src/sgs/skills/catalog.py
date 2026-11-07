@@ -109,6 +109,7 @@ __all__ = [
     "HookCondition",
     "HeroSkillDecl",
     "MATCH_ACTOR_KEY",
+    "ASK_SEAT_KEY",
     "MATCH_OWNER_KEY",
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
@@ -187,6 +188,11 @@ class SkillSourceKind(str, Enum):
     ``effect`` 非空的那条标记产出，``skill_id`` 记**放置该标记的那条技能**（= 标记的
     ``source_skill_id``，便于在 ``instance_key`` 里分清"哪条技能放的这枚标记"）。
     它是**唯一不受技能失效影响**的来源（用户 2026-11-07 裁定：标记本身有效果，技能失效也照常）。
+
+    ``CARD_TAG``（feng-yujin 票 03）是**牌标签自身效果**：实例由 ``GameState.card_tags`` 里
+    ``CardTagSpec.effect`` 非空的那条标签产出，``owner`` = 标签的来源实例持有者、
+    ``card_id`` = 挂着这枚标签的实体牌（``instance_key`` 因此逐牌可分）。与 ``MARKER``
+    同一姿态**不受技能失效 / 失去影响**——牌面写"直到进入弃牌堆"，效果只随标签消失而消失。
     """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
@@ -194,6 +200,7 @@ class SkillSourceKind(str, Enum):
     HERO_CARD = "HERO_CARD"
     GRANTED = "GRANTED"
     MARKER = "MARKER"
+    CARD_TAG = "CARD_TAG"
 
 
 HookCondition: TypeAlias = Callable[[Any, Frame], bool]
@@ -385,6 +392,16 @@ class SkillDef:
     H 族单源转化恒 1；【丈八蛇矛】是 2。候选本身不带技能归属，故"这两张来源的虚拟牌是
     谁转出来的"只能由声明回答——张数本来就是候选构造的参数（``grouped_candidates`` 的
     ``group_size``），这里只是把它暴露出来，不是第二份判据。
+    """
+
+    shared: bool = False
+    """这条技能是不是**共享技**（feng-yujin 票 02；【定乱】是首个载体，默认 ``False``）。
+
+    ``True`` = "这张武将牌上的技能**每个存活角色都能发动**"（牌面写「每名角色限1次」）：
+    派发环的座位环走到**每个座位**时都为它产出一条候选（不限于持有者），应答者 = 该座位
+    （``plan.actor`` 由派发环按座位覆写），效果里的"你" = 该座位。条件 / 回调从帧私有
+    :data:`ASK_SEAT_KEY` 读"这一问是问谁的"（与 :data:`MATCH_OWNER_KEY` 正交：后者仍是
+    持有者）。非共享技 ⇒ 一切不变（既有 171 条定义一字不改）。
     """
 
     per_round_limit: bool = False
@@ -624,10 +641,14 @@ def _skill_is_suppressed(player: Player, instance: SkillInstance) -> bool:
     按**定义**是否为装备技能区分，不能把整个来源一刀切。``MARKER``（票 94）**永不受失效
     影响**——用户 2026-11-07 裁定"这个标记本身具有效果，所以就算劫营这个技能失效了，依然
     享受以上所说的3种加成"；这里写成显式分支，不靠"未知来源 fail-closed"的副作用。
+    ``CARD_TAG``（feng-yujin 票 03）同理**永不受失效**：牌面写"直到进入弃牌堆"，效果只随
+    标签消失（用户 2026-11-07 签的 E2 口径）。
     来源种类无法判断时 **fail-closed = 不失效**（不让未知实例被误锁）。
     """
     source = instance.source.kind
     if source is SkillSourceKind.MARKER:
+        return False
+    if source is SkillSourceKind.CARD_TAG:
         return False
     if source is SkillSourceKind.EQUIPMENT_CARD:
         return False
@@ -736,6 +757,12 @@ def _resolve_key(state: GameState, include_suppressed: bool) -> tuple:
         state.pack_id,
         include_suppressed,
         tuple(_player_key_values(state, player) for player in state.players),
+        # **牌标签**（feng-yujin 票 03）：``CardTagSpec.effect`` 让解析按标签产出效果实例，
+        # 故标签集合是解析读到的状态位；不进键会让"刚挂上 / 刚清掉标签"的两个局面共用缓存。
+        tuple(
+            (card_id, tuple(tags))
+            for card_id, tags in sorted(state.card_tags.items())
+        ),
     )
 
 
@@ -889,6 +916,23 @@ def _resolve_instances_uncached(
                     SkillSource(
                         SkillSourceKind.MARKER, skill_id=marker.source_skill_id
                     ),
+                )
+    # **牌标签自身效果**（feng-yujin 票 03）：标签登记表声明了 ``effect`` ⇒ 它就是一条效果
+    # 实例。**不在座位环里**：标签挂在牌上、牌可能在任何区（含共享区），且牌面写"直到进入
+    # 弃牌堆" ⇒ 不随来源技能存亡 / 失效消失（"牌还在、标签就还在"）。``owner`` 取标签的
+    # 来源实例持有者（``instance_key`` 里用 ``card_id`` 再分牌）。
+    for card_id, tags in state.card_tags.items():
+        for tag in tags:
+            effect = card_tag_spec(tag.tag_type).effect
+            if not effect:
+                continue
+            definition = CATALOG.get(effect)
+            if definition is not None:
+                _add_instance(
+                    found,
+                    tag.owner,
+                    definition,
+                    SkillSource(SkillSourceKind.CARD_TAG, card_id=card_id),
                 )
     deduped: list[SkillInstance] = []
     seen: list[tuple[int, str]] = []
@@ -1330,6 +1374,15 @@ MATCH_OWNER_KEY = "hook_owner"
 """
 
 
+ASK_SEAT_KEY = "asking_seat"
+"""帧私有槽名：**这一问是问谁的**（feng-yujin 票 02；共享技的"每名角色"）。
+
+与 :data:`MATCH_OWNER_KEY` 正交：后者是"这条技能实例归谁"（共享技恒是持有者，如于禁），
+本键是"这一轮派发正在问哪个座位"（共享技 = 每个存活座位各问一次）。派发环在求值条件前
+按座位环写它，共享技的条件 / 回调据此判"这个座位还能不能发动"（是否已用过、X 够不够）。
+非共享技不读它 ⇒ 既有技能零变化；帧私有数据不进记录流。
+"""
+
 MATCH_ACTOR_KEY = "hook_actor"
 """帧私有槽名：**条件求值期这一次派发的对象**（`06`（§5「程序化约定与偏离一手」）韬·刘备行）。
 
@@ -1625,8 +1678,13 @@ def _activation_candidates(
     """
     found: list[ActivationCandidate] = []
     for instance in _chain_order(host.state, _instances_for(host.state, extra_instances)):
-        if instance.owner != seat:
+        shared = instance.definition.shared
+        if instance.owner != seat and not shared:
             continue
+        if shared:
+            # 共享技（feng-yujin 票 02）：每个座位都可能被问一次 ⇒ 把"这一问是问谁的"写进
+            # 帧私有槽，条件 / 回调据此按座位判；非共享技不写（既有技能零变化）。
+            frame.data[ASK_SEAT_KEY] = seat
         items = match(instance)
         if not items:
             continue
@@ -1653,6 +1711,9 @@ def _activation_candidates(
         plan = activation_plan(host.state, frame, instance)
         if not plan.available:
             continue
+        if shared and plan.actor is None:
+            # 共享技的应答者 = 座位环上的这个座位（不是实例持有者）。
+            plan = replace(plan, actor=seat)
         # 「要不要问」有两层（票 04）：整条技能的 `locked` / 觉醒技，与**逐条钩子**的
         # `Hook.forced`。后者服务"一条非锁定技里既有可选段、又有强制段"——强制段不问，
         # 但它仍然随实例失效而停摆（`forced` 不进 :func:`_skill_is_suppressed`）。
@@ -1845,6 +1906,7 @@ def _dispatch(
     timing: Timing,
     key: str,
     extra_instances: tuple[SkillInstance, ...] = (),
+    ring: tuple[int, ...] | None = None,
 ) -> Control:
     """钩子与接缝共用的派发环（唯一一份）：**逐角色、一次选一条、选完重估**。
 
@@ -1878,13 +1940,13 @@ def _dispatch(
     scope = _pass_scope(frame, timing, key)
     try:
         state = _pass_state(frame, scope)
-        ring = _seat_ring(host, extra_instances)
+        seat_ring = ring if ring is not None else _seat_ring(host, extra_instances)
         while True:
-            if state["pass_terminated"] or state["pass_seat"] >= len(ring):
+            if state["pass_terminated"] or state["pass_seat"] >= len(seat_ring):
                 # R5 收口 / 全座位处理完：本趟 pass 结束，游标清掉。
                 _close_pass(frame, scope)
                 return None
-            seat = ring[state["pass_seat"]]
+            seat = seat_ring[state["pass_seat"]]
             if state["pass_phase"] == "start":
                 candidates = _activation_candidates(
                     host,
@@ -2093,7 +2155,14 @@ def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timin
     if item.flow is not None:
         # 被动侧的持有者**显式**传：帧里的 ``source`` 是伤害来源（【反馈】）/ 使用者
         # （【流离】），不是技能持有者。``owner=None``（未指定）时执行器才读 ``source``。
-        return run_flow(host, frame, item.flow, owner=instance.owner, timing=timing)
+        # 共享技（feng-yujin 票 02）：效果里的"你" = **被问的那个座位**（``ASK_SEAT_KEY``），
+        # 不是实例持有者——否则"每名角色各发动一次"会全算到持有者头上。
+        owner = instance.owner
+        if instance.definition.shared:
+            asker = frame.data.get(ASK_SEAT_KEY)
+            if asker is not None:
+                owner = int(asker)
+        return run_flow(host, frame, item.flow, owner=owner, timing=timing)
     assert item.handler is not None  # __post_init__ 已保证恰有其一
     return item.handler(host, frame)
 
@@ -2154,6 +2223,7 @@ def dispatch_timing(
     timing: Timing,
     *,
     extra_instances: tuple[SkillInstance, ...] = (),
+    ring: tuple[int, ...] | None = None,
 ) -> Control:
     """在 ``timing`` 上派发钩子：逐角色、一次选一条、选完重估；**第一个返回非 ``None``
     的钩子即短路**（与改造前同）。
@@ -2174,6 +2244,7 @@ def dispatch_timing(
         timing=timing,
         key=timing.value if point == 0 else f"{timing.value}:{point}",
         extra_instances=extra_instances,
+        ring=ring,
     )
 
 
@@ -3147,6 +3218,8 @@ def _move_by_source(
     to_zone: ZoneRef,
     owner: int,
     key: str,
+    reason: MoveReason = MoveReason.DISCARD,
+    actor: int | None = None,
 ) -> Control:
     """把一批选中的牌按**来源区**分组移动：一次 ``move_card`` 只能有一个来源区。
 
@@ -3156,6 +3229,10 @@ def _move_by_source(
     **让出控制权（票 14 §1）**：成本移动可能内联派发 `MOVE_AFTER` 并挂起（例如
     【枭姬】的持有者弃掉自己的装备），`"stay"` 必须透传；帧私有游标 ``key`` 让重入
     只搬还没搬的组。
+
+    ``reason`` / ``actor``（feng-yujin 票 01 的加法，缺省 = 既有的"弃置 / 操使者 = 归属者"
+    一字不改）：【节钺】选项 1 把跨来源区的**若干张自己的牌交给目标**（``PUT``、
+    ``owner`` = 目标、``actor`` = 发动者）——同一个"按来源区分组"的实现，不必抄第二份。
     """
     if not card_ids:
         return None
@@ -3175,9 +3252,9 @@ def _move_by_source(
             frame,
             host.state.refs(plan[index]),
             to_zone=to_zone,
-            reason=MoveReason.DISCARD,
+            reason=reason,
             owner=owner,
-            actor=owner,
+            actor=owner if actor is None else actor,
         )
         if control == "stay":
             return "stay"
@@ -3501,6 +3578,9 @@ from .hero_lei import (  # noqa: E402  （末尾 import 是刻意的）
 from .hero_caocao import (  # noqa: E402  （末尾 import 是刻意的）
     caocao_skill_definitions,
 )
+from .hero_yujin import (  # noqa: E402  （末尾 import 是刻意的）
+    yujin_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -3556,6 +3636,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *shen_zhugeliang_skill_definitions(),
             *lei_skill_definitions(),
             *caocao_skill_definitions(),
+            *yujin_skill_definitions(),
         )
     }
 )

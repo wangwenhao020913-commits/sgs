@@ -231,7 +231,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 81
+    assert len(expected) == 82
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -242,6 +242,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     assert "tao_liubei" in expected, "自制包：韬·刘备自制版（真名刘备，与标准版同真名）"
     assert "wuming" in expected, "自制包：无名自制版（wuming 票 01；新真名「无名」）"
     assert "tao_caocao" in expected, "自制包：韬·曹操自制版（tao-caocao 票 01；真名曹操）"
+    assert "feng_yujin" in expected, "自制包：锋·于禁（feng-yujin 票 01；新真名于禁）"
     assert "dianwei_mobile" in expected, "火包移动版（huo-dianwei-mobile 票 01）也进默认池"
     assert "haozhao" in expected, "雷包（lei-batch 票 01）也进默认池"
     assert (
@@ -286,7 +287,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 81
+    assert len(ids) == 82
 
     for hero_id in ids:
         heroes = _heroes_of(

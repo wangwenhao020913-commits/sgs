@@ -40,6 +40,7 @@ __all__ = [
     "move_after_engine",
     "pindian_engine",
     "maxlife_engine",
+    "round_start_engine",
     "play_phase_peach_engine",
     "play_standard",
     "run_turns",
@@ -432,6 +433,55 @@ class PindianPlayer:
             if isinstance(action, Pass):
                 return action
         return query.legal_actions[0]
+
+
+class _RoundStartPlayer:
+    """场景 11 的脚本玩家：能结束阶段就结束阶段，其余放弃 / 取第一个候选。"""
+
+    def respond(self, query: Query):
+        if query.kind == "PLAY_PHASE":
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def round_start_engine(seed: int = 7):
+    """场景 11（feng-yujin 票 02）：「每轮开始时」的帧外派发（``Timing.ROUND_START``）。
+
+    座位 0 = 锋·于禁（【定乱】是 ``ROUND_START`` 的**首个载体**）。轮边界派发是**惰性**的
+    ——没有载体的对局一条记录都不落（标准 47 条金录像逐字节不变），故这个构造局面就是
+    :data:`~sgs.timing.DISPATCH_WHITELIST` 里 ``ROUND_START`` 的**实测来源**。驱动到第一轮
+    开始的那条记录出现即返回（共享技的"是否发动"由脚本玩家放弃，不影响节点本身）。
+    """
+    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="feng_yujin", hand=(slash,)), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id != slash
+        ),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=seed)
+    players = (_RoundStartPlayer(), _RoundStartPlayer())
+    for _ in range(2_000):
+        if any(
+            record.kind == "timing" and record.timing is Timing.ROUND_START
+            for record in engine.records
+        ):
+            return engine
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                return engine
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    return engine
 
 
 def pindian_engine(seed: int = 7):

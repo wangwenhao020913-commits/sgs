@@ -1792,12 +1792,25 @@ def test_every_equipment_card_has_a_skill_and_vice_versa():
         if definition.carrier is CarrierKind.MARKER
     }
 
+    # feng-yujin 票 03 起多出**第四类**：牌标签自身效果的定义
+    # （`carrier = CarrierKind.CARD_TAG`，`CardTagSpec.effect` 指向它）。与标记效果同一姿态
+    # ——不是任何角色"拥有"的技能，故不进技能两半；四分区仍然覆盖整张 `CATALOG`。
+    card_tags = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier is CarrierKind.CARD_TAG
+    }
+
     assert equipment == {f"equip.{card_type}" for card_type in EQUIPMENT_CARD_TYPE_IDS}
     assert not equipment & heroes, "两类载体的技能 id 前缀各一套，不相交"
     assert not markers & (equipment | heroes), "标记效果定义与技能两半不相交"
-    assert set(CATALOG) == equipment | heroes | markers
+    assert not card_tags & (equipment | heroes | markers), "牌标签效果定义与前三半不相交"
+    assert set(CATALOG) == equipment | heroes | markers | card_tags
     assert markers == {"hero.shen_ganning.jieying_mark"}, (
         "唯一一条标记自身效果的定义（「营」）；新增一条要同时想清楚它在界面上的归属"
+    )
+    assert card_tags == {"hero.feng_yujin.dingluan_mark"}, (
+        "唯一一条牌标签自身效果的定义（「【定乱】牌」）"
     )
     assert {
         "hero.guanyu.wusheng",

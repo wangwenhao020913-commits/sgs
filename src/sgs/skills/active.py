@@ -5072,6 +5072,288 @@ _POXI = ActiveSkill(
 )
 
 
+# ---------------------------------------------------------------------------
+# 自制包·锋·于禁【节钺】（feng-yujin 票 01）：出牌阶段内限一次，令一名攻击范围内的其它角色
+# 交给你一张牌 → 二选一：
+#   1. 选择至多 2 张牌标记为【定乱】牌后展示之，然后将这些牌交给该角色
+#   2. 弃置至多 2 张牌，对其造成 1 点伤害
+#
+# 读法（用户 2026-11-07 签「全部按建议」，逐条见 `.scratch/feng-yujin/issues/05-...`）：
+# - **R8=A**：「交给你一张牌」由**交出者**挑 ⇒ `PickCards(actor=目标, face=目标)`；
+# - **R9**：两支都 **1..2**（"至多"的下限从 1 起，`06`（§5「程序化约定与偏离一手」）的「『任意数量』在候选里不包含 0」行）；
+# - **R10**：正常两项必选、**无 `Pass`**；两项都不可执行（自身没有手牌也没有装备——
+#   极小概率，如刚收到的牌被立刻拿走）时给一条**兜底 `Pass`**，避免卡死。故选项是**手写**
+#   的（`PickOption.optional` 是静态 bool，表达不了"只有这一档才给 Pass"）。
+# - 选项 1 的「标记为【定乱】牌」与【定乱】共用同一个标签写入点
+#   （`hero_yujin.mark_dingluan_cards`）；标签的禁令 / 寿命 / 自身效果见
+#   `hero.feng_yujin.dingluan_mark`（`CarrierKind.CARD_TAG`）。
+# ---------------------------------------------------------------------------
+
+JIEYUE = hero_skill_id("feng_yujin", "jieyue")
+"""锋·于禁【节钺】的全限定技能 id（牌面见本段注释）。"""
+
+_JIEYUE_MARK = "jieyue_mark"
+"""选项 1 的 id（`options.js:OPTION_LABELS` 有同名中文键）。"""
+
+_JIEYUE_DAMAGE = "jieyue_damage"
+"""选项 2 的 id（同上）。"""
+
+_JIEYUE_OPTIONS: tuple[str, ...] = (_JIEYUE_MARK, _JIEYUE_DAMAGE)
+"""选项闭集（顺序即询问里的顺序：1 → 2）。"""
+
+_JIEYUE_CHOICE_STEP = "jieyue:choice"
+_ASK_JIEYUE_MARK = "jieyue:mark"
+_ASK_JIEYUE_DISCARD = "jieyue:discard"
+"""三处手写询问的标识：选项步（`choice`）/ 选项 1 选牌 / 选项 2 选牌。
+
+选项步的标识决定 `step_requirements` 的键（冒号后那段 = ``choice``）；两个选牌步的键恒读
+``card``（投影对 ``SELECT_CARDS`` 的既有约定）。"""
+
+_JIEYUE_GIVEN = "jieyue_given"
+"""帧私有：目标交出的那张牌已搬到发动者手里（续跑不重搬）。"""
+
+_JIEYUE_CHOICE = "jieyue_choice"
+"""帧私有：二选一选中的那一项（空串 = 兜底 `Pass` 收尾；重入不重问）。"""
+
+_JIEYUE_MARKED = "jieyue_marked"
+"""帧私有：选项 1 选中的牌（实体 id 元组）。"""
+
+_JIEYUE_TAGGED = "jieyue_tagged"
+"""帧私有：这批牌已经标记 + 展示过。"""
+
+_JIEYUE_GIFTED = "jieyue_gifted"
+"""帧私有：这批牌已经交给目标。"""
+
+_JIEYUE_DISCARD_PICKED = "jieyue_discard_picked"
+"""帧私有：选项 2 选中的牌（实体 id 元组）。"""
+
+_JIEYUE_DISCARDED = "jieyue_discarded"
+"""帧私有：这批牌已经弃置。"""
+
+_JIEYUE_DAMAGED = "jieyue_damaged"
+"""帧私有：1 点伤害的 DAMAGE 子帧已经压过。"""
+
+
+def _jieyue_own_cards(state: GameState, seat: int) -> int:
+    """``seat`` 的**手牌 + 装备区**张数（两支的代价池；R9 的 1..2 都从这里取上限）。"""
+    player = state.player(seat)
+    return len(player.hand) + len(player.equip)
+
+
+def _jieyue_targets(
+    state: GameState, frame: Any, owner: int, answers: Any
+) -> tuple[int, ...]:
+    """「攻击范围内的其它角色」且**至少有 1 张牌**（交不出来的不算目标）。"""
+    del frame, answers
+    return tuple(
+        seat
+        for seat in targets_within_attack_range(state, owner)
+        if _jieyue_own_cards(state, seat) > 0
+    )
+
+
+def _jieyue_giver(state: GameState, frame: Any, owner: int, answers: Any) -> int:
+    """第 2 步的应答者 / 选择面 = 第 1 步选中的那名角色（R8=A：由他挑一张交出）。"""
+    del state, frame, owner
+    return int(answers["seat"][0])
+
+
+def _jieyue_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选恒一条骨架（出牌阶段限一次；攻击范围内没有"有牌的其他角色"⇒ 不产出）。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _jieyue_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _jieyue_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：目标交出一张 → 手写二选一 → 分支主体。
+
+    两段（交牌 / 选项）各有帧私有游标：搬牌可能内联派发「失去牌后」而挂起，重入时既不
+    重搬、也不重问；选项的答案同样先落游标再执行分支。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    target = _jieyue_giver(state, frame, owner, answers)
+    timing = Timing.PHASE_PLAY_IDLE
+
+    # ---- 段 1：目标把那张牌交给你（PUT 进你的手牌、归属 = 你）-------------
+    if not frame.data.get(_JIEYUE_GIVEN):
+        given = tuple(int(card) for card in answers.get("give", ()))
+        if not given:
+            return None
+        frame.data[_JIEYUE_GIVEN] = True
+        control = host.move_in_frame(
+            frame,
+            state.refs(given),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=target,
+        )
+        if control == "stay":
+            return "stay"
+
+    # ---- 段 2：二选一（R10：正常无 Pass；两项都不可执行才给兜底 Pass）-----
+    if _JIEYUE_CHOICE not in frame.data:
+        options = _JIEYUE_OPTIONS if _jieyue_own_cards(state, owner) > 0 else ()
+        choice = host.ask_option(
+            frame,
+            owner,
+            timing,
+            skill_id=_JIEYUE_CHOICE_STEP,
+            options=options,
+            optional=not options,
+        )
+        if host.suspended(choice):
+            return "stay"
+        frame.data[_JIEYUE_CHOICE] = "" if isinstance(choice, Pass) else str(choice.choice)
+    chosen = str(frame.data[_JIEYUE_CHOICE])
+    if not chosen:
+        # 兜底 ``Pass``：自身没有牌 ⇒ 两支都不可执行，零副作用收尾（不卡死）。
+        return None
+    if chosen == _JIEYUE_MARK:
+        return _jieyue_mark_branch(host, frame, owner, target)
+    return _jieyue_damage_branch(host, frame, owner, target)
+
+
+def _jieyue_mark_branch(host: Any, frame: Any, owner: int, target: int) -> Any:
+    """选项 1：选至多 2 张**自己的**牌（1..2）→ 标记【定乱】→ 展示 → 交给目标（R9 / R8）。"""
+    state = host.state
+    timing = Timing.PHASE_PLAY_IDLE
+    if _JIEYUE_MARKED not in frame.data:
+        pool = _jieyue_own_cards(state, owner)
+        if pool <= 0:
+            return None
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_JIEYUE_MARK,
+            key="card",
+            actor=owner,
+            timing=timing,
+            spec=SelectionSpec(
+                zones=(Zone.HAND, Zone.EQUIP),
+                total=(1, min(2, pool)),
+                optional=False,
+            ),
+            build_face=lambda: host.selection_face(
+                owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+            ),
+        )
+        if host.suspended(picked):
+            return "stay"
+        frame.data[_JIEYUE_MARKED] = tuple(int(card) for card in picked)
+    marked = tuple(int(card) for card in frame.data[_JIEYUE_MARKED])
+    if not marked:
+        return None
+    if not frame.data.get(_JIEYUE_TAGGED):
+        # 牌面次序：先标记、再展示（展示 = `card_reveal`，不移动牌；手牌与装备牌都展示）。
+        from .hero_yujin import mark_dingluan_cards
+
+        mark_dingluan_cards(host, owner, marked)
+        for card_id in marked:
+            host.reveal_card(frame, owner, state.card(card_id))
+        frame.data[_JIEYUE_TAGGED] = True
+    if not frame.data.get(_JIEYUE_GIFTED):
+        frame.data[_JIEYUE_GIFTED] = True
+        control = _move_by_source(
+            host,
+            frame,
+            marked,
+            to_zone=ZoneRef(Zone.HAND, target),
+            owner=target,
+            key="jieyue:gift",
+            reason=MoveReason.PUT,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    return None
+
+
+def _jieyue_damage_branch(host: Any, frame: Any, owner: int, target: int) -> Any:
+    """选项 2：弃置至多 2 张**自己的**牌（1..2）→ 对该角色造成 1 点伤害（R9）。"""
+    state = host.state
+    timing = Timing.PHASE_PLAY_IDLE
+    if _JIEYUE_DISCARD_PICKED not in frame.data:
+        pool = _jieyue_own_cards(state, owner)
+        if pool <= 0:
+            return None
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_JIEYUE_DISCARD,
+            key="card",
+            actor=owner,
+            timing=timing,
+            spec=SelectionSpec(
+                zones=(Zone.HAND, Zone.EQUIP),
+                total=(1, min(2, pool)),
+                optional=False,
+            ),
+            build_face=lambda: host.selection_face(
+                owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+            ),
+        )
+        if host.suspended(picked):
+            return "stay"
+        frame.data[_JIEYUE_DISCARD_PICKED] = tuple(int(card) for card in picked)
+    picked = tuple(int(card) for card in frame.data[_JIEYUE_DISCARD_PICKED])
+    if not picked:
+        return None
+    if not frame.data.get(_JIEYUE_DISCARDED):
+        frame.data[_JIEYUE_DISCARDED] = True
+        control = _move_to_discard(
+            host, frame, picked, owner=owner, key="jieyue:discard"
+        )
+        if control == "stay":
+            return "stay"
+    if not frame.data.get(_JIEYUE_DAMAGED):
+        frame.data[_JIEYUE_DAMAGED] = True
+        _push_damage(host, frame, source=owner, target=target, amount=1)
+        return "stay"
+    return None
+
+
+JIEYUE_FLOW = SkillFlow(
+    name="jieyue",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_jieyue_targets, key="seat"),
+        # R8=A：应答者 / 选择面 = 目标本人（自己的手牌 + 装备区，可见可选）。
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            key="give",
+            actor=_jieyue_giver,
+            face=_jieyue_giver,
+            reveal_hand=True,
+        ),
+    ),
+    effect=_jieyue_effect,
+)
+"""【节钺】的两步流水线 + 手写主体：选角色 → 目标交出一张 → 手写二选一（分支住 effect）。"""
+
+_JIEYUE = ActiveSkill(
+    "feng_yujin",
+    "jieyue",
+    _jieyue_offers,
+    flow=JIEYUE_FLOW,
+    requirement=(
+        "出牌阶段内限一次，你可以令一名攻击范围内的其它角色交给你一张牌，然后你选择："
+        "1.选择至多2张牌标记为【定乱】牌后展示之，然后将这些牌交给该角色 "
+        "2.弃置至多2张牌，对其造成1点伤害"
+    ),
+    step_requirements={
+        "seat": "选择你攻击范围内的一名其他角色",
+        # SELECT_CARDS 的逐步文案键恒读 "card"：三个选牌步共用这一句（投影的既有约定）。
+        "card": "选择你自己的至多两张牌（手牌 / 装备区）",
+        "choice": "选择一项：标记并交给该角色 / 弃置并造成伤害",
+    },
+)
+"""锋·于禁【节钺】的声明（A 族；不翻预发动——首步是选座位，直提态 + 逐步问就够）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
@@ -5343,6 +5625,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 神甘宁【魄袭】（lei-shenganning 票 01）：A 族主动技 + 手写主体（观看 + 四色选牌 →
     # 两次搬牌 → 按"你的张数"分档）。不翻预发动（首步读别人的手牌，清单渲不出）。
     _POXI,
+    # 锋·于禁【节钺】（feng-yujin 票 01）：两步流水线（选角色 → 目标交出）+
+    # 手写二选一（标记并交给 / 弃置并伤害）。
+    _JIEYUE,
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/

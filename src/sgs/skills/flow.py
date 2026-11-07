@@ -40,6 +40,9 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     apply_modifiers,
+    behavior_for,
+    forbidden_as_slash,
+    is_slash,
     locate,
     satisfies_required,
 )
@@ -943,6 +946,9 @@ def provide_face(
         for card_id in state.zone(ZoneRef(zone, seat)):
             card = state.card(card_id)
             if not satisfies_required(card, type_id):
+                continue
+            if is_slash(behavior_for(card)) and forbidden_as_slash(state, card):
+                # 【定乱】牌不能作为【杀】提供 / 使用（"提供一张 B"窗口同样要拦）。
                 continue
             slots.append(Slot(ref=ZoneRef(zone, seat), card=card))
             card_ids.append(card_id)

@@ -67,12 +67,18 @@ PINDIAN_UNSEALED: frozenset[str] = frozenset(
 TAOCAOCAO_UNSEALED: frozenset[str] = frozenset({Timing.RANK_COMPARE_PLACED.value})
 """tao-caocao 票 03 的增量：L15 新增并解封的「拼点牌扣置入处理区后、亮出前」时机。"""
 
+FENGYUJIN_UNSEALED: frozenset[str] = frozenset({Timing.ROUND_START.value})
+"""feng-yujin 票 02 的增量：L1.0 **新增**的「每轮开始时」（轮边界；首个载体 = 锋·于禁【定乱】）。"""
+
 M2_DISPATCH_WHITELIST = frozenset(
     timing.value
     for timing in DISPATCH_WHITELIST
-    if timing.value not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED | TAOCAOCAO_UNSEALED
+    if timing.value
+    not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED | TAOCAOCAO_UNSEALED
+    | FENGYUJIN_UNSEALED
 )
-"""M2 的 53 个：今天的白名单减去四批解封（M3 一个 + wuming 两个 + 拼点两个 + 拼点扣置一个）。"""
+"""M2 的 53 个：今天的白名单减去五批解封（M3 一个 + wuming 两个 + 拼点两个 +
+拼点扣置一个 + 轮边界一个）。"""
 
 
 def test_the_unsealed_set_is_exactly_the_move_after_node():
@@ -89,6 +95,7 @@ def test_the_unsealed_set_is_exactly_the_move_after_node():
         - WUMING_UNSEALED
         - PINDIAN_UNSEALED
         - TAOCAOCAO_UNSEALED
+        - FENGYUJIN_UNSEALED
     )
 
     assert m3_unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
@@ -111,6 +118,7 @@ def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
         - M3_UNSEALED
         - PINDIAN_UNSEALED
         - TAOCAOCAO_UNSEALED
+        - FENGYUJIN_UNSEALED
     )
 
     assert wuming_unsealed == WUMING_UNSEALED
@@ -136,6 +144,7 @@ def test_the_taocaocao_unseal_is_exactly_the_pindian_placed_node():
         - M3_UNSEALED
         - WUMING_UNSEALED
         - PINDIAN_UNSEALED
+        - FENGYUJIN_UNSEALED
     )
 
     assert taocaocao_unsealed == TAOCAOCAO_UNSEALED
@@ -185,9 +194,10 @@ def test_m3_unseals_no_phase_start_node():
 
 
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
-    assert len(WHITELIST) == 59, (
+    assert len(WHITELIST) == 60, (
         "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
         " + huo-taishici-xunyu 票 03 的拼点二时机 + tao-caocao 票 03 的拼点扣置时机"
+        " + feng-yujin 票 02 新增的 `ROUND_START`（轮边界）"
     )
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
