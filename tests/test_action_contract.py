@@ -111,6 +111,8 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "use_card",
         "play_card",
         "watch_two_rows",
+        "unknown_zone_multipick",
+        "unknown_zone_single_pick",
     }, f"探针用例集合变了：{sorted(actions)}"
 
     borrowed = actions["borrowed_sword_preactivation"]
@@ -200,6 +202,53 @@ def test_the_two_row_watch_face_submits_an_ascending_select_cards() -> None:
     assert parsed.answers_seq == 98
 
 
+def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
+    """票 06：未知区域弹窗的**多选档**（【定乱】展示别人的至多 3 张牌）。
+
+    探针喂的是票面 §2.1 那份**真实载荷**（``total=(1,3)``、三槽 = 两张「?」手牌 +
+    装备区青釭剑、七条候选 = 三槽的全部非空组合），再用真的 ``options.js`` 入口**按点击
+    顺序 2 → 0** 点两张牌：
+
+    - 点牌只是切换选中态 ⇒ 两次点击**一次提交都不发**（多选档不保留"点一张即提交"）；
+    - 点完两张后 ``buildAction()`` 造出 ``picks = [0, 2]``（``state.picks`` 记的是点击
+      顺序，规范化住 ``answer.js:buildAction``），且**逐字段**等于候选里那条 ``[0, 2]``
+      ——顺序反过来点才真钉住升序规范化（点 0 → 2 时点击顺序恰好已升序，断言空转）；
+    - ``parse_action`` 接受它（跨语言形状不变，仍是三格 ``SelectCards``）。
+
+    对照组是 ``cap === 1`` 的旧载荷（反间式盲挑，一槽一条候选）：点一张**恰一次**提交，
+    即旧行为没有回归。
+    """
+    payload = _probe_payload()
+    cases = {case["name"]: case for case in payload["cases"]}
+
+    multi = cases["unknown_zone_multipick"]
+    assert multi["submits"] == 0, (
+        "点两张牌不得发出任何提交（多选档只有一个提交点：「提交」键）："
+        f"{multi['submits']} 次"
+    )
+    action = multi["action"]
+    assert action is not None, "点两张之后 buildAction() 返回了 null（多选档没接上候选骨架）"
+    assert action["kind"] == "SelectCards"
+    assert action["picks"] == [0, 2], (
+        "按点击顺序 2 → 0 点两张，要升序规范化成多张组合 [0, 2]：" f"{action['picks']}"
+    )
+    assert action in multi["legal_actions"], (
+        "造出的动作必须逐字段命中 legal_actions 的那一条（[0, 2]）："
+        f"{action} / {multi['legal_actions']}"
+    )
+    parsed = parse_action(action)
+    assert parsed.kind == "SelectCards"
+    assert parsed.picks == (0, 2)
+    assert parsed.answers_seq == 91
+
+    single = cases["unknown_zone_single_pick"]
+    assert single["submits"] == 1, (
+        "cap === 1 的旧载荷必须仍是「一击即提交」（不回归）：" f"{single['submits']} 次"
+    )
+    assert single["action"] is not None and single["action"]["picks"] == [2]
+    assert single["action"] in single["legal_actions"]
+
+
 def test_a_decorated_card_payload_is_rejected_by_the_server_model() -> None:
     """合成反例：**同一张卡**的展示形态不能被 ``parse_action`` 接受（= 报障的 400）。
 
@@ -226,4 +275,4 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 6
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 8

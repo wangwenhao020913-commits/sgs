@@ -21137,4 +21137,163 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.picks = [];
 }
 
+/* ============ 票 06：未知区域弹窗的**多选档**（【定乱】展示别人的至多 3 张牌） ============
+ *
+ * 报障原样：挑**别人**的牌时形状命中 `isUnknownZoneStep` ⇒ 落「未知区域」单选模板，
+ * 点一张即提交 ⇒"展示至多 X 张"只能展示 1 张，而且没有"选好 → 提交"这一步。
+ *
+ * 本段用**真会话**（票面 §2.2 的复现配方：2 人局 + 我的武将是锋·于禁）走一遍：
+ * 第 1 轮开始的【定乱】→ 点技能 + 「提交」（= 发动）→ 目标点座位 1 → 挑牌步
+ * （`SELECT_CARDS` + `total=[1,3]`，真载荷）点两张 → **弹窗不消失**、提交键可点 →
+ * 点「提交」→ 一条多张 `SelectCards{picks:[0,2]}` 上行 → 两张牌一起被展示
+ * （两条 `card_reveal` delta）且一局继续推进。
+ *
+ * 判据只读**真载荷**（`spec.total` / `slots` / `legal_actions` 都是引擎现算的），
+ * 种子 1 扫得这份局面；换池 / 换 AI 档位后形状变了，下面的循环跳过不匹配的种子。
+ * `cap === 1` 的旧档（反间式盲挑）"一击即提交"由上面的 U2-08j 继续钉，本段不重复。
+ */
+{
+  /** 挑牌步的槽位节点：每个 `<section class="unknown-zone">` 的正文行（第 2 个孩子）里的牌面。
+   *  区域顺序 = 载荷顺序（手牌在前、装备 / 判定按需），故扁平化后顺序 = 面内位置序。 */
+  const unknownSlotNodes = () => Array.from($("t-options").children)
+    .map((section) => Array.from(section.children)[1])
+    .filter(Boolean)
+    .flatMap((row) => Array.from(row.children));
+  const clickSkill = async (skillId) => {
+    const button = Array.from($("t-skills").children).find(
+      (node) => node.getAttribute && node.getAttribute("data-skill-id") === skillId,
+    );
+    if (!button) return false;
+    await clickAndWait(button);
+    return true;
+  };
+  const clickSeat = async (seat) => {
+    const box = seatBox(seat);
+    if (!box) return false;
+    await clickAndWait(box);
+    return true;
+  };
+  const answerCallsSince = (mark) => calls.slice(mark)
+    .filter((call) => call.path.includes("/answer"));
+
+  let scenario = null;
+  for (const seed of [1, 2, 3, 5]) {
+    await openSession(await post("/api/sessions", {
+      player_count: 2, ai: "random", human_seat: 0, timeout_seconds: null,
+      seed, my_hero: "feng_yujin",
+    }));
+    const first = ui.state.view && ui.state.view.pending;
+    if (!first || first.kind !== "SKILL_ACTIVATION") continue;
+    // ① 第 1 轮开始的【定乱】询问（直提态）：点技能（选中那条 ActivateSkill）→「提交」发动。
+    await clickSkill("hero.feng_yujin.dingluan");
+    if ($("btn-submit").disabled) continue;
+    await clickAndWait($("btn-submit"));
+    ui.flushPlayback();
+    const second = ui.state.view && ui.state.view.pending;
+    if (!second || second.kind !== "SELECT_OPTION") continue;
+    // ② 目标 = 对方（座位 1）。
+    if (!(await clickSeat(1)) || $("btn-submit").disabled) continue;
+    await clickAndWait($("btn-submit"));
+    ui.flushPlayback();
+    const pick = ui.state.view && ui.state.view.pending;
+    if (!pick || pick.kind !== "SELECT_CARDS") continue;
+    if (ui.stepDialogKind(pick) !== "unknown") continue;
+    if (!pick.spec || (pick.spec.total || [])[1] < 2) continue;   // 必须是**多选**档
+    if (unknownSlotNodes().length < 3) continue;
+    scenario = { seed, pick };
+    break;
+  }
+  check("票 06-0 找到真局面：2 人局第 1 轮【定乱】挑对方的牌，是多选档（total 上界 ≥ 2）",
+    scenario !== null,
+    scenario
+      ? `种子 ${scenario.seed} total=${JSON.stringify(scenario.pick.spec.total)} `
+        + `槽=${unknownSlotNodes().length} 候选=${scenario.pick.legal_actions.length}`
+      : "四个种子都没有这个形状");
+
+  if (scenario) {
+    const pick = scenario.pick;
+    const total = pick.spec.total || [1, 1];
+    const expectedTitle = total[1] <= 1
+      ? "选择一张牌"
+      : (total[0] === total[1] ? `选择 ${total[0]} 张牌` : `选择 ${total[0]}~${total[1]} 张牌`);
+    const answerMark = calls.length;
+    // ③ 点两张牌：只切换选中态（零 POST）、弹窗不消失、两张都画成已选。
+    //    每次点击后**重新取**槽位节点（点击会重铺正文）；取不到就不点（旧行为在第一次点击
+    //    就提交 ⇒ 弹窗已换 ⇒ 后面的断言按"挑牌步被推进了"红，而不是抛 TypeError）。
+    const clickSlot = async (index) => {
+      const node = unknownSlotNodes()[index];
+      if (!node) return false;
+      await clickAndWait(node);
+      return true;
+    };
+    await clickSlot(0);
+    await clickSlot(2);
+    const slotsAfter = unknownSlotNodes();
+    check("票 06-1 点两张「?」= 只收进 picks：零 POST、弹窗不消失、两张都 .sel",
+      answerCallsSince(answerMark).length === 0
+        && $("t-dialog").hidden === false
+        && Array.from($("t-dialog-body").children).includes($("t-options"))
+        && slotsAfter.length === pick.slots.length
+        && slotsAfter[0].classList.contains("sel")
+        && slotsAfter[2].classList.contains("sel")
+        && JSON.stringify(ui.state.picks) === "[0,2]",
+      `answers=${answerCallsSince(answerMark).length} dialogHidden=${$("t-dialog").hidden} `
+        + `inBody=${Array.from($("t-dialog-body").children).includes($("t-options"))} `
+        + `sel=${slotsAfter.map((node) => node.classList.contains("sel")).join(",")} `
+        + `picks=${JSON.stringify(ui.state.picks)}`);
+    check("票 06-2 标题 / 提示按 spec.total 说话，「提交」这时才可点",
+      $("t-dialog-title").textContent === expectedTitle
+        && $("t-target-hint").textContent.includes("再点「提交」")
+        && $("btn-submit").disabled === false
+        && $("t-choice").textContent.includes("可以提交"),
+      `title="${$("t-dialog-title").textContent}"(期望 ${expectedTitle}) `
+        + `hint="${$("t-target-hint").textContent}" submit=${$("btn-submit").disabled} `
+        + `choice="${$("t-choice").textContent}"`);
+
+    // ④ 点「提交」：一条多张 SelectCards（picks = 面内位置升序），逐字段命中候选。
+    const stillOnPick = Boolean(
+      ui.state.view && ui.state.view.pending && ui.state.view.pending.seq === pick.seq,
+    );
+    if (!stillOnPick) {
+      // 旧行为已经"点一张即提交"了：这个询问没了，提交与展示两条断言都不成立（不是跳过）。
+      check("票 06-3 点「提交」= 一条多张 SelectCards（picks=[0,2]），逐字段命中 legal_actions",
+        false, `挑牌步在点「提交」之前就被推进了（现在 seq=${ui.state.view && ui.state.view.pending ? ui.state.view.pending.seq : "null"}）`);
+      check("票 06-4 提交后两张牌**一起**被展示（两条 card_reveal），一局继续推进",
+        false, "同上：询问换了，提交 / 展示不在这一步");
+    } else {
+      const submitMark = calls.length;
+      const recordMark = ui.state.logRecords.length;
+      await clickAndWait($("btn-submit"));
+      ui.flushPlayback();
+      const posted = answerCallsSince(submitMark);
+      const action = posted.length ? posted[0].body.action : null;
+      check("票 06-3 点「提交」= 一条多张 SelectCards（picks=[0,2]），逐字段命中 legal_actions",
+        posted.length === 1
+          && action !== null
+          && action.kind === "SelectCards"
+          && JSON.stringify(action.picks) === "[0,2]"
+          && pick.legal_actions.some(
+            (candidate) => JSON.stringify(candidate) === JSON.stringify(action)),
+        `answers=${posted.length} action=${JSON.stringify(action)}`);
+
+      // ⑤ 两张牌一张成果地展示（`card_reveal`）× 2；询问推进到下一步。
+      const reveals = ui.state.logRecords.slice(recordMark)
+        .filter((record) => record && record.delta_type === "card_reveal"
+          && Number(record.seat) === 1);
+      const next = ui.state.view && ui.state.view.pending;
+      check("票 06-4 提交后两张牌**一起**被展示（两条 card_reveal），一局继续推进",
+        reveals.length === 2
+          && reveals.every((record) => record.card && record.card.card_id !== undefined)
+          && (!next || next.seq !== pick.seq),
+        `reveals=${reveals.length} `
+          + `cards=${JSON.stringify(reveals.map((record) => record.card && record.card.card_id))} `
+          + `seq=${pick.seq}→${next ? next.seq : "null"}`);
+    }
+  }
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

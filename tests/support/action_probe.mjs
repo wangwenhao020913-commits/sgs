@@ -342,6 +342,84 @@ ui.advancePreativation(); // 多选座位步的「下一步」
 const clickOrdered = ui.buildPreativationAction(lianhuanPending, ui.state.preactivation);
 if (!clickOrdered) throw new Error("buildPreativationAction 没拼出有序目标的 ActivateSkill（点击夹具失效）");
 
+/* 票 06：未知区域弹窗的**多选档**（【定乱】展示别人的至多 3 张牌，`total=(1,3)`）。
+ *
+ * 载荷**逐字**抄票面 §2.1：三槽 = 两张「?」手牌 + 装备区可见的青釭剑，七条候选 =
+ * 三槽的全部非空组合。界面的读法由两条断言钉住：
+ *   - 点两张牌**一次提交都不发**（`submits === 0`）——多选档不保留"点一张即提交"；
+ *   - 按**点击顺序 2 → 0** 点完之后，`buildAction()` 造出 `picks = [0, 2]`（升序规范化，
+ *     `state.picks` 记的是点击顺序），逐字段命中候选里的 `[0, 2]`——顺序反过来才真的钉住
+ *     `answer.js:buildAction` 的规范化（点 0 → 2 时点击顺序恰好已是升序，断言空转）。
+ * 对照组是 `cap === 1` 的旧载荷（反间式盲挑）：点一张**恰一次**提交（不回归）。
+ * 提交本身被换成计数器（不发 HTTP）：本探针只断"点点击 → 载荷"，请求的落点在烟测。
+ */
+context.renderTable = () => {};
+context.renderPending = () => {};
+/* `selectionSnapshot` 住 `session.js`（本探针不加载那份重脚本：它按 `index.html` 顺序
+ * 只取构造 / 点击的依赖闭包）。它是 409 回滚用的**本地快照**，不进载荷 ⇒ 这里给个空实现；
+ * 真正的回滚路径由 `ui_smoke.mjs` 的 U2 段覆盖。 */
+context.selectionSnapshot = () => null;
+let submitCalls = 0;
+context.submitAction = async () => { submitCalls += 1; };
+
+const qinggangSword = {
+  card_id: 39, type: "qinggang_sword", name: "青釭剑", suit: "spade", rank: 6,
+  slot: "weapon", attack_range: 2, color: "black", virtual_sources: [],
+};
+const unknownZonePending = {
+  kind: "SELECT_CARDS", actor: 0, seq: 91,
+  prompt: "请从选择面里选择一张牌。",
+  legal_actions: [[0], [0, 1], [0, 1, 2], [0, 2], [1], [1, 2], [2]].map(
+    (picks) => ({ kind: "SelectCards", picks, answers_seq: 91 }),
+  ),
+  candidate_index: {}, virtual_index: {}, option_seats: {},
+  context: null, revealed: null, preactivations: {}, preactivation: [],
+  slots: [
+    { ref: { zone: "hand", seat: 1 }, card: null },
+    { ref: { zone: "hand", seat: 1 }, card: null },
+    { ref: { zone: "equip", seat: 1 }, card: qinggangSword },
+  ],
+  spec: {
+    zones: ["hand", "equip"], total: [1, 3],
+    per_zone: [], optional: false, sequential: false,
+  },
+};
+resetState();
+ui.state.sessionId = "probe";
+ui.state.playback = null;
+ui.state.view = { human_seat: 0, pending: unknownZonePending };
+// 桥对缺失项容错：红要落在断言上，不能是加载期的 TypeError。
+if (typeof ui.toggleUnknownZonePick === "function") {
+  ui.toggleUnknownZonePick(unknownZonePending, 2); // 点击顺序：先 2
+  ui.toggleUnknownZonePick(unknownZonePending, 0); // 再 0（载荷须升序规范化）
+}
+const unknownMultiSubmits = submitCalls;
+const unknownMulti = ui.buildAction();
+
+const blindUnknownPending = {
+  kind: "SELECT_CARDS", actor: 0, seq: 92,
+  prompt: "请从选择面里选择一张牌。",
+  legal_actions: [
+    ...[0, 1, 2, 3, 4].map((index) => ({ kind: "SelectCards", picks: [index], answers_seq: 92 })),
+    { kind: "Pass", answers_seq: 92 },
+  ],
+  candidate_index: {}, virtual_index: {}, option_seats: {},
+  context: null, revealed: null, preactivations: {}, preactivation: [],
+  slots: [0, 1, 2, 3, 4].map(() => ({ ref: { seat: 1, zone: "hand" }, card: null })),
+  spec: { zones: ["hand"], total: [1, 1], per_slot: [], optional: true, sequential: false },
+};
+resetState();
+submitCalls = 0;
+ui.state.sessionId = "probe";
+ui.state.playback = null;
+ui.state.view = { human_seat: 0, pending: blindUnknownPending };
+if (typeof ui.submitUnknownPick === "function") {
+  await ui.submitUnknownPick(blindUnknownPending, 2);
+}
+const blindSubmits = submitCalls;
+const blindPicked = ui.buildAction();
+ui.state.sessionId = null;
+
 /* 合成反例：同一张借刀卡的**展示形态**原样塞进 UseCard.card（实机 400 的形状）。 */
 const decorated = {
   kind: "UseCard",
@@ -360,6 +438,19 @@ process.stdout.write(
       { name: "use_card", action: use },
       { name: "play_card", action: play },
       { name: "watch_two_rows", action: watch },
+      // 票 06：未知区域弹窗的两档（多选 = 点选后提交 / 单选 = 一击即提交）。
+      {
+        name: "unknown_zone_multipick",
+        action: unknownMulti,
+        legal_actions: unknownZonePending.legal_actions,
+        submits: unknownMultiSubmits,
+      },
+      {
+        name: "unknown_zone_single_pick",
+        action: blindPicked,
+        legal_actions: blindUnknownPending.legal_actions,
+        submits: blindSubmits,
+      },
     ],
     decorated,
   }),

@@ -81,6 +81,9 @@
     // U2-06：询问弹窗的四种模板种类名（票 07–12 只往 stepDialogKind 里加分支）。
     // U2-08：未知区域模板的渲染口（装备分组只由载荷决定，模板级用例直接喂载荷）。
     "selectionEnabled", "stepDialogKind", "DIALOG_KINDS", "renderUnknownZone",
+    // 票 06：未知区域弹窗的**多选档**——点一张 = 切换选中（`toggleUnknownZonePick`），
+    // 一击即提交的旧档仍是 `submitUnknownPick`（`cap === 1` 不回归，探针两侧都跑）。
+    "toggleUnknownZonePick", "submitUnknownPick",
     // U2-11（D4 / D10）：亮牌模板（五谷 + 票 12 遗计复用）——判据 / 数据 / 渲染 / 一击提交。
     // `isRevealStep` 住在 modal.js（只读判据源），渲染口在 reveal.js；烟测直接喂合成载荷。
     "isRevealStep", "revealData", "revealHintText", "renderReveal", "submitRevealPick",

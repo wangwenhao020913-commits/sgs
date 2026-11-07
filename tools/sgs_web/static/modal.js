@@ -168,6 +168,18 @@ function stepDialogKind(pending) {
   return null;
 }
 
+/** 未知区域弹窗的**多选档**（票 06）：两档的唯一分界。
+ *
+ * `stepDialogKind(...) === unknown` ∧ `spec.total` 上界 > 1（归一化住
+ * `options.js:selectionCap`）。`cap === 1` 是"点一张即提交"的旧手感（反间盲挑 / 反馈 /
+ * 拆 / 顺 / 寒冰剑）；`cap > 1` 才是「点选 + 提交」档（【定乱】展示至多 X 张牌）。调用方
+ * （`options.js` 的渲染 / 点选入口、`pending.js` 的提交可点态、本文件的 `unknownZoneTitle`）
+ * 共用这一条，不再各写一遍 `unknown ∧ cap > 1`。
+ */
+function isUnknownZoneMultipick(pending) {
+  return stepDialogKind(pending) === DIALOG_KINDS.unknown && selectionCap(pending) > 1;
+}
+
 /** **带观看授予的选项步**（韬·刘备【义起】）：牌面与选项按钮同一个窗。
  *
  * 判据只看载荷形状：`SELECT_OPTION` ∧ `revealed` 非空 ∧ 不是选座位形态（`option_seats`
@@ -449,7 +461,7 @@ function dialogTitleFor(kind, pending) {
     const contextName = watched && pending.context && pending.context.name;
     return contextName || "选择";
   }
-  if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
+  if (kind === DIALOG_KINDS.unknown) return unknownZoneTitle(pending);
   if (kind === DIALOG_KINDS.reveal) {
     const title = pending && pending.harvest && pending.harvest.title;
     const contextName = pending && pending.context && pending.context.name;
@@ -464,6 +476,15 @@ function dialogTitleFor(kind, pending) {
     return contextName || "亮牌";
   }
   return "询问";
+}
+
+/** 未知区域弹窗的标题（票 06）：单选档仍是「选择一张牌」，多选档按 `spec.total` 写
+ *  「选择 1~3 张牌」。张数**只读**服务端规格（与 `options.js:selectionRange` 同一份归一化），
+ *  前端不另立真源；两档的分界见 :func:`isUnknownZoneMultipick`。 */
+function unknownZoneTitle(pending) {
+  if (!isUnknownZoneMultipick(pending)) return "选择一张牌";
+  const [least, most] = selectionRange(pending);
+  return least === most ? `选择 ${least} 张牌` : `选择 ${least}~${most} 张牌`;
 }
 
 /* ------------------------------------------------------------ 暗化层 / 显隐 */
