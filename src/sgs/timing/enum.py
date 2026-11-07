@@ -287,7 +287,8 @@ wuming 票 04 的增量是 L11 的**加体力上限**二时机（``MAXLIFE_INCRE
 票 01 的【天成】，``src/sgs/skills/start.py``）。**减**侧两个
 （``MAXLIFE_DECREASE_*``）继续留枚举位：既有
 ``Engine.reduce_hp_max``（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进帧，迁会改既有
-``hp_max_change.frame_id`` 并多两条时机记录（E1）。
+``hp_max_change.frame_id`` 并多两条时机记录（E1）。lukang-mobile 票 04 只给那个
+写入口补上"上限减到 0 ⇒ 体力置 0 + 直接死亡"（规则 §4.15 L431–433），**不**动本枚举。
 """
 
 _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)

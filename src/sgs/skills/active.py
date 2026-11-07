@@ -5029,10 +5029,12 @@ def _poxi_tier(host: Any, frame: Any, owner: int, count: int) -> Any:
     """
     state = host.state
     if count == 0:
-        # 上限减为 0 的直接死亡流程未落地（`reduce_hp_max` 会抛），故兜一道：见票面 §1 的
-        # 「体力上限归零按既有口径」——本仓不新增死亡边界，只在那个越界点上停手。
-        if state.player(owner).hp_max > 1:
-            host.reduce_hp_max(frame, owner, 1)
+        # 上限**照减**（用户 2026-11-07：不兜底）；上限已经是 1 时减到 0 ⇒ 直接死亡
+        # （票 04 的 0 档：体力置 0、不进濒死）。DEATH 帧已压栈 ⇒ 本效果到此结束，
+        # 重入由 `_POXI_SETTLED` 收尾。
+        host.reduce_hp_max(frame, owner, 1)
+        if not state.player(owner).alive:
+            return "stay"
         return None
     if count == 1:
         host.add_hand_limit_bonus(owner, -1)

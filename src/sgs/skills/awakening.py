@@ -140,14 +140,22 @@ def _qianxue_condition(host: Any, frame: Any) -> bool:
 
 
 def _qianxue_effect(host: Any, frame: Any, answers: Any) -> Any:
-    """提交点：上限 -1 → 获得 ☆【荐言】（"然后"的次序；两件事都只做一次）。"""
+    """提交点：上限 -1 → 获得 ☆【荐言】（"然后"的次序；两件事都只做一次）。
+
+    **减死即收尾**（票 04）：上限照减（不兜底）；若减到 0 ⇒ 角色直接死亡、``DEATH`` 帧已
+    压栈 ⇒ 本段 ``return "stay"`` 让死亡帧先跑，重入时 ``_QIANXUE_DONE`` 已落 ⇒ 不再授予。
+    （【潜心】的条件是 ``hp < hp_max``，故上限 1 时触发不了；这道守卫是给票 04 之后的口径
+    兜底，不是"上限大于 1 才减"那种兜底。）
+    """
     del answers
     owner = frame.data["skill_owner"]
     frame.data[_AWAKENING_COMMITTED] = owner
     if not frame.data.get(_QIANXUE_DONE):
         host.reduce_hp_max(frame, owner, 1)
-        host.grant_skill(owner, XUSHU_JIANYAN, frame=frame)
         frame.data[_QIANXUE_DONE] = True
+        if not host.state.player(owner).alive:
+            return "stay"
+        host.grant_skill(owner, XUSHU_JIANYAN, frame=frame)
     return None
 
 
@@ -218,6 +226,9 @@ def _qinxue_effect(host: Any, frame: Any, answers: Any) -> Any:
 
     重入纪律（帧私有键）：上限只减一次；选项答案由 ``ask_option`` 的帧内缓存给出，重入不再
     问；回复帧出栈后跳过选项效果、只补授予；授予只做一次。
+
+    **减死即收尾**（票 04）：上限照减（不兜底）；减到 0 ⇒ 直接死亡、``DEATH`` 帧已压栈 ⇒
+    ``return "stay"``，重入时已阵亡 ⇒ 不再问选项、不再回复、不再授予。
     """
     del answers  # 零步流水线：答案全部来自 effect 里的手写询问
     owner = frame.data["skill_owner"]
@@ -225,6 +236,11 @@ def _qinxue_effect(host: Any, frame: Any, answers: Any) -> Any:
     if not frame.data.get(_QINXUE_HP_MAX_DONE):
         host.reduce_hp_max(frame, owner, 1)
         frame.data[_QINXUE_HP_MAX_DONE] = True
+        if not host.state.player(owner).alive:
+            return "stay"
+    if not host.state.player(owner).alive:
+        # 减上限把持有者减死之后的残余段：选项 / 回复 / 授予都不再结算（规则 4.18）。
+        return None
     answer = host.ask_option(
         frame,
         owner,

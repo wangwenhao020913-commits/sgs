@@ -426,6 +426,62 @@ def test_reduce_hp_max_stays_out_of_the_maxlife_frame():
     ] == [("hp_max_change", 4, 3, 1), ("hp_change", 4, 3, -1)]
 
 
+def test_a_max_hp_drop_to_zero_kills_without_going_through_near_death():
+    """票 04 的 0 档：上限减到 0 ⇒ 体力值**调整为 0**、**不进濒死**、直接死亡（规则 L431–433）。
+
+    两个取值的组合都在这里钉住：
+
+    - **满体力**（hp 2 / hp_max 2）减 2 ⇒ 上限 0、体力 0；
+    - **非满体力**（hp 1 / hp_max 2）减 2 ⇒ 上限 0、体力**照样置 0**（规则不看减之前是否满；
+      这是 0 档与"满体力同步下调"那条（L436–437）的分界）。
+
+    记录流 = ``hp_max_change`` → ``hp_change``（按序）+ DEATH 帧；**没有** NEAR_DEATH 帧、
+    也没有任何一个 ``NEAR_DEATH_*`` 时机被经过。**不兜底**（用户 2026-11-07）：
+    `reduce_hp_max` 不再因"减后为 0"抛错。
+    """
+    for hp in (2, 1):
+        state = build_state(
+            pack=PACK,
+            seats=[SeatSpec(hp=hp, hp_max=2), SeatSpec()],
+            deck=tuple(range(10)),
+        )
+        engine = Engine.from_state(state, seed=7)
+        carrier = Frame(kind=FrameKind.SKILL, frame_id=0)
+
+        engine.reduce_hp_max(carrier, 0, 2)
+
+        player = engine.state.player(0)
+        assert (player.alive, player.hp, player.hp_max) == (False, 0, 0), (
+            f"hp {hp} / hp_max 2：上限归零 ⇒ 体力置 0 + 直接死亡"
+        )
+        assert [
+            (record.delta_type, record.before, record.after, record.amount)
+            for record in _records_of(engine, kind="delta")
+        ] == [
+            ("hp_max_change", 2, 0, 2),
+            ("hp_change", hp, 0, -hp),
+        ], f"hp {hp}：上限先落、体力随后置 0"
+        assert not [
+            record
+            for record in _records_of(engine, kind="frame")
+            if record.frame_kind is FrameKind.NEAR_DEATH
+        ], "0 档不进濒死"
+        assert [
+            record.frame_kind
+            for record in _records_of(engine, kind="frame")
+        ].count(FrameKind.DEATH) == 1, "直接死亡：DEATH 帧压了一次"
+        assert not [
+            record
+            for record in _records_of(engine, kind="timing")
+            if record.timing.value.startswith("NEAR_DEATH")
+        ], "没有一个濒死时机节点被经过"
+        assert not [
+            record
+            for record in _records_of(engine, kind="timing")
+            if record.timing.value.startswith("MAXLIFE_")
+        ], "减侧时机仍不解封（0 档也不例外）"
+
+
 # ---------------------------------------------------------------------------
 # 时机计数纪律：规则级账本的"时机四轴计数"段必须与 enum.py 同步（retro 票 06 / C7）
 # ---------------------------------------------------------------------------

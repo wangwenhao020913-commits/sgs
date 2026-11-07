@@ -1418,11 +1418,14 @@ def test_jianyan_matches_by_color_too():
 # ---------------------------------------------------------------------------
 
 
-def _lvmeng_state(*, hp: int = 1, hand: tuple[int, ...] = (), target_hand: tuple[int, ...] = (), turn_seat: int = 0):
-    """两人局：座位 0 = 界吕蒙（体力 ``hp``，手牌 ``hand``），座位 1 = 无武将。"""
+def _lvmeng_state(*, hp: int = 1, hp_max: int = 4, hand: tuple[int, ...] = (), target_hand: tuple[int, ...] = (), turn_seat: int = 0):
+    """两人局：座位 0 = 界吕蒙（体力 ``hp`` / 上限 ``hp_max``，手牌 ``hand``），座位 1 = 无武将。
+
+    ``hp_max`` 默认 4（界吕蒙的牌面上限）；票 04 的"上限归零"用例把它压到 1。
+    """
     return build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=hp, hand=hand, hero="jie_lvmeng"), SeatSpec(hand=target_hand, gender=Gender.MALE)],
+        seats=[SeatSpec(hp=hp, hp_max=hp_max, hand=hand, hero="jie_lvmeng"), SeatSpec(hand=target_hand, gender=Gender.MALE)],
         deck=deck_excluding(PACK, *hand, *target_hand),
         turn_seat=turn_seat,
         rule_config=RuleConfig(player_count=2),
@@ -1485,6 +1488,33 @@ def test_qinxue_needs_hand_minus_hp_at_least_two():
     assert [
         q for q in _queries(engine, QueryKind.SELECT_OPTION.value) if str(q.skill_id).startswith("qinxue:")
     ] == []
+
+
+def test_qinxue_at_a_max_hp_of_one_dies_without_asking_or_granting():
+    """票 04：上限**已经是 1** 时【勤学】**照减**到 0 ⇒ 直接死亡；残余段一律不结算。
+
+    用户 2026-11-07 的「体力为1也不兜底，必须扣减」：不新增"上限大于 1 才减"的守卫。
+    减死之后：不再问二选一、不再摸牌 / 回复、不再授予 ☆【攻心】，且**不进濒死**。
+    """
+    hand = tuple(_cards("dodge")[:3])
+    engine = Engine.from_state(_lvmeng_state(hp=1, hp_max=1, hand=hand), seed=7)
+    run_until(
+        engine,
+        [_qinxue_player("draw_two"), PassPlayer()],
+        lambda e: not e.state.player(0).alive,
+    )
+
+    player = engine.state.player(0)
+    assert (player.alive, player.hp, player.hp_max) == (False, 0, 0), "上限 1 → 0：体力置 0 + 死亡"
+    assert player.granted_skills == [], "减死之后不再授予 ☆【攻心】"
+    assert [
+        q for q in _queries(engine, QueryKind.SELECT_OPTION.value) if str(q.skill_id).startswith("qinxue:")
+    ] == [], "减死之后不再问二选一"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing.value.startswith("NEAR_DEATH")
+    ], "上限归零不进濒死（规则 L431–433）"
 
 
 def test_qinxue_hooks_both_the_prepare_and_the_finish_phase():

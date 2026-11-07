@@ -304,6 +304,10 @@ class FrameHost(StepHost, Protocol):
         """把体力上限写成 ``value`` 并落一条 ``hp_max_change``（``MAXLIFE`` 帧的写入口）。"""
         ...
 
+    def reduce_hp_max(self, frame: Frame, seat: int, amount: int = 1) -> Any:
+        """减体力上限的唯一实现（含"上限减为 0 ⇒ 体力置 0 + 直接死亡"，票 04）。"""
+        ...
+
     def move_in_frame(
         self,
         frame: Frame | None,
@@ -1939,6 +1943,8 @@ RECOVER_STEPS = (
 # 既有 `Engine.reduce_hp_max`（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进来，
 # `MAXLIFE_DECREASE_*` 也**不解封**（迁会改既有 `hp_max_change.frame_id` 并多两条时机
 # 记录 ⇒ 金录像字节变化）。将来迁移时**只换调用点**，本表不必再动。
+# 票 04 起减侧**直接委托** `Engine.reduce_hp_max`（上限减为 0 ⇒ 体力置 0 + 直接死亡也一并
+# 跟上），本表仍不派发 ``MAXLIFE_DECREASE_*``。
 
 MAXLIFE_INCREASE = "increase"
 MAXLIFE_DECREASE = "decrease"
@@ -1967,27 +1973,19 @@ def maxlife_apply(host: FrameHost, frame: Frame) -> None:
     （L436–437；只下调、不回血）；"增加上限并回复 1 点"的回复是技能的第二段，走既有
     回复原语（``RECOVER`` 帧），本帧不替调用方回血（票 04 C5）。
 
-    减侧分支与 :meth:`~sgs.engine.Engine.reduce_hp_max` 逐条同语义（含"满体力同步下调"
-    与"上限减为 0 无载体"的 fail-closed 守卫），故将来迁移只换调用点。
+    **减侧委托** :meth:`~sgs.engine.Engine.reduce_hp_max`：那是减上限的唯一实现，含
+    "满体力同步下调"与"上限减为 0 ⇒ 体力置 0 + 直接死亡"（票 04；用户 2026-11-07 裁定不兜底）。
+    今天这条分支**没有调用者**，故"减死之后 ``MAXLIFE_DECREASE_AFTER`` 照旧派发"这个次序
+    问题暂时无处可观察；将来真有载体时按帧内游标收尾。
     """
     seat = frame.data["target"]
     amount = int(frame.data["amount"])
+    if frame.data["direction"] == MAXLIFE_DECREASE:
+        host.reduce_hp_max(frame, seat, amount)
+        return None
     player = host.state.player(seat)
-    before_max, before_hp = player.hp_max, player.hp
-    after_max = (
-        before_max + amount
-        if frame.data["direction"] == MAXLIFE_INCREASE
-        else before_max - amount
-    )
-    if after_max < 1:
-        raise ValueError(
-            f"体力上限 {before_max} 减 {amount} 后为 {after_max}："
-            "上限减为 0 的直接死亡流程未落地（今天没有该档载体）"
-        )
-    host.apply_hp_max_change(frame, seat, after_max)
-    if after_max < before_max and before_hp == before_max:
-        # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
-        host.apply_hp_change(frame, seat, after_max)
+    host.apply_hp_max_change(frame, seat, player.hp_max + amount)
+
 
 
 def maxlife_after(host: FrameHost, frame: Frame) -> Control:

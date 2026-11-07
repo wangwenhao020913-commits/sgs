@@ -1346,11 +1346,12 @@ def test_poxi_zero_cards_cuts_the_max_hp():
     assert set(engine.state.discard) == set(cards), "四张都进了弃牌堆"
 
 
-def test_poxi_zero_cards_stops_at_a_max_hp_of_one():
-    """0 档在**体力上限已为 1** 时停手：本仓没有"上限减为 0 ⇒ 直接死亡"的流程。
+def test_poxi_zero_cards_at_a_max_hp_of_one_now_kills():
+    """0 档在**体力上限已为 1** 时**照减**：上限 1 → 0，体力置 0，**直接死亡**（票 04）。
 
-    这不是规则读法，是**防御性**的边界（`reduce_hp_max` 在该越界点按设计抛错）：技能不许
-    把进程炸掉，故这一档变成零效果，其余结算（弃置四张、出牌阶段照常）不受影响。
+    用户 2026-11-07 裁定「体力为 1 也不兜底，必须扣减」：这不是"零效果"，而是规则 §四
+    4.15 L431–433 的 0 档——**不进濒死**、不能进行濒死结算，直接死亡。弃置四张照常发生
+    （它在减上限之前）。
     """
     cards = _cards()
     state = _ganning_state(theirs=cards, my_hp=1, my_hp_max=1)
@@ -1358,10 +1359,38 @@ def test_poxi_zero_cards_stops_at_a_max_hp_of_one():
     run_queries(
         engine,
         [player, PassPlayer()],
-        lambda e: len(_moves(e, reason=MoveReason.DISCARD)) == 1,
+        lambda e: not e.state.player(0).alive or len(_moves(e, reason=MoveReason.DISCARD)) == 1,
     )
-    assert engine.state.player(0).hp_max == 1, "上限已是 1 ⇒ 0 档不执行（不抛错）"
-    assert sorted(engine.state.discard) == sorted(cards), "弃置照常发生"
+    assert set(cards) <= set(engine.state.discard), "弃置照常发生（在减上限之前）"
+    dead = engine.state.player(0)
+    assert (dead.alive, dead.hp, dead.hp_max) == (False, 0, 0), "上限 1 减 1 ⇒ 体力置 0 + 死亡"
+    # 记录流：hp_max_change(1→0) 与 hp_change(1→0) 按序；**没有**濒死帧 / 濒死时机。
+    deltas = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type in ("hp_max_change", "hp_change")
+        and record.seat == 0
+    ]
+    assert [(record.delta_type, record.before, record.after) for record in deltas] == [
+        ("hp_max_change", 1, 0),
+        ("hp_change", 1, 0),
+    ]
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.frame_kind is FrameKind.NEAR_DEATH
+    ], "上限归零不进濒死（规则 L431–433）"
+    assert any(
+        record.kind == "frame" and record.frame_kind is FrameKind.DEATH
+        for record in engine.records
+    ), "直接死亡：DEATH 帧照常"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing.value.startswith("NEAR_DEATH")
+    ], "没有一个濒死时机节点被经过"
 
 
 def test_poxi_one_card_ends_the_play_phase_and_cuts_the_hand_limit():

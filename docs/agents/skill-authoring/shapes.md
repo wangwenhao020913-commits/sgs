@@ -191,7 +191,7 @@
 | `NEAR_DEATH` | 濒死 |
 | `DEATH` | 死亡结算 |
 | `LIFE_LOSE` | 失去体力上限 |
-| `MAXLIFE` | **体力上限变化事件帧**（wuming 票 04 解封「加」侧）：三步 = ① 派发 `MAXLIFE_INCREASE_BEFORE` → ② 落上限 + `emit_delta(HpMaxChangeDelta(amount=+N))` → ③ 派发 `MAXLIFE_INCREASE_AFTER`。帧私有带 `direction` + `amount`（`HpMaxChangeDelta.amount` 恒为幅度，方向由 `before` / `after` 读出）；唯一写入口 `Engine.raise_hp_max`（首个调用者 = 票 01 的【天成】，`src/sgs/skills/start.py`）。**不同步体力**（「满体力同步下调」只属于减侧）；"减"分支写好但**暂无调用者**——`reduce_hp_max` 不迁、`MAXLIFE_DECREASE_*` 不解封 |
+| `MAXLIFE` | **体力上限变化事件帧**（wuming 票 04 解封「加」侧）：三步 = ① 派发 `MAXLIFE_INCREASE_BEFORE` → ② 落上限 + `emit_delta(HpMaxChangeDelta(amount=+N))` → ③ 派发 `MAXLIFE_INCREASE_AFTER`。帧私有带 `direction` + `amount`（`HpMaxChangeDelta.amount` 恒为幅度，方向由 `before` / `after` 读出）；唯一写入口 `Engine.raise_hp_max`（首个调用者 = 票 01 的【天成】，`src/sgs/skills/start.py`）。**不同步体力**（「满体力同步下调」只属于减侧）；"减"分支写好但**暂无调用者**——`reduce_hp_max` 不迁、`MAXLIFE_DECREASE_*` 不解封。**票 04 起减侧补上 0 档**：`Engine.reduce_hp_max` 减到 0 ⇒ 体力值置 0 + `pass_away` **直接死亡**（不进濒死、无来源）——与规则 §四 4.15 L431–433 一致，且"减少体力上限的效果一律不兜底"（用户 2026-11-07）；`maxlife_apply` 的减侧分支因此**委托** `reduce_hp_max`，时机仍不解封 |
 | `RANK_COMPARE` | **拼点事件帧**（huo-taishici-xunyu 票 03 解封）：派发 `RANK_COMPARE_ON` → 逐参与者选一张手牌（不可放弃）→ 扣置处理区（`MoveReason.PINDIAN`，内联派发「失去牌后」）→ 亮出比点 + `pindian` delta + 结果回写发起帧（`pindian_result` / `pindian_won`）→ 派发 `RANK_COMPARE_RESULT_AFTER` → 两张牌置入弃牌堆（同一 `PINDIAN` 原因）。平点 = 双方都没赢；参与者缺手牌 ⇒ 整条中止（零副作用） |
 | `REJUDGE` | **改判事件帧**（feng-zhangjiao 票 02）：一次"用一张牌代替 / 替换判定牌"。帧内两段移动（新牌 → 处理区；原牌 → 弃牌堆（**代替**）/ 改判者手牌（**替换**）），不派发任何"打出时 / 使用后"钩子。判据：动作是 `SubstituteJudgeCard`（不是 `PlayCard`），去向由 `SkillDef.rejudge_original_to` 回答 |
 

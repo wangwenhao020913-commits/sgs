@@ -3609,9 +3609,16 @@ class Engine:
         - 若减上限前体力值**等于**上限，则减上限的同时**须把体力值调整至**新上限
           （`L436–437`）。因此"满体力觉醒"会同时落两条 delta：``hp_max_change`` 与
           ``hp_change``，而"已受伤觉醒"只有前一条；
-        - 上限减为 0 ⇒ 直接死亡、不进濒死（`L431–433`）。M6 的两个载体只会 4 → 3，
-          该档**没有载体**，故本原语只接受减后仍 ≥ 1 的调用（越界即编程错误，不静默
-          实现半套死亡流程）。
+        - **上限减为 0**（`L431–433`）：其体力值**调整为 0**（不看减之前是否满），**不进入
+          濒死**、不能进行濒死结算，而是**直接死亡**。0 档因此落 ``hp_max_change`` +
+          ``hp_change`` 两条 delta，再压一个 ``DEATH`` 帧（走 :meth:`pass_away`：无伤害来源、
+          无 killer、无死亡奖惩，与【武魂】②的"技能直接致死"同一入口）。
+
+        **不兜底**（用户 2026-11-07 裁定）：上限已经是 1 时照减到 0、照死；兜底只允许来自
+        牌面**明写的前置条件**（例：神孙策【英霸】"体力值上限**大于 1** 的角色减少 1 点
+        体力上限"），引擎侧不替任何效果"避免"0 档。**调用方要在减死之后收尾**：角色此时已
+        ``alive = False``、``DEATH`` 帧已压栈，常规做法是 ``return "stay"`` 让死亡帧先跑、
+        重入时再跳过残余段（见【魄袭】0 档与【勤学】的提交点）。
 
         返回值 = 这条 ``hp_max_change`` 事件；``frame`` 是承载帧（技能帧），记录坐标与
         同帧的 ``skill_gain`` 一致。
@@ -3619,17 +3626,17 @@ class Engine:
         player = self.state.player(seat)
         before_max = player.hp_max
         before_hp = player.hp
-        after_max = before_max - amount
-        if after_max < 1:
-            raise ValueError(
-                f"体力上限 {before_max} 减 {amount} 后为 {after_max}：M6 没有该档载体"
-                "（上限减为 0 的直接死亡流程未落地）"
-            )
+        after_max = max(0, before_max - amount)
         player.hp_max = after_max
         delta = HpMaxChangeDelta(
             seat=seat, before=before_max, after=after_max, amount=amount
         )
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        if after_max == 0:
+            # 规则 L431–433：上限减为 0 ⇒ 体力值调整为 0（不看减之前是否满）⇒ 直接死亡。
+            self.apply_hp_change(frame, seat, 0)
+            self.pass_away(frame, seat)
+            return delta
         if before_hp == before_max and before_hp > after_max:
             # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
             self.apply_hp_change(frame, seat, after_max)
