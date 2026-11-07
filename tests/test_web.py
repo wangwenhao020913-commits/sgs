@@ -10427,6 +10427,61 @@ def test_skill_events_cover_a_locked_skill_that_never_asks_to_activate() -> None
     }, fuyin[0]
 
 
+def test_the_card_tag_effect_event_names_the_skill_instead_of_its_id() -> None:
+    """用户 2026-11-07 报障：【定乱】牌的**标签自身效果**发动时，飘/叙的是
+    `hero.feng_yujin.dingluan_mark` 这串 id，而不是「定乱」。
+
+    根因：合成定义（`*_mark` 这类不在武将表技能清单里的标签效果）走
+    ``_skill_display_name`` 查不到中文名，调用方退回 ``skill_id``。判据走真实产出路径：
+    引擎真的跑一次标签效果（把带标记的牌弃进弃牌堆），`skill_events_after` 必须给出
+    中文名「定乱」。``jieying_mark`` 同形（劫营），这里只钉本 effort 的这一条。
+    """
+    from sgs.data import CardTagType
+    from sgs.state import CardTag, MoveReason
+    from sgs_web.projection import skill_events_after
+
+    pack = load_content_pack(deck_profile="standard_108")
+    marked = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="feng_yujin", hand=(marked,)), SeatSpec(hand=())],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id != marked),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.add_card_tag(
+        marked,
+        CardTag(
+            tag_type=CardTagType.DINGLUAN,
+            owner=0,
+            skill_id="hero.feng_yujin.dingluan",
+        ),
+    )
+    after = len(engine.records)
+    engine.move_in_frame(
+        None,
+        engine.state.refs((marked,)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+    )
+    events = skill_events_after(
+        engine.records,
+        after=after,
+        state=engine.state,
+        activations=engine.skill_activations,
+    )
+    mark = [
+        event
+        for event in events
+        if event["skill_id"] == "hero.feng_yujin.dingluan_mark"
+    ]
+    assert len(mark) == 1, f"标签自身效果真的跑了一次才证明得了这条：{events}"
+    assert mark[0]["name"] == "定乱", (
+        "标签自身效果的中文名要按来源技能取（退回 id 就是实机报障的形状）：" f"{mark[0]}"
+    )
+
+
 def _wusheng_engine(*, submit: str) -> Engine:
     """关羽（座位 0）用【武圣】把一张红【闪】当【杀】对座位 1 使用。
 

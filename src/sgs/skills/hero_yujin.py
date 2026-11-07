@@ -323,10 +323,11 @@ def _mark_condition(host: Any, frame: Any) -> bool:
 
 
 def _mark_draw(host: Any, frame: Any) -> Any:
-    """拥有者摸 1 张（R5：只看手牌 / 装备区；其他区进弃牌堆 ⇒ 不摸）。
+    """拥有者摸牌：这批移动里**每张**【定乱】牌各摸 1 张（R5：只看手牌 / 装备区）。
 
-    逐事件一次（牌面没有「一张」限定词，`06`（§5「程序化约定与偏离一手」）的「默认读法（三）」）：一次移动里带多张
-    【定乱】牌也只摸 1 张——派发环"每技能一次"保证本回调每次移动最多跑一遍。
+    用户 2026-11-07 改判（覆盖票 03 / 04 的"一次移动只摸一张"）：同一批移动里带 N 张
+    【定乱】牌 ⇒ 摸 N 张，每张独立结算一次。派发环"每技能一次"保证本回调每次移动最多
+    跑一遍，故计数只按**这一批**的 ``event.cards`` 来；同批里未带标记的牌不额外摸。
     """
     state = host.state
     event = move_event(frame)
@@ -340,7 +341,15 @@ def _mark_draw(host: Any, frame: Any) -> Any:
     seat = int(seat)
     if not state.player(seat).alive:
         return None
-    host.draw_for_hand(frame, seat, 1)
+    writer = frame.data.get(MATCH_OWNER_KEY)
+    if writer is None:
+        return None
+    marked = sum(
+        1 for card in event.cards if _is_tagged(state, card.card_id, int(writer))
+    )
+    if marked <= 0:
+        return None
+    host.draw_for_hand(frame, seat, marked)
     return None
 
 

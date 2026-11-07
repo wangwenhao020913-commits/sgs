@@ -1018,6 +1018,10 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
     两种形态都要认：命名空间 id（``hero.guojia.yiji``）与**合成键**
     （``yiji:give:0:0``——用冒号把点号/轮号拼进缓存键）。前者带武将 id、可直接定位；
     后者只留短 id，按短 id 在**全部**武将技能里查。``equip.<牌名 id>`` 取牌名。
+
+    **合成定义**（「标签自身效果」这类不在武将表技能清单里的定义，命名 ``<来源>_mark``）
+    按**来源技能**的中文名取：``hero.feng_yujin.dingluan_mark`` ⇒ 「定乱」、
+    ``hero.shen_ganning.jieying_mark`` ⇒ 「劫营」（用户 2026-11-07 报障：原先退回整串 id）。
     """
     head = skill_id.split(":", 1)[0]
     if head.startswith("equip."):
@@ -1030,13 +1034,20 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
         pool = (hero,) if hero is not None else ()
     else:
         pool = tuple(hero for table in heroes for hero in table.heroes)
-    for hero in pool:
-        if hero is None:
-            continue
-        for skill in hero.skills:
-            if skill.id == short:
-                return skill.name
-    return None
+
+    def lookup(name: str) -> str | None:
+        for hero in pool:
+            if hero is None:
+                continue
+            for skill in hero.skills:
+                if skill.id == name:
+                    return skill.name
+        return None
+
+    name = lookup(short)
+    if name is None and short.endswith("_mark"):
+        name = lookup(short[: -len("_mark")])
+    return name
 
 
 def _frame_targets(data: dict[str, Any]) -> list[int]:

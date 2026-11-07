@@ -331,6 +331,54 @@ def test_the_owner_draws_when_a_marked_card_is_discarded_not_by_use():
     assert card in [int(c) for c in engine.state.discard]
 
 
+def test_each_marked_card_draws_one_when_several_are_discarded_together():
+    """多张【定乱】牌**同时**离开手牌 ⇒ 每张各摸 1 张（用户 2026-11-07 改判）。
+
+    票 03 / 04 的原读法是"一次移动只摸一张"（账本 `06` L901 行）；本次用户明确改判：
+    同一批移动里的**每张**【定乱】牌都独立结算一次"摸 1 张"。判据走引擎外部缝：
+    三张一起弃置后手牌净张数 = -3 + 3，且三张都进了弃牌堆。
+    """
+    first, second = _cards("slash")[0], _cards("slash")[1]
+    third = _cards("peach")[0]
+    hand = (first, second, third)
+    engine = _engine(seats=[SeatSpec(hero=YUJIN, hand=hand), SeatSpec()], hand0=hand)
+    for card in hand:
+        _tag(engine, card)
+    before = len(engine.state.player(0).hand)
+    engine.move_in_frame(
+        None,
+        engine.state.refs(hand),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+    )
+    assert len(engine.state.player(0).hand) == before, (
+        "三张一起弃置 ⇒ 三张各摸一张（净张数不变）"
+    )
+    discard = [int(c) for c in engine.state.discard]
+    assert all(card in discard for card in hand), "三张都进了弃牌堆"
+
+
+def test_only_the_marked_cards_draw_when_a_batch_is_mixed():
+    """同一批里**只有带标记的牌**各摸 1 张；未标记的同批牌不额外摸。"""
+    marked = _cards("slash")[0]
+    plain = _cards("slash")[1]
+    hand = (marked, plain)
+    engine = _engine(seats=[SeatSpec(hero=YUJIN, hand=hand), SeatSpec()], hand0=hand)
+    _tag(engine, marked)
+    before = len(engine.state.player(0).hand)
+    engine.move_in_frame(
+        None,
+        engine.state.refs(hand),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+    )
+    assert len(engine.state.player(0).hand) == before - 2 + 1, (
+        "两张一起弃置、只有一张带标记 ⇒ 只摸一张"
+    )
+
+
 def test_no_draw_when_the_marked_card_is_used():
     """「非因使用或打出」——使用 / 打出的移动原因都是 ``USE``，不触发。"""
     card = _cards("peach")[0]
