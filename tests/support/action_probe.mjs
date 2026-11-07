@@ -347,7 +347,9 @@ if (!clickOrdered) throw new Error("buildPreativationAction 没拼出有序目�
  * 载荷**逐字**抄票面 §2.1：三槽 = 两张「?」手牌 + 装备区可见的青釭剑，七条候选 =
  * 三槽的全部非空组合。界面的读法由两条断言钉住：
  *   - 点两张牌**一次提交都不发**（`submits === 0`）——多选档不保留"点一张即提交"；
- *   - `buildAction()` 造出 `picks = [0, 2]`（升序规范化），逐字段命中候选里的 `[0, 2]`。
+ *   - 按**点击顺序 2 → 0** 点完之后，`buildAction()` 造出 `picks = [0, 2]`（升序规范化，
+ *     `state.picks` 记的是点击顺序），逐字段命中候选里的 `[0, 2]`——顺序反过来才真的钉住
+ *     `answer.js:buildAction` 的规范化（点 0 → 2 时点击顺序恰好已是升序，断言空转）。
  * 对照组是 `cap === 1` 的旧载荷（反间式盲挑）：点一张**恰一次**提交（不回归）。
  * 提交本身被换成计数器（不发 HTTP）：本探针只断"点点击 → 载荷"，请求的落点在烟测。
  */
@@ -388,8 +390,8 @@ ui.state.playback = null;
 ui.state.view = { human_seat: 0, pending: unknownZonePending };
 // 桥对缺失项容错：红要落在断言上，不能是加载期的 TypeError。
 if (typeof ui.toggleUnknownZonePick === "function") {
-  ui.toggleUnknownZonePick(unknownZonePending, 0);
-  ui.toggleUnknownZonePick(unknownZonePending, 2);
+  ui.toggleUnknownZonePick(unknownZonePending, 2); // 点击顺序：先 2
+  ui.toggleUnknownZonePick(unknownZonePending, 0); // 再 0（载荷须升序规范化）
 }
 const unknownMultiSubmits = submitCalls;
 const unknownMulti = ui.buildAction();

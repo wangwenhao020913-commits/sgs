@@ -737,7 +737,7 @@ function renderHeroZonePick(pending) {
 function renderUnknownZone(pending) {
   const box = $("t-options");
   const cap = selectionCap(pending);
-  const multi = cap > 1;
+  const multi = isUnknownZoneMultipick(pending);
   const hint = $("t-target-hint");
   if (hint) {
     const action = multi ? `点选至多 ${cap} 张牌，再点「提交」。` : "点一张牌即提交。";
@@ -858,41 +858,50 @@ async function submitUnknownPick(pending, index) {
 
 /** 未知区域**多选档**：点一张槽位 = 选中 / 取消它（票 06）。
  *
- * 与 :func:`submitUnknownPick` 的分界只有一个：`selectionCap(pending) > 1`。此时点牌**不发
- * 任何提交**（用户口径见票面 §6：不保留"点一张即提交"的快捷），唯一的提交点是「提交」键；
- * 载荷由 `buildAction` 按 `state.picks` 补（升序规范化住 `answer.js:buildAction`）。
+ * 与 :func:`submitUnknownPick` 的分界只有一个：:func:`isUnknownZoneMultipick`（未知区域 ∧
+ * `selectionCap(pending) > 1`）。此时点牌**不发任何提交**（用户口径见票面 §6：不保留"点一张
+ * 即提交"的快捷），唯一的提交点是「提交」键；载荷由 `buildAction` 按 `state.picks` 补
+ * （升序规范化住 `answer.js:buildAction`）。
  *
  * 候选骨架的指向也在这里补一次（`renderUnknownZone` 铺面时已指过）：点击后的重绘若发生在
  * 别的路径上（例如 `renderPending` 被别处替换），仍不会出现"选好了却没有可补的候选"。
  */
 function toggleUnknownZonePick(pending, index) {
   if (state.playback || state.submitBusy) return;
-  if (stepDialogKind(pending) !== DIALOG_KINDS.unknown) return;
-  if (selectionCap(pending) <= 1) return;
+  if (!isUnknownZoneMultipick(pending)) return;
   const at = (pending.legal_actions || []).findIndex((action) => action.kind === "SelectCards");
   if (at >= 0) state.selectedOption = at;
   toggleSlotPick(pending, index);
   state.lastRejectReason = "";
 }
 
-/** 选择面的张数上限（服务端 ``spec.total`` 的上界；缺省 1）。 */
-function selectionCap(pending) {
+/** 选择面的张数区间 ``[least, most]``（服务端 ``spec.total`` 的归一化；缺省 ``[1, 1]``）。
+ *
+ * 张数**只读**服务端规格：标题（`modal.js:unknownZoneTitle`）与可提交文案
+ * （`pending.js:refreshSubmit`）都从这里读同一份归一化，不在各自那里再算一遍。
+ */
+function selectionRange(pending) {
   const total = (pending && pending.spec && pending.spec.total) || [1, 1];
-  return Math.max(1, Number(total[1]) || 1);
+  const least = Math.max(1, Number(total[0]) || 1);
+  return [least, Math.max(least, Number(total[1]) || least)];
+}
+
+/** 选择面的张数上限（:func:`selectionRange` 的上界；缺省 1）。 */
+function selectionCap(pending) {
+  return selectionRange(pending)[1];
 }
 
 /** 弹窗开着（`selectionEnabled()` 为假）时，**哪几类槽位面**仍要接点选。
  *
  * 判据只有两条，都读载荷形状 / `spec.total`，不认技能 id：
  *  - `heroPick`：武将牌上的牌，正文就在弹窗里（huo-shenzhugeliang 票 02）；
- *  - `unknown` ∧ `cap > 1`：未知区域的多选档（票 06）——点牌只是收进 `state.picks`，
+ *  - :func:`isUnknownZoneMultipick`：未知区域的多选档（票 06）——点牌只是收进 `state.picks`，
  *    提交点是弹窗外的「提交」键。
  * 单选档的未知区域（`cap === 1`）不在此列：点一张即提交，入口是 `submitUnknownPick`。
  */
 function dialogSlotPickAllowed(pending) {
-  const kind = pending ? stepDialogKind(pending) : null;
-  if (kind === DIALOG_KINDS.heroPick) return true;
-  return kind === DIALOG_KINDS.unknown && selectionCap(pending) > 1;
+  if (stepDialogKind(pending) === DIALOG_KINDS.heroPick) return true;
+  return isUnknownZoneMultipick(pending);
 }
 
 /** 点一个槽位 = 选中 / 取消它；**上限之内**才收下（票 15：【遗计】一次可选两张，多选不得越界）。

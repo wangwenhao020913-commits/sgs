@@ -98,8 +98,9 @@ A 族的阶段位（``_PHASE_STATE_MASK`` = bit 0..22：``_USED`` / 仁德目标
 _ASK_DINGLUAN_PICKED = "dingluan:card"
 """【定乱】选牌步的**询问位置**（帧内缓存按 ``(owner, key)`` 分桶）。
 
-只有持有者会被问，但 ``key`` 仍带座位号（``dingluan:card:<座位>``）——与选人 / 完成标记的
-帧内键同一个分桶口径，重入时不会与别的座位串答案。位置常量本身只一处
+``owner`` 是常量（不随座位变），座位只带在帧内 ``key`` 上（``dingluan:card:<座位>``）。
+**保留座位分桶**不是旧"共享技"语义的残留（票 07 §6.1 已允许保留）：它与 ``target`` /
+``done`` 两个帧内键同一口径，重入时不与别的座位串答案。位置常量本身只一处
 （`tests/test_ask_points.py` 的机械闸要求入口常量两两不同）。
 """
 
@@ -199,34 +200,35 @@ def _dingluan(host: Any, frame: Any) -> Any:
     """【定乱】的效果主体（手写两段：选一名角色 → 展示并标记至多 X 张牌）。
 
     非共享技：``MATCH_OWNER_KEY`` 既是**发动者**（= 于禁，派发环上唯一会被问的座位）又是
-    技能实例持有者（= 标签来源，写进 ``CardTag.owner``），两者恒等。两段的答案仍按座位分桶
-    （手写询问的 ``owner`` / ``skill_id`` 带座位），重入时不与别的座位串答案。
+    技能实例持有者（= 标签来源，写进 ``CardTag.owner``），两者恒等，故函数里只有一个名字
+    ``owner``。两段的答案按座位收在帧内键里（``dingluan:target:<座位>`` /
+    ``dingluan:picked:<座位>``）：``ask_selection`` 的 ``owner=`` 实参是常量
+    ``_ASK_DINGLUAN_PICKED``，座位只出现在 ``skill_id`` 与帧内 ``key`` 上，重入时不与别的
+    座位串答案。
     """
     state = host.state
-    writer = frame.data.get(MATCH_OWNER_KEY)
-    if writer is None:
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
         return None
-    writer = int(writer)
-    # 非共享技：这一问的"我"就是实例持有者（票 07）。保留两个名字只为读代码时
-    # "发动者 / 标签写入者"不混：选人与选牌的询问都落在 asker 上；"已被定乱过"的记账
-    # 则落在 target 上（票 08：限次在目标侧，不在发动者侧）。
-    asker = writer
+    owner = int(owner)
+    # 非共享技：这一问的"我"就是实例持有者（票 07）。选人与选牌的询问都问 owner；
+    # "已被定乱过"的记账落在 target 上（票 08：限次在目标侧，不在发动者侧）。
     x = _remaining_x(state)
     if x <= 0:
         return None
     timing = Timing.ROUND_START
 
     # ---- 第 1 步：选一名角色（含自己）------------------------------------
-    target_key = f"dingluan:target:{asker}"
+    target_key = f"dingluan:target:{owner}"
     if target_key not in frame.data:
         pool = _dingluan_targets(state)
         if not pool:
             return None
         choice = host.ask_option(
             frame,
-            asker,
+            owner,
             timing,
-            skill_id=f"dingluan:seat:{asker}",
+            skill_id=f"dingluan:seat:{owner}",
             options=tuple(seat_choice(seat) for seat in pool),
         )
         if host.suspended(choice):
@@ -235,7 +237,7 @@ def _dingluan(host: Any, frame: Any) -> Any:
     target = int(frame.data[target_key])
 
     # ---- 第 2 步：展示该角色至多 X 张牌（R3=A：发动者挑；隐藏手牌盲挑）----
-    picked_key = f"dingluan:picked:{asker}"
+    picked_key = f"dingluan:picked:{owner}"
     if picked_key not in frame.data:
         pool_size = _own_card_count(state, target)
         if pool_size <= 0:
@@ -244,8 +246,8 @@ def _dingluan(host: Any, frame: Any) -> Any:
         picked = host.ask_selection(
             frame,
             owner=_ASK_DINGLUAN_PICKED,
-            key=f"dingluan:card:{asker}",
-            actor=asker,
+            key=f"dingluan:card:{owner}",
+            actor=owner,
             timing=timing,
             spec=_dingluan_spec(spec_hi),
             # 面只构造一次（引擎按 (owner, key) 缓存）：隐藏手牌的位置打乱消耗一次
@@ -253,7 +255,7 @@ def _dingluan(host: Any, frame: Any) -> Any:
             build_face=lambda: host.selection_face(
                 target,
                 (Zone.HAND, Zone.EQUIP),
-                reveal_hand=(target == asker),
+                reveal_hand=(target == owner),
             ),
         )
         if host.suspended(picked):
@@ -264,9 +266,9 @@ def _dingluan(host: Any, frame: Any) -> Any:
         return None
 
     # ---- 效果：标记为【定乱】牌 → 展示（一起做，无询问）→ 记"目标已被定乱过"----
-    done_key = f"dingluan:done:{asker}"
+    done_key = f"dingluan:done:{owner}"
     if not frame.data.get(done_key):
-        mark_dingluan_cards(host, writer, picked)
+        mark_dingluan_cards(host, owner, picked)
         for card_id in picked:
             host.reveal_card(frame, target, state.card(card_id))
         _mark_dingluan_used(state, target)
@@ -362,7 +364,7 @@ def yujin_skill_definitions() -> tuple[SkillDef, ...]:
             ),
             step_requirements={
                 "seat": "选择一名角色（可以是自己）",
-                "card": "展示该角色至多 X 张牌并标记为【定乱】牌（X = 3 − 此前发动过的次数）",
+                "card": "展示该角色至多 X 张牌并标记为【定乱】牌（X = 3 − 已被定乱过的角色数）",
             },
         ),
         SkillDef(

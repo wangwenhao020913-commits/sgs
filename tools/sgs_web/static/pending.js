@@ -727,6 +727,20 @@ function renderDirect(only, pending) {
   $("t-choice").textContent = only ? `将提交：${label}` : "";
 }
 
+/** 「显式选中的候选」是否已可提交：`blocked` / `ready` 的唯一算法。
+ *
+ * 两档提交面（亮牌的可选步与未知区域的多选档）原来是逐行同形的三行：取
+ * `state.selectedOption` 指向的候选 → `selectionError` 给阻塞原因 → `blocked === null` 且
+ * `buildAction()` 造得出那条 Action 才算可提交。抽在这里，两支共用；文案各自保留。
+ */
+function selectionReady(pending) {
+  const selected = state.selectedOption === null
+    ? null
+    : (pending.legal_actions || [])[state.selectedOption];
+  const blocked = selected === null ? null : selectionError(selected, pending);
+  return { blocked, ready: blocked === null && buildAction() !== null };
+}
+
 /** 提交按钮的唯一判据：**能造出一个候选里真有的 Action** 时才可点。
  *
  * 空选提交会被引擎拒（400），所以界面必须自己拦住——但**不能替引擎裁决**（`04` §4.1）：
@@ -807,18 +821,12 @@ function refreshSubmit(pending) {
     return;
   }
   if (dialogKind === DIALOG_KINDS.reveal && isPickRevealStep(pending)) {
-    const selected = state.selectedOption === null
-      ? null
-      : (pending.legal_actions || [])[state.selectedOption];
-    const blocked = selected === null ? null : selectionError(selected, pending);
-    const ready = blocked === null && buildAction() !== null;
+    const { blocked, ready } = selectionReady(pending);
     $("btn-submit").disabled = !ready;
     if (state.lastRejectReason) {
       $("t-choice").textContent = state.lastRejectReason;
     } else if (blocked) {
-      const total = (pending.spec && pending.spec.total) || [1, 1];
-      const least = Math.max(1, Number(total[0]) || 1);
-      const most = Math.max(least, Number(total[1]) || least);
+      const [least, most] = selectionRange(pending);
       const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
       $("t-choice").textContent = `选 ${howMany}后点右端「提交」（已选 ${state.picks.length} 张）。`;
     } else {
@@ -848,15 +856,9 @@ function refreshSubmit(pending) {
   // 右端「提交」是**唯一**提交点 ⇒ 这一支排在 `dialogDisablesPass`（弹窗内容一击即提交、
   // 提交键恒灰）**之前**，按既有的 `selectionError` / `buildAction` 算可点态。判据仍是
   // "能造出候选里真有的那条 Action"，`cap === 1` 的旧档原样走下面那条分支。
-  if (dialogKind === DIALOG_KINDS.unknown && selectionCap(pending) > 1) {
-    const selected = state.selectedOption === null
-      ? null
-      : (pending.legal_actions || [])[state.selectedOption];
-    const blocked = selected === null ? null : selectionError(selected, pending);
-    const ready = blocked === null && buildAction() !== null;
-    const total = (pending.spec && pending.spec.total) || [1, 1];
-    const least = Math.max(1, Number(total[0]) || 1);
-    const most = Math.max(least, Number(total[1]) || least);
+  if (isUnknownZoneMultipick(pending)) {
+    const { ready } = selectionReady(pending);
+    const [least, most] = selectionRange(pending);
     const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
     $("btn-submit").disabled = !ready;
     $("t-choice").textContent = state.lastRejectReason

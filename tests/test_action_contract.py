@@ -206,11 +206,13 @@ def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
     """票 06：未知区域弹窗的**多选档**（【定乱】展示别人的至多 3 张牌）。
 
     探针喂的是票面 §2.1 那份**真实载荷**（``total=(1,3)``、三槽 = 两张「?」手牌 +
-    装备区青釭剑、七条候选 = 三槽的全部非空组合），再用真的 ``options.js`` 入口点两张牌：
+    装备区青釭剑、七条候选 = 三槽的全部非空组合），再用真的 ``options.js`` 入口**按点击
+    顺序 2 → 0** 点两张牌：
 
     - 点牌只是切换选中态 ⇒ 两次点击**一次提交都不发**（多选档不保留"点一张即提交"）；
-    - 点完两张后 ``buildAction()`` 造出 ``picks = [0, 2]``，且**逐字段**等于候选里那条
-      ``[0, 2]``（引擎按升序枚举组合，点击顺序 2 → 0 也得规范化）；
+    - 点完两张后 ``buildAction()`` 造出 ``picks = [0, 2]``（``state.picks`` 记的是点击
+      顺序，规范化住 ``answer.js:buildAction``），且**逐字段**等于候选里那条 ``[0, 2]``
+      ——顺序反过来点才真钉住升序规范化（点 0 → 2 时点击顺序恰好已升序，断言空转）；
     - ``parse_action`` 接受它（跨语言形状不变，仍是三格 ``SelectCards``）。
 
     对照组是 ``cap === 1`` 的旧载荷（反间式盲挑，一槽一条候选）：点一张**恰一次**提交，
@@ -228,7 +230,7 @@ def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
     assert action is not None, "点两张之后 buildAction() 返回了 null（多选档没接上候选骨架）"
     assert action["kind"] == "SelectCards"
     assert action["picks"] == [0, 2], (
-        "点第一张 + 第三张（0 与 2）要造出多张组合 [0, 2]：" f"{action['picks']}"
+        "按点击顺序 2 → 0 点两张，要升序规范化成多张组合 [0, 2]：" f"{action['picks']}"
     )
     assert action in multi["legal_actions"], (
         "造出的动作必须逐字段命中 legal_actions 的那一条（[0, 2]）："

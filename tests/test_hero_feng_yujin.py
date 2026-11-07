@@ -582,6 +582,9 @@ def test_dingluan_x_counts_marked_characters_not_activations():
 
     三次发动分别定乱座位 1 / 2 / 3 ⇒ X 走 3 → 2 → 1 → 0；于禁自己的座位从不被记账
     （A1 的"发动者侧记账"会把 bit 0 置上，X 就只会变成 3 − 2 = 1）。
+
+    每个目标都配 ≥3 张手牌：``spec.total`` 的上界 = min(X, 目标牌数)，目标牌数若比 X 小
+    就会把 hi 拉低，X 的走势也就测不出来了（第 3 名目标原本只有 1 张牌 ⇒ hi 恒 1）。
     """
     engine = _engine(
         seats=[
@@ -595,10 +598,13 @@ def test_dingluan_x_counts_marked_characters_not_activations():
                 identity=Identity.REBEL,
             ),
             SeatSpec(
-                hand=(_cards("dodge")[1], _cards("slash")[2]),
+                hand=(_cards("dodge")[1], _cards("slash")[2], _cards("peach")[2]),
                 identity=Identity.REBEL,
             ),
-            SeatSpec(hand=(_cards("peach")[2],), identity=Identity.RENEGADE),
+            SeatSpec(
+                hand=(_cards("dodge")[2], _cards("slash")[3], _cards("peach")[3]),
+                identity=Identity.RENEGADE,
+            ),
         ],
         hand0=(_cards("slash")[0],),
     )
@@ -763,6 +769,65 @@ def test_jieyue_mark_branch_marks_shows_and_gives():
     assert own[0] in target_hand and own[1] in target_hand, "选项 1 把这些牌交给目标"
     for card_id in own:
         assert engine.state.tags_of(card_id), "交出去时仍带着【定乱】标记"
+
+
+def test_jieyue_marking_does_not_consume_the_dingluan_limit():
+    """【节钺】的标记**不**占用「被定乱过」的记账（两条技能各记各的，票 08）。
+
+    2 人局：座位 0 = 锋·于禁在出牌阶段发动【节钺】，选项 1 把座位 1 的牌标成【定乱】牌
+    并交还；走到**下一轮开始**时，【定乱】的目标选项里**仍有 `seat:1`**。判据只走公开
+    询问面（目标选项），不读私有位段——【节钺】若顺手写了【定乱】的那段位，座位 1 会从
+    目标池里消失。
+    """
+    own = (_cards("peach")[0], _cards("dodge")[0])
+    hand1 = (_cards("slash")[0],)
+    engine = _jieyue_engine(own, hand1)
+    # 第 1 个轮边界先放弃（本题只看【节钺】之后的那个轮边界）。
+    driver = _Driver(jieyue=True, choice="jieyue_mark", pick=2)
+    players = [driver, _Driver(pick=1)]
+    _play_phase(engine, players)
+    engine.submit(
+        next(
+            action
+            for action in engine.pending.legal_actions
+            if isinstance(action, ActivateSkill) and action.skill_id == JIEYUE
+        )
+    )
+    run_queries(
+        engine,
+        players,
+        lambda current: len(engine.state.player(1).hand) == 2,
+    )
+    target_hand = [int(card) for card in engine.state.player(1).hand]
+    assert all(
+        any(tag.tag_type is DINGLUAN_TAG for tag in engine.state.tags_of(card))
+        for card in target_hand
+    ), "前置：选项 1 交还的这两张牌都被标成【定乱】牌"
+
+    # 之后才在轮边界发动【定乱】：目标池里应仍有座位 1（记账没被【节钺】占掉）。
+    driver.activate_dingluan = True
+    run_queries(
+        engine,
+        players,
+        lambda current: any(
+            str(query.skill_id or "").startswith("dingluan:seat:")
+            for query in driver.options
+        ),
+    )
+    query = next(
+        query
+        for query in driver.options
+        if str(query.skill_id or "").startswith("dingluan:seat:")
+    )
+    choices = [
+        str(action.choice)
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert "seat:1" in choices, (
+        "【节钺】的标记不占用「被定乱过」的记账：下一轮开始时座位 1 仍在目标池里"
+        f"（实际：{choices}）"
+    )
 
 
 def test_jieyue_damage_branch_discards_then_hits():
