@@ -6,7 +6,9 @@
 
 本文件同时钉住框架票 ``02``（``Timing.ROUND_START`` 轮边界派发）与 ``03``
 （``CardTagType.DINGLUAN`` 的禁令 / 进入弃牌堆即清 / 标签自身效果）的行为面；票 ``07``
-起【定乱】是**于禁自己的技能**（B2）——轮开始时**只问持有者**，别的座位零询问。
+起【定乱】是**于禁自己的技能**（B2）——轮开始时**只问持有者**，别的座位零询问；
+票 ``08`` 起限次在**目标侧**（D1）——每名角色整局至多被定乱 1 次，目标池排除已被
+定乱过的座位（含自己），X = 3 − 已被定乱过的角色数。
 """
 
 from __future__ import annotations
@@ -130,6 +132,23 @@ class _Driver:
             if wanted:
                 return wanted[0]
         return choices[0]
+
+
+class _PerRoundDriver(_Driver):
+    """按轮次换目标座位的脚本驱动（票 08 主判据要"第 1 轮敌方 / 第 2 轮自己"）。"""
+
+    def __init__(self, targets: list[int]) -> None:
+        super().__init__(activate_dingluan=True)
+        self._targets = list(targets)
+
+    def respond(self, query):
+        if (
+            query.kind == "SKILL_ACTIVATION"
+            and query.skill_id == DINGLUAN
+            and self._targets
+        ):
+            self.target = self._targets.pop(0)
+        return super().respond(query)
 
 
 def _engine(
@@ -353,7 +372,7 @@ def test_no_draw_when_the_marked_card_enters_discard_from_another_zone():
 
 
 # ---------------------------------------------------------------------------
-# §定乱：轮边界派发，只问持有者（框架票 02 + feng-yujin 票 07）
+# §定乱：轮边界派发，只问持有者 + 目标侧限次（框架票 02 + feng-yujin 票 07 / 08）
 # ---------------------------------------------------------------------------
 
 
@@ -363,6 +382,24 @@ def _round_starts(engine: Engine) -> int:
         for record in engine.records
         if record.kind == "timing" and record.timing is Timing.ROUND_START
     )
+
+
+def _marks(engine: Engine) -> tuple[int, ...]:
+    """已经被定乱过的座位（票 08 的记账位段 = "每名角色整局至多被定乱 1 次"的唯一真源）。"""
+    from sgs.skills.hero_yujin import _seat_used
+
+    return tuple(
+        seat
+        for seat in range(len(engine.state.players))
+        if _seat_used(engine.state, seat)
+    )
+
+
+def _x(engine: Engine) -> int:
+    """【定乱】的当前 X（= 3 − 已被定乱过的角色数）。"""
+    from sgs.skills.hero_yujin import _remaining_x
+
+    return _remaining_x(engine.state)
 
 
 def _four_seats() -> list[SeatSpec]:
@@ -467,34 +504,162 @@ def test_dingluan_markers_are_public_and_the_cards_are_revealed():
     assert target_card in [int(c) for c in engine.state.player(1).hand], "展示不移动牌"
 
 
-def test_dingluan_x_shrinks_with_every_activation_and_a_used_seat_is_skipped():
-    """X = 3 − 此前发动次数；只问持有者，发动过的座位整局不再问。
+def test_dingluan_can_mark_each_character_once_in_a_two_seat_game():
+    """D1（票 08）主判据：2 人局「第 1 轮敌方 / 第 2 轮自己」。
 
-    "已发动"仍按**座位**记账（票 08 会把它换成"已被定乱过的角色"），故用记账入口把"此前
-    发动过 2 次"直接落位 ⇒ 持有者第一问的 X 必须缩到 1。发动之后持有者整局不再被问。
+    用户 2026-11-07 的实机报障：首轮对敌方发动之后于禁整局不再被问，而 X 还剩 2。
+    限次落到目标侧之后，座位 1 已被定乱 ⇒ 第 2 轮**仍被问**，但目标池只剩于禁自己；
+    第 2 次发动因此只能展示 2 张（X = 3 − 1）。
+    """
+    engine = _engine(
+        seats=[
+            SeatSpec(hero=YUJIN, hand=(_cards("slash")[0], _cards("peach")[0])),
+            SeatSpec(
+                hand=(_cards("dodge")[0], _cards("slash")[1], _cards("peach")[1])
+            ),
+        ],
+        hand0=(_cards("slash")[0], _cards("peach")[0]),
+    )
+    owner = _PerRoundDriver(targets=[1, 0])
+    other = _Driver()
+    # 停在第 3 轮的轮边界 ⇒ 第 1、2 轮各问完、两次效果都已结算（第 3 轮已无目标可问）。
+    run_queries(engine, [owner, other], lambda current: _round_starts(current) >= 3)
+
+    assert [int(query.actor) for query in owner.activations] == [0, 0], (
+        "第 2 轮仍被问：限次在目标侧，不在发动者侧"
+    )
+    assert [query.spec.total for query in owner.selections] == [(1, 3), (1, 2)], (
+        "第 1 次 X=3、第 2 次 X=2（牌面原文 3 − 此前次数）"
+    )
+    round_two_targets = [
+        str(action.choice)
+        for action in owner.options[1].legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert round_two_targets == ["seat:0"], "座位 1 已被定乱 ⇒ 第 2 轮目标池只剩于禁自己"
+    assert _marks(engine) == (0, 1), "每名角色整局至多被定乱 1 次（两个座位各一次）"
+    assert _x(engine) == 1, "X = 3 − 已被定乱过的角色数"
+
+
+def test_dingluan_never_offers_a_target_that_was_already_marked():
+    """D1（票 08）：目标池排除已经被定乱过的角色（记账位段预置 ⇒ 候选里没有它）。"""
+    from sgs.skills.hero_yujin import _mark_dingluan_used
+
+    engine = _engine(
+        seats=[
+            SeatSpec(
+                hero=YUJIN,
+                hand=(_cards("slash")[0],),
+                identity=Identity.LORD,
+            ),
+            SeatSpec(hand=(_cards("dodge")[0],), identity=Identity.REBEL),
+            SeatSpec(hand=(_cards("peach")[0],), identity=Identity.REBEL),
+            SeatSpec(hand=(_cards("slash")[1],), identity=Identity.RENEGADE),
+        ],
+        hand0=(_cards("slash")[0],),
+    )
+    _mark_dingluan_used(engine.state, 1)
+    driver = _Driver(activate_dingluan=True, target=2)
+    others = [_Driver() for _ in range(3)]
+    run_queries(engine, [driver, *others], lambda current: bool(driver.options))
+
+    query = driver.options[0]
+    choices = [
+        str(action.choice)
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert "seat:1" not in choices, "座位 1 已被定乱过 ⇒ 不再是【定乱】的目标"
+    assert choices == ["seat:0", "seat:2", "seat:3"]
+    assert all(
+        str(getattr(action, "choice", "")) != "seat:1"
+        for action in query.legal_actions
+    ), "整份候选里都没有 seat:1"
+
+
+def test_dingluan_x_counts_marked_characters_not_activations():
+    """D1（票 08）：X = 3 − 已被定乱过的角色数（不是"发动过的座位数"）。
+
+    三次发动分别定乱座位 1 / 2 / 3 ⇒ X 走 3 → 2 → 1 → 0；于禁自己的座位从不被记账
+    （A1 的"发动者侧记账"会把 bit 0 置上，X 就只会变成 3 − 2 = 1）。
+    """
+    engine = _engine(
+        seats=[
+            SeatSpec(
+                hero=YUJIN,
+                hand=(_cards("slash")[0], _cards("peach")[0]),
+                identity=Identity.LORD,
+            ),
+            SeatSpec(
+                hand=(_cards("dodge")[0], _cards("slash")[1], _cards("peach")[1]),
+                identity=Identity.REBEL,
+            ),
+            SeatSpec(
+                hand=(_cards("dodge")[1], _cards("slash")[2]),
+                identity=Identity.REBEL,
+            ),
+            SeatSpec(hand=(_cards("peach")[2],), identity=Identity.RENEGADE),
+        ],
+        hand0=(_cards("slash")[0],),
+    )
+    driver = _PerRoundDriver(targets=[1, 2, 3])
+    others = [_Driver() for _ in range(3)]
+    run_queries(engine, [driver, *others], lambda current: _round_starts(current) >= 4)
+
+    assert [query.spec.total[1] for query in driver.selections] == [3, 2, 1], (
+        "每定乱一名角色，下一次发动的 X 减 1"
+    )
+    assert _marks(engine) == (1, 2, 3), "记账记的是目标，不是发动者（座位 0 不在其中）"
+    assert _x(engine) == 0, "三名角色已被定乱 ⇒ X=0"
+    assert len(driver.activations) == 3, "X=0 之后不再问"
+
+
+def test_dingluan_x_shrinks_with_every_activation_and_a_used_seat_is_skipped():
+    """D1（票 08）：X = 3 − 已被定乱过的角色数；已经被定乱过的座位不再进目标池。
+
+    直接用记账入口把座位 1、2 置成"已经被定乱过"（本局一次都没发动过）⇒ 持有者第一问
+    的 X 必须缩到 1、目标池只剩座位 0 / 3；它发动一次（目标 = 座位 3）再记一名 ⇒ X=0，
+    此后不再问。记账记的是**目标**，不是发动者（座位 0 不在其中）。
     """
     from sgs.skills.hero_yujin import _mark_dingluan_used
 
-    engine = _engine(seats=_four_seats(), hand0=(_cards("slash")[0],))
+    engine = _engine(
+        seats=[
+            SeatSpec(hero=YUJIN, hand=(_cards("slash")[0],), identity=Identity.LORD),
+            SeatSpec(hand=(_cards("dodge")[0],), identity=Identity.REBEL),
+            SeatSpec(hand=(_cards("peach")[0],), identity=Identity.REBEL),
+            SeatSpec(hand=(_cards("slash")[1],), identity=Identity.RENEGADE),
+        ],
+        hand0=(_cards("slash")[0],),
+    )
     _mark_dingluan_used(engine.state, 1)
     _mark_dingluan_used(engine.state, 2)
-    first = _Driver(activate_dingluan=True, target=0)
+    first = _Driver(activate_dingluan=True, target=3)
     others = [_Driver() for _ in range(3)]
     # 停在第 3 轮的轮边界 ⇒ 第 1、2 轮各问完。
     run_queries(engine, [first, *others], lambda current: _round_starts(current) >= 3)
+
+    target_options = [
+        str(action.choice)
+        for action in first.options[0].legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert target_options == ["seat:0", "seat:3"], "已定乱过的座位 1 / 2 不再进目标池"
     totals = [query.spec.total for query in first.selections]
-    assert totals and totals[0][1] == 1, "X = 3 − 此前发动过的次数"
-    assert len(first.activations) == 1, "发动之后持有者不再被问（座位侧的整局限次）"
+    assert totals and totals[0][1] == 1, "X = 3 − 已被定乱过的角色数"
+    assert _marks(engine) == (1, 2, 3), "发动后记的是**目标**（座位 3），不是发动者"
+    assert _x(engine) == 0, "第三名角色被定乱 ⇒ X=0"
+    assert len(first.activations) == 1, "X=0 之后不再问"
     for driver in others:
         assert driver.activations == [], "非持有者零询问"
 
 
 def test_dingluan_is_not_offered_when_x_reaches_zero():
-    """三次发动之后 X=0 ⇒ 轮开始时连问都不问（持有者自己的座位还没发动过）。"""
+    """D1：X=0 ⇒ 轮开始时连问都不问（持有者自己没被定乱过、目标池非空也不行）。"""
     from sgs.skills.hero_yujin import _mark_dingluan_used
 
     engine = _engine(seats=_four_seats(), hand0=(_cards("slash")[0],))
-    # 直接落位三次"已发动"（座位位段是 X 减数的唯一真源）。
+    # 三名角色已经被定乱过（座位位段是 X 减数的唯一真源）。
     for seat in (1, 2, 3):
         _mark_dingluan_used(engine.state, seat)
     drivers = [_Driver() for _ in range(4)]
