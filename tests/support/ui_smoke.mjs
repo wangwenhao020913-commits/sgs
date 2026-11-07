@@ -513,7 +513,8 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // lei-batch 票 01：雷包加郝昭（新真名「郝昭」）⇒ 46 / 72 → 47 / 73。
   // tao-caocao 票 01：自制包加韬·曹操自制版（真名「曹操」已在池里）⇒ 真名不变、版本 75 → 76。
   // lin-batch 票 01：林包移动版加神曹操移动版（新真名「神曹操」）⇒ 真名 54 → 55、版本 83 → 84。
-  ui.state.heroCatalog.length === 55 && catalogVersions.length === 84,
+  // lin-batch 票 02：林包移动版加孙坚移动版（新真名「孙坚」）⇒ 真名 55 → 56、版本 84 → 85。
+  ui.state.heroCatalog.length === 56 && catalogVersions.length === 85,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

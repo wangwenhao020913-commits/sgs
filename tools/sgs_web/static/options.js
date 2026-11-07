@@ -285,6 +285,10 @@ const OPTION_LABELS = Object.freeze({
   duanyan_weapon: "武器栏",
   duanyan_armor: "防具栏",
   duanyan_horses: "两个坐骑栏",
+  // 孙坚移动版【英魂】（lin-batch 票 02）：两项恒可执行、发动后必答（Q1 = A：标签逐字写「X」，
+  // 不按当时 X 渲染成具体数字；两段效果都由**目标**执行）。
+  yinghun_draw_x_discard_one: "令其摸X张牌，然后其弃置一张牌",
+  yinghun_draw_one_discard_x: "令其摸一张牌，然后其弃置X张牌",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

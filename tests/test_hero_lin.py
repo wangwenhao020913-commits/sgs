@@ -1,6 +1,11 @@
-"""神话再临·林包（移动版）：神曹操移动版 —— 【归心】/【飞影】（lin-batch 票 01）。
+"""神话再临·林包（移动版）：神曹操移动版【归心】/【飞影】 与 孙坚移动版【英魂】。
 
-牌面（用户 `技能.txt` 第 1 版文本，逐字；口径 = **移动版**，取牌动词是「获得」）：
+本批（lin-batch）三只武将同住 `heroes.lin_mobile.json`，每票一个实现者 / 一个提交：
+
+- **票 01**：神曹操移动版 —— 【归心】/【飞影】（本文件 §1 / §2）；
+- **票 02**：孙坚移动版 —— 【英魂】（本文件 §3）。
+
+票 01 的牌面（用户 `技能.txt` 第 1 版文本，逐字；口径 = **移动版**，取牌动词是「获得」）：
 
     归心
     　当你受到1点伤害后，你可以获得每名其他角色区域里的一张牌，然后你翻面。
@@ -19,21 +24,28 @@
 - **Q2 = A**：发动后**不可**逐座少拿（`optional=False`、候选里没有 `Pass`）；
 - **Q3 = A**：逐座位顺序 = **从持有者下家起的座位序**。
 
+票 02 的牌面与裁定见本文件 §3 的段首注释（用户 2026-11-08 签「询问剧本」+ Q1–Q6 全按
+建议 A）。
+
 判据全走**外部缝**：记录流里的时机 / 询问 / delta、选牌面的 `spec.zones` 与槽位、
-以及终局状态（牌在哪、谁翻面了）。**不 mock、不旁路候选**。
+以及终局状态（牌在哪、谁翻面了 / 谁摸了几张、弃了几张）。**不 mock、不旁路候选**。
 """
 
 from __future__ import annotations
 
-from sgs.data import load_content_pack
+from sgs.data import RuleConfig, load_content_pack
 from sgs.effects import distance
 from sgs.engine import Engine
-from sgs.skills import CATALOG
+from sgs.skills import CATALOG, flow_for
 from sgs.state import (
     ActivateSkill,
+    EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
+    Phase,
     SelectCards,
+    SelectOption,
     SkillSuppression,
     Zone,
 )
@@ -705,8 +717,6 @@ def test_feiying_disappears_when_the_skill_is_suppressed():
 
 def test_guixin_is_a_handwritten_per_point_hook_without_a_flow():
     """票面 §1「形状」：手写钩子（逐点、无流水线、无 `preactivated`）⇒「多轮技能」格。"""
-    from sgs.skills import flow_for
-
     definition = CATALOG[GUIXIN]
     assert definition.locked is False
     assert definition.preactivated is False, "首步读别人的手牌 ⇒ 不翻预发动"
@@ -737,3 +747,582 @@ def test_guixin_and_feiying_are_the_two_skills_of_the_mobile_hero():
     assert hero.version == "lin-mobile"
     assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("shen", "male", 3)
     assert [f"hero.{hero.id}.{skill.id}" for skill in hero.skills] == [GUIXIN, FEIYING]
+
+
+# ===========================================================================
+# §3 孙坚移动版【英魂】（lin-batch 票 02）
+#
+# 牌面（`…/孙坚/技能.txt`，逐字；口径 = **移动版**，见票面 §0.1）：
+#
+#     英魂
+#     　准备阶段，若你已受伤，你可以选择一名其他角色并选择一项：
+#       1.令其摸X张牌，然后其弃置一张牌；2.令其摸一张牌，然后其弃置X张牌。
+#       （X为你已损失的体力值）
+#
+# 用户裁定（票面 `## 用户裁定` ③）：**发动者选 1 项，令目标执行**——两段效果都由目标
+# 执行（弃哪几张也由目标自己选）；X = 1 时两项后果相同是**有意的重复**，两项都列、
+# 不置灰、不合并。判据全走**外部缝**：询问（`SKILL_ACTIVATION` / `SELECT_OPTION` /
+# `SELECT_CARDS`）、`spec`、记录流 delta 与终局状态。**不 mock、不旁路候选**。
+# ===========================================================================
+
+SUNJIAN = "sunjian_mobile"
+YINGHUN = "hero.sunjian_mobile.yinghun"
+YINGHUN_DRAW_X_DISCARD_ONE = "yinghun_draw_x_discard_one"
+YINGHUN_DRAW_ONE_DISCARD_X = "yinghun_draw_one_discard_x"
+QINGJIAN = "hero.jie_xiahoudun.qingjian"
+
+YINGHUN_REQUIREMENT = (
+    "准备阶段，若你已受伤，你可以选择一名其他角色并选择一项："
+    "1.令其摸X张牌，然后其弃置一张牌；2.令其摸一张牌，然后其弃置X张牌。"
+    "（X为你已损失的体力值）"
+)
+
+
+class Yinghun:
+    """座位脚本：预发动 / 选座 / 选一项 / 弃牌各按构造参数应答。
+
+    **别的技能一律「不发动」**：本票借【清俭】造"摸牌内联挂起"的中继，它不是被测对象。
+    """
+
+    def __init__(
+        self,
+        *,
+        activate: bool = True,
+        seat: int = 1,
+        option: str = YINGHUN_DRAW_X_DISCARD_ONE,
+        take: int | None = None,
+        pick_index: int = 0,
+        relay: bool = False,
+        pick_action=None,
+    ) -> None:
+        self.activate = activate
+        self.seat = seat
+        self.option = option
+        self.take = take
+        self.pick_index = pick_index
+        self.relay = relay
+        """``True`` = **中继技能也发动**（本票只借【清俭】造"摸到的牌被当场交出去"的局面）。"""
+        self.pick_action = pick_action
+        """``(query) -> Action``：需要按**区域**挑牌时用它（缺省按 ``take`` / ``pick_index`` 挑）。"""
+        self.activations: list = []
+        self.options: list = []
+        self.selections: list = []
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "SKILL_ACTIVATION":
+            activate = next(
+                (a for a in query.legal_actions if isinstance(a, ActivateSkill)), None
+            )
+            give_up = next((a for a in query.legal_actions if isinstance(a, Pass)), None)
+            self.activations.append(query)
+            if str(query.skill_id) == YINGHUN:
+                if self.activate and activate is not None:
+                    return activate
+                if give_up is not None:
+                    return give_up
+                return query.legal_actions[0]
+            if self.relay and activate is not None:
+                return activate
+            # 【清俭】等中继技能：缺省一律不发动（不是被测对象）。
+            return give_up if give_up is not None else query.legal_actions[0]
+        if kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+            return query.legal_actions[0]
+        if kind == "SELECT_OPTION":
+            self.options.append(query)
+            skill = str(getattr(query, "skill_id", ""))
+            wanted = None
+            if skill == "yinghun:seat":
+                wanted = f"seat:{self.seat}"
+            elif skill == "yinghun:option":
+                wanted = self.option
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and str(action.choice) == wanted:
+                    return action
+            return next(
+                (a for a in query.legal_actions if isinstance(a, SelectOption)),
+                query.legal_actions[0],
+            )
+        if kind == "SELECT_CARDS":
+            self.selections.append(query)
+            if self.pick_action is not None:
+                return self.pick_action(query)
+            usable = [
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectCards)
+                and (self.take is None or len(action.picks) == self.take)
+            ]
+            if usable:
+                return usable[self.pick_index]
+            return query.legal_actions[0]
+        return query.legal_actions[0]
+
+
+def _yinghun_state(
+    *,
+    own_hp: int = 2,
+    own_hp_max: int = 4,
+    target_hero: str | None = None,
+    target_hp: int = 4,
+    target_hand: tuple[int, ...] = (),
+    target_equip: tuple[int, ...] = (),
+    target_judge: tuple[int, ...] = (),
+    target_alive: bool = True,
+    seats: int = 2,
+    first_seat: int = 0,
+    deck: tuple[int, ...] | None = None,
+):
+    """座位 0 = 孙坚移动版；座位 1 = 目标；其余无武将。``own_hp`` ⇒ X = 上限 − 当前。"""
+    used = {*target_hand, *target_equip, *target_judge}
+    specs = [
+        SeatSpec(hero=SUNJIAN, hp=own_hp, hp_max=own_hp_max),
+        SeatSpec(
+            hero=target_hero,
+            hp=target_hp,
+            hp_max=4,
+            hand=tuple(target_hand),
+            equip=tuple(target_equip),
+            judge=tuple(target_judge),
+            alive=target_alive,
+        ),
+    ]
+    specs.extend(SeatSpec() for _ in range(seats - 2))
+    rule_config = (
+        None
+        if first_seat == 0
+        else RuleConfig(player_count=2, first_seat=first_seat)
+    )
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck_excluding(PACK, *used) if deck is None else deck,
+        turn_seat=first_seat,
+        phase=Phase.PREPARE,
+        rule_config=rule_config,
+    )
+
+
+def _run_prepare(engine, **kwargs):
+    """推进到**准备阶段跑完**（``PHASE_DRAW`` 已落）——英魂的全部询问都在它之前。"""
+    players = [Yinghun(**kwargs) for _ in range(len(engine.state.players))]
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW))
+    return players
+
+
+def _yinghun_engine(**kwargs):
+    """``(engine, players)``：座位脚本先摘出来，剩下的参数交给 :func:`_yinghun_state`。"""
+    script = {
+        key: kwargs.pop(key)
+        for key in ("activate", "seat", "option", "take", "pick_index", "relay", "pick_action")
+        if key in kwargs
+    }
+    state = _yinghun_state(**kwargs)
+    engine = Engine.from_state(state, seed=7)
+    return engine, _run_prepare(engine, **script)
+
+
+def _step_query(players, step: str):
+    """``yinghun:<step>`` 那一问（找不到 ⇒ 断言失败，不是静默 ``None``）。"""
+    for query in players[0].options:
+        if str(getattr(query, "skill_id", "")) == f"yinghun:{step}":
+            return query
+    raise AssertionError(
+        f"没有发出 yinghun:{step} 询问："
+        f"{[str(query.skill_id) for query in players[0].options]}"
+    )
+
+
+def _discard_query(players) -> list:
+    """目标那一侧的选牌询问（英魂的弃置段；本票目标只在弃置段被问选牌）。"""
+    return list(players[1].selections)
+
+
+def _discard_moves(engine, seat: int) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DISCARD
+        and record.owner == seat
+    ]
+
+
+def _draw_moves(engine, seat: int) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DRAW
+        and record.owner == seat
+    ]
+
+
+# ---------------------------------------------------------------------------
+# §3 英魂 —— ① 入口（自己的准备阶段 + 已受伤 + 有其他存活角色）
+# ---------------------------------------------------------------------------
+
+
+def test_yinghun_is_offered_only_on_my_own_prepare_phase():
+    """H2：「准备阶段」= **自己的**准备阶段；已受伤 ⇒ 恰问一次，且「可以」= 有放弃出口。"""
+    engine, players = _yinghun_engine(own_hp=3)
+
+    assert len(players[0].activations) == 1, "每个自己的准备阶段至多问一次"
+    query = players[0].activations[0]
+    assert query.actor == 0
+    kinds = {type(action).__name__ for action in query.legal_actions}
+    assert {"ActivateSkill", "Pass"} <= kinds, "「可以」⇒ 提交与放弃两个出口都在候选里"
+    assert query.optional is True
+
+
+def test_yinghun_is_not_offered_when_not_wounded():
+    """G2 / L741：满体力（未受伤）⇒ 条件为假，**连问都不发**（零副作用）。"""
+    engine, players = _yinghun_engine(own_hp=4, own_hp_max=4)
+
+    assert players[0].activations == []
+    assert players[1].selections == []
+    assert not any(
+        record.kind == "query" and str(getattr(record.query, "skill_id", "")) == YINGHUN
+        for record in engine.records
+    )
+
+
+def test_yinghun_with_no_other_alive_seat_offers_nothing():
+    """S4：没有其他存活角色 ⇒ 目标池空 ⇒ 不发没有候选的询问。"""
+    engine, players = _yinghun_engine(target_alive=False)
+
+    assert players[0].activations == []
+    assert players[1].selections == []
+
+
+def test_yinghun_target_pool_is_other_alive_seats_only():
+    """S1 / S4 / O2：座位步的候选 = **其他存活**座位（不含自己、不含死者），且无 `Pass`。"""
+    engine, players = _yinghun_engine(seats=3, target_alive=False)
+
+    assert engine.state.player(1).alive is False
+    query = _step_query(players, "seat")
+    choices = {
+        str(action.choice)
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    }
+    assert choices == {"seat:2"}, "死者与持有者自己都不进池（只剩座位 2）"
+    assert not any(isinstance(action, Pass) for action in query.legal_actions), (
+        "O2：发动后必须选一名角色（没有 Pass）"
+    )
+
+
+def test_yinghun_does_not_trigger_in_another_players_prepare_phase():
+    """H2 反向：**别人的**准备阶段 ⇒ 持有者的实例连「是否发动」都不问。"""
+    engine, players = _yinghun_engine(first_seat=1)
+
+    assert engine.state.turn_seat == 1
+    assert players[0].activations == [], "孙坚不是当前回合角色 ⇒ 英魂不该被问到"
+
+
+# ---------------------------------------------------------------------------
+# §3 英魂 —— ② 选项步（两项恒列、无 `Pass`）
+# ---------------------------------------------------------------------------
+
+
+def test_yinghun_lists_both_options_even_when_x_is_one():
+    """O1 + 用户裁定③：X = 1 时两项**后果相同**，仍都列、都不置灰、不合并。"""
+    engine, players = _yinghun_engine(own_hp=3, own_hp_max=4)  # X = 1
+
+    assert engine.state.player(0).hp_max - engine.state.player(0).hp == 1
+    query = _step_query(players, "option")
+    assert query.options == (YINGHUN_DRAW_X_DISCARD_ONE, YINGHUN_DRAW_ONE_DISCARD_X)
+    assert query.disabled == (), "两项恒可执行 ⇒ 不产出置灰项"
+    choices = {
+        str(action.choice)
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    }
+    assert choices == {YINGHUN_DRAW_X_DISCARD_ONE, YINGHUN_DRAW_ONE_DISCARD_X}
+
+
+def test_yinghun_option_step_has_no_pass():
+    """O2 / Q5 = A：「可以」的放弃出口只在预发动那一问；发动后必须选一项。"""
+    _engine, players = _yinghun_engine()
+
+    for query in (_step_query(players, "seat"), _step_query(players, "option")):
+        assert not any(
+            isinstance(action, Pass) for action in query.legal_actions
+        ), f"{query.skill_id} 不该有 Pass"
+
+
+# ---------------------------------------------------------------------------
+# §3 英魂 —— ③ 效果（先摸、后弃；两段都由目标执行）
+# ---------------------------------------------------------------------------
+
+
+def test_yinghun_option_one_draws_x_then_target_discards_one():
+    """选项 1：目标摸 **X** 张，然后弃置 **1** 张（X = 已损失体力值 = 3）。"""
+    hand = (_cards("slash")[1], _cards("slash")[2])
+    engine, players = _yinghun_engine(
+        own_hp=1, target_hand=hand, option=YINGHUN_DRAW_X_DISCARD_ONE
+    )
+
+    assert [len(record.cards) for record in _draw_moves(engine, 1)] == [3], "一次摸 X = 3 张"
+    discard = _discard_query(players)
+    assert len(discard) == 1
+    assert discard[0].spec.total == (1, 1), "弃置一段恰好一张"
+    assert len(engine.state.player(1).hand) == len(hand) + 3 - 1
+
+
+def test_yinghun_option_two_draws_one_then_target_discards_x():
+    """选项 2：目标摸 **1** 张，然后弃置 **X** 张（X = 3）。"""
+    hand = (
+        _cards("slash")[1],
+        _cards("slash")[2],
+        _cards("dodge")[0],
+        _cards("dodge")[1],
+        _cards("peach")[0],
+    )
+    engine, players = _yinghun_engine(
+        own_hp=1, target_hand=hand, option=YINGHUN_DRAW_ONE_DISCARD_X
+    )
+
+    assert [len(record.cards) for record in _draw_moves(engine, 1)] == [1], "一次摸一张"
+    discard = _discard_query(players)
+    assert discard[0].spec.total == (3, 3), "弃置 X = 3 张（不是「任意张」）"
+    assert len(engine.state.player(1).hand) == len(hand) + 1 - 3
+
+
+def test_yinghun_short_discard_takes_every_card():
+    """Q3 = A：目标可用牌数 < X ⇒ **全部弃置**（《官方规则集》逐字），规格恒可满足。"""
+    hand = (_cards("slash")[1],)
+    engine, players = _yinghun_engine(
+        own_hp=1, target_hand=hand, option=YINGHUN_DRAW_ONE_DISCARD_X
+    )
+
+    discard = _discard_query(players)
+    assert discard[0].spec.total == (2, 2), "摸 1 张后共 2 张 < X = 3 ⇒ 弃光"
+    assert engine.state.player(1).hand == [], "全部弃置，不是「整段不发生」"
+
+
+def test_yinghun_no_discard_step_without_any_card():
+    """边界：弃置段的可用牌数 = 0 ⇒ 该段整体不出现（不发空询问；摸牌已经发生）。
+
+    可达路径：目标 = 界夏侯惇，摸到的**那一张**被【清俭】当场交出去 ⇒ 弃置段开始前
+    它手里已经空了（X = 1、选项 1 只摸一张）。本票不另造机制，只用既有中继。
+    """
+    engine, players = _yinghun_engine(
+        own_hp=3,
+        target_hero="jie_xiahoudun",
+        target_hand=(),
+        option=YINGHUN_DRAW_X_DISCARD_ONE,
+        relay=True,
+    )
+
+    assert QINGJIAN in [str(query.skill_id) for query in players[1].activations]
+    assert engine.state.player(1).hand == [] and engine.state.player(1).equip == []
+    drawn = {ref.card_id for record in _draw_moves(engine, 1) for ref in record.cards}
+    assert len(drawn) == 1, "选项 1 在 X = 1 时只摸一张"
+    assert drawn <= set(engine.state.player(0).hand), "那一张真的被交到了孙坚手里（清俭生效）"
+    assert _discard_moves(engine, 1) == [], "没有可弃的牌 ⇒ 一条弃置 delta 都不该有"
+
+
+def test_yinghun_discard_face_covers_hand_and_equipment_but_not_judge():
+    """C2 / Q2 = A：「一张牌」= 手牌 + 装备区，**不含判定区**；面由目标自己铺。"""
+    hand, equip = _cards("slash")[1], _cards("eight_diagrams")[0]
+
+    def _one_from_each(query):
+        """挑"一张手牌 + 一张装备牌"那一条（跨区的弃置正是引擎最容易踩空的那一格）。"""
+        index = {
+            slot.card.card_id: position for position, slot in enumerate(query.slots)
+        }
+        picks = (index[hand], index[equip])
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == picks
+        )
+
+    engine, players = _yinghun_engine(
+        own_hp=2,
+        target_hand=(hand,),
+        target_equip=(equip,),
+        target_judge=(_cards("indulgence")[0],),
+        option=YINGHUN_DRAW_ONE_DISCARD_X,
+        pick_action=_one_from_each,
+    )
+
+    query = _discard_query(players)[0]
+    assert [zone.value for zone in query.spec.zones] == ["hand", "equip"]
+    assert {slot.ref.seat for slot in query.slots} == {1}, "铺的是目标自己的区"
+    assert all(
+        slot.card is not None for slot in query.slots if slot.ref.zone is not Zone.HAND
+    ), "应答者是手牌持有者本人 ⇒ 可见槽"
+    assert engine.state.player(1).judge, "判定区的那张牌一张都没动"
+
+    # 跨区的一次弃置（一手牌 + 一装备牌）：两个来源区各一条 delta（``move_card`` 一次**只
+    # 接受一个来源区**），两张牌都真的进了弃牌堆、判定区那张没动。
+    discarded = {
+        ref.card_id for record in _discard_moves(engine, 1) for ref in record.cards
+    }
+    assert discarded == {hand, equip}
+    assert engine.state.player(1).equip == [], "装备区那张被弃掉了"
+    assert len(engine.state.player(1).hand) == 1, "手牌区里只剩【2】**摸到的那一张**"
+    assert hand not in engine.state.player(1).hand
+
+
+def test_yinghun_target_chooses_the_discarded_cards():
+    """Q2 = A：弃哪几张由**目标**自己选（不是孙坚挑、也不是引擎按顺序弃）。"""
+    hand = (_cards("slash")[1], _cards("dodge")[0], _cards("peach")[0])
+    state = _yinghun_state(own_hp=2, target_hand=hand)
+    engine = Engine.from_state(state, seed=7)
+    players = [
+        Yinghun(take=2, pick_index=-1, option=YINGHUN_DRAW_ONE_DISCARD_X)
+        for _ in range(len(state.players))
+    ]
+
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW))
+
+    query = _discard_query(players)[0]
+    chosen = {slot.card.card_id for slot in query.slots}
+    assert set(hand) <= chosen and len(chosen) == len(hand) + 1, (
+        "面里是目标自己的三张手牌 + 刚摸到的那一张"
+    )
+    # 引擎按应答搬牌：被弃的正是应答里点的那两张，其余留在手里。
+    discarded = {
+        ref.card_id for record in _discard_moves(engine, 1) for ref in record.cards
+    }
+    assert len(discarded) == 2
+    assert set(engine.state.player(1).hand) == chosen - discarded
+
+
+def test_yinghun_discards_in_one_move():
+    """G4：一次弃置 = **一次**搬牌（一条 delta 带两张），不逐张派发「失去牌后」。"""
+    hand = (_cards("slash")[1], _cards("dodge")[0])
+    engine, _players = _yinghun_engine(
+        own_hp=2,
+        target_hand=hand,
+        option=YINGHUN_DRAW_ONE_DISCARD_X,
+        take=2,
+    )
+
+    moves = _discard_moves(engine, 1)
+    assert len(moves) == 1, "两张牌一次搬完（逐张会派发两次「失去牌后」）"
+    assert len(moves[0].cards) == 2
+
+
+def test_yinghun_x_is_snapshotted_from_lost_hp():
+    """Q4 = A：X = 上限 − 当前体力，在发动时现算一次、写进帧私有（本次结算内恒为常数）。
+
+    G9 说明：本技能结算里没有任何能改孙坚体力的路径 ⇒ "定格"与"每次现算"在可达局面里
+    不可区分。可断言的是**帧私有里确实存着**发动时那一个 X（重入不重算），且两段效果
+    都读它（选项 2 的弃置张数 = 快照里的 X）。
+    """
+    state = _yinghun_state(
+        own_hp=1,
+        own_hp_max=5,
+        target_hand=tuple(_cards("slash")[1:6]),
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [
+        Yinghun(take=4, option=YINGHUN_DRAW_ONE_DISCARD_X)
+        for _ in range(len(state.players))
+    ]
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind == "SELECT_CARDS",
+    )
+
+    frame = engine.phase_body_frame()
+    assert frame is not None, "准备阶段体帧还在（不压栈的那条）"
+    assert frame.data.get("yinghun_x") == 4, "X = 体力上限 − 当前体力 = 5 − 1"
+    pending = engine.pending
+    assert pending is not None and pending.kind == "SELECT_CARDS"
+    assert pending.spec.total == (4, 4), "弃置 4 张 = 快照里的 X"
+
+
+def test_yinghun_short_draw_ends_in_a_draw():
+    """G10：两堆皆空 ⇒ 短摸即平局（既有引擎行为，不新增分支）。
+
+    "平"必须发生在**英魂的摸牌**里（不是摸牌阶段自己摸空）：故断言平局之前已经问过
+    「是否发动」、且 ``PHASE_DRAW`` 一次都没落。
+    """
+    state = _yinghun_state(own_hp=2, deck=())
+    engine = Engine.from_state(state, seed=7)
+    players = [Yinghun() for _ in range(len(state.players))]
+    run_queries(engine, players, lambda e: e.finished)
+
+    assert len(players[0].activations) == 1, "平局发生在英魂的摸牌里，不是摸牌阶段"
+    assert not ran_timing(engine, Timing.PHASE_DRAW), "准备阶段就收局了"
+    assert engine.finished
+    tail = engine.records[-1]
+    assert tail.kind == "game_end" and tail.reason == "both_decks_empty"
+
+
+def test_yinghun_suspension_resumes_without_replaying_the_draw():
+    """G7：摸牌内联派发「获得牌后」（这里用界夏侯惇【清俭】）⇒ 挂起 → 续跑**不重摸**。
+
+    游标 ``yinghun_drawn`` 在搬牌**之前**落位，故续跑从弃置段接着走，不会把 X 张重摸一遍。
+    """
+    engine, players = _yinghun_engine(
+        own_hp=1,
+        own_hp_max=4,
+        target_hero="jie_xiahoudun",
+        target_hand=(),
+        option=YINGHUN_DRAW_X_DISCARD_ONE,
+    )
+
+    assert [str(query.skill_id) for query in players[1].activations] == [QINGJIAN], (
+        "摸牌确实内联派发了【清俭】⇒ 本回复真的挂起过一次（否则这条断言是空转）"
+    )
+    assert [len(record.cards) for record in _draw_moves(engine, 1)] == [3], (
+        "续跑后仍然只有**一次** 3 张的摸牌（重摸会留下第二条 delta）"
+    )
+    assert len(engine.state.player(1).hand) == 2, "3 张里弃掉 1 张"
+
+
+# ---------------------------------------------------------------------------
+# §3 英魂 —— ④ 形状与数据面
+# ---------------------------------------------------------------------------
+
+
+def test_yinghun_is_a_prepare_phase_hook_with_a_two_step_flow():
+    """形状（`shapes.md` §2 第 52 行「手写主体」）：钩子 + 座位步 / 选项步，主体住 `effect`。"""
+    definition = CATALOG[YINGHUN]
+    assert definition.locked is False, "牌面写「可以」⇒ 非锁定"
+    assert definition.preactivated is False, "首步是座位步 ⇒ 直提态 + 逐步问，不翻预发动"
+    assert [hook.timing for hook in definition.hooks] == [Timing.PHASE_PREPARE]
+    flow = flow_for(YINGHUN)
+    assert flow is not None, "有 SkillFlow ⇒ 步骤语言**内**"
+    assert [type(step).__name__ for step in flow.steps] == ["PickSeats", "PickOption"]
+    assert flow.steps[0].key == "seat" and flow.steps[1].key == "option"
+    assert flow.steps[1].options == (
+        YINGHUN_DRAW_X_DISCARD_ONE,
+        YINGHUN_DRAW_ONE_DISCARD_X,
+    )
+
+
+def test_yinghun_requirement_is_the_card_text():
+    """一句话文案 = 牌面逐字（含 X 的定义）；逐步文案四个键齐（含手写询问的两种键）。"""
+    definition = CATALOG[YINGHUN]
+    assert definition.requirement == YINGHUN_REQUIREMENT
+    assert set(definition.step_requirements) == {"seat", "option", "card", "discard"}
+    assert definition.step_requirements["card"] == definition.step_requirements["discard"], (
+        "手写询问的 SELECT_CARDS 逐步文案两种键同文（先例 = 【刚烈】）"
+    )
+
+
+def test_sunjian_mobile_is_the_wu_general_of_the_mobile_lin_pack():
+    """数据面：孙坚移动版那一行与 `heroes.lin_mobile.json` 同源（`hero.<武将 id>.<短 id>`）。"""
+    from sgs.data import hero_by_id
+
+    hero = hero_by_id(SUNJIAN)
+    assert hero is not None
+    assert hero.name == "孙坚移动版"
+    assert hero.true_name == "孙坚"
+    assert hero.version == "lin-mobile"
+    assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("wu", "male", 4)
+    assert hero.enabled is True
+    assert [f"hero.{hero.id}.{skill.id}" for skill in hero.skills] == [YINGHUN]

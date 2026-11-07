@@ -30,6 +30,7 @@ from sgs.state import (
     ActivateSkill,
     EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     Phase,
     SelectCards,
@@ -2790,3 +2791,93 @@ def test_shen_caocao_guixin_ai_activates_while_already_back_facing() -> None:
     assert all(tuple(action.picks) for action in picks), "每座都要交出一张"
     assert len(engine.state.player(0).hand) == 1, "拿到的牌进了神曹操的手牌"
     assert engine.state.player(0).flipped is False, "这一手把他翻回正面"
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·孙坚（lin-batch 票 02）：【英魂】指向敌人、选【2】（Q6 = A 的两半）
+# ---------------------------------------------------------------------------
+
+SUNJIAN_MOBILE = "sunjian_mobile"
+YINGHUN = "hero.sunjian_mobile.yinghun"
+YINGHUN_DRAW_X_DISCARD_ONE = "yinghun_draw_x_discard_one"
+YINGHUN_DRAW_ONE_DISCARD_X = "yinghun_draw_one_discard_x"
+
+
+def test_sunjian_yinghun_ai_aims_at_the_enemy_and_denies_cards() -> None:
+    """【英魂】：座位步指向**已明的敌人**、选项挑【2】（摸 1 张、然后其弃置 X 张）。
+
+    这是票面 §AI 适配第 6 格点名的确定性用例，钉 Q6 = A 的两半：
+
+    - **座位步**：孙坚是已明身份的反贼、座位 1 是公开的主公 ⇒ 目标恒为座位 1（不登记
+      ``_HOSTILE_SEAT_STEPS`` 会落进"帮盟友"分支，去指身份未知的座位 2）；
+    - **选项步**：选【2】而不是【1】——判据取**可观测的后果**：X = 3 时【2】只摸 1 张、
+      然后弃 3 张；【1】会摸 3 张、只弃 1 张。
+
+    判据全走真引擎的记录流（摸牌 / 弃置各几条、各几张），不读打分函数内部。
+    """
+    hand = tuple(cards_of_type(PACK, "slash")[1:5])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=1, hp_max=4, identity=Identity.REBEL, hero=SUNJIAN_MOBILE),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD, hand=hand),
+            SeatSpec(hp=4, hand=tuple(cards_of_type(PACK, "dodge")[1:3])),
+        ],
+        deck=deck_excluding(PACK, *hand, *cards_of_type(PACK, "dodge")[1:3]),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    answers: dict[str, object] = {}
+    for _ in range(2_000):
+        if ran_timing(engine, Timing.PHASE_DRAW):
+            break
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        kind = str(getattr(query.kind, "value", query.kind))
+        skill = str(getattr(query, "skill_id", "") or "")
+        if kind in ("SKILL_ACTIVATION", "SELECT_OPTION", "SELECT_CARDS"):
+            action = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            if kind == "SKILL_ACTIVATION" and skill == YINGHUN:
+                answers["activate"] = action
+            elif kind == "SELECT_OPTION" and skill.startswith("yinghun:"):
+                answers[skill] = action
+            engine.submit(action)
+            continue
+        engine.submit(PassPlayer().respond(query))
+
+    activation = answers.get("activate")
+    assert isinstance(activation, ActivateSkill) and activation.skill_id == YINGHUN, (
+        f"AI 该发动【英魂】（没有代价，恒为正），实得 {activation!r}"
+    )
+    seat = answers.get("yinghun:seat")
+    assert isinstance(seat, SelectOption) and seat.choice == "seat:1", (
+        f"座位步该挑已明的敌人（主公 / 座位 1），实得 {seat!r}"
+    )
+    option = answers.get("yinghun:option")
+    assert isinstance(option, SelectOption) and option.choice == YINGHUN_DRAW_ONE_DISCARD_X, (
+        f"选项步该选【2】（摸 1 张再弃 X 张 = 拆牌），实得 {option!r}"
+    )
+
+    def _moves(seat: int, reason: MoveReason) -> list:
+        return [
+            record
+            for record in engine.records
+            if record.kind == "delta"
+            and record.delta_type == "card_move"
+            and record.reason is reason
+            and record.owner == seat
+        ]
+
+    assert [len(record.cards) for record in _moves(1, MoveReason.DRAW)] == [1], (
+        "【2】只摸一张（【1】会摸 X = 3 张）"
+    )
+    assert [len(record.cards) for record in _moves(1, MoveReason.DISCARD)] == [3], (
+        "【2】弃 X = 3 张（【1】只弃 1 张）"
+    )
+    assert not _moves(2, MoveReason.DRAW) and not _moves(2, MoveReason.DISCARD), (
+        "AI 不该把英魂指向身份未知的座位 2"
+    )

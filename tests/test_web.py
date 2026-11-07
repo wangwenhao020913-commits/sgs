@@ -485,7 +485,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 84 and len(catalog) == 55, (
+    assert len(flat) == 85 and len(catalog) == 56, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -505,7 +505,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         "jie-feng-batch / lei-batch 的界黄忠移动版·界魏延移动版 / 雷包三将 ⇒ 78 / 49；"
         "huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 ⇒ 79 / 50（新真名「卧龙诸葛」+1）；"
         "票 02 加火包 OL 颜良文丑 ⇒ 80 / 51（新真名「颜良文丑」+1）；"
-        "lin-batch 票 01 加林包移动版神曹操 ⇒ 84 / 55（新真名「神曹操」+1）"
+        "lin-batch 票 01 加林包移动版神曹操 ⇒ 84 / 55（新真名「神曹操」+1）；"
+        "lin-batch 票 02 加林包移动版孙坚 ⇒ 85 / 56（新真名「孙坚」+1）"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -3732,6 +3733,74 @@ def test_a_real_session_reaches_the_guixin_card_step_as_an_unknown_zone_dialog()
     assert seats == {0}, "每一槽都来自同一个别的座位（未知区域弹窗的判据）"
     assert all(action["kind"] != "Pass" for action in payload["legal_actions"]), (
         "Q2 = A：发动后不可逐座放弃，界面没有『放弃』键"
+    )
+
+
+def _yinghun_real_session() -> Session:
+    """**真会话**：座位 0 = 孙坚移动版（1/4 体力 ⇒ X = 3），停在【英魂】的弃置选牌步。
+
+    与 :func:`_guixin_real_session` 同一条理由：随机建局走不到【英魂】，但会话壳、派发环、
+    ``pending_payload`` 这条读取方链路一字不换 —— 要证的是**阶段体帧 + 手写询问**的
+    ``SELECT_CARDS`` 也读得到 ``step_requirements["card"]``（lin-batch 票 02 的询问剧本）。
+    """
+    pack = _context_pack()
+    hand = tuple(cards_of_type(pack, "slash")[1:5])
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="sunjian_mobile", hp=1, hp_max=4),
+            SeatSpec(hand=hand),
+        ],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id not in set(hand)
+        ),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = (_ScriptedSeat(), _ScriptedSeat())
+    _advance_to_the_yiji_card_step(session)
+    return session
+
+
+def test_a_real_session_reaches_the_yinghun_discard_step_with_its_step_wording() -> None:
+    """【英魂】的弃置步在生产帧形状下真的走到读取方（lin-batch 票 02）。
+
+    钉四件事（``CODING_STANDARDS.md`` §6 的读取方纪律）：
+
+    1. **阶段体帧 + 手写询问**也读得到逐步文案 —— 选牌步不带 ``skill_id``、阶段体帧上只有
+       派发环写的 ``running_skill``，``projection._step_requirement`` 的 ``SELECT_CARDS``
+       分支照样命中 ``step_requirements["card"]``；
+    2. 选取面 = 目标的**手牌 + 装备区**（Q2 = A：不含判定区）、应答者是**目标本人**；
+    3. 恰好 ``1`` 张（选项 1 的弃置段）+ 不可放弃（``optional=False``，发动后必须选一项）；
+    4. 这一步不会退回一句话 summary。
+    """
+    session = _yinghun_real_session()
+    query = session.pending
+
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert query.skill_id is None, "阶段体帧的选牌步不带 skill_id（真实形状）"
+    frame = session.engine.phase_body_frame()
+    assert frame is not None and frame.data.get("running_skill") == (
+        "hero.sunjian_mobile.yinghun"
+    )
+
+    session.human_seat = int(query.actor)
+    payload = pending_payload(session)
+
+    assert payload is not None and payload["context"] is not None
+    assert payload["context"]["requirement"] == "令其弃置一张牌 / X张牌", (
+        "读取方必须真的读到分步文案（退回一句话 summary 就说明判据又读错了键）"
+    )
+    assert payload["spec"]["zones"] == ["hand", "equip"], "手牌 + 装备区（不含判定区）"
+    assert payload["spec"]["total"] == [1, 1], "选项 1 的弃置段 = 恰好一张"
+    assert payload["spec"]["optional"] is False
+    assert {slot["ref"]["seat"] for slot in payload["slots"]} == {1}, (
+        "铺的是**目标**自己的区（应答者是目标本人）"
+    )
+    assert all(action["kind"] != "Pass" for action in payload["legal_actions"]), (
+        "发动后必须选一项，界面没有『放弃』键"
     )
 
 
@@ -7176,7 +7245,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 176, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 177, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

@@ -2033,6 +2033,42 @@ def test_a_harmful_seat_step_aims_at_the_revealed_enemy():
     )
 
 
+def test_the_yinghun_seat_step_aims_at_the_revealed_enemy():
+    """孙坚移动版【英魂】（lin-batch 票 02 / Q6 = A）：座位步 = "被令摸牌再弃牌"的那个人。
+
+    只选"摸 X 张弃 1 张"那一支时它是**送牌**，故这条技能的座位步只能固定一个方向：不登记
+    就落进"帮盟友"缺省分支（1V1 里等于把牌塞给敌人 = 资敌）。判据取跨 16 条随机流恒同。
+    """
+    state = _rebel_and_lord()
+
+    assert _seat_choices(state, "yinghun:seat", ("seat:1", "seat:2")) == {"seat:1"}, (
+        "英魂该指向已明的敌人（主公），而不是身份未知的座位 2"
+    )
+
+
+def test_the_yinghun_option_prefers_denying_cards_over_giving_them():
+    """Q6 = A 的第二半：选项 2（摸 1 张、然后其弃置 X 张）的分数必须高于选项 1（摸 X 张、
+    然后其弃置一张）。
+
+    两项都恒可执行（X = 1 时后果相同是用户裁定的**有意重复**），故这条只核**分值次序**：
+    AI 因此走控场那一支，而不是给对手补牌。
+    """
+    assert (
+        heuristic_scoring._OPTION_VALUES["yinghun_draw_one_discard_x"]
+        > heuristic_scoring._OPTION_VALUES["yinghun_draw_x_discard_one"]
+    )
+    query = _seat_option_query(
+        _rebel_and_lord(),
+        "yinghun:option",
+        ("yinghun_draw_x_discard_one", "yinghun_draw_one_discard_x"),
+    )
+    answers = {
+        HeuristicPlayer(_stream(seed)).respond(query).choice for seed in range(16)
+    }
+
+    assert answers == {"yinghun_draw_one_discard_x"}, "16 条随机流必须同答（否则说明是掷硬币）"
+
+
 def test_the_liuli_seat_step_aims_at_the_revealed_enemy():
     """【流离】的新目标也是"被指向的对手"（票 08 迁到 ``seat:N`` 后必须归入有害座位步）。
 

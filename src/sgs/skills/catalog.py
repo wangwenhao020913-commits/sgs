@@ -3581,6 +3581,9 @@ from .hero_caocao import (  # noqa: E402  （末尾 import 是刻意的）
 from .hero_yujin import (  # noqa: E402  （末尾 import 是刻意的）
     yujin_skill_definitions,
 )
+from .hero_lin import (  # noqa: E402  （末尾 import 是刻意的）
+    lin_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -3637,6 +3640,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *lei_skill_definitions(),
             *caocao_skill_definitions(),
             *yujin_skill_definitions(),
+            *lin_skill_definitions(),
         )
     }
 )
