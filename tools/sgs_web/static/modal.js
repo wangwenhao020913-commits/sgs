@@ -449,7 +449,7 @@ function dialogTitleFor(kind, pending) {
     const contextName = watched && pending.context && pending.context.name;
     return contextName || "选择";
   }
-  if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
+  if (kind === DIALOG_KINDS.unknown) return unknownZoneTitle(pending);
   if (kind === DIALOG_KINDS.reveal) {
     const title = pending && pending.harvest && pending.harvest.title;
     const contextName = pending && pending.context && pending.context.name;
@@ -464,6 +464,17 @@ function dialogTitleFor(kind, pending) {
     return contextName || "亮牌";
   }
   return "询问";
+}
+
+/** 未知区域弹窗的标题（票 06）：单选档仍是「选择一张牌」，多选档按 `spec.total` 写
+ *  「选择 1~3 张牌」。张数**只读**服务端规格（与 `options.js:selectionCap` / 提示文案同源），
+ *  前端不另立真源。 */
+function unknownZoneTitle(pending) {
+  const total = (pending && pending.spec && pending.spec.total) || [1, 1];
+  const least = Math.max(1, Number(total[0]) || 1);
+  const most = Math.max(least, Number(total[1]) || least);
+  if (most <= 1) return "选择一张牌";
+  return least === most ? `选择 ${least} 张牌` : `选择 ${least}~${most} 张牌`;
 }
 
 /* ------------------------------------------------------------ 暗化层 / 显隐 */

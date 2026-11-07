@@ -844,6 +844,25 @@ function refreshSubmit(pending) {
       || `点一张亮起的${where}即提交；也可以点右端「放弃」。`;
     return;
   }
+  // 未知区域弹窗的**多选档**（票 06，【定乱】展示至多 X 张牌）：点牌只切换选中态，
+  // 右端「提交」是**唯一**提交点 ⇒ 这一支排在 `dialogDisablesPass`（弹窗内容一击即提交、
+  // 提交键恒灰）**之前**，按既有的 `selectionError` / `buildAction` 算可点态。判据仍是
+  // "能造出候选里真有的那条 Action"，`cap === 1` 的旧档原样走下面那条分支。
+  if (dialogKind === DIALOG_KINDS.unknown && selectionCap(pending) > 1) {
+    const selected = state.selectedOption === null
+      ? null
+      : (pending.legal_actions || [])[state.selectedOption];
+    const blocked = selected === null ? null : selectionError(selected, pending);
+    const ready = blocked === null && buildAction() !== null;
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    const least = Math.max(1, Number(total[0]) || 1);
+    const most = Math.max(least, Number(total[1]) || least);
+    const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
+    $("btn-submit").disabled = !ready;
+    $("t-choice").textContent = state.lastRejectReason
+      || (ready ? "可以提交。" : `点选 ${howMany}牌（已选 ${state.picks.length} 张），再点「提交」。`);
+    return;
+  }
   if (dialogDisablesPass(dialogKind, pending)) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason

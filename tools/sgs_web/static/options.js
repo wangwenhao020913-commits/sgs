@@ -714,8 +714,16 @@ function renderHeroZonePick(pending) {
   box.appendChild(row);
 }
 
-/** 未知区域弹窗的正文（票 08 / D3；票 09 推广到反馈 / 拆 / 顺 / 寒冰剑）：按**实际提供的
- *  区域**分组，手牌画「?」、可见的装备 / 判定牌画牌面；点一张即提交（不经过"选中 → 再点提交"）。
+/** 未知区域弹窗的正文（票 08 / D3；票 09 推广到反馈 / 拆 / 顺 / 寒冰剑；票 06 分两档）：按
+ *  **实际提供的区域**分组，手牌画「?」、可见的装备 / 判定牌画牌面。
+ *
+ * 两档的分界是服务端 ``spec.total`` 的上界（:func:`selectionCap`）——同一份约束，前端不另立
+ * 真源：
+ *  - ``cap === 1``：**点一张即提交**（:func:`submitUnknownPick`）。反间盲挑 / 反馈 / 拆 / 顺 /
+ *    寒冰剑的既有手感一字不改；
+ *  - ``cap > 1``：点一张只切换选中态（``.sel``），**「提交」是唯一提交点**（【定乱】展示至多
+ *    X 张牌，票 06）。与 :func:`renderOwnZonePick` / 遗计式多选同形；「提交」的可点态在
+ *    `pending.js:refreshSubmit`，载荷由 ``buildAction`` 按 ``state.picks`` 补。
  *
  * 分组完全由 `pending.slots` 的 `ref.zone` 推出：这一步没提供的区域**不画**
  * （反间盲挑只提供发动者手牌 ⇒ 没有装备区；反馈 / 拆 / 顺带装备 / 判定槽时才出现）。
@@ -729,13 +737,20 @@ function renderHeroZonePick(pending) {
 function renderUnknownZone(pending) {
   const box = $("t-options");
   const cap = selectionCap(pending);
+  const multi = cap > 1;
   const hint = $("t-target-hint");
   if (hint) {
-    const action = cap === 1 ? "点一张牌即提交。" : `点选至多 ${cap} 张牌即提交。`;
+    const action = multi ? `点选至多 ${cap} 张牌，再点「提交」。` : "点一张牌即提交。";
     const requirement = pending.context && pending.context.requirement;
     hint.textContent = requirement
       ? `${requirement}：${action}`
       : `${action}看不到牌面，选中后才揭晓。`;
+  }
+  // 多选档的候选骨架（票 06 §5.1）：把 `state.selectedOption` 指到那条 `SelectCards`，
+  // `buildAction` 才有可补 `picks` 的对象（与 `renderOwnZonePick` / 遗计多选同一条路由）。
+  if (multi) {
+    const at = (pending.legal_actions || []).findIndex((action) => action.kind === "SelectCards");
+    if (at >= 0) state.selectedOption = at;
   }
   for (const group of unknownSlotGroups(pending)) {
     const section = document.createElement("section");
@@ -751,15 +766,21 @@ function renderUnknownZone(pending) {
     const row = document.createElement("div");
     row.className = "cards";
     for (const entry of group.slots) {
+      const picked = multi && state.picks.includes(entry.index);
+      const onClick = () => {
+        if (!multi) return submitUnknownPick(pending, entry.index);
+        toggleUnknownZonePick(pending, entry.index);
+        renderPending(state.view);
+        return null;
+      };
       const node = entry.slot.card
-        ? cardFaceNode(entry.slot.card, {
-          onClick: () => { submitUnknownPick(pending, entry.index); },
-        })
-        : unknownSlotNode();
+        ? cardFaceNode(entry.slot.card, { selected: picked, onClick })
+        : unknownSlotNode(picked);
       node.setAttribute("data-slot-index", String(entry.index));
       if (!entry.slot.card) {
+        // 「?」槽位不是 `cardFaceNode`：点击由这里接，接的是**同一个**读数判据。
         node.addEventListener("click", async () => {
-          await submitUnknownPick(pending, entry.index);
+          await onClick();
         });
       }
       row.appendChild(node);
@@ -767,6 +788,20 @@ function renderUnknownZone(pending) {
     section.appendChild(row);
     box.appendChild(section);
   }
+}
+
+/** 一张「?」槽位：与牌面同尺寸（88×124）。``selected`` = 多选档里已被点中（`.sel`，
+ *  与 :func:`cardFaceNode` 的选中态同一个类名）；单选档点它 = 一次提交。 */
+function unknownSlotNode(selected = false) {
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = "card face unknown";
+  // 真浏览器的 classList 与 className 同步；烟测的 DOM 垫片是两份存储，故两处都写
+  // （既有的 `cardFaceNode` 也是「className 赋值 + classList.add」同一写法）。
+  node.classList.add("card", "face", "unknown");
+  if (selected) node.classList.add("sel");
+  node.textContent = "?";
+  return node;
 }
 
 /** 未知区域的槽位分组（按载荷顺序；同一 `(座位, 区域)` 一组）。 */
@@ -794,23 +829,12 @@ function unknownSlotGroups(pending) {
   });
 }
 
-/** 一张「?」槽位：与牌面同尺寸（88×124），点击即提交。 */
-function unknownSlotNode() {
-  const node = document.createElement("button");
-  node.type = "button";
-  node.className = "card face unknown";
-  // 真浏览器的 classList 与 className 同步；烟测的 DOM 垫片是两份存储，故两处都写
-  // （既有的 `cardFaceNode` 也是「className 赋值 + classList.add」同一写法）。
-  node.classList.add("card", "face", "unknown");
-  node.textContent = "?";
-  return node;
-}
-
-/** 未知区域：点一张槽位 = **一次提交**（`picks` 填该槽位在面内的位置）。
+/** 未知区域：单选档点一张槽位 = **一次提交**（`picks` 填该槽位在面内的位置）。
  *
  * 送出的仍是 `legal_actions` 里那条 `SelectCards`（骨架 + `picks` 由 `buildAction` 补），
- * 不手拼 Action、不把实体牌 id 回传。引擎给这一步的候选是一槽一条（`total=(1,1)` 的
- * 全部组合），故一击即为完整答案。
+ * 不手拼 Action、不把实体牌 id 回传。引擎给**单选档**的候选是一槽一条（`total=(1,1)` 的
+ * 全部组合），故一击即为完整答案；**多选档**（`cap > 1`，票 06）不走这里——点牌只切换
+ * 选中态，出口是「提交」。
  */
 async function submitUnknownPick(pending, index) {
   if (state.playback || state.submitBusy) return;
@@ -832,10 +856,43 @@ async function submitUnknownPick(pending, index) {
   await submitAction(before);
 }
 
+/** 未知区域**多选档**：点一张槽位 = 选中 / 取消它（票 06）。
+ *
+ * 与 :func:`submitUnknownPick` 的分界只有一个：`selectionCap(pending) > 1`。此时点牌**不发
+ * 任何提交**（用户口径见票面 §6：不保留"点一张即提交"的快捷），唯一的提交点是「提交」键；
+ * 载荷由 `buildAction` 按 `state.picks` 补（升序规范化住 `answer.js:buildAction`）。
+ *
+ * 候选骨架的指向也在这里补一次（`renderUnknownZone` 铺面时已指过）：点击后的重绘若发生在
+ * 别的路径上（例如 `renderPending` 被别处替换），仍不会出现"选好了却没有可补的候选"。
+ */
+function toggleUnknownZonePick(pending, index) {
+  if (state.playback || state.submitBusy) return;
+  if (stepDialogKind(pending) !== DIALOG_KINDS.unknown) return;
+  if (selectionCap(pending) <= 1) return;
+  const at = (pending.legal_actions || []).findIndex((action) => action.kind === "SelectCards");
+  if (at >= 0) state.selectedOption = at;
+  toggleSlotPick(pending, index);
+  state.lastRejectReason = "";
+}
+
 /** 选择面的张数上限（服务端 ``spec.total`` 的上界；缺省 1）。 */
 function selectionCap(pending) {
   const total = (pending && pending.spec && pending.spec.total) || [1, 1];
   return Math.max(1, Number(total[1]) || 1);
+}
+
+/** 弹窗开着（`selectionEnabled()` 为假）时，**哪几类槽位面**仍要接点选。
+ *
+ * 判据只有两条，都读载荷形状 / `spec.total`，不认技能 id：
+ *  - `heroPick`：武将牌上的牌，正文就在弹窗里（huo-shenzhugeliang 票 02）；
+ *  - `unknown` ∧ `cap > 1`：未知区域的多选档（票 06）——点牌只是收进 `state.picks`，
+ *    提交点是弹窗外的「提交」键。
+ * 单选档的未知区域（`cap === 1`）不在此列：点一张即提交，入口是 `submitUnknownPick`。
+ */
+function dialogSlotPickAllowed(pending) {
+  const kind = pending ? stepDialogKind(pending) : null;
+  if (kind === DIALOG_KINDS.heroPick) return true;
+  return kind === DIALOG_KINDS.unknown && selectionCap(pending) > 1;
 }
 
 /** 点一个槽位 = 选中 / 取消它；**上限之内**才收下（票 15：【遗计】一次可选两张，多选不得越界）。
@@ -845,9 +902,10 @@ function selectionCap(pending) {
  */
 function toggleSlotPick(pending, index) {
   // 选择面槽位是牌桌选择入口（D8）：只读态里 no-op，与点牌 / 点座共用一条判据。
-  // 例外：武将牌上的牌点选（huo-shenzhugeliang 票 02）的**正文就在弹窗里**，此时
-  // `selectionEnabled()` 为假（弹窗开着 = 牌桌不可选）——但那一面必须可点。
-  if (!selectionEnabled() && stepDialogKind(state.view ? state.view.pending : null) !== DIALOG_KINDS.heroPick) {
+  // 例外：正文**就在弹窗里**的两类槽位面——武将牌上的牌（huo-shenzhugeliang 票 02）与
+  // 未知区域的**多选档**（票 06）。弹窗开着时 `selectionEnabled()` 为假（牌桌不可选），
+  // 但这两面的牌必须点得动；单选档的未知区域不在此列（点一张即提交，走 `submitUnknownPick`）。
+  if (!selectionEnabled() && !dialogSlotPickAllowed(state.view ? state.view.pending : null)) {
     return;
   }
   const at = state.picks.indexOf(index);
