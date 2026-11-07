@@ -1437,6 +1437,17 @@ def _jijiang_probe_state() -> GameState:
     )
 
 
+def _dingluan_probe_state() -> GameState:
+    """【定乱】的正面对照：持有者（ME）的**武将牌上真有**这条技能，且场上有可展示的牌。
+
+    票 07 起【定乱】非共享 ⇒ 条件自校"``MATCH_OWNER_KEY`` 是定乱实例的持有者"；ROUND_START
+    帧不带"这一次问谁"这个事实，故正 / 反两侧只由检查改写 ``MATCH_OWNER_KEY`` 来翻。
+    """
+    state = _probe_state()
+    state.player(ME).hero = "feng_yujin"
+    return state
+
+
 def _probe_state_for(skill_id: str) -> GameState:
     """逐技能的正面对照局面（默认同一份；条件里有额外状态前提的单独给）。"""
     if skill_id == "hero.jie_liubei.jijiang":
@@ -1483,6 +1494,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         state.player(ME).markers = (ying,)
         state.player(0).markers = (ying,)
         return state
+    if skill_id == "hero.feng_yujin.dingluan":
+        return _dingluan_probe_state()
     return _probe_state()
 
 
@@ -1794,6 +1807,11 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         ),
         # 「营」的**标记自身效果**：只有持有者自己的摸牌阶段才多摸一张。
         "hero.shen_ganning.jieying_mark": (_HookFrame(source=ME),),
+        # feng-yujin 票 07：【定乱】从共享技改成**非共享**（B2）⇒ 条件自校持有者
+        # （`MATCH_OWNER_KEY` 必须真是定乱实例的持有者）。ROUND_START 帧没有"这一次问谁"
+        # 这个事实（非共享技不写 `ASK_SEAT_KEY`），故探针帧只靠检查本身改写的
+        # `MATCH_OWNER_KEY` 判正 / 反两侧。
+        "hero.feng_yujin.dingluan": (_HookFrame(),),
     }
 
 
@@ -1801,11 +1819,6 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
     "hero.jie_ganning.fenwei": (
         "M6 票 07：触发条件关于**这张牌**（锦囊 ∧ ≥2 个目标），不关于持有者——"
         "任何角色使用的多目标锦囊都要问界甘宁；没有『我』可自校（与『关于我』的钩子正交）"
-    ),
-    "hero.feng_yujin.dingluan": (
-        "feng-yujin 票 01：**共享技**——判据里的『我』是座位环上**被问的那个座位**"
-        "（`ASK_SEAT_KEY`），不是技能持有者（持有者 = 于禁，但每个角色都能发动一次）；"
-        "『是不是已发动过』按座位位段判，与 MATCH_OWNER_KEY 无关"
     ),
     "hero.feng_yujin.dingluan_mark": (
         "feng-yujin 票 01：【定乱】牌的**标签自身效果**——触发条件关于『这批牌身上有没有我的"
@@ -1838,7 +1851,6 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
     """
     assert set(EXEMPT_OWNER_SELF_CHECK) == {
         "hero.jie_ganning.fenwei",
-        "hero.feng_yujin.dingluan",
         "hero.feng_yujin.dingluan_mark",
     }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
@@ -2186,7 +2198,8 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.shen_ganning.jieying": "触发技能",
     "hero.shen_ganning.jieying_mark": "多轮技能",
     # feng-yujin 票 01：自制包·锋·于禁【节钺】= A 族主动技（两步流水线 + 手写二选一）；
-    # 【定乱】= 帧外时机（ROUND_START）上的**共享技**、手写主体（无 SkillFlow）⇒ 多轮格；
+    # 【定乱】= 帧外时机（ROUND_START）上的可选技（票 07 起**非共享**：只问持有者）、
+    # 手写主体（无 SkillFlow）⇒ 多轮格；
     # 「【定乱】牌」的标签自身效果 = 手写 MOVE_AFTER 钩子（CarrierKind.CARD_TAG）⇒ 多轮格。
     "hero.feng_yujin.jieyue": "主动技能",
     "hero.feng_yujin.dingluan": "多轮技能",

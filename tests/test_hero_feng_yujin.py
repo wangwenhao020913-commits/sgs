@@ -4,8 +4,9 @@
 ``legal_actions`` 的候选集合、``card_reveal`` / ``tag_add`` 记录、技能实例与牌标签状态；
 不读回调内部结构。
 
-本文件同时钉住框架票 ``02``（``Timing.ROUND_START`` + 共享技逐座位派发）与 ``03``
-（``CardTagType.DINGLUAN`` 的禁令 / 进入弃牌堆即清 / 标签自身效果）的行为面。
+本文件同时钉住框架票 ``02``（``Timing.ROUND_START`` 轮边界派发）与 ``03``
+（``CardTagType.DINGLUAN`` 的禁令 / 进入弃牌堆即清 / 标签自身效果）的行为面；票 ``07``
+起【定乱】是**于禁自己的技能**（B2）——轮开始时**只问持有者**，别的座位零询问。
 """
 
 from __future__ import annotations
@@ -352,7 +353,7 @@ def test_no_draw_when_the_marked_card_enters_discard_from_another_zone():
 
 
 # ---------------------------------------------------------------------------
-# §定乱：共享技 + 轮边界逐座位派发（框架票 02）
+# §定乱：轮边界派发，只问持有者（框架票 02 + feng-yujin 票 07）
 # ---------------------------------------------------------------------------
 
 
@@ -379,14 +380,64 @@ def _four_seats() -> list[SeatSpec]:
     ]
 
 
-def test_dingluan_asks_every_seat_in_order_at_the_round_start():
-    """A1 + P1：每轮开始时按座位序逐座位问一次「是否发动」；共享技不限于持有者。"""
+def test_dingluan_is_not_offered_to_a_seat_that_does_not_own_the_skill():
+    """B2（票 07）：【定乱】是于禁自己的技能 ⇒ 没有这条技能的座位连候选都没有。
+
+    用户 2026-11-07 的 2 人局实测里，座位 1 是 ``pangtong_mobile`` 却被问了一次并自行发动；
+    反向断言（旧读法是"每个座位各问一次"）：座位 1 整轮零询问。
+    """
+    engine = _engine(
+        seats=[
+            SeatSpec(hero=YUJIN, hand=(_cards("slash")[0],)),
+            SeatSpec(hero="pangtong_mobile", hand=(_cards("dodge")[0],)),
+        ],
+        hand0=(_cards("slash")[0],),
+    )
+    owner = _Driver()
+    other = _Driver()
+    run_queries(engine, [owner, other], lambda current: _round_starts(current) >= 2)
+    assert other.activations == [], "座位 1 没有【定乱】⇒ 不该被问"
+    assert len(owner.activations) == 1, "对照臂：持有者在本轮开始时确实被问了一次"
+
+
+def test_the_owner_passing_leaves_no_tag_and_no_reveal():
+    """B2（票 07）：「放弃 = 无事发生」的正面断言。
+
+    座位 1 的 driver **愿意**发动（旧读法下它会被问、并自行亮牌）——放弃之后桌上不该
+    出现任何【定乱】牌，也不该有任何 ``card_reveal`` 记录。
+    """
+    target_card = _cards("dodge")[0]
+    engine = _engine(
+        seats=[
+            SeatSpec(hero=YUJIN, hand=(_cards("slash")[0],)),
+            SeatSpec(hero="pangtong_mobile", hand=(target_card,)),
+        ],
+        hand0=(_cards("slash")[0],),
+    )
+    owner = _Driver()
+    other = _Driver(activate_dingluan=True, target=0)
+    run_queries(engine, [owner, other], lambda current: _round_starts(current) >= 2)
+    assert owner.activations, "对照臂：持有者被问过（它选了放弃）"
+    assert engine.state.card_tags == {}, "放弃之后没有任何牌被标记为【定乱】牌"
+    reveals = [
+        record
+        for record in engine.records
+        if record.kind == "delta" and getattr(record, "delta_type", "") == "card_reveal"
+    ]
+    assert reveals == [], "放弃之后没有任何牌被展示"
+
+
+def test_dingluan_is_asked_only_at_the_owners_seat_every_round_start():
+    """B2：轮开始时**只问持有者**；放弃之后下一轮开始时仍会再被问（不是"整局只问一次"）。"""
     engine = _engine(seats=_four_seats(), hand0=(_cards("slash")[0],))
     drivers = [_Driver() for _ in range(4)]
-    run_queries(engine, drivers, lambda current: _round_starts(current) >= 2)
-    asked = [int(query.actor) for driver in drivers for query in driver.activations]
-    assert asked[:4] == [0, 1, 2, 3], "第一轮：从本轮起始座位起按座位序各问一次"
-    assert all(query.skill_id == DINGLUAN for d in drivers for query in d.activations)
+    # 停在第 3 轮的轮边界 ⇒ 第 1、2 轮各问完（持有者两次都放弃）。
+    run_queries(engine, drivers, lambda current: _round_starts(current) >= 3)
+    assert [int(query.actor) for query in drivers[0].activations] == [0, 0], (
+        "只有持有者被问，且每个轮开始时都可能被问一次"
+    )
+    for driver in drivers[1:]:
+        assert driver.activations == [], "没有【定乱】的座位整局零询问"
 
 
 def test_dingluan_markers_are_public_and_the_cards_are_revealed():
@@ -417,31 +468,38 @@ def test_dingluan_markers_are_public_and_the_cards_are_revealed():
 
 
 def test_dingluan_x_shrinks_with_every_activation_and_a_used_seat_is_skipped():
-    """X = 3 − 全局发动次数；已发动过的座位整局不再问（A1 每人整局 1 次）。"""
+    """X = 3 − 此前发动次数；只问持有者，发动过的座位整局不再问。
+
+    "已发动"仍按**座位**记账（票 08 会把它换成"已被定乱过的角色"），故用记账入口把"此前
+    发动过 2 次"直接落位 ⇒ 持有者第一问的 X 必须缩到 1。发动之后持有者整局不再被问。
+    """
+    from sgs.skills.hero_yujin import _mark_dingluan_used
+
     engine = _engine(seats=_four_seats(), hand0=(_cards("slash")[0],))
+    _mark_dingluan_used(engine.state, 1)
+    _mark_dingluan_used(engine.state, 2)
     first = _Driver(activate_dingluan=True, target=0)
     others = [_Driver() for _ in range(3)]
-    players = [first, *others]
-    # 第 1 轮：座位 0 发动（X=3）；其余座位放弃。停在第 3 轮的轮边界 ⇒ 第 1、2 轮各问完。
-    run_queries(engine, players, lambda current: _round_starts(current) >= 3)
+    # 停在第 3 轮的轮边界 ⇒ 第 1、2 轮各问完。
+    run_queries(engine, [first, *others], lambda current: _round_starts(current) >= 3)
     totals = [query.spec.total for query in first.selections]
-    assert totals and totals[0][1] == 3, "第一次发动 X=3"
-    assert len(first.activations) == 1, "A1：座位 0 整局只被问一次（发动后不再问）"
+    assert totals and totals[0][1] == 1, "X = 3 − 此前发动过的次数"
+    assert len(first.activations) == 1, "发动之后持有者不再被问（座位侧的整局限次）"
     for driver in others:
-        assert len(driver.activations) == 2, "其余座位每轮各被问一次"
+        assert driver.activations == [], "非持有者零询问"
 
 
 def test_dingluan_is_not_offered_when_x_reaches_zero():
-    """三次发动之后 X=0 ⇒ 轮开始时连问都不问（共享技的预算耗尽）。"""
-    engine = _engine(seats=_four_seats(), hand0=(_cards("slash")[0],))
-    # 直接落位三次"已发动"（座位位段是唯一真源）。
+    """三次发动之后 X=0 ⇒ 轮开始时连问都不问（持有者自己的座位还没发动过）。"""
     from sgs.skills.hero_yujin import _mark_dingluan_used
 
-    for seat in range(3):
+    engine = _engine(seats=_four_seats(), hand0=(_cards("slash")[0],))
+    # 直接落位三次"已发动"（座位位段是 X 减数的唯一真源）。
+    for seat in (1, 2, 3):
         _mark_dingluan_used(engine.state, seat)
     drivers = [_Driver() for _ in range(4)]
     run_queries(engine, drivers, lambda current: _round_starts(current) >= 2)
-    assert all(len(driver.activations) == 0 for driver in drivers), "X=0 不再产出询问"
+    assert all(driver.activations == [] for driver in drivers), "X=0 不再产出询问"
 
 
 # ---------------------------------------------------------------------------
