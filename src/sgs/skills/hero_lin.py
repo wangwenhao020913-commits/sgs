@@ -92,8 +92,11 @@ __all__ = [
     "BENGKUAI_REDUCE_MAX",
     "BENGKUAI_FLOW",
     "DONGZHUO_MOBILE",
+    "HAOSHI",
+    "HAOSHI_FLOW",
     "JIAXU_MOBILE",
     "LIN_SKILL_DEFS",
+    "LU_SU_MOBILE",
     "SUNJIAN_MOBILE",
     "WANSHA",
     "WEIMU",
@@ -610,7 +613,216 @@ _WEIMU = SkillDef(
 """贾诩移动版【帷幕】的完整声明（锁定技 + 一条 ``TARGET_POOL`` 剔除自己）。"""
 
 
-LIN_SKILL_DEFS: tuple[SkillDef, ...] = (_YINGHUN, _BENGKUAI, _WANSHA, _WEIMU)
+# ---------------------------------------------------------------------------
+# 鲁肃【好施】（神话再临·林包·移动版；jushou-lusu 票 02，用户 2026-11-08 签 Q2 = A′）
+#
+# 规则原文（用户 `技能.txt` 逐字，口径 = **移动版**）：
+#
+#     好施：摸牌阶段，你可以多摸两张牌，然后若你的手牌数大于5，
+#           你将一半的手牌（向下取整）交给除你以外全场手牌数最少的一名其他角色。
+#
+# **形状**（`shapes.md` §2 第 63 行「阶段体」为主 + 第 52 行「手写主体」）：
+#
+# 1. 阶段体的 effect 在**基础摸牌之前**跑（`Engine._phase_draw`：先派发阶段体、再摸
+#    基础牌），而段 2 的判据要读**摸完之后**的手牌 ⇒ 摸牌由本技能自己**一次摸完**
+#    （基础数 +2 折进同一条 ``card_move``，与【英姿】的用户口径 2026-11-07 同向），
+#    再把本阶段的基础摸牌数置 0（与【突袭】/【涉猎】同一个写入口）。
+# 2. **座位问与交牌问都住在 effect 里、位置在「> 5」判据之后**（票面 Q2 = A′）：先问
+#    "交给谁"再发现这一手根本不交牌，是那一问白问一次；本技能因此没有流水线步骤。
+# 3. **张数是算出来的**（``⌊手牌数/2⌋``）：``PickCards.lo`` 只收定值 ``int``
+#    （`flow.py` 的 ``lo: int``），故交牌只能手写 ``ask_selection(total=(k, k))``。
+#
+# 一手依据（用户 2026-11-08 给的 3.8.19 之外，并列取舍见《官方规则集》）：
+# 「角色选择发动技能或执行效果的目标时，如果合法目标数超过额定目标数，则由其自行从合法的
+# 目标中选择额定数量的目标。**例如：全场若有至少两名其他角色手牌数同为最少，鲁肃发动
+# 【好施】后可以选择对其中任意一名执行将一半的手牌交给其的效果**」
+# （`.scratch/m1-engine-skeleton/research/raw/rule_element.txt:69-71`）⇒ 并列**由鲁肃自选**。
+# ---------------------------------------------------------------------------
+
+LU_SU_MOBILE = "lu_su_mobile"
+"""鲁肃移动版的武将 id（数据表 ``heroes.lin_mobile.json``）。"""
+
+HAOSHI = hero_skill_id(LU_SU_MOBILE, "haoshi")
+
+HAOSHI_EXTRA_DRAWS = 2
+"""「多摸两张牌」：折进**基础摸牌数**，一次摸完（同【英姿】的用户口径）。"""
+
+_HAOSHI_DRAWN_KEY = "haoshi_drawn"
+"""帧私有：摸牌那一段做过（**搬牌之前**落位，重入不重摸）。"""
+
+_HAOSHI_HAND_KEY = "haoshi_hand"
+"""帧私有：摸完之后的**手牌数**（判据只取一次；重入不重算，G9）。"""
+
+_HAOSHI_SEAT_KEY = "haoshi_seat"
+"""帧私有：选定的接收者（并列时由鲁肃选，选完即定格）。"""
+
+_HAOSHI_PICKED_KEY = "haoshi_picked"
+"""帧私有：选出的「一半手牌」（交牌搬内联挂起时重入不重选）。"""
+
+_HAOSHI_GIVEN_KEY = "haoshi_given"
+"""帧私有：整段已收尾（含"判据为假 / 没有其他存活角色"两条零副作用出口）。"""
+
+_ASK_HAOSHI_GIVE = "hero.lu_su_mobile.haoshi.give"
+"""手写询问位置：选「一半的手牌」（自己手牌，牌面直选）。"""
+
+
+def _haoshi_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**自己的**摸牌阶段（阶段体帧的 ``source`` = 当前回合角色）。
+
+    ``PHASE_DRAW`` 是每个座位都派发的帧外时机，故必须自校"这一步的回合角色是不是我"
+    （H2：不写这一条就会在别人的摸牌阶段问鲁肃）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return owner is not None and frame.data.get("source") == owner
+
+
+def _haoshi_fewest_seats(state: GameState, owner: int) -> tuple[int, ...]:
+    """「除你以外全场手牌数最少的一名其他角色」的**候选集**（并列时给全部并列者）。
+
+    不含自己（L776②）、不含死者；并列由鲁肃在候选里自选（一手算例，见段首注释）。
+    池空 = 场上没有其他存活角色 ⇒ 调用方按"这一段整体不出现"处理（不发空询问）。
+    """
+    others = [
+        player for player in state.players if player.alive and player.seat != owner
+    ]
+    if not others:
+        return ()
+    fewest = min(len(player.hand) for player in others)
+    return tuple(player.seat for player in others if len(player.hand) == fewest)
+
+
+def _haoshi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：一次摸完（基础数 +2）→ 判「> 5」→（并列时选人）→ 手选一半 → 交出。
+
+    ``answers`` 不读（本技能没有流水线步骤，座位 / 交牌都是 effect 里的手写询问）。
+    """
+    state = host.state
+    owner = int(frame.data["skill_owner"])
+
+    # ---- 段 1：多摸两张（折进基础摸牌数，一次摸完；随后把阶段的基础摸牌数置 0）------
+    if not frame.data.get(_HAOSHI_DRAWN_KEY):
+        frame.data[_HAOSHI_DRAWN_KEY] = True
+        count = host.draw_phase_count() + HAOSHI_EXTRA_DRAWS
+        host.set_draw_phase_count(owner, 0)
+        if host.draw_for_hand(frame, owner, count) == "stay":
+            return "stay"
+        if host.finished:
+            # 两堆皆空 ⇒ 短摸即平局（G10）：既有引擎行为，这里只是不再往下结算。
+            return None
+
+    if frame.data.get(_HAOSHI_GIVEN_KEY):
+        return None
+
+    # ---- 段 2：判据「手牌数 > 5」，在**摸完之后、交牌之前**取一次 -------------------
+    hand = frame.data.get(_HAOSHI_HAND_KEY)
+    if hand is None:
+        hand = len(state.player(owner).hand)
+        frame.data[_HAOSHI_HAND_KEY] = hand
+    if hand <= 5:
+        frame.data[_HAOSHI_GIVEN_KEY] = True
+        return None
+
+    seats = _haoshi_fewest_seats(state, owner)
+    if not seats:
+        # 没有其他存活角色 ⇒ 段 3 整段不出现（不发没有候选的询问）。
+        frame.data[_HAOSHI_GIVEN_KEY] = True
+        return None
+
+    # ---- 段 3：选接收者（唯一 ⇒ 直提态，不问；并列 ⇒ 鲁肃自选）--------------------
+    target = frame.data.get(_HAOSHI_SEAT_KEY)
+    if target is None:
+        if len(seats) == 1:
+            target = seats[0]
+        else:
+            # 手写询问位置内联（与【遗计】的 ``yiji:give:…`` 同姿态）：``ask_option`` 的
+            # 询问标识不是 ``ask_selection`` 的所有者常量，故不另立模块常量。
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_DRAW,
+                skill_id="hero.lu_su_mobile.haoshi.seat",
+                options=tuple(f"seat:{seat}" for seat in seats),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            target = int(answer.choice.split(":", 1)[1])
+        frame.data[_HAOSHI_SEAT_KEY] = target
+    target = int(target)
+    if not state.player(target).alive:
+        # 目标在结算途中死亡（G9）：交出无从发生，本段整体放弃。
+        frame.data[_HAOSHI_GIVEN_KEY] = True
+        return None
+
+    # ---- 段 4：手选「一半（向下取整）」张手牌（强制，无 Pass）----------------------
+    picked = frame.data.get(_HAOSHI_PICKED_KEY)
+    if picked is None:
+        give = hand // 2
+        chosen = host.ask_selection(
+            frame,
+            owner=_ASK_HAOSHI_GIVE,
+            key="haoshi:give",
+            actor=owner,
+            timing=Timing.PHASE_DRAW,
+            spec=SelectionSpec(
+                zones=(Zone.HAND,), total=(give, give), optional=False
+            ),
+            # 应答的是**自己** ⇒ 牌面直选（`candidates.js:isOwnZonePick`，不铺左下角面板）。
+            build_face=lambda: host.selection_face(
+                owner, (Zone.HAND,), reveal_hand=True
+            ),
+        )
+        if host.suspended(chosen):
+            return "stay"
+        if not chosen:
+            # 防御分支：``optional=False`` 时引擎不会给空答案；硬塞空元组时收尾。
+            frame.data[_HAOSHI_GIVEN_KEY] = True
+            return None
+        picked = tuple(chosen)
+        frame.data[_HAOSHI_PICKED_KEY] = picked
+
+    # ---- 段 5：交出（手牌 → 目标手牌区；一次搬牌，PUT）-----------------------------
+    control = host.move_in_frame(
+        frame,
+        state.refs(picked),
+        to_zone=ZoneRef(Zone.HAND, target),
+        reason=MoveReason.PUT,
+        owner=target,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    frame.data[_HAOSHI_GIVEN_KEY] = True
+    return None
+
+
+HAOSHI_FLOW = SkillFlow(name="haoshi", steps=(), effect=_haoshi_effect)
+"""【好施】的零步流水线：座位问 / 交牌问都住在 effect 里（票面 Q2 = A′）。"""
+
+_HAOSHI = SkillDef(
+    skill_id=HAOSHI,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(Timing.PHASE_DRAW, flow=HAOSHI_FLOW, condition=_haoshi_condition),
+    ),
+    requirement=(
+        "摸牌阶段，你可以多摸两张牌，然后若你的手牌数大于5，"
+        "你将一半的手牌（向下取整）交给除你以外全场手牌数最少的一名其他角色"
+    ),
+    step_requirements={
+        "seat": "交给除你以外全场手牌数最少的一名其他角色",
+        # 手写 SELECT_CARDS 的逐步文案：投影先试 ``skill_id`` 冒号后那段（``give``），
+        # 取不到再回落到 ``"card"`` ⇒ 两键都给、同文案（与【刚烈】/【英魂】同一姿态）。
+        "give": "从你的手牌里选出一半（向下取整）交给该角色",
+        "card": "从你的手牌里选出一半（向下取整）交给该角色",
+    },
+)
+"""鲁肃移动版【好施】的完整声明（阶段体 + 手写主体）。"""
+
+
+LIN_SKILL_DEFS: tuple[SkillDef, ...] = (_YINGHUN, _BENGKUAI, _WANSHA, _WEIMU, _HAOSHI)
 """林包·移动版的全部技能定义（逐票追加）。"""
 
 

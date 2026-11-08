@@ -68,6 +68,7 @@ from sgs.effects import (
     distance,
     forced_use_targets,
     is_slash,
+    locate,
     need_card_floor,
     needs_designation,
     satisfies_required,
@@ -92,6 +93,7 @@ from sgs.state import (
     Zone,
     ZoneRef,
     alive_seats,
+    order_targets,
     seats_from,
 )
 from sgs.timing import Timing
@@ -115,6 +117,8 @@ __all__ = [
     "ACTIVATIONS",
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
+    "DIMENG",
+    "DIMENG_FLOW",
     "JIE_LIJIAN",
     "JIE_LIJIAN_FLOW",
     "POXI_CARDS",
@@ -5937,7 +5941,264 @@ _LUANWU = ActiveSkill(
 """贾诩移动版【乱武】的完整声明（A 族限定技 + 零步流水线 + 手写逐座位循环）。"""
 
 
+# ---------------------------------------------------------------------------
+# 鲁肃【缔盟】（神话再临·林包·移动版；jushou-lusu 票 02，用户 2026-11-08 签 Q3 / Q5）
+#
+# 规则原文（用户 `技能.txt` 逐字，口径 = **移动版**）：
+#
+#     缔盟：出牌阶段限一次，你可以选择两名其他角色并弃置X张牌
+#           （X为这两名角色的手牌数之差），令他们交换手牌。
+#
+# **一手口径**（用户 2026-11-08 给的《规则集》3.8.19「交换」；镜像
+# `.scratch/m1-engine-skeleton/research/raw/flow_move.txt:71-72`）：
+#
+#   「交换双方手牌区里的所有牌的过程为：若双方的手牌区里均有牌，交换的双方**先同时**将
+#    自己手牌区里的所有牌**扣置**入处理区，然后**同时**将处理区里原本为对方所拥有的牌
+#    扣置入自己的手牌区；若仅有其中一方的手牌区里有牌，则其将自己手牌区里的所有牌扣置入
+#    处理区，然后将这些牌扣置入另一方的手牌区。」
+#
+# **落地口径**（票面 Q3 = A + 父代理按 3.8.19 收窄的那一条）：
+#
+# - 两次「失去」走 ``MoveReason.LOSE``：3.8.19 写的是**扣置**，而投影的隐藏掩码只认
+#   「手牌 → 处理区 + ``LOSE``」（`projection.py:217`，【蛊惑】的扣置就是这一串）；
+#   用 ``PUT`` 会把处理区当公开区、把双方手牌晾给所有人看（`visibility.py:53`）。
+# - 两次「获得」走 ``MoveReason.PUT``（处理区 → 对方手牌区，与【涉猎】同口径）。
+#   **不新增** ``MoveReason.SWAP``：那会命中 E2（共享枚举 + 动画分类表 + 不泄露登记表）。
+# - **顺序** = :func:`~sgs.state.order_targets`（= 当前回合角色起逆时针 = **鲁肃起逆时针**，
+#   正是一手算例「从鲁肃开始按逆时针方向……依次决定是否发动」的次序）。引擎的
+#   ``MOVE_AFTER`` 是**逐次内联**派发，故「先同时失去」只剩「非同时」这一处近似（票面 Q3）。
+# - **X = |两名角色的手牌数之差|**，两次选人之后**立刻定格**；一手逐字「X可以为0」⇒
+#   X = 0 时弃置段整段不出现、交换照常（`glossary_value.txt:78-85`）。
+# - **可用牌数 m < X ⇒ 全部弃置**（`glossary_gamecard.txt:67-69` 逐字）。
+#
+# **形状** = `shapes.md` §2 第 52 行「手写主体」：两次 ``PickSeats`` 留在流水线，弃置与
+# 交换住在 ``effect`` 里（张数是算出来的、X = 0 时那一整段要"消失"，而 ``steps`` 是定长
+# 元组、没有"跳过这一步"）。
+# ---------------------------------------------------------------------------
+
+DIMENG = hero_skill_id("lu_su_mobile", "dimeng")
+
+_DIMENG_PAIR_KEY = "dimeng_pair"
+"""帧私有：``(a, b)`` —— 两名被选中的座位，已按**鲁肃起逆时针**排好。"""
+
+_DIMENG_HANDS_KEY = "dimeng_hands"
+"""帧私有：两名角色**交换前**的手牌快照 ``{seat: (card_id, ...)}``（重入不重拍）。"""
+
+_DIMENG_X_KEY = "dimeng_x"
+"""帧私有：定格的 X = 两人手牌数之差（本次结算内是常数）。"""
+
+_DIMENG_PICKED_KEY = "dimeng_picked"
+"""帧私有：选出的弃置牌（搬牌挂起后重入不重选）。"""
+
+_DIMENG_COST_KEY = "dimeng_cost_done"
+"""帧私有：弃置段收尾（含 X = 0 / 没有可弃的牌两条"整段不出现"出口）。"""
+
+_DIMENG_MOVED_KEY = "dimeng_moved"
+"""帧私有：已经完成的搬牌步数（失去 ×2 + 获得 ×2，逐次内联 ``MOVE_AFTER`` 可挂起）。"""
+
+_DIMENG_DONE_KEY = "dimeng_done"
+"""帧私有：整条结算收尾（重入不再做第二遍）。"""
+
+_ASK_DIMENG_DISCARD = "hero.lu_su_mobile.dimeng.cost"
+"""手写询问位置：弃置 X 张（鲁肃自己的手牌 + 装备区，由鲁肃自选）。"""
+
+
+def _dimeng_others(state: GameState, owner: int) -> tuple[int, ...]:
+    """「两名**其他**角色」的池：存活且不是鲁肃本人（座位序）。"""
+    return tuple(
+        player.seat for player in state.players if player.alive and player.seat != owner
+    )
+
+
+def _dimeng_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：一条骨架（与【离间】/【制衡】同姿态）；门 = 本人 / 出牌阶段 / 本阶段未用 +
+    场上**至少两名**其他存活角色（凑不出两人 ⇒ 候选阶段就不产出，零副作用）。"""
+    if not _can_offer(state, ctx):
+        return current
+    if len(_dimeng_others(state, ctx.subject)) < 2:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _dimeng_first_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """第 1 步的池：两名其他角色里的第一名（存活、不含自己）。"""
+    del frame, chosen
+    return _dimeng_others(state, owner)
+
+
+def _dimeng_second_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """第 2 步的池：排掉第 1 步选中的那位（两名必须不同）。
+
+    池依赖前序答案 ⇒ 从 :func:`~sgs.skills.flow._with_answers` 挂上的
+    ``frame.data["preactivation_answers"]`` 读（清单渲染与校验器共用的唯一通道）。
+    没有前序答案（清单退化 / 尚未选第一名）⇒ **空池**：宁可少给候选也不瞎猜
+    （照抄 ``_lijian_victims`` 的姿态）。
+    """
+    del chosen
+    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
+    first = answers.get("first") or ()
+    if not first:
+        return ()
+    taken = int(first[0])
+    return tuple(seat for seat in _dimeng_others(state, owner) if seat != taken)
+
+
+def _dimeng_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：定格 X 与手牌快照 → 弃置 X 张（付不起则弃光）→ 两次失去 → 两次获得。"""
+    state = host.state
+    owner = int(frame.data["source"])
+
+    pair = frame.data.get(_DIMENG_PAIR_KEY)
+    if pair is None:
+        first = tuple(answers["first"])[0]
+        second = tuple(answers["second"])[0]
+        # 顺序 = 鲁肃起逆时针（一手算例的次序；`turn_seat` 此刻就是鲁肃）。
+        pair = tuple(order_targets(state, (int(first), int(second))))
+        frame.data[_DIMENG_PAIR_KEY] = pair
+    a, b = int(pair[0]), int(pair[1])
+
+    hands = frame.data.get(_DIMENG_HANDS_KEY)
+    if hands is None:
+        hands = {a: tuple(state.player(a).hand), b: tuple(state.player(b).hand)}
+        frame.data[_DIMENG_HANDS_KEY] = hands
+    if _DIMENG_X_KEY not in frame.data:
+        frame.data[_DIMENG_X_KEY] = abs(len(hands[a]) - len(hands[b]))
+    x = int(frame.data[_DIMENG_X_KEY])
+
+    # ---- 段 1：弃置 X 张（X = 0 / 没有可弃的牌 ⇒ 整段不出现）-----------------------
+    if not frame.data.get(_DIMENG_COST_KEY):
+        player = state.player(owner)
+        available = len(player.hand) + len(player.equip)
+        if x > 0 and available > 0:
+            take = min(x, available)
+            picked = frame.data.get(_DIMENG_PICKED_KEY)
+            if picked is None:
+                chosen = host.ask_selection(
+                    frame,
+                    owner=_ASK_DIMENG_DISCARD,
+                    key="dimeng:cost",
+                    actor=owner,
+                    timing=Timing.PHASE_PLAY_IDLE,
+                    spec=SelectionSpec(
+                        zones=(Zone.HAND, Zone.EQUIP),
+                        total=(take, take),
+                        optional=False,
+                    ),
+                    # 应答的是**自己** ⇒ 牌面直选（不铺左下角面板）。
+                    build_face=lambda: host.selection_face(
+                        owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+                    ),
+                )
+                if host.suspended(chosen):
+                    return "stay"
+                picked = tuple(chosen or ())
+                frame.data[_DIMENG_PICKED_KEY] = picked
+            if picked:
+                control = _move_by_source(
+                    host,
+                    frame,
+                    tuple(picked),
+                    to_zone=ZoneRef(Zone.DISCARD),
+                    owner=owner,
+                    key="dimeng:cost",
+                )
+                if control == "stay":
+                    return "stay"
+        frame.data[_DIMENG_COST_KEY] = True
+
+    if frame.data.get(_DIMENG_DONE_KEY):
+        return None
+
+    # ---- 段 2/3：两次失去（手牌 → 处理区，**扣置** = LOSE）→ 两次获得（→ 对方手牌）---
+    steps: list[tuple[str, int, int]] = []
+    for seat in pair:
+        steps.append(("lose", seat, seat))
+    for seat in pair:
+        other = b if seat == a else a
+        steps.append(("gain", seat, other))
+    moved = int(frame.data.get(_DIMENG_MOVED_KEY, 0))
+    while moved < len(steps):
+        kind, seat, source = steps[moved]
+        if kind == "lose":
+            cards = tuple(
+                card_id
+                for card_id in hands[seat]
+                if locate(state, card_id).zone is Zone.HAND
+            )
+            if cards:
+                control = host.move_in_frame(
+                    frame,
+                    state.refs(cards),
+                    to_zone=ZoneRef(Zone.PROCESSING),
+                    reason=MoveReason.LOSE,
+                    owner=seat,
+                    actor=owner,
+                )
+                if control == "stay":
+                    return "stay"
+        else:
+            cards = tuple(
+                card_id
+                for card_id in hands[source]
+                if locate(state, card_id).zone is Zone.PROCESSING
+            )
+            if cards:
+                control = host.move_in_frame(
+                    frame,
+                    state.refs(cards),
+                    to_zone=ZoneRef(Zone.HAND, seat),
+                    reason=MoveReason.PUT,
+                    owner=seat,
+                    actor=owner,
+                )
+                if control == "stay":
+                    return "stay"
+        moved += 1
+        frame.data[_DIMENG_MOVED_KEY] = moved
+    frame.data[_DIMENG_DONE_KEY] = True
+    return None
+
+
+DIMENG_FLOW = SkillFlow(
+    name="dimeng",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_dimeng_first_pool, optional=False, key="first"),
+        PickSeats(lo=1, hi=1, pool=_dimeng_second_pool, optional=False, key="second"),
+    ),
+    effect=_dimeng_effect,
+)
+"""【缔盟】的两步流水线：选第一名 → 选第二名（不同）→ 弃置 / 交换住 effect。"""
+
+_DIMENG = ActiveSkill(
+    "lu_su_mobile",
+    "dimeng",
+    _dimeng_offers,
+    flow=DIMENG_FLOW,
+    preactivated=True,
+    requirement=(
+        "出牌阶段限一次，你可以选择两名其他角色并弃置X张牌"
+        "（X为这两名角色的手牌数之差），令他们交换手牌"
+    ),
+    step_requirements={
+        "first": "选择两名其他角色（第一名）",
+        "second": "选择两名其他角色（第二名，不能与第一名相同）",
+        # 手写 SELECT_CARDS 的逐步文案：投影先试 ``skill_id`` 冒号后那段（``cost``），
+        # 取不到再回落到 ``"card"`` ⇒ 两键都给、同文案（与【刚烈】/【英魂】同一姿态）。
+        "cost": "弃置 X 张牌（X 为两名角色的手牌数之差）",
+        "card": "弃置 X 张牌（X 为两名角色的手牌数之差）",
+    },
+)
+"""鲁肃移动版【缔盟】的完整声明（A 族 + 两步座位 + 手写主体）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
+    # 鲁肃【缔盟】（神话再临·林包·移动版；jushou-lusu 票 02）：两步选人 → 弃 X 张（动态）
+    # → 双方手牌经处理区交换。
+    _DIMENG,
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
         "xunyu",

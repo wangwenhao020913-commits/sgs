@@ -143,6 +143,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "lu_su_mobile",
+      "name": "鲁肃移动版",
+      "true_name": "鲁肃",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "lin-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "haoshi",
+          "name": "好施",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "dimeng",
+          "name": "缔盟",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

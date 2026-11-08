@@ -2796,6 +2796,27 @@ def _coverage_qingnang():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_dimeng():
+    """鲁肃【缔盟】（jushou-lusu 票 02）：已翻预发动 ⇒ 清单 = 两次座位步。
+
+    局面：鲁肃手里一张【闪电】（弃得掉、不是好牌），两名其他角色都有手牌（互换有意义）。
+    清单渲得出（首步池非空）⇒ AI 能填表发动一次。
+    """
+    lightning = _ids("lightning")[0]
+    other = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="lu_su_mobile", hand=(lightning,)),
+            SeatSpec(hand=(other,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(lightning, other),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_lijian():
     lightning = _ids("lightning")[0]
     state = build_state(
@@ -3095,6 +3116,8 @@ _COVERAGE_CASES = {
     # M6 票 17：界·吴两条已翻预发动的技能（界制衡 / 界流离）。
     "hero.jie_sunquan.zhiheng": _coverage_jie_zhiheng,
     "hero.jie_daqiao.liuli": _coverage_jie_liuli,
+    # jushou-lusu 票 02：林包移动版·鲁肃【缔盟】（A 族 + 两步座位，已翻预发动）。
+    "hero.lu_su_mobile.dimeng": _coverage_dimeng,
     # 风包·移动版于吉【蛊惑】（票 04 §3：出牌阶段入口改预发动，清单 = 选牌 → 声明牌名）。
     "hero.yuji_mobile.guohuo": _coverage_guohuo,
     # M6 票 23 报障：界夏侯惇【清俭】补翻预发动（首步选**自己**的手牌 / 装备 ⇒ 清单恒渲得出）。

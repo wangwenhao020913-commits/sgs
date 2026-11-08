@@ -5563,3 +5563,470 @@ def test_mutation_weimu_by_card_name_list_leaks_black_delayed_tricks(monkeypatch
     assert 0 in check_targets(state, 1, state.card(BLACK_INDULGENCE)), (
         "突变后黑色【乐不思蜀】能指定贾诩 ⇒ 原断言不是恒绿"
     )
+
+
+# ===========================================================================
+# §4 鲁肃移动版【好施】/【缔盟】（jushou-lusu 票 02；用户 2026-11-08 签 + 3.8.19）
+#
+# 牌面（用户 `技能.txt` 逐字，口径 = **移动版**）：
+#
+#     好施：摸牌阶段，你可以多摸两张牌，然后若你的手牌数大于5，你将一半的手牌（向下取整）
+#           交给除你以外全场手牌数最少的一名其他角色。
+#     缔盟：出牌阶段限一次，你可以选择两名其他角色并弃置X张牌（X为这两名角色的手牌数之差），
+#           令他们交换手牌。
+#
+# 签字要点：好施的**座位问在摸牌之后**（票面 Q2 = A′）；并列最少时由鲁肃自选
+# （《官方规则集》技能要素条的算例逐字）；缔盟 X = 0 合法、可用牌数 < X 则**弃光**、
+# 交换**经处理区**且两次「失去」记 ``LOSE``（扣置，不亮牌面）。
+# ===========================================================================
+
+LU_SU = "lu_su_mobile"
+HAOSHI = "hero.lu_su_mobile.haoshi"
+DIMENG = "hero.lu_su_mobile.dimeng"
+
+
+class _LuSuScript:
+    """鲁肃一侧的脚本：两条技能答发动 / 放弃；座位问、选牌问按给定值答。
+
+    ``dimeng`` = 预发动确认要提交的 ``(第一名, 第二名)`` 座位；提交后清空
+    （同一次出牌阶段只有一次机会）。
+    """
+
+    def __init__(self, *, activate=True, seat_pick=0, picks=None, dimeng=None):
+        self.activate = activate
+        self.seat_pick = seat_pick
+        self.picks = picks
+        self.dimeng = dimeng
+        self.asks: list = []
+        self.seat_questions: list = []
+        self.card_questions: list = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) in (
+            HAOSHI,
+            DIMENG,
+        ):
+            self.asks.append(query)
+            if self.activate:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            return next(
+                action for action in query.legal_actions if isinstance(action, Pass)
+            )
+        if query.kind == QueryKind.PLAY_PHASE and self.dimeng is not None:
+            first, second = self.dimeng
+            self.dimeng = None
+            return ActivateSkill(
+                skill_id=DIMENG,
+                picks=(),
+                choices=(f"seat:{first}", f"seat:{second}"),
+                answers_seq=query.seq,
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            self.seat_questions.append(query)
+            choices = [a for a in query.legal_actions if isinstance(a, SelectOption)]
+            return choices[min(self.seat_pick, len(choices) - 1)]
+        if query.kind == QueryKind.SELECT_CARDS:
+            self.card_questions.append(query)
+            if self.picks is not None:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectCards)
+                    and action.picks == tuple(self.picks)
+                )
+            return next(
+                action for action in query.legal_actions if isinstance(action, SelectCards)
+            )
+        return _minimal(query)
+
+
+class _DeclineAll:
+    """其余座位：一律放弃。"""
+
+    def respond(self, query):
+        return _minimal(query)
+
+
+def _lusu_seats(*, hand=(), others=((),), hero=LU_SU, hp=3):
+    """座位 0 = 鲁肃（3 体力），其余座位按 ``others`` 给手牌。"""
+    seats = [SeatSpec(hero=hero, hp=hp, hp_max=3, hand=tuple(hand))]
+    seats += [SeatSpec(hand=tuple(cards)) for cards in others]
+    return seats
+
+
+def _lusu_state(seats, *, deck=None):
+    used = {card for spec in seats for card in spec.hand}
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck
+        if deck is not None
+        else deck_excluding(PACK, *used),
+        turn_seat=0,
+        phase=Phase.DRAW,
+    )
+
+
+def _lusu_players(state, script):
+    return [script] + [_DeclineAll() for _ in range(len(state.players) - 1)]
+
+
+def _drive(engine, players, stop, *, limit=1600):
+    for _ in range(limit):
+        if stop(engine):
+            return engine
+        if engine.finished:
+            return engine
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        engine.submit(players[query.actor].respond(query))
+    raise AssertionError("推进上限内没有到达停止条件")
+
+
+def _play_idle(engine, actor: int = 0) -> bool:
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.PLAY_PHASE
+        and engine.pending.actor == actor
+    )
+
+
+def _run_lusu(state, *, script=None):
+    """把引擎推进到座位 0 的**出牌阶段空闲点**（好施那一问在摸牌阶段被应答完）。"""
+    engine = Engine.from_state(state, seed=7)
+    owner = script or _LuSuScript()
+    players = _lusu_players(state, owner)
+    _drive(engine, players, lambda e: _play_idle(e, 0))
+    return engine, owner, players
+
+
+def _submit_dimeng(engine, first: int, second: int):
+    """在出牌阶段提交【缔盟】的**预发动确认**（复合动作：两次座位答案）。"""
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=DIMENG,
+            picks=(),
+            choices=(f"seat:{first}", f"seat:{second}"),
+            answers_seq=query.seq,
+        )
+    )
+
+
+def _run_dimeng(state, *, first=1, second=2):
+    """跑到出牌阶段 → 提交【缔盟】→ 推进回出牌阶段（好施不发动，基础摸牌照常）。"""
+    engine, owner, players = _run_lusu(
+        state, script=_LuSuScript(activate=False)
+    )
+    _submit_dimeng(engine, first, second)
+    _drive(engine, players, lambda e: _play_idle(e, 0))
+    return engine, owner
+
+
+def _moves(engine, reason: MoveReason) -> list:
+    return [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and getattr(record, "reason", None) is reason
+    ]
+
+
+def _lusu_draw_moves(engine) -> list:
+    """本批次（鲁肃）的摸牌搬牌记录；**不**复用文件里既有的 ``_draw_moves(engine, seat)``。"""
+    return _moves(engine, MoveReason.DRAW)
+
+
+def test_haoshi_draws_four_in_one_move_and_gives_half():
+    """手牌 4 张 ⇒ 一次摸 4 张（折进基础摸牌数）⇒ 8 > 5 ⇒ 交 ⌊8/2⌋ = 4 张。"""
+    cards = tuple(range(4))
+    state = _lusu_state(_lusu_seats(hand=cards))
+    engine, owner = _run_lusu(state)[:2]
+
+    assert len(owner.asks) == 1, "摸牌阶段问一次「是否发动」"
+    draws = _lusu_draw_moves(engine)
+    assert [len(record.cards) for record in draws] == [4], (
+        "「多摸两张」折进基础摸牌数：一次搬 4 张，不是 2 + 2"
+    )
+    assert len(state.player(0).hand) == 4, "8 − 4 = 4"
+    assert len(state.player(1).hand) == 4, "接收者拿到那 4 张"
+    givens = _moves(engine, MoveReason.PUT)
+    assert [len(record.cards) for record in givens] == [4], "交出是一次搬牌"
+
+
+def test_haoshi_gives_half_rounded_down():
+    """6 → 交 3；7 → 交 3（向下取整）。"""
+    for start, expected in ((2, 3), (3, 3)):
+        state = _lusu_state(_lusu_seats(hand=tuple(range(start))))
+        _, _ = _run_lusu(state)[:2]
+        assert len(state.player(0).hand) == start + 4 - expected, (start, expected)
+        assert len(state.player(1).hand) == expected
+
+
+def test_haoshi_gives_nothing_when_hand_is_at_most_five():
+    """摸完恰好 ≤ 5 ⇒ 段 3 整段不出现（严格大于）。"""
+    state = _lusu_state(_lusu_seats(hand=()))
+    engine, owner = _run_lusu(state)[:2]
+
+    assert len(owner.asks) == 1
+    assert len(state.player(0).hand) == 4
+    assert state.player(1).hand == []
+    assert owner.seat_questions == [], "没有交牌就绝不问「交给谁」"
+    assert _moves(engine, MoveReason.PUT) == []
+
+
+def test_haoshi_lists_every_tied_minimum_seat():
+    """并列最少 ⇒ 座位问列出**全部并列者**，鲁肃选谁就交给谁（一手算例）。"""
+    seats = _lusu_seats(hand=tuple(range(4)), others=((), ()))
+    state = _lusu_state(seats)
+    engine, owner = _run_lusu(state, script=_LuSuScript(seat_pick=1))[:2]
+
+    assert len(owner.seat_questions) == 1, "并列 ⇒ 问一次「交给谁」"
+    options = owner.seat_questions[0].options
+    assert len(options) == 2, f"两名并列者都要列出来：{options}"
+    assert len(state.player(2).hand) == 4, "选了第二名 ⇒ 交给座位 2"
+    assert state.player(1).hand == []
+
+
+def test_haoshi_only_one_minimum_goes_direct():
+    """最少者唯一 ⇒ 不问座位（直提态）。"""
+    seats = _lusu_seats(hand=tuple(range(4)), others=((), (0, 1)))
+    state = _lusu_state(seats)
+    _, owner = _run_lusu(state)[:2]
+
+    assert owner.seat_questions == []
+    assert len(state.player(1).hand) == 4, "手牌 0 的那名是唯一最少者"
+
+
+def test_haoshi_declining_changes_nothing():
+    """答「放弃」⇒ 一张都不多摸（「可以」的放弃出口）。"""
+    state = _lusu_state(_lusu_seats(hand=tuple(range(4))))
+    engine, owner = _run_lusu(state, script=_LuSuScript(activate=False))[:2]
+
+    assert len(owner.asks) == 1
+    assert len(state.player(0).hand) == 4 + 2, "放弃 ⇒ 只剩摸牌阶段基础的 2 张"
+    assert [len(record.cards) for record in _lusu_draw_moves(engine)] == [2]
+
+
+def test_haoshi_does_not_trigger_in_another_players_draw_phase():
+    """别人的摸牌阶段不问鲁肃（阶段体帧的 source 自校）。"""
+    seats = _lusu_seats(hand=tuple(range(2)), others=((),))
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, 0, 1),
+        turn_seat=1,
+        phase=Phase.DRAW,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [_LuSuScript(), _DeclineAll()]
+
+    def stop(e) -> bool:
+        return (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and e.pending.actor == 1
+        )
+
+    for _ in range(800):
+        if stop(engine):
+            break
+        if engine.finished:
+            break
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        engine.submit(players[query.actor].respond(query))
+    assert not [
+        query
+        for query in (
+            record.query for record in engine.records if record.kind == "query"
+        )
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == HAOSHI
+    ], "别人的摸牌阶段不该问【好施】"
+
+
+def test_dimeng_is_not_offered_without_two_other_alive_seats():
+    """场上凑不出两名其他存活角色 ⇒ 候选阶段就不产出入口。"""
+    seats = _lusu_seats(hand=(_cards("slash")[0],), others=((),))
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, seats[0].hand[0]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    actions = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    assert not [
+        action
+        for action in actions
+        if isinstance(action, ActivateSkill) and action.skill_id == DIMENG
+    ]
+
+
+def test_dimeng_discards_the_hand_count_difference_and_swaps():
+    """X = |2 − 0| = 2：鲁肃弃 2 张，两名角色的手牌互换。"""
+    mine = (_cards("slash")[0], _cards("dodge")[0], _cards("peach")[0])
+    hand_a = (_cards("ex_nihilo")[0], _cards("duel")[0])
+    seats = [
+        SeatSpec(hero=LU_SU, hp=3, hp_max=3, hand=mine),
+        SeatSpec(hand=hand_a),
+        SeatSpec(),
+    ]
+    used = (*mine, *hand_a)
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *used),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine, owner = _run_dimeng(state)
+
+    assert len(state.player(1).hand) == 0, "座位 1 的手牌全部换走"
+    assert state.player(2).hand == list(hand_a), "座位 2 拿到座位 1 的那两张"
+    assert len(state.player(0).hand) == len(mine) + 2 - 2, "鲁肃弃掉 X = 2 张（另有摸牌阶段的 2 张）"
+    assert state.processing == [], "处理区在结算后清空"
+    loses = _moves(engine, MoveReason.LOSE)
+    puts = [record for record in _moves(engine, MoveReason.PUT) if record.to_zone.zone is Zone.HAND]
+    assert [len(record.cards) for record in loses] == [2], "只有一侧有牌 ⇒ 一次失去"
+    assert [len(record.cards) for record in puts] == [2], "一次获得（处理区 → 对方手牌）"
+
+
+def test_dimeng_zero_difference_discards_nothing_and_swaps():
+    """两人手牌数相同（X = 0）⇒ 弃置段整段不出现、交换照常（一手逐字「X可以为0」）。"""
+    mine = (_cards("slash")[0],)
+    hand_a = (_cards("ex_nihilo")[0],)
+    hand_b = (_cards("duel")[0],)
+    seats = [
+        SeatSpec(hero=LU_SU, hp=3, hp_max=3, hand=mine),
+        SeatSpec(hand=hand_a),
+        SeatSpec(hand=hand_b),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *mine, *hand_a, *hand_b),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine, owner = _run_dimeng(state)
+
+    assert owner.card_questions == [], "X = 0 ⇒ 连选牌问都不发"
+    assert state.player(1).hand == list(hand_b)
+    assert state.player(2).hand == list(hand_a)
+    assert len(state.player(0).hand) == len(mine) + 2, "一张都不弃（只有摸牌阶段那 2 张）"
+
+
+def test_dimeng_short_discard_takes_every_card():
+    """可用牌数 m < X ⇒ **全部弃置**（《官方规则集》「弃置」条逐字）。"""
+    # 鲁肃手上无牌 ⇒ 摸牌阶段摸 2 张；对面 3 张 vs 0 张 ⇒ X = 3 > m = 2 ⇒ 弃光这 2 张。
+    hand_a = (_cards("ex_nihilo")[0], _cards("duel")[0], _cards("dodge")[0])
+    seats = [
+        SeatSpec(hero=LU_SU, hp=3, hp_max=3, hand=()),
+        SeatSpec(hand=hand_a),
+        SeatSpec(),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *hand_a),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine, owner = _run_dimeng(state)
+
+    assert len(owner.card_questions) == 1, "付不起 X ⇒ 仍然问「弃哪几张」，但规格已收窄成 m 张"
+    assert owner.card_questions[0].spec.total == (2, 2), "m < X ⇒ 收窄到全部可弃的牌"
+    assert state.player(0).hand == [], "2 张全弃光"
+    assert state.player(2).hand == list(hand_a)
+    assert state.player(2).hand == list(hand_a)
+
+
+def test_dimeng_swap_goes_through_the_processing_zone():
+    """交换 = 两次「扣置进处理区」（LOSE）＋两次「从处理区获得」（PUT）。"""
+    mine = (_cards("slash")[0], _cards("dodge")[0])
+    hand_a = (_cards("ex_nihilo")[0],)
+    hand_b = (_cards("duel")[0], _cards("peach")[0])
+    seats = [
+        SeatSpec(hero=LU_SU, hp=3, hp_max=3, hand=mine),
+        SeatSpec(hand=hand_a),
+        SeatSpec(hand=hand_b),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *mine, *hand_a, *hand_b),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine, _owner = _run_dimeng(state)
+
+    to_processing = [
+        record
+        for record in _moves(engine, MoveReason.LOSE)
+        if record.to_zone.zone is Zone.PROCESSING
+    ]
+    from_processing = [
+        record
+        for record in _moves(engine, MoveReason.PUT)
+        if record.from_zone is not None and record.from_zone.zone is Zone.PROCESSING
+    ]
+    assert len(to_processing) == 2, "双方各一次「扣置入处理区」"
+    assert len(from_processing) == 2, "双方各一次「从处理区获得」"
+    assert state.player(1).hand == list(hand_b)
+    assert state.player(2).hand == list(hand_a)
+    assert state.processing == []
+
+
+def test_dimeng_empty_hand_target_still_swaps():
+    """一人空手牌 ⇒ 交换照常（空的一侧收牌、另一侧清零）。"""
+    mine = (_cards("slash")[0],)
+    hand_a = (_cards("ex_nihilo")[0], _cards("duel")[0])
+    seats = [
+        SeatSpec(hero=LU_SU, hp=3, hp_max=3, hand=mine),
+        SeatSpec(hand=hand_a),
+        SeatSpec(),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *mine, *hand_a),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine, _owner = _run_dimeng(state)
+
+    assert state.player(1).hand == []
+    assert state.player(2).hand == list(hand_a)
+
+
+def test_dimeng_two_empty_hands_swap_is_a_no_op():
+    """两人都空手牌 ⇒ 零搬牌、不崩（X = 0，弃置段也不出现）。"""
+    mine = (_cards("slash")[0],)
+    seats = [
+        SeatSpec(hero=LU_SU, hp=3, hp_max=3, hand=mine),
+        SeatSpec(),
+        SeatSpec(),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *mine),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine, owner = _run_dimeng(state)
+
+    assert owner.card_questions == []
+    assert state.player(1).hand == [] and state.player(2).hand == []
+    assert len(state.player(0).hand) == len(mine) + 2
+    assert state.processing == []
