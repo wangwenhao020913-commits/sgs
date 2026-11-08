@@ -255,14 +255,31 @@ def deck_catalog() -> list[dict[str, object]]:
     return catalog
 
 
+KEEP_FINISHED_SESSIONS = 2
+"""终局会话在内存里最多保留几局（perf-web 票 01，用户 2026-11-08 指定）。
+
+一局 8 人长局在引擎里是 1.4 万+ 条记录（其中 `query` 带完整 `legal_actions`，20MB 级）。
+此前 `sessions` 只增不删、终局落盘后也不回收 ⇒ 每开一局进程内存 +20MB 常驻，GC/swap 把
+服务拖钝。**回放本来就走 `runs/` 里的文件**（`/api/runs/<name>`），内存里只需要"还在打的"
+以及"刚打完、页面可能还在轮询的那几局"，故留最近 2 局当缓冲。
+"""
+
+
 class GameRegistry:
-    """内存里的会话表；**一局一个会话**，进程重启即丢（D15、`06` §2"单机跑通再谈"）。"""
+    """内存里的会话表；**一局一个会话**，进程重启即丢（D15、`06` §2"单机跑通再谈"）。
+
+    **终局回收**（perf-web 票 01）：`save_if_finished` 落盘成功后，较旧的已终局会话从
+    :attr:`sessions` 里移除（保留最近 :data:`KEEP_FINISHED_SESSIONS` 局 + 全部未终局）。
+    被回收的会话再取 ⇒ :meth:`get` 抛 ``KeyError``（HTTP 层 404）；它的回放改走文件，
+    不受影响。
+    """
 
     def __init__(self, runs_dir: Path | None = None) -> None:
         self.sessions: dict[str, Session] = {}
         self.runs_dir = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
         self.presets_path = self.runs_dir / HERO_PRESETS_FILENAME
         self._counter = 0
+        self._finished_order: list[str] = []
 
     # -- 将池存档（M6 票 13） ----------------------------------------------
 
@@ -434,7 +451,17 @@ class GameRegistry:
             return None
         path = save_run(self.runs_dir, session)
         _SAVED.add(key)
+        # perf-web 票 01：落盘成功才回收——**先保住文件、再丢内存**。按"落盘先后"记序，
+        # 不按创建序：两局并行时先创建的那局可能后结束，按创建序会把它误当成"旧的"回收。
+        self._finished_order.append(session.session_id)
+        self._prune_finished()
         return path
+
+    def _prune_finished(self) -> None:
+        """回收较旧的已终局会话：保留最近 :data:`KEEP_FINISHED_SESSIONS` 局 + 全部未终局。"""
+        while len(self._finished_order) > KEEP_FINISHED_SESSIONS:
+            oldest = self._finished_order.pop(0)
+            self.sessions.pop(oldest, None)
 
 
 class _Handler(BaseHTTPRequestHandler):

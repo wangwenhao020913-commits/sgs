@@ -54,6 +54,20 @@ def _unique_path(runs_dir: Path, stem: str) -> tuple[Path, Path]:
         suffix += 1
 
 
+def _human_seat_won_from_records(records: tuple[Any, ...], human_seat: int | None) -> bool | None:
+    """从**已在内存里的**记录流读"人类座位是否在获胜一侧"；没有终局 / 没有人类座位 ⇒ ``None``。
+
+    perf-web 票 01（用户 2026-11-08 指定）：这个事实以前由列表在 HTTP 请求里对**每局**
+    调 ``read_journal`` 现算（908MB / 257 局 ≈ 48s）；现在在**落盘那一刻**算好写进侧车
+    元数据，列表只读 meta——记录流一个字节都不用再解析。旧录像没有这个字段 ⇒ 列表给
+    ``None``（回放页显示「—」），**不**回落到读记录流（那正是要消掉的成本）。
+    """
+    end = next((r for r in reversed(records) if getattr(r, "kind", None) == "game_end"), None)
+    if end is None or human_seat is None:
+        return None
+    return human_seat in getattr(end, "winners", ())
+
+
 def build_meta(session: Session, when: datetime) -> dict[str, Any]:
     """侧车元数据的内容：重放所需的前置事实 + 接入层事实。"""
     seed, tape = tape_from_journal(session.records())
@@ -69,6 +83,8 @@ def build_meta(session: Session, when: datetime) -> dict[str, Any]:
         "hero_pool": list(session.hero_pool) if session.hero_pool is not None else None,
         "hero_pool_explicit": session.hero_pool is not None,
         "human_seat": session.human_seat,
+        # perf-web 票 01：胜负在落盘时定格，`list_runs` 因此只读 meta（见上面的辅助函数）。
+        "human_seat_won": _human_seat_won_from_records(session.records(), session.human_seat),
         "ai": session.ai,
         "timeout_seconds": session.timeout_seconds,
         "timeouts": session.timeouts,
@@ -112,7 +128,12 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
-    """录像列表（按文件名倒序 = 新的在前）；只列出**配对齐全**的那些。"""
+    """录像列表（按文件名倒序 = 新的在前）；只列出**配对齐全**的那些。
+
+    **只读侧车元数据**（perf-web 票 01）：胜负在 `save_run` 落盘时已写进 meta，这里
+    **一局记录流都不解析** —— 列表耗时与录像总字节数无关（此前 908MB / 257 局 ≈ 48s）。
+    旧录像没有 `human_seat_won` 字段 ⇒ `None`（回放页显示「—」），不回落读记录流。
+    """
     runs_dir = Path(runs_dir)
     if not runs_dir.is_dir():
         return []
@@ -134,7 +155,8 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
                 "human_seat": meta["human_seat"],
                 "heroes": meta.get("heroes", []),
                 "finished_at": meta.get("finished_at"),
-                "human_seat_won": _human_seat_won(runs_dir, name, meta),
+                # 只读侧车元数据：**不解析记录流**（perf-web 票 01）。旧录像没有该字段 ⇒ None。
+                "human_seat_won": meta.get("human_seat_won"),
             }
         )
     return out
@@ -220,13 +242,4 @@ def replay_journal(meta: dict[str, Any]) -> tuple[Any, ...]:
     engine.run([TapePlayer(tape)] * int(meta["player_count"]))
     return tuple(engine.records)
 
-def _human_seat_won(runs_dir: Path, name: str, meta: dict[str, Any]) -> bool | None:
-    """从记录流的终局记录读"人类座位是否在获胜一侧"；读不动就返回 ``None``。"""
-    try:
-        records = read_journal(Path(runs_dir) / f"{name}.jsonl")
-    except Exception:
-        return None
-    end = next((r for r in reversed(records) if getattr(r, "kind", None) == "game_end"), None)
-    if end is None:
-        return None
-    return meta["human_seat"] in getattr(end, "winners", ())
+

@@ -2690,6 +2690,90 @@ def test_listing_runs_reports_the_pair_and_the_outcome(tmp_path: Path) -> None:
     assert isinstance(runs[0]["human_seat_won"], bool)
 
 
+def test_the_sidecar_meta_carries_the_outcome(tmp_path: Path) -> None:
+    """perf-web 票 01：胜负在**落盘那一刻**定格进侧车元数据（列表因此不必解析记录流）。"""
+    from sgs_web.replay import read_run_meta
+
+    session = _finished_session(seed=103)
+    journal = save_run(tmp_path, session)
+    name = journal.name[: -len(".jsonl")]
+
+    meta = read_run_meta(tmp_path, name)
+
+    assert isinstance(meta.get("human_seat_won"), bool), meta.get("human_seat_won")
+    # 与"真去读记录流"的旧算法一致（终局记录的 winners 里有没有人类座位）。
+    assert meta["human_seat_won"] is (meta["human_seat"] in session.records()[-1].winners)
+
+
+def test_listing_runs_never_parses_the_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """perf-web 票 01：列表**只读侧车元数据**。
+
+    旧实现为算胜负对每局 `read_journal`（仓里实测 908MB / 257 局 ≈ 48s，且每局终局都跑）。
+    这里把 `read_journal` 换成"一调就炸"：列表还能返回 ⇒ 记录流一个字节都没被解析。
+    """
+    import sgs_web.replay as replay_module
+
+    session = _finished_session(seed=103)
+    save_run(tmp_path, session)
+
+    def _forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("list_runs 不许解析记录流（胜负已在 meta 里）")
+
+    monkeypatch.setattr(replay_module, "read_journal", _forbidden)
+
+    runs = list_runs(tmp_path)
+
+    assert len(runs) == 1 and isinstance(runs[0]["human_seat_won"], bool)
+
+
+def test_a_legacy_meta_without_the_outcome_lists_as_unknown(tmp_path: Path) -> None:
+    """旧录像没有 `human_seat_won` ⇒ 列表给 ``None``（回放页「—」），**不**回落读记录流。"""
+    session = _finished_session(seed=103)
+    journal = save_run(tmp_path, session)
+    name = journal.name[: -len(".jsonl")]
+    meta_path = tmp_path / f"{name}.meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("human_seat_won")
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+    runs = list_runs(tmp_path)
+
+    assert len(runs) == 1
+    assert runs[0]["human_seat_won"] is None
+
+
+def test_the_registry_drops_old_finished_sessions_after_saving(tmp_path: Path) -> None:
+    """perf-web 票 01：终局落盘成功后回收较旧的已终局会话（未终局的绝不回收）。
+
+    顺序按**落盘先后**（不是创建先后）：这里刻意先建一局不玩的（活的），再依次打完三局。
+    """
+    from sgs_web.serve import KEEP_FINISHED_SESSIONS, GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    live = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 11, "timeout_seconds": None}
+    )
+    finished: list[str] = []
+    for seed in (7, 8, 9):
+        session = registry.create(
+            {"player_count": 2, "ai": "random", "seed": seed, "timeout_seconds": None}
+        )
+        _play_to_end(session)
+        assert session.finished
+        registry.save_if_finished(session)
+        finished.append(session.session_id)
+
+    # 保留"最近 KEEP 局"：最老的那局被回收，最近的都还在；未终局的一局不受影响。
+    assert KEEP_FINISHED_SESSIONS >= 1
+    assert finished[0] not in registry.sessions
+    assert all(session_id in registry.sessions for session_id in finished[-KEEP_FINISHED_SESSIONS:])
+    assert live.session_id in registry.sessions
+    with pytest.raises(KeyError):
+        registry.get(finished[0])
+    # 回收的是**内存里的会话**，录像仍在（回放走文件）。
+    assert len(list(tmp_path.glob("*.jsonl"))) == 3
+
+
 def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_path: Path) -> None:
     """W4-6：回放页的询问面板 / 手牌 / 装备 / 判定 / 处理区**只能**从这份 API 读。
 
