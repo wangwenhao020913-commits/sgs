@@ -336,6 +336,9 @@ _FIRE_TAPE_BANNED_HEROES = (
     "xuhuang_mobile",
     # lin-batch2 票 01：林包移动版曹丕移动版（seed=46 那一局不加这条就整局用不出【火攻】）。
     "caopi_mobile",
+    # lin-batch2 票 02：林包移动版董卓移动版（8 体力 + 每回合崩坏 ⇒ 同样会重排随机配将；
+    # 新武将进默认池就往这里追加是既定规矩）。
+    "dongzhuo_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 

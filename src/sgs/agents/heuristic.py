@@ -1987,6 +1987,12 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         "失去2点体力": -0.6,
         "失去3点体力": -1.2,
         "失去4点体力": -1.8,
+        # 林包·移动版董卓【崩坏】（lin-batch2 票 02，Q7 = A）：锁定技的**必答二选一**，两项
+        # 都是成本。失 1 点体力可回复、减 1 点上限是永久（还会让后续每个结束阶段更难）⇒
+        # 失体力那格略高。已知限制：1 体力时「失体力」= 进濒死，静态常量读不出这个
+        # （要按"当前体力"细算得另开 AI 票），故这里把现状钉住、不假装它是对的。
+        "bengkuai_lose_hp": -1.2,
+        "bengkuai_reduce_max": -1.6,
     }
 )
 
@@ -3681,6 +3687,39 @@ def _score_huangtian(query: Query, action: Action, view: PlayerView) -> float:
     return 2.0 * (1.0 - enemy)
 
 
+def _score_jiuchi(query: Query, action: Action, view: PlayerView) -> float:
+    """林包·移动版董卓【酒池】（lin-batch2 票 02，Q7 = A）：黑桃手牌当【酒】。
+
+    **与真【酒】同一条估值**（三参包装 :func:`_score_wine`）：这一口酒只在"下一张【杀】
+    正好凑成斩杀"时给正分，否则 :data:`_WINE_WASTE_PENALTY`（【酒】每回合限一次，白喝
+    就再也救不了自己）。真正的候选打分仍走 ``_score_card_use`` 的 ``wine`` 分支（与真
+    【酒】同一个函数），本条只满足语义表的双向同步纪律与"清单 / 被动入口"的登记口径；
+    濒死那一侧由 :func:`_score_peach` 按"回复 1 点"计价（``_RESCUE_CARD_TYPES`` 含 wine）。
+    """
+    del action
+    return _score_wine(query, view)
+
+
+def _score_baonue(query: Query, action: Action, view: PlayerView) -> float:
+    """林包·移动版董卓【暴虐】（lin-batch2 票 02，Q7 = A）：**关系感知**的主公技。
+
+    这一问的应答者是**造成伤害的那个群势力角色**（决定者 ≠ 受益者），收益归主公：
+    主公回复 1 点体力。``SkillActivationQuery`` 没有"受益者是谁"的字段，故这里按
+    **主公身份公开**这一条事实自己找（:func:`_huangtian_lord_seat`，与【黄天】同一姿态）：
+    主公在**我的盟友集**里（:func:`_ally_identities`，按身份阵营算）⇒ ``+1.5``
+    （1 点回复 ≈ 半个 :data:`_HEAL_VALUE`，而且是一次"白拿"的机会）；否则 ``-1.0``
+    （帮敌人回血是负收益）。主公 / 自己的身份读不到（无身份局）⇒ ``0.0``（不表态）。
+    """
+    del query, action
+    lord = _huangtian_lord_seat(view)
+    if lord is None:
+        return 0.0
+    mine = _me(view).identity
+    if mine is None:
+        return 0.0
+    return 1.5 if "lord" in _ally_identities(mine) else -1.0
+
+
 def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
     """神曹操移动版【归心】（lin-batch 票 01）：逐座位各拿一张 + **翻面**。
 
@@ -4304,6 +4343,22 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "零代价、受益者是主公本人（与界【护驾】② 同口径：它是 `_constant`，不读任何字段）。"
         "三个条件（判定者不是主公 / 同魏 / 黑色）全在 `_songwei_plan.available` 里，候选出现"
         "即已成立 ⇒ 常量即正",
+    ),
+    # 林包·移动版·董卓（lin-batch2 票 02）：只装两条**非锁定**技（肉林 / 崩坏是锁定技 ⇒
+    # 没有「是否发动」询问，按纪律不入表）。口径见票面 `## AI 适配` 第 3 格 / Q7。
+    "hero.dongzhuo_mobile.jiuchi": (
+        _score_jiuchi,
+        "出牌阶段把一张**黑桃手牌**当【酒】使用（濒死时同一条转化还能自救）。与真【酒】"
+        "同一笔账（`_score_wine`）：只在『这一口酒正好凑成斩杀』时正分，否则负分（【酒】"
+        "每回合限一次）；真正的候选打分走 `_score_card_use` 的 `wine` 分支，本条按语义表"
+        "登记。默认 `standard_108` 档没有【酒】实体牌 ⇒ 该档恒 0 条候选",
+    ),
+    "hero.dongzhuo_mobile.baonue": (
+        _score_baonue,
+        "主公技：其他群势力角色造成伤害后**由它**决定是否判定（决定者 ≠ 受益者），黑桃 ⇒ "
+        "主公回复 1 点。**关系感知**：读公开的主公身份（`_huangtian_lord_seat`）与自己的"
+        "身份（`_me(view).identity`），主公在我的盟友集（`_ally_identities`）⇒ +1.5，"
+        "否则 -1.0；主公 / 自己的身份读不到 ⇒ 0.0。不读任何隐藏信息",
     ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。

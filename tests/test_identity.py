@@ -321,6 +321,8 @@ def test_the_lord_skill_ids_are_now_derived_from_the_m3_definitions():
             "hero.yuanshao_mobile.xueyi",
             # lin-batch2 票 01：曹丕移动版【颂威】
             "hero.caopi_mobile.songwei",
+# lin-batch2 票 02：董卓移动版【暴虐】
+            "hero.dongzhuo_mobile.baonue",
         }
     )
 

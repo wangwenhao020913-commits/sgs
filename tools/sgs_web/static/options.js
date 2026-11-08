@@ -289,6 +289,10 @@ const OPTION_LABELS = Object.freeze({
   // 不按当时 X 渲染成具体数字；两段效果都由**目标**执行）。
   yinghun_draw_x_discard_one: "令其摸X张牌，然后其弃置一张牌",
   yinghun_draw_one_discard_x: "令其摸一张牌，然后其弃置X张牌",
+  // 林包·移动版董卓【崩坏】（lin-batch2 票 02）：锁定技的两个选项**恒可执行、必答**
+  // （没有「放弃」；`PickOption(optional=False)`）⇒ 两项都列、都不置灰。
+  bengkuai_lose_hp: "失去1点体力",
+  bengkuai_reduce_max: "减1点体力上限",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

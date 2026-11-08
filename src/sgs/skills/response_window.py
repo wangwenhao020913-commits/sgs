@@ -13,6 +13,7 @@ E 族三条都改"响应窗口"，但按 R5-Q4 的分界走两条路——**改�
 吕布【无双】              锁定        ``Modifier(RESPONSE_COUNT, 2)``（见下方两半）
 马超【铁骑】              非锁定      ``Hook(USE_AFTER_DESIGNATE_TARGET)`` + 判定 + 帧标签 ``UNRESPONSIVE``
 黄忠【烈弓】              非锁定      ``Hook(USE_AFTER_DESIGNATE_TARGET)`` + **条件成立的目标**打 ``UNRESPONSIVE``
+董卓【肉林】              锁定        ``Modifier(RESPONSE_COUNT, 2)``（双向判据：另一侧是女性）
 =======================  ==========  ==========================================================
 
 【无双】（规则 1046）：牌名 ∈ {【杀】,【决斗】} ⇒ 本次响应窗口需要**两张**，但**改的是哪一方**
@@ -45,7 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import Gender, SkillType, hero_skill_id
 from sgs.effects import (
     CarrierKind,
     Modifier,
@@ -88,6 +89,7 @@ __all__ = [
     "LIEGONG",
     "LIEGONG_FLOW",
     "RESPONSE_WINDOW_SKILLS",
+    "ROULIN",
     "TIEQI_FLOW",
     "response_window_skill_definitions",
 ]
@@ -170,6 +172,57 @@ JIE_WUSHUANG = hero_skill_id("jie_lvbu", "wushuang")
 ①/② 的编号形态）⇒ 同一条 ``RESPONSE_COUNT`` 回调、同一条修饰器，界版只是另一个武将 id
 （与【马术】【克己】【流离】的"另一个武将 id"同一姿态，不复制第二份行为）。
 """
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版董卓【肉林】（lin-batch2 票 02；用户 2026-11-08 签 Q3 / Q4 = A）
+#
+#     肉林
+#     　锁定技，当你使用【杀】指定女性角色为目标后/成为女性角色使用【杀】的目标后，
+#     　该角色/你需连续使用两张【闪】才能抵消。
+#
+# 移动版官网把它写成一句状态式（「你对女性角色使用的【杀】、女性角色对你使用的【杀】
+# 均需使用两张【闪】才能抵消」）——两种写法能读出的结算后果逐条相同（票面 §0.1 判定 ①），
+# 故按【无双】同一条路落 ``ModifierPoint.RESPONSE_COUNT → 2``（账本 L631「响应所需张数
+# 是修饰值」），**不新增帧标签**。
+#
+# **双向判据内联在回调里**（Q4 = A）：修饰器只在【闪】窗口**开窗那一刻**被读到
+# （`effects/modifiers.py:response_count`），而开窗必然晚于"指定目标后 / 成为目标后"
+# 两个时点，故两个时点由 ``ctx`` 一次判清：
+#
+# - ``ctx.owner == ctx.subject``（我用的【杀】）⇒ 看 ``ctx.target`` 是不是女性；
+# - ``ctx.owner == ctx.target``（我挨的【杀】）⇒ 看 ``ctx.subject``（使用者）是不是女性。
+# ---------------------------------------------------------------------------
+
+ROULIN = hero_skill_id("dongzhuo_mobile", "roulin")
+"""董卓移动版【肉林】的全限定技能 id（锁定技 + 纯修饰器）。"""
+
+
+def _roulin_response_count(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """``RESPONSE_COUNT`` 回调：本次【闪】窗口要 **2** 张，当"另一侧"是女性角色。
+
+    「另一侧」按牌面两半取（见本节头注）：我用的【杀】看目标，我挨的【杀】看使用者。
+    性别读武将数据（``state.player(seat).gender``；无武将 / 未知 ⇒ **恒假**，与
+    【雌雄双股剑】的 ``_opposite_genders`` 同一姿态）。牌名闭集走
+    :func:`~sgs.effects.satisfies_required`（【杀】族按共享计数键放宽 ⇒ 火【杀】/ 雷【杀】/
+    转化【杀】同判，账本 L720）。返回**绝对值** :data:`RESPONSE_COUNT_NEEDED`（与
+    ``current + 1`` 的加法式不同、不叠加，与【无双】同一姿态）。
+    """
+    if ctx.card is None or not satisfies_required(ctx.card, "slash"):
+        return current
+    if ctx.owner == ctx.subject:
+        other = ctx.target
+    elif ctx.owner == ctx.target:
+        other = ctx.subject
+    else:
+        return current
+    if other is None:
+        return current
+    if state.player(int(other)).gender is not Gender.FEMALE:
+        return current
+    return RESPONSE_COUNT_NEEDED
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +665,9 @@ _REQUIREMENTS: dict[str, str] = {
     "tieqi": "判定；红色则该目标不能使用【闪】响应此【杀】",
     "jie_tieqi": "令目标本回合非锁定技失效并判定：除非其弃置一张同花色牌，否则不能使用【闪】响应此【杀】",
     "liegong": "出牌阶段使用【杀】指定目标后，若其手牌数不小于你的体力值或不大于你的攻击范围，其不能使用【闪】响应此【杀】",
+    "roulin": (
+        "锁定技，你对女性角色使用的【杀】、女性角色对你使用的【杀】均需使用两张【闪】才能抵消"
+    ),
     "jie_liegong_mobile": (
         "①你对你计算与其距离不大于你的【杀】点数的其他角色使用此【杀】无距离限制；"
         "②当你使用【杀】指定一名角色为目标后，你可以根据下列条件执行相应的效果："
@@ -668,6 +724,18 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.RESPONSE_COUNT, WUSHUANG.response_count),),
             requirement=_REQUIREMENTS["wushuang"],
+        ),
+        # 林包·移动版董卓【肉林】（lin-batch2 票 02）：锁定技 + 纯修饰器（与【无双】同一条路，
+        # 判据换成"另一侧是女性"的双向版本；Q3 / Q4 = A，见 `_roulin_response_count`）。
+        SkillDef(
+            skill_id=ROULIN,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(
+                Modifier(ModifierPoint.RESPONSE_COUNT, _roulin_response_count),
+            ),
+            requirement=_REQUIREMENTS["roulin"],
         ),
         # 黄忠【烈弓】（票 03）：非锁定；"目标全都够不上条件"时连问都不问 ⇒ 用 Hook.condition
         # （与【铁骑】的 `ActivationPlan.available` 是同一道门，只是条件还要读目标的手牌数）。

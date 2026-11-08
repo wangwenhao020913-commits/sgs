@@ -84,6 +84,38 @@
           "skill_type": "LORD"
         }
       ]
+    },
+    {
+      "id": "dongzhuo_mobile",
+      "name": "董卓移动版",
+      "true_name": "董卓",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 8,
+      "version": "lin-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jiuchi",
+          "name": "酒池",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "roulin",
+          "name": "肉林",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "bengkuai",
+          "name": "崩坏",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "baonue",
+          "name": "暴虐",
+          "skill_type": "LORD"
+        }
+      ]
     }
   ]
 }

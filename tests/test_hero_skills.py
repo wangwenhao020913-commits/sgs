@@ -275,6 +275,8 @@ def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
             "hero.yuanshao_mobile.xueyi",
             # lin-batch2 票 01：曹丕移动版【颂威】（主公技）
             "hero.caopi_mobile.songwei",
+# lin-batch2 票 02：董卓移动版【暴虐】（主公技）
+            "hero.dongzhuo_mobile.baonue",
         }
     )
 

@@ -1,4 +1,5 @@
-r"""神话再临·林包·移动版武将技能（``lin_mobile`` 包；lin-batch 票 02 起 = 孙坚【英魂】）。
+r"""神话再临·林包·移动版武将技能（``lin_mobile`` 包；lin-batch 票 02 = 孙坚【英魂】，
+lin-batch2 票 02 = 董卓【崩坏】）。
 
 本模块只装**林包·移动版**的武将技能声明；族级原语（钩子 / 步骤流水线 / 摸牌 / 选定 /
 帧内搬牌）一律复用既有实现，不新增机制。
@@ -12,6 +13,13 @@ r"""神话再临·林包·移动版武将技能（``lin_mobile`` 包；lin-batch
   ``CONVERSION_SKILLS``——一条 ``ConversionSkill`` 声明（与【国色】同一档：单源 → 延时
   锦囊）＋ 同一张声明上的 ``DISTANCE_LIMIT`` 修饰器（② 的额定距离 1 → 2）；**不**在本模块
   再声明一遍（一个技能一条定义）。
+- 董卓移动版【酒池】= 转化族，同样住 :mod:`sgs.skills.heroes` 的 ``CONVERSION_SKILLS``
+  （黑桃手牌 → 【酒】；濒死自救那一路由 02x 路线 A 的 ``near_death_conversion_offers`` 取）；
+- 董卓移动版【肉林】= 纯修饰器（``RESPONSE_COUNT`` 2，双向性别判据），住
+  :mod:`sgs.skills.response_window`；
+- 董卓移动版【崩坏】= 本模块（§6：结束阶段钩子 + 单步选项 + 帧私有定长推进）；
+- 董卓移动版【暴虐】= 主公技族，住 :mod:`sgs.skills.lord_request`（``DAMAGE_AFTER_DEAL``
+  钩子 + 零步流水线 + ``ActivationPlan(actor=伤害来源)``）。
 
 【英魂】（孙坚，吴 / 男 / 4 体力；牌面权威 = 用户 `技能.txt`，口径 = **移动版**，逐字）：
 
@@ -53,13 +61,26 @@ from typing import Any
 from sgs.data import SkillType, hero_skill_id
 from sgs.effects import CarrierKind, locate
 from sgs.resolution import Frame
-from sgs.state import GameState, MoveReason, SelectionSpec, Zone, ZoneRef
+from sgs.state import (
+    FrameKind,
+    GameState,
+    MoveReason,
+    SelectionSpec,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
 from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
 from .flow import FlowAnswers, PickOption, PickSeats, SkillFlow
 
 __all__ = [
+    "BENGKUAI",
+    "BENGKUAI_LOSE_HP",
+    "BENGKUAI_OPTIONS",
+    "BENGKUAI_REDUCE_MAX",
+    "BENGKUAI_FLOW",
+    "DONGZHUO_MOBILE",
     "LIN_SKILL_DEFS",
     "SUNJIAN_MOBILE",
     "YINGHUN",
@@ -298,7 +319,145 @@ _YINGHUN = SkillDef(
 """孙坚移动版【英魂】的完整声明（一条技能、一条准备阶段钩子 + 两步流水线）。"""
 
 
-LIN_SKILL_DEFS: tuple[SkillDef, ...] = (_YINGHUN,)
+# ===========================================================================
+# §6 林包·移动版董卓【崩坏】（lin-batch2 票 02；用户 2026-11-08 签 Q1 / Q5 = A）
+#
+#     崩坏
+#     　锁定技，结束阶段，若你不是全场体力值最低的角色，你选择一项：
+#     　1.失去1点体力；2.减1点体力上限。
+#
+# 形状 = `shapes.md` §2 第 67 行「帧外时机 + 单步选项」：`PHASE_FINISH` 钩子（**锁定技、
+# 不问**）+ 一步 `PickOption(optional=False)` + 住在 `effect` 里的两段定长效果（没有变长
+# 循环、也没有"按选项变更后续步骤"⇒ 不手写主体，与【琴音】同档）。
+#
+# 三条口径（票面 §3 / Q5）：
+#
+# - **「不是全场体力值最低」的判据**（用户 2026-11-08 第 3 点）："是全场最低" ⟺ 自己的
+#   体力值 ≤ **每一个其他存活角色**的体力值（**并列也算最低**）⇒ 触发条件是"**存在**其他
+#   存活角色 `hp < 我`"。并列（含全场同值）**不触发**。只看存活（账本 L890 的同一形态）。
+# - **两个选项恒可执行、都不兜底**（Q5 = A）：失去 1 点体力对 `hp == 1` 也照压（进濒死，
+#   【苦肉】就是 1 体力用的）；减 1 点体力上限由 :meth:`Engine.reduce_hp_max` 处理 0 档
+#   （减到 0 ⇒ 体力置 0、不进濒死、直接死亡，账本 L950「一律不兜底」）。
+# - **自己一个人存活** ⇒ 没有"其他角色"，按并列算最低 ⇒ 不触发（不发没有对手的询问）。
+#
+# 效果段的两段都是**帧私有定长推进**（G7）：`bengkuai_done` 在压帧**之前**落位，
+# 子帧（失体力引起的濒死 / 求桃 / 死亡，或上限 0 档的 DEATH）出栈后重入不重压。
+# ===========================================================================
+
+DONGZHUO_MOBILE = "dongzhuo_mobile"
+"""董卓移动版的武将 id（数据表 ``heroes.lin_mobile.json``；体力上限 = 8，Q1 = A）。"""
+
+BENGKUAI = hero_skill_id(DONGZHUO_MOBILE, "bengkuai")
+"""董卓移动版【崩坏】的全限定技能 id（锁定技）。"""
+
+BENGKUAI_LOSE_HP = "bengkuai_lose_hp"
+BENGKUAI_REDUCE_MAX = "bengkuai_reduce_max"
+"""选项闭集的两个键（顺序 = 牌面「1.失去1点体力；2.减1点体力上限」）。
+
+标签落 ``tools/sgs_web/static/options.js:OPTION_LABELS`` 的同名键；两项**恒可执行** ⇒
+都不置灰、都不给 ``Pass``（Q5 = A）。
+"""
+
+BENGKUAI_OPTIONS: tuple[str, str] = (BENGKUAI_LOSE_HP, BENGKUAI_REDUCE_MAX)
+
+BENGKUAI_REQUIREMENT = (
+    "锁定技，结束阶段，若你不是全场体力值最低的角色，你选择一项："
+    "1.失去1点体力；2.减1点体力上限"
+)
+"""一句话文案 = 用户 `技能.txt` 的牌面逐字（票面 §0 / §3 询问剧本第一行）。"""
+
+_BENGKUAI_DONE_KEY = "bengkuai_done"
+"""帧私有：本次效果已经压过子帧（重入不重压；在压帧**之前**落位）。"""
+
+
+def _is_lowest_hp(state: GameState, owner: int) -> bool:
+    """``owner`` 是不是**全场体力值最低**的角色（含并列；只看存活；先例【罪论】③）。
+
+    "最低" = 自己的体力值 ≤ 每一个**其他存活角色**的体力值（用户 2026-11-08 第 3 点：
+    「体力值与所有其他角色比较，均不大于其他角色」）。没有其他存活角色时是空真
+    （∪ 单座局 ⇒ 自己就是最低）。
+    """
+    player = state.player(owner)
+    return all(
+        player.hp <= other.hp
+        for other in state.players
+        if other.alive and other.seat != owner
+    )
+
+
+def _bengkuai_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**我的**结束阶段 ∧ 我**不是**全场体力值最低的角色。
+
+    ``PHASE_FINISH`` 是每个座位的结束阶段都派发的帧外时机，阶段体帧的 ``source`` =
+    当前回合角色 ⇒ 必须自校"这一步是问我的"（`H2`；与【英魂】/【罪论】同一句判据）。
+    条件为假 ⇒ 连"是否发动"都不问（锁定技本来就不问，故这里是"连那个选项步都不产生"）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if not host.state.player(int(owner)).alive:
+        return False
+    return not _is_lowest_hp(host.state, int(owner))
+
+
+def _bengkuai_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：按选项压 `LIFE_DECREASE` 子帧 / 走 ``reduce_hp_max`` 唯一写入口。
+
+    两段都没有询问，故重入只靠帧私有 ``bengkuai_done``：它在压帧**之前**落位，子帧
+    出栈后重入直接收尾（不重压第二份失体力 / 第二次减上限）。上限减到 0 时
+    :meth:`Engine.reduce_hp_max` 已压 ``DEATH`` 帧、座位已 ``alive = False`` ⇒ 返回
+    ``"stay"`` 让死亡帧先跑（不兜底，账本 L950）。
+    """
+    if frame.data.get(_BENGKUAI_DONE_KEY):
+        return None
+    owner = int(frame.data["skill_owner"])
+    frame.data[_BENGKUAI_DONE_KEY] = True
+    if str(answers["option"]) == BENGKUAI_LOSE_HP:
+        # 失去体力 ≠ 受到伤害：只压 LIFE_DECREASE（无来源、无属性），见规则 §4.15 L419–L422。
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {"target": owner, "source": None, "amount": 1},
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    host.reduce_hp_max(frame, owner, 1)
+    if not host.state.player(owner).alive:
+        return "stay"
+    return None
+
+
+BENGKUAI_FLOW = SkillFlow(
+    name="bengkuai",
+    # 「选择一项」：两项恒可执行 ⇒ `optional=False`（没有「可以」⇒ 无放弃出口）。
+    steps=(
+        PickOption(options=BENGKUAI_OPTIONS, optional=False, key="option"),
+    ),
+    effect=_bengkuai_effect,
+)
+"""【崩坏】的一步流水线：二选一（必答）→ 失 1 点体力 / 减 1 点体力上限。"""
+
+_BENGKUAI = SkillDef(
+    skill_id=BENGKUAI,
+    # 牌面写「锁定技」⇒ 不问"是否发动"，派发环的 forced 分支直接跑流水线
+    # （先例 = 界周瑜【英姿】：`locked=True` 且带 `SkillFlow`）。
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    # 阶段体时机（不挂 "开始时 / 结束时" 两个边界）：效果挂**结束阶段**本身。
+    hooks=(
+        Hook(
+            Timing.PHASE_FINISH,
+            flow=BENGKUAI_FLOW,
+            condition=_bengkuai_condition,
+        ),
+    ),
+    requirement=BENGKUAI_REQUIREMENT,
+    step_requirements={"option": "选择一项：1.失去1点体力；2.减1点体力上限"},
+)
+"""董卓移动版【崩坏】的完整声明（锁定技、一条结束阶段钩子 + 一步选项）。"""
+
+
+LIN_SKILL_DEFS: tuple[SkillDef, ...] = (_YINGHUN, _BENGKUAI)
 """林包·移动版的全部技能定义（逐票追加）。"""
 
 

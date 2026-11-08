@@ -36,6 +36,7 @@ from __future__ import annotations
 from sgs.data import (
     Category,
     Color,
+    Gender,
     Identity,
     Kingdom,
     RuleConfig,
@@ -44,7 +45,15 @@ from sgs.data import (
     color_of_suit,
     load_content_pack,
 )
-from sgs.effects import ModifierPoint, check_targets, distance, legal_actions_for
+from sgs.effects import (
+    CandidateScope,
+    ModifierPoint,
+    ModifierRole,
+    check_targets,
+    distance,
+    legal_actions_for,
+    response_count,
+)
 from sgs.engine import Engine
 from sgs.resolution import Tag, add_tag
 from sgs.engine import steps as engine_steps
@@ -3018,5 +3027,1273 @@ def test_the_caopi_skills_have_their_declared_shapes():
     assert CATALOG[SONGWEI].skill_type.value == "LORD"
 
 
+# ===========================================================================
+# §6 董卓移动版 —— 【酒池】【肉林】【崩坏】【暴虐】（lin-batch2 票 02）
+#
+# 牌面（用户 `技能.txt`，逐字；口径 = **移动版**，见票面 §0.1）：
+#
+#     酒池　你可以将一张♠️手牌当【酒】使用。
+#     肉林　锁定技，当你使用【杀】指定女性角色为目标后/成为女性角色使用【杀】的目标后，
+#           该角色/你需连续使用两张【闪】才能抵消。
+#     崩坏　锁定技，结束阶段，若你不是全场体力值最低的角色，你选择一项：
+#           1.失去1点体力；2.减1点体力上限。
+#     暴虐　主公技，当其他群势力角色造成伤害后，其可以进行一次判定，若结果为♠️，你回复1点体力。
+#
+# 用户 2026-11-08 的签字：**Q1 = 8**（体力上限）、**Q2 = A2**（酒池的濒死自救**本批补齐**，
+# 走 02x 的**路线 A**：泛化 `_transformed_peaches` + 按 `CandidateScope.PEACH` 收窄）、
+# Q3–Q7 全按建议 A。判据全走**外部缝**：候选面 / `response_count` / 选项询问 / 记录流 /
+# 终局状态，**不 mock、不旁路候选**。
+# ===========================================================================
+
+DONGZHUO = "dongzhuo_mobile"
+JIUCHI = "hero.dongzhuo_mobile.jiuchi"
+ROULIN = "hero.dongzhuo_mobile.roulin"
+BENGKUAI = "hero.dongzhuo_mobile.bengkuai"
+BAONUE = "hero.dongzhuo_mobile.baonue"
+
+JIUCHI_REQUIREMENT = "你可以将一张黑桃手牌当【酒】使用"
+ROULIN_REQUIREMENT = (
+    "锁定技，你对女性角色使用的【杀】、女性角色对你使用的【杀】均需使用两张【闪】才能抵消"
+)
+BENGKUAI_REQUIREMENT = (
+    "锁定技，结束阶段，若你不是全场体力值最低的角色，你选择一项："
+    "1.失去1点体力；2.减1点体力上限"
+)
+BAONUE_REQUIREMENT = (
+    "主公技，当其他群势力角色造成伤害后，其可以进行判定，若结果为黑桃，你回复1点体力"
+)
+
+BENGKUAI_LOSE_HP = "bengkuai_lose_hp"
+BENGKUAI_REDUCE_MAX = "bengkuai_reduce_max"
+
+SPADE_160 = next(
+    card_id
+    for card_id, card in enumerate(PACK_160.deck.cards)
+    if card.suit == Suit.SPADE and card.type == "slash"
+)
+"""军争 160 档的一张**黑桃手牌**（普通【杀】）：【酒池】的合法源。"""
+HEART_160 = next(
+    card_id
+    for card_id, card in enumerate(PACK_160.deck.cards)
+    if card.suit == Suit.HEART
+)
+"""军争 160 档的一张**红桃**牌：【酒池】的非源（花色不符）。"""
+WINE_160 = cards_of_type(PACK_160, "wine")[0]
+PEACH_160 = cards_of_type(PACK_160, "peach")[0]
+GEAR_160 = next(
+    card_id
+    for card_id, card in enumerate(PACK_160.deck.cards)
+    if card.suit == Suit.SPADE
+    and card_category(PACK_160.pack_id, card.type) is Category.EQUIPMENT
+)
+"""军争 160 档的一张**黑桃装备牌**：区域不对（【酒池】只收手牌）。"""
+
+SLASH_108 = _cards("slash")[0]
+SPADE_108 = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.suit == Suit.SPADE and card_id != SLASH_108
+)
+"""标准 108 档的黑桃牌：档里**没有【酒】**，故产物闸门把它挡掉。"""
 
 
+class LinPlayer:
+    """§6 的座位脚本：只开本测试需要的开关，其余走最小合法应答。
+
+    - ``wine_source``：出牌阶段在【酒池】的清单里把这张牌当【酒】（走复合候选
+      ``ActivateSkill``，与前端「进入预发动」同一条提交路）；
+    - ``slash_at``：出牌阶段对谁使用一张真【杀】；
+    - ``dodges``：在【闪】窗口里最多打出几张真【闪】（0 = 全放弃）；
+    - ``option``：``SELECT_OPTION`` 步选哪一项（按 ``skill_id`` 以 ``:option`` 结尾时生效）；
+    - ``activate``：允许真的发动的技能 id 集合（其余「是否发动」一律放弃）；
+    - ``rescue`` / ``rescue_source``：求桃窗口里用【酒池】把这张牌当【酒】自救。
+
+    记录面：``play_queries`` / ``options`` / ``activations`` / ``peach`` / ``dodge_queries`` /
+    ``asked``；``used_wine`` / ``rescued`` 是两个"真的做了"的位（断言不靠猜）。
+    """
+
+    def __init__(
+        self,
+        *,
+        wine_source: int | None = None,
+        slash_at: int | None = None,
+        dodges: int = 0,
+        option: str | None = None,
+        activate: tuple[str, ...] = (),
+        rescue: bool = False,
+        rescue_source: int | None = None,
+    ) -> None:
+        self.wine_source = wine_source
+        self.slash_at = slash_at
+        self.dodges = dodges
+        self.option = option
+        self.activate = tuple(activate)
+        self.rescue = rescue
+        self.rescue_source = rescue_source
+        self.play_queries: list = []
+        self.options: list = []
+        self.activations: list[str] = []
+        self.peach: list = []
+        self.dodge_queries: list = []
+        self.asked: list[str] = []
+        self.used_wine = False
+        self.rescued = False
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        skill = str(getattr(query, "skill_id", "") or "")
+        if kind == "SKILL_ACTIVATION":
+            self.asked.append(skill)
+            if skill in self.activate:
+                action = next(
+                    (a for a in query.legal_actions if isinstance(a, ActivateSkill)), None
+                )
+                if action is not None:
+                    self.activations.append(skill)
+                    return action
+            give_up = next(
+                (a for a in query.legal_actions if isinstance(a, Pass)), None
+            )
+            return give_up if give_up is not None else query.legal_actions[0]
+        if kind == "PLAY_PHASE":
+            self.play_queries.append(query)
+            steps = (getattr(query, "transform_preactivations", None) or {}).get(JIUCHI)
+            if self.wine_source is not None and steps:
+                source = self.wine_source
+                self.wine_source = None
+                self.used_wine = True
+                return ActivateSkill(
+                    skill_id=JIUCHI, picks=(source,), answers_seq=query.seq
+                )
+            if self.slash_at is not None:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "slash"
+                        and action.targets == (self.slash_at,)
+                    ):
+                        self.slash_at = None
+                        return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+            return query.legal_actions[0]
+        if kind == "SELECT_OPTION":
+            self.options.append(query)
+            if self.option is not None and skill.endswith(":option"):
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, SelectOption)
+                        and str(action.choice) == self.option
+                    ):
+                        return action
+            return next(
+                (a for a in query.legal_actions if isinstance(a, SelectOption)),
+                query.legal_actions[0],
+            )
+        if kind == "DODGE":
+            self.dodge_queries.append(query)
+            if self.dodges > 0:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "dodge"
+                        and not action.card.is_virtual
+                    ):
+                        self.dodges -= 1
+                        return action
+        if kind == "PEACH":
+            self.peach.append(query)
+            steps = (getattr(query, "transform_preactivations", None) or {}).get(JIUCHI)
+            if self.rescue and steps and self.rescue_source is not None:
+                self.rescue = False
+                self.rescued = True
+                return ActivateSkill(
+                    skill_id=JIUCHI,
+                    picks=(self.rescue_source,),
+                    answers_seq=query.seq,
+                )
+        for action in query.legal_actions:
+            if isinstance(action, (EndPhase, Pass)):
+                return action
+        return query.legal_actions[0]
+
+
+def _lin_virtual(actions, type_id: str) -> list:
+    """候选里的**虚拟牌**（``card_id < 0``）且产物牌名 = ``type_id``。"""
+    return [
+        action
+        for action in actions
+        if isinstance(action, (UseCard, PlayCard))
+        and action.card.card_id < 0
+        and action.card.type == type_id
+    ]
+
+
+def _jiuchi_state(
+    *, hand: tuple[int, ...] = (), equip: tuple[int, ...] = (), pack=PACK_160,
+    hero: str = DONGZHUO, hp: int = 4, hp_max: int = 8, seats: int = 2,
+):
+    """座位 0 = 董卓移动版（默认 8 体力上限，Q1 = A）；其余座位无武将。"""
+    used = {*hand, *equip}
+    specs = [
+        SeatSpec(hero=hero, hp=hp, hp_max=hp_max, hand=tuple(hand), equip=tuple(equip))
+    ]
+    specs.extend(SeatSpec() for _ in range(seats - 1))
+    return build_state(
+        pack=pack, seats=specs, deck=deck_excluding(pack, *used), turn_seat=0
+    )
+
+
+def _jiuchi_engine(state, *, script=None, stop=None, seats=None):
+    engine = Engine.from_state(state, seed=7)
+    players = [script or LinPlayer() for _ in range(len(engine.state.players))]
+    run_queries(engine, players, stop or (lambda e: e.finished), limit=50_000)
+    return engine, players
+
+
+# ---------------------------------------------------------------------------
+# §6.1 酒池 —— ① 形状 / 数据面
+# ---------------------------------------------------------------------------
+
+
+def test_jiuchi_is_a_single_source_wine_conversion():
+    """形状：一条**单源转化声明**（黑桃手牌 →【酒】），无钩子 / 无流水线 / 非锁定。"""
+    from sgs.skills.heroes import CONVERSION_SKILLS
+
+    declaration = next(
+        skill
+        for skill in CONVERSION_SKILLS
+        if skill.hero_id == DONGZHUO and skill.short_id == "jiuchi"
+    )
+    assert declaration.target_type_id == "wine", "产物牌名是【酒】"
+    assert declaration.source_zone.__name__ == "_hand", "牌面写「手牌」⇒ 只有手牌"
+    assert declaration.scopes == (CandidateScope.PLAY, CandidateScope.PEACH), (
+        "PLAY = 出牌阶段（额度一次）；PEACH = 02x 路线 A 的濒死自救那一档"
+    )
+    assert declaration.forced is False and declaration.outside_turn_only is False
+
+    definition = CATALOG[JIUCHI]
+    assert definition.locked is False, "牌面写「可以」⇒ 非锁定"
+    assert definition.hooks == () and flow_for(JIUCHI) is None
+    assert definition.virtual_type_ids == ("wine",)
+    assert definition.virtual_source_count == 1
+
+
+def test_jiuchi_requirement_is_the_card_text():
+    """一句话文案 = 票面 §1 询问剧本第一行（移动版牌面逐字）。"""
+    assert CATALOG[JIUCHI].requirement == JIUCHI_REQUIREMENT
+
+
+def test_dongzhuo_mobile_is_the_qun_general_of_the_mobile_lin_pack():
+    """数据面：`heroes.lin_mobile.json` 那一行（**8** 体力 / 群 / 男 / 暴虐 = 主公技）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    hero = hero_by_id(DONGZHUO)
+    assert hero is not None
+    assert hero.name == "董卓移动版"
+    assert hero.true_name == "董卓"
+    assert hero.version == "lin-mobile"
+    assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("qun", "male", 8), (
+        "Q1 = 8（移动版官网「高达8点体力值」），不是源文件的 1"
+    )
+    assert hero.enabled is True
+    assert [(f"hero.{hero.id}.{skill.id}", skill.skill_type.value) for skill in hero.skills] == [
+        (JIUCHI, "NORMAL"),
+        (ROULIN, "NORMAL"),
+        (BENGKUAI, "NORMAL"),
+        (BAONUE, "LORD"),
+    ], "暴虐的数据侧声明 = 主公技（与代码侧 SkillDef 对账）"
+    assert DONGZHUO in enabled_hero_ids(), "启用 ⇒ 进默认池（林包移动版按独立版本并存）"
+
+
+# ---------------------------------------------------------------------------
+# §6.1 酒池 —— ② 源筛选（黑桃 / 手牌 / 产物闸门）
+# ---------------------------------------------------------------------------
+
+
+def test_jiuchi_only_spade_hand_cards_are_offered():
+    """源谓词 = **黑桃**：红桃 / 方块 / 梅花手牌都不铺候选。"""
+    from sgs.skills import conversion_offers
+
+    spade_state = _jiuchi_state(hand=(SPADE_160,))
+    assert conversion_offers(spade_state, 0, "wine") == ((SPADE_160, JIUCHI),)
+    assert [action.card.virtual_sources for action in _lin_virtual(
+        _play_candidates(spade_state), "wine"
+    )] == [(SPADE_160,)], "清单的来源步铺的就是这张黑桃牌"
+
+    for other in (HEART_160, WINE_160, PEACH_160):
+        state = _jiuchi_state(hand=(other,))
+        assert conversion_offers(state, 0, "wine") == (), (
+            f"非黑桃的 {state.card(other).suit} 牌不是源"
+        )
+        assert _lin_virtual(_play_candidates(state), "wine") == []
+
+
+def test_jiuchi_ignores_equipped_spades():
+    """区域 = **手牌**（牌面明写「手牌」）：装备区的黑桃牌不是源。"""
+    from sgs.skills import conversion_offers
+
+    assert GEAR_160 not in (SPADE_160,), "前提：另有一张黑桃装备牌"
+    state = _jiuchi_state(equip=(GEAR_160,))
+
+    assert conversion_offers(state, 0, "wine") == ()
+    assert _lin_virtual(_play_candidates(state), "wine") == []
+
+
+def test_jiuchi_is_dark_when_wine_is_not_in_the_pack():
+    """产物闸门（账本 L938）：默认 `standard_108` 没有【酒】实体牌 ⇒ 整条不亮。"""
+    from sgs.skills import conversion_offers
+
+    assert not any(card.type == "wine" for card in PACK.deck.cards), "前提：108 档没有【酒】"
+    state = _jiuchi_state(hand=(SPADE_108,), pack=PACK)
+
+    assert conversion_offers(state, 0, "wine") == ()
+    assert _lin_virtual(_play_candidates(state), "wine") == [], (
+        "不产出一张牌面名会回落到 `wine` 的虚拟牌"
+    )
+
+
+def test_jiuchi_has_no_manifest_without_a_spade_hand_card():
+    """G1 付不起：手里没有黑桃牌 ⇒ 连预发动清单都不出现（不发没有候选的询问）。"""
+    player = LinPlayer()
+    engine = Engine.from_state(_jiuchi_state(hand=(HEART_160,)), seed=7)
+    run_queries(
+        engine,
+        [player, LinPlayer()],
+        lambda e: len(player.play_queries) >= 1,
+        limit=50_000,
+    )
+    query = player.play_queries[0]
+
+    assert JIUCHI not in (query.transform_preactivations or {}), "清单里没有酒池"
+    assert player.used_wine is False
+
+
+# ---------------------------------------------------------------------------
+# §6.1 酒池 —— ③ 使用 / 次数（160 档正例、每回合一次、满体力也喝）
+# ---------------------------------------------------------------------------
+
+
+def test_jiuchi_offers_conversion_in_standard_ex_160():
+    """160 档正例：清单里有酒池，提交后真的把这张黑桃手牌当【酒】用掉。"""
+    engine, players = _jiuchi_engine(
+        _jiuchi_state(hand=(SPADE_160,)),
+        script=LinPlayer(wine_source=SPADE_160),
+        stop=lambda e: SPADE_160 in e.state.discard,
+    )
+    query = players[0].play_queries[0]
+
+    assert JIUCHI in (query.transform_preactivations or {}), "清单里出现酒池"
+    assert players[0].used_wine is True
+    assert engine.state.player(0).wine_active is True, "【酒】的加伤生效"
+    assert engine.state.player(0).card_use_counts.get("wine") == 1, "出牌阶段那一次记账"
+    assert SPADE_160 in engine.state.discard, "源牌进了弃牌堆"
+    assert SPADE_160 not in engine.state.player(0).hand, "转化消耗的是那张实体手牌"
+
+
+def test_jiuchi_has_no_target_step_and_works_at_full_hp():
+    """【酒】的目标恒为自己（`self_only`）⇒ 清单只有来源步；满体力也能喝（加伤与体力无关）。"""
+    engine, players = _jiuchi_engine(
+        _jiuchi_state(hand=(SPADE_160,), hp=8),
+        script=LinPlayer(wine_source=SPADE_160),
+        stop=lambda e: SPADE_160 in e.state.discard,
+    )
+    steps = (players[0].play_queries[0].transform_preactivations or {})[JIUCHI]
+
+    assert [step.name for step in steps] == ["card"], "没有座位步（目标只能是自己）"
+    assert engine.state.player(0).wine_active is True, "8/8 体力照样能喝"
+
+
+def test_jiuchi_disappears_after_wine_was_used_this_turn():
+    """产物【酒】的每回合一次：喝过之后同一出牌阶段里清单不再出现。"""
+    state = _jiuchi_state(hand=(SPADE_160,))
+    engine = Engine.from_state(state, seed=7)
+    player = LinPlayer(wine_source=SPADE_160)
+    players = [player, LinPlayer()]
+    run_queries(
+        engine, players, lambda e: len(player.play_queries) >= 2, limit=50_000
+    )
+
+    assert player.used_wine is True
+    assert JIUCHI in (player.play_queries[0].transform_preactivations or {}), (
+        "喝之前清单里有酒池"
+    )
+    assert JIUCHI not in (player.play_queries[-1].transform_preactivations or {}), (
+        "本回合已经用过【酒】⇒ 清单里不再出现（次数闸门在候选阶段拦下）"
+    )
+    assert engine.state.player(0).card_use_counts.get("wine") == 1
+
+
+# ---------------------------------------------------------------------------
+# §6.1 酒池 —— ④ 濒死自救（02x 路线 A：泛化 + 按 scopes 收窄）
+# ---------------------------------------------------------------------------
+
+
+def _near_death_actions(state, seat: int, dying: int):
+    return legal_actions_for(state, seat, QueryKind.PEACH, answers_seq=1, dying=dying)
+
+
+def _near_death_wine(actions):
+    return [
+        action
+        for action in actions
+        if isinstance(action, UseCard) and action.card.type == "wine"
+    ]
+
+
+def test_jiuchi_self_rescues_in_the_near_death_window():
+    """02x ③：董卓濒死时，黑桃手牌当【酒】自救 —— 回复 1 点、源牌进弃牌堆、**不记账**。"""
+    channel = next(
+        card_id
+        for card_id, card in enumerate(PACK_160.deck.cards)
+        if card.type == "slash" and card_id != SPADE_160
+    )
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(),
+            SeatSpec(hero=DONGZHUO, hp=1, hp_max=8, hand=(SPADE_160,)),
+        ],
+        deck=deck_excluding(PACK_160, SPADE_160, channel),
+        processing=(channel,),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [
+        LinPlayer(),
+        LinPlayer(rescue=True, rescue_source=SPADE_160),
+    ]
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, channel, amount=1, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _advance(engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END) or e.finished)
+
+    query = players[1].peach[0]
+    assert JIUCHI in (query.transform_preactivations or {}), "求桃窗口里出现酒池"
+    assert [
+        action.targets
+        for action in (query.transform_actions or ())
+        if isinstance(action, UseCard) and action.card.type == "wine"
+    ] == [(1,)], "目标恒为濒死者"
+    assert players[1].rescued is True, "真的把黑桃手牌当【酒】用了"
+    assert engine.state.player(1).hp == 1 and engine.state.player(1).alive is True
+    assert engine.state.player(1).card_use_counts.get("wine") is None, (
+        "濒死自救不记账、也不占出牌阶段那一次（账本 L833）"
+    )
+    assert engine.state.player(1).wine_active is False, "自救不产生加伤"
+    assert SPADE_160 in engine.state.discard, "源牌进了弃牌堆"
+
+
+def test_jiuchi_near_death_is_self_only():
+    """【酒】的濒死用法只能对**自己**：别人濒死时酒池不出候选（`near_death_self_only`）。"""
+    from sgs.skills import near_death_conversion_offers
+
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=DONGZHUO, hand=(SPADE_160,), hp=3, hp_max=8),
+            SeatSpec(hp=0),
+        ],
+        deck=deck_excluding(PACK_160, SPADE_160),
+        turn_seat=0,
+    )
+
+    assert near_death_conversion_offers(state, 0, 1) == ()
+    assert _near_death_wine(_near_death_actions(state, 0, dying=1)) == []
+
+
+def test_jijiu_still_offers_a_transformed_peach_in_the_near_death_window():
+    """02x ①（影响面）：华佗【急救】的红牌当【桃】必须**照旧**出现在求桃窗口。"""
+    from sgs.skills import near_death_conversion_offers
+
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero="huatuo", hand=(PEACH_160,)),
+            SeatSpec(hp=0),
+        ],
+        deck=deck_excluding(PACK_160, PEACH_160),
+        turn_seat=1,
+    )
+
+    offers = near_death_conversion_offers(state, 0, 1)
+    assert (PEACH_160, "hero.huatuo.jijiu", "peach") in offers
+    actions = _near_death_actions(state, 0, dying=1)
+    assert any(
+        isinstance(action, UseCard)
+        and action.card.type == "peach"
+        and action.card.card_id < 0
+        for action in actions
+    ), "急救的转化【桃】仍在候选里"
+
+
+def test_jie_longdan_wine_to_peach_still_appears_in_the_near_death_window():
+    """02x ②（影响面）：界赵云【龙胆】的「【酒】当【桃】」照旧可救（补了 PEACH 档）。"""
+    from sgs.skills import near_death_conversion_offers
+
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero="jie_zhaoyun", hand=(WINE_160,)),
+            SeatSpec(hp=0),
+        ],
+        deck=deck_excluding(PACK_160, WINE_160),
+        turn_seat=1,
+    )
+
+    assert (WINE_160, "hero.jie_zhaoyun.longdan", "peach") in near_death_conversion_offers(
+        state, 0, 1
+    )
+    assert any(
+        isinstance(action, UseCard)
+        and action.card.type == "peach"
+        and action.card.virtual_sources == (WINE_160,)
+        for action in _near_death_actions(state, 0, dying=1)
+    )
+
+
+def test_jie_longdan_peach_to_wine_stays_out_of_the_near_death_window():
+    """02x 的关键影响面：界龙胆的「【桃】当【酒】」**不得**在求桃窗口多亮一条。
+
+    它声明的是 ``scopes=(PLAY,)`` —— 泛化 + 按 ``CandidateScope.PEACH`` 收窄之后，
+    它必须仍然不出现（否则等于把一张【桃】当【酒】废掉）。
+    """
+    from sgs.skills import near_death_conversion_offers
+
+    # 让**界赵云自己**濒死：只有这样「酒」的 `near_death_self_only` 才不挡它 ——
+    # 泛化后若漏掉 `CandidateScope.PEACH` 收窄，这一问就会多亮一条「把【桃】当【酒】」。
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero="jie_zhaoyun", hand=(PEACH_160,), hp=0),
+            SeatSpec(hp=4),
+        ],
+        deck=deck_excluding(PACK_160, PEACH_160),
+        turn_seat=1,
+    )
+
+    offers = near_death_conversion_offers(state, 0, 0)
+    assert all(product != "wine" for _source, _skill, product in offers), offers
+    assert _near_death_wine(_near_death_actions(state, 0, dying=0)) == []
+
+
+# ---------------------------------------------------------------------------
+# §6.2 肉林 —— 形状 / 双向性别判据 / 逐目标 / 抑制
+# ---------------------------------------------------------------------------
+
+
+def test_roulin_is_a_locked_response_count_modifier():
+    """形状：锁定技 + **纯修饰器**（`RESPONSE_COUNT`），没有钩子 / 流水线 / 询问。"""
+    definition = CATALOG[ROULIN]
+
+    assert definition.locked is True, "牌面写「锁定技」⇒ 不问「是否发动」"
+    assert definition.hooks == () and flow_for(ROULIN) is None
+    assert [modifier.point for modifier in definition.modifiers] == [
+        ModifierPoint.RESPONSE_COUNT
+    ]
+
+
+def test_roulin_requirement_is_the_card_text():
+    assert CATALOG[ROULIN].requirement == ROULIN_REQUIREMENT
+
+
+def _roulin_state(*, other_gender, dongzhuo_gender=Gender.MALE):
+    """座位 0 = 董卓移动版，座位 1 = 另一名角色（性别按参数给；None = 未知）。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=DONGZHUO, gender=dongzhuo_gender),
+            SeatSpec(gender=other_gender),
+        ],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+    )
+
+
+def test_roulin_female_target_needs_two_dodges_when_dongzhuo_attacks():
+    """牌面第一半：董卓使用【杀】指定女性角色为目标 ⇒ 该角色要 2 张【闪】。"""
+    state = _roulin_state(other_gender=Gender.FEMALE)
+    slash = state.card(SLASH_108)
+
+    assert response_count(state, source=0, card=slash, target=1, role=ModifierRole.TARGET) == 2
+
+
+def test_roulin_female_attacker_needs_two_dodges_from_dongzhuo():
+    """牌面第二半：女性角色对董卓使用【杀】⇒ 董卓要 2 张【闪】。"""
+    state = _roulin_state(other_gender=Gender.FEMALE)
+    slash = state.card(SLASH_108)
+
+    assert response_count(state, source=1, card=slash, target=0, role=ModifierRole.TARGET) == 2
+
+
+def test_roulin_male_target_still_needs_one_dodge():
+    """牌名的另一半：男性目标仍只要 1 张（不叠加、不改默认值）。"""
+    state = _roulin_state(other_gender=Gender.MALE)
+    slash = state.card(SLASH_108)
+
+    assert response_count(state, source=0, card=slash, target=1, role=ModifierRole.TARGET) == 1
+
+
+def test_roulin_unknown_gender_is_not_female():
+    """无武将模式（性别未知）⇒ 不算女性（与【雌雄双股剑】的"未知恒假"同一姿态）。"""
+    state = _roulin_state(other_gender=None, dongzhuo_gender=None)
+    slash = state.card(SLASH_108)
+
+    assert response_count(state, source=0, card=slash, target=1, role=ModifierRole.TARGET) == 1
+
+
+def test_roulin_multi_target_slash_only_charges_female_targets():
+    """G5 多目标：女性目标要 2 张、男性目标仍 1 张（逐目标各算一次）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=DONGZHUO),
+            SeatSpec(gender=Gender.FEMALE),
+            SeatSpec(gender=Gender.MALE),
+        ],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+    )
+    slash = state.card(SLASH_108)
+
+    assert response_count(state, source=0, card=slash, target=1, role=ModifierRole.TARGET) == 2
+    assert response_count(state, source=0, card=slash, target=2, role=ModifierRole.TARGET) == 1
+
+
+def test_roulin_counts_for_fire_and_thunder_slash():
+    """G6：【杀】族按共享计数键判 ⇒ 火【杀】/ 雷【杀】同样要 2 张。"""
+    state = build_state(
+        pack=PACK_160,
+        seats=[SeatSpec(hero=DONGZHUO), SeatSpec(gender=Gender.FEMALE)],
+        deck=deck_excluding(PACK_160),
+        turn_seat=0,
+    )
+    for type_id in ("fire_slash", "thunder_slash"):
+        # 火【杀】/ 雷【杀】只在军争 160 档里（108 档没有）。
+        card = state.card(cards_of_type(PACK_160, type_id)[0])
+        assert (
+            response_count(state, source=0, card=card, target=1, role=ModifierRole.TARGET)
+            == 2
+        ), f"{card.name} 同属【杀】族"
+
+
+def test_roulin_does_not_touch_duel_or_other_windows():
+    """不是【杀】的窗口（【决斗】/【南蛮】/【万箭】）一张也不加。"""
+    state = _roulin_state(other_gender=Gender.FEMALE)
+    for type_id in ("duel", "barbarian_invasion", "arrow_barrage"):
+        card = state.card(_cards(type_id)[0])
+        assert (
+            response_count(state, source=0, card=card, target=1, role=ModifierRole.TARGET)
+            == 1
+        ), f"{card.name} 不在肉林的闭集里"
+
+
+def test_roulin_one_dodge_is_not_enough():
+    """窗口语义：女性目标只打出 1 张【闪】⇒ 窗口重开再来一张（攒够 2 张才抵消）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=DONGZHUO, hand=(SLASH_108,)),
+            SeatSpec(gender=Gender.FEMALE, hand=tuple(_cards("dodge")[:2])),
+        ],
+        deck=deck_excluding(PACK, SLASH_108, *_cards("dodge")[:2]),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [LinPlayer(slash_at=1), LinPlayer(dodges=1)]
+    run_queries(
+        engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END) or e.finished
+    )
+
+    assert len(players[1].dodge_queries) == 2, "窗口开了两次（1 张不够）"
+    assert engine.state.player(1).hp == 3, "没攒够 ⇒ 【杀】照常造成 1 点伤害"
+    assert _activation_queries(engine, ROULIN) == [], "锁定技不问「是否发动」"
+
+
+def test_roulin_two_dodges_cancel_the_slash():
+    """对照：同一个窗口打出 2 张【闪】⇒ 完全抵消、窗口只开一次。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=DONGZHUO, hand=(SLASH_108,)),
+            SeatSpec(gender=Gender.FEMALE, hand=tuple(_cards("dodge")[:2])),
+        ],
+        deck=deck_excluding(PACK, SLASH_108, *_cards("dodge")[:2]),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [LinPlayer(slash_at=1), LinPlayer(dodges=2)]
+    run_queries(
+        engine, players, lambda e: ran_timing(e, Timing.RESOLVE_AFTER_END) or e.finished
+    )
+
+    assert len(players[1].dodge_queries) == 1, "两张在**同一**窗口里攒够"
+    assert engine.state.player(1).hp == 4, "完全抵消"
+
+
+def test_roulin_asks_no_activation_question():
+    """锁定技 ⇒ 没有任何 `SKILL_ACTIVATION`（既问不也放弃）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=DONGZHUO, hand=(SLASH_108,)),
+            SeatSpec(gender=Gender.FEMALE),
+        ],
+        deck=deck_excluding(PACK, SLASH_108),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [LinPlayer(slash_at=1), LinPlayer()]
+    run_queries(
+        engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END) or e.finished
+    )
+
+    assert _activation_queries(engine, ROULIN) == []
+    assert all(skill != ROULIN for player in players for skill in player.asked)
+
+
+def test_roulin_locked_skills_survive_yiji_but_lost_skills_do_not():
+    """锁定技**不**受「所有非锁定技失效」影响；失去技能后回到缺省 1 张。"""
+    from sgs.state import SkillSuppression
+
+    state = _roulin_state(other_gender=Gender.FEMALE)
+    slash = state.card(SLASH_108)
+
+    state.player(0).suppressed_skills.append(
+        SkillSuppression(skill_id="hero.jie_guanyu.yijue")
+    )
+    assert (
+        response_count(state, source=0, card=slash, target=1, role=ModifierRole.TARGET)
+        == 2
+    ), "锁定技照常生效"
+
+    state.player(0).lost_skills.append(ROULIN)
+    assert (
+        response_count(state, source=0, card=slash, target=1, role=ModifierRole.TARGET)
+        == 1
+    ), "失去技能 ⇒ 修饰器停摆"
+
+
+# ---------------------------------------------------------------------------
+# §6.3 崩坏 —— 形状 / 条件（自己的结束阶段 ∧ 不是全场最低）/ 两个选项
+# ---------------------------------------------------------------------------
+
+
+def _bengkuai_seats(*hps: int, seat_hp_max: int = 8) -> list[SeatSpec]:
+    """座位 0 = 董卓移动版（默认 8 体力上限），其余座位按 ``hps`` 给体力。
+
+    第一个 ``hps`` 值是**座位 0 自己**的体力（缺省 3）。死亡座位用 ``alive=False`` 的
+    ``SeatSpec`` 另给（见各测试）。
+    """
+    specs = [SeatSpec(hero=DONGZHUO, hp=hps[0], hp_max=seat_hp_max)]
+    specs.extend(SeatSpec(hp=hp) for hp in hps[1:])
+    return specs
+
+
+def _bengkuai_engine(seats, *, option=BENGKUAI_LOSE_HP, turn_seat=0, deck=None,
+                     stop=None, scripts=None):
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck if deck is not None else deck_excluding(PACK),
+        turn_seat=turn_seat,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = scripts or [LinPlayer(option=option) for _ in seats]
+    run_queries(
+        engine,
+        players,
+        stop or (lambda e: ran_timing(e, Timing.TURN_END) or e.finished),
+        limit=50_000,
+    )
+    return engine, players
+
+
+def _option_queries(players, skill_suffix: str = ":option") -> list:
+    return [
+        query
+        for player in players
+        for query in player.options
+        if str(getattr(query, "skill_id", "")).endswith(skill_suffix)
+    ]
+
+
+def _hp_deltas(engine, seat: int, delta_type: str = "hp_change") -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == delta_type
+        and record.seat == seat
+    ]
+
+
+def test_bengkuai_is_a_locked_phase_finish_hook():
+    """形状：锁定技 + `PHASE_FINISH` 钩子 + **一步** `PickOption(optional=False)`。"""
+    definition = CATALOG[BENGKUAI]
+    flow = flow_for(BENGKUAI)
+
+    assert definition.locked is True, "锁定技 ⇒ 不问「是否发动」，满足条件直接跑"
+    assert [hook.timing for hook in definition.hooks] == [Timing.PHASE_FINISH]
+    assert flow is not None and len(flow.steps) == 1
+    step = flow.steps[0]
+    assert type(step).__name__ == "PickOption" and step.key == "option"
+    assert step.options == (BENGKUAI_LOSE_HP, BENGKUAI_REDUCE_MAX)
+    assert step.optional is False, "没有「可以」⇒ 不给放弃出口"
+    assert step.disabled == (), "两项恒可执行 ⇒ 都不置灰"
+
+
+def test_bengkuai_requirement_is_the_card_text():
+    assert CATALOG[BENGKUAI].requirement == BENGKUAI_REQUIREMENT
+    assert CATALOG[BENGKUAI].step_requirements == {
+        "option": "选择一项：1.失去1点体力；2.减1点体力上限"
+    }
+
+
+def test_bengkuai_triggers_only_in_my_own_end_phase():
+    """正例：自己的结束阶段且「有人严格更低」⇒ 发一次选项询问。"""
+    engine, players = _bengkuai_engine(_bengkuai_seats(3, 4, 2))
+
+    queries = _option_queries(players)
+    assert len(queries) == 1
+    assert str(queries[0].skill_id) == "bengkuai:option"
+    assert _hp_deltas(engine, 0), "选项 1 真的落了体力变化"
+
+
+def test_bengkuai_does_not_trigger_in_another_players_end_phase():
+    """H2 自校：别人的结束阶段不问（阶段体帧的 ``source`` 不是我）。"""
+    engine, players = _bengkuai_engine(_bengkuai_seats(1, 4, 4), turn_seat=1)
+
+    assert _option_queries(players) == []
+    assert _hp_deltas(engine, 0) == []
+
+
+def test_bengkuai_tie_is_not_lowest():
+    """用户 2026-11-08 裁定：2/2/3/4/5 里「并列」也算全场最低 ⇒ **不触发**。"""
+    engine, players = _bengkuai_engine(_bengkuai_seats(2, 2, 3, 4, 5))
+
+    assert _option_queries(players) == []
+    assert engine.state.player(0).hp == 2
+
+
+def test_bengkuai_triggers_when_someone_is_strictly_lower():
+    """反向判据：存在其他存活角色 ``hp < 我`` ⇒ 触发。"""
+    engine, players = _bengkuai_engine(_bengkuai_seats(3, 4, 2))
+
+    assert len(_option_queries(players)) == 1
+    assert engine.state.player(0).hp == 2, "选项 1：失去 1 点体力"
+
+
+def test_bengkuai_ignores_dead_seats():
+    """只看**存活**角色：死者的体力值不参与比较。"""
+    seats = [
+        SeatSpec(hero=DONGZHUO, hp=2, hp_max=8),
+        SeatSpec(hp=1, alive=False),
+        SeatSpec(hp=4),
+    ]
+    engine, players = _bengkuai_engine(seats)
+
+    assert _option_queries(players) == [], "死者 1 体力不算「更低」"
+    assert engine.state.player(0).hp == 2
+
+
+def test_bengkuai_silent_when_alone():
+    """只有自己一个存活角色 ⇒ 空真下自己就是最低 ⇒ 不触发（不发没有对手的询问）。"""
+    seats = [
+        SeatSpec(hero=DONGZHUO, hp=2, hp_max=8),
+        SeatSpec(hp=4, alive=False),
+        SeatSpec(hp=4, alive=False),
+    ]
+    engine, players = _bengkuai_engine(seats)
+
+    assert _option_queries(players) == []
+    assert _hp_deltas(engine, 0) == []
+
+
+def test_bengkuai_asks_no_activation_question():
+    """锁定技 ⇒ 没有 `SKILL_ACTIVATION`（直接进选项步）。"""
+    engine, players = _bengkuai_engine(_bengkuai_seats(3, 4, 2))
+
+    assert _activation_queries(engine, BENGKUAI) == []
+    assert all(skill != BENGKUAI for player in players for skill in player.asked)
+    assert len(_option_queries(players)) == 1, "但选项步照发"
+
+
+def test_bengkuai_lists_both_options():
+    """选项面：两项都在、都可用（不置灰），没有第三项。"""
+    _engine, players = _bengkuai_engine(_bengkuai_seats(3, 4, 2))
+    query = _option_queries(players)[0]
+
+    choices = [
+        str(action.choice)
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert choices == [BENGKUAI_LOSE_HP, BENGKUAI_REDUCE_MAX]
+
+
+def test_bengkuai_option_step_has_no_pass():
+    """没有「可以」⇒ 选项步里没有 `Pass`（必答）。"""
+    _engine, players = _bengkuai_engine(_bengkuai_seats(3, 4, 2))
+    query = _option_queries(players)[0]
+
+    assert not any(isinstance(action, Pass) for action in query.legal_actions)
+
+
+def test_bengkuai_both_options_are_always_executable():
+    """两项恒可执行：①1 体力也照失（进濒死）；②上限 1 也照减到 0（直接死亡）。
+
+    两格各跑一遍（不是只看声明）：任何状态下都有一条合法路，锁定技不能"无解"。
+    """
+    engine, players = _bengkuai_engine(
+        [
+            SeatSpec(hero=DONGZHUO, hp=1, hp_max=8),
+            SeatSpec(hp=0),
+            SeatSpec(hp=4),
+        ],
+        option=BENGKUAI_LOSE_HP,
+    )
+    assert any(query.actor == 0 for query in players[0].peach), "①进了濒死窗口"
+
+    engine, players = _bengkuai_engine(
+        [
+            SeatSpec(hero=DONGZHUO, hp=1, hp_max=1),
+            SeatSpec(hp=0),
+            SeatSpec(hp=4),
+        ],
+        option=BENGKUAI_REDUCE_MAX,
+    )
+    assert engine.state.player(0).hp_max == 0 and engine.state.player(0).alive is False
+
+
+# ---------------------------------------------------------------------------
+# §6.3 崩坏 —— 效果两段（失体力 / 减上限）与重入纪律
+# ---------------------------------------------------------------------------
+
+
+def test_bengkuai_losing_hp_at_one_enters_near_death():
+    """选项 1 在 1 体力时也照失（不兜底）：压 LIFE_DECREASE ⇒ 进濒死窗口。"""
+    seats = [
+        SeatSpec(hero=DONGZHUO, hp=1, hp_max=8),
+        SeatSpec(hp=0),
+        SeatSpec(hp=4),
+    ]
+    engine, players = _bengkuai_engine(seats, option=BENGKUAI_LOSE_HP)
+
+    assert [record.amount for record in _hp_deltas(engine, 0)] == [-1]
+    assert any(query.actor == 0 for query in players[0].peach), "1 体力失 1 点 ⇒ 进濒死"
+
+
+def test_bengkuai_reduce_max_at_full_hp_lowers_hp_too():
+    """选项 2 在满体力时：上限 −1 **并且**体力同步下调（规则 L436–L437）。"""
+    engine, _players = _bengkuai_engine(
+        _bengkuai_seats(3, 2, seat_hp_max=3), option=BENGKUAI_REDUCE_MAX
+    )
+
+    assert engine.state.player(0).hp_max == 2
+    assert engine.state.player(0).hp == 2, "满体力减上限 ⇒ 体力同步下调（不回血）"
+    assert [record.after for record in _hp_deltas(engine, 0, "hp_max_change")] == [2]
+
+
+def test_bengkuai_reduce_max_to_zero_kills_directly():
+    """上限 1 也照减到 0（账本 L950 不兜底）：体力置 0、**不进濒死**、直接死亡。"""
+    seats = [
+        SeatSpec(hero=DONGZHUO, hp=1, hp_max=1),
+        SeatSpec(hp=0),
+        SeatSpec(hp=4),
+    ]
+    engine, players = _bengkuai_engine(seats, option=BENGKUAI_REDUCE_MAX)
+
+    assert engine.state.player(0).hp_max == 0 and engine.state.player(0).hp == 0
+    assert engine.state.player(0).alive is False
+    assert [record.after for record in _hp_deltas(engine, 0, "hp_max_change")] == [0]
+    assert all(query.actor != 0 for player in players for query in player.peach), (
+        "0 档不进濒死（没有求桃询问）"
+    )
+
+
+def test_bengkuai_suspension_resumes_without_replaying():
+    """G7 重入：失体力子帧（濒死 / 求桃 / 死亡）出栈后重入 ⇒ **只有一条** `hp_change`。
+
+    帧私有 ``bengkuai_done`` 在压帧**之前**落位：若丢了它，重入会再失 1 点体力
+    （delta 两条）。判据走记录流的 delta 条数，不读帧私有键。
+    """
+    seats = [
+        SeatSpec(hero=DONGZHUO, hp=1, hp_max=8),
+        SeatSpec(hp=0),
+        SeatSpec(hp=4),
+    ]
+    engine, players = _bengkuai_engine(seats, option=BENGKUAI_LOSE_HP)
+
+    assert [record.amount for record in _hp_deltas(engine, 0)] == [-1], (
+        "重入不重压第二份 LIFE_DECREASE"
+    )
+    assert len([query for player in players for query in player.peach]) >= 1
+    assert engine.state.player(0).hp == 0
+
+
+# ---------------------------------------------------------------------------
+# §6.4 暴虐 —— 入口（决定者 / 判定者 / 势力 / 身份门 / 抑制 / 防止）
+# ---------------------------------------------------------------------------
+
+
+SPADE_JUDGE = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.suit == Suit.SPADE and card_id != SLASH_108
+)
+HEART_JUDGE = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.suit == Suit.HEART and card_id not in {SLASH_108, SPADE_JUDGE}
+)
+
+
+def _baonue_run(
+    *,
+    judge: int,
+    source: int = 1,
+    target: int = 2,
+    amount: int = 1,
+    source_kingdom: Kingdom = Kingdom.QUN,
+    lord: bool = True,
+    lord_hp: int = 4,
+    lord_hp_max: int = 8,
+    prevented: bool = False,
+    suppress: bool = False,
+    activate: tuple[str, ...] = (BAONUE,),
+    scripts: list | None = None,
+):
+    """座位 0 = 董卓移动版（主公 / 群），座位 1 = 伤害来源（默认群），座位 2 = 受害者。
+
+    ``judge`` 是牌堆顶（判定牌）；伤害渠道牌 = :data:`SLASH_108`（处理区里）。
+    """
+    deck = (
+        judge,
+        *(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in {SLASH_108, judge}
+        ),
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=DONGZHUO,
+                kingdom=Kingdom.QUN,
+                identity=Identity.LORD if lord else Identity.REBEL,
+                hp=lord_hp,
+                hp_max=lord_hp_max,
+            ),
+            SeatSpec(kingdom=source_kingdom, identity=Identity.REBEL),
+            SeatSpec(kingdom=Kingdom.WEI, identity=Identity.REBEL),
+        ],
+        deck=deck,
+        processing=(SLASH_108,),
+    )
+    if suppress:
+        from sgs.state import SkillSuppression
+
+        state.player(0).suppressed_skills.append(
+            SkillSuppression(skill_id="hero.jie_guanyu.yijue")
+        )
+    engine = Engine.from_state(state, seed=7)
+    players = scripts or [LinPlayer(activate=activate) for _ in range(3)]
+    frame = engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, SLASH_108, amount=amount, source=source, target=target),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    if prevented:
+        # 「防止此伤害」= 帧标签 `PREVENTED`（`damage_after_deal` 仍走一条派发，
+        # 故"这一问不发"只能由技能条件自己判，见 `_baonue_condition` 的注）。
+        add_tag(frame, Tag.PREVENTED)
+    _advance(engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END) or e.finished)
+    return engine, players
+
+
+def test_baonue_is_a_lord_skill_damage_after_deal_hook():
+    """形状：主公技 + `DAMAGE_AFTER_DEAL` 零步流水线（每次伤害事件一次）+ 发动形态。"""
+    from sgs.skills.catalog import ACTIVATION_PLANS
+
+    definition = CATALOG[BAONUE]
+    hooks = definition.hooks
+
+    assert definition.skill_type.value == "LORD"
+    assert definition.locked is False, "牌面写「可以」⇒ 非锁定"
+    assert len(hooks) == 1 and hooks[0].timing is Timing.DAMAGE_AFTER_DEAL
+    assert hooks[0].per_point is False, "牌面没有「1 点」⇒ 每次伤害事件一次"
+    assert flow_for(BAONUE) is not None and flow_for(BAONUE).steps == (), "零步流水线"
+    assert BAONUE in ACTIVATION_PLANS, "决定者不是持有者 ⇒ 必须有 ActivationPlan"
+
+
+def test_baonue_requirement_is_the_card_text():
+    assert CATALOG[BAONUE].requirement == BAONUE_REQUIREMENT
+
+
+def test_baonue_asks_the_damage_source_not_the_lord():
+    """决定者 = 造成伤害的群势力角色（座位 1），不是董卓（座位 0）。"""
+    _engine, players = _baonue_run(judge=SPADE_JUDGE)
+
+    assert players[1].asked == [BAONUE], "问在来源座位上"
+    assert players[0].asked == [], "主公不被问"
+
+    engine, _players = _baonue_run(judge=SPADE_JUDGE)
+    query = _activation_queries(engine, BAONUE)[0]
+    assert query.actor == 1, "`ActivationPlan.actor = frame.data['source']`"
+
+
+def test_baonue_not_offered_when_dongzhuo_deals_damage():
+    """「**其他**群势力角色」：伤害来源就是董卓 ⇒ 不问。"""
+    engine, players = _baonue_run(judge=SPADE_JUDGE, source=0, target=2)
+
+    assert _activation_queries(engine, BAONUE) == []
+    assert players[0].asked == [] and players[1].asked == []
+
+
+def test_baonue_not_offered_for_other_kingdoms():
+    """「群势力」：来源不是群 ⇒ 不问。"""
+    engine, players = _baonue_run(
+        judge=SPADE_JUDGE, source_kingdom=Kingdom.WEI
+    )
+
+    assert _activation_queries(engine, BAONUE) == []
+    assert players[1].asked == []
+
+
+def test_baonue_absent_when_dongzhuo_is_not_lord():
+    """主公技的身份门：董卓不是主公 ⇒ 武将牌上根本没有这条技能。"""
+    engine, players = _baonue_run(judge=SPADE_JUDGE, lord=False)
+
+    assert _activation_queries(engine, BAONUE) == []
+    assert players[1].asked == []
+    assert engine.state.player(0).hp == 4, "也不回复"
+
+
+def test_baonue_is_suppressed_by_yiji():
+    """`ALL_NON_LOCKED`：暴虐是非锁定技 ⇒ 失效期间实例不产出。"""
+    engine, players = _baonue_run(judge=SPADE_JUDGE, suppress=True)
+
+    assert _activation_queries(engine, BAONUE) == []
+    assert players[1].asked == []
+    assert engine.state.player(0).hp == 4
+
+
+def test_baonue_not_offered_when_damage_is_prevented():
+    """伤害被防止 / 数值 0 ⇒ 不问（条件自校；见 `_baonue_condition` 的注）。"""
+    for kwargs in ({"prevented": True}, {"amount": 0}):
+        engine, players = _baonue_run(judge=SPADE_JUDGE, **kwargs)
+
+        assert _activation_queries(engine, BAONUE) == [], kwargs
+        assert players[1].asked == [], kwargs
+
+
+# ---------------------------------------------------------------------------
+# §6.4 暴虐 —— 效果（判定者是来源 / 黑桃才回复 / 满体力 / 逐次 / 死者）
+# ---------------------------------------------------------------------------
+
+
+def test_baonue_judgment_runs_once():
+    """G7：判定帧只压一次（重入不重判）。"""
+    engine, _players = _baonue_run(judge=SPADE_JUDGE)
+
+    assert _judge_pops(engine) == 1
+    assert len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.JUDGE_ON
+        ]
+    ) == 1
+
+
+def test_baonue_judgment_seat_is_the_source():
+    """Q6 = A（移动版）：判定者是**造成伤害的群势力角色**（座位 1），不是董卓。"""
+    engine, _players = _baonue_run(judge=SPADE_JUDGE)
+
+    judge_on = next(
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.JUDGE_ON
+    )
+    assert (judge_on.actor, judge_on.targets) == (1, (1,))
+
+
+def test_baonue_only_spade_recovers():
+    """黑桃 ⇒ 主公回复 1 点；红桃 ⇒ 什么都不做（不压帧、不回血）。"""
+    engine, _players = _baonue_run(judge=SPADE_JUDGE)
+    assert engine.state.player(0).hp == 5, "黑桃：主公 +1"
+    assert [record.amount for record in _hp_deltas(engine, 0)] == [1]
+
+    engine, _players = _baonue_run(judge=HEART_JUDGE)
+    assert engine.state.player(0).hp == 4, "红桃：不回复"
+    assert _hp_deltas(engine, 0) == []
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.RECOVER
+    ]
+
+
+def test_baonue_skips_recover_frame_when_lord_is_at_full_hp():
+    """满体力 ⇒ 与【救援】同姿态：不压零变化的 RECOVER 帧、不落 delta。"""
+    engine, players = _baonue_run(judge=SPADE_JUDGE, lord_hp=8)
+
+    assert players[1].asked == [BAONUE], "照问（牌面没有这个前置条件）"
+    assert engine.state.player(0).hp == 8
+    assert _hp_deltas(engine, 0) == []
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.RECOVER
+    ]
+
+
+def test_baonue_asks_once_per_damage_event_not_per_point():
+    """`per_point=False`：一次 2 点伤害只问一次、只判一次、只回 1 点。"""
+    engine, players = _baonue_run(judge=SPADE_JUDGE, amount=2)
+
+    assert players[1].asked == [BAONUE], "多点伤害也是一个事件"
+    assert _judge_pops(engine) == 1
+    assert engine.state.player(0).hp == 5, "回复量恒 1（不是每点各 1）"
+
+
+def test_baonue_is_silent_when_the_lord_dies_in_the_same_damage():
+    """规则 §4.15 L412 的落点：董卓在同一次伤害里阵亡 ⇒ 实例不产出、不判定、不回复。"""
+    engine, players = _baonue_run(
+        judge=SPADE_JUDGE, target=0, source=1, lord_hp=1
+    )
+
+    assert engine.state.player(0).alive is False
+    assert _activation_queries(engine, BAONUE) == []
+    assert players[1].asked == []
+
+
+def test_baonue_suspension_resumes_without_rejudging():
+    """G7：判定帧 / RECOVER 子帧出栈后重入 ⇒ 不重判、也不重复回复。
+
+    帧私有 ``baonue_judged`` / ``baonue_recovered`` 都在压帧**之前**落位；判据走记录流：
+    恰好一条 JUDGE_ON、恰好一次 RECOVER push、恰好一条 `hp_change(+1)`。
+    """
+    engine, _players = _baonue_run(judge=SPADE_JUDGE, amount=3)
+
+    assert _judge_pops(engine) == 1, "不重判"
+    assert len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "frame"
+            and record.op == "push"
+            and record.frame_kind is FrameKind.RECOVER
+        ]
+    ) == 1, "不重复回复"
+    assert [record.amount for record in _hp_deltas(engine, 0)] == [1]

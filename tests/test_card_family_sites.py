@@ -362,6 +362,18 @@ ALLOWLIST: dict[Site, Rule] = {
         "这一行本身出现两个字面量（成员测试 + 判族实参），故计数为 2；"
         "【杀】这一支仍走 satisfies_required ⇒ 火 / 雷 / 转化杀同族",
     ),
+    # lin-batch2 票 02：董卓移动版【肉林】（`RESPONSE_COUNT` 的第二个回调）——牌名闭集同样走
+    # `satisfies_required` ⇒ 火【杀】/ 雷【杀】/ 转化【杀】一样要求两张【闪】（账本 L720）。
+    (
+        "src/sgs/skills/response_window.py",
+        "_roulin_response_count",
+        'if ctx.card is None or not satisfies_required(ctx.card, "slash"):',
+    ): Rule(
+        FAMILY,
+        1,
+        "【肉林】的牌名闭集按**家族**判（与【无双】同一处判据 satisfies_required）："
+        "火 / 雷 / 转化【杀】同族，只差「另一侧是不是女性」这一条",
+    ),
     (
         "src/sgs/skills/target_pool.py",
         "TARGET_POOL_SKILLS",

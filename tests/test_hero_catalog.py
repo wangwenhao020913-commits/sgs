@@ -232,9 +232,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 181
+    assert len(CATALOG) == 185
     assert len(equipment) == 22, "装备不变：本票三条都是武将技"
-    assert len(heroes) == 157
+    assert len(heroes) == 161
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -262,7 +262,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 157
+    assert len(expected) == 161
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1301,6 +1301,37 @@ def _probe_state() -> GameState:
     return state
 
 
+def _bengkuai_probe_state() -> GameState:
+    """【崩坏】的正面对照：**别人比我低**（ME 3 体力、座位 2 是 2 体力）。
+
+    "不是全场体力值最低"的反向判据 = **存在**其他存活角色 `hp < 我`；默认探针局面里
+    ME 3 / 其余 4 全 ⇒ 我反而是最低，条件为假，故另给一个"有人严格更低"的局面。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hp=3),
+            SeatSpec(hp=2),
+        ],
+    )
+
+
+def _baonue_probe_state() -> GameState:
+    """【暴虐】的正面对照：伤害来源（座位 0）与 ME 同为**群**势力，座位 2 是魏。
+
+    持有者换成座位 2（OTHER）后 `same_kingdom(帧来源, 持有者)` 翻假 ⇒ 负断言成立。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(kingdom=Kingdom.QUN),
+            SeatSpec(kingdom=Kingdom.QUN),
+            SeatSpec(kingdom=Kingdom.WEI),
+        ],
+    )
+
+
 def _qinxue_probe_state() -> GameState:
     """【勤学】的正面对照需要"手牌数减体力值 ≥ 2"：ME 体力 1、三张手牌 ⇒ 2。"""
     return build_state(
@@ -1502,6 +1533,10 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _zhengku_probe_state()
     if skill_id == "hero.zhangxiu.congjian":
         return _congjian_probe_state()
+    if skill_id == "hero.dongzhuo_mobile.bengkuai":
+        return _bengkuai_probe_state()
+    if skill_id == "hero.dongzhuo_mobile.baonue":
+        return _baonue_probe_state()
     if skill_id == "hero.tao_caocao.changyi":
         return _changyi_probe_state()
     if skill_id.startswith("hero.shen_zhugeliang."):
@@ -1856,6 +1891,13 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # lin-batch2 票 01：曹丕移动版【放逐】——B 族同一条 `_hurt_owner`（受伤的是我）∧
         # 场上有其他存活角色（三座，ME = 座位 1 ⇒ 池 = {0, 2} 非空）。
         "hero.caopi_mobile.fangzhu": (_HookFrame(target=ME, source=0),),
+        # lin-batch2 票 02：董卓移动版的两条带条件钩子。
+        # - 【崩坏】：**我的**结束阶段（阶段体帧的 source = 我）∧ 场上有体力值**严格更低**的
+        #   存活角色（探针局面：ME 3 / 座位 2 = 2）；持有者换成座位 2 后 source 对不上。
+        # - 【暴虐】：伤害来源是座位 0（群势力、不是我）∧ 与我同势力（探针局面 ME = 群、
+        #   座位 2 = 魏 ⇒ 持有者换成别人后判据翻假）。
+        "hero.dongzhuo_mobile.bengkuai": (_HookFrame(source=ME),),
+        "hero.dongzhuo_mobile.baonue": (_HookFrame(source=0),),
     }
 
 
@@ -2278,6 +2320,14 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.caopi_mobile.xingshang": "零步技能",
     "hero.caopi_mobile.fangzhu": "触发技能",
     "hero.caopi_mobile.songwei": "零步技能",
+    # lin-batch2 票 02：董卓移动版四条——【酒池】= 单源转化声明（步骤语言外）；
+    # 【肉林】= 纯修饰器 + 锁定（锁定技格）；【崩坏】= 结束阶段钩子 + 单步选项 + 锁定
+    # （按类型归「锁定技」格，与界【英姿】/【英魂】的互斥纪律同一姿态）；【暴虐】=
+    # `DAMAGE_AFTER_DEAL` 零步流水线（零步技能格）。
+    "hero.dongzhuo_mobile.jiuchi": "转化技",
+    "hero.dongzhuo_mobile.roulin": "锁定技",
+    "hero.dongzhuo_mobile.bengkuai": "锁定技",
+    "hero.dongzhuo_mobile.baonue": "零步技能",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2303,7 +2353,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # 手写钩子 + 两个修饰器、没有流水线）⇒ 多轮技能 16 → 17。
     "主动技能": 30,
     "触发技能": 25,
-    "零步技能": 32,
+    # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
+    "零步技能": 33,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2316,9 +2367,11 @@ SHAPE_COUNTS: dict[str, int] = {
     # lin-batch2 票 01：曹丕移动版【行殇】（`DEATH_ON` + 零步流水线）与【颂威】（判定族
     # 零步流水线）⇒ 零步技能 30 → 32；【放逐】（受伤后钩子 + 单步选座流水线）⇒ 触发技能
     # 24 → 25。
+    # lin-batch2 票 02：董卓移动版【暴虐】（零步流水线）⇒ 零步技能 32 → 33；【肉林】/
+    # 【崩坏】（锁定技）⇒ 锁定技 38 → 40；【酒池】（单源转化）⇒ 转化技 19 → 20。
     "多轮技能": 20,
-    "锁定技": 38,
-    "转化技": 19,
+    "锁定技": 40,
+    "转化技": 20,
     "能力位": 3,
     "候选生成器": 1,
     "候选提供者": 5,
@@ -2429,7 +2482,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 181
+    assert len(SKILL_SHAPE) == len(CATALOG) == 185
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2462,6 +2515,10 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         and (CATALOG[skill_id].hooks or CATALOG[skill_id].seams)
         and CATALOG[skill_id].deck_arrange is None
         and skill_id not in awakening
+        # lin-batch2 票 02：**锁定技按类型单列一格**（与 :data:`zero_step` 同一条互斥纪律）。
+        # 董卓移动版【崩坏】是第一条"锁定 + 非空流水线 + 带钩子"的技能（界【英姿】也锁定，
+        # 但它的流水线是零步 ⇒ 本来就落在零步谓词之外），不扣掉它就会同时进「触发技能」格。
+        and not CATALOG[skill_id].locked
     )
     # 「主动技能」这一格要在 providers 之前定格：移动版于吉【蛊惑】**同时**是有流水线的
     # 主动技与提供者（出牌阶段入口 + "需要牌时"的提供者），而本表一格一技，取它更根本的
@@ -2563,8 +2620,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     # lin-batch2 票 01：曹丕移动版【行殇】/【颂威】（零步）+【放逐】（触发）⇒ 内 92 → 95。
-    assert len(inside) == 95
-    assert len(outside) == 86
+    # lin-batch2 票 02：董卓移动版【暴虐】（零步）⇒ 内 95 → 96；【酒池】（转化）/
+    # 【肉林】/【崩坏】（锁定）⇒ 外 86 → 89。
+    assert len(inside) == 96
+    assert len(outside) == 89
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

@@ -98,6 +98,7 @@ __all__ = [
     "conversion_skill_definitions",
     "is_forced_conversion",
     "is_transformed_action",
+    "near_death_conversion_offers",
     "owned_conversion_skill_ids",
     "resolve_conversion_confirmation",
     "transform_candidates",
@@ -272,6 +273,27 @@ def _diamond(state: GameState, card_id: int) -> bool:
 def _black(state: GameState, card_id: int) -> bool:
     """颜色谓词：黑色牌（【倾国】§九 L978 / 【奇袭】§九 L1025）。"""
     return _convertible(state, card_id, color=Color.BLACK)
+
+
+def _spade(state: GameState, card_id: int) -> bool:
+    """花色谓词：黑桃牌（林包·移动版董卓【酒池】；`Suit.SPADE == "spade"`）。"""
+    return _convertible(state, card_id, suit=Suit.SPADE.value)
+
+
+def _spade_wine(state: GameState, card_id: int) -> bool:
+    """花色谓词 + 产物闸门：黑桃手牌，且本档牌堆里有【酒】实体牌。
+
+    林包·移动版董卓【酒池】「你可以将一张黑桃手牌当【酒】使用」：
+
+    - **黑桃**读 :func:`_spade`（花色是 ``CardRef.suit`` 的既有事实，账本 L775）；
+    - **手牌**由声明的 ``source_zone=_hand`` 表达（牌面明写「手牌」⇒ 不套 ``_hand_equip``
+      的区域默认，先例 = 【倾国】）；
+    - **产物闸门**（账本 L938，用户 2026-11-06 已签）：默认 ``standard_108`` 牌堆里
+      一张【酒】都没有（``"wine": 5`` 只在军争 ``standard_ex_160`` 档）⇒ 该档整条不亮，
+      否则虚拟牌的牌面名只能回落到 ``wine``（界面上出现英文）。先例 = 界【龙胆】的酒桃
+      两向 / 徐晃移动版【断粮】。
+    """
+    return _spade(state, card_id) and _product_in_pack(state, "wine")
 
 
 def _slash(state: GameState, card_id: int) -> bool:
@@ -601,16 +623,22 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         shared_with=("jie_zhaoyun",),
     ),
     # 界赵云【龙胆】的 酒↔桃 两向（§十九 L2099–L2100）。【酒】当【桃】：出牌阶段可当
-    # 【桃】对自己使用（受伤时），濒死求桃窗口由 ``_transformed_peaches`` 按产物牌名取
-    # （该窗口不读 ``scopes``）。【桃】当【酒】：出牌阶段使用（每回合限一次由【酒】的
+    # 【桃】对自己使用（受伤时），濒死求桃窗口由 ``near_death_conversion_offers`` 取
+    # （产物【桃】= 濒死窗口的正牌）。【桃】当【酒】：出牌阶段使用（每回合限一次由【酒】的
     # 行为表收住，目标只能是自己）。
+    #
+    # 02x 路线 A（用户 2026-11-08 签）：``_transformed_peaches`` 泛化后**按
+    # ``CandidateScope.PEACH`` 收窄**每一条转化，故"酒→桃"这一向必须显式补上 PEACH
+    # （它今天就在濒死窗口产出候选，行为不变）；"桃→酒"那一向**不补**——产物是
+    # ``near_death_self_only`` 的【酒】，补上会让它在濒死窗口多亮一条（把一张【桃】当
+    # 【酒】用 = 废掉一张【桃】）。
     ConversionSkill(
         hero_id="jie_zhaoyun",
         short_id="longdan",
         target_type_id="peach",
         source_zone=_hand_equip,
         predicate=_wine,
-        scopes=(CandidateScope.PLAY,),
+        scopes=(CandidateScope.PLAY, CandidateScope.PEACH),
         requirement="选择1张【酒】当【桃】使用",
     ),
     ConversionSkill(
@@ -664,13 +692,16 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     # 华佗【急救】：回合外一张红色牌当【桃】使用（规则 1041）。
     # M6 票 18：界华佗【急救】与标准版**逐字相同**（§十九 L2199）⇒ 同一条声明经
     # ``shared_with`` 派生 ``hero.jie_huatuo.jijiu``，不复制第二行。
+    # 02x 路线 A：濒死求桃窗口的转化源改按 ``CandidateScope.PEACH`` 收窄 ⇒ 这里显式补上
+    # （急救的濒死候选面行为不变；``PLAY`` 分支照旧，``outside_turn_only`` 仍由
+    # ``ConversionSkill.select`` 自校）。
     ConversionSkill(
         hero_id="huatuo",
         short_id="jijiu",
         target_type_id="peach",
         source_zone=_hand_equip,
         predicate=_red,
-        scopes=(CandidateScope.PLAY,),
+        scopes=(CandidateScope.PLAY, CandidateScope.PEACH),
         outside_turn_only=True,
         requirement="选择1张红色牌当【桃】使用",
         shared_with=("jie_huatuo",),
@@ -748,10 +779,34 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.NULLIFY,),
         requirement="选择1张黑色手牌当【无懈可击】使用",
     ),
+    # 林包·移动版董卓【酒池】（lin-batch2 票 02；牌面权威 = 用户 `技能.txt`，口径 = **移动版**）：
+    #
+    #     你可以将一张黑桃手牌当【酒】使用。
+    #
+    # 形状 = 单源转化（`shapes.md` §2 第 56 行），样板 = 界赵云【龙胆】的「【桃】当【酒】」
+    # 方向（同一产物、同一条 ``PLAY`` 分支）+ 徐晃移动版【断粮】的**产物闸门**。三处与样板
+    # 不同的都由牌面决定：
+    #
+    # - **源区 = 手牌**（牌面明写「手牌」⇒ 不套 ``_hand_equip`` 的区域默认，先例【倾国】）；
+    # - **源谓词 = 花色**（黑桃）而不是牌名；
+    # - **``scopes`` 多一档 ``PEACH``**：濒死自救那一路（02x 路线 A）——泛化后的
+    #   ``near_death_conversion_offers`` 按 ``CandidateScope.PEACH`` 收窄每条转化，故这一档
+    #   是"允许在求桃窗口出现"的声明（``PLAY`` 分支一字不变；``virtual_card_use`` 没有
+    #   ``PEACH`` 分支 ⇒ 不会在出牌阶段的候选里多出一条）。
+    ConversionSkill(
+        hero_id="dongzhuo_mobile",
+        short_id="jiuchi",
+        target_type_id="wine",
+        source_zone=_hand,
+        predicate=_spade_wine,
+        scopes=(CandidateScope.PLAY, CandidateScope.PEACH),
+        requirement="你可以将一张黑桃手牌当【酒】使用",
+    ),
 )
-"""H 族七条技能（八条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
-甘宁那一行；火包 OL 卧龙诸葛【火计】【看破】两条）的逐字声明（票 03 §表 + M6 票 02【倾国】/
-票 03【奇袭】/ 票 04 界关羽【武圣】/ 票 07 界甘宁【奇袭】/ huo-wolong-yanliang 票 01 §2·§3）。"""
+"""H 族八条技能（九条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
+甘宁那一行；火包 OL 卧龙诸葛【火计】【看破】两条；林包·移动版董卓【酒池】一条）的逐字声明
+（票 03 §表 + M6 票 02【倾国】/ 票 03【奇袭】/ 票 04 界关羽【武圣】/ 票 07 界甘宁【奇袭】/
+huo-wolong-yanliang 票 01 §2·§3 / lin-batch2 票 02 董卓【酒池】）。"""
 
 
 _LUANJI_DEF = SkillDef(
@@ -854,6 +909,48 @@ bespoke 回调的武将转化（火包·OL 颜良文丑【双雄】——它的�
 ``ConversionSkill.predicate`` 的签名表达不了）都走那条兜底。"""
 
 
+def _owned_conversion_offers(
+    state: GameState,
+    seat: int,
+    products: Iterable[str],
+    *,
+    scope: CandidateScope | None = None,
+) -> tuple[tuple[int, str, str], ...]:
+    """逐条转化声明筛源（:func:`conversion_offers` 与 :func:`near_death_conversion_offers`
+    共用的**唯一**内核）：``((来源实体牌 id, 技能 id, 产物牌名), …)``。
+
+    ``products`` = 本次要的产物牌名集合；``scope`` 非空时只收 ``scopes`` 含它的声明
+    （02x 路线 A 的 `CandidateScope.PEACH` 收窄，见 :func:`near_death_conversion_offers`）。
+    """
+    wanted = frozenset(products)
+    owned = {
+        instance.skill_id
+        for instance in resolve_instances(state)
+        if instance.owner == seat
+    }
+    # 【定乱】牌不能作为转化【杀】的源牌（feng-yujin 票 03 / R4=A）：界面归属面与真候选
+    # 同一条判据（否则界面画出按钮、引擎却产不出候选）。
+    slash_products = {
+        product: is_slash(CARD_BEHAVIORS[product]) for product in wanted
+    }
+    offers: list[tuple[int, str, str]] = []
+    for skill in CONVERSION_SKILLS:
+        if skill.target_type_id not in wanted:
+            continue
+        if scope is not None and scope not in skill.scopes:
+            continue
+        for owned_id in skill.skill_ids:
+            if owned_id not in owned:
+                continue
+            for card_id in skill.select(state, seat):
+                if slash_products[skill.target_type_id] and forbidden_as_slash(
+                    state, state.card(card_id)
+                ):
+                    continue
+                offers.append((card_id, owned_id, skill.target_type_id))
+    return tuple(offers)
+
+
 def conversion_offers(
     state: GameState, seat: int, target_type_id: str
 ) -> tuple[tuple[int, str], ...]:
@@ -871,27 +968,65 @@ def conversion_offers(
     **只覆盖单来源转化**：多来源的【丈八蛇矛】是装备的 ``CANDIDATES`` 回调、不在本表里
     （它的"先选两张"是另一维，票 14 不做）。方向也由 ``target_type_id`` 逐条区分：
     需要【杀】时【龙胆】只给【闪】、需要【闪】时只给【杀】（票 14 顺手修的现有 bug）。
+
+    **不看 ``scopes``**（本函数是"这个产物牌名能不能被这几张牌转出来"的查询）；
+    濒死求【桃】窗口那一路另走 :func:`near_death_conversion_offers`（02x 路线 A）。
     """
-    owned = {
-        instance.skill_id
-        for instance in resolve_instances(state)
-        if instance.owner == seat
-    }
-    # 【定乱】牌不能作为转化【杀】的源牌（feng-yujin 票 03 / R4=A）：界面归属面与真候选
-    # 同一条判据（否则界面画出按钮、引擎却产不出候选）。
-    product_is_slash = is_slash(CARD_BEHAVIORS[target_type_id])
-    offers: list[tuple[int, str]] = []
-    for skill in CONVERSION_SKILLS:
-        if skill.target_type_id != target_type_id:
-            continue
-        for owned_id in skill.skill_ids:
-            if owned_id not in owned:
-                continue
-            for card_id in skill.select(state, seat):
-                if product_is_slash and forbidden_as_slash(state, state.card(card_id)):
-                    continue
-                offers.append((card_id, owned_id))
-    return tuple(offers)
+    return tuple(
+        (card_id, skill_id)
+        for card_id, skill_id, _product in _owned_conversion_offers(
+            state, seat, (target_type_id,)
+        )
+    )
+
+
+_NEAR_DEATH_CONVERSION_PRODUCTS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        skill.target_type_id
+        for skill in CONVERSION_SKILLS
+        if skill.target_type_id == "peach"
+        or CARD_BEHAVIORS[skill.target_type_id].target_rule.near_death_self_only
+    )
+)
+"""**濒死语境可用**的转化产物牌名（02x 路线 A 的判据，派生不手抄）。
+
+判据与 :func:`sgs.effects.actions._peach` 的**真牌那一趟**读同一份行为表声明
+（``TargetRule.near_death_self_only``；【桃】不声明它，故按牌名单列）：
+今天是 ``("peach", "wine")``——【桃】是求桃窗口的正牌，【酒】是"濒死时对自己使用"。
+"""
+
+
+def near_death_conversion_offers(
+    state: GameState, seat: int, dying: int
+) -> tuple[tuple[int, str, str], ...]:
+    """求【桃】窗口的**转化源**候选：``((来源实体牌 id, 技能 id, 产物牌名), …)``。
+
+    02x 路线 A（用户 2026-11-08 签 Q1 = A / Q2 = A2）：判据从写死的 ``"peach"`` 改为
+    「产物牌型可在濒死语境使用」（:data:`_NEAR_DEATH_CONVERSION_PRODUCTS`，与真牌那一趟
+    同源：``target_rule.near_death_self_only`` 或牌名是 ``peach``）。
+
+    **同时按 ``CandidateScope.PEACH`` 收窄每一条转化**（``scope=`` 参数）：这是泛化后
+    最容易漏的一步——界赵云【龙胆】的「【桃】当【酒】」方向声明的是 ``scopes=(PLAY,)``，
+    泛化后若不再看 ``scopes``，它会在濒死窗口**多亮一条**候选（把一张【桃】当【酒】用，
+    与直接用【桃】等价却废掉一张【桃】）。反向也成立：急救与界【龙胆】的「【酒】当【桃】」
+    今天就在濒死窗口出现，故它们的声明**补上了** ``CandidateScope.PEACH``（行为不变）。
+
+    ``near_death_self_only`` 的产物（【酒】）**只在濒死者本人被问时**出现——"濒死时对
+    **自己**使用"（规则 §5.5 L605），与 ``_peach`` 的真牌判据同一句；他人的【酒】不当【桃】。
+    """
+    return tuple(
+        (card_id, skill_id, product)
+        for card_id, skill_id, product in _owned_conversion_offers(
+            state,
+            seat,
+            _NEAR_DEATH_CONVERSION_PRODUCTS,
+            scope=CandidateScope.PEACH,
+        )
+        if not (
+            CARD_BEHAVIORS[product].target_rule.near_death_self_only
+            and seat != dying
+        )
+    )
 
 
 def conversion_offers_by_source(

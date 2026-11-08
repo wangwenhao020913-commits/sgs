@@ -3134,3 +3134,63 @@ def test_caopi_fangzhu_seat_value_comes_from_the_hostile_registration() -> None:
         f"没有登记就不再挑敌人（缺省 = 帮盟友），实得 {seat_choice.choice!r}"
     )
     assert engine.state.player(2).flipped is False, "敌人不再被翻面"
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·董卓（lin-batch2 票 02）：【崩坏】的静态二选一（Q7 = A 的证据）
+# ---------------------------------------------------------------------------
+
+DONGZHUO_MOBILE_ID = "dongzhuo_mobile"
+BENGKUAI_LOSE_HP = "bengkuai_lose_hp"
+BENGKUAI_REDUCE_MAX = "bengkuai_reduce_max"
+
+
+def _bengkuai_option_choice() -> tuple:
+    """董卓（群 / 8 体力上限）自己的结束阶段：有人体力严格更低 ⇒ 真的 AI 答选项步。
+
+    判据走**真询问**：``SELECT_OPTION`` + ``skill_id == "bengkuai:option"`` 的那一问
+    （锁定技不问「是否发动」，所以这是本技能唯一的面）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=DONGZHUO_MOBILE_ID, hp=3, hp_max=8),
+            SeatSpec(hp=4),
+            SeatSpec(hp=2),
+        ],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=1)
+    choice = None
+    for _ in range(20_000):
+        query = engine.pending
+        if query is None:
+            if ran_timing(engine, Timing.TURN_END) or engine.finished:
+                break
+            engine._step()
+            continue
+        if query.kind == "SELECT_OPTION" and str(getattr(query, "skill_id", "")) == (
+            "bengkuai:option"
+        ):
+            choice = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            engine.submit(choice)
+            break
+        engine.submit(PassPlayer().respond(query))
+    return choice, engine
+
+
+def test_bengkuai_ai_prefers_losing_hp_over_reducing_max_hp() -> None:
+    """【崩坏】两格都是成本：AI 宁失 1 点体力（可回复）也不缩上限（永久）。
+
+    票面 `## AI 适配` Q7 = A：`_OPTION_VALUES` 的 `bengkuai_lose_hp = -1.2` /
+    `bengkuai_reduce_max = -1.6`。**已知限制**：1 体力时「失体力」= 进濒死，静态常量
+    读不出这个（要按当前体力细算得另开 AI 票），本用例把现状钉住、不假装它是对的。
+    """
+    choice, _engine = _bengkuai_option_choice()
+
+    assert isinstance(choice, SelectOption), f"选项步要给出选择，实得 {choice!r}"
+    assert choice.choice == BENGKUAI_LOSE_HP, (
+        f"AI 该选「失去1点体力」（-1.2 > -1.6），实得 {choice.choice!r}"
+    )

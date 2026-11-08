@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.data import Kingdom, SkillType, hero_skill_id
+from sgs.data import Kingdom, SkillType, Suit, hero_skill_id
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -55,7 +55,7 @@ from sgs.effects import (
     ModifierPoint,
     satisfies_required,
 )
-from sgs.resolution import Control, Frame
+from sgs.resolution import Control, Frame, Tag, has_tag
 from sgs.state import (
     ActivateSkill,
     CardRef,
@@ -73,6 +73,7 @@ from .catalog import (
     Hook,
     MATCH_OWNER_KEY,
     RUNNING_SKILL_KEY,
+    SKILL_JUDGMENT_CARD_KEY,
     HeroSkillDecl,
     SkillDef,
     mark_skill_used_this_turn,
@@ -82,6 +83,8 @@ from .catalog import (
 from .flow import SkillFlow
 
 __all__ = [
+    "BAONUE",
+    "BAONUE_FLOW",
     "HUJIA",
     "JIE_HUJIA",
     "JIE_HUJIA_ECHO",
@@ -579,6 +582,9 @@ def lord_request_activation_plans() -> dict[str, Any]:
         JIE_JIJIANG: lord_echo_activation_plan,
         # M6 票 17：界【救援】的决定者 = 正在回复体力的那个吴势力角色。
         JIE_JIUYUAN: _jie_jiuyuan_plan,
+        # lin-batch2 票 02：董卓移动版【暴虐】的决定者 = 造成伤害的那个群势力角色
+        # （Q6 = A：判定者也落在它身上）。
+        BAONUE: _baonue_plan,
     }
 
 
@@ -758,6 +764,124 @@ JIE_JIUYUAN_FLOW = SkillFlow(name="jie_jiuyuan", steps=(), effect=_jie_jiuyuan_r
 """界【救援】的零步流水线：[是否发动] → 转移回复 + 摸一张（无步骤）。"""
 
 
+# ---------------------------------------------------------------------------
+# 林包·移动版董卓【暴虐】（lin-batch2 票 02；用户 2026-11-08 签 Q6 = A）
+#
+#     暴虐
+#     　主公技，当其他群势力角色造成伤害后，其可以进行一次判定，
+#     　若结果为♠️，你回复1点体力。
+#
+# 形状 = `shapes.md` §2 第 45 行「零步流水线」：`DAMAGE_AFTER_DEAL` 钩子（**每次伤害事件
+# 一次**，``per_point=False``——牌面没有「1 点」）+ 零步流水线（只问"是否发动"）+
+# :data:`~sgs.skills.catalog.ACTIVATION_PLANS` 里一条 `ActivationPlan(actor=来源)`。
+#
+# **决定者 ≠ 受益者**（牌面三处「其」同一先行词 = 造成这次伤害的那个群势力角色；「你」=
+# 主公 / 技能持有者）：这一问发给**伤害来源**的座位（与界【护驾】② / 界【救援】同一条既有
+# 机制，不新造形状），效果落在 ``skill_owner`` 身上。
+#
+# **判定者按移动版**（Q6 = A）：移动版牌面「其可以进行（一次）判定」⇒ 判定者是那个群势力
+# 角色；OL 牌面「其可以令你判定」⇒ 判定者是董卓。两者结果相同（同一张牌、同一个花色判据），
+# 差别只在 JUDGE 帧的 ``subject``。本仓按移动版落地（版本权威 = 用户 2026-11-08 第 1 点）。
+# ---------------------------------------------------------------------------
+
+BAONUE = hero_skill_id("dongzhuo_mobile", "baonue")
+"""董卓移动版【暴虐】的全限定技能 id（主公技）。"""
+
+BAONUE_REQUIREMENT = (
+    "主公技，当其他群势力角色造成伤害后，其可以进行判定，若结果为黑桃，你回复1点体力"
+)
+"""一句话文案 = 移动版牌面逐字（票面 §4 询问剧本第一行；♠️ 按移动版官网写作「黑桃」）。"""
+
+_BAONUE_JUDGED_KEY = "baonue_judged"
+"""帧私有：判定帧已经压出（重入不重判）。"""
+
+_BAONUE_RECOVERED_KEY = "baonue_recovered"
+"""帧私有：回复那一段已经处理过（花色不符 / 满体力 / 已压 RECOVER 帧都算处理过）。"""
+
+
+def _baonue_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：造成这次伤害的角色**不是**董卓本人 ∧ 与董卓**同势力**（群）。
+
+    持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），事件
+    来源读 ``frame.data["source"]``（伤害帧的既有载荷）。「其他」= 不含持有者自己
+    （账本默认读法（二）②）；「群势力角色」= 两侧 ``Player.kingdom`` 都已发牌且相等
+    （:func:`~sgs.skills.catalog.same_kingdom`，身份门控在 ``resolve_instances``）。
+
+    **伤害被防止 / 数值 0 ⇒ 不成立**（票面 §4 询问剧本的兜底 ④）：引擎在
+    ``damage_after_deal`` 里对被防止的伤害**仍会**走 ``_emit_damage``（`steps.py` 的
+    "只落时机记录、逐点循环不跑"这一档，与 ``DAMAGE_AFTER_TAKE`` 在
+    ``emit_frame_timing`` 里整条短路不同），故"这一问不该发"只能由条件自己判：
+    ``amount <= 0`` 或帧标签 ``PREVENTED``（`sgs.resolution.has_tag`）时返回假。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    if int(frame.data.get("amount", 1)) <= 0 or has_tag(frame, Tag.PREVENTED):
+        return False
+    source = frame.data.get("source")
+    if source is None or int(source) == int(owner):
+        return False
+    return same_kingdom(host.state, int(source), int(owner))
+
+
+def _baonue_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
+    """发动形态：这一问交给**造成伤害的那个群势力角色**（决定者 ≠ 受益者）。
+
+    与 :func:`lord_echo_activation_plan` / :func:`_jie_jiuyuan_plan` 同一条既有机制：帧里
+    没有 ``source`` 时退回 ``None``（= 问持有者，引擎缺省）——真实派发路径上恒有。
+    """
+    del state, instance
+    source = frame.data.get("source")
+    return ActivationPlan(actor=source if isinstance(source, int) else None)
+
+
+def _baonue_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：判定 → 黑桃则**玩家（技能持有者）**回复 1 点体力。
+
+    两段都可挂起（判定帧可能被改判、回复可能触发别的钩子），各用一个帧私有游标：
+    ``baonue_judged`` 在压 JUDGE 帧**之前**落位（重入不重判）；``baonue_recovered`` 在压
+    RECOVER 帧**之前**落位（重入不重回复）。判定牌取完**立刻弹掉**（``SKILL_JUDGMENT_CARD_KEY``
+    与同帧布尔 ``skill_result``），避免它们随帧数据流到同帧后续派发（先例 = 界【刚烈】）。
+
+    满体力时**不压零变化帧**（与界孙权【救援】同一姿态），也不落 delta。
+    """
+    del answers
+    owner = int(frame.data["skill_owner"])
+    source = frame.data.get("source")
+    if not frame.data.get(_BAONUE_JUDGED_KEY):
+        frame.data[_BAONUE_JUDGED_KEY] = True
+        # 判定者 = 造成伤害的群势力角色（Q6 = A：移动版「其进行判定」）。
+        host.open_skill_judgment(frame, int(source), BAONUE)
+        return "stay"
+    if frame.data.get(_BAONUE_RECOVERED_KEY):
+        return None
+    frame.data[_BAONUE_RECOVERED_KEY] = True
+    judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+    # 同帧的布尔结果只有本技能读（判定是刚开的、没有别人写），取完即弹。
+    frame.data.pop("skill_result", None)
+    if judge_card is None or judge_card.suit != Suit.SPADE.value:
+        return None
+    player = host.state.player(owner)
+    if not player.alive or player.hp >= player.hp_max:
+        return None
+    host.push_frame(
+        FrameKind.RECOVER,
+        {
+            "source": int(source),
+            "targets": (owner,),
+            "card": None,
+            "use_timing": frame.data.get("use_timing"),
+            "amount": 1,
+        },
+        timing=Timing.RECOVER_VALUE,
+    )
+    return "stay"
+
+
+BAONUE_FLOW = SkillFlow(name="baonue", steps=(), effect=_baonue_effect)
+"""【暴虐】的零步流水线：[是否发动] → 判定 → 黑桃则主公回复 1 点（无步骤）。"""
+
+
 _PROVIDERS: dict[str, ProviderHandler] = {
     skill.skill_id: skill.provide for skill in LORD_REQUEST_SKILLS
 }
@@ -867,5 +991,21 @@ def lord_skill_definitions() -> tuple[SkillDef, ...]:
                 "当其他吴势力角色于其回合内回复体力时，若其体力值不小于你，该角色可以改为"
                 "令你回复 1 点体力，然后其摸一张牌"
             ),
+        ),
+        # 林包·移动版董卓【暴虐】（lin-batch2 票 02，Q6 = A）：主公技 + `DAMAGE_AFTER_DEAL`
+        # 零步流水线；决定者 / 判定者 = 造成伤害的那个群势力角色，收益归主公。
+        SkillDef(
+            skill_id=BAONUE,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.LORD,
+            hooks=(
+                Hook(
+                    Timing.DAMAGE_AFTER_DEAL,
+                    condition=_baonue_condition,
+                    flow=BAONUE_FLOW,
+                ),
+            ),
+            requirement=BAONUE_REQUIREMENT,
         ),
     )

@@ -1001,12 +1001,13 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     它的**牌名候选**读同一份语境判据（见 `skills/active.py:_guohuo_response_names`）：
     濒死者本人是于吉时【酒】与【桃】都在声明表里。
 
-    **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
-    也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
-    ``GLOSSARY.md``「预发动清单」里的那一步**同源**：来源由
-    :func:`~sgs.skills.conversion_offers` 逐一筛出（区域默认 / 颜色 / 时机谓词都在那份
-    声明表里），本函数不另写谓词；漏掉这条路径，急救就永远进不了任何候选
-    （``scopes=(PLAY,)`` 与"限回合外"互斥）。
+    **转化源路径**（W4-3 / 02x 路线 A）：除了真牌，**能把牌当"濒死时可用之牌"的转化技**
+    也在这里产出候选——急救的红牌当【桃】、界【龙胆】的【酒】当【桃】、董卓移动版
+    【酒池】的**黑桃手牌当【酒】**（濒死自救，规则 §5.5 L605）。判据与真牌那一趟**同源**：
+    产物牌型的 ``target_rule.near_death_self_only`` 为真 **或** 牌名是 ``peach``
+    （:func:`~sgs.skills.near_death_conversion_offers`；该函数同时按
+    ``CandidateScope.PEACH`` 收窄每一条声明）。漏掉这条路径，急救就永远进不了任何候选
+    （``scopes`` 与"限回合外"互斥），酒池的濒死自救也永远没有入口。
     """
     actions: list[Action] = [
         UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
@@ -1041,21 +1042,33 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
 def _transformed_peaches(
     state: GameState, seat: int, dying: int, answers_seq: int
 ) -> list[Action]:
-    """求桃窗口的**转化源候选**：把每张能当【桃】的来源牌变成一个无目标争议的 ``UseCard``。
+    """求桃窗口的**转化源候选**：每张能当"濒死时可用之牌"的来源牌各一个 ``UseCard``。
+
+    02x 路线 A（E2 裁定，用户 2026-11-08 签 Q1 = 路线 A / Q2 = A2）把判据从写死的
+    ``"peach"`` 泛化成"**产物牌型可在濒死语境使用**"
+    （:func:`~sgs.skills.near_death_conversion_offers` 与 :func:`_peach` 的真牌那一趟
+    读同一份行为表声明：
+    ``target_rule.near_death_self_only`` 或牌名是 ``peach``），并**同时**按
+    ``CandidateScope.PEACH`` 收窄每一条转化声明（否则界【龙胆】的「【桃】当【酒】」会在
+    濒死窗口多亮一条）。【酒】的候选只在 ``seat == dying`` 时产出（`near_death_self_only`
+    = "濒死时对**自己**使用"）；目标恒为窗口固定的 ``dying``；**不查次数**（既有口径，
+    见 :func:`_peach`）。
 
     惰性 import：``sgs.skills`` 反向依赖本模块（``skills/virtual.py`` 读 ``sgs.effects``
     的 ``check_targets`` 等），模块级 import 会成环。目标由窗口固定成 ``dying``——
     这一点与清单的"无目标步"是同一件事（`spec.md` §2 的急救行）。
     """
-    from sgs.skills import conversion_offers, transformed_card
+    from sgs.skills import near_death_conversion_offers, transformed_card
 
     return [
         UseCard(
-            card=transformed_card(state, (source,), "peach"),
+            card=transformed_card(state, (source,), product),
             targets=(dying,),
             answers_seq=answers_seq,
         )
-        for source, _skill_id in conversion_offers(state, seat, "peach")
+        for source, _skill_id, product in near_death_conversion_offers(
+            state, seat, dying
+        )
     ]
 
 
