@@ -74,6 +74,36 @@ function selectOptionSeat(seat) {
   renderPending(state.view);
 }
 
+/** 点座位 = **多选**切换（座位多选面，W1）：点一下选中、再点取消，攒好后一次提交。
+ *
+ * 这是用户 2026-11-09 对【秉壹】的裁定（Q-W1：「一次点选多个座位（类似【铁索连环】），
+ * 不要选好一个提交再继续选」）所要求的交互：**不是** `selectOptionSeat` 那种"点一个
+ * 座位 = 选中那一条候选、一次一条"的循环面（它只服务 `SELECT_OPTION`，判据不改）。
+ *
+ * 池 = 服务端派生的 `pending.option_seats`；`pending.disabled` 里的座位、以及已到上限后
+ * 未选的座位都**点不动**（与 `options.js:renderMultiSelect` 的置灰 / 封顶同一口径）。
+ * 已选的座位**始终**能再点一次取消（与手选目标同一条）。选中集合住
+ * `state.selectedTargets`（`pending.js:seatMultiChosen`）：重绘 / 2 秒静默轮询都不丢，
+ * 换询问时由 `session.js:resetSelection` 清空。
+ */
+function toggleSeatMultiPick(seat) {
+  const pending = state.view ? state.view.pending : null;
+  if (!selectionEnabled() || !isSeatMultiStep(pending)) return;
+  const choice = optionSeatChoice(pending, seat);
+  if (choice === null) return;
+  const at = state.selectedTargets.indexOf(Number(seat));
+  if (at >= 0) {
+    state.selectedTargets.splice(at, 1);
+  } else {
+    if (seatMultiDisabled(pending).has(choice)) return;
+    if (seatMultiChosen(pending).length >= seatMultiCap(pending)) return;
+    state.selectedTargets.push(Number(seat));
+  }
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+}
+
 /** 点手牌 = 设**焦点**；再点一次取消焦点并清空已选目标。
  *
  * 非手选询问（弃牌 / 排列 / 选择面 / 单选）里的手牌点击**不是手选**——那些路径由

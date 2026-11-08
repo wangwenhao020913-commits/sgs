@@ -6,11 +6,12 @@
  * 真实构造器，输出的就是浏览器会发的那条 JSON。
  *
  * 加载纪律与 `ui_smoke.mjs` 同姿态：脚本清单来自 `index.html` 的 `<script src>` 顺序；
- * 这里只取 `buildAction` / 预发动点击 / 两行观看点选 的依赖闭包（core → candidates →
- * preactivation → pending → **options** → reveal → modal → arrange → answer），不加载
- * `main.js`（它在末尾 `wire()`，需要 DOM）。`options.js` 只为 `selectionCap`（两行面的
- * 选中上限），`reveal.js` / `modal.js` 只为只读态判据与点选入口（`selectionEnabled` →
- * `stepDialogKind`）——判据走真的那份，不在探针里另写。
+ * 这里只取 `buildAction` / 预发动点击 / 两行观看点选 / 座位多选点选 的依赖闭包（core →
+ * candidates → preactivation → **interaction** → pending → **options** → reveal → modal →
+ * arrange → answer），不加载 `main.js`（它在末尾 `wire()`，需要 DOM）。`options.js` 只为
+ * `selectionCap`（两行面的选中上限），`interaction.js` 只为座位多选面的点选入口
+ * （`toggleSeatMultiPick`，W1），`reveal.js` / `modal.js` 只为只读态判据与点选入口
+ * （`selectionEnabled` → `stepDialogKind`）——判据走真的那份，不在探针里另写。
  * 两个**渲染**入口（`renderTable` / `renderPending`）换成空实现：DOM 垫片只在
  * `ui_smoke.mjs` 里有，本探针只断"点击 → 载荷"，不断渲染。桥会检查每个名字真的存在：
  * 少一个就抛错，而不是让 Python 侧收到 `undefined` 后误判。
@@ -24,6 +25,7 @@ const NEEDED = [
   "core.js",
   "candidates.js",
   "preactivation.js",
+  "interaction.js",
   "pending.js",
   "options.js",
   "reveal.js",
@@ -420,6 +422,52 @@ const blindSubmits = submitCalls;
 const blindPicked = ui.buildAction();
 ui.state.sessionId = null;
 
+/* W1：**座位多选面**（`.scratch/chenqun-guyong/issues/05-seat-multi-select.md`）——一次点选多个
+ * 场上武将、一次提交。载荷形状取自服务端**真实**产出路径：`SelectOptionsQuery` 的
+ * `model_dump` + `projection.option_seats`（`options` 全是 `seat:N` ⇒ 非空），区间 1..2 的候选
+ * 由 `effects/actions.py:_select_options` 全量枚举（`tests/test_action_contract.py` 那边用真
+ * `legal_actions_for` 逐条核这份 `legal_actions`，不在这里抄规则）。用**真实**的
+ * `interaction.js:toggleSeatMultiPick` 按**点击顺序 2 → 0** 点两个场上武将：
+ *
+ *   - 点座位只切换选中态 ⇒ 两次点击**一次提交都不发**（这一面只有一个提交点：「提交」键）；
+ *   - `buildAction()` 造出的 `SelectOptions.choices` 必须按 `pending.options` 原序
+ *     （`["seat:0", "seat:2"]`，与点击顺序无关）——引擎按 `options` 序的位掩码枚举候选，
+ *     点击顺序若原样上行，逐字段自检会找不到候选（与两行观看面的 picks 升序同一条纪律）；
+ *   - 两个座位在**一条** `SelectOptions` 里一起上行（不是"选一个提交一次"的循环面）。
+ */
+context.renderTable = () => {};
+context.renderPending = () => {};
+resetState();
+submitCalls = 0;
+const seatOptionChoices = ["seat:0", "seat:1", "seat:2"];
+const seatMultiLegal = [
+  ["seat:0"], ["seat:1"], ["seat:2"],
+  ["seat:0", "seat:1"], ["seat:0", "seat:2"], ["seat:1", "seat:2"],
+].map((choices) => ({ kind: "SelectOptions", choices, answers_seq: 99 }));
+const seatMultiPending = {
+  kind: "SELECT_OPTIONS", actor: 0, seq: 99,
+  prompt: "请选择若干项（可多选）。",
+  legal_actions: seatMultiLegal,
+  candidate_index: {}, virtual_index: {},
+  option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2 },
+  // 置灰项为空 ⇒ 服务端**不落盘** `disabled`（`_QueryBase._serialize`，票 07）；界面按
+  // "没有这个键 = 没有置灰"读（`pending.js:seatMultiDisabled`）。置灰行的用例在烟测里。
+  options: seatOptionChoices,
+  min_selected: 1, max_selected: 2, option_texts: {}, context: null, revealed: [],
+  preactivations: {}, preactivation: [],
+};
+ui.state.sessionId = "probe";
+ui.state.playback = null;
+ui.state.view = { human_seat: 0, pending: seatMultiPending };
+if (typeof ui.toggleSeatMultiPick === "function") {
+  ui.toggleSeatMultiPick(2); // 点击顺序：先 2
+  ui.toggleSeatMultiPick(0); // 再 0（载荷须按 options 原序，不是点击序）
+}
+const seatMultiSubmits = submitCalls;
+const seatMulti = ui.buildAction();
+if (!seatMulti) throw new Error("buildAction 没拼出座位多选面的 SelectOptions（点击夹具失效）");
+ui.state.sessionId = null;
+
 /* 合成反例：同一张借刀卡的**展示形态**原样塞进 UseCard.card（实机 400 的形状）。 */
 const decorated = {
   kind: "UseCard",
@@ -450,6 +498,22 @@ process.stdout.write(
         action: blindPicked,
         legal_actions: blindUnknownPending.legal_actions,
         submits: blindSubmits,
+      },
+      // W1：座位多选面 —— 连同**载荷**一起打印，Python 侧用真引擎的候选枚举 / 投影核它。
+      {
+        name: "seat_multi_select",
+        action: seatMulti,
+        legal_actions: seatMultiPending.legal_actions,
+        submits: seatMultiSubmits,
+        payload: {
+          kind: seatMultiPending.kind,
+          options: seatMultiPending.options,
+          disabled: seatMultiPending.disabled,
+          option_seats: seatMultiPending.option_seats,
+          min_selected: seatMultiPending.min_selected,
+          max_selected: seatMultiPending.max_selected,
+          answers_seq: seatMultiPending.seq,
+        },
       },
     ],
     decorated,

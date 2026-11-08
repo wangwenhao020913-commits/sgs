@@ -210,6 +210,7 @@ function renderPending(view) {
   else if (kind === "activation-face") renderActivationFace(pending, actions);
   else if (kind === "preactivation-entry") renderPreativationEntry(pending);
   else if (kind === "seat") renderSeatPick(pending);
+  else if (kind === "seat-multi") renderSeatMultiPick(pending);
   else if (kind === "own-hand-pick") renderOwnHandPick(pending);
   else if (kind === "own-zone-pick") renderOwnZonePick(pending);
   else if (kind === "slots") {
@@ -343,6 +344,8 @@ function isJudgmentRevealOption(pending) {
  * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
  * - `preactivation` / `preactivation-entry`：清单驱动的本地态 / 被动入口；
  * - `seat` / `options`：`SELECT_OPTION` 的选座位形态 / 小选项按钮组；
+ * - `seat-multi`：`SELECT_OPTIONS` ∧ `option_seats` 非空的**座位多选面**（W1：牌桌上点多个
+ *   座位、一次提交；本地集合住 `state.selectedTargets`，与手选多目标同一份本地态）；
  * - `option-confirm`：单选项可选确认（B1；只画「提交 / 放弃」）；
  * - `judge-reveal`：洛神连续判定的亮牌确认（A1；弹窗 + 单选项确认）；
  * - `skill`：技能候选的直提态（无清单，如 B 形"是否发动"）；
@@ -377,6 +380,10 @@ function renderKind(pending, actions) {
   if (pending.kind === "ARRANGE") return "arrange";
   // 票 05：计数式分配（【业炎】）——窗内逐座位计数，不铺候选、不点牌桌。
   if (pending.kind === "DISTRIBUTE") return "distribution";
+  // 座位多选面（W1）：`SELECT_OPTIONS` ∧ `option_seats` 非空 ⇒ 牌桌上点座位多选、一次提交。
+  // **必须排在下面的 `multi` 之前**：这一面绝不能落到弹窗勾选面（fail-closed 优先级，
+  // 判据与 `modal.js:stepDialogKind` 共用 `isSeatMultiStep`）。
+  if (isSeatMultiStep(pending)) return "seat-multi";
   // 多选选项（jie-feng-batch2 票 01a）：专用勾选面（弹窗），不走候选列表。
   if (pending.kind === "SELECT_OPTIONS") return "multi";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
@@ -456,6 +463,16 @@ function renderUnsupported() {
 /** ``SELECT_OPTION`` 里形如 ``seat:N`` 的选项（服务端已解析成 ``option_seats``）。 */
 function seatChoices(pending) {
   return Object.keys((pending && pending.option_seats) || {});
+}
+
+/** 座位 → 本次询问里那条 ``seat:N`` 选项串；不在池里 = ``null``。
+ *
+ *  池 = 服务端派生的 ``option_seats``；两类座位面（单选 ``SELECT_OPTION`` 与多选
+ *  ``SELECT_OPTIONS``，W1）共用这一处映射——界面不自己解析选项串（解析在服务端）。
+ */
+function optionSeatChoice(pending, seat) {
+  const seats = (pending && pending.option_seats) || {};
+  return Object.keys(seats).find((choice) => Number(seats[choice]) === Number(seat)) || null;
 }
 
 /** 这一步能不能**取消**（票 01 的技能流水线）：候选里真有一条 `Pass` 吗。
@@ -691,6 +708,77 @@ function renderSeatPick(pending) {
   $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
 }
 
+/* --------------------------------------------------- 座位多选面（W1） */
+
+/** 本步**置灰**的座位选项（服务端 `disabled`，与 `multiSelect` 勾选面同一语义：列出来但点不动）。 */
+function seatMultiDisabled(pending) {
+  return new Set(Array.isArray(pending && pending.disabled) ? pending.disabled : []);
+}
+
+/** 这一面的可选**下限**（读载荷；缺省 0 = 允许一个都不选，超时兜底 = 空集）。 */
+function seatMultiFloor(pending) {
+  const raw = pending ? Number(pending.min_selected || 0) : 0;
+  return Number.isFinite(raw) ? Math.max(0, raw) : 0;
+}
+
+/** 这一面的可选**上限**（读载荷；`max_selected` 空 = 只受选项数约束）。 */
+function seatMultiCap(pending) {
+  const options = pending && Array.isArray(pending.options) ? pending.options : [];
+  const raw = pending ? pending.max_selected : null;
+  if (raw === null || raw === undefined) return options.length;
+  const cap = Number(raw);
+  return Number.isFinite(cap) ? Math.max(0, Math.min(cap, options.length)) : options.length;
+}
+
+/** 已选的座位（升序无关；住 `state.selectedTargets`，与手选多目标同一份本地态）。
+ *
+ * 为什么要借这份本地态：`state.selectedTargets` 不参与任何"重绘 / 轮询"的复位
+ * （`applyIdlePoll` 只同步时钟，`commitView` 换询问时才 `resetSelection`）⇒ 选到一半
+ * 的座位跨 2 秒轮询不丢。池外的残留（上一面留下的座位号）在这里滤掉，不进提交。
+ */
+function seatMultiChosen(pending) {
+  const seats = (pending && pending.option_seats) || {};
+  const pool = new Set(Object.values(seats).map((seat) => Number(seat)));
+  return state.selectedTargets.filter((seat) => pool.has(Number(seat)));
+}
+
+/** 本地选中集合 → 要上行的选项串，按 `pending.options` **原序**（与引擎枚举候选同序）。
+ *
+ * 点击顺序**不**上行：`SelectOptions` 的答案是一个集合，引擎按 `options` 序的位掩码枚举
+ * 候选（`effects/actions.py:_select_options`），原样发点击序会拼出降序、逐字段自检落空
+ * （与两行观看面的 `picks` 升序同一条纪律，`answer.js:buildAction`）。
+ */
+function seatMultiChoices(pending) {
+  const chosen = seatMultiChosen(pending);
+  const options = pending && Array.isArray(pending.options) ? pending.options : [];
+  return options.filter((option) => {
+    const seat = Number((pending.option_seats || {})[option]);
+    return Number.isFinite(seat) && chosen.includes(seat);
+  });
+}
+
+/** 座位多选面的提示（区间 + 已选计数；文案不认技能名）。 */
+function seatMultiHint(pending) {
+  const least = seatMultiFloor(pending);
+  const most = seatMultiCap(pending);
+  const picked = seatMultiChosen(pending).length;
+  const howMany = least === most ? `${least} 名` : `${least}~${most} 名`;
+  return `点场上武将可多选（再点一次取消）：请选 ${howMany}角色（已选 ${picked} 名），`
+    + "选好后点右端「提交」。";
+}
+
+/** 座位多选面（W1）：牌桌上点多个场上武将、一次提交（不是"选一个 → 提交 → 再问一次"）。
+ *
+ * 没有面内按钮：座位就是控件（高亮 / 点击在 `table.js:seatInteraction` + 本文件的
+ * `seatMultiChosen`）。左端「清空选择」只清本地面（`cancelOrClear` 的既有语义）；
+ * 「至多」这类可放弃的步，放弃是**右端**那条候选里的 `Pass`（`renderRightActions` 既有口径）。
+ */
+function renderSeatMultiPick(pending) {
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = seatMultiHint(pending);
+  $("btn-cancel").disabled = seatMultiChosen(pending).length === 0;
+}
+
 /** 响应窗口里"非使用牌"候选的按钮文案（W5-02b）：借刀的 `Pass` = b（**交出武器**）。
  *
  * 只看窗口成因这一条公开事实，不改 `actionLabel` 的通用语义（同一个 `Pass` 在别的窗口
@@ -795,6 +883,23 @@ function refreshSubmit(pending) {
     $("t-choice").textContent = state.lastRejectReason
       || `点选每种花色至多一张（已选 ${state.picks.length} 张）；`
       + "点「提交」或右端「放弃」都按当前选择结算。";
+    return;
+  }
+  // 座位多选面（W1）：牌桌上点多个座位，「提交」是**唯一**提交点。可点态 = 本地选中集合
+  // 在 `[min, max]` 内 **且** 能拼出候选里真有的那条 `SelectOptions`（`buildAction` 的
+  // 既有"只提交候选里有的那一条"纪律；超上限的那一下在点击口就被拦掉，这里只兜底）。
+  // 排在 `dialogDisablesPass` 之前：这一面是**牌桌表面**（`stepDialogKind` 返回 null），
+  // 「至多」这类可放弃的步走右端那条 `Pass`，与这里无关。
+  if (isSeatMultiStep(pending)) {
+    const least = seatMultiFloor(pending);
+    const most = seatMultiCap(pending);
+    const picked = seatMultiChosen(pending).length;
+    const ready = picked >= least && picked <= most && buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;
+    else if (ready) $("t-choice").textContent = "可以提交。";
+    else if (picked < least) $("t-choice").textContent = `还要选 ${least - picked} 名角色（已选 ${picked} 名）。`;
+    else $("t-choice").textContent = `最多选 ${most} 名角色（已选 ${picked} 名）：再点一下已选的武将可取消。`;
     return;
   }
   // 票 93：两行观看手牌——「提交」只在**四色各一**（picks 凑满 `spec.total` 下限）时可点；

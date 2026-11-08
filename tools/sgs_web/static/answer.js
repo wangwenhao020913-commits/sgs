@@ -106,12 +106,31 @@ function maybeAutoSubmitArrange(view) {
  *  右端「提交」因此保持灰着——与计数式分配同一条"只提交候选里有的那一条"纪律。
  */
 function multiSelectAction(pending) {
-  const wanted = multiSelectChoices(pending);
+  return selectOptionsAction(pending, multiSelectChoices(pending));
+}
+
+/** 本地选中集合 → 候选里那条 `SelectOptions`（`multiSelectAction` / `seatMultiAction` 的唯一实现）。
+ *
+ *  两个多选面只差"集合从哪来"：勾选面读 `state.multiSelect`，座位面读
+ *  `state.selectedTargets`（`pending.js:seatMultiChoices`）。"只在候选里查、不自己拼 Action"
+ *  这一条对两面同时成立，故拼装只写这一处。
+ */
+function selectOptionsAction(pending, wanted) {
   const candidates = (pending && pending.legal_actions) || [];
   return candidates.find(
     (candidate) => candidate.kind === "SelectOptions"
       && JSON.stringify(candidate.choices || []) === JSON.stringify(wanted),
   ) || null;
+}
+
+/** 座位多选面（W1）的最终答案动作：本地选中的座位 → 候选里那条 `SelectOptions`。
+ *
+ *  与 :func:`multiSelectAction` 同形（同一个查找实现）：数量不在 `[min, max]` 内时
+ *  自然查不到 ⇒ 右端「提交」保持灰着。一次提交送**全部**选中座位——不是"选一个提交一次"
+ *  的循环面（用户 2026-11-09 对【秉壹】的裁定 Q-W1）。
+ */
+function seatMultiAction(pending) {
+  return selectOptionsAction(pending, seatMultiChoices(pending));
 }
 
 /** 票 05：计数式分配的最终答案动作——本地计数 → 候选里那条 `Distribute`。
@@ -296,7 +315,16 @@ function buildAction() {
   // 计数式分配（票 05）：按本地计数拼出候选里那条 `Distribute`（不手拼服务器没发的东西）。
   if (pending.kind === "DISTRIBUTE") return distributionAction(pending);
   // 多选选项（jie-feng-batch2 票 01a）：按本地勾选拼出候选里那条 `SelectOptions`。
-  if (pending.kind === "SELECT_OPTIONS") return multiSelectAction(pending);
+  // 座位多选面（W1）是同一个动作、另一份本地集合（`state.selectedTargets`）；右端「放弃」
+  // 送出的仍是候选里那条 `Pass`（「至多」可放弃的步，放弃 ≠ 空集合）。
+  if (pending.kind === "SELECT_OPTIONS") {
+    if (!isSeatMultiStep(pending)) return multiSelectAction(pending);
+    const chosen = state.selectedOption === null
+      ? null
+      : (pending.legal_actions || [])[state.selectedOption];
+    if (chosen && chosen.kind === RIGHT_ACTION_KINDS.pass) return chosen;
+    return seatMultiAction(pending);
+  }
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
   //

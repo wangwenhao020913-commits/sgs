@@ -20771,6 +20771,237 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${multiAnswers.length} action=${JSON.stringify(multiAnswers[0] && multiAnswers[0].body.action)}`);
 }
 
+/* ============ W1：座位多选面（一次点选多个场上武将 → 一次提交）============
+ *
+ * 用户 2026-11-09 在 `02-guyong.md` 的 Q7 上改判（原话）：「一次点选多个座位（类似【铁索连环】），
+ * 不要选好一个提交再继续选」。服务端早已够用（`Engine.ask_options` + `Action.SelectOptions` +
+ * `projection.option_seats` 对 `SELECT_OPTIONS` 已生效），缺口纯在前端：票里点名的三条旧面
+ * 都不覆盖（单选 `selectOptionSeat` / 弹窗 `multiChoice` 勾选 / 多目标那套挂在手牌焦点上）。
+ *
+ * 本段喂一份与 `pending_payload` 同形的合成 view（`SELECT_OPTIONS` + 四个 `seat:N` 选项、
+ * 区间 1..2、`seat:1` 置灰），钉六件事：
+ *   ① fail-closed 优先级：**不开** `multiChoice` 弹窗（`stepDialogKind === null`）、不铺勾选行，
+ *      而 `option_seats` 为空的同一 `SELECT_OPTIONS` 仍走旧弹窗（不回归）；
+ *   ② 牌桌上点座位 = 切换选中（池外 / 置灰 / 到上限的点不动），选中的画成 `tsel`；
+ *   ③ 本地选中集合住 `state.selectedTargets` ⇒ 重绘 / 轮询不丢；
+ *   ④ 「提交」按 `[min,max]` 与候选查找共同启停（0 个 = 灰、1..2 个 = 可点、超上限的那一下不改变集合）；
+ *   ⑤ 一次提交送出**全部**选中座位（`SelectOptions.choices` 按 `options` 原序，与点击顺序无关）；
+ *   ⑥ 「至多」的放弃出口：右端「放弃」送候选里那条 `Pass`，不是把已选集合交上去。
+ */
+{
+  const seatSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261109,
+  });
+  const seatSeq = 973;
+  const seatChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
+  // 候选 = `options` 里 1..2 名的全部子集（`seat:1` 置灰 ⇒ 只枚举 {0,2,3}），
+  // 与 `effects/actions.py:_select_options` 的枚举域同形（顺序由引擎的 `_sort_key` 定，
+  // 界面按「集合相等」查找，不依赖这一序）。
+  const seatCandidates = [
+    ["seat:0"], ["seat:2"], ["seat:3"],
+    ["seat:0", "seat:2"], ["seat:0", "seat:3"], ["seat:2", "seat:3"],
+  ];
+  const seatActions = seatCandidates.map((choices) => ({
+    kind: "SelectOptions", choices, answers_seq: seatSeq,
+  }));
+  const seatPending = {
+    kind: "SELECT_OPTIONS", actor: 0, seq: seatSeq, prompt: "请选择角色（可多选）。",
+    legal_actions: seatActions,
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+    options: seatChoices, disabled: ["seat:1"],
+    min_selected: 1, max_selected: 2, option_texts: {},
+    context: {
+      actor: 0, name: "秉壹", targets: [],
+      label: "0号位顾雍发动秉壹",
+      requirement: "选择令其摸一张牌的角色（可多选，选好后提交）", skill_hints: [],
+    },
+  };
+  // 第 4 个座位：席位池按环桌布局画（synthView 只造 3 人）。
+  const seatViewWith = (pending) => {
+    const view = synthView(pending);
+    view.snapshot.players.push({
+      seat: 3, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+      sealed_zones: [], identity: null,
+    });
+    return view;
+  };
+  const seatView = seatViewWith(seatPending);
+  const seatCardOf = (seat) => seatBox(seat);
+  const seatClasses = (seat) => {
+    const box = seatCardOf(seat);
+    return box ? [...box.classList.set] : [];
+  };
+  const seatMultiRows = () => Array.from($("t-options").children).filter(
+    (node) => String(node.className || "").includes("multi-option"),
+  );
+
+  ui.state.view = seatView;
+  ui.state.sessionId = seatSession.session_id;
+  ui.state.multiSelect = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("座位多选-1 判据只看载荷：`SELECT_OPTIONS` + 非空 `option_seats` ⇒ `seat-multi` 牌桌面，"
+    + "不开 `multiChoice` 弹窗、不铺勾选行",
+    ui.renderKind(seatPending, seatActions) === "seat-multi"
+      && ui.stepDialogKind(seatPending) === null
+      && $("t-dialog").hidden === true
+      && seatMultiRows().length === 0
+      && $("t-target-hint").textContent.includes("多选"),
+    `kind=${ui.renderKind(seatPending, seatActions)} dialog=${ui.stepDialogKind(seatPending)}`
+      + ` rows=${seatMultiRows().length} hint="${$("t-target-hint").textContent}"`);
+
+  check("座位多选-2 池里的座位画成可点（`targetable`）；置灰项（`seat:1`）点不动、不画可点态",
+    ["0", "2", "3"].every((seat) => {
+      const box = seatCardOf(seat);
+      return !!box && box.classList.contains("targetable")
+        && (box.listeners.click || []).length === 1;
+    })
+      && (() => {
+        const box = seatCardOf(1);
+        return !!box && !box.classList.contains("targetable")
+          && !box.classList.contains("tsel")
+          && (box.listeners.click || []).length === 0;
+      })(),
+    `seat0=${JSON.stringify(seatClasses(0))} seat1=${JSON.stringify(seatClasses(1))}`);
+
+  check("座位多选-3 一个都没选 ⇒ 「提交」灰着（区间下限 1）",
+    $("btn-submit").disabled === true && ui.buildAction() === null,
+    `submit=${$("btn-submit").disabled} built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(2));
+  await clickAndWait(seatCardOf(0));
+  check("座位多选-4 点两个座位 = 选中两个（`tsel`）；动作按 `options` 原序给出集合，与点击顺序无关",
+    seatCardOf(2).classList.contains("tsel")
+      && seatCardOf(0).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3])
+      && $("btn-submit").disabled === false,
+    `seat2=${JSON.stringify(seatClasses(2))}`
+      + ` built=${JSON.stringify(ui.buildAction())} submit=${$("btn-submit").disabled}`);
+
+  await clickAndWait(seatCardOf(3));
+  check("座位多选-5 到上限后第三个点不动（集合仍是那两个，提交仍可点）",
+    seatCardOf(3).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3]),
+    `seat3=${JSON.stringify(seatClasses(3))}`
+      + ` built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(1));
+  check("座位多选-6 置灰座位点了也不改变集合（引擎侧同样不会收到含它的候选）",
+    seatCardOf(1).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3]),
+    `built=${JSON.stringify(ui.buildAction())}`);
+
+  // 静默轮询 / 重绘：同一询问序号的重复渲染不得丢掉本地选中集合。
+  ui.renderTable();
+  ui.renderPending(seatView);
+  check("座位多选-7 重绘（轮询刷新）后选中集合不丢：两座仍是 `tsel`、动作不变",
+    seatCardOf(2).classList.contains("tsel")
+      && seatCardOf(0).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3]),
+    `seat2=${JSON.stringify(seatClasses(2))}`
+      + ` built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(0));
+  check("座位多选-8 再点一次 = 取消选中；剩一个仍在区间内 ⇒ 提交可点",
+    seatCardOf(0).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[1])
+      && $("btn-submit").disabled === false,
+    `seat0=${JSON.stringify(seatClasses(0))}`
+      + ` built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeSeatSubmit = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const seatAnswers = calls
+    .slice(beforeSeatSubmit)
+    .filter((call) => call.path.includes("/answer"));
+  check("座位多选-9 点「提交」= 恰一条 POST，送出的就是候选里那条 `SelectOptions`（全部选中座位一次上行）",
+    seatAnswers.length === 1
+      && JSON.stringify(seatAnswers[0].body.action) === JSON.stringify(seatActions[1]),
+    `answers=${seatAnswers.length} action=${JSON.stringify(seatAnswers[0] && seatAnswers[0].body.action)}`);
+
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+  check("座位多选-10 清空本地选择后回到「灰着」的初态（一个都没选）",
+    $("btn-submit").disabled === true
+      && seatChoices.every((choice) => {
+        const box = seatCardOf(Number(choice.slice("seat:".length)));
+        return !!box && !box.classList.contains("tsel");
+      }),
+    `submit=${$("btn-submit").disabled}`);
+
+  // 「至多」的**放弃出口**（W1 的首个载体【秉壹】用它）：右端「放弃」送候选里那条 `Pass`，
+  // **不是**把已选座位集合交上去——两者在服务端是两条不同的候选。可放弃的步由
+  // `optional=True` 在 `legal_actions` 里多出一条 `Pass`（与单选座位面同一个出口）。
+  const seatPass = { kind: "Pass", answers_seq: seatSeq };
+  const seatPassPending = {
+    ...seatPending, seq: seatSeq + 2, legal_actions: [...seatActions, seatPass],
+  };
+  const seatPassView = seatViewWith(seatPassPending);
+  ui.state.view = seatPassView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatPassView);
+  await clickAndWait(seatCardOf(2));
+  check("座位多选-12 可放弃的步（候选里有 `Pass`）⇒ 右端「放弃」出现，左端「清空选择」只清本地面",
+    $("btn-pass").hidden === false
+      && $("btn-submit").disabled === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[1]),
+    `passHidden=${$("btn-pass").hidden} built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeSeatPass = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-pass"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const seatPassAnswers = calls
+    .slice(beforeSeatPass)
+    .filter((call) => call.path.includes("/answer"));
+  check("座位多选-13 点右端「放弃」= 恰一条 POST、送的是候选里那条 `Pass`（不是已选集合）",
+    seatPassAnswers.length === 1
+      && JSON.stringify(seatPassAnswers[0].body.action) === JSON.stringify(seatPass),
+    `answers=${seatPassAnswers.length} action=${JSON.stringify(seatPassAnswers[0] && seatPassAnswers[0].body.action)}`);
+  ui.state.view = seatView;
+  ui.resetSelection();
+
+  // fail-closed 的反面：`option_seats` 为空的同一 `SELECT_OPTIONS` 仍走旧弹窗（逐字节不回归）。
+  const plainMulti = {
+    ...seatPending, seq: seatSeq + 1, option_seats: {}, disabled: ["jie_shensu_2"],
+    options: ["jie_shensu_1", "jie_shensu_2"],
+    min_selected: 0, max_selected: 2,
+    legal_actions: [[], ["jie_shensu_1"]].map((choices) => ({
+      kind: "SelectOptions", choices, answers_seq: seatSeq + 1,
+    })),
+  };
+  const plainView = synthView(plainMulti);
+  ui.state.view = plainView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(plainView);
+  check("座位多选-11 没有 `option_seats` 的 `SELECT_OPTIONS` 仍走旧 `multiChoice` 弹窗（不回归）",
+    ui.renderKind(plainMulti, plainMulti.legal_actions) === "multi"
+      && ui.stepDialogKind(plainMulti) === "multiChoice"
+      && $("t-dialog").hidden === false
+      && Array.from($("t-options").children).some(
+        (node) => String(node.className || "").includes("multi-option")),
+    `kind=${ui.renderKind(plainMulti, plainMulti.legal_actions)}`
+      + ` dialog=${ui.stepDialogKind(plainMulti)}`);
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 /* ============ 改判窗口：装备区的牌必须点得动（2026-11-08 实机报障）============
  *
  * 报障原文：「鬼道无法选择装备区的牌改判；标鬼道也有这个问题」。引擎侧从来没错：

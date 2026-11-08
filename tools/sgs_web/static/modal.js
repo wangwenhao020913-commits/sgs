@@ -145,6 +145,11 @@ function stepDialogKind(pending) {
   // 票 05：计数式分配（【业炎】）——一张窗里给若干座位点计数，答案是一份"分配向量"。
   if (pending.kind === "DISTRIBUTE") return DIALOG_KINDS.distribution;
   // 多选选项（jie-feng-batch2 票 01a）：判据只看载荷种类，不认技能名。
+  // **座位多选面优先**（W1，`05-seat-multi-select.md`）：`SELECT_OPTIONS` 的选项全是
+  // `seat:N`（服务端派生 `option_seats` 非空）⇒ 答案是**在牌桌上点多个场上武将**，
+  // 这一步的表面是牌桌（返回 `null`，与单选座位面同一姿态），**绝不**能落到下面那条
+  // `multiChoice` 弹窗（那是文本勾选行，座位会画成 `seat:0` 这类报文串）。
+  if (isSeatMultiStep(pending)) return null;
   if (pending.kind === "SELECT_OPTIONS") return DIALOG_KINDS.multiChoice;
   // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 用**既有** `choice` 外壳（不新增种类：
   // 一张窗选一条技能 / 末条「都不发动」，正是"选项闭集"）。`state.preactivation` 优先，
@@ -183,6 +188,25 @@ function stepDialogKind(pending) {
  */
 function isUnknownZoneMultipick(pending) {
   return stepDialogKind(pending) === DIALOG_KINDS.unknown && selectionCap(pending) > 1;
+}
+
+/** **座位多选面**（W1，`.scratch/chenqun-guyong/issues/05-seat-multi-select.md`）的唯一判据。
+ *
+ * 用户 2026-11-09 对【秉壹】的交互裁定（Q-W1）：「一次点选多个座位（类似【铁索连环】），
+ * 不要选好一个提交再继续选」。判据只看载荷形状（不认技能 id）：`SELECT_OPTIONS` ∧
+ * `option_seats` 非空 ⇒ 这一步的答案 = **在牌桌上一次点选多个座位、一次提交**。
+ *
+ * `option_seats` 是服务端从 `options` 的 `seat:N` 前缀派生的（`projection.option_seats`，
+ * 对 `SELECT_OPTIONS` 与 `SELECT_OPTION` 同一个派生口）——界面只读这份数据，不自己解析
+ * 选项串。读取方共四处，必须读**同一个**谓词：`stepDialogKind`（牌桌表面 ⇒ 返回 `null`，
+ * 不开 `multiChoice` 弹窗）、`pending.js:renderKind`（`seat-multi` 档）、
+ * `table.js:seatInteraction`（座位可点 / 已选）、`answer.js:buildAction`（拼
+ * `SelectOptions.choices`）。写散一处就会出现"弹窗与牌桌各有一个提交点"。
+ */
+function isSeatMultiStep(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTIONS") return false;
+  const seats = pending.option_seats;
+  return !!seats && typeof seats === "object" && Object.keys(seats).length > 0;
 }
 
 /** **带观看授予的选项步**（韬·刘备【义起】）：牌面与选项按钮同一个窗。

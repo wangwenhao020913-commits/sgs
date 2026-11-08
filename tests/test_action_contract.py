@@ -45,7 +45,17 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
+from sgs.data import load_content_pack  # noqa: E402
+from sgs.effects import legal_actions_for  # noqa: E402
+from sgs.state import (  # noqa: E402
+    QueryKind,
+    SelectOptionsContext,
+    SelectOptionsQuery,
+    project,
+)
 from sgs.state.protocol import parse_action  # noqa: E402
+from sgs_web.projection import option_seats  # noqa: E402
+from support import SeatSpec, build_state  # noqa: E402
 
 CARD_REF_KEYS = {
     "card_id",
@@ -59,6 +69,9 @@ CARD_REF_KEYS = {
     "virtual_sources",
 }
 """与 ``core.js:CARD_REF_KEYS`` 逐字一致（跨语言没有共享常量的通道）。"""
+
+PACK = load_content_pack(deck_profile="standard_108")
+"""座位多选面那条回环用的牌堆档位（与 ``tests/test_select_options_query.py`` 同一档）。"""
 
 DECORATION_KEYS = ("display_name", "attribute", "description", "kind", "source_cards")
 """展示层字段：只读载体上可以有，**绝不**随动作上行。"""
@@ -113,6 +126,7 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "watch_two_rows",
         "unknown_zone_multipick",
         "unknown_zone_single_pick",
+        "seat_multi_select",
     }, f"探针用例集合变了：{sorted(actions)}"
 
     borrowed = actions["borrowed_sword_preactivation"]
@@ -249,6 +263,113 @@ def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
     assert single["action"] in single["legal_actions"]
 
 
+def test_the_seat_multi_select_face_submits_every_chosen_seat_at_once() -> None:
+    """W1：座位多选面（`SELECT_OPTIONS` ∧ `option_seats` 非空）——一次点选、一次提交。
+
+    用户 2026-11-09 对【秉壹】的交互裁定（Q-W1，原话）：「一次点选多个座位（类似【铁索连环】），
+    不要选好一个提交再继续选」。本票只补前端面：探针用**真实**的 `interaction.js:toggleSeatMultiPick`
+    按点击顺序 2 → 0 点两个场上武将，三件事逐条钉住：
+
+    - **两次点击一次提交都不发**（`submits == 0`）：这一面只有一个提交点（「提交」键），
+      不是"点一个座位 = 一次提交"的循环面；
+    - 送出的 `SelectOptions.choices` 按 `pending.options` 原序（`["seat:0", "seat:2"]`，
+      与点击顺序无关）——引擎按 options 序的位掩码枚举候选（`_select_options`），
+      点击顺序若原样上行，`buildAction` 的逐字段自检会找不到候选；
+    - 两个座位在**一条**动作里一起上行，且被 `parse_action` 接受（跨语言形状不变）。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}["seat_multi_select"]
+    action = case["action"]
+
+    assert case["submits"] == 0, (
+        f"点两个座位不得发出任何提交（只有一个提交点）：「{case['submits']}」次"
+    )
+    assert action is not None, "点两个座位之后 buildAction() 返回 null（多选面没接上候选骨架）"
+    assert action["kind"] == "SelectOptions"
+    assert set(action) == {"kind", "choices", "answers_seq"}, (
+        f"座位多选面的动作仍是 SelectOptions 的三格：{sorted(action)}"
+    )
+    assert action["choices"] == ["seat:0", "seat:2"], (
+        "按点击顺序 2 → 0 点两个座位，choices 必须按 options 原序（与点击顺序无关）："
+        f"{action['choices']}"
+    )
+    assert action in case["legal_actions"], (
+        "造出的动作必须逐字段命中 legal_actions 的那一条（[seat:0, seat:2]）："
+        f"{action} / {case['legal_actions']}"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.kind == "SelectOptions"
+    assert parsed.choices == ("seat:0", "seat:2")
+    assert parsed.answers_seq == 99
+
+
+def test_the_seat_multi_select_fixture_matches_the_real_view_payload() -> None:
+    """探针那份座位多选载荷必须是**服务端真会发**的形状（不另造一份想象）。
+
+    两件事都走真实产出路径，不用合成替身：
+
+    1. `legal_actions`：用真 `SelectOptionsContext`（三个 `seat:N`、区间 1..2）喂
+       `sgs.effects.legal_actions_for`，枚举出的候选集合与探针里的那份**逐条一致**
+       （集合相等，不断次序——引擎的 `_sort_key` 序不是本票的断言对象）；
+    2. 展示键：用真 `SelectOptionsQuery` 的 `model_dump` + `projection.option_seats`，
+       核探针读到的 `kind` / `options` / `min_selected` / `max_selected` / `option_seats`
+       —— 最后一项同时确认票面 §④ 第 2 条「`option_seats` 对 `SELECT_OPTIONS` 也已生效」
+       （它只读 `query.options` 的 `seat:N` 前缀）。置灰项为空时真载荷**不含** `disabled`
+       键（`_QueryBase._serialize`），探针夹具照同一形状，界面按"没有 = 没有置灰"读。
+    """
+    payload = _probe_payload()
+    case = {entry["name"]: entry for entry in payload["cases"]}["seat_multi_select"]
+    fixture = case["payload"]
+
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="caocao"), SeatSpec(hero="liubei"), SeatSpec(hero="guojia")],
+    )
+    context = SelectOptionsContext(
+        skill_id="hero.guyong.bingyi",
+        options=tuple(fixture["options"]),
+        min_selected=int(fixture["min_selected"]),
+        max_selected=int(fixture["max_selected"]),
+    )
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTIONS,
+        answers_seq=int(fixture["answers_seq"]),
+        payload=context,
+    )
+    assert len(actions) == len(case["legal_actions"]) == 6
+    assert {(action.kind, action.choices) for action in actions} == {
+        (candidate["kind"], tuple(candidate["choices"]))
+        for candidate in case["legal_actions"]
+    }, "探针里的候选必须就是引擎对同一份 (options, 区间) 的枚举"
+
+    query = SelectOptionsQuery(
+        seq=int(fixture["answers_seq"]),
+        actor=0,
+        timing="TURN_START",
+        prompt="请选择若干项（可多选）。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id="hero.guyong.bingyi",
+        options=tuple(fixture["options"]),
+        min_selected=int(fixture["min_selected"]),
+        max_selected=int(fixture["max_selected"]),
+    )
+    dumped = query.model_dump(mode="json")
+    for key in ("kind", "options", "min_selected", "max_selected"):
+        assert dumped[key] == fixture[key], f"探针的 {key} 与服务端载荷不一致：{dumped[key]}"
+    # 置灰项为空时 `_QueryBase._serialize` **不落盘** `disabled`（票 07）⇒ 真载荷里没有这个键，
+    # 界面按"没有 = 没有置灰"读（`seatMultiDisabled`）；探针夹具照同一形状（不补空数组）。
+    assert "disabled" not in dumped, f"空的 disabled 不进载荷：{dumped}"
+    assert "disabled" not in fixture, f"探针夹具不得凭空加空数组：{fixture}"
+    assert option_seats(query) == fixture["option_seats"] == {
+        "seat:0": 0,
+        "seat:1": 1,
+        "seat:2": 2,
+    }, "option_seats 对 SELECT_OPTIONS 也要生效（座位多选面的判据读它）"
+
+
 def test_a_decorated_card_payload_is_rejected_by_the_server_model() -> None:
     """合成反例：**同一张卡**的展示形态不能被 ``parse_action`` 接受（= 报障的 400）。
 
@@ -275,4 +396,4 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 8
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 9
