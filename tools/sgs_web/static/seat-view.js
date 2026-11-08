@@ -424,6 +424,15 @@ function sideBlockRows(player, ctx) {
   const equipPick = ownSeat
     && isOwnZonePick(ctx.pendingNow)
     && ownPickHasEquip(ctx.pendingNow);
+  // **改判窗口也接装备区**（2026-11-08 实机报障：鬼道 / 鬼才点不了装备区的牌）：
+  // 改判窗口是 `RESPOND` 的**手选面**（`isHandPick`），候选区 = 手牌 ∪ 装备区
+  // （`SkillDef.rejudge_zones`），可装备槽此前只在自己的选牌面（`isOwnZonePick`）里接
+  // 点击 ⇒ 装备区那张黑牌画得出来、却点不动。判据与手牌区**同一条**：手选面 ∧
+  // 候选索引里有它（`cardSelectable`）；不认技能名、不认窗口成因。
+  const equipCardPick = (card) => ownSeat
+    && Boolean(card)
+    && isHandPick(ctx.pendingNow)
+    && cardSelectable(ctx.pendingNow, card.card_id);
   // 预发动选牌步**不限于自己的区域**：【麒麟弓】的第一步只铺目标装备区的坐骑槽，清单的
   // `zones` / pool 都在 `preactivationCardPickable` 里读；目标座位的槽因此也要接点击。
   const preactivationPick = (zone, card) =>
@@ -456,7 +465,9 @@ function sideBlockRows(player, ctx) {
     const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
-      interactive: baseInteractive || equipPick || preactivationPick("equip", layout.card),
+      interactive: baseInteractive || equipPick
+        || equipCardPick(layout.card)
+        || preactivationPick("equip", layout.card),
       ctx,
     });
     // 装备槽同样**逐槽**一个角标（装备格本身不画）。

@@ -1900,6 +1900,22 @@ def test_jie_guidao_offers_only_black_cards() -> None:
     assert all(action.skill_id == JIE_GUIDAO for action in offered)
 
 
+def test_jie_guidao_can_substitute_with_an_equipment_card_end_to_end() -> None:
+    """装备区那张黑牌**真的能交出去**：它离开装备区成为判定牌，原判定牌进张角手牌。"""
+    original = _zj_suit_card(suit="heart")
+    black_equip = cards_of_type(PACK, "double_sword")[0]
+    assert PACK.deck.cards[black_equip].suit == "spade"
+    state = _jie_guidao_state(original=original, equip=(black_equip,))
+    engine = Engine.from_state(state, seed=7)
+
+    _run_jie_guidao(engine, pick_card=black_equip)
+    _zj_run_to_quiet(engine)
+
+    assert black_equip not in engine.state.player(0).equip, "装备区的牌被拿去改判了"
+    assert original in engine.state.player(0).hand, "原判定牌由张角获得"
+    assert black_equip in engine.state.discard, "新判定牌照常结算完进弃牌堆"
+
+
 def test_jie_guidao_is_not_asked_without_a_black_card() -> None:
     """没有黑色牌 ⇒ 改判窗口不发这一问（判定直接生效）。"""
     original = _zj_suit_card(suit="heart")

@@ -20767,6 +20767,75 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${multiAnswers.length} action=${JSON.stringify(multiAnswers[0] && multiAnswers[0].body.action)}`);
 }
 
+/* ============ 改判窗口：装备区的牌必须点得动（2026-11-08 实机报障）============
+ *
+ * 报障原文：「鬼道无法选择装备区的牌改判；标鬼道也有这个问题」。引擎侧从来没错：
+ * `SkillDef.rejudge_zones = (HAND, EQUIP)` ⇒ 候选里就有装备区那张黑牌（`SubstituteJudgeCard`
+ * 带 `card`，`candidate_index` 因此也有它）。缺的是**点击**：装备槽此前只在自己的选牌面
+ * （`isOwnZonePick`）里接点击，改判窗口是 `RESPOND` 手选面 ⇒ 装备区那张牌画得出来、点不动。
+ *
+ * 判据用合成 payload（形状取自真实引擎：一条 `SubstituteJudgeCard` + `Pass`）。
+ */
+{
+  ui.resetSelection();
+  const equipCard = {
+    card_id: 21, name: "青釭剑", type: "weapon", suit: "spade", rank: 6, color: "black",
+  };
+  const rejudge = {
+    kind: "RESPOND", cause: "REJUDGE", actor: 0, seq: 972,
+    prompt: "改判窗口：用一张牌代替此判定牌，或放弃。",
+    legal_actions: [
+      {
+        kind: "SubstituteJudgeCard", skill_id: "hero.jie_zhangjiao_mobile.guidao",
+        card: equipCard, targets: [], answers_seq: 972,
+      },
+      { kind: "Pass", answers_seq: 972 },
+    ],
+    candidate_index: {
+      "21": { card: equipCard, pool: [], combos: [[]], min_targets: 0, max_targets: 0 },
+    },
+  };
+  const rejudgeView = {
+    seed: 1, human_seat: 0, finished: false, timeout_seconds: null, heroes: {},
+    skills: [], pending: rejudge,
+    snapshot: {
+      seat: 0, phase: "judge", turn_seat: 0,
+      players: [{
+        seat: 0, hp: 4, hp_max: 4, hand_count: 0, alive: true, equip: [equipCard], judge: [],
+        sealed_zones: [], identity: null, chained: false, flipped: false, markers: [],
+        wine_active: false, hero: "jie_zhangjiao_mobile", kingdom: "qun",
+      }],
+      self_hand: [], deck_count: 50, discard: [], processing: [],
+    },
+  };
+  const savedView = ui.state.view;
+  ui.state.view = rejudgeView;
+  ui.renderTable();
+  ui.renderPending(rejudgeView);
+
+  const attrOf = (node, name) => (node.getAttribute ? node.getAttribute(name) : undefined);
+  const walkZones = (node, out = []) => {
+    for (const child of Array.from(node.children || [])) { out.push(child); walkZones(child, out); }
+    return out;
+  };
+  const equipSlot = walkZones($("t-self-zones")).find(
+    (node) => attrOf(node, "data-card-id") === "21"
+      && attrOf(node, "data-zone") === "equip");
+  check("改判-1 装备区的牌在改判窗口里是可点的控件（此前是死的 div）",
+    Boolean(equipSlot) && equipSlot.tagName === "BUTTON"
+      && attrOf(equipSlot, "data-zone") === "equip",
+    `slot=${equipSlot ? equipSlot.tagName : "缺"} zone=${equipSlot ? attrOf(equipSlot, "data-zone") : ""}`);
+
+  await clickAndWait(equipSlot);
+  check("改判-2 点装备区的牌 = 设上焦点，提交动作就是候选里那条 SubstituteJudgeCard",
+    ui.state.focusCardId === 21
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(rejudge.legal_actions[0]),
+    `focus=${ui.state.focusCardId} built=${JSON.stringify(ui.buildAction())}`);
+
+  ui.state.view = savedView;
+  ui.resetSelection();
+}
+
 /* ============ 选牌**顺序无关**（2026-11-03 实机报障：业炎的四色成本从右往左点 = 非法）============
  *
  * 根因：`SELECT_CARDS` 的候选由引擎按 `combinations(...)` 枚举 ⇒ 面内位置**升序**；而界面
