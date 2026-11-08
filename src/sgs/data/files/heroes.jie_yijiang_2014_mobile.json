@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "pack_id": "jie_yijiang_2014_mobile",
+  "heroes": [
+    {
+      "id": "jie_chenqun_mobile",
+      "name": "界陈群移动版",
+      "true_name": "陈群",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-yijiang-2014-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "dingpin",
+          "name": "定品",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

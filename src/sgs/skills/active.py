@@ -99,6 +99,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .catalog import (
+    SKILL_JUDGMENT_CARD_KEY,
     HeroSkillDecl,
     SkillDef,
     _GIVEN_TO_SHIFT,
@@ -119,6 +120,8 @@ __all__ = [
     "CANDIDATE_CAP",
     "DIMENG",
     "DIMENG_FLOW",
+    "DINGPIN",
+    "DINGPIN_FLOW",
     "JIE_LIJIAN",
     "JIE_LIJIAN_FLOW",
     "POXI_CARDS",
@@ -1121,6 +1124,176 @@ QINGNANG_FLOW = SkillFlow(
     effect=_qingnang_effect,
 )
 """【青囊】的两步流水线：弃 1 张手牌 → 一名已受伤角色回复 1 点（票 02）。"""
+
+
+# ---------------------------------------------------------------------------
+# 界陈群【定品】（界一将成名-2014·移动版；jie-yijiang-2014-mobile 票 01）
+#
+# 牌面（用户 `技能.txt` 逐字；移动版 WIKI 同值，见票面 §0.1）：
+#
+#     出牌阶段，你可以弃置一张牌（不能是本回合使用或弃置过的类型），令一名角色进行一次判定，
+#     若结果为：黑色，其摸X张牌（X为其体力值且至多为3），然后你本回合不能再对其发动此技能；
+#     ♥️，你本次以此法弃置的牌不计入弃置过的限制；♦️，你翻面。
+#
+# 用户 2026-11-09 签的四处（票面 Q2–Q5）：
+# - 「类型」= **大类**（基本 / 锦囊 / 装备；与账本 L758 的「类别」同一措辞面）；
+# - 「本回合使用或弃置过的类型」= 座位级事实 ``Player.turn_card_entries``（引擎两处写、
+#   回合末复位；主体是**动作主体**，不是牌主人）；
+# - 「本回合不能再对其发动此技能」= ``Player.dingpin_barred_targets``（per-target、回合末清）；
+# - ♥ 分支按**张**撤回（``Engine.exempt_turn_card``）——只存大类会把本回合先前的同类记录
+#   一起撤掉 ⇒ 过度放行。
+#
+# 三段判据（黑 / ♥ / ♦）互斥且穷尽四花色，故「并列全判」与「互斥分区」结算同值；判定取
+# **改判后**那张的花色（``SKILL_JUDGMENT_CARD_KEY``）。花色为空 ⇒ 三段均不成立（fail-closed，
+# 账本 L896）。次数上限来自"大类用掉一种就少一种"，不是每阶段一次 ⇒ ``once_per_phase=False``。
+# ---------------------------------------------------------------------------
+
+DINGPIN = hero_skill_id("jie_chenqun_mobile", "dingpin")
+"""界陈群【定品】的全限定技能 id（界一将成名-2014·移动版）。"""
+
+_DINGPIN_COST_KEY = "dingpin_cost"
+"""帧私有：成本已经搬进弃牌堆（搬牌挂起后的续跑不重搬）。"""
+
+_DINGPIN_JUDGED_KEY = "dingpin_judged"
+"""帧私有：判定帧已经压出（重入不再压第二张）。"""
+
+_DINGPIN_SUIT_KEY = "dingpin_suit"
+"""帧私有：本次判定的**花色**（判定牌读出来后即定格；重入不再读已被弹掉的键）。"""
+
+_DINGPIN_DRAWN_KEY = "dingpin_drawn"
+"""帧私有：黑判定那一段的摸牌已经发出（摸牌内联钩子挂起后不重摸）。"""
+
+_DINGPIN_DONE_KEY = "dingpin_done"
+"""帧私有：整段效果已收尾（♥ 撤回 / ♦ 翻面各只做一遍）。"""
+
+
+def _dingpin_forbidden(state: GameState, owner: int) -> frozenset[str]:
+    """本回合**已经用过 / 弃过**的牌的大类（读取面只做投影，见 ``Player.turn_card_entries``）。"""
+    return frozenset(category for _, category in state.player(owner).turn_card_entries)
+
+
+def _dingpin_cost_face(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """代价的**黑名单**：大类已被本回合用过 / 弃过、或证不出大类的牌都不能当成本。
+
+    与 ``PickCards.exclude_cards`` 的可调用档同签名；它同步作用在清单候选 / 铺面 /
+    ``hi`` 上限 / 校验器四处（``flow._exclude_ids`` 的唯一解析点）。
+    """
+    del frame, answers
+    forbidden = _dingpin_forbidden(state, owner)
+    player = state.player(owner)
+    excluded: list[int] = []
+    for cards in (player.hand, player.equip):
+        for card_id in cards:
+            category = card_category(state.pack_id, state.card(card_id).type)
+            if category is None or category.value in forbidden:
+                excluded.append(card_id)
+    return tuple(excluded)
+
+
+def _dingpin_has_cost(state: GameState, owner: int) -> bool:
+    """付得起吗：手牌 ∪ 装备区里至少有一张**不在黑名单**里的牌。"""
+    player = state.player(owner)
+    payable = len(player.hand) + len(player.equip)
+    return payable > len(_dingpin_cost_face(state, None, owner, ()))
+
+
+def _dingpin_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """「一名角色」= 全部存活角色（**含自己**），再剔除本回合已被黑判定禁掉的座位。"""
+    del frame, chosen
+    barred = set(state.player(owner).dingpin_barred_targets)
+    return tuple(p.seat for p in state.players if p.alive and p.seat not in barred)
+
+
+def _dingpin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：付得起（还有一类没用过）∧ 还有一名没被禁的目标。
+
+    ``once_per_phase=False``：本技能没有"每阶段一次"的上限，次数由"大类用掉一种就少一种"
+    自己限定 ⇒ 不读也不落 ``_USED`` 位（与界【势斩】"限两次"同一姿态）。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _dingpin_has_cost(state, ctx.subject):
+        return current
+    if not _dingpin_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _dingpin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：弃成本 → 判定 → 按花色三分支（黑：摸 X + 禁令 / ♥：撤回成本 / ♦：翻面）。
+
+    每个可挂起点各一个帧私有游标：成本搬牌（内联 ``MOVE_AFTER``）、判定帧、摸牌
+    （内联"获得牌后"钩子）、♥ / ♦ 两段收尾 ⇒ 重入既不重做也不漏做。
+    """
+    state = host.state
+    owner = frame.data["source"]
+    cards = answers["card"]
+    seats = answers["seat"]
+    assert isinstance(cards, tuple) and isinstance(seats, tuple)
+    target = int(seats[0])
+    if not frame.data.get(_DINGPIN_COST_KEY):
+        if _move_to_discard(host, frame, cards, owner=owner, key="dingpin:cost") == "stay":
+            return "stay"
+        frame.data[_DINGPIN_COST_KEY] = True
+    if not frame.data.get(_DINGPIN_JUDGED_KEY):
+        frame.data[_DINGPIN_JUDGED_KEY] = True
+        host.open_skill_judgment(frame, target, DINGPIN)
+        return "stay"
+    if _DINGPIN_SUIT_KEY not in frame.data:
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        # 同帧的布尔结果只有本技能读（判定刚开、没有别人写），取完即弹。
+        frame.data.pop("skill_result", None)
+        frame.data[_DINGPIN_SUIT_KEY] = None if judge_card is None else judge_card.suit
+    if frame.data.get(_DINGPIN_DONE_KEY):
+        return None
+    suit = frame.data[_DINGPIN_SUIT_KEY]
+    if suit == Suit.HEART.value:
+        frame.data[_DINGPIN_DONE_KEY] = True
+        # ``answers["card"]`` 是**实体牌 id**（``_move_to_discard`` 的入参口径）。
+        for card_id in cards:
+            host.exempt_turn_card(owner, int(card_id))
+        return None
+    if suit == Suit.DIAMOND.value:
+        frame.data[_DINGPIN_DONE_KEY] = True
+        host.set_flipped(frame, owner, not state.player(owner).flipped)
+        return None
+    if suit is not None and color_of_suit(suit) is Color.BLACK:
+        if not frame.data.get(_DINGPIN_DRAWN_KEY):
+            frame.data[_DINGPIN_DRAWN_KEY] = True
+            if state.player(target).alive:
+                # X = min(体力值, 3)：**判定后现算**（动态量，账本 L776⑤）。
+                control = host.draw_for_hand(
+                    frame, target, min(state.player(target).hp, 3)
+                )
+                if control == "stay":
+                    return "stay"
+        # 禁令照写（目标已阵亡时对死者无意义但无害；不额外判活，见票面 G9）。
+        host.bar_dingpin_target(owner, target)
+    frame.data[_DINGPIN_DONE_KEY] = True
+    return None
+
+
+DINGPIN_FLOW = SkillFlow(
+    name="dingpin",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            key="card",
+            exclude_cards=_dingpin_cost_face,
+        ),
+        PickSeats(lo=1, hi=1, pool=_dingpin_targets, key="seat"),
+    ),
+    effect=_dingpin_effect,
+    # 次数由"用过的大类"自己限定（见 :func:`_dingpin_offers`），执行器不自动落 `_USED`。
+    once_per_phase=False,
+)
+"""【定品】的两步流水线：弃一张（大类没用过）→ 一名角色判定 → 黑 / ♥ / ♦ 三分支。"""
 
 
 # ---------------------------------------------------------------------------
@@ -6295,6 +6468,16 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ActiveSkill("zhouyu", "fanjian", _fanjian_offers, flow=FANJIAN_FLOW, preactivated=True),
     # 华佗【青囊】：弃一张手牌 → 一名已受伤角色回复 1 点（规则 1040）；票 02 的流水线消费者。
     ActiveSkill("huatuo", "qingnang", _qingnang_offers, flow=QINGNANG_FLOW, preactivated=True),
+    # 界陈群【定品】（界一将成名-2014·移动版；jie-yijiang-2014-mobile 票 01）：弃一张
+    # （大类没用过）→ 一名角色判定 → 黑：摸 min(体力值,3) + 禁该目标 / ♥：撤回本次的牌 /
+    # ♦：你翻面。首步选**自己**的牌 ⇒ 清单渲得出，翻 `preactivated=True`（shapes.md §4 准入表）。
+    ActiveSkill(
+        "jie_chenqun_mobile",
+        "dingpin",
+        _dingpin_offers,
+        flow=DINGPIN_FLOW,
+        preactivated=True,
+    ),
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。
     ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preactivated=True),
@@ -6535,6 +6718,11 @@ _REQUIREMENTS: dict[str, str] = {
     "yijue": "弃置一张牌：令一名其他角色展示一张手牌（红则获得并可令其回复；黑则本回合其非锁定技失效、不能使用或打出手牌）",
     "jianyan": "选择一种牌的类别或颜色，亮出牌堆中一张符合要求的牌并令一名男性角色获得",
     "gongxin": "观看一名其他角色的手牌，然后可以展示其中一张红桃牌并选择：弃置此牌 / 将此牌置于牌堆顶",
+    "dingpin": (
+        "弃置一张牌（不能是本回合使用或弃置过的类型），令一名角色进行一次判定："
+        "黑色其摸X张牌（X为其体力值且至多为3）且本回合不能再对其发动；"
+        "♥ 你本次以此法弃置的牌不计入弃置过的限制；♦ 你翻面"
+    ),
 }
 """A 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -6589,6 +6777,11 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         # SELECT_CARDS 的逐步文案键恒读 "card"（与【青囊】同一套键）。
         "card": "观看其手牌：选择一张红桃牌展示（可放弃）",
         "option": "选择：弃置此牌 / 将此牌置于牌堆顶",
+    },
+    "dingpin": {
+        # SELECT_CARDS 恒读 "card"；SELECT_OPTION 读询问 ``dingpin:seat`` 冒号后那段。
+        "card": "弃置一张牌（不能是本回合使用或弃置过的类型：基本 / 锦囊 / 装备）",
+        "seat": "选择一名角色进行一次判定",
     },
     # M6 票 17：界·吴四条。键的取法与上同（SELECT_OPTION 读询问 id 冒号后那段；
     # SELECT_CARDS 恒读 "card"）。

@@ -811,6 +811,32 @@ class Player(BaseModel):
     （``Engine._clear_turn_effects``）——那正是"回合结束后"，不需要新时机。
     **不发 delta**：与 ``hand_card_prohibited`` 同姿态。
     """
+    turn_card_entries: list[tuple[int, str]] = Field(default_factory=list)
+    """本回合该座位**使用或弃置过的牌**：``(card_id, 大类)`` 按首次出现序去重（【定品】判据）。
+
+    写入唯一入口 = 引擎侧两处：① **使用** = :meth:`Engine._note_turn_card`（``start_use``
+    入口，与 ``play_phase_last_card`` 同一个调用点；**打出不算**）；② **弃置** =
+    :meth:`Engine.move_in_frame` 的 ``reason is DISCARD`` 分支（与 ``discarded_this_turn``
+    同一行；``actor`` 是弃置者）。作用域 = **本回合**：回合末由
+    :meth:`Engine._clear_turn_effects` 清空，故"本回合"的口径不跨回合。
+
+    **为什么带 ``card_id`` 而不是只存去重后的大类**：界陈群【定品】的 ♥ 分支要把**本次**
+    以此法弃置的那一张从记录里撤回（:meth:`Engine.exempt_turn_card`）——只存大类时，
+    "本回合先前已弃过一张基本牌、这次以基本牌发动并判 ♥"会把先前那条一起撤掉 ⇒
+    **过度放行**。读取面在技能里做投影（``{大类 for _, 大类 in entries}``），本字段是唯一真源。
+
+    纯虚拟牌 / 查不到牌名大类的牌**不记录**（``card_category`` fail-closed 返回 ``None``）；
+    对应的成本面同样把它们排除在外（"证不出它不属于用过的类型" ⇒ 不能当代价）。
+    **不发 delta**：与 ``discarded_this_turn`` 同姿态——回放按同一批使用 / 弃置动作重建。
+    """
+    dingpin_barred_targets: list[int] = Field(default_factory=list)
+    """本回合**不能再对其发动【定品】**的目标座位（去重、座位升序）。
+
+    写入唯一入口 :meth:`Engine.bar_dingpin_target`（界陈群【定品】黑色判定分支的
+    「然后你本回合不能再对其发动此技能」）；读取方 = 同一条技能声明的候选闸与座位池。
+    作用域 = **本回合**（``Engine._clear_turn_effects`` 清空）。**不发 delta**：与
+    ``heart_slash_bonus_against`` 同姿态（回放按那次发动的判定结果重建）。
+    """
     hand_limit_bonus: int = 0
     """本回合**手牌上限的加式增量**（M6 票 08；spec D11 / D9 的第二轴）。
     写入唯一入口 :meth:`Engine.add_hand_limit_bonus`（【清俭】作用于**当前回合角色**，

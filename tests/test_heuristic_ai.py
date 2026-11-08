@@ -2986,6 +2986,23 @@ def _coverage_huairou():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_dingpin():
+    """jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（已翻预发动、两步清单）。
+
+    手里只放一张**出牌阶段用不出去**的牌（【闪】）——否则 AI 会直接按原用途用掉它，这条
+    覆盖就测不到"从清单填复合动作"（与【青囊】/【制衡】的覆盖同一条口径）。两个座位都
+    在目标池里（「一名角色」含自己），座位步由 ``_score_seat_option`` 的缺省（帮盟友）挑。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_chenqun_mobile", hand=(dodge,)), SeatSpec()],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_xiongluan():
     """lei-batch 票 02：张绣【雄乱】——出牌阶段、区域都还能被废除 ⇒ 清单渲得出（一步选人）。"""
     state = build_state(
@@ -3127,6 +3144,8 @@ _COVERAGE_CASES = {
     "hero.zhangxiu.congjian": _coverage_congjian,
     # lukang-mobile 票 01：陆抗移动版 ☆【怀柔】（已翻预发动：选自己的 1 张装备牌 → 重铸）。
     "hero.lukang_mobile.huairou": _coverage_huairou,
+    # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（已翻预发动，两步清单）。
+    "hero.jie_chenqun_mobile.dingpin": _coverage_dingpin,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,

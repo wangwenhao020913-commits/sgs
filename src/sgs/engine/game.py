@@ -27,6 +27,7 @@ from sgs.data import (
     Mode,
     PlacementReturn,
     RuleConfig,
+    card_category,
     card_tag_spec,
     color_of_suit,
     deal_heroes,
@@ -1702,6 +1703,9 @@ class Engine:
         # jushou-lusu 票 01【渐营】：本阶段"上一张使用牌"的旋转。必须在 **push_frame 之前**
         # （即本函数内），否则 ``USE_ON_USE`` 派发时读到的是这张牌自己。
         self._note_play_phase_card(card, source)
+        # jie-yijiang-2014-mobile 票 01【定品】：本回合"使用过的牌"的座位事实（用户 Q2 签）。
+        # 与上一条同一个入口、同一时机；它**不看**本阶段，作用域由回合末复位给出。
+        self._note_turn_card(card, source)
         deal_bonus = 0
         if is_slash(behavior) and self.state.player(source).wine_active:
             deal_bonus = WINE_DAMAGE_BONUS
@@ -3344,6 +3348,9 @@ class Engine:
         # 弃置者是 ``actor``（自己被拆 / 被别人弃置不算"你弃置"），回合末复位。
         if reason is MoveReason.DISCARD and actor is not None and delta.cards:
             self.state.player(actor).discarded_this_turn = True
+            # jie-yijiang-2014-mobile 票 01【定品】：同一行的第二份记录——这里要的是
+            # "哪些大类被弃过"，故逐张记（`card_id` 粒度，♥ 分支按张撤回）。
+            self.note_turn_discard(actor, delta.cards)
         # 牌移动后同样核一次来源：装备 / 获得来源离场时，随来源消失的标签立刻清掉
         # （M6 票 09；武将技能失去 / 失效另走各自写入口的同一次清理）。
         self._prune_card_tags()
@@ -3679,6 +3686,26 @@ class Engine:
         player.play_phase_previous_card = player.play_phase_last_card
         player.play_phase_last_card = card
 
+    def _note_turn_card(self, card: CardRef, source: int) -> None:
+        """记"这张牌是 ``source`` **本回合使用过**的一张"（jie-yijiang-2014-mobile 票 01【定品】）。
+
+        与 :meth:`_note_play_phase_card` 同一个调用点（``start_use`` 入口，**打出不算**），
+        但**不看**是不是自己的出牌阶段：牌面写的是「本回合」而不是「本阶段」，作用域由
+        :meth:`_clear_turn_effects` 的回合末复位给出。故别人的回合里响应使用的牌会记在
+        **那时候的回合内**、回合末一起清掉，不会漏进下一个回合。
+
+        大类读内容包（``card_category``）；查不到大类的牌（纯虚拟牌 / 漏配牌名）
+        **不记**——成本面那边同样按 fail-closed 把它们排除（"证不出它不属于用过的类型"）。
+        同一 ``card_id`` 只记一次（首次出现序，与 ``discard_suits_this_turn`` 同一纪律）。
+        """
+        category = card_category(self.state.pack_id, card.type)
+        if category is None:
+            return
+        entries = self.state.player(source).turn_card_entries
+        if any(entry_id == card.card_id for entry_id, _ in entries):
+            return
+        entries.append((card.card_id, category.value))
+
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
         """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
 
@@ -3869,6 +3896,56 @@ class Engine:
         if player.damage_dealt_this_turn:
             return False
         player.damage_dealt_this_turn = True
+        return True
+
+    def note_turn_discard(self, seat: int, cards: tuple[CardRef, ...]) -> int:
+        """记"这一批牌是 ``seat`` **本回合弃置过**的"（【定品】判据；返回值 = 新记下的条数）。
+
+        写入点 = :meth:`move_in_frame` 的 ``reason is DISCARD`` 分支——**与
+        ``discarded_this_turn`` 同一行**，故"谁弃置的"口径也同一份：``actor`` 是弃置者，
+        自己被【过河拆桥】拆掉 / 被别人弃置**不算**"你弃置"（与【罪论】的用户裁定一致，
+        也是非界陈群一手「不能是**你**本回合使用或弃置过的类型」的主语）。
+
+        大类读内容包；查不到大类的牌不记（与 :meth:`_note_turn_card` 同一条 fail-closed）。
+        同一 ``card_id`` 只记一次（首次出现序）。**不发 delta**（回放按同一批搬牌重建）。
+        """
+        entries = self.state.player(seat).turn_card_entries
+        added = 0
+        for card in cards:
+            category = card_category(self.state.pack_id, card.type)
+            if category is None:
+                continue
+            if any(entry_id == card.card_id for entry_id, _ in entries):
+                continue
+            entries.append((card.card_id, category.value))
+            added += 1
+        return added
+
+    def exempt_turn_card(self, seat: int, card_id: int) -> bool:
+        """把 ``card_id`` 从"本回合使用或弃置过"的记录里**撤回**（【定品】♥ 分支的唯一入口）。
+
+        牌面：「♥️，你本次以此法弃置的牌**不计入**弃置过的限制」。撤回的是**这一张**、
+        不是它那个大类——见 ``Player.turn_card_entries`` 的注释（只存大类会过度放行）。
+        幂等：条目不存在（构造局面直接调 / 重入）⇒ 返回 ``False``，不抛错。
+        """
+        entries = self.state.player(seat).turn_card_entries
+        for index, (entry_id, _) in enumerate(entries):
+            if entry_id == card_id:
+                del entries[index]
+                return True
+        return False
+
+    def bar_dingpin_target(self, seat: int, target: int) -> bool:
+        """把 ``target`` 记进"本回合不能再对其发动【定品】"的禁令（【定品】黑色判定分支）。
+
+        幂等：已经禁过 ⇒ 返回 ``False``（不重复追加）；列表保持座位升序，便于断言。
+        **不发 delta**（回放按那次发动的判定结果重建）。
+        """
+        targets = self.state.player(seat).dingpin_barred_targets
+        if target in targets:
+            return False
+        targets.append(target)
+        targets.sort()
         return True
 
     def note_damage_taken(self, seat: int) -> int:
@@ -4641,6 +4718,10 @@ class Engine:
             player.damage_taken_this_turn = 0
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
+            # jie-yijiang-2014-mobile 票 01【定品】的两条本回合事实：使用 / 弃置过的牌的
+            # 大类记录与"不能再对其发动"的禁令，作用域都是**一个回合**（与上一位同一复位点）。
+            player.turn_card_entries.clear()
+            player.dingpin_barred_targets.clear()
             player.hand_limit_bonus = 0
             # 【双雄】本回合的转化许可（huo-wolong-yanliang 票 02）：作用域 = 一个回合。
             player.shuangxiong_judge_color = None
