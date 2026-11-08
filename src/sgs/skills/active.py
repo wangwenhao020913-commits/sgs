@@ -65,8 +65,10 @@ from sgs.effects import (
     behavior_for,
     check_count,
     check_targets,
+    distance,
     forced_use_targets,
     is_slash,
+    need_card_floor,
     needs_designation,
     satisfies_required,
     targets_within_attack_range,
@@ -86,6 +88,7 @@ from sgs.state import (
     Slot,
     SlotKind,
     UseCard,
+    WindowCause,
     Zone,
     ZoneRef,
     alive_seats,
@@ -3443,8 +3446,14 @@ def _guohuo_provider_offers(state: GameState, ctx: ModifierContext, current: Any
        手牌**换来的，赢家已定时它不会进结算，发候选就是让玩家白扣一张牌；
     4. **借刀窗口够得着 Bn**：产物是一张【杀】，与真牌候选同一道判据
        （``forced_use_targets``，Bn 由 ``ctx.respond_targets`` 给出）。
+
+    ``providers_used`` 自己也读一次（lin-batch2 票 03）：求桃窗口的**第二趟收口**
+    （`_peach` 对"纯删型回调"的补跑）把已经出现的提供者放进这个字段，回调据此闭嘴；
+    否则那一趟会把同一个产物**再追加一条**。真牌 / 转化候选不受影响。
     """
     if ctx.owner != ctx.subject or ctx.respond_declared:
+        return current
+    if ctx.skill_id in ctx.providers_used:
         return current
     required = _guohuo_window_required(ctx)
     if required is None:
@@ -5647,6 +5656,287 @@ _HUAJROU = ActiveSkill(
 )
 
 
+# ---------------------------------------------------------------------------
+# 林包·移动版·贾诩【乱武】（lin-batch2 票 03；用户 2026-11-08 签 Q2 = A / Q3 = A / Q4 = A）
+#
+#     限定技，出牌阶段，你可以令所有其他角色依次选择一项：
+#     1.对距离最近的另一名角色使用一张【杀】；2.失去1点体力。
+#
+# 形状（`shapes.md` §2 第 52 行「手写主体」+ 第 62 行「A 族的限定技」）=
+# ``ActiveSkill(skill_type=LIMITED, flow=SkillFlow(name="luanwu", steps=(), effect=…))``，
+# 样板 = 神周瑜移动版【业炎】（同为"零步流水线 + 全部主体住 effect"）。手写主体的三条
+# 理由与【蛊惑】的质疑循环同源：`steps` 是**定长元组**，而"所有其他角色依次"是变长循环；
+# 每个座位的询问形态不同（并列最近时先选目标，再开"使用【杀】"的窗）；每步都可能挂起。
+#
+# **选项 1 用哪扇窗**（Q2 = A）：复用既有的 ``RESPOND`` + ``RespondMode.USE`` 面（借刀
+# 那扇窗，`effects/ops.py:resolve_borrowed_sword`），只多一个窗口成因
+# ``WindowCause.LUANWU``。理由：① 一手把这一问写成「除非对…使用【杀】，**否则**失去1点
+# 体力」（移动版官网，票面 §0.1）⇒ "不使用就失体力"正是 ``Pass`` 的语义；② 引擎的"让
+# 别的座位使用一张牌"只有这一扇窗，它同时带**转化技清单**与**提供者候选**（武圣 / 蛊惑
+# 在乱武里都能用：`A/flow_use.txt:25`）；③ 若自造 ``SELECT_OPTION`` 的"用牌选项"就丢掉
+# 这两条路径（Q2 读法 C，命中 C1/C3）。
+#
+# **并列最近**（Q3 = A，`A/rule_element.txt:73`：由**被点名的角色自选**）：先问一次
+# 「选择距离最近的一名角色」（``SELECT_OPTION`` + ``seat:N``），再开那扇窗
+# （``use_targets=(选定者,)``）。候选池 = 最近者 ∩ "对至少一张可用【杀】合法"（现算）；
+# 池空 ⇒ 那一问**不出现**，直接开窗（窗口里只剩 ``Pass`` = 失体力，一手明文
+# `A/flow_condition.txt:76`：「必须执行失去1点体力」）。
+#
+# **结算口径**（票面 Q10 ②）：起点 = 贾诩的下家、逆时针（`seats_from`，去掉自己与阵亡者）、
+# 每人一次；轮到该座位时**现算**距离与合法性（不是发动时定格）；用的那张【杀】不查次数
+# 上限（不在其自己的出牌阶段空闲时间点）但照常记账（``start_use`` 缺省 ``counts=True``，
+# 与借刀同口径）；选项 2 = ``LIFE_DECREASE(1)``（无来源，不是伤害）；贾诩在结算中死亡 ⇒
+# 结算继续（一手 §2.1 ⑤）。
+# ---------------------------------------------------------------------------
+
+LUANWU = hero_skill_id("jiaxu_mobile", "luanwu")
+"""贾诩移动版【乱武】的全限定技能 id（A 族限定技）。"""
+
+LUANWU_RESPONSE_CARD = "slash"
+"""乱武窗口请求的牌名 = **【杀】族**（``sgs.effects.behaviors.SLASH_FAMILY_KEY`` 的同一取值）。
+
+本模块不许跨子包深层导入 ``sgs.effects.behaviors``，而 ``sgs.effects`` 的公开面没有导出
+这个键，故在此登记一份字面量（**判族**站点：它只是"要一张什么牌"的族请求，成员判定
+仍在下游 ``satisfies_required``）。`tests/test_card_family_sites.py` 的 allowlist 已登记。
+"""
+
+_LUANWU_ORDER_KEY = "luanwu_order"
+"""帧私有：本次发动定格的座位序（从贾诩的下家起逆时针、去掉贾诩）。"""
+
+_LUANWU_DONE_KEY = "luanwu_done"
+"""帧私有前缀：`luanwu_done:<seat>` = 该座位的**动作**已经落位（在动作**之前**写）。
+
+与【蛊惑】的 ``guohuo_result:<seat>`` 同一姿态：押过子帧（使用【杀】的 USE 帧 / 失体力
+的 LIFE_DECREASE 帧）之后重入不重押。**不**在发问之前写——发问挂起时还没有副作用，
+重入必须能回到同一个窗口（应答按询问身份由引擎归还，不重问）。
+"""
+
+_LUANWU_TARGET_KEY = "luanwu_target"
+"""帧私有前缀：`luanwu_target:<seat>` = 该座位选定的额定目标（并列时选完就定格）。"""
+
+_LUANWU_PROVIDERS_KEY = "luanwu_providers"
+"""帧私有前缀：`luanwu_providers:<seat>` = 该座位已经用过的提供者 id（**逐座位**分开）。
+
+不能与借刀共用 ``"providers_used"`` 一个键：那一扇窗只有一次询问，而乱武是逐座位各一扇——
+共用会让座位 A 用过的【蛊惑】把座位 B 的同一条提供者也过滤掉。
+"""
+
+_LUANWU_ASK_TARGET = f"{LUANWU}:target"
+"""并列最近时那一问的询问位置（``SELECT_OPTION``；步骤文案键 = ``target``）。"""
+
+_LUANWU_CURRENT_KEY = "luanwu_current"
+"""帧私有：当前正在结算的座位（提供者展开续跑时据此取回该座位的目标）。"""
+
+
+def _luanwu_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：自己的出牌阶段 ∧ 场上有**其他存活角色**（整局已用由 ``_limited_offers`` 挡）。
+
+    "所有其他角色"为空 ⇒ 这条技能没有任何作用对象 ⇒ 不产出候选（`edge-cases.md` 总纪律 1：
+    不发没有候选的询问）。没有"出牌阶段限一次"——它是限定技（整局一次），由外层闸负责，
+    故这里 ``once_per_phase=False``。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _other_alive_seats(state, ctx.owner):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _luanwu_nearest(state: GameState, seat: int) -> tuple[int, ...]:
+    """``seat`` 的「距离最近的**另一名**角色」集合（含并列；只算存活的其他座位）。
+
+    距离读引擎的唯一真源 :func:`sgs.effects.distance`（座位环 + 修正 + 下限 1，规则 §4.1
+    L264–L272）；并列 = 同一最小值的全部座位（`A/rule_element.txt:73`：由该角色自选）。
+    **现算**：轮到该座位时才求值（结算中有人阵亡 / 距离修正变了都跟着变）。
+    """
+    others = [player.seat for player in state.players if player.alive and player.seat != seat]
+    if not others:
+        return ()
+    best = min(distance(state, seat, other) for other in others)
+    return tuple(other for other in others if distance(state, seat, other) == best)
+
+
+def _luanwu_legal_targets(
+    host: Any, frame: Frame, seat: int, nearest: tuple[int, ...]
+) -> tuple[int, ...]:
+    """最近者里**对至少一张可用【杀】合法**的那些（Q3 = A 的候选池）。
+
+    只读状态：``respond_candidates`` 是窗口候选的**同一个**生成器（借刀的 auto-b 同一条
+    理由）——不记询问、不耗序号、不搬牌。真牌 / 转化【杀】/ 蛊惑产物三种候选都算"可用"；
+    ``floor`` 与随后那次真询问同源（票 03 §4-2）。
+    """
+    floor = need_card_floor(frame, seat)
+    providers_used = tuple(frame.data.get(f"{_LUANWU_PROVIDERS_KEY}:{seat}", ()))
+    return tuple(
+        candidate
+        for candidate in nearest
+        if any(
+            not isinstance(action, Pass)
+            for action in host.respond_candidates(
+                seat,
+                cause=WindowCause.LUANWU,
+                required=LUANWU_RESPONSE_CARD,
+                target=seat,
+                mode=RespondMode.USE,
+                use_targets=(candidate,),
+                providers_used=providers_used,
+                floor=floor,
+            )
+        )
+    )
+
+
+def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：逐座位二选一（使用一张【杀】 / 失去 1 点体力）。
+
+    帧私有游标（G7）：座位序 ``luanwu_order`` 在**第一次**入场时定格（从贾诩的下家起
+    逆时针、去掉贾诩；死者在此后阵亡 ⇒ 轮到时跳过，一手 `A/flow_death.txt:35-39` 的"继续
+    结算"）；``luanwu_done:<seat>`` 在**动作之前**落位 ⇒ 子帧（USE / LIFE_DECREASE，都可能
+    内联出濒死 / 死亡）出栈后重入不重押。**贾诩死亡不中断**：``source`` 只用来算座位序。
+
+    三处出口（票面 §2 死路检查）：使用【杀】（``UseCard``）、失体力（``Pass``）、以及
+    提供者（【蛊惑】的 ``ActivateSkill``，与借刀同一段展开）。选项 1 不可执行时窗口里
+    没有牌候选 ⇒ 只剩 ``Pass`` ⇒ 点一下就失体力（一手明文，Q4 = A）。
+    """
+    del answers
+    state = host.state
+    owner = int(frame.data["source"])
+    timing = Timing.PHASE_PLAY_IDLE
+    order = frame.data.get(_LUANWU_ORDER_KEY)
+    if order is None:
+        order = tuple(
+            seat
+            for seat in seats_from(state, owner, len(state.players))
+            if seat != owner
+        )
+        frame.data[_LUANWU_ORDER_KEY] = order
+
+    # 提供者（【蛊惑】扣置一张手牌当【杀】）展开中 ⇒ 先续跑它（借刀同一姿态，票 03）。
+    control, satisfied, produced = host.advance_provider(frame, timing)
+    if control is not None:
+        return control
+    if satisfied is not None:
+        seat = int(frame.data[_LUANWU_CURRENT_KEY])
+        if satisfied and produced is not None:
+            target = int(frame.data[f"{_LUANWU_TARGET_KEY}:{seat}"])
+            frame.data[f"{_LUANWU_DONE_KEY}:{seat}"] = True
+            host.start_use(produced, source=seat, targets=(target,))
+            return "stay"
+        # 作废（质疑 / 假牌）⇒ 回到该座位的窗口；该提供者已进 providers_used、不会再出现。
+
+    for seat in order:
+        flag = f"{_LUANWU_DONE_KEY}:{seat}"
+        if frame.data.get(flag):
+            continue
+        if not state.player(seat).alive:
+            # 轮到它时已阵亡（结算中死亡）⇒ 跳过，规则 L326 / `A/flow_death.txt:35-39`。
+            continue
+        frame.data[_LUANWU_CURRENT_KEY] = seat
+        nearest = _luanwu_nearest(state, seat)
+        if not nearest:
+            # 全场只剩它一个存活角色：选项 1 连"另一名角色"都没有 ⇒ 直接失体力（不发空窗）。
+            frame.data[flag] = True
+            host.push_frame(
+                FrameKind.LIFE_DECREASE,
+                {"target": seat, "source": None, "amount": 1},
+                timing=Timing.LIFE_DECREASE_BEFORE,
+            )
+            return "stay"
+        target_key = f"{_LUANWU_TARGET_KEY}:{seat}"
+        target = frame.data.get(target_key)
+        if target is None:
+            legal = _luanwu_legal_targets(host, frame, seat, nearest)
+            if len(legal) > 1:
+                # 并列最近（且不止一个可执行）⇒ 由**该角色自己**选一名（`A/rule_element.txt:73`）。
+                # 并列但只有一名可执行时不再问：单选一问只是多点一次，后果与"唯一最近"同值。
+                answer = host.ask_option(
+                    frame,
+                    seat,
+                    timing,
+                    skill_id=_LUANWU_ASK_TARGET,
+                    options=tuple(_seat_choice(candidate) for candidate in legal),
+                    optional=False,
+                )
+                if host.suspended(answer):
+                    return "stay"
+                target = _option_seat(answer)
+            elif legal:
+                target = legal[0]
+            else:
+                # 选项 1 不可执行（没有可用【杀】/ 最近者都不合法）：仍要开那扇窗——窗口里
+                # 只剩 ``Pass``（= 失体力）。给一个"最近者"只为让候选生成器有目标维度：
+                # 全部牌候选都会被 ``check_targets`` 挡掉（`A/flow_condition.txt:76`）。
+                target = nearest[0]
+            frame.data[target_key] = target
+        action = host.ask_respond(
+            frame,
+            seat,
+            timing,
+            cause=WindowCause.LUANWU,
+            required=LUANWU_RESPONSE_CARD,
+            target=seat,
+            window_frame=frame.frame_id,
+            mode=RespondMode.USE,
+            use_targets=(int(target),),
+            providers_used=tuple(
+                frame.data.get(f"{_LUANWU_PROVIDERS_KEY}:{seat}", ())
+            ),
+        )
+        if host.suspended(action):
+            return "stay"
+        if isinstance(action, ActivateSkill):
+            # 提供者产物同窗（【蛊惑】扣置一张手牌当【杀】）：与借刀同一段展开，产物由
+            # **本窗口**交付（目标 = 这次选定的最近者）。
+            frame.data.setdefault(f"{_LUANWU_PROVIDERS_KEY}:{seat}", []).append(
+                action.skill_id
+            )
+            if not host.provider_registered(action.skill_id):
+                raise NotImplementedError(
+                    f"乱武窗口没有判定式提供者：{action.skill_id!r}（lin-batch2 票 03）"
+                )
+            control, satisfied, produced = host.start_provider(
+                frame, action.skill_id, seat, timing, required=LUANWU_RESPONSE_CARD
+            )
+            if control is not None:
+                return control
+            if satisfied and produced is not None:
+                frame.data[flag] = True
+                host.start_use(produced, source=seat, targets=(int(target),))
+            return "stay"
+        frame.data[flag] = True
+        if isinstance(action, UseCard):
+            # 使用【杀】：真牌与转化牌同一条交付（`counts=True` 照常记账，Q6 口径）。
+            host.start_use(action.card, source=seat, targets=action.targets)
+            return "stay"
+        # 其余（``Pass``）= 选项 2：**失去 1 点体力**（不是伤害 ⇒ 无来源的 LIFE_DECREASE 帧，
+        # 与【蛊惑】的真牌惩罚 / 【强袭】同形）。
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {"target": seat, "source": None, "amount": 1},
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    return None
+
+
+LUANWU_FLOW = SkillFlow(name="luanwu", steps=(), effect=_luanwu_effect)
+"""【乱武】的零步流水线：发动即进提交点（逐座位循环全部住在 ``effect`` 里）。"""
+
+_LUANWU = ActiveSkill(
+    "jiaxu_mobile",
+    "luanwu",
+    _luanwu_offers,
+    flow=LUANWU_FLOW,
+    skill_type=SkillType.LIMITED,
+    requirement=(
+        "限定技，出牌阶段，你可以令所有其他角色依次选择一项："
+        "1.对距离最近的另一名角色使用一张【杀】；2.失去1点体力"
+    ),
+    step_requirements={"target": "选择距离最近的一名角色作为【杀】的目标"},
+)
+"""贾诩移动版【乱武】的完整声明（A 族限定技 + 零步流水线 + 手写逐座位循环）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
@@ -5909,6 +6199,10 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ),
     # 神周瑜移动版【业炎】（huo-shenzhouyu-mobile 票 01）：A 族限定技 + 计数式分配弹窗。
     _YEYAN,
+    # 林包·移动版·贾诩【乱武】（lin-batch2 票 03）：A 族限定技 + 手写逐座位二选一循环
+    # （选项 1 = 既有 RESPOND/USE 窗口，选项 2 = 无来源的 LIFE_DECREASE）。不翻预发动
+    # （首步是"逐座位问别人"，清单渲不出，与【业炎】同档）。
+    _LUANWU,
     # 张绣【雄乱】（lei-batch 票 02）：A 族限定技 + 预发动（选人后确认才发动）；
     # 代价 = 废除自己的判定区与装备区（隐藏发动 cost：至少 1 个区域还能被废除）。
     _XIONGLUAN,

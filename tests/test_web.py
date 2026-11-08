@@ -485,7 +485,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 88 and len(catalog) == 59, (
+    assert len(flat) == 89 and len(catalog) == 60, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -510,6 +510,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         "lin-batch 票 03 加林包移动版徐晃 ⇒ 86 / 57（新真名「徐晃」+1）"
         "；lin-batch2 票 01 加林包移动版曹丕 ⇒ 87 / 58（新真名「曹丕」+1）"
         "；lin-batch2 票 02 加林包移动版董卓 ⇒ 88 / 59（新真名「董卓」+1）"
+        "；lin-batch2 票 03 加林包移动版贾诩 ⇒ 89 / 60（新真名「贾诩」+1）"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -5143,6 +5144,47 @@ def test_the_borrowed_sword_prompt_names_bn_even_when_only_a_transform_can_use_i
     )
 
 
+def test_the_luanwu_window_prompt_says_use_a_nearest_slash_or_lose_one_hp() -> None:
+    """lin-batch2 票 03：贾诩移动版【乱武】的窗口提示条 = 牌面逐字。
+
+    `WindowCause.LUANWU` 在投影里只有一处落点（``_need_text`` 的 ``RESPOND`` 分支）：
+    选项 1 = 窗口里的「使用【杀】」候选，选项 2 = ``Pass``（按钮文案「失去1点体力」由
+    ``pending.js:alternativeLabel`` 的另一个分支给，`ui_smoke.mjs` ㉿LW1/㉿LW2 验读取方）。
+    这一条读**界面真正拿到的那份** ``context.requirement``，不另抄一份文案。
+    """
+    from sgs.state import Pass
+
+    pack = _context_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id != slash
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = RespondQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="对距离最近的另一名角色使用【杀】，或失去1点体力",
+        legal_actions=(Pass(answers_seq=1),),
+        view=project(state, 0),
+        cause=WindowCause.LUANWU,
+        required="slash",
+        target=0,
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None
+    assert context["requirement"] == "对距离最近的另一名角色使用【杀】，或失去1点体力", (
+        context["requirement"]
+    )
+
+
 def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -> None:
     """求桃窗口：**急救**的清单 = 红色牌，**无目标步**（濒死者由窗口固定）。
 
@@ -7251,7 +7293,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 185, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 188, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

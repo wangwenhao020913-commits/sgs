@@ -108,6 +108,11 @@ class WindowCause(str, Enum):
     **用一张牌代替 / 替换**之（`11.3`；feng-zhangjiao 票 02 起候选是
     :class:`SubstituteJudgeCard`，不是打出）；它挂在判定帧上、可循环重开，与效果自己的
     响应窗口分列。
+    ``LUANWU``（lin-batch2 票 03，E2 已批 / 用户 2026-11-08 签 Q2 = A）：贾诩移动版
+    【乱武】逐座位的**二选一**窗口——「对距离最近的另一名角色使用一张【杀】，或失去
+    1 点体力」。它复用既有的 ``RESPOND`` + ``RespondMode.USE`` 面（与借刀同一扇窗），
+    只多一个成因值，使记录流与界面文案都读得出"这次询问来自乱武"（借用
+    ``BORROWED_SWORD`` 会让提示条与 ``Pass`` 按钮说谎成"交出武器"）。
     """
 
     NULLIFY = "NULLIFY"
@@ -117,6 +122,7 @@ class WindowCause(str, Enum):
     BORROWED_SWORD = "BORROWED_SWORD"
     LORD_REQUEST = "LORD_REQUEST"
     REJUDGE = "REJUDGE"
+    LUANWU = "LUANWU"
 
 
 class RespondMode(str, Enum):

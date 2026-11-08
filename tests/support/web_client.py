@@ -339,6 +339,8 @@ _FIRE_TAPE_BANNED_HEROES = (
     # lin-batch2 票 02：林包移动版董卓移动版（8 体力 + 每回合崩坏 ⇒ 同样会重排随机配将；
     # 新武将进默认池就往这里追加是既定规矩）。
     "dongzhuo_mobile",
+    # lin-batch2 票 03：林包移动版贾诩移动版（加武将重排随机配将 ⇒ 追加，**不重扫 seed**）。
+    "jiaxu_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 
@@ -558,7 +560,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 1
+_WINE_TAPE_NEAR_DEATH_SEED = 16
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再加太史慈标准版 / 荀彧标准版）
@@ -578,7 +580,13 @@ lin-batch2 票 01（默认池 86/57 → 87/58，林包移动版加曹丕移动�
 出现自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
 `.scratch/lin-batch2/scan_wine_near_death_seed.py`，逐字复用 `_wine_tape_near_death` 的策略），
 首个命中 **seed 1**（70 次真实 POST 推进到 0 血 + 一次【酒】自救）；seed 1 未被其余 tape 占用，
-故取它。"""
+故取它。
+
+lin-batch2 票 03（默认池 88/59 → 89/60，林包移动版加贾诩移动版）再换池：seed 1 的对局在出现
+自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（同一个探针
+`.scratch/lin-batch2/scan_wine_near_death_seed.py`，策略与命中断言逐字未改），1–15 全部未命中、
+首个命中 **seed 16**（25 次真实 POST 推进到 0 血 + 一次【酒】自救）；16 未被其余 tape 占用
+（火攻 4 / 46、出牌阶段 65），故取它。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:

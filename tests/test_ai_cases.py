@@ -3194,3 +3194,103 @@ def test_bengkuai_ai_prefers_losing_hp_over_reducing_max_hp() -> None:
     assert choice.choice == BENGKUAI_LOSE_HP, (
         f"AI 该选「失去1点体力」（-1.2 > -1.6），实得 {choice.choice!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·贾诩（lin-batch2 票 03）：【乱武】的"敌人对最近者出【杀】"
+# ---------------------------------------------------------------------------
+
+JIAXU_MOBILE_ID = "jiaxu_mobile"
+LUANWU_ID = "hero.jiaxu_mobile.luanwu"
+
+
+def _luanwu_ai_case() -> tuple[dict, Engine]:
+    """四座身份局：贾诩（主公）发【乱武】，座位 1（明置反贼）对最近者出【杀】。
+
+    贾诩**空手** ⇒ 出牌阶段唯一有正分的动作就是【乱武】（`SKILL_VALUES` 2.5）；
+    座位 1 的最近者是 0（贾诩，主公 = 明置敌人）与 2（明置忠臣 = 盟友）⇒
+    **并列最近**那一问按 `_HOSTILE_SEAT_STEPS` 挑敌人、下一问按 Q9 = B 给敌人正分。
+    """
+    pack = PACK
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero=JIAXU_MOBILE_ID, hp=3, hp_max=3, identity=Identity.LORD),
+            SeatSpec(hand=(slash,), identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        # 牌堆**头两张是【闪】**：贾诩的摸牌阶段只会摸到不可用的牌 ⇒ 出牌阶段唯一有正分的
+        # 动作就是【乱武】（否则他会先把手里的锦囊用掉，用例测的就不是乱武了）。
+        deck=tuple(cards_of_type(pack, "dodge"))
+        + tuple(
+            index
+            for index in range(len(pack.deck.cards))
+            if index != slash and pack.deck.cards[index].type != "dodge"
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    state.player(0).identity_visible = True
+    state.player(1).identity_visible = True
+    state.player(2).identity_visible = True
+
+    engine = Engine.from_state(state, seed=5)
+    found: dict = {
+        "activation": None,
+        "target": None,
+        "response": None,
+        "hp_before": state.player(0).hp,
+    }
+    for _ in range(20_000):
+        query = engine.pending
+        if query is None:
+            if ran_timing(engine, Timing.TURN_END) or engine.finished:
+                break
+            engine._step()
+            continue
+        if query.kind == "PLAY_PHASE" and query.actor == 0 and found["activation"] is None:
+            choice = HeuristicPlayer(ai_stream(0, 0)).respond(query)
+            found["activation"] = choice
+            engine.submit(choice)
+            continue
+        if query.kind == "SELECT_OPTION" and str(
+            getattr(query, "skill_id", "")
+        ).endswith(":target"):
+            choice = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            found["target"] = choice
+            engine.submit(choice)
+            continue
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LUANWU
+            and found["response"] is None
+        ):
+            choice = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            found["response"] = choice
+            engine.submit(choice)
+            continue
+        engine.submit(PassPlayer().respond(query))
+    found["hp_after"] = engine.state.player(0).hp
+    return found, engine
+
+
+def test_jiaxu_ai_activates_luanwu_and_an_enemy_slashes_the_nearest() -> None:
+    """【乱武】的整条 AI 链路：贾诩发动 → 敌人挑敌人为目标 → 那一问真的出【杀】。
+
+    三处判据各自对应票面 `## AI 适配` 的三格：① `SKILL_VALUES[乱武]` 正分 ⇒ 发动；
+    ② 并列最近的目标步登记在 `_HOSTILE_SEAT_STEPS` ⇒ 选敌人；③ Q9 = B ⇒ 对敌人出
+    【杀】（而不是"能出就出"地打盟友、也不是白失 1 点体力）。
+    """
+    found, _engine = _luanwu_ai_case()
+
+    assert isinstance(found["activation"], ActivateSkill), f"该发动【乱武】，实得 {found['activation']!r}"
+    assert found["activation"].skill_id == LUANWU_ID
+    assert isinstance(found["target"], SelectOption) and found["target"].choice == "seat:0", (
+        f"并列最近的最近者里该挑明置敌人（贾诩），实得 {found['target']!r}"
+    )
+    assert isinstance(found["response"], UseCard), f"该出【杀】，实得 {found['response']!r}"
+    assert found["response"].targets == (0,)
+    assert found["hp_after"] == found["hp_before"] - 1, "那张【杀】真的打中了贾诩"

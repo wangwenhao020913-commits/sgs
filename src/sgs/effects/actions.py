@@ -1022,19 +1022,43 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     # "需要牌时"的**提供者**（票 03）：同【闪】窗口那一趟整段追加——【蛊惑】扣置一张手牌
     # 当【桃】（无人质疑 /（真 且 ♥）才是，否则作废）。它不是转化技：受理时**已经**验明完毕，故不进
     # ``transform_preactivations`` 那条"确认即定死"的通道。
-    actions = list(
-        apply_modifiers(
-            ModifierPoint.CANDIDATES,
-            state,
-            ModifierContext(
-                subject=seat,
-                answers_seq=answers_seq,
-                scope=CandidateScope.PEACH,
-                respond_required=PEACH_RESPONSE_CARD,
-            ),
-            tuple(actions),
-        )
+    ctx = ModifierContext(
+        subject=seat,
+        # 濒死者（lin-batch2 票 03）：贾诩移动版【完杀】的判据要读"被救的是谁"
+        # （「除你**和其**以外」⇒ 濒死者本人不受限）。此前 ``target`` 没有
+        # ``PEACH`` 读者，故这一行不改任何既有回调的行为。
+        target=dying,
+        answers_seq=answers_seq,
+        scope=CandidateScope.PEACH,
+        respond_required=PEACH_RESPONSE_CARD,
     )
+    actions = list(apply_modifiers(ModifierPoint.CANDIDATES, state, ctx, tuple(actions)))
+    # **纯删型回调的第二趟收口**（lin-batch2 票 03，贾诩移动版【完杀】）：
+    # ``CANDIDATES`` 链是**加法管道**——链上后跑的提供者（【蛊惑】"扣置一张手牌当【桃】"）
+    # 会把产物追加到已经被删空的列表里（链序 = 解析序 ``(优先级档, skill_id)``，
+    # ``hero.jiaxu_mobile.wansha`` 排在 ``hero.yuji_mobile.guohuo`` 之前）。故在
+    # "第一趟产生了提供者候选"时再收口一趟：**已经出现的提供者**进 ``providers_used``
+    # （它们按自己的口径闭嘴、不重复追加），纯删型回调因此在最后拿到发言权。
+    # 没有提供者候选时**不跑**第二趟 ⇒ 既有求桃窗口（含 47 条金录像）的调用次数不变。
+    providers = tuple(
+        action.skill_id for action in actions if isinstance(action, ActivateSkill)
+    )
+    if providers:
+        actions = list(
+            apply_modifiers(
+                ModifierPoint.CANDIDATES,
+                state,
+                ModifierContext(
+                    subject=seat,
+                    target=dying,
+                    answers_seq=answers_seq,
+                    providers_used=providers,
+                    scope=CandidateScope.PEACH,
+                    respond_required=PEACH_RESPONSE_CARD,
+                ),
+                tuple(actions),
+            )
+        )
     actions.append(Pass(answers_seq=answers_seq))
     return actions
 

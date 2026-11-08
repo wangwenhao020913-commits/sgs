@@ -69,11 +69,14 @@ from sgs.state import (
     Phase,
     PlayCard,
     QueryKind,
+    RespondContext,
+    RespondMode,
     SelectCards,
     SelectOption,
     SkillSuppression,
     SubstituteJudgeCard,
     UseCard,
+    WindowCause,
     Zone,
     ZoneRef,
 )
@@ -4297,3 +4300,1266 @@ def test_baonue_suspension_resumes_without_rejudging():
         ]
     ) == 1, "不重复回复"
     assert [record.amount for record in _hp_deltas(engine, 0)] == [1]
+
+
+# ===========================================================================
+# §7 贾诩移动版 —— 【完杀】【乱武】【帷幕】（lin-batch2 票 03）
+#
+# 牌面（用户 `技能.txt`，逐字；口径 = **移动版**，见票面 §0.1）：
+#
+#     完杀　锁定技，你的回合内，当一名角色进入濒死状态时，你令除你和其以外的角色
+#     　　　不能对其使用【桃】直到此次濒死结算结束。
+#     乱武　限定技，出牌阶段，你可以令所有其他角色依次选择一项：
+#     　　　1.对距离最近的另一名角色使用一张【杀】；2.失去1点体力。
+#     帷幕　锁定技，你不能成为黑色锦囊牌的目标。
+#
+# 用户 2026-11-08 的签字：**Q1 = A**（完杀落 `CANDIDATES(PEACH)` 清空候选，不改引擎
+# `askers`）、**Q2 = A**（乱武选项 1 复用既有 `RESPOND` 窗 + 新窗口成因
+# `WindowCause.LUANWU`，E2 已批）、**Q3 = A**（并列最近先问目标、零新字段）、Q4–Q8 按
+# 建议、**Q9 = B**（AI 按目标敌我给分）、Q10 三条账本提案照落。
+#
+# 判据全走**外部缝**：`legal_actions_for`（候选面）、记录流（帧 / 询问 / delta）、终局状态。
+# **不 mock、不旁路候选**。
+# ===========================================================================
+
+JIAXU = "jiaxu_mobile"
+WANSHA = "hero.jiaxu_mobile.wansha"
+LUANWU = "hero.jiaxu_mobile.luanwu"
+WEIMU = "hero.jiaxu_mobile.weimu"
+
+WANSHA_REQUIREMENT = (
+    "锁定技，你的回合内，当一名角色进入濒死状态时，你令除你和其以外的角色"
+    "不能对其使用【桃】直到此次濒死结算结束"
+)
+LUANWU_REQUIREMENT = (
+    "限定技，出牌阶段，你可以令所有其他角色依次选择一项："
+    "1.对距离最近的另一名角色使用一张【杀】；2.失去1点体力"
+)
+WEIMU_REQUIREMENT = "锁定技，你不能成为黑色锦囊牌的目标"
+
+PEACH_108 = _cards("peach")[0]
+"""标准 108 档的一张【桃】（求桃窗口的真牌路径）。"""
+SLASH_108 = _cards("slash")[0]
+SLASHES_108 = _cards("slash")
+"""`standard_108` 的【杀】**逐张不同**：同一张牌不能挂在两个座位上（搬走后另一家就空了）。"""
+DODGE_108 = _cards("dodge")[0]
+WUXIE_108 = _cards("nullify")[0]
+BLACK_SNATCH = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.type == "snatch" and color_of_suit(card.suit) is Color.BLACK
+)
+"""黑色【顺手牵羊】（单目标锦囊）：帷幕的**命中**样本。"""
+RED_SNATCH = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.type == "snatch" and color_of_suit(card.suit) is Color.RED
+)
+"""红色【顺手牵羊】：帷幕**不**拦的对照。"""
+BLACK_BARBARIAN = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.type == "barbarian_invasion" and color_of_suit(card.suit) is Color.BLACK
+)
+BLACK_INDULGENCE = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.type == "indulgence" and color_of_suit(card.suit) is Color.BLACK
+)
+"""黑色【乐不思蜀】（**延时类**锦囊）：帷幕的延时样本。"""
+RED_INDULGENCE = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.type == "indulgence" and color_of_suit(card.suit) is Color.RED
+)
+HORSE_108 = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.type == "jueying"
+)
+"""防御坐骑（+1 马）：把距离撑到 2，用来造"选项 1 不可执行"。"""
+
+
+def _jiaxu_board(specs, *, pack=PACK, turn_seat: int = 0, phase=None):
+    """按座位表造局面（牌堆 = 全档去掉已经发到座位上的牌）。"""
+    used = {
+        card
+        for spec in specs
+        for card in (*spec.hand, *spec.equip, *spec.judge)
+    }
+    return build_state(
+        pack=pack,
+        seats=specs,
+        deck=deck_excluding(pack, *sorted(used)),
+        turn_seat=turn_seat,
+        phase=phase,
+    )
+
+
+def _near_death(state, seat: int, dying: int):
+    """求桃窗口的候选（`legal_actions_for` = 候选的唯一生成口，**不**旁路候选）。"""
+    return legal_actions_for(state, seat, QueryKind.PEACH, answers_seq=1, dying=dying)
+
+
+def _peach_uses(actions) -> list:
+    """候选里的【桃】使用（真牌与转化产物都算；【酒】不算）。"""
+    return [
+        action
+        for action in actions
+        if isinstance(action, UseCard)
+        and action.card.type == "peach"
+        and action.targets != ()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# §7.0 数据面 / 形状 / 文案
+# ---------------------------------------------------------------------------
+
+
+def test_jiaxu_mobile_is_the_qun_general_of_the_mobile_lin_pack():
+    """数据面：`heroes.lin_mobile.json` 那一行（**3** 体力 / 群 / 男 / 乱武 = 限定技）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    hero = hero_by_id(JIAXU)
+    assert hero is not None
+    assert hero.name == "贾诩移动版"
+    assert hero.true_name == "贾诩"
+    assert hero.version == "lin-mobile"
+    assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("qun", "male", 3)
+    assert hero.enabled is True
+    assert [(f"hero.{hero.id}.{skill.id}", skill.skill_type.value) for skill in hero.skills] == [
+        (WANSHA, "NORMAL"),
+        (LUANWU, "LIMITED"),
+        (WEIMU, "NORMAL"),
+    ], "乱武的数据侧声明 = 限定技（与代码侧 SkillDef 对账）"
+    assert JIAXU in enabled_hero_ids(), "启用 ⇒ 进默认池（林包移动版按独立版本并存）"
+
+
+def test_the_jiaxu_skills_have_their_declared_shapes():
+    """形状：完杀 / 帷幕 = 锁定技 + 各**一条**修饰器；乱武 = A 族限定技 + 零步流水线。"""
+    wansha = CATALOG[WANSHA]
+    weimu = CATALOG[WEIMU]
+    luanwu = CATALOG[LUANWU]
+
+    assert wansha.locked is True and weimu.locked is True, "两条都写「锁定技」⇒ 不问「是否发动」"
+    assert wansha.carrier.value == "HERO" and weimu.carrier.value == "HERO"
+    assert [modifier.point for modifier in wansha.modifiers] == [
+        ModifierPoint.CANDIDATES
+    ], "完杀只挂候选集合"
+    assert [modifier.point for modifier in weimu.modifiers] == [
+        ModifierPoint.TARGET_POOL
+    ], "帷幕只挂目标池"
+    assert not wansha.hooks and not weimu.hooks and not wansha.seams and not weimu.seams
+    assert flow_for(WANSHA) is None and flow_for(WEIMU) is None
+
+    assert luanwu.locked is False, "「你可以」⇒ 非锁定"
+    assert luanwu.skill_type.value == "LIMITED", "乱武是限定技（整局一次）"
+    flow = flow_for(LUANWU)
+    assert flow is not None and flow.steps == (), "零步流水线：主体全住 effect（与【业炎】同档）"
+    assert luanwu.hooks == () and [m.point for m in luanwu.modifiers] == [
+        ModifierPoint.CANDIDATES
+    ]
+
+
+def test_the_jiaxu_requirements_are_the_card_text():
+    """一句话文案 = 票面 §0 的牌面逐字；乱武的并列目标步有逐步文案。"""
+    assert CATALOG[WANSHA].requirement == WANSHA_REQUIREMENT
+    assert CATALOG[LUANWU].requirement == LUANWU_REQUIREMENT
+    assert CATALOG[WEIMU].requirement == WEIMU_REQUIREMENT
+    assert dict(CATALOG[LUANWU].step_requirements or {}) == {
+        "target": "选择距离最近的一名角色作为【杀】的目标"
+    }
+
+
+# ---------------------------------------------------------------------------
+# §7.1 完杀 —— 候选面（Q1 = A：受限座位只剩「放弃」）
+# ---------------------------------------------------------------------------
+
+
+def _wansha_board(*, turn_seat: int = 0, dying_hp: int = 0, dying_hand=(),
+                  other_hand=(), owner_hand=(), other_hero=None, owner_hp: int = 3):
+    """座位 0 = 贾诩（默认 3 体力）；座位 1 = 濒死者；座位 2 = 另一名角色。"""
+    return _jiaxu_board(
+        [
+            SeatSpec(hero=JIAXU, hp=owner_hp, hp_max=3, hand=tuple(owner_hand)),
+            SeatSpec(hp=dying_hp, hand=tuple(dying_hand)),
+            SeatSpec(hero=other_hero, hand=tuple(other_hand)),
+        ],
+        turn_seat=turn_seat,
+    )
+
+
+def test_wansha_restricts_peach_for_other_seats_during_my_turn():
+    """贾诩的回合里，第三名角色对濒死者的【桃】候选**消失**；回合外回来（对照）。"""
+    state = _wansha_board(other_hand=(PEACH_108,))
+    actions = _near_death(state, 2, dying=1)
+
+    assert _peach_uses(actions) == [], "受限座位没有【桃】候选"
+    assert [action for action in actions if isinstance(action, Pass)], "「放弃」恒在（不是空询问）"
+
+    state.turn_seat = 2  # 别人的回合 ⇒ 不受限（对照）
+    assert [action.targets for action in _peach_uses(_near_death(state, 2, dying=1))] == [
+        (1,)
+    ], "回合外不生效：候选回到濒死者"
+
+
+def test_wansha_near_death_window_only_offers_pass_to_restricted_seats():
+    """受限座位的整张候选面 = **恰好一条** `Pass`（Q7：仍被问一次，但只能放弃）。"""
+    state = _wansha_board(other_hand=(PEACH_108, SLASH_108))
+    actions = _near_death(state, 2, dying=1)
+
+    assert len(actions) == 1 and isinstance(actions[0], Pass), (
+        f"只剩「放弃」，实得 {[action.kind for action in actions]}"
+    )
+
+
+def test_wansha_does_not_restrict_the_dying_character():
+    """「除你**和其**以外」：濒死者本人的自救候选一条不少（含真【桃】）。"""
+    state = _wansha_board(dying_hp=0, dying_hand=(PEACH_108,))
+    actions = _near_death(state, 1, dying=1)
+
+    assert [action.targets for action in _peach_uses(actions)] == [(1,)], (
+        "濒死者自救不受限（`_peach` 的 target=dying 判据）"
+    )
+
+
+def test_wansha_does_not_restrict_the_owner():
+    """「除你…以外」：贾诩本人可以救（全候选保留）。"""
+    state = _wansha_board(owner_hand=(PEACH_108,))
+    actions = _near_death(state, 0, dying=1)
+
+    assert [action.targets for action in _peach_uses(actions)] == [(1,)]
+
+
+def test_wansha_is_server_side_inert_outside_my_turn():
+    """回合外（别人进入濒死、贾诩不是回合角色）⇒ 一名【桃】都不少。"""
+    state = _wansha_board(turn_seat=2, other_hand=(PEACH_108,))
+
+    assert [action.targets for action in _peach_uses(_near_death(state, 2, dying=1))] == [(1,)]
+
+
+def test_wansha_also_blocks_jijiu_transformed_peach():
+    """G6：急救的**转化【桃】**同一趟 `CANDIDATES` 链 ⇒ 一起被挡（一手 `A/glossary_flow.txt:67`）。"""
+    heart_card = next(
+        card_id
+        for card_id, card in enumerate(PACK.deck.cards)
+        if card.suit == Suit.HEART and card.type == "slash"
+    )
+    # 急救是「**回合外**」的转化技：回合角色既不能是贾诩、也不能是华佗（否则它本就不给候选）。
+    state = _jiaxu_board(
+        [
+            SeatSpec(hero=JIAXU, hp=3, hp_max=3),
+            SeatSpec(hp=0),
+            SeatSpec(hero="huatuo", hand=(heart_card,)),
+            SeatSpec(),
+        ],
+        turn_seat=0,
+    )
+
+    assert _peach_uses(_near_death(state, 2, dying=1)) == [], "回合内：转化【桃】不出现"
+    state.turn_seat = 3
+    transformed = [
+        action
+        for action in _peach_uses(_near_death(state, 2, dying=1))
+        if action.card.card_id < 0
+    ]
+    assert transformed and transformed[0].card.virtual_sources == (heart_card,), (
+        "对照：回合外急救的红牌当【桃】照常出现（说明挡掉的是同一条路径）"
+    )
+
+
+def test_wansha_also_blocks_guohuo_produced_peach():
+    """G6：蛊惑产物（`ActivateSkill`）也在同一趟链上 ⇒ 一起被挡。"""
+    state = _wansha_board(other_hand=(SLASH_108,), other_hero="yuji_mobile")
+
+    assert not [
+        action
+        for action in _near_death(state, 2, dying=1)
+        if isinstance(action, ActivateSkill)
+    ], "回合内：蛊惑的提供者候选被删掉"
+    state.turn_seat = 2
+    assert [
+        action
+        for action in _near_death(state, 2, dying=1)
+        if isinstance(action, ActivateSkill)
+    ], "对照：回合外蛊惑照常提供【桃】"
+
+
+def test_wansha_scope_is_one_near_death_frame():
+    """作用域 = **求桃窗口**：别的窗口（【闪】）在贾诩的回合里一条候选不少。"""
+    state = _wansha_board(other_hand=(DODGE_108,))
+    state.player(1).hp = 4  # 不是濒死局面，只看别的窗口
+
+    dodge = legal_actions_for(state, 2, QueryKind.DODGE, answers_seq=1)
+    assert [action for action in dodge if isinstance(action, UseCard)], (
+        "【闪】窗口不受完杀影响（作用域只在 PEACH）"
+    )
+
+
+def test_wansha_recomputes_within_the_same_window():
+    """G8：每次候选生成**重新判**（不缓存）——同一份候选生成器连调两次同值，改状态立刻改判。"""
+    state = _wansha_board(other_hand=(PEACH_108,))
+
+    first = _near_death(state, 2, dying=1)
+    second = _near_death(state, 2, dying=1)
+    assert [action.kind for action in first] == [action.kind for action in second]
+
+    state.player(0).lost_skills.append(WANSHA)  # 失去技能
+    third = _near_death(state, 2, dying=1)
+    assert _peach_uses(third) != [], "失技能后同一次求值立刻改判（没有缓存）"
+
+
+def test_wansha_stops_when_jiaxu_dies_mid_resolution():
+    """G9：贾诩阵亡 ⇒ 实例消失 ⇒ 立刻不再限制（`A/rule_classification.txt:120`）。"""
+    state = _wansha_board(other_hand=(PEACH_108,))
+    state.player(0).alive = False
+
+    assert [action.targets for action in _peach_uses(_near_death(state, 2, dying=1))] == [(1,)]
+
+
+def test_wansha_stops_when_the_skill_is_lost():
+    """G9：失去技能 ⇒ 同一次求值不再受限。"""
+    state = _wansha_board(other_hand=(PEACH_108,))
+    state.player(0).lost_skills.append(WANSHA)
+
+    assert [action.targets for action in _peach_uses(_near_death(state, 2, dying=1))] == [(1,)]
+
+
+def test_wansha_does_not_block_jiu_self_rescue():
+    """Q8：**不挡【酒】**——濒死里【酒】只用于自救，自救者 = 濒死者 = 「其」⇒ 本就不受限。"""
+    wine_160 = cards_of_type(PACK_160, "wine")[0]
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=JIAXU, hp=3, hp_max=3),
+            SeatSpec(hp=0, hand=(wine_160,)),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK_160, wine_160),
+        turn_seat=0,
+    )
+
+    wine = [
+        action
+        for action in _near_death(state, 1, dying=1)
+        if isinstance(action, UseCard) and action.card.type == "wine"
+    ]
+    assert wine, "濒死者自救的【酒】照常出现（完杀不禁【酒】）"
+
+
+def test_wansha_is_inert_when_only_the_owner_is_alive():
+    """G2：全场只剩贾诩 ⇒ 无「其他人」可限；他自己濒死时候选照旧。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=JIAXU, hp=0, hp_max=3, hand=(PEACH_108,)),
+            SeatSpec(hp=4, alive=False),
+            SeatSpec(hp=4, alive=False),
+        ],
+        deck=deck_excluding(PACK, PEACH_108),
+        turn_seat=0,
+    )
+
+    assert [action.targets for action in _peach_uses(_near_death(state, 0, dying=0))] == [
+        (0,)
+    ], "只有自己时不受限（「除你和其以外」的集合为空）"
+
+
+def test_wansha_emits_no_new_query():
+    """锁定技 ⇒ **一条**新询问都不发（整局的询问流里没有完杀的 `skill_id`）。"""
+    state = _jiaxu_board(
+        [SeatSpec(hero=JIAXU), SeatSpec(), SeatSpec()], phase=Phase.PLAY
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_turns(engine, [LinPlayer() for _ in range(3)], turns=2)
+
+    asked = [
+        str(getattr(record.query, "skill_id", "") or "")
+        for record in engine.records
+        if record.kind == "query"
+    ]
+    assert not [skill for skill in asked if skill.startswith(WANSHA)], (
+        "完杀不产生任何询问（锁定技 + 纯修饰器）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §7.2 乱武 —— ① 候选入口（出牌阶段 / 限定技 / 至少一名其他存活角色）
+# ---------------------------------------------------------------------------
+
+
+class JiaxuPlayer:
+    """§7.2 的座位脚本：只开本测试需要的开关，其余走最小合法应答。
+
+    - ``activate``：轮到自己的出牌阶段时**真的发动【乱武】**（一次性）；
+    - ``target``：并列最近那一问选哪个座位（``None`` = 候选里的第一个）；
+    - ``slash_at``：选项 1 打谁（``None`` = 放弃 = 失体力）；
+    - ``transformed``：用**这张来源牌**转化出的【杀】响应（来源牌 id）；
+    - ``guohuo``：用【蛊惑】扣置的产物响应（一次性）。
+
+    记录面：``activations`` / ``target_queries`` / ``respond_queries``；``asked`` 记所有
+    ``SKILL_ACTIVATION`` 的技能 id。
+    """
+
+    def __init__(
+        self,
+        *,
+        activate: bool = False,
+        target: int | None = None,
+        slash_at: int | None = None,
+        transformed: int | None = None,
+        guohuo: bool = False,
+    ) -> None:
+        self.activate = activate
+        self.target = target
+        self.slash_at = slash_at
+        self.transformed = transformed
+        self.guohuo = guohuo
+        self.activations: list = []
+        self.target_queries: list = []
+        self.respond_queries: list = []
+        self.asked: list[str] = []
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        skill = str(getattr(query, "skill_id", "") or "")
+        if kind == "SKILL_ACTIVATION":
+            self.asked.append(skill)
+            action = next(
+                (item for item in query.legal_actions if isinstance(item, ActivateSkill)),
+                None,
+            )
+            return action if action is not None else query.legal_actions[0]
+        if kind == "PLAY_PHASE":
+            if self.activate:
+                action = next(
+                    (
+                        item
+                        for item in query.legal_actions
+                        if isinstance(item, ActivateSkill) and item.skill_id == LUANWU
+                    ),
+                    None,
+                )
+                if action is not None:
+                    self.activate = False
+                    self.activations.append(query)
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+            return query.legal_actions[0]
+        if kind == "SELECT_OPTION" and skill.endswith(":target"):
+            self.target_queries.append(query)
+            if self.target is not None:
+                wanted = f"seat:{self.target}"
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectOption) and str(action.choice) == wanted
+                )
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectOption)
+            )
+        if kind == "RESPOND" and getattr(query, "cause", None) is WindowCause.LUANWU:
+            self.respond_queries.append(query)
+            if self.guohuo:
+                action = next(
+                    (item for item in query.legal_actions if isinstance(item, ActivateSkill)),
+                    None,
+                )
+                if action is not None:
+                    self.guohuo = False
+                    return action
+            if self.transformed is not None:
+                source = self.transformed
+                # 转化候选**不在暴露面**（W4-fix-2 从 `legal_actions` 收回），内部池在
+                # `transform_actions`：程序化提交直接取那一条（引擎按成员判定放行）。
+                pool = list(query.legal_actions) + list(
+                    getattr(query, "transform_actions", ()) or ()
+                )
+                action = next(
+                    (
+                        item
+                        for item in pool
+                        if isinstance(item, UseCard)
+                        and item.card.card_id < 0
+                        and source in item.card.virtual_sources
+                    ),
+                    None,
+                )
+                if action is not None:
+                    self.transformed = None
+                    return action
+            if self.slash_at is not None:
+                action = next(
+                    (
+                        item
+                        for item in query.legal_actions
+                        if isinstance(item, UseCard)
+                        and bool(item.targets)
+                        and item.targets[0] == self.slash_at
+                    ),
+                    None,
+                )
+                if action is not None:
+                    self.slash_at = None
+                    return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, Pass)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, (EndPhase, Pass)):
+                return action
+        return query.legal_actions[0]
+
+
+def _luanwu_state(*, seats: int = 4, hand=(), hps=(), others_hands=None,
+                  others_hand=(), heroes=None, turn_seat: int = 0,
+                  phase=Phase.PLAY, pack=PACK):
+    """座位 0 = 贾诩移动版；其余座位按 ``hps`` / ``others_hands`` / ``heroes`` 给。
+
+    ``others_hand`` 是"座位 1 的手牌"的简写（单座局 / 两座局最常用）。
+    """
+    hands = dict(others_hands or {})
+    if others_hand:
+        hands.setdefault(1, tuple(others_hand))
+    specs = [SeatSpec(hero=JIAXU, hp=hps[0] if hps else 3, hp_max=3, hand=tuple(hand))]
+    for seat in range(1, seats):
+        specs.append(
+            SeatSpec(
+                hp=hps[seat] if hps else 4,
+                hand=tuple(hands.get(seat, ())),
+                hero=(heroes or {}).get(seat),
+            )
+        )
+    return _jiaxu_board(specs, pack=pack, turn_seat=turn_seat, phase=phase)
+
+
+def _luanwu_done(engine) -> bool:
+    """乱武那一段跑完（`SKILL` 帧出栈）：之后的回合 / 事件不再改这些读数。
+
+    不等终局——后面的回合会重置「本回合已用【杀】」计数、还会继续改体力，把它们算进来
+    会让"乱武这一段"的断言变成"整局"的断言。
+    """
+    return any(
+        record.kind == "frame"
+        and record.op == "pop"
+        and record.frame_kind is FrameKind.SKILL
+        for record in engine.records
+    )
+
+
+def _run_luanwu(engine, scripts):
+    run_queries(engine, scripts, _luanwu_done, limit=50_000)
+    return engine
+
+
+def _luanwu_seats_of(scripts) -> list[int]:
+    """乱武窗口的**应答者顺序**（读数比集合更严：窗口的推进次序就是它）。"""
+    return [query.actor for script in scripts for query in script.respond_queries]
+
+
+def _luanwu_options(queries) -> list[tuple[str, ...]]:
+    return [
+        tuple(str(action.choice) for action in query.legal_actions) for query in queries
+    ]
+
+
+def test_luanwu_is_offered_only_in_my_play_phase():
+    """候选 = 出牌阶段的一部分：**我的**出牌阶段有；别的座位的出牌阶段没有。"""
+    state = _luanwu_state()
+    mine = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    theirs = legal_actions_for(state, 1, QueryKind.PLAY_PHASE, answers_seq=1)
+
+    assert [
+        action
+        for action in mine
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ], "我的出牌阶段：乱武进候选（骨架 ActivateSkill）"
+    assert not [
+        action
+        for action in theirs
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ], "别人的出牌阶段：不给我的技能候选"
+
+
+def test_luanwu_is_not_offered_after_used():
+    """限定技：整局已用 ⇒ `_limited_offers` 不再产出候选（`mark_limited_skill_used` 之后）。"""
+    from sgs.skills.catalog import mark_limited_skill_used
+
+    state = _luanwu_state()
+    assert [
+        action
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ]
+
+    mark_limited_skill_used(state, 0, LUANWU)
+
+    assert not [
+        action
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ], "整局已用 ⇒ 连技能按钮都不亮"
+
+
+def test_luanwu_is_not_offered_without_other_alive_seats():
+    """「所有其他角色」为空 ⇒ 不发没有作用对象的询问（总纪律 1）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=JIAXU), SeatSpec(alive=False), SeatSpec(alive=False)],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+    assert not [
+        action
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ]
+
+
+def test_luanwu_is_not_offered_outside_my_play_phase():
+    """整局跑一轮：乱武的候选**只**出现在贾诩自己的 `PLAY_PHASE` 询问里、整局只发动一次。"""
+    engine = Engine.from_state(_luanwu_state(), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    run_turns(engine, scripts, turns=1)
+
+    assert len(scripts[0].activations) == 1, "整局只发动一次（限定技）"
+    query = scripts[0].activations[0]
+    assert query.kind == QueryKind.PLAY_PHASE.value and query.actor == 0
+
+
+# ---------------------------------------------------------------------------
+# §7.2 乱武 —— ② 逐座位（次序 / 每人一次 / 并列最近 / 额定目标 / 方天）
+# ---------------------------------------------------------------------------
+
+
+def test_luanwu_asks_each_other_seat_exactly_once():
+    """G4：一次发动里每个**其他存活角色**各被问**一次**（贾诩自己不算）。"""
+    engine = Engine.from_state(_luanwu_state(), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    assert sorted(_luanwu_seats_of(scripts)) == [1, 2, 3], (
+        f"每人一次、不含贾诩自己，实得 {_luanwu_seats_of(scripts)}"
+    )
+
+
+def test_luanwu_starts_from_the_next_seat_counterclockwise():
+    """Q5：起点 = 贾诩的**下家**、逆时针（座位号 +1）。"""
+    engine = Engine.from_state(_luanwu_state(), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    assert _luanwu_seats_of(scripts) == [1, 2, 3], f"实得 {_luanwu_seats_of(scripts)}"
+
+
+def test_luanwu_skips_the_target_step_when_the_nearest_is_unique():
+    """两座局：最近者唯一 ⇒ **不出现**选目标那一问，直接开「使用【杀】或失体力」的窗。"""
+    engine = Engine.from_state(_luanwu_state(seats=2, others_hand=(SLASH_108,)), seed=7)
+    scripts = [JiaxuPlayer(activate=True), JiaxuPlayer(slash_at=0)]
+    _run_luanwu(engine, scripts)
+
+    assert scripts[1].target_queries == [], "唯一最近 ⇒ 没有目标步"
+    assert len(scripts[1].respond_queries) == 1
+    window = scripts[1].respond_queries[0]
+    assert [
+        action.targets for action in window.legal_actions if isinstance(action, UseCard)
+    ] == [(0,)], "窗口的目标恒为那张唯一的最近者"
+
+
+def test_luanwu_tied_nearest_target_is_chosen_by_the_answering_seat():
+    """Q3 = A：四座环里每人有 2 名距离 1 的角色 ⇒ 先问**该角色自己**选一名。"""
+    engine = Engine.from_state(
+        _luanwu_state(
+            others_hands={
+                1: (SLASHES_108[0],),
+                2: (SLASHES_108[1],),
+                3: (SLASHES_108[2],),
+            }
+        ),
+        seed=7,
+    )
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(target=0, slash_at=0),
+        JiaxuPlayer(target=1, slash_at=1),
+        JiaxuPlayer(target=0, slash_at=0),
+    ]
+    _run_luanwu(engine, scripts)
+
+    assert [_luanwu_options(script.target_queries) for script in scripts[1:]] == [
+        [("seat:0", "seat:2")],
+        [("seat:1", "seat:3")],
+        [("seat:0", "seat:2")],
+    ], "每个座位都被问到并列的最近者（由它自己选，不是系统替它挑）"
+
+
+def test_luanwu_slash_target_must_be_the_nearest_one():
+    """额定目标只能在**最近者**里：远的那名角色**不**出现在窗口候选里。"""
+    engine = Engine.from_state(_luanwu_state(others_hand=(SLASH_108,)), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(target=0, slash_at=0),
+        JiaxuPlayer(),
+        JiaxuPlayer(),
+    ]
+    _run_luanwu(engine, scripts)
+
+    window = scripts[1].respond_queries[0]
+    targets = {
+        target
+        for action in window.legal_actions
+        if isinstance(action, UseCard)
+        for target in action.targets
+    }
+    assert targets and targets <= {0, 2}, f"目标只在最近者（0 / 2）里，实得 {targets}"
+
+
+def test_luanwu_slash_may_add_extra_targets_via_halberd():
+    """一手 §2.1 ②：「距离最近」是**额定目标**判据，方天的额外目标照常可以加。"""
+    state = _luanwu_state(others_hand=(SLASH_108,))
+    state.player(1).equip.append(_cards("halberd")[0])
+    engine = Engine.from_state(state, seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(target=0, slash_at=0),
+        JiaxuPlayer(),
+        JiaxuPlayer(),
+    ]
+    _run_luanwu(engine, scripts)
+
+    window = scripts[1].respond_queries[0]
+    combos = {
+        tuple(sorted(action.targets))
+        for action in window.legal_actions
+        if isinstance(action, UseCard)
+    }
+    assert (0,) in combos, "额定目标（最近的座位 0）在"
+    assert any(len(combo) > 1 and 0 in combo for combo in combos), (
+        f"方天把目标数放宽到 3：多目标组合都要含座位 0，实得 {sorted(combos)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §7.2 乱武 —— ③ 选项 1 不可执行（只剩失体力）/ 失体力帧 / 转化 / 提供者 / 续跑
+# ---------------------------------------------------------------------------
+
+
+def test_luanwu_offers_only_hp_loss_when_option_one_is_impossible():
+    """Q4 = A：手里没有可用【杀】⇒ 那扇窗**只剩 `Pass`**（= 失体力），不是空询问。"""
+    engine = Engine.from_state(_luanwu_state(), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    window = scripts[1].respond_queries[0]
+    assert [action.kind for action in window.legal_actions] == ["Pass"], (
+        f"只剩放弃，实得 {[action.kind for action in window.legal_actions]}"
+    )
+    assert window.cause is WindowCause.LUANWU
+
+
+def test_luanwu_forces_hp_loss_when_no_nearest_target_is_legal():
+    """一手 §2.1 ③：最近的都够不着 ⇒ **必须**失去 1 点体力（不是取消结算）。"""
+    state = _luanwu_state(others_hand=(SLASH_108,))
+    state.player(0).equip.append(HORSE_108)  # 别人算贾诩 +1 ⇒ 距离 2 > 攻击范围 1
+    state.player(2).equip.append(HORSE_108)
+    engine = Engine.from_state(state, seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    window = scripts[1].respond_queries[0]
+    assert [action.kind for action in window.legal_actions] == ["Pass"], (
+        "最近的都够不着 ⇒ 只剩选项 2，实得 "
+        f"{[action.kind for action in window.legal_actions]}"
+    )
+    assert [record.amount for record in _hp_deltas(engine, 1)] == [-1], "真的失去 1 点体力"
+
+
+def test_luanwu_hp_loss_is_a_life_decrease_frame():
+    """选项 2 = **失去 1 点体力**（无来源的 `LIFE_DECREASE` 帧，不是伤害）。"""
+    engine = Engine.from_state(_luanwu_state(), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    pushes = [
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.LIFE_DECREASE
+    ]
+    assert len(pushes) == 3, f"三个座位各一条失体力帧，实得 {len(pushes)}"
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_BEFORE
+    ], "失体力走 LIFE_DECREASE_BEFORE"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.DAMAGE
+    ], "**不是**伤害（没有 DAMAGE 帧）"
+
+
+def test_luanwu_accepts_a_transformed_slash():
+    """G6：转化【杀】同窗（武圣的红牌当【杀】）——走同一扇 `RESPOND`/`USE` 窗。"""
+    red = next(
+        card_id
+        for card_id, card in enumerate(PACK.deck.cards)
+        if card.suit == Suit.HEART and card.type == "dodge"
+    )
+    engine = Engine.from_state(
+        _luanwu_state(seats=2, others_hand=(red,), heroes={1: "guanyu"}), seed=7
+    )
+    scripts = [JiaxuPlayer(activate=True), JiaxuPlayer(transformed=red)]
+    _run_luanwu(engine, scripts)
+
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.USE
+    ], "转化【杀】真的压了 USE 帧"
+    assert [record.amount for record in _hp_deltas(engine, 0)] == [-1], "【杀】命中贾诩"
+
+
+def test_luanwu_accepts_a_guohuo_produced_slash():
+    """G6：蛊惑产物同窗（一手 `A/flow_use.txt:25`：于吉能用蛊惑出【杀】响应乱武）。"""
+    engine = Engine.from_state(
+        _luanwu_state(seats=2, others_hand=(SLASH_108,), heroes={1: "yuji_mobile"}),
+        seed=7,
+    )
+    scripts = [JiaxuPlayer(activate=True), JiaxuPlayer(guohuo=True)]
+    _run_luanwu(engine, scripts)
+
+    assert [
+        action
+        for action in scripts[1].respond_queries[0].legal_actions
+        if isinstance(action, ActivateSkill)
+    ], "窗口里出现蛊惑的提供者候选"
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.USE
+    ], "产物真的被使用（压了 USE 帧）"
+
+
+def test_luanwu_resumes_after_the_slash_settles():
+    """G7：使用【杀】压出 USE 帧（内含【闪】窗口）⇒ 续跑不重问，接着问下一个座位。"""
+    engine = Engine.from_state(_luanwu_state(others_hand=(SLASH_108,)), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(target=0, slash_at=0),
+        JiaxuPlayer(),
+        JiaxuPlayer(),
+    ]
+    _run_luanwu(engine, scripts)
+
+    assert len(scripts[1].respond_queries) == 1, "座位 1 只被问一次（续跑不重问）"
+    assert _luanwu_seats_of(scripts) == [1, 2, 3], "续跑接着问下一个座位"
+    assert [record.amount for record in _hp_deltas(engine, 0)] == [-1], "那张【杀】结算完了"
+
+
+# ---------------------------------------------------------------------------
+# §7.2 乱武 —— ④ 结算中状态翻转（阵亡跳过 / 现算最近 / 失血致死 / 记账）
+# ---------------------------------------------------------------------------
+
+
+def test_luanwu_skips_seats_that_died_earlier_in_the_same_resolution():
+    """G9①：轮到该座位时已阵亡 ⇒ **跳过**（规则 L326 / `A/flow_death.txt:35-39`）。"""
+    # 五座环：座位 1 的最近者是 0 / 2 ⇒ 由座位 1 把 1 体力的座位 2 打死，
+    # 轮到座位 2 时它已阵亡（跳过），座位 3 / 4 照常各问一次。
+    engine = Engine.from_state(
+        _luanwu_state(
+            seats=5,
+            hps=(3, 4, 1, 4, 4),
+            others_hands={1: (SLASHES_108[0],)},
+        ),
+        seed=7,
+    )
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(target=2, slash_at=2),  # 座位 1：把 1 体力的座位 2 打死
+        JiaxuPlayer(),                      # 座位 2：已阵亡 ⇒ 轮到时跳过
+        JiaxuPlayer(),                      # 座位 3：照常（失体力）
+        JiaxuPlayer(),                      # 座位 4：照常（失体力）
+    ]
+    _run_luanwu(engine, scripts)
+
+    assert engine.state.player(2).alive is False, "前提：座位 2 在结算中阵亡"
+    assert 2 not in _luanwu_seats_of(scripts), "阵亡座位不再被问（轮到时跳过）"
+    assert _luanwu_seats_of(scripts) == [1, 3, 4]
+
+
+def test_luanwu_recomputes_nearest_when_the_seat_is_reached():
+    """G9③：「距离最近」在**轮到该座位时**现算（不是发动时定格）。"""
+    engine = Engine.from_state(
+        _luanwu_state(
+            seats=5,
+            hps=(3, 4, 4, 1, 4),
+            others_hands={
+                1: (SLASHES_108[0],),
+                2: (SLASHES_108[1],),
+                4: (SLASHES_108[2],),
+            },
+        ),
+        seed=7,
+    )
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(),                      # 座位 1：没有【杀】⇒ 失体力
+        JiaxuPlayer(target=3, slash_at=3),  # 座位 2：把 1 体力的座位 3 打死
+        JiaxuPlayer(),                      # 座位 3：已阵亡 ⇒ 轮到时跳过
+        JiaxuPlayer(target=0, slash_at=0),  # 座位 4：最近者现算
+    ]
+    _run_luanwu(engine, scripts)
+
+    assert engine.state.player(3).alive is False, "前提：座位 3 在座位 2 的行动后阵亡"
+    assert _luanwu_options(scripts[4].target_queries) == [("seat:0", "seat:2")], (
+        "座位 3 死后，座位 4 的最近者变为 0 / 2（若在发动时定格会是 0 / 3）"
+    )
+
+
+def test_luanwu_hp_loss_that_kills_inserts_near_death_before_the_next_seat():
+    """G10：失体力可进濒死 ⇒ 濒死（与阵亡）结算在下一个座位之前（规则 §4.17 L498）。"""
+    engine = Engine.from_state(_luanwu_state(hps=(3, 1, 4, 4)), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    assert engine.state.player(1).hp == 0 and engine.state.player(1).alive is False, (
+        "1 体力再失 1 点 ⇒ 濒死；没人救 ⇒ 阵亡"
+    )
+    assert _luanwu_seats_of(scripts) == [1, 2, 3], "濒死结算插在座位 1 与座位 2 之间"
+
+
+def test_luanwu_does_not_consume_the_seats_slash_limit_but_counts_it():
+    """Q6：不在该角色自己的出牌阶段空闲时间点 ⇒ 不查次数上限，但**照常记账**。"""
+    engine = Engine.from_state(_luanwu_state(seats=2, others_hand=(SLASH_108,)), seed=7)
+    scripts = [JiaxuPlayer(activate=True), JiaxuPlayer(slash_at=0)]
+    _run_luanwu(engine, scripts)
+
+    assert engine.state.player(1).card_use_counts.get("slash") == 1, "那张【杀】照常记入本回合"
+
+
+def test_luanwu_response_window_cause_is_luanwu():
+    """Q2 = A：窗口成因 = `WindowCause.LUANWU`（记录流与文案都读得到"来自乱武"）。"""
+    engine = Engine.from_state(_luanwu_state(), seed=7)
+    scripts = [JiaxuPlayer(activate=True)] + [JiaxuPlayer() for _ in range(3)]
+    _run_luanwu(engine, scripts)
+
+    causes = [
+        record.query.cause
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.RESPOND.value
+    ]
+    assert causes == [WindowCause.LUANWU] * 3, f"实得 {causes}"
+
+
+# ---------------------------------------------------------------------------
+# §7.3 帷幕 —— 黑色锦囊牌不能选贾诩（目标产生前剔除，账本 L770 第 ① 层）
+# ---------------------------------------------------------------------------
+
+
+def _weimu_board(*, jiaxu_seat: int = 0, seats: int = 3, jiaxu_hand=(SLASH_108,)):
+    """座位 `jiaxu_seat` = 贾诩。
+
+    **每个座位都发一张不同的牌**：`顺手牵羊` 的目标过滤器要求"区域里有牌"，
+    没有牌的目标会被牌自己的规则先剔掉——那就分不清是"牌规则"还是"帷幕"动的手。
+    """
+    specs = [
+        SeatSpec(
+            hero=JIAXU if seat == jiaxu_seat else None,
+            hand=(SLASHES_108[seat],),
+        )
+        for seat in range(seats)
+    ]
+    if jiaxu_hand != (SLASH_108,):
+        specs[jiaxu_seat] = SeatSpec(hero=JIAXU, hand=tuple(jiaxu_hand))
+    return _jiaxu_board(specs, turn_seat=1 if jiaxu_seat == 0 else 0)
+
+
+def test_weimu_blocks_black_tricks():
+    """黑色【顺手牵羊】：贾诩的距离/区域都合法，只被锁定技剔掉。"""
+    state = _weimu_board()
+    card = state.card(BLACK_SNATCH)
+
+    assert 2 in check_targets(state, 1, card), "对照：座位 2 是合法目标"
+    assert 0 not in check_targets(state, 1, card), "黑色锦囊：贾诩不是合法目标"
+
+
+def test_weimu_allows_red_tricks():
+    """红色【顺手牵羊】：照常可以选贾诩（判据是颜色，不是"锦囊"）。"""
+    state = _weimu_board()
+
+    assert 0 in check_targets(state, 1, state.card(RED_SNATCH))
+
+
+def test_weimu_blocks_black_delayed_tricks():
+    """延时类锦囊也是「锦囊牌」（规则 L81–L83）：黑色【乐不思蜀】不能指定贾诩。"""
+    state = _weimu_board()
+    assert 0 not in check_targets(state, 1, state.card(BLACK_INDULGENCE))
+
+    other = _weimu_board()
+    assert 0 in check_targets(other, 1, other.card(RED_INDULGENCE))
+
+
+def test_weimu_only_removes_jiaxu_from_a_multi_target_trick():
+    """G5：群体黑色锦囊只把贾诩一个目标剔掉，其余照常。"""
+    state = _weimu_board(jiaxu_seat=1, seats=4)
+    pool = check_targets(state, 0, state.card(BLACK_BARBARIAN))
+
+    assert set(pool) == {2, 3}, f"贾诩（座位 1）之外的座位照常，实得 {pool}"
+
+
+def test_weimu_blocks_a_black_converted_trick():
+    """G6：单源转化牌按**产物**继承色——黑色"田"的【兵粮寸断】照样拦（`第四章:332`）。"""
+    from sgs.skills import conversion_offers, transformed_card
+
+    fillers = cards_of_type(PACK_160, "slash")
+    black = next(
+        card_id
+        for card_id, card in enumerate(PACK_160.deck.cards)
+        if card.suit == Suit.SPADE
+        and card_category(PACK_160.pack_id, card.type) is not Category.TRICK
+        and card_id not in fillers
+    )
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero="xuhuang_mobile", hand=(black,)),
+            SeatSpec(hero=JIAXU, hand=(fillers[0],)),
+            SeatSpec(hand=(fillers[1],)),
+        ],
+        deck=deck_excluding(PACK_160, black, fillers[0], fillers[1]),
+        turn_seat=1,
+    )
+    offers = conversion_offers(state, 0, "supply_shortage")
+    assert offers == ((black, "hero.xuhuang_mobile.duanliang"),), f"实得 {offers}"
+    virtual = transformed_card(state, (black,), "supply_shortage")
+    assert virtual.color is Color.BLACK, "产物继承了来源牌的黑色"
+
+    assert 1 not in check_targets(state, 0, virtual), "黑色转化锦囊：贾诩不是合法目标"
+
+
+def test_weimu_does_not_block_a_colourless_virtual_trick():
+    """G6：**纯虚拟牌没有颜色** ⇒ 不拦（`A/rule_forced.txt:16` 的蛊惑算例）。"""
+    from sgs.skills import pure_virtual_card
+
+    state = _weimu_board()
+    virtual = pure_virtual_card(state, "duel")
+    assert virtual.color is None
+
+    assert 0 in check_targets(state, 1, virtual), "无色虚拟锦囊照常可以选贾诩"
+
+
+def test_weimu_black_nanman_still_usable_with_one_legal_target():
+    """合法目标少于额定数但不小于 1 ⇒ 仍可使用（`A/flow_condition.txt:50`），不需要回落分支。"""
+    state = _jiaxu_board(
+        [
+            SeatSpec(hand=(BLACK_BARBARIAN,)),
+            SeatSpec(hero=JIAXU, hand=(SLASHES_108[0],)),
+            SeatSpec(hand=(SLASHES_108[1],)),
+        ],
+        turn_seat=1,
+        phase=Phase.PLAY,
+    )
+    card = state.card(BLACK_BARBARIAN)
+    pool = check_targets(state, 0, card)
+
+    assert pool == (2,), f"剔掉贾诩后剩 1 个合法目标（座位 2），实得 {pool}"
+    actions = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    assert [
+        action
+        for action in actions
+        if isinstance(action, UseCard) and action.card.card_id == BLACK_BARBARIAN
+    ], "只剩 1 个合法目标 ⇒ 这张【南蛮入侵】照样进候选"
+
+
+def test_weimu_does_not_stop_nullify():
+    """【无懈可击】的目标是**牌**不是角色 ⇒ `TARGET_POOL` 不参与，帷幕不影响它。"""
+    state = _weimu_board()
+    state.player(0).hand.append(WUXIE_108)
+
+    assert check_targets(state, 0, state.card(WUXIE_108)) == (), "响应牌没有座位目标"
+
+    window = legal_actions_for(
+        state,
+        0,
+        QueryKind.RESPOND,
+        answers_seq=1,
+        payload=RespondContext(
+            cause=WindowCause.NULLIFY,
+            required="nullify",
+            mode=RespondMode.PLAY,
+            target=2,
+        ),
+    )
+    assert [
+        action
+        for action in window
+        if isinstance(action, PlayCard) and action.card.type == "nullify"
+    ], "无懈可击照常可用"
+
+
+def test_weimu_stops_when_the_skill_is_lost():
+    """G9：失去技能 / 阵亡 ⇒ 实例消失 ⇒ 立刻不再拦（`resolve_instances` 只出存活实例）。"""
+    state = _weimu_board()
+    card = state.card(BLACK_SNATCH)
+
+    state.player(0).lost_skills.append(WEIMU)
+    assert 0 in check_targets(state, 1, card), "失去技能后回到合法目标"
+
+    state.player(0).lost_skills.clear()
+    assert 0 not in check_targets(state, 1, card), "恢复后重新拦"
+
+
+def test_weimu_emits_no_new_query():
+    """锁定技 ⇒ 一条新询问都不发（整局的询问流里没有帷幕的 `skill_id`）。"""
+    engine = Engine.from_state(_weimu_board(), seed=7)
+    run_turns(engine, [LinPlayer() for _ in range(3)], turns=2)
+
+    asked = [
+        str(getattr(record.query, "skill_id", "") or "")
+        for record in engine.records
+        if record.kind == "query"
+    ]
+    assert not [skill for skill in asked if skill.startswith(WEIMU)]
+
+
+def test_weimu_applies_to_forced_use_targets():
+    """`forced_use_targets` 也读 `check_targets`（"视为使用"不是绕过锁定技的缺口）。"""
+    from sgs.effects import forced_use_targets
+
+    state = _weimu_board()
+    card = state.card(BLACK_BARBARIAN)
+
+    assert forced_use_targets(state, 1, card, (0,)) == (), (
+        "预选集里的贾诩同样被剔掉"
+    )
+    assert forced_use_targets(state, 1, card, (0, 1, 2)) == (2,)
+
+
+# ---------------------------------------------------------------------------
+# §7.4 突变验证（3 组）：把判据改坏 ⇒ 对应断言必须变红（防"恒绿的假绿"）
+#
+# 姿态照 `tests/test_heuristic_ai.py` 的正 / 反双向断言：先证明"换成坏实现后行为真的变"，
+# 再让真正的声明继续被 §7.1–§7.3 钉住。突变只换 ``CATALOG`` 里的**那一条**定义
+# （`resolve_instances` 的解析缓存按 ``CATALOG`` 身份整批作废），不 mock 引擎、不旁路候选。
+# ---------------------------------------------------------------------------
+
+
+def _swap_skill(monkeypatch, skill_id: str, definition) -> None:
+    """把 ``CATALOG[skill_id]`` 换成突变体（测试结束自动还原）。"""
+    from types import MappingProxyType
+
+    import sgs.skills.catalog as catalog_module
+
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, skill_id: definition}),
+    )
+
+
+def test_mutation_wansha_without_the_removal_leaks_the_peach(monkeypatch):
+    """突变 A：把完杀改成"不删候选" ⇒ 受限座位的【桃】立刻回来（证明是它在拦）。"""
+    from dataclasses import replace as dc_replace
+
+    import sgs.skills.catalog as catalog_module
+
+    state = _wansha_board(other_hand=(PEACH_108,))
+    assert _peach_uses(_near_death(state, 2, dying=1)) == [], "原实现：不出现"
+
+    _swap_skill(
+        monkeypatch,
+        WANSHA,
+        dc_replace(catalog_module.CATALOG[WANSHA], modifiers=()),
+    )
+
+    assert [action.targets for action in _peach_uses(_near_death(state, 2, dying=1))] == [
+        (1,)
+    ], "突变后受限座位又能用【桃】⇒ 原断言不是恒绿"
+
+
+def test_mutation_luanwu_without_the_target_legality_gate_offers_a_dead_option(monkeypatch):
+    """突变 B：把"必须有其他存活角色"那条闸删掉 ⇒ 单座局也出候选（证明那道闸在起作用）。"""
+    from dataclasses import replace as dc_replace
+
+    import sgs.skills.catalog as catalog_module
+    from sgs.effects import Modifier, ModifierPoint
+    from sgs.skills import active as active_module
+
+    solo = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=JIAXU), SeatSpec(alive=False), SeatSpec(alive=False)],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    assert not [
+        action
+        for action in legal_actions_for(solo, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ], "原实现：没有其他存活角色 ⇒ 不发没有作用对象的询问"
+
+    def _blind_offers(state, ctx, current):
+        """突变：只判"出牌阶段 + 本人"，**不**判场上还有没有别人。"""
+        if not active_module._can_offer(state, ctx, once_per_phase=False):
+            return current
+        return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+    _swap_skill(
+        monkeypatch,
+        LUANWU,
+        dc_replace(
+            catalog_module.CATALOG[LUANWU],
+            modifiers=(Modifier(ModifierPoint.CANDIDATES, _blind_offers),),
+        ),
+    )
+
+    assert [
+        action
+        for action in legal_actions_for(solo, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, ActivateSkill) and action.skill_id == LUANWU
+    ], "突变后单座局也能点【乱武】⇒ 原断言不是恒绿"
+
+
+def test_mutation_weimu_by_card_name_list_leaks_black_delayed_tricks(monkeypatch):
+    """突变 C：帷幕改成"按牌名闭集"（只认【顺手牵羊】）⇒ 黑色**延时**锦囊漏过去。
+
+    这正是票面 §3 形状表点名的不许写法：判据必须是大类 + 颜色，不是牌名清单。
+    """
+    from dataclasses import replace as dc_replace
+
+    import sgs.skills.catalog as catalog_module
+    from sgs.effects import Modifier, ModifierPoint
+
+    state = _weimu_board()
+    assert 0 not in check_targets(state, 1, state.card(BLACK_INDULGENCE)), "原实现：拦"
+
+    def _by_card_name(state, ctx, current):
+        """突变：只按「牌名闭集」拦（漏掉延时类 = 票面点名的不许写法）。"""
+        names = frozenset({"snatch"})
+        if ctx.card is None or ctx.card.type not in names:
+            return current
+        if ctx.owner not in current:
+            return current
+        return tuple(target for target in current if target != ctx.owner)
+
+    _swap_skill(
+        monkeypatch,
+        WEIMU,
+        dc_replace(
+            catalog_module.CATALOG[WEIMU],
+            modifiers=(Modifier(ModifierPoint.TARGET_POOL, _by_card_name),),
+        ),
+    )
+
+    assert 0 in check_targets(state, 1, state.card(BLACK_INDULGENCE)), (
+        "突变后黑色【乐不思蜀】能指定贾诩 ⇒ 原断言不是恒绿"
+    )

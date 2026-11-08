@@ -686,11 +686,15 @@ function renderSeatPick(pending) {
 /** 响应窗口里"非使用牌"候选的按钮文案（W5-02b）：借刀的 `Pass` = b（**交出武器**）。
  *
  * 只看窗口成因这一条公开事实，不改 `actionLabel` 的通用语义（同一个 `Pass` 在别的窗口
- * 仍是"放弃"）。
+ * 仍是"放弃"）。`LUANWU`（lin-batch2 票 03，贾诩移动版【乱武】）的 `Pass` = 选项 2
+ * ——牌面「1.对距离最近的另一名角色使用一张【杀】；2.失去1点体力」⇒ 按钮写「失去1点体力」。
  */
 function alternativeLabel(pending, action) {
   if (action.kind === "Pass" && pending && pending.cause === "BORROWED_SWORD") {
     return "交出武器";
+  }
+  if (action.kind === "Pass" && pending && pending.cause === "LUANWU") {
+    return "失去1点体力";
   }
   return actionLabel(action);
 }

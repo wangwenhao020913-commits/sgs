@@ -308,6 +308,17 @@ ALLOWLIST: dict[Site, Rule] = {
         "_jie_rende_effect",
         'if type_id == "slash":',
     ): Rule(NORMAL, 1, "按产物牌型决定要不要选目标（普通杀需要目标；桃/酒只对自己）"),
+    (
+        "src/sgs/skills/active.py",
+        "LUANWU_RESPONSE_CARD",
+        'LUANWU_RESPONSE_CARD = "slash"',
+    ): Rule(
+        FAMILY,
+        1,
+        "贾诩移动版【乱武】（lin-batch2 票 03）的窗口**请求牌名**是【杀】族（与 "
+        "SLASH_FAMILY_KEY 同值；本模块不许深层导入 sgs.effects.behaviors 而公开面未导出该键）"
+        "——成员判定走 satisfies_required，转化 / 提供者产物同窗",
+    ),
     # ---- skills/heroes.py：转化产物 ----
     (
         "src/sgs/skills/heroes.py",

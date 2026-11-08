@@ -5807,3 +5807,91 @@ def test_the_heuristic_answers_a_real_tiancheng_reveal_without_touching_greyed_r
         assert choice not in set(query.disabled), "置灰行永远不能被选中"
         assert choice in {action.choice for action in query.legal_actions}, "答案必须在候选里"
     assert ran_timing(engine, Timing.TURN_BEFORE_START), "展示完之后第一回合照常开始"
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·贾诩（lin-batch2 票 03）：【乱武】窗口的"用【杀】还是失体力"（Q9 = B）
+# ---------------------------------------------------------------------------
+
+LUANWU_ID = "hero.jiaxu_mobile.luanwu"
+
+
+def _luanwu_window(state, actor: int, target: int) -> RespondQuery:
+    """与引擎同形的乱武窗口（目标由窗口固定成 ``target``）。"""
+    actions = legal_actions_for(
+        state,
+        actor,
+        QueryKind.RESPOND,
+        answers_seq=1,
+        payload=RespondContext(
+            cause=WindowCause.LUANWU,
+            required="slash",
+            mode=RespondMode.USE,
+            use_targets=(target,),
+        ),
+    )
+    return RespondQuery(
+        seq=1,
+        actor=actor,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="对距离最近的另一名角色使用【杀】，或失去1点体力",
+        legal_actions=actions,
+        view=project(state, actor),
+        cause=WindowCause.LUANWU,
+        required="slash",
+        target=actor,
+    )
+
+
+def _luanwu_ai_state(*, self_identity: Identity = Identity.LORD):
+    """座位 0 = 明置的**反贼**（敌人）、座位 1 = 应答者（默认主公）、座位 2 = 明置忠臣。
+
+    身份对 AI 是**公开事实**（``identity_visible``）⇒ :func:`_identity_relation` 给出精确
+    的 0/1，断言不依赖"配比后验"的浮点巧合。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_ids("dodge")[0],), identity=Identity.REBEL),
+            SeatSpec(hand=(_ids("slash")[0],), identity=self_identity),
+            SeatSpec(hand=(_ids("dodge")[1],), identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=_deck_excluding(_ids("dodge")[0], _ids("slash")[0], _ids("dodge")[1]),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=4),
+    )
+    state.player(0).identity_visible = True
+    state.player(2).identity_visible = True
+    return state
+
+
+def test_the_ai_uses_the_slash_in_luanwu_when_the_target_is_an_enemy():
+    """Q9 = B：目标 = **已明敌人** ⇒ 出【杀】（正分），不失体力。"""
+    state = _luanwu_ai_state()
+    query = _luanwu_window(state, 1, 0)
+
+    action = HeuristicPlayer(_stream(0, 1)).respond(query)
+
+    assert isinstance(action, UseCard), f"该对敌人出【杀】，实得 {action!r}"
+    assert action.targets == (0,), "目标 = 窗口固定的那张最近者（敌人）"
+
+
+def test_the_ai_prefers_losing_hp_over_slashing_an_allied_target():
+    """Q9 = B：目标 = **已盟友** ⇒ 分数低于 ``Pass`` ⇒ 宁失 1 点体力也不打队友。"""
+    state = _luanwu_ai_state()
+    query = _luanwu_window(state, 1, 2)
+
+    action = HeuristicPlayer(_stream(0, 1)).respond(query)
+
+    assert isinstance(action, Pass), f"不该对盟友出【杀】，实得 {action!r}"
+
+
+def test_the_luanwu_skill_value_is_positive_and_registered():
+    """限定技：无代价、全场互砍 ⇒ 语义表里给正分（不入表就永不发动）。"""
+    assert LUANWU_ID in SKILL_VALUES
+    scorer, reason = SKILL_VALUES[LUANWU_ID]
+    assert reason.strip()
+    query = _luanwu_window(_luanwu_ai_state(), 1, 0)
+    activation = ActivateSkill(skill_id=LUANWU_ID, answers_seq=1)
+    assert scorer(query, activation, query.view) > 0.0

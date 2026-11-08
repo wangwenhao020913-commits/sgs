@@ -232,9 +232,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 185
+    # lin-batch2 票 03：林包移动版·贾诩移动版三条（完杀 / 乱武 / 帷幕）⇒ 185 → 188、
+    # 武将技 161 → 164（装备 22 不变）。
+    assert len(CATALOG) == 188
     assert len(equipment) == 22, "装备不变：本票三条都是武将技"
-    assert len(heroes) == 161
+    assert len(heroes) == 164
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -262,7 +264,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 161
+    # lin-batch2 票 03：贾诩移动版三条 ⇒ 161 → 164。
+    assert len(expected) == 164
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2328,6 +2331,14 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.dongzhuo_mobile.roulin": "锁定技",
     "hero.dongzhuo_mobile.bengkuai": "锁定技",
     "hero.dongzhuo_mobile.baonue": "零步技能",
+    # lin-batch2 票 03：贾诩移动版三条——【乱武】= A 族限定技 + **零步**流水线（手写逐座位
+    # 循环全部住 `effect` 里，与【业炎】同形）⇒ 机械判据落在「零步技能」格（票面写的
+    # 「主动技能 +1」是分析期的读法，机械谓词按 `_flow_steps == ()` 归零步格）；
+    # 【完杀】= 纯修饰器（`CANDIDATES(PEACH)` 删候选、无流水线）与【帷幕】= 纯修饰器
+    # （`TARGET_POOL` 剔除自己）⇒ 两条都按类型归「锁定技」格。
+    "hero.jiaxu_mobile.wansha": "锁定技",
+    "hero.jiaxu_mobile.luanwu": "零步技能",
+    "hero.jiaxu_mobile.weimu": "锁定技",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2354,7 +2365,9 @@ SHAPE_COUNTS: dict[str, int] = {
     "主动技能": 30,
     "触发技能": 25,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
-    "零步技能": 33,
+    # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
+    # ⇒ 33 → 34。
+    "零步技能": 34,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2370,7 +2383,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # lin-batch2 票 02：董卓移动版【暴虐】（零步流水线）⇒ 零步技能 32 → 33；【肉林】/
     # 【崩坏】（锁定技）⇒ 锁定技 38 → 40；【酒池】（单源转化）⇒ 转化技 19 → 20。
     "多轮技能": 20,
-    "锁定技": 40,
+    # lin-batch2 票 03：贾诩移动版【完杀】/【帷幕】（两条纯修饰器）⇒ 锁定技 40 → 42。
+    "锁定技": 42,
     "转化技": 20,
     "能力位": 3,
     "候选生成器": 1,
@@ -2482,7 +2496,8 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 185
+    # lin-batch2 票 03：三条新技能进 CATALOG / SKILL_SHAPE ⇒ 185 → 188。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 188
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2622,8 +2637,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # lin-batch2 票 01：曹丕移动版【行殇】/【颂威】（零步）+【放逐】（触发）⇒ 内 92 → 95。
     # lin-batch2 票 02：董卓移动版【暴虐】（零步）⇒ 内 95 → 96；【酒池】（转化）/
     # 【肉林】/【崩坏】（锁定）⇒ 外 86 → 89。
-    assert len(inside) == 96
-    assert len(outside) == 89
+    # lin-batch2 票 03：贾诩移动版【乱武】（零步流水线）⇒ 内 96 → 97；【完杀】/
+    # 【帷幕】（纯修饰器、无流水线）⇒ 外 89 → 91。
+    assert len(inside) == 97
+    assert len(outside) == 91
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

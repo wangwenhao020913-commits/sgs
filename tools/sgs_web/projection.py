@@ -1452,6 +1452,12 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
             return f"需要打出{card}"
         if cause is WindowCause.REJUDGE:
             return _rejudge_requirement(engine, query)
+        if cause is WindowCause.LUANWU:
+            # 贾诩移动版【乱武】（lin-batch2 票 03）：选项 1 = 窗口里的「使用【杀】」候选，
+            # 选项 2 = `Pass`（按钮文案由 `pending.js:alternativeLabel` 写成「失去1点体力」）。
+            # 文案 = 牌面逐字（移动版官网「除非…否则失去1点体力」的同一句话，票面 §2 询问剧本）；
+            # 与借刀的「对 Bn 使用【杀】，或交出武器」同一个分支位，只是不写具体座位。
+            return "对距离最近的另一名角色使用【杀】，或失去1点体力"
     return None
 
 

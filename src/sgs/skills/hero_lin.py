@@ -19,7 +19,11 @@ lin-batch2 票 02 = 董卓【崩坏】）。
   :mod:`sgs.skills.response_window`；
 - 董卓移动版【崩坏】= 本模块（§6：结束阶段钩子 + 单步选项 + 帧私有定长推进）；
 - 董卓移动版【暴虐】= 主公技族，住 :mod:`sgs.skills.lord_request`（``DAMAGE_AFTER_DEAL``
-  钩子 + 零步流水线 + ``ActivationPlan(actor=伤害来源)``）。
+  钩子 + 零步流水线 + ``ActivationPlan(actor=伤害来源)``）；
+- 贾诩移动版【完杀】/【帷幕】= 本模块（§7：两条锁定技各一条纯修饰器——``CANDIDATES``
+  （``CandidateScope.PEACH``）清空候选 / ``TARGET_POOL`` 剔除自己；都不产生询问）；
+- 贾诩移动版【乱武】= A 族主动技（限定），住 :mod:`sgs.skills.active` 的
+  ``ACTIVE_SKILLS``（零步流水线 + 手写逐座位循环）。
 
 【英魂】（孙坚，吴 / 男 / 4 体力；牌面权威 = 用户 `技能.txt`，口径 = **移动版**，逐字）：
 
@@ -58,8 +62,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
-from sgs.effects import CarrierKind, locate
+from sgs.data import Category, Color, SkillType, card_category, hero_skill_id
+from sgs.effects import (
+    CandidateScope,
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    locate,
+)
 from sgs.resolution import Frame
 from sgs.state import (
     FrameKind,
@@ -81,8 +92,11 @@ __all__ = [
     "BENGKUAI_REDUCE_MAX",
     "BENGKUAI_FLOW",
     "DONGZHUO_MOBILE",
+    "JIAXU_MOBILE",
     "LIN_SKILL_DEFS",
     "SUNJIAN_MOBILE",
+    "WANSHA",
+    "WEIMU",
     "YINGHUN",
     "YINGHUN_DRAW_ONE_DISCARD_X",
     "YINGHUN_DRAW_X_DISCARD_ONE",
@@ -457,7 +471,146 @@ _BENGKUAI = SkillDef(
 """董卓移动版【崩坏】的完整声明（锁定技、一条结束阶段钩子 + 一步选项）。"""
 
 
-LIN_SKILL_DEFS: tuple[SkillDef, ...] = (_YINGHUN, _BENGKUAI)
+# ===========================================================================
+# §7 林包·移动版贾诩【完杀】【帷幕】（lin-batch2 票 03；用户 2026-11-08 签 Q1 = A / Q10）
+#
+#     完杀
+#     　锁定技，你的回合内，当一名角色进入濒死状态时，你令除你和其以外的角色不能对其
+#     　使用【桃】直到此次濒死结算结束。
+#
+#     帷幕
+#     　锁定技，你不能成为黑色锦囊牌的目标。
+#
+# 两条都是**纯修饰器**（`shapes.md` §2 第 54 / 55 行：无询问 ⇒ 不上脸），故一个钩子、
+# 一步流水线、一句文案都不新增。判据全走既有挂点：
+#
+# - **完杀** = `ModifierPoint.CANDIDATES` + `CandidateScope.PEACH` 上**删候选**（Q1 = A）：
+#   求桃窗口的三条【桃】路径（真牌 / 急救转化 / 蛊惑产物）在 `_peach` 里先合并、再整体
+#   过这一趟链，最后才追加 `Pass`（`effects/actions.py:_peach`）⇒ 一次收口。受限座位
+#   **仍被问一次**、只剩「放弃」——与"手里一张【桃】都没有的人"在界面上完全同形
+#   （引擎本来就逐座位无条件询问，票 19 §9.2）。
+#   不用 `FORBIDDEN`：它的上下文只有 `(subject, card)`，看不到濒死者、也看不到"这个候选
+#   是转化 / 提供者产物"（`actions.py:check_forbidden`）⇒ 急救与蛊惑两条路会漏（一手反例
+#   `A/glossary_flow.txt:67`）。落层依据：账本 L803（禁止使用类）、L736（唯一闸门）、
+#   L770（否定第 ① 层不是它——完杀是"禁止**使用**"，规则 §17.10 A1 点名）。
+#
+# - **帷幕** = `ModifierPoint.TARGET_POOL` 上把**自己**从池里剔掉（账本 L770 的否定第
+#   ① 层「目标产生前取消」）。判据 = 这张牌的**大类**为 `trick`（含延时类，规则 L81–L83）
+#   **且** 颜色为黑（`CardRef.color`：实体牌与**单源转化牌的产物**都由花色派生；
+#   纯虚拟牌无颜色 ⇒ 不拦，`A/rule_forced.txt:16`）。**不按牌名特判**，故也**不**进
+#   `skills/target_pool.py` 的 `TARGET_POOL_SKILLS`（那张表的字段是"牌名闭集 + 是否要求
+#   空手牌"，塞进来会给表加两个只服务一条技能的字段）。
+#
+# 两条都是锁定技 ⇒ **不问「是否发动」**；失去技能 / 贾诩阵亡 ⇒ 实例消失 ⇒ 立刻不再生效
+# （`catalog.py` 的 `resolve_instances` 只出存活实例 + `A/rule_classification.txt:103/120`）。
+# ===========================================================================
+
+JIAXU_MOBILE = "jiaxu_mobile"
+"""贾诩移动版的武将 id（数据表 ``heroes.lin_mobile.json``）。"""
+
+WANSHA = hero_skill_id(JIAXU_MOBILE, "wansha")
+"""贾诩移动版【完杀】的全限定技能 id（锁定技）。"""
+
+WEIMU = hero_skill_id(JIAXU_MOBILE, "weimu")
+"""贾诩移动版【帷幕】的全限定技能 id（锁定技）。"""
+
+WANSHA_REQUIREMENT = (
+    "锁定技，你的回合内，当一名角色进入濒死状态时，你令除你和其以外的角色"
+    "不能对其使用【桃】直到此次濒死结算结束"
+)
+"""一句话文案 = 用户 `技能.txt` 的牌面逐字（票面 §0；口径 = 移动版）。"""
+
+WEIMU_REQUIREMENT = "锁定技，你不能成为黑色锦囊牌的目标"
+"""一句话文案 = 用户 `技能.txt` 的牌面逐字（三平台逐字相同，票面 §0.1）。"""
+
+
+def _wansha_candidates(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``CANDIDATES(PEACH)`` 回调：受限座位的非 `Pass` 候选**全部消失**（Q1 = A）。
+
+    四条判据（票面 §1 六元组的「时机」格 / §0.1 ②）：
+
+    1. **是求桃窗口**（``ctx.scope is CandidateScope.PEACH``）——其余四档语境不动；
+    2. **是贾诩自己的回合**（``state.turn_seat == ctx.owner``；牌面「你的回合内」）；
+    3. **应答者不是贾诩**（「除你以外」）；
+    4. **应答者不是濒死者**（「和其以外」；濒死者由 `_peach` 写进 ``ctx.target``——**不**
+       按"体力 ≤ 0"猜）。
+
+    ``Pass`` 由 `_peach` 在这趟链**之后**追加，故 ``()`` 就是"只剩放弃"，不需要在这里
+    自己造 `Pass`。返回 ``()`` 而不是过滤后的元组：链上 ``current`` 此刻只有
+    ``UseCard`` / ``ActivateSkill``，两者都是"使用【桃】"这条路（真牌 / 急救转化 /
+    蛊惑产物）⇒ 一起收口。**不挡【酒】**：它在求桃窗口里只用于自救，而自救者 = 濒死者 =
+    「其」⇒ 本就不在受限集合（用户 2026-11-08 签 Q8）。
+
+    ``ctx.target`` 缺失（别的派发点）⇒ 判不出濒死者，fail-open 返回原值（不改既有行为）。
+    """
+    if ctx.scope is not CandidateScope.PEACH:
+        return current
+    if state.turn_seat != ctx.owner:
+        return current
+    if ctx.subject == ctx.owner:
+        return current
+    if ctx.target is None or ctx.subject == ctx.target:
+        return current
+    return ()
+
+
+def _weimu_target_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_POOL`` 回调：**黑色锦囊牌**的目标池去掉持有者自己（账本 L770 第 ① 层）。
+
+    三道守卫照 `target_pool.TargetPoolSkill.remove_self` 的顺序与惰性姿态（对别人的目标
+    池天然不动手）：
+
+    1. ``ctx.card is None``（不是"某张牌"的目标池）⇒ 原样返回；
+    2. 持有者**不在**池里 ⇒ 原样返回（不改别人的池）；
+    3. 判据不命中 ⇒ 原样返回。
+
+    判据两条，都不认牌名：
+
+    - **大类 = 锦囊**：``sgs.data.card_category`` 的数据事实（延时 / 非延时同属 ``trick``，
+      故【乐不思蜀】【兵粮寸断】【闪电】一并覆盖）；查不到牌名（漏配）按非锦囊处理
+      （fail-closed：不拦）。
+    - **颜色 = 黑**：读 ``CardRef.color``。实体牌由花色派生；**单源转化牌**继承来源牌的
+      颜色（`skills/virtual.py:transformed_card`）⇒ 黑色"田"的【顺手牵羊】照样拦
+      （`第四章-游戏流程.md:332`）；**纯虚拟牌**没有颜色 ⇒ **不拦**
+      （`A/rule_forced.txt:16` 的蛊惑算例）。
+
+    【无懈可击】的目标是**牌**不是角色（规则 L707–L712）⇒ 那条 `TARGET_POOL` 根本不派发，
+    本回调自然也碰不到它。
+    """
+    if ctx.card is None:
+        return current
+    if ctx.owner not in current:
+        return current
+    if card_category(state.pack_id, ctx.card.type) is not Category.TRICK:
+        return current
+    if ctx.card.color is not Color.BLACK:
+        return current
+    return tuple(target for target in current if target != ctx.owner)
+
+
+_WANSHA = SkillDef(
+    skill_id=WANSHA,
+    # 牌面写「锁定技」⇒ 不问"是否发动"；本技能连流水线都没有（纯修饰器）。
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    modifiers=(Modifier(ModifierPoint.CANDIDATES, _wansha_candidates),),
+    requirement=WANSHA_REQUIREMENT,
+)
+"""贾诩移动版【完杀】的完整声明（锁定技 + 一条 ``CANDIDATES`` 删候选）。"""
+
+_WEIMU = SkillDef(
+    skill_id=WEIMU,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    modifiers=(Modifier(ModifierPoint.TARGET_POOL, _weimu_target_pool),),
+    requirement=WEIMU_REQUIREMENT,
+)
+"""贾诩移动版【帷幕】的完整声明（锁定技 + 一条 ``TARGET_POOL`` 剔除自己）。"""
+
+
+LIN_SKILL_DEFS: tuple[SkillDef, ...] = (_YINGHUN, _BENGKUAI, _WANSHA, _WEIMU)
 """林包·移动版的全部技能定义（逐票追加）。"""
 
 

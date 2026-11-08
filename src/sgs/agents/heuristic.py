@@ -1676,6 +1676,42 @@ def _nullify_declares(query: Query) -> bool | None:
     return enemy > ally
 
 
+def _luanwu_respond_value(query: Query, action: Action) -> float | None:
+    """贾诩移动版【乱武】窗口的"用【杀】还是失体力"（lin-batch2 票 03，Q9 = B）。
+
+    这扇窗口的两条出口**不对称**：选项 1 = 对距离最近的另一名角色使用一张【杀】（代价
+    一张牌、收益看打的是谁），选项 2 = ``Pass`` = 失去 1 点体力（代价固定 1 点）。既有
+    的"能抵消就抵消"常量分（:data:`_RESPOND_VALUE`）在这里会让 AI **稳定打最近的队友**
+    （4 人环里最近的两人常有盟友）——用户 2026-11-08 签 Q9 = B：按**目标敌我**给分。
+
+    判据只用两条既有事实，**不新增通道**：``action.targets``（真牌 / 转化牌直接带；提供者
+    产物不带目标时回落到窗口里任一候选的目标——乱武的窗口只有**一个**固定目标）与
+    :func:`_identity_relation` 的 ``(P(敌), P(友))``。敌 ⇒ ``+_RESPOND_VALUE``、友 ⇒
+    ``-_RESPOND_VALUE``（**低于** ``Pass`` 的 0）、算不出 ⇒ 0（与 ``Pass`` 打平，由候选
+    次序决定，不硬判）。
+
+    不是乱武窗口 ⇒ ``None``（调用方走既有分支）。
+    """
+    if getattr(query, "cause", None) is not WindowCause.LUANWU:
+        return None
+    if isinstance(action, Pass):
+        return 0.0
+    if not isinstance(action, (ActivateSkill, UseCard, PlayCard)):
+        return 0.0
+    targets = tuple(getattr(action, "targets", None) or ())
+    if not targets:
+        # 提供者（【蛊惑】）的产物没有目标步：目标由窗口固定，读候选里的那一个。
+        targets = tuple(
+            int(target)
+            for candidate in query.legal_actions
+            for target in (getattr(candidate, "targets", None) or ())
+        )
+    if not targets:
+        return _RESPOND_VALUE
+    enemy, ally = _identity_relation(query.view, int(targets[0]))
+    return _RESPOND_VALUE * (enemy - ally)
+
+
 def _score_respond(query: Query, action: Action) -> float:
     """``RESPOND``：能抵消就抵消；技能类提供者（【护驾】/【激将】/【蛊惑】）同价。
 
@@ -1684,11 +1720,17 @@ def _score_respond(query: Query, action: Action) -> float:
     ``Pass``），由最大值直接选出 ``Pass``。其余窗口（【南蛮】/【万箭】/【决斗】/借刀 /
     势力求助 / 改判）仍是"有牌就抵消"的常量分——它们没有"取消对谁有利"的二义性。
 
+    **乱武窗口是第二条例外**（lin-batch2 票 03，Q9 = B）：它的两条出口不是"抵消 / 不抵消"，
+    而是"打最近的人 / 失去 1 点体力"⇒ 按目标敌我给分，见 :func:`_luanwu_respond_value`。
+
     **提供者也是响应牌**（票 03）：``ActivateSkill`` 在无懈窗口里同样过 :func:`_nullify_declares`
     ——【蛊惑】的产物是一张【无懈可击】，它的"该不该宣"与真牌是同一件事。不这么写的话，
     提供者恒拿 :data:`_DODGE_SKILL_VALUE`（正分）⇒ AI 会用它去宣一张**不该宣**的无懈，
     而换成真牌那条路它是会 ``Pass`` 的。
     """
+    luanwu = _luanwu_respond_value(query, action)
+    if luanwu is not None:
+        return luanwu
     if isinstance(action, Pass):
         return 0.0
     if isinstance(action, (ActivateSkill, UseCard, PlayCard, SubstituteJudgeCard)):
@@ -2152,6 +2194,11 @@ _HOSTILE_SEAT_STEPS = (
     # X 张是给它的补偿。不登记就落进"帮盟友"分支：AI 会把队友翻面、白送它一个回合的牌，
     # 纯自伤。1V1 下唯一其他座位就是敌人，登记为对手即正确方向。
     "fangzhu:",
+    # 贾诩移动版【乱武】（lin-batch2 票 03，Q9 = B）：并列最近时**先选**的座位就是那张
+    # 【杀】的额定目标（挨打的人）。不登记就落进"帮盟友"分支：AI 会先把队友选成目标，
+    # 再在下一问按敌我给分放弃 ⇒ 白失 1 点体力（比"能打敌人却失血"更差）。
+    # 全限定前缀，与手写的 ``hero.jiaxu_mobile.luanwu:target`` 同源。
+    "hero.jiaxu_mobile.luanwu:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -3106,7 +3153,8 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "cause": (
                     True,
                     "无懈窗口（``NULLIFY``）按'被取消的牌对目标利 / 害 × 关系'判宣不宣"
-                    "（D1，``_nullify_declares``）；其余窗口仍是常量'能抵消就抵消'",
+                    "（D1，``_nullify_declares``）；乱武窗口（``LUANWU``）按'这张【杀】打向"
+                    "谁'给分（`_luanwu_respond_value`，Q9 = B）；其余窗口仍是常量'能抵消就抵消'",
                 ),
                 "required": (False, "必需牌名不读：候选里只有合法的"),
                 "target": (
@@ -4359,6 +4407,14 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "主公回复 1 点。**关系感知**：读公开的主公身份（`_huangtian_lord_seat`）与自己的"
         "身份（`_me(view).identity`），主公在我的盟友集（`_ally_identities`）⇒ +1.5，"
         "否则 -1.0；主公 / 自己的身份读不到 ⇒ 0.0。不读任何隐藏信息",
+    ),
+    # 林包·移动版·贾诩（lin-batch2 票 03）：只装**限定主动技**【乱武】（完杀 / 帷幕是
+    # 锁定技、没有「是否发动」询问，按纪律不入表）。口径见票面 `## AI 适配` 第 3 格 / Q9。
+    "hero.jiaxu_mobile.luanwu": (
+        _constant(2.5),
+        "限定技，出牌阶段无代价发动：所有其他角色各一次「对最近者使用【杀】/ 失去 1 点"
+        "体力」——全场互砍 / 掉血，净收益恒为正（整局一次 ⇒ 给得比普通主动技高）。"
+        "那一问里'用【杀】还是失体力'按目标敌我另算（`_luanwu_respond_value`，Q9 = B）",
     ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。

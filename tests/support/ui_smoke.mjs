@@ -517,7 +517,8 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // lin-batch 票 03：林包移动版加徐晃移动版（新真名「徐晃」）⇒ 真名 56 → 57、版本 85 → 86。
   // lin-batch2 票 01：林包移动版加曹丕移动版（新真名「曹丕」）⇒ 真名 57 → 58、版本 86 → 87。
   // lin-batch2 票 02：林包移动版加董卓移动版（新真名「董卓」）⇒ 真名 58 → 59、版本 87 → 88。
-  ui.state.heroCatalog.length === 59 && catalogVersions.length === 88,
+  // lin-batch2 票 03：林包移动版加贾诩移动版（新真名「贾诩」）⇒ 真名 59 → 60、版本 88 → 89。
+  ui.state.heroCatalog.length === 60 && catalogVersions.length === 89,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -5438,6 +5439,51 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿FT7 借刀窗口的 `Pass` 仍写作「交出武器」（b 支不变）",
     $("btn-pass").hidden === false && $("btn-pass").textContent === "交出武器",
     `btn-pass="${$("btn-pass").textContent}" hidden=${$("btn-pass").hidden} options=${Array.from($("t-options").children).map((c) => c.textContent).join(" / ")}`);
+  ui.resetSelection();
+}
+
+/* ============ 乱武窗口（合成载荷）：提示行 + `Pass` 按钮文案 ============
+ *
+ * lin-batch2 票 03（贾诩移动版【乱武】）：选项 1 = 窗口里的「使用【杀】」候选、选项 2 =
+ * `Pass`（按钮写「失去1点体力」）。两处文案分别住在 `projection.py:_need_text` 的
+ * `WindowCause.LUANWU` 分支（服务端下发 `context.requirement`，`tests/test_web.py` 钉）
+ * 与 `pending.js:alternativeLabel` 的 `LUANWU` 分支（**本文件**验读取方）。
+ */
+{
+  const slash = { ...synthCard(61, "杀"), type: "slash" };
+  const luanwuPending = {
+    kind: "RESPOND", actor: 0, seq: 94, cause: "LUANWU", required: "slash",
+    prompt: "对距离最近的另一名角色使用【杀】，或失去1点体力",
+    legal_actions: [
+      { kind: "UseCard", card: slash, targets: [1], answers_seq: 94 },
+      { kind: "Pass", answers_seq: 94 },
+    ],
+    candidate_index: {
+      61: { card: slash, pool: [1], min_targets: 1, max_targets: 1, combos: [[1]] },
+    },
+    option_seats: {},
+    context: { requirement: "对距离最近的另一名角色使用【杀】，或失去1点体力" },
+    preactivations: {},
+    preactivation: [],
+  };
+  const luanwuView = synthView(luanwuPending);
+  luanwuView.snapshot.self_hand = [slash];
+  luanwuView.heroes = { 0: "jiaxu_mobile", 1: "zhangfei", 2: "diaochan" };
+  ui.state.view = luanwuView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(luanwuView);
+
+  check("㉿LW1 乱武窗口：提示行 =「对距离最近的另一名角色使用【杀】，或失去1点体力」",
+    $("t-prompt").textContent === "对距离最近的另一名角色使用【杀】，或失去1点体力",
+    `prompt="${$("t-prompt").textContent}"`);
+  check("㉿LW2 乱武窗口：`Pass` 按钮在右端、文案 =「失去1点体力」（不是「放弃」）",
+    $("btn-pass").hidden === false && $("btn-pass").textContent === "失去1点体力",
+    `hidden=${$("btn-pass").hidden} text="${$("btn-pass").textContent}"`);
+  check("㉿LW3 乱武窗口不新增按钮：选项行里既没有「放弃」也没有第二个「失去1点体力」",
+    Array.from($("t-options").children).every(
+      (child) => !child.textContent.includes("放弃") && !child.textContent.includes("失去1点体力")),
+    Array.from($("t-options").children).map((child) => child.textContent).join(" / "));
   ui.resetSelection();
 }
 

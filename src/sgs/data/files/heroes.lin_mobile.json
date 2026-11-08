@@ -116,6 +116,33 @@
           "skill_type": "LORD"
         }
       ]
+    },
+    {
+      "id": "jiaxu_mobile",
+      "name": "贾诩移动版",
+      "true_name": "贾诩",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "lin-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wansha",
+          "name": "完杀",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "luanwu",
+          "name": "乱武",
+          "skill_type": "LIMITED"
+        },
+        {
+          "id": "weimu",
+          "name": "帷幕",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

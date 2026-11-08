@@ -236,6 +236,11 @@ def test_the_ten_query_kinds_and_the_window_causes_are_defined():
         "BORROWED_SWORD",
         "LORD_REQUEST",
         "REJUDGE",
+        # lin-batch2 票 03：贾诩移动版【乱武】的"对距离最近的另一名角色使用一张【杀】"
+        # 复用借刀那扇 ``RESPOND`` 面（``mode=USE``），只多一个成因值——它与
+        # ``BORROWED_SWORD`` 的区别是"放弃 = 失去 1 点体力"而不是"交出武器"（投影文案与
+        # `pending.js:alternativeLabel` 各有一个分支）。
+        "LUANWU",
     }
 
 
