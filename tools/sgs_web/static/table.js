@@ -182,6 +182,9 @@ function renderSelfSeat(view, ctx) {
   for (const segment of [...hp.children]) hpBox.appendChild(segment);
   fillSeatTags($("t-self-tags"), ctx.flagsFor(player, classes));
   if ($("t-self-chain")) $("t-self-chain").hidden = !player.chained;
+  // lin-batch2 票 04：自己的翻面与环上座位卡同一套表现（同一个 `.flipped-layer` 节点、
+  // 同一个 title）。只读投影字段 `player.flipped`，不在前端推状态——与横置 / 阵亡同一姿态。
+  if ($("t-self-flipped")) $("t-self-flipped").hidden = !player.flipped;
   if ($("t-self-dead")) $("t-self-dead").hidden = Boolean(player.alive);
   // 票 09：与对手座位卡 / 武将详情同一句话「手牌：张数/上限」（读数由 seat-view.js 派生）。
   $("t-self-hand").textContent = handReading(player);

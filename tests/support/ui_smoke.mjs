@@ -15180,6 +15180,26 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && $("t-self-chain").hidden === true,
     `seat1=${[...seatBox(1).classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")} selfChainHidden=${$("t-self-chain").hidden}`);
 
+  /* ---- 自身翻面（lin-batch2 票 04）：自己的面板与环上座位卡同一套蒙灰层 ---- */
+  const selfFlip = displayView();
+  selfFlip.snapshot.players[0].flipped = true;
+  renderDisplay(selfFlip);
+  const selfLayer = $("t-self-flipped");
+  check("LIN-04-a1 自身翻面 = 与其他座位同一套蒙灰层（#t-self-flipped 去掉 hidden、无文字、同一 class）",
+    $("t-self-seat").classList.contains("flipped")
+      && selfLayer.hidden === false
+      && selfLayer.textContent === ""
+      // 静态节点的 class / title 由 test_web_static 那条从 index.html 里核（垫片只按 id 建节点、
+      // 不解析 HTML 属性）；这里核的是**渲染后的状态**：与环上座位同一个 class、同样没有文字。
+      && /id="t-self-flipped" class="flipped-layer"/.test(readFileSync("tools/sgs_web/static/index.html", "utf8")),
+    `self=${[...$("t-self-seat").classList.set].join(",")} hidden=${selfLayer.hidden} text="${selfLayer.textContent}"`);
+  const selfFront = displayView();
+  selfFront.snapshot.players[0].flipped = false;
+  renderDisplay(selfFront);
+  check("LIN-04-a2 翻回正面后同一节点重新 hidden（层不残留）",
+    !$("t-self-seat").classList.contains("flipped") && $("t-self-flipped").hidden === true,
+    `self=${[...$("t-self-seat").classList.set].join(",")} hidden=${$("t-self-flipped").hidden}`);
+
   /* ---- 酒：席位泛红 + 三态叠加不互挡；回合末清除后恢复 ---- */
   renderDisplay(displayView());
   const seat1 = seatBox(1);

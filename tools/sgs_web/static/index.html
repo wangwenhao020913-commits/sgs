@@ -206,6 +206,11 @@
             <span>座位 <b id="t-self-seatno">0</b></span>
           </div>
           <div id="t-self-chain" class="chain-line" hidden title="横置（连环状态）"></div>
+          <!-- lin-batch2 票 04（用户 2026-11-08 签）：自己的翻面与环上座位卡**同一套**蒙灰层。
+               节点常驻、只切 `hidden`（与 #t-self-chain / #t-self-dead 同姿态）；CSS 复用
+               `.flipped-layer`，不另写一份置灰配比。 -->
+          <div id="t-self-flipped" class="flipped-layer" hidden
+               title="翻面（背面朝上：跳过你的下个回合）"></div>
           <span id="t-self-dead" class="dead-tag" hidden><span class="dead-text">阵亡</span></span>
         </div>
         <!-- 右侧判定区（3 槽）/ 装备区（四槽）在渲染时铺；空槽也是暗色占位。 -->

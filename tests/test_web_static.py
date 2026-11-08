@@ -1478,3 +1478,25 @@ def test_the_two_row_watch_face_reads_the_shape_and_max_per_suit_from_the_payloa
     rule = _css_rule(".watch-row .cards")
     assert re.search(r"flex-wrap:\s*nowrap", rule), f"行内不换行：{rule}"
     assert re.search(r"overflow-x:\s*auto", rule), f"超过一屏横向滚动：{rule}"
+
+
+def test_the_self_panel_ships_the_flipped_layer_node() -> None:
+    """lin-batch2 票 04（用户 2026-11-08 签）：自己的武将块带与环上座位同一套翻面蒙灰层。
+
+    环上的层由 `seat-view.js:flippedLayerNode` 在 `heroBlockNode` 里**动态**建出；自己的
+    底部面板是**常驻静态节点**（与 `#t-self-chain` / `#t-self-dead` 同姿态），故节点必须在
+    `index.html` 里、且默认 `hidden` —— 渲染时只切 `hidden`（`table.js:renderSelfSeat`）。
+    三态（横置虚线 / 翻面蒙灰 / 阵亡牌）按 z-index 分层，互不遮挡。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    block = html[html.index('id="t-self-hero"'):html.index('id="t-self-zones"')]
+    tag = re.search(r'<div\b[^>]*\bid="t-self-flipped"[^>]*>', block)
+    assert tag is not None, "自己的武将块里缺少翻面蒙灰层 #t-self-flipped"
+    assert re.search(r'class="flipped-layer"', tag.group(0)), tag.group(0)
+    assert re.search(r"\bhidden\b", tag.group(0)), tag.group(0)
+    assert re.search(r'title="[^"]*翻面', tag.group(0)), tag.group(0)
+    assert (
+        html.index('id="t-self-chain"')
+        < html.index('id="t-self-flipped"')
+        < html.index('id="t-self-dead"')
+    ), "翻面层应排在横置虚线之后、阵亡牌之前（三态 CSS 分层互不遮挡）"
