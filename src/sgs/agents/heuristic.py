@@ -120,6 +120,8 @@ from sgs.state import (
     SelectCardsQuery,
     SelectOption,
     SelectOptionQuery,
+    SelectOptions,
+    SelectOptionsQuery,
     SkillActivationQuery,
     SlotKind,
     UseCard,
@@ -1991,6 +1993,12 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         "shensu_skip_judge_draw": 2.0,
         "shensu_skip_play_equip": -1.0,
         "shensu_both": 1.0,
+        # 界夏侯渊【神速】（jie-feng-batch2 票 01）的多选面：三项各自估值、AI 取和最大
+        # 的那一组。【1】与标版同档；【2】多付一张装备 + 让出整个出牌阶段（比标版更亏，
+        # 因为牌面不再允许"两项都选"这种打包优惠）；【3】翻面 = 白丢一个回合。
+        "jie_shensu_1": 2.0,
+        "jie_shensu_2": -1.0,
+        "jie_shensu_3": -3.0,
         # 典韦移动版【强袭】（huo-dianwei-mobile 票 01）的代价二选一：两档都是成本，
         # 由"哪一档更便宜"决定——1 点体力 ≈ 3.5、一张武器牌 ≈ 2.0 ⇒ 有牌就弃牌
         # （已发动的技能不能再放弃：`_is_committed_skill_step` 给 Pass 惩罚）。
@@ -2169,9 +2177,14 @@ _HOSTILE_SEAT_STEPS = (
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
     "hero.xiahouyuan.shensu:",
+    # 界夏侯渊【神速】（jie-feng-batch2 票 01）：同一手写询问、同一前缀陷阱
+    # （``hero.jie_xiahouyuan_mobile.shensu:target:<项号>``）。
+    "hero.jie_xiahouyuan_mobile.shensu:",
     # 张角移动版【雷击】（feng-zhangjiao 票 01）：座位步选的是**被判定者**（也就是挨 2 点
     # 雷电伤害的人）——不登记会落进"帮盟友"的缺省分支，AI 会给队友判一次、白打队友。
     "hero.zhangjiao_mobile.leiji:",
+    # 界张角移动版【雷击】（jie-feng-batch2 票 02）：同一手写座位步，同一档。
+    "hero.jie_zhangjiao_mobile.leiji:",
     # 典韦移动版【强袭】（huo-dianwei-mobile 票 01）：选的是**挨 1 点伤害的人**——不登记
     # AI 会把【强袭】的伤害砸在队友身上。
     "hero.dianwei_mobile.qiangxi:",
@@ -2337,6 +2350,20 @@ def _score_select_option(query: Query, action: Action) -> float:
     if query.hero_card is not None:
         return _score_hero_card_option(query, action.choice)
     return 0.0
+
+
+def _score_select_options(query: Query, action: Action) -> float:
+    """``SELECT_OPTIONS``（多选选项；jie-feng-batch2 票 01a）：按**勾中的项逐个**求和。
+
+    与 :func:`_score_select_option` 同一条口径：每个选项的估值来自 :data:`_OPTION_VALUES`
+    （技能票自己登记；没登记 = 0 分），``Pass`` 按"取消已发动的技能"罚分。空集是一条
+    合法候选（= 什么都不做），它的分数恒为 0 ⇒ 与"放弃"同价时按候选序取前面的那条，
+    也就是空集——这是**保守**方向（不做额外的事），符合多选面的超时兜底。
+    """
+    assert isinstance(query, SelectOptionsQuery)
+    if not isinstance(action, SelectOptions):
+        return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+    return sum(_OPTION_VALUES.get(choice, 0.0) for choice in action.choices)
 
 
 # ---------------------------------------------------------------------------
@@ -2971,6 +2998,7 @@ _SCORERS: Mapping[QueryKind, Callable[[Query, Action], float]] = MappingProxyTyp
         QueryKind.SKILL_ACTIVATION: _score_skill_activation,
         QueryKind.SELECT_CARDS: _score_select_cards,
         QueryKind.SELECT_OPTION: _score_select_option,
+        QueryKind.SELECT_OPTIONS: _score_select_options,
         QueryKind.ARRANGE: _score_arrange,
         QueryKind.DISTRIBUTE: _score_distribute,
     }
@@ -3225,6 +3253,37 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     True,
                     "非 None = 这一问是『展示武将牌』：``_score_select_option`` 据此进入 "
                     "``_score_hero_card_option``（技能行 / 效果行两档估值）",
+                ),
+            }
+        ),
+        "SelectOptionsQuery": MappingProxyType(
+            {
+                "skill_id": (
+                    True,
+                    "多选面的技能归属：与 ``SelectOptionQuery`` 同一条（本仓暂只有界神速用；"
+                    "座位步不在这里，故不查敌我前缀表）",
+                ),
+                "options": (
+                    False,
+                    "选项面不枚举：``_score_select_options`` 逐个勾中的项查 "
+                    "``_OPTION_VALUES``——未登记的新选项落 0 分（新增选项必须同票登记条目）",
+                ),
+                "disabled": (
+                    True,
+                    "置灰项在候选里根本不会出现（引擎侧枚举时已剔除）；AI 只读它理解"
+                    "『这一项此刻不可选』，不据此改分数",
+                ),
+                "min_selected": (
+                    True,
+                    "下限决定『空集是否合法』：AI 不自己重建合法性，取候选里合法的那一条",
+                ),
+                "max_selected": (
+                    True,
+                    "上限决定一次最多能勾几项：同上，候选枚举的唯一真源在引擎",
+                ),
+                "option_texts": (
+                    False,
+                    "显示文本只给界面看；AI 的估值读选项 id（``_OPTION_VALUES``）",
                 ),
             }
         ),
@@ -3855,6 +3914,21 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.0),
         "使用 / 打出【闪】后免费判定（♠ 1/4 概率造成 2 点雷电）：无成本，恒发动",
     ),
+    # jie-feng-batch2 票 02：界张角移动版三条。
+    "hero.jie_zhangjiao_mobile.leiji": (
+        _constant(2.5),
+        "使用 / 打出【闪】后免费判定：♠ 造 2 点、♣ 回复 1 点 + 造 1 点（两个分支都对自己有利），"
+        "无成本 ⇒ 恒发动",
+    ),
+    "hero.jie_zhangjiao_mobile.guidao": (
+        _constant(1.0),
+        "改判窗口：与两版【鬼才】同口径（有改判能力即参与，保守给正但不高）",
+    ),
+    "hero.jie_zhangjiao_mobile.huangtian": (
+        _score_huangtian,
+        "主公技：发动者是**别的座位**——交出一张【闪】/【闪电】的收益归张角、成本归自己；"
+        "按主公的身份关系打分（明敌人不给、其余给正分）",
+    ),
     "hero.zhangjiao_mobile.guidao": (
         _constant(1.0),
         "改判窗口：与两版【鬼才】同口径（有改判能力即参与，保守给正但不高）",
@@ -3933,6 +4007,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.xiahouyuan.shensu": (
         _score_shensu,
         "跳判定 + 摸牌换一张无距离【杀】：常态少摸两张不划算，只在敌方 1 血能补刀时发动",
+    ),
+    # jie-feng-batch2 票 01：界夏侯渊【神速】（同一条判据 + 多选面）。
+    "hero.jie_xiahouyuan_mobile.shensu": (
+        _score_shensu,
+        "同标版：敌方 1 血能补刀才发动；发动后在多选面里只勾【1】（【2】多付装备+让出"
+        "出牌阶段、【3】翻面白丢一个回合，都是负分）",
     ),
     "hero.xuchu.luoyi": (
         _constant(2.0),

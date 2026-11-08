@@ -518,7 +518,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // lin-batch2 票 01：林包移动版加曹丕移动版（新真名「曹丕」）⇒ 真名 57 → 58、版本 86 → 87。
   // lin-batch2 票 02：林包移动版加董卓移动版（新真名「董卓」）⇒ 真名 58 → 59、版本 87 → 88。
   // lin-batch2 票 03：林包移动版加贾诩移动版（新真名「贾诩」）⇒ 真名 59 → 60、版本 88 → 89。
-  ui.state.heroCatalog.length === 62 && catalogVersions.length === 91,
+  ui.state.heroCatalog.length === 62 && catalogVersions.length === 93,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -11554,11 +11554,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // ---- ① 外壳：仍是 `choice`（**不为武将牌另立 kind**），标题来自技能名 ----
   // 种类总数在 huo-shenzhugeliang 票 02 之后是 7（新增 `heroPick` = 武将牌上的牌点选），
-  // lei-shenganning 票 93 再加第八种 `watchTwoRows`（两行观看手牌）。本条判的仍是
-  // "武将牌弹窗**不**占用一个专用 kind"。
+  // lei-shenganning 票 93 再加第八种 `watchTwoRows`（两行观看手牌），jie-feng-batch2 票 01a
+  // 再加第九种 `multiChoice`（多选勾选面）。本条判的仍是"武将牌弹窗**不**占用一个专用 kind"。
   render(heroView(heroCardPending()));
   check("U1-08a 武将牌弹窗 = 既有选择型外壳（不另立 kind）：标题「天成」、正文在弹窗里",
-    Object.keys(ui.DIALOG_KINDS).length === 8
+    Object.keys(ui.DIALOG_KINDS).length === 9
       && !("hero" in ui.DIALOG_KINDS)
       && ui.stepDialogKind(ui.state.view.pending) === "choice"
       && $("t-dialog").hidden === false
@@ -20664,6 +20664,107 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     distributeAnswers.length === 1
       && JSON.stringify(distributeAnswers[0].body.action) === JSON.stringify(dActions[1]),
     `answers=${distributeAnswers.length} action=${JSON.stringify(distributeAnswers[0] && distributeAnswers[0].body.action)}`);
+}
+
+/* ============ 票 01a：多选选项弹窗（界夏侯渊【神速】「至多三项」）============
+ *
+ * 与真实 `pending_payload` 同形的合成 view：`SELECT_OPTIONS` + `options` / `disabled` /
+ * 两个区间 + `SelectOptions` 候选。钉四件事：勾选面画成逐项勾选 / 置灰项列出来但点不动 /
+ * 勾选拼出候选里那条集合动作 / 空集也是合法答案（提交键从一开始就可点）。
+ */
+{
+  const multiSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261108,
+  });
+  const multiSeq = 971;
+  const multiActions = [
+    [],
+    ["jie_shensu_1"],
+    ["jie_shensu_3"],
+    ["jie_shensu_1", "jie_shensu_3"],
+  ].map((choices) => ({
+    kind: "SelectOptions",
+    choices,
+    answers_seq: multiSeq,
+  }));
+  const multiView = synthView({
+    kind: "SELECT_OPTIONS", actor: 0, seq: multiSeq, prompt: "请选择若干项（可多选）。",
+    legal_actions: multiActions,
+    candidate_index: {}, option_seats: {},
+    options: ["jie_shensu_1", "jie_shensu_2", "jie_shensu_3"],
+    disabled: ["jie_shensu_2"],
+    min_selected: 0, max_selected: 3,
+    option_texts: {
+      jie_shensu_1: "【1】跳过判定阶段和摸牌阶段",
+      jie_shensu_2: "【2】跳过出牌阶段并弃置一张装备牌",
+      jie_shensu_3: "【3】跳过弃牌阶段并翻面",
+    },
+    context: {
+      actor: 0, name: "神速", targets: [],
+      label: "0号位界夏侯渊发动神速",
+      requirement: "回合开始时，你可以选择至多三项", skill_hints: [],
+    },
+  });
+  ui.state.view = multiView;
+  ui.state.sessionId = multiSession.session_id;
+  ui.state.multiSelect = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(multiView);
+
+  const multiRows = () => Array.from($("t-options").children).filter(
+    (node) => String(node.className || "").includes("multi-option"),
+  );
+  check("多选弹窗-1 画成逐项勾选面（弹窗 + 三行都是未勾选）",
+    ui.stepDialogKind(multiView.pending) === "multiChoice"
+      && $("t-dialog").hidden === false
+      && multiRows().length === 3
+      && multiRows().every((row) => row.textContent.startsWith("☐")),
+    `kind=${ui.stepDialogKind(multiView.pending)} rows=${JSON.stringify(multiRows().map((row) => row.textContent))}`);
+  check("多选弹窗-2 置灰项列出来但点不动（第 2 项）",
+    multiRows()[1].disabled === true
+      && String(multiRows()[1].className || "").includes("dis")
+      && multiRows()[0].disabled === false,
+    `row2=${multiRows()[1].disabled} cls=${multiRows()[1].className}`);
+  check("多选弹窗-3 空集也是合法答案（没有勾选时提交键就可点，动作 = 候选里那个空集）",
+    $("btn-submit").disabled === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(multiActions[0]),
+    `submit=${$("btn-submit").disabled} built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(multiRows()[0]);
+  check("多选弹窗-4 点第 1 行 = 勾上；动作变成 {1}",
+    multiRows()[0].textContent.startsWith("☑")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(multiActions[1]),
+    `row1=${multiRows()[0].textContent} built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(multiRows()[2]);
+  check("多选弹窗-5 再点第 3 行 = 勾上两项；动作变成 {1,3}（按 options 原序）",
+    multiRows()[2].textContent.startsWith("☑")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(multiActions[3]),
+    `built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(multiRows()[1]);
+  check("多选弹窗-6 点置灰行不改变勾选（引擎侧也不会有含它的候选）",
+    multiRows()[0].textContent.startsWith("☑")
+      && multiRows()[2].textContent.startsWith("☑")
+      && multiRows()[1].textContent.startsWith("☐")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(multiActions[3]),
+    `rows=${JSON.stringify(multiRows().map((row) => row.textContent))}`);
+
+  const beforeMulti = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const multiAnswers = calls
+    .slice(beforeMulti)
+    .filter((call) => call.path.includes("/answer"));
+  check("多选弹窗-7 点「提交」= 恰一条 POST，送出的就是候选里那条 SelectOptions",
+    multiAnswers.length === 1
+      && JSON.stringify(multiAnswers[0].body.action) === JSON.stringify(multiActions[3]),
+    `answers=${multiAnswers.length} action=${JSON.stringify(multiAnswers[0] && multiAnswers[0].body.action)}`);
 }
 
 /* ============ 选牌**顺序无关**（2026-11-03 实机报障：业炎的四色成本从右往左点 = 非法）============

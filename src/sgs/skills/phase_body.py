@@ -214,6 +214,15 @@ class PhaseBodySkill(HeroSkillDecl):
     同一短 id 的两版（标准【闭月】摸一张 / 界【闭月】有手牌摸一、没有手牌摸二）
     牌面不同、文案也就不同；键仍是短 id，故给界版一条显式覆盖，而不是再抄一份表。
     """
+    step_requirements: dict[str, str] | None = None
+    """逐步文案的**覆盖表**（jie-feng-batch2 票 01 的加法；缺省 ``None`` = 读
+    :data:`_STEP_REQUIREMENTS` 的短 id 那一行）。
+
+    与 :attr:`requirement` 同一条理由：标准 / 界两版共用短 id（界夏侯渊仍是 ``shensu``），
+    而逐步问法不同（界版是「至多三项」+ 多选面）。**先例 = B 族的** ``DamageAfterSkill``
+    （M6 票 15 的 ``step_requirements``，标/界【遗计】同短 id 而分配步问法不同）。
+    """
+
     deck_arrange: DeckTopArrange | None = None
     """这条阶段体技能带的**牌堆顶排列规格**（M6 票 15；缺省 ``None`` = 不排列）。
 
@@ -1425,6 +1434,238 @@ _SHENSU = PhaseBodySkill(
 
 
 # ---------------------------------------------------------------------------
+# 界夏侯渊【神速】（jie-feng-batch2 票 01）：至多三项（多选面）+ 第三项翻面
+#
+# 牌面（用户 `D:\\SGS_HEROS\\界限突破-风包\\界夏侯渊\\技能.txt` L13，2026-11-08 改后，逐字）：
+#   回合开始时，你可以选择至多三项：1.跳过判定阶段和摸牌阶段；2.跳过出牌阶段并弃置一张
+#   装备牌；3.跳过弃牌阶段并翻面。你每选择一项，便视为你使用一张无距离限制的【杀】。
+#
+# 与标版的三处实质差异：
+# - **至多三项**：选项面是**多选**（`QueryKind.SELECT_OPTIONS`，框 01a 新造的面），
+#   任意组合 0~3 项；没有可弃的装备牌时【2】**置灰不可勾**（引擎侧同时把它从候选域里去掉）。
+# - **第三项**「跳过弃牌阶段并翻面」：`skip_discard_phase` + `set_flipped`，翻面 = 下个回合
+#   整个被跳过（账本 L783）。
+# - 文案槽位：短 id 仍是 `shensu`，但逐步文案走 `PhaseBodySkill.step_requirements` 覆盖
+#   （A4 的显式区分；`_STEP_REQUIREMENTS["shensu"]` 是标版的「一至两项」，不能共用）。
+#
+# 结算序（用户 2026-11-08 裁 Q3 = A）：【2】的弃牌是**代价**，选完立刻付（付不起 ⇒ 这一项作废）；
+# 结果按牌面 1→2→3 逐项：跳阶段（第三项还翻面）→ 它那一张【杀】。
+# ---------------------------------------------------------------------------
+
+JIE_SHENSU = hero_skill_id("jie_xiahouyuan_mobile", "shensu")
+"""界夏侯渊【神速】的全限定技能 id（数据面 = `jie_feng_mobile` 表，用户裁定 D0 = B）。"""
+
+JIE_SHENSU_OPTIONS: tuple[str, ...] = (
+    "jie_shensu_1",
+    "jie_shensu_2",
+    "jie_shensu_3",
+)
+"""三项的选项 id（闭集；与 `options.js:OPTION_LABELS` 的键一一对应）。"""
+
+JIE_SHENSU_OPTION_TEXTS: dict[str, str] = {
+    "jie_shensu_1": "【1】跳过判定阶段和摸牌阶段",
+    "jie_shensu_2": "【2】跳过出牌阶段并弃置一张装备牌（没有可弃的装备牌时置灰）",
+    "jie_shensu_3": "【3】跳过弃牌阶段并翻面",
+}
+"""选项按钮上的显示文本（逐字按牌面子句；第 2 项额外说明置灰条件）。"""
+
+JIE_SHENSU_REQUIREMENT = (
+    "回合开始时，你可以选择至多三项：1.跳过判定阶段和摸牌阶段；"
+    "2.跳过出牌阶段并弃置一张装备牌；3.跳过弃牌阶段并翻面。"
+    "你每选择一项，便视为你使用一张无距离限制的【杀】。"
+)
+"""界版牌面全文（逐字；与 `_REQUIREMENTS["shensu"]` 的标版文案显式区分）。"""
+
+JIE_SHENSU_STEP_REQUIREMENTS: dict[str, str] = {
+    "items": "选择至多三项（可勾选任意组合；没有可弃的装备牌时【2】置灰）",
+    "card": "弃置一张装备牌（手牌或装备区）",
+    "target": "选择一张无距离限制的【杀】的目标",
+}
+"""逐步文案（覆盖表；键与询问 `skill_id` 冒号后那段对齐）。"""
+
+_ASK_JIE_SHENSU_EQUIP = "hero.jie_xiahouyuan_mobile.shensu.equip"
+"""手写询问位置：弃置一张装备牌（`ask_selection` 的询问位置，逐处唯一）。"""
+
+_JIE_SHENSU_ITEMS = "jie_shensu_items"
+"""帧私有：这一发选中的项（定格；续跑不重问）。"""
+
+_JIE_SHENSU_PAID = "jie_shensu_paid"
+"""帧私有：【2】的装备牌已弃置（续跑不重弃）。"""
+
+_JIE_SHENSU_SKIPPED = "jie_shensu_skipped"
+"""帧私有：第 n 项的阶段已跳过 / 已翻面（键后缀 = 项号）。"""
+
+_JIE_SHENSU_USED = "jie_shensu_used"
+"""帧私有：第 n 项那张【杀】已经发起（键后缀 = 项号）。"""
+
+_JIE_SHENSU_TARGET = "jie_shensu_target"
+"""帧私有：第 n 项那张【杀】已经选定的目标座位（键后缀 = 项号）。"""
+
+
+def _jie_shensu_disabled(state: GameState, owner: int) -> tuple[str, ...]:
+    """【2】此刻能不能选：手牌 + 装备区里没有装备牌 ⇒ 置灰（引擎侧同时把它排除出候选）。"""
+    if _shensu_equipment_cards(state, owner):
+        return ()
+    return ("jie_shensu_2",)
+
+
+def _jie_shensu_choose(host: Any, frame: Frame, owner: int) -> Any:
+    """多选询问（**只问一次**，答案定格在帧私有；挂起重入返回 ``"stay"`` 的哨兵）。
+
+    选项区间 ``[0, 3]``：0 项 = 什么都不做（用户口径「任意复选」；「可以」的放弃出口仍在
+    上一问"是否发动"里，账本 L816/L827）。置灰项由 :func:`_jie_shensu_disabled` 现算。
+    """
+    chosen = frame.data.get(_JIE_SHENSU_ITEMS)
+    if chosen is not None:
+        return chosen
+    answer = host.ask_options(
+        frame,
+        owner,
+        Timing.TURN_START,
+        skill_id=f"{JIE_SHENSU}:items",
+        options=JIE_SHENSU_OPTIONS,
+        disabled=_jie_shensu_disabled(host.state, owner),
+        min_selected=0,
+        max_selected=len(JIE_SHENSU_OPTIONS),
+        option_texts=JIE_SHENSU_OPTION_TEXTS,
+    )
+    if host.suspended(answer):
+        return "stay"
+    chosen = tuple(getattr(answer, "choices", ()) or ())
+    frame.data[_JIE_SHENSU_ITEMS] = chosen
+    return chosen
+
+
+def _jie_shensu_pay_equipment(host: Any, frame: Frame, owner: int) -> Any:
+    """【2】的**代价步**：弃一张装备牌（与标版同一姿态：选完立刻付，付不起这一项作废）。
+
+    返回 ``"paid"`` / ``"stay"`` / ``None``（付不起）。
+    """
+    if frame.data.get(_JIE_SHENSU_PAID):
+        return "paid"
+    if not _shensu_equipment_cards(host.state, owner):
+        return None
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_JIE_SHENSU_EQUIP,
+        key="jie_shensu:equip",
+        actor=owner,
+        timing=Timing.TURN_START,
+        spec=SelectionSpec(
+            zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=False
+        ),
+        build_face=lambda: _shensu_equipment_face(host, owner),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:
+        return None
+    control = host.move_in_frame(
+        frame,
+        host.state.refs((int(picked[0]),)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=owner,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    frame.data[_JIE_SHENSU_PAID] = True
+    return "paid"
+
+
+def _jie_shensu_use_slash(host: Any, frame: Frame, owner: int, index: int) -> Control:
+    """第 ``index`` 张虚拟【杀】：选目标 → ``start_use``，返回 ``"stay"`` / ``None``。"""
+    used_key = f"{_JIE_SHENSU_USED}:{index}"
+    if frame.data.get(used_key):
+        return None
+    card = pure_virtual_card(host.state, "slash")
+    pool = _shensu_target_pool(host.state, owner, card)
+    if not pool:
+        frame.data[used_key] = True
+        return None
+    target_key = f"{_JIE_SHENSU_TARGET}:{index}"
+    target = frame.data.get(target_key)
+    if target is None:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.TURN_START,
+            skill_id=f"{JIE_SHENSU}:target:{index}",
+            options=tuple(f"seat:{seat}" for seat in pool),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        target = int(str(answer.choice).split(":", 1)[1])
+        frame.data[target_key] = target
+    frame.data[used_key] = True
+    host.start_use(
+        card,
+        source=owner,
+        targets=(int(target),),
+        use_timing=Timing.TURN_START,
+        counts=False,
+    )
+    return "stay"
+
+
+def _jie_shensu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：多选一次 → 付【2】的代价 → 按 1→2→3 逐项（跳阶段 / 翻面 → 它那张【杀】）。"""
+    del answers
+    owner = frame.data["skill_owner"]
+    chosen = _jie_shensu_choose(host, frame, owner)
+    if chosen == "stay":
+        return "stay"
+    want = set(chosen)
+    if "jie_shensu_2" in want and not frame.data.get(_JIE_SHENSU_PAID):
+        paid = _jie_shensu_pay_equipment(host, frame, owner)
+        if paid == "stay":
+            return "stay"
+        if paid != "paid":
+            want.discard("jie_shensu_2")
+    for index, option, skip in (
+        (0, "jie_shensu_1", None),
+        (1, "jie_shensu_2", "play"),
+        (2, "jie_shensu_3", "discard"),
+    ):
+        if option not in want:
+            continue
+        skipped_key = f"{_JIE_SHENSU_SKIPPED}:{index}"
+        if not frame.data.get(skipped_key):
+            if index == 0:
+                host.skip_judge_phase(owner)
+                host.skip_draw_phase(owner)
+            elif skip == "play":
+                host.skip_play_phase(owner)
+            else:
+                host.skip_discard_phase(owner)
+                host.set_flipped(frame, owner, True)
+            frame.data[skipped_key] = True
+        if _jie_shensu_use_slash(host, frame, owner, index) == "stay":
+            return "stay"
+    return None
+
+
+JIE_SHENSU_FLOW = SkillFlow(
+    name="jie_shensu",
+    steps=(),
+    effect=_jie_shensu_effect,
+)
+"""【神速】（界版）的零步流水线：唯一的一问（多选面）住在 effect 里（手写询问）。"""
+
+_JIE_SHENSU = PhaseBodySkill(
+    hero_id="jie_xiahouyuan_mobile",
+    short_id="shensu",
+    timing=Timing.TURN_START,
+    flow=JIE_SHENSU_FLOW,
+    requirement=JIE_SHENSU_REQUIREMENT,
+    step_requirements=JIE_SHENSU_STEP_REQUIREMENTS,
+)
+
+
+
+# ---------------------------------------------------------------------------
 # 神周瑜移动版【琴音】（huo-shenzhouyu-mobile 票 01 / 框架票 03）
 #
 # 牌面（用户 2026-11-02 录入，移动版）：
@@ -1690,6 +1931,7 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _XUNXUN,
     _SHELIE,
     _SHENSU,
+    _JIE_SHENSU,
     _QINYIN,
     _SHUANGXIONG,
 )
@@ -1796,7 +2038,8 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             modifiers=skill.modifiers,
             deck_arrange=skill.deck_arrange,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
-            step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
+            step_requirements=skill.step_requirements
+            or _STEP_REQUIREMENTS.get(skill.short_id),
             per_round_limit=skill.per_round_limit,
             virtual_type_ids=skill.virtual_type_ids,
             virtual_source_count=skill.virtual_source_count,

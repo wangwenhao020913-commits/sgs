@@ -533,6 +533,9 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "SelectCardsQuery",
             "SelectOption",
             "SelectOptionQuery",
+            # jie-feng-batch2 票 01a：多选选项面（界夏侯渊【神速】）——同样是询问模型。
+            "SelectOptions",
+            "SelectOptionsQuery",
             "SkillActivationQuery",
             # huo-dianwei-mobile 票 01：`CardRef.slot` 的枚举（**可见面**的一部分，
             # 与已允许的 CardRef 同源；不是全知状态 / 规则表）。

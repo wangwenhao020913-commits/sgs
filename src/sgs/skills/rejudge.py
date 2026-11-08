@@ -39,6 +39,7 @@ from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
     "GUIDAO",
+    "JIE_GUIDAO",
     "GUICAI",
     "JIE_GUICAI",
     "JIE_TIANDU",
@@ -80,6 +81,16 @@ GUIDAO = hero_skill_id("zhangjiao_mobile", "guidao")
 
 文本里的"用"字是官方现行口径（feng-zhangjiao 票 01 的 R6）：改判**不是打出**，走
 ``FrameKind.REJUDGE`` 事件帧（票 02）。
+"""
+
+JIE_GUIDAO = hero_skill_id("jie_zhangjiao_mobile", "guidao")
+"""界张角移动版【鬼道】的全限定技能 id（jie-feng-batch2 票 02）。
+
+牌面（用户 `技能.txt` L15，2026-11-08 改后，逐字）：「当一名角色的判定牌生效前，你可以
+**用**一张黑色牌替换之。」与移动版【鬼道】的结算**相同**（同窗口、同颜色筛选、同"替换"
+去向），差别只有牌面用字（「一名角色的判定牌」/「用」）——A4 的显式区分因此落在**另起
+一条** :class:`~sgs.skills.catalog.SkillDef`（键 `hero.jie_zhangjiao_mobile.guidao`），
+声明字段一个不改。
 """
 
 TIANDU = hero_skill_id("guojia", "tiandu")
@@ -260,6 +271,18 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
         ),
         SkillDef(
             skill_id=GUIDAO,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            rejudge_capable=True,
+            rejudge_zones=(Zone.HAND, Zone.EQUIP),
+            rejudge_card_color=Color.BLACK,
+            rejudge_original_to=RejudgeOriginal.HAND,
+            requirement="用一张黑色牌，替换此判定牌",
+        ),
+        # 界张角移动版【鬼道】（jie-feng-batch2 票 02）：字段与移动版逐字相同，只换 skill_id。
+        SkillDef(
+            skill_id=JIE_GUIDAO,
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,

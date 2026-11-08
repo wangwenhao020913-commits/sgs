@@ -21,26 +21,33 @@
 
 from __future__ import annotations
 
-from sgs.data import RuleConfig, load_content_pack
-from sgs.effects import check_targets
+from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack
+from sgs.effects import check_targets, legal_actions_for
 from sgs.engine import Engine
 from sgs.skills.virtual import transformed_card
 from sgs.state import (
     ActivateSkill,
     EndPhase,
+    FrameKind,
     Pass,
     Phase,
+    QueryKind,
+    SelectCards,
     SelectOption,
+    SelectOptions,
+    SubstituteJudgeCard,
     UseCard,
     WindowCause,
 )
 from sgs.timing import Timing
 
 from support import (
+    PassPlayer,
     SeatSpec,
     build_state,
     cards_of_type,
     deck_excluding,
+    ran_timing,
     run_queries,
     run_until,
 )
@@ -1111,3 +1118,877 @@ def test_jie_qimou_hp_loss_does_not_trigger_kuanggu() -> None:
     engine, _players, _script = _qimou_use(hp=4, choice="失去2点体力")
 
     assert _asks(engine, JIE_KUANGGU) == []
+
+
+# ---------------------------------------------------------------------------
+# 界夏侯渊移动版【神速】（jie-feng-batch2 票 01）
+#
+# 牌面（用户 2026-11-08 改后，逐字）：「回合开始时，你可以选择至多三项：1.跳过判定阶段和
+# 摸牌阶段；2.跳过出牌阶段并弃置一张装备牌；3.跳过弃牌阶段并翻面。你每选择一项，便视为你
+# 使用一张无距离限制的【杀】。」
+#
+# 本节的判据（票面 §1.11）：
+# 1. 选项面是**多选**（`SELECT_OPTIONS`，任意 0~3 项）；没有可弃的装备牌时【2】置灰；
+# 2. 【2】的弃牌是**代价**、立刻先付，付不起这一项作废；
+# 3. 结果按牌面 1→2→3：跳阶段（第三项还翻面）→ 它那一张无距离【杀】；
+# 4. 三张【杀】不计入出牌阶段的次数；跳过的判定阶段保留判定区的牌。
+# ---------------------------------------------------------------------------
+
+JIE_SHENSU = "hero.jie_xiahouyuan_mobile.shensu"
+"""界夏侯渊【神速】的全限定技能 id。"""
+
+JIE_XIAHOUYUAN = "jie_xiahouyuan_mobile"
+
+_JIE_SHENSU_ARMOR = cards_of_type(PACK, "eight_diagrams")[0]
+"""八卦阵（防具）：【2】的成本——**手牌**里的装备牌。"""
+
+_JIE_SHENSU_HORSE = cards_of_type(PACK, "dilu")[0]
+"""的卢（+1 防御马）：【2】的成本——**装备区**里的装备牌（"装备牌"含两个区）。"""
+
+_JIE_SHENSU_HAND = tuple(cards_of_type(PACK, "dodge")[:2])
+"""手牌里的两张【闪】：撑手牌数、不给任何判据。"""
+
+_JIE_SHENSU_INDULGENCE = cards_of_type(PACK, "indulgence")[0]
+"""【乐不思蜀】：放在判定区，用来钉"跳过的判定阶段不消费判定区的牌"。"""
+
+
+def _jie_shensu_fallback(query):
+    """其余询问取最小合法应答：有 ``Pass`` 就 ``Pass``，否则第一条。"""
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    return query.legal_actions[0]
+
+
+def _jie_shensu_items(query, wanted):
+    """这条 ``SELECT_OPTIONS`` 询问里"恰好勾中 ``wanted``"的那条候选。"""
+    for action in query.legal_actions:
+        if isinstance(action, SelectOptions) and tuple(action.choices) == tuple(wanted):
+            return action
+    raise AssertionError(
+        f"多选面里勾不出 {wanted!r}："
+        f"{[a.choices for a in query.legal_actions if isinstance(a, SelectOptions)]}"
+    )
+
+
+def _jie_shensu_seat(query, seat: int):
+    """这条选座询问里 ``seat`` 对应的候选。"""
+    return _find(
+        query,
+        lambda action: isinstance(action, SelectOption) and action.choice == f"seat:{seat}",
+    )
+
+
+class _JieShensuActor:
+    """座位 0（界夏侯渊）的脚本：答【神速】的每一问；可选在出牌阶段再用一张真【杀】。"""
+
+    def __init__(
+        self,
+        *,
+        activate: bool = True,
+        items=(),
+        targets=(),
+        picks=(),
+        play_slash=(),
+    ) -> None:
+        self.activate = activate
+        self.items = tuple(items)
+        self.targets = list(targets)
+        self.picks = tuple(picks)
+        self.play_slash = list(play_slash)
+        self.items_query = None
+        self.target_queries = []
+        self.cards_queries = []
+
+    def respond(self, query):
+        skill = str(getattr(query, "skill_id", "") or "")
+        if query.kind == "SKILL_ACTIVATION" and skill == JIE_SHENSU:
+            if self.activate:
+                return _find(query, lambda action: isinstance(action, ActivateSkill))
+            return _jie_shensu_fallback(query)
+        if query.kind == "SELECT_OPTIONS" and skill.endswith(":items"):
+            self.items_query = query
+            return _jie_shensu_items(query, self.items)
+        if query.kind == "SELECT_OPTION" and ":target:" in skill:
+            self.target_queries.append(query)
+            return _jie_shensu_seat(query, self.targets.pop(0))
+        if query.kind == "SELECT_CARDS":
+            self.cards_queries.append(query)
+            wanted = set(self.picks)
+            for action in query.legal_actions:
+                if not isinstance(action, SelectCards):
+                    continue
+                picked = {
+                    query.slots[index].card.card_id
+                    for index in action.picks
+                    if query.slots[index].card is not None
+                }
+                if picked == wanted:
+                    return action
+            raise AssertionError(f"弃牌面里选不出 {sorted(wanted)}")
+        if query.kind == "PLAY_PHASE":
+            if self.play_slash:
+                target = self.play_slash.pop(0)
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "slash"
+                        and action.targets == (target,)
+                    ):
+                        return action
+            return _find(query, lambda action: isinstance(action, EndPhase))
+        return _jie_shensu_fallback(query)
+
+
+def _jie_shensu_engine(seats, *, used=(), players=None, turn_seat=0, seed=29, stop=None):
+    """造「座位 0 是界夏侯渊、从自己的回合起点开跑」的局面，默认跑到弃牌阶段开始。"""
+    deck = tuple(card_id for card_id in deck_excluding(PACK, *used))
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck,
+        turn_seat=turn_seat,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    actors = list(players) if players is not None else []
+    while len(actors) < len(seats):
+        actors.append(PassPlayer())
+    run_queries(
+        engine,
+        actors,
+        stop or (lambda e: ran_timing(e, Timing.PHASE_DISCARD_START)),
+    )
+    return engine, state
+
+
+def _jie_shensu_uses(engine) -> int:
+    """本局压过几个 ``USE`` 帧。"""
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.USE
+    )
+
+
+def _jie_shensu_activation_queries(engine):
+    return [
+        query
+        for query in _queries(engine, "SKILL_ACTIVATION")
+        if query.skill_id == JIE_SHENSU
+    ]
+
+
+def test_jie_xiahouyuan_mobile_is_in_the_default_pool() -> None:
+    """界夏侯渊移动版进了默认池（`jie_feng_mobile` 表 + 显示名后缀）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    assert JIE_XIAHOUYUAN in enabled_hero_ids()
+    hero = hero_by_id(JIE_XIAHOUYUAN)
+    assert hero.name == "界夏侯渊移动版"
+    assert hero.true_name == "夏侯渊"
+
+
+def test_jie_shensu_asks_once_at_own_turn_start_and_declines_cleanly() -> None:
+    """自己的回合开始时问一次；放弃 ⇒ 什么都不跳、一张【杀】都没有。"""
+    actor = _JieShensuActor(activate=False)
+    engine, state = _jie_shensu_engine(
+        [
+            SeatSpec(hero=JIE_XIAHOUYUAN, hand=_JIE_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_JIE_SHENSU_HAND,
+        players=[actor],
+    )
+
+    assert len(_jie_shensu_activation_queries(engine)) == 1
+    assert ran_timing(engine, Timing.PHASE_JUDGE), "没发动 ⇒ 判定阶段照常"
+    assert ran_timing(engine, Timing.PHASE_DRAW), "没发动 ⇒ 摸牌阶段照常"
+    assert _jie_shensu_uses(engine) == 0
+    assert actor.items_query is None
+    assert len(state.player(0).hand) == 4, "没发动 ⇒ 正常摸两张"
+
+
+def test_jie_shensu_does_not_trigger_on_another_turn_start() -> None:
+    """别人的回合开始时**不问**（自校：只有当前回合角色的那一份实例被问）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=JIE_XIAHOUYUAN), SeatSpec(hand=_JIE_SHENSU_HAND)],
+        deck=deck_excluding(PACK, *_JIE_SHENSU_HAND),
+        turn_seat=1,
+        phase=Phase.PREPARE,
+        rule_config=RuleConfig(player_count=2, starting_hand_size=4, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=29)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: ran_timing(e, Timing.PHASE_DISCARD_START),
+    )
+
+    assert not _jie_shensu_activation_queries(engine)
+    assert ran_timing(engine, Timing.TURN_START), "回合确实开始了，只是不是他的"
+
+
+def test_jie_shensu_items_step_is_a_multi_select_with_three_options() -> None:
+    """选项面是**多选**（不是 7 档单选）：三项各自一行、可勾任意组合。"""
+    actor = _JieShensuActor(items=())
+    _engine, _state = _jie_shensu_engine(
+        [
+            SeatSpec(
+                hero=JIE_XIAHOUYUAN,
+                hand=(_JIE_SHENSU_ARMOR, *_JIE_SHENSU_HAND),
+            ),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_JIE_SHENSU_ARMOR, *_JIE_SHENSU_HAND),
+        players=[actor],
+    )
+
+    query = actor.items_query
+    assert query is not None and query.kind == "SELECT_OPTIONS"
+    assert tuple(query.options) == ("jie_shensu_1", "jie_shensu_2", "jie_shensu_3")
+    assert query.max_selected == 3
+    subsets = {action.choices for action in query.legal_actions if isinstance(action, SelectOptions)}
+    assert subsets == {
+        (),
+        ("jie_shensu_1",),
+        ("jie_shensu_2",),
+        ("jie_shensu_3",),
+        ("jie_shensu_1", "jie_shensu_2"),
+        ("jie_shensu_1", "jie_shensu_3"),
+        ("jie_shensu_2", "jie_shensu_3"),
+        ("jie_shensu_1", "jie_shensu_2", "jie_shensu_3"),
+    }, "有装备牌时 8 个子集都合法（0~3 项）"
+
+
+def test_jie_shensu_option_two_is_greyed_without_equipment() -> None:
+    """没有可弃的装备牌 ⇒ 第 2 项**列出来但置灰**，且任何候选都不含它。"""
+    actor = _JieShensuActor(items=("jie_shensu_1",), targets=(1,))
+    _engine, _state = _jie_shensu_engine(
+        [
+            SeatSpec(hero=JIE_XIAHOUYUAN, hand=_JIE_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_JIE_SHENSU_HAND,
+        players=[actor],
+    )
+
+    query = actor.items_query
+    assert query is not None
+    assert tuple(query.disabled) == ("jie_shensu_2",), "第 2 项置灰（界面画灰、点不动）"
+    assert tuple(query.options) == ("jie_shensu_1", "jie_shensu_2", "jie_shensu_3"), (
+        "置灰项仍留在 options 里（要画出来）"
+    )
+    allowed = {
+        action.choices for action in query.legal_actions if isinstance(action, SelectOptions)
+    }
+    assert allowed == {
+        (),
+        ("jie_shensu_1",),
+        ("jie_shensu_3",),
+        ("jie_shensu_1", "jie_shensu_3"),
+    }, "含【2】的组合全部不合法"
+
+
+def test_jie_shensu_option_two_pays_the_equipment_before_any_slash() -> None:
+    """【2】的弃牌是**代价**：选完立刻付，付清之前不问目标、不发起【杀】。"""
+    actor = _JieShensuActor(
+        items=("jie_shensu_2",), targets=(2,), picks=(_JIE_SHENSU_HORSE,)
+    )
+    engine, state = _jie_shensu_engine(
+        [
+            SeatSpec(
+                hero=JIE_XIAHOUYUAN,
+                hand=(_JIE_SHENSU_ARMOR, *_JIE_SHENSU_HAND),
+                equip=(_JIE_SHENSU_HORSE,),
+            ),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_JIE_SHENSU_ARMOR, _JIE_SHENSU_HORSE, *_JIE_SHENSU_HAND),
+        players=[actor],
+    )
+
+    assert actor.cards_queries, "弃装备是一问"
+    face = {
+        slot.card.card_id
+        for slot in actor.cards_queries[0].slots
+        if slot.card is not None
+    }
+    assert face == {_JIE_SHENSU_ARMOR, _JIE_SHENSU_HORSE}, "手牌 + 装备区的装备牌都在面上"
+    assert _JIE_SHENSU_HORSE in state.discard, "选中的装备区牌进了弃牌堆"
+    assert not ran_timing(engine, Timing.PHASE_PLAY_START), "出牌阶段被跳过"
+    asks = [
+        (record.seq, record.query.kind, str(getattr(record.query, "skill_id", "") or ""))
+        for record in engine.records
+        if record.kind == "query"
+    ]
+    pay_at = next(i for i, (_s, kind, _sid) in enumerate(asks) if kind == "SELECT_CARDS")
+    target_at = next(i for i, (_s, _k, sid) in enumerate(asks) if ":target:" in sid)
+    assert pay_at < target_at, f"弃装备必须早于选目标：{asks}"
+
+
+def test_jie_shensu_three_items_use_three_slashes_in_order() -> None:
+    """三项全选：弃一件装备 → 跳判定/摸牌 → 杀 → 跳出牌 → 杀 → 跳弃牌 + 翻面 → 杀。"""
+    actor = _JieShensuActor(
+        items=("jie_shensu_1", "jie_shensu_2", "jie_shensu_3"),
+        targets=(1, 2, 3),
+        picks=(_JIE_SHENSU_ARMOR,),
+    )
+    engine, state = _jie_shensu_engine(
+        [
+            SeatSpec(
+                hero=JIE_XIAHOUYUAN,
+                hand=(_JIE_SHENSU_ARMOR, *_JIE_SHENSU_HAND),
+            ),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_JIE_SHENSU_ARMOR, *_JIE_SHENSU_HAND),
+        players=[actor],
+    )
+
+    assert _jie_shensu_uses(engine) == 3, "每选一项一张【杀】"
+    assert len(actor.target_queries) == 3, "三张各自选目标"
+    assert state.player(0).flipped is True, "第三项翻面"
+    assert not ran_timing(engine, Timing.PHASE_PLAY_START), "第二项跳出牌阶段"
+    assert state.player(1).hp == 3 and state.player(2).hp == 3 and state.player(3).hp == 3
+
+
+def test_jie_shensu_option_three_skips_the_discard_phase() -> None:
+    """第三项跳过弃牌阶段：手牌超上限也不进 DISCARD 询问。"""
+    actor = _JieShensuActor(items=("jie_shensu_3",), targets=(1,))
+    engine, state = _jie_shensu_engine(
+        [
+            SeatSpec(hero=JIE_XIAHOUYUAN, hand=_JIE_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_JIE_SHENSU_HAND,
+        players=[actor],
+    )
+
+    assert state.player(0).flipped is True
+    assert not any(
+        record.kind == "query" and record.query.kind == "DISCARD"
+        for record in engine.records
+    ), "弃牌阶段被跳过 ⇒ 不发 DISCARD 询问"
+
+
+def test_jie_shensu_flip_skips_the_next_turn_but_not_this_one() -> None:
+    """翻面：他**下一个**回合整个被跳过（回合开始前翻回、不发 `TURN_START`）。"""
+    actor = _JieShensuActor(items=("jie_shensu_3",), targets=(1,))
+    engine, state = _jie_shensu_engine(
+        [
+            SeatSpec(hero=JIE_XIAHOUYUAN, hand=_JIE_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_JIE_SHENSU_HAND,
+        players=[actor],
+        stop=lambda e: ran_timing(e, Timing.TURN_START) and e.state.turn_seat == 1,
+    )
+
+    assert state.player(0).flipped is True, "本回合结束时他仍是背面"
+    assert len(_jie_shensu_activation_queries(engine)) == 1, "只在自己的那个回合问过"
+
+
+def test_jie_shensu_skipped_judge_phase_keeps_the_judge_zone_cards() -> None:
+    """跳过判定阶段 ≠ 弃置判定区的牌（规则 §11.5）。"""
+    actor = _JieShensuActor(items=("jie_shensu_1",), targets=(1,))
+    _engine, state = _jie_shensu_engine(
+        [
+            SeatSpec(
+                hero=JIE_XIAHOUYUAN,
+                hand=_JIE_SHENSU_HAND,
+                judge=(_JIE_SHENSU_INDULGENCE,),
+            ),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_JIE_SHENSU_INDULGENCE, *_JIE_SHENSU_HAND),
+        players=[actor],
+    )
+
+    assert _JIE_SHENSU_INDULGENCE in state.player(0).judge, "判定区里的牌保留"
+    assert _JIE_SHENSU_INDULGENCE not in state.discard, "没被判、也没被弃"
+
+
+def test_jie_shensu_slashes_do_not_consume_the_play_phase_limit() -> None:
+    """回合开始的那三张【杀】不计入出牌阶段的次数（``counts=False``）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    actor = _JieShensuActor(
+        items=("jie_shensu_1",),
+        targets=(1,),
+        # 出牌阶段再用一张真【杀】：打相邻座位（距离 1，裸手也够得着）。
+        play_slash=(1,),
+    )
+    engine, _state = _jie_shensu_engine(
+        [
+            SeatSpec(hero=JIE_XIAHOUYUAN, hand=(slash, *_JIE_SHENSU_HAND)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(slash, *_JIE_SHENSU_HAND),
+        players=[actor],
+    )
+
+    assert _jie_shensu_uses(engine) == 2, "回合开始一张 + 出牌阶段一张（后者没被前者的次数挡住）"
+
+
+def test_jie_shensu_without_a_legal_target_skips_only_that_slash() -> None:
+    """没有任何合法目标 ⇒ 这一张【杀】不发生，其余项照旧（不发空询问）。"""
+    actor = _JieShensuActor(items=("jie_shensu_1",))
+    engine, _state = _jie_shensu_engine(
+        [
+            SeatSpec(hero=JIE_XIAHOUYUAN, hand=_JIE_SHENSU_HAND),
+            SeatSpec(hero="zhugeliang", hand=()),
+            SeatSpec(hero="zhugeliang", hand=()),
+            SeatSpec(hero="zhugeliang", hand=()),
+        ],
+        used=_JIE_SHENSU_HAND,
+        players=[actor],
+    )
+
+    assert actor.target_queries == [], "空池不发询问"
+    assert _jie_shensu_uses(engine) == 0, "一张【杀】都没发生"
+    assert not ran_timing(engine, Timing.PHASE_JUDGE), "但【1】的跳阶段照旧生效"
+
+
+# ---------------------------------------------------------------------------
+# 界张角移动版【雷击】【鬼道】【黄天】（jie-feng-batch2 票 02）
+#
+# 牌面（用户 2026-11-08 改后，逐字）：
+#   雷击：当你使用或打出【闪】时，你可以令一名其他角色进行一次判定，若结果为♠️，你对其造成
+#         2点雷电伤害；♣️，你回复1点体力并对其造成1点雷电伤害。
+#   鬼道：当一名角色的判定牌生效前，你可以用一张黑色牌替换之。
+#   黄天：主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你一张【闪】或【闪电】。
+#
+# 本节钉住（票面 §1.9 / §2.9 / §3.9）：
+# 1. 雷击的目标池**不含自己**；♠ = 一次 2 点、♣ = 先回复 1 点再 1 点、♥♦ 零副作用；
+# 2. 鬼道的候选只收黑色牌（手牌 ∪ 装备区），**替换**= 原判定牌进张角手牌；
+# 3. 黄天与移动版**共用** flow、但声明 / 技能 id 各一份，且能真的把牌交给界张角。
+# ---------------------------------------------------------------------------
+
+JIE_LEIJI = "hero.jie_zhangjiao_mobile.leiji"
+JIE_GUIDAO = "hero.jie_zhangjiao_mobile.guidao"
+JIE_HUANGTIAN = "hero.jie_zhangjiao_mobile.huangtian"
+JIE_ZHANGJIAO = "jie_zhangjiao_mobile"
+ZHANGJIAO_MOBILE = "zhangjiao_mobile"
+
+
+def _zj_suit_card(*, suit: str, exclude=()) -> int:
+    """牌堆里第一张指定花色的牌（避开已发到座位上的）。"""
+    for index, card in enumerate(PACK.deck.cards):
+        if index in exclude or card.suit != suit:
+            continue
+        return index
+    raise AssertionError(f"牌堆里没有 {suit}")
+
+
+def _zj_pick(query, predicate):
+    action = next((item for item in query.legal_actions if predicate(item)), None)
+    assert action is not None, (
+        f"候选里没有预期动作：{[(a.kind, getattr(a, 'choice', None)) for a in query.legal_actions]}"
+    )
+    return action
+
+
+def _zj_default(query):
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    return query.legal_actions[0]
+
+
+def _zj_step_until(engine, predicate, *, limit: int = 4000) -> bool:
+    """推进到 ``predicate`` 成立；中途其它询问按"缺省放弃 / 结束阶段"应答。"""
+    for _ in range(limit):
+        if predicate(engine):
+            return True
+        if engine.pending is not None:
+            engine.submit(_zj_default(engine.pending))
+            continue
+        engine._step()
+    return False
+
+
+def _zj_run_to_quiet(engine, *, limit: int = 4000) -> None:
+    for _ in range(limit):
+        if engine.finished or not engine.stack:
+            return
+        if engine.pending is None:
+            engine._step()
+            continue
+        engine.submit(_zj_default(engine.pending))
+
+
+def test_jie_zhangjiao_mobile_is_in_the_default_pool() -> None:
+    """数据面：界张角移动版进默认池（真名「张角」、群 / 男 / 3 体力）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    assert JIE_ZHANGJIAO in enabled_hero_ids()
+    hero = hero_by_id(JIE_ZHANGJIAO)
+    assert hero.name == "界张角移动版"
+    assert hero.true_name == "张角"
+    assert hero.kingdom == "qun"
+    assert hero.hp_max == 3
+
+
+def _jie_leiji_state(*, judge: int, hp: int = 4):
+    """座位 1 先用【杀】打座位 0（界张角）；座位 0 手里有【闪】。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    used = {slash, dodge, judge}
+    rest = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    deck = (rest[0], rest[1], judge, *rest[2:])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=hp, hp_max=4, hero=JIE_ZHANGJIAO, hand=(dodge,)),
+            SeatSpec(hp=4, hp_max=4, hand=(slash,)),
+        ],
+        deck=deck,
+        rule_config=RuleConfig(player_count=2, starting_hand_size=1, first_seat=1),
+    )
+    return slash, dodge, state
+
+
+def _run_jie_leiji(engine, *, slash: int, dodge: int, target_choice: str = "seat:1"):
+    """走完"出【杀】→ 出【闪】→ 是否发动雷击 → 选判定角色"这四问。"""
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    ), "没到座位 1 的出牌阶段"
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == slash,
+        )
+    )
+    assert _zj_step_until(
+        engine, lambda e: e.pending is not None and e.pending.kind == QueryKind.DODGE
+    ), "没到【闪】窗口"
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == dodge,
+        )
+    )
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == JIE_LEIJI,
+    ), "没问【雷击】是否发动"
+    engine.submit(_zj_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_OPTION,
+    ), "没到选判定角色的询问"
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, SelectOption)
+            and str(action.choice) == target_choice,
+        )
+    )
+
+
+def test_jie_leiji_spade_deals_two_thunder_damage() -> None:
+    """♠ ⇒ 对**被判定者**造成一次 2 点雷电伤害（不是两次 1 点）。"""
+    spade = _zj_suit_card(suit="spade")
+    slash, dodge, state = _jie_leiji_state(judge=spade)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_jie_leiji(engine, slash=slash, dodge=dodge)
+    _zj_run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 4, "伤害打的是被判定者，不是张角"
+    assert engine.state.player(1).hp == 2
+    damage = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+    assert len(damage) == 1, "一次伤害事件（2 点）"
+
+
+def test_jie_leiji_club_recovers_one_then_deals_one() -> None:
+    """♣ ⇒ 张角**先**回复 1 点，然后对被判定者造成 1 点雷电伤害。"""
+    club = _zj_suit_card(suit="club")
+    slash, dodge, state = _jie_leiji_state(judge=club, hp=3)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_jie_leiji(engine, slash=slash, dodge=dodge)
+    _zj_run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 4, "♣ 的分支里张角回复 1 点"
+    assert engine.state.player(1).hp == 3, "同时对被判定者造成 1 点雷电伤害"
+
+
+def test_jie_leiji_club_at_full_hp_still_deals_one() -> None:
+    """满体力时 ♣ 的回复不发生（规则 §4.15），但 1 点伤害照常。"""
+    club = _zj_suit_card(suit="club")
+    slash, dodge, state = _jie_leiji_state(judge=club, hp=4)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_jie_leiji(engine, slash=slash, dodge=dodge)
+    _zj_run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 4, "满体力不回复"
+    assert engine.state.player(1).hp == 3, "伤害段仍发生"
+
+
+def test_jie_leiji_never_targets_the_owner() -> None:
+    """「一名**其他**角色」⇒ 座位步的候选里没有张角自己（与移动版的分界）。"""
+    club = _zj_suit_card(suit="club")
+    slash, dodge, state = _jie_leiji_state(judge=club)
+    engine = Engine.from_state(state, seed=5)
+
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == slash,
+        )
+    )
+    assert _zj_step_until(
+        engine, lambda e: e.pending is not None and e.pending.kind == QueryKind.DODGE
+    )
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == dodge,
+        )
+    )
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == JIE_LEIJI,
+    )
+    engine.submit(_zj_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_OPTION,
+    )
+    choices = [
+        action.choice
+        for action in engine.pending.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert choices == ["seat:1"], "2 人局里唯一合法的判定对象是对手"
+
+
+def test_jie_leiji_heart_and_diamond_leave_no_side_effect() -> None:
+    """♥ / ♦ ⇒ 什么也不发生（判定牌照常结算）。"""
+    heart = _zj_suit_card(suit="heart")
+    slash, dodge, state = _jie_leiji_state(judge=heart, hp=3)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_jie_leiji(engine, slash=slash, dodge=dodge)
+    _zj_run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 3 and engine.state.player(1).hp == 4
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing in (Timing.DAMAGE_DEAL, Timing.RECOVER_VALUE)
+    ]
+
+
+def _jie_guidao_state(*, original: int, hand=(), equip=()):
+    """座位 0（界张角）的判定阶段有一张【乐不思蜀】；判定牌 = ``original``。"""
+    indulgence = cards_of_type(PACK, "indulgence")[0]
+    used = {indulgence, original, *hand, *equip}
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero=JIE_ZHANGJIAO,
+                judge=(indulgence,),
+                hand=tuple(hand),
+                equip=tuple(equip),
+            ),
+            SeatSpec(hp=4, hp_max=4),
+        ],
+        deck=(original, *deck_excluding(PACK, *used)),
+        rule_config=RuleConfig(player_count=2, starting_hand_size=1, first_seat=0),
+    )
+
+
+def _run_jie_guidao(engine, *, pick_card: int | None):
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.RESPOND
+        and getattr(e.pending, "cause", None) is WindowCause.REJUDGE,
+    ), "没开改判窗口"
+    if pick_card is None:
+        engine.submit(_zj_pick(engine.pending, lambda action: isinstance(action, Pass)))
+        return
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, SubstituteJudgeCard)
+            and action.card.card_id == pick_card,
+        )
+    )
+
+
+def test_jie_guidao_replaces_the_judge_card_and_the_owner_gains_the_original() -> None:
+    """**替换**：新牌成为判定牌，原判定牌由界张角获得（不进弃牌堆）。"""
+    original = _zj_suit_card(suit="heart")
+    black = _zj_suit_card(suit="club", exclude=(original,))
+    state = _jie_guidao_state(original=original, hand=(black,))
+    engine = Engine.from_state(state, seed=7)
+
+    _run_jie_guidao(engine, pick_card=black)
+    _zj_run_to_quiet(engine)
+
+    assert original in engine.state.player(0).hand, "替换 ⇒ 原判定牌由张角获得"
+    assert black in engine.state.discard
+
+
+def test_jie_guidao_offers_only_black_cards() -> None:
+    """候选区 = 手牌 ∪ 装备区，只收黑色牌。"""
+    original = _zj_suit_card(suit="heart")
+    red_hand = _zj_suit_card(suit="diamond", exclude=(original,))
+    black_equip = cards_of_type(PACK, "double_sword")[0]
+    assert PACK.deck.cards[black_equip].suit == "spade"
+    state = _jie_guidao_state(original=original, hand=(red_hand,), equip=(black_equip,))
+    engine = Engine.from_state(state, seed=7)
+
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.RESPOND
+        and getattr(e.pending, "cause", None) is WindowCause.REJUDGE,
+    )
+    offered = [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, SubstituteJudgeCard)
+    ]
+    assert [action.card.card_id for action in offered] == [black_equip]
+    assert all(action.skill_id == JIE_GUIDAO for action in offered)
+
+
+def test_jie_guidao_is_not_asked_without_a_black_card() -> None:
+    """没有黑色牌 ⇒ 改判窗口不发这一问（判定直接生效）。"""
+    original = _zj_suit_card(suit="heart")
+    red_hand = _zj_suit_card(suit="diamond", exclude=(original,))
+    state = _jie_guidao_state(original=original, hand=(red_hand,))
+    engine = Engine.from_state(state, seed=7)
+
+    _run_jie_guidao(engine, pick_card=None)
+    _zj_run_to_quiet(engine)
+
+    assert original in engine.state.discard, "没人改判 ⇒ 原判定牌照常进弃牌堆"
+
+
+def _jie_huangtian_state(*, lord_identity=Identity.LORD, hand=(None,), kingdom=Kingdom.QUN):
+    dodge = cards_of_type(PACK, "dodge")[0]
+    actual = dodge if hand[0] is None else hand[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero=JIE_ZHANGJIAO,
+                identity=lord_identity,
+                kingdom=Kingdom.QUN,
+            ),
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero="yuji_mobile",
+                hand=(actual,) if actual is not None else (),
+                kingdom=kingdom,
+            ),
+            SeatSpec(hp=4, hp_max=4, hero="simayi", kingdom=Kingdom.WEI),
+            SeatSpec(hp=4, hp_max=4, kingdom=Kingdom.WEI),
+        ],
+        deck=deck_excluding(PACK, dodge),
+        rule_config=RuleConfig(player_count=4, starting_hand_size=1),
+    )
+    return state, actual
+
+
+def test_jie_huangtian_is_offered_only_to_other_qun_seats() -> None:
+    """候选进**别人**的出牌阶段：界张角自己与魏势力角色都没有它。"""
+    state, _dodge = _jie_huangtian_state()
+    for seat, expected in ((0, False), (1, True), (2, False)):
+        actions = legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=0)
+        found = [
+            action
+            for action in actions
+            if isinstance(action, ActivateSkill) and action.skill_id == JIE_HUANGTIAN
+        ]
+        assert bool(found) is expected, f"座位 {seat} 的黄天候选应当是 {expected}"
+
+
+def test_jie_huangtian_moves_the_card_to_the_jie_zhangjiao() -> None:
+    """交出一张【闪】⇒ 进**界张角**的手牌（不是移动版那个张角的）。"""
+    state, dodge = _jie_huangtian_state()
+    engine = Engine.from_state(state, seed=3)
+
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    ), "没到座位 1 的出牌阶段"
+    engine.submit(
+        _zj_pick(
+            engine.pending,
+            lambda action: isinstance(action, ActivateSkill)
+            and action.skill_id == JIE_HUANGTIAN,
+        )
+    )
+    assert _zj_step_until(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_CARDS,
+    ), "没到选牌步"
+    engine.submit(SelectCards(answers_seq=engine.pending.seq, picks=(0,)))
+    assert _zj_step_until(engine, lambda e: dodge in e.state.player(0).hand), (
+        "那张【闪】要进界张角手牌"
+    )
+    assert dodge not in engine.state.player(1).hand
+
+
+def test_jie_huangtian_shares_the_flow_but_not_the_identifier() -> None:
+    """与移动版**逐字相同** ⇒ 共用 flow 对象，但声明 / 技能 id 各一份（界【天妒】先例）。"""
+    from sgs.skills import CATALOG
+    from sgs.skills.active import HUANGTIAN_FLOW
+
+    assert CATALOG[JIE_HUANGTIAN].skill_id != CATALOG["hero.zhangjiao_mobile.huangtian"].skill_id
+    assert JIE_HUANGTIAN in CATALOG and "hero.zhangjiao_mobile.huangtian" in CATALOG
+    assert HUANGTIAN_FLOW is not None

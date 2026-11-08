@@ -192,6 +192,70 @@ function renderDistribution(pending) {
   box.appendChild(reset);
 }
 
+/** 多选选项面的本地勾选态（jie-feng-batch2 票 01a）：同一 `pending.seq` 内跨重绘保留。
+ *
+ *  勾选是**本地态**（服务端看不到玩家点了几次），提交时由 `multiSelectAction` 拼成
+ *  候选里那条 `SelectOptions`；超时同理——服务端先到点则按枚举序第一条（最小集合）代答。
+ */
+function multiSelection(pending) {
+  const seq = pending && pending.seq !== undefined && pending.seq !== null ? pending.seq : null;
+  if (!state.multiSelect || state.multiSelect.seq !== seq) {
+    state.multiSelect = { seq, checked: {} };
+  }
+  return state.multiSelect.checked;
+}
+
+/** 已勾选的选项，按 `pending.options` 的原序（与引擎枚举候选时的规范序一致）。 */
+function multiSelectChoices(pending) {
+  const checked = multiSelection(pending);
+  const options = Array.isArray(pending.options) ? pending.options : [];
+  return options.filter((option) => checked[option]);
+}
+
+/** 多选选项面（jie-feng-batch2 票 01a；首个载体 = 界夏侯渊【神速】「至多三项」）。
+ *
+ *  逐项一行：点一行 = 勾上 / 取消勾；`pending.disabled` 里的项**列出来但不可点**（置灰）。
+ *  勾到上限后其余行不再响应（上限来自载荷，不在这里发明规则）；右端「提交」由
+ *  `multiSelectAction` 能不能在候选里找到同一条决定。
+ */
+function renderMultiSelect(pending) {
+  const box = $("t-options");
+  if (!box) return;
+  const options = Array.isArray(pending.options) ? pending.options : [];
+  const disabled = new Set(Array.isArray(pending.disabled) ? pending.disabled : []);
+  const checked = multiSelection(pending);
+  const min = Number(pending.min_selected || 0);
+  const maxRaw = pending.max_selected;
+  const max = maxRaw === null || maxRaw === undefined ? options.length : Number(maxRaw);
+  const picked = multiSelectChoices(pending).length;
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = min === max
+      ? `请勾选 ${min} 项，然后「提交」。`
+      : `可勾选 ${min}~${max} 项（已勾 ${picked} 项），然后「提交」。`;
+  }
+  options.forEach((option) => {
+    const on = Boolean(checked[option]);
+    const off = disabled.has(option);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt multi-option";
+    if (off) button.classList.add("dis");
+    if (on) button.classList.add("sel");
+    // 置灰项：真 DOM 里也点不动（disabled），引擎侧同样不会收到含它的候选。
+    button.disabled = off || (!on && picked >= max);
+    button.textContent = `${on ? "☑" : "☐"} ${optionText(option, pending)}`;
+    button.addEventListener("click", () => {
+      if (off) return;
+      if (!checked[option] && picked >= max) return;
+      checked[option] = !checked[option];
+      state.lastRejectReason = "";
+      renderPending(state.view);
+    });
+    box.appendChild(button);
+  });
+}
+
 /** 这一面要画哪些选项值（M5-bugfix）：一次性二选一画**完整的一对**，其余只画候选真有的。
  *
  * 配对来自 :data:`OPTION_PAIRS`——只要候选里有同一对的一项，就把整对都画出来；另一项
@@ -271,6 +335,11 @@ const OPTION_LABELS = Object.freeze({
   shensu_skip_judge_draw: "【1】跳过判定阶段和摸牌阶段",
   shensu_skip_play_equip: "【2】跳过出牌阶段并弃置一张装备牌",
   shensu_both: "两项都选",
+  // 界限突破-风包·界夏侯渊移动版【神速】（jie-feng-batch2 票 01）：至多三项（多选面）。
+  // 第 2 项在"没有可弃的装备牌"时由引擎置灰（`disabled`），文案不变。
+  jie_shensu_1: "【1】跳过判定阶段和摸牌阶段",
+  jie_shensu_2: "【2】跳过出牌阶段并弃置一张装备牌",
+  jie_shensu_3: "【3】跳过弃牌阶段并翻面",
   // 火包移动版典韦【强袭】（huo-dianwei-mobile 票 01）：代价二选一（可以放弃）。
   qiangxi_lose_hp: "失去1点体力",
   qiangxi_discard_weapon: "弃置一张武器牌",

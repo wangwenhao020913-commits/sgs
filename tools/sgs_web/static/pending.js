@@ -239,6 +239,12 @@ function renderPending(view) {
     $("btn-cancel").disabled = true;
     renderDistribution(pending);
   }
+  else if (kind === "multi") {
+    // 多选选项（jie-feng-batch2 票 01a）：勾选面；强制、无取消——唯一出口是右端「提交」。
+    $("btn-cancel").hidden = true;
+    $("btn-cancel").disabled = true;
+    renderMultiSelect(pending);
+  }
   else if (kind === "arrange") {
     // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
     $("btn-cancel").hidden = true;
@@ -371,6 +377,8 @@ function renderKind(pending, actions) {
   if (pending.kind === "ARRANGE") return "arrange";
   // 票 05：计数式分配（【业炎】）——窗内逐座位计数，不铺候选、不点牌桌。
   if (pending.kind === "DISTRIBUTE") return "distribution";
+  // 多选选项（jie-feng-batch2 票 01a）：专用勾选面（弹窗），不走候选列表。
+  if (pending.kind === "SELECT_OPTIONS") return "multi";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preactivation) return "preactivation";
   // 同一时机的激活面（票 02）：本轮 N ≥ 2 条技能候选 ⇒ 一张面选一条发动（末条

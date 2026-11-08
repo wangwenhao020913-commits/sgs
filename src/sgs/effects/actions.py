@@ -46,6 +46,8 @@ from sgs.state import (
     SelectContext,
     SelectOption,
     SelectOptionContext,
+    SelectOptions,
+    SelectOptionsContext,
     SkillActivationContext,
     SubstituteJudgeCard,
     SlotKind,
@@ -747,7 +749,7 @@ def legal_actions_for(
     *,
     answers_seq: int,
     dying: int | None = None,
-    payload: RespondContext | SelectContext | DodgeContext | PeachContext | SkillActivationContext | SelectOptionContext | DistributeContext | None = None,
+    payload: RespondContext | SelectContext | DodgeContext | PeachContext | SkillActivationContext | SelectOptionContext | SelectOptionsContext | DistributeContext | None = None,
 ) -> tuple[Action, ...]:
     """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
 
@@ -794,6 +796,10 @@ def legal_actions_for(
         if not isinstance(payload, SelectOptionContext):
             raise ValueError("SELECT_OPTION 询问必须给出 SelectOptionContext")
         candidates = _select_option(seat, answers_seq, payload)
+    elif kind is QueryKind.SELECT_OPTIONS:
+        if not isinstance(payload, SelectOptionsContext):
+            raise ValueError("SELECT_OPTIONS 询问必须给出 SelectOptionsContext")
+        candidates = _select_options(seat, answers_seq, payload)
     elif kind is QueryKind.ARRANGE:
         if not isinstance(payload, ArrangeContext):
             raise ValueError("ARRANGE 询问必须给出 ArrangeContext")
@@ -1443,6 +1449,39 @@ def _select_option(
         for option in ctx.options
         if option not in disabled
     ]
+    if ctx.optional:
+        actions.append(Pass(answers_seq=answers_seq))
+    return actions
+
+
+def _select_options(
+    seat: int, answers_seq: int, ctx: SelectOptionsContext
+) -> list[Action]:
+    """多选选项（jie-feng-batch2 票 01a）：把 ``[min,max]`` 内的**每个子集**枚举成一条候选。
+
+    枚举序 = 按 ``ctx.options`` 序的位掩码升序 ⇒ **空集排第一**（超时 / AI 的"取第一个
+    候选"因此天然是"一项都不做"，零副作用）。置灰项从枚举域里直接去掉（它们既不出现
+    在候选里，也不可能被选中）；``optional=True`` 时另加一条 ``Pass``（与单选面同语义）。
+
+    不按位掩码之外的方式枚举（例如"逐项 0/1"）：答案是**一个集合**，一次提交 —— 与
+    :func:`_distribute` 的"全量枚举 + 客户端拼出同一条"同姿态，合法集合只有这一份真源。
+    """
+    del seat
+    disabled = frozenset(ctx.disabled)
+    options = tuple(option for option in ctx.options if option not in disabled)
+    cap = len(options) if ctx.max_selected is None else min(int(ctx.max_selected), len(options))
+    if ctx.min_selected < 0 or cap < ctx.min_selected:
+        raise ValueError(
+            f"多选区间的下限 {ctx.min_selected} 大于上限 {cap}（选项 {ctx.options!r}）"
+        )
+    actions: list[Action] = []
+    for mask in range(1 << len(options)):
+        picked = tuple(
+            option for index, option in enumerate(options) if mask >> index & 1
+        )
+        if len(picked) < ctx.min_selected or len(picked) > cap:
+            continue
+        actions.append(SelectOptions(choices=picked, answers_seq=answers_seq))
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))
     return actions

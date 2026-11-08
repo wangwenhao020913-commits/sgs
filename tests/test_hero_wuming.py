@@ -626,8 +626,10 @@ def test_a_granted_lord_skill_works_for_a_non_lord():
     )
     engine = Engine.from_state(state, seed=3)
     _pin_pool(engine, ("张角",))
+    # jie-feng-batch2 票 02 之后池里有两个「张角」（移动版 / 界移动版），抽到哪一版都可能；
+    # 按**后缀**挑（与【武圣】那一档同一手法），后面断言的是**抽中的那一条**主公技。
     players = [
-        _TianchengPlayer((HUANGTIAN, "effect", "effect")),
+        _TianchengPlayer((".huangtian", "effect", "effect")),
         PassPlayer(),
         PassPlayer(),
         PassPlayer(),
@@ -640,15 +642,21 @@ def test_a_granted_lord_skill_works_for_a_non_lord():
         and e.pending.kind == QueryKind.PLAY_PHASE
         and e.pending.actor == 1,
     )
+    drawn = players[0].queries[0]
+    picked = next(
+        action.choice
+        for action in drawn.legal_actions
+        if isinstance(action, SelectOption) and str(action.choice).endswith(".huangtian")
+    )
     action = find_action(
         engine.pending,
-        lambda item: isinstance(item, ActivateSkill) and item.skill_id == HUANGTIAN,
+        lambda item: isinstance(item, ActivateSkill) and item.skill_id == picked,
     )
     assert action is not None, "座位 1 的出牌阶段应能发动无名获得的主公技【黄天】"
     granted = [
         instance
         for instance in resolve_instances(engine.state)
-        if instance.owner == 0 and instance.skill_id == HUANGTIAN
+        if instance.owner == 0 and instance.skill_id == picked
     ]
     assert len(granted) == 1 and granted[0].source.kind is SkillSourceKind.GRANTED, (
         "主公技的身份门控只作用于武将牌载体（票 06）"

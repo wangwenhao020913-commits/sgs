@@ -100,6 +100,20 @@ function maybeAutoSubmitArrange(view) {
   return submitAction();
 }
 
+/** 多选选项的最终答案动作（jie-feng-batch2 票 01a）：本地勾选 → 候选里那条 `SelectOptions`。
+ *
+ *  找不到同样的集合时返回 `null`（界面不发明动作；例如勾选数低于 `min_selected`），
+ *  右端「提交」因此保持灰着——与计数式分配同一条"只提交候选里有的那一条"纪律。
+ */
+function multiSelectAction(pending) {
+  const wanted = multiSelectChoices(pending);
+  const candidates = (pending && pending.legal_actions) || [];
+  return candidates.find(
+    (candidate) => candidate.kind === "SelectOptions"
+      && JSON.stringify(candidate.choices || []) === JSON.stringify(wanted),
+  ) || null;
+}
+
 /** 票 05：计数式分配的最终答案动作——本地计数 → 候选里那条 `Distribute`。
  *
  *  空计数（一个点都没分）是最小键那条候选，故"随时可提交"天然成立：`buildAction`
@@ -281,6 +295,8 @@ function buildAction() {
   if (pending.kind === "ARRANGE") return arrangeAction(pending);
   // 计数式分配（票 05）：按本地计数拼出候选里那条 `Distribute`（不手拼服务器没发的东西）。
   if (pending.kind === "DISTRIBUTE") return distributionAction(pending);
+  // 多选选项（jie-feng-batch2 票 01a）：按本地勾选拼出候选里那条 `SelectOptions`。
+  if (pending.kind === "SELECT_OPTIONS") return multiSelectAction(pending);
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
   //

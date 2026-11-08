@@ -3992,6 +3992,16 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
 HUANGTIAN = hero_skill_id("zhangjiao_mobile", "huangtian")
 """张角移动版【黄天】的全限定技能 id。"""
 
+JIE_HUANGTIAN = hero_skill_id("jie_zhangjiao_mobile", "huangtian")
+"""界张角移动版【黄天】的全限定技能 id（jie-feng-batch2 票 02）。
+
+牌面与移动版**逐字相同**（「主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你
+一张【闪】或【闪电】。」）⇒ 共用同一个 :data:`HUANGTIAN_FLOW` 对象与 `_huangtian_offers`
+（先例 = 界【天妒】共 `TIANDU_FLOW`），只有技能 id / 声明各一份。三个私有 helper 因此
+多了带缺省值的 ``skill_id`` 参数——不参数化时 ``_huangtian_lord`` 会把牌交给**移动版那个
+张角**（探针 `.scratch/jie-feng-batch2/probes/probe_huangtian_keys.py` 的 P5 实测）。
+"""
+
 _HUANGTIAN_CARD_TYPES: tuple[str, ...] = ("dodge", "lightning")
 """可以交出的牌名：「一张【闪】或【闪电】」（牌名 id 白名单）。"""
 
@@ -3999,7 +4009,7 @@ _HUANGTIAN_MOVED_KEY = "huangtian_moved"
 """帧私有：这次发动的手牌已经交给张角（续跑不重搬）。"""
 
 
-def _huangtian_lord(state: GameState) -> int | None:
+def _huangtian_lord(state: GameState, skill_id: str = HUANGTIAN) -> int | None:
     """持有【黄天】的座位（武将牌上是张角；也可能是**获得**了这条主公技的非主公）。
 
     身份门控只作用于**武将牌载体**（wuming 票 06），故持有者不保证是主公；效果侧只认
@@ -4008,22 +4018,26 @@ def _huangtian_lord(state: GameState) -> int | None:
     找不到（已阵亡 / 构造局面）时返回 ``None``，效果侧整条取消；多实例时取解析序第一条。
     """
     for instance in resolve_instances(state):
-        if instance.skill_id == HUANGTIAN:
+        if instance.skill_id == skill_id:
             return instance.owner
     return None
 
 
-def _huangtian_given(state: GameState, lord: int, seat: int) -> bool:
+def _huangtian_given(
+    state: GameState, lord: int, seat: int, skill_id: str = HUANGTIAN
+) -> bool:
     """``seat`` 本出牌阶段是否已经把牌交给张角（座位位段，键在**张角**的实例上）。"""
-    key = _skill_key(state, lord, HUANGTIAN)
+    key = _skill_key(state, lord, skill_id)
     if key is None:
         return True  # 实例不在 ⇒ 记不了"已交过" ⇒ fail-closed，不产出候选
     return bool(state.skill_state.get(key, 0) & (1 << (_HUANGTIAN_SHIFT + seat)))
 
 
-def _mark_huangtian_given(state: GameState, lord: int, seat: int) -> None:
+def _mark_huangtian_given(
+    state: GameState, lord: int, seat: int, skill_id: str = HUANGTIAN
+) -> None:
     """记下"本阶段 ``seat`` 已经交过牌"（位段随出牌阶段复位）。"""
-    key = _skill_key(state, lord, HUANGTIAN)
+    key = _skill_key(state, lord, skill_id)
     if key is not None and 0 <= seat < 8:
         state.skill_state[key] = state.skill_state.get(key, 0) | (
             1 << (_HUANGTIAN_SHIFT + seat)
@@ -4054,7 +4068,7 @@ def _huangtian_offers(state: GameState, ctx: ModifierContext, current: Any) -> A
         return current
     if not same_kingdom(state, lord, seat):
         return current
-    if _huangtian_given(state, lord, seat):
+    if _huangtian_given(state, lord, seat, ctx.skill_id):
         return current
     if not _huangtian_hand_cards(state, seat):
         return current
@@ -4068,7 +4082,8 @@ def _huangtian_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
     搬牌可能内联派发"失去牌后"而挂起，故先落帧私有 ``huangtian_moved`` 再搬。
     """
     seat = frame.data["source"]
-    lord = _huangtian_lord(host.state)
+    skill_id = str(frame.data.get("skill_id") or HUANGTIAN)
+    lord = _huangtian_lord(host.state, skill_id)
     if lord is None:
         return None
     if frame.data.get(_HUANGTIAN_MOVED_KEY):
@@ -4077,7 +4092,7 @@ def _huangtian_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
     if not cards:
         return None
     frame.data[_HUANGTIAN_MOVED_KEY] = True
-    _mark_huangtian_given(host.state, lord, seat)
+    _mark_huangtian_given(host.state, lord, seat, skill_id)
     control = host.move_in_frame(
         frame,
         host.state.refs(cards),
@@ -6431,6 +6446,17 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 发动者是那个座位，交给张角。不翻预发动（一步选牌，直提态 + 逐步问就够）。
     ActiveSkill(
         "zhangjiao_mobile",
+        "huangtian",
+        _huangtian_offers,
+        flow=HUANGTIAN_FLOW,
+        skill_type=SkillType.LORD,
+        requirement="主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你一张【闪】或【闪电】",
+        step_requirements={"card": "选择一张【闪】或【闪电】交给张角"},
+    ),
+    # 界张角移动版【黄天】（jie-feng-batch2 票 02）：牌面与移动版逐字相同 ⇒ 共用 flow /
+    # 候选回调（先例界【天妒】），只有声明与技能 id 各一份。
+    ActiveSkill(
+        "jie_zhangjiao_mobile",
         "huangtian",
         _huangtian_offers,
         flow=HUANGTIAN_FLOW,

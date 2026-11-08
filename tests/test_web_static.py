@@ -1271,13 +1271,16 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
     keys = re.findall(r"^\s*(\w+):\s*\"", kinds.group("body"), re.M)
     assert keys == [
         "arrange", "choice", "unknown", "reveal", "suit", "distribution",
-        # huo-shenzhugeliang 票 02：武将牌上的牌点选（星牌弹窗）——第七条。
+        # jie-feng-batch2 票 01a：多选勾选面（界夏侯渊【神速】「至多三项」）——第七条。
+        "multiChoice",
+        # huo-shenzhugeliang 票 02：武将牌上的牌点选（星牌弹窗）——第八条。
         "heroPick",
-        # lei-shenganning 票 93：两行观看手牌（上行目标 / 下行自己，四色各一）——第八条。
+        # lei-shenganning 票 93：两行观看手牌（上行目标 / 下行自己，四色各一）——第九条。
         "watchTwoRows",
     ], (
-        "票 08 只加正文段（展示武将牌复用 choice）；第七条由 huo-shenzhugeliang 票 02 加"
-        f"（武将牌上的牌点选）；第八条由 lei-shenganning 票 93 加（两行观看手牌）：{keys}"
+        "票 08 只加正文段（展示武将牌复用 choice）；第七条由 jie-feng-batch2 票 01a 加"
+        "（多选勾选面）；第八条由 huo-shenzhugeliang 票 02 加（武将牌上的牌点选）；"
+        f"第九条由 lei-shenganning 票 93 加（两行观看手牌）：{keys}"
     )
 
     predicate = _js_function(modal, "isShowHeroCardStep")

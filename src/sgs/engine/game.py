@@ -153,6 +153,9 @@ from sgs.state import (
     SelectionSpec,
     SelectOption,
     SelectOptionContext,
+    SelectOptions,
+    SelectOptionsContext,
+    SelectOptionsQuery,
     SelectOptionQuery,
     SkillActivationContext,
     SkillActivationQuery,
@@ -1504,6 +1507,7 @@ class Engine:
         | DodgeContext
         | SkillActivationContext
         | SelectOptionContext
+        | SelectOptionsContext
         | ArrangeContext
         | DistributeContext
         | None = None,
@@ -2765,6 +2769,69 @@ class Engine:
         if action is SUSPEND:
             return SUSPEND
         assert isinstance(action, (SelectOption, Pass))
+        answers[answer_key] = action
+        return action
+
+    def ask_options(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        skill_id: str,
+        options: tuple[str, ...],
+        disabled: tuple[str, ...] = (),
+        min_selected: int = 0,
+        max_selected: int | None = None,
+        option_texts: Mapping[str, str] | None = None,
+        optional: bool = False,
+    ) -> Any:
+        """发一次 ``SELECT_OPTIONS`` 询问（jie-feng-batch2 票 01a）：**多选**选项闭集。
+
+        与 :meth:`ask_option` 只差"答案是一组值"：候选由
+        :func:`~sgs.effects.actions._select_options` 全量枚举 ``[min_selected,
+        max_selected]`` 内、不含 ``disabled`` 的**每个子集**（空集排第一 ⇒ 超时兜底 =
+        "一项都不做"）。``optional=True`` 时候选另加一条 ``Pass`` 并原样返回。
+
+        ``disabled`` 的语义与单选面一致：留在 ``options`` 里（界面画置灰行），**不进候选**
+        —— 引擎侧因此不可能收到含置灰项的组合（fail-closed 在候选枚举那一处收口）。
+
+        答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（同 :meth:`ask_option`），重入不重发。
+        """
+        answers = frame.data.setdefault("ask_answers", {})
+        answer_key = _option_answer_key(frame, skill_id, actor)
+        if answer_key in answers:
+            return answers[answer_key]
+        texts = dict(option_texts or {})
+        unknown = [option for option in disabled if option not in options]
+        if unknown:
+            raise ValueError(f"置灰项不在本次询问的选项里：{unknown!r}（选项 = {options!r}）")
+        unknown = [option for option in texts if option not in options]
+        if unknown:
+            raise ValueError(
+                f"选项文本指向了不在本次询问选项里的 id：{unknown!r}（选项 = {options!r}）"
+            )
+        action = self.ask(
+            lambda seq: self._build_query(
+                QueryKind.SELECT_OPTIONS,
+                actor,
+                timing,
+                seq,
+                payload=SelectOptionsContext(
+                    skill_id=skill_id,
+                    options=options,
+                    optional=optional,
+                    disabled=tuple(disabled),
+                    min_selected=min_selected,
+                    max_selected=max_selected,
+                    option_texts=texts,
+                ),
+            ),
+            identity=self._ask_identity(QueryKind.SELECT_OPTIONS, actor, frame),
+        )
+        if action is SUSPEND:
+            return SUSPEND
+        assert isinstance(action, (SelectOptions, Pass))
         answers[answer_key] = action
         return action
 
@@ -4949,6 +5016,7 @@ class Engine:
         | DodgeContext
         | SkillActivationContext
         | SelectOptionContext
+        | SelectOptionsContext
         | ArrangeContext
         | DistributeContext
         | None = None,
@@ -5146,6 +5214,24 @@ class Engine:
                 disabled=payload.disabled,
                 option_texts=dict(payload.option_texts),
                 hero_card=payload.hero_card,
+                revealed=revealed,
+            )
+        if kind is QueryKind.SELECT_OPTIONS:
+            if not isinstance(payload, SelectOptionsContext):
+                raise ValueError("SELECT_OPTIONS 询问必须给出 SelectOptionsContext")
+            return SelectOptionsQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt="请选择若干项（可多选）。",
+                legal_actions=actions,
+                view=view,
+                skill_id=payload.skill_id,
+                options=payload.options,
+                disabled=payload.disabled,
+                min_selected=payload.min_selected,
+                max_selected=payload.max_selected,
+                option_texts=dict(payload.option_texts),
                 revealed=revealed,
             )
         if kind is QueryKind.DISTRIBUTE:

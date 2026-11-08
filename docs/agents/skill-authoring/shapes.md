@@ -160,6 +160,7 @@
 | `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判；`spec.max_per_suit` 存在时按花色收窄（涉猎，0 下限由牌面决定） |
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
 | `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它。**逐步询问**这一面自票 07 起同样有置灰口：`Engine.ask_option(..., disabled=..., hero_card=..., option_texts=...)` 把置灰项留在询问的 `options` 里、只从 `legal_actions` 剔除（提交被拒），投影派生 `option_details`（技能名 / `descriptions.json` 原文 / 置灰标记）给界面画灰——目前唯一载体是"展示武将牌"那一类（票 02 §4.2 B 段），首个真实调用者 = 【天成】（`hero.wuming.tiancheng`；选项 id 带展示序号 `tiancheng:reveal:<k>`，效果行文本给具体 X） |
+| `SELECT_OPTIONS` | **多选选项**（界夏侯渊【神速】的「至多三项」= 首个载体，jie-feng-batch2 票 01a）：一张弹窗里逐项勾选 | 答案 = `Action.SelectOptions(choices)`（集合，**不是**单个 `choice`）；候选 = `[min_selected, max_selected]` 内、不含 `disabled` 的**每个子集**的全量枚举（空集排第一 ⇒ 超时兜底 = 一项都不做）；`disabled` 与单选面同语义（留在 `options` 里画灰、不进候选）；引擎入口 `Engine.ask_options`（手写询问，**不进** `steps` 闭集、不进预发动清单） |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |
 | `DISTRIBUTE` | **计数式分配**（神周瑜移动版【业炎】= 首个载体，huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数（`seats` / `max_total` / `per_seat_max`） | 候选 = 「每座 0..单座上限、合计 ≤ 上限」的全量枚举；答案 = `Action.Distribute(counts)`（座位升序、省略 0）；`counts=()` 键最小 ⇒ 超时兜底 = 不分配 |
 
@@ -266,6 +267,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 两行交换（排列面·**不枚举**） | 弹窗：上排「星」/ 下排「手牌」，只上下交换、行内不调序；答案由界面构造、服务端只校验形状 | `modal.js:stepDialogKind`（`arrange`）+ `projection._arrange_spec` 下发 `rows` / `enumerate: false` / `reorder: false` | `hero.shen_zhugeliang.qixing`（huo-shenzhugeliang 票 02；外壳同 `hero.jie_lidian.xunxun`） |
 | 武将牌上的牌点选（弹窗） | 弹窗：一行牌（**牌面对宿主可见**），点选后提交 | `modal.js:stepDialogKind`（`heroPick`，判据 = 槽的 `ref.zone === "hero"`） | `hero.shen_zhugeliang.kuangfeng` / `.dawu`（huo-shenzhugeliang 票 02） |
 | 两行观看选择面（弹窗） | 弹窗：上行被观看角色的手牌 / 下行自己的手牌；同花色置灰（两行一起算）、四色各一才可提交；右端「放弃」= 候选里的 `Pass`（超时同义），凑不出四色时只剩「放弃」 | `modal.js:stepDialogKind`（`watchTwoRows`；判据 = `SELECT_CARDS` + `spec.max_per_suit` + 槽位恰好跨两个座位且含询问者；空选择面认服务端 `dialog` 标记）；渲染 = `reveal.js:renderWatchRows`，置灰复用 `reveal.js:suitSlotState` | 框架票 93（lei-shenganning）；首个技能载体 = 神甘宁【魄袭】（`hero.shen_ganning.poxi`，票 01） |
+| 多选弹窗（勾选 + 提交） | 弹窗：逐项一行勾选框（置灰项列出来但点不动）、右端「提交」；勾选是本地态，提交时拼出候选里那条 `SelectOptions` | `modal.js:stepDialogKind`（`multiChoice`）+ `options.js:renderMultiSelect` + `answer.js:multiSelectAction` | `hero.jie_xiahouyuan_mobile.shensu`（界夏侯渊移动版【神速】「至多三项」，jie-feng-batch2 票 01a / 01） |
 | fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
 
 **套不套用要写出来**：第 3 步反查出的相似技能就是模板源。套用 ⇒ 票面写它的 id 与抄哪一行；

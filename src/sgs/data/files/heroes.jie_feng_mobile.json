@@ -40,6 +40,50 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_xiahouyuan_mobile",
+      "name": "界夏侯渊移动版",
+      "true_name": "夏侯渊",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shensu",
+          "name": "神速",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhangjiao_mobile",
+      "name": "界张角移动版",
+      "true_name": "张角",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "leiji",
+          "name": "雷击",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "guidao",
+          "name": "鬼道",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "huangtian",
+          "name": "黄天",
+          "skill_type": "LORD"
+        }
+      ]
     }
   ]
 }

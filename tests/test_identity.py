@@ -323,6 +323,8 @@ def test_the_lord_skill_ids_are_now_derived_from_the_m3_definitions():
             "hero.caopi_mobile.songwei",
 # lin-batch2 票 02：董卓移动版【暴虐】
             "hero.dongzhuo_mobile.baonue",
+            # jie-feng-batch2 票 02：界张角移动版【黄天】（主公技）
+            "hero.jie_zhangjiao_mobile.huangtian",
         }
     )
 

@@ -70,6 +70,8 @@ __all__ = [
     "JIANYING_FLOW",
     "JIE_JIZHI",
     "JIE_JIZHI_FLOW",
+    "JIE_LEIJI",
+    "JIE_LEIJI_FLOW",
     "JIZHI",
     "JIZHI_FLOW",
     "YAJIAO",
@@ -866,6 +868,140 @@ LEIJI_FLOW = SkillFlow(
 """【雷击】的一步流水线：选一名角色（含自己）→ 判定 → ♠ 造 2 点雷电伤害。"""
 
 
+# ---------------------------------------------------------------------------
+# 界张角移动版【雷击】（jie-feng-batch2 票 02）——目标改成**其他角色**，♣ 走第二分支
+#
+# 牌面（用户 `D:\\SGS_HEROS\\界限突破-风包\\界张角\\技能.txt` L12，逐字）：
+#   当你使用或打出【闪】时，你可以令一名**其他**角色进行一次判定，若结果为♠️，你对其
+#   造成2点雷电伤害；♣️，你回复1点体力并对其造成1点雷电伤害。
+#
+# 与移动版【雷击】（feng-zhangjiao 票 01）的差别（A4 的显式区分）：目标池**不含自己**；
+# ♠ 仍是"一次 2 点雷电伤害"；**♣ 是第二分支**——张角先回复 1 点（满体力不回复），
+# 再对被判定者造成 1 点雷电伤害；♥ / ♦ 零副作用。
+# ---------------------------------------------------------------------------
+
+JIE_LEIJI = hero_skill_id("jie_zhangjiao_mobile", "leiji")
+"""界张角移动版【雷击】的全限定技能 id。"""
+
+JIE_LEIJI_SPADE_DAMAGE = 2
+"""「你对其造成2点雷电伤害」：**一个**伤害事件里的 2 点（与移动版同值）。"""
+
+JIE_LEIJI_CLUB_DAMAGE = 1
+"""♣ 分支的伤害：1 点（在回复之后）。"""
+
+_JIE_LEIJI_JUDGED_KEY = "jie_leiji_judged"
+"""帧私有：这一次发动已经压过判定帧（续跑不重开判定）。"""
+
+_JIE_LEIJI_SEAT_KEY = "jie_leiji_seat"
+"""帧私有：被选中的**被判定者**（同时也是伤害目标；"其"= 该角色）。"""
+
+_JIE_LEIJI_SUIT_KEY = "jie_leiji_suit"
+"""帧私有：判定牌的花色（判定期间读不出，回写后定格，续跑不重读）。"""
+
+_JIE_LEIJI_RECOVERED_KEY = "jie_leiji_recovered"
+"""帧私有：♣ 的回复段已经处理过（满体力没压帧也算处理过）。"""
+
+_JIE_LEIJI_DAMAGED_KEY = "jie_leiji_damaged"
+"""帧私有：这次发动的伤害段已经压过子帧（续跑不重复造伤）。"""
+
+_JIE_LEIJI_DONE_KEY = "jie_leiji_done"
+"""帧私有：这次发动已经结算完（重入直接收尾）。"""
+
+
+def _jie_leiji_pool(
+    host_state: GameState, frame: Frame, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """判定对象池：**其他**存活角色（「一名其他角色」⇒ 不含张角自己，账本 L776②）。"""
+    del frame, chosen
+    return tuple(
+        player.seat
+        for player in host_state.players
+        if player.alive and player.seat != owner
+    )
+
+
+def _jie_leiji_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：判定 → 按花色分两支（♠ 2 点 / ♣ 回复 1 点 + 1 点 / ♥♦ 无效果）。"""
+    owner = frame.data["skill_owner"]
+    if frame.data.get(_JIE_LEIJI_DONE_KEY):
+        return None
+    if not frame.data.get(_JIE_LEIJI_JUDGED_KEY):
+        seat = next(iter(int(value) for value in answers.get("seat", ())), None)
+        if seat is None:
+            return None
+        frame.data[_JIE_LEIJI_JUDGED_KEY] = True
+        frame.data[_JIE_LEIJI_SEAT_KEY] = seat
+        host.open_skill_judgment(frame, seat, JIE_LEIJI)
+        return "stay"
+    if _JIE_LEIJI_SUIT_KEY not in frame.data:
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        frame.data.pop("skill_result", None)
+        frame.data[_JIE_LEIJI_SUIT_KEY] = None if judge_card is None else judge_card.suit
+    suit = frame.data[_JIE_LEIJI_SUIT_KEY]
+    target = int(frame.data[_JIE_LEIJI_SEAT_KEY])
+    if suit == Suit.CLUB.value and not frame.data.get(_JIE_LEIJI_RECOVERED_KEY):
+        frame.data[_JIE_LEIJI_RECOVERED_KEY] = True
+        player = host.state.player(owner)
+        if player.hp < player.hp_max:
+            host.push_frame(
+                FrameKind.RECOVER,
+                {
+                    "source": owner,
+                    "targets": (owner,),
+                    "card": None,
+                    "use_timing": frame.data.get("use_timing"),
+                    "amount": 1,
+                },
+                timing=Timing.RECOVER_VALUE,
+            )
+            return "stay"
+    if suit in (Suit.SPADE.value, Suit.CLUB.value) and not frame.data.get(
+        _JIE_LEIJI_DAMAGED_KEY
+    ):
+        frame.data[_JIE_LEIJI_DAMAGED_KEY] = True
+        amount = (
+            JIE_LEIJI_SPADE_DAMAGE
+            if suit == Suit.SPADE.value
+            else JIE_LEIJI_CLUB_DAMAGE
+        )
+        host.push_frame(
+            FrameKind.DAMAGE,
+            {
+                "source": owner,
+                "targets": (target,),
+                "card": None,
+                "channel": None,
+                "use_timing": frame.data.get("use_timing"),
+                "target": target,
+                "nature": DamageNature.THUNDER,
+                "chain": False,
+                "amount": amount,
+            },
+            timing=Timing.DAMAGE_DEAL,
+        )
+        return "stay"
+    frame.data[_JIE_LEIJI_DONE_KEY] = True
+    return None
+
+
+JIE_LEIJI_FLOW = SkillFlow(
+    name="jie_leiji",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_jie_leiji_pool, optional=False, key="seat"),
+    ),
+    effect=_jie_leiji_effect,
+)
+"""【雷击】（界版）的一步流水线：选一名**其他**角色 → 判定 → 按花色分两支。"""
+
+
+def _jie_leiji_hooks() -> tuple[Hook, Hook]:
+    """使用 / 打出两条钩子（条件与移动版逐字相同，流水线不同）。"""
+    return (
+        Hook(Timing.USE_ON_USE, condition=_leiji_condition, flow=JIE_LEIJI_FLOW),
+        Hook(Timing.PLAY_ON_PLAY, condition=_leiji_condition, flow=JIE_LEIJI_FLOW),
+    )
+
+
 def _leiji_hooks() -> tuple[Hook, Hook]:
     """使用 / 打出两条钩子（同一条件、同一流水线；与【涯角】同形）。"""
     return (
@@ -967,5 +1103,18 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
                 "你对其造成2点雷电伤害"
             ),
             step_requirements={"seat": "选择一名角色进行判定"},
+        ),
+        # 界张角移动版【雷击】（jie-feng-batch2 票 02）：目标 = 其他角色；♠ 2 点 / ♣ 回复 1 + 1 点。
+        SkillDef(
+            skill_id=JIE_LEIJI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=_jie_leiji_hooks(),
+            requirement=(
+                "当你使用或打出【闪】时，你可以令一名其他角色进行一次判定，若结果为♠️，"
+                "你对其造成2点雷电伤害；♣️，你回复1点体力并对其造成1点雷电伤害。"
+            ),
+            step_requirements={"seat": "选择一名其他角色进行判定"},
         ),
     )

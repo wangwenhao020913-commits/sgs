@@ -42,6 +42,9 @@ const DIALOG_KINDS = Object.freeze({
   reveal: "reveal",
   suit: "suit",
   distribution: "distribution",
+  // 多选选项（jie-feng-batch2 票 01a）：一张弹窗里逐项勾选、右端「提交」；置灰项列出来
+  // 但不可勾。首个载体 = 界夏侯渊【神速】的「至多三项」。
+  multiChoice: "multiChoice",
   // 武将牌上的牌（huo-shenzhugeliang 票 02）：星牌点选（1..k 张，提交后结算）。
   heroPick: "heroPick",
   // 两行观看手牌（lei-shenganning 票 93）：上行被观看角色的手牌、下行自己的手牌；
@@ -141,6 +144,8 @@ function stepDialogKind(pending) {
   if (pending.kind === "ARRANGE") return DIALOG_KINDS.arrange;
   // 票 05：计数式分配（【业炎】）——一张窗里给若干座位点计数，答案是一份"分配向量"。
   if (pending.kind === "DISTRIBUTE") return DIALOG_KINDS.distribution;
+  // 多选选项（jie-feng-batch2 票 01a）：判据只看载荷种类，不认技能名。
+  if (pending.kind === "SELECT_OPTIONS") return DIALOG_KINDS.multiChoice;
   // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 用**既有** `choice` 外壳（不新增种类：
   // 一张窗选一条技能 / 末条「都不发动」，正是"选项闭集"）。`state.preactivation` 优先，
   // 与 `dialogWantedKind` 同一次序——选中某条技能进入它自己的清单后，这一步的表面是
@@ -445,6 +450,7 @@ function dialogTitleFor(kind, pending) {
   if (kind === DIALOG_KINDS.arrange) return "排列";
   if (kind === DIALOG_KINDS.heroPick) return "选择武将牌上的牌";
   if (kind === DIALOG_KINDS.distribution) return "分配";
+  if (kind === DIALOG_KINDS.multiChoice) return "多选";
   // 票 93：两行观看面的标题 = 技能展示名（服务端 `context.name`），没有时给中性文案；
   // 行标签才写"这是谁的手牌"（见 `reveal.js:watchRowLabel`）。
   if (kind === DIALOG_KINDS.watchTwoRows) {

@@ -93,6 +93,7 @@ class QueryKind(str, Enum):
     SELECT_CARDS = "SELECT_CARDS"
     SKILL_ACTIVATION = "SKILL_ACTIVATION"
     SELECT_OPTION = "SELECT_OPTION"
+    SELECT_OPTIONS = "SELECT_OPTIONS"
     ARRANGE = "ARRANGE"
     DISTRIBUTE = "DISTRIBUTE"
 
@@ -465,6 +466,24 @@ class SelectOptionContext:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectOptionsContext:
+    """``SELECT_OPTIONS`` 候选生成的类型化载荷（jie-feng-batch2 票 01a）：**多选**选项闭集。
+
+    与 :class:`SelectOptionContext` 的差别只有"答案是一组值"：``options`` 仍是全部选项
+    （含置灰），可提交的组合由 ``legal_actions`` 表达（每一问全量枚举 [min,max] 内、
+    不含置灰项的子集）。``min_selected`` 缺省 0 = 允许一个都不选（空集是候选里的第一条，
+    故超时兜底天然是"什么都不做"）；``max_selected=None`` = 只受选项数约束。
+    """
+    skill_id: str
+    options: tuple[str, ...]
+    optional: bool = False
+    disabled: tuple[str, ...] = ()
+    min_selected: int = 0
+    max_selected: int | None = None
+    option_texts: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class DistributeContext:
     """``DISTRIBUTE`` 候选生成的类型化载荷（huo-shenzhouyu-mobile 票 05）。
 
@@ -741,6 +760,17 @@ class SelectOption(_ActionBase):
     choice: str
 
 
+class SelectOptions(_ActionBase):
+    """多选选项的答复（jie-feng-batch2 票 01a）：``choices`` 是按 ``options`` 序排好的子集。
+
+    空元组 = 一个都不选（合法，当且仅当这一问允许空集）。去重与排序由引擎侧
+    :func:`sgs.effects.actions._select_options` 枚举出的候选承担：客户端必须**原样**
+    选中候选里的那一条，不自己拼集合（与 :class:`Distribute` 同姿态）。"""
+
+    kind: Literal["SelectOptions"] = "SelectOptions"
+    choices: tuple[str, ...] = ()
+
+
 class Distribute(_ActionBase):
     """计数式分配（huo-shenzhouyu-mobile 票 05；首个载体 = 神周瑜【业炎】）。
 
@@ -778,6 +808,7 @@ Action = Annotated[
     | SelectCards
     | ActivateSkill
     | SelectOption
+    | SelectOptions
     | ArrangeCards
     | Distribute,
     Field(discriminator="kind"),
@@ -1033,6 +1064,24 @@ class SelectOptionQuery(_QueryBase):
     hero_card: HeroCardRef | None = None
 
 
+class SelectOptionsQuery(_QueryBase):
+    """多选选项（jie-feng-batch2 票 01a；首个载体 = 界夏侯渊【神速】的「至多三项」）。
+
+    载荷与 :class:`SelectOptionQuery` 同姿态：``options`` 是**全部**选项（含置灰），
+    ``disabled`` 保留原位、只不在 ``legal_actions`` 里；``min_selected`` / ``max_selected``
+    是这次选择的区间，界面据此启用 / 禁用「提交」。答案是一组值
+    （:class:`~sgs.state.SelectOptions`），不是单个 ``choice``。
+    """
+
+    kind: Literal["SELECT_OPTIONS"] = "SELECT_OPTIONS"
+    skill_id: str
+    options: tuple[str, ...]
+    disabled: tuple[str, ...] = ()
+    min_selected: int = 0
+    max_selected: int | None = None
+    option_texts: dict[str, str] = Field(default_factory=dict)
+
+
 class DistributeQuery(_QueryBase):
     """计数式分配（huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数。
 
@@ -1074,6 +1123,7 @@ Query = Annotated[
     | SelectCardsQuery
     | SkillActivationQuery
     | SelectOptionQuery
+    | SelectOptionsQuery
     | ArrangeQuery
     | DistributeQuery,
     Field(discriminator="kind"),
