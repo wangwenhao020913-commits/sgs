@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "yijiang_2014",
+  "heroes": [
+    {
+      "id": "jushou",
+      "name": "沮授",
+      "true_name": "沮授",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "yijiang-2014",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jianying",
+          "name": "渐营",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "shibei",
+          "name": "矢北",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

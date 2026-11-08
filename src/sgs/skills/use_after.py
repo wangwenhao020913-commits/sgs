@@ -34,6 +34,7 @@ from sgs.effects import (
     CarrierKind,
     DamageNature,
     behavior_for,
+    is_own_play_phase,
     is_slash,
     targets_within_attack_range,
 )
@@ -65,6 +66,8 @@ from .flow import PickSeats, SkillFlow, zero_step_effect
 __all__ = [
     "CONGTAO",
     "CONGTAO_PER_ROUND",
+    "JIANYING",
+    "JIANYING_FLOW",
     "JIE_JIZHI",
     "JIE_JIZHI_FLOW",
     "JIZHI",
@@ -179,6 +182,82 @@ def _jizhi(host: Any, frame: Frame) -> Control:
     frame.data[_DRAWN_KEY] = True
     host.draw_for_hand(frame, frame.data["skill_owner"], 1)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 沮授【渐营】（一将成名-2014；jushou-lusu 票 01，用户 2026-11-08 签 Q1 / Q5）
+#
+# 规则原文（用户 `技能.txt` 逐字；OL 一将成名官网同值，见票面 §0.1）：
+#
+#     渐营：当你于你的出牌阶段内使用牌时，若此牌与你本阶段使用的上一张牌点数或花色
+#           相同，你可以摸一张牌。
+#
+# **跨事件记忆住在引擎侧**（`Player.play_phase_last_card` / `play_phase_previous_card`，
+# 由 `Engine._note_play_phase_card` 在 `start_use` 入口做旋转），本模块**只读**两条事实：
+#
+# - **打出不算**（牌面写"使用"）：旋转只在 `start_use` 里做，`play_card` 不写；
+# - **只算自己的出牌阶段**（牌面写"你的出牌阶段内"）：钩子条件再自校一次，故别人的回合里
+#   使用【无懈可击】这类响应不进比较（那两张事实在阶段起点已复位，见 `_phase_play_start`）；
+# - **无点数 / 无花色的牌 fail-closed**（账本 L896 的通则）：上一张是多源转化的虚拟牌
+#   （【丈八蛇矛】两张手牌当【杀】）时点数花色恒无 ⇒ 比较不成立，且它作为"上一张"会让
+#   **下一张**也不成立。界沮授移动版的【渐营】逐字补了"若上一张有花色则视为相同"，
+#   正是"没有就不同"这条基准读法的反面证据。
+# ---------------------------------------------------------------------------
+
+JIANYING = hero_skill_id("jushou", "jianying")
+"""沮授【渐营】的全限定技能 id（一将成名-2014 包）。"""
+
+_JIANYING_DRAWN_KEY = "jianying_drawn"
+"""帧私有：本帧已经因【渐营】摸过牌（重入不再摸；不进记录流）。"""
+
+
+def _same_rank_or_suit(current: CardRef | None, previous: CardRef | None) -> bool:
+    """「点数或花色相同」的唯一判据；任一侧缺该项信息 ⇒ 那一项**不算相同**。
+
+    账本 L896（用户 2026-11-06 签）把"缺信息"读成 fail-closed，而不是"缺信息与缺信息
+    相同"。点数与花色**各自独立**判：单源转化的虚拟牌继承来源牌的两项
+    （:mod:`sgs.skills.virtual` 的 `suit=first.suit if single else None`），多源 / 纯虚拟
+    恒无 ⇒ 两项都不成立。
+    """
+    if current is None or previous is None:
+        return False
+    same_rank = current.rank is not None and current.rank == previous.rank
+    same_suit = (
+        current.suit is not None
+        and previous.suit is not None
+        and current.suit == previous.suit
+    )
+    return same_rank or same_suit
+
+
+def _jianying_condition(host: Any, frame: Frame) -> bool:
+    """【渐营】的触发条件：**自己**于**自己的出牌阶段**使用，且与上一张点数或花色相同。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if not is_own_play_phase(host.state, owner):
+        return False
+    previous = host.state.player(owner).play_phase_previous_card
+    return _same_rank_or_suit(frame.data.get("card"), previous)
+
+
+def _jianying(host: Any, frame: Frame) -> Control:
+    """效果：摸一张牌（"是否发动"已由派发环问过）。
+
+    游标**先落位再摸**（界【集智】同款）：摸牌可能内联触发别人的「获得牌后 / 失去牌后」
+    钩子并挂起，重入时 ``run_flow`` 会从头重跑 effect，没有这个守卫就会多摸。
+    """
+    if frame.data.get(_JIANYING_DRAWN_KEY):
+        return None
+    frame.data[_JIANYING_DRAWN_KEY] = True
+    control = host.draw_for_hand(frame, frame.data["skill_owner"], 1)
+    if control == "stay":
+        return "stay"
+    return None
+
+
+JIANYING_FLOW = SkillFlow(name="jianying", steps=(), effect=zero_step_effect(_jianying))
+"""【渐营】的零步流水线（形状 = `shapes.md` §2 第 1 行；样板【集智】）。"""
 
 
 def _jie_jizhi(host: Any, frame: Frame) -> Control:
@@ -832,6 +911,20 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.USE_ON_USE, condition=_jizhi_condition, flow=JIZHI_FLOW),),
             requirement="使用非延时类锦囊牌时，摸一张牌（转化锦囊也算）",
+        ),
+        # 沮授【渐营】（一将成名-2014；jushou-lusu 票 01）：同一时机、换判据（"上一张牌"
+        # 而非牌型），比较的两侧都来自**本阶段自己的使用**（座位事实）。
+        SkillDef(
+            skill_id=JIANYING,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(Timing.USE_ON_USE, condition=_jianying_condition, flow=JIANYING_FLOW),
+            ),
+            requirement=(
+                "当你于你的出牌阶段内使用与上一张点数或花色相同的牌时，你可以摸一张牌"
+            ),
         ),
         SkillDef(
             skill_id=JIE_JIZHI,

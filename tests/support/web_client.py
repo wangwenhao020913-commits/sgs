@@ -286,7 +286,11 @@ _FIRE_TAPES = (
     # （对 AI 用火攻 / 目标亮牌 / 没被无懈 / 人类无同花色 / 零伤害 / 零非法应答），
     # 用同一支探针 `.scratch/huo-shenzhouyu-mobile/scan_fire_seed.py` 重扫 1–259，
     # 命中 4 / 46 / 56（4 已占用），取首个未在用的 **seed 46**。
-    (46, False, False),
+    # jushou-lusu 票 01（一将成名-2014·沮授进默认池，89 → 90 版本）同样挪了配将抽样面：
+    # seed 46 的人类整局没有可用【火攻】局面 ⇒ tape 失效。判据**逐字不动**，用同一支探针
+    # 重扫 1–259，命中 16 / 65 / 81 / 99 / 105 / 107 / 116 / 128 / 176 / 225，
+    # 取首个未在用的 **seed 16**（探针 `.scratch/huo-shenzhouyu-mobile/scan_fire_seed.py`）。
+    (16, False, False),
 )
 
 

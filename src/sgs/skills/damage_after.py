@@ -124,6 +124,8 @@ __all__ = [
     "damage_after_skill_definitions",
     "damage_point_index",
     "fankui_step_key",
+    "SHIBEI",
+    "SHIBEI_DEF",
 ]
 
 DAMAGE_POINT_KEY = "damage_point_index"
@@ -1618,6 +1620,94 @@ KUANGGU_DEF = SkillDef(
 
 
 # ---------------------------------------------------------------------------
+# 沮授【矢北】（一将成名-2014；jushou-lusu 票 01，用户 2026-11-08 签 Q2 / Q5）
+#
+# 规则原文（用户 `技能.txt` 逐字；OL 一将成名官网同句的展开式见票面 §0.1）：
+#
+#     矢北：锁定技，当你受到伤害后，若此次伤害是你本回合受到的第一次伤害，则你回复1点体力，
+#           否则你失去1点体力。
+#
+# 三个判据都落在**引擎侧座位事实**上（:attr:`~sgs.state.Player.damage_taken_this_turn`）：
+#
+# - **「本回合」= 当前这个游戏回合**（谁的回合都算；一手官网逐字「每当你于一名角色的回合内
+#   受到第一次伤害后」，账本 L889 同向）⇒ 复位点 = 回合末对所有座位清零，**不是**自己的
+#   ``TURN_START``；
+# - **逐事件、不是逐点**（牌面没有「1 点」限定词，账本 L777）：一次 2 点伤害只算 1 次、
+#   只回复 1 点；
+# - **0 伤害 / 被防止的伤害不算受到伤害**（规则 §4.14 L396–L397）⇒ 既不消耗"第一次"、
+#   也不推进次数（写点与派发环两处同判据）。
+# ---------------------------------------------------------------------------
+
+SHIBEI = hero_skill_id("jushou", "shibei")
+"""沮授【矢北】的全限定技能 id（一将成名-2014 包）。"""
+
+_SHIBEI_DONE_KEY = "shibei_done"
+"""帧私有：这次伤害事件已经结算过【矢北】（子帧出栈后派发环重入，不重做）。"""
+
+
+def _shibei(host: Any, frame: Any) -> Any:
+    """【矢北】的效果：本回合第 1 次伤害 ⇒ 回复 1 点；第 2 次及以后 ⇒ 失去 1 点。
+
+    两个分支各压一个**既有**子帧（与【狂骨】/【乱武】同形），故回复 / 失去体力两条链上的
+    钩子（【救援】一类改回复量、濒死窗口）都照常看得到：
+
+    - 回复走 ``RECOVER`` 帧；**满体力时不压帧**（规则 §4.15 L426「满体力时不回复」）——
+      锁定技照常"发动"，但没有 delta、也没有回复事件可供别人挂钩；
+    - 失去体力走 ``LIFE_DECREASE`` 帧、``source = None``（失去体力没有来源）；
+      体力扣到 0 的濒死由该帧自己处理（规则 §4.15 L415–L416 / §4.17）。
+
+    游标在压帧**之前**落位：子帧出栈后派发环从头重入本回调，没有它会把同一次伤害结算两遍。
+    """
+    owner = int(frame.data["skill_owner"])
+    if frame.data.get(_SHIBEI_DONE_KEY):
+        return None
+    frame.data[_SHIBEI_DONE_KEY] = True
+    player = host.state.player(owner)
+    if player.damage_taken_this_turn <= 1:
+        # 第 1 次（含"构造局面直接写 hp 却没走伤害帧"以外的所有正常路径）。
+        if player.hp >= player.hp_max:
+            return None
+        host.push_frame(
+            FrameKind.RECOVER,
+            {
+                "source": owner,
+                "targets": (owner,),
+                "card": None,
+                "use_timing": frame.data.get("use_timing"),
+                "amount": 1,
+            },
+            timing=Timing.RECOVER_VALUE,
+        )
+        return "stay"
+    host.push_frame(
+        FrameKind.LIFE_DECREASE,
+        {"target": owner, "source": None, "amount": 1},
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+    return "stay"
+
+
+SHIBEI_DEF = SkillDef(
+    skill_id=SHIBEI,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(Hook(Timing.DAMAGE_AFTER_TAKE, handler=_shibei),),
+    requirement=(
+        "锁定技：当你受到伤害后，若此次伤害是你本回合受到的第一次伤害，你回复 1 点体力；"
+        "否则你失去 1 点体力"
+    ),
+)
+"""【矢北】一条定义：锁定技 ⇒ 不问是否发动、无步骤（`shapes.md` §2 第 1 行的锁定技变体）。
+
+自校持有者由派发环的 ``MATCH_OWNER_KEY`` 保证（``frame.data["skill_owner"]`` 恒是实例
+持有者），故"任何人挨打都触发"不会发生——与【耀武】同姿态。比较的左侧不是帧载荷而是
+座位事实 ``damage_taken_this_turn``：它在 :func:`~sgs.engine.steps.damage_finalize_amount`
+里**本事件已计入**（写点早于 ``DAMAGE_AFTER_TAKE`` 派发），故第 1 次伤害读到的就是 1。
+"""
+
+
+# ---------------------------------------------------------------------------
 # 界魏延移动版【狂骨】（jie-feng-batch 票 02；口径 = 移动版、显示名带「移动版」后缀）
 #
 #     当你对一名角色造成1点伤害后，若其扣减体力前你计算与其的距离不大于1，
@@ -2273,4 +2363,4 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
         )
         for skill in DAMAGE_AFTER_SKILLS
     )
-    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF)
+    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF, SHIBEI_DEF)

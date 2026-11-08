@@ -1695,6 +1695,9 @@ class Engine:
             key = behavior.count_key
             counts_by_type[key] = counts_by_type.get(key, 0) + 1
         self._note_play_phase_slash(card, source)
+        # jushou-lusu 票 01【渐营】：本阶段"上一张使用牌"的旋转。必须在 **push_frame 之前**
+        # （即本函数内），否则 ``USE_ON_USE`` 派发时读到的是这张牌自己。
+        self._note_play_phase_card(card, source)
         deal_bonus = 0
         if is_slash(behavior) and self.state.player(source).wine_active:
             deal_bonus = WINE_DAMAGE_BONUS
@@ -3590,6 +3593,25 @@ class Engine:
             return
         self.state.player(source).slash_in_play_phase = True
 
+    def _note_play_phase_card(self, card: CardRef, source: int) -> None:
+        """把"本出牌阶段自己使用的最后一张牌"记进座位级事实（jushou-lusu 票 01【渐营】）。
+
+        与 :meth:`_note_play_phase_slash` 同一判据（``is_own_play_phase``）、同一条入口
+        （``Engine.start_use``；**打出不写**，故 ``play_card`` 不调本函数）。
+
+        **写的是旋转，不是覆盖**：``previous ← last``、``last ← card``。分两格的理由见
+        ``Player.play_phase_last_card`` 的注释——写入点在压 USE 帧之前，只留一格的话
+        ``USE_ON_USE`` 钩子读到的就是本张牌，比较恒成立。"上一张"因此恒指"本阶段上一次
+        使用的那一张"，嵌套使用（出牌阶段里用【无懈可击】、被【借刀杀人】迫使使用【杀】）
+        按**使用顺序**而不是按结算完成顺序（改到帧末写会把次序倒过来）。
+        复位见 :meth:`_phase_play_start`。
+        """
+        if not is_own_play_phase(self.state, source):
+            return
+        player = self.state.player(source)
+        player.play_phase_previous_card = player.play_phase_last_card
+        player.play_phase_last_card = card
+
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
         """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
 
@@ -3781,6 +3803,21 @@ class Engine:
             return False
         player.damage_dealt_this_turn = True
         return True
+
+    def note_damage_taken(self, seat: int) -> int:
+        """记"``seat`` 本回合**受到伤害**"的次数（jushou-lusu 票 01 的【矢北】判据；Q2 签）。
+
+        写入唯一入口：伤害数值定稿且 > 0、未被防止时由
+        :func:`~sgs.engine.steps.damage_finalize_amount` 调一次——**每个伤害事件 +1，不是
+        逐点**（一次 2 点伤害只算一次）。与 :meth:`note_damage_dealt` 同一位置、同一姿态，
+        差别只有两处：记的是**挨打**那一侧，且**不看有没有来源**（【闪电】一类无来源伤害
+        照样是"受到伤害"）。作用域 = **本回合**：:meth:`_clear_turn_effects` 在回合末把
+        所有座位的这一位清零。**不发 delta**（没有 JSON 读者，回放按同一条伤害结算重建）。
+        返回值 = 记完之后的次数。
+        """
+        player = self.state.player(seat)
+        player.damage_taken_this_turn += 1
+        return player.damage_taken_this_turn
 
     def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool:
         """写一个座位的**横置**状态并落一条 ``chained_change``（M5-03 的唯一写入口）。
@@ -4532,6 +4569,9 @@ class Engine:
             player.duanyan_slash_bonus = 0
             player.duanyan_no_distance = False
             player.damage_dealt_this_turn = False
+            # jushou-lusu 票 01 的【矢北】：与上一位同一复位点（作用域 = 一个回合。
+            # 不是"自己的 TURN_START"——别人的回合里挨打也算本回合的第 X 次）。
+            player.damage_taken_this_turn = 0
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
             player.hand_limit_bonus = 0
@@ -5935,6 +5975,9 @@ class Engine:
         # 出牌阶段起点（被【乐不思蜀】跳过时也复位——本阶段一张都没用，事实为假）。
         if self.state.turn_seat is not None:
             self.state.player(self.state.turn_seat).slash_in_play_phase = False
+            # jushou-lusu 票 01【渐营】：「本阶段上一张使用牌」的一对格子同一复位点。
+            self.state.player(self.state.turn_seat).play_phase_last_card = None
+            self.state.player(self.state.turn_seat).play_phase_previous_card = None
             # M6 票 17【诈降】：正常收尾在 ``_phase_play_end``；这里再兜一次（上一阶段异常
             # 中断时不让"本阶段"跨进新阶段）。
             self._clear_zhaxiang_active(self.state.turn_seat)

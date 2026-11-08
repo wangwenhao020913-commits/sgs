@@ -1106,6 +1106,11 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
         # M6 票 06【诛害】的判据：**造成过伤害**（数值定稿且 > 0、未被防止）。
         # 在"受到伤害时"整步之后记，故被【寒冰剑】一类效果防止的伤害不算。
         host.note_damage_dealt(int(source))
+    if amount > 0 and not has_tag(frame, Tag.PREVENTED):
+        # jushou-lusu 票 01【矢北】的判据：**受到伤害**的次数（与上一位同一位置）。
+        # 差别只有两处：记挨打那一侧，且**不看有没有来源**（【闪电】无来源照样算）；
+        # 一次 2 点伤害只 +1（逐事件，不是逐点）。
+        host.note_damage_taken(int(frame.data["target"]))
     return None
 
 

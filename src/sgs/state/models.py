@@ -631,6 +631,37 @@ class Player(BaseModel):
     **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，回放按同一条伤害结算
     重建（本字段不进记录流）。
     """
+    damage_taken_this_turn: int = 0
+    """本回合**受到过几次伤害**（jushou-lusu 票 01 的【矢北】判据；用户 2026-11-08 签 Q2）。
+
+    ``damage_dealt_this_turn`` 的**镜像**（M6 票 06 的【诛害】）——同一文件、同一复位点，
+    只换了三件事：记的是**挨打**那一侧、用**计数**而不是布尔（【矢北】要分"第 1 次 / 第
+    ≥2 次"两档），并**去掉「有来源」**这一条（【闪电】一类无来源伤害照样是"受到伤害"）。
+
+    写入唯一入口 :meth:`Engine.note_damage_taken`（伤害数值定稿且 > 0、未被防止时由
+    :func:`~sgs.engine.steps.damage_finalize_amount` 调一次，**每个伤害事件 +1**，不是逐点）；
+    作用域 = **本回合**（谁的回合都算）：回合末由 :meth:`Engine._clear_turn_effects` 把所有
+    座位的这一位清零。**不发 delta**：没有 JSON 读者，回放按同一条伤害结算重建。
+    """
+    play_phase_last_card: CardRef | None = None
+    """**本出牌阶段**自己**使用**的最后一张牌（jushou-lusu 票 01 的【渐营】判据；Q1 签）。
+
+    写入唯一入口 :meth:`Engine._note_play_phase_card`（``start_use`` 入口；**打出不算**，
+    故 ``play_card`` 不写）。判据与 ``slash_in_play_phase`` 同一组：``is_own_play_phase``
+    成立才写（回合外的响应、别人的回合都不算）。复位点 = :meth:`Engine._phase_play_start`
+    （被【乐不思蜀】跳过时也复位），故"本阶段"的作用域不跨回合。
+
+    与:attr:`play_phase_previous_card` 是**一对**：``start_use`` 里先 ``previous ← last``、
+    再 ``last ← 本张``（**旋转**），【渐营】的钩子在 ``USE_ON_USE`` 派发时读 ``previous``。
+    分两格而不是一格，是因为写入点在**压 USE 帧之前**（``game.py`` 的 ``start_use``）：
+    只留一格时钩子会读到"自己"，比较恒成立。**不发 delta**：与 ``slash_in_play_phase``
+    同姿态（记录流里的使用动作已足以重放重建）。
+    """
+    play_phase_previous_card: CardRef | None = None
+    """**本出牌阶段**自己使用过的**上一张**牌（【渐营】比较的左侧；见上一条字段）。
+
+    生命周期与:attr:`play_phase_last_card` 逐字相同（同一次旋转、同一个复位点）。
+    """
     identity: Identity | None = None
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。
 
