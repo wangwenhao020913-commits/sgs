@@ -782,6 +782,13 @@ def _haoshi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
         frame.data[_HAOSHI_PICKED_KEY] = picked
 
     # ---- 段 5：交出（手牌 → 目标手牌区；一次搬牌，PUT）-----------------------------
+    # 进度**先落、再搬牌**（与 `_yiji` 同一条判据，见 `damage_after.py:_yiji` 的注释）：
+    # `move_in_frame` 返回 `"stay"` 的意思是「牌**已经搬完**了，只是『失去牌后』的钩子挂起
+    # 了」。旧实现等搬完才记 `_HAOSHI_GIVEN_KEY` ⇒ 重入时又搬一遍——而挂起期间
+    # 【清俭】一类钩子可能已经把收到的牌里的一张转交给了别人，两次 `move_card` 的来源区因此
+    # 不同 ⇒ ``ValueError: 一次 move_card 只能有一个来源区域``（2026-11-08 门禁 fuzz 实测；
+    # `.scratch/wuming/followups.md` 第 5 条记着这一族站点，本条是其中一处）。
+    frame.data[_HAOSHI_GIVEN_KEY] = True
     control = host.move_in_frame(
         frame,
         state.refs(picked),
@@ -792,7 +799,6 @@ def _haoshi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
     )
     if control == "stay":
         return "stay"
-    frame.data[_HAOSHI_GIVEN_KEY] = True
     return None
 
 

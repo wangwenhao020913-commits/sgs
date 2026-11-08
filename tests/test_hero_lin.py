@@ -6030,3 +6030,116 @@ def test_dimeng_two_empty_hands_swap_is_a_no_op():
     assert state.player(1).hand == [] and state.player(2).hand == []
     assert len(state.player(0).hand) == len(mine) + 2
     assert state.processing == []
+
+
+def test_haoshi_does_not_move_the_same_cards_again_when_qingjian_takes_one():
+    """【好施】交出四张 ⇒ 收牌人界夏侯惇的【清俭】把其中一张交回鲁肃，好施**不得再搬一遍**。
+
+    ``move_in_frame`` 返回 ``"stay"`` 的意思是「牌**已经搬完**了，只是『失去牌后』的钩子挂起
+    了」。旧实现把「这一批已交出」的进度记在这次移动**之后**，于是重入时又搬一遍——而此时
+    【清俭】已经把其中一张搬走，两次 ``move_card`` 的来源区不同 ⇒
+    ``ValueError: 一次 move_card 只能有一个来源区域``（2026-11-08 门禁 fuzz 实测；与
+    `damage_after.py:_yiji` 同一条判据，见 `.scratch/wuming/followups.md` 第 5 条）。
+    本用例把那条路径钉成 2 人构造局面，不依赖种子。
+    """
+    hand = tuple(range(4))
+    deck = deck_excluding(PACK, *hand)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_xiahoudun"),
+            SeatSpec(hero=LU_SU, hand=hand),
+        ],
+        deck=deck,
+        turn_seat=1,
+        phase=Phase.DRAW,
+        # 首座 = 座位 1：鲁肃先手，好施在他的摸牌阶段触发。
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    class _HaoshiGive:
+        """鲁肃：发动【好施】，选牌问交出一半；其余取最小合法应答。"""
+
+        def __init__(self):
+            self.asks = []
+
+        def respond(self, query):
+            if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == HAOSHI:
+                self.asks.append(query)
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            if query.kind == QueryKind.SELECT_CARDS:
+                wanted = query.spec.total[0]
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectCards) and len(action.picks) == wanted
+                )
+            return _minimal(query)
+
+    class _QingjianRelay:
+        """界夏侯惇：发动【清俭】，挑收到的一张交给座位 1（鲁肃）。"""
+
+        def __init__(self):
+            self.asks = []
+            self.gave = None
+
+        def respond(self, query):
+            skill = str(getattr(query, "skill_id", "") or "")
+            if query.kind == QueryKind.SKILL_ACTIVATION and skill == QINGJIAN:
+                self.asks.append(query)
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            if query.kind == QueryKind.SELECT_CARDS:
+                self.gave = query
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectCards) and len(action.picks) == 1
+                )
+            if query.kind == QueryKind.SELECT_OPTION:
+                wanted = next(
+                    (
+                        action
+                        for action in query.legal_actions
+                        if isinstance(action, SelectOption)
+                        and str(action.choice) == "seat:1"
+                    ),
+                    None,
+                )
+                if wanted is not None:
+                    return wanted
+            return _minimal(query)
+
+    giver = _HaoshiGive()
+    receiver = _QingjianRelay()
+    run_queries(
+        engine,
+        [receiver, giver],
+        lambda e: e.finished or ran_timing(e, Timing.PHASE_PLAY_START),
+        limit=4000,
+    )
+
+    assert giver.asks, "好施要发动过"
+    assert receiver.asks, "清俭要真的把其中一张交回去（否则这条用例没走到重入路径）"
+    # 鲁肃：4 + 摸 4 = 8，交出一半（4）→ 4；清俭又交回 1 张 → 5。
+    assert len(engine.state.player(1).hand) == 5, (
+        f"交出 4 张、收回 1 张：{len(engine.state.player(1).hand)}"
+    )
+    puts = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.PUT
+    ]
+    assert [len(record.cards) for record in puts] == [4, 1], (
+        f"好施搬一次（4 张）、清俭搬一次（1 张），不得重搬：{[len(r.cards) for r in puts]}"
+    )
