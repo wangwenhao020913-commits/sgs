@@ -1572,6 +1572,75 @@ SHENXING_FLOW = SkillFlow(
 
 
 # ---------------------------------------------------------------------------
+# 顾雍（一将成名-2014 / OL）【慎行】（yijiang-2014 票 03）
+#
+# 牌面（用户 `技能.txt` 逐字；OL 官网同值，票面 §0.1）：
+#
+#     出牌阶段，你可以弃置两张牌，然后摸一张牌。
+#
+# 与界顾雍移动版【慎行】**同短 id、牌面不同**（A4），用户 2026-11-09 签 Q-G1 = A：
+#
+# - **无次数上限**：牌面没有「出牌阶段限一次」⇒ 同一出牌阶段只要付得起就能再发动
+#   （规则 §3.5 L185「限制来自标注」+ 账本 L652 的【仁德】同句裁定）⇒
+#   ``_can_offer(..., once_per_phase=False)`` + ``SkillFlow(once_per_phase=False)``；
+#   本版**没有**界版那套「本阶段发动次数」计数位段（``_phase_use_total`` 与本技能无关）；
+# - **恒摸一张**：牌面没有颜色那一句 ⇒ 不读 ``color_of_suit``、没有同色 / 异色的分支
+#   （界版的 L974 不适用于本版）；
+# - 「两张牌」的区域默认 = 手牌 + 装备区（账本 L775② + L674），两张可跨区各取一张。
+#
+# 文案**各自逐字声明**在 ``ActiveSkill(...)`` 上（声明级覆盖优先于 ``_REQUIREMENTS`` /
+# ``_STEP_REQUIREMENTS`` 的短 id 行，那两行是界版那一份、一字不改）；``SkillFlow.name``
+# 也另起（``guyong_shenxing``），因为 ``tests/test_ask_points.py`` 机械核"全部模块级 flow 的
+# name 两两不同"，而界版已占 ``"shenxing"``。
+# ---------------------------------------------------------------------------
+
+_GUYONG_SHENXING_DRAWN_KEY = "guyong_shenxing_drawn"
+"""帧私有：摸牌那一段已经发出（摸牌内联「获得牌后」钩子挂起后不重摸）。"""
+
+
+def _guyong_shenxing_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：付得起（手牌 ∪ 装备区 ≥ 2 张）。**没有次数上限**，故每次询问都重新进池。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    player = state.player(ctx.subject)
+    if len(player.hand) + len(player.equip) < 2:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _guyong_shenxing_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：弃两张（按来源区分组）→ 恒摸一张（无判据、无分支）。"""
+    owner = frame.data["source"]
+    cards = answers["card"]
+    assert isinstance(cards, tuple) and len(cards) == 2, "代价恰好两张"
+    if (
+        _move_to_discard(host, frame, cards, owner=owner, key="guyong_shenxing:cost")
+        == "stay"
+    ):
+        return "stay"
+    if not frame.data.get(_GUYONG_SHENXING_DRAWN_KEY):
+        # 游标在搬牌**之后**、摸牌**之前**落位：弃置内联的「失去牌后」钩子挂起时，
+        # 续跑既不会重弃、也不会漏摸；摸牌自己内联挂起时则由本标记挡住第二次。
+        frame.data[_GUYONG_SHENXING_DRAWN_KEY] = True
+        control = host.draw_for_hand(frame, owner, 1)
+        if control == "stay":
+            return "stay"
+    return None
+
+
+GUYONG_SHENXING_FLOW = SkillFlow(
+    name="guyong_shenxing",
+    steps=(
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=2, hi=2, key="card"),
+    ),
+    effect=_guyong_shenxing_effect,
+    # 牌面没有「出牌阶段限一次」⇒ 执行器不落 `_USED` 位（本版也**没有**别的计数位段）。
+    once_per_phase=False,
+)
+"""顾雍【慎行】的单步流水线：弃两张（手牌 ∪ 装备区）→ 恒摸一张。"""
+
+
+# ---------------------------------------------------------------------------
 # 界华佗【除疠】（M6 票 18）：任意名势力互异的其他角色 → 各弃一张；黑桃者各摸一张
 #
 # §十九 L2200–L2201：
@@ -6782,6 +6851,19 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         _shenxing_offers,
         flow=SHENXING_FLOW,
         preactivated=True,
+    ),
+    # 顾雍（一将成名-2014 / OL）【慎行】（yijiang-2014 票 03）：出牌阶段，你可以弃置两张牌，
+    # 然后摸一张牌——**没有**次数上限、**恒**摸一张。与界版**同短 id、牌面不同**（A4）⇒
+    # 文案与流水线名都各写各的（声明级覆盖优先，短 id 两张表一字不改）。首步选**自己**的牌
+    # ⇒ 清单渲得出，翻 `preactivated=True`（shapes.md §4 准入表）。
+    ActiveSkill(
+        "guyong",
+        "shenxing",
+        _guyong_shenxing_offers,
+        flow=GUYONG_SHENXING_FLOW,
+        preactivated=True,
+        requirement="出牌阶段，你可以弃置两张牌，然后摸一张牌",
+        step_requirements={"card": "弃置两张牌（手牌 / 装备区）"},
     ),
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。

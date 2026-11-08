@@ -3294,3 +3294,54 @@ def test_jiaxu_ai_activates_luanwu_and_an_enemy_slashes_the_nearest() -> None:
     assert isinstance(found["response"], UseCard), f"该出【杀】，实得 {found['response']!r}"
     assert found["response"].targets == (0,)
     assert found["hp_after"] == found["hp_before"] - 1, "那张【杀】真的打中了贾诩"
+
+
+# ---------------------------------------------------------------------------
+# 一将成名-2014·顾雍（yijiang-2014 票 03）：【慎行】弃两张恒摸一张
+# ---------------------------------------------------------------------------
+
+GUYONG_STD = "guyong"
+GUYONG_SHENXING = "hero.guyong.shenxing"
+
+
+def test_guyong_shenxing_ai_fills_the_manifest_and_filters_two_cards_into_one() -> None:
+    """【慎行】：AI 会填预发动清单（两张出牌阶段用不出去的牌）并完成"弃二摸一"。
+
+    手里只放【闪】+【无懈可击】：两者在出牌阶段都**用不出去**，故"发动【慎行】"是唯一
+    有意义的动作（否则 AI 会先按原用途把牌用掉）。本版**没有次数上限**、恒摸一张，
+    `SKILL_VALUES` 给的是低正分 ⇒ 判据只有"会发动 + 把两张都填进清单"。
+    """
+    dodge = cards_of_type(PACK, "dodge")[0]
+    nullify = cards_of_type(PACK, "nullify")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=GUYONG_STD, hand=(dodge, nullify)), SeatSpec()],
+        deck=deck_excluding(PACK, dodge, nullify),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    # 摸牌阶段放弃摸牌（`set_draw_phase_count(0, 0)`）：出牌阶段手里就只有可付的那两张。
+    engine.set_draw_phase_count(0, 0)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    play = engine.pending
+    action = HeuristicPlayer(ai_stream(0, play.actor)).respond(play)
+
+    assert isinstance(action, ActivateSkill) and action.skill_id == GUYONG_SHENXING, (
+        f"AI 该发动【慎行】，实得 {action!r}"
+    )
+    assert set(action.picks) == {dodge, nullify} and len(action.picks) == 2, (
+        f"清单要恰好填那两张，实得 {action.picks!r}"
+    )
+    engine.submit(action)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: dodge in running.state.discard and nullify in running.state.discard,
+    )
+    assert dodge in engine.state.discard and nullify in engine.state.discard
+    assert len(engine.state.player(0).hand) == 1, "弃两张、摸一张"

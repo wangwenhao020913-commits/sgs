@@ -3038,6 +3038,24 @@ def _coverage_shenxing():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_guyong_shenxing():
+    """yijiang-2014 票 03：顾雍（OL）【慎行】（已翻预发动、单步清单：选两张牌）。
+
+    与界版那条覆盖同形、换成标准顾雍：手里放两张**出牌阶段用不出去**的牌（【闪】+【无懈
+    可击】），清单只一步（``card``，恰好 2 张），复合动作由 AI 自己填。本版**无次数上限**、
+    弃两张**恒**摸一张，故 AI 只需在"付得起"时填表。
+    """
+    dodge = _ids("dodge")[0]
+    nullify = _ids("nullify")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guyong", hand=(dodge, nullify)), SeatSpec()],
+        deck=_deck_excluding(dodge, nullify),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_xiongluan():
     """lei-batch 票 02：张绣【雄乱】——出牌阶段、区域都还能被废除 ⇒ 清单渲得出（一步选人）。"""
     state = build_state(
@@ -3185,6 +3203,8 @@ _COVERAGE_CASES = {
     "hero.jie_guyong_mobile.shenxing": _coverage_shenxing,
     # yijiang-2014 票 02：陈群（OL）【定品】（已翻预发动，两步清单；目标只收已受伤）。
     "hero.chenqun.dingpin": _coverage_chenqun_dingpin,
+    # yijiang-2014 票 03：顾雍（OL）【慎行】（已翻预发动，单步清单；无次数上限、恒摸一张）。
+    "hero.guyong.shenxing": _coverage_guyong_shenxing,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,

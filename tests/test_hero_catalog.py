@@ -257,9 +257,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 票 02：界顾雍移动版【慎行】⇒ 197 → 198、武将技 173 → 174。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 198 → 199、武将技 174 → 175
     # （【法恩】C1 摘出 ⇒ 本将只带一条技能入池）。
-    assert len(CATALOG) == 199
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200、武将技 175 → 176
+    # （【秉壹】C3 摘出 ⇒ 本将只带一条技能入池）。
+    assert len(CATALOG) == 200
     assert len(equipment) == 22, "装备不变：本票一条是武将技"
-    assert len(heroes) == 175
+    assert len(heroes) == 176
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -293,7 +295,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # jie-feng-batch2 票 01：界夏侯渊移动版【神速】⇒ 168 → 169；票 02：界张角移动版三条 ⇒ 169 → 172。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 172 → 173；票 02：界顾雍移动版 ⇒ 174。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 174 → 175。
-    assert len(expected) == 175
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 175 → 176。
+    assert len(expected) == 176
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2444,6 +2447,10 @@ SKILL_SHAPE: dict[str, str] = {
     # 流水线，判定与黑 / 红两分支住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
     # 【法恩】C1 摘出 ⇒ 本将只有这一行。
     "hero.chenqun.dingpin": "主动技能",
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（A 族 + 单步 `PickCards` 流水线，
+    # 弃两张 → 恒摸一张住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
+    # 【秉壹】C3 摘出 ⇒ 本将只有这一行。
+    "hero.guyong.shenxing": "主动技能",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2471,7 +2478,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 主动技能 32 → 33；
     # 票 02：界顾雍移动版【慎行】⇒ 33 → 34。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 主动技能 34 → 35。
-    "主动技能": 35,
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 主动技能 35 → 36。
+    "主动技能": 36,
     "触发技能": 26,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
@@ -2613,7 +2621,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # jie-feng-batch2 票 01：界夏侯渊移动版【神速】⇒ 192 → 193；票 02：界张角三条 ⇒ 193 → 196。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 196 → 197；票 02：界顾雍移动版 ⇒ 198。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 198 → 199。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 199
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 200
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2760,7 +2769,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（两步流水线）⇒ 内 103 → 104；
     # 票 02：界顾雍移动版【慎行】（单步流水线）⇒ 内 104 → 105。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】（两步流水线）⇒ 内 105 → 106。
-    assert len(inside) == 106
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（单步流水线）⇒ 内 106 → 107。
+    assert len(inside) == 107
     assert len(outside) == 93
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

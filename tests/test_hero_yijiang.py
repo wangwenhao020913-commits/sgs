@@ -23,7 +23,14 @@
 from __future__ import annotations
 
 import pytest
-from sgs.data import Category, RuleConfig, Suit, card_category, load_content_pack
+from sgs.data import (
+    Category,
+    RuleConfig,
+    Suit,
+    card_category,
+    color_of_suit,
+    load_content_pack,
+)
 from sgs.engine import Engine, IllegalActionError
 from sgs.engine.steps import damage_finalize_amount
 from sgs.resolution import Tag, add_tag
@@ -50,6 +57,7 @@ from support import (
     cards_of_type,
     deck_excluding,
     ran_timing,
+    run_queries,
 )
 
 PACK = load_content_pack(deck_profile="standard_108")
@@ -1628,3 +1636,474 @@ def test_chenqun_dingpin_is_declared_with_its_own_wording():
     # 短 id 两张表一字未改：界版那一条仍与表逐字相同（改了两版会一起改掉）。
     assert jie.requirement == _REQUIREMENTS["dingpin"]
     assert dict(jie.step_requirements) == _STEP_REQUIREMENTS["dingpin"]
+
+
+# ===========================================================================
+# 一将成名-2014·顾雍【慎行】（yijiang-2014 票 03）
+#
+# 牌面（用户 `技能.txt` 逐字）：
+#
+#     出牌阶段，你可以弃置两张牌，然后摸一张牌。
+#
+# 用户 2026-11-09 签 Q-G1 = A（**无次数上限**）、Q-G2 = A（【秉壹】按源文件、本票摘出）、
+# Q-G3 = 可以（三行账本提案）。与界顾雍移动版【慎行】**同短 id、牌面不同**（A4）：
+#
+# - 本版**没有**「出牌阶段限X次（X为你的体力值）」⇒ 同一出牌阶段可反复发动；
+# - 本版**恒摸一张**（不读颜色 ⇒ 没有同色 / 异色的两支）；
+# - 代价「两张牌」的区域默认 = 手牌 + 装备区（账本 L775②、L674），可跨区各取一张。
+#
+# 【秉壹】命中 C3（座位多选面未落地）⇒ 摘出到 `09-guyong-bingyi.md`，本票**不声明**
+# 它的数据行、不写它的断言。
+#
+# 判据全走**外部缝**：预发动清单（``query.preactivations``）、记录流里的搬牌 / 摸牌 / 询问、
+# 座位上的手牌 / 装备区。不断言内部结构，也不 mock。
+# ===========================================================================
+
+GUYONG = "guyong"
+SHENXING = "hero.guyong.shenxing"
+JIE_SHENXING = "hero.jie_guyong_mobile.shenxing"
+
+
+def _card_of_color(color: str, *, exclude: tuple[int, ...] = ()) -> int:
+    """挑一张指定**颜色**的牌（``color`` = ``"red"`` / ``"black"``）。"""
+    for card_id in range(len(PACK.deck.cards)):
+        if card_id in exclude:
+            continue
+        actual = color_of_suit(PACK.deck.cards[card_id].suit)
+        if actual is not None and actual.value == color:
+            return card_id
+    raise AssertionError(f"标准 108 里没有 {color} 的牌")
+
+
+def _guyong_state(
+    *,
+    mine: tuple[int, ...],
+    equip: tuple[int, ...] = (),
+    draw: int = 2,
+    after: int = 2,
+    hp: int = 3,
+    hp_max: int = 3,
+    first_seat: int = 0,
+    rest: bool = True,
+):
+    """座位 0 = 顾雍（``mine`` = 直接给定的手牌）、座位 1 = 空座。
+
+    **牌的取用次序**：``from_state`` 的局面从**回合开头**跑起（准备 → 判定 → 摸牌 → 出牌），
+    故牌堆 = ``draw`` 张摸牌阶段要摸的牌 → ``after`` 张留给【慎行】的摸牌 → 其余。
+    """
+    drawn: list[int] = []
+    for _ in range(draw):
+        drawn.append(_first_of(category="basic", exclude=(*mine, *equip, *drawn)))
+    pending_draw: list[int] = []
+    for _ in range(after):
+        pending_draw.append(
+            _first_of(category="basic", exclude=(*mine, *equip, *drawn, *pending_draw))
+        )
+    taken = (*mine, *equip, *drawn, *pending_draw)
+    deck = (*drawn, *pending_draw, *(deck_excluding(PACK, *taken) if rest else ()))
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=GUYONG, hp=hp, hp_max=hp_max, hand=mine, equip=equip),
+            SeatSpec(),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=first_seat),
+    )
+
+
+def _guyong_play_phase(engine) -> bool:
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.PLAY_PHASE
+        and engine.pending.actor == 0
+    )
+
+
+def _park_guyong(state, *, draw: int = 2):
+    """构造局面 → 开到顾雍的出牌阶段询问（预发动清单就在这条询问上）。"""
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, draw)
+    return _drive(engine, _guyong_play_phase)
+
+
+def _activate_guyong(engine, picks=(), choices=(), skill_id: str = SHENXING):
+    """在出牌阶段询问上提交复合动作（预发动确认），推进回出牌阶段。"""
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=skill_id,
+            picks=tuple(picks),
+            choices=tuple(choices),
+            answers_seq=query.seq,
+        )
+    )
+    return _drive(engine, _guyong_play_phase)
+
+
+def _hand_size(engine, seat: int = 0) -> int:
+    return len(engine.state.player(seat).hand)
+
+
+def _moves_with(engine, *card_ids: int) -> list:
+    """牌面恰好是 ``card_ids`` 这一批的 ``card_move`` 记录（同一来源区的牌同批搬走）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and {card.card_id for card in record.cards} == set(card_ids)
+    ]
+
+
+def _drawn_batches(engine) -> list:
+    """摸牌落成的 ``card_move`` 记录（``reason = DRAW``；一次 ``draw_for_hand`` 一批）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason.value == "DRAW"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 形状：预发动清单（单步：恰两张，手牌 ∪ 装备区）
+# ---------------------------------------------------------------------------
+
+
+def test_shenxing_exposes_a_single_step_manifest_that_takes_exactly_two_cards():
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    engine = _park_guyong(_guyong_state(mine=mine))
+    query = engine.pending
+
+    assert not [
+        action
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == SHENXING
+    ], "已翻预发动：骨架候选从 legal_actions 删掉"
+    steps = _manifest(query, SHENXING)
+    assert [step.name for step in steps] == ["card"], "单步：选两张牌"
+    assert (steps[0].min, steps[0].max) == (2, 2), "代价恰好两张"
+    assert set(steps[0].zones) == {Zone.HAND, Zone.EQUIP}, "「两张牌」= 手牌 ∪ 装备区"
+
+
+def test_guyong_wording_is_its_own_not_the_jie_versions():
+    """A4：本版 ``requirement`` / ``step_requirements`` 逐字取自己那一版，短 id 表未改。"""
+    from sgs.skills import CATALOG, flow_for
+    from sgs.skills.active import _REQUIREMENTS, _STEP_REQUIREMENTS
+
+    ours = CATALOG[SHENXING]
+    jie = CATALOG[JIE_SHENXING]
+
+    assert ours.requirement == "出牌阶段，你可以弃置两张牌，然后摸一张牌"
+    assert "颜色" not in ours.requirement, "本版没有颜色那一句"
+    assert "限" not in ours.requirement, "本版没有「限X次」"
+    assert ours.requirement != jie.requirement, "两句牌面不同 ⇒ 不能共用界版那一句"
+    assert dict(ours.step_requirements) == {"card": "弃置两张牌（手牌 / 装备区）"}, (
+        "这一句两版同值，仍**各自显式声明**（不读短 id 表，防将来漂移）"
+    )
+    # 短 id 两张表一字未改：界版那一条仍与表逐字相同（改了两版会一起改掉）。
+    assert jie.requirement == _REQUIREMENTS["shenxing"]
+    assert dict(jie.step_requirements) == _STEP_REQUIREMENTS["shenxing"]
+    # 流水线也必须各叫各的（`tests/test_ask_points.py` 机械核"全部模块级 flow 名两两不同"）。
+    ours_flow = flow_for(SHENXING)
+    jie_flow = flow_for(JIE_SHENXING)
+    assert ours_flow is not None and jie_flow is not None
+    assert ours_flow.name == "guyong_shenxing"
+    assert ours_flow.name != jie_flow.name
+
+
+# ---------------------------------------------------------------------------
+# 效果：弃两张 → **恒**摸一张（不读颜色、不读体力）
+# ---------------------------------------------------------------------------
+
+
+def test_shenxing_discards_two_and_draws_exactly_one():
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    engine = _park_guyong(_guyong_state(mine=mine))
+    before = _hand_size(engine)
+    draws_before = len(_drawn_batches(engine))
+
+    engine = _activate_guyong(engine, picks=(mine[0], mine[1]))
+
+    assert mine[0] in engine.state.discard and mine[1] in engine.state.discard, (
+        "代价两张都进了弃牌堆"
+    )
+    cost = _moves_with(engine, mine[0], mine[1])
+    assert len(cost) == 1 and cost[0].from_zone.zone is Zone.HAND, (
+        "两张**同一批**搬走（不是逐张问、也不是逐张搬）"
+    )
+    drawn = _drawn_batches(engine)[draws_before:]
+    assert len(drawn) == 1, "只落一次摸牌"
+    assert len(drawn[0].cards) == 1, "恰好摸一张"
+    assert _hand_size(engine) == before - 2 + 1, "弃两张、摸一张"
+
+
+def test_shenxing_draws_one_whatever_the_colors_are():
+    """本版**没有**颜色那一句：同色与异色各跑一次，结果必须一样（恒摸一张）。"""
+    red1 = _card_of_color("red")
+    red2 = _card_of_color("red", exclude=(red1,))
+    black = _card_of_color("black", exclude=(red1, red2))
+
+    same_color = (red1, red2)
+    mixed = (red1, black)
+    assert (
+        color_of_suit(PACK.deck.cards[same_color[0]].suit)
+        == color_of_suit(PACK.deck.cards[same_color[1]].suit)
+    ), "同色那一对的夹具自校"
+    assert (
+        color_of_suit(PACK.deck.cards[mixed[0]].suit)
+        != color_of_suit(PACK.deck.cards[mixed[1]].suit)
+    ), "异色那一对的夹具自校"
+
+    outcomes: list[int] = []
+    for pair in (same_color, mixed):
+        mine = (*pair, *_hand_of(basic=2, skip=pair))
+        engine = _park_guyong(_guyong_state(mine=mine))
+        before = _hand_size(engine)
+        engine = _activate_guyong(engine, picks=pair)
+        outcomes.append(_hand_size(engine) - before)
+
+    assert outcomes == [-1, -1], "同色 / 异色都是净 −1（弃 2 摸 1，无颜色分支）"
+
+
+def test_shenxing_may_pay_one_hand_card_and_one_equipment_card():
+    equip_card = _first_of(category="equipment")
+    mine = _hand_of(basic=2, trick=1, skip=(equip_card,))
+    engine = _park_guyong(_guyong_state(mine=mine, equip=(equip_card,)))
+    before = _hand_size(engine)
+    assert engine.state.player(0).equip, "装备区那一张确实在场上"
+
+    engine = _activate_guyong(engine, picks=(mine[0], equip_card))
+
+    assert _moves_of(engine, equip_card) == [("equip", "discard", "DISCARD")], (
+        "装备区的牌按自己的来源区搬走（两张可跨区各取一张 ⇒ 一次 move_card 只走一个来源区）"
+    )
+    assert _moves_of(engine, mine[0]) == [("hand", "discard", "DISCARD")]
+    assert not engine.state.player(0).equip, "装备区那张已经离开"
+    assert _hand_size(engine) == before - 1 + 1, "手牌那张是代价、摸一张补回"
+
+
+def test_shenxing_may_pay_with_the_last_equipment_card():
+    """物理上合法：弃掉**唯一**一张装备牌会让装备技能随之消失——这是代价，不是缺陷。"""
+    equip_card = _first_of(category="equipment")
+    mine = _hand_of(basic=2, trick=1, skip=(equip_card,))
+    engine = _park_guyong(_guyong_state(mine=mine, equip=(equip_card,)))
+
+    engine = _activate_guyong(engine, picks=(mine[0], equip_card))
+
+    assert equip_card in engine.state.discard
+    assert not engine.state.player(0).equip, "装备区空了"
+    assert mine[0] in engine.state.discard
+
+
+def test_shenxing_draws_one_even_after_the_equipment_zone_is_emptied():
+    """G9：效果不读任何场况（只有绝对值 1）；弃空装备区后照样摸一张。"""
+    first = _first_of(category="equipment")
+    second = _first_of(category="equipment", exclude=(first,))
+    mine = _hand_of(basic=2, trick=1, skip=(first, second))
+    engine = _park_guyong(_guyong_state(mine=mine, equip=(first, second)))
+    before = _hand_size(engine)
+
+    engine = _activate_guyong(engine, picks=(first, second))
+
+    assert not engine.state.player(0).equip, "两张代价都来自装备区 ⇒ 装备区已空"
+    assert _hand_size(engine) == before + 1, "手牌只多了摸的那一张"
+
+
+# ---------------------------------------------------------------------------
+# 入口：付不起就不产出 / 取消零副作用 / **无次数上限**（Q-G1 = A）
+# ---------------------------------------------------------------------------
+
+
+def test_shenxing_is_not_offered_with_fewer_than_two_payable_cards():
+    """G1：手牌 1 张、装备区 0 张 ⇒ 凑不出两张 ⇒ 清单不出现（连"是否发动"都没有）。"""
+    mine = (_first_of(category="basic"),)
+    engine = _park_guyong(_guyong_state(mine=mine, draw=0), draw=0)
+
+    assert not _manifest(engine.pending, SHENXING), "少于两张 ⇒ 付不起"
+
+
+def test_shenxing_counts_equipment_cards_as_payable():
+    """同一判据的另一半：手牌只有 1 张 + 装备区 1 张 ⇒ 凑得出两张、清单出现。"""
+    equip_card = _first_of(category="equipment")
+    mine = (_first_of(category="basic", exclude=(equip_card,)),)
+    engine = _park_guyong(_guyong_state(mine=mine, equip=(equip_card,), draw=0), draw=0)
+
+    assert _manifest(engine.pending, SHENXING), "手牌 + 装备区合计两张 ⇒ 付得起"
+
+
+def test_shenxing_cancel_leaves_the_hand_untouched():
+    """「可以」含放弃：取消预发动零记录、零副作用（本版也没有次数可消耗）。"""
+    mine = _hand_of(basic=2)
+    engine = _park_guyong(_guyong_state(mine=mine, draw=0), draw=0)
+    before = _hand_size(engine)
+
+    assert _manifest(engine.pending, SHENXING), "取消 ≠ 用掉次数：清单仍在"
+    engine.submit(
+        next(action for action in engine.pending.legal_actions if isinstance(action, EndPhase))
+    )
+    engine = _drive(
+        engine,
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and e.pending.actor == 1
+        ),
+    )
+
+    assert _hand_size(engine) == before, "取消后手牌一张没动"
+    assert not [card for card in mine if card in engine.state.discard], "取消不弃牌"
+    assert not [key for key in engine.state.skill_state if SHENXING in key], (
+        "取消不写任何阶段位"
+    )
+
+
+def test_shenxing_may_be_used_twice_in_the_same_play_phase():
+    """Q-G1 = A：**无次数上限** —— 1 体力（界版的 X = 1）下仍能连发三次。"""
+    mine = _hand_of(basic=4, trick=2, equipment=1)
+    engine = _park_guyong(_guyong_state(mine=mine, after=4, hp=1, hp_max=3))
+    before = _hand_size(engine)
+
+    for used in range(3):
+        assert _manifest(engine.pending, SHENXING), f"第 {used + 1} 次仍该可发动（无上限）"
+        engine = _activate_guyong(engine, picks=(mine[used * 2], mine[used * 2 + 1]))
+
+    assert _hand_size(engine) == before - 3, "三次各净 −1 张（弃 2 摸 1）"
+    assert _manifest(engine.pending, SHENXING), "本版没有上限 ⇒ 只要付得起就还能发动"
+
+
+def test_shenxing_does_not_reset_or_touch_the_jie_versions_phase_counter():
+    """A4：两条技能**共用 CATALOG 但不共用状态** —— 本版不写计数位段、也不动界版那一格。"""
+    mine = _hand_of(basic=4, trick=2, equipment=2)
+    state = _guyong_state(mine=mine, after=6, hp=1, hp_max=3)
+    state.player(0).granted_skills.append(JIE_SHENXING)
+    engine = _park_guyong(state)
+
+    assert _manifest(engine.pending, SHENXING)
+    assert _manifest(engine.pending, JIE_SHENXING), "界版的 X = 1 次清单同时在场"
+
+    engine = _activate_guyong(engine, picks=(mine[0], mine[1]))
+    assert _manifest(engine.pending, JIE_SHENXING), "本版发一次不消耗界版的 X 次"
+    assert _manifest(engine.pending, SHENXING)
+
+    engine = _activate_guyong(engine, picks=(mine[2], mine[3]), skill_id=JIE_SHENXING)
+    assert not _manifest(engine.pending, JIE_SHENXING), "界版用满 X = 1 次 ⇒ 自己的清单消失"
+    assert _manifest(engine.pending, SHENXING), "界版用满不影响本版（无上限）"
+
+    keys = list(engine.state.skill_state)
+    assert not [key for key in keys if "hero.guyong.shenxing" in key], (
+        "本版 `once_per_phase=False` ⇒ 一个阶段位都不写"
+    )
+    assert [key for key in keys if JIE_SHENXING in key], "界版的计数位段只记在它自己那一格"
+
+
+# ---------------------------------------------------------------------------
+# 触发粒度（G4）/ 挂起续跑（G7）/ 收尾（G10）
+# ---------------------------------------------------------------------------
+
+LIANYING = "hero.jie_luxun.lianying"
+QINGJIAN = "hero.jie_xiahoudun.qingjian"
+
+
+def test_shenxing_asks_once_per_activation():
+    """G4：逐次发动 —— 一次发动 = 一次代价 + 一次摸牌（不逐张问、不逐张搬）。"""
+    mine = _hand_of(basic=2, trick=2)
+    engine = _park_guyong(_guyong_state(mine=mine, draw=0), draw=0)
+    before = _hand_size(engine)
+
+    engine = _activate_guyong(engine, picks=(mine[0], mine[1]))
+    first = _drawn_batches(engine)
+    assert not [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_CARDS.value
+        and str(record.query.skill_id) == SHENXING
+    ], "已翻预发动：两张在**一个**复合动作里交齐，不会逐张再问"
+    assert len(_moves_with(engine, mine[0], mine[1])) == 1, "代价只搬一批"
+    assert len(first) == 1 and len(first[0].cards) == 1, "只摸一次、只摸一张"
+
+    engine = _activate_guyong(engine, picks=(mine[2], mine[3]))
+
+    assert len(_moves_with(engine, mine[2], mine[3])) == 1, "第二次发动也只搬自己那一批"
+    assert len(_drawn_batches(engine)) == len(first) + 1, "两次发动 = 两次摸牌"
+    assert _hand_size(engine) == before - 2, "两次各净 −1 张"
+
+
+def test_shenxing_does_not_move_twice_when_a_move_hook_suspends():
+    """G7：成本弃置内联触发【连营】并挂起 ⇒ 续跑不重搬、也不漏摸。"""
+    mine = _hand_of(basic=2)
+    state = _guyong_state(mine=mine, draw=0, after=1)
+    state.player(0).granted_skills.append(LIANYING)
+    engine = _park_guyong(state, draw=0)
+
+    engine = _activate_guyong(engine, picks=mine)
+
+    assert _skill_asked(engine, LIANYING), "成本弃置确实内联问了【连营】"
+    assert len(_moves_with(engine, *mine)) == 1, "成本只搬一次（重入不重做）"
+    assert _hand_size(engine) == 1, "两张全部付出、摸牌只摸一张（不重摸）"
+
+
+def test_shenxing_does_not_draw_twice_when_a_gain_hook_suspends():
+    """G7：摸牌内联触发【清俭】并挂起 ⇒ 续跑不重摸（帧私有游标）。"""
+    mine = _hand_of(basic=2, trick=2)
+    state = _guyong_state(mine=mine, draw=0, after=2)
+    state.player(0).granted_skills.append(QINGJIAN)
+    engine = _park_guyong(state, draw=0)
+    before = _hand_size(engine)
+
+    engine = _activate_guyong(engine, picks=(mine[0], mine[1]))
+
+    assert _skill_asked(engine, QINGJIAN), "摸牌确实内联问了【清俭】"
+    assert _hand_size(engine) == before - 2 + 1, "只摸一次（重入不重摸）"
+
+
+class _EmptyTheDiscardAtTheCostHook:
+    """在【连营】的内联询问那一刻把弃牌堆腾空（**只**为走到引擎既有的短摸路径）。
+
+    本技能先弃两张、再摸一张，而弃掉的牌**必然**落进弃牌堆 ⇒ 纯正常路径下，摸牌那一刻
+    两堆不可能同时为空（弃牌堆里恒有刚付的这两张）。G10 的"两堆皆空 ⇒ 平局"因此要在这里
+    腾空弃牌堆才走得到；被测的仍是**引擎既有**的那条路径：技能把 ``draw_for_hand`` 的结局
+    如实透传（不吞掉、不重摸、不报错）。
+    """
+
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.cleared = False
+
+    def respond(self, query):
+        if (
+            not self.cleared
+            and query.kind == QueryKind.SKILL_ACTIVATION
+            and str(query.skill_id) == LIANYING
+        ):
+            self.cleared = True
+            self.engine.state.discard.clear()
+        return _answer(query)
+
+
+def test_shenxing_short_deck_ends_in_a_draw():
+    """G10：摸牌那一刻两堆皆空 ⇒ 短摸即平局（既有路径，技能只透传）。"""
+    mine = _hand_of(basic=2)
+    state = _guyong_state(mine=mine, draw=0, after=0, rest=False)
+    state.player(0).granted_skills.append(LIANYING)
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, 0)
+    engine = _drive(engine, _guyong_play_phase)
+    assert not engine.state.deck and not engine.state.discard, "开局两堆皆空"
+
+    engine.submit(
+        ActivateSkill(skill_id=SHENXING, picks=mine, answers_seq=engine.pending.seq)
+    )
+    driver = _EmptyTheDiscardAtTheCostHook(engine)
+    engine = run_queries(engine, [driver, driver], lambda e: e.finished)
+
+    assert driver.cleared, "成本弃置确实内联问了【连营】（腾空点就在这里）"
+    assert engine.finished
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result == "draw" and tail.reason == "both_decks_empty"
