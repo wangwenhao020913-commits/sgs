@@ -20974,6 +20974,89 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.view = seatView;
   ui.resetSelection();
 
+  /* ===== 秉壹（yijiang-2014 票 09 / W5b）的**合成载荷** ==========================
+   *
+   * 上面那份载荷是 W1 的通用面（刻意带了一个置灰座位）；【秉壹】的生产载荷是另一档：
+   * **4 名存活角色（含自己）、一个置灰项都没有**、区间 `[1, N]`（N = 展示那一刻的手牌数
+   * 3）、候选里带 `Pass`（「至多」可放弃）。服务端真会话读数钉在
+   * `tests/test_web.py::test_a_real_session_reaches_the_bingyi_seat_multi_select_face`，
+   * 这里补的是前端那一侧：**全部座位可点 + 上限恰在手牌数**时点满 3 个、第 4 个点不动，
+   * 提交仍是**一条** POST 送全部选中座位。
+   */
+  const bingyiSeq = seatSeq + 3;
+  const bingyiChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
+  const bingyiActions = [];
+  for (let mask = 1; mask < 1 << bingyiChoices.length; mask += 1) {
+    const picks = bingyiChoices.filter((_, index) => mask & (1 << index));
+    if (picks.length > 3) continue; // 上限 = 手牌数 3
+    bingyiActions.push({ kind: "SelectOptions", choices: picks, answers_seq: bingyiSeq });
+  }
+  const bingyiTarget = bingyiActions.find(
+    (action) => JSON.stringify(action.choices) === JSON.stringify(["seat:1", "seat:2", "seat:3"]));
+  const bingyiPending = {
+    kind: "SELECT_OPTIONS", actor: 0, seq: bingyiSeq, prompt: "请选择角色（可多选）。",
+    legal_actions: [...bingyiActions, { kind: "Pass", answers_seq: bingyiSeq }],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+    options: bingyiChoices, disabled: [],
+    min_selected: 1, max_selected: 3, option_texts: {},
+    context: {
+      actor: 0, name: "秉壹", targets: [],
+      label: "0号位顾雍对0号位顾雍使用秉壹",
+      requirement: "选择令其摸一张牌的角色（可多选，选好后提交）", skill_hints: [],
+    },
+  };
+  const bingyiView = seatViewWith(bingyiPending);
+  ui.state.view = bingyiView;
+  ui.state.sessionId = seatSession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(bingyiView);
+
+  check("秉壹-1 四名存活角色（**含自己**、没有置灰项）全部点得动，「提交」灰着（下限 1）",
+    ["0", "1", "2", "3"].every((seat) => {
+      const box = seatCardOf(seat);
+      return !!box && box.classList.contains("targetable")
+        && (box.listeners.click || []).length === 1;
+    }) && $("btn-submit").disabled === true,
+    `seats=${JSON.stringify(["0", "1", "2", "3"].map((seat) => seatClasses(seat)))}`
+      + ` submit=${$("btn-submit").disabled}`);
+
+  await clickAndWait(seatCardOf(3));
+  await clickAndWait(seatCardOf(1));
+  await clickAndWait(seatCardOf(2));
+  check("秉壹-2 点满手牌数（3 个座位）后第 4 个点不动；动作 = 三个座位按 `options` 原序一束",
+    seatCardOf(3).classList.contains("tsel")
+      && seatCardOf(1).classList.contains("tsel")
+      && seatCardOf(2).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(bingyiTarget),
+    `seat0=${JSON.stringify(seatClasses(0))} built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(0));
+  check("秉壹-3 上限外的第 4 个座位点了也不改变集合（上限 = 手牌数，比场上人数少）",
+    seatCardOf(0).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(bingyiTarget),
+    `seat0=${JSON.stringify(seatClasses(0))} built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeBingyi = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const bingyiAnswers = calls
+    .slice(beforeBingyi)
+    .filter((call) => call.path.includes("/answer"));
+  check("秉壹-4 点「提交」= 恰一条 POST，送出三个座位的 `SelectOptions`（一次点选、一次提交）",
+    bingyiAnswers.length === 1
+      && JSON.stringify(bingyiAnswers[0].body.action) === JSON.stringify(bingyiTarget),
+    `answers=${bingyiAnswers.length}`
+      + ` action=${JSON.stringify(bingyiAnswers[0] && bingyiAnswers[0].body.action)}`);
+
+  ui.state.view = seatView;
+  ui.resetSelection();
+
   // fail-closed 的反面：`option_seats` 为空的同一 `SELECT_OPTIONS` 仍走旧弹窗（逐字节不回归）。
   const plainMulti = {
     ...seatPending, seq: seatSeq + 1, option_seats: {}, disabled: ["jie_shensu_2"],

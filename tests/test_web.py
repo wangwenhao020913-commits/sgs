@@ -35,7 +35,7 @@ from sgs.data import (  # noqa: E402
     load_content_pack,
     validate_rule_config,
 )
-from sgs.data import enabled_hero_ids, hero_by_id  # noqa: E402
+from sgs.data import color_of_suit, enabled_hero_ids, hero_by_id  # noqa: E402
 from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT, RUNNING_SKILL_KEY, hero_card_zone_key  # noqa: E402
@@ -3896,6 +3896,107 @@ def test_a_real_session_reaches_the_yinghun_discard_step_with_its_step_wording()
     )
 
 
+class _FinishPhaseSeat:
+    """真会话里的脚本参与者：出牌阶段**直接结束**、技能一律发动、其余取第一个候选。
+
+    与 :class:`_ScriptedSeat` 的区别只有出牌阶段这一格：本段的被测局面靠"结束阶段的手牌
+    颜色"下断言，若脚本在出牌阶段随手打一张牌，手牌就变了（构造前提被脚本吃掉）。
+    """
+
+    def respond(self, query):
+        if getattr(query, "kind", None) == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "ActivateSkill":
+                return action
+        return query.legal_actions[0]
+
+
+def _advance_to_the_bingyi_seat_step(session: Session, *, limit: int = 20_000) -> None:
+    """逐步把**真引擎**推到【秉壹】的 ``SELECT_OPTIONS``（座位多选面）；不到就炸。"""
+    engine = session.engine
+    for _ in range(limit):
+        pending = engine.pending
+        if pending is not None and getattr(pending, "kind", None) == "SELECT_OPTIONS":
+            return
+        if pending is None:
+            engine._step()  # noqa: SLF001 - 与 _advance_to_the_yiji_card_step 同一推进手法
+            if engine.finished:
+                break
+            continue
+        engine.submit(session.participants[pending.actor].respond(pending))
+    raise AssertionError("真会话没有走到【秉壹】的座位多选面")
+
+
+def _bingyi_real_session() -> Session:
+    """**真会话**：座位 0 = 顾雍（两张**同色**手牌），停在【秉壹】的座位多选询问。
+
+    与 :func:`_yinghun_real_session` 同一条理由：随机建局走不到【秉壹】，但会话壳 /
+    阶段体派发 / ``pending_payload`` 这条读取方链路一字不换 —— 要证的是 W1 的座位多选面
+    在**生产载荷**里的形状（``option_seats`` 非空 ⇒ 牌桌多选、一次提交）与逐步文案
+    （``SkillDef.step_requirements["seat"]``，yijiang-2014 票 09 §2.6 的第三个勾选项）。
+    """
+    pack = _context_pack()
+    hand: list[int] = []
+    for card_id in range(len(pack.deck.cards)):
+        color = color_of_suit(pack.deck.cards[card_id].suit)
+        if color is not None and color.value == "red":
+            hand.append(card_id)
+        if len(hand) == 2:
+            break
+    assert len(hand) == 2, "构造：需要两张同色（红）手牌"
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="guyong", hp=3, hp_max=3, hand=tuple(hand)), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id not in set(hand)
+        ),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.engine.set_draw_phase_count(0, 0)  # 结束阶段的手牌 = 夹具给的那两张
+    session.participants = (_FinishPhaseSeat(), _FinishPhaseSeat())
+    _advance_to_the_bingyi_seat_step(session)
+    return session
+
+
+def test_a_real_session_reaches_the_bingyi_seat_multi_select_face() -> None:
+    """【秉壹】的「至多 N 名角色」在生产载荷里就是 W1 的座位多选面（yijiang-2014 票 09）。
+
+    钉四件事（``CODING_STANDARDS.md`` §6 的读取方纪律）：
+
+    1. **逐步文案真的被读到**：询问的 ``skill_id`` 是 ``hero.guyong.bingyi:seat``，
+       ``projection._step_requirement`` 按冒号后那段命中 ``step_requirements["seat"]``；
+    2. **`option_seats` 非空** ⇒ 前端 ``isSeatMultiStep`` 判定进牌桌多选（不是旧勾选弹窗）；
+    3. 池 = 全部存活角色**含自己**（座位 0 与 1 都在），区间 ``[1, N]``（N = 手牌数 2）；
+    4. 「至多」的放弃出口在候选里（``Pass``），不是"交一个空集合"。
+    """
+    session = _bingyi_real_session()
+    query = session.pending
+
+    assert query is not None and getattr(query, "kind", None) == "SELECT_OPTIONS"
+    assert str(query.skill_id) == "hero.guyong.bingyi:seat", "询问带着技能 id + 步骤键"
+
+    session.human_seat = int(query.actor)
+    payload = pending_payload(session)
+
+    assert payload is not None and payload["context"] is not None
+    assert payload["context"]["requirement"] == "选择令其摸一张牌的角色（可多选，选好后提交）", (
+        "读取方必须真的读到座位步的文案（退回一句话 summary 就说明判据读错了键）"
+    )
+    assert payload["option_seats"] == {"seat:0": 0, "seat:1": 1}, (
+        "座位池 = 全部存活角色（**含自己**）⇒ 前端进牌桌多选面"
+    )
+    assert payload["min_selected"] == 1 and payload["max_selected"] == 2, "至多 N 名（N = 手牌数）"
+    assert any(action["kind"] == "Pass" for action in payload["legal_actions"]), (
+        "「至多」可放弃：放弃出口是候选里的 Pass"
+    )
+
+
 def _jizhi_nullify_session() -> Session:
     """**真会话**：座位 1 = 界黄月英（回合角色）出【无中生有】⇒【集智】答完 ⇒ 无懈窗口。
 
@@ -7378,8 +7479,8 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200。
-    assert len(expected_skills) == 200, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201。
+    assert len(expected_skills) == 201, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

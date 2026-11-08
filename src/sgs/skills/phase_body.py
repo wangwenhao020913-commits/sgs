@@ -64,6 +64,7 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
+    Pass,
     SelectionSpec,
     Slot,
     SlotKind,
@@ -86,6 +87,7 @@ from .catalog import (
     round_skill_uses,
 )
 from .flow import (
+    SEAT_PREFIX,
     Arrange,
     DeckTopArrange,
     FixedSplit,
@@ -93,15 +95,18 @@ from .flow import (
     PickOption,
     PickSeats,
     SkillFlow,
+    seat_choice,
     watched_cards,
     zero_step_effect,
 )
 from .virtual import pure_virtual_card, virtual_candidates
 
 __all__ = [
+    "BINGYI",
     "BIYUE_FLOW",
     "BOTU_FLOW",
     "BOTU_ROUND_LIMIT",
+    "GUYONG_BINGYI_FLOW",
     "JIE_BOTU",
     "JIE_LUOYI",
     "JIE_LUOYI_FLOW",
@@ -1914,6 +1919,184 @@ _SHUANGXIONG = PhaseBodySkill(
 """【双雄】的声明（阶段体 + 随身 `CANDIDATES` 修饰器 + 产物牌名【决斗】）。"""
 
 
+# ---------------------------------------------------------------------------
+# 一将成名-2014·顾雍【秉壹】（yijiang-2014 票 09 / W5b）
+#
+#     结束阶段，你可以展示所有手牌。若你的手牌颜色均相同，
+#     你令至多等同于你手牌数名角色各摸一张牌。
+#
+# 用户 2026-11-09 签 Q-G2 = A（按用户源文件那一版）：**只看颜色**（界顾雍移动版是「颜色
+# **或类别**均相同」，本版没有类别那一支）、座位池**含自己**、N = **展示那一刻**的手牌数。
+# 两条已签的边界直接沿用：1 张手牌「均相同」= 平凡成立（`04-bingyi-uniform.md`）、
+# 0 张手牌**不给入口**（`02-guyong.md` Q3 = A）。
+#
+# 形状 = `shapes.md` §2 第 9 行「手写主体」+ 阶段体：流水线**一步都不装**（零步），
+# "展示 → 判条件 → 选至多 N 名角色 → 逐座位摸一张"整段住 ``effect``。座位步**不能**做成
+# ``PickSeats`` 步骤：流水线的任一步「没有候选」= 取消整条（零副作用），而本技能在条件
+# 不成立时仍必须**已经展示过手牌**——放进流水线，那一支就只剩取消、展示随之丢失。
+#
+# 与界版【秉壹】A4：``requirement`` / ``step_requirements`` 在声明级**逐字**写自己那一版
+# （短 id 表 ``_REQUIREMENTS`` / ``_STEP_REQUIREMENTS`` 里**不加** ``"bingyi"`` 一行，
+# 否则将来界版落地会两条声明抢同一行）；本版的 ``SkillFlow.name`` 也另起。
+# ---------------------------------------------------------------------------
+
+BINGYI = hero_skill_id("guyong", "bingyi")
+"""顾雍【秉壹】的全限定技能 id（一将成名-2014 / OL 版）。"""
+
+_BINGYI_REVEALED = "bingyi_revealed"
+"""帧私有：这批手牌已经展示过（重入不重复亮；展示段本身不挂起，游标是幂等闸）。"""
+
+_BINGYI_CAP = "bingyi_cap"
+"""帧私有：N = **展示那一刻**的手牌数（G9①：选人 / 摸牌期间手牌再变**不重算**）。"""
+
+_BINGYI_UNIFORM = "bingyi_uniform"
+"""帧私有：「颜色均相同」在**展示那一刻**是否成立（同上：定格，不随途中手牌变化重判）。"""
+
+_BINGYI_DRAWN = "bingyi_drawn"
+"""帧私有：**已经摸过的座位**（摸牌可能内联挂起；续跑据此不重摸）。"""
+
+
+def _bingyi_uniform_color(state: GameState, card_ids: tuple[int, ...]) -> bool:
+    """这批手牌的颜色是否**全部相同**（本版**只看颜色**，没有界版「或类别」那一支）。
+
+    1 张 = **平凡成立**（`04-bingyi-uniform.md` 的 A 裁定）；无颜色的牌 ⇒ fail-closed 不成立
+    （账本 L896：无点数的牌遇到比较一律 fail-closed）。空手牌**进不到这里**（入口在
+    ``condition`` 那一层就挡掉了，Q3 = A）；万一进来也只给 0 个名额 ⇒ 按不成立处理，
+    不构造 ``[1, 0]`` 这种没有候选的面（`edge-cases.md` 总纪律 1：不发没有候选的询问）。
+    """
+    if not card_ids:
+        return False
+    colors = {color_of_suit(state.card(card_id).suit) for card_id in card_ids}
+    if None in colors:
+        return False
+    return len(colors) <= 1
+
+
+def _bingyi_reveal(host: Any, frame: Frame, owner: int) -> None:
+    """效果第 1 段：把手牌**逐张**标成公开事实（``card_reveal``），一张都不搬。
+
+    「展示」不是移动（规则 §4.8 / 账本 L775③），故走 :meth:`Engine.reveal_card` 这条既有
+    通道（与【火攻】/界【清俭】同一条）；舞台的「展示组」由它渲染，技能不另造形态。
+    """
+    if frame.data.get(_BINGYI_REVEALED):
+        return
+    frame.data[_BINGYI_REVEALED] = True
+    for card_id in tuple(host.state.player(owner).hand):
+        host.reveal_card(frame, owner, host.state.card(card_id))
+
+
+def _bingyi_seats(host: Any, frame: Frame, owner: int) -> Any:
+    """效果第 2 段：**一次**多选至多 N 名角色（可放弃）；返回座位元组 / ``"stay"``。
+
+    面 = W1 的座位多选面：``options`` 全是 ``seat:N`` ⇒ 服务端派生的 ``option_seats`` 非空
+    ⇒ 界面进牌桌多选、**一次提交**（用户 2026-11-09 的 Q-W1 原话："一次点选多个座位（类似
+    【铁索连环】），不要选好一个提交再继续选"）。池 = 全部存活角色（**含自己**，Q-G2 = A），
+    按座位序；``[1, N]`` + ``optional=True`` = 「至多」（上限 + 可放弃，账本 L775 / L753）。
+    """
+    cap = int(frame.data[_BINGYI_CAP])
+    pool = tuple(player.seat for player in host.state.players if player.alive)
+    answer = host.ask_options(
+        frame,
+        owner,
+        Timing.PHASE_FINISH,
+        skill_id=f"{BINGYI}:seat",
+        options=tuple(seat_choice(seat) for seat in pool),
+        min_selected=1,
+        max_selected=cap,
+        optional=True,
+    )
+    if host.suspended(answer):
+        return "stay"
+    if isinstance(answer, Pass):
+        return ()
+    return tuple(int(choice.removeprefix(SEAT_PREFIX)) for choice in answer.choices)
+
+
+def _bingyi_draw(host: Any, frame: Frame, chosen: tuple[int, ...]) -> Any:
+    """效果第 3 段：逐座位**各摸一张**（G5；不是"整次一次性摸 N 张"），返回 ``"stay"`` / ``None``。
+
+    帧内游标 ``bingyi_drawn`` 在**摸牌之前**前进（与【连营】同姿态）：摸牌会内联派发
+    "获得牌后"的钩子（【清俭】一类）并挂起，续跑据此跳过已摸过的座位。
+    G9②：已选座位在途中阵亡 ⇒ 跳过（给死者摸牌没有意义）。
+    """
+    drawn: list[int] = frame.data.setdefault(_BINGYI_DRAWN, [])
+    for seat in chosen:
+        if seat in drawn:
+            continue
+        drawn.append(seat)
+        if not host.state.player(seat).alive:
+            continue
+        # 摸牌也算「获得牌」（票 24）：逐座摸牌会在中途触发钩子并挂起 ⇒ 原样上抛，
+        # 否则引擎会带着待答询问继续摸下一座，答复随后错配（【连营】注释里的实机根因）。
+        if host.draw_for_hand(frame, seat, 1) == "stay":
+            return "stay"
+    return None
+
+
+def _bingyi_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：展示所有手牌 → （颜色全同则）一次多选至多 N 名角色 → 逐座位各摸一张。"""
+    del answers
+    owner = int(frame.data["skill_owner"])
+    hand = tuple(host.state.player(owner).hand)
+    if not frame.data.get(_BINGYI_REVEALED):
+        # N 与「颜色是否全同」都在**展示那一刻**定格（G9①）：之后手牌再变不重算。
+        frame.data[_BINGYI_CAP] = len(hand)
+        frame.data[_BINGYI_UNIFORM] = _bingyi_uniform_color(host.state, hand)
+    _bingyi_reveal(host, frame, owner)
+    if not frame.data.get(_BINGYI_UNIFORM):
+        return None
+    chosen = _bingyi_seats(host, frame, owner)
+    if chosen == "stay":
+        return "stay"
+    return _bingyi_draw(host, frame, chosen)
+
+
+def _bingyi_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**我的**结束阶段 ∧ 我手上**有牌**。
+
+    - "关于我"自校一次（``frame.data["source"] == 持有者``，抄【琴音】`_qinyin_condition`
+      的写法；阶段体的 ``available`` 另挡一层是防御而非替代）⇒ 别人的结束阶段连问都不问；
+    - **0 张手牌不给入口**（`02-guyong.md` Q3 = A，直接沿用）：没有可展示的东西，
+      名额也是 0 ⇒ 不构造没有候选的面。
+
+    条件为假 ⇒ 派发环连"是否发动"都不问（零副作用）。
+    """
+    matched = frame.data.get(MATCH_OWNER_KEY)
+    if matched is None:
+        return False
+    if frame.data.get("source") != matched:
+        return False
+    return bool(host.state.player(int(matched)).hand)
+
+
+GUYONG_BINGYI_FLOW = SkillFlow(name="guyong_bingyi", steps=(), effect=_bingyi_effect)
+"""【秉壹】的零步流水线：[是否发动] → 展示 → （颜色全同则）至多 N 名角色各摸一张（无步骤）。
+
+必须是**模块级具名常量**（``tests/test_ask_points.py`` 的"全部模块级 flow 的 name 两两
+不同"）；``guyong_bingyi`` 与将来界版的同名技能也各叫各的。
+"""
+
+
+_GUYONG_BINGYI = PhaseBodySkill(
+    # 顾雍【秉壹】（一将成名-2014 / OL）：结束阶段，你可以展示所有手牌。若你的手牌颜色
+    # 均相同，你令至多等同于你手牌数名角色各摸一张牌。**只看颜色**（没有「或类别」那一支）。
+    hero_id="guyong",
+    short_id="bingyi",
+    timing=Timing.PHASE_FINISH,
+    flow=GUYONG_BINGYI_FLOW,
+    condition=_bingyi_condition,
+    requirement=(
+        "结束阶段，你可以展示所有手牌。若你的手牌颜色均相同，"
+        "你令至多等同于你手牌数名角色各摸一张牌"
+    ),
+    # 逐步文案的键 = 询问 ``skill_id`` 冒号后那段（``hero.guyong.bingyi:seat``）：投影的
+    # ``_step_requirement`` 按它查本表，故座位多选面在提示条上显示这一句（票 09 §2.6）。
+    step_requirements={
+        "seat": "选择令其摸一张牌的角色（可多选，选好后提交）"
+    },
+)
+
+
 PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _YINGZI,
     _JIE_YINGZI,
@@ -1934,12 +2117,14 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _JIE_SHENSU,
     _QINYIN,
     _SHUANGXIONG,
+    _GUYONG_BINGYI,
 )
 """L 族十三条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
 票 08 的界【英姿】、票 11 的【博图】、票 14 的界【突袭】/界【裸衣】、票 15 的界【恂恂】
 ——【博图】挂在**回合结束时**而不是阶段体上，派发机制相同，见
-:meth:`Engine._dispatch_phase_body`）。"""
+:meth:`Engine._dispatch_phase_body`）。yijiang-2014 票 09 起加顾雍【秉壹】（**手写主体**
++ ``PHASE_FINISH``；座位步是手写的座位多选面，故流水线零步）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",

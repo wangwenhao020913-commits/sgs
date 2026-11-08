@@ -1658,6 +1658,15 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         # 键相等时保持 ``ctx.options`` 给的次序——那是调用方**显式给出**的元组，
         # 不是生成顺序的隐式约定（且 ``seat:10`` 这类文本不宜按字面排序）。
         return (0, (), action.kind)
+    if isinstance(action, SelectOptions):
+        # 多选闭集里的**真候选**（yijiang-2014 票 09 补齐；与上面 ``SelectOption`` 同一条）。
+        # 它原先没有分支 ⇒ 与 ``Pass`` 同落兜底键 ``(1, (), kind)``，而
+        # ``"Pass" < "SelectOptions"`` 让「放弃」排到首位（``_check_decline_sorts_last``
+        # 在 fuzz 里判红；取首个候选的贪心参与者会一直取消）。**第一个**打开
+        # ``optional=True`` 的多选消费者是【秉壹】——此前的【界神速】多选步不带 ``Pass``，
+        # 故这条一直没被踩到。真候选之间的次序仍由 ``_select_options`` 的枚举给出
+        # （``sorted`` 是稳定的：空集在前 = 超时兜底"一项都不做"），这里不改它。
+        return (0, (), action.kind)
     if isinstance(action, ActivateSkill):
         # ``choices`` 也进键（票 04）：主动技同一组牌可以配不同目标座位，不带上它就会
         # 落进"键相等、顺序靠生成顺序"的隐式约定。既有候选两者皆空，故纪律扫描与

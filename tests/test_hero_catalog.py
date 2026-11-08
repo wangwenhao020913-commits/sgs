@@ -259,9 +259,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （【法恩】C1 摘出 ⇒ 本将只带一条技能入池）。
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200、武将技 175 → 176
     # （【秉壹】C3 摘出 ⇒ 本将只带一条技能入池）。
-    assert len(CATALOG) == 200
+    # yijiang-2014 票 09（W5b）：同一个顾雍补【秉壹】⇒ 200 → 201、武将技 176 → 177
+    # （座位多选面落地后解锁；数据行同一条武将，启用版本 / 真名都不变）。
+    assert len(CATALOG) == 201
     assert len(equipment) == 22, "装备不变：本票一条是武将技"
-    assert len(heroes) == 176
+    assert len(heroes) == 177
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -295,8 +297,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # jie-feng-batch2 票 01：界夏侯渊移动版【神速】⇒ 168 → 169；票 02：界张角移动版三条 ⇒ 169 → 172。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 172 → 173；票 02：界顾雍移动版 ⇒ 174。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 174 → 175。
-    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 175 → 176。
-    assert len(expected) == 176
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 175 → 176；票 09 补【秉壹】⇒ 177。
+    assert len(expected) == 177
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1362,6 +1364,22 @@ def _bengkuai_probe_state() -> GameState:
     )
 
 
+def _bingyi_probe_state() -> GameState:
+    """【秉壹】的正面对照需要"我手上有牌"（0 张手牌不给入口 ⇒ 条件为假）。
+
+    默认探针局面里 ME（座位 1）的手牌**故意为空**（【连营】要"移动后手牌为空"），
+    故另给一份：ME 两张手牌（【秉壹】的"展示所有手牌"要真的有牌可亮）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hand=tuple(cards_of_type(PACK, "dodge")[:2])),
+            SeatSpec(),
+        ],
+    )
+
+
 def _baonue_probe_state() -> GameState:
     """【暴虐】的正面对照：伤害来源（座位 0）与 ME 同为**群**势力，座位 2 是魏。
 
@@ -1611,6 +1629,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _bengkuai_probe_state()
     if skill_id == "hero.dongzhuo_mobile.baonue":
         return _baonue_probe_state()
+    if skill_id == "hero.guyong.bingyi":
+        return _bingyi_probe_state()
     if skill_id == "hero.tao_caocao.changyi":
         return _changyi_probe_state()
     if skill_id.startswith("hero.shen_zhugeliang."):
@@ -1984,6 +2004,10 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         #   座位 2 = 魏 ⇒ 持有者换成别人后判据翻假）。
         "hero.dongzhuo_mobile.bengkuai": (_HookFrame(source=ME),),
         "hero.dongzhuo_mobile.baonue": (_HookFrame(source=0),),
+        # yijiang-2014 票 09：顾雍【秉壹】——**我的**结束阶段（阶段体帧的 source = 我）∧
+        # 我有手牌（0 张不给入口，Q3 = A）。正面局面见 :func:`_bingyi_probe_state`；
+        # 持有者换成座位 2 后 source 与持有者对不上 ⇒ 条件翻假。
+        "hero.guyong.bingyi": (_HookFrame(source=ME),),
     }
 
 
@@ -2449,8 +2473,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.chenqun.dingpin": "主动技能",
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（A 族 + 单步 `PickCards` 流水线，
     # 弃两张 → 恒摸一张住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
-    # 【秉壹】C3 摘出 ⇒ 本将只有这一行。
+    # 【秉壹】原随 C3（座位多选面）摘出，票 09 解锁后是下面那一行。
     "hero.guyong.shenxing": "主动技能",
+    # yijiang-2014 票 09：顾雍【秉壹】（`PHASE_FINISH` 阶段体 + **零步流水线**，展示 /
+    # 判颜色 / 座位多选 / 逐座位摸牌全住 effect ⇒ 机械判据落在「零步技能」格；
+    # 座位步是**手写**的，不是 `PickSeats` 步——条件不成立时展示必须已经发生）。
+    "hero.guyong.bingyi": "零步技能",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2486,7 +2514,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # ⇒ 33 → 34。
     # jushou-lusu 票 01：沮授【渐营】（`USE_ON_USE` 零步流水线）⇒ 零步技能 34 → 35。
     # jushou-lusu 票 02：鲁肃【好施】（`PHASE_DRAW` 零步流水线）⇒ 35 → 36。
-    "零步技能": 37,
+    # yijiang-2014 票 09：顾雍【秉壹】（`PHASE_FINISH` 零步流水线 + 手写座位多选面）
+    # ⇒ 37 → 38。
+    "零步技能": 38,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2621,8 +2651,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # jie-feng-batch2 票 01：界夏侯渊移动版【神速】⇒ 192 → 193；票 02：界张角三条 ⇒ 193 → 196。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 196 → 197；票 02：界顾雍移动版 ⇒ 198。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 198 → 199。
-    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 200
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 201
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2770,7 +2800,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # 票 02：界顾雍移动版【慎行】（单步流水线）⇒ 内 104 → 105。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】（两步流水线）⇒ 内 105 → 106。
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（单步流水线）⇒ 内 106 → 107。
-    assert len(inside) == 107
+    # yijiang-2014 票 09：顾雍【秉壹】（零步流水线，形态归「零步技能」）⇒ 内 107 → 108。
+    assert len(inside) == 108
     assert len(outside) == 93
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
