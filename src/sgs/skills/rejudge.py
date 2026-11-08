@@ -28,13 +28,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import Color, SkillType, hero_skill_id
+from sgs.data import Color, SkillType, color_of_suit, hero_skill_id
 from sgs.effects import CarrierKind
 from sgs.resolution import Control, Frame
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import ActivationPlan, Hook, RejudgeOriginal, SkillDef
+from .catalog import ActivationPlan, Hook, RejudgeOriginal, SkillDef, same_kingdom
 from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
@@ -42,10 +42,14 @@ __all__ = [
     "GUICAI",
     "JIE_GUICAI",
     "JIE_TIANDU",
+    "SONGWEI",
+    "SONGWEI_FLOW",
+    "SONGWEI_REQUIREMENT",
     "TIANDU",
     "TIANDU_FLOW",
     "rejudge_activation_plans",
     "rejudge_skill_definitions",
+    "songwei_handler",
     "tiandu_handler",
 ]
 
@@ -104,8 +108,10 @@ def rejudge_activation_plans() -> dict[str, Any]:
     """I 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
 
     标准 / 界两版【天妒】共用同一个 ``_tiandu_plan`` 函数对象（"逐字相同"的落点）。
+    【颂威】（lin-batch2 票 01）挂第三个键：它的钩子与 plan **同住本模块**（票面 §3.1 的
+    第 4 条：plan 与 Hook 分住两个模块只会让下一个人两头找）。
     """
-    return {TIANDU: _tiandu_plan, JIE_TIANDU: _tiandu_plan}
+    return {TIANDU: _tiandu_plan, JIE_TIANDU: _tiandu_plan, SONGWEI: _songwei_plan}
 
 
 def tiandu_handler(host: Any, frame: Frame) -> Control:
@@ -133,6 +139,95 @@ TIANDU_FLOW = SkillFlow(name="tiandu", steps=(), effect=zero_step_effect(tiandu_
 
 必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
 并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
+"""
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·曹丕【颂威】（lin-batch2 票 01；用户 2026-11-08 签 Q5 / Q6 = A）
+#
+#     颂威
+#     　主公技，当其他魏势力角色的黑色判定牌生效后，其可以令你摸一张牌。
+#
+# 三个落点（票面 §3 / §3.1 的取证）：
+#
+# - **钩子住判定族**：`JUDGE_CARD_AFTER_EFFECT`（账本 L949 的 ❷ 档，与【天妒】同格），
+#   零步流水线（只问"是否发动"）；效果 = **技能持有者（主公）**摸一张。
+# - **决定者 ≠ 受益者**：官方同一句里「其可以令你摸一张牌」——决定者是**被判定者**
+#   （`frame.data["subject"]`），受益者是技能持有者。仓里同形的既有载体是界【护驾】② /
+#   界【激将】②（`lord_request.LordEcho`），但它的 `hooks` 把时机与载荷写死成
+#   `USE_ON_USE` + `frame.data["source"]` + `card_type`，三处都对不上判定帧
+#   （当事角色是 `subject`、触发物是判定牌的颜色）⇒ **不直接复用**（给它加参数 = 改共享
+#   原语）。可复用的是它的另一半：`ActivationPlan.actor`。故这里自带一个 plan，
+#   `actor = 判定者`，效果里读 `skill_owner` 摸牌（`_lord_echo_draw` 的两条骨架）。
+# - **频次 = 每次黑色判定一次**（Q5 = A）：三处一手都没有「每回合限一次」⇒ **不**调
+#   `mark_skill_used_this_turn`（这是与 `_lord_echo_draw` 的唯一差别）；「可以」= 每次给
+#   放弃出口（账本 L816）。
+#
+# 闸门放在 plan 的 `available` 里（照【天妒】），不写进 `condition`：颂威的判据是"这次
+# 判定的当事者 / 颜色 / 势力"，不是"关不关于我"——写成 condition 会撞上
+# `EXEMPT_OWNER_SELF_CHECK` 那张机械闸（票面 §3 边界 [2.4] H2）。
+# ---------------------------------------------------------------------------
+
+SONGWEI = hero_skill_id("caopi_mobile", "songwei")
+"""曹丕移动版【颂威】的全限定技能 id（主公技）。"""
+
+SONGWEI_REQUIREMENT = (
+    "主公技，当其他魏势力角色的黑色判定牌生效后，其可以令你摸一张牌。"
+)
+"""一句话文案 = 移动版牌面逐字（票面 §0.1 第 3 行：移动版写「其」，与 OL / 用户文本同义）。"""
+
+_SONGWEI_DRAWN_KEY = "songwei_drawn"
+"""帧私有：这一张判定牌上已经摸过（续跑不重摸）。"""
+
+
+def _songwei_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
+    """【颂威】的发动形态：**判定者 ≠ 持有者** ∧ 同势力（魏）∧ 判定牌黑色。
+
+    三个判据全落在 ``available`` 上（判定帧的 `subject` 是**被判定者**，不是 `source`；
+    判定牌读 `judge_card`，改判之后就是**新牌**）。都不成立 ⇒ 实例不进候选、连"是否发动"
+    都不问（票 19 §6 的姿态）。
+
+    ``actor = subject``：这一问**发给判定者**（决定者 ≠ 受益者；`skill_owner` 仍是曹丕）。
+    这与界【护驾】② 的 `lord_echo_activation_plan` 是同一条既有机制，不是为颂威新造的
+    形状（界【救援】的 `_jie_jiuyuan_plan` 也按帧现算 actor）。
+    """
+    subject = frame.data.get("subject")
+    owner = int(instance.owner)
+    if subject is None or int(subject) == owner:
+        # 判定牌不属于任何角色（规则 §11.6），但**被判定者**是「其 / 该角色」的先行词。
+        return ActivationPlan(available=False)
+    if not same_kingdom(state, int(subject), owner):
+        return ActivationPlan(available=False)
+    card = frame.data.get("judge_card")
+    if card is None or color_of_suit(card.suit) is not Color.BLACK:
+        return ActivationPlan(available=False)
+    return ActivationPlan(actor=int(subject))
+
+
+def songwei_handler(host: Any, frame: Frame) -> Control:
+    """【颂威】的 ``JUDGE_CARD_AFTER_EFFECT`` 钩子：**技能持有者（主公）**摸一张。
+
+    收益归 ``skill_owner``（曹丕），不是答话的判定者——照界【护驾】② 的
+    :func:`~sgs.skills.lord_request._lord_echo_draw`。与它**唯一**的差别：颂威牌面没有
+    「每回合限一次」⇒ **不**落"本回合已发动"位（票面 Q5 = A，实现时别顺手抄过来）。
+
+    帧私有游标在**摸牌之前**落位：``draw_for_hand`` 不幂等，且会内联派发「获得牌后」
+    （【清俭】一类）并可能挂起 —— 续跑既不再记一次、也不重摸。
+    """
+    if frame.data.get(_SONGWEI_DRAWN_KEY):
+        return None
+    frame.data[_SONGWEI_DRAWN_KEY] = True
+    owner = int(frame.data["skill_owner"])
+    if host.draw_for_hand(frame, owner, 1) == "stay":
+        return "stay"
+    return None
+
+
+SONGWEI_FLOW = SkillFlow(name="songwei", steps=(), effect=zero_step_effect(songwei_handler))
+"""【颂威】的零步流水线：判定者答"发动" → 主公摸一张（无步骤）。
+
+必须是**模块级具名常量**（同 :data:`TIANDU_FLOW`：``tests/test_ask_points.py`` 只发现
+模块级 ``SkillFlow`` 实例）。
 """
 
 
@@ -189,5 +284,16 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.JUDGE_CARD_AFTER_EFFECT, flow=TIANDU_FLOW),),
             requirement="获得此判定牌",
+        ),
+        # 曹丕移动版【颂威】（lin-batch2 票 01）：主公技 —— `skill_type = LORD` 是身份门控
+        # 的唯一声明位（`_identity_gates_out` 读**定义**这一份；数据侧那条同名声明与它对账）。
+        # 钩子**不带 condition**：闸门在 `_songwei_plan` 的 `available` 里（照【天妒】）。
+        SkillDef(
+            skill_id=SONGWEI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.LORD,
+            hooks=(Hook(Timing.JUDGE_CARD_AFTER_EFFECT, flow=SONGWEI_FLOW),),
+            requirement=SONGWEI_REQUIREMENT,
         ),
     )

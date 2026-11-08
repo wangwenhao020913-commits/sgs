@@ -3009,3 +3009,128 @@ def test_xuhuang_duanliang_ai_does_not_even_try_on_the_108_deck() -> None:
     assert not (isinstance(action, ActivateSkill) and action.skill_id == DUANLIANG), (
         f"AI 不该在 108 档试这条技能，实得 {action!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 林包·移动版·曹丕（lin-batch2 票 01）：【放逐】把翻面丢给敌人（Q7 = A 的证据）
+# ---------------------------------------------------------------------------
+
+CAOPI_MOBILE = "caopi_mobile"
+FANGZHU = "hero.caopi_mobile.fangzhu"
+
+
+def _caopi_fangzhu_choice(*, monkeypatch_hostile: bool = False) -> tuple:
+    """曹丕（已明的反贼）挨 1 点伤害 ⇒ 让**真实** AI 答「是否发动」与座位步。
+
+    座位 1 / 3 = 身份未知，座位 2 = 公开的主公（反贼的敌人）。返回
+    ``(activation, seat_choice, engine)`` —— 两者都是 ``HeuristicPlayer.respond`` 的产物。
+    用一个四座身份局，使"未知座位"与"已明敌人"同时在场，敌我估值才有区分度。
+    """
+    if monkeypatch_hostile:
+        # 合成反例：把 `fangzhu:` 从 `_HOSTILE_SEAT_STEPS` 里摘掉 ⇒ 落回"帮盟友"的缺省。
+        monkeypatch_hostile_registration = tuple(
+            step
+            for step in heuristic_scoring._HOSTILE_SEAT_STEPS
+            if step != "fangzhu:"
+        )
+        heuristic_scoring._HOSTILE_SEAT_STEPS = monkeypatch_hostile_registration
+    channel = cards_of_type(PACK, "slash")[5]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=CAOPI_MOBILE, hp=3, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hand=tuple(cards_of_type(PACK, "dodge")[1:3])),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD),
+            SeatSpec(hp=4, hand=tuple(cards_of_type(PACK, "peach")[1:3])),
+        ],
+        deck=deck_excluding(
+            PACK,
+            channel,
+            *cards_of_type(PACK, "dodge")[1:3],
+            *cards_of_type(PACK, "peach")[1:3],
+        ),
+        processing=(channel,),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    channel_ref = state.card(channel)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": channel_ref,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 0,
+            "channel": channel_ref,
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    activation = None
+    seat_choice = None
+    for _ in range(2_000):
+        if ran_timing(engine, Timing.DAMAGE_END) or engine.finished:
+            break
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        if query.kind == "SKILL_ACTIVATION" and str(query.skill_id) == FANGZHU:
+            activation = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            engine.submit(activation)
+            continue
+        if query.kind == "SELECT_OPTION" and str(query.skill_id) == "fangzhu:seat":
+            seat_choice = HeuristicPlayer(ai_stream(0, query.actor)).respond(query)
+            engine.submit(seat_choice)
+            continue
+        engine.submit(PassPlayer().respond(query))
+    return activation, seat_choice, engine
+
+
+def test_caopi_fangzhu_ai_aims_at_the_enemy() -> None:
+    """【放逐】：发动后座位步指向**已明的敌人**（`_HOSTILE_SEAT_STEPS` 里 `fangzhu:` 的证据）。
+
+    票面 §AI 适配 第 2 / 6 格：座位步的敌我估值读 ``skill_id``（``_score_seat_option`` 查
+    ``_HOSTILE_SEAT_STEPS``）⇒ 不登记就静默落进"帮盟友"分支（会把队友翻面、跳过其整个
+    下个回合，纯自伤）。判据全走真引擎：AI 在「是否发动」上答 ``ActivateSkill``、在座位步
+    上选**主公（座位 2）**，且终局状态的 ``flipped_change`` 落在座位 2。
+    """
+    activation, seat_choice, engine = _caopi_fangzhu_choice()
+
+    assert isinstance(activation, ActivateSkill) and activation.skill_id == FANGZHU, (
+        f"AI 该发动【放逐】（没有代价），实得 {activation!r}"
+    )
+    assert isinstance(seat_choice, SelectOption), f"座位步要给出选择，实得 {seat_choice!r}"
+    assert seat_choice.choice == "seat:2", (
+        f"AI 该把翻面丢给已明的敌人（主公 / 座位 2），实得 {seat_choice.choice!r}"
+    )
+    assert engine.state.player(2).flipped is True, "敌人被翻面"
+    assert engine.state.player(1).flipped is False, "身份未知的座位 1 不动"
+
+
+def test_caopi_fangzhu_seat_value_comes_from_the_hostile_registration() -> None:
+    """**合成反例**：摘掉 `fangzhu:` 登记 ⇒ AI 不再挑敌人（落回"帮盟友"缺省）。
+
+    与 `tests/test_heuristic_ai.py` 的"删一条 ⇒ 正向检查变红"同一条纪律：把登记摘掉必须
+    观察到行为翻转，否则那条登记只是装饰。缺省分支下已明敌人是负分、未知座位是 0 分
+    ⇒ 座位步改指身份未知的座位。
+    """
+    saved = heuristic_scoring._HOSTILE_SEAT_STEPS
+    try:
+        activation, seat_choice, engine = _caopi_fangzhu_choice(
+            monkeypatch_hostile=True
+        )
+    finally:
+        heuristic_scoring._HOSTILE_SEAT_STEPS = saved
+
+    assert isinstance(activation, ActivateSkill), "是否发动不受影响"
+    assert isinstance(seat_choice, SelectOption)
+    assert seat_choice.choice != "seat:2", (
+        f"没有登记就不再挑敌人（缺省 = 帮盟友），实得 {seat_choice.choice!r}"
+    )
+    assert engine.state.player(2).flipped is False, "敌人不再被翻面"

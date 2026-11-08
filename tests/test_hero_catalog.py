@@ -232,9 +232,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 178
-    assert len(equipment) == 22, "装备不变：本票两条都是武将技"
-    assert len(heroes) == 154
+    assert len(CATALOG) == 181
+    assert len(equipment) == 22, "装备不变：本票三条都是武将技"
+    assert len(heroes) == 157
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -262,7 +262,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 154
+    assert len(expected) == 157
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1256,10 +1256,18 @@ class _HookFrame:
 
 
 class _HookHost:
-    """只带 ``state`` 的最小宿主：条件里唯一用到的宿主面。"""
+    """只带 ``state`` 的最小宿主：条件里唯一用到的宿主面。
+
+    ``outcome_decided``（lin-batch2 票 01）：【行殇】的条件要读**终局位**——那个事实只挂在
+    引擎上（`Engine.pending_outcome`），`ACTIVATION_PLANS` 的构造器拿不到，故只能写在
+    `condition` 里（票面 Q3 的实现代价）。合成宿主恒报"未判胜"，让正面对照成立。
+    """
 
     def __init__(self, state: GameState) -> None:
         self.state = state
+
+    def outcome_decided(self) -> bool:
+        return False
 
 
 def _congtao_probe_state() -> GameState:
@@ -1845,6 +1853,9 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # lin-batch 票 02：孙坚移动版【英魂】——**我的**准备阶段（帧的 source 是我）∧ 我已
         # 受伤（基础局面 ME 3/4）∧ 场上有其他存活角色（三座）。
         "hero.sunjian_mobile.yinghun": (_HookFrame(source=ME),),
+        # lin-batch2 票 01：曹丕移动版【放逐】——B 族同一条 `_hurt_owner`（受伤的是我）∧
+        # 场上有其他存活角色（三座，ME = 座位 1 ⇒ 池 = {0, 2} 非空）。
+        "hero.caopi_mobile.fangzhu": (_HookFrame(target=ME, source=0),),
     }
 
 
@@ -1856,6 +1867,11 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
     "hero.feng_yujin.dingluan_mark": (
         "feng-yujin 票 01：【定乱】牌的**标签自身效果**——触发条件关于『这批牌身上有没有我的"
         "标签』（MoveEvent + 牌标签），『拥有者』由移动的来源区回答；没有『我』可自校"
+    ),
+    "hero.caopi_mobile.xingshang": (
+        "lin-batch2 票 01（Q6 = A）【行殇】：「当**其他角色**死亡时」是关于**别人**的死——"
+        "条件写的是『死者 ≠ 我自己』（MATCH_OWNER_KEY 对 target），把持有者换成别人后"
+        "仍然成立；这正是豁免表存在的形态（与【奋威】/【定乱】同一类『不关于我』）"
     ),
 }
 """**豁免表**：技能 id → "为什么它的条件不需要持有者判据"。
@@ -1885,6 +1901,7 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
     assert set(EXEMPT_OWNER_SELF_CHECK) == {
         "hero.jie_ganning.fenwei",
         "hero.feng_yujin.dingluan_mark",
+        "hero.caopi_mobile.xingshang",
     }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
         assert reason.strip(), f"{skill_id} 的豁免理由不能为空"
@@ -2253,6 +2270,14 @@ SKILL_SHAPE: dict[str, str] = {
     # lin-batch 票 02：孙坚移动版【英魂】= 准备阶段钩子 + 座位 / 选项两步流水线、主体手写
     # ⇒ 触发技能格（有 ``SkillFlow`` ⇒ 步骤语言内）。
     "hero.sunjian_mobile.yinghun": "触发技能",
+    # lin-batch2 票 01：曹丕移动版【行殇】= `DEATH_ON` 钩子 + 零步流水线（主体手写搬牌）
+    # ⇒ 零步技能格（`shapes.md` §2 第 44 行）；
+    # 【放逐】= 受伤后钩子 + 单步选座流水线（触发技能格）；
+    # 【颂威】= 判定族的零步流水线（主公技；闸门在 `ACTIVATION_PLANS` 的 `available` 里，
+    # 与【天妒】同档）⇒ 零步技能格。
+    "hero.caopi_mobile.xingshang": "零步技能",
+    "hero.caopi_mobile.fangzhu": "触发技能",
+    "hero.caopi_mobile.songwei": "零步技能",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2277,8 +2302,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # 一步选座流水线）⇒ 触发技能 22 → 23；「营」的**标记自身效果**（`carrier = MARKER`，
     # 手写钩子 + 两个修饰器、没有流水线）⇒ 多轮技能 16 → 17。
     "主动技能": 30,
-    "触发技能": 24,
-    "零步技能": 30,
+    "触发技能": 25,
+    "零步技能": 32,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2288,6 +2313,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # 【飞影】（锁定技 + 纯修饰器）⇒ 锁定技 37 → 38。
     # lin-batch 票 02：孙坚移动版【英魂】（准备阶段钩子 + 两步流水线）⇒ 触发技能 23 → 24。
     # lin-batch 票 03：徐晃移动版【断粮】（单源转化声明 + 距离修饰器）⇒ 转化技 18 → 19。
+    # lin-batch2 票 01：曹丕移动版【行殇】（`DEATH_ON` + 零步流水线）与【颂威】（判定族
+    # 零步流水线）⇒ 零步技能 30 → 32；【放逐】（受伤后钩子 + 单步选座流水线）⇒ 触发技能
+    # 24 → 25。
     "多轮技能": 20,
     "锁定技": 38,
     "转化技": 19,
@@ -2401,7 +2429,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 178
+    assert len(SKILL_SHAPE) == len(CATALOG) == 181
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2534,7 +2562,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 92
+    # lin-batch2 票 01：曹丕移动版【行殇】/【颂威】（零步）+【放逐】（触发）⇒ 内 92 → 95。
+    assert len(inside) == 95
     assert len(outside) == 86
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

@@ -334,12 +334,16 @@ _FIRE_TAPE_BANNED_HEROES = (
     "shen_caocao_mobile",
     "sunjian_mobile",
     "xuhuang_mobile",
+    # lin-batch2 票 01：林包移动版曹丕移动版（seed=46 那一局不加这条就整局用不出【火攻】）。
+    "caopi_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 
 新武将进默认池时**往这里追加**（见 :func:`fire_attack_tape` 的 docstring）：tape 钉的是
 火攻的界面与记录流，不是将池；重扫 seed 会把"加武将"和"tape 改坏"两件事混成一次红。
-林包三将分票落地，故 02 / 03 也各追加自己那一行（`sunjian_mobile` / `xuhuang_mobile`）。
+林包三将分票落地，故 02 / 03 也各追加自己那一行（`sunjian_mobile` / `xuhuang_mobile`）；
+lin-batch2 票 01 的曹丕移动版同理（实测：不加 ⇒ `seed=46 目标=AI` 那条 tape 整局没有
+用出【火攻】）。
 """
 
 
@@ -551,7 +555,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 27
+_WINE_TAPE_NEAR_DEATH_SEED = 1
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再加太史慈标准版 / 荀彧标准版）
@@ -565,7 +569,13 @@ tao-caocao 票 01（默认池 75/49 → 76/49，自制包加韬·曹操自制版
 
 huo-wolong-yanliang 票 01 / 02（默认池 78/49 → 79/50 → 80/51）再换池：seed 37 的对局在出现
 自救窗口前结束，按同一判据重扫（探针 `.scratch/huo-wolong-yanliang/scan_wine_near_death_seed.py`），
-命中 **1 / 4 / 16 / 27 / 36 …**，取首个未在用的 **seed 27**。"""
+命中 **1 / 4 / 16 / 27 / 36 …**，取首个未在用的 **seed 27**。
+
+lin-batch2 票 01（默认池 86/57 → 87/58，林包移动版加曹丕移动版）再换池：seed 27 的对局在
+出现自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
+`.scratch/lin-batch2/scan_wine_near_death_seed.py`，逐字复用 `_wine_tape_near_death` 的策略），
+首个命中 **seed 1**（70 次真实 POST 推进到 0 血 + 一次【酒】自救）；seed 1 未被其余 tape 占用，
+故取它。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:

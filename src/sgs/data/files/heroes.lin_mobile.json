@@ -57,6 +57,33 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "caopi_mobile",
+      "name": "曹丕移动版",
+      "true_name": "曹丕",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "lin-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "xingshang",
+          "name": "行殇",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fangzhu",
+          "name": "放逐",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "songwei",
+          "name": "颂威",
+          "skill_type": "LORD"
+        }
+      ]
     }
   ]
 }

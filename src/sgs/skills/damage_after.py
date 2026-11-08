@@ -116,6 +116,9 @@ __all__ = [
     "DAMAGE_DEAL_RECORDED_KEY",
     "DamageAfterSkill",
     "FANKUI_FLOW",
+    "FANGZHU",
+    "FANGZHU_FLOW",
+    "FANGZHU_REQUIREMENT",
     "GANGLIE_OPTIONS",
     "JIANXIONG_FLOW",
     "damage_after_skill_definitions",
@@ -1943,6 +1946,119 @@ JIEMING_FLOW = SkillFlow(
 """【节命】的一步流水线：选一名角色（含自己）→ 把手牌摸至 ``min(体力上限, 5)``。"""
 
 
+# ---------------------------------------------------------------------------
+# 林包·移动版·曹丕【放逐】（lin-batch2 票 01；用户 2026-11-08 签 Q4 / Q7 = A）
+#
+#     放逐
+#     　当你受到伤害后，你可以令一名其他角色翻面，然后该角色摸X张牌（X为你已损失的体力值）。
+#
+# 五条读法（票面 §2 的读法表 / 六元组，逐条落成下面的代码）：
+#
+# - **触发粒度**：牌面**没有**「1 点」⇒ ``per_point=False``（每次伤害事件一次）。
+#   对照【节命】写「受到 1 点伤害后」⇒ ``per_point=True``，两档不同。
+# - **次序**：**先翻面、后摸牌**（Q4 = A）。三处一手（用户 `技能.txt` / 移动版官网 /
+#   OL 官网）次序一致；仓内 `三国杀详细规则.txt` §13.4 的转写把两段反了过来，按账本 L773
+#   （文本以一手为准）取一手 + 规则 §4.16 L464–L466「按技能描述的顺序处理效果」。
+#   次序可观测：`flipped_change` 的 delta 落在摸牌那条 `card_move` 之前。
+# - **X** = **持有者**的已损失体力值（体力上限 − 当前体力），**发动时定格**（账本 L741 /
+#   L954 的同型口径：【英魂】签过的"发动时定格"）；不是目标的、也不逐次重算。
+# - **摸牌者** = 目标（移动版把摸牌者点名为「该角色」），不是曹丕。
+# - **目标池** = 除持有者以外的全部存活角色（含已背面朝上者 —— 翻面是 toggle，
+#   翻回正面是合法收益）。
+# ---------------------------------------------------------------------------
+
+FANGZHU = hero_skill_id("caopi_mobile", "fangzhu")
+"""曹丕移动版【放逐】的全限定技能 id。"""
+
+FANGZHU_REQUIREMENT = (
+    "当你受到伤害后，你可以令一名其他角色翻面，然后该角色摸X张牌（X为你已损失的体力值）。"
+)
+"""一句话文案 = 移动版牌面逐字（票面 §0.1：移动版把摸牌者写成「然后该角色」）。"""
+
+_FANGZHU_X_KEY = "fangzhu_x"
+"""帧私有：发动时**定格**的 X（持有者的已损失体力值）。"""
+
+_FANGZHU_FLIPPED_KEY = "fangzhu_flipped"
+"""帧私有：翻面已经做完（重入不重翻；G7 / G9）。"""
+
+_FANGZHU_DRAWN_KEY = "fangzhu_drawn"
+"""帧私有：摸牌已经开始（``draw_for_hand`` 不幂等，游标必须在**摸牌之前**落位）。"""
+
+
+def _fangzhu_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """目标池：**除持有者以外的全部存活角色**（「一名其他角色」，账本 L776②）。
+
+    不按牌数 / 距离 / 翻面状态收窄：牌面没有这些限定词；已背面朝上的角色照样合法
+    （翻面是 toggle，这一手把它翻回正面是真收益）。池空 ⇒ 座位步取消 ⇒ 整条流水线取消，
+    不发空询问（S4；条件里也先挡一次）。
+    """
+    del frame, chosen
+    return tuple(
+        player.seat for player in state.players if player.alive and player.seat != owner
+    )
+
+
+def _fangzhu_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**受伤的是持有者自己** ∧ 场上至少有一名其他存活角色。
+
+    前半句复用 B 族的 :func:`_hurt_owner`（条件求值期读派发环写好的
+    :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`，不读 ``skill_owner``）；后半句与目标池
+    共用同一个谓词 —— 池空时整条技能不产出候选、连"是否发动"都不问。
+    """
+    if not _hurt_owner(frame):
+        return False
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return bool(_fangzhu_pool(host.state, frame, int(owner), ()))
+
+
+def _fangzhu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：**先**翻面（toggle）、**然后**目标摸 X 张；X = 持有者已损失体力值（定格）。
+
+    "然后"是**同一次发动里的两段**，不是两问：座位步只收集目标，两段效果都在这里跑。
+
+    重入纪律（G7）：``fangzhu_x`` / ``fangzhu_flipped`` / ``fangzhu_drawn`` 三个帧私有
+    游标先落位再动作 —— 摸牌会内联派发「获得牌后」（【清俭】一类）并挂起，续跑既不重翻
+    也不重摸（``draw_for_hand`` 返回 ``"stay"`` 时**原样上抛**）。
+    """
+    owner = int(frame.data["skill_owner"])
+    seat = next(iter(int(value) for value in answers.get("seat", ())), None)
+    if seat is None:
+        return None
+    x = frame.data.get(_FANGZHU_X_KEY)
+    if x is None:
+        # X = 体力上限 − 当前体力（账本 L741 的「已受伤」口径同一条算式）。
+        player = host.state.player(owner)
+        x = max(0, player.hp_max - player.hp)
+        frame.data[_FANGZHU_X_KEY] = x
+    if not frame.data.get(_FANGZHU_FLIPPED_KEY):
+        frame.data[_FANGZHU_FLIPPED_KEY] = True
+        # 翻面 = **toggle**（账本 L783 / 规则 §13.2）：正 → 背、背 → 正，落一条
+        # `flipped_change`（唯一写入口 `Engine.set_flipped`）。
+        host.set_flipped(frame, seat, not host.state.player(seat).flipped)
+    if frame.data.get(_FANGZHU_DRAWN_KEY):
+        return None
+    # 摸牌**不幂等** ⇒ 游标在调用之前落位（与【英魂】的 `yinghun_drawn` 同姿态）。
+    frame.data[_FANGZHU_DRAWN_KEY] = True
+    if host.draw_for_hand(frame, seat, int(x)) == "stay":
+        return "stay"
+    return None
+
+
+FANGZHU_FLOW = SkillFlow(
+    name="fangzhu",
+    steps=(
+        # 单步选座（`shapes.md` §2 第 45 行「单步 → 效果」的选座位版；骨架抄【节命】，
+        # 档位抄【反馈】的 `per_point=False` + 单步 flow）。``optional=False``：发动之后
+        # 必须选一名角色 —— "翻面 + 摸 X 张"是整段，没有"发动了但什么都不做"的出口。
+        PickSeats(lo=1, hi=1, pool=_fangzhu_pool, optional=False, key="seat"),
+    ),
+    effect=_fangzhu_effect,
+)
+"""【放逐】的一步流水线：选一名其他存活角色 → 翻面（toggle）→ 该角色摸 X 张。"""
+
+
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 荀彧【节命】（火包·移动版）：逐点触发 → 选一名角色（含自己）→ 手牌摸至 min(上限, 5)。
     DamageAfterSkill(
@@ -2072,6 +2188,19 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
         _guixin,
         requirement="当你受到1点伤害后，你可以获得每名其他角色区域里的一张牌，然后你翻面。",
         step_requirements={"card": "获得一名其他角色区域里的一张牌"},
+    ),
+    # 曹丕移动版【放逐】（lin-batch2 票 01）：**非逐点** → 选一名其他存活角色 →
+    # **先**翻面（toggle）**后**该角色摸 X 张（X = 持有者已损失体力值，发动时定格）。
+    # 档位 = 【反馈】的 `per_point=False` + 单步 flow；骨架 = 【节命】的单步 `PickSeats`。
+    DamageAfterSkill(
+        "caopi_mobile",
+        "fangzhu",
+        False,
+        _fangzhu_condition,
+        None,
+        FANGZHU_FLOW,
+        requirement=FANGZHU_REQUIREMENT,
+        step_requirements={"seat": "选择一名其他角色"},
     ),
 )
 """B 族技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 / 08 / 14 / 15 的界版）。"""

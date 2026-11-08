@@ -36,6 +36,8 @@ from __future__ import annotations
 from sgs.data import (
     Category,
     Color,
+    Identity,
+    Kingdom,
     RuleConfig,
     Suit,
     card_category,
@@ -44,11 +46,15 @@ from sgs.data import (
 )
 from sgs.effects import ModifierPoint, check_targets, distance, legal_actions_for
 from sgs.engine import Engine
-from sgs.skills import CATALOG, flow_for
+from sgs.resolution import Tag, add_tag
+from sgs.engine import steps as engine_steps
+from sgs.skills import CATALOG, flow_for, hero_card_zone_key
+from sgs.skills.catalog import PASS_STATE_KEY
 from sgs.state import (
     ActivateSkill,
     EndPhase,
     FrameKind,
+    HeroCardZone,
     MoveReason,
     Pass,
     Phase,
@@ -57,8 +63,10 @@ from sgs.state import (
     SelectCards,
     SelectOption,
     SkillSuppression,
+    SubstituteJudgeCard,
     UseCard,
     Zone,
+    ZoneRef,
 )
 from sgs.timing import Timing
 
@@ -67,9 +75,11 @@ from support import (
     SeatSpec,
     build_state,
     cards_of_type,
+    declare_death,
     deck_excluding,
     ran_timing,
     run_queries,
+    run_turns,
 )
 
 PACK = load_content_pack(deck_profile="standard_108")
@@ -1859,3 +1869,1154 @@ def test_the_xuhuang_mobile_hero_is_in_the_default_pool():
     assert hero.enabled is True
     assert [f"hero.{hero.id}.{skill.id}" for skill in hero.skills] == [DUANLIANG]
     assert XUHUANG in enabled_hero_ids(), "启用 ⇒ 进默认池（林包移动版按独立版本并存）"
+
+
+# ===========================================================================
+# §5 曹丕移动版【行殇】【放逐】【颂威】（lin-batch2 票 01）
+#
+# 牌面（`…/曹丕/技能.txt`，逐字；口径 = **移动版**，见票面 §0.1）：
+#
+#     行殇
+#     　当其他角色死亡时，你可以获得其所有牌。
+#
+#     放逐
+#     　当你受到伤害后，你可以令一名其他角色翻面，然后该角色摸X张牌（X为你已损失的体力值）。
+#
+#     颂威
+#     　主公技，当其他魏势力角色的黑色判定牌生效后，其可以令你摸一张牌。
+#
+# 用户 2026-11-08 签 **Q1–Q7 全按建议 A**（票头 `规范确认:`）：
+#   Q1 行殇取「手牌 + 装备区」；Q2 搬死者牌不派发「失去牌后」；Q3 死者无牌 / 已判胜连问
+#   都不发；Q4 放逐先翻面后摸牌；Q5 颂威每次黑色判定一次（不限每回合）；Q6 行殇进
+#   `tests/test_hero_catalog.py` 的豁免表；Q7 放逐的座位步登记为敌对。
+# 判据全走**外部缝**：询问（含跨座位的 actor）、记录流 delta、终局状态。**不 mock**。
+# ===========================================================================
+
+CAOPI = "caopi_mobile"
+XINGSHANG = "hero.caopi_mobile.xingshang"
+FANGZHU = "hero.caopi_mobile.fangzhu"
+SONGWEI = "hero.caopi_mobile.songwei"
+JIE_QINGJIAN = "hero.jie_xiahoudun.qingjian"
+JIE_LIANYING = "hero.jie_luxun.lianying"
+INDULGENCE = _cards("indulgence")[0]
+EIGHT_DIAGRAMS = _cards("eight_diagrams")[0]
+
+XINGSHANG_REQUIREMENT = "当其他角色死亡时，你可以获得其所有的牌"
+FANGZHU_REQUIREMENT = (
+    "当你受到伤害后，你可以令一名其他角色翻面，然后该角色摸X张牌（X为你已损失的体力值）。"
+)
+SONGWEI_REQUIREMENT = "主公技，当其他魏势力角色的黑色判定牌生效后，其可以令你摸一张牌。"
+
+
+def _first_card_of_color(color, *, exclude=()):
+    """一张指定颜色的实体牌（判定牌只看颜色；避开已占用的 id）。"""
+    used = {INDULGENCE, *exclude}
+    return next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in used and color_of_suit(PACK.deck.cards[card_id].suit) is color
+    )
+
+
+def _black_judge(*, exclude=()) -> int:
+    return _first_card_of_color(Color.BLACK, exclude=exclude)
+
+
+def _red_judge(*, exclude=()) -> int:
+    return _first_card_of_color(Color.RED, exclude=exclude)
+
+
+class Caopi:
+    """座位脚本：按**技能 id 前缀**白名单发「是否发动」，其余技能一律放弃。
+
+    ``activate`` = 前缀元组（空 = 全放弃）；``seat`` = 座位步选谁；``pick`` = 选牌步应答；
+    ``bagua`` = 在【闪】窗口里点【八卦阵】；``slash_at`` = 出牌阶段对谁用【杀】。
+    其它询问取最小合法应答（响应 / 弃牌等）。**别的技能不是被测对象**，故缺省放弃。
+    """
+
+    def __init__(
+        self,
+        *,
+        activate=(),
+        seat=None,
+        pick=None,
+        bagua=False,
+        slash_at=None,
+        rejudge_with=None,
+    ) -> None:
+        self.activate = tuple(activate)
+        self.seat = seat
+        self.pick = pick
+        self.bagua = bagua
+        self.slash_at = slash_at
+        self.rejudge_with = rejudge_with
+        self.activations: list = []
+        self.options: list = []
+        self.selections: list = []
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        skill = str(getattr(query, "skill_id", "") or "")
+        if kind == "SKILL_ACTIVATION":
+            self.activations.append(query)
+            if self.activate and skill.startswith(self.activate):
+                action = next(
+                    (a for a in query.legal_actions if isinstance(a, ActivateSkill)), None
+                )
+                if action is not None:
+                    return action
+            return next(
+                (a for a in query.legal_actions if isinstance(a, Pass)),
+                query.legal_actions[0],
+            )
+        if kind == "SELECT_OPTION":
+            self.options.append(query)
+            if self.seat is not None:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, SelectOption)
+                        and str(action.choice) == f"seat:{self.seat}"
+                    ):
+                        return action
+            return next(
+                (a for a in query.legal_actions if isinstance(a, SelectOption)),
+                query.legal_actions[0],
+            )
+        if kind == "SELECT_CARDS":
+            self.selections.append(query)
+            if self.pick is not None:
+                return self.pick(query)
+            return next(
+                (a for a in query.legal_actions if isinstance(a, SelectCards)),
+                query.legal_actions[0],
+            )
+        if kind == "PLAY_PHASE":
+            if self.slash_at is not None:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "slash"
+                        and action.targets == (self.slash_at,)
+                    ):
+                        return action
+            return next(
+                (a for a in query.legal_actions if isinstance(a, EndPhase)),
+                query.legal_actions[0],
+            )
+        if kind in ("DODGE", "RESPOND") and self.bagua:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, ActivateSkill)
+                    and action.skill_id == "equip.eight_diagrams"
+                ):
+                    return action
+        if kind in ("DODGE", "RESPOND") and self.rejudge_with is not None:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, SubstituteJudgeCard)
+                    and action.card.card_id == self.rejudge_with
+                ):
+                    return action
+        return next(
+            (a for a in query.legal_actions if isinstance(a, Pass)), query.legal_actions[0]
+        )
+
+
+def _caopi_scripts(engine, *, activate=(), **kwargs) -> list:
+    """每座一个 :class:`Caopi`（``activate`` 对全部座位生效；别的座位也要能应答）。"""
+    return [
+        Caopi(activate=activate, **kwargs) for _ in range(len(engine.state.players))
+    ]
+
+
+def _moves_to(engine, *, to_zone: ZoneRef, reason: MoveReason | None = None) -> list:
+    """记录流里"搬到 ``to_zone``"的 ``card_move``（可按 reason 过滤）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.to_zone == to_zone
+        and (reason is None or record.reason is reason)
+    ]
+
+
+def _death_pops(engine) -> int:
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "pop"
+        and record.frame_kind is FrameKind.DEATH
+    )
+
+
+def _judge_pops(engine) -> int:
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "pop"
+        and record.frame_kind is FrameKind.JUDGE
+    )
+
+
+# ---------------------------------------------------------------------------
+# §5 行殇 —— ① 入口（Q1 两区有牌 / Q3 无牌与已判胜不问 / 死的不是自己）
+# ---------------------------------------------------------------------------
+
+
+def _xingshang_state(
+    *,
+    seats: int = 3,
+    owner: int = 0,
+    dead: int = 1,
+    hand: tuple[int, ...] = (),
+    equip: tuple[int, ...] = (),
+    judge: tuple[int, ...] = (),
+    dead_hero: str | None = None,
+    deck: tuple[int, ...] | None = None,
+):
+    """座位 ``owner`` = 曹丕移动版（3 体力），座位 ``dead`` = 死者（按参数铺牌）。"""
+    used = {*hand, *equip, *judge}
+    specs = [SeatSpec() for _ in range(seats)]
+    specs[owner] = SeatSpec(hero=CAOPI, hp=3, hp_max=3)
+    specs[dead] = SeatSpec(
+        hero=dead_hero,
+        hand=tuple(hand),
+        equip=tuple(equip),
+        judge=tuple(judge),
+    )
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck if deck is not None else deck_excluding(PACK, *used),
+        turn_seat=0,
+    )
+
+
+def _run_xingshang(state, *, dead: int, activate: bool = True, stop=None) -> tuple:
+    """把局面装进引擎、压一次死亡并推进到 ``DEATH_AFTER`` 之后；返回 ``(engine, players)``。"""
+    engine = Engine.from_state(state, seed=7)
+    players = [
+        Caopi(activate=(XINGSHANG,) if activate else ())
+        for _ in range(len(engine.state.players))
+    ]
+    declare_death(engine, dead)
+    _advance(
+        engine,
+        players,
+        stop or (lambda e: ran_timing(e, Timing.DEATH_AFTER) or e.finished),
+    )
+    return engine, players
+
+
+def test_xingshang_is_offered_when_another_character_dies_with_cards():
+    """Q1 = A：死者手牌 2 张 ⇒ 问一次「是否发动」，发动后两张都进曹丕手牌。"""
+    engine, players = _run_xingshang(_xingshang_state(hand=(0, 1)), dead=1)
+
+    assert len(_activation_queries(engine, XINGSHANG)) == 1, "一次死亡只问一次"
+    assert engine.state.player(0).hand == [0, 1], "死者的两张手牌进了曹丕手牌"
+    assert players[0].activations, "这一问发给曹丕（座位 0）"
+    assert all(q.actor == 0 for q in _activation_queries(engine, XINGSHANG)), (
+        "问的是技能持有者本人（「你可以获得」，不是死者）"
+    )
+
+
+def test_xingshang_is_not_offered_when_the_dead_has_no_cards():
+    """Q3 = A：死者两区皆空（只有判定区的牌）⇒ 条件假、连问都不发。
+
+    判定区的牌不算「其所有牌」的一部分（Q1），故"只有判定区的牌"也不构成候选。
+    """
+    engine, players = _run_xingshang(
+        _xingshang_state(hand=(), judge=(INDULGENCE,)), dead=1
+    )
+
+    assert _activation_queries(engine, XINGSHANG) == [], "没有可拿的牌 ⇒ 不发空询问"
+    assert players[0].activations == []
+    assert engine.state.player(0).hand == []
+    assert INDULGENCE in engine.state.discard, "判定区的牌照旧由系统弃掉"
+
+
+def test_xingshang_is_not_offered_when_the_owner_is_the_one_dying():
+    """H2：「其他角色」不含自己 ⇒ 曹丕自己死亡时这条技能不触发。"""
+    state = _xingshang_state(seats=3, owner=1, dead=1, hand=(0, 1))
+    engine, players = _run_xingshang(state, dead=1)
+
+    assert _activation_queries(engine, XINGSHANG) == [], "死的是持有者 ⇒ 不问"
+    assert engine.state.player(1).hand == [] and engine.state.player(1).equip == []
+    assert 0 in engine.state.discard and 1 in engine.state.discard, "照常进弃牌堆"
+
+
+def test_xingshang_is_not_offered_when_the_game_is_already_decided():
+    """Q3 = A：终局已判定 ⇒ 条件读 `host.outcome_decided()` 为真 ⇒ 不问、也不拿牌。
+
+    两座局里最后一名对手死亡 ⇒ 检测点（`DEATH_REVEAL_IDENTITY_AFTER`）先判胜，
+    `DEATH_ON` 才派发 ⇒ 这正是"已判胜"的那一格。
+    """
+    state = _xingshang_state(seats=2, hand=(0, 1))
+    engine, players = _run_xingshang(state, dead=1)
+
+    assert engine.outcome_decided(), "两座局最后一名对手死亡 ⇒ 判定点先判胜"
+    assert _activation_queries(engine, XINGSHANG) == [], "已判胜 ⇒ 连问都不发"
+    assert engine.state.player(0).hand == [], "也不拿牌"
+    assert 0 in engine.state.discard and 1 in engine.state.discard
+
+
+# ---------------------------------------------------------------------------
+# §5 行殇 —— ② 取牌范围（Q1：手牌 + 装备区；判定区 / 武将牌上的牌不取）
+# ---------------------------------------------------------------------------
+
+
+def test_xingshang_takes_hand_and_equipment_but_not_the_judge_zone():
+    """Q1 = A：手牌 + 装备区进曹丕手牌；判定区的牌留在原地、由系统弃掉。"""
+    equip = _cards("eight_diagrams")[0]
+    engine, _players = _run_xingshang(
+        _xingshang_state(hand=(0, 1), equip=(equip,), judge=(INDULGENCE,)), dead=1
+    )
+
+    assert engine.state.player(0).hand == [0, 1, equip], "手牌两张 + 装备一张"
+    assert INDULGENCE not in engine.state.player(0).hand, "判定区不取（Q1）"
+    assert INDULGENCE in engine.state.discard, "剩下的判定区由系统清区"
+    assert engine.state.player(1).hand == [] and engine.state.player(1).equip == []
+
+
+def test_xingshang_does_not_take_the_hero_card_cards():
+    """Q1 的否证：武将牌上 / 旁的牌「移出游戏、不为任何角色所拥有」⇒ 不取。"""
+    hero_card = _cards("peach")[0]
+    state = _xingshang_state(hand=(0,), dead=1)
+    zone = hero_card_zone_key(1, "hero.jie_xusheng.pojun")
+    state.player(1).hero_cards[zone] = HeroCardZone(
+        skill_id="hero.jie_xusheng.pojun", owner=1, cards=[hero_card]
+    )
+    engine, _players = _run_xingshang(state, dead=1)
+
+    assert hero_card not in engine.state.player(0).hand, "武将牌上的牌不进手牌"
+    assert hero_card in engine.state.discard, "由死亡结算的 3.b 单独置入弃牌堆"
+
+
+# ---------------------------------------------------------------------------
+# §5 行殇 —— ③ 时段与次序（DEATH_ON 早于系统清区；手牌先、装备区后）
+# ---------------------------------------------------------------------------
+
+
+def test_xingshang_gains_before_the_death_settlement_discards_the_rest():
+    """时段：`DEATH_ON` 的取牌 delta 落在系统清区（判定区那条 `card_move`）**之前**。"""
+    engine, _players = _run_xingshang(
+        _xingshang_state(hand=(0,), judge=(INDULGENCE,)), dead=1
+    )
+    gains = _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 0))
+    clears = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone == ZoneRef(Zone.JUDGE, 1)
+    ]
+    assert gains and clears, "两条 delta 都要有（取牌 / 系统清区）"
+    assert gains[0].seq < clears[0].seq, "行殇在系统的『弃置死亡角色区域里所有的牌』之前"
+
+
+def test_xingshang_gains_hand_and_equipment_in_two_moves():
+    """Q1 + 区序：逐来源区各一条 `card_move`，手牌先、装备区后（同 `discard_dead_cards`）。"""
+    equip = _cards("eight_diagrams")[0]
+    engine, _players = _run_xingshang(
+        _xingshang_state(hand=(0, 1), equip=(equip,)), dead=1
+    )
+    gains = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.to_zone == ZoneRef(Zone.HAND, 0)
+    ]
+    assert [record.from_zone.zone for record in gains] == [Zone.HAND, Zone.EQUIP], (
+        "两条：手牌区 → 手牌、装备区 → 手牌"
+    )
+    assert [record.reason for record in gains] == [MoveReason.PUT, MoveReason.PUT], (
+        "「获得」= PUT（与【归心】/【天妒】同一条记录口径）"
+    )
+    assert [record.owner for record in gains] == [0, 0], "归属 = 获得者（曹丕）"
+
+
+def test_xingshang_does_not_fire_move_after_for_the_dead_card_owner():
+    """**Q2 = A**：搬死者的牌**不派发**「失去牌后」——死者的【连营】一问都不发。
+
+    死者带【连营】（界陆逊）：若走移动入口 `move_in_frame`，`MOVE_AFTER` 会在死亡窗口内
+    派发（死者实例还在窗口里）、问它"是否发动"。按 Q2 走 `move_card` + `emit_frame_delta`
+    ⇒ 整段静默，连 `MOVE_AFTER` 时机记录都没有。
+    """
+    engine, _players = _run_xingshang(
+        _xingshang_state(hand=(0, 1), dead_hero="jie_luxun"), dead=1
+    )
+
+    assert engine.state.player(0).hand == [0, 1], "牌照样拿到（只是不派发失去牌后）"
+    assert not ran_timing(engine, Timing.MOVE_AFTER), "一条 MOVE_AFTER 都不该派发（Q2）"
+    assert [q for q in _activation_queries(engine, JIE_LIANYING)] == [], (
+        "死者的【连营】不该被问（L625：失去牌的是死者）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §5 行殇 —— ④ 放弃出口 / 次数 / 重入 / 同批（G4 / G7 / G8）
+# ---------------------------------------------------------------------------
+
+
+def test_xingshang_declining_leaves_the_dead_cards_in_place():
+    """「可以」= 整段发动的放弃出口（L816）：放弃 ⇒ 曹丕一张不拿、牌照常被系统弃掉。"""
+    engine, players = _run_xingshang(
+        _xingshang_state(hand=(0, 1)), dead=1, activate=False
+    )
+
+    assert len(_activation_queries(engine, XINGSHANG)) == 1, "照问"
+    assert engine.state.player(0).hand == [], "放弃 ⇒ 一张不拿"
+    assert 0 in engine.state.discard and 1 in engine.state.discard, "两张都进弃牌堆"
+
+
+def test_xingshang_is_offered_once_per_death_frame():
+    """G4：无限定词 ⇒ **逐事件一次**（一次死亡只问一次，不是逐张）。"""
+    engine, _players = _run_xingshang(_xingshang_state(hand=(0, 1, 2)), dead=1)
+
+    assert len(_activation_queries(engine, XINGSHANG)) == 1, "三张牌也只问一次"
+    assert engine.state.player(0).hand == [0, 1, 2]
+
+
+def test_xingshang_resumes_without_gaining_twice():
+    """G8：同一帧被**再派发一轮** `DEATH_ON` ⇒ 帧私有 `_DONE` 位挡住第二次取牌。
+
+    正常路径上不会重入（Q2 不派发"失去牌后"⇒ 没有挂起），这个防御位就是为"宿主级直调"
+    准备的。判据：把帧内的 pass 进度清掉、逼引擎重新走一遍派发环 ⇒ 技能**重新被问到**
+    （条件此刻确实成立），但答"发动"之后一张也不搬（`xingshang_done` 已落位）。
+    """
+    engine = Engine.from_state(
+        _xingshang_state(hand=(0, 1), equip=(EIGHT_DIAGRAMS,)), seed=7
+    )
+    players = [Caopi(activate=(XINGSHANG,)) for _ in range(3)]
+    declare_death(engine, 1)
+    _advance(engine, players, lambda e: ran_timing(e, Timing.DEATH_AFTER) or e.finished)
+    frame = next(
+        candidate
+        for candidate in reversed(engine.stack.frames)
+        if candidate.kind is FrameKind.DEATH
+    )
+    assert engine.state.player(0).hand == [0, 1, EIGHT_DIAGRAMS], "第一次已拿完"
+
+    # 宿主级直调：把 pass 进度与答案缓存清掉（= "这一帧的派发从头再来"），并放一张牌回
+    # 死者手里，使条件再次成立。帧私有 `xingshang_done` **不**清——它才是被检验的防御位。
+    frame.data.pop(PASS_STATE_KEY, None)
+    frame.data["ask_answers"] = {}
+    engine.state.player(1).hand.append(0)
+    assert engine_steps.death_on(engine, frame) == "stay", "重新走到「是否发动」"
+    reask = engine.pending
+    assert reask is not None and str(reask.skill_id) == XINGSHANG, "第二问确实是行殇"
+    engine.submit(players[0].respond(reask))
+
+    assert engine.state.player(0).hand == [0, 1, EIGHT_DIAGRAMS], (
+        "第二次一张都不再搬（`_DONE` 位）"
+    )
+    assert engine.state.player(1).hand == [0], "放回去的那张还留在死者手里"
+    assert len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "delta"
+            and record.delta_type == "card_move"
+            and record.to_zone == ZoneRef(Zone.HAND, 0)
+        ]
+    ) == 2, "整局只有第一次那两条取牌 delta（手牌 / 装备区）"
+
+
+def test_xingshang_is_offered_for_each_death_of_a_simultaneous_batch():
+    """同批多人同时死亡 ⇒ **每个死亡帧各问一次**（票面读法表「次数」行）。
+
+    两座局会一次判胜（Q3 挡住），故用四座：先声明座位 1 的死亡、推进到它的 `DEATH_ON`
+    结算完（帧还压着），再声明座位 2 的死亡（同批嵌套），两次死亡各拿各的牌。
+    """
+    state = _xingshang_state(
+        seats=4, hand=(0, 1), deck=deck_excluding(PACK, 0, 1, 2, 3)
+    )
+    state.player(2).hand = [2, 3]
+    engine = Engine.from_state(state, seed=7)
+    players = [Caopi(activate=(XINGSHANG,)) for _ in range(4)]
+
+    declare_death(engine, 1)
+    for _ in range(20_000):
+        # 停在"第一次死亡的行殇效果已经跑完、死亡帧还压着"的那一刻（同批嵌套的前提）。
+        if engine.state.player(0).hand == [0, 1] and engine.pending is None:
+            break
+        if engine.pending is None:
+            engine._step()
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    assert engine.state.player(0).hand == [0, 1], "第一次死亡已结算"
+
+    declare_death(engine, 2)  # 同批嵌套：座位 1 的死亡帧还没出栈
+    _advance(
+        engine,
+        players,
+        lambda e: _death_pops(e) >= 2 or e.finished,
+    )
+
+    assert len(_activation_queries(engine, XINGSHANG)) == 2, "两个死亡事件各问一次"
+    assert engine.state.player(0).hand == [0, 1, 2, 3], "两人的牌都拿到"
+    assert engine.state.player(1).hand == [] and engine.state.player(2).hand == []
+
+
+# ---------------------------------------------------------------------------
+# §5 放逐 —— ① 入口（自己的伤害 / 逐事件一次 / 防止 / 死亡 / 空池）
+# ---------------------------------------------------------------------------
+
+
+def _fangzhu_run(
+    seats: list[SeatSpec],
+    *,
+    amount: int = 1,
+    source: int | None = 1,
+    target: int = 0,
+    channel: int | None = None,
+    deck: tuple[int, ...] | None = None,
+    discard: tuple[int, ...] = (),
+    scripts: list | None = None,
+    flipped: tuple[int, ...] = (),
+    prevented: bool = False,
+) -> tuple:
+    """压一个 ``DAMAGE`` 子帧并推进到 ``DAMAGE_END``；座位 0 = 曹丕移动版。
+
+    ``channel`` 缺省取第一张【杀】（放处理区）；``deck`` 缺省补上除已占用牌以外的全部实体牌。
+    """
+    used = {card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)}
+    if channel is None:
+        channel = next(
+            card_id for card_id in _cards("slash") if card_id not in used
+        )
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck
+        if deck is not None
+        else deck_excluding(PACK, *used, channel),
+        processing=(channel,),
+        discard=discard,
+        turn_seat=0,
+    )
+    for seat in flipped:
+        state.player(seat).flipped = True
+    engine = Engine.from_state(state, seed=7)
+    players = scripts or [
+        Caopi(activate=(FANGZHU,)) for _ in range(len(state.players))
+    ]
+    frame = engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, channel, amount=amount, source=source, target=target),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    if prevented:
+        # 「防止此伤害」= 帧标签 `PREVENTED`（【寒冰剑】/【藤甲】一类写入口）：
+        # `emit_frame_timing` 只落一条时机记录、一个钩子都不派发。
+        add_tag(frame, Tag.PREVENTED)
+    _advance(engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END) or e.finished)
+    return engine, players
+
+
+def test_fangzhu_is_offered_after_the_owner_takes_damage():
+    """入口：曹丕受到伤害后问一次「是否发动」，发动 ⇒ 目标翻面 + 摸 X 张。"""
+    engine, players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)]
+    )
+
+    assert len(_activation_queries(engine, FANGZHU)) == 1
+    assert _flips(engine) == [(1, True)], "目标翻面（默认指向座位 1）"
+    assert engine.state.player(1).hand, "目标摸到牌（X = 2）"
+    assert players[0].options and str(players[0].options[0].skill_id) == "fangzhu:seat"
+
+
+def test_fangzhu_asks_only_on_the_owners_own_damage():
+    """H2：**别人的**伤害 ⇒ 条件假（`_hurt_owner`），连问都不发。"""
+    engine, players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=4, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        target=1,
+        source=2,
+    )
+
+    assert _activation_queries(engine, FANGZHU) == [], "受伤的不是曹丕 ⇒ 不问"
+    assert _flips(engine) == []
+    assert players[0].activations == []
+
+
+def test_fangzhu_triggers_once_per_damage_event():
+    """G4：牌面没有「1 点」⇒ `per_point=False`：**2 点伤害也只问一次**、只摸一次 X 张。"""
+    engine, players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=4, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        amount=2,
+    )
+
+    assert len(_activation_queries(engine, FANGZHU)) == 1, "逐事件一次（不是逐点）"
+    assert len(players[0].options) == 1, "座位步只问一次"
+    draws = _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 1), reason=MoveReason.DRAW)
+    assert [len(record.cards) for record in draws] == [2], "X = 2（4 − 2），一次摸完"
+    assert _flips(engine) == [(1, True)]
+
+
+def test_fangzhu_does_not_fire_when_the_damage_is_prevented():
+    """「防止此伤害」⇒ 帧标签 ``PREVENTED`` ⇒ B 族一个钩子都不派发（只落一条时机记录）。"""
+    engine, players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=4, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        prevented=True,
+    )
+
+    assert _activation_queries(engine, FANGZHU) == []
+    assert _flips(engine) == []
+    assert players[0].activations == []
+
+
+def test_fangzhu_is_not_offered_when_the_owner_dies_from_the_damage():
+    """曹丕被这次伤害打死 ⇒ `DAMAGE_AFTER_TAKE` 时他已无实例（死亡结算在子帧里跑完）。"""
+    engine, players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=1, hp_max=3), SeatSpec(hp=4), SeatSpec(hp=4)],
+        amount=2,
+    )
+
+    assert engine.state.player(0).alive is False
+    assert _activation_queries(engine, FANGZHU) == [], "持有者已阵亡 ⇒ 不问"
+    assert _flips(engine) == []
+
+
+def test_fangzhu_seat_pool_is_other_alive_seats_only():
+    """S1 / S4：座位池 = 除自己以外的**存活**座位（死者不进池），且没有 ``Pass``。"""
+    engine, players = _fangzhu_run(
+        [
+            SeatSpec(hero=CAOPI, hp=3, hp_max=4),
+            SeatSpec(hp=4),
+            SeatSpec(hp=4, alive=False),
+            SeatSpec(hp=4),
+        ]
+    )
+
+    query = players[0].options[0]
+    choices = {
+        str(action.choice)
+        for action in query.legal_actions
+        if isinstance(action, SelectOption)
+    }
+    assert choices == {"seat:1", "seat:3"}, "自己（0）与死者（2）都不进池"
+    assert not any(
+        isinstance(action, Pass) for action in query.legal_actions
+    ), "发动后必须选一名角色（没有 Pass）"
+    assert _flips(engine) == [(1, True)], "默认选座位 1"
+
+
+def test_fangzhu_with_no_other_alive_seat_offers_nothing():
+    """S4：没有其他存活角色 ⇒ 条件假、整条流水线取消、**不发生任何询问**。"""
+    engine, players = _fangzhu_run(
+        [
+            SeatSpec(hero=CAOPI, hp=3, hp_max=4),
+            SeatSpec(hp=4, alive=False),
+            SeatSpec(hp=4, alive=False),
+        ],
+        source=None,
+    )
+
+    assert _activation_queries(engine, FANGZHU) == [], "池空 ⇒ 连预发动都不问"
+    assert players[0].activations == [] and players[0].options == []
+    assert _flips(engine) == []
+
+
+# ---------------------------------------------------------------------------
+# §5 放逐 —— ② 效果（Q4：先翻面后摸牌；X = 持有者已损失体力值；放弃出口）
+# ---------------------------------------------------------------------------
+
+
+def test_fangzhu_flips_the_target_before_it_draws():
+    """**Q4 = A**：翻面的 `flipped_change` 落在摸牌的 `card_move` **之前**（一手次序）。"""
+    engine, _players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)]
+    )
+
+    flips = [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "flipped_change"
+    ]
+    draws = _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 1), reason=MoveReason.DRAW)
+    assert len(flips) == 1 and len(draws) == 1
+    assert flips[0].seq < draws[0].seq, (
+        "先翻面、后摸牌（Q4：仓内 §13.4 的转写次序相反，按一手）"
+    )
+
+
+def test_fangzhu_flips_a_back_facing_target_to_the_front():
+    """翻面是 **toggle**（L783）：已背面朝上的目标这一手把它翻回正面。"""
+    engine, _players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        flipped=(1,),
+    )
+
+    assert _flips(engine) == [(1, False)], "背面 → 正面"
+    assert engine.state.player(1).flipped is False
+    assert engine.state.player(1).hand, "摸牌照旧（翻回正面也是合法收益）"
+
+
+def test_fangzhu_x_is_the_owners_lost_hp():
+    """X = **曹丕的**已损失体力值（不是目标的），在发动时定格。
+
+    曹丕 3/4 挨 1 点 ⇒ X = 2；目标自己 1/4（已损失 3）⇒ 若错读成目标的，会摸 3 张。
+    """
+    engine, _players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=1), SeatSpec(hp=4)]
+    )
+
+    draws = _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 1), reason=MoveReason.DRAW)
+    assert [len(record.cards) for record in draws] == [2], "X = 4 − 2 = 2（不是目标的 3）"
+
+
+def test_fangzhu_declining_leaves_flip_and_hand_untouched():
+    """「可以」= 放弃出口（L816）：放弃 ⇒ 不翻面、不摸牌、座位步一问都不发。"""
+    scripts = [Caopi(activate=()) for _ in range(3)]
+    engine, players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        scripts=scripts,
+    )
+
+    assert len(_activation_queries(engine, FANGZHU)) == 1
+    assert _flips(engine) == []
+    assert engine.state.player(1).hand == []
+    assert players[0].options == [], "放弃 ⇒ 座位步不发生"
+
+
+def test_fangzhu_short_draw_ends_in_a_draw():
+    """G10：摸牌时两堆皆空 ⇒ 短摸即平局（既有 L613 的口径）。"""
+    engine, _players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        deck=(),
+        discard=(),
+    )
+
+    assert engine.finished is True
+    assert engine.pending_outcome is not None
+    assert engine.pending_outcome.result == "draw", "短摸 ⇒ 平局"
+
+
+def test_fangzhu_resumes_without_flipping_twice():
+    """G7：摸牌内联触发「获得牌后」（【清俭】）并挂起 ⇒ 续跑不重翻、不重摸。
+
+    目标 = 界夏侯惇（带【清俭】）：摸牌 → 派发 `MOVE_AFTER` →【清俭】问"是否发动" ⇒
+    `draw_for_hand` 返回 ``"stay"`` ⇒ 芳逐的 `effect` 重入。判据 = 记录流里只有
+    **一条** `flipped_change` 与 **一条** 摸牌 delta（各 X 张）。
+    """
+    scripts = [
+        Caopi(activate=(FANGZHU,)),
+        Caopi(activate=(JIE_QINGJIAN,), seat=0),
+        Caopi(),
+    ]
+    engine, _players = _fangzhu_run(
+        [
+            SeatSpec(hero=CAOPI, hp=3, hp_max=4),
+            SeatSpec(hero="jie_xiahoudun", hp=4),
+            SeatSpec(hp=4),
+        ],
+        scripts=scripts,
+    )
+
+    assert len(_activation_queries(engine, JIE_QINGJIAN)) == 1, "摸牌确实内联触发了清俭"
+    assert _flips(engine) == [(1, True)], "只翻一次"
+    draws = _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 1), reason=MoveReason.DRAW)
+    assert [len(record.cards) for record in draws] == [2], "只摸一次 X = 2 张"
+    assert engine.state.player(1).hand, "牌确实进了目标手牌"
+
+
+def test_fangzhu_flip_skips_the_targets_next_turn():
+    """L783 的联动：被翻面的角色在下个回合开始前翻回正面、并**跳过整个回合**。"""
+    engine, _players = _fangzhu_run(
+        [SeatSpec(hero=CAOPI, hp=3, hp_max=4), SeatSpec(hp=4), SeatSpec(hp=4)]
+    )
+    assert engine.state.player(1).flipped is True, "放逐先翻过去"
+
+    turns_player = [Caopi(activate=()) for _ in range(3)]
+    run_turns(engine, turns_player, turns=3)
+
+    before_start = [
+        record.seq
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_BEFORE_START
+    ]
+    assert len(before_start) >= 3, "至少跑到座位 1 的下一次『回合开始前』"
+    skipped = [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and before_start[1] < record.seq < before_start[2]
+    ]
+    skipped_timings = {record.timing for record in skipped}
+    for absent in (
+        Timing.PHASE_PREPARE,
+        Timing.PHASE_JUDGE,
+        Timing.PHASE_DRAW,
+        Timing.PHASE_PLAY_START,
+        Timing.PHASE_DISCARD_START,
+        Timing.PHASE_FINISH,
+    ):
+        assert absent not in skipped_timings, f"被跳过的回合不该发 {absent}"
+    assert (1, False) in _flips(engine), "回合开始前把座位 1 翻回正面"
+    assert engine.state.player(1).flipped is False
+
+
+# ---------------------------------------------------------------------------
+# §5 颂威 —— ① 入口（判定者 ≠ 主公 ∧ 同魏 ∧ 黑色；主公技的身份门）
+# ---------------------------------------------------------------------------
+
+
+def _songwei_run(
+    *,
+    judge_card: int,
+    caopi_seat: int = 1,
+    lord: bool = True,
+    judged_kingdom: Kingdom = Kingdom.WEI,
+    judge_cards: tuple[int, ...] = (INDULGENCE,),
+    caopi_hand: tuple[int, ...] = (),
+    extra: tuple[int, str, tuple[int, ...]] | None = None,
+    deck: tuple[int, ...] | None = None,
+    discard: tuple[int, ...] = (),
+    scripts: list | None = None,
+    stop=None,
+) -> tuple:
+    """座位 0 的判定阶段带延时锦囊（判定牌 = ``deck[0]``），``caopi_seat`` = 曹丕移动版。
+
+    ``caopi_seat == 0`` 时曹丕**自己**就是被判定者（"主公自己"的负向格）。
+    ``extra`` = ``(座位, 武将 id, 手牌)``，用来插一个改判者（【鬼才】）。
+    """
+    base = {"kingdom": judged_kingdom, "identity": Identity.REBEL}
+    specs = [SeatSpec(**base), SeatSpec(**base), SeatSpec(**base)]
+    specs[0] = SeatSpec(**base, judge=tuple(judge_cards))
+    specs[caopi_seat] = SeatSpec(
+        hero=CAOPI,
+        kingdom=Kingdom.WEI,
+        identity=Identity.LORD if lord else Identity.REBEL,
+        hand=tuple(caopi_hand),
+        judge=tuple(judge_cards) if caopi_seat == 0 else (),
+    )
+    if extra is not None:
+        seat, hero, hand = extra
+        specs[seat] = SeatSpec(**base, hero=hero, hand=tuple(hand))
+    used = {card for spec in specs for card in (*spec.hand, *spec.equip, *spec.judge)}
+    if deck is None:
+        deck = (
+            judge_card,
+            *(
+                card_id
+                for card_id in range(len(PACK.deck.cards))
+                if card_id not in used and card_id != judge_card
+            ),
+        )
+    state = build_state(
+        pack=PACK, seats=specs, deck=deck, discard=discard, turn_seat=0
+    )
+    engine = Engine.from_state(state, seed=1)
+    players = scripts or [Caopi(activate=(SONGWEI,)) for _ in range(len(specs))]
+    _advance(
+        engine,
+        players,
+        stop or (lambda e: _judge_pops(e) >= 1 or e.finished),
+    )
+    return engine, players
+
+
+def test_songwei_is_offered_to_the_judged_wei_character():
+    """入口：魏势力角色判定出黑牌 ⇒ 问**判定者**「是否发动」，发动后**主公**摸一张。"""
+    engine, players = _songwei_run(judge_card=_black_judge())
+
+    queries = _activation_queries(engine, SONGWEI)
+    assert len(queries) == 1, "黑色判定 ⇒ 问一次"
+    assert queries[0].actor == 0, "这一问发给被判定者（决定者），不是曹丕（座位 1）"
+    assert len(engine.state.player(1).hand) == 1, "受益者是主公（座位 1）"
+    assert engine.state.player(0).hand == [], "答话的判定者不摸牌"
+    assert players[0].activations, "判定者座位上确实收到这一问"
+
+
+def test_songwei_plan_actor_is_the_judged_character():
+    """票面 §3 的落点：`ActivationPlan.actor = frame.data["subject"]`（判定者）。"""
+    engine, _players = _songwei_run(judge_card=_black_judge())
+
+    query = _activation_queries(engine, SONGWEI)[0]
+    assert query.actor == 0 and engine.state.turn_seat == 0, (
+        "actor = 判定者 = 本回合角色（座位 0），不是技能持有者"
+    )
+
+
+def test_songwei_is_not_offered_for_a_red_judge_card():
+    """颜色：红色判定 ⇒ `available=False`、连问都不发，主公不摸牌。"""
+    engine, players = _songwei_run(judge_card=_red_judge())
+
+    assert _activation_queries(engine, SONGWEI) == []
+    assert engine.state.player(1).hand == []
+    assert players[0].activations == []
+
+
+def test_songwei_is_not_offered_for_another_kingdom():
+    """势力：判定者不是魏 ⇒ 不问。"""
+    engine, players = _songwei_run(
+        judge_card=_black_judge(), judged_kingdom=Kingdom.WU
+    )
+
+    assert _activation_queries(engine, SONGWEI) == []
+    assert engine.state.player(1).hand == []
+
+
+def test_songwei_is_not_offered_for_the_lord_himself():
+    """「**其他**魏势力角色」：主公自己判定 ⇒ 不问（L776②）。"""
+    engine, players = _songwei_run(judge_card=_black_judge(), caopi_seat=0)
+
+    assert _activation_queries(engine, SONGWEI) == [], "判定者是曹丕自己 ⇒ 不问"
+    assert engine.state.player(0).hand == [], "也不摸牌"
+
+
+def test_songwei_does_not_exist_without_the_lord_identity():
+    """主公技的身份门（`_identity_gates_out`）：曹丕不是主公 ⇒ 实例根本不产出。"""
+    engine, players = _songwei_run(judge_card=_black_judge(), lord=False)
+
+    assert _activation_queries(engine, SONGWEI) == []
+    assert engine.state.player(1).hand == []
+
+
+# ---------------------------------------------------------------------------
+# §5 颂威 —— ② 效果（收益归主公 / 放弃出口 / Q5 不限每回合）
+# ---------------------------------------------------------------------------
+
+
+def test_songwei_draws_for_the_lord_not_the_decider():
+    """收益归 `skill_owner`（主公），不是答话的判定者（照界【护驾】②）。"""
+    engine, _players = _songwei_run(judge_card=_black_judge(), caopi_hand=())
+
+    assert len(engine.state.player(1).hand) == 1, "主公 +1"
+    assert engine.state.player(0).hand == [], "决定者 +0"
+    draws = _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 1), reason=MoveReason.DRAW)
+    assert [len(record.cards) for record in draws] == [1], "恰好一张（恒 1，不是 X）"
+
+
+def test_songwei_declining_draws_nothing():
+    """「可以」= 每次都给放弃出口（L816）：判定者放弃 ⇒ 主公不摸牌。"""
+    scripts = [Caopi(activate=()) for _ in range(3)]
+    engine, _players = _songwei_run(judge_card=_black_judge(), scripts=scripts)
+
+    assert len(_activation_queries(engine, SONGWEI)) == 1, "照问"
+    assert engine.state.player(1).hand == []
+    assert engine.state.player(0).hand == []
+
+
+def test_songwei_is_offered_on_every_black_judge_not_once_per_turn():
+    """**Q5 = A**：牌面没有「每回合限一次」⇒ 同一回合的两次黑色判定各问一次。
+
+    座位 0 的判定区同时有【乐不思蜀】与【闪电】：判定阶段连续两次判定，牌堆顶两张都是
+    黑牌 ⇒ 两次「是否发动」、主公摸两张。
+    """
+    lightning = _cards("lightning")[1]
+    first = _black_judge(exclude=(lightning,))
+    # 第二张判定牌取**梅花**：闪电只在"黑桃 2–9"时造成伤害，梅花恒"传给下家"⇒ 两次判定
+    # 都只走 `JUDGE_CARD_AFTER_EFFECT`，不夹带伤害结算。
+    second = next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if PACK.deck.cards[card_id].suit == "club"
+        and card_id not in {first, INDULGENCE, lightning}
+    )
+    # 牌堆序 = (第一张判定牌, 颂威第一次摸到的那张, 第二张判定牌, …)：第一次颂威的摸牌
+    # 会消耗第二张判定牌，故中间必须垫一张 filler，否则第二次判定的颜色不可控。
+    filler = next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in {first, second, INDULGENCE, lightning}
+    )
+    engine, _players = _songwei_run(
+        judge_card=first,
+        judge_cards=(INDULGENCE, lightning),
+        deck=(
+            first,
+            filler,
+            second,
+            *(
+                card_id
+                for card_id in range(len(PACK.deck.cards))
+                if card_id not in {first, filler, second, INDULGENCE, lightning}
+            ),
+        ),
+        stop=lambda e: _judge_pops(e) >= 2 or e.finished,
+    )
+
+    assert len(_activation_queries(engine, SONGWEI)) == 2, (
+        "两次黑色判定 = 两次触发（不限每回合）"
+    )
+    assert len(engine.state.player(1).hand) == 2, "主公每次各摸一张"
+
+
+# ---------------------------------------------------------------------------
+# §5 颂威 —— ③ 改判 / 装备判定 / 重入 / 短摸（G7 / G10）
+# ---------------------------------------------------------------------------
+
+
+def test_songwei_reads_the_card_after_a_rejudge():
+    """改判之后按**新牌**判颜色：原判红 ⇒ 改判成黑 ⇒ 颂威成立。"""
+    red = _red_judge()
+    black = _black_judge(exclude=(red,))
+    scripts = [
+        Caopi(activate=(SONGWEI,)),
+        Caopi(activate=(SONGWEI,)),
+        Caopi(rejudge_with=black),
+    ]
+    engine, _players = _songwei_run(
+        judge_card=red,
+        extra=(2, "simayi", (black,)),
+        scripts=scripts,
+    )
+
+    assert _activation_queries(engine, SONGWEI), "改判成黑之后要问（按新牌判色）"
+    assert len(engine.state.player(1).hand) == 1, "主公摸到一张"
+    assert red in engine.state.discard, "被替代掉的原判红牌进弃牌堆"
+
+
+def test_songwei_fires_on_an_equipment_judgement():
+    """【八卦阵】的判定走同一条 `JUDGE_CARD_AFTER_EFFECT` ⇒ 颂威照常触发。"""
+    slash = _cards("slash")[0]
+    black = _black_judge(exclude=(slash, EIGHT_DIAGRAMS))
+    seats = [
+        SeatSpec(kingdom=Kingdom.WU, identity=Identity.REBEL, hand=(slash,)),
+        SeatSpec(kingdom=Kingdom.WEI, identity=Identity.REBEL, equip=(EIGHT_DIAGRAMS,)),
+        SeatSpec(hero=CAOPI, kingdom=Kingdom.WEI, identity=Identity.LORD),
+    ]
+    # 座位 0 的回合先跑**摸牌阶段**（额定 2 张）⇒ 前两张被摸走，第三张才是八卦阵的判定牌。
+    fillers = [
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in {slash, EIGHT_DIAGRAMS, black}
+    ][:2]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=(
+            *fillers,
+            black,
+            *(
+                card_id
+                for card_id in range(len(PACK.deck.cards))
+                if card_id not in {slash, EIGHT_DIAGRAMS, black, *fillers}
+            ),
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    scripts = [
+        Caopi(slash_at=1),
+        Caopi(bagua=True, activate=(SONGWEI,)),
+        Caopi(activate=(SONGWEI,)),
+    ]
+    _advance(
+        engine,
+        scripts,
+        lambda e: _judge_pops(e) >= 1 or e.finished,
+    )
+
+    assert ran_timing(engine, Timing.JUDGE_CARD_AFTER_EFFECT), "八卦阵的判定确实发生"
+    assert _activation_queries(engine, SONGWEI), "装备判定同样触发颂威"
+    assert len(engine.state.player(2).hand) == 1, "主公摸到一张"
+
+
+def test_songwei_resumes_without_drawing_twice():
+    """G7：同一判定帧被**再派发一轮** ⇒ 帧私有 `_SONGWEI_DRAWN_KEY` 挡住第二次摸牌。
+
+    正常路径上摸牌不会挂起（主公没有「获得牌后」类技能），这个防御位就是为"宿主级直调"
+    准备的。判据：清掉帧内的 pass 进度、逼引擎重新走一遍派发环 ⇒ 技能**重新被问到**，
+    但答"发动"之后一张也不摸（游标已落位）。
+    """
+    scripts = [Caopi(activate=(SONGWEI,)) for _ in range(3)]
+    # 停在"第一次颂威已经摸完牌、判定帧还压着"的那一刻（重入的前提）。
+    engine, _players = _songwei_run(
+        judge_card=_black_judge(),
+        scripts=scripts,
+        stop=lambda e: (bool(e.state.player(1).hand) and e.pending is None)
+        or e.finished,
+    )
+    frame = next(
+        candidate
+        for candidate in reversed(engine.stack.frames)
+        if candidate.kind is FrameKind.JUDGE
+    )
+    hand_before = list(engine.state.player(1).hand)
+    assert len(hand_before) == 1, "第一次颂威已摸到一张"
+    frame.data.pop(PASS_STATE_KEY, None)
+    frame.data["ask_answers"] = {}
+    assert engine_steps.judge_after_effect(engine, frame) == "stay", "重新走到「是否发动」"
+    reask = engine.pending
+    assert reask is not None and str(reask.skill_id) == SONGWEI
+    engine.submit(
+        next(
+            action
+            for action in reask.legal_actions
+            if isinstance(action, ActivateSkill)
+        )
+    )
+
+    assert engine.state.player(1).hand == hand_before, "第二次一张都不再摸"
+    assert len(
+        _moves_to(engine, to_zone=ZoneRef(Zone.HAND, 1), reason=MoveReason.DRAW)
+    ) == 1, "整局只有第一次那一条摸牌 delta"
+
+
+def test_songwei_short_draw_ends_in_a_draw():
+    """G10：主公摸牌时两堆皆空 ⇒ 短摸即平局（判定牌还在处理区，不进任何一堆）。"""
+    engine, _players = _songwei_run(
+        judge_card=_black_judge(),
+        deck=(_black_judge(),),
+        discard=(),
+        stop=lambda e: e.finished,
+    )
+
+    assert engine.finished is True
+    assert engine.pending_outcome is not None
+    assert engine.pending_outcome.result == "draw"
+
+
+# ---------------------------------------------------------------------------
+# §5 曹丕移动版 —— 形状 / 数据面
+# ---------------------------------------------------------------------------
+
+
+def test_caopi_mobile_is_the_wei_lord_of_the_mobile_lin_pack():
+    """数据面：`heroes.lin_mobile.json` 那一行（3 体力 / 魏 / 男 / 颂威 = 主公技）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    hero = hero_by_id(CAOPI)
+    assert hero is not None
+    assert hero.name == "曹丕移动版"
+    assert hero.true_name == "曹丕"
+    assert hero.version == "lin-mobile"
+    assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("wei", "male", 3)
+    assert hero.enabled is True
+    assert [(f"hero.{hero.id}.{skill.id}", skill.skill_type.value) for skill in hero.skills] == [
+        (XINGSHANG, "NORMAL"),
+        (FANGZHU, "NORMAL"),
+        (SONGWEI, "LORD"),
+    ], "颂威的数据侧声明 = 主公技（与代码侧 SkillDef 对账）"
+    assert CAOPI in enabled_hero_ids(), "启用 ⇒ 进默认池（林包移动版按独立版本并存）"
+
+
+def test_the_caopi_skills_have_their_declared_shapes():
+    """形状：行殇 / 颂威 = 零步流水线（只问"是否发动"），放逐 = 单步选座流水线。"""
+    for skill_id, requirement in (
+        (XINGSHANG, XINGSHANG_REQUIREMENT),
+        (FANGZHU, FANGZHU_REQUIREMENT),
+        (SONGWEI, SONGWEI_REQUIREMENT),
+    ):
+        definition = CATALOG[skill_id]
+        assert definition.locked is False, f"{skill_id}：牌面写「可以」⇒ 非锁定"
+        assert definition.preactivated is False, "三条都不翻预发动（`shapes.md` §4 准入表）"
+        assert definition.requirement == requirement
+        assert flow_for(skill_id) is not None, f"{skill_id}：有 SkillFlow ⇒ 步骤语言内"
+    assert flow_for(XINGSHANG).steps == (), "行殇：零步"
+    assert flow_for(SONGWEI).steps == (), "颂威：零步"
+    steps = flow_for(FANGZHU).steps
+    assert [type(step).__name__ for step in steps] == ["PickSeats"] and steps[0].key == "seat"
+    assert CATALOG[FANGZHU].step_requirements == {"seat": "选择一名其他角色"}
+    assert CATALOG[SONGWEI].skill_type.value == "LORD"
+
+
+
+
