@@ -19,14 +19,18 @@
 判据全走**外部缝**：预发动清单（``query.preactivations``）、记录流里的判定 / 搬牌、
 座位上的体力 / 翻面 / 手牌数。不断言内部结构，也不 mock。
 
-**牌堆控制**：开局按 ``RuleConfig.starting_hand_size``（缺省 4）给每个座位**从牌堆顶**发牌
-（座位序、逐座位 4 张），故本文件的夹具把"我要的手牌"直接放在牌堆头、判定牌放在**发牌之后**
-的第一张——这样判定与摸牌取到的就是指定的那张。
+**票 02（界顾雍移动版【慎行】）**：同一个界一将成名-2014·移动版包的第二名武将——出牌阶段
+限 X 次（X = 当下体力值）、弃两张、颜色相同摸一否则摸二。计数落 ``skill_state`` 的 4 位
+计数位段（``_PHASE_USE_SHIFT`` = 32），X 每次判可用时现算（用户 2026-11-09 签 Q1–Q3）。
+【秉壹】因 C3（用户改判成"一次点选多个座位"）摘出，见同 effort 的 ``05-seat-multi-select.md``。
+
+**牌堆控制**：``Engine.from_state`` 的局面从**回合开头**跑起（准备 → 判定 → 摸牌 → 出牌），
+故本文件的夹具把 2 张摸牌阶段要摸的牌放在牌堆头、要控制的牌（判定牌 / 慎行的摸牌）放在其后。
 """
 
 from __future__ import annotations
 
-from sgs.data import RuleConfig, Suit, card_category, load_content_pack
+from sgs.data import RuleConfig, Suit, card_category, color_of_suit, load_content_pack
 from sgs.engine import Engine
 from sgs.state import ActivateSkill, Phase, QueryKind, Zone
 from sgs.timing import Timing
@@ -37,6 +41,9 @@ PACK = load_content_pack(deck_profile="standard_108")
 
 HERO = "jie_chenqun_mobile"
 DINGPIN = "hero.jie_chenqun_mobile.dingpin"
+
+GUYONG = "jie_guyong_mobile"
+SHENXING = "hero.jie_guyong_mobile.shenxing"
 
 DEAL = 4
 """``RuleConfig.starting_hand_size`` 的缺省值；本文件的夹具不依赖它（`from_state` 不发牌），
@@ -186,6 +193,9 @@ def _state(
     target_hp: int = 4,
     target_hp_max: int = 4,
     first_seat: int = 0,
+    hero: str = HERO,
+    hp: int = 3,
+    hp_max: int = 3,
 ):
     """座位 0 = 界陈群（``mine`` = 直接给定的手牌）、座位 1 = 目标。
 
@@ -199,7 +209,7 @@ def _state(
     return build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hero=HERO, hp=3, hp_max=3, hand=mine),
+            SeatSpec(hero=hero, hp=hp, hp_max=hp_max, hand=mine),
             SeatSpec(hp=target_hp, hp_max=target_hp_max),
         ],
         deck=deck,
@@ -462,3 +472,156 @@ def test_dingpin_bar_is_idempotent_and_keeps_seat_order():
     assert engine.bar_dingpin_target(0, 0) is True
     assert engine.bar_dingpin_target(0, 1) is False, "重复禁同一目标 ⇒ 空操作"
     assert engine.state.player(0).dingpin_barred_targets == [0, 1], "座位升序"
+
+
+# ===========================================================================
+# 票 02：界顾雍移动版【慎行】
+#
+#     出牌阶段限X次（X为你的体力值），你可以弃置两张牌，然后若这两张牌的颜色相同，
+#     则你摸一张牌，否则你摸两张牌。
+# ===========================================================================
+
+
+def _card_of_color(color: str, *, category: str = "basic", exclude: tuple[int, ...] = ()) -> int:
+    """挑一张指定**颜色**的牌（``color`` = ``"red"`` / ``"black"``）。"""
+    for card_id in range(len(PACK.deck.cards)):
+        if card_id in exclude:
+            continue
+        card = PACK.deck.cards[card_id]
+        actual = color_of_suit(card.suit)
+        if actual is None or actual.value != color:
+            continue
+        if category and _category_of(card_id) != category:
+            continue
+        return card_id
+    raise AssertionError(f"标准 108 里没有 {color} 的 {category} 牌")
+
+
+def _guyong_state(*, mine, draw_cards=(), hp: int = 3, hp_max: int = 3, first_seat: int = 0):
+    """座位 0 = 界顾雍（``mine`` = 直接给定的手牌）、座位 1 = 空座。
+
+    牌堆 = 摸牌阶段的 2 张（``draw_cards``，缺省取两张基本牌）→ 之后是慎行的摸牌 → 其余。
+    """
+    drawn = list(draw_cards)
+    while len(drawn) < 2:
+        drawn.append(_first_of(category="basic", exclude=(*mine, *drawn)))
+    after: list[int] = []
+    for _ in range(2):
+        after.append(_first_of(category="basic", exclude=(*mine, *drawn, *after)))
+    deck = (*drawn, *after, *deck_excluding(PACK, *mine, *drawn, *after))
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=GUYONG, hp=hp, hp_max=hp_max, hand=mine),
+            SeatSpec(),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=first_seat),
+    )
+
+
+def _activate(engine, skill_id: str, *, picks=(), choices=()):
+    """在出牌阶段询问上提交一个复合动作（预发动确认），推进回出牌阶段。"""
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=skill_id,
+            picks=tuple(picks),
+            choices=tuple(choices),
+            answers_seq=query.seq,
+        )
+    )
+    return _drive(engine, _at_play_phase)
+
+
+def test_shenxing_exposes_a_single_step_manifest_that_takes_exactly_two_cards():
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    engine = _park(_guyong_state(mine=mine))
+    query = engine.pending
+
+    assert not [
+        action
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == SHENXING
+    ], "已翻预发动：骨架候选从 legal_actions 删掉"
+    steps = _manifest(query, SHENXING)
+    assert [step.name for step in steps] == ["card"], "单步：选两张牌"
+    assert (steps[0].min, steps[0].max) == (2, 2), "代价恰好两张"
+    assert set(steps[0].zones) == {Zone.HAND, Zone.EQUIP}, "「两张牌」= 手牌 ∪ 装备区"
+
+
+def test_shenxing_draws_one_when_the_two_cards_share_a_color():
+    red1 = _card_of_color("red")
+    red2 = _card_of_color("red", exclude=(red1,))
+    f1 = _first_of(category="trick", exclude=(red1, red2))
+    f2 = _first_of(category="equipment", exclude=(red1, red2, f1))
+    mine = (red1, red2, f1, f2)
+
+    engine = _park(_guyong_state(mine=mine))
+    before = _hand_size(engine.state, 0)
+
+    engine = _activate(engine, SHENXING, picks=(red1, red2))
+
+    assert red1 in engine.state.discard and red2 in engine.state.discard, "两张都进了弃牌堆"
+    assert _hand_size(engine.state, 0) == before - 2 + 1, "同色 ⇒ 摸一张"
+
+
+def test_shenxing_draws_two_when_the_colors_differ():
+    red = _card_of_color("red")
+    black = _card_of_color("black", exclude=(red,))
+    f1 = _first_of(category="trick", exclude=(red, black))
+    f2 = _first_of(category="equipment", exclude=(red, black, f1))
+    mine = (red, black, f1, f2)
+
+    engine = _park(_guyong_state(mine=mine))
+    before = _hand_size(engine.state, 0)
+
+    engine = _activate(engine, SHENXING, picks=(red, black))
+
+    assert _hand_size(engine.state, 0) == before - 2 + 2, "异色 ⇒ 摸两张"
+
+
+def test_shenxing_is_not_offered_with_a_single_card():
+    mine = (_first_of(category="basic"),)
+    engine = Engine.from_state(_guyong_state(mine=mine), seed=1)
+    # 摸牌阶段放弃摸牌（`set_draw_phase_count(0, 0)` = 突袭式的"0 张"），
+    # 于是出牌阶段手里就只剩那 1 张 ⇒ 付不起两张。
+    engine.set_draw_phase_count(0, 0)
+    engine = _drive(engine, _at_play_phase)
+
+    assert not _manifest(engine.pending, SHENXING), "少于两张 ⇒ 付不起 ⇒ 清单不出现"
+
+
+def test_shenxing_is_limited_to_one_use_at_one_hp():
+    """X = 当下体力值（账本 L776⑤）：1 体力 ⇒ 本阶段只提供 1 次。"""
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    engine = _park(_guyong_state(mine=mine, hp=1, hp_max=3))
+
+    assert _manifest(engine.pending, SHENXING), "1 体力 ⇒ 本阶段 1 次"
+    engine = _activate(engine, SHENXING, picks=(mine[0], mine[1]))
+
+    assert not _manifest(engine.pending, SHENXING), "用满 1 次 ⇒ 不再提供"
+
+
+def test_shenxing_allows_two_uses_at_two_hp():
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    engine = _park(_guyong_state(mine=mine, hp=2, hp_max=3))
+
+    assert _manifest(engine.pending, SHENXING), "2 体力 ⇒ 本阶段 2 次"
+    engine = _activate(engine, SHENXING, picks=(mine[0], mine[1]))
+    assert _manifest(engine.pending, SHENXING), "用了 1 次，还没到上限"
+    engine = _activate(engine, SHENXING, picks=(mine[2], mine[3]))
+
+    assert not _manifest(engine.pending, SHENXING), "用满 2 次 ⇒ 不再提供"
+
+
+def test_shenxing_cancel_leaves_the_hand_and_the_counter_untouched():
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    engine = _park(_guyong_state(mine=mine))
+    before = _hand_size(engine.state, 0)
+
+    assert _manifest(engine.pending, SHENXING), "取消 ≠ 用掉次数：清单仍在"
+    assert _hand_size(engine.state, 0) == before
+    assert not [card for card in engine.state.discard if card in mine]

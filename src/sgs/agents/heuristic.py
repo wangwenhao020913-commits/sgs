@@ -4535,6 +4535,14 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "♦（1/4）自己翻面。代价与风险都在明面上，且座位步会挑盟友 ⇒ 保守给正；"
         "`_constant` 不读任何字段（牌面收益随判定走，AI 侧无法预判）",
     ),
+    # 界一将成名-2014·移动版·界顾雍（jie-yijiang-2014-mobile 票 02）：【慎行】弃两张换
+    # 摸 1（同色）/ 摸 2（异色）——**牌质过滤**，净手牌 −1 或 0。弃哪两张由 `action.picks`
+    # 的打分挑（AI 会丢低价值牌），故发动本身略高于放弃即可。
+    "hero.jie_guyong_mobile.shenxing": (
+        _constant(0.6),
+        "弃两张摸一或两张（牌质过滤，净 −1 / 0）：弃哪两张由 picks 的打分挑低价值牌，"
+        "故恒可发动但不宜给高；`_constant` 不读任何字段",
+    ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。
 

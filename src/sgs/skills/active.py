@@ -104,6 +104,8 @@ from .catalog import (
     SkillDef,
     _GIVEN_TO_SHIFT,
     _HUANGTIAN_SHIFT,
+    _PHASE_USE_MASK,
+    _PHASE_USE_SHIFT,
     _USED_SECOND,
     _move_by_source,
     instance_key,
@@ -122,6 +124,8 @@ __all__ = [
     "DIMENG_FLOW",
     "DINGPIN",
     "DINGPIN_FLOW",
+    "SHENXING",
+    "SHENXING_FLOW",
     "JIE_LIJIAN",
     "JIE_LIJIAN_FLOW",
     "POXI_CARDS",
@@ -1294,6 +1298,106 @@ DINGPIN_FLOW = SkillFlow(
     once_per_phase=False,
 )
 """【定品】的两步流水线：弃一张（大类没用过）→ 一名角色判定 → 黑 / ♥ / ♦ 三分支。"""
+
+
+# ---------------------------------------------------------------------------
+# 界顾雍移动版【慎行】（界一将成名-2014·移动版；jie-yijiang-2014-mobile 票 02）
+#
+# 牌面（用户 `技能.txt` 逐字；移动版官网同义，见票面 §0.1）：
+#
+#     出牌阶段限X次（X为你的体力值），你可以弃置两张牌，然后若这两张牌的颜色相同，
+#     则你摸一张牌，否则你摸两张牌。
+#
+# 用户 2026-11-09 签的落点（票面 Q1）：「限X次」的计数落 ``skill_state`` 的 4 位计数位段
+# （``catalog._PHASE_USE_SHIFT`` = 32），不在 ``Player`` 上另开座位字段。三条判据：
+# - **X 是动态量**（账本 L776⑤）：每次判可用时按**当下体力值**现算（掉血后上限跟着缩）；
+# - **次数上限不是"每阶段一次"**：``COUNT_LIMIT`` 是"这张牌还能用几次"、``_USED`` 位是
+#   "用过没有"，两者都表达不了 X > 2 ⇒ 本技能走 ``once_per_phase=False`` + 自己的计数位段；
+# - 「颜色相同」= 两张的**大色**（红 / 黑）相同；任一张没有颜色 ⇒ 比较不成立（fail-closed，
+#   账本 L896）⇒ 走"否则"那一支（摸两张）。
+# ---------------------------------------------------------------------------
+
+SHENXING = hero_skill_id("jie_guyong_mobile", "shenxing")
+"""界顾雍移动版【慎行】的全限定技能 id（界一将成名-2014·移动版）。"""
+
+_SHENXING_STARTED_KEY = "shenxing_started"
+"""帧私有：本阶段次数已经 +1（搬牌挂起后的续跑不重复计数）。"""
+
+_SHENXING_DRAWN_KEY = "shenxing_drawn"
+"""帧私有：摸牌那一段已经发出（摸牌内联钩子挂起后不重摸）。"""
+
+
+def _phase_use_total(state: GameState, owner: int, skill_id: str) -> int:
+    """本出牌阶段该实例已经发动几次（4 位计数位段，见 ``catalog._PHASE_USE_SHIFT``）。"""
+    return (_phase_flags(state, owner, skill_id) & _PHASE_USE_MASK) >> _PHASE_USE_SHIFT
+
+
+def _bump_phase_use(state: GameState, owner: int, skill_id: str) -> int:
+    """把"本阶段发动次数"+1（幂等位移；饱和在 15 —— X 是体力值，正常到不了上限）。
+
+    复位点是既有的 :func:`~sgs.skills.catalog.reset_phase_skill_state`（出牌阶段起点清
+    ``_PHASE_STATE_MASK`` 里的位段），故不需要新的复位时机。
+    """
+    key = _skill_key(state, owner, skill_id)
+    if key is None:
+        return 0
+    flags = state.skill_state.get(key, 0)
+    used = (flags & _PHASE_USE_MASK) >> _PHASE_USE_SHIFT
+    if used >= 0b1111:
+        return used
+    state.skill_state[key] = (flags & ~_PHASE_USE_MASK) | ((used + 1) << _PHASE_USE_SHIFT)
+    return used + 1
+
+
+def _shenxing_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：付得起（手牌 ∪ 装备区 ≥ 2 张）∧ 本阶段次数未满 X（X = 当下体力值）。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    player = state.player(ctx.subject)
+    if len(player.hand) + len(player.equip) < 2:
+        return current
+    if _phase_use_total(state, ctx.subject, ctx.skill_id) >= player.hp:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _shenxing_same_color(state: GameState, cards: tuple[int, ...]) -> bool:
+    """这两张牌的颜色是否相同（任一张无颜色 ⇒ **不成立**，走"否则"那一支）。"""
+    colors = {color_of_suit(state.card(int(card_id)).suit) for card_id in cards}
+    return len(colors) == 1 and None not in colors
+
+
+def _shenxing_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：记一次本阶段已用 → 弃两张 → 同色摸 1 / 否则摸 2。"""
+    state = host.state
+    owner = frame.data["source"]
+    cards = answers["card"]
+    assert isinstance(cards, tuple) and len(cards) == 2, "代价恰好两张"
+    if not frame.data.get(_SHENXING_STARTED_KEY):
+        # 次数在**提交点**落（与界【势斩】同一姿态）：步骤阶段取消不消耗次数。
+        frame.data[_SHENXING_STARTED_KEY] = True
+        _bump_phase_use(state, owner, SHENXING)
+    if _move_to_discard(host, frame, cards, owner=owner, key="shenxing:cost") == "stay":
+        return "stay"
+    if not frame.data.get(_SHENXING_DRAWN_KEY):
+        frame.data[_SHENXING_DRAWN_KEY] = True
+        count = 1 if _shenxing_same_color(state, cards) else 2
+        control = host.draw_for_hand(frame, owner, count)
+        if control == "stay":
+            return "stay"
+    return None
+
+
+SHENXING_FLOW = SkillFlow(
+    name="shenxing",
+    steps=(
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=2, hi=2, key="card"),
+    ),
+    effect=_shenxing_effect,
+    # 次数由 `_phase_use_count` 自己数（见上），执行器不自动落 `_USED`。
+    once_per_phase=False,
+)
+"""【慎行】的单步流水线：弃两张（手牌 ∪ 装备区）→ 同色摸 1 / 否则摸 2。"""
 
 
 # ---------------------------------------------------------------------------
@@ -6478,6 +6582,16 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         flow=DINGPIN_FLOW,
         preactivated=True,
     ),
+    # 界顾雍移动版【慎行】（界一将成名-2014·移动版；jie-yijiang-2014-mobile 票 02）：
+    # 出牌阶段限 X 次（X = 你的体力值）——弃两张牌，颜色相同摸 1、否则摸 2。首步选**自己**
+    # 的牌 ⇒ 清单渲得出，翻 `preactivated=True`（shapes.md §4 准入表）。
+    ActiveSkill(
+        "jie_guyong_mobile",
+        "shenxing",
+        _shenxing_offers,
+        flow=SHENXING_FLOW,
+        preactivated=True,
+    ),
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。
     ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preactivated=True),
@@ -6723,6 +6837,7 @@ _REQUIREMENTS: dict[str, str] = {
         "黑色其摸X张牌（X为其体力值且至多为3）且本回合不能再对其发动；"
         "♥ 你本次以此法弃置的牌不计入弃置过的限制；♦ 你翻面"
     ),
+    "shenxing": "弃置两张牌：颜色相同摸一张，否则摸两张",
 }
 """A 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -6782,6 +6897,9 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         # SELECT_CARDS 恒读 "card"；SELECT_OPTION 读询问 ``dingpin:seat`` 冒号后那段。
         "card": "弃置一张牌（不能是本回合使用或弃置过的类型：基本 / 锦囊 / 装备）",
         "seat": "选择一名角色进行一次判定",
+    },
+    "shenxing": {
+        "card": "弃置两张牌（手牌 / 装备区）",
     },
     # M6 票 17：界·吴四条。键的取法与上同（SELECT_OPTION 读询问 id 冒号后那段；
     # SELECT_CARDS 恒读 "card"）。

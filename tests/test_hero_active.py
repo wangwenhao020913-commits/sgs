@@ -443,7 +443,16 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     assert huangtian_bits == 0xFF << catalog_module._HUANGTIAN_SHIFT
     assert not (huangtian_bits & given_bits), "两段位不许重叠"
 
-    assert catalog_module._PHASE_STATE_MASK == phase_bits | given_bits | huangtian_bits
+    # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】的"本阶段发动次数"4 位计数位段
+    # （位段取值见 `catalog._PHASE_USE_SHIFT`：24..31 属锋·于禁【定乱】，故取 32 起）。
+    phase_use_bits = catalog_module._PHASE_USE_MASK
+    assert phase_use_bits == 0b1111 << catalog_module._PHASE_USE_SHIFT
+    assert catalog_module._PHASE_USE_SHIFT == 32, "24..31 是【定乱】的座位位段，23 放不下 4 位"
+
+    assert (
+        catalog_module._PHASE_STATE_MASK
+        == phase_bits | given_bits | huangtian_bits | phase_use_bits
+    )
     assert catalog_module._USED_SECOND == active_module._USED_SECOND, (
         "位布局的唯一真源在 catalog；active 只是转发同一个常量"
     )
@@ -458,6 +467,7 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
             | catalog_module._LIMITED_USED
             | catalog_module._AWAKENED
             | catalog_module._TURN_USED
+            | phase_use_bits
         )
     ), "第二档位不得与任何既有位重叠"
     assert not (catalog_module._LIMITED_USED & phase_bits), "整局位不得与阶段位重叠"
@@ -468,6 +478,9 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     assert not (given_bits & phase_bits), "座位位段与 A 族阶段位不重叠"
     assert not (given_bits & catalog_module._LIMITED_USED), "座位位段与限定技整局位不重叠"
     assert not (given_bits & catalog_module._AWAKENED), "座位位段与觉醒位不重叠"
+    assert not (phase_use_bits & given_bits), "计数位段与【仁德】座位位段不重叠"
+    assert not (phase_use_bits & huangtian_bits), "计数位段与【黄天】座位位段不重叠"
+    assert not (phase_use_bits & catalog_module._LIMITED_USED), "计数位段与整局位不重叠"
     assert not (given_bits & catalog_module._TURN_USED), "座位位段与每回合已用位不重叠"
 
     state = build_state(

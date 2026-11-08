@@ -18,6 +18,23 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_guyong_mobile",
+      "name": "界顾雍移动版",
+      "true_name": "顾雍",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-yijiang-2014-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shenxing",
+          "name": "慎行",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

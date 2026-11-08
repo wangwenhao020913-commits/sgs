@@ -1045,10 +1045,28 @@ _HUANGTIAN_SHIFT = 15
 _HUANGTIAN_MASK = 0xFF << _HUANGTIAN_SHIFT
 """张角【黄天】的"本阶段已交过牌的座位"位段（座位号 = 位序号 - ``_HUANGTIAN_SHIFT``）。"""
 
-_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK | _USED_SECOND | _HUANGTIAN_MASK
+_PHASE_USE_SHIFT = 32
+"""**本出牌阶段发动次数**计数位段的起始位（jie-yijiang-2014-mobile 票 02；界顾雍移动版【慎行】）。
+
+位 32..35 = 0..15 次（4 位）。**为什么必须到 32**：位 0..5 是 A 族三位 + 限定技 + 觉醒 +
+每回合已用，6..13 是界刘备【仁德】的目标位段，14 是界华雄【势斩】的"第二次已用"，15..22 是
+张角【黄天】的座位位段，**24..31 是自制包·锋·于禁【定乱】的座位位段**
+（``src/sgs/skills/hero_yujin.py``：「``_DINGLUAN_SHIFT = 24`` … 故取 24..31」）——23 只是夹在
+两个位段之间的孤位，放不下 4 位计数。``int`` 无位宽上限，故取 32 起（与【定乱】同一条理由）。
+
+它与"限一次 / 限两次"的**位**（``_USED`` / ``_USED_SECOND``）分列：那两位表达"有没有用过"，
+本段表达"用了几次"（X 是动态量，界【势斩】的两位法表达不了 3 次以上）。
+"""
+
+_PHASE_USE_MASK = 0b1111 << _PHASE_USE_SHIFT
+"""「本阶段发动次数」的计数位段（值 = ``(flags & mask) >> _PHASE_USE_SHIFT``）。"""
+
+_PHASE_STATE_MASK = (
+    0b111 | _GIVEN_TO_MASK | _USED_SECOND | _HUANGTIAN_MASK | _PHASE_USE_MASK
+)
 """``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
-``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段 + 界华雄【势斩】的"第二次已用"位，
-见 :mod:`sgs.skills.active`）。
+``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段 + 界华雄【势斩】的"第二次已用"位 +
+界顾雍移动版【慎行】的"本阶段发动次数"位段，见 :mod:`sgs.skills.active`）。
 
 :func:`reset_phase_skill_state` 只清这一掩码里的位：M6 票 05 起 ``skill_state`` 还有
 **跨阶段**的位（限定技的"整局已用"），整段 ``clear()`` 会让限定技复活。
