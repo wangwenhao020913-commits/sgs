@@ -22,8 +22,9 @@
 
 from __future__ import annotations
 
-from sgs.data import Category, Suit, card_category, load_content_pack
-from sgs.engine import Engine
+import pytest
+from sgs.data import Category, RuleConfig, Suit, card_category, load_content_pack
+from sgs.engine import Engine, IllegalActionError
 from sgs.engine.steps import damage_finalize_amount
 from sgs.resolution import Tag, add_tag
 from sgs.skills.virtual import transformed_card
@@ -36,7 +37,10 @@ from sgs.state import (
     Phase,
     QueryKind,
     SkillSuppression,
+    SubstituteJudgeCard,
     UseCard,
+    WindowCause,
+    Zone,
 )
 from sgs.timing import Timing
 
@@ -647,3 +651,980 @@ def test_the_two_skills_are_declared_with_the_signed_shape():
     assert flow_for(SHIBEI) is None, "锁定技不问，不必造流水线"
     assert [hook.timing for hook in shibei.hooks] == [Timing.DAMAGE_AFTER_TAKE]
     assert [hook.per_point for hook in shibei.hooks] == [False], "逐事件，不是逐点"
+
+
+# ===========================================================================
+# 一将成名-2014·陈群【定品】（yijiang-2014 票 02）
+#
+# 牌面（用户 `技能.txt` 逐字）：
+#
+#     出牌阶段，你可以弃置一张手牌（不能是本回合使用或弃置过的类型），令一名已受伤的
+#     角色进行一次判定，若结果为：黑色，该角色摸X张牌（X为其已损失的体力值），且本回合
+#     不能再对其发动此技能；红色，你翻面。
+#
+# 与界陈群移动版【定品】**同短 id、四处实质不同**（用户 2026-11-09 签 Q-C1…Q-C4）：
+# 代价只**手牌**、目标限**已受伤**、X = **已损失体力值**（不是 min(体力值, 3)）、
+# 分支只有**黑 / 红**两段（红 ⇒ 你翻面，♥ 不退款）。【法恩】C1 摘出 ⇒ 本票只落【定品】。
+#
+# 判据全走**外部缝**：预发动清单（``query.preactivations``）、记录流里的判定 / 搬牌 /
+# 翻面、座位上的体力与手牌数。不断言内部结构，也不 mock。
+# ===========================================================================
+
+CHENQUN = "chenqun"
+DINGPIN = "hero.chenqun.dingpin"
+JIE_DINGPIN = "hero.jie_chenqun_mobile.dingpin"
+
+
+def _first_of(*, category: str = "", exclude: tuple[int, ...] = ()) -> int:
+    for card_id in range(len(PACK.deck.cards)):
+        if card_id in exclude:
+            continue
+        kind = card_category(PACK.pack_id, PACK.deck.cards[card_id].type)
+        if kind is None:
+            continue
+        if not category or kind.value == category:
+            return card_id
+    raise AssertionError(f"标准 108 里找不到大类 {category or '<任意>'} 的牌")
+
+
+def _basic_with_suit(suit: Suit, *, exclude: tuple[int, ...] = ()) -> int:
+    """除 ``exclude`` 外，挑一张**基本牌**里花色 = ``suit`` 的牌（当判定牌用）。"""
+    for card_id in range(len(PACK.deck.cards)):
+        if card_id in exclude:
+            continue
+        card = PACK.deck.cards[card_id]
+        if card.suit is suit and _category_of(card_id) == "basic":
+            return card_id
+    raise AssertionError(f"标准 108 里没有花色 {suit} 的基本牌")
+
+
+def _category_of(card_id: int) -> str:
+    kind = card_category(PACK.pack_id, PACK.deck.cards[card_id].type)
+    assert kind is not None
+    return kind.value
+
+
+def _hand_of(*, basic: int = 0, trick: int = 0, equipment: int = 0, skip=()) -> tuple[int, ...]:
+    """从牌堆里凑一手"指定大类组合"的牌（用于发到座位 0 手里）。"""
+    taken: list[int] = []
+    for category, count in (("basic", basic), ("trick", trick), ("equipment", equipment)):
+        for _ in range(count):
+            taken.append(_first_of(category=category, exclude=(*skip, *taken)))
+    return tuple(taken)
+
+
+def _dingpin_state(
+    *,
+    mine: tuple[int, ...],
+    judge: int,
+    draw: int = 2,
+    # 缺省目标**已受伤**（本技能的合法目标池；要"没人受伤"的场景显式传满血）。
+    target_hp: int = 1,
+    target_hp_max: int = 4,
+    target_hero: str | None = None,
+    hp: int = 3,
+    hp_max: int = 3,
+    first_seat: int = 0,
+    equip: tuple[int, ...] = (),
+    judge_zone: tuple[int, ...] = (),
+):
+    """座位 0 = 陈群（``mine`` = 直接给定的手牌）、座位 1 = 目标。
+
+    **牌的取用次序**：``from_state`` 的局面从**回合开头**跑起（判定 → 摸牌 → 出牌），
+    故牌堆 = ``draw`` 张摸牌阶段要摸的牌（取基本牌、与 ``mine`` 不重叠）→ ``judge``
+    （本技能那次判定的判定牌）→ 其余。
+    """
+    drawn: list[int] = []
+    for _ in range(draw):
+        drawn.append(_first_of(category="basic", exclude=(*mine, *equip, judge, *drawn)))
+    deck = (
+        *drawn,
+        judge,
+        *deck_excluding(PACK, *mine, *equip, *drawn, judge, *judge_zone),
+    )
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=CHENQUN, hp=hp, hp_max=hp_max, hand=mine, equip=equip, judge=judge_zone
+            ),
+            SeatSpec(hero=target_hero, hp=target_hp, hp_max=target_hp_max),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=first_seat),
+    )
+
+
+def _dingpin_play_phase(engine) -> bool:
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.PLAY_PHASE
+        and engine.pending.actor == 0
+    )
+
+
+def _park_dingpin(state, *, draw: int = 2):
+    """构造局面 → 开到陈群的出牌阶段询问（预发动清单就在这条询问上）。"""
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, draw)  # 摸牌阶段的张数（缺省 2；空牌堆夹具要 0）
+    return _drive(engine, _dingpin_play_phase)
+
+
+def _manifest(query, skill_id: str = DINGPIN):
+    return tuple((query.preactivations or {}).get(skill_id, ()))
+
+
+def _pool_options(step) -> tuple[str, ...]:
+    seen: list[str] = []
+    for row in step.pool:
+        for option in row.options:
+            if option not in seen:
+                seen.append(option)
+    return tuple(seen)
+
+
+def _confirm_dingpin(engine, *, cost: int, target: int, skill_id: str = DINGPIN):
+    """在出牌阶段询问上提交复合动作（弃 ``cost``、指定 ``target``），推进回出牌阶段。"""
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=skill_id,
+            picks=(cost,),
+            choices=(f"seat:{target}",),
+            answers_seq=query.seq,
+        )
+    )
+    return _drive(engine, _dingpin_play_phase)
+
+
+def _moves_of(engine, card_id: int) -> list[tuple[str, str, str]]:
+    return [
+        (record.from_zone.zone.value, record.to_zone.zone.value, record.reason.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] == [card_id]
+    ]
+
+
+def _judge_events(engine) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.JUDGE_ON
+    ]
+
+
+def _skill_asked(engine, skill_id: str) -> bool:
+    """记录流里有没有这条技能的「是否发动」询问（挂起点的证据）。"""
+    return any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and str(record.query.skill_id) == skill_id
+        for record in engine.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# 形状：预发动清单（两步：card → seat）
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_dingpin_is_not_a_plain_candidate_and_exposes_a_two_step_manifest():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge))
+    query = engine.pending
+
+    assert not [
+        action
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == DINGPIN
+    ], "已翻预发动：骨架候选从 legal_actions 删掉"
+    steps = _manifest(query)
+    assert [step.name for step in steps] == ["card", "seat"], "两步：弃牌 → 选人"
+    assert (steps[0].min, steps[0].max) == (1, 1), "代价恰好一张"
+    assert set(steps[0].zones) == {Zone.HAND}, "牌面明写「手牌」⇒ 只有手牌区"
+
+
+def test_chenqun_dingpin_manifest_first_step_lays_out_hand_only():
+    """首步铺的是**陈群自己的手牌**（比界版少一个装备区，正是本版的读法）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    other_equip = _first_of(category="equipment", exclude=mine)
+    judge = _basic_with_suit(Suit.SPADE, exclude=(*mine, other_equip))
+
+    engine = _park_dingpin(
+        _dingpin_state(mine=mine, judge=judge, equip=(other_equip,), target_hp=1, target_hp_max=4)
+    )
+    steps = _manifest(engine.pending)
+    options = _pool_options(steps[0])
+
+    assert set(options) == {str(card) for card in engine.state.player(0).hand}, (
+        "候选面恰是手牌（摸牌阶段摸到的两张也在内）"
+    )
+    assert str(other_equip) not in options, "装备区那张不是代价"
+
+
+def test_chenqun_dingpin_costs_exactly_one_card():
+    """「弃置一张手牌」⇒ ``lo = hi = 1``；0 张不是合法动作（不给"弃 0 张"的候选）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge, target_hp=1, target_hp_max=4))
+    steps = _manifest(engine.pending)
+    assert (steps[0].min, steps[0].max) == (1, 1)
+
+    with pytest.raises(IllegalActionError):
+        engine.submit(
+            ActivateSkill(
+                skill_id=DINGPIN,
+                picks=(),
+                choices=("seat:1",),
+                answers_seq=engine.pending.seq,
+            )
+        )
+    with pytest.raises(IllegalActionError):
+        engine.submit(
+            ActivateSkill(
+                skill_id=DINGPIN,
+                picks=(mine[0], mine[1]),
+                choices=("seat:1",),
+                answers_seq=engine.pending.seq,
+            )
+        )
+
+
+def test_chenqun_dingpin_never_costs_an_equipment_card():
+    """牌面写「一张**手牌**」⇒ 不套"手牌 + 装备区"的区域默认：装备区的牌永远不是代价。"""
+    mine = _hand_of(basic=4)
+    other_equip = _first_of(category="equipment", exclude=mine)
+    judge = _basic_with_suit(Suit.SPADE, exclude=(*mine, other_equip))
+
+    state = _dingpin_state(
+        mine=mine,
+        judge=judge,
+        equip=(other_equip,),
+        target_hp=1,
+        target_hp_max=4,
+    )
+    # 基本牌那一类已经用掉 ⇒ 手牌一张都当不了代价；装备区那张**大类可用**却救不了场。
+    state.player(0).turn_card_entries.append((-2, "basic"))
+
+    engine = _park_dingpin(state)
+
+    assert not _manifest(engine.pending), "装备区的牌不算代价 ⇒ 付不起 ⇒ 清单不出现"
+
+
+def test_chenqun_dingpin_is_not_offered_without_a_legal_cost_card():
+    """手牌为空（摸牌阶段 0 张）⇒ 候选阶段不产出入口。"""
+    mine = ()
+    judge = _basic_with_suit(Suit.SPADE)
+
+    engine = _park_dingpin(
+        _dingpin_state(mine=mine, judge=judge, draw=0, target_hp=1, target_hp_max=4), draw=0
+    )
+
+    assert not engine.state.player(0).hand, "手牌真的空"
+    assert not _manifest(engine.pending), "一张合法代价都没有 ⇒ 清单不出现"
+
+
+def test_chenqun_dingpin_is_not_offered_without_an_injured_target():
+    """「一名**已受伤**的角色」⇒ 全场无伤者时池空、整条取消（不发空询问）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(
+        _dingpin_state(mine=mine, judge=judge, target_hp=4, target_hp_max=4), draw=2
+    )
+
+    assert not _manifest(engine.pending), "没有已受伤角色 ⇒ 清单不出现"
+
+
+def test_chenqun_dingpin_is_not_offered_outside_my_play_phase():
+    """「出牌阶段」没写谁的阶段 ⇒ 只在陈群自己的出牌阶段（别人的回合里没有清单）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+    state = _dingpin_state(
+        mine=mine, judge=judge, target_hp=1, target_hp_max=4, first_seat=1
+    )
+
+    engine = _drive(
+        Engine.from_state(state, seed=1),
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE,
+    )
+
+    assert engine.pending.actor == 1, "现在是座位 1 的出牌阶段"
+    assert not _manifest(engine.pending), "不是我的出牌阶段"
+
+
+def test_chenqun_dingpin_has_no_entry_when_the_play_phase_is_skipped():
+    """【乐不思蜀】非红桃 ⇒ 出牌阶段整段不存在 ⇒ 【定品】没有入口。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    indulgence = cards_of_type(PACK, "indulgence")[0]
+    top = next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in (*mine, indulgence)
+        and PACK.deck.cards[card_id].suit is not Suit.HEART
+    )
+    state = _dingpin_state(
+        mine=mine,
+        judge=top,
+        target_hp=1,
+        target_hp_max=4,
+        judge_zone=(indulgence,),
+    )
+
+    engine = _drive(
+        Engine.from_state(state, seed=1),
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+
+    play_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind is QueryKind.PLAY_PHASE
+        and record.query.actor == 0
+    ]
+    assert not play_queries, "跳过出牌阶段 ⇒ 连询问都没有"
+    assert not engine.state.player(0).turn_card_entries, "回合末照常清空"
+    assert not engine.state.player(0).dingpin_barred_targets
+
+
+def test_chenqun_dingpin_declining_the_manifest_costs_nothing():
+    """玩家在清单里不动 ⇒ 零副作用（成本未搬、无判定、无禁令）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge, target_hp=1, target_hp_max=4))
+
+    assert set(mine) <= set(engine.state.player(0).hand), "手牌一张没少"
+    assert not [card for card in engine.state.discard if card in mine], "成本没有被搬走"
+    assert not engine.state.player(0).dingpin_barred_targets
+    assert _judge_events(engine) == [], "没有判定"
+
+
+def test_chenqun_dingpin_takes_the_only_injured_seat_directly():
+    """只剩一条合法路（陈群满血、只有座位 1 受伤）⇒ 座位步只有一个候选。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge, target_hp=1, target_hp_max=4))
+    steps = _manifest(engine.pending)
+
+    assert _pool_options(steps[1]) == ("seat:1",), "单候选 ⇒ 前端直提、不铺面"
+
+
+def test_chenqun_dingpin_can_target_itself_when_injured():
+    """「一名角色」含自己（L776①）：陈群自己受伤时也在池里，且能真的指定自己。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(
+        _dingpin_state(mine=mine, judge=judge, hp=1, hp_max=3, target_hp=1, target_hp_max=4)
+    )
+    steps = _manifest(engine.pending)
+    assert "seat:0" in _pool_options(steps[1]), "自己受伤 ⇒ 自己在池里"
+    assert "seat:1" in _pool_options(steps[1])
+
+    before = len(engine.state.player(0).hand)
+    engine = _confirm_dingpin(engine, cost=mine[0], target=0)
+
+    assert len(engine.state.player(0).hand) == before - 1 + 2, (
+        "弃 1 摸 X（自己已损失 2 点体力）"
+    )
+
+
+def test_chenqun_dingpin_treats_a_reduced_hp_max_as_injured():
+    """「已受伤」只看 ``hp < hp_max``，不看"上限有没有被减过"（账本 L741）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    full_with_reduced_max = _dingpin_state(
+        mine=mine, judge=judge, target_hp=2, target_hp_max=2
+    )
+    engine = _park_dingpin(full_with_reduced_max)
+    assert not _manifest(engine.pending), "上限被减到 2 但体力也满 2 ⇒ 不是「已受伤」"
+
+    hurt_with_reduced_max = _dingpin_state(
+        mine=mine, judge=judge, target_hp=3, target_hp_max=5
+    )
+    engine = _park_dingpin(hurt_with_reduced_max)
+    steps = _manifest(engine.pending)
+    assert "seat:1" in _pool_options(steps[1]), "上限被减过、体力低于上限 ⇒ 仍是「已受伤」"
+
+
+# ---------------------------------------------------------------------------
+# 两分支：黑（摸 X + 禁令）/ 红（你翻面）
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_dingpin_discards_one_card_and_judges_for_the_target():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    cost = mine[0]
+    judge = _basic_with_suit(Suit.CLUB, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge, target_hp=3, target_hp_max=4))
+    before = len(engine.state.player(1).hand)
+
+    engine = _confirm_dingpin(engine, cost=cost, target=1)
+
+    assert ("hand", "discard", "DISCARD") in _moves_of(engine, cost), "成本进弃牌堆"
+    assert ran_timing(engine, Timing.JUDGE_ON), "确实进行了一次判定"
+    assert len(engine.state.player(1).hand) == before + 1, "黑判定：目标摸 X（已损失 1 点）"
+
+
+def test_chenqun_dingpin_black_draws_the_lost_hp():
+    """X = 该角色**已损失**的体力值 = 上限 − 当前体力（本版**不是** min(体力值, 3)）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge, target_hp=1, target_hp_max=4))
+    before = len(engine.state.player(1).hand)
+
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert len(engine.state.player(1).hand) == before + 3, "已损失 3 点体力 ⇒ 摸 3 张"
+
+
+def test_chenqun_dingpin_black_draws_more_than_three_when_the_target_is_badly_hurt():
+    """本版**没有**"至多 3"的钳制（与界版的差别之一）：已损失 5 点体力就摸 5 张。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge, target_hp=1, target_hp_max=6))
+    before = len(engine.state.player(1).hand)
+
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert len(engine.state.player(1).hand) == before + 5, "5 > 3 也照摸"
+
+
+def test_chenqun_dingpin_black_bars_the_target_for_the_rest_of_the_turn():
+    """黑判定后该目标出池；陈群自己受伤 ⇒ 清单仍在（池里还有他自己）。"""
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    judge = _basic_with_suit(Suit.CLUB, exclude=mine)
+
+    engine = _park_dingpin(
+        _dingpin_state(mine=mine, judge=judge, hp=2, hp_max=3, target_hp=1, target_hp_max=4)
+    )
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    steps = _manifest(engine.pending)
+    assert steps, "还有别的类可弃 ∧ 自己已受伤 ⇒ 清单仍在"
+    assert "seat:1" not in _pool_options(steps[1]), "黑判定后该目标出池"
+    assert "seat:0" in _pool_options(steps[1]), "其他已受伤角色仍在池里"
+
+
+def test_chenqun_dingpin_bar_is_idempotent():
+    """同一目标在同一回合被禁两次 ⇒ 幂等（已实现"已禁过返回 False、座位升序"）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _dingpin_state(mine=mine, judge=_basic_with_suit(Suit.SPADE, exclude=mine))
+    engine = Engine.from_state(state, seed=1)
+
+    assert engine.bar_dingpin_target(0, 1) is True
+    assert engine.bar_dingpin_target(0, 0) is True
+    assert engine.bar_dingpin_target(0, 1) is False, "重复禁同一目标 ⇒ 空操作"
+    assert engine.state.player(0).dingpin_barred_targets == [0, 1], "座位升序"
+
+
+def _kill_target_during_the_judgment(state):
+    """把座位 1 在**判定窗口内**标成阵亡（``alive=False``；死亡流程不是本条的被测面）。
+
+    做法 = 给座位 0 挂【鬼才】，让判定帧的改判窗口问出一次 ``RESPOND``；驱动循环在那一问
+    之前把目标标死，再答"放弃改判"。与 ``tests/test_hero_extra_turn.py`` 的
+    "构造局面的捷径"同一条手法（那条注释逐字写"死亡流程本身不是本条的被测面"）。
+    """
+    state.player(0).granted_skills.append("hero.simayi.guicai")
+    engine = _park_dingpin(state)
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=DINGPIN,
+            picks=(state.player(0).hand[0],),
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    for _ in range(3000):
+        if engine.finished or _dingpin_play_phase(engine):
+            return engine
+        pending = engine.pending
+        if pending is None:
+            engine._step()
+            continue
+        if pending.kind == QueryKind.RESPOND and pending.cause is WindowCause.REJUDGE:
+            state.player(1).alive = False
+        engine.submit(_answer(pending))
+    raise AssertionError("步数上限内没有回到出牌阶段")
+
+
+def test_chenqun_dingpin_bar_is_written_even_if_the_target_dies():
+    """G9②：目标在判定结算中阵亡 ⇒ 不摸，但**禁令照写**（牌面无条件）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _kill_target_during_the_judgment(
+        _dingpin_state(mine=mine, judge=judge, hp=2, hp_max=3, target_hp=1, target_hp_max=4)
+    )
+
+    assert not engine.state.player(1).alive
+    assert engine.state.player(0).dingpin_barred_targets == [1], "禁令照写"
+
+
+def test_chenqun_dingpin_does_not_draw_for_a_dead_target():
+    """目标在判定结算中阵亡 ⇒ **不摸**（``alive`` 假 ⇒ 跳过摸牌那一段）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+
+    engine = _kill_target_during_the_judgment(
+        _dingpin_state(
+            mine=mine,
+            judge=_basic_with_suit(Suit.SPADE, exclude=mine),
+            hp=2,
+            hp_max=3,
+            target_hp=1,
+            target_hp_max=4,
+        )
+    )
+
+    assert not engine.state.player(1).alive
+    assert engine.state.player(1).hand == [], "死者一张都没摸到"
+
+
+def test_chenqun_dingpin_red_toggles_the_hero_card():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.DIAMOND, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge))
+    assert not engine.state.player(0).flipped
+
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert engine.state.player(0).flipped, "♦ ⇒ 你翻面（toggle 到背面）"
+
+
+def test_chenqun_dingpin_heart_also_flips_and_does_not_refund():
+    """♥ 与 ♦ 同走"你翻面"那一路；本版**没有** ♥ 撤回 ⇒ 成本的大类照旧算用掉。"""
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    cost, other_basic = mine[0], mine[1]
+    trick = mine[2]
+    judge = _basic_with_suit(Suit.HEART, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge))
+    engine = _confirm_dingpin(engine, cost=cost, target=1)
+
+    assert engine.state.player(0).flipped, "♥ ⇒ 也是「你翻面」"
+    assert (cost, "basic") in engine.state.player(0).turn_card_entries, "成本照记（不退款）"
+    steps = _manifest(engine.pending)
+    assert str(other_basic) not in _pool_options(steps[0]), "同大类的那张仍不可弃"
+    assert str(trick) in _pool_options(steps[0]), "没用过的类照常可选"
+
+
+def test_chenqun_dingpin_red_does_not_end_the_current_turn():
+    """在自己的回合内被翻面**不影响当回合**（翻面 = 状态位，账本 L783）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.HEART, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge))
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert engine.pending is not None
+    assert engine.pending.kind == QueryKind.PLAY_PHASE and engine.pending.actor == 0, (
+        "仍在陈群的出牌阶段"
+    )
+    assert engine.state.turn_seat == 0
+    assert not [
+        record for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_END
+    ], "没有回合结束"
+
+
+def test_chenqun_dingpin_judges_exactly_once_per_activation():
+    """G4：一次发动 = 一次判定 = 一段结算（逐事件一次，账本 L777）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge))
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert len(_judge_events(engine)) == 1, "只判一次"
+    assert len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.JUDGE_CARD_AFTER_EFFECT
+        ]
+    ) == 1, "只结算一段"
+
+
+def test_chenqun_dingpin_the_target_is_the_judging_character():
+    """G5：「令**其**进行一次判定」⇒ 判定者是被指定的那名角色（不是陈群）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    engine = _park_dingpin(_dingpin_state(mine=mine, judge=judge))
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    events = _judge_events(engine)
+    assert [record.actor for record in events] == [1], "判定者是座位 1"
+
+
+def test_chenqun_dingpin_x_is_the_lost_hp_and_never_negative():
+    """纯函数级：X = ``hp_max - hp``，夹到 ≥ 0（判定窗口内被治满 ⇒ 0 ⇒ 不摸）。"""
+    from sgs.skills.active import _chenqun_dingpin_x
+
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+    state = _dingpin_state(mine=mine, judge=judge, target_hp=1, target_hp_max=4)
+
+    assert _chenqun_dingpin_x(state, 1) == 3, "已损失 3 点"
+    state.player(1).hp = 4
+    assert _chenqun_dingpin_x(state, 1) == 0, "被治满 ⇒ 0（不是负数）"
+    state.player(1).hp = 6
+    state.player(1).hp_max = 4
+    assert _chenqun_dingpin_x(state, 1) == 0, "夹到 ≥ 0"
+
+
+def test_chenqun_dingpin_a_suitless_judgment_does_nothing():
+    """花色为空 ⇒ 黑 / 红都不成立（fail-closed，账本 L896）：不摸、不禁、不翻。
+
+    引擎侧拿不到"无花色的判定牌"（判定牌来自牌堆 ⇒ 恒有花色），故这里直接调模块级
+    效果函数并把帧私有判定牌写成 ``suit=None``——与本文件既有的"无点数 / 无花色"
+    fail-closed 断言（:func:`test_jianying_comparison_is_fail_closed_without_rank_or_suit`）
+    同一条姿态：真正会被改坏的判据只有一处。
+    """
+    from sgs.resolution import Frame
+    from sgs.skills import active as active_module
+    from sgs.skills.catalog import SKILL_JUDGMENT_CARD_KEY
+    from sgs.state import FrameKind
+
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _dingpin_state(mine=mine, judge=0, target_hp=1, target_hp_max=4)
+    engine = Engine.from_state(state, seed=1)
+    hand_before = list(state.player(1).hand)
+    frame = Frame(kind=FrameKind.SKILL, data={"source": 0, "skill_id": DINGPIN})
+    frame.data[active_module._CHENQUN_DINGPIN_COST_KEY] = True
+    frame.data[active_module._CHENQUN_DINGPIN_JUDGED_KEY] = True
+    frame.data[SKILL_JUDGMENT_CARD_KEY] = CardRef(
+        card_id=0, type="slash", name="杀", suit=None, rank=None
+    )
+
+    control = active_module._chenqun_dingpin_effect(
+        engine, frame, {"card": (mine[0],), "seat": (1,)}
+    )
+
+    assert control is None
+    assert state.player(1).hand == hand_before, "不摸"
+    assert not state.player(0).dingpin_barred_targets, "不写禁令"
+    assert not state.player(0).flipped, "不翻面"
+
+
+def test_chenqun_dingpin_reads_the_final_suit_after_a_rejudge():
+    """判据取**改判后**那张的花色（规则 §11.1 / §11.2）：♥ 被改成黑 ⇒ 走黑那一段。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    judge = _basic_with_suit(Suit.HEART, exclude=mine)
+    black = next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in (*mine, judge)
+        and PACK.deck.cards[card_id].suit in (Suit.SPADE, Suit.CLUB)
+    )
+
+    state = _dingpin_state(mine=mine, judge=judge, draw=0, target_hp=1, target_hp_max=4)
+    state.player(0).granted_skills.append("hero.simayi.guicai")
+    # 改判要一张手牌：把那张黑牌从牌堆挪到陈群手里（成本仍然用 mine[0]；摸牌阶段 0 张，
+    # 牌堆顶因此就是那张判定牌）。
+    state.deck = [card_id for card_id in state.deck if card_id != black]
+    state.player(0).hand.append(black)
+    engine = _park_dingpin(state, draw=0)
+    before = len(engine.state.player(1).hand)
+
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=DINGPIN,
+            picks=(mine[0],),
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    for _ in range(3000):
+        if engine.finished or _dingpin_play_phase(engine):
+            break
+        pending = engine.pending
+        if pending is None:
+            engine._step()
+            continue
+        if pending.kind == QueryKind.RESPOND and pending.cause is WindowCause.REJUDGE:
+            action = next(
+                candidate
+                for candidate in pending.legal_actions
+                if isinstance(candidate, SubstituteJudgeCard)
+                and candidate.card.card_id == black
+            )
+            engine.submit(action)
+            continue
+        engine.submit(_answer(pending))
+
+    assert len(engine.state.player(1).hand) == before + 3, (
+        "改成黑 ⇒ 走「摸 X」那一段（X = 3）"
+    )
+    assert not engine.state.player(0).flipped, "不再是红 ⇒ 不翻面"
+    assert engine.state.player(0).dingpin_barred_targets == [1], "黑那一段的禁令照写"
+
+
+def test_chenqun_dingpin_black_draw_into_an_empty_deck_is_a_draw():
+    """G10：黑判定后的摸牌两堆皆空 ⇒ 短摸即平局（既有路径，本技能只透传）。"""
+    mine = _hand_of(basic=1)
+    judge = _basic_with_suit(Suit.SPADE, exclude=mine)
+
+    # 目标 = 郭嘉【天妒】：判定牌进他的手牌、不进弃牌堆 ⇒ 摸牌那一刻牌堆与弃牌堆都空。
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=CHENQUN, hp=3, hp_max=3, hand=mine),
+            SeatSpec(hero="guojia", hp=1, hp_max=3),
+        ],
+        deck=(judge,),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = _park_dingpin(state, draw=0)
+    assert list(engine.state.deck) == [judge], "牌堆只剩那张判定牌"
+
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=DINGPIN,
+            picks=(mine[0],),
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    _drive(engine, _dingpin_play_phase, activate=("hero.guojia.tiandu",))
+
+    assert engine.finished
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result == "draw" and tail.reason == "both_decks_empty"
+
+
+# ---------------------------------------------------------------------------
+# 座位事实：「本回合使用或弃置过的类型」（复用界版同一份，零改动）
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_dingpin_excludes_categories_used_this_turn():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+
+    state = _dingpin_state(mine=mine, judge=_basic_with_suit(Suit.SPADE, exclude=mine))
+    state.player(0).turn_card_entries.append((-9, "basic"))
+
+    engine = _park_dingpin(state)
+    steps = _manifest(engine.pending)
+
+    assert str(mine[0]) not in _pool_options(steps[0]), "用过的那一类不可选"
+    assert str(mine[1]) in _pool_options(steps[0]), "没用过的那一类可选"
+
+
+def test_chenqun_dingpin_excludes_categories_discarded_this_turn():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _dingpin_state(mine=mine, judge=_basic_with_suit(Suit.SPADE, exclude=mine))
+    engine = Engine.from_state(state, seed=1)
+
+    assert engine.note_turn_discard(0, (engine.state.card(mine[0]),)) == 1
+    engine = _drive(engine, _dingpin_play_phase)
+    steps = _manifest(engine.pending)
+
+    assert str(mine[0]) not in _pool_options(steps[0]), "弃过的那一类不可选"
+    assert str(mine[2]) in _pool_options(steps[0]), "没动过的那一类可选"
+
+
+def test_chenqun_dingpin_counts_a_discard_by_its_actor_only():
+    """「你弃置过的类型」的主体是**动作主体**：记在弃置者名下，不记在牌主名下。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _dingpin_state(mine=mine, judge=_basic_with_suit(Suit.SPADE, exclude=mine))
+    engine = Engine.from_state(state, seed=1)
+
+    engine.note_turn_discard(1, (engine.state.card(mine[0]),))
+
+    assert engine.state.player(1).turn_card_entries, "记在弃置者（座位 1）名下"
+    assert not engine.state.player(0).turn_card_entries, "不记在牌主（座位 0）名下"
+
+
+def test_chenqun_dingpin_records_the_discarded_card_category():
+    """代价弃的是**实体牌**：记录读被弃那张牌自己的大类（不是产物）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    cost = mine[2]  # 一张装备牌
+
+    engine = _park_dingpin(
+        _dingpin_state(
+            mine=mine,
+            judge=_basic_with_suit(Suit.SPADE, exclude=mine),
+            target_hp=1,
+            target_hp_max=4,
+        )
+    )
+    engine = _confirm_dingpin(engine, cost=cost, target=1)
+
+    assert (cost, "equipment") in engine.state.player(0).turn_card_entries
+
+
+def test_chenqun_dingpin_records_the_product_category_of_a_converted_use():
+    """使用侧按**产物牌型**判大类（与账本 L758 的【涯角】同口径）：
+
+    一张红色**装备**牌被【武圣】当【杀】用掉 ⇒ 记下的大类是「基本」，不是「装备」。
+    """
+    red_equip = next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if _category_of(card_id) == "equipment"
+        and PACK.deck.cards[card_id].suit in (Suit.HEART, Suit.DIAMOND)
+    )
+    basic = _first_of(category="basic", exclude=(red_equip,))
+    trick = _first_of(category="trick", exclude=(red_equip, basic))
+    mine = (red_equip, basic, trick)
+
+    state = _dingpin_state(
+        mine=mine,
+        judge=_basic_with_suit(Suit.SPADE, exclude=mine),
+        draw=0,
+        target_hp=3,
+        target_hp_max=4,
+    )
+    state.player(0).granted_skills.append("hero.guanyu.wusheng")
+    engine = _park_dingpin(state, draw=0)
+    steps = (engine.pending.transform_preactivations or {}).get("hero.guanyu.wusheng")
+    assert steps, "红牌当【杀】的转化清单在出牌阶段下发"
+
+    engine.submit(
+        ActivateSkill(
+            skill_id="hero.guanyu.wusheng",
+            picks=(red_equip,),
+            choices=("seat:1",),
+            answers_seq=engine.pending.seq,
+        )
+    )
+    engine = _drive(engine, _dingpin_play_phase)
+
+    assert [category for _, category in engine.state.player(0).turn_card_entries] == ["basic"], (
+        "产物是一张【杀】⇒ 记「基本」，不是来源那张的「装备」"
+    )
+    steps = _manifest(engine.pending)
+    assert str(basic) not in _pool_options(steps[0]), "「基本」已用过"
+    assert str(trick) in _pool_options(steps[0]), "「锦囊」还没用过"
+
+
+# ---------------------------------------------------------------------------
+# 挂起续跑：搬牌（内联 MOVE_AFTER）/ 摸牌（内联"获得牌后"）
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_dingpin_resumes_once_when_a_move_hook_suspends():
+    """成本弃置内联触发【连营】的「是否发动」并挂起 ⇒ 续跑不重搬、不重判。"""
+    mine = (_first_of(category="basic"),)
+    state = _dingpin_state(
+        mine=mine,
+        judge=_basic_with_suit(Suit.SPADE, exclude=mine),
+        draw=0,
+        target_hp=1,
+        target_hp_max=4,
+    )
+    state.player(0).granted_skills.append("hero.jie_luxun.lianying")
+    engine = _park_dingpin(state, draw=0)
+    before = len(engine.state.player(1).hand)
+
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert _skill_asked(engine, "hero.jie_luxun.lianying"), "成本弃置确实内联问了【连营】"
+    assert _moves_of(engine, mine[0]) == [("hand", "discard", "DISCARD")], "成本只搬一次"
+    assert len(_judge_events(engine)) == 1, "判定只开一次"
+    assert len(engine.state.player(1).hand) == before + 3, "X = 3，只摸一次"
+
+
+def test_chenqun_dingpin_draws_once_when_a_gain_hook_suspends():
+    """目标摸牌内联触发【清俭】并挂起 ⇒ 续跑不重摸（帧私有 ``drawn`` 游标）。"""
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _dingpin_state(
+        mine=mine,
+        judge=_basic_with_suit(Suit.SPADE, exclude=mine),
+        target_hp=1,
+        target_hp_max=4,
+    )
+    state.player(1).granted_skills.append("hero.jie_xiahoudun.qingjian")
+    engine = _park_dingpin(state)
+    before = len(engine.state.player(1).hand)
+
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+
+    assert _skill_asked(engine, "hero.jie_xiahoudun.qingjian"), "摸牌确实内联问了【清俭】"
+    assert len(engine.state.player(1).hand) == before + 3, "只摸一次（重入不重摸）"
+    assert engine.state.player(0).dingpin_barred_targets == [1], "禁令仍落在这一次发动里"
+
+
+# ---------------------------------------------------------------------------
+# 复位点：两个回合之间（额外回合也是"另一个游戏回合"）
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_dingpin_facts_reset_between_two_turns():
+    """上一回合的「用过的大类」与「禁令」都清空 ⇒ 下一回合同一目标可再被指定。"""
+    mine = _hand_of(basic=2, trick=1, equipment=1)
+    other_basic = mine[1]
+    state = _dingpin_state(
+        mine=mine,
+        judge=_basic_with_suit(Suit.SPADE, exclude=mine),
+        hp=2,
+        hp_max=3,
+        target_hp=1,
+        target_hp_max=4,
+    )
+    engine = _park_dingpin(state)
+    engine = _confirm_dingpin(engine, cost=mine[0], target=1)
+    assert engine.state.player(0).dingpin_barred_targets == [1]
+    assert engine.state.player(0).turn_card_entries
+
+    start = engine.pending.seq
+    engine = _drive(
+        engine,
+        lambda e: _dingpin_play_phase(e) and e.pending.seq > start,
+    )
+
+    assert not engine.state.player(0).dingpin_barred_targets, "禁令在回合末清空"
+    assert not engine.state.player(0).turn_card_entries, "「用过 / 弃过」在回合末清空"
+    steps = _manifest(engine.pending)
+    assert steps, "新回合的清单照常出现"
+    assert "seat:1" in _pool_options(steps[1]), "上一回合的禁令不跨回合"
+    assert str(other_basic) in _pool_options(steps[0]), "同一大类在新回合重新可用"
+
+
+# ---------------------------------------------------------------------------
+# A4 的机械钉：两条 SkillDef 各写各的文案
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_dingpin_is_declared_with_its_own_wording():
+    """A4：本版 ``requirement`` / ``step_requirements`` 与界版**逐字不同**，且短 id 表未改。"""
+    from sgs.skills import CATALOG
+    from sgs.skills.active import _REQUIREMENTS, _STEP_REQUIREMENTS
+
+    ours = CATALOG[DINGPIN]
+    jie = CATALOG[JIE_DINGPIN]
+
+    assert ours.requirement and jie.requirement
+    assert ours.requirement != jie.requirement, "两句牌面不同 ⇒ 不能共用界版那一句"
+    assert "已损失" in ours.requirement, "本版的 X 口径"
+    assert "至多为3" not in ours.requirement, "那是界版的 X 口径"
+    assert dict(ours.step_requirements) != dict(jie.step_requirements)
+    assert "手牌" in ours.step_requirements["card"]
+    assert "已受伤" in ours.step_requirements["seat"]
+    # 短 id 两张表一字未改：界版那一条仍与表逐字相同（改了两版会一起改掉）。
+    assert jie.requirement == _REQUIREMENTS["dingpin"]
+    assert dict(jie.step_requirements) == _STEP_REQUIREMENTS["dingpin"]

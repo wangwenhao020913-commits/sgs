@@ -520,7 +520,8 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // lin-batch2 票 03：林包移动版加贾诩移动版（新真名「贾诩」）⇒ 真名 59 → 60、版本 88 → 89。
     // jie-yijiang-2014-mobile 票 01：界陈群移动版（新真名「陈群」）⇒ 真名 62 → 63、版本 93 → 94；
   // 票 02：界顾雍移动版（新真名「顾雍」）⇒ 真名 63 → 64、版本 94 → 95。
-  ui.state.heroCatalog.length === 64 && catalogVersions.length === 95,
+  // yijiang-2014 票 02：一将成名-2014 加陈群（真名「陈群」已在池里）⇒ 真名不变、版本 95 → 96。
+  ui.state.heroCatalog.length === 64 && catalogVersions.length === 96,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

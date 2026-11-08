@@ -3003,6 +3003,24 @@ def _coverage_dingpin():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_chenqun_dingpin():
+    """yijiang-2014 票 02：陈群（一将成名-2014 / OL）【定品】（已翻预发动、两步清单）。
+
+    手里只放一张**出牌阶段用不出去**的牌（【闪】）；座位 1 受伤（``hp=2 / hp_max=4``）
+    ⇒ 与界版那条覆盖的差别就在"目标池只收已受伤"，两个座位因此都在池里（目标含自己）。
+    座位步走 ``_score_seat_option`` 的缺省（帮盟友）——本版的分支对目标只有"摸牌"，
+    没有伤害，故缺省方向是对的。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="chenqun", hand=(dodge,)), SeatSpec(hp=2, hp_max=4)],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_shenxing():
     """jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（已翻预发动、单步清单：选两张牌）。
 
@@ -3165,6 +3183,8 @@ _COVERAGE_CASES = {
     "hero.jie_chenqun_mobile.dingpin": _coverage_dingpin,
     # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（已翻预发动，单步清单）。
     "hero.jie_guyong_mobile.shenxing": _coverage_shenxing,
+    # yijiang-2014 票 02：陈群（OL）【定品】（已翻预发动，两步清单；目标只收已受伤）。
+    "hero.chenqun.dingpin": _coverage_chenqun_dingpin,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,

@@ -23,6 +23,23 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "chenqun",
+      "name": "陈群",
+      "true_name": "陈群",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "yijiang-2014",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "dingpin",
+          "name": "定品",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

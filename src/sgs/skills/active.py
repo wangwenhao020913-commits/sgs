@@ -1301,6 +1301,177 @@ DINGPIN_FLOW = SkillFlow(
 
 
 # ---------------------------------------------------------------------------
+# 陈群（一将成名-2014 / OL）【定品】（yijiang-2014 票 02）
+#
+# 牌面（用户 `技能.txt` 逐字）：
+#
+#     出牌阶段，你可以弃置一张手牌（不能是本回合使用或弃置过的类型），令一名已受伤的角色
+#     进行一次判定，若结果为：黑色，该角色摸X张牌（X为其已损失的体力值），且本回合不能
+#     再对其发动此技能；红色，你翻面。
+#
+# **与界版同短 id、四处实质不同**（用户 2026-11-09 签 Q-C1…Q-C4；票面 §0.3 A）：
+#
+# 1. 代价的区域 = 「一张**手牌**」⇒ 只手牌区（牌面明写"手牌"⇒ 不套"手牌 + 装备区"的
+#    区域默认，与【火计】同一措辞面的既有裁定；账本 L943 / L775③）；
+# 2. 目标池 = 「一名**已受伤**的角色」⇒ ``hp < hp_max``（账本 L741），含自己（L776①）；
+# 3. X = 「其**已损失**的体力值」= ``hp_max - hp``（**判定后现算**，L776⑤），**不是**
+#    界版的 ``min(体力值, 3)``；
+# 4. 分支**两段**：黑（♠♣）⇒ 摸 X + per-target 禁令；红（**♥ ∪ ♦，不分花色**）⇒ **你翻面**。
+#    本版**没有** ♥ 撤回 ⇒ 一回合至多 3 次、且不可超（无 `exempt_turn_card`）。
+#
+# 复用的座位事实与界版**同一份**（``Player.turn_card_entries`` /
+# ``Player.dingpin_barred_targets`` + ``Engine.bar_dingpin_target`` / 回合末复位）——
+# ``state/models.py`` 与 ``engine/game.py`` 一个字节不动。两条 ``SkillDef`` 的文案各写各的
+# （A4：声明级覆盖，短 id 表 ``_REQUIREMENTS["dingpin"]`` / ``_STEP_REQUIREMENTS["dingpin"]``
+# 一字不改）；流水线另起 ``name``（``tests/test_ask_points.py`` 要求全模块唯一）；
+# 判定传**自己的** id。
+# ---------------------------------------------------------------------------
+
+CHENQUN_DINGPIN = hero_skill_id("chenqun", "dingpin")
+"""陈群（一将成名-2014 / OL）【定品】的全限定技能 id。"""
+
+_CHENQUN_DINGPIN_COST_KEY = "chenqun_dingpin_cost"
+"""帧私有：成本已经搬进弃牌堆（搬牌挂起后的续跑不重搬）。"""
+
+_CHENQUN_DINGPIN_JUDGED_KEY = "chenqun_dingpin_judged"
+"""帧私有：判定帧已经压出（重入不再压第二张）。"""
+
+_CHENQUN_DINGPIN_SUIT_KEY = "chenqun_dingpin_suit"
+"""帧私有：本次判定的**花色**（判定牌读出来后即定格；重入不再读已被弹掉的键）。"""
+
+_CHENQUN_DINGPIN_DRAWN_KEY = "chenqun_dingpin_drawn"
+"""帧私有：黑判定那一段的摸牌已经发出（摸牌内联钩子挂起后不重摸）。"""
+
+_CHENQUN_DINGPIN_DONE_KEY = "chenqun_dingpin_done"
+"""帧私有：整段效果已收尾（红分支的翻面只做一遍）。"""
+
+
+def _chenqun_dingpin_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """「一名**已受伤**的角色」= 存活 ∧ ``hp < hp_max``（**含自己**），再剔除本回合禁令。
+
+    「已受伤」只看 ``hp < hp_max``，不看"上限有没有被减过"（账本 L741）。签名与
+    :data:`SeatPool` 对齐（``frame`` / ``chosen`` 对静态池无意义）。
+    """
+    del frame, chosen
+    barred = set(state.player(owner).dingpin_barred_targets)
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.hp < player.hp_max and player.seat not in barred
+    )
+
+
+def _chenqun_dingpin_has_cost(state: GameState, owner: int) -> bool:
+    """付得起吗：**手牌里**至少有一张不在黑名单里的牌（装备区的牌**不算**代价）。"""
+    excluded = set(_dingpin_cost_face(state, None, owner, ()))
+    return any(card_id not in excluded for card_id in state.player(owner).hand)
+
+
+def _chenqun_dingpin_x(state: GameState, seat: int) -> int:
+    """X = 该角色**已损失**的体力值 = ``hp_max - hp``（判定后现算；防御式夹到 ≥ 0）。
+
+    已受伤是**发动前提** ⇒ 正常路径恒 ≥ 1；唯一能变成 0 的路径是"判定窗口内目标被治满"
+    （Q-C2 = 判定后现算的后果），那时不摸、禁令照写。
+    """
+    player = state.player(seat)
+    return max(player.hp_max - player.hp, 0)
+
+
+def _chenqun_dingpin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：付得起（还有一类没用过）∧ 还有一名没被禁的**已受伤**角色。
+
+    ``once_per_phase=False``：牌面没有"每阶段一次"的上限，次数由"大类用掉一种就少一种"
+    自己限定 ⇒ 不读也不落 ``_USED`` 位（与界版同一姿态）。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _chenqun_dingpin_has_cost(state, ctx.subject):
+        return current
+    if not _chenqun_dingpin_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _chenqun_dingpin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：弃成本 → 判定 → 按**颜色**两分支（黑：摸 X + 禁令 / 红：你翻面）。
+
+    每个可挂起点各一个帧私有游标：成本搬牌（内联 ``MOVE_AFTER``）、判定帧、摸牌
+    （内联"获得牌后"钩子）、红分支的翻面 ⇒ 重入既不重做也不漏做。判据取判定牌的
+    **最终花色**（改判后那张）：黑色（♠ / ♣）与红色（♥ / ♦）互斥且穷尽；
+    花色为空 ⇒ 两段都不成立（fail-closed，账本 L896）。
+    """
+    state = host.state
+    owner = frame.data["source"]
+    cards = answers["card"]
+    seats = answers["seat"]
+    assert isinstance(cards, tuple) and isinstance(seats, tuple)
+    target = int(seats[0])
+    if not frame.data.get(_CHENQUN_DINGPIN_COST_KEY):
+        if (
+            _move_to_discard(host, frame, cards, owner=owner, key="chenqun_dingpin:cost")
+            == "stay"
+        ):
+            return "stay"
+        frame.data[_CHENQUN_DINGPIN_COST_KEY] = True
+    if not frame.data.get(_CHENQUN_DINGPIN_JUDGED_KEY):
+        frame.data[_CHENQUN_DINGPIN_JUDGED_KEY] = True
+        host.open_skill_judgment(frame, target, CHENQUN_DINGPIN)
+        return "stay"
+    if _CHENQUN_DINGPIN_SUIT_KEY not in frame.data:
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        # 同帧的布尔结果只有本技能读（判定刚开、没有别人写），取完即弹。
+        frame.data.pop("skill_result", None)
+        frame.data[_CHENQUN_DINGPIN_SUIT_KEY] = (
+            None if judge_card is None else judge_card.suit
+        )
+    if frame.data.get(_CHENQUN_DINGPIN_DONE_KEY):
+        return None
+    suit = frame.data[_CHENQUN_DINGPIN_SUIT_KEY]
+    color = color_of_suit(suit) if suit is not None else None
+    if color is Color.RED:
+        frame.data[_CHENQUN_DINGPIN_DONE_KEY] = True
+        # 「红色，你翻面」：♥ 与 ♦ 同路；翻面是 toggle（账本 L783，唯一写入口）。
+        host.set_flipped(frame, owner, not state.player(owner).flipped)
+        return None
+    if color is Color.BLACK:
+        if not frame.data.get(_CHENQUN_DINGPIN_DRAWN_KEY):
+            frame.data[_CHENQUN_DINGPIN_DRAWN_KEY] = True
+            # 目标在判定结算中阵亡 ⇒ 不摸（禁令照写，牌面无条件）。
+            if state.player(target).alive:
+                amount = _chenqun_dingpin_x(state, target)
+                if amount > 0:
+                    control = host.draw_for_hand(frame, target, amount)
+                    if control == "stay":
+                        return "stay"
+        # 禁令照写：目标已阵亡时对死者无意义但无害；不额外判活以免"死后复活"类将来机制漏判。
+        host.bar_dingpin_target(owner, target)
+    frame.data[_CHENQUN_DINGPIN_DONE_KEY] = True
+    return None
+
+
+CHENQUN_DINGPIN_FLOW = SkillFlow(
+    name="chenqun_dingpin",
+    steps=(
+        PickCards(
+            # 「一张**手牌**」⇒ 只有手牌区（与【青囊】同值；**不**照界版扩成 HAND ∪ EQUIP）。
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            key="card",
+            # 黑名单与区域正交：复用界版的同一条读取面（不新造筛子）。
+            exclude_cards=_dingpin_cost_face,
+        ),
+        PickSeats(lo=1, hi=1, pool=_chenqun_dingpin_targets, key="seat"),
+    ),
+    effect=_chenqun_dingpin_effect,
+    once_per_phase=False,
+)
+"""【定品】（陈群 / OL）两步流水线：弃一张手牌（大类没用过）→ 一名已受伤角色判定 → 黑 / 红两分支。"""
+
+
+# ---------------------------------------------------------------------------
 # 界顾雍移动版【慎行】（界一将成名-2014·移动版；jie-yijiang-2014-mobile 票 02）
 #
 # 牌面（用户 `技能.txt` 逐字；移动版官网同义，见票面 §0.1）：
@@ -6581,6 +6752,26 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         _dingpin_offers,
         flow=DINGPIN_FLOW,
         preactivated=True,
+    ),
+    # 陈群（一将成名-2014 / OL）【定品】（yijiang-2014 票 02）：弃一张**手牌**（大类没用过）→
+    # 一名**已受伤**角色判定 → 黑（♠♣）：摸 X（X = 已损失体力值）+ 禁该目标 / 红（♥♦）：你翻面。
+    # 与界版**同短 id、牌面四处实质不同** ⇒ 两条文案都写在声明上（A4：声明级覆盖优先，
+    # 短 id 表一字不改）。首步选**自己**的手牌 ⇒ 清单渲得出，翻 `preactivated=True`。
+    ActiveSkill(
+        "chenqun",
+        "dingpin",
+        _chenqun_dingpin_offers,
+        flow=CHENQUN_DINGPIN_FLOW,
+        preactivated=True,
+        requirement=(
+            "出牌阶段，你可以弃置一张手牌，令一名已受伤的角色进行一次判定："
+            "黑色，该角色摸X张牌（X为其已损失的体力值），且本回合不能再对其发动此技能；"
+            "红色，你翻面"
+        ),
+        step_requirements={
+            "card": "弃置一张手牌（不能是本回合使用或弃置过的类型：基本 / 锦囊 / 装备）",
+            "seat": "令一名已受伤的角色进行一次判定",
+        },
     ),
     # 界顾雍移动版【慎行】（界一将成名-2014·移动版；jie-yijiang-2014-mobile 票 02）：
     # 出牌阶段限 X 次（X = 你的体力值）——弃两张牌，颜色相同摸 1、否则摸 2。首步选**自己**
