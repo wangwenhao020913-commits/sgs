@@ -122,6 +122,17 @@ class FrameHost(StepHost, Protocol):
 
     def note_damage_dealt(self, seat: int) -> bool: ...
 
+    def note_damage(
+        self,
+        *,
+        source: int | None,
+        target: int,
+        amount: int,
+        nature: DamageNature | None,
+    ) -> None:
+        """记一条**伤害事实**（damage-fx 票 01；表现层专用，见 ``Engine.damage_events``）。"""
+        ...
+
     def move_used_card_to_processing(self, frame: Frame) -> Control: ...
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
@@ -1115,6 +1126,16 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
         # 差别只有两处：记挨打那一侧，且**不看有没有来源**（【闪电】无来源照样算）；
         # 一次 2 点伤害只 +1（逐事件，不是逐点）。
         host.note_damage_taken(int(frame.data["target"]))
+        # damage-fx 票 01：把这次伤害事实记进**帧外**只增缓冲（表现层专用，见
+        # ``Engine.damage_events``）。位置与上面两条 ``note_*`` 同一处 = 数值已定稿、
+        # 未被防止；"一次伤害事件恰好一条"由本步每帧只跑一次保证，且这时还没进扣减帧，
+        # 故护甲全吸收的伤害照样记（``amount`` 是全额，不是掉的血）。
+        host.note_damage(
+            source=None if source is None else int(source),
+            target=int(frame.data["target"]),
+            amount=amount,
+            nature=frame.data.get("nature"),
+        )
     return None
 
 
