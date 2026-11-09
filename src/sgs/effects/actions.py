@@ -92,6 +92,7 @@ __all__ = [
     "check_forbidden",
     "forbidden_as_slash",
     "check_targets",
+    "check_usable",
     "delayed_settle_target",
     "designation_actions_for",
     "discard_count",
@@ -458,6 +459,47 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             tuple(pool),
         )
     )
+
+
+def check_usable(
+    state: GameState,
+    seat: int,
+    card: CardRef,
+    *,
+    context: UseContext = UseContext.PLAY_PHASE,
+) -> bool:
+    """``seat`` 此刻**能不能用**这张牌：L3 的"使用前校验"整条链，合成一个可调用的档。
+
+    回答的是"这张牌此刻真的能使用吗"，而不是其中任意半条。四类判据全部**委托**既有函数，
+    这里一条规则都不新造（顺序按"最便宜 / 最硬"的档排）：
+
+    1. **时机 / 语境**：行为表 ``use_timings`` 里有没有 ``context`` 这一档
+       （:func:`_usable_in`；候选生成器 :func:`_usable_hand` 读的是同一份声明）；
+    2. **禁止使用**（L3.1）：:func:`check_forbidden` 的 ``FORBIDDEN`` 链，以及
+       :func:`forbidden_as_slash`（「不能当作【杀】使用 / 打出」的标签，按牌面牌名判）；
+    3. **次数**（L3.2）：:func:`check_count`——【杀】的本回合额度、【酒】的每回合一次都在
+       这一条里（计数键由行为表声明，不按牌名特判）；
+    4. **目标池**（L3.3）：:func:`check_targets` 非空——【桃】满体力、【杀】没有可达目标、
+       【闪】这类 0 目标牌在出牌阶段没有目标，都是这一条。
+
+    合成这一档的理由（yijiang-2014-round2 票 18）：界【渐营】② 的"牌名置灰"原先只调第 4
+    条，于是次数用尽的【杀】仍显示可用、提交后才失败。技能侧**同一个判据**另有两处内联
+    （界刘备【仁德】的 ``_jie_rende_basic_options`` = 第 3 + 第 4 条；【蛊惑】的
+    ``_guohuo_unusable_names`` = 只有第 4 条），本票不迁移它们（行为不动），只把这一档
+    公开出来供新读点使用——故**不改变**任何既有技能的候选。
+
+    ``card`` 可以是实体牌，也可以是转化 / 虚拟产物（判据只读行为表与牌面，不要求它在某区）。
+    """
+    behavior = behavior_for(card)
+    if not _usable_in(behavior, context, None):
+        return False
+    if check_forbidden(state, seat, card):
+        return False
+    if is_slash(behavior) and forbidden_as_slash(state, card):
+        return False
+    if check_count(state, seat, card):
+        return False
+    return bool(check_targets(state, seat, card))
 
 
 def target_is_effective(state: GameState, card: CardRef, source: int, target: int) -> bool:

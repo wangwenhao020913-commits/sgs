@@ -2180,12 +2180,13 @@ _HOSTILE_SEAT_STEPS = (
     "jieying:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
-    # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3）：产物是【杀】家族时，提交点后
-    # 手写的那一问选的是**这张【杀】打谁** ⇒ 敌人。不登记会落进"帮盟友"的缺省分支（AI 拿
-    # 【杀】打队友）。登记**整条询问 id**（``hero.jie_jushou_mobile.jianying.target``，与
-    # ``src/sgs/skills/active.py`` 的 ``_JIE_JIANYING_ASK_TARGET`` 逐字相同）：本模块受源码
-    # 纪律约束不 import ``sgs.skills``，故两边由 ``tests/test_ai_cases.py`` 的反向对齐测试钉住。
-    "hero.jie_jushou_mobile.jianying.target",
+    # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3；票 18 迁进流水线）：产物是
+    # 【杀】家族时，第 3 步选的是**这张【杀】打谁** ⇒ 敌人。不登记会落进"帮盟友"的缺省
+    # 分支（AI 拿【杀】打队友）。**登记短 id 前缀**：票 18 起这一问是流水线第 3 步，AI 按
+    # ``<短技能 id>:<步骤键>``（:func:`_fill_activation` 的拼法）估值，引擎发的询问名也是
+    # 同一口径（``flow._flow_option_id`` 从全限定 id 派生短 id）。此前那条全限定
+    # ``hero.jie_jushou_mobile.jianying.target`` 是"提交点后手写一问"的 id，已随票 18 删除。
+    "jianying:",
     "hero.xiahouyuan.shensu:",
     # 界夏侯渊【神速】（jie-feng-batch2 票 01）：同一手写询问、同一前缀陷阱
     # （``hero.jie_xiahouyuan_mobile.shensu:target:<项号>``）。

@@ -2779,6 +2779,125 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.sessionId = null;
 }
 
+/* ============ 票 18（合成局面）：界【渐营】② 的**三步**清单 ============
+ *
+ * 出牌阶段那份清单的三步 =「选牌 → 选牌名 → 选目标」；第 3 步的可选目标由**牌名**决定，
+ * 服务端用两格表达"要不要选"：``StepPool.max``（这一行最多选几个，``0`` = 没有可选目标）
+ * 与 ``Step.min/max``。本节喂一份**与服务端同形**的合成载荷，钉住四条界面读法：
+ *
+ *  1. 三步都进预发动，第 2 步的置灰项画灰、不接 click（票 04 的既有通道）；
+ *  2. 选了【杀】⇒ 第 3 步出现，座位按服务端给的池高亮；
+ *  3. 第 3 步没填 ⇒ 「确认发动」灰着、``buildAction()`` 拼不出复合动作；填了 ⇒
+ *     ``choices = ["seat:N"]``；
+ *  4. 选了目标由牌名决定的【桃】⇒ 第 3 步**自动跳过**（不画空步），复合动作不带 choices。
+ */
+{
+  const source = {
+    ...synthCard(52, "闪"), type: "dodge", suit: "heart", rank: 2, color: "red",
+  };
+  const threeSteps = [
+    { name: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["52"] }],
+      wording: "选择一张牌（手牌 / 装备区）" },
+    { name: "name", min: 1, max: 1, order: 1,
+      pool: [{ when: [], options: ["杀", "闪", "桃"], disabled: ["闪"] }],
+      wording: "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）" },
+    { name: "seat", min: 1, max: 1, order: 2,
+      pool: [
+        { when: ["52", "杀"], options: ["seat:1", "seat:2"], max: 1 },
+        { when: ["52", "桃"], options: [], max: 0 },
+      ],
+      wording: "选择这张牌的目标（目标由牌名决定时不出现这一步）" },
+  ];
+  const payload = {
+    kind: "PLAY_PHASE", actor: 0, seq: 905, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 905 }],
+    preactivations: { "hero.jie_jushou_mobile.jianying": threeSteps },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  };
+  const skillRow = {
+    skill_id: "hero.jie_jushou_mobile.jianying", name: "渐营", skill_type: "NORMAL",
+    locked: false, carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "出牌阶段限一次，你可以将一张牌当任意一张基本牌使用" },
+  };
+  const open = () => {
+    const view = synthView(payload);
+    view.skills = [skillRow];
+    view.snapshot.self_hand = [source];
+    ui.state.view = view;
+    ui.state.sessionId = "smoke-missing-session";
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    const button = Array.from($("t-skills").children).find(
+      (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying");
+    (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+    return view;
+  };
+  const clickCardStep = () => {
+    const chip = $("t-hand").children[0];
+    (chip.listeners.click || []).forEach((fn) => fn({ target: chip }));
+    const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+    (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+  };
+  const nameButton = (label) => Array.from($("t-options").children).find(
+    (b) => b.textContent === label);
+  const seatBoxOf = (seat) => Array.from($("t-seats").children).find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+
+  open();
+  const pa = ui.state.preactivation;
+  check("㉿JY8 出牌阶段的【渐营】② 是**三步**清单（选牌 → 牌名 → 目标）",
+    !!pa && pa.steps.length === 3 && pa.steps[2].name === "seat",
+    `steps=${pa && pa.steps.map((s) => s.name).join(",")}`);
+  clickCardStep();
+  check("㉿JY9 第 1 步选完 ⇒ 光标进第 2 步（牌名）",
+    pa.cursor === 1, `cursor=${pa.cursor}`);
+  const grayed = nameButton("闪");
+  check("㉿JY10 第 2 步的置灰项画灰且不可点（`StepPool.disabled`）",
+    !!grayed && grayed.disabled === true && grayed.classList.contains("dis"),
+    `disabled=${grayed && grayed.disabled} class=${grayed && grayed.className}`);
+  (nameButton("杀").listeners.click || []).forEach((fn) => fn({ target: nameButton("杀") }));
+  check("㉿JY11 选【杀】⇒ 第 3 步出现，候选 = 服务端给的两名",
+    pa.cursor === 2
+      && (ui.preactivationOptions(pa, 2) || []).join(",") === "seat:1,seat:2",
+    `cursor=${pa.cursor} options=${(ui.preactivationOptions(pa, 2) || []).join(",")}`);
+  const beforeSeat = ui.buildAction();
+  check("㉿JY12 第 3 步没填完 ⇒ 「确认发动」灰着、拼不出复合动作",
+    beforeSeat === null && $("btn-submit").disabled === true,
+    `action=${JSON.stringify(beforeSeat)} disabled=${$("btn-submit").disabled}`);
+  const targetBox = seatBoxOf(1);
+  check("㉿JY13 第 3 步的座位画成可点（服务端池里的两名）",
+    !!targetBox && targetBox.classList.contains("targetable"),
+    `class=${targetBox && targetBox.className}`);
+  (targetBox.listeners.click || []).forEach((fn) => fn({ target: targetBox }));
+  const filled = ui.buildAction();
+  check("㉿JY14 三步填完 = 复合动作（picks=[源牌]、choices=[牌名, 目标座位]）",
+    !!filled && filled.kind === "ActivateSkill"
+      && JSON.stringify(filled.picks) === "[52]"
+      && JSON.stringify(filled.choices) === '["杀","seat:1"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(filled));
+
+  // 第 3 步的**直取**档：目标由牌名决定（【桃】自己）⇒ 这一行没有可选目标，自动跳过。
+  open();
+  clickCardStep();
+  (nameButton("桃").listeners.click || []).forEach((fn) => fn({ target: nameButton("桃") }));
+  const peach = ui.state.preactivation;
+  check("㉿JY15 【桃】没有第 3 步可填 ⇒ 光标直接越过它（不画空步）",
+    peach.cursor === peach.steps.length,
+    `cursor=${peach.cursor}/${peach.steps.length}`);
+  const peachAction = ui.buildAction();
+  check("㉿JY16 【桃】的复合动作不带目标（choices 只有牌名，目标由牌名决定）",
+    !!peachAction && peachAction.kind === "ActivateSkill"
+      && JSON.stringify(peachAction.picks) === "[52]"
+      && JSON.stringify(peachAction.choices) === '["桃"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(peachAction));
+  ui.state.sessionId = null;
+}
+
 /* ============ 票 25 报障（合成局面）：麒麟弓预发动的第一步要点**目标**装备区的坐骑 ============
  *
  * 清单形状来自引擎真实下发的 Step（`PickCards(zones=("equip",), slot_kinds=坐骑)`）：

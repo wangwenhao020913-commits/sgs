@@ -3139,18 +3139,23 @@ def test_caopi_fangzhu_seat_value_comes_from_the_hostile_registration() -> None:
 def test_the_jie_jianying_target_ask_is_registered_as_a_hostile_seat_step() -> None:
     """【渐营】② 的【杀】目标询问 **真的** 命中 `_HOSTILE_SEAT_STEPS`（反向对齐登记表）。
 
-    登记串按 `startswith` 用 ⇒ 少抄一个后缀（旧值 ``"hero.jie_jushou_mobile.jianying:"``
-    的尾冒号落在 id 的 ``.`` 之前）就永不命中、② 的【杀】静默落进"帮盟友"分支，而"表里有
-    这一条"的断言不会红。这里以引擎实际发的询问 id 为准（``sgs/skills/active.py`` 的
-    ``_JIE_JIANYING_ASK_TARGET``），直接问登记表认不认它。
+    票 18 把"产物打谁"从**提交点后手写的一问**搬进流水线第 3 步，AI 填表时用的询问 id
+    因此从 ``hero.jie_jushou_mobile.jianying.target`` 变成 ``<短技能 id>:<步骤键>``
+    （`heuristic._fill_activation` 的拼法；引擎在逐步询问那条路上发的是同一口径的
+    ``flow._flow_option_id``）。登记串按 `startswith` 用 ⇒ 少一个冒号 / 沿用全限定写法就
+    永不命中、② 的【杀】静默落进"帮盟友"分支，而"表里有这一条"的断言不会红。这里按引擎
+    声明的那一步拼出 id，直接问登记表认不认它。
     """
-    from sgs.skills.active import _JIE_JIANYING_ASK_TARGET
+    from sgs.skills.active import JIE_JIANYING, JIE_JIANYING_FLOW
 
-    assert _JIE_JIANYING_ASK_TARGET.startswith(heuristic_scoring._HOSTILE_SEAT_STEPS), (
-        f"询问 id {_JIE_JIANYING_ASK_TARGET!r} 不匹配任何登记前缀 ⇒ 座位步按'帮盟友'给分"
+    seat = next(step for step in JIE_JIANYING_FLOW.steps if step.key == "seat")
+    ask_id = f"{JIE_JIANYING.rsplit('.', 1)[-1]}:{seat.key}"
+
+    assert ask_id.startswith(heuristic_scoring._HOSTILE_SEAT_STEPS), (
+        f"询问 id {ask_id!r} 不匹配任何登记前缀 ⇒ 座位步按'帮盟友'给分"
     )
-    assert _JIE_JIANYING_ASK_TARGET in heuristic_scoring._HOSTILE_SEAT_STEPS, (
-        "登记的是整条 id：换前缀写法会让本测试与 `startswith` 判据再次漂开"
+    assert "jianying:" in heuristic_scoring._HOSTILE_SEAT_STEPS, (
+        "登记的是短 id 前缀（AI 填表与逐步询问共用这一口径）：换写法会让两边再次漂开"
     )
 
 

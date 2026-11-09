@@ -469,18 +469,43 @@ function preactivationRequiredSeat(pa, pending, index) {
   return options[0];
 }
 
+/** 座位步的**这一行**是不是"没有可选目标"（票 18）：服务端下发 ``StepPool.max = 0``。
+
+ *  产物的目标由**牌名**决定时（【桃】/【酒】固定选自己、2 人局的【杀】只有一个对手），
+ *  这一步没有可问的东西。服务端用``max = 0``（而不是把整条步拿掉）表达"这一行不需要选"：
+ *  同一条清单里"【杀】要选目标、【桃】不要"可以并存。界面据此把这一步当成**已填**并在
+ *  进入时自动跳过——判据只读服务端下发的这一格，不按技能 / 牌名分支。
+ */
+function preactivationNoChoiceStep(pa, index) {
+  const step = pa && pa.steps[index];
+  if (!step || preactivationStepKind(step) !== "seat") return false;
+  const row = preactivationPoolRow(pa, index);
+  return Boolean(row) && Number.isInteger(row.max) && row.max === 0;
+}
+
 /** 进入座位步时把**必选首项**（借刀窗口的 Bn）预先放进答案：省掉一次没有信息量的点击。
  *
  * 只在答案为空时填——玩家取消其它座位不会把它抖回来（首项本身也不可取消）。
+ *
+ * **没有可选目标的行直接跳过**（票 18）：``StepPool.max === 0`` 的座位步不画空步，
+ * 光标越过它、答案保持空（服务端按同一份 0 收尾，复合动作里不带 choices）。
  */
 function applyPreativationDefaults(pa, pending) {
-  if (!pa || pa.cursor >= pa.steps.length) return;
-  const required = preactivationRequiredSeat(pa, pending, pa.cursor);
-  if (required === null) return;
-  const answer = pa.answers[pa.cursor];
-  if (answer.values.length) return;
-  answer.values = [Number(required.slice(SEAT_PREFIX.length))];
-  answer.texts = [required];
+  if (!pa) return;
+  while (pa.cursor < pa.steps.length) {
+    if (preactivationNoChoiceStep(pa, pa.cursor)) {
+      pa.answers[pa.cursor] = { values: [], texts: [] };
+      pa.cursor += 1;
+      continue;
+    }
+    const required = preactivationRequiredSeat(pa, pending, pa.cursor);
+    if (required === null) return;
+    const answer = pa.answers[pa.cursor];
+    if (answer.values.length) return;
+    answer.values = [Number(required.slice(SEAT_PREFIX.length))];
+    answer.texts = [required];
+    return;
+  }
 }
 
 /** 点场上武将：选座位步的答案。
@@ -573,6 +598,9 @@ function jumpPreativationStep(index) {
 function preactivationStepFilled(pa, index) {
   const step = pa && pa.steps[index];
   if (!step) return false;
+  // 没有可选目标的一行（票 18）：服务端说"这一步在这个牌名下没有要选的" ⇒ 视为已填，
+  // 否则目标由牌名决定的牌名（【桃】/【酒】）永远点不亮「确认发动」。
+  if (preactivationNoChoiceStep(pa, index)) return true;
   const answer = pa.answers[index];
   const count = answer ? answer.values.length : 0;
   if (count < step.min) return false;

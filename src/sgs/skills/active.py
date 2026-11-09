@@ -65,6 +65,7 @@ from sgs.effects import (
     behavior_for,
     check_count,
     check_targets,
+    check_usable,
     distance,
     forced_use_targets,
     is_own_play_phase,
@@ -6785,12 +6786,6 @@ _JIE_JIANYING_PRODUCT_KEY = "jie_jianying_product"
 _JIE_JIANYING_USED_KEY = "jie_jianying_used"
 """帧私有：这次发动已经 ``start_use``（USE 帧出栈后派发环重入 SKILL 帧，不重发）。"""
 
-_JIE_JIANYING_TARGETS_KEY = "jie_jianying_targets"
-"""帧私有：产物的目标（问了 / 自动定格之后都不再重算）。"""
-
-_JIE_JIANYING_ASK_TARGET = "hero.jie_jushou_mobile.jianying.target"
-"""手写座位询问的 id（与 ``_ASK_`` 约定同形：全限定前缀 ⇒ AI 的敌我口径能按前缀登记）。"""
-
 
 def _jie_jianying_name_table(state: GameState) -> dict[str, str]:
     """② 可声明的牌名：``显示名 → 牌型 id``，**只收本牌堆真有的基本牌**（Q-J5 = A）。
@@ -6856,6 +6851,10 @@ def _jie_jianying_name_disabled(
     按**刚选中的那张源牌** + **当下记着的上一张牌**现算（与 :func:`_jie_jianying_product`
     同一份牌面）：同一份牌名闭集在不同来源牌 / 上一张牌下"能不能用"可以不同（花色被
     视为之后撞【仁王盾】一类颜色读者）。
+
+    "能不能用"读 :func:`~sgs.effects.check_usable` 的**整条**使用前校验（票 18）：时机 /
+    次数 / 目标池一起判。旧实现只查目标池，于是本回合【杀】的次数用尽、【酒】已经喝过
+    这两类"目标池非空但牌不能再用"的牌名仍显示可用，提交后才失败。
     """
     del frame
     source = _guohuo_selected_card(answers)
@@ -6865,7 +6864,7 @@ def _jie_jianying_name_disabled(
     return tuple(
         name
         for name, type_id in _jie_jianying_name_table(state).items()
-        if not check_targets(
+        if not check_usable(
             state, owner, _jie_jianying_product(state, source, type_id, previous)
         )
     )
@@ -6880,7 +6879,9 @@ def _jie_jianying_entry(state: GameState, seat: int) -> bool:
     table = _jie_jianying_name_table(state)
     previous = _jie_jianying_previous_card(state, seat)
     return any(
-        check_targets(state, seat, _jie_jianying_product(state, source, type_id, previous))
+        check_usable(
+            state, seat, _jie_jianying_product(state, source, type_id, previous)
+        )
         for source in sources
         for type_id in table.values()
     )
@@ -6900,48 +6901,116 @@ def _jie_jianying_offers(state: GameState, ctx: ModifierContext, current: Any) -
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
+@dataclass(frozen=True, slots=True)
+class _JieJianyingTargets:
+    """② 的产物目标**规则**的一次求值结果（票 18：清单第 3 步与提交后的效果共用）。
+
+    - ``legal``：``check_targets`` 现算的完整合法池（座位序）；
+    - ``lo`` / ``hi``：**玩家**要选几个；``0`` = 目标由牌名决定、直接取 ``legal``。
+
+    两者不可折叠：``legal`` 回答"哪些座位合法"，``lo`` 回答"要不要问"。桃 / 酒的目标恒为
+    自己（池恰好装得下额定数）⇒ ``lo = 0``，界面不出现第 3 步、执行器直取；【杀】在
+    多目标局面里 ``lo = 1``，界面必须选一名、校验器也要求一名。
+    """
+
+    legal: tuple[int, ...]
+    lo: int
+    hi: int
+
+
 def _jie_jianying_targets(
-    host: Any, frame: Any, owner: int, product: CardRef
-) -> tuple[int, ...] | None:
-    """产物的目标：按**产物牌名**的目标规则定（无显式目标选择 = 票面 §1.2 的签字口径）。
+    state: GameState, owner: int, product: CardRef
+) -> _JieJianyingTargets:
+    """产物的目标：按**产物牌名**的目标规则定（票面 §1.2 的签字口径）。
 
     与【蛊惑】段 4 同一套分档（规则一条都不新造，池与目标数都读 ``check_targets`` /
-    ``TargetRule.target_count``）：额定 0 个 ⇒ 空；池恰好装得下额定数 ⇒ 全取（【桃】/【酒】
-    因此落回自己，**不问**）；额定 1 个而有多个合法目标（【杀】家族）⇒ 问一次座位；其余
-    区间规则取下界张、按座位序定格。挂起 ⇒ ``None``（帧私有游标续跑不重问）。
+    ``TargetRule.target_count``）：
+
+    - 额定 0 个 / 空池 ⇒ 没有目标（``legal = ()``，``lo = 0``）；
+    - 池恰好装得下额定数 ⇒ **全取**（【桃】/【酒】落回自己，2 人局的【杀】直接指向对手）
+      ⇒ ``lo = 0``，第 3 步不存在；
+    - 池比额定数大 ⇒ 玩家在池里选 ``count`` 个（【杀】家族 = 1）⇒ ``lo = hi = count``，
+      第 3 步存在。
+
+    **一处求值**：清单第 3 步的 ``pool`` / ``lo`` / ``hi`` 三个可调用档与提交后的效果都调
+    本函数，故"界面要求选几个"与"效果读几个"不可能各说一套。
     """
-    if _JIE_JIANYING_TARGETS_KEY in frame.data:
-        return tuple(frame.data[_JIE_JIANYING_TARGETS_KEY])
-    pool = check_targets(host.state, owner, product)
+    pool = check_targets(state, owner, product)
     count = behavior_for(product).target_rule.target_count(len(pool))
-    if count <= 0:
-        chosen: tuple[int, ...] = ()
-    elif count >= len(pool):
-        chosen = tuple(pool)
-    elif count == 1:
-        answer = host.ask_option(
-            frame,
-            owner,
-            Timing.PHASE_PLAY_IDLE,
-            skill_id=_JIE_JIANYING_ASK_TARGET,
-            options=tuple(_seat_choice(seat) for seat in pool),
-            optional=False,
-        )
-        if host.suspended(answer):
-            return None
-        chosen = (_option_seat(answer),)
-    else:
-        chosen = tuple(pool[:count])
-    frame.data[_JIE_JIANYING_TARGETS_KEY] = chosen
-    return chosen
+    if count <= 0:  # 额定 0 个目标（【闪】一类）
+        return _JieJianyingTargets(legal=(), lo=0, hi=0)
+    if count >= len(pool):  # 池恰好装得下额定数 ⇒ 全取，不问
+        return _JieJianyingTargets(legal=tuple(pool), lo=0, hi=0)
+    return _JieJianyingTargets(legal=tuple(pool), lo=count, hi=count)
+
+
+def _jie_jianying_target_product(
+    state: GameState, owner: int, answers: FlowAnswers
+) -> CardRef | None:
+    """清单第 3 步的前序答案（源牌 ＋ 牌名）→ 产物；还没有／写错 ⇒ ``None``。
+
+    清单渲染、校验器与效果都从**前序答案**重造产物（与 :func:`_jie_jianying_name_disabled`
+    同一份构造），故第 3 步的池永远按"玩家刚选的那两张"算，不读第二份状态。
+    """
+    source = _guohuo_selected_card(answers)
+    declared = answers.get("name")
+    if source is None or not declared:
+        return None
+    type_id = _jie_jianying_name_table(state).get(str(declared))
+    if type_id is None:
+        return None
+    return _jie_jianying_product(
+        state, source, type_id, _jie_jianying_previous_card(state, owner)
+    )
+
+
+def _jie_jianying_plan_from_frame(
+    state: GameState, frame: Any, owner: int
+) -> _JieJianyingTargets | None:
+    """帧上前序答案（``preactivation_answers`` 通道）→ 目标计划；答案还不全 ⇒ ``None``。"""
+    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
+    product = _jie_jianying_target_product(state, owner, answers)
+    if product is None:
+        return None
+    return _jie_jianying_targets(state, owner, product)
+
+
+def _jie_jianying_target_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """第 3 步的候选：产物**有得选**时给完整合法池；目标由牌名决定 ⇒ 空池（自动跳过）。"""
+    del chosen
+    plan = _jie_jianying_plan_from_frame(state, frame, owner)
+    return () if plan is None or plan.lo == 0 else plan.legal
+
+
+def _jie_jianying_target_lo(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> int:
+    """第 3 步至少要选几个（0 = 由牌名决定，不出现这一步；见 :class:`_JieJianyingTargets`）。"""
+    del answers
+    plan = _jie_jianying_plan_from_frame(state, frame, owner)
+    return 0 if plan is None else plan.lo
+
+
+def _jie_jianying_target_hi(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> int:
+    """第 3 步最多选几个（与 :func:`_jie_jianying_target_lo` 同一份计划）。"""
+    del answers
+    plan = _jie_jianying_plan_from_frame(state, frame, owner)
+    return 0 if plan is None else plan.hi
 
 
 def _jie_jianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     """提交点：按来源牌 + 上一张牌的花色造产物，然后 ``start_use`` 它（段 8 的样板）。
 
-    重入纪律：产物与目标各有一个帧私有游标——``start_use`` 压整条使用链（目标响应还会再
-    挂起），USE 帧出栈后派发环从头重入本函数；没有 ``_JIE_JIANYING_USED_KEY`` 就会把同一张
-    产物使用两遍。
+    目标读**第 3 步的答案**（票 18）：``lo > 0`` ⇒ 玩家选的那几个座位；``lo == 0`` ⇒ 目标
+    由牌名决定，直取 :func:`_jie_jianying_targets` 的 ``legal``（【桃】/【酒】自己）。
+
+    重入纪律：产物与"已使用"各有一个帧私有游标——``start_use`` 压整条使用链（目标响应
+    还会再挂起），USE 帧出栈后派发环从头重入本函数；没有 ``_JIE_JIANYING_USED_KEY`` 就会把
+    同一张产物使用两遍。第 3 步的答案从复合动作（预填缓存）里重建，故重入不重问。
     """
     state = host.state
     owner = int(frame.data["source"])
@@ -6960,9 +7029,15 @@ def _jie_jianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     if frame.data.get(_JIE_JIANYING_USED_KEY):
         return None
     product = frame.data[_JIE_JIANYING_PRODUCT_KEY]
-    targets = _jie_jianying_targets(host, frame, owner, product)
-    if targets is None:
-        return "stay"
+    plan = _jie_jianying_targets(state, owner, product)
+    if plan.lo:
+        targets = tuple(int(seat) for seat in answers.get("seat") or ())
+        if len(targets) != plan.lo:  # 校验器已拦过；缺它就是声明写错了
+            raise ValueError(
+                f"【渐营】第 3 步要选 {plan.lo} 个目标，复合动作给了 {list(targets)}"
+            )
+    else:
+        targets = plan.legal
     frame.data[_JIE_JIANYING_USED_KEY] = True
     host.start_use(
         product,
@@ -7139,22 +7214,37 @@ JIE_JIANYING_FLOW = SkillFlow(
     steps=(
         # 步 1：把哪张牌当（手牌 ∪ 装备区，**恰好一张**：牌面写「一张牌」、无区域限定）。
         PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
-        # 步 2：当哪一张基本牌。闭集 = 本牌堆真有的基本牌名（列全）；此刻用不了的置灰。
+        # 步 2：当哪一张基本牌。闭集 = 本牌堆真有的基本牌名（列全）；此刻**用不了**的置灰
+        # （次数 / 时机 / 目标池一起判，票 18）。
         PickOption(
             options=_jie_jianying_name_options,
             disabled=_jie_jianying_name_disabled,
             optional=False,
             key="name",
         ),
+        # 步 3（票 18）：目标。个数与池都由产物的目标规则给定 ⇒ lo / hi 是可调用档：
+        # 目标由牌名决定（0 个 / 池恰好装得下）时 lo = hi = 0，这一步**不进清单**
+        # （`manifest` 按"所有行都没有可选目标"整条省掉；行内 `max = 0` 由界面自动跳过）。
+        PickSeats(
+            lo=_jie_jianying_target_lo,
+            hi=_jie_jianying_target_hi,
+            pool=_jie_jianying_target_pool,
+            optional=False,
+            key="seat",
+        ),
     ),
     effect=_jie_jianying_effect,
     # 「出牌阶段限一次」⇒ 落 ``_USED`` 阶段位（与界【慎行】同一条机制）。
     once_per_phase=True,
 )
-"""【渐营】② 的两步流水线：选一张自己的牌 → 选当作哪一张基本牌 → 提交点后手写主体。
+"""【渐营】② 的**三步**流水线：选一张自己的牌 → 选当作哪一张基本牌 → 选目标 → 提交主体。
 
 流水线名带武将前缀（``jie_jianying``）：``SkillFlow.name`` 必须两两唯一（`test_ask_points`），
 而 ① 复用的是 OL 沮授那一份 ``JIANYING_FLOW``（``name = "jianying"``，同一对象、不新增名字）。
+
+第 3 步在**目标由牌名决定**时整条消失（【桃】/【酒】；2 人局的【杀】也是），故"三步"是按
+牌名可变的清单——票 17 的窗口分支**只有一步**（牌名由窗口定死、目标在窗口上），两条路各
+自的清单形状由语境决定，规则求值仍是这一处（:func:`_jie_jianying_targets`）。
 """
 
 _JIE_JIANYING = ActiveSkill(
@@ -7184,7 +7274,8 @@ _JIE_JIANYING = ActiveSkill(
     ),
     step_requirements={
         "card": "选择一张牌（手牌 / 装备区）",
-        "name": "选择当作哪一张基本牌使用（此刻没有合法目标的名字置灰、不可选）",
+        "name": "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）",
+        "seat": "选择这张牌的目标（目标由牌名决定时不出现这一步）",
     },
 )
 """界沮授移动版【渐营】的完整声明（① 的钩子 + ② 的预发动清单，同一个技能 id）。"""

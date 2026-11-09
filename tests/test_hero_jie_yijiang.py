@@ -899,8 +899,9 @@ def test_jianying_is_one_skill_carrying_both_the_hook_and_the_manifest():
     assert "出牌阶段限一次" in definition.requirement
     assert definition.step_requirements == {
         "card": "选择一张牌（手牌 / 装备区）",
-        "name": "选择当作哪一张基本牌使用（此刻没有合法目标的名字置灰、不可选）",
-    }
+        "name": "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）",
+        "seat": "选择这张牌的目标（目标由牌名决定时不出现这一步）",
+    }, "票 18：三步文案（第 3 步在目标由牌名决定时整条不出现）"
 
 
 # ---------------------------------------------------------------------------
@@ -1858,6 +1859,240 @@ def test_jie_jianying_keeps_the_previous_suit_inside_its_own_play_phase():
         "花色 = 本阶段使用的上一张牌（那张【决斗】），不是来源牌的 ♥"
     )
     assert product.rank == _deck_card(HEART_DODGE_TWO).rank, "点数仍继承来源牌"
+
+
+# ===========================================================================
+# yijiang-2014-round2 票 18（P9）：② 的牌名合法性 = **此刻能不能用**；
+# 目标选择进预发动清单第 3 步
+#
+# 用户 2026-11-09 逐字：「转化预发动选择要使用什么牌名时，没有考虑所有牌名的牌的合法性
+# （例如我没有杀的次数了，但是还能转化杀）预期：修改为预发动时检验合法性，并且选择某牌名
+# 后，选择目标也纳入预发动第三步，必须散步都选择完毕才能提交」（"散步" = 三步）。
+#
+# 两处判据都**不新造规则**：
+#
+# - 牌名置灰 = 「这张产物此刻能不能用」（次数 / 时机 / 目标池一起判）。旧实现只查
+#   ``check_targets``，于是次数用尽的【杀】仍在闭集里、不置灰；
+# - 第 3 步 = 产物的 ``TargetRule``：**有得选才出现**（0 个目标 / 池恰好装得下额定数 ⇒
+#   这一步由牌名决定，直接跳过）。判据与提交后的 ``_jie_jianying_targets`` 同一份。
+# ===========================================================================
+
+PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""160 档牌堆：只有它才有【酒】（108 档的牌名闭集是杀 / 闪 / 桃）。"""
+
+
+def _jie_ready_four(*, hand=(), hp: int = 3, hp_max: int = 3):
+    """4 人身份局（``RuleConfig`` 没有 3 人档）：座位 0 = 界沮授（主公），其余反贼。
+
+    只有"目标不止一个"的场面才需要它：【杀】的目标步要有**得选**，池里至少两名——4 人环上
+    座位 0 的攻击范围 1 恰好够到左右两家（座位 2 隔了一位，不在池里）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=JUSHUO, hp=hp, hp_max=hp_max, hand=tuple(hand), identity=Identity.LORD
+            ),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=deck_excluding(PACK, *hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    return state, _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+
+
+def _jie_assert_disabled(steps, name: str) -> None:
+    """牌名步：``name`` **在闭集里**（列全）但被置灰（此刻用不了）。"""
+    name_step = next(step for step in steps if step.name == "name")
+    assert name in _jie_step_options(name_step), f"{name} 不在闭集里（Q-J5 = A 要求列全）"
+    assert name in _jie_step_disabled(name_step), f"{name} 此刻用不了，却没置灰"
+
+
+def _jie_assert_enabled(steps, name: str) -> None:
+    name_step = next(step for step in steps if step.name == "name")
+    assert name in _jie_step_options(name_step)
+    assert name not in _jie_step_disabled(name_step), f"{name} 此刻能用，却被置灰了"
+
+
+def test_jie_jianying_greys_the_slash_name_when_the_slash_quota_is_spent():
+    """**本票的判据点**：本回合【杀】的次数用尽 ⇒ 不能把牌转成【杀】（置灰 + 校验拒收）。
+
+    旧判据只看目标池（`check_targets`），而"目标池非空"与"这张牌此刻还能用"是两件事：
+    次数额度是**使用校验**的另一半。这里真的打出一张【杀】把额度花掉（不是往状态里塞
+    一个计数），再看清单。
+    """
+    from sgs.skills import validate_activation
+
+    slash = cards_of_type(PACK, "slash")[0]
+    state, engine = _jie_ready_four(hand=(slash,), hp=2, hp_max=3)
+    assert _jie_manifest(engine.pending), "前提：本阶段还没用过 ②"
+    _jie_assert_enabled(_jie_manifest(engine.pending), "杀")
+
+    _jie_use_and_settle(engine, slash, targets=(1,))
+
+    steps = _jie_manifest(engine.pending)
+    assert steps, "【桃】此刻仍可用（2/3 体力）⇒ ② 的清单还在（不是整体消失）"
+    _jie_assert_disabled(steps, "杀")
+    assert [step.name for step in steps] == ["card", "name"], (
+        "【桃】的目标由牌名决定（直取自己）⇒ 不出现空的第 3 步"
+    )
+    assert validate_activation(state, 0, JIE_JIANYING, (slash,), ("杀",)) is not None, (
+        "置灰不是界面纪律：次数用尽时复合动作仍被服务端拒收"
+    )
+
+
+def test_jie_jianying_keeps_the_slash_name_available_while_the_quota_lasts():
+    """反向断言：额度还在 ⇒ 【杀】不置灰（同一个局面、只差"打没打出那张【杀】"）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    state, engine = _jie_ready_four(hand=(slash,), hp=2, hp_max=3)
+
+    assert state.player(0).card_use_counts.get("slash", 0) == 0
+    _jie_assert_enabled(_jie_manifest(engine.pending), "杀")
+
+
+def test_jie_jianying_greys_the_wine_name_after_wine_was_used_this_turn():
+    """【酒】的"每回合一次"也是使用校验的一半：喝过之后牌名置灰（160 档才有【酒】）。"""
+    wine = cards_of_type(PACK_160, "wine")[0]
+    source = cards_of_type(PACK_160, "qilin_bow")[0]
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=JUSHUO, hp=3, hp_max=3, hand=(wine, source)),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK_160, wine, source),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+    _jie_assert_enabled(_jie_manifest(engine.pending), "酒")
+
+    _jie_use_and_settle(engine, wine)
+
+    steps = _jie_manifest(engine.pending)
+    assert steps, "【杀】仍可用 ⇒ 清单还在"
+    _jie_assert_disabled(steps, "酒")
+
+
+def test_jie_jianying_lists_targets_as_the_third_manifest_step():
+    """清单三步：选牌 → 牌名 → 目标；第 3 步的池 = 产物的合法目标（按牌名分行）。"""
+    state, engine = _jie_ready_four(hand=(HEART_BOW,), hp=3, hp_max=3)
+    steps = _jie_manifest(engine.pending)
+
+    assert [step.name for step in steps] == ["card", "name", "seat"], (
+        "有得选的目标 ⇒ 目标成为预发动的第 3 步"
+    )
+    seat_step = steps[2]
+    assert (seat_step.min, seat_step.max) == (1, 1), "【杀】额定 1 个目标"
+    rows = seat_step.pool
+    assert rows, "第 3 步要下发候选（否则界面只能靠退化档）"
+    assert all(
+        "杀" not in row.when or row.when[-1] == "杀" for row in rows
+    ), f"逐行的前序答案里只有『杀』那一族能要目标：{[row.when for row in rows]}"
+    options = {
+        option
+        for row in rows
+        for option in row.options
+        if not row.when or row.when[-1] == "杀"
+    }
+    assert options == {"seat:1", "seat:3"}, (
+        f"4 人环上攻击范围 1 ⇒ 【杀】够得着左右两家（隔位那家不行）：{sorted(options)}"
+    )
+    assert all(row.max == 1 for row in rows if not row.when or row.when[-1] == "杀")
+
+
+def test_jie_jianying_skips_the_target_step_for_a_targetless_name():
+    """目标由牌名决定的牌名（【桃】/【酒】）**不出现**空的第 3 步。
+
+    两条证据：
+
+    - 只剩【桃】/【酒】可用时清单只有两步（没有第 3 步可填）；
+    - 清单里有【杀】那一行时，同一个目标步里【桃】那一行被标成"没有可选目标"
+      （``max == 0``、池为空）——界面据此自动跳过，不画空步。
+    """
+    # (1) 108 档、2 人局、【桃】：对手【空城】⇒ 【杀】没有合法目标；2/3 体力 ⇒ 只有【桃】。
+    state = _jie_state(hand=(HEART_BOW,), hp=2, hp_max=3, seats=2)
+    state.player(1).granted_skills.append("hero.zhugeliang.kongcheng")
+    engine = _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+    steps = _jie_manifest(engine.pending)
+    assert set(_jie_step_options(steps[1])) - set(_jie_step_disabled(steps[1])) == {"桃"}
+    assert [step.name for step in steps] == ["card", "name"], (
+        "【桃】的目标由牌名决定（自己）⇒ 不出现第 3 步"
+    )
+
+    # (2) 160 档、【酒】：同样是"自己"这个唯一目标。
+    wine = cards_of_type(PACK_160, "wine")[0]
+    source = cards_of_type(PACK_160, "qilin_bow")[0]
+    state_160 = build_state(
+        pack=PACK_160,
+        seats=[SeatSpec(hero=JUSHUO, hp=3, hp_max=3, hand=(wine, source)), SeatSpec()],
+        deck=deck_excluding(PACK_160, wine, source),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    state_160.player(1).granted_skills.append("hero.zhugeliang.kongcheng")
+    engine_160 = _jie_drive(Engine.from_state(state_160, seed=7), _jie_is_idle)
+    steps_160 = _jie_manifest(engine_160.pending)
+    usable = set(_jie_step_options(steps_160[1])) - set(_jie_step_disabled(steps_160[1]))
+    assert "酒" in usable, f"前提：【酒】此刻可用（实得 {sorted(usable)}）"
+    assert usable == {"酒"}, f"【杀】一族被【空城】挡住：只有【酒】可用（实得 {sorted(usable)}）"
+    assert [step.name for step in steps_160] == ["card", "name"], (
+        "【酒】的目标也是唯一的 ⇒ 不出现第 3 步"
+    )
+
+    # (3) 第 3 步存在时（【杀】有得选），【桃】那一行是"没有可选目标"。
+    state_mixed, engine_mixed = _jie_ready_four(hand=(HEART_BOW,), hp=2, hp_max=3)
+    steps_mixed = _jie_manifest(engine_mixed.pending)
+    assert [step.name for step in steps_mixed] == ["card", "name", "seat"]
+    peach_rows = [row for row in steps_mixed[2].pool if row.when[-1:] == ("桃",)]
+    assert peach_rows, "同一个目标步里【桃】也有一行（按牌名分行）"
+    assert all(row.options == () and row.max == 0 for row in peach_rows), (
+        f"【桃】那一行 = 没有可选目标（界面自动跳过）："
+        f"{[(row.options, row.max) for row in peach_rows]}"
+    )
+
+
+def test_jie_jianying_manifest_is_unsubmittable_until_the_target_step_is_filled():
+    """第 3 步没填 ⇒ 复合动作被拒；填了合法目标 ⇒ 放行，且产物真的打向它。"""
+    from sgs.skills import validate_activation
+
+    state, engine = _jie_ready_four(hand=(HEART_BOW,), hp=2, hp_max=3)
+
+    assert validate_activation(state, 0, JIE_JIANYING, (HEART_BOW,), ("杀",)) is not None, (
+        "三步没填完（缺目标）⇒ 服务端拒收"
+    )
+    assert validate_activation(
+        state, 0, JIE_JIANYING, (HEART_BOW,), ("杀", "seat:1")
+    ) is None, "填了一个合法目标 ⇒ 放行"
+    assert validate_activation(
+        state, 0, JIE_JIANYING, (HEART_BOW,), ("杀", "seat:9")
+    ) is not None, "非法目标（没有这个座位）照样拒收"
+    assert validate_activation(
+        state, 0, JIE_JIANYING, (HEART_BOW,), ("杀", "seat:2")
+    ) is not None, "隔位的角色在攻击范围外 ⇒ 也不在池里"
+    assert validate_activation(state, 0, JIE_JIANYING, (HEART_BOW,), ("桃",)) is None, (
+        "【桃】的目标由牌名决定 ⇒ 不要求第 3 步的答案"
+    )
+
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=JIE_JIANYING,
+            picks=(HEART_BOW,),
+            choices=("杀", "seat:1"),
+            answers_seq=query.seq,
+        )
+    )
+    engine = _jie_drive(engine, _jie_is_idle)
+
+    assert state.player(1).hp == 3, "产物打向第 3 步选中的那一名"
+    assert [state.player(seat).hp for seat in (2, 3)] == [4, 4], "没选的那两名不受影响"
 
 
 # ===========================================================================
