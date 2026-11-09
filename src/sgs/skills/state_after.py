@@ -1,6 +1,6 @@
-r"""状态位变化后（S 族）：陈群【法恩】——「当一名角色翻面或横置后，你可以令其摸一张牌」。
+r"""状态位变化后（S 族）：陈群 / 界陈群移动版【法恩】——「当一名角色翻面或横置后，你可以令其摸一张牌」。
 
-牌面（用户 ``技能.txt`` 逐字，与界陈群移动版**逐字相同**）：
+牌面（用户 ``技能.txt`` 逐字，**两版逐字相同**）：
 
     当一名角色翻面或横置后，你可以令其摸一张牌。
 
@@ -32,6 +32,12 @@ L1387–L1392「同一武将牌上『横置』与『背面朝上』是两个独�
 ``tests/test_hero_catalog.py`` 的「钩子条件必须自校持有者」审计——【法恩】的条件**不关于持有者**
 （关于"这次变化是不是横置方向"），故按该审计的例外表登记一条理由（票 10 §4 明确要求按例外处理），
 不为它造一个假的"只问持有者"探针。
+
+**两版共用一份实现**（yijiang-2014 票 08 交 OL 陈群；yijiang-2014-round2 票 11 / P2 补界陈群移动版）：
+牌面**逐字相同**，``SkillDef`` 没有 ``shared_with`` 那种派生口子 ⇒ 落地形态 = "同一组回调 +
+同一个方向判据 + 同一份零步流水线（:data:`CHENQUN_FAEN_FLOW`，对象复用、不另起 flow 名）+
+两条 ``CATALOG`` 条目"。界版**不重写**方向判据（票 10 落在 :func:`_faen_chain_is_set` /
+:func:`_faen_seat` 里），故票 10 的「重置不问」口径对界版天然生效。
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ from .flow import SkillFlow, zero_step_effect
 __all__ = [
     "CHENQUN_FAEN",
     "CHENQUN_FAEN_FLOW",
+    "JIE_CHENQUN_FAEN",
     "state_after_skill_definitions",
 ]
 
@@ -57,12 +64,25 @@ CHENQUN_FAEN = hero_skill_id("chenqun", "faen")
 """陈群（一将成名-2014 / OL）【法恩】的全限定技能 id。
 
 与界陈群移动版的同名技能牌面**逐字相同**，但 ``SkillDef`` 没有 ``shared_with`` 那种
-派生口子（chenqun-guyong 票 03 的 Answer 已裁定不补）⇒ 界版将来落地时是"同一组回调 +
-同一份零步流水线 + 第二条 ``CATALOG`` 条目"。本行只服务 OL 陈群。
+派生口子（chenqun-guyong 票 03 的 Answer 已裁定不补）⇒ 界版是"同一组回调 +
+同一份零步流水线 + 第二条 ``CATALOG`` 条目"（见 :data:`JIE_CHENQUN_FAEN`）。
+"""
+
+JIE_CHENQUN_FAEN = hero_skill_id("jie_chenqun_mobile", "faen")
+"""界陈群移动版【法恩】的全限定技能 id（yijiang-2014-round2 票 11 / P2）。
+
+与 :data:`CHENQUN_FAEN` **牌面逐字相同** ⇒ 复用同一组回调（:func:`_chenqun_faen` /
+:func:`_faen_seat`）、同一个方向判据（:func:`_faen_chain_is_set`）与同一个零步流水线
+对象（:data:`CHENQUN_FAEN_FLOW`）；本行只提供第二条 ``CATALOG`` 条目。
 """
 
 _DRAWN_KEY = "chenqun_faen_drawn"
-"""帧私有：本帧已经因【法恩】摸过牌（重入不再摸；不进记录流）。"""
+"""帧私有：本帧已经因【法恩】摸过牌（重入不再摸；不进记录流）。
+
+两版【法恩】共用本键（一帧 = 一次状态位事件）。两版真名相同、正常发牌不会同桌同时出场
+（``test_hero_dealing`` 的口径）⇒ 不会互相吞摸；若将来手工把两版放进同一局，同一个事件帧
+上第二版的摸牌会被这个守卫挡掉——那是"同一事件只结算一次"的既有姿态，不是本票要改的面。
+"""
 
 
 def _faen_chain_is_set(host: Any, frame: Frame) -> bool:
@@ -125,18 +145,38 @@ CHENQUN_FAEN_FLOW = SkillFlow(
 
 必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
 并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
+
+两版【法恩】（OL / 界陈群移动版）**共用这个对象**（票 11 明写"复用对象、不另起 flow 名"）：
+``test_ask_points`` 的 ``name`` 唯一性只核**模块级定义**，故一个对象服务两条 ``CATALOG``
+条目不撞；效果与方向判据因此只有一份，界版不会漂出第二套读法。
 """
 
 
 def state_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """S 族（状态位变化后）的技能定义：本批只有陈群【法恩】一条（非锁定 ⇒ 每事件问一次）。
+    """S 族（状态位变化后）的技能定义：陈群【法恩】+ 界陈群移动版【法恩】（非锁定 ⇒ 每事件问一次）。
 
-    ``STATE_CHAINED`` 那一条带方向条件（票 10）：**重置不问**，翻面两个方向都问。界陈群移动版
-    的同名技能（票 11）落地时复用这两个回调与流水线，方向判据不必重写。
+    两条**牌面逐字相同**，故共用同一组回调、同一个方向判据与同一个零步流水线对象；区别只在
+    ``skill_id``（``CATALOG`` 两条、数据行各声明一条）。``STATE_CHAINED`` 那一条带方向条件
+    （票 10）：**重置不问**，翻面两个方向都问。
     """
     return (
         SkillDef(
             skill_id=CHENQUN_FAEN,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(Timing.STATE_FLIPPED, flow=CHENQUN_FAEN_FLOW),
+                Hook(
+                    Timing.STATE_CHAINED,
+                    condition=_faen_chain_is_set,
+                    flow=CHENQUN_FAEN_FLOW,
+                ),
+            ),
+            requirement="当一名角色翻面或横置后，你可以令其摸一张牌",
+        ),
+        SkillDef(
+            skill_id=JIE_CHENQUN_FAEN,
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,

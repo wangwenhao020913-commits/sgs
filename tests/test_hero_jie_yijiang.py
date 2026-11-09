@@ -35,7 +35,15 @@ from sgs.engine import Engine
 from sgs.state import ActivateSkill, EndPhase, FrameKind, Pass, Phase, QueryKind, UseCard, Zone
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state, deck_excluding, ran_timing
+from support import (
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    ran_timing,
+    run_queries,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -1426,3 +1434,260 @@ def test_jie_jianying_takes_the_only_legal_name_directly():
         if name not in _jie_step_disabled(steps[1])
     )
     assert usable == ("杀",)
+
+
+# ===========================================================================
+# 界陈群移动版【法恩】（yijiang-2014-round2 票 11 / P2）
+#
+# 牌面（用户 `技能.txt` 逐字，与 OL 陈群【法恩】**逐字相同**）：
+#
+#     当一名角色翻面或横置后，你可以令其摸一张牌。
+#
+# 落法（票面 §2，沿用票 08 / 票 10 的结论，不重新设计）：**同一组回调**（`_chenqun_faen`
+# / `_faen_seat`）、**同一个方向判据**（`_faen_chain_is_set`）与**同一份零步流水线**
+# （`CHENQUN_FAEN_FLOW`，不另起 flow 名）+ 第二条 `CATALOG` 条目。方向判据不重写 ⇒
+# 界版**天然**继承票 10 的口径：横置问、重置不问、翻面两个方向都问。
+#
+# 判据全走**外部缝**：两个写入口的返回值、记录流里的询问 / delta、座位上的状态位与手牌。
+# 不断言内部结构，也不 mock。
+# ===========================================================================
+
+JIE_FAEN = "hero.jie_chenqun_mobile.faen"
+OL_FAEN = "hero.chenqun.faen"
+FAEN_FACE = "当一名角色翻面或横置后，你可以令其摸一张牌"
+
+
+def _faen_state(*, seats: int = 2, hand: tuple[int, ...] = ()):
+    """座位 0 = 界陈群（3 体力，``hand`` 直接给定）；牌堆 = 除 ``hand`` 外的前 10 张。
+
+    缺省从**出牌阶段**起跑：不经过摸牌阶段 ⇒ 技能持有者的手牌就是 ``hand``（"谁摸到牌"
+    才好读）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=HERO, hp=3, hp_max=3, hand=hand)]
+        + [SeatSpec() for _ in range(seats - 1)],
+        deck=deck_excluding(PACK, *hand)[:10],
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=seats),
+    )
+
+
+def _faen_engine(*, seed: int = 1, **kwargs):
+    return Engine.from_state(_faen_state(**kwargs), seed=seed)
+
+
+def _faen_asks(engine) -> list:
+    """记录流里的界【法恩】「是否发动」询问（按出现顺序）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and str(record.query.skill_id) == JIE_FAEN
+    ]
+
+
+class _FaenScript:
+    """脚本玩家：对界【法恩】的每一问按给定序列答「发动 / 放弃」，其余走最小应答。
+
+    ``self.asked`` 记下每一次被问的界【法恩】询问——"问了几次"从这条外部缝读。
+    """
+
+    def __init__(self, *answers: bool) -> None:
+        self.answers = list(answers)
+        self.asked: list = []
+        self._otherwise = RecordingPlayer()
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == JIE_FAEN:
+            self.asked.append(query)
+            take = self.answers.pop(0) if self.answers else False
+            if take:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        return self._otherwise.respond(query)
+
+
+def _faen_players(player: "_FaenScript", *, seats: int = 2) -> list:
+    """座位 0 = 会答界【法恩】的那名脚本玩家；其余座位只做最小应答。"""
+    return [player, *(_FaenScript() for _ in range(seats - 1))]
+
+
+def _settle_after_the_dispatch(engine, players) -> None:
+    """推进到「这一趟状态位派发**收尾之后**」：本局的第一个「回合开始前」是那个里程碑。
+
+    ``Engine.submit`` 只**登记**应答，引擎在下一条 ``_step`` 才消费它 ⇒ 停止点取"应答之后
+    才出现的公开事实"。本局从 ``phase=PLAY`` 的造局起跑、回合环从 ``GAME_START`` 重跑，
+    故「回合开始前」排在派发帧之后、摸牌阶段之前。
+    """
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.TURN_BEFORE_START))
+
+
+def _turn_before_starts(engine) -> int:
+    """记录流里「回合开始前」的次数（停止点用：重置那一次之后引擎还会再进一次）。"""
+    return len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.TURN_BEFORE_START
+        ]
+    )
+
+
+def test_jie_chenqun_faen_draws_for_the_seat_that_flipped_or_chained():
+    """两个时机各问一次 ⇒ **刚翻面 / 横置的那名角色**摸一张（「令其」≠ 技能持有者）。"""
+    flipped = _faen_engine()
+    flip_player = _FaenScript(True)
+    assert flipped.set_flipped(None, 1, True) is True
+    _settle_after_the_dispatch(flipped, _faen_players(flip_player))
+
+    assert len(flip_player.asked) == 1, "翻面（值真的变了）⇒ 问一次"
+    assert flipped.state.player(1).flipped is True
+    assert len(flipped.state.player(1).hand) == 1, "「令其摸一张牌」= 刚翻面的那名角色"
+    assert flipped.state.player(0).hand == [], "技能持有者自己不摸"
+
+    chained = _faen_engine()
+    chain_player = _FaenScript(True)
+    assert chained.set_chained(None, 1, True) is True
+    _settle_after_the_dispatch(chained, _faen_players(chain_player))
+
+    assert len(chain_player.asked) == 1, "横置是第二个独立时机（两条独立钩子）"
+    assert chained.state.player(1).chained is True
+    assert len(chained.state.player(1).hand) == 1
+    assert chained.state.player(0).hand == []
+
+
+def test_jie_chenqun_faen_does_not_fire_on_a_chain_reset():
+    """**与票 10 同一条口径**（界版回归）：已横置的座位 1 被属性【杀】命中 ⇒ 重置**不问**。
+
+    造局走用户报障的那条真实路径（属性伤害 ⇒ 写入口把 ``chained`` 写回 ``False``），
+    不旁路写入口、也不 mock。断言分三层（与 OL 版那条逐层同形）：① 重置本身照旧派发
+    （框架口径不变）；② 记录流里没有界【法恩】的「是否发动」；③ 那一问若发生过就一定会
+    摸牌（脚本对每问都答"发动"），故"手牌为空"同时证明"没问"与"没摸"。
+    """
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    fire_slash = cards_of_type(pack, "fire_slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero=HERO, hp=3, hp_max=3, hand=(fire_slash,)),
+            SeatSpec(chained=True),
+        ],
+        deck=deck_excluding(pack, fire_slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=1)
+    player = _FaenScript(True)
+    players = _faen_players(player)
+
+    _drive(engine, _at_play_phase)
+    slash = next(
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.card_id == fire_slash
+        and action.targets == (1,)
+    )
+    engine.submit(slash)
+    run_queries(engine, players, lambda e: _turn_before_starts(e) >= 2)
+
+    assert engine.state.player(1).chained is False, "属性伤害命中横置者 ⇒ 结算后立即重置"
+    assert [
+        record.chained for record in _jie_deltas(engine, "chained_change")
+    ] == [False], "派发口径不变（读法一）：重置照旧落一条 chained_change"
+    assert ran_timing(engine, Timing.STATE_CHAINED), (
+        "重置照旧是一次 STATE_CHAINED 事件（票 10 只动技能侧，不动派发）"
+    )
+    assert player.asked == [], "重置不是「横置后」⇒ 连「是否发动」都不问（票 10 的判据被复用）"
+    assert _faen_asks(engine) == [], "记录流里也没有这一问"
+    assert engine.state.player(1).hand == [], "没问 ⇒ 一张都不摸"
+
+
+def test_jie_chenqun_faen_is_declared_and_wired():
+    """**数据行 + ``CATALOG`` + ``descriptions.json`` 三处一致**，且与 OL 那条共用实现。
+
+    加载期 ``loader`` 对启用武将逐条查 ``CATALOG``（数据行声明什么就必须有什么），
+    反方向由 ``test_hero_catalog`` 的 ``actual == expected`` 钉住 ⇒ 三处必须同一次提交。
+    """
+    import json
+    from pathlib import Path
+
+    from sgs.data import load_heroes
+    from sgs.skills import CATALOG, flow_for
+    from sgs.skills.state_after import _faen_chain_is_set
+
+    table = load_heroes("jie_yijiang_2014_mobile")
+    hero = next(hero for hero in table.heroes if hero.id == HERO)
+    assert [(skill.id, skill.name, skill.skill_type.value) for skill in hero.skills] == [
+        ("dingpin", "定品", "NORMAL"),
+        ("faen", "法恩", "NORMAL"),
+    ], "票面 §2：数据行追加第二条技能（与 CATALOG 同一次落地）"
+
+    definition = CATALOG[JIE_FAEN]
+    assert definition.carrier.value == "HERO"
+    assert definition.skill_type.value == "NORMAL"
+    assert definition.locked is False, "牌面写「可以」⇒ 非锁定（派发环先问「是否发动」）"
+    assert definition.requirement == FAEN_FACE
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.STATE_FLIPPED,
+        Timing.STATE_CHAINED,
+    ], "翻面 / 横置是两个独立状态（§13.1 / §8.10）⇒ 两条独立钩子"
+
+    ol = CATALOG[OL_FAEN]
+    flipped_hook, chained_hook = definition.hooks
+    assert flipped_hook.condition is None, (
+        "翻面维持现状：两个方向都算一次事件（Q-W2 = 读法一）⇒ 不设条件"
+    )
+    assert chained_hook.condition is ol.hooks[1].condition, (
+        "**复用**票 10 的方向判据（对象同一）：重置不问、横置问"
+    )
+    assert chained_hook.condition is _faen_chain_is_set
+    assert flipped_hook.flow is ol.hooks[0].flow, "复用 OL 那一条的零步流水线对象"
+    assert chained_hook.flow is flipped_hook.flow
+    flow = flow_for(JIE_FAEN)
+    assert flow is flow_for(OL_FAEN), "两版共用同一个 SkillFlow 对象（票面 §2）"
+    assert flow.name == "chenqun_faen", "不另起 flow 名（票面 §2 明写复用对象）"
+    assert flow.steps == (), "零步：只问「是否发动」（shapes.md §2 第 1 行）"
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "sgs_web" / "descriptions.json"
+    descriptions = json.loads(path.read_text(encoding="utf-8"))["skills"]
+    assert JIE_FAEN in descriptions, "本行有自己的 descriptions.json 条目（不借用 OL 那一行）"
+
+
+def test_jie_chenqun_wording_is_its_own_row():
+    """A4：界版与 OL 同文 ⇒ **两行都存在且牌面逐字相同**（不是借用 / 共享一条声明）。
+
+    ``SkillDef`` 没有 ``shared_with`` 那种派生口子（票 08 的 Answer 已裁定不补）⇒ 两版各自
+    一条 ``CATALOG`` 条目 + 各自一条 ``descriptions.json`` 条目；**牌面**（``requirement`` 与
+    描述的首句）逐字相同，版本口径的说明落在描述后半段（与【矢北】两行同一姿态）。
+    """
+    import json
+    from pathlib import Path
+
+    from sgs.skills import CATALOG
+
+    ours = CATALOG[JIE_FAEN]
+    ol = CATALOG[OL_FAEN]
+    assert ours.skill_id != ol.skill_id, "两条 CATALOG 条目（不是一份共享声明）"
+    assert ours.requirement == FAEN_FACE == ol.requirement, "两版牌面逐字相同"
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "sgs_web" / "descriptions.json"
+    descriptions = json.loads(path.read_text(encoding="utf-8"))["skills"]
+    assert JIE_FAEN in descriptions and OL_FAEN in descriptions, "两行描述都存在"
+    ours_text = descriptions[JIE_FAEN]
+    ol_text = descriptions[OL_FAEN]
+    assert ours_text.startswith(FAEN_FACE), "界版描述以牌面逐字开头"
+    assert ol_text.startswith(FAEN_FACE), "OL 版描述以同一句牌面开头"
+    assert ours_text.split("。", 1)[0] == ol_text.split("。", 1)[0] == FAEN_FACE, (
+        "首句（牌面）逐字相同"
+    )
+    assert "铁索连环后" not in ours_text, "本仓按状态事件读（读法一），不是牌名事件"
+    assert "重置" in ours_text, "界版描述带上票 10 的方向口径（重置不问，界版复用同一判据）"

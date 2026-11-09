@@ -265,9 +265,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 177 → 178（数据行同一条武将，启用版本 / 真名都不变）。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204、
     # 武将技 178 → 180（装备 22 不变：本票两条都是武将技）。
-    assert len(CATALOG) == 204
-    assert len(equipment) == 22, "装备不变：本票两条是武将技"
-    assert len(heroes) == 180
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205、武将技 180 → 181
+    # （数据行同一条武将，启用版本 / 真名都不变；装备 22 不变）。
+    assert len(CATALOG) == 205
+    assert len(equipment) == 22, "装备不变：本票加的是武将技"
+    assert len(heroes) == 181
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -304,7 +306,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 175 → 176；票 09 补【秉壹】⇒ 177。
     # yijiang-2014 票 08（W4b）：同一个陈群补【法恩】⇒ 177 → 178。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条 ⇒ 178 → 180。
-    assert len(expected) == 180
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 180 → 181。
+    assert len(expected) == 181
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2043,6 +2046,13 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
         "任何角色被横置都要问陈群，把持有者换成别人后条件仍然成立，没有『我』可自校"
         "（与【奋威】/【定乱】/【行殇】同一类「不关于我」）"
     ),
+    "hero.jie_chenqun_mobile.faen": (
+        "yijiang-2014-round2 票 11（P2）界陈群移动版【法恩】：牌面与 OL 陈群【法恩】**逐字"
+        "相同** ⇒ 两条 `Hook` 与方向判据都是**同一组对象**（`condition is` 判据直指票 10 的"
+        "`_faen_chain_is_set`），故豁免理由与上一格**同源**：条件关于『这次变化的方向』、"
+        "不关于持有者，换成别人当持有者后条件仍然成立，没有『我』可自校。条目单独登记是按"
+        "机械闸的键（技能 id）走——每个带条件的技能各一格，不是第二份理由"
+    ),
 }
 """**豁免表**：技能 id → "为什么它的条件不需要持有者判据"。
 
@@ -2050,6 +2060,8 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
 "正表 ∪ 这张表 == 全部带条件的钩子"，故新增一条同型钩子时逼你二选一（写探针 / 登记豁免）。
 M6 票 07 起不再为空：【奋威】的条件是"这张牌"的属性，不是"我"的属性（见上表理由）。
 yijiang-2014-round2 票 10 加【法恩】：条件是"往哪个方向变"，同样不是"我"的属性。
+票 11 加界陈群移动版【法恩】：与 OL 那一格**同一组判据对象**（牌面逐字相同），按技能 id
+各登记一格是机械闸的口径，不是第二份理由。
 """
 
 
@@ -2074,6 +2086,7 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
         "hero.feng_yujin.dingluan_mark",
         "hero.caopi_mobile.xingshang",
         "hero.chenqun.faen",
+        "hero.jie_chenqun_mobile.faen",
     }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
         assert reason.strip(), f"{skill_id} 的豁免理由不能为空"
@@ -2484,6 +2497,10 @@ SKILL_SHAPE: dict[str, str] = {
     # `PickCards` → `PickSeats` 流水线，判定与三分支住 effect；非锁定、无钩子 / 接缝 /
     # 修饰器）⇒ 主动技能。
     "hero.jie_chenqun_mobile.dingpin": "主动技能",
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（`STATE_FLIPPED` /
+    # `STATE_CHAINED` 两条状态位钩子 + **零步流水线**，回调与 OL 陈群【法恩】同一组对象；
+    # 非锁定 ⇒ 机械判据落在「零步技能」格）。
+    "hero.jie_chenqun_mobile.faen": "零步技能",
     # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（A 族 + 单步 `PickCards` 流水线，
     # 同色 / 异色的两段摸牌住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
     "hero.jie_guyong_mobile.shenxing": "主动技能",
@@ -2549,7 +2566,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2014 票 09：顾雍【秉壹】（`PHASE_FINISH` 零步流水线 + 手写座位多选面）
     # ⇒ 37 → 38。
     # yijiang-2014 票 08（W4b）：陈群【法恩】（两条状态位钩子 + 零步流水线）⇒ 38 → 39。
-    "零步技能": 39,
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（同一份零步流水线，第二条
+    # `CATALOG` 条目）⇒ 39 → 40。
+    "零步技能": 40,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2755,7 +2774,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201。
     # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线）⇒ 201 → 202。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 204
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步技能）⇒ 204 → 205。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 205
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2907,7 +2927,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线，形态归「零步技能」）⇒ 内 108 → 109。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】（A 族两步流水线，形态归
     # 「触发技能」）⇒ 内 109 → 110；【矢北】（锁定技、无 flow）⇒ 外 93 → 94。
-    assert len(inside) == 110
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步流水线）⇒ 内 110 → 111。
+    assert len(inside) == 111
     assert len(outside) == 94
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
