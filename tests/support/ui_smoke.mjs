@@ -4338,6 +4338,101 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!passSent && passSent.kind === "Pass", JSON.stringify(passSent));
 }
 
+/* 票 15（yijiang-2014-round2；合成局面）：界【渐营】① 的「是否发动」**默认 = 发动**。
+ *
+ * 形状取自真投影（本文件之外的 `tests/test_web.py::_session_at_jianying_activation` 钉
+ * 服务端那一半）：技能 id 同时带 ② 的出牌阶段预发动 ⇒ 视图里 `preactivated: true`，而
+ * ① 这一问自己**没有**清单。旧界面因此把它画成"被动入口"：默认答案是「放弃」，玩家得先
+ * 点一次【渐营】技能按钮才能提交。服务端对这条技能下发 `default_choice: "activate"`：
+ * 「提交」直接送候选里那条 `ActivateSkill`，提示条改口径；右端「放弃」仍是候选里的 `Pass`。
+ *
+ * **opt-in 的对照组**（逐字段相同、只是不带那个键）：仍是被动入口、提交键灰着、没有
+ * 默认候选——其余「是否发动」（苦肉 / 洛神 / …）因此一字不变。
+ */
+{
+  const skills = (skillId, name) => ([{
+    skill_id: skillId, name, skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { passive: false, requirement: "", convert_sources: [] },
+  }]);
+  const activationPending = (skillId, seq, extra = {}) => ({
+    kind: "SKILL_ACTIVATION", actor: 0, seq,
+    prompt: "是否发动该技能？", skill_id: skillId,
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: skillId, answers_seq: seq, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    ...extra,
+  });
+
+  // ① 声明的技能：不点技能按钮、直接点「提交」⇒ 送出的就是那条 `ActivateSkill`。
+  const jianying = activationPending(
+    "hero.jie_jushou_mobile.jianying", 9701, { default_choice: "activate" });
+  const jianyingView = synthView(jianying);
+  jianyingView.skills = skills("hero.jie_jushou_mobile.jianying", "渐营");
+  ui.state.view = jianyingView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(jianyingView);
+
+  check("㉿JY1 界【渐营】①：默认答案 = 发动（提交键可点、不用先点技能按钮）",
+    ui.renderKind(jianying, jianying.legal_actions) === "preactivation-entry"
+      && ui.state.selectedOption === null
+      && $("btn-submit").disabled === false
+      && $("t-options").children.length === 0,
+    `kind=${ui.renderKind(jianying, jianying.legal_actions)}`
+      + ` selected=${ui.state.selectedOption} submit=${$("btn-submit").disabled}`
+      + ` options=${$("t-options").children.length}`);
+  check("㉿JY2 界【渐营】①：buildAction = 候选里那条 ActivateSkill（不是 Pass、不是手拼）",
+    (() => {
+      const built = ui.buildAction();
+      return !!built && built.kind === "ActivateSkill"
+        && built.skill_id === "hero.jie_jushou_mobile.jianying"
+        && jianying.legal_actions.some((a) => JSON.stringify(a) === JSON.stringify(built));
+    })(), JSON.stringify(ui.buildAction()));
+  check("㉿JY3 界【渐营】①：提示条改成「点右端「提交」确认发动，或「放弃」取消」，页脚写明将提交什么",
+    $("t-target-hint").textContent.includes("提交")
+      && $("t-target-hint").textContent.includes("确认发动")
+      && $("t-target-hint").textContent.includes("放弃")
+      && $("t-choice").textContent.includes("将提交：发动【渐营】"),
+    `hint="${$("t-target-hint").textContent}" choice="${$("t-choice").textContent}"`);
+  const beforeDefault = calls.length;
+  await clickAndWait($("btn-submit"));
+  const defaultSent = calls.length > beforeDefault
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿JY4 界【渐营】①：不点技能按钮、直接点「提交」⇒ 送出 ActivateSkill",
+    !!defaultSent && defaultSent.kind === "ActivateSkill"
+      && defaultSent.skill_id === "hero.jie_jushou_mobile.jianying",
+    JSON.stringify(defaultSent));
+
+  // ② 对照组：同形载荷**不带** `default_choice` ⇒ 与改动前逐字节同一条被动入口。
+  const other = activationPending("demo.passive_default_off", 9702);
+  const otherView = synthView(other);
+  otherView.skills = skills("demo.passive_default_off", "示例被动");
+  ui.state.view = otherView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(otherView);
+
+  check("㉿JY5 没声明的「是否发动」仍是旧的被动入口（没有默认候选、提交键灰着）",
+    ui.renderKind(other, other.legal_actions) === "preactivation-entry"
+      && ui.buildAction() === null
+      && $("btn-submit").disabled === true
+      && !$("t-target-hint").textContent.includes("确认发动"),
+    `built=${JSON.stringify(ui.buildAction())} submit=${$("btn-submit").disabled}`
+      + ` hint="${$("t-target-hint").textContent}"`);
+  const beforeOtherPass = calls.length;
+  await clickAndWait($("btn-cancel"));
+  const otherPass = calls.length > beforeOtherPass
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿JY6 没声明的「是否发动」点「放弃」仍送出 Pass（其余询问不变）",
+    !!otherPass && otherPass.kind === "Pass", JSON.stringify(otherPass));
+}
+
 /* ⑯ M6 票 23 报障：被动入口的**两步**清单，选完牌要能走到第 2 步。
  *
  * 用户实机（界【清俭】：选牌 → 交给一名其他角色）：第 1 步选满牌后「确认发动」是灰的，

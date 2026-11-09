@@ -907,6 +907,28 @@ def test_jie_jianying_is_not_offered_without_a_matching_previous_card():
     assert _jie_asked(engine, JIE_JIANYING) == [], "♥5 之后用 ♣A：花色点数都不同"
 
 
+def test_jie_jianying_activation_ask_is_unchanged_by_the_interface_default():
+    """票 15 只改**界面默认**：服务端询问仍是裸的 [ActivateSkill, Pass]，没有默认候选字段。
+
+    投影侧的 ``default_choice`` 是展示层事实（不进记录流、不进 ``Query``）：③ 的可选性与
+    ④ 的规则语义都不因"提交 = 同意"而改变——放弃永远还在候选里。
+    """
+    _, engine = _jie_ready(hand=(HEART_BOW, 9))
+
+    _jie_use_and_settle(engine, HEART_BOW)
+    _jie_use_and_settle(engine, 9)
+
+    asked = _jie_asked(engine, JIE_JIANYING)
+    assert len(asked) == 1, "同花色 ⇒ 问一次"
+    query = asked[0]
+    assert [action.kind for action in query.legal_actions] == ["ActivateSkill", "Pass"], (
+        "① 的询问仍是「发动 / 放弃」两条裸候选：界面默认不改服务端可选性"
+    )
+    assert "default_choice" not in query.model_dump(), (
+        "默认候选是投影字段，不长在询问模型上（记录流逐字节不变）"
+    )
+
+
 def test_jie_jianying_draws_on_the_same_suit_and_declining_draws_nothing():
     """同花色 ⇒ 问一次；答发动摸牌堆顶那一张。"""
     state, engine = _jie_ready(hand=(HEART_BOW, 9))

@@ -352,6 +352,16 @@ function buildAction() {
   // 否则界面显示"将提交：放弃"、而 `buildAction()` 在手选模式下因为没有焦点而返回 null。
   const only = directAction(pending);
   if (only) return withPicks(only);
+  // 「是否发动」的**默认候选**（yijiang-2014-round2 票 15）：服务端只对**显式声明**的技能
+  // 下发 `pending.default_choice === "activate"`（界【渐营】① 是唯一 opt-in）。玩家没选任何
+  // 候选时，「提交」就是同意发动——返回候选里那条 `ActivateSkill`，不手拼 Action。
+  // 其余「是否发动」（苦肉 / 洛神 / …）**没有这个键** ⇒ 不命中，行为逐字节不变。
+  // 只认**唯一**那条 `ActivateSkill`：多条候选是"选一条发动"的面（`renderActivationFace`），
+  // 界面不替玩家挑；那种面本来也不接「提交」。
+  if (state.selectedOption === null && pending.default_choice === "activate") {
+    const activates = actions.filter((action) => action.kind === "ActivateSkill");
+    if (activates.length === 1) return withPicks(activates[0]);
+  }
   // **显式选中的候选优先于手选**：技能按钮（`ActivateSkill`）住在出牌阶段的候选里，
   // 点了它就是"我就要发这个技能"——它没有焦点也没有目标，走手选分支会返回 null。
   if (state.selectedOption !== null) {

@@ -110,6 +110,27 @@ HARVEST_REQUIREMENT = "从亮出的牌里选一张获得"
 ``harvest.hint`` 读同一个常量——前端只显示，不抄第二份文案。
 """
 
+_DEFAULT_ACTIVATE_SKILLS: frozenset[str] = frozenset(
+    {hero_skill_id("jie_jushou_mobile", "jianying")}
+)
+"""「是否发动」询问**默认 = 发动**的技能（yijiang-2014-round2 票 15；用户 2026-11-09 逐字）。
+
+**opt-in 单技能**：登记在这里的技能，其 ``SKILL_ACTIVATION`` 载荷才带
+``pending.default_choice = "activate"``；不在表里的「是否发动」（苦肉 / 洛神 / …）**连键都
+不发**（不是发 ``None``）⇒ 其余询问的载荷逐字节不变，前端照旧默认提交 ``Pass``。
+
+**为什么是投影层的登记表，而不是技能声明上的开关**（票面 §4 的路线 B 原话是"开关住
+``use_after.py`` 的 ``JIE_JIANYING`` 声明处"）：那条技能 ① 的声明实际住在
+``sgs/skills/active.py::_JIE_JIANYING``（``use_after.py`` 里只有 OL 沮授的 ``JIANYING``），
+而它复用的零步流水线 :data:`~sgs.skills.use_after.JIANYING_FLOW` 与 OL 那一版是**同一个
+对象**——开关加在 flow / Hook 上会连带把 OL 沮授也改掉，违反"只改这条技能"。投影按
+**全限定技能 id** 认技能，与 ``judgment_reveal`` 段读 :data:`~sgs.skills.LUOSHEN` /
+:data:`~sgs.skills.JIE_LUOSHEN` 是同一姿态（展示层认 id，引擎不认）。
+
+取名 **default_choice**（前端键）而不是 `default_action`：候选仍是 ``legal_actions`` 里的
+那一条，界面不另造 Action——"默认"只是**选中**哪条候选，不是第二种提交形状。
+"""
+
 
 def _card_lookup(state: Any) -> dict[int, Any]:
     """``card_id → CardRef``：展示层解析转化牌来源牌的唯一查找表。"""
@@ -2413,6 +2434,15 @@ def pending_payload(
     payload["activation_preactivations"] = _preactivation_payload(
         getattr(query, "activation_preactivations", None) or {}
     )
+    # 「是否发动」的**默认候选**（yijiang-2014-round2 票 15 / 路线 B）：投影按
+    # :data:`_DEFAULT_ACTIVATE_SKILLS` 登记表下发；前端 ``answer.js:buildAction`` 在玩家
+    # 没选任何候选时据此返回候选里那条 ``ActivateSkill``。**只有登记过的技能才带这个键**
+    # ——其余「是否发动」（苦肉 / 洛神 / …）载荷逐字节不变（键的缺席就是那个保证）。
+    if (
+        str(getattr(query, "kind", "")) == "SKILL_ACTIVATION"
+        and str(getattr(query, "skill_id", "")) in _DEFAULT_ACTIVATE_SKILLS
+    ):
+        payload["default_choice"] = "activate"
     if foreign:
         _mask_foreign_preactivations(payload)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。

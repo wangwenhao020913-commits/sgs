@@ -471,6 +471,38 @@ const seatMulti = ui.buildAction();
 if (!seatMulti) throw new Error("buildAction 没拼出座位多选面的 SelectOptions（点击夹具失效）");
 ui.state.sessionId = null;
 
+/* 票 15：界【渐营】① 的「是否发动」默认 = **发动**（用户 2026-11-09 逐字）。
+ *
+ * 服务端只对**显式声明**的技能下发 `pending.default_choice === "activate"`；玩家没点任何
+ * 候选（`selectedOption = null`）时，`buildAction()` 必须返回候选里那条裸 `ActivateSkill`
+ * ——「提交」就是同意，不必先点技能按钮。对照组 = **逐字段相同但不带该键**的载荷：
+ * `buildAction()` 仍是 null（其余「是否发动」苦肉 / 洛神 / … 一字不变）。
+ *
+ * 只喂形状：合法性仍由引擎按 `legal_actions` 裁决，探针不另算规则。 */
+resetState();
+const jianyingPending = {
+  kind: "SKILL_ACTIVATION", actor: 0, seq: 100,
+  prompt: "是否发动【渐营】？", skill_id: "hero.jie_jushou_mobile.jianying",
+  legal_actions: [
+    { kind: "ActivateSkill", skill_id: "hero.jie_jushou_mobile.jianying", answers_seq: 100, picks: [], choices: [] },
+    { kind: "Pass", answers_seq: 100 },
+  ],
+  candidate_index: {}, virtual_index: {}, option_seats: {},
+  context: null, preactivations: {}, preactivation: [],
+  default_choice: "activate",
+};
+ui.state.view = { human_seat: 0, pending: jianyingPending };
+ui.state.selectedOption = null;
+const defaultActivate = ui.buildAction();
+if (!defaultActivate) throw new Error("buildAction 没把 default_choice 变成那条 ActivateSkill");
+
+// 对照组：同形载荷但**没有**这个键（服务端对未登记技能就是不发键，不是发 null）。
+const otherActivationPending = { ...jianyingPending, seq: 101 };
+delete otherActivationPending.default_choice;
+ui.state.view = { human_seat: 0, pending: otherActivationPending };
+ui.state.selectedOption = null;
+const noDeclaredDefault = ui.buildAction();
+
 /* 合成反例：同一张借刀卡的**展示形态**原样塞进 UseCard.card（实机 400 的形状）。 */
 const decorated = {
   kind: "UseCard",
@@ -517,6 +549,13 @@ process.stdout.write(
           max_selected: seatMultiPending.max_selected,
           answers_seq: seatMultiPending.seq,
         },
+      },
+      // 票 15：「是否发动」的默认候选 —— 显式声明的技能提交 = 发动；不带该键的对照组仍是 null。
+      {
+        name: "default_activate",
+        action: defaultActivate,
+        legal_actions: jianyingPending.legal_actions,
+        without_declaration: noDeclaredDefault,
       },
     ],
     decorated,

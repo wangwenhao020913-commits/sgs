@@ -92,7 +92,12 @@ from sgs_web.projection import (  # noqa: E402
 from sgs_web.replay import list_runs, load_run, replay_journal, save_run  # noqa: E402
 from sgs_web.session import Session, StaleAnswer  # noqa: E402
 from sgs_web.timeout import fallback_action  # noqa: E402
-from support.positions import SeatSpec, build_state, cards_of_type  # noqa: E402
+from support.positions import (  # noqa: E402
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+)
 from support.scripts import PassPlayer, run_queries  # noqa: E402
 
 TWO_PLAYERS = {"player_count": 2}
@@ -2560,6 +2565,118 @@ def test_the_409_bare_query_does_not_get_an_arrange_spec() -> None:
     assert payload is not None
     assert payload["arrange"] is None, (
         "没有引擎 ⇒ 没有 SkillDef.deck_arrange ⇒ 投影不得凭空造一份排列规格"
+    )
+
+
+# ---------------------------------------------------------------------------
+# yijiang-2014-round2 票 15（P6）：界【渐营】① 的「是否发动」默认 = **发动**
+#
+# 这是**界面默认值**，不是规则语义：服务端询问一字不改（仍是裸的 [ActivateSkill, Pass]），
+# 投影只在**显式声明**的技能上下发 `pending.default_choice = "activate"`。界【渐营】① 是
+# 唯一 opt-in——它复用 OL 沮授【渐营】的条件与零步流水线，而 ② 的预发动把同一个技能 id 的
+# `SkillDef.preactivated` 置真，界面因此曾把它画成"被动入口"：默认答案是「放弃」。
+# ---------------------------------------------------------------------------
+
+JIE_JIANYING = "hero.jie_jushou_mobile.jianying"
+
+
+def _session_at_jianying_activation() -> Session:
+    """真引擎：座位 0 = 界沮授移动版，本阶段连出两张 ♥5 ⇒ 停在【渐营】① 的「是否发动」。
+
+    两张都是装备牌（【麒麟弓】/【赤兔】，同花色同点数），使用目标是**自己**（装备于自己）
+    故两张都能直接推进；局面与 ``test_hero_jie_yijiang.py`` 的 ``_jie_ready`` 同一构造。
+    会话壳只用来走**唯一的投影产出路径**（§6：读取方断言走真实产出路径）。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    bow = cards_of_type(pack, "qilin_bow")[0]
+    horse = cards_of_type(pack, "chitu")[0]
+    assert pack.deck.cards[bow].suit == pack.deck.cards[horse].suit, (
+        "【麒麟弓】与【赤兔】必须同花色（【渐营】① 的触发条件）"
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(bow, horse)),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(pack, bow, horse),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    for _ in range(400):
+        if engine.pending is not None:
+            break
+        engine._step()  # noqa: SLF001 - 与 test_hero_jie_yijiang 的推进器同一手法
+    assert engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE
+
+    for card_id in (bow, horse):
+        query = engine.pending
+        action = next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, UseCard) and action.card.card_id == card_id
+        )
+        engine.submit(action)
+        for _ in range(400):
+            if engine.pending is not None or engine.finished:
+                break
+            engine._step()  # noqa: SLF001
+
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION, (
+        f"同花色第二张之后应停在【渐营】① 的询问（实际 {getattr(query, 'kind', None)}）"
+    )
+    assert query.skill_id == JIE_JIANYING
+
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=2)
+    session.engine = engine
+    session.human_seat = 0
+    return session
+
+
+def test_the_jianying_activation_payload_defaults_to_activate() -> None:
+    """界【渐营】① 的「是否发动」载荷带 ``default_choice == "activate"``（票 15 §5 第 1 条）。"""
+    session = _session_at_jianying_activation()
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert payload["kind"] == "SKILL_ACTIVATION"
+    assert payload["skill_id"] == JIE_JIANYING
+    assert payload["default_choice"] == "activate", (
+        "界【渐营】① 是唯一 opt-in：投影必须下发默认候选 = 发动"
+    )
+    assert [action["kind"] for action in payload["legal_actions"]] == [
+        "ActivateSkill",
+        "Pass",
+    ], "默认值是**界面**事实：服务端候选一字不改（仍可放弃）"
+
+
+def test_other_activation_payloads_do_not_carry_a_default_choice() -> None:
+    """其余「是否发动」**没有**这个字段（不是发 null）：只有显式声明的技能才变。
+
+    取样 = 诸葛亮【观星】的真会话第一问（同文件既有用例已钉它是 ``SKILL_ACTIVATION``）：
+    同为「是否发动」，且**不在** opt-in 表里 ⇒ 载荷里键的**缺席**保证其余询问逐字节不变。
+    """
+    session = Session(
+        seed=7,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+        my_hero="zhugeliang",
+    )
+    query = session.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION
+    assert query.skill_id == GUANXING
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert "default_choice" not in payload, (
+        "没有显式声明的「是否发动」（观星 / 苦肉 / 洛神 / …）不得长出默认候选字段"
     )
 
 

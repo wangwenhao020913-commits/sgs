@@ -601,16 +601,23 @@ function renderDiscard(pending) {
 function renderPreativationEntry(pending) {
   const skill = preactivatedSkill(pending);
   const manifest = skill ? preactivationManifest(pending, skill.skill_id) : null;
+  // 默认答案 = 发动（yijiang-2014-round2 票 15）：服务端只对**显式声明**的技能下发
+  // `default_choice`（界【渐营】① 是唯一 opt-in；它的技能 id 同时带 ② 的预发动，故
+  // `preactivated` 为真、这一问自己没有清单）。这一面的「提交」就是同意发动，提示条
+  // 因此不写"点技能进入预发动"；没有这个键的被动入口一字不变。
+  const defaultActivate = pending.default_choice === "activate";
   const hint = $("t-target-hint");
   if (hint) {
     const name = skill ? skill.name : pending.skill_id;
     const passive = Boolean(skill && skill.ui && skill.ui.passive);
     // U1-06：被动 / 锁定技按钮本身不动作（只悬停看描述）；被动入口走浮动选项行。
-    hint.textContent = passive
-      ? `点下方「进入预发动【${name}】」；被动技按钮本身只说明，悬停可看描述。`
-        + "或点右端「放弃」跳过这次时机（放弃后不再询问）。"
-      : `点技能【${name}】进入预发动；`
-        + "或点右端「放弃」跳过这次时机（放弃后不再询问）。";
+    hint.textContent = defaultActivate
+      ? "点右端「提交」确认发动，或「放弃」取消。"
+      : (passive
+        ? `点下方「进入预发动【${name}】」；被动技按钮本身只说明，悬停可看描述。`
+          + "或点右端「放弃」跳过这次时机（放弃后不再询问）。"
+        : `点技能【${name}】进入预发动；`
+          + "或点右端「放弃」跳过这次时机（放弃后不再询问）。");
   }
   // 「是否发动」的浮动选项行：进入清单是唯一选项；`Pass` 是右端动作（U1-03），
   // `取消` 的文案在这里就是「放弃」（`setActionLabels` 的被动入口分支）。
@@ -1034,6 +1041,18 @@ function refreshSubmit(pending) {
     return;
   }
   if (isPassivePreativation(pending) && state.preactivation === null) {
+    // 默认答案 = 发动（yijiang-2014-round2 票 15）：服务端只对**显式声明**的技能下发
+    // `default_choice`（界【渐营】① 是唯一 opt-in）。这一问的「提交」= 同意发动（送出
+    // 候选里那条 `ActivateSkill`），右端「放弃」仍是候选里的那条 `Pass`；页脚与技能直提态
+    // 同源（中文技能名来自服务端），不再写"可以提交：放弃"——那会在默认动作是**发动**时
+    // 说反话。没有这个键的被动入口（苦肉 / 洛神 / …）末尾两句一字不变。
+    if (pending.default_choice === "activate") {
+      const activate = selectedSkillAction(pending, pending.legal_actions || []);
+      $("t-choice").textContent = ready && activate
+        ? `将提交：${skillActionLabel(activate)}`
+        : "";
+      return;
+    }
     $("t-choice").textContent = ready ? "可以提交：放弃。" : "点「进入预发动」，或点「放弃」。";
     return;
   }

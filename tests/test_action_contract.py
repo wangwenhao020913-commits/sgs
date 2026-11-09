@@ -127,6 +127,7 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "unknown_zone_multipick",
         "unknown_zone_single_pick",
         "seat_multi_select",
+        "default_activate",
     }, f"探针用例集合变了：{sorted(actions)}"
 
     borrowed = actions["borrowed_sword_preactivation"]
@@ -214,6 +215,42 @@ def test_the_two_row_watch_face_submits_an_ascending_select_cards() -> None:
     assert parsed.kind == "SelectCards"
     assert parsed.picks == (0, 1, 2, 3)
     assert parsed.answers_seq == 98
+
+
+def test_the_default_activate_answer_round_trips_through_the_server_action_parser() -> None:
+    """票 15：界【渐营】① 的「是否发动」默认答案 = 服务端候选里那条裸 ``ActivateSkill``。
+
+    探针喂的载荷与真投影同形（``pending.default_choice == "activate"``），且**没点任何
+    候选**（``selectedOption = null``）：``buildAction()`` 必须返回那条 ``ActivateSkill``，
+    ``parse_action`` 原样接受（跨语言形状不变，仍是 ``kind / skill_id / picks / choices /
+    answers_seq`` 五格）。**默认动作不是第二种提交形状**——它必须逐字段就是候选里的那一条。
+
+    对照组 = 逐字段相同但**不带该键**的载荷：``buildAction()`` 仍是 ``null``。服务端对
+    未登记技能根本不发这个键（不是发 ``null``）⇒ 其余「是否发动」（苦肉 / 洛神 / …）不变。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}["default_activate"]
+    action = case["action"]
+
+    assert action is not None, "带 default_choice 的「是否发动」提交不出候选（默认值没接上）"
+    assert action["kind"] == "ActivateSkill"
+    assert action["skill_id"] == "hero.jie_jushou_mobile.jianying"
+    assert set(action) == {"kind", "skill_id", "picks", "choices", "answers_seq"}, (
+        f"裸 ActivateSkill 仍是五格（展示字段一个都不许上行）：{sorted(action)}"
+    )
+    assert action["picks"] == [] and action["choices"] == [], (
+        "① 是零步流水线：默认动作不带选牌 / 选项"
+    )
+    assert action in case["legal_actions"], (
+        "默认动作必须逐字段命中 legal_actions 的那一条（界面不另造 Action）"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.kind == "ActivateSkill"
+    assert parsed.skill_id == "hero.jie_jushou_mobile.jianying"
+    assert parsed.answers_seq == 100
+    assert case["without_declaration"] is None, (
+        "没有 default_choice 的同形「是否发动」不得默认提交（opt-in 的对照组）"
+    )
 
 
 def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
@@ -396,4 +433,4 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 9
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 10
