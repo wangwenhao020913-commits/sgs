@@ -1491,21 +1491,115 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                     sizes = {len(combo) for combo in entry["combos"]}
                     assert entry["min_targets"] == min(sizes)
                     assert entry["max_targets"] == max(sizes)
-                    # 键名是**契约**：界面按 `card` / `pool` / `min_targets` / `max_targets` / `combos`
-                    # 读；只断言"值算得对"而不断言键名，会让"界面读了一个不存在的键"这类
-                    # 静默失配穿过全部测试（前端读不到只会退化，不会抛错）。
-                    assert set(entry) == {"card", "pool", "min_targets", "max_targets", "combos"}, (
-                        f"候选索引的键集合变了：{sorted(entry)}；改键名必须同时改 app.js 的读法"
-                    )
+                    # 键名是**契约**：界面按 `card` / `pool` / `min_targets` / `max_targets` / `combos` /
+                    # `self_only` 读；只断言"值算得对"而不断言键名，会让"界面读了一个不存在的键"
+                    # 这类静默失配穿过全部测试（前端读不到只会退化，不会抛错）。
+                    assert set(entry) == {
+                        "card", "pool", "min_targets", "max_targets", "combos", "self_only",
+                    }, f"候选索引的键集合变了：{sorted(entry)}；改键名必须同时改 app.js 的读法"
                     assert isinstance(entry["card"], dict) and "card_id" in entry["card"]
                     assert isinstance(entry["pool"], list)
                     assert isinstance(entry["combos"], list) and entry["combos"]
                     assert isinstance(entry["min_targets"], int)
                     assert isinstance(entry["max_targets"], int)
+                    assert isinstance(entry["self_only"], bool)
                 checked += 1
                 session.submit_answer(query.legal_actions[0])
 
     assert checked > 200, f"取样太少（{checked} 次询问），断言谈不上机械"
+
+
+def test_a_self_only_target_card_is_still_clickable_in_a_two_player_game() -> None:
+    """【帷幕】把黑色 1–2 目标锦囊的池削到只剩使用者 ⇒ 索引不得把它标成"自用牌"。
+
+    issue 19 的复现：2 人局（我 + 贾诩）的黑色【铁索连环】与【无中生有】在**形状上逐字
+    相同**（``pool == [0]``、``combos == [[0]]``、``min == max == 1``）。只靠池形状，界面
+    分不出"规则说只能对自己"与"这一问恰好只剩自己"，于是把前者的自己座位也当自用牌处理
+    ——座位既不高亮也不接点击，牌点得亮却指定不了目标。故判据必须是服务端转发的**规则
+    事实**：铁索 ``self_only is False``、【无中生有】``self_only is True``（共用同一个
+    ``pool == [0]`` 的形状）。
+    """
+    from sgs.data import Color, load_content_pack
+
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    iron = next(
+        card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.type == "iron_chain" and color_of_suit(card.suit) is Color.BLACK
+    )
+    exnihilo = next(
+        card_id for card_id, card in enumerate(pack.deck.cards) if card.type == "ex_nihilo"
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=3, hp_max=3, hand=(iron, exnihilo)),
+            SeatSpec(hero="jiaxu_mobile"),
+        ],
+        deck=deck_excluding(pack, iron, exnihilo),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    query = _play_query(state)
+    payload = pending_payload(query, human_seat=0)
+    assert payload is not None
+    assert any(
+        action.get("kind") == "UseCard"
+        and (action.get("card") or {}).get("card_id") == iron
+        and action.get("targets") == [0]
+        for action in payload["legal_actions"]
+    ), "前提：引擎照旧给出「只对自己」的使用候选（引擎事实由 test_hero_lin 钉）"
+
+    chain = payload["candidate_index"][str(iron)]
+    self_card = payload["candidate_index"][str(exnihilo)]
+
+    assert chain["pool"] == [0] and chain["combos"] == [[0]], "前提：帷幕削池 ⇒ 只剩自己"
+    assert self_card["pool"] == [0] and self_card["combos"] == [[0]]
+    assert (chain["min_targets"], chain["max_targets"]) == (1, 1)
+    assert (self_card["min_targets"], self_card["max_targets"]) == (1, 1)
+    assert chain["self_only"] is False, (
+        "【铁索连环】不是自用牌：池剩自己只是【帷幕】削出来的结果，界面必须仍画可指定的座位"
+    )
+    assert self_card["self_only"] is True, "【无中生有】才是规则自用牌（保持不画座位高亮）"
+
+
+def test_a_peach_for_another_dying_seat_is_not_marked_self_only() -> None:
+    """`self_only` = "规则自用 **且** 这一问的目标就是使用者"：求桃别人时必须是 ``False``。
+
+    【桃】的 ``TargetRule.self_only`` 为真，但濒死求桃的目标是**濒死者**。若把载荷读成裸的
+    规则位（不求值目标），求桃窗口里濒死者的座位就会被当成"自用牌"而不画可选高亮——与
+    issue 19 同一类"座位点不亮"，只是换了个场景。故这一面必须由**产品调用点**（真的
+    ``legal_actions_for`` 求桃候选）钉住，而不是只写在注释里。
+    """
+    from sgs.effects import legal_actions_for
+
+    pack = _context_pack()
+    peach = cards_of_type(pack, "peach")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(peach,)), SeatSpec(hero="diaochan"), SeatSpec(hp=1)],
+        deck=deck_excluding(pack, peach),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    query = PeachQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.NEAR_DEATH_AT,
+        prompt="座位 2 处于濒死状态：是否对其使用【桃】？",
+        legal_actions=tuple(
+            legal_actions_for(state, 0, QueryKind.PEACH, answers_seq=1, dying=2)
+        ),
+        view=project(state, 0),
+        dying=2,
+    )
+    entry = candidate_index(query)[str(peach)]
+
+    assert entry["pool"] == [2] and entry["combos"] == [[2]], "前提：目标是濒死的座位 2"
+    assert entry["self_only"] is False, (
+        "【桃】的规则是自用牌，但这一问的目标是别人 ⇒ 不能标成 self_only（否则座位点不亮）"
+    )
 
 
 def test_the_candidate_index_for_a_halberd_borrowed_window_keeps_bn_in_every_combo() -> None:
@@ -2685,6 +2779,10 @@ def test_the_candidate_index_never_carries_rule_judgements() -> None:
 
     取样的判据：索引里的座位**恰好**等于该牌候选的目标并集——多一个（"我算出来的合法目标"）
     或少一个（"我过滤掉了无效目标"）都会判红。这条断言把"别在接入层重新实现规则"钉死。
+
+    ``self_only`` 不违反这一条：它是**转发的牌声明**（行为表 ``TargetRule.self_only`` +
+    "候选组合的目标就是使用者"），不是接入层重新算出来的合法性；池本身仍逐座位等于候选并集
+    （issue 19）。
     """
     for seed in (13, 29):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)

@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 from sgs.data import (
+    Color,
     Identity,
     Kingdom,
     RuleConfig,
@@ -2363,6 +2364,39 @@ def test_jie_jianying_takes_the_only_legal_name_directly():
         if name not in _jie_step_disabled(steps[1])
     )
     assert usable == ("杀",)
+
+
+def test_jie_jianying_accepts_any_own_card_as_source_regardless_of_its_own_legality():
+    """② 的第 1 步（源牌）**不看这张牌自己能不能用**——票 19 证伪的那一半，这里钉成不变量。
+
+    票面怀疑"【渐营】的合法性检验搞到源牌上了"。实测不是：源牌步 = ``PickCards(zones=
+    HAND/EQUIP, key="card")``，候选是**自己的每一张手牌 / 装备牌**；牌名合法性只落在**产物**
+    （``_jie_jianying_name_disabled`` / ``_jie_jianying_entry``），``check_targets`` 也只对
+    产物调用。用一张黑色【借刀杀人】钉住：2 人局双方都没武器 ⇒ 它自己
+    ``check_targets == ()``（一个合法目标都没有），但源牌步里照样可选、不置灰。
+    """
+    from sgs.effects import check_targets
+
+    borrowed = next(
+        card_id
+        for card_id, card in enumerate(PACK.deck.cards)
+        if card.type == "borrowed_sword" and color_of_suit(card.suit) is Color.BLACK
+    )
+    state, engine = _jie_ready(hand=(borrowed,), hp=2, hp_max=3)
+
+    assert check_targets(state, 0, state.card(borrowed)) == (), (
+        "前提：这张牌自己此刻一个合法目标都没有（双方都没武器）"
+    )
+    steps = _jie_manifest(engine.pending)
+    assert steps and steps[0].name == "card", (
+        f"清单第一步 = 选源牌，实得 {[step.name for step in steps]}"
+    )
+    options = {int(option) for option in _jie_step_options(steps[0])}
+    assert options == set(state.player(0).hand), (
+        f"源牌候选 = 自己的**每一张**手牌（与它自己能不能用无关）：{sorted(options)}"
+    )
+    assert str(borrowed) in _jie_step_options(steps[0])
+    assert _jie_step_disabled(steps[0]) == (), "源牌步没有置灰（它不是产物，不查牌名合法性）"
 
 
 # ===========================================================================

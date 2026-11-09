@@ -266,8 +266,18 @@ function pickerTargetHint(pending) {
   return `${sourceConversionHint(pending)}${suffix}`;
 }
 
-/** 目标座位是否**就是自己或空集**：这类牌（【无中生有】【桃】、装备牌）不画座位高亮。 */
-function targetsSelfOnly(entry, selfSeat) {
-  if (!entry) return false;
-  return entry.pool.length === 1 && entry.pool[0] === selfSeat;
+/** 这张牌的**目标是否由牌自己的规则钉死为使用者本人**：这类牌（【无中生有】【桃】、装备牌）
+ *  不画座位高亮。
+ *
+ *  判据是服务端下发的 ``entry.self_only``（真源 = 牌行为表的 ``TargetRule.self_only``，
+ *  见 `projection.py:candidate_index`），**不是**从池的形状反推。旧读法
+ *  `pool.length === 1 && pool[0] === selfSeat` 是"规则自用"的**形状代理**：【帷幕】把黑色
+ *  1–2 目标锦囊的池削到只剩自己之后，`pool == [selfSeat]` 与【无中生有】逐字相同，于是自己的
+ *  座位既没有 `tsel` / `targetable` 也没有点击口——牌点得亮却指定不了目标（issue 19）。
+ *
+ *  缺字段（旧录像 / 合成载荷）按"不是自用牌"处理：多画一次座位高亮不会吞掉任何点击
+ *  （点自己选中的仍是一条合法组合），比反过来安全。
+ */
+function targetsSelfOnly(entry) {
+  return Boolean(entry) && entry.self_only === true;
 }

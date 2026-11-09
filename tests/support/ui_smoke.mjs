@@ -8525,7 +8525,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "EndPhase", answers_seq: 9501 },
     ],
     candidate_index: {
-      "13": { card: source, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      "13": {
+        card: source, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1,
+        self_only: true,   // 【无中生有】= 规则自用牌（issue 19 的 `self_only` 事实）
+      },
     },
     virtual_index: {}, option_seats: {}, context: null,
     preactivations: {
@@ -15020,9 +15023,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 /* ============ M5-08c（D5 / §5.1 酒）：酒界面（出牌阶段 / 濒死自救 / 每回合一次） ============
  *
  * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
- *   - 出牌阶段【酒】= 手选路 + 候选索引 `pool: [0]` / `combos: [[0]]`（**自己为目标**）：
- *     点牌自动选中自己，**没有目标步 / 座位目标高亮**；再点控件区「提交」= 恰一条 UseCard。
- *     这是 U2 的自我目标路径（与【桃】/装备同形）——本票**不**改成"点牌即提交"。
+ *   - 出牌阶段【酒】= 手选路 + 候选索引 `pool: [0]` / `combos: [[0]]` / `self_only: true`
+ *     （**自己为目标**）：点牌自动选中自己，**没有目标步 / 座位目标高亮**；再点控件区「提交」
+ *     = 恰一条 UseCard。这是 U2 的自我目标路径（与【桃】/装备同形）——本票**不**改成"点牌即提交"。
  *   - 使用后本回合第二张【酒】没有候选条目 ⇒ 牌置灰、点它零提交。
  *   - 自己濒死：【酒】进求桃窗口（目标恒为自己，无目标步）；他人濒死：没有【酒】入口。
  *   - 只读判据仍只住 `modal.js:stepDialogKind`；弹窗步骤里点牌不选、零提交。
@@ -15128,8 +15131,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "EndPhase", answers_seq: seq },
     ],
     candidate_index: {
-      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
-      124: { card: wine2, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
+      124: { card: wine2, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
       5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
     },
     virtual_index: {}, option_seats: {}, context,
@@ -15205,8 +15208,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "Pass", answers_seq: 3303 },
     ],
     candidate_index: {
-      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
-      4: { card: peach, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
+      4: { card: peach, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
     },
     virtual_index: {}, option_seats: {},
     context: { ...context, requirement: "你处于濒死状态：使用【桃】或【酒】自救，或放弃" },
@@ -15245,7 +15248,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "Pass", answers_seq: 3304 },
     ],
     candidate_index: {
-      4: { card: peach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
+      4: {
+        card: peach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1,
+        // 【桃】的**规则**是自用牌，但这一问的目标是座位 2（求桃窗口）⇒ `self_only` 为假
+        // （issue 19 的定义：规则自用 **且** 候选组合的目标就是使用者）。
+        self_only: false,
+      },
     },
     context: { ...context, requirement: "座位 2 处于濒死状态：是否对其使用【桃】？" },
     prompt_display: {
@@ -22365,6 +22373,134 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 
   ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ 19-A（P10）：目标池被技能削到只剩自己 ⇒ 自己座位仍可指定 ============
+ *
+ * 真局面（票面 §2 / 复现口径）：2 人局，我 = 座位 0 手里有**黑色【铁索连环】**，对面 = 贾诩
+ * （【帷幕】）。【帷幕】只把贾诩从黑色锦囊的池里剔掉，剩下的自己仍是合法目标 ⇒ 引擎给出
+ * `UseCard(targets=(0,))`；投影层因此下发 `pool:[0] / combos:[[0]] / min=max=1`——**与
+ * 【无中生有】逐字相同的形状**。
+ *
+ * 旧读法从形状反推"规则自用"（`pool.length === 1 && pool[0] === selfSeat`），于是自己的座位
+ * 既没有 `tsel` / `targetable` 也没有点击口：牌点得亮，却指定不了目标。现在的判据是服务端
+ * 转发的**规则事实** `candidate_index[].self_only`（真源 = 行为表 `TargetRule.self_only`），
+ * 投影侧的值由 `tests/test_web.py::test_a_self_only_target_card_is_still_clickable_in_a_two_player_game`
+ * 在真会话形状上钉住；本块只核**界面读得到那个键**，并保住"真自用牌"的既有面孔。
+ */
+{
+  const iron = {
+    ...synthCard(130, "铁索连环"),
+    type: "iron_chain", display_name: "铁索连环", kind: "normal", attribute: "普通",
+    source_cards: [], suit: "club", color: "black",
+    description: "铁索连环的描述：横置或重置至多两名角色。",
+  };
+  const exnihilo = {
+    ...synthCard(13, "无中生有"),
+    type: "ex_nihilo", display_name: "无中生有", kind: "normal", attribute: "普通",
+    source_cards: [], suit: "heart", color: "red",
+    description: "无中生有的描述：摸两张牌。",
+  };
+  const raw = (card) => ({
+    card_id: card.card_id, type: card.type, name: card.name, suit: card.suit,
+    rank: card.rank, slot: card.slot, attack_range: card.attack_range,
+    color: card.color, virtual_sources: [],
+  });
+  // 2 人局（无身份）：我 = 座位 0，对面 = 贾诩（带【帷幕】的座位 1）。
+  const view = (pending) => {
+    const built = synthView(pending);
+    built.human_seat = 0;
+    built.snapshot.seat = 0;
+    built.snapshot.phase = "play";
+    built.snapshot.turn_seat = 0;
+    built.snapshot.self_hand = [iron, exnihilo];
+    built.snapshot.processing = [];
+    built.snapshot.players = [0, 1].map((seat) => ({
+      seat, hp: 3, hp_max: 3, hand_count: 2, alive: true, equip: [], judge: [],
+      identity: null, chained: false,
+    }));
+    return built;
+  };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 1901,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 1901, card: raw(iron), targets: [0] },
+      { kind: "UseCard", answers_seq: 1901, card: raw(exnihilo), targets: [0] },
+      { kind: "EndPhase", answers_seq: 1901 },
+    ],
+    candidate_index: {
+      130: {
+        card: iron, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1,
+        self_only: false,   // 【帷幕】削池，不是规则自用
+      },
+      13: {
+        card: exnihilo, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1,
+        self_only: true,
+      },
+    },
+    virtual_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: null, targets: [], label: null,
+      requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+    },
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 1901 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const play = view(pending);
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const render = async () => {
+    ui.state.view = play;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(play);
+  };
+
+  // ---- ① 黑色【铁索连环】：池只剩自己（帷幕）⇒ 自己座位画成已选 + 接点击 ----
+  await render();
+  await clickHand(130);
+  const selfClicks = (node) => (node.listeners.click || []).length;
+  const chainSeat = seatBox(0);
+  check("19-A1 2 人局【帷幕】削池后黑色【铁索连环】的**自己**座位可指定（tsel + 点击口）",
+    ui.state.focusCardId === 130
+      && ui.cardEntry(pending, 130).self_only === false
+      && chainSeat !== null
+      && chainSeat.classList.contains("tsel")
+      && selfClicks(chainSeat) > 0
+      && $("btn-submit").disabled === false,
+    `focus=${ui.state.focusCardId} self_only=${ui.cardEntry(pending, 130).self_only} `
+      + `classes=${JSON.stringify([...(chainSeat ? chainSeat.classList.set : [])])} `
+      + `clicks=${chainSeat ? selfClicks(chainSeat) : "无节点"} submit=${$("btn-submit").disabled}`);
+
+  // ---- ② 真自用牌（【无中生有】）保持原面孔：不画座位高亮、不接点击 ----
+  await render();
+  await clickHand(13);
+  const selfOnlySeat = seatBox(0);
+  check("19-A2 真自用牌（【无中生有】）行为不变：自己座位既不画成 targetable/tsel 也不接点击",
+    ui.state.focusCardId === 13
+      && ui.cardEntry(pending, 13).self_only === true
+      && selfOnlySeat !== null
+      && !selfOnlySeat.classList.contains("targetable")
+      && !selfOnlySeat.classList.contains("tsel")
+      && selfClicks(selfOnlySeat) === 0,
+    `focus=${ui.state.focusCardId} self_only=${ui.cardEntry(pending, 13).self_only} `
+      + `classes=${JSON.stringify([...(selfOnlySeat ? selfOnlySeat.classList.set : [])])} `
+      + `clicks=${selfOnlySeat ? selfClicks(selfOnlySeat) : "无节点"}`);
+
   ui.state.view = null;
   ui.resetSelection();
 }

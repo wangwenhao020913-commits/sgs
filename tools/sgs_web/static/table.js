@@ -281,8 +281,10 @@ function renderTable() {
   const seats = pickerSeats(pendingNow);
   const seatOf = (seat) => seats.find((item) => item.seat === seat) || null;
   const focusEntry = state.focusCardId === null ? null : cardEntry(pendingNow, state.focusCardId);
-  // 池就是"自己"一个座位（【无中生有】【桃】、装备牌）：不画座位高亮，免得看着像要打自己
-  const selfOnly = targetsSelfOnly(focusEntry, snapshot.seat);
+  // 牌自己的规则把目标钉死为自己（【无中生有】【桃】、装备牌）：不画座位高亮，免得看着像
+  // 要打自己。判据是服务端下发的规则事实 `self_only`——**池刚好只剩自己不是自用牌**
+  // （【帷幕】削掉别人后池可能就只剩自己，那个座位仍要能点）。
+  const selfOnly = targetsSelfOnly(focusEntry);
   // `SELECT_OPTION` 的"选座位"形态（【遗计】的"交给谁"，服务端下发 `option_seats`）：
   // 座位是**可点的**——点它就等于选中那条 `seat:N` 候选。选项串的解析在服务端
   // （映射的唯一实现 = `pending.js:optionSeatChoice`，单选 / 多选两个座位面共用）。

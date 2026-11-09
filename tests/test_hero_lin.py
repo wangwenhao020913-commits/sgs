@@ -5380,6 +5380,40 @@ def test_weimu_black_nanman_still_usable_with_one_legal_target():
     ], "只剩 1 个合法目标 ⇒ 这张【南蛮入侵】照样进候选"
 
 
+def test_a_black_iron_chain_can_still_target_itself_when_weimu_removes_the_only_other_seat():
+    """【帷幕】剔掉贾诩之后，2 人局的黑色【铁索连环】仍可**只对自己**使用（票 19 的引擎事实）。
+
+    【帷幕】只把贾诩从黑色锦囊的目标池里剔掉：自己仍是合法目标，``TargetRule`` 的 1–2 名
+    下限也满足 ⇒ 候选里照旧有一条 ``UseCard(targets=(0,))``，不需要回落分支。这条断言钉住
+    引擎事实（**先红后绿**的那一半）；界面仍点不出来的原因在投影缺一个"规则自用"的事实，
+    见 ``tests/test_web.py::test_a_self_only_target_card_is_still_clickable_in_a_two_player_game``。
+    """
+    iron = next(
+        card_id
+        for card_id, card in enumerate(PACK_160.deck.cards)
+        if card.type == "iron_chain" and color_of_suit(card.suit) is Color.BLACK
+    )
+    state = _jiaxu_board(
+        [SeatSpec(hand=(iron,)), SeatSpec(hero=JIAXU)],
+        pack=PACK_160,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    card = state.card(iron)
+    pool = check_targets(state, 0, card)
+
+    assert pool == (0,), f"2 人局：帷幕只剔掉座位 1，自己仍是合法目标，实得 {pool}"
+    actions = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    uses = [
+        action
+        for action in actions
+        if isinstance(action, UseCard) and action.card.card_id == iron
+    ]
+    assert [action.targets for action in uses] == [(0,)], (
+        f"只剩自己一个合法目标 ⇒ 照常出这条使用候选，实得 {[a.targets for a in uses]}"
+    )
+
+
 def test_weimu_does_not_stop_nullify():
     """【无懈可击】的目标是**牌**不是角色 ⇒ `TARGET_POOL` 不参与，帷幕不影响它。"""
     state = _weimu_board()
