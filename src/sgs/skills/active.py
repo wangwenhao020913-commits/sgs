@@ -6485,6 +6485,14 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
                 raise NotImplementedError(
                     f"乱武窗口没有判定式提供者：{action.skill_id!r}（lin-batch2 票 03）"
                 )
+            # 本窗口**消费**产物（下面自己 `start_use`）⇒ 求助型提供者（票 22 的【激将】）
+            # 走交付模式：把盟友选出的那张【杀】交回来，由本窗口按"对最近的座位使用"结算
+            # （`provider_deliver`，不是求助窗口里的"代打是真打出"）。键与借刀同一只。
+            # 惰性 import：`lord_request` 反向依赖 `catalog`（本模块由 catalog 末尾导入），
+            # 模块级 import 会成环（与 `jie_jianying_provider` 同一理由）。
+            from .lord_request import LORD_REQUEST_DELIVER_KEY
+
+            frame.data[LORD_REQUEST_DELIVER_KEY] = True
             control, satisfied, produced = host.start_provider(
                 frame, action.skill_id, seat, timing, required=LUANWU_RESPONSE_CARD
             )

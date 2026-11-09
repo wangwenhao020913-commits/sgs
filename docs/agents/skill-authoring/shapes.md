@@ -222,7 +222,7 @@
 |---|---|
 | `scope` | 候选派发落在哪个 `CandidateScope`（`None` = 这扇窗口不走 `CANDIDATES`，例如改判） |
 | `causes` | 覆盖的 `WindowCause`（空 = 不是"效果内窗口"的成因：【闪】步 / 求桃是独立询问种类） |
-| `modes` | 这一次响应算**使用**还是**打出**（`RespondMode`；空 = 不是使用 / 打出） |
+| `modes` | 这一次响应算**使用**还是**打出**（`RespondMode`；空 = 不是使用 / 打出）。技能声明那一侧 = `LordSkill.respond_modes`（见本节末「使用 / 打出两档」） |
 | `required` | 要哪张牌（带上代码侧真源的名字，如 `DODGE_RESPONSE_CARD` / `ctx.required`） |
 | `axis` | **需要**（`RequestAxis.REQUIRED`：不响应就按规则结算）还是**可以**（`OPTIONAL`：放弃不是"没响应"）。改判没有这一轴 |
 | `providers` | **谁可以参与**：提供者（产物由技能自己付清）。`False` 的行必须写清理由。转化技**没有单独一列**（2026-11 的 Standards 轴评审删掉了旧的 `conversion`）：转化参与由窗口自己的候选派生决定（`transform_preactivations` / `conversion_offers` 读技能声明），那一列没有生产读取方 |
@@ -245,6 +245,22 @@
 `PlayCard`，没有 `UseCard` / `ActivateSkill` 分支 ⇒ 转化与提供者的候选即便由底层
 `DODGE` / `RESPOND` 派发顺带产生，也没有人消费。要把它们接进来，先给求助窗口补受理面
 （另开票）。
+
+**求助型技能自己可以当提供者**（票 22）：`LordSkill` 不是只能"被求助"——它同样登记在
+`PROVIDERS` 里，可以在**别人**的「使用【杀】」窗口里被选中。今天的载体是两扇
+`providers=True` 的 `USE` 窗口：`borrowed_sword`（【借刀杀人】）与 `luanwu`（【乱武】）。
+它们本来就会 `start_use` 提供者产物，故选中【激将】时**置 `LORD_REQUEST_DELIVER_KEY`**：
+求助子窗口把盟友选出的那张【杀】`provider_deliver` 交回来，由窗口自己按窗外定死的目标
+开使用链（"视为持刀者使用"）——**不**在求助里 `play_card`（那条"代打是真打出"只服务
+打出窗口）。**不查锁、不置锁、不设门槛**：票 20 的机械锁只挡"出牌阶段主动发动"，
+被迫使用窗口的目标由窗外定死、不占（出牌阶段那一次）使用次数。
+
+**「使用 / 打出」两档怎么声明**（票 22）：`LordSkill.respond_modes`（一档集合）——
+牌面写「使用或打出」的技能声明 `USE_OR_PLAY_MODES`（两条【激将】/ 两条【护驾】）。
+`RESPOND` 语境按 `actions._respond` 下传的 mode 筛（南蛮 / 决斗 / 万箭 = `PLAY`，
+借刀 / 乱武 = `USE`）；`DODGE` 语境的候选派发**不带 mode 事实**（`actions._dodge` 只给
+`respond_required`）⇒【护驾】那两档是**声明性**的（登记表上把「使用【闪】」= 【杀】的
+【闪】步、与「打出【闪】」= 万箭两半都认领了，行为与票 09 逐字相同）。
 
 **提供者怎么接入（票 17 起）**：只声明窗口 + 付得起谓词，候选追加走共用实现：
 

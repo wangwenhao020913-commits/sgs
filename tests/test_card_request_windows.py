@@ -140,7 +140,9 @@ def _site_of(call: ast.Call, keywords: dict[str, ast.expr]) -> tuple[str, str] |
         return "declaration", (
             f"required={_keyword_text(keywords, 'required')}"
             f" scope={_keyword_text(keywords, 'scope')}"
-            f" mode={_keyword_text(keywords, 'respond_mode')}"
+            # `respond_modes`（票 22）是**一档集合**：说出这条声明覆盖使用 / 打出哪几档。
+            # 不写它 ⇒ `<default>`（不按 mode 筛）；改值 / 改名都会让登记行对不上。
+            f" mode={_keyword_text(keywords, 'respond_modes')}"
         )
     if name in ("ask_respond", "respond_candidates"):
         return ("ask" if name == "ask_respond" else "preview"), (

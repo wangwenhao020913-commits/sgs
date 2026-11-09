@@ -1401,6 +1401,349 @@ def test_jijiang_passive_windows_ignore_the_lock():
     assert JIJIANG in query.preactivations, "被动发动之后主动入口照旧在"
 
 
+# ---------------------------------------------------------------------------
+# ⑧ 【激将】在**被动**的「使用【杀】」窗口里（yijiang-2014-round2 票 22）：
+#    【借刀杀人】逼持刀者对 Bn 使用【杀】——持刀者是主公时【激将】要喊得出来，
+#    产物是**持刀者的使用**（目标 = 借刀定死的 Bn），且**不查、不置**票 20 的机械锁。
+#
+# 座位：0 = 借刀的使用者（回合角色），1 = 主公（持刀者），2 = 蜀势力盟友（代打者）。
+# 主公手里**没有**【杀】——否则真牌候选会先被选中，求助这条路被遮蔽；装备区挂一把武器，
+# 因为借刀的第 0 层合法性要求持刀者「有武器且有合法【杀】目标」。
+# ---------------------------------------------------------------------------
+
+BORROWED_SWORD = "borrowed_sword"
+
+
+def _borrowed_sword_state(*, lord="liubei"):
+    borrowed = _ids(PACK, BORROWED_SWORD)[0]
+    weapon = _ids(PACK, "qinggang_sword")[0]
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(
+                hero=lord,
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+                equip=(weapon,),
+            ),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, borrowed, weapon, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return borrowed, weapon, slash, state
+
+
+def _borrowed_sword_window(engine):
+    """停在「借刀逼持刀者使用【杀】」的窗口上（不判座位：调用方按自己的局面核 actor）。"""
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == "RESPOND"
+        and getattr(pending, "cause", None) is WindowCause.BORROWED_SWORD
+    )
+
+
+def _plays_borrowed_sword(borrowed: int, *, caster: int, holder: int, bn: int):
+    """座位 ``caster`` 的脚本：打出【借刀杀人】（An = ``holder``、Bn = ``bn``）。"""
+
+    def handler(query):
+        if query.kind == "PLAY_PHASE" and query.actor == caster:
+            for action in getattr(query, "designation_actions", ()):
+                if (
+                    action.card.card_id == borrowed
+                    and action.targets == (holder,)
+                    and action.designations == (bn,)
+                ):
+                    return action
+        return None
+
+    return handler
+
+
+def _open_borrowed_sword_window(engine, players, borrowed):
+    """让座位 0 打出【借刀杀人】（An = 座位 1、Bn = 座位 0），停在持刀者的窗口。"""
+    players[0] = _Scripted(_plays_borrowed_sword(borrowed, caster=0, holder=1, bn=0))
+    return run_until(engine, players, _borrowed_sword_window)
+
+
+def test_jijiang_is_offered_for_borrowed_sword_slash_use():
+    """**本票判据点**：借刀杀人（``mode = USE``）里，持刀者是主公时【激将】进候选。"""
+    for lord, skill_id in (("liubei", JIJIANG), ("jie_liubei", JIE_JIJIANG)):
+        borrowed, _weapon, _slash, state = _borrowed_sword_state(lord=lord)
+        engine = Engine.from_state(state, seed=7)
+        players = [_Scripted(), _Scripted(), _Scripted()]
+        _open_borrowed_sword_window(engine, players, borrowed)
+        assert _borrowed_sword_window(engine), (
+            f"{skill_id}：借刀窗口根本没有开——持刀者的候选为空 ⇒ 直接走了 auto-b（交武器）"
+        )
+        window = engine.pending
+        assert window.actor == 1, "借刀问的是持刀者（主公）"
+        offered = [
+            action
+            for action in window.legal_actions
+            if isinstance(action, ActivateSkill) and action.skill_id == skill_id
+        ]
+        assert offered, (
+            f"{skill_id}：借刀杀人的「被迫使用【杀】」窗口里喊不出【激将】"
+            f"（候选：{window.legal_actions}）"
+        )
+
+
+def _run_borrowed_sword_jijiang(*, lord="liubei", ally_plays=True, stop=None):
+    """借刀窗口里主公发动【激将】的整条流程；盟友按 ``ally_plays`` 决定代不代打。"""
+    borrowed, weapon, slash, state = _borrowed_sword_state(lord=lord)
+    engine = Engine.from_state(state, seed=7)
+    caster = _plays_borrowed_sword(borrowed, caster=0, holder=1, bn=0)
+
+    def holder(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BORROWED_SWORD
+            and query.actor == 1
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG:
+                    return action
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+            and ally_plays
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    players = [_Scripted(caster), _Scripted(holder), _Scripted(ally)]
+    run_until(
+        engine,
+        players,
+        stop if stop is not None else (lambda e: slash in e.state.discard and not e.stack),
+    )
+    return engine, borrowed, weapon, slash
+
+
+def test_jijiang_borrowed_sword_use_hits_the_decreed_target():
+    """产物是**持刀者的使用**：目标 = 借刀定死的 Bn（主公改不了），进使用链而非打出链。"""
+    engine, _borrowed, weapon, slash = _run_borrowed_sword_jijiang()
+
+    assert engine.state.player(0).hp == 3, "借刀指定 Bn = 座位 0，这一刀落在它身上"
+    assert engine.state.player(2).hp == 4, "代打的盟友自己没有换目标"
+    assert engine.state.player(1).hp == 4, "主公不挨自己这一刀"
+    assert engine.state.player(1).card_use_counts["slash"] == 1, (
+        "产物是**持刀者（主公）的使用**：使用次数记在他头上"
+    )
+    assert engine.state.player(2).card_use_counts == {}, "响应者的实体牌只是**打出去**了"
+    assert engine.state.player(1).equip == [weapon], "a 支成立 ⇒ 武器不用交给借刀的使用者"
+    assert slash in engine.state.discard
+
+    resolves = [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.card_id == slash for card in record.cards)
+    ]
+    assert [record.actor for record in resolves] == [1], "使用链的使用者是持刀者（座位 1）"
+    assert [record.targets for record in resolves] == [(0,)], "目标 = 借刀定死的 Bn"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.PLAY_ON_PLAY
+    ], "产物没有走响应者的打出链（代打只在窗口里答了 PlayCard）"
+
+
+def test_jijiang_borrowed_sword_use_is_not_blocked_by_the_play_phase_lock():
+    """**用户 ③ 的判据点在被动侧的镜像**：锁着的主公在借刀窗口里照样能发动【激将】。
+
+    机械锁只挡"出牌阶段主动发动"（票 20 §2 的表）：这里先让出牌阶段的主动入口发动一次
+    （盟友放弃 ⇒ 锁置上），再在**别人的回合**里被【借刀杀人】逼着使用【杀】——求助窗口
+    既不查那把锁，也不因它拒发。
+    """
+    borrowed = _ids(PACK, BORROWED_SWORD)[0]
+    weapon = _ids(PACK, "qinggang_sword")[0]
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero="liubei",
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+                equip=(weapon,),
+            ),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, borrowed, weapon, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    asked = {"n": 0}
+
+    def holder(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BORROWED_SWORD
+            and query.actor == 0
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG:
+                    return action
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            asked["n"] += 1
+            if asked["n"] >= 2:  # 第一次（主动发动）放弃 ⇒ 锁上；第二次（借刀窗口）代打
+                return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    caster = _plays_borrowed_sword(borrowed, caster=2, holder=0, bn=2)
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(holder), _Scripted(ally), _Scripted(caster), _Scripted()]
+
+    # 第一步：出牌阶段主动发动一次（盟友放弃）⇒ 机械锁置上。
+    query = _next_play_phase(engine, players)
+    assert JIJIANG in query.preactivations, "先确认这一局本来喊得出（防假绿）"
+    engine.submit(_composite(query, JIJIANG, choices=("seat:3",)))
+    query = _next_play_phase(engine, players)
+    assert engine.state.player(0).jijiang_locked is True, "主动发动过一次 ⇒ 锁上"
+    engine.submit(EndPhase(answers_seq=query.seq))
+
+    # 第二步：座位 2 打出【借刀杀人】（An = 主公、Bn = 自己）⇒ 主公的被动窗口。
+    run_until(engine, players, _borrowed_sword_window)
+    window = engine.pending
+    assert window.actor == 0 and _borrowed_sword_window(engine)
+    assert engine.state.player(0).jijiang_locked is True, "此刻锁仍在（没出过【杀】）"
+    offered = [
+        action
+        for action in window.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG
+    ]
+    assert offered, "被动窗口不查锁：锁着的主公在借刀窗口里照样能发动【激将】"
+
+    engine.submit(offered[0])
+    run_until(engine, players, lambda e: slash in e.state.discard and not e.stack)
+
+    assert asked["n"] == 2, "借刀窗口里真的问了蜀盟友一次"
+    assert engine.state.player(2).hp == 3, "产物打向借刀定死的 Bn（座位 2）"
+    assert engine.state.player(0).jijiang_locked is False, (
+        "产物是主公**自己的使用**【杀】⇒ 按票 20 的解锁事件①把锁解开（不是锁不挡，是它自解）"
+    )
+
+
+def test_jijiang_borrowed_sword_use_does_not_set_the_lock():
+    """被动发动**不置锁**：没人响应时锁仍是假的，之后出牌阶段的主动入口照旧在。"""
+    weapon = _ids(PACK, "qinggang_sword")[0]
+    engine, _borrowed, _weapon, _slash = _run_borrowed_sword_jijiang(
+        ally_plays=False,
+        # b 支（交武器）完成 ⇒ 借刀窗口收尾：武器从主公的装备区进了借刀使用者的手牌。
+        stop=lambda e: weapon in e.state.player(0).hand,
+    )
+
+    # 主公 = 座位 1（借刀的使用者是座位 0）。
+    assert engine.state.player(1).jijiang_locked is False, (
+        "被动窗口发动【激将】不置锁（用户 2026-11-09：「如果是被动响应使用/打出杀则不影响」）"
+    )
+
+    # 「之后出牌阶段主动仍可发动」：跑回主公自己的出牌阶段。
+    players = [_Scripted(), _Scripted(), _Scripted()]
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == "PLAY_PHASE"
+        and e.state.turn_seat == 1,
+    )
+    assert JIJIANG in engine.pending.preactivations, "被动发动之后主动入口照旧在"
+
+
+def test_jijiang_luanwu_forced_use_delivers_the_ally_slash():
+    """【乱武】与借刀同一档「使用」窗口：产物同样由窗口 ``start_use`` 到最近的座位。
+
+    票 22 的 ``respond_modes`` 把【激将】接进**所有** ``RespondMode.USE`` 的【杀】窗口
+    （登记表里只有 ``borrowed_sword`` 与 ``luanwu`` 两行）。乱武这一扇的交付若漏掉，盟友那张
+    【杀】会被"真打出"、而该座位**还会被再问一次**（`satisfied=True` 但没有产物 ⇒ 白失 1 点
+    体力），本断言把这条同形状的路一起钉住。
+    """
+    jiaxu = "hero.jiaxu_mobile.luanwu"
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jiaxu_mobile", hp=3, hp_max=3),
+            SeatSpec(hero="liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+    def jiaxu_player(query):
+        if query.kind == "PLAY_PHASE" and query.actor == 0:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == jiaxu:
+                    return action
+        return None
+
+    def lord(query):
+        if query.kind == "SELECT_OPTION" and str(query.skill_id).endswith(":target"):
+            # 并列最近（乱武由该角色自选）：选贾诩。
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectOption) and str(action.choice) == "seat:0"
+            )
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LUANWU
+            and query.actor == 1
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG:
+                    return action
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(jiaxu_player), _Scripted(lord), _Scripted(ally)]
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and getattr(e.pending, "cause", None) is WindowCause.LUANWU
+        and e.pending.actor == 2,
+    )
+
+    assert engine.state.player(0).hp == 2, "那张【杀】由持刀者（刘备）打向最近的贾诩"
+    assert engine.state.player(1).hp == 4, "使用成立 ⇒ 刘备不因乱武失去体力"
+    assert engine.state.player(1).card_use_counts["slash"] == 1, "使用次数记在刘备头上"
+    assert engine.state.player(2).card_use_counts == {}, "盟友只是打出了那张牌"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.PLAY_ON_PLAY
+    ], "产物没有走打出链"
+
+
 HUJIA = "hero.caocao.hujia"
 
 
@@ -1472,6 +1815,62 @@ def test_hujia_has_no_lock():
     assert hujia.flow is None, "【护驾】没有出牌阶段的发动流水线"
 
 
+def test_hujia_use_side_mirrors_jijiang():
+    """票 22：【护驾】的「使用【闪】」侧与【激将】**同形状**——声明 USE、不锁、不设门槛。
+
+    现行牌堆里没有"主动**使用**【闪】"这条路（【闪】只在响应窗口里作为一次使用照走 L4 /
+    L5），故这半句今天是**声明性**的：``DODGE`` 语境的候选派发不带 mode 事实
+    （``actions._dodge`` 只给 ``respond_required``），行为与票 09 逐字相同。本断言钉三件事：
+
+    ①两条【护驾】声明都认领「使用 + 打出」两档（与【激将】同一份声明值）；
+    ②登记表里**要【闪】的每一扇窗口**都被这条声明覆盖（mode 逐档——闸不许空转）；
+    ③没有出牌阶段入口 / 解锁钩子（"不锁"的结构依据：不能主动使用【闪】⇒ 无卡死风险）。
+    """
+    from sgs.effects import CandidateScope
+    from sgs.skills import CATALOG
+    from sgs.skills.catalog import CARD_REQUEST_WINDOWS, REQUEST_WINDOW
+    from sgs.skills.lord_request import (
+        HUJIA as HUJIA_DECL,
+        JIE_HUJIA_LORD,
+        JIJIANG as JIJIANG_DECL,
+        USE_OR_PLAY_MODES,
+    )
+    from sgs.state import RespondMode
+
+    assert set(USE_OR_PLAY_MODES) == {RespondMode.PLAY, RespondMode.USE}
+    for decl in (HUJIA_DECL, JIE_HUJIA_LORD):
+        assert decl.required == "dodge"
+        assert decl.scope is CandidateScope.DODGE
+        assert decl.respond_modes == JIJIANG_DECL.respond_modes, "与【激将】同形状（使用 + 打出）"
+        assert RespondMode.USE in decl.respond_modes, "「使用【闪】」这一侧要在声明上"
+        assert decl.activation_flow is None, "不能主动使用【闪】⇒ 没有出牌阶段入口"
+
+    # ② 登记表：凡是要【闪】的窗口，都被这条声明按 mode 逐档覆盖（两半各有一扇真实窗口）。
+    #    排除势力求助的**子窗口**（`lord_request.dodge`）：那扇问的是**盟友**打不打出，
+    #    候选面不属于持有者自己（持有者的候选在它外面那一问里）。
+    dodge_rows = [
+        row
+        for row in CARD_REQUEST_WINDOWS
+        if row.kind == REQUEST_WINDOW
+        and "【闪】" in row.required
+        and WindowCause.LORD_REQUEST not in row.causes
+    ]
+    assert {row.key for row in dodge_rows} == {"dodge", "arrow_barrage"}, (
+        f"登记表里要【闪】的窗口变了：{[row.key for row in dodge_rows]}"
+    )
+    covered = set()
+    for row in dodge_rows:
+        assert row.scope is CandidateScope.DODGE, row.key
+        assert set(row.modes) <= set(HUJIA_DECL.respond_modes), row.key
+        covered |= set(row.modes)
+    assert covered == {RespondMode.PLAY, RespondMode.USE}, "使用 / 打出两半各有一扇真实窗口"
+
+    # ③ 不锁、不设门槛：没有解锁钩子、没有声明级流水线、不进预发动清单。
+    declared = CATALOG[HUJIA]
+    assert declared.hooks == (), "【护驾】没有解锁钩子（它不锁）"
+    assert declared.flow is None and declared.preactivated is False
+
+
 def test_liubei_jijiang_wording_says_use_or_play():
     """牌面文案按官网订正为「使用或打出」，并删掉那句自我设限的实现说明。"""
     path = (
@@ -1486,7 +1885,9 @@ def test_liubei_jijiang_wording_says_use_or_play():
     assert "当你需要使用或打出【杀】" in text
     assert "视为由你使用或打出" in text
     assert '只覆盖“打出【杀】”的窗口' not in text, "实现范围的自我设限说明要删掉"
-    assert "【借刀杀人】" not in text, "那句「不覆盖借刀杀人」随实现说明一起删"
+    # 票 22 起注记改为**正面**写覆盖面（含【借刀杀人】/【乱武】的被迫使用），故哨兵从
+    # "牌名本身不许出现"收紧成"那句自我设限的话不许出现"。
+    assert "不覆盖" not in text, "那句「不覆盖【借刀杀人】的『使用【杀】』」随实现说明一起删"
 
 
 # ---------------------------------------------------------------------------

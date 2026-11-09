@@ -3907,8 +3907,11 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         reason=(
             "可以：不接这一刀就交武器（放弃不是「没响应」，而是转向另一种规则结果）。"
             "`respond_targets` 非空 ⇒ 产物必须够得着 Bn（与真牌候选同一道判据 "
-            "`forced_use_targets`）；`modes = USE` 故还要过使用次数。`virtual_card_use` "
-            "那一条是**内层** `TARGET_COUNT` 链的事实透传（不是第二扇窗口）。"
+            "`forced_use_targets`）；`modes = USE` 故还要过使用次数（【杀】族只在**自己的**"
+            "出牌阶段读它，故借刀窗口实际不受次数限制）。`virtual_card_use` 那一条是**内层** "
+            "`TARGET_COUNT` 链的事实透传（不是第二扇窗口）。**求助型提供者**（票 22 的"
+            "【激将】）也在这扇窗口里：本窗口置 `LORD_REQUEST_DELIVER_KEY`，把盟友选出的那张"
+            "【杀】交回来自己 `start_use`（目标 = Bn），不走「代打是真打出」。"
         ),
     ),
     CardRequestWindow(
@@ -3951,6 +3954,9 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         reason=(
             "可以：这是「使用【杀】或失去 1 点体力」的二选一，放弃 = 走失去体力那条。"
             "用户点名「贾诩乱武也算」——它复用 `RESPOND` + `USE` 面，只有成因单独一档。"
+            "**求助型提供者**（票 22 的【激将】）与借刀同一姿态：本窗口置 "
+            "`LORD_REQUEST_DELIVER_KEY`，把盟友选出的那张【杀】交回来 `start_use` 到"
+            "「最近的那一名」——漏掉交付会让那个座位白失 1 点体力（先被「真打出」、再被问一次）。"
         ),
     ),
     CardRequestWindow(
@@ -4003,7 +4009,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 path="src/sgs/skills/lord_request.py",
                 owner="HUJIA",
                 fingerprint=(
-                    "required='dodge' scope=CandidateScope.DODGE mode=<default>"
+                    "required='dodge' scope=CandidateScope.DODGE mode=USE_OR_PLAY_MODES"
                 ),
             ),
             CardRequestSite(
@@ -4011,7 +4017,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 path="src/sgs/skills/lord_request.py",
                 owner="JIE_HUJIA_LORD",
                 fingerprint=(
-                    "required='dodge' scope=CandidateScope.DODGE mode=<default>"
+                    "required='dodge' scope=CandidateScope.DODGE mode=USE_OR_PLAY_MODES"
                 ),
             ),
             _LORD_REQUEST_ASK,
@@ -4022,6 +4028,10 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
             "`ActivateSkill` 分支）⇒ 转化与提供者的候选即便由底层 `DODGE` 派发顺带出现，"
             "也没有人消费（于吉是群势力，今天到不了魏 / 蜀的求助窗口）。要把它们接进来，"
             "先给 `_run_lord_request` 补受理面——那是另一张票。"
+            "**声明的两档 mode**（票 22）：两条【护驾】写 `USE_OR_PLAY_MODES`，覆盖本行"
+            "（求助子窗口的 `PLAY`）与 `dodge` / `arrow_barrage` 两行的 `USE` / `PLAY`；"
+            "`DODGE` 语境的派发**不带 mode 事实**（`actions._dodge` 只给 `respond_required`），"
+            "故那两档是**声明性**的，行为与票 09 逐字相同。"
         ),
     ),
     CardRequestWindow(
@@ -4040,7 +4050,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 path="src/sgs/skills/lord_request.py",
                 owner="JIJIANG",
                 fingerprint=(
-                    "required='slash' scope=CandidateScope.RESPOND mode=RespondMode.PLAY"
+                    "required='slash' scope=CandidateScope.RESPOND mode=USE_OR_PLAY_MODES"
                 ),
             ),
             CardRequestSite(
@@ -4048,7 +4058,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 path="src/sgs/skills/lord_request.py",
                 owner="JIE_JIJIANG_LORD",
                 fingerprint=(
-                    "required='slash' scope=CandidateScope.RESPOND mode=RespondMode.PLAY"
+                    "required='slash' scope=CandidateScope.RESPOND mode=USE_OR_PLAY_MODES"
                 ),
             ),
             _LORD_REQUEST_ASK,
@@ -4063,11 +4073,14 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
             ),
         ),
         reason=(
-            "可以：同【护驾】。**不参与**的理由也同：`_run_lord_request` 只认 `PlayCard`；"
-            "【激将】本身还要再筛一层 `respond_mode=PLAY`（它不覆盖借刀的「使用【杀】」）。"
-            "票 20 的「使用」侧走同一扇窗口的**交付模式**（`LORD_REQUEST_DELIVER_KEY`："
-            "响应者仍答 `PlayCard`，窗口把那张牌交回调用方的 `start_use`）——所以这里多一处 "
-            "`accept` 站点，而 asking 面一字未变。"
+            "可以：同【护驾】。**不参与**的理由也同：`_run_lord_request` 只认 `PlayCard`。"
+            "【激将】声明的 `respond_modes` 是 `USE_OR_PLAY_MODES`（票 22）：打出侧 = 本子"
+            "窗口与南蛮 / 决斗，使用侧 = `borrowed_sword` / `luanwu` 两扇**外层**窗口（它们"
+            "`providers=True`，产物由它们自己 `start_use`）。「使用」侧走同一扇求助窗口的"
+            "**交付模式**（`LORD_REQUEST_DELIVER_KEY`：响应者仍答 `PlayCard`，窗口把那张牌交回"
+            "调用方的 `start_use`）——所以这里多一处 `accept` 站点（票 20 的出牌阶段那条；"
+            "票 22 的两扇效果窗口住在 `effects/ops.py` / `skills/active.py` 的受理面），而 "
+            "asking 面一字未变。"
         ),
     ),
     CardRequestWindow(

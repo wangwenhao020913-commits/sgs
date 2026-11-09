@@ -12,11 +12,14 @@ r"""主公技族（F，票 09）：势力作用域、**势力求助窗口**与�
 =======================  ======  ==========================================================
 技能                       锁定     落点
 =======================  ======  ==========================================================
-曹操【护驾】               非锁定    ``CANDIDATES(DODGE)`` → 势力求助窗口（需要【闪】）
+曹操【护驾】               非锁定    ``CANDIDATES(DODGE)`` → 势力求助窗口（需要【闪】，使用 / 打出
+                                    两档都住这一扇窗口）
 界曹操【护驾】①            非锁定    同上（同一条 ``LordSkill.offer`` 声明）
 界曹操【护驾】②            非锁定    ``USE_ON_USE`` / ``PLAY_ON_PLAY`` 钩子：其他魏势力角色于其
                                     回合外使用 / 打出【闪】时，**其**可以令主公摸一张牌
-刘备【激将】               非锁定    ``CANDIDATES(RESPOND)`` → 势力求助窗口（需要【杀】）
+刘备【激将】               非锁定    ``CANDIDATES(RESPOND)`` → 势力求助窗口（需要【杀】；打出 =
+                                    南蛮 / 决斗 / 万箭，使用 = 借刀 / 乱武的被迫使用）+ 出牌
+                                    阶段主动使用【杀】的入口（票 20 的声明级流水线）
 孙权【救援】               锁定      ``Modifier(RECOVER_AMOUNT, …)``：其他吴势力角色对其用【桃】时 +1
 =======================  ======  ==========================================================
 
@@ -113,6 +116,7 @@ __all__ = [
     "LordEcho",
     "LordSkill",
     "LORD_REQUEST_DELIVER_KEY",
+    "USE_OR_PLAY_MODES",
     "advance_provider",
     "dispatch_provider",
     "jie_hujia_activation_plan",
@@ -350,10 +354,13 @@ def _run_lord_request(
     - **首个打出者即止**：记 ``done``、代打者走 L6（``host.play_card``），并让出控制权等
       PLAY 帧结算完，再在下一次重入写回"需要已满足"。
 
-    **交付模式**（:data:`LORD_REQUEST_DELIVER_KEY`，yijiang-2014-round2 票 20）：调用方要
-    自己开使用链时（出牌阶段主动使用【杀】这一侧），窗口把响应者选出的那张牌
-    ``provider_deliver`` 交回去、**不**替它打出——"视为由你使用"由调用方的 ``start_use``
-    完成（票 17 的产物交接姿态）。被动窗口读不到这个键，语义逐字不变。
+    **交付模式**（:data:`LORD_REQUEST_DELIVER_KEY`）：调用方要**自己开使用链**时，窗口把
+    响应者选出的那张牌 ``provider_deliver`` 交回去、**不**替它打出——"视为由你使用"由调用
+    方的 ``start_use`` 完成（票 17 的产物交接姿态）。置位者是三处**使用**窗口：出牌阶段主动
+    使用【杀】（票 20，住 :func:`_jijiang_use_effect`）与两扇"被迫使用【杀】"的效果窗口
+    （【借刀杀人】/【乱武】，票 22，住 `effects/ops.py` / `skills/active.py`——它们本来就
+    自己 ``start_use`` 提供者产物）。**打出**窗口（南蛮 / 决斗 / 万箭 / 【闪】步）读不到这个
+    键，语义逐字不变：代打是**真打出**。
     """
     request = frame.data.get(LORD_REQUEST_KEY)
     if request is None:
@@ -405,15 +412,20 @@ def _run_lord_request(
 #
 #     主公技，其他蜀势力角色可以在你需要时代替你**使用或打出**【杀】（视为由你使用或打出）。
 #
-# 票 09 / M6 票 16 只落了「打出」半边（南蛮 / 决斗 / 万箭一类的响应窗口）。出牌阶段
-# **主动使用**是它最常见的用法，今天却喊不出来：``_run_lord_request`` 只收 ``PlayCard``
-# （打出）⇒ 本段把「使用」这一侧接上，并配两道门槛（用户 2026-11-09 的防卡死裁定）。
+# 票 09 / M6 票 16 只落了「打出」半边（南蛮 / 决斗 / 万箭一类的响应窗口）。【激将】「使用」
+# 这一侧有两条路：
 #
-# **目标由主公先选**：一条 :class:`~sgs.skills.flow.PickSeats` 步，池 = 「这张虚拟【杀】
-# 此刻的合法目标」——候选 / 清单 / 校验器三处读同一个 :func:`_jijiang_use_legal`。
+# 1. **出牌阶段主动使用**（票 20，本段）：最常见、也最容易被 AI 无限点 ⇒ 配两道门槛
+#    （用户 2026-11-09 的防卡死裁定）；
+# 2. **被动的「被迫使用【杀】」窗口**（票 22）：【借刀杀人】与【乱武】——目标由窗外定死、
+#    不需要也不该有门槛，故候选只靠声明的 ``respond_modes`` 含 ``USE`` 就能进来，产物由
+#    那扇窗口 ``start_use``（:data:`LORD_REQUEST_DELIVER_KEY` 的交付模式）。
 #
-# **产物是主公的「使用」**：求助窗口把牌交回本流水线（:data:`LORD_REQUEST_DELIVER_KEY`），
-# 由这里开**使用**链（``start_use``）——不在求助里 ``start_use`` / ``play_card``（票 17 的
+# **目标由主公先选**（只属第 1 条）：一条 :class:`~sgs.skills.flow.PickSeats` 步，池 = 「这张
+# 虚拟【杀】此刻的合法目标」——候选 / 清单 / 校验器三处读同一个 :func:`_jijiang_use_legal`。
+#
+# **产物是主公的「使用」**：求助窗口把牌交回调用方（:data:`LORD_REQUEST_DELIVER_KEY`），
+# 由调用方开**使用**链（``start_use``）——不在求助里 ``start_use`` / ``play_card``（票 17 的
 # 产物交接姿态，"视为由你使用"）。
 #
 # **两道门槛**（用户原话：「一个是合法性门槛、一个是防卡死的机械门槛」）：
@@ -434,9 +446,15 @@ def _run_lord_request(
 LORD_REQUEST_DELIVER_KEY = "lord_request_deliver"
 """帧私有键：这次求助的产物**交回调用方**（``True``）而不是由求助窗口自己打出。
 
-只有「出牌阶段主动使用【杀】」这条新路（票 20）会置它：窗口把响应者选出的那张牌写进
-:data:`PROVIDER_CARD_KEY` 交回去，由调用方开**使用**链（"视为由你使用"）；被动窗口读不到
-它（缺省 ``False``），仍是 :func:`_run_lord_request` 的既有语义"代打是**真打出**"。
+置位者 = **三扇「使用」窗口**（它们自己 ``start_use`` 产物）：
+
+- 出牌阶段主动使用【杀】（票 20，:func:`_jijiang_use_effect`）；
+- 【借刀杀人】的「被迫使用【杀】」（票 22，`effects/ops.py:resolve_borrowed_sword`）；
+- 【乱武】的「对最近的座位使用一张【杀】」（票 22，`skills/active.py:_luanwu_effect`）。
+
+窗口把响应者选出的那张牌写进 :data:`PROVIDER_CARD_KEY` 交回去，由调用方开**使用**链
+（"视为由你使用"）；打出窗口（南蛮 / 决斗 / 万箭 / 【闪】步）读不到它（缺省 ``False``），
+仍是 :func:`_run_lord_request` 的既有语义"代打是**真打出**"。
 """
 
 _JIJIANG_ASKED = "jijiang_asked"
@@ -644,9 +662,23 @@ class LordSkill(HeroSkillDecl):
     """F 族一条"求助型"技能的**声明**：需要什么牌 + 在哪个候选语境里提供。
 
     ``scope`` 决定候选回调在哪条 ``CANDIDATES`` 派发里生效（【护驾】= ``DODGE``、
-    【激将】= ``RESPOND``）；``respond_mode`` 只在 ``RESPOND`` 语境里再筛一层
-    （【激将】今天覆盖**打出**【杀】的窗口：南蛮 / 决斗 / 万箭一类的响应——【借刀杀人】的
-    "被迫使用【杀】"侧是票 `22` 的活，**不在**本声明里）。
+    【激将】= ``RESPOND``）；``respond_modes`` 只在 ``RESPOND`` 语境里再筛一层——它回答
+    「这一次响应算使用还是打出」（票 22 起是**一档集合**：两种都覆盖的技能写
+    :data:`USE_OR_PLAY_MODES`）。今天的四条声明都是「使用或打出」的牌面：
+
+    ============  =========================================  ====================
+    技能           打出侧（``PLAY``）                          使用侧（``USE``）
+    ============  =========================================  ====================
+    【激将】       南蛮 / 决斗 / 万箭 / 求助子窗口            借刀 / 乱武的被迫使用
+    【护驾】       万箭（``DODGE`` 语境，注册表 modes=PLAY）   【杀】的【闪】步（同上，
+                                                              注册表 modes=USE）
+    ============  =========================================  ====================
+
+    【护驾】那一行两种模式都落在 ``DODGE`` 语境，而 ``DODGE`` 的候选派发**不带 mode 事实**
+    （``actions._dodge`` 只给 ``respond_required``）⇒ 这一层对它是**声明性**的：写法在
+    登记表上把「使用 / 打出」两半都认领了，行为与票 09 / M6 票 16 逐字相同（票 22 §2
+    「牌面不动，只补口径」）。``RESPOND`` 语境的 mode 由 ``actions._respond`` 原样下传
+    （南蛮 / 决斗 / 万箭 = ``PLAY``，借刀 / 乱武 = ``USE``），故【激将】的两半都是活的。
 
     ``activation_flow``（yijiang-2014-round2 票 20 的加法）：这条技能在**出牌阶段**作为
     一条"使用【杀】的入口"时的那条流水线（目标步 + 求助窗口 + 使用链）。缺省 ``None``
@@ -657,7 +689,7 @@ class LordSkill(HeroSkillDecl):
 
     required: str
     scope: CandidateScope
-    respond_mode: RespondMode | None = None
+    respond_modes: tuple[RespondMode, ...] | None = None
     activation_flow: SkillFlow | None = None
 
     def offer(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -669,10 +701,16 @@ class LordSkill(HeroSkillDecl):
         【黄天】式技能会在这里写 ``ctx.owner != ctx.subject`` 的分支。
         "每提供者只问一次"由候选生成器统一过滤 ``ctx.providers_used``。
 
+        **被动两侧**（``RESPOND`` / ``DODGE``）：只由窗口的 ``respond_required`` 与
+        ``respond_modes`` 筛。票 22 起【激将】声明的 mode 集合含 ``USE`` ⇒【借刀杀人】
+        （与【乱武】）的「被迫使用【杀】」窗口里也进候选；产物由窗口消费（求助窗口走
+        :data:`LORD_REQUEST_DELIVER_KEY` 把牌交回去，窗口自己 ``start_use``）。
+
         **PLAY 那一条**（票 20）：``activation_flow`` 有值 ⇒ 出牌阶段像一条"使用【杀】的
         入口"那样出候选，闸门 = :func:`_jijiang_use_legal`（机械锁 + ``check_usable`` 整条
         使用前校验）。它与 ``RESPOND`` / ``DODGE`` 两条**互不影响**：同一份声明在别人回合的
-        响应窗口里照样只由窗口的 ``respond_required`` / ``respond_mode`` 筛。
+        响应窗口里照样只由窗口的 ``respond_required`` / ``respond_modes`` 筛——被动窗口
+        **既不查也不置**票 20 的机械锁（用户 2026-11-09：「如果是被动响应使用/打出杀则不影响」）。
         """
         if ctx.owner != ctx.subject:
             return current
@@ -685,7 +723,7 @@ class LordSkill(HeroSkillDecl):
         if ctx.scope is CandidateScope.RESPOND:
             if ctx.respond_required != self.required:
                 return current
-            if self.respond_mode is not None and ctx.respond_mode is not self.respond_mode:
+            if self.respond_modes is not None and ctx.respond_mode not in self.respond_modes:
                 return current
         return (*current, ActivateSkill(skill_id=self.skill_id, answers_seq=ctx.answers_seq))
 
@@ -694,13 +732,29 @@ class LordSkill(HeroSkillDecl):
         return _run_lord_request(host, frame, self, actor, timing)
 
 
+USE_OR_PLAY_MODES: tuple[RespondMode, ...] = (RespondMode.PLAY, RespondMode.USE)
+"""「使用或打出」两档（票 22）：牌面逐字这么写的主公技（两条【激将】/ 两条【护驾】）都声明它。
+
+``PLAY`` = 打出（南蛮 / 决斗 / 万箭 / 求助子窗口本身），``USE`` = 使用（借刀的「被迫使用
+【杀】」与【乱武】；【闪】的【闪】步在登记表里也是这一档）。声明成一个**集合**而不是
+"最后一个 mode 胜"：两张【激将】在**出牌阶段主动使用**之外要同时覆盖这两半，只写其中一个
+就会让另一半的窗口静默地没有候选——票 22 要补的正是借刀那一半。
+"""
+
+
 HUJIA = LordSkill(
     hero_id="caocao",
     short_id="hujia",
     required="dodge",
     scope=CandidateScope.DODGE,
+    respond_modes=USE_OR_PLAY_MODES,
 )
-"""曹操【护驾】：需要【闪】时令其他魏势力角色打出【闪】（规则 937）。"""
+"""曹操【护驾】：需要【闪】时令其他魏势力角色打出【闪】（规则 937）。
+
+mode 集合含 ``USE`` = 牌面的「使用或打出」两半都认领（票 22）：使用侧住 ``DODGE`` 语境的
+【闪】步（登记表 modes=USE）、打出侧住万箭（同一语境的 modes=PLAY）。``DODGE`` 派发不带
+mode 事实 ⇒ 这一层是**声明性**的，行为与票 09 逐字相同。
+"""
 
 JIE_HUJIA = hero_skill_id("jie_caocao", "hujia")
 """界曹操【护驾】的全限定技能 id（§十九 L2030–L2034：①求助窗口 + ②决定者不是受益者）。"""
@@ -710,6 +764,7 @@ JIE_HUJIA_LORD = LordSkill(
     short_id="hujia",
     required="dodge",
     scope=CandidateScope.DODGE,
+    respond_modes=USE_OR_PLAY_MODES,
 )
 """界曹操【护驾】①：与标准版**逐字相同**的求助窗口声明（同一条 ``LordSkill.offer``）。
 
@@ -722,13 +777,15 @@ JIJIANG = LordSkill(
     short_id="jijiang",
     required="slash",
     scope=CandidateScope.RESPOND,
-    respond_mode=RespondMode.PLAY,
+    respond_modes=USE_OR_PLAY_MODES,
     activation_flow=JIJIANG_USE_FLOW,
 )
-"""刘备【激将】：需要【杀】时令其他蜀势力角色打出 / 代使用【杀】（规则 972 + 票 20）。
+"""刘备【激将】：需要【杀】时令其他蜀势力角色打出 / 代使用【杀】（规则 972 + 票 20 / 22）。
 
-「打出」半边 = ``RESPOND`` + ``RespondMode.PLAY``（南蛮 / 决斗…）；「使用」半边 = 出牌阶段
-的 ``activation_flow``（:data:`JIJIANG_USE_FLOW`：选目标 → 求助窗口 → 主公使用产物）。
+- 「打出」半边 = ``RESPOND`` + ``RespondMode.PLAY``（南蛮 / 决斗…）；
+- 「使用」半边 = 出牌阶段主动使用的 ``activation_flow``（:data:`JIJIANG_USE_FLOW`）**加上**
+  ``RespondMode.USE`` 的被动窗口（【借刀杀人】/【乱武】的「被迫使用【杀】」，票 22）；
+- 两个被动半边都**不查、不置**票 20 的机械锁（锁只挡"出牌阶段主动发动"）。
 """
 
 JIE_JIJIANG = hero_skill_id("jie_liubei", "jijiang")
@@ -739,7 +796,7 @@ JIE_JIJIANG_LORD = LordSkill(
     short_id="jijiang",
     required="slash",
     scope=CandidateScope.RESPOND,
-    respond_mode=RespondMode.PLAY,
+    respond_modes=USE_OR_PLAY_MODES,
     activation_flow=JIJIANG_USE_FLOW,
 )
 """界刘备【激将】①：与标准版**逐字相同**的求助窗口声明（同一条 ``LordSkill.offer``）。
