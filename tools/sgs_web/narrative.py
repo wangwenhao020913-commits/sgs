@@ -293,6 +293,8 @@ class _Narrator:
             self._chained_change(record, seq)
         elif delta_type == "flipped_change":
             self._flipped_change(record, seq)
+        elif delta_type == "armor_change":
+            self._armor_change(record, seq)
         elif delta_type == "wine_change":
             self._wine_change(record, seq)
         elif delta_type == "pindian":
@@ -322,6 +324,31 @@ class _Narrator:
         frame_id = record.get("frame_id")
         if isinstance(frame_id, int):
             self.reveal_frames[frame_id] = {"passed": False, "discarded": False}
+
+    def _armor_change(self, record: dict[str, Any], seq: int) -> None:
+        """护甲值变化（W7 的第二条体力轴）：获得护甲 / 被伤害吸收各一行中文。
+
+        ``after > before`` = 获得护甲（【矢北】的开局 3 点）；``after < before`` = 本次伤害
+        先扣掉了护甲——**被吸收的伤害仍算一次全额伤害**，``hp_change`` 那行照写全值
+        （护甲全吸收时没有那一行）。
+        """
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        before = int(record.get("before", 0))
+        after = int(record.get("after", 0))
+        if after == before:
+            return
+        gained = after > before
+        segments = [
+            *self._seat(seat),
+            _act(" 获得护甲 " if gained else " 护甲吸收伤害 "),
+            _number(abs(after - before), "dmg"),
+            _act(f" 点（护甲 {after}）"),
+        ]
+        self._line(seq, segments)
 
     def _flipped_change(self, record: dict[str, Any], seq: int) -> None:
         """翻面 / 翻回正面：一行中文。跳过回合的因果**不**在这里解释（事件流只写状态）。"""

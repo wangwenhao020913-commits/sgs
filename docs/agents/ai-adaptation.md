@@ -120,7 +120,10 @@
 同一类的**后续**：`PlayerPublic.hero_zone_count` 进 `_conserved_card_count`（守恒量完整）、
 `PlayerView.hero_zone_cards` 进 `_visible_card_faces`（已出现的牌），他人区的牌面仍留在未知池；
 两条登记同为"读"。评审同样问"守恒量 / 未知池的输入变没变"，不能只看金录像（字段
-`exclude=True`，不触发字节告警）。
+`exclude=True`，不触发字节告警）。**W7 的护甲**是同一条纪律下的第三处：`PlayerPublic.armor`
+（`exclude=True`，画在座位卡的血条上）进 `_lethal_to` 的斩杀判据（`hp + armor` 才是一条命
+的全部厚度），登记为"读"；但 `_wounded` 仍只看 `hp < hp_max`——**两条判据刻意分开**，
+评审时别把"读护甲"误读成"护甲影响是否已受伤"（那会污染【定品】类目标池）。
 
 **第三类先例：读法变了、读写档没变**——`PlayerPublic.identity`。I1 身份保守档（票 21）把
 "已明敌人 ⇒ 1、其余 ⇒ 0"换成配比字面表的均匀后验 `(P(敌), P(友))`（`_identity_relation`），

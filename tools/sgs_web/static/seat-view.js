@@ -101,7 +101,14 @@ function identityBadgeView(player, identityMode) {
   return { label: "?", className: "identity-badge hidden", title: "身份：暗置" };
 }
 
-/** 体力条：分段方块 + `current/max`；上限 ≥6 只画 `x/x` 文本（避免超出卡面）。 */
+/** 体力条：分段方块 + `current/max`；上限 ≥6 只画 `x/x` 文本（避免超出卡面）。
+ *
+ * **护甲段**（W7 的第二条体力轴）：`player.armor > 0` 时在血条右侧接一组独立的小方块
+ * （`.armor-segs` 里 `armor` 个 `.armor-seg`，悬停写「护甲 N」）。数值原样读服务端字段
+ * `player.armor`（`PlayerPublic` → `seat_display`），前端**不**自己夹上限、也不从体力推。
+ * `armor` 缺省 / 0（旧载荷、合成视图、没有护甲的武将）⇒ **一个节点都不加**：DOM 与
+ * 引入护甲之前逐字节同形（`.hp-seg` 的条数断言因此不受影响）。
+ */
 function hpBarNode(player) {
   const hp = Math.max(0, Number(player && player.hp) || 0);
   const hpMax = Math.max(hp, Number(player && player.hp_max) || 0);
@@ -123,7 +130,22 @@ function hpBarNode(player) {
   number.className = "hp-num";
   number.textContent = `${hp}/${hpMax}`;
   bar.appendChild(number);
+  const armor = Math.max(0, Number(player && player.armor) || 0);
+  if (armor > 0) bar.appendChild(armorSegsNode(armor));
   return bar;
+}
+
+/** 护甲段：`count` 个方块装在一个 `.armor-segs` 里（0 时调用方不接这个节点）。 */
+function armorSegsNode(count) {
+  const sleeve = document.createElement("span");
+  sleeve.className = "armor-segs";
+  sleeve.setAttribute("title", `护甲 ${count}（受到伤害时先扣护甲，扣完不濒死）`);
+  for (let index = 0; index < count; index += 1) {
+    const segment = document.createElement("span");
+    segment.className = "armor-seg";
+    sleeve.appendChild(segment);
+  }
+  return sleeve;
 }
 
 /** 手牌读数（票 09）：`张数/上限`——武将块左下的「手牌：」、武将详情与顶栏共用一句。

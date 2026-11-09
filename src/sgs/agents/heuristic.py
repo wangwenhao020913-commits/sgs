@@ -699,18 +699,22 @@ def _wounded(view: PlayerView) -> bool:
 def _lethal_to(
     card: CardRef | None, view: PlayerView, seat: int, *, wine: bool | None = None
 ) -> bool:
-    """这一下落到 ``seat`` 身上是不是**当场打死**（``_damage_to >= 目标体力``）。
+    """这一下落到 ``seat`` 身上是不是**当场打死**（``_damage_to >= hp + armor``）。
 
     这是**唯一的斩杀判据**（D2，票 19）：:func:`_score_attack` 的斩杀项问"现在就够不够"，
     :func:`_wine_enables_kill` 问"加【酒】才够、现在不够"——两条都读这里，不各写一份
     ``_damage_to`` 比较（改伤害模型时只有一处会漂）。``wine`` 语义同 :func:`_damage_to`：
     ``None`` 读当前状态，``True`` 推演"这一口已经喝下"。
 
-    只读公开面：目标体力（公开）与 :func:`_damage_to`（藤甲 / 白银狮子 / 【酒】/ 古锭刀都在
-    它里面）。**不**读目标手牌牌面：这一刀会不会被【闪】抵消是概率问题，归 C1（记牌那票），
-    本票的"斩杀"只回答"实际伤害够不够"。
+    只读公开面：目标体力 / **护甲**（两条都在投影里）与 :func:`_damage_to`（藤甲 / 白银狮子 /
+    【酒】/ 古锭刀都在它里面）。**不**读目标手牌牌面：这一刀会不会被【闪】抵消是概率问题，
+    归 C1（记牌那票），本票的"斩杀"只回答"实际伤害够不够"。
     """
-    return _damage_to(card, view, seat, wine=wine) >= view.players[seat].hp
+    target = view.players[seat]
+    # 护甲是**第二条体力轴**（yijiang-2014-round2 票 07 / W7）：这一刀要先把护甲打光才轮到
+    # 体力，"还能扛几下"因此是 ``hp + armor``。**只**进这条斩杀判据——「已受伤」
+    # （:func:`_wounded`）仍只看 ``hp < hp_max``（护甲不让任何人看起来受伤）。
+    return _damage_to(card, view, seat, wine=wine) >= target.hp + target.armor
 
 
 # ---------------------------------------------------------------------------
@@ -3062,6 +3066,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "（正面发动要跳过下个回合）与【谦逊】的续命判据也读它（票 22）",
                 ),
                 "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
+                "armor": (
+                    True,
+                    "护甲是第二条体力轴（W7）：``_lethal_to`` 的'这一下打不打得死'读 "
+                    "``hp + armor``（有护甲的人得多挨几下）；``_wounded`` 仍只看 "
+                    "``hp < hp_max``——护甲不让任何人看起来受伤，所以【仁德】类判据不读它",
+                ),
                 "hand_count": (
                     True,
                     "公开手牌数：【古锭刀】加伤、防守成本、够不够弃；记牌里它是"

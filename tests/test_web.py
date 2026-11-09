@@ -5590,6 +5590,28 @@ def test_the_public_seat_exposes_chained_and_wine_defaults() -> None:
         assert player["wine_active"] is False, f"座位 {player['seat']} 的酒状态默认未下发"
 
 
+def test_the_public_seat_carries_armor_and_the_payload_shape_pins_it() -> None:
+    """W7 的第二条体力轴：护甲值随投影 / 网页载荷下发（座位卡要画护甲段）。
+
+    投影里 ``armor`` 与 ``chained`` / ``wine_active`` 同档（公开事实、网页载荷由
+    ``seat_display`` 补下）。座位卡的护甲段读的就是 ``player.armor``：0 时一段都不画
+    （DOM 与旧版逐字节同形），故这里同时钉住"默认值照发"与"真值走完整下发路径"。
+    """
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"], "快照必须有座位"
+    for player in snapshot["players"]:
+        assert player["armor"] == 0, f"座位 {player['seat']} 的护甲默认未下发"
+
+    target = session.engine.state.players[1]
+    target.armor = 3
+    snapshot = visible_snapshot(session)
+    payload = next(p for p in snapshot["players"] if p["seat"] == target.seat)
+    assert payload["armor"] == 3, "护甲是真状态：完整下发路径读得到"
+    assert project(session.engine.state, session.human_seat).players[1].armor == 3
+    assert "armor" in PlayerPublic.model_fields
+
+
 def test_the_public_seat_reads_chained_and_wine_from_engine_state() -> None:
     """字段是真状态：引擎状态置真时投影读得到（M5 接状态时只写状态，不改投影）。"""
     pack = load_content_pack(deck_profile="standard_108")

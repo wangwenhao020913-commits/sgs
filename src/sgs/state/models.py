@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 
 __all__ = [
+    "ARMOR_CAP",
     "CardRef",
     "CardTag",
     "FrameKind",
@@ -417,6 +418,19 @@ LIFE_DECREASE_DAMAGE_KEY = "life_decrease_from_damage"
 帧私有载荷不进记录流，故这条判据不改变任何金录像的字节。
 """
 
+ARMOR_CAP = 5
+"""**护甲值**的硬上限（yijiang-2014-round2 票 07 / W7；用户 2026-11-09 签 Q-A2）。
+
+护甲是**第二条体力轴**（与 ``hp`` / ``hp_max`` 并列，见 :class:`Player.armor`）：可叠加、
+超过上限**夹到 5**。它是**规则常数**而不是 per-player 字段（"封顶"不随武将数据变化），
+故住模块级常量：``Player`` 只存当前值，任何"获得护甲"的效果都把结果夹进 ``[0, ARMOR_CAP]``
+再交给 :func:`~sgs.effects.primitives.apply_armor`（原语对越界抛错，与 ``apply_hp`` 同姿态）。
+
+**不是** ``Timing``、也不是一条帧：护甲在**别人打你时**生效（``life_decrease_on`` 的扣减
+次序），没有"护甲时机"可挂。故它不进 ``IMPLEMENTED`` / ``ENUM_ONLY`` 四轴计数，
+``shapes.md`` §5 的「零载体」一档由此解封（见 ``docs/agents/skill-authoring/shapes.md``）。
+"""
+
 
 class Marker(_FrozenModel):
     """一个座位身上的**标记实例**（票 06；用户 Q6 裁定）。
@@ -457,6 +471,21 @@ class Player(BaseModel):
     seat: int
     hp: int
     hp_max: int
+    armor: int = 0
+    """**护甲值**：与体力并列的第二条体力轴（yijiang-2014-round2 票 07 / W7）。
+
+    用户 2026-11-09 签 Q-A1 = 一（独立第二血条）：受到伤害时**先扣护甲、不足再扣体力**
+    （次序落在唯一写点 :func:`sgs.engine.steps.life_decrease_on`，且**只对伤害帧**——
+    「失去体力」帧不吸收）；回复体力 / 任何「失去体力」/ 体力上限变化**都不碰护甲**；
+    护甲扣光**不濒死**（濒死只看 ``hp``）。可叠加，封顶 :data:`ARMOR_CAP`。
+
+    写入口唯一 = :meth:`Engine.apply_armor_change` → :func:`~sgs.effects.apply_armor`
+    （照 ``apply_hp`` 的姿态：调用帧先把值夹进 ``[0, ARMOR_CAP]``，原语对越界抛错）。
+    变化落一条 ``armor_change`` delta（与 ``hp_change`` 同帧、**排在它前面**）；它是公开
+    事实，但不进记录流里的询问视图（``PlayerPublic.armor`` 是 ``exclude``，与
+    ``chained`` / ``wine_active`` 同一条纪律 ⇒ 47 条金录像逐字节不变），网页载荷由
+    ``sgs_web.display.seat_display`` 补下。
+    """
     alive: bool = True
     death_time_skills_active: bool = False
     """死亡时技能窗口（票 10）：死者本人的技能在阵亡结算里**暂时**可解析。

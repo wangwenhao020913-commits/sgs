@@ -561,6 +561,15 @@ class PlayerPublic(_FrozenModel):
     seat: int
     hp: int
     hp_max: int
+    armor: int = Field(default=0, exclude=True)
+    """**护甲值**：与体力并列的第二条体力轴（yijiang-2014-round2 票 07 / W7）。
+
+    公开事实（画在座位卡的血条上），但 ``exclude`` 与 ``chained`` / ``wine_active`` /
+    ``flipped`` 同一条纪律：**不进记录流**的询问视图，故 47 条金录像逐字节不变；网页载荷
+    由 ``tools/sgs_web/display.py:seat_display`` 补下（``visible_snapshot`` 只做投影的
+    ``model_dump``，拿不到 ``exclude`` 字段）。变化经 ``armor_change`` delta 下发
+    （``hp_change`` 同档：公开事实、原样下发），回放逐条重建。
+    """
     hand_count: int
     alive: bool
     equip: tuple[CardRef, ...]

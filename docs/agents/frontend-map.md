@@ -15,7 +15,7 @@
 | `candidates.js` | 候选索引的**只读**查询：`cardEntry` / `cardSelectable` / `isLegalCombo` / `autoCombo`；不重建索引。**自己区域的直选判据** `isOwnZonePick`（选自己的手牌/装备 ⇒ 牌面直选、不铺左下角面板；票 14）也在这里。 |
 | `card-view.js` | 卡面绘制（花色 / 点数 / 牌名 / 类型行 / 悬停全文），纯展示；**跟随鼠标的卡牌预览**（`showCardPreview` / `moveCardPreview` / `hideCardPreview`，层 `#t-card-preview`；用户 2026-11-07：装备 / 判定槽与武将牌上的牌区共用这一口，贴边翻转）。 |
 | `card-face.js` | 卡面状态的纯函数：选中 / 置灰 / 槽位、`isProvide` / `provideSlotIndex`。 |
-| `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**判定 / 装备槽的简略牌面**（`miniSlotNode`：牌名 + 花色点数、转化牌右上角「转」；槽是否接点击由 `sideBlockRows` 的三条判据决定——自己的「提供一张 B」/「选牌面」/ 预发动 / **手选面里候选索引有的牌**（`equipCardPick`，改判窗口的装备区牌因此可点）；装备槽**有牌时不写**武器 / 防具 / 攻马 / 防马，判定槽常写；悬停走 `#t-card-preview` 的常规卡面），**武将牌上的牌区**（`heroZoneRows`，标签带张数与**悬停预览**——2026-11-07 起点击不再展开；非宿主悬停只给「牌面仅宿主可见」）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**被废除（封印）的槽**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发；**票 03 起是槽 id**：判定 `judge_1..3`（`judgeSlotLayout` 的 `sealKey`，写成 `data-slot-key`；`data-slot="judge"` 仍是 `anim.js` 的落位锚点）+ 装备四槽）**逐槽**叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；**每个被废除的槽各画一个**，判定行 / 装备格本身不再画，**区域形状不变**；lukang-mobile 票 03 取代 lei 票 05 的"整区一个"）。 |
+| `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**判定 / 装备槽的简略牌面**（`miniSlotNode`：牌名 + 花色点数、转化牌右上角「转」；槽是否接点击由 `sideBlockRows` 的三条判据决定——自己的「提供一张 B」/「选牌面」/ 预发动 / **手选面里候选索引有的牌**（`equipCardPick`，改判窗口的装备区牌因此可点）；装备槽**有牌时不写**武器 / 防具 / 攻马 / 防马，判定槽常写；悬停走 `#t-card-preview` 的常规卡面），**武将牌上的牌区**（`heroZoneRows`，标签带张数与**悬停预览**——2026-11-07 起点击不再展开；非宿主悬停只给「牌面仅宿主可见」）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**护甲段**（W7 的第二条体力轴）：`hpBarNode` 读 `players[].armor`（`PlayerPublic` → `seat_display` 补下），`> 0` 时在血条右侧接 `.armor-segs` / `.armor-seg`；`0` 时**一个节点都不加**（DOM 与引入护甲之前逐字节同形，自己座位经 `table.js` 搬 `hp.children` 自动带上）。**被废除（封印）的槽**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发；**票 03 起是槽 id**：判定 `judge_1..3`（`judgeSlotLayout` 的 `sealKey`，写成 `data-slot-key`；`data-slot="judge"` 仍是 `anim.js` 的落位锚点）+ 装备四槽）**逐槽**叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；**每个被废除的槽各画一个**，判定行 / 装备格本身不再画，**区域形状不变**；lukang-mobile 票 03 取代 lei 票 05 的"整区一个"）。 |
 | `table.js` | 环桌布局与表体渲染：`tableViewForRender`、`renderTable`、`renderProcessing`、`renderSkills`；座位交互态 `seatInteraction`（可指定 / 已选 / 必选，环上与底部面板共用）：手选目标、预发动座位步、**单选座位面**（`SELECT_OPTION` + `option_seats`），以及 **W1 的座位多选面**（`SELECT_OPTIONS` + `option_seats` 非空 ⇒ 池里的座位画可点、已选画 `tsel`）。 |
 | `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
 | `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装；选项步的**置灰不可选**（`preactivationDisabled` 读 `StepPool.disabled`，画 `.dis` + 不接 click；票 04 §3）；多来源步的**合法来源组合**（`preactivationGroups` 读 `Step.groups`：卡面 / 「下一步」/ 「提交」三处同一判据，凑不成一组的来源既选不出也交不出；huo-mobile-batch 票 10）。 |
@@ -29,7 +29,7 @@
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
 | `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`；多选面共用的查找实现 `selectOptionsAction`（勾选 `multiSelectAction` / 座位 `seatMultiAction`，右端「放弃」仍是候选里那条 `Pass`）；三个前端代答例外（观星 `ARRANGE` / 涉猎 `suit` / 计数式分配 `DISTRIBUTE` 到点提交当前选择）；涉猎提交后的 2.5 秒结果态。 |
 | `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
-| `replay.js` | 回放页：录像列表、按记录重建座位全区、询问面板与播放控制。 |
+| `replay.js` | 回放页：录像列表、按记录重建座位全区（含 `armor_change` 的护甲值——从 0 起逐条 `after` 重建，`> 0` 才在座位行里写「护甲 N」）、询问面板与播放控制。 |
 | `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；阶段 / 回合飘字（U4-04）的 `#t-anim-phase` 层与 `animPlanPhase` 也在这里；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |
 | `main.js` | `wire()` 事件绑定、回放步长按钮、启动；必须是最后一份脚本。 |
 
@@ -47,7 +47,7 @@
 | `stageLane(item, now)` | `session.js` | **纯函数**寿命判定：`visible` / `fading` / `gone`；测试直接喂 `now`。 |
 | `tableViewForRender()` | `table.js` | 回放期读逐事件派生的 `state.liveView`（`pending` 收起），其余读权威视图。 |
 | `stepPlayback(immediate)` | `session.js` | 回放一条记录：日志 → 效果 / 亮牌 → `applyLiveDelta` → 重绘 → 动效 → 技能事件。 |
-| `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 手牌数 / 装备 / 阶段 / 标记数量 `marker_change` …）。 |
+| `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 护甲 `armor_change` / 手牌数 / 装备 / 阶段 / 标记数量 `marker_change` …）。 |
 | `poll()` | `session.js` | 2s 静默轮询；idle 只更新时钟，不重绘、不清选择；失败静默。 |
 | `drawTargetLines(actor, targets, now)` | `effects.js` | 每个目标一条金色 SVG 线（跳过自己 / 阵亡）；端点只读一次布局。 |
 | `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。**不判断"哪些技能该有特效"**：`event` 由服务端下发（见下一条），前端只画。 |

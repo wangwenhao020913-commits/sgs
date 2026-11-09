@@ -592,6 +592,13 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .hp-bar.hp-text .hp-num {
   margin-left: 0; font-size: calc(13 * var(--dsu)); font-weight: 700; color: var(--ink);
 }
+/* 护甲段（W7 的第二条体力轴）：血条右侧的独立小条，与体力块同一档尺寸但**异色**——
+ * 一眼能看出"这是额外的血，不是体力"。`.armor-segs` 自己不留间距时与体力块连成一排。 */
+.armor-segs { display: inline-flex; gap: 2px; margin-left: calc(3 * var(--dsu)); }
+.armor-seg {
+  width: calc(7 * var(--dsu)); height: calc(7 * var(--dsu)); border-radius: 2px;
+  background: #4a6b8a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
+}
 
 .seat .seat-foot {
   margin-top: auto; display: flex; justify-content: space-between; gap: 6px;
@@ -1277,6 +1284,7 @@ button.mini-slot { cursor: pointer; }
 .self .hp-seg { width: calc(13 * var(--dsu)); height: calc(9 * var(--dsu)); }
 .self .hp-num { margin-left: calc(5 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
 .self .hp-bar.hp-text .hp-num { font-size: calc(15 * var(--dsu)); }
+.self .armor-seg { width: calc(11 * var(--dsu)); height: calc(9 * var(--dsu)); }
 .self .seat-tags { margin-top: 2px; }
 .self .seat-flag { font-size: calc(11 * var(--dsu)); padding: 0 calc(7 * var(--dsu)); }
 .self .seat-foot { margin-top: auto; font-size: calc(11 * var(--dsu)); padding-top: 5px; }

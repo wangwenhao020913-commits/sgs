@@ -492,8 +492,9 @@ function liveUpdateCardTags(view, cardId, tag, adding) {
 
 /** 一条记录对 live view 的**可见**贡献（D11）：只写记录里真有的派生事实。
  *
- * 可派生：体力（`hp_change.after`）、手牌数（`card_move` 的牌面 / `card_count`）、自己的
- * 手牌面、装备与判定区（公开区牌面）、牌堆与弃牌数（含 `deck_shuffle` 的重洗）、横置、
+ * 可派生：体力（`hp_change.after`）、护甲（`armor_change.after`，W7 的第二条体力轴）、
+ * 手牌数（`card_move` 的牌面 / `card_count`）、自己的手牌面、装备与判定区（公开区牌面）、
+ * 牌堆与弃牌数（含 `deck_shuffle` 的重洗）、横置、
  * 酒、亮明身份、阵亡（`DEATH_BEFORE_START` 的 `actor`）、回合 / 阶段（`TURN_*` / `PHASE_*`）。
  *
  * **不可派生的字段一律不猜**：技能可用性、体力上限、当前询问、武将名与势力留在最近一次
@@ -526,6 +527,12 @@ function applyLiveDelta(record, view = state.liveView) {
     if (record.delta_type === "hp_change") {
       const player = playerAt(record.seat);
       if (player) player.hp = Number(record.after);
+      return view;
+    }
+    if (record.delta_type === "armor_change") {
+      // W7 的第二条体力轴：护甲值（绝对值，after 是唯一真源）。座位卡的护甲段读它。
+      const player = playerAt(record.seat);
+      if (player) player.armor = Number(record.after);
       return view;
     }
     if (record.delta_type === "chained_change") {

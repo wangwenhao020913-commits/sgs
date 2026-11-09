@@ -46,6 +46,7 @@ from sgs.effects import (
     Randomness,
     WINE_COUNT_KEY,
     WINE_DAMAGE_BONUS,
+    apply_armor,
     apply_hp,
     behavior_for,
     delayed_settle_target,
@@ -117,6 +118,7 @@ from sgs.state import (
     ArrangeCards,
     ArrangeContext,
     ArrangeQuery,
+    ArmorChangeDelta,
     CardRef,
     Distribute,
     DistributeContext,
@@ -3746,6 +3748,24 @@ class Engine:
         """
         ctx = self._effect_context(frame, actor=seat)
         delta = apply_hp(self.state, ctx, seat, value)
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        return delta
+
+    def apply_armor_change(
+        self, frame: Frame, seat: int, value: int
+    ) -> ArmorChangeDelta:
+        """调 ``apply_armor`` 这个叶子原语并把返回的变化事件写进记录流（W7）。
+
+        与 :meth:`apply_hp_change` 同姿态：``value`` 由调用帧算好（获得护甲 =
+        ``min(armor + amount, ARMOR_CAP)``；伤害吸收 = ``armor - min(armor, amount)``），
+        本方法只负责写与记录。伤害吸收那一条由 :func:`~sgs.engine.steps.life_decrease_on`
+        在**同一条** ``LIFE_DECREASE`` 帧里发出，且排在 ``hp_change`` **之前**。
+
+        ``frame_id`` 即承载它的帧（伤害吸收 = LIFE_DECREASE 帧；技能获得护甲 = 技能自己的
+        帧），故"这次护甲变化属于谁"可由帧关联推出——回放逐条重建即可。
+        """
+        ctx = self._effect_context(frame, actor=seat)
+        delta = apply_armor(self.state, ctx, seat, value)
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
         return delta
 

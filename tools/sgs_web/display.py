@@ -294,9 +294,10 @@ def seat_display(
     heroes: HeroTable | Sequence[HeroTable] | None = None,
     players: Sequence[PlayerPublic] | None = None,
 ) -> dict[str, Any]:
-    """座位卡的展示字段：横置 / 酒状态 + 身份标签 + 武将名称 / 势力。
+    """座位卡的展示字段：横置 / 酒 / **护甲**状态 + 身份标签 + 武将名称 / 势力。
 
-    ``chained`` / ``wine_active`` 来自投影（U1-04 起是 ``PlayerPublic`` 字段）；
+    ``chained`` / ``wine_active`` / ``armor`` 来自投影（U1-04 起是 ``PlayerPublic`` 字段；
+    ``armor`` 是 W7 的第二条体力轴，投影里 ``exclude`` ⇒ 只从这里补进网页载荷）；
     网页载荷里的身份标签由这里统一给出，前端可优先读它；旧的 ``identityLabel`` 仅作
     回放 / 合成载荷兜底。
 
@@ -311,6 +312,8 @@ def seat_display(
         "chained": bool(player.chained),
         "flipped": bool(player.flipped),
         "wine_active": bool(player.wine_active),
+        # W7 的第二条体力轴：座位卡在血条右侧画护甲段（0 = 一段都不画，DOM 与旧版逐字节同形）。
+        "armor": int(player.armor),
         "identity_label": (
             IDENTITY_LABELS.get(player.identity) if player.identity is not None else None
         ),
