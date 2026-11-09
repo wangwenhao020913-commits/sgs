@@ -1410,6 +1410,25 @@ def _jie_run(state, players, stop):
     return engine
 
 
+def _jie_window_offered(engine, cause, required) -> bool:
+    """停止条件：``engine.pending`` **正是那一扇窗口**，且 ② 在它的候选里。
+
+    窗口用例先用它停在询问面读"这一问是谁、要什么牌、候选里有没有 ②"，再接着推进到
+    结算完——两侧都读真实询问 / 真实记录流，不 mock 窗口。
+    """
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.RESPOND
+        and getattr(pending, "cause", None) is cause
+        and getattr(pending, "required", None) == required
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
+            for action in pending.legal_actions
+        )
+    )
+
+
 def _jie_closed(engine, frame_kind) -> bool:
     """记录流里某个帧**已经出栈**（= 那一整段结算跑完）。"""
     return any(
@@ -1529,6 +1548,85 @@ def test_jie_jianying_converts_a_card_into_a_slash_to_answer_barbarian_invasion(
     assert state.player(0).hp == 2, "响应成立 ⇒ 不受南蛮那 1 点伤害"
 
 
+def test_jie_jianying_converts_a_card_into_a_dodge_to_answer_arrow_barrage():
+    """**万箭齐发**（``mode = PLAY``，要【闪】）：产物走**打出**链，不进使用链。
+
+    票面 §2 表 / spec §11 的 P8 行都点名「南蛮 / 万箭 / 决斗」，而旧断言只覆盖南蛮——
+    万箭与决斗这两扇窗口各自单独钉一条，走的是同一个 ``ProviderWindows`` 声明面。
+    """
+    arrows = cards_of_type(PACK, "arrow_barrage")[0]
+    state = _jie_window_state(
+        seats=(
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+            SeatSpec(hand=(arrows,)),
+        ),
+        turn_seat=1,
+    )
+    players = [
+        _WindowSeat(provider=True, source=CLUB_CROSSBOW),
+        _WindowSeat(use=arrows, use_at=0),
+    ]
+    engine = _jie_run(
+        state,
+        players,
+        lambda e: _jie_window_offered(e, WindowCause.ARROW_BARRAGE, "dodge"),
+    )
+
+    window = engine.pending
+    assert window.actor == 0, "被问的是万箭的目标（渐营持有者），不是使用者"
+    assert window.required == "dodge", "万箭齐发要的是【闪】（不是南蛮那张【杀】）"
+
+    run_queries(engine, players, lambda e: _jie_closed(e, FrameKind.USE))
+
+    played = _jie_played_cards(engine)
+    assert [card.type for card in played] == ["dodge"], "打出的是一张转出来的【闪】"
+    assert played[0].virtual_sources == (CLUB_CROSSBOW,)
+    assert [card.type for card in _jie_used_products(engine)] == ["arrow_barrage"], (
+        "产物只打出、不进使用链：使用链上只有万箭齐发自己"
+    )
+    assert state.player(0).hp == 2, "响应成立 ⇒ 不受万箭那 1 点伤害"
+
+
+def test_jie_jianying_converts_a_card_into_a_slash_to_answer_duel():
+    """**决斗**（``mode = PLAY``，要【杀】族）：产物走**打出**链；没接住的一方受伤。
+
+    决斗的响应权在双方之间来回，故这条同时钉住"② 的产物被当**真打出**推进决斗游标"：
+    我打出那张【杀】之后，轮到对方，对方没有【杀】⇒ 受伤的是对方。
+    """
+    duel = cards_of_type(PACK, "duel")[0]
+    state = _jie_window_state(
+        seats=(
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+            SeatSpec(hand=(duel,)),
+        ),
+        turn_seat=1,
+    )
+    players = [
+        _WindowSeat(provider=True, source=CLUB_CROSSBOW),
+        _WindowSeat(use=duel, use_at=0),
+    ]
+    engine = _jie_run(
+        state,
+        players,
+        lambda e: _jie_window_offered(e, WindowCause.DUEL, "slash"),
+    )
+
+    window = engine.pending
+    assert window.actor == 0 and window.target is None, "决斗是**打出**窗口（target 为 None）"
+    assert window.required == "slash"
+
+    run_queries(engine, players, lambda e: _jie_closed(e, FrameKind.USE))
+
+    played = _jie_played_cards(engine)
+    assert played and played[0].type == "slash", "打出的是一张转出来的【杀】"
+    assert played[0].virtual_sources == (CLUB_CROSSBOW,)
+    assert [card.type for card in _jie_used_products(engine)] == ["duel"], (
+        "产物只打出、不进使用链：使用链上只有决斗自己"
+    )
+    assert state.player(0).hp == 2, "我接住了那一轮 ⇒ 不受决斗的 1 点伤害"
+    assert state.player(1).hp == 3, "对方没接住 ⇒ 决斗的输家是使用者"
+
+
 def test_jie_jianying_converts_a_card_into_a_dodge_for_the_slash_window():
     """§2 表**之外**的有意读法：语境键 ``dodge`` 同时带来【杀】的【闪】步。
 
@@ -1590,13 +1688,32 @@ def test_jie_jianying_converts_a_card_into_a_slash_in_the_luanwu_window():
     assert state.player(1).hp == 2, "选项 2（失体力）没有发生"
 
 
-def test_jie_jianying_is_offered_in_the_lord_request_window():
-    """护驾 / 激将的**求助子窗口**：被求助者自己那一问里能发动 ②（登记表 ``dodge`` / ``respond``）。"""
+def test_jie_jianying_is_not_offered_in_the_lord_request_window():
+    """求助窗口（护驾 / 激将）**问不到**界沮授：``_request_askers`` 只问**同势力**角色。
+
+    旧断言为了把 ② 塞进求助窗口，把座位 1（界沮授）强行改成 ``Kingdom.WEI``——但武将数据
+    写死 ``jie_jushou_mobile`` 是**群**（`heroes.jie_yijiang_2014_mobile.json`），那张局面在
+    真实对局里不可能出现，于是它只证明了"绕过势力判据时提供者会出现"，什么也没钉住。
+
+    真实可及的读法：应答者 = ``seat != owner ∧ same_kingdom``（`lord_request.py` 的
+    ``_request_askers``），而将池里带求助技能的只有**魏**【护驾】（曹操 / 界曹操）与
+    **蜀**【激将】（刘备 / 界刘备）⇒ **没有群势力的主公**，群势力的界沮授永远进不了求助
+    区间，② 在求助窗口里也就永远不会被提供。这条断言就是那个事实：求助窗口照常开（问到了
+    同势力的队友），但从未问到座位 1，候选里也从未出现 ②。
+
+    座位 1 此刻手里有可转化的源牌、又正处在**自己的出牌阶段**（Q17-b 的额度还没动）
+    ⇒ 只要被问，② 一定"付得起"。所以"没被问"是它不出现的**唯一**原因，这条负断言不空。
+
+    **遗留风险**（票 `20-lord-request-consumes-provider.md` 记录，未实现）：一旦有人能让
+    魏 / 蜀的转化技能声明 ``dodge`` / ``respond`` 语境，它就会在求助窗口里**被提供**，然后
+    被 `lord_request.py` 的 ``_run_lord_request`` 静默吞成一次放弃（那里只认 ``PlayCard``）
+    —— 一个按下去没反应的死按钮。本票不改 `lord_request.py`。
+    """
     slash = cards_of_type(PACK, "slash")[0]
-    # 身份局的主公恒坐座位 0（`RuleConfig.first_seat` 不得预设），故由座位 1 的渐营持有者
-    # 在自己的出牌阶段对曹操出【杀】——【护驾】的求助窗口就长在这里。
     state = _jie_window_state(
         seats=(
+            # 身份局的主公恒坐座位 0（`RuleConfig.first_seat` 不得预设），故由座位 1 的渐营
+            # 持有者在自己的出牌阶段对曹操出【杀】——【护驾】的求助窗口就长在这里。
             SeatSpec(
                 hero="caocao",
                 hp=4,
@@ -1604,15 +1721,29 @@ def test_jie_jianying_is_offered_in_the_lord_request_window():
                 identity=Identity.LORD,
                 kingdom=Kingdom.WEI,
             ),
+            # 界沮授按**武将数据**是群：这张局面在真实对局里可能出现。
             SeatSpec(
                 hero=JUSHUO,
                 hp=2,
                 hp_max=3,
                 hand=(slash, CLUB_CROSSBOW),
+                kingdom=Kingdom.QUN,
+            ),
+            # 两名真实的魏势力队友：求助窗口问的是他们（而不是座位 1）。
+            SeatSpec(
+                hero="xiahoudun",
+                hp=4,
+                hp_max=4,
+                identity=Identity.REBEL,
                 kingdom=Kingdom.WEI,
             ),
-            SeatSpec(identity=Identity.REBEL),
-            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(
+                hero="guojia",
+                hp=3,
+                hp_max=3,
+                identity=Identity.REBEL,
+                kingdom=Kingdom.WEI,
+            ),
         ),
     )
     engine = _jie_run(
@@ -1623,12 +1754,7 @@ def test_jie_jianying_is_offered_in_the_lord_request_window():
             _WindowSeat(),
             _WindowSeat(),
         ],
-        lambda e: (
-            e.pending is not None
-            and e.pending.kind == QueryKind.RESPOND
-            and e.pending.actor == 1
-            and getattr(e.pending, "cause", None) is WindowCause.LORD_REQUEST
-        ),
+        lambda e: _jie_closed(e, FrameKind.USE),
     )
     # 曹操先在自己的【闪】窗口里选了【护驾】；求助窗口于是逐个问同势力角色。
     assert any(
@@ -1638,12 +1764,25 @@ def test_jie_jianying_is_offered_in_the_lord_request_window():
         for action in record.query.legal_actions
     ), "这条用例的前提：曹操真的被问了【护驾】"
 
-    window = engine.pending
-    assert window.required == "dodge" and window.cause is WindowCause.LORD_REQUEST
-    assert any(
+    lord_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND
+        and getattr(record.query, "cause", None) is WindowCause.LORD_REQUEST
+    ]
+    assert lord_queries, "这条用例的前提：求助窗口真的开了（问到了同势力的队友）"
+    assert {query.actor for query in lord_queries} == {2, 3}, (
+        "求助窗口只问**同势力**角色（`_request_askers` 的 `same_kingdom`）：曹操是魏 ⇒ "
+        "问座位 2 / 3，**不问**群势力的座位 1（界沮授）——"
+        f"实际问到的是 {sorted(query.actor for query in lord_queries)}"
+    )
+    assert not any(
         isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
-        for action in window.legal_actions
-    ), "被求助者的求助子窗口里，② 在候选里（语境键 dodge 覆盖护驾）"
+        for query in lord_queries
+        for action in query.legal_actions
+    ), "② 在求助窗口里不会被提供（提供者只在持有者自己被问的那一问里出现）"
+    assert state.player(0).hp == 3, "求助没人接得住（界沮授问不到、两名队友也没【闪】）"
 
 
 def test_jie_jianying_is_not_offered_in_the_judge_substitution_window():

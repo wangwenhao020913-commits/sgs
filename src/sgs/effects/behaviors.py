@@ -375,8 +375,11 @@ def satisfies_required(card: CardRef, required: str) -> bool:
 
     **不放宽其它牌名**：``required == "dodge"`` 仍只接受产物牌型 ``dodge``（藤甲的
     "普通【杀】无效"同理是 normal-only 判据，见 ``skills/catalog.py`` 的
-    ``_VINE_ARMOR_IMMUNE_CARD_TYPES``）。两个调用点（真牌响应窗口 / 转化候选）因此
-    不可能各写一份"什么牌能当什么牌"。
+    ``_VINE_ARMOR_IMMUNE_CARD_TYPES``）。**每一个**读"能不能当这张牌"的地方都只读本
+    函数——真牌响应窗口（``_required_cards``）、转化候选（``virtual_card_use``）、
+    提供者的窗口牌名表（【蛊惑】``_guohuo_response_names`` / 界【渐营】②
+    ``_jie_jianying_window_name``，两者都按**纯虚拟牌**试闸）——因此谁也不可能另写
+    一份"什么牌能当什么牌"。
     """
     return card.type == required or (
         required == SLASH_FAMILY_KEY and is_slash(behavior_for(card))

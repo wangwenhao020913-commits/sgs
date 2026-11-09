@@ -7085,11 +7085,26 @@ def _jie_jianying_window_name(state: GameState, required: str) -> str | None:
     窗口里牌名由窗口给（候选期 ``ctx.respond_required``、受理期 ``PROVIDER_REQUIRED_KEY``），
     ② 不再问牌名——但产物仍必须落在"本牌堆真有的基本牌"这道闭集里：不在（【无懈可击】
     一类非基本牌、或 108 档的【酒】）⇒ 这次不参与，候选期就不该出现。
+
+    **判据是牌名闸门** :func:`~sgs.effects.satisfies_required`（产物按**纯虚拟牌**试闸，
+    与【蛊惑】的窗口牌名表 :func:`_guohuo_response_names` 同一份实现）：它回答"这张牌能
+    不能充当这次响应"，是"什么牌能当什么牌"的**唯一**判据——旧实现在这里另写一份
+    ``type_id == required``，等于把闸门抄了第二遍，`catalog.py` 登记表里【杀】族的放宽
+    （火 / 雷【杀】同族）也因此在这条路上永远不生效。
+
+    产物牌名仍**取窗口点名的那一张**（票 17 §2：「窗口里牌名已被窗口定死」）：同族里恰好
+    有它就优先，没有才退到同族的第一张（今日牌堆不会出现"有火杀没有杀"，这一档只是让
+    族放宽真的可达）。⇒ 160 档的【杀】窗口产出的仍是【杀】，不是火 / 雷【杀】；族放宽
+    决定的是**这道闸放不放行**，不是产物牌名。
     """
-    for type_id in _jie_jianying_name_table(state).values():
-        if type_id == required:
-            return type_id
-    return None
+    matches = [
+        type_id
+        for type_id in _jie_jianying_name_table(state).values()
+        if satisfies_required(pure_virtual_card(state, type_id), required)
+    ]
+    if not matches:
+        return None
+    return required if required in matches else matches[0]
 
 
 def _jie_jianying_provider_payable(
