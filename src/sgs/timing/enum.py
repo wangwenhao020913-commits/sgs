@@ -274,9 +274,13 @@ IMPLEMENTED: tuple[Timing, ...] = (
     Timing.RANK_COMPARE_RESULT_AFTER,
     # L16：牌移动事件（票 07 的 M3 唯一解封；**只解封 after**，`MOVE_BEFORE` 继续留枚举位）
     Timing.MOVE_AFTER,
+    # L17：状态位变化（chenqun-guyong 票 03 解封**有写入口**的两个；见本元组 docstring）
+    Timing.STATE_FLIPPED,
+    Timing.STATE_CHAINED,
 )
 """已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 + huo-taishici-xunyu 票 03 解封 2
-+ tao-caocao 票 03 解封 1 = 70）：流程真的会走到（允许空实现 / 空日志）。
++ tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1 + chenqun-guyong 票 03 解封 2 = 73）：
+流程真的会走到（允许空实现 / 空日志）。
 
 M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对称解封）：它在
 :meth:`~sgs.engine.game.Engine.move_in_frame` 这个**唯一移动入口**里内联派发，且只在
@@ -289,6 +293,14 @@ wuming 票 04 的增量是 L11 的**加体力上限**二时机（``MAXLIFE_INCRE
 ``Engine.reduce_hp_max``（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进帧，迁会改既有
 ``hp_max_change.frame_id`` 并多两条时机记录（E1）。lukang-mobile 票 04 只给那个
 写入口补上"上限减到 0 ⇒ 体力置 0 + 直接死亡"（规则 §4.15 L431–433），**不**动本枚举。
+
+chenqun-guyong 票 03 的增量是 L17 的**两个状态位写入口**时机（``STATE_FLIPPED`` /
+``STATE_CHAINED``；用户 2026-11-09 签 Q-W2 = 读法一）：口径 = **值真的变了**才是一次事件
+（两个写入口的幂等早退不算事件；「回合开始前翻回正面」的规则固定流程**算**）。派发是
+**惰性且延后**的——``Engine.set_flipped`` / ``Engine.set_chained`` 只把事件排进
+``Engine._state_pending``，由下一条 ``_step`` 开头用一条不压栈的临时帧派发；没有注册实例时
+连记录都不落（47 条标准金录像逐字节不变）。同层另外三个（``HERO_REVEALED`` /
+``HERO_REMOVED`` / ``CARD_SHOWN``）没有写入口，继续留枚举位。
 """
 
 _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
@@ -296,13 +308,15 @@ _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
 ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
-"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 − huo-taishici-xunyu 票 03 解封 2
-− tao-caocao 票 03 解封 1 + 该票新增 1 个 = 14）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
+"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 − huo-taishici-xunyu 票 03
+解封 2 − tao-caocao 票 03 解封 1 + 该票新增 1 个 − chenqun-guyong 票 03 解封 2 = 12）：
+不 dispatch（遍历 ``Timing`` 保证顺序确定）。
 
 M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；wuming 票 04 再移走
 ``MAXLIFE_INCREASE_BEFORE/AFTER`` 两个（"加"侧真的 dispatch，"减"侧仍无载体）；huo-taishici-xunyu
 票 03 再移走 L15 的 ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER``（``RANK_COMPARE`` 帧的
-步骤表 dispatch）。其余 14 个仍无载体。
+步骤表 dispatch）；chenqun-guyong 票 03 再移走 ``STATE_FLIPPED`` / ``STATE_CHAINED``（状态位
+写入口的惰性事件，见 :data:`IMPLEMENTED` 的 docstring）。其余 12 个仍无载体。
 """
 
 EMPTY_LOG: tuple[Timing, ...] = (
@@ -341,10 +355,10 @@ DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
     timing for timing in IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
 )
 """**dispatch 白名单**（M2 定格 53 + M3 解封 1 + wuming 票 04 解封 2
-+ huo-taishici-xunyu 票 03 解封 2 + tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1 = 60）：
-真的会 dispatch、可在记录流里观测的节点。
++ huo-taishici-xunyu 票 03 解封 2 + tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1
++ chenqun-guyong 票 03 解封 2 = 62）：真的会 dispatch、可在记录流里观测的节点。
 
-= 70 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
+= 73 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
 它声明的基准 / 用例产出的记录流里实测出现。
 """

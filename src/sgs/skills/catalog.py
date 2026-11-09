@@ -63,6 +63,8 @@ from sgs.state import (
     ActivateSkill,
     CardRef,
     CardTag,
+    ChainedChangeDelta,
+    FlippedChangeDelta,
     FrameKind,
     GameState,
     MoveReason,
@@ -103,6 +105,7 @@ __all__ = [
     "DAMAGE_DEAL_POINT_KEY",
     "DAMAGE_DEAL_RECORDED_KEY",
     "PASS_STATE_KEY",
+    "STATE_CHANGE_KEY",
     "ActivationCandidate",
     "ActivationPlan",
     "Hook",
@@ -120,6 +123,7 @@ __all__ = [
     "SkillInstance",
     "SkillSource",
     "SkillSourceKind",
+    "StateChange",
     "activation_plan",
     "awakening_skill_awakened",
     "damage_point_index",
@@ -142,6 +146,7 @@ __all__ = [
     "resolve_instances",
     "same_kingdom",
     "skill_used_this_turn",
+    "state_change",
     "terminate_activation_pass",
     "timing_hooks_present",
 ]
@@ -1434,6 +1439,30 @@ SKILL_JUDGMENT_CARD_KEY = "skill_judgment_card"
 再带上判定牌。帧私有数据不进记录流，既有基准逐字节不受影响；读它的技能用后即弹掉，
 避免随 ``dict(frame.data)`` 流进子帧被别的窗口误读。
 """
+
+
+STATE_CHANGE_KEY = "state_change"
+"""帧私有槽名：本次 ``STATE_FLIPPED`` / ``STATE_CHAINED`` 事件的**载荷**（chenqun-guyong 票 03）。
+
+载荷 = **写入口发的那条 delta 本身**（:class:`~sgs.state.FlippedChangeDelta` /
+:class:`~sgs.state.ChainedChangeDelta`：``seat`` + 写进去的**新值**）。与
+``MOVE_EVENT_KEY``（"失去牌后"的载荷）同姿态：帧私有数据不进记录流，钩子只读它、不读
+"派发那一刻的当前状态"——派发是**惰性且延后**的（写入口排队、下一条 ``_step`` 的开头
+才用一条不压栈的临时帧派发），同一 ``_step`` 里可以连着发生两次变化，读当前状态会读到
+后一次的值。
+"""
+
+StateChange: TypeAlias = ChainedChangeDelta | FlippedChangeDelta
+"""一次状态位变化事件的载荷：两个写入口各自的那条 delta（**恰有**这两个成员）。"""
+
+
+def state_change(frame: Any) -> StateChange | None:
+    """当前帧上的状态位事件载荷；不在 ``STATE_FLIPPED`` / ``STATE_CHAINED`` 派发中时是 ``None``。
+
+    钩子用 ``isinstance`` 分出是哪一边（``FlippedChangeDelta`` / ``ChainedChangeDelta``），
+    座位与**新值**都从载荷读，不从 ``state`` 现算（见 :data:`STATE_CHANGE_KEY`）。
+    """
+    return frame.data.get(STATE_CHANGE_KEY)
 
 
 def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: Frame) -> tuple[Hook, ...]:

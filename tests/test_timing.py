@@ -12,12 +12,15 @@ M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
   但流程结构性地不经过、因此记录流里一个都不出现；
 - ``ENUM_ONLY``（19）：枚举位保留、流程走不到。
 
-此后两批解封：M3 的 ``MOVE_AFTER``（票 07）与 wuming 票 04 的
+此后逐批解封：M3 的 ``MOVE_AFTER``（票 07）、wuming 票 04 的
 ``MAXLIFE_INCREASE_BEFORE`` / ``MAXLIFE_INCREASE_AFTER``（只解封"加体力上限"一侧；
-减侧继续留枚举位）。今天实测 = 白名单 **56** / 空日志 **11** / 枚举位 **16**。
+减侧继续留枚举位）、拼点三时机，以及 chenqun-guyong 票 03 的
+``STATE_FLIPPED`` / ``STATE_CHAINED``。今天实测 = 白名单 **62** / 空日志 **11** / 枚举位 **12**。
 
-末尾两节分别是 **``MAXLIFE`` 事件帧的行为**（wuming 票 04：合成技能调
-``Engine.raise_hp_max`` 的三条用例）与**时机计数纪律**（retro 票 06 / code-review C7）：规则级账本
+末尾几节分别是 **``MAXLIFE`` 事件帧的行为**（wuming 票 04：合成技能调
+``Engine.raise_hp_max`` 的三条用例）、**L17 状态位写入口的派发**（chenqun-guyong 票 03：
+翻面 / 横置的惰性事件、四轴计数的增量、幂等与「回合开始前翻回正面」两条读法）与
+**时机计数纪律**（retro 票 06 / code-review C7）：规则级账本
 （`06` §5「程序化约定与偏离一手」的"时机四轴计数"段）里这三个集合与派生的
 ``IMPLEMENTED`` 的四个计数必须与本文导入的长度同步，否则漂移只在 review 时被人读出来。
 术语表 `GLOSSARY.md` 只留定义、不承担账目（C7 把账目从术语表搬进账本）。
@@ -47,14 +50,17 @@ from sgs.effects import (
 )
 from sgs.engine import Engine, TimingRecord, record_json
 from sgs.resolution import Frame
-from sgs.skills import PASS_STATE_KEY, SkillDef
+from sgs.skills import PASS_STATE_KEY, SkillDef, state_change
 from sgs.state import (
     ActivateSkill,
+    ChainedChangeDelta,
     DodgeContext,
     EndPhase,
+    FlippedChangeDelta,
     FrameKind,
     Pass,
     PeachContext,
+    Phase,
     QueryKind,
     RespondContext,
     RespondMode,
@@ -71,7 +77,14 @@ from sgs.timing import (
     Timing,
 )
 
-from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_queries
+from support import (
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_queries,
+)
 
 PACK = load_content_pack(deck_profile="basic_53")
 """合成技能 / 构造局面用最小牌堆档（与其它构造局面单测同一档）。"""
@@ -96,16 +109,18 @@ def test_implemented_and_enum_only_partition_the_whole_table():
     implemented = set(IMPLEMENTED)
     enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 71, (
+    assert len(implemented) == 73, (
         "M2 已实现类 64 + M3 解封的 1 个（票 07）+ wuming 票 04 解封的 2 个"
         " + huo-taishici-xunyu 票 03 解封的拼点二时机"
         " + tao-caocao 票 03 解封的 `RANK_COMPARE_PLACED`"
         " + feng-yujin 票 02 新增的 `ROUND_START`"
+        " + chenqun-guyong 票 03 解封的 `STATE_FLIPPED` / `STATE_CHAINED`"
     )
-    assert len(enum_only) == 14, (
+    assert len(enum_only) == 12, (
         "枚举位 19 − M3 的 `MOVE_AFTER` − wuming 票 04 的加体力上限二时机"
         " − 票 03 的拼点二时机 − tao-caocao 的拼点三时机 + 该票新增的 1 个"
         "（feng-yujin 票 02 的 `ROUND_START` 是新成员、直接进已实现类）"
+        " − chenqun-guyong 票 03 的状态位二时机"
     )
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
@@ -115,15 +130,37 @@ def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_se
     dispatch = set(DISPATCH_WHITELIST)
     empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 60, (
+    assert len(dispatch) == 62, (
         "M2 dispatch 白名单 53 + M3 的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
         " + 票 03 的拼点二时机 + tao-caocao 票 03 的 `RANK_COMPARE_PLACED`"
         " + feng-yujin 票 02 的 `ROUND_START`"
+        " + chenqun-guyong 票 03 的 `STATE_FLIPPED` / `STATE_CHAINED`"
     )
     assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)
-    assert dispatch | empty_log == set(IMPLEMENTED), "58 + 11 复原 69 个已实现类"
+    assert dispatch | empty_log == set(IMPLEMENTED), "62 + 11 复原 73 个已实现类"
     assert dispatch | empty_log | set(ENUM_ONLY) == set(Timing)
+
+
+def test_the_state_write_entries_unseal_exactly_the_two_l17_nodes():
+    """chenqun-guyong 票 03（W2）：解封的恰是「翻面 / 横置」两个时机，**同层其余三个不动**。
+
+    L17 的五个成员里只有这两个有写入口（``Engine.set_flipped`` / ``Engine.set_chained``）；
+    ``HERO_REVEALED`` / ``HERO_REMOVED`` / ``CARD_SHOWN`` 继续留枚举位——它们今天没有任何
+    写入口，解封它们等于把"没有派发点"伪装成"已实现"。
+    """
+    for timing in (Timing.STATE_FLIPPED, Timing.STATE_CHAINED):
+        assert timing in IMPLEMENTED, "解封 = 写入口真的会派发它（惰性 + 无载体时零记录）"
+        assert timing in DISPATCH_WHITELIST
+        assert timing not in ENUM_ONLY
+    for timing in (
+        Timing.HERO_REVEALED,
+        Timing.HERO_REMOVED,
+        Timing.CARD_SHOWN,
+    ):
+        assert timing in ENUM_ONLY, "L17 的其余三个成员没有写入口 ⇒ 继续留枚举位"
+        assert timing not in IMPLEMENTED
+        assert timing not in DISPATCH_WHITELIST
 
 
 def test_the_m3_unseal_is_exactly_move_after():
@@ -480,6 +517,426 @@ def test_a_max_hp_drop_to_zero_kills_without_going_through_near_death():
             for record in _records_of(engine, kind="timing")
             if record.timing.value.startswith("MAXLIFE_")
         ], "减侧时机仍不解封（0 档也不例外）"
+
+
+# ---------------------------------------------------------------------------
+# L17 状态位写入口（W2 / 票 03）：``STATE_FLIPPED`` / ``STATE_CHAINED`` 解封
+#
+# 用户 2026-11-09 签 Q-W2 = **读法一**（`.scratch/chenqun-guyong/issues/03-faen-timing-gap.md`
+# ②）：``Player.flipped`` / ``Player.chained`` 的**值真的变了** = 一次事件；幂等写（同值、
+# 不落 delta）**不算**事件；「回合开始前翻回正面」（``frame=None`` 的规则固定流程）**算**；
+# 一趟【铁索连环】横置 2 名角色 = **2 个事件**（一个座位一次）。
+#
+# 派发照 ``MOVE_AFTER`` 的先例**惰性**：当前局面没有注册在该时机上的实例 ⇒ 一条记录都不落
+# （47 条标准金录像逐字节不变，判据 = `tools/check_goldens.sh`）。写入口是别人也在用的共享
+# 原语（9 个调用点，见 `.scratch/chenqun-guyong/issues/03-faen-timing-gap.md` ⑤A），故事件
+# **不在** ``set_flipped`` / ``set_chained`` 的调用栈里派发：写入口排队、下一条 ``_step``
+# 的开头用一条不压栈的临时帧派发（与 ``_dispatch_phase_body`` 同形），钩子提问 / 续跑因此
+# 不需要任何一个调用点透传 ``"stay"``。这些用例全部用 ``CATALOG`` 注入的合成技能钉形状。
+# ---------------------------------------------------------------------------
+
+STATE_SKILL = "hero.fake.state_flag"
+"""合成 L17 技能的 id（只活在 ``CATALOG`` 注入里）。"""
+
+STATE_TIMINGS = (Timing.STATE_FLIPPED, Timing.STATE_CHAINED)
+"""本票解封的两个时机（``DISPATCH_WHITELIST`` 的增量；同层其余三个仍在枚举位）。"""
+
+
+def _install_state_skill(monkeypatch, calls, *, locked: bool = True, draws: int = 0):
+    """把一条**同时挂两个状态位时机**的合成技能注入 ``CATALOG``。
+
+    ``calls`` 收集 ``(时机, 载荷)``——载荷 = :func:`~sgs.skills.state_change` 读到的写入口
+    delta（``flipped_change`` / ``chained_change``）。``locked=True`` ⇒ 不问发动、回调直接跑；
+    ``locked=False`` ⇒ 先问"是否发动"（【法恩】的形状：询问让派发挂起、由下一条 ``_step``
+    续跑）；``draws > 0`` ⇒ 回调里"令其摸一张牌"（摸牌会内联派发 ``MOVE_AFTER``）。
+    """
+    from types import MappingProxyType
+
+    from sgs.skills import Hook
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills.flow import SkillFlow, zero_step_effect
+
+    def _handler(timing):
+        def handler(host, frame):
+            change = state_change(frame)
+            calls.append((timing, change))
+            if draws:
+                control = host.draw_for_hand(frame, change.seat, draws)
+                if control == "stay":
+                    return "stay"
+            return None
+
+        return handler
+
+    def _hook(timing, name):
+        handler = _handler(timing)
+        if locked:
+            return Hook(timing, handler=handler)
+        flow = SkillFlow(name=name, steps=(), effect=zero_step_effect(handler))
+        return Hook(timing, flow=flow)
+
+    definition = SkillDef(
+        skill_id=STATE_SKILL,
+        locked=locked,
+        carrier=CarrierKind.HERO,
+        hooks=(
+            _hook(Timing.STATE_FLIPPED, "fake_state_flip"),
+            _hook(Timing.STATE_CHAINED, "fake_state_chain"),
+        ),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, STATE_SKILL: definition}),
+    )
+
+
+def _state_engine(seed: int = 1):
+    """状态位事件的测试底座：两座位、空手牌、10 张牌堆、座位 0 先手。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(10)),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    return Engine.from_state(state, seed=seed)
+
+
+def _state_records(engine) -> list:
+    """记录流里的两个状态位时机记录（按序）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing in STATE_TIMINGS
+    ]
+
+
+def _delta_records(engine, delta_type: str) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == delta_type
+    ]
+
+
+def test_a_changed_flip_dispatches_state_flipped_with_the_delta_as_payload(monkeypatch):
+    """**值真的变了** ⇒ 一条 ``STATE_FLIPPED`` 记录 + 一次钩子，载荷 = 那条 delta。
+
+    读法一的第一条：事件的判据是"值变了"，故记录的主体 = 被翻面的座位、目标的同一座位、
+    没有牌；钩子拿到的载荷就是写入口落的 ``flipped_change``（``seat`` + **新值**），不需要
+    再读一份会漂移的当前状态。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls)
+    engine = _state_engine()
+    engine.grant_skill(0, STATE_SKILL)
+    players = [RecordingPlayer(), RecordingPlayer()]
+
+    assert engine.set_flipped(None, 1, True) is True
+    run_queries(
+        engine,
+        players,
+        lambda e: len(_state_records(e)) >= 1,
+        limit=50,
+    )
+
+    records = _state_records(engine)
+    assert [record.timing for record in records] == [Timing.STATE_FLIPPED]
+    record = records[0]
+    assert (record.actor, record.targets, record.cards) == (1, (1,), ())
+    assert calls == [
+        (Timing.STATE_FLIPPED, FlippedChangeDelta(seat=1, flipped=True))
+    ], "钩子拿到的载荷 = 写入口那条 delta（座位 + 新值）"
+    delta = _delta_records(engine, "flipped_change")[0]
+    assert delta.seq < record.seq, "「后」= 那次写入完成之后：delta 在前、时机记录在后"
+
+
+def test_one_iron_chain_chaining_two_seats_is_two_events(monkeypatch):
+    """一趟【铁索连环】横置 2 名角色 ⇒ **2 个事件**（读法一：一个座位一次），按座位序。
+
+    这也是"事件粒度 = 值变化"的直接后果：两个座位各变了一次 ⇒ 两次发动机会，不是一次。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls)
+    engine = _state_engine()
+    engine.grant_skill(0, STATE_SKILL)
+    players = [RecordingPlayer(), RecordingPlayer()]
+
+    assert engine.set_chained(None, 0, True) is True
+    assert engine.set_chained(None, 1, True) is True
+    run_queries(
+        engine,
+        players,
+        lambda e: len(_state_records(e)) >= 2,
+        limit=50,
+    )
+
+    records = _state_records(engine)
+    assert [record.timing for record in records] == [
+        Timing.STATE_CHAINED,
+        Timing.STATE_CHAINED,
+    ]
+    assert [record.actor for record in records] == [0, 1], "按座位序各一次"
+    assert [record.targets for record in records] == [(0,), (1,)]
+    assert calls == [
+        (Timing.STATE_CHAINED, ChainedChangeDelta(seat=0, chained=True)),
+        (Timing.STATE_CHAINED, ChainedChangeDelta(seat=1, chained=True)),
+    ]
+
+
+def test_a_framed_write_lands_its_delta_on_that_frame_and_carries_the_source(monkeypatch):
+    """有承载帧时（9 个调用点里的 7 个）：delta 落在该帧，事件记录继承帧的 ``source``。
+
+    事件本身**不在**这个帧里派发（排队到下一条 ``_step``），但"这次是谁引起的"必须与写入口
+    同源：``source`` 直接取承载帧的 ``source``，``frame=None``（回合环的翻回正面）留空。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls)
+    engine = _state_engine()
+    engine.grant_skill(0, STATE_SKILL)
+    carrier = Frame(kind=FrameKind.SKILL, data={"source": 1}, frame_id=7)
+
+    assert engine.set_chained(carrier, 0, True) is True
+    run_queries(
+        engine,
+        [RecordingPlayer(), RecordingPlayer()],
+        lambda e: len(_state_records(e)) >= 1,
+        limit=50,
+    )
+
+    record = _state_records(engine)[0]
+    assert (record.actor, record.source, record.targets) == (0, 1, (0,))
+    assert _delta_records(engine, "chained_change")[0].frame_id == 7, "写入口的帧坐标照旧"
+    assert calls == [(Timing.STATE_CHAINED, ChainedChangeDelta(seat=0, chained=True))]
+
+
+def test_an_idempotent_write_is_not_an_event(monkeypatch):
+    """读法一的反面：**同值重写不算事件**（幂等写不落 delta，也不派发）。
+
+    两个写入口都自带幂等早退；本用例把它与派发绑在一起：第二次 ``True`` / 已经正面时的
+    ``False`` 都既没有 delta、也没有时机记录、也没有钩子。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls)
+    engine = _state_engine()
+    engine.grant_skill(0, STATE_SKILL)
+    players = [RecordingPlayer(), RecordingPlayer()]
+
+    assert engine.set_chained(None, 0, True) is True
+    assert engine.set_flipped(None, 1, True) is True
+    run_queries(engine, players, lambda e: len(_state_records(e)) >= 2, limit=50)
+    assert [record.timing for record in _state_records(engine)] == [
+        Timing.STATE_CHAINED,
+        Timing.STATE_FLIPPED,
+    ]
+
+    assert engine.set_chained(None, 0, True) is False, "同值 ⇒ 幂等早退"
+    assert engine.set_flipped(None, 1, True) is False
+    for _ in range(3):
+        if engine.pending is None:
+            engine._step()
+
+    assert [record.timing for record in _state_records(engine)] == [
+        Timing.STATE_CHAINED,
+        Timing.STATE_FLIPPED,
+    ], "幂等写不派发第二个事件"
+    assert len(calls) == 2, "钩子也只跑过那两次"
+    assert len(_delta_records(engine, "chained_change")) == 1
+    assert len(_delta_records(engine, "flipped_change")) == 1
+
+
+def test_the_turn_start_unflip_counts_as_a_flip_event(monkeypatch):
+    """读法一签下的那一处：**回合开始前翻回正面也算一次翻面事件**（Q-W2，票 02 ②）。
+
+    造局：先把座位 0 翻到背面（**此时还没授予技能** ⇒ 懒守卫为假、那一次不落事件——顺带
+    钉住"守卫看的是当下的注册实例"），再授予合成技能；座位 0 的「回合开始前」翻回正面
+    必须派发 ``STATE_FLIPPED``，载荷 = ``flipped_change(seat=0, flipped=False)``。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls)
+    engine = _state_engine()
+    engine.set_flipped(None, 0, True)  # 无载体：只有 delta，没有事件
+    assert _state_records(engine) == []
+    engine.grant_skill(0, STATE_SKILL)
+    players = [RecordingPlayer(), RecordingPlayer()]
+
+    run_queries(engine, players, lambda e: len(_state_records(e)) >= 1, limit=400)
+
+    records = _state_records(engine)
+    assert [record.timing for record in records] == [Timing.STATE_FLIPPED]
+    assert (records[0].actor, records[0].targets) == (0, (0,))
+    assert records[0].source is None, "帧外写（frame=None）：事件没有操使者"
+    assert calls == [
+        (Timing.STATE_FLIPPED, FlippedChangeDelta(seat=0, flipped=False))
+    ], "「回合开始前翻回正面」算一次事件（载荷 = 新值 False）"
+    before_starts = [
+        record.seq
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_BEFORE_START
+    ]
+    assert before_starts, "造局没走到座位 0 的「回合开始前」"
+    assert before_starts[0] < records[0].seq, "翻面在「回合开始前」之内、翻完才是事件"
+
+
+def _state_flip_scene():
+    """一段**含真实状态变化**的脚本：横置 / 重置 / 翻面 / 「回合开始前翻回正面」。"""
+    engine = _state_engine()
+    engine.set_chained(None, 0, True)
+    engine.set_chained(None, 0, False)
+    engine.set_chained(None, 1, True)
+    engine.set_flipped(None, 0, True)
+    players = [RecordingPlayer(), RecordingPlayer()]
+    run_queries(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+            for record in e.records
+        ),
+        limit=400,
+    )
+    return engine
+
+
+def test_no_registered_instance_keeps_the_record_stream_byte_identical(monkeypatch):
+    """**惰性**的判据：没有注册实例 ⇒ 记录流与"这条派发根本不存在"逐字节相同。
+
+    对照臂用同一个脚本跑两次：一次 ``CATALOG`` 里**有**这条合成技能的**定义**（但没人拿到它
+    ⇒ :func:`~sgs.skills.resolve_instances` 不产出实例），一次连定义都没有。两边的
+    ``journal()`` 必须逐字节相等，且都**只**落状态位 delta、一条 ``STATE_*`` 时机记录都没有。
+    定义存在与否无痕，正是"守卫读的是**注册实例**、不是一条会漂移的 id 名单"的判据。
+    """
+    control = _state_flip_scene()
+    _install_state_skill(monkeypatch, [])
+    baseline = _state_flip_scene()
+
+    control_text = control.journal()
+    baseline_text = baseline.journal()
+    assert baseline_text == control_text, "没有注册实例时记录流逐字节不变"
+    for timing in STATE_TIMINGS:
+        assert timing.value not in baseline_text, "一条状态位时机记录都不许落"
+    assert [
+        (record.seat, record.chained)
+        for record in _delta_records(baseline, "chained_change")
+    ] == [(0, True), (0, False), (1, True)], "状态变化本身照常落 delta"
+    assert [
+        (record.seat, record.flipped)
+        for record in _delta_records(baseline, "flipped_change")
+    ] == [(0, True), (0, False)], "含「回合开始前翻回正面」那一次"
+
+
+def test_a_state_hook_can_ask_and_continue_across_the_lazy_dispatch(monkeypatch):
+    """钩子**可以提问并续跑**（【法恩】的形状）：非锁定技先问"是否发动"，答发动 ⇒ 摸一张。
+
+    派发被排到写入口之外（下一条 ``_step`` 的帧外临时帧），故挂起 / 续跑不需要任何调用点
+    改签名：询问照常是 ``SKILL_ACTIVATION``，应答到达后续跑同一个派发、把那一张牌摸完。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls, locked=False, draws=1)
+
+    class _AcceptStateSkill(RecordingPlayer):
+        """技能询问一律发动；其余照脚本玩家（能结束阶段就结束阶段）。"""
+
+        def respond(self, query):
+            if query.kind == QueryKind.SKILL_ACTIVATION:
+                for action in query.legal_actions:
+                    if getattr(action, "kind", None) == "ActivateSkill":
+                        self.seen.append(query)
+                        return action
+            return super().respond(query)
+
+    engine = _state_engine()
+    engine.grant_skill(0, STATE_SKILL)
+    players = [_AcceptStateSkill(), RecordingPlayer()]
+    hand_before = len(engine.state.player(0).hand)
+
+    assert engine.set_flipped(None, 0, True) is True
+    run_queries(
+        engine,
+        players,
+        lambda e: bool(calls) and e.pending is None,
+        limit=50,
+    )
+
+    asked = [query for query in players[0].seen if query.kind == QueryKind.SKILL_ACTIVATION]
+    assert len(asked) == 1, "挂起 → 应答 → 续跑：同一个钩子只问一次（CODING_STANDARDS §3）"
+    assert len(engine.state.player(0).hand) == hand_before + 1, "答发动 ⇒ 续跑后真的摸了一张"
+    assert calls == [
+        (Timing.STATE_FLIPPED, FlippedChangeDelta(seat=0, flipped=True))
+    ]
+
+
+class _SlashOnce:
+    """出牌阶段对 ``target`` 使用 ``card_id`` **一次**；其余询问能放弃就放弃。"""
+
+    def __init__(self, card_id: int, target: int) -> None:
+        self.card_id = card_id
+        self.target = target
+        self.used = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and not self.used:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == self.card_id
+                    and action.targets == (self.target,)
+                ):
+                    self.used = True
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        for action in query.legal_actions:
+            if isinstance(action, EndPhase):
+                return action
+        return query.legal_actions[0]
+
+
+def test_the_elemental_damage_reset_dispatches_state_chained_from_the_damage_step(monkeypatch):
+    """属性伤害命中横置者 ⇒ 伤害帧里的「结算后立即重置」（`steps.py` 的写入口）也是一次事件。
+
+    这是 spec §8 点名的那条风险路径：``set_chained`` 在**别人也在用**的伤害步骤里被调。
+    事件不在该步骤里内联派发（那会让每个调用点都要透传 ``"stay"``），而是排到下一次
+    ``_step``——但它真的派发了：载荷 = ``chained_change(seat=1, chained=False)``，钩子被叫醒，
+    且记录排在伤害的 ``hp_change`` 之后（「后」= 写入完成之后）。
+    """
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    fire_slash = cards_of_type(pack, "fire_slash")[0]
+    calls: list = []
+    _install_state_skill(monkeypatch, calls)
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(fire_slash,)), SeatSpec(chained=True)],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id != fire_slash
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.grant_skill(0, STATE_SKILL)
+    attacker = _SlashOnce(fire_slash, 1)
+
+    run_queries(
+        engine,
+        [attacker, _SlashOnce(-1, -1)],
+        lambda e: len(_state_records(e)) >= 1,
+        limit=2_000,
+    )
+
+    assert engine.state.player(1).chained is False, "属性伤害命中横置者 ⇒ 结算后立即重置"
+    records = _state_records(engine)
+    assert [record.timing for record in records] == [Timing.STATE_CHAINED]
+    assert (records[0].actor, records[0].targets) == (1, (1,))
+    assert calls == [
+        (Timing.STATE_CHAINED, ChainedChangeDelta(seat=1, chained=False))
+    ], "重置也是一次横置事件（读法一：值变了）"
+    assert [record.chained for record in _delta_records(engine, "chained_change")] == [False]
+    hurt = _delta_records(engine, "hp_change")
+    assert hurt and hurt[0].seq < records[0].seq, "事件排在伤害的体力变化之后"
 
 
 # ---------------------------------------------------------------------------
