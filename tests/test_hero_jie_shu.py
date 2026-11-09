@@ -29,14 +29,21 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack
 from sgs.effects import behavior_for, check_targets, is_slash
-from sgs.engine import Engine
+from sgs.engine import Engine, IllegalActionError
 from sgs.skills import conversion_offers
 from sgs.state import (
     ActivateSkill,
     ArrangeCards,
+    EndPhase,
     Pass,
+    Phase,
     PlayCard,
     MoveReason,
     QueryKind,
@@ -974,12 +981,512 @@ def test_jie_jijiang_second_does_not_ask_when_the_lord_plays_himself():
 
 
 def test_the_standard_liubei_jijiang_has_no_second_hooks():
-    """反例（对照）：标准刘备的【激将】只有①，没有 ② 的两条钩子。"""
-    from sgs.skills import CATALOG
-    from sgs.skills.lord_request import JIE_JIJIANG_ECHO
+    """反例（对照）：标准刘备的【激将】只有①，没有 ② 的两条钩子。
 
-    assert CATALOG["hero.liubei.jijiang"].hooks == ()
-    assert CATALOG["hero.jie_liubei.jijiang"].hooks == JIE_JIJIANG_ECHO.hooks
+    票 20 起标准版另有三条**解锁钩子**（机械锁的观测点，不是 ② 的收益段）：它们
+    ``forced=True``、没有流水线，故这里按"② 的钩子一条都不在"断言，而不是"没有钩子"。
+    """
+    from sgs.skills import CATALOG
+    from sgs.skills.lord_request import JIE_JIJIANG_ECHO, JIE_JIJIANG_LORD
+
+    standard = CATALOG["hero.liubei.jijiang"]
+    assert standard.hooks, "票 20：标准版也有机械锁的三条解锁钩子"
+    assert all(hook.forced for hook in standard.hooks), "解锁钩子不问「是否发动」"
+    assert all(hook.flow is None for hook in standard.hooks)
+    assert JIE_JIJIANG_ECHO.hooks[0] not in standard.hooks
+    # 界版 = ② 的两条 + 同样的三条解锁钩子（同一条 ``_lord_request_definition`` 造）。
+    jie = CATALOG["hero.jie_liubei.jijiang"]
+    assert jie.hooks[: len(JIE_JIJIANG_ECHO.hooks)] == JIE_JIJIANG_ECHO.hooks
+    assert jie.hooks[len(JIE_JIJIANG_ECHO.hooks) :] == standard.hooks
+    assert JIE_JIJIANG_LORD.activation_flow is not None
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 刘备 / 界刘备【激将】「使用」侧（yijiang-2014-round2 票 20）：出牌阶段主动
+#    **使用**一张【杀】（目标由主公先选、同势力角色代打、产物进**使用**链），
+#    外加两道门槛（合法性 = ``check_usable``；防卡死 = 按座位的机械锁）。
+# ---------------------------------------------------------------------------
+
+JIJIANG = "hero.liubei.jijiang"
+
+
+def _jijiang_use_state(
+    *, lord="liubei", lord_hand=(), lord_equip=(), ally_slashes=1, seats=3
+):
+    """主公（座位 0，LORD）+ 一名蜀势力盟友（座位 1，手上若干【杀】）+ 其余无势力角色。"""
+    slashes = tuple(_ids(PACK, "slash")[:ally_slashes])
+    specs = [
+        SeatSpec(
+            hero=lord,
+            identity=Identity.LORD,
+            kingdom=Kingdom.SHU,
+            hand=tuple(lord_hand),
+            equip=tuple(lord_equip),
+        ),
+        SeatSpec(hand=slashes, kingdom=Kingdom.SHU),
+        *[SeatSpec() for _ in range(seats - 2)],
+    ]
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck_excluding(PACK, *lord_hand, *lord_equip, *slashes),
+        turn_seat=0,
+    )
+
+
+def test_jijiang_is_offered_as_a_slash_use_in_the_play_phase():
+    """**本票判据点**：出牌阶段，主公的【激将】像一条"使用【杀】的入口"那样出清单。"""
+    for lord, skill_id in (("liubei", JIJIANG), ("jie_liubei", JIE_JIJIANG)):
+        engine = _park_at_play_phase(_jijiang_use_state(lord=lord), players=3)
+        query = engine.pending
+
+        assert query.kind == "PLAY_PHASE"
+        assert skill_id in query.preactivations, (
+            f"{skill_id}：出牌阶段主动使用【杀】这一侧喊不出来"
+        )
+        steps = query.preactivations[skill_id]
+        assert [step.name for step in steps] == ["seat"], "只有「选目标」一步"
+        assert {
+            option for row in steps[0].pool for option in row.options
+        } == {"seat:1", "seat:2"}, "目标由主公先选（合法目标池 = 其他存活角色）"
+
+
+def test_jijiang_use_takes_the_lords_targets_and_enters_the_use_chain():
+    """目标由主公选、产物进**使用**链（不是响应者的打出链）。"""
+    state = _jijiang_use_state()
+    slash = state.player(1).hand[0]
+    engine = Engine.from_state(state, seed=7)
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    players = [_Scripted(), _Scripted(ally), _Scripted()]
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind == "PLAY_PHASE",
+    )
+    query = engine.pending
+    engine.submit(_composite(query, JIJIANG, choices=("seat:2",)))
+    run_until(engine, players, lambda e: e.state.player(2).hp < 4)
+
+    requests = _respond_queries(engine, WindowCause.LORD_REQUEST)
+    assert [request.actor for request in requests] == [1], "只问其他蜀势力角色"
+    assert engine.state.player(2).hp == 3, "主公选的那名角色受到 1 点【杀】伤害"
+    assert engine.state.player(0).card_use_counts["slash"] == 1, (
+        "产物是**主公的使用**：占主公的【杀】次数"
+    )
+    assert engine.state.player(1).hand == [], "响应者的实体牌付出去了"
+    assert slash in engine.state.discard
+
+    resolves = [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.card_id == slash for card in record.cards)
+    ]
+    assert [record.actor for record in resolves] == [0], "使用链的使用者是主公（座位 0）"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.PLAY_ON_PLAY
+    ], "产物没有走响应者的打出链"
+
+
+def _own_slash(query, target: int):
+    """候选里"主公自己的那张【杀】打向 ``target``"的使用动作。"""
+    for action in query.legal_actions:
+        if (
+            isinstance(action, UseCard)
+            and not action.card.is_virtual
+            and action.card.type == "slash"
+            and action.targets == (target,)
+        ):
+            return action
+    return None
+
+
+def test_jijiang_use_is_not_offered_when_the_slash_quota_is_spent():
+    """**合法性门槛之一**：本阶段【杀】的次数用尽 ⇒ 候选不出现。"""
+    state = _jijiang_use_state(lord_hand=(_ids(PACK, "slash")[-1],))
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(), _Scripted(), _Scripted()]
+    query = _next_play_phase(engine, players)
+
+    assert JIJIANG in query.preactivations, "先确认这一局本来喊得出（防假绿）"
+    engine.submit(_own_slash(query, 2))
+    query = _next_play_phase(engine, players)
+
+    assert engine.state.player(0).card_use_counts["slash"] == 1
+    assert JIJIANG not in query.preactivations, (
+        "没有【杀】的次数（且不是无限）⇒ 不能主动发动【激将】使用【杀】"
+    )
+
+
+def test_jijiang_use_is_not_offered_without_a_legal_target():
+    """**合法性门槛之二**：没有合法目标 ⇒ 候选不出现（``check_targets`` 空池）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            # 界诸葛亮的【空城】：「若你没有手牌，你不能成为【杀】或【决斗】的目标」
+            SeatSpec(hero="jie_zhugeliang"),
+        ],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+    )
+    engine = _park_at_play_phase(state, players=2)
+
+    assert engine.pending.kind == "PLAY_PHASE"
+    assert JIJIANG not in engine.pending.preactivations, "没有合法目标 ⇒ 候选不出现"
+
+
+def test_jijiang_use_is_still_offered_with_unlimited_slash_quota():
+    """【诸葛连弩】/无次数限制 ⇒ 次数花掉之后照旧可发动（不写死成"每回合一次"）。"""
+    state = _jijiang_use_state(
+        lord_hand=(_ids(PACK, "slash")[-1],),
+        lord_equip=(_ids(PACK, "crossbow")[0],),
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(), _Scripted(), _Scripted()]
+    query = _next_play_phase(engine, players)
+
+    engine.submit(_own_slash(query, 2))
+    query = _next_play_phase(engine, players)
+
+    assert engine.state.player(0).card_use_counts["slash"] == 1, "次数确实花掉了一张"
+    assert JIJIANG in query.preactivations, "无限次数 ⇒ 【激将】的入口照旧在"
+
+
+# ---------------------------------------------------------------------------
+# 机械门槛（防卡死）：PLAY 发动一次 ⇒ 立刻禁止再次发动，直到持有者使用 / 打出【杀】
+# 或他自己的新出牌阶段开始（用户 2026-11-09 的两句裁定）。
+# ---------------------------------------------------------------------------
+
+
+def _locked_lord_engine(*, seats=3, lord_hand=(), lord_equip=()):
+    """跑完一次**没人响应**的 PLAY 发动（锁已置位），停在下一次出牌阶段询问上。"""
+    state = _jijiang_use_state(
+        seats=seats, lord_hand=lord_hand, lord_equip=lord_equip
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted() for _ in range(seats)]
+    query = _next_play_phase(engine, players)
+    assert JIJIANG in query.preactivations, "先确认本来喊得出（防假绿）"
+    engine.submit(_composite(query, JIJIANG, choices=("seat:2",)))
+    return engine, players, _next_play_phase(engine, players)
+
+
+def test_jijiang_play_phase_activation_locks_itself():
+    """**机械门槛判据点**：发动一次（没成）⇒ 本阶段再问即无候选，且受理侧也拒。"""
+    engine, _players, query = _locked_lord_engine()
+
+    assert JIJIANG not in query.preactivations, (
+        "发动过一次（没人响应）⇒ 本阶段不能再发动"
+    )
+    # 受理侧：候选里没有也能提交的那道缝（`Engine._structured_activation_failure`）同样拒。
+    with pytest.raises(IllegalActionError):
+        engine.submit(_composite(query, JIJIANG, choices=("seat:2",)))
+
+
+def test_jijiang_play_phase_lock_clears_after_the_owner_plays_a_slash():
+    """该持有者**使用或打出**一张【杀】⇒ 解锁（含刚由这次【激将】产出的那张）。"""
+    slash = _ids(PACK, "slash")[-1]
+    engine, players, query = _locked_lord_engine(
+        lord_hand=(slash,), lord_equip=(_ids(PACK, "crossbow")[0],)
+    )
+    assert JIJIANG not in query.preactivations
+
+    engine.submit(_own_slash(query, 2))
+    query = _next_play_phase(engine, players)
+
+    assert slash in engine.state.discard
+    assert JIJIANG in query.preactivations, "持有者出过【杀】⇒ 锁解开（【诸葛连弩】让次数留着）"
+
+
+def test_jijiang_play_phase_lock_clears_at_the_next_play_phase():
+    """**用户 ④ 的判据点**：不靠出【杀】，**自己的**新出牌阶段开始也解锁（按座位，不全局）。"""
+    engine, players, query = _locked_lord_engine()
+    assert JIJIANG not in query.preactivations
+    engine.submit(EndPhase(answers_seq=query.seq))
+
+    # 对手的出牌阶段开始**不**清这座位上的锁（否则这扇门就是全局开关）。
+    _next_play_phase(engine, players)
+    assert engine.state.turn_seat == 1
+    assert engine.state.player(0).jijiang_locked is True, (
+        "座位 1 的出牌阶段开始不该解开座位 0 的锁"
+    )
+
+    # 过完一轮，回到自己的出牌阶段 ⇒ 没有出过【杀】也能再发动一次。
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == "PLAY_PHASE"
+        and e.state.turn_seat == 0,
+    )
+    query = engine.pending
+
+    assert engine.state.player(0).jijiang_locked is False
+    assert JIJIANG in query.preactivations, "新出牌阶段开始 ⇒ 解锁"
+
+
+def test_jijiang_play_phase_lock_is_not_cleared_by_someone_elses_slash():
+    """该持有者**之外**的人使用 / 打出【杀】**不**解锁（锁绑持有者）。"""
+    engine, players, query = _locked_lord_engine()
+    assert JIJIANG not in query.preactivations
+    engine.submit(EndPhase(answers_seq=query.seq))
+
+    # 座位 1（蜀势力盟友）在自己的回合里使用它手上那张【杀】——锁仍绑在座位 0 身上。
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == "PLAY_PHASE"
+        and e.state.turn_seat == 1,
+    )
+    engine.submit(_own_slash(engine.pending, 2))
+    run_until(engine, players, lambda e: e.state.player(2).hp < 4)
+
+    assert engine.state.player(0).jijiang_locked is True, "别人的使用不解锁"
+    assert engine.state.player(1).card_use_counts["slash"] == 1, "确实是座位 1 的使用"
+
+
+def test_jijiang_passive_windows_ignore_the_lock():
+    """**用户 ③ 的判据点**：锁只挡「出牌阶段主动发动」，被动窗口**不查也不置**。"""
+    # 方向 A：锁着的刘备在**别人回合**的南蛮窗口里照样能发动，且没人因此解锁。
+    barbarian = _ids(PACK, "barbarian_invasion")[0]
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=(barbarian,)),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+            SeatSpec(kingdom=Kingdom.WEI),
+        ],
+        deck=deck_excluding(PACK, barbarian, slash),
+        turn_seat=0,
+    )
+    asked = {"n": 0}
+
+    def lord(query):
+        if query.kind == "RESPOND" and query.actor == 0:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG:
+                    return action
+        return None
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE" and query.actor == 1:
+            return _of_type(query, UseCard, type_id="barbarian_invasion")
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            asked["n"] += 1
+            if asked["n"] >= 2:  # 第一次（主公主动发动）放弃，第二次（被动窗口）代打
+                return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(lord), _Scripted(attacker), _Scripted(ally), _Scripted()]
+    query = _next_play_phase(engine, players)
+    assert engine.state.turn_seat == 0
+    engine.submit(_composite(query, JIJIANG, choices=("seat:1",)))
+    query = _next_play_phase(engine, players)
+    assert engine.state.player(0).jijiang_locked is True, "主动发动过一次 ⇒ 锁上"
+    engine.submit(EndPhase(answers_seq=query.seq))
+
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == "RESPOND"
+        and getattr(e.pending, "cause", None) is WindowCause.BARBARIAN_INVASION
+        # 这扇窗按座位序逐个问；走到**刘备自己**那一问才停（前两位 Scripted 放弃）。
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == JIJIANG
+            for action in e.pending.legal_actions
+        ),
+    )
+    window = engine.pending
+    offered = [
+        action
+        for action in window.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG
+    ]
+    assert offered, "被动窗口不查锁：南蛮窗口里【激将】照样在候选里"
+    engine.submit(offered[0])
+    run_until(engine, players, lambda e: slash in e.state.discard)
+
+    assert engine.state.player(0).hp == 4, "求助满足 ⇒ 刘备不受【南蛮入侵】伤害"
+    assert engine.state.player(0).jijiang_locked is True, (
+        "被动窗口既不置锁也不解锁——这里仍是上一阶段那把锁"
+    )
+
+    # 方向 B：**自己的出牌阶段里**的被动窗口（【决斗】的响应）也不置锁——决斗打完，
+    # 主动入口照旧在（否则"被动响应一次"会把自己锁死，正是用户 ③ 要防的那件事）。
+    duel = _ids(PACK, "duel")[0]
+    ally_slash = _ids(PACK, "slash")[0]
+    enemy_slash = _ids(PACK, "slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero="liubei",
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+                hand=(duel,),
+            ),
+            SeatSpec(hand=(ally_slash,), kingdom=Kingdom.SHU),
+            SeatSpec(hand=(enemy_slash,)),
+        ],
+        deck=deck_excluding(PACK, duel, ally_slash, enemy_slash),
+        turn_seat=0,
+    )
+
+    def lord_duel(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.DUEL
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG:
+                    return action
+        return None
+
+    def ally_duel(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    def enemy_duel(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.DUEL
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(lord_duel), _Scripted(ally_duel), _Scripted(enemy_duel)]
+    query = _next_play_phase(engine, players)
+    duel_action = next(
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.card_id == duel
+        and action.targets == (2,)
+    )
+    engine.submit(duel_action)
+    run_until(engine, players, lambda e: e.state.player(2).hp < 4)
+    query = _next_play_phase(engine, players)
+
+    assert engine.state.player(2).hp == 3, "决斗里刘备借到的【杀】真的结算了"
+    assert engine.state.player(0).hp == 4
+    assert engine.state.player(0).jijiang_locked is False, "被动发动不置锁"
+    assert JIJIANG in query.preactivations, "被动发动之后主动入口照旧在"
+
+
+HUJIA = "hero.caocao.hujia"
+
+
+def test_hujia_has_no_lock():
+    """【护驾】完全不锁：不能主动使用 / 打出【闪】⇒ 无卡死风险（用户原话）。"""
+    slashes = tuple(_ids(PACK, "slash")[:2])
+    dodges = tuple(_ids(PACK, "dodge")[:2])
+    crossbow = _ids(PACK, "crossbow")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="caocao", identity=Identity.LORD, kingdom=Kingdom.WEI),
+            # 【诸葛连弩】让同一个出牌阶段里能打第二张【杀】（否则次数闸先挡住第二问）。
+            SeatSpec(hand=slashes, equip=(crossbow,)),
+            SeatSpec(hand=dodges, kingdom=Kingdom.WEI),
+        ],
+        deck=deck_excluding(PACK, *slashes, *dodges, crossbow),
+        turn_seat=0,
+    )
+
+    def lord(query):
+        if query.kind == "DODGE":
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == HUJIA:
+                    return action
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            return _of_type(query, PlayCard, type_id="dodge")
+        return None
+
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(lord), _Scripted(), _Scripted(ally)]
+    query = _next_play_phase(engine, players)
+    engine.submit(EndPhase(answers_seq=query.seq))
+
+    # 座位 1 在自己的回合里连续两张【杀】打曹操：两次都该喊得出【护驾】（没有锁）。
+    run_until(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == "PLAY_PHASE"
+        and e.state.turn_seat == 1,
+    )
+    engine.submit(_own_slash(engine.pending, 0))
+    run_until(engine, players, lambda e: dodges[0] in e.state.discard)
+    query = _next_play_phase(engine, players)
+    engine.submit(_own_slash(query, 0))
+    run_until(engine, players, lambda e: dodges[1] in e.state.discard)
+
+    windows = [
+        window
+        for window in _queries_of_kind(engine, "DODGE")
+        if any(
+            isinstance(action, ActivateSkill) and action.skill_id == HUJIA
+            for action in window.legal_actions
+        )
+    ]
+    assert len(windows) == 2, "两次【闪】窗口里【护驾】都在候选里（没有机械锁）"
+    assert engine.state.player(0).hp == 4, "两张【杀】都被【护驾】抵消"
+    from sgs.skills import CATALOG
+
+    hujia = CATALOG[HUJIA]
+    assert hujia.hooks == (), "【护驾】没有解锁钩子（它不锁）"
+    assert hujia.flow is None, "【护驾】没有出牌阶段的发动流水线"
+
+
+def test_liubei_jijiang_wording_says_use_or_play():
+    """牌面文案按官网订正为「使用或打出」，并删掉那句自我设限的实现说明。"""
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "tools"
+        / "sgs_web"
+        / "descriptions.json"
+    )
+    text = json.loads(path.read_text(encoding="utf-8"))["skills"][JIJIANG]
+
+    assert "当你需要打出【杀】" not in text, "官网写的是「需要**使用或打出**【杀】」"
+    assert "当你需要使用或打出【杀】" in text
+    assert "视为由你使用或打出" in text
+    assert '只覆盖“打出【杀】”的窗口' not in text, "实现范围的自我设限说明要删掉"
+    assert "【借刀杀人】" not in text, "那句「不覆盖借刀杀人」随实现说明一起删"
 
 
 # ---------------------------------------------------------------------------

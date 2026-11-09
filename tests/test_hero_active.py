@@ -1955,9 +1955,17 @@ def test_a_cancelable_option_step_offers_pass_last_so_a_first_choice_actor_commi
 
 
 def test_every_declared_active_skill_has_a_handler_and_a_catalog_definition():
-    assert set(active_module.ACTIVATIONS) == {
-        skill.skill_id for skill in active_module.ACTIVE_SKILLS
+    declared = {skill.skill_id for skill in active_module.ACTIVE_SKILLS}
+    # A 族每一条都必须有发动回调；登记表里**多出来**的只能是"声明级发动流水线"的那几条
+    # （yijiang-2014-round2 票 20 的 `register_activation`：把非 A 族的出牌阶段入口并进来，
+    # 首个载体 = 【激将】「使用【杀】」侧）。两边都从声明派生，不手抄名单。
+    flow_backed = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.flow is not None
     }
+    assert declared <= set(active_module.ACTIVATIONS)
+    assert set(active_module.ACTIVATIONS) == declared | flow_backed
     assert all(skill_id in CATALOG for skill_id in active_module.ACTIVATIONS)
 
 

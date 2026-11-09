@@ -22543,4 +22543,89 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+/* ============ 票 20（合成局面）：出牌阶段【激将】的使用侧回环 ============
+ *
+ * 服务端的形状：出牌阶段对【激将】下发一份**一步**清单（`seat`，池 = 那张虚拟【杀】的
+ * 合法目标）；点技能进入清单 → 点一名目标 ⇒ 复合动作 `ActivateSkill(picks=[], choices=
+ * ["seat:N"])` → 「确认发动」可点。锁着的时候**清单不下发**（候选也已被预发动删掉）⇒
+ * 界面上没有入口——这三条钉住"这个新入口在前端真的走得通 / 锁住时真的消失"。
+ */
+{
+  const jijiangSteps = [
+    { name: "seat", kind: "seat", min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["seat:1", "seat:2"] }],
+      wording: "选择【杀】的目标" },
+  ];
+  const jijiangPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 910,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 910 }],
+    preactivations: { "hero.liubei.jijiang": jijiangSteps },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  };
+  const jijiangSkill = {
+    skill_id: "hero.liubei.jijiang", name: "激将", skill_type: "LORD",
+    locked: false, carrier: "HERO",
+    // 已翻预发动 ⇒ 骨架候选被删 ⇒ 真投影这里是 `available: false`（可用性只有清单）。
+    available: false, preactivated: true,
+    ui: { requirement: "主公技：当你需要使用或打出【杀】时，可以令其他蜀势力角色代打" },
+  };
+  const openJijiang = (preactivations) => {
+    const view = synthView({ ...jijiangPending, preactivations });
+    view.skills = [jijiangSkill];
+    ui.state.view = view;
+    ui.state.sessionId = "smoke-missing-session";
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    return Array.from($("t-skills").children).find(
+      (b) => b.getAttribute("data-skill-id") === "hero.liubei.jijiang");
+  };
+  const jijiangSeat = (seat) => Array.from($("t-seats").children).find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+
+  const button = openJijiang({ "hero.liubei.jijiang": jijiangSteps });
+  check("㉿JJ1 出牌阶段的【激将】按钮在（已翻预发动 ⇒ 清单入口）",
+    !!button && (button.listeners.click || []).length > 0,
+    `button=${!!button}`);
+  (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+  const pa = ui.state.preactivation;
+  check("㉿JJ2 点【激将】⇒ 唯一的一步是「选目标」，候选 = 服务端给的两名",
+    !!pa && pa.steps.length === 1 && pa.cursor === 0
+      && (ui.preactivationOptions(pa, 0) || []).join(",") === "seat:1,seat:2",
+    `steps=${pa && pa.steps.length} cursor=${pa && pa.cursor} `
+      + `options=${pa && (ui.preactivationOptions(pa, 0) || []).join(",")}`);
+  const target = jijiangSeat(2);
+  check("㉿JJ3 第 1 步的座位画成可点（服务端池里的两名）",
+    !!target && target.classList.contains("targetable"),
+    `class=${target && target.className}`);
+  (target.listeners.click || []).forEach((fn) => fn({ target }));
+  const action = ui.buildAction();
+  check("㉿JJ4 点目标 ⇒ 复合动作 ActivateSkill(picks=[], choices=[\"seat:2\"])，「确认发动」可点",
+    !!action && action.kind === "ActivateSkill"
+      && action.skill_id === "hero.liubei.jijiang"
+      && JSON.stringify(action.picks) === "[]"
+      && JSON.stringify(action.choices) === '["seat:2"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(action));
+
+  // 锁着的时候：服务端不下发清单（骨架候选也已被"已翻预发动"删掉）⇒ 按钮画成深灰、
+  // **不接 click**（点不动 = 没有入口，不是"点了没反应"）。
+  const lockedButton = openJijiang({});
+  check("㉿JJ5 清单不下发（机械锁）⇒ 【激将】按钮不可点（无 click 口、禁用、深灰）",
+    !!lockedButton
+      && lockedButton.disabled === true
+      && (lockedButton.listeners.click || []).length === 0
+      && lockedButton.classList.contains("unavailable")
+      && !lockedButton.getAttribute("data-preactivation"),
+    `button=${!!lockedButton} disabled=${lockedButton && lockedButton.disabled} `
+      + `clicks=${lockedButton && (lockedButton.listeners.click || []).length} `
+      + `class=${lockedButton && lockedButton.className} `
+      + `preactivation=${lockedButton && lockedButton.getAttribute("data-preactivation")}`);
+
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

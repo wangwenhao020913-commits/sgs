@@ -153,6 +153,7 @@ __all__ = [
     "SkillFlow",
     "activate_skill",
     "active_skill_definitions",
+    "register_activation",
     "run_flow",
 ]
 
@@ -7716,9 +7717,32 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
 """
 
 
-ACTIVATIONS: MappingProxyType[str, ActivationHandler] = MappingProxyType(
-    {skill.skill_id: _activation_handler(skill) for skill in ACTIVE_SKILLS}
-)
+_ACTIVATIONS: dict[str, ActivationHandler] = {
+    skill.skill_id: _activation_handler(skill) for skill in ACTIVE_SKILLS
+}
+"""``skill_id`` → 发动回调的**唯一可变层**：初始只有 A 族，加载期再由
+:func:`register_activation` 并入技能层别的发动入口（对外只读视图见 :data:`ACTIVATIONS`）。"""
+
+
+def register_activation(skill_id: str, handler: ActivationHandler) -> None:
+    """把一条**非 A 族**的发动回调登记进 :data:`ACTIVATIONS`（加载期一次，调用点 = `catalog.py`）。
+
+    发动回调不是 A 族的专利：出牌阶段的 ``ActivateSkill`` 帧由
+    :func:`activate_skill` 按 ``skill_id`` 通用派发，而【激将】的「出牌阶段主动**使用**
+    【杀】」侧（yijiang-2014-round2 票 20）是一条**求助型主公技**——它的声明由
+    ``lord_request._lord_request_definition`` 造，不在 :data:`ACTIVE_SKILLS` 里，故没有
+    别的入口能把那条 ``PickSeats → 求助窗口 → 使用链`` 的流水线挂上去。
+
+    与 :func:`sgs.skills.lord_request.register_provider` 同一条纪律：**只许在加载期登记**
+    （`catalog.py` 末尾，两个模块都已 import 时调一次）；运行期登记会让"这一问能派发哪些
+    发动回调"取决于时序。重复登记是编程错误——同一 id 有两个回调时没有"后者胜"的语义。
+    """
+    if skill_id in _ACTIVATIONS:
+        raise ValueError(f"发动回调 {skill_id!r} 已登记：同一技能不能有两个发动回调")
+    _ACTIVATIONS[skill_id] = handler
+
+
+ACTIVATIONS: Mapping[str, ActivationHandler] = MappingProxyType(_ACTIVATIONS)
 """``skill_id`` → 发动回调。引擎只按 :func:`activate_skill` 通用派发，不认识任何具体 id。"""
 
 _REQUIREMENTS: dict[str, str] = {

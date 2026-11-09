@@ -2221,6 +2221,10 @@ _HOSTILE_SEAT_STEPS = (
     # X 张是给它的补偿。不登记就落进"帮盟友"分支：AI 会把队友翻面、白送它一个回合的牌，
     # 纯自伤。1V1 下唯一其他座位就是敌人，登记为对手即正确方向。
     "fangzhu:",
+    # 【激将】的「出牌阶段主动使用【杀】」侧（yijiang-2014-round2 票 20）：清单唯一一步
+    # 选的是**这张【杀】的目标** ⇒ 对手。不登记就落进"帮盟友"分支：AI 会拿盟友代打的
+    # 【杀】去打另一个盟友。前缀 = 短技能 id（票 18 起的拼法 ``<短 id>:<步骤键>``）。
+    "jijiang:",
     # 贾诩移动版【乱武】（lin-batch2 票 03，Q9 = B）：并列最近时**先选**的座位就是那张
     # 【杀】的额定目标（挨打的人）。不登记就落进"帮盟友"分支：AI 会先把队友选成目标，
     # 再在下一问按敌我给分放弃 ⇒ 白失 1 点体力（比"能打敌人却失血"更差）。
@@ -4044,7 +4048,13 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.guojia.yiji": (_constant(4.5), "受伤后摸两张并可分配：净赚两张"),
     # 蜀
     "hero.liubei.rende": (_score_rende, "给牌是成本；首次给到两张以上回复 1 点 ⇒ 受伤时值得"),
-    "hero.liubei.jijiang": (_constant(_RESPOND_VALUE), "主公技：视为使用/打出一张【杀】"),
+    "hero.liubei.jijiang": (
+        _constant(_RESPOND_VALUE),
+        "主公技：①求助窗口视为打出【杀】（南蛮 / 决斗，免费）；②出牌阶段主动**使用**【杀】"
+        "（票 20：目标由自己选、盟友代付那张牌，占自己的使用次数）——**免费**、只读"
+        "`view` 的敌我估值（目标步登记为对手）；唯一的频率闸门是机械锁（同一出牌阶段里"
+        "发动后直到出过【杀】或新阶段开始前不再出现），故常量=始终愿意",
+    ),
     "hero.guanyu.wusheng": (_constant(2.0), "红色牌当【杀】：多一条进攻路径，按牌价保守为正"),
     "hero.zhaoyun.longdan": (_constant(2.0), "【杀】⇄【闪】互转：攻防两便"),
     "hero.machao.tieqi": (_constant(2.5), "使用【杀】后判定，通过则目标不可响应：助此【杀】命中"),
@@ -4226,7 +4236,9 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     ),
     "hero.jie_liubei.jijiang": (
         _constant(_RESPOND_VALUE),
-        "主公技：①求助窗口视为使用 / 打出【杀】；②盟友回合外打出【杀】时令主公摸一张",
+        "主公技：①求助窗口视为使用 / 打出【杀】；②盟友回合外打出【杀】时令主公摸一张；"
+        "③与标准版同一条出牌阶段主动**使用**【杀】的入口（票 20：免费，只读 `view` 的"
+        "敌我估值，频率由机械锁兜住）",
     ),
     "hero.jie_zhaoyun.longdan": (
         _constant(2.0),

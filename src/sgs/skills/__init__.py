@@ -166,6 +166,7 @@ from .active import (
     PickSeats,
     SkillFlow,
     activate_skill,
+    register_activation,
     run_flow,
 )
 from .flow import (
@@ -536,6 +537,7 @@ __all__ = (
     "prune_card_tags",
     "prune_skill_state",
     "provider_registered",
+    "register_activation",
     "pure_virtual_card",
     "rejudge_activation_plans",
     "rejudge_capable_seats",

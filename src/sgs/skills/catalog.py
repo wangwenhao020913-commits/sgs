@@ -432,6 +432,22 @@ class SkillDef:
     :attr:`~sgs.state.GameState.round_use_counts`，轮次 +1 时清空。
     """
 
+    flow: SkillFlow | None = None
+    """这条技能的**发动流水线**（yijiang-2014-round2 票 20 的加法；缺省 ``None``）。
+
+    服务"**不是 A 族、却要在出牌阶段作为一条主动入口**"的技能：装载点 = 出牌阶段的
+    ``ActivateSkill`` 候选，执行 = :func:`~sgs.skills.flow.run_flow`（登记在
+    :data:`~sgs.skills.active.ACTIVATIONS` 的发动回调里调它），清单 / 校验 =
+    :func:`~sgs.skills.preactivation.preactivation_for` 读 :func:`~sgs.skills.flow.flow_for`
+    的同一份声明。
+
+    首个（也是今天唯一）消费者是【激将】的「出牌阶段主动**使用**【杀】」侧
+    （``sgs.skills.lord_request.JIJIANG_USE_FLOW``）：求助型主公技的声明由
+    :func:`~sgs.skills.lord_request._lord_request_definition` 造，不在
+    ``ACTIVE_SKILLS`` 里，故它没有别的字段能挂那条"选目标"的流水线。``hooks`` 侧的
+    流水线仍走 :class:`Hook.flow`（两条登记互不覆盖）。
+    """
+
     @property
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
@@ -4036,10 +4052,22 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 ),
             ),
             _LORD_REQUEST_ASK,
+            CardRequestSite(
+                # yijiang-2014-round2 票 20：**出牌阶段主动使用【杀】**这一侧的受理面
+                # （「使用」链由调用方开，求助窗口只把牌交回去）。与上面的 `ask` 同一个
+                # 窗口、同一个 `required`，只是交付模式不同。
+                kind="accept",
+                path="src/sgs/skills/lord_request.py",
+                owner="_jijiang_use_effect",
+                fingerprint="required='slash'",
+            ),
         ),
         reason=(
             "可以：同【护驾】。**不参与**的理由也同：`_run_lord_request` 只认 `PlayCard`；"
             "【激将】本身还要再筛一层 `respond_mode=PLAY`（它不覆盖借刀的「使用【杀】」）。"
+            "票 20 的「使用」侧走同一扇窗口的**交付模式**（`LORD_REQUEST_DELIVER_KEY`："
+            "响应者仍答 `PlayCard`，窗口把那张牌交回调用方的 `start_use`）——所以这里多一处 "
+            "`accept` 站点，而 asking 面一字未变。"
         ),
     ),
     CardRequestWindow(
@@ -4286,6 +4314,7 @@ from .active import (  # noqa: E402  （末尾 import 是刻意的）
     active_skill_definitions,
     guohuo_provider,
     jie_jianying_provider,
+    register_activation,
 )
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
@@ -4293,6 +4322,9 @@ from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
     response_window_skill_definitions,
 )
 from .lord_request import (  # noqa: E402  （末尾 import 是刻意的）
+    JIE_JIJIANG,
+    JIJIANG,
+    jijiang_use_activate,
     lord_request_activation_plans,
     lord_skill_definitions,
     register_provider,
@@ -4379,6 +4411,11 @@ register_provider(GUOHUO, guohuo_provider)
 # 只声明"我在哪些窗口参与"（`active.JIE_JIANYING_PROVIDER_WINDOWS`），"要的是哪张牌"
 # 由窗口经 `PROVIDER_REQUIRED_KEY` 给出，故这里不需要窗口名单。
 register_provider(JIE_JIANYING, jie_jianying_provider)
+# 【激将】的「出牌阶段主动**使用**【杀】」侧（yijiang-2014-round2 票 20）：它不是 A 族
+# （声明由 `lord_request._lord_request_definition` 造），故发动回调同样只能在**这里**
+# 登记——两个模块都已 import 完之后。标准 / 界两条声明共用同一条流水线。
+register_activation(JIJIANG.skill_id, jijiang_use_activate)
+register_activation(JIE_JIJIANG, jijiang_use_activate)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(

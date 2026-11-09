@@ -47,12 +47,13 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
-from sgs.data import RuleConfig, load_content_pack  # noqa: E402
+from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack  # noqa: E402
 from sgs.engine import Engine  # noqa: E402
 from sgs.effects import legal_actions_for  # noqa: E402
 from sgs.state import (  # noqa: E402
     EndPhase,
     Pass,
+    PlayCard,
     Phase,
     QueryKind,
     SelectOptionsContext,
@@ -449,6 +450,156 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
     assert isinstance(payload["cases"], list) and len(payload["cases"]) == 10
+
+
+# ---------------------------------------------------------------------------
+# 票 20：【激将】的出牌阶段回环（点技能 → 清单里选目标 → 提交 = 主公的一次使用）
+# ---------------------------------------------------------------------------
+
+
+JIJIANG = "hero.liubei.jijiang"
+"""【激将】的全限定技能 id（标准刘备的主公技）。"""
+
+
+class _PlaySeat:
+    """最小出牌阶段脚本：南蛮一律放弃、出牌阶段结束；``use`` 给定时打出那一张。"""
+
+    def __init__(self, *, use: int | None = None, targets: tuple[int, ...] = ()) -> None:
+        self.use = use
+        self.targets = targets
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "PLAY_PHASE":
+            if self.use is not None:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.card_id == self.use
+                        and action.targets == self.targets
+                    ):
+                        self.use = None
+                        return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+class _LordRequestAlly:
+    """【激将】求助窗口的响应者：打出那张【杀】；其余一律放弃。"""
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if (
+            kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, PlayCard):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def test_the_play_phase_jijiang_loop_clicks_the_skill_picks_a_seat_and_submits() -> None:
+    """出牌阶段「点【激将】→ 选目标 → 提交」的回环（票 20 §4）。
+
+    服务端 = **真引擎**：主公孙权没有这张牌，产物由蜀势力盟友代付；客户端 = `pending_payload`
+    投影出的**真载荷** + 真实前端构造器（`enterPreativation` / `selectPreativationSeat` /
+    `buildPreativationAction`，全经 `ui_bridge`）。三条断言：
+
+    1. 出牌阶段的【激将】清单只有**一步**「选目标」，候选 = 服务端给的合法目标；
+    2. 点那名目标 ⇒ 客户端拼出 `ActivateSkill(picks=[], choices=["seat:N"])`，被
+       `parse_action` 接受（服务端模型是唯一真源）；
+    3. 提交后产物进**使用**链：伤害落在选中的那名身上、记录流里是一次**使用**
+       （`RESOLVE_AFTER_END` 的 actor = 主公），没有响应者的打出。
+    """
+    slashes = cards_of_type(PACK, "slash")
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero="liubei",
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+            ),
+            SeatSpec(hand=(slashes[0],), kingdom=Kingdom.SHU),
+            SeatSpec(hand=(slashes[1],)),
+        ],
+        deck=deck_excluding(PACK, slashes[0], slashes[1]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [_PlaySeat(), _LordRequestAlly(), _PlaySeat()],
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and JIJIANG in (e.pending.preactivations or {})
+        ),
+    )
+    query = engine.pending
+    assert query is not None
+
+    payload = pending_payload(query, human_seat=0)
+    manifest = payload["preactivations"][JIJIANG]
+    assert [step["name"] for step in manifest] == ["seat"], "清单只有「选目标」一步"
+    seats = [option for row in manifest[0]["pool"] for option in row["options"]]
+    assert seats == ["seat:1", "seat:2"], f"候选 = 服务端的合法目标池：{seats}"
+
+    activation = _probe_build(
+        {
+            "pending": payload,
+            "human_seat": 0,
+            "enter_preactivation": JIJIANG,
+            "click_seats": [2],
+        }
+    )
+    assert activation["kind"] == "ActivateSkill"
+    assert activation["skill_id"] == JIJIANG
+    assert activation["picks"] == []
+    assert activation["choices"] == ["seat:2"], "点的那名目标原样进 choices"
+    # 复合动作**不在** `legal_actions` 里（预发动入口），由服务端的校验器裁决通过。
+    engine.submit(parse_action(activation))
+
+    run_queries(
+        engine,
+        [_PlaySeat(), _LordRequestAlly(), _PlaySeat()],
+        # 等到**使用结算结束**（`RESOLVE_AFTER_END` 已落记录）再停：体力在伤害帧里就掉了，
+        # 只按体力停会停在结算中间，读不到那条使用记录。
+        lambda e: any(
+            record.kind == "timing"
+            and record.timing is Timing.RESOLVE_AFTER_END
+            and record.actor == 0
+            for record in e.records
+        ),
+    )
+    assert engine.state.player(2).hp == 3, "主公选的那名受到 1 点【杀】伤害"
+    assert engine.state.player(0).card_use_counts["slash"] == 1, (
+        "产物是**主公的使用**（占主公的次数）"
+    )
+    uses = [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.type == "slash" for card in record.cards)
+    ]
+    assert [record.actor for record in uses] == [0], "使用链的使用者是主公"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.PLAY_ON_PLAY
+    ], "没有响应者的打出（产物不进打出链）"
 
 
 # ---------------------------------------------------------------------------

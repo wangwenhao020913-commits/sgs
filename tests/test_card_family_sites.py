@@ -344,8 +344,37 @@ ALLOWLIST: dict[Site, Rule] = {
     (
         "src/sgs/skills/lord_request.py",
         "_lord_request_definition",
-        'requirement = {"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required]',
+        'requirement = {"dodge": "打出【闪】", "slash": "使用或打出【杀】"}[skill.required]',
     ): Rule(FAMILY, 1, "按 required 取文案（请求牌名，不筛牌面；护驾 / 激将各一档）"),
+    # ---- skills/lord_request.py：【激将】的「出牌阶段主动使用【杀】」侧（票 20）----
+    (
+        "src/sgs/skills/lord_request.py",
+        "_jijiang_slash_card",
+        'return pure_virtual_card(state, "slash")',
+    ): Rule(
+        NORMAL,
+        1,
+        "【激将】代打的**产物**是一张普通【杀】（无属性 / 无花色点数）——只用来读使用规则"
+        "（check_usable / 目标池），有意 normal-only；族判据在下游行为表的 count_key",
+    ),
+    (
+        "src/sgs/skills/lord_request.py",
+        "_jijiang_slash_unlock_condition",
+        'return card is not None and satisfies_required(card, "slash")',
+    ): Rule(
+        FAMILY, 1, "机械锁的**解锁事件**按族判：持有者使用 / 打出的火【杀】/ 雷【杀】/ 转化"
+        "【杀】与普通【杀】一样解锁（satisfies_required，与界【激将】② 同一判据）",
+    ),
+    (
+        "src/sgs/skills/lord_request.py",
+        "_jijiang_use_effect",
+        'required="slash",',
+    ): Rule(
+        FAMILY,
+        1,
+        "使用侧的求助窗口**请求牌名**是【杀】族（与 ``JIJIANG.required`` 同值）——"
+        "成员判定走 satisfies_required，转化 / 提供者产物同窗",
+    ),
     # ---- skills/lord_request.py：界【激将】①②（M6 票 16）----
     (
         "src/sgs/skills/lord_request.py",

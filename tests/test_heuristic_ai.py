@@ -2783,6 +2783,38 @@ def _coverage_jie_jianying():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_jijiang():
+    """刘备【激将】的「出牌阶段主动使用【杀】」侧（yijiang-2014-round2 票 20）。
+
+    主公（座位 0）+ 一名对手（座位 1）：清单只有一步「选【杀】的目标」，AI 填出那名
+    对手；复合动作由同一个校验器放行。战力之外不需要任何手牌（代打由蜀势力盟友出）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_jie_jijiang():
+    """界刘备【激将】：同一条出牌阶段入口（另一条声明）、同一份清单。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_jie_rende():
     low = tuple(_ids("lightning")[:2])
     state = build_state(
@@ -3197,6 +3229,9 @@ _COVERAGE_CASES = {
     "hero.sunquan.zhiheng": _coverage_zhiheng,
     "hero.liubei.rende": _coverage_rende,
     "hero.jie_liubei.rende": _coverage_jie_rende,
+    # yijiang-2014-round2 票 20：【激将】的出牌阶段主动「使用【杀】」入口（声明级 flow）。
+    "hero.liubei.jijiang": _coverage_jijiang,
+    "hero.jie_liubei.jijiang": _coverage_jie_jijiang,
     "hero.zhouyu.fanjian": _coverage_fanjian,
     "hero.huatuo.qingnang": _coverage_qingnang,
     "hero.diaochan.lijian": _coverage_lijian,

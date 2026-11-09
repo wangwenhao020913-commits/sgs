@@ -530,6 +530,26 @@ if (liveInput) {
   if (fixture.click_slot !== null && fixture.click_slot !== undefined) {
     ui.submitOwnHandSinglePick(fixture.pending, Number(fixture.click_slot));
   }
+  if (fixture.enter_preactivation) {
+    /* 复合动作的半边（yijiang-2014-round2 票 20）：**点已翻预发动的技能**（= 进入清单）
+     * → 按 ``click_seats`` 逐个点座位 → 拼 ``ActivateSkill(picks, choices)``。
+     * 入口都是真实的前端函数（`enterPreativation` / `selectPreativationSeat` /
+     * `buildPreativationAction`，经 `ui_bridge` 桥出），探针不另抄一份点击逻辑。 */
+    const skillId = String(fixture.enter_preactivation);
+    const manifest = ((fixture.pending.preactivations || {})[skillId]) || [];
+    ui.enterPreativation(
+      { skill_id: skillId, name: "", preactivated: true },
+      manifest,
+    );
+    for (const seat of fixture.click_seats || []) {
+      ui.selectPreativationSeat(Number(seat));
+    }
+    const preactivationAction = ui.buildPreativationAction(
+      fixture.pending, ui.state.preactivation,
+    );
+    process.stdout.write(JSON.stringify({ action: preactivationAction }));
+    process.exit(0);
+  }
   const action = ui.buildAction();
   process.stdout.write(JSON.stringify({ action }));
   process.exit(0);

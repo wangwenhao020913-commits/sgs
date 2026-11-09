@@ -382,8 +382,12 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
             for hook in definition.hooks:
                 by_timing[hook.timing].append(skill.id)
         for timing, owners in by_timing.items():
-            if len(owners) > 1:
-                duplicated[f"{hero.id}:{timing.value}"] = owners
+            # 判据是"**两条技能**同一时机"（同一张武将牌上的两段彼此独立的机制）：
+            # 一条技能自己在一个时机上挂两条钩子是另一回事——**界【激将】**就是这种
+            # （yijiang-2014-round2 票 20：② 的收益段与机械锁的解锁观测同一时机，
+            # 两者互不消费对方的答案），故按技能 id 去重后再判。
+            if len(set(owners)) > 1:
+                duplicated[f"{hero.id}:{timing.value}"] = list(dict.fromkeys(owners))
 
     assert not duplicated, f"同一时机的多条技能必须有重新裁定：{dict(duplicated)}"
 
@@ -1915,6 +1919,17 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.jie_liubei.jijiang": (
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=0),
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=0),
+            # yijiang-2014-round2 票 20 的三条**解锁钩子**（机械锁）：①「持有者使用 /
+            # 打出【杀】」×2（牌名判族 + 来源 = 持有者）②「持有者自己的新出牌阶段开始」。
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(source=ME),
+        ),
+        # 标准【激将】没有 ② 的收益段，只有同一组三条解锁钩子（票 20）。
+        "hero.liubei.jijiang": (
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(source=ME),
         ),
         "hero.jie_zhaoyun.yajiao": (
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME, from_hand=True),
@@ -2423,14 +2438,17 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.haozhao.zhengku": "触发技能",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
-    # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
+    # 候选提供者 3（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
     # （它另带②的两条零步钩子，但"候选提供者"是它在本表里的归类——见 zero_step 的排除）
     "hero.caocao.hujia": "候选提供者",
     "hero.jie_caocao.hujia": "候选提供者",
-    "hero.liubei.jijiang": "候选提供者",
-    # M6 票 16：界【激将】= ①求助窗口 + ②的两条零步钩子（按"提供者"单列，同界【护驾】）。
-    "hero.jie_liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
+    # yijiang-2014-round2 票 20：标准 / 界【激将】多了出牌阶段主动**使用【杀】**的声明级
+    # 流水线（`SkillDef.flow`：选目标 → 求助窗口 → 主公使用）⇒ 机械谓词「非空流水线 + 钩子」
+    # 让它们落进**触发技能**格；①的求助窗口（`PROVIDERS`）只是同一份声明的第二条入口，
+    # 与界【渐营】/【蛊惑】同一条互斥纪律（一格一技）。
+    "hero.liubei.jijiang": "触发技能",
+    "hero.jie_liubei.jijiang": "触发技能",
     # 风包·移动版于吉【蛊惑】：出牌阶段入口自 `04` 票 §3 起是**两步流水线**（选牌 → 声明，
     # 用户 2026-11-02 的 Q3A 裁定）⇒ 归「主动技能」格。它的**逐座位质疑**仍是段机里的手写
     # 循环（流水线语言没有循环步骤），但那一半住在 `SkillFlow.effect` 里，不是"手写钩子"
@@ -2573,7 +2591,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】是"钩子 + 非空流水线"的 A 族技能
     # ⇒ 机械谓词落在**触发技能**格（主动技能因此**不加**）⇒ 26 → 27。
     "主动技能": 36,
-    "触发技能": 27,
+    # yijiang-2014-round2 票 20：标准 / 界【激将】从「候选提供者」移进「触发技能」
+    # （声明级 `flow`：出牌阶段主动使用【杀】的入口）⇒ 27 → 29；候选提供者 5 → 3。
+    "触发技能": 29,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
@@ -2610,7 +2630,7 @@ SHAPE_COUNTS: dict[str, int] = {
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
-    "候选提供者": 5,
+    "候选提供者": 3,
     "觉醒技": 3,
 }
 """每格的条数（spec §4.4；M6 票 18 后
@@ -2727,8 +2747,9 @@ def _triggered_ids() -> frozenset[str]:
     已经被别的格认领"。后者的第二个消费者是界【渐营】（yijiang-2014-round2 票 17）：
     ① 的钩子 + ② 的两步流水线让它进「触发技能」格，而它同时登记了 ② 的**提供者**入口
     （`PROVIDERS` 里有它，与【蛊惑】同姿态）——本表**一格一技**，故这里按同一条互斥纪律
-    把它从「候选提供者」那一格扣掉（界【护驾】/【激将】的 ② 钩子是**零步**、不命中"非空
-    流水线"，仍按「候选提供者」列格）。
+    把它从「候选提供者」那一格扣掉（界【护驾】的 ② 钩子是**零步**、不命中"非空流水线"，
+    仍按「候选提供者」列格）。标准 / 界【激将】（yijiang-2014-round2 票 20）同理：出牌阶段
+    主动使用【杀】的声明级流水线让它们进了本格，候选提供者那一格因此扣掉它们。
     """
     return frozenset(
         skill_id
@@ -2969,8 +2990,9 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # 「触发技能」）⇒ 内 109 → 110；【矢北】（锁定技、无 flow）⇒ 外 93 → 94。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步流水线）⇒ 内 110 → 111。
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步流水线）⇒ 内 111 → 112。
-    assert len(inside) == 112
-    assert len(outside) == 94
+    # yijiang-2014-round2 票 20：标准 / 界【激将】带声明级流水线 ⇒ 内 112 → 114、外 94 → 92。
+    assert len(inside) == 114
+    assert len(outside) == 92
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

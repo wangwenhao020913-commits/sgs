@@ -1826,6 +1826,58 @@ def _assert_activation(query, *, skill_id: str, activate: bool) -> None:
             assert isinstance(answer, Pass), f"{skill_id} 该 Pass，实得 {answer!r}"
 
 
+JIJIANG = "hero.jie_liubei.jijiang"
+"""界刘备【激将】的全限定 id（票 20 的出牌阶段主动「使用【杀】」入口）。"""
+
+
+def test_jijiang_use_seat_step_targets_a_rebel_not_the_loyalist():
+    """【激将】的目标步登记为**对手**（yijiang-2014-round2 票 20）。
+
+    4 人身份局、主公界刘备（AI，座位 0）+ 已亮忠臣（座位 1）+ 两名已亮反贼（座位 2/3）；
+    牌堆全给【闪】（出牌阶段用不出）⇒ AI 在出牌阶段唯一有正分的动作就是【激将】的复合
+    动作。座位 2 在攻击范围外（距离 2），故目标池 = {1, 3}：**登记了 `jijiang:` 前缀**
+    才会挑反贼（座位 3）；不登记就落进"帮盟友"的缺省分支 ⇒ 拿代打的【杀】去打忠臣。
+    """
+    from sgs.data import Kingdom
+
+    dodges = tuple(cards_of_type(PACK, "dodge"))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=dodges,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    for seat in (1, 2, 3):
+        # 身份对本局 AI 可见（构造事实：它只改投影的可见性，不改胜负）。
+        state.player(seat).identity_visible = True
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in range(4)],
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == "PLAY_PHASE"
+            and JIJIANG in (e.pending.preactivations or {})
+        ),
+    )
+    query = engine.pending
+
+    action = HeuristicPlayer(ai_stream(7, 0)).respond(query)
+
+    assert isinstance(action, ActivateSkill) and action.skill_id == JIJIANG, (
+        f"AI 应当发动【激将】（唯一正分动作），实得 {action!r}"
+    )
+    assert action.choices == ("seat:3",), (
+        f"目标必须是攻击范围内的那名**反贼**（座位 3），不是忠臣（座位 1）：{action.choices}"
+    )
+
+
 def test_the_skill_table_fixtures_reach_real_windows():
     """夹具自检（不带 xfail）：三条 S1 用例的构造面（询问归属 / 牌面 / 成本池）。
 

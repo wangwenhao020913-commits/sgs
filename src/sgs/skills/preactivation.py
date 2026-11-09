@@ -5,7 +5,9 @@
 清单与校验都从同一份 ``SkillFlow.steps`` 渲染（`sgs.skills.flow`），本模块只回答两件事：
 
 - **哪条技能有清单**：主动技读 :data:`~sgs.skills.active.ACTIVE_SKILLS` 的 ``flow``，
-  被动技读 :data:`~sgs.skills.catalog.CATALOG` 里钩子 / 接缝的 ``flow``；
+  被动技读 :data:`~sgs.skills.catalog.CATALOG` 里钩子 / 接缝的 ``flow``；两者之外的第三条
+  = :attr:`~sgs.skills.catalog.SkillDef.flow`（声明级的**发动**流水线，yijiang-2014-round2
+  票 20 的【激将】「使用【杀】」侧：它既不是 A 族、也不是钩子）；
 - **哪条技能已经翻到预发动**：声明上的 ``preactivated`` 开关（本票只落机制，W4-2 逐条翻）。
 
 不新增询问类型、不改 ``SkillFlow`` 的步骤声明字段：登记表是**派生**的（不手抄 id 名单），
@@ -52,6 +54,11 @@ def _build_flows(
         if skill.flow is not None:
             table.setdefault(skill.skill_id, []).append((None, skill.flow))
     for skill_id, definition in catalog.items():
+        if definition.flow is not None:
+            # 声明级**发动**流水线（yijiang-2014-round2 票 20 的加法）：不是 A 族、却在
+            # 出牌阶段作为主动入口的技能（【激将】的「使用【杀】」侧）。时机档为 ``None``
+            # ——与主动技同一条读法（"出牌阶段空闲"），故 ``flow_for(skill_id)`` 取它。
+            table.setdefault(skill_id, []).append((None, definition.flow))
         for hook in definition.hooks:
             if hook.flow is not None:
                 table.setdefault(skill_id, []).append((hook.timing, hook.flow))

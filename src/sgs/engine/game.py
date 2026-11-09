@@ -6282,7 +6282,20 @@ class Engine:
         """
         return self._dispatch_phase_body(Timing.PHASE_DRAW_END, "phase_draw_end")
 
-    def _phase_play_start(self) -> None:
+    def _phase_play_start(self) -> Control:
+        """**出牌阶段开始时**：复位 + 帧外时机派发（yijiang-2014-round2 票 20 起可提问）。
+
+        与 :meth:`_phase_play_end` / :meth:`_phase_prepare` 逐字同一姿态：``_dispatch_phase_body``
+        惰性建帧（没有注册在该时机上的实例时**一个帧都不建** ⇒ 记录流与既有实现逐字节
+        相同：它发的 ``emit_timing`` 与本步改造前那一行逐字段同值）。
+
+        **为什么本票必须接上派发**：用户 2026-11-09 补的解锁语义是「**新的出牌阶段开始**
+        也要解锁」（【激将】的机械锁），观测点就是 ``PHASE_PLAY_START``——它此前只记时机、
+        从不派发钩子（既没有载体，也没有消费者）。额外回合同样经过本步，故它一并覆盖。
+
+        复位那一段**保持原样**（每次进入本步都跑）：它此前就是无条件的，既有技能把它当
+        "复位点"直接调用（`test_jianying_resets_the_last_card_at_the_play_phase_start`）。
+        """
         self.state.phase = Phase.PLAY
         # 出牌阶段限一次的技能计数在本步复位：与"座位自己的 TURN_START 清空
         # card_use_counts"同一重置口径（票 04 §要做什么 2 / 票 07 §6）。
@@ -6303,8 +6316,10 @@ class Engine:
             # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
             # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
             self._skip_to(self._phase_discard_start)
-            return
-        self.emit_timing(Timing.PHASE_PLAY_START, actor=self.state.turn_seat)
+            return None
+        # ``actor=_TURN_SEAT``（缺省）⇒ 帧 ``source`` 与时机记录的 ``actor`` 都是当前回合
+        # 角色——解锁钩子的"这是**我的**出牌阶段"因此读同一个值。
+        return self._dispatch_phase_body(Timing.PHASE_PLAY_START, "phase_play_start")
 
     def _skip_to(self, step: Callable[[], Any]) -> None:
         """把回合环的 pc 拨到 ``step``：本步返回后 ``_step_turn`` 的 +1 正好落到它。"""

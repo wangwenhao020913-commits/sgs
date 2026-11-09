@@ -97,6 +97,7 @@
 | `PHASE_DISCARD_END` | **弃牌阶段结束时**（神周瑜移动版【琴音】= 首个载体，huo-shenzhouyu-mobile 票 03）：与 `PHASE_FINISH` 同一条惰性派发（`_dispatch_phase_body`）；帧私有 `discard_phase_hand_discards` = 本阶段弃牌步实际弃置的手牌数，钩子条件读它 |
 | `PHASE_DRAW_END` | **摸牌阶段结束时**（神诸葛亮【七星】② = 首个载体，huo-shenzhugeliang 票 03）：`_phase_draw_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。被【兵粮寸断】跳过的摸牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发 |
 | `PHASE_FINISH` | 结束阶段（闭月、观星二段、诛害、勤学二段） |
+| `PHASE_PLAY_START` | **出牌阶段开始时**（yijiang-2014-round2 票 20：【激将】的机械锁 = 首个载体）：`_phase_play_start` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，**记录流逐字节不变**——它此前只记时机、从不派发）。帧 `source` = 当前回合角色（`actor=_TURN_SEAT`），故"这是**我的**出牌阶段"读 `source == MATCH_OWNER_KEY`。复位段带 `play_start_reset` 闸（钩子提问挂起后重入不重复抹"本阶段"事实）。被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在 |
 | `PHASE_PLAY_END` | **出牌阶段结束时**（韬·曹操【倡义】= 首个载体，tao-caocao 票 02）：`_phase_play_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。**"本阶段"作用域的清理排在本步之后**；被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发（与【兵粮寸断】跳摸牌阶段的 `PHASE_DRAW_END` 同一口径） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
