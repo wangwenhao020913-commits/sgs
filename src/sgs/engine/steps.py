@@ -300,6 +300,10 @@ class FrameHost(StepHost, Protocol):
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> Any: ...
 
+    def apply_armor_change(self, frame: Frame, seat: int, value: int) -> Any:
+        """把护甲值写成 ``value`` 并落一条 ``armor_change``（W7 的第二条体力轴）。"""
+        ...
+
     def apply_hp_max_change(self, frame: Frame, seat: int, value: int) -> Any:
         """把体力上限写成 ``value`` 并落一条 ``hp_max_change``（``MAXLIFE`` 帧的写入口）。"""
         ...
@@ -1260,12 +1264,36 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。结算完**立刻**把
     结果记进帧：濒死与否是这次扣减的结果，"扣减体力时"之后据此决定是否压入濒死帧
     （票 21）；无人救时死亡结算再从濒死帧压入（票 22）。
+
+    **护甲分账**（yijiang-2014-round2 票 07 / W7；用户 2026-11-09 签 Q-A1 / Q-A3 / Q-A4）：
+
+    - 只有**伤害帧**吸收——判据 = 帧私有 ``LIFE_DECREASE_DAMAGE_KEY``（由
+      :func:`damage_push_life_decrease` 置真）；「失去体力」帧（【苦肉】/【反间】/无来源
+      失去）该键缺省，**一点护甲都不碰**；
+    - 次序 = 先 ``absorbed = min(armor, amount)`` 扣护甲、再 ``hp - hp_loss``（``hp_loss`` =
+      未被吸收的伤害）；两条 delta 同属本帧、**护甲在前**（回放逐条重建即得到同一次结算）；
+    - ``frame.data["amount"]`` **不动**：被护甲吸收的那部分仍算一次**全额**伤害（受到 /
+      造成伤害、伤害值读者、``note_damage_*`` 都按它）；
+    - 护甲全吸收 ⇒ 这一帧**只有** ``armor_change``，一条 ``hp_change`` 都不发；L8 三个
+      时机照常派发（挂 ``LIFE_DECREASE_AFTER`` 的技能要能读到"时机在、delta 可能没有"）；
+    - ``frame.data["dying"]`` 仍只看 ``hp <= 0``：护甲扣光**不**濒死（Q-A4）；
+    - **惰性**：护甲为 0 时 ``absorbed = 0`` ⇒ 逐字走原路径（47 条金录像逐字节不变）。
     """
     target = frame.data["target"]
     control = _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
     if control is not None:
         return control
-    host.apply_hp_change(frame, target, host.state.player(target).hp - frame.data["amount"])
+    amount = frame.data["amount"]
+    player = host.state.player(target)
+    absorbed = 0
+    if frame.data.get(LIFE_DECREASE_DAMAGE_KEY) and amount > 0 and player.armor > 0:
+        absorbed = min(player.armor, amount)
+        # 护甲先落一条 armor_change（同一帧、排在 hp_change 之前）。
+        host.apply_armor_change(frame, target, player.armor - absorbed)
+    # 护甲全吸收 ⇒ 体力一点没动（``hp_loss == 0``）且护甲确实动过 ⇒ **一条 hp_change 都不发**。
+    hp_loss = amount - absorbed
+    if hp_loss > 0 or absorbed == 0:
+        host.apply_hp_change(frame, target, player.hp - hp_loss)
     frame.data["dying"] = host.state.player(target).hp <= 0
     return None
 

@@ -12,11 +12,14 @@ r"""主公技族（F，票 09）：势力作用域、**势力求助窗口**与�
 =======================  ======  ==========================================================
 技能                       锁定     落点
 =======================  ======  ==========================================================
-曹操【护驾】               非锁定    ``CANDIDATES(DODGE)`` → 势力求助窗口（需要【闪】）
+曹操【护驾】               非锁定    ``CANDIDATES(DODGE)`` → 势力求助窗口（需要【闪】，使用 / 打出
+                                    两档都住这一扇窗口）
 界曹操【护驾】①            非锁定    同上（同一条 ``LordSkill.offer`` 声明）
 界曹操【护驾】②            非锁定    ``USE_ON_USE`` / ``PLAY_ON_PLAY`` 钩子：其他魏势力角色于其
                                     回合外使用 / 打出【闪】时，**其**可以令主公摸一张牌
-刘备【激将】               非锁定    ``CANDIDATES(RESPOND)`` → 势力求助窗口（需要【杀】）
+刘备【激将】               非锁定    ``CANDIDATES(RESPOND)`` → 势力求助窗口（需要【杀】；打出 =
+                                    南蛮 / 决斗 / 万箭，使用 = 借刀 / 乱武的被迫使用）+ 出牌
+                                    阶段主动使用【杀】的入口（票 20 的声明级流水线）
 孙权【救援】               锁定      ``Modifier(RECOVER_AMOUNT, …)``：其他吴势力角色对其用【桃】时 +1
 =======================  ======  ==========================================================
 
@@ -53,6 +56,8 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    check_targets,
+    check_usable,
     satisfies_required,
 )
 from sgs.resolution import Control, Frame, Tag, has_tag
@@ -80,7 +85,8 @@ from .catalog import (
     same_kingdom,
     skill_used_this_turn,
 )
-from .flow import SkillFlow
+from .flow import PickSeats, SkillFlow, run_flow
+from .virtual import pure_virtual_card
 
 __all__ = [
     "BAONUE",
@@ -93,6 +99,7 @@ __all__ = [
     "JIE_JIJIANG_ECHO",
     "JIE_JIJIANG_LORD",
     "JIJIANG",
+    "JIJIANG_USE_FLOW",
     "JIE_JIUYUAN",
     "JIE_JIUYUAN_FLOW",
     "JIE_JIUYUAN_REPLACED_KEY",
@@ -108,14 +115,22 @@ __all__ = [
     "LORD_ECHO_FLOW",
     "LordEcho",
     "LordSkill",
+    "LORD_REQUEST_DELIVER_KEY",
+    "LORD_REQUEST_PAYER_KEY",
+    "USE_OR_PLAY_MODES",
     "advance_provider",
+    "carry_payer",
     "dispatch_provider",
     "jie_hujia_activation_plan",
+    "jijiang_use_activate",
     "lord_echo_activation_plan",
     "lord_request_activation_plans",
     "lord_request_skill_definitions",
     "lord_skill_definitions",
+    "provider_deliver",
+    "provider_give_up",
     "provider_registered",
+    "provider_required",
     "register_provider",
     "start_provider",
 ]
@@ -234,6 +249,48 @@ def _finish_provider(frame: Frame) -> tuple[Control, bool, CardRef | None]:
     return None, satisfied, card
 
 
+# ---------------------------------------------------------------------------
+# 提供者回调的**公共件**（票 16 §2.4）：受理面读 required + 产物交接
+#
+# 这三件是"提供者只声明我在哪些窗口参与，共用一份实现"的**受理半边**（候选半边见
+# `skills/catalog.py` 的 `ProviderWindows`）：技能回调不再各自 `frame.data[...] = ...`
+# 地手抄结果键，也不再各自写一份"required 缺失 = 编程错误"。
+# ---------------------------------------------------------------------------
+
+
+def provider_required(frame: Frame) -> str:
+    """提供者回调读**这扇窗口要哪张牌**（``PROVIDER_REQUIRED_KEY``）。
+
+    缺失 ⇒ ``NotImplementedError``：引擎在派发提供者之前一定写好它（见
+    :func:`start_provider`），撞到即编程错误——不猜、不回退。
+    """
+    required = frame.data.get(PROVIDER_REQUIRED_KEY)
+    if required is None:
+        raise NotImplementedError(
+            "提供者缺少窗口的 required（引擎应在派发前写 PROVIDER_REQUIRED_KEY）"
+        )
+    return str(required)
+
+
+def provider_deliver(frame: Frame, card: CardRef) -> None:
+    """产物交接：**这次响应成立**，产物牌交给窗口。
+
+    写 ``satisfied=True`` + :data:`PROVIDER_CARD_KEY`；窗口自己决定怎么消费（使用 / 打出 /
+    回复 / 打向 Bn / 无懈的"先声明、赢家才使用"）。
+    """
+    frame.data[PROVIDER_SATISFIED_KEY] = True
+    frame.data[PROVIDER_CARD_KEY] = card
+
+
+def provider_give_up(frame: Frame) -> None:
+    """产物交接：**这次响应没发生**（``satisfied=False``，不写产物，牌一张不动）。
+
+    外层窗口拿到 ``False`` 后照常继续（问真牌 / 记放弃）——这就是"作废不需要受理后回滚"
+    的那条契约（轮询发生在受理之前）。
+    """
+    frame.data[PROVIDER_SATISFIED_KEY] = False
+
+
 def start_provider(
     host: Any,
     frame: Frame,
@@ -298,6 +355,14 @@ def _run_lord_request(
     - 每个应答者一次询问；``Pass`` ⇒ 轮到下一个（该座位不再被问第二次）；
     - **首个打出者即止**：记 ``done``、代打者走 L6（``host.play_card``），并让出控制权等
       PLAY 帧结算完，再在下一次重入写回"需要已满足"。
+
+    **交付模式**（:data:`LORD_REQUEST_DELIVER_KEY`）：调用方要**自己开使用链**时，窗口把
+    响应者选出的那张牌 ``provider_deliver`` 交回去、**不**替它打出——"视为由你使用"由调用
+    方的 ``start_use`` 完成（票 17 的产物交接姿态）。置位者是三处**使用**窗口：出牌阶段主动
+    使用【杀】（票 20，住 :func:`_jijiang_use_effect`）与两扇"被迫使用【杀】"的效果窗口
+    （【借刀杀人】/【乱武】，票 22，住 `effects/ops.py` / `skills/active.py`——它们本来就
+    自己 ``start_use`` 提供者产物）。**打出**窗口（南蛮 / 决斗 / 万箭 / 【闪】步）读不到这个
+    键，语义逐字不变：代打是**真打出**。
     """
     request = frame.data.get(LORD_REQUEST_KEY)
     if request is None:
@@ -328,6 +393,13 @@ def _run_lord_request(
         if isinstance(action, PlayCard):
             request["done"] = True
             request["satisfied"] = True
+            if frame.data.get(LORD_REQUEST_DELIVER_KEY):
+                # 使用侧（票 20）：**不**在求助里 start_use / play_card——把那张牌交回
+                # 调用方，由它开使用链（"视为由你使用"）。产物经 PROVIDER_CARD_KEY 交付；
+                # 代付者另记一帧（票 23，由调用方 ``carry_payer`` 搬到使用帧上）。
+                frame.data[LORD_REQUEST_PAYER_KEY] = asker
+                provider_deliver(frame, action.card)
+                return None
             # 代打是**真打出**：走 L6、消耗响应者的实体牌、不占响应者的使用次数。
             host.play_card(action.card, source=asker, timing=timing)
             return "stay"
@@ -337,18 +409,356 @@ def _run_lord_request(
     return None
 
 
+# ---------------------------------------------------------------------------
+# 【激将】的「使用」侧（yijiang-2014-round2 票 20）：出牌阶段主动**使用【杀】**
+#
+# 票面（官网 2026-11-09 逐字）：
+#
+#     主公技，其他蜀势力角色可以在你需要时代替你**使用或打出**【杀】（视为由你使用或打出）。
+#
+# 票 09 / M6 票 16 只落了「打出」半边（南蛮 / 决斗 / 万箭一类的响应窗口）。【激将】「使用」
+# 这一侧有两条路：
+#
+# 1. **出牌阶段主动使用**（票 20，本段）：最常见、也最容易被 AI 无限点 ⇒ 配两道门槛
+#    （用户 2026-11-09 的防卡死裁定）；
+# 2. **被动的「被迫使用【杀】」窗口**（票 22）：【借刀杀人】与【乱武】——目标由窗外定死、
+#    不需要也不该有门槛，故候选只靠声明的 ``respond_modes`` 含 ``USE`` 就能进来，产物由
+#    那扇窗口 ``start_use``（:data:`LORD_REQUEST_DELIVER_KEY` 的交付模式）。
+#
+# **目标由主公先选**（只属第 1 条）：一条 :class:`~sgs.skills.flow.PickSeats` 步，池 = 「这张
+# 虚拟【杀】此刻的合法目标」——候选 / 清单 / 校验器三处读同一个 :func:`_play_activation_legal`
+# （牌名取声明的 ``required``，不写死【杀】）。
+#
+# **产物是主公的「使用」**：求助窗口把牌交回调用方（:data:`LORD_REQUEST_DELIVER_KEY`），
+# 由调用方开**使用**链（``start_use``）——不在求助里 ``start_use`` / ``play_card``（票 17 的
+# 产物交接姿态，"视为由你使用"）。
+#
+# **两道门槛**（用户原话：「一个是合法性门槛、一个是防卡死的机械门槛」）：
+#
+# 1. **合法性**：没有【杀】的次数（且不是无限）或没有合法目标 ⇒ 候选不出现。判据**直接
+#    复用**票 18 抽出的 :func:`~sgs.effects.check_usable`（时机 + 禁用 + 次数 + 目标池
+#    四件一起判），技能里不重抄"有没有次数 / 有没有目标"；
+# 2. **机械锁**：PLAY 发动**开始问第一个盟友之前**就把 ``Player.jijiang_locked`` 置真；
+#    解锁事件 = 该持有者**使用或打出**一张【杀】（``USE_ON_USE`` / ``PLAY_ON_PLAY``）
+#    **或**他自己的新出牌阶段开始（``PHASE_PLAY_START``，用户 2026-11-09 补：「新的出牌
+#    阶段开始也要解锁」）。被动窗口（南蛮 / 决斗…）**既不查也不置**这把锁（用户原话：
+#    「这个锁只防止出牌阶段内主动发动激将，如果是被动响应使用/打出杀则不影响」），
+#    【护驾】完全不锁（不能主动使用 / 打出【闪】⇒ 无卡死风险）。
+#
+# 锁**不进记录流**（不新增 delta / 时机），47 条金录像逐字节不变。
+# ---------------------------------------------------------------------------
+
+LORD_REQUEST_DELIVER_KEY = "lord_request_deliver"
+"""帧私有键：这次求助的产物**交回调用方**（``True``）而不是由求助窗口自己打出。
+
+置位者 = **三扇「使用」窗口**（它们自己 ``start_use`` 产物）：
+
+- 出牌阶段主动使用【杀】（票 20，:func:`_jijiang_use_effect`）；
+- 【借刀杀人】的「被迫使用【杀】」（票 22，`effects/ops.py:resolve_borrowed_sword`）；
+- 【乱武】的「对最近的座位使用一张【杀】」（票 22，`skills/active.py:_luanwu_effect`）。
+
+窗口把响应者选出的那张牌写进 :data:`PROVIDER_CARD_KEY` 交回去，由调用方开**使用**链
+（"视为由你使用"）；打出窗口（南蛮 / 决斗 / 万箭 / 【闪】步）读不到它（缺省 ``False``），
+仍是 :func:`_run_lord_request` 的既有语义"代打是**真打出**"。
+"""
+
+LORD_REQUEST_PAYER_KEY = "lord_request_payer"
+"""帧私有键：**代付者**——替主公付了这张牌的座位（票 23；用户 2026-11-10 逐字
+「票23需要加帧私有键」）。
+
+一条事实、两个落点，落点各错一层深度：
+
+1. 求助窗口在交付模式下先把它写在**窗口帧**上（:func:`_run_lord_request` 的交付分支）；
+2. 调用方开完使用链后由 :func:`carry_payer` 搬到那张**使用帧**上。
+
+② 半句在 ``USE_ON_USE`` 里被交给的正是使用帧（:func:`sgs.engine.steps.use_on_use` 以 USE
+帧派发），故它读得到第 2 站；窗口帧到那时已经不在派发链上——两帧**真的是两帧**，这条事实
+因此必须显式搬，不能靠"读窗口帧"的偶然查表。
+
+**不进记录流**（不新增 delta / 时机）：47 条金录像逐字节不变；代价是回放 / 录像里**读不出**
+这次【杀】是谁替主公付的——用户 2026-11-10 签字时明确接受这一取舍。
+
+与 :data:`LORD_REQUEST_DELIVER_KEY` 同一条姿态：**打出**窗口两个键都读不到，代打仍是
+``play_card(source=盟友)``，② 走的还是「来源 = 我」那一支。
+"""
+
+
+def carry_payer(window_frame: Frame, use_frame: Frame) -> None:
+    """把求助窗口记下的**代付者**搬到这次**使用帧**上（票 23；三扇使用窗口各调一次）。
+
+    ``window_frame`` = 开着求助窗口、由 ``provider_deliver`` 交付产物那一帧；
+    ``use_frame`` = 调用方随后 ``start_use`` 压出的 USE 帧。两帧不同（见
+    :data:`LORD_REQUEST_PAYER_KEY`），故这里**显式搬运**而不是在使用帧上再查一次窗口帧。
+    没有代付者（没人响应 / 真牌路径 / 打出路径）⇒ 零动作，使用帧与旧路径逐键相同。
+    """
+    payer = window_frame.data.pop(LORD_REQUEST_PAYER_KEY, None)
+    if payer is not None:
+        use_frame.data[LORD_REQUEST_PAYER_KEY] = int(payer)
+
+
+_JIJIANG_ASKED = "jijiang_asked"
+"""帧私有：PLAY 发动的求助窗口**已经开过**（重入只续跑它，不重开、不重锁）。"""
+
+_JIJIANG_DONE = "jijiang_done"
+"""帧私有：这次 PLAY 发动**已经收尾**（产物已交付使用 / 没人响应）——重入直接结束。"""
+
+
+_JIJIANG_CARD = "slash"
+"""【激将】这条流水线要的牌名：两条【激将】（标准 / 界）的 ``LordSkill.required`` 都是它，
+产物与目标池也都按这张牌求值。它只属于这份**声明级**流水线——共享判据
+:func:`_play_activation_legal` 读的是 ``skill.required``，不读这个常量。"""
+
+
+def _jijiang_slash_card(state: GameState) -> Any:
+    """这条通道的产物：一张**普通**【杀】的纯虚拟牌（只用来读使用规则，不进任何区域）。
+
+    【激将】的代打产物按牌面是普通【杀】（无属性、无花色 / 点数），故 ``check_usable`` 与
+    目标池对它的求值就是"这张【杀】此刻能不能用 / 能打谁"。纯虚拟牌走
+    :func:`~sgs.skills.virtual.pure_virtual_card` 这条既有构造（与【神速】/【离间】的产物
+    同源），不为"问一句能不能用"另造一张假牌。
+    """
+    return pure_virtual_card(state, _JIJIANG_CARD)
+
+
+def _play_activation_legal(state: GameState, owner: int, required: str) -> bool:
+    """声明级 ``flow`` 在**出牌阶段**能否出候选的**唯一判据**（三项读者共读这一处）。
+
+    读者 = PLAY 候选（:meth:`LordSkill.offer`）、预发动清单的目标池（:func:`_jijiang_use_targets`）
+    与复合动作校验器（同一份 ``pool``，见 ``flow._assign_activation``）——故"候选里没有"
+    与"提交也会被拒"结构上不可能各说一套（``Engine._structured_activation_failure`` 是
+    "不在候选里也能提交"的那道缝，受理侧读到的必须是同一份裁决）。
+
+    ``required`` = **这条声明**要的牌（``LordSkill.required``）：闸门问的是"此刻能不能主动
+    使用一张【这张牌】"，故虚拟牌的牌名**由声明给出**，不再写死成【杀】——第二个声明
+    ``activation_flow`` 的主公技因此不会静默继承【激将】的闸门。
+
+    两件事：①**机械锁**；②合法性 = :func:`~sgs.effects.check_usable` 的整条使用前校验
+    （时机 / 禁用 / 次数 / 目标池），故次数用尽是假、【诸葛连弩】的无限次数照旧为真——不把
+    判据写死成"每回合一次"。
+
+    **锁仍是【激将】自己的**（:attr:`~sgs.state.models.Player.jijiang_locked`：写入面只有
+    :func:`_jijiang_use_effect` 的置位与三条解锁钩子）。第二个声明 ``activation_flow`` 的
+    主公技**不能**默默共用这一位（它的解锁事件是"使用 / 打出它的那张牌"，不是【杀】）——
+    要么自带锁位，要么在这里按声明分档；本条注释就是那条"别默默继承"的提醒。
+    """
+    if state.player(owner).jijiang_locked:
+        return False
+    return check_usable(state, owner, pure_virtual_card(state, required))
+
+
+def _jijiang_use_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """目标步的池：**这张虚拟【杀】当下的合法目标**（``check_targets`` 的完整池）。
+
+    不可发动（锁着 / 次数用尽 / 没有目标）⇒ **空池**：清单因此整条不下发
+    （``flow.manifest`` 的空池分支），而复合动作的校验器照同一份池拒收——受理侧因此也
+    有门槛，不只是候选侧藏起来。
+
+    ``frame`` / ``chosen`` 不读：这一步没有前序答案（单步），池只取决于局面。
+    """
+    del frame, chosen
+    if not _play_activation_legal(state, owner, _JIJIANG_CARD):
+        return ()
+    return check_targets(state, owner, _jijiang_slash_card(state))
+
+
+def _jijiang_use_effect(host: Any, frame: Frame, answers: Any) -> Control:
+    """提交点：锁 → 问同势力角色（求助窗口）→ **主公使用**产物。
+
+    三个要点（都对应用户的裁定）：
+
+    - **置点在问第一个人之前**（用户原话「每次发动时**立刻**禁止再次发动」）——锁写在
+      开求助窗口之前，故"没人响应"与"有人响应"一样都锁上；
+    - **求助窗口只在这里被当作提供者展开**（``start_provider`` / ``advance_provider``）：
+      它可能跨多次重入（逐个问同势力角色），帧私有游标记住"已经开过"；
+    - **产物交给使用链**：求助窗口在 ``LORD_REQUEST_DELIVER_KEY`` 模式下交回响应者选出的
+      那张牌（不自己打出），这里 ``start_use`` 它、目标 = 主公刚才选的座位 ⇒ 记录流里是
+      主公的一次**使用**（"视为由你使用"），不是响应者的一次打出。
+    """
+    owner = int(frame.data["source"])
+    targets = tuple(int(seat) for seat in answers["seat"])
+    if frame.data.get(_JIJIANG_DONE):
+        return None
+    if not frame.data.get(_JIJIANG_ASKED):
+        frame.data[_JIJIANG_ASKED] = True
+        host.state.player(owner).jijiang_locked = True
+        frame.data[LORD_REQUEST_DELIVER_KEY] = True
+        control, satisfied, produced = host.start_provider(
+            frame,
+            str(frame.data["skill_id"]),
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            required="slash",
+        )
+    else:
+        control, satisfied, produced = host.advance_provider(
+            frame, Timing.PHASE_PLAY_IDLE
+        )
+    if control is not None:
+        return control
+    frame.data[_JIJIANG_DONE] = True
+    frame.data.pop(LORD_REQUEST_DELIVER_KEY, None)
+    if satisfied and produced is not None:
+        use = host.start_use(
+            produced,
+            source=owner,
+            targets=targets,
+            use_timing=Timing.PHASE_PLAY_IDLE,
+        )
+        # 票 23：把**代付者**搬到这次使用帧上——② 在 USE_ON_USE 里拿到的是使用帧。
+        carry_payer(frame, use)
+        return "stay"
+    return None
+
+
+JIJIANG_USE_FLOW = SkillFlow(
+    name="jijiang_use",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_jijiang_use_targets, optional=False, key="seat"),
+    ),
+    effect=_jijiang_use_effect,
+    # 牌面不限次数（官网逐字没有"限一次"）⇒ 阶段位不落；唯一的频率闸门是机械锁。
+    once_per_phase=False,
+)
+"""【激将】「出牌阶段主动使用【杀】」的流水线：选目标 → 求助窗口 → 主公使用产物。
+
+清单 = 一步「选目标」（票 18 的 ``PickSeats`` 机制；``lo = hi = 1`` 是【杀】的额定目标数，
+池由 :func:`_jijiang_use_targets` 现算）。锁在 ``effect`` 里、问第一个盟友之前置位。
+"""
+
+
+def jijiang_use_activate(host: Any, frame: Any) -> Any:
+    """【激将】PLAY 发动的回调（登记在 :data:`sgs.skills.active.ACTIVATIONS`）。
+
+    与 A 族的 :func:`~sgs.skills.active._activation_handler` 同形，但**不**落 ``_USED``
+    阶段位：这条技能没有"出牌阶段限一次"，频率由机械锁表达。流水线名 / 步骤声明住在
+    :data:`JIJIANG_USE_FLOW`，``run_flow`` 用复合动作的 ``activation`` 载荷摊回目标答案。
+    """
+    return run_flow(host, frame, JIJIANG_USE_FLOW)
+
+
+def _jijiang_use_unlock_owner(frame: Frame) -> int | None:
+    """锁的**持有者**（= 条件求值期由派发环写进 :data:`MATCH_OWNER_KEY` 的那个座位）。
+
+    两条条件（使用 / 打出【杀】、自己的新出牌阶段）与效果体 :func:`_jijiang_unlock`
+    **都读这一处**：这个键的读取只此一家，谁也别再内联一份 ``frame.data.get`` 出来。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return None if owner is None else int(owner)
+
+
+def _jijiang_slash_unlock_condition(host: Any, frame: Frame) -> bool:
+    """解锁事件①：**持有者自己**使用 / 打出【杀】族（含刚由这次【激将】产出的那张）。
+
+    「牌名 ∈ {杀}」按 :func:`~sgs.effects.satisfies_required` 判族（火 / 雷 / 转化【杀】
+    同族，与界【激将】② 同一条判据）；「来源 = 持有者」读使用 / 打出帧的既有载荷
+    ``frame.data["source"]``。**别人**使用 / 打出【杀】不解锁（锁绑持有者）。
+    """
+    del host
+    owner = _jijiang_use_unlock_owner(frame)
+    if owner is None:
+        return False
+    source = frame.data.get("source")
+    if source is None or int(source) != owner:
+        return False
+    card = frame.data.get("card")
+    return card is not None and satisfies_required(card, "slash")
+
+
+def _jijiang_play_phase_unlock_condition(host: Any, frame: Frame) -> bool:
+    """解锁事件②：**持有者自己的**新出牌阶段开始（用户 2026-11-09 补）。
+
+    阶段体帧的 ``source`` = 当前回合角色（``_dispatch_phase_body`` 写同一个值），故
+    "source == 持有者"就是"这是他的出牌阶段"。对手的 ``PHASE_PLAY_START`` 因此**不**解锁
+    ——锁按座位，不是全局开关。这一支覆盖「上一阶段不 productive（没出过【杀】）也不会
+    被永久锁死」，也覆盖额外回合给出的出牌阶段。
+    """
+    del host
+    owner = _jijiang_use_unlock_owner(frame)
+    source = frame.data.get("source")
+    return owner is not None and source is not None and int(source) == owner
+
+
+def _jijiang_unlock(host: Any, frame: Any) -> Any:
+    """解锁：把持有者的机械锁置假（三条解锁钩子共用这一个回调，幂等）。"""
+    owner = _jijiang_use_unlock_owner(frame)
+    if owner is not None:
+        host.state.player(owner).jijiang_locked = False
+    return None
+
+
+def _jijiang_unlock_hooks() -> tuple[Hook, ...]:
+    """解锁的**三条**挂接：使用 / 打出【杀】（各一条）与自己的新出牌阶段开始。
+
+    都是 ``forced=True``（**不问"是否发动"**：解锁是规则事实，不是可选技能段）；判据在
+    ``condition`` 上（票 12 的姿态：条件门要能被 ``tests/test_hero_catalog.py`` 的
+    ``_owner_probes`` 机械看见），效果体只做"置假"这一个幂等动作。
+    """
+    return (
+        Hook(
+            Timing.USE_ON_USE,
+            condition=_jijiang_slash_unlock_condition,
+            handler=_jijiang_unlock,
+            forced=True,
+        ),
+        Hook(
+            Timing.PLAY_ON_PLAY,
+            condition=_jijiang_slash_unlock_condition,
+            handler=_jijiang_unlock,
+            forced=True,
+        ),
+        Hook(
+            Timing.PHASE_PLAY_START,
+            condition=_jijiang_play_phase_unlock_condition,
+            handler=_jijiang_unlock,
+            forced=True,
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LordSkill(HeroSkillDecl):
     """F 族一条"求助型"技能的**声明**：需要什么牌 + 在哪个候选语境里提供。
 
     ``scope`` 决定候选回调在哪条 ``CANDIDATES`` 派发里生效（【护驾】= ``DODGE``、
-    【激将】= ``RESPOND``）；``respond_mode`` 只在 ``RESPOND`` 语境里再筛一层
-    （【激将】按票面只覆盖**打出**【杀】的窗口：南蛮 / 决斗，不含【借刀杀人】的"使用【杀】"）。
+    【激将】= ``RESPOND``）；``respond_modes`` 只在 ``RESPOND`` 语境里再筛一层——它回答
+    「这一次响应算使用还是打出」（票 22 起是**一档集合**：两种都覆盖的技能写
+    :data:`USE_OR_PLAY_MODES`）。今天的四条声明都是「使用或打出」的牌面：
+
+    ============  =========================================  ====================
+    技能           打出侧（``PLAY``）                          使用侧（``USE``）
+    ============  =========================================  ====================
+    【激将】       南蛮 / 决斗 / 万箭 / 求助子窗口            借刀 / 乱武的被迫使用
+    【护驾】       万箭（``DODGE`` 语境，注册表 modes=PLAY）   【杀】的【闪】步（同上，
+                                                              注册表 modes=USE）
+    ============  =========================================  ====================
+
+    【护驾】那一行两种模式都落在 ``DODGE`` 语境，而 ``DODGE`` 的候选派发**不带 mode 事实**
+    （``actions._dodge`` 只给 ``respond_required``）⇒ 这一层对它是**声明性**的：写法在
+    登记表上把「使用 / 打出」两半都认领了，行为与票 09 / M6 票 16 逐字相同（票 22 §2
+    「牌面不动，只补口径」）。``RESPOND`` 语境的 mode 由 ``actions._respond`` 原样下传
+    （南蛮 / 决斗 / 万箭 = ``PLAY``，借刀 / 乱武 = ``USE``），故【激将】的两半都是活的。
+
+    ``activation_flow``（yijiang-2014-round2 票 20 的加法）：这条技能在**出牌阶段**作为
+    一条"使用【``required``】的入口"时的那条流水线（目标步 + 求助窗口 + 使用链）。缺省
+    ``None`` ⇒ 不产出 PLAY 候选（【护驾】就是这种：不能主动使用 / 打出【闪】，用户
+    2026-11-09 的原话「护驾别锁，因为不能主动使用/打出闪」）。它有值时 ``offer`` 多出 PLAY
+    那一条、``_lord_request_definition`` 把同一条流水线登记成声明级 ``flow`` 并翻预发动。
+
+    **牌名从 ``required`` 派生，不写死【杀】**（评审 P2-e）：PLAY 候选的闸门（
+    :func:`_play_activation_legal` 用 ``required`` 现造虚拟牌交给 ``check_usable``）与清单
+    文案（``step_requirements["seat"]`` 取 ``_required_card_name(required)``）都读同一个字段
+    ⇒ 第二个声明 ``activation_flow`` 的主公技不会静默继承【激将】的措辞与闸门。
+    **未登记进 :data:`_LORD_REQUEST_CARD_NAMES` 的新牌名在构造期就抛错**，不会默默沿用【杀】。
+    仍属【激将】自己的只有机械锁（``Player.jijiang_locked``）与解锁钩子——第二个声明者要
+    自带这两样（见 :func:`_play_activation_legal` 的注释）。
     """
 
     required: str
     scope: CandidateScope
-    respond_mode: RespondMode | None = None
+    respond_modes: tuple[RespondMode, ...] | None = None
+    activation_flow: SkillFlow | None = None
 
     def offer(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
         """``CANDIDATES`` 回调：需要者**自己**的这条实例给它追加"视为发动"候选。
@@ -358,14 +768,33 @@ class LordSkill(HeroSkillDecl):
         跨座位注入是合法用法（`03` §4「技能描述模型」的「技能定义 / 实例 / 派发的冻结面」小节），
         【黄天】式技能会在这里写 ``ctx.owner != ctx.subject`` 的分支。
         "每提供者只问一次"由候选生成器统一过滤 ``ctx.providers_used``。
+
+        **被动两侧**（``RESPOND`` / ``DODGE``）：只由窗口的 ``respond_required`` 与
+        ``respond_modes`` 筛。票 22 起【激将】声明的 mode 集合含 ``USE`` ⇒【借刀杀人】
+        （与【乱武】）的「被迫使用【杀】」窗口里也进候选；产物由窗口消费（求助窗口走
+        :data:`LORD_REQUEST_DELIVER_KEY` 把牌交回去，窗口自己 ``start_use``）。
+
+        **PLAY 那一条**（票 20）：``activation_flow`` 有值 ⇒ 出牌阶段像一条"使用【这张牌】的
+        入口"那样出候选（这张牌 = ``self.required``，措辞与闸门都从它派生），闸门 =
+        :func:`_play_activation_legal`（机械锁 + ``check_usable`` 整条使用前校验）。它与
+        ``RESPOND`` / ``DODGE`` 两条**互不影响**：同一份声明在别人回合的响应窗口里照样只由
+        窗口的 ``respond_required`` / ``respond_modes`` 筛——被动窗口**既不查也不置**票 20
+        的机械锁（用户 2026-11-09：「如果是被动响应使用/打出杀则不影响」）。
         """
-        del state
-        if ctx.owner != ctx.subject or ctx.scope is not self.scope:
+        if ctx.owner != ctx.subject:
+            return current
+        if ctx.scope is CandidateScope.PLAY:
+            if self.activation_flow is None or not _play_activation_legal(
+                state, ctx.owner, self.required
+            ):
+                return current
+            return (*current, ActivateSkill(skill_id=self.skill_id, answers_seq=ctx.answers_seq))
+        if ctx.scope is not self.scope:
             return current
         if ctx.scope is CandidateScope.RESPOND:
             if ctx.respond_required != self.required:
                 return current
-            if self.respond_mode is not None and ctx.respond_mode is not self.respond_mode:
+            if self.respond_modes is not None and ctx.respond_mode not in self.respond_modes:
                 return current
         return (*current, ActivateSkill(skill_id=self.skill_id, answers_seq=ctx.answers_seq))
 
@@ -374,13 +803,37 @@ class LordSkill(HeroSkillDecl):
         return _run_lord_request(host, frame, self, actor, timing)
 
 
+USE_OR_PLAY_MODES: tuple[RespondMode, ...] = (RespondMode.PLAY, RespondMode.USE)
+"""「使用或打出」两档（票 22）：牌面逐字这么写的主公技（两条【激将】/ 两条【护驾】）都声明它。
+
+``PLAY`` = 打出（南蛮 / 决斗 / 万箭 / 求助子窗口本身），``USE`` = 使用（借刀的「被迫使用
+【杀】」与【乱武】；【闪】的【闪】步在登记表里也是这一档）。声明成一个**集合**而不是
+"最后一个 mode 胜"：两张【激将】在**出牌阶段主动使用**之外要同时覆盖这两半，只写其中一个
+就会让另一半的窗口静默地没有候选——票 22 要补的正是借刀那一半。
+
+**今天的四条声明都用这一个值 ⇒ `offer` 里那条筛分支恒真**（评审 P3 的核查结论，2026-11-11）：
+能走到 ``CANDIDATES`` 的 mode 只有 ``PLAY`` / ``USE`` 两档，改判窗口 ``required=None``、
+``_respond_scope(None)`` 返回 ``None`` ⇒ 根本不做候选派发（登记表把 ``rejudge`` 记成
+"不参与"）。所以这条分支**今天不构成行为**，它是留给"只覆盖一档"的后来者的闸（声明成
+元组而不是布尔就是为了那一刻）；`tests/test_hero_jie_shu.py` 与
+`tests/test_card_request_windows.py` 反过来按声明核登记表的 ``modes`` 列，故这个值不是
+纯注释。简化成 ``None`` 会同时改掉四处登记表指纹与那一列的口径——不划算，故保留。
+"""
+
+
 HUJIA = LordSkill(
     hero_id="caocao",
     short_id="hujia",
     required="dodge",
     scope=CandidateScope.DODGE,
+    respond_modes=USE_OR_PLAY_MODES,
 )
-"""曹操【护驾】：需要【闪】时令其他魏势力角色打出【闪】（规则 937）。"""
+"""曹操【护驾】：需要【闪】时令其他魏势力角色打出【闪】（规则 937）。
+
+mode 集合含 ``USE`` = 牌面的「使用或打出」两半都认领（票 22）：使用侧住 ``DODGE`` 语境的
+【闪】步（登记表 modes=USE）、打出侧住万箭（同一语境的 modes=PLAY）。``DODGE`` 派发不带
+mode 事实 ⇒ 这一层是**声明性**的，行为与票 09 逐字相同。
+"""
 
 JIE_HUJIA = hero_skill_id("jie_caocao", "hujia")
 """界曹操【护驾】的全限定技能 id（§十九 L2030–L2034：①求助窗口 + ②决定者不是受益者）。"""
@@ -390,6 +843,7 @@ JIE_HUJIA_LORD = LordSkill(
     short_id="hujia",
     required="dodge",
     scope=CandidateScope.DODGE,
+    respond_modes=USE_OR_PLAY_MODES,
 )
 """界曹操【护驾】①：与标准版**逐字相同**的求助窗口声明（同一条 ``LordSkill.offer``）。
 
@@ -402,9 +856,16 @@ JIJIANG = LordSkill(
     short_id="jijiang",
     required="slash",
     scope=CandidateScope.RESPOND,
-    respond_mode=RespondMode.PLAY,
+    respond_modes=USE_OR_PLAY_MODES,
+    activation_flow=JIJIANG_USE_FLOW,
 )
-"""刘备【激将】：需要【杀】时令其他蜀势力角色打出【杀】（规则 972）。"""
+"""刘备【激将】：需要【杀】时令其他蜀势力角色打出 / 代使用【杀】（规则 972 + 票 20 / 22）。
+
+- 「打出」半边 = ``RESPOND`` + ``RespondMode.PLAY``（南蛮 / 决斗…）；
+- 「使用」半边 = 出牌阶段主动使用的 ``activation_flow``（:data:`JIJIANG_USE_FLOW`）**加上**
+  ``RespondMode.USE`` 的被动窗口（【借刀杀人】/【乱武】的「被迫使用【杀】」，票 22）；
+- 两个被动半边都**不查、不置**票 20 的机械锁（锁只挡"出牌阶段主动发动"）。
+"""
 
 JIE_JIJIANG = hero_skill_id("jie_liubei", "jijiang")
 """界刘备【激将】的全限定技能 id（§十九 L2078–L2081：①求助窗口 + ②决定者不是受益者）。"""
@@ -414,7 +875,8 @@ JIE_JIJIANG_LORD = LordSkill(
     short_id="jijiang",
     required="slash",
     scope=CandidateScope.RESPOND,
-    respond_mode=RespondMode.PLAY,
+    respond_modes=USE_OR_PLAY_MODES,
+    activation_flow=JIJIANG_USE_FLOW,
 )
 """界刘备【激将】①：与标准版**逐字相同**的求助窗口声明（同一条 ``LordSkill.offer``）。
 
@@ -457,6 +919,24 @@ M6 票 16 的界【激将】①）。"""
 # ---------------------------------------------------------------------------
 
 
+def _lord_echo_actor(frame: Frame) -> int | None:
+    """② 半句的**当事角色**（= 「其」/ 决定者）：**代付者**优先，否则事件来源。
+
+    两段牌面共用一条判据：
+
+    - 「其他蜀势力角色于其回合外**使用 / 打出**【杀】」——当事角色 = 帧的来源
+      （``USE`` / ``PLAY`` 帧的既有载荷）；
+    - 「或**替你使用或打出**【杀】」（票 23）——使用帧的 ``source`` 是主公（视为**主公
+      使用**，票 20 的产品口径），真正的当事角色是那个付了牌的代付者
+      （:data:`LORD_REQUEST_PAYER_KEY`，由 :func:`carry_payer` 搬到使用帧上）。
+
+    两条合成一处：有代付者就用它。打出侧没有这个键 ⇒ 与旧读法逐字相同。
+    """
+    payer = frame.data.get(LORD_REQUEST_PAYER_KEY)
+    raw = payer if payer is not None else frame.data.get("source")
+    return None if raw is None else int(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class LordEcho(HeroSkillDecl):
     """主公技的 **② 半句**声明：势力由持有者与事件来源比、牌名由 ``card_type`` 声明。"""
@@ -468,13 +948,37 @@ class LordEcho(HeroSkillDecl):
     requirement: str = ""
     """② 半句的人话（拼在 ① 后面，供询问提示用）。"""
 
+    def used_this_turn(self, state: GameState, owner: int) -> bool:
+        """本回合的「每回合限一次」**是否已经用掉**（读**实例级**的
+        :data:`~sgs.skills.catalog._TURN_USED` 位）。
+
+        **计数主体 = 技能持有者（主公）/ 实例，整回合只触发一次，不分盟友**（用户
+        2026-11-10 逐字：「激将②和护驾②一样的，每个回合，只能触发一次，而非每个盟友每回合
+        各一次」）。它**不是**"每个决定者各一份额度"：两个不同的盟友同一回合各使用 / 打出
+        一次同一牌名时，第二个不再被问——那正是"整回合一次"的读法。
+
+        计的是**真的发动**（落位在提交点 :func:`_lord_echo_draw`），放弃不占：条件不成立于
+        "已经发动过"，而不是"已经问过"。
+        """
+        return skill_used_this_turn(state, owner, self.skill_id)
+
+    def mark_used_this_turn(self, state: GameState, owner: int) -> None:
+        """在**提交点**落位（实例级；幂等，重入不重复记）。"""
+        mark_skill_used_this_turn(state, owner, self.skill_id)
+
     def condition(self, host: Any, frame: Any) -> bool:
         """触发条件：**其他同势力角色于其回合外**使用 / 打出 ``card_type``，且本回合未发动。
 
-        持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），事件
-        的当事角色读 ``frame.data["source"]``（使用 / 打出帧的既有载荷）。五段全成立才发问：
-        ①牌名对得上（转化 / 虚拟牌按**产物牌型**同判）；②当事角色不是主公自己（"其他"）；
-        ③当前回合不是它的回合（"于其回合外"）；④与自己同势力；⑤本回合还没发动过。
+        持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），
+        **当事角色**由 :func:`_lord_echo_actor` 给出（代付者优先，见票 23）。五段全成立才
+        发问：①牌名对得上（转化 / 虚拟牌按**产物牌型**同判）；②当事角色不是主公自己
+        （"其他"）；③当前回合不是**它**的回合（"于其回合外"）；④与自己同势力；
+        ⑤本回合这次「限一次」还没用掉（:meth:`used_this_turn`，**整回合一次**）。
+
+        「替你使用」那一支（票 23）：使用帧的 ``source`` 是主公（视为主公使用），当事角色
+        因此不能读 ``source``，改读 :data:`LORD_REQUEST_PAYER_KEY`。两段「回合外」的读法
+        不变：仍是"当事角色的回合外"——替主公使用必然发生在主公的回合，故这一支恒成立；
+        被动使用窗口里代付者**可能**就是回合角色（回合角色也能被求助），此时照旧不问。
         """
         owner = frame.data.get(MATCH_OWNER_KEY)
         if owner is None:
@@ -482,15 +986,15 @@ class LordEcho(HeroSkillDecl):
         card = frame.data.get("card")
         if card is None or not satisfies_required(card, self.card_type):
             return False
-        source = frame.data.get("source")
-        if source is None or source == owner:
+        actor = _lord_echo_actor(frame)
+        if actor is None or actor == owner:
             return False
         state = host.state
-        if state.turn_seat == source:
+        if state.turn_seat == actor:
             return False
-        if not same_kingdom(state, source, owner):
+        if not same_kingdom(state, actor, owner):
             return False
-        return not skill_used_this_turn(state, owner, self.skill_id)
+        return not self.used_this_turn(state, int(owner))
 
     @property
     def hooks(self) -> tuple[Hook, ...]:
@@ -509,7 +1013,11 @@ JIE_HUJIA_ECHO = LordEcho(
         "每回合限一次，其他魏势力角色于其回合外使用或打出【闪】时，其可以令你摸一张牌"
     ),
 )
-"""界曹操【护驾】②：其他**魏**势力角色于其回合外使用 / 打出【闪】时，其可以令主公摸一张。"""
+"""界曹操【护驾】②：其他**魏**势力角色于其回合外使用 / 打出【闪】时，其可以令主公摸一张。
+
+「每回合限一次」按**主公 / 实例**计：整回合只触发一次（先到先得），第二个魏势力角色同一
+回合再使用 / 打出【闪】不会拿到第二张——用户 2026-11-10 的裁定。
+"""
 
 JIE_JIJIANG_ECHO = LordEcho(
     hero_id="jie_liubei",
@@ -519,7 +1027,19 @@ JIE_JIJIANG_ECHO = LordEcho(
         "每回合限一次，其他蜀势力角色于其回合外使用或打出【杀】时，其可以令你摸一张牌"
     ),
 )
-"""界刘备【激将】②：其他**蜀**势力角色于其回合外使用 / 打出【杀】时，其可以令主公摸一张。"""
+"""界刘备【激将】②：其他**蜀**势力角色于其回合外使用 / 打出【杀】时，其可以令主公摸一张。
+
+「每回合限一次」与【护驾】②**同一条口径**（用户 2026-11-10 逐字：「激将②和护驾②一样的，
+每个回合，只能触发一次，而非每个盟友每回合各一次」）⇒ 按**主公 / 实例**计。
+「认出代付者」（:func:`_lord_echo_actor`）与"计几次"是两件事：前者是票 23 的落地，后者是
+本条的唯一口径。
+"""
+
+_ECHO_BY_SKILL: dict[str, LordEcho] = {
+    echo.skill_id: echo for echo in (JIE_HUJIA_ECHO, JIE_JIJIANG_ECHO)
+}
+"""``skill_id`` → ② 声明（由声明自身派生，不按 id 白名单手写）：派发环只把 ``skill_id``
+写在帧上，提交点因此要反查声明对象（今天两版 ② 同一套计数口径，反查是为了**不**按 id 分支）。"""
 
 _ECHO_BY_LORD: dict[LordSkill, LordEcho] = {
     JIE_HUJIA_LORD: JIE_HUJIA_ECHO,
@@ -532,21 +1052,27 @@ _LORD_ECHO_DRAWN_KEY = "lord_echo_drawn"
 
 
 def _lord_echo_draw(host: Any, frame: Any, answers: Any) -> Any:
-    """提交点：**主公**摸一张牌（决定者已在"是否发动"里答过），并落"本回合已发动"。
+    """提交点：**主公**摸一张牌（决定者已在"是否发动"里答过），并落「本回合已发动」。
 
-    收益归技能持有者（``skill_owner`` = 主公），不是答话的人。技能 id 读派发环写在帧上的
-    :data:`~sgs.skills.catalog.RUNNING_SKILL_KEY`：同一条流水线服务两条主公技（界护驾 /
-    界激将），落位必须落在**正在跑的那一条**上。帧私有游标挡住重入（摸牌可能内联挂起）。
+    收益归技能持有者（``skill_owner`` = 主公），不是答话的人。「每回合限一次」的**计数主体**
+    是技能持有者 / 实例（**整回合只触发一次**，用户 2026-11-10 的裁定，两条 ② 同一条口径）
+    ——故落位走 :meth:`LordEcho.mark_used_this_turn`，不在这里按技能 id 分支。
+
+    技能 id 读派发环写在帧上的 :data:`~sgs.skills.catalog.RUNNING_SKILL_KEY`：同一条流水线
+    服务两条主公技，声明对象由 :data:`_ECHO_BY_SKILL` 反查（= 声明自己派生，不手抄白名单）。
+    帧私有游标挡住重入（摸牌可能内联挂起）。
     """
     del answers
     if frame.data.get(_LORD_ECHO_DRAWN_KEY):
         return None
     frame.data[_LORD_ECHO_DRAWN_KEY] = True
     owner = frame.data["skill_owner"]
+    actor = _lord_echo_actor(frame)
     host.draw_for_hand(frame, owner, 1)
     skill_id = frame.data.get(RUNNING_SKILL_KEY)
-    if skill_id:
-        mark_skill_used_this_turn(host.state, owner, str(skill_id))
+    echo = None if skill_id is None else _ECHO_BY_SKILL.get(str(skill_id))
+    if echo is not None:
+        echo.mark_used_this_turn(host.state, int(owner))
     return None
 
 
@@ -561,11 +1087,14 @@ def lord_echo_activation_plan(
 
     由 :data:`~sgs.skills.catalog.ACTIVATION_PLANS` 交给引擎的 ``ask_skill_activation``，
     询问因此出现在正确的座位上；``skill_owner`` 仍是主公，流水线的效果落在它身上。
-    帧里没有 ``source`` 时退回 ``None``（= 问持有者，引擎缺省）——真实派发路径上恒有。
+    帧里没有当事人（既无 ``source`` 也无代付者）时退回 ``None``（= 问持有者，引擎缺省）
+    ——真实派发路径上恒有。
+
+    **当事角色读 :func:`_lord_echo_actor`**（票 23）：「替你使用【杀】」那一支的帧
+    ``source`` 是主公，问主公"是否发动"是错的——决定者是那个代付的盟友（牌面「其」）。
     """
     del state, instance
-    source = frame.data.get("source")
-    return ActivationPlan(actor=source if isinstance(source, int) else None)
+    return ActivationPlan(actor=_lord_echo_actor(frame))
 
 
 def jie_hujia_activation_plan(
@@ -921,11 +1450,36 @@ def lord_request_skill_definitions() -> tuple[SkillDef, ...]:
     return tuple(_lord_request_definition(skill) for skill in LORD_REQUEST_SKILLS)
 
 
+_LORD_REQUEST_CARD_NAMES: dict[str, str] = {"slash": "杀", "dodge": "闪"}
+"""``LordSkill.required`` → **牌面显示名**（求助型主公技的牌名闭集）。
+
+键是 ``required`` 的闭集、值是牌面逐字的``【X】``里那个 X。文案与清单步骤都从这里取：
+牌名**由声明派生**（``required``），不在这两处各写一份【杀】/【闪】——否则第二个声明
+``activation_flow`` 的主公技会静默沿用【激将】的措辞。
+"""
+
+
+def _required_card_name(required: str) -> str:
+    """``required`` → 牌名；**未登记即抛**（构造期，不是运行期）。
+
+    用"键不命中就抛"而不是缺省【杀】：新牌名必须当场登记、当场裁定文案，不许靠沿用
+    别人的显示名蒙混过去（``ValueError`` 比一条读起来没问题的错文案容易发现）。
+    """
+    try:
+        return _LORD_REQUEST_CARD_NAMES[required]
+    except KeyError:
+        raise ValueError(
+            f"求助型主公技的 required={required!r} 还没有显示名：先在 "
+            f"_LORD_REQUEST_CARD_NAMES 里登记（现有：{sorted(_LORD_REQUEST_CARD_NAMES)}）"
+        ) from None
+
+
 def _lord_echo_requirement(skill: LordSkill, echo: LordEcho) -> str:
     """①② 都在一条技能上时的 ``requirement`` 文案：两段都要说（按声明取，不按 id 猜）。"""
+    card = _required_card_name(skill.required)
     first = {
-        "dodge": "当你需要使用或打出【闪】时，你可以令其他魏势力角色依次选择是否打出一张【闪】",
-        "slash": "当你需要使用或打出【杀】时，你可以令其他蜀势力角色依次选择是否打出一张【杀】",
+        "dodge": f"当你需要使用或打出【{card}】时，你可以令其他魏势力角色依次选择是否打出一张【{card}】",
+        "slash": f"当你需要使用或打出【{card}】时，你可以令其他蜀势力角色依次选择是否打出一张【{card}】",
     }[skill.required]
     return f"①{first}；②{echo.requirement}"
 
@@ -935,10 +1489,24 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
 
     "多出来的那一半"是这一处显式的分支：``_ECHO_BY_LORD`` 的键是**声明对象**（这条声明
     就是界曹操的【护驾】/ 界刘备的【激将】），不是按 id 字符串猜的白名单。
+
+    另两条分支也读声明、不读 id 白名单（yijiang-2014-round2 票 20）：
+
+    - ``activation_flow`` 有值 ⇒ 声明级 ``flow``（出牌阶段「使用【required 那张牌】」的入口）
+      + 三条解锁钩子 + ``preactivated=True``（可用性只剩预发动清单）；清单文案取
+      ``step_requirements``（牌名从 ``required`` 派生，不写死【杀】）；
+    - 没有 ⇒ 与票 09 / M6 票 16 逐字相同（【护驾】不主动使用 / 打出【闪】，故无锁、
+      无流水线）。
     """
     echo = _ECHO_BY_LORD.get(skill)
     hooks: tuple[Hook, ...] = () if echo is None else echo.hooks
-    requirement = {"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required]
+    if skill.activation_flow is not None:
+        # 解锁钩子挂在**同一条**声明上（不是第二条 SkillDef：``CATALOG`` 是同 id 后者胜）。
+        hooks = (*hooks, *_jijiang_unlock_hooks())
+    card = _required_card_name(skill.required)
+    requirement = {"dodge": f"打出【{card}】", "slash": f"使用或打出【{card}】"}[
+        skill.required
+    ]
     if echo is not None:
         requirement = _lord_echo_requirement(skill, echo)
     return SkillDef(
@@ -947,8 +1515,13 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
         carrier=CarrierKind.HERO,
         skill_type=SkillType.LORD,
         hooks=hooks,
+        flow=skill.activation_flow,
         modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offer),),
         requirement=requirement,
+        step_requirements=(
+            {"seat": f"选择【{card}】的目标"} if skill.activation_flow is not None else None
+        ),
+        preactivated=skill.activation_flow is not None,
     )
 
 

@@ -30,12 +30,14 @@
   （【天成】的流还混着展示 / 询问 / 回复）；减侧两个 ``MAXLIFE_DECREASE_*`` **不解封**，
   仍留枚举位。
 
-**不进清单的 27 个节点与理由**（票 12 §5"实战不可达者写明理由"）：
+**不进清单的节点与理由**（票 12 §5"实战不可达者写明理由"）：
 
 - ``sgs.timing.EMPTY_LOG``（11）：L2 边界 / 阶段间节点，流程结构上不 dispatch
   （票 18 承票 06 §7 的登记），记录流里不出现，故无来源可挂；
-- ``sgs.timing.ENUM_ONLY``（16）：触发它们的前提机制（拼点、翻面、失去体力、**减**体力
-  上限、牌移动、属性伤害…）仍被排除，只留枚举位——"加"体力上限已于 wuming 票 04 解封。
+- ``sgs.timing.ENUM_ONLY``（12）：触发它们的前提机制（**失去体力**、**减**体力上限、
+  **移动前**、L17 里没有写入口的 ``HERO_REVEALED`` / ``HERO_REMOVED`` / ``CARD_SHOWN``…）
+  仍被排除，只留枚举位——"加"体力上限已于 wuming 票 04 解封、拼点三时机于
+  huo-taishici-xunyu / tao-caocao 解封、状态位二时机于 chenqun-guyong 票 03 解封。
 
 另：基准 ``06-deck-reshuffle`` 不作为来源——重洗没有专属时机节点，它 dispatch 的与
 01–05 相同；它自己的回归断言（重洗可观测）由 ``tests/test_deck_shuffle.py`` 与
@@ -56,6 +58,7 @@ from .positions import (
     pindian_engine,
     play_phase_peach_engine,
     round_start_engine,
+    state_engine,
     turn_loop_engine,
 )
 
@@ -69,6 +72,8 @@ MOVE_AFTER_SCENE = "position:move-after"
 MAXLIFE_SCENE = "position:maxlife"
 PINDIAN_SCENE = "position:pindian"
 ROUND_START_SCENE = "position:round-start"
+STATE_SCENE = "position:state"
+"""chenqun-guyong 票 03（W2）：状态位写入口的惰性派发（合成技能 + 三个真实写入）。"""
 
 
 def _baseline(slug: str) -> str:
@@ -158,8 +163,11 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.RANK_COMPARE_ON: (PINDIAN_SCENE,),
     Timing.RANK_COMPARE_PLACED: (PINDIAN_SCENE,),
     Timing.RANK_COMPARE_RESULT_AFTER: (PINDIAN_SCENE,),
+    # ---- L17 状态位：chenqun-guyong 票 03 解封**有写入口的**两个时机（同层其余三个仍留位） ----
+    Timing.STATE_FLIPPED: (STATE_SCENE,),
+    Timing.STATE_CHAINED: (STATE_SCENE,),
 }
-"""60 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+"""62 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
 
 
 @lru_cache(maxsize=None)
@@ -180,6 +188,8 @@ def stream_records(source_id: str):
         return pindian_engine().records
     if source_id == ROUND_START_SCENE:
         return round_start_engine().records
+    if source_id == STATE_SCENE:
+        return state_engine().records
     raise KeyError(f"未知的覆盖来源：{source_id!r}")
 
 

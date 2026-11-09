@@ -1,13 +1,14 @@
 """变化事件（delta）的载荷类型：一次状态变化的纯事实（票 06 §2 / §3）。
 
 ``delta_type`` 是记录流 schema 的一部分，后补会动事件版本，所以即使 M1 的骨架期只用得到
-``card_move`` 也先建位。现有 11 种：M1 的八种（``card_move`` / ``hp_change`` /
+``card_move`` 也先建位。现有 19 种（M5 时 11 种）：M1 的八种（``card_move`` / ``hp_change`` /
 ``chained_change`` / ``wine_change`` / ``card_reveal`` / ``deck_shuffle`` /
 ``identity_deal`` / ``identity_reveal``）之后，``chained_change``（M5-03 横置）、
 ``wine_change``（M5-04 酒）与 ``card_reveal``（M5-06 火攻亮牌）都是就地追加；M6 票 04 再
 追加技能三态的 ``skill_gain`` / ``skill_lose`` / ``skill_suppress``（技能获得 / 失去 /
 失效），M6 票 11 追加 ``turn_change``（额外回合 / 轮次变化），M6 票 20 追加标签增删的
-``tag_add`` / ``tag_remove``（spec §投影与记录流），记录流仍为事件版本 2。记录层
+``tag_add`` / ``tag_remove``（spec §投影与记录流），W7 追加 ``armor_change``（护甲值：
+第二条体力轴，``before`` / ``after``）。记录流仍为事件版本 2。记录层
 （``engine``）在这些模型上**继承**出带 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，
 从而 JSON 是平铺的。
 """
@@ -30,6 +31,7 @@ from .models import (
 )
 
 __all__ = [
+    "ArmorChangeDelta",
     "CardMoveDelta",
     "CardRevealDelta",
     "ChainedChangeDelta",
@@ -100,6 +102,28 @@ class HpChangeDelta(_FrozenModel):
     before: int
     after: int
     amount: int
+
+
+class ArmorChangeDelta(_FrozenModel):
+    """一个座位的**护甲值**被写成某个值（yijiang-2014-round2 票 07 / W7）。
+
+    写入口唯一 = :func:`~sgs.effects.apply_armor`（经 :meth:`Engine.apply_armor_change`）。
+    护甲是**第二条体力轴**：照 :class:`HpChangeDelta` 的姿态记 ``before`` / ``after``，
+    且**与它分轴**——被护甲吸收的那部分伤害不进 ``hp_change``（否则体力会记成负值、回放
+    与投影都对不上），伤害值本身仍是全额（``DAMAGE`` 帧的 ``amount`` 一字不改）。
+
+    同一次伤害事件的两条 delta 同属那条 ``LIFE_DECREASE`` 帧，**护甲在前、体力在后**：
+    回放（``tools/sgs_web/static/replay.js``）/ live view（``session.js``）逐条重建即可。
+    护甲全吸收时这一帧**只有** ``armor_change``（没有 ``hp_change``）——挂
+    ``LIFE_DECREASE_AFTER`` 的技能因此"时机照发、delta 可能没有"。
+
+    **公开事实**（与 ``hp_change`` 同档）：护甲值画在座位卡的血条上。
+    """
+
+    delta_type: Literal["armor_change"] = "armor_change"
+    seat: int
+    before: int
+    after: int
 
 
 class HpMaxChangeDelta(_FrozenModel):
@@ -373,6 +397,7 @@ class TurnChangeDelta(_FrozenModel):
 
 Delta = Annotated[
     CardMoveDelta
+    | ArmorChangeDelta
     | HpChangeDelta
     | HpMaxChangeDelta
     | ChainedChangeDelta

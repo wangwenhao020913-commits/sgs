@@ -16,6 +16,11 @@
 这条在本项目是**结构事实**——:class:`~sgs.state.CardRef` 根本没有属性字段，故
 "武圣转化的【杀】是普通【杀】"不可能被某个构造器悄悄改掉。
 
+**牌面的效果侧覆盖**（W6 票 06）是上表的**唯一**显式例外：
+:func:`transformed_card` 的可选 ``suit`` / ``color``（缺省 ``None`` ⇒ 仍走上表；首个
+消费者 = 界【渐营】②「此牌花色视为与上一张牌花色相同」）。它是**构造器参数**，不是第六种
+原语——五种原语（钩子 / 接缝 / 修饰器 / 流水线步骤 / 提供者）都不产生"牌面"这个量。
+
 id 由**来源实体牌 id** 确定性地派生（同种子逐字节可复现）：同一目标牌名 + 同一组来源
 恒得同一个 id、**不同来源不同 id**（来源集合的枚举序不影响，构造时先排序）。票 03 把
 命名空间从"最多两张来源"泛化到 :data:`MAX_VIRTUAL_SOURCES` 张：每个**目标牌名**一段
@@ -28,7 +33,7 @@ from collections.abc import Callable, Sequence
 from enum import IntEnum
 from itertools import combinations
 
-from sgs.data import Color
+from sgs.data import Color, color_of_suit
 from sgs.effects import (
     CandidateScope,
     ModifierContext,
@@ -472,7 +477,12 @@ def _common_color(state: GameState, sources: tuple[int, ...]) -> Color | None:
 
 
 def transformed_card(
-    state: GameState, sources: tuple[int, ...], target_type_id: str
+    state: GameState,
+    sources: tuple[int, ...],
+    target_type_id: str,
+    *,
+    suit: str | None = None,
+    color: Color | None = None,
 ) -> CardRef:
     """**共享构造器**：把 ``sources`` 这几张实体牌转化成 ``target_type_id`` 牌名的牌。
 
@@ -483,6 +493,19 @@ def transformed_card(
     - 属性一律不继承（ADR-003：属性由效果决定，未声明即普通伤害）；
     - ``virtual_sources`` 记来源实体牌 id（**排序后**，故枚举序不影响 id）；
     - 负 id 判据不变（:attr:`CardRef.is_virtual`）。
+
+    ``suit`` / ``color``（W6 票 06 的加法）是**效果侧指定牌面**的唯一口子，缺省 ``None``
+    = 上面的派生（逐字节不变）。规则 §16.3 把"牌面从哪来"钉成唯一答案（继承原牌 /
+    多源恒无 / 纯虚拟恒无），故它是**显式偏离默认**的例外，只给牌面原文改写花色 / 颜色的
+    技能用（首个消费者 = 界【渐营】②「此牌花色视为与上一张牌花色相同」）：
+
+    - 只给 ``suit`` ⇒ 颜色由它经 :func:`~sgs.data.color_of_suit` 派生（花色 → 颜色的
+      唯一真源，不另抄映射），**点数仍继承来源牌**（用户实例：红桃 2 ⇒ 梅花 2，不是梅花 A）；
+    - 只给 ``color`` ⇒ 花色仍走上面的派生（多源产物本来无色，效果可指定颜色）；
+    - 两个都给 ⇒ 各自以参数为准。
+
+    **牌面覆盖不进 id**：:func:`virtual_card_id` 只读（命名空间, 来源集合, 牌堆张数）——
+    牌面是牌面事实、id 是机器键，同一组来源的同一张转化牌不会因效果改写而分裂成两张。
 
     ``sources`` 为空或超过**该牌名所在段**的来源上界（108 张档的共享段 ⇒ 7、
     ``DISMANTLEMENT`` 段 ⇒ 6；160 张档 ⇒ 6，见 :func:`kind_source_ceiling`）时抛
@@ -496,13 +519,20 @@ def transformed_card(
     ids = tuple(sorted(sources))
     first = state.card(ids[0])
     single = len(ids) == 1
+    if suit is None:
+        face_suit = first.suit if single else None
+        default_color = first.color if single else _common_color(state, ids)
+        face_color = default_color if color is None else color
+    else:
+        face_suit = suit
+        face_color = color_of_suit(suit) if color is None else color
     return CardRef(
         card_id=virtual_card_id(kind=kind, sources=ids, card_count=len(state.cards)),
         type=target_type_id,
         name=_card_name(state, target_type_id),
-        suit=first.suit if single else None,
+        suit=face_suit,
         rank=first.rank if single else None,
-        color=first.color if single else _common_color(state, ids),
+        color=face_color,
         virtual_sources=ids,
     )
 

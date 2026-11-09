@@ -46,12 +46,15 @@ from sgs.effects import (
     Randomness,
     WINE_COUNT_KEY,
     WINE_DAMAGE_BONUS,
+    apply_armor,
     apply_hp,
     behavior_for,
+    cap_of,
     delayed_settle_target,
     designation_actions_for,
     discard_count,
     draw_from_deck,
+    is_legal_option_set,
     is_own_play_phase,
     is_slash,
     legal_actions_for,
@@ -76,9 +79,11 @@ from sgs.skills import (
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
+    STATE_CHANGE_KEY,
     ActivationCandidate,
     MoveEvent,
     SeamKind,
+    StateChange,
     advance_provider,
     blocked_true_names,
     card_preactivations,
@@ -115,6 +120,7 @@ from sgs.state import (
     ArrangeCards,
     ArrangeContext,
     ArrangeQuery,
+    ArmorChangeDelta,
     CardRef,
     Distribute,
     DistributeContext,
@@ -376,6 +382,26 @@ class _PendingMove(NamedTuple):
     key: tuple
     resume_frame: Frame
     carrying: Frame | None
+
+
+@dataclass(slots=True)
+class _PendingStateEvent:
+    """排队等派发的一次状态位事件（chenqun-guyong 票 03；见 ``Engine._state_pending``）。
+
+    排队时只有"哪一次变化"（``timing`` + 写入口那条 delta + 承载帧的 ``source``）；**帧与
+    时机记录都等到第一次派发时**才建/落（:meth:`Engine._flush_pending_state`）：记录与钩子
+    因此在记录流里相邻，也不会出现"记了时机、钩子却因为局终没跑"的半截事实。
+
+    ``frame`` 是不压栈的临时帧（``frame_id = 0``，与 :meth:`Engine._dispatch_phase_body` 造的
+    帧同形），帧私有里带着本次事件的载荷（:data:`~sgs.skills.STATE_CHANGE_KEY`）与
+    ``targets = (座位,)``。挂起续跑必须复用**这一条**帧——询问缓存（``ask_answers``）与
+    派发游标都住在它上面。
+    """
+
+    timing: Timing
+    change: StateChange
+    source: int | None
+    frame: Frame | None = None
 
 
 class _Suspend:
@@ -781,6 +807,17 @@ class Engine:
         名单在传导开始时**一次锁定**（``seats`` 元组），此后中途新横置的角色不会进来；
         轮到时已重置 / 已阵亡的座位在派发前跳过。它是引擎规则处理，不是 ``Timing`` /
         技能钩子，故不进记录流：回放重跑引擎时会按同一份状态重建。
+        """
+        self._state_pending: list[_PendingStateEvent] = []
+        """**排队等派发**的状态位事件（chenqun-guyong 票 03：``STATE_FLIPPED`` / ``STATE_CHAINED``）。
+
+        :meth:`set_flipped` / :meth:`set_chained` 是**别人也在用**的共享写入口（9 个调用点：
+        据守、定品、涅槃、铁索、属性伤害的重置、回合环的"回合开始前翻回"……），事件因此
+        **不在写入口的调用栈里派发**：写入口只排队（惰性守卫在本容器的追加处），由
+        :meth:`_flush_pending_state` 在**下一条** :meth:`_step` 的开头用一条**不压栈**的临时帧
+        派发（与 :meth:`_dispatch_phase_body` 同形）。于是钩子提问 / 续跑**不需要任何调用点**
+        透传 ``"stay"``——那正是 ``MOVE_AFTER`` 那种内联时机做不到的（它要专门的续跑栈）。
+        队列是 **FIFO**：同一步里的两次变化按发生的先后各派发一次（读法一：值变了 = 一次事件）。
         """
         self._turn_data: dict[str, Any] = {}
         self._round_start_pending: bool = True
@@ -2789,6 +2826,7 @@ class Engine:
         max_selected: int | None = None,
         option_texts: Mapping[str, str] | None = None,
         optional: bool = False,
+        enumerate_candidates: bool = True,
     ) -> Any:
         """发一次 ``SELECT_OPTIONS`` 询问（jie-feng-batch2 票 01a）：**多选**选项闭集。
 
@@ -2799,6 +2837,13 @@ class Engine:
 
         ``disabled`` 的语义与单选面一致：留在 ``options`` 里（界面画置灰行），**不进候选**
         —— 引擎侧因此不可能收到含置灰项的组合（fail-closed 在候选枚举那一处收口）。
+
+        ``enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21；先例 =
+        :meth:`ask_arrange` 的同名档）：子集数随选项数组合爆炸时（8 人局、上限 4 的座位多选
+        = 162 条），候选只留一条**骨架兜底**，答案由界面 / 参与者组装、引擎在
+        :meth:`submit` 收答案时按 :func:`~sgs.effects.is_legal_option_set` 校验形状。
+        与 ``split`` / ``count`` 同一姿态：**不进询问 / 记录流**（询问上只落一个
+        ``exclude=True`` 的 ``structural`` 标志）。
 
         答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（同 :meth:`ask_option`），重入不重发。
         """
@@ -2829,6 +2874,7 @@ class Engine:
                     min_selected=min_selected,
                     max_selected=max_selected,
                     option_texts=texts,
+                    enumerate_candidates=enumerate_candidates,
                 ),
             ),
             identity=self._ask_identity(QueryKind.SELECT_OPTIONS, actor, frame),
@@ -3716,6 +3762,24 @@ class Engine:
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
         return delta
 
+    def apply_armor_change(
+        self, frame: Frame, seat: int, value: int
+    ) -> ArmorChangeDelta:
+        """调 ``apply_armor`` 这个叶子原语并把返回的变化事件写进记录流（W7）。
+
+        与 :meth:`apply_hp_change` 同姿态：``value`` 由调用帧算好（获得护甲 =
+        ``min(armor + amount, ARMOR_CAP)``；伤害吸收 = ``armor - min(armor, amount)``），
+        本方法只负责写与记录。伤害吸收那一条由 :func:`~sgs.engine.steps.life_decrease_on`
+        在**同一条** ``LIFE_DECREASE`` 帧里发出，且排在 ``hp_change`` **之前**。
+
+        ``frame_id`` 即承载它的帧（伤害吸收 = LIFE_DECREASE 帧；技能获得护甲 = 技能自己的
+        帧），故"这次护甲变化属于谁"可由帧关联推出——回放逐条重建即可。
+        """
+        ctx = self._effect_context(frame, actor=seat)
+        delta = apply_armor(self.state, ctx, seat, value)
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        return delta
+
     def reduce_hp_max(self, frame: Frame, seat: int, amount: int = 1) -> HpMaxChangeDelta:
         """**减体力上限**（M6 票 06 的唯一写入口；觉醒技"减 1 点体力上限"）。
 
@@ -3970,16 +4034,24 @@ class Engine:
         故"重置在伤害事件内、先于 `DAMAGE_AFTER_TAKE`"由**调用点**决定，这里只管写状态 +
         记 delta：``frame`` 是承载帧（重置 = LIFE_DECREASE 帧，记录流里因此与那条
         ``hp_change`` 同帧），帧外写状态时为 ``None``（记录坐标 ``frame_id = 0``）。
+
+        **值真的变了 ⇒ 一次 ``STATE_CHAINED`` 事件**（chenqun-guyong 票 03；用户 2026-11-09
+        签 Q-W2 = 读法一）：幂等的同值写入在**上面那行就返回**，不落 delta、也不是事件；
+        变化则把事件排进 :attr:`_state_pending`（惰性：没有注册实例时连记录都不落），由
+        :meth:`_flush_pending_state` 在下一条 ``_step`` 派发。一趟【铁索连环】横置两个座位
+        = **两次** ``set_chained`` = 两个事件（一个座位一次）。
         """
         player = self.state.player(seat)
         if player.chained == chained:
             return False
         player.chained = chained
+        change = ChainedChangeDelta(seat=seat, chained=chained)
         self.emit_delta(
-            ChainedChangeDelta(seat=seat, chained=chained),
+            change,
             frame_id=(frame.frame_id if frame is not None else 0),
             depth=self.stack.depth,
         )
+        self._queue_state_event(frame, Timing.STATE_CHAINED, change)
         return True
 
     def set_flipped(self, frame: Frame | None, seat: int, flipped: bool) -> bool:
@@ -3990,17 +4062,101 @@ class Engine:
         角色翻回正面（规则集 13.2 的固定流程，帧外 ⇒ ``frame=None``，记录坐标 0）。
 
         与 :meth:`set_chained` 同形：状态 + 一条 delta，"回放可重建"不靠调用点自觉。
+
+        **值真的变了 ⇒ 一次 ``STATE_FLIPPED`` 事件**（chenqun-guyong 票 03 / Q-W2 读法一）：
+        幂等写不是事件；而 ② 那种**规则固定流程**的翻回正面**算**一次事件（读法二被否掉）。
+        事件与 :meth:`set_chained` 走同一条惰性队列。
         """
         player = self.state.player(seat)
         if player.flipped == flipped:
             return False
         player.flipped = flipped
+        change = FlippedChangeDelta(seat=seat, flipped=flipped)
         self.emit_delta(
-            FlippedChangeDelta(seat=seat, flipped=flipped),
+            change,
             frame_id=(frame.frame_id if frame is not None else 0),
             depth=self.stack.depth,
         )
+        self._queue_state_event(frame, Timing.STATE_FLIPPED, change)
         return True
+
+    # -- 状态位写入口的事件派发（chenqun-guyong 票 03：STATE_FLIPPED / STATE_CHAINED）----
+
+    def _queue_state_event(
+        self, frame: Frame | None, timing: Timing, change: StateChange
+    ) -> None:
+        """把一次**真的变了**的状态位写入排进 :attr:`_state_pending`（懒：没有载体就零动作）。
+
+        惰性守卫 = :func:`~sgs.skills.timing_hooks_present`（与 ``ROUND_START`` / 帧外阶段体
+        同一条判据）：当前局面没有注册在 ``timing`` 上的钩子 ⇒ **一条记录都不落**，标准
+        47 条金录像因此逐字节不变（E1 的判据 = ``tools/check_goldens.sh``）。有载体时才把
+        这次事件排进队列，记录与钩子都由 :meth:`_flush_pending_state` 在下一条 :meth:`_step`
+        的开头一起落。
+
+        **为什么排队而不内联派发**：写入口是别人也在用的共享原语（据守 / 定品 / 涅槃 /
+        铁索 / 属性伤害重置 / 回合环……共 11 个调用点），内联派发会让每个调用点都要透传
+        ``"stay"``，且 toggle 类调用点（``not 当前值``）在挂起重入时会**再翻一次**。
+        排队把"挂起 / 续跑"整个搬进 :meth:`_step`，调用点一字不改。
+
+        ``source`` 取承载帧的 ``source``（"这次是谁引起的"），``frame=None`` ⇒ ``None``
+        （回合环的翻回正面没有操使者）。载荷 = 写入口那条 delta 本身
+        （:data:`~sgs.skills.STATE_CHANGE_KEY`），钩子从中读座位与**新值**。时机记录不在这里
+        落——它与钩子一起由 :meth:`_flush_pending_state` 补，两者因此在记录流里相邻。
+        """
+        if not timing_hooks_present(self.state, timing):
+            return
+        source = frame.data.get("source") if frame is not None else None
+        self._state_pending.append(
+            _PendingStateEvent(
+                timing=timing,
+                change=change,
+                source=None if source is None else int(source),
+            )
+        )
+
+    def _flush_pending_state(self) -> None:
+        """把排队的状态位事件派发完（:meth:`set_chained` / :meth:`set_flipped` 的派发落点）。
+
+        在 :meth:`_step` 开头、``_flush_pending_move`` 之后调用：上一步已经跑完、下一次询问
+        还没发。**第一次**尝试时补一条时机记录 + 建那条不压栈的临时帧；返回 ``"stay"``
+        （钩子发问）⇒ 本项留在**队首**、帧上的询问缓存与派发游标都还在，下一条 :meth:`_step`
+        从这里接着派发。队列是 FIFO，故同一步里的两次变化各派发一次、按发生先后。
+
+        **钩子压了子帧就停下**：与 ``"stay"`` 同一条契约（"帧真正跑完"才轮到效果的下一段），
+        下一条事件排在那条子帧结算完之后，而不是插进它的中途。
+        """
+        while self._state_pending:
+            pending = self._state_pending[0]
+            if pending.frame is None:
+                seat = pending.change.seat
+                self.emit_timing(
+                    pending.timing,
+                    actor=seat,
+                    source=pending.source,
+                    targets=(seat,),
+                )
+                pending.frame = Frame(
+                    kind=FrameKind.RESOLVE,
+                    data={
+                        "source": pending.source,
+                        "targets": (seat,),
+                        "card": None,
+                        STATE_CHANGE_KEY: pending.change,
+                        MATCH_ACTOR_KEY: seat,
+                    },
+                    frame_id=0,
+                )
+            depth = self.stack.depth
+            control = dispatch_timing(self, pending.frame, pending.timing)
+            if control == "stay":
+                return
+            self._state_pending.pop(0)
+            if self.pending is not None:
+                # 钩子发问了却没回 "stay"（契约上不许，与 _flush_pending_move 同一条兜底）：
+                # 停在询问上，绝不在待答状态里继续派发下一条事件。
+                return
+            if self.stack.depth > depth:
+                return
 
     # -- 废除槽位（lei-batch 票 02 立、lukang-mobile 票 03 改成**逐槽**；用户 2026-11-07）--
 
@@ -4896,10 +5052,31 @@ class Engine:
         if (
             action not in pending.legal_actions
             and getattr(pending, "structural", False)
-            and isinstance(action, ArrangeCards)
+            and isinstance(action, (ArrangeCards, SelectOptions))
         ):
-            # **不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，界面自己构造
-            # 两行交换的答案；形状校验在 `ask_arrange` 收答案时做，这里只放行。
+            # **不枚举档**（huo-shenzhugeliang 票 02 的 ARRANGE；yijiang-2014-round2 票 21
+            # 把同一档推广到 SELECT_OPTIONS）：候选只有一条兜底（恒等排列 / 最小骨架），
+            # 答案由界面 / 参与者自己构造。ARRANGE 的形状校验在 `ask_arrange` 收答案时做；
+            # 多选的形状**只有一份判据**（`is_legal_option_set`，与候选生成 / 骨架 / AI 构造
+            # / 回放放行同一份），这里拿它拒掉区间外 / 池外 / 置灰 / 重复的集合。
+            if isinstance(action, SelectOptions) and not is_legal_option_set(
+                pending, action.choices
+            ):
+                # 上界读 `cap_of`（= 谓词的一半），**不是** `max_selected`：后者之上还有
+                # "可选项只有这么几个"这一层，印出来玩家永远选不到（票 21 的受理侧文案）。
+                cap = cap_of(pending)
+                self._reject(action, reason="不枚举档：答复集合不满足形状谓词")
+                raise IllegalActionError(
+                    reason_code="IllegalAction",
+                    message=(
+                        "多选答复的形状不合法：每项须在本次选项池内、不重复、不含置灰项，"
+                        f"且选了 {len(action.choices)} 项须落在 "
+                        f"[{pending.min_selected}, {cap}] 内"
+                    ),
+                    expected="形状合法的 SelectOptions（池内 / 无重复 / 无置灰 / 长度在区间内）",
+                    got=action.kind,
+                    answers_seq=action.answers_seq,
+                )
             self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
             self._answer_to(action)
             return
@@ -5314,6 +5491,10 @@ class Engine:
                 max_selected=payload.max_selected,
                 option_texts=dict(payload.option_texts),
                 revealed=revealed,
+                # 不枚举档（yijiang-2014-round2 票 21）：与 ARRANGE 同一处映射——
+                # `enumerate_candidates=False` ⇒ 询问上落 `structural=True`（`exclude`，
+                # 不进记录流），`submit` 据此开"客户端自行组装、引擎校验形状"那道闸。
+                structural=not payload.enumerate_candidates,
             )
         if kind is QueryKind.DISTRIBUTE:
             if not isinstance(payload, DistributeContext):
@@ -5560,6 +5741,10 @@ class Engine:
             # 这类会问目标的失去牌后技能）：这一问就是本次 ``_step`` 的产物，必须停在这里。
             # 否则结算栈会继续走、再发一条无关询问把它覆盖，那条应答随后被前一个问句
             # 错配（M6 票 12 的混合局暴露；回归 = test_hero_card_zone 的同名用例）。
+            return
+        self._flush_pending_state()
+        if self.pending is not None:
+            # 状态位事件的钩子发问了（chenqun-guyong 票 03）：同上，停在询问上。
             return
         if self.stack and (self._started or self._l0_in_progress):
             # **结算栈优先于 L0 派发的重入**（wuming 票 01）：L0 的钩子（【天成】）也会压子帧
@@ -6133,7 +6318,20 @@ class Engine:
         """
         return self._dispatch_phase_body(Timing.PHASE_DRAW_END, "phase_draw_end")
 
-    def _phase_play_start(self) -> None:
+    def _phase_play_start(self) -> Control:
+        """**出牌阶段开始时**：复位 + 帧外时机派发（yijiang-2014-round2 票 20 起可提问）。
+
+        与 :meth:`_phase_play_end` / :meth:`_phase_prepare` 逐字同一姿态：``_dispatch_phase_body``
+        惰性建帧（没有注册在该时机上的实例时**一个帧都不建** ⇒ 记录流与既有实现逐字节
+        相同：它发的 ``emit_timing`` 与本步改造前那一行逐字段同值）。
+
+        **为什么本票必须接上派发**：用户 2026-11-09 补的解锁语义是「**新的出牌阶段开始**
+        也要解锁」（【激将】的机械锁），观测点就是 ``PHASE_PLAY_START``——它此前只记时机、
+        从不派发钩子（既没有载体，也没有消费者）。额外回合同样经过本步，故它一并覆盖。
+
+        复位那一段**保持原样**（每次进入本步都跑）：它此前就是无条件的，既有技能把它当
+        "复位点"直接调用（`test_jianying_resets_the_last_card_at_the_play_phase_start`）。
+        """
         self.state.phase = Phase.PLAY
         # 出牌阶段限一次的技能计数在本步复位：与"座位自己的 TURN_START 清空
         # card_use_counts"同一重置口径（票 04 §要做什么 2 / 票 07 §6）。
@@ -6154,8 +6352,10 @@ class Engine:
             # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
             # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
             self._skip_to(self._phase_discard_start)
-            return
-        self.emit_timing(Timing.PHASE_PLAY_START, actor=self.state.turn_seat)
+            return None
+        # ``actor=_TURN_SEAT``（缺省）⇒ 帧 ``source`` 与时机记录的 ``actor`` 都是当前回合
+        # 角色——解锁钩子的"这是**我的**出牌阶段"因此读同一个值。
+        return self._dispatch_phase_body(Timing.PHASE_PLAY_START, "phase_play_start")
 
     def _skip_to(self, step: Callable[[], Any]) -> None:
         """把回合环的 pc 拨到 ``step``：本步返回后 ``_step_turn`` 的 +1 正好落到它。"""

@@ -104,14 +104,44 @@ function maybeAutoSubmitArrange(view) {
  *
  *  找不到同样的集合时返回 `null`（界面不发明动作；例如勾选数低于 `min_selected`），
  *  右端「提交」因此保持灰着——与计数式分配同一条"只提交候选里有的那一条"纪律。
+ *  **不枚举档**（`pending.structural`，yijiang-2014-round2 票 21）是例外：那一档候选里
+ *  只有骨架，集合由本地选择拼出，服务端按形状谓词校验（见 :func:`selectOptionsAction`）。
  */
 function multiSelectAction(pending) {
-  const wanted = multiSelectChoices(pending);
+  return selectOptionsAction(pending, multiSelectChoices(pending));
+}
+
+/** 本地选中集合 → 要上行的 `SelectOptions`（`multiSelectAction` / `seatMultiAction` 的唯一实现）。
+ *
+ *  两个多选面只差"集合从哪来"：勾选面读 `state.multiSelect`，座位面读
+ *  `state.selectedTargets`（`pending.js:seatMultiChoices`）。"只在候选里查、不自己拼 Action"
+ *  这一条对两面同时成立，故拼装只写这一处。
+ *
+ *  **不枚举档**（`pending.structural`，yijiang-2014-round2 票 21）是这条纪律的**唯一**
+ *  让开处（与 `ARRANGE` 的不枚举档同姿态）：那一档服务端只下发一条**骨架候选**（子集数
+ *  组合爆炸，8 人局 × 上限 4 是 162 条），答案由界面按本地选择拼出来——形状（池内 /
+ *  无重复 / 无置灰 / 长度在 `[min, max]` 内）由服务端 `is_legal_option_set` 裁决，界面
+ *  不另写一份规则；`choices` 已按 `pending.options` 原序（常规结算顺序）。
+ */
+function selectOptionsAction(pending, wanted) {
   const candidates = (pending && pending.legal_actions) || [];
-  return candidates.find(
+  const found = candidates.find(
     (candidate) => candidate.kind === "SelectOptions"
       && JSON.stringify(candidate.choices || []) === JSON.stringify(wanted),
-  ) || null;
+  );
+  if (found) return found;
+  if (!pending || pending.structural !== true) return null;
+  return { kind: "SelectOptions", choices: wanted.slice(), answers_seq: pending.seq };
+}
+
+/** 座位多选面（W1）的最终答案动作：本地选中的座位 → 候选里那条 `SelectOptions`。
+ *
+ *  与 :func:`multiSelectAction` 同形（同一个查找实现）：数量不在 `[min, max]` 内时
+ *  自然查不到 ⇒ 右端「提交」保持灰着。一次提交送**全部**选中座位——不是"选一个提交一次"
+ *  的循环面（用户 2026-11-09 对【秉壹】的裁定 Q-W1）。
+ */
+function seatMultiAction(pending) {
+  return selectOptionsAction(pending, seatMultiChoices(pending));
 }
 
 /** 票 05：计数式分配的最终答案动作——本地计数 → 候选里那条 `Distribute`。
@@ -296,7 +326,16 @@ function buildAction() {
   // 计数式分配（票 05）：按本地计数拼出候选里那条 `Distribute`（不手拼服务器没发的东西）。
   if (pending.kind === "DISTRIBUTE") return distributionAction(pending);
   // 多选选项（jie-feng-batch2 票 01a）：按本地勾选拼出候选里那条 `SelectOptions`。
-  if (pending.kind === "SELECT_OPTIONS") return multiSelectAction(pending);
+  // 座位多选面（W1）是同一个动作、另一份本地集合（`state.selectedTargets`）；右端「放弃」
+  // 送出的仍是候选里那条 `Pass`（「至多」可放弃的步，放弃 ≠ 空集合）。
+  if (pending.kind === "SELECT_OPTIONS") {
+    if (!isSeatMultiStep(pending)) return multiSelectAction(pending);
+    const chosen = state.selectedOption === null
+      ? null
+      : (pending.legal_actions || [])[state.selectedOption];
+    if (chosen && chosen.kind === RIGHT_ACTION_KINDS.pass) return chosen;
+    return seatMultiAction(pending);
+  }
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
   //
@@ -324,6 +363,16 @@ function buildAction() {
   // 否则界面显示"将提交：放弃"、而 `buildAction()` 在手选模式下因为没有焦点而返回 null。
   const only = directAction(pending);
   if (only) return withPicks(only);
+  // 「是否发动」的**默认候选**（yijiang-2014-round2 票 15）：服务端只对**显式声明**的技能
+  // 下发 `pending.default_choice === "activate"`（界【渐营】① 是唯一 opt-in）。玩家没选任何
+  // 候选时，「提交」就是同意发动——返回候选里那条 `ActivateSkill`，不手拼 Action。
+  // 其余「是否发动」（苦肉 / 洛神 / …）**没有这个键** ⇒ 不命中，行为逐字节不变。
+  // 只认**唯一**那条 `ActivateSkill`：多条候选是"选一条发动"的面（`renderActivationFace`），
+  // 界面不替玩家挑；那种面本来也不接「提交」。
+  if (state.selectedOption === null && pending.default_choice === "activate") {
+    const activates = actions.filter((action) => action.kind === "ActivateSkill");
+    if (activates.length === 1) return withPicks(activates[0]);
+  }
   // **显式选中的候选优先于手选**：技能按钮（`ActivateSkill`）住在出牌阶段的候选里，
   // 点了它就是"我就要发这个技能"——它没有焦点也没有目标，走手选分支会返回 null。
   if (state.selectedOption !== null) {
@@ -440,17 +489,23 @@ async function submitAction(restoreSelection = null) {
   const cardEntry = Boolean(state.preactivation && state.preactivation.cardEntry);
   const composite = state.preactivation !== null
     && (action.kind === "ActivateSkill" || (cardEntry && action.kind === "UseCard"));
-  // 排列的**不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，答案由界面的
-  // 两行布局拼出来 —— 服务端在收答案时做结构校验（order 是排列、split 与声明一致）。
-  const structuralArrange = action.kind === "ArrangeCards"
-    && Boolean(pending.arrange && pending.arrange.enumerate === false);
+  // **不枚举档**的两处让开（`ARRANGE` = huo-shenzhugeliang 票 02，`SELECT_OPTIONS` =
+  // yijiang-2014-round2 票 21）：候选只有一条兜底（恒等排列 / 最小骨架），答案由界面按
+  // 本地布局 / 本地选择拼出来 —— 服务端在收答案时做形状校验（排列是排列、切分与声明一致；
+  // 多选集合池内 / 无重复 / 无置灰 / 长度在区间内）。
+  const structuralAnswer = !composite && (
+    (action.kind === "ArrangeCards"
+      && Boolean(pending.arrange && pending.arrange.enumerate === false))
+    || (action.kind === "SelectOptions" && pending.structural === true)
+  );
   if (
     !composite
-    && !structuralArrange
+    && !structuralAnswer
     && !pending.legal_actions.some((candidate) => JSON.stringify(candidate) === JSON.stringify(action))
   ) {
     // 最后一道自检：造出来的必须**逐字段**是候选里的那一条（否则引擎会拒，且错在界面）。
-    // 预发动是**唯一**让开的地方：复合动作不要求在候选里，由服务端校验器验（W4-1）。
+    // 预发动 / 不枚举档是**仅有的**让开处：复合动作由服务端校验器验（W4-1），不枚举档的
+    // 答案由服务端的形状谓词验。
     $("t-choice").textContent = "这个组合不在合法候选里，请换一个选择。";
     return;
   }

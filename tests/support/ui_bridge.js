@@ -24,6 +24,9 @@
     "renderKind", "resetSelection", "isHandPick", "sameCombo", "HAND_PICK_KINDS", "needsPicker",
     // 本轮报障：公开处理区（五谷亮牌）+ 询问上下文 + 遗计"交给谁"的座位点选
     "selectOptionSeat",
+    // W1：座位多选面——判据（`SELECT_OPTIONS` ∧ `option_seats` 非空）+ 点座位切换选中。
+    // 探针用它点两个场上武将、断"一次提交送全部选中座位"；烟测用它断置灰 / 上限 / 重绘不丢。
+    "isSeatMultiStep", "toggleSeatMultiPick",
     // 报障 2 / 4：转化技来源索引（【龙胆】）与转化模式切换（W4-2 的宽松保留）
     "cardAliases", "toggleConvertSkill", "providePickStays", "prunePreativationAnswers",
     "seatChoices",

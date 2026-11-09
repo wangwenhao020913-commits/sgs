@@ -631,6 +631,12 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     （``satisfied=False``）⇒ 回到真牌窗口（该提供者已被 ``providers_used`` 过滤），
     真牌也没有则走 auto-b。方天画戟式的**额外目标不做**：提供者的产物没有目标步，
     借刀窗口对它的语义就是"只打 Bn"（票 03 的裁定）。
+
+    **求助型提供者（票 22）**：持刀者是主公时，候选里还有【激将】——它的产物不是虚拟牌，
+    而是**盟友打出的那张实体【杀】**。本窗口要的是"**持刀者使用**"这一件事，故给求助窗口
+    置 :data:`~sgs.skills.lord_request.LORD_REQUEST_DELIVER_KEY`（票 20 的交付模式）：求助
+    窗口把那张牌 ``provider_deliver`` 交回来，由上面的 ``_use_at_bn`` 开使用链（"视为由你
+    使用"），**不**替盟友 ``play_card``。键是帧私有的、属这扇窗口的整段结算。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
@@ -649,16 +655,27 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             "借刀的附带指定恰好一个 Bn（W5-02b）：入口只经清单，缺失即 fail-closed"
         )
     use_targets = (int(designations[0]),)
+    # 本窗口**消费**产物（`_use_at_bn` 自己 `start_use`）⇒ 求助窗口走交付模式。
+    # 惰性 import：`sgs.skills` 反向依赖本模块，模块级 import 会成环（与 `actions._peach`
+    # 那处惰性 import 同一理由）；键从**子包出口**取（跨子包的深层导入被
+    # `tests/test_scaffold.py` 判红）。
+    from sgs.skills import LORD_REQUEST_DELIVER_KEY, carry_payer
+
+    frame.data[LORD_REQUEST_DELIVER_KEY] = True
 
     def _use_at_bn(card: Any) -> None:
         """a 支成立：持刀者使用一张【杀】打向 Bn（真牌与提供者产物同一份交付）。"""
         frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
-        host.start_use(
+        use = host.start_use(
             card,
             source=holder,
             targets=use_targets,
             use_timing=Timing.RESOLVE_AFTER_EFFECT,
         )
+        # 票 23：产物若是【激将】交付的（持刀者是主公、盟友代付），把**代付者**搬到这次
+        # 使用帧上——② 在 USE_ON_USE 里拿到的是使用帧。别的提供者（【蛊惑】）没有代付者
+        # ⇒ 零动作，使用帧与旧路径逐键相同。
+        carry_payer(frame, use)
 
     control, satisfied, produced = host.advance_provider(
         frame, Timing.RESOLVE_AFTER_EFFECT

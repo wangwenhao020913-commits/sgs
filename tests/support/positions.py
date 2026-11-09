@@ -33,6 +33,7 @@ __all__ = [
     "RecordingPlayer",
     "SeatSpec",
     "SequenceHalt",
+    "STATE_SCENE_SKILL",
     "build_state",
     "cards_of_type",
     "deck_excluding",
@@ -45,6 +46,7 @@ __all__ = [
     "play_standard",
     "run_turns",
     "run_until",
+    "state_engine",
     "turn_loop_engine",
 ]
 
@@ -519,3 +521,72 @@ def pindian_engine(seed: int = 7):
             continue
         engine.submit(players[engine.pending.actor].respond(engine.pending))
     raise AssertionError("场景没跑出拼点：RANK_COMPARE_RESULT_AFTER 必须真的落进记录流")
+
+
+STATE_SCENE_SKILL = "hero.fake.state_flag"
+"""场景 12 用的合成技能 id（只活在 ``CATALOG`` 的**临时**注入里，随场景结束恢复）。"""
+
+
+def state_engine(seed: int = 7):
+    """场景 12（chenqun-guyong 票 03 / W2）：状态位写入口的**惰性派发**实测来源。
+
+    ``STATE_FLIPPED`` / ``STATE_CHAINED`` 解封的机械判据是"写入口真的会派发"，而派发是
+    **惰性**的（当前局面没有注册实例时一条记录都不落）⇒ 这个来源必须临时注入一条同时挂在
+    两个时机上的合成技能。不做 ``monkeypatch``：本函数要被
+    ``tests/support/timing_coverage.py`` 的 ``lru_cache`` 直接调用，故用 ``try/finally``
+    临时替换 ``CATALOG``（替换即让 :func:`~sgs.skills.resolve_instances` 的内容键缓存整批
+    作废，恢复时再作废一次）。
+
+    脚本：座位 0 拿到合成技能，然后依次写"横置座位 0 / 横置座位 1 / 翻面座位 0"——三个
+    **真的变了**的状态位写入口各派发一次（两个座位各一次 = 读法一的粒度）。记录流因此含
+    ``STATE_CHAINED`` ×2 与 ``STATE_FLIPPED`` ×1，两者都是
+    :data:`~sgs.timing.DISPATCH_WHITELIST` 里那两个节点的实测来源。
+    """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef, state_change
+    from sgs.skills import catalog as catalog_module
+
+    def handler(host, frame):
+        state_change(frame)  # 读一次载荷：被解封的是"钩子真的能被叫醒"，不只是记录
+        return None
+
+    definition = SkillDef(
+        skill_id=STATE_SCENE_SKILL,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(
+            Hook(Timing.STATE_FLIPPED, handler=handler),
+            Hook(Timing.STATE_CHAINED, handler=handler),
+        ),
+    )
+    saved = catalog_module.CATALOG
+    catalog_module.CATALOG = MappingProxyType({**saved, STATE_SCENE_SKILL: definition})
+    try:
+        state = build_state(
+            pack=load_content_pack(deck_profile=M1_DECK_PROFILE),
+            seats=[SeatSpec(), SeatSpec()],
+            deck=tuple(range(10)),
+            turn_seat=0,
+            phase=Phase.PREPARE,
+        )
+        engine = Engine.from_state(state, seed=seed)
+        engine.grant_skill(0, STATE_SCENE_SKILL)
+        engine.set_chained(None, 0, True)
+        engine.set_chained(None, 1, True)
+        engine.set_flipped(None, 0, True)
+        for _ in range(50):
+            if all(
+                any(
+                    record.kind == "timing" and record.timing is timing
+                    for record in engine.records
+                )
+                for timing in (Timing.STATE_CHAINED, Timing.STATE_FLIPPED)
+            ):
+                break
+            assert engine.pending is None, "合成锁定技不问发动：场景不该有询问"
+            engine._step()
+    finally:
+        catalog_module.CATALOG = saved
+    return engine

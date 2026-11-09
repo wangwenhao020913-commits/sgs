@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 
 __all__ = [
+    "ARMOR_CAP",
     "CardRef",
     "CardTag",
     "FrameKind",
@@ -417,6 +418,19 @@ LIFE_DECREASE_DAMAGE_KEY = "life_decrease_from_damage"
 帧私有载荷不进记录流，故这条判据不改变任何金录像的字节。
 """
 
+ARMOR_CAP = 5
+"""**护甲值**的硬上限（yijiang-2014-round2 票 07 / W7；用户 2026-11-09 签 Q-A2）。
+
+护甲是**第二条体力轴**（与 ``hp`` / ``hp_max`` 并列，见 :class:`Player.armor`）：可叠加、
+超过上限**夹到 5**。它是**规则常数**而不是 per-player 字段（"封顶"不随武将数据变化），
+故住模块级常量：``Player`` 只存当前值，任何"获得护甲"的效果都把结果夹进 ``[0, ARMOR_CAP]``
+再交给 :func:`~sgs.effects.primitives.apply_armor`（原语对越界抛错，与 ``apply_hp`` 同姿态）。
+
+**不是** ``Timing``、也不是一条帧：护甲在**别人打你时**生效（``life_decrease_on`` 的扣减
+次序），没有"护甲时机"可挂。故它不进 ``IMPLEMENTED`` / ``ENUM_ONLY`` 四轴计数，
+``shapes.md`` §5 的「零载体」一档由此解封（见 ``docs/agents/skill-authoring/shapes.md``）。
+"""
+
 
 class Marker(_FrozenModel):
     """一个座位身上的**标记实例**（票 06；用户 Q6 裁定）。
@@ -457,6 +471,21 @@ class Player(BaseModel):
     seat: int
     hp: int
     hp_max: int
+    armor: int = 0
+    """**护甲值**：与体力并列的第二条体力轴（yijiang-2014-round2 票 07 / W7）。
+
+    用户 2026-11-09 签 Q-A1 = 一（独立第二血条）：受到伤害时**先扣护甲、不足再扣体力**
+    （次序落在唯一写点 :func:`sgs.engine.steps.life_decrease_on`，且**只对伤害帧**——
+    「失去体力」帧不吸收）；回复体力 / 任何「失去体力」/ 体力上限变化**都不碰护甲**；
+    护甲扣光**不濒死**（濒死只看 ``hp``）。可叠加，封顶 :data:`ARMOR_CAP`。
+
+    写入口唯一 = :meth:`Engine.apply_armor_change` → :func:`~sgs.effects.apply_armor`
+    （照 ``apply_hp`` 的姿态：调用帧先把值夹进 ``[0, ARMOR_CAP]``，原语对越界抛错）。
+    变化落一条 ``armor_change`` delta（与 ``hp_change`` 同帧、**排在它前面**）；它是公开
+    事实，但不进记录流里的询问视图（``PlayerPublic.armor`` 是 ``exclude``，与
+    ``chained`` / ``wine_active`` 同一条纪律 ⇒ 47 条金录像逐字节不变），网页载荷由
+    ``sgs_web.display.seat_display`` 补下。
+    """
     alive: bool = True
     death_time_skills_active: bool = False
     """死亡时技能窗口（票 10）：死者本人的技能在阵亡结算里**暂时**可解析。
@@ -642,6 +671,28 @@ class Player(BaseModel):
     :func:`~sgs.engine.steps.damage_finalize_amount` 调一次，**每个伤害事件 +1**，不是逐点）；
     作用域 = **本回合**（谁的回合都算）：回合末由 :meth:`Engine._clear_turn_effects` 把所有
     座位的这一位清零。**不发 delta**：没有 JSON 读者，回放按同一条伤害结算重建。
+    """
+    jijiang_locked: bool = False
+    """【激将】的**机械锁**：本座位主动发动过、且此后还没**使用或打出**【杀】（票 20）。
+
+    牌面（官网逐字）：「你可以令其他蜀势力角色选择是否打出一张【杀】（视为由你使用或
+    打出）」——不限次数。用户 2026-11-09 的防卡死裁定（逐字：「每次发动时立刻禁止再次
+    发动，直到你使用或打出一张杀为止」）把它收成一位按座位的布尔。
+
+    作用域**只**是「出牌阶段主动发动」这条新路（:data:`sgs.skills.lord_request.
+    JIJIANG_USE_FLOW`）：被动窗口（南蛮 / 决斗等需要**打出**【杀】的地方）既不查也不置
+    （用户逐字：「这个锁只防止出牌阶段内主动发动激将，如果是被动响应使用/打出杀则不影响」）；
+    【护驾】没有这一位（不能主动使用 / 打出【闪】⇒ 无卡死风险）。
+
+    写入/清除的唯一入口 = :mod:`sgs.skills.lord_request` 的两处：置点 = PLAY 发动**开始
+    问第一个盟友之前**；清点是三条 ``Hook``（``USE_ON_USE`` / ``PLAY_ON_PLAY``，条件 =
+    牌名是【杀】族 ∧ 来源是持有者；``PHASE_PLAY_START``，条件 = 持有者自己的新出牌阶段
+    开始）——条件门因此能被 ``tests/test_hero_catalog.py::_owner_probes`` 看见，而不是在
+    效果体里手清。
+
+    **不发 delta**：与 :attr:`damage_taken_this_turn` 同一条既有惯例——它是"这条技能还能
+    不能再点"的座位事实，没有 JSON 读者；回放按同一条 ``SKILL_ACTIVATION`` 动作 + 记录流里
+    的使用 / 打出事件重建，故 47 条金录像逐字节不变。
     """
     play_phase_last_card: CardRef | None = None
     """**本出牌阶段**自己**使用**的最后一张牌（jushou-lusu 票 01 的【渐营】判据；Q1 签）。

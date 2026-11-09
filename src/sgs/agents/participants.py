@@ -10,18 +10,41 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from sgs.effects import Randomness
-from sgs.state import Action, ActivateSkill, Query
+from sgs.effects import Randomness, is_legal_option_set
+from sgs.state import Action, ActivateSkill, ArrangeCards, Query, SelectOptions
 
 __all__ = [
     "Participant",
     "RandomPlayer",
     "TapeError",
     "TapePlayer",
+    "is_structural_answer",
     "is_structured_activation",
     "is_transform_use",
     "tape_from_journal",
 ]
+
+
+def is_structural_answer(query: Query, action: Action) -> bool:
+    """应答是不是**不枚举档**里客户端自行组装的动作（yijiang-2014-round2 票 21）。
+
+    不枚举档（询问上的 ``structural``）的候选只有一条兜底，答案由界面 / AI 自己构造：
+    ``SELECT_OPTIONS`` 的集合、``ARRANGE`` 的排列都不在 ``legal_actions`` 里。本谓词与引擎
+    :meth:`Engine.submit` 那道闸**同一条口径**（不枚举档 + 形状谓词），供回放执行器与
+    测试侧的"零非法应答"扫描放行：
+
+    - ``SELECT_OPTIONS`` ⇒ 交给 :func:`sgs.effects.is_legal_option_set`（池内 / 无重复 /
+      无置灰 / 长度在区间内）——**同一个**谓词，不另立判据；
+    - ``ARRANGE`` ⇒ 引擎在 ``ask_arrange`` 收答案时校验排列 / 切分，这里只认种类。
+
+    与 :func:`is_structured_activation` 同一姿态：它只回答"这道闸适不适用"，真正的合法性
+    仍由引擎裁决（被拒的提交仍然抛错）。
+    """
+    if not getattr(query, "structural", False):
+        return False
+    if isinstance(action, SelectOptions):
+        return is_legal_option_set(query, action.choices)
+    return isinstance(action, ArrangeCards)
 
 
 def is_structured_activation(query: Query, action: Action) -> bool:
@@ -143,6 +166,7 @@ class TapePlayer:
             and not is_structured_activation(query, action)
             and not is_transform_use(query, action)
             and not is_designation_use(query, action)
+            and not is_structural_answer(query, action)
         ):
             raise TapeError(f"行动序列分歧：{action.kind} 不在 {query.kind} 的候选集合内")
         self._index += 1

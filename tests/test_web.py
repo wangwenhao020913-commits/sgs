@@ -35,7 +35,7 @@ from sgs.data import (  # noqa: E402
     load_content_pack,
     validate_rule_config,
 )
-from sgs.data import enabled_hero_ids, hero_by_id  # noqa: E402
+from sgs.data import color_of_suit, enabled_hero_ids, hero_by_id  # noqa: E402
 from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT, RUNNING_SKILL_KEY, hero_card_zone_key  # noqa: E402
@@ -56,6 +56,8 @@ from sgs.state import (  # noqa: E402
     SelectCardsQuery,
     SelectionSpec,
     SelectOptionQuery,
+    SelectOptionsContext,
+    SelectOptionsQuery,
     Slot,
     Step,
     StepPool,
@@ -92,7 +94,12 @@ from sgs_web.projection import (  # noqa: E402
 from sgs_web.replay import list_runs, load_run, replay_journal, save_run  # noqa: E402
 from sgs_web.session import Session, StaleAnswer  # noqa: E402
 from sgs_web.timeout import fallback_action  # noqa: E402
-from support.positions import SeatSpec, build_state, cards_of_type  # noqa: E402
+from support.positions import (  # noqa: E402
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+)
 from support.scripts import PassPlayer, run_queries  # noqa: E402
 
 TWO_PLAYERS = {"player_count": 2}
@@ -485,7 +492,10 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 95 and len(catalog) == 64, (
+    # yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 96 → 97 / 64 不变。
+    # yijiang-2014-round2 票 01（W3）：界一将成名-2014·移动版加界沮授移动版（真名「沮授」
+    # 已在池里）⇒ 97 → 98 / 64 不变。
+    assert len(flat) == 98 and len(catalog) == 64, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -1483,21 +1493,115 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                     sizes = {len(combo) for combo in entry["combos"]}
                     assert entry["min_targets"] == min(sizes)
                     assert entry["max_targets"] == max(sizes)
-                    # 键名是**契约**：界面按 `card` / `pool` / `min_targets` / `max_targets` / `combos`
-                    # 读；只断言"值算得对"而不断言键名，会让"界面读了一个不存在的键"这类
-                    # 静默失配穿过全部测试（前端读不到只会退化，不会抛错）。
-                    assert set(entry) == {"card", "pool", "min_targets", "max_targets", "combos"}, (
-                        f"候选索引的键集合变了：{sorted(entry)}；改键名必须同时改 app.js 的读法"
-                    )
+                    # 键名是**契约**：界面按 `card` / `pool` / `min_targets` / `max_targets` / `combos` /
+                    # `self_only` 读；只断言"值算得对"而不断言键名，会让"界面读了一个不存在的键"
+                    # 这类静默失配穿过全部测试（前端读不到只会退化，不会抛错）。
+                    assert set(entry) == {
+                        "card", "pool", "min_targets", "max_targets", "combos", "self_only",
+                    }, f"候选索引的键集合变了：{sorted(entry)}；改键名必须同时改 app.js 的读法"
                     assert isinstance(entry["card"], dict) and "card_id" in entry["card"]
                     assert isinstance(entry["pool"], list)
                     assert isinstance(entry["combos"], list) and entry["combos"]
                     assert isinstance(entry["min_targets"], int)
                     assert isinstance(entry["max_targets"], int)
+                    assert isinstance(entry["self_only"], bool)
                 checked += 1
                 session.submit_answer(query.legal_actions[0])
 
     assert checked > 200, f"取样太少（{checked} 次询问），断言谈不上机械"
+
+
+def test_a_self_only_target_card_is_still_clickable_in_a_two_player_game() -> None:
+    """【帷幕】把黑色 1–2 目标锦囊的池削到只剩使用者 ⇒ 索引不得把它标成"自用牌"。
+
+    issue 19 的复现：2 人局（我 + 贾诩）的黑色【铁索连环】与【无中生有】在**形状上逐字
+    相同**（``pool == [0]``、``combos == [[0]]``、``min == max == 1``）。只靠池形状，界面
+    分不出"规则说只能对自己"与"这一问恰好只剩自己"，于是把前者的自己座位也当自用牌处理
+    ——座位既不高亮也不接点击，牌点得亮却指定不了目标。故判据必须是服务端转发的**规则
+    事实**：铁索 ``self_only is False``、【无中生有】``self_only is True``（共用同一个
+    ``pool == [0]`` 的形状）。
+    """
+    from sgs.data import Color, load_content_pack
+
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    iron = next(
+        card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.type == "iron_chain" and color_of_suit(card.suit) is Color.BLACK
+    )
+    exnihilo = next(
+        card_id for card_id, card in enumerate(pack.deck.cards) if card.type == "ex_nihilo"
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=3, hp_max=3, hand=(iron, exnihilo)),
+            SeatSpec(hero="jiaxu_mobile"),
+        ],
+        deck=deck_excluding(pack, iron, exnihilo),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    query = _play_query(state)
+    payload = pending_payload(query, human_seat=0)
+    assert payload is not None
+    assert any(
+        action.get("kind") == "UseCard"
+        and (action.get("card") or {}).get("card_id") == iron
+        and action.get("targets") == [0]
+        for action in payload["legal_actions"]
+    ), "前提：引擎照旧给出「只对自己」的使用候选（引擎事实由 test_hero_lin 钉）"
+
+    chain = payload["candidate_index"][str(iron)]
+    self_card = payload["candidate_index"][str(exnihilo)]
+
+    assert chain["pool"] == [0] and chain["combos"] == [[0]], "前提：帷幕削池 ⇒ 只剩自己"
+    assert self_card["pool"] == [0] and self_card["combos"] == [[0]]
+    assert (chain["min_targets"], chain["max_targets"]) == (1, 1)
+    assert (self_card["min_targets"], self_card["max_targets"]) == (1, 1)
+    assert chain["self_only"] is False, (
+        "【铁索连环】不是自用牌：池剩自己只是【帷幕】削出来的结果，界面必须仍画可指定的座位"
+    )
+    assert self_card["self_only"] is True, "【无中生有】才是规则自用牌（保持不画座位高亮）"
+
+
+def test_a_peach_for_another_dying_seat_is_not_marked_self_only() -> None:
+    """`self_only` = "规则自用 **且** 这一问的目标就是使用者"：求桃别人时必须是 ``False``。
+
+    【桃】的 ``TargetRule.self_only`` 为真，但濒死求桃的目标是**濒死者**。若把载荷读成裸的
+    规则位（不求值目标），求桃窗口里濒死者的座位就会被当成"自用牌"而不画可选高亮——与
+    issue 19 同一类"座位点不亮"，只是换了个场景。故这一面必须由**产品调用点**（真的
+    ``legal_actions_for`` 求桃候选）钉住，而不是只写在注释里。
+    """
+    from sgs.effects import legal_actions_for
+
+    pack = _context_pack()
+    peach = cards_of_type(pack, "peach")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(peach,)), SeatSpec(hero="diaochan"), SeatSpec(hp=1)],
+        deck=deck_excluding(pack, peach),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    query = PeachQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.NEAR_DEATH_AT,
+        prompt="座位 2 处于濒死状态：是否对其使用【桃】？",
+        legal_actions=tuple(
+            legal_actions_for(state, 0, QueryKind.PEACH, answers_seq=1, dying=2)
+        ),
+        view=project(state, 0),
+        dying=2,
+    )
+    entry = candidate_index(query)[str(peach)]
+
+    assert entry["pool"] == [2] and entry["combos"] == [[2]], "前提：目标是濒死的座位 2"
+    assert entry["self_only"] is False, (
+        "【桃】的规则是自用牌，但这一问的目标是别人 ⇒ 不能标成 self_only（否则座位点不亮）"
+    )
 
 
 def test_the_candidate_index_for_a_halberd_borrowed_window_keeps_bn_in_every_combo() -> None:
@@ -2560,11 +2664,181 @@ def test_the_409_bare_query_does_not_get_an_arrange_spec() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# yijiang-2014-round2 票 15（P6）：界【渐营】① 的「是否发动」默认 = **发动**
+#
+# 这是**界面默认值**，不是规则语义：服务端询问一字不改（仍是裸的 [ActivateSkill, Pass]），
+# 投影只在**显式声明**的技能上下发 `pending.default_choice = "activate"`。界【渐营】① 是
+# 唯一 opt-in——它复用 OL 沮授【渐营】的条件与零步流水线，而 ② 的预发动把同一个技能 id 的
+# `SkillDef.preactivated` 置真，界面因此曾把它画成"被动入口"：默认答案是「放弃」。
+# ---------------------------------------------------------------------------
+
+JIE_JIANYING = "hero.jie_jushou_mobile.jianying"
+
+
+def _session_at_jianying_activation() -> Session:
+    """真引擎：座位 0 = 界沮授移动版，本阶段连出两张 ♥5 ⇒ 停在【渐营】① 的「是否发动」。
+
+    两张都是装备牌（【麒麟弓】/【赤兔】，同花色同点数），使用目标是**自己**（装备于自己）
+    故两张都能直接推进；局面与 ``test_hero_jie_yijiang.py`` 的 ``_jie_ready`` 同一构造。
+    会话壳只用来走**唯一的投影产出路径**（§6：读取方断言走真实产出路径）。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    bow = cards_of_type(pack, "qilin_bow")[0]
+    horse = cards_of_type(pack, "chitu")[0]
+    assert pack.deck.cards[bow].suit == pack.deck.cards[horse].suit, (
+        "【麒麟弓】与【赤兔】必须同花色（【渐营】① 的触发条件）"
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(bow, horse)),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(pack, bow, horse),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    for _ in range(400):
+        if engine.pending is not None:
+            break
+        engine._step()  # noqa: SLF001 - 与 test_hero_jie_yijiang 的推进器同一手法
+    assert engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE
+
+    for card_id in (bow, horse):
+        query = engine.pending
+        action = next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, UseCard) and action.card.card_id == card_id
+        )
+        engine.submit(action)
+        for _ in range(400):
+            if engine.pending is not None or engine.finished:
+                break
+            engine._step()  # noqa: SLF001
+
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION, (
+        f"同花色第二张之后应停在【渐营】① 的询问（实际 {getattr(query, 'kind', None)}）"
+    )
+    assert query.skill_id == JIE_JIANYING
+
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=2)
+    session.engine = engine
+    session.human_seat = 0
+    return session
+
+
+def test_the_jianying_activation_payload_defaults_to_activate() -> None:
+    """界【渐营】① 的「是否发动」载荷带 ``default_choice == "activate"``（票 15 §5 第 1 条）。"""
+    session = _session_at_jianying_activation()
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert payload["kind"] == "SKILL_ACTIVATION"
+    assert payload["skill_id"] == JIE_JIANYING
+    assert payload["default_choice"] == "activate", (
+        "界【渐营】① 是唯一 opt-in：投影必须下发默认候选 = 发动"
+    )
+    assert [action["kind"] for action in payload["legal_actions"]] == [
+        "ActivateSkill",
+        "Pass",
+    ], "默认值是**界面**事实：服务端候选一字不改（仍可放弃）"
+
+
+def test_the_jianying_manifest_steps_carry_an_explicit_kind() -> None:
+    """界【渐营】② 的清单每步都下发 ``Step.kind`` —— 读取方 = `preactivation.js:preactivationStepKind`。
+
+    跨线契约的**服务端那一半**（`CODING_STANDARDS.md` §6：读取方断言要在真实产出路径上跑）：
+    这里走真引擎 → `preactivation_for` → `pending_payload`，读的是前端真正收到的键。
+
+    为什么必须是**显式**字段：同一个座位步里有一条"目标由牌名决定"的行
+    （``options = []``、``max = 0``）；界面若拿第一行的 ``options[0]`` 猜"这一步选什么"，
+    那一行排到最前时整步会被读成**选项步**，于是"自动跳过空步"那一支永不触发（票 18 的
+    死路）。故这一份清单同时钉两件事：三步的类型，以及"空行真的存在"这个前提。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    bow = cards_of_type(pack, "qilin_bow")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            # hp < hp_max ⇒ 【桃】此刻可用 ⇒ 第 3 步多出一行"目标由牌名决定"的空行。
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(bow,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=deck_excluding(pack, bow),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    for _ in range(400):
+        if engine.pending is not None:
+            break
+        engine._step()  # noqa: SLF001 - 与 test_hero_jie_yijiang 的推进器同一手法
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE and query.actor == 0
+
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=4)
+    session.engine = engine
+    session.human_seat = 0
+    payload = pending_payload(session)
+
+    steps = (payload["preactivations"] or {})[JIE_JIANYING]
+    assert [step["kind"] for step in steps] == ["card", "option", "seat"], (
+        "三步各自的**类型**要显式下发（选牌 → 选牌名 = 选项步 → 选座位；"
+        f"实得 {[step.get('kind') for step in steps]}）"
+    )
+    empty_rows = [
+        row for row in steps[2]["pool"] if row.get("max") == 0 and not row.get("options")
+    ]
+    assert empty_rows, (
+        "前提：清单里有『没有可选目标』的行——正是按形状猜类型会误判的那一行"
+        f"（实得 {steps[2]['pool']}）"
+    )
+
+
+def test_other_activation_payloads_do_not_carry_a_default_choice() -> None:
+    """其余「是否发动」**没有**这个字段（不是发 null）：只有显式声明的技能才变。
+
+    取样 = 诸葛亮【观星】的真会话第一问（同文件既有用例已钉它是 ``SKILL_ACTIVATION``）：
+    同为「是否发动」，且**不在** opt-in 表里 ⇒ 载荷里键的**缺席**保证其余询问逐字节不变。
+    """
+    session = Session(
+        seed=7,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+        my_hero="zhugeliang",
+    )
+    query = session.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION
+    assert query.skill_id == GUANXING
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert "default_choice" not in payload, (
+        "没有显式声明的「是否发动」（观星 / 苦肉 / 洛神 / …）不得长出默认候选字段"
+    )
+
+
 def test_the_candidate_index_never_carries_rule_judgements() -> None:
     """③ 索引无规则：它只聚合候选里已有的座位，不算距离 / 攻击范围 / 花色 / 体力 / 存活。
 
     取样的判据：索引里的座位**恰好**等于该牌候选的目标并集——多一个（"我算出来的合法目标"）
     或少一个（"我过滤掉了无效目标"）都会判红。这条断言把"别在接入层重新实现规则"钉死。
+
+    ``self_only`` 不违反这一条：它是**转发的牌声明**（行为表 ``TargetRule.self_only`` +
+    "候选组合的目标就是使用者"），不是接入层重新算出来的合法性；池本身仍逐座位等于候选并集
+    （issue 19）。
     """
     for seed in (13, 29):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
@@ -3895,6 +4169,151 @@ def test_a_real_session_reaches_the_yinghun_discard_step_with_its_step_wording()
     )
 
 
+class _FinishPhaseSeat:
+    """真会话里的脚本参与者：出牌阶段**直接结束**、技能一律发动、其余取第一个候选。
+
+    与 :class:`_ScriptedSeat` 的区别只有出牌阶段这一格：本段的被测局面靠"结束阶段的手牌
+    颜色"下断言，若脚本在出牌阶段随手打一张牌，手牌就变了（构造前提被脚本吃掉）。
+    """
+
+    def respond(self, query):
+        if getattr(query, "kind", None) == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "ActivateSkill":
+                return action
+        return query.legal_actions[0]
+
+
+def _advance_to_the_bingyi_seat_step(session: Session, *, limit: int = 20_000) -> None:
+    """逐步把**真引擎**推到【秉壹】的 ``SELECT_OPTIONS``（座位多选面）；不到就炸。"""
+    engine = session.engine
+    for _ in range(limit):
+        pending = engine.pending
+        if pending is not None and getattr(pending, "kind", None) == "SELECT_OPTIONS":
+            return
+        if pending is None:
+            engine._step()  # noqa: SLF001 - 与 _advance_to_the_yiji_card_step 同一推进手法
+            if engine.finished:
+                break
+            continue
+        engine.submit(session.participants[pending.actor].respond(pending))
+    raise AssertionError("真会话没有走到【秉壹】的座位多选面")
+
+
+def _bingyi_real_session() -> Session:
+    """**真会话**：座位 0 = 顾雍（两张**同色**手牌），停在【秉壹】的座位多选询问。
+
+    与 :func:`_yinghun_real_session` 同一条理由：随机建局走不到【秉壹】，但会话壳 /
+    阶段体派发 / ``pending_payload`` 这条读取方链路一字不换 —— 要证的是 W1 的座位多选面
+    在**生产载荷**里的形状（``option_seats`` 非空 ⇒ 牌桌多选、一次提交）与逐步文案
+    （``SkillDef.step_requirements["seat"]``，yijiang-2014 票 09 §2.6 的第三个勾选项）。
+    """
+    pack = _context_pack()
+    hand: list[int] = []
+    for card_id in range(len(pack.deck.cards)):
+        color = color_of_suit(pack.deck.cards[card_id].suit)
+        if color is not None and color.value == "red":
+            hand.append(card_id)
+        if len(hand) == 2:
+            break
+    assert len(hand) == 2, "构造：需要两张同色（红）手牌"
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="guyong", hp=3, hp_max=3, hand=tuple(hand)), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id not in set(hand)
+        ),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.engine.set_draw_phase_count(0, 0)  # 结束阶段的手牌 = 夹具给的那两张
+    session.participants = (_FinishPhaseSeat(), _FinishPhaseSeat())
+    _advance_to_the_bingyi_seat_step(session)
+    return session
+
+
+def test_a_real_session_reaches_the_bingyi_seat_multi_select_face() -> None:
+    """【秉壹】的「至多 N 名角色」在生产载荷里就是 W1 的座位多选面（yijiang-2014 票 09）。
+
+    钉四件事（``CODING_STANDARDS.md`` §6 的读取方纪律）：
+
+    1. **逐步文案真的被读到**：询问的 ``skill_id`` 是 ``hero.guyong.bingyi:seat``，
+       ``projection._step_requirement`` 按冒号后那段命中 ``step_requirements["seat"]``；
+    2. **`option_seats` 非空** ⇒ 前端 ``isSeatMultiStep`` 判定进牌桌多选（不是旧勾选弹窗）；
+    3. 池 = 全部存活角色**含自己**（座位 0 与 1 都在），区间 ``[1, N]``（N = 手牌数 2）；
+    4. 「至多」的放弃出口在候选里（``Pass``），不是"交一个空集合"。
+    """
+    session = _bingyi_real_session()
+    query = session.pending
+
+    assert query is not None and getattr(query, "kind", None) == "SELECT_OPTIONS"
+    assert str(query.skill_id) == "hero.guyong.bingyi:seat", "询问带着技能 id + 步骤键"
+
+    session.human_seat = int(query.actor)
+    payload = pending_payload(session)
+
+    assert payload is not None and payload["context"] is not None
+    assert payload["context"]["requirement"] == "选择令其摸一张牌的角色（可多选，选好后提交）", (
+        "读取方必须真的读到座位步的文案（退回一句话 summary 就说明判据读错了键）"
+    )
+    assert payload["option_seats"] == {"seat:0": 0, "seat:1": 1}, (
+        "座位池 = 全部存活角色（**含自己**）⇒ 前端进牌桌多选面"
+    )
+    assert payload["min_selected"] == 1 and payload["max_selected"] == 2, "至多 N 名（N = 手牌数）"
+    assert any(action["kind"] == "Pass" for action in payload["legal_actions"]), (
+        "「至多」可放弃：放弃出口是候选里的 Pass"
+    )
+    assert payload["structural"] is True, (
+        "票 21：这一档是**不枚举档**（候选只有骨架）⇒ 投影必须下发 structural，"
+        "前端据此自己拼集合、不逐字段自检候选"
+    )
+    assert len(payload["legal_actions"]) == 2, (
+        f"候选只有骨架 + 放弃（旧行为是 1+1+2+1 = 5 条子集）：{payload['legal_actions']}"
+    )
+
+
+def test_the_structural_flag_is_only_projected_for_the_non_enumerating_multi_select() -> None:
+    """**键的缺席就是保证**：枚举档的多选面载荷里没有 `structural`（既有面逐字节不变）。
+
+    与 ``default_choice`` 同一姿态：投影只在 ``SELECT_OPTIONS`` ∧ ``structural`` 时补这个键；
+    界神速（``enumerate_candidates`` 缺省）的同一类询问因此一个键都不多。
+    """
+    state = build_state(
+        pack=load_content_pack(deck_profile="standard_108"),
+        seats=[SeatSpec(hero="caocao"), SeatSpec(hero="liubei")],
+    )
+    enumerated = SelectOptionsContext(
+        skill_id="hero.jie_xiahouyuan_mobile.shensu",
+        options=("jie_shensu_1", "jie_shensu_2", "jie_shensu_3"),
+        max_selected=3,
+    )
+    from sgs.effects import legal_actions_for
+
+    actions = legal_actions_for(
+        state, 0, QueryKind.SELECT_OPTIONS, answers_seq=1, payload=enumerated
+    )
+    query = SelectOptionsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.TURN_START,
+        prompt="请选择若干项（可多选）。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id=enumerated.skill_id,
+        options=enumerated.options,
+        max_selected=3,
+    )
+    assert "structural" not in pending_payload(query, human_seat=0), (
+        "枚举档不多键（金录像 / 既有载荷逐字节不变）"
+    )
+    assert len(actions) == 8, "对照：枚举档仍是 2³ = 8 条子集"
+
+
 def _jizhi_nullify_session() -> Session:
     """**真会话**：座位 1 = 界黄月英（回合角色）出【无中生有】⇒【集智】答完 ⇒ 无懈窗口。
 
@@ -4256,7 +4675,11 @@ def test_the_pending_payload_carries_the_play_phase_preactivations() -> None:
     assert [step["name"] for step in steps] == ["card", "seat"]
     assert [step["order"] for step in steps] == [0, 1]
     # W4-fix-3：`wording` = 声明上的 `step_requirements`（界面据此画这一问的人话）。
-    assert set(steps[0]) == {"name", "zones", "min", "max", "pool", "order", "wording"}
+    # `kind`（评审 Fix 2）= 这一步**选什么**：类型是规则级事实、由服务端按步骤声明类型
+    # 下发，读取方 = `preactivation.js:preactivationStepKind`（不再按 `pool[0].options[0]`
+    # 猜——目标由牌名决定的空行排最前时会猜错）。
+    assert set(steps[0]) == {"name", "kind", "zones", "min", "max", "pool", "order", "wording"}
+    assert [step["kind"] for step in steps] == ["card", "seat"]
     assert steps[0]["wording"] == "选择任意张要交给其他角色的手牌"
     assert steps[0]["zones"] == ["hand"]
     assert steps[0]["max"] >= steps[0]["min"] >= 1
@@ -5486,6 +5909,37 @@ def test_the_public_seat_exposes_chained_and_wine_defaults() -> None:
     for player in snapshot["players"]:
         assert player["chained"] is False, f"座位 {player['seat']} 的横置默认未下发"
         assert player["wine_active"] is False, f"座位 {player['seat']} 的酒状态默认未下发"
+
+
+def test_the_public_seat_carries_armor_and_the_payload_shape_pins_it() -> None:
+    """W7 的第二条体力轴：护甲值随投影 / 网页载荷下发（座位卡要画护甲段）。
+
+    投影里 ``armor`` 与 ``chained`` / ``wine_active`` 同档（公开事实、网页载荷由
+    ``seat_display`` 补下）。座位卡的护甲段读的就是 ``player.armor``：0 时一段都不画
+    （DOM 与旧版逐字节同形），故这里同时钉住"默认值照发"与"真值走完整下发路径"。
+
+    ``seed``（yijiang-2014-round2 票 01 / W3）：换池会重排默认将池 ⇒ 原 ``61`` 这一局抽到
+    **界沮授移动版**（【矢北】开局发 3 点护甲，挨了一刀之后是 2）⇒ "全员默认 0"这条判据
+    不再成立。判据不动、换种子（spec §7 的既有处置）：``1`` 这一局没有任何获得护甲的开局
+    效果，全员缺省 0。
+
+    被换掉的覆盖由 ``tests/test_armor.py::test_the_simple_narrative_writes_armor_changes_in_chinese``
+    接手（真会话跑到【矢北】的护甲吸收，断言简易叙事的中文行；`CODING_STANDARDS.md` §5
+    "重选种 = 放弃一条覆盖"）。
+    """
+    session = Session(seed=1, ai="random", timeout_seconds=None, player_count=5)
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"], "快照必须有座位"
+    for player in snapshot["players"]:
+        assert player["armor"] == 0, f"座位 {player['seat']} 的护甲默认未下发"
+
+    target = session.engine.state.players[1]
+    target.armor = 3
+    snapshot = visible_snapshot(session)
+    payload = next(p for p in snapshot["players"] if p["seat"] == target.seat)
+    assert payload["armor"] == 3, "护甲是真状态：完整下发路径读得到"
+    assert project(session.engine.state, session.human_seat).players[1].armor == 3
+    assert "armor" in PlayerPublic.model_fields
 
 
 def test_the_public_seat_reads_chained_and_wine_from_engine_state() -> None:
@@ -7377,7 +7831,12 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 198, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201；
+    # 票 08（W4b）补陈群【法恩】⇒ 202。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205。
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206。
+    assert len(expected_skills) == 206, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

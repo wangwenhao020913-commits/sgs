@@ -1,6 +1,7 @@
 """叶子原语：只改状态、返回 delta，**绝不**压栈 / 发询问 / 暂停 / 访问结算栈（票 07 §1）。
 
-两个口：``move_card``（移动牌）与 ``apply_hp``（写体力，唯一改体力的口）。
+三个口：``move_card``（移动牌）、``apply_hp``（写体力，唯一改体力的口）与
+``apply_armor``（写护甲，唯一改护甲的口——第二条体力轴，W7）。
 洗牌是"明确的随机置换"，走 ``deck_shuffle`` 记录而不是 ``move_card``（票 08 §5）：
 ``draw_from_deck`` 在牌堆耗尽时把弃牌堆重洗成新牌堆，并把这次置换作为 delta 交回调用方。
 """
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from sgs.state import (
+    ARMOR_CAP,
+    ArmorChangeDelta,
     CardMoveDelta,
     CardRef,
     DeckShuffleDelta,
@@ -26,6 +29,7 @@ __all__ = [
     "DrawResult",
     "EffectContext",
     "Randomness",
+    "apply_armor",
     "apply_hp",
     "draw_from_deck",
     "locate",
@@ -268,6 +272,30 @@ def apply_hp(state: GameState, ctx: EffectContext, seat: int, value: int) -> HpC
     before = player.hp
     player.hp = value
     return HpChangeDelta(seat=seat, before=before, after=value, amount=value - before)
+
+
+def apply_armor(
+    state: GameState, ctx: EffectContext, seat: int, value: int
+) -> ArmorChangeDelta:
+    """把座位 ``seat`` 的**护甲值**写成 ``value``，返回一条变化事件（唯一改护甲的口）。
+
+    ``value`` 由调用帧算好（获得护甲帧 = ``min(armor + amount, ARMOR_CAP)``；伤害吸收帧 =
+    ``armor - min(armor, amount)``）；本原语只做**闭区间**检查——越过
+    :data:`~sgs.state.ARMOR_CAP` 或写成负数都是编程错误，帧必须先夹住（与
+    :func:`apply_hp` 的"上限由帧先夹"同姿态）。
+
+    与 ``apply_hp`` 的差别只有两处：护甲**没有"小于 0 的中间态"**（0 是合法终值，且扣光
+    **不**进濒死——濒死只看体力），故两侧都是硬边界。护甲是第二条体力轴，不是体力上限的
+    临时加成：回复体力 / 任何「失去体力」/ 体力上限变化都不经过这里。
+    """
+    player = state.player(seat)
+    if not 0 <= value <= ARMOR_CAP:
+        raise ValueError(
+            f"护甲 {value} 越界：合法区间是 [0, {ARMOR_CAP}]；获得 / 吸收护甲的帧必须先夹住"
+        )
+    before = player.armor
+    player.armor = value
+    return ArmorChangeDelta(seat=seat, before=before, after=value)
 
 
 def place_on_deck(

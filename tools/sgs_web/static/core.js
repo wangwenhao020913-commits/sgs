@@ -9,13 +9,14 @@
  *    **唯一例外**：观星排列（`ARRANGE`）到时限时前端主动提交一次**当前排列**——服务端
  *    看不到客户端摆放的顺序（spec D9.3 / 票 07）；其余询问到时限仍是零请求。
  *
- * **跨线契约**：`pending.candidate_index` 是 `{card_id: entry}`，界面读的字段**只有这四个**——
+ * **跨线契约**：`pending.candidate_index` 是 `{card_id: entry}`，界面读的字段**只有这几个**——
  *
  *     entry.card          这张牌的牌面（`CardRef`）
  *     entry.pool          合法目标座位
  *     entry.min_targets   这次使用最少要选几个目标
  *     entry.max_targets   这次使用最多能选几个目标
  *     entry.combos        合法目标组合（元组的数组）
+ *     entry.self_only     这张牌的目标由**牌自己的规则**钉死为使用者本人（不画座位高亮）
  *
  * 真源在 `tools/sgs_web/projection.py:candidate_index`；键名两边必须**逐字**一致。
  * 只断言服务端"发了这个键"是不够的——服务端断言与界面读法之间曾经失配过

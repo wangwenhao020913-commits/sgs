@@ -48,6 +48,7 @@ from sgs.state import (
     SelectOptionContext,
     SelectOptions,
     SelectOptionsContext,
+    SelectOptionsQuery,
     SkillActivationContext,
     SubstituteJudgeCard,
     SlotKind,
@@ -92,6 +93,7 @@ __all__ = [
     "check_forbidden",
     "forbidden_as_slash",
     "check_targets",
+    "check_usable",
     "delayed_settle_target",
     "designation_actions_for",
     "discard_count",
@@ -458,6 +460,47 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             tuple(pool),
         )
     )
+
+
+def check_usable(
+    state: GameState,
+    seat: int,
+    card: CardRef,
+    *,
+    context: UseContext = UseContext.PLAY_PHASE,
+) -> bool:
+    """``seat`` 此刻**能不能用**这张牌：L3 的"使用前校验"整条链，合成一个可调用的档。
+
+    回答的是"这张牌此刻真的能使用吗"，而不是其中任意半条。四类判据全部**委托**既有函数，
+    这里一条规则都不新造（顺序按"最便宜 / 最硬"的档排）：
+
+    1. **时机 / 语境**：行为表 ``use_timings`` 里有没有 ``context`` 这一档
+       （:func:`_usable_in`；候选生成器 :func:`_usable_hand` 读的是同一份声明）；
+    2. **禁止使用**（L3.1）：:func:`check_forbidden` 的 ``FORBIDDEN`` 链，以及
+       :func:`forbidden_as_slash`（「不能当作【杀】使用 / 打出」的标签，按牌面牌名判）；
+    3. **次数**（L3.2）：:func:`check_count`——【杀】的本回合额度、【酒】的每回合一次都在
+       这一条里（计数键由行为表声明，不按牌名特判）；
+    4. **目标池**（L3.3）：:func:`check_targets` 非空——【桃】满体力、【杀】没有可达目标、
+       【闪】这类 0 目标牌在出牌阶段没有目标，都是这一条。
+
+    合成这一档的理由（yijiang-2014-round2 票 18）：界【渐营】② 的"牌名置灰"原先只调第 4
+    条，于是次数用尽的【杀】仍显示可用、提交后才失败。技能侧**同一个判据**另有两处内联
+    （界刘备【仁德】的 ``_jie_rende_basic_options`` = 第 3 + 第 4 条；【蛊惑】的
+    ``_guohuo_unusable_names`` = 只有第 4 条），本票不迁移它们（行为不动），只把这一档
+    公开出来供新读点使用——故**不改变**任何既有技能的候选。
+
+    ``card`` 可以是实体牌，也可以是转化 / 虚拟产物（判据只读行为表与牌面，不要求它在某区）。
+    """
+    behavior = behavior_for(card)
+    if not _usable_in(behavior, context, None):
+        return False
+    if check_forbidden(state, seat, card):
+        return False
+    if is_slash(behavior) and forbidden_as_slash(state, card):
+        return False
+    if check_count(state, seat, card):
+        return False
+    return bool(check_targets(state, seat, card))
 
 
 def target_is_effective(state: GameState, card: CardRef, source: int, target: int) -> bool:
@@ -1454,6 +1497,68 @@ def _select_option(
     return actions
 
 
+def is_legal_option_set(
+    face: SelectOptionsContext | SelectOptionsQuery, choices: Sequence[str]
+) -> bool:
+    """多选答案的**唯一**合法性谓词（yijiang-2014-round2 票 21）：池内 / 无重复 / 无置灰 /
+    长度在 ``[min_selected, cap]`` 内。
+
+    ``face`` 读 ``options`` / ``disabled`` / ``min_selected`` / ``max_selected`` 四项——
+    候选生成口（:class:`~sgs.state.SelectOptionsContext`）与询问面
+    （:class:`~sgs.state.SelectOptionsQuery`）同上同下，故两者都收：**合法集合只有这一份
+    真源**，候选枚举、不枚举档的骨架、引擎收答案、AI 自建集合、回放放行（``agents``）全走它，
+    不另写第二份判据。
+
+    口径与 :func:`_select_options` 逐条对齐：
+
+    - **池内**：每个 ``choice`` 都在 ``options`` 里（``options`` 是展示面，含置灰）；
+    - **无置灰**：``disabled`` 里的项不可选（它们留在 ``options`` 里只为画灰）；
+    - **无重复**：答案是一个**集合**，重复项不是"多选了一个"；
+    - **区间**：``min_selected <= len(choices) <= cap``，``cap`` 与候选枚举同一条算法
+      （``max_selected=None`` ⇒ 只受**可选项**数约束）。
+
+    **不比次序**：答案是集合，``choices`` 的次序不进判据（默认序 = ``options`` 序由写方
+    规范化——界面 ``pending.js:seatMultiChoices`` 与 AI 的构造器各自排好；"依次结算"是另一
+    档，将来有技能要它时再开票）。
+    """
+    usable = usable_options(face)
+    cap = cap_of(face)
+    chosen = tuple(choices)
+    if not int(face.min_selected) <= len(chosen) <= cap:
+        return False
+    if len(set(chosen)) != len(chosen):
+        return False
+    pool = frozenset(usable)
+    return all(choice in pool for choice in chosen)
+
+
+def usable_options(
+    face: SelectOptionsContext | SelectOptionsQuery,
+) -> tuple[str, ...]:
+    """多选面的**可选项池**：``options`` 去掉 ``disabled``，保持原序。
+
+    与 :func:`is_legal_option_set` 的「池内 / 无置灰」两条同源（谓词与候选枚举都读它）：
+    置灰项**留在** ``options`` 里只为画灰，任何生产答案都不许含它 —— 故"可选的"只有这一份
+    派生，别处不再自己过一遍 ``disabled``。
+    """
+    disabled = frozenset(face.disabled)
+    return tuple(option for option in face.options if option not in disabled)
+
+
+def cap_of(face: SelectOptionsContext | SelectOptionsQuery) -> int:
+    """多选面的**可达上限**：``min(max_selected, len(usable_options(face)))``。
+
+    ``max_selected=None`` ⇒ 只受可选项数约束。这条派生是 :func:`is_legal_option_set` 区间
+    判据的一半，也是**玩家文案**（引擎拒收时的 ``[min, cap]``）与 AI 自建集合的上界。上限
+    只在这里算：四处各算一遍时，引擎那份曾把 ``max_selected`` 直接当上限（数了**含置灰**
+    的 ``options``），于是拒收文案印出一个永远选不到的数。
+    """
+    usable = usable_options(face)
+    if face.max_selected is None:
+        return len(usable)
+    return min(int(face.max_selected), len(usable))
+
+
 def _select_options(
     seat: int, answers_seq: int, ctx: SelectOptionsContext
 ) -> list[Action]:
@@ -1465,23 +1570,35 @@ def _select_options(
 
     不按位掩码之外的方式枚举（例如"逐项 0/1"）：答案是**一个集合**，一次提交 —— 与
     :func:`_distribute` 的"全量枚举 + 客户端拼出同一条"同姿态，合法集合只有这一份真源。
+
+    ``ctx.enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21；先例 =
+    :func:`_arrange` 的同名档）：子集数随选项数组合爆炸（8 人局、上限 4 ⇒ 162 条），故
+    **一条都不枚举** —— 只留一条**骨架兜底**：``options`` 序的前 ``min_selected`` 个可选项
+    （``min_selected == 0`` ⇒ 空集，超时兜底仍是"什么都不做"）。骨架**不是答案集**，它只
+    兑现"每一问都有至少一个合法应答"（超时代答 / 取首个候选的消费者 / 回放放行都靠它），
+    真正的答案由界面 / 参与者组装、引擎按 :func:`is_legal_option_set` 校验形状。可选项凑不
+    出下限时**没有**合法集合 ⇒ fail-closed（不发明一条越界的骨架）。
     """
     del seat
-    disabled = frozenset(ctx.disabled)
-    options = tuple(option for option in ctx.options if option not in disabled)
-    cap = len(options) if ctx.max_selected is None else min(int(ctx.max_selected), len(options))
+    options = usable_options(ctx)
+    cap = cap_of(ctx)
     if ctx.min_selected < 0 or cap < ctx.min_selected:
         raise ValueError(
             f"多选区间的下限 {ctx.min_selected} 大于上限 {cap}（选项 {ctx.options!r}）"
         )
     actions: list[Action] = []
-    for mask in range(1 << len(options)):
-        picked = tuple(
-            option for index, option in enumerate(options) if mask >> index & 1
-        )
-        if len(picked) < ctx.min_selected or len(picked) > cap:
-            continue
-        actions.append(SelectOptions(choices=picked, answers_seq=answers_seq))
+    if not ctx.enumerate_candidates:
+        # 上面那条区间检查已经覆盖"可选项凑不出下限"：``cap`` 只受**可选项**数约束，
+        # 故 ``cap >= min_selected`` ⇒ 骨架一定够长、形状必然合法，不需要第二条守卫。
+        skeleton = options[: int(ctx.min_selected)]
+        actions.append(SelectOptions(choices=skeleton, answers_seq=answers_seq))
+    else:
+        for mask in range(1 << len(options)):
+            picked = tuple(
+                option for index, option in enumerate(options) if mask >> index & 1
+            )
+            if is_legal_option_set(ctx, picked):
+                actions.append(SelectOptions(choices=picked, answers_seq=answers_seq))
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))
     return actions
@@ -1650,13 +1767,11 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         return (0, (action.card.card_id,), action.kind)
     if isinstance(action, SelectCards):
         return (0, action.picks, action.kind)
-    if isinstance(action, SelectOption):
-        # 选项闭集里的**真候选**。``Pass``（``optional=True`` 时的"放弃"）没有分支、
-        # 走兜底键 ``(1, …)`` ⇒ 恒排在真候选之后。**票 03 的活锁**就出在这里：
-        # 两者原先共用兜底键，而 ``"Pass" < "SelectOption"`` 让"放弃"排到首位，
-        # 取首个候选的贪心参与者（``tests/test_web.py::_play_to_end``）便一直取消。
-        # 键相等时保持 ``ctx.options`` 给的次序——那是调用方**显式给出**的元组，
-        # 不是生成顺序的隐式约定（且 ``seat:10`` 这类文本不宜按字面排序）。
+    if isinstance(action, (SelectOption, SelectOptions)):
+        # 选项 / 多选闭集里的**真候选**。``Pass``（可放弃时）没有分支、走兜底键
+        # ``(1, …)`` ⇒ 恒排在真候选之后；两臂合一之前 ``SelectOptions`` 缺过这一支，
+        # 让「放弃」排到首位（票 03 的活锁同一类；yijiang-2014 票 09 补齐）。
+        # 键相等时保持调用方给出的次序（``seat:10`` 这类文本不宜按字面排序）。
         return (0, (), action.kind)
     if isinstance(action, ActivateSkill):
         # ``choices`` 也进键（票 04）：主动技同一组牌可以配不同目标座位，不带上它就会

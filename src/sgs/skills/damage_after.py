@@ -64,6 +64,7 @@ from sgs.effects import (
     locate,
 )
 from sgs.state import (
+    ARMOR_CAP,
     CardRef,
     FrameKind,
     GameState,
@@ -126,6 +127,8 @@ __all__ = [
     "fankui_step_key",
     "SHIBEI",
     "SHIBEI_DEF",
+    "JIE_SHIBEI",
+    "JIE_SHIBEI_DEF",
 ]
 
 DAMAGE_POINT_KEY = "damage_point_index"
@@ -1636,6 +1639,12 @@ KUANGGU_DEF = SkillDef(
 #   只回复 1 点；
 # - **0 伤害 / 被防止的伤害不算受到伤害**（规则 §4.14 L396–L397）⇒ 既不消耗"第一次"、
 #   也不推进次数（写点与派发环两处同判据）。
+#
+# 另有一条**归属**判据（yijiang-2014-round2 票 12 / P3）落在钩子的 ``condition`` 上：
+# 「当**你**受到伤害后」的那个"你"——``_hurt_owner`` 自校这次伤害的受伤者
+# （``frame.data["target"]``）是不是持有者（``MATCH_OWNER_KEY``）。派发环写进
+# ``MATCH_OWNER_KEY`` 的只是"这条实例归谁"，**不**回答"这次伤害落在谁身上"；不设条件就会
+# 别人挨打、沮授也回血（用户 2026-11-09 实机报障）。
 # ---------------------------------------------------------------------------
 
 SHIBEI = hero_skill_id("jushou", "shibei")
@@ -1643,6 +1652,18 @@ SHIBEI = hero_skill_id("jushou", "shibei")
 
 _SHIBEI_DONE_KEY = "shibei_done"
 """帧私有：这次伤害事件已经结算过【矢北】（子帧出栈后派发环重入，不重做）。"""
+
+
+def _shibei_condition(host: Any, frame: Any) -> bool:
+    """【矢北】的触发条件：**受伤的是持有者自己**（``_hurt_owner``，B 族的共同前提）。
+
+    ``DAMAGE_AFTER_TAKE`` 的受伤者住 ``frame.data["target"]``，持有者由派发环在条件求值前
+    写进 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`。OL 版与界沮授移动版**共用这一条**
+    （两版受伤后那一句逐字相同；yijiang-2014-round2 票 12 / P3）：不设它，派发环给每个存活
+    玩家的实例求条件时会对"别人挨打"也放行，效果体再按 ``skill_owner`` 回血。
+    """
+    del host
+    return _hurt_owner(frame)
 
 
 def _shibei(host: Any, frame: Any) -> Any:
@@ -1692,7 +1713,11 @@ SHIBEI_DEF = SkillDef(
     locked=True,
     carrier=CarrierKind.HERO,
     skill_type=SkillType.NORMAL,
-    hooks=(Hook(Timing.DAMAGE_AFTER_TAKE, handler=_shibei),),
+    hooks=(
+        # 「当**你**受到伤害后」：归属自校在**条件门**上（``_hurt_owner``，与【耀武】/
+        # 【刚烈】同源）——效果体里挡做不到"别人的伤害与我无关"。
+        Hook(Timing.DAMAGE_AFTER_TAKE, handler=_shibei, condition=_shibei_condition),
+    ),
     requirement=(
         "锁定技：当你受到伤害后，若此次伤害是你本回合受到的第一次伤害，你回复 1 点体力；"
         "否则你失去 1 点体力"
@@ -1700,10 +1725,78 @@ SHIBEI_DEF = SkillDef(
 )
 """【矢北】一条定义：锁定技 ⇒ 不问是否发动、无步骤（`shapes.md` §2 第 1 行的锁定技变体）。
 
-自校持有者由派发环的 ``MATCH_OWNER_KEY`` 保证（``frame.data["skill_owner"]`` 恒是实例
-持有者），故"任何人挨打都触发"不会发生——与【耀武】同姿态。比较的左侧不是帧载荷而是
-座位事实 ``damage_taken_this_turn``：它在 :func:`~sgs.engine.steps.damage_finalize_amount`
-里**本事件已计入**（写点早于 ``DAMAGE_AFTER_TAKE`` 派发），故第 1 次伤害读到的就是 1。
+**"受伤的是我"必须由 ``condition`` 自校**（:func:`_hurt_owner`）：派发环写进
+:data:`~sgs.skills.catalog.MATCH_OWNER_KEY` 的只是"这条实例归谁"，**不是**"这次伤害落在谁
+身上"——两者混成一件就会"任何人挨打都触发"（yijiang-2014-round2 票 12 / P3 修正了本
+docstring 早先那句错误结论）。伤害的受伤者住 ``frame.data["target"]``。比较的左侧不是帧
+载荷而是座位事实 ``damage_taken_this_turn``：它在
+:func:`~sgs.engine.steps.damage_finalize_amount` 里**本事件已计入**（写点早于
+``DAMAGE_AFTER_TAKE`` 派发），故第 1 次伤害读到的就是 1。
+"""
+
+
+# ---------------------------------------------------------------------------
+# 界沮授移动版【矢北】（yijiang-2014-round2 票 01 / W3；Q-J1 = A ⇒ 本仓按 **OL 口径**）
+#
+# 牌面（用户 `技能.txt` 逐字 + OL 官网 `sanguosha.com/hero/749` 多出来的那一句）：
+#
+#     矢北：锁定技，游戏开始时，你获得3点护甲。当你受到伤害后，若此次伤害是你本回合受到的
+#           第一次伤害，则你回复1点体力，否则你失去1点体力。
+#
+# 与 OL 一将成名-2014 的【矢北】（:data:`SHIBEI_DEF`）逐句对齐：
+#
+# - **受伤后那一句逐字相同** ⇒ 复用**同一个** ``_shibei`` 回调（先例 = 界【天妒】：同一组
+#   回调 + 第二条 ``SkillDef``；钩子族没有 ``shared_with`` 字段，那是 ``ConversionSkill`` 的）；
+# - **多出来的是开局那 3 点护甲**（只有界沮授有；移动版源文件没有这一句）：用户 2026-11-09
+#   签「A，护甲机制以后再加」⇒ 护甲作为**第二条体力轴**由 W7 落地，本票在 ``GAME_START``
+#   钩子里把「获得 3 点」写成 ``min(护甲 + 3, ARMOR_CAP)``（可叠加、封顶 5 的签字口径）。
+#   **护甲不写进数据行、也不写 ``_initial_player``**：它是技能效果，不是登场属性
+#   （登场属性只有 ``hp = 2`` 那一条）。
+# ---------------------------------------------------------------------------
+
+JIE_SHIBEI = hero_skill_id("jie_jushou_mobile", "shibei")
+"""界沮授移动版【矢北】的全限定技能 id。"""
+
+_JIE_SHIBEI_ARMOR_KEY = "jie_shibei_armor"
+"""帧私有：开局那 3 点护甲已经发过（``GAME_START`` 挂起续跑不重发）。"""
+
+
+def _jie_shibei_start(host: Any, frame: Any) -> Any:
+    """「游戏开始时，你获得 3 点护甲」：唯一的写入口是 :meth:`Engine.apply_armor_change`。
+
+    ``min(护甲 + 3, ARMOR_CAP)`` 由调用帧先夹住（``apply_armor`` 对越界值抛错，不替调用方
+    兜底）；``GAME_START`` 是帧外时机、锁定技不问是否发动（派发环的 forced 分支直接跑），
+    故这里没有询问面、也不需要 ``"stay"``。
+    """
+    owner = int(frame.data["skill_owner"])
+    if frame.data.get(_JIE_SHIBEI_ARMOR_KEY):
+        return None
+    frame.data[_JIE_SHIBEI_ARMOR_KEY] = True
+    player = host.state.player(owner)
+    host.apply_armor_change(frame, owner, min(player.armor + 3, ARMOR_CAP))
+    return None
+
+
+JIE_SHIBEI_DEF = SkillDef(
+    skill_id=JIE_SHIBEI,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        # 开局那 3 点护甲（只有界版这一句）。
+        Hook(Timing.GAME_START, handler=_jie_shibei_start),
+        # 受伤后的两支与 OL 版**逐字相同** ⇒ 同一个回调、同一条归属判据（票 12）。
+        Hook(Timing.DAMAGE_AFTER_TAKE, handler=_shibei, condition=_shibei_condition),
+    ),
+    requirement=(
+        "锁定技：游戏开始时，你获得 3 点护甲；当你受到伤害后，若此次伤害是你本回合受到的"
+        "第一次伤害，你回复 1 点体力，否则你失去 1 点体力"
+    ),
+)
+"""界沮授移动版【矢北】：锁定技 ⇒ 不问是否发动、无步骤（`shapes.md` §2 第 1 行的锁定技变体）。
+
+两条钩子：``GAME_START`` 发护甲、``DAMAGE_AFTER_TAKE`` 跑与 OL 版**共用的** ``_shibei``
+（归属判据也共用同一条 ``_hurt_owner``，票 12 / P3）。
 """
 
 
@@ -2363,4 +2456,4 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
         )
         for skill in DAMAGE_AFTER_SKILLS
     )
-    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF, SHIBEI_DEF)
+    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF, SHIBEI_DEF, JIE_SHIBEI_DEF)

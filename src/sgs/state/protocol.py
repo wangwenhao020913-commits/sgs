@@ -114,6 +114,13 @@ class WindowCause(str, Enum):
     1 点体力」。它复用既有的 ``RESPOND`` + ``RespondMode.USE`` 面（与借刀同一扇窗），
     只多一个成因值，使记录流与界面文案都读得出"这次询问来自乱武"（借用
     ``BORROWED_SWORD`` 会让提示条与 ``Pass`` 按钮说谎成"交出武器"）。
+
+    **本枚举是"要牌窗口"的成因闭集**（yijiang-2014-round2 票 16）：每个成员都必须被
+    :data:`sgs.skills.catalog.CARD_REQUEST_WINDOWS` 的某一行认领（写清那扇窗口的 scope /
+    mode / 要的牌 / 需要还是可以 / 谁可以参与）。新加一个成员 = 新加一扇窗口，
+    ``tests/test_card_request_windows.py`` 与 ``tests/test_ai_adaptation.py`` 会同时逼出
+    那一次裁定；``REJUDGE`` 是其中"登记但排除"的一行（改判不是使用 / 打出，提供者与
+    转化都不参与）。
     """
 
     NULLIFY = "NULLIFY"
@@ -235,10 +242,12 @@ class StepPool(_FrozenModel):
 
 
 class Step(_FrozenModel):
-    """预发动清单的一步（W4-1）：``{name, zones, min, max, pool, order}``。
+    """预发动清单的一步（W4-1）：``{name, kind, zones, min, max, pool, order}``。
 
-    ``name`` = 步骤键（效果按它从答案里取）；``zones`` = 选牌步铺哪些区（座位步 / 选项步
-    为空）；``min`` / ``max`` = 张数区间。``max = None`` 表示"全部可选的牌"（声明面）；
+    ``name`` = 步骤键（效果按它从答案里取）；``kind`` = 这一步**选什么**（选牌 / 座位 /
+    选项，规则级事实，由渲染器按声明类型给，读取方不按载荷形状反推）；``zones`` = 选牌步
+    铺哪些区（座位步 / 选项步为空）；``min`` / ``max`` = 张数区间。``max = None`` 表示
+    "全部可选的牌"（声明面）；
     渲染器会把它解析成**当前可选牌数**（与 ``SelectionSpec.total`` 同一条解析），故下发的
     清单里通常是整数。``pool`` = 候选池（见 :class:`StepPool`）；
     ``order`` = 步骤序号（0 起）。
@@ -278,11 +287,27 @@ class Step(_FrozenModel):
     （来源牌 id 是询问者的手牌）。
     """
 
+    kind: Literal["card", "seat", "option"] | None = None
+    """这一步**选什么**的类型（`card` 选牌 / `seat` 选座位 / `option` 选选项文本）。
+
+    由渲染器按**步骤声明类型**填（:func:`sgs.skills.flow.manifest` 的
+    ``PickCards`` / ``PickProvide`` → ``card``，``PickSeats`` → ``seat``，
+    ``PickOption`` → ``option``）：这是**规则级事实**，不该由读取方按载荷形状反推。
+    反例（票 18 的评审 Fix 2）：目标由牌名决定的座位上，某一行是"没有可选目标"
+    （``options = []``、``max = 0``）；界面若拿**第一行**的 ``options[0]`` 猜类型，
+    这一行排在最前时整步会被读成选项步，于是"自动跳过空步"那一支永不触发。
+
+    缺省 ``None`` = 旧载荷（合成夹具 / 退化前的清单），读取方退回形状判据。
+    **不进记录流**（清单整体在询问字段里 ``exclude``），缺省时不序列化。
+    """
+
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)
         if not data.get("groups"):
             data.pop("groups", None)
+        if data.get("kind") is None:
+            data.pop("kind", None)
         return data
 
 
@@ -470,9 +495,10 @@ class SelectOptionsContext:
     """``SELECT_OPTIONS`` 候选生成的类型化载荷（jie-feng-batch2 票 01a）：**多选**选项闭集。
 
     与 :class:`SelectOptionContext` 的差别只有"答案是一组值"：``options`` 仍是全部选项
-    （含置灰），可提交的组合由 ``legal_actions`` 表达（每一问全量枚举 [min,max] 内、
-    不含置灰项的子集）。``min_selected`` 缺省 0 = 允许一个都不选（空集是候选里的第一条，
-    故超时兜底天然是"什么都不做"）；``max_selected=None`` = 只受选项数约束。
+    （含置灰），可提交的组合由 ``legal_actions`` 表达（``enumerate_candidates=True`` 时是
+    每一问全量枚举 [min,max] 内、不含置灰项的子集）。``min_selected`` 缺省 0 = 允许一个都
+    不选（空集是候选里的第一条，故超时兜底天然是"什么都不做"）；``max_selected=None`` =
+    只受选项数约束。
     """
     skill_id: str
     options: tuple[str, ...]
@@ -481,6 +507,18 @@ class SelectOptionsContext:
     min_selected: int = 0
     max_selected: int | None = None
     option_texts: Mapping[str, str] = field(default_factory=dict)
+    enumerate_candidates: bool = True
+    """是否按**子集**枚举候选（yijiang-2014-round2 票 21 的加法；先例 = ``ArrangeContext``）。
+
+    ``True`` = 既有行为（[min,max] 内、不含置灰项的每个子集各一条候选）。``False`` =
+    **不枚举档**：只给一条**骨架兜底**（``options`` 序的前 ``min_selected`` 个可选项），
+    答案由界面 / 参与者自己组装，引擎在收答案时按
+    :func:`~sgs.effects.actions.is_legal_option_set` 校验形状（池内 / 无重复 / 无置灰 /
+    长度在区间内）。服务的是"子集数随座位数组合爆炸"的多人座位多选（8 人局、上限 4 ⇒
+    162 条子集）。与 ``count`` / ``split`` 同一姿态：**不进询问记录**（``_build_query``
+    对 ``SELECT_OPTIONS`` 不序列化本载荷，询问上只落一个 ``exclude=True`` 的
+    ``structural`` 标志），故既有金录像逐字节不变。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +599,15 @@ class PlayerPublic(_FrozenModel):
     seat: int
     hp: int
     hp_max: int
+    armor: int = Field(default=0, exclude=True)
+    """**护甲值**：与体力并列的第二条体力轴（yijiang-2014-round2 票 07 / W7）。
+
+    公开事实（画在座位卡的血条上），但 ``exclude`` 与 ``chained`` / ``wine_active`` /
+    ``flipped`` 同一条纪律：**不进记录流**的询问视图，故 47 条金录像逐字节不变；网页载荷
+    由 ``tools/sgs_web/display.py:seat_display`` 补下（``visible_snapshot`` 只做投影的
+    ``model_dump``，拿不到 ``exclude`` 字段）。变化经 ``armor_change`` delta 下发
+    （``hp_change`` 同档：公开事实、原样下发），回放逐条重建。
+    """
     hand_count: int
     alive: bool
     equip: tuple[CardRef, ...]
@@ -1080,6 +1127,18 @@ class SelectOptionsQuery(_QueryBase):
     min_selected: int = 0
     max_selected: int | None = None
     option_texts: dict[str, str] = Field(default_factory=dict)
+    structural: bool = Field(default=False, exclude=True)
+    """不枚举档：答案**由界面 / 参与者构造**、只做形状校验（yijiang-2014-round2 票 21）。
+
+    与 :attr:`ArrangeQuery.structural` 同一档、同一理由（``huo-shenzhugeliang`` 票 02 的
+    「不枚举档」推广到多选）：``True`` 时本询问的 ``legal_actions`` 只有一条**骨架兜底**
+    （``options`` 序的前 ``min_selected`` 个可选项，只保证"每一问都有至少一个合法应答"），
+    界面 / AI 可以提交**任何**形状合法的 ``SelectOptions``（引擎按
+    :func:`~sgs.effects.actions.is_legal_option_set` 校验：池内 / 无重复 / 无置灰 /
+    长度在 ``[min_selected, max_selected]`` 内）。服务的是"子集数随座位数组合爆炸"的
+    多人座位多选（8 人局、上限 4 ⇒ 162 条子集）。``exclude=True`` ⇒ 不进记录流，既有
+    47 条金录像逐字节不变。
+    """
 
 
 class DistributeQuery(_QueryBase):

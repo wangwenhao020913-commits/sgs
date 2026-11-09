@@ -23,6 +23,50 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "chenqun",
+      "name": "陈群",
+      "true_name": "陈群",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "yijiang-2014",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "dingpin",
+          "name": "定品",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "faen",
+          "name": "法恩",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "guyong",
+      "name": "顾雍",
+      "true_name": "顾雍",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "yijiang-2014",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shenxing",
+          "name": "慎行",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "bingyi",
+          "name": "秉壹",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

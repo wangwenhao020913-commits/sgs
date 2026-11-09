@@ -255,9 +255,23 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # jie-feng-batch2 票 02：界张角移动版三条（雷击 / 鬼道 / 黄天）⇒ 193 → 196、武将技 169 → 172。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 196 → 197、武将技 172 → 173；
     # 票 02：界顾雍移动版【慎行】⇒ 197 → 198、武将技 173 → 174。
-    assert len(CATALOG) == 198
-    assert len(equipment) == 22, "装备不变：本票一条是武将技"
-    assert len(heroes) == 174
+    # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 198 → 199、武将技 174 → 175
+    # （【法恩】C1 摘出 ⇒ 本将只带一条技能入池）。
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200、武将技 175 → 176
+    # （【秉壹】C3 摘出 ⇒ 本将只带一条技能入池）。
+    # yijiang-2014 票 09（W5b）：同一个顾雍补【秉壹】⇒ 200 → 201、武将技 176 → 177
+    # （座位多选面落地后解锁；数据行同一条武将，启用版本 / 真名都不变）。
+    # yijiang-2014 票 08（W4b）：同一个陈群补【法恩】（状态位写入口解封后）⇒ 201 → 202、
+    # 武将技 177 → 178（数据行同一条武将，启用版本 / 真名都不变）。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204、
+    # 武将技 178 → 180（装备 22 不变：本票两条都是武将技）。
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205、武将技 180 → 181
+    # （数据行同一条武将，启用版本 / 真名都不变；装备 22 不变）。
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206、武将技 181 → 182
+    # （同样只加技能、不加武将：启用版本 98 / 真名 64 都不变，装备 22 不变）。
+    assert len(CATALOG) == 206
+    assert len(equipment) == 22, "装备不变：本票加的是武将技"
+    assert len(heroes) == 182
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -290,7 +304,13 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # jushou-lusu 票 01：沮授两条 ⇒ 164 → 166；票 02：鲁肃两条 ⇒ 166 → 168。
     # jie-feng-batch2 票 01：界夏侯渊移动版【神速】⇒ 168 → 169；票 02：界张角移动版三条 ⇒ 169 → 172。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 172 → 173；票 02：界顾雍移动版 ⇒ 174。
-    assert len(expected) == 174
+    # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 174 → 175。
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 175 → 176；票 09 补【秉壹】⇒ 177。
+    # yijiang-2014 票 08（W4b）：同一个陈群补【法恩】⇒ 177 → 178。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条 ⇒ 178 → 180。
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 180 → 181。
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 181 → 182。
+    assert len(expected) == 182
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -362,10 +382,17 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
             for hook in definition.hooks:
                 by_timing[hook.timing].append(skill.id)
         for timing, owners in by_timing.items():
-            if len(owners) > 1:
-                duplicated[f"{hero.id}:{timing.value}"] = owners
+            # 判据是"**两条技能**同一时机"（同一张武将牌上的两段彼此独立的机制）：
+            # 一条技能自己在一个时机上挂两条钩子是另一回事——**界【激将】**就是这种
+            # （yijiang-2014-round2 票 20：② 的收益段与机械锁的解锁观测同一时机，
+            # 两者互不消费对方的答案），故按技能 id 去重后再判。
+            if len(set(owners)) > 1:
+                duplicated[f"{hero.id}:{timing.value}"] = list(dict.fromkeys(owners))
 
-    assert not duplicated, f"同一时机的多条技能必须有重新裁定：{dict(duplicated)}"
+    assert not duplicated, (
+        "同一时机上挂着**两条不同的技能**时必须有重新裁定"
+        f"（同一条技能的多个钩子不算：{dict(duplicated)}）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1383,22 @@ def _bengkuai_probe_state() -> GameState:
     )
 
 
+def _bingyi_probe_state() -> GameState:
+    """【秉壹】的正面对照需要"我手上有牌"（0 张手牌不给入口 ⇒ 条件为假）。
+
+    默认探针局面里 ME（座位 1）的手牌**故意为空**（【连营】要"移动后手牌为空"），
+    故另给一份：ME 两张手牌（【秉壹】的"展示所有手牌"要真的有牌可亮）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hand=tuple(cards_of_type(PACK, "dodge")[:2])),
+            SeatSpec(),
+        ],
+    )
+
+
 def _baonue_probe_state() -> GameState:
     """【暴虐】的正面对照：伤害来源（座位 0）与 ME 同为**群**势力，座位 2 是魏。
 
@@ -1583,7 +1626,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _jiuyuan_probe_state()
     if skill_id == "hero.tao_liubei.congtao":
         return _congtao_probe_state()
-    if skill_id == "hero.jushou.jianying":
+    if skill_id in ("hero.jushou.jianying", "hero.jie_jushou_mobile.jianying"):
+        # 界【渐营】的 ① 与 OL 版**逐字同句**、复用同一个条件对象 ⇒ 同一份正面局面。
         return _jianying_probe_state()
     if skill_id == "hero.lu_su_mobile.haoshi":
         return _haoshi_probe_state()
@@ -1605,6 +1649,9 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _bengkuai_probe_state()
     if skill_id == "hero.dongzhuo_mobile.baonue":
         return _baonue_probe_state()
+    if skill_id in ("hero.guyong.bingyi", "hero.jie_guyong_mobile.bingyi"):
+        # 两版共用同一个条件对象（票 13）⇒ 同一份正面局面（"我手上有牌"）。
+        return _bingyi_probe_state()
     if skill_id == "hero.tao_caocao.changyi":
         return _changyi_probe_state()
     if skill_id.startswith("hero.shen_zhugeliang."):
@@ -1640,7 +1687,7 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
 
     帧里的 ``target`` / ``targets`` / ``source`` / 移动载荷都指向**别人**（座位 0 / 座位 1），
     只有 ``MATCH_OWNER_KEY`` 由检查本身按 ME / OTHER 改写。逐条的"我"分别是：
-    受伤者（【奸雄】【遗计】【刚烈】）、受伤者 + 拿来源牌的持有者（【反馈】）、
+    受伤者（【奸雄】【遗计】【刚烈】【矢北】）、受伤者 + 拿来源牌的持有者（【反馈】）、
     本次【杀】的目标（【流离】）、刚失去最后一张手牌 / 装备的失主（【连营】【枭姬】）。
     """
     move_lianying = MoveEvent(
@@ -1713,6 +1760,10 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # jushou-lusu 票 01【渐营】：使用牌帧的 source 是我、且这道条件还要读座位事实
         # （本阶段上一张牌）——正面局面见 :func:`_jianying_probe_state`。
         "hero.jushou.jianying": (
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
+        ),
+        # yijiang-2014-round2 票 01（W3）界【渐营】①：同一个条件对象、同一份正面局面。
+        "hero.jie_jushou_mobile.jianying": (
             _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
         # M6 票 02【集智】：使用牌帧的 source 是我、牌面是非延时类锦囊。
@@ -1871,6 +1922,17 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.jie_liubei.jijiang": (
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=0),
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=0),
+            # yijiang-2014-round2 票 20 的三条**解锁钩子**（机械锁）：①「持有者使用 /
+            # 打出【杀】」×2（牌名判族 + 来源 = 持有者）②「持有者自己的新出牌阶段开始」。
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(source=ME),
+        ),
+        # 标准【激将】没有 ② 的收益段，只有同一组三条解锁钩子（票 20）。
+        "hero.liubei.jijiang": (
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME),
+            _HookFrame(source=ME),
         ),
         "hero.jie_zhaoyun.yajiao": (
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME, from_hand=True),
@@ -1978,6 +2040,19 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         #   座位 2 = 魏 ⇒ 持有者换成别人后判据翻假）。
         "hero.dongzhuo_mobile.bengkuai": (_HookFrame(source=ME),),
         "hero.dongzhuo_mobile.baonue": (_HookFrame(source=0),),
+        # yijiang-2014 票 09：顾雍【秉壹】——**我的**结束阶段（阶段体帧的 source = 我）∧
+        # 我有手牌（0 张不给入口，Q3 = A）。正面局面见 :func:`_bingyi_probe_state`；
+        # 持有者换成座位 2 后 source 与持有者对不上 ⇒ 条件翻假。
+        "hero.guyong.bingyi": (_HookFrame(source=ME),),
+        # yijiang-2014-round2 票 13（P4）：界顾雍移动版的【秉壹】与 OL 版**同一个条件对象**
+        # ⇒ 同一帧、同一份正面局面（差别只在 effect 里的「均相同」判据）。
+        "hero.jie_guyong_mobile.bingyi": (_HookFrame(source=ME),),
+        # yijiang-2014-round2 票 12（P3）【矢北】OL / 界两版的受伤那一支：条件是**归属**——
+        # 受伤的是我（`_hurt_owner`，与【耀武】/【刚烈】/【归心】等同一条判据）。两版共用
+        # 同一个条件对象；界版的 `GAME_START`（发 3 点护甲）没有 condition，故各只有一帧。
+        # 用户 2026-11-09 实机报障："当你受到伤害后"漏了自校 ⇒ 别人挨打沮授也回血。
+        "hero.jushou.shibei": (_HookFrame(target=ME),),
+        "hero.jie_jushou_mobile.shibei": (_HookFrame(target=ME),),
     }
 
 
@@ -1995,12 +2070,29 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
         "条件写的是『死者 ≠ 我自己』（MATCH_OWNER_KEY 对 target），把持有者换成别人后"
         "仍然成立；这正是豁免表存在的形态（与【奋威】/【定乱】同一类『不关于我』）"
     ),
+    "hero.chenqun.faen": (
+        "yijiang-2014-round2 票 10（P1）【法恩】：触发条件是**方向**——这一次 `STATE_CHAINED`"
+        "是「未横置 → 横置」而不是**重置**（`change.chained is True`；牌面写「横置**后**」，"
+        "重置不是横置，用户 2026-11-09 实机报障）。条件关于『这次变化』、不关于持有者："
+        "任何角色被横置都要问陈群，把持有者换成别人后条件仍然成立，没有『我』可自校"
+        "（与【奋威】/【定乱】/【行殇】同一类「不关于我」）"
+    ),
+    "hero.jie_chenqun_mobile.faen": (
+        "yijiang-2014-round2 票 11（P2）界陈群移动版【法恩】：牌面与 OL 陈群【法恩】**逐字"
+        "相同** ⇒ 两条 `Hook` 与方向判据都是**同一组对象**（`condition is` 判据直指票 10 的"
+        "`_faen_chain_is_set`），故豁免理由与上一格**同源**：条件关于『这次变化的方向』、"
+        "不关于持有者，换成别人当持有者后条件仍然成立，没有『我』可自校。条目单独登记是按"
+        "机械闸的键（技能 id）走——每个带条件的技能各一格，不是第二份理由"
+    ),
 }
 """**豁免表**：技能 id → "为什么它的条件不需要持有者判据"。
 
 姿态照 `tests/test_fuzz.py:OVER_CAP_BY_DESIGN`：例外必须显式列名 + 写明理由，覆盖断言会核
 "正表 ∪ 这张表 == 全部带条件的钩子"，故新增一条同型钩子时逼你二选一（写探针 / 登记豁免）。
 M6 票 07 起不再为空：【奋威】的条件是"这张牌"的属性，不是"我"的属性（见上表理由）。
+yijiang-2014-round2 票 10 加【法恩】：条件是"往哪个方向变"，同样不是"我"的属性。
+票 11 加界陈群移动版【法恩】：与 OL 那一格**同一组判据对象**（牌面逐字相同），按技能 id
+各登记一格是机械闸的口径，不是第二份理由。
 """
 
 
@@ -2024,6 +2116,8 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
         "hero.jie_ganning.fenwei",
         "hero.feng_yujin.dingluan_mark",
         "hero.caopi_mobile.xingshang",
+        "hero.chenqun.faen",
+        "hero.jie_chenqun_mobile.faen",
     }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
         assert reason.strip(), f"{skill_id} 的豁免理由不能为空"
@@ -2347,14 +2441,17 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.haozhao.zhengku": "触发技能",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
-    # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
+    # 候选提供者 3（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
     # （它另带②的两条零步钩子，但"候选提供者"是它在本表里的归类——见 zero_step 的排除）
     "hero.caocao.hujia": "候选提供者",
     "hero.jie_caocao.hujia": "候选提供者",
-    "hero.liubei.jijiang": "候选提供者",
-    # M6 票 16：界【激将】= ①求助窗口 + ②的两条零步钩子（按"提供者"单列，同界【护驾】）。
-    "hero.jie_liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
+    # yijiang-2014-round2 票 20：标准 / 界【激将】多了出牌阶段主动**使用【杀】**的声明级
+    # 流水线（`SkillDef.flow`：选目标 → 求助窗口 → 主公使用）⇒ 机械谓词「非空流水线 + 钩子」
+    # 让它们落进**触发技能**格；①的求助窗口（`PROVIDERS`）只是同一份声明的第二条入口，
+    # 与界【渐营】/【蛊惑】同一条互斥纪律（一格一技）。
+    "hero.liubei.jijiang": "触发技能",
+    "hero.jie_liubei.jijiang": "触发技能",
     # 风包·移动版于吉【蛊惑】：出牌阶段入口自 `04` 票 §3 起是**两步流水线**（选牌 → 声明，
     # 用户 2026-11-02 的 Q3A 裁定）⇒ 归「主动技能」格。它的**逐座位质疑**仍是段机里的手写
     # 循环（流水线语言没有循环步骤），但那一半住在 `SkillFlow.effect` 里，不是"手写钩子"
@@ -2434,9 +2531,38 @@ SKILL_SHAPE: dict[str, str] = {
     # `PickCards` → `PickSeats` 流水线，判定与三分支住 effect；非锁定、无钩子 / 接缝 /
     # 修饰器）⇒ 主动技能。
     "hero.jie_chenqun_mobile.dingpin": "主动技能",
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（`STATE_FLIPPED` /
+    # `STATE_CHAINED` 两条状态位钩子 + **零步流水线**，回调与 OL 陈群【法恩】同一组对象；
+    # 非锁定 ⇒ 机械判据落在「零步技能」格）。
+    "hero.jie_chenqun_mobile.faen": "零步技能",
     # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（A 族 + 单步 `PickCards` 流水线，
     # 同色 / 异色的两段摸牌住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
     "hero.jie_guyong_mobile.shenxing": "主动技能",
+    # yijiang-2014 票 02：一将成名-2014·陈群【定品】（A 族 + 两步 `PickCards` → `PickSeats`
+    # 流水线，判定与黑 / 红两分支住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
+    # 【法恩】C1 摘出 ⇒ 本将只有这一行。
+    "hero.chenqun.dingpin": "主动技能",
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（A 族 + 单步 `PickCards` 流水线，
+    # 弃两张 → 恒摸一张住 effect；非锁定、无钩子 / 接缝 / 修饰器）⇒ 主动技能。
+    # 【秉壹】原随 C3（座位多选面）摘出，票 09 解锁后是下面那一行。
+    "hero.guyong.shenxing": "主动技能",
+    # yijiang-2014 票 09：顾雍【秉壹】（`PHASE_FINISH` 阶段体 + **零步流水线**，展示 /
+    # 判颜色 / 座位多选 / 逐座位摸牌全住 effect ⇒ 机械判据落在「零步技能」格；
+    # 座位步是**手写**的，不是 `PickSeats` 步——条件不成立时展示必须已经发生）。
+    "hero.guyong.bingyi": "零步技能",
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】= 同一条阶段体 + 同一份手写主体
+    # （各自一份零步流水线；条件多「或类别」一支）⇒ 与 OL 那一行同一格。
+    "hero.jie_guyong_mobile.bingyi": "零步技能",
+    # yijiang-2014 票 08（W4b）：陈群【法恩】（`STATE_FLIPPED` / `STATE_CHAINED` 两条钩子 +
+    # **零步流水线**，摸一张住 effect；非锁定、无修饰器 / 接缝）⇒ 零步技能格。
+    "hero.chenqun.faen": "零步技能",
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】= `USE_ON_USE` 钩子 + **非空**的
+    # A 族流水线（选牌 → 牌名），非锁定 ⇒ 机械谓词落在「触发技能」格：
+    # `_flow_backed_active_ids()` 要求"没有钩子"，`triggered` 正好收"有钩子 + 非空流水线 +
+    # 非锁定"（裁定票 06 的 F2 预告的就是这条读法）。【矢北】= 锁定技 + 开局护甲 / 受伤后
+    # 两条钩子、无流水线 ⇒ 锁定技格。
+    "hero.jie_jushou_mobile.jianying": "触发技能",
+    "hero.jie_jushou_mobile.shibei": "锁定技",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2463,14 +2589,27 @@ SHAPE_COUNTS: dict[str, int] = {
     # jushou-lusu 票 02：鲁肃【缔盟】（A 族 + 两步座位流水线）⇒ 主动技能 30 → 31。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 主动技能 32 → 33；
     # 票 02：界顾雍移动版【慎行】⇒ 33 → 34。
-    "主动技能": 34,
-    "触发技能": 26,
+    # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 主动技能 34 → 35。
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 主动技能 35 → 36。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】是"钩子 + 非空流水线"的 A 族技能
+    # ⇒ 机械谓词落在**触发技能**格（主动技能因此**不加**）⇒ 26 → 27。
+    "主动技能": 36,
+    # yijiang-2014-round2 票 20：标准 / 界【激将】从「候选提供者」移进「触发技能」
+    # （声明级 `flow`：出牌阶段主动使用【杀】的入口）⇒ 27 → 29；候选提供者 5 → 3。
+    "触发技能": 29,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
     # jushou-lusu 票 01：沮授【渐营】（`USE_ON_USE` 零步流水线）⇒ 零步技能 34 → 35。
     # jushou-lusu 票 02：鲁肃【好施】（`PHASE_DRAW` 零步流水线）⇒ 35 → 36。
-    "零步技能": 37,
+    # yijiang-2014 票 09：顾雍【秉壹】（`PHASE_FINISH` 零步流水线 + 手写座位多选面）
+    # ⇒ 37 → 38。
+    # yijiang-2014 票 08（W4b）：陈群【法恩】（两条状态位钩子 + 零步流水线）⇒ 38 → 39。
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（同一份零步流水线，第二条
+    # `CATALOG` 条目）⇒ 39 → 40。
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（`PHASE_FINISH` + 各自的零步
+    # 流水线，手写主体与 OL 顾雍【秉壹】同一份）⇒ 40 → 41。
+    "零步技能": 41,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2488,11 +2627,13 @@ SHAPE_COUNTS: dict[str, int] = {
     "多轮技能": 20,
     # lin-batch2 票 03：贾诩移动版【完杀】/【帷幕】（两条纯修饰器）⇒ 锁定技 40 → 42。
     # jushou-lusu 票 01：沮授【矢北】（锁定技 + 受伤后钩子、无流水线）⇒ 锁定技 42 → 43。
-    "锁定技": 43,
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【矢北】（锁定技 + 开局护甲 / 受伤后
+    # 两条钩子、无流水线）⇒ 43 → 44。
+    "锁定技": 44,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
-    "候选提供者": 5,
+    "候选提供者": 3,
     "觉醒技": 3,
 }
 """每格的条数（spec §4.4；M6 票 18 后
@@ -2597,6 +2738,95 @@ def _flow_backed_active_ids() -> frozenset[str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# W6 / F2（yijiang-2014-round2 票 06）：A 族声明也能带钩子
+# ---------------------------------------------------------------------------
+
+
+def _triggered_ids() -> frozenset[str]:
+    """机械读出的「触发技能」格：**非空**流水线 + 钩子 / 接缝（觉醒 / 排列 / 锁定各单列）。
+
+    与 :func:`_flow_backed_active_ids` 同形、同为两处读取：形态逐格核对，以及"提供者里谁
+    已经被别的格认领"。后者的第二个消费者是界【渐营】（yijiang-2014-round2 票 17）：
+    ① 的钩子 + ② 的两步流水线让它进「触发技能」格，而它同时登记了 ② 的**提供者**入口
+    （`PROVIDERS` 里有它，与【蛊惑】同姿态）——本表**一格一技**，故这里按同一条互斥纪律
+    把它从「候选提供者」那一格扣掉（界【护驾】的 ② 钩子是**零步**、不命中"非空流水线"，
+    仍按「候选提供者」列格）。标准 / 界【激将】（yijiang-2014-round2 票 20）同理：出牌阶段
+    主动使用【杀】的声明级流水线让它们进了本格，候选提供者那一格因此扣掉它们。
+    """
+    return frozenset(
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if (_steps := _flow_steps(skill_id)) is not None
+        and _steps != ()
+        and (definition.hooks or definition.seams)
+        and definition.deck_arrange is None
+        and definition.skill_type is not SkillType.AWAKENING
+        and not definition.locked
+    )
+
+
+def test_an_active_declaration_can_carry_hooks_and_a_flow_in_one_definition(monkeypatch):
+    """``ActiveSkill.hooks`` 由声明透传进**同一条** ``SkillDef``（缺省空 ⇒ A 族既有声明零改动）。
+
+    为什么必须住进**同一条**声明：``CATALOG`` 是 ``{skill_id: definition}`` 的字典推导，
+    同 id 的后者**静默覆盖**前者——下面用两条同 id 的定义把这条语义钉出来；一条声明同时带
+    钩子与 A 族流水线（界【渐营】的 ① + ②）才让两半都留下。
+    """
+    from sgs.skills import active as active_module
+    from sgs.skills.active import ActiveSkill, active_skill_definitions
+    from sgs.skills.catalog import CarrierKind, Hook, SkillDef
+    from sgs.skills.flow import PickCards, SkillFlow
+    from sgs.skills.preactivation import _build_flows
+
+    def _noop(host, frame):
+        del host, frame
+        return None
+
+    def _effect(host, frame, answers):
+        del host, frame, answers
+        return None
+
+    hook = Hook(Timing.PHASE_DRAW, handler=_noop)
+    flow = SkillFlow(
+        name="w6_f2_probe",
+        steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1),),
+        effect=_effect,
+    )
+    declaration = ActiveSkill(
+        "w6_probe",
+        "f2",
+        lambda state, context, current: current,
+        flow=flow,
+        hooks=(hook,),
+        requirement="探针：一条声明同时带钩子与 A 族流水线",
+    )
+    monkeypatch.setattr(active_module, "ACTIVE_SKILLS", (declaration,))
+
+    (definition,) = active_skill_definitions()
+
+    assert definition.skill_id == "hero.w6_probe.f2"
+    assert definition.hooks == (hook,), "缺失 F2 时这里恒为 ()（透传就是那 1 行）"
+    assert [modifier.point for modifier in definition.modifiers] == [
+        ModifierPoint.CANDIDATES
+    ], "A 族的候选挂点仍在这一份定义上"
+    flows = _build_flows(active=(declaration,), catalog={definition.skill_id: definition})
+    assert flows[definition.skill_id] == ((None, flow),), "同一份声明的非空流水线照样登记"
+
+    hooks_only = SkillDef(
+        skill_id=definition.skill_id,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        hooks=(hook,),
+    )
+    # CATALOG 的合并姿态是 `{skill_id: definition}` 的字典推导：同 id 的**后者胜**。
+    split = {item.skill_id: item for item in (definition, hooks_only)}
+    assert split[definition.skill_id] is hooks_only
+    assert split[definition.skill_id].modifiers == (), (
+        "拆成两条同 id 的声明 ⇒ 后者整条覆盖前者（这里 A 族候选挂点消失）；F2 就是修这个"
+    )
+
+
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
@@ -2604,7 +2834,13 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # jushou-lusu 票 01：沮授两条 ⇒ 188 → 190；票 02：鲁肃两条 ⇒ 190 → 192。
     # jie-feng-batch2 票 01：界夏侯渊移动版【神速】⇒ 192 → 193；票 02：界张角三条 ⇒ 193 → 196。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】⇒ 196 → 197；票 02：界顾雍移动版 ⇒ 198。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 198
+    # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 198 → 199。
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201。
+    # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线）⇒ 201 → 202。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步技能）⇒ 204 → 205。
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步技能）⇒ 205 → 206。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 206
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2629,24 +2865,19 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     # 觉醒技按**类型**单列一格；两条觉醒技都有流水线（零步 / 一步），故从"零步 / 触发"
     # 两个机械谓词里排除，避免一条技能落进两格。
     active = _flow_backed_active_ids()
-    triggered = frozenset(
-        skill_id
-        for skill_id in CATALOG
-        if (_steps := _flow_steps(skill_id)) is not None
-        and _steps != ()
-        and (CATALOG[skill_id].hooks or CATALOG[skill_id].seams)
-        and CATALOG[skill_id].deck_arrange is None
-        and skill_id not in awakening
-        # lin-batch2 票 02：**锁定技按类型单列一格**（与 :data:`zero_step` 同一条互斥纪律）。
-        # 董卓移动版【崩坏】是第一条"锁定 + 非空流水线 + 带钩子"的技能（界【英姿】也锁定，
-        # 但它的流水线是零步 ⇒ 本来就落在零步谓词之外），不扣掉它就会同时进「触发技能」格。
-        and not CATALOG[skill_id].locked
-    )
+    # lin-batch2 票 02：**锁定技按类型单列一格**（与 :data:`zero_step` 同一条互斥纪律）。
+    # 董卓移动版【崩坏】是第一条"锁定 + 非空流水线 + 带钩子"的技能（界【英姿】也锁定，
+    # 但它的流水线是零步 ⇒ 本来就落在零步谓词之外），不扣掉它就会同时进「触发技能」格。
+    triggered = _triggered_ids()
     # 「主动技能」这一格要在 providers 之前定格：移动版于吉【蛊惑】**同时**是有流水线的
     # 主动技与提供者（出牌阶段入口 + "需要牌时"的提供者），而本表一格一技，取它更根本的
     # 那一格——发动主体是那条两步流水线（提供者只是它的第二个入口）。故 providers 这里
     # 扣掉 flow-backed 的主动技（与"锁定技 / 觉醒技单列"同一条互斥纪律）。
-    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - active
+    # 界【渐营】（yijiang-2014-round2 票 17）同理：① 的钩子 + ② 的两步流水线让它按
+    # 「触发技能」列格，② 的提供者入口是第二条路 ⇒ 也从 providers 扣掉（`_triggered_ids`）。
+    providers = (
+        frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+    ) - active - triggered
     zero_step = frozenset(
         skill_id
         for skill_id in CATALOG
@@ -2695,6 +2926,10 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         # M6 票 01：**非主公技**的提供者（移动版于吉【蛊惑】的"需要牌时"入口）——
         # `PROVIDERS` 由 `register_provider` 在 `catalog.py` 末尾并入，不是靠主公技枚举。
         "hero.yuji_mobile.guohuo",
+        # yijiang-2014-round2 票 17：界【渐营】② 接入票 16 登记表里的全部要牌窗口
+        # （求桃 / 借刀 / 南蛮 / 万箭 / 决斗 / 乱武 / 护驾 / 激将）。它也带 ① 的钩子 ⇒
+        # 形态表按「触发技能」列格（提供者入口只是同一份声明的第二条路）。
+        "hero.jie_jushou_mobile.jianying",
     }
 
     multi_round = _shape_members("多轮技能")
@@ -2750,8 +2985,17 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # ⇒ 外 91 → 92。票 02：鲁肃【好施】（零步）/【缔盟】（主动）各一条流水线 ⇒ 内 98 → 100。
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（两步流水线）⇒ 内 103 → 104；
     # 票 02：界顾雍移动版【慎行】（单步流水线）⇒ 内 104 → 105。
-    assert len(inside) == 105
-    assert len(outside) == 93
+    # yijiang-2014 票 02：一将成名-2014·陈群【定品】（两步流水线）⇒ 内 105 → 106。
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（单步流水线）⇒ 内 106 → 107。
+    # yijiang-2014 票 09：顾雍【秉壹】（零步流水线，形态归「零步技能」）⇒ 内 107 → 108。
+    # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线，形态归「零步技能」）⇒ 内 108 → 109。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】（A 族两步流水线，形态归
+    # 「触发技能」）⇒ 内 109 → 110；【矢北】（锁定技、无 flow）⇒ 外 93 → 94。
+    # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步流水线）⇒ 内 110 → 111。
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步流水线）⇒ 内 111 → 112。
+    # yijiang-2014-round2 票 20：标准 / 界【激将】带声明级流水线 ⇒ 内 112 → 114、外 94 → 92。
+    assert len(inside) == 114
+    assert len(outside) == 92
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉
@@ -2759,8 +3003,11 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # （与觉醒技单列同一姿态）——"有没有 flow"不再是划分步骤语言内外的充分条件。
     locked = {skill_id for skill_id in CATALOG if CATALOG[skill_id].locked}
     # "提供者"这一格只收**按提供者单列**的那些：同时有主动技流水线的（【蛊惑】）归「主动
-    # 技能」格，故这里先扣掉它们——否则一条 inside 的技能会同时被当成 outside 的证据。
-    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - _flow_backed_active_ids()
+    # 技能」格、同时按「触发技能」列格的（界【渐营】：① 的钩子 + ② 的提供者入口）同理，
+    # 故这里先扣掉它们——否则一条 inside 的技能会同时被当成 outside 的证据。
+    providers = (
+        frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+    ) - _flow_backed_active_ids() - _triggered_ids()
     flow_backed = {
         skill_id for skill_id in CATALOG if flow_for(skill_id) is not None
     }

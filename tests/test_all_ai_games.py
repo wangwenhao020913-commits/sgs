@@ -23,6 +23,7 @@ from sgs.agents import (
     HeuristicPlayer,
     TapePlayer,
     is_designation_use,
+    is_structural_answer,
     is_structured_activation,
     tape_from_journal,
 )
@@ -66,6 +67,9 @@ class _IllegalAnswerScan:
     W5-02b：借刀的复合使用同样不在 ``legal_actions`` 里，但必须是本次**附带指定池**
     （``query.designation_actions``）的成员——``is_designation_use`` 与引擎第四条路
     读同一份池。
+    yijiang-2014-round2 票 21：不枚举档多选（【秉壹】的座位面）的答案由 AI 自己拼、不在
+    ``legal_actions`` 里；``is_structural_answer`` 与引擎 ``submit`` 那道闸同一口径
+    （``is_legal_option_set`` 形状谓词），故放行它不放松判据。
     """
 
     def __init__(self, inner) -> None:
@@ -80,6 +84,7 @@ class _IllegalAnswerScan:
             action not in query.legal_actions
             and not is_structured_activation(query, action)
             and not is_designation_use(query, action)
+            and not is_structural_answer(query, action)
         ):
             self.illegal += 1
         return action
@@ -797,7 +802,7 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (95, 64), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」）；tao-caocao 票 01 加自制包韬·曹操自制版 1 个 ⇒ 76 / 49（真名「曹操」已在池里）；huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 1 个 ⇒ 79 / 50（新真名「卧龙诸葛」）；票 02 加火包 OL 颜良文丑 1 个 ⇒ 80 / 51（新真名「颜良文丑」）；feng-yujin 票 01 加自制包锋·于禁 1 个 ⇒ 82 / 53（新真名「于禁」）；lin-batch 票 01 加林包移动版神曹操 1 个 ⇒ 84 / 55（新真名「神曹操」）；lin-batch 票 02 加林包移动版孙坚 1 个 ⇒ 85 / 56（新真名「孙坚」）；lin-batch 票 03 加林包移动版徐晃 1 个 ⇒ 86 / 57（新真名「徐晃」）；lin-batch2 票 01 加林包移动版曹丕 1 个 ⇒ 87 / 58（新真名「曹丕」）；lin-batch2 票 02 加林包移动版董卓 1 个 ⇒ 88 / 59（新真名「董卓」）；lin-batch2 票 03 加林包移动版贾诩 1 个 ⇒ 89 / 60（新真名「贾诩」））"
+    assert (len(pool), len(true_names)) == (98, 64), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」）；tao-caocao 票 01 加自制包韬·曹操自制版 1 个 ⇒ 76 / 49（真名「曹操」已在池里）；huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 1 个 ⇒ 79 / 50（新真名「卧龙诸葛」）；票 02 加火包 OL 颜良文丑 1 个 ⇒ 80 / 51（新真名「颜良文丑」）；feng-yujin 票 01 加自制包锋·于禁 1 个 ⇒ 82 / 53（新真名「于禁」）；lin-batch 票 01 加林包移动版神曹操 1 个 ⇒ 84 / 55（新真名「神曹操」）；lin-batch 票 02 加林包移动版孙坚 1 个 ⇒ 85 / 56（新真名「孙坚」）；lin-batch 票 03 加林包移动版徐晃 1 个 ⇒ 86 / 57（新真名「徐晃」）；lin-batch2 票 01 加林包移动版曹丕 1 个 ⇒ 87 / 58（新真名「曹丕」）；lin-batch2 票 02 加林包移动版董卓 1 个 ⇒ 88 / 59（新真名「董卓」）；lin-batch2 票 03 加林包移动版贾诩 1 个 ⇒ 89 / 60（新真名「贾诩」）；jushou-lusu 票 01 加一将成名-2014 沮授 1 个 ⇒ 90 / 61（新真名「沮授」）；票 02 加林包移动版鲁肃 1 个 ⇒ 91 / 62（新真名「鲁肃」）；jie-feng-batch2 票 01 / 02 加界夏侯渊移动版 / 界张角移动版 2 个 ⇒ 93 / 62（真名均已在池里）；jie-yijiang-2014-mobile 票 01 加界陈群移动版 1 个 ⇒ 94 / 63（新真名「陈群」）；票 02 加界顾雍移动版 1 个 ⇒ 95 / 64（新真名「顾雍」）；yijiang-2014 票 02 加陈群 1 个 ⇒ 96 / 64；票 03 加顾雍 1 个 ⇒ 97 / 64；yijiang-2014-round2 票 01 加界沮授移动版 1 个 ⇒ 98 / 64）"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)

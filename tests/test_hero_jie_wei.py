@@ -20,8 +20,9 @@
 
 1. 【裸衣】的"亮出"走 ``peek_deck`` +  ``card_reveal``：牌**不移动**，没拿走的自然留在
    牌堆顶；"若如此做"的判据 = **真的拿到了至少一张**（一张都没有 ⇒ 照常摸两张、不加伤）。
-2. 【护驾】②的"每回合限一次"与【清俭】同姿态：**真的发动了**才落位，决定者放弃不算；
-   同一回合里再来一张【闪】仍会被问。
+2. 【护驾】②的"每回合限一次"= **整回合只触发一次**（不是每个盟友各一次；用户 2026-11-10
+   裁定），与【激将】② 同一条口径。与【清俭】同姿态：**真的发动了**才落位，决定者放弃
+   不算——放弃不消耗这一回合的名额，后续盟友照样会被问。
 3. 【护驾】②"于其回合外"这一条在正常牌流里几乎造不出来（闪的响应者通常不是当前回合
    角色），故它的反例用**条件直探**（合成帧）钉住，其余反例都走真实询问流。
 
@@ -1317,8 +1318,11 @@ def test_jie_hujia_second_condition_has_four_guards():
         assert condition(host, frame) is False, "不是【闪】⇒ 不触发"
         frame.data["card"] = state.card(dodge)
 
+        # 【护驾】②的「每回合限一次」计在**主公 / 实例**头上（用户 2026-11-10 裁定：
+        # 「每个回合只触发一次，而非每个盟友每回合触发一次」）⇒ 落位走**实例级**位图。
+        # 这一格是两版 ② 的分界：换成 `mark_skill_decider_used_this_turn` 会让这条变红。
         mark_skill_used_this_turn(state, 1, JIE_HUJIA)
-        assert condition(host, frame) is False, "本回合已发动过 ⇒ 不再触发"
+        assert condition(host, frame) is False, "本回合已发动过 ⇒ 不再触发（整回合一次）"
 
 
 def test_jie_hujia_second_is_offered_once_per_turn():
@@ -1406,3 +1410,102 @@ def test_jie_hujia_second_is_offered_once_per_turn():
     assert len(_kind_queries(engine, JIE_HUJIA)) == 1, "每回合限一次：第二张【闪】不再问"
     assert len(engine.state.player(1).hand) == 1, "主公只摸一张（收益仍归主公）"
     assert engine.state.player(1).hp == 4, "主公自己用【闪】抵消了【万箭齐发】"
+
+
+def test_jie_hujia_second_is_once_per_turn_not_once_per_ally():
+    """「每回合限一次」**整回合一次**，不是"每个盟友各一次"（用户 2026-11-10 裁定）。
+
+    与【激将】② 的分界就在这一条（那一条按**决定者**计，见
+    ``tests/test_hero_jie_shu.py::test_jie_jijiang_second_is_once_per_turn_for_the_substitute``）：
+
+    - 座位 1、3 是**两名不同的魏势力盟友**，同一回合各使用 / 打出一次【闪】；
+    - 座位 1 的【闪】（【杀】的 DODGE 窗口，距离 1）让 ② **真的发动** ⇒ 这一回合的名额用掉；
+    - 座位 3 的【闪】（【万箭齐发】的响应）**不再被问**（若按"每个盟友一次"，这里会发第二问）；
+    - 主公因此只摸**一张**。
+
+    计的是"真的发动"：如果座位 1 只是**放弃**，名额不动、座位 3 照样会被问——那半由
+    ``test_jie_hujia_second_is_offered_once_per_turn`` 与条件直探那两条守（放弃不落位）。
+    座位序 = 攻方 0 / 盟友 1、3 / 主公 2（4 人环里 0↔1 与 0↔3 都是距离 1，故【杀】够得着）。
+    """
+    slash = _cards("slash")[0]
+    barrage = _cards("arrow_barrage")[0]
+    dodge_a, dodge_b = _cards("dodge")[0], _cards("dodge")[1]
+    lord_dodge = _cards("dodge")[2]
+    used = {slash, barrage, dodge_a, dodge_b, lord_dodge}
+    deck = tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in used)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash, barrage)),
+            SeatSpec(hand=(dodge_a,), kingdom=Kingdom.WEI),
+            SeatSpec(
+                hero="jie_caocao",
+                identity=Identity.LORD,
+                kingdom=Kingdom.WEI,
+                hand=(lord_dodge,),
+            ),
+            SeatSpec(hand=(dodge_b,), kingdom=Kingdom.WEI),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    played: list[int] = []
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == slash
+                    and action.targets == (1,)
+                ):
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == barrage:
+                    return action
+        return None
+
+    def lord(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.ARROW_BARRAGE
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, PlayCard) and action.card.card_id == lord_dodge:
+                    played.append(action.card.card_id)
+                    return action
+        return None
+
+    def ally(query):
+        kind = getattr(query, "kind", None)
+        if kind == "DODGE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == dodge_a:
+                    played.append(action.card.card_id)
+                    return action
+        if kind == "RESPOND" and getattr(query, "cause", None) is WindowCause.ARROW_BARRAGE:
+            for action in query.legal_actions:
+                if isinstance(action, PlayCard) and action.card.card_id == dodge_b:
+                    played.append(action.card.card_id)
+                    return action
+        return None
+
+    _run(
+        engine,
+        [
+            Scripted(attacker),
+            Scripted(ally),
+            Scripted(lord),
+            # 座位 3：第二张【闪】照打（它拿不到 ② 的询问，但行动本身必须发生）。
+            Scripted(ally),
+        ],
+        lambda e: len(played) >= 3,
+    )
+
+    assert sorted(played) == sorted((dodge_a, dodge_b, lord_dodge)), "三张【闪】都打了出来"
+    assert len(_kind_queries(engine, JIE_HUJIA)) == 1, (
+        "第二个**不同的**魏势力盟友不再被问（整回合只触发一次，不是每个盟友一次）"
+    )
+    assert len(engine.state.player(2).hand) == 1, "主公只摸一张"
+    assert engine.state.player(2).hp == 4, "主公自己用【闪】抵消了【万箭齐发】"

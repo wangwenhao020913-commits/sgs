@@ -29,6 +29,7 @@ from sgs.agents import (
     RandomPlayer,
     TapePlayer,
     is_designation_use,
+    is_structural_answer,
     is_structured_activation,
     tape_from_journal,
 )
@@ -47,7 +48,12 @@ from sgs.data import (
     load_hero_tables,
     load_heroes,
 )
-from sgs.effects import designation_actions_for, legal_actions_for, locate
+from sgs.effects import (
+    designation_actions_for,
+    is_legal_option_set,
+    legal_actions_for,
+    locate,
+)
 from sgs.engine import Engine, ai_stream
 from sgs.skills import (
     CATALOG,
@@ -92,6 +98,8 @@ from sgs.state import (
     SelectOption,
     SelectOptionContext,
     SelectOptionQuery,
+    SelectOptions,
+    SelectOptionsQuery,
     SkillActivationContext,
     SkillActivationQuery,
     MoveReason,
@@ -104,6 +112,7 @@ from sgs.state import (
     ZoneRef,
     project,
 )
+from sgs.resolution import Frame
 from sgs.timing import Timing
 
 from support import (
@@ -1628,6 +1637,94 @@ def test_arrange_puts_the_most_useful_card_on_top():
 
 
 # ---------------------------------------------------------------------------
+# 不枚举档多选（yijiang-2014-round2 票 21）：AI 自己拼合法集合
+# ---------------------------------------------------------------------------
+
+
+def _structural_seat_query(
+    *, min_selected: int, max_selected: int, disabled: tuple[str, ...] = ()
+) -> SelectOptionsQuery:
+    """真引擎发一次【秉壹】式的座位多选（**不枚举档**）：5 座位身份局、观察者 = 主公。
+
+    身份全部亮明 ⇒ 敌我关系是精确 0/1，AI 的"帮盟友"方向可断言：座位 0 = 主公（自己）、
+    3 = 忠臣（盟友）、1 / 2 = 反贼、4 = 内奸（敌人）。
+    """
+    identities = (
+        Identity.LORD,
+        Identity.REBEL,
+        Identity.REBEL,
+        Identity.LOYALIST,
+        Identity.RENEGADE,
+    )
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=[SeatSpec(hp=4, hp_max=4, identity=identity) for identity in identities],
+        deck=_deck_excluding(),
+    )
+    for seat in range(len(identities)):
+        state.players[seat].identity_visible = True
+    engine = Engine.from_state(state, seed=1)
+    engine.ask_options(
+        Frame(kind=FrameKind.SKILL, data={}),
+        0,
+        Timing.PHASE_FINISH,
+        skill_id="hero.guyong.bingyi:seat",
+        options=tuple(f"seat:{seat}" for seat in range(len(identities))),
+        disabled=disabled,
+        min_selected=min_selected,
+        max_selected=max_selected,
+        optional=True,
+        enumerate_candidates=False,
+    )
+    query = engine.pending
+    assert isinstance(query, SelectOptionsQuery), f"挂起的应当是多选询问：{query!r}"
+    assert query.structural is True, "构造：【秉壹】的座位面必须落在不枚举档"
+    return query
+
+
+def test_the_ai_assembles_a_legal_set_in_options_order_for_a_structural_multi_select():
+    """不枚举档：AI 不再"挑候选"，按座位意图自己拼集合——次序恒是 ``options`` 原序。
+
+    5 座位身份局、全部亮明。正分座位 = 自己（0）+ 忠臣（3）；反贼（1、2）与内奸（4）是敌人。
+
+    - 下限 3：正分只凑到 2 ⇒ 按同一排名补一个（打平取 ``options`` 序 ⇒ 座位 1）；
+    - 上行序 = ``options`` 原序（常规结算顺序）：排名序是「0、3、1」，上行必须是
+      ``seat:0, seat:1, seat:3``——**不保留打分排名序**（用户 2026-11-09 的顺序裁定）；
+    - 形状由引擎的同一份谓词核（AI 不发明越界集合）。
+    """
+    query = _structural_seat_query(min_selected=3, max_selected=4)
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, SelectOptions), f"多选面必须答 SelectOptions：{action!r}"
+    assert is_legal_option_set(query, action.choices), (
+        f"AI 自建的集合必须过引擎的谓词：{action.choices!r}"
+    )
+    assert action.choices == ("seat:0", "seat:1", "seat:3"), (
+        f"帮盟友（0、3）后补到下限 3，并按 options 原序上行：{action.choices!r}"
+    )
+    assert action.choices != query.legal_actions[0].choices, (
+        "不能拿骨架当答案（骨架 = options 序的前 min_selected 个）"
+    )
+    assert action.answers_seq == query.seq
+
+    capped = _structural_seat_query(min_selected=1, max_selected=2)
+    assert HeuristicPlayer(_stream(0)).respond(capped).choices == ("seat:0", "seat:3"), (
+        "上限 2、下限 1：只取两个正分座位，不资敌"
+    )
+
+    greyed = _structural_seat_query(
+        min_selected=1, max_selected=2, disabled=("seat:3",)
+    )
+    disabled_action = HeuristicPlayer(_stream(0)).respond(greyed)
+    assert disabled_action.choices == ("seat:0",), (
+        f"置灰的盟友不在池里 ⇒ 只剩自己：{disabled_action.choices!r}"
+    )
+    assert is_legal_option_set(greyed, disabled_action.choices)
+
+
+# ---------------------------------------------------------------------------
 # ④ 整局：零非法应答、确定性、可回放（票 13 §验收 2 / 3 / 5）
 # ---------------------------------------------------------------------------
 
@@ -1640,6 +1737,8 @@ class _IllegalAnswerScan:
     由引擎的同一个校验器裁决——非法应答会让整局抛错。
     W5-02b：借刀的复合使用同样不在 ``legal_actions`` 里，但必须是本次**附带指定池**
     （``query.designation_actions``）的成员——池成员就是服务端第四条路的接受条件。
+    yijiang-2014-round2 票 21：不枚举档多选（【秉壹】的座位面）的答案由 AI 自己拼、
+    不在 ``legal_actions`` 里；``is_structural_answer`` 与引擎 ``submit`` 那道闸同一口径。
     """
 
     def __init__(self, inner) -> None:
@@ -1654,6 +1753,7 @@ class _IllegalAnswerScan:
             action not in query.legal_actions
             and not is_structured_activation(query, action)
             and not is_designation_use(query, action)
+            and not is_structural_answer(query, action)
         ):
             self.illegal += 1
         return action
@@ -2763,6 +2863,58 @@ def _coverage_guohuo():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_jie_jianying():
+    """界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3 起翻预发动）：一张手牌 + 一名对手。
+
+    满体力 ⇒ 牌名闭集里只有【杀】此刻可用（【闪】在出牌阶段没有目标、【桃】满体力不可用）。
+    AI 必须从两步清单填「那张牌 → 杀」的复合动作，再由同一个校验器放行；提交点之后
+    "产物打谁"的手写询问不在本场景里（只校验复合动作）。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=3, hp_max=3, hand=(dodge,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_jijiang():
+    """刘备【激将】的「出牌阶段主动使用【杀】」侧（yijiang-2014-round2 票 20）。
+
+    主公（座位 0）+ 一名对手（座位 1）：清单只有一步「选【杀】的目标」，AI 填出那名
+    对手；复合动作由同一个校验器放行。战力之外不需要任何手牌（代打由蜀势力盟友出）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_jie_jijiang():
+    """界刘备【激将】：同一条出牌阶段入口（另一条声明）、同一份清单。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_jie_rende():
     low = tuple(_ids("lightning")[:2])
     state = build_state(
@@ -3003,6 +3155,24 @@ def _coverage_dingpin():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_chenqun_dingpin():
+    """yijiang-2014 票 02：陈群（一将成名-2014 / OL）【定品】（已翻预发动、两步清单）。
+
+    手里只放一张**出牌阶段用不出去**的牌（【闪】）；座位 1 受伤（``hp=2 / hp_max=4``）
+    ⇒ 与界版那条覆盖的差别就在"目标池只收已受伤"，两个座位因此都在池里（目标含自己）。
+    座位步走 ``_score_seat_option`` 的缺省（帮盟友）——本版的分支对目标只有"摸牌"，
+    没有伤害，故缺省方向是对的。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="chenqun", hand=(dodge,)), SeatSpec(hp=2, hp_max=4)],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_shenxing():
     """jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（已翻预发动、单步清单：选两张牌）。
 
@@ -3014,6 +3184,24 @@ def _coverage_shenxing():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="jie_guyong_mobile", hand=(dodge, nullify)), SeatSpec()],
+        deck=_deck_excluding(dodge, nullify),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_guyong_shenxing():
+    """yijiang-2014 票 03：顾雍（OL）【慎行】（已翻预发动、单步清单：选两张牌）。
+
+    与界版那条覆盖同形、换成标准顾雍：手里放两张**出牌阶段用不出去**的牌（【闪】+【无懈
+    可击】），清单只一步（``card``，恰好 2 张），复合动作由 AI 自己填。本版**无次数上限**、
+    弃两张**恒**摸一张，故 AI 只需在"付得起"时填表。
+    """
+    dodge = _ids("dodge")[0]
+    nullify = _ids("nullify")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guyong", hand=(dodge, nullify)), SeatSpec()],
         deck=_deck_excluding(dodge, nullify),
         turn_seat=0,
     )
@@ -3141,6 +3329,9 @@ _COVERAGE_CASES = {
     "hero.sunquan.zhiheng": _coverage_zhiheng,
     "hero.liubei.rende": _coverage_rende,
     "hero.jie_liubei.rende": _coverage_jie_rende,
+    # yijiang-2014-round2 票 20：【激将】的出牌阶段主动「使用【杀】」入口（声明级 flow）。
+    "hero.liubei.jijiang": _coverage_jijiang,
+    "hero.jie_liubei.jijiang": _coverage_jie_jijiang,
     "hero.zhouyu.fanjian": _coverage_fanjian,
     "hero.huatuo.qingnang": _coverage_qingnang,
     "hero.diaochan.lijian": _coverage_lijian,
@@ -3161,10 +3352,17 @@ _COVERAGE_CASES = {
     "hero.zhangxiu.congjian": _coverage_congjian,
     # lukang-mobile 票 01：陆抗移动版 ☆【怀柔】（已翻预发动：选自己的 1 张装备牌 → 重铸）。
     "hero.lukang_mobile.huairou": _coverage_huairou,
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】②（已翻预发动，两步清单：
+    # 选一张牌 → 选当作哪一张基本牌；① 的那个钩子与它共用同一个技能 id）。
+    "hero.jie_jushou_mobile.jianying": _coverage_jie_jianying,
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（已翻预发动，两步清单）。
     "hero.jie_chenqun_mobile.dingpin": _coverage_dingpin,
     # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（已翻预发动，单步清单）。
     "hero.jie_guyong_mobile.shenxing": _coverage_shenxing,
+    # yijiang-2014 票 02：陈群（OL）【定品】（已翻预发动，两步清单；目标只收已受伤）。
+    "hero.chenqun.dingpin": _coverage_chenqun_dingpin,
+    # yijiang-2014 票 03：顾雍（OL）【慎行】（已翻预发动，单步清单；无次数上限、恒摸一张）。
+    "hero.guyong.shenxing": _coverage_guyong_shenxing,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,

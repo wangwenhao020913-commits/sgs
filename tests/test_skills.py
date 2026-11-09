@@ -32,6 +32,7 @@ from sgs.skills import (
     is_equipped,
     prune_skill_state,
     resolve_instances,
+    transformed_card,
     transformed_slash,
 )
 from sgs.skills import catalog as catalog_module
@@ -1575,6 +1576,96 @@ def test_a_transformed_slash_is_virtual_has_no_rank_and_inherits_a_common_color(
     assert transformed_slash(state, (black_one, black_two)).card_id == same_color.card_id, (
         "同一组来源恒得同一个负 id（确定性）"
     )
+
+
+# ---------------------------------------------------------------------------
+# W6 / F1（yijiang-2014-round2 票 06）：牌面的**效果侧覆盖**（读法 A）
+# ---------------------------------------------------------------------------
+
+
+def _heart_two(state):
+    """牌堆里的那张**红桃 2**（用户实例「红桃 2 ⇒ 梅花 2」的来源牌，不写死牌 id）。"""
+    return next(
+        card_id
+        for card_id in range(len(state.cards))
+        if state.card(card_id).suit == "heart" and state.card(card_id).rank == 2
+    )
+
+
+def test_a_face_override_rewrites_the_suit_derives_the_color_and_keeps_the_source_rank():
+    """读法 A：效果侧指定产物的**花色**；颜色跟派生，点数仍是**来源牌**的点数。
+
+    用户实例（`issues/06-jie-jianying-conversion.md` §Answer）：红桃 2 用【渐营】② 转成
+    【杀】、花色视为上次使用的梅花 ⇒ 产物是**梅花 2**（不是梅花 A）。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = _heart_two(state)
+    origin = state.card(source)
+    assert (origin.suit, origin.rank, origin.color) == ("heart", 2, Color.RED)
+
+    overridden = transformed_card(state, (source,), "slash", suit="club")
+
+    assert overridden.suit == "club", "花色 = 效果指定的花色（上一张牌的花色）"
+    assert overridden.color is Color.BLACK, "颜色跟**覆盖后**的花色派生（不出现红桃 + 黑）"
+    assert overridden.rank == 2, "点数仍继承来源牌：红桃 2 ⇒ 梅花 2，不是梅花 A"
+    assert overridden.virtual_sources == (source,), "来源牌不变"
+
+
+def test_a_color_override_alone_gives_a_suitless_product_a_color():
+    """F1 的第二个参数：多源产物本来**无色**，效果要它黑 ⇒ 只给 ``color``（没有花色可派生）。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    black = _first_by_color("slash", black=True)
+    red = _first_by_color("slash", black=False)
+
+    face = transformed_card(state, (black, red), "slash", color=Color.BLACK)
+
+    assert (face.suit, face.rank, face.color) == (None, None, Color.BLACK), (
+        "花色 / 点数仍按多源规则恒无；颜色 = 效果指定的颜色"
+    )
+
+
+def test_without_a_face_override_a_transformed_card_keeps_the_rule_16_3_face():
+    """缺省 ``suit=None, color=None`` = §16.3 的派生，逐字节不变（E1 的纪律面）。
+
+    单源 ⇒ 源牌花色 / 点数 / 颜色；多源 ⇒ 花色点数恒无、同色才有颜色；纯虚拟 ⇒ 三者皆无。
+    显式传两个 ``None`` 必须与**不传**得到同一张 ``CardRef``（默认值不是第二套派生）。
+    """
+    from sgs.data import color_of_suit
+    from sgs.skills.virtual import virtual_dodge
+
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = _heart_two(state)
+    origin = state.card(source)
+
+    single = transformed_card(state, (source,), "slash")
+    assert single == transformed_card(state, (source,), "slash", suit=None, color=None)
+    assert (single.suit, single.rank, single.color) == (
+        origin.suit,
+        origin.rank,
+        origin.color,
+    ), "单源 ⇒ 继承原牌花色 / 点数 / 颜色"
+
+    blacks = [
+        card_id
+        for card_id in _cards("slash")
+        if color_of_suit(PACK.deck.cards[card_id].suit) is Color.BLACK
+    ]
+    black_one, black_two = blacks[0], blacks[1]
+    red_one = _first_by_color("slash", black=False)
+    same_color = transformed_card(state, (black_one, black_two), "slash")
+    assert same_color == transformed_card(
+        state, (black_one, black_two), "slash", suit=None, color=None
+    )
+    assert (same_color.suit, same_color.rank, same_color.color) == (
+        None,
+        None,
+        Color.BLACK,
+    ), "多源 ⇒ 花色点数恒无、同色才有颜色"
+    mixed = transformed_card(state, (black_one, red_one), "slash")
+    assert (mixed.suit, mixed.rank, mixed.color) == (None, None, None), "多源异色 ⇒ 无色"
+
+    pure = virtual_dodge(state)
+    assert (pure.suit, pure.rank, pure.color) == (None, None, None), "纯虚拟 ⇒ 三者皆无"
 
 
 def test_virtual_card_id_namespaces_do_not_collide():

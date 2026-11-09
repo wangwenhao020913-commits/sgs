@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, 
 from sgs.data import RuleConfig
 from sgs.state import (
     Action,
+    ArmorChangeDelta,
     CardMoveDelta,
     CardRef,
     CardRevealDelta,
@@ -52,6 +53,7 @@ __all__ = [
     "EVENT_SCHEMA_VERSION",
     "SUPPORTED_EVENT_VERSIONS",
     "ActionRecord",
+    "ArmorChangeRecord",
     "CardMoveRecord",
     "CardRevealRecord",
     "PindianRecord",
@@ -132,6 +134,15 @@ class CardMoveRecord(CardMoveDelta):
 
 
 class HpChangeRecord(HpChangeDelta):
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class ArmorChangeRecord(ArmorChangeDelta):
+    """一次**护甲值**变化（W7 的第二条体力轴）：获得护甲 / 伤害吸收。"""
+
     kind: Literal["delta"] = "delta"
     seq: int
     frame_id: int
@@ -419,6 +430,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return CardMoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, HpChangeDelta):
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, ArmorChangeDelta):
+        return ArmorChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, HpMaxChangeDelta):
         return HpMaxChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, ChainedChangeDelta):

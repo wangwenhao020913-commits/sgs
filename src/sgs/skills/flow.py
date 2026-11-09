@@ -80,6 +80,7 @@ __all__ = [
     "PickProvide",
     "PickSeats",
     "SeatPool",
+    "SeatBound",
     "SkillFlow",
     "activation_answers",
     "ask_key_of",
@@ -143,6 +144,16 @@ ActorRef = int | None | Callable[[GameState, Any, int, FlowAnswers], int]
 
 可调用这一档是给票 06 的"选择权在目标"与票 07 的"选取面读帧"留的**同一扇门**
 （不把发动者写死进执行器）：实际的非发动者询问由票 06 落，票 07 只补上 ``frame``。
+"""
+
+SeatBound = int | Callable[[GameState, Any, int, FlowAnswers], int]
+"""``PickSeats`` 的 ``lo`` / ``hi``：定值，或 ``(state, frame, owner, 前序答案) -> 个数``。
+
+可调用档（yijiang-2014-round2 票 18 / P9）服务"这一步要选几个**取决于前序答案**"的技能：
+界【渐营】② 的第 3 步要选几个目标由**牌名**决定（0 个 / 1 个），而清单的 ``Step`` 只有
+一个全局 ``min`` / ``max``。界面上"这一行不需要选"由 ``StepPool.max = 0`` 表达（该行
+没有可选目标 ⇒ 自动跳过），执行器与校验器则逐行调用本档拿到真正的个数，故**界面不会
+放宽规则**：0 个的牌名提交目标会被拒，1 个的牌名缺目标也会被拒。
 """
 
 FlowEffect = Callable[[Any, Any, FlowAnswers], Any]
@@ -278,10 +289,21 @@ class PickSeats:
 
     ``key`` 是效果读取答案的键；同一步问多次时询问的 ``skill_id`` / 缓存键补序号
     （``seat:0`` / ``seat:1``），故效果读到的永远是 ``answers["seat"]`` = 座位元组。
+
+    ``lo`` / ``hi`` 可以是 :data:`SeatBound` 的**可调用档**（yijiang-2014-round2 票 18）：
+    按**前序答案**现算"这一步要选几个"。**可调用档**在三个读取方（执行器
+    :func:`_flow_step_seats` / 校验器 :func:`_assign_activation` / 清单 :func:`manifest`）
+    都走 :func:`_seat_bounds` 这一份解析，故"清单说不用选"与"校验器要求选"不可能各说一套；
+    **定值档**不经过它——执行器与清单直接读字段（清单的 ``Step.min`` / ``Step.max`` 就是
+    ``lo`` / ``hi`` 原样），校验器的 :func:`_seat_bounds` 对定值档原样返回（既有技能的
+    清单与裁决逐字节不变）。
+    **可调用档的步必须住在流水线末尾**：清单的逐行渲染要拿"前一步的代表答案"当键，
+    把"按前序答案变个数"的步排在别人前面时，前序上下文抽样没有它的答案可用（
+    :func:`_sampled_answers` 只读定值档）。
     """
 
-    lo: int
-    hi: int
+    lo: SeatBound
+    hi: SeatBound
     pool: SeatPool
     ordered: bool = False
     optional: bool = True
@@ -1036,6 +1058,29 @@ def _flow_step_provide(
     return "ok", tuple(refs[int(card_id)] for card_id in picked)
 
 
+def _seat_bounds(
+    step: PickSeats, state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, int]:
+    """这一步此刻要选几个座位 —— ``lo`` / ``hi`` 的**唯一**解析处（票 18）。
+
+    定值档原样返回（既有技能逐字节不变）；可调用档按**前序答案**现算（界【渐营】② 的
+    第 3 步：0 个 = 目标由牌名决定，1 个 = 玩家选一名）。执行器（:func:`_flow_step_seats`）、
+    复合动作校验器（:func:`_assign_activation`）与清单渲染（:func:`manifest`）三处都读
+    这一份，故"清单不要求选"与"校验器要求选"结构上不可能各说一套。
+
+    ``hi < lo`` 是声明写错了（例如按牌名算出 0 个、却写死 ``lo = 1``）：**响亮失败**，
+    不静默夹成一个宽松值——那会让界面收窄与裁决再次漂开。
+    """
+    lo = step.lo(state, frame, owner, answers) if callable(step.lo) else step.lo
+    hi = step.hi(state, frame, owner, answers) if callable(step.hi) else step.hi
+    resolved = (int(lo), int(hi))
+    if resolved[1] < resolved[0] or resolved[0] < 0:
+        raise ValueError(
+            f"PickSeats({step.key!r}) 的 lo/hi 声明不一致：lo={resolved[0]} hi={resolved[1]}"
+        )
+    return resolved
+
+
 def _flow_step_seats(
     host: Any,
     frame: Any,
@@ -1057,9 +1102,10 @@ def _flow_step_seats(
     """
     del ask_owner  # 座位步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
+    lo, hi = _seat_bounds(step, host.state, frame, owner, answers)
     chosen: list[int] = []
-    while len(chosen) < step.hi:
-        option_id = _flow_option_id(frame, step.key, len(chosen), multi=step.hi > 1)
+    while len(chosen) < hi:
+        option_id = _flow_option_id(frame, step.key, len(chosen), multi=hi > 1)
         accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
         if accepted is not None:
             if isinstance(accepted, Pass):
@@ -1087,7 +1133,7 @@ def _flow_step_seats(
         if isinstance(answer, Pass):
             break
         chosen.append(option_seat(answer))
-    if len(chosen) < step.lo:
+    if len(chosen) < lo:
         return "cancel", ()
     return "ok", tuple(chosen)
 
@@ -1520,6 +1566,32 @@ def _pool_rows(
     return tuple(out)
 
 
+def _seat_pool_rows(
+    rows: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], int]],
+) -> tuple[StepPool, ...]:
+    """座位步的逐行池（票 18）：与 :func:`_pool_rows` 同一条去重 / 收行纪律，**多带逐行上限**。
+
+    第 3 格 ``row_max`` 是这一行最多选几个：``0`` = 这一行**没有可选目标**（产物的目标
+    由牌名决定 ⇒ 界面据此自动跳过、不画空步；执行器与校验器也按同一份 0 收尾）。
+    行相同（候选与上限都一样）才收成一行 ``when=()``。
+    """
+    if rows and len(
+        {(options, disabled, row_max) for _when, options, disabled, row_max in rows}
+    ) == 1:
+        return (
+            StepPool(when=(), options=rows[0][1], max=rows[0][3], disabled=rows[0][2]),
+        )
+    seen: set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], int]] = set()
+    out: list[StepPool] = []
+    for when, options, disabled, row_max in rows:
+        key = (when, options, disabled, row_max)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(StepPool(when=when, options=options, max=row_max, disabled=disabled))
+    return tuple(out)
+
+
 def card_preactivations(
     designation_actions: tuple[UseCard, ...] | list[UseCard],
 ) -> dict[str, tuple[Step, ...]]:
@@ -1564,6 +1636,7 @@ def card_preactivations(
         out[name] = (
             Step(
                 name="seat",
+                kind="seat",
                 min=1,
                 max=1,
                 order=0,
@@ -1572,6 +1645,7 @@ def card_preactivations(
             ),
             Step(
                 name="seat",
+                kind="seat",
                 min=1,
                 max=1,
                 order=1,
@@ -1702,6 +1776,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="card",
                     zones=step.zones,
                     min=step.lo,
                     max=maximum,
@@ -1713,6 +1788,33 @@ def manifest(
             domains.append((step, tuple(dict.fromkeys(values))))
 
         elif isinstance(step, PickSeats):
+            dynamic = callable(step.lo) or callable(step.hi)
+            if dynamic and degraded:
+                # 退化的清单（前序组合数超过 :data:`MANIFEST_POOL_LIMIT`）读不出"这一步
+                # 在这个牌名下要选几个"——不能假装"没有目标"把步整条拿掉（那会让界面上
+                # 再也选不到目标），也不能按某个抽样组合硬写个数（【桃】/【酒】会被要求
+                # 选一个不存在的东西）。故步照旧下发、**不下发候选索引**（界面退化为全都
+                # 点得动），个数交给校验器按**本次真实答案**裁决：``min = 0`` 只是把
+                # "能不能提交"交还给服务端，规则一条都不放宽。
+                steps.append(
+                    Step(
+                        name=step.key,
+                        kind="seat",
+                        min=0,
+                        max=1,
+                        pool=(),
+                        order=index,
+                        wording=wording(step),
+                    )
+                )
+                domains.append((step, ()))
+                continue
+            # 第 4 格 = 这一行要多选几个（只有可调用档才下发 ``StepPool.max``；定值步
+            # 的载荷保持原样，既有清单逐字节不变）。
+            seat_rows: list[
+                tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], int | None]
+            ] = []
+            bounds: list[tuple[int, int]] = []
             for combo in combos:
                 answers = answer_map(combo)
                 framed = _with_answers(base, answers)
@@ -1722,30 +1824,69 @@ def manifest(
                     if not degraded:
                         raise
                     # 退化路径没有前序答案可喂；不假装"没有目标"，改成不下发候选索引。
-                    rows = []
+                    seat_rows = []
+                    bounds = []
                     break
+                row_max: int | None = None
+                if dynamic:
+                    lo, hi = _seat_bounds(step, state, framed, owner, answers)
+                    row_max = hi
+                    bounds.append((lo, hi))
                 if not pool and not domains:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(seat_choice(seat) for seat in pool), ()))
+                seat_rows.append(
+                    (
+                        when,
+                        tuple(seat_choice(seat) for seat in pool),
+                        (),
+                        row_max,
+                    )
+                )
                 values.extend(pool)
             if multi_prior:
-                if not rows:
-                    rows = []
-                elif len({(options, disabled) for _when, options, disabled in rows}) > 1:
-                    rows = []
+                shapes = {
+                    (options, disabled, row_max)
+                    for _when, options, disabled, row_max in seat_rows
+                }
+                if not seat_rows:
+                    seat_rows = []
+                elif len(shapes) > 1:
+                    seat_rows = []
                 else:
-                    rows = [((), rows[0][1], rows[0][2])]
+                    seat_rows = [((), seat_rows[0][1], seat_rows[0][2], seat_rows[0][3])]
+            if dynamic:
+                required = max((lo for lo, _hi in bounds), default=0)
+                if required == 0:
+                    # 所有前序组合都没有可选目标（产物的目标由牌名 / 上下文决定）⇒
+                    # **这一步不存在**：清单里不出现一个空的第 3 步（票 18 的断言面）。
+                    continue
+                steps.append(
+                    Step(
+                        name=step.key,
+                        kind="seat",
+                        min=required,
+                        max=max((hi for _lo, hi in bounds), default=0),
+                        pool=_seat_pool_rows(seat_rows),
+                        order=index,
+                        wording=wording(step),
+                    )
+                )
+                domains.append((step, tuple(dict.fromkeys(values))))
+                continue
             if step.ordered and step.hi > 1:
                 # 有序多选座位步的第二问依赖**本步已选**的座位；清单只能表达第一问，
                 # 故不下发候选索引（执行器按 ``chosen`` 逐步问，校验器也按真池验）。
-                rows = []
+                seat_rows = []
             steps.append(
                 Step(
                     name=step.key,
+                    kind="seat",
                     min=step.lo,
                     max=step.hi,
-                    pool=_pool_rows(rows),
+                    pool=_pool_rows(
+                        [(when, options, disabled) for when, options, disabled, _m in seat_rows]
+                    ),
                     order=index,
                     wording=wording(step),
                 )
@@ -1768,7 +1909,14 @@ def manifest(
                 disabled = _resolve_options(step.disabled, state, framed, owner, answers)
                 when = _when_texts(domains, combo) if combo else ()
                 option_rows.append((when, choices, disabled))
-                option_values.extend(choices)
+                # 只有**能选**的那几项才是后续步骤的前序答案（票 18）：置灰项在闭集里
+                # 只为"列出来给玩家看"，`_assign_activation` 拒收它们 ⇒ 以它们为前序的
+                # 组合永远提交不了。把它们喂进 `_prior_contexts` 会让后续步骤的行数白涨
+                # （界【蛊惑】的牌名闭集有十几个），界【渐营】的第 3 步更是会被这个行数
+                # 挤进"退化"档。故前序候选只收非置灰项。
+                option_values.extend(
+                    choice for choice in choices if choice not in disabled
+                )
             if multi_prior:
                 shapes = {
                     (choices, disabled) for _when, choices, disabled in option_rows
@@ -1779,6 +1927,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="option",
                     min=1,
                     max=1,
                     pool=_pool_rows(option_rows),
@@ -1809,6 +1958,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="card",
                     zones=step.zones,
                     min=step.lo,
                     max=min(
@@ -1908,10 +2058,11 @@ def _assign_activation(
             answers[step.key] = chunk
 
         elif isinstance(step, PickSeats):
+            lo, hi = _seat_bounds(step, state, framed, owner, answers)
             remaining = len(choices) - choice_index
-            if check and remaining < step.lo:
-                return answers, f"步骤 {step.key} 至少需要 {step.lo} 名目标，复合动作只给了 {remaining} 个"
-            take = min(step.hi, remaining)
+            if check and remaining < lo:
+                return answers, f"步骤 {step.key} 至少需要 {lo} 名目标，复合动作只给了 {remaining} 个"
+            take = min(hi, remaining)
             chunk = tuple(choices[choice_index : choice_index + take])
             choice_index += take
             chosen: list[int] = []

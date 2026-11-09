@@ -92,7 +92,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
-from sgs.effects import Randomness, behavior_for, is_slash, target_sets_match
+from sgs.effects import (
+    Randomness,
+    behavior_for,
+    cap_of,
+    is_slash,
+    target_sets_match,
+    usable_options,
+)
 from sgs.state import (
     Action,
     ActivateSkill,
@@ -699,18 +706,22 @@ def _wounded(view: PlayerView) -> bool:
 def _lethal_to(
     card: CardRef | None, view: PlayerView, seat: int, *, wine: bool | None = None
 ) -> bool:
-    """这一下落到 ``seat`` 身上是不是**当场打死**（``_damage_to >= 目标体力``）。
+    """这一下落到 ``seat`` 身上是不是**当场打死**（``_damage_to >= hp + armor``）。
 
     这是**唯一的斩杀判据**（D2，票 19）：:func:`_score_attack` 的斩杀项问"现在就够不够"，
     :func:`_wine_enables_kill` 问"加【酒】才够、现在不够"——两条都读这里，不各写一份
     ``_damage_to`` 比较（改伤害模型时只有一处会漂）。``wine`` 语义同 :func:`_damage_to`：
     ``None`` 读当前状态，``True`` 推演"这一口已经喝下"。
 
-    只读公开面：目标体力（公开）与 :func:`_damage_to`（藤甲 / 白银狮子 / 【酒】/ 古锭刀都在
-    它里面）。**不**读目标手牌牌面：这一刀会不会被【闪】抵消是概率问题，归 C1（记牌那票），
-    本票的"斩杀"只回答"实际伤害够不够"。
+    只读公开面：目标体力 / **护甲**（两条都在投影里）与 :func:`_damage_to`（藤甲 / 白银狮子 /
+    【酒】/ 古锭刀都在它里面）。**不**读目标手牌牌面：这一刀会不会被【闪】抵消是概率问题，
+    归 C1（记牌那票），本票的"斩杀"只回答"实际伤害够不够"。
     """
-    return _damage_to(card, view, seat, wine=wine) >= view.players[seat].hp
+    target = view.players[seat]
+    # 护甲是**第二条体力轴**（yijiang-2014-round2 票 07 / W7）：这一刀要先把护甲打光才轮到
+    # 体力，"还能扛几下"因此是 ``hp + armor``。**只**进这条斩杀判据——「已受伤」
+    # （:func:`_wounded`）仍只看 ``hp < hp_max``（护甲不让任何人看起来受伤）。
+    return _damage_to(card, view, seat, wine=wine) >= target.hp + target.armor
 
 
 # ---------------------------------------------------------------------------
@@ -2176,6 +2187,13 @@ _HOSTILE_SEAT_STEPS = (
     "jieying:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
+    # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3；票 18 迁进流水线）：产物是
+    # 【杀】家族时，第 3 步选的是**这张【杀】打谁** ⇒ 敌人。不登记会落进"帮盟友"的缺省
+    # 分支（AI 拿【杀】打队友）。**登记短 id 前缀**：票 18 起这一问是流水线第 3 步，AI 按
+    # ``<短技能 id>:<步骤键>``（:func:`_fill_activation` 的拼法）估值，引擎发的询问名也是
+    # 同一口径（``flow._flow_option_id`` 从全限定 id 派生短 id）。此前那条全限定
+    # ``hero.jie_jushou_mobile.jianying.target`` 是"提交点后手写一问"的 id，已随票 18 删除。
+    "jianying:",
     "hero.xiahouyuan.shensu:",
     # 界夏侯渊【神速】（jie-feng-batch2 票 01）：同一手写询问、同一前缀陷阱
     # （``hero.jie_xiahouyuan_mobile.shensu:target:<项号>``）。
@@ -2210,6 +2228,10 @@ _HOSTILE_SEAT_STEPS = (
     # X 张是给它的补偿。不登记就落进"帮盟友"分支：AI 会把队友翻面、白送它一个回合的牌，
     # 纯自伤。1V1 下唯一其他座位就是敌人，登记为对手即正确方向。
     "fangzhu:",
+    # 【激将】的「出牌阶段主动使用【杀】」侧（yijiang-2014-round2 票 20）：清单唯一一步
+    # 选的是**这张【杀】的目标** ⇒ 对手。不登记就落进"帮盟友"分支：AI 会拿盟友代打的
+    # 【杀】去打另一个盟友。前缀 = 短技能 id（票 18 起的拼法 ``<短 id>:<步骤键>``）。
+    "jijiang:",
     # 贾诩移动版【乱武】（lin-batch2 票 03，Q9 = B）：并列最近时**先选**的座位就是那张
     # 【杀】的额定目标（挨打的人）。不登记就落进"帮盟友"分支：AI 会先把队友选成目标，
     # 再在下一问按敌我给分放弃 ⇒ 白失 1 点体力（比"能打敌人却失血"更差）。
@@ -2352,18 +2374,70 @@ def _score_select_option(query: Query, action: Action) -> float:
     return 0.0
 
 
+def _option_choice_value(query: Query, choice: str) -> float:
+    """多选面里**单个选项**的分值（``_score_select_options`` 与自建集合共用的唯一口径）。
+
+    座位选项（``seat:N``）走 :func:`_score_seat_option` 的敌我估值——【秉壹】这类"令若干
+    角色各摸一张"的座位多选面因此知道该帮谁；其余选项查 :data:`_OPTION_VALUES`（技能票
+    自己登记；没登记 = 0 分，保守方向）。
+    """
+    if choice.startswith(_SEAT_PREFIX):
+        return _score_seat_option(query, choice)
+    return _OPTION_VALUES.get(choice, 0.0)
+
+
 def _score_select_options(query: Query, action: Action) -> float:
     """``SELECT_OPTIONS``（多选选项；jie-feng-batch2 票 01a）：按**勾中的项逐个**求和。
 
-    与 :func:`_score_select_option` 同一条口径：每个选项的估值来自 :data:`_OPTION_VALUES`
-    （技能票自己登记；没登记 = 0 分），``Pass`` 按"取消已发动的技能"罚分。空集是一条
-    合法候选（= 什么都不做），它的分数恒为 0 ⇒ 与"放弃"同价时按候选序取前面的那条，
-    也就是空集——这是**保守**方向（不做额外的事），符合多选面的超时兜底。
+    与 :func:`_score_select_option` 同一条口径（单选项的估值只有 :func:`_option_choice_value`
+    一处），``Pass`` 按"取消已发动的技能"罚分。空集是一条合法候选（= 什么都不做），它的
+    分数恒为 0 ⇒ 与"放弃"同价时按候选序取前面的那条，也就是空集——这是**保守**方向
+    （不做额外的事），符合多选面的超时兜底。
     """
     assert isinstance(query, SelectOptionsQuery)
     if not isinstance(action, SelectOptions):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
-    return sum(_OPTION_VALUES.get(choice, 0.0) for choice in action.choices)
+    return sum(_option_choice_value(query, choice) for choice in action.choices)
+
+
+def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
+    """**不枚举档**多选面：AI 自己拼一个合法集合（yijiang-2014-round2 票 21）。
+
+    这一档的 ``legal_actions`` 只有一条**骨架**（``options`` 序的前 ``min_selected`` 个），
+    候选里**没有**真正的答案集合 ⇒ AI 不能"挑候选"，得按同一个谓词自己构造：
+
+    - **池** = ``options`` 去掉 ``disabled``（引擎只把可选项当合法成员）；
+    - **估值** = 逐项 :func:`_option_choice_value`（座位走敌我 / 帮盟友那一套），降序取
+      **正分**项、至多 ``max_selected`` 个——【秉壹】"令至多 N 名角色各摸一张"因此给自己与
+      盟友、不资敌；
+    - **下限**：不足 ``min_selected`` 时按同一排名补（副作用最小的）项，绝不交一条越界集合；
+    - **次序** = 询问 ``options`` 的**原序**（常规结算顺序；用户 2026-11-09 的裁定：默认按
+      常规结算顺序，"依次"要有技能明说才另开一档）——打分排名只决定**选谁**，不决定次序。
+
+    池与上限读引擎的**同一份派生**（``sgs.effects.usable_options`` / ``cap_of``，谓词的另一
+    半）：构造器的 ``cap`` / ``floor`` 因此天然落在 ``is_legal_option_set`` 的区间内——构造器
+    不该产出非法集合，越界即打分 / 构造的编程错误（这里**不**再拿 assert 兜一遍：``-O`` 下
+    断言会被剥掉，兜不住任何东西）。
+    """
+    options = usable_options(query)
+    cap = cap_of(query)
+    ranked = sorted(
+        (-_option_choice_value(query, option), index, option)
+        for index, option in enumerate(options)
+    )
+    picked = [option for negated, _index, option in ranked if negated < 0][:cap]
+    floor = min(int(query.min_selected), cap)
+    if len(picked) < floor:
+        chosen = set(picked)
+        for _negated, _index, option in ranked:
+            if len(picked) >= floor:
+                break
+            if option not in chosen:
+                picked.append(option)
+                chosen.add(option)
+    chosen = set(picked)
+    choices = tuple(option for option in options if option in chosen)
+    return SelectOptions(choices=choices, answers_seq=query.seq)
 
 
 # ---------------------------------------------------------------------------
@@ -3062,6 +3136,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "（正面发动要跳过下个回合）与【谦逊】的续命判据也读它（票 22）",
                 ),
                 "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
+                "armor": (
+                    True,
+                    "护甲是第二条体力轴（W7）：``_lethal_to`` 的'这一下打不打得死'读 "
+                    "``hp + armor``（有护甲的人得多挨几下）；``_wounded`` 仍只看 "
+                    "``hp < hp_max``——护甲不让任何人看起来受伤，所以【仁德】类判据不读它",
+                ),
                 "hand_count": (
                     True,
                     "公开手牌数：【古锭刀】加伤、防守成本、够不够弃；记牌里它是"
@@ -3260,30 +3340,38 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
             {
                 "skill_id": (
                     True,
-                    "多选面的技能归属：与 ``SelectOptionQuery`` 同一条（本仓暂只有界神速用；"
-                    "座位步不在这里，故不查敌我前缀表）",
+                    "多选面的技能归属：与 ``SelectOptionQuery`` 同一条（开关 = 界神速的三项、"
+                    "座位 = 【秉壹】等座位步）——座位选项的敌我估值按它查那两张前缀表",
                 ),
                 "options": (
-                    False,
-                    "选项面不枚举：``_score_select_options`` 逐个勾中的项查 "
-                    "``_OPTION_VALUES``——未登记的新选项落 0 分（新增选项必须同票登记条目）",
+                    True,
+                    "选项池（含置灰）：``_score_select_options`` 逐项查 ``_option_choice_value``"
+                    "（未登记落 0 分）；**不枚举档**（``structural``）下它同时是 AI 自建集合的"
+                    "可选池，且集合按它的**原序**上行（常规结算顺序）",
                 ),
                 "disabled": (
                     True,
-                    "置灰项在候选里根本不会出现（引擎侧枚举时已剔除）；AI 只读它理解"
+                    "置灰项不进任何候选 / 自建集合（不枚举档由 AI 自己在池里滤掉）——"
                     "『这一项此刻不可选』，不据此改分数",
                 ),
                 "min_selected": (
                     True,
-                    "下限决定『空集是否合法』：AI 不自己重建合法性，取候选里合法的那一条",
+                    "下限：不枚举档下是**自建集合的地板**（不足则按排名补），枚举档下由候选承担",
                 ),
                 "max_selected": (
                     True,
-                    "上限决定一次最多能勾几项：同上，候选枚举的唯一真源在引擎",
+                    "上限：不枚举档下是**自建集合的天花板**（只取正分项、至多这么多），"
+                    "枚举档下由候选承担",
                 ),
                 "option_texts": (
                     False,
-                    "显示文本只给界面看；AI 的估值读选项 id（``_OPTION_VALUES``）",
+                    "显示文本只给界面看；AI 的估值读选项 id（``_OPTION_VALUES`` / 座位前缀）",
+                ),
+                "structural": (
+                    True,
+                    "**不枚举档**（yijiang-2014-round2 票 21）：``True`` ⇒ 候选里只有骨架，"
+                    "AI 必须自己按 ``_option_choice_value`` 拼一个合法集合（谓词 = 引擎收答案的"
+                    "``is_legal_option_set``）；读它是『该自己拼』的唯一判据",
                 ),
             }
         ),
@@ -4027,7 +4115,13 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.guojia.yiji": (_constant(4.5), "受伤后摸两张并可分配：净赚两张"),
     # 蜀
     "hero.liubei.rende": (_score_rende, "给牌是成本；首次给到两张以上回复 1 点 ⇒ 受伤时值得"),
-    "hero.liubei.jijiang": (_constant(_RESPOND_VALUE), "主公技：视为使用/打出一张【杀】"),
+    "hero.liubei.jijiang": (
+        _constant(_RESPOND_VALUE),
+        "主公技：①求助窗口视为打出【杀】（南蛮 / 决斗，免费）；②出牌阶段主动**使用**【杀】"
+        "（票 20：目标由自己选、盟友代付那张牌，占自己的使用次数）——**免费**、只读"
+        "`view` 的敌我估值（目标步登记为对手）；唯一的频率闸门是机械锁（同一出牌阶段里"
+        "发动后直到出过【杀】或新阶段开始前不再出现），故常量=始终愿意",
+    ),
     "hero.guanyu.wusheng": (_constant(2.0), "红色牌当【杀】：多一条进攻路径，按牌价保守为正"),
     "hero.zhaoyun.longdan": (_constant(2.0), "【杀】⇄【闪】互转：攻防两便"),
     "hero.machao.tieqi": (_constant(2.5), "使用【杀】后判定，通过则目标不可响应：助此【杀】命中"),
@@ -4209,7 +4303,9 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     ),
     "hero.jie_liubei.jijiang": (
         _constant(_RESPOND_VALUE),
-        "主公技：①求助窗口视为使用 / 打出【杀】；②盟友回合外打出【杀】时令主公摸一张",
+        "主公技：①求助窗口视为使用 / 打出【杀】；②盟友回合外打出【杀】时令主公摸一张；"
+        "③与标准版同一条出牌阶段主动**使用**【杀】的入口（票 20：免费，只读 `view` 的"
+        "敌我估值，频率由机械锁兜住）",
     ),
     "hero.jie_zhaoyun.longdan": (
         _constant(2.0),
@@ -4441,6 +4537,16 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "出牌阶段使用与上一张点数或花色相同的牌时摸一张：**没有代价**（不弃牌 / 不失体力 /"
         "无次数成本），候选只在条件成立时出现 ⇒ 常量即正",
     ),
+    # 界一将成名-2014·移动版·界沮授（yijiang-2014-round2 票 01 / W3）：同一个技能 id 的两半
+    # 共用这一条估值——① 与 OL 版逐字同句（摸一张、无代价 ⇒ 常量即正，抄上面那条）；
+    # ② 是"消耗一张牌换一张基本牌的使用权 + ① 的一次摸牌"，`_constant` 读不到那张牌的牌价
+    # （已知限制，与上面那条同档），故沿用同一个正值。锁定的【矢北】按 `_missing_entries`
+    # 的既有口径**不必**登记。
+    "hero.jie_jushou_mobile.jianying": (
+        _constant(2.5),
+        "① 使用与上一张点数或花色相同的牌时摸一张（无代价）；② 出一张牌当任意基本牌使用、"
+        "产物被使用时 ① 必然再摸一张 ⇒ 两半都是正收益，常量即正",
+    ),
     # 林包·移动版·鲁肃（jushou-lusu 票 02）：【好施】多摸两张、再按牌面把一半手牌交给
     # 「其他角色里手牌数最少」的那一名——交给谁由座位步（或并列时的手写座位问）决定，
     # 收益方向交给牌面的"最少"判据 ⇒ 本身没有代价，常量即正。
@@ -4535,6 +4641,37 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "♦（1/4）自己翻面。代价与风险都在明面上，且座位步会挑盟友 ⇒ 保守给正；"
         "`_constant` 不读任何字段（牌面收益随判定走，AI 侧无法预判）",
     ),
+    # 一将成名-2014·陈群（yijiang-2014 票 02）：【定品】弃一张**手牌**（大类没用过）→
+    # 一名**已受伤**角色判定：黑（1/2）⇒ 其摸 **已损失体力值** 张（本版无"至多 3"的钳制、
+    # 也不退成本），红（1/2）⇒ 自己翻面。与界版同形、收益措辞不同（X 更大、没有 ♥ 退款）。
+    # 座位步选的仍是**受益者**（已受伤角色、含自己）⇒ 走 `_score_seat_option` 的"帮盟友"
+    # 缺省分支，**不登记** `_HOSTILE_SEAT_STEPS`（登记成 "dingpin:" 前缀还会连带改掉界版，
+    # 因为两版的 SELECT_OPTION 短 id 都是 `dingpin:seat`）。保守给略高于放弃的正分。
+    "hero.chenqun.dingpin": (
+        _constant(1.2),
+        "弃一张手牌换一次判定：黑（1/2）让目标摸「已损失体力值」张（可 >3）、"
+        "红（1/2）自己翻面（本版不退成本）。代价与风险都在明面上，且座位步会挑盟友 ⇒ "
+        "保守给正；`_constant` 不读任何字段（牌面收益随判定走，AI 侧无法预判）",
+    ),
+    # 一将成名-2014·陈群（yijiang-2014 票 08 / W4b）：【法恩】**没有代价**（不弃牌 / 不失
+    # 体力 / 不占次数）——有人在翻面 / 横置后摸一张，受益者是"刚变状态的那个人"（本技能
+    # **不选座位**：目标由事件决定）⇒ 走缺省常量即可，**不登记** `_HOSTILE_SEAT_STEPS`
+    # （那条表只收"被指向的对手"，本技能没有座位步可登记）。给得比自摸类低：受益者可能
+    # 是敌方，而 AI 无从选择。
+    "hero.chenqun.faen": (
+        _constant(1.0),
+        "一名角色翻面 / 横置后（无代价）令**其**摸一张：受益者由事件决定、AI 不选座位 ⇒ "
+        "常量正分；`_constant` 不读任何字段",
+    ),
+    # 界一将成名-2014·移动版·界陈群（yijiang-2014-round2 票 11 / P2）：界版【法恩】——
+    # 牌面与 OL 陈群【法恩】**逐字相同**、复用同一组回调 ⇒ 打分口径也逐字沿用上面那条：
+    # **没有代价**、目标由事件决定、**不选座位** ⇒ **不登记** `_HOSTILE_SEAT_STEPS`
+    # （那条表只收"被指向的对手"，本技能没有座位步可登记）。
+    "hero.jie_chenqun_mobile.faen": (
+        _constant(1.0),
+        "一名角色翻面 / 横置后（无代价）令**其**摸一张：受益者由事件决定、AI 不选座位 ⇒ "
+        "常量正分（与 OL 陈群【法恩】逐字同口径）；`_constant` 不读任何字段",
+    ),
     # 界一将成名-2014·移动版·界顾雍（jie-yijiang-2014-mobile 票 02）：【慎行】弃两张换
     # 摸 1（同色）/ 摸 2（异色）——**牌质过滤**，净手牌 −1 或 0。弃哪两张由 `action.picks`
     # 的打分挑（AI 会丢低价值牌），故发动本身略高于放弃即可。
@@ -4542,6 +4679,38 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(0.6),
         "弃两张摸一或两张（牌质过滤，净 −1 / 0）：弃哪两张由 picks 的打分挑低价值牌，"
         "故恒可发动但不宜给高；`_constant` 不读任何字段",
+    ),
+    # 界一将成名-2014·移动版·界顾雍（yijiang-2014-round2 票 13）：【秉壹】结束阶段展示全部
+    # 手牌，颜色**或类别**全同则令至多 N（= 手牌数）名角色**各摸一张**——**没有代价**
+    # （不弃牌 / 不失体力 / 不占次数），候选只在"手上有牌"时出现 ⇒ 常量即正（与 OL 顾雍
+    # 【秉壹】同一口径：同一张座位面、同一份主体，界版只多"或类别"那一支）。座位步走缺省的
+    # 「帮盟友」口径（选中的是被送牌的人）⇒ **不登记** `_HOSTILE_SEAT_STEPS`。
+    "hero.jie_guyong_mobile.bingyi": (
+        _constant(1.5),
+        "结束阶段展示所有手牌：颜色或类别全同则令至多 N 名角色（N = 展示时的手牌数、含自己）"
+        "各摸一张。**没有代价**，座位步走缺省的「帮盟友」口径 ⇒ 常量即正；"
+        "`_constant` 不读任何字段",
+    ),
+    # 一将成名-2014·顾雍（yijiang-2014 票 03）：【慎行】弃两张**恒**摸一张——同样是
+    # **牌质过滤**，但净手牌恒 −1（与界版的"同色摸 1 / 异色摸 2"不同，**没有**颜色分支），
+    # 且**没有次数上限**（Q-G1 = A）。弃哪两张仍由 `action.picks` 的打分挑低价值牌。
+    "hero.guyong.shenxing": (
+        _constant(0.5),
+        "弃两张恒摸一张（牌质过滤，净 −1；无颜色分支、无次数上限）：弃哪两张由 picks 的"
+        "打分挑低价值牌，故恒可发动但不宜给高（净亏一张）；`_constant` 不读任何字段",
+    ),
+    # 一将成名-2014·顾雍（yijiang-2014 票 09 / W5b）：【秉壹】结束阶段展示全部手牌，颜色
+    # 全同则令至多 N（= 手牌数）名角色**各摸一张**——**没有代价**（不弃牌 / 不失体力 /
+    # 不占次数），且座位池**含自己**（Q-G2 = A），候选只在"手上有牌"时出现 ⇒ 常量即正。
+    # 座位步**走缺省的「帮盟友」口径**（本技能对己方有益）：**不登记**
+    # `_HOSTILE_SEAT_STEPS`——那条表收的是"被指向的对手"（伤害 / 拆牌 / 翻面类），
+    # 这里选中的是被送一张牌的人。送的张数（≤ 手牌数）由座位多选面的勾选决定，
+    # 打分器不读任何字段（`_constant`）。
+    "hero.guyong.bingyi": (
+        _constant(1.5),
+        "结束阶段展示所有手牌：颜色全同则令至多 N 名角色（N = 展示时的手牌数、含自己）"
+        "各摸一张。**没有代价**（不弃牌 / 不失体力 / 无次数成本），座位步走缺省的"
+        "「帮盟友」口径（选中的是被送牌的人，不是对手）⇒ 常量即正；`_constant` 不读任何字段",
     ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。
@@ -4593,6 +4762,15 @@ class HeuristicPlayer:
         # W5-02b：借刀的**外层两步清单**（附带指定）——复合使用同样不在候选里，
         # AI 读 ``card_preactivations`` 自己填 A / Bn；持刀者窗口的 a / b 由后续询问应答。
         actions.extend(_card_preactivation_candidates(query))
+        # **不枚举档**多选（yijiang-2014-round2 票 21）：候选里只有一条骨架，AI 按
+        # `_assembled_option_set` 自己拼合法集合来取代它（骨架不是答案集）；「至多」的
+        # 放弃出口 ``Pass`` 仍是候选、照旧参评。
+        if getattr(query, "structural", False) and isinstance(query, SelectOptionsQuery):
+            assembled = _assembled_option_set(query)
+            actions = [
+                action for action in actions if not isinstance(action, SelectOptions)
+            ]
+            actions.append(assembled)
         if not actions:
             raise ValueError(f"{query.kind} 询问没有候选行动，参与者无法应答")
         scorer = _SCORERS[QueryKind(query.kind)]

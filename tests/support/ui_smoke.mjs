@@ -520,7 +520,10 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // lin-batch2 票 03：林包移动版加贾诩移动版（新真名「贾诩」）⇒ 真名 59 → 60、版本 88 → 89。
     // jie-yijiang-2014-mobile 票 01：界陈群移动版（新真名「陈群」）⇒ 真名 62 → 63、版本 93 → 94；
   // 票 02：界顾雍移动版（新真名「顾雍」）⇒ 真名 63 → 64、版本 94 → 95。
-  ui.state.heroCatalog.length === 64 && catalogVersions.length === 95,
+  // yijiang-2014 票 02：一将成名-2014 加陈群（真名「陈群」已在池里）⇒ 真名不变、版本 95 → 96。
+  // yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 真名不变、版本 96 → 97。
+  // yijiang-2014-round2 票 01（W3）：界沮授移动版（真名「沮授」已在池里）⇒ 真名不变、版本 97 → 98。
+  ui.state.heroCatalog.length === 64 && catalogVersions.length === 98,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -2679,6 +2682,262 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeOk}`);
 }
 
+/* ============ 票 17（合成局面）：窗口里的【渐营】② 提供者入口 + **一步清单** ============
+ *
+ * 票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）之后，② 只在**持有者自己的
+ * 出牌阶段 + 使用窗口**里参与 ⇒ 真实可及的只剩**濒死求桃**；故本节的合成载荷从
+ * `RESPOND / BARBARIAN_INVASION`（别人回合的打出窗口）换成 `PEACH`（自己出牌阶段里的使用
+ * 窗口），与服务端下发的真载荷同形。窗口里牌名被窗口定死 ⇒ ② 的交互只剩"选哪张源牌"
+ * 一步。本节喂两份**与服务端同形**的合成载荷，钉住两条界面读法：
+ *
+ *  1. **生产形状**：窗口里【渐营】是一条**裸 `ActivateSkill`** 候选（提供者入口）；按钮
+ *     不能因为 `preactivated` 就画灰（与【蛊惑】同一姿态——清单入口之外还有提供者入口）。
+ *     点它 = 选中那条候选；确认送出的就是它（"选哪张源牌"由服务端随后自己问）。
+ *  2. **一步清单**（票面 §4 点名的合成载荷）：同一扇窗口带【渐营】的单步清单 ⇒ 点技能进
+ *     预发动、点一张手牌、下一步 ⇒ 复合动作 `picks=[那张牌]`、**没有** `choices`
+ *     （牌名由窗口定死，不再问第二步）。
+ */
+{
+  const source = {
+    ...synthCard(52, "闪"), type: "dodge", suit: "heart", rank: 2, color: "red",
+  };
+  const windowPayload = (extra = {}) => ({
+    kind: "PEACH", actor: 0, seq: 903, dying: 1,
+    prompt: "座位 1 濒死：是否使用一张【桃】？",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "hero.jie_jushou_mobile.jianying", answers_seq: 903 },
+      { kind: "Pass", answers_seq: 903 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [], ...extra,
+  });
+  const skillRow = {
+    skill_id: "hero.jie_jushou_mobile.jianying", name: "渐营", skill_type: "NORMAL",
+    locked: false, carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "出牌阶段限一次，你可以将一张牌当任意一张基本牌使用" },
+  };
+  const view = synthView(windowPayload());
+  view.skills = [skillRow];
+  view.snapshot.self_hand = [source];
+  ui.state.view = view;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const windowButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying",
+  );
+  check("㉿JY1 窗口里【渐营】的提供者入口可点（`preactivated` 不会把它弄灰）",
+    !!windowButton && windowButton.disabled === false,
+    `disabled=${windowButton && windowButton.disabled} pre=${windowButton && windowButton.getAttribute("data-preactivation")}`);
+  (windowButton.listeners.click || []).forEach((fn) => fn({ target: windowButton }));
+  check("㉿JY2 点它 = 直提态（选中那条裸 ActivateSkill，不进预发动本地态）",
+    ui.state.selectedOption !== null && ui.state.preactivation === null,
+    `selectedOption=${ui.state.selectedOption} pre=${JSON.stringify(ui.state.preactivation)}`);
+  const bare = ui.buildAction();
+  check("㉿JY3 确认送出的是那条裸候选（选源牌是服务端的下一问）",
+    !!bare && bare.kind === "ActivateSkill"
+      && bare.skill_id === "hero.jie_jushou_mobile.jianying"
+      && (bare.picks || []).length === 0 && (bare.choices || []).length === 0,
+    JSON.stringify(bare));
+
+  const oneStep = [{
+    name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+    pool: [{ when: [], options: ["52"] }],
+    wording: "选择一张源牌（当作窗口要的那张基本牌）",
+  }];
+  const view2 = synthView(windowPayload({
+    preactivations: { "hero.jie_jushou_mobile.jianying": oneStep },
+  }));
+  view2.skills = [skillRow];
+  view2.snapshot.self_hand = [source];
+  ui.state.view = view2;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view2);
+  const oneStepButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying",
+  );
+  (oneStepButton.listeners.click || []).forEach((fn) => fn({ target: oneStepButton }));
+  check("㉿JY4 点【渐营】= 进入**一步**清单（不是出牌阶段那份两步）",
+    !!ui.state.preactivation
+      && ui.state.preactivation.steps.length === 1
+      && /预发动【渐营】/.test($("t-prompt").textContent),
+    `steps=${ui.state.preactivation && ui.state.preactivation.steps.length} prompt="${$("t-prompt").textContent}"`);
+  const windowChip = $("t-hand").children[0];
+  (windowChip.listeners.click || []).forEach((fn) => fn({ target: windowChip }));
+  check("㉿JY5 点那张手牌 = 收进这一步的答案",
+    JSON.stringify(ui.state.preactivation.answers[0].values) === "[52]",
+    JSON.stringify(ui.state.preactivation.answers[0]));
+  const nextStep = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+  check("㉿JY6 一步选完 ⇒ 「下一步」可点", !!nextStep && nextStep.disabled === false);
+  (nextStep.listeners.click || []).forEach((fn) => fn({ target: nextStep }));
+  const oneStepAction = ui.buildAction();
+  check("㉿JY7 确认 = 复合动作 picks=[那张源牌]、没有 choices（牌名由窗口定死）",
+    !!oneStepAction && oneStepAction.kind === "ActivateSkill"
+      && JSON.stringify(oneStepAction.picks) === "[52]"
+      && (oneStepAction.choices || []).length === 0,
+    JSON.stringify(oneStepAction));
+  ui.state.sessionId = null;
+}
+
+/* ============ 票 18（合成局面）：界【渐营】② 的**三步**清单 ============
+ *
+ * 出牌阶段那份清单的三步 =「选牌 → 选牌名 → 选目标」；第 3 步的可选目标由**牌名**决定，
+ * 服务端用两格表达"要不要选"：``StepPool.max``（这一行最多选几个，``0`` = 没有可选目标）
+ * 与 ``Step.min/max``。本节喂一份**与服务端同形**的合成载荷（含 ``Step.kind``），钉住六条
+ * 界面读法：
+ *
+ *  1. 三步都进预发动，第 2 步的置灰项画灰、不接 click（票 04 的既有通道）；
+ *  2. 选了【杀】⇒ 第 3 步出现，座位按服务端给的池高亮；
+ *  3. 第 3 步没填 ⇒ 「确认发动」灰着、``buildAction()`` 拼不出复合动作；填了 ⇒
+ *     ``choices = ["seat:N"]``；
+ *  4. 选了目标由牌名决定的【桃】⇒ 第 3 步**自动跳过**（不画空步），复合动作不带 choices；
+ *  5. 「没有可选目标」那一行排到**最前**时，步类型仍按 ``Step.kind`` 认（评审 Fix 2：
+ *     旧实现拿第一行的 ``options[0]`` 猜类型，这一行排最前 ⇒ 整步被读成选项步 ⇒ 死路）；
+ *  6. 旧载荷（没有 ``Step.kind``）的形状退路看**全部行**，同样不会掉回选项步。
+ */
+{
+  const source = {
+    ...synthCard(52, "闪"), type: "dodge", suit: "heart", rank: 2, color: "red",
+  };
+  const threeSteps = [
+    { name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["52"] }],
+      wording: "选择一张牌（手牌 / 装备区）" },
+    { name: "name", kind: "option", min: 1, max: 1, order: 1,
+      pool: [{ when: [], options: ["杀", "闪", "桃"], disabled: ["闪"] }],
+      wording: "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）" },
+    { name: "seat", kind: "seat", min: 1, max: 1, order: 2,
+      pool: [
+        { when: ["52", "杀"], options: ["seat:1", "seat:2"], max: 1 },
+        { when: ["52", "桃"], options: [], max: 0 },
+      ],
+      wording: "选择这张牌的目标（目标由牌名决定时不出现这一步）" },
+  ];
+  const payload = {
+    kind: "PLAY_PHASE", actor: 0, seq: 905, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 905 }],
+    preactivations: { "hero.jie_jushou_mobile.jianying": threeSteps },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  };
+  const skillRow = {
+    skill_id: "hero.jie_jushou_mobile.jianying", name: "渐营", skill_type: "NORMAL",
+    locked: false, carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "出牌阶段限一次，你可以将一张牌当任意一张基本牌使用" },
+  };
+  const open = (steps = threeSteps) => {
+    const view = synthView({
+      ...payload,
+      preactivations: { "hero.jie_jushou_mobile.jianying": steps },
+    });
+    view.skills = [skillRow];
+    view.snapshot.self_hand = [source];
+    ui.state.view = view;
+    ui.state.sessionId = "smoke-missing-session";
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    const button = Array.from($("t-skills").children).find(
+      (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying");
+    (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+    return view;
+  };
+  const clickCardStep = () => {
+    const chip = $("t-hand").children[0];
+    (chip.listeners.click || []).forEach((fn) => fn({ target: chip }));
+    const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+    (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+  };
+  const nameButton = (label) => Array.from($("t-options").children).find(
+    (b) => b.textContent === label);
+  const seatBoxOf = (seat) => Array.from($("t-seats").children).find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+
+  open();
+  const pa = ui.state.preactivation;
+  check("㉿JY8 出牌阶段的【渐营】② 是**三步**清单（选牌 → 牌名 → 目标）",
+    !!pa && pa.steps.length === 3 && pa.steps[2].name === "seat",
+    `steps=${pa && pa.steps.map((s) => s.name).join(",")}`);
+  clickCardStep();
+  check("㉿JY9 第 1 步选完 ⇒ 光标进第 2 步（牌名）",
+    pa.cursor === 1, `cursor=${pa.cursor}`);
+  const grayed = nameButton("闪");
+  check("㉿JY10 第 2 步的置灰项画灰且不可点（`StepPool.disabled`）",
+    !!grayed && grayed.disabled === true && grayed.classList.contains("dis"),
+    `disabled=${grayed && grayed.disabled} class=${grayed && grayed.className}`);
+  (nameButton("杀").listeners.click || []).forEach((fn) => fn({ target: nameButton("杀") }));
+  check("㉿JY11 选【杀】⇒ 第 3 步出现，候选 = 服务端给的两名",
+    pa.cursor === 2
+      && (ui.preactivationOptions(pa, 2) || []).join(",") === "seat:1,seat:2",
+    `cursor=${pa.cursor} options=${(ui.preactivationOptions(pa, 2) || []).join(",")}`);
+  const beforeSeat = ui.buildAction();
+  check("㉿JY12 第 3 步没填完 ⇒ 「确认发动」灰着、拼不出复合动作",
+    beforeSeat === null && $("btn-submit").disabled === true,
+    `action=${JSON.stringify(beforeSeat)} disabled=${$("btn-submit").disabled}`);
+  const targetBox = seatBoxOf(1);
+  check("㉿JY13 第 3 步的座位画成可点（服务端池里的两名）",
+    !!targetBox && targetBox.classList.contains("targetable"),
+    `class=${targetBox && targetBox.className}`);
+  (targetBox.listeners.click || []).forEach((fn) => fn({ target: targetBox }));
+  const filled = ui.buildAction();
+  check("㉿JY14 三步填完 = 复合动作（picks=[源牌]、choices=[牌名, 目标座位]）",
+    !!filled && filled.kind === "ActivateSkill"
+      && JSON.stringify(filled.picks) === "[52]"
+      && JSON.stringify(filled.choices) === '["杀","seat:1"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(filled));
+
+  // 第 3 步的**直取**档：目标由牌名决定（【桃】自己）⇒ 这一行没有可选目标，自动跳过。
+  open();
+  clickCardStep();
+  (nameButton("桃").listeners.click || []).forEach((fn) => fn({ target: nameButton("桃") }));
+  const peach = ui.state.preactivation;
+  check("㉿JY15 【桃】没有第 3 步可填 ⇒ 光标直接越过它（不画空步）",
+    peach.cursor === peach.steps.length,
+    `cursor=${peach.cursor}/${peach.steps.length}`);
+  const peachAction = ui.buildAction();
+  check("㉿JY16 【桃】的复合动作不带目标（choices 只有牌名，目标由牌名决定）",
+    !!peachAction && peachAction.kind === "ActivateSkill"
+      && JSON.stringify(peachAction.picks) === "[52]"
+      && JSON.stringify(peachAction.choices) === '["桃"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(peachAction));
+
+  /* **危险排序**（评审 Fix 2）：同一份清单里"没有可选目标"的那一行（`max: 0`、
+   * `options: []`）排到**最前**。步的类型是服务端下发的 `Step.kind`（规则级事实），
+   * 不是从 `pool[0].options[0]` 猜出来的——旧实现拿第一行猜，这一行排最前时整步被读成
+   * 选项步 ⇒ 空步不会被跳过、`buildAction()` 也拼不出复合动作，玩家卡死在一步点不动
+   * 的东西上（票 18 要消掉的正是这条死路）。
+   *
+   * 两条判据：生产载荷（带 `kind`）与**旧载荷**（没有 `kind`，形状退路）都要跳过空步。
+   */
+  const peachFirst = [threeSteps[0], threeSteps[1], {
+    ...threeSteps[2],
+    pool: [threeSteps[2].pool[1], threeSteps[2].pool[0]],
+  }];
+  open(peachFirst);
+  clickCardStep();
+  (nameButton("桃").listeners.click || []).forEach((fn) => fn({ target: nameButton("桃") }));
+  const swapped = ui.state.preactivation;
+  check("㉿JY17 「没有可选目标」那一行排最前 ⇒ 仍按 `Step.kind` 认出座位步、空步照样跳过",
+    swapped.cursor === swapped.steps.length
+      && (ui.preactivationStepKind(swapped.steps[2]) === "seat"),
+    `cursor=${swapped.cursor}/${swapped.steps.length}`
+      + ` kind=${ui.preactivationStepKind(swapped.steps[2])}`);
+  const legacySteps = peachFirst.map(({ kind, ...rest }) => rest);
+  open(legacySteps);
+  clickCardStep();
+  (nameButton("桃").listeners.click || []).forEach((fn) => fn({ target: nameButton("桃") }));
+  const legacyPeach = ui.state.preactivation;
+  check("㉿JY18 旧载荷（没有 `Step.kind`）也照样跳过：形状退路看**全部行**而不是第一行",
+    legacyPeach.cursor === legacyPeach.steps.length,
+    `cursor=${legacyPeach.cursor}/${legacyPeach.steps.length}`
+      + ` kind=${ui.preactivationStepKind(legacyPeach.steps[2])}`);
+  ui.state.sessionId = null;
+}
+
 /* ============ 票 25 报障（合成局面）：麒麟弓预发动的第一步要点**目标**装备区的坐骑 ============
  *
  * 清单形状来自引擎真实下发的 Step（`PickCards(zones=("equip",), slot_kinds=坐骑)`）：
@@ -4333,6 +4592,101 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const passSent = calls.length > beforePass ? calls[calls.length - 1].body.action : null;
   check("㉿PZ14 被动入口点「放弃」= 送出 Pass（时机消费，不重问）",
     !!passSent && passSent.kind === "Pass", JSON.stringify(passSent));
+}
+
+/* 票 15（yijiang-2014-round2；合成局面）：界【渐营】① 的「是否发动」**默认 = 发动**。
+ *
+ * 形状取自真投影（本文件之外的 `tests/test_web.py::_session_at_jianying_activation` 钉
+ * 服务端那一半）：技能 id 同时带 ② 的出牌阶段预发动 ⇒ 视图里 `preactivated: true`，而
+ * ① 这一问自己**没有**清单。旧界面因此把它画成"被动入口"：默认答案是「放弃」，玩家得先
+ * 点一次【渐营】技能按钮才能提交。服务端对这条技能下发 `default_choice: "activate"`：
+ * 「提交」直接送候选里那条 `ActivateSkill`，提示条改口径；右端「放弃」仍是候选里的 `Pass`。
+ *
+ * **opt-in 的对照组**（逐字段相同、只是不带那个键）：仍是被动入口、提交键灰着、没有
+ * 默认候选——其余「是否发动」（苦肉 / 洛神 / …）因此一字不变。
+ */
+{
+  const skills = (skillId, name) => ([{
+    skill_id: skillId, name, skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { passive: false, requirement: "", convert_sources: [] },
+  }]);
+  const activationPending = (skillId, seq, extra = {}) => ({
+    kind: "SKILL_ACTIVATION", actor: 0, seq,
+    prompt: "是否发动该技能？", skill_id: skillId,
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: skillId, answers_seq: seq, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    ...extra,
+  });
+
+  // ① 声明的技能：不点技能按钮、直接点「提交」⇒ 送出的就是那条 `ActivateSkill`。
+  const jianying = activationPending(
+    "hero.jie_jushou_mobile.jianying", 9701, { default_choice: "activate" });
+  const jianyingView = synthView(jianying);
+  jianyingView.skills = skills("hero.jie_jushou_mobile.jianying", "渐营");
+  ui.state.view = jianyingView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(jianyingView);
+
+  check("㉿JY-D1 界【渐营】①：默认答案 = 发动（提交键可点、不用先点技能按钮）",
+    ui.renderKind(jianying, jianying.legal_actions) === "preactivation-entry"
+      && ui.state.selectedOption === null
+      && $("btn-submit").disabled === false
+      && $("t-options").children.length === 0,
+    `kind=${ui.renderKind(jianying, jianying.legal_actions)}`
+      + ` selected=${ui.state.selectedOption} submit=${$("btn-submit").disabled}`
+      + ` options=${$("t-options").children.length}`);
+  check("㉿JY-D2 界【渐营】①：buildAction = 候选里那条 ActivateSkill（不是 Pass、不是手拼）",
+    (() => {
+      const built = ui.buildAction();
+      return !!built && built.kind === "ActivateSkill"
+        && built.skill_id === "hero.jie_jushou_mobile.jianying"
+        && jianying.legal_actions.some((a) => JSON.stringify(a) === JSON.stringify(built));
+    })(), JSON.stringify(ui.buildAction()));
+  check("㉿JY-D3 界【渐营】①：提示条改成「点右端「提交」确认发动，或「放弃」取消」，页脚写明将提交什么",
+    $("t-target-hint").textContent.includes("提交")
+      && $("t-target-hint").textContent.includes("确认发动")
+      && $("t-target-hint").textContent.includes("放弃")
+      && $("t-choice").textContent.includes("将提交：发动【渐营】"),
+    `hint="${$("t-target-hint").textContent}" choice="${$("t-choice").textContent}"`);
+  const beforeDefault = calls.length;
+  await clickAndWait($("btn-submit"));
+  const defaultSent = calls.length > beforeDefault
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿JY-D4 界【渐营】①：不点技能按钮、直接点「提交」⇒ 送出 ActivateSkill",
+    !!defaultSent && defaultSent.kind === "ActivateSkill"
+      && defaultSent.skill_id === "hero.jie_jushou_mobile.jianying",
+    JSON.stringify(defaultSent));
+
+  // ② 对照组：同形载荷**不带** `default_choice` ⇒ 与改动前逐字节同一条被动入口。
+  const other = activationPending("demo.passive_default_off", 9702);
+  const otherView = synthView(other);
+  otherView.skills = skills("demo.passive_default_off", "示例被动");
+  ui.state.view = otherView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(otherView);
+
+  check("㉿JY-D5 没声明的「是否发动」仍是旧的被动入口（没有默认候选、提交键灰着）",
+    ui.renderKind(other, other.legal_actions) === "preactivation-entry"
+      && ui.buildAction() === null
+      && $("btn-submit").disabled === true
+      && !$("t-target-hint").textContent.includes("确认发动"),
+    `built=${JSON.stringify(ui.buildAction())} submit=${$("btn-submit").disabled}`
+      + ` hint="${$("t-target-hint").textContent}"`);
+  const beforeOtherPass = calls.length;
+  await clickAndWait($("btn-cancel"));
+  const otherPass = calls.length > beforeOtherPass
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿JY-D6 没声明的「是否发动」点「放弃」仍送出 Pass（其余询问不变）",
+    !!otherPass && otherPass.kind === "Pass", JSON.stringify(otherPass));
 }
 
 /* ⑯ M6 票 23 报障：被动入口的**两步**清单，选完牌要能走到第 2 步。
@@ -8211,7 +8565,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "EndPhase", answers_seq: 9501 },
     ],
     candidate_index: {
-      "13": { card: source, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      "13": {
+        card: source, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1,
+        self_only: true,   // 【无中生有】= 规则自用牌（issue 19 的 `self_only` 事实）
+      },
     },
     virtual_index: {}, option_seats: {}, context: null,
     preactivations: {
@@ -14706,9 +15063,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 /* ============ M5-08c（D5 / §5.1 酒）：酒界面（出牌阶段 / 濒死自救 / 每回合一次） ============
  *
  * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
- *   - 出牌阶段【酒】= 手选路 + 候选索引 `pool: [0]` / `combos: [[0]]`（**自己为目标**）：
- *     点牌自动选中自己，**没有目标步 / 座位目标高亮**；再点控件区「提交」= 恰一条 UseCard。
- *     这是 U2 的自我目标路径（与【桃】/装备同形）——本票**不**改成"点牌即提交"。
+ *   - 出牌阶段【酒】= 手选路 + 候选索引 `pool: [0]` / `combos: [[0]]` / `self_only: true`
+ *     （**自己为目标**）：点牌自动选中自己，**没有目标步 / 座位目标高亮**；再点控件区「提交」
+ *     = 恰一条 UseCard。这是 U2 的自我目标路径（与【桃】/装备同形）——本票**不**改成"点牌即提交"。
  *   - 使用后本回合第二张【酒】没有候选条目 ⇒ 牌置灰、点它零提交。
  *   - 自己濒死：【酒】进求桃窗口（目标恒为自己，无目标步）；他人濒死：没有【酒】入口。
  *   - 只读判据仍只住 `modal.js:stepDialogKind`；弹窗步骤里点牌不选、零提交。
@@ -14814,8 +15171,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "EndPhase", answers_seq: seq },
     ],
     candidate_index: {
-      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
-      124: { card: wine2, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
+      124: { card: wine2, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
       5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
     },
     virtual_index: {}, option_seats: {}, context,
@@ -14891,8 +15248,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "Pass", answers_seq: 3303 },
     ],
     candidate_index: {
-      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
-      4: { card: peach, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
+      4: { card: peach, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1, self_only: true },
     },
     virtual_index: {}, option_seats: {},
     context: { ...context, requirement: "你处于濒死状态：使用【桃】或【酒】自救，或放弃" },
@@ -14931,7 +15288,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "Pass", answers_seq: 3304 },
     ],
     candidate_index: {
-      4: { card: peach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
+      4: {
+        card: peach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1,
+        // 【桃】的**规则**是自用牌，但这一问的目标是座位 2（求桃窗口）⇒ `self_only` 为假
+        // （issue 19 的定义：规则自用 **且** 候选组合的目标就是使用者）。
+        self_only: false,
+      },
     },
     context: { ...context, requirement: "座位 2 处于濒死状态：是否对其使用【桃】？" },
     prompt_display: {
@@ -20769,6 +21131,397 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${multiAnswers.length} action=${JSON.stringify(multiAnswers[0] && multiAnswers[0].body.action)}`);
 }
 
+/* ============ W1：座位多选面（一次点选多个场上武将 → 一次提交）============
+ *
+ * 用户 2026-11-09 在 `02-guyong.md` 的 Q7 上改判（原话）：「一次点选多个座位（类似【铁索连环】），
+ * 不要选好一个提交再继续选」。服务端早已够用（`Engine.ask_options` + `Action.SelectOptions` +
+ * `projection.option_seats` 对 `SELECT_OPTIONS` 已生效），缺口纯在前端：票里点名的三条旧面
+ * 都不覆盖（单选 `selectOptionSeat` / 弹窗 `multiChoice` 勾选 / 多目标那套挂在手牌焦点上）。
+ *
+ * 本段喂一份与 `pending_payload` 同形的合成 view（`SELECT_OPTIONS` + 四个 `seat:N` 选项、
+ * 区间 1..2、`seat:1` 置灰），钉六件事：
+ *   ① fail-closed 优先级：**不开** `multiChoice` 弹窗（`stepDialogKind === null`）、不铺勾选行，
+ *      而 `option_seats` 为空的同一 `SELECT_OPTIONS` 仍走旧弹窗（不回归）；
+ *   ② 牌桌上点座位 = 切换选中（池外 / 置灰 / 到上限的点不动），选中的画成 `tsel`；
+ *   ③ 本地选中集合住 `state.selectedTargets` ⇒ 重绘 / 轮询不丢；
+ *   ④ 「提交」按 `[min,max]` 与候选查找共同启停（0 个 = 灰、1..2 个 = 可点、超上限的那一下不改变集合）；
+ *   ⑤ 一次提交送出**全部**选中座位（`SelectOptions.choices` 按 `options` 原序，与点击顺序无关）；
+ *   ⑥ 「至多」的放弃出口：右端「放弃」送候选里那条 `Pass`，不是把已选集合交上去。
+ */
+{
+  const seatSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261109,
+  });
+  const seatSeq = 973;
+  const seatChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
+  // 候选 = `options` 里 1..2 名的全部子集（`seat:1` 置灰 ⇒ 只枚举 {0,2,3}），
+  // 与 `effects/actions.py:_select_options` 的枚举域同形（顺序由引擎的 `_sort_key` 定，
+  // 界面按「集合相等」查找，不依赖这一序）。
+  const seatCandidates = [
+    ["seat:0"], ["seat:2"], ["seat:3"],
+    ["seat:0", "seat:2"], ["seat:0", "seat:3"], ["seat:2", "seat:3"],
+  ];
+  const seatActions = seatCandidates.map((choices) => ({
+    kind: "SelectOptions", choices, answers_seq: seatSeq,
+  }));
+  const seatPending = {
+    kind: "SELECT_OPTIONS", actor: 0, seq: seatSeq, prompt: "请选择角色（可多选）。",
+    legal_actions: seatActions,
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+    options: seatChoices, disabled: ["seat:1"],
+    min_selected: 1, max_selected: 2, option_texts: {},
+    context: {
+      actor: 0, name: "秉壹", targets: [],
+      label: "0号位顾雍发动秉壹",
+      requirement: "选择令其摸一张牌的角色（可多选，选好后提交）", skill_hints: [],
+    },
+  };
+  // 第 4 个座位：席位池按环桌布局画（synthView 只造 3 人）。
+  const seatViewWith = (pending) => {
+    const view = synthView(pending);
+    view.snapshot.players.push({
+      seat: 3, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+      sealed_zones: [], identity: null,
+    });
+    return view;
+  };
+  const seatView = seatViewWith(seatPending);
+  const seatCardOf = (seat) => seatBox(seat);
+  const seatClasses = (seat) => {
+    const box = seatCardOf(seat);
+    return box ? [...box.classList.set] : [];
+  };
+  const seatMultiRows = () => Array.from($("t-options").children).filter(
+    (node) => String(node.className || "").includes("multi-option"),
+  );
+
+  ui.state.view = seatView;
+  ui.state.sessionId = seatSession.session_id;
+  ui.state.multiSelect = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("座位多选-1 判据只看载荷：`SELECT_OPTIONS` + 非空 `option_seats` ⇒ `seat-multi` 牌桌面，"
+    + "不开 `multiChoice` 弹窗、不铺勾选行",
+    ui.renderKind(seatPending, seatActions) === "seat-multi"
+      && ui.stepDialogKind(seatPending) === null
+      && $("t-dialog").hidden === true
+      && seatMultiRows().length === 0
+      && $("t-target-hint").textContent.includes("多选"),
+    `kind=${ui.renderKind(seatPending, seatActions)} dialog=${ui.stepDialogKind(seatPending)}`
+      + ` rows=${seatMultiRows().length} hint="${$("t-target-hint").textContent}"`);
+
+  check("座位多选-2 池里的座位画成可点（`targetable`）；置灰项（`seat:1`）点不动、不画可点态",
+    ["0", "2", "3"].every((seat) => {
+      const box = seatCardOf(seat);
+      return !!box && box.classList.contains("targetable")
+        && (box.listeners.click || []).length === 1;
+    })
+      && (() => {
+        const box = seatCardOf(1);
+        return !!box && !box.classList.contains("targetable")
+          && !box.classList.contains("tsel")
+          && (box.listeners.click || []).length === 0;
+      })(),
+    `seat0=${JSON.stringify(seatClasses(0))} seat1=${JSON.stringify(seatClasses(1))}`);
+
+  check("座位多选-3 一个都没选 ⇒ 「提交」灰着（区间下限 1）",
+    $("btn-submit").disabled === true && ui.buildAction() === null,
+    `submit=${$("btn-submit").disabled} built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(2));
+  await clickAndWait(seatCardOf(0));
+  check("座位多选-4 点两个座位 = 选中两个（`tsel`）；动作按 `options` 原序给出集合，与点击顺序无关",
+    seatCardOf(2).classList.contains("tsel")
+      && seatCardOf(0).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3])
+      && $("btn-submit").disabled === false,
+    `seat2=${JSON.stringify(seatClasses(2))}`
+      + ` built=${JSON.stringify(ui.buildAction())} submit=${$("btn-submit").disabled}`);
+
+  await clickAndWait(seatCardOf(3));
+  check("座位多选-5 到上限后第三个点不动（集合仍是那两个，提交仍可点）",
+    seatCardOf(3).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3]),
+    `seat3=${JSON.stringify(seatClasses(3))}`
+      + ` built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(1));
+  check("座位多选-6 置灰座位点了也不改变集合（引擎侧同样不会收到含它的候选）",
+    seatCardOf(1).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3]),
+    `built=${JSON.stringify(ui.buildAction())}`);
+
+  // 静默轮询 / 重绘：同一询问序号的重复渲染不得丢掉本地选中集合。
+  ui.renderTable();
+  ui.renderPending(seatView);
+  check("座位多选-7 重绘（轮询刷新）后选中集合不丢：两座仍是 `tsel`、动作不变",
+    seatCardOf(2).classList.contains("tsel")
+      && seatCardOf(0).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[3]),
+    `seat2=${JSON.stringify(seatClasses(2))}`
+      + ` built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(0));
+  check("座位多选-8 再点一次 = 取消选中；剩一个仍在区间内 ⇒ 提交可点",
+    seatCardOf(0).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[1])
+      && $("btn-submit").disabled === false,
+    `seat0=${JSON.stringify(seatClasses(0))}`
+      + ` built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeSeatSubmit = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const seatAnswers = calls
+    .slice(beforeSeatSubmit)
+    .filter((call) => call.path.includes("/answer"));
+  check("座位多选-9 点「提交」= 恰一条 POST，送出的就是候选里那条 `SelectOptions`（全部选中座位一次上行）",
+    seatAnswers.length === 1
+      && JSON.stringify(seatAnswers[0].body.action) === JSON.stringify(seatActions[1]),
+    `answers=${seatAnswers.length} action=${JSON.stringify(seatAnswers[0] && seatAnswers[0].body.action)}`);
+
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+  check("座位多选-10 清空本地选择后回到「灰着」的初态（一个都没选）",
+    $("btn-submit").disabled === true
+      && seatChoices.every((choice) => {
+        const box = seatCardOf(Number(choice.slice("seat:".length)));
+        return !!box && !box.classList.contains("tsel");
+      }),
+    `submit=${$("btn-submit").disabled}`);
+
+  // 「至多」的**放弃出口**（W1 的首个载体【秉壹】用它）：右端「放弃」送候选里那条 `Pass`，
+  // **不是**把已选座位集合交上去——两者在服务端是两条不同的候选。可放弃的步由
+  // `optional=True` 在 `legal_actions` 里多出一条 `Pass`（与单选座位面同一个出口）。
+  const seatPass = { kind: "Pass", answers_seq: seatSeq };
+  const seatPassPending = {
+    ...seatPending, seq: seatSeq + 2, legal_actions: [...seatActions, seatPass],
+  };
+  const seatPassView = seatViewWith(seatPassPending);
+  ui.state.view = seatPassView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatPassView);
+  await clickAndWait(seatCardOf(2));
+  check("座位多选-12 可放弃的步（候选里有 `Pass`）⇒ 右端「放弃」出现，左端「清空选择」只清本地面",
+    $("btn-pass").hidden === false
+      && $("btn-submit").disabled === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(seatActions[1]),
+    `passHidden=${$("btn-pass").hidden} built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeSeatPass = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-pass"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const seatPassAnswers = calls
+    .slice(beforeSeatPass)
+    .filter((call) => call.path.includes("/answer"));
+  check("座位多选-13 点右端「放弃」= 恰一条 POST、送的是候选里那条 `Pass`（不是已选集合）",
+    seatPassAnswers.length === 1
+      && JSON.stringify(seatPassAnswers[0].body.action) === JSON.stringify(seatPass),
+    `answers=${seatPassAnswers.length} action=${JSON.stringify(seatPassAnswers[0] && seatPassAnswers[0].body.action)}`);
+  ui.state.view = seatView;
+  ui.resetSelection();
+
+  /* ===== 秉壹（yijiang-2014 票 09 / W5b）的**合成载荷** ==========================
+   *
+   * 上面那份载荷是 W1 的通用面（刻意带了一个置灰座位）；【秉壹】的生产载荷是另一档：
+   * **4 名存活角色（含自己）、一个置灰项都没有**、区间 `[1, N]`（N = 展示那一刻的手牌数
+   * 3）、候选里带 `Pass`（「至多」可放弃）。服务端真会话读数钉在
+   * `tests/test_web.py::test_a_real_session_reaches_the_bingyi_seat_multi_select_face`，
+   * 这里补的是前端那一侧：**全部座位可点 + 上限恰在手牌数**时点满 3 个、第 4 个点不动，
+   * 提交仍是**一条** POST 送全部选中座位。
+   */
+  const bingyiSeq = seatSeq + 3;
+  const bingyiChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
+  // 票 21 起【秉壹】的座位面是**不枚举档**（`structural`）：候选里只有一条骨架（前
+  // `min_selected` 个座位）+ 一条 `Pass`，集合由界面按本地选择自己拼出来（服务端按
+  // `is_legal_option_set` 校验形状）。这里照生产形状摆，不再铺子集候选。
+  const bingyiActions = [
+    { kind: "SelectOptions", choices: ["seat:0"], answers_seq: bingyiSeq },
+  ];
+  const bingyiTarget = {
+    kind: "SelectOptions", choices: ["seat:1", "seat:2", "seat:3"], answers_seq: bingyiSeq,
+  };
+  const bingyiPending = {
+    kind: "SELECT_OPTIONS", actor: 0, seq: bingyiSeq, prompt: "请选择角色（可多选）。",
+    legal_actions: [...bingyiActions, { kind: "Pass", answers_seq: bingyiSeq }],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+    options: bingyiChoices, disabled: [], structural: true,
+    min_selected: 1, max_selected: 3, option_texts: {},
+    context: {
+      actor: 0, name: "秉壹", targets: [],
+      label: "0号位顾雍对0号位顾雍使用秉壹",
+      requirement: "选择令其摸一张牌的角色（可多选，选好后提交）", skill_hints: [],
+    },
+  };
+  const bingyiView = seatViewWith(bingyiPending);
+  ui.state.view = bingyiView;
+  ui.state.sessionId = seatSession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(bingyiView);
+
+  check("秉壹-1 四名存活角色（**含自己**、没有置灰项）全部点得动，「提交」灰着（下限 1）",
+    ["0", "1", "2", "3"].every((seat) => {
+      const box = seatCardOf(seat);
+      return !!box && box.classList.contains("targetable")
+        && (box.listeners.click || []).length === 1;
+    }) && $("btn-submit").disabled === true,
+    `seats=${JSON.stringify(["0", "1", "2", "3"].map((seat) => seatClasses(seat)))}`
+      + ` submit=${$("btn-submit").disabled}`);
+
+  await clickAndWait(seatCardOf(3));
+  await clickAndWait(seatCardOf(1));
+  await clickAndWait(seatCardOf(2));
+  check("秉壹-2 点满手牌数（3 个座位）后第 4 个点不动；动作 = 三个座位按 `options` 原序一束",
+    seatCardOf(3).classList.contains("tsel")
+      && seatCardOf(1).classList.contains("tsel")
+      && seatCardOf(2).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(bingyiTarget),
+    `seat0=${JSON.stringify(seatClasses(0))} built=${JSON.stringify(ui.buildAction())}`);
+
+  await clickAndWait(seatCardOf(0));
+  check("秉壹-3 上限外的第 4 个座位点了也不改变集合（上限 = 手牌数，比场上人数少）",
+    seatCardOf(0).classList.contains("tsel") === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(bingyiTarget),
+    `seat0=${JSON.stringify(seatClasses(0))} built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeBingyi = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const bingyiAnswers = calls
+    .slice(beforeBingyi)
+    .filter((call) => call.path.includes("/answer"));
+  check("秉壹-4 点「提交」= 恰一条 POST，送出三个座位的 `SelectOptions`（一次点选、一次提交）",
+    bingyiAnswers.length === 1
+      && JSON.stringify(bingyiAnswers[0].body.action) === JSON.stringify(bingyiTarget),
+    `answers=${bingyiAnswers.length}`
+      + ` action=${JSON.stringify(bingyiAnswers[0] && bingyiAnswers[0].body.action)}`);
+
+  /* ===== 界顾雍移动版【秉壹】（yijiang-2014-round2 票 13 / P4）的**合成载荷** ==========
+   *
+   * 与标准顾雍【秉壹】**同一张座位多选面**：票面 §6 明写本票**不动** `static/`——服务端
+   * 只是换了发动者（界顾雍移动版）、这条询问的文案与名额上限（N = 展示那一刻的手牌数）。
+   * 这里只换这三样东西再跑一遍，证明"界版这条技能用的就是已落地的同一张面"：文案换掉之后
+   * 提示条照读服务端下发的那一句、名额上限比场上人数**小**时点满即停、提交仍是一条 POST。
+   * 真会话读数（服务端真派生出 `option_seats` / 区间 / 文案）钉在
+   * `tests/test_hero_jie_yijiang.py::test_jie_bingyi_wording_is_its_own_row`（询问的
+   * `skill_id` = 界版那一行）与票 09 的 `test_a_real_session_reaches_the_bingyi_seat_multi_select_face`。
+   */
+  const jieBingyiSeq = seatSeq + 4;
+  const jieBingyiChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
+  // 与标准顾雍【秉壹】同一档（票 21 起两版都是**不枚举档**）：骨架 + 放弃，集合由界面拼。
+  const jieBingyiActions = [
+    { kind: "SelectOptions", choices: ["seat:0"], answers_seq: jieBingyiSeq },
+  ];
+  const jieBingyiTarget = {
+    kind: "SelectOptions", choices: ["seat:1", "seat:3"], answers_seq: jieBingyiSeq,
+  };
+  const jieBingyiRequirement = "选择令其摸一张牌的角色（可多选，选好后提交）";
+  const jieBingyiPending = {
+    kind: "SELECT_OPTIONS", actor: 0, seq: jieBingyiSeq, prompt: "请选择角色（可多选）。",
+    legal_actions: [...jieBingyiActions, { kind: "Pass", answers_seq: jieBingyiSeq }],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+    options: jieBingyiChoices, disabled: [], structural: true,
+    min_selected: 1, max_selected: 2, option_texts: {},
+    context: {
+      actor: 0, name: "秉壹", targets: [],
+      label: "3号位界顾雍移动版对3号位界顾雍移动版使用秉壹",
+      requirement: jieBingyiRequirement, skill_hints: [],
+    },
+  };
+  const jieBingyiView = seatViewWith(jieBingyiPending);
+  ui.state.view = jieBingyiView;
+  ui.state.sessionId = seatSession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(jieBingyiView);
+
+  check("界秉壹-1 同一张面：界版的文案照读服务端下发那一句、四名角色全部点得动（没有置灰项）",
+    $("t-prompt").textContent === jieBingyiRequirement
+      && ["0", "1", "2", "3"].every((seat) => {
+        const box = seatCardOf(seat);
+        return !!box && box.classList.contains("targetable");
+      })
+      && $("btn-submit").disabled === true,
+    `prompt="${$("t-prompt").textContent}"`
+      + ` seats=${JSON.stringify(["0", "1", "2", "3"].map((seat) => seatClasses(seat)))}`);
+
+  await clickAndWait(seatCardOf(3));
+  await clickAndWait(seatCardOf(1));
+  await clickAndWait(seatCardOf(0));
+  check("界秉壹-2 上限 = 手牌数 2（比场上人数少）⇒ 点满后第 3 个点不动；动作 = 这两个座位一束",
+    !seatCardOf(0).classList.contains("tsel")
+      && seatCardOf(3).classList.contains("tsel")
+      && seatCardOf(1).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(jieBingyiTarget),
+    `seat0=${JSON.stringify(seatClasses(0))} built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeJieBingyi = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const jieBingyiAnswers = calls
+    .slice(beforeJieBingyi)
+    .filter((call) => call.path.includes("/answer"));
+  check("界秉壹-3 提交 = 恰一条 POST，送出的就是这一面里那条 `SelectOptions`（界版复用同一张面）",
+    jieBingyiAnswers.length === 1
+      && JSON.stringify(jieBingyiAnswers[0].body.action) === JSON.stringify(jieBingyiTarget),
+    `answers=${jieBingyiAnswers.length}`
+      + ` action=${JSON.stringify(jieBingyiAnswers[0] && jieBingyiAnswers[0].body.action)}`);
+
+  ui.state.view = seatView;
+  ui.resetSelection();
+
+  // fail-closed 的反面：`option_seats` 为空的同一 `SELECT_OPTIONS` 仍走旧弹窗（逐字节不回归）。
+  const plainMulti = {
+    ...seatPending, seq: seatSeq + 1, option_seats: {}, disabled: ["jie_shensu_2"],
+    options: ["jie_shensu_1", "jie_shensu_2"],
+    min_selected: 0, max_selected: 2,
+    legal_actions: [[], ["jie_shensu_1"]].map((choices) => ({
+      kind: "SelectOptions", choices, answers_seq: seatSeq + 1,
+    })),
+  };
+  const plainView = synthView(plainMulti);
+  ui.state.view = plainView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(plainView);
+  check("座位多选-11 没有 `option_seats` 的 `SELECT_OPTIONS` 仍走旧 `multiChoice` 弹窗（不回归）",
+    ui.renderKind(plainMulti, plainMulti.legal_actions) === "multi"
+      && ui.stepDialogKind(plainMulti) === "multiChoice"
+      && $("t-dialog").hidden === false
+      && Array.from($("t-options").children).some(
+        (node) => String(node.className || "").includes("multi-option")),
+    `kind=${ui.renderKind(plainMulti, plainMulti.legal_actions)}`
+      + ` dialog=${ui.stepDialogKind(plainMulti)}`);
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 /* ============ 改判窗口：装备区的牌必须点得动（2026-11-08 实机报障）============
  *
  * 报障原文：「鬼道无法选择装备区的牌改判；标鬼道也有这个问题」。引擎侧从来没错：
@@ -21660,6 +22413,219 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 
   ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ 19-A（P10）：目标池被技能削到只剩自己 ⇒ 自己座位仍可指定 ============
+ *
+ * 真局面（票面 §2 / 复现口径）：2 人局，我 = 座位 0 手里有**黑色【铁索连环】**，对面 = 贾诩
+ * （【帷幕】）。【帷幕】只把贾诩从黑色锦囊的池里剔掉，剩下的自己仍是合法目标 ⇒ 引擎给出
+ * `UseCard(targets=(0,))`；投影层因此下发 `pool:[0] / combos:[[0]] / min=max=1`——**与
+ * 【无中生有】逐字相同的形状**。
+ *
+ * 旧读法从形状反推"规则自用"（`pool.length === 1 && pool[0] === selfSeat`），于是自己的座位
+ * 既没有 `tsel` / `targetable` 也没有点击口：牌点得亮，却指定不了目标。现在的判据是服务端
+ * 转发的**规则事实** `candidate_index[].self_only`（真源 = 行为表 `TargetRule.self_only`），
+ * 投影侧的值由 `tests/test_web.py::test_a_self_only_target_card_is_still_clickable_in_a_two_player_game`
+ * 在真会话形状上钉住；本块只核**界面读得到那个键**，并保住"真自用牌"的既有面孔。
+ */
+{
+  const iron = {
+    ...synthCard(130, "铁索连环"),
+    type: "iron_chain", display_name: "铁索连环", kind: "normal", attribute: "普通",
+    source_cards: [], suit: "club", color: "black",
+    description: "铁索连环的描述：横置或重置至多两名角色。",
+  };
+  const exnihilo = {
+    ...synthCard(13, "无中生有"),
+    type: "ex_nihilo", display_name: "无中生有", kind: "normal", attribute: "普通",
+    source_cards: [], suit: "heart", color: "red",
+    description: "无中生有的描述：摸两张牌。",
+  };
+  const raw = (card) => ({
+    card_id: card.card_id, type: card.type, name: card.name, suit: card.suit,
+    rank: card.rank, slot: card.slot, attack_range: card.attack_range,
+    color: card.color, virtual_sources: [],
+  });
+  // 2 人局（无身份）：我 = 座位 0，对面 = 贾诩（带【帷幕】的座位 1）。
+  const view = (pending) => {
+    const built = synthView(pending);
+    built.human_seat = 0;
+    built.snapshot.seat = 0;
+    built.snapshot.phase = "play";
+    built.snapshot.turn_seat = 0;
+    built.snapshot.self_hand = [iron, exnihilo];
+    built.snapshot.processing = [];
+    built.snapshot.players = [0, 1].map((seat) => ({
+      seat, hp: 3, hp_max: 3, hand_count: 2, alive: true, equip: [], judge: [],
+      identity: null, chained: false,
+    }));
+    return built;
+  };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 1901,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 1901, card: raw(iron), targets: [0] },
+      { kind: "UseCard", answers_seq: 1901, card: raw(exnihilo), targets: [0] },
+      { kind: "EndPhase", answers_seq: 1901 },
+    ],
+    candidate_index: {
+      130: {
+        card: iron, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1,
+        self_only: false,   // 【帷幕】削池，不是规则自用
+      },
+      13: {
+        card: exnihilo, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1,
+        self_only: true,
+      },
+    },
+    virtual_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: null, targets: [], label: null,
+      requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+    },
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 1901 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const play = view(pending);
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const render = async () => {
+    ui.state.view = play;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(play);
+  };
+
+  // ---- ① 黑色【铁索连环】：池只剩自己（帷幕）⇒ 自己座位画成已选 + 接点击 ----
+  await render();
+  await clickHand(130);
+  const selfClicks = (node) => (node.listeners.click || []).length;
+  const chainSeat = seatBox(0);
+  check("19-A1 2 人局【帷幕】削池后黑色【铁索连环】的**自己**座位可指定（tsel + 点击口）",
+    ui.state.focusCardId === 130
+      && ui.cardEntry(pending, 130).self_only === false
+      && chainSeat !== null
+      && chainSeat.classList.contains("tsel")
+      && selfClicks(chainSeat) > 0
+      && $("btn-submit").disabled === false,
+    `focus=${ui.state.focusCardId} self_only=${ui.cardEntry(pending, 130).self_only} `
+      + `classes=${JSON.stringify([...(chainSeat ? chainSeat.classList.set : [])])} `
+      + `clicks=${chainSeat ? selfClicks(chainSeat) : "无节点"} submit=${$("btn-submit").disabled}`);
+
+  // ---- ② 真自用牌（【无中生有】）保持原面孔：不画座位高亮、不接点击 ----
+  await render();
+  await clickHand(13);
+  const selfOnlySeat = seatBox(0);
+  check("19-A2 真自用牌（【无中生有】）行为不变：自己座位既不画成 targetable/tsel 也不接点击",
+    ui.state.focusCardId === 13
+      && ui.cardEntry(pending, 13).self_only === true
+      && selfOnlySeat !== null
+      && !selfOnlySeat.classList.contains("targetable")
+      && !selfOnlySeat.classList.contains("tsel")
+      && selfClicks(selfOnlySeat) === 0,
+    `focus=${ui.state.focusCardId} self_only=${ui.cardEntry(pending, 13).self_only} `
+      + `classes=${JSON.stringify([...(selfOnlySeat ? selfOnlySeat.classList.set : [])])} `
+      + `clicks=${selfOnlySeat ? selfClicks(selfOnlySeat) : "无节点"}`);
+
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ 票 20（合成局面）：出牌阶段【激将】的使用侧回环 ============
+ *
+ * 服务端的形状：出牌阶段对【激将】下发一份**一步**清单（`seat`，池 = 那张虚拟【杀】的
+ * 合法目标）；点技能进入清单 → 点一名目标 ⇒ 复合动作 `ActivateSkill(picks=[], choices=
+ * ["seat:N"])` → 「确认发动」可点。锁着的时候**清单不下发**（候选也已被预发动删掉）⇒
+ * 界面上没有入口——这三条钉住"这个新入口在前端真的走得通 / 锁住时真的消失"。
+ */
+{
+  const jijiangSteps = [
+    { name: "seat", kind: "seat", min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["seat:1", "seat:2"] }],
+      wording: "选择【杀】的目标" },
+  ];
+  const jijiangPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 910,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 910 }],
+    preactivations: { "hero.liubei.jijiang": jijiangSteps },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  };
+  const jijiangSkill = {
+    skill_id: "hero.liubei.jijiang", name: "激将", skill_type: "LORD",
+    locked: false, carrier: "HERO",
+    // 已翻预发动 ⇒ 骨架候选被删 ⇒ 真投影这里是 `available: false`（可用性只有清单）。
+    available: false, preactivated: true,
+    ui: { requirement: "主公技：当你需要使用或打出【杀】时，可以令其他蜀势力角色代打" },
+  };
+  const openJijiang = (preactivations) => {
+    const view = synthView({ ...jijiangPending, preactivations });
+    view.skills = [jijiangSkill];
+    ui.state.view = view;
+    ui.state.sessionId = "smoke-missing-session";
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    return Array.from($("t-skills").children).find(
+      (b) => b.getAttribute("data-skill-id") === "hero.liubei.jijiang");
+  };
+  const jijiangSeat = (seat) => Array.from($("t-seats").children).find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+
+  const button = openJijiang({ "hero.liubei.jijiang": jijiangSteps });
+  check("㉿JJ1 出牌阶段的【激将】按钮在（已翻预发动 ⇒ 清单入口）",
+    !!button && (button.listeners.click || []).length > 0,
+    `button=${!!button}`);
+  (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+  const pa = ui.state.preactivation;
+  check("㉿JJ2 点【激将】⇒ 唯一的一步是「选目标」，候选 = 服务端给的两名",
+    !!pa && pa.steps.length === 1 && pa.cursor === 0
+      && (ui.preactivationOptions(pa, 0) || []).join(",") === "seat:1,seat:2",
+    `steps=${pa && pa.steps.length} cursor=${pa && pa.cursor} `
+      + `options=${pa && (ui.preactivationOptions(pa, 0) || []).join(",")}`);
+  const target = jijiangSeat(2);
+  check("㉿JJ3 第 1 步的座位画成可点（服务端池里的两名）",
+    !!target && target.classList.contains("targetable"),
+    `class=${target && target.className}`);
+  (target.listeners.click || []).forEach((fn) => fn({ target }));
+  const action = ui.buildAction();
+  check("㉿JJ4 点目标 ⇒ 复合动作 ActivateSkill(picks=[], choices=[\"seat:2\"])，「确认发动」可点",
+    !!action && action.kind === "ActivateSkill"
+      && action.skill_id === "hero.liubei.jijiang"
+      && JSON.stringify(action.picks) === "[]"
+      && JSON.stringify(action.choices) === '["seat:2"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(action));
+
+  // 锁着的时候：服务端不下发清单（骨架候选也已被"已翻预发动"删掉）⇒ 按钮画成深灰、
+  // **不接 click**（点不动 = 没有入口，不是"点了没反应"）。
+  const lockedButton = openJijiang({});
+  check("㉿JJ5 清单不下发（机械锁）⇒ 【激将】按钮不可点（无 click 口、禁用、深灰）",
+    !!lockedButton
+      && lockedButton.disabled === true
+      && (lockedButton.listeners.click || []).length === 0
+      && lockedButton.classList.contains("unavailable")
+      && !lockedButton.getAttribute("data-preactivation"),
+    `button=${!!lockedButton} disabled=${lockedButton && lockedButton.disabled} `
+      + `clicks=${lockedButton && (lockedButton.listeners.click || []).length} `
+      + `class=${lockedButton && lockedButton.className} `
+      + `preactivation=${lockedButton && lockedButton.getAttribute("data-preactivation")}`);
+
   ui.state.view = null;
   ui.resetSelection();
 }

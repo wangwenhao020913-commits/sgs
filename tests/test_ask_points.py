@@ -74,12 +74,16 @@ def _module_flows() -> dict[int, tuple[str, SkillFlow]]:
 
 
 def _registered_flows() -> dict[int, str]:
-    """登记处引用的流水线：``id(flow) -> 登记处``（主动技 + 钩子 + 接缝）。"""
+    """登记处引用的流水线：``id(flow) -> 登记处``（主动技 + 声明级 flow + 钩子 + 接缝）。"""
     found: dict[int, str] = {}
     for skill in ACTIVE_SKILLS:
         if skill.flow is not None:
             found.setdefault(id(skill.flow), f"ACTIVE_SKILLS[{skill.skill_id}]")
     for skill_id, definition in CATALOG.items():
+        if definition.flow is not None:
+            # 声明级**发动**流水线（yijiang-2014-round2 票 20）：非 A 族、却在出牌阶段
+            # 作为主动入口的技能（【激将】的「使用【杀】」侧）。
+            found.setdefault(id(definition.flow), f"CATALOG[{skill_id}].flow")
         for hook in definition.hooks:
             if hook.flow is not None:
                 found.setdefault(id(hook.flow), f"{skill_id}:{hook.timing.value}")

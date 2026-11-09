@@ -79,6 +79,7 @@ def project(state: GameState, seat: int) -> PlayerView:
             seat=player.seat,
             hp=player.hp,
             hp_max=player.hp_max,
+            armor=player.armor,
             hand_count=len(player.hand),
             alive=player.alive,
             equip=state.refs(player.equip),

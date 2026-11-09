@@ -151,15 +151,34 @@ function cardPreactivationManifest(pending, card) {
   return steps && steps.length ? steps : null;
 }
 
-/** 这一步选什么：`card` = 区域里的牌；`seat` = `seat:N` 闭集；`option` = 其余闭集文本。 */
+/** 这一步选什么：`card` = 区域里的牌；`seat` = `seat:N` 闭集；`option` = 其余闭集文本。
+ *
+ * **类型是服务端下发的规则级事实**（`Step.kind`，清单渲染器按步骤**声明类型**填），界面
+ * 不按载荷形状反推（`CODING_STANDARDS.md` §1：字段的读取方要读对）。反例（票 18 的评审
+ * Fix 2）：目标由牌名决定的清单里，同一个座位步有一行是"没有可选目标"
+ * （`options = []`、`max = 0`）；旧实现拿 `pool[0].options[0]` 猜类型，这一行排在**最前**
+ * 时整步被读成选项步 ⇒ :func:`preactivationNoChoiceStep` 恒假、空步不会被跳过，玩家卡在
+ * 一步点不动的东西上——正是票 18 要消掉的那条死路。
+ *
+ * 退路只给**旧载荷**（缺 `kind` 的合成夹具 / 退化清单）：判据点看**全部行**而不是第一行，
+ * 任一行有 `seat:N` 即座位步；一行候选都没有时按"非选牌步的默认真实形态"判成座位步
+ * （选项步的候选是常量、不会全空；`pool = []` 的退化座位步也走这里）。
+ */
 function preactivationStepKind(step) {
+  if (step.kind === "card" || step.kind === "seat" || step.kind === "option") {
+    return step.kind;
+  }
   if (step.zones && step.zones.length) return "card";
-  // 服务端退化掉候选索引时（`pool=()`）只能按"非选牌步的默认真实形态"判：座位步。
-  // 选项步的候选是常量、不会退化，故这条 fallback 不会把选项步误判成座位。
   if (!step.pool || !step.pool.length) return "seat";
-  const first = (step.pool[0].options || [])[0];
-  if (typeof first === "string" && first.startsWith(SEAT_PREFIX)) return "seat";
-  return "option";
+  let sawOption = false;
+  for (const row of step.pool) {
+    for (const option of (row.options || [])) {
+      if (typeof option !== "string") continue;
+      if (option.startsWith(SEAT_PREFIX)) return "seat";
+      sawOption = true;
+    }
+  }
+  return sawOption ? "option" : "seat";
 }
 
 /** 命中**前序答案**的那一行池：先找精确匹配 `when` 的，其次 `when=()` 的（与前序无关）。
@@ -469,18 +488,43 @@ function preactivationRequiredSeat(pa, pending, index) {
   return options[0];
 }
 
+/** 座位步的**这一行**是不是"没有可选目标"（票 18）：服务端下发 ``StepPool.max = 0``。
+
+ *  产物的目标由**牌名**决定时（【桃】/【酒】固定选自己、2 人局的【杀】只有一个对手），
+ *  这一步没有可问的东西。服务端用``max = 0``（而不是把整条步拿掉）表达"这一行不需要选"：
+ *  同一条清单里"【杀】要选目标、【桃】不要"可以并存。界面据此把这一步当成**已填**并在
+ *  进入时自动跳过——判据只读服务端下发的这一格，不按技能 / 牌名分支。
+ */
+function preactivationNoChoiceStep(pa, index) {
+  const step = pa && pa.steps[index];
+  if (!step || preactivationStepKind(step) !== "seat") return false;
+  const row = preactivationPoolRow(pa, index);
+  return Boolean(row) && Number.isInteger(row.max) && row.max === 0;
+}
+
 /** 进入座位步时把**必选首项**（借刀窗口的 Bn）预先放进答案：省掉一次没有信息量的点击。
  *
  * 只在答案为空时填——玩家取消其它座位不会把它抖回来（首项本身也不可取消）。
+ *
+ * **没有可选目标的行直接跳过**（票 18）：``StepPool.max === 0`` 的座位步不画空步，
+ * 光标越过它、答案保持空（服务端按同一份 0 收尾，复合动作里不带 choices）。
  */
 function applyPreativationDefaults(pa, pending) {
-  if (!pa || pa.cursor >= pa.steps.length) return;
-  const required = preactivationRequiredSeat(pa, pending, pa.cursor);
-  if (required === null) return;
-  const answer = pa.answers[pa.cursor];
-  if (answer.values.length) return;
-  answer.values = [Number(required.slice(SEAT_PREFIX.length))];
-  answer.texts = [required];
+  if (!pa) return;
+  while (pa.cursor < pa.steps.length) {
+    if (preactivationNoChoiceStep(pa, pa.cursor)) {
+      pa.answers[pa.cursor] = { values: [], texts: [] };
+      pa.cursor += 1;
+      continue;
+    }
+    const required = preactivationRequiredSeat(pa, pending, pa.cursor);
+    if (required === null) return;
+    const answer = pa.answers[pa.cursor];
+    if (answer.values.length) return;
+    answer.values = [Number(required.slice(SEAT_PREFIX.length))];
+    answer.texts = [required];
+    return;
+  }
 }
 
 /** 点场上武将：选座位步的答案。
@@ -573,6 +617,9 @@ function jumpPreativationStep(index) {
 function preactivationStepFilled(pa, index) {
   const step = pa && pa.steps[index];
   if (!step) return false;
+  // 没有可选目标的一行（票 18）：服务端说"这一步在这个牌名下没有要选的" ⇒ 视为已填，
+  // 否则目标由牌名决定的牌名（【桃】/【酒】）永远点不亮「确认发动」。
+  if (preactivationNoChoiceStep(pa, index)) return true;
   const answer = pa.answers[index];
   const count = answer ? answer.values.length : 0;
   if (count < step.min) return false;

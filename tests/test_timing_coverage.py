@@ -3,10 +3,10 @@
 覆盖清单 = 「时机节点 → 覆盖它的基准或用例」的映射，定义在
 ``tests/support/timing_coverage.py``。本文件把它变成判决，断言四件事：
 
-1. 清单的键集**恰等于** dispatch 白名单（56 个可从记录流观测的节点）；
+1. 清单的键集**恰等于** dispatch 白名单（62 个可从记录流观测的节点）；
 2. 清单里声明的**每一个**来源都真的 dispatch 它声称覆盖的节点（实测，不靠声明）；
 3. 所有来源的记录流并集**恰等于**白名单（既 ⊇ 也不多）；
-4. 16 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
+4. 12 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
 
 **"⊇ 64" 的重述**（票 18 已登记、票 25 落地、票 32 定格）：64 个已实现类里有 11 个 L2
 边界 / 阶段间节点结构性地不 dispatch、记录流不可见，故机械判据是
@@ -18,10 +18,16 @@ from __future__ import annotations
 
 from sgs.timing import DISPATCH_WHITELIST, EMPTY_LOG, ENUM_ONLY, IMPLEMENTED, Timing
 
-from support.timing_coverage import ALL_SOURCES, COVERAGE, PINDIAN_SCENE, dispatched
+from support.timing_coverage import (
+    ALL_SOURCES,
+    COVERAGE,
+    PINDIAN_SCENE,
+    STATE_SCENE,
+    dispatched,
+)
 
 WHITELIST = frozenset(timing.value for timing in DISPATCH_WHITELIST)
-"""56 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
+"""62 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
 
 
 def _collected() -> frozenset[str]:
@@ -70,15 +76,26 @@ TAOCAOCAO_UNSEALED: frozenset[str] = frozenset({Timing.RANK_COMPARE_PLACED.value
 FENGYUJIN_UNSEALED: frozenset[str] = frozenset({Timing.ROUND_START.value})
 """feng-yujin 票 02 的增量：L1.0 **新增**的「每轮开始时」（轮边界；首个载体 = 锋·于禁【定乱】）。"""
 
+STATE_UNSEALED: frozenset[str] = frozenset(
+    {Timing.STATE_FLIPPED.value, Timing.STATE_CHAINED.value}
+)
+"""chenqun-guyong 票 03（W2）的增量：L17 里**有写入口**的两个状态位时机。
+
+写入口 = ``Engine.set_flipped`` / ``Engine.set_chained``，两者都**惰性**派发（没有注册实例时
+一条记录都不落，47 条标准金录像逐字节不变）。同层的 ``HERO_REVEALED`` / ``HERO_REMOVED`` /
+``CARD_SHOWN`` 仍留枚举位——它们今天没有写入口。
+"""
+
 M2_DISPATCH_WHITELIST = frozenset(
     timing.value
     for timing in DISPATCH_WHITELIST
     if timing.value
     not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED | TAOCAOCAO_UNSEALED
     | FENGYUJIN_UNSEALED
+    | STATE_UNSEALED
 )
-"""M2 的 53 个：今天的白名单减去五批解封（M3 一个 + wuming 两个 + 拼点两个 +
-拼点扣置一个 + 轮边界一个）。"""
+"""M2 的 53 个：今天的白名单减去六批解封（M3 一个 + wuming 两个 + 拼点两个 +
+拼点扣置一个 + 轮边界一个 + 状态位两个）。"""
 
 
 def test_the_unsealed_set_is_exactly_the_move_after_node():
@@ -96,6 +113,7 @@ def test_the_unsealed_set_is_exactly_the_move_after_node():
         - PINDIAN_UNSEALED
         - TAOCAOCAO_UNSEALED
         - FENGYUJIN_UNSEALED
+        - STATE_UNSEALED
     )
 
     assert m3_unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
@@ -119,6 +137,7 @@ def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
         - PINDIAN_UNSEALED
         - TAOCAOCAO_UNSEALED
         - FENGYUJIN_UNSEALED
+        - STATE_UNSEALED
     )
 
     assert wuming_unsealed == WUMING_UNSEALED
@@ -145,6 +164,7 @@ def test_the_taocaocao_unseal_is_exactly_the_pindian_placed_node():
         - WUMING_UNSEALED
         - PINDIAN_UNSEALED
         - FENGYUJIN_UNSEALED
+        - STATE_UNSEALED
     )
 
     assert taocaocao_unsealed == TAOCAOCAO_UNSEALED
@@ -193,11 +213,43 @@ def test_m3_unseals_no_phase_start_node():
 
 
 
+def test_the_state_unseal_adds_exactly_the_two_l17_write_entry_nodes():
+    """chenqun-guyong 票 03（W2）：解封增量为「翻面 / 横置」两个时机，且都有实测来源。
+
+    机械含义 = 记录流里真的能看到 ``STATE_FLIPPED`` / ``STATE_CHAINED``（来源 = 构造局面
+    ``position:state``：一条同时挂两个时机的合成技能 + 三个**真的变了**的写入口调用）；
+    同层没有写入口的三个（``HERO_REVEALED`` / ``HERO_REMOVED`` / ``CARD_SHOWN``）继续留
+    枚举位。这条判据同时钉住"解封集合 = 白名单增量"，本票是 `MOVE_AFTER` 之后的第二个
+    **不是"新增节点"**的解封点。
+    """
+    whitelist = {timing.value for timing in DISPATCH_WHITELIST}
+    state_unsealed = (
+        whitelist
+        - M2_DISPATCH_WHITELIST
+        - M3_UNSEALED
+        - WUMING_UNSEALED
+        - PINDIAN_UNSEALED
+        - TAOCAOCAO_UNSEALED
+        - FENGYUJIN_UNSEALED
+    )
+
+    assert state_unsealed == STATE_UNSEALED
+    stream = dispatched(STATE_SCENE)
+    for timing in (Timing.STATE_FLIPPED, Timing.STATE_CHAINED):
+        assert timing.value in stream, "解封的节点必须有实测来源（场景真的派发它）"
+    assert {
+        Timing.HERO_REVEALED.value,
+        Timing.HERO_REMOVED.value,
+        Timing.CARD_SHOWN.value,
+    }.isdisjoint(whitelist), "L17 里没有写入口的三个继续留枚举位"
+
+
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
-    assert len(WHITELIST) == 60, (
+    assert len(WHITELIST) == 62, (
         "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
         " + huo-taishici-xunyu 票 03 的拼点二时机 + tao-caocao 票 03 的拼点扣置时机"
         " + feng-yujin 票 02 新增的 `ROUND_START`（轮边界）"
+        " + chenqun-guyong 票 03 解封的 `STATE_FLIPPED` / `STATE_CHAINED`"
     )
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
@@ -209,13 +261,13 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     """实测判据：来源覆盖 M2 的全部行为面（回合环 / 使用 / 伤害 / 濒死 / 死亡 / 回复 /
     重洗 / 判定 / 身份 / 打出），故"一个不冒"是跑出来的，不是声明出来的。
 
-    引擎侧**不**加白名单守卫：记录流 schema 对 84 个节点都合法（后续里程碑填位用），
+    引擎侧**不**加白名单守卫：记录流 schema 对 85 个节点都合法（后续里程碑填位用），
     把常量硬编码进 ``Engine`` 会让后续的 dispatch 被误挡。
     """
     collected = _collected()
 
     assert collected.isdisjoint({timing.value for timing in ENUM_ONLY}), (
-        "14 个枚举位只留位（含减体力上限二时机），一次都不 dispatch"
+        "12 个枚举位只留位（含减体力上限二时机与 L17 的其余三个成员），一次都不 dispatch"
     )
     assert collected.isdisjoint({timing.value for timing in EMPTY_LOG}), (
         "11 个空日志节点结构性存在，但记录流里不出现"

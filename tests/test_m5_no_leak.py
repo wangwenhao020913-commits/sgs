@@ -43,6 +43,7 @@ _bootstrap()
 from sgs.data import Identity, RuleConfig, load_content_pack  # noqa: E402
 from sgs.engine import (  # noqa: E402
     CardMoveRecord,
+    ArmorChangeRecord,
     CardRevealRecord,
     PindianRecord,
     ChainedChangeRecord,
@@ -626,6 +627,10 @@ def _delta_records() -> dict[str, object]:
         "hp_change": HpChangeRecord(
             seq=102, frame_id=0, depth=0, seat=1, before=4, after=3, amount=1
         ),
+        # W7 的护甲值（第二条体力轴）：与 hp_change 同档的公开事实（画在座位卡的血条上）。
+        "armor_change": ArmorChangeRecord(
+            seq=119, frame_id=0, depth=0, seat=1, before=3, after=2
+        ),
         # M6 票 06 的体力上限变化（觉醒技）：与 hp_change 同档的公开事实。
         "hp_max_change": HpMaxChangeRecord(
             seq=112, frame_id=0, depth=0, seat=1, before=4, after=3, amount=1
@@ -758,8 +763,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 18, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 18 种写）："
+    assert len(schema_types) == 19, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 19 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
@@ -823,10 +828,11 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
             "skill_suppress",
             "hp_max_change",
             "turn_change",
+            "armor_change",
         ):
-            # 技能三态（M6 票 04）/ 体力上限变化（M6 票 06）/ 回合边界（M6 票 11）：
-            # 座位 + 技能 id / 数值 / 轮次都是公开事实（体力上限与轮次本来就在投影 / 顶栏里），
-            # 没有可裁的隐藏面。
+            # 技能三态（M6 票 04）/ 体力上限变化（M6 票 06）/ 回合边界（M6 票 11）/
+            # 护甲值（W7）：座位 + 技能 id / 数值 / 轮次都是公开事实（体力上限与轮次本来就在
+            # 投影 / 顶栏里，护甲画在座位卡的血条上），没有可裁的隐藏面。
             assert payload == raw, f"{delta_type} 是公开事实，不该被裁剪：{payload}"
             assert payload["seat"] == 1
         else:

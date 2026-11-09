@@ -587,6 +587,40 @@ def test_select_option_is_forced_by_default_and_offers_pass_when_optional():
     assert all(action.answers_seq == 9 for action in cancelable)
 
 
+def test_a_cancelable_multi_select_offers_pass_last_too():
+    """``SELECT_OPTIONS`` 的 ``Pass`` 同样恒排**最后**（yijiang-2014 票 09 补齐）。
+
+    与上一条同一条不变量（``tests/test_fuzz.py::_check_decline_sorts_last``）：``_sort_key``
+    原先**没有** ``SelectOptions`` 分支 ⇒ 它与 ``Pass`` 同落兜底键
+    ``(1, (), kind)``，而 ``"Pass" < "SelectOptions"`` 把「放弃」排到首位；取首个候选的
+    参与者（``tests/test_web.py::_play_to_end``）于是"点开→放弃→再点开"空转。
+
+    第一个打开 ``optional=True`` 的多选消费者是【秉壹】（「至多 N 名角色」必须可放弃）；
+    此前的【界神速】多选步不带 ``Pass``，故这条一直没被踩到。真候选之间的次序不变
+    （``sorted`` 稳定 ⇒ 仍是 ``_select_options`` 的枚举序：空集在前 = 超时"一项都不做"）。
+    """
+    from sgs.state import SelectOptionsContext
+
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=DECK, turn_seat=0)
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTIONS,
+        answers_seq=9,
+        payload=SelectOptionsContext(
+            skill_id="hero.guyong.bingyi:seat",
+            options=("seat:0", "seat:1"),
+            min_selected=1,
+            max_selected=2,
+            optional=True,
+        ),
+    )
+    kinds = [action.kind for action in actions]
+    assert kinds[-1] == "Pass", f"「放弃」恒在最后（实际 {kinds}）"
+    assert "SelectOptions" in kinds, "真候选仍要在（不能只剩 Pass）"
+    assert kinds.count("Pass") == 1
+
+
 # ---------------------------------------------------------------------------
 # W4-1：submit 的两条路——候选 **或** 结构化复合动作 + 校验器
 # ---------------------------------------------------------------------------

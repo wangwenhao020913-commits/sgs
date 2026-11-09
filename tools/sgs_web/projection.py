@@ -32,7 +32,7 @@ from sgs.data import (
     load_content_pack,
     load_hero_tables,
 )
-from sgs.effects import hand_limit, responder_role, response_count
+from sgs.effects import behavior_for, hand_limit, responder_role, response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
@@ -108,6 +108,27 @@ HARVEST_REQUIREMENT = "从亮出的牌里选一张获得"
 公开处理区的正确口径：亮出的牌**牌面可见**，因此不是「隐藏区域的槽位只有位置」，
 也不是通用的「请从选择面里选择一张牌」。`_card_window_requirement` 与询问载荷的
 ``harvest.hint`` 读同一个常量——前端只显示，不抄第二份文案。
+"""
+
+_DEFAULT_ACTIVATE_SKILLS: frozenset[str] = frozenset(
+    {hero_skill_id("jie_jushou_mobile", "jianying")}
+)
+"""「是否发动」询问**默认 = 发动**的技能（yijiang-2014-round2 票 15；用户 2026-11-09 逐字）。
+
+**opt-in 单技能**：登记在这里的技能，其 ``SKILL_ACTIVATION`` 载荷才带
+``pending.default_choice = "activate"``；不在表里的「是否发动」（苦肉 / 洛神 / …）**连键都
+不发**（不是发 ``None``）⇒ 其余询问的载荷逐字节不变，前端照旧默认提交 ``Pass``。
+
+**为什么是投影层的登记表，而不是技能声明上的开关**（票面 §4 的路线 B 原话是"开关住
+``use_after.py`` 的 ``JIE_JIANYING`` 声明处"）：那条技能 ① 的声明实际住在
+``sgs/skills/active.py::_JIE_JIANYING``（``use_after.py`` 里只有 OL 沮授的 ``JIANYING``），
+而它复用的零步流水线 :data:`~sgs.skills.use_after.JIANYING_FLOW` 与 OL 那一版是**同一个
+对象**——开关加在 flow / Hook 上会连带把 OL 沮授也改掉，违反"只改这条技能"。投影按
+**全限定技能 id** 认技能，与 ``judgment_reveal`` 段读 :data:`~sgs.skills.LUOSHEN` /
+:data:`~sgs.skills.JIE_LUOSHEN` 是同一姿态（展示层认 id，引擎不认）。
+
+取名 **default_choice**（前端键）而不是 `default_action`：候选仍是 ``legal_actions`` 里的
+那一条，界面不另造 Action——"默认"只是**选中**哪条候选，不是第二种提交形状。
 """
 
 
@@ -1741,12 +1762,23 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
     三件事刻意不做：
 
     - **不裁决规则**：不读距离 / 攻击范围 / 花色 / 体力 / 存活；只把候选里有的事实聚合起来。
+      唯一读行为表的地方是 ``self_only``（见下），它转发的是**牌自己声明的目标规则**，不是
+      这里判出来的合法性。
     - **不重排**：``pool`` 与 ``combos`` 保持候选的**首次出现顺序**（候选本身由引擎稳定排序）。
     - **不收无牌的候选**：``SelectOption`` / ``ActivateSkill`` 不是"牌 → 目标"，不进索引。
 
     ``min_targets`` / ``max_targets`` 是**这张牌这次使用**要选几个目标，**由候选组合派生**
     （【杀】额定 1；【方天画戟】等 ``TARGET_COUNT`` 修饰器成立时可放宽到 ``1..max``；
     【南蛮入侵】类等于池大小），界面据此说"还要选 N 个"。
+
+    ``self_only`` = **这张牌这次使用的目标由牌自己的规则钉死为使用者本人**——牌行为表的
+    ``TargetRule.self_only``（【无中生有】/【桃】/【酒】/装备牌/【闪电】）**且**候选组合里的
+    每个座位都恰好是 ``query.actor``。界面用它决定"不画座位高亮"（目标没有可选的余地）。
+
+    它是**转发的事实**，不是第二份合法性；反过来，**池只有一个座位不等于自用牌**：
+    【帷幕】把黑色 1–2 目标锦囊的池削到只剩使用者时 ``pool == [actor]``、``min == max == 1``，
+    形状与【无中生有】逐字相同，但规则不是自用牌 ⇒ ``False``（座位仍要画成可指定）。
+    濒死求桃是另一半：规则 ``self_only`` 为真，候选目标却是濒死者（可能不是使用者）⇒ ``False``。
 
     **重铸不参与目标聚合**（M5-08b / D6）：``Reforge`` 是独立 Action、不是 ``UseCard`` 的
     变体，它没有目标。索引仍为它保留**这张牌的条目**（手牌因此可点、重铸入口读
@@ -1765,6 +1797,8 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
                 "pool": [],
                 "combos": [],
                 "_sizes": set(),
+                # 牌自己声明的目标规则（不是按池形状推的）：决定 `self_only` 的那一半。
+                "_self_only_rule": bool(behavior_for(card).target_rule.self_only),
             }
             grouped[str(card.card_id)] = entry
         # 重铸：只保留"这张牌可点"的条目，不把它的空目标并进使用组合。
@@ -1778,10 +1812,18 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
             if seat not in entry["pool"]:
                 entry["pool"].append(seat)
 
+    actor = getattr(query, "actor", None)
     for entry in grouped.values():
         sizes = entry.pop("_sizes")
+        rule_self_only = entry.pop("_self_only_rule")
         entry["min_targets"] = min(sizes) if sizes else 0
         entry["max_targets"] = max(sizes) if sizes else 0
+        entry["self_only"] = bool(
+            rule_self_only
+            and entry["combos"]
+            and actor is not None
+            and all(seat == actor for combo in entry["combos"] for seat in combo)
+        )
         entry["combos"] = [list(combo) for combo in entry["combos"]]
     return grouped
 
@@ -2413,8 +2455,26 @@ def pending_payload(
     payload["activation_preactivations"] = _preactivation_payload(
         getattr(query, "activation_preactivations", None) or {}
     )
+    # 「是否发动」的**默认候选**（yijiang-2014-round2 票 15 / 路线 B）：投影按
+    # :data:`_DEFAULT_ACTIVATE_SKILLS` 登记表下发；前端 ``answer.js:buildAction`` 在玩家
+    # 没选任何候选时据此返回候选里那条 ``ActivateSkill``。**只有登记过的技能才带这个键**
+    # ——其余「是否发动」（苦肉 / 洛神 / …）载荷逐字节不变（键的缺席就是那个保证）。
+    if (
+        str(getattr(query, "kind", "")) == "SKILL_ACTIVATION"
+        and str(getattr(query, "skill_id", "")) in _DEFAULT_ACTIVATE_SKILLS
+    ):
+        payload["default_choice"] = "activate"
     if foreign:
         _mask_foreign_preactivations(payload)
+    # **不枚举档**多选（yijiang-2014-round2 票 21）：询问上的 ``structural`` 是 ``exclude=True``
+    # 的本地面（不进记录流 / 金录像），前端看不到它；投影显式下发一个 ``structural: true``
+    # 让 ``answer.js`` 知道"候选只有骨架、集合由界面自己拼"。与 ``default_choice`` 同一姿态：
+    # **只有这一档才带这个键**，其余多选面（界神速）的载荷逐字节不变（键的缺席就是那个保证）。
+    if (
+        str(getattr(query, "kind", "")) == "SELECT_OPTIONS"
+        and bool(getattr(query, "structural", False))
+    ):
+        payload["structural"] = True
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。
     # 只有拿得到 ``Session``（= 拿得到引擎）时才算；409 里附带的那份现状（裸 ``Query``）为 None。
     payload["context"] = (

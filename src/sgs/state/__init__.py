@@ -4,6 +4,7 @@
 """
 
 from .deltas import (
+    ArmorChangeDelta,
     CardMoveDelta,
     CardRevealDelta,
     ChainedChangeDelta,
@@ -25,6 +26,7 @@ from .deltas import (
     WineChangeDelta,
 )
 from .models import (
+    ARMOR_CAP,
     CardRef,
     CardTag,
     FrameKind,
@@ -112,11 +114,13 @@ from .seating import (
 )
 
 __all__ = (
+    "ARMOR_CAP",
     "Action",
     "ActivateSkill",
     "ArrangeCards",
     "ArrangeContext",
     "ArrangeQuery",
+    "ArmorChangeDelta",
     "Distribute",
     "DistributeContext",
     "DistributeQuery",

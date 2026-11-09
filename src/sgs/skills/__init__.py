@@ -31,6 +31,7 @@
 | 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 / 烈弓 |
 | P 限制豁免 / 【咆哮】②（锁定技） | :mod:`sgs.skills.limits` | 咆哮（次数 + 被抵消后的 +1）/ 奇才（距离） |
 | U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
+| S **状态位变化后**（`STATE_FLIPPED` / `STATE_CHAINED`，yijiang-2014 票 08） | :mod:`sgs.skills.state_after` | 法恩 |
 | J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |
 | 觉醒 / ☆ 派生（M6 票 06） | :mod:`sgs.skills.awakening` | 潜心 / 勤学 / 诛害 |
 | 否定（目标级无效，M6 票 07） | :mod:`sgs.skills.negation` | 奋威（目标产生前的取消住 :mod:`sgs.skills.target_pool`，事件帧 / 响应窗口各自住票 08 / 界【离间】） |
@@ -69,6 +70,7 @@ from .catalog import (
     DAMAGE_RECORDED_KEY,
     MATCH_ACTOR_KEY,
     PASS_STATE_KEY,
+    STATE_CHANGE_KEY,
     ActivationCandidate,
     ActivationPlan,
     Hook,
@@ -81,6 +83,7 @@ from .catalog import (
     SkillInstance,
     SkillSource,
     SkillSourceKind,
+    StateChange,
     activation_plan,
     awakening_skill_awakened,
     damage_point_index,
@@ -107,6 +110,7 @@ from .catalog import (
     resolve_instances,
     same_kingdom,
     skill_used_this_turn,
+    state_change,
     terminate_activation_pass,
     timing_hooks_present,
 )
@@ -162,6 +166,7 @@ from .active import (
     PickSeats,
     SkillFlow,
     activate_skill,
+    register_activation,
     run_flow,
 )
 from .flow import (
@@ -206,7 +211,9 @@ from .lord_request import (
     JIE_JIUYUAN_REPLACED_KEY,
     JIJIANG,
     JIUYUAN,
+    LORD_REQUEST_DELIVER_KEY,
     LORD_REQUEST_KEY,
+    LORD_REQUEST_PAYER_KEY,
     LORD_REQUEST_SKILLS,
     PROVIDERS,
     PROVIDER_ACTOR_KEY,
@@ -216,6 +223,7 @@ from .lord_request import (
     PROVIDER_SKILL_KEY,
     LordSkill,
     advance_provider,
+    carry_payer,
     dispatch_provider,
     lord_skill_definitions,
     provider_registered,
@@ -386,7 +394,9 @@ __all__ = (
     "JIZHI_FLOW",
     "JIUYUAN",
     "LIULI",
+    "LORD_REQUEST_DELIVER_KEY",
     "LORD_REQUEST_KEY",
+    "LORD_REQUEST_PAYER_KEY",
     "LORD_REQUEST_SKILLS",
     "LORD_SKILL_IDS",
     "JIE_LUOSHEN",
@@ -418,6 +428,7 @@ __all__ = (
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
     "SEAT_PREFIX",
+    "STATE_CHANGE_KEY",
     "ActivationCandidate",
     "ActivationPlan",
     "PASS_STATE_KEY",
@@ -446,6 +457,7 @@ __all__ = (
     "SkillInstance",
     "SkillSource",
     "SkillSourceKind",
+    "StateChange",
     "SkillType",
     "TARGET_INEFFECTIVE_KEY",
     "TIANDU",
@@ -483,6 +495,7 @@ __all__ = (
     "arrange_activation_plans",
     "arrange_skill_definitions",
     "blocked_true_names",
+    "carry_payer",
     "start_skill_definitions",
     "TIANCHENG",
     "TIANCHENG_MAX_HP",
@@ -530,6 +543,7 @@ __all__ = (
     "prune_card_tags",
     "prune_skill_state",
     "provider_registered",
+    "register_activation",
     "pure_virtual_card",
     "rejudge_activation_plans",
     "rejudge_capable_seats",
@@ -548,6 +562,7 @@ __all__ = (
     "run_flow",
     "same_kingdom",
     "skill_used_this_turn",
+    "state_change",
     "start_provider",
     "target_change_skill_definitions",
     "target_is_ineffective",

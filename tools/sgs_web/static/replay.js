@@ -78,7 +78,7 @@ function resetReplayDerived(replay) {
   const count = Math.max(0, Number(replay.meta.player_count) || 0);
   replay.seats = Array.from({ length: count }, () => ({
     hand: [], equip: [], judge: [],
-    hp: null, hpMax: null, alive: null, identity: null,
+    hp: null, hpMax: null, armor: 0, alive: null, identity: null,
   }));
   replay.effectCards = [];
   replay.revealedCards = [];
@@ -117,12 +117,19 @@ function applyReplayCardMove(replay, record) {
   }
 }
 
-/** 体力 / 身份 / 存活：delta 是公开事实，询问视图补上"开局时就是满血"这类初值。 */
+/** 体力 / 护甲 / 身份 / 存活：delta 是公开事实，询问视图补上"开局时就是满血"这类初值。 */
 function applyReplaySeatDelta(replay, record) {
   if (!record || record.kind !== "delta") return;
   if (record.delta_type === "hp_change") {
     const seat = replay.seats[record.seat];
     if (seat) seat.hp = record.after;
+    return;
+  }
+  if (record.delta_type === "armor_change") {
+    // W7 的第二条体力轴：护甲从 0 起，逐条 `armor_change.after` 重建（护甲不在询问视图里，
+    // 记录流是它唯一的来源）。同一次伤害的两条 delta 里这一条排在 hp_change **之前**。
+    const seat = replay.seats[record.seat];
+    if (seat) seat.armor = Number(record.after) || 0;
     return;
   }
   if (record.delta_type === "identity_deal" || record.delta_type === "identity_reveal") {
@@ -206,10 +213,13 @@ function renderReplaySeats(replay) {
       ? "—"
       : `${seatState.hp} / ${seatState.hpMax === null || seatState.hpMax === undefined ? "?" : seatState.hpMax}`;
     const identity = seatState.identity ? identityLabel(seatState.identity) : "—";
+    const armor = Math.max(0, Number(seatState.armor) || 0);
+    // 护甲段只在 > 0 时写，零护甲的回放文本与旧版逐字节同形（W7 的惰性）。
+    const armorText = armor > 0 ? ` · 护甲 ${armor}` : "";
     const alive = seatState.alive === false ? " · 已阵亡" : "";
     const heroName = heroDisplayName(heroes[seat]) || "（无武将）";
     node.innerHTML = `<div class="top"><span class="who">座位 ${seat}${isHuman ? "（本局人类）" : ""}</span>
-      <span class="small">体力 ${hp}${alive}</span></div>
+      <span class="small">体力 ${hp}${armorText}${alive}</span></div>
       <div class="small">${heroName} · 身份 ${identity}</div>`;
     for (const [zone, label] of REPLAY_SEAT_ZONES) {
       const cards = seatState[zone] || [];

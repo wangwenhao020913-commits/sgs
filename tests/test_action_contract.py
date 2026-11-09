@@ -26,9 +26,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,32 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
+from sgs.data import Identity, Kingdom, RuleConfig, color_of_suit, load_content_pack  # noqa: E402
+from sgs.engine import Engine  # noqa: E402
+from sgs.effects import is_legal_option_set, legal_actions_for  # noqa: E402
+from sgs.state import (  # noqa: E402
+    ActivateSkill,
+    EndPhase,
+    Pass,
+    PlayCard,
+    Phase,
+    QueryKind,
+    SelectOptionsContext,
+    SelectOptionsQuery,
+    UseCard,
+    WindowCause,
+    project,
+)
 from sgs.state.protocol import parse_action  # noqa: E402
+from sgs.timing import Timing  # noqa: E402
+from sgs_web.projection import option_seats, pending_payload  # noqa: E402
+from support import (  # noqa: E402
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_queries,
+)
 
 CARD_REF_KEYS = {
     "card_id",
@@ -59,6 +86,9 @@ CARD_REF_KEYS = {
     "virtual_sources",
 }
 """与 ``core.js:CARD_REF_KEYS`` 逐字一致（跨语言没有共享常量的通道）。"""
+
+PACK = load_content_pack(deck_profile="standard_108")
+"""座位多选面那条回环用的牌堆档位（与 ``tests/test_select_options_query.py`` 同一档）。"""
 
 DECORATION_KEYS = ("display_name", "attribute", "description", "kind", "source_cards")
 """展示层字段：只读载体上可以有，**绝不**随动作上行。"""
@@ -113,6 +143,9 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "watch_two_rows",
         "unknown_zone_multipick",
         "unknown_zone_single_pick",
+        "seat_multi_select",
+        "seat_multi_select_structural",
+        "default_activate",
     }, f"探针用例集合变了：{sorted(actions)}"
 
     borrowed = actions["borrowed_sword_preactivation"]
@@ -202,6 +235,42 @@ def test_the_two_row_watch_face_submits_an_ascending_select_cards() -> None:
     assert parsed.answers_seq == 98
 
 
+def test_the_default_activate_answer_round_trips_through_the_server_action_parser() -> None:
+    """票 15：界【渐营】① 的「是否发动」默认答案 = 服务端候选里那条裸 ``ActivateSkill``。
+
+    探针喂的载荷与真投影同形（``pending.default_choice == "activate"``），且**没点任何
+    候选**（``selectedOption = null``）：``buildAction()`` 必须返回那条 ``ActivateSkill``，
+    ``parse_action`` 原样接受（跨语言形状不变，仍是 ``kind / skill_id / picks / choices /
+    answers_seq`` 五格）。**默认动作不是第二种提交形状**——它必须逐字段就是候选里的那一条。
+
+    对照组 = 逐字段相同但**不带该键**的载荷：``buildAction()`` 仍是 ``null``。服务端对
+    未登记技能根本不发这个键（不是发 ``null``）⇒ 其余「是否发动」（苦肉 / 洛神 / …）不变。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}["default_activate"]
+    action = case["action"]
+
+    assert action is not None, "带 default_choice 的「是否发动」提交不出候选（默认值没接上）"
+    assert action["kind"] == "ActivateSkill"
+    assert action["skill_id"] == "hero.jie_jushou_mobile.jianying"
+    assert set(action) == {"kind", "skill_id", "picks", "choices", "answers_seq"}, (
+        f"裸 ActivateSkill 仍是五格（展示字段一个都不许上行）：{sorted(action)}"
+    )
+    assert action["picks"] == [] and action["choices"] == [], (
+        "① 是零步流水线：默认动作不带选牌 / 选项"
+    )
+    assert action in case["legal_actions"], (
+        "默认动作必须逐字段命中 legal_actions 的那一条（界面不另造 Action）"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.kind == "ActivateSkill"
+    assert parsed.skill_id == "hero.jie_jushou_mobile.jianying"
+    assert parsed.answers_seq == 100
+    assert case["without_declaration"] is None, (
+        "没有 default_choice 的同形「是否发动」不得默认提交（opt-in 的对照组）"
+    )
+
+
 def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
     """票 06：未知区域弹窗的**多选档**（【定乱】展示别人的至多 3 张牌）。
 
@@ -249,6 +318,280 @@ def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
     assert single["action"] in single["legal_actions"]
 
 
+def test_the_seat_multi_select_face_submits_every_chosen_seat_at_once() -> None:
+    """W1：座位多选面（`SELECT_OPTIONS` ∧ `option_seats` 非空）——一次点选、一次提交。
+
+    用户 2026-11-09 对【秉壹】的交互裁定（Q-W1，原话）：「一次点选多个座位（类似【铁索连环】），
+    不要选好一个提交再继续选」。本票只补前端面：探针用**真实**的 `interaction.js:toggleSeatMultiPick`
+    按点击顺序 2 → 0 点两个场上武将，三件事逐条钉住：
+
+    - **两次点击一次提交都不发**（`submits == 0`）：这一面只有一个提交点（「提交」键），
+      不是"点一个座位 = 一次提交"的循环面；
+    - 送出的 `SelectOptions.choices` 按 `pending.options` 原序（`["seat:0", "seat:2"]`，
+      与点击顺序无关）——引擎按 options 序的位掩码枚举候选（`_select_options`），
+      点击顺序若原样上行，`buildAction` 的逐字段自检会找不到候选；
+    - 两个座位在**一条**动作里一起上行，且被 `parse_action` 接受（跨语言形状不变）。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}["seat_multi_select"]
+    action = case["action"]
+
+    assert case["submits"] == 0, (
+        f"点两个座位不得发出任何提交（只有一个提交点）：「{case['submits']}」次"
+    )
+    assert action is not None, "点两个座位之后 buildAction() 返回 null（多选面没接上候选骨架）"
+    assert action["kind"] == "SelectOptions"
+    assert set(action) == {"kind", "choices", "answers_seq"}, (
+        f"座位多选面的动作仍是 SelectOptions 的三格：{sorted(action)}"
+    )
+    assert action["choices"] == ["seat:0", "seat:2"], (
+        "按点击顺序 2 → 0 点两个座位，choices 必须按 options 原序（与点击顺序无关）："
+        f"{action['choices']}"
+    )
+    assert action in case["legal_actions"], (
+        "造出的动作必须逐字段命中 legal_actions 的那一条（[seat:0, seat:2]）："
+        f"{action} / {case['legal_actions']}"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.kind == "SelectOptions"
+    assert parsed.choices == ("seat:0", "seat:2")
+    assert parsed.answers_seq == 99
+
+
+def test_the_seat_multi_select_fixture_matches_the_real_view_payload() -> None:
+    """探针那份座位多选载荷必须是**服务端真会发**的形状（不另造一份想象）。
+
+    两件事都走真实产出路径，不用合成替身：
+
+    1. `legal_actions`：用真 `SelectOptionsContext`（三个 `seat:N`、区间 1..2）喂
+       `sgs.effects.legal_actions_for`，枚举出的候选集合与探针里的那份**逐条一致**
+       （集合相等，不断次序——引擎的 `_sort_key` 序不是本票的断言对象）；
+    2. 展示键：用真 `SelectOptionsQuery` 的 `model_dump` + `projection.option_seats`，
+       核探针读到的 `kind` / `options` / `min_selected` / `max_selected` / `option_seats`
+       —— 最后一项同时确认票面 §④ 第 2 条「`option_seats` 对 `SELECT_OPTIONS` 也已生效」
+       （它只读 `query.options` 的 `seat:N` 前缀）。置灰项为空时真载荷**不含** `disabled`
+       键（`_QueryBase._serialize`），探针夹具照同一形状，界面按"没有 = 没有置灰"读。
+    """
+    payload = _probe_payload()
+    case = {entry["name"]: entry for entry in payload["cases"]}["seat_multi_select"]
+    fixture = case["payload"]
+
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="caocao"), SeatSpec(hero="liubei"), SeatSpec(hero="guojia")],
+    )
+    context = SelectOptionsContext(
+        skill_id="hero.guyong.bingyi",
+        options=tuple(fixture["options"]),
+        min_selected=int(fixture["min_selected"]),
+        max_selected=int(fixture["max_selected"]),
+    )
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTIONS,
+        answers_seq=int(fixture["answers_seq"]),
+        payload=context,
+    )
+    assert len(actions) == len(case["legal_actions"]) == 6
+    assert {(action.kind, action.choices) for action in actions} == {
+        (candidate["kind"], tuple(candidate["choices"]))
+        for candidate in case["legal_actions"]
+    }, "探针里的候选必须就是引擎对同一份 (options, 区间) 的枚举"
+
+    query = SelectOptionsQuery(
+        seq=int(fixture["answers_seq"]),
+        actor=0,
+        timing="TURN_START",
+        prompt="请选择若干项（可多选）。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id="hero.guyong.bingyi",
+        options=tuple(fixture["options"]),
+        min_selected=int(fixture["min_selected"]),
+        max_selected=int(fixture["max_selected"]),
+    )
+    dumped = query.model_dump(mode="json")
+    for key in ("kind", "options", "min_selected", "max_selected"):
+        assert dumped[key] == fixture[key], f"探针的 {key} 与服务端载荷不一致：{dumped[key]}"
+    # 置灰项为空时 `_QueryBase._serialize` **不落盘** `disabled`（票 07）⇒ 真载荷里没有这个键，
+    # 界面按"没有 = 没有置灰"读（`seatMultiDisabledSet`）；探针夹具照同一形状（不补空数组）。
+    assert "disabled" not in dumped, f"空的 disabled 不进载荷：{dumped}"
+    assert "disabled" not in fixture, f"探针夹具不得凭空加空数组：{fixture}"
+    assert option_seats(query) == fixture["option_seats"] == {
+        "seat:0": 0,
+        "seat:1": 1,
+        "seat:2": 2,
+    }, "option_seats 对 SELECT_OPTIONS 也要生效（座位多选面的判据读它）"
+
+
+# ---------------------------------------------------------------------------
+# 评审 P1-b：把【秉壹】的**真会话**接到**真前端构造器**上（CODING_STANDARDS.md §6）
+# ---------------------------------------------------------------------------
+
+BINGYI = "hero.guyong.bingyi"
+"""【秉壹】的全限定技能 id（顾雍；两版各一条声明，这里用 OL 那一版）。"""
+
+
+class _EndPlayPhaseSeat:
+    """脚本参与者：出牌阶段**直接结束**、技能一律发动、其余取第一个候选。
+
+    与 ``test_web.py:_FinishPhaseSeat`` 同一姿态（那个夹具是给 Session 用的）：【秉壹】判的是
+    **结束阶段的手牌**，脚本若在出牌阶段随手打一张牌，构造前提就被吃掉了。
+    """
+
+    def respond(self, query):
+        if str(getattr(getattr(query, "kind", None), "value", query.kind)) == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, ActivateSkill):
+                return action
+        return query.legal_actions[0]
+
+
+def _two_same_color_hand() -> tuple[int, ...]:
+    """两张**同色**手牌的 card_id（= 牌堆下标；颜色取牌面事实，不按牌名猜）。"""
+    cards = PACK.deck.cards
+    first = next(index for index, card in enumerate(cards) if color_of_suit(card.suit) is not None)
+    color = color_of_suit(cards[first].suit)
+    second = next(
+        index
+        for index, card in enumerate(cards)
+        if index != first and color_of_suit(card.suit) is color
+    )
+    return (first, second)
+
+
+def _bingyi_engine() -> tuple[Engine, tuple[_EndPlayPhaseSeat, _EndPlayPhaseSeat]]:
+    """把**真引擎**推到【秉壹】的座位多选询问，返回引擎与两名脚本参与者。"""
+    hand = _two_same_color_hand()
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guyong", hp=3, hp_max=3, hand=hand), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(len(PACK.deck.cards)) if card_id not in set(hand)
+        ),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, 0)  # 结束阶段的手牌 = 夹具给的那两张（同色前提）
+    seats = (_EndPlayPhaseSeat(), _EndPlayPhaseSeat())
+    run_queries(
+        engine,
+        seats,
+        lambda e: getattr(e.pending, "kind", None) == "SELECT_OPTIONS",
+    )
+    return engine, seats
+
+
+def test_the_structural_seat_multi_select_face_assembles_the_set_locally() -> None:
+    """票 21：**不枚举档**的座位多选面 —— 候选里只有骨架，集合由界面按本地选择拼出。
+
+    与 W1 那条回环是同一张面、同一个动作构造子，差别只在载荷的 `structural`：那一档服务端
+    不枚举子集（8 人局 × 上限 4 = 162 条），`legal_actions` 只剩一条骨架 + 一条 `Pass`。
+    三件事逐条钉住：
+
+    - 两次点击仍**一次提交都不发**（提交点还是那一个）；
+    - 上行集合按 `pending.options` 原序（`["seat:0", "seat:2"]`，点击顺序 2 → 0 不上行）——
+      用户 2026-11-09 的顺序裁定：默认常规结算顺序；
+    - 它**不在** `legal_actions` 里（这正是"不枚举"的意思），而形状恰好过引擎的同一份谓词
+      （`is_legal_option_set`），因此服务端收得下。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}[
+        "seat_multi_select_structural"
+    ]
+    fixture = case["payload"]
+    action = case["action"]
+
+    assert case["submits"] == 0, "点两个座位不得发出任何提交（只有一个提交点）"
+    assert action is not None, "不枚举档的座位多选面必须能拼出动作（骨架不是答案）"
+    assert action["kind"] == "SelectOptions"
+    assert action["choices"] == ["seat:0", "seat:2"], (
+        f"上行必须按 options 原序（与点击顺序无关）：{action['choices']}"
+    )
+    assert action not in case["legal_actions"], (
+        "不枚举档不铺子集候选：这条集合是界面自己拼的，不在 legal_actions 里"
+    )
+    assert fixture["structural"] is True
+
+    parsed = parse_action(action)
+    assert parsed.choices == ("seat:0", "seat:2")
+    assert parsed.answers_seq == fixture["answers_seq"]
+
+    context = SelectOptionsContext(
+        skill_id="hero.guyong.bingyi",
+        options=tuple(fixture["options"]),
+        min_selected=int(fixture["min_selected"]),
+        max_selected=int(fixture["max_selected"]),
+        enumerate_candidates=False,
+    )
+    assert is_legal_option_set(context, parsed.choices), (
+        "界面拼出的集合必须过引擎的形状谓词（同一份判据，界面不另写规则）"
+    )
+
+
+def test_a_real_bingyi_payload_round_trips_the_structural_seat_multi_select() -> None:
+    """【秉壹】的**不枚举档**座位多选面：真引擎 → 真载荷 → 真前端构造器 → 引擎收下。
+
+    ``CODING_STANDARDS.md`` §6：断"读取方读到了"的测试必须走**真实产出路径**。这一档此前
+    两半各自为政——服务端那半（``test_web.py`` 的真会话）只证到"投影下发了 ``structural``"，
+    前端那半（探针的 ``seat_multi_select_structural``）只喂过一份**手扎的**合成载荷；两端
+    从未在同一条载荷上接起来。这里把 §6 要求的 join 补上（样板 = 同文件的【激将】回环）：
+
+    1. **真引擎**走到【秉壹】的 ``SELECT_OPTIONS``（顾雍两张同色手牌、摸牌阶段 0 张）；
+    2. ``pending_payload`` 投影出的**真载荷**：``structural`` / ``option_seats`` / 区间 /
+       ``legal_actions`` 只有骨架 + 放弃；
+    3. 把这份载荷喂给**真实前端构造器**（``toggleSeatMultiPick`` + ``buildAction``），点选
+       顺序 1 → 0，上行按 ``options`` 原序；
+    4. ``parse_action`` 之后**交给引擎**：不在候选里（不枚举档的本意）但形状合法 ⇒ 接受，
+       两名被选的座位各摸一张——"服务端收得下"由真结算证明，不由谓词代证。
+    """
+    engine, seats = _bingyi_engine()
+    query = engine.pending
+    assert query is not None
+
+    payload = pending_payload(query, human_seat=0)
+    assert payload["structural"] is True, (
+        "真会话的这一问必须落**不枚举档**（否则前端走枚举档的逐字段自检，这条回环测错面）"
+    )
+    assert payload["option_seats"] == {"seat:0": 0, "seat:1": 1}, (
+        "座位多选面的判据读 `option_seats`：池 = 全部存活角色（含自己）"
+    )
+    assert payload["min_selected"] == 1 and payload["max_selected"] == 2, (
+        "「至多 N 名」的 N = 手牌数（这里 2 张）"
+    )
+    assert [entry["kind"] for entry in payload["legal_actions"]] == ["SelectOptions", "Pass"], (
+        f"不枚举档只发骨架 + 放弃：{payload['legal_actions']}"
+    )
+    assert payload["legal_actions"][0]["choices"] == ["seat:0"], "骨架 = options 序前 min 个"
+
+    action = _probe_build(
+        {"pending": payload, "human_seat": 0, "seat_multi_picks": [1, 0]}
+    )
+    assert action["kind"] == "SelectOptions"
+    assert action["choices"] == ["seat:0", "seat:1"], (
+        "按点击顺序 1 → 0 点两个座位，上行必须按 pending.options 原序（默认结算顺序）"
+    )
+    assert action["answers_seq"] == payload["seq"]
+    assert action not in payload["legal_actions"], (
+        "不枚举档不铺子集候选：这条集合是界面按本地选择拼的"
+    )
+
+    hand_before = [len(engine.state.player(seat).hand) for seat in (0, 1)]
+    engine.submit(parse_action(action))
+    run_queries(engine, seats, lambda e: len(e.state.player(1).hand) > hand_before[1])
+    drew = [
+        len(engine.state.player(seat).hand) - before
+        for seat, before in zip((0, 1), hand_before, strict=True)
+    ]
+    assert drew == [1, 1], (
+        "引擎接受这条界面拼出的集合，并按逐座位各摸一张结算（座位 0 = 自己也在池里）"
+    )
+
+
 def test_a_decorated_card_payload_is_rejected_by_the_server_model() -> None:
     """合成反例：**同一张卡**的展示形态不能被 ``parse_action`` 接受（= 报障的 400）。
 
@@ -275,4 +618,333 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 8
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 11
+
+
+# ---------------------------------------------------------------------------
+# 票 20：【激将】的出牌阶段回环（点技能 → 清单里选目标 → 提交 = 主公的一次使用）
+# ---------------------------------------------------------------------------
+
+
+JIJIANG = "hero.liubei.jijiang"
+"""【激将】的全限定技能 id（标准刘备的主公技）。"""
+
+
+class _PlaySeat:
+    """最小出牌阶段脚本：南蛮一律放弃、出牌阶段结束；``use`` 给定时打出那一张。"""
+
+    def __init__(self, *, use: int | None = None, targets: tuple[int, ...] = ()) -> None:
+        self.use = use
+        self.targets = targets
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "PLAY_PHASE":
+            if self.use is not None:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.card_id == self.use
+                        and action.targets == self.targets
+                    ):
+                        self.use = None
+                        return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+class _LordRequestAlly:
+    """【激将】求助窗口的响应者：打出那张【杀】；其余一律放弃。"""
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if (
+            kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, PlayCard):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def test_the_play_phase_jijiang_loop_clicks_the_skill_picks_a_seat_and_submits() -> None:
+    """出牌阶段「点【激将】→ 选目标 → 提交」的回环（票 20 §4）。
+
+    服务端 = **真引擎**：主公孙权没有这张牌，产物由蜀势力盟友代付；客户端 = `pending_payload`
+    投影出的**真载荷** + 真实前端构造器（`enterPreativation` / `selectPreativationSeat` /
+    `buildPreativationAction`，全经 `ui_bridge`）。三条断言：
+
+    1. 出牌阶段的【激将】清单只有**一步**「选目标」，候选 = 服务端给的合法目标；
+    2. 点那名目标 ⇒ 客户端拼出 `ActivateSkill(picks=[], choices=["seat:N"])`，被
+       `parse_action` 接受（服务端模型是唯一真源）；
+    3. 提交后产物进**使用**链：伤害落在选中的那名身上、记录流里是一次**使用**
+       （`RESOLVE_AFTER_END` 的 actor = 主公），没有响应者的打出。
+    """
+    slashes = cards_of_type(PACK, "slash")
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero="liubei",
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+            ),
+            SeatSpec(hand=(slashes[0],), kingdom=Kingdom.SHU),
+            SeatSpec(hand=(slashes[1],)),
+        ],
+        deck=deck_excluding(PACK, slashes[0], slashes[1]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [_PlaySeat(), _LordRequestAlly(), _PlaySeat()],
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and JIJIANG in (e.pending.preactivations or {})
+        ),
+    )
+    query = engine.pending
+    assert query is not None
+
+    payload = pending_payload(query, human_seat=0)
+    manifest = payload["preactivations"][JIJIANG]
+    assert [step["name"] for step in manifest] == ["seat"], "清单只有「选目标」一步"
+    seats = [option for row in manifest[0]["pool"] for option in row["options"]]
+    assert seats == ["seat:1", "seat:2"], f"候选 = 服务端的合法目标池：{seats}"
+
+    activation = _probe_build(
+        {
+            "pending": payload,
+            "human_seat": 0,
+            "enter_preactivation": JIJIANG,
+            "click_seats": [2],
+        }
+    )
+    assert activation["kind"] == "ActivateSkill"
+    assert activation["skill_id"] == JIJIANG
+    assert activation["picks"] == []
+    assert activation["choices"] == ["seat:2"], "点的那名目标原样进 choices"
+    # 复合动作**不在** `legal_actions` 里（预发动入口），由服务端的校验器裁决通过。
+    engine.submit(parse_action(activation))
+
+    run_queries(
+        engine,
+        [_PlaySeat(), _LordRequestAlly(), _PlaySeat()],
+        # 等到**使用结算结束**（`RESOLVE_AFTER_END` 已落记录）再停：体力在伤害帧里就掉了，
+        # 只按体力停会停在结算中间，读不到那条使用记录。
+        lambda e: any(
+            record.kind == "timing"
+            and record.timing is Timing.RESOLVE_AFTER_END
+            and record.actor == 0
+            for record in e.records
+        ),
+    )
+    assert engine.state.player(2).hp == 3, "主公选的那名受到 1 点【杀】伤害"
+    assert engine.state.player(0).card_use_counts["slash"] == 1, (
+        "产物是**主公的使用**（占主公的次数）"
+    )
+    uses = [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.type == "slash" for card in record.cards)
+    ]
+    assert [record.actor for record in uses] == [0], "使用链的使用者是主公"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.PLAY_ON_PLAY
+    ], "没有响应者的打出（产物不进打出链）"
+
+
+# ---------------------------------------------------------------------------
+# 票 17：窗口里的提供者回环（点技能 → 服务端问"选哪张源牌" → 点牌 → 产物交给窗口）
+# 票 24 / Q1：载体已从南蛮（别人回合的**打出**窗口）换成求桃（自己出牌阶段里的**使用**窗口）
+# ---------------------------------------------------------------------------
+
+
+class _WindowSeat:
+    """最小窗口脚本：给定的那个座位在自己的出牌阶段用一张指定的牌，其余一律放弃 / 结束阶段。"""
+
+    def __init__(self, *, use: int | None = None) -> None:
+        self.use = use
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "PLAY_PHASE":
+            if self.use is not None:
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.card_id == self.use:
+                        self.use = None
+                        return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _next_ask(engine, *, limit: int = 64):
+    """推进到**下一条询问**（`submit` 只接受应答，重入结算由 `_step` 继续）。"""
+    for _ in range(limit):
+        if engine.pending is not None:
+            return engine.pending
+        if engine.finished:
+            break
+        engine._step()
+    raise AssertionError("提交之后没有等到下一条询问")
+
+
+def _probe_build(fixture: dict) -> dict:
+    """把一份**真实**询问载荷交给真实前端构造器，返回客户端会发的那一条动作。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(fixture, handle)
+        path = handle.name
+    try:
+        result = subprocess.run(
+            [node, str(PROBE.relative_to(REPO_ROOT)), path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    finally:
+        os.unlink(path)
+    assert result.returncode == 0, (
+        f"载荷模式探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)["action"]
+
+
+def test_the_window_provider_loop_clicks_the_skill_then_picks_a_source_card() -> None:
+    """窗口里的提供者回环（票 17；票 24 / Q1 之后只剩**求桃**这一扇）：点技能 → 选源牌 → 提交。
+
+    票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）把 ② 的参与面收窄成
+    "持有者自己的出牌阶段 + **使用**窗口"，真实可及的只剩**濒死求桃**——故回环的载体从
+    南蛮入侵（别人回合里的**打出**窗口）换成"他砍出的濒死"。
+
+    两半都走真路径：服务端这边是**真引擎**的求桃窗口与它随后的 `SELECT_CARDS` 询问；
+    客户端那边是 `pending_payload` 投影出来的**真载荷** + 真实前端构造器（`ui_bridge` 的
+    `buildAction` / `submitOwnHandSinglePick`）。断言三件事：
+
+    1. 窗口里【渐营】是一条裸 `ActivateSkill` 候选（提供者入口），点它发出的载荷只有
+       五个键、`picks` 为空——牌名由窗口定死，选牌由服务端随后问；
+    2. 服务端随即问"选哪张源牌"（`SELECT_CARDS`，手牌 ∪ 装备区、恰好一张），点那一张
+       发出的 `SelectCards` 用**面内位置**命中候选；
+    3. 提交后产物（一张虚拟【桃】）由**求桃窗口**消费：濒死者回到 1 点，源牌走上使用链。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    source = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(slash, source)),
+            SeatSpec(hp=1, hp_max=4),
+        ],
+        deck=deck_excluding(PACK, slash, source),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [_WindowSeat(use=slash), _WindowSeat()],
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PEACH
+            and e.pending.actor == 0
+        ),
+    )
+    window = engine.pending
+    assert window is not None and window.actor == 0
+    assert state.turn_seat == 0 and state.phase is Phase.PLAY, (
+        "前提：这一问长在界沮授**自己的出牌阶段**里（票 24 的准入条件）"
+    )
+
+    payload = pending_payload(window, human_seat=0)
+    at = next(
+        index
+        for index, action in enumerate(payload["legal_actions"])
+        if action["kind"] == "ActivateSkill"
+        and action["skill_id"] == "hero.jie_jushou_mobile.jianying"
+    )
+    activation = _probe_build(
+        {"pending": payload, "human_seat": 0, "selected_option": at}
+    )
+    assert set(activation) == {"kind", "skill_id", "picks", "choices", "answers_seq"}
+    assert activation["kind"] == "ActivateSkill"
+    assert activation["picks"] == [] and activation["choices"] == [], (
+        "窗口里的提供者入口是**裸**候选：选牌是服务端的下一问"
+    )
+    engine.submit(parse_action(activation))
+
+    pick_query = _next_ask(engine)
+    assert pick_query is not None and pick_query.kind == QueryKind.SELECT_CARDS, (
+        "点技能之后服务端只问一步：选哪张源牌（牌名已被窗口定死）"
+    )
+    slot = next(
+        index
+        for index, entry in enumerate(pick_query.slots)
+        if entry.card is not None and entry.card.card_id == source
+    )
+    pick = _probe_build(
+        {
+            "pending": pending_payload(pick_query, human_seat=0),
+            "human_seat": 0,
+            "click_slot": slot,
+        }
+    )
+    assert set(pick) == {"kind", "picks", "answers_seq"}
+    assert pick["picks"] == [slot], "点那张牌 = 面内位置那一个（不手拼实体牌 id）"
+    engine.submit(parse_action(pick))
+    _next_ask(engine)
+
+    # 产物由**求桃窗口**消费：等它把濒死者拉回 1 点（回复结算在 RESOLVE_END 之后）。
+    run_queries(
+        engine,
+        [_WindowSeat(), _WindowSeat()],
+        lambda e: e.finished or state.player(1).hp >= 1,
+    )
+    used = [
+        record.cards[0]
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and record.cards
+    ]
+    peach = next(card for card in used if card.type == "peach")
+    assert peach.virtual_sources == (source,), "救命的是一张**转出来的**【桃】"
+    moves = [
+        (record.from_zone.zone.value, record.to_zone.zone.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] == [source]
+    ]
+    assert moves == [("hand", "processing"), ("processing", "discard")], (
+        f"源牌走上**使用**链（不是留在原地）：{moves}"
+    )
+    assert state.player(1).hp == 1 and state.player(1).alive, (
+        "求桃窗口把濒死者拉回 1 点（产物由**窗口**消费，技能自己不 start_use）"
+    )

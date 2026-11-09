@@ -1826,6 +1826,58 @@ def _assert_activation(query, *, skill_id: str, activate: bool) -> None:
             assert isinstance(answer, Pass), f"{skill_id} 该 Pass，实得 {answer!r}"
 
 
+JIJIANG = "hero.jie_liubei.jijiang"
+"""界刘备【激将】的全限定 id（票 20 的出牌阶段主动「使用【杀】」入口）。"""
+
+
+def test_jijiang_use_seat_step_targets_a_rebel_not_the_loyalist():
+    """【激将】的目标步登记为**对手**（yijiang-2014-round2 票 20）。
+
+    4 人身份局、主公界刘备（AI，座位 0）+ 已亮忠臣（座位 1）+ 两名已亮反贼（座位 2/3）；
+    牌堆全给【闪】（出牌阶段用不出）⇒ AI 在出牌阶段唯一有正分的动作就是【激将】的复合
+    动作。座位 2 在攻击范围外（距离 2），故目标池 = {1, 3}：**登记了 `jijiang:` 前缀**
+    才会挑反贼（座位 3）；不登记就落进"帮盟友"的缺省分支 ⇒ 拿代打的【杀】去打忠臣。
+    """
+    from sgs.data import Kingdom
+
+    dodges = tuple(cards_of_type(PACK, "dodge"))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=dodges,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    for seat in (1, 2, 3):
+        # 身份对本局 AI 可见（构造事实：它只改投影的可见性，不改胜负）。
+        state.player(seat).identity_visible = True
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in range(4)],
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == "PLAY_PHASE"
+            and JIJIANG in (e.pending.preactivations or {})
+        ),
+    )
+    query = engine.pending
+
+    action = HeuristicPlayer(ai_stream(7, 0)).respond(query)
+
+    assert isinstance(action, ActivateSkill) and action.skill_id == JIJIANG, (
+        f"AI 应当发动【激将】（唯一正分动作），实得 {action!r}"
+    )
+    assert action.choices == ("seat:3",), (
+        f"目标必须是攻击范围内的那名**反贼**（座位 3），不是忠臣（座位 1）：{action.choices}"
+    )
+
+
 def test_the_skill_table_fixtures_reach_real_windows():
     """夹具自检（不带 xfail）：三条 S1 用例的构造面（询问归属 / 牌面 / 成本池）。
 
@@ -3136,6 +3188,47 @@ def test_caopi_fangzhu_seat_value_comes_from_the_hostile_registration() -> None:
     assert engine.state.player(2).flipped is False, "敌人不再被翻面"
 
 
+def test_the_jie_jianying_target_ask_is_registered_as_a_hostile_seat_step() -> None:
+    """【渐营】② 的【杀】目标询问 **真的** 命中 `_HOSTILE_SEAT_STEPS`（反向对齐登记表）。
+
+    票 18 把"产物打谁"从**提交点后手写的一问**搬进流水线第 3 步，询问 id 因此从
+    ``hero.jie_jushou_mobile.jianying.target`` 变成 ``<短技能 id>:<步骤键>``。登记串按
+    ``startswith`` 用 ⇒ 少一个冒号 / 沿用全限定写法就永不命中、② 的【杀】静默落进
+    "帮盟友"分支，而"表里有这一条"的断言不会红。
+
+    询问 id **不在这里重拼**（`CODING_STANDARDS.md` §6）：它由真实产出方的两个函数给出 ——
+    SKILL 帧载荷里的 ``skill_id``（:meth:`~sgs.engine.Engine._skill_payload` 写它，本测试
+    真的调它；被动帧走 ``running_skill`` 那一档，`flow._flow_option_id` 同样认）与
+    :func:`~sgs.skills.flow._flow_option_id`（派生出短 id 与冒号）。两档都问：
+    同一步问多次时 id 补序号（``seat:0``），登记前缀必须两档都命中。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills.active import JIE_JIANYING, JIE_JIANYING_FLOW
+    from sgs.skills.flow import _flow_option_id
+
+    seat = next(step for step in JIE_JIANYING_FLOW.steps if step.key == "seat")
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=deck_excluding(PACK),
+        rule_config=RuleConfig(player_count=2),
+    )
+    data = Engine.from_state(state, seed=1)._skill_payload(  # noqa: SLF001 - 真实写方
+        ActivateSkill(skill_id=JIE_JIANYING, answers_seq=0), 0
+    )
+    frame = SimpleNamespace(data=data)
+    ask_ids = (
+        _flow_option_id(frame, seat.key, 0, multi=False),
+        _flow_option_id(frame, seat.key, 0, multi=True),
+    )
+
+    assert all(
+        ask_id.startswith(heuristic_scoring._HOSTILE_SEAT_STEPS)
+        for ask_id in ask_ids
+    ), f"询问 id {ask_ids!r} 不匹配任何登记前缀 ⇒ 座位步按'帮盟友'给分"
+
+
 # ---------------------------------------------------------------------------
 # 林包·移动版·董卓（lin-batch2 票 02）：【崩坏】的静态二选一（Q7 = A 的证据）
 # ---------------------------------------------------------------------------
@@ -3294,3 +3387,54 @@ def test_jiaxu_ai_activates_luanwu_and_an_enemy_slashes_the_nearest() -> None:
     assert isinstance(found["response"], UseCard), f"该出【杀】，实得 {found['response']!r}"
     assert found["response"].targets == (0,)
     assert found["hp_after"] == found["hp_before"] - 1, "那张【杀】真的打中了贾诩"
+
+
+# ---------------------------------------------------------------------------
+# 一将成名-2014·顾雍（yijiang-2014 票 03）：【慎行】弃两张恒摸一张
+# ---------------------------------------------------------------------------
+
+GUYONG_STD = "guyong"
+GUYONG_SHENXING = "hero.guyong.shenxing"
+
+
+def test_guyong_shenxing_ai_fills_the_manifest_and_filters_two_cards_into_one() -> None:
+    """【慎行】：AI 会填预发动清单（两张出牌阶段用不出去的牌）并完成"弃二摸一"。
+
+    手里只放【闪】+【无懈可击】：两者在出牌阶段都**用不出去**，故"发动【慎行】"是唯一
+    有意义的动作（否则 AI 会先按原用途把牌用掉）。本版**没有次数上限**、恒摸一张，
+    `SKILL_VALUES` 给的是低正分 ⇒ 判据只有"会发动 + 把两张都填进清单"。
+    """
+    dodge = cards_of_type(PACK, "dodge")[0]
+    nullify = cards_of_type(PACK, "nullify")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=GUYONG_STD, hand=(dodge, nullify)), SeatSpec()],
+        deck=deck_excluding(PACK, dodge, nullify),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    # 摸牌阶段放弃摸牌（`set_draw_phase_count(0, 0)`）：出牌阶段手里就只有可付的那两张。
+    engine.set_draw_phase_count(0, 0)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    play = engine.pending
+    action = HeuristicPlayer(ai_stream(0, play.actor)).respond(play)
+
+    assert isinstance(action, ActivateSkill) and action.skill_id == GUYONG_SHENXING, (
+        f"AI 该发动【慎行】，实得 {action!r}"
+    )
+    assert set(action.picks) == {dodge, nullify} and len(action.picks) == 2, (
+        f"清单要恰好填那两张，实得 {action.picks!r}"
+    )
+    engine.submit(action)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda running: dodge in running.state.discard and nullify in running.state.discard,
+    )
+    assert dodge in engine.state.discard and nullify in engine.state.discard
+    assert len(engine.state.player(0).hand) == 1, "弃两张、摸一张"
