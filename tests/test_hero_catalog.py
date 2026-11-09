@@ -2720,6 +2720,28 @@ def _flow_backed_active_ids() -> frozenset[str]:
 # ---------------------------------------------------------------------------
 
 
+def _triggered_ids() -> frozenset[str]:
+    """机械读出的「触发技能」格：**非空**流水线 + 钩子 / 接缝（觉醒 / 排列 / 锁定各单列）。
+
+    与 :func:`_flow_backed_active_ids` 同形、同为两处读取：形态逐格核对，以及"提供者里谁
+    已经被别的格认领"。后者的第二个消费者是界【渐营】（yijiang-2014-round2 票 17）：
+    ① 的钩子 + ② 的两步流水线让它进「触发技能」格，而它同时登记了 ② 的**提供者**入口
+    （`PROVIDERS` 里有它，与【蛊惑】同姿态）——本表**一格一技**，故这里按同一条互斥纪律
+    把它从「候选提供者」那一格扣掉（界【护驾】/【激将】的 ② 钩子是**零步**、不命中"非空
+    流水线"，仍按「候选提供者」列格）。
+    """
+    return frozenset(
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if (_steps := _flow_steps(skill_id)) is not None
+        and _steps != ()
+        and (definition.hooks or definition.seams)
+        and definition.deck_arrange is None
+        and definition.skill_type is not SkillType.AWAKENING
+        and not definition.locked
+    )
+
+
 def test_an_active_declaration_can_carry_hooks_and_a_flow_in_one_definition(monkeypatch):
     """``ActiveSkill.hooks`` 由声明透传进**同一条** ``SkillDef``（缺省空 ⇒ A 族既有声明零改动）。
 
@@ -2819,24 +2841,19 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     # 觉醒技按**类型**单列一格；两条觉醒技都有流水线（零步 / 一步），故从"零步 / 触发"
     # 两个机械谓词里排除，避免一条技能落进两格。
     active = _flow_backed_active_ids()
-    triggered = frozenset(
-        skill_id
-        for skill_id in CATALOG
-        if (_steps := _flow_steps(skill_id)) is not None
-        and _steps != ()
-        and (CATALOG[skill_id].hooks or CATALOG[skill_id].seams)
-        and CATALOG[skill_id].deck_arrange is None
-        and skill_id not in awakening
-        # lin-batch2 票 02：**锁定技按类型单列一格**（与 :data:`zero_step` 同一条互斥纪律）。
-        # 董卓移动版【崩坏】是第一条"锁定 + 非空流水线 + 带钩子"的技能（界【英姿】也锁定，
-        # 但它的流水线是零步 ⇒ 本来就落在零步谓词之外），不扣掉它就会同时进「触发技能」格。
-        and not CATALOG[skill_id].locked
-    )
+    # lin-batch2 票 02：**锁定技按类型单列一格**（与 :data:`zero_step` 同一条互斥纪律）。
+    # 董卓移动版【崩坏】是第一条"锁定 + 非空流水线 + 带钩子"的技能（界【英姿】也锁定，
+    # 但它的流水线是零步 ⇒ 本来就落在零步谓词之外），不扣掉它就会同时进「触发技能」格。
+    triggered = _triggered_ids()
     # 「主动技能」这一格要在 providers 之前定格：移动版于吉【蛊惑】**同时**是有流水线的
     # 主动技与提供者（出牌阶段入口 + "需要牌时"的提供者），而本表一格一技，取它更根本的
     # 那一格——发动主体是那条两步流水线（提供者只是它的第二个入口）。故 providers 这里
     # 扣掉 flow-backed 的主动技（与"锁定技 / 觉醒技单列"同一条互斥纪律）。
-    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - active
+    # 界【渐营】（yijiang-2014-round2 票 17）同理：① 的钩子 + ② 的两步流水线让它按
+    # 「触发技能」列格，② 的提供者入口是第二条路 ⇒ 也从 providers 扣掉（`_triggered_ids`）。
+    providers = (
+        frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+    ) - active - triggered
     zero_step = frozenset(
         skill_id
         for skill_id in CATALOG
@@ -2885,6 +2902,10 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         # M6 票 01：**非主公技**的提供者（移动版于吉【蛊惑】的"需要牌时"入口）——
         # `PROVIDERS` 由 `register_provider` 在 `catalog.py` 末尾并入，不是靠主公技枚举。
         "hero.yuji_mobile.guohuo",
+        # yijiang-2014-round2 票 17：界【渐营】② 接入票 16 登记表里的全部要牌窗口
+        # （求桃 / 借刀 / 南蛮 / 万箭 / 决斗 / 乱武 / 护驾 / 激将）。它也带 ① 的钩子 ⇒
+        # 形态表按「触发技能」列格（提供者入口只是同一份声明的第二条路）。
+        "hero.jie_jushou_mobile.jianying",
     }
 
     multi_round = _shape_members("多轮技能")
@@ -2957,8 +2978,11 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # （与觉醒技单列同一姿态）——"有没有 flow"不再是划分步骤语言内外的充分条件。
     locked = {skill_id for skill_id in CATALOG if CATALOG[skill_id].locked}
     # "提供者"这一格只收**按提供者单列**的那些：同时有主动技流水线的（【蛊惑】）归「主动
-    # 技能」格，故这里先扣掉它们——否则一条 inside 的技能会同时被当成 outside 的证据。
-    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - _flow_backed_active_ids()
+    # 技能」格、同时按「触发技能」列格的（界【渐营】：① 的钩子 + ② 的提供者入口）同理，
+    # 故这里先扣掉它们——否则一条 inside 的技能会同时被当成 outside 的证据。
+    providers = (
+        frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+    ) - _flow_backed_active_ids() - _triggered_ids()
     flow_backed = {
         skill_id for skill_id in CATALOG if flow_for(skill_id) is not None
     }

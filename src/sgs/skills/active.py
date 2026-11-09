@@ -67,6 +67,7 @@ from sgs.effects import (
     check_targets,
     distance,
     forced_use_targets,
+    is_own_play_phase,
     is_slash,
     locate,
     need_card_floor,
@@ -6820,6 +6821,25 @@ def _jie_jianying_product(
     )
 
 
+def _jie_jianying_previous_card(state: GameState, owner: int) -> CardRef | None:
+    """「**本阶段**使用的上一张牌」——只在自己的出牌阶段里可读（Q17-c = A 的判据）。
+
+    用户 2026-11-09 签 A：产物花色照旧，但"本阶段"要读成**当前这个出牌阶段**，不是座位
+    事实的陈旧值。判据与引擎写 ``play_phase_last_card`` 的判据**同一个**
+    （:func:`~sgs.effects.is_own_play_phase`：``turn_seat == owner`` ∧ 阶段 = 出牌阶段），
+    故"什么时候写的"与"什么时候读"结构上不可能漂移：
+
+    - 是（含自己的出牌阶段内发生的响应窗口，例如自己造成伤害触发的濒死求桃）⇒ 沿用
+      Q-J4 的口径：读 ``play_phase_last_card``；
+    - 否（别人的回合 / 别人的出牌阶段）⇒ 本阶段没有"上一张使用牌" ⇒ 返回 ``None``
+      （= 与"上一张无花色"同一支，产物按规则 §16.3 继承来源牌）。**不读**上一次自己的
+      出牌阶段留下的陈旧值——``play_phase_last_card`` 在别人回合里仍然躺着那个值。
+    """
+    if not is_own_play_phase(state, owner):
+        return None
+    return state.player(owner).play_phase_last_card
+
+
 def _jie_jianying_name_options(
     state: GameState, frame: Any, owner: int, answers: FlowAnswers
 ) -> tuple[str, ...]:
@@ -6841,7 +6861,7 @@ def _jie_jianying_name_disabled(
     source = _guohuo_selected_card(answers)
     if source is None:  # 前序还没选牌（清单的退化路径）⇒ 没有可置灰的依据
         return ()
-    previous = state.player(owner).play_phase_last_card
+    previous = _jie_jianying_previous_card(state, owner)
     return tuple(
         name
         for name, type_id in _jie_jianying_name_table(state).items()
@@ -6858,7 +6878,7 @@ def _jie_jianying_entry(state: GameState, seat: int) -> bool:
     if not sources:
         return False
     table = _jie_jianying_name_table(state)
-    previous = player.play_phase_last_card
+    previous = _jie_jianying_previous_card(state, seat)
     return any(
         check_targets(state, seat, _jie_jianying_product(state, source, type_id, previous))
         for source in sources
@@ -6935,7 +6955,7 @@ def _jie_jianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         if source is None:  # 第一步是必答（lo = 1），缺它就是声明写错了
             raise ValueError("【渐营】的预发动没有带出那张源牌")
         frame.data[_JIE_JIANYING_PRODUCT_KEY] = _jie_jianying_product(
-            state, source, type_id, state.player(owner).play_phase_last_card
+            state, source, type_id, _jie_jianying_previous_card(state, owner)
         )
     if frame.data.get(_JIE_JIANYING_USED_KEY):
         return None
@@ -6951,6 +6971,167 @@ def _jie_jianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         use_timing=Timing.PHASE_PLAY_IDLE,
     )
     return "stay"
+
+
+# ---------------------------------------------------------------------------
+# ② 的**提供者分支**（yijiang-2014-round2 票 17 / P8）：接入票 16 登记表里**全部**
+# "需要 / 可以使用或打出"的窗口
+#
+# 用户 2026-11-09 逐字签的窗口范围：「任何"需要"、"可以使用或打出的场合，例如贾诩乱武也
+# 算」；同一天签的两条行为裁定（Q17-b / Q17-c）落在技能侧：
+#
+# - **Q17-b = A**：「出牌阶段限一次」只数**自己出牌阶段内的发动**——判据 =
+#   :func:`~sgs.effects.is_own_play_phase`（``turn_seat == owner`` ∧ 阶段 = 出牌阶段）。
+#   是 ⇒ 照旧查 / 记 ``_USED`` 位；否 ⇒ 不查也不记，回合外可以多次发动。**自己的**出牌
+#   阶段里因响应窗口而发动（例如自己造成伤害触发的濒死求桃）按字面**算**额度。
+# - **Q17-c = A**：产物花色照旧（"本阶段使用的上一张牌"的花色），但"本阶段"只在**自己的
+#   出牌阶段**里可读（:func:`_jie_jianying_previous_card`）；回合外 ⇒ 继承来源牌。
+#
+# 窗口面（登记表里 ``providers=True`` 的行）：``dodge``（【闪】步 / 万箭 / 护驾）、
+# ``peach``（求桃）、``respond`` 一族（南蛮 / 决斗 / 借刀 / 乱武 / 激将）。改判不参与、
+# 无懈不声明（② 的产物是基本牌，``can_pay`` 恒假）。
+#
+# **不手抄**（票 16 的纪律）：候选追加 = :meth:`ProviderWindows.offers`（本段只给"付得起"
+# 谓词），受理 / 产物交接 = `lord_request` 的 ``provider_required`` / ``provider_deliver`` /
+# ``provider_give_up``；**不**自己 ``start_use``——使用 / 打出 / 回复 / 打向 Bn 由窗口决定。
+# ---------------------------------------------------------------------------
+
+_ASK_JIE_JIANYING_CARD = "hero.jie_jushou_mobile.jianying.card"
+"""手写询问位置（票 22）：窗口里的"选哪张源牌"。
+
+出牌阶段那一问由 :data:`JIE_JIANYING_FLOW` 的 `PickCards` 承担（预发动把这一步画进清单）；
+窗口没有清单，故这一侧手写——与【蛊惑】段 1（:func:`_guohuo_pick_card`）同形。
+"""
+
+
+def _jie_jianying_window_name(state: GameState, required: str) -> str | None:
+    """窗口**定死**的牌名：``required`` 必须真是本牌堆有的**基本牌**（Q-J5 的闭集）。
+
+    窗口里牌名由窗口给（候选期 ``ctx.respond_required``、受理期 ``PROVIDER_REQUIRED_KEY``），
+    ② 不再问牌名——但产物仍必须落在"本牌堆真有的基本牌"这道闭集里：不在（【无懈可击】
+    一类非基本牌、或 108 档的【酒】）⇒ 这次不参与，候选期就不该出现。
+    """
+    for type_id in _jie_jianying_name_table(state).values():
+        if type_id == required:
+            return type_id
+    return None
+
+
+def _jie_jianying_provider_payable(
+    state: GameState, ctx: ModifierContext, required: str
+) -> bool:
+    """② 在窗口里"付得起"：两条牌面事实 + 一条已签额度裁定（Q17-b）+ 一条窗口目标约束。
+
+    1. 窗口要的牌名能由 ② 产出（:func:`_jie_jianying_window_name`；闭集见 Q-J5）；
+    2. 有源牌（手牌 ∪ 装备区——牌面写"一张牌"，无区域限定）；
+    3. **Q17-b = A**：在**自己的**出牌阶段里 ⇒ 本阶段没发动过才付得起（查 ``_USED`` 位）；
+       回合外 ⇒ 不查（也不记，见 :func:`jie_jianying_provider`）；
+    4. **USE 类窗口的目标约束**：借刀 / 乱武的产物必须够得着窗口定的那名角色
+       （``ctx.respond_targets``）——与真牌候选同一道判据（``forced_use_targets``）。
+       打出类窗口（南蛮 / 万箭 / 决斗 / 【闪】）与求桃没有目标维度。
+    """
+    type_id = _jie_jianying_window_name(state, required)
+    if type_id is None:
+        return False
+    owner = ctx.subject
+    if is_own_play_phase(state, owner) and (
+        _phase_flags(state, owner, ctx.skill_id) & _USED
+    ):
+        return False
+    player = state.player(owner)
+    sources = (*player.hand, *player.equip)
+    if not sources:
+        return False
+    if ctx.respond_mode is RespondMode.USE and ctx.respond_targets:
+        previous = _jie_jianying_previous_card(state, owner)
+        return any(
+            forced_use_targets(
+                state,
+                owner,
+                _jie_jianying_product(state, source, type_id, previous),
+                ctx.respond_targets,
+            )
+            for source in sources
+        )
+    return True
+
+
+JIE_JIANYING_PROVIDER_WINDOWS = ProviderWindows(
+    # 语境键——`ProviderWindows` **只按语境收窄**（`ModifierContext` 不带窗口成因）：
+    # dodge ⇒ 【闪】步 / 万箭齐发 / 护驾；peach ⇒ 濒死求【桃】；其余四键 ⇒ respond 语境
+    # （南蛮 / 决斗 / 借刀 / 乱武 / 激将）。
+    keys=(
+        "dodge",
+        "arrow_barrage",
+        "peach",
+        "barbarian_invasion",
+        "duel",
+        "borrowed_sword",
+        "luanwu",
+    ),
+    can_pay=_jie_jianying_provider_payable,
+)
+"""② 的**提供者窗口声明**（票 16 的登记表）：候选追加因此只有一处实现。
+
+未声明：``nullify``（② 的产物是基本牌，``can_pay`` 恒假）、``rejudge``（登记表"登记但
+排除"）；``lord_request.*`` 两个键**构造期就会被拒**（求助子窗口只收 ``PlayCard``，没有
+受理面）——护驾 / 激将那一行由 ``dodge`` / ``respond`` 两档语境覆盖：被求助者自己那一问
+里 ② 照样在候选里（求助子窗口怎么消费产物是另一张票）。
+"""
+
+
+def jie_jianying_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Control:
+    """提供者受理：窗口点【渐营】⇒ **选一张源牌** ⇒ 造产物交给窗口。
+
+    与出牌阶段入口是**同一条声明**的两条路（与【蛊惑】同姿态）：
+
+    1. **牌名由窗口定死**（:func:`~sgs.skills.lord_request.provider_required`）⇒ 不再问
+       牌名，故只剩"选哪张源牌"一步（出牌阶段那份清单是两步）；
+    2. **产物交给窗口**：写 ``provider_deliver``（``satisfied=True`` + 产物牌），**不**自己
+       ``start_use``——使用 / 打出 / 求桃的回复结算 / 打向 Bn / 乱武的目标全由窗口按自己
+       那一份规则决定（票 16 的"产物交给窗口"契约）；
+    3. **Q17-b = A** 的落点：产物交付后，若这一次发动**在自己出牌阶段内**（含该阶段内的
+       响应窗口）⇒ 落 ``_USED`` 阶段位（与出牌阶段入口同一个位）。回合外不落。
+    4. **Q17-c = A** 的落点：产物牌面走 :func:`_jie_jianying_previous_card`——自己的出牌
+       阶段才读"本阶段上一张牌"的花色，否则继承来源牌。
+
+    重入纪律（`CODING_STANDARDS.md` §3）：这一步只有一次询问（``ask_selection`` 帧内缓存
+    答案），重入时按同一份答案重造产物——``transformed_card`` 是纯函数、``_mark_phase``
+    是幂等 OR 位，故重复走一遍不产生第二个副作用。
+    """
+    # 惰性 import：`lord_request` 反向依赖 `catalog`（本模块由 catalog 末尾导入），
+    # 模块级 import 会成环（与 `guohuo_provider` 同一理由）。
+    from .lord_request import provider_deliver, provider_give_up, provider_required
+
+    required = provider_required(frame)
+    state = host.state
+    type_id = _jie_jianying_window_name(state, required)
+    if type_id is None:  # 候选期已按同一份闭集挡过；走到这里就是窗口写错了
+        provider_give_up(frame)
+        return None
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_JIE_JIANYING_CARD,
+        key="jie_jianying:card",
+        actor=actor,
+        timing=timing,
+        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
+        build_face=lambda: host.selection_face(
+            actor, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+        ),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:  # 一张源牌都没有：这次响应没发生（零副作用，窗口照常继续问真牌）
+        provider_give_up(frame)
+        return None
+    product = _jie_jianying_product(
+        state, int(picked[0]), type_id, _jie_jianying_previous_card(state, actor)
+    )
+    provider_deliver(frame, product)
+    if is_own_play_phase(state, actor):
+        _mark_phase(state, actor, JIE_JIANYING, _USED)
+    return None
 
 
 JIE_JIANYING_FLOW = SkillFlow(
@@ -6986,6 +7167,13 @@ _JIE_JIANYING = ActiveSkill(
     # ``SkillDef`` 会在 ``CATALOG`` 的字典推导里被后者静默覆盖。
     hooks=(
         Hook(Timing.USE_ON_USE, condition=_jianying_condition, flow=JIANYING_FLOW),
+    ),
+    # ② 的**提供者分支**（票 17）：窗口里"需要一张基本牌"时追加一条裸 `ActivateSkill`
+    # ——候选追加只有 `ProviderWindows.offers` 这一份实现；受理见 `jie_jianying_provider`。
+    extra_modifiers=(
+        Modifier(
+            ModifierPoint.CANDIDATES, JIE_JIANYING_PROVIDER_WINDOWS.offers
+        ),
     ),
     # A4：与 OL 沮授【渐营】同短 id 但牌面不同（界版多 ②、且 ① 多「你的」）⇒ 界版全文写在
     # **声明级覆盖**上，不动 ``_REQUIREMENTS["jianying"]`` 那一行。

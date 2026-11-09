@@ -2682,6 +2682,103 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeOk}`);
 }
 
+/* ============ 票 17（合成局面）：窗口里的【渐营】② 提供者入口 + **一步清单** ============
+ *
+ * 用户 2026-11-09 签的窗口范围 =「任何"需要"、"可以使用或打出的场合」；窗口里牌名被窗口
+ * 定死（`ctx.respond_required`）⇒ ② 的交互只剩"选哪张源牌"一步。本节喂两份**与服务端
+ * 同形**的合成载荷，钉住两条界面读法：
+ *
+ *  1. **生产形状**：窗口里【渐营】是一条**裸 `ActivateSkill`** 候选（提供者入口）；按钮
+ *     不能因为 `preactivated` 就画灰（与【蛊惑】同一姿态——清单入口之外还有提供者入口）。
+ *     点它 = 选中那条候选；确认送出的就是它（"选哪张源牌"由服务端随后自己问）。
+ *  2. **一步清单**（票面 §4 点名的合成载荷）：同一扇窗口带【渐营】的单步清单 ⇒ 点技能进
+ *     预发动、点一张手牌、下一步 ⇒ 复合动作 `picks=[那张牌]`、**没有** `choices`
+ *     （牌名由窗口定死，不再问第二步）。
+ */
+{
+  const source = {
+    ...synthCard(52, "闪"), type: "dodge", suit: "heart", rank: 2, color: "red",
+  };
+  const windowPayload = (extra = {}) => ({
+    kind: "RESPOND", actor: 0, seq: 903, cause: "BARBARIAN_INVASION",
+    required: "slash", prompt: "请打出一张【杀】响应南蛮入侵。",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "hero.jie_jushou_mobile.jianying", answers_seq: 903 },
+      { kind: "Pass", answers_seq: 903 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [], ...extra,
+  });
+  const skillRow = {
+    skill_id: "hero.jie_jushou_mobile.jianying", name: "渐营", skill_type: "NORMAL",
+    locked: false, carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "出牌阶段限一次，你可以将一张牌当任意一张基本牌使用" },
+  };
+  const view = synthView(windowPayload());
+  view.skills = [skillRow];
+  view.snapshot.self_hand = [source];
+  ui.state.view = view;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const windowButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying",
+  );
+  check("㉿JY1 窗口里【渐营】的提供者入口可点（`preactivated` 不会把它弄灰）",
+    !!windowButton && windowButton.disabled === false,
+    `disabled=${windowButton && windowButton.disabled} pre=${windowButton && windowButton.getAttribute("data-preactivation")}`);
+  (windowButton.listeners.click || []).forEach((fn) => fn({ target: windowButton }));
+  check("㉿JY2 点它 = 直提态（选中那条裸 ActivateSkill，不进预发动本地态）",
+    ui.state.selectedOption !== null && ui.state.preactivation === null,
+    `selectedOption=${ui.state.selectedOption} pre=${JSON.stringify(ui.state.preactivation)}`);
+  const bare = ui.buildAction();
+  check("㉿JY3 确认送出的是那条裸候选（选源牌是服务端的下一问）",
+    !!bare && bare.kind === "ActivateSkill"
+      && bare.skill_id === "hero.jie_jushou_mobile.jianying"
+      && (bare.picks || []).length === 0 && (bare.choices || []).length === 0,
+    JSON.stringify(bare));
+
+  const oneStep = [{
+    name: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+    pool: [{ when: [], options: ["52"] }],
+    wording: "选择一张源牌（当作窗口要的那张基本牌）",
+  }];
+  const view2 = synthView(windowPayload({
+    preactivations: { "hero.jie_jushou_mobile.jianying": oneStep },
+  }));
+  view2.skills = [skillRow];
+  view2.snapshot.self_hand = [source];
+  ui.state.view = view2;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view2);
+  const oneStepButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying",
+  );
+  (oneStepButton.listeners.click || []).forEach((fn) => fn({ target: oneStepButton }));
+  check("㉿JY4 点【渐营】= 进入**一步**清单（不是出牌阶段那份两步）",
+    !!ui.state.preactivation
+      && ui.state.preactivation.steps.length === 1
+      && /预发动【渐营】/.test($("t-prompt").textContent),
+    `steps=${ui.state.preactivation && ui.state.preactivation.steps.length} prompt="${$("t-prompt").textContent}"`);
+  const windowChip = $("t-hand").children[0];
+  (windowChip.listeners.click || []).forEach((fn) => fn({ target: windowChip }));
+  check("㉿JY5 点那张手牌 = 收进这一步的答案",
+    JSON.stringify(ui.state.preactivation.answers[0].values) === "[52]",
+    JSON.stringify(ui.state.preactivation.answers[0]));
+  const nextStep = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+  check("㉿JY6 一步选完 ⇒ 「下一步」可点", !!nextStep && nextStep.disabled === false);
+  (nextStep.listeners.click || []).forEach((fn) => fn({ target: nextStep }));
+  const oneStepAction = ui.buildAction();
+  check("㉿JY7 确认 = 复合动作 picks=[那张源牌]、没有 choices（牌名由窗口定死）",
+    !!oneStepAction && oneStepAction.kind === "ActivateSkill"
+      && JSON.stringify(oneStepAction.picks) === "[52]"
+      && (oneStepAction.choices || []).length === 0,
+    JSON.stringify(oneStepAction));
+  ui.state.sessionId = null;
+}
+
 /* ============ 票 25 报障（合成局面）：麒麟弓预发动的第一步要点**目标**装备区的坐骑 ============
  *
  * 清单形状来自引擎真实下发的 Step（`PickCards(zones=("equip",), slot_kinds=坐骑)`）：

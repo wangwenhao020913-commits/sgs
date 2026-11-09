@@ -4296,8 +4296,10 @@ from .heroes import (  # noqa: E402  （末尾 import 是刻意的）
 )
 from .active import (  # noqa: E402  （末尾 import 是刻意的）
     GUOHUO,
+    JIE_JIANYING,
     active_skill_definitions,
     guohuo_provider,
+    jie_jianying_provider,
 )
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
@@ -4387,6 +4389,10 @@ from .state_after import (  # noqa: E402  （末尾 import 是刻意的）
 # 质疑，最后才决定这张牌算不算数。登记点必须是**这里**：`active.py` 与 `lord_request.py`
 # 互相不认识（都反向 import 本模块），只有本文件末尾两个模块都已 import 完。
 register_provider(GUOHUO, guohuo_provider)
+# 界沮授移动版【渐营】②（yijiang-2014-round2 票 17）：与【蛊惑】同形的一次登记——技能层
+# 只声明"我在哪些窗口参与"（`active.JIE_JIANYING_PROVIDER_WINDOWS`），"要的是哪张牌"
+# 由窗口经 `PROVIDER_REQUIRED_KEY` 给出，故这里不需要窗口名单。
+register_provider(JIE_JIANYING, jie_jianying_provider)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(

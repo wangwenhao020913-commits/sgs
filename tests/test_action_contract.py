@@ -26,9 +26,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -45,17 +47,30 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
-from sgs.data import load_content_pack  # noqa: E402
+from sgs.data import RuleConfig, load_content_pack  # noqa: E402
+from sgs.engine import Engine  # noqa: E402
 from sgs.effects import legal_actions_for  # noqa: E402
 from sgs.state import (  # noqa: E402
+    EndPhase,
+    Pass,
+    Phase,
     QueryKind,
     SelectOptionsContext,
     SelectOptionsQuery,
+    UseCard,
+    WindowCause,
     project,
 )
 from sgs.state.protocol import parse_action  # noqa: E402
-from sgs_web.projection import option_seats  # noqa: E402
-from support import SeatSpec, build_state  # noqa: E402
+from sgs.timing import Timing  # noqa: E402
+from sgs_web.projection import option_seats, pending_payload  # noqa: E402
+from support import (  # noqa: E402
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_queries,
+)
 
 CARD_REF_KEYS = {
     "card_id",
@@ -434,3 +449,178 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
     assert isinstance(payload["cases"], list) and len(payload["cases"]) == 10
+
+
+# ---------------------------------------------------------------------------
+# 票 17：窗口里的提供者回环（点技能 → 服务端问"选哪张源牌" → 点牌 → 产物交给窗口）
+# ---------------------------------------------------------------------------
+
+
+class _WindowSeat:
+    """最小窗口脚本：座位 1 在自己的出牌阶段用【南蛮入侵】，其余一律放弃 / 结束阶段。"""
+
+    def __init__(self, *, use: int | None = None) -> None:
+        self.use = use
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "PLAY_PHASE":
+            if self.use is not None:
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.card_id == self.use:
+                        self.use = None
+                        return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _next_ask(engine, *, limit: int = 64):
+    """推进到**下一条询问**（`submit` 只接受应答，重入结算由 `_step` 继续）。"""
+    for _ in range(limit):
+        if engine.pending is not None:
+            return engine.pending
+        if engine.finished:
+            break
+        engine._step()
+    raise AssertionError("提交之后没有等到下一条询问")
+
+
+def _probe_build(fixture: dict) -> dict:
+    """把一份**真实**询问载荷交给真实前端构造器，返回客户端会发的那一条动作。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(fixture, handle)
+        path = handle.name
+    try:
+        result = subprocess.run(
+            [node, str(PROBE.relative_to(REPO_ROOT)), path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    finally:
+        os.unlink(path)
+    assert result.returncode == 0, (
+        f"载荷模式探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)["action"]
+
+
+def test_the_window_provider_loop_clicks_the_skill_then_picks_a_source_card() -> None:
+    """窗口里的提供者回环（票 17）：**点技能 → 选一张源牌 → 提交**，产物由窗口消费。
+
+    两半都走真路径：服务端这边是**真引擎**的【南蛮入侵】窗口与它随后的 `SELECT_CARDS`
+    询问；客户端那边是 `pending_payload` 投影出来的**真载荷** + 真实前端构造器
+    （`ui_bridge` 的 `buildAction` / `submitOwnHandSinglePick`）。断言三件事：
+
+    1. 窗口里【渐营】是一条裸 `ActivateSkill` 候选（提供者入口），点它发出的载荷只有
+       五个键、`picks` 为空——牌名由窗口定死，选牌由服务端随后问；
+    2. 服务端随即问"选哪张源牌"（`SELECT_CARDS`，手牌 ∪ 装备区、恰好一张），点那一张
+       发出的 `SelectCards` 用**面内位置**命中候选；
+    3. 提交后产物（一张虚拟【杀】）真的**打出**了（不进使用链），源牌走上打出链。
+    """
+    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+    source = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(source,)),
+            SeatSpec(hand=(barbarian,)),
+        ],
+        deck=deck_excluding(PACK, source, barbarian),
+        turn_seat=1,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [_WindowSeat(), _WindowSeat(use=barbarian)],
+        lambda e: (
+            e.pending is not None
+            and e.pending.kind == QueryKind.RESPOND
+            and e.pending.actor == 0
+            and getattr(e.pending, "cause", None) is WindowCause.BARBARIAN_INVASION
+        ),
+    )
+    window = engine.pending
+    assert window is not None and window.actor == 0
+
+    payload = pending_payload(window, human_seat=0)
+    at = next(
+        index
+        for index, action in enumerate(payload["legal_actions"])
+        if action["kind"] == "ActivateSkill"
+        and action["skill_id"] == "hero.jie_jushou_mobile.jianying"
+    )
+    activation = _probe_build(
+        {"pending": payload, "human_seat": 0, "selected_option": at}
+    )
+    assert set(activation) == {"kind", "skill_id", "picks", "choices", "answers_seq"}
+    assert activation["kind"] == "ActivateSkill"
+    assert activation["picks"] == [] and activation["choices"] == [], (
+        "窗口里的提供者入口是**裸**候选：选牌是服务端的下一问"
+    )
+    engine.submit(parse_action(activation))
+
+    pick_query = _next_ask(engine)
+    assert pick_query is not None and pick_query.kind == QueryKind.SELECT_CARDS, (
+        "点技能之后服务端只问一步：选哪张源牌（牌名已被窗口定死）"
+    )
+    slot = next(
+        index
+        for index, entry in enumerate(pick_query.slots)
+        if entry.card is not None and entry.card.card_id == source
+    )
+    pick = _probe_build(
+        {
+            "pending": pending_payload(pick_query, human_seat=0),
+            "human_seat": 0,
+            "click_slot": slot,
+        }
+    )
+    assert set(pick) == {"kind", "picks", "answers_seq"}
+    assert pick["picks"] == [slot], "点那张牌 = 面内位置那一个（不手拼实体牌 id）"
+    engine.submit(parse_action(pick))
+    _next_ask(engine)
+
+    run_queries(
+        engine,
+        [_WindowSeat(), _WindowSeat()],
+        lambda e: any(
+            record.kind == "timing"
+            and record.timing is Timing.PLAY_ON_PLAY
+            and record.cards
+            and record.cards[0].virtual_sources
+            for record in e.records
+        ),
+    )
+    played = [
+        record.cards[0]
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.PLAY_ON_PLAY
+        and record.cards
+    ]
+    assert [card.type for card in played] == ["slash"]
+    assert played[0].virtual_sources == (source,)
+    moves = [
+        (record.from_zone.zone.value, record.to_zone.zone.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] == [source]
+    ]
+    assert moves == [("hand", "processing"), ("processing", "discard")], (
+        f"源牌走上**打出**链（不是留在原地）：{moves}"
+    )
+    assert state.player(0).hp == 2, "响应成立 ⇒ 不受南蛮那 1 点伤害"

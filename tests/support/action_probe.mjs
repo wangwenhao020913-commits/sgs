@@ -26,6 +26,10 @@ const STATIC_DIR = "tools/sgs_web/static";
 const NEEDED = [
   "core.js",
   "candidates.js",
+  // 票 17：`candidates.js:isOwnZonePick` 调 `card-face.js:isProvide`（"提供一张 B"的判据），
+  // 故客户端的 `submitOwnHandSinglePick`（窗口里"点一张自己的牌"）依赖它。页面里也是
+  // candidates → card-face 的次序。
+  "card-face.js",
   "table.js",
   "preactivation.js",
   "interaction.js",
@@ -502,6 +506,34 @@ delete otherActivationPending.default_choice;
 ui.state.view = { human_seat: 0, pending: otherActivationPending };
 ui.state.selectedOption = null;
 const noDeclaredDefault = ui.buildAction();
+
+/* 参数模式（yijiang-2014-round2 票 17）：把**真实**询问载荷（Python 侧用
+ * `sgs_web.projection.pending_payload` 投影出来的那份）喂给同一批构造器，打印客户端会发
+ * 的那一条动作。这是"窗口里点技能 → 选牌 → 提交"回环的客户端半边：
+ *
+ *   - `selected_option`：`selectSkillCandidate` 写的那一格（窗口里的 `ActivateSkill`
+ *     候选 = 提供者入口，点技能按钮就是选它）；
+ *   - `click_slot`：**真实点击入口** `submitOwnHandSinglePick`（自己手牌 / 装备区单张，
+ *     一击即选中；它自己写 `state.picks` + 候选骨架的指向）。
+ *
+ * 合成载荷（无会话）⇒ 点击只留内部态、不发请求，正是本探针要的"点击 → 载荷"。 */
+const liveInput = process.argv[2];
+if (liveInput) {
+  const fixture = JSON.parse(readFileSync(liveInput, "utf8"));
+  resetState();
+  ui.state.sessionId = "";
+  ui.state.playback = null;
+  ui.state.view = { human_seat: fixture.human_seat, pending: fixture.pending };
+  if (fixture.selected_option !== null && fixture.selected_option !== undefined) {
+    ui.state.selectedOption = Number(fixture.selected_option);
+  }
+  if (fixture.click_slot !== null && fixture.click_slot !== undefined) {
+    ui.submitOwnHandSinglePick(fixture.pending, Number(fixture.click_slot));
+  }
+  const action = ui.buildAction();
+  process.stdout.write(JSON.stringify({ action }));
+  process.exit(0);
+}
 
 /* 合成反例：同一张借刀卡的**展示形态**原样塞进 UseCard.card（实机 400 的形状）。 */
 const decorated = {
