@@ -147,6 +147,7 @@ __all__ = [
     "lord_skill_allowed",
     "lord_skill_ids",
     "mark_limited_skill_used",
+    "mark_skill_decider_used_this_turn",
     "mark_skill_used_this_turn",
     "placement_skill_ids",
     "prune_card_tags",
@@ -157,6 +158,7 @@ __all__ = [
     "reset_phase_skill_state",
     "resolve_instances",
     "same_kingdom",
+    "skill_decider_used_this_turn",
     "skill_used_this_turn",
     "state_change",
     "terminate_activation_pass",
@@ -1170,12 +1172,45 @@ def mark_skill_used_this_turn(state: GameState, seat: int, skill_id: str) -> Non
             return
 
 
+def skill_decider_used_this_turn(
+    state: GameState, seat: int, skill_id: str, actor: int
+) -> bool:
+    """``seat`` 的 ``skill_id`` 本回合是否已被 ``actor`` **作为决定者**发动过（票 23）。
+
+    与 :func:`skill_used_this_turn` 同一份实例身份，但多一轴"谁决定"：位图（
+    ``_TURN_USED``）只记"这条技能本回合发动过"，而「每回合限一次」的主语可以是**事件当事
+    角色**而不是技能持有者（界刘备【激将】②：「其他蜀势力角色…其可以令你摸牌」——每名蜀势力
+    角色各有一份额度）。账本住 :attr:`~sgs.state.GameState.skill_deciders_this_turn`，
+    复位点与位图同一处（:func:`reset_turn_skill_state`）。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return actor in state.skill_deciders_this_turn.get(
+                instance_key(instance), ()
+            )
+    return False
+
+
+def mark_skill_decider_used_this_turn(
+    state: GameState, seat: int, skill_id: str, actor: int
+) -> None:
+    """给 ``seat`` 的 ``skill_id`` 记一次"``actor`` 已作为决定者发动"（幂等；实例不在则零动作）。"""
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            key = instance_key(instance)
+            used = state.skill_deciders_this_turn.get(key, ())
+            if actor not in used:
+                state.skill_deciders_this_turn[key] = (*used, actor)
+            return
+
+
 def reset_turn_skill_state(state: GameState) -> None:
     """清理**本回合**的 per-instance 技能状态（M6 票 08；引擎回合末统一调用）。
 
-    只清 :data:`_TURN_USED` 位：整局位（限定技"已用"）与觉醒位保留，"每回合限一次"的
-    技能因此每个游戏回合都能重新发动一次。与 :func:`reset_phase_skill_state` 同形
-    （按掩码清、键清空即删）。
+    只清 :data:`_TURN_USED` 位（连同票 23 的**决定者账本**
+    :attr:`~sgs.state.GameState.skill_deciders_this_turn`）：整局位（限定技"已用"）与
+    觉醒位保留，"每回合限一次"的技能因此每个游戏回合都能重新发动一次。与
+    :func:`reset_phase_skill_state` 同形（按掩码清、键清空即删）。
     """
     for key in list(state.skill_state):
         remaining = state.skill_state[key] & ~_TURN_USED
@@ -1183,6 +1218,7 @@ def reset_turn_skill_state(state: GameState) -> None:
             state.skill_state[key] = remaining
         else:
             del state.skill_state[key]
+    state.skill_deciders_this_turn.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1364,7 +1400,8 @@ def prune_skill_state(state: GameState) -> None:
 
     ``include_suppressed=True``：暂时失效的实例**仍算活着**（M6 票 04）——把它的
     ``skill_state`` 一起清掉，会让"失效恢复后限定技又能再发动一次"。这里只清
-    "实例真的没了"（载体消失 / 已失去）的那些键。
+    "实例真的没了"（载体消失 / 已失去）的那些键；票 23 的**决定者账本**
+    （:attr:`~sgs.state.GameState.skill_deciders_this_turn`）同一套实例键，一并清。
     """
     live = {
         instance_key(instance)
@@ -1373,6 +1410,9 @@ def prune_skill_state(state: GameState) -> None:
     for key in list(state.skill_state):
         if key not in live:
             del state.skill_state[key]
+    for key in list(state.skill_deciders_this_turn):
+        if key not in live:
+            del state.skill_deciders_this_turn[key]
 
 
 def reset_phase_skill_state(state: GameState) -> None:

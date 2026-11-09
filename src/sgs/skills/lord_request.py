@@ -81,9 +81,9 @@ from .catalog import (
     SKILL_JUDGMENT_CARD_KEY,
     HeroSkillDecl,
     SkillDef,
-    mark_skill_used_this_turn,
+    mark_skill_decider_used_this_turn,
     same_kingdom,
-    skill_used_this_turn,
+    skill_decider_used_this_turn,
 )
 from .flow import PickSeats, SkillFlow, run_flow
 from .virtual import pure_virtual_card
@@ -116,8 +116,10 @@ __all__ = [
     "LordEcho",
     "LordSkill",
     "LORD_REQUEST_DELIVER_KEY",
+    "LORD_REQUEST_PAYER_KEY",
     "USE_OR_PLAY_MODES",
     "advance_provider",
+    "carry_payer",
     "dispatch_provider",
     "jie_hujia_activation_plan",
     "jijiang_use_activate",
@@ -393,7 +395,9 @@ def _run_lord_request(
             request["satisfied"] = True
             if frame.data.get(LORD_REQUEST_DELIVER_KEY):
                 # 使用侧（票 20）：**不**在求助里 start_use / play_card——把那张牌交回
-                # 调用方，由它开使用链（"视为由你使用"）。产物经 PROVIDER_CARD_KEY 交付。
+                # 调用方，由它开使用链（"视为由你使用"）。产物经 PROVIDER_CARD_KEY 交付；
+                # 代付者另记一帧（票 23，由调用方 ``carry_payer`` 搬到使用帧上）。
+                frame.data[LORD_REQUEST_PAYER_KEY] = asker
                 provider_deliver(frame, action.card)
                 return None
             # 代打是**真打出**：走 L6、消耗响应者的实体牌、不占响应者的使用次数。
@@ -456,6 +460,40 @@ LORD_REQUEST_DELIVER_KEY = "lord_request_deliver"
 （"视为由你使用"）；打出窗口（南蛮 / 决斗 / 万箭 / 【闪】步）读不到它（缺省 ``False``），
 仍是 :func:`_run_lord_request` 的既有语义"代打是**真打出**"。
 """
+
+LORD_REQUEST_PAYER_KEY = "lord_request_payer"
+"""帧私有键：**代付者**——替主公付了这张牌的座位（票 23；用户 2026-11-10 逐字
+「票23需要加帧私有键」）。
+
+一条事实、两个落点，落点各错一层深度：
+
+1. 求助窗口在交付模式下先把它写在**窗口帧**上（:func:`_run_lord_request` 的交付分支）；
+2. 调用方开完使用链后由 :func:`carry_payer` 搬到那张**使用帧**上。
+
+② 半句在 ``USE_ON_USE`` 里被交给的正是使用帧（:func:`sgs.engine.steps.use_on_use` 以 USE
+帧派发），故它读得到第 2 站；窗口帧到那时已经不在派发链上——两帧**真的是两帧**，这条事实
+因此必须显式搬，不能靠"读窗口帧"的偶然查表。
+
+**不进记录流**（不新增 delta / 时机）：47 条金录像逐字节不变；代价是回放 / 录像里**读不出**
+这次【杀】是谁替主公付的——用户 2026-11-10 签字时明确接受这一取舍。
+
+与 :data:`LORD_REQUEST_DELIVER_KEY` 同一条姿态：**打出**窗口两个键都读不到，代打仍是
+``play_card(source=盟友)``，② 走的还是「来源 = 我」那一支。
+"""
+
+
+def carry_payer(window_frame: Frame, use_frame: Frame) -> None:
+    """把求助窗口记下的**代付者**搬到这次**使用帧**上（票 23；三扇使用窗口各调一次）。
+
+    ``window_frame`` = 开着求助窗口、由 ``provider_deliver`` 交付产物那一帧；
+    ``use_frame`` = 调用方随后 ``start_use`` 压出的 USE 帧。两帧不同（见
+    :data:`LORD_REQUEST_PAYER_KEY`），故这里**显式搬运**而不是在使用帧上再查一次窗口帧。
+    没有代付者（没人响应 / 真牌路径 / 打出路径）⇒ 零动作，使用帧与旧路径逐键相同。
+    """
+    payer = window_frame.data.pop(LORD_REQUEST_PAYER_KEY, None)
+    if payer is not None:
+        use_frame.data[LORD_REQUEST_PAYER_KEY] = int(payer)
+
 
 _JIJIANG_ASKED = "jijiang_asked"
 """帧私有：PLAY 发动的求助窗口**已经开过**（重入只续跑它，不重开、不重锁）。"""
@@ -546,12 +584,14 @@ def _jijiang_use_effect(host: Any, frame: Frame, answers: Any) -> Control:
     frame.data[_JIJIANG_DONE] = True
     frame.data.pop(LORD_REQUEST_DELIVER_KEY, None)
     if satisfied and produced is not None:
-        host.start_use(
+        use = host.start_use(
             produced,
             source=owner,
             targets=targets,
             use_timing=Timing.PHASE_PLAY_IDLE,
         )
+        # 票 23：把**代付者**搬到这次使用帧上——② 在 USE_ON_USE 里拿到的是使用帧。
+        carry_payer(frame, use)
         return "stay"
     return None
 
@@ -840,6 +880,24 @@ M6 票 16 的界【激将】①）。"""
 # ---------------------------------------------------------------------------
 
 
+def _lord_echo_actor(frame: Frame) -> int | None:
+    """② 半句的**当事角色**（= 「其」/ 决定者）：**代付者**优先，否则事件来源。
+
+    两段牌面共用一条判据：
+
+    - 「其他蜀势力角色于其回合外**使用 / 打出**【杀】」——当事角色 = 帧的来源
+      （``USE`` / ``PLAY`` 帧的既有载荷）；
+    - 「或**替你使用或打出**【杀】」（票 23）——使用帧的 ``source`` 是主公（视为**主公
+      使用**，票 20 的产品口径），真正的当事角色是那个付了牌的代付者
+      （:data:`LORD_REQUEST_PAYER_KEY`，由 :func:`carry_payer` 搬到使用帧上）。
+
+    两条合成一处：有代付者就用它。打出侧没有这个键 ⇒ 与旧读法逐字相同。
+    """
+    payer = frame.data.get(LORD_REQUEST_PAYER_KEY)
+    raw = payer if payer is not None else frame.data.get("source")
+    return None if raw is None else int(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class LordEcho(HeroSkillDecl):
     """主公技的 **② 半句**声明：势力由持有者与事件来源比、牌名由 ``card_type`` 声明。"""
@@ -854,10 +912,16 @@ class LordEcho(HeroSkillDecl):
     def condition(self, host: Any, frame: Any) -> bool:
         """触发条件：**其他同势力角色于其回合外**使用 / 打出 ``card_type``，且本回合未发动。
 
-        持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），事件
-        的当事角色读 ``frame.data["source"]``（使用 / 打出帧的既有载荷）。五段全成立才发问：
-        ①牌名对得上（转化 / 虚拟牌按**产物牌型**同判）；②当事角色不是主公自己（"其他"）；
-        ③当前回合不是它的回合（"于其回合外"）；④与自己同势力；⑤本回合还没发动过。
+        持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），
+        **当事角色**由 :func:`_lord_echo_actor` 给出（代付者优先，见票 23）。五段全成立才
+        发问：①牌名对得上（转化 / 虚拟牌按**产物牌型**同判）；②当事角色不是主公自己
+        （"其他"）；③当前回合不是**它**的回合（"于其回合外"）；④与自己同势力；
+        ⑤**它**本回合还没发动过（「每回合限一次」按那个角色计数，票 23）。
+
+        「替你使用」那一支（票 23）：使用帧的 ``source`` 是主公（视为主公使用），当事角色
+        因此不能读 ``source``，改读 :data:`LORD_REQUEST_PAYER_KEY`。两段「回合外」的读法
+        不变：仍是"当事角色的回合外"——替主公使用必然发生在主公的回合，故这一支恒成立；
+        被动使用窗口里代付者**可能**就是回合角色（回合角色也能被求助），此时照旧不问。
         """
         owner = frame.data.get(MATCH_OWNER_KEY)
         if owner is None:
@@ -865,15 +929,15 @@ class LordEcho(HeroSkillDecl):
         card = frame.data.get("card")
         if card is None or not satisfies_required(card, self.card_type):
             return False
-        source = frame.data.get("source")
-        if source is None or source == owner:
+        actor = _lord_echo_actor(frame)
+        if actor is None or actor == owner:
             return False
         state = host.state
-        if state.turn_seat == source:
+        if state.turn_seat == actor:
             return False
-        if not same_kingdom(state, source, owner):
+        if not same_kingdom(state, actor, owner):
             return False
-        return not skill_used_this_turn(state, owner, self.skill_id)
+        return not skill_decider_used_this_turn(state, owner, self.skill_id, actor)
 
     @property
     def hooks(self) -> tuple[Hook, ...]:
@@ -917,19 +981,23 @@ _LORD_ECHO_DRAWN_KEY = "lord_echo_drawn"
 def _lord_echo_draw(host: Any, frame: Any, answers: Any) -> Any:
     """提交点：**主公**摸一张牌（决定者已在"是否发动"里答过），并落"本回合已发动"。
 
-    收益归技能持有者（``skill_owner`` = 主公），不是答话的人。技能 id 读派发环写在帧上的
-    :data:`~sgs.skills.catalog.RUNNING_SKILL_KEY`：同一条流水线服务两条主公技（界护驾 /
-    界激将），落位必须落在**正在跑的那一条**上。帧私有游标挡住重入（摸牌可能内联挂起）。
+    收益归技能持有者（``skill_owner`` = 主公），不是答话的人；「每回合限一次」的**计数主体**
+    是那个决定者（票 23：界刘备【激将】② 按**那个角色**计，不按主公）——故落位写进
+    :func:`~sgs.skills.catalog.mark_skill_decider_used_this_turn`，键仍是主公的实例。
+    技能 id 读派发环写在帧上的 :data:`~sgs.skills.catalog.RUNNING_SKILL_KEY`：同一条流水线
+    服务两条主公技（界护驾 / 界激将），落位必须落在**正在跑的那一条**上。帧私有游标挡住
+    重入（摸牌可能内联挂起）。
     """
     del answers
     if frame.data.get(_LORD_ECHO_DRAWN_KEY):
         return None
     frame.data[_LORD_ECHO_DRAWN_KEY] = True
     owner = frame.data["skill_owner"]
+    actor = _lord_echo_actor(frame)
     host.draw_for_hand(frame, owner, 1)
     skill_id = frame.data.get(RUNNING_SKILL_KEY)
-    if skill_id:
-        mark_skill_used_this_turn(host.state, owner, str(skill_id))
+    if skill_id and actor is not None:
+        mark_skill_decider_used_this_turn(host.state, int(owner), str(skill_id), actor)
     return None
 
 
@@ -944,11 +1012,14 @@ def lord_echo_activation_plan(
 
     由 :data:`~sgs.skills.catalog.ACTIVATION_PLANS` 交给引擎的 ``ask_skill_activation``，
     询问因此出现在正确的座位上；``skill_owner`` 仍是主公，流水线的效果落在它身上。
-    帧里没有 ``source`` 时退回 ``None``（= 问持有者，引擎缺省）——真实派发路径上恒有。
+    帧里没有当事人（既无 ``source`` 也无代付者）时退回 ``None``（= 问持有者，引擎缺省）
+    ——真实派发路径上恒有。
+
+    **当事角色读 :func:`_lord_echo_actor`**（票 23）：「替你使用【杀】」那一支的帧
+    ``source`` 是主公，问主公"是否发动"是错的——决定者是那个代付的盟友（牌面「其」）。
     """
     del state, instance
-    source = frame.data.get("source")
-    return ActivationPlan(actor=source if isinstance(source, int) else None)
+    return ActivationPlan(actor=_lord_echo_actor(frame))
 
 
 def jie_hujia_activation_plan(

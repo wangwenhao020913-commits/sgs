@@ -6411,7 +6411,12 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
         if satisfied and produced is not None:
             target = int(frame.data[f"{_LUANWU_TARGET_KEY}:{seat}"])
             frame.data[f"{_LUANWU_DONE_KEY}:{seat}"] = True
-            host.start_use(produced, source=seat, targets=(target,))
+            # 票 23：产物由盟友代付时（主公发动【激将】），把**代付者**搬到这次使用帧上
+            # ——② 在 USE_ON_USE 里拿到的是使用帧。惰性 import 理由同下面那一处。
+            from .lord_request import carry_payer
+
+            use = host.start_use(produced, source=seat, targets=(target,))
+            carry_payer(frame, use)
             return "stay"
         # 作废（质疑 / 假牌）⇒ 回到该座位的窗口；该提供者已进 providers_used、不会再出现。
 
@@ -6490,7 +6495,7 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
             # （`provider_deliver`，不是求助窗口里的"代打是真打出"）。键与借刀同一只。
             # 惰性 import：`lord_request` 反向依赖 `catalog`（本模块由 catalog 末尾导入），
             # 模块级 import 会成环（与 `jie_jianying_provider` 同一理由）。
-            from .lord_request import LORD_REQUEST_DELIVER_KEY
+            from .lord_request import LORD_REQUEST_DELIVER_KEY, carry_payer
 
             frame.data[LORD_REQUEST_DELIVER_KEY] = True
             control, satisfied, produced = host.start_provider(
@@ -6500,7 +6505,10 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
                 return control
             if satisfied and produced is not None:
                 frame.data[flag] = True
-                host.start_use(produced, source=seat, targets=(int(target),))
+                use = host.start_use(produced, source=seat, targets=(int(target),))
+                # 票 23：产物由盟友代付时（主公发动【激将】），把**代付者**搬到这次使用帧上
+                # ——② 在 USE_ON_USE 里拿到的是使用帧。没有代付者（真牌 / 转化）⇒ 零动作。
+                carry_payer(frame, use)
             return "stay"
         frame.data[flag] = True
         if isinstance(action, UseCard):

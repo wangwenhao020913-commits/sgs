@@ -875,9 +875,11 @@ def test_jie_jijiang_second_asks_the_shu_ally_and_the_lord_draws():
     seconds = _jijiang_queries(engine)
     assert [query.actor for query in seconds] == [2], "询问发给打出【杀】的盟友（决定者）"
     assert len(engine.state.player(1).hand) == 1, "收益归主公（摸一张）"
-    from sgs.skills.catalog import skill_used_this_turn
+    from sgs.skills.catalog import skill_decider_used_this_turn
 
-    assert skill_used_this_turn(engine.state, 1, JIE_JIJIANG), "落「本回合已用」位"
+    assert skill_decider_used_this_turn(engine.state, 1, JIE_JIJIANG, 2), (
+        "「每回合限一次」的计数主体 = **那个角色**（票 23 订正）：落位记在代打盟友的账上"
+    )
 
 
 def test_jie_jijiang_second_is_offered_once_per_turn():
@@ -1011,7 +1013,7 @@ JIJIANG = "hero.liubei.jijiang"
 
 
 def _jijiang_use_state(
-    *, lord="liubei", lord_hand=(), lord_equip=(), ally_slashes=1, seats=3
+    *, lord="liubei", lord_hand=(), lord_equip=(), ally_slashes=1, seats=3, phase=None
 ):
     """主公（座位 0，LORD）+ 一名蜀势力盟友（座位 1，手上若干【杀】）+ 其余无势力角色。"""
     slashes = tuple(_ids(PACK, "slash")[:ally_slashes])
@@ -1031,6 +1033,7 @@ def _jijiang_use_state(
         seats=specs,
         deck=deck_excluding(PACK, *lord_hand, *lord_equip, *slashes),
         turn_seat=0,
+        phase=phase,
     )
 
 
@@ -1493,8 +1496,12 @@ def test_jijiang_is_offered_for_borrowed_sword_slash_use():
         )
 
 
-def _run_borrowed_sword_jijiang(*, lord="liubei", ally_plays=True, stop=None):
-    """借刀窗口里主公发动【激将】的整条流程；盟友按 ``ally_plays`` 决定代不代打。"""
+def _run_borrowed_sword_jijiang(*, lord="liubei", skill_id=JIJIANG, ally_plays=True, stop=None):
+    """借刀窗口里主公发动【激将】的整条流程；盟友按 ``ally_plays`` 决定代不代打。
+
+    ``skill_id`` 按主公的版本给（标准 / 界是两条不同的技能 id）：票 23 起界刘备也要走这条路
+    （② 要认代付者）。
+    """
     borrowed, weapon, slash, state = _borrowed_sword_state(lord=lord)
     engine = Engine.from_state(state, seed=7)
     caster = _plays_borrowed_sword(borrowed, caster=0, holder=1, bn=0)
@@ -1506,7 +1513,7 @@ def _run_borrowed_sword_jijiang(*, lord="liubei", ally_plays=True, stop=None):
             and query.actor == 1
         ):
             for action in query.legal_actions:
-                if isinstance(action, ActivateSkill) and action.skill_id == JIJIANG:
+                if isinstance(action, ActivateSkill) and action.skill_id == skill_id:
                     return action
         return None
 
@@ -2131,3 +2138,318 @@ def test_the_standard_zhaoyun_has_no_yajiao():
     assert JIE_YAJIAO == YAJIAO
     assert YAJIAO in CATALOG
     assert "hero.zhaoyun.yajiao" not in hero_skill_ids("zhaoyun")
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 界刘备【激将】② 的「**替你**使用【杀】」侧（yijiang-2014-round2 票 23）
+#
+#     每回合限一次，其他蜀势力角色于其回合外使用、打出或**替你使用或打出**【杀】时，
+#     其可以令你摸一张牌。
+#
+# 票 20 / 22 把「替主公使用【杀】」的产品建模成 **`source = 主公`** 的一次使用（规则上正确：
+# 视为**主公使用**），于是记录流里读不出那个真正付了牌的盟友。裁定（用户 2026-11-10 逐字
+# 「票23需要加帧私有键」）= **帧私有键**：代付者住**使用帧**的 `frame.data`，**不进记录流**
+# （47 条金录像逐字节不变；回放读不出谁付的牌——这是**有意接受**的代价）。
+#
+# 下面六条钉：三扇「使用」窗口（①出牌阶段主动使用【杀】（票 20）；②【借刀杀人】被迫使用
+# （票 22）；③【乱武】被迫使用（票 22））+ 一扇**打出**窗口（南蛮，既有路径不许回退）
+# + 「每回合限一次」的计数主体（按**代付者**）+ 「于其回合外」按代付者判的负例。
+# ---------------------------------------------------------------------------
+
+
+def _jijiang_pays_with_slash(query):
+    """求助窗口里代打：把盟友手上那张【杀】交出去（三扇使用窗口共用的一问）。"""
+    if (
+        query.kind == "RESPOND"
+        and getattr(query, "cause", None) is WindowCause.LORD_REQUEST
+    ):
+        return _of_type(query, PlayCard, type_id="slash")
+    return None
+
+
+def test_jie_jijiang_second_fires_when_an_ally_uses_a_slash_for_the_lord():
+    """**本票判据点**：盟友替主公**使用**【杀】（票 20 的 PLAY 入口）⇒ ② 问那名盟友、主公摸一张。
+
+    产品口径**不变**：记录流里这次仍是**主公的使用**（``source = 主公``、占主公的次数）；
+    代付者是使用帧的私有键，只有 ② 读它。故断言拆两半：记录面仍归主公，询问面归盟友。
+    """
+    state = _jijiang_use_state(lord="jie_liubei", phase=Phase.PLAY)
+    slash = state.player(1).hand[0]
+    engine = Engine.from_state(state, seed=7)
+
+    players = [_Scripted(), _Scripted(_jijiang_pays_with_slash), _Scripted()]
+    query = _next_play_phase(engine, players)
+    before = len(engine.state.player(0).hand)
+    assert JIE_JIJIANG in query.preactivations, "先确认这一局本来喊得出（防假绿）"
+    engine.submit(_composite(query, JIE_JIJIANG, choices=("seat:2",)))
+    run_until(engine, players, lambda e: len(e.state.player(0).hand) > before)
+
+    seconds = _jijiang_queries(engine)
+    assert [second.actor for second in seconds] == [1], (
+        "② 必须问那个替主公出了【杀】的盟友（决定者 = 代付者，不是主公）"
+    )
+    assert seconds[0].timing is Timing.USE_ON_USE, "走的是**使用**那一支，不是打出"
+    assert len(engine.state.player(0).hand) == before + 1, "收益归主公（摸一张）"
+    assert engine.state.player(0).card_use_counts["slash"] == 1, (
+        "记录面不变：这次仍是**主公的使用**（占主公的【杀】次数）"
+    )
+    assert engine.state.player(1).hand == [], "代付者的实体牌付出去了"
+    assert slash in engine.state.processing, "代付的那张牌此刻正在结算（使用链的处理区）"
+
+
+def test_jie_jijiang_second_does_not_fire_when_the_lord_uses_his_own_slash():
+    """反例（**没有第三方付牌**）：主公自己在出牌阶段使用【杀】⇒ ② 不问。
+
+    场上有蜀势力盟友（"能被问"的人在场），故"不问"只能是条件判出来的，不是没人可问。
+    """
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero="jie_liubei",
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+                hand=(slash,),
+            ),
+            SeatSpec(kingdom=Kingdom.SHU),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(), _Scripted(), _Scripted()]
+    query = _next_play_phase(engine, players)
+
+    engine.submit(_own_slash(query, 2))
+    run_until(engine, players, lambda e: e.state.player(2).hp < 4)
+
+    assert engine.state.player(0).card_use_counts["slash"] == 1, "确实是主公自己的使用"
+    assert _jijiang_queries(engine) == [], "没有代付者 ⇒ 「替你使用」那一支不该触发"
+
+
+def test_jie_jijiang_second_still_fires_for_the_play_window():
+    """**打出侧不许回退**：盟友于其回合外打出【杀】⇒ ② 仍问它、主公仍摸一张。
+
+    与「替你使用」那一支的区别只在帧：这里是 PLAY 帧、``source`` 就是盟友自己（求助窗口
+    走的是"代打是真打出"），根本没有代付者键；② 读「来源 = 我」那一支。
+    """
+    _barbarians, slashes, state = _jie_jijiang_second_state()
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _of_type(query, UseCard, type_id="barbarian_invasion")
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BARBARIAN_INVASION
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        [_Scripted(attacker), _Scripted(), _Scripted(ally), _Scripted()],
+        lambda e: e.state.player(1).hand,
+    )
+
+    seconds = _jijiang_queries(engine)
+    assert [second.actor for second in seconds] == [2], "询问发给打出【杀】的盟友"
+    assert seconds[0].timing is Timing.PLAY_ON_PLAY, "走的是**打出**那一支（PLAY 帧）"
+    assert len(engine.state.player(1).hand) == 1, "收益归主公（摸一张）"
+    assert slashes[0] in engine.state.discard, "打出的实体牌真的进了弃牌堆"
+
+
+def test_jie_jijiang_second_fires_for_the_borrowed_sword_slash_the_ally_paid():
+    """第二扇**使用**窗口（【借刀杀人】，票 22）：被迫使用的那张【杀】由盟友代付 ⇒ ② 问它。
+
+    产品口径同 PLAY 入口：记录流里是**持刀者（主公）的使用**（``source = 主公``、目标 =
+    借刀定死的 Bn），代付者只在帧私有键上。
+    """
+    engine, _borrowed, _weapon, _slash = _run_borrowed_sword_jijiang(
+        lord="jie_liubei", skill_id=JIE_JIJIANG
+    )
+
+    seconds = _jijiang_queries(engine)
+    assert [second.actor for second in seconds] == [2], (
+        "② 必须问那个替持刀者出了【杀】的盟友（决定者 = 代付者）"
+    )
+    assert seconds[0].timing is Timing.USE_ON_USE, "借刀这一扇是**使用**窗口"
+    assert len(engine.state.player(1).hand) == 1, "收益归主公（摸一张）"
+    assert engine.state.player(1).card_use_counts["slash"] == 1, (
+        "记录面不变：使用次数仍记在持刀者（主公）头上"
+    )
+    assert engine.state.player(0).hp == 3, "这一刀落在借刀定死的 Bn（座位 0）"
+
+
+def test_jie_jijiang_second_fires_for_the_luanwu_slash_the_ally_paid():
+    """第三扇**使用**窗口（【乱武】，票 22）：产物是**主公**对最近者的使用，② 问代付的盟友。"""
+    jiaxu = "hero.jiaxu_mobile.luanwu"
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jiaxu_mobile", hp=3, hp_max=3),
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+    def jiaxu_player(query):
+        if query.kind == "PLAY_PHASE" and query.actor == 0:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == jiaxu:
+                    return action
+        return None
+
+    def lord(query):
+        if query.kind == "SELECT_OPTION" and str(query.skill_id).endswith(":target"):
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectOption) and str(action.choice) == "seat:0"
+            )
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.LUANWU
+            and query.actor == 1
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIJIANG:
+                    return action
+        return None
+
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(jiaxu_player), _Scripted(lord), _Scripted(_jijiang_pays_with_slash)]
+    run_until(engine, players, lambda e: len(e.state.player(1).hand) == 1)
+
+    seconds = _jijiang_queries(engine)
+    assert [second.actor for second in seconds] == [2], (
+        "② 必须问那个替主公出了【杀】的盟友（决定者 = 代付者）"
+    )
+    assert seconds[0].timing is Timing.USE_ON_USE, "乱武这一扇是**使用**窗口"
+    assert engine.state.player(1).card_use_counts["slash"] == 1, (
+        "记录面不变：使用次数仍记在主公头上"
+    )
+    assert engine.state.player(2).hand == [], "代付者的实体牌付出去了"
+
+
+def test_jie_jijiang_second_is_once_per_turn_for_the_substitute():
+    """「每回合限一次」按**那个角色**计数，不按主公（票 23 §3 的 last bullet）。
+
+    同一回合两轮【南蛮入侵】，两名蜀盟友各打出两张【杀】：**每名盟友**各触发一次 ②
+    （主公摸两张），而**已经发动过的那名**盟友在第二轮里不再被问（每回合限一次）。
+    按主公计的话第一轮就只有一条询问、主公只摸一张——本断言因此同时钉住"按角色"与"限一次"。
+    """
+    barbarians = tuple(_ids(PACK, "barbarian_invasion")[:2])
+    slashes = tuple(_ids(PACK, "slash")[:4])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=barbarians),
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=slashes[:2], kingdom=Kingdom.SHU),
+            SeatSpec(hand=slashes[2:], kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, *barbarians, *slashes),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _of_type(query, UseCard, type_id="barbarian_invasion")
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BARBARIAN_INVASION
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        [_Scripted(attacker), _Scripted(), _Scripted(ally), _Scripted(ally)],
+        lambda e: all(slash in e.state.discard for slash in slashes),
+    )
+
+    seconds = _jijiang_queries(engine)
+    assert [second.actor for second in seconds] == [2, 3], (
+        "两名替主公出了牌的盟友各问一次（第二轮不再问：每回合限一次按**那个角色**计）"
+    )
+    assert len(engine.state.player(1).hand) == 2, "主公各摸一张（收益归他，一共两张）"
+
+
+def test_jie_jijiang_second_does_not_fire_for_the_substitute_in_his_own_turn():
+    """反例（「于其回合外」按**代付者**判）：代付者就是当前回合角色 ⇒ ② 不问。
+
+    【借刀杀人】由**蜀势力盟友自己**（回合角色）打出、逼持刀者（主公）对 Bn 使用【杀】；
+    主公发动【激将】求助时，回合角色本人也在应答区间里（座位环从它起算），它可以代付。
+    这一支的「其」是**代付者**，不是帧来源（主公）——故它自己的回合里不触发。
+    """
+    borrowed = _ids(PACK, BORROWED_SWORD)[0]
+    weapon = _ids(PACK, "qinggang_sword")[0]
+    slash = _ids(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed, slash), kingdom=Kingdom.SHU),
+            SeatSpec(
+                hero="jie_liubei",
+                identity=Identity.LORD,
+                kingdom=Kingdom.SHU,
+                equip=(weapon,),
+            ),
+            SeatSpec(kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, borrowed, weapon, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+    def holder(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BORROWED_SWORD
+            and query.actor == 1
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIJIANG:
+                    return action
+        return None
+
+    play_borrowed = _plays_borrowed_sword(borrowed, caster=0, holder=1, bn=0)
+
+    def caster(query):
+        """回合角色：先打出【借刀杀人】，再在自己的求助窗口里代付那张【杀】。"""
+        return play_borrowed(query) or _jijiang_pays_with_slash(query)
+
+    engine = Engine.from_state(state, seed=7)
+    players = [_Scripted(caster), _Scripted(holder), _Scripted()]
+    run_until(engine, players, _borrowed_sword_window)
+    window = engine.pending
+    assert window is not None and window.actor == 1, "停在持刀者（主公）的借刀窗口"
+    engine.submit(
+        next(
+            action
+            for action in window.legal_actions
+            if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIJIANG
+        )
+    )
+    run_until(engine, players, lambda e: e.state.player(0).hp < 4)
+
+    assert engine.state.player(1).card_use_counts["slash"] == 1, "产物确实是主公的使用"
+    assert engine.state.player(0).hp == 3, "这一刀落在 Bn（回合角色自己）身上"
+    assert _jijiang_queries(engine) == [], (
+        "代付者于**其自己的回合**内 ⇒ 「于其回合外」不成立，② 不问"
+    )

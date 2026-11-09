@@ -37,7 +37,7 @@ from sgs.engine import Engine
 from sgs.skills import (
     CATALOG,
     REJUDGE_SKILL_IDS,
-    mark_skill_used_this_turn,
+    mark_skill_decider_used_this_turn,
     rejudge_capable_seats,
     rejudge_card_zones,
     reset_turn_skill_state,
@@ -1317,7 +1317,7 @@ def test_jie_hujia_second_condition_has_four_guards():
         assert condition(host, frame) is False, "不是【闪】⇒ 不触发"
         frame.data["card"] = state.card(dodge)
 
-        mark_skill_used_this_turn(state, 1, JIE_HUJIA)
+        mark_skill_decider_used_this_turn(state, 1, JIE_HUJIA, 0)
         assert condition(host, frame) is False, "本回合已发动过 ⇒ 不再触发"
 
 

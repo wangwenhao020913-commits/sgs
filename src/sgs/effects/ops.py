@@ -659,19 +659,23 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     # 惰性 import：`sgs.skills` 反向依赖本模块，模块级 import 会成环（与 `actions._peach`
     # 那处惰性 import 同一理由）；键从**子包出口**取（跨子包的深层导入被
     # `tests/test_scaffold.py` 判红）。
-    from sgs.skills import LORD_REQUEST_DELIVER_KEY
+    from sgs.skills import LORD_REQUEST_DELIVER_KEY, carry_payer
 
     frame.data[LORD_REQUEST_DELIVER_KEY] = True
 
     def _use_at_bn(card: Any) -> None:
         """a 支成立：持刀者使用一张【杀】打向 Bn（真牌与提供者产物同一份交付）。"""
         frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
-        host.start_use(
+        use = host.start_use(
             card,
             source=holder,
             targets=use_targets,
             use_timing=Timing.RESOLVE_AFTER_EFFECT,
         )
+        # 票 23：产物若是【激将】交付的（持刀者是主公、盟友代付），把**代付者**搬到这次
+        # 使用帧上——② 在 USE_ON_USE 里拿到的是使用帧。别的提供者（【蛊惑】）没有代付者
+        # ⇒ 零动作，使用帧与旧路径逐键相同。
+        carry_payer(frame, use)
 
     control, satisfied, produced = host.advance_provider(
         frame, Timing.RESOLVE_AFTER_EFFECT
