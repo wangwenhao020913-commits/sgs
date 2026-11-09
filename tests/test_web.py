@@ -5603,6 +5603,10 @@ def test_the_public_seat_carries_armor_and_the_payload_shape_pins_it() -> None:
     **界沮授移动版**（【矢北】开局发 3 点护甲，挨了一刀之后是 2）⇒ "全员默认 0"这条判据
     不再成立。判据不动、换种子（spec §7 的既有处置）：``1`` 这一局没有任何获得护甲的开局
     效果，全员缺省 0。
+
+    被换掉的覆盖由 ``tests/test_armor.py::test_the_simple_narrative_writes_armor_changes_in_chinese``
+    接手（真会话跑到【矢北】的护甲吸收，断言简易叙事的中文行；`CODING_STANDARDS.md` §5
+    "重选种 = 放弃一条覆盖"）。
     """
     session = Session(seed=1, ai="random", timeout_seconds=None, player_count=5)
     snapshot = visible_snapshot(session)

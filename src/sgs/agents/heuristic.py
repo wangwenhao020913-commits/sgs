@@ -2182,9 +2182,10 @@ _HOSTILE_SEAT_STEPS = (
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
     # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3）：产物是【杀】家族时，提交点后
     # 手写的那一问选的是**这张【杀】打谁** ⇒ 敌人。不登记会落进"帮盟友"的缺省分支（AI 拿
-    # 【杀】打队友）。前缀 = 全限定技能 id（手写询问 id 是
-    # ``hero.jie_jushou_mobile.jianying.target``）。
-    "hero.jie_jushou_mobile.jianying:",
+    # 【杀】打队友）。登记**整条询问 id**（``hero.jie_jushou_mobile.jianying.target``，与
+    # ``src/sgs/skills/active.py`` 的 ``_JIE_JIANYING_ASK_TARGET`` 逐字相同）：本模块受源码
+    # 纪律约束不 import ``sgs.skills``，故两边由 ``tests/test_ai_cases.py`` 的反向对齐测试钉住。
+    "hero.jie_jushou_mobile.jianying.target",
     "hero.xiahouyuan.shensu:",
     # 界夏侯渊【神速】（jie-feng-batch2 票 01）：同一手写询问、同一前缀陷阱
     # （``hero.jie_xiahouyuan_mobile.shensu:target:<项号>``）。

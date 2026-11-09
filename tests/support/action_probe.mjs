@@ -7,10 +7,12 @@
  *
  * 加载纪律与 `ui_smoke.mjs` 同姿态：脚本清单来自 `index.html` 的 `<script src>` 顺序；
  * 这里只取 `buildAction` / 预发动点击 / 两行观看点选 / 座位多选点选 的依赖闭包（core →
- * candidates → preactivation → **interaction** → pending → **options** → reveal → modal →
- * arrange → answer），不加载 `main.js`（它在末尾 `wire()`，需要 DOM）。`options.js` 只为
- * `selectionCap`（两行面的选中上限），`interaction.js` 只为座位多选面的点选入口
- * （`toggleSeatMultiPick`，W1），`reveal.js` / `modal.js` 只为只读态判据与点选入口
+ * candidates → **table** → preactivation → **interaction** → pending → **options** →
+ * reveal → modal → arrange → answer），不加载 `main.js`（它在末尾 `wire()`，需要 DOM）。
+ * `options.js` 只为 `selectionCap`（两行面的选中上限），`table.js` 只为座位多选面的
+ * "能不能新选"判据（`seatMultiPickable`，W1 评审修订后点击口 `interaction.js` 调它），
+ * `interaction.js` 只为座位多选面的点选入口（`toggleSeatMultiPick`，W1），
+ * `reveal.js` / `modal.js` 只为只读态判据与点选入口
  * （`selectionEnabled` → `stepDialogKind`）——判据走真的那份，不在探针里另写。
  * 两个**渲染**入口（`renderTable` / `renderPending`）换成空实现：DOM 垫片只在
  * `ui_smoke.mjs` 里有，本探针只断"点击 → 载荷"，不断渲染。桥会检查每个名字真的存在：
@@ -24,6 +26,7 @@ const STATIC_DIR = "tools/sgs_web/static";
 const NEEDED = [
   "core.js",
   "candidates.js",
+  "table.js",
   "preactivation.js",
   "interaction.js",
   "pending.js",
@@ -451,7 +454,7 @@ const seatMultiPending = {
   candidate_index: {}, virtual_index: {},
   option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2 },
   // 置灰项为空 ⇒ 服务端**不落盘** `disabled`（`_QueryBase._serialize`，票 07）；界面按
-  // "没有这个键 = 没有置灰"读（`pending.js:seatMultiDisabled`）。置灰行的用例在烟测里。
+  // "没有这个键 = 没有置灰"读（`pending.js:seatMultiDisabledSet`）。置灰行的用例在烟测里。
   options: seatOptionChoices,
   min_selected: 1, max_selected: 2, option_texts: {}, context: null, revealed: [],
   preactivations: {}, preactivation: [],

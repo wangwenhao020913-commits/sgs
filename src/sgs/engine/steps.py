@@ -1270,8 +1270,8 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     - 只有**伤害帧**吸收——判据 = 帧私有 ``LIFE_DECREASE_DAMAGE_KEY``（由
       :func:`damage_push_life_decrease` 置真）；「失去体力」帧（【苦肉】/【反间】/无来源
       失去）该键缺省，**一点护甲都不碰**；
-    - 次序 = 先 ``absorbed = min(armor, amount)`` 扣护甲、再 ``hp - (amount - absorbed)``；
-      两条 delta 同属本帧、**护甲在前**（回放逐条重建即得到同一次结算）；
+    - 次序 = 先 ``absorbed = min(armor, amount)`` 扣护甲、再 ``hp - hp_loss``（``hp_loss`` =
+      未被吸收的伤害）；两条 delta 同属本帧、**护甲在前**（回放逐条重建即得到同一次结算）；
     - ``frame.data["amount"]`` **不动**：被护甲吸收的那部分仍算一次**全额**伤害（受到 /
       造成伤害、伤害值读者、``note_damage_*`` 都按它）；
     - 护甲全吸收 ⇒ 这一帧**只有** ``armor_change``，一条 ``hp_change`` 都不发；L8 三个
@@ -1290,10 +1290,10 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
         absorbed = min(player.armor, amount)
         # 护甲先落一条 armor_change（同一帧、排在 hp_change 之前）。
         host.apply_armor_change(frame, target, player.armor - absorbed)
-    # 护甲全吸收 ⇒ 体力一点没动 ⇒ **一条 hp_change 都不发**；护甲为 0 时
-    # ``absorbed == 0``，这一支逐字走原路径（含 ``amount == 0`` 的零变化记录）。
-    if amount - absorbed > 0 or absorbed == 0:
-        host.apply_hp_change(frame, target, player.hp - (amount - absorbed))
+    # 护甲全吸收 ⇒ 体力一点没动（``hp_loss == 0``）且护甲确实动过 ⇒ **一条 hp_change 都不发**。
+    hp_loss = amount - absorbed
+    if hp_loss > 0 or absorbed == 0:
+        host.apply_hp_change(frame, target, player.hp - hp_loss)
     frame.data["dying"] = host.state.player(target).hp <= 0
     return None
 

@@ -89,6 +89,19 @@ function roundLabelOf(snapshot, records) {
   return String(roundNumber(records));
 }
 
+/** 这一座能不能**新选**进座位多选集（"已选 ⇒ 可取消"另走一支）：池内 ∧ 未置灰 ∧ 未到上限。
+ *
+ *  唯一实现（`docs/agents/frontend-map.md`：座位交互态归 `table.js`）——点击口
+ *  `interaction.js:toggleSeatMultiPick` 与座位卡态 `seatInteraction` 都调它，不各写一份。
+ *  `chosen` / `disabled` 由调用方**一次算好**（逐座位现算 `seatMultiChosenSeats` 是 O(n²)）。
+ */
+function seatMultiPickable(pending, seat, chosen, disabled) {
+  const choice = optionSeatChoice(pending, seat);
+  return choice !== null
+    && !disabled.has(choice)
+    && chosen.size < seatMultiCap(pending);
+}
+
 /** 座位交互态的类全集 / `applySeatState` 住 `seat-view.js`（U1-02）；环上与底部面板共用一份。 */
 
 /** 座位卡的交互态（可指定 / 已选 / 必选）与点击行为，对手与自己的面板共用一份判据。 */
@@ -122,16 +135,15 @@ function seatInteraction(player, ctx) {
   } else if (seatMulti) {
     // 座位多选面（W1）：点一下选中、再点取消；池 = `option_seats`，`disabled` 与"已到上限
     // 后未选"的座位都点不动（与勾选面的置灰 / 封顶同一口径）。已选的**始终**能取消。
-    const optionChoice = optionChoiceAt(player.seat);
-    if (optionChoice !== null) {
-      if (seatMultiChosen(pendingNow).includes(Number(player.seat))) {
-        classes.push("tsel");
-        handler = () => toggleSeatMultiPick(player.seat);
-      } else if (!seatMultiDisabled(pendingNow).has(optionChoice)
-        && seatMultiChosen(pendingNow).length < seatMultiCap(pendingNow)) {
-        classes.push("targetable");
-        handler = () => toggleSeatMultiPick(player.seat);
-      }
+    // 判据 = `seatMultiPickable`（与点击口同一份）；已选 / 置灰集合按 ctx 里**一次算好**的那份。
+    if (ctx.chosenSeats.has(Number(player.seat))) {
+      classes.push("tsel");
+      handler = () => toggleSeatMultiPick(player.seat);
+    } else if (seatMultiPickable(
+      pendingNow, player.seat, ctx.chosenSeats, ctx.disabledChoices,
+    )) {
+      classes.push("targetable");
+      handler = () => toggleSeatMultiPick(player.seat);
     }
   } else {
     const optionChoice = optionChoiceAt(player.seat);
@@ -278,6 +290,9 @@ function renderTable() {
   // 座位多选面（W1）：`SELECT_OPTIONS` 的选项全是 `seat:N` ⇒ 座位是**多选**控件
   // （点一下选中、再点取消）；单选座位面（`SELECT_OPTION`）的判据一字不改。
   const seatMulti = isSeatMultiStep(pendingNow);
+  // 已选 / 置灰集合**每次渲染只算一份**（逐座位现算是 O(n²)）；判据见 `seatMultiPickable`。
+  const chosenSeats = seatMulti ? new Set(seatMultiChosenSeats(pendingNow)) : new Set();
+  const disabledChoices = seatMulti ? seatMultiDisabledSet(pendingNow) : new Set();
   // 预发动（W4-1）：当前的选目标步 ⇒ 可点的座位来自**清单**（服务端已按前序选择算好）。
   const preStep = state.preactivation && state.preactivation.cursor < state.preactivation.steps.length
     ? state.preactivation.steps[state.preactivation.cursor]
@@ -305,7 +320,7 @@ function renderTable() {
   ];
   const ctx = {
     seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow, ownPending,
-    seatMulti, snapshot, identityMode, flagsFor,
+    seatMulti, chosenSeats, disabledChoices, snapshot, identityMode, flagsFor,
   };
 
   renderRingSeats(view, ctx);

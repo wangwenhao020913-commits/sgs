@@ -81,22 +81,23 @@ function selectOptionSeat(seat) {
  * 座位 = 选中那一条候选、一次一条"的循环面（它只服务 `SELECT_OPTION`，判据不改）。
  *
  * 池 = 服务端派生的 `pending.option_seats`；`pending.disabled` 里的座位、以及已到上限后
- * 未选的座位都**点不动**（与 `options.js:renderMultiSelect` 的置灰 / 封顶同一口径）。
- * 已选的座位**始终**能再点一次取消（与手选目标同一条）。选中集合住
- * `state.selectedTargets`（`pending.js:seatMultiChosen`）：重绘 / 2 秒静默轮询都不丢，
- * 换询问时由 `session.js:resetSelection` 清空。
+ * 未选的座位都**点不动**（与 `options.js:renderMultiSelect` 的置灰 / 封顶同一口径，判据
+ * 的唯一实现 = `table.js:seatMultiPickable`）。已选的座位**始终**能再点一次取消（与手选
+ * 目标同一条）。选中集合住 `state.selectedTargets`（`pending.js:seatMultiChosenSeats`）：
+ * 重绘 / 2 秒静默轮询都不丢，换询问时由 `session.js:resetSelection` 清空。
  */
 function toggleSeatMultiPick(seat) {
   const pending = state.view ? state.view.pending : null;
   if (!selectionEnabled() || !isSeatMultiStep(pending)) return;
-  const choice = optionSeatChoice(pending, seat);
-  if (choice === null) return;
+  if (optionSeatChoice(pending, seat) === null) return;  // 池外座位：连"取消"都不接
   const at = state.selectedTargets.indexOf(Number(seat));
   if (at >= 0) {
     state.selectedTargets.splice(at, 1);
+  } else if (!seatMultiPickable(
+    pending, seat, new Set(seatMultiChosenSeats(pending)), seatMultiDisabledSet(pending),
+  )) {
+    return;
   } else {
-    if (seatMultiDisabled(pending).has(choice)) return;
-    if (seatMultiChosen(pending).length >= seatMultiCap(pending)) return;
     state.selectedTargets.push(Number(seat));
   }
   state.lastRejectReason = "";

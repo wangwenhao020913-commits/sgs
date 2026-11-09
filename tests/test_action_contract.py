@@ -360,7 +360,7 @@ def test_the_seat_multi_select_fixture_matches_the_real_view_payload() -> None:
     for key in ("kind", "options", "min_selected", "max_selected"):
         assert dumped[key] == fixture[key], f"探针的 {key} 与服务端载荷不一致：{dumped[key]}"
     # 置灰项为空时 `_QueryBase._serialize` **不落盘** `disabled`（票 07）⇒ 真载荷里没有这个键，
-    # 界面按"没有 = 没有置灰"读（`seatMultiDisabled`）；探针夹具照同一形状（不补空数组）。
+    # 界面按"没有 = 没有置灰"读（`seatMultiDisabledSet`）；探针夹具照同一形状（不补空数组）。
     assert "disabled" not in dumped, f"空的 disabled 不进载荷：{dumped}"
     assert "disabled" not in fixture, f"探针夹具不得凭空加空数组：{fixture}"
     assert option_seats(query) == fixture["option_seats"] == {

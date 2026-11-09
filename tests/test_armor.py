@@ -34,6 +34,7 @@ from sgs.resolution import Frame, Step  # noqa: E402
 from sgs.state import ARMOR_CAP, FrameKind, Pass, PlayerPublic, project  # noqa: E402
 from sgs.timing import Timing  # noqa: E402
 from sgs_web.narrative import build_narrative  # noqa: E402
+from sgs_web.session import Session  # noqa: E402
 
 from support import SeatSpec, build_state, cards_of_type  # noqa: E402
 
@@ -83,6 +84,25 @@ def test_armor_stacks_up_to_the_cap_and_the_primitive_stops_there():
     apply_armor(state, EffectContext(actor=0), 0, ARMOR_CAP)
 
     assert state.player(0).armor == ARMOR_CAP == 5, "可叠加、硬上限 5（Q-A2）"
+
+
+def test_the_jie_shibei_armor_grant_clamps_to_the_cap_at_the_caller():
+    """调用方夹取：护甲 4 再吃【矢北】的 3 点 = **5**（``min(护甲 + 3, ARMOR_CAP)``）。
+
+    原语不替调用方封顶（越界值直接抛，见上面那条范围检查）；唯一会叠加的调用方是【矢北】的
+    开局钩子，真对局里开局护甲恒 0、撞不到上限，故这里按它的真实形状（真 ``Engine`` + 那条
+    回调）把"4 + 3 ⇒ 5、且原语不抛错"钉住。
+    """
+    from sgs.skills.damage_after import _jie_shibei_start
+
+    state = _state(hp=(2, 4), armor=(4, 0))
+    engine = Engine.from_state(state, seed=7)
+    frame = Frame(kind=FrameKind.RESOLVE, data={"skill_owner": 0}, frame_id=0)
+
+    _jie_shibei_start(engine, frame)
+
+    assert state.player(0).armor == ARMOR_CAP == 5, "4 + 3 被调用方夹到封顶 5"
+    assert _deltas(engine, "armor_change")[-1].after == 5, "夹取后的值走唯一写入口落记录"
 
 
 # ---------------------------------------------------------------------------
@@ -404,12 +424,38 @@ def test_the_lethal_check_counts_armor_while_the_wounded_check_stays_on_hp():
     assert scoring._wounded(project(state, 0)) is True, "已受伤仍按 hp < hp_max 判"
 
 
-def test_the_simple_narrative_writes_armor_changes_in_chinese():
-    """简易档事件流（牌桌与回放页共用）：护甲变化有中文行，不落 ``armor_change`` 英文枚举。
+def _real_armor_session_lines() -> str:
+    """真对局 → 生产叙事入口（牌桌 / 回放页共用同一份 ``build_narrative``）。
 
-    合成的三条记录走 ``build_narrative`` 的公开入口（不跑引擎）：本票落地时全树**零个**
-    护甲载体，真对局里这条 delta 还不会出现，但前端消费面必须先钉住。
+    4 人局把座位 0 点成**界沮授移动版**（W3 的【矢北】= 全树唯一的护甲载体：开局 3 点），
+    其余三个座位也显式钉死 ⇒ 默认池以后再加将不会换掉这一局。``ai="random"`` + 挂起驱动
+    把整局走完（与 ``tests/test_web.py`` 的护甲载荷用例同一条真会话构造面）。
     """
+    session = Session(
+        seed=3,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        heroes=("jie_jushou_mobile", "xuchu", "shen_zhugeliang", "jiaxu_mobile"),
+    )
+    answers = 0
+    while session.pending is not None:
+        session.submit_answer(session.pending.legal_actions[0])
+        answers += 1
+    assert answers and session.finished, "真对局必须真的跑完"
+    entries = build_narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    return "\n".join(entry["text"] for entry in entries if entry["kind"] == "line")
+
+
+def _gain_armor_lines() -> dict[int, str]:
+    """开局「获得护甲」那一行**只能**用合成记录驱动：``GAME_START`` 落在首条
+    ``TURN_START`` **之前**，而叙事刻意从首回合开始（``_Narrator.started``）⇒
+    生产叙事流里读不到这条 delta（读不到**不是**"全树零载体"：W3 的【矢北】就是载体）。"""
     entries = build_narrative(
         [
             {"kind": "timing", "seq": 1, "timing": "TURN_START", "actor": 0},
@@ -421,20 +467,25 @@ def test_the_simple_narrative_writes_armor_changes_in_chinese():
                 "before": 0,
                 "after": 3,
             },
-            {
-                "kind": "delta",
-                "seq": 3,
-                "delta_type": "armor_change",
-                "seat": 1,
-                "before": 3,
-                "after": 2,
-            },
         ],
         viewer=0,
         heroes=(),
         pack_id="standard",
     )
-    lines = {entry["seq"]: entry["text"] for entry in entries if entry["kind"] == "line"}
-    assert "获得护甲 3 点" in lines[2], lines
-    assert "护甲吸收伤害 1 点" in lines[3], lines
-    assert all("armor_change" not in text for text in lines.values()), lines
+    return {entry["seq"]: entry["text"] for entry in entries if entry["kind"] == "line"}
+
+
+def test_the_simple_narrative_writes_armor_changes_in_chinese():
+    """简易档事件流（牌桌与回放页共用）：护甲变化有中文行，不落 ``armor_change`` 英文枚举。
+
+    **吸收**那半段走**真对局**（界沮授移动版 + ``build_narrative`` 生产入口，见
+    :func:`_real_armor_session_lines`）；**获得**那半段只能用合成记录，原因写在
+    :func:`_gain_armor_lines`（开局 3 点是 ``GAME_START`` 钩子，叙事从首回合才开始）。
+    """
+    absorbed = _real_armor_session_lines()
+    assert "座位0 界沮授移动版 护甲吸收伤害 1 点" in absorbed, absorbed[-2000:]
+    assert "armor_change" not in absorbed, "真对局的叙事不该漏出英文枚举"
+
+    gained = _gain_armor_lines()
+    assert "获得护甲 3 点" in gained[2], gained
+    assert all("armor_change" not in text for text in gained.values()), gained

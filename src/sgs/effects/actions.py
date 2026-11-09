@@ -1650,22 +1650,11 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         return (0, (action.card.card_id,), action.kind)
     if isinstance(action, SelectCards):
         return (0, action.picks, action.kind)
-    if isinstance(action, SelectOption):
-        # 选项闭集里的**真候选**。``Pass``（``optional=True`` 时的"放弃"）没有分支、
-        # 走兜底键 ``(1, …)`` ⇒ 恒排在真候选之后。**票 03 的活锁**就出在这里：
-        # 两者原先共用兜底键，而 ``"Pass" < "SelectOption"`` 让"放弃"排到首位，
-        # 取首个候选的贪心参与者（``tests/test_web.py::_play_to_end``）便一直取消。
-        # 键相等时保持 ``ctx.options`` 给的次序——那是调用方**显式给出**的元组，
-        # 不是生成顺序的隐式约定（且 ``seat:10`` 这类文本不宜按字面排序）。
-        return (0, (), action.kind)
-    if isinstance(action, SelectOptions):
-        # 多选闭集里的**真候选**（yijiang-2014 票 09 补齐；与上面 ``SelectOption`` 同一条）。
-        # 它原先没有分支 ⇒ 与 ``Pass`` 同落兜底键 ``(1, (), kind)``，而
-        # ``"Pass" < "SelectOptions"`` 让「放弃」排到首位（``_check_decline_sorts_last``
-        # 在 fuzz 里判红；取首个候选的贪心参与者会一直取消）。**第一个**打开
-        # ``optional=True`` 的多选消费者是【秉壹】——此前的【界神速】多选步不带 ``Pass``，
-        # 故这条一直没被踩到。真候选之间的次序仍由 ``_select_options`` 的枚举给出
-        # （``sorted`` 是稳定的：空集在前 = 超时兜底"一项都不做"），这里不改它。
+    if isinstance(action, (SelectOption, SelectOptions)):
+        # 选项 / 多选闭集里的**真候选**。``Pass``（可放弃时）没有分支、走兜底键
+        # ``(1, …)`` ⇒ 恒排在真候选之后；两臂合一之前 ``SelectOptions`` 缺过这一支，
+        # 让「放弃」排到首位（票 03 的活锁同一类；yijiang-2014 票 09 补齐）。
+        # 键相等时保持调用方给出的次序（``seat:10`` 这类文本不宜按字面排序）。
         return (0, (), action.kind)
     if isinstance(action, ActivateSkill):
         # ``choices`` 也进键（票 04）：主动技同一组牌可以配不同目标座位，不带上它就会

@@ -710,8 +710,8 @@ function renderSeatPick(pending) {
 
 /* --------------------------------------------------- 座位多选面（W1） */
 
-/** 本步**置灰**的座位选项（服务端 `disabled`，与 `multiSelect` 勾选面同一语义：列出来但点不动）。 */
-function seatMultiDisabled(pending) {
+/** 本步**置灰**的座位选项集合（服务端 `disabled`，与 `multiSelect` 勾选面同一语义：列出来但点不动）。 */
+function seatMultiDisabledSet(pending) {
   return new Set(Array.isArray(pending && pending.disabled) ? pending.disabled : []);
 }
 
@@ -736,7 +736,7 @@ function seatMultiCap(pending) {
  * （`applyIdlePoll` 只同步时钟，`commitView` 换询问时才 `resetSelection`）⇒ 选到一半
  * 的座位跨 2 秒轮询不丢。池外的残留（上一面留下的座位号）在这里滤掉，不进提交。
  */
-function seatMultiChosen(pending) {
+function seatMultiChosenSeats(pending) {
   const seats = (pending && pending.option_seats) || {};
   const pool = new Set(Object.values(seats).map((seat) => Number(seat)));
   return state.selectedTargets.filter((seat) => pool.has(Number(seat)));
@@ -749,7 +749,7 @@ function seatMultiChosen(pending) {
  * （与两行观看面的 `picks` 升序同一条纪律，`answer.js:buildAction`）。
  */
 function seatMultiChoices(pending) {
-  const chosen = seatMultiChosen(pending);
+  const chosen = seatMultiChosenSeats(pending);
   const options = pending && Array.isArray(pending.options) ? pending.options : [];
   return options.filter((option) => {
     const seat = Number((pending.option_seats || {})[option]);
@@ -761,7 +761,7 @@ function seatMultiChoices(pending) {
 function seatMultiHint(pending) {
   const least = seatMultiFloor(pending);
   const most = seatMultiCap(pending);
-  const picked = seatMultiChosen(pending).length;
+  const picked = seatMultiChosenSeats(pending).length;
   const howMany = least === most ? `${least} 名` : `${least}~${most} 名`;
   return `点场上武将可多选（再点一次取消）：请选 ${howMany}角色（已选 ${picked} 名），`
     + "选好后点右端「提交」。";
@@ -770,13 +770,13 @@ function seatMultiHint(pending) {
 /** 座位多选面（W1）：牌桌上点多个场上武将、一次提交（不是"选一个 → 提交 → 再问一次"）。
  *
  * 没有面内按钮：座位就是控件（高亮 / 点击在 `table.js:seatInteraction` + 本文件的
- * `seatMultiChosen`）。左端「清空选择」只清本地面（`cancelOrClear` 的既有语义）；
+ * `seatMultiChosenSeats`）。左端「清空选择」只清本地面（`cancelOrClear` 的既有语义）；
  * 「至多」这类可放弃的步，放弃是**右端**那条候选里的 `Pass`（`renderRightActions` 既有口径）。
  */
 function renderSeatMultiPick(pending) {
   const hint = $("t-target-hint");
   if (hint) hint.textContent = seatMultiHint(pending);
-  $("btn-cancel").disabled = seatMultiChosen(pending).length === 0;
+  $("btn-cancel").disabled = seatMultiChosenSeats(pending).length === 0;
 }
 
 /** 响应窗口里"非使用牌"候选的按钮文案（W5-02b）：借刀的 `Pass` = b（**交出武器**）。
@@ -893,7 +893,7 @@ function refreshSubmit(pending) {
   if (isSeatMultiStep(pending)) {
     const least = seatMultiFloor(pending);
     const most = seatMultiCap(pending);
-    const picked = seatMultiChosen(pending).length;
+    const picked = seatMultiChosenSeats(pending).length;
     const ready = picked >= least && picked <= most && buildAction() !== null;
     $("btn-submit").disabled = !ready;
     if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;

@@ -1049,6 +1049,42 @@ def test_jie_jianying_is_once_per_play_phase():
     ]
 
 
+def test_jie_jianying_can_be_used_again_in_an_extra_turn():
+    """§1.7 补充 [额外回合]：闸是"本**出牌阶段**限一次" ⇒ 额外回合可以再用一次。
+
+    额外回合是**另一个游戏回合**（回合环从待执行栈弹出 ``schedule_extra_turn`` 的座位、
+    自然指针不动），出牌阶段起点重新计数 ⇒ ② 的清单重新出现、真能再发动一次。
+    """
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO, HEART_BOW), hp=3, hp_max=3)
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+    assert _jie_manifest(engine.pending) == (), "本阶段的次数已用掉"
+
+    engine.schedule_extra_turn(0)
+    engine.submit(_jie_answer(engine.pending))  # 结束当前出牌阶段
+    engine = _jie_drive(engine, _jie_is_idle)  # 回合环插入额外回合 ⇒ 回到座位 0 的出牌阶段
+
+    assert state.extra_turns == [], "额外回合已被回合环弹出"
+    assert any(
+        record.kind == "delta"
+        and record.delta_type == "turn_change"
+        and record.seat == 0
+        and record.extra is True
+        for record in engine.records
+    ), "这一局真的进了座位 0 的额外回合（不是又打了一个自然回合）"
+    assert _jie_manifest(engine.pending), "新的出牌阶段 ⇒ ② 的清单重新出现"
+
+    extra_source = next(
+        card for card in state.player(0).hand if state.card(card).type == "dodge"
+    )
+    engine = _jie_activate(engine, card=extra_source, name="杀")
+
+    assert _jie_manifest(engine.pending) == (), "额外回合里的这一次也记在本阶段上"
+    assert _jie_moves(engine, extra_source) == [
+        ("hand", "processing"),
+        ("processing", "discard"),
+    ], "额外回合里真的又消耗了一张源牌"
+
+
 def test_jie_jianying_declining_the_manifest_costs_nothing():
     """放弃（不提交复合动作）⇒ 一张牌不搬、第 ② 半仍可用。"""
     state, engine = _jie_ready(hand=(HEART_DODGE_TWO,), hp=3, hp_max=3)
@@ -1134,6 +1170,20 @@ def test_jie_jianying_keeps_the_source_face_when_the_previous_card_has_no_suit()
     )
     assert product.suit == "heart", "继承来源牌的花色（红桃 2）"
     assert product.rank == 2, "点数同样是来源牌的"
+
+
+def test_jie_jianying_records_the_product_as_the_previous_card():
+    """Q-J4 ④：产物被使用后"上一张牌"记的是**产物**（花色 = 上一张的 ♣、点数 = 来源牌的 2）。"""
+    state, engine = _jie_ready(hand=(CLUB_CROSSBOW, HEART_DODGE_TWO), hp=3, hp_max=3)
+    _jie_use_and_settle(engine, CLUB_CROSSBOW)
+    assert state.player(0).play_phase_last_card.suit == "club"
+
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+
+    last = state.player(0).play_phase_last_card
+    assert last.type == "slash" and last.name == "杀", "上一张牌 = 用出去的产物"
+    assert last.suit == "club", "花色 = 上一张牌（♣A）的花色，不是来源牌的 ♥"
+    assert last.rank == _deck_card(HEART_DODGE_TWO).rank, "点数 = 来源牌（♥2）的点数"
 
 
 # ===========================================================================
