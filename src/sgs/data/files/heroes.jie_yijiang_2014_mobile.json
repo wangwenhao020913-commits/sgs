@@ -38,6 +38,11 @@
           "id": "shenxing",
           "name": "慎行",
           "skill_type": "NORMAL"
+        },
+        {
+          "id": "bingyi",
+          "name": "秉壹",
+          "skill_type": "NORMAL"
         }
       ]
     },

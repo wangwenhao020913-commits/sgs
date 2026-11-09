@@ -24,6 +24,10 @@
 计数位段（``_PHASE_USE_SHIFT`` = 32），X 每次判可用时现算（用户 2026-11-09 签 Q1–Q3）。
 【秉壹】因 C3（用户改判成"一次点选多个座位"）摘出，见同 effort 的 ``05-seat-multi-select.md``。
 
+**票 13（界顾雍移动版【秉壹】）**：同一张武将牌的第二条技能落地——与 OL 顾雍【秉壹】只差
+**条件**一处（「颜色**或类别**均相同」），故与标准版**共用同一个手写主体**、只参数化判据；
+座位多选面就是 W1 已落地的那一张（票 02 / 票 09 的断言住在 ``test_hero_yijiang.py``）。
+
 **牌堆控制**：``Engine.from_state`` 的局面从**回合开头**跑起（准备 → 判定 → 摸牌 → 出牌），
 故本文件的夹具把 2 张摸牌阶段要摸的牌放在牌堆头、要控制的牌（判定牌 / 慎行的摸牌）放在其后。
 """
@@ -32,7 +36,17 @@ from __future__ import annotations
 
 from sgs.data import RuleConfig, Suit, card_category, color_of_suit, load_content_pack
 from sgs.engine import Engine
-from sgs.state import ActivateSkill, EndPhase, FrameKind, Pass, Phase, QueryKind, UseCard, Zone
+from sgs.state import (
+    ActivateSkill,
+    EndPhase,
+    FrameKind,
+    Pass,
+    Phase,
+    QueryKind,
+    SelectOptions,
+    UseCard,
+    Zone,
+)
 from sgs.timing import Timing
 
 from support import (
@@ -1719,3 +1733,351 @@ def test_jie_chenqun_wording_is_its_own_row():
     )
     assert "铁索连环后" not in ours_text, "本仓按状态事件读（读法一），不是牌名事件"
     assert "重置" in ours_text, "界版描述带上票 10 的方向口径（重置不问，界版复用同一判据）"
+
+
+# ===========================================================================
+# 界顾雍移动版【秉壹】（yijiang-2014-round2 票 13 / P4）
+#
+# 牌面（界版逐字；与 OL 顾雍【秉壹】只差**条件**那一处）：
+#
+#     结束阶段，你可以展示所有手牌。若你的手牌颜色**或类别**均相同，
+#     你令至多等同于你手牌数名角色各摸一张牌。
+#
+# 落法（票面 §3）：**第二条声明 + 同一个手写主体**（`phase_body._bingyi_effect`），
+# 条件参数化（颜色 ∨ 类别，先例 = 界张角【黄天】按 `skill_id` 参数化 helper）；A4 ⇒
+# 自己的 `requirement` / `step_requirements` 与自己的 `SkillFlow` 名（`jie_guyong_bingyi`）。
+# 三条既有读法原样沿用：1 张手牌 = 平凡成立（`04-bingyi-uniform.md`）、0 张不给入口
+# （`02-guyong.md` Q3 = A）、「至多 N 名」= 上限 + 可放弃（N = 展示那一刻的手牌数、含自己）。
+#
+# 判据全走**外部缝**：询问（`SKILL_ACTIVATION` / `SELECT_OPTIONS` 与其 `skill_id`）、
+# 记录流里的 `card_reveal` / `card_move`、座位上的手牌。不断言内部结构，也不 mock。
+# ===========================================================================
+
+JIE_BINGYI = "hero.jie_guyong_mobile.bingyi"
+OL_BINGYI = "hero.guyong.bingyi"
+OL_GUYONG = "guyong"
+OL_BINGYI_FACE = (
+    "结束阶段，你可以展示所有手牌。若你的手牌颜色均相同，"
+    "你令至多等同于你手牌数名角色各摸一张牌"
+)
+JIE_BINGYI_FACE = (
+    "结束阶段，你可以展示所有手牌。若你的手牌颜色或类别均相同，"
+    "你令至多等同于你手牌数名角色各摸一张牌"
+)
+
+
+def _bingyi_state(
+    *, mine: tuple[int, ...], hero: str = GUYONG, seats: int = 2, turn_seat: int = 0
+):
+    """座位 0 = ``hero``（``mine`` = 直接给定的手牌）、其余座位空着。
+
+    摸牌阶段的张数由 :func:`_park_bingyi` 置 0 ⇒ **结束阶段的手牌 = ``mine``**；体力 3 / 上限 3
+    ⇒ 手牌 ≤ 3 时弃牌阶段一张都不弃（N 因此也只由 ``mine`` 决定）。
+    """
+    specs = [SeatSpec() for _ in range(seats)]
+    specs[0] = SeatSpec(hero=hero, hp=3, hp_max=3, hand=mine)
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck_excluding(PACK, *mine),
+        turn_seat=turn_seat,
+        rule_config=RuleConfig(player_count=seats, first_seat=turn_seat),
+    )
+
+
+def _bingyi_activating(engine, skill_id: str = JIE_BINGYI) -> bool:
+    """停在 ``skill_id`` 的【秉壹】「是否发动」询问上（**还没应答**）。"""
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.SKILL_ACTIVATION
+        and str(engine.pending.skill_id) == skill_id
+    )
+
+
+def _park_bingyi(state, skill_id: str = JIE_BINGYI):
+    """构造局面 → 开到结束阶段的「是否发动」询问（摸牌阶段置 0 张）。"""
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, 0)
+    return _drive(engine, lambda e: _bingyi_activating(e, skill_id))
+
+
+def _declare_bingyi(engine) -> None:
+    """在【秉壹】的「是否发动」上答「发动」（后续询问 / 摸牌由调用方推进）。"""
+    query = engine.pending
+    engine.submit(next(a for a in query.legal_actions if isinstance(a, ActivateSkill)))
+
+
+def _bingyi_seats(engine) -> bool:
+    """停在【秉壹】的**座位多选**询问上（`SELECT_OPTIONS`；条件成立时才出现）。"""
+    return engine.pending is not None and engine.pending.kind == QueryKind.SELECT_OPTIONS
+
+
+def _bingyi_turn_over(seat: int = 0):
+    """回调：座位 ``seat`` 那一回合**已经走完**（回合指针过到别人）——"整段没有第二问"的观察点。"""
+
+    def stop(engine) -> bool:
+        current = engine.state.turn_seat
+        return current is not None and int(current) != seat
+
+    return stop
+
+
+def _bingyi_asked(engine, skill_id: str = JIE_BINGYI) -> list:
+    """记录流里该技能的「是否发动」询问（按出现顺序）。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and str(record.query.skill_id) == skill_id
+    ]
+
+
+def _bingyi_seat_queries(engine) -> list:
+    """记录流里的 ``SELECT_OPTIONS`` 询问（"条件不成立 ⇒ 没有座位面"的证据）。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_OPTIONS
+    ]
+
+
+def _bingyi_reveals(engine) -> list[tuple[int, int]]:
+    """记录流里的 ``card_reveal``（``(座位, 牌 id)``，按出现顺序）。"""
+    return [
+        (record.seat, record.card.card_id)
+        for record in _jie_deltas(engine, "card_reveal")
+    ]
+
+
+def _bingyi_draw_batches(engine) -> list[list[int]]:
+    """摸牌落成的 ``card_move`` 记录（``reason = DRAW``；一次 ``draw_for_hand`` 一批）。"""
+    return [
+        [card.card_id for card in record.cards]
+        for record in _jie_deltas(engine, "card_move")
+        if record.reason.value == "DRAW"
+    ]
+
+
+def _bingyi_for(hero: str) -> str:
+    """武将 id → 那一版的【秉壹】技能 id（同一局面并排钉界版 / OL 版时用）。"""
+    return JIE_BINGYI if hero == GUYONG else OL_BINGYI
+
+
+def _bingyi_run_uniform(mine: tuple[int, ...], *, hero: str = GUYONG) -> tuple:
+    """跑完座位 0 的整回合，返回 ``(引擎, 座位面询问或 None)``（不假设条件一定成立）。"""
+    skill_id = _bingyi_for(hero)
+    engine = _park_bingyi(_bingyi_state(mine=mine, hero=hero), skill_id)
+    if not _bingyi_activating(engine, skill_id):
+        engine = _drive(engine, _bingyi_turn_over())
+        return engine, None
+    _declare_bingyi(engine)
+    engine = _drive(engine, _bingyi_turn_over())
+    queries = _bingyi_seat_queries(engine)
+    return engine, (queries[0] if queries else None)
+
+
+def test_jie_bingyi_accepts_a_hand_that_is_uniform_in_colour_or_in_category():
+    """**界版独有**：同类别、异颜色的两张（都是基本牌）⇒ 成立；标准顾雍同局面 ⇒ 不成立。
+
+    票面 §2 / §3 的 A4：界版的差别**只有条件**一处——「颜色**或类别**均相同」。两条并排跑
+    同一局面（同一批牌、同一起始点、同一名 1 号座位），一边出现座位面、一边一张都不摸。
+    颜色的那一支同样要成立（OR 不是"改成只看类别"）：同色、异类别的两张两版都成立。
+    """
+    black = _card_of_color("black", category="basic")
+    red = _card_of_color("red", category="basic", exclude=(black,))
+    mine = (black, red)
+    assert _category_of(black) == _category_of(red) == "basic", "构造：两张同一大类"
+    assert color_of_suit(PACK.deck.cards[black].suit) is not color_of_suit(
+        PACK.deck.cards[red].suit
+    ), "构造：一黑一红（同类别、异颜色）"
+
+    jie, jie_query = _bingyi_run_uniform(mine)
+    assert jie_query is not None, "界版：类别全同 ⇒ 条件成立、出座位多选面"
+    assert (jie_query.min_selected, jie_query.max_selected) == (1, 2)
+    assert sorted(_bingyi_reveals(jie)) == sorted((0, card_id) for card_id in mine), (
+        f"展示段照旧逐张亮出：{_bingyi_reveals(jie)}"
+    )
+
+    ol, ol_query = _bingyi_run_uniform(mine, hero=OL_GUYONG)
+    assert ol_query is None, "标准顾雍：只看颜色 ⇒ 同类别不算「均相同」"
+    assert _bingyi_draw_batches(ol) == [], "标准版一张都不摸"
+    assert sorted(_bingyi_reveals(ol)) == sorted((0, card_id) for card_id in mine), (
+        "条件不成立也要展示（两版同一条读法）"
+    )
+
+    red_basic = _card_of_color("red", category="basic")
+    red_trick = _card_of_color("red", category="trick", exclude=(red_basic,))
+    assert _category_of(red_basic) != _category_of(red_trick), "构造：同色、异类别"
+    for hero in (GUYONG, OL_GUYONG):
+        _, query = _bingyi_run_uniform((red_basic, red_trick), hero=hero)
+        assert query is not None, f"{hero}：颜色全同 ⇒ 成立（颜色的那一支仍在）"
+
+
+def test_jie_bingyi_rejects_a_hand_uniform_in_neither():
+    """颜色、类别**各都不全同** ⇒ 条件不成立：只展示、不出现座位面、一张都不摸。"""
+    mine = (
+        _card_of_color("red", category="basic"),
+        _card_of_color("black", category="trick"),
+    )
+    assert _category_of(mine[0]) != _category_of(mine[1]), "构造：类别不同"
+    assert color_of_suit(PACK.deck.cards[mine[0]].suit) is not color_of_suit(
+        PACK.deck.cards[mine[1]].suit
+    ), "构造：颜色也不同"
+
+    engine, query = _bingyi_run_uniform(mine)
+
+    assert query is None, "两支都不成立 ⇒ 不构造座位面（edge-cases.md 总纪律 1）"
+    assert _bingyi_asked(engine) != [], "「是否发动」照旧先问（展示是发动后无条件发生的）"
+    assert sorted(_bingyi_reveals(engine)) == sorted((0, card_id) for card_id in mine)
+    assert _bingyi_draw_batches(engine) == [], "一张都不摸"
+    assert sorted(engine.state.player(0).hand) == sorted(mine), "手牌一张不动"
+
+
+def test_jie_bingyi_with_one_hand_card_still_qualifies():
+    """1 张手牌「均相同」= **平凡成立**（`04-bingyi-uniform.md` 的 A 裁定，两版共用）。
+
+    ⇒ 名额 N = 1：座位面照出、区间 ``[1, 1]``（含自己），选谁谁摸一张。
+    """
+    mine = (_card_of_color("red", category="basic"),)
+    engine = _park_bingyi(_bingyi_state(mine=mine))
+    _declare_bingyi(engine)
+    engine = _drive(engine, _bingyi_seats)
+    query = engine.pending
+
+    assert (query.min_selected, query.max_selected) == (1, 1), "1 张手牌 ⇒ 恰好 1 个名额"
+    engine.submit(SelectOptions(choices=("seat:0",), answers_seq=query.seq))
+    engine = _drive(engine, _bingyi_turn_over())
+
+    assert len(engine.state.player(0).hand) == 2, "选自己 ⇒ 自己摸一张"
+    assert len(engine.state.player(1).hand) == 0, "没选别人 ⇒ 别人不摸"
+
+
+def test_jie_bingyi_is_not_offered_without_hand_cards():
+    """0 张手牌 ⇒ **不给发动入口**（`02-guyong.md` Q3 = A，两版共用）：不问、不展示。
+
+    正面对照放在同一条断言里（防"技能根本不存在"的假绿）：同一夹具、只把 ``mine`` 换成
+    一张牌 ⇒ 结束阶段照问。
+    """
+    with_cards = _park_bingyi(_bingyi_state(mine=(_card_of_color("red"),)))
+    assert _bingyi_activating(with_cards), "正面对照：有手牌 ⇒ 结束阶段问「是否发动」"
+
+    empty = Engine.from_state(_bingyi_state(mine=()), seed=1)
+    empty.set_draw_phase_count(0, 0)
+    empty = _drive(empty, _bingyi_turn_over())
+
+    assert _bingyi_asked(empty) == [], "手牌为空 ⇒ 连「是否发动」都不问（零副作用）"
+    assert _bingyi_reveals(empty) == [], "没发动 ⇒ 一张都不亮"
+    assert _bingyi_seat_queries(empty) == []
+
+
+def test_jie_bingyi_seat_cap_equals_the_hand_size():
+    """名额上限 N = **手牌数**（不是可选池大小）：3 张手牌、场上 2 人 ⇒ ``max_selected == 3``。"""
+    first = _card_of_color("red", category="basic")
+    second = _card_of_color("red", category="basic", exclude=(first,))
+    third = _card_of_color("red", category="basic", exclude=(first, second))
+    mine = (first, second, third)
+
+    engine = _park_bingyi(_bingyi_state(mine=mine))
+    _declare_bingyi(engine)
+    engine = _drive(engine, _bingyi_seats)
+    query = engine.pending
+
+    assert len(engine.state.player(0).hand) == 3, "构造：展示那一刻手牌 3 张"
+    assert query.max_selected == 3, "N = 手牌数（不按可选池裁剪）"
+    assert len(query.options) == 2, "可选池 = 存活座位（含自己）"
+
+
+def test_jie_bingyi_each_chosen_seat_draws_one():
+    """座位多选面一次交齐两个座位 ⇒ **每个各摸 1 张**（逐座位一次摸牌，不是整次摸 2 张）。"""
+    mine = (
+        _card_of_color("red", category="basic"),
+        _card_of_color("red", category="trick"),
+    )
+    engine = _park_bingyi(_bingyi_state(mine=mine))
+    _declare_bingyi(engine)
+    engine = _drive(engine, _bingyi_seats)
+    query = engine.pending
+
+    assert [str(option) for option in query.options] == ["seat:0", "seat:1"], (
+        "可选池 = 全部存活角色（**含自己**），按座位序"
+    )
+    assert any(isinstance(action, Pass) for action in query.legal_actions), (
+        "「至多」⇒ 可以放弃（账本 L775 / L753）"
+    )
+    engine.submit(SelectOptions(choices=("seat:0", "seat:1"), answers_seq=query.seq))
+    engine = _drive(engine, _bingyi_turn_over())
+
+    assert len(engine.state.player(0).hand) == 3, "自己：两张手牌 + 摸的一张"
+    assert len(engine.state.player(1).hand) == 1, "另一个座位也摸到一张"
+    assert [len(batch) for batch in _bingyi_draw_batches(engine)] == [1, 1], (
+        f"逐座位各摸一张（两个独立的摸牌批次）：{_bingyi_draw_batches(engine)}"
+    )
+
+
+def test_jie_bingyi_wording_is_its_own_row():
+    """A4：界版有**自己的一行**——数据行、``CATALOG`` 文案、逐步文案、flow 名、描述。
+
+    三处一致性（票面 §3）：数据行声明了第二条技能 ⇒ 加载器要求 ``CATALOG`` 里真有它；
+    描述文件另有一行。文案**只差条件那一句**（颜色 ∨ 类别），短 id 表
+    ``_REQUIREMENTS`` / ``_STEP_REQUIREMENTS`` 里没有 ``bingyi`` 一行可借 ⇒ 各自逐字写。
+    """
+    import json
+    from pathlib import Path
+
+    from sgs.data import load_heroes
+    from sgs.skills import CATALOG, flow_for
+    from sgs.skills import phase_body
+
+    table = load_heroes("jie_yijiang_2014_mobile")
+    hero = next(hero for hero in table.heroes if hero.id == GUYONG)
+    assert [(skill.id, skill.name, skill.skill_type.value) for skill in hero.skills] == [
+        ("shenxing", "慎行", "NORMAL"),
+        ("bingyi", "秉壹", "NORMAL"),
+    ], "票面 §3：数据行追加第二条技能（与 CATALOG 同一次落地）"
+
+    ours = CATALOG[JIE_BINGYI]
+    ol = CATALOG[OL_BINGYI]
+    assert ours.skill_id != ol.skill_id, "两条 CATALOG 条目（不是一份共享声明）"
+    assert ours.carrier.value == "HERO"
+    assert ours.skill_type.value == "NORMAL"
+    assert ours.locked is False, "牌面写「可以」⇒ 非锁定（派发环先问「是否发动」）"
+    assert [hook.timing for hook in ours.hooks] == [Timing.PHASE_FINISH], "结束阶段"
+    assert ours.requirement == JIE_BINGYI_FACE, "界版逐字（含「或类别」）"
+    assert ol.requirement == OL_BINGYI_FACE, "OL 版逐字（只看颜色）"
+    assert ours.requirement != ol.requirement, "A4：同短 id、牌面不同 ⇒ 各自逐字写"
+
+    assert ours.step_requirements and ol.step_requirements, "两版都有逐步文案"
+    assert ours.step_requirements is not ol.step_requirements, (
+        "A4：各写各的那一份（不共用同一个 dict 对象）"
+    )
+    assert set(ours.step_requirements) == {"seat"}
+    assert ours.step_requirements["seat"].strip()
+
+    assert "bingyi" not in phase_body._REQUIREMENTS, "短 id 表里没有 bingyi 一行可借"
+    assert "bingyi" not in phase_body._STEP_REQUIREMENTS
+
+    ours_flow = flow_for(JIE_BINGYI)
+    ol_flow = flow_for(OL_BINGYI)
+    assert ours_flow is not None and ours_flow.steps == (), "零步：主体全在 effect 里"
+    assert ours_flow is not ol_flow, "A4：流水线各自另起"
+    assert ours_flow.name == "jie_guyong_bingyi", "界版自己的 flow 名（票面 §3）"
+    assert ol_flow.name == "guyong_bingyi"
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "sgs_web" / "descriptions.json"
+    descriptions = json.loads(path.read_text(encoding="utf-8"))["skills"]
+    assert JIE_BINGYI in descriptions, "本行有自己的 descriptions.json 条目（不借用 OL 那一行）"
+    assert OL_BINGYI in descriptions, "OL 那一行照旧在"
+    ours_text = descriptions[JIE_BINGYI]
+    ol_text = descriptions[OL_BINGYI]
+    assert ours_text.startswith(JIE_BINGYI_FACE), "界版描述以界版牌面逐字开头"
+    assert ol_text.startswith(OL_BINGYI_FACE), "OL 版描述以 OL 牌面逐字开头"
+    assert ours_text != ol_text
+
+    engine = _park_bingyi(_bingyi_state(mine=(_card_of_color("red"),)))
+    _declare_bingyi(engine)
+    engine = _drive(engine, _bingyi_seats)
+    (query,) = _bingyi_seat_queries(engine)
+    assert str(query.skill_id) == f"{JIE_BINGYI}:seat", (
+        "座位面挂在**界版**技能 id 上（投影据此查界版那一行逐步文案，A4）"
+    )

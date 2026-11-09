@@ -7516,7 +7516,8 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # 票 08（W4b）补陈群【法恩】⇒ 202。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205。
-    assert len(expected_skills) == 205, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206。
+    assert len(expected_skills) == 206, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

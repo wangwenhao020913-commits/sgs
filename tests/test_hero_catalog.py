@@ -267,9 +267,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 178 → 180（装备 22 不变：本票两条都是武将技）。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205、武将技 180 → 181
     # （数据行同一条武将，启用版本 / 真名都不变；装备 22 不变）。
-    assert len(CATALOG) == 205
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206、武将技 181 → 182
+    # （同样只加技能、不加武将：启用版本 98 / 真名 64 都不变，装备 22 不变）。
+    assert len(CATALOG) == 206
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 181
+    assert len(heroes) == 182
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -307,7 +309,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014 票 08（W4b）：同一个陈群补【法恩】⇒ 177 → 178。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条 ⇒ 178 → 180。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 180 → 181。
-    assert len(expected) == 181
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 181 → 182。
+    assert len(expected) == 182
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1639,7 +1642,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _bengkuai_probe_state()
     if skill_id == "hero.dongzhuo_mobile.baonue":
         return _baonue_probe_state()
-    if skill_id == "hero.guyong.bingyi":
+    if skill_id in ("hero.guyong.bingyi", "hero.jie_guyong_mobile.bingyi"):
+        # 两版共用同一个条件对象（票 13）⇒ 同一份正面局面（"我手上有牌"）。
         return _bingyi_probe_state()
     if skill_id == "hero.tao_caocao.changyi":
         return _changyi_probe_state()
@@ -2022,6 +2026,9 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # 我有手牌（0 张不给入口，Q3 = A）。正面局面见 :func:`_bingyi_probe_state`；
         # 持有者换成座位 2 后 source 与持有者对不上 ⇒ 条件翻假。
         "hero.guyong.bingyi": (_HookFrame(source=ME),),
+        # yijiang-2014-round2 票 13（P4）：界顾雍移动版的【秉壹】与 OL 版**同一个条件对象**
+        # ⇒ 同一帧、同一份正面局面（差别只在 effect 里的「均相同」判据）。
+        "hero.jie_guyong_mobile.bingyi": (_HookFrame(source=ME),),
         # yijiang-2014-round2 票 12（P3）【矢北】OL / 界两版的受伤那一支：条件是**归属**——
         # 受伤的是我（`_hurt_owner`，与【耀武】/【刚烈】/【归心】等同一条判据）。两版共用
         # 同一个条件对象；界版的 `GAME_START`（发 3 点护甲）没有 condition，故各只有一帧。
@@ -2522,6 +2529,9 @@ SKILL_SHAPE: dict[str, str] = {
     # 判颜色 / 座位多选 / 逐座位摸牌全住 effect ⇒ 机械判据落在「零步技能」格；
     # 座位步是**手写**的，不是 `PickSeats` 步——条件不成立时展示必须已经发生）。
     "hero.guyong.bingyi": "零步技能",
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】= 同一条阶段体 + 同一份手写主体
+    # （各自一份零步流水线；条件多「或类别」一支）⇒ 与 OL 那一行同一格。
+    "hero.jie_guyong_mobile.bingyi": "零步技能",
     # yijiang-2014 票 08（W4b）：陈群【法恩】（`STATE_FLIPPED` / `STATE_CHAINED` 两条钩子 +
     # **零步流水线**，摸一张住 effect；非锁定、无修饰器 / 接缝）⇒ 零步技能格。
     "hero.chenqun.faen": "零步技能",
@@ -2574,7 +2584,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2014 票 08（W4b）：陈群【法恩】（两条状态位钩子 + 零步流水线）⇒ 38 → 39。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（同一份零步流水线，第二条
     # `CATALOG` 条目）⇒ 39 → 40。
-    "零步技能": 40,
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（`PHASE_FINISH` + 各自的零步
+    # 流水线，手写主体与 OL 顾雍【秉壹】同一份）⇒ 40 → 41。
+    "零步技能": 41,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2781,7 +2793,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线）⇒ 201 → 202。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步技能）⇒ 204 → 205。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 205
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步技能）⇒ 205 → 206。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 206
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2934,7 +2947,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】（A 族两步流水线，形态归
     # 「触发技能」）⇒ 内 109 → 110；【矢北】（锁定技、无 flow）⇒ 外 93 → 94。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步流水线）⇒ 内 110 → 111。
-    assert len(inside) == 111
+    # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步流水线）⇒ 内 111 → 112。
+    assert len(inside) == 112
     assert len(outside) == 94
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

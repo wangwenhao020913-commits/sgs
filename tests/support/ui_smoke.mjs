@@ -21055,6 +21055,83 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${bingyiAnswers.length}`
       + ` action=${JSON.stringify(bingyiAnswers[0] && bingyiAnswers[0].body.action)}`);
 
+  /* ===== 界顾雍移动版【秉壹】（yijiang-2014-round2 票 13 / P4）的**合成载荷** ==========
+   *
+   * 与标准顾雍【秉壹】**同一张座位多选面**：票面 §6 明写本票**不动** `static/`——服务端
+   * 只是换了发动者（界顾雍移动版）、这条询问的文案与名额上限（N = 展示那一刻的手牌数）。
+   * 这里只换这三样东西再跑一遍，证明"界版这条技能用的就是已落地的同一张面"：文案换掉之后
+   * 提示条照读服务端下发的那一句、名额上限比场上人数**小**时点满即停、提交仍是一条 POST。
+   * 真会话读数（服务端真派生出 `option_seats` / 区间 / 文案）钉在
+   * `tests/test_hero_jie_yijiang.py::test_jie_bingyi_wording_is_its_own_row`（询问的
+   * `skill_id` = 界版那一行）与票 09 的 `test_a_real_session_reaches_the_bingyi_seat_multi_select_face`。
+   */
+  const jieBingyiSeq = seatSeq + 4;
+  const jieBingyiChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
+  const jieBingyiActions = [];
+  for (let mask = 1; mask < 1 << jieBingyiChoices.length; mask += 1) {
+    const picks = jieBingyiChoices.filter((_, index) => mask & (1 << index));
+    if (picks.length > 2) continue; // 上限 = 手牌数 2（比场上 4 人少）
+    jieBingyiActions.push({ kind: "SelectOptions", choices: picks, answers_seq: jieBingyiSeq });
+  }
+  const jieBingyiTarget = jieBingyiActions.find(
+    (action) => JSON.stringify(action.choices) === JSON.stringify(["seat:1", "seat:3"]));
+  const jieBingyiRequirement = "选择令其摸一张牌的角色（可多选，选好后提交）";
+  const jieBingyiPending = {
+    kind: "SELECT_OPTIONS", actor: 0, seq: jieBingyiSeq, prompt: "请选择角色（可多选）。",
+    legal_actions: [...jieBingyiActions, { kind: "Pass", answers_seq: jieBingyiSeq }],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+    options: jieBingyiChoices, disabled: [],
+    min_selected: 1, max_selected: 2, option_texts: {},
+    context: {
+      actor: 0, name: "秉壹", targets: [],
+      label: "3号位界顾雍移动版对3号位界顾雍移动版使用秉壹",
+      requirement: jieBingyiRequirement, skill_hints: [],
+    },
+  };
+  const jieBingyiView = seatViewWith(jieBingyiPending);
+  ui.state.view = jieBingyiView;
+  ui.state.sessionId = seatSession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(jieBingyiView);
+
+  check("界秉壹-1 同一张面：界版的文案照读服务端下发那一句、四名角色全部点得动（没有置灰项）",
+    $("t-prompt").textContent === jieBingyiRequirement
+      && ["0", "1", "2", "3"].every((seat) => {
+        const box = seatCardOf(seat);
+        return !!box && box.classList.contains("targetable");
+      })
+      && $("btn-submit").disabled === true,
+    `prompt="${$("t-prompt").textContent}"`
+      + ` seats=${JSON.stringify(["0", "1", "2", "3"].map((seat) => seatClasses(seat)))}`);
+
+  await clickAndWait(seatCardOf(3));
+  await clickAndWait(seatCardOf(1));
+  await clickAndWait(seatCardOf(0));
+  check("界秉壹-2 上限 = 手牌数 2（比场上人数少）⇒ 点满后第 3 个点不动；动作 = 这两个座位一束",
+    !seatCardOf(0).classList.contains("tsel")
+      && seatCardOf(3).classList.contains("tsel")
+      && seatCardOf(1).classList.contains("tsel")
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(jieBingyiTarget),
+    `seat0=${JSON.stringify(seatClasses(0))} built=${JSON.stringify(ui.buildAction())}`);
+
+  const beforeJieBingyi = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const jieBingyiAnswers = calls
+    .slice(beforeJieBingyi)
+    .filter((call) => call.path.includes("/answer"));
+  check("界秉壹-3 提交 = 恰一条 POST，送出的就是这一面里那条 `SelectOptions`（界版复用同一张面）",
+    jieBingyiAnswers.length === 1
+      && JSON.stringify(jieBingyiAnswers[0].body.action) === JSON.stringify(jieBingyiTarget),
+    `answers=${jieBingyiAnswers.length}`
+      + ` action=${JSON.stringify(jieBingyiAnswers[0] && jieBingyiAnswers[0].body.action)}`);
+
   ui.state.view = seatView;
   ui.resetSelection();
 
