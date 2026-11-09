@@ -7479,8 +7479,9 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201。
-    assert len(expected_skills) == 201, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201；
+    # 票 08（W4b）补陈群【法恩】⇒ 202。
+    assert len(expected_skills) == 202, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

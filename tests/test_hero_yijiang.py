@@ -25,6 +25,7 @@ from __future__ import annotations
 import pytest
 from sgs.data import (
     Category,
+    Identity,
     RuleConfig,
     Suit,
     card_category,
@@ -1637,6 +1638,355 @@ def test_chenqun_dingpin_is_declared_with_its_own_wording():
     # 短 id 两张表一字未改：界版那一条仍与表逐字相同（改了两版会一起改掉）。
     assert jie.requirement == _REQUIREMENTS["dingpin"]
     assert dict(jie.step_requirements) == _STEP_REQUIREMENTS["dingpin"]
+
+
+# ===========================================================================
+# 一将成名-2014·陈群【法恩】（yijiang-2014 票 08 / W4b）
+#
+# 牌面（用户 `技能.txt` 逐字，与界陈群移动版**逐字相同**）：
+#
+#     当一名角色翻面或横置后，你可以令其摸一张牌。
+#
+# 两个时机由 chenqun-guyong 票 03（W2）在 `Engine.set_flipped` / `Engine.set_chained` 的
+# 写入口解封；派发口径 = 用户 2026-11-09 签的 **Q-W2 = 读法一**：
+#
+#   ① 状态值**真的变了** = 一次事件（幂等写不算）；
+#   ② 「回合开始前翻回正面」（`frame=None` 的规则固定流程）**算**一次；
+#   ③ 一趟【铁索连环】横置 2 名角色 = **2 次**机会（一个座位一次）。
+#
+# 效果 = 零步流水线（样板 `hero.sunshangxiang.xiaoji`）：问一次「是否发动」，答发动则
+# **刚翻面 / 横置的那一名角色**摸一张（「令其」≠ 技能持有者）。派发是**延后**的（写入口
+# 排队、下一条 `_step` 的开头才派发）⇒ 用例统一走「写入口 → 推进 → 询问」两段式。
+#
+# 判据全走**外部缝**：两个写入口的返回值、记录流里的询问 / delta、座位上的状态位与手牌。
+# 不断言内部结构，也不 mock。
+# ===========================================================================
+
+FAEN = "hero.chenqun.faen"
+FAEN_FACE = "当一名角色翻面或横置后，你可以令其摸一张牌"
+"""牌面逐字（§2.1 的「翻面或横置」= 状态事件；不是移动版官网非界陈群那句「铁索连环」）。"""
+
+
+def _faen_state(*, seats: int = 2, hand: tuple[int, ...] = (), phase=Phase.PLAY):
+    """座位 0 = 陈群（3 体力，``hand`` 直接给定）；牌堆 = 除 ``hand`` 外的前 10 张。
+
+    缺省从**出牌阶段**起跑：不经过摸牌阶段 ⇒ 陈群的手牌就是 ``hand``（"谁摸到牌"才好读）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=CHENQUN, hp=3, hp_max=3, hand=hand)]
+        + [SeatSpec() for _ in range(seats - 1)],
+        deck=deck_excluding(PACK, *hand)[:10],
+        turn_seat=0,
+        phase=phase,
+    )
+
+
+def _faen_engine(*, seed: int = 1, **kwargs):
+    return Engine.from_state(_faen_state(**kwargs), seed=seed)
+
+
+def _faen_asks(engine) -> list:
+    """记录流里的【法恩】「是否发动」询问（按出现顺序）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and str(record.query.skill_id) == FAEN
+    ]
+
+
+def _state_deltas(engine, delta_type: str) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == delta_type
+    ]
+
+
+class _FaenScript:
+    """脚本玩家：对【法恩】的每一问按给定序列答「发动 / 放弃」，其余走最小应答。
+
+    记下每一次被问的【法恩】询问（``self.asked``）——"一次事件问几次""有几个座位各问一次"
+    都从这条外部缝读。
+    """
+
+    def __init__(self, *answers: bool) -> None:
+        self.answers = list(answers)
+        self.asked: list = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == FAEN:
+            self.asked.append(query)
+            take = self.answers.pop(0) if self.answers else False
+            if take:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            return next(
+                action for action in query.legal_actions if isinstance(action, Pass)
+            )
+        return _answer(query)
+
+
+def _faen_players(player: "_FaenScript", *, seats: int = 4) -> list:
+    """座位 0 = 会答【法恩】的那名脚本玩家；其余座位只做最小应答。"""
+    return [player, *(_FaenScript() for _ in range(seats - 1))]
+
+
+def _settle_after_the_dispatch(engine, players) -> None:
+    """推进到「这一趟状态位派发**收尾之后**」：回合环的下一个「回合开始前」是那个里程碑。
+
+    ``Engine.submit`` 只**登记**应答，引擎在下一条 ``_step`` 才消费它 ⇒ 停止点必须取一个
+    **应答之后**才出现的公开事实；只看「没有待答询问」会停在"应答还没被消费"处（摸牌还没
+    发生 ⇒ 断言假绿）。「回合开始前」排在派发帧之后、摸牌阶段之前 ⇒ 它一到就说明钩子已经
+    跑完、本次事件的效果也都落了，而**还没有**任何摸牌阶段把座位的手牌搅乱。
+    """
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.TURN_BEFORE_START))
+
+
+def _turn_before_starts(engine) -> int:
+    """记录流里「回合开始前」的次数（停止点用：翻回正面那一次之后引擎还会再进一次）。"""
+    return len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.TURN_BEFORE_START
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# ① 两个时机各一次：值真的变了 ⇒ 问一次 ⇒ 那名角色摸一张
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_faen_draws_one_after_a_flip():
+    """读法一①：翻面（值真的变了）⇒ 问一次「是否发动」；答发动 ⇒ 那名角色摸一张。"""
+    engine = _faen_engine()
+    player = _FaenScript(True)
+    players = _faen_players(player)
+
+    assert engine.set_flipped(None, 1, True) is True
+    _settle_after_the_dispatch(engine, players)
+
+    assert len(player.asked) == 1
+    assert engine.state.player(1).flipped is True
+    assert len(engine.state.player(1).hand) == 1, "「令其摸一张牌」= 刚翻面的那名角色"
+    assert engine.state.player(0).hand == [], "技能持有者自己不摸"
+
+
+def test_chenqun_faen_draws_one_after_a_chain():
+    """横置是同形的第二个时机（两条独立钩子，§8.10 L873–L882）。"""
+    engine = _faen_engine()
+    player = _FaenScript(True)
+    players = _faen_players(player)
+
+    assert engine.set_chained(None, 1, True) is True
+    _settle_after_the_dispatch(engine, players)
+
+    assert len(player.asked) == 1
+    assert engine.state.player(1).chained is True
+    assert len(engine.state.player(1).hand) == 1
+
+
+def test_chenqun_faen_does_not_fire_when_nothing_changed():
+    """读法一的反面：**幂等写不是事件**（已横置再横置 / 已翻面再翻面 ⇒ 各只问一次）。"""
+    chained = _faen_engine()
+    chain_player = _FaenScript(True)
+    chain_players = _faen_players(chain_player)
+
+    assert chained.set_chained(None, 1, True) is True
+    assert chained.set_chained(None, 1, True) is False, "同值 ⇒ 写入口幂等早退"
+    _settle_after_the_dispatch(chained, chain_players)
+    assert len(chain_player.asked) == 1, "两次写同一值只派发一次事件"
+    assert len(chained.state.player(1).hand) == 1
+    assert len(_state_deltas(chained, "chained_change")) == 1, "幂等写不落 delta"
+
+    flipped = _faen_engine()
+    flip_player = _FaenScript(True)
+    flip_players = _faen_players(flip_player)
+
+    assert flipped.set_flipped(None, 1, True) is True
+    assert flipped.set_flipped(None, 1, True) is False
+    _settle_after_the_dispatch(flipped, flip_players)
+    assert len(flip_player.asked) == 1, "翻面方向的幂等写也不再问"
+    assert len(flipped.state.player(1).hand) == 1
+    assert len(_state_deltas(flipped, "flipped_change")) == 1
+
+
+def test_chenqun_faen_fires_on_the_turn_start_unflip():
+    """读法一②：**「回合开始前翻回正面」也算一次翻面事件**（Q-W2 的那一处判据点）。
+
+    造局：先把座位 1 翻到背面（同一写入口 ⇒ 也派发一次，先**拒绝**那一问），再让它走到
+    自己的「回合开始前」——``frame=None`` 的规则固定流程把背面翻回正面，也必须问一次；
+    答发动 ⇒ 座位 1 摸一张。
+    """
+    engine = _faen_engine()
+    player = _FaenScript(False, True)
+    players = _faen_players(player)
+
+    assert engine.set_flipped(None, 1, True) is True
+    run_queries(engine, players, lambda e: _turn_before_starts(e) >= 3)
+
+    unflip = [
+        record for record in _state_deltas(engine, "flipped_change") if record.flipped is False
+    ]
+    assert unflip, "造局没走到「回合开始前翻回正面」"
+    assert engine.state.player(1).flipped is False
+    assert len(engine.state.player(1).hand) == 1, "翻回正面那一次也算 ⇒ 答发动就摸一张"
+    asks = _faen_asks(engine)
+    assert len(asks) == 2
+    assert asks[0].seq < unflip[0].seq < asks[1].seq, (
+        "第一问来自造局那次翻面，第二问才是「回合开始前翻回正面」"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ② 粒度：一次事件问一次；一趟【铁索】横置 2 名 ⇒ 一个座位一次
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_faen_asks_once_per_event():
+    """一次事件只问**一次**：不是"翻面钩 + 横置钩各问一次"，也不会随续跑再问。"""
+    engine = _faen_engine()
+    player = _FaenScript(True)
+    players = _faen_players(player)
+
+    assert engine.set_flipped(None, 1, True) is True
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert len(player.asked) == 1, "整整一个回合里只有这一问"
+    assert len(_faen_asks(engine)) == 1, "记录流里也只有一条询问"
+    assert len(engine.state.player(1).hand) == 1, "只摸一张（重入不重摸）"
+
+
+def test_chenqun_faen_chains_give_one_chance_per_seat():
+    """读法一③：**一趟【铁索连环】横置 2 名角色 = 2 次机会**（逐座位各一次）。
+
+    用**真实**的那张牌（军争 160 档才有【铁索连环】实体牌）走一趟 1–2 目标的使用，
+    两个目标各派发一次 ``STATE_CHAINED`` ⇒ 各问一次、各摸一张。
+    """
+    chain_pack = load_content_pack(deck_profile="standard_ex_160")
+    iron = cards_of_type(chain_pack, "iron_chain")[0]
+    state = build_state(
+        pack=chain_pack,
+        seats=[
+            SeatSpec(hero=CHENQUN, hp=3, hp_max=3, hand=(iron,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=tuple(
+            card_id for card_id in range(len(chain_pack.deck.cards)) if card_id != iron
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, 0)  # 摸牌阶段摸 0 张：陈群的手牌只剩那张【铁索连环】
+    player = _FaenScript(True, True)
+    players = _faen_players(player)
+
+    _drive(engine, _is_play_idle)
+    use = next(
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.type == "iron_chain"
+        and action.targets == (1, 2)
+    )
+    engine.submit(use)
+    # 停止点 = **本回合结束**：两问都答完、派发收尾之后才到；此时本回合的摸牌阶段早已过去
+    # （使用发生在出牌阶段），故两个目标的手牌仍只有【法恩】摸的那一张。
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert [(record.seat, record.chained) for record in _state_deltas(engine, "chained_change")] == [
+        (1, True),
+        (2, True),
+    ], "两个座位各一次写入"
+    assert len(player.asked) == 2, "一个座位一次机会（不是一趟一次）"
+    assert len(engine.state.player(1).hand) == 1
+    assert len(engine.state.player(2).hand) == 1
+    assert engine.state.player(0).hand == [], "技能持有者不摸（他只用了那张铁索）"
+
+
+# ---------------------------------------------------------------------------
+# ③ 可选 / 指向：可以放弃；摸牌的是被点名的那一名角色
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_faen_may_be_declined():
+    """非锁定技：每一问都可以放弃（``Pass``）——不摸牌，也不回滚状态位。"""
+    engine = _faen_engine()
+    player = _FaenScript(False)
+    players = _faen_players(player)
+
+    assert engine.set_chained(None, 1, True) is True
+    _settle_after_the_dispatch(engine, players)
+
+    assert len(player.asked) == 1
+    assert engine.state.player(1).hand == [], "放弃 ⇒ 一张都不摸"
+    assert engine.state.player(1).chained is True, "拒绝【法恩】不影响那次横置本身"
+    assert len(_faen_asks(engine)) == 1, "放弃之后不再补问"
+
+
+def test_chenqun_faen_draws_for_the_named_target_not_the_owner():
+    """「令其」= **刚翻面 / 横置的那名角色**，不是技能持有者（陈群自己那手牌不动）。"""
+    mine = _hand_of(basic=1, trick=1)
+    engine = _faen_engine(hand=mine)
+    player = _FaenScript(True)
+    players = _faen_players(player)
+
+    assert engine.set_flipped(None, 1, True) is True
+    _settle_after_the_dispatch(engine, players)
+
+    assert len(player.asked) == 1
+    assert len(engine.state.player(1).hand) == 1
+    assert list(engine.state.player(0).hand) == list(mine), "陈群的手牌一张不多、一张不少"
+
+
+# ---------------------------------------------------------------------------
+# ④ 文案 / 形状：本行有自己的 requirement + descriptions.json 条目
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_faen_wording_is_its_own_row():
+    """A4：本技能以自己的 ``requirement`` + ``descriptions.json`` 条目落地，牌面逐字取
+    **OL 陈群那版**（「横置」= 状态事件，不是移动版官网非界陈群那句「铁索连环」）。
+
+    两版【法恩】牌面**逐字相同**，故 A4 在这一行的真实风险是"把「横置」写成牌名事件"。
+    """
+    import json
+    from pathlib import Path
+
+    from sgs.skills import CATALOG, flow_for
+
+    ours = CATALOG[FAEN]
+    assert ours.locked is False, "牌面写「可以」⇒ 非锁定（派发环先问「是否发动」）"
+    assert ours.requirement == FAEN_FACE
+    assert [hook.timing for hook in ours.hooks] == [
+        Timing.STATE_FLIPPED,
+        Timing.STATE_CHAINED,
+    ], "翻面 / 横置是两个独立状态（§13.1 / §8.10）⇒ 两条独立钩子"
+    assert all(hook.condition is None for hook in ours.hooks), (
+        "派发点上「一名角色翻面 / 横置了」恒成立 ⇒ 不设条件；"
+        "「座位是否存活」这一层放在效果里（写进 condition 会撞钩子条件的持有者自校审计）"
+    )
+    flow = flow_for(FAEN)
+    assert flow is not None and flow.name == "chenqun_faen"
+    assert flow.steps == (), "零步：只问「是否发动」（shapes.md §2 第 1 行）"
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "sgs_web" / "descriptions.json"
+    descriptions = json.loads(path.read_text(encoding="utf-8"))["skills"]
+    assert FAEN in descriptions, "本行有自己的 descriptions.json 条目"
+    text = descriptions[FAEN]
+    assert text.startswith(FAEN_FACE), "牌面逐字（OL 陈群那版）"
+    assert "铁索连环后" not in text, "本仓按状态事件读（读法一），不是牌名事件"
 
 
 # ===========================================================================

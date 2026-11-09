@@ -38,6 +38,11 @@
           "id": "dingpin",
           "name": "定品",
           "skill_type": "NORMAL"
+        },
+        {
+          "id": "faen",
+          "name": "法恩",
+          "skill_type": "NORMAL"
         }
       ]
     },

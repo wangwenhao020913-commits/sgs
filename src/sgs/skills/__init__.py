@@ -31,6 +31,7 @@
 | 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 / 烈弓 |
 | P 限制豁免 / 【咆哮】②（锁定技） | :mod:`sgs.skills.limits` | 咆哮（次数 + 被抵消后的 +1）/ 奇才（距离） |
 | U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
+| S **状态位变化后**（`STATE_FLIPPED` / `STATE_CHAINED`，yijiang-2014 票 08） | :mod:`sgs.skills.state_after` | 法恩 |
 | J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |
 | 觉醒 / ☆ 派生（M6 票 06） | :mod:`sgs.skills.awakening` | 潜心 / 勤学 / 诛害 |
 | 否定（目标级无效，M6 票 07） | :mod:`sgs.skills.negation` | 奋威（目标产生前的取消住 :mod:`sgs.skills.target_pool`，事件帧 / 响应窗口各自住票 08 / 界【离间】） |
