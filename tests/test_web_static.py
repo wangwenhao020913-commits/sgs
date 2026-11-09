@@ -19,9 +19,15 @@ U1-00 把单文件 `tools/sgs_web/static/app.js` 拆成一组按职责命名、�
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = REPO_ROOT / "tools" / "sgs_web" / "static"
@@ -739,27 +745,286 @@ def test_damage_fx_scripts_keep_their_global_names_and_stay_static() -> None:
     assert keys == {1, 2, 3, 4}, f"VARIANTS 必须恰好四档（1~4），实际：{sorted(keys)}"
 
 
-def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
-    """`anim.ini` = D8 的 13 个键；`flight_stage_out = 0`；`debug_scale` 不进产品。"""
-    text = _ANIM_INI.read_text(encoding="utf-8")
-    assert "debug_scale" not in text, "debug_scale 必须从 anim.ini 整体移除（含键与注释）"
+def _ini_entries() -> dict[str, str]:
+    """`anim.ini` 的 `key = value` 全表（剥注释；缺 `=` 即红）。"""
     entries: dict[str, str] = {}
-    for raw in text.splitlines():
+    for raw in _ANIM_INI.read_text(encoding="utf-8").splitlines():
         line = re.sub(r"\s*[#;].*$", "", raw).strip()
         if not line:
             continue
         key, separator, value = line.partition("=")
         assert separator, f"anim.ini 行不是 key = value：{raw}"
         entries[key.strip()] = value.strip()
-    assert set(entries) == _D8_INI_KEYS, (
-        f"anim.ini 的键必须与 D8 表一致：缺 {sorted(_D8_INI_KEYS - set(entries))}；"
-        f"多 {sorted(set(entries) - _D8_INI_KEYS)}"
+    return entries
+
+
+def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
+    """`anim.ini` = D8 的 13 个键（外加 damage-fx 票 04 的 19 个）；`debug_scale` 不进产品。"""
+    text = _ANIM_INI.read_text(encoding="utf-8")
+    assert "debug_scale" not in text, "debug_scale 必须从 anim.ini 整体移除（含键与注释）"
+    entries = _ini_entries()
+    # 同一份 ini 也住着 damage-fx 的 19 个键（票 04：用户改一份文件就能调两套时长），
+    # 这里只钉 D8 那一族，19 个键由下面那条用例钉。
+    shared = {key for key in entries if not key.startswith("damage_fx_")}
+    assert shared == _D8_INI_KEYS, (
+        f"anim.ini 的 D8 键必须与 D8 表一致：缺 {sorted(_D8_INI_KEYS - shared)}；"
+        f"多 {sorted(shared - _D8_INI_KEYS)}"
     )
     for key, value in entries.items():
         float(value)  # 解析失败即红（页面此时会退回默认）
     assert float(entries["flight_stage_out"]) == 0, (
         "处理区 → 弃牌堆不飞：flight_stage_out 必须是 0"
     )
+
+
+# ---------------------------------------------------------------------------
+# damage-fx 票 04：四档各自的游戏内时长（anim.ini 的 19 个键 + fx-core 的 game 档）
+#
+# 票面要求：每档的四个时长（total / flight / impact / fade）**必须能各自独立改**，
+# 不许用一条公式把四档绑死；单档总时长上限 2.2s。这里钉三件：
+# 1. `anim.ini` 的键集合与不变式（`flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`）；
+# 2. 真 `anim.js` 解析器把 19 个键读进 `animConfig`、**不**报"未知键"（否则用户改了没生效）；
+# 3. 真 `fx-core.js` 的 `SgsDamageFX.gameTiming` 解算与四条钳制（含缺键 / 非法值回默认）。
+# ---------------------------------------------------------------------------
+
+_DAMAGE_FX_VARIANTS = (1, 2, 3, 4)
+_DAMAGE_FX_TIMING_FIELDS = ("total", "flight", "impact", "fade")
+_DAMAGE_FX_INI_KEYS = {
+    f"damage_fx_{variant}_{field}"
+    for variant in _DAMAGE_FX_VARIANTS
+    for field in _DAMAGE_FX_TIMING_FIELDS
+} | {"damage_fx_3_strobe", "damage_fx_4_strobe", "damage_fx_4_split"}
+"""票 04 的 19 个键：四档 × 四个时长 + 3/4 点的屏闪 + 4 点的劈屏错位。"""
+
+
+def test_anim_ini_lists_the_damage_fx_durations_per_variant() -> None:
+    """19 个键齐全、可解析，且每档都满足 `flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`。"""
+    entries = _ini_entries()
+    damage = {key: value for key, value in entries.items() if key.startswith("damage_fx_")}
+    assert set(damage) == _DAMAGE_FX_INI_KEYS, (
+        f"damage-fx 的时长键必须与票面 19 个一致：缺 {sorted(_DAMAGE_FX_INI_KEYS - set(damage))}；"
+        f"多 {sorted(set(damage) - _DAMAGE_FX_INI_KEYS)}"
+    )
+    values = {key: float(value) for key, value in damage.items()}
+    for variant in _DAMAGE_FX_VARIANTS:
+        total = values[f"damage_fx_{variant}_total"]
+        flight = values[f"damage_fx_{variant}_flight"]
+        impact = values[f"damage_fx_{variant}_impact"]
+        fade = values[f"damage_fx_{variant}_fade"]
+        assert 0 < impact < total <= 2200, (
+            f"{variant} 点档：命中必须落在演出之内、总时长 ≤ 2200（挡住牌桌），"
+            f"实际 impact={impact} / total={total}"
+        )
+        assert 0 < flight < impact, f"{variant} 点档：剑光必须在命中之前飞完"
+        assert impact + fade <= total, (
+            f"{variant} 点档：刀痕必须在摘层之前散尽（impact + fade ≤ total），"
+            f"实际 {impact} + {fade} > {total}"
+        )
+    # 四档总时长各自独立：一条公式绑死的话四个值会相等（票 04 的核心交付）。
+    totals = [values[f"damage_fx_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
+    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), (
+        f"四档总时长必须各自独立可改，实际：{totals}"
+    )
+    assert values["damage_fx_3_strobe"] > 0 and values["damage_fx_4_strobe"] > values["damage_fx_3_strobe"], (
+        "屏闪只有 3 / 4 点有，且 4 点更长（spec §演出口径）"
+    )
+    assert values["damage_fx_4_split"] > 0, "只有 4 点有劈屏错位"
+
+
+_DAMAGE_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
+const noteNode = { textContent: "", hidden: true };
+const context = vm.createContext({
+  console,
+  setTimeout,
+  clearTimeout,
+  fetch: async () => ({ ok: true, text: async () => ini }),
+  document: {
+    getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+    createElement: () => ({
+      style: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      appendChild() {},
+      setAttribute() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+context.$ = (id) => context.document.getElementById(id);
+// 与页面一致的加载方式：每份脚本单独编译，同一个 context 的全局词法作用域跨脚本可见。
+for (const name of ["anim.js", "fx-core.js", "effects.js"]) {
+  vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+}
+const report = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     const fx = SgsDamageFX;
+     const resolved = {};
+     for (const variant of [1, 2, 3, 4]) resolved[variant] = fx.gameTiming(variant, {});
+     const clamps = {
+       total: fx.gameTiming(1, { damage_fx_1_total: 9999 }).ms.total,
+       impact: fx.gameTiming(2, { damage_fx_2_total: 400, damage_fx_2_impact: 900 }).ms.impact,
+       flight: fx.gameTiming(3, { damage_fx_3_impact: 300, damage_fx_3_flight: 800 }).ms.flight,
+       fade: fx.gameTiming(4, { damage_fx_4_total: 1000, damage_fx_4_impact: 800, damage_fx_4_fade: 900 }).ms.fade,
+       missing: fx.gameTiming(1, { damage_fx_1_total: 1600 }).ms,
+       junk: fx.gameTiming(2, { damage_fx_2_total: "abc", damage_fx_2_flight: -5 }).ms,
+       tunedTotal: fx.gameTiming(4, { damage_fx_4_total: 1600 }).timeline.DURATION,
+       exportUntouched: fx.TIMELINE.DURATION,
+     };
+     return JSON.stringify({
+       note: $("t-anim-note").textContent,
+       animConfigKeys: Object.keys(animConfig),
+       defaults: fx.DEFAULT_TIMING,
+       maxTotal: fx.MAX_TOTAL_MS,
+       resolved,
+       clamps,
+       effectsTiming: {
+         1: damageFxTiming(1),
+         4: damageFxTiming(4),
+         resolvedFromEffects: fx.gameTiming(4, damageFxTiming(4)).timeline.DURATION,
+       },
+     });
+   })()`,
+  context,
+  { filename: "damage_fx_probe.js" },
+);
+process.stdout.write(report);
+"""
+
+
+def _damage_fx_probe() -> dict:
+    """跑真 `anim.js` + 真 `fx-core.js`（node vm），拿回两份时间表的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "damage_fx_probe.mjs"
+        probe.write_text(_DAMAGE_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"damage-fx 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def damage_fx_probe() -> dict:
+    """一次探针跑完，两条用例共用（node 启动约 100ms，不必跑两遍）。"""
+    return _damage_fx_probe()
+
+
+def test_the_damage_fx_durations_reach_anim_config_without_unknown_key_notes(damage_fx_probe: dict) -> None:
+    """`anim.js` 的解析器把 19 个键读进 `animConfig`，**不**把它们当未知键删掉 / 报错。
+
+    这是用户改 ini 能不能生效的判据：`anim.js:animLoadConfig` 对不在默认表里的键会
+    `delete` + 弹一行"未知键"，`damage_fx_*` 必须走前缀登记那条路。
+    """
+    probe = damage_fx_probe
+    assert "未知键" not in probe["note"], (
+        f"damage_fx_* 不得被当成未知键（页面提示：{probe['note']}）"
+    )
+    missing = _DAMAGE_FX_INI_KEYS - set(probe["animConfigKeys"])
+    assert not missing, f"这 19 个键必须进 animConfig，缺：{sorted(missing)}"
+
+
+def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_fx_probe: dict) -> None:
+    """`effects.js:damageFxTiming` 只搬数字：有键的档给全六个量，没键的档不硬造。
+
+    这一层不兜底、不钳制（默认与钳制都在 `fx-core.js`）：缺 `damage_fx_1_strobe` 时返回的
+    表里就**没有**这个键，fx-core 退 `VARIANTS[1].strobe = 0`。票 05 的播放器读它。
+    """
+    probe = damage_fx_probe
+    ini = {
+        key: float(value)
+        for key, value in _ini_entries().items()
+        if key.startswith("damage_fx_")
+    }
+    four = probe["effectsTiming"]["4"]
+    assert set(four) == {
+        f"damage_fx_4_{field}" for field in _DAMAGE_FX_TIMING_FIELDS
+    } | {"damage_fx_4_strobe", "damage_fx_4_split"}, f"4 点档的六个量都要搬过去：{sorted(four)}"
+    for key, value in four.items():
+        assert value == ini[key], f"{key} 必须原样来自 anim.ini"
+    one = probe["effectsTiming"]["1"]
+    assert set(one) == {f"damage_fx_1_{field}" for field in _DAMAGE_FX_TIMING_FIELDS}, (
+        f"1 点档没有 strobe / split 的键，就不该硬造：{sorted(one)}"
+    )
+    assert probe["effectsTiming"]["resolvedFromEffects"] == pytest.approx(
+        ini["damage_fx_4_total"] / 1000
+    ), "把搬过来的表交给 fx-core，解算出同一段 4 点档时长"
+
+
+def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_probe: dict) -> None:
+    """`SgsDamageFX.gameTiming`：默认值 = `DEFAULT_TIMING` = ini；四条钳制与缺键 / 垃圾值兜底。"""
+    probe = damage_fx_probe
+    ini = {
+        key: float(value)
+        for key, value in _ini_entries().items()
+        if key.startswith("damage_fx_")
+    }
+    assert set(probe["defaults"]) == _DAMAGE_FX_INI_KEYS, (
+        "fx-core 的内置默认必须恰好覆盖这 19 个键："
+        f"缺 {sorted(_DAMAGE_FX_INI_KEYS - set(probe['defaults']))}"
+    )
+    assert {key: int(value) for key, value in ini.items()} == probe["defaults"], (
+        "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
+    )
+    assert probe["maxTotal"] == 2200
+
+    for variant in _DAMAGE_FX_VARIANTS:
+        entry = probe["resolved"][str(variant)]
+        total = ini[f"damage_fx_{variant}_total"] / 1000
+        flight = ini[f"damage_fx_{variant}_flight"] / 1000
+        impact = ini[f"damage_fx_{variant}_impact"] / 1000
+        fade = ini[f"damage_fx_{variant}_fade"] / 1000
+        timeline = entry["timeline"]
+        assert timeline["DURATION"] == pytest.approx(total), "整段寿命 = total（到点摘层）"
+        assert timeline["IMPACT"] == pytest.approx(impact)
+        assert timeline["LAUNCH"] == pytest.approx(impact - flight), "出鞘 = 命中 - 飞行"
+        assert timeline["NUM_LIFE"] == pytest.approx(total - impact), "飘字活到整段结束"
+        assert 0 < timeline["CHARGE"] < timeline["LAUNCH"], "剑意凝聚必须在出鞘之前"
+        assert entry["variant"]["flight"] == pytest.approx(flight)
+        assert entry["variant"]["fadeStart"] == pytest.approx(impact + 0.25 * fade), (
+            "淡出起点 = 命中 + fade 的 25%"
+        )
+        assert entry["variant"]["fadeEnd"] == pytest.approx(impact + fade), (
+            "刀痕散尽 = 命中 + fade（不能照搬 export 档的 4.6 → 9.2 秒）"
+        )
+    assert probe["resolved"]["3"]["variant"]["strobe"] == pytest.approx(0.16)
+    assert probe["resolved"]["4"]["variant"]["strobe"] == pytest.approx(0.44)
+    assert probe["resolved"]["4"]["variant"]["split"] == 44
+    assert probe["resolved"]["1"]["variant"]["strobe"] == 0
+    assert probe["resolved"]["2"]["variant"]["split"] == 0
+
+    clamps = probe["clamps"]
+    assert clamps["total"] == 2200, "单档总时长上限 2200（超过会挡住牌桌）"
+    assert clamps["impact"] == 400, "impact ≤ total"
+    assert clamps["flight"] == 300, "flight ≤ impact"
+    assert clamps["fade"] == 200, "impact + fade ≤ total（否则层摘了刀痕还没散）"
+    assert clamps["missing"] == {
+        "total": 1600,
+        "flight": 130,
+        "impact": 330,
+        "fade": 700,
+        "strobe": 0,
+        "split": 0,
+    }, "只改一个键，其余退回内置默认"
+    assert clamps["junk"]["total"] == 1650 and clamps["junk"]["flight"] == 125, (
+        "非法值（非数字 / 负数）退回内置默认"
+    )
+    assert clamps["tunedTotal"] == pytest.approx(1.6), "把 4 点档 total 改成 1600 ⇒ 整段 1.6s"
+    assert clamps["exportUntouched"] == 12, "export 档的 12 秒链一字不动（截图 / 导片依赖它）"
 
 
 def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> None:

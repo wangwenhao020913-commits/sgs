@@ -63,7 +63,8 @@
   };
 
   /* -------------------------------------------------------- 时间轴本体 ----
-   * 12 秒是素材库默认时长。游戏内只播到 2.5~3 秒（见 README）。 */
+   * 12 秒是素材库默认时长（`export` 档）。牌桌上的 `game` 档由 `anim.ini` 的
+   * `damage_fx_*` 每档各给一套（票 04），解算见 `gameTiming`。 */
   var T = {
     DURATION: 12.0,
     CHARGE:   0.18,   // 剑意开始凝聚
@@ -71,6 +72,32 @@
     IMPACT:   0.64,   // 劈中
     NUM_LIFE: 1.50    // 飘字存活
   };
+
+  /* ------------------------------------------------------- 游戏档时长表 ----
+   * `anim.ini` 的 19 个键的**内置默认**（磁盘副本在 `tools/sgs_web/static/anim.ini`；
+   * 缺键 / 解析失败 / 传进来的值不是有限数 ⇒ 退回这里）。这里是 JS 侧**唯一**一份，
+   * `anim.js` 不再抄一遍——它只负责把 ini 读进 `animConfig`，效果层原样转交。
+   *
+   * 每档四个时长各自独立：改 `damage_fx_4_total` 只动 4 点档，不会牵动 1~3 点档。 */
+  var TIMING_PREFIX = 'damage_fx_';
+  var DEFAULT_TIMING = {
+    damage_fx_1_total: 1500, damage_fx_1_flight: 130,
+    damage_fx_1_impact: 330, damage_fx_1_fade: 700,
+    damage_fx_2_total: 1650, damage_fx_2_flight: 125,
+    damage_fx_2_impact: 330, damage_fx_2_fade: 750,
+    damage_fx_3_total: 1850, damage_fx_3_flight: 120,
+    damage_fx_3_impact: 340, damage_fx_3_fade: 850,
+    damage_fx_3_strobe: 160,
+    damage_fx_4_total: 2100, damage_fx_4_flight: 110,
+    damage_fx_4_impact: 340, damage_fx_4_fade: 950,
+    damage_fx_4_strobe: 440, damage_fx_4_split: 44
+  };
+
+  /* 单档总时长上限：再长会挡住牌桌（spec §演出口径）。 */
+  var MAX_TOTAL_MS = 2200;
+
+  /* 剑意凝聚占"出鞘之前"的比例：19 个键里没有它，按 export 档的比例（0.18 / 0.52）取。 */
+  var CHARGE_RATIO = 0.35;
 
   /* ------------------------------------------------------------ 小工具 ---- */
   function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
@@ -144,6 +171,97 @@
       fadeStart: 4.8, fadeEnd: 9.2
     }
   };
+
+  /* ================================================================
+   * 两档时间轴：`export`（素材库 12s，截图 / 导片用）与 `game`（牌桌，四档各一套）
+   * ============================================================== */
+
+  function copy(base, extra) {
+    var out = {};
+    for (var key in base) {
+      if (Object.prototype.hasOwnProperty.call(base, key)) out[key] = base[key];
+    }
+    for (var more in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, more)) out[more] = extra[more];
+    }
+    return out;
+  }
+
+  /* 从 `raw` 取一个毫秒数：不是有限非负数就退回 `fallback`（= 本文件的内置默认）。 */
+  function millis(raw, key, fallback) {
+    if (raw && Object.prototype.hasOwnProperty.call(raw, key)) {
+      var value = Number(raw[key]);
+      if (isFinite(value) && value >= 0) return value;
+    }
+    return fallback;
+  }
+
+  /* `export` 档：参考实现的 12 秒链，`renderAt(t)` / `?still` / `?export` 三个模式走的都是它。 */
+  function exportClock(variantId) {
+    var id = clamp(Math.round(variantId || 1), 1, 4);
+    return { id: id, profile: 'export', timeline: T, variant: VARIANTS[id], ms: null };
+  }
+
+  /* `game` 档：把 `anim.ini` 的 19 个键解成一档**秒**时间轴 + 档位参数。
+   *
+   * 钳制四条（票 04 §做法 2 + 收口补的一条）：`total ≤ 2200`、`flight ≤ impact ≤ total`、
+   * `impact + fade ≤ total`（否则层都摘了刀痕还在，等于白设）。刀痕按
+   * "命中 + fade 的 25% 起淡、命中 + fade 散尽"给（不能照搬 export 档的 4.6 → 9.2 秒，
+   * 否则层都摘了刀痕还在）。`strobe` 只覆盖 3 / 4 点，`split` 只有 4 点有——缺键时取
+   * `VARIANTS` 里那一档的原值。
+   *
+   * **不压缩时间**：返回的是真常量（秒），不是 `t * k`。音效是另一条时钟（票 06），
+   * 两边必须读同一份 `timeline` 才不会漂。
+   */
+  function gameTiming(variantId, raw) {
+    var id = clamp(Math.round(variantId || 1), 1, 4);
+    var base = VARIANTS[id];
+    function key(field) { return TIMING_PREFIX + id + '_' + field; }
+    var total = Math.min(
+      millis(raw, key('total'), DEFAULT_TIMING[key('total')]), MAX_TOTAL_MS
+    );
+    var impact = clamp(millis(raw, key('impact'), DEFAULT_TIMING[key('impact')]), 0, total);
+    var flight = clamp(millis(raw, key('flight'), DEFAULT_TIMING[key('flight')]), 0, impact);
+    // 刀痕必须在层被摘掉之前散尽：`impact + fade ≤ total`（票 04 §做法 2 补的一条钳制）。
+    var fade = clamp(
+      millis(raw, key('fade'), DEFAULT_TIMING[key('fade')]),
+      0,
+      Math.max(0, total - impact)
+    );
+    var strobe = clamp(millis(raw, key('strobe'), base.strobe * 1000), 0, total);
+    var split = Math.max(0, millis(raw, key('split'), base.split));
+    var timeline = {
+      DURATION: total / 1000,
+      LAUNCH: (impact - flight) / 1000,
+      IMPACT: impact / 1000,
+      // 飘字活到整段结束（命中之后那一段），淡出留给 `drawNumber` 自己的 60ms 尾。
+      NUM_LIFE: Math.max(0.001, (total - impact) / 1000)
+    };
+    timeline.CHARGE = timeline.LAUNCH * CHARGE_RATIO;
+    return {
+      id: id,
+      profile: 'game',
+      timeline: timeline,
+      ms: {
+        total: total, flight: flight, impact: impact, fade: fade,
+        strobe: strobe, split: split
+      },
+      variant: copy(base, {
+        flight: flight / 1000,
+        strobe: strobe / 1000,
+        split: split,
+        fadeStart: timeline.IMPACT + 0.25 * fade / 1000,
+        fadeEnd: timeline.IMPACT + fade / 1000
+      })
+    };
+  }
+
+  /* 本实例用哪一档钟：`profile` 缺省 = `export`（素材库那条链一字不动）。 */
+  function clockFor(opts) {
+    return opts && opts.profile === 'game'
+      ? gameTiming(opts.variant, opts.timing)
+      : exportClock(opts && opts.variant);
+  }
 
   /* ================================================================
    * 宣纸舞台
@@ -495,14 +613,14 @@
   /* ================================================================
    * 剑光
    * ============================================================== */
-  function swordHead(t, variant) {
+  function swordHead(t, variant, T) {
     var k = clamp((t - T.LAUNCH) / variant.flight, 0, 1);
     return { k: k, x: lerp(SWORD_A.x, SWORD_B.x, eIn(k) * 0.25 + eOut(k) * 0.75), y: lerp(SWORD_A.y, SWORD_B.y, k) };
   }
 
-  function drawSwordLight(c, t, variant) {
+  function drawSwordLight(c, t, variant, T) {
     if (t < T.LAUNCH - 0.02 || t > T.IMPACT + 0.18) return;
-    var head = swordHead(t, variant);
+    var head = swordHead(t, variant, T);
     var ang = Math.atan2(SWORD_B.y - SWORD_A.y, SWORD_B.x - SWORD_A.x);
     var dx = Math.cos(ang), dy = Math.sin(ang);
     var px = -dy, py = dx;
@@ -610,7 +728,7 @@
   }
 
   /* 出剑前：剑意凝聚 */
-  function drawCharge(c, t, variant) {
+  function drawCharge(c, t, variant, T) {
     if (t < T.CHARGE || t > T.LAUNCH + 0.04) return;
     var k = ss(T.CHARGE, T.LAUNCH, t);
     var a = Math.sin(k * Math.PI * 0.5) * 0.9;
@@ -653,7 +771,7 @@
     return out;
   }
 
-  function drawDrops(c, drops, t) {
+  function drawDrops(c, drops, t, T) {
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i];
       var age = t - T.IMPACT;
@@ -685,7 +803,7 @@
   /* ================================================================
    * 伤害飘字
    * ============================================================== */
-  function drawNumber(c, variant, t) {
+  function drawNumber(c, variant, t, T) {
     var age = t - T.IMPACT;
     if (age < 0 || age > T.NUM_LIFE) return;
 
@@ -746,8 +864,13 @@
    * ============================================================== */
   function create(canvas, opts) {
     opts = opts || {};
-    var vId = clamp(Math.round(opts.variant || 1), 1, 4);
-    var variant = VARIANTS[vId];
+    // 本实例自己的钟：`profile: 'game'` 走 anim.ini 的四档紧凑时间轴，缺省仍是 export 档
+    // 那条 12 秒链（`renderAt(t)` / `?still` / `?export` 三个模式逐字节不变）。
+    var clock = clockFor(opts);
+    var vId = clock.id;
+    // `var T` 遮蔽模块级的 export 时间轴：`create` 内部的所有函数都读实例的这一份。
+    var T = clock.timeline;
+    var variant = clock.variant;
     var seed = 1700 + vId * 977;
     var dpr = opts.dpr || 1;
 
@@ -836,13 +959,13 @@
             c.restore();
           }
         }
-        drawDrops(c, drops, t);
+        drawDrops(c, drops, t, T);
       }
       c.restore();
 
       // ---- 剑意 / 剑光 / 命中光（画在牌之上）----
-      drawCharge(c, t, variant);
-      drawSwordLight(c, t, variant);
+      drawCharge(c, t, variant, T);
+      drawSwordLight(c, t, variant, T);
 
       if (age >= 0 && age < 0.34) {
         var ba = Math.pow(1 - age / 0.34, 1.8);
@@ -855,7 +978,7 @@
         c.beginPath(); c.arc(SWORD_B.x, SWORD_B.y, BR, 0, Math.PI * 2); c.fill();
       }
 
-      drawNumber(c, variant, t);
+      drawNumber(c, variant, t, T);
       c.restore();
     }
 
@@ -990,11 +1113,18 @@
       }
     }
 
-    return { draw: draw, duration: T.DURATION, variant: vId, width: W, height: H };
+    return {
+      draw: draw, duration: T.DURATION, variant: vId, width: W, height: H,
+      profile: clock.profile, timeline: T, timing: clock.ms
+    };
   }
 
   global.SgsDamageFX = {
     create: create, VARIANTS: VARIANTS, TIMELINE: T, COLORS: C,
-    WIDTH: W, HEIGHT: H, SRC: SRC, DST: DST
+    WIDTH: W, HEIGHT: H, SRC: SRC, DST: DST,
+    // 票 04：游戏档的时长表。`DEFAULT_TIMING` = anim.ini 那 19 个键的内置默认，
+    // `gameTiming(variant, flatMap)` = 解算 + 钳制后的秒级时间轴（effects.js / 票 06 读它）。
+    DEFAULT_TIMING: DEFAULT_TIMING, MAX_TOTAL_MS: MAX_TOTAL_MS,
+    TIMING_PREFIX: TIMING_PREFIX, gameTiming: gameTiming
   };
 })(window);

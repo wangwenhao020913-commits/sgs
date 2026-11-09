@@ -539,3 +539,36 @@ function applyRecordEffects(record, querySeat) {
   markActing(record.actor);
   drawTargetLines(record.actor, record.targets || []);
 }
+
+/* -------------------------------------------------- 无属性伤害演出（damage-fx 票 04） */
+
+/** 一档演出要读的六个量；键名 = `damage_fx_<档>_<字段>`（见 `anim.ini` 的那 19 行）。
+ *
+ * 每档四个时长（`total` / `flight` / `impact` / `fade`）**各自独立**，改 4 点档不会牵动
+ * 1~3 点档；`strobe` 只有 3 / 4 点有，`split` 只有 4 点有。
+ */
+const DAMAGE_FX_TIMING_FIELDS = ["total", "flight", "impact", "fade", "strobe", "split"];
+
+/** 从生效中的 `anim.ini` 表取**某一档**的时长（毫秒），原样交给 `SgsDamageFX`。
+ *
+ * **这里不给兜底值、也不钳制**：内置默认（`SgsDamageFX.DEFAULT_TIMING`）与四条钳制
+ * （`total ≤ 2200` / `flight ≤ impact ≤ total` / `impact + fade ≤ total`）都住在
+ * `fx-core.js` —— 它是时间轴语义的唯一拥有者，前端这一侧只负责"把用户改的数字搬过去"。
+ * 缺键 ⇒ 不放进返回的表 ⇒ fx-core 退默认（`anim.ini` 删一行不该让页面报错）。
+ *
+ * 票 05 的播放器把它交给 `SgsDamageFX.create(canvas, {variant, profile: "game", timing})`；
+ * 票 06 的音效读 fx-core 解算后的同一份 `timeline`，两条时钟因此不会漂。
+ */
+function damageFxTiming(variant) {
+  const timing = {};
+  if (typeof animTiming !== "function") return timing;
+  const id = Math.max(1, Math.min(4, Math.round(Number(variant) || 1)));
+  for (const field of DAMAGE_FX_TIMING_FIELDS) {
+    const key = `damage_fx_${id}_${field}`;
+    const value = animTiming(key);
+    if (value !== undefined && value !== null && Number.isFinite(Number(value))) {
+      timing[key] = Number(value);
+    }
+  }
+  return timing;
+}
