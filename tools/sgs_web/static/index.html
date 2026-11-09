@@ -419,6 +419,10 @@
 <script src="replay.js"></script>
 <!-- U4-01（D1）：飞行层。必须排在 main.js 之前：test_web_static 契约要求 main.js 是清单最后一份。 -->
 <script src="anim.js"></script>
+<!-- damage-fx 票 03：剑光演出的画面（fx-core.js）+ 现场合成音效（sfx.js）。
+     两份都是普通脚本（零依赖、零外部资源、不改 DOM、不发请求），仍是「main.js 最后」。 -->
+<script src="fx-core.js"></script>
+<script src="sfx.js"></script>
 <script src="main.js"></script>
 </body>
 </html>

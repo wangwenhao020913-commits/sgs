@@ -702,6 +702,43 @@ def test_session_playback_hook_measures_source_before_render_and_launches_after(
     assert launch > body.find("renderProcessing()"), "落点必须在 renderProcessing 重绘之后量"
 
 
+# ---------------------------------------------------------------------------
+# damage-fx 票 03：剑光演出的两个纯静态脚本进清单
+#
+# 参考实现（`.scratch/damage-fx/reference/`）搬进 `static/` 时只有两处必须变：
+# 1. `"use strict";` 从 IIFE **内部**挪到文件第一条语句（U1-00 的清单契约）；
+# 2. 全局名照旧（`window.SgsDamageFX` / `window.SgsSfx`），不改成 ESM。
+# 两份都必须是**纯静态**脚本：零依赖、零外部资源、不改 DOM、不发请求——它们是画布 / 声音
+# 生成器，接管牌桌是票 05 的事（`effects.js`）。
+# ---------------------------------------------------------------------------
+
+_DAMAGE_FX_GLOBALS = {"fx-core.js": "SgsDamageFX", "sfx.js": "SgsSfx"}
+
+
+def test_damage_fx_scripts_keep_their_global_names_and_stay_static() -> None:
+    """两份脚本都在清单里、排在 `main.js` 之前、按普通脚本导出全局名，且不发请求。"""
+    srcs = _script_srcs()
+    assert srcs[-1] == "main.js", "清单契约的先决条件：main.js 仍是最后一份"
+    for name, global_name in _DAMAGE_FX_GLOBALS.items():
+        assert name in srcs, f"index.html 必须加载 {name}：{srcs}"
+        assert srcs.index(name) < srcs.index("main.js"), f"{name} 必须排在 main.js 之前"
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert re.search(rf"global\.{global_name}\s*=\s*\{{", text), (
+            f"{name} 必须把入口挂在 window.{global_name}（参考实现的全局名，不改成 ESM）"
+        )
+        assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", text), (
+            f"{name} 是纯静态脚本：不发请求（素材库那套壳子不进牌桌）"
+        )
+        assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", text), (
+            f"{name} 不接管 DOM（覆盖层与挂载是票 05 / effects.js 的事）"
+        )
+    fx_core = (STATIC_DIR / "fx-core.js").read_text(encoding="utf-8")
+    block = re.search(r"var VARIANTS = \{(?P<body>.*?)\n  \};", fx_core, re.S)
+    assert block is not None, "fx-core.js 里找不到 VARIANTS 表"
+    keys = {int(match.group(1)) for match in re.finditer(r"^    (\d): \{$", block.group("body"), re.M)}
+    assert keys == {1, 2, 3, 4}, f"VARIANTS 必须恰好四档（1~4），实际：{sorted(keys)}"
+
+
 def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
     """`anim.ini` = D8 的 13 个键；`flight_stage_out = 0`；`debug_scale` 不进产品。"""
     text = _ANIM_INI.read_text(encoding="utf-8")
