@@ -1396,6 +1396,7 @@ def _manifest_steps(
     steps = [
         Step(
             name="card",
+            kind="card",
             zones=tuple(zone for zone in _SOURCE_ZONE_ORDER if zone in zones_used),
             min=count,
             max=count,
@@ -1436,6 +1437,7 @@ def _manifest_steps(
     steps.append(
         Step(
             name="seat",
+            kind="seat",
             min=1,
             max=max(row_max for _when, _options, row_max in rows),
             pool=tuple(

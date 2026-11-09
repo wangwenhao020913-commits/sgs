@@ -4145,6 +4145,41 @@ def _guohuo_doubt_round(host: Any, frame: Any, owner: int) -> tuple[Control, boo
     return None, False
 
 
+def _pick_window_source_card(
+    host: Any,
+    frame: Any,
+    owner: int,
+    timing: Timing,
+    *,
+    ask_owner: str,
+    key: str,
+    zones: tuple[Zone, ...],
+) -> Any:
+    """窗口提供者共用的「从自己的某几个区里**牌面直选一张**源牌」那一问。
+
+    两个用户同一形状、只差参数：蛊惑段 1（:func:`_guohuo_pick_card`，只收手牌）与
+    界【渐营】② 的窗口受理（:func:`jie_jianying_provider`，手牌 ∪ 装备区）。出牌阶段那
+    一问两条技能都由各自的 `PickCards` 步承担（预发动清单画得出），故这里是**窗口那一侧
+    唯一**的选源牌实现：`ask_selection` 的帧内答案缓存、只读牌面（`reveal_hand`）与
+    "一张"的语义都只写一遍。
+
+    返回 ``card_id`` / ``None``（池为空，零张）/ ``SUSPEND``（挂起）；``ask_owner`` 是
+    手写询问位置（票 22 的登记），``key`` 是帧内答案缓存键，两者都**不是** ``skill_id``。
+    """
+    picked = host.ask_selection(
+        frame,
+        owner=ask_owner,
+        key=key,
+        actor=owner,
+        timing=timing,
+        spec=SelectionSpec(zones=zones, total=(1, 1)),
+        build_face=lambda: host.selection_face(owner, zones, reveal_hand=True),
+    )
+    if host.suspended(picked):
+        return picked
+    return None if not picked else int(picked[0])
+
+
 def _guohuo_pick_card(host: Any, frame: Any, owner: int, timing: Timing) -> Any:
     """提供者入口的段 1：扣置哪一张手牌 —— 自己的手牌，**牌面直选**。
 
@@ -4154,18 +4189,15 @@ def _guohuo_pick_card(host: Any, frame: Any, owner: int, timing: Timing) -> Any:
     返回 ``card_id`` / ``None``（池为空，零张）/ ``SUSPEND``（挂起）。池为空只有一种成因：
     手里没牌时提供者不产候选，故这里按"整条取消"处理。
     """
-    picked = host.ask_selection(
+    return _pick_window_source_card(
+        host,
         frame,
-        owner=_ASK_GUOHUO_CARD,
+        owner,
+        timing,
+        ask_owner=_ASK_GUOHUO_CARD,
         key="guohuo:card",
-        actor=owner,
-        timing=timing,
-        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
-        build_face=lambda: host.selection_face(owner, (Zone.HAND,), reveal_hand=True),
+        zones=(Zone.HAND,),
     )
-    if host.suspended(picked):
-        return picked
-    return None if not picked else int(picked[0])
 
 
 def _guohuo_kouchu(host: Any, frame: Any, owner: int) -> Control:
@@ -6964,15 +6996,38 @@ def _jie_jianying_target_product(
     )
 
 
+_JIE_JIANYING_PLAN_KEY = "jie_jianying_target_plan"
+"""帧私有缓存键：**这一次渲染 / 这一次执行**的 :class:`_JieJianyingTargets`。
+
+三个读取方（``lo`` / ``hi`` / ``pool``）在一次清单渲染里各自被喂同一个帧替身
+（``_with_answers`` 的产物），故缓存落在帧私有 ``data`` 上就自然"一次求值、三处共用"。
+不新增协议字段、不进记录流（帧载荷不进帧记录）。
+"""
+
+
 def _jie_jianying_plan_from_frame(
     state: GameState, frame: Any, owner: int
 ) -> _JieJianyingTargets | None:
-    """帧上前序答案（``preactivation_answers`` 通道）→ 目标计划；答案还不全 ⇒ ``None``。"""
-    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
+    """帧上前序答案（``preactivation_answers`` 通道）→ 目标计划；答案还不全 ⇒ ``None``。
+
+    **一次求值三处共用**（评审 Fix 5）：计划由"重造产物 + ``check_targets``"得到，不便宜；
+    而清单渲染同一个前序组合要问三次（``pool`` / ``lo`` / ``hi``）。故按帧私有键缓存，
+    命中条件是**同一份答案对象**（``is``，不是相等）——``run_flow`` 每次重入都新写一份
+    ``preactivation_answers``，执行器那条因此每次重入仍按活状态重算，与缓存前逐字节一致；
+    同一次渲染里的三次读取共用同一份答案，只算一次。
+    """
+    data = getattr(frame, "data", None)
+    if not isinstance(data, dict):  # 防线：没有可写帧载荷的替身 ⇒ 不缓存，照旧现算
+        data = None
+    answers = (data or {}).get("preactivation_answers") or {}
+    cached = (data or {}).get(_JIE_JIANYING_PLAN_KEY)
+    if cached is not None and cached[0] is answers:
+        return cached[1]
     product = _jie_jianying_target_product(state, owner, answers)
-    if product is None:
-        return None
-    return _jie_jianying_targets(state, owner, product)
+    plan = None if product is None else _jie_jianying_targets(state, owner, product)
+    if data is not None:
+        data[_JIE_JIANYING_PLAN_KEY] = (answers, plan)
+    return plan
 
 
 def _jie_jianying_target_pool(
@@ -7075,7 +7130,8 @@ _ASK_JIE_JIANYING_CARD = "hero.jie_jushou_mobile.jianying.card"
 """手写询问位置（票 22）：窗口里的"选哪张源牌"。
 
 出牌阶段那一问由 :data:`JIE_JIANYING_FLOW` 的 `PickCards` 承担（预发动把这一步画进清单）；
-窗口没有清单，故这一侧手写——与【蛊惑】段 1（:func:`_guohuo_pick_card`）同形。
+窗口没有清单，故这一侧手写——实现与【蛊惑】段 1 共用 :func:`_pick_window_source_card`
+（只差区域：这里手牌 ∪ 装备区）。
 """
 
 
@@ -7199,24 +7255,22 @@ def jie_jianying_provider(host: Any, frame: Any, actor: int, timing: Timing) -> 
     if type_id is None:  # 候选期已按同一份闭集挡过；走到这里就是窗口写错了
         provider_give_up(frame)
         return None
-    picked = host.ask_selection(
+    picked = _pick_window_source_card(
+        host,
         frame,
-        owner=_ASK_JIE_JIANYING_CARD,
+        actor,
+        timing,
+        ask_owner=_ASK_JIE_JIANYING_CARD,
         key="jie_jianying:card",
-        actor=actor,
-        timing=timing,
-        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
-        build_face=lambda: host.selection_face(
-            actor, (Zone.HAND, Zone.EQUIP), reveal_hand=True
-        ),
+        zones=(Zone.HAND, Zone.EQUIP),
     )
     if host.suspended(picked):
         return "stay"
-    if not picked:  # 一张源牌都没有：这次响应没发生（零副作用，窗口照常继续问真牌）
+    if picked is None:  # 一张源牌都没有：这次响应没发生（零副作用，窗口照常继续问真牌）
         provider_give_up(frame)
         return None
     product = _jie_jianying_product(
-        state, int(picked[0]), type_id, _jie_jianying_previous_card(state, actor)
+        state, picked, type_id, _jie_jianying_previous_card(state, actor)
     )
     provider_deliver(frame, product)
     if is_own_play_phase(state, actor):

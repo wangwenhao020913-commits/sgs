@@ -224,7 +224,7 @@
 | `modes` | 这一次响应算**使用**还是**打出**（`RespondMode`；空 = 不是使用 / 打出） |
 | `required` | 要哪张牌（带上代码侧真源的名字，如 `DODGE_RESPONSE_CARD` / `ctx.required`） |
 | `axis` | **需要**（`RequestAxis.REQUIRED`：不响应就按规则结算）还是**可以**（`OPTIONAL`：放弃不是"没响应"）。改判没有这一轴 |
-| `providers` / `conversion` | **谁可以参与**：提供者（产物由技能自己付清）/ 转化技（来源牌直接当这张牌）。`False` 的行必须写清理由 |
+| `providers` | **谁可以参与**：提供者（产物由技能自己付清）。`False` 的行必须写清理由。转化技**没有单独一列**（2026-11 的 Standards 轴评审删掉了旧的 `conversion`）：转化参与由窗口自己的候选派生决定（`transform_preactivations` / `conversion_offers` 读技能声明），那一列没有生产读取方 |
 | `sites` | 这扇窗口在源码里的落点（`CardRequestSite`：标记类别 + 文件 + 所属 + 关键字实参指纹 + 次数） |
 | `reason` | 一行理由（`False` 的那几格这一句是必须的裁定，不是装饰） |
 
@@ -240,7 +240,7 @@
 "新加一个改判类窗口"仍然走过登记表：`WindowCause` 的闭集断言会逼它在这里加一行、当场裁定
 参与面（票 17 的 §2 表已按这一行排除【渐营】②）。
 
-**势力求助（护驾 / 激将）为什么两列都是 `False`**：`_run_lord_request` 的子窗口只收
+**势力求助（护驾 / 激将）为什么 `providers` 是 `False`**：`_run_lord_request` 的子窗口只收
 `PlayCard`，没有 `UseCard` / `ActivateSkill` 分支 ⇒ 转化与提供者的候选即便由底层
 `DODGE` / `RESPOND` 派发顺带产生，也没有人消费。要把它们接进来，先给求助窗口补受理面
 （另开票）。
@@ -266,7 +266,7 @@ extra_modifiers=(Modifier(ModifierPoint.CANDIDATES, MY_PROVIDER_WINDOWS.offers),
 漏登记 = 红）：
 
 1. **先裁六格**：`scope`（落在哪个候选语境）/ 典型 `causes` / 这份响应算使用还是打出 /
-   要哪张牌 / `axis`（需要还是可以）/ 谁参与（`providers` / `conversion`，`False` 写理由）；
+   要哪张牌 / `axis`（需要还是可以）/ 谁参与（`providers`，`False` 写理由；转化技由窗口候选派生）；
 2. 在 `CARD_REQUEST_WINDOWS` 里加一行；它必须认领至少一个 `CardRequestSite`；
 3. 跑 `.venv/bin/pytest -q tests/test_card_request_windows.py`：红行会打印"未登记的站点"
    （`kind :: path :: 所属 :: 指纹`）——把那一行**逐字**抄进 `sites`（`fingerprint` 由扫描器

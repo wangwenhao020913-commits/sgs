@@ -151,15 +151,34 @@ function cardPreactivationManifest(pending, card) {
   return steps && steps.length ? steps : null;
 }
 
-/** 这一步选什么：`card` = 区域里的牌；`seat` = `seat:N` 闭集；`option` = 其余闭集文本。 */
+/** 这一步选什么：`card` = 区域里的牌；`seat` = `seat:N` 闭集；`option` = 其余闭集文本。
+ *
+ * **类型是服务端下发的规则级事实**（`Step.kind`，清单渲染器按步骤**声明类型**填），界面
+ * 不按载荷形状反推（`CODING_STANDARDS.md` §1：字段的读取方要读对）。反例（票 18 的评审
+ * Fix 2）：目标由牌名决定的清单里，同一个座位步有一行是"没有可选目标"
+ * （`options = []`、`max = 0`）；旧实现拿 `pool[0].options[0]` 猜类型，这一行排在**最前**
+ * 时整步被读成选项步 ⇒ :func:`preactivationNoChoiceStep` 恒假、空步不会被跳过，玩家卡在
+ * 一步点不动的东西上——正是票 18 要消掉的那条死路。
+ *
+ * 退路只给**旧载荷**（缺 `kind` 的合成夹具 / 退化清单）：判据点看**全部行**而不是第一行，
+ * 任一行有 `seat:N` 即座位步；一行候选都没有时按"非选牌步的默认真实形态"判成座位步
+ * （选项步的候选是常量、不会全空；`pool = []` 的退化座位步也走这里）。
+ */
 function preactivationStepKind(step) {
+  if (step.kind === "card" || step.kind === "seat" || step.kind === "option") {
+    return step.kind;
+  }
   if (step.zones && step.zones.length) return "card";
-  // 服务端退化掉候选索引时（`pool=()`）只能按"非选牌步的默认真实形态"判：座位步。
-  // 选项步的候选是常量、不会退化，故这条 fallback 不会把选项步误判成座位。
   if (!step.pool || !step.pool.length) return "seat";
-  const first = (step.pool[0].options || [])[0];
-  if (typeof first === "string" && first.startsWith(SEAT_PREFIX)) return "seat";
-  return "option";
+  let sawOption = false;
+  for (const row of step.pool) {
+    for (const option of (row.options || [])) {
+      if (typeof option !== "string") continue;
+      if (option.startsWith(SEAT_PREFIX)) return "seat";
+      sawOption = true;
+    }
+  }
+  return sawOption ? "option" : "seat";
 }
 
 /** 命中**前序答案**的那一行池：先找精确匹配 `when` 的，其次 `when=()` 的（与前序无关）。

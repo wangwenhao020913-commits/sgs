@@ -3139,24 +3139,42 @@ def test_caopi_fangzhu_seat_value_comes_from_the_hostile_registration() -> None:
 def test_the_jie_jianying_target_ask_is_registered_as_a_hostile_seat_step() -> None:
     """【渐营】② 的【杀】目标询问 **真的** 命中 `_HOSTILE_SEAT_STEPS`（反向对齐登记表）。
 
-    票 18 把"产物打谁"从**提交点后手写的一问**搬进流水线第 3 步，AI 填表时用的询问 id
-    因此从 ``hero.jie_jushou_mobile.jianying.target`` 变成 ``<短技能 id>:<步骤键>``
-    （`heuristic._fill_activation` 的拼法；引擎在逐步询问那条路上发的是同一口径的
-    ``flow._flow_option_id``）。登记串按 `startswith` 用 ⇒ 少一个冒号 / 沿用全限定写法就
-    永不命中、② 的【杀】静默落进"帮盟友"分支，而"表里有这一条"的断言不会红。这里按引擎
-    声明的那一步拼出 id，直接问登记表认不认它。
+    票 18 把"产物打谁"从**提交点后手写的一问**搬进流水线第 3 步，询问 id 因此从
+    ``hero.jie_jushou_mobile.jianying.target`` 变成 ``<短技能 id>:<步骤键>``。登记串按
+    ``startswith`` 用 ⇒ 少一个冒号 / 沿用全限定写法就永不命中、② 的【杀】静默落进
+    "帮盟友"分支，而"表里有这一条"的断言不会红。
+
+    询问 id **不在这里重拼**（`CODING_STANDARDS.md` §6）：它由真实产出方的两个函数给出 ——
+    SKILL 帧载荷里的 ``skill_id``（:meth:`~sgs.engine.Engine._skill_payload` 写它，本测试
+    真的调它；被动帧走 ``running_skill`` 那一档，`flow._flow_option_id` 同样认）与
+    :func:`~sgs.skills.flow._flow_option_id`（派生出短 id 与冒号）。两档都问：
+    同一步问多次时 id 补序号（``seat:0``），登记前缀必须两档都命中。
     """
+    from types import SimpleNamespace
+
     from sgs.skills.active import JIE_JIANYING, JIE_JIANYING_FLOW
+    from sgs.skills.flow import _flow_option_id
 
     seat = next(step for step in JIE_JIANYING_FLOW.steps if step.key == "seat")
-    ask_id = f"{JIE_JIANYING.rsplit('.', 1)[-1]}:{seat.key}"
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=deck_excluding(PACK),
+        rule_config=RuleConfig(player_count=2),
+    )
+    data = Engine.from_state(state, seed=1)._skill_payload(  # noqa: SLF001 - 真实写方
+        ActivateSkill(skill_id=JIE_JIANYING, answers_seq=0), 0
+    )
+    frame = SimpleNamespace(data=data)
+    ask_ids = (
+        _flow_option_id(frame, seat.key, 0, multi=False),
+        _flow_option_id(frame, seat.key, 0, multi=True),
+    )
 
-    assert ask_id.startswith(heuristic_scoring._HOSTILE_SEAT_STEPS), (
-        f"询问 id {ask_id!r} 不匹配任何登记前缀 ⇒ 座位步按'帮盟友'给分"
-    )
-    assert "jianying:" in heuristic_scoring._HOSTILE_SEAT_STEPS, (
-        "登记的是短 id 前缀（AI 填表与逐步询问共用这一口径）：换写法会让两边再次漂开"
-    )
+    assert all(
+        ask_id.startswith(heuristic_scoring._HOSTILE_SEAT_STEPS)
+        for ask_id in ask_ids
+    ), f"询问 id {ask_ids!r} 不匹配任何登记前缀 ⇒ 座位步按'帮盟友'给分"
 
 
 # ---------------------------------------------------------------------------

@@ -242,10 +242,12 @@ class StepPool(_FrozenModel):
 
 
 class Step(_FrozenModel):
-    """预发动清单的一步（W4-1）：``{name, zones, min, max, pool, order}``。
+    """预发动清单的一步（W4-1）：``{name, kind, zones, min, max, pool, order}``。
 
-    ``name`` = 步骤键（效果按它从答案里取）；``zones`` = 选牌步铺哪些区（座位步 / 选项步
-    为空）；``min`` / ``max`` = 张数区间。``max = None`` 表示"全部可选的牌"（声明面）；
+    ``name`` = 步骤键（效果按它从答案里取）；``kind`` = 这一步**选什么**（选牌 / 座位 /
+    选项，规则级事实，由渲染器按声明类型给，读取方不按载荷形状反推）；``zones`` = 选牌步
+    铺哪些区（座位步 / 选项步为空）；``min`` / ``max`` = 张数区间。``max = None`` 表示
+    "全部可选的牌"（声明面）；
     渲染器会把它解析成**当前可选牌数**（与 ``SelectionSpec.total`` 同一条解析），故下发的
     清单里通常是整数。``pool`` = 候选池（见 :class:`StepPool`）；
     ``order`` = 步骤序号（0 起）。
@@ -285,11 +287,27 @@ class Step(_FrozenModel):
     （来源牌 id 是询问者的手牌）。
     """
 
+    kind: Literal["card", "seat", "option"] | None = None
+    """这一步**选什么**的类型（`card` 选牌 / `seat` 选座位 / `option` 选选项文本）。
+
+    由渲染器按**步骤声明类型**填（:func:`sgs.skills.flow.manifest` 的
+    ``PickCards`` / ``PickProvide`` → ``card``，``PickSeats`` → ``seat``，
+    ``PickOption`` → ``option``）：这是**规则级事实**，不该由读取方按载荷形状反推。
+    反例（票 18 的评审 Fix 2）：目标由牌名决定的座位上，某一行是"没有可选目标"
+    （``options = []``、``max = 0``）；界面若拿**第一行**的 ``options[0]`` 猜类型，
+    这一行排在最前时整步会被读成选项步，于是"自动跳过空步"那一支永不触发。
+
+    缺省 ``None`` = 旧载荷（合成夹具 / 退化前的清单），读取方退回形状判据。
+    **不进记录流**（清单整体在询问字段里 ``exclude``），缺省时不序列化。
+    """
+
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)
         if not data.get("groups"):
             data.pop("groups", None)
+        if data.get("kind") is None:
+            data.pop("kind", None)
         return data
 
 

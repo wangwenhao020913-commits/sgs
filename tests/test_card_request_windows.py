@@ -516,8 +516,7 @@ def test_the_refusal_windows_are_registered_as_not_participating() -> None:
     assert row.scope is None, "改判没有候选派发（_respond 的 REJUDGE 分支在派发之前就返回）"
     assert row.modes == (RespondMode.REJUDGE,)
     assert row.axis is None, "改判既不是使用也不是打出 ⇒ 没有'需要 / 可以'这一轴"
-    assert not row.providers, "改判不让提供者参与（理由写在该行的 reason 里）"
-    assert not row.conversion, "改判不让转化参与"
+    assert not row.providers, "改判不让提供者参与（理由写在该行的 reason 里；转化技也没有受理面）"
     assert any(word in row.reason for word in ("代替", "改判")), row.reason
 
     # 行为面：改判窗口的候选里没有任何提供者候选（CANDIDATES 派发根本不发生）。

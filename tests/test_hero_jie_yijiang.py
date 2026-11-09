@@ -1790,7 +1790,7 @@ def test_jie_jianying_is_not_offered_in_the_judge_substitution_window():
     from sgs.skills.catalog import CARD_REQUEST_WINDOWS
 
     row = next(row for row in CARD_REQUEST_WINDOWS if row.key == "rejudge")
-    assert row.providers is False and row.conversion is False
+    assert row.providers is False
 
     indulgence = cards_of_type(PACK, "indulgence")[0]
     original = _basic_with_suit(Suit.HEART)

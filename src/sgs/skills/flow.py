@@ -291,8 +291,12 @@ class PickSeats:
     （``seat:0`` / ``seat:1``），故效果读到的永远是 ``answers["seat"]`` = 座位元组。
 
     ``lo`` / ``hi`` 可以是 :data:`SeatBound` 的**可调用档**（yijiang-2014-round2 票 18）：
-    按**前序答案**现算"这一步要选几个"。三个读取方（执行器 / 校验器 / 清单）都走
-    :func:`_seat_bounds` 这一份解析，故"清单说不用选"与"校验器要求选"不可能各说一套。
+    按**前序答案**现算"这一步要选几个"。**可调用档**在三个读取方（执行器
+    :func:`_flow_step_seats` / 校验器 :func:`_assign_activation` / 清单 :func:`manifest`）
+    都走 :func:`_seat_bounds` 这一份解析，故"清单说不用选"与"校验器要求选"不可能各说一套；
+    **定值档**不经过它——执行器与清单直接读字段（清单的 ``Step.min`` / ``Step.max`` 就是
+    ``lo`` / ``hi`` 原样），校验器的 :func:`_seat_bounds` 对定值档原样返回（既有技能的
+    清单与裁决逐字节不变）。
     **可调用档的步必须住在流水线末尾**：清单的逐行渲染要拿"前一步的代表答案"当键，
     把"按前序答案变个数"的步排在别人前面时，前序上下文抽样没有它的答案可用（
     :func:`_sampled_answers` 只读定值档）。
@@ -1632,6 +1636,7 @@ def card_preactivations(
         out[name] = (
             Step(
                 name="seat",
+                kind="seat",
                 min=1,
                 max=1,
                 order=0,
@@ -1640,6 +1645,7 @@ def card_preactivations(
             ),
             Step(
                 name="seat",
+                kind="seat",
                 min=1,
                 max=1,
                 order=1,
@@ -1770,6 +1776,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="card",
                     zones=step.zones,
                     min=step.lo,
                     max=maximum,
@@ -1792,6 +1799,7 @@ def manifest(
                 steps.append(
                     Step(
                         name=step.key,
+                        kind="seat",
                         min=0,
                         max=1,
                         pool=(),
@@ -1819,10 +1827,11 @@ def manifest(
                     seat_rows = []
                     bounds = []
                     break
+                row_max: int | None = None
                 if dynamic:
                     lo, hi = _seat_bounds(step, state, framed, owner, answers)
-                else:
-                    lo, hi = step.lo, step.hi  # type: ignore[assignment]
+                    row_max = hi
+                    bounds.append((lo, hi))
                 if not pool and not domains:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
@@ -1831,10 +1840,9 @@ def manifest(
                         when,
                         tuple(seat_choice(seat) for seat in pool),
                         (),
-                        hi if dynamic else None,
+                        row_max,
                     )
                 )
-                bounds.append((int(lo), int(hi)))
                 values.extend(pool)
             if multi_prior:
                 shapes = {
@@ -1856,6 +1864,7 @@ def manifest(
                 steps.append(
                     Step(
                         name=step.key,
+                        kind="seat",
                         min=required,
                         max=max((hi for _lo, hi in bounds), default=0),
                         pool=_seat_pool_rows(seat_rows),
@@ -1872,6 +1881,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="seat",
                     min=step.lo,
                     max=step.hi,
                     pool=_pool_rows(
@@ -1917,6 +1927,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="option",
                     min=1,
                     max=1,
                     pool=_pool_rows(option_rows),
@@ -1947,6 +1958,7 @@ def manifest(
             steps.append(
                 Step(
                     name=step.key,
+                    kind="card",
                     zones=step.zones,
                     min=step.lo,
                     max=min(

@@ -2748,6 +2748,60 @@ def test_the_jianying_activation_payload_defaults_to_activate() -> None:
     ], "默认值是**界面**事实：服务端候选一字不改（仍可放弃）"
 
 
+def test_the_jianying_manifest_steps_carry_an_explicit_kind() -> None:
+    """界【渐营】② 的清单每步都下发 ``Step.kind`` —— 读取方 = `preactivation.js:preactivationStepKind`。
+
+    跨线契约的**服务端那一半**（`CODING_STANDARDS.md` §6：读取方断言要在真实产出路径上跑）：
+    这里走真引擎 → `preactivation_for` → `pending_payload`，读的是前端真正收到的键。
+
+    为什么必须是**显式**字段：同一个座位步里有一条"目标由牌名决定"的行
+    （``options = []``、``max = 0``）；界面若拿第一行的 ``options[0]`` 猜"这一步选什么"，
+    那一行排到最前时整步会被读成**选项步**，于是"自动跳过空步"那一支永不触发（票 18 的
+    死路）。故这一份清单同时钉两件事：三步的类型，以及"空行真的存在"这个前提。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    bow = cards_of_type(pack, "qilin_bow")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            # hp < hp_max ⇒ 【桃】此刻可用 ⇒ 第 3 步多出一行"目标由牌名决定"的空行。
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(bow,), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=deck_excluding(pack, bow),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    for _ in range(400):
+        if engine.pending is not None:
+            break
+        engine._step()  # noqa: SLF001 - 与 test_hero_jie_yijiang 的推进器同一手法
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE and query.actor == 0
+
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=4)
+    session.engine = engine
+    session.human_seat = 0
+    payload = pending_payload(session)
+
+    steps = (payload["preactivations"] or {})[JIE_JIANYING]
+    assert [step["kind"] for step in steps] == ["card", "option", "seat"], (
+        "三步各自的**类型**要显式下发（选牌 → 选牌名 = 选项步 → 选座位；"
+        f"实得 {[step.get('kind') for step in steps]}）"
+    )
+    empty_rows = [
+        row for row in steps[2]["pool"] if row.get("max") == 0 and not row.get("options")
+    ]
+    assert empty_rows, (
+        "前提：清单里有『没有可选目标』的行——正是按形状猜类型会误判的那一行"
+        f"（实得 {steps[2]['pool']}）"
+    )
+
+
 def test_other_activation_payloads_do_not_carry_a_default_choice() -> None:
     """其余「是否发动」**没有**这个字段（不是发 null）：只有显式声明的技能才变。
 
@@ -4575,7 +4629,11 @@ def test_the_pending_payload_carries_the_play_phase_preactivations() -> None:
     assert [step["name"] for step in steps] == ["card", "seat"]
     assert [step["order"] for step in steps] == [0, 1]
     # W4-fix-3：`wording` = 声明上的 `step_requirements`（界面据此画这一问的人话）。
-    assert set(steps[0]) == {"name", "zones", "min", "max", "pool", "order", "wording"}
+    # `kind`（评审 Fix 2）= 这一步**选什么**：类型是规则级事实、由服务端按步骤声明类型
+    # 下发，读取方 = `preactivation.js:preactivationStepKind`（不再按 `pool[0].options[0]`
+    # 猜——目标由牌名决定的空行排最前时会猜错）。
+    assert set(steps[0]) == {"name", "kind", "zones", "min", "max", "pool", "order", "wording"}
+    assert [step["kind"] for step in steps] == ["card", "seat"]
     assert steps[0]["wording"] == "选择任意张要交给其他角色的手牌"
     assert steps[0]["zones"] == ["hand"]
     assert steps[0]["max"] >= steps[0]["min"] >= 1

@@ -3567,7 +3567,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 # 1. :data:`CARD_REQUEST_WINDOWS` = **代码侧唯一真源**：每一扇"要牌"窗口一行，写清
 #    ``scope``（候选派发落在哪个语境）、``causes``（窗口成因）、``modes``（这一次响应算
 #    使用还是打出）、``required``（要哪张牌）、``axis``（"需要"还是"可以"），以及**谁可以
-#    参与**（``providers`` / ``conversion``）+ 一行理由；
+#    参与**（``providers``；转化技由窗口自己的候选派生决定，不设列）+ 一行理由；
 # 2. :func:`is_card_request` / :func:`required_card` = **一处判据**（【蛊惑】的提供者分支与
 #    之后的转化技共用，不再各自手抄一份）；
 # 3. :class:`ProviderWindows` = 提供者只声明"我在哪些窗口参与"，候选追加共用一份实现
@@ -3635,9 +3635,11 @@ class CardRequestWindow:
     - ``modes``：这一次响应算**使用**还是**打出**（空 = 不是使用 / 打出，例如改判 / 非窗口）；
     - ``required``：要哪张牌（带上代码侧真源的名字，便于对着源码核）；
     - ``axis``：需要 / 可以（见 :class:`RequestAxis`；``None`` = 不是使用 / 打出窗口）；
-    - ``providers`` / ``conversion``：**谁可以参与**——提供者（产物由技能自己付清，窗口只
-      负责消费）与转化技（来源牌直接当这张牌用）；``False`` 的行必须写理由，说明"为什么
-      不让它参与"或"候选会被生成但没人消费"；
+    - ``providers``：**谁可以参与**——提供者（产物由技能自己付清，窗口只负责消费）；
+      ``False`` 的行必须写理由，说明"为什么不让它参与"或"候选会被生成但没人消费"。
+      转化技**不另设一列**（2026-11 的 Standards 轴评审）：转化参与由窗口自己的候选派生
+      决定（``transform_preactivations`` / ``conversion_offers`` 读技能声明），这一列没有
+      任何生产读取方——留着就是"没有读取方的一般性"；
     - ``sites``：这扇窗口在源码里的落点；``reason``：一句话理由（``False`` 的行这一句是
       必须的裁定，不是装饰）。
     """
@@ -3651,7 +3653,6 @@ class CardRequestWindow:
     required: str
     axis: RequestAxis | None
     providers: bool
-    conversion: bool
     sites: tuple[CardRequestSite, ...]
     reason: str
 
@@ -3714,7 +3715,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【闪】 / DODGE_RESPONSE_CARD",
         axis=RequestAxis.REQUIRED,
         providers=True,
-        conversion=True,
         sites=(
             CardRequestSite(
                 kind="dispatch",
@@ -3751,7 +3751,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【闪】（万箭）/ required='dodge'",
         axis=RequestAxis.REQUIRED,
         providers=True,
-        conversion=True,
         sites=(
             _RESPOND_DISPATCH,
             _RESIST_ASK,
@@ -3775,7 +3774,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【桃】（濒死自救时含【酒】）/ PEACH_RESPONSE_CARD",
         axis=RequestAxis.OPTIONAL,
         providers=True,
-        conversion=True,
         sites=(
             CardRequestSite(
                 kind="dispatch",
@@ -3812,7 +3810,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【杀】族 / required='slash'",
         axis=RequestAxis.REQUIRED,
         providers=True,
-        conversion=True,
         sites=(_RESPOND_DISPATCH, _RESIST_ASK, _RESIST_ACCEPT),
         reason=(
             "需要：不响应就受 1 点伤害。提供者（激将 / 蛊惑）与转化（武圣 / 龙胆类）都在"
@@ -3829,7 +3826,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【杀】族 / required='slash'",
         axis=RequestAxis.REQUIRED,
         providers=True,
-        conversion=True,
         sites=(
             _RESPOND_DISPATCH,
             CardRequestSite(
@@ -3859,7 +3855,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【杀】族 / SLASH_FAMILY_KEY",
         axis=RequestAxis.OPTIONAL,
         providers=True,
-        conversion=True,
         sites=(
             _RESPOND_DISPATCH,
             CardRequestSite(
@@ -3910,7 +3905,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【杀】族 / LUANWU_RESPONSE_CARD",
         axis=RequestAxis.OPTIONAL,
         providers=True,
-        conversion=True,
         sites=(
             _RESPOND_DISPATCH,
             CardRequestSite(
@@ -3953,7 +3947,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【无懈可击】 / NULLIFY_RESPONSE_CARD",
         axis=RequestAxis.OPTIONAL,
         providers=True,
-        conversion=True,
         sites=(
             _RESPOND_DISPATCH,
             CardRequestSite(
@@ -3988,7 +3981,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【闪】 / skill.required（声明 = 'dodge'）",
         axis=RequestAxis.OPTIONAL,
         providers=False,
-        conversion=False,
         sites=(
             CardRequestSite(
                 kind="declaration",
@@ -4026,7 +4018,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="【杀】族 / skill.required（声明 = 'slash'）",
         axis=RequestAxis.OPTIONAL,
         providers=False,
-        conversion=False,
         sites=(
             CardRequestSite(
                 kind="declaration",
@@ -4061,7 +4052,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="任意可改判的牌 / required=None（判据是颜色 / 牌名）",
         axis=None,
         providers=False,
-        conversion=False,
         sites=(
             CardRequestSite(
                 kind="preview",
@@ -4097,7 +4087,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="调用方给的 type_id",
         axis=None,
         providers=False,
-        conversion=True,
         sites=(
             CardRequestSite(
                 kind="dispatch",
@@ -4122,7 +4111,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="ctx.respond_required（窗口事实透传）",
         axis=None,
         providers=False,
-        conversion=False,
         sites=(
             CardRequestSite(
                 kind="dispatch",
@@ -4146,7 +4134,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="ctx.required（窗口事实透传）",
         axis=None,
         providers=False,
-        conversion=False,
         sites=(_RESPOND_TARGET_COUNT,),
         reason=(
             "**不是窗口**：与上一行同形——真牌候选的额定目标数链读窗口事实，不产生候选。"
@@ -4162,7 +4149,6 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         required="required（窗口事实透传）",
         axis=None,
         providers=False,
-        conversion=False,
         sites=(
             CardRequestSite(
                 kind="accept",

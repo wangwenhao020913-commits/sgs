@@ -2740,7 +2740,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(bare));
 
   const oneStep = [{
-    name: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+    name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
     pool: [{ when: [], options: ["52"] }],
     wording: "选择一张源牌（当作窗口要的那张基本牌）",
   }];
@@ -2783,26 +2783,30 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
  *
  * 出牌阶段那份清单的三步 =「选牌 → 选牌名 → 选目标」；第 3 步的可选目标由**牌名**决定，
  * 服务端用两格表达"要不要选"：``StepPool.max``（这一行最多选几个，``0`` = 没有可选目标）
- * 与 ``Step.min/max``。本节喂一份**与服务端同形**的合成载荷，钉住四条界面读法：
+ * 与 ``Step.min/max``。本节喂一份**与服务端同形**的合成载荷（含 ``Step.kind``），钉住六条
+ * 界面读法：
  *
  *  1. 三步都进预发动，第 2 步的置灰项画灰、不接 click（票 04 的既有通道）；
  *  2. 选了【杀】⇒ 第 3 步出现，座位按服务端给的池高亮；
  *  3. 第 3 步没填 ⇒ 「确认发动」灰着、``buildAction()`` 拼不出复合动作；填了 ⇒
  *     ``choices = ["seat:N"]``；
- *  4. 选了目标由牌名决定的【桃】⇒ 第 3 步**自动跳过**（不画空步），复合动作不带 choices。
+ *  4. 选了目标由牌名决定的【桃】⇒ 第 3 步**自动跳过**（不画空步），复合动作不带 choices；
+ *  5. 「没有可选目标」那一行排到**最前**时，步类型仍按 ``Step.kind`` 认（评审 Fix 2：
+ *     旧实现拿第一行的 ``options[0]`` 猜类型，这一行排最前 ⇒ 整步被读成选项步 ⇒ 死路）；
+ *  6. 旧载荷（没有 ``Step.kind``）的形状退路看**全部行**，同样不会掉回选项步。
  */
 {
   const source = {
     ...synthCard(52, "闪"), type: "dodge", suit: "heart", rank: 2, color: "red",
   };
   const threeSteps = [
-    { name: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+    { name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
       pool: [{ when: [], options: ["52"] }],
       wording: "选择一张牌（手牌 / 装备区）" },
-    { name: "name", min: 1, max: 1, order: 1,
+    { name: "name", kind: "option", min: 1, max: 1, order: 1,
       pool: [{ when: [], options: ["杀", "闪", "桃"], disabled: ["闪"] }],
       wording: "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）" },
-    { name: "seat", min: 1, max: 1, order: 2,
+    { name: "seat", kind: "seat", min: 1, max: 1, order: 2,
       pool: [
         { when: ["52", "杀"], options: ["seat:1", "seat:2"], max: 1 },
         { when: ["52", "桃"], options: [], max: 0 },
@@ -2821,8 +2825,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     locked: false, carrier: "HERO", available: true, preactivated: true,
     ui: { requirement: "出牌阶段限一次，你可以将一张牌当任意一张基本牌使用" },
   };
-  const open = () => {
-    const view = synthView(payload);
+  const open = (steps = threeSteps) => {
+    const view = synthView({
+      ...payload,
+      preactivations: { "hero.jie_jushou_mobile.jianying": steps },
+    });
     view.skills = [skillRow];
     view.snapshot.self_hand = [source];
     ui.state.view = view;
@@ -2895,6 +2902,37 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(peachAction.choices) === '["桃"]'
       && $("btn-submit").disabled === false,
     JSON.stringify(peachAction));
+
+  /* **危险排序**（评审 Fix 2）：同一份清单里"没有可选目标"的那一行（`max: 0`、
+   * `options: []`）排到**最前**。步的类型是服务端下发的 `Step.kind`（规则级事实），
+   * 不是从 `pool[0].options[0]` 猜出来的——旧实现拿第一行猜，这一行排最前时整步被读成
+   * 选项步 ⇒ 空步不会被跳过、`buildAction()` 也拼不出复合动作，玩家卡死在一步点不动
+   * 的东西上（票 18 要消掉的正是这条死路）。
+   *
+   * 两条判据：生产载荷（带 `kind`）与**旧载荷**（没有 `kind`，形状退路）都要跳过空步。
+   */
+  const peachFirst = [threeSteps[0], threeSteps[1], {
+    ...threeSteps[2],
+    pool: [threeSteps[2].pool[1], threeSteps[2].pool[0]],
+  }];
+  open(peachFirst);
+  clickCardStep();
+  (nameButton("桃").listeners.click || []).forEach((fn) => fn({ target: nameButton("桃") }));
+  const swapped = ui.state.preactivation;
+  check("㉿JY17 「没有可选目标」那一行排最前 ⇒ 仍按 `Step.kind` 认出座位步、空步照样跳过",
+    swapped.cursor === swapped.steps.length
+      && (ui.preactivationStepKind(swapped.steps[2]) === "seat"),
+    `cursor=${swapped.cursor}/${swapped.steps.length}`
+      + ` kind=${ui.preactivationStepKind(swapped.steps[2])}`);
+  const legacySteps = peachFirst.map(({ kind, ...rest }) => rest);
+  open(legacySteps);
+  clickCardStep();
+  (nameButton("桃").listeners.click || []).forEach((fn) => fn({ target: nameButton("桃") }));
+  const legacyPeach = ui.state.preactivation;
+  check("㉿JY18 旧载荷（没有 `Step.kind`）也照样跳过：形状退路看**全部行**而不是第一行",
+    legacyPeach.cursor === legacyPeach.steps.length,
+    `cursor=${legacyPeach.cursor}/${legacyPeach.steps.length}`
+      + ` kind=${ui.preactivationStepKind(legacyPeach.steps[2])}`);
   ui.state.sessionId = null;
 }
 
@@ -4594,7 +4632,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(jianyingView);
 
-  check("㉿JY1 界【渐营】①：默认答案 = 发动（提交键可点、不用先点技能按钮）",
+  check("㉿JY-D1 界【渐营】①：默认答案 = 发动（提交键可点、不用先点技能按钮）",
     ui.renderKind(jianying, jianying.legal_actions) === "preactivation-entry"
       && ui.state.selectedOption === null
       && $("btn-submit").disabled === false
@@ -4602,14 +4640,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `kind=${ui.renderKind(jianying, jianying.legal_actions)}`
       + ` selected=${ui.state.selectedOption} submit=${$("btn-submit").disabled}`
       + ` options=${$("t-options").children.length}`);
-  check("㉿JY2 界【渐营】①：buildAction = 候选里那条 ActivateSkill（不是 Pass、不是手拼）",
+  check("㉿JY-D2 界【渐营】①：buildAction = 候选里那条 ActivateSkill（不是 Pass、不是手拼）",
     (() => {
       const built = ui.buildAction();
       return !!built && built.kind === "ActivateSkill"
         && built.skill_id === "hero.jie_jushou_mobile.jianying"
         && jianying.legal_actions.some((a) => JSON.stringify(a) === JSON.stringify(built));
     })(), JSON.stringify(ui.buildAction()));
-  check("㉿JY3 界【渐营】①：提示条改成「点右端「提交」确认发动，或「放弃」取消」，页脚写明将提交什么",
+  check("㉿JY-D3 界【渐营】①：提示条改成「点右端「提交」确认发动，或「放弃」取消」，页脚写明将提交什么",
     $("t-target-hint").textContent.includes("提交")
       && $("t-target-hint").textContent.includes("确认发动")
       && $("t-target-hint").textContent.includes("放弃")
@@ -4619,7 +4657,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   await clickAndWait($("btn-submit"));
   const defaultSent = calls.length > beforeDefault
     ? calls[calls.length - 1].body.action : null;
-  check("㉿JY4 界【渐营】①：不点技能按钮、直接点「提交」⇒ 送出 ActivateSkill",
+  check("㉿JY-D4 界【渐营】①：不点技能按钮、直接点「提交」⇒ 送出 ActivateSkill",
     !!defaultSent && defaultSent.kind === "ActivateSkill"
       && defaultSent.skill_id === "hero.jie_jushou_mobile.jianying",
     JSON.stringify(defaultSent));
@@ -4634,7 +4672,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(otherView);
 
-  check("㉿JY5 没声明的「是否发动」仍是旧的被动入口（没有默认候选、提交键灰着）",
+  check("㉿JY-D5 没声明的「是否发动」仍是旧的被动入口（没有默认候选、提交键灰着）",
     ui.renderKind(other, other.legal_actions) === "preactivation-entry"
       && ui.buildAction() === null
       && $("btn-submit").disabled === true
@@ -4645,7 +4683,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   await clickAndWait($("btn-cancel"));
   const otherPass = calls.length > beforeOtherPass
     ? calls[calls.length - 1].body.action : null;
-  check("㉿JY6 没声明的「是否发动」点「放弃」仍送出 Pass（其余询问不变）",
+  check("㉿JY-D6 没声明的「是否发动」点「放弃」仍送出 Pass（其余询问不变）",
     !!otherPass && otherPass.kind === "Pass", JSON.stringify(otherPass));
 }
 
