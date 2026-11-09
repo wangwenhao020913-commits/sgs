@@ -51,6 +51,7 @@ from sgs_web.projection import (  # noqa: E402
     build_skills,
     concealed_by_later_reveal,
     concealed_guohuo_cards,
+    damage_events_after,
     decorate_records_card_tags,
     live_tag_deltas_after,
     pending_payload,
@@ -417,6 +418,16 @@ class GameRegistry:
                 after=after,
                 state=session.engine.state,
                 activations=session.engine.skill_activations,
+            ),
+            # damage-fx 票 02：伤害事实是**第二条派生通道**，与 `skill_events` 同姿态——
+            # 事实来源是引擎的只增缓冲 `Engine.damage_events`（票 01），共用同一个 `after`
+            # 游标 ⇒ 轮询不重复下发。`HpChangeDelta` 里没有来源与属性，剑光的起 / 落点只能
+            # 从这里读；伤害是公开事实（血条本来就公开），不按视角过滤。
+            "damage_events": damage_events_after(
+                all_records,
+                after=after,
+                state=session.engine.state,
+                events=session.engine.damage_events,
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }

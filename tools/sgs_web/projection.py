@@ -86,6 +86,7 @@ __all__ = [
     "candidate_index",
     "concealed_by_later_reveal",
     "concealed_guohuo_cards",
+    "damage_events_after",
     "decorate_records_card_tags",
     "harvest_state",
     "live_tag_deltas_after",
@@ -2944,3 +2945,74 @@ def skill_events_after(
     # 两路按记录序号合并（稳定排序：同 seq 保持"记录流在前"的既有次序）。
     events.sort(key=lambda event: event["seq"])
     return events
+
+
+def damage_events_after(
+    records: Iterable[object],
+    *,
+    after: int,
+    state: Any,
+    events: Iterable[Any] = (),
+) -> list[dict[str, Any]]:
+    """从**未裁剪**的记录流派生伤害事实（damage-fx 票 02 / spec §Solution 2）：``seq > after``
+    的那几条。
+
+    判据、游标、去重口径**与** :func:`skill_events_after` 完全一致，不另造一套：
+
+    - 事实来源是引擎的只增缓冲 ``Engine.damage_events``（票 01）——``HpChangeDelta`` 只有
+      ``seat / before / after / amount``，来源与属性那两样记录面根本没有，而剑光要从
+      "来源那张武将牌"飞到"中剑那张武将牌"；
+    - ``seq`` 是引擎在伤害数值定稿那一刻取的最后一条记录序号，故与 ``records`` 共用同一个
+      ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复下发；
+    - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
+      时才下发，超出上界的留到下一次轮询——那时 ``after`` 仍小于它的 ``seq``，``seq > after``
+      照成立，一条都不会丢；
+    - ``state`` 只用来**夹座位**（``target`` / ``source`` 必须落在本局座位里）：越界条目是坏
+      数据，宁可不下发也不让前端拿它去量一张不存在的武将牌。
+
+    **不按视角过滤**：伤害是**公开事实**（血条本来就公开），与技能名同一档。``amount`` 是
+    服务端算好的**全额**（护甲吸收的部分不减），前端不自己算、不自己减。
+
+    ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
+    （没有剑光），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
+    """
+    last_seq: int | None = None
+    for raw in records:
+        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
+        seq = record.get("seq")
+        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
+            last_seq = seq
+    seat_count = len(getattr(state, "players", ()) or ())
+    out: list[dict[str, Any]] = []
+    for event in events or ():
+        seq = getattr(event, "seq", None)
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        if last_seq is not None and seq > last_seq:
+            continue
+        target = getattr(event, "target", None)
+        amount = getattr(event, "amount", None)
+        if target is None or amount is None:
+            continue
+        source = getattr(event, "source", None)
+        source = None if source is None else int(source)
+        target = int(target)
+        if seat_count and not (
+            0 <= target < seat_count and (source is None or 0 <= source < seat_count)
+        ):
+            continue
+        nature = getattr(event, "nature", None)
+        out.append(
+            {
+                "seq": seq,
+                "source": source,
+                "target": target,
+                "amount": int(amount),
+                # `DamageNature` 是 str 枚举：读它的 `.value`；缺声明（拼点类帧）保持 `None`，
+                # 与"无属性"同义——按什么档播是前端的事，投影层不替它判。
+                "nature": None if nature is None else str(getattr(nature, "value", nature)),
+            }
+        )
+    # 同一批里多条伤害事件按记录序号排：前端"逐条播、相邻错开 120ms"（spec §演出口径）。
+    out.sort(key=lambda event: event["seq"])
+    return out
