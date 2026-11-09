@@ -2650,6 +2650,72 @@ def _flow_backed_active_ids() -> frozenset[str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# W6 / F2（yijiang-2014-round2 票 06）：A 族声明也能带钩子
+# ---------------------------------------------------------------------------
+
+
+def test_an_active_declaration_can_carry_hooks_and_a_flow_in_one_definition(monkeypatch):
+    """``ActiveSkill.hooks`` 由声明透传进**同一条** ``SkillDef``（缺省空 ⇒ A 族既有声明零改动）。
+
+    为什么必须住进**同一条**声明：``CATALOG`` 是 ``{skill_id: definition}`` 的字典推导，
+    同 id 的后者**静默覆盖**前者——下面用两条同 id 的定义把这条语义钉出来；一条声明同时带
+    钩子与 A 族流水线（界【渐营】的 ① + ②）才让两半都留下。
+    """
+    from sgs.skills import active as active_module
+    from sgs.skills.active import ActiveSkill, active_skill_definitions
+    from sgs.skills.catalog import CarrierKind, Hook, SkillDef
+    from sgs.skills.flow import PickCards, SkillFlow
+    from sgs.skills.preactivation import _build_flows
+
+    def _noop(host, frame):
+        del host, frame
+        return None
+
+    def _effect(host, frame, answers):
+        del host, frame, answers
+        return None
+
+    hook = Hook(Timing.PHASE_DRAW, handler=_noop)
+    flow = SkillFlow(
+        name="w6_f2_probe",
+        steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1),),
+        effect=_effect,
+    )
+    declaration = ActiveSkill(
+        "w6_probe",
+        "f2",
+        lambda state, context, current: current,
+        flow=flow,
+        hooks=(hook,),
+        requirement="探针：一条声明同时带钩子与 A 族流水线",
+    )
+    monkeypatch.setattr(active_module, "ACTIVE_SKILLS", (declaration,))
+
+    (definition,) = active_skill_definitions()
+
+    assert definition.skill_id == "hero.w6_probe.f2"
+    assert definition.hooks == (hook,), "缺失 F2 时这里恒为 ()（透传就是那 1 行）"
+    assert [modifier.point for modifier in definition.modifiers] == [
+        ModifierPoint.CANDIDATES
+    ], "A 族的候选挂点仍在这一份定义上"
+    flows = _build_flows(active=(declaration,), catalog={definition.skill_id: definition})
+    assert flows[definition.skill_id] == ((None, flow),), "同一份声明的非空流水线照样登记"
+
+    hooks_only = SkillDef(
+        skill_id=definition.skill_id,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        hooks=(hook,),
+    )
+    # CATALOG 的合并姿态是 `{skill_id: definition}` 的字典推导：同 id 的**后者胜**。
+    split = {item.skill_id: item for item in (definition, hooks_only)}
+    assert split[definition.skill_id] is hooks_only
+    assert split[definition.skill_id].modifiers == (), (
+        "拆成两条同 id 的声明 ⇒ 后者整条覆盖前者（这里 A 族候选挂点消失）；F2 就是修这个"
+    )
+
+
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """168 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)

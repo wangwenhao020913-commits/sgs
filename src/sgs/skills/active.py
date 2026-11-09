@@ -101,6 +101,7 @@ from sgs.timing import Timing
 from .catalog import (
     SKILL_JUDGMENT_CARD_KEY,
     HeroSkillDecl,
+    Hook,
     SkillDef,
     _GIVEN_TO_SHIFT,
     _HUANGTIAN_SHIFT,
@@ -3563,6 +3564,15 @@ class ActiveSkill(HeroSkillDecl):
     - **候选**：:func:`_limited_offers` 在"整局已用"之后不再产出候选；
     - **落位**：:func:`_activation_handler` 的提交点调
       :func:`~sgs.skills.catalog.mark_limited_skill_used`（与被动侧的执行完落位同姿态）。
+    """
+    hooks: tuple[Hook, ...] = ()
+    """这条主动技**同时带**的时机钩子（W6 票 06 的加法，缺省空 ⇒ A 族既有声明零改动）。
+
+    一条牌面可以"既有触发段、又有可主动发动的段"（界【渐营】① 钩子 + ② 主动技）：两半必须
+    住进**同一条** ``SkillDef``——``CATALOG`` 是 ``{skill_id: definition}`` 的字典推导，
+    同 id 的两条声明**后者静默覆盖前者**（于是 A 族入口或钩子整条消失，且现有断言全绿）。
+    这里留一个声明口，由 :func:`active_skill_definitions` 原样透传；钩子自己若带 ``flow``，
+    由 :data:`~sgs.skills.preactivation.FLOWS` 的派生照常登记（与被动技同一条派生）。
     """
 
     def __post_init__(self) -> None:
@@ -7212,6 +7222,8 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
                 Modifier(ModifierPoint.CANDIDATES, _limited_offers(skill, skill.offers)),
                 *skill.extra_modifiers,
             ),
+            # W6 票 06 的加法：主动技同时带的钩子原样透传（缺省空 ⇒ 既有声明零改动）。
+            hooks=skill.hooks,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             # 声明级覆盖优先（标准 / 界同短 id 但步骤次序 / 角色不同，M6 票 14）。
             step_requirements=(

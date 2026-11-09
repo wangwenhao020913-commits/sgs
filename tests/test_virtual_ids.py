@@ -15,7 +15,7 @@ from itertools import combinations
 
 import pytest
 
-from sgs.data import load_content_pack
+from sgs.data import Color, load_content_pack
 from sgs.effects import CandidateScope
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
@@ -606,3 +606,31 @@ def test_the_tail_kind_is_wire_safe_and_single_source_is_constructible_in_the_16
         if kind != WINE_KIND and kind_source_ceiling(kind, 160) >= 1
     }
     assert product.card_id not in other_kinds, "与所有旧 kind 的单源 id 两两不等"
+
+
+# ---------------------------------------------------------------------------
+# W6 / F1（yijiang-2014-round2 票 06）：牌面覆盖**不进** id 派生
+# ---------------------------------------------------------------------------
+
+
+def test_a_face_override_does_not_move_the_virtual_id():
+    """id 只由（牌名命名空间, 来源集合, 牌堆张数）派生 ⇒ ``suit`` / ``color`` 不参与。
+
+    牌面是**牌面事实**、id 是**机器键**：同一次转化无论效果把花色 / 颜色改成什么，
+    都必须是同一张虚拟牌（否则"同一组来源 ⇒ 同一张牌"的判等会分裂）。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = next(card.card_id for card in state.cards if card.suit == "heart")
+
+    plain = transformed_card(state, (source,), "slash")
+    overridden = transformed_card(
+        state, (source,), "slash", suit="club", color=Color.BLACK
+    )
+
+    assert overridden.card_id == plain.card_id, "覆盖花色 / 颜色不改 id"
+    assert (overridden.suit, overridden.color) == ("club", Color.BLACK), "确实换了牌面"
+    assert overridden.suit != plain.suit, "来源牌不是梅花 ⇒ 覆盖是**真的**覆盖"
+
+    multi_plain = transformed_card(state, (0, 1), "slash")
+    multi_overridden = transformed_card(state, (0, 1), "slash", color=Color.BLACK)
+    assert multi_overridden.card_id == multi_plain.card_id, "多源的纯颜色覆盖同样不改 id"
