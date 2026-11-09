@@ -48,6 +48,7 @@ from sgs.state import (
     SelectOptionContext,
     SelectOptions,
     SelectOptionsContext,
+    SelectOptionsQuery,
     SkillActivationContext,
     SubstituteJudgeCard,
     SlotKind,
@@ -1496,6 +1497,47 @@ def _select_option(
     return actions
 
 
+def is_legal_option_set(
+    face: SelectOptionsContext | SelectOptionsQuery, choices: Sequence[str]
+) -> bool:
+    """多选答案的**唯一**合法性谓词（yijiang-2014-round2 票 21）：池内 / 无重复 / 无置灰 /
+    长度在 ``[min_selected, cap]`` 内。
+
+    ``face`` 读 ``options`` / ``disabled`` / ``min_selected`` / ``max_selected`` 四项——
+    候选生成口（:class:`~sgs.state.SelectOptionsContext`）与询问面
+    （:class:`~sgs.state.SelectOptionsQuery`）同上同下，故两者都收：**合法集合只有这一份
+    真源**，候选枚举、不枚举档的骨架、引擎收答案、AI 自建集合、回放放行（``agents``）全走它，
+    不另写第二份判据。
+
+    口径与 :func:`_select_options` 逐条对齐：
+
+    - **池内**：每个 ``choice`` 都在 ``options`` 里（``options`` 是展示面，含置灰）；
+    - **无置灰**：``disabled`` 里的项不可选（它们留在 ``options`` 里只为画灰）；
+    - **无重复**：答案是一个**集合**，重复项不是"多选了一个"；
+    - **区间**：``min_selected <= len(choices) <= cap``，``cap`` 与候选枚举同一条算法
+      （``max_selected=None`` ⇒ 只受**可选项**数约束）。
+
+    **不比次序**：答案是集合，``choices`` 的次序不进判据（默认序 = ``options`` 序由写方
+    规范化——界面 ``pending.js:seatMultiChoices`` 与 AI 的构造器各自排好；"依次结算"是另一
+    档，将来有技能要它时再开票）。
+    """
+    options = tuple(face.options)
+    disabled = frozenset(face.disabled)
+    usable = tuple(option for option in options if option not in disabled)
+    cap = (
+        len(usable)
+        if face.max_selected is None
+        else min(int(face.max_selected), len(usable))
+    )
+    chosen = tuple(choices)
+    if not int(face.min_selected) <= len(chosen) <= cap:
+        return False
+    if len(set(chosen)) != len(chosen):
+        return False
+    pool = frozenset(usable)
+    return all(choice in pool for choice in chosen)
+
+
 def _select_options(
     seat: int, answers_seq: int, ctx: SelectOptionsContext
 ) -> list[Action]:
@@ -1507,6 +1549,14 @@ def _select_options(
 
     不按位掩码之外的方式枚举（例如"逐项 0/1"）：答案是**一个集合**，一次提交 —— 与
     :func:`_distribute` 的"全量枚举 + 客户端拼出同一条"同姿态，合法集合只有这一份真源。
+
+    ``ctx.enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21；先例 =
+    :func:`_arrange` 的同名档）：子集数随选项数组合爆炸（8 人局、上限 4 ⇒ 162 条），故
+    **一条都不枚举** —— 只留一条**骨架兜底**：``options`` 序的前 ``min_selected`` 个可选项
+    （``min_selected == 0`` ⇒ 空集，超时兜底仍是"什么都不做"）。骨架**不是答案集**，它只
+    兑现"每一问都有至少一个合法应答"（超时代答 / 取首个候选的消费者 / 回放放行都靠它），
+    真正的答案由界面 / 参与者组装、引擎按 :func:`is_legal_option_set` 校验形状。可选项凑不
+    出下限时**没有**合法集合 ⇒ fail-closed（不发明一条越界的骨架）。
     """
     del seat
     disabled = frozenset(ctx.disabled)
@@ -1517,13 +1567,19 @@ def _select_options(
             f"多选区间的下限 {ctx.min_selected} 大于上限 {cap}（选项 {ctx.options!r}）"
         )
     actions: list[Action] = []
-    for mask in range(1 << len(options)):
-        picked = tuple(
-            option for index, option in enumerate(options) if mask >> index & 1
-        )
-        if len(picked) < ctx.min_selected or len(picked) > cap:
-            continue
-        actions.append(SelectOptions(choices=picked, answers_seq=answers_seq))
+    if not ctx.enumerate_candidates:
+        # 上面那条区间检查已经覆盖"可选项凑不出下限"：``cap`` 只受**可选项**数约束，
+        # 故 ``cap >= min_selected`` ⇒ 骨架一定够长，不需要第二条守卫。
+        skeleton = options[: int(ctx.min_selected)]
+        assert is_legal_option_set(ctx, skeleton), "骨架必须是合法集合（与谓词同一口径）"
+        actions.append(SelectOptions(choices=skeleton, answers_seq=answers_seq))
+    else:
+        for mask in range(1 << len(options)):
+            picked = tuple(
+                option for index, option in enumerate(options) if mask >> index & 1
+            )
+            if is_legal_option_set(ctx, picked):
+                actions.append(SelectOptions(choices=picked, answers_seq=answers_seq))
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))
     return actions

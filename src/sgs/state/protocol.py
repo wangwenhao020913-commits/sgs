@@ -495,9 +495,10 @@ class SelectOptionsContext:
     """``SELECT_OPTIONS`` 候选生成的类型化载荷（jie-feng-batch2 票 01a）：**多选**选项闭集。
 
     与 :class:`SelectOptionContext` 的差别只有"答案是一组值"：``options`` 仍是全部选项
-    （含置灰），可提交的组合由 ``legal_actions`` 表达（每一问全量枚举 [min,max] 内、
-    不含置灰项的子集）。``min_selected`` 缺省 0 = 允许一个都不选（空集是候选里的第一条，
-    故超时兜底天然是"什么都不做"）；``max_selected=None`` = 只受选项数约束。
+    （含置灰），可提交的组合由 ``legal_actions`` 表达（``enumerate_candidates=True`` 时是
+    每一问全量枚举 [min,max] 内、不含置灰项的子集）。``min_selected`` 缺省 0 = 允许一个都
+    不选（空集是候选里的第一条，故超时兜底天然是"什么都不做"）；``max_selected=None`` =
+    只受选项数约束。
     """
     skill_id: str
     options: tuple[str, ...]
@@ -506,6 +507,18 @@ class SelectOptionsContext:
     min_selected: int = 0
     max_selected: int | None = None
     option_texts: Mapping[str, str] = field(default_factory=dict)
+    enumerate_candidates: bool = True
+    """是否按**子集**枚举候选（yijiang-2014-round2 票 21 的加法；先例 = ``ArrangeContext``）。
+
+    ``True`` = 既有行为（[min,max] 内、不含置灰项的每个子集各一条候选）。``False`` =
+    **不枚举档**：只给一条**骨架兜底**（``options`` 序的前 ``min_selected`` 个可选项），
+    答案由界面 / 参与者自己组装，引擎在收答案时按
+    :func:`~sgs.effects.actions.is_legal_option_set` 校验形状（池内 / 无重复 / 无置灰 /
+    长度在区间内）。服务的是"子集数随座位数组合爆炸"的多人座位多选（8 人局、上限 4 ⇒
+    162 条子集）。与 ``count`` / ``split`` 同一姿态：**不进询问记录**（``_build_query``
+    对 ``SELECT_OPTIONS`` 不序列化本载荷，询问上只落一个 ``exclude=True`` 的
+    ``structural`` 标志），故既有金录像逐字节不变。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -1114,6 +1127,18 @@ class SelectOptionsQuery(_QueryBase):
     min_selected: int = 0
     max_selected: int | None = None
     option_texts: dict[str, str] = Field(default_factory=dict)
+    structural: bool = Field(default=False, exclude=True)
+    """不枚举档：答案**由界面 / 参与者构造**、只做形状校验（yijiang-2014-round2 票 21）。
+
+    与 :attr:`ArrangeQuery.structural` 同一档、同一理由（``huo-shenzhugeliang`` 票 02 的
+    「不枚举档」推广到多选）：``True`` 时本询问的 ``legal_actions`` 只有一条**骨架兜底**
+    （``options`` 序的前 ``min_selected`` 个可选项，只保证"每一问都有至少一个合法应答"），
+    界面 / AI 可以提交**任何**形状合法的 ``SelectOptions``（引擎按
+    :func:`~sgs.effects.actions.is_legal_option_set` 校验：池内 / 无重复 / 无置灰 /
+    长度在 ``[min_selected, max_selected]`` 内）。服务的是"子集数随座位数组合爆炸"的
+    多人座位多选（8 人局、上限 4 ⇒ 162 条子集）。``exclude=True`` ⇒ 不进记录流，既有
+    47 条金录像逐字节不变。
+    """
 
 
 class DistributeQuery(_QueryBase):

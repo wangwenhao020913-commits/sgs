@@ -21343,20 +21343,21 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
    */
   const bingyiSeq = seatSeq + 3;
   const bingyiChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
-  const bingyiActions = [];
-  for (let mask = 1; mask < 1 << bingyiChoices.length; mask += 1) {
-    const picks = bingyiChoices.filter((_, index) => mask & (1 << index));
-    if (picks.length > 3) continue; // 上限 = 手牌数 3
-    bingyiActions.push({ kind: "SelectOptions", choices: picks, answers_seq: bingyiSeq });
-  }
-  const bingyiTarget = bingyiActions.find(
-    (action) => JSON.stringify(action.choices) === JSON.stringify(["seat:1", "seat:2", "seat:3"]));
+  // 票 21 起【秉壹】的座位面是**不枚举档**（`structural`）：候选里只有一条骨架（前
+  // `min_selected` 个座位）+ 一条 `Pass`，集合由界面按本地选择自己拼出来（服务端按
+  // `is_legal_option_set` 校验形状）。这里照生产形状摆，不再铺子集候选。
+  const bingyiActions = [
+    { kind: "SelectOptions", choices: ["seat:0"], answers_seq: bingyiSeq },
+  ];
+  const bingyiTarget = {
+    kind: "SelectOptions", choices: ["seat:1", "seat:2", "seat:3"], answers_seq: bingyiSeq,
+  };
   const bingyiPending = {
     kind: "SELECT_OPTIONS", actor: 0, seq: bingyiSeq, prompt: "请选择角色（可多选）。",
     legal_actions: [...bingyiActions, { kind: "Pass", answers_seq: bingyiSeq }],
     candidate_index: {}, virtual_index: {},
     option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
-    options: bingyiChoices, disabled: [],
+    options: bingyiChoices, disabled: [], structural: true,
     min_selected: 1, max_selected: 3, option_texts: {},
     context: {
       actor: 0, name: "秉壹", targets: [],
@@ -21424,21 +21425,20 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
    */
   const jieBingyiSeq = seatSeq + 4;
   const jieBingyiChoices = ["seat:0", "seat:1", "seat:2", "seat:3"];
-  const jieBingyiActions = [];
-  for (let mask = 1; mask < 1 << jieBingyiChoices.length; mask += 1) {
-    const picks = jieBingyiChoices.filter((_, index) => mask & (1 << index));
-    if (picks.length > 2) continue; // 上限 = 手牌数 2（比场上 4 人少）
-    jieBingyiActions.push({ kind: "SelectOptions", choices: picks, answers_seq: jieBingyiSeq });
-  }
-  const jieBingyiTarget = jieBingyiActions.find(
-    (action) => JSON.stringify(action.choices) === JSON.stringify(["seat:1", "seat:3"]));
+  // 与标准顾雍【秉壹】同一档（票 21 起两版都是**不枚举档**）：骨架 + 放弃，集合由界面拼。
+  const jieBingyiActions = [
+    { kind: "SelectOptions", choices: ["seat:0"], answers_seq: jieBingyiSeq },
+  ];
+  const jieBingyiTarget = {
+    kind: "SelectOptions", choices: ["seat:1", "seat:3"], answers_seq: jieBingyiSeq,
+  };
   const jieBingyiRequirement = "选择令其摸一张牌的角色（可多选，选好后提交）";
   const jieBingyiPending = {
     kind: "SELECT_OPTIONS", actor: 0, seq: jieBingyiSeq, prompt: "请选择角色（可多选）。",
     legal_actions: [...jieBingyiActions, { kind: "Pass", answers_seq: jieBingyiSeq }],
     candidate_index: {}, virtual_index: {},
     option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
-    options: jieBingyiChoices, disabled: [],
+    options: jieBingyiChoices, disabled: [], structural: true,
     min_selected: 1, max_selected: 2, option_texts: {},
     context: {
       actor: 0, name: "秉壹", targets: [],

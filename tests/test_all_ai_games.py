@@ -23,6 +23,7 @@ from sgs.agents import (
     HeuristicPlayer,
     TapePlayer,
     is_designation_use,
+    is_structural_answer,
     is_structured_activation,
     tape_from_journal,
 )
@@ -66,6 +67,9 @@ class _IllegalAnswerScan:
     W5-02b：借刀的复合使用同样不在 ``legal_actions`` 里，但必须是本次**附带指定池**
     （``query.designation_actions``）的成员——``is_designation_use`` 与引擎第四条路
     读同一份池。
+    yijiang-2014-round2 票 21：不枚举档多选（【秉壹】的座位面）的答案由 AI 自己拼、不在
+    ``legal_actions`` 里；``is_structural_answer`` 与引擎 ``submit`` 那道闸同一口径
+    （``is_legal_option_set`` 形状谓词），故放行它不放松判据。
     """
 
     def __init__(self, inner) -> None:
@@ -80,6 +84,7 @@ class _IllegalAnswerScan:
             action not in query.legal_actions
             and not is_structured_activation(query, action)
             and not is_designation_use(query, action)
+            and not is_structural_answer(query, action)
         ):
             self.illegal += 1
         return action

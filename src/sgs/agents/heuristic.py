@@ -92,7 +92,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
-from sgs.effects import Randomness, behavior_for, is_slash, target_sets_match
+from sgs.effects import (
+    Randomness,
+    behavior_for,
+    is_legal_option_set,
+    is_slash,
+    target_sets_match,
+)
 from sgs.state import (
     Action,
     ActivateSkill,
@@ -2367,18 +2373,76 @@ def _score_select_option(query: Query, action: Action) -> float:
     return 0.0
 
 
+def _option_choice_value(query: Query, choice: str) -> float:
+    """多选面里**单个选项**的分值（``_score_select_options`` 与自建集合共用的唯一口径）。
+
+    座位选项（``seat:N``）走 :func:`_score_seat_option` 的敌我估值——【秉壹】这类"令若干
+    角色各摸一张"的座位多选面因此知道该帮谁；其余选项查 :data:`_OPTION_VALUES`（技能票
+    自己登记；没登记 = 0 分，保守方向）。
+    """
+    if choice.startswith(_SEAT_PREFIX):
+        return _score_seat_option(query, choice)
+    return _OPTION_VALUES.get(choice, 0.0)
+
+
 def _score_select_options(query: Query, action: Action) -> float:
     """``SELECT_OPTIONS``（多选选项；jie-feng-batch2 票 01a）：按**勾中的项逐个**求和。
 
-    与 :func:`_score_select_option` 同一条口径：每个选项的估值来自 :data:`_OPTION_VALUES`
-    （技能票自己登记；没登记 = 0 分），``Pass`` 按"取消已发动的技能"罚分。空集是一条
-    合法候选（= 什么都不做），它的分数恒为 0 ⇒ 与"放弃"同价时按候选序取前面的那条，
-    也就是空集——这是**保守**方向（不做额外的事），符合多选面的超时兜底。
+    与 :func:`_score_select_option` 同一条口径（单选项的估值只有 :func:`_option_choice_value`
+    一处），``Pass`` 按"取消已发动的技能"罚分。空集是一条合法候选（= 什么都不做），它的
+    分数恒为 0 ⇒ 与"放弃"同价时按候选序取前面的那条，也就是空集——这是**保守**方向
+    （不做额外的事），符合多选面的超时兜底。
     """
     assert isinstance(query, SelectOptionsQuery)
     if not isinstance(action, SelectOptions):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
-    return sum(_OPTION_VALUES.get(choice, 0.0) for choice in action.choices)
+    return sum(_option_choice_value(query, choice) for choice in action.choices)
+
+
+def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
+    """**不枚举档**多选面：AI 自己拼一个合法集合（yijiang-2014-round2 票 21）。
+
+    这一档的 ``legal_actions`` 只有一条**骨架**（``options`` 序的前 ``min_selected`` 个），
+    候选里**没有**真正的答案集合 ⇒ AI 不能"挑候选"，得按同一个谓词自己构造：
+
+    - **池** = ``options`` 去掉 ``disabled``（引擎只把可选项当合法成员）；
+    - **估值** = 逐项 :func:`_option_choice_value`（座位走敌我 / 帮盟友那一套），降序取
+      **正分**项、至多 ``max_selected`` 个——【秉壹】"令至多 N 名角色各摸一张"因此给自己与
+      盟友、不资敌；
+    - **下限**：不足 ``min_selected`` 时按同一排名补（副作用最小的）项，绝不交一条越界集合；
+    - **次序** = 询问 ``options`` 的**原序**（常规结算顺序；用户 2026-11-09 的裁定：默认按
+      常规结算顺序，"依次"要有技能明说才另开一档）——打分排名只决定**选谁**，不决定次序。
+
+    形状由 :func:`sgs.effects.is_legal_option_set`（与引擎收答案同一个谓词）核一遍：构造器
+    不该产出非法集合，越界即打分 / 构造的编程错误，直接崩而不是发给服务端换一个 400。
+    """
+    disabled = frozenset(query.disabled)
+    options = tuple(option for option in query.options if option not in disabled)
+    cap = (
+        len(options)
+        if query.max_selected is None
+        else min(int(query.max_selected), len(options))
+    )
+    ranked = sorted(
+        (-_option_choice_value(query, option), index, option)
+        for index, option in enumerate(options)
+    )
+    picked = [option for negated, _index, option in ranked if negated < 0][:cap]
+    floor = min(int(query.min_selected), cap)
+    if len(picked) < floor:
+        chosen = set(picked)
+        for _negated, _index, option in ranked:
+            if len(picked) >= floor:
+                break
+            if option not in chosen:
+                picked.append(option)
+                chosen.add(option)
+    chosen = set(picked)
+    choices = tuple(option for option in options if option in chosen)
+    assert is_legal_option_set(query, choices), (
+        f"AI 自建的多选集合必须过引擎的同一份谓词：{choices!r}（选项 {query.options!r}）"
+    )
+    return SelectOptions(choices=choices, answers_seq=query.seq)
 
 
 # ---------------------------------------------------------------------------
@@ -3281,30 +3345,38 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
             {
                 "skill_id": (
                     True,
-                    "多选面的技能归属：与 ``SelectOptionQuery`` 同一条（本仓暂只有界神速用；"
-                    "座位步不在这里，故不查敌我前缀表）",
+                    "多选面的技能归属：与 ``SelectOptionQuery`` 同一条（开关 = 界神速的三项、"
+                    "座位 = 【秉壹】等座位步）——座位选项的敌我估值按它查那两张前缀表",
                 ),
                 "options": (
-                    False,
-                    "选项面不枚举：``_score_select_options`` 逐个勾中的项查 "
-                    "``_OPTION_VALUES``——未登记的新选项落 0 分（新增选项必须同票登记条目）",
+                    True,
+                    "选项池（含置灰）：``_score_select_options`` 逐项查 ``_option_choice_value``"
+                    "（未登记落 0 分）；**不枚举档**（``structural``）下它同时是 AI 自建集合的"
+                    "可选池，且集合按它的**原序**上行（常规结算顺序）",
                 ),
                 "disabled": (
                     True,
-                    "置灰项在候选里根本不会出现（引擎侧枚举时已剔除）；AI 只读它理解"
+                    "置灰项不进任何候选 / 自建集合（不枚举档由 AI 自己在池里滤掉）——"
                     "『这一项此刻不可选』，不据此改分数",
                 ),
                 "min_selected": (
                     True,
-                    "下限决定『空集是否合法』：AI 不自己重建合法性，取候选里合法的那一条",
+                    "下限：不枚举档下是**自建集合的地板**（不足则按排名补），枚举档下由候选承担",
                 ),
                 "max_selected": (
                     True,
-                    "上限决定一次最多能勾几项：同上，候选枚举的唯一真源在引擎",
+                    "上限：不枚举档下是**自建集合的天花板**（只取正分项、至多这么多），"
+                    "枚举档下由候选承担",
                 ),
                 "option_texts": (
                     False,
-                    "显示文本只给界面看；AI 的估值读选项 id（``_OPTION_VALUES``）",
+                    "显示文本只给界面看；AI 的估值读选项 id（``_OPTION_VALUES`` / 座位前缀）",
+                ),
+                "structural": (
+                    True,
+                    "**不枚举档**（yijiang-2014-round2 票 21）：``True`` ⇒ 候选里只有骨架，"
+                    "AI 必须自己按 ``_option_choice_value`` 拼一个合法集合（谓词 = 引擎收答案的"
+                    "``is_legal_option_set``）；读它是『该自己拼』的唯一判据",
                 ),
             }
         ),
@@ -4695,6 +4767,15 @@ class HeuristicPlayer:
         # W5-02b：借刀的**外层两步清单**（附带指定）——复合使用同样不在候选里，
         # AI 读 ``card_preactivations`` 自己填 A / Bn；持刀者窗口的 a / b 由后续询问应答。
         actions.extend(_card_preactivation_candidates(query))
+        # **不枚举档**多选（yijiang-2014-round2 票 21）：候选里只有一条骨架，AI 按
+        # `_assembled_option_set` 自己拼合法集合来取代它（骨架不是答案集）；「至多」的
+        # 放弃出口 ``Pass`` 仍是候选、照旧参评。
+        if getattr(query, "structural", False) and isinstance(query, SelectOptionsQuery):
+            assembled = _assembled_option_set(query)
+            actions = [
+                action for action in actions if not isinstance(action, SelectOptions)
+            ]
+            actions.append(assembled)
         if not actions:
             raise ValueError(f"{query.kind} 询问没有候选行动，参与者无法应答")
         scorer = _SCORERS[QueryKind(query.kind)]

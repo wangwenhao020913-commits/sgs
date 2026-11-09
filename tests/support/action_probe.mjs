@@ -475,6 +475,44 @@ const seatMulti = ui.buildAction();
 if (!seatMulti) throw new Error("buildAction 没拼出座位多选面的 SelectOptions（点击夹具失效）");
 ui.state.sessionId = null;
 
+/* 票 21：**不枚举档**的座位多选面（`pending.structural`）——候选里只有一条**骨架**（前
+ * `min_selected` 个座位 + 放弃），集合由界面按本地选择自己拼出来（服务端按
+ * `is_legal_option_set` 校验形状：池内 / 无重复 / 无置灰 / 长度在 `[min, max]` 内）。
+ *
+ * 与上面那一档的差别只在 `legal_actions` 与 `structural`：点击顺序仍是 2 → 0，上行必须按
+ * `options` 原序（`["seat:0", "seat:2"]`）——而且它**不在** `legal_actions` 里（那一档根本
+ * 不枚举子集）。前端因此走 `submitAction` 的"不枚举档"让开，不逐字段自检候选。
+ */
+resetState();
+submitCalls = 0;
+const structuralSeatPending = {
+  kind: "SELECT_OPTIONS", actor: 0, seq: 101,
+  prompt: "请选择若干项（可多选）。",
+  legal_actions: [
+    { kind: "SelectOptions", choices: ["seat:0"], answers_seq: 101 },
+    { kind: "Pass", answers_seq: 101 },
+  ],
+  candidate_index: {}, virtual_index: {},
+  option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2 },
+  options: seatOptionChoices,
+  min_selected: 1, max_selected: 2, option_texts: {}, context: null, revealed: [],
+  preactivations: {}, preactivation: [],
+  structural: true,
+};
+ui.state.sessionId = "probe";
+ui.state.playback = null;
+ui.state.view = { human_seat: 0, pending: structuralSeatPending };
+if (typeof ui.toggleSeatMultiPick === "function") {
+  ui.toggleSeatMultiPick(2); // 点击顺序：先 2
+  ui.toggleSeatMultiPick(0); // 再 0（上行仍按 options 原序）
+}
+const structuralSeatSubmits = submitCalls;
+const structuralSeat = ui.buildAction();
+if (!structuralSeat) {
+  throw new Error("不枚举档的座位多选面没拼出 SelectOptions（骨架被当成答案了）");
+}
+ui.state.sessionId = null;
+
 /* 票 15：界【渐营】① 的「是否发动」默认 = **发动**（用户 2026-11-09 逐字）。
  *
  * 服务端只对**显式声明**的技能下发 `pending.default_choice === "activate"`；玩家没点任何
@@ -600,6 +638,23 @@ process.stdout.write(
           min_selected: seatMultiPending.min_selected,
           max_selected: seatMultiPending.max_selected,
           answers_seq: seatMultiPending.seq,
+        },
+      },
+      // 票 21：**不枚举档**的同一张座位多选面 —— 候选只有骨架，界面自己拼集合。
+      {
+        name: "seat_multi_select_structural",
+        action: structuralSeat,
+        legal_actions: structuralSeatPending.legal_actions,
+        submits: structuralSeatSubmits,
+        payload: {
+          kind: structuralSeatPending.kind,
+          options: structuralSeatPending.options,
+          disabled: [],
+          option_seats: structuralSeatPending.option_seats,
+          min_selected: structuralSeatPending.min_selected,
+          max_selected: structuralSeatPending.max_selected,
+          answers_seq: structuralSeatPending.seq,
+          structural: structuralSeatPending.structural,
         },
       },
       // 票 15：「是否发动」的默认候选 —— 显式声明的技能提交 = 发动；不带该键的对照组仍是 null。

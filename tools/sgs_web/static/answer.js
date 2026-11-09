@@ -104,23 +104,34 @@ function maybeAutoSubmitArrange(view) {
  *
  *  找不到同样的集合时返回 `null`（界面不发明动作；例如勾选数低于 `min_selected`），
  *  右端「提交」因此保持灰着——与计数式分配同一条"只提交候选里有的那一条"纪律。
+ *  **不枚举档**（`pending.structural`，yijiang-2014-round2 票 21）是例外：那一档候选里
+ *  只有骨架，集合由本地选择拼出，服务端按形状谓词校验（见 :func:`selectOptionsAction`）。
  */
 function multiSelectAction(pending) {
   return selectOptionsAction(pending, multiSelectChoices(pending));
 }
 
-/** 本地选中集合 → 候选里那条 `SelectOptions`（`multiSelectAction` / `seatMultiAction` 的唯一实现）。
+/** 本地选中集合 → 要上行的 `SelectOptions`（`multiSelectAction` / `seatMultiAction` 的唯一实现）。
  *
  *  两个多选面只差"集合从哪来"：勾选面读 `state.multiSelect`，座位面读
  *  `state.selectedTargets`（`pending.js:seatMultiChoices`）。"只在候选里查、不自己拼 Action"
  *  这一条对两面同时成立，故拼装只写这一处。
+ *
+ *  **不枚举档**（`pending.structural`，yijiang-2014-round2 票 21）是这条纪律的**唯一**
+ *  让开处（与 `ARRANGE` 的不枚举档同姿态）：那一档服务端只下发一条**骨架候选**（子集数
+ *  组合爆炸，8 人局 × 上限 4 是 162 条），答案由界面按本地选择拼出来——形状（池内 /
+ *  无重复 / 无置灰 / 长度在 `[min, max]` 内）由服务端 `is_legal_option_set` 裁决，界面
+ *  不另写一份规则；`choices` 已按 `pending.options` 原序（常规结算顺序）。
  */
 function selectOptionsAction(pending, wanted) {
   const candidates = (pending && pending.legal_actions) || [];
-  return candidates.find(
+  const found = candidates.find(
     (candidate) => candidate.kind === "SelectOptions"
       && JSON.stringify(candidate.choices || []) === JSON.stringify(wanted),
-  ) || null;
+  );
+  if (found) return found;
+  if (!pending || pending.structural !== true) return null;
+  return { kind: "SelectOptions", choices: wanted.slice(), answers_seq: pending.seq };
 }
 
 /** 座位多选面（W1）的最终答案动作：本地选中的座位 → 候选里那条 `SelectOptions`。
@@ -478,17 +489,23 @@ async function submitAction(restoreSelection = null) {
   const cardEntry = Boolean(state.preactivation && state.preactivation.cardEntry);
   const composite = state.preactivation !== null
     && (action.kind === "ActivateSkill" || (cardEntry && action.kind === "UseCard"));
-  // 排列的**不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，答案由界面的
-  // 两行布局拼出来 —— 服务端在收答案时做结构校验（order 是排列、split 与声明一致）。
-  const structuralArrange = action.kind === "ArrangeCards"
-    && Boolean(pending.arrange && pending.arrange.enumerate === false);
+  // **不枚举档**的两处让开（`ARRANGE` = huo-shenzhugeliang 票 02，`SELECT_OPTIONS` =
+  // yijiang-2014-round2 票 21）：候选只有一条兜底（恒等排列 / 最小骨架），答案由界面按
+  // 本地布局 / 本地选择拼出来 —— 服务端在收答案时做形状校验（排列是排列、切分与声明一致；
+  // 多选集合池内 / 无重复 / 无置灰 / 长度在区间内）。
+  const structuralAnswer = !composite && (
+    (action.kind === "ArrangeCards"
+      && Boolean(pending.arrange && pending.arrange.enumerate === false))
+    || (action.kind === "SelectOptions" && pending.structural === true)
+  );
   if (
     !composite
-    && !structuralArrange
+    && !structuralAnswer
     && !pending.legal_actions.some((candidate) => JSON.stringify(candidate) === JSON.stringify(action))
   ) {
     // 最后一道自检：造出来的必须**逐字段**是候选里的那一条（否则引擎会拒，且错在界面）。
-    // 预发动是**唯一**让开的地方：复合动作不要求在候选里，由服务端校验器验（W4-1）。
+    // 预发动 / 不枚举档是**仅有的**让开处：复合动作由服务端校验器验（W4-1），不枚举档的
+    // 答案由服务端的形状谓词验。
     $("t-choice").textContent = "这个组合不在合法候选里，请换一个选择。";
     return;
   }

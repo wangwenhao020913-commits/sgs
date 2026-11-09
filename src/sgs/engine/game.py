@@ -53,6 +53,7 @@ from sgs.effects import (
     designation_actions_for,
     discard_count,
     draw_from_deck,
+    is_legal_option_set,
     is_own_play_phase,
     is_slash,
     legal_actions_for,
@@ -2824,6 +2825,7 @@ class Engine:
         max_selected: int | None = None,
         option_texts: Mapping[str, str] | None = None,
         optional: bool = False,
+        enumerate_candidates: bool = True,
     ) -> Any:
         """发一次 ``SELECT_OPTIONS`` 询问（jie-feng-batch2 票 01a）：**多选**选项闭集。
 
@@ -2834,6 +2836,13 @@ class Engine:
 
         ``disabled`` 的语义与单选面一致：留在 ``options`` 里（界面画置灰行），**不进候选**
         —— 引擎侧因此不可能收到含置灰项的组合（fail-closed 在候选枚举那一处收口）。
+
+        ``enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21；先例 =
+        :meth:`ask_arrange` 的同名档）：子集数随选项数组合爆炸时（8 人局、上限 4 的座位多选
+        = 162 条），候选只留一条**骨架兜底**，答案由界面 / 参与者组装、引擎在
+        :meth:`submit` 收答案时按 :func:`~sgs.effects.is_legal_option_set` 校验形状。
+        与 ``split`` / ``count`` 同一姿态：**不进询问 / 记录流**（询问上只落一个
+        ``exclude=True`` 的 ``structural`` 标志）。
 
         答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（同 :meth:`ask_option`），重入不重发。
         """
@@ -2864,6 +2873,7 @@ class Engine:
                     min_selected=min_selected,
                     max_selected=max_selected,
                     option_texts=texts,
+                    enumerate_candidates=enumerate_candidates,
                 ),
             ),
             identity=self._ask_identity(QueryKind.SELECT_OPTIONS, actor, frame),
@@ -5041,10 +5051,33 @@ class Engine:
         if (
             action not in pending.legal_actions
             and getattr(pending, "structural", False)
-            and isinstance(action, ArrangeCards)
+            and isinstance(action, (ArrangeCards, SelectOptions))
         ):
-            # **不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，界面自己构造
-            # 两行交换的答案；形状校验在 `ask_arrange` 收答案时做，这里只放行。
+            # **不枚举档**（huo-shenzhugeliang 票 02 的 ARRANGE；yijiang-2014-round2 票 21
+            # 把同一档推广到 SELECT_OPTIONS）：候选只有一条兜底（恒等排列 / 最小骨架），
+            # 答案由界面 / 参与者自己构造。ARRANGE 的形状校验在 `ask_arrange` 收答案时做；
+            # 多选的形状**只有一份判据**（`is_legal_option_set`，与候选生成 / 骨架 / AI 构造
+            # / 回放放行同一份），这里拿它拒掉区间外 / 池外 / 置灰 / 重复的集合。
+            if isinstance(action, SelectOptions) and not is_legal_option_set(
+                pending, action.choices
+            ):
+                cap = (
+                    len(pending.options)
+                    if pending.max_selected is None
+                    else pending.max_selected
+                )
+                self._reject(action, reason="不枚举档：答复集合不满足形状谓词")
+                raise IllegalActionError(
+                    reason_code="IllegalAction",
+                    message=(
+                        "多选答复的形状不合法：每项须在本次选项池内、不重复、不含置灰项，"
+                        f"且选了 {len(action.choices)} 项须落在 "
+                        f"[{pending.min_selected}, {cap}] 内"
+                    ),
+                    expected="形状合法的 SelectOptions（池内 / 无重复 / 无置灰 / 长度在区间内）",
+                    got=action.kind,
+                    answers_seq=action.answers_seq,
+                )
             self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
             self._answer_to(action)
             return
@@ -5459,6 +5492,10 @@ class Engine:
                 max_selected=payload.max_selected,
                 option_texts=dict(payload.option_texts),
                 revealed=revealed,
+                # 不枚举档（yijiang-2014-round2 票 21）：与 ARRANGE 同一处映射——
+                # `enumerate_candidates=False` ⇒ 询问上落 `structural=True`（`exclude`，
+                # 不进记录流），`submit` 据此开"客户端自行组装、引擎校验形状"那道闸。
+                structural=not payload.enumerate_candidates,
             )
         if kind is QueryKind.DISTRIBUTE:
             if not isinstance(payload, DistributeContext):

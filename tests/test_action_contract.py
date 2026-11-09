@@ -49,7 +49,7 @@ _bootstrap()
 
 from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack  # noqa: E402
 from sgs.engine import Engine  # noqa: E402
-from sgs.effects import legal_actions_for  # noqa: E402
+from sgs.effects import is_legal_option_set, legal_actions_for  # noqa: E402
 from sgs.state import (  # noqa: E402
     EndPhase,
     Pass,
@@ -143,6 +143,7 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "unknown_zone_multipick",
         "unknown_zone_single_pick",
         "seat_multi_select",
+        "seat_multi_select_structural",
         "default_activate",
     }, f"探针用例集合变了：{sorted(actions)}"
 
@@ -423,6 +424,52 @@ def test_the_seat_multi_select_fixture_matches_the_real_view_payload() -> None:
     }, "option_seats 对 SELECT_OPTIONS 也要生效（座位多选面的判据读它）"
 
 
+def test_the_structural_seat_multi_select_face_assembles_the_set_locally() -> None:
+    """票 21：**不枚举档**的座位多选面 —— 候选里只有骨架，集合由界面按本地选择拼出。
+
+    与 W1 那条回环是同一张面、同一个动作构造子，差别只在载荷的 `structural`：那一档服务端
+    不枚举子集（8 人局 × 上限 4 = 162 条），`legal_actions` 只剩一条骨架 + 一条 `Pass`。
+    三件事逐条钉住：
+
+    - 两次点击仍**一次提交都不发**（提交点还是那一个）；
+    - 上行集合按 `pending.options` 原序（`["seat:0", "seat:2"]`，点击顺序 2 → 0 不上行）——
+      用户 2026-11-09 的顺序裁定：默认常规结算顺序；
+    - 它**不在** `legal_actions` 里（这正是"不枚举"的意思），而形状恰好过引擎的同一份谓词
+      （`is_legal_option_set`），因此服务端收得下。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}[
+        "seat_multi_select_structural"
+    ]
+    fixture = case["payload"]
+    action = case["action"]
+
+    assert case["submits"] == 0, "点两个座位不得发出任何提交（只有一个提交点）"
+    assert action is not None, "不枚举档的座位多选面必须能拼出动作（骨架不是答案）"
+    assert action["kind"] == "SelectOptions"
+    assert action["choices"] == ["seat:0", "seat:2"], (
+        f"上行必须按 options 原序（与点击顺序无关）：{action['choices']}"
+    )
+    assert action not in case["legal_actions"], (
+        "不枚举档不铺子集候选：这条集合是界面自己拼的，不在 legal_actions 里"
+    )
+    assert fixture["structural"] is True
+
+    parsed = parse_action(action)
+    assert parsed.choices == ("seat:0", "seat:2")
+    assert parsed.answers_seq == fixture["answers_seq"]
+
+    context = SelectOptionsContext(
+        skill_id="hero.guyong.bingyi",
+        options=tuple(fixture["options"]),
+        min_selected=int(fixture["min_selected"]),
+        max_selected=int(fixture["max_selected"]),
+        enumerate_candidates=False,
+    )
+    assert is_legal_option_set(context, parsed.choices), (
+        "界面拼出的集合必须过引擎的形状谓词（同一份判据，界面不另写规则）"
+    )
+
+
 def test_a_decorated_card_payload_is_rejected_by_the_server_model() -> None:
     """合成反例：**同一张卡**的展示形态不能被 ``parse_action`` 接受（= 报障的 400）。
 
@@ -449,7 +496,7 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 10
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 11
 
 
 # ---------------------------------------------------------------------------

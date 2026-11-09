@@ -1521,6 +1521,12 @@ def _jie_shensu_choose(host: Any, frame: Frame, owner: int) -> Any:
 
     选项区间 ``[0, 3]``：0 项 = 什么都不做（用户口径「任意复选」；「可以」的放弃出口仍在
     上一问"是否发动"里，账本 L816/L827）。置灰项由 :func:`_jie_shensu_disabled` 现算。
+
+    **仍是按子集枚举档**（yijiang-2014-round2 票 21 只翻了【秉壹】）：选项恒 3 个 ⇒ 至多
+    ``2³ = 8`` 条候选，不在指数爆炸的形状上；而翻成不枚举档会让既有断言改口（
+    `tests/test_hero_jie_feng.py` 的两条测试逐条枚举这 8 个子集、并靠"勾中 wanted 的那条
+    候选"驱动【神速】），属"翻转本身逼出测试 churn"。票 21 的裁定是"只有爆炸的那一面才翻"，
+    故这里保留现状，等真有消费者需要时再单开一票。
     """
     chosen = frame.data.get(_JIE_SHENSU_ITEMS)
     if chosen is not None:
@@ -2045,6 +2051,12 @@ def _bingyi_seats(host: Any, frame: Frame, owner: int, skill_id: str = BINGYI) -
     【铁索连环】），不要选好一个提交再继续选"）。池 = 全部存活角色（**含自己**，Q-G2 = A），
     按座位序；``[1, N]`` + ``optional=True`` = 「至多」（上限 + 可放弃，账本 L775 / L753）。
 
+    ``enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21）：这一问的子集数
+    是 ``Σ C(座位数, k)`` —— 8 人局、上限 4 时 **162 条**（+ 放弃 = 163），撞穿
+    `tests/test_fuzz.py` 的候选上界 128。上限 N 还会随**手牌数**长大（残局 5 张手牌 ⇒ 更多），
+    按子集枚举在生产路径上是指数级的。故这一档只发**一条骨架候选**、答案由界面 / AI 组装，
+    引擎按 ``is_legal_option_set`` 校验形状（池内 / 无重复 / 无置灰 / 长度在 ``[1, N]`` 内）。
+
     ``skill_id`` = **正在跑的那一版**（两版各自一条声明，A4）：它拼出这一步的询问 id
     （``hero.jie_guyong_mobile.bingyi:seat``），投影的 ``_step_requirement`` 据此查**那条
     声明**的逐步文案——写成常量 ``BINGYI`` 会让界版显示 OL 那一行。
@@ -2060,6 +2072,7 @@ def _bingyi_seats(host: Any, frame: Frame, owner: int, skill_id: str = BINGYI) -
         min_selected=1,
         max_selected=cap,
         optional=True,
+        enumerate_candidates=False,
     )
     if host.suspended(answer):
         return "stay"

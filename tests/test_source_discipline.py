@@ -500,7 +500,16 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     # W7-03（D5）：目标集合比较与确认解析器共用一份（纯函数，不碰状态 / 规则）。
     # M5-07：AI 按**行为表**认【杀】族（火 / 雷 / 转化与虚拟产物），不抄牌名集合。
     "sgs.effects": frozenset(
-        {"Randomness", "behavior_for", "is_slash", "target_sets_match"}
+        {
+            "Randomness",
+            "behavior_for",
+            # yijiang-2014-round2 票 21：不枚举档多选面的**形状谓词**（引擎收答案时用的是
+            # 同一份）。它只读询问自带的 `options` / `disabled` / 区间 ⇒ 可见面，不是全知
+            # 状态；AI 自建集合必须过它，"AI 与引擎同一份合法性"才成立。
+            "is_legal_option_set",
+            "is_slash",
+            "target_sets_match",
+        }
     ),
     "sgs.state": frozenset(
         {

@@ -751,9 +751,11 @@ function seatMultiChosenSeats(pending) {
 
 /** 本地选中集合 → 要上行的选项串，按 `pending.options` **原序**（与引擎枚举候选同序）。
  *
- * 点击顺序**不**上行：`SelectOptions` 的答案是一个集合，引擎按 `options` 序的位掩码枚举
- * 候选（`effects/actions.py:_select_options`），原样发点击序会拼出降序、逐字段自检落空
- * （与两行观看面的 `picks` 升序同一条纪律，`answer.js:buildAction`）。
+ * 点击顺序**不**上行：`SelectOptions` 的答案是一个集合。**枚举档**下引擎按 `options` 序的
+ * 位掩码枚举候选（`effects/actions.py:_select_options`），原样发点击序会拼出降序、逐字段
+ * 自检落空（与两行观看面的 `picks` 升序同一条纪律，`answer.js:buildAction`）。**不枚举档**
+ * （`pending.structural`，yijiang-2014-round2 票 21）下候选里只有一条骨架、集合由界面拼出，
+ * 这里仍是**唯一**的定序处——用户 2026-11-09 的裁定：默认按常规结算顺序，不保留点击序。
  */
 function seatMultiChoices(pending) {
   const chosen = seatMultiChosenSeats(pending);

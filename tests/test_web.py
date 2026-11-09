@@ -56,6 +56,8 @@ from sgs.state import (  # noqa: E402
     SelectCardsQuery,
     SelectionSpec,
     SelectOptionQuery,
+    SelectOptionsContext,
+    SelectOptionsQuery,
     Slot,
     Step,
     StepPool,
@@ -4266,6 +4268,50 @@ def test_a_real_session_reaches_the_bingyi_seat_multi_select_face() -> None:
     assert any(action["kind"] == "Pass" for action in payload["legal_actions"]), (
         "「至多」可放弃：放弃出口是候选里的 Pass"
     )
+    assert payload["structural"] is True, (
+        "票 21：这一档是**不枚举档**（候选只有骨架）⇒ 投影必须下发 structural，"
+        "前端据此自己拼集合、不逐字段自检候选"
+    )
+    assert len(payload["legal_actions"]) == 2, (
+        f"候选只有骨架 + 放弃（旧行为是 1+1+2+1 = 5 条子集）：{payload['legal_actions']}"
+    )
+
+
+def test_the_structural_flag_is_only_projected_for_the_non_enumerating_multi_select() -> None:
+    """**键的缺席就是保证**：枚举档的多选面载荷里没有 `structural`（既有面逐字节不变）。
+
+    与 ``default_choice`` 同一姿态：投影只在 ``SELECT_OPTIONS`` ∧ ``structural`` 时补这个键；
+    界神速（``enumerate_candidates`` 缺省）的同一类询问因此一个键都不多。
+    """
+    state = build_state(
+        pack=load_content_pack(deck_profile="standard_108"),
+        seats=[SeatSpec(hero="caocao"), SeatSpec(hero="liubei")],
+    )
+    enumerated = SelectOptionsContext(
+        skill_id="hero.jie_xiahouyuan_mobile.shensu",
+        options=("jie_shensu_1", "jie_shensu_2", "jie_shensu_3"),
+        max_selected=3,
+    )
+    from sgs.effects import legal_actions_for
+
+    actions = legal_actions_for(
+        state, 0, QueryKind.SELECT_OPTIONS, answers_seq=1, payload=enumerated
+    )
+    query = SelectOptionsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.TURN_START,
+        prompt="请选择若干项（可多选）。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id=enumerated.skill_id,
+        options=enumerated.options,
+        max_selected=3,
+    )
+    assert "structural" not in pending_payload(query, human_seat=0), (
+        "枚举档不多键（金录像 / 既有载荷逐字节不变）"
+    )
+    assert len(actions) == 8, "对照：枚举档仍是 2³ = 8 条子集"
 
 
 def _jizhi_nullify_session() -> Session:

@@ -2466,6 +2466,15 @@ def pending_payload(
         payload["default_choice"] = "activate"
     if foreign:
         _mask_foreign_preactivations(payload)
+    # **不枚举档**多选（yijiang-2014-round2 票 21）：询问上的 ``structural`` 是 ``exclude=True``
+    # 的本地面（不进记录流 / 金录像），前端看不到它；投影显式下发一个 ``structural: true``
+    # 让 ``answer.js`` 知道"候选只有骨架、集合由界面自己拼"。与 ``default_choice`` 同一姿态：
+    # **只有这一档才带这个键**，其余多选面（界神速）的载荷逐字节不变（键的缺席就是那个保证）。
+    if (
+        str(getattr(query, "kind", "")) == "SELECT_OPTIONS"
+        and bool(getattr(query, "structural", False))
+    ):
+        payload["structural"] = True
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。
     # 只有拿得到 ``Session``（= 拿得到引擎）时才算；409 里附带的那份现状（裸 ``Query``）为 None。
     payload["context"] = (

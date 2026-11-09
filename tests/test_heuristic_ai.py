@@ -29,6 +29,7 @@ from sgs.agents import (
     RandomPlayer,
     TapePlayer,
     is_designation_use,
+    is_structural_answer,
     is_structured_activation,
     tape_from_journal,
 )
@@ -47,7 +48,12 @@ from sgs.data import (
     load_hero_tables,
     load_heroes,
 )
-from sgs.effects import designation_actions_for, legal_actions_for, locate
+from sgs.effects import (
+    designation_actions_for,
+    is_legal_option_set,
+    legal_actions_for,
+    locate,
+)
 from sgs.engine import Engine, ai_stream
 from sgs.skills import (
     CATALOG,
@@ -92,6 +98,8 @@ from sgs.state import (
     SelectOption,
     SelectOptionContext,
     SelectOptionQuery,
+    SelectOptions,
+    SelectOptionsQuery,
     SkillActivationContext,
     SkillActivationQuery,
     MoveReason,
@@ -104,6 +112,7 @@ from sgs.state import (
     ZoneRef,
     project,
 )
+from sgs.resolution import Frame
 from sgs.timing import Timing
 
 from support import (
@@ -1628,6 +1637,94 @@ def test_arrange_puts_the_most_useful_card_on_top():
 
 
 # ---------------------------------------------------------------------------
+# 不枚举档多选（yijiang-2014-round2 票 21）：AI 自己拼合法集合
+# ---------------------------------------------------------------------------
+
+
+def _structural_seat_query(
+    *, min_selected: int, max_selected: int, disabled: tuple[str, ...] = ()
+) -> SelectOptionsQuery:
+    """真引擎发一次【秉壹】式的座位多选（**不枚举档**）：5 座位身份局、观察者 = 主公。
+
+    身份全部亮明 ⇒ 敌我关系是精确 0/1，AI 的"帮盟友"方向可断言：座位 0 = 主公（自己）、
+    3 = 忠臣（盟友）、1 / 2 = 反贼、4 = 内奸（敌人）。
+    """
+    identities = (
+        Identity.LORD,
+        Identity.REBEL,
+        Identity.REBEL,
+        Identity.LOYALIST,
+        Identity.RENEGADE,
+    )
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=[SeatSpec(hp=4, hp_max=4, identity=identity) for identity in identities],
+        deck=_deck_excluding(),
+    )
+    for seat in range(len(identities)):
+        state.players[seat].identity_visible = True
+    engine = Engine.from_state(state, seed=1)
+    engine.ask_options(
+        Frame(kind=FrameKind.SKILL, data={}),
+        0,
+        Timing.PHASE_FINISH,
+        skill_id="hero.guyong.bingyi:seat",
+        options=tuple(f"seat:{seat}" for seat in range(len(identities))),
+        disabled=disabled,
+        min_selected=min_selected,
+        max_selected=max_selected,
+        optional=True,
+        enumerate_candidates=False,
+    )
+    query = engine.pending
+    assert isinstance(query, SelectOptionsQuery), f"挂起的应当是多选询问：{query!r}"
+    assert query.structural is True, "构造：【秉壹】的座位面必须落在不枚举档"
+    return query
+
+
+def test_the_ai_assembles_a_legal_set_in_options_order_for_a_structural_multi_select():
+    """不枚举档：AI 不再"挑候选"，按座位意图自己拼集合——次序恒是 ``options`` 原序。
+
+    5 座位身份局、全部亮明。正分座位 = 自己（0）+ 忠臣（3）；反贼（1、2）与内奸（4）是敌人。
+
+    - 下限 3：正分只凑到 2 ⇒ 按同一排名补一个（打平取 ``options`` 序 ⇒ 座位 1）；
+    - 上行序 = ``options`` 原序（常规结算顺序）：排名序是「0、3、1」，上行必须是
+      ``seat:0, seat:1, seat:3``——**不保留打分排名序**（用户 2026-11-09 的顺序裁定）；
+    - 形状由引擎的同一份谓词核（AI 不发明越界集合）。
+    """
+    query = _structural_seat_query(min_selected=3, max_selected=4)
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, SelectOptions), f"多选面必须答 SelectOptions：{action!r}"
+    assert is_legal_option_set(query, action.choices), (
+        f"AI 自建的集合必须过引擎的谓词：{action.choices!r}"
+    )
+    assert action.choices == ("seat:0", "seat:1", "seat:3"), (
+        f"帮盟友（0、3）后补到下限 3，并按 options 原序上行：{action.choices!r}"
+    )
+    assert action.choices != query.legal_actions[0].choices, (
+        "不能拿骨架当答案（骨架 = options 序的前 min_selected 个）"
+    )
+    assert action.answers_seq == query.seq
+
+    capped = _structural_seat_query(min_selected=1, max_selected=2)
+    assert HeuristicPlayer(_stream(0)).respond(capped).choices == ("seat:0", "seat:3"), (
+        "上限 2、下限 1：只取两个正分座位，不资敌"
+    )
+
+    greyed = _structural_seat_query(
+        min_selected=1, max_selected=2, disabled=("seat:3",)
+    )
+    disabled_action = HeuristicPlayer(_stream(0)).respond(greyed)
+    assert disabled_action.choices == ("seat:0",), (
+        f"置灰的盟友不在池里 ⇒ 只剩自己：{disabled_action.choices!r}"
+    )
+    assert is_legal_option_set(greyed, disabled_action.choices)
+
+
+# ---------------------------------------------------------------------------
 # ④ 整局：零非法应答、确定性、可回放（票 13 §验收 2 / 3 / 5）
 # ---------------------------------------------------------------------------
 
@@ -1640,6 +1737,8 @@ class _IllegalAnswerScan:
     由引擎的同一个校验器裁决——非法应答会让整局抛错。
     W5-02b：借刀的复合使用同样不在 ``legal_actions`` 里，但必须是本次**附带指定池**
     （``query.designation_actions``）的成员——池成员就是服务端第四条路的接受条件。
+    yijiang-2014-round2 票 21：不枚举档多选（【秉壹】的座位面）的答案由 AI 自己拼、
+    不在 ``legal_actions`` 里；``is_structural_answer`` 与引擎 ``submit`` 那道闸同一口径。
     """
 
     def __init__(self, inner) -> None:
@@ -1654,6 +1753,7 @@ class _IllegalAnswerScan:
             action not in query.legal_actions
             and not is_structured_activation(query, action)
             and not is_designation_use(query, action)
+            and not is_structural_answer(query, action)
         ):
             self.illegal += 1
         return action
