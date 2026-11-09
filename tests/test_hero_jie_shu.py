@@ -875,10 +875,10 @@ def test_jie_jijiang_second_asks_the_shu_ally_and_the_lord_draws():
     seconds = _jijiang_queries(engine)
     assert [query.actor for query in seconds] == [2], "询问发给打出【杀】的盟友（决定者）"
     assert len(engine.state.player(1).hand) == 1, "收益归主公（摸一张）"
-    from sgs.skills.catalog import skill_decider_used_this_turn
+    from sgs.skills.catalog import skill_used_this_turn
 
-    assert skill_decider_used_this_turn(engine.state, 1, JIE_JIJIANG, 2), (
-        "「每回合限一次」的计数主体 = **那个角色**（票 23 订正）：落位记在代打盟友的账上"
+    assert skill_used_this_turn(engine.state, 1, JIE_JIJIANG), (
+        "「每回合限一次」按**主公 / 实例**落位（整回合一次）：位图表在持有者这条实例上"
     )
 
 
@@ -1001,6 +1001,48 @@ def test_the_standard_liubei_jijiang_has_no_second_hooks():
     assert jie.hooks[: len(JIE_JIJIANG_ECHO.hooks)] == JIE_JIJIANG_ECHO.hooks
     assert jie.hooks[len(JIE_JIJIANG_ECHO.hooks) :] == standard.hooks
     assert JIE_JIJIANG_LORD.activation_flow is not None
+
+
+def test_the_shared_lord_definition_derives_the_card_name_from_the_declaration():
+    """牌名从声明的 ``required`` 派生，不写死【杀】（评审 P2-e 的回归）。
+
+    ``activation_flow`` 是**通用**字段（任何求助型主公技都可能声明它），而 P2-e 之前共享的
+    ``_lord_request_definition`` 把清单文案写死成「选择【杀】的目标」、闸门也写死成【杀】——
+    第二个声明者会**静默继承【激将】的措辞与闸门**。现在两边都读
+    ``_required_card_name(skill.required)``；未登记的新牌名在**构造期**就抛错（不静默沿用
+    【杀】）。
+    """
+    from sgs.effects import CandidateScope
+    from sgs.skills import CATALOG
+    from sgs.skills.lord_request import (
+        LordSkill,
+        JIJIANG_USE_FLOW,
+        _lord_request_definition,
+    )
+
+    probe = LordSkill(
+        hero_id="caocao",
+        short_id="hujia_probe",
+        required="dodge",
+        scope=CandidateScope.DODGE,
+        activation_flow=JIJIANG_USE_FLOW,
+    )
+    probe_definition = _lord_request_definition(probe)
+    assert probe_definition.step_requirements == {"seat": "选择【闪】的目标"}, (
+        "清单文案必须随 required 走（写死【杀】= 第二个声明者继承别人的措辞）"
+    )
+    assert probe_definition.requirement == "打出【闪】"
+    assert CATALOG["hero.liubei.jijiang"].step_requirements == {"seat": "选择【杀】的目标"}
+
+    unregistered = LordSkill(
+        hero_id="caocao",
+        short_id="peach_probe",
+        required="peach",
+        scope=CandidateScope.DODGE,
+        activation_flow=JIJIANG_USE_FLOW,
+    )
+    with pytest.raises(ValueError, match="required"):
+        _lord_request_definition(unregistered)
 
 
 # ---------------------------------------------------------------------------
@@ -2153,7 +2195,9 @@ def test_the_standard_zhaoyun_has_no_yajiao():
 #
 # 下面六条钉：三扇「使用」窗口（①出牌阶段主动使用【杀】（票 20）；②【借刀杀人】被迫使用
 # （票 22）；③【乱武】被迫使用（票 22））+ 一扇**打出**窗口（南蛮，既有路径不许回退）
-# + 「每回合限一次」的计数主体（按**代付者**）+ 「于其回合外」按代付者判的负例。
+# + 「每回合限一次」的计数主体（**整回合一次**，按主公 / 实例；用户 2026-11-10 裁定：
+#   「激将②和护驾②一样的，每个回合，只能触发一次，而非每个盟友每回合各一次」）
+# + 「于其回合外」按代付者判的负例。
 # ---------------------------------------------------------------------------
 
 
@@ -2342,12 +2386,19 @@ def test_jie_jijiang_second_fires_for_the_luanwu_slash_the_ally_paid():
     assert engine.state.player(2).hand == [], "代付者的实体牌付出去了"
 
 
-def test_jie_jijiang_second_is_once_per_turn_for_the_substitute():
-    """「每回合限一次」按**那个角色**计数，不按主公（票 23 §3 的 last bullet）。
+def test_jie_jijiang_second_is_once_per_turn_not_once_per_ally():
+    """「每回合限一次」= **整回合只触发一次**，不是每名蜀盟友各一次（用户 2026-11-10 裁定）。
 
-    同一回合两轮【南蛮入侵】，两名蜀盟友各打出两张【杀】：**每名盟友**各触发一次 ②
-    （主公摸两张），而**已经发动过的那名**盟友在第二轮里不再被问（每回合限一次）。
-    按主公计的话第一轮就只有一条询问、主公只摸一张——本断言因此同时钉住"按角色"与"限一次"。
+    与【护驾】② 同一条口径（``tests/test_hero_jie_wei.py::
+    test_jie_hujia_second_is_once_per_turn_not_once_per_ally`` 是同形的另一半）：
+
+    - 同一回合两轮【南蛮入侵】，座位 2、3 是**两名不同的蜀势力盟友**，各打出【杀】；
+    - 第一个打出【杀】的那名（座位 2，派发序在前）触发② ⇒ 这一回合的名额用掉；
+    - **第二个不同的盟友不再被问**（若按"每个盟友各一次"，这里会有第二条询问、主公摸两张）；
+    - 主公因此只摸**一张**。
+
+    「真的发动才计数」与"整回合一次"是两条正交的口径：放弃不占由
+    ``test_jie_jijiang_second_declining_does_not_consume_the_turn`` 钉。
     """
     barbarians = tuple(_ids(PACK, "barbarian_invasion")[:2])
     slashes = tuple(_ids(PACK, "slash")[:4])
@@ -2384,10 +2435,73 @@ def test_jie_jijiang_second_is_once_per_turn_for_the_substitute():
     )
 
     seconds = _jijiang_queries(engine)
-    assert [second.actor for second in seconds] == [2, 3], (
-        "两名替主公出了牌的盟友各问一次（第二轮不再问：每回合限一次按**那个角色**计）"
+    assert [second.actor for second in seconds] == [2], (
+        "只有第一个打出【杀】的盟友被问（整回合一次）；第二个**不同的**盟友不再被问"
     )
-    assert len(engine.state.player(1).hand) == 2, "主公各摸一张（收益归他，一共两张）"
+    assert len(engine.state.player(1).hand) == 1, "主公只摸一张"
+
+
+class _DeclinesSkillActivation(_Scripted):
+    """只把「是否发动」答成**放弃**，其余按 :class:`_Scripted` 兜底。
+
+    【激将】② 的「放弃不占名额」需要一个"被问但放弃"的盟友：座位 2 放弃之后，座位 3 仍
+    必须被问（这一回合的名额没被一次放弃吃掉）。
+    """
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION":
+            for action in query.legal_actions:
+                if type(action).__name__ == "Pass":
+                    return action
+        return super().respond(query)
+
+
+def test_jie_jijiang_second_declining_does_not_consume_the_turn():
+    """**真的发动**才落位：盟友答「放弃」不占本回合的那一次（用户 2026-11-10 的复核）。
+
+    座位 2 放弃 ②（②的名额不动），随后座位 3（另一名蜀盟友）打出【杀】⇒ 仍然会问它，
+    且它真的发动后主公摸一张。"每回合一次"限制的是**发动次数**，不是**询问次数**。
+    """
+    barbarians = tuple(_ids(PACK, "barbarian_invasion")[:2])
+    slashes = tuple(_ids(PACK, "slash")[:4])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=barbarians),
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=slashes[:2], kingdom=Kingdom.SHU),
+            SeatSpec(hand=slashes[2:], kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, *barbarians, *slashes),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _of_type(query, UseCard, type_id="barbarian_invasion")
+        return None
+
+    def ally(query):
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BARBARIAN_INVASION
+        ):
+            return _of_type(query, PlayCard, type_id="slash")
+        return None
+
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        # 座位 2 放弃 ②，座位 3 照常发动：放弃只影响那一问，不落"已发动"位。
+        [_Scripted(attacker), _Scripted(), _DeclinesSkillActivation(ally), _Scripted(ally)],
+        lambda e: all(slash in e.state.discard for slash in slashes),
+    )
+
+    seconds = _jijiang_queries(engine)
+    assert [second.actor for second in seconds] == [2, 3], (
+        "座位 2 放弃不占名额 ⇒ 座位 3 仍被问（每回合一次限的是**发动**，不是询问）"
+    )
+    assert len(engine.state.player(1).hand) == 1, "只有座位 3 真的发动了 ⇒ 主公摸一张"
 
 
 def test_jie_jijiang_second_does_not_fire_for_the_substitute_in_his_own_turn():

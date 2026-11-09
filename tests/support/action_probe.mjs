@@ -74,6 +74,7 @@ for (const name of [
   "togglePreativationCard",
   "advancePreativation",
   "selectPreativationSeat",
+  "toggleSeatMultiPick",
 ]) {
   if (!(name in ui)) throw new Error(`ui_bridge 没桥出 ${name}：前端脚本加载不完整`);
 }
@@ -552,7 +553,9 @@ const noDeclaredDefault = ui.buildAction();
  *   - `selected_option`：`selectSkillCandidate` 写的那一格（窗口里的 `ActivateSkill`
  *     候选 = 提供者入口，点技能按钮就是选它）；
  *   - `click_slot`：**真实点击入口** `submitOwnHandSinglePick`（自己手牌 / 装备区单张，
- *     一击即选中；它自己写 `state.picks` + 候选骨架的指向）。
+ *     一击即选中；它自己写 `state.picks` + 候选骨架的指向）；
+ *   - `seat_multi_picks`：**真实点击入口** `toggleSeatMultiPick` 按点击顺序逐个点座位
+ *     （座位多选面；`structural` 档与枚举档都是这一口，界面自己拼集合）。
  *
  * 合成载荷（无会话）⇒ 点击只留内部态、不发请求，正是本探针要的"点击 → 载荷"。 */
 const liveInput = process.argv[2];
@@ -567,6 +570,16 @@ if (liveInput) {
   }
   if (fixture.click_slot !== null && fixture.click_slot !== undefined) {
     ui.submitOwnHandSinglePick(fixture.pending, Number(fixture.click_slot));
+  }
+  if (fixture.seat_multi_picks) {
+    /* 座位多选面的半边（评审 P1-b 的真实载荷回环）：按 ``seat_multi_picks`` 的**点击顺序**
+     * 逐个点场上武将（`interaction.js:toggleSeatMultiPick`，经 ui_bridge 桥出），再让
+     * `buildAction()` 按 `pending.options` 原序拼出那条 `SelectOptions`。两个座位界面的
+     * 唯一差别只在载荷的 `structural`：这一档候选里只有骨架，集合由界面自己拼，
+     * 故这里不另写分支——判据全在前端那一份实现里。 */
+    for (const seat of fixture.seat_multi_picks) {
+      ui.toggleSeatMultiPick(Number(seat));
+    }
   }
   if (fixture.enter_preactivation) {
     /* 复合动作的半边（yijiang-2014-round2 票 20）：**点已翻预发动的技能**（= 进入清单）

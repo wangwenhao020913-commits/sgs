@@ -31,6 +31,17 @@
 | **转化声明** | 「你可以将一张 X 当 Y 使用或打出」 | 【武圣】`hero.guanyu.wusheng`、界【国色】`hero.jie_daqiao.guose` |
 | **纯声明 / 状态位** | 只有被动约束或状态（空城、马术、谦逊放置） | 【空城】`hero.zhugeliang.kongcheng`、【谦逊】`hero.jie_luxun.qianxun` |
 
+> **声明级流水线 `SkillDef.flow`**（yijiang-2014-round2 票 20 的加法）：不是第六种原语、也不是
+> 第五种"进入"方式，而是把**已有的流水线原语**挂到一条**不属于 A 族**的技能声明上。判据：
+> 这条技能不是「点击即发动」的 A 族（`src/sgs/skills/active.py:ACTIVE_SKILLS`），却要在出牌阶段
+> 作为一条**主动入口**（首个 / 今天唯一的载体 = 【激将】的「出牌阶段主动使用【杀】」侧，声明由
+> `src/sgs/skills/lord_request.py:_lord_request_definition` 造）。三件事一起落：声明上给
+> `flow=`（清单 / 校验读同一条流水线）、给 `preactivated=True`、并在 `catalog.py` 末尾用
+> `src/sgs/skills/active.py:register_activation` 把**执行回调**（`run_flow`）登记进
+> `src/sgs/skills/active.py:ACTIVATIONS`。`ACTIVATIONS` 的**对外视图只读**，可变层 `_ACTIVATIONS`
+> 是加载期一次性写入的——**运行期登记禁止**（与 `register_provider` 同一条纪律）。A 族仍走
+> `ACTIVE_SKILLS`，钩子侧的流水线仍走 `Hook.flow` / 接缝走 `Seam.flow`，三条登记互不覆盖。
+
 > **「只能」型转化另立一档**：牌面写「**只能**将一张 X 当 Y 使用或打出」（当前只有神关羽
 > 【武神】）时，在 `ConversionSkill` 上声明 `forced=True`。它与 `locked` **正交**：锁定技是
 > 另一条规则类型（失效 / 形态表），`forced` 只回答"源牌还能不能按原用途用"——`forced=True`
@@ -97,7 +108,7 @@
 | `PHASE_DISCARD_END` | **弃牌阶段结束时**（神周瑜移动版【琴音】= 首个载体，huo-shenzhouyu-mobile 票 03）：与 `PHASE_FINISH` 同一条惰性派发（`_dispatch_phase_body`）；帧私有 `discard_phase_hand_discards` = 本阶段弃牌步实际弃置的手牌数，钩子条件读它 |
 | `PHASE_DRAW_END` | **摸牌阶段结束时**（神诸葛亮【七星】② = 首个载体，huo-shenzhugeliang 票 03）：`_phase_draw_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。被【兵粮寸断】跳过的摸牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发 |
 | `PHASE_FINISH` | 结束阶段（闭月、观星二段、诛害、勤学二段） |
-| `PHASE_PLAY_START` | **出牌阶段开始时**（yijiang-2014-round2 票 20：【激将】的机械锁 = 首个载体）：`_phase_play_start` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，**记录流逐字节不变**——它此前只记时机、从不派发）。帧 `source` = 当前回合角色（`actor=_TURN_SEAT`），故"这是**我的**出牌阶段"读 `source == MATCH_OWNER_KEY`。复位段带 `play_start_reset` 闸（钩子提问挂起后重入不重复抹"本阶段"事实）。被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在 |
+| `PHASE_PLAY_START` | **出牌阶段开始时**（yijiang-2014-round2 票 20：【激将】的机械锁 = 首个载体）：`_phase_play_start` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，**记录流逐字节不变**——它此前只记时机、从不派发）。帧 `source` = 当前回合角色（`actor=_TURN_SEAT`），故"这是**我的**出牌阶段"读 `source == MATCH_OWNER_KEY`。**复位段（阶段位 / `slash_in_play_phase` / 上一张牌 / 诈降 / 天义）每次进本步都无条件跑**，本步**没有**"只跑一次"的闸（与 `TURN_START` 的 `turn_start_reset` 不同）⇒ 挂在这里的钩子不许依赖「本阶段」事实：会提问（挂起）的钩子一挂起，续跑就是**重入本步**、复位段再跑一遍，把这次钩子刚落下的这些事实抹掉。要让本时机能安全承载提问型钩子，先给复位段加一把「复位只跑一次」的闸（那是引擎语义改动，另开票，别在技能票里顺手加）。被【乐不思蜀】跳过时**本步照进**（复位照样跑），只是不派发 ⇒ 这个时点整段不存在、挂在上面的技能不触发 |
 | `PHASE_PLAY_END` | **出牌阶段结束时**（韬·曹操【倡义】= 首个载体，tao-caocao 票 02）：`_phase_play_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。**"本阶段"作用域的清理排在本步之后**；被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发（与【兵粮寸断】跳摸牌阶段的 `PHASE_DRAW_END` 同一口径） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
@@ -294,6 +305,25 @@ extra_modifiers=(Modifier(ModifierPoint.CANDIDATES, MY_PROVIDER_WINDOWS.offers),
 5. 提供者要参与 ⇒ 在它自己的 `ProviderWindows(keys=(...))` 里加 key（未登记 / 登记为
    "不参与"的 key 在构造期就 `ValueError`）。
 
+### 3.9 发动回调登记表 `ACTIVATIONS`（yijiang-2014-round2 票 20）
+
+出牌阶段那个 `ActivateSkill` 帧由 `src/sgs/skills/active.py:activate_skill` 按 `skill_id`
+**通用派发**，故"谁有发动回调"是一张登记表，不是一张白名单：
+
+| 列 | 回答什么 |
+|---|---|
+| `skill_id` | 全限定 id（与 `CATALOG` 同键） |
+| 回调 | `(host, frame) -> Control`；走流水线的技能在回调里调 `run_flow` |
+| 装载点 | A 族 = `src/sgs/skills/active.py:ACTIVE_SKILLS`（`_ACTIVATIONS` 的初值由它派生）；**非 A 族** = 声明级 `SkillDef.flow` + 在 `catalog.py` 末尾调 `src/sgs/skills/active.py:register_activation` |
+| 只读视图 | `src/sgs/skills/active.py:ACTIVATIONS`（`MappingProxyType`）——引擎只读它 |
+| 纪律 | **只在加载期登记一次**（`catalog.py` 末尾，相关模块都已 import 完）；重复登记是编程错误（同一 id 没有"后者胜"）；**运行期登记禁止**（"能派发谁"不许取决于时序）。与 `register_provider` 同一条纪律 |
+
+今天的唯一非 A 族载体 = 【激将】的「出牌阶段主动使用【杀】」侧（票 20）：
+`SkillDef.flow = JIJIANG_USE_FLOW` + `register_activation(JIJIANG.skill_id, jijiang_use_activate)`。
+A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住在 `Hook` / `Seam` 上——
+**三条登记互不覆盖**（同一 id 的两条 `SkillDef` 会被 `CATALOG` 的字典推导静默覆盖，故
+"一条技能两半"必须挂在**同一条**声明上）。
+
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 
 | 触点 | 位置 | 判据 |
@@ -369,7 +399,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 |---|---|---|
 | 无 | 全树没有对应字段 / 帧 / 时机 | （当前为空；曾登记过的"标记"已解封，见下行。**护甲值**（yijiang-2014-round2 票 07 / W7）也已解封：它是 `Player.armor` + `Engine.apply_armor_change` / `apply_armor` + `armor_change` delta 的**第二条体力轴**（伤害在 `life_decrease_on` 先扣护甲再扣体力），**不是** `Timing`——没有"护甲时机"可挂，故不进 §3.1 的时机表、也不进 `IMPLEMENTED` / `ENUM_ONLY` 四轴计数）。**虚拟牌牌面的效果侧指定**（yijiang-2014-round2 票 06 / W6）也已解封：它是 `src/sgs/skills/virtual.py:transformed_card` 的两个可选参数 `suit` / `color`（缺省 `None` = §16.3 的派生、逐字节不变；给了 `suit` 就由 `color_of_suit` 派生颜色、**点数仍继承来源牌**，牌面覆盖**不进 id**）——**不是第六种原语**（五种原语都不产生"牌面"这个量，故只是一条构造器参数），首个消费者 = 界沮授【渐营】②「此牌花色视为与上一张牌花色相同」。同票的 `src/sgs/skills/active.py:ActiveSkill` 还加了 `hooks`（缺省空）：一条 `SkillDef` 可以同时带钩子与 A 族流水线（界【渐营】①+②），因为同 id 的两条声明会被 `CATALOG` 的字典推导**静默覆盖** |
 | 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **减体力上限**（`MAXLIFE_DECREASE_*` 留位、`reduce_hp_max` 未迁进帧）；**废除 / 恢复槽位的时机**（「废除前 / 废除后」在补充一手里有名，`Timing` 里没有——`Engine.abolish_slots` 只做事件本身，不派发时机） |
-| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **标记**（`Player.markers` + `Engine.add_marker` / `remove_marker` + `marker_change` delta，账本 L800；首批载体 = 神诸葛亮【狂风】【大雾】/ 神关羽【武魂】，雷包【镇骨】用同一机制做"欠账到点结算"；**标记自身效果**自 lei-shenganning 票 94 起接线：`Marker.effect` 指向一个效果定义（`carrier = CarrierKind.MARKER`，在 `CATALOG` 里登记但**不是任何角色拥有的技能** ⇒ 武将面 / 技能按钮区都不列它）⇒ `resolve_instances` 以 `SkillSourceKind.MARKER` 产出实例，**不受技能失效影响**，寿命两条 = `clear_on_source_death` / `clear_on_source_skill_lost`；首个载体 = 神甘宁【劫营】的「营」（`hero.shen_ganning.jieying_mark`，票 01））；**横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**状态位写入口的事件派发**（chenqun-guyong 票 03 / W2：`Engine.set_flipped` / `Engine.set_chained` 惰性派发 `STATE_FLIPPED` / `STATE_CHAINED`——事件排进 `Engine._state_pending`、下一条 `_step` 开头用不压栈的临时帧派发；值变了才算事件、幂等写不算、「回合开始前翻回正面」算；无注册实例时零记录）；**废除 / 恢复槽位**（lei-batch 票 02 立、lukang-mobile 票 03 改成**逐槽**：`Player.sealed_zones` 只存 7 个槽 id（判定 `judge_1..3` + 装备四槽），`Engine.abolish_slots` / `restore_slots`（**一次调用 = 一个废除事件**，槽里牌按来源区分组先强制弃置、再落封印；`judge` / `equip` 两词只是读取面的整区兼容名 = 该区槽全封）；读点 = `check_targets` 的装备牌与延时锦囊两条系统规则、`put_equipment_card`、闪电转移；首个载体 = 雷包·张绣【雄乱】（一次废 7 槽））；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁）；**拼点**（huo-taishici-xunyu 票 03：`RANK_COMPARE` 帧 + `RANK_COMPARE_ON` / `RANK_COMPARE_RESULT_AFTER` 解封 + 新 `MoveReason.PINDIAN` + `pindian` delta；首个载体 = 火包·OL 太史慈【天义】、荀彧【驱虎】） |
+| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **标记**（`Player.markers` + `Engine.add_marker` / `remove_marker` + `marker_change` delta，账本 L800；首批载体 = 神诸葛亮【狂风】【大雾】/ 神关羽【武魂】，雷包【镇骨】用同一机制做"欠账到点结算"；**标记自身效果**自 lei-shenganning 票 94 起接线：`Marker.effect` 指向一个效果定义（`carrier = CarrierKind.MARKER`，在 `CATALOG` 里登记但**不是任何角色拥有的技能** ⇒ 武将面 / 技能按钮区都不列它）⇒ `resolve_instances` 以 `SkillSourceKind.MARKER` 产出实例，**不受技能失效影响**，寿命两条 = `clear_on_source_death` / `clear_on_source_skill_lost`；首个载体 = 神甘宁【劫营】的「营」（`hero.shen_ganning.jieying_mark`，票 01））；**横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**状态位写入口的事件派发**（chenqun-guyong 票 03 / W2：`Engine.set_flipped` / `Engine.set_chained` 惰性派发 `STATE_FLIPPED` / `STATE_CHAINED`——事件排进 `Engine._state_pending`、下一条 `_step` 开头用不压栈的临时帧派发；值变了才算事件、幂等写不算、「回合开始前翻回正面」算；无注册实例时零记录）；**废除 / 恢复槽位**（lei-batch 票 02 立、lukang-mobile 票 03 改成**逐槽**：`Player.sealed_zones` 只存 7 个槽 id（判定 `judge_1..3` + 装备四槽），`Engine.abolish_slots` / `restore_slots`（**一次调用 = 一个废除事件**，槽里牌按来源区分组先强制弃置、再落封印；`judge` / `equip` 两词只是读取面的整区兼容名 = 该区槽全封）；读点 = `check_targets` 的装备牌与延时锦囊两条系统规则、`put_equipment_card`、闪电转移；首个载体 = 雷包·张绣【雄乱】（一次废 7 槽））；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁）；**拼点**（huo-taishici-xunyu 票 03：`RANK_COMPARE` 帧 + `RANK_COMPARE_ON` / `RANK_COMPARE_RESULT_AFTER` 解封 + 新 `MoveReason.PINDIAN` + `pindian` delta；首个载体 = 火包·OL 太史慈【天义】、荀彧【驱虎】）；**声明级流水线的主动入口**（yijiang-2014-round2 票 20：`SkillDef.flow` + 加载期 `register_activation` ⇒ 非 A 族的技能也能在出牌阶段作为主动入口，清单 / 校验 / 执行三处读同一条流水线；首个载体 = 【激将】的「出牌阶段主动使用【杀】」侧。登记面见 §3.9，**不是**第六种原语） |
 
 判定完：
 

@@ -344,18 +344,29 @@ ALLOWLIST: dict[Site, Rule] = {
     (
         "src/sgs/skills/lord_request.py",
         "_lord_request_definition",
-        'requirement = {"dodge": "打出【闪】", "slash": "使用或打出【杀】"}[skill.required]',
+        'requirement = {"dodge": f"打出【{card}】", "slash": f"使用或打出【{card}】"}[',
     ): Rule(FAMILY, 1, "按 required 取文案（请求牌名，不筛牌面；护驾 / 激将各一档）"),
+    (
+        "src/sgs/skills/lord_request.py",
+        "_LORD_REQUEST_CARD_NAMES",
+        '_LORD_REQUEST_CARD_NAMES: dict[str, str] = {"slash": "杀", "dodge": "闪"}',
+    ): Rule(
+        FAMILY,
+        1,
+        "``required``（请求牌名）→ 牌面显示名：只取文案，不筛牌面；判族在下游 "
+        "satisfies_required（评审 P2-e 把写死的【杀】改成由声明派生）",
+    ),
     # ---- skills/lord_request.py：【激将】的「出牌阶段主动使用【杀】」侧（票 20）----
     (
         "src/sgs/skills/lord_request.py",
-        "_jijiang_slash_card",
-        'return pure_virtual_card(state, "slash")',
+        "_JIJIANG_CARD",
+        '_JIJIANG_CARD = "slash"',
     ): Rule(
         NORMAL,
         1,
         "【激将】代打的**产物**是一张普通【杀】（无属性 / 无花色点数）——只用来读使用规则"
-        "（check_usable / 目标池），有意 normal-only；族判据在下游行为表的 count_key",
+        "（check_usable / 目标池），有意 normal-only；族判据在下游行为表的 count_key"
+        "（评审 P2-a / P2-e 把字面量收进这个常量，产物与目标池都读它）",
     ),
     (
         "src/sgs/skills/lord_request.py",
@@ -389,7 +400,7 @@ ALLOWLIST: dict[Site, Rule] = {
     (
         "src/sgs/skills/lord_request.py",
         "_lord_echo_requirement",
-        '"slash": "当你需要使用或打出【杀】时，你可以令其他蜀势力角色依次选择是否打出一张【杀】",',
+        '"slash": f"当你需要使用或打出【{card}】时，你可以令其他蜀势力角色依次选择是否打出一张【{card}】",',
     ): Rule(FAMILY, 1, "按 required 取 ① 的文案（请求牌名，不筛牌面）"),
     # ---- skills/response_window.py / target_pool.py：声明闭集 ----
     (

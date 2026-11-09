@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from sgs.data import load_content_pack
-from sgs.effects import is_legal_option_set, legal_actions_for
+from sgs.effects import cap_of, is_legal_option_set, legal_actions_for, usable_options
 from sgs.engine import Engine, IllegalActionError
 from sgs.resolution import Frame
 from sgs.state import (
@@ -339,6 +339,72 @@ def test_the_predicate_is_the_single_shape_truth():
     assert not is_legal_option_set(ctx, ("seat:0", "seat:9")), "池外"
     assert not is_legal_option_set(ctx, ("seat:2",)), "置灰"
     assert not is_legal_option_set(ctx, ("seat:0", "seat:0")), "重复"
+
+
+def test_the_usable_pool_and_the_cap_come_from_one_derivation():
+    """可选项池与上限**只有一份派生**（``usable_options`` / ``cap_of``，与谓词同源）。
+
+    这四项（池 / 置灰 / 下限 / 上限）此前在候选枚举、谓词、AI 自建集合、引擎收答案的报错
+    文案里各算一遍；第 4 份曾经把 ``cap`` 算成 ``max_selected``（数**含置灰**的 ``options``），
+    于是报错文案会给出一个**达不到**的上界。故把派生抽出来、由谓词统一定义：
+
+    - 池 = ``options`` 去掉 ``disabled``（与谓词逐项一致）；
+    - ``cap`` = ``min(max_selected, len(池))``，``max_selected=None`` ⇒ ``len(池)``；
+    - 谓词的合法边界就是 ``[min_selected, cap_of]``：多一项必拒、``cap`` 项必收。
+
+    询问面（``SelectOptionsQuery``）与候选面（``SelectOptionsContext``）同上同下，两个都收。
+    """
+    ctx = SelectOptionsContext(
+        skill_id="hero.guyong.bingyi:seat",
+        options=("seat:0", "seat:1", "seat:2"),
+        disabled=("seat:2",),
+        min_selected=1,
+        max_selected=3,
+    )
+    assert usable_options(ctx) == ("seat:0", "seat:1"), "池 = options 去置灰（保持原序）"
+    assert cap_of(ctx) == 2, "cap 被**可选项**数钳住：max_selected=3 也达不到"
+
+    unbounded = SelectOptionsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.TURN_START,
+        prompt="请选择若干项（可多选）。",
+        legal_actions=(),
+        view=project_view(_state(), 0),
+        skill_id="hero.guyong.bingyi:seat",
+        options=("seat:0", "seat:1", "seat:2"),
+    )
+    assert cap_of(unbounded) == 3, "max_selected=None ⇒ 只受可选项数约束"
+    assert usable_options(unbounded) == ("seat:0", "seat:1", "seat:2")
+
+    full = usable_options(ctx)
+    assert is_legal_option_set(ctx, full) is (len(full) <= cap_of(ctx)), (
+        "谓词的边界与 cap_of 是同一条算法（池内 / 无置灰由 usable_options 保证）"
+    )
+    assert is_legal_option_set(ctx, (*full, "seat:2")) is False, "多一项（且置灰）必拒"
+
+
+def test_the_rejection_message_quotes_the_reachable_bound():
+    """引擎拒收时的文案必须给出**可达**的上界（``cap_of``，不是 ``max_selected``）。
+
+    票 21 的受理侧报错文案是玩家看得到的那一句：它此前直接印 ``pending.max_selected``，
+    而 ``max_selected`` 之上还有"可选项只有这么几个"这一层 ⇒ 印出一个永远选不到的数。
+    """
+    engine, query = _structural_engine(
+        options=("seat:0", "seat:1", "seat:2"),
+        disabled=("seat:2",),
+        min_selected=1,
+        max_selected=3,
+    )
+    with pytest.raises(IllegalActionError) as excinfo:
+        engine.submit(
+            SelectOptions(choices=("seat:0", "seat:1", "seat:2"), answers_seq=query.seq)
+        )
+    message = str(excinfo.value)
+    assert "[1, 2]" in message, (
+        f"上界必须是可选项数（2），不是 max_selected（3）：{message}"
+    )
+    assert "[1, 3]" not in message, f"不可达的上界不许出现在玩家文案里：{message}"
 
 
 def test_the_structural_flag_stays_out_of_the_record_stream():

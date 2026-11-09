@@ -1521,14 +1521,8 @@ def is_legal_option_set(
     规范化——界面 ``pending.js:seatMultiChoices`` 与 AI 的构造器各自排好；"依次结算"是另一
     档，将来有技能要它时再开票）。
     """
-    options = tuple(face.options)
-    disabled = frozenset(face.disabled)
-    usable = tuple(option for option in options if option not in disabled)
-    cap = (
-        len(usable)
-        if face.max_selected is None
-        else min(int(face.max_selected), len(usable))
-    )
+    usable = usable_options(face)
+    cap = cap_of(face)
     chosen = tuple(choices)
     if not int(face.min_selected) <= len(chosen) <= cap:
         return False
@@ -1536,6 +1530,33 @@ def is_legal_option_set(
         return False
     pool = frozenset(usable)
     return all(choice in pool for choice in chosen)
+
+
+def usable_options(
+    face: SelectOptionsContext | SelectOptionsQuery,
+) -> tuple[str, ...]:
+    """多选面的**可选项池**：``options`` 去掉 ``disabled``，保持原序。
+
+    与 :func:`is_legal_option_set` 的「池内 / 无置灰」两条同源（谓词与候选枚举都读它）：
+    置灰项**留在** ``options`` 里只为画灰，任何生产答案都不许含它 —— 故"可选的"只有这一份
+    派生，别处不再自己过一遍 ``disabled``。
+    """
+    disabled = frozenset(face.disabled)
+    return tuple(option for option in face.options if option not in disabled)
+
+
+def cap_of(face: SelectOptionsContext | SelectOptionsQuery) -> int:
+    """多选面的**可达上限**：``min(max_selected, len(usable_options(face)))``。
+
+    ``max_selected=None`` ⇒ 只受可选项数约束。这条派生是 :func:`is_legal_option_set` 区间
+    判据的一半，也是**玩家文案**（引擎拒收时的 ``[min, cap]``）与 AI 自建集合的上界。上限
+    只在这里算：四处各算一遍时，引擎那份曾把 ``max_selected`` 直接当上限（数了**含置灰**
+    的 ``options``），于是拒收文案印出一个永远选不到的数。
+    """
+    usable = usable_options(face)
+    if face.max_selected is None:
+        return len(usable)
+    return min(int(face.max_selected), len(usable))
 
 
 def _select_options(
@@ -1559,9 +1580,8 @@ def _select_options(
     出下限时**没有**合法集合 ⇒ fail-closed（不发明一条越界的骨架）。
     """
     del seat
-    disabled = frozenset(ctx.disabled)
-    options = tuple(option for option in ctx.options if option not in disabled)
-    cap = len(options) if ctx.max_selected is None else min(int(ctx.max_selected), len(options))
+    options = usable_options(ctx)
+    cap = cap_of(ctx)
     if ctx.min_selected < 0 or cap < ctx.min_selected:
         raise ValueError(
             f"多选区间的下限 {ctx.min_selected} 大于上限 {cap}（选项 {ctx.options!r}）"
@@ -1569,9 +1589,8 @@ def _select_options(
     actions: list[Action] = []
     if not ctx.enumerate_candidates:
         # 上面那条区间检查已经覆盖"可选项凑不出下限"：``cap`` 只受**可选项**数约束，
-        # 故 ``cap >= min_selected`` ⇒ 骨架一定够长，不需要第二条守卫。
+        # 故 ``cap >= min_selected`` ⇒ 骨架一定够长、形状必然合法，不需要第二条守卫。
         skeleton = options[: int(ctx.min_selected)]
-        assert is_legal_option_set(ctx, skeleton), "骨架必须是合法集合（与谓词同一口径）"
         actions.append(SelectOptions(choices=skeleton, answers_seq=answers_seq))
     else:
         for mask in range(1 << len(options)):

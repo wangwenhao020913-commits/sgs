@@ -507,6 +507,10 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             # 同一份）。它只读询问自带的 `options` / `disabled` / 区间 ⇒ 可见面，不是全知
             # 状态；AI 自建集合必须过它，"AI 与引擎同一份合法性"才成立。
             "is_legal_option_set",
+            # 评审 P2-a：谓词的两半（可选项池 / 可达上限）抽出来由谓词共读。同样只读询问
+            # 自带的四个字段 ⇒ 与 `is_legal_option_set` 同一条可见面，不是全知状态。
+            "cap_of",
+            "usable_options",
             "is_slash",
             "target_sets_match",
         }

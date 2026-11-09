@@ -1015,20 +1015,6 @@ class GameState(BaseModel):
     来源消失（装备离场 / 技能失去）时由 ``skills.prune_skill_state`` 清理——暂时失效不算
     来源消失；M2 的 17 条装备没有持久状态，故本字段实际恒空。
     """
-    skill_deciders_this_turn: dict[str, tuple[int, ...]] = Field(default_factory=dict)
-    """**每回合限一次**的**决定者**账本（yijiang-2014-round2 票 23）：实例键 → 本回合已经
-    作为决定者发动过它的座位（按首次出现序、去重，故用 ``tuple`` 不用 ``set``）。
-
-    与 :attr:`skill_state` 的 ``_TURN_USED`` 位**分列**而不是再挤一位：位图只记"这条技能
-    本回合发动过"，而界刘备【激将】② 的「每回合限一次」按**那个角色**计数（其他蜀势力角色
-    各有一份额度），需要"谁决定过"这一轴。写入口
-    ``skills.mark_skill_decider_used_this_turn``，读入口 ``skills.skill_decider_used_this_turn``，
-    **唯一复位点** = 回合末（``skills.reset_turn_skill_state``，与位图同一处）。
-    来源消失时随实例键一起清（``skills.prune_skill_state``）。
-
-    **不进记录流**（不新增 delta）：读它的只有「是否发动」的条件，回放按同一条技能决策
-    重跑即可重建——47 条金录像因此逐字节不变。
-    """
     card_tags: dict[int, tuple[CardTag, ...]] = Field(default_factory=dict)
     """**牌标签**：``card_id → 该牌上的标签（按加入序）``（M6 票 09；spec D12）。
 

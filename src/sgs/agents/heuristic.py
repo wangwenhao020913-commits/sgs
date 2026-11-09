@@ -95,9 +95,10 @@ from types import MappingProxyType
 from sgs.effects import (
     Randomness,
     behavior_for,
-    is_legal_option_set,
+    cap_of,
     is_slash,
     target_sets_match,
+    usable_options,
 )
 from sgs.state import (
     Action,
@@ -2413,16 +2414,13 @@ def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     - **次序** = 询问 ``options`` 的**原序**（常规结算顺序；用户 2026-11-09 的裁定：默认按
       常规结算顺序，"依次"要有技能明说才另开一档）——打分排名只决定**选谁**，不决定次序。
 
-    形状由 :func:`sgs.effects.is_legal_option_set`（与引擎收答案同一个谓词）核一遍：构造器
-    不该产出非法集合，越界即打分 / 构造的编程错误，直接崩而不是发给服务端换一个 400。
+    池与上限读引擎的**同一份派生**（``sgs.effects.usable_options`` / ``cap_of``，谓词的另一
+    半）：构造器的 ``cap`` / ``floor`` 因此天然落在 ``is_legal_option_set`` 的区间内——构造器
+    不该产出非法集合，越界即打分 / 构造的编程错误（这里**不**再拿 assert 兜一遍：``-O`` 下
+    断言会被剥掉，兜不住任何东西）。
     """
-    disabled = frozenset(query.disabled)
-    options = tuple(option for option in query.options if option not in disabled)
-    cap = (
-        len(options)
-        if query.max_selected is None
-        else min(int(query.max_selected), len(options))
-    )
+    options = usable_options(query)
+    cap = cap_of(query)
     ranked = sorted(
         (-_option_choice_value(query, option), index, option)
         for index, option in enumerate(options)
@@ -2439,9 +2437,6 @@ def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
                 chosen.add(option)
     chosen = set(picked)
     choices = tuple(option for option in options if option in chosen)
-    assert is_legal_option_set(query, choices), (
-        f"AI 自建的多选集合必须过引擎的同一份谓词：{choices!r}（选项 {query.options!r}）"
-    )
     return SelectOptions(choices=choices, answers_seq=query.seq)
 
 

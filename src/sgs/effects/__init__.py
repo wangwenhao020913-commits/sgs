@@ -15,6 +15,7 @@ from .actions import (
     TARGET_FILTERS,
     activation_allowed,
     attack_range,
+    cap_of,
     check_count,
     check_forbidden,
     forbidden_as_slash,
@@ -41,6 +42,7 @@ from .actions import (
     target_sets_match,
     targets_within_attack_range,
     tier_not_downgraded,
+    usable_options,
 )
 from .behaviors import (
     CARD_BEHAVIORS,
@@ -134,6 +136,7 @@ __all__ = (
     "apply_modifiers",
     "attack_range",
     "behavior_for",
+    "cap_of",
     "check_count",
     "check_forbidden",
     "forbidden_as_slash",
@@ -173,4 +176,5 @@ __all__ = (
     "target_sets_match",
     "targets_within_attack_range",
     "tier_not_downgraded",
+    "usable_options",
 )

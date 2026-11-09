@@ -389,7 +389,10 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
             if len(set(owners)) > 1:
                 duplicated[f"{hero.id}:{timing.value}"] = list(dict.fromkeys(owners))
 
-    assert not duplicated, f"同一时机的多条技能必须有重新裁定：{dict(duplicated)}"
+    assert not duplicated, (
+        "同一时机上挂着**两条不同的技能**时必须有重新裁定"
+        f"（同一条技能的多个钩子不算：{dict(duplicated)}）"
+    )
 
 
 # ---------------------------------------------------------------------------

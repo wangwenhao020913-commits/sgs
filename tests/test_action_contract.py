@@ -47,10 +47,11 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
-from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack  # noqa: E402
+from sgs.data import Identity, Kingdom, RuleConfig, color_of_suit, load_content_pack  # noqa: E402
 from sgs.engine import Engine  # noqa: E402
 from sgs.effects import is_legal_option_set, legal_actions_for  # noqa: E402
 from sgs.state import (  # noqa: E402
+    ActivateSkill,
     EndPhase,
     Pass,
     PlayCard,
@@ -424,6 +425,68 @@ def test_the_seat_multi_select_fixture_matches_the_real_view_payload() -> None:
     }, "option_seats 对 SELECT_OPTIONS 也要生效（座位多选面的判据读它）"
 
 
+# ---------------------------------------------------------------------------
+# 评审 P1-b：把【秉壹】的**真会话**接到**真前端构造器**上（CODING_STANDARDS.md §6）
+# ---------------------------------------------------------------------------
+
+BINGYI = "hero.guyong.bingyi"
+"""【秉壹】的全限定技能 id（顾雍；两版各一条声明，这里用 OL 那一版）。"""
+
+
+class _EndPlayPhaseSeat:
+    """脚本参与者：出牌阶段**直接结束**、技能一律发动、其余取第一个候选。
+
+    与 ``test_web.py:_FinishPhaseSeat`` 同一姿态（那个夹具是给 Session 用的）：【秉壹】判的是
+    **结束阶段的手牌**，脚本若在出牌阶段随手打一张牌，构造前提就被吃掉了。
+    """
+
+    def respond(self, query):
+        if str(getattr(getattr(query, "kind", None), "value", query.kind)) == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, ActivateSkill):
+                return action
+        return query.legal_actions[0]
+
+
+def _two_same_color_hand() -> tuple[int, ...]:
+    """两张**同色**手牌的 card_id（= 牌堆下标；颜色取牌面事实，不按牌名猜）。"""
+    cards = PACK.deck.cards
+    first = next(index for index, card in enumerate(cards) if color_of_suit(card.suit) is not None)
+    color = color_of_suit(cards[first].suit)
+    second = next(
+        index
+        for index, card in enumerate(cards)
+        if index != first and color_of_suit(card.suit) is color
+    )
+    return (first, second)
+
+
+def _bingyi_engine() -> tuple[Engine, tuple[_EndPlayPhaseSeat, _EndPlayPhaseSeat]]:
+    """把**真引擎**推到【秉壹】的座位多选询问，返回引擎与两名脚本参与者。"""
+    hand = _two_same_color_hand()
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guyong", hp=3, hp_max=3, hand=hand), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(len(PACK.deck.cards)) if card_id not in set(hand)
+        ),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.set_draw_phase_count(0, 0)  # 结束阶段的手牌 = 夹具给的那两张（同色前提）
+    seats = (_EndPlayPhaseSeat(), _EndPlayPhaseSeat())
+    run_queries(
+        engine,
+        seats,
+        lambda e: getattr(e.pending, "kind", None) == "SELECT_OPTIONS",
+    )
+    return engine, seats
+
+
 def test_the_structural_seat_multi_select_face_assembles_the_set_locally() -> None:
     """票 21：**不枚举档**的座位多选面 —— 候选里只有骨架，集合由界面按本地选择拼出。
 
@@ -467,6 +530,65 @@ def test_the_structural_seat_multi_select_face_assembles_the_set_locally() -> No
     )
     assert is_legal_option_set(context, parsed.choices), (
         "界面拼出的集合必须过引擎的形状谓词（同一份判据，界面不另写规则）"
+    )
+
+
+def test_a_real_bingyi_payload_round_trips_the_structural_seat_multi_select() -> None:
+    """【秉壹】的**不枚举档**座位多选面：真引擎 → 真载荷 → 真前端构造器 → 引擎收下。
+
+    ``CODING_STANDARDS.md`` §6：断"读取方读到了"的测试必须走**真实产出路径**。这一档此前
+    两半各自为政——服务端那半（``test_web.py`` 的真会话）只证到"投影下发了 ``structural``"，
+    前端那半（探针的 ``seat_multi_select_structural``）只喂过一份**手扎的**合成载荷；两端
+    从未在同一条载荷上接起来。这里把 §6 要求的 join 补上（样板 = 同文件的【激将】回环）：
+
+    1. **真引擎**走到【秉壹】的 ``SELECT_OPTIONS``（顾雍两张同色手牌、摸牌阶段 0 张）；
+    2. ``pending_payload`` 投影出的**真载荷**：``structural`` / ``option_seats`` / 区间 /
+       ``legal_actions`` 只有骨架 + 放弃；
+    3. 把这份载荷喂给**真实前端构造器**（``toggleSeatMultiPick`` + ``buildAction``），点选
+       顺序 1 → 0，上行按 ``options`` 原序；
+    4. ``parse_action`` 之后**交给引擎**：不在候选里（不枚举档的本意）但形状合法 ⇒ 接受，
+       两名被选的座位各摸一张——"服务端收得下"由真结算证明，不由谓词代证。
+    """
+    engine, seats = _bingyi_engine()
+    query = engine.pending
+    assert query is not None
+
+    payload = pending_payload(query, human_seat=0)
+    assert payload["structural"] is True, (
+        "真会话的这一问必须落**不枚举档**（否则前端走枚举档的逐字段自检，这条回环测错面）"
+    )
+    assert payload["option_seats"] == {"seat:0": 0, "seat:1": 1}, (
+        "座位多选面的判据读 `option_seats`：池 = 全部存活角色（含自己）"
+    )
+    assert payload["min_selected"] == 1 and payload["max_selected"] == 2, (
+        "「至多 N 名」的 N = 手牌数（这里 2 张）"
+    )
+    assert [entry["kind"] for entry in payload["legal_actions"]] == ["SelectOptions", "Pass"], (
+        f"不枚举档只发骨架 + 放弃：{payload['legal_actions']}"
+    )
+    assert payload["legal_actions"][0]["choices"] == ["seat:0"], "骨架 = options 序前 min 个"
+
+    action = _probe_build(
+        {"pending": payload, "human_seat": 0, "seat_multi_picks": [1, 0]}
+    )
+    assert action["kind"] == "SelectOptions"
+    assert action["choices"] == ["seat:0", "seat:1"], (
+        "按点击顺序 1 → 0 点两个座位，上行必须按 pending.options 原序（默认结算顺序）"
+    )
+    assert action["answers_seq"] == payload["seq"]
+    assert action not in payload["legal_actions"], (
+        "不枚举档不铺子集候选：这条集合是界面按本地选择拼的"
+    )
+
+    hand_before = [len(engine.state.player(seat).hand) for seat in (0, 1)]
+    engine.submit(parse_action(action))
+    run_queries(engine, seats, lambda e: len(e.state.player(1).hand) > hand_before[1])
+    drew = [
+        len(engine.state.player(seat).hand) - before
+        for seat, before in zip((0, 1), hand_before, strict=True)
+    ]
+    assert drew == [1, 1], (
+        "引擎接受这条界面拼出的集合，并按逐座位各摸一张结算（座位 0 = 自己也在池里）"
     )
 
 

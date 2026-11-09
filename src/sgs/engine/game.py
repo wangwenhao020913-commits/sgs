@@ -49,6 +49,7 @@ from sgs.effects import (
     apply_armor,
     apply_hp,
     behavior_for,
+    cap_of,
     delayed_settle_target,
     designation_actions_for,
     discard_count,
@@ -5061,11 +5062,9 @@ class Engine:
             if isinstance(action, SelectOptions) and not is_legal_option_set(
                 pending, action.choices
             ):
-                cap = (
-                    len(pending.options)
-                    if pending.max_selected is None
-                    else pending.max_selected
-                )
+                # 上界读 `cap_of`（= 谓词的一半），**不是** `max_selected`：后者之上还有
+                # "可选项只有这么几个"这一层，印出来玩家永远选不到（票 21 的受理侧文案）。
+                cap = cap_of(pending)
                 self._reject(action, reason="不枚举档：答复集合不满足形状谓词")
                 raise IllegalActionError(
                     reason_code="IllegalAction",
