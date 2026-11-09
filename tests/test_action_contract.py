@@ -773,11 +773,12 @@ def test_the_play_phase_jijiang_loop_clicks_the_skill_picks_a_seat_and_submits()
 
 # ---------------------------------------------------------------------------
 # 票 17：窗口里的提供者回环（点技能 → 服务端问"选哪张源牌" → 点牌 → 产物交给窗口）
+# 票 24 / Q1：载体已从南蛮（别人回合的**打出**窗口）换成求桃（自己出牌阶段里的**使用**窗口）
 # ---------------------------------------------------------------------------
 
 
 class _WindowSeat:
-    """最小窗口脚本：座位 1 在自己的出牌阶段用【南蛮入侵】，其余一律放弃 / 结束阶段。"""
+    """最小窗口脚本：给定的那个座位在自己的出牌阶段用一张指定的牌，其余一律放弃 / 结束阶段。"""
 
     def __init__(self, *, use: int | None = None) -> None:
         self.use = use
@@ -836,44 +837,50 @@ def _probe_build(fixture: dict) -> dict:
 
 
 def test_the_window_provider_loop_clicks_the_skill_then_picks_a_source_card() -> None:
-    """窗口里的提供者回环（票 17）：**点技能 → 选一张源牌 → 提交**，产物由窗口消费。
+    """窗口里的提供者回环（票 17；票 24 / Q1 之后只剩**求桃**这一扇）：点技能 → 选源牌 → 提交。
 
-    两半都走真路径：服务端这边是**真引擎**的【南蛮入侵】窗口与它随后的 `SELECT_CARDS`
-    询问；客户端那边是 `pending_payload` 投影出来的**真载荷** + 真实前端构造器
-    （`ui_bridge` 的 `buildAction` / `submitOwnHandSinglePick`）。断言三件事：
+    票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）把 ② 的参与面收窄成
+    "持有者自己的出牌阶段 + **使用**窗口"，真实可及的只剩**濒死求桃**——故回环的载体从
+    南蛮入侵（别人回合里的**打出**窗口）换成"他砍出的濒死"。
+
+    两半都走真路径：服务端这边是**真引擎**的求桃窗口与它随后的 `SELECT_CARDS` 询问；
+    客户端那边是 `pending_payload` 投影出来的**真载荷** + 真实前端构造器（`ui_bridge` 的
+    `buildAction` / `submitOwnHandSinglePick`）。断言三件事：
 
     1. 窗口里【渐营】是一条裸 `ActivateSkill` 候选（提供者入口），点它发出的载荷只有
        五个键、`picks` 为空——牌名由窗口定死，选牌由服务端随后问；
     2. 服务端随即问"选哪张源牌"（`SELECT_CARDS`，手牌 ∪ 装备区、恰好一张），点那一张
        发出的 `SelectCards` 用**面内位置**命中候选；
-    3. 提交后产物（一张虚拟【杀】）真的**打出**了（不进使用链），源牌走上打出链。
+    3. 提交后产物（一张虚拟【桃】）由**求桃窗口**消费：濒死者回到 1 点，源牌走上使用链。
     """
-    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+    slash = cards_of_type(PACK, "slash")[0]
     source = cards_of_type(PACK, "dodge")[0]
     state = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(source,)),
-            SeatSpec(hand=(barbarian,)),
+            SeatSpec(hero="jie_jushou_mobile", hp=2, hp_max=3, hand=(slash, source)),
+            SeatSpec(hp=1, hp_max=4),
         ],
-        deck=deck_excluding(PACK, source, barbarian),
-        turn_seat=1,
+        deck=deck_excluding(PACK, slash, source),
+        turn_seat=0,
         phase=Phase.PLAY,
-        rule_config=RuleConfig(player_count=2, first_seat=1),
+        rule_config=RuleConfig(player_count=2, first_seat=0),
     )
     engine = Engine.from_state(state, seed=7)
     run_queries(
         engine,
-        [_WindowSeat(), _WindowSeat(use=barbarian)],
+        [_WindowSeat(use=slash), _WindowSeat()],
         lambda e: (
             e.pending is not None
-            and e.pending.kind == QueryKind.RESPOND
+            and e.pending.kind == QueryKind.PEACH
             and e.pending.actor == 0
-            and getattr(e.pending, "cause", None) is WindowCause.BARBARIAN_INVASION
         ),
     )
     window = engine.pending
     assert window is not None and window.actor == 0
+    assert state.turn_seat == 0 and state.phase is Phase.PLAY, (
+        "前提：这一问长在界沮授**自己的出牌阶段**里（票 24 的准入条件）"
+    )
 
     payload = pending_payload(window, human_seat=0)
     at = next(
@@ -913,26 +920,21 @@ def test_the_window_provider_loop_clicks_the_skill_then_picks_a_source_card() ->
     engine.submit(parse_action(pick))
     _next_ask(engine)
 
+    # 产物由**求桃窗口**消费：等它把濒死者拉回 1 点（回复结算在 RESOLVE_END 之后）。
     run_queries(
         engine,
         [_WindowSeat(), _WindowSeat()],
-        lambda e: any(
-            record.kind == "timing"
-            and record.timing is Timing.PLAY_ON_PLAY
-            and record.cards
-            and record.cards[0].virtual_sources
-            for record in e.records
-        ),
+        lambda e: e.finished or state.player(1).hp >= 1,
     )
-    played = [
+    used = [
         record.cards[0]
         for record in engine.records
         if record.kind == "timing"
-        and record.timing is Timing.PLAY_ON_PLAY
+        and record.timing is Timing.RESOLVE_AFTER_END
         and record.cards
     ]
-    assert [card.type for card in played] == ["slash"]
-    assert played[0].virtual_sources == (source,)
+    peach = next(card for card in used if card.type == "peach")
+    assert peach.virtual_sources == (source,), "救命的是一张**转出来的**【桃】"
     moves = [
         (record.from_zone.zone.value, record.to_zone.zone.value)
         for record in engine.records
@@ -941,6 +943,8 @@ def test_the_window_provider_loop_clicks_the_skill_then_picks_a_source_card() ->
         and [card.card_id for card in record.cards] == [source]
     ]
     assert moves == [("hand", "processing"), ("processing", "discard")], (
-        f"源牌走上**打出**链（不是留在原地）：{moves}"
+        f"源牌走上**使用**链（不是留在原地）：{moves}"
     )
-    assert state.player(0).hp == 2, "响应成立 ⇒ 不受南蛮那 1 点伤害"
+    assert state.player(1).hp == 1 and state.player(1).alive, (
+        "求桃窗口把濒死者拉回 1 点（产物由**窗口**消费，技能自己不 start_use）"
+    )

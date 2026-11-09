@@ -2684,9 +2684,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
 /* ============ 票 17（合成局面）：窗口里的【渐营】② 提供者入口 + **一步清单** ============
  *
- * 用户 2026-11-09 签的窗口范围 =「任何"需要"、"可以使用或打出的场合」；窗口里牌名被窗口
- * 定死（`ctx.respond_required`）⇒ ② 的交互只剩"选哪张源牌"一步。本节喂两份**与服务端
- * 同形**的合成载荷，钉住两条界面读法：
+ * 票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）之后，② 只在**持有者自己的
+ * 出牌阶段 + 使用窗口**里参与 ⇒ 真实可及的只剩**濒死求桃**；故本节的合成载荷从
+ * `RESPOND / BARBARIAN_INVASION`（别人回合的打出窗口）换成 `PEACH`（自己出牌阶段里的使用
+ * 窗口），与服务端下发的真载荷同形。窗口里牌名被窗口定死 ⇒ ② 的交互只剩"选哪张源牌"
+ * 一步。本节喂两份**与服务端同形**的合成载荷，钉住两条界面读法：
  *
  *  1. **生产形状**：窗口里【渐营】是一条**裸 `ActivateSkill`** 候选（提供者入口）；按钮
  *     不能因为 `preactivated` 就画灰（与【蛊惑】同一姿态——清单入口之外还有提供者入口）。
@@ -2700,8 +2702,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ...synthCard(52, "闪"), type: "dodge", suit: "heart", rank: 2, color: "red",
   };
   const windowPayload = (extra = {}) => ({
-    kind: "RESPOND", actor: 0, seq: 903, cause: "BARBARIAN_INVASION",
-    required: "slash", prompt: "请打出一张【杀】响应南蛮入侵。",
+    kind: "PEACH", actor: 0, seq: 903, dying: 1,
+    prompt: "座位 1 濒死：是否使用一张【桃】？",
     legal_actions: [
       { kind: "ActivateSkill", skill_id: "hero.jie_jushou_mobile.jianying", answers_seq: 903 },
       { kind: "Pass", answers_seq: 903 },

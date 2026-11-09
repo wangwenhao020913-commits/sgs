@@ -6866,18 +6866,21 @@ def _jie_jianying_product(
 
 
 def _jie_jianying_previous_card(state: GameState, owner: int) -> CardRef | None:
-    """「**本阶段**使用的上一张牌」——只在自己的出牌阶段里可读（Q17-c = A 的判据）。
+    """「**本阶段**使用的上一张牌」——只在自己的出牌阶段里可读（与引擎的写点同一判据）。
 
-    用户 2026-11-09 签 A：产物花色照旧，但"本阶段"要读成**当前这个出牌阶段**，不是座位
-    事实的陈旧值。判据与引擎写 ``play_phase_last_card`` 的判据**同一个**
-    （:func:`~sgs.effects.is_own_play_phase`：``turn_seat == owner`` ∧ 阶段 = 出牌阶段），
-    故"什么时候写的"与"什么时候读"结构上不可能漂移：
+    "本阶段"要读成**当前这个出牌阶段**，不是座位事实的陈旧值。判据与引擎写
+    ``play_phase_last_card`` 的判据**同一个**（:func:`~sgs.effects.is_own_play_phase`：
+    ``turn_seat == owner`` ∧ 阶段 = 出牌阶段），故"什么时候写的"与"什么时候读"结构上
+    不可能漂移：
 
-    - 是（含自己的出牌阶段内发生的响应窗口，例如自己造成伤害触发的濒死求桃）⇒ 沿用
-      Q-J4 的口径：读 ``play_phase_last_card``；
-    - 否（别人的回合 / 别人的出牌阶段）⇒ 本阶段没有"上一张使用牌" ⇒ 返回 ``None``
-      （= 与"上一张无花色"同一支，产物按规则 §16.3 继承来源牌）。**不读**上一次自己的
-      出牌阶段留下的陈旧值——``play_phase_last_card`` 在别人回合里仍然躺着那个值。
+    - 是 ⇒ 读 ``play_phase_last_card``（Q-J4 的口径：产物花色视为与上一张牌相同）；
+    - 否 ⇒ 本阶段没有"上一张使用牌" ⇒ 返回 ``None``（= 与"上一张无花色"同一支，产物按
+      规则 §16.3 继承来源牌）。**不读**上一次自己的出牌阶段留下的陈旧值。
+
+    票 24 之后"否"那一支在生产路径上已经**走不到**（提供者在候选 / 受理两侧都收窄成
+    自己的出牌阶段，出牌阶段流水线本来就只在自己的出牌阶段里跑），保留它是因为这条读取
+    必须与引擎的写点同判据——它的职责是让**任何**调用点都读不到陈旧值，而不是只服务今天
+    的这几个调用点。（票 17 的 Q17-c 即"回合外继承来源牌"那一条已因票 24 作废。）
     """
     if not is_own_play_phase(state, owner):
         return None
@@ -7121,22 +7124,27 @@ def _jie_jianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# ② 的**提供者分支**（yijiang-2014-round2 票 17 / P8）：接入票 16 登记表里**全部**
-# "需要 / 可以使用或打出"的窗口
+# ② 的**提供者分支**（yijiang-2014-round2 票 17 / P8；票 24 把范围收回牌面口径）
 #
-# 用户 2026-11-09 逐字签的窗口范围：「任何"需要"、"可以使用或打出的场合，例如贾诩乱武也
-# 算」；同一天签的两条行为裁定（Q17-b / Q17-c）落在技能侧：
+# 牌面 ② 逐字（`tools/sgs_web/descriptions.json` → `hero.jie_jushou_mobile.jianying`）：
 #
-# - **Q17-b = A**：「出牌阶段限一次」只数**自己出牌阶段内的发动**——判据 =
-#   :func:`~sgs.effects.is_own_play_phase`（``turn_seat == owner`` ∧ 阶段 = 出牌阶段）。
-#   是 ⇒ 照旧查 / 记 ``_USED`` 位；否 ⇒ 不查也不记，回合外可以多次发动。**自己的**出牌
-#   阶段里因响应窗口而发动（例如自己造成伤害触发的濒死求桃）按字面**算**额度。
-# - **Q17-c = A**：产物花色照旧（"本阶段使用的上一张牌"的花色），但"本阶段"只在**自己的
-#   出牌阶段**里可读（:func:`_jie_jianying_previous_card`）；回合外 ⇒ 继承来源牌。
+#     ②**出牌阶段限一次**，你可以将一张牌当任意一张基本牌**使用**
 #
-# 窗口面（登记表里 ``providers=True`` 的行）：``dodge``（【闪】步 / 万箭 / 护驾）、
-# ``peach``（求桃）、``respond`` 一族（南蛮 / 决斗 / 借刀 / 乱武 / 激将）。改判不参与、
-# 无懈不声明（② 的产物是基本牌，``can_pay`` 恒假）。
+# 票 17 把它接成"任何要牌窗口都能参与的提供者"，于是**回合外也能转化**——范围放大了。
+# 票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）把准入条件收成两条，
+# 两条都只是把实现放回牌面，**不新增读法**：
+#
+# 1. **只有持有者自己的出牌阶段**（``turn_seat == owner`` ∧ 阶段 = 出牌阶段，判据 =
+#    :func:`~sgs.effects.is_own_play_phase`）才提供、才受理。同一个谓词读**三处**：候选
+#    （:func:`_jie_jianying_provider_payable`）、受理（:func:`jie_jianying_provider`）、
+#    额度位（``_USED``）——不写第二份条件。
+# 2. **只参加「使用」窗口**：牌面的动词是「使用」，故声明只留 ``peach``（濒死求桃 = 使用
+#    【桃】）。打出侧的窗口（【闪】步 / 南蛮 / 万箭 / 决斗 / 护驾·激将）与"别人的回合里的
+#    使用"（借刀 / 乱武）都不在其中。见 :data:`JIE_JIANYING_PROVIDER_WINDOWS` 的注释。
+#
+# **票 17 的 Q17-b / Q17-c 因票 24 作废**（它们讨论"回合外怎么发动"，而票 24 的结论是
+# "回合外根本不能发动"）：额度位现在只在自己的出牌阶段里读写，产物花色也只在同一个阶段里
+# 现算。两条的载体断言已随条文删除（见票 17 `## Answer` 末尾的指针）。
 #
 # **不手抄**（票 16 的纪律）：候选追加 = :meth:`ProviderWindows.offers`（本段只给"付得起"
 # 谓词），受理 / 产物交接 = `lord_request` 的 ``provider_required`` / ``provider_deliver`` /
@@ -7183,63 +7191,59 @@ def _jie_jianying_window_name(state: GameState, required: str) -> str | None:
 def _jie_jianying_provider_payable(
     state: GameState, ctx: ModifierContext, required: str
 ) -> bool:
-    """② 在窗口里"付得起"：两条牌面事实 + 一条已签额度裁定（Q17-b）+ 一条窗口目标约束。
+    """② 在窗口里"付得起"：两条牌面事实 + 一条额度事实（票 24 起**回合外一律不付**）。
 
-    1. 窗口要的牌名能由 ② 产出（:func:`_jie_jianying_window_name`；闭集见 Q-J5）；
-    2. 有源牌（手牌 ∪ 装备区——牌面写"一张牌"，无区域限定）；
-    3. **Q17-b = A**：在**自己的**出牌阶段里 ⇒ 本阶段没发动过才付得起（查 ``_USED`` 位）；
-       回合外 ⇒ 不查（也不记，见 :func:`jie_jianying_provider`）；
-    4. **USE 类窗口的目标约束**：借刀 / 乱武的产物必须够得着窗口定的那名角色
-       （``ctx.respond_targets``）——与真牌候选同一道判据（``forced_use_targets``）。
-       打出类窗口（南蛮 / 万箭 / 决斗 / 【闪】）与求桃没有目标维度。
+    1. **票 24（票面「出牌阶段限一次」）**：只有持有者**自己的出牌阶段**才付得起
+       （:func:`~sgs.effects.is_own_play_phase`）——别人的回合、别人造成的濒死、自己的
+       判定 / 摸牌 / 弃牌 / 结束阶段都不提供候选；
+    2. **额度**：自己的出牌阶段里本阶段发动过 ⇒ 不付得起（``_USED`` 阶段位；票 17 的
+       Q17-b 在"只数自己出牌阶段内的发动"这一点上仍然成立）；
+    3. 窗口要的牌名能由 ② 产出（:func:`_jie_jianying_window_name`；闭集见 Q-J5）；
+    4. 有源牌（手牌 ∪ 装备区——牌面写"一张牌"，无区域限定）。
+
+    **不再有**"USE 类窗口的目标可达性"那一条（票 17 写的 ``forced_use_targets``）：
+    它只服务借刀 / 乱武两扇 ``RespondMode.USE`` 的窗口，而 Q1 把声明收窄成 ``peach`` 之后
+    那两扇窗口本来就不再参与（它们只在**别人的回合**里出现，第 1 条也挡）。删掉它而不是
+    留着，免得"走不到的读法"继续冒充承重断言（真要重新接回借刀 / 乱武时必须补回来）。
     """
-    type_id = _jie_jianying_window_name(state, required)
-    if type_id is None:
-        return False
     owner = ctx.subject
-    if is_own_play_phase(state, owner) and (
-        _phase_flags(state, owner, ctx.skill_id) & _USED
-    ):
+    if not is_own_play_phase(state, owner):
+        return False
+    if _phase_flags(state, owner, ctx.skill_id) & _USED:
+        return False
+    if _jie_jianying_window_name(state, required) is None:
         return False
     player = state.player(owner)
-    sources = (*player.hand, *player.equip)
-    if not sources:
-        return False
-    if ctx.respond_mode is RespondMode.USE and ctx.respond_targets:
-        previous = _jie_jianying_previous_card(state, owner)
-        return any(
-            forced_use_targets(
-                state,
-                owner,
-                _jie_jianying_product(state, source, type_id, previous),
-                ctx.respond_targets,
-            )
-            for source in sources
-        )
-    return True
+    return bool(player.hand or player.equip)
 
 
 JIE_JIANYING_PROVIDER_WINDOWS = ProviderWindows(
-    # 语境键——`ProviderWindows` **只按语境收窄**（`ModifierContext` 不带窗口成因）：
-    # dodge ⇒ 【闪】步 / 万箭齐发 / 护驾；peach ⇒ 濒死求【桃】；其余四键 ⇒ respond 语境
-    # （南蛮 / 决斗 / 借刀 / 乱武 / 激将）。
-    keys=(
-        "dodge",
-        "arrow_barrage",
-        "peach",
-        "barbarian_invasion",
-        "duel",
-        "borrowed_sword",
-        "luanwu",
-    ),
+    # 语境键——`ProviderWindows` **只按语境收窄**（`ModifierContext` 不带窗口成因），
+    # 故"只参加使用窗口"这一条**只能**用声明的 key 表达（票 24 / Q1 = 使用）。
+    #
+    # 只留 ``peach``：濒死求桃就是**使用**一张【桃】（票面的动词）。
+    # 「出牌阶段限一次」那一半不在这里，而在 ``can_pay`` 的 ``is_own_play_phase``。
+    #
+    # **刻意不声明**（不是漏写；改之前先读这段）：
+    # - ``dodge``（真【杀】的【闪】步 / 万箭齐发 / 护驾）：**打出**侧的响应；
+    # - ``arrow_barrage`` / ``barbarian_invasion`` / ``duel``：``RespondMode.PLAY`` 的打出窗口；
+    # - ``borrowed_sword`` / ``luanwu``：``RespondMode.USE``，确实是「使用」，但它们**只**
+    #   发生在**别人的回合**里（借刀由别人使用、乱武是贾诩的出牌阶段）⇒ 已经由
+    #   ``is_own_play_phase`` 全挡 ⇒ 声明它们只会多一条走不到的读法。将来若有规则让这两扇
+    #   窗口能长在持有者自己的出牌阶段里，**加回 key 的同时**要把"产物够不够得着 Bn"的判据
+    #   （``forced_use_targets``）一并写回 ``can_pay``。
+    #
+    # 未声明：``nullify``（② 的产物是基本牌，``can_pay`` 恒假）、``rejudge``（登记表"登记但
+    # 排除"）；``lord_request.*`` 两个键**构造期就会被拒**（求助子窗口只收 ``PlayCard``，没有
+    # 受理面）——且求助窗口只长在求助者的回合里（回合外），``can_pay`` 第 1 条也挡。
+    keys=("peach",),
     can_pay=_jie_jianying_provider_payable,
 )
 """② 的**提供者窗口声明**（票 16 的登记表）：候选追加因此只有一处实现。
 
-未声明：``nullify``（② 的产物是基本牌，``can_pay`` 恒假）、``rejudge``（登记表"登记但
-排除"）；``lord_request.*`` 两个键**构造期就会被拒**（求助子窗口只收 ``PlayCard``，没有
-受理面）——护驾 / 激将那一行由 ``dodge`` / ``respond`` 两档语境覆盖：被求助者自己那一问
-里 ② 照样在候选里（求助子窗口怎么消费产物是另一张票）。
+票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）把声明收窄成**使用**一档：
+``peach``（濒死求桃）。"自己的出牌阶段"那一条是候选与受理**两侧**共读的
+:func:`~sgs.effects.is_own_play_phase`，不是第二个条件。
 """
 
 
@@ -7248,15 +7252,20 @@ def jie_jianying_provider(host: Any, frame: Any, actor: int, timing: Timing) -> 
 
     与出牌阶段入口是**同一条声明**的两条路（与【蛊惑】同姿态）：
 
+    0. **票 24 的受理侧闸**：不在**自己的出牌阶段**内 ⇒ ``provider_give_up``（这次响应没
+       发生：零副作用、**不问源牌**）。候选侧（:func:`_jie_jianying_provider_payable`）
+       挡的是"看得见的候选"；受理侧挡的是"被派发到"——``Engine.start_provider`` 不看候选，
+       它是"不在候选里也能提交"的那道缝。两侧读**同一个**
+       :func:`~sgs.effects.is_own_play_phase`，不是第二份条件；
     1. **牌名由窗口定死**（:func:`~sgs.skills.lord_request.provider_required`）⇒ 不再问
        牌名，故只剩"选哪张源牌"一步（出牌阶段那份清单是两步）；
     2. **产物交给窗口**：写 ``provider_deliver``（``satisfied=True`` + 产物牌），**不**自己
-       ``start_use``——使用 / 打出 / 求桃的回复结算 / 打向 Bn / 乱武的目标全由窗口按自己
-       那一份规则决定（票 16 的"产物交给窗口"契约）；
-    3. **Q17-b = A** 的落点：产物交付后，若这一次发动**在自己出牌阶段内**（含该阶段内的
-       响应窗口）⇒ 落 ``_USED`` 阶段位（与出牌阶段入口同一个位）。回合外不落。
-    4. **Q17-c = A** 的落点：产物牌面走 :func:`_jie_jianying_previous_card`——自己的出牌
-       阶段才读"本阶段上一张牌"的花色，否则继承来源牌。
+       ``start_use``——使用 / 打出 / 求桃的回复结算 / 打向 Bn 由窗口按自己那一份规则决定
+       （票 16 的"产物交给窗口"契约）；
+    3. **额度**：产物交付后落 ``_USED`` 阶段位（与出牌阶段入口同一个位）。票 24 之后这条
+       路径只可能发生在自己的出牌阶段里，故不再有"回合外不落"那一支（Q17-b 已作废）；
+    4. **产物牌面**走 :func:`_jie_jianying_previous_card`——同一个自己的出牌阶段里读
+       "本阶段上一张牌"的花色（Q17-c 的"回合外继承来源牌"那一支已随票 24 作废）。
 
     重入纪律（`CODING_STANDARDS.md` §3）：这一步只有一次询问（``ask_selection`` 帧内缓存
     答案），重入时按同一份答案重造产物——``transformed_card`` 是纯函数、``_mark_phase``
@@ -7268,6 +7277,9 @@ def jie_jianying_provider(host: Any, frame: Any, actor: int, timing: Timing) -> 
 
     required = provider_required(frame)
     state = host.state
+    if not is_own_play_phase(state, actor):  # 票 24：受理侧与候选侧同一个判据
+        provider_give_up(frame)
+        return None
     type_id = _jie_jianying_window_name(state, required)
     if type_id is None:  # 候选期已按同一份闭集挡过；走到这里就是窗口写错了
         provider_give_up(frame)
@@ -7290,8 +7302,7 @@ def jie_jianying_provider(host: Any, frame: Any, actor: int, timing: Timing) -> 
         state, picked, type_id, _jie_jianying_previous_card(state, actor)
     )
     provider_deliver(frame, product)
-    if is_own_play_phase(state, actor):
-        _mark_phase(state, actor, JIE_JIANYING, _USED)
+    _mark_phase(state, actor, JIE_JIANYING, _USED)
     return None
 
 

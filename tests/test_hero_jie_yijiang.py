@@ -1245,18 +1245,21 @@ def test_jie_jianying_records_the_product_as_the_previous_card():
 
 
 # ===========================================================================
-# §2 渐营 ② 接入**全部**「需要 / 可以使用或打出」的窗口（yijiang-2014-round2 票 17 / P8）
+# §2 渐营 ② 接入「需要 / 可以使用或打出」的窗口（yijiang-2014-round2 票 17 / P8；
+#    票 24 把范围收回牌面口径）
 #
-# 用户 2026-11-09 逐字签的窗口范围：「任何"需要"、"可以使用或打出的场合，例如贾诩乱武也算」。
-# 两条行为裁定（同一天签 A）：
+# 票面写的是「②**出牌阶段限一次**，你可以将一张牌当任意一张基本牌**使用**」
+# （``tools/sgs_web/descriptions.json`` 的 ``hero.jie_jushou_mobile.jianying`` 逐字如此）。
+# 票 17 把 ② 接成"任何要牌窗口都能参与"⇒ **回合外也能转化**，范围放大了；票 24 收回：
 #
-# - **Q17-b = A**：「出牌阶段限一次」只数**自己出牌阶段内的发动**（``state.turn_seat ==
-#   owner`` ∧ 当前阶段 = 出牌阶段）。是 ⇒ 照旧查 / 记 ``_USED`` 阶段位；**否** ⇒ 不查也
-#   不记，回合外可以多次发动。**自己的**出牌阶段里因响应窗口而发动（例如自己造成伤害触发
-#   的濒死求桃）按字面**算**额度——别写成"窗口一律不占"。
-# - **Q17-c = A**：产物花色照旧（"本阶段使用的上一张牌"的花色），但"本阶段"只在**自己的
-#   出牌阶段**里可读；回合外 ⇒ 继承来源牌（与"上一张无花色"同一支），**不读**上一次自己的
-#   出牌阶段留下的陈旧值。
+# - **只有持有者自己的出牌阶段**（``turn_seat == owner`` ∧ 阶段 = 出牌阶段）才提供候选、
+#   才受理。判据用**现成的** :func:`~sgs.effects.is_own_play_phase`（票 17 已用它算额度）。
+# - 票 17 的两条行为裁定 **Q17-b / Q17-c 因本票作废**（它们讨论"回合外怎么发动"，本票的
+#   结论是"回合外根本不能发动"）⇒ 它们的载体断言已删，不再有"回合外不占额度 / 回合外继承
+#   来源牌"这两条分支。**自己**出牌阶段里的响应窗口（自己砍到濒死 / 自己打【决斗】后还
+#   【杀】）照旧**算**额度、照旧读"本阶段上一张牌"的花色。
+# - **Q1 未动**：牌面 ② 的动词是「使用」，故"自己的出牌阶段内、但窗口要求**打出**"（决斗
+#   还【杀】一类）按字面**不该**提供——但那是要用户点头的一条（票 24 §4），本票保持现状。
 #
 # 窗口面 = 票 16 登记表里的 ``providers=True`` 行：``dodge``（【闪】步 / 万箭 / 护驾）、
 # ``peach``（求桃）、``respond`` 一族（南蛮 / 决斗 / 借刀 / 乱武 / 激将）。改判不参与。
@@ -1410,23 +1413,34 @@ def _jie_run(state, players, stop):
     return engine
 
 
-def _jie_window_offered(engine, cause, required) -> bool:
-    """停止条件：``engine.pending`` **正是那一扇窗口**，且 ② 在它的候选里。
+def _jie_window_at(engine, *, kind, cause=None, required=None, actor=None) -> bool:
+    """停止条件：``engine.pending`` **正是那一扇窗口**（**不要求** ② 在候选里）。
 
-    窗口用例先用它停在询问面读"这一问是谁、要什么牌、候选里有没有 ②"，再接着推进到
-    结算完——两侧都读真实询问 / 真实记录流，不 mock 窗口。
+    窗口用四件事实定位：询问种类 / 成因 / 要的牌名 / 被问的座位。票 24 起"② 在不在候选里"
+    是**被断言的对象**，不能写进到达条件——否则"不在候选"时停不下来，断言永远跑不到
+    （票 17 的旧 `_jie_window_offered` 正是把两者混在一起，故已删除）。
     """
     pending = engine.pending
     return (
         pending is not None
-        and pending.kind == QueryKind.RESPOND
-        and getattr(pending, "cause", None) is cause
-        and getattr(pending, "required", None) == required
-        and any(
-            isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
-            for action in pending.legal_actions
-        )
+        and pending.kind == kind
+        and (cause is None or getattr(pending, "cause", None) is cause)
+        and (required is None or getattr(pending, "required", None) == required)
+        and (actor is None or pending.actor == actor)
     )
+
+
+def _jie_provider_actions(actions) -> list:
+    """候选序列里属于 ② 的那些（提供者入口：裸 ``ActivateSkill``）。
+
+    入参 = ``query.legal_actions``（真实询问面）或 ``legal_actions_for`` 的返回值——两者同形，
+    故"有没有候选"这一条判据只写一遍。
+    """
+    return [
+        action
+        for action in actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
+    ]
 
 
 def _jie_closed(engine, frame_kind) -> bool:
@@ -1453,6 +1467,420 @@ def _jie_played_cards(engine) -> list:
     return _jie_timing_cards(engine, Timing.PLAY_ON_PLAY)
 
 
+def test_jie_jianying_is_not_offered_outside_its_own_play_phase():
+    """**本票的判据点**（票 24 §5）：别人回合里的每一扇要牌窗口都**不提供** ②——逐扇读。
+
+    牌面写「②出牌阶段限一次……」⇒ 回合外不能转化。票 17 把 ② 接进了全部窗口，于是它在
+    借刀 / 南蛮 / 万箭 / 决斗 / 乱武 / 他人触发的求桃里都出候选；这一条把六扇窗口**逐一**
+    钉住（不是抽一个代表）：每扇都用一个真实局面跑到"窗口正问界沮授"的那一刻，读真实
+    询问面，断言候选里没有 ②，并先断言这扇窗口确实**不在他自己的出牌阶段**里。
+
+    每条的前提断言（``(state.turn_seat, state.phase) != (window.actor, Phase.PLAY)``）用的是
+    座位 / 阶段这两个**席位事实**，不是技能里的那条谓词——否则这条用例只是在验证自己。
+
+    票 24 之后这些窗口同时被两把闸挡着（阶段 + 「使用 / 打出」），这一条钉的是**阶段**
+    那一把：其中借刀 / 乱武确实是「使用」，只因**别人的回合**才该被挡；求桃更是唯一还
+    参与 ② 的语境，它的缺席完全由阶段解释。打出侧那一把由下面
+    ``..._is_not_offered_in_a_play_out_window_inside_its_own_play_phase`` 单独钉。
+    """
+    borrowed = cards_of_type(PACK, "borrowed_sword")[0]
+    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+    arrows = cards_of_type(PACK, "arrow_barrage")[0]
+    duel = cards_of_type(PACK, "duel")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    qinggang = cards_of_type(PACK, "qinggang_sword")[0]
+
+    cases = (
+        (
+            "借刀杀人（座位 1 的回合逼他使用【杀】）",
+            _jie_window_state(
+                seats=(
+                    # 借刀只会指定**装备区里有武器**的角色；手里那张真【杀】是**前提**
+                    # 之一：a 支预览到"非 Pass 候选为空"时窗口根本不会开（auto-b），
+                    # 那时"② 不在候选里"就成了一条走不到的空断言。
+                    SeatSpec(
+                        hero=JUSHUO,
+                        hp=2,
+                        hp_max=3,
+                        hand=(slash, CLUB_CROSSBOW),
+                        equip=(qinggang,),
+                    ),
+                    SeatSpec(hand=(borrowed,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(), _WindowSeat(designation=(0, 1))],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.BORROWED_SWORD,
+                required="slash",
+                actor=0,
+            ),
+        ),
+        (
+            "南蛮入侵（座位 1 的回合）",
+            _jie_window_state(
+                seats=(
+                    SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+                    SeatSpec(hand=(barbarian,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(), _WindowSeat(use=barbarian)],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.BARBARIAN_INVASION,
+                required="slash",
+                actor=0,
+            ),
+        ),
+        (
+            "万箭齐发（座位 1 的回合）",
+            _jie_window_state(
+                seats=(
+                    SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+                    SeatSpec(hand=(arrows,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(), _WindowSeat(use=arrows, use_at=0)],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.ARROW_BARRAGE,
+                required="dodge",
+                actor=0,
+            ),
+        ),
+        (
+            "决斗（座位 1 的回合）",
+            _jie_window_state(
+                seats=(
+                    SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+                    SeatSpec(hand=(duel,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(), _WindowSeat(use=duel, use_at=0)],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.DUEL,
+                required="slash",
+                actor=0,
+            ),
+        ),
+        (
+            "乱武（贾诩的回合）",
+            _jie_window_state(
+                seats=(
+                    SeatSpec(hero=JIAXU, hp=3, hp_max=3),
+                    SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+                ),
+            ),
+            [_WindowSeat(activate=LUANWU), _WindowSeat()],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.LUANWU,
+                required="slash",
+                actor=1,
+            ),
+        ),
+        (
+            "濒死求桃（座位 1 的回合里自己输掉决斗）",
+            _jie_window_state(
+                seats=(
+                    # 座位 0 用真【杀】接住第一轮；座位 1 没有第二张【杀】⇒ 座位 1 濒死，
+                    # 求桃窗口按回合座位起问 ⇒ 先问座位 1、再问座位 0（界沮授）。
+                    SeatSpec(
+                        hero=JUSHUO, hp=2, hp_max=3, hand=(slash, CLUB_CROSSBOW)
+                    ),
+                    SeatSpec(hp=1, hp_max=3, hand=(duel,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(real=slash), _WindowSeat(use=duel, use_at=0)],
+            dict(kind=QueryKind.PEACH, actor=0),
+        ),
+    )
+
+    for label, state, players, where in cases:
+        try:
+            engine = _jie_run(
+                state, players, lambda e, where=where: _jie_window_at(e, **where)
+            )
+        except AssertionError as error:
+            raise AssertionError(f"{label}：没有到达那扇窗口（{error}）") from error
+        window = engine.pending
+
+        assert (state.turn_seat, state.phase) != (window.actor, Phase.PLAY), (
+            f"{label}：前提——这扇窗口必须**不在**界沮授自己的出牌阶段里"
+            f"（实际 turn_seat={state.turn_seat}、phase={state.phase}、被问座位={window.actor}）"
+        )
+        assert _jie_provider_actions(window.legal_actions) == [], (
+            f"{label}：回合外不提供 ②（牌面「出牌阶段限一次」）——"
+            f"候选里却有 {_jie_provider_actions(window.legal_actions)}"
+        )
+
+
+def test_jie_jianying_is_still_offered_in_its_own_play_phase():
+    """收窄是**两面**的：他自己的出牌阶段里，**使用**窗口照旧提供 ②。
+
+    载体 = **濒死求桃**（他自己砍出的濒死，求桃窗口长在他的出牌阶段里）。票 24 / Q1 把
+    打出侧收窄掉之后，求桃是真实局面里唯一还能发动 ② 的窗口（见下一条用例：同一份
+    "自己的出牌阶段"里，打出窗口不提供）。这条读的是**真实询问面**，不是合成的
+    ``ModifierContext``。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _jie_window_state(
+        seats=(
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(slash, CLUB_CROSSBOW)),
+            SeatSpec(hp=1, hp_max=4),
+        ),
+    )
+    engine = _jie_run(
+        state,
+        [_WindowSeat(use=slash, use_at=1), _WindowSeat()],
+        lambda e: _jie_window_at(e, kind=QueryKind.PEACH, actor=0),
+    )
+    window = engine.pending
+
+    assert (state.turn_seat, state.phase) == (window.actor, Phase.PLAY), (
+        "前提——这扇窗口必须在他**自己的出牌阶段**里"
+        f"（实际 turn_seat={state.turn_seat}、phase={state.phase}）"
+    )
+    assert _jie_provider_actions(window.legal_actions), (
+        "自己的出牌阶段里，求桃（**使用**窗口）照旧提供 ②"
+    )
+
+
+def test_jie_jianying_is_not_offered_in_a_play_out_window_inside_its_own_play_phase():
+    """**Q1 = 使用**（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）：打出的窗口不提供。
+
+    牌面 ② 的动词是「使用」，而【决斗】的响应步是**打出**【杀】（规则 §16.2）——即便这扇
+    窗口长在界沮授**自己的出牌阶段**里、他手里也有可转化的源牌、额度也还在，② 也不提供。
+
+    载体 = 自己打【决斗】：对方还了真【杀】之后轮到自己**打出**【杀】——这是"自己的出牌
+    阶段内的打出窗口"在真实牌堆里唯一能构造出来的一类（【闪】步 / 南蛮 / 万箭都只长在
+    别人的回合里，见下一条用例的说明）。
+    """
+    duel = cards_of_type(PACK, "duel")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _jie_window_state(
+        seats=(
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(duel, CLUB_CROSSBOW)),
+            SeatSpec(hand=(slash,)),
+        ),
+    )
+    engine = _jie_run(
+        state,
+        [_WindowSeat(use=duel, use_at=1), _WindowSeat(real=slash)],
+        lambda e: _jie_window_at(
+            e, kind=QueryKind.RESPOND, cause=WindowCause.DUEL, required="slash", actor=0
+        ),
+    )
+    window = engine.pending
+
+    assert (state.turn_seat, state.phase) == (window.actor, Phase.PLAY), (
+        "前提——这扇窗口长在他自己的出牌阶段里（挡掉它的不是阶段，是「使用 / 打出」）"
+    )
+    assert state.player(0).hand or state.player(0).equip, (
+        "前提——他手里有可转化的源牌（付得起），故'没有候选'只能是打出侧被收窄"
+    )
+    assert _jie_provider_actions(window.legal_actions) == [], (
+        "打出的窗口里不提供 ②（牌面动词是「使用」）——"
+        f"候选里却有 {_jie_provider_actions(window.legal_actions)}"
+    )
+
+
+def test_jie_jianying_is_not_offered_in_its_own_turn_outside_the_play_phase():
+    """自己的回合、但**不在出牌阶段**（判定 / 摸牌 / 弃牌 / 结束阶段）⇒ 也不提供。
+
+    这条为什么走**候选求值缝**（``legal_actions_for``）而不是真实局面：界沮授自己的判定 /
+    摸牌 / 弃牌 / 结束阶段里，牌堆里没有任何一扇窗口会问到他一张基本牌——"要一张基本牌"
+    的窗口要么长在**另一个玩家**的出牌阶段里（借刀 / 南蛮 / 万箭 / 决斗 / 【闪】步），要么
+    长在濒死那一刻（而他的【矢北】会在受伤后回复，本局的第一步伤害都由它收口）。真实局面
+    构造不出来，硬造只会是一条绿着的空断言。
+
+    故这里读**窗口候选的唯一生成口**（``legal_actions_for``：引擎构造询问时用的同一个
+    函数）：同一份局面、同一扇窗口，只翻 ``phase`` 这一个事实，候选从"有"到"没有"。
+    窗口取**求桃**——票 24 / Q1 之后唯一还参与 ② 的那一档。
+    """
+    from sgs.effects import legal_actions_for
+
+    def peach_window(state):
+        return legal_actions_for(state, 0, QueryKind.PEACH, answers_seq=1, dying=1)
+
+    def own_turn(phase):
+        return build_state(
+            pack=PACK,
+            seats=[
+                SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
+                SeatSpec(),
+            ],
+            deck=deck_excluding(PACK, CLUB_CROSSBOW),
+            turn_seat=0,
+            phase=phase,
+            rule_config=RuleConfig(player_count=2, first_seat=0),
+        )
+
+    assert _jie_provider_actions(peach_window(own_turn(Phase.PLAY))), (
+        "前提：出牌阶段里求桃窗口提供 ②（下一段只翻阶段这一个事实）"
+    )
+
+    for phase in (Phase.JUDGE, Phase.DRAW, Phase.DISCARD, Phase.FINISH):
+        actions = peach_window(own_turn(phase))
+        assert _jie_provider_actions(actions) == [], (
+            f"自己的回合但阶段 = {phase} ⇒ 求桃窗口里不提供 ②："
+            f"候选里却有 {_jie_provider_actions(actions)}"
+        )
+
+
+def test_jie_jianying_windows_answer_their_own_card_without_the_conversion():
+    """不给候选之后，那些窗口照常按"没有候选"结算：真【杀】/ 真【闪】路径不回退。
+
+    两扇窗口各一个真实局面（都在**出牌者自己的回合**里，故 ② 两把闸都过不了）：界沮授
+    手里有真【杀】/ 真【闪】时打出它，结算与"没有提供者"时逐字一致——打出的那张**没有**
+    虚拟来源（= 没有偷偷回退到 ② 的产物）、源牌一张不动、整条记录流里没有一次 ② 的发动。
+    """
+    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+    arrows = cards_of_type(PACK, "arrow_barrage")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+
+    cases = (
+        (
+            "南蛮入侵（真【杀】）",
+            _jie_window_state(
+                seats=(
+                    SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(slash, CLUB_CROSSBOW)),
+                    SeatSpec(hand=(barbarian,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(real=slash), _WindowSeat(use=barbarian)],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.BARBARIAN_INVASION,
+                required="slash",
+                actor=0,
+            ),
+            ("slash", slash),
+        ),
+        (
+            "万箭齐发（真【闪】）",
+            _jie_window_state(
+                seats=(
+                    SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(dodge, CLUB_CROSSBOW)),
+                    SeatSpec(hand=(arrows,)),
+                ),
+                turn_seat=1,
+            ),
+            [_WindowSeat(real=dodge), _WindowSeat(use=arrows, use_at=0)],
+            dict(
+                kind=QueryKind.RESPOND,
+                cause=WindowCause.ARROW_BARRAGE,
+                required="dodge",
+                actor=0,
+            ),
+            ("dodge", dodge),
+        ),
+    )
+
+    for label, state, players, where, (type_id, real) in cases:
+        engine = _jie_run(
+            state,
+            players,
+            lambda e, where=where: _jie_window_at(e, **where),
+        )
+        window = engine.pending
+        assert _jie_provider_actions(window.legal_actions) == [], (
+            f"{label}：前提——回合外这一问里 ② 不在候选里"
+        )
+
+        run_queries(engine, players, lambda e: ran_timing(e, Timing.RESOLVE_AFTER_END))
+
+        played = _jie_played_cards(engine)
+        assert [card.type for card in played] == [type_id], (
+            f"{label}：打出的就是手里那张真牌（真牌路径不回退）"
+        )
+        assert played[0].virtual_sources == (), (
+            f"{label}：打出的那张不是 ② 的产物（没有虚拟来源）"
+        )
+        assert _jie_moves(engine, CLUB_CROSSBOW) == [], (
+            f"{label}：那一张可转化的源牌一张没动"
+        )
+        assert not [
+            record
+            for record in engine.records
+            if record.kind == "action"
+            and getattr(record, "accepted", False)
+            and isinstance(getattr(record, "action", None), ActivateSkill)
+            and record.action.skill_id == JIE_JIANYING
+        ], f"{label}：整局没有一次 ② 的复合动作被接受"
+
+
+def test_jie_jianying_provider_refuses_a_dispatch_outside_its_own_play_phase():
+    """**受理侧**（票 24 §3 的第二道闸）：**被派发到**也不产物、不问源牌。
+
+    候选侧的闸只挡"看得见的候选"。受理侧是"不在候选里也能提交"的那道缝：
+    ``Engine.start_provider`` 拿到一条被选中的技能就派发，``ProviderWindows.offers``
+    不是它的前提（求助 / 无懈 / 判定式提供者都走同一个入口）。故这里用**真实窗口的真实
+    帧**，把这张局面**本来不会提供**的 ② 直接派发出去：受理侧必须当场 ``provider_give_up``
+    ——``satisfied=False``、没有产物、**不问源牌**（受理侧与候选侧读同一个
+    :func:`~sgs.effects.is_own_play_phase`，不是第二份条件）。
+
+    局面 = 座位 1 的回合里座位 1 输掉【决斗】濒死 ⇒ 求桃窗口问到座位 0（界沮授）——这是
+    票 24 / Q1 之后唯一还参与 ② 的**语境**（``peach``），只是阶段不对。
+    "红→绿"的证据（票 24 落地前）：同一次派发返回 ``("stay", None, None)``，并真的发出
+    ``SELECT_CARDS`` 去问源牌——即"受理侧没有闸"。
+    """
+    duel = cards_of_type(PACK, "duel")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _jie_window_state(
+        seats=(
+            # 座位 0 用真【杀】接住决斗第一轮；座位 1 没有第二张【杀】⇒ 座位 1 濒死。
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(slash, CLUB_CROSSBOW)),
+            SeatSpec(hp=1, hp_max=3, hand=(duel,)),
+        ),
+        turn_seat=1,
+    )
+    players = [_WindowSeat(real=slash), _WindowSeat(use=duel, use_at=0)]
+    engine = _jie_run(
+        state, players, lambda e: _jie_window_at(e, kind=QueryKind.PEACH, actor=0)
+    )
+    window = engine.pending
+    assert (state.turn_seat, state.phase) != (window.actor, Phase.PLAY), (
+        "前提：受理侧要挡的正是「不在自己的出牌阶段」"
+    )
+    assert _jie_provider_actions(window.legal_actions) == [], (
+        "前提：候选侧已经收窄（回合外的求桃窗口不再提供 ②）"
+    )
+
+    delta_before = len([record for record in engine.records if record.kind == "delta"])
+    control, satisfied, product = engine.start_provider(
+        engine.stack.top,
+        JIE_JIANYING,
+        0,
+        Timing.NEAR_DEATH_AT,
+        required="peach",
+    )
+
+    assert control is None, "受理侧必须当场收尾：不挂起、不去问源牌"
+    assert satisfied is False, "这次响应没发生（`provider_give_up`）"
+    assert product is None, "没有产物交给窗口"
+    assert (
+        len([record for record in engine.records if record.kind == "delta"])
+        == delta_before
+    ), "受理侧零副作用：一张牌都不搬"
+    assert _jie_moves(engine, CLUB_CROSSBOW) == []
+
+    # 被拒绝之后窗口照常继续（拒绝不是中断）：没人出【桃】⇒ 座位 1 死于这次濒死。
+    run_queries(
+        engine, players, lambda e: _jie_closed(e, FrameKind.NEAR_DEATH)
+    )
+    assert not state.player(1).alive, "求桃窗口按「没有【桃】」结算，没有产物被塞进去"
+    assert _jie_moves(engine, CLUB_CROSSBOW) == [], "整段结算里源牌始终没动"
+
+
 def test_jie_jianying_converts_a_card_into_a_peach_in_the_near_death_window():
     """濒死求【桃】：牌名被窗口定死 ⇒ 选一张源牌就成交，回复由**求桃窗口**建立。"""
     slash = cards_of_type(PACK, "slash")[0]
@@ -1477,215 +1905,6 @@ def test_jie_jianying_converts_a_card_into_a_peach_in_the_near_death_window():
         ("hand", "processing"),
         ("processing", "discard"),
     ], "源牌照常走使用链 ⇒ 进弃牌堆（② 的成本恰好一张）"
-
-
-def test_jie_jianying_converts_a_card_into_a_slash_for_borrowed_sword():
-    """借刀杀人（``mode = USE``）：产物的目标由窗口承载（Bn），技能自己不 ``start_use``。"""
-    borrowed = cards_of_type(PACK, "borrowed_sword")[0]
-    # 2 人局里 Bn = 那位借刀的使用者自己（距离 1，够得着）；4 人局要先给 Bn 装备 -1 马。
-    state = _jie_window_state(
-        seats=(
-            # 借刀只会指定**装备区里有武器**的角色：座位 0 先挂着【青釭剑】。
-            SeatSpec(
-                hero=JUSHUO,
-                hp=2,
-                hp_max=3,
-                hand=(CLUB_CROSSBOW,),
-                equip=(cards_of_type(PACK, "qinggang_sword")[0],),
-            ),
-            SeatSpec(hand=(borrowed,)),
-        ),
-        turn_seat=1,
-    )
-    engine = _jie_run(
-        state,
-        [
-            _WindowSeat(provider=True, source=CLUB_CROSSBOW),
-            _WindowSeat(designation=(0, 1)),
-        ],
-        lambda e: any(
-            record.kind == "timing"
-            and record.timing is Timing.RESOLVE_AFTER_END
-            and record.cards
-            and record.cards[0].type == "slash"
-            for record in e.records
-        ),
-    )
-
-    products = [card for card in _jie_used_products(engine) if card.type == "slash"]
-    assert len(products) == 1, "借刀窗口只逼出一张【杀】"
-    product = products[0]
-    assert product.virtual_sources == (CLUB_CROSSBOW,), "产物来自那张源牌"
-    assert state.player(1).hp == 3, "窗口把它打向了 Bn（借刀的使用者掉 1 点）"
-    assert _jie_moves(engine, CLUB_CROSSBOW) == [
-        ("hand", "processing"),
-        ("processing", "discard"),
-    ]
-
-
-def test_jie_jianying_converts_a_card_into_a_slash_to_answer_barbarian_invasion():
-    """南蛮入侵（``mode = PLAY``）：产物走**打出**链（规则 §16.2），不进使用链。"""
-    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-            SeatSpec(hand=(barbarian,)),
-        ),
-        turn_seat=1,
-    )
-    engine = _jie_run(
-        state,
-        [_WindowSeat(provider=True, source=CLUB_CROSSBOW), _WindowSeat(use=barbarian)],
-        lambda e: ran_timing(e, Timing.RESOLVE_AFTER_END),
-    )
-
-    played = _jie_played_cards(engine)
-    assert [card.type for card in played] == ["slash"], "打出的是一张转出来的【杀】"
-    assert played[0].virtual_sources == (CLUB_CROSSBOW,)
-    assert [card.type for card in _jie_used_products(engine)] == ["barbarian_invasion"], (
-        "产物只打出、不进使用链：使用链上只有南蛮自己"
-    )
-    assert state.player(0).hp == 2, "响应成立 ⇒ 不受南蛮那 1 点伤害"
-
-
-def test_jie_jianying_converts_a_card_into_a_dodge_to_answer_arrow_barrage():
-    """**万箭齐发**（``mode = PLAY``，要【闪】）：产物走**打出**链，不进使用链。
-
-    票面 §2 表 / spec §11 的 P8 行都点名「南蛮 / 万箭 / 决斗」，而旧断言只覆盖南蛮——
-    万箭与决斗这两扇窗口各自单独钉一条，走的是同一个 ``ProviderWindows`` 声明面。
-    """
-    arrows = cards_of_type(PACK, "arrow_barrage")[0]
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-            SeatSpec(hand=(arrows,)),
-        ),
-        turn_seat=1,
-    )
-    players = [
-        _WindowSeat(provider=True, source=CLUB_CROSSBOW),
-        _WindowSeat(use=arrows, use_at=0),
-    ]
-    engine = _jie_run(
-        state,
-        players,
-        lambda e: _jie_window_offered(e, WindowCause.ARROW_BARRAGE, "dodge"),
-    )
-
-    window = engine.pending
-    assert window.actor == 0, "被问的是万箭的目标（渐营持有者），不是使用者"
-    assert window.required == "dodge", "万箭齐发要的是【闪】（不是南蛮那张【杀】）"
-
-    run_queries(engine, players, lambda e: _jie_closed(e, FrameKind.USE))
-
-    played = _jie_played_cards(engine)
-    assert [card.type for card in played] == ["dodge"], "打出的是一张转出来的【闪】"
-    assert played[0].virtual_sources == (CLUB_CROSSBOW,)
-    assert [card.type for card in _jie_used_products(engine)] == ["arrow_barrage"], (
-        "产物只打出、不进使用链：使用链上只有万箭齐发自己"
-    )
-    assert state.player(0).hp == 2, "响应成立 ⇒ 不受万箭那 1 点伤害"
-
-
-def test_jie_jianying_converts_a_card_into_a_slash_to_answer_duel():
-    """**决斗**（``mode = PLAY``，要【杀】族）：产物走**打出**链；没接住的一方受伤。
-
-    决斗的响应权在双方之间来回，故这条同时钉住"② 的产物被当**真打出**推进决斗游标"：
-    我打出那张【杀】之后，轮到对方，对方没有【杀】⇒ 受伤的是对方。
-    """
-    duel = cards_of_type(PACK, "duel")[0]
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-            SeatSpec(hand=(duel,)),
-        ),
-        turn_seat=1,
-    )
-    players = [
-        _WindowSeat(provider=True, source=CLUB_CROSSBOW),
-        _WindowSeat(use=duel, use_at=0),
-    ]
-    engine = _jie_run(
-        state,
-        players,
-        lambda e: _jie_window_offered(e, WindowCause.DUEL, "slash"),
-    )
-
-    window = engine.pending
-    assert window.actor == 0 and window.target is None, "决斗是**打出**窗口（target 为 None）"
-    assert window.required == "slash"
-
-    run_queries(engine, players, lambda e: _jie_closed(e, FrameKind.USE))
-
-    played = _jie_played_cards(engine)
-    assert played and played[0].type == "slash", "打出的是一张转出来的【杀】"
-    assert played[0].virtual_sources == (CLUB_CROSSBOW,)
-    assert [card.type for card in _jie_used_products(engine)] == ["duel"], (
-        "产物只打出、不进使用链：使用链上只有决斗自己"
-    )
-    assert state.player(0).hp == 2, "我接住了那一轮 ⇒ 不受决斗的 1 点伤害"
-    assert state.player(1).hp == 3, "对方没接住 ⇒ 决斗的输家是使用者"
-
-
-def test_jie_jianying_converts_a_card_into_a_dodge_for_the_slash_window():
-    """§2 表**之外**的有意读法：语境键 ``dodge`` 同时带来【杀】的【闪】步。
-
-    票面 §2 的【闪】只列在"护驾 / 激将"那一行，但票 16 的 ``ProviderWindows`` **只按语境
-    收窄**（`ModifierContext` 不带窗口成因）⇒ 真【杀】的【闪】步与万箭 / 护驾共用同一档。
-    这一条把它钉成**真的能用**（不是只进了候选面）：转出来的【闪】走使用链、那张【杀】被
-    抵消。
-    """
-    slash = cards_of_type(PACK, "slash")[0]
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-            SeatSpec(hand=(slash,)),
-        ),
-        turn_seat=1,
-    )
-    engine = _jie_run(
-        state,
-        [
-            _WindowSeat(provider=True, source=CLUB_CROSSBOW),
-            _WindowSeat(use=slash, use_at=0),
-        ],
-        lambda e: any(
-            record.kind == "timing"
-            and record.timing is Timing.RESOLVE_AFTER_END
-            and record.cards
-            and record.cards[0].type == "dodge"
-            for record in e.records
-        ),
-    )
-
-    dodges = [card for card in _jie_used_products(engine) if card.type == "dodge"]
-    assert len(dodges) == 1, "【闪】步里转出来的是一张【闪】"
-    assert dodges[0].virtual_sources == (CLUB_CROSSBOW,)
-    assert state.player(0).hp == 2, "【闪】成立 ⇒ 那张【杀】被抵消（座位 0 不掉血）"
-
-
-def test_jie_jianying_converts_a_card_into_a_slash_in_the_luanwu_window():
-    """**用户点名的窗口**：贾诩【乱武】的「对最近的角色使用【杀】」二选一。"""
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JIAXU, hp=3, hp_max=3),
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-        ),
-    )
-    engine = _jie_run(
-        state,
-        [
-            _WindowSeat(activate=LUANWU),
-            _WindowSeat(provider=True, source=CLUB_CROSSBOW),
-        ],
-        lambda e: _jie_closed(e, FrameKind.SKILL),
-    )
-
-    products = [card for card in _jie_used_products(engine) if card.type == "slash"]
-    assert len(products) == 1, "乱武窗口里逼出的是一张【杀】（不是失体力那条）"
-    assert products[0].virtual_sources == (CLUB_CROSSBOW,)
-    assert state.player(0).hp == 2, "那张【杀】打向了最近的贾诩"
-    assert state.player(1).hp == 2, "选项 2（失体力）没有发生"
 
 
 def test_jie_jianying_is_not_offered_in_the_lord_request_window():
@@ -1836,28 +2055,31 @@ def test_jie_jianying_provider_lists_only_the_required_name_in_its_manifest():
 
     出牌阶段那份清单列全三个牌名（Q-J5 = A）；窗口里 ``required`` 说了要什么，故第二次
     询问（牌名）不出现——同一份声明按语境少一步，产物就是那个牌名。
+
+    载体是**求桃窗口**：票 24 / Q1 之后，② 参与的唯一语境就是它（濒死求桃 = 使用【桃】），
+    而且它长在他**自己的出牌阶段**里（他砍出的濒死）。
     """
     from sgs.effects import CandidateScope
     from sgs.skills import active as active_module
 
     declare = getattr(active_module, JIE_JIANYING_WINDOWS)
-    assert declare.scopes == frozenset(
-        {CandidateScope.DODGE, CandidateScope.PEACH, CandidateScope.RESPOND}
-    ), "声明只覆盖三档要牌语境（无懈不在：② 的产物是基本牌）"
+    assert declare.scopes == frozenset({CandidateScope.PEACH}), (
+        "声明只覆盖**使用**一档（求桃）：打出侧（``dodge`` / ``respond``）与只在别人回合里的"
+        "使用（借刀 / 乱武）都不参与——票 24 / Q1（票 24 §4，用户逐字「就按照使用来」）"
+    )
 
-    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+    slash = cards_of_type(PACK, "slash")[0]
     state = _jie_window_state(
         seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-            SeatSpec(hand=(barbarian,)),
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(slash, CLUB_CROSSBOW)),
+            SeatSpec(hp=1, hp_max=4),
         ),
-        turn_seat=1,
     )
-    seat = _WindowSeat(provider=True, source=CLUB_CROSSBOW)
+    seat = _WindowSeat(use=slash, use_at=1, provider=True, source=CLUB_CROSSBOW)
     engine = _jie_run(
         state,
-        [seat, _WindowSeat(use=barbarian)],
-        lambda e: ran_timing(e, Timing.PLAY_ON_PLAY),
+        [seat, _WindowSeat()],
+        lambda e: _jie_closed(e, FrameKind.NEAR_DEATH),
     )
 
     kinds = [
@@ -1868,43 +2090,17 @@ def test_jie_jianying_provider_lists_only_the_required_name_in_its_manifest():
     assert kinds == ["SELECT_CARDS"], (
         f"窗口里只问『选哪张源牌』（牌名已被窗口定死）：{kinds}"
     )
-    product = _jie_played_cards(engine)[0]
-    assert product.type == "slash", "产物就是窗口要的那一个牌名（不是闪 / 桃）"
-    assert product.name == "杀"
-
-
-def test_jie_jianying_does_not_spend_the_play_phase_quota_outside_its_own_play_phase():
-    """Q17-b = A：回合外的窗口发动**不查也不记** ``_USED`` ⇒ 回到自己的出牌阶段仍可发动。"""
-    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(CLUB_CROSSBOW,)),
-            SeatSpec(hand=(barbarian,)),
-        ),
-        turn_seat=1,
-    )
-    engine = _jie_run(
-        state,
-        [_WindowSeat(provider=True, source=CLUB_CROSSBOW), _WindowSeat(use=barbarian)],
-        lambda e: (
-            e.pending is not None
-            and e.pending.kind == QueryKind.PLAY_PHASE
-            and e.pending.actor == 0
-        ),
-    )
-
-    assert _jie_played_cards(engine), "前提：那张【杀】真的在别人的回合里打出去了"
-    assert state.turn_seat == 0 and state.phase is Phase.PLAY
-    assert _jie_manifest(engine.pending), (
-        "回合外的那次发动不占额度：自己的出牌阶段里 ② 的清单**照旧出现**"
-    )
+    product = next(card for card in _jie_used_products(engine) if card.type == "peach")
+    assert product.name == "桃", "产物就是窗口要的那一个牌名（不是闪 / 杀）"
 
 
 def test_jie_jianying_still_spends_the_quota_inside_its_own_play_phase():
-    """Q17-b 的另一半（**边角**）：自己的出牌阶段里因响应窗口而发动 ⇒ 按字面**算**额度。
+    """「自己的出牌阶段里的响应窗口」照旧**算**额度（票 17 的边角；票 24 后仍成立）。
 
-    边角用例逐字取自票面 §3：自己造成伤害触发的濒死求桃长在自己的出牌阶段内
-    （``turn_seat == owner`` ∧ 阶段 = 出牌阶段）⇒ 这一次照样花掉「出牌阶段限一次」。
+    自己造成伤害触发的濒死求桃长在自己的出牌阶段内（``turn_seat == owner`` ∧ 阶段 =
+    出牌阶段）⇒ 这一次照样花掉「出牌阶段限一次」。票 24 / Q1 把打出侧收窄之后，**求桃**
+    就是自己的出牌阶段里唯一还能发动 ② 的窗口，故这条边角正好是这个窗口的额度断言。
+    回合外那条（票 17 的 Q17-b"回合外不占额度"）随条文作废，载体已删。
     """
     slash = cards_of_type(PACK, "slash")[0]
     state = _jie_window_state(
@@ -1939,64 +2135,38 @@ def test_jie_jianying_still_spends_the_quota_inside_its_own_play_phase():
     ]
 
 
-def test_jie_jianying_keeps_the_source_face_in_a_window_outside_its_play_phase():
-    """Q17-c = A：回合外的窗口里"本阶段没有上一张使用牌" ⇒ 继承来源牌，**不读陈旧值**。"""
-    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
-    state = _jie_window_state(
-        seats=(
-            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(HEART_DODGE_TWO,)),
-            SeatSpec(hand=(barbarian,)),
-        ),
-        turn_seat=1,
-    )
-    # 上一次（自己回合的）出牌阶段留下的陈旧值：座位事实还指着那张 ♣A。
-    state.player(0).play_phase_last_card = _deck_card(CLUB_CROSSBOW)
-    engine = _jie_run(
-        state,
-        [_WindowSeat(provider=True, source=HEART_DODGE_TWO), _WindowSeat(use=barbarian)],
-        lambda e: ran_timing(e, Timing.PLAY_ON_PLAY),
-    )
-
-    product = _jie_played_cards(engine)[0]
-    assert product.type == "slash"
-    assert product.suit == "heart", "继承来源牌的花色（♥），不是上一回合留下的 ♣"
-    assert product.rank == _deck_card(HEART_DODGE_TWO).rank, "点数同样来自源牌"
-    assert product.color.value == "red", "颜色由花色派生（红）"
-
-
 def test_jie_jianying_keeps_the_previous_suit_inside_its_own_play_phase():
-    """Q17-c 的另一半：自己的出牌阶段 ⇒ 花色取"**本阶段**使用的上一张牌"（Q-J4 口径不变）。"""
-    duel = next(
+    """自己的出牌阶段 ⇒ 花色取"**本阶段**使用的上一张牌"（Q-J4 口径不变）。
+
+    票 17 的这一半原本借【决斗】的**打出**窗口做载体；票 24 / Q1 把打出侧收窄掉之后，
+    自己的出牌阶段里还能发动 ② 的只剩**求桃窗口**，故载体换成"自己砍出的濒死"：本阶段
+    使用的上一张牌是那张真【杀】，产物（【桃】）的花色视为它的花色，点数仍继承来源牌。
+    """
+    slash = next(
         card
-        for card in cards_of_type(PACK, "duel")
+        for card in cards_of_type(PACK, "slash")
         if _deck_card(card).suit is not Suit.HEART
     )
-    slash = cards_of_type(PACK, "slash")[0]
     state = _jie_window_state(
         seats=(
-            SeatSpec(hero=JUSHUO, hp=3, hp_max=3, hand=(duel, HEART_DODGE_TWO)),
-            SeatSpec(hand=(slash,)),
+            SeatSpec(hero=JUSHUO, hp=3, hp_max=3, hand=(slash, HEART_DODGE_TWO)),
+            SeatSpec(hp=1, hp_max=4),
         ),
     )
     engine = _jie_run(
         state,
         [
-            _WindowSeat(use=duel, use_at=1, provider=True, source=HEART_DODGE_TWO),
-            _WindowSeat(real=slash),
+            _WindowSeat(
+                use=slash, use_at=1, provider=True, source=HEART_DODGE_TWO
+            ),
+            _WindowSeat(),
         ],
-        lambda e: any(
-            record.kind == "timing"
-            and record.timing is Timing.PLAY_ON_PLAY
-            and record.cards
-            and record.cards[0].virtual_sources
-            for record in e.records
-        ),
+        lambda e: _jie_closed(e, FrameKind.NEAR_DEATH),
     )
 
-    product = next(card for card in _jie_played_cards(engine) if card.virtual_sources)
-    assert product.type == "slash"
-    assert product.suit == _deck_card(duel).suit, (
-        "花色 = 本阶段使用的上一张牌（那张【决斗】），不是来源牌的 ♥"
+    product = next(card for card in _jie_used_products(engine) if card.type == "peach")
+    assert product.suit == _deck_card(slash).suit, (
+        "花色 = 本阶段使用的上一张牌（那张真【杀】），不是来源牌的 ♥"
     )
     assert product.rank == _deck_card(HEART_DODGE_TWO).rank, "点数仍继承来源牌"
 
