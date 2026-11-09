@@ -102,6 +102,7 @@ from .catalog import (
     SKILL_JUDGMENT_CARD_KEY,
     HeroSkillDecl,
     Hook,
+    ProviderWindows,
     SkillDef,
     _GIVEN_TO_SHIFT,
     _HUANGTIAN_SHIFT,
@@ -3944,71 +3945,40 @@ def _guohuo_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
 # 消费它"（使用 / 打出 / 求桃的回复结算 / 借刀打向 Bn / 无懈的"先声明、赢家才使用"）由
 # 窗口按自己那一份规则决定。故本模块不认窗口形状，"这扇窗口要什么牌"由引擎写进
 # ``PROVIDER_REQUIRED_KEY``（候选期读同一份事实的 ``ctx.respond_required``）。
+#
+# **票 16 起不再手抄**：窗口集合 / 要哪张牌 / 候选追加都走框架：
+# - 登记表 = `skills/catalog.py` 的 ``CARD_REQUEST_WINDOWS``（每扇窗口的 scope / cause /
+#   mode / 要的牌 / 需要还是可以 / 谁参与，代码侧唯一真源）；
+# - 共享判据 = `required_card(ctx)`（票面 §2.1：蛊惑与之后的转化技都调它）；
+# - 候选追加 = `ProviderWindows.offers`（本技能的声明见 ``GUOHUO_PROVIDER_WINDOWS``），
+#   受理 / 产物交接的公共件在 `skills/lord_request.py`（``provider_required`` /
+#   ``provider_deliver`` / ``provider_give_up``）。
 # ---------------------------------------------------------------------------
 
 
-_PROVIDER_SCOPES: frozenset[CandidateScope] = frozenset(
-    {
-        CandidateScope.DODGE,
-        CandidateScope.RESPOND,
-        CandidateScope.PEACH,
-        CandidateScope.NULLIFY,
-    }
-)
-"""有 provider 分支的候选语境（``PLAY`` / ``CARD`` 不是"需要牌"窗口）。
+def _guohuo_provider_payable(
+    state: GameState, ctx: ModifierContext, required: str
+) -> bool:
+    """【蛊惑】**自己**的"付得起"谓词（提供者公共件调它；其余三条共有谓词在框架里）。
 
-票面那六行窗口由**四档**语境覆盖：``DODGE`` = 【闪】、``PEACH`` = 濒死求【桃】、
-``NULLIFY`` = 无懈的收集式窗口、``RESPOND`` = 南蛮 / 万箭 / 决斗（打出）与借刀（使用，
-由 ``respond_mode`` 再分）。
-"""
+    三条都是牌面事实、不是窗口形状：
 
-
-def _guohuo_window_required(ctx: ModifierContext) -> str | None:
-    """这次候选派发是不是**有 provider 分支**的"需要牌"窗口；是 ⇒ 它要的牌名。
-
-    牌名一律读 ``ctx.respond_required``（六扇窗口的 ``CANDIDATES`` 派发都填它）：窗口
-    "要一张什么牌"只有一处真源，技能不按外层帧的牌反推（濒死帧上没有牌、无懈窗口的帧上
-    是被无懈的锦囊、借刀的帧上是【借刀杀人】本身——三处反推得到的都不是要的那张）。
+    1. 手牌非空（产物是**扣置一张手牌**换来的）；
+    2. 本牌堆真有一种牌名能当 ``required``（``_guohuo_response_names``：牌名闸门
+       ``satisfies_required`` + 求桃窗口对濒死者的【酒】放宽）；
+    3. **借刀窗口够得着 Bn**：产物是一张【杀】，与真牌候选同一道判据
+       （``forced_use_targets``，Bn 由 ``ctx.respond_targets`` 给出）。三个杀族牌名共用
+       同一套目标规则，逐个判而非只判一个，免得多写一份"哪个牌名算数"。
     """
-    if ctx.scope not in _PROVIDER_SCOPES:
-        return None
-    return ctx.respond_required
-
-
-def _guohuo_provider_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """提供者入口的候选：需要牌时手里有牌、且本牌堆真能当那张牌 ⇒ 追加 ``ActivateSkill``。
-
-    "每提供者只问一次"由候选生成器统一过滤 ``ctx.providers_used``（与【八卦阵】同一姿态），
-    这里只判本技能自己的四条谓词：
-
-    1. **需要者就是于吉自己**（``ctx.owner == ctx.subject``）；
-    2. 付得起：手牌非空、且至少有一种可声明的牌名；
-    3. **收集式窗口的赢家还没定**（``ctx.respond_declared == False``）：产物是**扣置一张
-       手牌**换来的，赢家已定时它不会进结算，发候选就是让玩家白扣一张牌；
-    4. **借刀窗口够得着 Bn**：产物是一张【杀】，与真牌候选同一道判据
-       （``forced_use_targets``，Bn 由 ``ctx.respond_targets`` 给出）。
-
-    ``providers_used`` 自己也读一次（lin-batch2 票 03）：求桃窗口的**第二趟收口**
-    （`_peach` 对"纯删型回调"的补跑）把已经出现的提供者放进这个字段，回调据此闭嘴；
-    否则那一趟会把同一个产物**再追加一条**。真牌 / 转化候选不受影响。
-    """
-    if ctx.owner != ctx.subject or ctx.respond_declared:
-        return current
-    if ctx.skill_id in ctx.providers_used:
-        return current
-    required = _guohuo_window_required(ctx)
-    if required is None:
-        return current
     if not state.player(ctx.subject).hand:
-        return current
+        return False
     table = _guohuo_response_names(state, required)
     if not table:
-        return current
+        return False
     if ctx.respond_mode is RespondMode.USE and ctx.respond_targets:
         # 产物是【杀】⇒ "它够不够得着 Bn"是**产物牌**的事实（与真牌候选同一道判据
         # ``forced_use_targets``），不是窗口形状：两个入参（``respond_mode`` /
         # ``respond_targets``）本来就随候选派发下传，这里只读它们、不另推窗口。
-        # 三个杀族牌名共用同一套目标规则，逐个判而非只判一个，免得多写一份"哪个牌名算数"。
         if not any(
             forced_use_targets(
                 state,
@@ -4018,8 +3988,40 @@ def _guohuo_provider_offers(state: GameState, ctx: ModifierContext, current: Any
             )
             for type_id in table.values()
         ):
-            return current
-    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+            return False
+    return True
+
+
+GUOHUO_PROVIDER_WINDOWS = ProviderWindows(
+    # 声明"我在哪些窗口参与"：逐一对应 `CARD_REQUEST_WINDOWS` 里 providers=True 的行
+    # （四档语境 DODGE / RESPOND / PEACH / NULLIFY 的全部八扇窗口；框架按语境集合派发）。
+    keys=(
+        "dodge",
+        "arrow_barrage",
+        "peach",
+        "barbarian_invasion",
+        "duel",
+        "borrowed_sword",
+        "luanwu",
+        "nullify",
+    ),
+    can_pay=_guohuo_provider_payable,
+)
+"""【蛊惑】的**提供者窗口声明**（票 16 §2.4）：候选追加因此只有一处实现。
+
+改判（``REJUDGE``）不在里面——那是登记表里"登记但排除"的一行（既不是使用也不是打出）。
+"""
+
+
+def _guohuo_provider_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """提供者入口的候选：需要牌时本技能付得起 ⇒ 追加 ``ActivateSkill``（共用实现）。
+
+    "每提供者只问一次"（``ctx.providers_used``）、"收集式窗口的赢家已定就闭嘴"
+    （``ctx.respond_declared``）、"只要需要者自己的实例"（``ctx.owner == ctx.subject``）
+    三条都是**提供者的共有纪律**，住 :meth:`ProviderWindows.offers`；本技能的谓词只有
+    :func:`_guohuo_provider_payable` 那三条。
+    """
+    return GUOHUO_PROVIDER_WINDOWS.offers(state, ctx, current)
 
 
 def _guohuo_response_names(
@@ -4406,19 +4408,16 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
     重入纪律（``CODING_STANDARDS.md`` §3 的幂等）：每段一个帧内游标；收尾前先写
     ``satisfied``（本函数**不**压帧，故没有"子帧出栈后重入"的那一次，只有内联钩子挂起
     引发的重入——作废那条的弃置因此靠 ``move_in_frame`` 自己的重入守卫兜住）。
+
+    受理 / 产物交接的两件公共件（票 16 §2.4）：``required`` 读
+    :func:`~sgs.skills.lord_request.provider_required`，两个结果分支写
+    ``provider_deliver`` / ``provider_give_up``——不再在这里手抄结果键。
     """
     # 惰性 import：`lord_request` 反向依赖 `catalog`（本模块由 catalog 末尾导入），
     # 模块级 import 会成环（见 `catalog.py` 末尾的 import 注释）。
-    from .lord_request import (
-        PROVIDER_CARD_KEY,
-        PROVIDER_REQUIRED_KEY,
-        PROVIDER_SATISFIED_KEY,
-    )
+    from .lord_request import provider_deliver, provider_give_up, provider_required
 
-    required = frame.data.get(PROVIDER_REQUIRED_KEY)
-    if required is None:
-        # 引擎在派发提供者之前写好"这扇窗口要什么牌"；缺失即编程错误（不猜、不回退）。
-        raise NotImplementedError("【蛊惑】提供者缺少窗口的 required（引擎应写 PROVIDER_REQUIRED_KEY）")
+    required = provider_required(frame)
     state = host.state
     stage = frame.data.get(_GUOHUO_PROVIDER_STAGE, "card")
 
@@ -4428,7 +4427,7 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
         直接写回引擎的结果键就够了——这条路上什么都没挂起，外层窗口马上拿到
         ``satisfied=False`` 并继续问真牌。
         """
-        frame.data[PROVIDER_SATISFIED_KEY] = False
+        provider_give_up(frame)
 
     # ---- 段 1：扣置一张手牌（手牌 → 处理区；算失去牌）------------------------
     if stage == "card":
@@ -4493,10 +4492,11 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
 
     # ---- 段 7：无人质疑 /（真 且 ♥️）⇒ 把产物交给窗口；否则作废（未使用 / 打出）--
     live = _guohuo_live(state, frame)
-    frame.data[PROVIDER_SATISFIED_KEY] = live
     if not live:
-        # 作废：扣置过的牌进弃牌堆。搬牌可能内联派发「失去牌后」而挂起，重入时
-        # ``move_in_frame`` 按"这次移动已经搬完"认出同一次移动（不再搬第二遍）。
+        # 作废：牌从处理区进弃牌堆、**从未使用 / 打出**，``satisfied=False`` ⇒ 外层窗口照常
+        # 继续问真牌。搬牌可能内联派发「失去牌后」而挂起，重入时 ``move_in_frame`` 按
+        # "这次移动已经搬完"认出同一次移动（不再搬第二遍）。
+        provider_give_up(frame)
         control = host.move_in_frame(
             frame,
             state.refs((int(frame.data[_GUOHUO_SOURCE]),)),
@@ -4506,7 +4506,7 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
             actor=actor,
         )
         return control if control == "stay" else None
-    frame.data[PROVIDER_CARD_KEY] = _guohuo_virtual(state, frame)
+    provider_deliver(frame, _guohuo_virtual(state, frame))
     return None
 
 
@@ -7256,7 +7256,8 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         requirement="出牌阶段限两次：令一名其他角色视为对你使用一张【决斗】",
     ),
     # 移动版于吉【蛊惑】（用户 2026-11-01 裁定）：**两个入口**——出牌阶段主动使用（A 族）
-    # **与**"需要牌时"的提供者（六扇窗口，见 `_PROVIDER_SCOPES`）。**无次数限制** ⇒
+    # **与**"需要牌时"的提供者（六扇窗口，见 `GUOHUO_PROVIDER_WINDOWS` 与登记表
+    # `catalog.CARD_REQUEST_WINDOWS`）。**无次数限制** ⇒
     # `once_per_phase=False`（不落阶段位）。**翻预发动**（用户 2026-11-02 的 Q3A 裁定）：
     # 出牌阶段是"点蛊惑 → 选 1 张手牌 → 牌名弹窗 → 一次提交"两步（`GUOHUO_FLOW`）；
     # 逐座位质疑仍是段机里的手写循环（清单表达不了循环）。

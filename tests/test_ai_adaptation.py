@@ -306,6 +306,76 @@ def test_the_skill_activation_query_keeps_its_frozen_serialized_face():
 
 
 # ---------------------------------------------------------------------------
+# 断言 2″：要牌窗口的闭集 = 代码侧登记表（yijiang-2014-round2 票 16 / E2）
+# ---------------------------------------------------------------------------
+
+
+def test_the_card_request_windows_are_registered_without_touching_the_query_face():
+    """票 16 把「需要 / 可以使用或打出」的窗口收成 ``CARD_REQUEST_WINDOWS``（代码侧登记表）。
+
+    对 AI 适配来说这是**一条加法**：AI 看见这些窗口的通道仍然只有 ``RespondQuery`` 的
+    ``cause`` / ``required``（候选面在 ``legal_actions`` 里），登记表**不新增询问字段**、
+    也不新增读点。于是本机制的 AI 适配面 = 两条闭集 + 一条读点登记：
+
+    1. ``WindowCause`` 的值集不变——它**直接落盘**（录像字节），也是 ``_score_respond``
+       的分支键；新加一扇窗口必须是一次有意的裁定（AI 打分口径 + 金录像一起变红），
+       所以不能在技能代码里顺手塞一个新成员；
+    2. ``RespondQuery`` 的字段集不变——把"这扇窗口谁可以参与 / 要哪张牌"做成查询字段会
+       同时改 AI 读点与录像字节；登记表是**代码侧**事实，不进询问；
+    3. 读点表里 ``RespondQuery`` 的四项仍在册，且 ``required`` 仍是"不读"（候选里只有
+       合法的；登记表不改变这条——需要改读法时那是另一张票的裁定）。
+
+    窗口的**站点**登记与 ``WindowCause`` 的**覆盖**在
+    ``tests/test_card_request_windows.py``（全树审计）；本条只核 AI 看得见的那一面。
+    """
+    from sgs.state import RespondQuery, WindowCause
+
+    assert {cause.value for cause in WindowCause} == {
+        "NULLIFY",
+        "BARBARIAN_INVASION",
+        "ARROW_BARRAGE",
+        "DUEL",
+        "BORROWED_SWORD",
+        "LORD_REQUEST",
+        "REJUDGE",
+        "LUANWU",
+    }, (
+        "要牌窗口的成因闭集变了：新窗口必须先在 "
+        "sgs.skills.catalog.CARD_REQUEST_WINDOWS 登记（含 AI 打分口径），"
+        "这条与 tests/test_card_request_windows.py 的覆盖断言一起红"
+    )
+
+    assert set(RespondQuery.model_fields) == {
+        "seq",
+        "actor",
+        "timing",
+        "prompt",
+        "legal_actions",
+        "view",
+        "revealed",
+        "transform_preactivations",
+        "transform_actions",
+        "kind",
+        "cause",
+        "required",
+        "target",
+        "window_frame",
+    }, (
+        "RespondQuery 的字段集变了：要牌窗口的登记表是代码侧事实，"
+        "不许把它（或它的参与者标记）做成询问字段——那会同时改 AI 读点与录像字节"
+    )
+
+    read = heuristic._AI_READ_POINTS["RespondQuery"]
+    assert set(read) == {"cause", "required", "target", "window_frame"}, (
+        f"RespondQuery 的读点登记变了：{sorted(read)}"
+    )
+    assert read["cause"][0] is True, "AI 按成因分叉（无懈 / 乱武各有专项打分）"
+    assert read["required"][0] is False, (
+        "``required`` 仍登记为「不读」（候选里只有合法的）；要改读法请另开票裁"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 断言 3：Mode 表（每个模式四个格子，站点可解析）
 # ---------------------------------------------------------------------------
 

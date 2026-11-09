@@ -115,7 +115,10 @@ __all__ = [
     "lord_request_activation_plans",
     "lord_request_skill_definitions",
     "lord_skill_definitions",
+    "provider_deliver",
+    "provider_give_up",
     "provider_registered",
+    "provider_required",
     "register_provider",
     "start_provider",
 ]
@@ -232,6 +235,48 @@ def _finish_provider(frame: Frame) -> tuple[Control, bool, CardRef | None]:
     satisfied = bool(frame.data.pop(PROVIDER_SATISFIED_KEY, False))
     card = frame.data.pop(PROVIDER_CARD_KEY, None)
     return None, satisfied, card
+
+
+# ---------------------------------------------------------------------------
+# 提供者回调的**公共件**（票 16 §2.4）：受理面读 required + 产物交接
+#
+# 这三件是"提供者只声明我在哪些窗口参与，共用一份实现"的**受理半边**（候选半边见
+# `skills/catalog.py` 的 `ProviderWindows`）：技能回调不再各自 `frame.data[...] = ...`
+# 地手抄结果键，也不再各自写一份"required 缺失 = 编程错误"。
+# ---------------------------------------------------------------------------
+
+
+def provider_required(frame: Frame) -> str:
+    """提供者回调读**这扇窗口要哪张牌**（``PROVIDER_REQUIRED_KEY``）。
+
+    缺失 ⇒ ``NotImplementedError``：引擎在派发提供者之前一定写好它（见
+    :func:`start_provider`），撞到即编程错误——不猜、不回退。
+    """
+    required = frame.data.get(PROVIDER_REQUIRED_KEY)
+    if required is None:
+        raise NotImplementedError(
+            "提供者缺少窗口的 required（引擎应在派发前写 PROVIDER_REQUIRED_KEY）"
+        )
+    return str(required)
+
+
+def provider_deliver(frame: Frame, card: CardRef) -> None:
+    """产物交接：**这次响应成立**，产物牌交给窗口。
+
+    写 ``satisfied=True`` + :data:`PROVIDER_CARD_KEY`；窗口自己决定怎么消费（使用 / 打出 /
+    回复 / 打向 Bn / 无懈的"先声明、赢家才使用"）。
+    """
+    frame.data[PROVIDER_SATISFIED_KEY] = True
+    frame.data[PROVIDER_CARD_KEY] = card
+
+
+def provider_give_up(frame: Frame) -> None:
+    """产物交接：**这次响应没发生**（``satisfied=False``，不写产物，牌一张不动）。
+
+    外层窗口拿到 ``False`` 后照常继续（问真牌 / 记放弃）——这就是"作废不需要受理后回滚"
+    的那条契约（轮询发生在受理之前）。
+    """
+    frame.data[PROVIDER_SATISFIED_KEY] = False
 
 
 def start_provider(

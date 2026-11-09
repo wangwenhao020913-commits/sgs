@@ -29,7 +29,7 @@ M3 起该门控**只作用于此来源**——wuming 票 06 收窄到"武将牌�
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, TypeAlias
@@ -69,9 +69,11 @@ from sgs.state import (
     GameState,
     MoveReason,
     Player,
+    RespondMode,
     SelectionSpec,
     SkillSuppressionPredicate,
     SlotKind,
+    WindowCause,
     Zone,
     ZoneRef,
     seats_from,
@@ -99,22 +101,30 @@ from .virtual import (
 
 __all__ = [
     "ACTIVATION_PLANS",
+    "CARD_REQUEST_SCOPES",
+    "CARD_REQUEST_WINDOWS",
     "CATALOG",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
     "DAMAGE_DEAL_POINT_KEY",
     "DAMAGE_DEAL_RECORDED_KEY",
     "PASS_STATE_KEY",
+    "REQUEST_PLUMBING",
+    "REQUEST_WINDOW",
     "STATE_CHANGE_KEY",
     "ActivationCandidate",
     "ActivationPlan",
+    "CardRequestSite",
+    "CardRequestWindow",
     "Hook",
     "HookCondition",
     "HeroSkillDecl",
     "MATCH_ACTOR_KEY",
     "ASK_SEAT_KEY",
     "MATCH_OWNER_KEY",
+    "ProviderWindows",
     "RUNNING_SKILL_KEY",
+    "RequestAxis",
     "SKILL_JUDGMENT_CARD_KEY",
     "RejudgeOriginal",
     "Seam",
@@ -131,6 +141,7 @@ __all__ = [
     "dispatch_timing",
     "hero_card_zone_key",
     "instance_key",
+    "is_card_request",
     "is_equipped",
     "limited_skill_used",
     "lord_skill_allowed",
@@ -141,6 +152,7 @@ __all__ = [
     "prune_card_tags",
     "prune_skill_state",
     "rejudge_skill_ids",
+    "required_card",
     "reset_turn_skill_state",
     "reset_phase_skill_state",
     "resolve_instances",
@@ -3539,6 +3551,741 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         modifiers=_DISTANCE_PLUS_ONE,
     ),
 )
+
+# ---------------------------------------------------------------------------
+# 「需要 / 可以使用或打出一张牌」的窗口：闭集 + 登记表 + 共享判据
+# （yijiang-2014-round2 票 16 / E2）
+#
+# 用户 2026-11-09 的裁定（逐字）：「任何"需要"、"可以"使用或打出的场合，例如贾诩乱武也算
+# （把这个"需要"、"可以"使用或打出给规范下来，转化计才能真正排除bug，不然每新加一个技能
+# 都可能产生bug）」。
+#
+# 零件早就齐了（``CandidateScope`` / ``WindowCause`` / ``RespondMode`` /
+# ``ModifierContext.respond_required``），缺的是**登记**：此前只有【蛊惑】一家把"某扇窗口
+# 要不要牌"串起来，而且串法（``_PROVIDER_SCOPES``）住在技能自己的模块里。本段落三件东西：
+#
+# 1. :data:`CARD_REQUEST_WINDOWS` = **代码侧唯一真源**：每一扇"要牌"窗口一行，写清
+#    ``scope``（候选派发落在哪个语境）、``causes``（窗口成因）、``modes``（这一次响应算
+#    使用还是打出）、``required``（要哪张牌）、``axis``（"需要"还是"可以"），以及**谁可以
+#    参与**（``providers`` / ``conversion``）+ 一行理由；
+# 2. :func:`is_card_request` / :func:`required_card` = **一处判据**（【蛊惑】的提供者分支与
+#    之后的转化技共用，不再各自手抄一份）；
+# 3. :class:`ProviderWindows` = 提供者只声明"我在哪些窗口参与"，候选追加共用一份实现
+#    （受理 / 产物交接在 :mod:`sgs.skills.lord_request` 的 ``PROVIDER_*`` 键那一层）。
+#
+# **这不是第六种原语**：五种原语一条没动，本表只把既有零件登记成闭集。新加一扇要牌窗口
+# ⇒ 在 :data:`CARD_REQUEST_WINDOWS` 里加一行；漏登记 = ``tests/test_card_request_windows.py``
+# 红（照 `tests/test_card_family_sites.py` 的"未登记的新站点直接判红"）。登记步骤见
+# ``docs/agents/skill-authoring/shapes.md`` §3.8。
+# ---------------------------------------------------------------------------
+
+REQUEST_WINDOW = "window"
+"""登记行的种类：**真的是一扇窗口**（引擎/技能向某座位要一张牌）。"""
+
+REQUEST_PLUMBING = "plumbing"
+"""登记行的种类：**不是窗口**的"要牌"站点（面构造 / 窗口事实透传 / 引擎转发入口）。
+
+它们与窗口共用同一条候选/受理通道（``respond_required=`` / ``start_provider(required=)``），
+故同样要登记——不登记就没人回答"新加一处时要不要让转化 / 提供者参与"，但它们的
+``axis`` / ``causes`` / ``modes`` 都是空的（不是窗口，没有那几格事实）。
+"""
+
+
+class RequestAxis(str, Enum):
+    """一扇窗口是**需要**还是**可以**（票 16 §2.2；用户 2026-11-09 的措辞）。
+
+    ``REQUIRED`` = 不响应就按规则结算（南蛮 / 万箭 / 决斗 / 【闪】步）：窗口要的就是这条
+    响应本身，没响应 ⇒ 伤害 / 效果照落。``OPTIONAL`` = 可以放弃（求桃 / 借刀 / 乱武的
+    二选一 / 无懈）：响应是玩家的一次选择。
+
+    这一轴决定**接入方**怎么产候选：``OPTIONAL`` 的窗口不能做成"必须"（放弃那条路要在），
+    ``REQUIRED`` 的窗口的产物就是那条响应。改判窗口没有这一轴（见 ``rejudge`` 行）。
+    """
+
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+
+
+@dataclass(frozen=True, slots=True)
+class CardRequestSite:
+    """一扇窗口在源码里的**站点**（由 ``tests/test_card_request_windows.py`` 的 AST 扫描核对）。
+
+    ``kind`` = 扫描器认识的标记类别（``dispatch`` / ``declaration`` / ``ask`` / ``preview`` /
+    ``askkind`` / ``accept``）；``fingerprint`` = 这一处的关键字实参（``scope`` /
+    ``required`` / ``cause`` / ``mode`` 之一）。把 ``scope=`` 换一档、把 ``required=`` 换成
+    另一个常量、函数改名——都会让登记行对不上，逼实现者同时改这一行（"函数名还在就算登记过"
+    不算数）。``count`` = 同一所属里的同形出现次数（``_peach`` 的收集式窗口有两趟派发）。
+    """
+
+    kind: str
+    path: str
+    owner: str
+    fingerprint: str
+    count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class CardRequestWindow:
+    """一扇"要一张牌"的窗口（或它的非窗口站点）：
+
+    - ``scope``：候选派发落在哪个 :class:`~sgs.effects.CandidateScope`（``None`` = 这扇窗口
+      不走 ``CANDIDATES`` 派发，例如改判）；
+    - ``causes``：覆盖的 :class:`~sgs.state.WindowCause`（空 = 不是"效果内窗口"的成因：
+      【闪】步 / 求桃是独立询问种类）；
+    - ``modes``：这一次响应算**使用**还是**打出**（空 = 不是使用 / 打出，例如改判 / 非窗口）；
+    - ``required``：要哪张牌（带上代码侧真源的名字，便于对着源码核）；
+    - ``axis``：需要 / 可以（见 :class:`RequestAxis`；``None`` = 不是使用 / 打出窗口）；
+    - ``providers`` / ``conversion``：**谁可以参与**——提供者（产物由技能自己付清，窗口只
+      负责消费）与转化技（来源牌直接当这张牌用）；``False`` 的行必须写理由，说明"为什么
+      不让它参与"或"候选会被生成但没人消费"；
+    - ``sites``：这扇窗口在源码里的落点；``reason``：一句话理由（``False`` 的行这一句是
+      必须的裁定，不是装饰）。
+    """
+
+    key: str
+    kind: str
+    label: str
+    scope: CandidateScope | None
+    causes: tuple[WindowCause, ...]
+    modes: tuple[RespondMode, ...]
+    required: str
+    axis: RequestAxis | None
+    providers: bool
+    conversion: bool
+    sites: tuple[CardRequestSite, ...]
+    reason: str
+
+
+_RESPOND_DISPATCH = CardRequestSite(
+    kind="dispatch",
+    path="src/sgs/effects/actions.py",
+    owner="_respond",
+    fingerprint="scope=scope required=ctx.required",
+)
+"""``actions._respond`` 的候选派发（南蛮 / 万箭 / 决斗 / 借刀 / 乱武 / 无懈共用这一趟）。
+
+``scope`` 是**变量**：同一函数按窗口要的牌名分派（``_respond_scope``：dodge ⇒ ``DODGE``、
+nullify ⇒ ``NULLIFY``、其余 ⇒ ``RESPOND``），故指纹是 ``scope=scope`` 而不是某个成员。
+"""
+
+_RESPOND_TARGET_COUNT = CardRequestSite(
+    kind="dispatch",
+    path="src/sgs/effects/actions.py",
+    owner="_respond",
+    fingerprint="scope=<default> required=ctx.required",
+)
+"""``actions._respond`` 的**内层** ``TARGET_COUNT`` 链（借刀 / 乱武的额定目标数）。
+
+它不是候选派发：把窗口的"要哪张牌"透传进修饰器管道，``scope`` 保持默认 ``CARD``。
+"""
+
+_RESIST_ASK = CardRequestSite(
+    kind="ask",
+    path="src/sgs/effects/ops.py",
+    owner="_resist_or_damage",
+    fingerprint="cause=cause required=required mode=<default>",
+)
+"""南蛮 / 万箭共用的响应询问（``cause`` 与 ``required`` 都是入参）。"""
+
+_RESIST_ACCEPT = CardRequestSite(
+    kind="accept",
+    path="src/sgs/effects/ops.py",
+    owner="_resist_or_damage",
+    fingerprint="required=required",
+)
+"""南蛮 / 万箭共用受理面：把窗口的 ``required`` 交给提供者。"""
+
+_LORD_REQUEST_ASK = CardRequestSite(
+    kind="ask",
+    path="src/sgs/skills/lord_request.py",
+    owner="_run_lord_request",
+    fingerprint="cause=WindowCause.LORD_REQUEST required=skill.required mode=RespondMode.PLAY",
+)
+"""势力求助窗口的逐座位询问（护驾 / 激将共用；``required`` 取各自声明的牌名）。"""
+
+CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
+    CardRequestWindow(
+        key="dodge",
+        kind=REQUEST_WINDOW,
+        label="【杀】的【闪】步（真【闪】/ 转化【闪】/ 提供者同槽）",
+        scope=CandidateScope.DODGE,
+        causes=(),
+        modes=(RespondMode.USE,),
+        required="【闪】 / DODGE_RESPONSE_CARD",
+        axis=RequestAxis.REQUIRED,
+        providers=True,
+        conversion=True,
+        sites=(
+            CardRequestSite(
+                kind="dispatch",
+                path="src/sgs/effects/actions.py",
+                owner="_dodge",
+                fingerprint="scope=CandidateScope.DODGE required=DODGE_RESPONSE_CARD",
+            ),
+            CardRequestSite(
+                kind="askkind",
+                path="src/sgs/engine/steps.py",
+                owner="_dodge_window",
+                fingerprint="kind=QueryKind.DODGE payload=payload",
+            ),
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/engine/steps.py",
+                owner="_dodge_window",
+                fingerprint="required=DODGE_RESPONSE_CARD",
+            ),
+        ),
+        reason=(
+            "需要【闪】不是「可以」：放弃就按【杀】结算（挨这一刀）。"
+            "提供者（八卦阵 / 护驾 / 蛊惑）与转化（龙胆）都在这一档；【闪】自己作为一次"
+            "使用照走 L4 / L5，故 modes = USE。"
+        ),
+    ),
+    CardRequestWindow(
+        key="arrow_barrage",
+        kind=REQUEST_WINDOW,
+        label="【万箭齐发】的【闪】请求（打出【闪】否则受 1 点伤害）",
+        scope=CandidateScope.DODGE,
+        causes=(WindowCause.ARROW_BARRAGE,),
+        modes=(RespondMode.PLAY,),
+        required="【闪】（万箭）/ required='dodge'",
+        axis=RequestAxis.REQUIRED,
+        providers=True,
+        conversion=True,
+        sites=(
+            _RESPOND_DISPATCH,
+            _RESIST_ASK,
+            _RESIST_ACCEPT,
+        ),
+        reason=(
+            "这一扇的候选派发**落在 `DODGE` 语境**（`actions._respond_scope` 按请求牌名分派："
+            "dodge ⇒ DODGE），故八卦阵 / 蛊惑与龙胆的虚拟【闪】照样进来；但询问是**打出**"
+            "（`mode=PLAY`，真牌候选是 PlayCard）——票 16 §1 的表把它记成 `RESPOND`，"
+            "写码时逐处核行号后按代码事实改记到本行。转化产物走 UseCard（W4-fix-6），"
+            "窗口两种都收。"
+        ),
+    ),
+    CardRequestWindow(
+        key="peach",
+        kind=REQUEST_WINDOW,
+        label="濒死求【桃】（濒死者本人时【酒】同档）",
+        scope=CandidateScope.PEACH,
+        causes=(),
+        modes=(RespondMode.USE,),
+        required="【桃】（濒死自救时含【酒】）/ PEACH_RESPONSE_CARD",
+        axis=RequestAxis.OPTIONAL,
+        providers=True,
+        conversion=True,
+        sites=(
+            CardRequestSite(
+                kind="dispatch",
+                path="src/sgs/effects/actions.py",
+                owner="_peach",
+                fingerprint="scope=CandidateScope.PEACH required=PEACH_RESPONSE_CARD",
+                count=2,
+            ),
+            CardRequestSite(
+                kind="askkind",
+                path="src/sgs/engine/steps.py",
+                owner="near_death_ask",
+                fingerprint="kind=QueryKind.PEACH payload=payload",
+            ),
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/engine/steps.py",
+                owner="near_death_ask",
+                fingerprint="required=PEACH_RESPONSE_CARD",
+            ),
+        ),
+        reason=(
+            "可以放弃：放弃只是「这一轮不出桃」，窗口照规则问下一个座位。两趟派发 = 真牌 + "
+            "纯删型回调的第二趟收口（见 `_peach` 的注释），故 count=2。"
+        ),
+    ),
+    CardRequestWindow(
+        key="barbarian_invasion",
+        kind=REQUEST_WINDOW,
+        label="【南蛮入侵】的【杀】请求（打出【杀】否则受 1 点伤害）",
+        scope=CandidateScope.RESPOND,
+        causes=(WindowCause.BARBARIAN_INVASION,),
+        modes=(RespondMode.PLAY,),
+        required="【杀】族 / required='slash'",
+        axis=RequestAxis.REQUIRED,
+        providers=True,
+        conversion=True,
+        sites=(_RESPOND_DISPATCH, _RESIST_ASK, _RESIST_ACCEPT),
+        reason=(
+            "需要：不响应就受 1 点伤害。提供者（激将 / 蛊惑）与转化（武圣 / 龙胆类）都在"
+            "这一档；【杀】族按 `satisfies_required` 的共享计数键放宽（火 / 雷【杀】同族）。"
+        ),
+    ),
+    CardRequestWindow(
+        key="duel",
+        kind=REQUEST_WINDOW,
+        label="【决斗】轮流打出【杀】（未打出者受 1 点伤害）",
+        scope=CandidateScope.RESPOND,
+        causes=(WindowCause.DUEL,),
+        modes=(RespondMode.PLAY,),
+        required="【杀】族 / required='slash'",
+        axis=RequestAxis.REQUIRED,
+        providers=True,
+        conversion=True,
+        sites=(
+            _RESPOND_DISPATCH,
+            CardRequestSite(
+                kind="ask",
+                path="src/sgs/effects/ops.py",
+                owner="resolve_duel",
+                fingerprint="cause=WindowCause.DUEL required='slash' mode=<default>",
+            ),
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/effects/ops.py",
+                owner="resolve_duel",
+                fingerprint="required=SLASH_FAMILY_KEY",
+            ),
+        ),
+        reason=(
+            "需要：这一问就是「你打不打」；【无双】把额定张数改成 2，仍是同一扇窗口。"
+        ),
+    ),
+    CardRequestWindow(
+        key="borrowed_sword",
+        kind=REQUEST_WINDOW,
+        label="【借刀杀人】迫使「对 Bn 使用一张【杀】」",
+        scope=CandidateScope.RESPOND,
+        causes=(WindowCause.BORROWED_SWORD,),
+        modes=(RespondMode.USE,),
+        required="【杀】族 / SLASH_FAMILY_KEY",
+        axis=RequestAxis.OPTIONAL,
+        providers=True,
+        conversion=True,
+        sites=(
+            _RESPOND_DISPATCH,
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/effects/ops.py",
+                owner="resolve_borrowed_sword",
+                fingerprint=(
+                    "cause=WindowCause.BORROWED_SWORD required=SLASH_FAMILY_KEY "
+                    "mode=RespondMode.USE"
+                ),
+            ),
+            CardRequestSite(
+                kind="ask",
+                path="src/sgs/effects/ops.py",
+                owner="resolve_borrowed_sword",
+                fingerprint=(
+                    "cause=WindowCause.BORROWED_SWORD required=SLASH_FAMILY_KEY "
+                    "mode=RespondMode.USE"
+                ),
+            ),
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/effects/ops.py",
+                owner="resolve_borrowed_sword",
+                fingerprint="required=SLASH_FAMILY_KEY",
+            ),
+            CardRequestSite(
+                kind="dispatch",
+                path="src/sgs/skills/virtual.py",
+                owner="virtual_card_use",
+                fingerprint="scope=<default> required=ctx.respond_required",
+            ),
+        ),
+        reason=(
+            "可以：不接这一刀就交武器（放弃不是「没响应」，而是转向另一种规则结果）。"
+            "`respond_targets` 非空 ⇒ 产物必须够得着 Bn（与真牌候选同一道判据 "
+            "`forced_use_targets`）；`modes = USE` 故还要过使用次数。`virtual_card_use` "
+            "那一条是**内层** `TARGET_COUNT` 链的事实透传（不是第二扇窗口）。"
+        ),
+    ),
+    CardRequestWindow(
+        key="luanwu",
+        kind=REQUEST_WINDOW,
+        label="贾诩移动版【乱武】的「对最近的角色使用【杀】或失去 1 点体力」",
+        scope=CandidateScope.RESPOND,
+        causes=(WindowCause.LUANWU,),
+        modes=(RespondMode.USE,),
+        required="【杀】族 / LUANWU_RESPONSE_CARD",
+        axis=RequestAxis.OPTIONAL,
+        providers=True,
+        conversion=True,
+        sites=(
+            _RESPOND_DISPATCH,
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/skills/active.py",
+                owner="_luanwu_legal_targets",
+                fingerprint=(
+                    "cause=WindowCause.LUANWU required=LUANWU_RESPONSE_CARD "
+                    "mode=RespondMode.USE"
+                ),
+            ),
+            CardRequestSite(
+                kind="ask",
+                path="src/sgs/skills/active.py",
+                owner="_luanwu_effect",
+                fingerprint=(
+                    "cause=WindowCause.LUANWU required=LUANWU_RESPONSE_CARD "
+                    "mode=RespondMode.USE"
+                ),
+            ),
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/skills/active.py",
+                owner="_luanwu_effect",
+                fingerprint="required=LUANWU_RESPONSE_CARD",
+            ),
+        ),
+        reason=(
+            "可以：这是「使用【杀】或失去 1 点体力」的二选一，放弃 = 走失去体力那条。"
+            "用户点名「贾诩乱武也算」——它复用 `RESPOND` + `USE` 面，只有成因单独一档。"
+        ),
+    ),
+    CardRequestWindow(
+        key="nullify",
+        kind=REQUEST_WINDOW,
+        label="【无懈可击】的收集式窗口（先声明、赢家才使用）",
+        scope=CandidateScope.NULLIFY,
+        causes=(WindowCause.NULLIFY,),
+        modes=(RespondMode.USE,),
+        required="【无懈可击】 / NULLIFY_RESPONSE_CARD",
+        axis=RequestAxis.OPTIONAL,
+        providers=True,
+        conversion=True,
+        sites=(
+            _RESPOND_DISPATCH,
+            CardRequestSite(
+                kind="ask",
+                path="src/sgs/engine/steps.py",
+                owner="_collected_response_window",
+                fingerprint=(
+                    "cause=WindowCause.NULLIFY required=NULLIFY_RESPONSE_CARD "
+                    "mode=RespondMode.USE"
+                ),
+            ),
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/engine/steps.py",
+                owner="_collected_response_window",
+                fingerprint="required=NULLIFY_RESPONSE_CARD",
+            ),
+        ),
+        reason=(
+            "可以：不声明就由上一个声明者结算（放弃 = 不抵消）。收集式的规矩：赢家已定时"
+            "提供者闭嘴（`respond_declared`），产物只算一条**声明**、由赢家统一使用——"
+            "六扇窗口里唯一「先记账、后交付」的一扇。"
+        ),
+    ),
+    CardRequestWindow(
+        key="lord_request.dodge",
+        kind=REQUEST_WINDOW,
+        label="曹操 / 界曹操【护驾】的求助子窗口（同势力角色打出【闪】）",
+        scope=CandidateScope.DODGE,
+        causes=(WindowCause.LORD_REQUEST,),
+        modes=(RespondMode.PLAY,),
+        required="【闪】 / skill.required（声明 = 'dodge'）",
+        axis=RequestAxis.OPTIONAL,
+        providers=False,
+        conversion=False,
+        sites=(
+            CardRequestSite(
+                kind="declaration",
+                path="src/sgs/skills/lord_request.py",
+                owner="HUJIA",
+                fingerprint=(
+                    "required='dodge' scope=CandidateScope.DODGE mode=<default>"
+                ),
+            ),
+            CardRequestSite(
+                kind="declaration",
+                path="src/sgs/skills/lord_request.py",
+                owner="JIE_HUJIA_LORD",
+                fingerprint=(
+                    "required='dodge' scope=CandidateScope.DODGE mode=<default>"
+                ),
+            ),
+            _LORD_REQUEST_ASK,
+        ),
+        reason=(
+            "可以：每个同势力角色「选择是否打出」（放弃 = 问下一个）。"
+            "**不参与**：求助子窗口只收 `PlayCard`（`_run_lord_request` 没有 `UseCard` / "
+            "`ActivateSkill` 分支）⇒ 转化与提供者的候选即便由底层 `DODGE` 派发顺带出现，"
+            "也没有人消费（于吉是群势力，今天到不了魏 / 蜀的求助窗口）。要把它们接进来，"
+            "先给 `_run_lord_request` 补受理面——那是另一张票。"
+        ),
+    ),
+    CardRequestWindow(
+        key="lord_request.slash",
+        kind=REQUEST_WINDOW,
+        label="刘备 / 界刘备【激将】的求助子窗口（同势力角色打出【杀】）",
+        scope=CandidateScope.RESPOND,
+        causes=(WindowCause.LORD_REQUEST,),
+        modes=(RespondMode.PLAY,),
+        required="【杀】族 / skill.required（声明 = 'slash'）",
+        axis=RequestAxis.OPTIONAL,
+        providers=False,
+        conversion=False,
+        sites=(
+            CardRequestSite(
+                kind="declaration",
+                path="src/sgs/skills/lord_request.py",
+                owner="JIJIANG",
+                fingerprint=(
+                    "required='slash' scope=CandidateScope.RESPOND mode=RespondMode.PLAY"
+                ),
+            ),
+            CardRequestSite(
+                kind="declaration",
+                path="src/sgs/skills/lord_request.py",
+                owner="JIE_JIJIANG_LORD",
+                fingerprint=(
+                    "required='slash' scope=CandidateScope.RESPOND mode=RespondMode.PLAY"
+                ),
+            ),
+            _LORD_REQUEST_ASK,
+        ),
+        reason=(
+            "可以：同【护驾】。**不参与**的理由也同：`_run_lord_request` 只认 `PlayCard`；"
+            "【激将】本身还要再筛一层 `respond_mode=PLAY`（它不覆盖借刀的「使用【杀】」）。"
+        ),
+    ),
+    CardRequestWindow(
+        key="rejudge",
+        kind=REQUEST_WINDOW,
+        label="改判窗口（用一张牌代替 / 替换判定牌）",
+        scope=None,
+        causes=(WindowCause.REJUDGE,),
+        modes=(RespondMode.REJUDGE,),
+        required="任意可改判的牌 / required=None（判据是颜色 / 牌名）",
+        axis=None,
+        providers=False,
+        conversion=False,
+        sites=(
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/engine/steps.py",
+                owner="_rejudge_window",
+                fingerprint=(
+                    "cause=WindowCause.REJUDGE required=<default> mode=RespondMode.REJUDGE"
+                ),
+            ),
+            CardRequestSite(
+                kind="ask",
+                path="src/sgs/engine/steps.py",
+                owner="_rejudge_window",
+                fingerprint=(
+                    "cause=WindowCause.REJUDGE required=None mode=RespondMode.REJUDGE"
+                ),
+            ),
+        ),
+        reason=(
+            "**登记但排除**（票 16 §1 的裁定）：改判是「用一张牌**代替**判定牌」，既不是使用"
+            "也不是打出，判据是颜色 / 牌名而不是「某种基本牌」⇒ 提供者与转化都不参与。"
+            "登记（而不是删掉这一行）是为了让「新加一个改判类窗口」仍然走过登记表："
+            "`WindowCause` 的闭集断言会逼它在这里加一行、当场裁定参与面。"
+        ),
+    ),
+    CardRequestWindow(
+        key="face.respond",
+        kind=REQUEST_PLUMBING,
+        label="「提供一张 B」的选择面（青龙 / `PickProvide` 步骤）",
+        scope=CandidateScope.RESPOND,
+        causes=(),
+        modes=(),
+        required="调用方给的 type_id",
+        axis=None,
+        providers=False,
+        conversion=True,
+        sites=(
+            CardRequestSite(
+                kind="dispatch",
+                path="src/sgs/skills/flow.py",
+                owner="provide_face",
+                fingerprint="scope=CandidateScope.RESPOND required=type_id",
+            ),
+        ),
+        reason=(
+            "**不是窗口**：它是选择面的构造（「哪些牌能当 B」），跑一趟 `CANDIDATES` 只为收"
+            "**单源转化**的虚拟牌。提供者候选（`ActivateSkill`）不带 `card`，调用方按形状"
+            "丢弃，故 providers=no。"
+        ),
+    ),
+    CardRequestWindow(
+        key="pass_through.respond_required",
+        kind=REQUEST_PLUMBING,
+        label="转化候选的内层 `TARGET_COUNT` 链（借刀 / 乱武）",
+        scope=None,
+        causes=(),
+        modes=(),
+        required="ctx.respond_required（窗口事实透传）",
+        axis=None,
+        providers=False,
+        conversion=False,
+        sites=(
+            CardRequestSite(
+                kind="dispatch",
+                path="src/sgs/skills/virtual.py",
+                owner="virtual_card_use",
+                fingerprint="scope=<default> required=ctx.respond_required",
+            ),
+        ),
+        reason=(
+            "**不是窗口**：转化候选在被迫使用窗口（借刀 / 乱武）里要问`TARGET_COUNT`"
+            "（方天一类的额定目标数），把窗口的 `required` 原样透传进修饰器管道。"
+        ),
+    ),
+    CardRequestWindow(
+        key="pass_through.required",
+        kind=REQUEST_PLUMBING,
+        label="`_respond` 的内层 `TARGET_COUNT` 链（借刀 / 乱武）",
+        scope=None,
+        causes=(),
+        modes=(),
+        required="ctx.required（窗口事实透传）",
+        axis=None,
+        providers=False,
+        conversion=False,
+        sites=(_RESPOND_TARGET_COUNT,),
+        reason=(
+            "**不是窗口**：与上一行同形——真牌候选的额定目标数链读窗口事实，不产生候选。"
+        ),
+    ),
+    CardRequestWindow(
+        key="engine.provider_entry",
+        kind=REQUEST_PLUMBING,
+        label="`Engine.start_provider` 的引擎侧转发",
+        scope=None,
+        causes=(),
+        modes=(),
+        required="required（窗口事实透传）",
+        axis=None,
+        providers=False,
+        conversion=False,
+        sites=(
+            CardRequestSite(
+                kind="accept",
+                path="src/sgs/engine/game.py",
+                owner="Engine.start_provider",
+                fingerprint="required=required",
+            ),
+        ),
+        reason=(
+            "**不是窗口**：引擎把「这扇窗口要哪张牌」交给技能层的转发点（窗口的受理面由"
+            "`sgs.skills.lord_request.start_provider` 收口）。"
+        ),
+    ),
+)
+"""**要牌窗口的登记表**（票 16 §2.2）：代码侧唯一真源。
+
+``tests/test_card_request_windows.py`` 扫全树，**未登记的新站点直接判红**，登记表里的
+站点消失同样判红；新加 ``WindowCause`` 成员而没有窗口认领它也红。改这里的任何一行之前，
+先读 ``docs/agents/skill-authoring/shapes.md`` §3.8 的登记步骤。
+"""
+
+CARD_REQUEST_SCOPES: frozenset[CandidateScope] = frozenset(
+    row.scope
+    for row in CARD_REQUEST_WINDOWS
+    if row.kind == REQUEST_WINDOW and row.scope is not None
+)
+"""**要牌语境**的闭集（从登记表推导，不另抄一份）。
+
+今天恰是 ``DODGE`` / ``RESPOND`` / ``PEACH`` / ``NULLIFY`` 四档；``PLAY``（出牌阶段）与
+``CARD``（逐张牌的常规候选）**不是**要牌窗口，故不在里面。
+"""
+
+
+def is_card_request(ctx: ModifierContext) -> bool:
+    """这次 ``CANDIDATES`` 派发是不是在**要一张牌**（窗口给了牌名）。
+
+    判据只要两样：语境落在 :data:`CARD_REQUEST_SCOPES` 里，且窗口把"要哪张牌"写进了
+    :attr:`ModifierContext.respond_required`。四扇窗口的派发都填它（``DODGE`` 恒为
+    ``dodge``），故这里不需要猜窗口形状。
+    """
+    return ctx.scope in CARD_REQUEST_SCOPES and ctx.respond_required is not None
+
+
+def required_card(ctx: ModifierContext) -> str | None:
+    """这次派发"要的是哪张牌"（牌名 id）；不是要牌派发 ⇒ ``None``。
+
+    牌名一律读 ``ctx.respond_required``：窗口"要一张什么牌"只有一处真源，技能不按外层帧
+    的牌反推（濒死帧上没有牌、无懈窗口的帧上是被无懈的锦囊、借刀的帧上是【借刀杀人】本身
+    ——三处反推得到的都不是要的那张）。
+
+    这是**【蛊惑】与之后的转化技共用的那一处判据**（票 16 §2.1）：技能的 ``CANDIDATES``
+    回调不再各写一份"哪些 scope 算要牌"。
+    """
+    return ctx.respond_required if is_card_request(ctx) else None
+
+
+ProviderPayable: TypeAlias = Callable[[GameState, ModifierContext, str], bool]
+"""提供者的**付得起**谓词：``(state, ctx, required) -> 这次付不付得起``。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderWindows:
+    """提供者（产物由技能自己付清的转化类技能）的**窗口声明**：我在哪些窗口参与 + 我怎么付得起。
+
+    :attr:`keys` 是 :data:`CARD_REQUEST_WINDOWS` 的 ``key``；构造期就核（未知 key / 登记为
+    "不让提供者参与"的窗口 ⇒ ``ValueError``：运行期撞到即编程错误，不静默跳过）。
+    :attr:`can_pay` 是**技能自己的**谓词（手里有没有牌、本牌堆有没有能当它的牌名、借刀窗口
+    够不够得着 Bn……）；本类只做各提供者共有的四件事：
+
+    1. 只在**需要者自己**的实例上追加（``ctx.owner == ctx.subject``）——产物是持有者自己
+       付的牌（跨座位注入是主公技的 ``LordSkill`` 面，不是 provider）；
+    2. 收集式窗口的赢家已定 ⇒ 闭嘴（``ctx.respond_declared``）：产物要扣置一张牌，赢家
+       已定时它不会进结算；
+    3. 每提供者只问一次（``ctx.providers_used``；求桃窗口的第二趟收口靠它）；
+    4. 读 :func:`required_card` 并只在本声明覆盖的语境里发言。
+
+    满足之后追加一条裸 ``ActivateSkill``——受理（``start_provider`` / ``advance_provider``）
+    与产物交接（``provider_required`` / ``provider_deliver`` / ``provider_give_up``，住
+    :mod:`sgs.skills.lord_request`）由通用面负责；**怎么消费产物**是窗口自己的事实
+    （见 :class:`CardRequestWindow`）。
+
+    **接入一扇新窗口只需要声明它**：``ProviderWindows(keys=(...), can_pay=...)`` +
+    ``Modifier(ModifierPoint.CANDIDATES, <实例>.offers)``——不必再抄一遍候选追加。
+    """
+
+    keys: tuple[str, ...]
+    can_pay: ProviderPayable
+    scopes: frozenset[CandidateScope] = field(init=False, repr=False)
+    """声明的窗口折成的语境集合（由 :attr:`keys` 推导；构造期算一次）。"""
+
+    def __post_init__(self) -> None:
+        rows = {row.key: row for row in CARD_REQUEST_WINDOWS}
+        unknown = [key for key in self.keys if key not in rows]
+        if unknown:
+            raise ValueError(f"未知的要牌窗口 key：{unknown}（见 CARD_REQUEST_WINDOWS）")
+        refused = [key for key in self.keys if not rows[key].providers]
+        if refused:
+            raise ValueError(f"登记表说这些窗口不让提供者参与：{refused}")
+        object.__setattr__(
+            self,
+            "scopes",
+            frozenset(
+                row.scope
+                for row in (rows[key] for key in self.keys)
+                if row.scope is not None
+            ),
+        )
+
+    def offers(
+        self, state: GameState, ctx: ModifierContext, current: Any
+    ) -> Any:
+        """``CANDIDATES`` 回调：需要牌时本技能付得起 ⇒ 追加一条裸 ``ActivateSkill``。"""
+        if ctx.owner != ctx.subject or ctx.respond_declared:
+            return current
+        if ctx.skill_id in ctx.providers_used:
+            return current
+        required = required_card(ctx)
+        if required is None or ctx.scope not in self.scopes:
+            return current
+        if not self.can_pay(state, ctx, required):
+            return current
+        return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
 
 # 武将技能定义（票 03 的 H 族、票 04 的 A 族；票 12 起全表）在**文件末尾**并入：
 # `heroes` / `active` 反向 import 本模块的 SkillDef / ModifierContext，故这一行必须晚于

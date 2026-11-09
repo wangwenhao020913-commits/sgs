@@ -114,6 +114,13 @@ class WindowCause(str, Enum):
     1 点体力」。它复用既有的 ``RESPOND`` + ``RespondMode.USE`` 面（与借刀同一扇窗），
     只多一个成因值，使记录流与界面文案都读得出"这次询问来自乱武"（借用
     ``BORROWED_SWORD`` 会让提示条与 ``Pass`` 按钮说谎成"交出武器"）。
+
+    **本枚举是"要牌窗口"的成因闭集**（yijiang-2014-round2 票 16）：每个成员都必须被
+    :data:`sgs.skills.catalog.CARD_REQUEST_WINDOWS` 的某一行认领（写清那扇窗口的 scope /
+    mode / 要的牌 / 需要还是可以 / 谁可以参与）。新加一个成员 = 新加一扇窗口，
+    ``tests/test_card_request_windows.py`` 与 ``tests/test_ai_adaptation.py`` 会同时逼出
+    那一次裁定；``REJUDGE`` 是其中"登记但排除"的一行（改判不是使用 / 打出，提供者与
+    转化都不参与）。
     """
 
     NULLIFY = "NULLIFY"

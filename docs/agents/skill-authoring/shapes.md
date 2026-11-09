@@ -133,7 +133,7 @@
 
 | 修饰点 | 归属 |
 |---|---|
-| `CANDIDATES` | 补候选（转化技 / 护驾 / 激将 / 蛊惑）。语境由 `CandidateScope` 区分：`PLAY`（出牌阶段）、`DODGE`（【闪】）、`RESPOND`（打出 / 使用的响应窗口）、`PEACH`（濒死求【桃】）、`NULLIFY`（无懈的收集式窗口）、`CARD`（逐张牌的常规候选）。"这扇窗口要一张什么牌"随 `ModifierContext.respond_required` 下传（六扇窗口都填；`DODGE` 恒为 `dodge`） |
+| `CANDIDATES` | 补候选（转化技 / 护驾 / 激将 / 蛊惑）。语境由 `CandidateScope` 区分：`PLAY`（出牌阶段）、`DODGE`（【闪】）、`RESPOND`（打出 / 使用的响应窗口）、`PEACH`（濒死求【桃】）、`NULLIFY`（无懈的收集式窗口）、`CARD`（逐张牌的常规候选）。"这扇窗口要一张什么牌"随 `ModifierContext.respond_required` 下传（六扇窗口都填；`DODGE` 恒为 `dodge`）。**窗口本身的登记**（scope / cause / mode / 要的牌 / 需要还是可以 / 谁可以参与 + 源码站点）住 §3.8 的 `CARD_REQUEST_WINDOWS`；共享判据 = `src/sgs/skills/catalog.py:required_card`（技能不再各写一份"哪些 scope 算要牌"） |
 | `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降）。**补目标能放宽"自用牌"**（给【无中生有】/【桃】一类 `TargetRule.self_only` 的牌加别人，是"可对别人使用自用牌"类技能的模板）——但补目标前先分清自己豁免的是**距离**还是**目标合法性**：雄乱（`hero.zhangxiu.xiongluan`）只豁免距离与次数，故回调按 `TargetRule.self_only` 收窄（lei-batch 票 04 的缺陷 B：不加这道守卫，雄乱生效时【无中生有】/【桃】就能指定雄乱目标） |
 | `TARGET_COUNT` | 额定目标数（方天画戟类） |
 | `DISTANCE` | 座位距离（马术、义从、坐骑） |
@@ -206,6 +206,76 @@
 | `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`disabled` = **显示但不可选**的那几项（同形态的可调用档）⇒ 清单的 `StepPool.disabled` 让界面置灰、校验器拒收；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
 | `PickProvide` | `provide` | 选一张用于"提供"的牌（转化 / 提供者） |
 | `Arrange` | `arrange` | 排列（观星）；含它的流水线不下发预发动清单。规格可以是 `DeckTopArrange`（牌堆顶 / 底）或 `TwoRowArrange`（**两行交换**：具名行 + 定切分 + 不枚举候选 + 行内不调序；首个载体 = 神诸葛亮【七星】），后者见 §4.1 |
+
+### 3.8 要牌窗口登记表 `CARD_REQUEST_WINDOWS`（票 16 / E2）
+
+用户 2026-11-09 的裁定（逐字）：「任何"需要"、"可以"使用或打出的场合，例如贾诩乱武也算
+（把这个"需要"、"可以"使用或打出给规范下来，转化计才能真正排除bug，不然每新加一个技能
+都可能产生bug）」。落点 = `src/sgs/skills/catalog.py:CARD_REQUEST_WINDOWS`：**每一扇"要
+一张牌"的窗口一行**，代码侧唯一真源。这不是第六种原语——零件（`CandidateScope` /
+`WindowCause` / `RespondMode` / `respond_required`）全都在，本表只把它们登记成闭集。
+
+一行的列（`src/sgs/skills/catalog.py:CardRequestWindow`）：
+
+| 列 | 回答什么 |
+|---|---|
+| `scope` | 候选派发落在哪个 `CandidateScope`（`None` = 这扇窗口不走 `CANDIDATES`，例如改判） |
+| `causes` | 覆盖的 `WindowCause`（空 = 不是"效果内窗口"的成因：【闪】步 / 求桃是独立询问种类） |
+| `modes` | 这一次响应算**使用**还是**打出**（`RespondMode`；空 = 不是使用 / 打出） |
+| `required` | 要哪张牌（带上代码侧真源的名字，如 `DODGE_RESPONSE_CARD` / `ctx.required`） |
+| `axis` | **需要**（`RequestAxis.REQUIRED`：不响应就按规则结算）还是**可以**（`OPTIONAL`：放弃不是"没响应"）。改判没有这一轴 |
+| `providers` / `conversion` | **谁可以参与**：提供者（产物由技能自己付清）/ 转化技（来源牌直接当这张牌）。`False` 的行必须写清理由 |
+| `sites` | 这扇窗口在源码里的落点（`CardRequestSite`：标记类别 + 文件 + 所属 + 关键字实参指纹 + 次数） |
+| `reason` | 一行理由（`False` 的那几格这一句是必须的裁定，不是装饰） |
+
+当前 11 扇窗口 + 4 个非窗口站点：`dodge` / `arrow_barrage`（万箭的候选派发**落在**
+`DODGE` 语境——`actions._respond_scope` 按请求牌名分派，票面 §1 表记成 `RESPOND` 是笔误，
+按代码事实改记） / `peach` / `barbarian_invasion` / `duel` / `borrowed_sword` / `luanwu` /
+`nullify` / `lord_request.dodge` / `lord_request.slash` / `rejudge`（**登记但排除**）+
+`face.respond` / `pass_through.respond_required` / `pass_through.required` /
+`engine.provider_entry`（`REQUEST_PLUMBING`：面构造 / 窗口事实透传 / 引擎转发，不是窗口）。
+
+**改判为什么登记为"不参与"**：它是"用一张牌**代替**判定牌"，既不是使用也不是打出，判据是
+颜色 / 牌名而不是"某种基本牌"⇒ 提供者与转化都不参与。登记（而不是删掉这一行）是为了让
+"新加一个改判类窗口"仍然走过登记表：`WindowCause` 的闭集断言会逼它在这里加一行、当场裁定
+参与面（票 17 的 §2 表已按这一行排除【渐营】②）。
+
+**势力求助（护驾 / 激将）为什么两列都是 `False`**：`_run_lord_request` 的子窗口只收
+`PlayCard`，没有 `UseCard` / `ActivateSkill` 分支 ⇒ 转化与提供者的候选即便由底层
+`DODGE` / `RESPOND` 派发顺带产生，也没有人消费。要把它们接进来，先给求助窗口补受理面
+（另开票）。
+
+**提供者怎么接入（票 17 起）**：只声明窗口 + 付得起谓词，候选追加走共用实现：
+
+```python
+MY_PROVIDER_WINDOWS = ProviderWindows(
+    keys=("peach", "barbarian_invasion", "duel", "borrowed_sword", "luanwu"),
+    can_pay=_my_can_pay,  # (state, ctx, required) -> bool
+)
+# 声明面（ActiveSkill.extra_modifiers）：
+extra_modifiers=(Modifier(ModifierPoint.CANDIDATES, MY_PROVIDER_WINDOWS.offers),)
+```
+
+`src/sgs/skills/catalog.py:ProviderWindows` 做提供者共有的四件事（只在本人的实例上追加、
+收集式窗口赢家已定就闭嘴、每提供者只问一次、按声明收窄语境），并把共享判据
+`src/sgs/skills/catalog.py:required_card` 的答案交给 `can_pay`。受理 / 产物交接的公共件在
+`src/sgs/skills/lord_request.py:provider_deliver` / `provider_give_up`（`satisfied` +
+`PROVIDER_CARD_KEY`），技能不再手抄结果键。
+
+**新加一扇窗口 / 新加一个要牌站点时怎么登记**（`tests/test_card_request_windows.py` 机械核，
+漏登记 = 红）：
+
+1. **先裁六格**：`scope`（落在哪个候选语境）/ 典型 `causes` / 这份响应算使用还是打出 /
+   要哪张牌 / `axis`（需要还是可以）/ 谁参与（`providers` / `conversion`，`False` 写理由）；
+2. 在 `CARD_REQUEST_WINDOWS` 里加一行；它必须认领至少一个 `CardRequestSite`；
+3. 跑 `.venv/bin/pytest -q tests/test_card_request_windows.py`：红行会打印"未登记的站点"
+   （`kind :: path :: 所属 :: 指纹`）——把那一行**逐字**抄进 `sites`（`fingerprint` 由扫描器
+   从语法树现算，不要手写近似值）；
+4. 若新窗口带来新的 `WindowCause` 成员：它必须被某一行认领（闭集断言），且
+   `tests/test_ai_adaptation.py` 的成因冻结断言会同时变红——那是一次**有意的裁定**
+   （AI 打分口径 + 金录像），不是顺手加成员；
+5. 提供者要参与 ⇒ 在它自己的 `ProviderWindows(keys=(...))` 里加 key（未登记 / 登记为
+   "不参与"的 key 在构造期就 `ValueError`）。
 
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 
