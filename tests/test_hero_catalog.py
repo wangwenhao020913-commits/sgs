@@ -2036,12 +2036,20 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
         "条件写的是『死者 ≠ 我自己』（MATCH_OWNER_KEY 对 target），把持有者换成别人后"
         "仍然成立；这正是豁免表存在的形态（与【奋威】/【定乱】同一类『不关于我』）"
     ),
+    "hero.chenqun.faen": (
+        "yijiang-2014-round2 票 10（P1）【法恩】：触发条件是**方向**——这一次 `STATE_CHAINED`"
+        "是「未横置 → 横置」而不是**重置**（`change.chained is True`；牌面写「横置**后**」，"
+        "重置不是横置，用户 2026-11-09 实机报障）。条件关于『这次变化』、不关于持有者："
+        "任何角色被横置都要问陈群，把持有者换成别人后条件仍然成立，没有『我』可自校"
+        "（与【奋威】/【定乱】/【行殇】同一类「不关于我」）"
+    ),
 }
 """**豁免表**：技能 id → "为什么它的条件不需要持有者判据"。
 
 姿态照 `tests/test_fuzz.py:OVER_CAP_BY_DESIGN`：例外必须显式列名 + 写明理由，覆盖断言会核
 "正表 ∪ 这张表 == 全部带条件的钩子"，故新增一条同型钩子时逼你二选一（写探针 / 登记豁免）。
 M6 票 07 起不再为空：【奋威】的条件是"这张牌"的属性，不是"我"的属性（见上表理由）。
+yijiang-2014-round2 票 10 加【法恩】：条件是"往哪个方向变"，同样不是"我"的属性。
 """
 
 
@@ -2065,6 +2073,7 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
         "hero.jie_ganning.fenwei",
         "hero.feng_yujin.dingluan_mark",
         "hero.caopi_mobile.xingshang",
+        "hero.chenqun.faen",
     }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
         assert reason.strip(), f"{skill_id} 的豁免理由不能为空"

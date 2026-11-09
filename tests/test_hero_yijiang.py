@@ -1951,7 +1951,96 @@ def test_chenqun_faen_draws_for_the_named_target_not_the_owner():
 
 
 # ---------------------------------------------------------------------------
-# ④ 文案 / 形状：本行有自己的 requirement + descriptions.json 条目
+# ④ 方向判据（yijiang-2014-round2 票 10 / P1）：**横置**问、**重置**不问
+#
+# 用户 2026-11-09 实机报障逐字：「陈群【法恩】解除横置（例如属性杀重置横置状态）时不应该
+# 发动，其他没有问题」。牌面写的是「横置**后**」⇒ 方向是**技能侧**的判据：
+#
+#   未横置 → 横置（`chained: False → True`）  ⇒ 问；
+#   已横置 → 重置（`True → False`，含属性伤害后的重置） ⇒ **不问**。
+#
+# 派发口径（Q-W2 = 读法一，"值真的变了 = 一次事件"）**不动**：重置照旧落一条
+# `chained_change` + 一条 `STATE_CHAINED` 时机记录，只是【法恩】的 `Hook.condition`
+# 按载荷的方向把它挡在「是否发动」之前。翻面维持现状（两个方向都算，用户 2026-11-09 签）。
+# ---------------------------------------------------------------------------
+
+
+def test_chenqun_faen_does_not_fire_when_a_chain_is_reset():
+    """**本票的判据点**：座位 1 已横置，属性【杀】命中它 ⇒ 伤害结算末尾的重置**不问**。
+
+    造局走用户报障的那条真实路径（属性伤害 ⇒ 写入口把 ``chained`` 写回 ``False``），
+    不旁路写入口、也不 mock。断言分三层：① 重置本身照旧派发（框架口径不变）；② 记录流里
+    没有【法恩】的「是否发动」；③ 那一问若发生过就一定会摸牌（脚本对每问都答"发动"），
+    故"手牌为空"同时证明"没问"与"没摸"。
+    """
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    fire_slash = cards_of_type(pack, "fire_slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero=CHENQUN, hp=3, hp_max=3, hand=(fire_slash,)),
+            SeatSpec(chained=True),
+        ],
+        deck=deck_excluding(pack, fire_slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=1)
+    player = _FaenScript(True)
+    players = _faen_players(player, seats=2)
+
+    _drive(engine, _is_play_idle)
+    slash = next(
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.card_id == fire_slash
+        and action.targets == (1,)
+    )
+    engine.submit(slash)
+    # 停止点 = **下一个「回合开始前」之后**（本局从出牌阶段起跑 ⇒ 第 1 条早已落过）：
+    # 那时属性伤害的结算（含重置的延后派发）已经全部跑完，而座位 1 还没进摸牌阶段。
+    run_queries(engine, players, lambda e: _turn_before_starts(e) >= 2)
+
+    assert engine.state.player(1).chained is False, "属性伤害命中横置者 ⇒ 结算后立即重置"
+    assert [
+        record.chained for record in _state_deltas(engine, "chained_change")
+    ] == [False], "派发口径不变（读法一）：重置照旧落一条 chained_change"
+    assert ran_timing(engine, Timing.STATE_CHAINED), (
+        "重置照旧是一次 STATE_CHAINED 事件（本票只动技能侧，不动派发）"
+    )
+    assert player.asked == [], "重置不是「横置后」⇒ 连「是否发动」都不问"
+    assert _faen_asks(engine) == [], "记录流里也没有这一问"
+    assert engine.state.player(1).hand == [], "没问 ⇒ 一张都不摸"
+
+
+def test_chenqun_faen_still_fires_when_a_chain_is_set():
+    """方向没被误伤：同一 ``_step`` 里**先横置、再重置** ⇒ 只有横置那一次问。
+
+    这一条钉住"方向从**载荷**读、不读派发那一刻的当前状态"：两次写入口都在任何 ``_step``
+    之前完成（派发是**延后**的），派发第一条时座位上的 ``chained`` 已经是 ``False`` ⇒ 读当下
+    状态会把横置那次也挡掉（或把重置那次放过去）。正确读法下：``True`` 那一条问一次、摸一张，
+    ``False`` 那一条不问；两条 delta 都照常落（读法一）。
+    """
+    engine = _faen_engine()
+    player = _FaenScript(True)
+    players = _faen_players(player)
+
+    assert engine.set_chained(None, 1, True) is True, "未横置 → 横置：一次事件"
+    assert engine.set_chained(None, 1, False) is True, "已横置 → 重置：又一次事件（同一 _step 内）"
+    _settle_after_the_dispatch(engine, players)
+
+    assert len(player.asked) == 1, "只有「未横置 → 横置」问一次；紧接着的重置不问"
+    assert engine.state.player(1).chained is False, "两次写入都生效（横置后又被重置）"
+    assert len(engine.state.player(1).hand) == 1, "答发动 ⇒ 横置那一次照常摸一张"
+    assert [
+        record.chained for record in _state_deltas(engine, "chained_change")
+    ] == [True, False], "派发口径不变（读法一）：两条变化各一条 delta"
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 文案 / 形状：本行有自己的 requirement + descriptions.json 条目
 # ---------------------------------------------------------------------------
 
 
@@ -1973,9 +2062,14 @@ def test_chenqun_faen_wording_is_its_own_row():
         Timing.STATE_FLIPPED,
         Timing.STATE_CHAINED,
     ], "翻面 / 横置是两个独立状态（§13.1 / §8.10）⇒ 两条独立钩子"
-    assert all(hook.condition is None for hook in ours.hooks), (
-        "派发点上「一名角色翻面 / 横置了」恒成立 ⇒ 不设条件；"
-        "「座位是否存活」这一层放在效果里（写进 condition 会撞钩子条件的持有者自校审计）"
+    flipped_hook, chained_hook = ours.hooks
+    assert flipped_hook.condition is None, (
+        "翻面维持现状：两个方向都算一次事件（Q-W2 = 读法一）⇒ 不设条件；"
+        "「座位是否存活」这一层放在效果里"
+    )
+    assert chained_hook.condition is not None, (
+        "横置只在**横置**方向问（票 10）：重置不是「横置后」⇒ 方向判据挂在 condition 上"
+        "（连「是否发动」都不问）"
     )
     flow = flow_for(FAEN)
     assert flow is not None and flow.name == "chenqun_faen"

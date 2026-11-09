@@ -542,13 +542,16 @@ STATE_TIMINGS = (Timing.STATE_FLIPPED, Timing.STATE_CHAINED)
 """本票解封的两个时机（``DISPATCH_WHITELIST`` 的增量；同层其余三个仍在枚举位）。"""
 
 
-def _install_state_skill(monkeypatch, calls, *, locked: bool = True, draws: int = 0):
+def _install_state_skill(
+    monkeypatch, calls, *, locked: bool = True, draws: int = 0, condition=None
+):
     """把一条**同时挂两个状态位时机**的合成技能注入 ``CATALOG``。
 
     ``calls`` 收集 ``(时机, 载荷)``——载荷 = :func:`~sgs.skills.state_change` 读到的写入口
     delta（``flipped_change`` / ``chained_change``）。``locked=True`` ⇒ 不问发动、回调直接跑；
     ``locked=False`` ⇒ 先问"是否发动"（【法恩】的形状：询问让派发挂起、由下一条 ``_step``
-    续跑）；``draws > 0`` ⇒ 回调里"令其摸一张牌"（摸牌会内联派发 ``MOVE_AFTER``）。
+    续跑）；``draws > 0`` ⇒ 回调里"令其摸一张牌"（摸牌会内联派发 ``MOVE_AFTER``）；
+    ``condition`` 原样挂到两条钩子上（票 10：模拟【法恩】的**方向**判据，缺省 = 不设条件）。
     """
     from types import MappingProxyType
 
@@ -571,9 +574,9 @@ def _install_state_skill(monkeypatch, calls, *, locked: bool = True, draws: int 
     def _hook(timing, name):
         handler = _handler(timing)
         if locked:
-            return Hook(timing, handler=handler)
+            return Hook(timing, handler=handler, condition=condition)
         flow = SkillFlow(name=name, steps=(), effect=zero_step_effect(handler))
-        return Hook(timing, flow=flow)
+        return Hook(timing, flow=flow, condition=condition)
 
     definition = SkillDef(
         skill_id=STATE_SKILL,
@@ -865,6 +868,63 @@ def test_a_state_hook_can_ask_and_continue_across_the_lazy_dispatch(monkeypatch)
     assert calls == [
         (Timing.STATE_FLIPPED, FlippedChangeDelta(seat=0, flipped=True))
     ]
+
+
+def _chained_only(host, frame) -> bool:
+    """合成【法恩】形状的**方向条件**：只有 ``chained=True`` 那一条成立（不关于持有者）。
+
+    与 `src/sgs/skills/state_after.py:_faen_chain_is_set` 同形但**故意不复用**：本文件钉的是
+    框架（条件在派发环里怎么用），真实技能的判据由 `tests/test_hero_yijiang.py` 从外部缝钉。
+    """
+    del host
+    change = state_change(frame)
+    return not isinstance(change, ChainedChangeDelta) or change.chained
+
+
+def test_a_direction_condition_silences_the_ask_but_not_the_l17_dispatch(monkeypatch):
+    """票 10（P1）：方向判据是**技能条件**，L17 的派发口径（Q-W2 = 读法一）一字不改。
+
+    造局：同一 ``_step`` 之前连着两次 ``set_chained``（先横置、再重置）⇒ 两条事件都排队。
+    期望：① 记录流里两条 ``STATE_CHAINED`` 时机 + 两条 ``chained_change`` 照旧（重置**不会**
+    因为方向被过滤而在框架侧消失）；② 只有横置那一条进「是否发动」——重置那一条被钩子条件
+    挡在询问之前。这两条合起来才说明"方向过滤落在技能侧、没有搬进派发器"。
+    """
+    calls: list = []
+    _install_state_skill(monkeypatch, calls, locked=False, condition=_chained_only)
+
+    class _CountAsks(RecordingPlayer):
+        """技能询问一律发动，并数清问了几次。"""
+
+        def respond(self, query):
+            if query.kind == QueryKind.SKILL_ACTIVATION:
+                for action in query.legal_actions:
+                    if getattr(action, "kind", None) == "ActivateSkill":
+                        self.seen.append(query)
+                        return action
+            return super().respond(query)
+
+    engine = _state_engine()
+    engine.grant_skill(0, STATE_SKILL)
+    players = [_CountAsks(), RecordingPlayer()]
+
+    assert engine.set_chained(None, 0, True) is True
+    assert engine.set_chained(None, 0, False) is True, "同一 _step 里再重置一次"
+    run_queries(engine, players, lambda e: len(_state_records(e)) >= 2, limit=50)
+
+    assert [record.timing for record in _state_records(engine)] == [
+        Timing.STATE_CHAINED,
+        Timing.STATE_CHAINED,
+    ], "两条事件都派发（重置照旧是一条 STATE_CHAINED）"
+    assert [
+        record.chained for record in _delta_records(engine, "chained_change")
+    ] == [True, False], "两条 delta 照旧落（读法一）"
+    asked = [
+        query for query in players[0].seen if query.kind == QueryKind.SKILL_ACTIVATION
+    ]
+    assert len(asked) == 1, "只有「未横置 → 横置」那一条进询问"
+    assert calls == [
+        (Timing.STATE_CHAINED, ChainedChangeDelta(seat=0, chained=True))
+    ], "条件不成立的那一条连回调都不跑（更不会问）"
 
 
 class _SlashOnce:
