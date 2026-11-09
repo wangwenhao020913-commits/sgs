@@ -1676,7 +1676,7 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
 
     帧里的 ``target`` / ``targets`` / ``source`` / 移动载荷都指向**别人**（座位 0 / 座位 1），
     只有 ``MATCH_OWNER_KEY`` 由检查本身按 ME / OTHER 改写。逐条的"我"分别是：
-    受伤者（【奸雄】【遗计】【刚烈】）、受伤者 + 拿来源牌的持有者（【反馈】）、
+    受伤者（【奸雄】【遗计】【刚烈】【矢北】）、受伤者 + 拿来源牌的持有者（【反馈】）、
     本次【杀】的目标（【流离】）、刚失去最后一张手牌 / 装备的失主（【连营】【枭姬】）。
     """
     move_lianying = MoveEvent(
@@ -2022,6 +2022,12 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # 我有手牌（0 张不给入口，Q3 = A）。正面局面见 :func:`_bingyi_probe_state`；
         # 持有者换成座位 2 后 source 与持有者对不上 ⇒ 条件翻假。
         "hero.guyong.bingyi": (_HookFrame(source=ME),),
+        # yijiang-2014-round2 票 12（P3）【矢北】OL / 界两版的受伤那一支：条件是**归属**——
+        # 受伤的是我（`_hurt_owner`，与【耀武】/【刚烈】/【归心】等同一条判据）。两版共用
+        # 同一个条件对象；界版的 `GAME_START`（发 3 点护甲）没有 condition，故各只有一帧。
+        # 用户 2026-11-09 实机报障："当你受到伤害后"漏了自校 ⇒ 别人挨打沮授也回血。
+        "hero.jushou.shibei": (_HookFrame(target=ME),),
+        "hero.jie_jushou_mobile.shibei": (_HookFrame(target=ME),),
     }
 
 

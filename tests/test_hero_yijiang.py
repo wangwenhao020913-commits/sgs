@@ -644,6 +644,46 @@ def test_shibei_is_not_suppressed_by_a_non_locked_only_effect():
 
 
 # ---------------------------------------------------------------------------
+# §2 矢北 —— ⑥ 归属：受伤的必须是持有者（yijiang-2014-round2 票 12 / P3）
+#
+# 用户 2026-11-09 实机报障逐字：「界沮授和标沮授的【矢北】都存在一个问题："当你受到伤害后"
+# 没有筛选自身，其他人受到伤害也能触发矢北，然后自身会回血」。
+#
+# 归属判据落在钩子的 ``condition``（``_hurt_owner``：``frame.data["target"]`` 是不是
+# ``MATCH_OWNER_KEY``），**不是**效果体里再挡一次——效果体里挡只能做到"问了之后不回血"，
+# 做不到"别人的伤害与我无关"。同族【耀武】/【刚烈】一直是这个姿态。
+# ---------------------------------------------------------------------------
+
+
+def test_shibei_does_not_fire_when_someone_else_is_hurt():
+    """别人挨打不触发【矢北】（票 12 §5）：不回复、不压 RECOVER 帧、不占"本回合"名额。
+
+    持有者取 2/3 体力：满体力那条分支（满血不压帧）会把"该红"的用例抹成绿，故不能取 3。
+    """
+    state, engine = _hurt_boot(hp=2)
+    _hit(engine, source=0, target=1)
+
+    assert state.player(0).hp == 2, "受伤的是座位 1，沮授一点体力都不回"
+    assert state.player(1).hp == 3, "只掉座位 1 自己的体力"
+    assert state.player(0).damage_taken_this_turn == 0, "受伤者不是持有者 ⇒ 不占名额"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.RECOVER_VALUE
+    ], "不压 RECOVER 帧（别人的改回复量技能也看不到这一次）"
+
+
+def test_shibei_damage_to_others_does_not_consume_the_first_hit_slot():
+    """别人先挨一刀不消耗沮授「本回合第 1 次」的名额：他随后真挨打仍走回复分支。"""
+    state, engine = _hurt_boot(hp=2)  # 2/3 ⇒ 两次结算的差会落到体力上
+    _hit(engine, source=0, target=1)  # 别人先挨一刀（座位 1：4 → 3）
+    _hit(engine, source=1, target=0)  # 沮授本回合第一次真正挨打
+
+    assert state.player(0).hp == 2, "2 - 1（伤害）+ 1（回复）= 2 ⇒ 仍走「第 1 次」分支"
+    assert state.player(0).damage_taken_this_turn == 1, "本回合只挨过这一次"
+
+
+# ---------------------------------------------------------------------------
 # 结构面：两条技能都在 CATALOG 里、且锁定位与形状对得上
 # ---------------------------------------------------------------------------
 

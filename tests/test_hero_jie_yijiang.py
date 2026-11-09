@@ -1200,9 +1200,9 @@ def test_jie_jianying_records_the_product_as_the_previous_card():
 
 
 def test_jie_shibei_is_locked_and_reuses_the_ol_callbacks():
-    """锁定技（不问）+ 两条钩子；受伤那一支与 OL 版**共用同一个回调**。"""
+    """锁定技（不问）+ 两条钩子；受伤那一支的**回调与归属判据**都与 OL 版共用同一对象。"""
     from sgs.skills import CATALOG, flow_for
-    from sgs.skills.damage_after import _shibei
+    from sgs.skills.damage_after import _shibei, _shibei_condition
 
     definition = CATALOG[JIE_SHIBEI]
     ol = CATALOG[OL_SHIBEI]
@@ -1216,6 +1216,11 @@ def test_jie_shibei_is_locked_and_reuses_the_ol_callbacks():
     assert definition.hooks[1].handler is _shibei
     assert definition.hooks[1].handler is ol.hooks[0].handler, "界版复用 OL 的回调"
     assert definition.hooks[1].per_point is False, "逐事件，不是逐点"
+    # 票 12（P3）：受伤那一支的自校（受伤者是不是持有者）也**是同一个纯函数**——
+    # 与 OL 版同源，也与【耀武】/【刚烈】等同族钩子用的那一条（`_hurt_owner`）同源。
+    assert definition.hooks[1].condition is _shibei_condition
+    assert definition.hooks[1].condition is ol.hooks[0].condition, "界版复用 OL 的归属判据"
+    assert definition.hooks[0].condition is None, "开局发护甲那一条不关于「谁受伤」，没有条件"
 
 
 def test_jie_shibei_grants_three_armor_at_game_start():
@@ -1377,6 +1382,29 @@ def test_jie_shibei_is_silent_when_this_damage_kills_the_owner():
     _jie_hit(engine)
     assert not state.player(0).alive
     assert state.player(0).hp == 0
+
+
+def test_jie_shibei_does_not_fire_when_someone_else_is_hurt():
+    """界【矢北】同样只认「自己受伤」（yijiang-2014-round2 票 12 / P3 §5）。
+
+    用户 2026-11-09 实机报障的界版逐字：「界沮授和标沮授的【矢北】都存在一个问题："当你受到
+    伤害后"没有筛选自身，其他人受到伤害也能触发矢北，然后自身会回血」。归属判据与 OL 版
+    共用同一个纯函数（``_hurt_owner``，见上面的结构面对照）；这里从外部缝看行为：别人挨打，
+    界沮授不回血、不进记录流。
+
+    持有者取 2/3 体力：满体力那条分支（满血不压帧）会把"该红"的用例抹成绿，故不能取 3。
+    """
+    state, engine = _jie_hurt_state(hp=2)
+    _jie_hit(engine, source=0, target=1)
+
+    assert state.player(0).hp == 2, "受伤的是座位 1，界沮授一点体力都不回"
+    assert state.player(1).hp == 3, "只掉座位 1 自己的体力"
+    assert state.player(0).damage_taken_this_turn == 0, "受伤者不是持有者 ⇒ 不占名额"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.RECOVER_VALUE
+    ], "不压 RECOVER 帧（别人的改回复量技能也看不到这一次）"
 
 
 def test_jie_jianying_declining_draws_nothing():
