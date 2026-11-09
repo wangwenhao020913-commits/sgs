@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from sgs.data import RuleConfig, Suit, card_category, color_of_suit, load_content_pack
 from sgs.engine import Engine
-from sgs.state import ActivateSkill, Phase, QueryKind, Zone
+from sgs.state import ActivateSkill, EndPhase, FrameKind, Pass, Phase, QueryKind, UseCard, Zone
 from sgs.timing import Timing
 
 from support import RecordingPlayer, SeatSpec, build_state, deck_excluding, ran_timing
@@ -625,3 +625,754 @@ def test_shenxing_cancel_leaves_the_hand_and_the_counter_untouched():
     assert _manifest(engine.pending, SHENXING), "取消 ≠ 用掉次数：清单仍在"
     assert _hand_size(engine.state, 0) == before
     assert not [card for card in engine.state.discard if card in mine]
+
+
+# ===========================================================================
+# 界一将成名-2014·移动版·界沮授移动版【渐营】【矢北】（yijiang-2014-round2 票 01 / W3）
+#
+# 牌面（用户 `技能.txt` 逐字；OL / 移动版官网同值，票面 §0）：
+#
+#     渐营
+#       ①当你于你的出牌阶段内使用牌时，若此牌与你本阶段使用的上一张牌点数或花色相同，
+#         你可以摸一张牌；
+#       ②出牌阶段限一次，你可以将一张牌当任意一张基本牌使用
+#         （若你本阶段使用的上一张牌有花色，此牌花色视为与上一张牌花色相同）。
+#     矢北：锁定技，游戏开始时，你获得3点护甲。当你受到伤害后，若此次伤害是你本回合受到的
+#           第一次伤害，则你回复1点体力，否则你失去1点体力。
+#
+# 用户 2026-11-09 签的口径：Q-J1 = A（OL 口径 ⇒ 开局 3 点护甲）、Q-J4 = A（花色改写牌面、
+# 颜色随花色、点数继承来源牌、上一张无花色 ⇒ §16.3）、Q-J5 = A（本牌堆真有的基本牌名，列全 +
+# 置灰）、Q-J6 = A（产物被使用照常触发 ①）；数据面 = `hp_max = 3` / **登场 `hp = 2`**。
+# ===========================================================================
+
+JUSHUO = "jie_jushou_mobile"
+JIE_JIANYING = "hero.jie_jushou_mobile.jianying"
+JIE_SHIBEI = "hero.jie_jushou_mobile.shibei"
+OL_JIANYING = "hero.jushou.jianying"
+OL_SHIBEI = "hero.jushou.shibei"
+
+CLUB_CROSSBOW = 82
+"""♣A【诸葛连弩】（用户 Q-J4 实例里的"先出一张梅花 A 的【诸葛连弩】"）。"""
+
+HEART_DODGE_TWO = 2
+"""♥2【闪】（同一实例里的"一张红桃 2 的牌"）。"""
+
+HEART_BOW = 8
+"""♥5【麒麟弓】：① 的半段用它对"同花色 / 不同花色"做对照。"""
+
+
+def _deck_card(card_id: int):
+    return PACK.deck.cards[card_id]
+
+
+def _jie_manifest(query, skill_id: str = JIE_JIANYING):
+    return tuple((getattr(query, "preactivations", None) or {}).get(skill_id, ()))
+
+
+def _jie_step_options(step) -> tuple[str, ...]:
+    seen: list[str] = []
+    for row in step.pool:
+        for option in row.options:
+            if option not in seen:
+                seen.append(option)
+    return tuple(seen)
+
+
+def _jie_step_disabled(step) -> tuple[str, ...]:
+    seen: list[str] = []
+    for row in step.pool:
+        for option in row.disabled:
+            if option not in seen:
+                seen.append(option)
+    return tuple(seen)
+
+
+def _jie_asked(engine, skill_id: str) -> list:
+    """记录流里该技能的「是否发动」询问（按出现顺序）。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and str(record.query.skill_id) == skill_id
+    ]
+
+
+def _jie_answer(query, *, activate=()):
+    """最小合法应答：出牌阶段结束；指定技能答「发动」；其余一律能放弃就放弃。"""
+    if query.kind == QueryKind.PLAY_PHASE:
+        return next(action for action in query.legal_actions if isinstance(action, EndPhase))
+    if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) in activate:
+        for action in query.legal_actions:
+            if isinstance(action, ActivateSkill):
+                return action
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    return query.legal_actions[0]
+
+
+def _jie_drive(engine, stop, *, activate=(), limit=1500):
+    for _ in range(limit):
+        if stop(engine):
+            return engine
+        if engine.finished:
+            return engine
+        if engine.pending is None:
+            engine._step()  # noqa: SLF001 - 与既有推进器同一手法（无询问就推一步）
+            continue
+        engine.submit(_jie_answer(engine.pending, activate=activate))
+    raise AssertionError("推进上限内没有到达停止条件")
+
+
+def _jie_is_idle(engine) -> bool:
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.PLAY_PHASE
+        and engine.pending.actor == 0
+    )
+
+
+def _jie_state(
+    *,
+    hand=(),
+    equip=(),
+    hp: int = 2,
+    hp_max: int = 3,
+    seats: int = 2,
+    hero: str = JUSHUO,
+    deck=None,
+):
+    used = (*hand, *equip)
+    specs = [SeatSpec(hero=hero, hp=hp, hp_max=hp_max, hand=tuple(hand), equip=tuple(equip))]
+    specs += [SeatSpec() for _ in range(seats - 1)]
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck if deck is not None else deck_excluding(PACK, *used),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=seats, first_seat=0),
+    )
+
+
+def _jie_ready(*, hand=(), equip=(), hp: int = 2, hp_max: int = 3, seats: int = 2, deck=None):
+    """构造局面并推进到座位 0 的出牌阶段询问（摸牌阶段的两张已进手牌）。"""
+    state = _jie_state(hand=hand, equip=equip, hp=hp, hp_max=hp_max, seats=seats, deck=deck)
+    engine = _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+    return state, engine
+
+
+def _jie_use(engine, card_id: int, *, targets=None):
+    query = engine.pending
+    action = next(
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.card_id == card_id
+        and (targets is None or action.targets == tuple(targets))
+    )
+    engine.submit(action)
+
+
+def _jie_use_and_settle(engine, card_id: int, *, activate=(), targets=None):
+    _jie_use(engine, card_id, targets=targets)
+    return _jie_drive(engine, _jie_is_idle, activate=activate)
+
+
+def _jie_activate(engine, *, card: int, name: str, activate=(JIE_JIANYING,)):
+    """在出牌阶段询问上提交【渐营】② 的复合动作（选牌 → 牌名），推进回出牌阶段。"""
+    query = engine.pending
+    engine.submit(
+        ActivateSkill(
+            skill_id=JIE_JIANYING,
+            picks=(card,),
+            choices=(name,),
+            answers_seq=query.seq,
+        )
+    )
+    return _jie_drive(engine, _jie_is_idle, activate=activate)
+
+
+def _jie_used_products(engine) -> list:
+    """记录流里"使用结算结束"那一时机带的牌面（= 这次使用的那张牌，含虚拟产物）。"""
+    return [
+        record.cards[0]
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and record.cards
+    ]
+
+
+def _jie_moves(engine, card_id: int) -> list[tuple[str, str]]:
+    return [
+        (record.from_zone.zone.value, record.to_zone.zone.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] == [card_id]
+    ]
+
+
+def _jie_deltas(engine, delta_type: str) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == delta_type
+    ]
+
+
+# ---------------------------------------------------------------------------
+# §0.2 数据面：那一行 + 两条技能都在 CATALOG 里
+# ---------------------------------------------------------------------------
+
+
+def test_jie_jushou_mobile_enters_the_pool_with_the_signed_data_row():
+    """数据行：界沮授移动版 / 真名沮授 / 群男 / 3 上限 + **登场 2 体力** / 两条 NORMAL 技能。"""
+    from sgs.data import load_heroes
+
+    table = load_heroes("jie_yijiang_2014_mobile")
+    hero = next(hero for hero in table.heroes if hero.id == JUSHUO)
+
+    assert hero.name == "界沮授移动版"
+    assert hero.true_name == "沮授"
+    assert (hero.kingdom.value, hero.gender.value) == ("qun", "male")
+    assert (hero.hp_max, hero.hp) == (3, 2), "用户 2026-11-09 裁：2/3 体力登场"
+    assert hero.version == "jie-yijiang-2014-mobile"
+    assert hero.enabled is True
+    assert [(skill.id, skill.name, skill.skill_type.value) for skill in hero.skills] == [
+        ("jianying", "渐营", "NORMAL"),
+        ("shibei", "矢北", "NORMAL"),
+    ], "skill_type 闭集里没有 LOCKED ⇒ 【矢北】的锁定位住代码侧（SkillDef.locked）"
+
+
+def test_jianying_is_one_skill_carrying_both_the_hook_and_the_manifest():
+    """①（钩子）与 ②（A 族流水线）住进**同一条** ``SkillDef``（Q-J3 = A / W6 的 F2）。"""
+    from sgs.skills import CATALOG, flow_for
+
+    definition = CATALOG[JIE_JIANYING]
+    ol = CATALOG[OL_JIANYING]
+
+    assert [hook.timing for hook in definition.hooks] == [Timing.USE_ON_USE]
+    assert flow_for(JIE_JIANYING).steps != (), "② 有非空流水线"
+    assert definition.preactivated is True, "② 是预发动清单（出牌阶段限一次）"
+    # ① 复用 OL 沮授那一份（**同一对象**）：条件与零步流水线各一个。
+    assert definition.hooks[0].condition is ol.hooks[0].condition
+    assert definition.hooks[0].flow is ol.hooks[0].flow
+    # A4：界版文案必须显式区分（多 ② 那一句），且不写进共享的 `_REQUIREMENTS`。
+    assert definition.requirement != ol.requirement
+    assert "出牌阶段限一次" in definition.requirement
+    assert definition.step_requirements == {
+        "card": "选择一张牌（手牌 / 装备区）",
+        "name": "选择当作哪一张基本牌使用（此刻没有合法目标的名字置灰、不可选）",
+    }
+
+
+# ---------------------------------------------------------------------------
+# §1 渐营 ① —— 与 OL 版**逐字同句**的触发段
+# ---------------------------------------------------------------------------
+
+
+def test_jie_jianying_is_not_offered_without_a_matching_previous_card():
+    """本阶段第一张没有"上一张"；与上一张花色点数都不同 ⇒ 候选期就不问。"""
+    state, engine = _jie_ready(hand=(HEART_BOW, CLUB_CROSSBOW))
+
+    _jie_use_and_settle(engine, HEART_BOW)
+    assert _jie_asked(engine, JIE_JIANYING) == [], "第一张牌：连问都不问"
+
+    _jie_use_and_settle(engine, CLUB_CROSSBOW)
+    assert _jie_asked(engine, JIE_JIANYING) == [], "♥5 之后用 ♣A：花色点数都不同"
+
+
+def test_jie_jianying_draws_on_the_same_suit_and_declining_draws_nothing():
+    """同花色 ⇒ 问一次；答发动摸牌堆顶那一张。"""
+    state, engine = _jie_ready(hand=(HEART_BOW, 9))
+    assert _deck_card(9).suit is Suit.HEART, "9 = ♥5【赤兔】：与麒麟弓同花色"
+
+    _jie_use_and_settle(engine, HEART_BOW)
+    deck_before = list(state.deck)
+    hand_before = list(state.player(0).hand)
+    _jie_use_and_settle(engine, 9, activate=(JIE_JIANYING,))
+
+    assert len(_jie_asked(engine, JIE_JIANYING)) == 1, "同花色 ⇒ 问一次"
+    assert list(state.deck) == deck_before[1:], "摸走牌堆顶那一张"
+    assert state.player(0).hand == [*hand_before[1:], deck_before[0]], (
+        "用掉那张之后摸到牌堆顶那一张（手牌序按此推移）"
+    )
+
+
+def test_jie_jianying_asks_once_for_a_multi_target_card():
+    """一张多目标锦囊是**一次使用** ⇒ 只问一次、只摸一张（账本 L777 逐事件）。"""
+    from sgs.data import Identity
+
+    barrage = next(
+        index for index, card in enumerate(PACK.deck.cards) if card.type == "arrow_barrage"
+    )
+    assert _deck_card(barrage).suit is Suit.HEART
+    # 4 人局 ⇒ 身份局，必须显式给身份（`build_state` 不会替我们发主公）。
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=JUSHUO, hp=2, hp_max=3, hand=(HEART_BOW, barrage), identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=deck_excluding(PACK, HEART_BOW, barrage),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+    deck_before = list(state.deck)
+
+    _jie_use_and_settle(engine, HEART_BOW)
+    _jie_use(engine, barrage)
+    _jie_drive(engine, _jie_is_idle, activate=(JIE_JIANYING,))
+
+    assert len(_jie_asked(engine, JIE_JIANYING)) == 1, "多目标也只是一次使用"
+    assert state.player(0).hand[-1] == deck_before[0], "只摸一张"
+
+
+def test_jie_jianying_comparison_is_fail_closed_without_rank_or_suit():
+    """上一张是**无点数无花色**的多源转化牌 ⇒ 比较不成立、不产出入口（账本 L896）。"""
+    from sgs.skills.virtual import transformed_card
+
+    state, engine = _jie_ready(hand=(HEART_BOW, CLUB_CROSSBOW))
+    state.player(0).play_phase_last_card = transformed_card(
+        state, (HEART_BOW, 9), "slash"
+    )
+    assert state.player(0).play_phase_last_card.suit is None
+
+    _jie_use_and_settle(engine, HEART_BOW)
+
+    assert _jie_asked(engine, JIE_JIANYING) == [], "两侧都缺点数花色 ≠ 相同"
+
+
+# ---------------------------------------------------------------------------
+# §1 渐营 ② —— 预发动清单（选牌 → 牌名）
+# ---------------------------------------------------------------------------
+
+
+def test_jie_jianying_manifest_lists_every_basic_name_in_the_deck():
+    """牌名闭集 = **本牌堆真有的**基本牌名（108 档 3 种），此刻用不了的置灰（Q-J5 = A）。"""
+    from sgs.skills.active import _jie_jianying_name_table
+
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO,), hp=3, hp_max=3)
+    steps = _jie_manifest(engine.pending)
+
+    assert [step.name for step in steps] == ["card", "name"]
+    assert set(_jie_step_options(steps[1])) == {"杀", "闪", "桃"}
+    assert set(_jie_step_disabled(steps[1])) == {"闪", "桃"}, (
+        "满体力【桃】不可用；【闪】在出牌阶段没有目标 ⇒ 列出来但置灰"
+    )
+    assert set(_jie_jianying_name_table(state)) == {"杀", "闪", "桃"}
+
+    pack_160 = load_content_pack(deck_profile="standard_ex_160")
+    wide = build_state(
+        pack=pack_160,
+        seats=[SeatSpec(hero=JUSHUO), SeatSpec()],
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2),
+    )
+    assert set(_jie_jianying_name_table(wide)) == {"杀", "闪", "桃", "火杀", "雷杀", "酒"}, (
+        "160 档才有【酒】/火杀/雷杀；108 档不列牌堆里没有的名字"
+    )
+
+
+def test_jie_jianying_is_not_offered_without_a_legal_source_or_name():
+    """手牌 + 装备区都空 ⇒ 没有入口（连清单都渲不出）。"""
+    state = _jie_state(hand=())
+    engine = Engine.from_state(state, seed=7)
+    # 摸牌阶段放弃摸牌（`set_draw_phase_count(0, 0)` = 突袭式的"0 张"）⇒ 出牌阶段手里真的空。
+    engine.set_draw_phase_count(0, 0)
+    engine = _jie_drive(engine, _jie_is_idle)
+
+    assert not state.player(0).hand and not state.player(0).equip
+    assert _jie_manifest(engine.pending) == ()
+    assert not [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
+    ]
+
+
+def test_jie_jianying_cancels_when_every_basic_name_is_disabled():
+    """三个牌名**全部**置灰 ⇒ 候选期不产出入口（不是发一张空清单）。"""
+    state, engine = _jie_ready(hand=(HEART_BOW,), hp=3, hp_max=3)
+    # 【空城】：座位 1 没有手牌 ⇒ 不能成为【杀】的目标；满体力 ⇒ 【桃】不可用；【闪】无目标。
+    state.player(1).granted_skills.append("hero.zhugeliang.kongcheng")
+
+    engine2 = _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+
+    assert _jie_manifest(engine2.pending) == ()
+    assert not [
+        action
+        for action in engine2.pending.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
+    ]
+
+
+def test_jie_jianying_never_uses_a_name_without_a_target_pool():
+    """置灰不是界面纪律：校验器用同一份闭集拒收（【闪】在出牌阶段没有目标）。"""
+    from sgs.skills import validate_activation
+
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO,), hp=3, hp_max=3)
+    query = engine.pending
+
+    assert validate_activation(
+        state, 0, JIE_JIANYING, (HEART_DODGE_TWO,), ("闪",)
+    ) is not None, "【闪】置灰 ⇒ 提交被拒"
+    assert validate_activation(
+        state, 0, JIE_JIANYING, (HEART_DODGE_TWO,), ("桃",)
+    ) is not None, "满体力【桃】置灰 ⇒ 提交被拒"
+    assert validate_activation(
+        state, 0, JIE_JIANYING, (HEART_DODGE_TWO,), ("杀",)
+    ) is None, "同一个局面里【杀】是可用的那一个"
+    assert query.preactivations, "清单在"
+
+
+def test_jie_jianying_is_once_per_play_phase():
+    """「出牌阶段限一次」：用掉之后清单不再出现。"""
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO, HEART_BOW), hp=3, hp_max=3)
+    assert _jie_manifest(engine.pending), "本阶段还没用过"
+
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+
+    assert _jie_manifest(engine.pending) == (), "本阶段已用过 ⇒ 清单消失"
+    assert not [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == JIE_JIANYING
+    ]
+
+
+def test_jie_jianying_declining_the_manifest_costs_nothing():
+    """放弃（不提交复合动作）⇒ 一张牌不搬、第 ② 半仍可用。"""
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO,), hp=3, hp_max=3)
+    hand_before = list(state.player(0).hand)
+    discard_before = list(state.discard)
+
+    engine = _jie_drive(engine, _jie_is_idle)
+
+    assert state.player(0).hand == hand_before
+    assert state.discard == discard_before
+    assert _jie_manifest(engine.pending), "取消 ≠ 用掉次数"
+
+
+def test_jie_jianying_costs_exactly_one_card():
+    """源牌恰好一张（手牌 → 处理区 → 弃牌堆），不多不少（G3）。"""
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO, HEART_BOW), hp=3, hp_max=3)
+
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+
+    assert _jie_moves(engine, HEART_DODGE_TWO) == [
+        ("hand", "processing"),
+        ("processing", "discard"),
+    ]
+    assert len(state.player(0).equip) == 0, "只消耗了那一张"
+
+
+# ---------------------------------------------------------------------------
+# §1 渐营 ② —— 产物的牌面（Q-J4 = A）与"被使用 ⇒ 触发 ①"（Q-J6 = A）
+# ---------------------------------------------------------------------------
+
+
+def test_jie_jianying_product_takes_the_previous_suit_and_keeps_the_source_rank():
+    """用户 2026-11-09 的逐字实例：♣A【诸葛连弩】→ ♥2 当【杀】= **♣2**（点数不变）。"""
+    from sgs.data import Color
+
+    state, engine = _jie_ready(hand=(CLUB_CROSSBOW, HEART_DODGE_TWO), hp=3, hp_max=3)
+    _jie_use_and_settle(engine, CLUB_CROSSBOW)
+    assert state.player(0).play_phase_last_card.suit == "club"
+
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+
+    product = next(
+        card for card in _jie_used_products(engine) if card.type == "slash"
+    )
+    assert product.name == "杀"
+    assert product.suit == "club", "花色视为上一张的花色（不是来源牌的 ♥）"
+    assert product.color is Color.BLACK, "颜色由派生花色给出（♣ ⇒ 黑），不自相矛盾"
+    assert product.rank == _deck_card(HEART_DODGE_TWO).rank, "点数仍继承来源牌（不是 ♣A）"
+    assert product.virtual_sources == (HEART_DODGE_TWO,)
+
+
+def test_jie_jianying_product_use_triggers_the_hook_and_draws_once():
+    """Q-J6 = A：产物被使用 ⇒ ① 照常问一次并摸一张（② 一次 = 定摸一张）。"""
+    state, engine = _jie_ready(hand=(CLUB_CROSSBOW, HEART_DODGE_TWO), hp=3, hp_max=3)
+    _jie_use_and_settle(engine, CLUB_CROSSBOW)
+    deck_before = list(state.deck)
+    hand_before = list(state.player(0).hand)
+
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+    asked = _jie_asked(engine, JIE_JIANYING)
+
+    assert len(asked) == 1, "产物的这次使用问了一次【渐营】"
+    assert list(state.deck) == deck_before[1:], "① 摸走牌堆顶一张"
+    assert state.player(0).hand == [*hand_before[1:], deck_before[0]], (
+        "源牌被当掉（-1）、① 摸一张（+1）⇒ 手牌净额不变、内容推移"
+    )
+
+
+def test_jie_jianying_keeps_the_source_face_when_the_previous_card_has_no_suit():
+    """上一张**无花色**（多源转化）⇒ 整条括号不生效 ⇒ 产物按 §16.3 继承来源牌。"""
+    from sgs.skills.virtual import transformed_card
+
+    state, engine = _jie_ready(hand=(HEART_DODGE_TWO, HEART_BOW), hp=3, hp_max=3)
+    state.player(0).play_phase_last_card = transformed_card(
+        state, (HEART_BOW, 9), "slash"
+    )
+    assert state.player(0).play_phase_last_card.suit is None
+
+    engine = _jie_activate(engine, card=HEART_DODGE_TWO, name="杀")
+
+    product = next(
+        card for card in _jie_used_products(engine) if card.type == "slash"
+    )
+    assert product.suit == "heart", "继承来源牌的花色（红桃 2）"
+    assert product.rank == 2, "点数同样是来源牌的"
+
+
+# ===========================================================================
+# 界沮授移动版【矢北】（Q-J1 = A：OL 口径 ⇒ 开局 3 点护甲 + 受伤后两支）
+# ===========================================================================
+
+
+def test_jie_shibei_is_locked_and_reuses_the_ol_callbacks():
+    """锁定技（不问）+ 两条钩子；受伤那一支与 OL 版**共用同一个回调**。"""
+    from sgs.skills import CATALOG, flow_for
+    from sgs.skills.damage_after import _shibei
+
+    definition = CATALOG[JIE_SHIBEI]
+    ol = CATALOG[OL_SHIBEI]
+
+    assert definition.locked is True
+    assert flow_for(JIE_SHIBEI) is None, "锁定技不问、无流水线"
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.GAME_START,
+        Timing.DAMAGE_AFTER_TAKE,
+    ]
+    assert definition.hooks[1].handler is _shibei
+    assert definition.hooks[1].handler is ol.hooks[0].handler, "界版复用 OL 的回调"
+    assert definition.hooks[1].per_point is False, "逐事件，不是逐点"
+
+
+def test_jie_shibei_grants_three_armor_at_game_start():
+    """「游戏开始时，你获得 3 点护甲」——护甲是 W7 的第二条体力轴，不写进数据行。"""
+    engine = Engine.new_game(
+        seed=5,
+        rule_config=RuleConfig(player_count=2),
+        pack=PACK,
+        heroes=(JUSHUO, "caocao"),
+    )
+    _jie_drive(
+        engine,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.TURN_BEFORE_START
+            for record in e.records
+        ),
+    )
+
+    assert engine.state.player(0).armor == 3
+    assert engine.state.player(1).armor == 0, "只有持有者获得"
+    assert engine.state.player(0).hp == 2, "登场 2/3 体力（armor 是另一条轴，不是 hp）"
+
+
+def _jie_hurt_state(*, hp: int, hp_max: int = 3):
+    """座位 0 = 界沮授、座位 1 = 伤害来源（停在开局派发之后、第一回合之前）。
+
+    **开局那 3 点护甲先清零**：这一组用例只验"受伤后"那一支（护甲吸收另有一条断言），
+    不把它混进体力账。``GAME_START`` 派发完时结算栈是空的（无待答询问），故随后直接压
+    ``DAMAGE`` 子帧与 `tests/test_hero_damage_after.py` 的夹具同形。
+    """
+    state = _jie_state(hand=(), hp=hp, hp_max=hp_max)
+    engine = Engine.from_state(state, seed=7)
+    _jie_drive(
+        engine,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.GAME_START
+            for record in e.records
+        ),
+    )
+    assert state.player(0).armor == 3, "矢北的开局护甲已经发过"
+    state.player(0).armor = 0
+    assert engine.pending is None, "开局派发之后没有待答询问（可以安全压子帧）"
+    return state, engine
+
+
+def _jie_hit(engine, *, amount: int = 1, source: int = 1, target: int = 0):
+    """压一个 ``DAMAGE`` 子帧并推进到它结束（同一次伤害事件；与 OL 版夹具同形）。"""
+    payload = {
+        "source": source,
+        "targets": (target,),
+        "card": None,
+        "use_timing": Timing.PHASE_PLAY_IDLE,
+        "target": target,
+        "channel": None,
+        "nature": "NORMAL",
+        "chain": False,
+        "amount": amount,
+    }
+    expected = sum(
+        1
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_END
+    ) + 1
+    engine.push_frame(FrameKind.DAMAGE, payload, timing=Timing.DAMAGE_DEAL)
+    _jie_drive(
+        engine,
+        lambda e: sum(
+            1
+            for record in e.records
+            if record.kind == "timing" and record.timing is Timing.DAMAGE_END
+        )
+        >= expected,
+    )
+    return engine
+
+
+def test_jie_shibei_first_damage_heals_one_and_second_loses_one():
+    """本回合第一次受伤 ⇒ 回复 1；之后每次受伤 ⇒ 失去 1。"""
+    state, engine = _jie_hurt_state(hp=3)
+
+    _jie_hit(engine)
+    assert (state.player(0).hp, state.player(0).damage_taken_this_turn) == (3, 1), (
+        "3 → 2（伤害）→ 3（回复 1）"
+    )
+
+    _jie_hit(engine)
+    assert (state.player(0).hp, state.player(0).damage_taken_this_turn) == (1, 2), (
+        "3 → 2（伤害）→ 1（失去 1 点体力）"
+    )
+
+
+def test_jie_shibei_two_point_first_damage_heals_only_one():
+    """一次 2 点伤害仍是**一个**伤害事件：只算 1 次、只回复 1 点。"""
+    state, engine = _jie_hurt_state(hp=3)
+    _jie_hit(engine, amount=2)
+    assert (state.player(0).hp, state.player(0).damage_taken_this_turn) == (2, 1)
+
+
+def test_jie_shibei_full_health_first_damage_pushes_nothing():
+    """满体力（护甲全吸收 ⇒ hp 仍满）⇒ 锁定技照常"发动"但零回复（满体力不回复）。"""
+    state, engine = _jie_hurt_state(hp=3, hp_max=3)
+    state.player(0).armor = 1
+
+    _jie_hit(engine)
+
+    assert state.player(0).hp == 3, "伤害被护甲吃掉 ⇒ 体力仍满"
+    assert state.player(0).armor == 0
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.RECOVER_VALUE
+    ], "满体力不压 RECOVER 帧（规则 §4.15）"
+    assert not _jie_deltas(engine, "hp_change"), "全吸收 ⇒ 一条 hp_change 都不该有"
+
+
+def test_jie_shibei_armor_absorbs_the_hit_and_the_turn_counter_still_counts():
+    """护甲全吸收（无 hp_change）仍算"受到伤害"一次 ⇒ 矢北照常结算（W7 的伤害分账）。"""
+    state, engine = _jie_hurt_state(hp=2)
+    state.player(0).armor = 2
+
+    _jie_hit(engine)
+
+    assert state.player(0).hp == 3, "伤害被护甲吃了，第一次矢北照常回复 1"
+    assert state.player(0).armor == 1, "先扣护甲、再扣体力"
+    assert state.player(0).damage_taken_this_turn == 1
+
+
+def test_jie_shibei_counts_damage_taken_in_another_players_turn():
+    """别人的回合里挨打同样占"本回合"的那一次（「本回合」= 当前游戏回合）。"""
+    state = _jie_state(hand=(), hp=3, hp_max=3)
+    state.turn_seat = 1  # 这一局是**别人**的回合（伤害事件不按回合归属）
+    engine = Engine.from_state(state, seed=7)
+    _jie_drive(
+        engine,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.GAME_START
+            for record in e.records
+        ),
+    )
+    state.player(0).armor = 0
+
+    _jie_hit(engine)
+
+    assert state.player(0).damage_taken_this_turn == 1
+    assert state.player(0).hp == 3, "第一次 ⇒ 回复"
+
+
+def test_jie_shibei_ignores_a_zero_damage_event():
+    """伤害数值为 0 ⇒ 不派发「受到伤害后」⇒ 不计数（与 OL 版同一条判据）。"""
+    state, engine = _jie_hurt_state(hp=3)
+    _jie_hit(engine, amount=0)
+    assert state.player(0).damage_taken_this_turn == 0
+    assert state.player(0).hp == 3
+
+
+def test_jie_shibei_is_silent_when_this_damage_kills_the_owner():
+    """这笔伤害直接把持有者打死 ⇒ 实例不再产出、矢北静默（不再补回复）。"""
+    state, engine = _jie_hurt_state(hp=1)
+    _jie_hit(engine)
+    assert not state.player(0).alive
+    assert state.player(0).hp == 0
+
+
+def test_jie_jianying_declining_draws_nothing():
+    """① 的"可以"有一个放弃出口：答「不发动」⇒ 一张都不摸。"""
+    state, engine = _jie_ready(hand=(HEART_BOW, 9))
+    _jie_use_and_settle(engine, HEART_BOW)
+    deck_before = list(state.deck)
+    hand_before = list(state.player(0).hand)
+
+    _jie_use_and_settle(engine, 9)  # activate=() ⇒ 一律放弃
+
+    assert len(_jie_asked(engine, JIE_JIANYING)) == 1, "问过一次，但答的是放弃"
+    assert list(state.deck) == deck_before
+    assert state.player(0).hand == hand_before[1:]
+
+
+def test_jie_jianying_draw_into_an_empty_deck_is_a_draw():
+    """牌堆空 ⇒ 【渐营】的摸牌是**短摸** ⇒ 既有 G10 口径：平局。"""
+    state, engine = _jie_ready(hand=(HEART_BOW, 9))
+    _jie_use_and_settle(engine, HEART_BOW)
+
+    state.deck.clear()
+    _jie_use(engine, 9)
+    _jie_drive(engine, _jie_is_idle, activate=(JIE_JIANYING,))
+
+    assert len(_jie_asked(engine, JIE_JIANYING)) == 1, "问过一次"
+    assert engine.finished is True, "短摸即平局"
+
+
+def _jie_single_source_state():
+    """手里**只有一张**牌的出牌阶段局面（摸牌阶段放弃摸牌 ⇒ 源牌候选恰好一个）。"""
+    state = _jie_state(hand=(HEART_BOW,), hp=3, hp_max=3)
+    engine = Engine.from_state(state, seed=7)
+    engine.set_draw_phase_count(0, 0)
+    return state, _jie_drive(engine, _jie_is_idle)
+
+
+def test_jie_jianying_takes_the_only_legal_source_directly():
+    """源牌候选恰好一个 ⇒ 清单只剩那一个（前端据此走"直提态"，引擎侧证据 = 池只有一项）。"""
+    state, engine = _jie_single_source_state()
+    steps = _jie_manifest(engine.pending)
+
+    assert [step.name for step in steps] == ["card", "name"]
+    assert _jie_step_options(steps[0]) == (str(HEART_BOW),), "唯一可付的源牌"
+
+
+def test_jie_jianying_takes_the_only_legal_name_directly():
+    """满体力 + 2 人局 ⇒ 只剩【杀】可用（前端"直提态"的引擎侧等价事实）。"""
+    state, engine = _jie_single_source_state()
+    steps = _jie_manifest(engine.pending)
+
+    usable = tuple(
+        name
+        for name in _jie_step_options(steps[1])
+        if name not in _jie_step_disabled(steps[1])
+    )
+    assert usable == ("杀",)

@@ -35,6 +35,29 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_jushou_mobile",
+      "name": "界沮授移动版",
+      "true_name": "沮授",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "hp": 2,
+      "version": "jie-yijiang-2014-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jianying",
+          "name": "渐营",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "shibei",
+          "name": "矢北",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

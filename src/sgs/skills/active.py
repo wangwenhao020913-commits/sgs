@@ -117,6 +117,14 @@ from .catalog import (
 )
 from .virtual import pure_virtual_card, transformed_card
 
+# 界沮授移动版【渐营】①（yijiang-2014-round2 票 01 / W3）：牌面与 `hero.jushou.jianying`
+# **逐字同句** ⇒ 直接复用那一份条件与零步流水线（**同一对象**，裁定票 06 的 §W3 API）。
+# 这个跨族 import 的顺序是安全的：`catalog.py` 末尾先导入本模块、由本模块拉起
+# `use_after`，而 `use_after` 只反向依赖 `catalog` **末尾 import 之前**就已定义的声明面
+# （`SkillDef` / `Hook` / `MATCH_OWNER_KEY`…），**不**依赖本模块 ⇒ 不会绕回半初始化的
+# `active`。唯一的代价是 `use_after` 的模块体比 `catalog` 的末尾 import 早一步跑完。
+from .use_after import JIANYING_FLOW, _jianying_condition
+
 __all__ = [
     "ACTIVATIONS",
     "ACTIVE_SKILLS",
@@ -129,6 +137,8 @@ __all__ = [
     "SHENXING_FLOW",
     "JIE_LIJIAN",
     "JIE_LIJIAN_FLOW",
+    "JIE_JIANYING",
+    "JIE_JIANYING_FLOW",
     "POXI_CARDS",
     "POXI_FLOW",
     "ActiveSkill",
@@ -6737,10 +6747,268 @@ _DIMENG = ActiveSkill(
 """鲁肃移动版【缔盟】的完整声明（A 族 + 两步座位 + 手写主体）。"""
 
 
+# ---------------------------------------------------------------------------
+# 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3；① 见 :mod:`sgs.skills.use_after`）
+#
+# 牌面（用户 `技能.txt` 逐字；移动版 / OL 官网同值，票面 §0.1）：
+#
+#     渐营
+#       ①当你于你的出牌阶段内使用牌时，若此牌与你本阶段使用的上一张牌点数或花色相同，
+#         你可以摸一张牌；
+#       ②出牌阶段限一次，你可以将一张牌当任意一张基本牌使用
+#         （若你本阶段使用的上一张牌有花色，此牌花色视为与上一张牌花色相同）。
+#
+# 本段只落 ②（A 族：预发动清单 = 选牌 → 牌名 → 提交点后手写主体）。① 是**同一个技能 id**
+# 的钩子，由 :data:`ACTIVE_SKILLS` 里那条声明的 ``hooks=`` 同时带（W6 的
+# :attr:`ActiveSkill.hooks`）——**不许**另写第二条同 id 的声明：``CATALOG`` 是字典推导，
+# 后者会静默覆盖前者（裁定票 06 的 F2）。
+#
+# 用户 2026-11-09 签的四条：
+#
+# - **Q-J4 = A**：花色**改写产物牌面**（``transformed_card(..., suit=上一张的花色)``，颜色
+#   由该花色派生、**点数仍继承来源牌** ⇒ 红桃 2 当【杀】是梅花 2，不是梅花 A）；上一张
+#   **无花色** ⇒ 传 ``suit=None`` ⇒ 按规则 §16.3 继承来源牌（三小问随 A）；
+# - **Q-J5 = A**：牌名闭集 = **本牌堆真有的**基本牌名（108 档 3 种 / 160 档 6 种），
+#   **列全 + 此刻用不了的置灰**（先例 = 蛊惑的 ``_guohuo_declaration_table``）；
+# - **Q-J6 = A**：产物**被使用**照常触发 ①（``start_use`` 先旋转"上一张牌"再派发
+#   ``USE_ON_USE``；产物花色已被视为与上一张相同 ⇒ ① 的条件恒成立）；
+# - **Q-J3 = A**：① 与 ② 住进同一条 ``SkillDef``（结构面 = ``hooks`` + ``CANDIDATES``）。
+# ---------------------------------------------------------------------------
+
+JIE_JIANYING = hero_skill_id("jie_jushou_mobile", "jianying")
+"""界沮授移动版【渐营】的全限定技能 id（① 与 ② 共用这一个 id）。"""
+
+_JIE_JIANYING_PRODUCT_KEY = "jie_jianying_product"
+"""帧私有：② 的产物（构造那一刻定格，续跑不重造）。"""
+
+_JIE_JIANYING_USED_KEY = "jie_jianying_used"
+"""帧私有：这次发动已经 ``start_use``（USE 帧出栈后派发环重入 SKILL 帧，不重发）。"""
+
+_JIE_JIANYING_TARGETS_KEY = "jie_jianying_targets"
+"""帧私有：产物的目标（问了 / 自动定格之后都不再重算）。"""
+
+_JIE_JIANYING_ASK_TARGET = "hero.jie_jushou_mobile.jianying.target"
+"""手写座位询问的 id（与 ``_ASK_`` 约定同形：全限定前缀 ⇒ AI 的敌我口径能按前缀登记）。"""
+
+
+def _jie_jianying_name_table(state: GameState) -> dict[str, str]:
+    """② 可声明的牌名：``显示名 → 牌型 id``，**只收本牌堆真有的基本牌**（Q-J5 = A）。
+
+    与【蛊惑】共用"本牌堆真有这种牌"的判据（:func:`_guohuo_declaration_table`），再按
+    ``card_category`` 收窄到 ``BASIC``：108 档 = 杀 / 闪 / 桃，160 档 = 再加火杀 / 雷杀 / 酒。
+    **不**列牌堆里没有的名字（108 档列【酒】会产出一张牌堆里不存在的虚拟牌）。
+    """
+    return {
+        name: type_id
+        for name, type_id in _guohuo_declaration_table(state).items()
+        if card_category(state.pack_id, type_id) is Category.BASIC
+    }
+
+
+def _jie_jianying_product(
+    state: GameState, source: int, type_id: str, previous: CardRef | None
+) -> CardRef:
+    """② 的产物：把 ``source`` 这张实体牌转化成 ``type_id``，花色**视为**上一张的花色。
+
+    ``previous`` 是本阶段**已使用**的最后一张牌（② 本身不是一次使用，故读
+    ``play_phase_last_card``；见 :func:`_jie_jianying_effect`）。它没有花色 ⇒ 传 ``None``
+    ⇒ ``transformed_card`` 走规则 §16.3 的默认（继承来源牌）。只给 ``suit`` ⇒ 颜色由
+    :func:`~sgs.data.color_of_suit` 派生，点数仍继承来源牌（用户 Q-J4 的逐字实例）。
+    """
+    return transformed_card(
+        state, (source,), type_id, suit=None if previous is None else previous.suit
+    )
+
+
+def _jie_jianying_name_options(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """牌名弹窗的**全量**闭集（列全；此刻用不了的进 :func:`_jie_jianying_name_disabled`）。"""
+    del frame, owner, answers
+    return tuple(_jie_jianying_name_table(state))
+
+
+def _jie_jianying_name_disabled(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """全量闭集里**此刻用不了**的那些（界面置灰；校验器独立拒收，不靠界面挡）。
+
+    按**刚选中的那张源牌** + **当下记着的上一张牌**现算（与 :func:`_jie_jianying_product`
+    同一份牌面）：同一份牌名闭集在不同来源牌 / 上一张牌下"能不能用"可以不同（花色被
+    视为之后撞【仁王盾】一类颜色读者）。
+    """
+    del frame
+    source = _guohuo_selected_card(answers)
+    if source is None:  # 前序还没选牌（清单的退化路径）⇒ 没有可置灰的依据
+        return ()
+    previous = state.player(owner).play_phase_last_card
+    return tuple(
+        name
+        for name, type_id in _jie_jianying_name_table(state).items()
+        if not check_targets(
+            state, owner, _jie_jianying_product(state, source, type_id, previous)
+        )
+    )
+
+
+def _jie_jianying_entry(state: GameState, seat: int) -> bool:
+    """清单渲不渲得出：至少有一条"源牌 × 牌名"此刻合法（候选闸与清单同一份判据）。"""
+    player = state.player(seat)
+    sources = (*player.hand, *player.equip)
+    if not sources:
+        return False
+    table = _jie_jianying_name_table(state)
+    previous = player.play_phase_last_card
+    return any(
+        check_targets(state, seat, _jie_jianying_product(state, source, type_id, previous))
+        for source in sources
+        for type_id in table.values()
+    )
+
+
+def _jie_jianying_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """出牌阶段入口：本阶段没用过 ∧ 有源牌 ∧ 至少有一个牌名此刻可用（否则不产候选）。
+
+    已翻预发动 ⇒ 骨架候选不进 ``legal_actions``，可用性只剩预发动清单；但**清单只随候选
+    渲染**（`_build_query` 的 ``offered``），故"付得起且至少有一条合法组合"这道闸必须
+    落在这里，否则会出现一张点不开的空清单。
+    """
+    if not _can_offer(state, ctx):
+        return current
+    if not _jie_jianying_entry(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _jie_jianying_targets(
+    host: Any, frame: Any, owner: int, product: CardRef
+) -> tuple[int, ...] | None:
+    """产物的目标：按**产物牌名**的目标规则定（无显式目标选择 = 票面 §1.2 的签字口径）。
+
+    与【蛊惑】段 4 同一套分档（规则一条都不新造，池与目标数都读 ``check_targets`` /
+    ``TargetRule.target_count``）：额定 0 个 ⇒ 空；池恰好装得下额定数 ⇒ 全取（【桃】/【酒】
+    因此落回自己，**不问**）；额定 1 个而有多个合法目标（【杀】家族）⇒ 问一次座位；其余
+    区间规则取下界张、按座位序定格。挂起 ⇒ ``None``（帧私有游标续跑不重问）。
+    """
+    if _JIE_JIANYING_TARGETS_KEY in frame.data:
+        return tuple(frame.data[_JIE_JIANYING_TARGETS_KEY])
+    pool = check_targets(host.state, owner, product)
+    count = behavior_for(product).target_rule.target_count(len(pool))
+    if count <= 0:
+        chosen: tuple[int, ...] = ()
+    elif count >= len(pool):
+        chosen = tuple(pool)
+    elif count == 1:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=_JIE_JIANYING_ASK_TARGET,
+            options=tuple(_seat_choice(seat) for seat in pool),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return None
+        chosen = (_option_seat(answer),)
+    else:
+        chosen = tuple(pool[:count])
+    frame.data[_JIE_JIANYING_TARGETS_KEY] = chosen
+    return chosen
+
+
+def _jie_jianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：按来源牌 + 上一张牌的花色造产物，然后 ``start_use`` 它（段 8 的样板）。
+
+    重入纪律：产物与目标各有一个帧私有游标——``start_use`` 压整条使用链（目标响应还会再
+    挂起），USE 帧出栈后派发环从头重入本函数；没有 ``_JIE_JIANYING_USED_KEY`` 就会把同一张
+    产物使用两遍。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    if _JIE_JIANYING_PRODUCT_KEY not in frame.data:
+        table = _jie_jianying_name_table(state)
+        declared = str(answers["name"])
+        type_id = table.get(declared)
+        if type_id is None:  # 校验器已按同一份闭集拦过；走到这里就是声明写错了
+            raise ValueError(f"【渐营】声明的牌名 {declared!r} 不在本牌堆的基本牌里")
+        source = _guohuo_selected_card(answers)
+        if source is None:  # 第一步是必答（lo = 1），缺它就是声明写错了
+            raise ValueError("【渐营】的预发动没有带出那张源牌")
+        frame.data[_JIE_JIANYING_PRODUCT_KEY] = _jie_jianying_product(
+            state, source, type_id, state.player(owner).play_phase_last_card
+        )
+    if frame.data.get(_JIE_JIANYING_USED_KEY):
+        return None
+    product = frame.data[_JIE_JIANYING_PRODUCT_KEY]
+    targets = _jie_jianying_targets(host, frame, owner, product)
+    if targets is None:
+        return "stay"
+    frame.data[_JIE_JIANYING_USED_KEY] = True
+    host.start_use(
+        product,
+        source=owner,
+        targets=targets,
+        use_timing=Timing.PHASE_PLAY_IDLE,
+    )
+    return "stay"
+
+
+JIE_JIANYING_FLOW = SkillFlow(
+    name="jie_jianying",
+    steps=(
+        # 步 1：把哪张牌当（手牌 ∪ 装备区，**恰好一张**：牌面写「一张牌」、无区域限定）。
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
+        # 步 2：当哪一张基本牌。闭集 = 本牌堆真有的基本牌名（列全）；此刻用不了的置灰。
+        PickOption(
+            options=_jie_jianying_name_options,
+            disabled=_jie_jianying_name_disabled,
+            optional=False,
+            key="name",
+        ),
+    ),
+    effect=_jie_jianying_effect,
+    # 「出牌阶段限一次」⇒ 落 ``_USED`` 阶段位（与界【慎行】同一条机制）。
+    once_per_phase=True,
+)
+"""【渐营】② 的两步流水线：选一张自己的牌 → 选当作哪一张基本牌 → 提交点后手写主体。
+
+流水线名带武将前缀（``jie_jianying``）：``SkillFlow.name`` 必须两两唯一（`test_ask_points`），
+而 ① 复用的是 OL 沮授那一份 ``JIANYING_FLOW``（``name = "jianying"``，同一对象、不新增名字）。
+"""
+
+_JIE_JIANYING = ActiveSkill(
+    "jie_jushou_mobile",
+    "jianying",
+    _jie_jianying_offers,
+    flow=JIE_JIANYING_FLOW,
+    preactivated=True,
+    # ①（钩子）与 ②（A 族流水线）住在**同一条**声明里（W6 的 F2）：两族各产一条同 id 的
+    # ``SkillDef`` 会在 ``CATALOG`` 的字典推导里被后者静默覆盖。
+    hooks=(
+        Hook(Timing.USE_ON_USE, condition=_jianying_condition, flow=JIANYING_FLOW),
+    ),
+    # A4：与 OL 沮授【渐营】同短 id 但牌面不同（界版多 ②、且 ① 多「你的」）⇒ 界版全文写在
+    # **声明级覆盖**上，不动 ``_REQUIREMENTS["jianying"]`` 那一行。
+    requirement=(
+        "当你于你的出牌阶段内使用牌时，若此牌与你本阶段使用的上一张牌点数或花色相同，"
+        "你可以摸一张牌；出牌阶段限一次，你可以将一张牌当任意一张基本牌使用"
+        "（若你本阶段使用的上一张牌有花色，此牌花色视为与上一张牌花色相同）"
+    ),
+    step_requirements={
+        "card": "选择一张牌（手牌 / 装备区）",
+        "name": "选择当作哪一张基本牌使用（此刻没有合法目标的名字置灰、不可选）",
+    },
+)
+"""界沮授移动版【渐营】的完整声明（① 的钩子 + ② 的预发动清单，同一个技能 id）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 鲁肃【缔盟】（神话再临·林包·移动版；jushou-lusu 票 02）：两步选人 → 弃 X 张（动态）
     # → 双方手牌经处理区交换。
     _DIMENG,
+    # 界沮授移动版【渐营】（yijiang-2014-round2 票 01 / W3）：① 钩子 + ② 转化共用**一个**
+    # 技能 id（`hooks` + A 族流水线同一条声明，见 `_JIE_JIANYING` 的注释）。
+    _JIE_JIANYING,
     # 荀彧【驱虎】（火包·移动版）：与体力值大于你的角色拼点 → 赢选承受者 / 没赢挨 1 点。
     ActiveSkill(
         "xunyu",

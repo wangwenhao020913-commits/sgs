@@ -263,9 +263,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （座位多选面落地后解锁；数据行同一条武将，启用版本 / 真名都不变）。
     # yijiang-2014 票 08（W4b）：同一个陈群补【法恩】（状态位写入口解封后）⇒ 201 → 202、
     # 武将技 177 → 178（数据行同一条武将，启用版本 / 真名都不变）。
-    assert len(CATALOG) == 202
-    assert len(equipment) == 22, "装备不变：本票一条是武将技"
-    assert len(heroes) == 178
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204、
+    # 武将技 178 → 180（装备 22 不变：本票两条都是武将技）。
+    assert len(CATALOG) == 204
+    assert len(equipment) == 22, "装备不变：本票两条是武将技"
+    assert len(heroes) == 180
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -301,7 +303,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 174 → 175。
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 175 → 176；票 09 补【秉壹】⇒ 177。
     # yijiang-2014 票 08（W4b）：同一个陈群补【法恩】⇒ 177 → 178。
-    assert len(expected) == 178
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条 ⇒ 178 → 180。
+    assert len(expected) == 180
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1610,7 +1613,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _jiuyuan_probe_state()
     if skill_id == "hero.tao_liubei.congtao":
         return _congtao_probe_state()
-    if skill_id == "hero.jushou.jianying":
+    if skill_id in ("hero.jushou.jianying", "hero.jie_jushou_mobile.jianying"):
+        # 界【渐营】的 ① 与 OL 版**逐字同句**、复用同一个条件对象 ⇒ 同一份正面局面。
         return _jianying_probe_state()
     if skill_id == "hero.lu_su_mobile.haoshi":
         return _haoshi_probe_state()
@@ -1742,6 +1746,10 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # jushou-lusu 票 01【渐营】：使用牌帧的 source 是我、且这道条件还要读座位事实
         # （本阶段上一张牌）——正面局面见 :func:`_jianying_probe_state`。
         "hero.jushou.jianying": (
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
+        ),
+        # yijiang-2014-round2 票 01（W3）界【渐营】①：同一个条件对象、同一份正面局面。
+        "hero.jie_jushou_mobile.jianying": (
             _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
         # M6 票 02【集智】：使用牌帧的 source 是我、牌面是非延时类锦囊。
@@ -2485,6 +2493,13 @@ SKILL_SHAPE: dict[str, str] = {
     # yijiang-2014 票 08（W4b）：陈群【法恩】（`STATE_FLIPPED` / `STATE_CHAINED` 两条钩子 +
     # **零步流水线**，摸一张住 effect；非锁定、无修饰器 / 接缝）⇒ 零步技能格。
     "hero.chenqun.faen": "零步技能",
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】= `USE_ON_USE` 钩子 + **非空**的
+    # A 族流水线（选牌 → 牌名），非锁定 ⇒ 机械谓词落在「触发技能」格：
+    # `_flow_backed_active_ids()` 要求"没有钩子"，`triggered` 正好收"有钩子 + 非空流水线 +
+    # 非锁定"（裁定票 06 的 F2 预告的就是这条读法）。【矢北】= 锁定技 + 开局护甲 / 受伤后
+    # 两条钩子、无流水线 ⇒ 锁定技格。
+    "hero.jie_jushou_mobile.jianying": "触发技能",
+    "hero.jie_jushou_mobile.shibei": "锁定技",
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2513,8 +2528,10 @@ SHAPE_COUNTS: dict[str, int] = {
     # 票 02：界顾雍移动版【慎行】⇒ 33 → 34。
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 主动技能 34 → 35。
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 主动技能 35 → 36。
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】是"钩子 + 非空流水线"的 A 族技能
+    # ⇒ 机械谓词落在**触发技能**格（主动技能因此**不加**）⇒ 26 → 27。
     "主动技能": 36,
-    "触发技能": 26,
+    "触发技能": 27,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
@@ -2541,7 +2558,9 @@ SHAPE_COUNTS: dict[str, int] = {
     "多轮技能": 20,
     # lin-batch2 票 03：贾诩移动版【完杀】/【帷幕】（两条纯修饰器）⇒ 锁定技 40 → 42。
     # jushou-lusu 票 01：沮授【矢北】（锁定技 + 受伤后钩子、无流水线）⇒ 锁定技 42 → 43。
-    "锁定技": 43,
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【矢北】（锁定技 + 开局护甲 / 受伤后
+    # 两条钩子、无流水线）⇒ 43 → 44。
+    "锁定技": 44,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -2726,7 +2745,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014 票 02：一将成名-2014·陈群【定品】⇒ 198 → 199。
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201。
     # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线）⇒ 201 → 202。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 202
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 204
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2876,8 +2896,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】（单步流水线）⇒ 内 106 → 107。
     # yijiang-2014 票 09：顾雍【秉壹】（零步流水线，形态归「零步技能」）⇒ 内 107 → 108。
     # yijiang-2014 票 08（W4b）：陈群【法恩】（零步流水线，形态归「零步技能」）⇒ 内 108 → 109。
-    assert len(inside) == 109
-    assert len(outside) == 93
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】（A 族两步流水线，形态归
+    # 「触发技能」）⇒ 内 109 → 110；【矢北】（锁定技、无 flow）⇒ 外 93 → 94。
+    assert len(inside) == 110
+    assert len(outside) == 94
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

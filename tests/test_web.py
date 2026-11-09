@@ -486,7 +486,9 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
     # yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 96 → 97 / 64 不变。
-    assert len(flat) == 97 and len(catalog) == 64, (
+    # yijiang-2014-round2 票 01（W3）：界一将成名-2014·移动版加界沮授移动版（真名「沮授」
+    # 已在池里）⇒ 97 → 98 / 64 不变。
+    assert len(flat) == 98 and len(catalog) == 64, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -5596,8 +5598,13 @@ def test_the_public_seat_carries_armor_and_the_payload_shape_pins_it() -> None:
     投影里 ``armor`` 与 ``chained`` / ``wine_active`` 同档（公开事实、网页载荷由
     ``seat_display`` 补下）。座位卡的护甲段读的就是 ``player.armor``：0 时一段都不画
     （DOM 与旧版逐字节同形），故这里同时钉住"默认值照发"与"真值走完整下发路径"。
+
+    ``seed``（yijiang-2014-round2 票 01 / W3）：换池会重排默认将池 ⇒ 原 ``61`` 这一局抽到
+    **界沮授移动版**（【矢北】开局发 3 点护甲，挨了一刀之后是 2）⇒ "全员默认 0"这条判据
+    不再成立。判据不动、换种子（spec §7 的既有处置）：``1`` 这一局没有任何获得护甲的开局
+    效果，全员缺省 0。
     """
-    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    session = Session(seed=1, ai="random", timeout_seconds=None, player_count=5)
     snapshot = visible_snapshot(session)
     assert snapshot["players"], "快照必须有座位"
     for player in snapshot["players"]:
@@ -7503,7 +7510,8 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     expected_skills = set(CATALOG)
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 199 → 200；票 09 补【秉壹】⇒ 201；
     # 票 08（W4b）补陈群【法恩】⇒ 202。
-    assert len(expected_skills) == 202, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
+    assert len(expected_skills) == 204, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

@@ -2180,6 +2180,11 @@ _HOSTILE_SEAT_STEPS = (
     "jieying:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
+    # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3）：产物是【杀】家族时，提交点后
+    # 手写的那一问选的是**这张【杀】打谁** ⇒ 敌人。不登记会落进"帮盟友"的缺省分支（AI 拿
+    # 【杀】打队友）。前缀 = 全限定技能 id（手写询问 id 是
+    # ``hero.jie_jushou_mobile.jianying.target``）。
+    "hero.jie_jushou_mobile.jianying:",
     "hero.xiahouyuan.shensu:",
     # 界夏侯渊【神速】（jie-feng-batch2 票 01）：同一手写询问、同一前缀陷阱
     # （``hero.jie_xiahouyuan_mobile.shensu:target:<项号>``）。
@@ -4450,6 +4455,16 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.5),
         "出牌阶段使用与上一张点数或花色相同的牌时摸一张：**没有代价**（不弃牌 / 不失体力 /"
         "无次数成本），候选只在条件成立时出现 ⇒ 常量即正",
+    ),
+    # 界一将成名-2014·移动版·界沮授（yijiang-2014-round2 票 01 / W3）：同一个技能 id 的两半
+    # 共用这一条估值——① 与 OL 版逐字同句（摸一张、无代价 ⇒ 常量即正，抄上面那条）；
+    # ② 是"消耗一张牌换一张基本牌的使用权 + ① 的一次摸牌"，`_constant` 读不到那张牌的牌价
+    # （已知限制，与上面那条同档），故沿用同一个正值。锁定的【矢北】按 `_missing_entries`
+    # 的既有口径**不必**登记。
+    "hero.jie_jushou_mobile.jianying": (
+        _constant(2.5),
+        "① 使用与上一张点数或花色相同的牌时摸一张（无代价）；② 出一张牌当任意基本牌使用、"
+        "产物被使用时 ① 必然再摸一张 ⇒ 两半都是正收益，常量即正",
     ),
     # 林包·移动版·鲁肃（jushou-lusu 票 02）：【好施】多摸两张、再按牌面把一半手牌交给
     # 「其他角色里手牌数最少」的那一名——交给谁由座位步（或并列时的手写座位问）决定，

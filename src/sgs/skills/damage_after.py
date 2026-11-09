@@ -64,6 +64,7 @@ from sgs.effects import (
     locate,
 )
 from sgs.state import (
+    ARMOR_CAP,
     CardRef,
     FrameKind,
     GameState,
@@ -126,6 +127,8 @@ __all__ = [
     "fankui_step_key",
     "SHIBEI",
     "SHIBEI_DEF",
+    "JIE_SHIBEI",
+    "JIE_SHIBEI_DEF",
 ]
 
 DAMAGE_POINT_KEY = "damage_point_index"
@@ -1708,6 +1711,70 @@ SHIBEI_DEF = SkillDef(
 
 
 # ---------------------------------------------------------------------------
+# 界沮授移动版【矢北】（yijiang-2014-round2 票 01 / W3；Q-J1 = A ⇒ 本仓按 **OL 口径**）
+#
+# 牌面（用户 `技能.txt` 逐字 + OL 官网 `sanguosha.com/hero/749` 多出来的那一句）：
+#
+#     矢北：锁定技，游戏开始时，你获得3点护甲。当你受到伤害后，若此次伤害是你本回合受到的
+#           第一次伤害，则你回复1点体力，否则你失去1点体力。
+#
+# 与 OL 一将成名-2014 的【矢北】（:data:`SHIBEI_DEF`）逐句对齐：
+#
+# - **受伤后那一句逐字相同** ⇒ 复用**同一个** ``_shibei`` 回调（先例 = 界【天妒】：同一组
+#   回调 + 第二条 ``SkillDef``；钩子族没有 ``shared_with`` 字段，那是 ``ConversionSkill`` 的）；
+# - **多出来的是开局那 3 点护甲**（只有界沮授有；移动版源文件没有这一句）：用户 2026-11-09
+#   签「A，护甲机制以后再加」⇒ 护甲作为**第二条体力轴**由 W7 落地，本票在 ``GAME_START``
+#   钩子里把「获得 3 点」写成 ``min(护甲 + 3, ARMOR_CAP)``（可叠加、封顶 5 的签字口径）。
+#   **护甲不写进数据行、也不写 ``_initial_player``**：它是技能效果，不是登场属性
+#   （登场属性只有 ``hp = 2`` 那一条）。
+# ---------------------------------------------------------------------------
+
+JIE_SHIBEI = hero_skill_id("jie_jushou_mobile", "shibei")
+"""界沮授移动版【矢北】的全限定技能 id。"""
+
+_JIE_SHIBEI_ARMOR_KEY = "jie_shibei_armor"
+"""帧私有：开局那 3 点护甲已经发过（``GAME_START`` 挂起续跑不重发）。"""
+
+
+def _jie_shibei_start(host: Any, frame: Any) -> Any:
+    """「游戏开始时，你获得 3 点护甲」：唯一的写入口是 :meth:`Engine.apply_armor_change`。
+
+    ``min(护甲 + 3, ARMOR_CAP)`` 由调用帧先夹住（``apply_armor`` 对越界值抛错，不替调用方
+    兜底）；``GAME_START`` 是帧外时机、锁定技不问是否发动（派发环的 forced 分支直接跑），
+    故这里没有询问面、也不需要 ``"stay"``。
+    """
+    owner = int(frame.data["skill_owner"])
+    if frame.data.get(_JIE_SHIBEI_ARMOR_KEY):
+        return None
+    frame.data[_JIE_SHIBEI_ARMOR_KEY] = True
+    player = host.state.player(owner)
+    host.apply_armor_change(frame, owner, min(player.armor + 3, ARMOR_CAP))
+    return None
+
+
+JIE_SHIBEI_DEF = SkillDef(
+    skill_id=JIE_SHIBEI,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        # 开局那 3 点护甲（只有界版这一句）。
+        Hook(Timing.GAME_START, handler=_jie_shibei_start),
+        # 受伤后的两支与 OL 版**逐字相同** ⇒ 同一个回调。
+        Hook(Timing.DAMAGE_AFTER_TAKE, handler=_shibei),
+    ),
+    requirement=(
+        "锁定技：游戏开始时，你获得 3 点护甲；当你受到伤害后，若此次伤害是你本回合受到的"
+        "第一次伤害，你回复 1 点体力，否则你失去 1 点体力"
+    ),
+)
+"""界沮授移动版【矢北】：锁定技 ⇒ 不问是否发动、无步骤（`shapes.md` §2 第 1 行的锁定技变体）。
+
+两条钩子：``GAME_START`` 发护甲、``DAMAGE_AFTER_TAKE`` 跑与 OL 版**共用的** ``_shibei``。
+"""
+
+
+# ---------------------------------------------------------------------------
 # 界魏延移动版【狂骨】（jie-feng-batch 票 02；口径 = 移动版、显示名带「移动版」后缀）
 #
 #     当你对一名角色造成1点伤害后，若其扣减体力前你计算与其的距离不大于1，
@@ -2363,4 +2430,4 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
         )
         for skill in DAMAGE_AFTER_SKILLS
     )
-    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF, SHIBEI_DEF)
+    return (*declared, KUANGGU_DEF, JIE_KUANGGU_MOBILE_DEF, SHIBEI_DEF, JIE_SHIBEI_DEF)

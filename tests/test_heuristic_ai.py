@@ -2763,6 +2763,26 @@ def _coverage_guohuo():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_jie_jianying():
+    """界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3 起翻预发动）：一张手牌 + 一名对手。
+
+    满体力 ⇒ 牌名闭集里只有【杀】此刻可用（【闪】在出牌阶段没有目标、【桃】满体力不可用）。
+    AI 必须从两步清单填「那张牌 → 杀」的复合动作，再由同一个校验器放行；提交点之后
+    "产物打谁"的手写询问不在本场景里（只校验复合动作）。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=3, hp_max=3, hand=(dodge,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_jie_rende():
     low = tuple(_ids("lightning")[:2])
     state = build_state(
@@ -3197,6 +3217,9 @@ _COVERAGE_CASES = {
     "hero.zhangxiu.congjian": _coverage_congjian,
     # lukang-mobile 票 01：陆抗移动版 ☆【怀柔】（已翻预发动：选自己的 1 张装备牌 → 重铸）。
     "hero.lukang_mobile.huairou": _coverage_huairou,
+    # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】②（已翻预发动，两步清单：
+    # 选一张牌 → 选当作哪一张基本牌；① 的那个钩子与它共用同一个技能 id）。
+    "hero.jie_jushou_mobile.jianying": _coverage_jie_jianying,
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（已翻预发动，两步清单）。
     "hero.jie_chenqun_mobile.dingpin": _coverage_dingpin,
     # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（已翻预发动，单步清单）。
