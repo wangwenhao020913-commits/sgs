@@ -113,6 +113,33 @@
     damage_fx_4_strobe: 440, damage_fx_4_split: 44
   };
 
+  /* 六个时长字段的**字段名名单**：由 `DEFAULT_TIMING` 的键反推（票 10 起这是唯一真源）。
+   *
+   * 加一个字段（比如 4 点档再来一个时长）**只改 `DEFAULT_TIMING` 一处**：`effects.js` 读
+   * `anim.ini` 的那一侧与 `tests/test_web_static.py` 的键表都从下面两个导出派生。早先三处
+   * 各写一份名单，漏改一处**不报错**、只是静默不生效——这是最坏的一类失败。
+   *
+   * - `TIMING_FIELDS`：字段名（`total` / `flight` / `impact` / `fade` / `strobe` / `split`），
+   *   播放器用它拼 `damage_fx_<档>_<字段>`；
+   * - `TIMING_KEYS`：那张表的**全部键**（19 个，含只有 3 / 4 点档才有的 `strobe` / `split`），
+   *   测试拿它与磁盘上的 `anim.ini` 对表。
+   * 两个都是 `Object.freeze` 的数组：读方只许读，不许再各抄一份。 */
+  function timingFieldOf(key) {
+    // `damage_fx_3_strobe` → `strobe`（档号与字段名之间只有一个下划线）
+    var rest = key.slice(TIMING_PREFIX.length);
+    return rest.slice(rest.indexOf('_') + 1);
+  }
+  var TIMING_FIELDS = (function () {
+    var fields = [];
+    for (var key in DEFAULT_TIMING) {
+      if (!Object.prototype.hasOwnProperty.call(DEFAULT_TIMING, key)) continue;
+      var field = timingFieldOf(key);
+      if (fields.indexOf(field) < 0) fields.push(field);
+    }
+    return Object.freeze(fields);
+  })();
+  var TIMING_KEYS = Object.freeze(Object.keys(DEFAULT_TIMING));
+
   /* 单档总时长上限：再长会挡住牌桌（spec §演出口径）。 */
   var MAX_TOTAL_MS = 2200;
 
@@ -1005,8 +1032,9 @@
     // 那条 12 秒链（`renderAt(t)` / `?still` / `?export` 三个模式逐字节不变）。
     var clock = clockFor(opts);
     var vId = clock.id;
-    // `var T` 遮蔽模块级的 export 时间轴：`create` 内部的所有函数都读实例的这一份。
-    var T = clock.timeline;
+    // 本实例的时间轴：`export` 档就是模块级那份 `T`，`game` 档是 `gameTiming` 解出来的。
+    // 票 10：局部名从 `T` 改成 `instT`——不再遮蔽模块级的 `T`，读代码时不必分辨"这是哪个 T"。
+    var instT = clock.timeline;
     var variant = clock.variant;
     // 票 05：两块座位矩形（覆盖层量出来的武将块，**舞台坐标**）。缺省 = 参考舞台。
     var S = stageFor(opts.stage);
@@ -1031,9 +1059,9 @@
     // （那次 ~3 倍降采样会把 2px 的刀痕抹平，实机验收里就是一条灰铅笔线）。
     // 缺省仍是 1920×1080 的参考舞台（`?still` / `?export` 逐字节不变）。
     var size = viewSize(opts.view);
-    // 局部 `W` / `H` = 本实例的目标画布尺寸，遮蔽模块级的参考舞台（`viewSize` 在模块作用域
-    // 里读真值，故缺省仍是 1920×1080）。
-    var W = size.w, H = size.h;
+    // 本实例的目标画布尺寸（票 10：局部名从 `W` / `H` 改成 `instW` / `instH`，不再遮蔽模块级
+    // 的参考舞台 —— `viewSize` 在模块作用域里读真值，故缺省仍是 1920×1080）。
+    var instW = size.w, instH = size.h;
     // 票 05 R3 / R4：牌桌档的飘字——**字号两头夹 + 位置由包围盒判据反推**。
     //   字高 ∈ [SCREEN_MIN.number, 35% × 牌高]（牌高小的时候上限优先：宁可小，也不能压住
     //   体力读数；`clamp` 在上限小于下限时返回上限）；
@@ -1073,12 +1101,12 @@
     var dpr = opts.dpr || 1;
 
     var ctx = canvas.getContext('2d');
-    canvas.width = Math.round(W * dpr);
-    canvas.height = Math.round(H * dpr);
+    canvas.width = Math.round(instW * dpr);
+    canvas.height = Math.round(instH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // 场景层：先画在这上面，再做屏裂 / 屏闪的合成
-    var sc = offscreen(W * dpr, H * dpr);
+    var sc = offscreen(instW * dpr, instH * dpr);
     var sceneCanvas = sc[0], sceneCtx = sc[1];
     sceneCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
@@ -1086,7 +1114,7 @@
     // 就建一次 1920×1080 的纸底 + 两张 460×644 的牌是几十毫秒的主线卡顿（票 05 起
     // 每次伤害都要建一个实例，故缓存到模块级；`drawImage` 只读，多实例共用安全）。
     var paper = bare ? null
-      : sharedImage('paper:' + W + 'x' + H, function () { return paintPaper(W, H, 21); });
+      : sharedImage('paper:' + instW + 'x' + instH, function () { return paintPaper(instW, instH, 21); });
     var heroSrc = bare ? null : sharedImage('heroSrc', function () { return paintHeroCard(HEROES.src, 401); });
     var heroDst = bare ? null : sharedImage('heroDst', function () { return paintHeroCard(HEROES.dst, 733); });
 
@@ -1097,8 +1125,8 @@
     var fadeStart = variant.fadeStart, fadeEnd = variant.fadeEnd;
     var halfPaths = {};
 
-    function drawCardsAndFx(c, t, S) {
-      var age = t - T.IMPACT;
+    function drawCardsAndFx(c, t, stage) {
+      var age = t - instT.IMPACT;
 
       // 震屏（只震牌面上的东西，纸底不动）
       var sx = 0, sy = 0;
@@ -1114,8 +1142,8 @@
       // 两张武将牌（阴影已烘进图里，这里只贴图）：贴进本实例的两块座位矩形。
       // `bare`（牌桌档）**不画**——牌桌上那两张是真实的武将块，画上去就是"真牌 + 假牌"两层。
       if (heroSrc && heroDst) {
-        drawHeroCard(c, heroSrc, S.src);
-        drawHeroCard(c, heroDst, S.dst);
+        drawHeroCard(c, heroSrc, stage.src);
+        drawHeroCard(c, heroDst, stage.dst);
       }
 
       // 出剑瞬间，出剑方整块亮一下
@@ -1125,19 +1153,19 @@
         c.globalAlpha = srcFlash;
         c.globalCompositeOperation = 'lighter';
         c.fillStyle = 'rgba(210,228,255,0.35)';
-        roundRect(c, S.src.cx - S.src.w / 2, S.src.cy - S.src.h / 2, S.src.w, S.src.h, 14);
+        roundRect(c, stage.src.cx - stage.src.w / 2, stage.src.cy - stage.src.h / 2, stage.src.w, stage.src.h, 14);
         c.fill();
         c.restore();
       }
 
       // ---- 中剑方牌内 ----
       c.save();
-      roundRect(c, S.dst.cx - S.dst.w / 2, S.dst.cy - S.dst.h / 2, S.dst.w, S.dst.h, 14);
+      roundRect(c, stage.dst.cx - stage.dst.w / 2, stage.dst.cy - stage.dst.h / 2, stage.dst.w, stage.dst.h, 14);
       c.clip();
 
       if (age >= 0 && age < 0.5) {
         c.fillStyle = 'rgba(28,26,23,' + (0.09 * Math.exp(-age * 9)).toFixed(4) + ')';
-        c.fillRect(S.dst.cx - S.dst.w / 2, S.dst.cy - S.dst.h / 2, S.dst.w, S.dst.h);
+        c.fillRect(stage.dst.cx - stage.dst.w / 2, stage.dst.cy - stage.dst.h / 2, stage.dst.w, stage.dst.h);
       }
 
       if (age > 0) {
@@ -1153,7 +1181,7 @@
             c.globalCompositeOperation = 'multiply';
             for (var q = 0; q < 2; q++) {
               var mp = scar.mid[Math.floor((q + 0.5) / 2 * (scar.mid.length - 1))];
-              var R = (40 + q * 22) * S.u;
+              var R = (40 + q * 22) * stage.u;
               var gr = c.createRadialGradient(mp[0], mp[1], 0, mp[0], mp[1], R);
               gr.addColorStop(0, rgba(C.red, 0.13 * spread * a));
               gr.addColorStop(0.55, rgba(C.red, 0.05 * spread * a));
@@ -1164,26 +1192,26 @@
             c.restore();
           }
         }
-        drawDrops(c, drops, t, T);
+        drawDrops(c, drops, t, instT);
       }
       c.restore();
 
       // ---- 剑意 / 剑光 / 命中光（画在牌之上）----
-      drawCharge(c, t, variant, T, S);
-      drawSwordLight(c, t, variant, T, S);
+      drawCharge(c, t, variant, instT, stage);
+      drawSwordLight(c, t, variant, instT, stage);
 
       if (age >= 0 && age < 0.34) {
         var ba = Math.pow(1 - age / 0.34, 1.8);
-        var BR = (120 + 30 * variant.dmg) * S.u * (0.5 + 0.5 * eOut(age / 0.1));
-        var bg = c.createRadialGradient(S.b.x, S.b.y, 0, S.b.x, S.b.y, BR);
+        var BR = (120 + 30 * variant.dmg) * stage.u * (0.5 + 0.5 * eOut(age / 0.1));
+        var bg = c.createRadialGradient(stage.b.x, stage.b.y, 0, stage.b.x, stage.b.y, BR);
         bg.addColorStop(0, 'rgba(255,255,255,' + (0.75 * ba) + ')');
         bg.addColorStop(0.35, 'rgba(240,246,255,' + (0.28 * ba) + ')');
         bg.addColorStop(1, 'rgba(240,246,255,0)');
         c.fillStyle = bg;
-        c.beginPath(); c.arc(S.b.x, S.b.y, BR, 0, Math.PI * 2); c.fill();
+        c.beginPath(); c.arc(stage.b.x, stage.b.y, BR, 0, Math.PI * 2); c.fill();
       }
 
-      drawNumber(c, variant, t, T, S.dst, txt, numberOffset);
+      drawNumber(c, variant, t, instT, stage.dst, txt, numberOffset);
       c.restore();
     }
 
@@ -1201,8 +1229,8 @@
 
     function renderScene(c, target) {
       target.setTransform(dpr, 0, 0, dpr, 0, 0);
-      target.clearRect(0, 0, W, H);
-      target.drawImage(paper, 0, 0, W, H);
+      target.clearRect(0, 0, instW, instH);
+      target.drawImage(paper, 0, 0, instW, instH);
       drawCardsAndFx(target, t, S);
     }
 
@@ -1211,8 +1239,8 @@
 
       // 不劈屏的档位：直接画在主画布上，省掉一次全屏搬运
       if (variant.split <= 0) {
-        ctx.clearRect(0, 0, W, H);
-        if (paper) ctx.drawImage(paper, 0, 0, W, H);
+        ctx.clearRect(0, 0, instW, instH);
+        if (paper) ctx.drawImage(paper, 0, 0, instW, instH);
         drawCardsAndFx(ctx, t, S);
         postProcess(ctx, t);
         return;
@@ -1220,14 +1248,14 @@
 
       // 要劈屏：先画到场景层
       sceneCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      sceneCtx.clearRect(0, 0, W, H);
-      if (paper) sceneCtx.drawImage(paper, 0, 0, W, H);
+      sceneCtx.clearRect(0, 0, instW, instH);
+      if (paper) sceneCtx.drawImage(paper, 0, 0, instW, instH);
       drawCardsAndFx(sceneCtx, t, S);
-      ctx.clearRect(0, 0, W, H);
+      ctx.clearRect(0, 0, instW, instH);
 
       var splitK = 0;
       if (variant.split > 0) {
-        splitK = clamp(ss(T.IMPACT, T.IMPACT + 0.10, t) - ss(T.IMPACT + 0.55, T.IMPACT + 1.15, t), 0, 1);
+        splitK = clamp(ss(instT.IMPACT, instT.IMPACT + 0.10, t) - ss(instT.IMPACT + 0.55, instT.IMPACT + 1.15, t), 0, 1);
       }
       var sep = variant.split * splitK;
 
@@ -1259,20 +1287,20 @@
         // 那是一次不透明度 1 的全屏填充，等于把牌桌盖住（实机验收被挡的就是这一类）。
         if (!bare) {
           ctx.fillStyle = '#0d0c0b';
-          ctx.fillRect(0, 0, W, H);
+          ctx.fillRect(0, 0, instW, instH);
         }
 
         // 上半天 / 下半天（Path2D 缓存，别每帧重建多边形）
         ctx.save();
         ctx.clip(halfPaths.up);
         ctx.translate(-nx * sep, -ny * sep);
-        ctx.drawImage(sceneCanvas, 0, 0, W, H);
+        ctx.drawImage(sceneCanvas, 0, 0, instW, instH);
         ctx.restore();
 
         ctx.save();
         ctx.clip(halfPaths.down);
         ctx.translate(nx * sep, ny * sep);
-        ctx.drawImage(sceneCanvas, 0, 0, W, H);
+        ctx.drawImage(sceneCanvas, 0, 0, instW, instH);
         ctx.restore();
 
         // 切口：外黑边 + 白光 + 热芯
@@ -1291,26 +1319,26 @@
         ctx.stroke();
         ctx.restore();
       } else {
-        ctx.drawImage(sceneCanvas, 0, 0, W, H);
+        ctx.drawImage(sceneCanvas, 0, 0, instW, instH);
       }
 
       postProcess(ctx, t);
     }
 
     function postProcess(c, t) {
-      var age = t - T.IMPACT;
+      var age = t - instT.IMPACT;
 
       // 命中白闪
       if (age >= 0 && age < 0.16) {
         var fa = Math.pow(1 - age / 0.16, 2) * (0.30 + 0.06 * variant.dmg);
         c.fillStyle = 'rgba(255,255,255,' + fa.toFixed(4) + ')';
-        c.fillRect(0, 0, W, H);
+        c.fillRect(0, 0, instW, instH);
       }
 
       // 黑白屏闪（3 点起）
-      if (variant.strobe > 0 && t >= T.IMPACT && t <= T.IMPACT + variant.strobe) {
+      if (variant.strobe > 0 && t >= instT.IMPACT && t <= instT.IMPACT + variant.strobe) {
         // 15Hz：30fps 下正好一明一暗各两帧，不会和帧率打架
-        var phase = Math.floor((t - T.IMPACT) * 15);
+        var phase = Math.floor((t - instT.IMPACT) * 15);
         var bright = phase % 2 === 0;
 
         if (bare) {
@@ -1325,7 +1353,7 @@
             c.globalAlpha = 0.34;
             c.fillStyle = '#14120f';
           }
-          c.fillRect(0, 0, W, H);
+          c.fillRect(0, 0, instW, instH);
           c.restore();
           return;   // 下面那段是素材库档的整屏去色 + 压暗，牌桌档不参与
         }
@@ -1334,7 +1362,7 @@
         c.save();
         c.globalCompositeOperation = 'saturation';
         c.fillStyle = 'hsl(0, 0%, 50%)';
-        c.fillRect(0, 0, W, H);
+        c.fillRect(0, 0, instW, instH);
         c.restore();
 
         c.save();
@@ -1346,14 +1374,14 @@
           c.globalAlpha = 0.12;
           c.fillStyle = '#ffffff';
         }
-        c.fillRect(0, 0, W, H);
+        c.fillRect(0, 0, instW, instH);
         c.restore();
       }
     }
 
     return {
-      draw: draw, duration: T.DURATION, variant: vId, width: W, height: H,
-      profile: clock.profile, timeline: T, timing: clock.ms,
+      draw: draw, duration: instT.DURATION, variant: vId, width: instW, height: instH,
+      profile: clock.profile, timeline: instT, timing: clock.ms,
       // 票 05：本实例的舞台（座位矩形 / 构图比例 / 剑光航线）与飘字文案。播放器用
       // `duration` 定时摘层（= `anim.ini` 的 `total`），票 06 的音效读同一份 `timeline`。
       stage: S, number: txt, bare: bare,
@@ -1379,8 +1407,11 @@
     WIDTH: W, HEIGHT: H, SRC: SRC, DST: DST,
     // 票 04：游戏档的时长表。`DEFAULT_TIMING` = anim.ini 那 19 个键的内置默认，
     // `gameTiming(variant, flatMap)` = 解算 + 钳制后的秒级时间轴（effects.js / 票 06 读它）。
+    // 票 10：`TIMING_FIELDS` / `TIMING_KEYS` 由 `DEFAULT_TIMING` 的键生成——字段名名单的
+    // **单一真源**，`effects.js` 与 `tests/test_web_static.py` 都只读这两个，不再各写一份。
     DEFAULT_TIMING: DEFAULT_TIMING, MAX_TOTAL_MS: MAX_TOTAL_MS,
-    TIMING_PREFIX: TIMING_PREFIX, gameTiming: gameTiming,
+    TIMING_PREFIX: TIMING_PREFIX, TIMING_FIELDS: TIMING_FIELDS, TIMING_KEYS: TIMING_KEYS,
+    gameTiming: gameTiming,
     // 票 05 R2：牌桌档的落屏下限（构图比例不许小于它）与三样下限尺寸（CSS px）。
     SCREEN_MIN: SCREEN_MIN, COMPOSITION_FLOOR: COMPOSITION_FLOOR
   };

@@ -785,25 +785,27 @@ def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
 # 1. `anim.ini` 的键集合与不变式（`flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`）；
 # 2. 真 `anim.js` 解析器把 19 个键读进 `animConfig`、**不**报"未知键"（否则用户改了没生效）；
 # 3. 真 `fx-core.js` 的 `SgsDamageFX.gameTiming` 解算与四条钳制（含缺键 / 非法值回默认）。
+#
+# **票 10 起键表不再写在测试里**：`SgsDamageFX.TIMING_KEYS`（= `DEFAULT_TIMING` 的键）是
+# 唯一真源，这些用例一律从上面那个 node 探针（`damage_fx_probe`）派生期望值，再与磁盘上的
+# `anim.ini` 对表。三处各写一份名单的时代，加字段漏改一处只会静默不生效。
 # ---------------------------------------------------------------------------
 
 _DAMAGE_FX_VARIANTS = (1, 2, 3, 4)
-_DAMAGE_FX_TIMING_FIELDS = ("total", "flight", "impact", "fade")
-_DAMAGE_FX_INI_KEYS = {
-    f"damage_fx_{variant}_{field}"
-    for variant in _DAMAGE_FX_VARIANTS
-    for field in _DAMAGE_FX_TIMING_FIELDS
-} | {"damage_fx_3_strobe", "damage_fx_4_strobe", "damage_fx_4_split"}
-"""票 04 的 19 个键：四档 × 四个时长 + 3/4 点的屏闪 + 4 点的劈屏错位。"""
 
 
-def test_anim_ini_lists_the_damage_fx_durations_per_variant() -> None:
-    """19 个键齐全、可解析，且每档都满足 `flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`。"""
+def test_anim_ini_lists_the_damage_fx_durations_per_variant(damage_fx_probe: dict) -> None:
+    """19 个键齐全、可解析，且每档都满足 `flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`。
+
+    键表**不是**写在测试里的第二份清单：期望值来自 `fx-core.js` 的 `DEFAULT_TIMING`
+    （票 10 的单一真源），这里只把它与磁盘上的 `anim.ini` 对表。
+    """
     entries = _ini_entries()
     damage = {key: value for key, value in entries.items() if key.startswith("damage_fx_")}
-    assert set(damage) == _DAMAGE_FX_INI_KEYS, (
-        f"damage-fx 的时长键必须与票面 19 个一致：缺 {sorted(_DAMAGE_FX_INI_KEYS - set(damage))}；"
-        f"多 {sorted(set(damage) - _DAMAGE_FX_INI_KEYS)}"
+    expected = set(damage_fx_probe["timingKeys"])
+    assert set(damage) == expected, (
+        f"damage-fx 的时长键必须与 fx-core 的 `DEFAULT_TIMING` 一致："
+        f"缺 {sorted(expected - set(damage))}；多 {sorted(set(damage) - expected)}"
     )
     values = {key: float(value) for key, value in damage.items()}
     for variant in _DAMAGE_FX_VARIANTS:
@@ -836,29 +838,41 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
-const noteNode = { textContent: "", hidden: true };
-const context = vm.createContext({
-  console,
-  setTimeout,
-  clearTimeout,
-  fetch: async () => ({ ok: true, text: async () => ini }),
-  document: {
-    getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
-    createElement: () => ({
-      style: {},
-      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-      appendChild() {},
-      setAttribute() {},
-    }),
-  },
-});
-context.globalThis = context;
-context.window = context;
-context.$ = (id) => context.document.getElementById(id);
-// 与页面一致的加载方式：每份脚本单独编译，同一个 context 的全局词法作用域跨脚本可见。
-for (const name of ["anim.js", "fx-core.js", "effects.js"]) {
-  vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 每份脚本单独编译、同一个 context 的全局词法作用域跨脚本可见——与页面一致的加载方式。
+ * 每次都起**新的** sandbox：`fx-core.js` 全是 `var` / 函数声明，同一 context 载两遍会互相
+ * 覆盖，而下面那条反证必须从零起一份打过补丁的。 */
+function makeSandbox() {
+  const noteNode = { textContent: "", hidden: true };
+  const context = vm.createContext({
+    console,
+    setTimeout,
+    clearTimeout,
+    fetch: async () => ({ ok: true, text: async () => ini }),
+    document: {
+      getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+      createElement: () => ({
+        style: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        appendChild() {},
+        setAttribute() {},
+      }),
+    },
+  });
+  context.globalThis = context;
+  context.window = context;
+  context.$ = (id) => context.document.getElementById(id);
+  return context;
 }
+
+function load(context, name, source) {
+  vm.runInContext(source ?? readFileSync(staticPath(name), "utf8"), context, { filename: name });
+}
+
+/* ------------------------------------------------- ① 真脚本：正常那一份 ---- */
+const context = makeSandbox();
+for (const name of ["anim.js", "fx-core.js", "effects.js"]) load(context, name);
 const report = await vm.runInContext(
   `(async () => {
      await animReady;
@@ -880,6 +894,10 @@ const report = await vm.runInContext(
        animConfigKeys: Object.keys(animConfig),
        defaults: fx.DEFAULT_TIMING,
        maxTotal: fx.MAX_TOTAL_MS,
+       // 票 10：字段名名单的单一真源（由 DEFAULT_TIMING 的键生成，冻结数组）。
+       timingFields: fx.TIMING_FIELDS,
+       timingKeys: fx.TIMING_KEYS,
+       timingFrozen: [Object.isFrozen(fx.TIMING_FIELDS), Object.isFrozen(fx.TIMING_KEYS)],
        resolved,
        clamps,
        effectsTiming: {
@@ -900,7 +918,36 @@ const report = await vm.runInContext(
   context,
   { filename: "damage_fx_probe.js" },
 );
-process.stdout.write(report);
+
+/* ------------------- ② 反证：把 fx-core 的一个字段删掉，读取面必须跟着少一个 ---- */
+/* `damage_fx_4_split` 是 `split` 字段**唯一**的键：删掉它，`DEFAULT_TIMING` 里就没有
+ * `split`，由键生成的 `TIMING_FIELDS` 随之少一个 —— `effects.js` 也就不再去读
+ * `damage_fx_4_split`。这正是票 10 要证明的"真的收成了一处"。 */
+const source = readFileSync(staticPath("fx-core.js"), "utf8");
+const patchedSource = source.replace(/(\n|,)\s*damage_fx_4_split:\s*\d+/, "");
+const patched = makeSandbox();
+load(patched, "anim.js");
+load(patched, "fx-core.js", patchedSource);
+load(patched, "effects.js");
+const negative = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     return JSON.stringify({
+       fields: SgsDamageFX.TIMING_FIELDS,
+       keys: SgsDamageFX.TIMING_KEYS,
+       four: damageFxTiming(4),
+       // 缺键的画面并不会变：split 退回 VARIANTS[4].split。所以"静默不生效"只能靠名单比对抓。
+       resolvedSplit: SgsDamageFX.gameTiming(4, damageFxTiming(4)).ms.split,
+     });
+   })()`,
+  patched,
+  { filename: "damage_fx_negative.js" },
+);
+
+process.stdout.write(JSON.stringify({
+  ...JSON.parse(report),
+  negative: { patched: patchedSource !== source, ...JSON.parse(negative) },
+}));
 """
 
 
@@ -942,8 +989,8 @@ def test_the_damage_fx_durations_reach_anim_config_without_unknown_key_notes(dam
     assert "未知键" not in probe["note"], (
         f"damage_fx_* 不得被当成未知键（页面提示：{probe['note']}）"
     )
-    missing = _DAMAGE_FX_INI_KEYS - set(probe["animConfigKeys"])
-    assert not missing, f"这 19 个键必须进 animConfig，缺：{sorted(missing)}"
+    missing = set(probe["timingKeys"]) - set(probe["animConfigKeys"])
+    assert not missing, f"这些键必须进 animConfig（否则用户改了不生效），缺：{sorted(missing)}"
 
 
 def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_fx_probe: dict) -> None:
@@ -959,18 +1006,80 @@ def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_
         if key.startswith("damage_fx_")
     }
     four = probe["effectsTiming"]["4"]
-    assert set(four) == {
-        f"damage_fx_4_{field}" for field in _DAMAGE_FX_TIMING_FIELDS
-    } | {"damage_fx_4_strobe", "damage_fx_4_split"}, f"4 点档的六个量都要搬过去：{sorted(four)}"
+    # 期望值 = fx-core 导出的字段名名单（票 10 的单一真源），测试里不再另写一份六个名字。
+    assert set(four) == {f"damage_fx_4_{field}" for field in probe["timingFields"]}, (
+        f"4 点档的六个量都要搬过去（名单 = SgsDamageFX.TIMING_FIELDS）：{sorted(four)}"
+    )
     for key, value in four.items():
         assert value == ini[key], f"{key} 必须原样来自 anim.ini"
     one = probe["effectsTiming"]["1"]
-    assert set(one) == {f"damage_fx_1_{field}" for field in _DAMAGE_FX_TIMING_FIELDS}, (
+    assert set(one) == {key for key in ini if key.startswith("damage_fx_1_")}, (
         f"1 点档没有 strobe / split 的键，就不该硬造：{sorted(one)}"
     )
     assert probe["effectsTiming"]["resolvedFromEffects"] == pytest.approx(
         ini["damage_fx_4_total"] / 1000
     ), "把搬过来的表交给 fx-core，解算出同一段 4 点档时长"
+
+
+def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: dict) -> None:
+    """票 10：六个字段名的名单只有 `fx-core.js` 一份，`effects.js` 与本测试都从它派生。
+
+    三件事：
+    1. 名单确实由 `DEFAULT_TIMING` 的键生成，且是冻结数组（读方只许读）；
+    2. `effects.js` 里**没有**第二份手写清单——它的读取面完全等于导出的字段名；
+    3. **反证**：把 `DEFAULT_TIMING` 里的 `damage_fx_4_split` 删掉，`effects.js` 的读取面
+       随之少一个 `damage_fx_4_split`，而磁盘上的 `anim.ini` 仍有这一行 ⇒ 键表比对会红。
+       缺键时画面照样是 `VARIANTS[4].split = 44`——正是这种"静默不生效"，只能靠名单兜住。
+    """
+    probe = damage_fx_probe
+    fields = probe["timingFields"]
+    defaults = probe["defaults"]
+
+    # 1) 由 `DEFAULT_TIMING` 的键生成（`damage_fx_<档>_<字段>`），次序按首次出现。
+    derived: list[str] = []
+    for key in defaults:
+        field = key.split("_", 3)[3]
+        if field not in derived:
+            derived.append(field)
+    assert list(fields) == derived, (
+        f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(fields)}"
+    )
+    assert list(probe["timingKeys"]) == list(defaults), (
+        "`TIMING_KEYS` 必须就是 `DEFAULT_TIMING` 的键"
+    )
+    assert probe["timingFrozen"] == [True, True], (
+        "两个导出必须是冻结数组（读方只许读，不许再各改一份）"
+    )
+
+    # 2) `effects.js` 没有第二份手写清单：任何数组字面量里都凑不出两个字段名。
+    effects = _strip_js_comments((STATIC_DIR / "effects.js").read_text(encoding="utf-8"))
+    assert re.search(r"\.TIMING_FIELDS\b", effects), (
+        "effects.js 必须从 `SgsDamageFX.TIMING_FIELDS` 读字段名，而不是自己写一份"
+    )
+    for array in re.findall(r"\[[^\[\]]*\]", effects):
+        repeated = [field for field in fields if f'"{field}"' in array]
+        assert len(repeated) < 2, f"effects.js 里又手写了一份字段名清单：{array.strip()}"
+
+    # 3) 反证：删掉 fx-core 里唯一的 `split` 键 ⇒ 读取面跟着少一个。
+    negative = probe["negative"]
+    assert negative["patched"] is True, (
+        "反证没生效：补丁正则没匹配到 `damage_fx_4_split`（`DEFAULT_TIMING` 的排版变了？）"
+    )
+    assert "split" in fields and "damage_fx_4_split" in probe["timingKeys"], (
+        "前提：`split` 在导出的名单里"
+    )
+    assert "split" not in negative["fields"], (
+        "删掉唯一的 `split` 键后，由键生成的字段名单必须少一个"
+    )
+    assert "damage_fx_4_split" not in negative["keys"], "键表也必须跟着少一个"
+    assert "damage_fx_4_split" not in negative["four"], (
+        "effects.js 的读取面必须跟着 fx-core 走：键删了就不该再去读它"
+    )
+    ini_keys = {key for key in _ini_entries() if key.startswith("damage_fx_")}
+    assert "damage_fx_4_split" in ini_keys, "前提：磁盘 anim.ini 仍有这一行（否则反证无意义）"
+    assert negative["resolvedSplit"] == 44, (
+        "缺键时画面仍是 VARIANTS[4].split = 44：这种失败不报错，只能由键表比对抓住"
+    )
 
 
 def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_probe: dict) -> None:
@@ -981,9 +1090,11 @@ def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_prob
         for key, value in _ini_entries().items()
         if key.startswith("damage_fx_")
     }
-    assert set(probe["defaults"]) == _DAMAGE_FX_INI_KEYS, (
-        "fx-core 的内置默认必须恰好覆盖这 19 个键："
-        f"缺 {sorted(_DAMAGE_FX_INI_KEYS - set(probe['defaults']))}"
+    # 期望值来自磁盘上的 `anim.ini`（独立于 fx-core 的那一侧），不是第三份手写清单。
+    assert set(probe["defaults"]) == set(ini), (
+        "fx-core 的内置默认必须恰好覆盖 anim.ini 的 damage_fx_* 键："
+        f"缺 {sorted(set(ini) - set(probe['defaults']))}；"
+        f"多 {sorted(set(probe['defaults']) - set(ini))}"
     )
     assert {key: int(value) for key, value in ini.items()} == probe["defaults"], (
         "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"

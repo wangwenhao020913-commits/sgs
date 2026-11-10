@@ -556,8 +556,19 @@ function applyRecordEffects(record, querySeat) {
  *
  * 每档四个时长（`total` / `flight` / `impact` / `fade`）**各自独立**，改 4 点档不会牵动
  * 1~3 点档；`strobe` 只有 3 / 4 点有，`split` 只有 4 点有。
+ *
+ * **字段名名单不在这份文件里维护**（票 10）：真源是 `fx-core.js` 的 `DEFAULT_TIMING`，它导出
+ * `SgsDamageFX.TIMING_FIELDS`（由那张表的键生成）。早先这里抄了第二份清单，加字段时漏改一处
+ * **不报错**、只是静默不生效——现在只剩一处。
+ *
+ * **调用时取**：`index.html` 里 `fx-core.js` 排在 `effects.js` **之后**（脚本清单第 9 位 vs
+ * 倒数第三），文件顶层此时还没有 `SgsDamageFX`；`damageFxTiming` 是播放器运行时调的，那时
+ * 两份都在。
  */
-const DAMAGE_FX_TIMING_FIELDS = ["total", "flight", "impact", "fade", "strobe", "split"];
+function damageFxTimingFields() {
+  const api = window.SgsDamageFX;
+  return (api && api.TIMING_FIELDS) || [];
+}
 
 /** 从生效中的 `anim.ini` 表取**某一档**的时长（毫秒），原样交给 `SgsDamageFX`。
  *
@@ -573,7 +584,7 @@ function damageFxTiming(variant) {
   const timing = {};
   if (typeof animTiming !== "function") return timing;
   const id = Math.max(1, Math.min(4, Math.round(Number(variant) || 1)));
-  for (const field of DAMAGE_FX_TIMING_FIELDS) {
+  for (const field of damageFxTimingFields()) {
     const key = `damage_fx_${id}_${field}`;
     const value = animTiming(key);
     if (value !== undefined && value !== null && Number.isFinite(Number(value))) {
