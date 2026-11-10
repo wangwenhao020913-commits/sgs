@@ -65,7 +65,7 @@ function wireOverlayToggle(button, panel, onOpen) {
  * 不报错、但一点声音都没有。所以解锁挂在**一次性 `pointerdown`** 上（用户点哪里都算手势，
  * 比只绑「开始对局」成功率高），并且 `resume()` 必须与手势**同一个 tick**：放进 `fetch`
  * 回调 / 定时器 / rAF 里在 iOS / Safari 上仍然挂起。故这里**同步**交给
- * `effects.js:damageSfxUnlock()`，中间不经过任何 await / 计时器。
+ * `sfx-ui.js:damageSfxUnlock()`，中间不经过任何 await / 计时器。
  *
  * 缺省静音：开关关着时连 `AudioContext` 都不建；用户点开顶栏「♪」那一下同样是手势。
  */

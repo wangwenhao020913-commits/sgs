@@ -13,11 +13,11 @@
  * - **音效开关不在这份文件里**（damage-fx 票 08）：顶栏「♪」的状态机 / `localStorage` 记忆 /
  *   `?audiotest=1` 住在 `sfx-ui.js`。
  * - **伤害演出也不在这份文件里**（damage-fx 票 09）：排播 / 座位几何 / 画布生命周期住在
- *   `damage-fx.js`。本文件反过来往它**借三个**读布局的小工具（`rectOf` / `heroBlockFor` /
- *   `descendantWithClass`；`stageNow` 来自 `session.js`）——即依赖方向只有「伤害 → 动效」。
- *   反方向**零调用**：座位重建后的版式重检由 `table.js:renderTable` 在重绘末尾显式调
- *   `damageDropStalePlays()`，换局清场由 `session.js:commitView` 显式调 `clearDamageFx()`
- *   （这两处原来是本文件里的反向钩子）。
+ *   `damage-fx.js`。反过来是 `damage-fx.js` 往本文件**借三个**读布局的小工具（`rectOf` /
+ *   `heroBlockFor` / `descendantWithClass` 由本文件定义，`stageNow` 由 `session.js` 提供），
+ *   即依赖方向只有「伤害 → 动效」。动效层对伤害层**零调用**：座位重建后的版式重检由
+ *   `table.js:renderTable` 在重绘末尾显式调 `damageDropStalePlays()`，换局清场由
+ *   `session.js:commitView` 显式调 `clearDamageFx()`（这两处原来是本文件里的反向钩子）。
  * - 页面顺序：本文件 → `damage-fx.js` → … → `fx-core.js` → `sfx.js` → `sfx-ui.js` →
  *   `main.js`。
  */

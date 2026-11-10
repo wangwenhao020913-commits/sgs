@@ -115,7 +115,7 @@
 
   /* 六个时长字段的**字段名名单**：由 `DEFAULT_TIMING` 的键反推（票 10 起这是唯一真源）。
    *
-   * 加一个字段（比如 4 点档再来一个时长）**只改 `DEFAULT_TIMING` 一处**：`effects.js` 读
+   * 加一个字段（比如 4 点档再来一个时长）**只改 `DEFAULT_TIMING` 一处**：`damage-fx.js` 读
    * `anim.ini` 的那一侧与 `tests/test_web_static.py` 的键表都从下面两个导出派生。早先三处
    * 各写一份名单，漏改一处**不报错**、只是静默不生效——这是最坏的一类失败。
    *
@@ -1008,7 +1008,7 @@
    * ============================================================== */
 
   /* 本实例的目标画布尺寸（CSS px）：缺省 = 参考舞台 1920×1080。
-   * 牌桌档由 `effects.js` 传覆盖层的实际尺寸进来（见 `view` 的注释）。 */
+   * 牌桌档由 `damage-fx.js` 传覆盖层的实际尺寸进来（见 `view` 的注释）。 */
   function viewSize(view) {
     var w = view ? Number(view.width) : NaN;
     var h = view ? Number(view.height) : NaN;
@@ -1054,7 +1054,7 @@
     // 就是一块不透明的米色板（整个牌桌被盖住）＋ 与真实武将不符的假牌；故 `bare: true`
     // 时两样都不画，牌桌透得出来。缺省仍是素材库那条链（逐字节不变）。
     var bare = opts.bare === true;
-    // 票 05 R2：牌桌档的坐标空间 = **覆盖层的 CSS 像素**（`view` 由 effects.js 给），
+    // 票 05 R2：牌桌档的坐标空间 = **覆盖层的 CSS 像素**（`view` 由 `damage-fx.js` 给），
     // 画布按 `view × dpr` 建、内部 `drawImage` 是 1:1 合成——不再"1920 舞台画完再缩小"
     // （那次 ~3 倍降采样会把 2px 的刀痕抹平，实机验收里就是一条灰铅笔线）。
     // 缺省仍是 1920×1080 的参考舞台（`?still` / `?export` 逐字节不变）。
@@ -1406,9 +1406,9 @@
     create: create, VARIANTS: VARIANTS, TIMELINE: T, COLORS: C,
     WIDTH: W, HEIGHT: H, SRC: SRC, DST: DST,
     // 票 04：游戏档的时长表。`DEFAULT_TIMING` = anim.ini 那 19 个键的内置默认，
-    // `gameTiming(variant, flatMap)` = 解算 + 钳制后的秒级时间轴（effects.js / 票 06 读它）。
+    // `gameTiming(variant, flatMap)` = 解算 + 钳制后的秒级时间轴（`damage-fx.js` / 票 06 读它）。
     // 票 10：`TIMING_FIELDS` / `TIMING_KEYS` 由 `DEFAULT_TIMING` 的键生成——字段名名单的
-    // **单一真源**，`effects.js` 与 `tests/test_web_static.py` 都只读这两个，不再各写一份。
+    // **单一真源**，`damage-fx.js` 与 `tests/test_web_static.py` 都只读这两个，不再各写一份。
     DEFAULT_TIMING: DEFAULT_TIMING, MAX_TOTAL_MS: MAX_TOTAL_MS,
     TIMING_PREFIX: TIMING_PREFIX, TIMING_FIELDS: TIMING_FIELDS, TIMING_KEYS: TIMING_KEYS,
     gameTiming: gameTiming,

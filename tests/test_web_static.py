@@ -903,10 +903,10 @@ const report = await vm.runInContext(
        timingFrozen: [Object.isFrozen(fx.TIMING_FIELDS), Object.isFrozen(fx.TIMING_KEYS)],
        resolved,
        clamps,
-       effectsTiming: {
+       damageFxTiming: {
          1: damageFxTiming(1),
          4: damageFxTiming(4),
-         resolvedFromEffects: fx.gameTiming(4, damageFxTiming(4)).timeline.DURATION,
+         resolvedFromDamageFx: fx.gameTiming(4, damageFxTiming(4)).timeline.DURATION,
        },
        // 评审修复：null / 缺字段 = 无属性（三层文档同一句话），只有 FIRE / THUNDER 不播。
        naturePlayable: {
@@ -924,7 +924,7 @@ const report = await vm.runInContext(
 
 /* ------------------- ② 反证：把 fx-core 的一个字段删掉，读取面必须跟着少一个 ---- */
 /* `damage_fx_4_split` 是 `split` 字段**唯一**的键：删掉它，`DEFAULT_TIMING` 里就没有
- * `split`，由键生成的 `TIMING_FIELDS` 随之少一个 —— `effects.js` 也就不再去读
+ * `split`，由键生成的 `TIMING_FIELDS` 随之少一个 —— `damage-fx.js` 也就不再去读
  * `damage_fx_4_split`。这正是票 10 要证明的"真的收成了一处"。 */
 const source = readFileSync(staticPath("fx-core.js"), "utf8");
 const patchedSource = source.replace(/(\n|,)\s*damage_fx_4_split:\s*\d+/, "");
@@ -998,7 +998,10 @@ def test_the_damage_fx_durations_reach_anim_config_without_unknown_key_notes(dam
 
 
 def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_fx_probe: dict) -> None:
-    """`effects.js:damageFxTiming` 只搬数字：有键的档给全六个量，没键的档不硬造。
+    """`damage-fx.js:damageFxTiming` 只搬数字：有键的档给全六个量，没键的档不硬造。
+
+    票 09 起这个函数住 `damage-fx.js`（测试函数名保留原名：票 04 的 `## Answer` 与
+    acceptance-map 都引用它，重命名会让 `check_acceptance` 红）。
 
     这一层不兜底、不钳制（默认与钳制都在 `fx-core.js`）：缺 `damage_fx_1_strobe` 时返回的
     表里就**没有**这个键，fx-core 退 `VARIANTS[1].strobe = 0`。票 05 的播放器读它。
@@ -1009,18 +1012,18 @@ def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_
         for key, value in _ini_entries().items()
         if key.startswith("damage_fx_")
     }
-    four = probe["effectsTiming"]["4"]
+    four = probe["damageFxTiming"]["4"]
     # 期望值 = fx-core 导出的字段名名单（票 10 的单一真源），测试里不再另写一份六个名字。
     assert set(four) == {f"damage_fx_4_{field}" for field in probe["timingFields"]}, (
         f"4 点档的六个量都要搬过去（名单 = SgsDamageFX.TIMING_FIELDS）：{sorted(four)}"
     )
     for key, value in four.items():
         assert value == ini[key], f"{key} 必须原样来自 anim.ini"
-    one = probe["effectsTiming"]["1"]
+    one = probe["damageFxTiming"]["1"]
     assert set(one) == {key for key in ini if key.startswith("damage_fx_1_")}, (
         f"1 点档没有 strobe / split 的键，就不该硬造：{sorted(one)}"
     )
-    assert probe["effectsTiming"]["resolvedFromEffects"] == pytest.approx(
+    assert probe["damageFxTiming"]["resolvedFromDamageFx"] == pytest.approx(
         ini["damage_fx_4_total"] / 1000
     ), "把搬过来的表交给 fx-core，解算出同一段 4 点档时长"
 
@@ -1079,7 +1082,7 @@ def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: 
     )
     assert "damage_fx_4_split" not in negative["keys"], "键表也必须跟着少一个"
     assert "damage_fx_4_split" not in negative["four"], (
-        "effects.js 的读取面必须跟着 fx-core 走：键删了就不该再去读它"
+        "damage-fx.js 的读取面必须跟着 fx-core 走：键删了就不该再去读它"
     )
     ini_keys = {key for key in _ini_entries() if key.startswith("damage_fx_")}
     assert "damage_fx_4_split" in ini_keys, "前提：磁盘 anim.ini 仍有这一行（否则反证无意义）"
@@ -1674,6 +1677,26 @@ def _js_function(source: str, name: str) -> str:
     match = re.search(rf"function {name}\((?P<args>[^)]*)\) \{{(?P<body>.*?)\n\}}", source, re.S)
     assert match is not None, f"找不到函数 {name}()"
     return match.group("body")
+
+
+def _function_definition_order(
+    source: str, names: tuple[str, ...]
+) -> tuple[list[str], list[str]]:
+    """按**源码里的出现位置**返回这些顶层函数的真实次序，以及缺失的那些。
+
+    `[name for name in 期望表 if re.search(...)]` 那种写法是**从期望表过滤**：把文件里的函数
+    顺序重排它照样绿——`CODING_STANDARDS.md` §4「断次序的断言不许先把次序归一化」正是禁止这个。
+    这里排序键取源码下标，比较的就是次序本身。
+    """
+    found: list[tuple[int, str]] = []
+    missing: list[str] = []
+    for name in names:
+        at = source.find(f"function {name}(")
+        if at < 0:
+            missing.append(name)
+        else:
+            found.append((at, name))
+    return [name for _at, name in sorted(found)], missing
 
 
 def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> None:
@@ -2777,10 +2800,13 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
     damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
     sfx_ui = _strip_js_comments(_SFX_UI_JS.read_text(encoding="utf-8"))
 
-    moved = [name for name in _SFX_UI_FUNCTIONS if re.search(rf"^function {name}\(", sfx_ui, re.M)]
+    # 次序按**源码下标**排，不从期望表过滤（CODING_STANDARDS §4）：表里写的"顺序与文件一致"
+    # 必须真的被断到，否则重排文件也照样绿。
+    moved, missing = _function_definition_order(sfx_ui, _SFX_UI_FUNCTIONS)
+    assert not missing, f"这些音效函数必须住在 sfx-ui.js：缺 {sorted(missing)}"
     assert moved == list(_SFX_UI_FUNCTIONS), (
-        "这些音效函数必须住在 sfx-ui.js："
-        f"缺 {sorted(set(_SFX_UI_FUNCTIONS) - set(moved))}，实际次序 {moved}"
+        "定义的**次序**必须与这张表一致（表就是文件里的出现次序）："
+        f"实际 {moved}"
     )
     for owner, text in (("effects.js", effects), ("damage-fx.js", damage_fx)):
         left = [name for name in _SFX_UI_FUNCTIONS if re.search(rf"^function {name}\(", text, re.M)]
@@ -2891,13 +2917,12 @@ def test_the_damage_playback_module_is_a_one_way_seam_out_of_the_effects_layer()
     table = _strip_js_comments((STATIC_DIR / "table.js").read_text(encoding="utf-8"))
     session = _strip_js_comments(_SESSION_JS.read_text(encoding="utf-8"))
 
-    moved = [
-        name for name in _DAMAGE_FX_FUNCTIONS
-        if re.search(rf"^function {name}\(", damage_fx, re.M)
-    ]
+    # 同 §4：次序按源码下标排，不从期望表过滤。
+    moved, missing = _function_definition_order(damage_fx, _DAMAGE_FX_FUNCTIONS)
+    assert not missing, f"这些排播函数必须住在 damage-fx.js：缺 {sorted(missing)}"
     assert moved == list(_DAMAGE_FX_FUNCTIONS), (
-        "这些排播函数必须住在 damage-fx.js："
-        f"缺 {sorted(set(_DAMAGE_FX_FUNCTIONS) - set(moved))}，实际次序 {moved}"
+        "定义的**次序**必须与这张表一致（表就是文件里的出现次序）："
+        f"实际 {moved}"
     )
     left = [
         name for name in _DAMAGE_FX_FUNCTIONS

@@ -264,7 +264,7 @@ function damageSfxStop(play) {
 /** 换局 / 版式作废：在播的演出全部收声（尾巴也不留）。
  *
  * 「在播的」= 本文件**自己记的**那几条（`damageSfxBound`）：收声是音效层的事，
- * 清场由调用方（`effects.js:clearDamageFx`）决定，音效层不需要知道伤害排播的内部结构。
+ * 清场由调用方（`damage-fx.js:clearDamageFx`）决定，音效层不需要知道伤害排播的内部结构。
  */
 function damageSfxStopAll() {
   for (const play of damageSfxBound) damageSfxStop(play);
