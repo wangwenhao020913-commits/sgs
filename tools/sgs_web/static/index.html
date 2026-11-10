@@ -113,7 +113,8 @@
         <button id="btn-settings" type="button" class="icon-btn" title="牌桌设置">设置</button>
         <!-- damage-fx 票 06：伤害音效开关。**缺省关**（首次进来不主动出声），状态记在
              `localStorage['sgs.sfx']`；文案 / `aria-pressed` / `.on` 由
-             `effects.js:damageSfxSyncButton()` 唯一维护，这里只留缺省形态。 -->
+             `sfx-ui.js:damageSfxSyncButton()`（票 08 起从 effects.js 抽走）唯一维护，
+             这里只留缺省形态。 -->
         <button id="btn-sfx" type="button" class="icon-btn sfx-btn" aria-pressed="false"
                 title="伤害音效（缺省关；点一下打开，刷新后记住）">♪ 音效 关</button>
         <!-- U2-01：导航三键（D7 右端顺序：牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放）。
@@ -434,6 +435,11 @@
      两份都是普通脚本（零依赖、零外部资源、不改 DOM、不发请求），仍是「main.js 最后」。 -->
 <script src="fx-core.js"></script>
 <script src="sfx.js"></script>
+<!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 三条声道池 / ?audiotest）。
+     只读 effects.js 的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT），且都在
+     调用时才解析 ⇒ 排在 effects.js 之后、main.js 之前；effects.js 的四个调用点运行时才触发，
+     wire() 里的 damageSfxSync() 也在这之后。 -->
+<script src="sfx-ui.js"></script>
 <script src="main.js"></script>
 </body>
 </html>
