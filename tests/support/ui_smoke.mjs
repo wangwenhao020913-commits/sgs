@@ -22781,6 +22781,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     if (!match) throw new Error(`anim.ini 缺少 ${key}`);
     return Number(match[1]);
   };
+  /** 并发表（票 02）：期望值从磁盘上的 ini 读；**缺键回退 3**——与 `damageFxCapFor` 同一条
+   *  兜底口径（测试不另写第二份"3"）。 */
+  const iniCap = (key) => {
+    try {
+      return iniMilliseconds(key);
+    } catch (error) {
+      return 3;
+    }
+  };
 
   /** 跑**最先到期**的那个计时器。真浏览器按到期时刻排，垫片的登记顺序只是插入顺序，
    *  故这里按毫秒数取（同刻按登记先后）——否则 1500ms 的摘层会先于 120ms 的错开被跑掉。 */
@@ -22990,21 +22999,22 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     runUntil(() => liveCount() === 0) && layer().children.length === 0,
     `live=${liveCount()} children=${layer().children.length}`);
 
-  // 同时在播上限 3 条：第 4 条起丢队列尾（spec §演出口径），伤害本身不受影响。
+  // 同时在播上限：第 cap+1 条起丢队列尾（spec §演出口径），伤害本身不受影响。
+  // 票 02：cap **不是**写死的 3——期望值从磁盘上的 `anim.ini` 读（缺键回退 3）。
+  const capNormal = iniCap("damage_fx_concurrency");
+  const capThunder = iniCap("damage_fx_thunder_concurrency");
+  const overflow = capNormal + 2;
   const before03f = playCount();
   loadDamageBatch(
-    [hpChange(5, 1, 4, 3), hpChange(6, 2, 4, 2), hpChange(7, 3, 4, 3), hpChange(8, 1, 3, 2)],
-    [
-      damageEvent(5, 0, 1, 1), damageEvent(6, 0, 2, 1),
-      damageEvent(7, 0, 3, 1), damageEvent(8, 0, 1, 1),
-    ],
+    Array.from({ length: overflow }, (_unused, index) => hpChange(5 + index, 1, 4, 3)),
+    Array.from({ length: overflow }, (_unused, index) => damageEvent(5 + index, 0, 1, 1)),
   );
-  step(4);
-  runUntil(() => liveCount() >= 3);
-  check("U-DMG-03f 同时在播上限 3 条：第 4 条丢队列尾，在播恰好 3 条",
-    liveCount() === 3 && playCount() === before03f + 3,
-    `live=${liveCount()} plays=${playCount() - before03f}`);
-  runUntil(() => liveCount() === 0);
+  step(overflow);
+  runUntil(() => liveCount() >= capNormal, 400);
+  check("U-DMG-03f 同时在播上限 = anim.ini 的 damage_fx_concurrency（缺键回退 3）：第 cap+1 条丢队列尾",
+    liveCount() === capNormal && playCount() === before03f + capNormal,
+    `cap=${capNormal} live=${liveCount()} plays=${playCount() - before03f}`);
+  runUntil(() => liveCount() === 0, 400);
 
   // ---- U-DMG-04：版式变了（座位矩形挪动）→ 摘掉在播的演出，之后无残留 ----
   const before04 = playCount();
@@ -23228,6 +23238,78 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   windowShim.SgsThunderFX.create = realThunderCreate;
   windowShim.SgsDamageFX.create = realDamageCreate;
 
+  /* ---- U-DMG-12：每属性独立计数（票 02 §3 / 验收 2）----
+   *
+   * 一条家族满了**不许**把另一个家族同批的事件一起丢掉：上限是"该属性自己的"。
+   * 合成批次按 seq 顺序排（合成记录 → `step()`），计数读 `damagePlays` 的 `nature`。
+   */
+  const liveByNature = () => {
+    const out = { normal: 0, thunder: 0 };
+    for (const nature of playNatures()) {
+      if (nature === "THUNDER") out.thunder += 1;
+      else out.normal += 1;   // null / "NORMAL" / 未登记属性同族
+    }
+    return out;
+  };
+  const before12 = playCount();
+  const want12normal = Math.min(capNormal, 3);
+  const want12thunder = Math.min(capThunder, 2);
+  loadDamageBatch(
+    [hpChange(70, 1, 4, 3), hpChange(71, 2, 4, 3), hpChange(72, 3, 4, 3),
+      hpChange(73, 1, 3, 2), hpChange(74, 2, 3, 2)],
+    [damageEvent(70, 0, 1, 1), damageEvent(71, 0, 2, 1), damageEvent(72, 0, 3, 1),
+      damageEvent(73, 0, 1, 2, "THUNDER"), damageEvent(74, 0, 2, 2, "THUNDER")],
+  );
+  step(5);
+  const grouped12 = runUntil(() => liveCount() === want12normal + want12thunder, 400);
+  const counts12 = liveByNature();
+  check("U-DMG-12 每属性独立计数：3 条无属性 + 2 条雷同场（上限是各属性自己的 cap）",
+    grouped12 && counts12.normal === want12normal && counts12.thunder === want12thunder
+      && playCount() === before12 + want12normal + want12thunder,
+    `live=${liveCount()} normal=${counts12.normal} thunder=${counts12.thunder} `
+      + `plays=${playCount() - before12} caps=${capNormal}/${capThunder}`);
+  runUntil(() => liveCount() === 0, 400);
+
+  // 4 条无属性 + 1 条雷：无属性的第 4 条丢队尾，但**排在它后面的雷照样演**。
+  const before12b = playCount();
+  const want12bNormal = Math.min(capNormal, 3);
+  loadDamageBatch(
+    [hpChange(75, 1, 4, 3), hpChange(76, 2, 4, 3), hpChange(77, 3, 4, 3),
+      hpChange(78, 1, 3, 2), hpChange(79, 2, 3, 2)],
+    [damageEvent(75, 0, 1, 1), damageEvent(76, 0, 2, 1), damageEvent(77, 0, 3, 1),
+      damageEvent(78, 0, 1, 1), damageEvent(79, 0, 2, 1, "THUNDER")],
+  );
+  step(5);
+  const grouped12b = runUntil(() => liveCount() === want12bNormal + 1, 400);
+  const counts12b = liveByNature();
+  check("U-DMG-12b 无属性满 3 条时同批的雷仍开演（丢的只是超出的那一条，不整队清空）",
+    grouped12b && counts12b.normal === want12bNormal
+      && counts12b.thunder === 1 && playCount() === before12b + want12bNormal + 1,
+    `live=${liveCount()} normal=${counts12b.normal} thunder=${counts12b.thunder} `
+      + `plays=${playCount() - before12b}`);
+  runUntil(() => liveCount() === 0, 400);
+
+  /* ---- U-DMG-13：cap 调到 5 ⇒ 第 5 条仍开演、第 6 条丢队列尾（票 02 验收 3）----
+   *
+   * 改的是**生效中的** `animConfig`（与用户改 anim.ini 后解析出来的同一份表），不是测试里
+   * 另写一个期望值。用完按磁盘 ini 的值还回去。
+   */
+  ui.animConfig.damage_fx_thunder_concurrency = 5;
+  const capRaised = vm.runInContext("damageFxCapFor('THUNDER')", context);
+  const before13 = playCount();
+  loadDamageBatch(
+    Array.from({ length: 6 }, (_unused, index) => hpChange(80 + index, 1, 4, 3)),
+    Array.from({ length: 6 }, (_unused, index) => damageEvent(80 + index, 0, 1, 1, "THUNDER")),
+  );
+  step(6);
+  const grouped13 = runUntil(() => liveCount() === 5, 400);
+  const plays13 = playCount() - before13;
+  check("U-DMG-13 cap 从 3 调到 5：雷可同时 5 条，第 6 条丢队列尾",
+    capRaised === 5 && grouped13 && liveCount() === 5 && plays13 === 5,
+    `cap=${capRaised} live=${liveCount()} plays=${plays13}`);
+  runUntil(() => liveCount() === 0, 400);
+  ui.animConfig.damage_fx_thunder_concurrency = capThunder;
+
   /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
    *
    * 垫片里**没有 `AudioContext`**（见 windowShim），故分两段：
@@ -23442,6 +23524,74 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     audiotest === null
       && attr(documentShim.documentElement, "data-audio") === "unavailable",
     `audiotest=${audiotest} data-audio=${attr(documentShim.documentElement, "data-audio")}`);
+
+  /* ---- U-SFX-06：cap 从 3 调到 5 ⇒ 第 4 / 5 条**有声音**（票 02 §4 的回归）----
+   *
+   * 现有坑：声道池在点开「♪」的那一次按 cap 建好就定长，槽号超出池长时 `damageSfxStart`
+   * 直接 `return null`——牌桌上表现为"雷偶尔没声音"，代码里一声不响。
+   * 这里把池建在**旧 cap（3）**下，再把雷的 cap 调到 5：槽 3 / 4 必须就地补建并被喂到 tick。
+   */
+  const realThunderSfx06 = windowShim.SgsThunderSfx;
+  const laneLog = { created: [], started: [], ticks: [] };
+  windowShim.SgsThunderSfx = {
+    create(timeline) {
+      const lane = { index: laneLog.created.length };
+      laneLog.created.push(lane);
+      return {
+        start() { laneLog.started.push(lane.index); return true; },
+        stop() {},
+        mute() {},
+        tick(seconds, voice) { laneLog.ticks.push({ lane: lane.index, seconds }); },
+      };
+    },
+    renderOffline: () => Promise.resolve(null),
+  };
+  // 清池 + 把开关复位成"关"，再点一次「♪」：这次是**手势里的初建**，池长 = 当时的 cap（3）。
+  vm.runInContext(
+    "for (const key of Object.keys(damageSfxLanes)) delete damageSfxLanes[key]; "
+      + "damageSfxOn = false;", context);
+  await sfxClick();
+  const lanesBefore06 = vm.runInContext(
+    "damageSfxLanes.SgsThunderSfx ? damageSfxLanes.SgsThunderSfx.length : 0", context);
+  // 用户把并发表改成 5（生效的是 `animConfig` 那一份，与 ini 解析出来的同一个对象）。
+  ui.animConfig.damage_fx_thunder_concurrency = 5;
+  const capRaised06 = vm.runInContext("damageFxCapFor('THUNDER')", context);
+  const beforeSfx06 = playCount();
+  loadDamageBatch(
+    Array.from({ length: 6 }, (_unused, index) => hpChange(90 + index, 1, 4, 3)),
+    Array.from({ length: 6 }, (_unused, index) => damageEvent(90 + index, 0, 1, 1, "THUNDER")),
+  );
+  step(6);
+  const grouped06 = runUntil(() => liveCount() === 5, 400);
+  runFrame();
+  const slots06 = JSON.parse(
+    vm.runInContext("JSON.stringify(damagePlays.map((play) => play.slot))", context))
+    .sort((left, right) => left - right);
+  const bound06 = vm.runInContext("damageSfxBound.size", context);
+  const lanesAfter06 = vm.runInContext(
+    "damageSfxLanes.SgsThunderSfx ? damageSfxLanes.SgsThunderSfx.length : 0", context);
+  const tickedLanes = [...new Set(laneLog.ticks.map((entry) => entry.lane))]
+    .sort((left, right) => left - right);
+  check("U-SFX-06a cap 从 3 调到 5：雷的声道池就地补建（3 → 5 条），两条新声道也在同一次调用里 start()",
+    // 前提：ini 的雷 cap 是 3（静态用例钉着初值），先按 3 建池、再调到 5 才是"增长"。
+    capThunder === 3 && capRaised06 === 5 && lanesBefore06 === 3 && lanesAfter06 === 5
+      && laneLog.created.length === 5
+      // 建池 3 次 + 补建 2 次 + 五条演出各自 start 一次 = 10。
+      && laneLog.started.length === 10,
+    `cap=${capThunder}→${capRaised06} lanes=${lanesBefore06}→${lanesAfter06} `
+      + `created=${laneLog.created.length} started=${laneLog.started.length}`);
+  check("U-SFX-06b 第 4 / 5 条**有声音**：五条演出都绑上声道、五条都被喂 tick（不再静默丢声）",
+    grouped06 && liveCount() === 5 && bound06 === 5
+      && JSON.stringify(slots06) === "[0,1,2,3,4]"
+      && JSON.stringify(tickedLanes) === "[0,1,2,3,4]"
+      && playCount() === beforeSfx06 + 5,
+    `live=${liveCount()} bound=${bound06} slots=${JSON.stringify(slots06)} `
+      + `ticked=${JSON.stringify(tickedLanes)} plays=${playCount() - beforeSfx06}`);
+  runUntil(() => liveCount() === 0, 400);
+  // 还回去：cap 按磁盘 ini 的值、雷的音效模块换回真身。
+  ui.animConfig.damage_fx_thunder_concurrency = capThunder;
+  windowShim.SgsThunderSfx = realThunderSfx06;
+  drainTimers();
 
   // ---- 对照组：有来源时航线起点在画面内（> 0），与 U-DMG-06 的 off-stage 形成对照 ----
   loadDamageBatch([hpChange(20, 1, 4, 3)], [damageEvent(20, 2, 1, 1)]);

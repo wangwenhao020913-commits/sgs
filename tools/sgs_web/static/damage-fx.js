@@ -23,8 +23,9 @@
  * **唯一**判据——`damageFxRendererFor(nature)` 选画面模块，`damageFxTiming(nature, variant)`
  * 选 `anim.ini` 的字段表，`sfx-ui.js` 按 `play.nature` 选音效模块。查表只此一处。
  *
- * 硬口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 3 条（`damageFxCapFor` 是
- * 唯一的 cap 口，票 02 改成按键读）、超出丢队列尾；`null` / `undefined` ≡ 无属性；
+ * 硬口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 = **该属性自己的 cap**
+ * （`damageFxCapFor(nature)` 是唯一的 cap 口：票 02 起按属性读 `anim.ini` 的并发表，1~8、
+ * 缺省 3）、超出丢队列尾；`null` / `undefined` ≡ 无属性；
  * 摘层用 `anim.ini` 的 `total` 定时；无属性 3 / 4 点档的黑白屏闪窗口 = 该档 `strobe`，
  * 属性伤害（火 / 雷）改挂着色子层 `.fx-flash`（**不是** `filter`，见 `damageFxFlashSpec`）。
  */
@@ -38,24 +39,29 @@
 const DAMAGE_FX_NATURE = "NORMAL";
 
 /** 属性家族 → **唯一**的一张表：画面模块（+ 缺模块时的回落）、整屏效果（灰阶 / 着色闪档）、
- *  能不能播。`renderer` / `fallback` 存的是**全局名**，调用时才解析——`index.html` 里两个
- *  画面模块都排在本文件之后，顶层此时还没有 `window.SgsDamageFX` / `window.SgsThunderFX`。
+ *  能不能播、并发表键名。`renderer` / `fallback` 存的是**全局名**，调用时才解析——`index.html`
+ *  里两个画面模块都排在本文件之后，顶层此时还没有 `window.SgsDamageFX` / `window.SgsThunderFX`。
+ *  `cap` 是 `anim.ini` 的键名（票 02）：cap 键只在这张表里写一次，读的一侧是
+ *  `damageFxCapFor`——一个家族一条并发表，调雷不该顺手改了剑光的行为。
  *
  *  票 03 接火时只动这张表的 `FIRE` 行：`playable: true` + 加载 `fx-fire.js`。 */
 const DAMAGE_FX_FAMILIES = {
   [DAMAGE_FX_NATURE]: {
     renderer: "SgsDamageFX", fallback: "SgsDamageFX",
     grayscale: true, flash: null, playable: true,
+    cap: "damage_fx_concurrency",
   },
   THUNDER: {
     // 雷电是**已接**的家族：模块没加载就是部署缺件，**不**回落剑光（spec §2 的 fail-open
     // 只给"其它未知"）；`startDamagePlay` 拿不到模块就不播，事件仍被消费。
     renderer: "SgsThunderFX", fallback: null,
     grayscale: false, flash: "fx-flash-thunder", playable: true,
+    cap: "damage_fx_thunder_concurrency",
   },
   FIRE: {
     renderer: "SgsFireFX", fallback: "SgsDamageFX",
     grayscale: false, flash: "fx-flash-fire", playable: false,
+    cap: "damage_fx_fire_concurrency",
   },
 };
 
@@ -129,9 +135,13 @@ function damageFxTiming(nature, variant) {
 
 /* ------------------------------------ 伤害演出（damage-fx 票 05）：排播 + 座位映射 */
 
-/** 同一批里多条伤害的排播口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 3 条。 */
+/** 同一批里多条伤害的排播口径（spec §演出口径）：相邻开演错开 120ms。 */
 const DAMAGE_FX_STAGGER_MS = 120;
+/** 并发上限的**缺省**值（票 02：生效值按属性读 `anim.ini` 的并发表；缺键 / 非数字时回退到它）。 */
 const DAMAGE_FX_CONCURRENCY = 3;
+/** 并发表的钳制范围（spec §多目标：1–8）：`0` / 负数 → 1，`> 8` → 8。 */
+const DAMAGE_FX_CAP_MIN = 1;
+const DAMAGE_FX_CAP_MAX = 8;
 
 /** 这一条伤害该不该演：**只挡还没接的家族**（FIRE 的闸门住在 `DAMAGE_FX_FAMILIES`）。
  *
@@ -149,11 +159,19 @@ function damageFxNaturePlayable(nature) {
 
 /** 某属性自己的同时在播上限（spec §多目标：1–8，缺省 3）。
  *
- * 本票仍是常量 3——但**只有一个 cap 口**：排播闸门与 `sfx-ui.js` 的声道池都读它，
- * 票 02 只改这里的返回、不动调用点。
+ * 票 02：读 `anim.ini` 的并发表——无属性 `damage_fx_concurrency`、雷 / 火各自那条（键名只在
+ * `DAMAGE_FX_FAMILIES` 里写一次）。**这是唯一的 cap 口**：排播闸门、槽位与 `sfx-ui.js` 的
+ * 声道池长度都读它。
+ *
+ * 钳制在**读者侧**（照 `fx-core.js:gameTiming` 的姿态：`animTiming` 只搬数字，不给兜底也不
+ * 钳）：缺键 / 非数字 → 缺省 3；`0` 或负数 → 1；`> 8` → 8。**调用时才解析**——`anim.ini`
+ * 的加载是异步的，顶层读只会读到空表。
  */
 function damageFxCapFor(nature) {
-  return DAMAGE_FX_CONCURRENCY;
+  const key = damageFxFamilyFor(nature).cap;
+  const raw = typeof animTiming === "function" && key ? Number(animTiming(key)) : Number.NaN;
+  const cap = Number.isFinite(raw) ? Math.round(raw) : DAMAGE_FX_CONCURRENCY;
+  return Math.max(DAMAGE_FX_CAP_MIN, Math.min(DAMAGE_FX_CAP_MAX, cap));
 }
 
 /** 档位封顶：`amount ≥ 5` 按 4 档演——档位只决定强度，数字照旧是服务端给的真实值。 */
@@ -175,8 +193,9 @@ const damagePlays = [];
 /** 层里那**一张**可见 canvas（跨演出复用；闲置时摘掉，于是层是空的）。 */
 let damageCanvas = null;
 
-/** 舞台离屏画布池：同时在播最多 3 条 ⇒ 最多 3 张，按需建一次、跨演出复用。
- *  **不是**每来一次伤害就新建一张（票 05 §2：一个层里复用 canvas）。 */
+/** 舞台离屏画布池：一张离屏舞台对应一个在播槽位（槽号取最小空闲槽），池长随在播数
+ *  **自然增长**——票 02 起不再假定"最多 3 张"（三族 cap 之和才是上限，1~8 × 3）。
+ *  按需建一次、跨演出复用；**不是**每来一次伤害就新建一张（票 05 §2：一个层里复用 canvas）。 */
 const damageStagePool = [];
 
 /** 正在黑白屏闪窗口里的演出（可能多条重叠）；非空 ⇒ 表壳挂 `filter`。**只挂无属性**：
@@ -340,8 +359,12 @@ function damageFxStageFor(nature, plan) {
   return { src: plan.src, dst: plan.dst };
 }
 
-/** 找一个空闲的离屏槽（最小空闲号）。在播上限由排播闸门保证，故必有一个空槽；
- *  从 0 往上找（票 02：槽位不再假定"最多 3 个"，随在播数自然增长）。 */
+/** 找一个空闲的离屏槽（最小空闲号）。在播上限由排播闸门**按属性**保证，故必有一个空槽；
+ *  从 0 往上找，槽位数只由在播条数决定（票 02 起不再假定"最多 3 个"）。
+ *
+ *  槽号是**跨家族**的唯一号（同屏不能两条演出共用一个离屏舞台），所以一族的演出可能拿到
+ *  比**本族** cap 更大的槽号（另一族正占着低位槽）——`sfx-ui.js` 的声道池因此要能按需增长
+ *  （`damageSfxStart` 会就地补建，见那份脚本）。 */
 function damageFxSlot() {
   const used = new Set(damagePlays.map((play) => play.slot));
   let slot = 0;
@@ -635,8 +658,8 @@ function damageClearCanvas() {
 
 /** 一帧：每条在播的演出画进自己的离屏舞台，再合成到层里**唯一**那张 canvas 上。
  *
- * 合成而不是共用一张可见画布，是因为 `fx.draw(t)` 每帧整屏清一次——3 条同时在播时
- * 只能各画各的，最后一起贴上来（票 05 §4 的"同时在播上限 3 条"）。
+ * 合成而不是共用一张可见画布，是因为 `fx.draw(t)` 每帧整屏清一次——多条同时在播时
+ * 只能各画各的，最后一起贴上来（票 05 §4 的"同时在播上限"，票 02 起按属性读）。
  */
 function renderDamageFrame(now = stageNow()) {
   if (!damagePlays.length) return;
@@ -683,14 +706,28 @@ function damageStopFrame() {
   damageFrame = null;
 }
 
-/** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过该属性的 cap。
+/** 该属性**正在播**几条（票 02 §3 的计数口径）。
+ *
+ * 按**家族**归一：`null` / `"NORMAL"` / 未登记属性同族（`damageFxNatureKind` 是唯一判据），
+ * 于是"一条牌面没声明属性的伤害"也占着无属性那一份 cap。排播闸门只认这一个计数。
+ */
+function damageFxLiveOf(nature) {
+  const kind = damageFxNatureKind(nature);
+  let live = 0;
+  for (const play of damagePlays) {
+    if (damageFxNatureKind(play && play.nature) === kind) live += 1;
+  }
+  return live;
+}
+
+/** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过**该属性自己的** cap。
  *
  * 超过上限的**丢队列尾**（spec §演出口径）：伤害本身早已由服务端结算（体力条 / 事件流
  * 都到位了），攒着等下一批只会把旧伤害飘在新画面上。
  *
- * 票 01 的 cap 口是 `damageFxCapFor(nature)`（本票恒 3，票 02 改成按键读 1–8）。这一票
- * 仍按**总数**判：槽位（以及音效声道的下标）要等票 02 一起动态化，否则同批混家族时
- * 槽号会超出声道池、声音静默丢掉一半。
+ * 票 02：判满改成**按属性计数**（`damageFxLiveOf(nature) >= damageFxCapFor(nature)`），
+ * 丢的也只是该家族超出上限的那几条——**不整队清空**：上限是"该属性自己的"，一条家族满了
+ * 不该把排在它后面、另一个家族的事件一起吃掉（同批混家族是本 effort 的主场景）。
  */
 function pumpDamageQueue() {
   if (damageStaggerTimer !== null) {
@@ -698,11 +735,16 @@ function pumpDamageQueue() {
     damageStaggerTimer = null;
   }
   while (damageQueue.length) {
-    const next = damageQueue[0];
-    if (damagePlays.length >= damageFxCapFor(next && next.nature)) {
+    // 队头那条若已超出**它自己**家族的 cap 就丢掉，让后面还能演的先上；全都满了 ⇒ 剩下的
+    // 都是超出部分，整队丢（这就是"丢队列尾"）。
+    const at = damageQueue.findIndex(
+      (event) => damageFxLiveOf(event && event.nature) < damageFxCapFor(event && event.nature),
+    );
+    if (at < 0) {
       damageQueue = [];
       break;
     }
+    if (at > 0) damageQueue.splice(0, at);
     const wait = Math.round(damageNextStartAt - stageNow());
     if (wait > 0) {
       damageStaggerTimer = window.setTimeout(() => {

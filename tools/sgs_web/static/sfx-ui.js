@@ -17,9 +17,9 @@
  * 本文件只接 `play` 对象（读 `play.nature` / `play.variant` / `play.fx.timing` /
  * `play.fx.timeline` / `play.slot` / `play.flash`），并且只收自己绑过的声道，**不读**伤害
  * 排播层的运行状态。反方向只读三个**纯读**口：`DAMAGE_FX_MAX_VARIANT`（档位号钳到 1..4）、
- * `damageFxCapFor(nature)`（声道池长度 = 该属性的在播上限；本票恒 3）与
- * `damageFxNatureKind(nature)`（属性归类）——三者都住在 `damage-fx.js`，都只读、都不反向
- * 驱动排播，且都在**调用时**才解析。
+ * `damageFxCapFor(nature)`（声道池的**起始**长度 = 该属性在播上限，票 02 起按属性读
+ * `anim.ini` 的并发表）与 `damageFxNatureKind(nature)`（属性归类）——三者都住在 `damage-fx.js`，
+ * 都只读、都不反向驱动排播，且都在**调用时**才解析。
  *
  * 三条硬口径（票 06，逐字未改）：**缺省静音** / **对齐演出时钟** / **没有 `AudioContext`
  * 就静默降级**。下面这一段是它们各自的理由。
@@ -40,7 +40,9 @@
  *
  * **按模块分池**（票 01）：每条声道**绑死**一个音效模块（剑 = `SgsSfx`、雷 =
  * `SgsThunderSfx`），池子按模块分组；一条声道同时喂两个时钟会互相吞 cue，雷与剑因此
- * 各有各的声道。池长 = 该属性的 cap（`damageFxCapFor`），开演时用 `play.slot` 取声道。
+ * 各有各的声道。池的**起始**长度 = 该属性的 cap（`damageFxCapFor`，票 02 起按属性读
+ * `anim.ini`，1~8、缺省 3），开演时用 `play.slot` 取声道；槽号是跨家族的，超出池长时
+ * **就地补建**（`damageSfxStart`）——旧口径在这里 `return null`，声音会静默丢掉。
  * 池**惰性建**：只有页面上加载了该模块、且用户点开「♪」时才建（不一次把三套都建出来）。
  */
 
@@ -171,24 +173,32 @@ function damageSfxTimeline(source) {
 
 /** 给**一个**已加载的音效模块建声道池（惰性：没有该模块就一条都不建）。
  *
- * 声道数 = 该属性的 cap（`damageFxCapFor`，本票恒 3；票 02 改成按键读 1–8）。
+ * 起始池长 = 该属性的 cap（`damageFxCapFor`，票 02 起按属性读 `anim.ini` 的并发表，1~8）；
+ * `need` 是调用点**至少要几条**——开演时槽号可能被别的家族顶高（槽是跨家族的唯一号，
+ * 见 `damageFxSlot`），那时就按 `need` 补建（票 02 §4：不许再"槽位超出池长 ⇒ 静默无声"）。
+ *
  * 每条声道持有一份**可变**的时间轴（`create()` 按引用读它），开演时把该档的 cue 时刻
  * 写进去——于是声道跨演出复用，也不需要在开演时新建 `AudioContext`。
  *
- * ⚠️ 只能在**真实用户手势的同一个 tick** 里调用：iOS / Safari 在 `fetch` 回调、定时器、
+ * ⚠️ **初建**只能发生在**真实用户手势的同一个 tick** 里：iOS / Safari 在 `fetch` 回调、定时器、
  * `requestAnimationFrame` 里 resume 一律不生效（票面 §别踩的坑），声音会一直挂着不出。
+ * 票 02 的**补建**（`damageSfxStart` 里槽位超出池长时）没有这个待遇——它是开演时调的。
+ * 代价写在明处：新声道的 `AudioContext` 在 Safari 上可能要到**下一次手势**才真的出声
+ * （`sfx.js` 是每声道一个 context；`sfx-thunder.js` 已是模块级共享）。这比"静默丢掉一声"
+ * 好，而且补建只在**跨家族同场**（本族槽号被别的家族顶高）时才发生。
  * 没有 `AudioContext`（老浏览器 / 被策略禁用）时 `start()` 返回 false ⇒ 静默降级。
  */
-function damageSfxEnsureLanes(engine) {
+function damageSfxEnsureLanes(engine, need) {
   if (!engine || !engine.sfx || typeof engine.sfx.create !== "function") return [];
   const key = engine.key;
   if (!damageSfxLanes[key]) damageSfxLanes[key] = [];
   const lanes = damageSfxLanes[key];
-  // 池长只有 `damageFxCapFor` 一处真源（本票恒 3；票 02 改成按键读）。本文件排在
+  // 池长只有 `damageFxCapFor` 一处真源（票 02：按属性读 anim.ini）。本文件排在
   // damage-fx.js 之后，加载次序由清单保证，不再在这里留第二个 3 做兜底。
   const cap = damageFxCapFor(engine.nature);
+  const want = Math.max(cap, Math.round(Number(need) || 0));
   const base = damageSfxBaseTimeline(engine.fx);
-  while (lanes.length < cap) {
+  while (lanes.length < want) {
     const timeline = damageSfxTimeline(base);
     const player = engine.sfx.create(timeline);
     if (!player || typeof player.tick !== "function") break;
@@ -288,15 +298,22 @@ function damageSfxVoice(play) {
  *  并 `start()` 重置 cue 游标。
  *
  * `play.slot` 是离屏舞台槽（在播期间唯一），正好一条声道一个槽——并发各有各的时钟，
- * 互不吞 cue。**不在这里建池**：池只在手势里建（开关关着 / 没解锁时这里是 null，不建
- * `AudioContext`）。返回占用的声道（没声道 / 已关时 null）。
+ * 互不吞 cue。槽号是**跨家族**的，可能大于本族池长（另一族占着低位槽）：那时**就地补建**
+ * 到 `slot + 1` 条（票 02 §4），不许像旧代码那样 `return null` 静默无声。
+ * **池仍然只在手势里初建**：没建过池（用户没开「♪」/ 没解锁）时一条都不建，返回 null。
+ * 返回占用的声道（没声道 / 已关时 null）。
  */
 function damageSfxStart(play) {
   if (!play) return null;
   const engine = damageSfxEngineFor(play.nature);
-  const lanes = damageSfxLanes[engine.key];
+  const slot = Math.max(0, Math.round(Number(play.slot) || 0));
+  let lanes = damageSfxLanes[engine.key];
+  // 开关关着时只复用已有声道，不补建新的——"缺省静音是零代价的"那条口径不变。
+  if (lanes && lanes.length <= slot && damageSfxOn) {
+    lanes = damageSfxEnsureLanes(engine, slot + 1);
+  }
   if (!lanes || !lanes.length) return null;
-  const lane = lanes[play.slot];
+  const lane = lanes[slot];
   if (!lane || !lane.live) return null;
   const timeline = damageSfxTimeline(play.fx && play.fx.timeline);
   lane.timeline.CHARGE = timeline.CHARGE;

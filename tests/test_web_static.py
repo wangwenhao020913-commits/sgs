@@ -805,6 +805,9 @@ _DAMAGE_FX_VARIANTS = (1, 2, 3, 4)
 
 # 剑光的键：`damage_fx_<档>_<字段>`（雷电是 `damage_fx_thunder_<档>_<字段>`，不在此列）。
 _SWORD_TIMING_KEY = re.compile(r"^damage_fx_\d+_")
+# 雷的键同理：`damage_fx_thunder_<档>_<字段>`——**不带档位号**的 `damage_fx_thunder_concurrency`
+# （票 02 的并发表）不是时长键，别混进这张对照表。
+_THUNDER_TIMING_KEY = re.compile(r"^damage_fx_thunder_\d+_")
 
 
 def _sword_ini_entries() -> dict[str, str]:
@@ -949,6 +952,42 @@ const report = await vm.runInContext(
          3: damageFxTiming("THUNDER", 3),
        },
        cap: damageFxCapFor("THUNDER"),
+       /* 票 02：并发表按**属性**读 anim.ini，钳在读者侧（缺键 3 / 0→1 / 9→8）。
+        * 这里直接改生效中的 animConfig（与用户改 ini 之后解析出来的表同一份）。 */
+       caps: (() => {
+         const keys = [
+           "damage_fx_concurrency",
+           "damage_fx_thunder_concurrency",
+           "damage_fx_fire_concurrency",
+         ];
+         const saved = keys.map((key) => animConfig[key]);
+         const read = () => ({
+           normal: damageFxCapFor(null),
+           explicitNormal: damageFxCapFor("NORMAL"),
+           thunder: damageFxCapFor("THUNDER"),
+           fire: damageFxCapFor("FIRE"),
+           unknown: damageFxCapFor("ICE"),
+         });
+         const out = { ini: read() };
+         animConfig.damage_fx_fire_concurrency = 5;
+         out.fireFive = read();
+         animConfig.damage_fx_fire_concurrency = 3;
+         animConfig.damage_fx_concurrency = 0;
+         animConfig.damage_fx_thunder_concurrency = -2;
+         out.clampedLow = read();
+         animConfig.damage_fx_concurrency = 9;
+         animConfig.damage_fx_thunder_concurrency = 2.6;
+         out.clampedHigh = read();
+         animConfig.damage_fx_concurrency = 3;
+         animConfig.damage_fx_thunder_concurrency = "abc";
+         out.junk = read();
+         for (const key of keys) delete animConfig[key];
+         out.missing = read();
+         keys.forEach((key, index) => {
+           if (saved[index] !== undefined) animConfig[key] = saved[index];
+         });
+         return out;
+       })(),
        // §1 / §6：逐属性**驱动真函数**（不是整段源码 grep），供服务端枚举那条用例读。
        natureDispatch: (() => {
          const out = {};
@@ -1143,6 +1182,106 @@ def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: 
     assert negative["resolvedSplit"] == 44, (
         "缺键时画面仍是 VARIANTS[4].split = 44：这种失败不报错，只能由键表比对抓住"
     )
+
+
+# ---------------------------------------------------------------------------
+# damage-fx-natures 票 02：节奏参数可配（三属性并发表）
+#
+# 牌桌要的不是"同时播 3 条"这个数，而是**这个数可以随时长一起调**：演出时长住在 `anim.ini`
+# 且可改，"时长变长了、还能同时播几条"必须跟着能改。分属性是 spec 的选择（Q8B）：火 2.0s 的
+# 天陨与剑光 1.5s 的一刀，答案本来就不该相同；一个全局值会把三者绑死。
+#
+# 本条钉**读的一侧**（键表 / 钳制 / 读口唯一）；排播与声道池的行为归烟测 `U-DMG-12/13`、
+# `U-SFX-06`。
+# ---------------------------------------------------------------------------
+
+# `anim.ini` 的三个并发表键（缺一即"某个家族悄悄回到写死的 3"）。
+_CAP_KEYS = (
+    ("damage_fx_concurrency", "无属性"),
+    ("damage_fx_thunder_concurrency", "雷电"),
+    ("damage_fx_fire_concurrency", "火焰"),
+)
+
+
+def test_the_concurrency_cap_is_read_per_nature_from_anim_ini(damage_fx_probe: dict) -> None:
+    """票 02 §1：三键齐全、按属性读、钳在读者侧；`damageFxCapFor` 是唯一的 cap 口。
+
+    - `anim.ini` 三键各带一行注释、初值 3（缺键 / 非数字回退到 `DAMAGE_FX_CONCURRENCY`）；
+    - `0` / 负数 → 1，`> 8` → 8（**钳在读者侧**，照 `fx-core.js:gameTiming` 的姿态：
+      `animTiming` 只搬数字，不给兜底也不钳）；
+    - **分属性**：把火调到 5 ⇒ 火 5 条、无属性仍 3 条（一个全局值会把三者绑死）；
+    - 读口唯一：三个键名只在家族表里出现一次；`animTiming(...)` 只被 `damageFxCapFor` /
+      `damageFxTiming` 两个函数读，且都在**调用时**解析（`anim.ini` 是异步加载的）。
+    """
+    ini_text = _ANIM_INI.read_text(encoding="utf-8")
+    entries = _ini_entries()
+    header = ini_text.index("并发表")
+    # 三个键都在「并发表」那一块里，且各带一行注释（用户改得动，改完刷新即生效）。
+    start = ini_text.rindex("# ====", 0, header)
+    # 本块 = 头部横线 → 三键之后的下一条分节横线（键必须住在这块评论下面）。
+    last_key_at = max(ini_text.index(key) for key, _family in _CAP_KEYS)
+    block = ini_text[start:ini_text.index("# ====", last_key_at)]
+    for key, family in _CAP_KEYS:
+        assert key in entries, f"anim.ini 缺少并发表键 {key}（{family}的 cap）"
+        assert re.search(rf"^{key}\s*=\s*3\s+#\s*\S+", ini_text, re.M), (
+            f"{key} 必须初值 3 且带一行注释（{family}）：{entries[key]}"
+        )
+        assert key in block, f"{key} 要住在「并发表」那一块里"
+    for phrase in ("1~8", "缺省", "钳"):
+        assert phrase in block, f"并发表的注释要写清钳制口径（找 {phrase}）：\n{block}"
+
+    caps = damage_fx_probe["caps"]
+    base = {"normal": 3, "explicitNormal": 3, "thunder": 3, "fire": 3, "unknown": 3}
+    assert caps["ini"] == base, f"三键初值都是 3：{caps['ini']}"
+    assert caps["missing"] == base, "三个键都缺 ⇒ 全部回退缺省 3（不报错、不静音）"
+    assert caps["fireFive"] == {**base, "fire": 5}, (
+        f"火调到 5：火 5 条、无属性仍 3 条（分属性的意义）：{caps['fireFive']}"
+    )
+    low = caps["clampedLow"]
+    assert (low["normal"], low["explicitNormal"], low["unknown"]) == (1, 1, 1), (
+        f"0 / 负数 → 1（不能把演出关死）：{low}"
+    )
+    assert low["thunder"] == 1 and low["fire"] == 3, f"钳制按属性各自生效：{low}"
+    high = caps["clampedHigh"]
+    assert high["normal"] == 8 and high["unknown"] == 8, f"9 → 8（spec §多目标 1–8）：{high}"
+    assert high["thunder"] == 3, f"2.6 取整到 3（阈值以内的数原样用）：{high}"
+    assert caps["junk"] == base, f"非数字 → 缺省 3（ini 里写错不该让伤害不演）：{caps['junk']}"
+
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+    for key, family in _CAP_KEYS:
+        assert damage_fx.count(key) == 1, (
+            f"cap 键名只在家族表里写一次（{family}）——读的一侧统一走 damageFxCapFor"
+        )
+    readers = [
+        name for name in _DAMAGE_FX_FUNCTIONS
+        if "animTiming(" in _js_function_with_defaults(damage_fx, name)
+    ]
+    assert readers == ["damageFxTiming", "damageFxCapFor"], (
+        f"只有这两个函数读 anim.ini 的时长 / 并发表（都在**调用时**解析）：{readers}"
+    )
+
+
+def test_the_damage_queue_gate_counts_live_plays_per_nature() -> None:
+    """票 02 §3：闸门按**家族**计数，丢的只是该家族超出上限的那几条。
+
+    "按总数判"会让一条家族满了把另一个家族同批的事件一起吃掉；spec §多目标写的是
+    "在播上限 = **该属性自己的** cap"。计数口径也必须是家族（`null` 与 `"NORMAL"` 同族）。
+    """
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+    live = _js_function(damage_fx, "damageFxLiveOf")
+    assert "damageFxNatureKind(" in live, (
+        "计数按家族归一：null / NORMAL / 未登记属性同族（damageFxNatureKind 是唯一判据）"
+    )
+    assert "damagePlays" in live, "在播表是计数的唯一来源（不另记一个计数器）"
+
+    gate = _js_function(damage_fx, "pumpDamageQueue")
+    assert "damageFxLiveOf(" in gate and "damageFxCapFor(" in gate, (
+        "判满改成就地计数：liveOf(nature) >= capFor(nature) 才丢"
+    )
+    assert "damagePlays.length >= " not in gate, (
+        "闸门不许再按**总数**判满（那条口径会把别的家族的事件一起吃掉）"
+    )
+    assert "findIndex(" in gate, "队头那条满了就跳过它（丢的是超出部分，不是整队）"
 
 
 def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_probe: dict) -> None:
@@ -2064,10 +2203,14 @@ def test_the_damage_fx_layer_is_a_full_shell_overlay_above_the_flight_layer() ->
 
 
 def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbers() -> None:
-    """票面 §1 / §4：队列进 `applyView`、触发点紧挨技能事件、口径 120ms / 3 条 / 只挂 NORMAL。
+    """票面 §1 / §4：队列进 `applyView`、触发点紧挨技能事件、口径 120ms / 按属性的 cap。
 
     票 09 起排播住 `damage-fx.js`：常量与 `startDamagePlay` / `finishDamagePlay` 从那里读，
     触发点与清场仍在 `session.js`（调用方）。
+
+    票 02 起"同时在播上限 3 条"不是常量的全部故事：生效值按属性读 `anim.ini` 的并发表。
+    这里只钉两件机械事实——**缺省常量仍是 3**、cap 在**调用时**才解析（键表 / 钳制 / 分属性
+    归 `test_the_concurrency_cap_is_read_per_nature_from_anim_ini`）。
     """
     damage_fx = _DAMAGE_FX_JS.read_text(encoding="utf-8")
     effects = _EFFECTS_JS.read_text(encoding="utf-8")
@@ -2077,8 +2220,15 @@ def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbe
         "相邻开演错开 120ms（spec §演出口径）"
     )
     assert re.search(r"^const DAMAGE_FX_CONCURRENCY = 3;$", damage_fx, re.M), (
-        "同时在播上限 3 条（超出丢队列尾）"
+        "缺省 cap 仍是 3：并发表缺键 / 非数字时回退到它（生效值按属性读 anim.ini）"
     )
+    assert "animTiming(" in _js_function(damage_fx, "damageFxCapFor"), (
+        "cap 的读取入口唯一（damageFxCapFor）且**调用时**才解析 anim.ini"
+    )
+    assert re.search(r"^const DAMAGE_FX_CAP_MIN = 1;$", damage_fx, re.M), (
+        "钳制范围 1–8：0 / 负数 → 1（票 02）"
+    )
+    assert re.search(r"^const DAMAGE_FX_CAP_MAX = 8;$", damage_fx, re.M), "> 8 → 8（票 02）"
     assert re.search(r'^const DAMAGE_FX_NATURE = "NORMAL";$', damage_fx, re.M), (
         "无属性的规范名（null / 缺字段也是它；家族表用它当 NORMAL 的键）"
     )
@@ -2676,6 +2826,9 @@ def test_the_damage_sfx_state_machine_is_gesture_unlocked_and_remembers_the_swit
 
     damage-fx 票 08 起这套状态机住 `sfx-ui.js`（原来是 `effects.js` 的尾巴）；`main.js` 那侧的
     接线不动——跨文件全局函数，调用时解析。
+
+    票 02 补第四条结构口径：**声道池随 cap 增长**（起始 = 该属性 cap，槽位超出时就地补建），
+    行为归烟测 `U-SFX-06`。
     """
     sfx_ui = _strip_js_comments(_SFX_UI_JS.read_text(encoding="utf-8"))
     main = _strip_js_comments(_MAIN_JS.read_text(encoding="utf-8"))
@@ -2720,9 +2873,23 @@ def test_the_damage_sfx_state_machine_is_gesture_unlocked_and_remembers_the_swit
     )
     ensure = _js_function(sfx_ui, "damageSfxEnsureLanes")
     assert "damageFxCapFor(" in ensure, (
-        "声道数 = 该属性的在播上限（票 01 收进 damageFxCapFor，票 02 只改它的返回）"
+        "池的起始长度 = 该属性的在播上限（票 02：cap 按属性读 anim.ini 的并发表）"
     )
     assert "player.start()" in ensure, "建声道的那一次就要 start()（同一个 tick 里 resume）"
+    # 票 02 §4：池要能**按需增长**——槽号是跨家族的，本族的槽可能比本族 cap 大。
+    assert re.search(r"^function damageSfxEnsureLanes\(engine, need\) \{", sfx_ui, re.M), (
+        "damageSfxEnsureLanes 必须接受「至少要几条」（旧签名只按 cap 建一次就定长）"
+    )
+    assert re.search(r"while \(lanes\.length < (?:want|Math\.max)", ensure), (
+        "按所需条数增长（cap 只是起始长度）"
+    )
+    start = _js_function(sfx_ui, "damageSfxStart")
+    assert "damageSfxEnsureLanes(engine, slot + 1)" in start, (
+        "槽位超出池长时**就地补建**（旧代码在这里 return null ⇒ 静默无声）"
+    )
+    assert "damageFxCapFor(" in ensure and "damageSfxOn" in start, (
+        "开关关着时只复用已有声道，不凭空建 AudioContext"
+    )
     set_enabled = _js_function(sfx_ui, "damageSfxSetEnabled")
     assert "if (damageSfxOn) damageSfxEnsureModules();" in set_enabled, (
         "点开「♪」本身就是手势：给页面上**已加载**的音效模块各建一套声道"
@@ -2967,6 +3134,7 @@ _DAMAGE_FX_FUNCTIONS = (
     "renderDamageFrame",
     "damageRequestFrame",
     "damageStopFrame",
+    "damageFxLiveOf",
     "pumpDamageQueue",
     "fireDamageEventsThrough",
     "damageDropStalePlays",
@@ -2988,9 +3156,9 @@ _EFFECTS_LAYER_ENTRIES = (
 def test_the_damage_playback_module_is_a_one_way_seam_out_of_the_effects_layer() -> None:
     """票 09：排播独立成一份脚本，缝只朝一个方向（伤害 → 动效）。
 
-    - 26 个函数与全部模块级状态都在 `damage-fx.js`，`effects.js` 里一个都不剩；
-    - 加载次序：`effects.js` 之后（它借三个布局小工具）、`sfx-ui.js` 之前（音效读它的两个
-      常量）、`main.js` 之前；
+    - 37 个函数与全部模块级状态都在 `damage-fx.js`，`effects.js` 里一个都不剩；
+    - 加载次序：`effects.js` 之后（它借三个布局小工具）、`sfx-ui.js` 之前（音效读它的纯读口
+      `DAMAGE_FX_MAX_VARIANT` / `damageFxCapFor` / `damageFxNatureKind`）、`main.js` 之前；
     - 反向**零调用**：`effects.js` 不出现伤害层的任何函数名 / 状态名；`damage-fx.js` 不出现
       动效层的入口名；
     - 两个反向钩子（票面 §2）确实住在调用方，而不是换了个文件名继续互调。
@@ -3001,7 +3169,8 @@ def test_the_damage_playback_module_is_a_one_way_seam_out_of_the_effects_layer()
         "damage-fx.js 排在 effects.js 之后（依赖方向）、main.js 之前"
     )
     assert srcs.index("damage-fx.js") < srcs.index("sfx-ui.js"), (
-        "sfx-ui.js 读 damage-fx.js 的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT）"
+        "sfx-ui.js 读 damage-fx.js 的纯读口（DAMAGE_FX_MAX_VARIANT / damageFxCapFor / "
+        "damageFxNatureKind）"
     )
 
     effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
@@ -3453,7 +3622,7 @@ def test_anim_ini_lists_the_thunder_durations_per_variant(thunder_probe: dict) -
     """
     entries = {
         key: value for key, value in _ini_entries().items()
-        if key.startswith("damage_fx_thunder_")
+        if _THUNDER_TIMING_KEY.match(key)
     }
     expected = set(thunder_probe["keys"])
     assert set(entries) == expected, (

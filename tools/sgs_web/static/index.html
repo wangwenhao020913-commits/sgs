@@ -417,7 +417,8 @@
 <script src="effects.js"></script>
 <!-- damage-fx 票 09：无属性伤害演出的排播 / 座位几何 / 画布生命周期（从 effects.js 抽出）。
      依赖 effects.js 的 rectOf / heroBlockFor / descendantWithClass（调用时解析）⇒ 排在它之后；
-     sfx-ui.js 读它的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT），故也排在它之后。 -->
+     sfx-ui.js 读它的三个纯读口（DAMAGE_FX_MAX_VARIANT / damageFxCapFor /
+     damageFxNatureKind），故也排在它之后。 -->
 <script src="damage-fx.js"></script>
 <script src="preactivation.js"></script>
 <script src="interaction.js"></script>
@@ -446,9 +447,10 @@
 <script src="sfx.js"></script>
 <script src="sfx-thunder.js"></script>
 <!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 按模块分组的声道池 /
-     ?audiotest）。读 damage-fx.js 的 DAMAGE_FX_MAX_VARIANT 与 damageFxCapFor(nature)，都在
-     调用时才解析 ⇒ 排在 damage-fx.js 之后、main.js 之前；damage-fx.js 的四个调用点运行时
-     才触发，wire() 里的 damageSfxSync() 也在这之后。 -->
+     ?audiotest）。读 damage-fx.js 的 DAMAGE_FX_MAX_VARIANT 与 damageFxCapFor(nature)（票 02
+     起池长按属性读 anim.ini 的并发表，槽位超出时就地补建），都在调用时才解析 ⇒ 排在
+     damage-fx.js 之后、main.js 之前；damage-fx.js 的四个调用点运行时才触发，wire() 里的
+     damageSfxSync() 也在这之后。 -->
 <script src="sfx-ui.js"></script>
 <script src="main.js"></script>
 </body>
