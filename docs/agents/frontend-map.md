@@ -31,9 +31,12 @@
 | `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
 | `replay.js` | 回放页：录像列表、按记录重建座位全区（含 `armor_change` 的护甲值——从 0 起逐条 `after` 重建，`> 0` 才在座位行里写「护甲 N」）、询问面板与播放控制。 |
 | `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；阶段 / 回合飘字（U4-04）的 `#t-anim-phase` 层与 `animPlanPhase` 也在这里；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |
+| `fx-core.js` | 无属性伤害演出的**画面**：`SgsDamageFX`（纯 Canvas 2D，零依赖、零请求、不接管 DOM）。四档 `VARIANTS`（伤害值 / 剑光粗细配色 / 刀痕 / 屏闪 / 劈屏）；两档时间轴——`export`（素材库 12s，`?still` / `?export` / `renderAt(t)` 走这条）与 `game`（牌桌：19 个 `damage_fx_*` 键来自 `anim.ini`，缺键回退 `DEFAULT_TIMING`，四条钳制含 `total ≤ MAX_TOTAL_MS = 2200`）。入口 `create(canvas, {variant, profile: "game", timing, amount, stage, view, bare, numberKeepOut})` 与 `gameTiming(variant, raw)`；牌桌档 `bare: true` 只出剑光 / 刀痕 / 墨点 / 飘字（宣纸底与样例武将牌不画）。 |
+| `sfx.js` | 无属性伤害演出的**音效**：`SgsSfx`（Web Audio 现场合成，仓库里没有音频文件）。文件顶部的 `VOICE` 调音台是**唯一**调音处，六个声音 `riser` / `shing` / `whoosh` / `impact` / `strobe` / `split` 各一个独立函数；`create(timeline)` 返回的播放器由 `effects.js` 按演出驱动（`start` / `tick(t, v)` / `stop` / `mute`），`renderOffline` 只给 `?audiotest=1` 出电平。 |
 | `main.js` | `wire()` 事件绑定、回放步长按钮、启动；必须是最后一份脚本。 |
 
-`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights` / `#t-card-preview`）+ 脚本顺序；
+`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights` /
+`#t-damage-fx` / `#t-card-preview`）+ 脚本顺序；
 弃牌堆面板的模态挂载点 `#t-discard-modal`（含自己的 `#t-discard-backdrop`，正文由 `table.js:renderDiscardPanel` 画）
 也在这里；`style.css` 是样式与设计单位，动效时长 / 尺寸的机械断言在 `tests/test_web_static.py`。
 
@@ -52,7 +55,11 @@
 | `drawTargetLines(actor, targets, now)` | `effects.js` | 每个目标一条金色 SVG 线（跳过自己 / 阵亡）；端点只读一次布局。 |
 | `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。**不判断"哪些技能该有特效"**：`event` 由服务端下发（见下一条），前端只画。 |
 | `fireSkillEventsThrough(seq)` | `effects.js` | 回放到某条记录时释放 `state.skillEvents` 队列。 |
+| `fireDamageEventsThrough(seq)` | `effects.js` | 伤害演出与 `fireSkillEventsThrough` **同一条 seq 游标**（`stepPlayback` 里紧挨它的下一行）：把 `state.damageEvents` 里到点的事件交给排播闸门 `pumpDamageQueue`（相邻错开 120ms、同时在播上限 3 条、超出丢队列尾），只挂 `NORMAL`。 |
+| `startDamagePlay(event)` | `effects.js` | 一条伤害开演：量出两张武将块的矩形（`source == null` 时来源挪到画面外 200 单位，不猜来源）→ `SgsDamageFX.create(…, {profile: "game", bare: true, amount, numberKeepOut})` 挂进 `#t-damage-fx` 里**唯一**那张 canvas → 按 `duration`（= `anim.ini` 的 `total`）定时摘层；3 / 4 点档顺势给 `#table-shell` 挂灰阶滤镜窗口。 |
+| `damageSfxTick(play, seconds)` | `effects.js` | 每帧把**演出自己的** `seconds`（就是喂 `fx.draw` 的那个数）交给该演出的音效声道——`sfx.js` 的 `tick(t, v)` 据此判 cue；档位参数（`flight` / `strobe` / `split`）取 `fx.timing`，不另写数字。 |
 | `skill_events_after(records, after, state, activations)` | `projection.py` | **技能特效的唯一判据**（U3-04 / D8.2 + lei 票 06）：`{seq, seat, skill_id, name, targets}` 由两条公共事实合成——① 未裁剪记录里**已接受且点名了技能**的动作（`ActivateSkill` / `SubstituteJudgeCard`）；② 引擎的发动缓冲 `Engine.skill_activations`（**记录面没有技能归属**的锁定技与转化技）。跑 `bash tests/smoke-web.sh`，用例在 `tests/support/ui_smoke.mjs` 的 U3-04*（U3-04k 锁定技 / U3-04l 转化技）。 |
+| `damage_events_after(records, after, state, events)` | `projection.py` | **伤害演出的唯一判据**（damage-fx）：与 `skill_events_after` 同姿态——共用 `after` 游标、`seq > after` 才下发，形状 `{seq, source, target, amount, nature}`；事实来源是 `Engine.damage_events`，`records` 只定本批上界，座位越界 fail-closed，不按视角过滤（伤害是公开事实）。会话载荷的 `damage_events` 键由它填，前端由 `fireDamageEventsThrough` 消费。 |
 | `syncTransientEffects()` | `effects.js` | 座位重建后补回仍在播的高亮 / 体力闪 / 白光；顺手收掉过期目标线。 |
 | `animPlanFlight(record)` | `anim.js` | 飞行层**起飞前**：查分类表、不飞 / 未登记判定、量一次源矩形（`stepPlayback` 在 `applyEffectDelta` 之后、重绘之前调）。 |
 | `animLaunchFlight(plan)` | `anim.js` | 飞行层**重绘之后**：量落点并同步起飞；起 / 落点缺失静默跳过（层上留 `data-anim-missing`）。 |
@@ -77,7 +84,10 @@
   （`length` / 下标 / `item` / 迭代，无数组方法）——测试遍历一律 `Array.from(...)` 或展开；
   集合断言用 `setEquals`，纯函数断言经 `ui.stageLane` 喂 `now`。U4-01 起垫片另有
   **确定性 `getBoundingClientRect`** 与登记式 `animate`（飞行层只读"矩形存在 / 动画参数"，
-  不读真实布局与时钟）。
+  不读真实布局与时钟）；damage-fx 再补 `<canvas>` + 记录型 2D 上下文、`Path2D`、
+  **只排队不自动跑**的 `setTimeout` / `requestAnimationFrame`（演出寿命 / 错开按毫秒读，
+  `U-DMG-*` 用 `runEarliest` 显式推进），以及 `localStorage` 与一次性的
+  `removeEventListener`（`U-SFX-*` 的解锁与开关记忆）。
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。
