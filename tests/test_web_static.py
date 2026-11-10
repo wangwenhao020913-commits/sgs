@@ -1525,12 +1525,22 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     assert wake.index("playbackHoldReason()") < wake.index("stepPlayback(false)"), (
         "每次被唤醒都要**重新读**判据，再决定推不推进（不是在排计时器那一刻算一次）"
     )
-    assert "PLAYBACK_HOLD_POLL_MS" in wake, "仍要暂停 ⇒ 再排一次轮询"
+    assert "schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS)" in wake, (
+        "仍要暂停 ⇒ 走**同一个**排程口再等一轮（不另抄一行 setTimeout）"
+    )
     assert "playbackHoldExpired(" in wake, "到兜底上限必须继续推进"
     assert "playback_hold_timeout" in wake, (
         "兜底触发要留一条可查的侧车日志（`playback_hold_timeout`）"
     )
     assert "playbackHoldTimeouts += 1" in wake, "兜底次数也要可读（实机 / 烟测）"
+    # 兜底是"**放弃等待**"，不是"清零重来"：判据永久为真时清零会让每条记录都停满 8 秒。
+    assert "playbackHoldAbandoned = true;" in wake, (
+        "兜底到点要置上放弃闩（之后判据再真也照常推进，直到判据放空）"
+    )
+    assert "!playbackHoldAbandoned" in wake, "放弃闩要先于上限判据被检查"
+    assert "playbackHoldAbandoned = false;" in _js_function(session, "resetPlaybackHold"), (
+        "判据放空时复位放弃闩（下一轮暂停重新开始计时）"
+    )
     schedule = _js_function(session, "schedulePlaybackStep")
     assert "window.setTimeout(stepPlaybackWhenFree" in schedule, (
         "排下一步只排这一个唤醒体（暂停门在它的开头）"
@@ -1541,6 +1551,10 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     assert 'setAttribute("data-playback-hold"' in mark, (
         "排播侧把「为什么暂停」写进 `<html data-playback-hold>`（与 `?audiotest` 的 data-audio 同姿态）"
     )
+    assert 'setAttribute("data-playback-hold-timeouts"' in mark, (
+        "兜底次数也要落成 DOM 读数（§1：只有写、没有读的计数器等于没有）"
+    )
+    assert "playbackHoldTimeouts" in mark, "读数写的就是那个计数"
     damage_mark = _js_function(damage_fx, "damageFxMark")
     assert 'setAttribute("data-damage-fx-hold"' in damage_mark, (
         "伤害侧在覆盖层上标「我在要求暂停」（实机 / 烟测一眼读）"
@@ -1568,6 +1582,14 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     )
     assert damage_fx.count('registerPlaybackHold("damage", damageFxPlaybackHold);') == 1, (
         "伤害侧只在文件末尾登记一条；同名重复登记会就地替换（页面里本文件只加载一遍）"
+    )
+    # 登记是**加载时**的一次动作，所以清单次序就是这条缝的前提（缺了要喊，不能悄悄失效）。
+    srcs = _script_srcs()
+    assert srcs.index("session.js") < srcs.index("damage-fx.js"), (
+        "damage-fx.js 在加载时就调 registerPlaybackHold ⇒ session.js 必须排在它之前"
+    )
+    assert "没有排播侧的 registerPlaybackHold" in damage_fx, (
+        "排播侧缺失时要喊一声（否则切了脚本次序 ⇒ 暂停悄悄失效，没人看见）"
     )
     assert "registerPlaybackHold" not in _strip_js_comments(
         _EFFECTS_JS.read_text(encoding="utf-8")

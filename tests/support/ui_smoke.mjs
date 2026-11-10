@@ -23372,9 +23372,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const damageHoldMark = () => attr(layer(), "data-damage-fx-hold");
   const playbackIndex = () => (ui.state.playback ? ui.state.playback.index : null);
   const logCount = () => ui.state.logRecords.length;
-  /** 还挂着的**暂停轮询**计时器（票面验收 2：作废 / 换局后不许残留）。 */
-  const pollTimers = () => Array.from(timerDelays.values())
-    .filter((ms) => ms === ui.PLAYBACK_HOLD_POLL_MS).length;
+  /** 还挂着的**暂停轮询**计时器（票面验收 2：作废 / 换局后不许残留）。
+   *  按**回调身份**认（`stepPlaybackWhenFree`），不按毫秒数：伤害的错开也是 120ms，
+   *  按 ms 过滤会把两者混成一件东西。 */
+  const holdWake = vm.runInContext("stepPlaybackWhenFree", context);
+  const pollTimers = () => Array.from(pendingTimers.values())
+    .filter((fn) => fn === holdWake).length;
+  /** 最后排上的那个计时器的回调（垫片按登记序认"最后"）——用来断"重排的是轮询本身"。 */
+  const lastTimerFn = () => {
+    const fns = Array.from(pendingTimers.values());
+    return fns.length ? fns[fns.length - 1] : null;
+  };
   drainTimers();
 
   // ---- 3 点档：冻住 → 连跑若干轮轮询仍停在同一格 → 摘层后一次补齐 ----
@@ -23391,10 +23399,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + `damage-hold="${damageHoldMark()}"`);
   // 下一步的唤醒：判据为真 ⇒ 不推进，改排 120ms 轮询（通用读数这时才写上）。
   const held14b = runUntil(() => holdMark() === "damage:3", 5);
-  check("U-DMG-14b 唤醒时先问判据：记录不前进、通用读数 = 原因串、重排的仍是 120ms 轮询",
+  check("U-DMG-14b 唤醒时先问判据：记录不前进、通用读数 = 原因串、重排的是轮询它自己（120ms）",
     held14b && playbackIndex() === 1 && holdMark() === "damage:3"
-      && latestTimerDelay() === ui.PLAYBACK_HOLD_POLL_MS,
-    `held=${held14b} index=${playbackIndex()} hold="${holdMark()}" next=${latestTimerDelay()}`);
+      && lastTimerFn() === holdWake && latestTimerDelay() === ui.PLAYBACK_HOLD_POLL_MS,
+    `held=${held14b} index=${playbackIndex()} hold="${holdMark()}" `
+      + `wake=${lastTimerFn() === holdWake} next=${latestTimerDelay()}`);
   for (let index = 0; index < 6; index += 1) runEarliest();
   check("U-DMG-14c 连跑 6 轮轮询仍停在同一条记录上（记录流被冻住）、演出还在播",
     playbackIndex() === 1 && liveCount() === 1 && logCount() === logBefore14 + 1,
@@ -23468,8 +23477,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && pendingTimers.size === 0,
     `paused=${paused14j} playback=${ui.state.playback} live=${liveCount()} `
       + `hold="${holdMark()}" damage-hold="${damageHoldMark()}" timers=${pendingTimers.size}`);
+  // 换局时被摘掉的那条演出还有两个屏闪窗口计时器：清不干净就会在之后 push 却没人 pop，
+  // 牌桌**永久**留在黑白 / 冷白里（`damageDropPlayTimers` 的修复点）。
+  drainTimers();
+  check("U-DMG-14k 换局跑空计时器：牌桌不留在黑白 / 冷白里（屏闪窗口计时器一起清掉了）",
+    shellFilter() === "" && flashNodeOf() === null,
+    `filter="${shellFilter()}" flash=${!!flashNodeOf()}`);
 
-  /* ---- U-DMG-14k：「该暂停」是**登记表**，不是写死"只有伤害 3 档" ----
+  /* ---- U-DMG-14l：「该暂停」是**登记表**，不是写死"只有伤害 3 档" ----
    *
    * 用户 2026-11-10 的口径：以后 回复体力 3 档（以及可能的其它重演出）也要冻住记录流，
    * 所以这条缝必须对**任何来源**开放。这里登记一条与伤害无关的判据（模拟那个未来的演出，
@@ -23482,20 +23497,51 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     [],
   );
   const held14k = runUntil(() => holdMark() === "heal:3", 5);
-  check("U-DMG-14k 非伤害来源（模拟 回复体力 3 档）登记后同样冻住记录流：读数 = 它自己的原因串",
-    held14k && playbackIndex() === 1 && holdMark() === "heal:3" && liveCount() === 0,
-    `held=${held14k} index=${playbackIndex()} hold="${holdMark()}" live=${liveCount()}`);
+  check("U-DMG-14l 非伤害来源（模拟 回复体力 3 档）登记后同样冻住记录流：读数 = 它自己的原因串",
+    held14k && playbackIndex() === 1 && holdMark() === "heal:3" && liveCount() === 0
+      && ui.playbackHoldReason() === "heal:3",
+    `held=${held14k} index=${playbackIndex()} hold="${holdMark()}" live=${liveCount()} `
+      + `reason="${ui.playbackHoldReason()}"`);
   healHoldOn = false;   // 那条演出收掉（判据放空）
   const resumed14k = runUntil(() => ui.state.playback === null, 240);
-  check("U-DMG-14l 判据放空后回放继续收尾、通用读数清空（换一个来源也走同一条路）",
+  check("U-DMG-14m 判据放空后回放继续收尾、通用读数清空（换一个来源也走同一条路）",
     resumed14k && holdMark() === "",
     `resumed=${resumed14k} hold="${holdMark()}"`);
   ui.registerPlaybackHold("smoke-heal", () => "");   // 收尾：把这条模拟判据清成恒空
   drainTimers();
 
-  // ---- 兜底上限（票面 §3）：永久不摘层时页面不能永久卡死；纯函数可喂两个时刻 ----
+  /* ---- 兜底上限（票面 §3）：判据永久为真时页面不能跟着永久卡死 ----
+   *
+   * 墙钟可以注入（同一手法见 U-SFX-04c 的 `Date.now`）：把时钟推过上限，让下一个轮询
+   * 走到"兜底"那一支。**放弃等待**（不是清零重来）才是真·不卡死：清零会让每条记录都停满
+   * 8 秒，判据一旦永久为真就变成"卡得慢一点的卡死"。
+   */
+  loadDamageBatch(
+    [hpChange(86, 1, 4, 3), hpChange(87, 2, 4, 3), hpChange(88, 3, 4, 3)],
+    [damageEvent(86, 0, 1, 3)],
+  );
+  const held14n = runUntil(() => holdMark() === "damage:3", 5);
+  const realDateNowHold = Date.now;
+  Date.now = () => realDateNowHold() + ui.PLAYBACK_HOLD_MAX_MS + 1;
+  try {
+    runEarliest();   // 轮询醒来：判据仍为真，但已过兜底上限 ⇒ 推进 + 告警
+  } finally {
+    Date.now = realDateNowHold;
+  }
+  const timeouts14n = Number(attr(documentShim.documentElement, "data-playback-hold-timeouts"));
+  check("U-DMG-14n 判据挂满兜底上限：照常推进一条、记一次超时、通用读数清空",
+    held14n && playbackIndex() === 2 && timeouts14n === 1 && holdMark() === "",
+    `held=${held14n} index=${playbackIndex()} timeouts=${timeouts14n} hold="${holdMark()}"`);
+  const advanced14n = runUntil(() => playbackIndex() >= 3, 20);
+  check("U-DMG-14n2 兜底之后不再重新挂起：判据仍为真也照常推进（不是每条记录停 8 秒）",
+    advanced14n && playbackIndex() >= 3 && timeouts14n === 1,
+    `advanced=${advanced14n} index=${playbackIndex()} timeouts=${timeouts14n}`);
+  runUntil(() => ui.state.playback === null, 400);
+  runUntil(() => liveCount() === 0, 400);
+
+  // 纯函数口径（两个时刻进、布尔出）：烟测直接喂时刻，不等真墙钟。
   const expired14 = ui.playbackHoldExpired;
-  check("U-DMG-14m 兜底上限是纯函数（两个时刻进、布尔出）：未开始 / 差 1ms 不超时，到点超时",
+  check("U-DMG-14o 兜底上限是纯函数（两个时刻进、布尔出）：未开始 / 差 1ms 不超时，到点超时",
     expired14(0, 12345) === false
       && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS - 1) === false
       && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS) === true,

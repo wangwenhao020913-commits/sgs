@@ -905,9 +905,17 @@ function clearDamageFx() {
 /* -------------------------------------------------- 票 07：登记"演出期间暂停回放" */
 
 /* 把伤害家族的判据登记进 `session.js` 的暂停表（`registerPlaybackHold` 住 session.js）。
- * 登记放在文件末尾：页面里本文件只加载一遍；判据读的是**调用时**的 `damagePlays`，故早晚
- * 登记都不影响。`typeof` 守卫与 `animTiming` / `stageNow` 同一口径——只加载本文件的探针
- * （`test_web_static.py` 的三份 sandbox）里没有排播侧，本文件仍是一份独立的排播模块。
+ *
+ * 登记是**加载时**的一次动作（判据本身读的是调用时的 `damagePlays`，故什么时候登记不影响
+ * 它读到什么）：`index.html` 里 `session.js` 排在本文件之前，`test_web_static.py` 钉住了这条
+ * 次序。`typeof` 守卫与 `animTiming` / `stageNow` 同一口径——只加载本文件的探针
+ * （`test_web_static.py` 的三份 sandbox）里没有排播侧，本文件仍是一份独立的排播模块；
+ * 真的缺了排播侧就**喊一声**，别让"切了脚本次序 ⇒ 暂停悄悄失效"这种事没人看见。
+ *
  * 以后要冻住记录流的别的演出（回复体力 3 档等）在自己的脚本里各登记一条，**不要**改这里
  * ——排播侧不认来源，只认"有没有人要求暂停"。 */
-if (typeof registerPlaybackHold === "function") registerPlaybackHold("damage", damageFxPlaybackHold);
+if (typeof registerPlaybackHold === "function") {
+  registerPlaybackHold("damage", damageFxPlaybackHold);
+} else if (typeof console !== "undefined" && console.warn) {
+  console.warn("[playback-hold] 没有排播侧的 registerPlaybackHold：3 / 4 档演出不会暂停回放");
+}

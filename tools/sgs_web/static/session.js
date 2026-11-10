@@ -812,8 +812,14 @@ const playbackHoldProbes = {};
 /** 这一轮暂停从什么时候开始（`stageNow()`；0 = 现在没在暂停）。 */
 let playbackHoldStartedAt = 0;
 
-/** 兜底上限被触发的次数（正常永远是 0；实机 / 烟测可读，用来发现"判据再也不放空"）。 */
+/** 兜底上限被触发的次数（正常永远是 0；写在 `<html data-playback-hold-timeouts>` 上，
+ *  实机 / 烟测一眼读，用来发现"判据再也不放空"）。 */
 let playbackHoldTimeouts = 0;
+
+/** 这一轮暂停是不是已经**放弃等待**（兜底上限到点）：到过之后判据再真也照常推进，
+ *  直到判据放空（`resetPlaybackHold` 复位）。否则永久为真的判据会变成"每条记录停 8 秒"，
+ *  那还是卡死，只是卡得慢一点。 */
+let playbackHoldAbandoned = false;
 
 /** 登记一条「现在该暂停回放吗」的只读判据；同名就地替换（先登记者先命中）。 */
 function registerPlaybackHold(name, probe) {
@@ -848,7 +854,8 @@ function playbackHoldExpired(startedAt, now) {
   return now - startedAt >= PLAYBACK_HOLD_MAX_MS;
 }
 
-/** 把"回放暂停"的读数写进页面根（`<html data-playback-hold>`，值 = 原因串或空）。
+/** 把"回放暂停"的读数写进页面根：`data-playback-hold` = 原因串或空（现在为什么冻住）、
+ *  `data-playback-hold-timeouts` = 兜底上限被触发过几次（正常 0）。
  *
  * 与 `?audiotest=1` 的 `<html data-audio>` 同一姿态：实机 / 烟测一眼读，不必开 DevTools
  * 的作用域。**只写读数**，不驱动任何行为（判据才是行为落点）。
@@ -857,12 +864,14 @@ function markPlaybackHold(reason) {
   if (typeof document === "undefined" || !document || !document.documentElement) return;
   const root = document.documentElement;
   if (typeof root.setAttribute !== "function") return;
-  root.setAttribute("data-playback-hold", reason ? String(reason) : "");
+  root.setAttribute("data-playback-hold", reason || "");
+  root.setAttribute("data-playback-hold-timeouts", String(playbackHoldTimeouts));
 }
 
-/** 收掉暂停状态与读数（冲刷 / 回放收尾）：下一次排程重新开始计时。 */
+/** 收掉暂停状态、兜底闩与读数（判据放空 / 冲刷 / 回放收尾）：下一次排程重新开始计时。 */
 function resetPlaybackHold() {
   playbackHoldStartedAt = 0;
+  playbackHoldAbandoned = false;
   markPlaybackHold("");
 }
 
@@ -878,7 +887,12 @@ function schedulePlaybackStep(base) {
   playbackTimer = window.setTimeout(stepPlaybackWhenFree, Math.max(0, Number(base) || 0));
 }
 
-/** `schedulePlaybackStep` 的唤醒体：判据为空就继续推进，否则再排一次轮询。 */
+/** `schedulePlaybackStep` 的唤醒体：判据为空就继续推进，否则再排一次轮询。
+ *
+ * 兜底（票面 §3）走"**放弃等待**"而不是"清零重来"：判据若因 bug 永久为真，清零会让每条
+ * 记录都停满 `PLAYBACK_HOLD_MAX_MS`（8s/条），那还是卡死、只是卡得慢。放弃之后照常推进，
+ * 直到判据放空（`resetPlaybackHold` 复位，见下一条）。
+ */
 function stepPlaybackWhenFree() {
   playbackTimer = null;
   const reason = playbackHoldReason();
@@ -887,23 +901,26 @@ function stepPlaybackWhenFree() {
     stepPlayback(false);
     return;
   }
-  const now = stageNow();
-  if (!playbackHoldStartedAt) playbackHoldStartedAt = now;
-  if (playbackHoldExpired(playbackHoldStartedAt, now)) {
-    // 兜底（票面 §3）：判据永久为真时页面不能跟着永久卡死——继续推进，并留一条侧车日志。
+  if (!playbackHoldAbandoned) {
+    const now = stageNow();
+    if (!playbackHoldStartedAt) playbackHoldStartedAt = now;
+    if (!playbackHoldExpired(playbackHoldStartedAt, now)) {
+      markPlaybackHold(reason);
+      schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS);
+      return;
+    }
+    playbackHoldAbandoned = true;
     playbackHoldStartedAt = 0;
     playbackHoldTimeouts += 1;
     if (typeof console !== "undefined" && console.warn) {
       console.warn(
-        `[playback-hold] playback_hold_timeout：判据 ${reason} 已挂 ${PLAYBACK_HOLD_MAX_MS}ms，继续推进`,
+        `[playback-hold] playback_hold_timeout：判据 ${reason} 已挂 ${PLAYBACK_HOLD_MAX_MS}ms，`
+          + "放弃等待、继续推进（判据放空前不再挂起）",
       );
     }
-    markPlaybackHold("");
-    stepPlayback(false);
-    return;
   }
-  markPlaybackHold(reason);
-  playbackTimer = window.setTimeout(stepPlaybackWhenFree, PLAYBACK_HOLD_POLL_MS);
+  markPlaybackHold("");
+  stepPlayback(false);
 }
 
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
@@ -983,7 +1000,7 @@ function stepPlayback(immediate) {
     scrollLogToBottom();
   }
   playback.index += 1;
-  // 票 07：下一步先过暂停门（3 / 4 档演出在播时记录流冻住，摘层后再一次补齐）。
+  // 票 07：下一步先过暂停门（登记表里有人要求暂停时记录流冻住，放行后再一次补齐）。
   // `immediate` 侧不排计时器、也不问判据——flushPlayback 的连跑与烟测的 step() 走那条。
   if (!immediate) schedulePlaybackStep(delayOf(record));
 }

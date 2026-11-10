@@ -11,7 +11,7 @@
 |---|---|
 | `core.js` | 全局 `state`、`$`、`post` / `api`、`show` 导航、`bareCardRef`、牌名 / 描述 / 阶段 / 技能标签等共享纯函数。不含渲染与请求流程。 |
 | `lobby.js` | 开局页表单（人数 / 点将 / 牌堆档位）、`POST /api/sessions`、`loadHeroCatalog` / `loadDeckCatalog`。 |
-| `session.js` | 会话生命周期与派生：`applyView` / `commitView`、事件回放 `stepPlayback`、舞台三组、live view、轮询（见下节）。**回放暂停**（damage-fx-natures 票 07）：`playbackHoldProbes` 登记表 + `registerPlaybackHold(name, probe)` / `playbackHoldReason()`，排下一步只走 `schedulePlaybackStep(base)`——演出在播时按 `PLAYBACK_HOLD_POLL_MS`（120ms）轮询判据、冻结记录推进，兜底 `PLAYBACK_HOLD_MAX_MS`（8000ms，纯函数 `playbackHoldExpired`）。读数 `<html data-playback-hold>` = 原因串。**排播侧不认识任何具体演出**（不读 `damagePlays`、不认档位）：以后 回复体力 3 档 之类的重演出各自登记一条即可。 |
+| `session.js` | 会话生命周期与派生：`applyView` / `commitView`、事件回放 `stepPlayback`、舞台三组、live view、轮询（见下节）。**回放暂停**（damage-fx-natures 票 07）：`playbackHoldProbes` 登记表 + `registerPlaybackHold(name, probe)` / `playbackHoldReason()`，排下一步只走 `schedulePlaybackStep(base)`——演出在播时按 `PLAYBACK_HOLD_POLL_MS`（120ms）轮询判据、冻结记录推进，兜底 `PLAYBACK_HOLD_MAX_MS`（8000ms，纯函数 `playbackHoldExpired`）到点后**放弃等待**（`playbackHoldAbandoned`：判据放空前不再挂起——否则永久为真的判据会变成"每条记录停 8 秒"）。读数 `<html data-playback-hold>` = 原因串、`data-playback-hold-timeouts` = 兜底触发次数（正常 0）。**排播侧不认识任何具体演出**（不读 `damagePlays`、不认档位）：以后 回复体力 3 档 之类的重演出各自登记一条即可。 |
 | `candidates.js` | 候选索引的**只读**查询：`cardEntry` / `cardSelectable` / `isLegalCombo` / `autoCombo`；不重建索引。**自己区域的直选判据** `isOwnZonePick`（选自己的手牌/装备 ⇒ 牌面直选、不铺左下角面板；票 14）也在这里。 |
 | `card-view.js` | 卡面绘制（花色 / 点数 / 牌名 / 类型行 / 悬停全文），纯展示；**跟随鼠标的卡牌预览**（`showCardPreview` / `moveCardPreview` / `hideCardPreview`，层 `#t-card-preview`；用户 2026-11-07：装备 / 判定槽与武将牌上的牌区共用这一口，贴边翻转）。 |
 | `card-face.js` | 卡面状态的纯函数：选中 / 置灰 / 槽位、`isProvide` / `provideSlotIndex`。 |
@@ -54,7 +54,7 @@
 | `stageLane(item, now)` | `session.js` | **纯函数**寿命判定：`visible` / `fading` / `gone`；测试直接喂 `now`。 |
 | `tableViewForRender()` | `table.js` | 回放期读逐事件派生的 `state.liveView`（`pending` 收起），其余读权威视图。 |
 | `stepPlayback(immediate)` | `session.js` | 回放一条记录：日志 → 效果 / 亮牌 → `applyLiveDelta` → 重绘 → 动效 → 技能事件；收尾的下一步只经 `schedulePlaybackStep(delayOf(record))`（`immediate` 侧不过暂停门）。**暂停只停记录推进，不停演出自身的帧与声**。 |
-| `schedulePlaybackStep(base)` | `session.js` | 排下一步回放（票 07）：先等 `base`，**唤醒时**才问 `playbackHoldReason()`；判据非空 ⇒ 不推进记录，改排 `PLAYBACK_HOLD_POLL_MS` 轮询，直到放空（或到 `PLAYBACK_HOLD_MAX_MS` 兜底，并留一条 `playback_hold_timeout` 告警）。`immediate` 侧不经过它。 |
+| `schedulePlaybackStep(base)` | `session.js` | 排下一步回放（票 07）：先等 `base`，**唤醒时**才问 `playbackHoldReason()`；判据非空 ⇒ 不推进记录，改排 `PLAYBACK_HOLD_POLL_MS` 轮询，直到放空；到 `PLAYBACK_HOLD_MAX_MS` 兜底时**放弃等待**（此轮不再挂起、照常推进）并留一条 `playback_hold_timeout` 告警 + `data-playback-hold-timeouts` 计数。`immediate` 侧不经过它。 |
 | `registerPlaybackHold(name, probe)` | `session.js` | **回放暂停的通用口**（票 07）：登记一条只读判据 `() => 原因串`（空串 = 不暂停），同名就地替换。伤害家族在 `damage-fx.js` 文件末尾登记一条（3 / 4 档在播）；以后 回复体力 3 档 之类的重演出各登记一条即可——排播侧不认来源。 |
 | `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 护甲 `armor_change` / 手牌数 / 装备 / 阶段 / 标记数量 `marker_change` …）。 |
 | `poll()` | `session.js` | 2s 静默轮询；idle 只更新时钟，不重绘、不清选择；失败静默。`state.playback` 非空时**本来就不发**——回放暂停期间服务端超时代答不会插进窗口（票 07 的已知取舍）。 |
