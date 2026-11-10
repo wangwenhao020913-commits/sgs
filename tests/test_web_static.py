@@ -23,6 +23,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
@@ -4702,3 +4703,44 @@ def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() ->
     assert _css_rule(".fx-flash-fire"), "缺暖白档的 CSS"
     assert "rgb(226, 240, 255)" in _css_rule(".fx-flash-thunder"), "雷 = 冷白"
     assert "rgb(255, 243, 224)" in _css_rule(".fx-flash-fire"), "火 = 暖白"
+
+
+# ---------------------------------------------------------------------------
+# damage-fx-natures 票 04：真会话夹具（闪电 → 连环传导；Python 产出 / JS 消费）
+#
+# 夹具是**证据**，不是可以随手改的输入：由 `tools/gen_damage_fixture.py` 跑真引擎产出。
+# 本文件只钉"夹具 = 今天的引擎产出"这一件事：夹具存在 / 是合法 JSON（`records` 与
+# `damage_events` 两键）+ 重跑生成器**逐字节**相等。剧本形状（同批多条 / 无来源 / 雷电 /
+# 事件锚点 / `hp_change`）归生成器自己的自检，消费侧（层出现 / 串行 / 时停）归烟测
+# `U-DMG-18*`——两边都不在这里抄第二份。
+#
+# 重录只走 `--update`（默认只打印，不写盘）。
+# ---------------------------------------------------------------------------
+
+THUNDER_FIXTURE = REPO_ROOT / "tests" / "support" / "fixtures" / "thunder-conduction.json"
+
+
+def test_the_thunder_conduction_fixture_is_what_todays_engine_produces() -> None:
+    """夹具存在、是合法 JSON（`records` + `damage_events` 两键），且重跑生成器**逐字节**相等。
+
+    夹具是"今天的引擎会产出什么"的冻结证据：引擎行为（判定区间 / 传导名单 / 事件字段）变了
+    就这里红——先判断是"行为真的变了"（照票面改判据）还是"夹具该重录"
+    （`tools/gen_damage_fixture.py --update`）。剧本形状（3 条无来源雷电 / 一目标一帧 / 事件
+    锚点落在窗口里 / 三条 `hp_change`）由生成器自己的自检钉住，不在这里抄第二份。
+    """
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "gen_damage_fixture.py")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    committed = THUNDER_FIXTURE.read_bytes()
+    payload = json.loads(committed)
+    assert isinstance(payload.get("records"), list) and payload["records"], "夹具缺 records"
+    assert isinstance(payload.get("damage_events"), list), "夹具缺 damage_events"
+    assert completed.stdout == committed, (
+        "重跑生成器与提交的夹具不一致：先判断是引擎行为变了（那就照着改判据 / 票面），"
+        "还是夹具该重录（tools/gen_damage_fixture.py --update）"
+    )

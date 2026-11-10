@@ -1,0 +1,1308 @@
+{
+  "damage_events": [
+    {
+      "amount": 3,
+      "nature": "THUNDER",
+      "seq": 28,
+      "source": null,
+      "target": 0
+    },
+    {
+      "amount": 3,
+      "nature": "THUNDER",
+      "seq": 42,
+      "source": null,
+      "target": 1
+    },
+    {
+      "amount": 3,
+      "nature": "THUNDER",
+      "seq": 56,
+      "source": null,
+      "target": 2
+    }
+  ],
+  "meta": {
+    "chained_seats": [
+      0,
+      1,
+      2
+    ],
+    "deck_profile": "standard_108",
+    "human_seat": 0,
+    "judge_card": {
+      "card_id": 29,
+      "rank": 2,
+      "suit": "spade",
+      "type": "double_sword"
+    },
+    "lightning_card": 24,
+    "note": "横置 / 判定区为局面构造给定（standard_108 无【铁索连环】）；判定 → 伤害 → 传导 → 弃牌走真引擎。",
+    "player_count": 4,
+    "scenario": "闪电 → 连环传导",
+    "seed": 20261111
+  },
+  "records": [
+    {
+      "actor": null,
+      "cards": [],
+      "depth": 0,
+      "frame_id": 0,
+      "kind": "timing",
+      "seq": 1,
+      "source": null,
+      "targets": [],
+      "timing": "GAME_START"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 0,
+      "frame_id": 0,
+      "kind": "timing",
+      "seq": 2,
+      "source": null,
+      "targets": [],
+      "timing": "TURN_BEFORE_START"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 0,
+      "frame_id": 0,
+      "kind": "timing",
+      "seq": 3,
+      "source": null,
+      "targets": [],
+      "timing": "TURN_START"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 0,
+      "frame_id": 0,
+      "kind": "timing",
+      "seq": 4,
+      "source": null,
+      "targets": [],
+      "timing": "PHASE_PREPARE"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 0,
+      "frame_id": 0,
+      "kind": "timing",
+      "seq": 5,
+      "source": null,
+      "targets": [],
+      "timing": "PHASE_JUDGE"
+    },
+    {
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "delta_type": "card_move",
+      "depth": 0,
+      "frame_id": 0,
+      "from_zone": {
+        "seat": 0,
+        "zone": "judge"
+      },
+      "kind": "delta",
+      "owner": null,
+      "reason": "LOSE",
+      "seq": 6,
+      "to_zone": {
+        "seat": null,
+        "zone": "processing"
+      }
+    },
+    {
+      "depth": 1,
+      "frame_id": 1,
+      "frame_kind": "RESOLVE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": null,
+      "seq": 7
+    },
+    {
+      "actor": null,
+      "cards": [],
+      "depth": 1,
+      "frame_id": 1,
+      "kind": "timing",
+      "seq": 8,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "RESOLVE_START"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 1,
+      "frame_id": 1,
+      "kind": "timing",
+      "seq": 9,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "RESOLVE_BEFORE_EFFECT"
+    },
+    {
+      "kind": "query",
+      "query": {
+        "actor": 0,
+        "kind": "RESPOND",
+        "prompt": "响应窗口：请使用一张牌，或放弃。",
+        "seq": 10,
+        "timing": "RESOLVE_BEFORE_EFFECT"
+      },
+      "seq": 10
+    },
+    {
+      "accepted": true,
+      "action": {
+        "answers_seq": 10,
+        "kind": "Pass"
+      },
+      "answers_seq": 10,
+      "kind": "action",
+      "reason": null,
+      "seq": 11
+    },
+    {
+      "kind": "query",
+      "query": {
+        "actor": 1,
+        "kind": "RESPOND",
+        "prompt": "响应窗口：请使用一张牌，或放弃。",
+        "seq": 12,
+        "timing": "RESOLVE_BEFORE_EFFECT"
+      },
+      "seq": 12
+    },
+    {
+      "accepted": true,
+      "action": {
+        "answers_seq": 12,
+        "kind": "Pass"
+      },
+      "answers_seq": 12,
+      "kind": "action",
+      "reason": null,
+      "seq": 13
+    },
+    {
+      "kind": "query",
+      "query": {
+        "actor": 2,
+        "kind": "RESPOND",
+        "prompt": "响应窗口：请使用一张牌，或放弃。",
+        "seq": 14,
+        "timing": "RESOLVE_BEFORE_EFFECT"
+      },
+      "seq": 14
+    },
+    {
+      "accepted": true,
+      "action": {
+        "answers_seq": 14,
+        "kind": "Pass"
+      },
+      "answers_seq": 14,
+      "kind": "action",
+      "reason": null,
+      "seq": 15
+    },
+    {
+      "kind": "query",
+      "query": {
+        "actor": 3,
+        "kind": "RESPOND",
+        "prompt": "响应窗口：请使用一张牌，或放弃。",
+        "seq": 16,
+        "timing": "RESOLVE_BEFORE_EFFECT"
+      },
+      "seq": 16
+    },
+    {
+      "accepted": true,
+      "action": {
+        "answers_seq": 16,
+        "kind": "Pass"
+      },
+      "answers_seq": 16,
+      "kind": "action",
+      "reason": null,
+      "seq": 17
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 1,
+      "frame_id": 1,
+      "kind": "timing",
+      "seq": 18,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "RESOLVE_EFFECT"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 1,
+      "frame_id": 1,
+      "kind": "timing",
+      "seq": 19,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "RESOLVE_AFTER_EFFECT"
+    },
+    {
+      "depth": 2,
+      "frame_id": 2,
+      "frame_kind": "JUDGE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "RESOLVE",
+        "JUDGE_ON"
+      ],
+      "seq": 20
+    },
+    {
+      "cards": [
+        {
+          "attack_range": 2,
+          "attribute": "普通",
+          "card_id": 29,
+          "color": "black",
+          "description": "武器，攻击范围 2。当你使用【杀】指定一名异性角色为目标后，你可以令其选择一项：弃置一张手牌，或令你摸一张牌。本仓裁定：由目标选择；性别取自武将数据；目标没有手牌时只能令你摸牌。",
+          "display_name": "雌雄双股剑",
+          "kind": "normal",
+          "name": "雌雄双股剑",
+          "rank": 2,
+          "slot": "weapon",
+          "source_cards": [],
+          "suit": "spade",
+          "type": "double_sword",
+          "virtual_sources": []
+        }
+      ],
+      "delta_type": "card_move",
+      "depth": 2,
+      "frame_id": 2,
+      "from_zone": {
+        "seat": null,
+        "zone": "deck"
+      },
+      "kind": "delta",
+      "owner": 0,
+      "reason": "JUDGE",
+      "seq": 21,
+      "to_zone": {
+        "seat": null,
+        "zone": "processing"
+      }
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": 2,
+          "attribute": "普通",
+          "card_id": 29,
+          "color": "black",
+          "description": "武器，攻击范围 2。当你使用【杀】指定一名异性角色为目标后，你可以令其选择一项：弃置一张手牌，或令你摸一张牌。本仓裁定：由目标选择；性别取自武将数据；目标没有手牌时只能令你摸牌。",
+          "display_name": "雌雄双股剑",
+          "kind": "normal",
+          "name": "雌雄双股剑",
+          "rank": 2,
+          "slot": "weapon",
+          "source_cards": [],
+          "suit": "spade",
+          "type": "double_sword",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 2,
+      "frame_id": 2,
+      "kind": "timing",
+      "seq": 22,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "JUDGE_ON"
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": 2,
+          "attribute": "普通",
+          "card_id": 29,
+          "color": "black",
+          "description": "武器，攻击范围 2。当你使用【杀】指定一名异性角色为目标后，你可以令其选择一项：弃置一张手牌，或令你摸一张牌。本仓裁定：由目标选择；性别取自武将数据；目标没有手牌时只能令你摸牌。",
+          "display_name": "雌雄双股剑",
+          "kind": "normal",
+          "name": "雌雄双股剑",
+          "rank": 2,
+          "slot": "weapon",
+          "source_cards": [],
+          "suit": "spade",
+          "type": "double_sword",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 2,
+      "frame_id": 2,
+      "kind": "timing",
+      "seq": 23,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "JUDGE_CARD_BEFORE_EFFECT"
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": 2,
+          "attribute": "普通",
+          "card_id": 29,
+          "color": "black",
+          "description": "武器，攻击范围 2。当你使用【杀】指定一名异性角色为目标后，你可以令其选择一项：弃置一张手牌，或令你摸一张牌。本仓裁定：由目标选择；性别取自武将数据；目标没有手牌时只能令你摸牌。",
+          "display_name": "雌雄双股剑",
+          "kind": "normal",
+          "name": "雌雄双股剑",
+          "rank": 2,
+          "slot": "weapon",
+          "source_cards": [],
+          "suit": "spade",
+          "type": "double_sword",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 2,
+      "frame_id": 2,
+      "kind": "timing",
+      "seq": 24,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "JUDGE_CARD_AFTER_EFFECT"
+    },
+    {
+      "cards": [
+        {
+          "attack_range": 2,
+          "attribute": "普通",
+          "card_id": 29,
+          "color": "black",
+          "description": "武器，攻击范围 2。当你使用【杀】指定一名异性角色为目标后，你可以令其选择一项：弃置一张手牌，或令你摸一张牌。本仓裁定：由目标选择；性别取自武将数据；目标没有手牌时只能令你摸牌。",
+          "display_name": "雌雄双股剑",
+          "kind": "normal",
+          "name": "雌雄双股剑",
+          "rank": 2,
+          "slot": "weapon",
+          "source_cards": [],
+          "suit": "spade",
+          "type": "double_sword",
+          "virtual_sources": []
+        }
+      ],
+      "delta_type": "card_move",
+      "depth": 2,
+      "frame_id": 2,
+      "from_zone": {
+        "seat": null,
+        "zone": "processing"
+      },
+      "kind": "delta",
+      "owner": 0,
+      "reason": "JUDGE",
+      "seq": 25,
+      "to_zone": {
+        "seat": null,
+        "zone": "discard"
+      }
+    },
+    {
+      "depth": 3,
+      "frame_id": 3,
+      "frame_kind": "DAMAGE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "JUDGE",
+        "DAMAGE_DEAL"
+      ],
+      "seq": 26
+    },
+    {
+      "actor": null,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 3,
+      "kind": "timing",
+      "seq": 27,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "DAMAGE_DEAL"
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 3,
+      "kind": "timing",
+      "seq": 28,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "DAMAGE_TAKE"
+    },
+    {
+      "depth": 4,
+      "frame_id": 4,
+      "frame_kind": "LIFE_DECREASE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "DAMAGE",
+        "LIFE_DECREASE_BEFORE"
+      ],
+      "seq": 29
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 4,
+      "kind": "timing",
+      "seq": 30,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_BEFORE"
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 4,
+      "kind": "timing",
+      "seq": 31,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_ON"
+    },
+    {
+      "after": 1,
+      "amount": -3,
+      "before": 4,
+      "delta_type": "hp_change",
+      "depth": 4,
+      "frame_id": 4,
+      "kind": "delta",
+      "seat": 0,
+      "seq": 32
+    },
+    {
+      "chained": false,
+      "delta_type": "chained_change",
+      "depth": 4,
+      "frame_id": 4,
+      "kind": "delta",
+      "seat": 0,
+      "seq": 33
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 4,
+      "kind": "timing",
+      "seq": 34,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_AFTER"
+    },
+    {
+      "depth": 3,
+      "frame_id": 4,
+      "frame_kind": "LIFE_DECREASE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "DAMAGE",
+        "LIFE_DECREASE_BEFORE"
+      ],
+      "seq": 35
+    },
+    {
+      "actor": null,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 3,
+      "kind": "timing",
+      "seq": 36,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "DAMAGE_AFTER_DEAL"
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 3,
+      "kind": "timing",
+      "seq": 37,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "DAMAGE_AFTER_TAKE"
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 3,
+      "kind": "timing",
+      "seq": 38,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "DAMAGE_END"
+    },
+    {
+      "depth": 2,
+      "frame_id": 3,
+      "frame_kind": "DAMAGE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "JUDGE",
+        "DAMAGE_DEAL"
+      ],
+      "seq": 39
+    },
+    {
+      "depth": 3,
+      "frame_id": 5,
+      "frame_kind": "DAMAGE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "JUDGE",
+        "DAMAGE_DEAL"
+      ],
+      "seq": 40
+    },
+    {
+      "actor": null,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 5,
+      "kind": "timing",
+      "seq": 41,
+      "source": null,
+      "targets": [
+        1
+      ],
+      "timing": "DAMAGE_DEAL"
+    },
+    {
+      "actor": 1,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 5,
+      "kind": "timing",
+      "seq": 42,
+      "source": null,
+      "targets": [
+        1
+      ],
+      "timing": "DAMAGE_TAKE"
+    },
+    {
+      "depth": 4,
+      "frame_id": 6,
+      "frame_kind": "LIFE_DECREASE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "DAMAGE",
+        "LIFE_DECREASE_BEFORE"
+      ],
+      "seq": 43
+    },
+    {
+      "actor": 1,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 6,
+      "kind": "timing",
+      "seq": 44,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_BEFORE"
+    },
+    {
+      "actor": 1,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 6,
+      "kind": "timing",
+      "seq": 45,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_ON"
+    },
+    {
+      "after": 1,
+      "amount": -3,
+      "before": 4,
+      "delta_type": "hp_change",
+      "depth": 4,
+      "frame_id": 6,
+      "kind": "delta",
+      "seat": 1,
+      "seq": 46
+    },
+    {
+      "chained": false,
+      "delta_type": "chained_change",
+      "depth": 4,
+      "frame_id": 6,
+      "kind": "delta",
+      "seat": 1,
+      "seq": 47
+    },
+    {
+      "actor": 1,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 6,
+      "kind": "timing",
+      "seq": 48,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_AFTER"
+    },
+    {
+      "depth": 3,
+      "frame_id": 6,
+      "frame_kind": "LIFE_DECREASE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "DAMAGE",
+        "LIFE_DECREASE_BEFORE"
+      ],
+      "seq": 49
+    },
+    {
+      "actor": null,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 5,
+      "kind": "timing",
+      "seq": 50,
+      "source": null,
+      "targets": [
+        1
+      ],
+      "timing": "DAMAGE_AFTER_DEAL"
+    },
+    {
+      "actor": 1,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 5,
+      "kind": "timing",
+      "seq": 51,
+      "source": null,
+      "targets": [
+        1
+      ],
+      "timing": "DAMAGE_AFTER_TAKE"
+    },
+    {
+      "actor": 1,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 5,
+      "kind": "timing",
+      "seq": 52,
+      "source": null,
+      "targets": [
+        1
+      ],
+      "timing": "DAMAGE_END"
+    },
+    {
+      "depth": 2,
+      "frame_id": 5,
+      "frame_kind": "DAMAGE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "JUDGE",
+        "DAMAGE_DEAL"
+      ],
+      "seq": 53
+    },
+    {
+      "depth": 3,
+      "frame_id": 7,
+      "frame_kind": "DAMAGE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "JUDGE",
+        "DAMAGE_DEAL"
+      ],
+      "seq": 54
+    },
+    {
+      "actor": null,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 7,
+      "kind": "timing",
+      "seq": 55,
+      "source": null,
+      "targets": [
+        2
+      ],
+      "timing": "DAMAGE_DEAL"
+    },
+    {
+      "actor": 2,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 7,
+      "kind": "timing",
+      "seq": 56,
+      "source": null,
+      "targets": [
+        2
+      ],
+      "timing": "DAMAGE_TAKE"
+    },
+    {
+      "depth": 4,
+      "frame_id": 8,
+      "frame_kind": "LIFE_DECREASE",
+      "kind": "frame",
+      "op": "push",
+      "return_to": [
+        "DAMAGE",
+        "LIFE_DECREASE_BEFORE"
+      ],
+      "seq": 57
+    },
+    {
+      "actor": 2,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 8,
+      "kind": "timing",
+      "seq": 58,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_BEFORE"
+    },
+    {
+      "actor": 2,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 8,
+      "kind": "timing",
+      "seq": 59,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_ON"
+    },
+    {
+      "after": 1,
+      "amount": -3,
+      "before": 4,
+      "delta_type": "hp_change",
+      "depth": 4,
+      "frame_id": 8,
+      "kind": "delta",
+      "seat": 2,
+      "seq": 60
+    },
+    {
+      "chained": false,
+      "delta_type": "chained_change",
+      "depth": 4,
+      "frame_id": 8,
+      "kind": "delta",
+      "seat": 2,
+      "seq": 61
+    },
+    {
+      "actor": 2,
+      "cards": [],
+      "depth": 4,
+      "frame_id": 8,
+      "kind": "timing",
+      "seq": 62,
+      "source": null,
+      "targets": [],
+      "timing": "LIFE_DECREASE_AFTER"
+    },
+    {
+      "depth": 3,
+      "frame_id": 8,
+      "frame_kind": "LIFE_DECREASE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "DAMAGE",
+        "LIFE_DECREASE_BEFORE"
+      ],
+      "seq": 63
+    },
+    {
+      "actor": null,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 7,
+      "kind": "timing",
+      "seq": 64,
+      "source": null,
+      "targets": [
+        2
+      ],
+      "timing": "DAMAGE_AFTER_DEAL"
+    },
+    {
+      "actor": 2,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 7,
+      "kind": "timing",
+      "seq": 65,
+      "source": null,
+      "targets": [
+        2
+      ],
+      "timing": "DAMAGE_AFTER_TAKE"
+    },
+    {
+      "actor": 2,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 3,
+      "frame_id": 7,
+      "kind": "timing",
+      "seq": 66,
+      "source": null,
+      "targets": [
+        2
+      ],
+      "timing": "DAMAGE_END"
+    },
+    {
+      "depth": 2,
+      "frame_id": 7,
+      "frame_kind": "DAMAGE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "JUDGE",
+        "DAMAGE_DEAL"
+      ],
+      "seq": 67
+    },
+    {
+      "depth": 1,
+      "frame_id": 2,
+      "frame_kind": "JUDGE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": [
+        "RESOLVE",
+        "JUDGE_ON"
+      ],
+      "seq": 68
+    },
+    {
+      "actor": 0,
+      "cards": [],
+      "depth": 1,
+      "frame_id": 1,
+      "kind": "timing",
+      "seq": 69,
+      "source": null,
+      "targets": [
+        0
+      ],
+      "timing": "RESOLVE_END"
+    },
+    {
+      "depth": 0,
+      "frame_id": 1,
+      "frame_kind": "RESOLVE",
+      "kind": "frame",
+      "op": "pop",
+      "return_to": null,
+      "seq": 70
+    },
+    {
+      "actor": 0,
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "depth": 0,
+      "frame_id": 1,
+      "kind": "timing",
+      "seq": 71,
+      "source": null,
+      "targets": [],
+      "timing": "RESOLVE_AFTER_END"
+    },
+    {
+      "cards": [
+        {
+          "attack_range": null,
+          "attribute": "雷电",
+          "card_id": 24,
+          "color": "red",
+          "description": "延时类锦囊。出牌阶段对自己使用，置于自己的判定区。判定阶段进行判定：若为黑桃 2～9，则受到 3 点雷电伤害，然后【闪电】进入弃牌堆；否则将【闪电】移动到下家的判定区。本仓裁定：雷电伤害可与【铁索连环】传导；被【无懈可击】抵消后不进入弃牌堆，继续移动到下家。",
+          "display_name": "闪电",
+          "kind": "normal",
+          "name": "闪电",
+          "rank": 12,
+          "slot": null,
+          "source_cards": [],
+          "suit": "heart",
+          "type": "lightning",
+          "virtual_sources": []
+        }
+      ],
+      "delta_type": "card_move",
+      "depth": 0,
+      "frame_id": 0,
+      "from_zone": {
+        "seat": null,
+        "zone": "processing"
+      },
+      "kind": "delta",
+      "owner": null,
+      "reason": "USE",
+      "seq": 72,
+      "to_zone": {
+        "seat": null,
+        "zone": "discard"
+      }
+    }
+  ]
+}

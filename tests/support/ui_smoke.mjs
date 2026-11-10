@@ -23761,6 +23761,115 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     resumed16 && liveCount() === 0 && holdMark() === "" && logCount() === logBefore16 + 3,
     `resumed=${resumed16} live=${liveCount()} hold="${holdMark()}" log=${logCount() - logBefore16}/3`);
 
+  /* ==== damage-fx-natures 票 04：真会话夹具 —— 闪电 → 连环传导（Python 产出 / JS 消费）====
+   *
+   * 夹具由 `tools/gen_damage_fixture.py` 跑**真引擎**产出（重跑比对在
+   * `test_web_static.py`），这里只消费：喂给**同一个** `loadDamageBatch` 路径。它钉住两个
+   * 只有属性演出才踩到的形状——`source: null`（天降）与**同批多条**（连环传导，一目标一帧）。
+   * 合成事件也能造这两点，但造不出"服务端真的这么下发"。
+   *
+   * 票 08 之后 3 档是**串行 + 独占牌桌**：三条 3 点雷逐条播、从不叠着播——120ms 错开与
+   * cap 并发那段口径只留给 1 / 2 档（`U-DMG-03*` 继续钉着）。这里按当前口径断言，并把
+   * "真数字"从夹具读出来，不在测试里另写一份。
+   */
+  const fixture = JSON.parse(readFileSync(
+    "tests/support/fixtures/thunder-conduction.json", "utf8"));
+  const fixtureEvents = fixture.damage_events || [];
+  /* 【闪电】固定 3 点 ⇒ 3 档 ⇒ 暂停原因串字面量 `damage:3`（18a 把夹具的 amount 钉成 3）。
+   * 这里**不**拿 `damageFxVariantOf` 反过来算期望值——那是拿被测函数给自己出题。 */
+  const fixtureHold04 = "damage:3";
+  check("U-DMG-18a 真夹具：同批多条、全部无来源雷电，目标各不相同（shape 由 Python 产出）",
+    Array.isArray(fixture.records) && fixture.records.length > 0
+      && fixtureEvents.length >= 2
+      && fixtureEvents.every((event) => event.nature === "THUNDER" && event.source === null
+        && Number(event.amount) === Number(fixtureEvents[0].amount))
+      && Number(fixtureEvents[0].amount) === 3
+      && new Set(fixtureEvents.map((event) => event.target)).size === fixtureEvents.length,
+    `records=${(fixture.records || []).length} events=${JSON.stringify(fixtureEvents)}`);
+
+  const realThunderCreate04 = windowShim.SgsThunderFX.create;
+  const thunderOptions04 = [];
+  windowShim.SgsThunderFX.create = (canvas, options) => {
+    thunderOptions04.push(options);
+    return realThunderCreate04(canvas, options);
+  };
+  const fixturePlayBefore04 = playCount();
+  loadDamageBatch(fixture.records, fixture.damage_events);
+  check("U-DMG-18b 夹具灌进来先只排队：一条都还没演（触发点仍是记录 seq 游标）",
+    liveCount() === 0 && playCount() === fixturePlayBefore04
+      && (ui.state.damageEvents || []).length === fixtureEvents.length,
+    `live=${liveCount()} plays=${playCount() - fixturePlayBefore04} `
+      + `pending=${(ui.state.damageEvents || []).length}`);
+  const firstPlay04 = runUntil(() => playCount() === fixturePlayBefore04 + 1, 200);
+  /* `data-damage-fx-number` 是飘字的**字高**（U-DMG-08c 的读数），不是数值——数值的唯一入口
+   * 是交给画面模块的 `options.amount`（服务端的真实点数，前端不算）。 */
+  check("U-DMG-18c 走到第一条命中记录才开演：nature = THUNDER、金额 = 夹具 amount、天降（无来源）",
+    firstPlay04 && liveCount() === 1
+      && attr(layer(), "data-damage-fx-nature") === "THUNDER"
+      && Number(attr(layer(), "data-damage-fx-number")) > 0
+      && thunderOptions04.length === 1
+      && thunderOptions04[0].stage.src === null
+      && thunderOptions04[0].amount === Number(fixtureEvents[0].amount)
+      && thunderOptions04[0].variant === 3,
+    `first=${firstPlay04} live=${liveCount()} nature="${attr(layer(), "data-damage-fx-nature")}" `
+      + `number="${attr(layer(), "data-damage-fx-number")}" options=${JSON.stringify(
+        thunderOptions04[0] && {
+          amount: thunderOptions04[0].amount, variant: thunderOptions04[0].variant,
+          sky: thunderOptions04[0].stage && thunderOptions04[0].stage.src === null,
+        })}`);
+  const frozen04 = playbackIndex();
+  const frozenLog04 = logCount();
+  const held04 = runUntil(() => holdMark() === fixtureHold04, 40);
+  /* 判据要能红：回放**还有**记录没走（index < 本批条数），而窗口把它们挡住了——不是"批次
+   * 本来就走完了"。 */
+  check("U-DMG-18d 重演出窗口里记录流冻住：通用读数 = 该档原因串、伤害侧要求暂停、index / 记录都不动",
+    held04 && holdMark() === fixtureHold04 && damageHoldMark() === "1"
+      && playbackIndex() === frozen04 && logCount() === frozenLog04
+      && frozen04 < fixture.records.length,
+    `held=${held04} hold="${holdMark()}" damage-hold="${damageHoldMark()}" `
+      + `index=${playbackIndex()}/${fixture.records.length} log=${logCount() - frozenLog04}`);
+  for (let index = 0; index < 6; index += 1) runEarliest();
+  check("U-DMG-18e 连跑 6 轮轮询仍只有一条在播：第二条不抢跑、回放仍冻着（串行 + 独占）",
+    liveCount() === 1 && playCount() === fixturePlayBefore04 + 1
+      && playbackIndex() === frozen04 && logCount() === frozenLog04
+      && (ui.state.damageEvents || []).length === fixtureEvents.length - 1,
+    `live=${liveCount()} plays=${playCount() - fixturePlayBefore04} index=${playbackIndex()} `
+      + `log=${logCount() - frozenLog04} pending=${(ui.state.damageEvents || []).length}`);
+  // 逐条收：每条 3 档雷在播时把 `plan.targetSeat` 记下来（串行 ⇒ 采样一个就够），
+  // 三条都收完后与夹具逐条对齐——这条用例的判据是"真事件真的驱动了演出"。
+  const plays04 = [];
+  let maxLive04 = 0;
+  for (let steps = 0; steps < 1200 && ui.state.playback !== null; steps += 1) {
+    if (liveCount() > 0) {
+      const rows = JSON.parse(vm.runInContext(
+        "JSON.stringify(damagePlays.map((play) => [play.plan.targetSeat, play.amount, play.nature]))",
+        context));
+      for (const row of rows) {
+        if (!plays04.some((seen) => seen[0] === row[0])) plays04.push(row);
+      }
+    }
+    maxLive04 = Math.max(maxLive04, liveCount());
+    if (!runEarliest()) break;
+  }
+  maxLive04 = Math.max(maxLive04, liveCount());
+  windowShim.SgsThunderFX.create = realThunderCreate04;
+  check("U-DMG-18f 三条真伤害逐条开演（峰值 1，从不并存）：目标 / 数值 / 属性都等于夹具",
+    ui.state.playback === null && playCount() === fixturePlayBefore04 + fixtureEvents.length
+      && liveCount() === 0 && maxLive04 === 1
+      && (ui.state.damageEvents || []).length === 0
+      && thunderOptions04.length === fixtureEvents.length
+      && plays04.length === fixtureEvents.length
+      && plays04.every((row, index) => row[0] === fixtureEvents[index].target
+        && row[1] === Number(fixtureEvents[index].amount) && row[2] === "THUNDER")
+      && thunderOptions04.every((options, index) => (
+        options.amount === Number(fixtureEvents[index].amount)
+          && options.variant === 3
+          && options.stage.src === null)),
+    `playback=${ui.state.playback} plays=${playCount() - fixturePlayBefore04}/${fixtureEvents.length} `
+      + `maxLive=${maxLive04} pending=${(ui.state.damageEvents || []).length} `
+      + `plays=${JSON.stringify(plays04)} creates=${thunderOptions04.length}`);
+  drainTimers();   // 收尾：夹具这一批自己的计时器一条不留（后面的 U-SFX 从干净状态起）
+
   /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
    *
    * 垫片里**没有 `AudioContext`**（见 windowShim），故分两段：
