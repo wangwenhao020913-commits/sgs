@@ -621,12 +621,26 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .flag-legal, .flag-selected { background: var(--ok); color: #fff; }
 .flag-req { background: #8a6508; color: #fff; }
 
-/* 状态叠加：横置虚线 / 酒泛红 / 阵亡蒙灰 + 大号「阵亡」。三层各自定位、互不遮挡。 */
-.chain-line {
-  position: absolute; left: 8px; right: 8px; top: 50%; height: 0;
-  border-top: 2px dashed #8b6b3e; opacity: .9;
-  pointer-events: none; z-index: 3;
+/* 状态叠加：横置铁索 / 酒泛红 / 阵亡蒙灰 + 大号「阵亡」。三层各自定位、互不遮挡。
+ * 横置的常态 = 一块**铁索贴图画布**（chain-death-voices 票 01，原来是 2px 虚线）：贴图由
+ * `SgsChainFX.bakeStatic()` 按武将块尺寸现烘、`chainFxSync()` 画进来。铺法照素材包 `STATIC`：
+ * 宽 = 牌宽 × (1 + 10.5% + 9.2%)、左沿外扩 10.5%（两端都探出牌沿，读起来是"绑在外面"）。
+ * z-index **4**：压在阵亡 / 翻面的蒙灰（1）之上，与 `.dead-tag` 同层——源码里 `#t-self-chain`
+ * 排在 `#t-self-flipped` / `#t-self-dead` **之前**，于是「阵亡」标签仍压在最上面。 */
+.chain-mark {
+  position: absolute; top: 0; bottom: 0; left: -10.5%; width: 119.7%;
+  pointer-events: none; z-index: 4;
 }
+/* 入链演出期间藏掉常态铁索（用户口径：动画结束后才进入横置表现，不然常态 UI 会挡住动画）。
+ * 座位上的 `data-chain-fx` 由 `fx-chain.js` 在开演 / 收尾时贴 / 摘；解锁（`break`）不藏——
+ * 那时常态本来就已经摘掉了。 */
+.seat[data-chain-fx="link"] .chain-mark { visibility: hidden; }
+/* 铁索要**探出牌沿**（左 10.5% / 宽 119.7%），但武将块为了把牌区 / 状态标签 / 白光裁在牌内写了
+ * `overflow: hidden`——那会把两端的链头正好切在牌沿上，素材包 §六 的"两端都探出左右沿"就没了。
+ * 只在**横置**的座位上放开裁切（`.chain-mark` 只在横置时存在）：其余内容都是块内尺寸，不受影响；
+ * 唯一的副作用是横置座位上的技能白光（`.hero-block.skill-sweep`）扫出牌沿时不再被裁——用户
+ * 的验收口径里"两端探出"是硬要求，这个组合态很罕见，取舍记在票 01 的 `## Answer`。 */
+.seat.chained .hero-block { overflow: visible; }
 .seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
 /* 阵亡与翻面**共用同一档置灰**（用户裁定：翻面的置灰程度与阵亡完全一致）。
  * 两者写在同一条规则里，配比因此不会漂：翻面唯一的差别是**没有文字**。
@@ -1037,6 +1051,19 @@ button.mini-slot { cursor: pointer; }
   height: 100%;
 }
 
+/* ---------- 铁索连环演出层（chain-death-voices 票 01）：入链 / 解锁 ---------- */
+
+/* 与伤害层**各自独立**（spec §硬约束：不许往 `#t-damage-fx` 里塞画布）、同一 z-index 档：
+ * 两张层互不摘层，两套排播也互不知道对方。层里一次演出一张 canvas（位置 / 尺寸由
+ * `fx-chain.js` 按武将块矩形内联写出，CSS 不替它铺满——铁索只盖一个武将块，不是整屏）。 */
+.chain-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 19;
+}
+
 /* ---------- 属性伤害的整屏着色闪（damage-fx-natures 票 01）：雷 = 冷白、火 = 暖白 ---------- */
 
 /* 为什么不是 `filter`：`filter` 会在 `#table-shell` 上建立 containing block，把两个
@@ -1331,7 +1358,8 @@ button.mini-slot { cursor: pointer; }
 .self .seat-tags { margin-top: 2px; }
 .self .seat-flag { font-size: calc(11 * var(--dsu)); padding: 0 calc(7 * var(--dsu)); }
 .self .seat-foot { margin-top: auto; font-size: calc(11 * var(--dsu)); padding-top: 5px; }
-.self .chain-line { left: 10px; right: 10px; }
+/* 自己武将块的铁索贴图不另调左右：`.chain-mark` 的 -10.5% / 119.7% 是相对**牌宽**的，
+ * 与对手座位同一条规则（原先的虚线因为内边距要写 `left/right: 10px`，现在不需要了）。 */
 .self .dead-text { font-size: calc(36 * var(--dsu)); }
 .self .side-block {
   flex: 0 0 44.52%;              /* 130 / 292 */

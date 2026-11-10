@@ -228,7 +228,68 @@ function damageSfxEnsureModules() {
       if (lane.live) live += 1;
     }
   }
+  // chain-death-voices 票 01：铁索的**一路**排程器也在这一个手势 / 开关里建（同一个 tick）。
+  chainSfxEnsure();
   return live;
+}
+
+/* ---------------------------------------------- 铁索连环的音效（chain-death-voices 票 01） */
+
+/** 铁索那一路（`SgsChainSfx` 是**一次性排程器**：`play(mode)` 排完整段、`stop()` 收掉，
+ *  没有逐帧 `tick`，所以不进上面按模块分组的伤害声道池）。池长 **1**——横置不是高频事件
+ *  （spec §演出口径）。惰性建：只有页面上加载了该模块、且用户开过「♪」时才建
+ *  （`damageSfxEnsureModules` 在同一个手势 / 开关里顺手建它）。 */
+let chainSfxLane = null;
+
+/** 惰性建那一路并解锁（`unlock()` 必须在真实手势的同一个 tick 里调）。
+ *
+ * 没有 `SgsChainSfx`（缺件）/ 没有 `AudioContext` 时返回 `null`：整套铁索音效就是
+ * **不存在**，不报错（与伤害声道同一条降级口径）。
+ */
+function chainSfxEnsure() {
+  if (!chainSfxLane) {
+    const api = window.SgsChainSfx;
+    if (!api || typeof api.create !== "function") return null;
+    const player = api.create();
+    if (!player || typeof player.play !== "function") return null;
+    chainSfxLane = { player };
+  }
+  if (typeof chainSfxLane.player.unlock === "function") {
+    try {
+      chainSfxLane.player.unlock();
+    } catch (error) {
+      // 没有 AudioContext / 被策略禁用：静默降级，画面照旧。
+    }
+  }
+  chainSfxMute(!damageSfxOn);
+  return chainSfxLane;
+}
+
+/** 铁索一次演出开声（`fx-chain.js` 的 `startChainPlay` 调；**单向缝**：它只认这两个口）。
+ *
+ * 「♪」关着时 `return null`——一声都不出，而且**连 `AudioContext` 都不建**（缺省静音是
+ * 零代价的，三条既有口径之一）。
+ */
+function chainSfxPlay(mode) {
+  if (!damageSfxOn) return null;
+  const lane = chainSfxEnsure();
+  if (!lane) return null;
+  if (typeof lane.player.play === "function") {
+    lane.player.play(mode === "break" ? "break" : "link", 0, 1.0);
+  }
+  return lane;
+}
+
+/** 一次演出收尾：这一声停掉（画面摘层时由 `fx-chain.js:finishChainPlay` 调）。 */
+function chainSfxStop() {
+  if (!chainSfxLane) return;
+  if (typeof chainSfxLane.player.stop === "function") chainSfxLane.player.stop();
+}
+
+/** 开关灌到铁索这一路（`damageSfxMute` 顺手调它：同一个开关管所有声音）。 */
+function chainSfxMute(on) {
+  if (!chainSfxLane) return;
+  if (typeof chainSfxLane.player.mute === "function") chainSfxLane.player.mute(Boolean(on));
 }
 
 /** 把开关灌到所有声道上（没有声道时只是空转：状态仍由 `damageSfxOn` 记着）。 */
@@ -239,6 +300,8 @@ function damageSfxMute(muted) {
       lane.player.mute(Boolean(muted));
     }
   }
+  // 铁索那一路同一个开关（chain-death-voices 票 01）。
+  chainSfxMute(Boolean(muted));
 }
 
 /** 启动时读一次记忆并刷按钮（`main.js:wire()` 里调一次）。 */

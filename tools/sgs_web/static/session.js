@@ -959,6 +959,11 @@ function stepPlayback(immediate) {
     // damage-fx 票 05：伤害演出挂在**同一条 seq 游标**上（这是它唯一的触发点：不在
     // `applyLiveDelta` 里、也不在提交视图时触发）。
     fireDamageEventsThrough(record.seq);
+    // chain-death-voices 票 01：铁索连环的横置 / 重置演出**紧挨着**伤害演出的下一行。
+    // 与伤害不同，它读的是**整条记录**（判据 `delta_type === "chained_change"`，座位在
+    // `record.seat`）；首批用它自己的 `state.chainSeq` 游标压掉历史，打开一局已横置的对局
+    // 不会补播入链。**无时停**：这里没有任何登记，演出与后续记录并行是口径。
+    fireChainEventsThrough(record);
     scrollLogToBottom();
   }
   playback.index += 1;
@@ -1407,6 +1412,10 @@ function commitView(body) {
     // 上一局那一剑不能劈在新桌上，也不能在新桌上响完。
     clearDamageFx();
     state.damageEvents = [];
+    // chain-death-voices 票 01：铁索的入链 / 解锁是**另一层**的一次演出（自己的覆盖层
+    // `#t-chain-fx`、自己的队列 / 计时器 / 常态贴图），换局同样连声音一起收掉。`state.chainSeq`
+    // 也在这里清回 `null`——新局首批的记录是历史，不该补播入链。
+    clearChainFx();
   }
   state.view = body;
   // U3-05（D11）：提交即权威——live view 用这份快照整份覆盖（下一批事件从它起算）。

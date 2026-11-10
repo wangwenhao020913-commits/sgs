@@ -562,9 +562,11 @@ function heroBlockNode(player, view, ctx, flags) {
   foot.appendChild(hand);
   foot.appendChild(seat);
   block.appendChild(foot);
-  // 横置 = 武将块中央从左到右一条虚线；酒 = 席位泛红（只上类，无「酒」字徽章）；
-  // 阵亡 = 蒙灰 + 大号「阵亡」覆盖中心。三个状态可以同时存在、互不遮挡（CSS 分层）。
-  if (player.chained) block.appendChild(chainLineNode());
+  // 横置 = 武将块上的一条铁索贴图（`fx-chain.js` 画的常态）；酒 = 席位泛红（只上类，无「酒」字
+  // 徽章）；阵亡 = 蒙灰 + 大号「阵亡」覆盖中心。三个状态可以同时存在、互不遮挡（CSS 分层）。
+  // 贴图本身不在这里画：`table.js:renderTable` 末尾的 `chainFxSync()` 按当前矩形重贴（座位节点
+  // 每次重绘都会重建），这里只负责"横置时有一块画布"。
+  if (player.chained) block.appendChild(chainMarkNode());
   // 翻面 = 与阵亡同一套"蒙灰"覆盖层，但**不**配文字（用户裁定：文字会遮挡标记）。
   // 三态（横置 / 翻面 / 阵亡）可以同时存在，CSS 分层互不遮挡。
   if (player.flipped) block.appendChild(flippedLayerNode());
@@ -575,11 +577,18 @@ function heroBlockNode(player, view, ctx, flags) {
   return block;
 }
 
-function chainLineNode() {
-  const line = document.createElement("div");
-  line.className = "chain-line";
-  line.setAttribute("title", "横置（连环状态）");
-  return line;
+/** 横置（连环状态）的常态铁索：一块**画布**，不是虚线（chain-death-voices 票 01）。
+ *
+ * 为什么是 canvas 而不是 CSS 背景图：贴图由 `SgsChainFX.bakeStatic()` 运行时按武将块尺寸
+ * 烘焙（烟测垫片没有 `toDataURL`，改不了 data URL；顺带不新增二进制、随 dpr 现烘）。
+ * 本函数只建节点；画面与"演完才挂"的抑制态都归 `fx-chain.js:chainFxSync()`。
+ * 自己的座位有一份常驻节点（`index.html` 的 `#t-self-chain`），两条路是同一个 class。
+ */
+function chainMarkNode() {
+  const mark = document.createElement("canvas");
+  mark.className = "chain-mark";
+  mark.setAttribute("title", "横置（连环状态）");
+  return mark;
 }
 
 function flippedLayerNode() {

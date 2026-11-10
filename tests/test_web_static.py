@@ -607,6 +607,11 @@ _ANIM_JS = STATIC_DIR / "anim.js"
 _SESSION_JS = STATIC_DIR / "session.js"
 _ANIM_INI = STATIC_DIR / "anim.ini"
 
+# 住在同一份 `anim.ini` 里、但**默认值与钳制都不在本文件**的外来键前缀（`anim.js` 只搬数字）：
+# damage-fx 的三族 + chain-death-voices 的铁索。`test_anim_ini_lists_the_d8_durations_...` 用
+# 它把"不属于任何演出家族的键"过滤出来，逐族键表归各自的用例钉。
+_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_")
+
 _D8_INI_KEYS = {
     "base_step",
     "flight_use",
@@ -772,13 +777,14 @@ def _ini_entries() -> dict[str, str]:
 
 
 def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
-    """`anim.ini` = D8 的 13 个键（外加 damage-fx 票 04 的 19 个）；`debug_scale` 不进产品。"""
+    """`anim.ini` = D8 的 13 个键（外加各演出家族的外来键）；`debug_scale` 不进产品。"""
     text = _ANIM_INI.read_text(encoding="utf-8")
     assert "debug_scale" not in text, "debug_scale 必须从 anim.ini 整体移除（含键与注释）"
     entries = _ini_entries()
-    # 同一份 ini 也住着 damage-fx 的 19 个键（票 04：用户改一份文件就能调两套时长），
-    # 这里只钉 D8 那一族，19 个键由下面那条用例钉。
-    shared = {key for key in entries if not key.startswith("damage_fx_")}
+    # 同一份 ini 也住着各演出家族的外来键（用户改一份文件就能调所有时长），这里只钉 D8
+    # 那一族：伤害（19 + 雷电 20 + 火焰 20 + 三条并发表）由下面的用例钉，铁索的两个键由
+    # `test_the_chain_fx_module_shape_and_its_two_timing_keys` 钉。
+    shared = {key for key in entries if not key.startswith(_ANIM_FOREIGN_PREFIXES)}
     assert shared == _D8_INI_KEYS, (
         f"anim.ini 的 D8 键必须与 D8 表一致：缺 {sorted(_D8_INI_KEYS - shared)}；"
         f"多 {sorted(shared - _D8_INI_KEYS)}"
@@ -4744,3 +4750,516 @@ def test_the_thunder_conduction_fixture_is_what_todays_engine_produces() -> None
         "重跑生成器与提交的夹具不一致：先判断是引擎行为变了（那就照着改判据 / 票面），"
         "还是夹具该重录（tools/gen_damage_fixture.py --update）"
     )
+
+
+# ---------------------------------------------------------------------------
+# chain-death-voices 票 01：铁索连环（常态铁索贴图 + link / break 演出，**无时停**）
+#
+# 机械的四半：
+# 1. **脚本清单 / 严格脚本 / 顺序 / 全局名**：`fx-chain.js` 跟 `fx-fire.js`、`sfx-chain.js` 跟
+#    `sfx-fire.js`、两份都在 `sfx-ui.js` 之前；全局名 `SgsChainFX` / `SgsChainSfx`；不发请求、
+#    不自己取 DOM（纯画布 / 声音生成器）。
+# 2. **`SgsChainFX` 的形状与双时间轴**：`create` / `bakeStatic` / `MODES` / `STATIC` /
+#    `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` / `TIMING_KEYS` / `MAX_TOTAL_MS` 都在；
+#    字段名由 `DEFAULT_TIMING` **生成**；`anim.ini` 的两个键与它逐键同值；钳制 800–2400。
+# 3. **`.chain-line` 被整体替换成 `.chain-mark`**（虚线 ⇒ 铁索贴图画布）：全仓静态脚本里
+#    不再有 `.chain-line`；`#t-self-chain` 是常驻 canvas 且 `hidden` 协议不变；CSS 四条
+#    （absolute / 外扩 / pointer-events / z-index 4）+ 入链期间的抑制规则。
+# 4. **排播钩子**：`stepPlayback` 里 `fireChainEventsThrough(record)` 紧挨
+#    `fireDamageEventsThrough(record.seq)` 的下一行；`renderTable` 末尾 `chainFxSync()`；
+#    `commitView` 换会话时 `clearChainFx()`；`state.chainSeq` 游标 / 120ms 错开 / 200ms 同座位
+#    / 在播上限 8；**两个文件里都没有 `registerPlaybackHold`**（无时停）。
+#
+# 行为（入链 / 解锁 / 重播保护 / 同批两条 / 版式作废 / 音效）归烟测 `U-CHAIN-01..`。
+# ---------------------------------------------------------------------------
+
+_FX_CHAIN_JS = STATIC_DIR / "fx-chain.js"
+_SFX_CHAIN_JS = STATIC_DIR / "sfx-chain.js"
+
+# chain-death-voices 票 01：本 effort 新加的两个全局名（票 02 / 03 会往这张表继续加）。
+_FX_EXTRA_GLOBALS = {
+    "fx-chain.js": "SgsChainFX",
+    "sfx-chain.js": "SgsChainSfx",
+}
+
+
+def test_the_fx_extra_globals_are_listed_in_order_and_stay_static() -> None:
+    """新演出家族的脚本：清单里有、顺序对、导全局名、不发请求、不自己取 DOM。"""
+    srcs = _script_srcs()
+    for name, global_name in _FX_EXTRA_GLOBALS.items():
+        assert name in srcs, f"index.html 必须加载 {name}：{srcs}"
+        assert (STATIC_DIR / name).is_file(), f"static/ 里缺少 {name}"
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        # 首条语句仍是 `"use strict";`（总清单用例也扫，这里就近再说一次）。
+        assert _LEADING_COMMENT.sub("", text, count=1).startswith('"use strict";'), (
+            f"{name} 的首条语句必须是 \"use strict\";"
+        )
+        assert re.search(rf"global\.{global_name}\s*=\s*\{{", text), (
+            f"{name} 必须把入口挂在 window.{global_name}（与素材包 / 伤害家族同一姿态）"
+        )
+        assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", text), (
+            f"{name} 是纯静态脚本：不发请求"
+        )
+        assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", text), (
+            f"{name} 不接管 DOM（覆盖层与挂载是排播层的事）"
+        )
+    # 顺序：画面跟 fx-fire.js、音效跟 sfx-fire.js，两份都在 sfx-ui.js 之前。
+    assert srcs.index("fx-fire.js") < srcs.index("fx-chain.js"), (
+        f"fx-chain.js 必须排在 fx-fire.js 之后：{srcs}"
+    )
+    assert srcs.index("sfx-fire.js") < srcs.index("sfx-chain.js"), (
+        f"sfx-chain.js 必须排在 sfx-fire.js 之后：{srcs}"
+    )
+    assert srcs.index("fx-chain.js") < srcs.index("sfx-ui.js") < srcs.index("main.js"), (
+        "fx-chain.js 要在 sfx-ui.js 之前（音效读画面模块的时间表）"
+    )
+    assert srcs.index("sfx-chain.js") < srcs.index("sfx-ui.js"), (
+        "sfx-chain.js 要在 sfx-ui.js 之前（后者按名惰性建声道）"
+    )
+    assert srcs.index("fx-chain.js") < srcs.index("sfx-chain.js"), (
+        "画面在前、音效在后（音效的 cue 时刻从画面模块的 MODES 读）"
+    )
+
+
+def test_the_chain_fx_family_never_registers_a_playback_hold() -> None:
+    """用户口径：铁索的入链 / 解锁**都没有时停**（与素材包 / 阵亡那套建议相反）。
+
+    逐文件扫 `registerPlaybackHold`：出现即红。这条与伤害家族（3 / 4 档才登记一条）是
+    **两条相反的口径**，所以必须各钉各的——不能靠"登记表里只有伤害"这种间接事实。
+    """
+    for name in ("fx-chain.js", "sfx-chain.js"):
+        text = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        assert "registerPlaybackHold" not in text, (
+            f"{name} 不许登记回放暂停：铁索演出无时停（spec §硬约束）"
+        )
+        assert "playbackHold" not in text, f"{name} 连暂停判据的名字都不该认识"
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+    assert 'registerPlaybackHold("damage"' in damage_fx, (
+        "反向对照：伤害家族仍只登记自己那一条（本条不是把登记表整个禁掉）"
+    )
+
+
+_CHAIN_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
+const noteNode = { textContent: "", hidden: true };
+const context = vm.createContext({
+  console,
+  setTimeout,
+  clearTimeout,
+  fetch: async () => ({ ok: true, text: async () => ini }),
+  document: {
+    getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+    createElement: () => ({
+      style: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      appendChild() {},
+      setAttribute() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+context.$ = (id) => context.document.getElementById(id);
+for (const name of ["anim.js", "fx-chain.js"]) {
+  vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+}
+
+const report = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     const FX = SgsChainFX;
+     const g = (mode, raw) => FX.gameTiming(mode, raw || {});
+     return JSON.stringify({
+       note: $("t-anim-note").textContent,
+       animConfigKeys: Object.keys(animConfig),
+       chainFromIni: {
+         link: animTiming("chain_fx_link_total"),
+         break: animTiming("chain_fx_break_total"),
+       },
+       shape: {
+         create: typeof FX.create,
+         bakeStatic: typeof FX.bakeStatic,
+         gameTiming: typeof FX.gameTiming,
+         cues: typeof FX.cues,
+         modes: Object.keys(FX.MODES || {}),
+         static: FX.STATIC,
+         geom: typeof FX.GEOM,
+         colors: typeof FX.COLORS,
+       },
+       durations: { link: FX.MODES.link.duration, break: FX.MODES.break.duration },
+       defaults: FX.DEFAULT_TIMING,
+       timingFields: FX.TIMING_FIELDS,
+       timingKeys: FX.TIMING_KEYS,
+       frozen: [Object.isFrozen(FX.TIMING_FIELDS), Object.isFrozen(FX.TIMING_KEYS)],
+       prefix: FX.TIMING_PREFIX,
+       maxTotal: FX.MAX_TOTAL_MS,
+       minTotal: FX.MIN_TOTAL_MS,
+       resolved: {
+         link: g("link").total,
+         break: g("break").total,
+         linkSeconds: g("link").seconds,
+         breakSeconds: g("break").seconds,
+         fromIni: g("link", { chain_fx_link_total: animTiming("chain_fx_link_total") }).total,
+       },
+       clamps: {
+         low: g("link", { chain_fx_link_total: 100 }).total,
+         high: g("break", { chain_fx_break_total: 9000 }).total,
+         junk: g("link", { chain_fx_link_total: "abc" }).total,
+         missing: g("break", {}).total,
+       },
+     });
+   })()`,
+  context,
+  { filename: "chain_fx_probe.js" },
+);
+console.log(report);
+"""
+
+
+def _chain_fx_probe() -> dict:
+    """跑真 `anim.js` + 真 `fx-chain.js`（node vm），拿回形状 / 时间轴 / 钳制的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "chain_fx_probe.mjs"
+        probe.write_text(_CHAIN_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"铁索探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def chain_fx_probe() -> dict:
+    """一次探针跑完，形状 / 时间轴 / 钳制几条用例共用。"""
+    return _chain_fx_probe()
+
+
+_CHAIN_MODES = ("link", "break")
+
+
+def test_the_chain_fx_module_shape_and_its_two_timing_keys(chain_fx_probe: dict) -> None:
+    """`SgsChainFX` 的形状、双时间轴的单一真源与钳制（spec §演出口径·牌桌档缺省）。
+
+    行为的一半在 node 探针里驱动真函数（`gameTiming` 的钳制 / 缺键 / 垃圾值），另一半与磁盘上的
+    `anim.ini` 对表。字段名**不是**写在测试里的第二份清单：期望值来自 `DEFAULT_TIMING`。
+    """
+    probe = chain_fx_probe
+    shape = probe["shape"]
+    for key in ("create", "bakeStatic", "gameTiming", "cues"):
+        assert shape[key] == "function", f"SgsChainFX 缺 {key}()"
+    assert set(_CHAIN_MODES) <= set(shape["modes"]), f"MODES 缺 link / break：{shape['modes']}"
+    assert "hold" in shape["modes"], (
+        "hold = 常态（入链末帧）那一档：`bakeStatic` 与它共用 frameHold，不是另一套画法"
+    )
+    assert shape["geom"] == "object" and shape["colors"] == "object", "GEOM / COLORS 要导出"
+    static = shape["static"]
+    for field in ("overL", "overR", "entry", "deg", "cardRatio"):
+        assert isinstance(static.get(field), (int, float)), f"STATIC 缺 {field}：{static}"
+    assert abs(float(static["overL"]) - 0.105) < 1e-9, f"左沿外扩 10.5%：{static}"
+    assert abs(float(static["overR"]) - 0.092) < 1e-9, f"右沿外扩 9.2%：{static}"
+    assert probe["durations"] == {"link": 1.36, "break": 1.24}, (
+        f"素材页基准时长：{probe['durations']}"
+    )
+
+    # `DEFAULT_TIMING`：每模式一张子表，键就是 anim.ini 的字段名。
+    defaults = probe["defaults"]
+    assert set(defaults) == set(_CHAIN_MODES), f"DEFAULT_TIMING 的模式：{sorted(defaults)}"
+    assert defaults["link"] == {"total": 1360}, f"link 缺省 1360ms：{defaults['link']}"
+    assert defaults["break"] == {"total": 1240}, f"break 缺省 1240ms：{defaults['break']}"
+    # 字段名由 `DEFAULT_TIMING` 生成（票面：字段名只有一处真源）。
+    from_defaults = sorted({field for mode in defaults.values() for field in mode})
+    assert list(probe["timingFields"]) == from_defaults, (
+        f"TIMING_FIELDS 必须由 DEFAULT_TIMING 生成：{probe['timingFields']} vs {from_defaults}"
+    )
+    expected_keys = sorted(
+        f"{probe['prefix']}{mode}_{field}"
+        for mode, fields in defaults.items()
+        for field in fields
+    )
+    assert sorted(probe["timingKeys"]) == expected_keys, (
+        f"TIMING_KEYS 必须由前缀 + 模式 + 字段生成：{probe['timingKeys']} vs {expected_keys}"
+    )
+    assert probe["frozen"] == [True, True], "TIMING_FIELDS / TIMING_KEYS 冻结（别被就地改写）"
+    assert probe["prefix"] == "chain_fx_", f"anim.ini 前缀：{probe['prefix']}"
+    assert probe["maxTotal"] == 2400 and probe["minTotal"] == 800, (
+        f"钳制 800–2400ms：min={probe['minTotal']} max={probe['maxTotal']}"
+    )
+
+    # 磁盘上的 `anim.ini` 与 `DEFAULT_TIMING` **逐键同值**（用户改一份文件调时长）。
+    ini = {
+        key: float(value)
+        for key, value in _ini_entries().items()
+        if key.startswith("chain_fx_")
+    }
+    assert set(ini) == set(probe["timingKeys"]), (
+        f"anim.ini 的键必须与 TIMING_KEYS 一致：缺 {sorted(set(probe['timingKeys']) - set(ini))}；"
+        f"多 {sorted(set(ini) - set(probe['timingKeys']))}"
+    )
+    for mode in _CHAIN_MODES:
+        key = f"chain_fx_{mode}_total"
+        assert ini[key] == defaults[mode]["total"], (
+            f"{key} 必须与 DEFAULT_TIMING 同值：ini={ini[key]} default={defaults[mode]['total']}"
+        )
+    # 新键真的进了 animConfig，且没被当成未知键删掉 / 报错。
+    anim_js = _ANIM_JS.read_text(encoding="utf-8")
+    prefixes = re.search(r"^const ANIM_FOREIGN_KEY_PREFIXES = \[(?P<body>[^\]]*)\];$", anim_js, re.M)
+    assert prefixes is not None, "anim.js 里找不到 ANIM_FOREIGN_KEY_PREFIXES"
+    assert '"chain_fx_"' in prefixes.group("body"), (
+        f"anim.js 必须把 chain_fx_ 登记成外来键（否则用户的改动被当未知键删掉）：{prefixes.group('body')}"
+    )
+    assert "未知键" not in probe["note"], f"chain_fx_* 不得被当成未知键（页面提示：{probe['note']}）"
+    for key in probe["timingKeys"]:
+        assert key in probe["animConfigKeys"], f"anim.js 没把 {key} 读进 animConfig"
+    for mode in _CHAIN_MODES:
+        assert probe["chainFromIni"][mode] == defaults[mode]["total"], (
+            f"animTiming(chain_fx_{mode}_total) 应等于缺省值：{probe['chainFromIni']}"
+        )
+
+    # `gameTiming`：缺省 = DEFAULT_TIMING，ini 值活着，越界被夹（800–2400），垃圾值退默认。
+    resolved = probe["resolved"]
+    assert resolved["link"] == 1360 and resolved["break"] == 1240, f"缺省解算：{resolved}"
+    assert abs(resolved["linkSeconds"] - 1.36) < 1e-9 and abs(resolved["breakSeconds"] - 1.24) < 1e-9
+    assert resolved["fromIni"] == 1360, "带真 ini 值的解算也要落到 1360"
+    clamps = probe["clamps"]
+    assert clamps["low"] == 800, f"低于 800ms 被夹到 800：{clamps['low']}"
+    assert clamps["high"] == 2400, f"高于 2400ms 被夹到 2400：{clamps['high']}"
+    assert clamps["junk"] == 1360, f"非法值退回 DEFAULT_TIMING：{clamps['junk']}"
+    assert clamps["missing"] == 1240, f"缺键退回 DEFAULT_TIMING：{clamps['missing']}"
+
+
+_CHAIN_MARK_Z = 4
+
+
+def test_the_chain_mark_replaces_the_dashed_line_everywhere() -> None:
+    """`.chain-line` **整体替换**成 `.chain-mark`（spec §硬约束）：不是"再画一条铁索"。
+
+    三处一起换：`seat-view.js:chainMarkNode()`（对手座位）、`index.html` 的常驻
+    `#t-self-chain`（自己的座位）、`style.css` 的两条虚线规则。也钉住**保留**的那几样：
+    `.chained` 状态类、`#t-self-chain` 的常驻节点 + `hidden` 协议、`title="横置（连环状态）"`、
+    z-index ≥ 3（铁索画在阵亡蒙灰之上）。
+    """
+    stray = []
+    for path in sorted(STATIC_DIR.glob("*")):
+        if path.suffix not in {".js", ".css", ".html", ".ini"}:
+            continue
+        if ".chain-line" in path.read_text(encoding="utf-8"):
+            stray.append(path.name)
+    assert not stray, f".chain-line 必须整体替换成 .chain-mark，这些文件里还有：{stray}"
+
+    seat_view = (STATIC_DIR / "seat-view.js").read_text(encoding="utf-8")
+    node = _js_function(seat_view, "chainMarkNode")
+    assert 'createElement("canvas")' in node, f"chainMarkNode 必须造一块 canvas：{node}"
+    assert '"chain-mark"' in node, f"class = chain-mark：{node}"
+    assert '"横置（连环状态）"' in node, f"悬停全文照旧：{node}"
+    assert "if (player.chained) block.appendChild(chainMarkNode());" in seat_view, (
+        "武将块里仍按 `player.chained` 挂铁索画布（.chained 状态类保留）"
+    )
+    assert "chainLineNode" not in seat_view, "旧名字 chainLineNode 必须整体换掉"
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<canvas\b[^>]*\bid=\"t-self-chain\"[^>]*>", html)
+    assert tag is not None, "自己的座位：#t-self-chain 必须是常驻 <canvas>"
+    assert re.search(r'class="chain-mark"', tag.group(0)), tag.group(0)
+    assert re.search(r"\bhidden\b", tag.group(0)), f"节点常驻、只切 hidden：{tag.group(0)}"
+    assert 'title="横置（连环状态）"' in tag.group(0), tag.group(0)
+
+    table = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+    assert 'if ($("t-self-chain")) $("t-self-chain").hidden = !player.chained;' in table, (
+        "自己的座位仍只切 `hidden`（节点常驻的既有协议）"
+    )
+
+    rule = _css_rule(".chain-mark")
+    assert re.search(r"position:\s*absolute", rule), f"铁索贴图必须绝对定位：{rule}"
+    assert re.search(r"top:\s*0", rule) and re.search(r"bottom:\s*0", rule), (
+        f"纵向铺满武将块：{rule}"
+    )
+    assert re.search(r"left:\s*-10\.5%", rule), f"左沿外扩 10.5%（STATIC.overL）：{rule}"
+    assert re.search(r"width:\s*119\.7%", rule), (
+        f"宽 = 1 + 10.5% + 9.2%（两端都探出牌沿）：{rule}"
+    )
+    assert re.search(r"pointer-events:\s*none", rule), f"不吃指针：{rule}"
+    assert _layer_z_index(".chain-mark") == _CHAIN_MARK_Z, (
+        f"铁索 z-index = 4：在阵亡蒙灰（1）之上、与「阵亡」标签同层（spec §演出口径）"
+    )
+    assert _layer_z_index(".chain-mark") >= 3, "spec §硬约束：z-index ≥ 3"
+
+    suppress = _css_rule('.seat[data-chain-fx="link"] .chain-mark')
+    assert re.search(r"visibility:\s*hidden", suppress), (
+        f"入链演出期间藏掉常态铁索（用户口径：演完才挂）：{suppress}"
+    )
+
+    # 铁索要探出牌沿：武将块的 `overflow: hidden`（白光 / 牌区的既有裁切，别改那条规则）会把
+    # 两端的链头正好切在牌沿上——横置的座位必须放开裁切，否则"两端都探出"这条验收永远不成立。
+    assert re.search(r"overflow:\s*hidden", _css_rule(".seat .hero-block")), (
+        "既有口径：白光仍裁在武将块内（这一条不许改）"
+    )
+    open_rule = _css_rule(".seat.chained .hero-block")
+    assert re.search(r"overflow:\s*visible", open_rule), (
+        f"横置的座位要放开裁切，铁索两端才探得出去：{open_rule}"
+    )
+
+
+def test_the_chain_layer_is_its_own_overlay_next_to_the_damage_layer() -> None:
+    """`#t-chain-fx` / `.chain-fx-layer` 是**独立**的覆盖层（spec §硬约束）。
+
+    不许往 `#t-damage-fx` 里塞画布：`U-DMG-01c` 正向断言"伤害层里只有一张 canvas"，两张
+    演出共用一层会让那条断言失去意义，也会让两套排播互相摘层。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<div\b[^>]*\bid=\"t-chain-fx\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少铁索演出层 #t-chain-fx"
+    assert re.search(r'class="[^"]*chain-fx-layer', tag.group(0)), tag.group(0)
+    assert "aria-hidden" in tag.group(0), "铁索演出是纯视觉层，必须 aria-hidden"
+    assert html.index('id="table-shell"') < html.index('id="t-chain-fx"'), (
+        "铁索层必须住在 .table-shell 里（座位矩形按壳内坐标量）"
+    )
+    assert html.index('id="t-damage-fx"') < html.index('id="t-chain-fx"'), (
+        "挨着 #t-damage-fx（排在它之后，两者同 z-index 档）"
+    )
+    # 伤害层仍是**空**的常驻 div：铁索层不在它里面（各自摘层，互不干扰）。
+    assert re.search(r'<div\b[^>]*\bid="t-damage-fx"[^>]*></div>', html), (
+        "伤害演出层必须仍是空的常驻 div（铁索层不许塞进它里面）"
+    )
+
+    layer = _css_rule(".chain-fx-layer")
+    assert re.search(r"position:\s*absolute", layer), f"层必须绝对定位：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"层必须铺满壳：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"层不能吃指针：{layer}"
+    assert re.search(r"overflow:\s*hidden", layer), f"层必须裁在壳内：{layer}"
+    assert _layer_z_index(".chain-fx-layer") == _layer_z_index(".damage-fx-layer"), (
+        "铁索层与伤害层同一 z-index 档（spec §硬约束）"
+    )
+    assert _layer_z_index(".chain-fx-layer") < _layer_z_index(".modal"), "永远让位给询问弹窗"
+
+
+def test_the_chain_playback_is_scheduled_from_the_seq_cursor_without_holding() -> None:
+    """票面 §做法 1：触发点、游标、三条排播口径、两个重绘 / 换局钩子。
+
+    「无时停」已由 `test_the_chain_fx_family_never_registers_a_playback_hold` 逐文件钉住；
+    这里钉的是**反过来**的那一半：演出之外的三处次序必须由排播层自己兜住。
+    """
+    chain = _strip_js_comments(_FX_CHAIN_JS.read_text(encoding="utf-8"))
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    table = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+
+    # 排播口径（spec §演出口径·铁索连环）：错开 120ms、同座位 200ms、在播上限 8。
+    assert re.search(r"^  var CHAIN_FX_MAX = 8;$", chain, re.M), "在播上限 8（超出丢队尾）"
+    assert re.search(r"^  var CHAIN_FX_STAGGER_MS = 120;$", chain, re.M), "相邻错开 120ms"
+    assert re.search(r"^  var CHAIN_FX_SAME_SEAT_MS = 200;$", chain, re.M), (
+        "同座位 200ms 内的新一条先收掉旧的"
+    )
+    assert "chainQueue.length >= CHAIN_FX_MAX" in chain or "chainPlays.length >= CHAIN_FX_MAX" in chain, (
+        "上限判在入队 / 排播闸门上（超出丢队尾）"
+    )
+
+    # 排播函数住在 IIFE 里（比顶层多缩进两格）：剥掉那一层再按顶层函数的形状取正文。
+    body_src = re.sub(r"^  ", "", chain, flags=re.M)
+
+    # 判据只看 delta_type（不认技能 id、不认座位之外的东西），座位取 record.seat。
+    fire = _js_function(body_src, "fireChainEventsThrough")
+    assert 'record.delta_type !== "chained_change"' in fire, fire
+    assert "record.seat" in fire, "座位 = record.seat"
+    assert "kind !== \"delta\"" in fire, "只看 delta 记录"
+
+    # seq 游标：`state.chainSeq` 首批初始化成该批最大 seq（只切常态、不演）。
+    prime = _js_function(body_src, "chainPrimeSeq")
+    assert "stateRef.chainSeq" in prime and "playback.records" in prime, prime
+    assert "seq > max" in prime, "取该批最大 seq"
+    assert "seq > Number(state.chainSeq)" in fire, "之后只演 seq 更大的那几条"
+    clear = _js_function(body_src, "clearChainFx")
+    assert "state.chainSeq = null" in clear, "换局把游标清回 null（新局首批仍是历史）"
+
+    # 入链"演完才挂常态"：开演时清掉常态贴图、同步时按抑制态重贴。
+    start = _js_function(body_src, "startChainPlay")
+    assert "chainClearMark" in start, "入链开演时先清常态贴图（演完才挂）"
+    sync = _js_function(body_src, "chainFxSyncBody") if re.search(
+        r"function chainFxSyncBody\(", chain
+    ) else _js_function(chain, "chainFxSync")
+    assert "chainLinkLive(seat)" in sync and "chainClearMark(mark)" in sync, (
+        "入链期间不挂常态，收尾后由同一条同步补上"
+    )
+    assert "chainPaintMark(mark, block)" in sync, "平时按当前矩形画常态贴图"
+    # 每次重绘都重贴：`renderTable` 末尾显式调（座位的调用方，不是本文件反向抓事件）。
+    step_at = table.index("damageDropStalePlays();")
+    sync_at = table.index("chainFxSync();")
+    assert step_at < sync_at, "chainFxSync() 排在 damageDropStalePlays() 之后（同一处重绘钩子）"
+    assert "chainFxSync" in table, "renderTable 必须重贴常态贴图"
+
+    # 触发点：紧挨伤害演出的下一行（同一条 seq 游标）；换局在 commitView 里清场。
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    damage_at = body.find("fireDamageEventsThrough(record.seq)")
+    chain_at = body.find("fireChainEventsThrough(record)")
+    assert damage_at >= 0 and chain_at > damage_at, (
+        "铁索演出必须挂在伤害演出的**下一行**（票面 §做法 1）"
+    )
+    commit = _js_function(session, "commitView")
+    assert "clearChainFx()" in commit, "换局要清铁索的队列 / 画布 / 计时器 / 声音"
+    assert "clearDamageFx();" in commit and commit.index("clearDamageFx();") < commit.index("clearChainFx();"), (
+        "两层各清各的（铁索紧跟着伤害层的清场）"
+    )
+
+
+def test_the_chain_sfx_is_a_one_shot_scheduler_behind_the_same_switch() -> None:
+    """票面 §做法 3：`SgsChainSfx` 是**一次性排程器**，由 `sfx-ui.js` 在同一手势 / 开关里
+    惰性建 **1 路**；`fx-chain.js` 只调 `chainSfxPlay` / `chainSfxStop` / `chainSfxMute`。
+
+    三条既有口径不动：缺省静音 / `localStorage['sgs.sfx']` / 静音时不建 `AudioContext`。
+    `?audiotest=1` 不扩（spec §不做）——铁索是排程器，没有逐档电平可听。
+    """
+    sfx_ui = (STATIC_DIR / "sfx-ui.js").read_text(encoding="utf-8")
+    sfx_chain = (STATIC_DIR / "sfx-chain.js").read_text(encoding="utf-8")
+    chain = _FX_CHAIN_JS.read_text(encoding="utf-8")
+
+    # 排程器的接口（与素材包一致）。
+    for name in ("unlock", "play", "stop", "mute"):
+        assert re.search(rf"^\s+{name}: function", sfx_chain, re.M), (
+            f"SgsChainSfx 的播放器缺 {name}()"
+        )
+    assert re.search(r"global\.SgsChainSfx = \{", sfx_chain), "音效入口挂 window.SgsChainSfx"
+    assert "renderOffline" in sfx_chain, "离线电平读数照素材包留着（?audiotest 不扩，但仍可单跑）"
+
+    # 一路声道：惰性建、跟着同一个手势 / 开关。
+    assert re.search(r"^let chainSfxLane = null;$", sfx_ui, re.M), "铁索只有一路声道（惰性建）"
+    ensure = _js_function(sfx_ui, "chainSfxEnsure")
+    assert 'window.SgsChainSfx' in ensure, "按全局名惰性取模块（缺件就跳过，不报错）"
+    assert "unlock" in ensure, "解锁必须走模块自己的 unlock()（手势同一个 tick）"
+    modules = _js_function(sfx_ui, "damageSfxEnsureModules")
+    assert "chainSfxEnsure" in modules, (
+        "铁索声道要在**同一个**手势 / 开关里建（damageSfxEnsureModules 顺手建它）"
+    )
+    play = _js_function(sfx_ui, "chainSfxPlay")
+    assert "damageSfxOn" in play and "return null" in play, (
+        "「♪」关着时一声都不出、也不建 AudioContext（`SgsChainSfx.create` 都不许走到）"
+    )
+    assert "lane.player.play(" in play, "开着一场一声（play(mode, 0, 1)）"
+    mute = _js_function(sfx_ui, "damageSfxMute")
+    assert "chainSfxMute" in mute, "开关要灌到铁索那一路（与伤害声道同一次静音）"
+    assert "SgsChainSfx" not in sfx_ui.split("DAMAGE_SFX_ENGINES = {")[1].split("};")[0], (
+        "铁索**不进**伤害声道池：它是排程器，不是逐帧 tick 的播放器"
+    )
+    audio = _js_function(sfx_ui, "damageSfxAudiotest")
+    assert "ChainSfx" not in audio and "chainSfx" not in audio, (
+        "?audiotest=1 不扩到铁索（spec §不做）"
+    )
+
+    # 画面侧只调这三个口（单向缝），不自己碰 AudioContext。
+    for name in ("chainSfxPlay", "chainSfxStop"):
+        assert f"typeof {name} === \"function\"" in chain, (
+            f"fx-chain.js 要按 typeof 守卫调 {name}（缺 sfx-ui.js 的探针里仍是一份独立排播）"
+        )
+    assert "AudioContext" not in chain, "画面侧不碰音频 API（音效层的事）"
