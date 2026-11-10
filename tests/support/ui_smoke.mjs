@@ -81,6 +81,8 @@ const RECT_TABLE = new Map(Object.entries({
   "t-damage-fx": { left: 0, top: 0, width: 1440, height: 810 },
   // chain-death-voices 票 01：铁索的覆盖层同样是整壳覆盖层（演出的 canvas 位置按它换算）。
   "t-chain-fx": { left: 0, top: 0, width: 1440, height: 810 },
+  // chain-death-voices 票 02：阵亡的覆盖层同样是整壳覆盖层（`damageFxBoxOf` 按它算出 stage）。
+  "t-death-fx": { left: 0, top: 0, width: 1440, height: 810 },
 }));
 let rectSeq = 0;
 /* damage-fx 票 05：武将块的垫片矩形默认按座位固定派生（跨重绘稳定）；用例改这个数就能
@@ -24623,6 +24625,503 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     // 还回去：真模块 + 原来的开关状态 + 清掉桩建的声道（后面的用例从干净状态起）。
     windowShim.SgsChainSfx = realChainSfx;
     vm.runInContext("chainSfxLane = null;", context);
+    vm.runInContext(`damageSfxSetEnabled(${sfxWasOn ? "true" : "false"})`, context);
+    drainTimers();
+  } finally {
+    Date.now = realDateNow;
+    heroBlockShift = 0;
+    ui.state.animScale = 1;
+    ui.state.view = null;
+    ui.state.sessionId = null;
+    ui.resetSelection();
+    drainTimers();
+  }
+}
+
+/* ============ chain-death-voices 票 02：阵亡演出（U-DEATH-01..08）============
+ *
+ * 判据来自票面 §验收断言 3 与 spec §演出口径「阵亡：三条覆盖规则 + 三条反向钩子」。载荷是
+ * 与响应体同形的合成 `view` + 记录：阵亡在记录流里**有真身**——一条
+ * `{kind: "timing", timing: "DEATH_BEFORE_START", actor: 死者}`（伤害致死与技能直接致死同形），
+ * 前端**不**用 `hp_change` 到 0 去猜。
+ *
+ * 时间不靠真实等待：`window.setTimeout` 只排队（`runEarliest` 按虚拟时钟跑最早到期的那个），
+ * `stageNow()` = `Date.now()` 由用例按需推进。画布像素不断言（也不该断言）：只断"层里有没有
+ * canvas、座位贴了什么属性、锚在哪块矩形上、CSS 覆盖规则在不在"。**CSS 不在垫片里生效**
+ * （没有排版引擎），"这时候标签看不见"因此读的是"属性 + 磁盘上那条覆盖规则"两件事——
+ * 与 U-CHAIN-01b 读 `.chain-mark` 抑制规则同一个口径。
+ *
+ * 与伤害层的对照（U-DMG-14*）：3 / 4 档伤害会写 `<html data-playback-hold="damage:N">` 冻住记录
+ * 流；阵亡**一个读数都不写**（用户口径「均无时停」），演出 2.2s 里记录照常推进——两处读数在
+ * U-DEATH-04 / 06b 里同时出现。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const tagOf = (node) => String(node && node.tagName ? node.tagName : "").toUpperCase();
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodeNow = (seat) => [...$("t-seats").children, $("t-self-seat")]
+    .find((node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockNow = (seat) => {
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-hero");
+    }
+    const seatNode = seatNodeNow(seat);
+    return seatNode ? walk(seatNode).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const deadTagOf = (seat) => {
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-dead");
+    }
+    const seatNode = seatNodeNow(seat);
+    return seatNode ? walk(seatNode).find((node) => hasClass(node, "dead-tag")) || null : null;
+  };
+  /** 阵亡的覆盖层与它上面的 canvas（**一条演出一张**，不是复用一张）。 */
+  const layer = () => $("t-death-fx");
+  const canvases = () => Array.from(layer().children)
+    .filter((node) => tagOf(node) === "CANVAS");
+  const seatCanvases = (seat) => canvases()
+    .filter((node) => attr(node, "data-death-seat") === String(seat));
+  const liveCount = () => Number(attr(layer(), "data-death-fx-live") || 0);
+  const startedCount = () => Number(attr(layer(), "data-death-fx-plays") || 0);
+  const droppedCount = () => Number(attr(layer(), "data-death-fx-dropped") || 0);
+  /** 伤害层（对照）：阵亡不许塞进去，也不许把它的在播 / 暂停读数搅乱。 */
+  const dmgLayer = () => $("t-damage-fx");
+  const dmgCanvases = () => Array.from(dmgLayer().children)
+    .filter((node) => tagOf(node) === "CANVAS");
+  const dmgLive = () => Number(attr(dmgLayer(), "data-damage-fx-live") || 0);
+  const dmgHold = () => attr(dmgLayer(), "data-damage-fx-hold");
+  const holdMark = () => String(attr(documentShim.documentElement, "data-playback-hold") || "");
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  /** 一块武将块 → 覆盖层坐标里的 `cx,cy,w,h`（与 `fx-death.js:deathBoxKey` 同口径）。
+   *  "两条阵亡各在各的牌上"读它，不读画布像素。 */
+  const boxOf = (seat) => {
+    const block = heroBlockNow(seat);
+    if (!block) return null;
+    const rect = block.getBoundingClientRect();
+    const box = layer().getBoundingClientRect();
+    const cx = Number(rect.left) - Number(box.left) + Number(rect.width) / 2;
+    const cy = Number(rect.top) - Number(box.top) + Number(rect.height) / 2;
+    return [Math.round(cx), Math.round(cy), Math.round(rect.width), Math.round(rect.height)].join(",");
+  };
+  /** `anim.ini` 里阵亡的整段时长（摘层时刻的唯一来源，不在测试里另写一份数字）。 */
+  const deathTotal = Number((readIniFile().match(/^\s*death_fx_total\s*=\s*(\d+)/m) || [])[1]);
+  /** 还挂在队列里的**阵亡**计时器（摘层 / 切 gone 两拍）：按 2200ms 这个数认。 */
+  const deathDelays = () => Array.from(timerDelays.values())
+    .filter((ms) => Math.round(Number(ms)) === deathTotal);
+
+  /** 跑**最先到期**的计时器（虚拟时钟到期时刻最小的那个；同刻按登记顺序）。 */
+  const runEarliest = () => {
+    for (;;) {
+      const entries = Array.from(timerDue.entries())
+        .sort((left, right) => left[1] - right[1] || left[0] - right[0]);
+      if (!entries.length) return false;
+      const [id, due] = entries[0];
+      if (!pendingTimers.has(id)) {
+        timerDue.delete(id);
+        timerDelays.delete(id);
+        continue;
+      }
+      const fn = pendingTimers.get(id);
+      pendingTimers.delete(id);
+      timerDelays.delete(id);
+      timerDue.delete(id);
+      if (due > shimClock) shimClock = due;
+      if (typeof fn !== "function") return false;
+      fn();
+      runFrame();
+      return true;
+    }
+  };
+  const runUntil = (done, limit = 400) => {
+    let steps = 0;
+    while (!done() && steps < limit) {
+      if (!runEarliest()) break;
+      steps += 1;
+    }
+    return done();
+  };
+  const drainTimers = (limit = 400) => {
+    let steps = 0;
+    while (steps < limit && runEarliest()) steps += 1;
+    return steps;
+  };
+
+  /** 一份干净会话（4 座）；`aliveSeats` 是这份的权威快照。 */
+  let deathSerial = 0;
+  let deathSession = "";
+  let deathSeq = 0;
+  const aliveSeats = new Set([0, 1, 2, 3]);
+  const deathPlayers = () => [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: aliveSeats.has(seat), equip: [], judge: [],
+    identity: null, chained: false, wine_active: false, flipped: false,
+  }));
+  const deathView = () => {
+    const out = synthView(null);
+    out.session_id = deathSession;
+    out.snapshot.processing = [];
+    out.snapshot.players = deathPlayers();
+    return out;
+  };
+  const openDeathSession = () => {
+    ui.flushPlayback();
+    drainTimers();
+    deathSerial += 1;
+    deathSession = `u-death-${deathSerial}`;
+    deathSeq = 0;
+    aliveSeats.clear();
+    for (const seat of [0, 1, 2, 3]) aliveSeats.add(seat);
+    ui.applyViewRaw({
+      ...deathView(), cursor: 0, log_seq: 0, records: [], damage_events: [], finished: false,
+    });
+  };
+  /** 一条阵亡记录：`enter_death`（伤害致死）与 `pass_away`（技能直接致死）压同一个
+   *  `Timing.DEATH_BEFORE_START`，故**两种死法同一条演出**（票面 §做法 1）。 */
+  const deathRecord = (seq, seat) => ({
+    kind: "timing", timing: "DEATH_BEFORE_START", seq, frame_id: 7, depth: 1,
+    actor: seat, source: null, targets: [], cards: [],
+  });
+  const hpChange = (seq, seat, before, after) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: 3, depth: 1,
+    seat, before, after, amount: after - before,
+  });
+  const damageEvent = (seq, source, target, amount, nature = "NORMAL") => ({
+    seq, source, target, amount, nature,
+  });
+  /** 一条普通的填充记录（同批的"后续事件"用它：无时停时它们照常推进）。 */
+  const filler = (seq) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: 1, depth: 1,
+    seat: 1, before: 4, after: 4, amount: 0,
+  });
+  /** 同一 session 的下一批（权威快照先按本批结算存活，再交给回放逐条演）。 */
+  const deathBatch = (records, damageEvents = []) => {
+    deathSeq = records.reduce((max, record) => Math.max(max, Number(record.seq) || 0), deathSeq);
+    for (const record of records) {
+      if (record.kind === "timing" && record.timing === "DEATH_BEFORE_START") {
+        aliveSeats.delete(Number(record.actor));
+      }
+    }
+    ui.applyViewRaw({
+      ...deathView(), cursor: deathSeq, log_seq: 0,
+      records, damage_events: damageEvents, finished: false,
+    });
+  };
+  const step = (count = 1) => {
+    for (let index = 0; index < count; index += 1) ui.stepPlayback(true);
+  };
+
+  ui.state.animScale = 0;
+  $("t-self-hero").className = "hero-block";
+  // 墙钟由用例自己推（`stageNow()` = `Date.now()`）。
+  const realDateNow = Date.now;
+  let clockNow = realDateNow();
+  Date.now = () => clockNow;
+  try {
+    /* ---- U-DEATH-01：DEATH_BEFORE_START ⇒ 覆盖层出现 canvas + 座位贴 hold（牌看着还活着）---- */
+    openDeathSession();
+    deathBatch([filler(10)]);
+    step();
+    const startedBefore01 = startedCount();
+    clockNow += 500;
+    deathBatch([deathRecord(11, 2)]);
+    step();
+    const holdCanvas = seatCanvases(2)[0] || null;
+    const seat2InHold = seatNodeNow(2);
+    check("U-DEATH-01a 阵亡那一步：#t-death-fx 出现一张 canvas（锚在这个座位的武将块上）、"
+      + "座位带 data-death-fx=hold",
+      canvases().length === 1 && Boolean(holdCanvas)
+        && attr(holdCanvas, "data-death-seat") === "2"
+        && attr(holdCanvas, "data-death-box") === boxOf(2)
+        && attr(seat2InHold, "data-death-fx") === "hold"
+        && liveCount() === 1 && startedCount() === startedBefore01 + 1,
+      `canvases=${canvases().length} box=${attr(holdCanvas, "data-death-box")} `
+        + `want=${boxOf(2)} flag=${attr(seat2InHold, "data-death-fx")} live=${liveCount()}`);
+    check("U-DEATH-01b hold 期间「阵亡」标签不可见、席位不置灰：属性在、基线类也还在，"
+      + "CSS 三条覆盖规则把灰与标签压住",
+      seat2InHold.classList.contains("dead") && Boolean(deadTagOf(2))
+        && /\.seat\[data-death-fx="hold"\]\s*\{[^}]*opacity:\s*1/s.test(css)
+        && /\.seat\[data-death-fx="hold"\] \.dead-tag\s*\{[^}]*display:\s*none/s.test(css)
+        && /\.seat\[data-death-fx="hold"\] \.hero-block::after,[\s\S]{0,120}?display:\s*none/s.test(css),
+      `dead=${seat2InHold.classList.contains("dead")} tag=${Boolean(deadTagOf(2))}`);
+    check("U-DEATH-01c 演出层盖满壳（画布尺寸 = 覆盖层尺寸）、且**不**是伤害层里的那张 canvas",
+      String(holdCanvas.style.cssText).includes("width:1440px")
+        && String(holdCanvas.style.cssText).includes("height:810px")
+        && dmgCanvases().length === 0 && dmgLive() === 0,
+      `style="${holdCanvas.style.cssText}" dmgCanvases=${dmgCanvases().length}`);
+    // 回放每步都重绘全表：座位节点被重建，属性必须**重贴**（`deathFxSync` 的钩子）。
+    const nodeBeforeRepaint = seatNodeNow(2);
+    ui.renderTable();
+    check("U-DEATH-01d 每次 renderTable 之后重贴 data-death-fx（座位节点被重建也不丢）",
+      seatNodeNow(2) !== nodeBeforeRepaint
+        && attr(seatNodeNow(2), "data-death-fx") === "hold"
+        && canvases().length === 1 && liveCount() === 1,
+      `rebuilt=${seatNodeNow(2) !== nodeBeforeRepaint} `
+        + `flag=${attr(seatNodeNow(2), "data-death-fx")} live=${liveCount()}`);
+
+    /* ---- U-DEATH-02：到 burstAt ⇒ 属性换成 gone（牌本身藏掉）---- */
+    const gone02 = runUntil(() => attr(seatNodeNow(2), "data-death-fx") === "gone");
+    check("U-DEATH-02 到 burstAt：属性换成 gone、画布读数同步换拍，"
+      + "CSS 把 `.hero-block` 藏掉（牌已经碎了，等收尾再交还给游戏）",
+      gone02 && canvases().length === 1 && liveCount() === 1
+        && attr(holdCanvas, "data-death-phase") === "gone"
+        && /\.seat\[data-death-fx="gone"\] \.hero-block\s*\{[^}]*visibility:\s*hidden/s.test(css),
+      `gone=${gone02} phase=${attr(holdCanvas, "data-death-phase")} live=${liveCount()}`);
+
+    /* ---- U-DEATH-03：到 duration ⇒ 属性清空、画布摘掉、灰与「阵亡」标签回来 ---- */
+    const cleared03 = runUntil(
+      () => attr(seatNodeNow(2), "data-death-fx") === undefined && canvases().length === 0,
+    );
+    check("U-DEATH-03 到 duration：属性清空、画布摘掉、席位仍带基线 .dead（灰 + 标签自然回来）",
+      cleared03 && liveCount() === 0 && holdCanvas.parentNode === null
+        && seatNodeNow(2).classList.contains("dead") && Boolean(deadTagOf(2)),
+      `cleared=${cleared03} canvases=${canvases().length} live=${liveCount()} `
+        + `dead=${seatNodeNow(2).classList.contains("dead")}`);
+
+    /* ---- U-DEATH-04：无时停 —— 2.2s 里记录流照常推进（与 U-DMG-14* 正好相反）---- */
+    openDeathSession();
+    deathBatch([filler(20)]);
+    step();
+    runUntil(() => liveCount() === 0);
+    clockNow += 500;
+    deathBatch([deathRecord(21, 2), filler(22), filler(23), filler(24)]);
+    const holdsSeen04 = new Set();
+    let guard04 = 0;
+    while (ui.state.playback !== null && guard04 < 120) {
+      holdsSeen04.add(holdMark());
+      if (!runEarliest()) break;
+      holdsSeen04.add(holdMark());
+      guard04 += 1;
+    }
+    const holds04 = [...holdsSeen04];
+    check("U-DEATH-04a 阵亡在播时回放**不冻**：同批剩下的三条记录照常走完（演出还在播）",
+      holds04.every((value) => value === "") && ui.state.playback === null
+        && liveCount() === 1 && attr(seatNodeNow(2), "data-death-fx") === "hold",
+      `index-done=${ui.state.playback === null} live=${liveCount()} `
+        + `flag=${attr(seatNodeNow(2), "data-death-fx")}`);
+    check("U-DEATH-04b 整段里 `<html data-playback-hold>` 始终为空、死亡层也没有 hold 读数"
+      + "（对照 U-DMG-14*：那边是 damage:3 / damage:4）",
+      holds04.length > 0 && holds04.every((value) => value === "")
+        && attr(layer(), "data-death-fx-hold") === undefined
+        && holdMark() === "",
+      `holds=${JSON.stringify(holds04)} layerHold=${attr(layer(), "data-death-fx-hold")} `
+        + `mark="${holdMark()}"`);
+    runUntil(() => liveCount() === 0);
+    drainTimers();
+
+    /* ---- U-DEATH-05：同批两条各在各的牌上 + 第 3 条丢队尾（不排队等）---- */
+    openDeathSession();
+    deathBatch([filler(30)]);
+    step();
+    runUntil(() => liveCount() === 0);
+    clockNow += 500;
+    const startedBefore05 = startedCount();
+    const droppedBefore05 = droppedCount();
+    deathBatch([deathRecord(31, 1), deathRecord(32, 3), deathRecord(33, 0)]);
+    step(3);
+    check("U-DEATH-05a 同批两条阵亡：两张 canvas 各锚在自己的牌上（座位号与矩形都分开）、不串位",
+      canvases().length === 2 && liveCount() === 2
+        && seatCanvases(1).length === 1 && seatCanvases(3).length === 1
+        && attr(seatCanvases(1)[0], "data-death-box") === boxOf(1)
+        && attr(seatCanvases(3)[0], "data-death-box") === boxOf(3)
+        && attr(seatCanvases(1)[0], "data-death-box") !== attr(seatCanvases(3)[0], "data-death-box")
+        && attr(seatNodeNow(1), "data-death-fx") === "hold"
+        && attr(seatNodeNow(3), "data-death-fx") === "hold"
+        && startedCount() === startedBefore05 + 2,
+      `canvases=${canvases().length} box1=${attr(seatCanvases(1)[0], "data-death-box")} `
+        + `box3=${attr(seatCanvases(3)[0], "data-death-box")} `
+        + `started=${startedCount() - startedBefore05}`);
+    check("U-DEATH-05b 第 3 条丢队尾：不排队、不开演（dropped +1、started 不涨、仍 2 张 canvas）",
+      startedCount() === startedBefore05 + 2
+        && droppedCount() === droppedBefore05 + 1
+        && canvases().length === 2 && liveCount() === 2
+        && attr(seatNodeNow(0), "data-death-fx") === undefined,
+      `started=${startedCount() - startedBefore05} dropped=${droppedCount() - droppedBefore05} `
+        + `canvases=${canvases().length} seat0=${attr(seatNodeNow(0), "data-death-fx")}`);
+    runUntil(() => liveCount() === 0);
+    drainTimers();
+
+    /* ---- U-DEATH-06：1 / 2 档轻伤害叠着播；3 / 4 档重伤害先播完（它自己的时停）---- */
+    openDeathSession();
+    deathBatch([filler(40)]);
+    step();
+    runUntil(() => liveCount() === 0 && dmgLive() === 0);
+    clockNow += 500;
+    const startedBefore06 = startedCount();
+    deathBatch([hpChange(41, 2, 4, 3), deathRecord(42, 2)], [damageEvent(41, 0, 2, 2)]);
+    step(2);
+    check("U-DEATH-06a 1 / 2 档轻伤害与阵亡**叠着播**、互不取消（两层同时在播、都不要求暂停）",
+      liveCount() === 1 && startedCount() === startedBefore06 + 1
+        && dmgLive() >= 1 && dmgCanvases().length >= 1
+        && holdMark() === "" && dmgHold() === "",
+      `death=${liveCount()} dmg=${dmgLive()} hold="${holdMark()}" dmgHold="${dmgHold()}"`);
+    runUntil(() => liveCount() === 0, 400);
+    runUntil(() => dmgLive() === 0, 200);
+    drainTimers();
+
+    // 3 / 4 档：重伤害自带时停 ⇒ 记录流冻住，阵亡**到它播完**才开演。
+    openDeathSession();
+    deathBatch([filler(50)]);
+    step();
+    runUntil(() => liveCount() === 0 && dmgLive() === 0);
+    clockNow += 500;
+    deathBatch([hpChange(51, 2, 4, 1), deathRecord(52, 2)], [damageEvent(51, 0, 2, 3)]);
+    const playbackIndex = () => (ui.state.playback ? ui.state.playback.index : null);
+    const heavyLive06 = runUntil(() => dmgLive() >= 1, 10);
+    // 唤醒时先问判据才写读数（U-DMG-14b 同一个口径）：再跑一拍轮询才看得到原因串。
+    const held06 = runUntil(() => holdMark() === "damage:3", 5);
+    const holdWhileHeavy = holdMark();
+    const indexWhileHeavy = playbackIndex();
+    for (let round = 0; round < 4; round += 1) runEarliest();
+    const frozen06 = playbackIndex() === indexWhileHeavy;
+    const deathBeforeHeavyEnd = liveCount();
+    const heavyDone06 = runUntil(() => dmgLive() === 0, 400);
+    const deathAfterHeavy = runUntil(() => liveCount() >= 1, 400);
+    check("U-DEATH-06b 3 / 4 档重伤害先播完（它自己的时停把记录流冻住：damage:3），阵亡随后才开演；"
+      + "阵亡这一段 hold 为空",
+      heavyLive06 && held06 && holdWhileHeavy === "damage:3" && frozen06
+        && deathBeforeHeavyEnd === 0 && heavyDone06 && deathAfterHeavy
+        && liveCount() >= 1 && holdMark() === ""
+        && attr(seatNodeNow(2), "data-death-fx") === "hold",
+      `heavy=${heavyLive06} held=${held06} hold="${holdWhileHeavy}" frozen=${frozen06} `
+        + `deathBefore=${deathBeforeHeavyEnd} done=${heavyDone06} `
+        + `deathAfter=${deathAfterHeavy} holdNow="${holdMark()}"`);
+    runUntil(() => liveCount() === 0, 400);
+    drainTimers();
+
+    /* ---- U-DEATH-07：自己的座位（#t-self-seat）同样工作 ---- */
+    openDeathSession();
+    deathBatch([filler(60)]);
+    step();
+    runUntil(() => liveCount() === 0);
+    clockNow += 500;
+    deathBatch([deathRecord(61, 0)]);
+    step();
+    check("U-DEATH-07a 自己的座位同样贴 hold，canvas 锚在 `#t-self-hero` 的矩形上（块更小）",
+      attr($("t-self-seat"), "data-death-fx") === "hold"
+        && seatCanvases(0).length === 1 && liveCount() === 1
+        && attr(seatCanvases(0)[0], "data-death-box") === boxOf(0)
+        && $("t-self-seat").classList.contains("dead")
+        && $("t-self-dead").hidden === false,
+      `flag=${attr($("t-self-seat"), "data-death-fx")} box=${attr(seatCanvases(0)[0], "data-death-box")} `
+        + `deadTagHidden=${$("t-self-dead").hidden}`);
+    const selfGone07 = runUntil(() => attr($("t-self-seat"), "data-death-fx") === "gone");
+    const selfCleared07 = runUntil(
+      () => attr($("t-self-seat"), "data-death-fx") === undefined && canvases().length === 0,
+    );
+    check("U-DEATH-07b 自己座位也走 gone → 清空：画布摘净、灰与「阵亡」标签回来（不留常驻覆盖态）",
+      selfGone07 && selfCleared07 && liveCount() === 0
+        && $("t-self-seat").classList.contains("dead")
+        && $("t-self-dead").hidden === false,
+      `gone=${selfGone07} cleared=${selfCleared07} live=${liveCount()} `
+        + `flag=${attr($("t-self-seat"), "data-death-fx")}`);
+
+    /* ---- U-DEATH-08：版式作废 / 换局：画布摘净、属性清空、无残留计时器 ---- */
+    openDeathSession();
+    deathBatch([filler(70)]);
+    step();
+    runUntil(() => liveCount() === 0);
+    clockNow += 500;
+    deathBatch([deathRecord(71, 2)]);
+    step();
+    const liveBefore08 = liveCount();
+    heroBlockShift += 9;                 // 版式变了（窗口缩放 / 座位重排）
+    ui.renderTable();
+    const droppedByLayout = liveCount() === 0 && canvases().length === 0;
+    check("U-DEATH-08a 版式作废：整条演出立刻丢掉（canvas 摘净、data-death-fx 清空），"
+      + "座位回到基线（仍是 .dead + 「阵亡」标签）",
+      liveBefore08 === 1 && droppedByLayout
+        && attr(seatNodeNow(2), "data-death-fx") === undefined
+        && seatNodeNow(2).classList.contains("dead"),
+      `before=${liveBefore08} canvases=${canvases().length} `
+        + `flag=${attr(seatNodeNow(2), "data-death-fx")}`);
+    check("U-DEATH-08b 作废同时摘掉两拍计时器（不再有 2200ms 的阵亡计时器挂着）",
+      deathDelays().length === 0, `delays=${JSON.stringify(deathDelays())} total=${deathTotal}`);
+    heroBlockShift = 0;
+    const drained08 = drainTimers();
+    check("U-DEATH-08c 作废之后跑空计时器也不补播（不留一张永远灰或永远活的牌）",
+      canvases().length === 0 && liveCount() === 0
+        && attr(seatNodeNow(2), "data-death-fx") === undefined,
+      `drained=${drained08} canvases=${canvases().length}`);
+
+    // 换局：新会话 ⇒ `commitView` 里的 `clearDeathFx()`（队列 / 画布 / 计时器 / 属性 / 声音）。
+    deathBatch([deathRecord(72, 3)]);
+    step();
+    runUntil(() => liveCount() === 1);
+    const liveBeforeSwap08 = liveCount();
+    clockNow += 40;
+    openDeathSession();
+    const everySeatClean = [...$("t-seats").children, $("t-self-seat")]
+      .every((node) => attr(node, "data-death-fx") === undefined);
+    check("U-DEATH-08d 换局：在播的演出摘净、所有座位的 data-death-fx 清空（上一局不留在新桌上）",
+      liveBeforeSwap08 === 1 && liveCount() === 0 && canvases().length === 0 && everySeatClean,
+      `before=${liveBeforeSwap08} live=${liveCount()} canvases=${canvases().length} `
+        + `clean=${everySeatClean}`);
+    drainTimers();
+    deathBatch([deathRecord(1, 1)]);
+    step();
+    check("U-DEATH-08e 换局把 seq 游标清回（新会话 seq=1 的阵亡照常开演、不残留上一局的读数）",
+      liveCount() === 1 && attr(seatNodeNow(1), "data-death-fx") === "hold",
+      `live=${liveCount()} flag=${attr(seatNodeNow(1), "data-death-fx")}`);
+    runUntil(() => liveCount() === 0);
+    drainTimers();
+
+    /* ---- U-DEATH-09：音效（关「♪」时一次都不建；开着一场一声、收尾 stop）---- */
+    const realDeathSfx = windowShim.SgsDeathSfx;
+    const deathSfxLog = { create: 0, play: [], stop: 0, mute: [] };
+    windowShim.SgsDeathSfx = {
+      create() {
+        deathSfxLog.create += 1;
+        return {
+          unlock() { return Promise.resolve(false); },
+          play(fromT, speed) { deathSfxLog.play.push([fromT, speed]); },
+          stop() { deathSfxLog.stop += 1; },
+          mute(on) { deathSfxLog.mute.push(Boolean(on)); },
+        };
+      },
+      renderOffline: () => Promise.resolve(null),
+    };
+    const sfxWasOn = Boolean(vm.runInContext("damageSfxOn", context));
+    vm.runInContext("deathSfxLane = null;", context);
+    vm.runInContext("damageSfxSetEnabled(false)", context);
+    openDeathSession();
+    deathBatch([filler(80)]);
+    step();
+    runUntil(() => liveCount() === 0);
+    clockNow += 500;
+    deathBatch([deathRecord(81, 2)]);
+    step();
+    const silentStarted = liveCount() === 1;
+    check("U-DEATH-09a 关「♪」：演出照常播，但 SgsDeathSfx 一次都不建、一声都不出",
+      silentStarted && deathSfxLog.create === 0 && deathSfxLog.play.length === 0,
+      `started=${silentStarted} create=${deathSfxLog.create} `
+        + `play=${JSON.stringify(deathSfxLog.play)}`);
+    runUntil(() => liveCount() === 0);
+    // 开「♪」：这次点击本身就是手势（`damageSfxSetEnabled` 里建那一路）。
+    vm.runInContext("damageSfxSetEnabled(true)", context);
+    clockNow += 300;
+    deathBatch([deathRecord(82, 2)]);
+    step();
+    check("U-DEATH-09b 开「♪」：惰性建**一路**排程器，一场阵亡一声（play(0, 3.05/2.2)）",
+      deathSfxLog.create === 1 && deathSfxLog.play.length === 1
+        && deathSfxLog.play[0][0] === 0
+        && Math.abs(Number(deathSfxLog.play[0][1]) - 3.05 / 2.2) < 1e-9,
+      `create=${deathSfxLog.create} play=${JSON.stringify(deathSfxLog.play)}`);
+    const stoppedByFinish = runUntil(() => liveCount() === 0);
+    check("U-DEATH-09c 演出收尾：那一声 stop（不留给下一场）",
+      stoppedByFinish && deathSfxLog.stop >= 1,
+      `stop=${deathSfxLog.stop}`);
+    // 还回去：真模块 + 原来的开关状态 + 清掉桩建的声道（后面的用例从干净状态起）。
+    windowShim.SgsDeathSfx = realDeathSfx;
+    vm.runInContext("deathSfxLane = null;", context);
     vm.runInContext(`damageSfxSetEnabled(${sfxWasOn ? "true" : "false"})`, context);
     drainTimers();
   } finally {

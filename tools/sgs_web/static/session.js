@@ -964,6 +964,13 @@ function stepPlayback(immediate) {
     // `record.seat`）；首批用它自己的 `state.chainSeq` 游标压掉历史，打开一局已横置的对局
     // 不会补播入链。**无时停**：这里没有任何登记，演出与后续记录并行是口径。
     fireChainEventsThrough(record);
+    // chain-death-voices 票 02：阵亡演出也挂在**同一条 seq 游标**上（触发判据只看记录：
+    // `kind === "timing"` ∧ `timing === "DEATH_BEFORE_START"`，座位 = `record.actor`；
+    // **不用** `hp_change` 到 0 去猜——护甲全吸收 / 濒死被救都会猜错）。**无时停**：这里没有
+    // 任何登记，2.2s 里记录流照常推进是用户口径（后续事件画在"正在碎的牌"旁边是预期）。
+    // 上面的 `renderTable()` 已经把这张牌画成"已阵亡"；演出层自己贴 `data-death-fx`
+    // 把灰与「阵亡」标签压到收尾那一刻（三条覆盖规则，见 `style.css`）。
+    fireDeathEventsThrough(record.seq);
     scrollLogToBottom();
   }
   playback.index += 1;
@@ -1416,6 +1423,10 @@ function commitView(body) {
     // `#t-chain-fx`、自己的队列 / 计时器 / 常态贴图），换局同样连声音一起收掉。`state.chainSeq`
     // 也在这里清回 `null`——新局首批的记录是历史，不该补播入链。
     clearChainFx();
+    // chain-death-voices 票 02：阵亡演出同理（自己的覆盖层 `#t-death-fx`、自己的计时器、
+    // 座位上的 `data-death-fx`）。**必须清属性**：覆盖规则留着会让上一局的座位在新桌上
+    // 永远不灰（或永远不显示）——spec §硬约束。
+    clearDeathFx();
   }
   state.view = body;
   // U3-05（D11）：提交即权威——live view 用这份快照整份覆盖（下一批事件从它起算）。

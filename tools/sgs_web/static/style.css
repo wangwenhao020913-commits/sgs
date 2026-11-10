@@ -667,6 +667,21 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   color: rgba(96, 38, 30, .9); font-size: calc(28 * var(--dsu)); font-weight: 700; letter-spacing: .16em;
   text-shadow: 0 2px 0 rgba(255, 255, 255, .55);
 }
+/* 阵亡演出的**三条覆盖规则**（chain-death-voices 票 02）。上面的 `.seat.dead` /
+ * `.seat.dead .hero-block::after` / `.dead-tag` 三条基线**逐字未改**——演出只临时覆盖，
+ * 摘掉 `data-death-fx` 之后必须回到原样。属性由 `fx-death.js` 贴 / 摘，并且每次
+ * `renderTable` 之后由 `deathFxSync()` 重贴（座位节点会被重建）。
+ *
+ * 为什么需要它们：`renderTable` 在演出**之前**就把牌画成"已阵亡"，而这套演出前 1.7s 演的
+ * 是"牌还活着，只是泛白、裂开"——所以：
+ *   hold  牌看着还活着：压住置灰、藏掉蒙灰伪元素与「阵亡」标签
+ *   gone  碎了之后：牌本身藏掉，等演出收尾再交还给游戏（灰 + 标签那一刻才回来）
+ * 自己的座位也是 `.seat`（`#t-self-seat`），三条规则自动覆盖；`#t-self-dead` 是 `.dead-tag`。
+ * 不依赖 `.seat .hero-block { overflow: hidden }` 的裁切行为（那条被白光烟测钉着，不动）。 */
+.seat[data-death-fx="hold"] { opacity: 1; }
+.seat[data-death-fx="hold"] .hero-block::after,
+.seat[data-death-fx="hold"] .dead-tag { display: none; }
+.seat[data-death-fx="gone"] .hero-block { visibility: hidden; }
 
 /* 右侧判定 / 装备区：判定 3 槽、装备四槽（武器 / 防具 / 攻马 / 防马）。 */
 .seat .side-block {
@@ -1058,6 +1073,20 @@ button.mini-slot { cursor: pointer; }
  * 两张层互不摘层，两套排播也互不知道对方。层里一次演出一张 canvas（位置 / 尺寸由
  * `fx-chain.js` 按武将块矩形内联写出，CSS 不替它铺满——铁索只盖一个武将块，不是整屏）。 */
 .chain-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 19;
+}
+
+/* ---------- 阵亡演出层（chain-death-voices 票 02）：泛白 / 裂 / 碎 ---------- */
+
+/* 与伤害层 / 铁索层**各自独立**（spec §硬约束：不许往 `#t-damage-fx` 里塞画布）、同一
+ * z-index 档：三张层互不摘层，三套排播互不知道对方。层里**每条阵亡一张** canvas（铺满壳，
+ * 泛白 / 裂 / 碎都按武将块矩形画在层的坐标系里），CSS 不替它定位——画布尺寸与它在层里的
+ * 位置由 `fx-death.js` 内联写出。 */
+.death-fx-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;

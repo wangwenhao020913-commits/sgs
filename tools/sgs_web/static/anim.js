@@ -120,8 +120,11 @@ function animParseIni(text) {
  *
  * chain-death-voices 票 01：铁索连环的两个 ``chain_fx_*`` 键同姿态，内置默认在
  * `fx-chain.js`（`SgsChainFX.DEFAULT_TIMING`，钳制 800–2400ms 也在那里）。
+ *
+ * chain-death-voices 票 02：阵亡的那个 ``death_fx_total`` 同理，内置默认在 `fx-death.js`
+ * （`SgsDeathFX.DEFAULT_TIMING`，钳制 1200–3200ms 也在那里）。
  */
-const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_", "chain_fx_"];
+const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_", "chain_fx_", "death_fx_"];
 
 /** 这个键是不是别的模块的（前缀登记过 ⇒ 原样留在 `animConfig` 里）。 */
 function animIsForeignKey(key) {

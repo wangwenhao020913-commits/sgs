@@ -610,7 +610,7 @@ _ANIM_INI = STATIC_DIR / "anim.ini"
 # 住在同一份 `anim.ini` 里、但**默认值与钳制都不在本文件**的外来键前缀（`anim.js` 只搬数字）：
 # damage-fx 的三族 + chain-death-voices 的铁索。`test_anim_ini_lists_the_d8_durations_...` 用
 # 它把"不属于任何演出家族的键"过滤出来，逐族键表归各自的用例钉。
-_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_")
+_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_", "death_fx_")
 
 _D8_INI_KEYS = {
     "base_step",
@@ -4777,9 +4777,12 @@ _FX_CHAIN_JS = STATIC_DIR / "fx-chain.js"
 _SFX_CHAIN_JS = STATIC_DIR / "sfx-chain.js"
 
 # chain-death-voices 票 01：本 effort 新加的两个全局名（票 02 / 03 会往这张表继续加）。
+# 票 02 追加阵亡的两份（`SgsDeathFX` / `SgsDeathSfx`）。
 _FX_EXTRA_GLOBALS = {
     "fx-chain.js": "SgsChainFX",
     "sfx-chain.js": "SgsChainSfx",
+    "fx-death.js": "SgsDeathFX",
+    "sfx-death.js": "SgsDeathSfx",
 }
 
 
@@ -4818,6 +4821,16 @@ def test_the_fx_extra_globals_are_listed_in_order_and_stay_static() -> None:
     )
     assert srcs.index("fx-chain.js") < srcs.index("sfx-chain.js"), (
         "画面在前、音效在后（音效的 cue 时刻从画面模块的 MODES 读）"
+    )
+    # 票 02：阵亡的画面紧挨 fx-chain（都在 sfx.js 之前）、音效紧挨 sfx-chain。
+    assert srcs.index("fx-chain.js") < srcs.index("fx-death.js") < srcs.index("sfx.js"), (
+        f"fx-death.js 必须紧跟 fx-chain.js、排在 sfx.js 之前：{srcs}"
+    )
+    assert srcs.index("sfx-chain.js") < srcs.index("sfx-death.js") < srcs.index("sfx-ui.js"), (
+        f"sfx-death.js 必须紧跟 sfx-chain.js、排在 sfx-ui.js 之前：{srcs}"
+    )
+    assert srcs.index("fx-death.js") < srcs.index("sfx-death.js"), (
+        "画面在前、音效在后（阵亡的音效报点从 SgsDeathFX.PARAMS 读）"
     )
 
 
@@ -5268,3 +5281,571 @@ def test_the_chain_sfx_is_a_one_shot_scheduler_behind_the_same_switch() -> None:
             f"fx-chain.js 要按 typeof 守卫调 {name}（缺 sfx-ui.js 的探针里仍是一份独立排播）"
         )
     assert "AudioContext" not in chain, "画面侧不碰音频 API（音效层的事）"
+
+
+# ---------------------------------------------------------------------------
+# chain-death-voices 票 02：阵亡演出（`fx-death.js` / `sfx-death.js`）
+#
+# 判据来自票面 §验收断言 2 与 spec §演出口径「阵亡：三条覆盖规则 + 三条反向钩子」：
+# 1. **`SgsDeathFX` 的形状与单时间轴**：`create` / `PARAMS` / `gameTiming` /
+#    `DEFAULT_TIMING` / `TIMING_FIELDS` / `TIMING_KEYS` / `MAX_TOTAL_MS` 都在；
+#    `PARAMS.duration = 3.05` 是基准；`anim.ini` 的 `death_fx_total` 与 `DEFAULT_TIMING`
+#    逐键同值；钳制 1200–3200；各节拍按 `k = total / 3050` 等比缩放。
+# 2. **两个文件里都没有 `registerPlaybackHold`**（用户口径：阵亡无时停；素材包 §3 的 hold
+#    建议**不采纳**）。
+# 3. **三条覆盖规则是加法**：`.seat.dead` / `.seat.dead .hero-block::after` / `.dead-tag`
+#    三条基线**逐字未改**；`data-death-fx="hold"/"gone"` 只覆盖。
+# 4. **`#t-death-fx` 是独立覆盖层**：与 `#t-damage-fx` 同 z-index 档，且不复用伤害层。
+# 5. **排播钩子**：`stepPlayback` 里 `fireDeathEventsThrough(record.seq)` 在
+#    `fireDamageEventsThrough(record.seq)` 之后；`renderTable` 末尾 `deathFxSync()`；
+#    `commitView` 换会话时 `clearDeathFx()`；在播上限 2、第 3 条丢队尾；每条开演前重测 stage。
+# 6. **音效**：`SgsDeathSfx` 是一次性排程器，`sfx-ui.js` 在同一个手势 / 开关里惰性建 1 路。
+#
+# 行为（hold / gone / 收尾 / 无时停 / 两条同批 / 第 3 条丢掉 / 轻伤害叠播 / 自己的座位 /
+# 版式作废 / 换局 / 音效）归烟测 `U-DEATH-01..`。
+# ---------------------------------------------------------------------------
+
+_FX_DEATH_JS = STATIC_DIR / "fx-death.js"
+_SFX_DEATH_JS = STATIC_DIR / "sfx-death.js"
+
+
+def test_the_death_fx_family_never_registers_a_playback_hold() -> None:
+    """用户口径：阵亡**无时停**（素材包 `SGS-INTEGRATION.md` §3 的 hold 建议**不采纳**）。
+
+    逐文件扫 `registerPlaybackHold`：出现即红。与铁索那条同形，但**各钉各的**——两张票
+    改的是不同的文件，"另一份也没登记"不是这一份的证据。反向对照仍是伤害家族（3 / 4 档
+    登记一条），避免把登记表整个禁掉。
+    """
+    for name in ("fx-death.js", "sfx-death.js"):
+        text = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        assert "registerPlaybackHold" not in text, (
+            f"{name} 不许登记回放暂停：阵亡演出无时停（spec §硬约束 / 用户口径）"
+        )
+        assert "playbackHold" not in text, f"{name} 连暂停判据的名字都不该认识"
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+    assert 'registerPlaybackHold("damage"' in damage_fx, (
+        "反向对照：伤害家族仍只登记自己那一条（本条不是把登记表整个禁掉）"
+    )
+
+
+_DEATH_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
+const noteNode = { textContent: "", hidden: true };
+/* `fx-death.js` 的 `create()` 要一张**真 canvas + 2D 上下文**（烘焙碎片贴图 / 画每一帧）。
+ * 这里给一个记录型的空实现（与伤害舞台探针同一套）：方法全在、不画像素，但把 `fillText`
+ * 记下来——"牌桌档不落印（label: ''）"这条只能靠它读。 */
+const calls = [];
+const originStack = [];
+let origin = { x: 0, y: 0 };
+const gradient = { addColorStop() {} };
+const props = { globalCompositeOperation: "source-over", globalAlpha: 1, fillStyle: "" };
+const ctx = new Proxy({}, {
+  get(_target, prop) {
+    if (prop in props) return props[prop];
+    if (prop === "measureText") return () => ({ width: 10 });
+    if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+    if (prop === "save") return () => { originStack.push({ ...origin }); };
+    if (prop === "restore") return () => { origin = originStack.pop() || { x: 0, y: 0 }; };
+    if (prop === "setTransform") return () => { origin = { x: 0, y: 0 }; };
+    if (prop === "translate") {
+      return (x, y) => { origin.x += Number(x) || 0; origin.y += Number(y) || 0; };
+    }
+    if (prop === "scale") return () => {};
+    if (prop === "fillText") return (text) => calls.push({ op: "fillText", text, font: props.font });
+    if (prop === "drawImage") return (image) => calls.push({ op: "drawImage", w: image && image.width });
+    return () => {};
+  },
+  set(_target, prop, value) { props[prop] = value; return true; },
+});
+const makeCanvas = () => ({ width: 0, height: 0, getContext: () => ctx });
+const context = vm.createContext({
+  __calls: calls,
+  console, Date, JSON, Object, Array, Number, String, Math, isFinite, parseInt,
+  fetch: async () => ({ ok: true, text: async () => ini }),
+  document: {
+    getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+    createElement: () => makeCanvas(),
+  },
+});
+context.globalThis = context;
+context.window = context;
+context.$ = (id) => context.document.getElementById(id);
+for (const name of ["anim.js", "fx-death.js"]) {
+  vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+}
+
+const report = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     const FX = SgsDeathFX;
+     const g = (raw) => FX.gameTiming(raw || {});
+     const textsOf = (fx, at) => {
+       __calls.length = 0;
+       fx.draw(at);
+       return __calls.filter((call) => call.op === "fillText").map((call) => call.text);
+     };
+     /* 落印是**烘成贴图**的（bakeStamp 在 create 时画一次），所以"有没有印"要在建实例
+      * 那一步读：牌桌档 label 传空串 ⇒ 一次都不烘。 */
+     const creationTexts = (opts) => {
+       __calls.length = 0;
+       const fx = make(opts);
+       return { fx, texts: __calls.filter((call) => call.op === "fillText").map((call) => call.text) };
+     };
+     const tableStage = { cx: 720, cy: 405, w: 250, h: 240 };
+     const view = { w: 1440, h: 810 };
+     const make = (opts) => FX.create(document.createElement("canvas"), opts);
+     /* 牌桌档：bare + radius 0 + label '' + 2200ms。 */
+     const tableSetup = creationTexts({
+       bare: true, radius: 0, label: "", dpr: 1, view, stage: tableStage,
+       timing: { death_fx_total: animTiming("death_fx_total") },
+     });
+     const table = tableSetup.fx;
+     /* 素材页档：3.05s（不压时间）+ 默认 label（会落印）。 */
+     const materialSetup = creationTexts({ dpr: 1, timing: { death_fx_total: 3050 } });
+     const material = materialSetup.fx;
+     const defaults = make({ dpr: 1 });
+     return JSON.stringify({
+       note: $("t-anim-note").textContent,
+       animConfigKeys: Object.keys(animConfig),
+       deathFromIni: animTiming("death_fx_total"),
+       shape: {
+         create: typeof FX.create,
+         gameTiming: typeof FX.gameTiming,
+         seatOf: typeof FX.deathSeatOf,
+         fire: typeof FX.fireDeathEventsThrough,
+         sync: typeof FX.deathFxSync,
+         clear: typeof FX.clearDeathFx,
+         params: typeof FX.PARAMS,
+         colors: typeof FX.COLORS,
+         maxPlays: FX.MAX_PLAYS,
+         defaults: FX.DEFAULT_TIMING,
+         fields: FX.TIMING_FIELDS,
+         keys: FX.TIMING_KEYS,
+         frozen: [Object.isFrozen(FX.TIMING_FIELDS), Object.isFrozen(FX.TIMING_KEYS)],
+         prefix: FX.TIMING_PREFIX,
+         minTotal: FX.MIN_TOTAL_MS,
+         maxTotal: FX.MAX_TOTAL_MS,
+       },
+       params: {
+         duration: FX.PARAMS.duration,
+         waves: FX.PARAMS.waves,
+         holdAt: FX.PARAMS.holdAt,
+         burstAt: FX.PARAMS.burstAt,
+         labelAt: FX.PARAMS.labelAt,
+         label: FX.PARAMS.label,
+       },
+       resolved: {
+         plain: g(),
+         fromIni: g({ death_fx_total: animTiming("death_fx_total") }),
+         basis: g().basis,
+         speed: g().speed,
+       },
+       clamps: {
+         low: g({ death_fx_total: 100 }).total,
+         high: g({ death_fx_total: 9000 }).total,
+         junk: g({ death_fx_total: "abc" }).total,
+         missing: g({}).total,
+       },
+       table: {
+         duration: table.duration,
+         total: table.total,
+         speed: table.speed,
+         width: table.width,
+         height: table.height,
+         burstAt: table.burstAt,
+         holdAt: table.holdAt,
+         labelAt: table.labelAt,
+         pause: table.burstAt - table.holdAt,
+         shards: table.shardCount,
+         cracks: table.crackCount,
+         label: table.tier.label,
+         noStamp: tableSetup.texts.includes("阵亡") === false,
+         drawsToEnd: (textsOf(table, table.duration + 10), true),
+         drawsAtZero: (textsOf(table, 0), true),
+       },
+       material: {
+         duration: material.duration,
+         burstAt: material.burstAt,
+         holdAt: material.holdAt,
+         labelAt: material.labelAt,
+         width: material.width,
+         height: material.height,
+         stamp: materialSetup.texts.includes("阵亡"),
+       },
+       defaultCreate: { duration: defaults.duration, total: defaults.total },
+     });
+   })()`,
+  context,
+  { filename: "death_fx_probe.js" },
+);
+console.log(report);
+"""
+
+
+def _death_fx_probe() -> dict:
+    """跑真 `anim.js` + 真 `fx-death.js`（node vm），拿回形状 / 时间轴 / 钳制 / 缩放实测值。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "death_fx_probe.mjs"
+        probe.write_text(_DEATH_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"阵亡探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def death_fx_probe() -> dict:
+    """一次探针跑完，形状 / 时间轴 / 钳制 / 缩放几条用例共用。"""
+    return _death_fx_probe()
+
+
+def test_the_death_fx_module_shape_and_its_timing_key(death_fx_probe: dict) -> None:
+    """`SgsDeathFX` 的形状、单时间轴的单一真源与钳制（spec §演出口径·牌桌档缺省）。
+
+    一半在 node 探针里驱动真函数（`gameTiming` 的钳制 / 缺键 / 垃圾值、`create` 的缩放），
+    另一半与磁盘上的 `anim.ini` 对表。字段名**不是**写在测试里的第二份清单：期望值来自
+    `DEFAULT_TIMING`。
+    """
+    probe = death_fx_probe
+    shape = probe["shape"]
+    for key in ("create", "gameTiming", "seatOf", "fire", "sync", "clear"):
+        assert shape[key] == "function", f"SgsDeathFX 缺 {key}()"
+    assert shape["params"] == "object" and shape["colors"] == "object", "PARAMS / COLORS 要导出"
+    assert shape["maxPlays"] == 2, f"在播上限 2（spec §演出口径）：{shape['maxPlays']}"
+
+    # 素材页基准：3.05s 与四个节拍（票面 §做法 1：`PARAMS.duration = 3.05` 作基准）。
+    params = probe["params"]
+    assert params["duration"] == pytest.approx(3.05), f"素材页基准 3.05s：{params['duration']}"
+    assert params["waves"] == [0.16, 0.52, 0.98], f"三波裂缝：{params['waves']}"
+    assert params["holdAt"] == pytest.approx(1.40)
+    assert params["burstAt"] == pytest.approx(1.74)
+    assert params["labelAt"] == pytest.approx(2.26)
+    assert params["label"] == "阵亡", "素材页缺省落印（牌桌档才传空串）"
+
+    # `DEFAULT_TIMING`：字段名由它生成（票面：字段名只有一处真源）。
+    defaults = shape["defaults"]
+    assert defaults == {"total": 2200}, f"缺省 2200ms：{defaults}"
+    assert list(shape["fields"]) == sorted(defaults), (
+        f"TIMING_FIELDS 必须由 DEFAULT_TIMING 生成：{shape['fields']}"
+    )
+    expected_keys = sorted(f"{shape['prefix']}{field}" for field in defaults)
+    assert sorted(shape["keys"]) == expected_keys, (
+        f"TIMING_KEYS 必须由前缀 + 字段生成：{shape['keys']} vs {expected_keys}"
+    )
+    assert shape["frozen"] == [True, True], "TIMING_FIELDS / TIMING_KEYS 冻结（别被就地改写）"
+    assert shape["prefix"] == "death_fx_", f"anim.ini 前缀：{shape['prefix']}"
+    assert shape["maxTotal"] == 3200 and shape["minTotal"] == 1200, (
+        f"钳制 1200–3200ms：min={shape['minTotal']} max={shape['maxTotal']}"
+    )
+
+    # 磁盘上的 `anim.ini` 与 `DEFAULT_TIMING` **逐键同值**（用户改一份文件调时长）。
+    ini = {
+        key: float(value)
+        for key, value in _ini_entries().items()
+        if key.startswith("death_fx_")
+    }
+    assert set(ini) == set(shape["keys"]), (
+        f"anim.ini 的键必须与 TIMING_KEYS 一致：缺 {sorted(set(shape['keys']) - set(ini))}；"
+        f"多 {sorted(set(ini) - set(shape['keys']))}"
+    )
+    assert ini["death_fx_total"] == defaults["total"], (
+        f"death_fx_total 必须与 DEFAULT_TIMING 同值：ini={ini['death_fx_total']} "
+        f"default={defaults['total']}"
+    )
+    # 新键真的进了 animConfig，且没被当成未知键删掉 / 报错。
+    anim_js = _ANIM_JS.read_text(encoding="utf-8")
+    prefixes = re.search(r"^const ANIM_FOREIGN_KEY_PREFIXES = \[(?P<body>[^\]]*)\];$", anim_js, re.M)
+    assert prefixes is not None, "anim.js 里找不到 ANIM_FOREIGN_KEY_PREFIXES"
+    assert '"death_fx_"' in prefixes.group("body"), (
+        f"anim.js 必须把 death_fx_ 登记成外来键（否则用户的改动被当未知键删掉）："
+        f"{prefixes.group('body')}"
+    )
+    assert "未知键" not in probe["note"], f"death_fx_* 不得被当成未知键（页面提示：{probe['note']}）"
+    for key in shape["keys"]:
+        assert key in probe["animConfigKeys"], f"anim.js 没把 {key} 读进 animConfig"
+    assert probe["deathFromIni"] == defaults["total"], (
+        f"animTiming(death_fx_total) 应等于缺省值：{probe['deathFromIni']}"
+    )
+
+    # `gameTiming`：缺省 = DEFAULT_TIMING，ini 值活着，越界被夹（1200–3200），垃圾值退默认。
+    resolved = probe["resolved"]
+    assert resolved["plain"]["total"] == 2200, f"缺省解算：{resolved['plain']}"
+    assert resolved["plain"]["seconds"] == pytest.approx(2.2)
+    assert resolved["plain"]["timing"] == {"death_fx_total": 2200}
+    assert resolved["basis"] == pytest.approx(3.05), "basis = 素材页基准 3.05s"
+    assert resolved["fromIni"]["total"] == 2200, "带真 ini 值的解算也要落到 2200"
+    clamps = probe["clamps"]
+    assert clamps["low"] == 1200, f"低于 1200ms 被夹到 1200：{clamps['low']}"
+    assert clamps["high"] == 3200, f"高于 3200ms 被夹到 3200：{clamps['high']}"
+    assert clamps["junk"] == 2200, f"非法值退回 DEFAULT_TIMING：{clamps['junk']}"
+    assert clamps["missing"] == 2200, f"缺键退回 DEFAULT_TIMING：{clamps['missing']}"
+
+
+def test_the_table_death_profile_scales_every_beat_by_the_same_k(death_fx_probe: dict) -> None:
+    """票面 §做法 1：牌桌档压到 2.2s 时各节拍**等比缩放**（`k = total / 3050`）。
+
+    素材页 3.05s 那一档逐拍不变（`burstAt` 1.74 / `holdAt` 1.40 / `labelAt` 2.26）；
+    牌桌档三个节拍同乘 `k`，于是 `hold → burst` 的停顿约 0.25s（素材包 §8 的 0.2s 下限仍守）。
+    牌桌档的另外三条口径也在这一条里：`bare`（不画纸底 / 样例牌）、`radius: 0`（直角武将块）、
+    `label: ""`（**不落印**——游戏自己已经有「阵亡」标签）。
+    """
+    probe = death_fx_probe
+    table = probe["table"]
+    material = probe["material"]
+    k = 2200 / 3050
+    assert table["duration"] == pytest.approx(2.2), f"牌桌档整段 2.2s：{table['duration']}"
+    assert table["total"] == 2200
+    assert table["speed"] == pytest.approx(3.05 / 2.2), f"speed = 基准 / 牌桌秒：{table['speed']}"
+    assert table["burstAt"] == pytest.approx(1.74 * k), f"burstAt 等比缩：{table['burstAt']}"
+    assert table["holdAt"] == pytest.approx(1.40 * k), f"holdAt 等比缩：{table['holdAt']}"
+    assert table["labelAt"] == pytest.approx(2.26 * k), f"labelAt 等比缩：{table['labelAt']}"
+    assert table["pause"] == pytest.approx(0.34 * k), f"停顿 = 0.34s × k：{table['pause']}"
+    assert table["pause"] >= 0.2, f"素材包 §8：停顿不许低于 0.2s（实际 {table['pause']}）"
+    assert table["label"] == "", "牌桌档 label 传空串（不落印）"
+    assert table["noStamp"] is True, "牌桌档一笔「阵亡」都不许画（标签是游戏自己那份）"
+    assert table["drawsAtZero"] and table["drawsToEnd"], "draw(t) 在两端都要能跑（不抛错）"
+    # 画布按覆盖层的 CSS 尺寸建（内部 1:1 合成）：牌桌档的两块读数来自 view。
+    assert (table["width"], table["height"]) == (1440, 810), (
+        f"画布尺寸 = 覆盖层尺寸：{table['width']}x{table['height']}"
+    )
+    assert table["shards"] > 0 and table["cracks"] > 0, "碎片 / 裂缝都烘出来了（自检读数）"
+
+    # 素材页那一档：3.05s，节拍**逐拍不动**，默认落印。
+    assert material["duration"] == pytest.approx(3.05)
+    assert material["burstAt"] == pytest.approx(1.74)
+    assert material["holdAt"] == pytest.approx(1.40)
+    assert material["labelAt"] == pytest.approx(2.26)
+    assert (material["width"], material["height"]) == (1920, 1080), "缺省舞台仍是 1920×1080"
+    assert material["stamp"] is True, "素材页档照旧落印（label 缺省 = 阵亡）"
+
+    # 不传 timing ⇒ 牌桌档缺省（2200ms），不是素材页的 3.05s。
+    assert probe["defaultCreate"]["total"] == 2200
+    assert probe["defaultCreate"]["duration"] == pytest.approx(2.2)
+
+
+# 三条基线样式**逐字**冻结（票面：演出只做覆盖、不改基线；摘属性后必须回到原样）。
+_BASELINE_DEATH_RULES = (
+    ".seat.dead, .seat.flipped { opacity: .72; }",
+    ".seat.dead .hero-block::after,\n"
+    ".flipped-layer {\n"
+    "  position: absolute; inset: 0; z-index: 1;\n"
+    "  background: rgba(120, 116, 108, .35); pointer-events: none;\n"
+    "}",
+    '.seat.dead .hero-block::after { content: ""; }',
+    ".dead-tag {\n"
+    "  position: absolute; inset: 0; z-index: 4;\n"
+    "  display: flex; align-items: center; justify-content: center;\n"
+    "  pointer-events: none;\n"
+    "}",
+)
+
+
+def test_the_death_override_rules_are_additive_and_the_baseline_stays_verbatim() -> None:
+    """票面 §做法 2：三条覆盖规则是**加法**，基线三条**逐字未改**。
+
+    `renderTable` 在演出之前就把牌画成"已阵亡"，而这套演出前 1.7s 牌还得是活的 ⇒
+    `hold` 压住置灰与标签、`gone` 藏掉牌本身，收尾摘属性回到基线。
+    覆盖规则**不许**依赖 `.seat .hero-block { overflow: hidden }` 的裁切（那条被白光烟测钉着）。
+    """
+    css = _CSS_TEXT
+    for rule in _BASELINE_DEATH_RULES:
+        assert rule in css, f"阵亡的基线样式被改了（必须逐字保留）：{rule!r}"
+
+    # 保持式：牌看着还活着。
+    hold = _css_rule('.seat[data-death-fx="hold"]')
+    assert re.search(r"opacity:\s*1\b", hold), f"hold 期间席位不置灰：{hold}"
+    hidden = _css_rule('.seat[data-death-fx="hold"] .dead-tag')
+    assert re.search(r"display:\s*none", hidden), f"hold 期间「阵亡」标签藏掉：{hidden}"
+    # 蒙灰伪元素与标签写在**同一条**规则里（两个选择器共用 `display: none`）。
+    assert '.seat[data-death-fx="hold"] .hero-block::after,' in css, (
+        "hold 期间蒙灰伪元素也要藏掉（与标签同一条规则）"
+    )
+    assert re.search(r"display:\s*none", hidden), f"hold 期间蒙灰伪元素藏掉：{hidden}"
+    # 碎了之后：牌本身藏掉（不靠"盖一张纸色矩形"）。
+    gone = _css_rule('.seat[data-death-fx="gone"] .hero-block')
+    assert re.search(r"visibility:\s*hidden", gone), f"gone 期间牌本身藏掉：{gone}"
+    assert "overflow" not in gone and "display" not in gone, (
+        f"gone 不许改裁切 / 显示方式（`overflow: hidden` 是白光那条基线）：{gone}"
+    )
+    # 白光那条基线一个字不动（它被烟测的白闪用例钉着）。
+    assert re.search(r"overflow:\s*hidden", _css_rule(".seat .hero-block")), (
+        "既有口径：白光仍裁在武将块内（这一条不许改）"
+    )
+    # 属性由排播层贴 / 摘；两个方向都要有（贴 = 开演 / 重绘，摘 = 收尾 / 作废 / 换局）。
+    death = _strip_js_comments(_FX_DEATH_JS.read_text(encoding="utf-8"))
+    assert '"data-death-fx"' in death, "排播层要贴这个属性"
+    assert "setAttribute(\"data-death-fx\", phase)" in death, "贴属性（hold / gone）"
+    assert "removeAttribute(\"data-death-fx\")" in death, "摘属性（收尾 / 作废 / 换局）"
+
+
+def test_the_death_layer_is_its_own_overlay_next_to_the_damage_layer() -> None:
+    """`#t-death-fx` / `.death-fx-layer` 是**独立**的覆盖层（spec §硬约束）。
+
+    不许往 `#t-damage-fx` 里塞画布：`U-DMG-01c` 正向断言"伤害层里只有一张 canvas"；
+    也不与铁索共层（两套排播各自摘层）。同一 z-index 档，永远让位给询问弹窗。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<div\b[^>]*\bid=\"t-death-fx\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少阵亡演出层 #t-death-fx"
+    assert re.search(r'class="[^"]*death-fx-layer', tag.group(0)), tag.group(0)
+    assert "aria-hidden" in tag.group(0), "阵亡演出是纯视觉层，必须 aria-hidden"
+    assert html.index('id="table-shell"') < html.index('id="t-death-fx"'), (
+        "阵亡层必须住在 .table-shell 里（座位矩形按壳内坐标量）"
+    )
+    assert html.index('id="t-damage-fx"') < html.index('id="t-death-fx"'), (
+        "挨着 #t-damage-fx（排在它之后，两者同 z-index 档）"
+    )
+    # 伤害层仍是**空**的常驻 div：阵亡层不在它里面（各自摘层，互不干扰）。
+    assert re.search(r'<div\b[^>]*\bid="t-damage-fx"[^>]*></div>', html), (
+        "伤害演出层必须仍是空的常驻 div（阵亡层不许塞进它里面）"
+    )
+
+    layer = _css_rule(".death-fx-layer")
+    assert re.search(r"position:\s*absolute", layer), f"层必须绝对定位：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"层必须铺满壳：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"层不能吃指针：{layer}"
+    assert re.search(r"overflow:\s*hidden", layer), f"层必须裁在壳内：{layer}"
+    assert _layer_z_index(".death-fx-layer") == _layer_z_index(".damage-fx-layer"), (
+        "阵亡层与伤害层同一 z-index 档（spec §硬约束）"
+    )
+    assert _layer_z_index(".death-fx-layer") == _layer_z_index(".chain-fx-layer"), (
+        "三张演出层同档（互不摘层）"
+    )
+    assert _layer_z_index(".death-fx-layer") < _layer_z_index(".modal"), "永远让位给询问弹窗"
+
+
+def test_the_death_playback_is_scheduled_from_the_seq_cursor_without_holding() -> None:
+    """票面 §做法 1：触发判据、游标、排播口径、三个钩子。
+
+    「无时停」已由 `test_the_death_fx_family_never_registers_a_playback_hold` 逐文件钉住；
+    这里钉的是**反过来**的那一半：演出之外的三处次序必须由排播层自己兜住。
+    """
+    death = _strip_js_comments(_FX_DEATH_JS.read_text(encoding="utf-8"))
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    table = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+
+    # 排播口径（spec §演出口径·阵亡）：在播上限 2、第 3 条丢队尾（不排队等）。
+    assert re.search(r"^  var DEATH_FX_MAX = 2;$", death, re.M), "在播上限 2（超出丢队尾）"
+    assert "deathPlays.length >= DEATH_FX_MAX" in death, "超限判在触发点上（不排队）"
+
+    # 排播函数住在 IIFE 里（比顶层多缩进两格）：剥掉那一层再按顶层函数的形状取正文。
+    body_src = re.sub(r"^  ", "", death, flags=re.M)
+
+    # 判据只看记录（kind / timing / actor），**不认 hp_change**。
+    seat = _js_function(body_src, "deathSeatOf")
+    assert 'record.kind !== "timing"' in seat, seat
+    assert 'record.timing !== "DEATH_BEFORE_START"' in seat, seat
+    assert "record.actor" in seat, "座位 = record.actor（两种死法同形）"
+    assert "hp_change" not in death, "不许用 hp_change 到 0 去猜（护甲全吸收 / 濒死被救会猜错）"
+    fire = _js_function(body_src, "fireDeathEventsThrough")
+    assert "deathSeatOf(record)" in fire, fire
+    assert "deathCursor" in fire, "seq 游标（同一条记录只演一次）"
+    assert "startDeathPlay" in fire, "交给排播闸门"
+
+    # 每条开演前**重新量**一次 stage（版式可能刚变；量不到就不演）。
+    start = _js_function(body_src, "startDeathPlay")
+    assert "deathStageOf(seat, layerRect)" in start, start
+    assert "deathDroppedCount += 1" in start, "量不到就丢，并记一笔读数"
+    assert 'setAttribute("data-death-fx", phase)' in body_src, "开演 / 到 burstAt 都贴属性"
+    assert "window.setTimeout(function () { finishDeathPlay(play); }, play.duration)" in start, (
+        "摘层挂在**演出自己的计时器**上（不能等 commit / 下一批：无时停）"
+    )
+    assert "deathSfxPlay(0, " in start, "开演时同一声（单向缝：只调 sfx-ui 的口）"
+
+    # 到 `burstAt` 换 `gone`：牌本身藏掉。
+    gone = _js_function(body_src, "deathMarkGone")
+    assert "deathSetSeatFlag(play.seat, \"gone\")" in gone, gone
+
+    # 三个反向钩子。
+    sync_at = table.index("damageDropStalePlays();")
+    assert sync_at < table.index("deathFxSync();"), (
+        "deathFxSync() 排在 damageDropStalePlays() 之后（同一处重绘钩子）"
+    )
+    commit = _js_function(session, "commitView")
+    assert "clearDeathFx()" in commit, "换局要清阵亡的队列 / 画布 / 计时器 / 属性 / 声音"
+    assert "clearDamageFx();" in commit and commit.index("clearDamageFx();") < commit.index("clearDeathFx();"), (
+        "两层各清各的（阵亡紧跟着伤害层的清场）"
+    )
+
+    # 触发点：紧挨伤害演出的后面（同一条 seq 游标）。
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    damage_at = body.find("fireDamageEventsThrough(record.seq)")
+    death_at = body.find("fireDeathEventsThrough(record.seq)")
+    assert damage_at >= 0 and death_at > damage_at, (
+        "阵亡演出必须挂在伤害演出之后（票面 §做法 1）"
+    )
+    # 属性必须**清得干净**：收尾 / 作废 / 换局三处都有摘属性的路径。
+    finish = _js_function(body_src, "finishDeathPlay")
+    assert "deathSetSeatFlag(play.seat, null)" in finish, finish
+    assert "deathDropTimers(play)" in finish, "收尾要把两个计时器都摘掉（不留残留）"
+    clear = _js_function(body_src, "clearDeathFx")
+    assert "removeAttribute(\"data-death-fx\")" in clear, "换局把所有座位的属性都清掉"
+    assert "deathDropTimers(play)" in clear, "换局也要摘计时器（不然还有一拍会回来）"
+
+
+def test_the_death_sfx_is_a_one_shot_scheduler_behind_the_same_switch() -> None:
+    """票面 §做法 3：`SgsDeathSfx` 是**一次性排程器**，由 `sfx-ui.js` 在同一手势 / 开关里
+    惰性建 **1 路**；`fx-death.js` 只调 `deathSfxPlay` / `deathSfxStop` / `deathSfxMute`。
+
+    三条既有口径不动：缺省静音 / `localStorage['sgs.sfx']` / 静音时不建 `AudioContext`。
+    `?audiotest=1` 不扩（spec §不做）——阵亡是排程器，没有逐档电平可听。
+    """
+    sfx_ui = (STATIC_DIR / "sfx-ui.js").read_text(encoding="utf-8")
+    sfx_death = (STATIC_DIR / "sfx-death.js").read_text(encoding="utf-8")
+    death = _FX_DEATH_JS.read_text(encoding="utf-8")
+
+    # 排程器的接口（与素材包一致）。
+    for name in ("unlock", "play", "stop", "mute"):
+        assert re.search(rf"^\s+{name}: function", sfx_death, re.M), (
+            f"SgsDeathSfx 的播放器缺 {name}()"
+        )
+    assert re.search(r"global\.SgsDeathSfx = \{", sfx_death), "音效入口挂 window.SgsDeathSfx"
+    assert "renderOffline" in sfx_death, "离线电平读数照素材包留着（?audiotest 不扩，但仍可单跑）"
+    assert "SgsDeathFX" in sfx_death, "报点从画面模块的 PARAMS 读（不另抄一份时间表）"
+
+    # 一路声道：惰性建、跟着同一个手势 / 开关。
+    assert re.search(r"^let deathSfxLane = null;$", sfx_ui, re.M), "阵亡只有一路声道（惰性建）"
+    ensure = _js_function(sfx_ui, "deathSfxEnsure")
+    assert 'window.SgsDeathSfx' in ensure, "按全局名惰性取模块（缺件就跳过，不报错）"
+    assert "unlock" in ensure, "解锁必须走模块自己的 unlock()（手势同一个 tick）"
+    modules = _js_function(sfx_ui, "damageSfxEnsureModules")
+    assert "deathSfxEnsure" in modules, (
+        "阵亡声道要在**同一个**手势 / 开关里建（damageSfxEnsureModules 顺手建它）"
+    )
+    play = _js_function(sfx_ui, "deathSfxPlay")
+    assert "damageSfxOn" in play and "return null" in play, (
+        "「♪」关着时一声都不出、也不建 AudioContext（`SgsDeathSfx.create` 都不许走到）"
+    )
+    assert "lane.player.play(" in play, "开演一声（play(fromT, speed)）"
+    mute = _js_function(sfx_ui, "damageSfxMute")
+    assert "deathSfxMute" in mute, "开关要灌到阵亡那一路（与伤害声道同一次静音）"
+    assert "SgsDeathSfx" not in sfx_ui.split("DAMAGE_SFX_ENGINES = {")[1].split("};")[0], (
+        "阵亡**不进**伤害声道池：它是排程器，不是逐帧 tick 的播放器"
+    )
+    audio = _js_function(sfx_ui, "damageSfxAudiotest")
+    assert "DeathSfx" not in audio and "deathSfx" not in audio, (
+        "?audiotest=1 不扩到阵亡（spec §不做）"
+    )
+
+    # 画面侧只调这三个口（单向缝），不自己碰 AudioContext。
+    for name in ("deathSfxPlay", "deathSfxStop"):
+        assert f"typeof {name} === \"function\"" in death, (
+            f"fx-death.js 要按 typeof 守卫调 {name}（缺 sfx-ui.js 的探针里仍是一份独立排播）"
+        )
+    assert "AudioContext" not in death, "画面侧不碰音频 API（音效层的事）"

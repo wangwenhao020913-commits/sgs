@@ -331,6 +331,12 @@
          **各自独立**（同 z-index 档，`U-DMG-01c` 正向断言伤害层里只有一张 canvas），所以不许
          把铁索画布塞进 `#t-damage-fx`：两次演出会互相摘层。 -->
     <div id="t-chain-fx" class="chain-fx-layer" aria-hidden="true"></div>
+    <!-- 阵亡演出层（chain-death-voices 票 02）：一场阵亡挂**一张**铺满壳的 canvas（泛白 / 裂 /
+         碎 / 尘都画在 `#t-death-fx` 的坐标系里，武将块的矩形由 `damageFxBoxOf` 换算过去），
+         `fx.duration` 到点摘掉。与伤害层**各自独立**（同 z-index 档）：既不许塞进
+         `#t-damage-fx`（`U-DMG-01c` 正向断言那一层只有一张 canvas），也不与铁索共层——
+         两套排播各自摘层、互不干扰。**无时停**：这一层演它的，记录流照常推进。 -->
+    <div id="t-death-fx" class="death-fx-layer" aria-hidden="true"></div>
     <!-- 飞行时间表提示（U4-01 / D8）：anim.ini 缺键 / 解析失败时**一行**，正常时隐藏。 -->
     <div id="t-anim-note" class="anim-note" hidden></div>
 
@@ -463,10 +469,18 @@
      `fireChainEventsThrough(record)`、`table.js:renderTable` 调 `chainFxSync()`、`commitView` 调
      `clearChainFx()`——都排在它之后加载，故全部在调用时解析。 -->
 <script src="fx-chain.js"></script>
+<!-- chain-death-voices 票 02：**阵亡**家族的画面 + 排播（SgsDeathFX）与音效（SgsDeathSfx）。
+     画面紧挨 fx-chain（都在 sfx.js 之前）、音效紧挨 sfx-chain；两份都在 sfx-ui.js 之前
+     （它按名惰性建那一路一次性排程器）。fx-death.js 同时是阵亡的排播层（与 damage-fx.js 同
+     姿态）：`session.js:stepPlayback` 调 `fireDeathEventsThrough(record.seq)`、
+     `table.js:renderTable` 调 `deathFxSync()`、`commitView` 调 `clearDeathFx()`——都排在它
+     之后加载，故全部在调用时解析。**无时停**：不登记 `registerPlaybackHold`。 -->
+<script src="fx-death.js"></script>
 <script src="sfx.js"></script>
 <script src="sfx-thunder.js"></script>
 <script src="sfx-fire.js"></script>
 <script src="sfx-chain.js"></script>
+<script src="sfx-death.js"></script>
 <!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 按模块分组的声道池 /
      ?audiotest）。读 damage-fx.js 的 DAMAGE_FX_MAX_VARIANT 与 damageFxCapFor(nature)（票 02
      起池长按属性读 anim.ini 的并发表，槽位超出时就地补建），都在调用时才解析 ⇒ 排在
