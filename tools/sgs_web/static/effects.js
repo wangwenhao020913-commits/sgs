@@ -591,8 +591,12 @@ const DAMAGE_FX_NATURE = "NORMAL";
 /** 档位封顶：`amount ≥ 5` 按 4 档演——档位只决定强度，数字照旧是服务端给的真实值。 */
 const DAMAGE_FX_MAX_VARIANT = 4;
 
-/** 没有来源（`source == null`，判定类伤害）时剑光从画面左侧外这么远处飞进来（舞台单位）。 */
+/** 没有来源（`source == null`，判定类伤害）时剑光从画面左侧外这么远处飞进来（CSS px）。 */
 const DAMAGE_FX_OFFSTAGE_UNITS = 200;
+
+/** 3 / 4 点档的黑白屏闪（票 05 R2）：canvas 的 `saturation` 合成管不到下层 DOM，正解是
+ *  给**表壳**挂 CSS 滤镜（派发者指定做法）。窗口 = 该档 `strobe` 的时长。 */
+const DAMAGE_FX_GRAYSCALE = "grayscale(1) contrast(1.08)";
 
 /** 待开演的事件（已到 seq、还没轮到）。**不跨批攒**：换局 / 换批 / 版式变了都清。 */
 let damageQueue = [];
@@ -606,6 +610,10 @@ let damageCanvas = null;
 /** 舞台离屏画布池：同时在播最多 3 条 ⇒ 最多 3 张，按需建一次、跨演出复用。
  *  **不是**每来一次伤害就新建一张（票 05 §2：一个层里复用 canvas）。 */
 const damageStagePool = [];
+
+/** 正在黑白屏闪窗口里的演出（可能多条重叠）；非空 ⇒ 表壳挂 `filter`。 */
+const damageGrayPlays = new Set();
+let damageGrayOn = false;
 
 let damageStaggerTimer = null;
 let damageFrame = null;
@@ -625,39 +633,28 @@ function damageFxDpr() {
   return Number.isFinite(ratio) && ratio > 0 ? Math.min(1.5, ratio) : 1;
 }
 
-/** 舞台（1920×1080 参考坐标）→ 覆盖层 CSS 像素的等比铺满（cover，居中）。
- *
- * 牌桌壳是 16:9、舞台也是 16:9，故实际等于 `k = 层宽 / 1920`；写成通用式是为了窄屏 /
- * 极端尺寸下也不变形（spec §不做：移动端沿用桌面坐标映射，由 CSS 缩放兜住）。
- */
-function damageFxFit(rect) {
-  // 走 `window.` 显式取全局：`fx-core.js` 是普通脚本，把入口挂在 `window.SgsDamageFX`
-  // 上（票 03 / 06 同一条口径），页面里不另立一份裸名。
-  const stage = window.SgsDamageFX || null;
-  const stageW = (stage && Number(stage.WIDTH)) || 1920;
-  const stageH = (stage && Number(stage.HEIGHT)) || 1080;
-  const width = Number(rect && rect.width) || 0;
-  const height = Number(rect && rect.height) || 0;
-  const k = Math.max(width / stageW, height / stageH) || 1;
+/** 覆盖层的目标画布尺寸（CSS px）。牌桌档按它建画布、内部 1:1 合成——**不再**
+ *  "1920 舞台画完再整块缩小"（票 05 R2：那次 ~3 倍降采样会把 2px 的刀痕抹成灰铅笔线）。 */
+function damageFxView(layerRect) {
   return {
-    k, stageW, stageH, width, height,
-    dx: (width - stageW * k) / 2,
-    dy: (height - stageH * k) / 2,
+    width: Math.max(1, Math.round(Number(layerRect && layerRect.width) || 0)),
+    height: Math.max(1, Math.round(Number(layerRect && layerRect.height) || 0)),
   };
 }
 
-/** 一张武将块 → 舞台坐标里的矩形（**量一次** `getBoundingClientRect()`，不做 CSS 手算）。 */
-function damageFxBoxOf(node, fit, layerRect) {
+/** 一张武将块 → **覆盖层坐标**里的矩形（CSS px；量一次 `getBoundingClientRect()`，
+ *  不拿 `--dsu` 手算）。牌桌档的坐标系就是覆盖层的 CSS 像素，故这里不做任何比例换算。 */
+function damageFxBoxOf(node, layerRect) {
   const rect = rectOf(node);
   const left = Number(rect.left) || 0;
   const top = Number(rect.top) || 0;
   const width = Number(rect.width) || 0;
   const height = Number(rect.height) || 0;
   return {
-    cx: (left - (Number(layerRect.left) || 0) + width / 2 - fit.dx) / fit.k,
-    cy: (top - (Number(layerRect.top) || 0) + height / 2 - fit.dy) / fit.k,
-    w: width / fit.k,
-    h: height / fit.k,
+    cx: left - (Number(layerRect.left) || 0) + width / 2,
+    cy: top - (Number(layerRect.top) || 0) + height / 2,
+    w: width,
+    h: height,
   };
 }
 
@@ -682,15 +679,14 @@ function damageFxPlanFor(event) {
   const dstBlock = heroBlockFor(target);
   if (!dstBlock) return null;
   const layerRect = rectOf(layer);
-  const fit = damageFxFit(layerRect);
-  const dst = damageFxBoxOf(dstBlock, fit, layerRect);
+  const dst = damageFxBoxOf(dstBlock, layerRect);
   if (!(dst.w > 0) || !(dst.h > 0)) return null;
   const source = event.source === null || event.source === undefined ? null : Number(event.source);
   let src = null;
   if (source !== null && Number.isFinite(source)) {
     const srcBlock = heroBlockFor(source);
     if (srcBlock) {
-      const box = damageFxBoxOf(srcBlock, fit, layerRect);
+      const box = damageFxBoxOf(srcBlock, layerRect);
       if (box.w > 0 && box.h > 0) src = box;
     }
   }
@@ -752,6 +748,36 @@ function damageFxMark(layer) {
   layer.setAttribute("data-damage-fx-plays", String(damageStartedCount));
 }
 
+/** 表壳的灰阶滤镜：非空集合 ⇒ 挂上（3 / 4 点档的"整屏转黑白"，票 05 R2）。
+ *
+ * 为什么不在画布上做：canvas 的 `saturation` 合成模式只能改**自己那层**的像素，管不到
+ * 下面的牌桌 DOM（在透明层上还会得到一张不透明的灰）。正解是给表壳挂 CSS `filter`——
+ * 牌桌与演出一起转黑白（票 05 R2 派发者指定做法）。
+ *
+ * 已知副作用（可接受，窗口只有 0.16 / 0.44 秒）：`filter` 会建 containing block，
+ * 表壳里两个 `position: fixed` 的子节点在窗口内改按表壳定位——`#t-anim-note`（平时
+ * `hidden`，本来就在左下角）与 `#t-card-preview`（悬停才出现）。两者的位置差都在几 px
+ * 量级，且窗口极短；要彻底避免得给它们搬出表壳，不属本票。
+ */
+function damageGrayscaleSync() {
+  const want = damageGrayPlays.size > 0;
+  if (want === damageGrayOn) return;
+  const shell = $("table-shell");
+  if (shell && shell.style) shell.style.filter = want ? DAMAGE_FX_GRAYSCALE : "";
+  damageGrayOn = want;
+}
+
+function damageGrayscalePush(play) {
+  if (!play || !(play.strobeMs > 0)) return;
+  damageGrayPlays.add(play);
+  damageGrayscaleSync();
+}
+
+function damageGrayscalePop(play) {
+  if (!damageGrayPlays.delete(play)) return;
+  damageGrayscaleSync();
+}
+
 /** 一条伤害开演：取离屏槽 → `SgsDamageFX.create()`（game 档 + 座位矩形 + 真实值 + bare）→ 定时摘层。
  *
  * 摘层时刻用 `create()` 返回的 `duration`（= `anim.ini` 的 `total`）**定时**，不靠 rAF
@@ -768,17 +794,24 @@ function startDamagePlay(event) {
   const stageCanvas = damageStagePool[slot];
   if (!stageCanvas || typeof stageCanvas.getContext !== "function") return null;
   damageFxMountCanvas(layer);
+  const view = damageFxView(rectOf(layer));
   const fx = api.create(stageCanvas, {
     variant: plan.variant,
     profile: "game",
     timing: damageFxTiming(plan.variant),
     amount: plan.amount,
     stage: { src: plan.src, dst: plan.dst },
+    // 画布按覆盖层的实际尺寸建、内部 1:1 合成（票 05 R2：不再整块缩小）。
+    view,
     dpr: damageFxDpr(),
     // 牌桌档**只出特效**：宣纸底 + 样例武将牌一概不画（否则覆盖层不透明、牌桌被盖住，
     // 而且会在真实武将块上叠出参考实现的关羽 / 吕布）。素材库那条链（缺省）不受影响。
     bare: true,
   });
+  const timeline = fx.timeline || {};
+  const timing = fx.timing || {};
+  const impactMs = Math.max(0, Number(timeline.IMPACT) || 0) * 1000;
+  const strobeMs = Math.max(0, Number(timing.strobe) || 0);
   const play = {
     seq: Number(event.seq),
     variant: plan.variant,
@@ -789,11 +822,25 @@ function startDamagePlay(event) {
     slot,
     startedAt: stageNow(),
     duration: Math.max(0, Number(fx.duration) || 0) * 1000,
+    strobeMs,
     timer: null,
+    grayOnTimer: null,
+    grayOffTimer: null,
   };
   damagePlays.push(play);
   damageStartedCount += 1;
   play.timer = window.setTimeout(() => finishDamagePlay(play), play.duration);
+  if (strobeMs > 0) {
+    // 黑白屏闪的窗口：命中起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
+    play.grayOnTimer = window.setTimeout(() => {
+      play.grayOnTimer = null;
+      damageGrayscalePush(play);
+    }, impactMs);
+    play.grayOffTimer = window.setTimeout(() => {
+      play.grayOffTimer = null;
+      damageGrayscalePop(play);
+    }, impactMs + strobeMs);
+  }
   damageFxMark(layer);
   renderDamageFrame(stageNow());
   damageRequestFrame();
@@ -808,6 +855,14 @@ function finishDamagePlay(play) {
     if (window.clearTimeout) window.clearTimeout(play.timer);
     play.timer = null;
   }
+  // 收尾必须把屏闪窗口一起撤掉：否则中途作废的演出会把整块牌桌留在黑白里。
+  for (const key of ["grayOnTimer", "grayOffTimer"]) {
+    if (play && play[key] !== null && play[key] !== undefined && window.clearTimeout) {
+      window.clearTimeout(play[key]);
+    }
+    if (play) play[key] = null;
+  }
+  damageGrayscalePop(play);
   if (!damagePlays.length) {
     damageStopFrame();
     damageClearCanvas();
@@ -846,13 +901,14 @@ function renderDamageFrame(now = stageNow()) {
   }
   const ctx = typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
   if (!ctx) return;
-  const fit = damageFxFit(rectOf(layer));
+  const view = damageFxView(rectOf(layer));
   const dpr = damageFxDpr();
   if (ctx.setTransform) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, fit.width, fit.height);
+  ctx.clearRect(0, 0, view.width, view.height);
   for (const play of damagePlays) {
     if (!play.canvas) continue;
-    ctx.drawImage(play.canvas, fit.dx, fit.dy, fit.stageW * fit.k, fit.stageH * fit.k);
+    // 1:1（离屏舞台与可见画布同尺寸、同 dpr）：不再有整块降采样。
+    ctx.drawImage(play.canvas, 0, 0, view.width, view.height);
   }
 }
 
@@ -947,11 +1003,10 @@ function damageDropStalePlays() {
     return;
   }
   const layerRect = rectOf(layer);
-  const fit = damageFxFit(layerRect);
   const stale = damagePlays.filter((play) => {
     const block = heroBlockFor(play.plan && play.plan.targetSeat);
     if (!block) return true;
-    return damageFxBoxKey(damageFxBoxOf(block, fit, layerRect)) !== play.plan.key;
+    return damageFxBoxKey(damageFxBoxOf(block, layerRect)) !== play.plan.key;
   });
   for (const play of stale) finishDamagePlay(play);
 }
@@ -972,5 +1027,8 @@ function clearDamageFx() {
   damageStopFrame();
   damageClearCanvas();
   damageNextStartAt = 0;
+  // 换局 / 版式作废：屏闪窗口一并撤掉（牌桌不能留在黑白里）。
+  damageGrayPlays.clear();
+  damageGrayscaleSync();
   damageFxMark(damageFxLayer());
 }

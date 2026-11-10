@@ -287,6 +287,26 @@
    * 座位矩形 → 舞台（票 05）
    * ============================================================== */
 
+  /* 牌桌档的**落屏下限**（CSS px；票 05 R2 实机返工）。
+   *
+   * 真实机器上武将块约 250×240 CSS px、覆盖层约 660 CSS px 宽 ⇒ 参考构图缩到 ~0.37 倍，
+   * 1 点档 14 单位的刀痕落屏只剩 ~2 设备 px，被降采样抹成一条灰铅笔线。故构图比例 `u`
+   * 不许小于"这三样一眼看得见"所需的比值（验收下限 4 / 40 CSS px，这里各留 ~20% 余量）：
+   * 刀痕墨身 ≈ 0.94 × scarW、飘字字高 ≈ 0.7 × numSize、剑光主体 ≈ 2.1 × swordW。
+   * 三个"参考值"取**最细的一档**（1 点），四档里它就是下限。 */
+  var SCREEN_MIN = { scar: 5, number: 44, sword: 6 };
+  var REF_SCAR_W = 14, REF_NUM_SIZE = 150, REF_SWORD_W = 10;
+  var COMPOSITION_FLOOR = Math.max(
+    SCREEN_MIN.scar / (0.94 * REF_SCAR_W),      // 0.38
+    SCREEN_MIN.number / (0.7 * REF_NUM_SIZE),   // 0.42
+    SCREEN_MIN.sword / (2.1 * REF_SWORD_W)      // 0.29
+  );
+
+  /* 飘字相对中剑牌的位置，**牌桌档一份**（票 05 R2）：真实武将块的上沿就是势力印 +
+   * 将名 + 体力条，按素材库那份往上飘会压在体力条上。故从牌心略下起飘、上浮也短一点，
+   * 全程避开体力条。素材库那份（`NUMBER_OFFSET`）一个数都不动。 */
+  var NUMBER_OFFSET_SCREEN = { dx: 10 / CARD_W, dy: -0.02, rise: 0.10 };
+
   /* 一个座位矩形：缺字段 / 非法值退回参考舞台的对应值（`anim.ini` 删一行不该让页面报错，
    * 覆盖层量不到布局时同理）。w / h 必须为正——0 宽会把构图比例算成 0。 */
   function rectOr(raw, fallback) {
@@ -307,7 +327,8 @@
    * - `src` / `dst` 就是量出来的矩形（**舞台坐标**）：两张牌画在这两块上，刀痕
    *   （`buildScar(…, dst)`）、墨点、飘字都按它定位——不再按参考舞台的 460×644 硬摆。
    * - `u` = 它们比参考牌小多少（按 460×644 contain，取两牌最小值）：剑光粗细 / 刀痕 /
-   *   飘字字号是"牌上的绝对尺寸"，必须一起缩，否则 46 单位的剑光会糊满整张牌。
+   *   飘字字号是"牌上的绝对尺寸"，必须一起缩，否则 46 单位的剑光会糊满整张牌；
+   *   但**不许小于 `COMPOSITION_FLOOR`**（小牌上再缩就成了一条灰铅笔线）。
    * - `a` / `b` = 剑光航线，按 `SWORD_ANCHOR` 的同一比例从两张牌算出。
    *
    * 不传 `stage` ⇒ 参考舞台（`u = 1`、A / B 仍取原常量），素材库那条链逐字节不变。 */
@@ -319,6 +340,8 @@
     var dst = rectOr(raw.dst, DST);
     var u = Math.min(src.w / CARD_W, src.h / CARD_H, dst.w / CARD_W, dst.h / CARD_H);
     if (!isFinite(u) || u <= 0) u = 1;
+    // 小牌不许把"牌上的绝对尺寸"一起缩到看不见：抬到落屏下限（牌桌档的坐标就是 CSS px）。
+    u = Math.max(u, COMPOSITION_FLOOR);
     return {
       src: src, dst: dst, u: u,
       a: { x: src.cx + src.w * SWORD_ANCHOR.ax, y: src.cy + src.h * SWORD_ANCHOR.ay },
@@ -879,8 +902,8 @@
    * 伤害飘字
    * ============================================================== */
   /* 伤害飘字：`txt` 由 `create()` 按服务端的 `amount` 定好（票 05），这里只画。
-   * 位置 / 上浮距离按中剑牌那块矩形换算（`NUMBER_OFFSET`），故任意座位大小都落在牌上。 */
-  function drawNumber(c, variant, t, T, dst, txt) {
+   * 位置 / 上浮距离按中剑牌那块矩形换算（`offset`），故任意座位大小都落在牌上。 */
+  function drawNumber(c, variant, t, T, dst, txt, offset) {
     var age = t - T.IMPACT;
     if (age < 0 || age > T.NUM_LIFE) return;
 
@@ -893,8 +916,8 @@
 
     c.save();
     c.translate(
-      dst.cx + dst.w * NUMBER_OFFSET.dx,
-      dst.cy - dst.h * NUMBER_OFFSET.dy - rise * dst.h * NUMBER_OFFSET.rise
+      dst.cx + dst.w * offset.dx,
+      dst.cy - dst.h * offset.dy - rise * dst.h * offset.rise
     );
     c.rotate(-0.05 + (1 - rise) * 0.03);
     c.scale(0.6 + 0.4 * pop, 0.6 + 0.4 * pop);
@@ -942,6 +965,17 @@
    * 主入口
    * ============================================================== */
 
+  /* 本实例的目标画布尺寸（CSS px）：缺省 = 参考舞台 1920×1080。
+   * 牌桌档由 `effects.js` 传覆盖层的实际尺寸进来（见 `view` 的注释）。 */
+  function viewSize(view) {
+    var w = view ? Number(view.width) : NaN;
+    var h = view ? Number(view.height) : NaN;
+    return {
+      w: isFinite(w) && w > 0 ? w : W,
+      h: isFinite(h) && h > 0 ? h : H
+    };
+  }
+
   /* 静态贴图缓存（票 05）：键 → 一张离屏 canvas。画进它之后就只 `drawImage`，故多实例共用。 */
   var IMAGE_CACHE = {};
 
@@ -966,15 +1000,27 @@
     if (S.u !== 1) {
       variant = copy(variant, {
         swordW: variant.swordW * S.u, scarW: variant.scarW * S.u,
-        numSize: variant.numSize * S.u, shake: variant.shake * S.u
+        numSize: variant.numSize * S.u, shake: variant.shake * S.u,
+        // 劈屏错位同样是"牌上的尺寸"：牌桌档的坐标系是 CSS px，44 单位不缩就是硬劈一刀。
+        split: variant.split * S.u
       });
     }
     // 飘字文案：服务端 `amount` 是真实伤害（酒 / 加伤可能 ≥ 5），档位只决定强度。
     var txt = numberText(variant, opts.amount);
-    // 票 05（实机验收返工）：**牌桌档 = 只出特效**。纸底与两张样例武将牌是素材库舞台的
-    // 布景，铺到牌桌上就是一块不透明的米色板（整个牌桌被盖住）＋ 与真实武将不符的假牌；
-    // 故 `bare: true` 时两样都不画，牌桌透得出来。缺省仍是素材库那条链（逐字节不变）。
+    // 票 05 R1：**牌桌档 = 只出特效**。纸底与两张样例武将牌是素材库舞台的布景，铺到牌桌上
+    // 就是一块不透明的米色板（整个牌桌被盖住）＋ 与真实武将不符的假牌；故 `bare: true`
+    // 时两样都不画，牌桌透得出来。缺省仍是素材库那条链（逐字节不变）。
     var bare = opts.bare === true;
+    // 票 05 R2：牌桌档的坐标空间 = **覆盖层的 CSS 像素**（`view` 由 effects.js 给），
+    // 画布按 `view × dpr` 建、内部 `drawImage` 是 1:1 合成——不再"1920 舞台画完再缩小"
+    // （那次 ~3 倍降采样会把 2px 的刀痕抹平，实机验收里就是一条灰铅笔线）。
+    // 缺省仍是 1920×1080 的参考舞台（`?still` / `?export` 逐字节不变）。
+    var size = viewSize(opts.view);
+    // 局部 `W` / `H` = 本实例的目标画布尺寸，遮蔽模块级的参考舞台（`viewSize` 在模块作用域
+    // 里读真值，故缺省仍是 1920×1080）。
+    var W = size.w, H = size.h;
+    // 飘字位置：牌桌档避开体力条（见 `NUMBER_OFFSET_SCREEN`），素材库档照旧。
+    var numberOffset = bare ? NUMBER_OFFSET_SCREEN : NUMBER_OFFSET;
     var seed = 1700 + vId * 977;
     var dpr = opts.dpr || 1;
 
@@ -991,7 +1037,8 @@
     // 三张静态图（宣纸底 / 两张武将牌）都是**只读**贴图，跨实例复用：牌桌上一段伤害
     // 就建一次 1920×1080 的纸底 + 两张 460×644 的牌是几十毫秒的主线卡顿（票 05 起
     // 每次伤害都要建一个实例，故缓存到模块级；`drawImage` 只读，多实例共用安全）。
-    var paper = bare ? null : sharedImage('paper', function () { return paintPaper(W, H, 21); });
+    var paper = bare ? null
+      : sharedImage('paper:' + W + 'x' + H, function () { return paintPaper(W, H, 21); });
     var heroSrc = bare ? null : sharedImage('heroSrc', function () { return paintHeroCard(HEROES.src, 401); });
     var heroDst = bare ? null : sharedImage('heroDst', function () { return paintHeroCard(HEROES.dst, 733); });
 
@@ -1088,7 +1135,7 @@
         c.beginPath(); c.arc(S.b.x, S.b.y, BR, 0, Math.PI * 2); c.fill();
       }
 
-      drawNumber(c, variant, t, T, S.dst, txt);
+      drawNumber(c, variant, t, T, S.dst, txt, numberOffset);
       c.restore();
     }
 
@@ -1261,7 +1308,16 @@
       profile: clock.profile, timeline: T, timing: clock.ms,
       // 票 05：本实例的舞台（座位矩形 / 构图比例 / 剑光航线）与飘字文案。播放器用
       // `duration` 定时摘层（= `anim.ini` 的 `total`），票 06 的音效读同一份 `timeline`。
-      stage: S, number: txt, bare: bare
+      stage: S, number: txt, bare: bare,
+      // 落屏尺寸（牌桌档的坐标系就是覆盖层 CSS px）：三个数直接对应验收口径
+      // "刀痕墨身 ≥ 4 / 飘字字高 ≥ 40 / 剑光一眼认得出"。
+      metrics: {
+        u: S.u,
+        scar: variant.scarW * 0.94,
+        number: variant.numSize * 0.7,
+        sword: variant.swordW * 2.1,
+      },
+      numberOffset: numberOffset
     };
   }
 
@@ -1271,6 +1327,8 @@
     // 票 04：游戏档的时长表。`DEFAULT_TIMING` = anim.ini 那 19 个键的内置默认，
     // `gameTiming(variant, flatMap)` = 解算 + 钳制后的秒级时间轴（effects.js / 票 06 读它）。
     DEFAULT_TIMING: DEFAULT_TIMING, MAX_TOTAL_MS: MAX_TOTAL_MS,
-    TIMING_PREFIX: TIMING_PREFIX, gameTiming: gameTiming
+    TIMING_PREFIX: TIMING_PREFIX, gameTiming: gameTiming,
+    // 票 05 R2：牌桌档的落屏下限（构图比例不许小于它）与三样下限尺寸（CSS px）。
+    SCREEN_MIN: SCREEN_MIN, COMPOSITION_FLOOR: COMPOSITION_FLOOR
   };
 })(window);

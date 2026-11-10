@@ -1934,7 +1934,9 @@ const ctx = new Proxy({}, {
     if (prop in props) return props[prop];
     if (prop === "measureText") return () => ({ width: 10 });
     if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
-    if (prop === "fillText" || prop === "strokeText") return (text) => calls.push({ op: prop, text });
+    if (prop === "fillText" || prop === "strokeText") {
+      return (text) => calls.push({ op: prop, text, font: props.font });
+    }
     if (prop === "drawImage") {
       return (image, ...args) => calls.push({ op: "drawImage", w: image && image.width, args });
     }
@@ -1990,6 +1992,22 @@ const report = vm.runInContext(`(() => {
   const bare1 = draw({
     variant: 1, profile: "game", timing: timing1, amount: 3, dpr: 1, stage, bare: true,
   }, 0.80);
+  // 实机验收 R2 的**真机读数**：武将块约 250×240 CSS px、覆盖层约 660×371 CSS px、dpr 1.5。
+  // 牌桌档的坐标就是覆盖层的 CSS px，故几何直接按这两块算（不再有 1920→目标 的缩小）。
+  const screenStage = {
+    src: { cx: 180, cy: 190, w: 250, h: 240 },
+    dst: { cx: 480, cy: 190, w: 250, h: 240 },
+  };
+  const screen = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1.5,
+    stage: screenStage, bare: true, view: { width: 660, height: 371 },
+  }, 0.80);
+  // 大牌桌（1920 宽、武将块 630×600）：构图比例应跟着牌走，不受落屏下限牵动。
+  const big = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1,
+    stage: { src: { cx: 400, cy: 500, w: 630, h: 600 }, dst: { cx: 1400, cy: 500, w: 630, h: 600 } },
+    bare: true, view: { width: 1920, height: 1080 },
+  }, 0.80);
   // 牌桌：座位矩形 + 服务端的真实伤害值（7 点仍按 4 档演）
   const tuned = draw({
     variant: 4, profile: "game", timing: timing4, amount: 7, dpr: 1, stage,
@@ -2001,6 +2019,13 @@ const report = vm.runInContext(`(() => {
   }, 0.39);
 
   const texts = (calls) => calls.filter((call) => call.op === "fillText").map((call) => call.text);
+  /** 飘字那一笔的**实际字号**（font = '700 <N>px …'），用来看落屏是否 1:1。 */
+  const numberFont = (calls, text) => {
+    const hit = calls.filter(
+      (call) => call.op === "fillText" && call.text === text && /\\d+px/.test(String(call.font)));
+    if (!hit.length) return null;
+    return Number(/(\\d+(?:\\.\\d+)?)px/.exec(String(hit[hit.length - 1].font))[1]);
+  };
   const fallback = SgsDamageFX.create(document.createElement("canvas"), { variant: 2, dpr: 1 });
   const degenerate = SgsDamageFX.create(document.createElement("canvas"), {
     variant: 1, dpr: 1, stage: { src: { w: 0, h: 0 } },
@@ -2010,6 +2035,8 @@ const report = vm.runInContext(`(() => {
     plain: {
       stage: plain.fx.stage, number: plain.fx.number, duration: plain.fx.duration,
       bare: plain.fx.bare, cards: cards(plain.calls).map((call) => call.args),
+      width: plain.fx.width, height: plain.fx.height,
+      numberOffset: plain.fx.numberOffset, metrics: plain.fx.metrics,
     },
     bare: {
       stage: bare1.fx.stage, number: bare1.fx.number, duration: bare1.fx.duration,
@@ -2024,7 +2051,15 @@ const report = vm.runInContext(`(() => {
       timeline: tuned.fx.timeline, cards: cards(tuned.calls).map((call) => call.args),
       texts: texts(tuned.calls),
     },
-    fallback: { number: fallback.number, bare: fallback.bare },
+    screen: {
+      width: screen.fx.width, height: screen.fx.height,
+      stage: screen.fx.stage, metrics: screen.fx.metrics, bare: screen.fx.bare,
+      numberOffset: screen.fx.numberOffset, duration: screen.fx.duration,
+      numberFont: numberFont(screen.calls, "-1"),
+      floor: SgsDamageFX.COMPOSITION_FLOOR, screenMin: SgsDamageFX.SCREEN_MIN,
+    },
+    big: { stage: big.fx.stage, metrics: big.fx.metrics, floor: SgsDamageFX.COMPOSITION_FLOOR },
+    fallback: { number: fallback.number, bare: fallback.bare, numberOffset: fallback.numberOffset },
     degenerate: degenerate.stage,
   });
 })()`, context);
@@ -2169,3 +2204,64 @@ def test_the_table_profile_draws_the_effects_only_without_covering_the_table(
     assert kinds == {"split", "strobe"}, (
         f"?still / ?export 那条链必须保持原样（缝隙黑底 + 整屏去色）：{kinds}"
     )
+
+
+def test_the_table_profile_renders_at_target_size_with_legible_sizes(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """票 05 R2（实机返工）：渲染尺度按**目标设备尺寸**，且落屏尺寸有下限。
+
+    真机读数：武将块约 250×240 CSS px、覆盖层约 660×371 CSS px、dpr 1.5。旧实现把
+    1920×1080 舞台整块缩到 660 宽（≈ 3 倍降采样）再叠上构图比例 0.37，1 点档的刀痕
+    落屏只剩 ~2 设备 px，被抹成一条灰铅笔线。现在：
+
+    - 画布直接按覆盖层的 CSS 尺寸建（内部 1:1 合成，没有整块降采样）；
+    - 座位矩形就是覆盖层坐标，不再做 `1920 → 目标` 的换算；
+    - 构图比例 `u` 有**落屏下限**（`COMPOSITION_FLOOR`），保证刀痕墨身 ≥ 4 CSS px、
+      飘字字高 ≥ 40 CSS px、剑光主体一眼认得出；
+    - 飘字从牌心略下起飘，不压真实武将块顶部的体力条；素材库那份偏移一个数都不动。
+    """
+    probe = damage_fx_stage_probe
+    screen = probe["screen"]
+
+    # 1) 画布 = 覆盖层的 CSS 尺寸（内部 1:1，无整块缩放）
+    assert (screen["width"], screen["height"]) == (660, 371), (
+        f"牌桌档按目标尺寸建画布：{screen['width']}×{screen['height']}"
+    )
+    assert screen["bare"] is True, "牌桌档必须只出特效"
+
+    # 2) 座位矩形就是覆盖层的 CSS px，构图比例抬到落屏下限
+    assert screen["stage"]["src"] == {"cx": 180, "cy": 190, "w": 250, "h": 240}
+    assert screen["stage"]["dst"] == {"cx": 480, "cy": 190, "w": 250, "h": 240}
+    card_scale = min(250 / 460, 240 / 644)
+    assert screen["stage"]["u"] == pytest.approx(screen["floor"]), (
+        f"小牌上构图比例必须抬到落屏下限：u={screen['stage']['u']} floor={screen['floor']}"
+    )
+    assert screen["floor"] > card_scale, "下限必须真的抬起来（否则 1 点档还是铅笔线）"
+    assert screen["screenMin"]["scar"] >= 4, "下限尺寸不许低于验收线（刀痕 4 CSS px）"
+    assert screen["screenMin"]["number"] >= 40, "下限尺寸不许低于验收线（飘字字高 40 CSS px）"
+
+    # 3) 三样落屏尺寸都达线
+    metrics = screen["metrics"]
+    assert metrics["scar"] >= 4, f"刀痕墨身 ≥ 4 CSS px：{metrics['scar']}"
+    assert metrics["number"] >= 40, f"飘字字高 ≥ 40 CSS px：{metrics['number']}"
+    assert metrics["sword"] >= 5, f"剑光主体 ≥ 5 CSS px：{metrics['sword']}"
+
+    # 4) 飘字的**实际绘制字号**与落屏尺寸同源（画布即目标尺寸 ⇒ 1:1，不再被缩小）
+    assert screen["numberFont"] == pytest.approx(metrics["number"] / 0.7, rel=0.01), (
+        f"画到画布上的字号 = numSize：{screen['numberFont']} vs {metrics['number'] / 0.7}"
+    )
+
+    # 5) 飘字从牌心略下起飘：真实武将块的上沿是体力条，压上去看不清
+    offset = screen["numberOffset"]
+    assert offset["dy"] <= 0, f"牌桌档从牌心或其下方起飘：{offset}"
+    assert offset["dy"] - offset["rise"] > -0.15, f"上浮到顶也不许越过牌心 15%：{offset}"
+
+    # 6) 大牌桌（1920 宽、630×600 的武将块）：构图跟着牌走，不受下限牵动
+    assert probe["big"]["stage"]["u"] == pytest.approx(min(630 / 460, 600 / 644))
+    assert probe["big"]["metrics"]["scar"] > screen["metrics"]["scar"]
+
+    # 7) 素材库那条链：画布仍是 1920×1080，飘字偏移一个数都不动
+    assert (probe["plain"]["width"], probe["plain"]["height"]) == (1920, 1080)
+    assert probe["plain"]["numberOffset"]["dy"] == pytest.approx(55 / 644)
+    assert probe["plain"]["numberOffset"]["rise"] == pytest.approx(92 / 644)

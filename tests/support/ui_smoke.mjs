@@ -22959,7 +22959,40 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `live=${liveCount()} plays=${playCount() - before06}`);
   runUntil(() => liveCount() === 0);
 
+  // ---- U-DMG-07：3 点档的黑白屏闪挂在**表壳**上（canvas 的 saturation 管不到下层 DOM）----
+  const shell = $("table-shell");
+  const shellFilter = () => String((shell.style && shell.style.filter) || "");
+  const before07 = playCount();
+  loadDamageBatch(
+    [hpChange(14, 1, 4, 1)],
+    [damageEvent(14, 0, 1, 3)],
+  );
+  step();
+  const gray1 = { started: playCount() === before07 + 1, filter: shellFilter() };
+  check("U-DMG-07a 3 点档开演：命中之前表壳不挂滤镜（屏闪还没开始）",
+    gray1.started && gray1.filter === "",
+    `started=${gray1.started} filter="${gray1.filter}"`);
+  // 命中那一拍：滤镜挂上（grayscale + 压对比度），到 strobe 末尾那一拍摘掉。
+  const strobe = Number(iniMilliseconds("damage_fx_3_strobe"));
+  const impact = Number(iniMilliseconds("damage_fx_3_impact"));
+  runUntil(() => shellFilter() !== "", 60);
+  check("U-DMG-07b 命中后表壳转黑白（grayscale + contrast）",
+    shellFilter().includes("grayscale(1)"), `filter="${shellFilter()}" strobe=${strobe}`);
+  runUntil(() => shellFilter() === "", 60);
+  check("U-DMG-07c 屏闪窗口（= 该档 strobe）过后滤镜摘掉，牌桌恢复彩色",
+    shellFilter() === "" && liveCount() === 1,
+    `filter="${shellFilter()}" live=${liveCount()} impact=${impact}`);
+  runUntil(() => liveCount() === 0);
+  check("U-DMG-07d 1 点档全程不挂滤镜（只有 3 / 4 点有屏闪）",
+    shellFilter() === "" && layerCanvases().length === 0, `filter="${shellFilter()}"`);
+
+  loadDamageBatch([hpChange(15, 2, 4, 3)], [damageEvent(15, 0, 2, 1)]);
+  step();
+  drainTimers();
+  check("U-DMG-07e 1 点档跑完也不留滤镜", shellFilter() === "", `filter="${shellFilter()}"`);
+
   // 收尾：把这一块留下的状态清干净，不影响后面的用例。
+  shell.style.filter = "";
   heroBlockShift = 0;
   ui.state.view = null;
   ui.state.sessionId = null;
