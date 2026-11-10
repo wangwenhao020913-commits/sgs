@@ -2393,6 +2393,39 @@ const report = vm.runInContext(`(() => {
   const fullScreen = (calls) => calls.filter(
     (call) => call.op === "fillRect" && call.w >= 1920 && call.h >= 1080);
 
+  /* 票 06：命中后 1ms 那一帧。刀痕的长度 cutLen = max(3, floor(111 × k))、
+   * k = eOut(age / 0.15) ⇒ 命中后约 1.8ms 内 cutLen 只有 3；命中白闪的 0.16s 窗口也从
+   * 这一帧算起。两件事都靠这一帧读。包一层 try/catch：修前这里会抛 TypeError，要把那句
+   * 错误当**读数**带回去，而不是让整份探针 exit 非零（那样红的信息只剩 stderr 一行）。 */
+  const impactFrame = (opts) => {
+    __calls.length = 0;
+    try {
+      const fx = SgsDamageFX.create(document.createElement("canvas"), opts);
+      fx.draw(fx.timeline.IMPACT + 0.001);
+      return { calls: __calls.slice(), error: null };
+    } catch (error) {
+      return { calls: [], error: String((error && error.message) || error) };
+    }
+  };
+  /** 白色整屏填充（命中白闪 / 屏闪亮帧）：fillStyle 是 rgba(255,255,255,…) 或 #ffffff。 */
+  const whiteFullScreen = (calls) => fullScreen(calls).filter((call) => {
+    const fill = String(call.fill).toLowerCase();
+    return /^rgba?\\(\\s*255\\s*,\\s*255\\s*,\\s*255/.test(fill) || fill === "#ffffff";
+  });
+  /** 只认命中白闪那一笔（postProcess 的 rgba(255,255,255,…)）；3 / 4 点档的灰阶屏闪
+   *  亮帧是 #ffffff + globalAlpha，两套效果在读数上分开。 */
+  const hitFlashOnly = (fills) => fills.filter(
+    (call) => String(call.fill).toLowerCase().startsWith("rgba(255,255,255,"));
+  const tableImpact = {};
+  for (const id of [1, 2, 3, 4]) {
+    const frame = impactFrame({ variant: id, profile: "game", dpr: 1, stage, bare: true });
+    const white = whiteFullScreen(frame.calls);
+    tableImpact[id] = { error: frame.error, white, hitFlash: hitFlashOnly(white) };
+  }
+  // 导出档（bare: false）：12 秒链的冻结面，1 点档的白闪照旧。
+  const exportImpact = impactFrame({ variant: 1, dpr: 1 });
+  const exportWhite = whiteFullScreen(exportImpact.calls);
+
   // 参考舞台（不传 stage / amount / bare）：素材库那条链的回归钉。
   const plain = draw({ variant: 1, dpr: 1 }, 0.70);
   // 牌桌档：只出特效（不画纸底 / 样例武将牌），飘字仍是服务端真实值。
@@ -2498,6 +2531,12 @@ const report = vm.runInContext(`(() => {
     },
     bare4: { fullScreen: fullScreen(bare4.calls), cards: cards(bare4.calls).length },
     plain4: { fullScreen: fullScreen(plain4.calls) },
+    hitFlash: {
+      table: tableImpact,
+      exportOne: {
+        error: exportImpact.error, white: exportWhite, hitFlash: hitFlashOnly(exportWhite),
+      },
+    },
     tuned: {
       stage: tuned.fx.stage, number: tuned.fx.number, duration: tuned.fx.duration,
       timeline: tuned.fx.timeline, cards: cards(tuned.calls).map((call) => call.args),
@@ -2775,6 +2814,49 @@ def test_the_table_profile_renders_at_target_size_with_legible_sizes(
     assert (probe["plain"]["width"], probe["plain"]["height"]) == (1920, 1080)
     assert probe["plain"]["numberOffset"]["dy"] == pytest.approx(55 / 644)
     assert probe["plain"]["numberOffset"]["rise"] == pytest.approx(92 / 644)
+
+
+def test_the_sword_first_hit_flash_starts_at_two_damage(damage_fx_stage_probe: dict) -> None:
+    """票 06 §1：牌桌档 1 点**没有**整屏白闪（2 点起才有）；导出档照旧。
+
+    判据是命中后 1ms（白闪 0.16s 窗口的第一帧）那一帧的 `fillRect(0, 0, w, h)` + 白色
+    填充：1 点档一次都不许有；2 点档必须有；`bare: false` 的导出档（12 秒链 / 静帧哈希
+    是参考素材的冻结面）1 点档也照旧有。
+    """
+    probe = damage_fx_stage_probe["hitFlash"]
+    table = probe["table"]
+    assert table["1"]["white"] == [], (
+        f"1 点档不许有整屏白闪（掉 1 点血整块牌桌亮一下过头了）：{table['1']['white']}"
+    )
+    assert table["2"]["hitFlash"], (
+        f"2 点档的命中白闪必须还在（0.16s 内衰减）；这一帧读数：{table['2']}"
+    )
+    # 3 / 4 点档另有一套灰阶屏闪（亮帧也是整屏白），这里只认命中白闪那一笔：
+    # 它不许跟着 1 点档一起被砍掉。
+    for variant in ("3", "4"):
+        assert table[variant]["hitFlash"], (
+            f"{variant} 点档的命中白闪不许跟着 1 点档一起消失：{table[variant]}"
+        )
+    assert probe["exportOne"]["error"] is None, probe["exportOne"]["error"]
+    assert probe["exportOne"]["hitFlash"], (
+        f"导出档（bare: false）是冻结面：1 点档的白闪照旧，不许跟着牌桌档一起改："
+        f"{probe['exportOne']}"
+    )
+
+
+def test_the_sword_scar_survives_the_growth_window(damage_fx_stage_probe: dict) -> None:
+    """票 06 §2：命中后 ~2ms 的 `cutLen = 3` 窗口里，刀痕毛刺的下标不许越界。
+
+    `cutLen = max(3, floor(111 × k))`、`k = eOut(age / 0.15)` ⇒ `cutLen = 3` 只在命中后
+    约 1.8ms 内；而 `r = rng(seed × 7 + 13)` 与 `seed = 1700 + vId × 977` 都是确定的 ⇒
+    四档在这一帧全崩（`Cannot read properties of undefined`），不是概率测试那种偶发。
+    """
+    table = damage_fx_stage_probe["hitFlash"]["table"]
+    assert sorted(table) == ["1", "2", "3", "4"], sorted(table)
+    for variant, frame in table.items():
+        assert frame["error"] is None, (
+            f"{variant} 点档在命中后 1ms 画一帧就崩了：{frame['error']}"
+        )
 
 
 # ---------------------------------------------------------------------------

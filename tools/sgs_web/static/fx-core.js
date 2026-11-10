@@ -666,12 +666,14 @@
     c.fillStyle = mg;
     c.fill();
 
-    // 毛刺
+    // 毛刺：命中后 ~2ms 的 `cutLen = 3` 窗口里 `3 + floor(r() * (cutLen - 7))` 会落到 -1
+    // （`mid[-1]` ⇒ TypeError，票 06 的偶发崩溃）。钳进 `[1, cutLen - 2]`：`cutLen ≥ 3`
+    // ⇒ 区间非空，只保证画得出来，不改刀痕本体。
     var r = rng(scar.seed * 7 + 13);
     c.strokeStyle = 'rgba(24,22,19,0.38)';
     c.lineCap = 'round';
     for (var hh = 0; hh < 8; hh++) {
-      var idx = 3 + Math.floor(r() * (cutLen - 7));
+      var idx = clamp(3 + Math.floor(r() * (cutLen - 7)), 1, cutLen - 2);
       var mp = mid[idx];
       var side = r() < 0.5 ? 1 : -1;
       var len = (5 + r() * 16) * ws;
@@ -1328,8 +1330,11 @@
     function postProcess(c, t) {
       var age = t - instT.IMPACT;
 
-      // 命中白闪
-      if (age >= 0 && age < 0.16) {
+      // 命中白闪：**2 点起才有**（票 06）。1 点档只是掉 1 点血，整块牌桌亮一下过头了；
+      // 牌桌上（`bare`）不画，导出档（`bare: false`，12 秒链 / 静帧哈希的冻结面）照旧四档全画。
+      // 这与下面 3 / 4 点档的**灰阶窗口**是两套效果，别把 `strobe` 一起折进来。
+      var hitFlash = !bare || variant.dmg > 1;
+      if (hitFlash && age >= 0 && age < 0.16) {
         var fa = Math.pow(1 - age / 0.16, 2) * (0.30 + 0.06 * variant.dmg);
         c.fillStyle = 'rgba(255,255,255,' + fa.toFixed(4) + ')';
         c.fillRect(0, 0, instW, instH);
