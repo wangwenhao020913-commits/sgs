@@ -458,7 +458,7 @@
   global.SgsThunderSfx = {
     create: create,
     renderOffline: renderOffline,
-    /* 六个音色单独导出：调音时不必碰排程（与 `SgsSfx` 的姿态一致） */
+    /* 七个音色单独导出：调音时不必碰排程（与 `SgsSfx` 的姿态一致） */
     riser: riser, crack: crack, boom: boom, zap: zap,
     sizzle: sizzle, rumble: rumble, strobe: strobe
   };

@@ -1044,7 +1044,7 @@ button.mini-slot { cursor: pointer; }
  * （见 `damage-fx.js:damageGrayscaleSync` 的既有注记）。属性闪因此走一个**着色的绝对定位
  * 子层**：层级 20 = 覆盖画布（19）之上、卡牌预览（55）之下；`mix-blend-mode: screen` 让
  * 底下的牌桌透出来（不是一块不透明的白板），`pointer-events: none` 不吃点击。
- * 颜色 / 强度由 `damage-fx.js:damageFlashSync` 写内联（强度 = 该档 `flash`，0..1）。 */
+ * 颜色由下面两个 class 定档，强度由 `damage-fx.js:damageFlashSync` 写内联（= 该档 `flash`）。 */
 .fx-flash {
   position: absolute;
   inset: 0;

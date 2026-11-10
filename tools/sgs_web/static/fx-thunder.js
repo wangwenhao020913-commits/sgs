@@ -70,6 +70,7 @@
   var W = REF_W, H = REF_H;
   var SRC = REF_SRC, DST = REF_DST;
   var A = REF_A, B = REF_B;
+  /* `SKY` = 无来源天降；`U` = 构图比例（牌比参考牌 460×644 小多少，落屏尺寸用它）。 */
   var SKY = false, U = 1;
 
   /* ---------------------------------------------------------------- 武将 ----
@@ -429,8 +430,8 @@
     };
   }
 
-  /* 把画法用的帧上下文切到这条演出：时钟 / 两张牌 / 两个锚点 / 画布尺寸 / 两种模式。 */
-  function setFrame(stage, timeline, w, h, bare) {
+  /* 把画法用的帧上下文切到这条演出：时钟 / 两张牌 / 两个锚点 / 画布尺寸 / 天降模式。 */
+  function setFrame(stage, timeline, w, h) {
     T = timeline;
     SRC = stage.src;
     DST = stage.dst;
@@ -2041,7 +2042,7 @@
 
     /* 形状在 create 时生成一次（随机数固定种子）：先切到本实例的帧上下文，
      * 于是 `cardArcs` / `stormShape` 这些读 A / B / W / H 的生成器拿到的是本实例的舞台。 */
-    setFrame(stage, instT, instW, instH, bare);
+    setFrame(stage, instT, instW, instH);
 
     var r = rng(9100 + id * 733);
     V.scorchData = scorchShape(r);
@@ -2077,7 +2078,7 @@
     function draw(t) {
       t = clamp(t, 0, instT.DURATION);
       // 每条演出开画前切帧：三条并发依次 draw，互不串味（见文件顶的帧上下文说明）。
-      setFrame(stage, instT, instW, instH, bare);
+      setFrame(stage, instT, instW, instH);
       var sh = shakeAt(t, V);
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
       c.clearRect(0, 0, instW, instH);

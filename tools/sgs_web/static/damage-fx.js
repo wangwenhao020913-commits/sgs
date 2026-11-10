@@ -32,7 +32,32 @@
 
 /* -------------------------------------------------- 伤害演出（damage-fx 票 04；票 01 起按属性分家族） */
 
-/* -------------------------------------------------- 属性 → 伤害演出家族 */
+/* -------------------------------------------------- 属性 → 伤害演出家族（票 01） */
+
+/** 无属性的规范名（服务端显式声明时用；`null` / 缺字段同样是它）。 */
+const DAMAGE_FX_NATURE = "NORMAL";
+
+/** 属性家族 → **唯一**的一张表：画面模块（+ 缺模块时的回落）、整屏效果（灰阶 / 着色闪档）、
+ *  能不能播。`renderer` / `fallback` 存的是**全局名**，调用时才解析——`index.html` 里两个
+ *  画面模块都排在本文件之后，顶层此时还没有 `window.SgsDamageFX` / `window.SgsThunderFX`。
+ *
+ *  票 03 接火时只动这张表的 `FIRE` 行：`playable: true` + 加载 `fx-fire.js`。 */
+const DAMAGE_FX_FAMILIES = {
+  [DAMAGE_FX_NATURE]: {
+    renderer: "SgsDamageFX", fallback: "SgsDamageFX",
+    grayscale: true, flash: null, playable: true,
+  },
+  THUNDER: {
+    // 雷电是**已接**的家族：模块没加载就是部署缺件，**不**回落剑光（spec §2 的 fail-open
+    // 只给"其它未知"）；`startDamagePlay` 拿不到模块就不播，事件仍被消费。
+    renderer: "SgsThunderFX", fallback: null,
+    grayscale: false, flash: "fx-flash-thunder", playable: true,
+  },
+  FIRE: {
+    renderer: "SgsFireFX", fallback: "SgsDamageFX",
+    grayscale: false, flash: "fx-flash-fire", playable: false,
+  },
+};
 
 /** 属性归一成**演出家族**：`NORMAL` / `THUNDER` / `FIRE`。
  *
@@ -43,7 +68,12 @@
 function damageFxNatureKind(nature) {
   if (nature === "THUNDER") return "THUNDER";
   if (nature === "FIRE") return "FIRE";
-  return "NORMAL";
+  return DAMAGE_FX_NATURE;
+}
+
+/** 属性 → 本家族的那一行（未登记属性 fail-open 回落无属性）。 */
+function damageFxFamilyFor(nature) {
+  return DAMAGE_FX_FAMILIES[damageFxNatureKind(nature)] || DAMAGE_FX_FAMILIES[DAMAGE_FX_NATURE];
 }
 
 /** 属性 → 画面模块（**分派查表只许写在这一处**，票面 §2）。
@@ -53,13 +83,12 @@ function damageFxNatureKind(nature) {
  *   仍不放行 FIRE，见 `damageFxNaturePlayable`）；
  * - `NORMAL` / 未登记 → `SgsDamageFX`。
  *
- * 缺模块时一律回落剑光（fail-open）：模块没加载时宁可演错家族，也不静默不播。
+ * 缺模块时：未登记属性 / 票 03 的 FIRE 回落剑光（fail-open）；**已接的雷电缺件就不播**
+ * （`fallback: null`，见家族表）——spec §2 的 fail-open 只给"其它未知"。
  */
 function damageFxRendererFor(nature) {
-  const kind = damageFxNatureKind(nature);
-  if (kind === "THUNDER") return window.SgsThunderFX || window.SgsDamageFX || null;
-  if (kind === "FIRE") return window.SgsFireFX || window.SgsDamageFX || null;
-  return window.SgsDamageFX || null;
+  const family = damageFxFamilyFor(nature);
+  return window[family.renderer] || (family.fallback ? window[family.fallback] : null) || null;
 }
 
 /** 一档演出要读的字段名；键名 = `<模块的 TIMING_PREFIX><档>_<字段>`（见 `anim.ini`）。
@@ -104,10 +133,7 @@ function damageFxTiming(nature, variant) {
 const DAMAGE_FX_STAGGER_MS = 120;
 const DAMAGE_FX_CONCURRENCY = 3;
 
-/** 无属性的规范名（服务端显式声明时用；`null` / 缺字段同样是它）。 */
-const DAMAGE_FX_NATURE = "NORMAL";
-
-/** 这一条伤害该不该演：**只挡还没接的家族**。
+/** 这一条伤害该不该演：**只挡还没接的家族**（FIRE 的闸门住在 `DAMAGE_FX_FAMILIES`）。
  *
  * 票 01 口径：`THUNDER` 放行；`FIRE` 的闸门留给票 03（票面 §验收 5 明写"FIRE 事件本票
  * 仍不播"）；`null` / `undefined` / `"NORMAL"` / 未登记属性一律视同无属性。
@@ -118,7 +144,7 @@ const DAMAGE_FX_NATURE = "NORMAL";
  * - `active.py:_quhu_burn`：「造成 1 点伤害（无渠道牌、无属性）」并显式写 `"nature": None`。
  */
 function damageFxNaturePlayable(nature) {
-  return damageFxNatureKind(nature) !== "FIRE";
+  return damageFxFamilyFor(nature).playable !== false;
 }
 
 /** 某属性自己的同时在播上限（spec §多目标：1–8，缺省 3）。
@@ -281,6 +307,8 @@ function damageFxPlanFor(event) {
   }
   const amount = Math.round(Number(event.amount));
   const damage = Number.isFinite(amount) && amount > 0 ? amount : 1;
+  // `source != null` 与"量到了来源牌"是两件事：前者决定雷走不走天降，后者决定剑光的源锚点。
+  const hasSource = source !== null;
   const variant = Math.max(1, Math.min(DAMAGE_FX_MAX_VARIANT, damage));
   return {
     src, dst, variant, amount: damage,
@@ -290,6 +318,7 @@ function damageFxPlanFor(event) {
     // 无来源 / 画面外进场——那块坐标是按中剑方矩组合成的，与版式无关，故只比中剑方。
     keys: { dst: damageFxBoxKey(dst), src: srcSeat !== null ? damageFxBoxKey(src) : null },
     sourceSeat: srcSeat,
+    hasSource,
     // 飘字的硬线：中剑方体力条的下沿（相对武将块左上角；量不到是 null）。
     keepOut: damageFxNumberKeepOut(dstBlock, target),
     targetSeat: target,
@@ -303,7 +332,9 @@ function damageFxPlanFor(event) {
  * 矩形——剑光那条链一个数都不动。
  */
 function damageFxStageFor(nature, plan) {
-  if (damageFxNatureKind(nature) === "THUNDER" && plan.sourceSeat === null) {
+  // 判据是"这次伤害**有没有来源**"（`source === null`），不是"来源牌量没量到"：后者只是
+  // 量不到布局，不能把一次有来源的雷改画成天降（spec §无来源伤害）。
+  if (damageFxNatureKind(nature) === "THUNDER" && plan.hasSource === false) {
     return { src: null, dst: plan.dst };
   }
   return { src: plan.src, dst: plan.dst };
@@ -361,6 +392,8 @@ function damageFxMark(layer, play = null) {
   const stage = play && play.fx ? play.fx.stage : null;
   if (!stage) return;
   // 票 01：家族 / 天降分支 / 起笔点（雷的起笔在画面上方，与剑光的"左侧画面外"是两回事）。
+  // 这几个读数是**最近一条演出**的：收尾后不擦（`damageFxMark(layer)` 不带 play 就只刷
+  // live / plays），实机验收在演出期间读它们。
   layer.setAttribute("data-damage-fx-nature", damageFxNatureKind(play.nature));
   layer.setAttribute("data-damage-fx-sky", stage.sky ? "1" : "");
   if (stage.a) {
@@ -381,10 +414,8 @@ function damageFxMark(layer, play = null) {
  * 不写色值：一个色值一处真源，烟测读 class、静态测试读 CSS。
  */
 function damageFxFlashSpec(nature) {
-  const kind = damageFxNatureKind(nature);
-  if (kind === "THUNDER") return { className: "fx-flash-thunder" };
-  if (kind === "FIRE") return { className: "fx-flash-fire" };
-  return null;
+  const className = damageFxFamilyFor(nature).flash;
+  return className ? { className } : null;
 }
 
 /** 着色闪子层的同步：有在闪的属性伤害 ⇒ 在表壳里建 / 更新 `.fx-flash`；空了 ⇒ 摘掉。
@@ -478,6 +509,7 @@ function startDamagePlay(event) {
   const plan = damageFxPlanFor(event);
   if (!layer || !plan) return null;
   const nature = plan.nature;
+  const family = damageFxFamilyFor(nature);
   const api = damageFxRendererFor(nature);
   if (!api || typeof api.create !== "function") return null;
   const slot = damageFxSlot();
@@ -507,8 +539,12 @@ function startDamagePlay(event) {
   const timing = fx.timing || {};
   const impactMs = Math.max(0, Number(timeline.IMPACT) || 0) * 1000;
   const strobeMs = Math.max(0, Number(timing.strobe) || 0);
-  // 整屏闪的强度（0..1）：属性家族读 `flash`（缺省 0.6），无属性走灰阶、用不到它。
-  const flash = Math.max(0, Math.min(1, Number(timing.flash) || 0.6));
+  // 整屏闪的强度（0..1）：属性家族读 `flash`（缺省 **只在缺键时** 才是 0.6——0 是合法的
+  // "不闪"），无属性走灰阶、用不到它。
+  const flashValue = Number(timing.flash);
+  const flash = Number.isFinite(flashValue)
+    ? Math.max(0, Math.min(1, flashValue))
+    : 0.6;
   const play = {
     seq: Number(event.seq),
     variant: plan.variant,
@@ -524,10 +560,9 @@ function startDamagePlay(event) {
     strobeMs,
     flash,
     timer: null,
-    grayOnTimer: null,
-    grayOffTimer: null,
-    flashOnTimer: null,
-    flashOffTimer: null,
+    // 整屏闪窗口的两个计时器（灰阶 / 着色共用；家族表决定推哪一只）。
+    windowOnTimer: null,
+    windowOffTimer: null,
     // 票 06：这条演出占用的音效声道与它那一段的档位参数（`damageSfxStart` 里填）。
     sfxLane: null,
     sfxVoice: null,
@@ -541,26 +576,17 @@ function startDamagePlay(event) {
   damageFxMark(layer, play);
   if (strobeMs > 0) {
     // 屏闪窗口：命中起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
-    // 无属性 = 表壳灰阶（`filter`）；火 / 雷 = 着色子层（互斥，spec §整屏效果）。
-    if (damageFxNatureKind(nature) === "NORMAL") {
-      play.grayOnTimer = window.setTimeout(() => {
-        play.grayOnTimer = null;
-        damageGrayscalePush(play);
-      }, impactMs);
-      play.grayOffTimer = window.setTimeout(() => {
-        play.grayOffTimer = null;
-        damageGrayscalePop(play);
-      }, impactMs + strobeMs);
-    } else {
-      play.flashOnTimer = window.setTimeout(() => {
-        play.flashOnTimer = null;
-        damageFlashPush(play);
-      }, impactMs);
-      play.flashOffTimer = window.setTimeout(() => {
-        play.flashOffTimer = null;
-        damageFlashPop(play);
-      }, impactMs + strobeMs);
-    }
+    // 家族表决定是表壳灰阶（无属性）还是着色子层（火 / 雷）——两者互斥（spec §整屏效果）。
+    const pushWindow = family.grayscale ? damageGrayscalePush : damageFlashPush;
+    const popWindow = family.grayscale ? damageGrayscalePop : damageFlashPop;
+    play.windowOnTimer = window.setTimeout(() => {
+      play.windowOnTimer = null;
+      pushWindow(play);
+    }, impactMs);
+    play.windowOffTimer = window.setTimeout(() => {
+      play.windowOffTimer = null;
+      popWindow(play);
+    }, impactMs + strobeMs);
   }
   damageFxMark(layer);
   renderDamageFrame(stageNow());
@@ -579,7 +605,7 @@ function finishDamagePlay(play) {
     play.timer = null;
   }
   // 收尾必须把屏闪窗口一起撤掉：否则中途作废的演出会把整块牌桌留在黑白 / 冷白里。
-  for (const key of ["grayOnTimer", "grayOffTimer", "flashOnTimer", "flashOffTimer"]) {
+  for (const key of ["windowOnTimer", "windowOffTimer"]) {
     if (play && play[key] !== null && play[key] !== undefined && window.clearTimeout) {
       window.clearTimeout(play[key]);
     }

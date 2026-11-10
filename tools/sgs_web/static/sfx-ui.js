@@ -125,23 +125,20 @@ function damageSfxSyncButton() {
  * （`SgsThunderSfx`）是两套全局名，映射只能在音效层说。属性归类仍走 `damageFxNatureKind`
  * （`damage-fx.js` 的单一判据，调用时解析）。
  */
+const DAMAGE_SFX_ENGINES = {
+  NORMAL: { key: "SgsSfx", fx: "SgsDamageFX" },
+  THUNDER: { key: "SgsThunderSfx", fx: "SgsThunderFX" },
+  FIRE: { key: "SgsFireSfx", fx: "SgsFireFX" },
+};
+
 function damageSfxEngineFor(nature) {
   const kind = typeof damageFxNatureKind === "function" ? damageFxNatureKind(nature) : "NORMAL";
-  if (kind === "THUNDER") {
-    return {
-      key: "SgsThunderSfx", nature: kind,
-      sfx: window.SgsThunderSfx || null, fx: window.SgsThunderFX || null,
-    };
-  }
-  if (kind === "FIRE") {
-    return {
-      key: "SgsFireSfx", nature: kind,
-      sfx: window.SgsFireSfx || null, fx: window.SgsFireFX || null,
-    };
-  }
+  const spec = DAMAGE_SFX_ENGINES[kind] || DAMAGE_SFX_ENGINES.NORMAL;
   return {
-    key: "SgsSfx", nature: "NORMAL",
-    sfx: window.SgsSfx || null, fx: window.SgsDamageFX || null,
+    key: spec.key,
+    nature: kind,
+    sfx: window[spec.key] || null,
+    fx: window[spec.fx] || null,
   };
 }
 
@@ -187,9 +184,9 @@ function damageSfxEnsureLanes(engine) {
   const key = engine.key;
   if (!damageSfxLanes[key]) damageSfxLanes[key] = [];
   const lanes = damageSfxLanes[key];
-  const cap = typeof damageFxCapFor === "function"
-    ? damageFxCapFor(engine.nature)
-    : DAMAGE_FX_CONCURRENCY;
+  // 池长只有 `damageFxCapFor` 一处真源（本票恒 3；票 02 改成按键读）。本文件排在
+  // damage-fx.js 之后，加载次序由清单保证，不再在这里留第二个 3 做兜底。
+  const cap = damageFxCapFor(engine.nature);
   const base = damageSfxBaseTimeline(engine.fx);
   while (lanes.length < cap) {
     const timeline = damageSfxTimeline(base);
@@ -211,8 +208,8 @@ function damageSfxEnsureLanes(engine) {
  */
 function damageSfxEnsureModules() {
   let live = 0;
-  for (const nature of ["NORMAL", "THUNDER", "FIRE"]) {
-    const engine = damageSfxEngineFor(nature);
+  for (const kind of Object.keys(DAMAGE_SFX_ENGINES)) {
+    const engine = damageSfxEngineFor(kind);
     if (!engine.sfx) continue;
     for (const lane of damageSfxEnsureLanes(engine)) {
       if (lane.live) live += 1;
@@ -280,7 +277,10 @@ function damageSfxVoice(play) {
     flight: Math.max(0, Number(timing.flight) || 0) / 1000,
     strobe: Math.max(0, Number(timing.strobe) || 0) / 1000,
     split: Math.max(0, Number(timing.split) || 0),
-    flash: Math.max(0, Math.min(1, Number(timing.flash) || 0.6)),
+    // 0 是合法的"不闪"；只有缺键 / 非法值才退 0.6。
+    flash: Number.isFinite(Number(timing.flash))
+      ? Math.max(0, Math.min(1, Number(timing.flash)))
+      : 0.6,
   };
 }
 

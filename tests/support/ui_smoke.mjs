@@ -23182,6 +23182,28 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `flash=${!!flashNodeOf()} filter="${shellFilter()}" live=${liveCount()}`);
   runUntil(() => liveCount() === 0);
 
+  // §7：新的屏闪生命周期也要收敛——中途作废（finishDamagePlay 清计时器）与换局清场
+  // （clearDamageFx 清集合）各一条，别只测"自然到点"。
+  loadDamageBatch([hpChange(44, 1, 4, 1)], [damageEvent(44, 0, 1, 3, "THUNDER")]);
+  step();
+  const flashLive10d = runUntil(() => flashNodeOf() !== null, 80);
+  heroBlockShift = 260;
+  ui.renderTable();
+  check("U-DMG-10d 演出中途版式作废：着色子层与计时器一起撤掉（不留冷白屏）",
+    flashLive10d && flashNodeOf() === null && shellFilter() === "" && liveCount() === 0,
+    `flash=${!!flashNodeOf()} filter="${shellFilter()}" live=${liveCount()}`);
+  heroBlockShift = 0;
+  drainTimers();
+
+  loadDamageBatch([hpChange(45, 2, 4, 1)], [damageEvent(45, 0, 2, 3, "THUNDER")]);
+  step();
+  const flashLive10e = runUntil(() => flashNodeOf() !== null, 80);
+  loadDamageBatch([], []);
+  check("U-DMG-10e 换局清场：着色子层撤掉、表壳 filter 为空、在播归零",
+    flashLive10e && flashNodeOf() === null && shellFilter() === "" && liveCount() === 0,
+    `flash=${!!flashNodeOf()} filter="${shellFilter()}" live=${liveCount()}`);
+  drainTimers();
+
   // ---- U-DMG-11：同批混家族 → 各用各的画面模块，互不串味 ----
   const thunderBefore11 = thunderLog.create;
   const damageBefore11 = damageLog.create;
@@ -23337,6 +23359,68 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     liveCount() === 1 && sfxLog.mute[sfxLog.mute.length - 1] === true,
     `live=${liveCount()} lastMute=${sfxLog.mute[sfxLog.mute.length - 1]}`);
   runUntil(() => liveCount() === 0);
+
+  // ---- U-SFX-04c/d/e：雷电走**它自己**的声道池，cue 时间轴带 SKY_AT / EXPLODE ----
+  // 垫片没有 AudioContext（真播放器 live=false），故换一个会 start() 成真的假雷模块：
+  // 只验"排播层把这条演出交给了谁、往声道里写了什么"，不验声音本身。
+  const realThunderSfx = windowShim.SgsThunderSfx;
+  const thunderSfxLog = { create: 0, start: 0, stop: 0, tick: [] };
+  windowShim.SgsThunderSfx = {
+    create(timeline) {
+      thunderSfxLog.create += 1;
+      return {
+        start() { thunderSfxLog.start += 1; return true; },
+        stop() { thunderSfxLog.stop += 1; },
+        mute() {},
+        tick(seconds, voice) {
+          thunderSfxLog.tick.push({ seconds, voice, timeline: { ...timeline } });
+        },
+      };
+    },
+    renderOffline: () => Promise.resolve(null),
+  };
+  vm.runInContext(
+    "for (const key of Object.keys(damageSfxLanes)) delete damageSfxLanes[key];", context);
+  await sfxClick();   // 开：两族各建 3 条（雷是刚换上的假模块）
+  const thunderLanesLive = vm.runInContext(
+    "JSON.stringify((damageSfxLanes.SgsThunderSfx || []).map((lane) => lane.live))", context);
+  const realDateNowSfx = Date.now;
+  let clockSfx = realDateNowSfx();
+  Date.now = () => clockSfx;
+  try {
+    loadDamageBatch([hpChange(50, 2, 4, 0)], [damageEvent(50, 0, 2, 4, "THUNDER")]);
+    step();
+    clockSfx += 100;   // 跨过 CHARGE
+    runFrame();
+    clockSfx += 300;   // 跨过 IMPACT
+    runFrame();
+    clockSfx += 900;   // 跨过 SKY_AT / EXPLODE（4 档天雷）
+    runFrame();
+  } finally {
+    Date.now = realDateNowSfx;
+  }
+  const thunderTick = thunderSfxLog.tick[thunderSfxLog.tick.length - 1] || null;
+  check("U-SFX-04c 雷电开演：走 SgsThunderSfx 的池（3 条 + 本段 start 一次），不吃剑的声道",
+    // 建池时每声 start 一次（3），开演再 start 一次重置 cue 游标 ⇒ 4 次。
+    thunderSfxLog.create === 3 && thunderSfxLog.start === 4
+      && thunderLanesLive === "[true,true,true]" && Boolean(thunderTick),
+    `create=${thunderSfxLog.create} start=${thunderSfxLog.start} `
+      + `lanes=${thunderLanesLive} ticks=${thunderSfxLog.tick.length}`);
+  check("U-SFX-04d 雷的 cue 时间轴带 SKY_AT / EXPLODE / DURATION（4 档天雷），voice.dmg = 4",
+    Boolean(thunderTick) && thunderTick.voice && thunderTick.voice.dmg === 4
+      && thunderTick.timeline.SKY_AT > 0
+      && thunderTick.timeline.EXPLODE > thunderTick.timeline.SKY_AT
+      && thunderTick.timeline.DURATION === 2,
+    `voice=${JSON.stringify(thunderTick && thunderTick.voice)} `
+      + `timeline=${JSON.stringify(thunderTick && thunderTick.timeline)}`);
+  runUntil(() => liveCount() === 0, 200);
+  const thunderTicksAtFinish = thunderSfxLog.tick.length;
+  runFrame();
+  runFrame();
+  check("U-SFX-04e 摘层即收声：雷电那条声道 stop() 一次，之后不再喂 tick",
+    thunderSfxLog.stop === 1 && thunderSfxLog.tick.length === thunderTicksAtFinish,
+    `stop=${thunderSfxLog.stop} ticks=${thunderSfxLog.tick.length}/${thunderTicksAtFinish}`);
+  windowShim.SgsThunderSfx = realThunderSfx;
 
   // ---- U-SFX-05：换回真 sfx.js —— 没有 AudioContext ⇒ 静默降级；?audiotest=1 ⇒ unavailable ----
   windowShim.SgsSfx = realSfx;

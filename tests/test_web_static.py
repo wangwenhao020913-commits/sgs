@@ -949,6 +949,30 @@ const report = await vm.runInContext(
          3: damageFxTiming("THUNDER", 3),
        },
        cap: damageFxCapFor("THUNDER"),
+       // §1 / §6：逐属性**驱动真函数**（不是整段源码 grep），供服务端枚举那条用例读。
+       natureDispatch: (() => {
+         const out = {};
+         for (const name of ["NORMAL", "FIRE", "THUNDER"]) {
+           const api = damageFxRendererFor(name);
+           const spec = damageFxFlashSpec(name);
+           out[name] = {
+             kind: damageFxNatureKind(name),
+             playable: damageFxNaturePlayable(name),
+             renderer: api === SgsThunderFX ? "SgsThunderFX"
+               : api === SgsDamageFX ? "SgsDamageFX" : "none",
+             flash: spec ? spec.className : null,
+           };
+         }
+         return out;
+       })(),
+       // 雷电是已接的家族：模块缺件时不回落剑光（spec §2 的 fail-open 只给未登记属性）。
+       thunderWithoutModule: (() => {
+         const saved = window.SgsThunderFX;
+         window.SgsThunderFX = undefined;
+         const missing = damageFxRendererFor("THUNDER");
+         window.SgsThunderFX = saved;
+         return missing === null;
+       })(),
      });
    })()`,
   context,
@@ -975,7 +999,7 @@ const negative = await vm.runInContext(
        keys: SgsDamageFX.TIMING_KEYS,
        four: damageFxTiming(null, 4),
        // 缺键的画面并不会变：split 退回 VARIANTS[4].split。所以"静默不生效"只能靠名单比对抓。
-       resolvedSplit: SgsDamageFX.gameTiming(4, damageFxTiming(4)).ms.split,
+       resolvedSplit: SgsDamageFX.gameTiming(4, damageFxTiming(null, 4)).ms.split,
      });
    })()`,
   patched,
@@ -2056,7 +2080,7 @@ def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbe
         "同时在播上限 3 条（超出丢队列尾）"
     )
     assert re.search(r'^const DAMAGE_FX_NATURE = "NORMAL";$', damage_fx, re.M), (
-        "只挂无属性伤害；火焰 / 雷电显式跳过"
+        "无属性的规范名（null / 缺字段也是它；家族表用它当 NORMAL 的键）"
     )
 
     apply_view = _js_function(session, "applyView")
@@ -2876,10 +2900,15 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
     assert "damageSfxLanes[engine.key]" in sfx_ui, "声道池必须按键 = 音效模块名"
     assert "damageSfxLanes.length" not in sfx_ui, "声道池不再是单个数组"
     ensure_modules = _js_function(sfx_ui, "damageSfxEnsureModules")
-    assert 'for (const nature of ["NORMAL", "THUNDER", "FIRE"])' in ensure_modules, (
+    assert "Object.keys(DAMAGE_SFX_ENGINES)" in ensure_modules, (
+        "家族清单只有 DAMAGE_SFX_ENGINES 一张表（不再写第三份 NORMAL/THUNDER/FIRE 字面量）"
+    )
+    assert "if (!engine.sfx) continue;" in ensure_modules, (
         "只给**已加载**的模块建池（没有 SgsFireSfx 就跳过，不凭空建）"
     )
-    assert "if (!engine.sfx) continue;" in ensure_modules, "缺模块 ⇒ 跳过该族"
+    assert 'THUNDER: { key: "SgsThunderSfx", fx: "SgsThunderFX" }' in sfx_ui, (
+        "雷的音效模块与画面模块成对登记（表是唯一真源）"
+    )
     ensure_lanes = _js_function(sfx_ui, "damageSfxEnsureLanes")
     assert "damageSfxBaseTimeline(engine.fx)" in ensure_lanes, (
         "占位时间轴按该属性的**画面模块**取（SgsThunderFX / SgsDamageFX）"
@@ -2908,6 +2937,7 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
 # 票面 §3 的"剩余部分" + 票 01 的属性分派 / 着色闪：按 `damage-fx.js` 里的出现次序。
 _DAMAGE_FX_FUNCTIONS = (
     "damageFxNatureKind",
+    "damageFxFamilyFor",
     "damageFxRendererFor",
     "damageFxTimingFields",
     "damageFxTiming",
@@ -3106,6 +3136,9 @@ def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) 
     )
     assert renderer["unknown"] is True, "未登记属性 fail-open 回落剑光（spec §2）"
     assert renderer["fireFallsBack"] is True, "SgsFireFX 还没加载 ⇒ 分派回落剑光（票 03 接）"
+    assert probe["thunderWithoutModule"] is True, (
+        "雷电是已接家族：SgsThunderFX 缺件时**不**回落剑光（fail-open 只给未登记属性）"
+    )
 
     fields = probe["fieldsFor"]
     assert fields["sword"] == ["total", "flight", "impact", "fade", "strobe", "split"]
@@ -3121,7 +3154,9 @@ def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) 
     assert probe["cap"] == 3, "本票 cap 恒 3（票 02 改成按键读）"
 
 
-def test_the_server_damage_natures_are_the_ones_the_frontend_dispatches() -> None:
+def test_the_server_damage_natures_are_the_ones_the_frontend_dispatches(
+    damage_fx_probe: dict,
+) -> None:
     """服务端的 `DamageNature` = 前端分派表认识的属性名（`null` 另算"无属性"）。
 
     `api/damage_events_after` 原样下发 `Engine.damage_events` 的 `nature`（`None` 保持
@@ -3135,9 +3170,29 @@ def test_the_server_damage_natures_are_the_ones_the_frontend_dispatches() -> Non
     body = behaviors[start:] if end < 0 else behaviors[start:end]
     natures = set(re.findall(r'=\s*"([A-Z]+)"', body))
     assert natures == {"NORMAL", "FIRE", "THUNDER"}, f"服务端的伤害属性取值变了：{sorted(natures)}"
-    damage_fx = _DAMAGE_FX_JS.read_text(encoding="utf-8")
+
+    # 每个枚举值都**调一次真函数**（不是 grep 源码）：家族归一、能不能播、画面模块、闪档。
+    dispatch = damage_fx_probe["natureDispatch"]
+    expected = {
+        "NORMAL": {
+            "kind": "NORMAL", "playable": True,
+            "renderer": "SgsDamageFX", "flash": None,
+        },
+        "THUNDER": {
+            "kind": "THUNDER", "playable": True,
+            "renderer": "SgsThunderFX", "flash": "fx-flash-thunder",
+        },
+        # FIRE 本票仍不播（§验收 5），但分派 / 闪档已经就位，票 03 只需打开闸门。
+        "FIRE": {
+            "kind": "FIRE", "playable": False,
+            "renderer": "SgsDamageFX", "flash": "fx-flash-fire",
+        },
+    }
     for nature in natures:
-        assert f'"{nature}"' in damage_fx, f"damage-fx.js 的分派表必须认识 {nature}"
+        assert nature in dispatch, f"前端分派表不认识服务端属性 {nature}"
+        assert dispatch[nature] == expected[nature], (
+            f"{nature} 的分派结果与期望不一致：{dispatch[nature]} != {expected[nature]}"
+        )
 
 
 def test_the_damage_fx_offstage_sword_path_starts_outside_the_screen(
@@ -3507,7 +3562,10 @@ def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() ->
     assert "aria-hidden" in sync, "纯视觉层不进无障碍树"
     assert "damageFxFlashSpec" in damage_fx
     spec = _js_function(damage_fx, "damageFxFlashSpec")
-    assert "fx-flash-thunder" in spec and "fx-flash-fire" in spec, (
+    assert "damageFxFamilyFor(nature).flash" in spec, (
+        "着色档从家族表取（唯一真源），不在函数里再写一份 if"
+    )
+    assert "fx-flash-thunder" in damage_fx and "fx-flash-fire" in damage_fx, (
         "两族各有一个颜色档（雷 = 冷白、火 = 暖白）"
     )
     # 无属性那条链仍然是**唯一**写 `#table-shell` filter 的地方。
@@ -3517,12 +3575,12 @@ def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() ->
     grayscale = _js_function(damage_fx, "damageGrayscaleSync")
     assert "DAMAGE_FX_GRAYSCALE" in grayscale
     start = _js_function(damage_fx, "startDamagePlay")
-    assert "damageGrayscalePush(play)" in start and "damageFlashPush(play)" in start, (
-        "两种窗口互斥：NORMAL 走灰阶、属性走着色子层（同一段 if / else）"
+    assert "damageGrayscalePush" in start and "damageFlashPush" in start, (
+        "两种窗口互斥：家族表挑灰阶 / 着色闪的推入函数（同一段计时器）"
     )
-    assert 'damageFxNatureKind(nature) === "NORMAL"' in start, "互斥判据读属性家族"
-    assert "Math.max(0, Math.min(1, Number(timing.flash) || 0.6))" in start, (
-        "强度读该档 flash（缺省 0.6）"
+    assert "family.grayscale" in start, "互斥判据读家族表（不是再写一条 if）"
+    assert "Number.isFinite(flashValue)" in start and "0.6" in start, (
+        "强度读该档 flash（缺省 0.6；0 是合法的『不闪』，不许被 || 吃掉）"
     )
 
     rule = _css_rule(".fx-flash")
