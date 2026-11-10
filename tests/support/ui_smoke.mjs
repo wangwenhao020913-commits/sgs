@@ -23511,35 +23511,6 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.registerPlaybackHold("smoke-heal", () => "");   // 收尾：把这条模拟判据清成恒空
   drainTimers();
 
-  /* ---- 兜底上限（票面 §3）：判据永久为真时页面不能跟着永久卡死 ----
-   *
-   * 墙钟可以注入（同一手法见 U-SFX-04c 的 `Date.now`）：把时钟推过上限，让下一个轮询
-   * 走到"兜底"那一支。**放弃等待**（不是清零重来）才是真·不卡死：清零会让每条记录都停满
-   * 8 秒，判据一旦永久为真就变成"卡得慢一点的卡死"。
-   */
-  loadDamageBatch(
-    [hpChange(86, 1, 4, 3), hpChange(87, 2, 4, 3), hpChange(88, 3, 4, 3)],
-    [damageEvent(86, 0, 1, 3)],
-  );
-  const held14n = runUntil(() => holdMark() === "damage:3", 5);
-  const realDateNowHold = Date.now;
-  Date.now = () => realDateNowHold() + ui.PLAYBACK_HOLD_MAX_MS + 1;
-  try {
-    runEarliest();   // 轮询醒来：判据仍为真，但已过兜底上限 ⇒ 推进 + 告警
-  } finally {
-    Date.now = realDateNowHold;
-  }
-  const timeouts14n = Number(attr(documentShim.documentElement, "data-playback-hold-timeouts"));
-  check("U-DMG-14n 判据挂满兜底上限：照常推进一条、记一次超时、通用读数清空",
-    held14n && playbackIndex() === 2 && timeouts14n === 1 && holdMark() === "",
-    `held=${held14n} index=${playbackIndex()} timeouts=${timeouts14n} hold="${holdMark()}"`);
-  const advanced14n = runUntil(() => playbackIndex() >= 3, 20);
-  check("U-DMG-14n2 兜底之后不再重新挂起：判据仍为真也照常推进（不是每条记录停 8 秒）",
-    advanced14n && playbackIndex() >= 3 && timeouts14n === 1,
-    `advanced=${advanced14n} index=${playbackIndex()} timeouts=${timeouts14n}`);
-  runUntil(() => ui.state.playback === null, 400);
-  runUntil(() => liveCount() === 0, 400);
-
   /* ---- 新视图在旧演出还没收尾时到达：**新一批的首步也等在窗口外** ----
    *
    * 用户口径是"3、4+ 伤害档动画**演出期间**游戏事件处理暂停"——窗口是整个演出寿命，不是
@@ -23566,14 +23537,6 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U-DMG-14q 演出收尾后新一批照常播完（flush 的那条 + 新批两条，一条不丢）",
     resumed14p && liveCount() === 0 && logCount() === logBefore14p + 3,
     `resumed=${resumed14p} live=${liveCount()} log=${logCount() - logBefore14p}/3`);
-
-  // 纯函数口径（两个时刻进、布尔出）：烟测直接喂时刻，不等真墙钟。
-  const expired14 = ui.playbackHoldExpired;
-  check("U-DMG-14o 兜底上限是纯函数（两个时刻进、布尔出）：未开始 / 差 1ms 不超时，到点超时",
-    expired14(0, 12345) === false
-      && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS - 1) === false
-      && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS) === true,
-    `MAX=${ui.PLAYBACK_HOLD_MAX_MS} POLL=${ui.PLAYBACK_HOLD_POLL_MS}`);
 
   /* ---- U-DMG-15：3 / 4 档**串行**、独占牌桌（票 08）----
    *
@@ -23610,6 +23573,33 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && logCount() === logBefore15 + 3,
     `maxLive=${maxLive15} playback=${ui.state.playback} live=${liveCount()} `
       + `log=${logCount() - logBefore15}/3`);
+
+  /* ---- U-DMG-16：暂停**没有上限**（票 09 / 用户 2026-11-10："把这个上限取消…不允许动画期间
+   * 进行任何事件"）----
+   *
+   * 墙钟可以注入（同一手法见 U-SFX-04c 的 `Date.now`）：把时钟推到远远超过"以前那 8 秒上限"的
+   * 地方——演出没收到，事件流就不许动。
+   */
+  const logBefore16 = logCount();
+  loadDamageBatch(
+    [hpChange(86, 1, 4, 3), hpChange(87, 2, 4, 3), hpChange(88, 3, 4, 3)],
+    [damageEvent(86, 0, 1, 3)],
+  );
+  const held16 = runUntil(() => holdMark() === "damage:3", 5);
+  const realDateNow16 = Date.now;
+  Date.now = () => realDateNow16() + 30000;   // 30s：老口径早在 8s 就放行了
+  try {
+    for (let index = 0; index < 6; index += 1) runEarliest();
+  } finally {
+    Date.now = realDateNow16;
+  }
+  check("U-DMG-16 墙钟推进 30s 后仍在冻着：index 不动、原因串还在、演出还在播（没有上限）",
+    held16 && playbackIndex() === 1 && liveCount() === 1 && holdMark() === "damage:3",
+    `held=${held16} index=${playbackIndex()} live=${liveCount()} hold="${holdMark()}"`);
+  const resumed16 = runUntil(() => ui.state.playback === null, 400);
+  check("U-DMG-16b 演出自然收完后才恢复：回放一次补齐、读数清空（不是靠计时器放行）",
+    resumed16 && liveCount() === 0 && holdMark() === "" && logCount() === logBefore16 + 3,
+    `resumed=${resumed16} live=${liveCount()} hold="${holdMark()}" log=${logCount() - logBefore16}/3`);
 
   /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
    *

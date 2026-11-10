@@ -1510,13 +1510,21 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     session = _strip_js_comments(_SESSION_JS.read_text(encoding="utf-8"))
     damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
 
-    # 两个口径常量：轮询间隔与兜底上限（缺一个都会让"永久不摘层 ⇒ 页面永久卡死"成立）。
     assert re.search(r"^const PLAYBACK_HOLD_POLL_MS = 120;$", session, re.M), (
         "暂停期间的轮询间隔必须是 120ms 的具名常量（与演出的错开 120ms 只是同值巧合）"
     )
-    assert re.search(r"^const PLAYBACK_HOLD_MAX_MS = 8000;$", session, re.M), (
-        "兜底上限必须是具名常量（写得比最长档 2.2s × 三条错开还宽）"
-    )
+    # 用户 2026-11-10（票 09）：**上限取消**——3 / 4 档在播期间不许"等够久就放行"，也不许在
+    # 暂停路径里读墙钟（墙钟 = 上限的实现方式，留个口子就会被重新加回来）。
+    for gone in (
+        "PLAYBACK_HOLD_MAX_MS", "playbackHoldExpired", "playbackHoldAbandoned",
+        "playbackHoldTimeouts", "playback_hold_timeout", "data-playback-hold-timeouts",
+        "playbackHoldStartedAt",
+    ):
+        assert gone not in session, f"暂停上限必须整体移除（票 09）：{gone}"
+    wake = _js_function(session, "stepPlaybackWhenFree")
+    for clock in ("stageNow", "Date.now", "performance.now"):
+        assert clock not in wake, f"没有上限就不该在暂停路径里读墙钟（票 09）：{clock}"
+    assert "console.warn" not in wake, "超时告警随上限一起删掉（票 09）"
 
     # 登记表：任何脚本都能登记一条只读判据；重名就地替换，取首条非空原因。
     register = _js_function(session, "registerPlaybackHold")
@@ -1530,13 +1538,6 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     )
     assert "playbackHoldProbes[name]();" in reason, "每次被问都重读判据（不缓存在排计时器那一刻）"
 
-    # 兜底上限是纯函数：烟测直接喂两个时刻，不等真实时钟。
-    expired = _js_function(session, "playbackHoldExpired")
-    assert "Date.now" not in expired and "stageNow" not in expired, (
-        "playbackHoldExpired 必须是纯函数（两个时刻进、布尔出）"
-    )
-    assert "PLAYBACK_HOLD_MAX_MS" in expired, "上限只读那个具名常量"
-
     # 唤醒体：先问判据再生效，暂停 / 超时 / 放空三条分支都在这一处。
     wake = _js_function(session, "stepPlaybackWhenFree")
     assert wake.index("playbackHoldReason()") < wake.index("stepPlayback(false)"), (
@@ -1545,18 +1546,9 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     assert "schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS)" in wake, (
         "仍要暂停 ⇒ 走**同一个**排程口再等一轮（不另抄一行 setTimeout）"
     )
-    assert "playbackHoldExpired(" in wake, "到兜底上限必须继续推进"
-    assert "playback_hold_timeout" in wake, (
-        "兜底触发要留一条可查的侧车日志（`playback_hold_timeout`）"
-    )
-    assert "playbackHoldTimeouts += 1" in wake, "兜底次数也要可读（实机 / 烟测）"
-    # 兜底是"**放弃等待**"，不是"清零重来"：判据永久为真时清零会让每条记录都停满 8 秒。
-    assert "playbackHoldAbandoned = true;" in wake, (
-        "兜底到点要置上放弃闩（之后判据再真也照常推进，直到判据放空）"
-    )
-    assert "!playbackHoldAbandoned" in wake, "放弃闩要先于上限判据被检查"
-    assert "playbackHoldAbandoned = false;" in _js_function(session, "resetPlaybackHold"), (
-        "判据放空时复位放弃闩（下一轮暂停重新开始计时）"
+    # 唤醒体只有两条分支：放行 / 继续等（票 09 删掉了第三条"到点放弃"）。
+    assert wake.count("stepPlayback(false)") == 1, (
+        "暂停分支不许自己推进记录：唯一放行点在判据为空那一支"
     )
     schedule = _js_function(session, "schedulePlaybackStep")
     assert "window.setTimeout(stepPlaybackWhenFree" in schedule, (
@@ -1568,10 +1560,7 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
     assert 'setAttribute("data-playback-hold"' in mark, (
         "排播侧把「为什么暂停」写进 `<html data-playback-hold>`（与 `?audiotest` 的 data-audio 同姿态）"
     )
-    assert 'setAttribute("data-playback-hold-timeouts"' in mark, (
-        "兜底次数也要落成 DOM 读数（§1：只有写、没有读的计数器等于没有）"
-    )
-    assert "playbackHoldTimeouts" in mark, "读数写的就是那个计数"
+    assert mark.count("setAttribute(") == 1, "暂停读数只有原因串一条（票 09 删掉了计数）"
     damage_mark = _js_function(damage_fx, "damageFxMark")
     assert 'setAttribute("data-damage-fx-hold"' in damage_mark, (
         "伤害侧在覆盖层上标「我在要求暂停」（实机 / 烟测一眼读）"

@@ -48,10 +48,9 @@
     "cardPreactivationManifest", "enterCardPreativation", "alternativeLabel",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
-    // damage-fx-natures 票 07：回放暂停——登记口（通用：以后 回复体力 3 档 / 其它演出同形）+
-    // 两个只读读数（原因串 / 兜底上限的纯函数）。烟测据此断"不是只有伤害能冻住回放"。
-    "registerPlaybackHold", "playbackHoldReason", "playbackHoldExpired",
-    "PLAYBACK_HOLD_POLL_MS", "PLAYBACK_HOLD_MAX_MS",
+    // damage-fx-natures 票 07 / 09：回放暂停——登记口（通用：以后 回复体力 3 档 / 其它演出同形）
+    // + 只读读数（原因串）与轮询间隔。烟测据此断"不是只有伤害能冻住回放"与"没有上限"。
+    "registerPlaybackHold", "playbackHoldReason", "PLAYBACK_HOLD_POLL_MS",
     // U3-01 / D5：舞台项寿命的纯函数——烟测直接喂 `now` 断 visible / fading / gone（D15）
     "stageLane",
     // U4-03 / D9：批量停留的纯函数（0.5×(N+1) 秒）——烟测直接喂 N（缺省按 1）。

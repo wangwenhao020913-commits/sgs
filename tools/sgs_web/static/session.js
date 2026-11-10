@@ -794,13 +794,6 @@ function delayOf(record, base = state.eventDelayMs) {
  */
 const PLAYBACK_HOLD_POLL_MS = 120;
 
-/** 暂停的兜底上限（毫秒）：比最长档（2.2s）× 三条错开叠加还宽。
- *
- * 演出若因 bug 永久不摘层，记录流不能跟着永久停住——到点无论判据如何都继续推进，并留一条
- * `playback_hold_timeout` 告警（`playbackHoldTimeouts` 同时记一次数，实机 / 烟测可读）。
- */
-const PLAYBACK_HOLD_MAX_MS = 8000;
-
 /** 回放暂停的**登记表**（票 07）：键 = 提供方名，值 = 只读判据 `() => 原因串`。
  *
  * 为什么是登记表、而不是在 `stepPlayback` 里直接问伤害层：3 / 4 档伤害只是**第一个**要冻住
@@ -808,21 +801,10 @@ const PLAYBACK_HOLD_MAX_MS = 8000;
  * 不认识任何具体演出：它不认档位号、不认家族、也**不读** `damagePlays`。
  *
  * 判据必须是**只读**的（被唤醒时会被反复调用），且只回答"现在该不该冻住记录流"：
- * 推进、清理、排播那些事归各演出自己。
+ * 推进、清理、排播那些事归各演出自己。**没有兜底上限**（票 09）：判据一直为真就一直等，
+ * 故判据只能看会自然清空的状态。
  */
 const playbackHoldProbes = {};
-
-/** 这一轮暂停从什么时候开始（`stageNow()`；0 = 现在没在暂停）。 */
-let playbackHoldStartedAt = 0;
-
-/** 兜底上限被触发的次数（正常永远是 0；写在 `<html data-playback-hold-timeouts>` 上，
- *  实机 / 烟测一眼读，用来发现"判据再也不放空"）。 */
-let playbackHoldTimeouts = 0;
-
-/** 这一轮暂停是不是已经**放弃等待**（兜底上限到点）：到过之后判据再真也照常推进，
- *  直到判据放空（`resetPlaybackHold` 复位）。否则永久为真的判据会变成"每条记录停 8 秒"，
- *  那还是卡死，只是卡得慢一点。 */
-let playbackHoldAbandoned = false;
 
 /** 登记一条「现在该暂停回放吗」的只读判据；同名就地替换（先登记者先命中）。 */
 function registerPlaybackHold(name, probe) {
@@ -851,14 +833,7 @@ function playbackHoldReason() {
   return "";
 }
 
-/** 暂停是否已到兜底上限（**纯函数**：两个时刻进、布尔出，烟测直接喂时刻不等时钟）。 */
-function playbackHoldExpired(startedAt, now) {
-  if (!startedAt) return false;
-  return now - startedAt >= PLAYBACK_HOLD_MAX_MS;
-}
-
-/** 把"回放暂停"的读数写进页面根：`data-playback-hold` = 原因串或空（现在为什么冻住）、
- *  `data-playback-hold-timeouts` = 兜底上限被触发过几次（正常 0）。
+/** 把"回放暂停"的读数写进页面根：`data-playback-hold` = 原因串或空（现在为什么冻住）。
  *
  * 与 `?audiotest=1` 的 `<html data-audio>` 同一姿态：实机 / 烟测一眼读，不必开 DevTools
  * 的作用域。**只写读数**，不驱动任何行为（判据才是行为落点）。
@@ -868,13 +843,10 @@ function markPlaybackHold(reason) {
   const root = document.documentElement;
   if (typeof root.setAttribute !== "function") return;
   root.setAttribute("data-playback-hold", reason || "");
-  root.setAttribute("data-playback-hold-timeouts", String(playbackHoldTimeouts));
 }
 
-/** 收掉暂停状态、兜底闩与读数（判据放空 / 冲刷 / 回放收尾）：下一次排程重新开始计时。 */
+/** 收掉暂停读数（判据放空 / 冲刷 / 回放收尾）。 */
 function resetPlaybackHold() {
-  playbackHoldStartedAt = 0;
-  playbackHoldAbandoned = false;
   markPlaybackHold("");
 }
 
@@ -892,9 +864,14 @@ function schedulePlaybackStep(base) {
 
 /** `schedulePlaybackStep` 的唤醒体：判据为空就继续推进，否则再排一次轮询。
  *
- * 兜底（票面 §3）走"**放弃等待**"而不是"清零重来"：判据若因 bug 永久为真，清零会让每条
- * 记录都停满 `PLAYBACK_HOLD_MAX_MS`（8s/条），那还是卡死、只是卡得慢。放弃之后照常推进，
- * 直到判据放空（`resetPlaybackHold` 复位，见下一条）。
+ * **没有上限、也不读墙钟**（用户 2026-11-10 的裁定："把这个上限取消，3 档、4+ 档伤害时动画
+ * 暂停，不允许动画期间进行任何事件"）：判据为真就一直每 `PLAYBACK_HOLD_POLL_MS` 重问一次，
+ * 直到它自然放空。
+ *
+ * 安全性靠判据自身：它只读两张**会自然清空**的表——`damagePlays`（到点摘层 / 版式作废 /
+ * 换局清场都摘）与 `damageQueue`（入队处有 cap、`clearDamageFx` 清空），没有任何"等够久
+ * 就放行"的时钟分支。代价是判据若因 bug 永久为真，事件流会一直停——这是用户明确选的取舍
+ * （宁可不放行，也不许动画期间插事件）。
  */
 function stepPlaybackWhenFree() {
   playbackTimer = null;
@@ -904,26 +881,8 @@ function stepPlaybackWhenFree() {
     stepPlayback(false);
     return;
   }
-  if (!playbackHoldAbandoned) {
-    const now = stageNow();
-    if (!playbackHoldStartedAt) playbackHoldStartedAt = now;
-    if (!playbackHoldExpired(playbackHoldStartedAt, now)) {
-      markPlaybackHold(reason);
-      schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS);
-      return;
-    }
-    playbackHoldAbandoned = true;
-    playbackHoldStartedAt = 0;
-    playbackHoldTimeouts += 1;
-    if (typeof console !== "undefined" && console.warn) {
-      console.warn(
-        `[playback-hold] playback_hold_timeout：判据 ${reason} 已挂 ${PLAYBACK_HOLD_MAX_MS}ms，`
-          + "放弃等待、继续推进（判据放空前不再挂起）",
-      );
-    }
-  }
-  markPlaybackHold("");
-  stepPlayback(false);
+  markPlaybackHold(reason);
+  schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS);
 }
 
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
