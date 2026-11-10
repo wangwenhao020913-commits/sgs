@@ -1925,6 +1925,11 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const calls = [];
+/* 画字的**实际位置**：`drawNumber` 是 translate 到字心再 fillText(0,0)，故要跟一下原点
+ * （`save` / `restore` 成栈；`scale` / `rotate` 不改原点）。R3 的验收要靠它把
+ * "分析出来的包围盒"与"真的画到哪"对上。 */
+let origin = { x: 0, y: 0 };
+const originStack = [];
 const gradient = { addColorStop() {} };
 /* 属性要**真的**记下来：`effects.js` 的牌桌档靠"有没有全屏不透明填充"判，
  * 而那是 `fillStyle` / `globalCompositeOperation` 决定的（方法调用看不出来）。 */
@@ -1934,8 +1939,14 @@ const ctx = new Proxy({}, {
     if (prop in props) return props[prop];
     if (prop === "measureText") return () => ({ width: 10 });
     if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+    if (prop === "save") return () => { originStack.push({ ...origin }); };
+    if (prop === "restore") return () => { origin = originStack.pop() || { x: 0, y: 0 }; };
+    if (prop === "setTransform") return () => { origin = { x: 0, y: 0 }; };
+    if (prop === "translate") {
+      return (x, y) => { origin.x += Number(x) || 0; origin.y += Number(y) || 0; };
+    }
     if (prop === "fillText" || prop === "strokeText") {
-      return (text) => calls.push({ op: prop, text, font: props.font });
+      return (text) => calls.push({ op: prop, text, font: props.font, x: origin.x, y: origin.y });
     }
     if (prop === "drawImage") {
       return (image, ...args) => calls.push({ op: "drawImage", w: image && image.width, args });
@@ -2008,6 +2019,19 @@ const report = vm.runInContext(`(() => {
     stage: { src: { cx: 400, cy: 500, w: 630, h: 600 }, dst: { cx: 1400, cy: 500, w: 630, h: 600 } },
     bare: true, view: { width: 1920, height: 1080 },
   }, 0.80);
+  // 牌高的扫掠（R3 的两条不变式必须在任何牌高下都成立，不只是真机那一档）：
+  const sweep = [];
+  for (const h of [60, 87, 105, 150, 240, 400, 644]) {
+    const w = Math.round(h * 0.75);
+    sweep.push({
+      h,
+      metrics: SgsDamageFX.create(document.createElement("canvas"), {
+        variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+        view: { width: 800, height: 700 },
+        stage: { src: { cx: 200, cy: 350, w, h }, dst: { cx: 600, cy: 350, w, h } },
+      }).metrics,
+    });
+  }
   // 牌桌：座位矩形 + 服务端的真实伤害值（7 点仍按 4 档演）
   const tuned = draw({
     variant: 4, profile: "game", timing: timing4, amount: 7, dpr: 1, stage,
@@ -2025,6 +2049,11 @@ const report = vm.runInContext(`(() => {
       (call) => call.op === "fillText" && call.text === text && /\\d+px/.test(String(call.font)));
     if (!hit.length) return null;
     return Number(/(\\d+(?:\\.\\d+)?)px/.exec(String(hit[hit.length - 1].font))[1]);
+  };
+  /** 画到画布上的最后一笔某个文案的位置（字心）。 */
+  const drawnAt = (calls, text) => {
+    const hit = calls.filter((call) => call.op === "fillText" && call.text === text);
+    return hit.length ? { x: hit[hit.length - 1].x, y: hit[hit.length - 1].y } : null;
   };
   const fallback = SgsDamageFX.create(document.createElement("canvas"), { variant: 2, dpr: 1 });
   const degenerate = SgsDamageFX.create(document.createElement("canvas"), {
@@ -2056,8 +2085,11 @@ const report = vm.runInContext(`(() => {
       stage: screen.fx.stage, metrics: screen.fx.metrics, bare: screen.fx.bare,
       numberOffset: screen.fx.numberOffset, duration: screen.fx.duration,
       numberFont: numberFont(screen.calls, "-1"),
+      numberDraw: drawnAt(screen.calls, "-1"),
+      cardTop: screen.fx.stage.dst.cy - screen.fx.stage.dst.h / 2,
       floor: SgsDamageFX.COMPOSITION_FLOOR, screenMin: SgsDamageFX.SCREEN_MIN,
     },
+    sweep: sweep,
     big: { stage: big.fx.stage, metrics: big.fx.metrics, floor: SgsDamageFX.COMPOSITION_FLOOR },
     fallback: { number: fallback.number, bare: fallback.bare, numberOffset: fallback.numberOffset },
     degenerate: degenerate.stage,
@@ -2252,10 +2284,44 @@ def test_the_table_profile_renders_at_target_size_with_legible_sizes(
         f"画到画布上的字号 = numSize：{screen['numberFont']} vs {metrics['number'] / 0.7}"
     )
 
-    # 5) 飘字从牌心略下起飘：真实武将块的上沿是体力条，压上去看不清
-    offset = screen["numberOffset"]
-    assert offset["dy"] <= 0, f"牌桌档从牌心或其下方起飘：{offset}"
-    assert offset["dy"] - offset["rise"] > -0.15, f"上浮到顶也不许越过牌心 15%：{offset}"
+    # 5) R3：飘字的**包围盒**整体落在头部带（牌高 25%）以下，且字高 ≤ 牌高 35%
+    card = screen["metrics"]["card"]
+    box = screen["metrics"]["numberBox"]
+    header_bottom = 0.25 * card["h"]
+    assert box["top"] >= header_bottom - 1e-6, (
+        f"飘字包围盒必须整体在头部带（含体力条）以下：top={box['top']:.2f} "
+        f"< 头部带下沿 {header_bottom:.2f}（牌高 {card['h']}）"
+    )
+    assert box["bottom"] <= card["h"], f"包围盒不许溢出牌底：{box}"
+    assert box["height"] <= 0.35 * card["h"] + 1e-6, (
+        f"字高 ≤ 牌高 35%：{box['height']:.2f} > {0.35 * card['h']:.2f}（牌高 {card['h']}）"
+    )
+    assert box["height"] >= 40 - 1e-6, f"真机这一档字高仍 ≥ 40 CSS px：{box['height']}"
+
+    # 5b) 分析出来的包围盒必须与**真的画到哪**对得上（否则判据是自说自话）
+    drawn = screen["numberDraw"]
+    assert drawn is not None, "牌桌档必须真的把飘字画出来"
+    assert screen["cardTop"] + box["top"] - 1e-6 <= drawn["y"] <= screen["cardTop"] + box["bottom"] + 1e-6, (
+        f"画出来的字心 {drawn['y']:.1f} 必须落在包围盒里 "
+        f"[{screen['cardTop'] + box['top']:.1f}, {screen['cardTop'] + box['bottom']:.1f}]"
+    )
+
+    # 5c) 牌高扫掠：两条不变式在任何牌高下都成立（上限在小牌上优先于 40px 下限，
+    #     否则小牌块上必然二选一：这是 R3 明确的口径，写在 `create` 的注释里）
+    for entry in probe["sweep"]:
+        card_h = entry["h"]
+        box = entry["metrics"]["numberBox"]
+        assert box["top"] >= 0.25 * card_h - 1e-6, (
+            f"牌高 {card_h}：包围盒顶 {box['top']:.2f} 越过了头部带下沿 {0.25 * card_h:.2f}"
+        )
+        assert box["bottom"] <= card_h + 1e-6, f"牌高 {card_h}：包围盒溢出牌底 {box}"
+        assert box["height"] <= 0.35 * card_h + 1e-6, (
+            f"牌高 {card_h}：字高 {box['height']:.2f} > 35% 上限 {0.35 * card_h:.2f}"
+        )
+        floor = 40 if 40 <= 0.35 * card_h else 0.35 * card_h
+        assert box["height"] >= floor - 1e-6, (
+            f"牌高 {card_h}：字高 {box['height']:.2f} 低于可用下限 {floor:.2f}"
+        )
 
     # 6) 大牌桌（1920 宽、630×600 的武将块）：构图跟着牌走，不受下限牵动
     assert probe["big"]["stage"]["u"] == pytest.approx(min(630 / 460, 600 / 644))

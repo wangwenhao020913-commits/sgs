@@ -294,18 +294,29 @@
    * 不许小于"这三样一眼看得见"所需的比值（验收下限 4 / 40 CSS px，这里各留 ~20% 余量）：
    * 刀痕墨身 ≈ 0.94 × scarW、飘字字高 ≈ 0.7 × numSize、剑光主体 ≈ 2.1 × swordW。
    * 三个"参考值"取**最细的一档**（1 点），四档里它就是下限。 */
+  /* 牌桌档飘字的四条口径（票 05 R2 / R3，全部以**尺寸**为单位，不拍脑袋写比例）：
+   * - `GLYPH_RATIO`：数字的字形高度 ≈ 0.7 em（衬线体的数字高）。
+   * - `NUMBER_HEADER_RATIO`：中剑牌**头部带**（势力印 + 将名 + 体力条）占牌高的 25%；
+   *   飘字的**包围盒**必须整体落在它下面（R2 用"离上沿 ≥8% 牌高"当代理判据，实测不够）。
+   * - `NUMBER_MAX_RATIO`：字高不超过牌高的 35%（R2 在真机上占到了 45%，压住体力读数）。
+   * - `NUMBER_RISE_RATIO`：上浮距离 = 牌高的 10%；`NUMBER_GAP_RATIO`：包围盒与头部带之间
+   *   留的余量；`NUMBER_BELOW_MIN`：起飘点至少压在牌心下方这么多（不让数字飘进上半区）。
+   * 位置由这几条**反推**（见 `create`），不用固定的 dy / rise 比例。
+   * 素材库那份（`NUMBER_OFFSET`）一个数都不动。 */
+  var GLYPH_RATIO = 0.7;
+  var NUMBER_HEADER_RATIO = 0.25;
+  var NUMBER_MAX_RATIO = 0.35;
+  var NUMBER_RISE_RATIO = 0.10;
+  var NUMBER_GAP_RATIO = 0.02;
+  var NUMBER_BELOW_MIN = 0.02;
+
   var SCREEN_MIN = { scar: 5, number: 44, sword: 6 };
   var REF_SCAR_W = 14, REF_NUM_SIZE = 150, REF_SWORD_W = 10;
   var COMPOSITION_FLOOR = Math.max(
     SCREEN_MIN.scar / (0.94 * REF_SCAR_W),      // 0.38
-    SCREEN_MIN.number / (0.7 * REF_NUM_SIZE),   // 0.42
+    SCREEN_MIN.number / (GLYPH_RATIO * REF_NUM_SIZE),   // 0.42
     SCREEN_MIN.sword / (2.1 * REF_SWORD_W)      // 0.29
   );
-
-  /* 飘字相对中剑牌的位置，**牌桌档一份**（票 05 R2）：真实武将块的上沿就是势力印 +
-   * 将名 + 体力条，按素材库那份往上飘会压在体力条上。故从牌心略下起飘、上浮也短一点，
-   * 全程避开体力条。素材库那份（`NUMBER_OFFSET`）一个数都不动。 */
-  var NUMBER_OFFSET_SCREEN = { dx: 10 / CARD_W, dy: -0.02, rise: 0.10 };
 
   /* 一个座位矩形：缺字段 / 非法值退回参考舞台的对应值（`anim.ini` 删一行不该让页面报错，
    * 覆盖层量不到布局时同理）。w / h 必须为正——0 宽会把构图比例算成 0。 */
@@ -1019,8 +1030,31 @@
     // 局部 `W` / `H` = 本实例的目标画布尺寸，遮蔽模块级的参考舞台（`viewSize` 在模块作用域
     // 里读真值，故缺省仍是 1920×1080）。
     var W = size.w, H = size.h;
-    // 飘字位置：牌桌档避开体力条（见 `NUMBER_OFFSET_SCREEN`），素材库档照旧。
-    var numberOffset = bare ? NUMBER_OFFSET_SCREEN : NUMBER_OFFSET;
+    // 票 05 R3：牌桌档的飘字——**字号两头夹 + 位置由包围盒判据反推**。
+    //   字高 ∈ [SCREEN_MIN.number, 35% × 牌高]（真机上牌高小的时候上限优先：宁可小，
+    //   也不能压住体力条；`clamp` 在上限小于下限时返回上限）；
+    //   位置：上浮到顶那一刻，包围盒的顶边正好落在"头部带下沿 + 余量"上——
+    //   于是**任意时刻**的包围盒都整体在牌高 25% 以下（含上浮抖动）。
+    var numberOffset = NUMBER_OFFSET;
+    var numberGlyph = variant.numSize * GLYPH_RATIO;
+    if (bare) {
+      var cardH = Number(S.dst.h) || CARD_H;
+      numberGlyph = clamp(numberGlyph, SCREEN_MIN.number, NUMBER_MAX_RATIO * cardH);
+      variant = copy(variant, { numSize: numberGlyph / GLYPH_RATIO });
+      var belowCenter = Math.max(
+        NUMBER_BELOW_MIN,
+        NUMBER_RISE_RATIO - NUMBER_HEADER_RATIO + numberGlyph / (2 * cardH) + NUMBER_GAP_RATIO
+      );
+      numberOffset = { dx: NUMBER_OFFSET.dx, dy: -belowCenter, rise: NUMBER_RISE_RATIO };
+    }
+    // 飘字包围盒（相对中剑牌左上角，CSS px）：取 `rise = 1` 的**最坏情形**（最靠上的那一刻）。
+    var cardTop = S.dst.cy - S.dst.h / 2;
+    var numberCenterY = S.dst.cy - S.dst.h * numberOffset.dy - S.dst.h * numberOffset.rise;
+    var numberBox = {
+      top: numberCenterY - numberGlyph / 2 - cardTop,
+      bottom: numberCenterY + numberGlyph / 2 - cardTop,
+      height: numberGlyph,
+    };
     var seed = 1700 + vId * 977;
     var dpr = opts.dpr || 1;
 
@@ -1314,8 +1348,11 @@
       metrics: {
         u: S.u,
         scar: variant.scarW * 0.94,
-        number: variant.numSize * 0.7,
+        number: numberGlyph,
         sword: variant.swordW * 2.1,
+        // 中剑牌的尺寸与飘字的包围盒（相对牌左上角）——R3 的验收判据直接读这两个。
+        card: { w: S.dst.w, h: S.dst.h },
+        numberBox: numberBox,
       },
       numberOffset: numberOffset
     };
