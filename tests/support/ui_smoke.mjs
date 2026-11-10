@@ -84,6 +84,9 @@ let rectSeq = 0;
 /* damage-fx 票 05：武将块的垫片矩形默认按座位固定派生（跨重绘稳定）；用例改这个数就能
  * 模拟"版式变了"，验证演出不会演在半空（U-DMG-04）。 */
 let heroBlockShift = 0;
+/* damage-fx 票 05 评审修复：按**座位**挪动武将块（`heroBlockShift` 是整排挪）。
+ * 用来验证"只有来源座位挪了"也算版式作废（剑光从旧坐标起飞）。 */
+const heroBlockSeatShift = new Map();
 const rectOfBox = (left, top, width, height) => ({
   left, top, width, height, right: left + width, bottom: top + height, x: left, y: top,
 });
@@ -132,7 +135,8 @@ const shimRect = (node) => {
     if (seatNo !== null && Number.isFinite(seatNo)) {
       // damage-fx 票 05：`heroBlockShift` 让用例挪动整排武将块，模拟"版式变了"
       // （窗口缩放 / 座位重排）。默认 0 ⇒ 跨重绘稳定，正常重绘不打断在播的演出。
-      return rectOfBox(84 + seatNo * 180 + heroBlockShift, 76, 104, 40);
+      return rectOfBox(
+        84 + seatNo * 180 + heroBlockShift + (heroBlockSeatShift.get(seatNo) || 0), 76, 104, 40);
     }
   }
   // damage-fx 票 05 R4：体力条在武将块的头部带**下面**（真 DOM 由 CSS 决定；这里给一块
@@ -22824,6 +22828,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     kind: "delta", delta_type: "hp_change", seq, frame_id: 3, depth: 1,
     seat, before, after, amount: after - before,
   });
+  /* `nature` 缺省写 `"NORMAL"`（与服务端一般情况一致）；**显式传 `null`** 表示"牌面没声明
+   * 无属性"（`game.py` / `projection.py` / `active.py` 三层同一句话：`None` ≡ 无属性）——
+   * 那一格由 U-DMG-02c 单独钉，别让默认值盖住它。 */
   const damageEvent = (seq, source, target, amount, nature = "NORMAL") => ({
     seq, source, target, amount, nature,
   });
@@ -22900,6 +22907,16 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       `pending=${(ui.state.damageEvents || []).length}`);
   }
 
+  // ---- U-DMG-02c：`nature: null`（牌面没声明属性）**视同无属性**，必须播 ----
+  // 三层文档同一句话：`None` ≡ 无属性（【驱虎】拼点那 1 点就是这么下发的）。
+  const before02c = playCount();
+  loadDamageBatch([hpChange(18, 1, 4, 3)], [damageEvent(18, 0, 1, 1, null)]);
+  step();
+  check("U-DMG-02c `nature: null` 视同无属性：照常开演（【驱虎】那 1 点的入口）",
+    liveCount() === 1 && playCount() === before02c + 1,
+    `live=${liveCount()} plays=${playCount() - before02c}`);
+  runUntil(() => liveCount() === 0);
+
   // ---- U-DMG-03：同批两条伤害 → 两次播放、错开 120ms、互不踩，仍在播上限之内 ----
   const before03 = playCount();
   const delays03 = new Set(timerDelays.values());
@@ -22966,6 +22983,26 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `children=${layer().children.length} live=${liveCount()} timers=${pendingTimers.size} `
       + `drained=${drained}`);
 
+  // ---- U-DMG-04d：**只有来源座位**挪了也算版式作废（剑光从旧坐标起飞就是错的）----
+  const before04d = playCount();
+  loadDamageBatch([hpChange(19, 1, 4, 3)], [damageEvent(19, 3, 1, 1)]);
+  step();
+  const started04d = liveCount() === 1 && playCount() === before04d + 1;
+  // 控制组：挪一张**与这次演出无关**的座位 ⇒ 不该打断
+  heroBlockSeatShift.set(2, 40);
+  ui.renderTable();
+  const unrelated = liveCount() === 1;
+  heroBlockSeatShift.delete(2);
+  // 挪来源座位（3）⇒ 中剑方矩形没变，但剑光的起点已经不对了
+  heroBlockSeatShift.set(3, 60);
+  ui.renderTable();
+  check("U-DMG-04d 只挪来源座位也算版式作废（中剑方矩形没变也必须摘）",
+    started04d && unrelated && liveCount() === 0 && layerCanvases().length === 0,
+    `started=${started04d} unrelatedKept=${unrelated} live=${liveCount()} `
+      + `canvases=${layerCanvases().length}`);
+  heroBlockSeatShift.clear();
+  drainTimers();
+
   // ---- 换局清空：在播的演出与还没到 seq 的队列都不属于新局 ----
   loadDamageBatch([hpChange(10, 2, 4, 2)], [damageEvent(11, 0, 2, 2)]);
   step();
@@ -22986,9 +23023,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const before06 = playCount();
   loadDamageBatch([hpChange(13, 3, 4, 3)], [damageEvent(13, null, 3, 1)]);
   step();
-  check("U-DMG-06 无来源伤害照常演（剑光从画面外进场，不猜来源）",
-    liveCount() === 1 && playCount() === before06 + 1,
-    `live=${liveCount()} plays=${playCount() - before06}`);
+  const offstageX = Number(attr(layer(), "data-damage-fx-sword-x"));
+  check("U-DMG-06 无来源伤害照常演，且剑光**起点在画面外**（`sword-x < 0`，不猜来源）",
+    liveCount() === 1 && playCount() === before06 + 1
+      && Number.isFinite(offstageX) && offstageX < 0,
+    `live=${liveCount()} plays=${playCount() - before06} swordX=${attr(layer(), "data-damage-fx-sword-x")}`);
   runUntil(() => liveCount() === 0);
 
   // ---- U-DMG-07：3 点档的黑白屏闪挂在**表壳**上（canvas 的 saturation 管不到下层 DOM）----
@@ -23192,9 +23231,19 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && attr(documentShim.documentElement, "data-audio") === "unavailable",
     `audiotest=${audiotest} data-audio=${attr(documentShim.documentElement, "data-audio")}`);
 
+  // ---- 对照组：有来源时航线起点在画面内（> 0），与 U-DMG-06 的 off-stage 形成对照 ----
+  loadDamageBatch([hpChange(20, 1, 4, 3)], [damageEvent(20, 2, 1, 1)]);
+  step();
+  const onstageX = Number(attr(layer(), "data-damage-fx-sword-x"));
+  check("U-DMG-06b 有来源时航线起点在画面内（`sword-x > 0`）",
+    liveCount() === 1 && Number.isFinite(onstageX) && onstageX > 0,
+    `swordX=${attr(layer(), "data-damage-fx-sword-x")}`);
+  drainTimers();
+
   // 收尾：把这一块留下的状态清干净，不影响后面的用例。
   shell.style.filter = "";
   heroBlockShift = 0;
+  heroBlockSeatShift.clear();
   ui.state.view = null;
   ui.state.sessionId = null;
   ui.state.damageEvents = [];

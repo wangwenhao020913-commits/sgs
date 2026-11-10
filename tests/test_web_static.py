@@ -887,6 +887,14 @@ const report = await vm.runInContext(
          4: damageFxTiming(4),
          resolvedFromEffects: fx.gameTiming(4, damageFxTiming(4)).timeline.DURATION,
        },
+       // 评审修复：null / 缺字段 = 无属性（三层文档同一句话），只有 FIRE / THUNDER 不播。
+       naturePlayable: {
+         null: damageFxNaturePlayable(null),
+         undefined: damageFxNaturePlayable(undefined),
+         NORMAL: damageFxNaturePlayable("NORMAL"),
+         FIRE: damageFxNaturePlayable("FIRE"),
+         THUNDER: damageFxNaturePlayable("THUNDER"),
+       },
      });
    })()`,
   context,
@@ -2022,6 +2030,26 @@ const report = vm.runInContext(`(() => {
     stage: { src: { cx: 400, cy: 500, w: 630, h: 600 }, dst: { cx: 1400, cy: 500, w: 630, h: 600 } },
     bare: true, view: { width: 1920, height: 1080 },
   }, 0.80);
+  // 评审修复：无来源（source == null）的"从画面外飞入"形状——覆盖层把来源矩形整块挪到
+  // 画面左外（cx = -dst.w / 2 - 200，与 effects.js:damageFxPlanFor 同形）。这里读解出来的
+  // 航线起点 stage.a.x，看它是不是真的在画面外。
+  const view660 = { width: 660, height: 371 };
+  const onscreen = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+    view: view660, stage: screenStage,
+  }, 0.80);
+  const offstage = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+    view: view660,
+    stage: {
+      src: {
+        cx: -screenStage.dst.w / 2 - 200, cy: screenStage.dst.cy,
+        w: screenStage.dst.w, h: screenStage.dst.h,
+      },
+      dst: screenStage.dst,
+    },
+  }, 0.80);
+
   // 牌高的扫掠（R3 的两条不变式必须在任何牌高下都成立，不只是真机那一档）：
   const sweep = [];
   for (const h of [60, 87, 105, 150, 240, 400, 644]) {
@@ -2098,6 +2126,8 @@ const report = vm.runInContext(`(() => {
       floor: SgsDamageFX.COMPOSITION_FLOOR, screenMin: SgsDamageFX.SCREEN_MIN,
     },
     sweep: sweep,
+    onscreen: { stage: onscreen.fx.stage },
+    offstage: { stage: offstage.fx.stage },
     big: { stage: big.fx.stage, metrics: big.fx.metrics, floor: SgsDamageFX.COMPOSITION_FLOOR },
     fallback: { number: fallback.number, bare: fallback.bare, numberOffset: fallback.numberOffset },
     degenerate: degenerate.stage,
@@ -2565,3 +2595,47 @@ def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_fil
     assert not found, (
         f"音效全部现场合成，仓库里不得出现音频文件（票面 §音效以后怎么改）：{[str(p) for p in found[:5]]}"
     )
+
+
+def test_the_damage_nature_check_treats_null_as_normal(damage_fx_probe: dict) -> None:
+    """评审修复：`nature: null` ≡ 无属性 ⇒ 必须播；只有 `FIRE` / `THUNDER` 跳过。
+
+    三层文档同一句话：`game.py:note_damage`「`None` = 牌面没声明，等同无属性」、
+    `projection.py:damage_events_after`「缺声明保持 `None`，与"无属性"同义」、
+    `active.py:_quhu_burn`「无渠道牌、无属性」显式写 `"nature": None`。
+
+    早先的 `event.nature !== DAMAGE_FX_NATURE` 把 `null` 当成"火焰 / 雷电"一起丢了——
+    【驱虎】拼点那 1 点无属性伤害永远不演剑光。这里读的是**真 `effects.js` 的判定函数**
+    （探针按页面顺序加载 `anim.js` + `fx-core.js` + `effects.js`），不是另抄一份。
+    """
+    playable = damage_fx_probe["naturePlayable"]
+    assert playable["null"] is True, f"`null` 必须视同无属性（会播）：{playable}"
+    assert playable["undefined"] is True, f"缺字段同样是无属性：{playable}"
+    assert playable["NORMAL"] is True, f"显式 NORMAL 照旧播：{playable}"
+    assert playable["FIRE"] is False, f"火焰不播（本 effort 不接）：{playable}"
+    assert playable["THUNDER"] is False, f"雷电不播（本 effort 不接）：{playable}"
+
+
+def test_the_damage_fx_offstage_sword_path_starts_outside_the_screen(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """评审修复：`source == null` 的"从画面外飞入"补**几何断言**（不只有代码路径）。
+
+    覆盖层在无来源时把来源矩形整块挪到画面左外（`cx = -dst.w / 2 - 200`，与
+    `effects.js:damageFxPlanFor` 同形），fx-core 解出的航线起点 `stage.a.x` 必须 < 0；
+    有来源时起点在画面内。烟测 `U-DMG-06` / `U-DMG-06b` 从**真实产出路径**读
+    `#t-damage-fx` 的 `data-damage-fx-sword-x` 钉同一件事。
+    """
+    probe = damage_fx_stage_probe
+    offstage = probe["offstage"]
+    onstage = probe["onscreen"]
+    assert offstage["stage"]["a"]["x"] < 0, (
+        f"无来源 ⇒ 航线起点在画面外：a.x = {offstage['stage']['a']['x']}"
+    )
+    assert offstage["stage"]["src"]["cx"] < 0, (
+        f"来源块的矩形整块在画面外：src.cx = {offstage['stage']['src']['cx']}"
+    )
+    assert onstage["stage"]["a"]["x"] > 0, (
+        f"有来源 ⇒ 起点在画面内：a.x = {onstage['stage']['a']['x']}"
+    )
+    assert onstage["stage"]["a"]["x"] > offstage["stage"]["a"]["x"], "两者必须真的不同"

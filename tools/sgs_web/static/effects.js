@@ -585,8 +585,23 @@ function damageFxTiming(variant) {
 const DAMAGE_FX_STAGGER_MS = 120;
 const DAMAGE_FX_CONCURRENCY = 3;
 
-/** 只挂**无属性**伤害：`nature !== "NORMAL"` 一律不播（火焰 / 雷电留给将来的 effort）。 */
+/** 唯一会播的属性名。 */
 const DAMAGE_FX_NATURE = "NORMAL";
+
+/** 这一条伤害该不该演剑光：**只挂无属性**，`FIRE` / `THUNDER` 一律不播（留给将来的 effort）。
+ *
+ * **`null` / 缺字段 = 无属性**，三层文档同一句话：
+ * - `game.py:note_damage`：「`None` = 牌面没声明，**等同无属性**」；
+ * - `projection.py:damage_events_after`：「缺声明（拼点类帧）保持 `None`，与"无属性"同义」；
+ * - `active.py:_quhu_burn`：「造成 1 点伤害（无渠道牌、无属性）」并显式写 `"nature": None`。
+ *
+ * 评审修复：早先这里是 `event.nature !== DAMAGE_FX_NATURE` 就丢，`null !== "NORMAL"` 于是把
+ * 【驱虎】拼点那 1 点**无属性**伤害一起丢了——那正是本功能最常见的入口之一。
+ */
+function damageFxNaturePlayable(nature) {
+  if (nature === null || nature === undefined) return true;
+  return nature === DAMAGE_FX_NATURE;
+}
 
 /** 档位封顶：`amount ≥ 5` 按 4 档演——档位只决定强度，数字照旧是服务端给的真实值。 */
 const DAMAGE_FX_MAX_VARIANT = 4;
@@ -709,11 +724,15 @@ function damageFxPlanFor(event) {
   if (!(dst.w > 0) || !(dst.h > 0)) return null;
   const source = event.source === null || event.source === undefined ? null : Number(event.source);
   let src = null;
+  let srcSeat = null;   // **量到了**来源武将块的座位号；null = 无来源 / 量不到（画面外进场）
   if (source !== null && Number.isFinite(source)) {
     const srcBlock = heroBlockFor(source);
     if (srcBlock) {
       const box = damageFxBoxOf(srcBlock, layerRect);
-      if (box.w > 0 && box.h > 0) src = box;
+      if (box.w > 0 && box.h > 0) {
+        src = box;
+        srcSeat = source;
+      }
     }
   }
   if (!src) {
@@ -729,10 +748,13 @@ function damageFxPlanFor(event) {
   const damage = Number.isFinite(amount) && amount > 0 ? amount : 1;
   const variant = Math.max(1, Math.min(DAMAGE_FX_MAX_VARIANT, damage));
   return {
-    src, dst, variant, amount: damage, key: damageFxBoxKey(dst),
+    src, dst, variant, amount: damage,
+    // 版式作废判据要重量的**两张牌**（`damageDropStalePlays` 读它）：`src` 为 null =
+    // 无来源 / 画面外进场——那块坐标是按中剑方矩组合成的，与版式无关，故只比中剑方。
+    keys: { dst: damageFxBoxKey(dst), src: srcSeat !== null ? damageFxBoxKey(src) : null },
+    sourceSeat: srcSeat,
     // 飘字的硬线：中剑方体力条的下沿（相对武将块左上角；量不到是 null）。
     keepOut: damageFxNumberKeepOut(dstBlock, target),
-    // 版式作废判据要重量的那一张牌（`damageDropStalePlays` 读它）。
     targetSeat: target,
   };
 }
@@ -784,6 +806,10 @@ function damageFxMark(layer, play = null) {
     "data-damage-fx-keep-out",
     metrics.keepOut === null || metrics.keepOut === undefined ? "" : metrics.keepOut.toFixed(1),
   );
+  // 剑光航线的**起点 x**（相对覆盖层左沿、CSS px）：`source == null` 时整块在画面外，
+  // 故 x < 0 —— "从画面外飞入"因此有了几何读法，不再只有代码路径。
+  const stage = play && play.fx ? play.fx.stage : null;
+  if (stage && stage.a) layer.setAttribute("data-damage-fx-sword-x", stage.a.x.toFixed(1));
 }
 
 /** 表壳的灰阶滤镜：非空集合 ⇒ 挂上（3 / 4 点档的"整屏转黑白"，票 05 R2）。
@@ -1035,7 +1061,8 @@ function fireDamageEventsThrough(seq = Infinity) {
   state.damageEvents = kept;
   let queued = 0;
   for (const event of due) {
-    if (!event || event.nature !== DAMAGE_FX_NATURE) continue;   // 火焰 / 雷电：不播
+    // `null` / 缺字段 = 无属性（视同 NORMAL）；只有 FIRE / THUNDER 显式跳过。
+    if (!event || !damageFxNaturePlayable(event.nature)) continue;
     damageQueue.push(event);
     queued += 1;
   }
@@ -1057,9 +1084,17 @@ function damageDropStalePlays() {
   }
   const layerRect = rectOf(layer);
   const stale = damagePlays.filter((play) => {
-    const block = heroBlockFor(play.plan && play.plan.targetSeat);
-    if (!block) return true;
-    return damageFxBoxKey(damageFxBoxOf(block, layerRect)) !== play.plan.key;
+    const plan = play.plan;
+    if (!plan || !plan.keys) return true;
+    const dstBlock = heroBlockFor(plan.targetSeat);
+    if (!dstBlock) return true;
+    if (damageFxBoxKey(damageFxBoxOf(dstBlock, layerRect)) !== plan.keys.dst) return true;
+    // 评审修复：**来源**座位挪了同样是版式作废——剑光是从出剑方那张牌起飞的，
+    // 只比中剑方会让它从旧坐标出发。无来源（画面外进场）没有源矩形，只比中剑方。
+    if (plan.keys.src === null) return false;
+    const srcBlock = heroBlockFor(plan.sourceSeat);
+    if (!srcBlock) return true;
+    return damageFxBoxKey(damageFxBoxOf(srcBlock, layerRect)) !== plan.keys.src;
   });
   for (const play of stale) finishDamagePlay(play);
 }
