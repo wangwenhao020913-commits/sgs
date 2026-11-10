@@ -23575,6 +23575,42 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS) === true,
     `MAX=${ui.PLAYBACK_HOLD_MAX_MS} POLL=${ui.PLAYBACK_HOLD_POLL_MS}`);
 
+  /* ---- U-DMG-15：3 / 4 档**串行**、独占牌桌（票 08）----
+   *
+   * 用户 2026-11-10 实机验收票 07 后的原话："我确实看到了从我的座位开始，每 120ms 就进行下一个
+   * 演出。但是我的想法是，我的演出彻底结束后（4 档 2000ms）才继续下一个事件，期间都是暂停的"。
+   * 轻演出（1 / 2 档）的 120ms 错开由 `U-DMG-03*` 继续钉着——串行只给 3 / 4 档。
+   */
+  const before15 = playCount();
+  const logBefore15 = logCount();
+  loadDamageBatch(
+    [hpChange(95, 1, 4, 3), hpChange(96, 2, 4, 3), hpChange(97, 3, 4, 3)],
+    [damageEvent(95, 0, 1, 3, "THUNDER"), damageEvent(95, 0, 2, 3, "THUNDER")],
+  );
+  runUntil(() => playbackIndex() === 1, 5);
+  const first15 = playCount() === before15 + 1 && liveCount() === 1;
+  for (let index = 0; index < 6; index += 1) runEarliest();
+  check("U-DMG-15a 重演出串行：第一条在播时第二条不抢跑（开演数不涨、在播仍 1 条、回放不动）",
+    first15 && liveCount() === 1 && playCount() === before15 + 1
+      && playbackIndex() === 1 && holdMark() === "damage:3",
+    `first=${first15} live=${liveCount()} plays=${playCount() - before15} `
+      + `index=${playbackIndex()} hold="${holdMark()}"`);
+  const second15 = runUntil(() => playCount() === before15 + 2, 200);
+  check("U-DMG-15b 第一条**彻底结束**后才接第二条：交接时在播仍 1 条、回放仍停在原格",
+    second15 && liveCount() === 1 && playbackIndex() === 1 && holdMark() === "damage:3",
+    `second=${second15} live=${liveCount()} index=${playbackIndex()} hold="${holdMark()}"`);
+  let maxLive15 = 0;
+  for (let steps = 0; steps < 400 && ui.state.playback !== null; steps += 1) {
+    maxLive15 = Math.max(maxLive15, liveCount());
+    if (!runEarliest()) break;
+  }
+  maxLive15 = Math.max(maxLive15, liveCount());
+  check("U-DMG-15c 整个窗口在播峰值 = 1（两条从不叠着播），收完后回放一次补齐、一条不丢",
+    maxLive15 === 1 && ui.state.playback === null && liveCount() === 0
+      && logCount() === logBefore15 + 3,
+    `maxLive=${maxLive15} playback=${ui.state.playback} live=${liveCount()} `
+      + `log=${logCount() - logBefore15}/3`);
+
   /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
    *
    * 垫片里**没有 `AudioContext`**（见 windowShim），故分两段：

@@ -27,9 +27,11 @@
  * **唯一**判据——`damageFxRendererFor(nature)` 选画面模块，`damageFxTiming(nature, variant)`
  * 选 `anim.ini` 的字段表，`sfx-ui.js` 按 `play.nature` 选音效模块。查表只此一处。
  *
- * 硬口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 = **该属性自己的 cap**
- * （`damageFxCapFor(nature)` 是唯一的 cap 口：票 02 起按属性读 `anim.ini` 的并发表，1~8、
- * 缺省 3）、超出该家族上限的那几条丢掉（不整队清空）；`null` / `undefined` ≡ 无属性；
+ * 硬口径（spec §演出口径）：**轻演出**（1 / 2 档）相邻开演错开 120ms、同时在播上限 =
+ * **该属性自己的 cap**（`damageFxCapFor(nature)` 是唯一的 cap 口）；**重演出**（>= 3 档，
+ * 也就是会暂停回放的那些）**串行且独占牌桌**（票 08：一条播满自己的 `total` 才接下一条，
+ * 用户口径"我的演出彻底结束后才继续下一个事件"）；cap 因此是"该家族的**排队**上限"
+ * （在播 + 排队，超出丢掉，票 08）；`null` / `undefined` ≡ 无属性；
  * 摘层用 `anim.ini` 的 `total` 定时；无属性 3 / 4 点档的黑白屏闪窗口 = 该档 `strobe`，
  * 属性伤害（火 / 雷）改挂着色子层 `.fx-flash`（**不是** `filter`，见 `damageFxFlashSpec`）。
  */
@@ -139,7 +141,10 @@ function damageFxTiming(nature, variant) {
 
 /* ------------------------------------ 伤害演出（damage-fx 票 05）：排播 + 座位映射 */
 
-/** 同一批里多条伤害的排播口径（spec §演出口径）：相邻开演错开 120ms。 */
+/** **轻演出**（1 / 2 档）之间相邻开演的错开（spec §演出口径）。
+ *
+ * 票 08 起它只服务轻演出：3 / 4 档是**串行**的（一条彻底播完才接下一条，不再错开——错开
+ * 会让八道雷叠在一起，而串行的窗口本来就要整段冻住回放）。 */
 const DAMAGE_FX_STAGGER_MS = 120;
 /** 并发上限的**缺省**值（票 02：生效值按属性读 `anim.ini` 的并发表；缺键 / 非数字时回退到它）。 */
 const DAMAGE_FX_CONCURRENCY = 3;
@@ -180,6 +185,14 @@ function damageFxCapFor(nature) {
 
 /** 档位封顶：`amount ≥ 5` 按 4 档演——档位只决定强度，数字照旧是服务端给的真实值。 */
 const DAMAGE_FX_MAX_VARIANT = 4;
+
+/** `amount` → **档位**（1..4，取整、非法按 1、封顶 4）。**唯一的换算处**：开演（`damageFxPlanFor`）、
+ *  排播闸门（判"重演出"）、暂停判据（判要不要冻回放）都读它——三处各写一遍就会漂。 */
+function damageFxVariantOf(amount) {
+  const rounded = Math.round(Number(amount));
+  const damage = Number.isFinite(rounded) && rounded > 0 ? rounded : 1;
+  return Math.max(1, Math.min(DAMAGE_FX_MAX_VARIANT, damage));
+}
 
 /** 会**暂停回放**的最低档（damage-fx-natures 票 07）：3 / 4 档 1.85 / 2.1s 的窗口里，回放
  *  继续逐条重绘全表会和演出抢主线程；1 / 2 档窗口只有 1.5 / 1.65s，普通伤害（摸牌挨一刀）
@@ -341,7 +354,7 @@ function damageFxPlanFor(event) {
   const damage = Number.isFinite(amount) && amount > 0 ? amount : 1;
   // `source != null` 与"量到了来源牌"是两件事：前者决定雷走不走天降，后者决定剑光的源锚点。
   const hasSource = source !== null;
-  const variant = Math.max(1, Math.min(DAMAGE_FX_MAX_VARIANT, damage));
+  const variant = damageFxVariantOf(damage);
   return {
     src, dst, variant, amount: damage,
     // 票 01：属性穿透的第一站（event → plan）。下游只读 `plan.nature`，不再回头读 `event`。
@@ -666,6 +679,8 @@ function finishDamagePlay(play) {
     damageClearCanvas();
   }
   damageFxMark(damageFxLayer());
+  // 票 08：重演出串行的**交接点**——上一条彻底结束（摘层）后紧接着开队列里的下一条。
+  pumpDamageQueue();
 }
 
 /** 清可见画布并把它摘下来：层因此回到"空"（下一段演出重新挂回去，节点仍复用同一个）。 */
@@ -759,11 +774,36 @@ function damageFxLiveOf(nature) {
  */
 function damageFxPlaybackHold() {
   let highest = 0;
+  // 在播的 + **排队的**重演出都算：票 08 起重演出串行，队列里还有一条就说明这个窗口没结束
+  // （交接是同一 tick，但"上一条摘层、下一条还没起"的缝隙也不许漏推记录）。
   for (const play of damagePlays) {
-    const variant = Math.round(Number(play && play.variant) || 0);
+    const variant = damageFxVariantOf(play && play.variant);
+    if (variant >= DAMAGE_FX_HOLD_MIN_VARIANT && variant > highest) highest = variant;
+  }
+  for (const event of damageQueue) {
+    const variant = damageFxVariantOf(event && event.amount);
     if (variant >= DAMAGE_FX_HOLD_MIN_VARIANT && variant > highest) highest = variant;
   }
   return highest ? `damage:${highest}` : "";
+}
+
+/** 该属性**在播 + 排队**几条（票 08：重演出串行后"同时在播"恒为 1，cap 改判**该家族的排队
+ *  上限**，否则队列会无界增长——一条 12 段连环就是 24 秒的窗口）。 */
+function damageFxPendingOf(nature) {
+  const kind = damageFxNatureKind(nature);
+  let pending = damageFxLiveOf(nature);
+  for (const event of damageQueue) {
+    if (damageFxNatureKind(event && event.nature) === kind) pending += 1;
+  }
+  return pending;
+}
+
+/** 现在有没有**重演出**在播（>= 3 档）。重演出串行、独占牌桌，这是"下一条能不能上"的总闸。 */
+function damageFxHeavyLive() {
+  for (const play of damagePlays) {
+    if (damageFxVariantOf(play && play.variant) >= DAMAGE_FX_HOLD_MIN_VARIANT) return true;
+  }
+  return false;
 }
 
 /** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过**该属性自己的** cap。
@@ -783,16 +823,14 @@ function pumpDamageQueue() {
     damageStaggerTimer = null;
   }
   while (damageQueue.length) {
-    // 队头那条若已超出**它自己**家族的 cap 就丢掉，让后面还能演的先上；全都满了 ⇒ 剩下的
-    // 都是超出部分，整队丢（这就是"丢队列尾"）。
-    const at = damageQueue.findIndex(
-      (event) => damageFxLiveOf(event && event.nature) < damageFxCapFor(event && event.nature),
-    );
-    if (at < 0) {
-      damageQueue = [];
-      break;
-    }
-    if (at > 0) damageQueue.splice(0, at);
+    const event = damageQueue[0];
+    // 重演出（3 / 4 档）**串行且独占牌桌**（票 08）：有一条在播就一个都不开（轻演出也不许在
+    // 这个窗口里抢跑），等它摘层——`finishDamagePlay` 末尾续泵，紧接着开下一条。
+    if (damageFxHeavyLive()) break;
+    const heavy = damageFxVariantOf(event && event.amount) >= DAMAGE_FX_HOLD_MIN_VARIANT;
+    if (heavy && damagePlays.length) break;
+    // 轻演出：按**该家族自己的**并发表并发（cap 现在也含排队，见 `damageFxPendingOf`）。
+    if (!heavy && damageFxLiveOf(event && event.nature) >= damageFxCapFor(event && event.nature)) break;
     const wait = Math.round(damageNextStartAt - stageNow());
     if (wait > 0) {
       damageStaggerTimer = window.setTimeout(() => {
@@ -805,7 +843,8 @@ function pumpDamageQueue() {
       break;
     }
     startDamagePlay(damageQueue.shift());
-    damageNextStartAt = stageNow() + DAMAGE_FX_STAGGER_MS;
+    // 轻演出之间错开 120ms；重演出串行，下一条要等它摘层（那时早过点了），不必再错开。
+    damageNextStartAt = stageNow() + (heavy ? 0 : DAMAGE_FX_STAGGER_MS);
   }
 }
 
@@ -833,6 +872,9 @@ function fireDamageEventsThrough(seq = Infinity) {
   for (const event of due) {
     // 票 01：`null` / 缺字段 / `NORMAL` / THUNDER 放行；FIRE 的闸门留给票 03。
     if (!event || !damageFxNaturePlayable(event.nature)) continue;
+    // 票 08：cap 是**该家族的排队上限**（在播 + 排队）——重演出串行后"同时在播"恒为 1，
+    // 若还按在播判，队列会无界增长。超出的丢掉（伤害本身已结算，攒着只会把旧伤害飘在新画面上）。
+    if (damageFxPendingOf(event.nature) >= damageFxCapFor(event.nature)) continue;
     damageQueue.push(event);
     queued += 1;
   }

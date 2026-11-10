@@ -1303,6 +1303,15 @@ def test_the_concurrency_cap_is_read_per_nature_from_anim_ini(damage_fx_probe: d
     assert "damageFxLiveOf(" in gate and "damageFxCapFor(" in gate, (
         "闸门按属性判满：liveOf(nature) < capFor(nature) 才开演（行为归烟测 U-DMG-12/12b/13）"
     )
+    # 票 08：cap 改成**该家族的排队上限**（在播 + 排队），判在**入队**处；闸门只判"能不能上"。
+    fire = _js_function(damage_fx, "fireDamageEventsThrough")
+    assert "damageFxPendingOf(" in fire and "damageFxCapFor(" in fire, (
+        "超出该家族排队上限的事件在入队处就丢掉（串行后 live 恒为 1，按 live 判 cap 等于失效）"
+    )
+    pending = _js_function(damage_fx, "damageFxPendingOf")
+    assert "damageFxLiveOf(" in pending and "damageQueue" in pending, (
+        "排队计数 = 在播 + 队列（damageFxLiveOf 归一，队列按同一判据分类）"
+    )
 
 
 def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_probe: dict) -> None:
@@ -1583,7 +1592,10 @@ def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
         "档位阈值住伤害层；排播侧不许出现任何档位号"
     )
     hold = _js_function(damage_fx, "damageFxPlaybackHold")
-    assert "damagePlays" in hold, "判据只看在播表（不看队列：排队条目由错开计时器自己开演）"
+    assert "damagePlays" in hold and "damageQueue" in hold, (
+        "判据读在播表**与排队**（票 08 起重演出串行：队列没播完窗口就没结束）"
+    )
+    assert "damageFxVariantOf(" in hold, "档位换算读唯一的口（damageFxVariantOf）"
     assert "DAMAGE_FX_HOLD_MIN_VARIANT" in hold, "档位阈值读具名常量"
     assert re.search(r"^const DAMAGE_FX_HOLD_MIN_VARIANT = 3;$", damage_fx, re.M), (
         "3 / 4 档才要暂停（1 / 2 档 1.5 / 1.65s 窗口短，普通伤害不该被冻住）"
@@ -3353,6 +3365,7 @@ _DAMAGE_FX_FUNCTIONS = (
     "damageFxTiming",
     "damageFxNaturePlayable",
     "damageFxCapFor",
+    "damageFxVariantOf",
     "damageFxLayer",
     "damageFxDpr",
     "damageFxView",
@@ -3380,6 +3393,8 @@ _DAMAGE_FX_FUNCTIONS = (
     "damageStopFrame",
     "damageFxLiveOf",
     "damageFxPlaybackHold",
+    "damageFxPendingOf",
+    "damageFxHeavyLive",
     "pumpDamageQueue",
     "fireDamageEventsThrough",
     "damageDropStalePlays",
@@ -3510,6 +3525,48 @@ def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_fil
     assert not found, (
         f"音效全部现场合成，仓库里不得出现音频文件（票面 §音效以后怎么改）：{[str(p) for p in found[:5]]}"
     )
+
+
+def test_the_heavy_damage_plays_are_serialized_and_exclusive() -> None:
+    """票 08：3 / 4 档（= 会暂停回放的那些）**串行且独占牌桌**，轻演出照旧错开 120ms。
+
+    用户 2026-11-10 原话："我的演出彻底结束后（4 档 2000ms）才继续下一个事件，期间都是暂停的"。
+    三件机械事实：闸门里有"重演出在播 ⇒ 一个都不开"；摘层处**续泵**（交接 = 同一 tick，不是
+    再等一个错开）；档位换算只有一个口（开演 / 闸门 / 暂停判据读同一个函数）。
+    行为归烟测 `U-DMG-15*`（两条 3 档雷串行）与 `U-DMG-03*`（轻演出照旧错开）。
+    """
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+
+    gate = _js_function(damage_fx, "pumpDamageQueue")
+    assert "damageFxHeavyLive()" in gate, (
+        "闸门先看「有没有重演出在播」：有就一个都不开（轻演出也不许抢跑）"
+    )
+    assert "if (heavy && damagePlays.length) break;" in gate, (
+        "重演出独占牌桌：它在播时下一条排队等摘层"
+    )
+    assert "DAMAGE_FX_HOLD_MIN_VARIANT" in gate, "重演出的档位阈值读具名常量（与暂停判据同一个）"
+    assert "DAMAGE_FX_STAGGER_MS" in gate, "轻演出仍按 120ms 错开（票 08 没动它们）"
+    assert "heavy ? 0 : DAMAGE_FX_STAGGER_MS" in gate, (
+        "重演出不排错开：它要等摘层，错开只会让下一段窗口白等"
+    )
+
+    finish = _js_function(damage_fx, "finishDamagePlay")
+    assert "pumpDamageQueue();" in finish, (
+        "摘层那一刻续泵——串行的交接点（否则队列里剩下的重演出永远不开演）"
+    )
+
+    hold = _js_function(damage_fx, "damageFxPlaybackHold")
+    assert "damageQueue" in hold, "串行窗口内回放一直冻着：排队里的重演出也算"
+    plan = _js_function(damage_fx, "damageFxPlanFor")
+    assert "damageFxVariantOf(" in plan, "开演的档位读唯一换算口"
+    assert "Math.min(DAMAGE_FX_MAX_VARIANT" not in plan, (
+        "档位换算只剩 damageFxVariantOf 一处（plan 里不再手写第二份）"
+    )
+    variant_of = _js_function(damage_fx, "damageFxVariantOf")
+    assert "DAMAGE_FX_MAX_VARIANT" in variant_of and "Math.round" in variant_of, (
+        "damageFxVariantOf：取整 + 封顶 4"
+    )
+    assert damage_fx.count("DAMAGE_FX_MAX_VARIANT") >= 2, "封顶常量仍只有一处定义"
 
 
 def test_the_damage_nature_check_treats_null_as_normal(damage_fx_probe: dict) -> None:
