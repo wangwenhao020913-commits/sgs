@@ -59,6 +59,21 @@ function wireOverlayToggle(button, panel, onOpen) {
   });
 }
 
+/** damage-fx 票 06：一次性解锁伤害音效。
+ *
+ * 浏览器规定：没有**真实用户手势**之前 `AudioContext` 处于 `suspended`——`new AudioContext()`
+ * 不报错、但一点声音都没有。所以解锁挂在**一次性 `pointerdown`** 上（用户点哪里都算手势，
+ * 比只绑「开始对局」成功率高），并且 `resume()` 必须与手势**同一个 tick**：放进 `fetch`
+ * 回调 / 定时器 / rAF 里在 iOS / Safari 上仍然挂起。故这里**同步**交给
+ * `effects.js:damageSfxUnlock()`，中间不经过任何 await / 计时器。
+ *
+ * 缺省静音：开关关着时连 `AudioContext` 都不建；用户点开顶栏「♪」那一下同样是手势。
+ */
+function unlockAudio() {
+  damageSfxUnlock();
+  document.removeEventListener("pointerdown", unlockAudio);
+}
+
 function wire() {
   seedOptions();
   $("in-players").addEventListener("change", () => {
@@ -117,6 +132,12 @@ function wire() {
   wireOverlayToggle($("t-log-toggle"), $("t-log-panel"), () => {
     scrollLogToBottom();
   });
+  // damage-fx 票 06：伤害音效。缺省静音（`localStorage['sgs.sfx']` 缺省 `'off'`），顶栏「♪」是
+  // 唯一开关；解锁只认第一次 `pointerdown`（见 unlockAudio），`?audiotest=1` 走离线电平自检。
+  damageSfxSync();
+  $("btn-sfx").addEventListener("click", damageSfxToggle);
+  document.addEventListener("pointerdown", unlockAudio, { once: true });
+  if (damageSfxAudiotestRequested()) damageSfxAudiotest();
   $("btn-r-delay").addEventListener("click", cycleDelay);
   updateDelayButton();
   // U4-02（D7 / D8）：`anim.ini` 的 `base_step` 只决定**加载时**的初始档。订阅飞行层的

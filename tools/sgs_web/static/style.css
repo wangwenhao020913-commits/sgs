@@ -493,6 +493,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; border-radius: 7px; color: var(--dim); cursor: pointer;
 }
 .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* damage-fx 票 06：顶栏「♪」音效开关。关 = 收着（半透明，不抢注意力）；开 = 亮起（accent 描边）。
+   与「设置」同一套 `.icon-btn` 尺寸，只加两档状态——不新增按钮形状。 */
+.sfx-btn { opacity: .55; white-space: nowrap; }
+.sfx-btn.on { opacity: 1; border-color: var(--accent); color: var(--accent); }
 
 .settings {
   position: absolute; right: 0; top: calc(100% + 6px); width: 250px;
@@ -1012,6 +1016,25 @@ button.mini-slot { cursor: pointer; }
     transform: translate(-50%, -100%) translateY(calc(-20 * var(--dsu)));
     opacity: 0;
   }
+}
+
+/* ---------- 无属性伤害演出层（damage-fx 票 05）：剑光 / 刀痕 / 飘字 ---------- */
+
+/* 覆盖整个牌桌壳、不吃指针、裁在壳内。层级 19 = 在飞行层（18）之上、弹窗 / 询问窗（60）
+ * 之下：剑光劈在桌上、挡得住座位与手牌，但永远让位给模态。
+ * 层里只有一张 canvas（`effects.js` 的播放器建 / 摘，跨演出复用），CSS 只负责铺满与
+ * 让位——**不**在这里做缩放：座位映射是把两座武将块的矩形换算进舞台坐标做的。 */
+.damage-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 19;
+}
+.damage-fx-layer canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* ---------- 阶段 / 回合飘字层（U4-04 / D10）：判定 / 装备区上方，不占步长 ---------- */

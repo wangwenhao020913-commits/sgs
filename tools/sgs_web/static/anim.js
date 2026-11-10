@@ -112,6 +112,28 @@ function animParseIni(text) {
   return out;
 }
 
+/** ``anim.ini`` 里**不属于本文件默认表**、但同一份 ini 也在用的键前缀。
+ *
+ * damage-fx 票 04：19 个 ``damage_fx_*`` 键住同一份 ``anim.ini``（用户改一份文件就能调
+ * 两套时长），它们的**内置默认在 `fx-core.js`**（`SgsDamageFX.DEFAULT_TIMING`，那是时间轴
+ * 语义的拥有者）。本文件只负责"读进来、别当未知键删掉"——不抄第二份默认值，也不替它钳制。
+ */
+const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_"];
+
+/** 这个键是不是别的模块的（前缀登记过 ⇒ 原样留在 `animConfig` 里）。 */
+function animIsForeignKey(key) {
+  return ANIM_FOREIGN_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+/** 读**生效中**的时长表里某个键；缺键返回 `undefined`。
+ *
+ * 这是给 `damage_fx_*` 这类「表住在这里、默认住在别处」的键用的**只读搬运口**：
+ * 本文件不给兜底值（兜底在 `fx-core.js`），不钳制，也不替调用方判它该不该有。
+ */
+function animTiming(key) {
+  return animConfig[key];
+}
+
 /** 读 ``anim.ini`` 覆盖内置默认；缺键 / 非法值 / 取不到都退回默认，只留一行提示。 */
 function animLoadConfig() {
   const apply = (text, failed) => {
@@ -120,7 +142,7 @@ function animLoadConfig() {
     const unavailable = failed || animLooksLikeHtml(text);
     const parsed = unavailable ? {} : animParseIni(text);
     for (const key of Object.keys(parsed)) {
-      if (key in animDefaults) continue;
+      if (key in animDefaults || animIsForeignKey(key)) continue;
       delete parsed[key];
       animPushNote(`未知键 ${key}`);
     }

@@ -19,9 +19,15 @@ U1-00 把单文件 `tools/sgs_web/static/app.js` 拆成一组按职责命名、�
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = REPO_ROOT / "tools" / "sgs_web" / "static"
@@ -702,27 +708,331 @@ def test_session_playback_hook_measures_source_before_render_and_launches_after(
     assert launch > body.find("renderProcessing()"), "落点必须在 renderProcessing 重绘之后量"
 
 
-def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
-    """`anim.ini` = D8 的 13 个键；`flight_stage_out = 0`；`debug_scale` 不进产品。"""
-    text = _ANIM_INI.read_text(encoding="utf-8")
-    assert "debug_scale" not in text, "debug_scale 必须从 anim.ini 整体移除（含键与注释）"
+# ---------------------------------------------------------------------------
+# damage-fx 票 03：剑光演出的两个纯静态脚本进清单
+#
+# 参考实现（`.scratch/damage-fx/reference/`）搬进 `static/` 时只有两处必须变：
+# 1. `"use strict";` 从 IIFE **内部**挪到文件第一条语句（U1-00 的清单契约）；
+# 2. 全局名照旧（`window.SgsDamageFX` / `window.SgsSfx`），不改成 ESM。
+# 两份都必须是**纯静态**脚本：零依赖、零外部资源、不改 DOM、不发请求——它们是画布 / 声音
+# 生成器，接管牌桌是票 05 的事（`effects.js`）。
+# ---------------------------------------------------------------------------
+
+_DAMAGE_FX_GLOBALS = {"fx-core.js": "SgsDamageFX", "sfx.js": "SgsSfx"}
+
+
+def test_damage_fx_scripts_keep_their_global_names_and_stay_static() -> None:
+    """两份脚本都在清单里、排在 `main.js` 之前、按普通脚本导出全局名，且不发请求。"""
+    srcs = _script_srcs()
+    assert srcs[-1] == "main.js", "清单契约的先决条件：main.js 仍是最后一份"
+    for name, global_name in _DAMAGE_FX_GLOBALS.items():
+        assert name in srcs, f"index.html 必须加载 {name}：{srcs}"
+        assert srcs.index(name) < srcs.index("main.js"), f"{name} 必须排在 main.js 之前"
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert re.search(rf"global\.{global_name}\s*=\s*\{{", text), (
+            f"{name} 必须把入口挂在 window.{global_name}（参考实现的全局名，不改成 ESM）"
+        )
+        assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", text), (
+            f"{name} 是纯静态脚本：不发请求（素材库那套壳子不进牌桌）"
+        )
+        assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", text), (
+            f"{name} 不接管 DOM（覆盖层与挂载是票 05 / effects.js 的事）"
+        )
+    fx_core = (STATIC_DIR / "fx-core.js").read_text(encoding="utf-8")
+    block = re.search(r"var VARIANTS = \{(?P<body>.*?)\n  \};", fx_core, re.S)
+    assert block is not None, "fx-core.js 里找不到 VARIANTS 表"
+    keys = {int(match.group(1)) for match in re.finditer(r"^    (\d): \{$", block.group("body"), re.M)}
+    assert keys == {1, 2, 3, 4}, f"VARIANTS 必须恰好四档（1~4），实际：{sorted(keys)}"
+
+
+def _ini_entries() -> dict[str, str]:
+    """`anim.ini` 的 `key = value` 全表（剥注释；缺 `=` 即红）。"""
     entries: dict[str, str] = {}
-    for raw in text.splitlines():
+    for raw in _ANIM_INI.read_text(encoding="utf-8").splitlines():
         line = re.sub(r"\s*[#;].*$", "", raw).strip()
         if not line:
             continue
         key, separator, value = line.partition("=")
         assert separator, f"anim.ini 行不是 key = value：{raw}"
         entries[key.strip()] = value.strip()
-    assert set(entries) == _D8_INI_KEYS, (
-        f"anim.ini 的键必须与 D8 表一致：缺 {sorted(_D8_INI_KEYS - set(entries))}；"
-        f"多 {sorted(set(entries) - _D8_INI_KEYS)}"
+    return entries
+
+
+def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
+    """`anim.ini` = D8 的 13 个键（外加 damage-fx 票 04 的 19 个）；`debug_scale` 不进产品。"""
+    text = _ANIM_INI.read_text(encoding="utf-8")
+    assert "debug_scale" not in text, "debug_scale 必须从 anim.ini 整体移除（含键与注释）"
+    entries = _ini_entries()
+    # 同一份 ini 也住着 damage-fx 的 19 个键（票 04：用户改一份文件就能调两套时长），
+    # 这里只钉 D8 那一族，19 个键由下面那条用例钉。
+    shared = {key for key in entries if not key.startswith("damage_fx_")}
+    assert shared == _D8_INI_KEYS, (
+        f"anim.ini 的 D8 键必须与 D8 表一致：缺 {sorted(_D8_INI_KEYS - shared)}；"
+        f"多 {sorted(shared - _D8_INI_KEYS)}"
     )
     for key, value in entries.items():
         float(value)  # 解析失败即红（页面此时会退回默认）
     assert float(entries["flight_stage_out"]) == 0, (
         "处理区 → 弃牌堆不飞：flight_stage_out 必须是 0"
     )
+
+
+# ---------------------------------------------------------------------------
+# damage-fx 票 04：四档各自的游戏内时长（anim.ini 的 19 个键 + fx-core 的 game 档）
+#
+# 票面要求：每档的四个时长（total / flight / impact / fade）**必须能各自独立改**，
+# 不许用一条公式把四档绑死；单档总时长上限 2.2s。这里钉三件：
+# 1. `anim.ini` 的键集合与不变式（`flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`）；
+# 2. 真 `anim.js` 解析器把 19 个键读进 `animConfig`、**不**报"未知键"（否则用户改了没生效）；
+# 3. 真 `fx-core.js` 的 `SgsDamageFX.gameTiming` 解算与四条钳制（含缺键 / 非法值回默认）。
+# ---------------------------------------------------------------------------
+
+_DAMAGE_FX_VARIANTS = (1, 2, 3, 4)
+_DAMAGE_FX_TIMING_FIELDS = ("total", "flight", "impact", "fade")
+_DAMAGE_FX_INI_KEYS = {
+    f"damage_fx_{variant}_{field}"
+    for variant in _DAMAGE_FX_VARIANTS
+    for field in _DAMAGE_FX_TIMING_FIELDS
+} | {"damage_fx_3_strobe", "damage_fx_4_strobe", "damage_fx_4_split"}
+"""票 04 的 19 个键：四档 × 四个时长 + 3/4 点的屏闪 + 4 点的劈屏错位。"""
+
+
+def test_anim_ini_lists_the_damage_fx_durations_per_variant() -> None:
+    """19 个键齐全、可解析，且每档都满足 `flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`。"""
+    entries = _ini_entries()
+    damage = {key: value for key, value in entries.items() if key.startswith("damage_fx_")}
+    assert set(damage) == _DAMAGE_FX_INI_KEYS, (
+        f"damage-fx 的时长键必须与票面 19 个一致：缺 {sorted(_DAMAGE_FX_INI_KEYS - set(damage))}；"
+        f"多 {sorted(set(damage) - _DAMAGE_FX_INI_KEYS)}"
+    )
+    values = {key: float(value) for key, value in damage.items()}
+    for variant in _DAMAGE_FX_VARIANTS:
+        total = values[f"damage_fx_{variant}_total"]
+        flight = values[f"damage_fx_{variant}_flight"]
+        impact = values[f"damage_fx_{variant}_impact"]
+        fade = values[f"damage_fx_{variant}_fade"]
+        assert 0 < impact < total <= 2200, (
+            f"{variant} 点档：命中必须落在演出之内、总时长 ≤ 2200（挡住牌桌），"
+            f"实际 impact={impact} / total={total}"
+        )
+        assert 0 < flight < impact, f"{variant} 点档：剑光必须在命中之前飞完"
+        assert impact + fade <= total, (
+            f"{variant} 点档：刀痕必须在摘层之前散尽（impact + fade ≤ total），"
+            f"实际 {impact} + {fade} > {total}"
+        )
+    # 四档总时长各自独立：一条公式绑死的话四个值会相等（票 04 的核心交付）。
+    totals = [values[f"damage_fx_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
+    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), (
+        f"四档总时长必须各自独立可改，实际：{totals}"
+    )
+    assert values["damage_fx_3_strobe"] > 0 and values["damage_fx_4_strobe"] > values["damage_fx_3_strobe"], (
+        "屏闪只有 3 / 4 点有，且 4 点更长（spec §演出口径）"
+    )
+    assert values["damage_fx_4_split"] > 0, "只有 4 点有劈屏错位"
+
+
+_DAMAGE_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
+const noteNode = { textContent: "", hidden: true };
+const context = vm.createContext({
+  console,
+  setTimeout,
+  clearTimeout,
+  fetch: async () => ({ ok: true, text: async () => ini }),
+  document: {
+    getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+    createElement: () => ({
+      style: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      appendChild() {},
+      setAttribute() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+context.$ = (id) => context.document.getElementById(id);
+// 与页面一致的加载方式：每份脚本单独编译，同一个 context 的全局词法作用域跨脚本可见。
+for (const name of ["anim.js", "fx-core.js", "effects.js"]) {
+  vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+}
+const report = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     const fx = SgsDamageFX;
+     const resolved = {};
+     for (const variant of [1, 2, 3, 4]) resolved[variant] = fx.gameTiming(variant, {});
+     const clamps = {
+       total: fx.gameTiming(1, { damage_fx_1_total: 9999 }).ms.total,
+       impact: fx.gameTiming(2, { damage_fx_2_total: 400, damage_fx_2_impact: 900 }).ms.impact,
+       flight: fx.gameTiming(3, { damage_fx_3_impact: 300, damage_fx_3_flight: 800 }).ms.flight,
+       fade: fx.gameTiming(4, { damage_fx_4_total: 1000, damage_fx_4_impact: 800, damage_fx_4_fade: 900 }).ms.fade,
+       missing: fx.gameTiming(1, { damage_fx_1_total: 1600 }).ms,
+       junk: fx.gameTiming(2, { damage_fx_2_total: "abc", damage_fx_2_flight: -5 }).ms,
+       tunedTotal: fx.gameTiming(4, { damage_fx_4_total: 1600 }).timeline.DURATION,
+       exportUntouched: fx.TIMELINE.DURATION,
+     };
+     return JSON.stringify({
+       note: $("t-anim-note").textContent,
+       animConfigKeys: Object.keys(animConfig),
+       defaults: fx.DEFAULT_TIMING,
+       maxTotal: fx.MAX_TOTAL_MS,
+       resolved,
+       clamps,
+       effectsTiming: {
+         1: damageFxTiming(1),
+         4: damageFxTiming(4),
+         resolvedFromEffects: fx.gameTiming(4, damageFxTiming(4)).timeline.DURATION,
+       },
+       // 评审修复：null / 缺字段 = 无属性（三层文档同一句话），只有 FIRE / THUNDER 不播。
+       naturePlayable: {
+         null: damageFxNaturePlayable(null),
+         undefined: damageFxNaturePlayable(undefined),
+         NORMAL: damageFxNaturePlayable("NORMAL"),
+         FIRE: damageFxNaturePlayable("FIRE"),
+         THUNDER: damageFxNaturePlayable("THUNDER"),
+       },
+     });
+   })()`,
+  context,
+  { filename: "damage_fx_probe.js" },
+);
+process.stdout.write(report);
+"""
+
+
+def _damage_fx_probe() -> dict:
+    """跑真 `anim.js` + 真 `fx-core.js`（node vm），拿回两份时间表的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "damage_fx_probe.mjs"
+        probe.write_text(_DAMAGE_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"damage-fx 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def damage_fx_probe() -> dict:
+    """一次探针跑完，两条用例共用（node 启动约 100ms，不必跑两遍）。"""
+    return _damage_fx_probe()
+
+
+def test_the_damage_fx_durations_reach_anim_config_without_unknown_key_notes(damage_fx_probe: dict) -> None:
+    """`anim.js` 的解析器把 19 个键读进 `animConfig`，**不**把它们当未知键删掉 / 报错。
+
+    这是用户改 ini 能不能生效的判据：`anim.js:animLoadConfig` 对不在默认表里的键会
+    `delete` + 弹一行"未知键"，`damage_fx_*` 必须走前缀登记那条路。
+    """
+    probe = damage_fx_probe
+    assert "未知键" not in probe["note"], (
+        f"damage_fx_* 不得被当成未知键（页面提示：{probe['note']}）"
+    )
+    missing = _DAMAGE_FX_INI_KEYS - set(probe["animConfigKeys"])
+    assert not missing, f"这 19 个键必须进 animConfig，缺：{sorted(missing)}"
+
+
+def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_fx_probe: dict) -> None:
+    """`effects.js:damageFxTiming` 只搬数字：有键的档给全六个量，没键的档不硬造。
+
+    这一层不兜底、不钳制（默认与钳制都在 `fx-core.js`）：缺 `damage_fx_1_strobe` 时返回的
+    表里就**没有**这个键，fx-core 退 `VARIANTS[1].strobe = 0`。票 05 的播放器读它。
+    """
+    probe = damage_fx_probe
+    ini = {
+        key: float(value)
+        for key, value in _ini_entries().items()
+        if key.startswith("damage_fx_")
+    }
+    four = probe["effectsTiming"]["4"]
+    assert set(four) == {
+        f"damage_fx_4_{field}" for field in _DAMAGE_FX_TIMING_FIELDS
+    } | {"damage_fx_4_strobe", "damage_fx_4_split"}, f"4 点档的六个量都要搬过去：{sorted(four)}"
+    for key, value in four.items():
+        assert value == ini[key], f"{key} 必须原样来自 anim.ini"
+    one = probe["effectsTiming"]["1"]
+    assert set(one) == {f"damage_fx_1_{field}" for field in _DAMAGE_FX_TIMING_FIELDS}, (
+        f"1 点档没有 strobe / split 的键，就不该硬造：{sorted(one)}"
+    )
+    assert probe["effectsTiming"]["resolvedFromEffects"] == pytest.approx(
+        ini["damage_fx_4_total"] / 1000
+    ), "把搬过来的表交给 fx-core，解算出同一段 4 点档时长"
+
+
+def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_probe: dict) -> None:
+    """`SgsDamageFX.gameTiming`：默认值 = `DEFAULT_TIMING` = ini；四条钳制与缺键 / 垃圾值兜底。"""
+    probe = damage_fx_probe
+    ini = {
+        key: float(value)
+        for key, value in _ini_entries().items()
+        if key.startswith("damage_fx_")
+    }
+    assert set(probe["defaults"]) == _DAMAGE_FX_INI_KEYS, (
+        "fx-core 的内置默认必须恰好覆盖这 19 个键："
+        f"缺 {sorted(_DAMAGE_FX_INI_KEYS - set(probe['defaults']))}"
+    )
+    assert {key: int(value) for key, value in ini.items()} == probe["defaults"], (
+        "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
+    )
+    assert probe["maxTotal"] == 2200
+
+    for variant in _DAMAGE_FX_VARIANTS:
+        entry = probe["resolved"][str(variant)]
+        total = ini[f"damage_fx_{variant}_total"] / 1000
+        flight = ini[f"damage_fx_{variant}_flight"] / 1000
+        impact = ini[f"damage_fx_{variant}_impact"] / 1000
+        fade = ini[f"damage_fx_{variant}_fade"] / 1000
+        timeline = entry["timeline"]
+        assert timeline["DURATION"] == pytest.approx(total), "整段寿命 = total（到点摘层）"
+        assert timeline["IMPACT"] == pytest.approx(impact)
+        assert timeline["LAUNCH"] == pytest.approx(impact - flight), "出鞘 = 命中 - 飞行"
+        assert timeline["NUM_LIFE"] == pytest.approx(total - impact), "飘字活到整段结束"
+        assert 0 < timeline["CHARGE"] < timeline["LAUNCH"], "剑意凝聚必须在出鞘之前"
+        assert entry["variant"]["flight"] == pytest.approx(flight)
+        assert entry["variant"]["fadeStart"] == pytest.approx(impact + 0.25 * fade), (
+            "淡出起点 = 命中 + fade 的 25%"
+        )
+        assert entry["variant"]["fadeEnd"] == pytest.approx(impact + fade), (
+            "刀痕散尽 = 命中 + fade（不能照搬 export 档的 4.6 → 9.2 秒）"
+        )
+    assert probe["resolved"]["3"]["variant"]["strobe"] == pytest.approx(0.16)
+    assert probe["resolved"]["4"]["variant"]["strobe"] == pytest.approx(0.44)
+    assert probe["resolved"]["4"]["variant"]["split"] == 44
+    assert probe["resolved"]["1"]["variant"]["strobe"] == 0
+    assert probe["resolved"]["2"]["variant"]["split"] == 0
+
+    clamps = probe["clamps"]
+    assert clamps["total"] == 2200, "单档总时长上限 2200（超过会挡住牌桌）"
+    assert clamps["impact"] == 400, "impact ≤ total"
+    assert clamps["flight"] == 300, "flight ≤ impact"
+    assert clamps["fade"] == 200, "impact + fade ≤ total（否则层摘了刀痕还没散）"
+    assert clamps["missing"] == {
+        "total": 1600,
+        "flight": 130,
+        "impact": 330,
+        "fade": 700,
+        "strobe": 0,
+        "split": 0,
+    }, "只改一个键，其余退回内置默认"
+    assert clamps["junk"]["total"] == 1650 and clamps["junk"]["flight"] == 125, (
+        "非法值（非数字 / 负数）退回内置默认"
+    )
+    assert clamps["tunedTotal"] == pytest.approx(1.6), "把 4 点档 total 改成 1600 ⇒ 整段 1.6s"
+    assert clamps["exportUntouched"] == 12, "export 档的 12 秒链一字不动（截图 / 导片依赖它）"
 
 
 def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> None:
@@ -1503,3 +1813,829 @@ def test_the_self_panel_ships_the_flipped_layer_node() -> None:
         < html.index('id="t-self-flipped"')
         < html.index('id="t-self-dead"')
     ), "翻面层应排在横置虚线之后、阵亡牌之前（三态 CSS 分层互不遮挡）"
+
+
+# ---------------------------------------------------------------------------
+# damage-fx 票 05：前端消费 —— 覆盖层、队列 / 排播、座位矩形映射
+#
+# 机械的四半：
+# 1. **覆盖层**：`index.html` 的 `#t-damage-fx` 铺满牌桌壳、不吃指针、层级夹在飞行层
+#    （18）与弹窗（60）之间；层里那张 canvas 由 `effects.js` 建 / 摘，CSS 只负责铺满。
+# 2. **触发点**：只有 `seq` 游标——`stepPlayback` 里紧挨 `fireSkillEventsThrough(record.seq)`
+#    的下一行；`applyLiveDelta` / `commitView` 里**没有**（硬约束：不许在回放派生里触发）。
+# 3. **排播口径**：相邻错开 120ms、同时在播上限 3 条、只挂 `NORMAL`（spec §演出口径）。
+# 4. **两处 fx-core 缺口**（票 04 收口时登记的）：飘字用服务端 `amount` 而不是档位；
+#    座位矩形换算成舞台坐标（`u` / 航线 / 两张牌的落点），且**缺省舞台逐字节不变**。
+#
+# 行为（层寿命 / 错开 / 上限 / 版式作废）归烟测 `U-DMG-01..06`。
+# ---------------------------------------------------------------------------
+
+_DAMAGE_FX_LAYER_Z = 19
+
+
+def _layer_z_index(selector: str) -> int:
+    found = re.search(r"z-index:\s*(\d+)", _css_rule(selector))
+    assert found is not None, f"{selector} 里找不到 z-index：{_css_rule(selector)}"
+    return int(found.group(1))
+
+
+def test_the_damage_fx_layer_is_a_full_shell_overlay_above_the_flight_layer() -> None:
+    """票面 §2：整壳覆盖、`pointer-events:none`、层级在飞行层之上、弹窗之下。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<div\b[^>]*\bid=\"t-damage-fx\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少伤害演出层 #t-damage-fx"
+    assert re.search(r'class="[^"]*damage-fx-layer', tag.group(0)), (
+        f"层必须带 class=damage-fx-layer：{tag.group(0)}"
+    )
+    assert "aria-hidden" in tag.group(0), "伤害演出是纯视觉层，必须 aria-hidden"
+    assert html.index('id="table-shell"') < html.index('id="t-damage-fx"'), (
+        "伤害演出层必须住在 .table-shell 里（座位矩形按壳内坐标量）"
+    )
+
+    layer = _css_rule(".damage-fx-layer")
+    assert re.search(r"position:\s*absolute", layer), f"层必须绝对定位：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"层必须铺满壳（inset: 0）：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"层不能吃指针：{layer}"
+    assert re.search(r"overflow:\s*hidden", layer), f"层必须裁在壳内：{layer}"
+    assert _layer_z_index(".damage-fx-layer") == _DAMAGE_FX_LAYER_Z, (
+        "层级取 19：飞行层（18）之上、弹窗（60）之下"
+    )
+    assert _layer_z_index(".anim-layer") < _layer_z_index(".damage-fx-layer"), (
+        "剑光要压在飞行层之上"
+    )
+    assert _layer_z_index(".damage-fx-layer") < _layer_z_index(".modal"), (
+        "永远让位给询问弹窗"
+    )
+
+    canvas = _css_rule(".damage-fx-layer canvas")
+    assert re.search(r"width:\s*100%", canvas) and re.search(r"height:\s*100%", canvas), (
+        f"层里的 canvas 必须铺满整块壳（内部缩放由 JS 换算）：{canvas}"
+    )
+
+
+def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbers() -> None:
+    """票面 §1 / §4：队列进 `applyView`、触发点紧挨技能事件、口径 120ms / 3 条 / 只挂 NORMAL。"""
+    effects = _EFFECTS_JS.read_text(encoding="utf-8")
+    session = _SESSION_JS.read_text(encoding="utf-8")
+
+    assert re.search(r"^const DAMAGE_FX_STAGGER_MS = 120;$", effects, re.M), (
+        "相邻开演错开 120ms（spec §演出口径）"
+    )
+    assert re.search(r"^const DAMAGE_FX_CONCURRENCY = 3;$", effects, re.M), (
+        "同时在播上限 3 条（超出丢队列尾）"
+    )
+    assert re.search(r'^const DAMAGE_FX_NATURE = "NORMAL";$', effects, re.M), (
+        "只挂无属性伤害；火焰 / 雷电显式跳过"
+    )
+
+    apply_view = _js_function(session, "applyView")
+    assert "body.damage_events" in apply_view, "applyView 必须把载荷收进队列"
+    assert "state.damageEvents" in apply_view, "队列住 state.damageEvents"
+
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    skill = body.find("fireSkillEventsThrough(record.seq)")
+    damage = body.find("fireDamageEventsThrough(record.seq)")
+    assert skill >= 0 and damage > skill, (
+        "伤害演出必须挂在**同一条 seq 游标**上，且紧挨技能事件的下一行（票面 §1）"
+    )
+    assert ";" not in body[skill + len("fireSkillEventsThrough(record.seq)") : damage].replace(
+        "fireSkillEventsThrough(record.seq);", ""
+    ).replace(";", ""), "两行之间不留别的语句（只有注释）"
+    for name in ("applyLiveDelta", "commitView"):
+        assert "fireDamageEventsThrough" not in _js_function(session, name), (
+            f"{name} 里不许触发伤害演出（触发点只能是 seq 游标）"
+        )
+
+    clear = _js_function(effects, "clearTransientEffects")
+    assert "clearDamageFx()" in clear, "换局 / 换会话必须连同覆盖层一起摘掉"
+    assert "state.damageEvents = []" in clear, "换局清空队列（照 state.skillEvents 的姿态）"
+
+    sync = _js_function(effects, "syncTransientEffects")
+    assert "damageDropStalePlays()" in sync, (
+        "renderTable 重建座位后要按矩形判一次：版式变了就摘层（别演在半空）"
+    )
+    window_actions = _js_function(effects, "startDamagePlay")
+    assert "damageFxTiming(plan.variant)" in window_actions, (
+        "时长从 anim.ini 那一份搬过来（票 04 的接线口），不在 JS 里硬编码"
+    )
+    assert "setTimeout(() => finishDamagePlay(play), play.duration)" in window_actions, (
+        "摘层用 create() 返回的 duration 定时，不靠 rAF 自然停（票 04 的交接）"
+    )
+    assert "fx.draw(" not in _js_function(effects, "finishDamagePlay"), (
+        "摘层不靠再画一帧"
+    )
+
+
+_DAMAGE_FX_STAGE_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const calls = [];
+/* 画字的**实际位置**：`drawNumber` 是 translate 到字心再 fillText(0,0)，故要跟一下原点
+ * （`save` / `restore` 成栈；`scale` / `rotate` 不改原点）。R3 的验收要靠它把
+ * "分析出来的包围盒"与"真的画到哪"对上。 */
+let origin = { x: 0, y: 0 };
+const originStack = [];
+const gradient = { addColorStop() {} };
+/* 属性要**真的**记下来：`effects.js` 的牌桌档靠"有没有全屏不透明填充"判，
+ * 而那是 `fillStyle` / `globalCompositeOperation` 决定的（方法调用看不出来）。 */
+const props = { globalCompositeOperation: "source-over", globalAlpha: 1, fillStyle: "" };
+const ctx = new Proxy({}, {
+  get(_target, prop) {
+    if (prop in props) return props[prop];
+    if (prop === "measureText") return () => ({ width: 10 });
+    if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+    if (prop === "save") return () => { originStack.push({ ...origin }); };
+    if (prop === "restore") return () => { origin = originStack.pop() || { x: 0, y: 0 }; };
+    if (prop === "setTransform") return () => { origin = { x: 0, y: 0 }; };
+    if (prop === "translate") {
+      return (x, y) => { origin.x += Number(x) || 0; origin.y += Number(y) || 0; };
+    }
+    if (prop === "fillText" || prop === "strokeText") {
+      return (text) => calls.push({ op: prop, text, font: props.font, x: origin.x, y: origin.y });
+    }
+    if (prop === "drawImage") {
+      return (image, ...args) => calls.push({ op: "drawImage", w: image && image.width, args });
+    }
+    if (prop === "fillRect") {
+      return (_x, _y, w, h) => calls.push({
+        op: "fillRect", w, h, fill: props.fillStyle,
+        composite: props.globalCompositeOperation, alpha: props.globalAlpha,
+      });
+    }
+    return () => {};
+  },
+  set(_target, prop, value) { props[prop] = value; return true; },
+});
+const makeCanvas = () => ({ width: 0, height: 0, getContext: () => ctx });
+const context = vm.createContext({
+  __calls: calls,
+  console, Date, JSON, Object, Array, Number, String, Math, isFinite, parseInt,
+  document: { createElement: () => makeCanvas() },
+  Path2D: class { moveTo() {} lineTo() {} closePath() {} },
+});
+context.globalThis = context;
+context.window = context;
+vm.runInContext(readFileSync("tools/sgs_web/static/fx-core.js", "utf8"), context,
+                { filename: "fx-core.js" });
+
+const report = vm.runInContext(`(() => {
+  const stage = {
+    src: { cx: 620, cy: 360, w: 230, h: 320 },
+    dst: { cx: 1080, cy: 360, w: 230, h: 320 },
+  };
+  const timing1 = {
+    damage_fx_1_total: 1500, damage_fx_1_flight: 130,
+    damage_fx_1_impact: 330, damage_fx_1_fade: 700,
+  };
+  const timing4 = {
+    damage_fx_4_total: 2100, damage_fx_4_flight: 110,
+    damage_fx_4_impact: 340, damage_fx_4_fade: 950,
+  };
+  const draw = (opts, at) => {
+    __calls.length = 0;
+    const fx = SgsDamageFX.create(document.createElement("canvas"), opts);
+    fx.draw(at);
+    return { fx, calls: __calls.slice() };
+  };
+  const cards = (calls) => calls.filter((call) => call.op === "drawImage" && call.w !== 1920);
+  /** 全屏填充（铺满 1920×1080 的那一张）：牌桌档一次都不许有"不透明"的。 */
+  const fullScreen = (calls) => calls.filter(
+    (call) => call.op === "fillRect" && call.w >= 1920 && call.h >= 1080);
+
+  // 参考舞台（不传 stage / amount / bare）：素材库那条链的回归钉。
+  const plain = draw({ variant: 1, dpr: 1 }, 0.70);
+  // 牌桌档：只出特效（不画纸底 / 样例武将牌），飘字仍是服务端真实值。
+  const bare1 = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 3, dpr: 1, stage, bare: true,
+  }, 0.80);
+  // 实机验收 R2 的**真机读数**：武将块约 250×240 CSS px、覆盖层约 660×371 CSS px、dpr 1.5。
+  // 牌桌档的坐标就是覆盖层的 CSS px，故几何直接按这两块算（不再有 1920→目标 的缩小）。
+  const screenStage = {
+    src: { cx: 180, cy: 190, w: 250, h: 240 },
+    dst: { cx: 480, cy: 190, w: 250, h: 240 },
+  };
+  // 派发者真机读数：体力条（.hp-bar）在牌高的 34.7%~42.3% 之间 ⇒ 下沿 101.5px。
+  const hpBar = { top: 0.347 * 240, bottom: 0.423 * 240 };
+  const screen = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1.5,
+    stage: screenStage, bare: true, view: { width: 660, height: 371 },
+    numberKeepOut: hpBar.bottom,
+  }, 0.80);
+  // 大牌桌（1920 宽、武将块 630×600）：构图比例应跟着牌走，不受落屏下限牵动。
+  const big = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1,
+    stage: { src: { cx: 400, cy: 500, w: 630, h: 600 }, dst: { cx: 1400, cy: 500, w: 630, h: 600 } },
+    bare: true, view: { width: 1920, height: 1080 },
+  }, 0.80);
+  // 评审修复：无来源（source == null）的"从画面外飞入"形状——覆盖层把来源矩形整块挪到
+  // 画面左外（cx = -dst.w / 2 - 200，与 effects.js:damageFxPlanFor 同形）。这里读解出来的
+  // 航线起点 stage.a.x，看它是不是真的在画面外。
+  const view660 = { width: 660, height: 371 };
+  const onscreen = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+    view: view660, stage: screenStage,
+  }, 0.80);
+  const offstage = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+    view: view660,
+    stage: {
+      src: {
+        cx: -screenStage.dst.w / 2 - 200, cy: screenStage.dst.cy,
+        w: screenStage.dst.w, h: screenStage.dst.h,
+      },
+      dst: screenStage.dst,
+    },
+  }, 0.80);
+
+  // 牌高的扫掠（R3 的两条不变式必须在任何牌高下都成立，不只是真机那一档）：
+  const sweep = [];
+  for (const h of [60, 87, 105, 150, 240, 400, 644]) {
+    const w = Math.round(h * 0.75);
+    const base = {
+      variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+      view: { width: 800, height: 700 },
+      stage: { src: { cx: 200, cy: 350, w, h }, dst: { cx: 600, cy: 350, w, h } },
+    };
+    // 一次不带硬线（走兜底比例），一次带 DOM 硬线（体力条下沿 = 42.3% 牌高）
+    for (const [kind, keepOut] of [["fallback", null], ["hpBar", 0.423 * h]]) {
+      const opts = { ...base };
+      if (keepOut !== null) opts.numberKeepOut = keepOut;
+      sweep.push({ h, kind, hpBarBottom: keepOut, metrics: SgsDamageFX.create(
+        document.createElement("canvas"), opts).metrics });
+    }
+  }
+  // 牌桌：座位矩形 + 服务端的真实伤害值（7 点仍按 4 档演）
+  const tuned = draw({
+    variant: 4, profile: "game", timing: timing4, amount: 7, dpr: 1, stage,
+  }, 0.50);
+  // 4 点档的屏闪 + 劈屏窗口：素材库档会铺纸底 / 黑缝 / 整屏去色，牌桌档一样都不许有
+  const plain4 = draw({ variant: 4, profile: "game", timing: timing4, amount: 3, dpr: 1 }, 0.39);
+  const bare4 = draw({
+    variant: 4, profile: "game", timing: timing4, amount: 3, dpr: 1, stage, bare: true,
+  }, 0.39);
+
+  const texts = (calls) => calls.filter((call) => call.op === "fillText").map((call) => call.text);
+  /** 飘字那一笔的**实际字号**（font = '700 <N>px …'），用来看落屏是否 1:1。 */
+  const numberFont = (calls, text) => {
+    const hit = calls.filter(
+      (call) => call.op === "fillText" && call.text === text && /\\d+px/.test(String(call.font)));
+    if (!hit.length) return null;
+    return Number(/(\\d+(?:\\.\\d+)?)px/.exec(String(hit[hit.length - 1].font))[1]);
+  };
+  /** 画到画布上的最后一笔某个文案的位置（字心）。 */
+  const drawnAt = (calls, text) => {
+    const hit = calls.filter((call) => call.op === "fillText" && call.text === text);
+    return hit.length ? { x: hit[hit.length - 1].x, y: hit[hit.length - 1].y } : null;
+  };
+  const fallback = SgsDamageFX.create(document.createElement("canvas"), { variant: 2, dpr: 1 });
+  const degenerate = SgsDamageFX.create(document.createElement("canvas"), {
+    variant: 1, dpr: 1, stage: { src: { w: 0, h: 0 } },
+  });
+
+  return JSON.stringify({
+    plain: {
+      stage: plain.fx.stage, number: plain.fx.number, duration: plain.fx.duration,
+      bare: plain.fx.bare, cards: cards(plain.calls).map((call) => call.args),
+      width: plain.fx.width, height: plain.fx.height,
+      numberOffset: plain.fx.numberOffset, metrics: plain.fx.metrics,
+    },
+    bare: {
+      stage: bare1.fx.stage, number: bare1.fx.number, duration: bare1.fx.duration,
+      bare: bare1.fx.bare, draws: bare1.calls.filter((call) => call.op === "drawImage").length,
+      cards: cards(bare1.calls).length, texts: texts(bare1.calls),
+      fullScreen: fullScreen(bare1.calls),
+    },
+    bare4: { fullScreen: fullScreen(bare4.calls), cards: cards(bare4.calls).length },
+    plain4: { fullScreen: fullScreen(plain4.calls) },
+    tuned: {
+      stage: tuned.fx.stage, number: tuned.fx.number, duration: tuned.fx.duration,
+      timeline: tuned.fx.timeline, cards: cards(tuned.calls).map((call) => call.args),
+      texts: texts(tuned.calls),
+    },
+    screen: {
+      width: screen.fx.width, height: screen.fx.height,
+      stage: screen.fx.stage, metrics: screen.fx.metrics, bare: screen.fx.bare,
+      numberOffset: screen.fx.numberOffset, duration: screen.fx.duration,
+      numberFont: numberFont(screen.calls, "-1"),
+      numberDraw: drawnAt(screen.calls, "-1"),
+      hpBar: hpBar,
+      cardTop: screen.fx.stage.dst.cy - screen.fx.stage.dst.h / 2,
+      floor: SgsDamageFX.COMPOSITION_FLOOR, screenMin: SgsDamageFX.SCREEN_MIN,
+    },
+    sweep: sweep,
+    onscreen: { stage: onscreen.fx.stage },
+    offstage: { stage: offstage.fx.stage },
+    big: { stage: big.fx.stage, metrics: big.fx.metrics, floor: SgsDamageFX.COMPOSITION_FLOOR },
+    fallback: { number: fallback.number, bare: fallback.bare, numberOffset: fallback.numberOffset },
+    degenerate: degenerate.stage,
+  });
+})()`, context);
+process.stdout.write(report);
+"""
+
+
+@pytest.fixture(scope="module")
+def damage_fx_stage_probe() -> dict:
+    """真 `fx-core.js`（node vm）跑一遍：座位矩形映射 + `amount` 飘字 + 参考舞台不变。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "damage_fx_stage_probe.mjs"
+        probe.write_text(_DAMAGE_FX_STAGE_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"damage-fx 座位探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def test_the_damage_fx_number_comes_from_the_server_amount(damage_fx_stage_probe: dict) -> None:
+    """票面 §6.1：档位只决定强度，飘字画**服务端**的 `amount`（`amount ≥ 5` 仍按 4 档演）。"""
+    probe = damage_fx_stage_probe
+    assert probe["tuned"]["number"] == "-7", (
+        f"7 点伤害要画 -7（档位封顶在 4 档，数字不封顶）：{probe['tuned']['number']}"
+    )
+    assert "-7" in probe["tuned"]["texts"], (
+        f"真的画到了画布上：{sorted(set(probe['tuned']['texts']))[:8]}"
+    )
+    assert probe["tuned"]["duration"] == pytest.approx(2.1), "4 点档的时长仍来自 anim.ini"
+    assert probe["tuned"]["timeline"]["DURATION"] == pytest.approx(2.1)
+    assert probe["fallback"]["number"] == "-2", (
+        "不传 amount ⇒ 与参考实现一致（该档的 dmg）"
+    )
+    assert probe["plain"]["number"] == "-1"
+    assert probe["plain"]["bare"] is False, "缺省不是牌桌档：素材库 / 截图仍是完整舞台"
+    assert probe["bare"]["number"] == "-3", "牌桌档（bare）的飘字同样用服务端 amount"
+
+
+def test_the_damage_fx_stage_maps_the_two_seat_rects_without_touching_the_export_chain(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """票面 §6.2：两张牌的矩形换成量出来的座位矩形，画布铺满、内部缩放；缺省舞台不变。"""
+    probe = damage_fx_stage_probe
+    plain = probe["plain"]
+    assert plain["duration"] == 12, "export 档的 12 秒链一字不动"
+    assert plain["stage"]["src"] == {"cx": 520, "cy": 545, "w": 460, "h": 644}
+    assert plain["stage"]["dst"] == {"cx": 1400, "cy": 545, "w": 460, "h": 644}
+    assert plain["stage"]["u"] == 1
+    assert plain["stage"]["a"] == {"x": 752, "y": 582}
+    assert plain["stage"]["b"] == {"x": 1332, "y": 516}
+    assert plain["cards"] == [
+        [216, 149, 608, 792],
+        [1096, 149, 608, 792],
+    ], f"参考舞台的贴图位置 / 尺寸不许漂：{plain['cards']}"
+
+    tuned = probe["tuned"]["stage"]
+    stage = {"src": {"cx": 620, "cy": 360, "w": 230, "h": 320},
+             "dst": {"cx": 1080, "cy": 360, "w": 230, "h": 320}}
+    assert tuned["src"] == stage["src"] and tuned["dst"] == stage["dst"], (
+        "两张牌的矩形原样就是覆盖层量出来的那两块"
+    )
+    # 构图比例 = 按参考牌 460×644 contain 的最小比例（320 / 644）
+    assert tuned["u"] == pytest.approx(320 / 644), f"构图比例按参考牌等比缩：{tuned['u']}"
+    # 剑光航线跟着两张牌走（参考舞台的比例：A 在出剑牌右缘外、B 在中剑牌内偏左上）
+    assert tuned["a"]["x"] == pytest.approx(620 + 0.5043 * 230, abs=0.02)
+    assert tuned["a"]["y"] == pytest.approx(360 + 0.05745 * 320, abs=0.02)
+    assert tuned["b"]["x"] == pytest.approx(1080 - 0.14783 * 230, abs=0.02)
+    assert tuned["b"]["y"] == pytest.approx(360 - 0.04503 * 320, abs=0.02)
+
+    pad_x = 74 * 230 / 460
+    pad_y = 74 * 320 / 644
+    expected = [
+        [620 - 115 - pad_x, 360 - 160 - pad_y, 230 + pad_x * 2, 320 + pad_y * 2],
+        [1080 - 115 - pad_x, 360 - 160 - pad_y, 230 + pad_x * 2, 320 + pad_y * 2],
+    ]
+    cards = probe["tuned"]["cards"]
+    assert len(cards) == 2, f"两张武将牌各贴一次：{cards}"
+    for drawn, want in zip(cards, expected):
+        assert drawn == pytest.approx(want, abs=0.02), (
+            f"两张牌要贴进量出来的矩形（阴影按同一比例外扩）：{cards}"
+        )
+
+    assert probe["degenerate"]["src"] == {"cx": 520, "cy": 545, "w": 460, "h": 644}, (
+        "量不到布局（0 宽 / 缺字段）⇒ 退回参考舞台，不让页面报错"
+    )
+
+
+def test_the_table_profile_draws_the_effects_only_without_covering_the_table(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """票 05 返工（实机验收）：牌桌档 `bare` 只出特效——牌桌全程透得出来。
+
+    实机（Edge 156 + bsk 0.4.2）上被打回的是**不透明覆盖**：宣纸底铺满整个牌桌壳、
+    真牌上叠了两张参考实现的样例武将牌（关羽 / 吕布）。故 `bare: true` 时：
+
+    - 一次 `drawImage` 都不做（纸底与两张样例牌都不画）；
+    - 4 点档的"缝隙黑底"与"整屏去色"这两张不透明度 1 的全屏填充也一并免掉
+      （`saturation` 合成喂给透明层只会得到一张不透明的灰，等于盖住牌桌）；
+    - 剑光 / 刀痕 / 墨点 / 飘字照旧，座位矩形与飘字数值不受影响。
+
+    `?still` / `?export` 那条素材库链**逐字节不变**（缺省不 bare，见上面两条用例）。
+    """
+    probe = damage_fx_stage_probe
+    bare = probe["bare"]
+    assert bare["bare"] is True
+    assert bare["draws"] == 0, f"牌桌档一次贴图都不该做（纸底 / 样例武将牌）：{bare['draws']}"
+    assert bare["cards"] == 0, "参考实现的样例武将牌不许画到真实武将块上"
+    assert bare["texts"] and "-3" in bare["texts"], "飘字照旧画（数值来自服务端 amount）"
+    assert bare["stage"]["src"] == {"cx": 620, "cy": 360, "w": 230, "h": 320}
+    assert bare["stage"]["dst"] == {"cx": 1080, "cy": 360, "w": 230, "h": 320}
+    assert bare["duration"] == pytest.approx(1.5), "摘层时长仍来自 anim.ini 的 total"
+
+    def opaque_full_screen(fills: list[dict]) -> list[dict]:
+        """判定"盖住牌桌"的那两张：缝隙黑底（`#0d0c0b`）与整屏去色（`saturation`）。"""
+        return [
+            fill for fill in fills
+            if fill["fill"] == "#0d0c0b" or fill["composite"] == "saturation"
+        ]
+
+    assert opaque_full_screen(bare["fullScreen"]) == [], (
+        f"牌桌档不许有全屏不透明填充：{bare['fullScreen']}"
+    )
+    assert opaque_full_screen(probe["bare4"]["fullScreen"]) == [] and probe["bare4"]["cards"] == 0, (
+        "4 点档（屏闪 + 劈屏窗口）同样不许有全屏填充、不许贴样例牌"
+    )
+    # 反过来钉住素材库档：同一时刻它**应该**有那两张全屏填充（否则就是两档串了）。
+    kinds = {
+        "split" if fill["fill"] == "#0d0c0b" else "strobe"
+        for fill in opaque_full_screen(probe["plain4"]["fullScreen"])
+    }
+    assert kinds == {"split", "strobe"}, (
+        f"?still / ?export 那条链必须保持原样（缝隙黑底 + 整屏去色）：{kinds}"
+    )
+
+
+def test_the_table_profile_renders_at_target_size_with_legible_sizes(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """票 05 R2（实机返工）：渲染尺度按**目标设备尺寸**，且落屏尺寸有下限。
+
+    真机读数：武将块约 250×240 CSS px、覆盖层约 660×371 CSS px、dpr 1.5。旧实现把
+    1920×1080 舞台整块缩到 660 宽（≈ 3 倍降采样）再叠上构图比例 0.37，1 点档的刀痕
+    落屏只剩 ~2 设备 px，被抹成一条灰铅笔线。现在：
+
+    - 画布直接按覆盖层的 CSS 尺寸建（内部 1:1 合成，没有整块降采样）；
+    - 座位矩形就是覆盖层坐标，不再做 `1920 → 目标` 的换算；
+    - 构图比例 `u` 有**落屏下限**（`COMPOSITION_FLOOR`），保证刀痕墨身 ≥ 4 CSS px、
+      飘字字高 ≥ 40 CSS px、剑光主体一眼认得出；
+    - 飘字从牌心略下起飘，不压真实武将块顶部的体力条；素材库那份偏移一个数都不动。
+    """
+    probe = damage_fx_stage_probe
+    screen = probe["screen"]
+
+    # 1) 画布 = 覆盖层的 CSS 尺寸（内部 1:1，无整块缩放）
+    assert (screen["width"], screen["height"]) == (660, 371), (
+        f"牌桌档按目标尺寸建画布：{screen['width']}×{screen['height']}"
+    )
+    assert screen["bare"] is True, "牌桌档必须只出特效"
+
+    # 2) 座位矩形就是覆盖层的 CSS px，构图比例抬到落屏下限
+    assert screen["stage"]["src"] == {"cx": 180, "cy": 190, "w": 250, "h": 240}
+    assert screen["stage"]["dst"] == {"cx": 480, "cy": 190, "w": 250, "h": 240}
+    card_scale = min(250 / 460, 240 / 644)
+    assert screen["stage"]["u"] == pytest.approx(screen["floor"]), (
+        f"小牌上构图比例必须抬到落屏下限：u={screen['stage']['u']} floor={screen['floor']}"
+    )
+    assert screen["floor"] > card_scale, "下限必须真的抬起来（否则 1 点档还是铅笔线）"
+    assert screen["screenMin"]["scar"] >= 4, "下限尺寸不许低于验收线（刀痕 4 CSS px）"
+    assert screen["screenMin"]["number"] >= 40, "下限尺寸不许低于验收线（飘字字高 40 CSS px）"
+
+    # 3) 三样落屏尺寸都达线
+    metrics = screen["metrics"]
+    assert metrics["scar"] >= 4, f"刀痕墨身 ≥ 4 CSS px：{metrics['scar']}"
+    assert metrics["number"] >= 40, f"飘字字高 ≥ 40 CSS px：{metrics['number']}"
+    assert metrics["sword"] >= 5, f"剑光主体 ≥ 5 CSS px：{metrics['sword']}"
+
+    # 4) 飘字的**实际绘制字号**与落屏尺寸同源（画布即目标尺寸 ⇒ 1:1，不再被缩小）
+    assert screen["numberFont"] == pytest.approx(metrics["number"] / 0.7, rel=0.01), (
+        f"画到画布上的字号 = numSize：{screen['numberFont']} vs {metrics['number'] / 0.7}"
+    )
+
+    # 5) R4：飘字的**包围盒**与中剑方 `.hp-bar`（体力条）**不相交**，且留 ≥2% 牌高的余量。
+    #    判据是 DOM 真值（覆盖层量 `.hp-bar` 的下沿传进来），不是"牌高百分之几"。
+    card = screen["metrics"]["card"]
+    box = screen["metrics"]["numberBox"]
+    bar = screen["hpBar"]
+    assert screen["metrics"]["keepOut"] == pytest.approx(bar["bottom"]), (
+        f"硬线必须就是体力条下沿（DOM 真值）：{screen['metrics']['keepOut']} vs {bar['bottom']}"
+    )
+    assert box["top"] >= bar["bottom"] + 0.02 * card["h"] - 1e-6, (
+        f"飘字包围盒必须与体力条矩形不相交且留 2% 牌高余量：top={box['top']:.2f} "
+        f"< 体力条下沿 {bar['bottom']:.2f} + {0.02 * card['h']:.2f}（牌高 {card['h']}）"
+    )
+    assert box["bottom"] > bar["top"], "飘字必须在体力条**下面**（不是从上面压下来）"
+
+    assert box["bottom"] <= card["h"], f"包围盒不许溢出牌底：{box}"
+    assert box["height"] <= 0.35 * card["h"] + 1e-6, (
+        f"字高 ≤ 牌高 35%：{box['height']:.2f} > {0.35 * card['h']:.2f}（牌高 {card['h']}）"
+    )
+    assert box["height"] >= 40 - 1e-6, f"真机这一档字高仍 ≥ 40 CSS px：{box['height']}"
+
+    # 5b) 分析出来的包围盒必须与**真的画到哪**对得上（否则判据是自说自话）
+    drawn = screen["numberDraw"]
+    assert drawn is not None, "牌桌档必须真的把飘字画出来"
+    assert screen["cardTop"] + box["top"] - 1e-6 <= drawn["y"] <= screen["cardTop"] + box["bottom"] + 1e-6, (
+        f"画出来的字心 {drawn['y']:.1f} 必须落在包围盒里 "
+        f"[{screen['cardTop'] + box['top']:.1f}, {screen['cardTop'] + box['bottom']:.1f}]"
+    )
+
+    # 5c) 牌高扫掠：两条不变式在任何牌高下都成立（上限在小牌上优先于 40px 下限，
+    #     否则小牌块上必然二选一：这是 R3 明确的口径，写在 `create` 的注释里）。
+    #     每档跑两次：不带硬线（走兜底比例）与带 DOM 硬线（体力条下沿 = 42.3% 牌高）。
+    assert {entry["kind"] for entry in probe["sweep"]} == {"fallback", "hpBar"}
+    for entry in probe["sweep"]:
+        card_h = entry["h"]
+        box = entry["metrics"]["numberBox"]
+        keep_out = entry["metrics"]["keepOut"]
+        assert keep_out is not None and keep_out > 0, f"牌高 {card_h}：硬线必须算得出来"
+        if entry["kind"] == "hpBar":
+            assert keep_out == pytest.approx(entry["hpBarBottom"]), (
+                f"牌高 {card_h}：量到体力条就必须用它（不被兜底比例覆盖）：{keep_out}"
+            )
+        else:
+            assert keep_out == pytest.approx(0.45 * card_h), (
+                f"牌高 {card_h}：量不到体力条时才走兜底（牌高 45%）：{keep_out}"
+            )
+        assert box["top"] >= keep_out + 0.02 * card_h - 1e-6, (
+            f"牌高 {card_h}：包围盒顶 {box['top']:.2f} 越过了硬线 {keep_out:.2f} + 2%"
+        )
+        assert box["bottom"] <= card_h + 1e-6, f"牌高 {card_h}：包围盒溢出牌底 {box}"
+        assert box["height"] <= 0.35 * card_h + 1e-6, (
+            f"牌高 {card_h}：字高 {box['height']:.2f} > 35% 上限 {0.35 * card_h:.2f}"
+        )
+        floor = 40 if 40 <= 0.35 * card_h else 0.35 * card_h
+        assert box["height"] >= floor - 1e-6, (
+            f"牌高 {card_h}：字高 {box['height']:.2f} 低于可用下限 {floor:.2f}"
+        )
+
+    # 6) 大牌桌（1920 宽、630×600 的武将块）：构图跟着牌走，不受下限牵动
+    assert probe["big"]["stage"]["u"] == pytest.approx(min(630 / 460, 600 / 644))
+    assert probe["big"]["metrics"]["scar"] > screen["metrics"]["scar"]
+
+    # 7) 素材库那条链：画布仍是 1920×1080，飘字偏移一个数都不动
+    assert (probe["plain"]["width"], probe["plain"]["height"]) == (1920, 1080)
+    assert probe["plain"]["numberOffset"]["dy"] == pytest.approx(55 / 644)
+    assert probe["plain"]["numberOffset"]["rise"] == pytest.approx(92 / 644)
+
+
+# ---------------------------------------------------------------------------
+# damage-fx 票 06：伤害音效 —— 解锁、对齐、静音缺省
+#
+# 票面只要求三件可机械判的事：
+# 1. **静音缺省**：`localStorage['sgs.sfx']` 缺省 `'off'`，顶栏「♪」是唯一开关；
+# 2. **解锁**：一次性 `pointerdown`，`resume()` 与手势**同一个 tick**（不许经过 await / 计时器）；
+# 3. **对齐**：`tick` 的 `t` 就是 `fx.draw(t)` 的那个 `seconds`，cue 时刻取该档的 `fx.timeline`；
+#    导出链（`renderAt(t)`）与素材库那条链一声不响。
+#
+# 行为（按钮 / 记忆 / 同一秒 / 摘层即收声 / 无 AudioContext 降级）归烟测 `U-SFX-01..05`；
+# 电平（真的出声）归 `?audiotest=1` + `OfflineAudioContext`（`SgsSfx.renderOffline`）。
+# ---------------------------------------------------------------------------
+
+_MAIN_JS = STATIC_DIR / "main.js"
+
+
+def _js_function_with_defaults(source: str, name: str) -> str:
+    """同 :func:`_js_function`，但容得下带默认值的形参（`now = stageNow()`）。
+
+    `_js_function` 的 `[^)]*` 会在默认值里的那个 `)` 上提前收口；`renderDamageFrame` 与
+    `stageNow` 这类哨兵默认值是全仓写法，故这里按"行首 `}` 收尾"取正文。
+    """
+    start = source.find(f"function {name}(")
+    assert start >= 0, f"找不到函数 {name}()"
+    end = source.find("\n}", start)
+    assert end >= 0, f"函数 {name}() 没有行首收尾的 }}"
+    return source[start:end]
+
+
+def test_the_sfx_toggle_is_the_single_topbar_switch_and_defaults_to_off() -> None:
+    """顶栏「♪ 音效 关」：`type=button`、`aria-pressed=false`、位置在设置之后导航之前。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    button = re.search(r'<button\b[^>]*\bid="btn-sfx"[^>]*>(?P<body>.*?)</button>', html, re.S)
+    assert button is not None, "index.html 里缺少顶栏音效开关 #btn-sfx（票 06 §做法 2）"
+    assert re.search(r'\btype="button"', button.group(0)), (
+        f"#btn-sfx 必须是 type=\"button\"：{button.group(0)}"
+    )
+    assert 'aria-pressed="false"' in button.group(0), "缺省关：aria-pressed 必须是 false"
+    assert "♪" in button.group("body") and "音效 关" in button.group("body"), (
+        f"缺省文案必须是「♪ 音效 关」：{button.group('body')}"
+    )
+    assert html.count('id="btn-sfx"') == 1, "音效开关只许有一枚（不做角落 chip，不做第二处开关）"
+    assert "sfx-chip" not in html, "参考实现的右下角 chip 不进牌桌"
+
+    topbar = html[html.index('id="table-topbar"'):html.index('id="table-stage"')]
+    order = [
+        "t-deck", "btn-discard", "t-discard", "btn-settings", "btn-sfx",
+        "nav-lobby", "nav-table", "nav-replay",
+    ]
+    positions = [topbar.index(f'id="{name}"') for name in order]
+    assert positions == sorted(positions), (
+        f"顶栏右端顺序必须是 牌堆 / 弃牌 / 设置 / 音效 / 导航三键：{dict(zip(order, positions))}"
+    )
+
+    rule = _css_rule(".sfx-btn")
+    assert re.search(r"opacity:\s*\.?\d", rule), f"关着时要收着（半透明）：{rule}"
+    assert re.search(r"\.sfx-btn\.on\s*\{", _CSS_TEXT), "开着要有独立的 .on 档（亮起）"
+
+
+def test_the_damage_sfx_state_machine_is_gesture_unlocked_and_remembers_the_switch() -> None:
+    """缺省静音 / 一次性手势解锁 / 开关记忆：三条都在代码结构上钉住。"""
+    effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+    main = _strip_js_comments(_MAIN_JS.read_text(encoding="utf-8"))
+
+    assert re.search(r'^const DAMAGE_SFX_KEY = "sgs\.sfx";$', effects, re.M), (
+        "持久化键必须是 localStorage['sgs.sfx']（票面 §做法 2）"
+    )
+    assert re.search(r'^const DAMAGE_SFX_OFF = "off";$', effects, re.M), "缺省值必须是 'off'"
+    assert re.search(r'^const DAMAGE_SFX_ON = "on";$', effects, re.M), "开着记 'on'"
+
+    remembered = _js_function(effects, "damageSfxRemembered")
+    assert "=== DAMAGE_SFX_ON" in remembered, (
+        "只有 'on' 算开；缺键 / 'off' / 别的值一律静音（缺省静音不许被杂值绕过）"
+    )
+    sync = _js_function(effects, "damageSfxSync")
+    assert "damageSfxRemembered()" in sync, "启动时读一次记忆"
+    assert "damageSfxRemember(" not in sync, "启动时**不写**记忆（没点过就不留键）"
+    assert "damageSfxSyncButton()" in sync, "启动时把文案刷成记忆里的状态"
+
+    wire_body = _js_function(main, "wire")
+    assert 'document.addEventListener("pointerdown", unlockAudio, { once: true })' in wire_body, (
+        "解锁挂在**一次性** pointerdown 上（票面 §做法 1：点哪里都算手势）"
+    )
+    assert '$("btn-sfx").addEventListener("click", damageSfxToggle)' in wire_body, (
+        "顶栏「♪」是唯一开关"
+    )
+    assert "damageSfxSync()" in wire_body, "wire() 里先读记忆再接线"
+    assert "damageSfxAudiotestRequested()" in wire_body and "damageSfxAudiotest()" in wire_body, (
+        "?audiotest=1 在装配末尾触发（离线电平自检）"
+    )
+
+    unlock = _js_function(main, "unlockAudio")
+    assert "damageSfxUnlock()" in unlock, "手势处理器同步交给 effects.js"
+    assert "removeEventListener" in unlock, "一次性：跑过就把自己摘掉"
+    assert "await" not in unlock and "setTimeout" not in unlock and "fetch" not in unlock, (
+        "resume() 必须在手势的**同一个 tick**：不许经过 await / 计时器 / 回调"
+    )
+
+    unlock_fx = _js_function(effects, "damageSfxUnlock")
+    assert "if (!damageSfxOn) return false;" in unlock_fx, (
+        "开关关着时连 AudioContext 都不建（缺省静音是零代价的）"
+    )
+    ensure = _js_function(effects, "damageSfxEnsureLanes")
+    assert "DAMAGE_FX_CONCURRENCY" in ensure, (
+        "声道数 = 同时在播上限（3）：一条声道一路时钟，否则三条并发会互相吞 cue"
+    )
+    assert "player.start()" in ensure, "建声道的那一次就要 start()（同一个 tick 里 resume）"
+    set_enabled = _js_function(effects, "damageSfxSetEnabled")
+    assert "if (damageSfxOn) damageSfxEnsureLanes();" in set_enabled, (
+        "点开「♪」本身就是手势：声道在这一下建"
+    )
+    assert "damageSfxRemember(damageSfxOn)" in set_enabled, "开关状态写进 localStorage"
+    assert "damageSfxSyncButton()" in set_enabled, "文案 / aria-pressed / .on 同处更新"
+
+
+def test_the_damage_sfx_tick_shares_the_play_clock_and_the_export_chain_stays_silent() -> None:
+    """`tick` 吃演出自己的 `seconds`（与 `fx.draw` 同一个变量）；导出 / 素材库链一声不响。"""
+    effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+
+    frame = _js_function_with_defaults(effects, "renderDamageFrame")
+    assert "play.fx.draw(seconds)" in frame, "画面用 `seconds`（一次性算好的演出秒数）"
+    assert "damageSfxTick(play, seconds)" in frame, (
+        "音效必须吃**同一个** `seconds`——另起墙钟会漂（票面 §做法 3）"
+    )
+    assert "Date.now" not in frame and "performance.now" not in frame, (
+        "演出帧里不许再读墙钟"
+    )
+
+    tick = _js_function(effects, "damageSfxTick")
+    assert "lane.player.tick(seconds, voice)" in tick, "tick 的 t 就是演出秒数"
+    for wall_clock in ("Date.now", "stageNow", "performance.now", "requestAnimationFrame"):
+        assert wall_clock not in tick, f"音效时钟里不许出现 {wall_clock}（不另起墙钟）"
+    assert effects.count("damageSfxTick(") == 2, (
+        "tick 只有一个驱动点（定义 + renderDamageFrame 里那一次）"
+    )
+
+    voice = _js_function(effects, "damageSfxVoice")
+    assert "play.fx && play.fx.timing" in voice, (
+        "档位参数取 anim.ini 解算出来的毫秒表（票 04），不另写一份数字"
+    )
+    for field in ("flight", "strobe", "split"):
+        assert f'timing.{field}' in voice, f"sfx.js 要的 {field} 必须从 timing 折算"
+
+    start = _js_function(effects, "damageSfxStart")
+    assert "damageSfxTimeline(play.fx && play.fx.timeline)" in start, (
+        "cue 时刻取**这一档**的 fx.timeline（anim.ini 解算出来的那一份）"
+    )
+    assert "play.slot" in start, "一条并发演出一条声道（槽位唯一）"
+
+    assert "damageSfxStop(play)" in _js_function(effects, "finishDamagePlay"), (
+        "摘层即收声"
+    )
+    assert "damageSfxStopAll()" in _js_function(effects, "clearDamageFx"), (
+        "换局 / 版式作废：在播的演出一起收声"
+    )
+
+    # 导出链（`renderAt(t)` / `?export=1` / 素材库）一声不响：fx-core 根本不认识 SgsSfx，
+    # 牌桌也不提供 `renderAt` 这条路。
+    fx_core = (STATIC_DIR / "fx-core.js").read_text(encoding="utf-8")
+    assert "SgsSfx" not in fx_core, "画面那份脚本不许碰音效（导出链只驱动画面）"
+    assert "renderAt" not in effects, "牌桌不提供 renderAt（导出是素材库那条链的事）"
+
+    audiotest = _js_function(effects, "damageSfxAudiotest")
+    assert "renderOffline" in audiotest, "自检走 SgsSfx.renderOffline（纯函数式）"
+    assert "gameTiming(" in audiotest, "四档各自的时间轴都渲染一遍"
+    assert 'setAttribute("data-audio"' in audiotest, "电平写进 <html data-audio>"
+    assert "unavailable" in audiotest, "没有 OfflineAudioContext ⇒ unavailable（不抛错）"
+    requested = _js_function(effects, "damageSfxAudiotestRequested")
+    assert "audiotest=1" in requested, "只认 ?audiotest=1"
+
+
+def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_files() -> None:
+    """调音台：`VOICE` 表在文件顶部单独一段，六个声音是六个独立函数，仓库里没有音频文件。"""
+    text = (STATIC_DIR / "sfx.js").read_text(encoding="utf-8")
+    block = re.search(r"var VOICE = \{(?P<body>.*?)\n  \};", text, re.S)
+    assert block is not None, "sfx.js 顶部必须有一张 `var VOICE = { … }` 调音台"
+    keys = re.findall(r"^    (\w+):", block.group("body"), re.M)
+    assert keys == ["riser", "shing", "whoosh", "impact", "strobe", "split"], (
+        f"调音台必须是这六行（六个声音各一行）：{keys}"
+    )
+    for voice in keys:
+        assert re.search(rf"^  function {voice}\(", text, re.M), (
+            f"{voice} 必须是独立函数（用户要逐一替换，不许合并成一个大函数）"
+        )
+    assert text.index("var VOICE") < text.index("function riser("), (
+        "调音台必须在六个函数**之前**（改一个数就生效，不用碰合成代码）"
+    )
+    assert text.index("function scheduleAll(") > text.index("function split("), (
+        "排播在六个声音之后（表 → 声音 → 排播 → 播放器的次序）"
+    )
+
+    audio_suffixes = {".mp3", ".ogg", ".wav", ".m4a", ".flac", ".aac"}
+    found: list[Path] = []
+    for root in (
+        REPO_ROOT / "tools", REPO_ROOT / "src", REPO_ROOT / "tests",
+        REPO_ROOT / "docs", REPO_ROOT / "开发文档",
+    ):
+        if not root.exists():
+            continue
+        found.extend(
+            path for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in audio_suffixes
+        )
+    assert not found, (
+        f"音效全部现场合成，仓库里不得出现音频文件（票面 §音效以后怎么改）：{[str(p) for p in found[:5]]}"
+    )
+
+
+def test_the_damage_nature_check_treats_null_as_normal(damage_fx_probe: dict) -> None:
+    """评审修复：`nature: null` ≡ 无属性 ⇒ 必须播；只有 `FIRE` / `THUNDER` 跳过。
+
+    三层文档同一句话：`game.py:note_damage`「`None` = 牌面没声明，等同无属性」、
+    `projection.py:damage_events_after`「缺声明保持 `None`，与"无属性"同义」、
+    `active.py:_quhu_burn`「无渠道牌、无属性」显式写 `"nature": None`。
+
+    早先的 `event.nature !== DAMAGE_FX_NATURE` 把 `null` 当成"火焰 / 雷电"一起丢了——
+    【驱虎】拼点那 1 点无属性伤害永远不演剑光。这里读的是**真 `effects.js` 的判定函数**
+    （探针按页面顺序加载 `anim.js` + `fx-core.js` + `effects.js`），不是另抄一份。
+    """
+    playable = damage_fx_probe["naturePlayable"]
+    assert playable["null"] is True, f"`null` 必须视同无属性（会播）：{playable}"
+    assert playable["undefined"] is True, f"缺字段同样是无属性：{playable}"
+    assert playable["NORMAL"] is True, f"显式 NORMAL 照旧播：{playable}"
+    assert playable["FIRE"] is False, f"火焰不播（本 effort 不接）：{playable}"
+    assert playable["THUNDER"] is False, f"雷电不播（本 effort 不接）：{playable}"
+
+
+def test_the_damage_fx_offstage_sword_path_starts_outside_the_screen(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """评审修复：`source == null` 的"从画面外飞入"补**几何断言**（不只有代码路径）。
+
+    覆盖层在无来源时把来源矩形整块挪到画面左外（`cx = -dst.w / 2 - 200`，与
+    `effects.js:damageFxPlanFor` 同形），fx-core 解出的航线起点 `stage.a.x` 必须 < 0；
+    有来源时起点在画面内。烟测 `U-DMG-06` / `U-DMG-06b` 从**真实产出路径**读
+    `#t-damage-fx` 的 `data-damage-fx-sword-x` 钉同一件事。
+    """
+    probe = damage_fx_stage_probe
+    offstage = probe["offstage"]
+    onstage = probe["onscreen"]
+    assert offstage["stage"]["a"]["x"] < 0, (
+        f"无来源 ⇒ 航线起点在画面外：a.x = {offstage['stage']['a']['x']}"
+    )
+    assert offstage["stage"]["src"]["cx"] < 0, (
+        f"来源块的矩形整块在画面外：src.cx = {offstage['stage']['src']['cx']}"
+    )
+    assert onstage["stage"]["a"]["x"] > 0, (
+        f"有来源 ⇒ 起点在画面内：a.x = {onstage['stage']['a']['x']}"
+    )
+    assert onstage["stage"]["a"]["x"] > offstage["stage"]["a"]["x"], "两者必须真的不同"

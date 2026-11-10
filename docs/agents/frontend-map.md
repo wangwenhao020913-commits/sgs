@@ -17,7 +17,7 @@
 | `card-face.js` | 卡面状态的纯函数：选中 / 置灰 / 槽位、`isProvide` / `provideSlotIndex`。 |
 | `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**判定 / 装备槽的简略牌面**（`miniSlotNode`：牌名 + 花色点数、转化牌右上角「转」；槽是否接点击由 `sideBlockRows` 的三条判据决定——自己的「提供一张 B」/「选牌面」/ 预发动 / **手选面里候选索引有的牌**（`equipCardPick`，改判窗口的装备区牌因此可点）；装备槽**有牌时不写**武器 / 防具 / 攻马 / 防马，判定槽常写；悬停走 `#t-card-preview` 的常规卡面），**武将牌上的牌区**（`heroZoneRows`，标签带张数与**悬停预览**——2026-11-07 起点击不再展开；非宿主悬停只给「牌面仅宿主可见」）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。**护甲段**（W7 的第二条体力轴）：`hpBarNode` 读 `players[].armor`（`PlayerPublic` → `seat_display` 补下），`> 0` 时在血条右侧接 `.armor-segs` / `.armor-seg`；`0` 时**一个节点都不加**（DOM 与引入护甲之前逐字节同形，自己座位经 `table.js` 搬 `hp.children` 自动带上）。**被废除（封印）的槽**由 `sideBlockRows` 读投影字段 `players[].sealed_zones`（`PlayerPublic` 下发；**票 03 起是槽 id**：判定 `judge_1..3`（`judgeSlotLayout` 的 `sealKey`，写成 `data-slot-key`；`data-slot="judge"` 仍是 `anim.js` 的落位锚点）+ 装备四槽）**逐槽**叠红色禁止角标（`markSealedZone` → `.zone-sealed` + `.zone-ban`，视觉照 `.skill.suppressed` 的 `.skill-ban`；**每个被废除的槽各画一个**，判定行 / 装备格本身不再画，**区域形状不变**；lukang-mobile 票 03 取代 lei 票 05 的"整区一个"）。 |
 | `table.js` | 环桌布局与表体渲染：`tableViewForRender`、`renderTable`、`renderProcessing`、`renderSkills`；座位交互态 `seatInteraction`（可指定 / 已选 / 必选，环上与底部面板共用）：手选目标、预发动座位步、**单选座位面**（`SELECT_OPTION` + `option_seats`），以及 **W1 的座位多选面**（`SELECT_OPTIONS` + `option_seats` 非空 ⇒ 池里的座位画可点、已选画 `tsel`；"能不能新选"的唯一判据 = `seatMultiPickable`，点击口也调它；已选 / 置灰集合每次渲染只算一份）。 |
-| `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
+| `effects.js` | 动效层，两条互不依赖的线。**① 牌桌既有动效**：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。**② 无属性伤害演出**（damage-fx 票 05 / 06，与 spec 的"派生态表现通道"同姿态）：`state.damageEvents` 队列 + `fireDamageEventsThrough(seq)`（与技能事件同一条 seq 游标，`null` 属性视同无属性、`FIRE`/`THUNDER` 跳过）→ 排播闸门 `pumpDamageQueue`（相邻错开 120ms、同时在播上限 3 条、超出丢队尾）→ `startDamagePlay` 用 `heroBlockFor` 量两张武将块的矩形（`source == null` 时来源挪到画面外，不猜来源）、取 `.hp-bar`（自己的座位 `#t-self-hp`）的下沿当飘字硬线，交给 `SgsDamageFX.create(…, {profile: "game", bare: true, amount, stage, view, numberKeepOut})`；**画布生命周期**也在这一层（`#t-damage-fx` 里只有一张可见 canvas、最多 3 张离屏舞台按槽复用、到 `duration` 摘层、版式变了（两张牌任一矩形变）作废、换局清队列）；3 / 4 点档给 `#table-shell` 挂灰阶滤镜窗口。**音效开关**同样住这里：`#btn-sfx` 的状态机（手势解锁 / 缺省静音 / `localStorage['sgs.sfx']` 记忆 / 无 `AudioContext` 时静默降级）与 `damageSfxTick` 的每帧驱动。 |
 | `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装；**步类型**只读服务端下发的 `Step.kind`（`preactivationStepKind`：选牌 / 座位 / 选项是规则级事实，不按 `pool[0].options[0]` 猜——目标由牌名决定的空行排最前时会猜错；yijiang-2014-round2 评审 Fix 2）；选项步的**置灰不可选**（`preactivationDisabled` 读 `StepPool.disabled`，画 `.dis` + 不接 click；票 04 §3）；多来源步的**合法来源组合**（`preactivationGroups` 读 `Step.groups`：卡面 / 「下一步」/ 「提交」三处同一判据，凑不成一组的来源既选不出也交不出；huo-mobile-batch 票 10）。 |
 | `interaction.js` | 点选：卡面芯片、点牌设焦点、点座位选目标、弃牌点选；**座位多选面的点选**（W1：`toggleSeatMultiPick` —— 点一下选中、再点取消，已选集合住 `state.selectedTargets`，因此重绘 / 轮询不丢；置灰与封顶判据走 `table.js:seatMultiPickable`，不在这里另抄一份）。 |
 | `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）；**同一时机的激活面**（`renderActivationFace`：一条 `SKILL_ACTIVATION` 有 ≥2 条 `ActivateSkill` 候选时铺"选一条发动"的逐技能行 + 末条「都不发动」，退出判据是候选里的 `Pass`；选中哪条就按 `activation_preactivations[skill_id]` 进它自己的清单，没有清单则一击即提交；`skill-face` 只在这个形状出现，单候选面仍走直提态）；**两行观看手牌的出口**（票 93：非应答者也画两行位置、空选择面的"只能放弃"明话；「提交」只在 `picks` 凑满 `spec.total` 下限时可点，左端取消只清本地选择、右端「放弃」送候选里的 `Pass`）；**未知区域弹窗的两档**（`cap===1` 一击即提交 / `cap>1` 点选 +「提交」，判据 `isUnknownZoneMultipick`；票 06）；**座位多选面**（W1：`renderKind` 的 `seat-multi` 档 —— `SELECT_OPTIONS` ∧ `option_seats` 非空 ⇒ 牌桌上点多个座位、一次提交，本地集合 / 区间 / 置灰 / 提交可点态分别住 `seatMultiChosenSeats` / `seatMultiFloor` / `seatMultiCap` / `seatMultiHint`（置灰集合 = `seatMultiDisabledSet`）；排在同类的 `multi` 档**之前**，绝不能落到 `multiChoice` 弹窗）。 |
@@ -31,9 +31,12 @@
 | `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
 | `replay.js` | 回放页：录像列表、按记录重建座位全区（含 `armor_change` 的护甲值——从 0 起逐条 `after` 重建，`> 0` 才在座位行里写「护甲 N」）、询问面板与播放控制。 |
 | `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；阶段 / 回合飘字（U4-04）的 `#t-anim-phase` 层与 `animPlanPhase` 也在这里；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |
+| `fx-core.js` | 无属性伤害演出的**画面**：`SgsDamageFX`（纯 Canvas 2D，零依赖、零请求、不接管 DOM）。四档 `VARIANTS`（伤害值 / 剑光粗细配色 / 刀痕 / 屏闪 / 劈屏）；两档时间轴——`export`（素材库 12s，`?still` / `?export` / `renderAt(t)` 走这条）与 `game`（牌桌：19 个 `damage_fx_*` 键来自 `anim.ini`，缺键回退 `DEFAULT_TIMING`，四条钳制含 `total ≤ MAX_TOTAL_MS = 2200`）。入口 `create(canvas, {variant, profile: "game", timing, amount, stage, view, bare, numberKeepOut})` 与 `gameTiming(variant, raw)`；牌桌档 `bare: true` 只出剑光 / 刀痕 / 墨点 / 飘字（宣纸底与样例武将牌不画）。 |
+| `sfx.js` | 无属性伤害演出的**音效**：`SgsSfx`（Web Audio 现场合成，仓库里没有音频文件）。文件顶部的 `VOICE` 调音台是**唯一**调音处，六个声音 `riser` / `shing` / `whoosh` / `impact` / `strobe` / `split` 各一个独立函数；`create(timeline)` 返回的播放器由 `effects.js` 按演出驱动（`start` / `tick(t, v)` / `stop` / `mute`），`renderOffline` 只给 `?audiotest=1` 出电平。 |
 | `main.js` | `wire()` 事件绑定、回放步长按钮、启动；必须是最后一份脚本。 |
 
-`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights` / `#t-card-preview`）+ 脚本顺序；
+`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights` /
+`#t-damage-fx` / `#t-card-preview`）+ 脚本顺序；
 弃牌堆面板的模态挂载点 `#t-discard-modal`（含自己的 `#t-discard-backdrop`，正文由 `table.js:renderDiscardPanel` 画）
 也在这里；`style.css` 是样式与设计单位，动效时长 / 尺寸的机械断言在 `tests/test_web_static.py`。
 
@@ -52,7 +55,11 @@
 | `drawTargetLines(actor, targets, now)` | `effects.js` | 每个目标一条金色 SVG 线（跳过自己 / 阵亡）；端点只读一次布局。 |
 | `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。**不判断"哪些技能该有特效"**：`event` 由服务端下发（见下一条），前端只画。 |
 | `fireSkillEventsThrough(seq)` | `effects.js` | 回放到某条记录时释放 `state.skillEvents` 队列。 |
+| `fireDamageEventsThrough(seq)` | `effects.js` | 伤害演出与 `fireSkillEventsThrough` **同一条 seq 游标**（`stepPlayback` 里紧挨它的下一行）：把 `state.damageEvents` 里到点的事件交给排播闸门 `pumpDamageQueue`（相邻错开 120ms、同时在播上限 3 条、超出丢队列尾）。属性口径走 `damageFxNaturePlayable`：**`null` / 缺字段 = 无属性（播）**，只有 `FIRE` / `THUNDER` 跳过——三层文档都写 `None` ≡ 无属性（`game.py:note_damage` / `projection.py:damage_events_after` / `active.py:_quhu_burn`）。 |
+| `startDamagePlay(event)` | `effects.js` | 一条伤害开演：量出两张武将块的矩形（`source == null` 时来源挪到画面外 200 单位，不猜来源）→ `SgsDamageFX.create(…, {profile: "game", bare: true, amount, numberKeepOut})` 挂进 `#t-damage-fx` 里**唯一**那张 canvas → 按 `duration`（= `anim.ini` 的 `total`）定时摘层；3 / 4 点档顺势给 `#table-shell` 挂灰阶滤镜窗口。 |
+| `damageSfxTick(play, seconds)` | `effects.js` | 每帧把**演出自己的** `seconds`（就是喂 `fx.draw` 的那个数）交给该演出的音效声道——`sfx.js` 的 `tick(t, v)` 据此判 cue；档位参数（`flight` / `strobe` / `split`）取 `fx.timing`，不另写数字。 |
 | `skill_events_after(records, after, state, activations)` | `projection.py` | **技能特效的唯一判据**（U3-04 / D8.2 + lei 票 06）：`{seq, seat, skill_id, name, targets}` 由两条公共事实合成——① 未裁剪记录里**已接受且点名了技能**的动作（`ActivateSkill` / `SubstituteJudgeCard`）；② 引擎的发动缓冲 `Engine.skill_activations`（**记录面没有技能归属**的锁定技与转化技）。跑 `bash tests/smoke-web.sh`，用例在 `tests/support/ui_smoke.mjs` 的 U3-04*（U3-04k 锁定技 / U3-04l 转化技）。 |
+| `damage_events_after(records, after, state, events)` | `projection.py` | **伤害演出的唯一判据**（damage-fx）：与 `skill_events_after` 同姿态——共用 `after` 游标、`seq > after` 才下发，形状 `{seq, source, target, amount, nature}`；事实来源是 `Engine.damage_events`，`records` 只定本批上界，座位越界 fail-closed，不按视角过滤（伤害是公开事实）。会话载荷的 `damage_events` 键由它填，前端由 `fireDamageEventsThrough` 消费。 |
 | `syncTransientEffects()` | `effects.js` | 座位重建后补回仍在播的高亮 / 体力闪 / 白光；顺手收掉过期目标线。 |
 | `animPlanFlight(record)` | `anim.js` | 飞行层**起飞前**：查分类表、不飞 / 未登记判定、量一次源矩形（`stepPlayback` 在 `applyEffectDelta` 之后、重绘之前调）。 |
 | `animLaunchFlight(plan)` | `anim.js` | 飞行层**重绘之后**：量落点并同步起飞；起 / 落点缺失静默跳过（层上留 `data-anim-missing`）。 |
@@ -77,7 +84,10 @@
   （`length` / 下标 / `item` / 迭代，无数组方法）——测试遍历一律 `Array.from(...)` 或展开；
   集合断言用 `setEquals`，纯函数断言经 `ui.stageLane` 喂 `now`。U4-01 起垫片另有
   **确定性 `getBoundingClientRect`** 与登记式 `animate`（飞行层只读"矩形存在 / 动画参数"，
-  不读真实布局与时钟）。
+  不读真实布局与时钟）；damage-fx 再补 `<canvas>` + 记录型 2D 上下文、`Path2D`、
+  **只排队不自动跑**的 `setTimeout` / `requestAnimationFrame`（演出寿命 / 错开按毫秒读，
+  `U-DMG-*` 用 `runEarliest` 显式推进），以及 `localStorage` 与一次性的
+  `removeEventListener`（`U-SFX-*` 的解锁与开关记忆）。
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。

@@ -524,6 +524,44 @@ class SkillActivation:
     """这次发动指定 / 作用的目标（公开事实）；空元组 = 不画线（只飘名 + 白光）。"""
 
 
+@dataclass(frozen=True, slots=True)
+class DamageEvent:
+    """一次**伤害事实**的公共面（damage-fx 票 01）：谁打了谁、多少点、什么属性、锚在哪条记录。
+
+    与 :class:`SkillActivation` 同一姿态：**不是**记录流的一条记录，而是引擎侧的只增缓冲
+    （:attr:`Engine.damage_events`）里的一条。理由：
+    :class:`~sgs.state.deltas.HpChangeDelta` 只有 ``seat / before / after / amount`` 四个
+    字段——金录像逐字节冻结，一格都加不得——而"剑光从来源那张武将牌飞到中剑那张"恰好要
+    来源与属性这两样记录面没有的事实。
+
+    它**只服务表现层**：规则层一个读者都没有（不进帧私有数据、不参与任何判据），也不消耗
+    随机数 ⇒ 既有金录像逐字节不变。缺省为空元组的读取方（只喂静态 jsonl 录像的回放）
+    因此只少这一路表现。
+    """
+
+    seq: int
+    """锚点 = 伤害数值定稿那一刻**最后一条记录**的 ``seq``（前端回放到它时演出）。
+
+    与 ``note_skill_activation`` 同一口径：定稿落在 ``DAMAGE`` 帧中间，此刻最后一条记录
+    恒在本批里（``seq > after`` 因此恒成立），轮询不会重复下发。
+    """
+
+    source: int | None
+    """造成伤害的座位号；``None`` = 无来源伤害（判定类 / 拼点类），前端**不猜来源**。"""
+
+    target: int
+    """受到伤害的座位号。"""
+
+    amount: int
+    """这次伤害的**全额**（护甲吸收的部分不减，与 ``frame.data["amount"]`` 同一口径）。"""
+
+    nature: DamageNature | None
+    """伤害属性，原样透传帧上的 ``nature``；``None`` = 牌面没声明（等同无属性）。
+
+    记录面**不筛**属性（火 / 雷照样记一条）：筛选是表现层的事（本 effort 只播 ``NORMAL``）。
+    """
+
+
 def _card_from_hand(state: GameState, source: int, card: CardRef) -> bool:
     """这张使用 / 打出的牌此刻是不是**手牌**（M6 票 16 的界【涯角】判据）。
 
@@ -757,6 +795,14 @@ class Engine:
         经过 ``SKILL_ACTIVATION`` 应答的主动 / 触发技**不**在这里再记一遍：它们在记录流里
         有已接受的 ``ActivateSkill``，接入层仍从那份公共事实派生（既有行为逐字不变）。
         """
+        self._damage_events: list[DamageEvent] = []
+        """**伤害事实**的只增缓冲（damage-fx 票 01；表现层专用，不进记录流）。
+
+        唯一追加点 = :meth:`note_damage`，只在 ``DAMAGE`` 帧的数值定稿那一步调用一次，
+        故"一次伤害事件 ⇒ 恰好一条"（护甲全吸收的也照记，``amount`` 仍是全额）。
+        与 :attr:`_skill_activations` 同一姿态：不耗随机数、不改状态、不进记录 ⇒
+        47 条金录像逐字节不变。
+        """
         self._started = False
         self._l0_in_progress = False
         """L0 派发（:meth:`_start`）**是否已经开始过**。
@@ -933,6 +979,46 @@ class Engine:
                 seat=int(seat),
                 skill_id=str(skill_id),
                 targets=tuple(int(target) for target in targets),
+            )
+        )
+
+    @property
+    def damage_events(self) -> tuple[DamageEvent, ...]:
+        """**伤害事实**的派生面（damage-fx 票 01）：只增缓冲的只读视图。
+
+        与 :attr:`skill_activations` 同一姿态：不进 ``records``、不消耗随机数 ⇒ 47 条金录像
+        逐字节不变。缺省为空元组的读取方（只喂静态 jsonl 录像的回放）因此不抛错、只少这一路。
+        """
+        return tuple(self._damage_events)
+
+    def note_damage(
+        self,
+        *,
+        source: int | None,
+        target: int,
+        amount: int,
+        nature: DamageNature | None,
+    ) -> None:
+        """记一次**伤害事件**（damage-fx 票 01；表现层专用）。
+
+        唯一调用点 = ``steps.damage_finalize_amount``（伤害数值定稿那一步），故：
+
+        - 数值是**定稿后**的全额（护甲吸收的部分不减，与 ``frame.data["amount"]`` 同源）；
+        - 一次伤害事件只记一条（``damage_finalize_amount`` 每帧只跑一次；被防止 / 数值 ≤ 0
+          的伤害不是伤害事件，压根不进缓冲）；
+        - ``seq`` 取**此刻最后一条记录**的序号，与 ``skill_events`` 同一"按记录序号释放"
+          口径，也保证它一定落在本批记录里（``seq > after`` 恒成立），轮询不重复下发。
+
+        只 ``append``：不写状态、不发记录、不取随机数。``nature`` 原样透传帧上的属性
+        （``None`` = 牌面没声明，等同无属性），记录面**不筛**属性。
+        """
+        self._damage_events.append(
+            DamageEvent(
+                seq=self._last_seq,
+                source=None if source is None else int(source),
+                target=int(target),
+                amount=int(amount),
+                nature=None if nature is None else DamageNature(nature),
             )
         )
 
