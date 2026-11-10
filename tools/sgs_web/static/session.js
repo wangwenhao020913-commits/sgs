@@ -767,7 +767,10 @@ function applyView(body) {
   }
   // 第一条也等满一个基准步长再出现；之后每条记录的间隔由**上一条**的 `delayOf` 算
   // （U4-02 / D7：base + 该条动画时长 × base/100）。
-  playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
+  // 票 07：首步同样过暂停门（与 `stepPlayback` 收尾同一个出口）。用户的口径是"3、4+ 伤害档
+  // 动画**演出期间**游戏事件处理暂停"——窗口是整个演出寿命，不是"产生它的那一批记录"：
+  // 上一批的演出还挂着近 2s 尾巴时（`finishPlayback` 之后轮询立刻送来新记录）新批照样要等。
+  schedulePlaybackStep(state.eventDelayMs);
 }
 
 /** U4-02（spec D7 / D8）：一条记录占用的回放步长 = `base + dur(记录) × (base / 100)`。

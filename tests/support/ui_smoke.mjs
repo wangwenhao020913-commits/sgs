@@ -23497,8 +23497,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     [],
   );
   const held14k = runUntil(() => holdMark() === "heal:3", 5);
-  check("U-DMG-14l 非伤害来源（模拟 回复体力 3 档）登记后同样冻住记录流：读数 = 它自己的原因串",
-    held14k && playbackIndex() === 1 && holdMark() === "heal:3" && liveCount() === 0
+  // 判据从**第一条**就该生效：以后 回复体力 3 档 的窗口若从这批之前就开着，整批都不该动。
+  check("U-DMG-14l 非伤害来源（模拟 回复体力 3 档）登记后同样冻住记录流：连首步都不推进、读数 = 它自己的原因串",
+    held14k && playbackIndex() === 0 && holdMark() === "heal:3" && liveCount() === 0
       && ui.playbackHoldReason() === "heal:3",
     `held=${held14k} index=${playbackIndex()} hold="${holdMark()}" live=${liveCount()} `
       + `reason="${ui.playbackHoldReason()}"`);
@@ -23538,6 +23539,33 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `advanced=${advanced14n} index=${playbackIndex()} timeouts=${timeouts14n}`);
   runUntil(() => ui.state.playback === null, 400);
   runUntil(() => liveCount() === 0, 400);
+
+  /* ---- 新视图在旧演出还没收尾时到达：**新一批的首步也等在窗口外** ----
+   *
+   * 用户口径是"3、4+ 伤害档动画**演出期间**游戏事件处理暂停"——窗口是整个演出寿命，不是
+   * "产生它的那一批记录"。真实路径：某批最后一条记录开演 ⇒ 回放收尾 ⇒ 轮询 2s 内送来新记录，
+   * 而那条演出还有近 2s 尾巴。这里用同一会话的新一批复现它（`applyViewRaw` 会先 flush 旧回放）。
+   */
+  const session14p = loadDamageBatch(
+    [hpChange(90, 1, 4, 3), hpChange(91, 2, 4, 3)],
+    [damageEvent(90, 0, 1, 3)],
+  );
+  const paused14p = runUntil(() => holdMark() === "damage:3", 5)
+    && playbackIndex() === 1 && liveCount() === 1;
+  const logBefore14p = logCount();
+  ui.applyViewRaw({
+    ...baseView(session14p), cursor: 2, log_seq: 0, finished: false,
+    records: [hpChange(92, 2, 4, 3), hpChange(93, 3, 4, 3)],
+    damage_events: [],
+  });
+  for (let index = 0; index < 6; index += 1) runEarliest();
+  check("U-DMG-14p 旧演出还在播时到达的新一批：首步也等在窗口外（index 仍 0、读数仍是 damage:3）",
+    paused14p && playbackIndex() === 0 && liveCount() === 1 && holdMark() === "damage:3",
+    `paused=${paused14p} index=${playbackIndex()} live=${liveCount()} hold="${holdMark()}"`);
+  const resumed14p = runUntil(() => ui.state.playback === null, 400);
+  check("U-DMG-14q 演出收尾后新一批照常播完（flush 的那条 + 新批两条，一条不丢）",
+    resumed14p && liveCount() === 0 && logCount() === logBefore14p + 3,
+    `resumed=${resumed14p} live=${liveCount()} log=${logCount() - logBefore14p}/3`);
 
   // 纯函数口径（两个时刻进、布尔出）：烟测直接喂时刻，不等真墙钟。
   const expired14 = ui.playbackHoldExpired;

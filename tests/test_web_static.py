@@ -1460,6 +1460,14 @@ def test_playback_schedules_the_next_step_from_delay_of_the_record() -> None:
     assert "setTimeout" not in _strip_js_comments(body), (
         "stepPlayback 收尾不许自己排计时器：出口只有 schedulePlaybackStep（票 07）"
     )
+    # 首步也要过暂停门：用户口径是"动画**演出期间**暂停"，上一批的演出还有尾巴时新批照样要等。
+    apply_view = _js_function(text, "applyView")
+    assert "schedulePlaybackStep(state.eventDelayMs)" in apply_view, (
+        "applyView 的新批首步也走同一个排程口（否则演出尾巴里送来的新记录照旧推进）"
+    )
+    assert "setTimeout(() => stepPlayback(false)" not in _strip_js_comments(text), (
+        "整个 session.js 里不许再有绕开暂停门的排程（两个出口都归 schedulePlaybackStep）"
+    )
 
     body = _strip_js_comments(text)
     assert re.search(r"function delayOf\(record, base = state\.eventDelayMs\)", body), (
