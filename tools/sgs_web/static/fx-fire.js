@@ -311,10 +311,10 @@
      * 回放在这段时间里是冻住的，与雷的 3 / 4 档同一个口径）。 */
     damage_fx_fire_3_total: 2600, damage_fx_fire_3_flight: 200,
     damage_fx_fire_3_impact: 260, damage_fx_fire_3_boom: 1800,
-    damage_fx_fire_3_strobe: 200, damage_fx_fire_3_flash: 0.8,
-    damage_fx_fire_4_total: 4500, damage_fx_fire_4_flight: 180,
+    damage_fx_fire_3_strobe: 120, damage_fx_fire_3_flash: 0.6,
+    damage_fx_fire_4_total: 3600, damage_fx_fire_4_flight: 180,
     damage_fx_fire_4_impact: 240, damage_fx_fire_4_boom: 2400,
-    damage_fx_fire_4_strobe: 300, damage_fx_fire_4_flash: 1
+    damage_fx_fire_4_strobe: 160, damage_fx_fire_4_flash: 0.8
   };
 
   /* 字段名名单由 `DEFAULT_TIMING` 的键反推（票 10 同款：只许有一处真源）。 */

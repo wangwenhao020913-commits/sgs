@@ -4339,8 +4339,8 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
     assert four["BLAST"] == pytest.approx(four["EXPLODE"]), "4 档的爆炸就是流星命中"
     assert probe["shapes"]["1"]["timing"]["strobe"] == 0, "1 / 2 档没有整屏闪"
     assert probe["shapes"]["2"]["timing"]["strobe"] == 0
-    assert probe["shapes"]["3"]["timing"]["strobe"] == 200
-    assert probe["shapes"]["4"]["timing"]["strobe"] == 300
+    assert probe["shapes"]["3"]["timing"]["strobe"] == 120
+    assert probe["shapes"]["4"]["timing"]["strobe"] == 160
     # 档位只决定强度，飘字写真实点数（amount ≥ 5 仍播 4 档）。
     assert probe["six"]["variant"] == 4
     assert probe["six"]["amount"] == 6, "飘字数字来自服务端 amount，不是档位号"
@@ -4402,8 +4402,8 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
     )
     # 这四个数是 spec §演出口径 的缺省（票 03 返工后 3 / 4 档按用户要求加长：时停窗口里的
     # 箭串 + 爆炸 / 陨星段）。改 ini 等于改用户可见的节奏，可以；换掉缺省值先改 spec。
-    assert totals == [2000, 2200, 2600, 4500], (
-        f"spec §游戏档缺省时长（返工后按用户实机调的值）：{totals}"
+    assert totals == [2000, 2200, 2600, 3600], (
+        f"spec §游戏档缺省时长（返工后按用户实机定稿的值）：{totals}"
     )
     assert values["damage_fx_fire_3_strobe"] > 0
     assert values["damage_fx_fire_4_strobe"] > values["damage_fx_fire_3_strobe"], (
