@@ -3623,8 +3623,11 @@ def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) 
     assert fields["thunder"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
         f"雷电的字段集由它自己的 DEFAULT_TIMING 推导：{fields['thunder']}"
     )
-    assert fields["fire"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
-        f"火焰与雷电同字段集（不需要剑光的 split）：{fields['fire']}"
+    assert fields["fire"] == [
+        "total", "flight", "impact", "fade", "boom", "strobe", "flash",
+    ], (
+        f"火的字段集由它自己的 DEFAULT_TIMING 推导（不需要剑光的 split，但多一个 boom）："
+        f"{fields['fire']}"
     )
     thunder = probe["timingThunder"]
     assert set(thunder["1"]) == {
@@ -3636,8 +3639,12 @@ def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) 
     assert set(fire["1"]) == {
         "damage_fx_fire_1_total", "damage_fx_fire_1_flight",
         "damage_fx_fire_1_impact", "damage_fx_fire_1_fade",
-    }, f"1 点火没有 strobe / flash，不该硬造：{sorted(fire['1'])}"
-    assert set(fire["3"]) == {f"damage_fx_fire_3_{field}" for field in fields["fire"]}
+    }, f"1 点火没有爆燃 / 屏闪，不该硬造 strobe / flash / boom：{sorted(fire['1'])}"
+    assert set(fire["3"]) == {
+        "damage_fx_fire_3_total", "damage_fx_fire_3_flight",
+        "damage_fx_fire_3_impact", "damage_fx_fire_3_boom",
+        "damage_fx_fire_3_strobe", "damage_fx_fire_3_flash",
+    }, f"3 点火有爆燃 / 屏闪，但尾段是 boom 不是 fade：{sorted(fire['3'])}" 
     assert probe["cap"] == 3, "cap 缺省 3（生效值按属性读 anim.ini，见票 02）"
 
 
@@ -3903,7 +3910,9 @@ def test_the_thunder_renderer_keeps_the_sword_renderer_shape(thunder_probe: dict
             assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
         timing = shape["timing"]
         timeline = shape["timeline"]
-        assert timing["total"] <= 2200
+        assert timing["total"] <= probe["maxTotal"], (
+            f"{variant} 档总时长必须 ≤ SgsFireFX.MAX_TOTAL_MS（{probe['maxTotal']}）"
+        )
         assert shape["duration"] == pytest.approx(timing["total"] / 1000)
         assert timeline["DURATION"] == pytest.approx(shape["duration"])
         assert timeline["IMPACT"] == pytest.approx(timing["impact"] / 1000)
@@ -4163,7 +4172,9 @@ const report = vm.runInContext(`(() => {
       total: fx.gameTiming(1, { damage_fx_fire_1_total: 9999 }).ms.total,
       impact: fx.gameTiming(2, { damage_fx_fire_2_total: 400, damage_fx_fire_2_impact: 900 }).ms.impact,
       flight: fx.gameTiming(3, { damage_fx_fire_3_impact: 300, damage_fx_fire_3_flight: 800 }).ms.flight,
-      fade: fx.gameTiming(4, { damage_fx_fire_4_total: 1000, damage_fx_fire_4_impact: 800, damage_fx_fire_4_fade: 900 }).ms.fade,
+      fade: fx.gameTiming(2, { damage_fx_fire_2_total: 1000, damage_fx_fire_2_impact: 800, damage_fx_fire_2_fade: 900 }).ms.fade,
+      boom: fx.gameTiming(3, { damage_fx_fire_3_total: 3000, damage_fx_fire_3_impact: 300, damage_fx_fire_3_boom: 2000 }).ms.boom,
+      boomClamped: fx.gameTiming(3, { damage_fx_fire_3_total: 1200, damage_fx_fire_3_impact: 300, damage_fx_fire_3_boom: 5000 }).ms.boom,
       flash: fx.gameTiming(3, { damage_fx_fire_3_flash: 2 }).ms.flash,
       junk: fx.gameTiming(2, { damage_fx_fire_2_total: "abc", damage_fx_fire_2_flight: -5 }).ms,
       missing: fx.gameTiming(1, { damage_fx_fire_1_total: 1600 }).ms,
@@ -4233,9 +4244,12 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
     """
     probe = fire_probe
     assert probe["prefix"] == "damage_fx_fire_"
-    assert probe["maxTotal"] == 2200
-    assert probe["fields"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
-        "火焰不需要剑光的 split（劈屏），但要有 flash（整屏着色闪的强度）"
+    assert probe["maxTotal"] == 4500
+    assert probe["fields"] == [
+        "total", "flight", "impact", "fade", "boom", "strobe", "flash",
+    ], (
+        "火焰不需要剑光的 split（劈屏），但要有 flash（整屏着色闪的强度）与 boom"
+        "（3 / 4 档爆炸 / 陨星那一段；1 / 2 档只有 fade）"
     )
     assert probe["keys"] == list(probe["defaults"]), "TIMING_KEYS 必须就是 DEFAULT_TIMING 的键"
     assert probe["frozen"] == [True, True], "两个导出是冻结数组（读方只许读）"
@@ -4259,7 +4273,9 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
             assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
         timing = shape["timing"]
         timeline = shape["timeline"]
-        assert timing["total"] <= 2200
+        assert timing["total"] <= probe["maxTotal"], (
+            f"{variant} 档总时长必须 ≤ SgsFireFX.MAX_TOTAL_MS（{probe['maxTotal']}）"
+        )
         assert shape["duration"] == pytest.approx(timing["total"] / 1000)
         assert timeline["DURATION"] == pytest.approx(shape["duration"])
         assert timeline["IMPACT"] == pytest.approx(timing["impact"] / 1000)
@@ -4281,6 +4297,23 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
             "飘字包围盒的顶边不得压到体力条（留 2% 牌高余量）"
         )
         assert probe["drawn"][variant] == "ok", f"{variant} 档逐帧绘制抛错：{probe['drawn'][variant]}"
+        if variant in ("3", "4"):
+            # 3 / 4 档是时停窗口：`boom` 就是爆炸 / 陨星那一段，必须真的占满这么长
+            # （票 03 返工的直接判据——用户实机后嫌这一段太短）。
+            assert timing["boom"] > 0, f"{variant} 档必须有 boom（爆炸 / 陨星段时长）"
+            assert timing["fade"] == 0, f"{variant} 档的尾段由 boom 管，不再读 fade"
+            tail_ms = (timeline["DURATION"] - timeline["LAST_IMPACT"]) * 1000
+            assert tail_ms >= 0.9 * timing["boom"], (
+                f"{variant} 档的爆炸 / 陨星段必须真的占满 boom："
+                f"尾段 {tail_ms:.0f}ms / boom {timing['boom']}ms"
+            )
+            blast_ms = (timeline["DURATION"] - timeline["BLAST"]) * 1000
+            assert blast_ms >= 1800, (
+                f"{variant} 档的爆炸本身太短（返工后应 ≥1.8s）：{blast_ms:.0f}ms"
+            )
+        else:
+            assert timing["boom"] == 0, f"{variant} 档没有爆炸段，不该有 boom"
+            assert timing["fade"] > 0, f"{variant} 档的尾段是焦痕淡出（fade）"
 
     # 飘字只在"最后一击 → 收尾"那一段出现：画面按素材页秒数画、`draw()` 把牌桌秒数映射回去，
     # 单位一旦错位（把牌桌秒数写进 `numAt`）飘字就会跑到爆炸之前——这条从 public `draw()` 读。
@@ -4306,18 +4339,22 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
     assert four["BLAST"] == pytest.approx(four["EXPLODE"]), "4 档的爆炸就是流星命中"
     assert probe["shapes"]["1"]["timing"]["strobe"] == 0, "1 / 2 档没有整屏闪"
     assert probe["shapes"]["2"]["timing"]["strobe"] == 0
-    assert probe["shapes"]["3"]["timing"]["strobe"] == 160
-    assert probe["shapes"]["4"]["timing"]["strobe"] == 260
+    assert probe["shapes"]["3"]["timing"]["strobe"] == 200
+    assert probe["shapes"]["4"]["timing"]["strobe"] == 300
     # 档位只决定强度，飘字写真实点数（amount ≥ 5 仍播 4 档）。
     assert probe["six"]["variant"] == 4
     assert probe["six"]["amount"] == 6, "飘字数字来自服务端 amount，不是档位号"
 
 
 def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None:
-    """火键块与 `SgsFireFX.DEFAULT_TIMING` 逐键同值，且四条不变式成立。
+    """火键块与 `SgsFireFX.DEFAULT_TIMING` 逐键同值，且两套不变式成立。
 
     键表**不在测试里写第二份**：`SgsFireFX.TIMING_KEYS` 是唯一真源，这里只与磁盘上的
     `anim.ini` 对表（同剑光票 10 / 雷电票 01 的姿态）。
+
+    字段集是**分档**的（模块级的 `TIMING_FIELDS`）：1 / 2 档是轻演出（总时长 + 焦痕淡出
+    `fade`），3 / 4 档是**时停演出**（总时长 + 爆炸 / 陨星段 `boom`）。票 03 返工的核心判据
+    就在 3 / 4 档的 `boom` 与 `total` 上：尾段必须真的给足（用户实机后嫌 1.7 / 2.0s 太短）。
     """
     entries = {
         key: value for key, value in _ini_entries().items()
@@ -4329,27 +4366,45 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
         f"缺 {sorted(expected - set(entries))}；多 {sorted(set(entries) - expected)}"
     )
     values = {key: float(value) for key, value in entries.items()}
+    max_total = fire_probe["maxTotal"]
     for variant in _DAMAGE_FX_VARIANTS:
         total = values[f"damage_fx_fire_{variant}_total"]
         flight = values[f"damage_fx_fire_{variant}_flight"]
         impact = values[f"damage_fx_fire_{variant}_impact"]
-        fade = values[f"damage_fx_fire_{variant}_fade"]
-        assert 0 < impact < total <= 2200, (
-            f"{variant} 点火：命中必须落在演出之内、总时长 ≤ 2200，实际 impact={impact} / total={total}"
+        assert 0 < impact < total <= max_total, (
+            f"{variant} 点火：命中必须落在演出之内、总时长 ≤ {max_total}，"
+            f"实际 impact={impact} / total={total}"
         )
         assert 0 < flight < impact, f"{variant} 点火：火羽必须在命中之前飞到"
-        assert impact + fade <= total, (
-            f"{variant} 点火：焦痕必须在摘层之前散尽（impact + fade ≤ total），"
-            f"实际 {impact} + {fade} > {total}"
-        )
+        if variant in (3, 4):
+            boom = values[f"damage_fx_fire_{variant}_boom"]
+            assert boom >= 1800, (
+                f"{variant} 点火：爆炸 / 陨星段（boom）必须给足（返工下限 1800ms），实际 {boom}"
+            )
+            assert impact + boom <= total, (
+                f"{variant} 点火：爆炸段必须在摘层之前结束（impact + boom ≤ total），"
+                f"实际 {impact} + {boom} > {total}"
+            )
+            assert f"damage_fx_fire_{variant}_fade" not in values, (
+                f"{variant} 点火由 boom 管尾段，不该再留一个 fade 键（两处真源）"
+            )
+        else:
+            fade = values[f"damage_fx_fire_{variant}_fade"]
+            assert impact + fade <= total, (
+                f"{variant} 点火：焦痕必须在摘层之前散尽（impact + fade ≤ total），"
+                f"实际 {impact} + {fade} > {total}"
+            )
+            assert f"damage_fx_fire_{variant}_boom" not in values, (
+                f"{variant} 点火没有爆炸段，不该有 boom 键"
+            )
     totals = [values[f"damage_fx_fire_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
     assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), (
         f"四档总时长必须各自独立可改（一条公式绑死的话四个值会相等）：{totals}"
     )
-    # 这四个数是 **spec §演出口径** 的缺省（不是从 anim.ini 抄回来的第二份）：改 ini 等于改
-    # 用户可见的节奏，可以；但换掉缺省值必须先改 spec。
-    assert totals == [1400, 1500, 1700, 2000], (
-        f"spec §游戏档缺省时长：火 / 雷都是 1400 / 1500 / 1700 / 2000，实际 {totals}"
+    # 这四个数是 spec §演出口径 的缺省（票 03 返工后 3 / 4 档按用户要求加长：时停窗口里的
+    # 箭串 + 爆炸 / 陨星段）。改 ini 等于改用户可见的节奏，可以；换掉缺省值先改 spec。
+    assert totals == [2000, 2200, 3100, 3700], (
+        f"spec §游戏档缺省时长（返工后）：{totals}"
     )
     assert values["damage_fx_fire_3_strobe"] > 0
     assert values["damage_fx_fire_4_strobe"] > values["damage_fx_fire_3_strobe"], (
@@ -4386,17 +4441,23 @@ def test_the_fire_export_chain_keeps_the_material_package_timeline(fire_probe: d
     assert fire_probe["drawn"]["export"] == "ok"
 
     clamps = fire_probe["clamps"]
-    assert clamps["total"] == 2200, "单档总时长上限 2200（超过会挡住牌桌）"
+    assert clamps["total"] == 4500, (
+        "单档总时长上限 4500（火比雷宽：3 / 4 档是时停窗口里的两段戏；仍有上限）"
+    )
     assert clamps["impact"] == 400, "impact ≤ total"
     assert clamps["flight"] == 300, "flight ≤ impact"
-    assert clamps["fade"] == 200, "impact + fade ≤ total（否则层摘了焦痕还没散）"
+    assert clamps["fade"] == 200, "1 / 2 档：impact + fade ≤ total（否则层摘了焦痕还没散）"
+    assert clamps["boom"] == 2000, "3 / 4 档：boom 装得下就照给定值放行"
+    assert 0 < clamps["boomClamped"] < 1200, (
+        f"boom 给过头时被钳到「total − 最后一击」之内：{clamps['boomClamped']}"
+    )
     assert clamps["flash"] == 1, "flash 钳在 0..1"
-    assert clamps["junk"]["total"] == 1500 and clamps["junk"]["flight"] == 95, (
+    assert clamps["junk"]["total"] == 2200 and clamps["junk"]["flight"] == 220, (
         "非法值（非数字 / 负数）退回内置默认"
     )
     assert clamps["missing"] == {
-        "total": 1600, "flight": 90, "impact": 300, "fade": 700,
-        "strobe": 0, "flash": 0.6,
+        "total": 1600, "flight": 240, "impact": 300, "fade": 1200,
+        "boom": 0, "strobe": 0, "flash": 0.6,
     }, "只改一个键，其余退回内置默认"
 
 

@@ -151,8 +151,6 @@
       shake: 13,
       numSize: 216, numEcho: 1, numGlow: 1.00, numLife: 2.00,
       pal: { edge: "rgba(90,22,8,0.64)", mid: "#f04a13", mid2: "#ffb050", core: "#fff6d6" },
-      // `strobeMs` = 牌桌档缺 key 时整屏着色闪的窗口（素材页的白闪是画布内画的，这里只给默认）
-      strobeMs: 160,
       blast: { scale: 0.72, shake: 13, flash: 0.55, dx: 0, dy: 18 },
       meteor: null
     },
@@ -166,7 +164,6 @@
       shake: 11,
       numSize: 256, numEcho: 2, numGlow: 1.40, numLife: 2.20,
       pal: { edge: "rgba(86,20,7,0.66)", mid: "#f2460f", mid2: "#ffb452", core: "#fff8e2" },
-      strobeMs: 260,
       blast: { scale: 1.24, shake: 32, flash: 1.00, dx: -2, dy: 0, meteor: true },
       meteor: { skyAt: 1.70, hit: 2.14 }
     }
@@ -305,16 +302,19 @@
    * 单档总时长上限同剑光：2200ms，再长会挡住牌桌。 */
   var TIMING_PREFIX = "damage_fx_fire_";
   var DEFAULT_TIMING = {
-    damage_fx_fire_1_total: 1400, damage_fx_fire_1_flight: 90,
-    damage_fx_fire_1_impact: 300, damage_fx_fire_1_fade: 700,
-    damage_fx_fire_2_total: 1500, damage_fx_fire_2_flight: 95,
-    damage_fx_fire_2_impact: 310, damage_fx_fire_2_fade: 750,
-    damage_fx_fire_3_total: 1700, damage_fx_fire_3_flight: 100,
-    damage_fx_fire_3_impact: 330, damage_fx_fire_3_fade: 820,
-    damage_fx_fire_3_strobe: 160, damage_fx_fire_3_flash: 0.6,
-    damage_fx_fire_4_total: 2000, damage_fx_fire_4_flight: 105,
-    damage_fx_fire_4_impact: 360, damage_fx_fire_4_fade: 900,
-    damage_fx_fire_4_strobe: 260, damage_fx_fire_4_flash: 0.6
+    damage_fx_fire_1_total: 2000, damage_fx_fire_1_flight: 240,
+    damage_fx_fire_1_impact: 300, damage_fx_fire_1_fade: 1200,
+    damage_fx_fire_2_total: 2200, damage_fx_fire_2_flight: 220,
+    damage_fx_fire_2_impact: 280, damage_fx_fire_2_fade: 1500,
+    /* 3 / 4 档不是"一条更快的链"，而是**时停窗口里的两段**：箭串（`impact` 前）+
+     * 爆炸 / 陨星段（`boom`）。`total` = 整段寿命（3 / 4 档因此比 1 / 2 档长得多，
+     * 回放在这段时间里是冻住的，与雷的 3 / 4 档同一个口径）。 */
+    damage_fx_fire_3_total: 3100, damage_fx_fire_3_flight: 200,
+    damage_fx_fire_3_impact: 260, damage_fx_fire_3_boom: 2200,
+    damage_fx_fire_3_strobe: 200, damage_fx_fire_3_flash: 0.8,
+    damage_fx_fire_4_total: 3700, damage_fx_fire_4_flight: 180,
+    damage_fx_fire_4_impact: 240, damage_fx_fire_4_boom: 2800,
+    damage_fx_fire_4_strobe: 300, damage_fx_fire_4_flash: 1
   };
 
   /* 字段名名单由 `DEFAULT_TIMING` 的键反推（票 10 同款：只许有一处真源）。 */
@@ -332,7 +332,10 @@
     return Object.freeze(fields);
   })();
   var TIMING_KEYS = Object.freeze(Object.keys(DEFAULT_TIMING));
-  var MAX_TOTAL_MS = 2200;
+  /* 单档最长的硬上限。火比雷宽：雷的 3 / 4 档是 2.0s 的"一瞬"；火的 3 / 4 档是**时停窗口**
+   * 里的两段戏（箭串 + 爆炸 / 陨星），用户实机后要求把爆炸段给足（见票 03 §Answer 返工）。
+   * 4500 仍是上限——再长会挡住牌桌，而回放在这段里是冻住的。 */
+  var MAX_TOTAL_MS = 4500;
   var FLASH_DEFAULT = 0.6;
 
   /* 素材页时间轴（导出档）：命中 / 爆炸 / 飘字都从四档表推出来，画面与音效共用同一份。 */
@@ -348,13 +351,17 @@
   })();
 
   /* 牌桌档的排期比例（都相对**这一段窗口**，不是绝对秒数）：
-   * - `VOLLEY_SHARE`：整串火羽占命中之后那一段的比例（0.30s 封顶，12 支箭也要看得出连珠）；
-   * - `METEOR_TAIL_SHARE`：4 档最后一支箭落地到流星命中之间，占剩余时间的比例；
-   * - `NUM_SHARE`：飘字在"最后一击 → 收尾"里出现的位置。
-   * 这三个数**不是**时长字段：时长只有 `anim.ini` 的六个字段，它们只决定"那一段怎么分"。 */
+   * - `VOLLEY_SHARE`：整串火羽占命中之后那一段的比例；`VOLLEY_MAX` 是它的封顶（素材页
+   *   4 档十二支箭 0.66s 走完，牌桌上 0.6s 封顶已经接近原速）；
+   * - `METEOR_LEAD_SHARE` / `METEOR_LEAD_MAX`：4 档「最后一支箭钉住 → 流星砸下」那一段，
+   *   占 `boom` 的比例与封顶（素材页是 0.63s；`boom` 2.5s 时给 0.6s，流星才不是一眨眼）；
+   * - `NUM_SHARE`：飘字在 1 / 2 档"最后一击 → 收尾"里出现的位置（3 / 4 档由素材页的
+   *   相对位置决定，见 `gameTiming`）。
+   * 这几个数**不是**时长字段：时长只有 `anim.ini` 那几个字段，它们只决定"那一段怎么分"。 */
   var VOLLEY_SHARE = 0.22;
-  var VOLLEY_MAX = 0.30;
-  var METEOR_TAIL_SHARE = 0.15;
+  var VOLLEY_MAX = 0.60;
+  var METEOR_LEAD_SHARE = 0.30;
+  var METEOR_LEAD_MAX = 0.60;
   var NUM_SHARE = 0.10;
   /* 火印开始发亮的提前量（素材页的绝对秒数；导出档照抄，牌桌档由 warp 一起压）。 */
   var CHARGE_LEAD = 0.46;
@@ -422,15 +429,20 @@
     return clamp(base, 0, 1);
   }
 
-  /* `game` 档：把 `anim.ini` 的六个字段解成一档**秒**时间轴 + 档位参数 + 时间映射。
+  /* `game` 档：把 `anim.ini` 的字段解成一档**秒**时间轴 + 档位参数 + 时间映射。
    *
-   * 钳制四条（同 `fx-core.js`）：`total ≤ 2200`、`flight ≤ impact ≤ total`、
-   * `impact + fade ≤ total`（否则层都摘了焦痕还在）。`strobe` 是整屏着色闪的窗口，
-   * 只覆盖 3 / 4 档；`flash` 是它的强度。
+   * 1 / 2 档（轻演出）：`total / flight / impact / fade` 四个时长，焦痕从最后一击起算
+   * `fade`，飘字落在最后一段的前 10%。
+   * 3 / 4 档（时停演出）：**两段**——箭串（`impact` 之前）与**爆炸 / 陨星段**（`boom`）。
+   * 素材页「最后一击 → 收尾」那一整段（3 档 4.16s / 4 档 4.69s）等比压进 `boom`；4 档再在
+   * `boom` 里先切出「火云 → 流星砸下」那一段（`METEOR_LEAD_*`，素材页 0.63s），剩下的才是
+   * 爆炸。这一段与雷的 3 / 4 档同一个口径：**回放是冻住的**（`damageFxPlaybackHold` 按档位
+   * 判，与家族无关），所以时长给足不会"挡住牌桌"。
    *
-   * 排期全从这四个时长派生（`VOLLEY_SHARE` / `METEOR_TAIL_SHARE` / `NUM_SHARE` 上面有注记）：
-   * 第一箭命中 = `impact`、最后一支钉住 = 再一串火羽、3 档立刻爆燃、4 档再留一段给流星；
-   * 焦痕从最后一击起算 `fade`，飘字落在最后一段的前 10%。`warp` 把这些锚点对回素材页的秒。 */
+   * 钳制（同 `fx-core.js` 的姿态）：`total ≤ MAX_TOTAL_MS`（火 4000，见上面注记）、
+   * `flight ≤ impact ≤ total`、`impact + fade ≤ total`（1 / 2 档）、`boom ≤ total − 最后一击`
+   * （3 / 4 档，给多了会层都摘了爆炸还在）。`strobe` 是整屏着色闪的窗口，只覆盖 3 / 4 档；
+   * `flash` 是它的强度。 */
   function gameTiming(variantId, raw) {
     var id = clamp(Math.round(variantId || 1), 1, 4);
     var base = TIERS[id];
@@ -440,47 +452,70 @@
     );
     var impact = clamp(millis(raw, key("impact"), DEFAULT_TIMING[key("impact")]), 0, total);
     var flight = clamp(millis(raw, key("flight"), DEFAULT_TIMING[key("flight")]), 0, impact);
-    var fade = clamp(
-      millis(raw, key("fade"), DEFAULT_TIMING[key("fade")]), 0, Math.max(0, total - impact)
+    /* 缺键时退回 `DEFAULT_TIMING` 里的那一档（1 / 2 档没有这个键 ⇒ 0）；
+     * 素材页的白闪是画布内画的，`strobe` 在牌桌上只用来开**着色子层**的窗口。 */
+    var strobe = clamp(
+      millis(raw, key("strobe"), DEFAULT_TIMING[key("strobe")] || 0), 0, total
     );
-    var strobe = clamp(millis(raw, key("strobe"), base.strobeMs || 0), 0, total);
     var flash = ratio(raw, key("flash"), DEFAULT_TIMING[key("flash")]);
 
     var seconds = total / 1000;
     var firstHit = impact / 1000;
     var postS = Math.max(0, seconds - firstHit);
-    /* 火羽连珠：占命中之后那一段的 22%，封顶 0.30s（12 支箭也要看得出是一串）。 */
+    /* 火羽连珠：占命中之后那一段的 22%，封顶 `VOLLEY_MAX`（12 支箭也要看得出是一串）。 */
     var volley = Math.min(VOLLEY_MAX, postS * VOLLEY_SHARE);
     var lastHit = firstHit + volley;
-    /* 最后一击之后才是爆炸 / 焦痕 / 飘字的舞台。3 档最后一支箭落地即爆燃；4 档再留一段
-     * 给「火云 → 流星压境」。 */
-    var blast = 0;
-    if (base.blast) {
-      blast = base.meteor
-        ? lastHit + Math.max(0, seconds - lastHit) * METEOR_TAIL_SHARE
-        : lastHit;
-    }
-    var anchor = blast > 0 ? blast : lastHit;
-    var fadeSpan = Math.min(fade / 1000, Math.max(0, seconds - anchor));
-    var fadeEnd = anchor + fadeSpan;
-    var fadeStart = anchor + fadeSpan * 0.25;
-    var numAt = anchor + Math.max(0, seconds - anchor) * NUM_SHARE;
 
-    var pairs = warpPairs([
-      { e: 0, g: 0 },
-      { e: base.firstImpact, g: firstHit },
-      { e: base.blast ? base.blastAt : base.lastImpact, g: anchor },
-      { e: base.numAt, g: numAt },
-      { e: base.fadeStart, g: fadeStart },
-      { e: base.fadeEnd, g: fadeEnd },
-      { e: base.duration, g: seconds }
-    ]);
+    var fade = 0;
+    var boom = 0;
+    var pairs;
+    if (base.blast) {
+      /* 3 / 4 档：最后一击之后整段是"爆炸 / 陨星"，时长由 `boom` 给。 */
+      boom = clamp(
+        millis(raw, key("boom"), DEFAULT_TIMING[key("boom")]),
+        0,
+        Math.max(0, total - lastHit * 1000)
+      );
+      var tail = boom / 1000;
+      /* 4 档：先给流星一段下落时间（素材页「最后一击 → 流星砸下」占尾段的 13%，压到 2.5s
+       * 只剩 0.33s，一眨眼；这里按比例放大并封顶 0.6s，剩下的才是爆炸）。3 档没有流星，
+       * `blastAt` 与 `lastImpact` 是同一时刻，这一对锚点会被 `warpPairs` 合并掉。 */
+      var lead = base.meteor
+        ? Math.min(METEOR_LEAD_MAX, tail * METEOR_LEAD_SHARE)
+        : 0;
+      pairs = warpPairs([
+        { e: 0, g: 0 },
+        { e: base.firstImpact, g: firstHit },
+        { e: base.lastImpact, g: lastHit },
+        { e: base.blastAt, g: Math.min(seconds, lastHit + lead) },
+        { e: base.duration, g: Math.min(seconds, lastHit + tail) }
+      ]);
+    } else {
+      /* 1 / 2 档：没有爆炸，尾段就是焦痕淡出（`fade`）。 */
+      fade = clamp(
+        millis(raw, key("fade"), DEFAULT_TIMING[key("fade")]), 0, Math.max(0, total - impact)
+      );
+      var fadeSpan = Math.min(fade / 1000, Math.max(0, seconds - lastHit));
+      var fadeEnd = lastHit + fadeSpan;
+      var fadeStart = lastHit + fadeSpan * 0.25;
+      var numAt = lastHit + Math.max(0, seconds - lastHit) * NUM_SHARE;
+      pairs = warpPairs([
+        { e: 0, g: 0 },
+        { e: base.firstImpact, g: firstHit },
+        { e: base.lastImpact, g: lastHit },
+        { e: base.numAt, g: numAt },
+        { e: base.fadeStart, g: fadeStart },
+        { e: base.fadeEnd, g: fadeEnd },
+        { e: base.duration, g: seconds }
+      ]);
+    }
     function gameOf(exportSeconds) { return warpGameOf(pairs, exportSeconds); }
 
     var count = base.count;
     /* 逐箭的节奏按**命中**摊开（不是按离弦）：画面里相邻两支箭是等间隔落地的，
      * 音效照同一份 `GAP` 排，于是「第 i 箭命中」在两边是同一个时刻。 */
     var flightSec = Math.max(0, gameOf(base.launch0 + base.flight) - gameOf(base.launch0));
+    var blast = base.blast ? gameOf(base.blastAt) : 0;
     var timeline = {
       DURATION: seconds,
       CHARGE: gameOf(Math.max(0, base.launch0 - CHARGE_LEAD)),
@@ -493,18 +528,21 @@
       BLAST: blast,
       SKY_AT: base.meteor ? gameOf(base.meteor.skyAt) : 0,
       EXPLODE: base.meteor ? blast : 0,
-      NUM_AT: numAt
+      NUM_AT: gameOf(base.numAt)
     };
     return {
       id: id,
       profile: "game",
       timeline: timeline,
       warp: pairs,
-      ms: { total: total, flight: flight, impact: impact, fade: fade, strobe: strobe, flash: flash },
+      ms: {
+        total: total, flight: flight, impact: impact, fade: fade,
+        boom: boom, strobe: strobe, flash: flash
+      },
       /* 档位参数里**时间全是素材页的秒数**：`draw()` 每帧先把牌桌秒数映射回素材页再画，
        * 所以 `fadeStart` / `numAt` / `blastAt` / `meteor` 这些画法读的键一个都不能换成牌桌
        * 秒数（换了就是两套钟）。唯一要改的是飘字的寿命：素材页那边是 1.9~2.2s（在 5~6 秒里
-       * 刚好），压到 1.4~2.0s 之后要按"素材页的飘字时刻 → 素材页的收尾"整段给，warp 之后
+       * 刚好），压到 2.8~3.6s 之后要按"素材页的飘字时刻 → 素材页的收尾"整段给，warp 之后
        * 正好延伸到牌桌的摘层。 */
       variant: copy(base, {
         numLife: Math.max(0.3, base.duration - base.numAt)

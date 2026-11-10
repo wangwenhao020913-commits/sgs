@@ -23342,12 +23342,16 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const got17 = runUntil(() => flashNodeOf() !== null, 100);
   const node17 = flashNodeOf();
   const opacity17 = node17 ? Number(node17.style.opacity) : NaN;
-  check("U-DMG-17b 命中后挂暖白档 .fx-flash-fire（强度 = 该档 flash 0.6），表壳 filter 始终为空",
+  // 强度是用户可调的（`flash` 0..1）：期望值从磁盘上的 ini 读，不写死 0.6。
+  const flash17 = Number((readIniFile().match(
+    /^\s*damage_fx_fire_3_flash\s*=\s*([0-9.]+)/m) || [])[1]);
+  check("U-DMG-17b 命中后挂暖白档 .fx-flash-fire（强度 = 该档 ini 的 flash），表壳 filter 始终为空",
     got17 && Boolean(node17)
       && hasClass(node17, "fx-flash") && hasClass(node17, "fx-flash-fire")
-      && Math.abs(opacity17 - 0.6) < 1e-9 && shellFilter() === "",
+      && Number.isFinite(flash17) && Math.abs(opacity17 - flash17) < 1e-9
+      && shellFilter() === "",
     `flash=${!!node17} class=${node17 && node17.className} `
-      + `opacity=${opacity17} filter="${shellFilter()}"`);
+      + `opacity=${opacity17} ini=${flash17} filter="${shellFilter()}"`);
   const removed17 = runUntil(() => flashNodeOf() === null, 140);
   check("U-DMG-17c 窗口（= 该档 strobe）结束子层被移除，表壳仍无 filter、演出还在",
     removed17 && flashNodeOf() === null && shellFilter() === "" && liveCount() === 1,
@@ -23950,11 +23954,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   try {
     loadDamageBatch([hpChange(51, 2, 4, 0)], [damageEvent(51, 0, 2, 4, "FIRE")]);
     step();
-    clockFire += 150;   // 跨过蓄力 / 第一支箭离弦
+    clockFire += 300;    // 跨过蓄力 / 第一箭离弦
     runFrame();
-    clockFire += 260;   // 跨过第一箭命中
+    clockFire += 300;    // 跨过最后一支箭（火羽串 0.6s 左右）
     runFrame();
-    clockFire += 900;   // 跨过火云与天陨爆炸
+    clockFire += 900;    // 跨过火云流星与天陨爆炸（3 / 4 档现在是时停里的长戏）
     runFrame();
   } finally {
     Date.now = realDateNowFire;
@@ -23972,7 +23976,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && fireTick.timeline.FLIGHT > 0
       && fireTick.timeline.SKY_AT > 0
       && fireTick.timeline.EXPLODE > fireTick.timeline.SKY_AT
-      && fireTick.timeline.DURATION === 2,
+      && fireTick.timeline.DURATION === 3.7,
     `voice=${JSON.stringify(fireTick && fireTick.voice)} `
       + `timeline=${JSON.stringify(fireTick && fireTick.timeline)}`);
   runUntil(() => liveCount() === 0, 400);
