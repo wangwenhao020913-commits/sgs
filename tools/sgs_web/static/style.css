@@ -637,10 +637,11 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .seat[data-chain-fx="link"] .chain-mark { visibility: hidden; }
 /* 铁索要**探出牌沿**（左 10.5% / 宽 119.7%），但武将块为了把牌区 / 状态标签 / 白光裁在牌内写了
  * `overflow: hidden`——那会把两端的链头正好切在牌沿上，素材包 §六 的"两端都探出左右沿"就没了。
- * 只在**横置**的座位上放开裁切（`.chain-mark` 只在横置时存在）：其余内容都是块内尺寸，不受影响；
- * 唯一的副作用是横置座位上的技能白光（`.hero-block.skill-sweep`）扫出牌沿时不再被裁——用户
- * 的验收口径里"两端探出"是硬要求，这个组合态很罕见，取舍记在票 01 的 `## Answer`。 */
-.seat.chained .hero-block { overflow: visible; }
+ * 只在**对手**的横置座位上放开裁切（`.chain-mark` 只在横置时存在）：其余内容都是块内尺寸，不受
+ * 影响；唯一的副作用是横置座位上的技能白光（`.hero-block.skill-sweep`）扫出牌沿时不再被裁——
+ * 用户口径里"两端探出"是硬要求，这个组合态很罕见，取舍记在票 01 的 `## Answer`。
+ * **自己的座位不放开**（原因见下面 `.self .chain-mark` 那条）。 */
+.seat.opponent.chained .hero-block { overflow: visible; }
 .seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
 /* 阵亡与翻面**共用同一档置灰**（用户裁定：翻面的置灰程度与阵亡完全一致）。
  * 两者写在同一条规则里，配比因此不会漂：翻面唯一的差别是**没有文字**。
@@ -1358,8 +1359,11 @@ button.mini-slot { cursor: pointer; }
 .self .seat-tags { margin-top: 2px; }
 .self .seat-flag { font-size: calc(11 * var(--dsu)); padding: 0 calc(7 * var(--dsu)); }
 .self .seat-foot { margin-top: auto; font-size: calc(11 * var(--dsu)); padding-top: 5px; }
-/* 自己武将块的铁索贴图不另调左右：`.chain-mark` 的 -10.5% / 119.7% 是相对**牌宽**的，
- * 与对手座位同一条规则（原先的虚线因为内边距要写 `left/right: 10px`，现在不需要了）。 */
+/* 自己的武将块只有**半个卡宽**（右边是判定 / 装备区）：两端的"探出"在这里没有牌沿可探——
+ * 左端会被座位卡（`.seat.self` 的 `overflow: hidden` + 圆角）裁掉，右端会压到装备槽上。
+ * 自己这一块因此把贴图收回牌内：整张贴图铺满武将块，链头正好落在块的左右沿（唯一代价是
+ * 水平方向压 ~1.197 倍，肉眼是倾角略平一点）。对手座位仍按 `STATIC` 外扩。 */
+.self .chain-mark { left: 0; width: 100%; }
 .self .dead-text { font-size: calc(36 * var(--dsu)); }
 .self .side-block {
   flex: 0 0 44.52%;              /* 130 / 292 */

@@ -5102,13 +5102,18 @@ def test_the_chain_mark_replaces_the_dashed_line_everywhere() -> None:
     )
 
     # 铁索要探出牌沿：武将块的 `overflow: hidden`（白光 / 牌区的既有裁切，别改那条规则）会把
-    # 两端的链头正好切在牌沿上——横置的座位必须放开裁切，否则"两端都探出"这条验收永远不成立。
+    # 两端的链头正好切在牌沿上——横置的**对手**座位必须放开裁切，否则"两端都探出"永远不成立。
     assert re.search(r"overflow:\s*hidden", _css_rule(".seat .hero-block")), (
         "既有口径：白光仍裁在武将块内（这一条不许改）"
     )
-    open_rule = _css_rule(".seat.chained .hero-block")
+    open_rule = _css_rule(".seat.opponent.chained .hero-block")
     assert re.search(r"overflow:\s*visible", open_rule), (
-        f"横置的座位要放开裁切，铁索两端才探得出去：{open_rule}"
+        f"横置的对手座位要放开裁切，铁索两端才探得出去：{open_rule}"
+    )
+    # 自己的武将块只有半个卡宽：外扩会被座位卡裁掉左端、并压到右边的装备槽上 ⇒ 贴图收回牌内。
+    self_rule = _css_rule(".self .chain-mark")
+    assert re.search(r"left:\s*0", self_rule) and re.search(r"width:\s*100%", self_rule), (
+        f"自己的铁索贴图必须收在武将块内（不探出）：{self_rule}"
     )
 
 
