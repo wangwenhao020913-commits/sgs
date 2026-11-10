@@ -2357,3 +2357,211 @@ def test_the_table_profile_renders_at_target_size_with_legible_sizes(
     assert (probe["plain"]["width"], probe["plain"]["height"]) == (1920, 1080)
     assert probe["plain"]["numberOffset"]["dy"] == pytest.approx(55 / 644)
     assert probe["plain"]["numberOffset"]["rise"] == pytest.approx(92 / 644)
+
+
+# ---------------------------------------------------------------------------
+# damage-fx 票 06：伤害音效 —— 解锁、对齐、静音缺省
+#
+# 票面只要求三件可机械判的事：
+# 1. **静音缺省**：`localStorage['sgs.sfx']` 缺省 `'off'`，顶栏「♪」是唯一开关；
+# 2. **解锁**：一次性 `pointerdown`，`resume()` 与手势**同一个 tick**（不许经过 await / 计时器）；
+# 3. **对齐**：`tick` 的 `t` 就是 `fx.draw(t)` 的那个 `seconds`，cue 时刻取该档的 `fx.timeline`；
+#    导出链（`renderAt(t)`）与素材库那条链一声不响。
+#
+# 行为（按钮 / 记忆 / 同一秒 / 摘层即收声 / 无 AudioContext 降级）归烟测 `U-SFX-01..05`；
+# 电平（真的出声）归 `?audiotest=1` + `OfflineAudioContext`（`SgsSfx.renderOffline`）。
+# ---------------------------------------------------------------------------
+
+_MAIN_JS = STATIC_DIR / "main.js"
+
+
+def _js_function_with_defaults(source: str, name: str) -> str:
+    """同 :func:`_js_function`，但容得下带默认值的形参（`now = stageNow()`）。
+
+    `_js_function` 的 `[^)]*` 会在默认值里的那个 `)` 上提前收口；`renderDamageFrame` 与
+    `stageNow` 这类哨兵默认值是全仓写法，故这里按"行首 `}` 收尾"取正文。
+    """
+    start = source.find(f"function {name}(")
+    assert start >= 0, f"找不到函数 {name}()"
+    end = source.find("\n}", start)
+    assert end >= 0, f"函数 {name}() 没有行首收尾的 }}"
+    return source[start:end]
+
+
+def test_the_sfx_toggle_is_the_single_topbar_switch_and_defaults_to_off() -> None:
+    """顶栏「♪ 音效 关」：`type=button`、`aria-pressed=false`、位置在设置之后导航之前。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    button = re.search(r'<button\b[^>]*\bid="btn-sfx"[^>]*>(?P<body>.*?)</button>', html, re.S)
+    assert button is not None, "index.html 里缺少顶栏音效开关 #btn-sfx（票 06 §做法 2）"
+    assert re.search(r'\btype="button"', button.group(0)), (
+        f"#btn-sfx 必须是 type=\"button\"：{button.group(0)}"
+    )
+    assert 'aria-pressed="false"' in button.group(0), "缺省关：aria-pressed 必须是 false"
+    assert "♪" in button.group("body") and "音效 关" in button.group("body"), (
+        f"缺省文案必须是「♪ 音效 关」：{button.group('body')}"
+    )
+    assert html.count('id="btn-sfx"') == 1, "音效开关只许有一枚（不做角落 chip，不做第二处开关）"
+    assert "sfx-chip" not in html, "参考实现的右下角 chip 不进牌桌"
+
+    topbar = html[html.index('id="table-topbar"'):html.index('id="table-stage"')]
+    order = [
+        "t-deck", "btn-discard", "t-discard", "btn-settings", "btn-sfx",
+        "nav-lobby", "nav-table", "nav-replay",
+    ]
+    positions = [topbar.index(f'id="{name}"') for name in order]
+    assert positions == sorted(positions), (
+        f"顶栏右端顺序必须是 牌堆 / 弃牌 / 设置 / 音效 / 导航三键：{dict(zip(order, positions))}"
+    )
+
+    rule = _css_rule(".sfx-btn")
+    assert re.search(r"opacity:\s*\.?\d", rule), f"关着时要收着（半透明）：{rule}"
+    assert re.search(r"\.sfx-btn\.on\s*\{", _CSS_TEXT), "开着要有独立的 .on 档（亮起）"
+
+
+def test_the_damage_sfx_state_machine_is_gesture_unlocked_and_remembers_the_switch() -> None:
+    """缺省静音 / 一次性手势解锁 / 开关记忆：三条都在代码结构上钉住。"""
+    effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+    main = _strip_js_comments(_MAIN_JS.read_text(encoding="utf-8"))
+
+    assert re.search(r'^const DAMAGE_SFX_KEY = "sgs\.sfx";$', effects, re.M), (
+        "持久化键必须是 localStorage['sgs.sfx']（票面 §做法 2）"
+    )
+    assert re.search(r'^const DAMAGE_SFX_OFF = "off";$', effects, re.M), "缺省值必须是 'off'"
+    assert re.search(r'^const DAMAGE_SFX_ON = "on";$', effects, re.M), "开着记 'on'"
+
+    remembered = _js_function(effects, "damageSfxRemembered")
+    assert "=== DAMAGE_SFX_ON" in remembered, (
+        "只有 'on' 算开；缺键 / 'off' / 别的值一律静音（缺省静音不许被杂值绕过）"
+    )
+    sync = _js_function(effects, "damageSfxSync")
+    assert "damageSfxRemembered()" in sync, "启动时读一次记忆"
+    assert "damageSfxRemember(" not in sync, "启动时**不写**记忆（没点过就不留键）"
+    assert "damageSfxSyncButton()" in sync, "启动时把文案刷成记忆里的状态"
+
+    wire_body = _js_function(main, "wire")
+    assert 'document.addEventListener("pointerdown", unlockAudio, { once: true })' in wire_body, (
+        "解锁挂在**一次性** pointerdown 上（票面 §做法 1：点哪里都算手势）"
+    )
+    assert '$("btn-sfx").addEventListener("click", damageSfxToggle)' in wire_body, (
+        "顶栏「♪」是唯一开关"
+    )
+    assert "damageSfxSync()" in wire_body, "wire() 里先读记忆再接线"
+    assert "damageSfxAudiotestRequested()" in wire_body and "damageSfxAudiotest()" in wire_body, (
+        "?audiotest=1 在装配末尾触发（离线电平自检）"
+    )
+
+    unlock = _js_function(main, "unlockAudio")
+    assert "damageSfxUnlock()" in unlock, "手势处理器同步交给 effects.js"
+    assert "removeEventListener" in unlock, "一次性：跑过就把自己摘掉"
+    assert "await" not in unlock and "setTimeout" not in unlock and "fetch" not in unlock, (
+        "resume() 必须在手势的**同一个 tick**：不许经过 await / 计时器 / 回调"
+    )
+
+    unlock_fx = _js_function(effects, "damageSfxUnlock")
+    assert "if (!damageSfxOn) return false;" in unlock_fx, (
+        "开关关着时连 AudioContext 都不建（缺省静音是零代价的）"
+    )
+    ensure = _js_function(effects, "damageSfxEnsureLanes")
+    assert "DAMAGE_FX_CONCURRENCY" in ensure, (
+        "声道数 = 同时在播上限（3）：一条声道一路时钟，否则三条并发会互相吞 cue"
+    )
+    assert "player.start()" in ensure, "建声道的那一次就要 start()（同一个 tick 里 resume）"
+    set_enabled = _js_function(effects, "damageSfxSetEnabled")
+    assert "if (damageSfxOn) damageSfxEnsureLanes();" in set_enabled, (
+        "点开「♪」本身就是手势：声道在这一下建"
+    )
+    assert "damageSfxRemember(damageSfxOn)" in set_enabled, "开关状态写进 localStorage"
+    assert "damageSfxSyncButton()" in set_enabled, "文案 / aria-pressed / .on 同处更新"
+
+
+def test_the_damage_sfx_tick_shares_the_play_clock_and_the_export_chain_stays_silent() -> None:
+    """`tick` 吃演出自己的 `seconds`（与 `fx.draw` 同一个变量）；导出 / 素材库链一声不响。"""
+    effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+
+    frame = _js_function_with_defaults(effects, "renderDamageFrame")
+    assert "play.fx.draw(seconds)" in frame, "画面用 `seconds`（一次性算好的演出秒数）"
+    assert "damageSfxTick(play, seconds)" in frame, (
+        "音效必须吃**同一个** `seconds`——另起墙钟会漂（票面 §做法 3）"
+    )
+    assert "Date.now" not in frame and "performance.now" not in frame, (
+        "演出帧里不许再读墙钟"
+    )
+
+    tick = _js_function(effects, "damageSfxTick")
+    assert "lane.player.tick(seconds, voice)" in tick, "tick 的 t 就是演出秒数"
+    for wall_clock in ("Date.now", "stageNow", "performance.now", "requestAnimationFrame"):
+        assert wall_clock not in tick, f"音效时钟里不许出现 {wall_clock}（不另起墙钟）"
+    assert effects.count("damageSfxTick(") == 2, (
+        "tick 只有一个驱动点（定义 + renderDamageFrame 里那一次）"
+    )
+
+    voice = _js_function(effects, "damageSfxVoice")
+    assert "play.fx && play.fx.timing" in voice, (
+        "档位参数取 anim.ini 解算出来的毫秒表（票 04），不另写一份数字"
+    )
+    for field in ("flight", "strobe", "split"):
+        assert f'timing.{field}' in voice, f"sfx.js 要的 {field} 必须从 timing 折算"
+
+    start = _js_function(effects, "damageSfxStart")
+    assert "damageSfxTimeline(play.fx && play.fx.timeline)" in start, (
+        "cue 时刻取**这一档**的 fx.timeline（anim.ini 解算出来的那一份）"
+    )
+    assert "play.slot" in start, "一条并发演出一条声道（槽位唯一）"
+
+    assert "damageSfxStop(play)" in _js_function(effects, "finishDamagePlay"), (
+        "摘层即收声"
+    )
+    assert "damageSfxStopAll()" in _js_function(effects, "clearDamageFx"), (
+        "换局 / 版式作废：在播的演出一起收声"
+    )
+
+    # 导出链（`renderAt(t)` / `?export=1` / 素材库）一声不响：fx-core 根本不认识 SgsSfx，
+    # 牌桌也不提供 `renderAt` 这条路。
+    fx_core = (STATIC_DIR / "fx-core.js").read_text(encoding="utf-8")
+    assert "SgsSfx" not in fx_core, "画面那份脚本不许碰音效（导出链只驱动画面）"
+    assert "renderAt" not in effects, "牌桌不提供 renderAt（导出是素材库那条链的事）"
+
+    audiotest = _js_function(effects, "damageSfxAudiotest")
+    assert "renderOffline" in audiotest, "自检走 SgsSfx.renderOffline（纯函数式）"
+    assert "gameTiming(" in audiotest, "四档各自的时间轴都渲染一遍"
+    assert 'setAttribute("data-audio"' in audiotest, "电平写进 <html data-audio>"
+    assert "unavailable" in audiotest, "没有 OfflineAudioContext ⇒ unavailable（不抛错）"
+    requested = _js_function(effects, "damageSfxAudiotestRequested")
+    assert "audiotest=1" in requested, "只认 ?audiotest=1"
+
+
+def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_files() -> None:
+    """调音台：`VOICE` 表在文件顶部单独一段，六个声音是六个独立函数，仓库里没有音频文件。"""
+    text = (STATIC_DIR / "sfx.js").read_text(encoding="utf-8")
+    block = re.search(r"var VOICE = \{(?P<body>.*?)\n  \};", text, re.S)
+    assert block is not None, "sfx.js 顶部必须有一张 `var VOICE = { … }` 调音台"
+    keys = re.findall(r"^    (\w+):", block.group("body"), re.M)
+    assert keys == ["riser", "shing", "whoosh", "impact", "strobe", "split"], (
+        f"调音台必须是这六行（六个声音各一行）：{keys}"
+    )
+    for voice in keys:
+        assert re.search(rf"^  function {voice}\(", text, re.M), (
+            f"{voice} 必须是独立函数（用户要逐一替换，不许合并成一个大函数）"
+        )
+    assert text.index("var VOICE") < text.index("function riser("), (
+        "调音台必须在六个函数**之前**（改一个数就生效，不用碰合成代码）"
+    )
+    assert text.index("function scheduleAll(") > text.index("function split("), (
+        "排播在六个声音之后（表 → 声音 → 排播 → 播放器的次序）"
+    )
+
+    audio_suffixes = {".mp3", ".ogg", ".wav", ".m4a", ".flac", ".aac"}
+    found: list[Path] = []
+    for root in (
+        REPO_ROOT / "tools", REPO_ROOT / "src", REPO_ROOT / "tests",
+        REPO_ROOT / "docs", REPO_ROOT / "开发文档",
+    ):
+        if not root.exists():
+            continue
+        found.extend(
+            path for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in audio_suffixes
+        )
+    assert not found, (
+        f"音效全部现场合成，仓库里不得出现音频文件（票面 §音效以后怎么改）：{[str(p) for p in found[:5]]}"
+    )

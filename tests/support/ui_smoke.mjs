@@ -319,6 +319,16 @@ Object.assign(byId.get("in-seat"), { value: "0" });
 Object.assign(byId.get("in-timeout"), { value: "0" });
 Object.assign(byId.get("in-seed"), { value: "20261012" });
 
+/* damage-fx 票 06：音效开关进 `localStorage['sgs.sfx']`。node 的 vm 里没有 Storage，垫一个
+ * 最简实现（初始为空 = 缺省静音）；断言直接读 `storage`（= 浏览器里真存了什么），
+ * 不读前端的 state。 */
+const storage = new Map();
+const localStorageShim = {
+  getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
+  setItem: (key, value) => { storage.set(String(key), String(value)); },
+  removeItem: (key) => { storage.delete(String(key)); },
+};
+
 const documentListeners = {};
 const documentShim = {
   getElementById: (id) => byId.get(id) || (byId.set(id, el("div", id)), byId.get(id)),
@@ -326,8 +336,17 @@ const documentShim = {
   createElement: (tag) => (String(tag).toLowerCase() === "canvas" ? new CanvasEl() : new El(tag)),
   // 模态的 ESC 关闭挂在 document 的 keydown 上；垫片记下来交给用例显式触发。
   addEventListener: (name, fn) => { (documentListeners[name] ||= []).push(fn); },
+  // damage-fx 票 06：音效的手势解锁是**一次性**的，处理器自己摘掉自己——垫片要真摘。
+  removeEventListener: (name, fn) => {
+    const list = documentListeners[name];
+    if (!list) return;
+    const at = list.indexOf(fn);
+    if (at >= 0) list.splice(at, 1);
+  },
+  // `?audiotest=1` 的电平写在 `<html data-audio>` 上（真页面里就是 documentElement）。
+  documentElement: el("html", ""),
 };
-const fireDocument = (name, event) => (documentListeners[name] || []).forEach((fn) => fn(event));
+const fireDocument = (name, event) => (documentListeners[name] || []).slice().forEach((fn) => fn(event));
 
 /* -------------------------------------------------- 只记录前端发出的请求 */
 
@@ -435,6 +454,11 @@ const windowShim = {
     return id;
   },
   cancelAnimationFrame: (id) => { pendingFrames.delete(id); },
+  // damage-fx 票 06：开关的记忆口与 `?audiotest=1` 的查询串（页面里都是 `window.*`）。
+  localStorage: localStorageShim,
+  location: { search: "" },
+  /* 垫片**故意没有** `AudioContext`：票 06 的"没有 AudioContext ⇒ 静默降级"就是这条路径，
+   * 用例在 U-SFX-02b 里断言它建声道但一条都出不了声、且不抛错。 */
 };
 /* 排队的动画帧：`runFrame()` 跑一拍（本文件末的 damage-fx 用例按需取用）。 */
 const pendingFrames = new Map();
@@ -23024,6 +23048,149 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U-DMG-08d 自己座位的演出照常开演（体力条按 `#t-self-hp` 取，取不到就退兜底）",
     liveCount() === 1, `live=${liveCount()} keepOut="${attr(layer(), "data-damage-fx-keep-out")}"`);
   drainTimers();
+
+  /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
+   *
+   * 垫片里**没有 `AudioContext`**（见 windowShim），故分两段：
+   * ① 装一个假的 `window.SgsSfx` 记录 `create/start/tick/stop/mute`——断言"接线"（缺省关、
+   *    一次性解锁、tick 吃演出自己的 seconds、摘层即 stop）；
+   * ② 换回**真的** `sfx.js`——断言没有 `AudioContext` 时静默降级（建声道但一条都出不了声、
+   *    不抛错），以及 `?audiotest=1` 在没有 `OfflineAudioContext` 时写 `"unavailable"`。
+   * 电平（真的出声）不在烟测里：走 `?audiotest=1` + `OfflineAudioContext`（真浏览器）。
+   */
+  const sfxKey = "sgs.sfx";
+  const sfxButton = () => $("btn-sfx");
+  const sfxText = () => sfxButton().textContent;
+  const sfxPressed = () => attr(sfxButton(), "aria-pressed");
+  const sfxClick = async () => { await clickAndWait(sfxButton()); };
+
+  check("U-SFX-01a 缺省静音：顶栏「♪」文案 = 关、aria-pressed = false、localStorage 里没有键",
+    sfxText() === "♪ 音效 关" && sfxPressed() === "false" && !storage.has(sfxKey),
+    `text=${sfxText()} pressed=${sfxPressed()} store=${storage.get(sfxKey)}`);
+
+  const realSfx = windowShim.SgsSfx;
+  const sfxLog = { create: 0, start: 0, tick: [], stop: 0, mute: [] };
+  windowShim.SgsSfx = {
+    create(timeline) {
+      sfxLog.create += 1;
+      return {
+        start() { sfxLog.start += 1; return true; },
+        stop() { sfxLog.stop += 1; },
+        mute(muted) { sfxLog.mute.push(muted); },
+        tick(seconds, variant) {
+          sfxLog.tick.push({ t: seconds, v: variant, timeline: { ...timeline } });
+        },
+      };
+    },
+    renderOffline: () => Promise.resolve(null),
+  };
+
+  // 解锁只认**第一次** pointerdown，且必须在这个手势的同步调用栈里做完（同一个 tick resume）。
+  fireDocument("pointerdown", { type: "pointerdown" });
+  check("U-SFX-01b 缺省关时解锁不建 AudioContext（零点代价静音），手势仍被消费掉",
+    sfxLog.create === 0 && sfxLog.start === 0, `create=${sfxLog.create} start=${sfxLog.start}`);
+  fireDocument("pointerdown", { type: "pointerdown" });
+  check("U-SFX-01c 解锁是一次性的：第二次 pointerdown 不再触发任何创建",
+    sfxLog.create === 0 && sfxLog.start === 0, `create=${sfxLog.create} start=${sfxLog.start}`);
+
+  await sfxClick();
+  check("U-SFX-02a 点开「♪」：文案 / aria-pressed / localStorage 一起变成「开」",
+    sfxText() === "♪ 音效 开" && sfxPressed() === "true" && storage.get(sfxKey) === "on",
+    `text=${sfxText()} pressed=${sfxPressed()} store=${storage.get(sfxKey)}`);
+  check("U-SFX-02b 开声道：按同时在播上限建 3 条，且每条都在这次点击（手势）里 start()",
+    sfxLog.create === 3 && sfxLog.start === 3
+      && sfxLog.mute.length >= 3 && sfxLog.mute.every((muted) => muted === false),
+    `create=${sfxLog.create} start=${sfxLog.start} mute=${JSON.stringify(sfxLog.mute)}`);
+
+  // ---- U-SFX-03：tick 吃**演出自己的** seconds（与 fx.draw 同一个数），cue 时刻取该档时间轴 ----
+  const fxApiShim = windowShim.SgsDamageFX;
+  const realFxCreate = fxApiShim.create;
+  const drawn = [];
+  fxApiShim.create = (canvas, options) => {
+    const fx = realFxCreate(canvas, options);
+    const realDraw = fx.draw;
+    fx.draw = (t) => { drawn.push(t); return realDraw(t); };
+    return fx;
+  };
+  /* `stageNow()` = `Date.now()`，跑得比 1ms 还快时三帧的 seconds 全是 0——那样"同一个
+   * seconds"就成了 0==0 的空断言。这里把墙钟按帧推进（用例自己造时间，不等真实时钟），
+   * 于是 t 真的在走，draw / tick 的逐帧相等才有判据。用完立刻还回去。 */
+  const realDateNow = Date.now;
+  let clockNow = realDateNow();
+  Date.now = () => clockNow;
+  try {
+    loadDamageBatch([hpChange(20, 1, 4, 3)], [damageEvent(20, 1, 1, 1)]);
+    step();
+    clockNow += 40;
+    runFrame();
+    clockNow += 40;
+    runFrame();
+  } finally {
+    Date.now = realDateNow;
+  }
+  const paired = sfxLog.tick.map((call, index) => Math.abs(call.t - drawn[index]) < 1e-9);
+  check("U-SFX-03a 音效吃演出自己的 seconds：tick 的 t 与 fx.draw 的 t 逐个相等（不另起墙钟）",
+    drawn.length >= 3 && sfxLog.tick.length === drawn.length && paired.every(Boolean)
+      && sfxLog.tick[sfxLog.tick.length - 1].t > 0,
+    `draws=${drawn.length} ticks=${sfxLog.tick.length} `
+      + `t=${drawn.map((t) => t.toFixed(3)).join("/")}`);
+  const timeline = sfxLog.tick.length ? sfxLog.tick[0].timeline : null;
+  const expected = fxApiShim.gameTiming(1).timeline;
+  check("U-SFX-03b cue 时刻来自这一档的游戏时间轴（anim.ini 解算值，不是导出档的 0.52/0.64s）",
+    Boolean(timeline) && Math.abs(timeline.CHARGE - expected.CHARGE) < 1e-9
+      && Math.abs(timeline.LAUNCH - expected.LAUNCH) < 1e-9
+      && Math.abs(timeline.IMPACT - expected.IMPACT) < 1e-9,
+    `lane=${JSON.stringify(timeline)} expected=${JSON.stringify(expected)}`);
+  const voice = sfxLog.tick.length ? sfxLog.tick[0].v : null;
+  check("U-SFX-03c tick 的第二个实参是这一档的档位参数（dmg / flight / strobe / split）",
+    Boolean(voice) && voice.dmg === 1 && voice.flight > 0
+      && voice.strobe === 0 && voice.split === 0,
+    `voice=${JSON.stringify(voice)}`);
+  const ticksBeforeFinish = sfxLog.tick.length;
+  runUntil(() => liveCount() === 0);
+  const ticksAtFinish = sfxLog.tick.length;
+  const stopsAfterFinish = sfxLog.stop;
+  runFrame();
+  runFrame();
+  check("U-SFX-03d 演出摘层即收声（stop() 一次），之后不再喂 tick",
+    stopsAfterFinish === 1 && ticksAtFinish > ticksBeforeFinish
+      && sfxLog.tick.length === ticksAtFinish && liveCount() === 0,
+    `stops=${stopsAfterFinish} ticks=${sfxLog.tick.length}/${ticksAtFinish} `
+      + `before=${ticksBeforeFinish}`);
+
+  // ---- U-SFX-04：关掉开关 ⇒ 记忆为 off、三条声道静音；再打一次仍静音 ----
+  await sfxClick();
+  check("U-SFX-04a 点关「♪」：文案 / aria-pressed / localStorage 一起回到「关」，声道全部静音",
+    sfxText() === "♪ 音效 关" && sfxPressed() === "false" && storage.get(sfxKey) === "off"
+      && sfxLog.mute.slice(-3).every((muted) => muted === true),
+    `text=${sfxText()} pressed=${sfxPressed()} store=${storage.get(sfxKey)} `
+      + `mute=${JSON.stringify(sfxLog.mute.slice(-3))}`);
+  loadDamageBatch([hpChange(21, 2, 4, 3)], [damageEvent(21, 1, 2, 2)]);
+  step();
+  check("U-SFX-04b 关掉之后再打一次：画面照演，这一条声道开演时被重新静音（mute(true)）",
+    liveCount() === 1 && sfxLog.mute[sfxLog.mute.length - 1] === true,
+    `live=${liveCount()} lastMute=${sfxLog.mute[sfxLog.mute.length - 1]}`);
+  runUntil(() => liveCount() === 0);
+
+  // ---- U-SFX-05：换回真 sfx.js —— 没有 AudioContext ⇒ 静默降级；?audiotest=1 ⇒ unavailable ----
+  windowShim.SgsSfx = realSfx;
+  fxApiShim.create = realFxCreate;
+  // 白盒复位：声道池是模块级数组，这里按 ui_bridge 同一口径用 eval 取那个词法绑定
+  // （产品侧不新增"测试钩子"），好让真 sfx.js 走一遍建声道。
+  vm.runInContext(
+    "damageSfxLanes.length = 0; damageSfxUnlocked = false; damageSfxOn = false;", context);
+  await sfxClick();
+  const lanesLive = vm.runInContext(
+    "JSON.stringify(damageSfxLanes.map((lane) => lane.live))", context);
+  check("U-SFX-05a 没有 AudioContext：声道建了 3 条但一条都出不了声（start()=false，不抛错）",
+    lanesLive === "[false,false,false]" && storage.get(sfxKey) === "on",
+    `lanes=${lanesLive} store=${storage.get(sfxKey)}`);
+  storage.delete(sfxKey);
+  const audiotest = await vm.runInContext("damageSfxAudiotest()", context);
+  check("U-SFX-05b 没有 OfflineAudioContext：?audiotest=1 写 data-audio=\"unavailable\"（不抛错）",
+    audiotest === null
+      && attr(documentShim.documentElement, "data-audio") === "unavailable",
+    `audiotest=${audiotest} data-audio=${attr(documentShim.documentElement, "data-audio")}`);
 
   // 收尾：把这一块留下的状态清干净，不影响后面的用例。
   shell.style.filter = "";

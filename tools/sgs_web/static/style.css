@@ -493,6 +493,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; border-radius: 7px; color: var(--dim); cursor: pointer;
 }
 .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* damage-fx 票 06：顶栏「♪」音效开关。关 = 收着（半透明，不抢注意力）；开 = 亮起（accent 描边）。
+   与「设置」同一套 `.icon-btn` 尺寸，只加两档状态——不新增按钮形状。 */
+.sfx-btn { opacity: .55; white-space: nowrap; }
+.sfx-btn.on { opacity: 1; border-color: var(--accent); color: var(--accent); }
 
 .settings {
   position: absolute; right: 0; top: calc(100% + 6px); width: 250px;

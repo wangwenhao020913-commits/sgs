@@ -111,6 +111,11 @@
                 aria-haspopup="dialog" aria-controls="t-discard-modal"
                 aria-expanded="false">弃牌 <span id="t-discard"></span></button>
         <button id="btn-settings" type="button" class="icon-btn" title="牌桌设置">设置</button>
+        <!-- damage-fx 票 06：伤害音效开关。**缺省关**（首次进来不主动出声），状态记在
+             `localStorage['sgs.sfx']`；文案 / `aria-pressed` / `.on` 由
+             `effects.js:damageSfxSyncButton()` 唯一维护，这里只留缺省形态。 -->
+        <button id="btn-sfx" type="button" class="icon-btn sfx-btn" aria-pressed="false"
+                title="伤害音效（缺省关；点一下打开，刷新后记住）">♪ 音效 关</button>
         <!-- U2-01：导航三键（D7 右端顺序：牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放）。
              无会话时「牌桌」禁用；当前页高亮由 core.js:show() 统一维护。 -->
         <button id="nav-lobby" class="tab on" type="button" aria-current="page">开局</button>
