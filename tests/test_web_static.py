@@ -1926,17 +1926,27 @@ import vm from "node:vm";
 
 const calls = [];
 const gradient = { addColorStop() {} };
+/* 属性要**真的**记下来：`effects.js` 的牌桌档靠"有没有全屏不透明填充"判，
+ * 而那是 `fillStyle` / `globalCompositeOperation` 决定的（方法调用看不出来）。 */
+const props = { globalCompositeOperation: "source-over", globalAlpha: 1, fillStyle: "" };
 const ctx = new Proxy({}, {
   get(_target, prop) {
+    if (prop in props) return props[prop];
     if (prop === "measureText") return () => ({ width: 10 });
     if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
     if (prop === "fillText" || prop === "strokeText") return (text) => calls.push({ op: prop, text });
     if (prop === "drawImage") {
       return (image, ...args) => calls.push({ op: "drawImage", w: image && image.width, args });
     }
+    if (prop === "fillRect") {
+      return (_x, _y, w, h) => calls.push({
+        op: "fillRect", w, h, fill: props.fillStyle,
+        composite: props.globalCompositeOperation, alpha: props.globalAlpha,
+      });
+    }
     return () => {};
   },
-  set() { return true; },
+  set(_target, prop, value) { props[prop] = value; return true; },
 });
 const makeCanvas = () => ({ width: 0, height: 0, getContext: () => ctx });
 const context = vm.createContext({
@@ -1955,40 +1965,66 @@ const report = vm.runInContext(`(() => {
     src: { cx: 620, cy: 360, w: 230, h: 320 },
     dst: { cx: 1080, cy: 360, w: 230, h: 320 },
   };
-  const timing = {
+  const timing1 = {
+    damage_fx_1_total: 1500, damage_fx_1_flight: 130,
+    damage_fx_1_impact: 330, damage_fx_1_fade: 700,
+  };
+  const timing4 = {
     damage_fx_4_total: 2100, damage_fx_4_flight: 110,
     damage_fx_4_impact: 340, damage_fx_4_fade: 950,
   };
-  const cards = () => __calls.filter((call) => call.op === "drawImage" && call.w !== 1920);
+  const draw = (opts, at) => {
+    __calls.length = 0;
+    const fx = SgsDamageFX.create(document.createElement("canvas"), opts);
+    fx.draw(at);
+    return { fx, calls: __calls.slice() };
+  };
+  const cards = (calls) => calls.filter((call) => call.op === "drawImage" && call.w !== 1920);
+  /** 全屏填充（铺满 1920×1080 的那一张）：牌桌档一次都不许有"不透明"的。 */
+  const fullScreen = (calls) => calls.filter(
+    (call) => call.op === "fillRect" && call.w >= 1920 && call.h >= 1080);
 
-  // 参考舞台（不传 stage / amount）：素材库那条链的回归钉——贴图仍是自然尺寸。
-  __calls.length = 0;
-  const plain = SgsDamageFX.create(document.createElement("canvas"), { variant: 1, dpr: 1 });
-  plain.draw(0.70);
-  const plainCards = cards().map((call) => call.args);
-
+  // 参考舞台（不传 stage / amount / bare）：素材库那条链的回归钉。
+  const plain = draw({ variant: 1, dpr: 1 }, 0.70);
+  // 牌桌档：只出特效（不画纸底 / 样例武将牌），飘字仍是服务端真实值。
+  const bare1 = draw({
+    variant: 1, profile: "game", timing: timing1, amount: 3, dpr: 1, stage, bare: true,
+  }, 0.80);
   // 牌桌：座位矩形 + 服务端的真实伤害值（7 点仍按 4 档演）
-  __calls.length = 0;
-  const tuned = SgsDamageFX.create(document.createElement("canvas"), {
-    variant: 4, profile: "game", timing, amount: 7, dpr: 1, stage,
-  });
-  tuned.draw(0.50);
-  const tunedCards = cards().map((call) => call.args);
-  const texts = __calls.filter((call) => call.op === "fillText").map((call) => call.text);
+  const tuned = draw({
+    variant: 4, profile: "game", timing: timing4, amount: 7, dpr: 1, stage,
+  }, 0.50);
+  // 4 点档的屏闪 + 劈屏窗口：素材库档会铺纸底 / 黑缝 / 整屏去色，牌桌档一样都不许有
+  const plain4 = draw({ variant: 4, profile: "game", timing: timing4, amount: 3, dpr: 1 }, 0.39);
+  const bare4 = draw({
+    variant: 4, profile: "game", timing: timing4, amount: 3, dpr: 1, stage, bare: true,
+  }, 0.39);
 
-  // 缺 amount ⇒ 退回该档的参考数字；空矩形 ⇒ 退回参考舞台（不让页面报错）
+  const texts = (calls) => calls.filter((call) => call.op === "fillText").map((call) => call.text);
   const fallback = SgsDamageFX.create(document.createElement("canvas"), { variant: 2, dpr: 1 });
   const degenerate = SgsDamageFX.create(document.createElement("canvas"), {
     variant: 1, dpr: 1, stage: { src: { w: 0, h: 0 } },
   });
 
   return JSON.stringify({
-    plain: { stage: plain.stage, number: plain.number, duration: plain.duration, cards: plainCards },
-    tuned: {
-      stage: tuned.stage, number: tuned.number, duration: tuned.duration,
-      timeline: tuned.timeline, cards: tunedCards, texts,
+    plain: {
+      stage: plain.fx.stage, number: plain.fx.number, duration: plain.fx.duration,
+      bare: plain.fx.bare, cards: cards(plain.calls).map((call) => call.args),
     },
-    fallback: { number: fallback.number, stage: fallback.stage },
+    bare: {
+      stage: bare1.fx.stage, number: bare1.fx.number, duration: bare1.fx.duration,
+      bare: bare1.fx.bare, draws: bare1.calls.filter((call) => call.op === "drawImage").length,
+      cards: cards(bare1.calls).length, texts: texts(bare1.calls),
+      fullScreen: fullScreen(bare1.calls),
+    },
+    bare4: { fullScreen: fullScreen(bare4.calls), cards: cards(bare4.calls).length },
+    plain4: { fullScreen: fullScreen(plain4.calls) },
+    tuned: {
+      stage: tuned.fx.stage, number: tuned.fx.number, duration: tuned.fx.duration,
+      timeline: tuned.fx.timeline, cards: cards(tuned.calls).map((call) => call.args),
+      texts: texts(tuned.calls),
+    },
+    fallback: { number: fallback.number, bare: fallback.bare },
     degenerate: degenerate.stage,
   });
 })()`, context);
@@ -2034,6 +2070,8 @@ def test_the_damage_fx_number_comes_from_the_server_amount(damage_fx_stage_probe
         "不传 amount ⇒ 与参考实现一致（该档的 dmg）"
     )
     assert probe["plain"]["number"] == "-1"
+    assert probe["plain"]["bare"] is False, "缺省不是牌桌档：素材库 / 截图仍是完整舞台"
+    assert probe["bare"]["number"] == "-3", "牌桌档（bare）的飘字同样用服务端 amount"
 
 
 def test_the_damage_fx_stage_maps_the_two_seat_rects_without_touching_the_export_chain(
@@ -2082,4 +2120,52 @@ def test_the_damage_fx_stage_maps_the_two_seat_rects_without_touching_the_export
 
     assert probe["degenerate"]["src"] == {"cx": 520, "cy": 545, "w": 460, "h": 644}, (
         "量不到布局（0 宽 / 缺字段）⇒ 退回参考舞台，不让页面报错"
+    )
+
+
+def test_the_table_profile_draws_the_effects_only_without_covering_the_table(
+    damage_fx_stage_probe: dict,
+) -> None:
+    """票 05 返工（实机验收）：牌桌档 `bare` 只出特效——牌桌全程透得出来。
+
+    实机（Edge 156 + bsk 0.4.2）上被打回的是**不透明覆盖**：宣纸底铺满整个牌桌壳、
+    真牌上叠了两张参考实现的样例武将牌（关羽 / 吕布）。故 `bare: true` 时：
+
+    - 一次 `drawImage` 都不做（纸底与两张样例牌都不画）；
+    - 4 点档的"缝隙黑底"与"整屏去色"这两张不透明度 1 的全屏填充也一并免掉
+      （`saturation` 合成喂给透明层只会得到一张不透明的灰，等于盖住牌桌）；
+    - 剑光 / 刀痕 / 墨点 / 飘字照旧，座位矩形与飘字数值不受影响。
+
+    `?still` / `?export` 那条素材库链**逐字节不变**（缺省不 bare，见上面两条用例）。
+    """
+    probe = damage_fx_stage_probe
+    bare = probe["bare"]
+    assert bare["bare"] is True
+    assert bare["draws"] == 0, f"牌桌档一次贴图都不该做（纸底 / 样例武将牌）：{bare['draws']}"
+    assert bare["cards"] == 0, "参考实现的样例武将牌不许画到真实武将块上"
+    assert bare["texts"] and "-3" in bare["texts"], "飘字照旧画（数值来自服务端 amount）"
+    assert bare["stage"]["src"] == {"cx": 620, "cy": 360, "w": 230, "h": 320}
+    assert bare["stage"]["dst"] == {"cx": 1080, "cy": 360, "w": 230, "h": 320}
+    assert bare["duration"] == pytest.approx(1.5), "摘层时长仍来自 anim.ini 的 total"
+
+    def opaque_full_screen(fills: list[dict]) -> list[dict]:
+        """判定"盖住牌桌"的那两张：缝隙黑底（`#0d0c0b`）与整屏去色（`saturation`）。"""
+        return [
+            fill for fill in fills
+            if fill["fill"] == "#0d0c0b" or fill["composite"] == "saturation"
+        ]
+
+    assert opaque_full_screen(bare["fullScreen"]) == [], (
+        f"牌桌档不许有全屏不透明填充：{bare['fullScreen']}"
+    )
+    assert opaque_full_screen(probe["bare4"]["fullScreen"]) == [] and probe["bare4"]["cards"] == 0, (
+        "4 点档（屏闪 + 劈屏窗口）同样不许有全屏填充、不许贴样例牌"
+    )
+    # 反过来钉住素材库档：同一时刻它**应该**有那两张全屏填充（否则就是两档串了）。
+    kinds = {
+        "split" if fill["fill"] == "#0d0c0b" else "strobe"
+        for fill in opaque_full_screen(probe["plain4"]["fullScreen"])
+    }
+    assert kinds == {"split", "strobe"}, (
+        f"?still / ?export 那条链必须保持原样（缝隙黑底 + 整屏去色）：{kinds}"
     )

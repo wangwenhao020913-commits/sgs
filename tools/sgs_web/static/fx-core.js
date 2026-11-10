@@ -11,6 +11,13 @@
  *
  * 用法：SgsDamageFX.create(canvas, { variant: 1|2|3|4 }).draw(t)
  *
+ * 两种用途（票 05 起）：
+ * - **素材库 / 截图**（缺省）：连宣纸底 + 两张样例武将牌一起画满 1920×1080，
+ *   `?still` / `?export` / `renderAt(t)` 走这条链。
+ * - **牌桌覆盖层**（`bare: true`）：只出**特效**——剑光 / 刀痕 / 墨点 / 飘字，
+ *   纸底与样例牌一概不画，牌桌全透过覆盖层的透明区看得见；刀痕仍裁在中剑方那块
+ *   座位矩形里（`stage`）。
+ *
  * 落进牌桌时是**普通脚本**（U1-00 的清单契约）：`"use strict";` 是文件的**第一条语句**
  * （`tests/test_web_static.py:test_every_script_is_a_classic_strict_script`），故它写在
  * 参考实现那段块注释**之前**；全局名仍是 `window.SgsDamageFX`，不改成 ESM。
@@ -964,6 +971,10 @@
     }
     // 飘字文案：服务端 `amount` 是真实伤害（酒 / 加伤可能 ≥ 5），档位只决定强度。
     var txt = numberText(variant, opts.amount);
+    // 票 05（实机验收返工）：**牌桌档 = 只出特效**。纸底与两张样例武将牌是素材库舞台的
+    // 布景，铺到牌桌上就是一块不透明的米色板（整个牌桌被盖住）＋ 与真实武将不符的假牌；
+    // 故 `bare: true` 时两样都不画，牌桌透得出来。缺省仍是素材库那条链（逐字节不变）。
+    var bare = opts.bare === true;
     var seed = 1700 + vId * 977;
     var dpr = opts.dpr || 1;
 
@@ -980,9 +991,9 @@
     // 三张静态图（宣纸底 / 两张武将牌）都是**只读**贴图，跨实例复用：牌桌上一段伤害
     // 就建一次 1920×1080 的纸底 + 两张 460×644 的牌是几十毫秒的主线卡顿（票 05 起
     // 每次伤害都要建一个实例，故缓存到模块级；`drawImage` 只读，多实例共用安全）。
-    var paper = sharedImage('paper', function () { return paintPaper(W, H, 21); });
-    var heroSrc = sharedImage('heroSrc', function () { return paintHeroCard(HEROES.src, 401); });
-    var heroDst = sharedImage('heroDst', function () { return paintHeroCard(HEROES.dst, 733); });
+    var paper = bare ? null : sharedImage('paper', function () { return paintPaper(W, H, 21); });
+    var heroSrc = bare ? null : sharedImage('heroSrc', function () { return paintHeroCard(HEROES.src, 401); });
+    var heroDst = bare ? null : sharedImage('heroDst', function () { return paintHeroCard(HEROES.dst, 733); });
 
     var cut = { a: -31, off: -0.02, w: variant.scarW, span: 1.0 };
     var scar = buildScar(cut, seed, S.dst);
@@ -1005,10 +1016,12 @@
       c.save();
       c.translate(sx, sy);
 
-      // 两张武将牌（阴影已烘进图里，这里只贴图）：贴进本实例的两块座位矩形，
-      // 于是牌桌上的两张牌正好盖住真实的武将块（票 05）；参考舞台下 = 原样贴图。
-      drawHeroCard(c, heroSrc, S.src);
-      drawHeroCard(c, heroDst, S.dst);
+      // 两张武将牌（阴影已烘进图里，这里只贴图）：贴进本实例的两块座位矩形。
+      // `bare`（牌桌档）**不画**——牌桌上那两张是真实的武将块，画上去就是"真牌 + 假牌"两层。
+      if (heroSrc && heroDst) {
+        drawHeroCard(c, heroSrc, S.src);
+        drawHeroCard(c, heroDst, S.dst);
+      }
 
       // 出剑瞬间，出剑方整块亮一下
       var srcFlash = age >= 0 && age < 0.22 ? 0.5 * Math.exp(-age * 14) : 0;
@@ -1104,7 +1117,7 @@
       // 不劈屏的档位：直接画在主画布上，省掉一次全屏搬运
       if (variant.split <= 0) {
         ctx.clearRect(0, 0, W, H);
-        ctx.drawImage(paper, 0, 0, W, H);
+        if (paper) ctx.drawImage(paper, 0, 0, W, H);
         drawCardsAndFx(ctx, t, S);
         postProcess(ctx, t);
         return;
@@ -1113,7 +1126,7 @@
       // 要劈屏：先画到场景层
       sceneCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
       sceneCtx.clearRect(0, 0, W, H);
-      sceneCtx.drawImage(paper, 0, 0, W, H);
+      if (paper) sceneCtx.drawImage(paper, 0, 0, W, H);
       drawCardsAndFx(sceneCtx, t, S);
       ctx.clearRect(0, 0, W, H);
 
@@ -1147,8 +1160,12 @@
           halfPaths = { up: up, down: down };
         }
 
-        ctx.fillStyle = '#0d0c0b';
-        ctx.fillRect(0, 0, W, H);
+        // 缝里的"虚空"：素材库档铺黑底（两半像从纸里撕开）；牌桌档**不铺**——
+        // 那是一次不透明度 1 的全屏填充，等于把牌桌盖住（实机验收被挡的就是这一类）。
+        if (!bare) {
+          ctx.fillStyle = '#0d0c0b';
+          ctx.fillRect(0, 0, W, H);
+        }
 
         // 上半天 / 下半天（Path2D 缓存，别每帧重建多边形）
         ctx.save();
@@ -1201,6 +1218,23 @@
         var phase = Math.floor((t - T.IMPACT) * 15);
         var bright = phase % 2 === 0;
 
+        if (bare) {
+          // 牌桌档做不了"整屏转黑白"：`saturation` 是合成模式，喂给**透明**层只会得到
+          // 一张不透明度 1 的灰（等于把牌桌盖住 0.16 / 0.44 秒，实机验收被打回的就是
+          // 这一类全屏不透明覆盖）。这里只留明暗闪：牌桌照旧透得出来，重击的顿挫仍在。
+          c.save();
+          if (bright) {
+            c.globalAlpha = 0.12;
+            c.fillStyle = '#ffffff';
+          } else {
+            c.globalAlpha = 0.34;
+            c.fillStyle = '#14120f';
+          }
+          c.fillRect(0, 0, W, H);
+          c.restore();
+          return;   // 下面那段是素材库档的整屏去色 + 压暗，牌桌档不参与
+        }
+
         // 去饱和：saturation 混合模式喂一个零饱和度色
         c.save();
         c.globalCompositeOperation = 'saturation';
@@ -1227,7 +1261,7 @@
       profile: clock.profile, timeline: T, timing: clock.ms,
       // 票 05：本实例的舞台（座位矩形 / 构图比例 / 剑光航线）与飘字文案。播放器用
       // `duration` 定时摘层（= `anim.ini` 的 `total`），票 06 的音效读同一份 `timeline`。
-      stage: S, number: txt
+      stage: S, number: txt, bare: bare
     };
   }
 

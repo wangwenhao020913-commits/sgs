@@ -310,10 +310,11 @@
     <!-- 飞行层（U4-01 / D1）：与舞台区互不依赖的覆盖层，z 高于目标线 / 技能飘字。
          每张移动的牌一个牌面副本；起 / 落点只在起飞那一刻量一次，之后不跟随重绘。 -->
     <div id="t-anim-flights" class="anim-layer" aria-hidden="true"></div>
-    <!-- 无属性伤害演出层（damage-fx 票 05）：剑光 / 刀痕 / 飘字的一块画布，铺满牌桌壳、
-         不吃指针，z 在飞行层（18）之上、弹窗（60）之下。层里**只有一张** canvas——跨演出
-         复用、播完清空摘掉；两张武将牌的矩形由 `effects.js` 量出来换算成舞台坐标，交给
-         `SgsDamageFX.create(canvas, {stage})`。 -->
+    <!-- 无属性伤害演出层（damage-fx 票 05）：剑光 / 刀痕 / 墨点 / 飘字的一块**透明**画布，
+         铺满牌桌壳、不吃指针，z 在飞行层（18）之上、弹窗（60）之下。层里**只有一张**
+         canvas——跨演出复用、播完清空摘掉；素材库舞台的宣纸底与样例武将牌在牌桌档
+         （`bare: true`）一概不画，牌桌全程透得出来；两张武将块的矩形由 `effects.js`
+         量出来换算成舞台坐标，交给 `SgsDamageFX.create(canvas, {stage, bare: true})`。 -->
     <div id="t-damage-fx" class="damage-fx-layer" aria-hidden="true"></div>
     <!-- 飞行时间表提示（U4-01 / D8）：anim.ini 缺键 / 解析失败时**一行**，正常时隐藏。 -->
     <div id="t-anim-note" class="anim-note" hidden></div>

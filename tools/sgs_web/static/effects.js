@@ -752,7 +752,7 @@ function damageFxMark(layer) {
   layer.setAttribute("data-damage-fx-plays", String(damageStartedCount));
 }
 
-/** 一条伤害开演：取离屏槽 → `SgsDamageFX.create()`（game 档 + 座位矩形 + 真实值）→ 定时摘层。
+/** 一条伤害开演：取离屏槽 → `SgsDamageFX.create()`（game 档 + 座位矩形 + 真实值 + bare）→ 定时摘层。
  *
  * 摘层时刻用 `create()` 返回的 `duration`（= `anim.ini` 的 `total`）**定时**，不靠 rAF
  * 自然停、也不用 `draw(t × k)` 压时间：音效是另一条时钟（票 06），两边必须读同一份 timeline。
@@ -775,6 +775,9 @@ function startDamagePlay(event) {
     amount: plan.amount,
     stage: { src: plan.src, dst: plan.dst },
     dpr: damageFxDpr(),
+    // 牌桌档**只出特效**：宣纸底 + 样例武将牌一概不画（否则覆盖层不透明、牌桌被盖住，
+    // 而且会在真实武将块上叠出参考实现的关羽 / 吕布）。素材库那条链（缺省）不受影响。
+    bare: true,
   });
   const play = {
     seq: Number(event.seq),
