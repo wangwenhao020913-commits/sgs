@@ -23,9 +23,10 @@
  * 音效那侧同样单向：本文件在四个点调 `sfx-ui.js`（开演 / 收尾 / 每帧 / 清场），它只接
  * `play` 对象，不读这里的在播表。
  *
- * **属性家族**（damage-fx-natures 票 01）：`event.nature` 穿透到 `plan` / `play`，是下游
- * **唯一**判据——`damageFxRendererFor(nature)` 选画面模块，`damageFxTiming(nature, variant)`
- * 选 `anim.ini` 的字段表，`sfx-ui.js` 按 `play.nature` 选音效模块。查表只此一处。
+ * **属性家族**（damage-fx-natures 票 01 雷电、票 03 火焰）：`event.nature` 穿透到 `plan` /
+ * `play`，是下游**唯一**判据——`damageFxRendererFor(nature)` 选画面模块，
+ * `damageFxTiming(nature, variant)` 选 `anim.ini` 的字段表，`sfx-ui.js` 按 `play.nature`
+ * 选音效模块。查表只此一处。
  *
  * 硬口径（spec §演出口径）：**轻演出**（1 / 2 档）相邻开演错开 120ms、同时在播上限 =
  * **该属性自己的 cap**（`damageFxCapFor(nature)` 是唯一的 cap 口）；**重演出**（>= 3 档，
@@ -46,11 +47,10 @@ const DAMAGE_FX_NATURE = "NORMAL";
 
 /** 属性家族 → **唯一**的一张表：画面模块（+ 缺模块时的回落）、整屏效果（灰阶 / 着色闪档）、
  *  能不能播、并发表键名。`renderer` / `fallback` 存的是**全局名**，调用时才解析——`index.html`
- *  里两个画面模块都排在本文件之后，顶层此时还没有 `window.SgsDamageFX` / `window.SgsThunderFX`。
+ *  里三个画面模块都排在本文件之后，顶层此时还没有 `window.SgsDamageFX` / `SgsThunderFX` /
+ *  `SgsFireFX`。
  *  `cap` 是 `anim.ini` 的键名（票 02）：cap 键只在这张表里写一次，读的一侧是
- *  `damageFxCapFor`——一个家族一条并发表，调雷不该顺手改了剑光的行为。
- *
- *  票 03 接火时只动这张表的 `FIRE` 行：`playable: true` + 加载 `fx-fire.js`。 */
+ *  `damageFxCapFor`——一个家族一条并发表，调雷不该顺手改了剑光的行为。 */
 const DAMAGE_FX_FAMILIES = {
   [DAMAGE_FX_NATURE]: {
     renderer: "SgsDamageFX", fallback: "SgsDamageFX",
@@ -65,8 +65,10 @@ const DAMAGE_FX_FAMILIES = {
     cap: "damage_fx_thunder_concurrency",
   },
   FIRE: {
-    renderer: "SgsFireFX", fallback: "SgsDamageFX",
-    grayscale: false, flash: "fx-flash-fire", playable: false,
+    // 火焰与雷电同姿态：`SgsFireFX` 是它唯一的画面模块，缺件就不播（回落剑光会把一次
+    // 火杀演成无属性剑光，比不演更误导）。整屏闪同理走暖白着色子层。
+    renderer: "SgsFireFX", fallback: null,
+    grayscale: false, flash: "fx-flash-fire", playable: true,
     cap: "damage_fx_fire_concurrency",
   },
 };
@@ -91,11 +93,10 @@ function damageFxFamilyFor(nature) {
 /** 属性 → 画面模块（**分派查表只许写在这一处**，票面 §2）。
  *
  * - `THUNDER` → `SgsThunderFX`（票 01 落地）；
- * - `FIRE` → `SgsFireFX`（票 03 落地；本票还没有这份脚本 ⇒ 回落剑光，但属性闸门本票
- *   仍不放行 FIRE，见 `damageFxNaturePlayable`）；
+ * - `FIRE` → `SgsFireFX`（票 03 落地）；
  * - `NORMAL` / 未登记 → `SgsDamageFX`。
  *
- * 缺模块时：未登记属性 / 票 03 的 FIRE 回落剑光（fail-open）；**已接的雷电缺件就不播**
+ * 缺模块时：未登记属性回落剑光（fail-open）；**已接的雷 / 火缺件就不播**
  * （`fallback: null`，见家族表）——spec §2 的 fail-open 只给"其它未知"。
  */
 function damageFxRendererFor(nature) {
@@ -107,10 +108,10 @@ function damageFxRendererFor(nature) {
  *
  * **字段名名单不在这份文件里维护**：真源是各画面模块的 `DEFAULT_TIMING`，它导出
  * `TIMING_FIELDS`（由那张表的键生成）。剑光是 `total / flight / impact / fade / strobe /
- * split`，雷电是 `total / flight / impact / fade / strobe / flash`——由模块自己说。
+ * split`，雷电与火焰都是 `total / flight / impact / fade / strobe / flash`——由模块自己说。
  *
- * **调用时取**：`index.html` 里两个画面模块都排在 `damage-fx.js` **之后**，文件顶层此时
- * 还没有 `SgsDamageFX` / `SgsThunderFX`；本函数是播放器运行时调的，那时都在。
+ * **调用时取**：`index.html` 里三个画面模块都排在 `damage-fx.js` **之后**，文件顶层此时
+ * 还没有 `SgsDamageFX` / `SgsThunderFX` / `SgsFireFX`；本函数是播放器运行时调的，那时都在。
  */
 function damageFxTimingFields(nature) {
   const api = damageFxRendererFor(nature);
@@ -152,10 +153,9 @@ const DAMAGE_FX_CONCURRENCY = 3;
 const DAMAGE_FX_CAP_MIN = 1;
 const DAMAGE_FX_CAP_MAX = 8;
 
-/** 这一条伤害该不该演：**只挡还没接的家族**（FIRE 的闸门住在 `DAMAGE_FX_FAMILIES`）。
+/** 这一条伤害该不该演：家族表里 `playable` 为 false 的才挡（票 03 起三个家族全开）。
  *
- * 票 01 口径：`THUNDER` 放行；`FIRE` 的闸门留给票 03（票面 §验收 5 明写"FIRE 事件本票
- * 仍不播"）；`null` / `undefined` / `"NORMAL"` / 未登记属性一律视同无属性。
+ * `null` / `undefined` / `"NORMAL"` / 未登记属性一律视同无属性。
  *
  * **`null` / 缺字段 = 无属性**，三层文档同一句话：
  * - `game.py:note_damage`：「`None` = 牌面没声明，**等同无属性**」；
@@ -574,7 +574,7 @@ function startDamagePlay(event) {
   const fx = api.create(stageCanvas, {
     variant: plan.variant,
     profile: "game",
-    // 字段表按属性取（剑光 19 键 / 雷电 20 键），读的是同一份 anim.ini。
+    // 字段表按属性取（剑光 19 键 / 雷电 20 键 / 火焰 20 键），读的是同一份 anim.ini。
     timing: damageFxTiming(nature, plan.variant),
     amount: plan.amount,
     // 雷电无来源时传 `src: null`（天降）；其余家族原样交两块矩形（见 `damageFxStageFor`）。
@@ -870,7 +870,7 @@ function fireDamageEventsThrough(seq = Infinity) {
   state.damageEvents = kept;
   let queued = 0;
   for (const event of due) {
-    // 票 01：`null` / 缺字段 / `NORMAL` / THUNDER 放行；FIRE 的闸门留给票 03。
+    // `null` / 缺字段 / `NORMAL` / `THUNDER` / `FIRE` / 未登记属性都演（票 03 起三族全开）。
     if (!event || !damageFxNaturePlayable(event.nature)) continue;
     // 票 08：cap 是**该家族的排队上限**（在播 + 排队）——重演出串行后"同时在播"恒为 1，
     // 若还按在播判，队列会无界增长。超出的丢掉（伤害本身已结算，攒着只会把旧伤害飘在新画面上）。

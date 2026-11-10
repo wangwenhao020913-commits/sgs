@@ -727,6 +727,9 @@ _DAMAGE_FX_GLOBALS = {
     # damage-fx-natures 票 01：雷电家族与剑光同姿态（普通脚本、全局名、不碰 DOM）。
     "fx-thunder.js": "SgsThunderFX",
     "sfx-thunder.js": "SgsThunderSfx",
+    # damage-fx-natures 票 03：火焰家族逐字同形。
+    "fx-fire.js": "SgsFireFX",
+    "sfx-fire.js": "SgsFireSfx",
 }
 
 
@@ -808,6 +811,8 @@ _SWORD_TIMING_KEY = re.compile(r"^damage_fx_\d+_")
 # 雷的键同理：`damage_fx_thunder_<档>_<字段>`——**不带档位号**的 `damage_fx_thunder_concurrency`
 # （票 02 的并发表）不是时长键，别混进这张对照表。
 _THUNDER_TIMING_KEY = re.compile(r"^damage_fx_thunder_\d+_")
+# 火的键同理：`damage_fx_fire_<档>_<字段>`（`damage_fx_fire_concurrency` 是并发表，不是时长键）。
+_FIRE_TIMING_KEY = re.compile(r"^damage_fx_fire_\d+_")
 
 
 def _sword_ini_entries() -> dict[str, str]:
@@ -892,7 +897,7 @@ function load(context, name, source) {
 
 /* ------------------------------------------------- ① 真脚本：正常那一份 ---- */
 const context = makeSandbox();
-for (const name of ["anim.js", "fx-core.js", "fx-thunder.js", "effects.js", "damage-fx.js"]) load(context, name);
+for (const name of ["anim.js", "fx-core.js", "fx-thunder.js", "fx-fire.js", "effects.js", "damage-fx.js"]) load(context, name);
 const report = await vm.runInContext(
   `(async () => {
      await animReady;
@@ -925,7 +930,7 @@ const report = await vm.runInContext(
          4: damageFxTiming(null, 4),
          resolvedFromDamageFx: fx.gameTiming(4, damageFxTiming(null, 4)).timeline.DURATION,
        },
-       // 票 01：null / 缺字段 / NORMAL / THUNDER / 未登记属性都播；只有还没接的 FIRE 被挡。
+       // 票 03：三个家族全开——null / 缺字段 / NORMAL / THUNDER / FIRE / 未登记属性都播。
        naturePlayable: {
          null: damageFxNaturePlayable(null),
          undefined: damageFxNaturePlayable(undefined),
@@ -937,19 +942,23 @@ const report = await vm.runInContext(
        // 票 01：属性 → 画面模块（分派查表只住 damage-fx.js）。
        rendererFor: {
          thunder: damageFxRendererFor("THUNDER") === SgsThunderFX,
+         fire: damageFxRendererFor("FIRE") === SgsFireFX,
          normal: damageFxRendererFor(null) === SgsDamageFX,
          explicitNormal: damageFxRendererFor("NORMAL") === SgsDamageFX,
          unknown: damageFxRendererFor("ICE") === SgsDamageFX,
-         // 票 03 才接火：本票 FIRE 回落剑光（属性闸门仍挡着，见 naturePlayable）。
-         fireFallsBack: damageFxRendererFor("FIRE") === SgsDamageFX,
        },
        fieldsFor: {
          sword: damageFxTimingFields(null),
          thunder: damageFxTimingFields("THUNDER"),
+         fire: damageFxTimingFields("FIRE"),
        },
        timingThunder: {
          1: damageFxTiming("THUNDER", 1),
          3: damageFxTiming("THUNDER", 3),
+       },
+       timingFire: {
+         1: damageFxTiming("FIRE", 1),
+         3: damageFxTiming("FIRE", 3),
        },
        cap: damageFxCapFor("THUNDER"),
        // §1 / §6：逐属性**驱动真函数**（不是整段源码 grep），供服务端枚举那条用例读。
@@ -962,18 +971,26 @@ const report = await vm.runInContext(
              kind: damageFxNatureKind(name),
              playable: damageFxNaturePlayable(name),
              renderer: api === SgsThunderFX ? "SgsThunderFX"
+               : api === SgsFireFX ? "SgsFireFX"
                : api === SgsDamageFX ? "SgsDamageFX" : "none",
              flash: spec ? spec.className : null,
            };
          }
          return out;
        })(),
-       // 雷电是已接的家族：模块缺件时不回落剑光（spec §2 的 fail-open 只给未登记属性）。
+       // 雷电 / 火焰都是已接的家族：模块缺件时不回落剑光（fail-open 只给未登记属性）。
        thunderWithoutModule: (() => {
          const saved = window.SgsThunderFX;
          window.SgsThunderFX = undefined;
          const missing = damageFxRendererFor("THUNDER");
          window.SgsThunderFX = saved;
+         return missing === null;
+       })(),
+       fireWithoutModule: (() => {
+         const saved = window.SgsFireFX;
+         window.SgsFireFX = undefined;
+         const missing = damageFxRendererFor("FIRE");
+         window.SgsFireFX = saved;
          return missing === null;
        })(),
      });
@@ -997,7 +1014,7 @@ const iniPatch = (patch) => {
 
 async function capsWithIni(text) {
   const ctx = makeSandbox(text);
-  for (const name of ["anim.js", "fx-core.js", "fx-thunder.js", "effects.js", "damage-fx.js"]) {
+  for (const name of ["anim.js", "fx-core.js", "fx-thunder.js", "fx-fire.js", "effects.js", "damage-fx.js"]) {
     load(ctx, name);
   }
   return JSON.parse(await vm.runInContext(`(async () => {
@@ -1045,6 +1062,7 @@ const patched = makeSandbox();
 load(patched, "anim.js");
 load(patched, "fx-core.js", patchedSource);
 load(patched, "fx-thunder.js");
+load(patched, "fx-fire.js");
 load(patched, "effects.js");
 load(patched, "damage-fx.js");
 const negative = await vm.runInContext(
@@ -3559,7 +3577,7 @@ def test_the_heavy_damage_plays_are_serialized_and_exclusive() -> None:
 
 
 def test_the_damage_nature_check_treats_null_as_normal(damage_fx_probe: dict) -> None:
-    """`nature: null` ≡ 无属性 ⇒ 必须播；票 01 起 `THUNDER` 也播，只有还没接的 `FIRE` 挡着。
+    """`nature: null` ≡ 无属性 ⇒ 必须播；票 01 / 03 起 `THUNDER`、`FIRE` 也播。
 
     三层文档同一句话：`game.py:note_damage`「`None` = 牌面没声明，等同无属性」、
     `projection.py:damage_events_after`「缺声明保持 `None`，与"无属性"同义」、
@@ -3567,37 +3585,37 @@ def test_the_damage_nature_check_treats_null_as_normal(damage_fx_probe: dict) ->
 
     早先的 `event.nature !== DAMAGE_FX_NATURE` 把 `null` 当成"火焰 / 雷电"一起丢了——
     【驱虎】拼点那 1 点无属性伤害永远不演剑光。这里读的是**真 `damage-fx.js` 的判定函数**
-    （探针按页面顺序加载 `anim.js` + `fx-core.js` + `fx-thunder.js` + `effects.js` +
-    `damage-fx.js`），不是另抄一份。
-
-    票面 §1 说"放行 FIRE / THUNDER"，但 §验收 5 与 §7 明写"FIRE 本票仍不播"——
-    以验收断言为准：FIRE 的闸门留给票 03（分派表已经给它留了 `SgsFireFX` 的位子）。
+    （探针按页面顺序加载 `anim.js` + `fx-core.js` + `fx-thunder.js` + `fx-fire.js` +
+    `effects.js` + `damage-fx.js`），不是另抄一份。
     """
     playable = damage_fx_probe["naturePlayable"]
     assert playable["null"] is True, f"`null` 必须视同无属性（会播）：{playable}"
     assert playable["undefined"] is True, f"缺字段同样是无属性：{playable}"
     assert playable["NORMAL"] is True, f"显式 NORMAL 照旧播：{playable}"
     assert playable["THUNDER"] is True, f"雷电票 01 接进来了，必须播：{playable}"
+    assert playable["FIRE"] is True, f"火焰票 03 接进来了，必须播：{playable}"
     assert playable["ICE"] is True, f"未登记属性 fail-open 回落无属性：{playable}"
-    assert playable["FIRE"] is False, f"火焰留给票 03（本票仍不播）：{playable}"
 
 
 def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) -> None:
-    """票 01：属性 → 画面模块的查表只有 `damageFxRendererFor` 一处，且未知属性 fail-open。
+    """票 01 / 03：属性 → 画面模块的查表只有 `damageFxRendererFor` 一处，未知属性 fail-open。
 
-    顺带钉住字段表：剑 6 个 / 雷 6 个，各自由自己的 `DEFAULT_TIMING` 生成——`damage-fx.js`
-    里不许再写第二份名单（`damageFxTiming` 只按 `TIMING_PREFIX` + 字段名拼键）。
+    顺带钉住字段表：剑 6 个 / 雷 6 个 / 火 6 个，各自由自己的 `DEFAULT_TIMING` 生成——
+    `damage-fx.js` 里不许再写第二份名单（`damageFxTiming` 只按 `TIMING_PREFIX` + 字段名拼键）。
     """
     probe = damage_fx_probe
     renderer = probe["rendererFor"]
     assert renderer["thunder"] is True, "THUNDER 必须交给 SgsThunderFX"
+    assert renderer["fire"] is True, "FIRE 必须交给 SgsFireFX（票 03 开闸）"
     assert renderer["normal"] is True and renderer["explicitNormal"] is True, (
         "null / NORMAL 都回 SgsDamageFX"
     )
     assert renderer["unknown"] is True, "未登记属性 fail-open 回落剑光（spec §2）"
-    assert renderer["fireFallsBack"] is True, "SgsFireFX 还没加载 ⇒ 分派回落剑光（票 03 接）"
     assert probe["thunderWithoutModule"] is True, (
         "雷电是已接家族：SgsThunderFX 缺件时**不**回落剑光（fail-open 只给未登记属性）"
+    )
+    assert probe["fireWithoutModule"] is True, (
+        "火焰同理：SgsFireFX 缺件就不播，不把火杀演成无属性剑光"
     )
 
     fields = probe["fieldsFor"]
@@ -3605,13 +3623,22 @@ def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) 
     assert fields["thunder"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
         f"雷电的字段集由它自己的 DEFAULT_TIMING 推导：{fields['thunder']}"
     )
+    assert fields["fire"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
+        f"火焰与雷电同字段集（不需要剑光的 split）：{fields['fire']}"
+    )
     thunder = probe["timingThunder"]
     assert set(thunder["1"]) == {
         "damage_fx_thunder_1_total", "damage_fx_thunder_1_flight",
         "damage_fx_thunder_1_impact", "damage_fx_thunder_1_fade",
     }, f"1 点雷没有 strobe / flash，不该硬造：{sorted(thunder['1'])}"
     assert set(thunder["3"]) == {f"damage_fx_thunder_3_{field}" for field in fields["thunder"]}
-    assert probe["cap"] == 3, "本票 cap 恒 3（票 02 改成按键读）"
+    fire = probe["timingFire"]
+    assert set(fire["1"]) == {
+        "damage_fx_fire_1_total", "damage_fx_fire_1_flight",
+        "damage_fx_fire_1_impact", "damage_fx_fire_1_fade",
+    }, f"1 点火没有 strobe / flash，不该硬造：{sorted(fire['1'])}"
+    assert set(fire["3"]) == {f"damage_fx_fire_3_{field}" for field in fields["fire"]}
+    assert probe["cap"] == 3, "cap 缺省 3（生效值按属性读 anim.ini，见票 02）"
 
 
 def test_the_server_damage_natures_are_the_ones_the_frontend_dispatches(
@@ -3642,10 +3669,9 @@ def test_the_server_damage_natures_are_the_ones_the_frontend_dispatches(
             "kind": "THUNDER", "playable": True,
             "renderer": "SgsThunderFX", "flash": "fx-flash-thunder",
         },
-        # FIRE 本票仍不播（§验收 5），但分派 / 闪档已经就位，票 03 只需打开闸门。
         "FIRE": {
-            "kind": "FIRE", "playable": False,
-            "renderer": "SgsDamageFX", "flash": "fx-flash-fire",
+            "kind": "FIRE", "playable": True,
+            "renderer": "SgsFireFX", "flash": "fx-flash-fire",
         },
     }
     for nature in natures:
@@ -4002,6 +4028,380 @@ def test_the_thunder_sky_branch_starts_above_the_screen(thunder_probe: dict) -> 
     onstage = thunder_probe["onstage"]
     assert onstage["sky"] is False, "有来源时不走天降"
     assert onstage["a"]["y"] > 0 and onstage["b"]["y"] > 0, "两个锚点都在画面内"
+
+
+# ---------------------------------------------------------------------------
+# damage-fx-natures 票 03：属性家族（第二族 = 火焰）
+#
+# 与票 01 的雷电拆成同样的三块：
+# 1. **清单 / 静态契约**：两份新脚本进清单、按家族顺序、仍是严格模式普通脚本（上面
+#    `_DAMAGE_FX_GLOBALS` 那条用例已覆盖全局名与"不发请求 / 不碰 DOM"），火的键块进 `anim.ini`；
+# 2. **画面模块的形状**：`SgsFireFX` 与 `SgsThunderFX` / `SgsDamageFX` 同形（`create` /
+#    `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` / `TIMING_KEYS`），双时间轴、四条钳制、
+#    `bare` 只出特效、`src === null` 走"画面外进场"；
+# 3. **整屏暖白闪**：`.fx-flash-fire`（票 01 已建的着色子层通道，本票只开火那一档）。
+#
+# 行为（层出现 / 混批 / 屏闪窗口 / 音效）归烟测 `U-DMG-17*` / `U-SFX-07*`。
+# ---------------------------------------------------------------------------
+
+_FIRE_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 记录型 2D 上下文：火的 `create()` / `draw()` 全走真代码，像素不参与断言；只把
+ * `fillText` 的文本记下来——"飘字在正确的那一段画面里才出现"是行为判据，不是像素判据。 */
+function makeCtx() {
+  const gradient = { addColorStop() {} };
+  const target = { texts: [] };
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+      if (prop === "measureText") return () => ({ width: 10 });
+      if (prop === "fillText") return (text) => { obj.texts.push(String(text)); };
+      if (prop in obj) return obj[prop];
+      const fn = () => {};
+      obj[prop] = fn;
+      return fn;
+    },
+    set(obj, prop, value) { obj[prop] = value; return true; },
+  });
+}
+
+function makeCanvas() {
+  const ctx = makeCtx();
+  return { width: 0, height: 0, getContext: () => ctx };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout,
+  document: {
+    getElementById: () => null,
+    createElement: (tag) => (tag === "canvas" ? makeCanvas() : {
+      style: {}, setAttribute() {}, appendChild() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+
+vm.runInContext(readFileSync(staticPath("fx-fire.js"), "utf8"), context,
+                { filename: "fx-fire.js" });
+
+const report = vm.runInContext(`(() => {
+  const fx = SgsFireFX;
+  const dst = { cx: 600, cy: 300, w: 240, h: 160 };
+  const src = { cx: 200, cy: 300, w: 240, h: 160 };
+  const make = (opts) => fx.create(document.createElement("canvas"), opts);
+  const game = (id, extra) => make(Object.assign({
+    variant: id, profile: "game", amount: id, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src, dst }, numberKeepOut: 70,
+  }, extra || {}));
+  const shapes = {};
+  const drawn = { export: "ok", offstage: "ok" };
+  for (const id of [1, 2, 3, 4]) {
+    const inst = game(id);
+    shapes[id] = {
+      keys: Object.keys(inst).sort(),
+      duration: inst.duration,
+      profile: inst.profile,
+      timing: inst.timing,
+      timeline: inst.timeline,
+      metrics: inst.metrics,
+      stage: { a: inst.stage.a, b: inst.stage.b, u: inst.stage.u, offstage: inst.stage.offstage },
+    };
+    drawn[id] = "ok";
+    try {
+      const dur = inst.duration;
+      for (let step = 0; step <= 16; step += 1) inst.draw((dur * step) / 16);
+    } catch (error) { drawn[id] = String(error && error.stack || error); }
+  }
+  const off = game(1, { stage: { src: null, dst } });
+  try { for (const t of [0, 0.2, 0.6, 1.2]) off.draw(t); } catch (error) { drawn.offstage = String(error); }
+  /* 3 点档：飘字只该在"最后一击 → 收尾"那一段出现（画面内部按素材页秒数画，靠 warp 对齐；
+   * 单位一旦错位，飘字就会跑到爆炸之前——票 03 实机目视时真踩过这一条）。 */
+  const numCanvas = document.createElement("canvas");
+  const numFx = fx.create(numCanvas, {
+    variant: 3, profile: "game", amount: 3, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src, dst }, numberKeepOut: 70,
+  });
+  const numCtx = numCanvas.getContext("2d");
+  const numberAt = {};
+  for (const at of [0.10, 0.50, 0.62, 0.70, 0.74, 0.90, 1.60]) {
+    numCtx.texts = [];
+    numFx.draw(at);
+    numberAt[at] = numCtx.texts.indexOf("-3") >= 0;
+  }
+  const six = make({
+    variant: 4, profile: "game", amount: 6, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src, dst },
+  });
+  const exported = make({ variant: 4, profile: "export", amount: 6, dpr: 1 });
+  try {
+    for (const t of [0, 0.5, 1.0, 1.5, 2.2, 3.0, 5.0, 6.1]) exported.draw(t);
+  } catch (error) { drawn.export = String(error && error.stack || error); }
+  return JSON.stringify({
+    fields: fx.TIMING_FIELDS, keys: fx.TIMING_KEYS, defaults: fx.DEFAULT_TIMING,
+    maxTotal: fx.MAX_TOTAL_MS, prefix: fx.TIMING_PREFIX,
+    frozen: [Object.isFrozen(fx.TIMING_FIELDS), Object.isFrozen(fx.TIMING_KEYS)],
+    shapes,
+    offstage: { stage: { a: off.stage.a, b: off.stage.b, offstage: off.stage.offstage }, drawn: drawn.offstage },
+    six: { amount: six.amount, variant: six.variant, timeline: six.timeline },
+    numberAt: numberAt,
+    export: { duration: exported.duration, profile: exported.profile, timeline: exported.timeline },
+    clamps: {
+      total: fx.gameTiming(1, { damage_fx_fire_1_total: 9999 }).ms.total,
+      impact: fx.gameTiming(2, { damage_fx_fire_2_total: 400, damage_fx_fire_2_impact: 900 }).ms.impact,
+      flight: fx.gameTiming(3, { damage_fx_fire_3_impact: 300, damage_fx_fire_3_flight: 800 }).ms.flight,
+      fade: fx.gameTiming(4, { damage_fx_fire_4_total: 1000, damage_fx_fire_4_impact: 800, damage_fx_fire_4_fade: 900 }).ms.fade,
+      flash: fx.gameTiming(3, { damage_fx_fire_3_flash: 2 }).ms.flash,
+      junk: fx.gameTiming(2, { damage_fx_fire_2_total: "abc", damage_fx_fire_2_flight: -5 }).ms,
+      missing: fx.gameTiming(1, { damage_fx_fire_1_total: 1600 }).ms,
+    },
+    drawn,
+  });
+})()`, context, { filename: "fire_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def _fire_probe() -> dict:
+    """跑真 `fx-fire.js`（node vm + 记录型 2D 上下文），拿回解算 / 实例 / 画面外进场的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "fire_probe.mjs"
+        probe.write_text(_FIRE_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"火焰探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def fire_probe() -> dict:
+    """一次探针跑完，四条用例共用。"""
+    return _fire_probe()
+
+
+def test_the_fire_family_scripts_are_listed_next_to_their_thunder_twins() -> None:
+    """票 03 §4：清单插两行，顺序 = 画面 `fx-core → fx-thunder → fx-fire`、音效
+    `sfx → sfx-thunder → sfx-fire`，全部在 `sfx-ui.js` 之前（音效 UI 的声道池要读它们的
+    `gameTiming`）。spec §硬约束把这条顺序逐名列出来了。"""
+    srcs = _script_srcs()
+    for name in ("fx-fire.js", "sfx-fire.js"):
+        assert name in srcs, f"index.html 的脚本清单里必须有 {name}：{srcs}"
+    order = [
+        "fx-core.js", "fx-thunder.js", "fx-fire.js",
+        "sfx.js", "sfx-thunder.js", "sfx-fire.js",
+        "sfx-ui.js", "main.js",
+    ]
+    positions = [srcs.index(name) for name in order]
+    assert positions == sorted(positions), (
+        f"家族脚本必须按 {order} 的顺序加载，实际：{srcs}"
+    )
+
+
+def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> None:
+    """`SgsFireFX` 与 `SgsDamageFX` / `SgsThunderFX` 同形：排播层不认第二种形状。
+
+    - 五件导出（`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` /
+      `TIMING_KEYS`）与剑、雷同名；字段名由 `DEFAULT_TIMING` 生成；
+    - `create()` 返回 `draw / duration / timeline / timing / metrics.*`；
+    - 每档：`duration = total`（秒）、`IMPACT = impact`、`LAUNCH = IMPACT − FLIGHT`，
+      火羽串与爆炸的时刻按 spec 的三档 / 四档形状落在命中之后；
+    - 牌桌档的飘字：字高 ≤ 35% 牌高、包围盒顶 ≥ 体力条下沿 + 2% 牌高（同剑 / 雷的判据）。
+    """
+    probe = fire_probe
+    assert probe["prefix"] == "damage_fx_fire_"
+    assert probe["maxTotal"] == 2200
+    assert probe["fields"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
+        "火焰不需要剑光的 split（劈屏），但要有 flash（整屏着色闪的强度）"
+    )
+    assert probe["keys"] == list(probe["defaults"]), "TIMING_KEYS 必须就是 DEFAULT_TIMING 的键"
+    assert probe["frozen"] == [True, True], "两个导出是冻结数组（读方只许读）"
+    derived: list[str] = []
+    for key in probe["defaults"]:
+        field = key[len(probe["prefix"]):].split("_", 1)[1]
+        if field not in derived:
+            derived.append(field)
+    assert list(probe["fields"]) == derived, (
+        f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(probe['fields'])}"
+    )
+
+    counts = {"1": 3, "2": 6, "3": 9, "4": 12}
+    for variant in ("1", "2", "3", "4"):
+        shape = probe["shapes"][variant]
+        for key in (
+            "draw", "duration", "timeline", "timing", "metrics", "stage",
+            "variant", "profile", "amount", "bare", "width", "height",
+        ):
+            assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
+        timing = shape["timing"]
+        timeline = shape["timeline"]
+        assert timing["total"] <= 2200
+        assert shape["duration"] == pytest.approx(timing["total"] / 1000)
+        assert timeline["DURATION"] == pytest.approx(shape["duration"])
+        assert timeline["IMPACT"] == pytest.approx(timing["impact"] / 1000)
+        assert timeline["LAUNCH"] == pytest.approx(timeline["IMPACT"] - timeline["FLIGHT"])
+        assert 0 < timeline["LAUNCH"] < timeline["IMPACT"] < timeline["LAST_IMPACT"] < timeline["DURATION"], (
+            f"{variant} 档的火羽串必须落在演出之内：{timeline}"
+        )
+        assert timeline["COUNT"] == counts[variant], "箭数来自四档表"
+        assert timeline["GAP"] > 0, "相邻两支箭之间有间隔（不是同时落地）"
+        assert timeline["NUM_AT"] > timeline["LAST_IMPACT"], "飘字在最后一击之后"
+        assert timeline["NUM_AT"] < timeline["DURATION"]
+        metrics = shape["metrics"]
+        assert metrics["number"] > 0
+        assert metrics["numberBox"]["height"] == pytest.approx(metrics["number"])
+        assert metrics["number"] <= 0.35 * metrics["card"]["h"] + 0.05, (
+            "字高不得超过牌高 35%（压住体力读数）"
+        )
+        assert metrics["numberBox"]["top"] >= metrics["keepOut"] + 0.02 * metrics["card"]["h"] - 0.05, (
+            "飘字包围盒的顶边不得压到体力条（留 2% 牌高余量）"
+        )
+        assert probe["drawn"][variant] == "ok", f"{variant} 档逐帧绘制抛错：{probe['drawn'][variant]}"
+
+    # 飘字只在"最后一击 → 收尾"那一段出现：画面按素材页秒数画、`draw()` 把牌桌秒数映射回去，
+    # 单位一旦错位（把牌桌秒数写进 `numAt`）飘字就会跑到爆炸之前——这条从 public `draw()` 读。
+    number = probe["numberAt"]
+    three = probe["shapes"]["3"]["timeline"]
+    assert number["0.1"] is False and number["0.5"] is False and number["0.62"] is False, (
+        f"3 点火的爆炸（{three['BLAST']:.2f}s）之前不许有飘字：{[k for k, v in number.items() if v]}"
+    )
+    assert number["0.7"] is False, "最后一击之后、飘字时刻（NUM_AT）之前仍然没有"
+    assert number["0.74"] is True and number["0.9"] is True and number["1.6"] is True, (
+        f"飘字时刻（{three['NUM_AT']:.2f}s）之后到收尾之间必须出现：{number}"
+    )
+
+    # 只有 3 / 4 档爆燃 / 天陨；1 / 2 档只有火羽与火星。
+    for variant in ("1", "2"):
+        assert probe["shapes"][variant]["timeline"]["BLAST"] == 0, "1 / 2 档没有爆炸"
+        assert probe["shapes"][variant]["timeline"]["SKY_AT"] == 0, "1 / 2 档没有流星"
+    three = probe["shapes"]["3"]["timeline"]
+    assert three["BLAST"] > 0 and three["BLAST"] == pytest.approx(three["LAST_IMPACT"]), (
+        "3 档：最后一支箭落地即爆燃"
+    )
+    assert three["EXPLODE"] == 0, "3 档没有流星"
+    four = probe["shapes"]["4"]["timeline"]
+    assert four["LAST_IMPACT"] < four["SKY_AT"] < four["BLAST"], (
+        f"4 档：十二箭钉住 → 火云流星 → 天陨爆炸：{four}"
+    )
+    assert four["BLAST"] == pytest.approx(four["EXPLODE"]), "4 档的爆炸就是流星命中"
+    assert probe["shapes"]["1"]["timing"]["strobe"] == 0, "1 / 2 档没有整屏闪"
+    assert probe["shapes"]["2"]["timing"]["strobe"] == 0
+    assert probe["shapes"]["3"]["timing"]["strobe"] == 160
+    assert probe["shapes"]["4"]["timing"]["strobe"] == 260
+    # 档位只决定强度，飘字写真实点数（amount ≥ 5 仍播 4 档）。
+    assert probe["six"]["variant"] == 4
+    assert probe["six"]["amount"] == 6, "飘字数字来自服务端 amount，不是档位号"
+
+
+def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None:
+    """火键块与 `SgsFireFX.DEFAULT_TIMING` 逐键同值，且四条不变式成立。
+
+    键表**不在测试里写第二份**：`SgsFireFX.TIMING_KEYS` 是唯一真源，这里只与磁盘上的
+    `anim.ini` 对表（同剑光票 10 / 雷电票 01 的姿态）。
+    """
+    entries = {
+        key: value for key, value in _ini_entries().items()
+        if _FIRE_TIMING_KEY.match(key)
+    }
+    expected = set(fire_probe["keys"])
+    assert set(entries) == expected, (
+        f"火的时长键必须与 fx-fire 的 DEFAULT_TIMING 一致："
+        f"缺 {sorted(expected - set(entries))}；多 {sorted(set(entries) - expected)}"
+    )
+    values = {key: float(value) for key, value in entries.items()}
+    for variant in _DAMAGE_FX_VARIANTS:
+        total = values[f"damage_fx_fire_{variant}_total"]
+        flight = values[f"damage_fx_fire_{variant}_flight"]
+        impact = values[f"damage_fx_fire_{variant}_impact"]
+        fade = values[f"damage_fx_fire_{variant}_fade"]
+        assert 0 < impact < total <= 2200, (
+            f"{variant} 点火：命中必须落在演出之内、总时长 ≤ 2200，实际 impact={impact} / total={total}"
+        )
+        assert 0 < flight < impact, f"{variant} 点火：火羽必须在命中之前飞到"
+        assert impact + fade <= total, (
+            f"{variant} 点火：焦痕必须在摘层之前散尽（impact + fade ≤ total），"
+            f"实际 {impact} + {fade} > {total}"
+        )
+    totals = [values[f"damage_fx_fire_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
+    assert totals == [1400, 1500, 1700, 2000], (
+        f"spec §游戏档缺省时长：火 / 雷都是 1400 / 1500 / 1700 / 2000，实际 {totals}"
+    )
+    assert values["damage_fx_fire_3_strobe"] > 0
+    assert values["damage_fx_fire_4_strobe"] > values["damage_fx_fire_3_strobe"], (
+        "4 点火的整屏闪比 3 点更长"
+    )
+    for variant in (3, 4):
+        flash = values[f"damage_fx_fire_{variant}_flash"]
+        assert 0 < flash <= 1, f"{variant} 点火的 flash 是 0..1 的强度（不是毫秒）：{flash}"
+    assert values == {
+        key: float(value) for key, value in fire_probe["defaults"].items()
+    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
+
+
+def test_the_fire_export_chain_keeps_the_material_package_timeline(fire_probe: dict) -> None:
+    """导出档（profile 缺省）照抄素材页的 4.9~6.2 秒链——node 探针逐帧导静帧靠它。
+
+    牌桌档（game）只换**节拍**：`gameTiming` 把同一批关键点（第一箭命中 / 最后一击 /
+    爆炸 / 飘字 / 收尾）压到 `anim.ini` 的秒数上，画法一行不改。这条钉导出档与四条钳制。
+    """
+    export = fire_probe["export"]
+    assert export["profile"] == "export"
+    assert export["duration"] == pytest.approx(6.2), "4 档的素材页时长 6.2s"
+    timeline = export["timeline"]
+    assert timeline["DURATION"] == pytest.approx(6.2)
+    assert timeline["LAUNCH"] == pytest.approx(0.58)
+    assert timeline["IMPACT"] == pytest.approx(0.85)
+    assert timeline["LAST_IMPACT"] == pytest.approx(1.51)
+    assert timeline["COUNT"] == 12
+    assert timeline["GAP"] == pytest.approx(0.06)
+    assert timeline["SKY_AT"] == pytest.approx(1.70)
+    assert timeline["BLAST"] == pytest.approx(2.14)
+    assert timeline["EXPLODE"] == pytest.approx(2.14)
+    assert timeline["NUM_AT"] == pytest.approx(2.52)
+    assert fire_probe["drawn"]["export"] == "ok"
+
+    clamps = fire_probe["clamps"]
+    assert clamps["total"] == 2200, "单档总时长上限 2200（超过会挡住牌桌）"
+    assert clamps["impact"] == 400, "impact ≤ total"
+    assert clamps["flight"] == 300, "flight ≤ impact"
+    assert clamps["fade"] == 200, "impact + fade ≤ total（否则层摘了焦痕还没散）"
+    assert clamps["flash"] == 1, "flash 钳在 0..1"
+    assert clamps["junk"]["total"] == 1500 and clamps["junk"]["flight"] == 95, (
+        "非法值（非数字 / 负数）退回内置默认"
+    )
+    assert clamps["missing"] == {
+        "total": 1600, "flight": 90, "impact": 300, "fade": 700,
+        "strobe": 0, "flash": 0.6,
+    }, "只改一个键，其余退回内置默认"
+
+
+def test_the_fire_without_source_starts_outside_the_screen(fire_probe: dict) -> None:
+    """`source == null` 的火 ⇒ 沿用剑光先例：来源整块挪到画面左外（不猜来源，也不做"天降"）。
+
+    票面 §1：库里三个火焰生产者（火杀 / 火攻 / 业炎）都带来源，`source: null` 的火焰不存在
+    ——这条路径只为"真遇到 null"不抛错；几何判据与剑光一致（起笔 `a.x < 0`、落点仍在牌上）。
+    牌桌的真实入口由 `damage-fx.js:damageFxPlanFor` 合成那块画面外矩形（`U-DMG-06` 同一条）。
+    """
+    offstage = fire_probe["offstage"]
+    stage = offstage["stage"]
+    assert stage["offstage"] is True, "无来源必须被认出来（stage.offstage）"
+    assert stage["a"]["x"] < 0, f"火羽从画面左外射入：a.x = {stage['a']['x']}"
+    assert stage["b"]["x"] > 0 and stage["b"]["y"] > 0, "落点仍在目标牌上"
+    assert offstage["drawn"] == "ok", f"无来源那一分支逐帧绘制抛错：{offstage['drawn']}"
 
 
 def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() -> None:

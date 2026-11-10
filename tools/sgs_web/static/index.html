@@ -444,8 +444,13 @@
      与剑那份同姿态：普通脚本、零依赖、不发请求、不碰 DOM。画面紧挨 fx-core、音效紧挨
      sfx；两份都必须排在 sfx-ui.js 之前（音效 UI 的声道池按模块取它们的 gameTiming）。 -->
 <script src="fx-thunder.js"></script>
+<!-- damage-fx-natures 票 03：**火焰**家族的画面与音效（SgsFireFX / SgsFireSfx）。与雷那份
+     逐字同形（同一套 create / gameTiming / DEFAULT_TIMING / TIMING_FIELDS / TIMING_KEYS）；
+     画面紧挨雷、音效紧挨雷的音效，两份同样在 sfx-ui.js 之前。 -->
+<script src="fx-fire.js"></script>
 <script src="sfx.js"></script>
 <script src="sfx-thunder.js"></script>
+<script src="sfx-fire.js"></script>
 <!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 按模块分组的声道池 /
      ?audiotest）。读 damage-fx.js 的 DAMAGE_FX_MAX_VARIANT 与 damageFxCapFor(nature)（票 02
      起池长按属性读 anim.ini 的并发表，槽位超出时就地补建），都在调用时才解析 ⇒ 排在

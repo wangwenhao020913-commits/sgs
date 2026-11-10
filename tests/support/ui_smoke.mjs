@@ -284,6 +284,9 @@ class Ctx2D {
   setTransform() {} clearRect() {} fillRect() {} save() {} restore() {}
   translate() {} rotate() {} scale() {} beginPath() {} closePath() {}
   moveTo() {} lineTo() {} arcTo() {} arc() {} ellipse() {} fill() {} stroke() {}
+  /* damage-fx-natures 票 03：火焰的画法用二次 / 三次贝塞尔（火舌、墨团、箭羽），
+   * 剑与雷只用到 `arcTo` / `arc` / `ellipse`——垫片补齐，`draw(t)` 仍走同一份真代码。 */
+  quadraticCurveTo() {} bezierCurveTo() {}
   clip() {} setLineDash() {}
   drawImage(image, ...args) { this.calls.push({ op: "drawImage", image, args }); }
   fillText(text) { this.calls.push({ op: "fillText", text }); }
@@ -22964,7 +22967,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     damageLog.options.push(options);
     return realDamageCreate(canvas, options);
   };
+  const realFireCreate = windowShim.SgsFireFX.create;
+  const fireLog = { create: 0, options: [] };
+  windowShim.SgsFireFX.create = (canvas, options) => {
+    fireLog.create += 1;
+    fireLog.options.push(options);
+    return realFireCreate(canvas, options);
+  };
   const lastThunderOptions = () => thunderLog.options[thunderLog.options.length - 1] || null;
+  const lastFireOptions = () => fireLog.options[fireLog.options.length - 1] || null;
   const playNatures = () => JSON.parse(
     vm.runInContext("JSON.stringify(damagePlays.map((play) => play.nature))", context));
 
@@ -22994,15 +23005,30 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     })}`);
   runUntil(() => liveCount() === 0);
 
-  // 火焰留给票 03：本票连闸门都还没开（事件仍被消费，不跨到下一批）。
+  // 火焰票 03 开闸：与雷同一条分派——层出现，交给 SgsFireFX（不再"留着不播"）。
   const beforeFire = playCount();
+  const fireBefore02 = fireLog.create;
   loadDamageBatch([hpChange(3, 2, 4, 1)], [damageEvent(3, 1, 2, 1, "FIRE")]);
   step();
-  check("U-DMG-02d FIRE 伤害：本票仍不播（票 03 才开），事件被消费",
-    layer().children.length === 0 && liveCount() === 0 && playCount() === beforeFire
+  check("U-DMG-02d FIRE 伤害：开演并送进 SgsFireFX（票 03 开闸），事件被消费",
+    liveCount() === 1 && playCount() === beforeFire + 1
+      && fireLog.create === fireBefore02 + 1
       && (ui.state.damageEvents || []).length === 0,
-    `children=${layer().children.length} live=${liveCount()} `
-      + `plays=${playCount() - beforeFire} pending=${(ui.state.damageEvents || []).length}`);
+    `live=${liveCount()} plays=${playCount() - beforeFire} `
+      + `fire=${fireLog.create - fireBefore02} pending=${(ui.state.damageEvents || []).length}`);
+  const fireOptions = lastFireOptions();
+  check("U-DMG-02f FIRE 的 create 选项与剑 / 雷同形（game / bare / stage.dst / 真实 amount）",
+    Boolean(fireOptions) && fireOptions.profile === "game" && fireOptions.bare === true
+      && Boolean(fireOptions.stage && fireOptions.stage.dst)
+      && fireOptions.amount === 1 && fireOptions.variant === 1
+      && typeof fireOptions.timing === "object"
+      && Number.isFinite(Number(fireOptions.timing.damage_fx_fire_1_total)),
+    `options=${JSON.stringify(fireOptions && {
+      profile: fireOptions.profile, bare: fireOptions.bare,
+      amount: fireOptions.amount, variant: fireOptions.variant,
+      timing: fireOptions.timing,
+    })}`);
+  runUntil(() => liveCount() === 0);
 
   // ---- U-DMG-02c：`nature: null`（牌面没声明属性）**视同无属性**，必须播 ----
   // 三层文档同一句话：`None` ≡ 无属性（【驱虎】拼点那 1 点就是这么下发的）。
@@ -23256,29 +23282,83 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `flash=${!!flashNodeOf()} filter="${shellFilter()}" live=${liveCount()}`);
   drainTimers();
 
-  // ---- U-DMG-11：同批混家族 → 各用各的画面模块，互不串味 ----
+  // ---- U-DMG-11：同批混家族 → 三族各用各的画面模块，互不串味 ----
   const thunderBefore11 = thunderLog.create;
   const damageBefore11 = damageLog.create;
+  const fireBefore11 = fireLog.create;
   loadDamageBatch(
-    [hpChange(42, 1, 4, 3), hpChange(43, 2, 4, 2)],
-    [damageEvent(42, 0, 1, 1, "THUNDER"), damageEvent(43, 0, 2, 2, null)],
+    [hpChange(42, 1, 4, 3), hpChange(43, 2, 4, 2), hpChange(44, 3, 4, 3)],
+    [
+      damageEvent(42, 0, 1, 1, "THUNDER"),
+      damageEvent(43, 0, 2, 2, null),
+      damageEvent(44, 0, 3, 1, "FIRE"),
+    ],
   );
   step();
   step();
-  runUntil(() => liveCount() === 2, 80);
+  step();
+  runUntil(() => liveCount() === 3, 120);
   const natures11 = playNatures();
-  check("U-DMG-11 同批混家族：两条都在播、各用各的模块、play.nature 分别正确",
-    liveCount() === 2
-      && natures11.length === 2 && natures11.includes("THUNDER")
+  check("U-DMG-11 同批混家族：三条都在播、各用各的模块、play.nature 分别正确",
+    liveCount() === 3
+      && natures11.length === 3 && natures11.includes("THUNDER")
+      && natures11.includes("FIRE")
       && natures11.some((nature) => nature === null)
       && thunderLog.create === thunderBefore11 + 1
-      && damageLog.create === damageBefore11 + 1,
+      && damageLog.create === damageBefore11 + 1
+      && fireLog.create === fireBefore11 + 1,
     `live=${liveCount()} natures=${JSON.stringify(natures11)} `
-      + `thunder=${thunderLog.create - thunderBefore11} damage=${damageLog.create - damageBefore11}`);
-  runUntil(() => liveCount() === 0, 200);
-  // 把两个画面模块的计数器还回去（后面 U-SFX 会自己再包一层，顺序不能乱）。
+      + `thunder=${thunderLog.create - thunderBefore11} damage=${damageLog.create - damageBefore11} `
+      + `fire=${fireLog.create - fireBefore11}`);
+  runUntil(() => liveCount() === 0, 300);
+  // 把三个画面模块的计数器还回去（后面 U-SFX 会自己再包一层，顺序不能乱）。
   windowShim.SgsThunderFX.create = realThunderCreate;
   windowShim.SgsDamageFX.create = realDamageCreate;
+  windowShim.SgsFireFX.create = realFireCreate;
+
+  /* ---- U-DMG-17：火焰的整屏暖白闪 + 无来源分支（票 03 验收 5）----
+   *
+   * 与 U-DMG-10 同一条通道（`.fx-flash` 着色子层），只换颜色档；表壳的 `filter` 始终为空
+   * ——`filter` 会在表壳上建 containing block，把两个 `position: fixed` 的子孙重新锚定。
+   * 无来源的火沿用**剑光**先例（来源整块在画面外），不是雷的「天降」：库里没有无来源的火，
+   * 这条只为"真遇到 null"不抛错。
+   */
+  const before17 = playCount();
+  loadDamageBatch([hpChange(46, 1, 4, 1)], [damageEvent(46, 0, 1, 3, "FIRE")]);
+  step();
+  check("U-DMG-17a 3 点火开演：层读数 nature = FIRE，命中之前不挂着色子层、表壳无 filter",
+    liveCount() === 1 && playCount() === before17 + 1
+      && attr(layer(), "data-damage-fx-nature") === "FIRE"
+      && flashNodeOf() === null && shellFilter() === "",
+    `live=${liveCount()} plays=${playCount() - before17} `
+      + `nature="${attr(layer(), "data-damage-fx-nature")}" `
+      + `flash=${!!flashNodeOf()} filter="${shellFilter()}"`);
+  const got17 = runUntil(() => flashNodeOf() !== null, 100);
+  const node17 = flashNodeOf();
+  const opacity17 = node17 ? Number(node17.style.opacity) : NaN;
+  check("U-DMG-17b 命中后挂暖白档 .fx-flash-fire（强度 = 该档 flash 0.6），表壳 filter 始终为空",
+    got17 && Boolean(node17)
+      && hasClass(node17, "fx-flash") && hasClass(node17, "fx-flash-fire")
+      && Math.abs(opacity17 - 0.6) < 1e-9 && shellFilter() === "",
+    `flash=${!!node17} class=${node17 && node17.className} `
+      + `opacity=${opacity17} filter="${shellFilter()}"`);
+  const removed17 = runUntil(() => flashNodeOf() === null, 140);
+  check("U-DMG-17c 窗口（= 该档 strobe）结束子层被移除，表壳仍无 filter、演出还在",
+    removed17 && flashNodeOf() === null && shellFilter() === "" && liveCount() === 1,
+    `flash=${!!flashNodeOf()} filter="${shellFilter()}" live=${liveCount()}`);
+  runUntil(() => liveCount() === 0, 300);
+
+  loadDamageBatch([hpChange(47, 1, 4, 1)], [damageEvent(47, null, 1, 1, "FIRE")]);
+  step();
+  const swordX17 = Number(attr(layer(), "data-damage-fx-sword-x"));
+  check("U-DMG-17d 无来源的火照常演：来源被挪到画面外（sword-x < 0），不走雷的天降读数",
+    liveCount() === 1 && attr(layer(), "data-damage-fx-nature") === "FIRE"
+      && Number.isFinite(swordX17) && swordX17 < 0
+      && attr(layer(), "data-damage-fx-sky") === "",
+    `live=${liveCount()} swordX=${attr(layer(), "data-damage-fx-sword-x")} `
+      + `sky="${attr(layer(), "data-damage-fx-sky")}"`);
+  runUntil(() => liveCount() === 0, 200);
+
 
   /* ---- U-DMG-12：每属性独立计数（票 02 §3 / 验收 2）----
    *
@@ -23656,10 +23736,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const groupedLanes = JSON.parse(vm.runInContext(
     "JSON.stringify(Object.keys(damageSfxLanes).map((key) => [key, damageSfxLanes[key].length]))",
     context));
-  check("U-SFX-02c 声道池按模块分组：剑 3 条 + 雷 3 条（雷这两条在垫片里没有 AudioContext ⇒ live=false）",
-    JSON.stringify(groupedLanes) === JSON.stringify([["SgsSfx", 3], ["SgsThunderSfx", 3]])
+  check("U-SFX-02c 声道池按模块分组：剑 / 雷 / 火各 3 条（雷与火在垫片里没有 AudioContext ⇒ live=false）",
+    JSON.stringify(groupedLanes) === JSON.stringify(
+      [["SgsSfx", 3], ["SgsThunderSfx", 3], ["SgsFireSfx", 3]])
       && vm.runInContext(
         "JSON.stringify(damageSfxLanes.SgsThunderSfx.map((lane) => lane.live))", context)
+        === "[false,false,false]"
+      && vm.runInContext(
+        "JSON.stringify(damageSfxLanes.SgsFireSfx.map((lane) => lane.live))", context)
         === "[false,false,false]",
     `groups=${JSON.stringify(groupedLanes)}`);
 
@@ -23794,6 +23878,76 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     thunderSfxLog.stop === 1 && thunderSfxLog.tick.length === thunderTicksAtFinish,
     `stop=${thunderSfxLog.stop} ticks=${thunderSfxLog.tick.length}/${thunderTicksAtFinish}`);
   windowShim.SgsThunderSfx = realThunderSfx;
+
+  /* ---- U-SFX-07：火焰走**它自己**的声道池，cue 时间轴带逐箭节奏（票 03 §2）----
+   *
+   * 与 U-SFX-04c/d/e（雷）同一条链：垫片没有 AudioContext，故换一个会 start() 成真的假火模块，
+   * 只验"排播层把这条演出交给了谁、往声道里写了什么"，不验声音本身。火的逐箭 cue 靠时间轴上
+   * 的 `COUNT` / `GAP` / `FLIGHT`（画面模块的 `gameTiming` 算好的那一份），所以这里一并断言
+   * 它们真的被写进声道（改箭数 / 节奏时声音跟着走）。
+   */
+  await sfxClick();   // 先关一次：下面的"开"要走一遍手势里的**初建**（池按当时的 cap 建）
+  const realFireSfx = windowShim.SgsFireSfx;
+  const fireSfxLog = { create: 0, start: 0, stop: 0, tick: [] };
+  windowShim.SgsFireSfx = {
+    create(timeline) {
+      fireSfxLog.create += 1;
+      return {
+        start() { fireSfxLog.start += 1; return true; },
+        stop() { fireSfxLog.stop += 1; },
+        mute() {},
+        tick(seconds, voice) {
+          fireSfxLog.tick.push({ seconds, voice, timeline: { ...timeline } });
+        },
+      };
+    },
+    renderOffline: () => Promise.resolve(null),
+  };
+  vm.runInContext(
+    "for (const key of Object.keys(damageSfxLanes)) delete damageSfxLanes[key];", context);
+  await sfxClick();   // 开：三族各建 3 条（火是刚换上的假模块）
+  const fireLanesLive = vm.runInContext(
+    "JSON.stringify((damageSfxLanes.SgsFireSfx || []).map((lane) => lane.live))", context);
+  const realDateNowFire = Date.now;
+  let clockFire = realDateNowFire();
+  Date.now = () => clockFire;
+  try {
+    loadDamageBatch([hpChange(51, 2, 4, 0)], [damageEvent(51, 0, 2, 4, "FIRE")]);
+    step();
+    clockFire += 150;   // 跨过蓄力 / 第一支箭离弦
+    runFrame();
+    clockFire += 260;   // 跨过第一箭命中
+    runFrame();
+    clockFire += 900;   // 跨过火云与天陨爆炸
+    runFrame();
+  } finally {
+    Date.now = realDateNowFire;
+  }
+  const fireTick = fireSfxLog.tick[fireSfxLog.tick.length - 1] || null;
+  check("U-SFX-07a 火焰开演：走 SgsFireSfx 的池（3 条 + 本段 start 一次），不吃雷 / 剑的声道",
+    // 建池时每声 start 一次（3），开演再 start 一次重置 cue 游标 ⇒ 4 次。
+    fireSfxLog.create === 3 && fireSfxLog.start === 4
+      && fireLanesLive === "[true,true,true]" && Boolean(fireTick),
+    `create=${fireSfxLog.create} start=${fireSfxLog.start} `
+      + `lanes=${fireLanesLive} ticks=${fireSfxLog.tick.length}`);
+  check("U-SFX-07b 火的 cue 时间轴带逐箭节奏与天陨（COUNT / GAP / FLIGHT / SKY_AT / EXPLODE），voice.dmg = 4",
+    Boolean(fireTick) && fireTick.voice && fireTick.voice.dmg === 4
+      && fireTick.timeline.COUNT === 12 && fireTick.timeline.GAP > 0
+      && fireTick.timeline.FLIGHT > 0
+      && fireTick.timeline.SKY_AT > 0
+      && fireTick.timeline.EXPLODE > fireTick.timeline.SKY_AT
+      && fireTick.timeline.DURATION === 2,
+    `voice=${JSON.stringify(fireTick && fireTick.voice)} `
+      + `timeline=${JSON.stringify(fireTick && fireTick.timeline)}`);
+  runUntil(() => liveCount() === 0, 400);
+  const fireTicksAtFinish = fireSfxLog.tick.length;
+  runFrame();
+  runFrame();
+  check("U-SFX-07c 摘层即收声：火的那条声道 stop() 一次，之后不再喂 tick",
+    fireSfxLog.stop === 1 && fireSfxLog.tick.length === fireTicksAtFinish,
+    `stop=${fireSfxLog.stop} ticks=${fireSfxLog.tick.length}/${fireTicksAtFinish}`);
+  windowShim.SgsFireSfx = realFireSfx;
+  drainTimers();
 
   // ---- U-SFX-05：换回真 sfx.js —— 没有 AudioContext ⇒ 静默降级；?audiotest=1 ⇒ unavailable ----
   windowShim.SgsSfx = realSfx;

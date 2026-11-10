@@ -38,12 +38,13 @@
  *    三个 cue 时刻取该档的 `fx.timeline`（`anim.ini` 解算出来的那一份），不另起墙钟。
  * 3. **没有 `AudioContext` 就静默降级**：播放器的 `start()` 返回 false，画面照旧。
  *
- * **按模块分池**（票 01）：每条声道**绑死**一个音效模块（剑 = `SgsSfx`、雷 =
- * `SgsThunderSfx`），池子按模块分组；一条声道同时喂两个时钟会互相吞 cue，雷与剑因此
- * 各有各的声道。池的**起始**长度 = 该属性的 cap（`damageFxCapFor`，票 02 起按属性读
- * `anim.ini`，1~8、缺省 3），开演时用 `play.slot` 取声道；槽号是跨家族的，超出池长时
+ * **按模块分池**（票 01 起）：每条声道**绑死**一个音效模块（剑 = `SgsSfx`、雷 =
+ * `SgsThunderSfx`、火 = `SgsFireSfx`），池子按模块分组——一条声道同时喂两个时钟会互相吞
+ * cue，所以三族各有各的声道。池的**起始**长度 = 该属性的 cap（`damageFxCapFor`，票 02 起按
+ * 属性读 `anim.ini`，1~8、缺省 3），开演时用 `play.slot` 取声道；槽号是跨家族的，超出池长时
  * **就地补建**（`damageSfxStart`）——旧口径在这里 `return null`，声音会静默丢掉。
- * 池**惰性建**：只有页面上加载了该模块、且用户点开「♪」时才建（不一次把三套都建出来）。
+ * 池**惰性建**：只有页面上加载了该模块、且用户点开「♪」时才建（不一次把三套都建出来）；
+ * 三份脚本都在清单里之后，一次手势就是三族各 cap 条。
  */
 
 /** 开关的持久化键与两个取值（票面 §做法 2：缺省 `'off'`）。 */
@@ -156,19 +157,19 @@ function damageSfxBaseTimeline(fxApi) {
 
 /** 一条声道取一份**可变**的时间轴副本：`create()` 捕获的是对象引用，开演时原地改写。
  *
- * `SKY_AT` / `EXPLODE` / `DURATION` 只有雷电用（4 档的天雷与爆炸）；剑的声道读不到它们
- * 也没有关系（`SgsSfx` 的 cue 只认前三个）。
+ * 逐键复制**画面时间轴上的全部数字**（不是一份手写名单）：三族的键本来就不同——剑读
+ * `CHARGE / LAUNCH / IMPACT`，雷多 `SKY_AT / EXPLODE`，火还要 `COUNT / GAP / FLIGHT /
+ * LAST_IMPACT / BLAST / NUM_AT`（逐箭发声靠它们摊开）。手写名单每加一族就得改这里，而
+ * "哪个键有用"是各音效模块自己的事；非数字 / 非有限值一律跳过（`PRE_STRIKES` 那种数组）。
  */
 function damageSfxTimeline(source) {
   const timeline = source || {};
-  return {
-    CHARGE: Number(timeline.CHARGE) || 0,
-    LAUNCH: Number(timeline.LAUNCH) || 0,
-    IMPACT: Number(timeline.IMPACT) || 0,
-    SKY_AT: Number(timeline.SKY_AT) || 0,
-    EXPLODE: Number(timeline.EXPLODE) || 0,
-    DURATION: Number(timeline.DURATION) || 0,
-  };
+  const out = {};
+  for (const key of Object.keys(timeline)) {
+    const value = Number(timeline[key]);
+    if (Number.isFinite(value)) out[key] = value;
+  }
+  return out;
 }
 
 /** 给**一个**已加载的音效模块建声道池（惰性：没有该模块就一条都不建）。
@@ -209,11 +210,11 @@ function damageSfxEnsureLanes(engine, need) {
   return lanes;
 }
 
-/** 给**页面上已经加载**的音效模块各建一套声道（剑 / 雷；火还没有）。
+/** 给**页面上已经加载**的音效模块各建一套声道（剑 / 雷 / 火）。
  *
  * 为什么要全部建：`AudioContext` 必须在手势的同一个 tick 里 resume。若等到第一次伤害才建，
- * 那时距用户点开「♪」已经隔了很久（Safari 会再次挂起），雷电就永远不出声。这里只给
- * **存在的**模块建池——"三套"里缺谁就跳过谁，不会凭空建出 `SgsFireSfx`。
+ * 那时距用户点开「♪」已经隔了很久（Safari 会再次挂起），雷电 / 火焰就永远不出声。这里只
+ * 给 **存在的**模块建池——"三套"里缺谁就跳过谁，不会凭空建出 `SgsFireSfx`。
  * 返回真正出得了声的声道数。
  */
 function damageSfxEnsureModules() {
@@ -274,11 +275,12 @@ function damageSfxToggle() {
 }
 
 /** 音效模块的 `tick(t, v)` 要的档位参数（剑的 `SgsSfx` 要 `dmg / flight / strobe /
- *  split`，雷的 `SgsThunderSfx` 只要 `dmg`，`flash` 留给将来的逐帧音量）。
+ *  split`，雷 / 火的 tick 只用 `dmg` 选响度档，`flash` 留给将来的逐帧音量）。
  *
  * 注意 `fx.variant` 只是**档位号**（1..4），真正的时长在 `fx.timing` —— 那是 `anim.ini`
  * 解算出来的毫秒表。`whoosh` 的飞行时长、`strobe` / `split` 的窗口都读它，不在这里另写
- * 一份数字（否则调 ini 之后声音与画面就分家了）。
+ * 一份数字（否则调 ini 之后声音与画面就分家了）。逐箭的节奏（`COUNT` / `GAP`）不在这里：
+ * 它住在那份整份写进声道的时间轴里（`damageSfxTimeline`）。
  */
 function damageSfxVoice(play) {
   const timing = (play.fx && play.fx.timing) || {};
@@ -315,13 +317,8 @@ function damageSfxStart(play) {
   if (!lanes || !lanes.length) return null;
   const lane = lanes[slot];
   if (!lane || !lane.live) return null;
-  const timeline = damageSfxTimeline(play.fx && play.fx.timeline);
-  lane.timeline.CHARGE = timeline.CHARGE;
-  lane.timeline.LAUNCH = timeline.LAUNCH;
-  lane.timeline.IMPACT = timeline.IMPACT;
-  lane.timeline.SKY_AT = timeline.SKY_AT;
-  lane.timeline.EXPLODE = timeline.EXPLODE;
-  lane.timeline.DURATION = timeline.DURATION;
+  // 把这一档的整份时间轴写进声道的**可变**引用（音效模块的 cue 表自己决定读哪几个键）。
+  Object.assign(lane.timeline, damageSfxTimeline(play.fx && play.fx.timeline));
   play.sfxVoice = damageSfxVoice(play);
   // `start()` 里会重置 `lastT`：本段从 0 重新判 cue（声道是跨演出复用的）。
   if (typeof lane.player.start === "function") lane.player.start();
