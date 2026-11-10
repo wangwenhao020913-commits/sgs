@@ -709,12 +709,20 @@ function applyView(body) {
     state.revealedCards = [];
     // U3-04：上一局还没触发的技能发动事件不属于新局（DOM 侧由 commit 的清屏兜底）。
     state.skillEvents = [];
+    // damage-fx 票 05：伤害演出同理——上一局那一剑不能劈在新局的牌桌上（覆盖层由
+    // `clearTransientEffects` 的 `clearDamageFx()` 一起摘掉）。
+    state.damageEvents = [];
     // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
     state.liveView = null;
   }
   // U3-04 / D8.2：技能发动是随视图下发的派生通道；先收进队列，回放走到对应的记录 seq
   // 才演出（飘名 / 白光 / 线），而不是响应一到就全部同时出现。
   for (const event of body.skill_events || []) state.skillEvents.push(event);
+  // damage-fx 票 05：伤害事实是**第二条派生通道**（服务端在每次伤害时下发
+  // `{seq, source, target, amount, nature}`），与 `skill_events` 同姿态——先收进队列，
+  // 回放走到那条记录的 `seq` 才挥剑。默认空表由这里建（`state` 的其余字段在 core.js）。
+  if (!Array.isArray(state.damageEvents)) state.damageEvents = [];
+  for (const event of body.damage_events || []) state.damageEvents.push(event);
   // U1-07：快照的处理区已经是**产物**（服务端把转化来源组换成了虚拟牌），回放期间也要
   // 按同一份映射把"来源牌进处理区"渲染成产物，否则用户会先看到两张源牌再被快照纠正。
   state.processingProducts = processingProductMap(
@@ -723,6 +731,7 @@ function applyView(body) {
   if (!incoming.length) {
     // 纯刷新没有回放：技能发动的演出按响应立即触发（不等一个不存在的记录步）。
     fireSkillEventsThrough(Infinity);
+    fireDamageEventsThrough(Infinity);
     commitView(body);
     return;
   }
@@ -844,6 +853,9 @@ function stepPlayback(immediate) {
     if (judgedCard) refreshJudgmentReveal(judgedCard);
     // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
     fireSkillEventsThrough(record.seq);
+    // damage-fx 票 05：伤害演出挂在**同一条 seq 游标**上（这是它唯一的触发点：不在
+    // `applyLiveDelta` 里、也不在提交视图时触发）。
+    fireDamageEventsThrough(record.seq);
     scrollLogToBottom();
   }
   playback.index += 1;
@@ -877,6 +889,7 @@ function finishPlayback() {
   }
   // 兜底：旧录像 / 合成载荷若没有同 seq 的记录，播完立即触发，不让事件跨到下一批。
   fireSkillEventsThrough(Infinity);
+  fireDamageEventsThrough(Infinity);
   commitView(playback.body);
 }
 

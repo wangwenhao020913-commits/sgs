@@ -77,8 +77,13 @@ const RECT_TABLE = new Map(Object.entries({
   "t-seats": { left: 20, top: 60, width: 1000, height: 420 },
   // U4-04：阶段飘字层由 anim.js 动态建出（inset: 0 铺满壳），与飞行层同一块矩形。
   "t-anim-phase": { left: 0, top: 0, width: 1440, height: 810 },
+  // damage-fx 票 05：伤害演出层也是整壳覆盖层——座位矩形按它换算成舞台坐标。
+  "t-damage-fx": { left: 0, top: 0, width: 1440, height: 810 },
 }));
 let rectSeq = 0;
+/* damage-fx 票 05：武将块的垫片矩形默认按座位固定派生（跨重绘稳定）；用例改这个数就能
+ * 模拟"版式变了"，验证演出不会演在半空（U-DMG-04）。 */
+let heroBlockShift = 0;
 const rectOfBox = (left, top, width, height) => ({
   left, top, width, height, right: left + width, bottom: top + height, x: left, y: top,
 });
@@ -125,7 +130,9 @@ const shimRect = (node) => {
   if (!node.id && hasClassText(node, "hero-block")) {
     const seatNo = seatAncestorOf(node);
     if (seatNo !== null && Number.isFinite(seatNo)) {
-      return rectOfBox(84 + seatNo * 180, 76, 104, 40);
+      // damage-fx 票 05：`heroBlockShift` 让用例挪动整排武将块，模拟"版式变了"
+      // （窗口缩放 / 座位重排）。默认 0 ⇒ 跨重绘稳定，正常重绘不打断在播的演出。
+      return rectOfBox(84 + seatNo * 180 + heroBlockShift, 76, 104, 40);
     }
   }
   if (hasClassText(node, "face")) return rectOfBox(360, 300, 88, 124);
@@ -249,6 +256,42 @@ class El {
   text() { return (this._html || this._text).replace(/<[^>]*>/g, "") + this._children.map((c) => c.text()).join(""); }
 }
 
+/* damage-fx 票 05：`SgsDamageFX.create()` 要一张真 canvas + 2D 上下文。垫片给一个
+ * **记录型的空实现**：方法全在、不画像素，但把 `fillText` / `drawImage` 的参数记下来。
+ * 像素不可断言（也不该断言），DOM 侧的层寿命由 U-DMG-01..04 断；这里只保证 `create()` /
+ * `draw(t)` 走的是**同一份真代码**，而不是被 `if (getContext)` 挡掉的降级路径。 */
+class Ctx2D {
+  constructor() {
+    this.calls = [];
+    this.fillStyle = ""; this.strokeStyle = ""; this.lineWidth = 1;
+    this.lineCap = "butt"; this.lineJoin = "miter"; this.globalAlpha = 1;
+    this.globalCompositeOperation = "source-over";
+    this.font = ""; this.textAlign = "start"; this.textBaseline = "alphabetic";
+    this.shadowColor = ""; this.shadowBlur = 0; this.shadowOffsetY = 0;
+  }
+  setTransform() {} clearRect() {} fillRect() {} save() {} restore() {}
+  translate() {} rotate() {} scale() {} beginPath() {} closePath() {}
+  moveTo() {} lineTo() {} arcTo() {} arc() {} ellipse() {} fill() {} stroke() {}
+  clip() {}
+  drawImage(image, ...args) { this.calls.push({ op: "drawImage", image, args }); }
+  fillText(text) { this.calls.push({ op: "fillText", text }); }
+  strokeText() {}
+  measureText() { return { width: 10 }; }
+  createRadialGradient() { return { addColorStop() {} }; }
+  createLinearGradient() { return { addColorStop() {} }; }
+}
+class CanvasEl extends El {
+  constructor() {
+    super("canvas");
+    this.width = 0;
+    this.height = 0;
+  }
+  getContext() {
+    if (!this._ctx) this._ctx = new Ctx2D();
+    return this._ctx;
+  }
+}
+
 const byId = new Map();
 const el = (tag, id) => { const n = new El(tag, id); if (id) byId.set(id, n); return n; };
 const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
@@ -271,7 +314,8 @@ Object.assign(byId.get("in-seed"), { value: "20261012" });
 const documentListeners = {};
 const documentShim = {
   getElementById: (id) => byId.get(id) || (byId.set(id, el("div", id)), byId.get(id)),
-  createElement: (tag) => new El(tag),
+  // damage-fx 票 05：`<canvas>` 走上面那个带 2D 上下文的子类（其余标签仍是普通元素）。
+  createElement: (tag) => (String(tag).toLowerCase() === "canvas" ? new CanvasEl() : new El(tag)),
   // 模态的 ESC 关闭挂在 document 的 keydown 上；垫片记下来交给用例显式触发。
   addEventListener: (name, fn) => { (documentListeners[name] ||= []).push(fn); },
 };
@@ -373,6 +417,25 @@ const windowShim = {
     intervals.push({ fn, ms });
     return intervals.length;
   },
+  /* damage-fx 票 05：`requestAnimationFrame` 同样只登记、不自动跑。于是"演出的寿命由
+   * `create()` 返回的 `duration` 定时摘层、不靠 rAF 自然停"这条在垫片里也成立——用例
+   * 显式跑一帧只会画一次，摘层仍由计时器决定。 */
+  requestAnimationFrame: (fn) => {
+    const id = nextFrameId;
+    nextFrameId += 1;
+    pendingFrames.set(id, fn);
+    return id;
+  },
+  cancelAnimationFrame: (id) => { pendingFrames.delete(id); },
+};
+/* 排队的动画帧：`runFrame()` 跑一拍（本文件末的 damage-fx 用例按需取用）。 */
+const pendingFrames = new Map();
+let nextFrameId = 1;
+const runFrame = () => {
+  const queued = Array.from(pendingFrames.values());
+  pendingFrames.clear();
+  for (const fn of queued) fn();
+  return queued.length;
 };
 
 const context = vm.createContext({
@@ -381,6 +444,10 @@ const context = vm.createContext({
   fetch: globalThis.fetch,
   performance: { timeOrigin: Date.now() },
   console, Date, JSON, Object, Array, Number, String, Math, encodeURIComponent,
+  // damage-fx 票 05：4 点档的劈屏要 `new Path2D()`（真浏览器一样有）。
+  Path2D: class Path2D {
+    moveTo() {} lineTo() {} closePath() {}
+  },
 });
 context.globalThis = context;
 /* 加载契约（U1-00）：脚本清单**只认** index.html 的 `<script src>` 顺序。
@@ -22627,6 +22694,276 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + `preactivation=${lockedButton && lockedButton.getAttribute("data-preactivation")}`);
 
   ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ damage-fx 票 05：伤害演出的队列 / 排播 / 座位映射（U-DMG-01..04）============
+ *
+ * 判据来自票面 §4「分支口径」与 §5「生命周期」。载荷是**与响应体同形**的合成 `view` +
+ * 记录 + `damage_events`（服务端每次伤害都下发 `{seq, source, target, amount, nature}`）：
+ * 断言只落在 DOM 与计时器上——层里有没有 canvas、`data-damage-fx-live` / `-plays` 两个读数、
+ * 排程出来的毫秒数。画布像素不可断言（也不该断言）。
+ *
+ * 时间不靠真实等待：`window.setTimeout` 是**只排队**的垫片，`runFrame()` 跑一帧，
+ * 摘层由用例显式跑计时器推进（演出寿命来自 `anim.ini` 的 `damage_fx_<档>_total`）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const heroBlockOf = (seat) => {
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-hero");
+    }
+    const seatNode = seatNodesNow().find((node) => attr(node, "data-seat") === String(seat));
+    return seatNode
+      ? walk(seatNode).find((node) => hasClass(node, "hero-block")) || null
+      : null;
+  };
+
+  /** 演出层与它上面**唯一**那张 canvas（票面 §2：一个层里复用一张 canvas）。 */
+  const layer = () => $("t-damage-fx");
+  const layerCanvases = () => Array.from(layer().children)
+    .filter((node) => String(node.tagName || "").toUpperCase() === "CANVAS");
+  const liveCount = () => Number(attr(layer(), "data-damage-fx-live") || 0);
+  const playCount = () => Number(attr(layer(), "data-damage-fx-plays") || 0);
+
+  /** `anim.ini` 里一档的总时长（摘层时刻的唯一来源，不在测试里另写一份数字）。 */
+  const iniMilliseconds = (key) => {
+    const match = readIniFile().match(new RegExp(`^\\s*${key}\\s*=\\s*(\\d+)`, "m"));
+    if (!match) throw new Error(`anim.ini 缺少 ${key}`);
+    return Number(match[1]);
+  };
+
+  /** 跑**最先到期**的那个计时器。真浏览器按到期时刻排，垫片的登记顺序只是插入顺序，
+   *  故这里按毫秒数取（同刻按登记先后）——否则 1500ms 的摘层会先于 120ms 的错开被跑掉。 */
+  const runEarliest = () => {
+    const entries = Array.from(timerDelays.entries())
+      .sort((left, right) => left[1] - right[1] || left[0] - right[0]);
+    if (!entries.length) return false;
+    const [id] = entries[0];
+    const fn = pendingTimers.get(id);
+    pendingTimers.delete(id);
+    timerDelays.delete(id);
+    if (typeof fn !== "function") return false;
+    fn();
+    runFrame();
+    return true;
+  };
+  /** 把计时器跑到 `done()` 成立为止（只看结果，不等真实时钟）。 */
+  const runUntil = (done, limit = 400) => {
+    let steps = 0;
+    while (!done() && steps < limit) {
+      if (!runEarliest()) break;
+      steps += 1;
+    }
+    return done();
+  };
+  const drainTimers = (limit = 400) => {
+    let steps = 0;
+    while (steps < limit && runEarliest()) steps += 1;
+    return steps;
+  };
+
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const baseView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+      seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+    ];
+    return out;
+  };
+  const hpChange = (seq, seat, before, after) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: 3, depth: 1,
+    seat, before, after, amount: after - before,
+  });
+  const damageEvent = (seq, source, target, amount, nature = "NORMAL") => ({
+    seq, source, target, amount, nature,
+  });
+
+  let serial = 0;
+  /** 落一份干净会话（走真实的换会话清屏路径），再起一份带记录 + damage_events 的回放。 */
+  const loadDamageBatch = (records, events) => {
+    ui.flushPlayback();
+    serial += 1;
+    const session = `u-dmg-${serial}`;
+    ui.applyViewRaw({
+      ...baseView(session), cursor: 0, log_seq: 0, records: [],
+      damage_events: [], finished: false,
+    });
+    ui.applyViewRaw({
+      ...baseView(session), cursor: records.length, log_seq: 0,
+      records, damage_events: events, finished: false,
+    });
+    return session;
+  };
+  const step = (count = 1) => {
+    for (let index = 0; index < count; index += 1) ui.stepPlayback(true);
+  };
+  /** 这一批新排上的、毫秒数落在 [lo, hi] 里的计时器（用来读"错开 120ms"与"按 total 摘层"）。 */
+  const newDelays = (before) => Array.from(timerDelays.values())
+    .filter((ms) => !before.has(ms));
+
+  ui.state.animScale = 0;
+  // 垫片只按 id 建静态节点（不解析 HTML 的 class）：自己的武将块在真页面里带 hero-block。
+  $("t-self-hero").className = "hero-block";
+  ui.state.damageEvents = [];
+
+  // ---- U-DMG-01：一次普通伤害 → 层里出现画布、按该档 total 定时摘层、之后不留节点 ----
+  const before01 = playCount();
+  loadDamageBatch([hpChange(1, 1, 4, 3)], [damageEvent(1, 1, 1, 1)]);
+  // 事件在**自己那条记录的 seq** 上触发（触发点只有 seq 游标）：还没走到就一条都不该有。
+  check("U-DMG-01a 记录还没走到时不出手（触发点是 seq 游标，不是载荷一到）",
+    layerCanvases().length === 0 && liveCount() === 0,
+    `canvases=${layerCanvases().length} live=${liveCount()}`);
+  const delays01 = new Set(timerDelays.values());
+  step();
+  check("U-DMG-01b 普通伤害：层里挂上唯一一张 canvas，在播 1 条",
+    layerCanvases().length === 1 && liveCount() === 1 && playCount() === before01 + 1,
+    `canvases=${layerCanvases().length} live=${liveCount()} plays=${playCount() - before01}`);
+  check("U-DMG-01c 层里只有一张 canvas（不是每个事件新建一张）",
+    layer().children.length === 1,
+    `children=${layer().children.length}`);
+  const total01 = iniMilliseconds("damage_fx_1_total");
+  check("U-DMG-01d 摘层时刻 = 该档的 anim.ini 总时长（用 create() 的 duration 定时）",
+    newDelays(delays01).includes(total01),
+    `delays=${JSON.stringify(newDelays(delays01))} total=${total01}`);
+  check("U-DMG-01e 演出到点后层被清空（画布摘掉、在播 0 条）",
+    runUntil(() => layerCanvases().length === 0),
+    `canvases=${layerCanvases().length} live=${liveCount()}`);
+  const playedBefore = playCount();
+  drainTimers();
+  check("U-DMG-01f 收尾后不留残影（再跑完余下的计时器也不会把层挂回来）",
+    layer().children.length === 0 && liveCount() === 0 && playCount() === playedBefore,
+    `children=${layer().children.length} live=${liveCount()} plays=${playCount()}`);
+
+  // ---- U-DMG-02：火焰 / 雷电伤害不播（本 effort 只挂无属性）----
+  for (const nature of ["FIRE", "THUNDER"]) {
+    const before = playCount();
+    loadDamageBatch(
+      [hpChange(2, 2, 4, 2)],
+      [damageEvent(2, 1, 2, 2, nature)],
+    );
+    step();
+    check(`U-DMG-02 ${nature} 伤害：层不出现、不算一次演出`,
+      layer().children.length === 0 && liveCount() === 0 && playCount() === before,
+      `children=${layer().children.length} live=${liveCount()} plays=${playCount() - before}`);
+    check(`U-DMG-02b ${nature} 事件仍被消费（队列清空，不跨到下一批）`,
+      (ui.state.damageEvents || []).length === 0,
+      `pending=${(ui.state.damageEvents || []).length}`);
+  }
+
+  // ---- U-DMG-03：同批两条伤害 → 两次播放、错开 120ms、互不踩，仍在播上限之内 ----
+  const before03 = playCount();
+  const delays03 = new Set(timerDelays.values());
+  loadDamageBatch(
+    [hpChange(3, 1, 4, 3), hpChange(4, 2, 4, 2)],
+    [damageEvent(3, 0, 1, 1), damageEvent(4, 0, 2, 2)],
+  );
+  step();
+  check("U-DMG-03a 第一条立刻开演（在播 1 条）",
+    liveCount() === 1 && layerCanvases().length === 1,
+    `live=${liveCount()} canvases=${layerCanvases().length}`);
+  step();
+  const stagger = newDelays(delays03).filter((ms) => ms >= 100 && ms <= 120);
+  check("U-DMG-03b 第二条排在同一批里、错开 120ms（先排程，不抢着一起开演）",
+    liveCount() === 1 && stagger.length >= 1,
+    `live=${liveCount()} delays=${JSON.stringify(newDelays(delays03))}`);
+  runUntil(() => liveCount() === 2);
+  check("U-DMG-03c 到点后第二条也开演：两条同时在播、互不踩",
+    liveCount() === 2 && playCount() === before03 + 2,
+    `live=${liveCount()} plays=${playCount() - before03}`);
+  check("U-DMG-03d 两条同时在播时，层里仍然只有一张 canvas",
+    layer().children.length === 1,
+    `children=${layer().children.length}`);
+  check("U-DMG-03e 两条都播完：层清空、读数归零",
+    runUntil(() => liveCount() === 0) && layer().children.length === 0,
+    `live=${liveCount()} children=${layer().children.length}`);
+
+  // 同时在播上限 3 条：第 4 条起丢队列尾（spec §演出口径），伤害本身不受影响。
+  const before03f = playCount();
+  loadDamageBatch(
+    [hpChange(5, 1, 4, 3), hpChange(6, 2, 4, 2), hpChange(7, 3, 4, 3), hpChange(8, 1, 3, 2)],
+    [
+      damageEvent(5, 0, 1, 1), damageEvent(6, 0, 2, 1),
+      damageEvent(7, 0, 3, 1), damageEvent(8, 0, 1, 1),
+    ],
+  );
+  step(4);
+  runUntil(() => liveCount() >= 3);
+  check("U-DMG-03f 同时在播上限 3 条：第 4 条丢队列尾，在播恰好 3 条",
+    liveCount() === 3 && playCount() === before03f + 3,
+    `live=${liveCount()} plays=${playCount() - before03f}`);
+  runUntil(() => liveCount() === 0);
+
+  // ---- U-DMG-04：版式变了（座位矩形挪动）→ 摘掉在播的演出，之后无残留 ----
+  const before04 = playCount();
+  loadDamageBatch([hpChange(9, 1, 4, 3)], [damageEvent(9, 0, 1, 3)]);
+  step();
+  const started = liveCount() === 1 && playCount() === before04 + 1;
+  // 回放每步都会重绘全表：矩形没变 ⇒ **不**摘（否则 1.5~2.1s 的演出活不过 100ms）。
+  ui.renderTable();
+  check("U-DMG-04a 矩形没变的普通重绘不打断演出（回放每步都重绘全表）",
+    started && liveCount() === 1 && layerCanvases().length === 1,
+    `started=${started} live=${liveCount()} canvases=${layerCanvases().length}`);
+  // 版式真的变了（窗口缩放 / 座位重排）：两张牌的矩形对不上了 ⇒ 这一剑作废，别演在半空。
+  heroBlockShift = 260;
+  ui.renderTable();
+  check("U-DMG-04b 座位矩形变了 ⇒ 立刻摘掉正在播的演出",
+    liveCount() === 0 && layerCanvases().length === 0,
+    `live=${liveCount()} canvases=${layerCanvases().length}`);
+  heroBlockShift = 0;
+  const drained = drainTimers();
+  check("U-DMG-04c 作废之后不补播、不留残留节点与计时器",
+    layer().children.length === 0 && liveCount() === 0 && pendingTimers.size === 0,
+    `children=${layer().children.length} live=${liveCount()} timers=${pendingTimers.size} `
+      + `drained=${drained}`);
+
+  // ---- 换局清空：在播的演出与还没到 seq 的队列都不属于新局 ----
+  loadDamageBatch([hpChange(10, 2, 4, 2)], [damageEvent(11, 0, 2, 2)]);
+  step();
+  check("U-DMG-05a 事件 seq 还没走到：队列里等着，不出手",
+    liveCount() === 0 && (ui.state.damageEvents || []).length === 1,
+    `live=${liveCount()} pending=${(ui.state.damageEvents || []).length}`);
+  loadDamageBatch([hpChange(12, 2, 2, 1)], [damageEvent(12, 0, 2, 1)]);
+  step();
+  const liveAfterSwap = liveCount();
+  loadDamageBatch([], []);
+  check("U-DMG-05b 换局：队列清空、在播的演出摘掉（上一局那一剑不劈在新桌上）",
+    liveAfterSwap === 1 && liveCount() === 0 && layerCanvases().length === 0
+      && (ui.state.damageEvents || []).length === 0,
+    `before=${liveAfterSwap} live=${liveCount()} canvases=${layerCanvases().length} `
+      + `pending=${(ui.state.damageEvents || []).length}`);
+
+  // ---- 无来源（source == null）：不猜来源，剑光从画面外飞进来，命中照常 ----
+  const before06 = playCount();
+  loadDamageBatch([hpChange(13, 3, 4, 3)], [damageEvent(13, null, 3, 1)]);
+  step();
+  check("U-DMG-06 无来源伤害照常演（剑光从画面外进场，不猜来源）",
+    liveCount() === 1 && playCount() === before06 + 1,
+    `live=${liveCount()} plays=${playCount() - before06}`);
+  runUntil(() => liveCount() === 0);
+
+  // 收尾：把这一块留下的状态清干净，不影响后面的用例。
+  heroBlockShift = 0;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.damageEvents = [];
   ui.resetSelection();
 }
 

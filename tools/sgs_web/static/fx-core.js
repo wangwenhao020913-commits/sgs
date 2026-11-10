@@ -49,6 +49,19 @@
   /* 剑气劈屏的那条线（取剑光航线的高度） */
   var SPLIT_Y = 545;
 
+  /* 剑光航线 / 飘字的**比例**（票 05）：参考舞台上这两个点相对两张牌的位置。
+   * 牌桌上量出来的武将块大小与参考牌 460×644 不同，`stageFor` 按同一比例算出新的
+   * 航线与飘字位置——"从出剑牌右缘外飞进中剑牌"在任意座位矩形下都成立。 */
+  var SWORD_ANCHOR = {
+    ax: (SWORD_A.x - SRC.cx) / CARD_W,   // 0.504：出剑牌中心右方半张牌多一点
+    ay: (SWORD_A.y - SRC.cy) / CARD_H,   // 0.057：略低于牌心
+    bx: (DST.cx - SWORD_B.x) / CARD_W,   // 0.148：中剑牌中心左方
+    by: (DST.cy - SWORD_B.y) / CARD_H    // 0.045：略高于牌心
+  };
+
+  /* 飘字相对中剑牌的位置（参考舞台是 (1410, 490) = cx + 10 / cy − 55，上浮 92）。 */
+  var NUMBER_OFFSET = { dx: 10 / CARD_W, dy: 55 / CARD_H, rise: 92 / CARD_H };
+
   /* -------------------------------------------------------------- 武将 ----
    * 数值照三国杀；势力色：魏蓝 / 蜀绿 / 吴红 / 群灰。 */
   var HEROES = {
@@ -264,6 +277,57 @@
   }
 
   /* ================================================================
+   * 座位矩形 → 舞台（票 05）
+   * ============================================================== */
+
+  /* 一个座位矩形：缺字段 / 非法值退回参考舞台的对应值（`anim.ini` 删一行不该让页面报错，
+   * 覆盖层量不到布局时同理）。w / h 必须为正——0 宽会把构图比例算成 0。 */
+  function rectOr(raw, fallback) {
+    var out = { cx: fallback.cx, cy: fallback.cy, w: fallback.w, h: fallback.h };
+    if (!raw) return out;
+    var keys = ['cx', 'cy', 'w', 'h'];
+    for (var i = 0; i < keys.length; i++) {
+      var value = Number(raw[keys[i]]);
+      if (!isFinite(value)) continue;
+      if ((keys[i] === 'w' || keys[i] === 'h') && value <= 0) continue;
+      out[keys[i]] = value;
+    }
+    return out;
+  }
+
+  /* 把覆盖层量出来的两张武将牌矩形解成本实例的舞台。
+   *
+   * - `src` / `dst` 就是量出来的矩形（**舞台坐标**）：两张牌画在这两块上，刀痕
+   *   （`buildScar(…, dst)`）、墨点、飘字都按它定位——不再按参考舞台的 460×644 硬摆。
+   * - `u` = 它们比参考牌小多少（按 460×644 contain，取两牌最小值）：剑光粗细 / 刀痕 /
+   *   飘字字号是"牌上的绝对尺寸"，必须一起缩，否则 46 单位的剑光会糊满整张牌。
+   * - `a` / `b` = 剑光航线，按 `SWORD_ANCHOR` 的同一比例从两张牌算出。
+   *
+   * 不传 `stage` ⇒ 参考舞台（`u = 1`、A / B 仍取原常量），素材库那条链逐字节不变。 */
+  function stageFor(raw) {
+    if (!raw || (!raw.src && !raw.dst)) {
+      return { src: SRC, dst: DST, u: 1, a: SWORD_A, b: SWORD_B };
+    }
+    var src = rectOr(raw.src, SRC);
+    var dst = rectOr(raw.dst, DST);
+    var u = Math.min(src.w / CARD_W, src.h / CARD_H, dst.w / CARD_W, dst.h / CARD_H);
+    if (!isFinite(u) || u <= 0) u = 1;
+    return {
+      src: src, dst: dst, u: u,
+      a: { x: src.cx + src.w * SWORD_ANCHOR.ax, y: src.cy + src.h * SWORD_ANCHOR.ay },
+      b: { x: dst.cx - dst.w * SWORD_ANCHOR.bx, y: dst.cy - dst.h * SWORD_ANCHOR.by }
+    };
+  }
+
+  /* 飘字文案：`amount` 是服务端下发的**真实**伤害（酒 + 杀 + 加伤可能 ≥ 5，档位只决定
+   * 强度、不决定数字）。缺省 / 非法值退回该档的参考值，故不传 `amount` 时与原来一致。 */
+  function numberText(variant, amount) {
+    var value = Math.round(Number(amount));
+    if (!isFinite(value) || value <= 0) value = variant.dmg;
+    return '-' + value;
+  }
+
+  /* ================================================================
    * 宣纸舞台
    * ============================================================== */
   function paintPaper(w, h, seed) {
@@ -451,7 +515,7 @@
 
     var ox = card.cx + px * (cut.off || 0) * card.h * 0.5;
     var oy = card.cy + py * (cut.off || 0) * card.h * 0.5;
-    var L = (Math.hypot(card.w, card.h) * 0.5 + 24) * (cut.span || 1);
+    var L = (Math.hypot(card.w, card.h) * 0.5 + 24 * (card.w / CARD_W)) * (cut.span || 1);
 
     var top = [], bot = [], mid = [];
     for (var i = 0; i <= N; i++) {
@@ -613,22 +677,24 @@
   /* ================================================================
    * 剑光
    * ============================================================== */
-  function swordHead(t, variant, T) {
+  /* 剑光航线由 `S`（本实例的舞台）给：参考舞台是 A=(752,582) → B=(1332,516)，
+   * 牌桌上是覆盖层量出来的两张牌算出的同一比例航线（票 05）。 */
+  function swordHead(t, variant, T, S) {
     var k = clamp((t - T.LAUNCH) / variant.flight, 0, 1);
-    return { k: k, x: lerp(SWORD_A.x, SWORD_B.x, eIn(k) * 0.25 + eOut(k) * 0.75), y: lerp(SWORD_A.y, SWORD_B.y, k) };
+    return { k: k, x: lerp(S.a.x, S.b.x, eIn(k) * 0.25 + eOut(k) * 0.75), y: lerp(S.a.y, S.b.y, k) };
   }
 
-  function drawSwordLight(c, t, variant, T) {
+  function drawSwordLight(c, t, variant, T, S) {
     if (t < T.LAUNCH - 0.02 || t > T.IMPACT + 0.18) return;
-    var head = swordHead(t, variant, T);
-    var ang = Math.atan2(SWORD_B.y - SWORD_A.y, SWORD_B.x - SWORD_A.x);
+    var head = swordHead(t, variant, T, S);
+    var ang = Math.atan2(S.b.y - S.a.y, S.b.x - S.a.x);
     var dx = Math.cos(ang), dy = Math.sin(ang);
     var px = -dy, py = dx;
 
     var after = clamp((t - T.IMPACT) / 0.18, 0, 1);
     var boost = variant.split ? 1.7 : 1;
-    var hx = head.x + dx * after * 220 * boost;
-    var hy = head.y + dy * after * 220 * boost;
+    var hx = head.x + dx * after * 220 * S.u * boost;
+    var hy = head.y + dy * after * 220 * S.u * boost;
 
     var fade = (1 - after) * (t >= T.LAUNCH ? 1 : 0);
     if (fade <= 0.01) return;
@@ -637,7 +703,7 @@
     var B = variant.blade;
 
     // 拖尾始终回指出剑方；伤害越大，剑光越长
-    var distA = Math.hypot(hx - SWORD_A.x, hy - SWORD_A.y);
+    var distA = Math.hypot(hx - S.a.x, hy - S.a.y);
     var tailLen = Math.min(distA + 90 + (variant.dmg - 1) * 130, 1000);
 
     c.save();
@@ -700,7 +766,7 @@
           'rgba(255,255,255,0)', 'rgba(255,255,255,0.85)', rgba(B.core, 1));
 
     // 剑尖的一点亮
-    var tipR = 16 + w * 1.1;
+    var tipR = 16 * S.u + w * 1.1;
     var bgr = c.createRadialGradient(hx, hy, 0, hx, hy, tipR);
     bgr.addColorStop(0, 'rgba(255,255,255,0.92)');
     bgr.addColorStop(0.34, rgba(B.mid, 0.45));
@@ -728,41 +794,43 @@
   }
 
   /* 出剑前：剑意凝聚 */
-  function drawCharge(c, t, variant, T) {
+  function drawCharge(c, t, variant, T, S) {
     if (t < T.CHARGE || t > T.LAUNCH + 0.04) return;
     var k = ss(T.CHARGE, T.LAUNCH, t);
     var a = Math.sin(k * Math.PI * 0.5) * 0.9;
-    var r = 6 + 40 * k + variant.swordW * 1.4 * k;
-    var g = c.createRadialGradient(SWORD_A.x, SWORD_A.y, 0, SWORD_A.x, SWORD_A.y, r * 3);
+    var r = (6 + 40 * k) * S.u + variant.swordW * 1.4 * k;
+    var g = c.createRadialGradient(S.a.x, S.a.y, 0, S.a.x, S.a.y, r * 3);
     g.addColorStop(0, 'rgba(255,255,255,' + (0.9 * a) + ')');
     g.addColorStop(0.3, 'rgba(214,232,255,' + (0.45 * a) + ')');
     g.addColorStop(1, 'rgba(214,232,255,0)');
     c.save();
     c.fillStyle = g;
-    c.beginPath(); c.arc(SWORD_A.x, SWORD_A.y, r * 3, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(S.a.x, S.a.y, r * 3, 0, Math.PI * 2); c.fill();
     c.restore();
   }
 
   /* ================================================================
    * 墨点
    * ============================================================== */
-  function buildDrops(variant, seed, cut) {
+  function buildDrops(variant, seed, cut, card) {
     var r = rng(seed);
     var ang = rad(cut.a);
     var px = -Math.sin(ang), py = Math.cos(ang);
     var dx = Math.cos(ang), dy = Math.sin(ang);
-    var ox = DST.cx + px * (cut.off || 0) * DST.h * 0.5;
-    var oy = DST.cy + py * (cut.off || 0) * DST.h * 0.5;
+    // 墨点的大小 / 铺开距离跟着牌走：牌桌上的武将块比参考牌小得多，不缩就是一串胖墨团。
+    var k = card.w / CARD_W;
+    var ox = card.cx + px * (cut.off || 0) * card.h * 0.5;
+    var oy = card.cy + py * (cut.off || 0) * card.h * 0.5;
     var out = [];
     for (var i = 0; i < variant.inkDrops; i++) {
       var u = (r() * 2 - 1) * 0.9;
       var side = r() < 0.5 ? -1 : 1;
       out.push({
-        x: ox + dx * u * DST.h * 0.46 + px * side * (6 + r() * 14),
-        y: oy + dy * u * DST.h * 0.46 + py * side * (6 + r() * 14),
-        vx: px * side * (26 + r() * 120) + dx * (r() - 0.5) * 60,
-        vy: py * side * (26 + r() * 120) + dy * (r() - 0.5) * 60 - 8 - r() * 40,
-        rad: 1.5 + Math.pow(r(), 2.2) * 6.5,
+        x: ox + dx * u * card.h * 0.46 + px * side * (6 + r() * 14) * k,
+        y: oy + dy * u * card.h * 0.46 + py * side * (6 + r() * 14) * k,
+        vx: px * side * (26 + r() * 120) * k + dx * (r() - 0.5) * 60 * k,
+        vy: py * side * (26 + r() * 120) * k + dy * (r() - 0.5) * 60 * k - (8 + r() * 40) * k,
+        rad: (1.5 + Math.pow(r(), 2.2) * 6.5) * k,
         red: variant.cinnabar * r(),
         life: 0.42 + r() * 0.85,
         streak: r() < 0.35
@@ -803,7 +871,9 @@
   /* ================================================================
    * 伤害飘字
    * ============================================================== */
-  function drawNumber(c, variant, t, T) {
+  /* 伤害飘字：`txt` 由 `create()` 按服务端的 `amount` 定好（票 05），这里只画。
+   * 位置 / 上浮距离按中剑牌那块矩形换算（`NUMBER_OFFSET`），故任意座位大小都落在牌上。 */
+  function drawNumber(c, variant, t, T, dst, txt) {
     var age = t - T.IMPACT;
     if (age < 0 || age > T.NUM_LIFE) return;
 
@@ -813,10 +883,12 @@
     if (alpha <= 0.01) return;
 
     var size = variant.numSize;
-    var txt = '-' + variant.dmg;
 
     c.save();
-    c.translate(DST.cx + 10, DST.cy - 55 - rise * 92);
+    c.translate(
+      dst.cx + dst.w * NUMBER_OFFSET.dx,
+      dst.cy - dst.h * NUMBER_OFFSET.dy - rise * dst.h * NUMBER_OFFSET.rise
+    );
     c.rotate(-0.05 + (1 - rise) * 0.03);
     c.scale(0.6 + 0.4 * pop, 0.6 + 0.4 * pop);
     c.textAlign = 'center';
@@ -862,6 +934,15 @@
   /* ================================================================
    * 主入口
    * ============================================================== */
+
+  /* 静态贴图缓存（票 05）：键 → 一张离屏 canvas。画进它之后就只 `drawImage`，故多实例共用。 */
+  var IMAGE_CACHE = {};
+
+  function sharedImage(key, paint) {
+    if (!IMAGE_CACHE[key]) IMAGE_CACHE[key] = paint();
+    return IMAGE_CACHE[key];
+  }
+
   function create(canvas, opts) {
     opts = opts || {};
     // 本实例自己的钟：`profile: 'game'` 走 anim.ini 的四档紧凑时间轴，缺省仍是 export 档
@@ -871,6 +952,18 @@
     // `var T` 遮蔽模块级的 export 时间轴：`create` 内部的所有函数都读实例的这一份。
     var T = clock.timeline;
     var variant = clock.variant;
+    // 票 05：两块座位矩形（覆盖层量出来的武将块，**舞台坐标**）。缺省 = 参考舞台。
+    var S = stageFor(opts.stage);
+    // 构图比例：牌桌上的武将块比参考牌 460×644 小得多，"牌上的绝对尺寸"跟着缩
+    // （`u === 1` 时一个乘法都不做，素材库那条链因此逐字节不变）。
+    if (S.u !== 1) {
+      variant = copy(variant, {
+        swordW: variant.swordW * S.u, scarW: variant.scarW * S.u,
+        numSize: variant.numSize * S.u, shake: variant.shake * S.u
+      });
+    }
+    // 飘字文案：服务端 `amount` 是真实伤害（酒 / 加伤可能 ≥ 5），档位只决定强度。
+    var txt = numberText(variant, opts.amount);
     var seed = 1700 + vId * 977;
     var dpr = opts.dpr || 1;
 
@@ -884,18 +977,21 @@
     var sceneCanvas = sc[0], sceneCtx = sc[1];
     sceneCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    var paper = paintPaper(W, H, 21);
-    var heroSrc = paintHeroCard(HEROES.src, 401);
-    var heroDst = paintHeroCard(HEROES.dst, 733);
+    // 三张静态图（宣纸底 / 两张武将牌）都是**只读**贴图，跨实例复用：牌桌上一段伤害
+    // 就建一次 1920×1080 的纸底 + 两张 460×644 的牌是几十毫秒的主线卡顿（票 05 起
+    // 每次伤害都要建一个实例，故缓存到模块级；`drawImage` 只读，多实例共用安全）。
+    var paper = sharedImage('paper', function () { return paintPaper(W, H, 21); });
+    var heroSrc = sharedImage('heroSrc', function () { return paintHeroCard(HEROES.src, 401); });
+    var heroDst = sharedImage('heroDst', function () { return paintHeroCard(HEROES.dst, 733); });
 
     var cut = { a: -31, off: -0.02, w: variant.scarW, span: 1.0 };
-    var scar = buildScar(cut, seed, DST);
-    var drops = buildDrops(variant, seed + 5, cut);
+    var scar = buildScar(cut, seed, S.dst);
+    var drops = buildDrops(variant, seed + 5, cut, S.dst);
 
     var fadeStart = variant.fadeStart, fadeEnd = variant.fadeEnd;
     var halfPaths = {};
 
-    function drawCardsAndFx(c, t) {
+    function drawCardsAndFx(c, t, S) {
       var age = t - T.IMPACT;
 
       // 震屏（只震牌面上的东西，纸底不动）
@@ -909,9 +1005,10 @@
       c.save();
       c.translate(sx, sy);
 
-      // 两张武将牌（阴影已烘进图里，这里只贴图）
-      c.drawImage(heroSrc, SRC.cx - SRC.w / 2 - SHADOW_PAD, SRC.cy - SRC.h / 2 - SHADOW_PAD);
-      c.drawImage(heroDst, DST.cx - DST.w / 2 - SHADOW_PAD, DST.cy - DST.h / 2 - SHADOW_PAD);
+      // 两张武将牌（阴影已烘进图里，这里只贴图）：贴进本实例的两块座位矩形，
+      // 于是牌桌上的两张牌正好盖住真实的武将块（票 05）；参考舞台下 = 原样贴图。
+      drawHeroCard(c, heroSrc, S.src);
+      drawHeroCard(c, heroDst, S.dst);
 
       // 出剑瞬间，出剑方整块亮一下
       var srcFlash = age >= 0 && age < 0.22 ? 0.5 * Math.exp(-age * 14) : 0;
@@ -920,19 +1017,19 @@
         c.globalAlpha = srcFlash;
         c.globalCompositeOperation = 'lighter';
         c.fillStyle = 'rgba(210,228,255,0.35)';
-        roundRect(c, SRC.cx - SRC.w / 2, SRC.cy - SRC.h / 2, SRC.w, SRC.h, 14);
+        roundRect(c, S.src.cx - S.src.w / 2, S.src.cy - S.src.h / 2, S.src.w, S.src.h, 14);
         c.fill();
         c.restore();
       }
 
       // ---- 中剑方牌内 ----
       c.save();
-      roundRect(c, DST.cx - DST.w / 2, DST.cy - DST.h / 2, DST.w, DST.h, 14);
+      roundRect(c, S.dst.cx - S.dst.w / 2, S.dst.cy - S.dst.h / 2, S.dst.w, S.dst.h, 14);
       c.clip();
 
       if (age >= 0 && age < 0.5) {
         c.fillStyle = 'rgba(28,26,23,' + (0.09 * Math.exp(-age * 9)).toFixed(4) + ')';
-        c.fillRect(DST.cx - DST.w / 2, DST.cy - DST.h / 2, DST.w, DST.h);
+        c.fillRect(S.dst.cx - S.dst.w / 2, S.dst.cy - S.dst.h / 2, S.dst.w, S.dst.h);
       }
 
       if (age > 0) {
@@ -948,7 +1045,7 @@
             c.globalCompositeOperation = 'multiply';
             for (var q = 0; q < 2; q++) {
               var mp = scar.mid[Math.floor((q + 0.5) / 2 * (scar.mid.length - 1))];
-              var R = 40 + q * 22;
+              var R = (40 + q * 22) * S.u;
               var gr = c.createRadialGradient(mp[0], mp[1], 0, mp[0], mp[1], R);
               gr.addColorStop(0, rgba(C.red, 0.13 * spread * a));
               gr.addColorStop(0.55, rgba(C.red, 0.05 * spread * a));
@@ -964,29 +1061,41 @@
       c.restore();
 
       // ---- 剑意 / 剑光 / 命中光（画在牌之上）----
-      drawCharge(c, t, variant, T);
-      drawSwordLight(c, t, variant, T);
+      drawCharge(c, t, variant, T, S);
+      drawSwordLight(c, t, variant, T, S);
 
       if (age >= 0 && age < 0.34) {
         var ba = Math.pow(1 - age / 0.34, 1.8);
-        var BR = (120 + 30 * variant.dmg) * (0.5 + 0.5 * eOut(age / 0.1));
-        var bg = c.createRadialGradient(SWORD_B.x, SWORD_B.y, 0, SWORD_B.x, SWORD_B.y, BR);
+        var BR = (120 + 30 * variant.dmg) * S.u * (0.5 + 0.5 * eOut(age / 0.1));
+        var bg = c.createRadialGradient(S.b.x, S.b.y, 0, S.b.x, S.b.y, BR);
         bg.addColorStop(0, 'rgba(255,255,255,' + (0.75 * ba) + ')');
         bg.addColorStop(0.35, 'rgba(240,246,255,' + (0.28 * ba) + ')');
         bg.addColorStop(1, 'rgba(240,246,255,0)');
         c.fillStyle = bg;
-        c.beginPath(); c.arc(SWORD_B.x, SWORD_B.y, BR, 0, Math.PI * 2); c.fill();
+        c.beginPath(); c.arc(S.b.x, S.b.y, BR, 0, Math.PI * 2); c.fill();
       }
 
-      drawNumber(c, variant, t, T);
+      drawNumber(c, variant, t, T, S.dst, txt);
       c.restore();
+    }
+
+    /* 把烘好阴影的武将牌贴进一块矩形：牌面正好铺满 rect，阴影按同一比例外扩。
+     * `rect === SRC / DST`（参考舞台）时退回原来的自然尺寸贴图，逐字节一致。 */
+    function drawHeroCard(c, image, rect) {
+      var padX = SHADOW_PAD * rect.w / CARD_W;
+      var padY = SHADOW_PAD * rect.h / CARD_H;
+      c.drawImage(
+        image,
+        rect.cx - rect.w / 2 - padX, rect.cy - rect.h / 2 - padY,
+        rect.w + padX * 2, rect.h + padY * 2
+      );
     }
 
     function renderScene(c, target) {
       target.setTransform(dpr, 0, 0, dpr, 0, 0);
       target.clearRect(0, 0, W, H);
       target.drawImage(paper, 0, 0, W, H);
-      drawCardsAndFx(target, t);
+      drawCardsAndFx(target, t, S);
     }
 
     function draw(t) {
@@ -996,7 +1105,7 @@
       if (variant.split <= 0) {
         ctx.clearRect(0, 0, W, H);
         ctx.drawImage(paper, 0, 0, W, H);
-        drawCardsAndFx(ctx, t);
+        drawCardsAndFx(ctx, t, S);
         postProcess(ctx, t);
         return;
       }
@@ -1005,7 +1114,7 @@
       sceneCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
       sceneCtx.clearRect(0, 0, W, H);
       sceneCtx.drawImage(paper, 0, 0, W, H);
-      drawCardsAndFx(sceneCtx, t);
+      drawCardsAndFx(sceneCtx, t, S);
       ctx.clearRect(0, 0, W, H);
 
       var splitK = 0;
@@ -1016,13 +1125,13 @@
 
       if (sep > 0.6) {
         // 切口沿剑光的飞行方向斜着走，两半沿法线分开
-        var cAng = Math.atan2(SWORD_B.y - SWORD_A.y, SWORD_B.x - SWORD_A.x);
+        var cAng = Math.atan2(S.b.y - S.a.y, S.b.x - S.a.x);
         var cca = Math.cos(cAng), csa = Math.sin(cAng);
         var nx = -csa, ny = cca;                  // 法线（指向下方那半）
         var EXT = 2400;
 
-        var ax = SWORD_B.x - cca * EXT, ay = SWORD_B.y - csa * EXT;
-        var bx = SWORD_B.x + cca * EXT, by = SWORD_B.y + csa * EXT;
+        var ax = S.b.x - cca * EXT, ay = S.b.y - csa * EXT;
+        var bx = S.b.x + cca * EXT, by = S.b.y + csa * EXT;
 
         if (!halfPaths.up) {
           var up = new Path2D();
@@ -1115,7 +1224,10 @@
 
     return {
       draw: draw, duration: T.DURATION, variant: vId, width: W, height: H,
-      profile: clock.profile, timeline: T, timing: clock.ms
+      profile: clock.profile, timeline: T, timing: clock.ms,
+      // 票 05：本实例的舞台（座位矩形 / 构图比例 / 剑光航线）与飘字文案。播放器用
+      // `duration` 定时摘层（= `anim.ini` 的 `total`），票 06 的音效读同一份 `timeline`。
+      stage: S, number: txt
     };
   }
 
