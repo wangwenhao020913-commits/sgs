@@ -439,11 +439,16 @@
 <!-- damage-fx 票 03：剑光演出的画面（fx-core.js）+ 现场合成音效（sfx.js）。
      两份都是普通脚本（零依赖、零外部资源、不改 DOM、不发请求），仍是「main.js 最后」。 -->
 <script src="fx-core.js"></script>
+<!-- damage-fx-natures 票 01：**雷电**家族的画面与音效（SgsThunderFX / SgsThunderSfx）。
+     与剑那份同姿态：普通脚本、零依赖、不发请求、不碰 DOM。画面紧挨 fx-core、音效紧挨
+     sfx；两份都必须排在 sfx-ui.js 之前（音效 UI 的声道池按模块取它们的 gameTiming）。 -->
+<script src="fx-thunder.js"></script>
 <script src="sfx.js"></script>
-<!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 三条声道池 / ?audiotest）。
-     只读 damage-fx.js 的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT），且都在
-     调用时才解析 ⇒ 排在 damage-fx.js 之后、main.js 之前；damage-fx.js 的四个调用点运行时才
-     触发，wire() 里的 damageSfxSync() 也在这之后。 -->
+<script src="sfx-thunder.js"></script>
+<!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 按模块分组的声道池 /
+     ?audiotest）。读 damage-fx.js 的 DAMAGE_FX_MAX_VARIANT 与 damageFxCapFor(nature)，都在
+     调用时才解析 ⇒ 排在 damage-fx.js 之后、main.js 之前；damage-fx.js 的四个调用点运行时
+     才触发，wire() 里的 damageSfxSync() 也在这之后。 -->
 <script src="sfx-ui.js"></script>
 <script src="main.js"></script>
 </body>

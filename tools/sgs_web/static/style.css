@@ -1037,6 +1037,26 @@ button.mini-slot { cursor: pointer; }
   height: 100%;
 }
 
+/* ---------- 属性伤害的整屏着色闪（damage-fx-natures 票 01）：雷 = 冷白、火 = 暖白 ---------- */
+
+/* 为什么不是 `filter`：`filter` 会在 `#table-shell` 上建立 containing block，把两个
+ * `position: fixed` 的子孙（`#t-anim-note` z 9999 / `#t-card-preview` z 55）重新锚定
+ * （见 `damage-fx.js:damageGrayscaleSync` 的既有注记）。属性闪因此走一个**着色的绝对定位
+ * 子层**：层级 20 = 覆盖画布（19）之上、卡牌预览（55）之下；`mix-blend-mode: screen` 让
+ * 底下的牌桌透出来（不是一块不透明的白板），`pointer-events: none` 不吃点击。
+ * 颜色 / 强度由 `damage-fx.js:damageFlashSync` 写内联（强度 = 该档 `flash`，0..1）。 */
+.fx-flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  mix-blend-mode: screen;
+  opacity: 0;
+}
+/* 两档颜色（damage-fx.js:damageFxFlashSpec 只选档，不写色值）：雷 = 冷白、火 = 暖白。 */
+.fx-flash-thunder { background: rgb(226, 240, 255); }
+.fx-flash-fire { background: rgb(255, 243, 224); }
+
 /* ---------- 阶段 / 回合飘字层（U4-04 / D10）：判定 / 装备区上方，不占步长 ---------- */
 
 /* 覆盖整个牌桌壳、不吃指针、裁在壳内；层级高于技能名飘字（16），低于飞行器（18）与

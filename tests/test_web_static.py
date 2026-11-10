@@ -721,7 +721,13 @@ def test_session_playback_hook_measures_source_before_render_and_launches_after(
 # 生成器，接管牌桌是票 05 的事（`effects.js`）。
 # ---------------------------------------------------------------------------
 
-_DAMAGE_FX_GLOBALS = {"fx-core.js": "SgsDamageFX", "sfx.js": "SgsSfx"}
+_DAMAGE_FX_GLOBALS = {
+    "fx-core.js": "SgsDamageFX",
+    "sfx.js": "SgsSfx",
+    # damage-fx-natures 票 01：雷电家族与剑光同姿态（普通脚本、全局名、不碰 DOM）。
+    "fx-thunder.js": "SgsThunderFX",
+    "sfx-thunder.js": "SgsThunderSfx",
+}
 
 
 def test_damage_fx_scripts_keep_their_global_names_and_stay_static() -> None:
@@ -797,14 +803,22 @@ def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
 _DAMAGE_FX_VARIANTS = (1, 2, 3, 4)
 
 
+# 剑光的键：`damage_fx_<档>_<字段>`（雷电是 `damage_fx_thunder_<档>_<字段>`，不在此列）。
+_SWORD_TIMING_KEY = re.compile(r"^damage_fx_\d+_")
+
+
+def _sword_ini_entries() -> dict[str, str]:
+    """`anim.ini` 里**剑光**那一族的键（雷电的 `damage_fx_thunder_*` 由自己那条用例钉）。"""
+    return {key: value for key, value in _ini_entries().items() if _SWORD_TIMING_KEY.match(key)}
+
+
 def test_anim_ini_lists_the_damage_fx_durations_per_variant(damage_fx_probe: dict) -> None:
     """19 个键齐全、可解析，且每档都满足 `flight ≤ impact ≤ total ≤ 2200`、`impact + fade ≤ total`。
 
     键表**不是**写在测试里的第二份清单：期望值来自 `fx-core.js` 的 `DEFAULT_TIMING`
     （票 10 的单一真源），这里只把它与磁盘上的 `anim.ini` 对表。
     """
-    entries = _ini_entries()
-    damage = {key: value for key, value in entries.items() if key.startswith("damage_fx_")}
+    damage = _sword_ini_entries()
     expected = set(damage_fx_probe["timingKeys"])
     assert set(damage) == expected, (
         f"damage-fx 的时长键必须与 fx-core 的 `DEFAULT_TIMING` 一致："
@@ -875,7 +889,7 @@ function load(context, name, source) {
 
 /* ------------------------------------------------- ① 真脚本：正常那一份 ---- */
 const context = makeSandbox();
-for (const name of ["anim.js", "fx-core.js", "effects.js", "damage-fx.js"]) load(context, name);
+for (const name of ["anim.js", "fx-core.js", "fx-thunder.js", "effects.js", "damage-fx.js"]) load(context, name);
 const report = await vm.runInContext(
   `(async () => {
      await animReady;
@@ -904,18 +918,37 @@ const report = await vm.runInContext(
        resolved,
        clamps,
        damageFxTiming: {
-         1: damageFxTiming(1),
-         4: damageFxTiming(4),
-         resolvedFromDamageFx: fx.gameTiming(4, damageFxTiming(4)).timeline.DURATION,
+         1: damageFxTiming(null, 1),
+         4: damageFxTiming(null, 4),
+         resolvedFromDamageFx: fx.gameTiming(4, damageFxTiming(null, 4)).timeline.DURATION,
        },
-       // 评审修复：null / 缺字段 = 无属性（三层文档同一句话），只有 FIRE / THUNDER 不播。
+       // 票 01：null / 缺字段 / NORMAL / THUNDER / 未登记属性都播；只有还没接的 FIRE 被挡。
        naturePlayable: {
          null: damageFxNaturePlayable(null),
          undefined: damageFxNaturePlayable(undefined),
          NORMAL: damageFxNaturePlayable("NORMAL"),
          FIRE: damageFxNaturePlayable("FIRE"),
          THUNDER: damageFxNaturePlayable("THUNDER"),
+         ICE: damageFxNaturePlayable("ICE"),
        },
+       // 票 01：属性 → 画面模块（分派查表只住 damage-fx.js）。
+       rendererFor: {
+         thunder: damageFxRendererFor("THUNDER") === SgsThunderFX,
+         normal: damageFxRendererFor(null) === SgsDamageFX,
+         explicitNormal: damageFxRendererFor("NORMAL") === SgsDamageFX,
+         unknown: damageFxRendererFor("ICE") === SgsDamageFX,
+         // 票 03 才接火：本票 FIRE 回落剑光（属性闸门仍挡着，见 naturePlayable）。
+         fireFallsBack: damageFxRendererFor("FIRE") === SgsDamageFX,
+       },
+       fieldsFor: {
+         sword: damageFxTimingFields(null),
+         thunder: damageFxTimingFields("THUNDER"),
+       },
+       timingThunder: {
+         1: damageFxTiming("THUNDER", 1),
+         3: damageFxTiming("THUNDER", 3),
+       },
+       cap: damageFxCapFor("THUNDER"),
      });
    })()`,
   context,
@@ -931,6 +964,7 @@ const patchedSource = source.replace(/(\n|,)\s*damage_fx_4_split:\s*\d+/, "");
 const patched = makeSandbox();
 load(patched, "anim.js");
 load(patched, "fx-core.js", patchedSource);
+load(patched, "fx-thunder.js");
 load(patched, "effects.js");
 load(patched, "damage-fx.js");
 const negative = await vm.runInContext(
@@ -939,7 +973,7 @@ const negative = await vm.runInContext(
      return JSON.stringify({
        fields: SgsDamageFX.TIMING_FIELDS,
        keys: SgsDamageFX.TIMING_KEYS,
-       four: damageFxTiming(4),
+       four: damageFxTiming(null, 4),
        // 缺键的画面并不会变：split 退回 VARIANTS[4].split。所以"静默不生效"只能靠名单比对抓。
        resolvedSplit: SgsDamageFX.gameTiming(4, damageFxTiming(4)).ms.split,
      });
@@ -1007,11 +1041,7 @@ def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_
     表里就**没有**这个键，fx-core 退 `VARIANTS[1].strobe = 0`。票 05 的播放器读它。
     """
     probe = damage_fx_probe
-    ini = {
-        key: float(value)
-        for key, value in _ini_entries().items()
-        if key.startswith("damage_fx_")
-    }
+    ini = {key: float(value) for key, value in _sword_ini_entries().items()}
     four = probe["damageFxTiming"]["4"]
     # 期望值 = fx-core 导出的字段名名单（票 10 的单一真源），测试里不再另写一份六个名字。
     assert set(four) == {f"damage_fx_4_{field}" for field in probe["timingFields"]}, (
@@ -1084,7 +1114,7 @@ def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: 
     assert "damage_fx_4_split" not in negative["four"], (
         "damage-fx.js 的读取面必须跟着 fx-core 走：键删了就不该再去读它"
     )
-    ini_keys = {key for key in _ini_entries() if key.startswith("damage_fx_")}
+    ini_keys = set(_sword_ini_entries())
     assert "damage_fx_4_split" in ini_keys, "前提：磁盘 anim.ini 仍有这一行（否则反证无意义）"
     assert negative["resolvedSplit"] == 44, (
         "缺键时画面仍是 VARIANTS[4].split = 44：这种失败不报错，只能由键表比对抓住"
@@ -1094,11 +1124,7 @@ def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: 
 def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_probe: dict) -> None:
     """`SgsDamageFX.gameTiming`：默认值 = `DEFAULT_TIMING` = ini；四条钳制与缺键 / 垃圾值兜底。"""
     probe = damage_fx_probe
-    ini = {
-        key: float(value)
-        for key, value in _ini_entries().items()
-        if key.startswith("damage_fx_")
-    }
+    ini = {key: float(value) for key, value in _sword_ini_entries().items()}
     # 期望值来自磁盘上的 `anim.ini`（独立于 fx-core 的那一侧），不是第三份手写清单。
     assert set(probe["defaults"]) == set(ini), (
         "fx-core 的内置默认必须恰好覆盖 anim.ini 的 damage_fx_* 键："
@@ -2084,8 +2110,8 @@ def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbe
         "版式重检排在座位补类之后（座位节点必须先建好，矩形才是新的）"
     )
     window_actions = _js_function(damage_fx, "startDamagePlay")
-    assert "damageFxTiming(plan.variant)" in window_actions, (
-        "时长从 anim.ini 那一份搬过来（票 04 的接线口），不在 JS 里硬编码"
+    assert "damageFxTiming(nature, plan.variant)" in window_actions, (
+        "时长从 anim.ini 那一份搬过来（按属性取字段表），不在 JS 里硬编码"
     )
     assert "setTimeout(() => finishDamagePlay(play), play.duration)" in window_actions, (
         "摘层用 create() 返回的 duration 定时，不靠 rAF 自然停（票 04 的交接）"
@@ -2669,13 +2695,13 @@ def test_the_damage_sfx_state_machine_is_gesture_unlocked_and_remembers_the_swit
         "开关关着时连 AudioContext 都不建（缺省静音是零代价的）"
     )
     ensure = _js_function(sfx_ui, "damageSfxEnsureLanes")
-    assert "DAMAGE_FX_CONCURRENCY" in ensure, (
-        "声道数 = 同时在播上限（3）：一条声道一路时钟，否则三条并发会互相吞 cue"
+    assert "damageFxCapFor(" in ensure, (
+        "声道数 = 该属性的在播上限（票 01 收进 damageFxCapFor，票 02 只改它的返回）"
     )
     assert "player.start()" in ensure, "建声道的那一次就要 start()（同一个 tick 里 resume）"
     set_enabled = _js_function(sfx_ui, "damageSfxSetEnabled")
-    assert "if (damageSfxOn) damageSfxEnsureLanes();" in set_enabled, (
-        "点开「♪」本身就是手势：声道在这一下建"
+    assert "if (damageSfxOn) damageSfxEnsureModules();" in set_enabled, (
+        "点开「♪」本身就是手势：给页面上**已加载**的音效模块各建一套声道"
     )
     assert "damageSfxRemember(damageSfxOn)" in set_enabled, "开关状态写进 localStorage"
     assert "damageSfxSyncButton()" in set_enabled, "文案 / aria-pressed / .on 同处更新"
@@ -2753,16 +2779,18 @@ _SFX_UI_CALL_SITES = (
     "damageSfxStopAll()",
 )
 
-# 票 08 搬走的 20 个函数（票面 §要搬走的，顺序与文件一致）。
+# 票 08 搬走的 20 个函数 + 票 01 的按模块分池（顺序与文件一致）。
 _SFX_UI_FUNCTIONS = (
     "damageSfxStore",
     "damageSfxRemembered",
     "damageSfxRemember",
     "damageSfxButtonText",
     "damageSfxSyncButton",
+    "damageSfxEngineFor",
     "damageSfxBaseTimeline",
     "damageSfxTimeline",
     "damageSfxEnsureLanes",
+    "damageSfxEnsureModules",
     "damageSfxMute",
     "damageSfxSync",
     "damageSfxUnlock",
@@ -2781,8 +2809,9 @@ _SFX_UI_FUNCTIONS = (
 def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> None:
     """票 08：音效 UI 独立成一份脚本，缝只朝一个方向（伤害排播 → 音效）。
 
-    - 20 个函数与四个调用点**分家**：定义在 `sfx-ui.js`；票 09 把调用点连同排播一起搬到
-      `damage-fx.js`，`effects.js` 一侧一个都不剩；
+    - 22 个函数与四个调用点**分家**：定义在 `sfx-ui.js`；票 09 把调用点连同排播一起搬到
+      `damage-fx.js`，`effects.js` 一侧一个都不剩；票 01 的声道池按**音效模块**分组
+      （`damageSfxLanes[engine.key]`），池长读 `damageFxCapFor(nature)`；
     - 加载次序：`sfx.js` 之后、`damage-fx.js` 之后、`main.js` 之前（票面写「`sfx.js` 之后、
       `effects.js` 之前」，但 `effects.js` 原本就排在 `sfx.js` 之前，见 `index.html`；
       实际落点是音效组末尾——两个常量这时已就位，比「之前」更稳）；
@@ -2832,6 +2861,31 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
         assert damage_name not in sfx_ui, (
             f"sfx-ui.js 不许调伤害排播层（{damage_name}）：缝只朝一个方向"
         )
+    # 唯一的例外是**纯读**的 cap 口：池长必须与排播层同源（票 01 收进 damageFxCapFor，
+    # 票 02 只改它的返回）。它不是运行状态，也不反向驱动排播。
+    assert "damageFxCapFor(" in sfx_ui, "声道池长读 damage-fx.js 的 cap 口（唯一真源）"
+    assert "damageFxNatureKind(" in sfx_ui, "属性归类读 damage-fx.js 的唯一判据"
+    # 只有这两个**纯读**助手可以跨过来：它们不接受 play、不读写排播状态，也不反向驱动。
+    _PURE_READS = {"damageFxCapFor", "damageFxNatureKind"}
+    for name in _DAMAGE_FX_FUNCTIONS:
+        if name in _PURE_READS:
+            continue
+        assert name not in sfx_ui, f"sfx-ui.js 不许出现伤害层的其它函数（{name}）"
+    # 池按模块分组：一个模块一套（`{SgsSfx: [...], SgsThunderSfx: [...]}`），
+    # 不能再假设"一个数组装完三套"。
+    assert "damageSfxLanes[engine.key]" in sfx_ui, "声道池必须按键 = 音效模块名"
+    assert "damageSfxLanes.length" not in sfx_ui, "声道池不再是单个数组"
+    ensure_modules = _js_function(sfx_ui, "damageSfxEnsureModules")
+    assert 'for (const nature of ["NORMAL", "THUNDER", "FIRE"])' in ensure_modules, (
+        "只给**已加载**的模块建池（没有 SgsFireSfx 就跳过，不凭空建）"
+    )
+    assert "if (!engine.sfx) continue;" in ensure_modules, "缺模块 ⇒ 跳过该族"
+    ensure_lanes = _js_function(sfx_ui, "damageSfxEnsureLanes")
+    assert "damageSfxBaseTimeline(engine.fx)" in ensure_lanes, (
+        "占位时间轴按该属性的**画面模块**取（SgsThunderFX / SgsDamageFX）"
+    )
+    base = _js_function(sfx_ui, "damageSfxBaseTimeline")
+    assert "gameTiming(1).timeline" in base, "占位时间轴 = 该画面模块 1 点档的 game 时间轴"
     for leaked in ("localStorage", "btn-sfx", "audiotest", "SgsSfx"):
         assert leaked not in effects, (
             f"effects.js 里不该再有音效实现（{leaked}）：开关 / 记忆 / 自检都搬去 sfx-ui.js"
@@ -2851,11 +2905,14 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
 # 行为（错开 / 上限 / 版式作废 / 换局无残影）归烟测 `U-DMG-01..06`。
 # ---------------------------------------------------------------------------
 
-# 票面 §3 的"剩余部分"：按 `damage-fx.js` 里的出现次序。
+# 票面 §3 的"剩余部分" + 票 01 的属性分派 / 着色闪：按 `damage-fx.js` 里的出现次序。
 _DAMAGE_FX_FUNCTIONS = (
+    "damageFxNatureKind",
+    "damageFxRendererFor",
     "damageFxTimingFields",
     "damageFxTiming",
     "damageFxNaturePlayable",
+    "damageFxCapFor",
     "damageFxLayer",
     "damageFxDpr",
     "damageFxView",
@@ -2863,9 +2920,14 @@ _DAMAGE_FX_FUNCTIONS = (
     "damageFxNumberKeepOut",
     "damageFxBoxKey",
     "damageFxPlanFor",
+    "damageFxStageFor",
     "damageFxSlot",
     "damageFxMountCanvas",
     "damageFxMark",
+    "damageFxFlashSpec",
+    "damageFlashSync",
+    "damageFlashPush",
+    "damageFlashPop",
     "damageGrayscaleSync",
     "damageGrayscalePush",
     "damageGrayscalePop",
@@ -3007,22 +3069,75 @@ def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_fil
 
 
 def test_the_damage_nature_check_treats_null_as_normal(damage_fx_probe: dict) -> None:
-    """评审修复：`nature: null` ≡ 无属性 ⇒ 必须播；只有 `FIRE` / `THUNDER` 跳过。
+    """`nature: null` ≡ 无属性 ⇒ 必须播；票 01 起 `THUNDER` 也播，只有还没接的 `FIRE` 挡着。
 
     三层文档同一句话：`game.py:note_damage`「`None` = 牌面没声明，等同无属性」、
     `projection.py:damage_events_after`「缺声明保持 `None`，与"无属性"同义」、
     `active.py:_quhu_burn`「无渠道牌、无属性」显式写 `"nature": None`。
 
     早先的 `event.nature !== DAMAGE_FX_NATURE` 把 `null` 当成"火焰 / 雷电"一起丢了——
-    【驱虎】拼点那 1 点无属性伤害永远不演剑光。这里读的是**真 `effects.js` 的判定函数**
-    （探针按页面顺序加载 `anim.js` + `fx-core.js` + `effects.js`），不是另抄一份。
+    【驱虎】拼点那 1 点无属性伤害永远不演剑光。这里读的是**真 `damage-fx.js` 的判定函数**
+    （探针按页面顺序加载 `anim.js` + `fx-core.js` + `fx-thunder.js` + `effects.js` +
+    `damage-fx.js`），不是另抄一份。
+
+    票面 §1 说"放行 FIRE / THUNDER"，但 §验收 5 与 §7 明写"FIRE 本票仍不播"——
+    以验收断言为准：FIRE 的闸门留给票 03（分派表已经给它留了 `SgsFireFX` 的位子）。
     """
     playable = damage_fx_probe["naturePlayable"]
     assert playable["null"] is True, f"`null` 必须视同无属性（会播）：{playable}"
     assert playable["undefined"] is True, f"缺字段同样是无属性：{playable}"
     assert playable["NORMAL"] is True, f"显式 NORMAL 照旧播：{playable}"
-    assert playable["FIRE"] is False, f"火焰不播（本 effort 不接）：{playable}"
-    assert playable["THUNDER"] is False, f"雷电不播（本 effort 不接）：{playable}"
+    assert playable["THUNDER"] is True, f"雷电票 01 接进来了，必须播：{playable}"
+    assert playable["ICE"] is True, f"未登记属性 fail-open 回落无属性：{playable}"
+    assert playable["FIRE"] is False, f"火焰留给票 03（本票仍不播）：{playable}"
+
+
+def test_the_damage_fx_nature_dispatch_is_single_sourced(damage_fx_probe: dict) -> None:
+    """票 01：属性 → 画面模块的查表只有 `damageFxRendererFor` 一处，且未知属性 fail-open。
+
+    顺带钉住字段表：剑 6 个 / 雷 6 个，各自由自己的 `DEFAULT_TIMING` 生成——`damage-fx.js`
+    里不许再写第二份名单（`damageFxTiming` 只按 `TIMING_PREFIX` + 字段名拼键）。
+    """
+    probe = damage_fx_probe
+    renderer = probe["rendererFor"]
+    assert renderer["thunder"] is True, "THUNDER 必须交给 SgsThunderFX"
+    assert renderer["normal"] is True and renderer["explicitNormal"] is True, (
+        "null / NORMAL 都回 SgsDamageFX"
+    )
+    assert renderer["unknown"] is True, "未登记属性 fail-open 回落剑光（spec §2）"
+    assert renderer["fireFallsBack"] is True, "SgsFireFX 还没加载 ⇒ 分派回落剑光（票 03 接）"
+
+    fields = probe["fieldsFor"]
+    assert fields["sword"] == ["total", "flight", "impact", "fade", "strobe", "split"]
+    assert fields["thunder"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
+        f"雷电的字段集由它自己的 DEFAULT_TIMING 推导：{fields['thunder']}"
+    )
+    thunder = probe["timingThunder"]
+    assert set(thunder["1"]) == {
+        "damage_fx_thunder_1_total", "damage_fx_thunder_1_flight",
+        "damage_fx_thunder_1_impact", "damage_fx_thunder_1_fade",
+    }, f"1 点雷没有 strobe / flash，不该硬造：{sorted(thunder['1'])}"
+    assert set(thunder["3"]) == {f"damage_fx_thunder_3_{field}" for field in fields["thunder"]}
+    assert probe["cap"] == 3, "本票 cap 恒 3（票 02 改成按键读）"
+
+
+def test_the_server_damage_natures_are_the_ones_the_frontend_dispatches() -> None:
+    """服务端的 `DamageNature` = 前端分派表认识的属性名（`null` 另算"无属性"）。
+
+    `api/damage_events_after` 原样下发 `Engine.damage_events` 的 `nature`（`None` 保持
+    `None`）；属性名的真源是 `src/sgs/effects/behaviors.py:DamageNature`。这条把两边对在
+    一起：前端分派表每加一族，服务端枚举里必须真有这个值（反之枚举加值也逼前端跟上）。
+    """
+    behaviors = (REPO_ROOT / "src" / "sgs" / "effects" / "behaviors.py").read_text(encoding="utf-8")
+    start = behaviors.find("class DamageNature(str, Enum):")
+    assert start >= 0, "behaviors.py 里找不到 DamageNature 枚举"
+    end = behaviors.find("\nclass ", start + 1)
+    body = behaviors[start:] if end < 0 else behaviors[start:end]
+    natures = set(re.findall(r'=\s*"([A-Z]+)"', body))
+    assert natures == {"NORMAL", "FIRE", "THUNDER"}, f"服务端的伤害属性取值变了：{sorted(natures)}"
+    damage_fx = _DAMAGE_FX_JS.read_text(encoding="utf-8")
+    for nature in natures:
+        assert f'"{nature}"' in damage_fx, f"damage-fx.js 的分派表必须认识 {nature}"
 
 
 def test_the_damage_fx_offstage_sword_path_starts_outside_the_screen(
@@ -3048,3 +3163,380 @@ def test_the_damage_fx_offstage_sword_path_starts_outside_the_screen(
         f"有来源 ⇒ 起点在画面内：a.x = {onstage['stage']['a']['x']}"
     )
     assert onstage["stage"]["a"]["x"] > offstage["stage"]["a"]["x"], "两者必须真的不同"
+
+
+# ---------------------------------------------------------------------------
+# damage-fx-natures 票 01：属性家族（第一族 = 雷电）
+#
+# 三件事分开钉：
+# 1. **清单 / 静态契约**：两份新脚本进清单、按家族顺序、仍是严格模式普通脚本（上面两条
+#    用例已按 `_DAMAGE_FX_GLOBALS` 覆盖），雷的键块住进 `anim.ini`；
+# 2. **画面模块的形状**：`SgsThunderFX` 与 `SgsDamageFX` 同形（`create` / `gameTiming` /
+#    `DEFAULT_TIMING` / `TIMING_FIELDS` / `TIMING_KEYS`），双时间轴、四条钳制、`bare` 只出
+#    特效、无来源走「天降」；
+# 3. **整屏着色闪**：`.fx-flash` 是着色绝对定位子层，**不是** `#table-shell` 的 `filter`。
+#
+# 行为（层出现 / 天降 / 混批 / 屏闪窗口 / 音效）归烟测 `U-DMG-02*` / `U-DMG-09*`。
+# ---------------------------------------------------------------------------
+
+_THUNDER_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 记录型 2D 上下文：雷的 `create()` / `draw()` 全走真代码，像素不参与断言。 */
+function makeCtx() {
+  const gradient = { addColorStop() {} };
+  return new Proxy({}, {
+    get(target, prop) {
+      if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+      if (prop === "measureText") return () => ({ width: 10 });
+      if (prop in target) return target[prop];
+      const fn = () => {};
+      target[prop] = fn;
+      return fn;
+    },
+    set(target, prop, value) { target[prop] = value; return true; },
+  });
+}
+
+function makeCanvas() {
+  const ctx = makeCtx();
+  return { width: 0, height: 0, getContext: () => ctx };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout,
+  document: {
+    getElementById: () => null,
+    createElement: (tag) => (tag === "canvas" ? makeCanvas() : {
+      style: {}, setAttribute() {}, appendChild() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+
+vm.runInContext(readFileSync(staticPath("fx-thunder.js"), "utf8"), context,
+                { filename: "fx-thunder.js" });
+
+const report = vm.runInContext(`(() => {
+  const th = SgsThunderFX;
+  const dst = { cx: 600, cy: 300, w: 240, h: 160 };
+  const src = { cx: 200, cy: 300, w: 240, h: 160 };
+  const make = (opts) => th.create(document.createElement("canvas"), opts);
+  const game = (id, extra) => make(Object.assign({
+    variant: id, profile: "game", amount: id, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src, dst }, numberKeepOut: 70,
+  }, extra || {}));
+  const shapes = {};
+  const drawn = { sky: "ok", export: "ok" };
+  for (const id of [1, 2, 3, 4]) {
+    const fx = game(id);
+    shapes[id] = {
+      keys: Object.keys(fx).sort(),
+      duration: fx.duration,
+      profile: fx.profile,
+      timing: fx.timing,
+      timeline: fx.timeline,
+      metrics: fx.metrics,
+      stage: { sky: fx.stage.sky, a: fx.stage.a, b: fx.stage.b, u: fx.stage.u },
+    };
+    drawn[id] = "ok";
+    try {
+      for (const t of [0, 0.1, 0.3, 0.6, 1.0, 1.4, 1.7, 1.99]) fx.draw(t);
+    } catch (error) { drawn[id] = String(error && error.stack || error); }
+  }
+  const sky = game(3, { stage: { src: null, dst } });
+  try { for (const t of [0, 0.3, 0.9, 1.6]) sky.draw(t); } catch (error) { drawn.sky = String(error); }
+  const onstage = game(1);
+  const six = make({
+    variant: 4, profile: "game", amount: 6, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src, dst },
+  });
+  const exported = make({ variant: 4, profile: "export", amount: 6, dpr: 1 });
+  try {
+    for (const t of [0, 0.5, 1.0, 2.0, 2.2, 3.0, 5.0]) exported.draw(t);
+  } catch (error) { drawn.export = String(error && error.stack || error); }
+  return JSON.stringify({
+    fields: th.TIMING_FIELDS, keys: th.TIMING_KEYS, defaults: th.DEFAULT_TIMING,
+    maxTotal: th.MAX_TOTAL_MS, prefix: th.TIMING_PREFIX,
+    frozen: [Object.isFrozen(th.TIMING_FIELDS), Object.isFrozen(th.TIMING_KEYS)],
+    shapes,
+    sky: { sky: sky.stage.sky, a: sky.stage.a, src: sky.stage.src },
+    onstage: { sky: onstage.stage.sky, a: onstage.stage.a, b: onstage.stage.b },
+    six: { amount: six.amount, variant: six.variant, timeline: six.timeline },
+    export: { duration: exported.duration, profile: exported.profile, timeline: exported.timeline },
+    clamps: {
+      total: th.gameTiming(1, { damage_fx_thunder_1_total: 9999 }).ms.total,
+      impact: th.gameTiming(2, { damage_fx_thunder_2_total: 400, damage_fx_thunder_2_impact: 900 }).ms.impact,
+      flight: th.gameTiming(3, { damage_fx_thunder_3_impact: 300, damage_fx_thunder_3_flight: 800 }).ms.flight,
+      fade: th.gameTiming(4, { damage_fx_thunder_4_total: 1000, damage_fx_thunder_4_impact: 800, damage_fx_thunder_4_fade: 900 }).ms.fade,
+      flash: th.gameTiming(3, { damage_fx_thunder_3_flash: 2 }).ms.flash,
+      junk: th.gameTiming(2, { damage_fx_thunder_2_total: "abc", damage_fx_thunder_2_flight: -5 }).ms,
+      missing: th.gameTiming(1, { damage_fx_thunder_1_total: 1600 }).ms,
+    },
+    drawn,
+  });
+})()`, context, { filename: "thunder_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def _thunder_probe() -> dict:
+    """跑真 `fx-thunder.js`（node vm + 记录型 2D 上下文），拿回解算 / 实例 / 天降的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "thunder_probe.mjs"
+        probe.write_text(_THUNDER_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"雷电探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def thunder_probe() -> dict:
+    """一次探针跑完，四条用例共用。"""
+    return _thunder_probe()
+
+
+def test_the_thunder_family_scripts_are_listed_next_to_their_sword_twins() -> None:
+    """票 01 §7：清单插两行——`fx-thunder.js` 紧跟 `fx-core.js`、`sfx-thunder.js` 紧跟
+    `sfx.js`，两份都在 `sfx-ui.js` 之前（音效 UI 的声道池要读它们的 `gameTiming`）。"""
+    srcs = _script_srcs()
+    for name in ("fx-thunder.js", "sfx-thunder.js"):
+        assert name in srcs, f"index.html 的脚本清单里必须有 {name}：{srcs}"
+    assert srcs.index("fx-core.js") < srcs.index("fx-thunder.js") < srcs.index("sfx.js"), (
+        "画面家族：fx-core.js → fx-thunder.js，都排在音效组之前"
+    )
+    assert srcs.index("sfx.js") < srcs.index("sfx-thunder.js") < srcs.index("sfx-ui.js"), (
+        "音效家族：sfx.js → sfx-thunder.js → sfx-ui.js（音效 UI 最后）"
+    )
+    assert srcs.index("fx-thunder.js") < srcs.index("sfx-ui.js") < srcs.index("main.js")
+
+
+def test_the_thunder_renderer_keeps_the_sword_renderer_shape(thunder_probe: dict) -> None:
+    """`SgsThunderFX` 与 `SgsDamageFX` 同形：排播层不认第二种形状。
+
+    - 五件导出（`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` /
+      `TIMING_KEYS`）与剑光同名；字段名由 `DEFAULT_TIMING` 生成，`flash` 取代 `split`；
+    - `create()` 返回 `draw / duration / timeline / timing / metrics.*`；
+    - 每档：`duration = total`（秒）、`LAUNCH = impact − flight`、`IMPACT = impact`；
+    - 牌桌档的飘字：字高 ≤ 35% 牌高、包围盒顶 ≥ 体力条下沿 + 2% 牌高（与剑光同一判据）。
+    """
+    probe = thunder_probe
+    assert probe["prefix"] == "damage_fx_thunder_"
+    assert probe["maxTotal"] == 2200
+    assert probe["fields"] == ["total", "flight", "impact", "fade", "strobe", "flash"], (
+        "雷电不需要剑光的 split（劈屏），但要有 flash（整屏着色闪的强度）"
+    )
+    assert probe["keys"] == list(probe["defaults"]), "TIMING_KEYS 必须就是 DEFAULT_TIMING 的键"
+    assert probe["frozen"] == [True, True], "两个导出是冻结数组（读方只许读）"
+    derived: list[str] = []
+    for key in probe["defaults"]:
+        field = key[len(probe["prefix"]):].split("_", 1)[1]
+        if field not in derived:
+            derived.append(field)
+    assert list(probe["fields"]) == derived, (
+        f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(probe['fields'])}"
+    )
+
+    for variant in ("1", "2", "3", "4"):
+        shape = probe["shapes"][variant]
+        for key in (
+            "draw", "duration", "timeline", "timing", "metrics", "stage",
+            "variant", "profile", "amount", "bare", "width", "height",
+        ):
+            assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
+        timing = shape["timing"]
+        timeline = shape["timeline"]
+        assert timing["total"] <= 2200
+        assert shape["duration"] == pytest.approx(timing["total"] / 1000)
+        assert timeline["DURATION"] == pytest.approx(shape["duration"])
+        assert timeline["IMPACT"] == pytest.approx(timing["impact"] / 1000)
+        assert timeline["LAUNCH"] == pytest.approx((timing["impact"] - timing["flight"]) / 1000)
+        assert 0 < timeline["LAUNCH"] < timeline["IMPACT"] < timeline["DURATION"]
+        assert timing["strobe"] >= 0
+        assert 0 < timing["flash"] <= 1
+        metrics = shape["metrics"]
+        assert metrics["number"] > 0
+        assert metrics["numberBox"]["height"] == pytest.approx(metrics["number"])
+        assert metrics["number"] <= 0.35 * metrics["card"]["h"] + 0.05, (
+            "字高不得超过牌高 35%（压住体力读数）"
+        )
+        assert metrics["numberBox"]["top"] >= metrics["keepOut"] + 0.02 * metrics["card"]["h"] - 0.05, (
+            "飘字包围盒的顶边不得压到体力条（留 2% 牌高余量）"
+        )
+        assert probe["drawn"][variant] == "ok", f"{variant} 档逐帧绘制抛错：{probe['drawn'][variant]}"
+
+    assert probe["shapes"]["1"]["timing"]["strobe"] == 0, "1 / 2 档没有整屏闪"
+    assert probe["shapes"]["2"]["timing"]["strobe"] == 0
+    assert probe["shapes"]["3"]["timing"]["strobe"] == 160
+    assert probe["shapes"]["4"]["timing"]["strobe"] == 260
+    # 档位只决定强度，飘字写真实点数（amount ≥ 5 仍播 4 档）。
+    assert probe["six"]["variant"] == 4
+    assert probe["six"]["amount"] == 6, "飘字数字来自服务端 amount，不是档位号"
+
+
+def test_anim_ini_lists_the_thunder_durations_per_variant(thunder_probe: dict) -> None:
+    """雷键块与 `SgsThunderFX.DEFAULT_TIMING` 逐键同值，且四条不变式成立。
+
+    键表**不在测试里写第二份**：`SgsThunderFX.TIMING_KEYS` 是唯一真源，这里只与磁盘上的
+    `anim.ini` 对表（同剑光票 10 的姿态）。
+    """
+    entries = {
+        key: value for key, value in _ini_entries().items()
+        if key.startswith("damage_fx_thunder_")
+    }
+    expected = set(thunder_probe["keys"])
+    assert set(entries) == expected, (
+        f"雷的时长键必须与 fx-thunder 的 DEFAULT_TIMING 一致："
+        f"缺 {sorted(expected - set(entries))}；多 {sorted(set(entries) - expected)}"
+    )
+    values = {key: float(value) for key, value in entries.items()}
+    for variant in _DAMAGE_FX_VARIANTS:
+        total = values[f"damage_fx_thunder_{variant}_total"]
+        flight = values[f"damage_fx_thunder_{variant}_flight"]
+        impact = values[f"damage_fx_thunder_{variant}_impact"]
+        fade = values[f"damage_fx_thunder_{variant}_fade"]
+        assert 0 < impact < total <= 2200, (
+            f"{variant} 点雷：命中必须落在演出之内、总时长 ≤ 2200，实际 impact={impact} / total={total}"
+        )
+        assert 0 < flight < impact, f"{variant} 点雷：雷光必须在命中之前飞到"
+        assert impact + fade <= total, (
+            f"{variant} 点雷：墨痕必须在摘层之前散尽（impact + fade ≤ total），"
+            f"实际 {impact} + {fade} > {total}"
+        )
+    totals = [values[f"damage_fx_thunder_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
+    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), f"四档总时长必须各自独立可改：{totals}"
+    assert values["damage_fx_thunder_3_strobe"] > 0
+    assert values["damage_fx_thunder_4_strobe"] > values["damage_fx_thunder_3_strobe"], (
+        "4 点雷的整屏闪比 3 点更长"
+    )
+    for variant in (3, 4):
+        flash = values[f"damage_fx_thunder_{variant}_flash"]
+        assert 0 < flash <= 1, f"{variant} 点雷的 flash 是 0..1 的强度（不是毫秒）：{flash}"
+    assert {key: float(value) for key, value in entries.items()} == {
+        key: float(value) for key, value in thunder_probe["defaults"].items()
+    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
+
+
+def test_the_thunder_export_chain_keeps_the_material_package_timeline(
+    thunder_probe: dict,
+) -> None:
+    """导出档（profile 缺省）照抄素材页的 5~6 秒链——node 探针逐帧导静帧靠它。
+
+    牌桌档（game）只改**秒数**，不改画法：同一个 `draw(t)`，时间轴上的关键点由 `gameTiming`
+    解出来。这条只钉导出档与四条钳制。
+    """
+    export = thunder_probe["export"]
+    assert export["profile"] == "export"
+    assert export["duration"] == pytest.approx(6.0), "4 档的素材页时长 6.0s"
+    timeline = export["timeline"]
+    assert timeline["DURATION"] == pytest.approx(6.0)
+    assert timeline["LAUNCH"] == pytest.approx(0.84)
+    assert timeline["IMPACT"] == pytest.approx(1.00)
+    assert timeline["NUM_AT"] == pytest.approx(1.24)
+    assert timeline["SKY_AT"] == pytest.approx(2.10)
+    assert timeline["EXPLODE"] == pytest.approx(2.20)
+    assert timeline["NUM2_AT"] == pytest.approx(2.48)
+    assert timeline["STORM_IN"] == pytest.approx(1.04)
+    assert timeline["STORM_OUT1"] == pytest.approx(5.80)
+    assert thunder_probe["drawn"]["export"] == "ok"
+
+    clamps = thunder_probe["clamps"]
+    assert clamps["total"] == 2200, "单档总时长上限 2200（超过会挡住牌桌）"
+    assert clamps["impact"] == 400, "impact ≤ total"
+    assert clamps["flight"] == 300, "flight ≤ impact"
+    assert clamps["fade"] == 200, "impact + fade ≤ total（否则层摘了墨痕还没散）"
+    assert clamps["flash"] == 1, "flash 钳在 0..1"
+    assert clamps["junk"]["total"] == 1500 and clamps["junk"]["flight"] == 115, (
+        "非法值（非数字 / 负数）退回内置默认"
+    )
+    assert clamps["missing"] == {
+        "total": 1600, "flight": 110, "impact": 300, "fade": 700,
+        "strobe": 0, "flash": 0.6,
+    }, "只改一个键，其余退回内置默认"
+
+
+def test_the_thunder_sky_branch_starts_above_the_screen(thunder_probe: dict) -> None:
+    """无来源（`src === null`）⇒「天降」：不画来源雷印，起笔锚在**画面上方**。
+
+    与剑光的"从画面左侧外飞入"是两种形状：剑光的 `a.x < 0`（烟测 `U-DMG-06`），雷的
+    `a.y < 0`（烟测 `U-DMG-09`）。默认 108 牌堆那 2 张【闪电】就是这个形状。
+    """
+    sky = thunder_probe["sky"]
+    assert sky["sky"] is True, "无来源必须走天降分支（stage.sky）"
+    assert sky["src"] is None, "天降不猜来源座位（src 保持 null）"
+    assert sky["a"]["y"] < 0, f"雷从画面上方进入：a.y = {sky['a']['y']}"
+    assert sky["a"]["x"] > 0, f"起笔落在目标牌正上方：a.x = {sky['a']['x']}"
+    assert thunder_probe["drawn"]["sky"] == "ok"
+
+    onstage = thunder_probe["onstage"]
+    assert onstage["sky"] is False, "有来源时不走天降"
+    assert onstage["a"]["y"] > 0 and onstage["b"]["y"] > 0, "两个锚点都在画面内"
+
+
+def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() -> None:
+    """spec §整屏效果：火 / 雷的整屏闪走**着色子层**，不是 `#table-shell` 的 `filter`。
+
+    理由（既有注记）：`filter` 会在表壳上建 containing block，把两个 `position: fixed` 的
+    子孙（`#t-anim-note` z 9999 / `#t-card-preview` z 55）重新锚定。子层必须：
+    绝对定位铺满、不吃指针、`mix-blend-mode: screen`、层级在覆盖画布（19）之上、卡牌预览
+    （55）之下；窗口时长复用该档 `strobe`，强度读 `flash`。
+    """
+    damage_fx = _DAMAGE_FX_JS.read_text(encoding="utf-8")
+    sync = _js_function(damage_fx, "damageFlashSync")
+    assert 'shell.appendChild(damageFlashNode)' in sync, (
+        "着色子层必须挂进 #table-shell（`filter` 之外的合法做法）"
+    )
+    assert "filter" not in sync, "属性闪不许碰表壳的 filter"
+    assert "document.createElement(\"div\")" in sync, "子层是一个普通 div"
+    assert "aria-hidden" in sync, "纯视觉层不进无障碍树"
+    assert "damageFxFlashSpec" in damage_fx
+    spec = _js_function(damage_fx, "damageFxFlashSpec")
+    assert "fx-flash-thunder" in spec and "fx-flash-fire" in spec, (
+        "两族各有一个颜色档（雷 = 冷白、火 = 暖白）"
+    )
+    # 无属性那条链仍然是**唯一**写 `#table-shell` filter 的地方。
+    assert damage_fx.count("shell.style.filter") == 1, (
+        "表壳的 filter 只许灰阶窗口写（属性闪走子层）"
+    )
+    grayscale = _js_function(damage_fx, "damageGrayscaleSync")
+    assert "DAMAGE_FX_GRAYSCALE" in grayscale
+    start = _js_function(damage_fx, "startDamagePlay")
+    assert "damageGrayscalePush(play)" in start and "damageFlashPush(play)" in start, (
+        "两种窗口互斥：NORMAL 走灰阶、属性走着色子层（同一段 if / else）"
+    )
+    assert 'damageFxNatureKind(nature) === "NORMAL"' in start, "互斥判据读属性家族"
+    assert "Math.max(0, Math.min(1, Number(timing.flash) || 0.6))" in start, (
+        "强度读该档 flash（缺省 0.6）"
+    )
+
+    rule = _css_rule(".fx-flash")
+    assert re.search(r"position:\s*absolute", rule), f"子层必须绝对定位：{rule}"
+    assert re.search(r"inset:\s*0\b", rule), f"子层必须铺满表壳：{rule}"
+    assert re.search(r"pointer-events:\s*none", rule), f"子层不能吃指针：{rule}"
+    assert re.search(r"mix-blend-mode:\s*screen", rule), f"子层要透出牌桌：{rule}"
+    assert _layer_z_index(".fx-flash") > _layer_z_index(".damage-fx-layer"), (
+        "子层在覆盖画布之上"
+    )
+    assert _layer_z_index(".fx-flash") < _layer_z_index(".card-preview"), (
+        "子层在卡牌预览（55）之下"
+    )
+    assert _css_rule(".fx-flash-thunder"), "缺冷白档的 CSS"
+    assert _css_rule(".fx-flash-fire"), "缺暖白档的 CSS"
+    assert "rgb(226, 240, 255)" in _css_rule(".fx-flash-thunder"), "雷 = 冷白"
+    assert "rgb(255, 243, 224)" in _css_rule(".fx-flash-fire"), "火 = 暖白"

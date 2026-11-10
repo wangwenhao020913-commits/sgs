@@ -1,9 +1,10 @@
-/* SGS 前端 · 无属性伤害演出的**音效 UI**（票 06 落成、damage-fx 票 08 从 `effects.js` 抽出）：
- * 顶栏「♪」开关、一次性手势解锁、`localStorage` 记忆、三条声道池、`?audiotest=1` 自检。
+/* SGS 前端 · 伤害演出的**音效 UI**（票 06 落成、damage-fx 票 08 从 `effects.js` 抽出；
+ * damage-fx-natures 票 01 改成**按属性模块**分声道池）：
+ * 顶栏「♪」开关、一次性手势解锁、`localStorage` 记忆、模块化声道池、`?audiotest=1` 自检。
  *
  * 为什么单独一份：它不属于"动效层"，而且是**用户以后要自己调音色**的那一块——改音效时
- * 面对的是一个独立文件，不是 1400 行的 `effects.js`（音色表在 `sfx.js` 顶部的 `VOICE`，
- * 仍是唯一的调音处）。
+ * 面对的是一个独立文件，不是 1400 行的 `effects.js`（音色表在 `sfx.js` / `sfx-thunder.js`
+ * 顶部，仍是各自的唯一调音处）。
  *
  * 缝是**单向**的，只有四个调用点，全在 `damage-fx.js` 的伤害排播里（票 09 从 `effects.js`
  * 搬过去）：
@@ -13,19 +14,19 @@
  *   renderDamageFrame → damageSfxTick(play, seconds)
  *   clearDamageFx     → damageSfxStopAll()
  *
- * 本文件只接 `play` 对象（读 `play.variant` / `play.fx.timing` / `play.fx.timeline` /
- * `play.slot`），并且只收自己绑过的声道，**不读**伤害排播层的运行状态。反方向只有两个
- * **常量**：`DAMAGE_FX_CONCURRENCY`（声道数 = 同时在播上限）与 `DAMAGE_FX_MAX_VARIANT`
- * （档位号钳到 1..4）——两者都住在 `damage-fx.js`，且都在**调用时**才解析
- * （`index.html` 里本文件排在它之后：`effects.js` → `damage-fx.js` → … → `sfx.js` →
- * `sfx-ui.js` → `main.js`）。
+ * 本文件只接 `play` 对象（读 `play.nature` / `play.variant` / `play.fx.timing` /
+ * `play.fx.timeline` / `play.slot` / `play.flash`），并且只收自己绑过的声道，**不读**伤害
+ * 排播层的运行状态。反方向只读三个**纯读**口：`DAMAGE_FX_MAX_VARIANT`（档位号钳到 1..4）、
+ * `damageFxCapFor(nature)`（声道池长度 = 该属性的在播上限；本票恒 3）与
+ * `damageFxNatureKind(nature)`（属性归类）——三者都住在 `damage-fx.js`，都只读、都不反向
+ * 驱动排播，且都在**调用时**才解析。
  *
  * 三条硬口径（票 06，逐字未改）：**缺省静音** / **对齐演出时钟** / **没有 `AudioContext`
  * 就静默降级**。下面这一段是它们各自的理由。
  */
 "use strict";
 
-/* ---------------------------------------------- 无属性伤害音效（damage-fx 票 06） */
+/* ---------------------------------------------- 伤害音效（damage-fx 票 06） */
 
 /* 浏览器规定：没有**真实用户手势**之前 `AudioContext` 处于 `suspended`——`new AudioContext()`
  * 不报错、但一点声音都没有。解锁因此必须发生在手势的**同一个 tick** 里（见 main.js:unlockAudio）。
@@ -35,12 +36,12 @@
  *    连 `AudioContext` 都不建（零代价静音），用户点开顶栏「♪」那一下本身就是手势。
  * 2. **对齐时间轴**：`tick(t, v)` 的 `t` 是**演出自己的秒数**（与 `fx.draw(t)` 同一个数），
  *    三个 cue 时刻取该档的 `fx.timeline`（`anim.ini` 解算出来的那一份），不另起墙钟。
- * 3. **没有 `AudioContext` 就静默降级**：`SgsSfx.create()` 的 `start()` 返回 false，画面照旧。
+ * 3. **没有 `AudioContext` 就静默降级**：播放器的 `start()` 返回 false，画面照旧。
  *
- * 为什么是**三条声道**而不是一条：`sfx.js` 的 `tick` 用一个 `lastT` 判"跨过了哪个 cue"，
- * 一条声道同时喂两个时钟就会互相吞 cue；而排播口允许**三条同时开演**（相邻错开 120ms）。
- * 每条声道持有一个**可变**的时间轴对象（`create()` 按引用读它），开演时把该档的三个时刻
- * 写进去——于是声道跨演出复用，也不需要在开演时新建 `AudioContext`。
+ * **按模块分池**（票 01）：每条声道**绑死**一个音效模块（剑 = `SgsSfx`、雷 =
+ * `SgsThunderSfx`），池子按模块分组；一条声道同时喂两个时钟会互相吞 cue，雷与剑因此
+ * 各有各的声道。池长 = 该属性的 cap（`damageFxCapFor`），开演时用 `play.slot` 取声道。
+ * 池**惰性建**：只有页面上加载了该模块、且用户点开「♪」时才建（不一次把三套都建出来）。
  */
 
 /** 开关的持久化键与两个取值（票面 §做法 2：缺省 `'off'`）。 */
@@ -54,12 +55,13 @@ let damageSfxOn = false;
 /** 一次性手势解锁是否已经发生过（`main.js` 的 `pointerdown` 只算一次）。 */
 let damageSfxUnlocked = false;
 
-/** 声道池：`[{player, timeline, live}]`，长度 = 同时开演上限（3）。
+/** 声道池：**按音效模块分组** `{SgsSfx: [{player, timeline, live}], SgsThunderSfx: [...]}`。
  *
  * `live` = 这个播放器真的建出了 `AudioContext`（`start()` 返回 true）；false 的声道此后
  * 不再喂 `tick`——没有 `AudioContext` 的浏览器上整套音效就是**不存在**，不报错。
+ * 池子惰性建（`damageSfxEnsureModules`）：只有加载了该模块、且用户点开「♪」时才建。
  */
-const damageSfxLanes = [];
+const damageSfxLanes = {};
 
 /** 已经绑上声道的演出（`damageSfxStart` 记下、`damageSfxStop` 摘除）。
  *
@@ -116,52 +118,116 @@ function damageSfxSyncButton() {
   else button.classList.remove("on");
 }
 
-/** 声道建出来时的占位时间轴：用**1 点档的游戏时间轴**（每次开演都会按该档重写这三个数）。 */
-function damageSfxBaseTimeline() {
-  const api = window.SgsDamageFX;
+/** 属性 → **音效引擎 + 它的画面模块**（声道池按模块分组；时间轴从画面模块的
+ *  `gameTiming` 取）。这是音效这一侧唯一的查表处。
+ *
+ * 为什么不复用 `damageFxRendererFor`：画面模块名（`SgsThunderFX`）与音效模块名
+ * （`SgsThunderSfx`）是两套全局名，映射只能在音效层说。属性归类仍走 `damageFxNatureKind`
+ * （`damage-fx.js` 的单一判据，调用时解析）。
+ */
+function damageSfxEngineFor(nature) {
+  const kind = typeof damageFxNatureKind === "function" ? damageFxNatureKind(nature) : "NORMAL";
+  if (kind === "THUNDER") {
+    return {
+      key: "SgsThunderSfx", nature: kind,
+      sfx: window.SgsThunderSfx || null, fx: window.SgsThunderFX || null,
+    };
+  }
+  if (kind === "FIRE") {
+    return {
+      key: "SgsFireSfx", nature: kind,
+      sfx: window.SgsFireSfx || null, fx: window.SgsFireFX || null,
+    };
+  }
+  return {
+    key: "SgsSfx", nature: "NORMAL",
+    sfx: window.SgsSfx || null, fx: window.SgsDamageFX || null,
+  };
+}
+
+/** 声道建出来时的占位时间轴：用**该画面的 1 点档**（每次开演都会按该档重写这些数）。
+ *
+ * 画面模块缺了（只加载了音效）⇒ 空表；`voice` 仍在每帧给档位，声音不会因此消失。
+ */
+function damageSfxBaseTimeline(fxApi) {
+  const api = fxApi || null;
   if (api && typeof api.gameTiming === "function") return api.gameTiming(1).timeline;
   return (api && api.TIMELINE) || {};
 }
 
-/** 一条声道取一份**可变**的时间轴副本：`create()` 捕获的是对象引用，开演时原地改这三个数。 */
+/** 一条声道取一份**可变**的时间轴副本：`create()` 捕获的是对象引用，开演时原地改写。
+ *
+ * `SKY_AT` / `EXPLODE` / `DURATION` 只有雷电用（4 档的天雷与爆炸）；剑的声道读不到它们
+ * 也没有关系（`SgsSfx` 的 cue 只认前三个）。
+ */
 function damageSfxTimeline(source) {
   const timeline = source || {};
   return {
     CHARGE: Number(timeline.CHARGE) || 0,
     LAUNCH: Number(timeline.LAUNCH) || 0,
     IMPACT: Number(timeline.IMPACT) || 0,
+    SKY_AT: Number(timeline.SKY_AT) || 0,
+    EXPLODE: Number(timeline.EXPLODE) || 0,
+    DURATION: Number(timeline.DURATION) || 0,
   };
 }
 
-/** 建声道并**立刻** `start()`（`sfx.js` 内部会 `ctx.resume()`）。
+/** 给**一个**已加载的音效模块建声道池（惰性：没有该模块就一条都不建）。
+ *
+ * 声道数 = 该属性的 cap（`damageFxCapFor`，本票恒 3；票 02 改成按键读 1–8）。
+ * 每条声道持有一份**可变**的时间轴（`create()` 按引用读它），开演时把该档的 cue 时刻
+ * 写进去——于是声道跨演出复用，也不需要在开演时新建 `AudioContext`。
  *
  * ⚠️ 只能在**真实用户手势的同一个 tick** 里调用：iOS / Safari 在 `fetch` 回调、定时器、
  * `requestAnimationFrame` 里 resume 一律不生效（票面 §别踩的坑），声音会一直挂着不出。
  * 没有 `AudioContext`（老浏览器 / 被策略禁用）时 `start()` 返回 false ⇒ 静默降级。
- * 返回真正出得了声的声道数。
  */
-function damageSfxEnsureLanes() {
-  const api = window.SgsSfx;
-  if (!api || typeof api.create !== "function") return 0;
-  const base = damageSfxBaseTimeline();
-  let live = 0;
-  while (damageSfxLanes.length < DAMAGE_FX_CONCURRENCY) {
+function damageSfxEnsureLanes(engine) {
+  if (!engine || !engine.sfx || typeof engine.sfx.create !== "function") return [];
+  const key = engine.key;
+  if (!damageSfxLanes[key]) damageSfxLanes[key] = [];
+  const lanes = damageSfxLanes[key];
+  const cap = typeof damageFxCapFor === "function"
+    ? damageFxCapFor(engine.nature)
+    : DAMAGE_FX_CONCURRENCY;
+  const base = damageSfxBaseTimeline(engine.fx);
+  while (lanes.length < cap) {
     const timeline = damageSfxTimeline(base);
-    const player = api.create(timeline);
+    const player = engine.sfx.create(timeline);
     if (!player || typeof player.tick !== "function") break;
     const started = typeof player.start === "function" ? player.start() : false;
-    damageSfxLanes.push({ player, timeline, live: started === true });
-    if (started === true) live += 1;
+    lanes.push({ player, timeline, live: started === true });
   }
   damageSfxMute(!damageSfxOn);
+  return lanes;
+}
+
+/** 给**页面上已经加载**的音效模块各建一套声道（剑 / 雷；火还没有）。
+ *
+ * 为什么要全部建：`AudioContext` 必须在手势的同一个 tick 里 resume。若等到第一次伤害才建，
+ * 那时距用户点开「♪」已经隔了很久（Safari 会再次挂起），雷电就永远不出声。这里只给
+ * **存在的**模块建池——"三套"里缺谁就跳过谁，不会凭空建出 `SgsFireSfx`。
+ * 返回真正出得了声的声道数。
+ */
+function damageSfxEnsureModules() {
+  let live = 0;
+  for (const nature of ["NORMAL", "THUNDER", "FIRE"]) {
+    const engine = damageSfxEngineFor(nature);
+    if (!engine.sfx) continue;
+    for (const lane of damageSfxEnsureLanes(engine)) {
+      if (lane.live) live += 1;
+    }
+  }
   return live;
 }
 
 /** 把开关灌到所有声道上（没有声道时只是空转：状态仍由 `damageSfxOn` 记着）。 */
 function damageSfxMute(muted) {
-  for (const lane of damageSfxLanes) {
-    if (!lane || !lane.player || typeof lane.player.mute !== "function") continue;
-    lane.player.mute(Boolean(muted));
+  for (const key of Object.keys(damageSfxLanes)) {
+    for (const lane of damageSfxLanes[key]) {
+      if (!lane || !lane.player || typeof lane.player.mute !== "function") continue;
+      lane.player.mute(Boolean(muted));
+    }
   }
 }
 
@@ -182,13 +248,13 @@ function damageSfxUnlock() {
   if (damageSfxUnlocked) return false;
   damageSfxUnlocked = true;
   if (!damageSfxOn) return false;
-  return damageSfxEnsureLanes() > 0;
+  return damageSfxEnsureModules() > 0;
 }
 
 /** 开 / 关 + 记忆 + 刷按钮；开的时候顺手建声道（这次点击本身就是手势）。 */
 function damageSfxSetEnabled(on) {
   damageSfxOn = Boolean(on);
-  if (damageSfxOn) damageSfxEnsureLanes();
+  if (damageSfxOn) damageSfxEnsureModules();
   damageSfxMute(!damageSfxOn);
   damageSfxRemember(damageSfxOn);
   damageSfxSyncButton();
@@ -200,11 +266,12 @@ function damageSfxToggle() {
   return damageSfxSetEnabled(!damageSfxOn);
 }
 
-/** `sfx.js` 的 `tick(t, v)` 要的档位参数（形状与参考实现的 `SgsDamageFX.VARIANTS[id]` 一致）。
+/** 音效模块的 `tick(t, v)` 要的档位参数（剑的 `SgsSfx` 要 `dmg / flight / strobe /
+ *  split`，雷的 `SgsThunderSfx` 只要 `dmg`，`flash` 留给将来的逐帧音量）。
  *
- * 注意 `fx.variant` 只是**档位号**（1..4），真正的时长在 `fx.timing` —— 那是票 04 从
- * `anim.ini` 解算出来的毫秒表。`whoosh` 的飞行时长、`strobe` / `split` 的窗口都读它，
- * 不在这里另写一份数字（否则调 ini 之后声音与画面就分家了）。
+ * 注意 `fx.variant` 只是**档位号**（1..4），真正的时长在 `fx.timing` —— 那是 `anim.ini`
+ * 解算出来的毫秒表。`whoosh` 的飞行时长、`strobe` / `split` 的窗口都读它，不在这里另写
+ * 一份数字（否则调 ini 之后声音与画面就分家了）。
  */
 function damageSfxVoice(play) {
   const timing = (play.fx && play.fx.timing) || {};
@@ -213,22 +280,31 @@ function damageSfxVoice(play) {
     flight: Math.max(0, Number(timing.flight) || 0) / 1000,
     strobe: Math.max(0, Number(timing.strobe) || 0) / 1000,
     split: Math.max(0, Number(timing.split) || 0),
+    flash: Math.max(0, Math.min(1, Number(timing.flash) || 0.6)),
   };
 }
 
-/** 一条演出开演：把**这一档**的三个时刻写进它那条声道，并 `start()` 重置 cue 游标。
+/** 一条演出开演：按 `play.nature` 取该模块的声道池，把**这一档**的 cue 时刻写进去，
+ *  并 `start()` 重置 cue 游标。
  *
- * `play.slot` 是离屏舞台槽（在播期间唯一，0..2），正好一条声道一个槽——三条并发各有各的
- * 时钟，互不吞 cue。返回占用的声道（没声道 / 已关时 null）。
+ * `play.slot` 是离屏舞台槽（在播期间唯一），正好一条声道一个槽——并发各有各的时钟，
+ * 互不吞 cue。**不在这里建池**：池只在手势里建（开关关着 / 没解锁时这里是 null，不建
+ * `AudioContext`）。返回占用的声道（没声道 / 已关时 null）。
  */
 function damageSfxStart(play) {
-  if (!play || !damageSfxLanes.length) return null;
-  const lane = damageSfxLanes[play.slot];
+  if (!play) return null;
+  const engine = damageSfxEngineFor(play.nature);
+  const lanes = damageSfxLanes[engine.key];
+  if (!lanes || !lanes.length) return null;
+  const lane = lanes[play.slot];
   if (!lane || !lane.live) return null;
   const timeline = damageSfxTimeline(play.fx && play.fx.timeline);
   lane.timeline.CHARGE = timeline.CHARGE;
   lane.timeline.LAUNCH = timeline.LAUNCH;
   lane.timeline.IMPACT = timeline.IMPACT;
+  lane.timeline.SKY_AT = timeline.SKY_AT;
+  lane.timeline.EXPLODE = timeline.EXPLODE;
+  lane.timeline.DURATION = timeline.DURATION;
   play.sfxVoice = damageSfxVoice(play);
   // `start()` 里会重置 `lastT`：本段从 0 重新判 cue（声道是跨演出复用的）。
   if (typeof lane.player.start === "function") lane.player.start();

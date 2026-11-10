@@ -1,5 +1,6 @@
-/* SGS 前端 · 无属性伤害演出的**排播 + 座位几何 + 画布生命周期**（damage-fx 票 05 / 06，
- * 票 09 从 `effects.js` 抽出）：队列 → 排播闸门 → 开演 → 每帧合成 → 到点摘层。
+/* SGS 前端 · 伤害演出的**排播 + 座位几何 + 画布生命周期**（damage-fx 票 05 / 06，
+ * 票 09 从 `effects.js` 抽出；damage-fx-natures 票 01 接进**属性家族**）：队列 → 排播闸门
+ * → 开演 → 每帧合成 → 到点摘层。
  *
  * 为什么单独一份（票 09 的切口）：这一段原本是 `effects.js` 的尾巴（~590 行），与动效层
  * **双向耦合**，所以票 08 先搬走音效、这一票再搬排播——拆完 `effects.js` 只剩动效层。
@@ -18,48 +19,77 @@
  * 音效那侧同样单向：本文件在四个点调 `sfx-ui.js`（开演 / 收尾 / 每帧 / 清场），它只接
  * `play` 对象，不读这里的在播表。
  *
- * 硬口径（spec §演出口径，票面要求逐字不变）：相邻开演错开 120ms、同时在播上限 3 条、
- * 超出丢队列尾；只演无属性伤害（`null` ≡ 无属性）；摘层用 `anim.ini` 的 `total` 定时；
- * 3 / 4 点档的黑白屏闪窗口 = 该档 `strobe` 的时长。
+ * **属性家族**（damage-fx-natures 票 01）：`event.nature` 穿透到 `plan` / `play`，是下游
+ * **唯一**判据——`damageFxRendererFor(nature)` 选画面模块，`damageFxTiming(nature, variant)`
+ * 选 `anim.ini` 的字段表，`sfx-ui.js` 按 `play.nature` 选音效模块。查表只此一处。
+ *
+ * 硬口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 3 条（`damageFxCapFor` 是
+ * 唯一的 cap 口，票 02 改成按键读）、超出丢队列尾；`null` / `undefined` ≡ 无属性；
+ * 摘层用 `anim.ini` 的 `total` 定时；无属性 3 / 4 点档的黑白屏闪窗口 = 该档 `strobe`，
+ * 属性伤害（火 / 雷）改挂着色子层 `.fx-flash`（**不是** `filter`，见 `damageFxFlashSpec`）。
  */
 "use strict";
 
-/* -------------------------------------------------- 无属性伤害演出（damage-fx 票 04） */
+/* -------------------------------------------------- 伤害演出（damage-fx 票 04；票 01 起按属性分家族） */
 
-/** 一档演出要读的六个量；键名 = `damage_fx_<档>_<字段>`（见 `anim.ini` 的那 19 行）。
+/* -------------------------------------------------- 属性 → 伤害演出家族 */
+
+/** 属性归一成**演出家族**：`NORMAL` / `THUNDER` / `FIRE`。
  *
- * 每档四个时长（`total` / `flight` / `impact` / `fade`）**各自独立**，改 4 点档不会牵动
- * 1~3 点档；`strobe` 只有 3 / 4 点有，`split` 只有 4 点有。
- *
- * **字段名名单不在这份文件里维护**（票 10）：真源是 `fx-core.js` 的 `DEFAULT_TIMING`，它导出
- * `SgsDamageFX.TIMING_FIELDS`（由那张表的键生成）。早先这里抄了第二份清单，加字段时漏改一处
- * **不报错**、只是静默不生效——现在只剩一处。
- *
- * **调用时取**：`index.html` 里 `fx-core.js` 排在 `damage-fx.js` **之后**（脚本清单第 24 位
- * vs 第 10 位），文件顶层此时还没有 `SgsDamageFX`；`damageFxTiming` 是播放器运行时调的，那时
- * 两份都在。
+ * `null` / `undefined`（牌面没声明）与显式 `"NORMAL"` 都是无属性；未登记的属性按
+ * spec §2 **fail-open** 回落无属性（宁可演成剑光，也不要让一次伤害在牌桌上凭空消失）。
+ * 这一个函数是"哪个家族"的唯一判据——画面分派、字段表、着色闪、音效都从它派生。
  */
-function damageFxTimingFields() {
-  const api = window.SgsDamageFX;
+function damageFxNatureKind(nature) {
+  if (nature === "THUNDER") return "THUNDER";
+  if (nature === "FIRE") return "FIRE";
+  return "NORMAL";
+}
+
+/** 属性 → 画面模块（**分派查表只许写在这一处**，票面 §2）。
+ *
+ * - `THUNDER` → `SgsThunderFX`（票 01 落地）；
+ * - `FIRE` → `SgsFireFX`（票 03 落地；本票还没有这份脚本 ⇒ 回落剑光，但属性闸门本票
+ *   仍不放行 FIRE，见 `damageFxNaturePlayable`）；
+ * - `NORMAL` / 未登记 → `SgsDamageFX`。
+ *
+ * 缺模块时一律回落剑光（fail-open）：模块没加载时宁可演错家族，也不静默不播。
+ */
+function damageFxRendererFor(nature) {
+  const kind = damageFxNatureKind(nature);
+  if (kind === "THUNDER") return window.SgsThunderFX || window.SgsDamageFX || null;
+  if (kind === "FIRE") return window.SgsFireFX || window.SgsDamageFX || null;
+  return window.SgsDamageFX || null;
+}
+
+/** 一档演出要读的字段名；键名 = `<模块的 TIMING_PREFIX><档>_<字段>`（见 `anim.ini`）。
+ *
+ * **字段名名单不在这份文件里维护**：真源是各画面模块的 `DEFAULT_TIMING`，它导出
+ * `TIMING_FIELDS`（由那张表的键生成）。剑光是 `total / flight / impact / fade / strobe /
+ * split`，雷电是 `total / flight / impact / fade / strobe / flash`——由模块自己说。
+ *
+ * **调用时取**：`index.html` 里两个画面模块都排在 `damage-fx.js` **之后**，文件顶层此时
+ * 还没有 `SgsDamageFX` / `SgsThunderFX`；本函数是播放器运行时调的，那时都在。
+ */
+function damageFxTimingFields(nature) {
+  const api = damageFxRendererFor(nature);
   return (api && api.TIMING_FIELDS) || [];
 }
 
-/** 从生效中的 `anim.ini` 表取**某一档**的时长（毫秒），原样交给 `SgsDamageFX`。
+/** 从生效中的 `anim.ini` 表取**某一档**的时长（毫秒），原样交给画面模块的 `create()`。
  *
- * **这里不给兜底值、也不钳制**：内置默认（`SgsDamageFX.DEFAULT_TIMING`）与四条钳制
- * （`total ≤ 2200` / `flight ≤ impact ≤ total` / `impact + fade ≤ total`）都住在
- * `fx-core.js` —— 它是时间轴语义的唯一拥有者，前端这一侧只负责"把用户改的数字搬过去"。
- * 缺键 ⇒ 不放进返回的表 ⇒ fx-core 退默认（`anim.ini` 删一行不该让页面报错）。
- *
- * 票 05 的播放器把它交给 `SgsDamageFX.create(canvas, {variant, profile: "game", timing})`；
- * 票 06 的音效读 fx-core 解算后的同一份 `timeline`，两条时钟因此不会漂。
+ * **这里不给兜底值、也不钳制**：内置默认（各模块的 `DEFAULT_TIMING`）与钳制都在画面模块
+ * 内部——它是时间轴语义的唯一拥有者，前端这一侧只负责"把用户改的数字搬过去"。
+ * 缺键 ⇒ 不放进返回的表 ⇒ 画面模块退默认（`anim.ini` 删一行不该让页面报错）。
  */
-function damageFxTiming(variant) {
+function damageFxTiming(nature, variant) {
   const timing = {};
   if (typeof animTiming !== "function") return timing;
+  const api = damageFxRendererFor(nature);
+  const prefix = (api && api.TIMING_PREFIX) || "damage_fx_";
   const id = Math.max(1, Math.min(4, Math.round(Number(variant) || 1)));
-  for (const field of damageFxTimingFields()) {
-    const key = `damage_fx_${id}_${field}`;
+  for (const field of damageFxTimingFields(nature)) {
+    const key = `${prefix}${id}_${field}`;
     const value = animTiming(key);
     if (value !== undefined && value !== null && Number.isFinite(Number(value))) {
       timing[key] = Number(value);
@@ -68,28 +98,36 @@ function damageFxTiming(variant) {
   return timing;
 }
 
-/* ------------------------------------ 无属性伤害演出（damage-fx 票 05）：排播 + 座位映射 */
+/* ------------------------------------ 伤害演出（damage-fx 票 05）：排播 + 座位映射 */
 
 /** 同一批里多条伤害的排播口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 3 条。 */
 const DAMAGE_FX_STAGGER_MS = 120;
 const DAMAGE_FX_CONCURRENCY = 3;
 
-/** 唯一会播的属性名。 */
+/** 无属性的规范名（服务端显式声明时用；`null` / 缺字段同样是它）。 */
 const DAMAGE_FX_NATURE = "NORMAL";
 
-/** 这一条伤害该不该演剑光：**只挂无属性**，`FIRE` / `THUNDER` 一律不播（留给将来的 effort）。
+/** 这一条伤害该不该演：**只挡还没接的家族**。
+ *
+ * 票 01 口径：`THUNDER` 放行；`FIRE` 的闸门留给票 03（票面 §验收 5 明写"FIRE 事件本票
+ * 仍不播"）；`null` / `undefined` / `"NORMAL"` / 未登记属性一律视同无属性。
  *
  * **`null` / 缺字段 = 无属性**，三层文档同一句话：
  * - `game.py:note_damage`：「`None` = 牌面没声明，**等同无属性**」；
  * - `projection.py:damage_events_after`：「缺声明（拼点类帧）保持 `None`，与"无属性"同义」；
  * - `active.py:_quhu_burn`：「造成 1 点伤害（无渠道牌、无属性）」并显式写 `"nature": None`。
- *
- * 评审修复：早先这里是 `event.nature !== DAMAGE_FX_NATURE` 就丢，`null !== "NORMAL"` 于是把
- * 【驱虎】拼点那 1 点**无属性**伤害一起丢了——那正是本功能最常见的入口之一。
  */
 function damageFxNaturePlayable(nature) {
-  if (nature === null || nature === undefined) return true;
-  return nature === DAMAGE_FX_NATURE;
+  return damageFxNatureKind(nature) !== "FIRE";
+}
+
+/** 某属性自己的同时在播上限（spec §多目标：1–8，缺省 3）。
+ *
+ * 本票仍是常量 3——但**只有一个 cap 口**：排播闸门与 `sfx-ui.js` 的声道池都读它，
+ * 票 02 只改这里的返回、不动调用点。
+ */
+function damageFxCapFor(nature) {
+  return DAMAGE_FX_CONCURRENCY;
 }
 
 /** 档位封顶：`amount ≥ 5` 按 4 档演——档位只决定强度，数字照旧是服务端给的真实值。 */
@@ -115,9 +153,17 @@ let damageCanvas = null;
  *  **不是**每来一次伤害就新建一张（票 05 §2：一个层里复用 canvas）。 */
 const damageStagePool = [];
 
-/** 正在黑白屏闪窗口里的演出（可能多条重叠）；非空 ⇒ 表壳挂 `filter`。 */
+/** 正在黑白屏闪窗口里的演出（可能多条重叠）；非空 ⇒ 表壳挂 `filter`。**只挂无属性**：
+ *  火 / 雷的整屏闪走 `damageFlashPlays` 的着色子层，两者互斥（spec §整屏效果）。 */
 const damageGrayPlays = new Set();
 let damageGrayOn = false;
+
+/** 正在**着色闪**窗口里的属性伤害（雷 = 冷白、火 = 暖白）；非空 ⇒ 表壳里挂一个 `.fx-flash`
+ *  绝对定位子层。**不是** `filter`：`filter` 会在表壳上建 containing block，把两个
+ *  `position: fixed` 的子孙重新锚定（见 `damageGrayscaleSync` 的注记）。 */
+const damageFlashPlays = new Set();
+/** 那个子层（惰性建、窗口空时摘掉；跨窗口复用不划算——摘掉更符合"窗口结束被移除"）。 */
+let damageFlashNode = null;
 
 let damageStaggerTimer = null;
 let damageFrame = null;
@@ -238,6 +284,8 @@ function damageFxPlanFor(event) {
   const variant = Math.max(1, Math.min(DAMAGE_FX_MAX_VARIANT, damage));
   return {
     src, dst, variant, amount: damage,
+    // 票 01：属性穿透的第一站（event → plan）。下游只读 `plan.nature`，不再回头读 `event`。
+    nature: event.nature,
     // 版式作废判据要重量的**两张牌**（`damageDropStalePlays` 读它）：`src` 为 null =
     // 无来源 / 画面外进场——那块坐标是按中剑方矩组合成的，与版式无关，故只比中剑方。
     keys: { dst: damageFxBoxKey(dst), src: srcSeat !== null ? damageFxBoxKey(src) : null },
@@ -248,13 +296,26 @@ function damageFxPlanFor(event) {
   };
 }
 
-/** 找一个空闲的离屏槽（0..2）。同时在播上限由排播闸门保证，故必有一个空槽。 */
+/** 一条伤害交给画面模块的座位舞台（票 01 §3「无来源天降」）。
+ *
+ * 雷电**没有来源**时传 `src: null`：雷从天而降，而不是沿用剑光"来源整块挪到画面外
+ * 200 单位"的合成矩形（那条合成只对"从左侧飞入的剑光"有意义）。其余家族原样交两块
+ * 矩形——剑光那条链一个数都不动。
+ */
+function damageFxStageFor(nature, plan) {
+  if (damageFxNatureKind(nature) === "THUNDER" && plan.sourceSeat === null) {
+    return { src: null, dst: plan.dst };
+  }
+  return { src: plan.src, dst: plan.dst };
+}
+
+/** 找一个空闲的离屏槽（最小空闲号）。在播上限由排播闸门保证，故必有一个空槽；
+ *  从 0 往上找（票 02：槽位不再假定"最多 3 个"，随在播数自然增长）。 */
 function damageFxSlot() {
   const used = new Set(damagePlays.map((play) => play.slot));
-  for (let slot = 0; slot < DAMAGE_FX_CONCURRENCY; slot += 1) {
-    if (!used.has(slot)) return slot;
-  }
-  return 0;
+  let slot = 0;
+  while (used.has(slot)) slot += 1;
+  return slot;
 }
 
 /** 覆盖层那张唯一的 canvas：按层的大小定尺寸，**复用同一个节点**（票 05 §2）。 */
@@ -298,7 +359,79 @@ function damageFxMark(layer, play = null) {
   // 剑光航线的**起点 x**（相对覆盖层左沿、CSS px）：`source == null` 时整块在画面外，
   // 故 x < 0 —— "从画面外飞入"因此有了几何读法，不再只有代码路径。
   const stage = play && play.fx ? play.fx.stage : null;
-  if (stage && stage.a) layer.setAttribute("data-damage-fx-sword-x", stage.a.x.toFixed(1));
+  if (!stage) return;
+  // 票 01：家族 / 天降分支 / 起笔点（雷的起笔在画面上方，与剑光的"左侧画面外"是两回事）。
+  layer.setAttribute("data-damage-fx-nature", damageFxNatureKind(play.nature));
+  layer.setAttribute("data-damage-fx-sky", stage.sky ? "1" : "");
+  if (stage.a) {
+    layer.setAttribute("data-damage-fx-bolt-x", Number(stage.a.x).toFixed(1));
+    layer.setAttribute("data-damage-fx-bolt-y", Number(stage.a.y).toFixed(1));
+    // `sword-x` 是剑光那条链的既有读数：只有"从画面左侧外飞入"的剑光才写（天降不写，
+    // 否则验收会把它误读成"剑光又从左边进来了"）。
+    layer.setAttribute(
+      "data-damage-fx-sword-x",
+      stage.sky ? "" : Number(stage.a.x).toFixed(1),
+    );
+  }
+}
+
+/** 属性 → 着色闪的**颜色档**（spec §整屏效果：雷 = 冷白、火 = 暖白）。无属性返回 `null`。
+ *
+ * 颜色本身住在 `style.css`（`.fx-flash-thunder` / `.fx-flash-fire`）——这份 JS 只选档、
+ * 不写色值：一个色值一处真源，烟测读 class、静态测试读 CSS。
+ */
+function damageFxFlashSpec(nature) {
+  const kind = damageFxNatureKind(nature);
+  if (kind === "THUNDER") return { className: "fx-flash-thunder" };
+  if (kind === "FIRE") return { className: "fx-flash-fire" };
+  return null;
+}
+
+/** 着色闪子层的同步：有在闪的属性伤害 ⇒ 在表壳里建 / 更新 `.fx-flash`；空了 ⇒ 摘掉。
+ *
+ * 强度取在闪几条里最大的 `flash`（0..1，缺省 0.6），颜色按先到的那一族定（雷 / 火窗口
+ * 重叠的概率极低：两条不同属性的伤害落在同一个 0.16~0.26s 窗口里才会撞上）。
+ * 子层的 `z-index`（20）与 `mix-blend-mode: screen` 住在 `style.css`：高于覆盖画布（19）、
+ * 低于 `.card-preview`（55），且**不是** `filter`——表壳的 containing block 不能被建出来。
+ */
+function damageFlashSync() {
+  if (!damageFlashPlays.size) {
+    if (damageFlashNode && damageFlashNode.parentNode) {
+      damageFlashNode.parentNode.removeChild(damageFlashNode);
+    }
+    damageFlashNode = null;
+    return;
+  }
+  const shell = $("table-shell");
+  if (!shell || typeof shell.appendChild !== "function") return;
+  let strength = 0;
+  let className = "";
+  for (const play of damageFlashPlays) {
+    const spec = damageFxFlashSpec(play.nature);
+    if (!spec) continue;
+    if (!className) className = `fx-flash ${spec.className}`;
+    const flash = Number(play.flash);
+    if (Number.isFinite(flash)) strength = Math.max(strength, Math.max(0, Math.min(1, flash)));
+  }
+  if (!className) return;
+  if (!damageFlashNode) {
+    damageFlashNode = document.createElement("div");
+    damageFlashNode.setAttribute("aria-hidden", "true");
+    shell.appendChild(damageFlashNode);
+  }
+  damageFlashNode.className = className;
+  if (damageFlashNode.style) damageFlashNode.style.opacity = String(strength);
+}
+
+function damageFlashPush(play) {
+  if (!play || !(play.strobeMs > 0)) return;
+  damageFlashPlays.add(play);
+  damageFlashSync();
+}
+
+function damageFlashPop(play) {
+  if (!damageFlashPlays.delete(play)) return;
+  damageFlashSync();
 }
 
 /** 表壳的灰阶滤镜：非空集合 ⇒ 挂上（3 / 4 点档的"整屏转黑白"，票 05 R2）。
@@ -331,17 +464,22 @@ function damageGrayscalePop(play) {
   damageGrayscaleSync();
 }
 
-/** 一条伤害开演：取离屏槽 → `SgsDamageFX.create()`（game 档 + 座位矩形 + 真实值 + bare）→ 定时摘层。
+/** 一条伤害开演：取离屏槽 → 按属性选画面模块 → `create()`（game 档 + 座位矩形 + 真实值
+ *  + bare）→ 定时摘层。
  *
  * 摘层时刻用 `create()` 返回的 `duration`（= `anim.ini` 的 `total`）**定时**，不靠 rAF
  * 自然停、也不用 `draw(t × k)` 压时间：音效是另一条时钟（票 06），两边必须读同一份 timeline。
+ *
+ * 票 01：`nature` 在 `plan` 里；这里把它写进 `play.nature`——下游（音效 / 着色闪 / 读数）
+ * **只读 `play.nature`**，不回头读 `event`。画面模块与字段表都由 `damageFxRendererFor` 派生。
  */
 function startDamagePlay(event) {
-  const api = window.SgsDamageFX || null;
-  if (!api || typeof api.create !== "function") return null;
   const layer = damageFxLayer();
   const plan = damageFxPlanFor(event);
   if (!layer || !plan) return null;
+  const nature = plan.nature;
+  const api = damageFxRendererFor(nature);
+  if (!api || typeof api.create !== "function") return null;
   const slot = damageFxSlot();
   while (damageStagePool.length <= slot) damageStagePool.push(document.createElement("canvas"));
   const stageCanvas = damageStagePool[slot];
@@ -351,9 +489,11 @@ function startDamagePlay(event) {
   const fx = api.create(stageCanvas, {
     variant: plan.variant,
     profile: "game",
-    timing: damageFxTiming(plan.variant),
+    // 字段表按属性取（剑光 19 键 / 雷电 20 键），读的是同一份 anim.ini。
+    timing: damageFxTiming(nature, plan.variant),
     amount: plan.amount,
-    stage: { src: plan.src, dst: plan.dst },
+    // 雷电无来源时传 `src: null`（天降）；其余家族原样交两块矩形（见 `damageFxStageFor`）。
+    stage: damageFxStageFor(nature, plan),
     // 飘字不许压到中剑方的体力条：硬线 = `.hp-bar` 的下沿（票 05 R4，DOM 真值）。
     numberKeepOut: plan.keepOut,
     // 画布按覆盖层的实际尺寸建、内部 1:1 合成（票 05 R2：不再整块缩小）。
@@ -367,10 +507,14 @@ function startDamagePlay(event) {
   const timing = fx.timing || {};
   const impactMs = Math.max(0, Number(timeline.IMPACT) || 0) * 1000;
   const strobeMs = Math.max(0, Number(timing.strobe) || 0);
+  // 整屏闪的强度（0..1）：属性家族读 `flash`（缺省 0.6），无属性走灰阶、用不到它。
+  const flash = Math.max(0, Math.min(1, Number(timing.flash) || 0.6));
   const play = {
     seq: Number(event.seq),
     variant: plan.variant,
     amount: plan.amount,
+    // 票 01：属性穿透的第二站（plan → play）。下游的**唯一**判据。
+    nature,
     plan,
     fx,
     canvas: stageCanvas,
@@ -378,9 +522,12 @@ function startDamagePlay(event) {
     startedAt: stageNow(),
     duration: Math.max(0, Number(fx.duration) || 0) * 1000,
     strobeMs,
+    flash,
     timer: null,
     grayOnTimer: null,
     grayOffTimer: null,
+    flashOnTimer: null,
+    flashOffTimer: null,
     // 票 06：这条演出占用的音效声道与它那一段的档位参数（`damageSfxStart` 里填）。
     sfxLane: null,
     sfxVoice: null,
@@ -393,15 +540,27 @@ function startDamagePlay(event) {
   play.timer = window.setTimeout(() => finishDamagePlay(play), play.duration);
   damageFxMark(layer, play);
   if (strobeMs > 0) {
-    // 黑白屏闪的窗口：命中起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
-    play.grayOnTimer = window.setTimeout(() => {
-      play.grayOnTimer = null;
-      damageGrayscalePush(play);
-    }, impactMs);
-    play.grayOffTimer = window.setTimeout(() => {
-      play.grayOffTimer = null;
-      damageGrayscalePop(play);
-    }, impactMs + strobeMs);
+    // 屏闪窗口：命中起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
+    // 无属性 = 表壳灰阶（`filter`）；火 / 雷 = 着色子层（互斥，spec §整屏效果）。
+    if (damageFxNatureKind(nature) === "NORMAL") {
+      play.grayOnTimer = window.setTimeout(() => {
+        play.grayOnTimer = null;
+        damageGrayscalePush(play);
+      }, impactMs);
+      play.grayOffTimer = window.setTimeout(() => {
+        play.grayOffTimer = null;
+        damageGrayscalePop(play);
+      }, impactMs + strobeMs);
+    } else {
+      play.flashOnTimer = window.setTimeout(() => {
+        play.flashOnTimer = null;
+        damageFlashPush(play);
+      }, impactMs);
+      play.flashOffTimer = window.setTimeout(() => {
+        play.flashOffTimer = null;
+        damageFlashPop(play);
+      }, impactMs + strobeMs);
+    }
   }
   damageFxMark(layer);
   renderDamageFrame(stageNow());
@@ -419,14 +578,15 @@ function finishDamagePlay(play) {
     if (window.clearTimeout) window.clearTimeout(play.timer);
     play.timer = null;
   }
-  // 收尾必须把屏闪窗口一起撤掉：否则中途作废的演出会把整块牌桌留在黑白里。
-  for (const key of ["grayOnTimer", "grayOffTimer"]) {
+  // 收尾必须把屏闪窗口一起撤掉：否则中途作废的演出会把整块牌桌留在黑白 / 冷白里。
+  for (const key of ["grayOnTimer", "grayOffTimer", "flashOnTimer", "flashOffTimer"]) {
     if (play && play[key] !== null && play[key] !== undefined && window.clearTimeout) {
       window.clearTimeout(play[key]);
     }
     if (play) play[key] = null;
   }
   damageGrayscalePop(play);
+  damageFlashPop(play);
   if (!damagePlays.length) {
     damageStopFrame();
     damageClearCanvas();
@@ -497,10 +657,14 @@ function damageStopFrame() {
   damageFrame = null;
 }
 
-/** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过 3 条。
+/** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过该属性的 cap。
  *
  * 超过上限的**丢队列尾**（spec §演出口径）：伤害本身早已由服务端结算（体力条 / 事件流
  * 都到位了），攒着等下一批只会把旧伤害飘在新画面上。
+ *
+ * 票 01 的 cap 口是 `damageFxCapFor(nature)`（本票恒 3，票 02 改成按键读 1–8）。这一票
+ * 仍按**总数**判：槽位（以及音效声道的下标）要等票 02 一起动态化，否则同批混家族时
+ * 槽号会超出声道池、声音静默丢掉一半。
  */
 function pumpDamageQueue() {
   if (damageStaggerTimer !== null) {
@@ -508,7 +672,8 @@ function pumpDamageQueue() {
     damageStaggerTimer = null;
   }
   while (damageQueue.length) {
-    if (damagePlays.length >= DAMAGE_FX_CONCURRENCY) {
+    const next = damageQueue[0];
+    if (damagePlays.length >= damageFxCapFor(next && next.nature)) {
       damageQueue = [];
       break;
     }
@@ -550,7 +715,7 @@ function fireDamageEventsThrough(seq = Infinity) {
   state.damageEvents = kept;
   let queued = 0;
   for (const event of due) {
-    // `null` / 缺字段 = 无属性（视同 NORMAL）；只有 FIRE / THUNDER 显式跳过。
+    // 票 01：`null` / 缺字段 / `NORMAL` / THUNDER 放行；FIRE 的闸门留给票 03。
     if (!event || !damageFxNaturePlayable(event.nature)) continue;
     damageQueue.push(event);
     queued += 1;
@@ -614,8 +779,10 @@ function clearDamageFx() {
   damageStopFrame();
   damageClearCanvas();
   damageNextStartAt = 0;
-  // 换局 / 版式作废：屏闪窗口一并撤掉（牌桌不能留在黑白里）。
+  // 换局 / 版式作废：屏闪窗口一并撤掉（牌桌不能留在黑白 / 冷白里）。
   damageGrayPlays.clear();
   damageGrayscaleSync();
+  damageFlashPlays.clear();
+  damageFlashSync();
   damageFxMark(damageFxLayer());
 }
