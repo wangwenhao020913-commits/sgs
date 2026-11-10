@@ -658,6 +658,32 @@ function damageFxBoxOf(node, layerRect) {
   };
 }
 
+/** 中剑方武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
+ *
+ * 票 05 R4：判据不走"牌高百分之几"——真机上武将块的头部带（势力印 + 将名 + 内奸徽）本身
+ * 就占 25%，体力条在**它下面**（实测下沿 34.7%~42.3% 牌高），百分比判据会落在头部带中间。
+ * 自己的体力条是 `index.html` 的常驻节点 `#t-self-hp`（烟测垫片不建静态父子树，只能按 id 取），
+ * 对手的武将块里由 `seat-view.js:hpBarNode` 建 `.hp-bar`。
+ * 量不到（没有体力条 / 垫片没有布局）⇒ 返回 `null`，交给 fx-core 的兜底比例。
+ */
+function damageFxNumberKeepOut(block, seat) {
+  if (!block) return null;
+  const selfSeat = state.view && state.view.snapshot ? state.view.snapshot.seat : null;
+  let bar = null;
+  if (selfSeat !== null && selfSeat !== undefined && Number(seat) === Number(selfSeat)) {
+    bar = $("t-self-hp");
+  }
+  if (!bar) bar = descendantWithClass(block, "hp-bar");
+  if (!bar) return null;
+  const barRect = rectOf(bar);
+  const blockRect = rectOf(block);
+  const blockHeight = Number(blockRect.height) || 0;
+  const barHeight = Number(barRect.height) || 0;
+  if (!(blockHeight > 0) || !(barHeight > 0)) return null;
+  const bottom = (Number(barRect.bottom) || 0) - (Number(blockRect.top) || 0);
+  return Number.isFinite(bottom) ? bottom : null;
+}
+
 /** 座位矩形的可比较读法：版式是否变过（演出还锚得准不准）由它判。 */
 function damageFxBoxKey(box) {
   return [box.cx, box.cy, box.w, box.h]
@@ -704,6 +730,8 @@ function damageFxPlanFor(event) {
   const variant = Math.max(1, Math.min(DAMAGE_FX_MAX_VARIANT, damage));
   return {
     src, dst, variant, amount: damage, key: damageFxBoxKey(dst),
+    // 飘字的硬线：中剑方体力条的下沿（相对武将块左上角；量不到是 null）。
+    keepOut: damageFxNumberKeepOut(dstBlock, target),
     // 版式作废判据要重量的那一张牌（`damageDropStalePlays` 读它）。
     targetSeat: target,
   };
@@ -742,10 +770,20 @@ function damageFxMountCanvas(layer) {
  * 画布像素不可断言（也不该断言），故把"演了几条 / 在播几条"写在节点上——烟测与实机
  * 验收都读它，与 `.skill-float` 的 `data-skill-stack` 同一姿态。
  */
-function damageFxMark(layer) {
+function damageFxMark(layer, play = null) {
   if (!layer || !layer.setAttribute) return;
   layer.setAttribute("data-damage-fx-live", String(damagePlays.length));
   layer.setAttribute("data-damage-fx-plays", String(damageStartedCount));
+  // 最近一条的飘字读数（全部相对中剑方武将块左上角、CSS px）：实机验收在 DevTools 里
+  // 直接读这三个数就能判"有没有压到体力条"，不必自己按百分比换算。
+  const metrics = play && play.fx ? play.fx.metrics : null;
+  if (!metrics) return;
+  layer.setAttribute("data-damage-fx-number", metrics.number.toFixed(1));
+  layer.setAttribute("data-damage-fx-number-top", metrics.numberBox.top.toFixed(1));
+  layer.setAttribute(
+    "data-damage-fx-keep-out",
+    metrics.keepOut === null || metrics.keepOut === undefined ? "" : metrics.keepOut.toFixed(1),
+  );
 }
 
 /** 表壳的灰阶滤镜：非空集合 ⇒ 挂上（3 / 4 点档的"整屏转黑白"，票 05 R2）。
@@ -801,6 +839,8 @@ function startDamagePlay(event) {
     timing: damageFxTiming(plan.variant),
     amount: plan.amount,
     stage: { src: plan.src, dst: plan.dst },
+    // 飘字不许压到中剑方的体力条：硬线 = `.hp-bar` 的下沿（票 05 R4，DOM 真值）。
+    numberKeepOut: plan.keepOut,
     // 画布按覆盖层的实际尺寸建、内部 1:1 合成（票 05 R2：不再整块缩小）。
     view,
     dpr: damageFxDpr(),
@@ -830,6 +870,7 @@ function startDamagePlay(event) {
   damagePlays.push(play);
   damageStartedCount += 1;
   play.timer = window.setTimeout(() => finishDamagePlay(play), play.duration);
+  damageFxMark(layer, play);
   if (strobeMs > 0) {
     // 黑白屏闪的窗口：命中起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
     play.grayOnTimer = window.setTimeout(() => {

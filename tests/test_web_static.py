@@ -2009,9 +2009,12 @@ const report = vm.runInContext(`(() => {
     src: { cx: 180, cy: 190, w: 250, h: 240 },
     dst: { cx: 480, cy: 190, w: 250, h: 240 },
   };
+  // 派发者真机读数：体力条（.hp-bar）在牌高的 34.7%~42.3% 之间 ⇒ 下沿 101.5px。
+  const hpBar = { top: 0.347 * 240, bottom: 0.423 * 240 };
   const screen = draw({
     variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1.5,
     stage: screenStage, bare: true, view: { width: 660, height: 371 },
+    numberKeepOut: hpBar.bottom,
   }, 0.80);
   // 大牌桌（1920 宽、武将块 630×600）：构图比例应跟着牌走，不受落屏下限牵动。
   const big = draw({
@@ -2023,14 +2026,18 @@ const report = vm.runInContext(`(() => {
   const sweep = [];
   for (const h of [60, 87, 105, 150, 240, 400, 644]) {
     const w = Math.round(h * 0.75);
-    sweep.push({
-      h,
-      metrics: SgsDamageFX.create(document.createElement("canvas"), {
-        variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
-        view: { width: 800, height: 700 },
-        stage: { src: { cx: 200, cy: 350, w, h }, dst: { cx: 600, cy: 350, w, h } },
-      }).metrics,
-    });
+    const base = {
+      variant: 1, profile: "game", timing: timing1, amount: 1, dpr: 1, bare: true,
+      view: { width: 800, height: 700 },
+      stage: { src: { cx: 200, cy: 350, w, h }, dst: { cx: 600, cy: 350, w, h } },
+    };
+    // 一次不带硬线（走兜底比例），一次带 DOM 硬线（体力条下沿 = 42.3% 牌高）
+    for (const [kind, keepOut] of [["fallback", null], ["hpBar", 0.423 * h]]) {
+      const opts = { ...base };
+      if (keepOut !== null) opts.numberKeepOut = keepOut;
+      sweep.push({ h, kind, hpBarBottom: keepOut, metrics: SgsDamageFX.create(
+        document.createElement("canvas"), opts).metrics });
+    }
   }
   // 牌桌：座位矩形 + 服务端的真实伤害值（7 点仍按 4 档演）
   const tuned = draw({
@@ -2086,6 +2093,7 @@ const report = vm.runInContext(`(() => {
       numberOffset: screen.fx.numberOffset, duration: screen.fx.duration,
       numberFont: numberFont(screen.calls, "-1"),
       numberDraw: drawnAt(screen.calls, "-1"),
+      hpBar: hpBar,
       cardTop: screen.fx.stage.dst.cy - screen.fx.stage.dst.h / 2,
       floor: SgsDamageFX.COMPOSITION_FLOOR, screenMin: SgsDamageFX.SCREEN_MIN,
     },
@@ -2284,14 +2292,20 @@ def test_the_table_profile_renders_at_target_size_with_legible_sizes(
         f"画到画布上的字号 = numSize：{screen['numberFont']} vs {metrics['number'] / 0.7}"
     )
 
-    # 5) R3：飘字的**包围盒**整体落在头部带（牌高 25%）以下，且字高 ≤ 牌高 35%
+    # 5) R4：飘字的**包围盒**与中剑方 `.hp-bar`（体力条）**不相交**，且留 ≥2% 牌高的余量。
+    #    判据是 DOM 真值（覆盖层量 `.hp-bar` 的下沿传进来），不是"牌高百分之几"。
     card = screen["metrics"]["card"]
     box = screen["metrics"]["numberBox"]
-    header_bottom = 0.25 * card["h"]
-    assert box["top"] >= header_bottom - 1e-6, (
-        f"飘字包围盒必须整体在头部带（含体力条）以下：top={box['top']:.2f} "
-        f"< 头部带下沿 {header_bottom:.2f}（牌高 {card['h']}）"
+    bar = screen["hpBar"]
+    assert screen["metrics"]["keepOut"] == pytest.approx(bar["bottom"]), (
+        f"硬线必须就是体力条下沿（DOM 真值）：{screen['metrics']['keepOut']} vs {bar['bottom']}"
     )
+    assert box["top"] >= bar["bottom"] + 0.02 * card["h"] - 1e-6, (
+        f"飘字包围盒必须与体力条矩形不相交且留 2% 牌高余量：top={box['top']:.2f} "
+        f"< 体力条下沿 {bar['bottom']:.2f} + {0.02 * card['h']:.2f}（牌高 {card['h']}）"
+    )
+    assert box["bottom"] > bar["top"], "飘字必须在体力条**下面**（不是从上面压下来）"
+
     assert box["bottom"] <= card["h"], f"包围盒不许溢出牌底：{box}"
     assert box["height"] <= 0.35 * card["h"] + 1e-6, (
         f"字高 ≤ 牌高 35%：{box['height']:.2f} > {0.35 * card['h']:.2f}（牌高 {card['h']}）"
@@ -2307,12 +2321,24 @@ def test_the_table_profile_renders_at_target_size_with_legible_sizes(
     )
 
     # 5c) 牌高扫掠：两条不变式在任何牌高下都成立（上限在小牌上优先于 40px 下限，
-    #     否则小牌块上必然二选一：这是 R3 明确的口径，写在 `create` 的注释里）
+    #     否则小牌块上必然二选一：这是 R3 明确的口径，写在 `create` 的注释里）。
+    #     每档跑两次：不带硬线（走兜底比例）与带 DOM 硬线（体力条下沿 = 42.3% 牌高）。
+    assert {entry["kind"] for entry in probe["sweep"]} == {"fallback", "hpBar"}
     for entry in probe["sweep"]:
         card_h = entry["h"]
         box = entry["metrics"]["numberBox"]
-        assert box["top"] >= 0.25 * card_h - 1e-6, (
-            f"牌高 {card_h}：包围盒顶 {box['top']:.2f} 越过了头部带下沿 {0.25 * card_h:.2f}"
+        keep_out = entry["metrics"]["keepOut"]
+        assert keep_out is not None and keep_out > 0, f"牌高 {card_h}：硬线必须算得出来"
+        if entry["kind"] == "hpBar":
+            assert keep_out == pytest.approx(entry["hpBarBottom"]), (
+                f"牌高 {card_h}：量到体力条就必须用它（不被兜底比例覆盖）：{keep_out}"
+            )
+        else:
+            assert keep_out == pytest.approx(0.45 * card_h), (
+                f"牌高 {card_h}：量不到体力条时才走兜底（牌高 45%）：{keep_out}"
+            )
+        assert box["top"] >= keep_out + 0.02 * card_h - 1e-6, (
+            f"牌高 {card_h}：包围盒顶 {box['top']:.2f} 越过了硬线 {keep_out:.2f} + 2%"
         )
         assert box["bottom"] <= card_h + 1e-6, f"牌高 {card_h}：包围盒溢出牌底 {box}"
         assert box["height"] <= 0.35 * card_h + 1e-6, (

@@ -135,6 +135,14 @@ const shimRect = (node) => {
       return rectOfBox(84 + seatNo * 180 + heroBlockShift, 76, 104, 40);
     }
   }
+  // damage-fx 票 05 R4：体力条在武将块的头部带**下面**（真 DOM 由 CSS 决定；这里给一块
+  // 稳定矩形：相对武将块上沿 12px 处、8px 高），"飘字包围盒不与体力条相交"才可断言。
+  if (!node.id && hasClassText(node, "hp-bar")) {
+    const seatNo = seatAncestorOf(node);
+    if (seatNo !== null && Number.isFinite(seatNo)) {
+      return rectOfBox(88 + seatNo * 180 + heroBlockShift, 88, 60, 8);
+    }
+  }
   if (hasClassText(node, "face")) return rectOfBox(360, 300, 88, 124);
   // U4-04：阶段飘字的盒子由文本 / 设计单位决定（垫片只给一个确定尺寸，供夹边距用）。
   if (hasClassText(node, "anim-phase-float")) return rectOfBox(0, 0, 100, 28);
@@ -22990,6 +22998,32 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   step();
   drainTimers();
   check("U-DMG-07e 1 点档跑完也不留滤镜", shellFilter() === "", `filter="${shellFilter()}"`);
+
+  // ---- U-DMG-08：飘字不与体力条相交（R4 判据读层上的三个读数，不读百分比）----
+  const readout = (name) => Number(attr(layer(), `data-damage-fx-${name}`));
+  const before08 = playCount();
+  loadDamageBatch([hpChange(16, 1, 4, 3)], [damageEvent(16, 0, 1, 1)]);
+  step();
+  const block = heroBlockOf(1);
+  const keepOut = readout("keep-out");
+  const numberTop = readout("number-top");
+  const numberHeight = readout("number");
+  check("U-DMG-08a 硬线来自 DOM 真值（`.hp-bar` 的下沿），不是百分比兜底",
+    Number.isFinite(keepOut) && keepOut > 0 && playCount() === before08 + 1,
+    `keepOut=${attr(layer(), "data-damage-fx-keep-out")} plays=${playCount() - before08}`);
+  check("U-DMG-08b 飘字包围盒顶 ≥ 体力条下沿 + 2% 牌高（不相交，留余量）",
+    numberTop >= keepOut + 0.02 * block.getBoundingClientRect().height - 0.05,
+    `numberTop=${numberTop} keepOut=${keepOut} blockH=${block.getBoundingClientRect().height}`);
+  check("U-DMG-08c 字高 ≤ 35% 牌高", numberHeight <= 0.35 * block.getBoundingClientRect().height + 0.05,
+    `numberHeight=${numberHeight} blockH=${block.getBoundingClientRect().height}`);
+  runUntil(() => liveCount() === 0);
+
+  // 自己的座位走 `#t-self-hp`（垫片里它是静态节点）：不能因为取不到体力条就崩
+  loadDamageBatch([hpChange(17, 0, 4, 3)], [damageEvent(17, 1, 0, 1)]);
+  step();
+  check("U-DMG-08d 自己座位的演出照常开演（体力条按 `#t-self-hp` 取，取不到就退兜底）",
+    liveCount() === 1, `live=${liveCount()} keepOut="${attr(layer(), "data-damage-fx-keep-out")}"`);
+  drainTimers();
 
   // 收尾：把这一块留下的状态清干净，不影响后面的用例。
   shell.style.filter = "";

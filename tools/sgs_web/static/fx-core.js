@@ -294,20 +294,24 @@
    * 不许小于"这三样一眼看得见"所需的比值（验收下限 4 / 40 CSS px，这里各留 ~20% 余量）：
    * 刀痕墨身 ≈ 0.94 × scarW、飘字字高 ≈ 0.7 × numSize、剑光主体 ≈ 2.1 × swordW。
    * 三个"参考值"取**最细的一档**（1 点），四档里它就是下限。 */
-  /* 牌桌档飘字的四条口径（票 05 R2 / R3，全部以**尺寸**为单位，不拍脑袋写比例）：
+  /* 牌桌档飘字的口径（票 05 R2 / R3 / R4，全部以**尺寸**为单位，不拍脑袋写比例）：
    * - `GLYPH_RATIO`：数字的字形高度 ≈ 0.7 em（衬线体的数字高）。
-   * - `NUMBER_HEADER_RATIO`：中剑牌**头部带**（势力印 + 将名 + 体力条）占牌高的 25%；
-   *   飘字的**包围盒**必须整体落在它下面（R2 用"离上沿 ≥8% 牌高"当代理判据，实测不够）。
    * - `NUMBER_MAX_RATIO`：字高不超过牌高的 35%（R2 在真机上占到了 45%，压住体力读数）。
-   * - `NUMBER_RISE_RATIO`：上浮距离 = 牌高的 10%；`NUMBER_GAP_RATIO`：包围盒与头部带之间
-   *   留的余量；`NUMBER_BELOW_MIN`：起飘点至少压在牌心下方这么多（不让数字飘进上半区）。
+   * - `NUMBER_KEEP_OUT_FALLBACK`：**量不到 DOM 时**的兜底硬线（牌高的 45%）。R4 之前这里
+   *   用的是"头部带 25%"，可是真机上头部带（势力印 + 将名 + 内奸徽）本身就占 25%，体力条
+   *   在**它下面**（实测下沿 34.7%~42.3% 牌高）——25% 落在头部带中间，所以 R3 仍然压住了
+   *   体力点数。现在正路是覆盖层量 `.hp-bar` 的真矩形传进来（`numberKeepOut`），
+   *   这个比例只在量不到时兜底。
+   * - `NUMBER_GAP_RATIO`：包围盒与硬线之间必留的余量（牌高的 2%）。
+   * - `NUMBER_RISE_RATIO`：上浮距离 = 牌高的 10%；`NUMBER_BELOW_MIN`：起飘点至少压在牌心
+   *   下方这么多（不让数字飘进上半区）。
    * 位置由这几条**反推**（见 `create`），不用固定的 dy / rise 比例。
    * 素材库那份（`NUMBER_OFFSET`）一个数都不动。 */
   var GLYPH_RATIO = 0.7;
-  var NUMBER_HEADER_RATIO = 0.25;
   var NUMBER_MAX_RATIO = 0.35;
-  var NUMBER_RISE_RATIO = 0.10;
+  var NUMBER_KEEP_OUT_FALLBACK = 0.45;
   var NUMBER_GAP_RATIO = 0.02;
+  var NUMBER_RISE_RATIO = 0.10;
   var NUMBER_BELOW_MIN = 0.02;
 
   var SCREEN_MIN = { scar: 5, number: 44, sword: 6 };
@@ -1030,21 +1034,31 @@
     // 局部 `W` / `H` = 本实例的目标画布尺寸，遮蔽模块级的参考舞台（`viewSize` 在模块作用域
     // 里读真值，故缺省仍是 1920×1080）。
     var W = size.w, H = size.h;
-    // 票 05 R3：牌桌档的飘字——**字号两头夹 + 位置由包围盒判据反推**。
-    //   字高 ∈ [SCREEN_MIN.number, 35% × 牌高]（真机上牌高小的时候上限优先：宁可小，
-    //   也不能压住体力条；`clamp` 在上限小于下限时返回上限）；
-    //   位置：上浮到顶那一刻，包围盒的顶边正好落在"头部带下沿 + 余量"上——
-    //   于是**任意时刻**的包围盒都整体在牌高 25% 以下（含上浮抖动）。
+    // 票 05 R3 / R4：牌桌档的飘字——**字号两头夹 + 位置由包围盒判据反推**。
+    //   字高 ∈ [SCREEN_MIN.number, 35% × 牌高]（牌高小的时候上限优先：宁可小，也不能压住
+    //   体力读数；`clamp` 在上限小于下限时返回上限）；
+    //   位置：硬线 = 中剑方**体力条下沿**（R4：覆盖层量 `.hp-bar` 的真矩形传进来，相对武将块
+    //   左上角的 CSS px；量不到才退回 `NUMBER_KEEP_OUT_FALLBACK`）。上浮到顶那一刻包围盒的
+    //   顶边正好落在"硬线 + 2% 牌高"上 ⇒ **任意时刻**的包围盒都不与体力条相交。
     var numberOffset = NUMBER_OFFSET;
     var numberGlyph = variant.numSize * GLYPH_RATIO;
+    var keepOutPx = null;
     if (bare) {
       var cardH = Number(S.dst.h) || CARD_H;
       numberGlyph = clamp(numberGlyph, SCREEN_MIN.number, NUMBER_MAX_RATIO * cardH);
       variant = copy(variant, { numSize: numberGlyph / GLYPH_RATIO });
-      var belowCenter = Math.max(
-        NUMBER_BELOW_MIN,
-        NUMBER_RISE_RATIO - NUMBER_HEADER_RATIO + numberGlyph / (2 * cardH) + NUMBER_GAP_RATIO
-      );
+      // 硬线必须在牌内才有意义（量到牌外 / 0 / 负数 ⇒ 当作量不到，退回兜底比例）。
+      var keepOut = Number(opts.numberKeepOut);
+      var keepOutRatio = isFinite(keepOut) && keepOut > 0 && keepOut < cardH
+        ? keepOut / cardH
+        : NUMBER_KEEP_OUT_FALLBACK;
+      keepOutPx = keepOutRatio * cardH;
+      var boxTopRatio = Math.min(0.9, keepOutRatio + NUMBER_GAP_RATIO);
+      // 包围盒顶边落在 boxTopRatio ⇒ 反推起飘点（`dy` 为"牌心上方为正"的旧口径，故取负）。
+      var belowCenter = boxTopRatio + numberGlyph / (2 * cardH) - 0.5 + NUMBER_RISE_RATIO;
+      // 起飘点至少压在牌心下方一点；整盒也不许越出牌底（硬线极低时这条先兜住）。
+      belowCenter = Math.max(belowCenter, NUMBER_BELOW_MIN);
+      belowCenter = Math.min(belowCenter, 0.5 - numberGlyph / (2 * cardH) - 0.01);
       numberOffset = { dx: NUMBER_OFFSET.dx, dy: -belowCenter, rise: NUMBER_RISE_RATIO };
     }
     // 飘字包围盒（相对中剑牌左上角，CSS px）：取 `rise = 1` 的**最坏情形**（最靠上的那一刻）。
@@ -1350,9 +1364,11 @@
         scar: variant.scarW * 0.94,
         number: numberGlyph,
         sword: variant.swordW * 2.1,
-        // 中剑牌的尺寸与飘字的包围盒（相对牌左上角）——R3 的验收判据直接读这两个。
+        // 中剑牌的尺寸、飘字的包围盒、生效的硬线（都相对牌左上角 / CSS px）——
+        // R4 的验收判据直接读这三个，不再换算百分比。
         card: { w: S.dst.w, h: S.dst.h },
         numberBox: numberBox,
+        keepOut: keepOutPx,
       },
       numberOffset: numberOffset
     };
