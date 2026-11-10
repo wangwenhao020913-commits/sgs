@@ -303,17 +303,17 @@
   var TIMING_PREFIX = "damage_fx_fire_";
   var DEFAULT_TIMING = {
     damage_fx_fire_1_total: 2000, damage_fx_fire_1_flight: 240,
-    damage_fx_fire_1_impact: 300, damage_fx_fire_1_fade: 1200,
+    damage_fx_fire_1_impact: 300, damage_fx_fire_1_fade: 1500,
     damage_fx_fire_2_total: 2200, damage_fx_fire_2_flight: 220,
-    damage_fx_fire_2_impact: 280, damage_fx_fire_2_fade: 1500,
+    damage_fx_fire_2_impact: 280, damage_fx_fire_2_fade: 2100,
     /* 3 / 4 档不是"一条更快的链"，而是**时停窗口里的两段**：箭串（`impact` 前）+
      * 爆炸 / 陨星段（`boom`）。`total` = 整段寿命（3 / 4 档因此比 1 / 2 档长得多，
      * 回放在这段时间里是冻住的，与雷的 3 / 4 档同一个口径）。 */
-    damage_fx_fire_3_total: 3100, damage_fx_fire_3_flight: 200,
-    damage_fx_fire_3_impact: 260, damage_fx_fire_3_boom: 2200,
+    damage_fx_fire_3_total: 2600, damage_fx_fire_3_flight: 200,
+    damage_fx_fire_3_impact: 260, damage_fx_fire_3_boom: 1800,
     damage_fx_fire_3_strobe: 200, damage_fx_fire_3_flash: 0.8,
-    damage_fx_fire_4_total: 3700, damage_fx_fire_4_flight: 180,
-    damage_fx_fire_4_impact: 240, damage_fx_fire_4_boom: 2800,
+    damage_fx_fire_4_total: 4500, damage_fx_fire_4_flight: 180,
+    damage_fx_fire_4_impact: 240, damage_fx_fire_4_boom: 2400,
     damage_fx_fire_4_strobe: 300, damage_fx_fire_4_flash: 1
   };
 

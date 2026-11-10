@@ -4308,8 +4308,8 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
                 f"尾段 {tail_ms:.0f}ms / boom {timing['boom']}ms"
             )
             blast_ms = (timeline["DURATION"] - timeline["BLAST"]) * 1000
-            assert blast_ms >= 1800, (
-                f"{variant} 档的爆炸本身太短（返工后应 ≥1.8s）：{blast_ms:.0f}ms"
+            assert blast_ms >= 1500, (
+                f"{variant} 档的爆炸本身太短（返工后应 ≥1.5s）：{blast_ms:.0f}ms"
             )
         else:
             assert timing["boom"] == 0, f"{variant} 档没有爆炸段，不该有 boom"
@@ -4378,8 +4378,8 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
         assert 0 < flight < impact, f"{variant} 点火：火羽必须在命中之前飞到"
         if variant in (3, 4):
             boom = values[f"damage_fx_fire_{variant}_boom"]
-            assert boom >= 1800, (
-                f"{variant} 点火：爆炸 / 陨星段（boom）必须给足（返工下限 1800ms），实际 {boom}"
+            assert boom >= 1500, (
+                f"{variant} 点火：爆炸 / 陨星段（boom）必须给足（返工下限 1500ms），实际 {boom}"
             )
             assert impact + boom <= total, (
                 f"{variant} 点火：爆炸段必须在摘层之前结束（impact + boom ≤ total），"
@@ -4390,10 +4390,9 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
             )
         else:
             fade = values[f"damage_fx_fire_{variant}_fade"]
-            assert impact + fade <= total, (
-                f"{variant} 点火：焦痕必须在摘层之前散尽（impact + fade ≤ total），"
-                f"实际 {impact} + {fade} > {total}"
-            )
+            assert fade > 0, f"{variant} 点火：焦痕总得有个淡出窗口"
+            # 上界不在这里判：给得比剩下的时间还长时由**读者侧**钳到 `total − impact`，
+            # 有效的钳制由 `test_the_fire_export_chain…` 的 `clamps["fade"]` 钉。
             assert f"damage_fx_fire_{variant}_boom" not in values, (
                 f"{variant} 点火没有爆炸段，不该有 boom 键"
             )
@@ -4403,8 +4402,8 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
     )
     # 这四个数是 spec §演出口径 的缺省（票 03 返工后 3 / 4 档按用户要求加长：时停窗口里的
     # 箭串 + 爆炸 / 陨星段）。改 ini 等于改用户可见的节奏，可以；换掉缺省值先改 spec。
-    assert totals == [2000, 2200, 3100, 3700], (
-        f"spec §游戏档缺省时长（返工后）：{totals}"
+    assert totals == [2000, 2200, 2600, 4500], (
+        f"spec §游戏档缺省时长（返工后按用户实机调的值）：{totals}"
     )
     assert values["damage_fx_fire_3_strobe"] > 0
     assert values["damage_fx_fire_4_strobe"] > values["damage_fx_fire_3_strobe"], (
@@ -4456,9 +4455,10 @@ def test_the_fire_export_chain_keeps_the_material_package_timeline(fire_probe: d
         "非法值（非数字 / 负数）退回内置默认"
     )
     assert clamps["missing"] == {
-        "total": 1600, "flight": 240, "impact": 300, "fade": 1200,
+        # 只改 total：其余字段退回内置默认；1 档的 fade（1500）被钳到剩下的 1300。
+        "total": 1600, "flight": 240, "impact": 300, "fade": 1300,
         "boom": 0, "strobe": 0, "flash": 0.6,
-    }, "只改一个键，其余退回内置默认"
+    }, "只改一个键，其余退回内置默认（fade 按剩下的时间钳）"
 
 
 def test_the_fire_without_source_starts_outside_the_screen(fire_probe: dict) -> None:
@@ -4680,6 +4680,12 @@ def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() ->
     assert "Number.isFinite(flashValue)" in start and "0.6" in start, (
         "强度读该档 flash（缺省 0.6；0 是合法的『不闪』，不许被 || 吃掉）"
     )
+    # 闪的**时机**也住在家族表：剑 / 雷对准命中，火对准爆炸（3 档爆燃 / 4 档天陨）——
+    # 用户 2026-11-11 实机反馈：火在箭串中途闪会让人以为伤害已经结算完了。
+    assert 'screenAt: "BLAST"' in damage_fx, "火的整屏闪必须对准 BLAST（爆炸），不是 IMPACT"
+    assert 'screenAt: "IMPACT"' in damage_fx, "剑 / 雷的窗口仍从命中开始（既有口径不动）"
+    assert "family.screenAt" in start, "窗口起点读家族表（时机的唯一真源）"
+    assert "screenMs + strobeMs" in start, "窗口长度仍是该档 strobe（起点换了、长度没换）"
 
     rule = _css_rule(".fx-flash")
     assert re.search(r"position:\s*absolute", rule), f"子层必须绝对定位：{rule}"

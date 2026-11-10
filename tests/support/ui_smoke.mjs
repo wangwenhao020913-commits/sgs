@@ -23329,23 +23329,44 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
    * 无来源的火沿用**剑光**先例（来源整块在画面外），不是雷的「天降」：库里没有无来源的火，
    * 这条只为"真遇到 null"不抛错。
    */
+  /* 闪的时机（用户 2026-11-11 反馈，3 / 4 档同一条）：暖白闪要**对着爆炸**（`BLAST`），
+   * 不是第一支箭命中（`IMPACT`）——箭串中途闪一下会让人以为伤害已经结算完了。判据不看
+   * 内部计时器，而是按**时间轴自己的两个时刻**推垫片的虚拟时钟：
+   *   走到「命中之后一点点」⇒ 还没有子层；走到「爆炸」⇒ 子层出现。 */
+  const runClockTo = (target, limit = 200) => {
+    let steps = 0;
+    for (;;) {
+      const next = Array.from(timerDue.entries())
+        .filter(([id]) => pendingTimers.has(id))
+        .sort((left, right) => left[1] - right[1])[0];
+      if (!next || next[1] > target || steps >= limit) break;
+      runEarliest();
+      steps += 1;
+    }
+    return shimClock <= target + 1;
+  };
   const before17 = playCount();
   loadDamageBatch([hpChange(46, 1, 4, 1)], [damageEvent(46, 0, 1, 3, "FIRE")]);
   step();
-  check("U-DMG-17a 3 点火开演：层读数 nature = FIRE，命中之前不挂着色子层、表壳无 filter",
+  const clock17 = shimClock;
+  const fire3 = windowShim.SgsFireFX.gameTiming(3).timeline;
+  const impact17 = fire3.IMPACT * 1000;
+  const blast17 = fire3.BLAST * 1000;
+  check("U-DMG-17a 3 点火开演：层读数 nature = FIRE，第一支箭命中前后都还没有着色子层",
     liveCount() === 1 && playCount() === before17 + 1
       && attr(layer(), "data-damage-fx-nature") === "FIRE"
-      && flashNodeOf() === null && shellFilter() === "",
+      && runClockTo(clock17 + impact17 + 60) && flashNodeOf() === null
+      && shellFilter() === "",
     `live=${liveCount()} plays=${playCount() - before17} `
-      + `nature="${attr(layer(), "data-damage-fx-nature")}" `
-      + `flash=${!!flashNodeOf()} filter="${shellFilter()}"`);
-  const got17 = runUntil(() => flashNodeOf() !== null, 100);
+      + `nature="${attr(layer(), "data-damage-fx-nature")}" impact=${impact17.toFixed(0)}ms `
+      + `blast=${blast17.toFixed(0)}ms flash=${!!flashNodeOf()} filter="${shellFilter()}"`);
+  const got17 = runClockTo(clock17 + blast17 + 40) && flashNodeOf() !== null;
   const node17 = flashNodeOf();
   const opacity17 = node17 ? Number(node17.style.opacity) : NaN;
   // 强度是用户可调的（`flash` 0..1）：期望值从磁盘上的 ini 读，不写死 0.6。
   const flash17 = Number((readIniFile().match(
     /^\s*damage_fx_fire_3_flash\s*=\s*([0-9.]+)/m) || [])[1]);
-  check("U-DMG-17b 命中后挂暖白档 .fx-flash-fire（强度 = 该档 ini 的 flash），表壳 filter 始终为空",
+  check("U-DMG-17b 爆燃那一刻（BLAST）才挂暖白档 .fx-flash-fire，强度 = 该档 ini 的 flash",
     got17 && Boolean(node17)
       && hasClass(node17, "fx-flash") && hasClass(node17, "fx-flash-fire")
       && Number.isFinite(flash17) && Math.abs(opacity17 - flash17) < 1e-9
@@ -23397,6 +23418,25 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && playCount() === before17e + 3 + wantFire17,
     `live=${liveCount()} fire=${fires17e}/${wantFire17} normal=${normals17e} `
       + `plays=${playCount() - before17e} cap=${capFire17}`);
+  runUntil(() => liveCount() === 0, 400);
+
+  /* ---- U-DMG-17f：4 档火（天陨）的闪也在爆炸那一刻，不在第一支箭命中 ---- */
+  const before17f = playCount();
+  loadDamageBatch([hpChange(55, 1, 4, 1)], [damageEvent(55, 0, 1, 4, "FIRE")]);
+  step();
+  const clock17f = shimClock;
+  const fire4 = windowShim.SgsFireFX.gameTiming(4).timeline;
+  const impact17f = fire4.IMPACT * 1000;
+  const blast17f = fire4.BLAST * 1000;
+  const quiet17f = runClockTo(clock17f + impact17f + 80) && flashNodeOf() === null;
+  const lit17f = runClockTo(clock17f + blast17f + 40) && flashNodeOf() !== null;
+  const node17f = flashNodeOf();
+  check("U-DMG-17f 4 档天陨：命中之后仍无子层，流星砸下的那一刻（BLAST）才闪",
+    liveCount() === 1 && playCount() === before17f + 1
+      && quiet17f && lit17f && Boolean(node17f)
+      && hasClass(node17f, "fx-flash-fire") && shellFilter() === "",
+    `live=${liveCount()} impact=${impact17f.toFixed(0)}ms blast=${blast17f.toFixed(0)}ms `
+      + `quiet=${quiet17f} lit=${lit17f} filter="${shellFilter()}"`);
   runUntil(() => liveCount() === 0, 400);
 
 
@@ -23976,7 +24016,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && fireTick.timeline.FLIGHT > 0
       && fireTick.timeline.SKY_AT > 0
       && fireTick.timeline.EXPLODE > fireTick.timeline.SKY_AT
-      && fireTick.timeline.DURATION === 3.7,
+      // 整段寿命从磁盘上的 ini 读（用户会调它；测试不写死）
+      && fireTick.timeline.DURATION === iniMilliseconds("damage_fx_fire_4_total") / 1000,
     `voice=${JSON.stringify(fireTick && fireTick.voice)} `
       + `timeline=${JSON.stringify(fireTick && fireTick.timeline)}`);
   runUntil(() => liveCount() === 0, 400);

@@ -56,6 +56,8 @@ const DAMAGE_FX_FAMILIES = {
     renderer: "SgsDamageFX", fallback: "SgsDamageFX",
     grayscale: true, flash: null, playable: true,
     cap: "damage_fx_concurrency",
+    // 整屏效果窗口的起点取时间轴上的哪个键（缺省 `IMPACT` = 命中）。
+    screenAt: "IMPACT",
   },
   THUNDER: {
     // 雷电是**已接**的家族：模块没加载就是部署缺件，**不**回落剑光（spec §2 的 fail-open
@@ -63,6 +65,8 @@ const DAMAGE_FX_FAMILIES = {
     renderer: "SgsThunderFX", fallback: null,
     grayscale: false, flash: "fx-flash-thunder", playable: true,
     cap: "damage_fx_thunder_concurrency",
+    // 雷的整屏闪就是**劈下来的那一下**（`IMPACT` = 雷光命中）。
+    screenAt: "IMPACT",
   },
   FIRE: {
     // 火焰与雷电同姿态：`SgsFireFX` 是它唯一的画面模块，缺件就不播（回落剑光会把一次
@@ -70,6 +74,10 @@ const DAMAGE_FX_FAMILIES = {
     renderer: "SgsFireFX", fallback: null,
     grayscale: false, flash: "fx-flash-fire", playable: true,
     cap: "damage_fx_fire_concurrency",
+    // 火的暖白闪对准**爆炸**：3 档 `BLAST` = 爆燃、4 档 = 天陨命中（`BLAST` 在火的时间轴
+    // 上是"最后一支箭钉住 → 爆炸"那一段的起点）。第一支箭命中就闪会让人以为伤害结算完了
+    // ——用户 2026-11-11 实机反馈，3 / 4 档同一条。
+    screenAt: "BLAST",
   },
 };
 
@@ -591,6 +599,12 @@ function startDamagePlay(event) {
   const timeline = fx.timeline || {};
   const timing = fx.timing || {};
   const impactMs = Math.max(0, Number(timeline.IMPACT) || 0) * 1000;
+  /* 整屏效果（灰阶 / 着色闪）的窗口起点：家族表说对准时间轴上的哪个键（缺省 `IMPACT`）。
+   * 火是 `BLAST`——3 档的爆燃 / 4 档的天陨命中，**不是**第一支箭命中；读不到这个键
+   * （缺件 / 老模块）就退回命中，宁早不丢。 */
+  const screenKey = family.screenAt || "IMPACT";
+  const screenRaw = Number(timeline[screenKey]);
+  const screenMs = Number.isFinite(screenRaw) && screenRaw > 0 ? screenRaw * 1000 : impactMs;
   const strobeMs = Math.max(0, Number(timing.strobe) || 0);
   // 整屏闪的强度（0..1）：属性家族读 `flash`（缺省 **只在缺键时** 才是 0.6——0 是合法的
   // "不闪"），无属性走灰阶、用不到它。
@@ -628,18 +642,19 @@ function startDamagePlay(event) {
   play.timer = window.setTimeout(() => finishDamagePlay(play), play.duration);
   damageFxMark(layer, play);
   if (strobeMs > 0) {
-    // 屏闪窗口：命中起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
-    // 家族表决定是表壳灰阶（无属性）还是着色子层（火 / 雷）——两者互斥（spec §整屏效果）。
+    // 屏闪窗口：`screenMs` 起、`strobe` 后收。用定时器而不是逐帧判：垫片 / 掉帧下也准。
+    // 家族表决定两件事：窗口**从哪一刻**开始（`screenAt`：剑 / 雷 = 命中，火 = 爆炸），
+    // 以及是表壳灰阶（无属性）还是着色子层（火 / 雷）——两者互斥（spec §整屏效果）。
     const pushWindow = family.grayscale ? damageGrayscalePush : damageFlashPush;
     const popWindow = family.grayscale ? damageGrayscalePop : damageFlashPop;
     play.windowOnTimer = window.setTimeout(() => {
       play.windowOnTimer = null;
       pushWindow(play);
-    }, impactMs);
+    }, screenMs);
     play.windowOffTimer = window.setTimeout(() => {
       play.windowOffTimer = null;
       popWindow(play);
-    }, impactMs + strobeMs);
+    }, screenMs + strobeMs);
   }
   damageFxMark(layer);
   renderDamageFrame(stageNow());
