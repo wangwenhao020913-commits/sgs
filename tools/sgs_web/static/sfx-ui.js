@@ -5,7 +5,8 @@
  * 面对的是一个独立文件，不是 1400 行的 `effects.js`（音色表在 `sfx.js` 顶部的 `VOICE`，
  * 仍是唯一的调音处）。
  *
- * 缝是**单向**的，只有四个调用点，全在 `effects.js` 的伤害排播里：
+ * 缝是**单向**的，只有四个调用点，全在 `damage-fx.js` 的伤害排播里（票 09 从 `effects.js`
+ * 搬过去）：
  *
  *   startDamagePlay   → damageSfxStart(play)
  *   finishDamagePlay  → damageSfxStop(play)
@@ -15,8 +16,9 @@
  * 本文件只接 `play` 对象（读 `play.variant` / `play.fx.timing` / `play.fx.timeline` /
  * `play.slot`），并且只收自己绑过的声道，**不读**伤害排播层的运行状态。反方向只有两个
  * **常量**：`DAMAGE_FX_CONCURRENCY`（声道数 = 同时在播上限）与 `DAMAGE_FX_MAX_VARIANT`
- * （档位号钳到 1..4）——两者都在**调用时**才解析，所以本文件可以排在 `effects.js`
- * **之前**加载（`index.html` 的顺序：`sfx.js` → `sfx-ui.js` → `effects.js`）。
+ * （档位号钳到 1..4）——两者都住在 `damage-fx.js`，且都在**调用时**才解析
+ * （`index.html` 里本文件排在它之后：`effects.js` → `damage-fx.js` → … → `sfx.js` →
+ * `sfx-ui.js` → `main.js`）。
  *
  * 三条硬口径（票 06，逐字未改）：**缺省静音** / **对齐演出时钟** / **没有 `AudioContext`
  * 就静默降级**。下面这一段是它们各自的理由。
@@ -62,7 +64,7 @@ const damageSfxLanes = [];
 /** 已经绑上声道的演出（`damageSfxStart` 记下、`damageSfxStop` 摘除）。
  *
  * 换局清场时 `damageSfxStopAll()` 收的是**这张表**，不去读伤害排播层的在播表
- * （`damagePlays` 是 `effects.js` 的私有状态）——这条缝是单向的：伤害 → 音效。
+ * （`damagePlays` 是 `damage-fx.js` 的私有状态）——这条缝是单向的：伤害 → 音效。
  */
 const damageSfxBound = new Set();
 

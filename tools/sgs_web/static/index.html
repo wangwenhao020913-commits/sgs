@@ -319,7 +319,7 @@
     <!-- 无属性伤害演出层（damage-fx 票 05）：剑光 / 刀痕 / 墨点 / 飘字的一块**透明**画布，
          铺满牌桌壳、不吃指针，z 在飞行层（18）之上、弹窗（60）之下。层里**只有一张**
          canvas——跨演出复用、播完清空摘掉；素材库舞台的宣纸底与样例武将牌在牌桌档
-         （`bare: true`）一概不画，牌桌全程透得出来；两张武将块的矩形由 `effects.js`
+         （`bare: true`）一概不画，牌桌全程透得出来；两张武将块的矩形由 `damage-fx.js`
          量出来换算成舞台坐标，交给 `SgsDamageFX.create(canvas, {stage, bare: true})`。 -->
     <div id="t-damage-fx" class="damage-fx-layer" aria-hidden="true"></div>
     <!-- 飞行时间表提示（U4-01 / D8）：anim.ini 缺键 / 解析失败时**一行**，正常时隐藏。 -->
@@ -412,8 +412,13 @@
 <script src="card-face.js"></script>
 <script src="seat-view.js"></script>
 <script src="table.js"></script>
-<!-- 牌桌动效（U3-03 / D8 / D13）：目标线 / 行动者高亮 / 体力闪。函数只在 wire() 后被调用。 -->
+<!-- 牌桌动效（U3-03 / D8 / D13）：目标线 / 行动者高亮 / 体力闪 / 技能名 / 白光。
+     函数只在 wire() 后被调用；伤害演出（damage-fx 票 09）已搬去下面那份 damage-fx.js。 -->
 <script src="effects.js"></script>
+<!-- damage-fx 票 09：无属性伤害演出的排播 / 座位几何 / 画布生命周期（从 effects.js 抽出）。
+     依赖 effects.js 的 rectOf / heroBlockFor / descendantWithClass（调用时解析）⇒ 排在它之后；
+     sfx-ui.js 读它的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT），故也排在它之后。 -->
+<script src="damage-fx.js"></script>
 <script src="preactivation.js"></script>
 <script src="interaction.js"></script>
 <script src="pending.js"></script>
@@ -436,9 +441,9 @@
 <script src="fx-core.js"></script>
 <script src="sfx.js"></script>
 <!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 三条声道池 / ?audiotest）。
-     只读 effects.js 的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT），且都在
-     调用时才解析 ⇒ 排在 effects.js 之后、main.js 之前；effects.js 的四个调用点运行时才触发，
-     wire() 里的 damageSfxSync() 也在这之后。 -->
+     只读 damage-fx.js 的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT），且都在
+     调用时才解析 ⇒ 排在 damage-fx.js 之后、main.js 之前；damage-fx.js 的四个调用点运行时才
+     触发，wire() 里的 damageSfxSync() 也在这之后。 -->
 <script src="sfx-ui.js"></script>
 <script src="main.js"></script>
 </body>

@@ -329,6 +329,11 @@ function renderTable() {
   renderSelfSeat(view, ctx);
   // U3-03：座位节点在这一屏被重建；仍在播的行动者描边 / 体力闪按状态补回类（D13）。
   syncTransientEffects();
+  // damage-fx 票 09：座位同时是伤害演出的**锚点**（两张武将块的矩形），所以重绘之后要按
+  // 矩形判一次"已经在播的那几条还锚得准吗"——版式变了就摘掉，矩形没变的普通重绘（回放
+  // 每步都重绘全表）不打断。这行原来住在 `effects.js:syncTransientEffects` 里（动效层 →
+  // 伤害层的反向钩子）；排播搬进 `damage-fx.js` 后由**重绘的调用方**显式说这句话。
+  damageDropStalePlays();
 
   // 快照到达时把处理区并进 `state.effectCards`（同一张牌保留回放期间的使用者标注）；
   // 回放期间不并——那份是逐事件派生的，快照要等播完才提交。

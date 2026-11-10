@@ -709,8 +709,8 @@ function applyView(body) {
     state.revealedCards = [];
     // U3-04：上一局还没触发的技能发动事件不属于新局（DOM 侧由 commit 的清屏兜底）。
     state.skillEvents = [];
-    // damage-fx 票 05：伤害演出同理——上一局那一剑不能劈在新局的牌桌上（覆盖层由
-    // `clearTransientEffects` 的 `clearDamageFx()` 一起摘掉）。
+    // damage-fx 票 05：伤害演出同理——上一局那一剑不能劈在新局的牌桌上（覆盖层与在播演出
+    // 由 commitView 换会话时显式调 `clearDamageFx()` 摘掉，票 09 起不再经动效层转手）。
     state.damageEvents = [];
     // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
     state.liveView = null;
@@ -1293,6 +1293,12 @@ function commitView(body) {
     state.revealedCards = [];
     // U3-03 / D8.1：目标线与行动者描边 / 体力闪是**一次演出**，换会话后不属于新局。
     clearTransientEffects();
+    // damage-fx 票 09：伤害演出（覆盖层 / 队列 / 在播 / 屏闪窗口 / 音效声道）是**另一层**的
+    // 一次演出，同样不属于新局。这两行原来是 `clearTransientEffects` 内部调的反向钩子
+    // （动效层 → 伤害层）；排播搬进 `damage-fx.js` 后改由换局的调用方显式说：
+    // 上一局那一剑不能劈在新桌上，也不能在新桌上响完。
+    clearDamageFx();
+    state.damageEvents = [];
   }
   state.view = body;
   // U3-05（D11）：提交即权威——live view 用这份快照整份覆盖（下一批事件从它起算）。

@@ -269,6 +269,9 @@ def test_stage_title_is_renamed_from_processing_area() -> None:
 # ---------------------------------------------------------------------------
 
 _EFFECTS_JS = STATIC_DIR / "effects.js"
+# damage-fx 票 09：伤害排播（队列 / 排播闸门 / 座位几何 / 画布生命周期）从 `effects.js`
+# 搬进这份脚本；`effects.js` 只剩动效层（目标线 / 高亮 / 体力闪 / 技能名 / 白光）。
+_DAMAGE_FX_JS = STATIC_DIR / "damage-fx.js"
 
 
 def test_target_line_layer_is_full_shell_above_seats_below_modals() -> None:
@@ -872,7 +875,7 @@ function load(context, name, source) {
 
 /* ------------------------------------------------- ① 真脚本：正常那一份 ---- */
 const context = makeSandbox();
-for (const name of ["anim.js", "fx-core.js", "effects.js"]) load(context, name);
+for (const name of ["anim.js", "fx-core.js", "effects.js", "damage-fx.js"]) load(context, name);
 const report = await vm.runInContext(
   `(async () => {
      await animReady;
@@ -929,6 +932,7 @@ const patched = makeSandbox();
 load(patched, "anim.js");
 load(patched, "fx-core.js", patchedSource);
 load(patched, "effects.js");
+load(patched, "damage-fx.js");
 const negative = await vm.runInContext(
   `(async () => {
      await animReady;
@@ -952,7 +956,7 @@ process.stdout.write(JSON.stringify({
 
 
 def _damage_fx_probe() -> dict:
-    """跑真 `anim.js` + 真 `fx-core.js`（node vm），拿回两份时间表的实测结果。"""
+    """跑真 `anim.js` + 真 `fx-core.js` + `effects.js` + `damage-fx.js`（node vm），拿回实测结果。"""
     node = shutil.which("node")
     assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
     with tempfile.TemporaryDirectory() as workdir:
@@ -1022,13 +1026,14 @@ def test_effects_hands_the_damage_fx_timing_over_from_the_live_ini_table(damage_
 
 
 def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: dict) -> None:
-    """票 10：六个字段名的名单只有 `fx-core.js` 一份，`effects.js` 与本测试都从它派生。
+    """票 10：六个字段名的名单只有 `fx-core.js` 一份，读取面与测试都从它派生。
 
     三件事：
     1. 名单确实由 `DEFAULT_TIMING` 的键生成，且是冻结数组（读方只许读）；
-    2. `effects.js` 里**没有**第二份手写清单——它的读取面完全等于导出的字段名；
-    3. **反证**：把 `DEFAULT_TIMING` 里的 `damage_fx_4_split` 删掉，`effects.js` 的读取面
-       随之少一个 `damage_fx_4_split`，而磁盘上的 `anim.ini` 仍有这一行 ⇒ 键表比对会红。
+    2. 读取面（票 09 起住 `damage-fx.js`）里**没有**第二份手写清单——它完全等于导出的
+       字段名；
+    3. **反证**：把 `DEFAULT_TIMING` 里的 `damage_fx_4_split` 删掉，读取面随之少一个
+       `damage_fx_4_split`，而磁盘上的 `anim.ini` 仍有这一行 ⇒ 键表比对会红。
        缺键时画面照样是 `VARIANTS[4].split = 44`——正是这种"静默不生效"，只能靠名单兜住。
     """
     probe = damage_fx_probe
@@ -1051,14 +1056,15 @@ def test_the_damage_fx_timing_field_names_have_a_single_source(damage_fx_probe: 
         "两个导出必须是冻结数组（读方只许读，不许再各改一份）"
     )
 
-    # 2) `effects.js` 没有第二份手写清单：任何数组字面量里都凑不出两个字段名。
-    effects = _strip_js_comments((STATIC_DIR / "effects.js").read_text(encoding="utf-8"))
-    assert re.search(r"\.TIMING_FIELDS\b", effects), (
-        "effects.js 必须从 `SgsDamageFX.TIMING_FIELDS` 读字段名，而不是自己写一份"
+    # 2) 读取面那一侧没有第二份手写清单：任何数组字面量里都凑不出两个字段名。
+    #    票 09 起读取面住 `damage-fx.js`（`damageFxTimingFields` / `damageFxTiming`）。
+    reader = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+    assert re.search(r"\.TIMING_FIELDS\b", reader), (
+        "damage-fx.js 必须从 `SgsDamageFX.TIMING_FIELDS` 读字段名，而不是自己写一份"
     )
-    for array in re.findall(r"\[[^\[\]]*\]", effects):
+    for array in re.findall(r"\[[^\[\]]*\]", reader):
         repeated = [field for field in fields if f'"{field}"' in array]
-        assert len(repeated) < 2, f"effects.js 里又手写了一份字段名清单：{array.strip()}"
+        assert len(repeated) < 2, f"damage-fx.js 里又手写了一份字段名清单：{array.strip()}"
 
     # 3) 反证：删掉 fx-core 里唯一的 `split` 键 ⇒ 读取面跟着少一个。
     negative = probe["negative"]
@@ -1985,17 +1991,22 @@ def test_the_damage_fx_layer_is_a_full_shell_overlay_above_the_flight_layer() ->
 
 
 def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbers() -> None:
-    """票面 §1 / §4：队列进 `applyView`、触发点紧挨技能事件、口径 120ms / 3 条 / 只挂 NORMAL。"""
+    """票面 §1 / §4：队列进 `applyView`、触发点紧挨技能事件、口径 120ms / 3 条 / 只挂 NORMAL。
+
+    票 09 起排播住 `damage-fx.js`：常量与 `startDamagePlay` / `finishDamagePlay` 从那里读，
+    触发点与清场仍在 `session.js`（调用方）。
+    """
+    damage_fx = _DAMAGE_FX_JS.read_text(encoding="utf-8")
     effects = _EFFECTS_JS.read_text(encoding="utf-8")
     session = _SESSION_JS.read_text(encoding="utf-8")
 
-    assert re.search(r"^const DAMAGE_FX_STAGGER_MS = 120;$", effects, re.M), (
+    assert re.search(r"^const DAMAGE_FX_STAGGER_MS = 120;$", damage_fx, re.M), (
         "相邻开演错开 120ms（spec §演出口径）"
     )
-    assert re.search(r"^const DAMAGE_FX_CONCURRENCY = 3;$", effects, re.M), (
+    assert re.search(r"^const DAMAGE_FX_CONCURRENCY = 3;$", damage_fx, re.M), (
         "同时在播上限 3 条（超出丢队列尾）"
     )
-    assert re.search(r'^const DAMAGE_FX_NATURE = "NORMAL";$', effects, re.M), (
+    assert re.search(r'^const DAMAGE_FX_NATURE = "NORMAL";$', damage_fx, re.M), (
         "只挂无属性伤害；火焰 / 雷电显式跳过"
     )
 
@@ -2019,22 +2030,44 @@ def test_damage_fx_playback_is_scheduled_from_the_seq_cursor_with_the_spec_numbe
             f"{name} 里不许触发伤害演出（触发点只能是 seq 游标）"
         )
 
-    clear = _js_function(effects, "clearTransientEffects")
-    assert "clearDamageFx()" in clear, "换局 / 换会话必须连同覆盖层一起摘掉"
-    assert "state.damageEvents = []" in clear, "换局清空队列（照 state.skillEvents 的姿态）"
+    # 换局清场（票 09）：原来藏在 `effects.js:clearTransientEffects` 的最后两行——那是
+    # 「动效 → 伤害」的反向钩子；现在由换局的调用方 `commitView` 显式说。
+    # 结构断言读**剥掉注释**的源码：注释里提到旧调用点不算调用点。
+    effects_code = _strip_js_comments(effects)
+    clear = _js_function(effects_code, "clearTransientEffects")
+    assert "clearDamageFx()" not in clear, (
+        "动效层不许再调伤害层的清理（票 09 的反向钩子已挪到 session.js:commitView）"
+    )
+    assert "state.damageEvents" not in clear, "伤害队列不归动效层清"
+    commit = _js_function(session, "commitView")
+    assert "clearTransientEffects();" in commit, "换局先发动效层自己的清理"
+    assert "clearDamageFx();" in commit, "换局必须连同伤害覆盖层一起摘掉（票 05 的硬约束）"
+    assert "state.damageEvents = []" in commit, (
+        "换局清空队列（照 state.skillEvents 的姿态）；顺序不敏感，但必须同一处"
+    )
 
-    sync = _js_function(effects, "syncTransientEffects")
-    assert "damageDropStalePlays()" in sync, (
+    # 版式重检（票 09）：由重绘的调用方说，且**在**动效层的座位补类之后（原来住在
+    # `syncTransientEffects` 里）。
+    sync = _js_function(effects_code, "syncTransientEffects")
+    assert "damageDropStalePlays()" not in sync, (
+        "动效层不许再调伤害层（票 09）：版式重检挪到 table.js:renderTable"
+    )
+    table = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+    render = _js_function(table, "renderTable")
+    assert "damageDropStalePlays();" in render, (
         "renderTable 重建座位后要按矩形判一次：版式变了就摘层（别演在半空）"
     )
-    window_actions = _js_function(effects, "startDamagePlay")
+    assert render.index("syncTransientEffects();") < render.index("damageDropStalePlays();"), (
+        "版式重检排在座位补类之后（座位节点必须先建好，矩形才是新的）"
+    )
+    window_actions = _js_function(damage_fx, "startDamagePlay")
     assert "damageFxTiming(plan.variant)" in window_actions, (
         "时长从 anim.ini 那一份搬过来（票 04 的接线口），不在 JS 里硬编码"
     )
     assert "setTimeout(() => finishDamagePlay(play), play.duration)" in window_actions, (
         "摘层用 create() 返回的 duration 定时，不靠 rAF 自然停（票 04 的交接）"
     )
-    assert "fx.draw(" not in _js_function(effects, "finishDamagePlay"), (
+    assert "fx.draw(" not in _js_function(damage_fx, "finishDamagePlay"), (
         "摘层不靠再画一帧"
     )
 
@@ -2628,13 +2661,13 @@ def test_the_damage_sfx_state_machine_is_gesture_unlocked_and_remembers_the_swit
 def test_the_damage_sfx_tick_shares_the_play_clock_and_the_export_chain_stays_silent() -> None:
     """`tick` 吃演出自己的 `seconds`（与 `fx.draw` 同一个变量）；导出 / 素材库链一声不响。
 
-    票 08 起音效函数住 `sfx-ui.js`；驱动点（`renderDamageFrame`）与两个收声点
-    （`finishDamagePlay` / `clearDamageFx`）仍在 `effects.js`——断言分两份读。
+    票 08 起音效函数住 `sfx-ui.js`；票 09 起驱动点（`renderDamageFrame`）与两个收声点
+    （`finishDamagePlay` / `clearDamageFx`）住 `damage-fx.js`——断言分两份读。
     """
-    effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
     sfx_ui = _strip_js_comments(_SFX_UI_JS.read_text(encoding="utf-8"))
 
-    frame = _js_function_with_defaults(effects, "renderDamageFrame")
+    frame = _js_function_with_defaults(damage_fx, "renderDamageFrame")
     assert "play.fx.draw(seconds)" in frame, "画面用 `seconds`（一次性算好的演出秒数）"
     assert "damageSfxTick(play, seconds)" in frame, (
         "音效必须吃**同一个** `seconds`——另起墙钟会漂（票面 §做法 3）"
@@ -2647,8 +2680,8 @@ def test_the_damage_sfx_tick_shares_the_play_clock_and_the_export_chain_stays_si
     assert "lane.player.tick(seconds, voice)" in tick, "tick 的 t 就是演出秒数"
     for wall_clock in ("Date.now", "stageNow", "performance.now", "requestAnimationFrame"):
         assert wall_clock not in tick, f"音效时钟里不许出现 {wall_clock}（不另起墙钟）"
-    assert effects.count("damageSfxTick(") == 1, (
-        "tick 只有一个驱动点（renderDamageFrame 里那一次）；定义已搬去 sfx-ui.js"
+    assert damage_fx.count("damageSfxTick(") == 1, (
+        "tick 只有一个驱动点（damage-fx.js:renderDamageFrame 里那一次）；定义在 sfx-ui.js"
     )
     assert sfx_ui.count("damageSfxTick(") == 1, (
         "sfx-ui.js 里只有 damageSfxTick 的定义，不许有第二个驱动点"
@@ -2667,10 +2700,10 @@ def test_the_damage_sfx_tick_shares_the_play_clock_and_the_export_chain_stays_si
     )
     assert "play.slot" in start, "一条并发演出一条声道（槽位唯一）"
 
-    assert "damageSfxStop(play)" in _js_function(effects, "finishDamagePlay"), (
+    assert "damageSfxStop(play)" in _js_function(damage_fx, "finishDamagePlay"), (
         "摘层即收声"
     )
-    assert "damageSfxStopAll()" in _js_function(effects, "clearDamageFx"), (
+    assert "damageSfxStopAll()" in _js_function(damage_fx, "clearDamageFx"), (
         "换局 / 版式作废：在播的演出一起收声"
     )
 
@@ -2678,7 +2711,7 @@ def test_the_damage_sfx_tick_shares_the_play_clock_and_the_export_chain_stays_si
     # 牌桌也不提供 `renderAt` 这条路。
     fx_core = (STATIC_DIR / "fx-core.js").read_text(encoding="utf-8")
     assert "SgsSfx" not in fx_core, "画面那份脚本不许碰音效（导出链只驱动画面）"
-    assert "renderAt" not in effects, "牌桌不提供 renderAt（导出是素材库那条链的事）"
+    assert "renderAt" not in damage_fx, "排播不提供 renderAt（导出是素材库那条链的事）"
 
     audiotest = _js_function(sfx_ui, "damageSfxAudiotest")
     assert "renderOffline" in audiotest, "自检走 SgsSfx.renderOffline（纯函数式）"
@@ -2725,8 +2758,9 @@ _SFX_UI_FUNCTIONS = (
 def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> None:
     """票 08：音效 UI 独立成一份脚本，缝只朝一个方向（伤害排播 → 音效）。
 
-    - 20 个函数与四个调用点**分家**：定义在 `sfx-ui.js`，`effects.js` 只剩调用；
-    - 加载次序：`sfx.js` 之后、`effects.js` 之后、`main.js` 之前（票面写「`sfx.js` 之后、
+    - 20 个函数与四个调用点**分家**：定义在 `sfx-ui.js`；票 09 把调用点连同排播一起搬到
+      `damage-fx.js`，`effects.js` 一侧一个都不剩；
+    - 加载次序：`sfx.js` 之后、`damage-fx.js` 之后、`main.js` 之前（票面写「`sfx.js` 之后、
       `effects.js` 之前」，但 `effects.js` 原本就排在 `sfx.js` 之前，见 `index.html`；
       实际落点是音效组末尾——两个常量这时已就位，比「之前」更稳）；
     - 反方向**只许读常量**：`sfx-ui.js` 不读伤害排播层的在播表（`damagePlays`），
@@ -2735,11 +2769,12 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
     srcs = _script_srcs()
     assert "sfx-ui.js" in srcs, f"index.html 的脚本清单里必须有 sfx-ui.js：{srcs}"
     assert srcs.index("sfx.js") < srcs.index("sfx-ui.js"), "音效 UI 必须排在 sfx.js 之后"
-    assert srcs.index("effects.js") < srcs.index("sfx-ui.js") < srcs.index("main.js"), (
-        "音效 UI 排在 effects.js 之后、main.js 之前（它读 effects.js 的两个常量）"
+    assert srcs.index("damage-fx.js") < srcs.index("sfx-ui.js") < srcs.index("main.js"), (
+        "音效 UI 排在 damage-fx.js 之后、main.js 之前（它读 damage-fx.js 的两个常量）"
     )
 
     effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
     sfx_ui = _strip_js_comments(_SFX_UI_JS.read_text(encoding="utf-8"))
 
     moved = [name for name in _SFX_UI_FUNCTIONS if re.search(rf"^function {name}\(", sfx_ui, re.M)]
@@ -2747,14 +2782,18 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
         "这些音效函数必须住在 sfx-ui.js："
         f"缺 {sorted(set(_SFX_UI_FUNCTIONS) - set(moved))}，实际次序 {moved}"
     )
-    left = [name for name in _SFX_UI_FUNCTIONS if re.search(rf"^function {name}\(", effects, re.M)]
-    assert not left, f"这些音效函数还留在 effects.js（票 08 要求搬走）：{left}"
+    for owner, text in (("effects.js", effects), ("damage-fx.js", damage_fx)):
+        left = [name for name in _SFX_UI_FUNCTIONS if re.search(rf"^function {name}\(", text, re.M)]
+        assert not left, f"这些音效函数还留在 {owner}（票 08 要求搬走）：{left}"
 
     for site in _SFX_UI_CALL_SITES:
-        assert site in effects, f"effects.js 的调用点必须原样保留（只换定义位置）：{site}"
+        assert site in damage_fx, (
+            f"damage-fx.js 的调用点必须原样保留（只换定义位置）：{site}"
+        )
+        assert site not in effects, f"effects.js 里不该再有音效调用点（票 09 已搬走）：{site}"
 
     assert "damagePlays" not in sfx_ui, (
-        "sfx-ui.js 不许读 effects.js 的在播表 damagePlays（换局清场收自己的 damageSfxBound）"
+        "sfx-ui.js 不许读伤害排播层的在播表 damagePlays（换局清场收自己的 damageSfxBound）"
     )
     for damage_name in (
         "startDamagePlay",
@@ -2771,6 +2810,138 @@ def test_the_sfx_ui_module_is_a_one_way_seam_out_of_the_damage_playback() -> Non
         assert leaked not in effects, (
             f"effects.js 里不该再有音效实现（{leaked}）：开关 / 记忆 / 自检都搬去 sfx-ui.js"
         )
+
+
+# ---------------------------------------------------------------------------
+# damage-fx 票 09：伤害排播独立成 `damage-fx.js`（拆分第二步）
+#
+# 票 08 把音效搬走后 `effects.js` 还剩"伤害排播 + 座位几何 + 画布生命周期"（~590 行），
+# 它与动效层**双向耦合**。本票先解耦、再搬文件：
+#   - 两个反向钩子挪到调用方：`table.js:renderTable` → `damageDropStalePlays()`；
+#     `session.js:commitView` → `clearDamageFx()`（+ 清 `state.damageEvents`）；
+#   - 排播整体搬进 `damage-fx.js`，它只借 `effects.js` 三个"读真实布局"的小工具
+#     （`rectOf` / `heroBlockFor` / `descendantWithClass`）与 `session.js:stageNow`。
+# 下面这条用例钉的是**缝的方向**：搬走的清单、调用点留在哪、以及反向零调用。
+# 行为（错开 / 上限 / 版式作废 / 换局无残影）归烟测 `U-DMG-01..06`。
+# ---------------------------------------------------------------------------
+
+# 票面 §3 的"剩余部分"：按 `damage-fx.js` 里的出现次序。
+_DAMAGE_FX_FUNCTIONS = (
+    "damageFxTimingFields",
+    "damageFxTiming",
+    "damageFxNaturePlayable",
+    "damageFxLayer",
+    "damageFxDpr",
+    "damageFxView",
+    "damageFxBoxOf",
+    "damageFxNumberKeepOut",
+    "damageFxBoxKey",
+    "damageFxPlanFor",
+    "damageFxSlot",
+    "damageFxMountCanvas",
+    "damageFxMark",
+    "damageGrayscaleSync",
+    "damageGrayscalePush",
+    "damageGrayscalePop",
+    "startDamagePlay",
+    "finishDamagePlay",
+    "damageClearCanvas",
+    "renderDamageFrame",
+    "damageRequestFrame",
+    "damageStopFrame",
+    "pumpDamageQueue",
+    "fireDamageEventsThrough",
+    "damageDropStalePlays",
+    "clearDamageFx",
+)
+
+# 反向不许出现的动效层入口（伤害层不认识动效层的任何内部结构）。
+_EFFECTS_LAYER_ENTRIES = (
+    "syncTransientEffects",
+    "clearTransientEffects",
+    "applyRecordEffects",
+    "playSkillEvent",
+    "drawTargetLines",
+    "markActing",
+    "flashHeroHp",
+)
+
+
+def test_the_damage_playback_module_is_a_one_way_seam_out_of_the_effects_layer() -> None:
+    """票 09：排播独立成一份脚本，缝只朝一个方向（伤害 → 动效）。
+
+    - 26 个函数与全部模块级状态都在 `damage-fx.js`，`effects.js` 里一个都不剩；
+    - 加载次序：`effects.js` 之后（它借三个布局小工具）、`sfx-ui.js` 之前（音效读它的两个
+      常量）、`main.js` 之前；
+    - 反向**零调用**：`effects.js` 不出现伤害层的任何函数名 / 状态名；`damage-fx.js` 不出现
+      动效层的入口名；
+    - 两个反向钩子（票面 §2）确实住在调用方，而不是换了个文件名继续互调。
+    """
+    srcs = _script_srcs()
+    assert "damage-fx.js" in srcs, f"index.html 的脚本清单里必须有 damage-fx.js：{srcs}"
+    assert srcs.index("effects.js") < srcs.index("damage-fx.js") < srcs.index("main.js"), (
+        "damage-fx.js 排在 effects.js 之后（依赖方向）、main.js 之前"
+    )
+    assert srcs.index("damage-fx.js") < srcs.index("sfx-ui.js"), (
+        "sfx-ui.js 读 damage-fx.js 的两个常量（DAMAGE_FX_CONCURRENCY / DAMAGE_FX_MAX_VARIANT）"
+    )
+
+    effects = _strip_js_comments(_EFFECTS_JS.read_text(encoding="utf-8"))
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+    table = _strip_js_comments((STATIC_DIR / "table.js").read_text(encoding="utf-8"))
+    session = _strip_js_comments(_SESSION_JS.read_text(encoding="utf-8"))
+
+    moved = [
+        name for name in _DAMAGE_FX_FUNCTIONS
+        if re.search(rf"^function {name}\(", damage_fx, re.M)
+    ]
+    assert moved == list(_DAMAGE_FX_FUNCTIONS), (
+        "这些排播函数必须住在 damage-fx.js："
+        f"缺 {sorted(set(_DAMAGE_FX_FUNCTIONS) - set(moved))}，实际次序 {moved}"
+    )
+    left = [
+        name for name in _DAMAGE_FX_FUNCTIONS
+        if re.search(rf"^function {name}\(", effects, re.M)
+    ]
+    assert not left, f"这些排播函数还留在 effects.js（票 09 要求搬走）：{left}"
+
+    for constant in (
+        "const DAMAGE_FX_STAGGER_MS = 120;",
+        "const DAMAGE_FX_CONCURRENCY = 3;",
+        'const DAMAGE_FX_NATURE = "NORMAL";',
+        "const DAMAGE_FX_MAX_VARIANT = 4;",
+        "let damageQueue = [];",
+        "const damagePlays = [];",
+    ):
+        assert constant in damage_fx, f"模块级状态 / 口径常量必须跟着搬：{constant}"
+        assert constant not in effects, f"effects.js 里不该再留：{constant}"
+
+    # 反方向零调用：动效层不认识伤害层。
+    for name in _DAMAGE_FX_FUNCTIONS:
+        assert name not in effects, (
+            f"effects.js 不许调伤害层（{name}）：缝只朝一个方向（票 09 的解耦）"
+        )
+    for state_name in ("damagePlays", "damageQueue", "damageGrayPlays", "state.damageEvents"):
+        assert state_name not in effects, (
+            f"effects.js 不许读伤害层的运行状态（{state_name}）"
+        )
+    # 伤害层也不许反过来认动效层的入口（它只许用 rectOf / heroBlockFor / descendantWithClass）。
+    for name in _EFFECTS_LAYER_ENTRIES:
+        assert name not in damage_fx, (
+            f"damage-fx.js 不许调动效层（{name}）：缝只朝一个方向"
+        )
+    for helper in ("rectOf(", "heroBlockFor(", "descendantWithClass("):
+        assert helper in damage_fx, f"伤害层只借这三个布局小工具（走 effects.js）：{helper}"
+
+    # 票面 §2 的两个反向钩子：住在调用方，且调用点在重绘 / 换局那一侧。
+    render = _js_function(table, "renderTable")
+    assert "syncTransientEffects();" in render and "damageDropStalePlays();" in render, (
+        "renderTable 里先补动效层的类、再让伤害层按矩形重检版式（两个都是显式的）"
+    )
+    commit = _js_function(session, "commitView")
+    assert "clearTransientEffects();" in commit and "clearDamageFx();" in commit, (
+        "换局时两个清理都由 commitView 显式调（谁的状态谁收，不再互调）"
+    )
 
 
 def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_files() -> None:
