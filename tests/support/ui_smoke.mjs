@@ -421,12 +421,20 @@ const pendingTimers = new Map();
 /* U4-02：步长是**排程出来**的毫秒数，垫片顺手记下 `setTimeout` 的第二个参数，
  * 用例才能断言"收尾按 delayOf(record) 排、不是固定步长"（不读真实时钟）。 */
 const timerDelays = new Map();
+/* damage-fx-natures 票 07：真实浏览器按**绝对到期时刻**排队，只记 delay 的垫片会饿死长计时器
+ * ——一条 120ms 的轮询每次跑完都再排 120ms，永远比 1850ms 的摘层"更早"，摘层就永远轮不到
+ * （回放暂停的用例正好会撞上）。这里额外记一个**虚拟时钟**上的到期时刻：`runEarliest` 按它取
+ * 最早到期的那个，跑的时候把虚拟时钟推到那一刻。`timerDelays` 仍是"排出来多少毫秒"，
+ * 既有断言（错开 120 / 按 total 摘层 / latestTimerDelay）一个字不受影响。 */
+const timerDue = new Map();
+let shimClock = 0;
 let nextTimerId = 1;
 const runNextTimer = () => {
   const entry = pendingTimers.entries().next().value;
   if (!entry) return false;
   pendingTimers.delete(entry[0]);
   timerDelays.delete(entry[0]);
+  timerDue.delete(entry[0]);
   entry[1]();
   return true;
 };
@@ -441,9 +449,14 @@ const windowShim = {
     nextTimerId += 1;
     pendingTimers.set(id, fn);
     timerDelays.set(id, ms);
+    timerDue.set(id, shimClock + Math.max(0, Number(ms) || 0));
     return id;
   },
-  clearTimeout: (id) => { pendingTimers.delete(id); timerDelays.delete(id); },
+  clearTimeout: (id) => {
+    pendingTimers.delete(id);
+    timerDelays.delete(id);
+    timerDue.delete(id);
+  },
   setInterval: (fn, ms) => {
     intervals.push({ fn, ms });
     return intervals.length;
@@ -1951,6 +1964,7 @@ function slotsInQueryMatch(query) {
 
 // play / pause：计时器垫片只排队，这里显式跑一条——断言"推进一条"与"不叠第二个计时器"。
 pendingTimers.clear();
+timerDue.clear();
 ui.state.replay.index = 0;
 ui.renderReplay();
 clickButton($("btn-r-play"));
@@ -19113,6 +19127,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.sessionId = "u4-pacing";
   pendingTimers.clear();
   timerDelays.clear();
+  timerDue.clear();
   ui.state.view = body([]);
   ui.applyViewRaw(body([drawRecord, useRecord]));
   const delayBefore = ui.state.eventDelayMs;
@@ -19121,11 +19136,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   // 每步先清掉上一条的计时器（垫片不自动跑），再显式走一步：收尾那条是最后排的。
   pendingTimers.clear();
   timerDelays.clear();
+  timerDue.clear();
   ui.stepPlayback(false);
   check("U4-02-g 播完「摸 2 张」后按 delayOf(record) 排下一条：100 + 340 = 440ms",
     latestTimerDelay() === 440, `排程=${latestTimerDelay()}ms`);
   pendingTimers.clear();
   timerDelays.clear();
+  timerDue.clear();
   ui.stepPlayback(false);
   check("U4-02-h 播完「使用杀」后排下一条：100 + 180 = 280ms",
     latestTimerDelay() === 280, `排程=${latestTimerDelay()}ms`);
@@ -19598,6 +19615,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   load([timingDelay, timingRecord(81, "TURN_START", 1)]);
   pendingTimers.clear();
   timerDelays.clear();
+  timerDue.clear();
   ui.stepPlayback(false);
   const phaseStepDelay = latestTimerDelay();
   const phaseStepTimers = pendingTimers.size;
@@ -22803,20 +22821,32 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     await ui.animLoadConfig();
   };
 
-  /** 跑**最先到期**的那个计时器。真浏览器按到期时刻排，垫片的登记顺序只是插入顺序，
-   *  故这里按毫秒数取（同刻按登记先后）——否则 1500ms 的摘层会先于 120ms 的错开被跑掉。 */
+  /** 跑**最先到期**的那个计时器。真浏览器按**绝对到期时刻**排，垫片的登记顺序只是插入顺序，
+   *  故这里取虚拟时钟上 due 最小的那个（同刻按登记先后）——否则 1500ms 的摘层会先于 120ms
+   *  的错开被跑掉；而一条反复重排的 120ms 轮询会把长计时器饿死（票 07 的回放暂停）。
+   *  跑之前把虚拟时钟推到那一刻，所以"每 120ms 醒一次"的轮询不会卡住 1850ms 的摘层。 */
   const runEarliest = () => {
-    const entries = Array.from(timerDelays.entries())
-      .sort((left, right) => left[1] - right[1] || left[0] - right[0]);
-    if (!entries.length) return false;
-    const [id] = entries[0];
-    const fn = pendingTimers.get(id);
-    pendingTimers.delete(id);
-    timerDelays.delete(id);
-    if (typeof fn !== "function") return false;
-    fn();
-    runFrame();
-    return true;
+    for (;;) {
+      const entries = Array.from(timerDue.entries())
+        .sort((left, right) => left[1] - right[1] || left[0] - right[0]);
+      if (!entries.length) return false;
+      const [id, due] = entries[0];
+      // 历史用例里有用例只清 `pendingTimers`：残留在 timerDue 里的 id 直接丢掉（自愈）。
+      if (!pendingTimers.has(id)) {
+        timerDue.delete(id);
+        timerDelays.delete(id);
+        continue;
+      }
+      const fn = pendingTimers.get(id);
+      pendingTimers.delete(id);
+      timerDelays.delete(id);
+      timerDue.delete(id);
+      if (due > shimClock) shimClock = due;
+      if (typeof fn !== "function") return false;
+      fn();
+      runFrame();
+      return true;
+    }
   };
   /** 把计时器跑到 `done()` 成立为止（只看结果，不等真实时钟）。 */
   const runUntil = (done, limit = 400) => {
@@ -23324,6 +23354,152 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `cap=${capRaised} live=${liveCount()} plays=${plays13}`);
   runUntil(() => liveCount() === 0, 400);
   await reloadIniWith("damage_fx_thunder_concurrency", capThunder);
+
+  /* ==== damage-fx-natures 票 07：3 / 4 档演出期间**冻住记录流**（U-DMG-14*）====
+   *
+   * 卡的不是并发数，是"演出窗口里回放还在推进记录"：3 / 4 档 1.85 / 2.1s 里回放每步都重绘
+   * 全表 + 读一次布局，和演出自己的每帧绘制抢同一个主线程。治本 = 窗口里把记录流冻住，
+   * 等演出收尾再一次性补齐（一条不丢）。
+   *
+   * 这一段走**非 immediate** 的真回放路径（`loadDamageBatch` 的 `applyViewRaw` 排计时器 →
+   * `runEarliest()` 按虚拟时钟的到期时刻跑最早到期的那个），与上面 `step()`（immediate 连跑）
+   * 相对照：暂停只服务人眼看的路径，测试 / 收尾不该被演出拖住。
+   *
+   * 读数全在 DOM 上：`<html data-playback-hold>`（排播侧的通用读数，值 = 原因串）与
+   * `#t-damage-fx[data-damage-fx-hold]`（伤害侧"我在要求暂停"）。
+   */
+  const holdMark = () => attr(documentShim.documentElement, "data-playback-hold");
+  const damageHoldMark = () => attr(layer(), "data-damage-fx-hold");
+  const playbackIndex = () => (ui.state.playback ? ui.state.playback.index : null);
+  const logCount = () => ui.state.logRecords.length;
+  /** 还挂着的**暂停轮询**计时器（票面验收 2：作废 / 换局后不许残留）。 */
+  const pollTimers = () => Array.from(timerDelays.values())
+    .filter((ms) => ms === ui.PLAYBACK_HOLD_POLL_MS).length;
+  drainTimers();
+
+  // ---- 3 点档：冻住 → 连跑若干轮轮询仍停在同一格 → 摘层后一次补齐 ----
+  const records14 = [
+    hpChange(60, 1, 4, 3), hpChange(61, 2, 4, 3), hpChange(62, 3, 4, 3), hpChange(63, 0, 4, 3),
+  ];
+  const logBefore14 = logCount();
+  loadDamageBatch(records14, [damageEvent(60, 0, 1, 3)]);
+  runUntil(() => playbackIndex() === 1, 5);   // 第一步（100ms 基准步长，走真计时器）
+  check("U-DMG-14a 3 点伤害那一步照常播：记录前进 1 条、演出在播，伤害侧已要求暂停",
+    playbackIndex() === 1 && liveCount() === 1 && logCount() === logBefore14 + 1
+      && damageHoldMark() === "1",
+    `index=${playbackIndex()} live=${liveCount()} log=${logCount() - logBefore14} `
+      + `damage-hold="${damageHoldMark()}"`);
+  // 下一步的唤醒：判据为真 ⇒ 不推进，改排 120ms 轮询（通用读数这时才写上）。
+  const held14b = runUntil(() => holdMark() === "damage:3", 5);
+  check("U-DMG-14b 唤醒时先问判据：记录不前进、通用读数 = 原因串、重排的仍是 120ms 轮询",
+    held14b && playbackIndex() === 1 && holdMark() === "damage:3"
+      && latestTimerDelay() === ui.PLAYBACK_HOLD_POLL_MS,
+    `held=${held14b} index=${playbackIndex()} hold="${holdMark()}" next=${latestTimerDelay()}`);
+  for (let index = 0; index < 6; index += 1) runEarliest();
+  check("U-DMG-14c 连跑 6 轮轮询仍停在同一条记录上（记录流被冻住）、演出还在播",
+    playbackIndex() === 1 && liveCount() === 1 && logCount() === logBefore14 + 1,
+    `index=${playbackIndex()} live=${liveCount()} log=${logCount() - logBefore14}`);
+  const playedOut14 = runUntil(() => liveCount() === 0, 200);
+  const resumed14 = runUntil(() => ui.state.playback === null, 240);
+  check("U-DMG-14d 摘层后同一条回放继续推进到收尾：四条记录一条不丢，两个读数都清空",
+    playedOut14 && resumed14 && logCount() === logBefore14 + records14.length
+      && holdMark() === "" && damageHoldMark() === "",
+    `resumed=${resumed14} log=${logCount() - logBefore14}/${records14.length} `
+      + `hold="${holdMark()}" damage-hold="${damageHoldMark()}"`);
+
+  // ---- 1 / 2 档不冻（用户口径"3、4+"）：普通伤害照旧一条条走 ----
+  const records14e = [hpChange(70, 1, 4, 3), hpChange(71, 2, 4, 3), hpChange(72, 3, 4, 3)];
+  loadDamageBatch(records14e, [damageEvent(70, 0, 1, 2)]);
+  runUntil(() => playbackIndex() === 1, 5);
+  check("U-DMG-14e 2 点档照常开演，但**不**要求暂停（伤害侧读数空）",
+    playbackIndex() === 1 && liveCount() === 1 && damageHoldMark() === "",
+    `index=${playbackIndex()} live=${liveCount()} damage-hold="${damageHoldMark()}"`);
+  const stepped14e = runUntil(() => playbackIndex() >= 2, 20);
+  check("U-DMG-14f 2 点档窗口里记录照常前进（演出仍在播）：普通伤害不许被冻",
+    stepped14e && playbackIndex() >= 2 && liveCount() === 1 && holdMark() === "",
+    `index=${playbackIndex()} live=${liveCount()} hold="${holdMark()}"`);
+  runUntil(() => ui.state.playback === null, 240);
+  runUntil(() => liveCount() === 0, 240);
+
+  // ---- 4 点及以上一律 4 档，与家族无关：原因串带上最高在播档 ----
+  loadDamageBatch(
+    [hpChange(75, 1, 4, 1), hpChange(76, 2, 4, 1)],
+    [damageEvent(75, 0, 1, 4, "THUNDER")],
+  );
+  const held14g = runUntil(() => holdMark() === "damage:4", 5);
+  check("U-DMG-14g 4 档雷同样冻住记录流：原因串带最高在播档（damage:4），不认家族",
+    held14g && playbackIndex() === 1 && holdMark() === "damage:4" && liveCount() === 1,
+    `held=${held14g} index=${playbackIndex()} hold="${holdMark()}" live=${liveCount()}`);
+  runUntil(() => liveCount() === 0, 400);
+  runUntil(() => ui.state.playback === null, 240);
+
+  /* ---- 解除路径必须自然收敛（票面 §3 的三条）：演出自己摘层 / 版式作废 / 换局清场 ----
+   *
+   * 判据只看在播表，故这三条都不需要额外通知（伤害层不反向调 session）。
+   */
+  loadDamageBatch(
+    [hpChange(78, 1, 4, 3), hpChange(79, 2, 4, 3), hpChange(80, 3, 4, 3)],
+    [damageEvent(78, 0, 1, 3)],
+  );
+  const paused14h = runUntil(() => holdMark() === "damage:3", 5)
+    && playbackIndex() === 1 && liveCount() === 1;
+  heroBlockShift = 240;
+  ui.renderTable();   // → damageDropStalePlays ⇒ 在播表空
+  check("U-DMG-14h 演出中途版式作废：伤害侧暂停读数立刻清空（在播表空了）",
+    paused14h && liveCount() === 0 && damageHoldMark() === "",
+    `paused=${paused14h} live=${liveCount()} damage-hold="${damageHoldMark()}"`);
+  const resumed14h = runUntil(() => ui.state.playback === null, 240);
+  check("U-DMG-14i 暂停解除后回放继续收尾：通用读数清空、暂停轮询不残留",
+    resumed14h && holdMark() === "" && pollTimers() === 0,
+    `resumed=${resumed14h} hold="${holdMark()}" polls=${pollTimers()}`);
+  heroBlockShift = 0;
+  drainTimers();
+
+  loadDamageBatch(
+    [hpChange(81, 1, 4, 3), hpChange(82, 2, 4, 3)],
+    [damageEvent(81, 0, 1, 3)],
+  );
+  const paused14j = runUntil(() => holdMark() === "damage:3", 5)
+    && playbackIndex() === 1 && liveCount() === 1;
+  loadDamageBatch([], []);   // 换局：flushPlayback + 新会话（commitView ⇒ clearDamageFx）
+  check("U-DMG-14j 换局：暂停解除（在播归零 + 两个读数清空）、不残留计时器",
+    paused14j && ui.state.playback === null && liveCount() === 0
+      && holdMark() === "" && damageHoldMark() === ""
+      && pendingTimers.size === 0,
+    `paused=${paused14j} playback=${ui.state.playback} live=${liveCount()} `
+      + `hold="${holdMark()}" damage-hold="${damageHoldMark()}" timers=${pendingTimers.size}`);
+
+  /* ---- U-DMG-14k：「该暂停」是**登记表**，不是写死"只有伤害 3 档" ----
+   *
+   * 用户 2026-11-10 的口径：以后 回复体力 3 档（以及可能的其它重演出）也要冻住记录流，
+   * 所以这条缝必须对**任何来源**开放。这里登记一条与伤害无关的判据（模拟那个未来的演出，
+   * 批次里一条伤害事件都没有），同一个暂停路径必须生效——排播侧不认档位、不认家族。
+   */
+  let healHoldOn = true;
+  ui.registerPlaybackHold("smoke-heal", () => (healHoldOn ? "heal:3" : ""));
+  loadDamageBatch(
+    [hpChange(83, 1, 4, 3), hpChange(84, 2, 4, 3), hpChange(85, 3, 4, 3)],
+    [],
+  );
+  const held14k = runUntil(() => holdMark() === "heal:3", 5);
+  check("U-DMG-14k 非伤害来源（模拟 回复体力 3 档）登记后同样冻住记录流：读数 = 它自己的原因串",
+    held14k && playbackIndex() === 1 && holdMark() === "heal:3" && liveCount() === 0,
+    `held=${held14k} index=${playbackIndex()} hold="${holdMark()}" live=${liveCount()}`);
+  healHoldOn = false;   // 那条演出收掉（判据放空）
+  const resumed14k = runUntil(() => ui.state.playback === null, 240);
+  check("U-DMG-14l 判据放空后回放继续收尾、通用读数清空（换一个来源也走同一条路）",
+    resumed14k && holdMark() === "",
+    `resumed=${resumed14k} hold="${holdMark()}"`);
+  ui.registerPlaybackHold("smoke-heal", () => "");   // 收尾：把这条模拟判据清成恒空
+  drainTimers();
+
+  // ---- 兜底上限（票面 §3）：永久不摘层时页面不能永久卡死；纯函数可喂两个时刻 ----
+  const expired14 = ui.playbackHoldExpired;
+  check("U-DMG-14m 兜底上限是纯函数（两个时刻进、布尔出）：未开始 / 差 1ms 不超时，到点超时",
+    expired14(0, 12345) === false
+      && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS - 1) === false
+      && expired14(5000, 5000 + ui.PLAYBACK_HOLD_MAX_MS) === true,
+    `MAX=${ui.PLAYBACK_HOLD_MAX_MS} POLL=${ui.PLAYBACK_HOLD_POLL_MS}`);
 
   /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
    *

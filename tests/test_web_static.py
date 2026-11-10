@@ -1438,16 +1438,28 @@ def test_delay_steps_are_the_five_step_table_with_a_100ms_default() -> None:
 
 
 def test_playback_schedules_the_next_step_from_delay_of_the_record() -> None:
+    """收尾的**唯一出口**是 `schedulePlaybackStep(delayOf(record))`（票 07 起暂停门就在那儿）。
+
+    票 07 把"排下一步"从 `stepPlayback` 里挪进 `schedulePlaybackStep`（那一步才有机会先问
+    "演出要不要冻住记录流"）：这里只钉出口唯一、仍读 `delayOf(record)`、且 `immediate` 分支
+    绕开暂停门。暂停的行为归烟测 `U-DMG-14*`。
+    """
     text = _SESSION_JS.read_text(encoding="utf-8")
     match = _STEP_PLAYBACK_RE.search(text)
     assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
     schedule = [
-        line.strip() for line in match.group("body").splitlines()
-        if "setTimeout(() => stepPlayback(false)" in line
+        line.strip() for line in body.splitlines()
+        if "schedulePlaybackStep(" in line and not line.strip().startswith("//")
     ]
-    assert len(schedule) == 1, f"stepPlayback 收尾应只有一处排程：{schedule}"
-    assert "delayOf(record)" in schedule[0], f"排程必须读 delayOf(record)：{schedule[0]}"
-    assert "state.eventDelayMs" not in schedule[0], f"排程不得再直接用固定步长：{schedule[0]}"
+    assert schedule == ["if (!immediate) schedulePlaybackStep(delayOf(record));"], (
+        "stepPlayback 的排程只剩 schedulePlaybackStep(delayOf(record)) 一个出口、"
+        f"且只在非 immediate 侧（`immediate === true` 永远不暂停）：{schedule}"
+    )
+    # `immediate` 路径不许被暂停拖住：flushPlayback 的连跑 / 烟测的 step() 都走这条。
+    assert "setTimeout" not in _strip_js_comments(body), (
+        "stepPlayback 收尾不许自己排计时器：出口只有 schedulePlaybackStep（票 07）"
+    )
 
     body = _strip_js_comments(text)
     assert re.search(r"function delayOf\(record, base = state\.eventDelayMs\)", body), (
@@ -1462,6 +1474,104 @@ def test_replay_page_keeps_using_the_base_step_without_flight_pacing() -> None:
     replay = _strip_js_comments(_REPLAY_JS.read_text(encoding="utf-8"))
     assert "state.eventDelayMs" in replay, "回放页（D15 不接飞行）仍按基准步长排程"
     assert "delayOf(" not in replay, "回放页不接飞行，不得读按记录时长的节奏公式"
+
+
+# ---------------------------------------------------------------------------
+# damage-fx-natures 票 07：3 / 4 档演出期间暂停前端记录回放
+#
+# 判据 = 在播表（`damage-fx.js:damagePlays`），暂停门 = 回放排程（`session.js` 的
+# `schedulePlaybackStep`）。两件机械事实：
+# 1. **缝的方向**：`session.js` 不认识伤害层（不读 `damagePlays`、不认档位号），伤害层也
+#    不推进回放——它在文件末尾往登记表里放一条**只读**判据 `damageFxPlaybackHold`；
+# 2. **"该暂停"是登记表，不是写死"只有伤害 3 档"**（用户 2026-11-10：以后 回复体力 3 档、
+#    以及可能的其它重演出同形）。`session.js` 只认"有没有人要求暂停 + 原因串"。
+# 行为（3 / 4 档冻住、1 / 2 档照走、作废 / 换局解除）归烟测 `U-DMG-14*`。
+# ---------------------------------------------------------------------------
+
+
+def test_the_playback_hold_is_a_registry_not_a_hardcoded_damage_tier() -> None:
+    session = _strip_js_comments(_SESSION_JS.read_text(encoding="utf-8"))
+    damage_fx = _strip_js_comments(_DAMAGE_FX_JS.read_text(encoding="utf-8"))
+
+    # 两个口径常量：轮询间隔与兜底上限（缺一个都会让"永久不摘层 ⇒ 页面永久卡死"成立）。
+    assert re.search(r"^const PLAYBACK_HOLD_POLL_MS = 120;$", session, re.M), (
+        "暂停期间的轮询间隔必须是 120ms 的具名常量（与演出的错开 120ms 只是同值巧合）"
+    )
+    assert re.search(r"^const PLAYBACK_HOLD_MAX_MS = 8000;$", session, re.M), (
+        "兜底上限必须是具名常量（写得比最长档 2.2s × 三条错开还宽）"
+    )
+
+    # 登记表：任何脚本都能登记一条只读判据；重名就地替换，取首条非空原因。
+    register = _js_function(session, "registerPlaybackHold")
+    assert "playbackHoldProbes[name] = probe;" in register, (
+        "登记就落在排播侧的那张表里（同名就地替换）"
+    )
+    reason = _js_function(session, "playbackHoldReason")
+    assert "Object.keys(playbackHoldProbes)" in reason, "判据表是唯一的问答处（逐条问过去）"
+    assert "return String(reason);" in reason, (
+        "命中就返回**原因串**（实机 / 烟测读数用），排播侧不解读它"
+    )
+    assert "playbackHoldProbes[name]();" in reason, "每次被问都重读判据（不缓存在排计时器那一刻）"
+
+    # 兜底上限是纯函数：烟测直接喂两个时刻，不等真实时钟。
+    expired = _js_function(session, "playbackHoldExpired")
+    assert "Date.now" not in expired and "stageNow" not in expired, (
+        "playbackHoldExpired 必须是纯函数（两个时刻进、布尔出）"
+    )
+    assert "PLAYBACK_HOLD_MAX_MS" in expired, "上限只读那个具名常量"
+
+    # 唤醒体：先问判据再生效，暂停 / 超时 / 放空三条分支都在这一处。
+    wake = _js_function(session, "stepPlaybackWhenFree")
+    assert wake.index("playbackHoldReason()") < wake.index("stepPlayback(false)"), (
+        "每次被唤醒都要**重新读**判据，再决定推不推进（不是在排计时器那一刻算一次）"
+    )
+    assert "PLAYBACK_HOLD_POLL_MS" in wake, "仍要暂停 ⇒ 再排一次轮询"
+    assert "playbackHoldExpired(" in wake, "到兜底上限必须继续推进"
+    assert "playback_hold_timeout" in wake, (
+        "兜底触发要留一条可查的侧车日志（`playback_hold_timeout`）"
+    )
+    assert "playbackHoldTimeouts += 1" in wake, "兜底次数也要可读（实机 / 烟测）"
+    schedule = _js_function(session, "schedulePlaybackStep")
+    assert "window.setTimeout(stepPlaybackWhenFree" in schedule, (
+        "排下一步只排这一个唤醒体（暂停门在它的开头）"
+    )
+
+    # 读数：通用一份（页面根）、伤害侧一份（覆盖层）。两份都读 DOM，不开 DevTools 作用域。
+    mark = _js_function(session, "markPlaybackHold")
+    assert 'setAttribute("data-playback-hold"' in mark, (
+        "排播侧把「为什么暂停」写进 `<html data-playback-hold>`（与 `?audiotest` 的 data-audio 同姿态）"
+    )
+    damage_mark = _js_function(damage_fx, "damageFxMark")
+    assert 'setAttribute("data-damage-fx-hold"' in damage_mark, (
+        "伤害侧在覆盖层上标「我在要求暂停」（实机 / 烟测一眼读）"
+    )
+    for name in ("flushPlayback", "finishPlayback"):
+        assert "resetPlaybackHold()" in _js_function(session, name), (
+            f"{name} 要连暂停状态与读数一起收掉（否则换局 / 冲刷后读数挂在页面上）"
+        )
+
+    # 缝的方向：session.js 不读伤害层的在播表、也不认档位；伤害侧只登记一条只读判据。
+    assert "damagePlays" not in session, (
+        "session.js 不许读伤害层的在播表：判据由登记表给（票 07 的通用口）"
+    )
+    assert "damageFxPlaybackHold" not in session, (
+        "session.js 连伤害侧判据的名字都不该认识（按名直呼就等于写死了伤害这一个来源）"
+    )
+    assert "DAMAGE_FX_HOLD_MIN_VARIANT" not in session, (
+        "档位阈值住伤害层；排播侧不许出现任何档位号"
+    )
+    hold = _js_function(damage_fx, "damageFxPlaybackHold")
+    assert "damagePlays" in hold, "判据只看在播表（不看队列：排队条目由错开计时器自己开演）"
+    assert "DAMAGE_FX_HOLD_MIN_VARIANT" in hold, "档位阈值读具名常量"
+    assert re.search(r"^const DAMAGE_FX_HOLD_MIN_VARIANT = 3;$", damage_fx, re.M), (
+        "3 / 4 档才要暂停（1 / 2 档 1.5 / 1.65s 窗口短，普通伤害不该被冻住）"
+    )
+    assert damage_fx.count('registerPlaybackHold("damage", damageFxPlaybackHold);') == 1, (
+        "伤害侧只在文件末尾登记一条；同名重复登记会就地替换（页面里本文件只加载一遍）"
+    )
+    assert "registerPlaybackHold" not in _strip_js_comments(
+        _EFFECTS_JS.read_text(encoding="utf-8")
+    ), "动效层不参与回放暂停（它没有要冻住记录流的重演出）"
 
 
 def test_delay_button_titles_describe_the_new_five_step_range() -> None:
@@ -3232,12 +3342,14 @@ _DAMAGE_FX_FUNCTIONS = (
     "damageGrayscalePush",
     "damageGrayscalePop",
     "startDamagePlay",
+    "damageDropPlayTimers",
     "finishDamagePlay",
     "damageClearCanvas",
     "renderDamageFrame",
     "damageRequestFrame",
     "damageStopFrame",
     "damageFxLiveOf",
+    "damageFxPlaybackHold",
     "pumpDamageQueue",
     "fireDamageEventsThrough",
     "damageDropStalePlays",

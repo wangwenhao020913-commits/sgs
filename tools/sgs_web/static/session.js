@@ -782,6 +782,130 @@ function delayOf(record, base = state.eventDelayMs) {
   return Math.round(base + durationOf(record) * base / 100);
 }
 
+/* ---------------------------------- 回放暂停（damage-fx-natures 票 07） */
+
+/** 暂停期间的轮询间隔（毫秒）：每唤醒一次重读判据，仍要暂停就再排一次。
+ *
+ * 与伤害演出的**错开** 120ms 只是同值巧合：一个是"相邻开演隔多久"，一个是"多久回头看
+ * 一眼判据"，将来会各自调——别抽成同一个常量。
+ */
+const PLAYBACK_HOLD_POLL_MS = 120;
+
+/** 暂停的兜底上限（毫秒）：比最长档（2.2s）× 三条错开叠加还宽。
+ *
+ * 演出若因 bug 永久不摘层，记录流不能跟着永久停住——到点无论判据如何都继续推进，并留一条
+ * `playback_hold_timeout` 告警（`playbackHoldTimeouts` 同时记一次数，实机 / 烟测可读）。
+ */
+const PLAYBACK_HOLD_MAX_MS = 8000;
+
+/** 回放暂停的**登记表**（票 07）：键 = 提供方名，值 = 只读判据 `() => 原因串`。
+ *
+ * 为什么是登记表、而不是在 `stepPlayback` 里直接问伤害层：3 / 4 档伤害只是**第一个**要冻住
+ * 记录流的演出——回复体力 3 档、以后别的重演出同形，各自登记一条即可。`session.js` 因此
+ * 不认识任何具体演出：它不认档位号、不认家族、也**不读** `damagePlays`。
+ *
+ * 判据必须是**只读**的（被唤醒时会被反复调用），且只回答"现在该不该冻住记录流"：
+ * 推进、清理、排播那些事归各演出自己。
+ */
+const playbackHoldProbes = {};
+
+/** 这一轮暂停从什么时候开始（`stageNow()`；0 = 现在没在暂停）。 */
+let playbackHoldStartedAt = 0;
+
+/** 兜底上限被触发的次数（正常永远是 0；实机 / 烟测可读，用来发现"判据再也不放空"）。 */
+let playbackHoldTimeouts = 0;
+
+/** 登记一条「现在该暂停回放吗」的只读判据；同名就地替换（先登记者先命中）。 */
+function registerPlaybackHold(name, probe) {
+  if (!name || typeof probe !== "function") return;
+  playbackHoldProbes[name] = probe;
+}
+
+/** 现在该不该暂停回放：返回原因串（`"damage:3"` 这种，写进 DOM 读数），没有则 `""`。
+ *
+ * 每次被问都**重新读**判据——演出可能被版式作废 / 换局提前收掉，也可能又起一条新的。
+ * 单条判据抛错按"不暂停"处理：以后新登记一条坏判据时，页面不能跟着永久停下。
+ */
+function playbackHoldReason() {
+  for (const name of Object.keys(playbackHoldProbes)) {
+    let reason = "";
+    try {
+      reason = playbackHoldProbes[name]();
+    } catch (error) {
+      reason = "";
+      if (typeof console !== "undefined" && console.warn) {
+        console.warn(`[playback-hold] ${name} 的判据抛错，按不暂停处理：${error}`);
+      }
+    }
+    if (reason) return String(reason);
+  }
+  return "";
+}
+
+/** 暂停是否已到兜底上限（**纯函数**：两个时刻进、布尔出，烟测直接喂时刻不等时钟）。 */
+function playbackHoldExpired(startedAt, now) {
+  if (!startedAt) return false;
+  return now - startedAt >= PLAYBACK_HOLD_MAX_MS;
+}
+
+/** 把"回放暂停"的读数写进页面根（`<html data-playback-hold>`，值 = 原因串或空）。
+ *
+ * 与 `?audiotest=1` 的 `<html data-audio>` 同一姿态：实机 / 烟测一眼读，不必开 DevTools
+ * 的作用域。**只写读数**，不驱动任何行为（判据才是行为落点）。
+ */
+function markPlaybackHold(reason) {
+  if (typeof document === "undefined" || !document || !document.documentElement) return;
+  const root = document.documentElement;
+  if (typeof root.setAttribute !== "function") return;
+  root.setAttribute("data-playback-hold", reason ? String(reason) : "");
+}
+
+/** 收掉暂停状态与读数（冲刷 / 回放收尾）：下一次排程重新开始计时。 */
+function resetPlaybackHold() {
+  playbackHoldStartedAt = 0;
+  markPlaybackHold("");
+}
+
+/** 排下一步回放（票 07）：先等 `base`，**唤醒时**再问一句"该暂停吗"。
+ *
+ * 为什么问在唤醒而不是排程那一刻：演出随时可能起来（同批错开 120ms 的后续几条）或提前收掉
+ * （版式作废 / 换局），排程时算一次就会把一个过期的答案用到几百毫秒之后。
+ *
+ * `immediate` 路径**不经过这里**（`stepPlayback(true)` 由 `flushPlayback` / 烟测直接连跑）：
+ * 暂停只服务"人眼看"的回放，测试与收尾不该被演出拖住。
+ */
+function schedulePlaybackStep(base) {
+  playbackTimer = window.setTimeout(stepPlaybackWhenFree, Math.max(0, Number(base) || 0));
+}
+
+/** `schedulePlaybackStep` 的唤醒体：判据为空就继续推进，否则再排一次轮询。 */
+function stepPlaybackWhenFree() {
+  playbackTimer = null;
+  const reason = playbackHoldReason();
+  if (!reason) {
+    resetPlaybackHold();
+    stepPlayback(false);
+    return;
+  }
+  const now = stageNow();
+  if (!playbackHoldStartedAt) playbackHoldStartedAt = now;
+  if (playbackHoldExpired(playbackHoldStartedAt, now)) {
+    // 兜底（票面 §3）：判据永久为真时页面不能跟着永久卡死——继续推进，并留一条侧车日志。
+    playbackHoldStartedAt = 0;
+    playbackHoldTimeouts += 1;
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn(
+        `[playback-hold] playback_hold_timeout：判据 ${reason} 已挂 ${PLAYBACK_HOLD_MAX_MS}ms，继续推进`,
+      );
+    }
+    markPlaybackHold("");
+    stepPlayback(false);
+    return;
+  }
+  markPlaybackHold(reason);
+  playbackTimer = window.setTimeout(stepPlaybackWhenFree, PLAYBACK_HOLD_POLL_MS);
+}
+
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
  *
  * ``immediate`` = 测试 / 批量冲刷用：不排计时器，由 :func:`flushPlayback` 直接连跑。
@@ -859,7 +983,9 @@ function stepPlayback(immediate) {
     scrollLogToBottom();
   }
   playback.index += 1;
-  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), delayOf(record));
+  // 票 07：下一步先过暂停门（3 / 4 档演出在播时记录流冻住，摘层后再一次补齐）。
+  // `immediate` 侧不排计时器、也不问判据——flushPlayback 的连跑与烟测的 step() 走那条。
+  if (!immediate) schedulePlaybackStep(delayOf(record));
 }
 
 /** 把整批回放**立刻**跑完（测试与"收到新视图前先收尾"用）。 */
@@ -868,6 +994,7 @@ function flushPlayback() {
     if (window.clearTimeout) window.clearTimeout(playbackTimer);
     playbackTimer = null;
   }
+  resetPlaybackHold();
   let guard = 0;
   while (state.playback && guard < 100000) {
     stepPlayback(true);
@@ -887,6 +1014,8 @@ function finishPlayback() {
     if (window.clearTimeout) window.clearTimeout(playbackTimer);
     playbackTimer = null;
   }
+  // 票 07：整批播完就收暂停读数（演出自己的帧与声不受影响，见 `schedulePlaybackStep`）。
+  resetPlaybackHold();
   // 兜底：旧录像 / 合成载荷若没有同 seq 的记录，播完立即触发，不让事件跨到下一批。
   fireSkillEventsThrough(Infinity);
   fireDamageEventsThrough(Infinity);

@@ -11,6 +11,10 @@
  *   rectOf / heroBlockFor / descendantWithClass   → effects.js（渲染层的小工具，非纯函数）
  *   stageNow                                      → session.js（唯一的时钟读口）
  *
+ * 票 07 又往 `session.js` 登记了一条只读判据（文件末尾的 `registerPlaybackHold("damage", …)`）：
+ * 3 / 4 档在播时排播侧据此冻住记录流。那是**同一个方向**（本文件调排播侧的口），排播侧仍然
+ * 不认识本文件的任何内部结构（不读 `damagePlays`、不认档位号）。
+ *
  * **反方向零调用**——两个钩子都挪到了调用方（票 09 的解耦，不是本文件自己收的）：
  *
  *   table.js:renderTable  → damageDropStalePlays()   重绘后按矩形判"版式变没变"
@@ -176,6 +180,15 @@ function damageFxCapFor(nature) {
 
 /** 档位封顶：`amount ≥ 5` 按 4 档演——档位只决定强度，数字照旧是服务端给的真实值。 */
 const DAMAGE_FX_MAX_VARIANT = 4;
+
+/** 会**暂停回放**的最低档（damage-fx-natures 票 07）：3 / 4 档 1.85 / 2.1s 的窗口里，回放
+ *  继续逐条重绘全表会和演出抢主线程；1 / 2 档窗口只有 1.5 / 1.65s，普通伤害（摸牌挨一刀）
+ *  被冻住观感更差，用户也只要"3、4+"。
+ *
+ *  这是**伤害家族**的口径。以后要冻住记录流的别的演出（回复体力 3 档等）**不是**改这个数，
+ *  而是在它自己的脚本里 `registerPlaybackHold(...)` 另登记一条判据——排播侧只认"有没有人
+ *  要求暂停"，不认来源。 */
+const DAMAGE_FX_HOLD_MIN_VARIANT = 3;
 
 /** 没有来源（`source == null`，判定类伤害）时剑光从画面左侧外这么远处飞进来（CSS px）。 */
 const DAMAGE_FX_OFFSTAGE_UNITS = 200;
@@ -391,7 +404,8 @@ function damageFxMountCanvas(layer) {
   return damageCanvas;
 }
 
-/** 层上的可读状态：`data-damage-fx-live` = 正在播几条、`data-damage-fx-plays` = 累计几次。
+/** 层上的可读状态：`data-damage-fx-live` = 正在播几条、`data-damage-fx-plays` = 累计几次、
+ *  `data-damage-fx-hold` = 这条演出正要求"暂停回放"吗（`"1"` / 空串，票 07）。
  *
  * 画布像素不可断言（也不该断言），故把"演了几条 / 在播几条"写在节点上——烟测与实机
  * 验收都读它，与 `.skill-float` 的 `data-skill-stack` 同一姿态。
@@ -400,6 +414,9 @@ function damageFxMark(layer, play = null) {
   if (!layer || !layer.setAttribute) return;
   layer.setAttribute("data-damage-fx-live", String(damagePlays.length));
   layer.setAttribute("data-damage-fx-plays", String(damageStartedCount));
+  // 票 07：这条演出现在要不要冻住记录流（判据与 `session.js` 读的是同一个函数；这里只做
+  // 读数，故实机 / 烟测读层上这一个属性就等于读了排播侧的判据）。
+  layer.setAttribute("data-damage-fx-hold", damageFxPlaybackHold() ? "1" : "");
   // 最近一条的飘字读数（全部相对中剑方武将块左上角、CSS px）：实机验收在 DevTools 里
   // 直接读这三个数就能判"有没有压到体力条"，不必自己按百分比换算。
   const metrics = play && play.fx ? play.fx.metrics : null;
@@ -617,23 +634,31 @@ function startDamagePlay(event) {
   return play;
 }
 
+/** 摘掉一条演出的三个计时器：寿命（到点摘层）+ 屏闪窗口的开 / 关。
+ *
+ * 两处调用：自然到点（`finishDamagePlay`）与**清场**（`clearDamageFx`：换局 / 覆盖层不在了）。
+ * 清场那一侧原只清寿命计时器，残留的窗口计时器之后照样触发 `damageGrayscalePush` /
+ * `damageFlashPush`——那时这条演出早已不在在播表里，没有人再来 pop，牌桌就**永久**留在
+ * 黑白 / 冷白里（票 07 验收"换局后不留计时器"时挖出来的）。
+ */
+function damageDropPlayTimers(play) {
+  if (!play) return;
+  for (const key of ["timer", "windowOnTimer", "windowOffTimer"]) {
+    if (play[key] !== null && play[key] !== undefined && window.clearTimeout) {
+      window.clearTimeout(play[key]);
+    }
+    play[key] = null;
+  }
+}
+
 /** 一段演出到点：从在播表里摘掉，最后一帧合成完之后清画布、摘 canvas（不留残影）。 */
 function finishDamagePlay(play) {
   const at = damagePlays.indexOf(play);
   if (at >= 0) damagePlays.splice(at, 1);
   // 票 06：先收声（这一段的声道静音并清 cue 游标），再撤画面。
   damageSfxStop(play);
-  if (play && play.timer !== null && play.timer !== undefined) {
-    if (window.clearTimeout) window.clearTimeout(play.timer);
-    play.timer = null;
-  }
-  // 收尾必须把屏闪窗口一起撤掉：否则中途作废的演出会把整块牌桌留在黑白 / 冷白里。
-  for (const key of ["windowOnTimer", "windowOffTimer"]) {
-    if (play && play[key] !== null && play[key] !== undefined && window.clearTimeout) {
-      window.clearTimeout(play[key]);
-    }
-    if (play) play[key] = null;
-  }
+  // 收尾必须把三个计时器一起撤掉：否则中途作废的演出会把整块牌桌留在黑白 / 冷白里。
+  damageDropPlayTimers(play);
   damageGrayscalePop(play);
   damageFlashPop(play);
   if (!damagePlays.length) {
@@ -718,6 +743,27 @@ function damageFxLiveOf(nature) {
     if (damageFxNatureKind(play && play.nature) === kind) live += 1;
   }
   return live;
+}
+
+/** 「3 / 4 档演出在播 ⇒ 请前端暂停记录回放」（damage-fx-natures 票 07）。**只读**判据。
+ *
+ * 由 `session.js` 的排程侧按登记表调用（登记见本文件末尾的 `registerPlaybackHold`）：
+ * 本函数不推进排播、不改在播表、也不知道回放的存在——它只回答"现在该不该冻住"。
+ *
+ * - 只看 `damagePlays`（在播表），**不看队列**：`fireDamageEventsThrough` 已经把队列头那条
+ *   `startDamagePlay` 掉了，"演出正在播"与"队列里还有"是两回事；剩下的排队条目由错开计时器
+ *   自己开演，不依赖回放推进。
+ * - 家族无关：剑光 / 雷 / 火都按 `play.variant` 判（同一份档位口径，见 `damageFxPlanFor`）。
+ * - 返回**原因串**（`"damage:4"` = 最高在播档）：排播侧的判据只认"非空 = 该暂停"，不解读它；
+ *   空串 = 不要求暂停。
+ */
+function damageFxPlaybackHold() {
+  let highest = 0;
+  for (const play of damagePlays) {
+    const variant = Math.round(Number(play && play.variant) || 0);
+    if (variant >= DAMAGE_FX_HOLD_MIN_VARIANT && variant > highest) highest = variant;
+  }
+  return highest ? `damage:${highest}` : "";
 }
 
 /** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过**该属性自己的** cap。
@@ -841,10 +887,9 @@ function clearDamageFx() {
   damageSfxStopAll();
   damageQueue = [];
   for (const play of damagePlays.splice(0, damagePlays.length)) {
-    if (play.timer !== null && play.timer !== undefined && window.clearTimeout) {
-      window.clearTimeout(play.timer);
-    }
-    play.timer = null;
+    // 票 07：三个计时器一起清（见 `damageDropPlayTimers`）——只清寿命那一个会把屏闪窗口的
+    // 计时器留在队列里，之后没人 pop。
+    damageDropPlayTimers(play);
   }
   damageStopFrame();
   damageClearCanvas();
@@ -856,3 +901,13 @@ function clearDamageFx() {
   damageFlashSync();
   damageFxMark(damageFxLayer());
 }
+
+/* -------------------------------------------------- 票 07：登记"演出期间暂停回放" */
+
+/* 把伤害家族的判据登记进 `session.js` 的暂停表（`registerPlaybackHold` 住 session.js）。
+ * 登记放在文件末尾：页面里本文件只加载一遍；判据读的是**调用时**的 `damagePlays`，故早晚
+ * 登记都不影响。`typeof` 守卫与 `animTiming` / `stageNow` 同一口径——只加载本文件的探针
+ * （`test_web_static.py` 的三份 sandbox）里没有排播侧，本文件仍是一份独立的排播模块。
+ * 以后要冻住记录流的别的演出（回复体力 3 档等）在自己的脚本里各登记一条，**不要**改这里
+ * ——排播侧不认来源，只认"有没有人要求暂停"。 */
+if (typeof registerPlaybackHold === "function") registerPlaybackHold("damage", damageFxPlaybackHold);
