@@ -387,6 +387,7 @@
     var count = Math.max(0, Math.round(num(T.COUNT)));
     var gap = num(T.GAP);
     var impact = num(T.IMPACT);
+    var lastImpact = Math.max(num(T.LAST_IMPACT), impact);
     var blast = num(T.BLAST);
     var sky = num(T.SKY_AT);
     var explode = num(T.EXPLODE);
@@ -442,11 +443,13 @@
       });
     }
 
-    /* 4 档：火云低频 → 云内预闪 → 流星下坠 → 大爆炸 + 冲击波 */
+    /* 4 档：火云低频 → 云内预闪 → 流星下坠 → 大爆炸 + 冲击波。
+     * 火云从**最后一支箭钉住**开始压顶（`LAST_IMPACT`，时间轴上就是"箭串播完"的那一刻），
+     * 不是从第一支命中就开始——那样低频会比画面早一整串箭。 */
     if (explode > 0) {
-      var lead = Math.max(0.12, sky > impact ? sky - impact : 0.2);
-      at(impact, function (when) {
-        if (sky > impact) rumble(ctx, out, B, when, sky - impact, 0.14);
+      var lead = Math.max(0.12, sky > lastImpact ? sky - lastImpact : 0.2);
+      at(lastImpact, function (when) {
+        if (sky > lastImpact) rumble(ctx, out, B, when, sky - lastImpact, 0.14);
       });
       at(sky, function (when) {
         var pres = [when - lead * 0.7, when - lead * 0.45, when - lead * 0.2];
@@ -454,7 +457,8 @@
           crack(ctx, out, B, pres[p], 0.08, 0.06 * level, 2200, -0.10);
           pop(ctx, out, B, pres[p], 0.05, -0.1);
         }
-        meteorFall(ctx, out, B, when, Math.max(0.06, explode - (sky || when)));
+        // 4 档的流星一定先有「压境」（`SKY_AT > 0`），下落时长 = 压境到命中的那一段。
+        meteorFall(ctx, out, B, when, Math.max(0.06, explode - sky));
       });
       at(explode, function (when) {
         boom(ctx, out, B, when, 1.15, 0.88 * level, 0.05);

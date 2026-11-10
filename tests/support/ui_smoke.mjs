@@ -23299,15 +23299,21 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   step();
   runUntil(() => liveCount() === 3, 120);
   const natures11 = playNatures();
-  check("U-DMG-11 同批混家族：三条都在播、各用各的模块、play.nature 分别正确",
+  /* 音效那一侧也各用各的模块：`damageSfxEngineFor(play.nature)` 是音效层的唯一查表处，
+   * 这里按三条演出的 nature 各取一次（真出不出声由 U-SFX-04c / U-SFX-07 在假模块上验）。 */
+  const engineKeys11 = JSON.parse(vm.runInContext(
+    "JSON.stringify(damagePlays.map((play) => damageSfxEngineFor(play.nature).key))", context))
+    .sort();
+  check("U-DMG-11 同批混家族：三条都在播、各用各的画面与音效模块、play.nature 分别正确",
     liveCount() === 3
       && natures11.length === 3 && natures11.includes("THUNDER")
       && natures11.includes("FIRE")
       && natures11.some((nature) => nature === null)
       && thunderLog.create === thunderBefore11 + 1
       && damageLog.create === damageBefore11 + 1
-      && fireLog.create === fireBefore11 + 1,
-    `live=${liveCount()} natures=${JSON.stringify(natures11)} `
+      && fireLog.create === fireBefore11 + 1
+      && setEquals(engineKeys11, ["SgsSfx", "SgsThunderSfx", "SgsFireSfx"]),
+    `live=${liveCount()} natures=${JSON.stringify(natures11)} engines=${JSON.stringify(engineKeys11)} `
       + `thunder=${thunderLog.create - thunderBefore11} damage=${damageLog.create - damageBefore11} `
       + `fire=${fireLog.create - fireBefore11}`);
   runUntil(() => liveCount() === 0, 300);
@@ -23358,6 +23364,36 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `live=${liveCount()} swordX=${attr(layer(), "data-damage-fx-sword-x")} `
       + `sky="${attr(layer(), "data-damage-fx-sky")}"`);
   runUntil(() => liveCount() === 0, 200);
+
+  /* ---- U-DMG-17e：火的并发表也是**独立的一条**（票 02 的读口 + 票 03 开闸后的行为覆盖）----
+   *
+   * 票 02 收口时 FIRE 还被闸门挡着，"火可同时 5 条"只断在读口（`capsReal.fireFive`）。本票开闸
+   * 之后这条行为终于能跑到：4 条火 + 3 条无属性同批 ⇒ 火丢第 4 条、无属性 3 条照演。
+   */
+  const capFire17 = iniCap("damage_fx_fire_concurrency");
+  const wantFire17 = Math.min(capFire17, 4);
+  const before17e = playCount();
+  loadDamageBatch(
+    [hpChange(48, 1, 4, 3), hpChange(49, 2, 4, 3), hpChange(50, 3, 4, 3), hpChange(51, 0, 4, 3),
+      hpChange(52, 1, 3, 2), hpChange(53, 2, 3, 2), hpChange(54, 3, 3, 2)],
+    [damageEvent(48, 0, 1, 1, "FIRE"), damageEvent(49, 0, 2, 1, "FIRE"),
+      damageEvent(50, 0, 3, 1, "FIRE"), damageEvent(51, 0, 0, 1, "FIRE"),
+      damageEvent(52, 0, 1, 1), damageEvent(53, 0, 2, 1), damageEvent(54, 0, 3, 1)],
+  );
+  step(7);
+  const grouped17e = runUntil(() => liveCount() === 3 + wantFire17, 400);
+  const natures17e = playNatures();
+  // 无属性有两种写法：`null`（牌面没声明）与显式 `"NORMAL"`——家族判据读产品自己的
+  // `damageFxNatureKind`（与 U-DMG-12 的 `liveByNature` 同一个口），测试不另抄一份映射。
+  const natureKind17e = vm.runInContext("damageFxNatureKind", context);
+  const fires17e = natures17e.filter((nature) => natureKind17e(nature) === "FIRE").length;
+  const normals17e = natures17e.filter((nature) => natureKind17e(nature) === "NORMAL").length;
+  check("U-DMG-17e 火自己的 cap 独立算：4 条火 + 3 条无属性同批 ⇒ 火丢第 4 条、无属性 3 条照演",
+    grouped17e && capFire17 === 3 && fires17e === wantFire17 && normals17e === 3
+      && playCount() === before17e + 3 + wantFire17,
+    `live=${liveCount()} fire=${fires17e}/${wantFire17} normal=${normals17e} `
+      + `plays=${playCount() - before17e} cap=${capFire17}`);
+  runUntil(() => liveCount() === 0, 400);
 
 
   /* ---- U-DMG-12：每属性独立计数（票 02 §3 / 验收 2）----

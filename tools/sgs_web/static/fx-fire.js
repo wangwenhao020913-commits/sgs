@@ -109,6 +109,8 @@
 
   /* -------------------------------------------------------------- 四档 ----
    * 一档一行的强度表：箭数 / 箭长 / 火星 / 焦痕 / 屏震 / 飘字大小。
+   * 四档的名字（烬火 / 烈焰 / 爆燃 / 天陨）只活在这行注释里——牌桌上没有地方读它，
+   * 写进表就是一块没人读的数据。
    * 所有"越来越强"都只读这张表，画法本身只有一套。
    * 时间点（命中、爆炸、飘字）在下面 `fillExportTimes()` 里按这张表推出来，不手写第二份。
    *
@@ -116,7 +118,7 @@
    * 流星的 `p0` / `c` 在 `create()` 里按画布宽高比例换成落屏坐标。 */
   var TIERS = {
     1: {
-      dmg: 1, name: "烬火", tag: "三支火羽",
+      dmg: 1,
       duration: 4.9, fadeStart: 3.0, fadeEnd: 4.6,
       count: 3, gap: 0.100, flight: 0.30, launch0: 0.60,
       len: 152, wid: 12,
@@ -128,7 +130,7 @@
       blast: null, meteor: null
     },
     2: {
-      dmg: 2, name: "烈焰", tag: "六箭连珠",
+      dmg: 2,
       duration: 5.2, fadeStart: 3.2, fadeEnd: 4.9,
       count: 6, gap: 0.085, flight: 0.30, launch0: 0.60,
       len: 160, wid: 14,
@@ -140,7 +142,7 @@
       blast: null, meteor: null
     },
     3: {
-      dmg: 3, name: "爆燃", tag: "九箭灼爆",
+      dmg: 3,
       duration: 5.6, fadeStart: 3.4, fadeEnd: 5.2,
       count: 9, gap: 0.070, flight: 0.28, launch0: 0.60,
       len: 168, wid: 16,
@@ -155,7 +157,7 @@
       meteor: null
     },
     4: {
-      dmg: 4, name: "天陨", tag: "十二箭 · 天降陨石",
+      dmg: 4,
       duration: 6.2, fadeStart: 4.0, fadeEnd: 5.8,
       count: 12, gap: 0.060, flight: 0.27, launch0: 0.58,
       len: 162, wid: 15,

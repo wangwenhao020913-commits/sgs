@@ -158,16 +158,18 @@ function damageSfxBaseTimeline(fxApi) {
 /** 一条声道取一份**可变**的时间轴副本：`create()` 捕获的是对象引用，开演时原地改写。
  *
  * 逐键复制**画面时间轴上的全部数字**（不是一份手写名单）：三族的键本来就不同——剑读
- * `CHARGE / LAUNCH / IMPACT`，雷多 `SKY_AT / EXPLODE`，火还要 `COUNT / GAP / FLIGHT /
- * LAST_IMPACT / BLAST / NUM_AT`（逐箭发声靠它们摊开）。手写名单每加一族就得改这里，而
- * "哪个键有用"是各音效模块自己的事；非数字 / 非有限值一律跳过（`PRE_STRIKES` 那种数组）。
+ * `CHARGE / LAUNCH / IMPACT`，雷多 `SKY_AT / EXPLODE`（还有 `PRE_STRIKES` 那种数组），
+ * 火还要 `COUNT` / `GAP` / `FLIGHT` / `LAST_IMPACT` / `BLAST` / `NUM_AT`（逐箭发声靠它们
+ * 摊开）。手写名单每加一族就得改这里，而"哪个键有用"是各音效模块自己的事；**只收数字**，
+ * 数组 / 字符串一律跳过（不靠 `Number()` 把 `[]` 变成 0）。
  */
 function damageSfxTimeline(source) {
   const timeline = source || {};
   const out = {};
   for (const key of Object.keys(timeline)) {
-    const value = Number(timeline[key]);
-    if (Number.isFinite(value)) out[key] = value;
+    const value = timeline[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    out[key] = value;
   }
   return out;
 }

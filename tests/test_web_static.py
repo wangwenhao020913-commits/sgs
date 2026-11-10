@@ -4120,18 +4120,27 @@ const report = vm.runInContext(`(() => {
   const off = game(1, { stage: { src: null, dst } });
   try { for (const t of [0, 0.2, 0.6, 1.2]) off.draw(t); } catch (error) { drawn.offstage = String(error); }
   /* 3 点档：飘字只该在"最后一击 → 收尾"那一段出现（画面内部按素材页秒数画，靠 warp 对齐；
-   * 单位一旦错位，飘字就会跑到爆炸之前——票 03 实机目视时真踩过这一条）。 */
+   * 单位一旦错位，飘字就会跑到爆炸之前——票 03 实机目视时真踩过这一条）。
+   * 采样点从**时间轴自己**算（命中前 / 最后一击到飘字之间 / 飘字之后），不写死秒数：
+   * 改 anim.ini 或排期比例时，这条断言不跟着红。 */
   const numCanvas = document.createElement("canvas");
+  const numClock = fx.gameTiming(3);
+  const threeT = numClock.timeline;
   const numFx = fx.create(numCanvas, {
     variant: 3, profile: "game", amount: 3, bare: true, dpr: 1,
     view: { width: 1440, height: 810 }, stage: { src, dst }, numberKeepOut: 70,
   });
   const numCtx = numCanvas.getContext("2d");
+  const marks = {
+    beforeImpact: Math.max(0, threeT.IMPACT - Math.max(0.02, threeT.IMPACT * 0.4)),
+    beforeNumber: (threeT.LAST_IMPACT + threeT.NUM_AT) / 2,
+    afterNumber: (threeT.NUM_AT + threeT.DURATION) / 2,
+  };
   const numberAt = {};
-  for (const at of [0.10, 0.50, 0.62, 0.70, 0.74, 0.90, 1.60]) {
+  for (const key of Object.keys(marks)) {
     numCtx.texts = [];
-    numFx.draw(at);
-    numberAt[at] = numCtx.texts.indexOf("-3") >= 0;
+    numFx.draw(marks[key]);
+    numberAt[key] = numCtx.texts.indexOf("-3") >= 0;
   }
   const six = make({
     variant: 4, profile: "game", amount: 6, bare: true, dpr: 1,
@@ -4239,6 +4248,7 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
         f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(probe['fields'])}"
     )
 
+    # 箭数来自素材包 README §二 的四档表（独立于 `TIERS.count` 的第二处真源）。
     counts = {"1": 3, "2": 6, "3": 9, "4": 12}
     for variant in ("1", "2", "3", "4"):
         shape = probe["shapes"][variant]
@@ -4274,15 +4284,11 @@ def test_the_fire_renderer_keeps_the_sword_renderer_shape(fire_probe: dict) -> N
 
     # 飘字只在"最后一击 → 收尾"那一段出现：画面按素材页秒数画、`draw()` 把牌桌秒数映射回去，
     # 单位一旦错位（把牌桌秒数写进 `numAt`）飘字就会跑到爆炸之前——这条从 public `draw()` 读。
+    # 三个采样点由时间轴自己算（见探针）：命中前 / 最后一击到飘字之间 / 飘字之后。
     number = probe["numberAt"]
-    three = probe["shapes"]["3"]["timeline"]
-    assert number["0.1"] is False and number["0.5"] is False and number["0.62"] is False, (
-        f"3 点火的爆炸（{three['BLAST']:.2f}s）之前不许有飘字：{[k for k, v in number.items() if v]}"
-    )
-    assert number["0.7"] is False, "最后一击之后、飘字时刻（NUM_AT）之前仍然没有"
-    assert number["0.74"] is True and number["0.9"] is True and number["1.6"] is True, (
-        f"飘字时刻（{three['NUM_AT']:.2f}s）之后到收尾之间必须出现：{number}"
-    )
+    assert number["beforeImpact"] is False, f"命中之前不许有飘字：{number}"
+    assert number["beforeNumber"] is False, f"最后一击之后、飘字时刻之前仍然没有：{number}"
+    assert number["afterNumber"] is True, f"飘字时刻之后到收尾之间必须出现：{number}"
 
     # 只有 3 / 4 档爆燃 / 天陨；1 / 2 档只有火羽与火星。
     for variant in ("1", "2"):
@@ -4337,6 +4343,11 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
             f"实际 {impact} + {fade} > {total}"
         )
     totals = [values[f"damage_fx_fire_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
+    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), (
+        f"四档总时长必须各自独立可改（一条公式绑死的话四个值会相等）：{totals}"
+    )
+    # 这四个数是 **spec §演出口径** 的缺省（不是从 anim.ini 抄回来的第二份）：改 ini 等于改
+    # 用户可见的节奏，可以；但换掉缺省值必须先改 spec。
     assert totals == [1400, 1500, 1700, 2000], (
         f"spec §游戏档缺省时长：火 / 雷都是 1400 / 1500 / 1700 / 2000，实际 {totals}"
     )
@@ -4403,6 +4414,172 @@ def test_the_fire_without_source_starts_outside_the_screen(fire_probe: dict) -> 
     assert stage["b"]["x"] > 0 and stage["b"]["y"] > 0, "落点仍在目标牌上"
     assert offstage["drawn"] == "ok", f"无来源那一分支逐帧绘制抛错：{offstage['drawn']}"
 
+
+_FIRE_SFX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 假 Web Audio：node 没有 AudioContext，而 `SgsFireSfx` 的排程代码必须整条走一遍。
+ * 每个节点只有 connect / start / stop 与参数 setter；顺手数一数**建了多少个音源**——
+ * 四档的 cue 表差别很大（箭数 + 爆燃 + 天陨），节点数能把"排程真的按档展开"读出来。 */
+function makeParam() {
+  const p = {
+    value: 0,
+    setValueAtTime(v) { p.value = v; return p; },
+    exponentialRampToValueAtTime(v) { p.value = v; return p; },
+    linearRampToValueAtTime(v) { p.value = v; return p; },
+    setTargetAtTime(v) { p.value = v; return p; },
+  };
+  return p;
+}
+
+function makeNode(kind, graph) {
+  const node = {
+    kind,
+    connect() { return node; },
+    disconnect() {},
+    start() { graph.started += 1; },
+    stop() {},
+  };
+  if (kind === "gain") node.gain = makeParam();
+  if (kind === "oscillator") { node.frequency = makeParam(); node.type = "sine"; }
+  if (kind === "bufferSource") { node.buffer = null; node.loop = false; }
+  if (kind === "filter") { node.frequency = makeParam(); node.Q = makeParam(); node.type = "lowpass"; }
+  if (kind === "compressor") {
+    node.threshold = makeParam(); node.knee = makeParam(); node.ratio = makeParam();
+    node.attack = makeParam(); node.release = makeParam();
+  }
+  if (kind === "panner") node.pan = makeParam();
+  return node;
+}
+
+function makeGraph() {
+  const graph = { nodes: 0, started: 0 };
+  const ctx = {
+    sampleRate: 44100,
+    currentTime: 0,
+    state: "running",
+    destination: { connect() {} },
+    resume() { return Promise.resolve(); },
+    createGain() { graph.nodes += 1; return makeNode("gain", graph); },
+    createOscillator() { graph.nodes += 1; return makeNode("oscillator", graph); },
+    createBufferSource() { graph.nodes += 1; return makeNode("bufferSource", graph); },
+    createBiquadFilter() { graph.nodes += 1; return makeNode("filter", graph); },
+    createDynamicsCompressor() { graph.nodes += 1; return makeNode("compressor", graph); },
+    createStereoPanner() { graph.nodes += 1; return makeNode("panner", graph); },
+    createBuffer(channels, length) {
+      const data = new Float32Array(Math.max(1, length));
+      return {
+        numberOfChannels: channels, length: data.length, sampleRate: 44100,
+        getChannelData: () => data,
+      };
+    },
+  };
+  return { ctx, graph };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout, Math, Array, Float32Array, Object, JSON,
+  document: { createElement: () => ({ width: 0, height: 0, getContext: () => null }) },
+});
+context.globalThis = context;
+context.window = context;
+/* 假图的构造器在外面写，但要在沙箱里调（vm 的脚本看不到外层变量）。 */
+context.makeGraph = makeGraph;
+vm.runInContext(readFileSync(staticPath("fx-fire.js"), "utf8"), context, { filename: "fx-fire.js" });
+vm.runInContext(readFileSync(staticPath("sfx-fire.js"), "utf8"), context, { filename: "sfx-fire.js" });
+
+const report = vm.runInContext(`(() => {
+  const fx = window.SgsFireFX;
+  const sfx = window.SgsFireSfx;
+  const out = {};
+  /* 模块级的 AudioContext 图只建一次（GRAPH 是缓存的），故四档共用一张假图、
+   * 按每个档开始前的节点数取**增量**。 */
+  const made = makeGraph();
+  window.AudioContext = function AudioContext() { return made.ctx; };
+  for (const id of [1, 2, 3, 4]) {
+    const before = { nodes: made.graph.nodes, sources: made.graph.started };
+    const clock = fx.gameTiming(id);
+    const timeline = Object.assign({}, clock.timeline);
+    const lane = sfx.create(timeline);
+    let error = null;
+    let started = false;
+    try {
+      started = lane.start();
+      const frames = 24;
+      for (let step = 1; step <= frames; step += 1) {
+        lane.tick((clock.timeline.DURATION * step) / frames, { dmg: id });
+      }
+      lane.mute(true);
+      lane.mute(false);
+      lane.stop();
+    } catch (e) { error = String(e && e.stack || e); }
+    out[id] = {
+      started, error,
+      nodes: made.graph.nodes - before.nodes,
+      sources: made.graph.started - before.sources,
+      clock: {
+        count: clock.timeline.COUNT,
+        blast: clock.timeline.BLAST,
+        explode: clock.timeline.EXPLODE,
+        duration: clock.timeline.DURATION,
+      },
+    };
+  }
+  return JSON.stringify(out);
+})()`, context, { filename: "fire_sfx_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def _fire_sfx_probe() -> dict:
+    """跑真 `sfx-fire.js` 的排程（node vm + 假 Web Audio），四档各走一整段 tick。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "fire_sfx_probe.mjs"
+        probe.write_text(_FIRE_SFX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"火焰音效探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def test_the_fire_sfx_lane_schedules_every_tier_without_a_real_audio_context() -> None:
+    """`SgsFireSfx` 的排程代码整条可跑：四档都能建图、排完、收声，且档位越高音源越多。
+
+    垫片里没有 Web Audio，烟测的 `U-SFX-07` 用的是**桩模块**（只验接线）；这条补上
+    **真模块**这一侧：真 `create` / `start` / `tick` / `stop` 在假图（记录型
+    `AudioContext`）上跑一遍，抓 11 个音色函数里的拼写 / 参数错误。声音本身（听感）仍只能
+    在浏览器里听——`renderOffline` 接进 `?audiotest=1` 不在本票（见票 03 §已知缺口）。
+    """
+    probe = _fire_sfx_probe()
+    for variant in ("1", "2", "3", "4"):
+        tier = probe[variant]
+        assert tier["error"] is None, f"{variant} 档排程抛错：{tier['error']}"
+        assert tier["started"] is True, f"{variant} 档 start() 建出了共享图"
+        assert tier["nodes"] > 0 and tier["sources"] > 0, f"{variant} 档一个音源都没排出来"
+    assert probe["4"]["sources"] > probe["1"]["sources"], (
+        "4 档（十二箭 + 火云 + 天陨）排出的音源必须明显多于 1 档（三箭）："
+        f"{probe['4']['sources']} vs {probe['1']['sources']}"
+    )
+    assert probe["3"]["clock"]["blast"] > 0 and probe["3"]["clock"]["explode"] == 0, (
+        "3 档：排出了爆燃、没有流星"
+    )
+    assert probe["4"]["clock"]["explode"] > probe["4"]["clock"]["blast"] - 1e-9, (
+        "4 档：流星的命中就是爆炸时刻"
+    )
 
 def test_the_attribute_flash_is_a_colored_sublayer_not_a_table_shell_filter() -> None:
     """spec §整屏效果：火 / 雷的整屏闪走**着色子层**，不是 `#table-shell` 的 `filter`。
