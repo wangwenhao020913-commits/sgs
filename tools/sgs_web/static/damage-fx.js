@@ -25,7 +25,7 @@
  *
  * 硬口径（spec §演出口径）：相邻开演错开 120ms、同时在播上限 = **该属性自己的 cap**
  * （`damageFxCapFor(nature)` 是唯一的 cap 口：票 02 起按属性读 `anim.ini` 的并发表，1~8、
- * 缺省 3）、超出丢队列尾；`null` / `undefined` ≡ 无属性；
+ * 缺省 3）、超出该家族上限的那几条丢掉（不整队清空）；`null` / `undefined` ≡ 无属性；
  * 摘层用 `anim.ini` 的 `total` 定时；无属性 3 / 4 点档的黑白屏闪窗口 = 该档 `strobe`，
  * 属性伤害（火 / 雷）改挂着色子层 `.fx-flash`（**不是** `filter`，见 `damageFxFlashSpec`）。
  */
@@ -164,8 +164,8 @@ function damageFxNaturePlayable(nature) {
  * 声道池长度都读它。
  *
  * 钳制在**读者侧**（照 `fx-core.js:gameTiming` 的姿态：`animTiming` 只搬数字，不给兜底也不
- * 钳）：缺键 / 非数字 → 缺省 3；`0` 或负数 → 1；`> 8` → 8。**调用时才解析**——`anim.ini`
- * 的加载是异步的，顶层读只会读到空表。
+ * 钳）：缺键 / 非数字 → 缺省 3；`0` 或负数 → 1；`> 8` → 8；小数取整（cap 是**条数**，1~8
+ * 是整数档；`2.6` ⇒ 3）。**调用时才解析**——`anim.ini` 的加载是异步的，顶层读只会读到空表。
  */
 function damageFxCapFor(nature) {
   const key = damageFxFamilyFor(nature).cap;
@@ -722,12 +722,14 @@ function damageFxLiveOf(nature) {
 
 /** 排播闸门：已到 seq 的事件逐条开演，相邻错开 120ms，同时在播不超过**该属性自己的** cap。
  *
- * 超过上限的**丢队列尾**（spec §演出口径）：伤害本身早已由服务端结算（体力条 / 事件流
+ * 超出上限的那几条**丢掉**（spec §演出口径）：伤害本身早已由服务端结算（体力条 / 事件流
  * 都到位了），攒着等下一批只会把旧伤害飘在新画面上。
  *
  * 票 02：判满改成**按属性计数**（`damageFxLiveOf(nature) >= damageFxCapFor(nature)`），
  * 丢的也只是该家族超出上限的那几条——**不整队清空**：上限是"该属性自己的"，一条家族满了
  * 不该把排在它后面、另一个家族的事件一起吃掉（同批混家族是本 effort 的主场景）。
+ * "丢队列尾"因此按家族生效：同一家族里先到的先演、后来的（队尾那几条）丢；跨家族不互相
+ * 影响——队头那条满了就跳过它，让后面还能演的家族先上。
  */
 function pumpDamageQueue() {
   if (damageStaggerTimer !== null) {

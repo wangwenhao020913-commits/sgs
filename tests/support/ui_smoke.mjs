@@ -508,6 +508,13 @@ const check = (label, ok, detail = "") => {
   else { failures += 1; console.log(`FAIL ${label}${detail ? ` — ${detail}` : ""}`); }
 };
 const $ = (id) => documentShim.getElementById(id);
+/** 集合相等（`CODING_STANDARDS` §4：断集合就明说集合，不先 sort 再比序列）。
+ *  元素一律按字符串比——数字 / 字符串混用不会给出假红。 */
+const setEquals = (actual, expected) => {
+  const left = new Set((actual || []).map(String));
+  const right = new Set((expected || []).map(String));
+  return left.size === right.size && [...right].every((value) => left.has(value));
+};
 /** 触发一次 click 并**等它跑完**：右上动作 / 取消里发请求的处理器是 async 的，
  *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。 */
 const clickAndWait = async (node, event = null) => {
@@ -16598,11 +16605,6 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     .filter((value) => value !== undefined);
   /** 集合相等（Standards §4）：只在**确实是集合**的断言上用，并且显式命名——
    *  它比的是成员、不比次序；反过来，次序是契约的地方（如 U3-03d）仍直接比序列。 */
-  const setEquals = (actual, expected) => {
-    const left = new Set((actual || []).map(String));
-    const right = new Set((expected || []).map(String));
-    return left.size === right.size && [...right].every((value) => left.has(value));
-  };
   const linePart = (node, name) => Boolean(node && Array.from(node.children).find(
     (child) => hasClass(child, name)));
   const seatPlayer = (seat, heroName, extra = {}) => ({
@@ -22781,14 +22783,24 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     if (!match) throw new Error(`anim.ini 缺少 ${key}`);
     return Number(match[1]);
   };
-  /** 并发表（票 02）：期望值从磁盘上的 ini 读；**缺键回退 3**——与 `damageFxCapFor` 同一条
-   *  兜底口径（测试不另写第二份"3"）。 */
+  /** 并发表（票 02）：期望值从磁盘上的 ini 读（只认正整数行——钳制 / 缺键口径归
+   *  `test_the_concurrency_cap_is_read_per_nature_from_anim_ini` 的探针）；缺键时回退
+   *  **产品自己的缺省常量**，测试里不另写第二份数字。 */
+  const iniCapDefault = vm.runInContext("DAMAGE_FX_CONCURRENCY", context);
   const iniCap = (key) => {
     try {
       return iniMilliseconds(key);
     } catch (error) {
-      return 3;
+      return iniCapDefault;
     }
+  };
+  /** 改一档并发表：注入一份**真 ini 文本**再走 `animLoadConfig()`——与用户改文件后刷新页面的
+   *  同一条解析路径（`CODING_STANDARDS` §6：读取方断言要走真实产出路径，不直接改内存里的表）。 */
+  const reloadIniWith = async (key, value) => {
+    const text = readIniFile().replace(
+      new RegExp(`^(\\s*${key}\\s*=\\s*)\\d+`, "m"), `$1${value}`);
+    iniInjection = { ok: true, text };
+    await ui.animLoadConfig();
   };
 
   /** 跑**最先到期**的那个计时器。真浏览器按到期时刻排，垫片的登记顺序只是插入顺序，
@@ -23243,30 +23255,33 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
    * 一条家族满了**不许**把另一个家族同批的事件一起丢掉：上限是"该属性自己的"。
    * 合成批次按 seq 顺序排（合成记录 → `step()`），计数读 `damagePlays` 的 `nature`。
    */
+  /** 在播演出按**家族**计数——家族归类读产品自己的 `damageFxNatureKind`，测试不另抄一份
+   *  映射（`null` / 未登记属性因此天然落在 NORMAL 那一格）。 */
   const liveByNature = () => {
-    const out = { normal: 0, thunder: 0 };
-    for (const nature of playNatures()) {
-      if (nature === "THUNDER") out.thunder += 1;
-      else out.normal += 1;   // null / "NORMAL" / 未登记属性同族
-    }
+    const kinds = JSON.parse(vm.runInContext(
+      "JSON.stringify(damagePlays.map((play) => damageFxNatureKind(play.nature)))", context));
+    const out = { NORMAL: 0, THUNDER: 0 };
+    for (const kind of kinds) out[kind] += 1;
     return out;
   };
   const before12 = playCount();
   const want12normal = Math.min(capNormal, 3);
-  const want12thunder = Math.min(capThunder, 2);
+  const want12thunder = Math.min(capThunder, 4);
   loadDamageBatch(
     [hpChange(70, 1, 4, 3), hpChange(71, 2, 4, 3), hpChange(72, 3, 4, 3),
-      hpChange(73, 1, 3, 2), hpChange(74, 2, 3, 2)],
+      hpChange(73, 1, 3, 2), hpChange(74, 2, 3, 2), hpChange(75, 3, 3, 2),
+      hpChange(76, 1, 2, 1)],
     [damageEvent(70, 0, 1, 1), damageEvent(71, 0, 2, 1), damageEvent(72, 0, 3, 1),
-      damageEvent(73, 0, 1, 2, "THUNDER"), damageEvent(74, 0, 2, 2, "THUNDER")],
+      damageEvent(73, 0, 1, 2, "THUNDER"), damageEvent(74, 0, 2, 2, "THUNDER"),
+      damageEvent(75, 0, 3, 2, "THUNDER"), damageEvent(76, 0, 1, 3, "THUNDER")],
   );
-  step(5);
+  step(7);
   const grouped12 = runUntil(() => liveCount() === want12normal + want12thunder, 400);
   const counts12 = liveByNature();
-  check("U-DMG-12 每属性独立计数：3 条无属性 + 2 条雷同场（上限是各属性自己的 cap）",
-    grouped12 && counts12.normal === want12normal && counts12.thunder === want12thunder
+  check("U-DMG-12 每属性独立计数：3 条无属性 + 4 条雷同批（各按自己的 cap 3 计，第 4 条雷丢）",
+    grouped12 && counts12.NORMAL === want12normal && counts12.THUNDER === want12thunder
       && playCount() === before12 + want12normal + want12thunder,
-    `live=${liveCount()} normal=${counts12.normal} thunder=${counts12.thunder} `
+    `live=${liveCount()} normal=${counts12.NORMAL} thunder=${counts12.THUNDER} `
       + `plays=${playCount() - before12} caps=${capNormal}/${capThunder}`);
   runUntil(() => liveCount() === 0, 400);
 
@@ -23283,18 +23298,18 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const grouped12b = runUntil(() => liveCount() === want12bNormal + 1, 400);
   const counts12b = liveByNature();
   check("U-DMG-12b 无属性满 3 条时同批的雷仍开演（丢的只是超出的那一条，不整队清空）",
-    grouped12b && counts12b.normal === want12bNormal
-      && counts12b.thunder === 1 && playCount() === before12b + want12bNormal + 1,
-    `live=${liveCount()} normal=${counts12b.normal} thunder=${counts12b.thunder} `
+    grouped12b && counts12b.NORMAL === want12bNormal
+      && counts12b.THUNDER === 1 && playCount() === before12b + want12bNormal + 1,
+    `live=${liveCount()} normal=${counts12b.NORMAL} thunder=${counts12b.THUNDER} `
       + `plays=${playCount() - before12b}`);
   runUntil(() => liveCount() === 0, 400);
 
   /* ---- U-DMG-13：cap 调到 5 ⇒ 第 5 条仍开演、第 6 条丢队列尾（票 02 验收 3）----
    *
-   * 改的是**生效中的** `animConfig`（与用户改 anim.ini 后解析出来的同一份表），不是测试里
-   * 另写一个期望值。用完按磁盘 ini 的值还回去。
+   * 改 ini 走 `reloadIniWith`（真文本 → `animLoadConfig`，与刷新页面同一条路径），不是测试里
+   * 直接改内存表、也不是另写一个期望值。用完按磁盘 ini 的值还回去。
    */
-  ui.animConfig.damage_fx_thunder_concurrency = 5;
+  await reloadIniWith("damage_fx_thunder_concurrency", 5);
   const capRaised = vm.runInContext("damageFxCapFor('THUNDER')", context);
   const before13 = playCount();
   loadDamageBatch(
@@ -23308,7 +23323,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     capRaised === 5 && grouped13 && liveCount() === 5 && plays13 === 5,
     `cap=${capRaised} live=${liveCount()} plays=${plays13}`);
   runUntil(() => liveCount() === 0, 400);
-  ui.animConfig.damage_fx_thunder_concurrency = capThunder;
+  await reloadIniWith("damage_fx_thunder_concurrency", capThunder);
 
   /* ---- damage-fx 票 06：伤害音效（缺省静音 / 一次性解锁 / 同一条时钟 / 收声）----
    *
@@ -23553,8 +23568,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   await sfxClick();
   const lanesBefore06 = vm.runInContext(
     "damageSfxLanes.SgsThunderSfx ? damageSfxLanes.SgsThunderSfx.length : 0", context);
-  // 用户把并发表改成 5（生效的是 `animConfig` 那一份，与 ini 解析出来的同一个对象）。
-  ui.animConfig.damage_fx_thunder_concurrency = 5;
+  // 用户把并发表改成 5（走真 ini 文本 → `animLoadConfig`，与刷新页面同一条路径）。
+  await reloadIniWith("damage_fx_thunder_concurrency", 5);
   const capRaised06 = vm.runInContext("damageFxCapFor('THUNDER')", context);
   const beforeSfx06 = playCount();
   loadDamageBatch(
@@ -23564,33 +23579,30 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   step(6);
   const grouped06 = runUntil(() => liveCount() === 5, 400);
   runFrame();
-  const slots06 = JSON.parse(
-    vm.runInContext("JSON.stringify(damagePlays.map((play) => play.slot))", context))
-    .sort((left, right) => left - right);
   const bound06 = vm.runInContext("damageSfxBound.size", context);
   const lanesAfter06 = vm.runInContext(
     "damageSfxLanes.SgsThunderSfx ? damageSfxLanes.SgsThunderSfx.length : 0", context);
-  const tickedLanes = [...new Set(laneLog.ticks.map((entry) => entry.lane))]
-    .sort((left, right) => left - right);
-  check("U-SFX-06a cap 从 3 调到 5：雷的声道池就地补建（3 → 5 条），两条新声道也在同一次调用里 start()",
+  const tickedLanes = [...new Set(laneLog.ticks.map((entry) => entry.lane))];
+  const startedLanes = [...new Set(laneLog.started)];
+  check("U-SFX-06a 池按旧 cap 建好后再调大：雷的声道池就地补建（3 → 5 条），两条新声道也被 start()",
     // 前提：ini 的雷 cap 是 3（静态用例钉着初值），先按 3 建池、再调到 5 才是"增长"。
     capThunder === 3 && capRaised06 === 5 && lanesBefore06 === 3 && lanesAfter06 === 5
       && laneLog.created.length === 5
-      // 建池 3 次 + 补建 2 次 + 五条演出各自 start 一次 = 10。
-      && laneLog.started.length === 10,
+      // 五条声道都在（前三条初建、后两条是这次补建的），且每条都 start 过。
+      && startedLanes.length === 5 && setEquals(startedLanes, [0, 1, 2, 3, 4]),
     `cap=${capThunder}→${capRaised06} lanes=${lanesBefore06}→${lanesAfter06} `
-      + `created=${laneLog.created.length} started=${laneLog.started.length}`);
-  check("U-SFX-06b 第 4 / 5 条**有声音**：五条演出都绑上声道、五条都被喂 tick（不再静默丢声）",
-    grouped06 && liveCount() === 5 && bound06 === 5
-      && JSON.stringify(slots06) === "[0,1,2,3,4]"
-      && JSON.stringify(tickedLanes) === "[0,1,2,3,4]"
-      && playCount() === beforeSfx06 + 5,
-    `live=${liveCount()} bound=${bound06} slots=${JSON.stringify(slots06)} `
-      + `ticked=${JSON.stringify(tickedLanes)} plays=${playCount() - beforeSfx06}`);
+      + `created=${laneLog.created.length} started=${JSON.stringify(startedLanes)}`);
+  check("U-SFX-06b 第 4 / 5 条**有声音**：五条演出都绑上声道、五条声道都被喂 tick（不再静默丢声）",
+    grouped06 && liveCount() === 5 && bound06 === 5 && playCount() === beforeSfx06 + 5
+      && tickedLanes.length === 5 && setEquals(tickedLanes, [0, 1, 2, 3, 4]),
+    `live=${liveCount()} bound=${bound06} ticked=${JSON.stringify(tickedLanes)} `
+      + `plays=${playCount() - beforeSfx06}`);
   runUntil(() => liveCount() === 0, 400);
-  // 还回去：cap 按磁盘 ini 的值、雷的音效模块换回真身。
-  ui.animConfig.damage_fx_thunder_concurrency = capThunder;
+  // 还回去：cap 按磁盘 ini 的值（同一份真文本）、雷的音效模块换回真身、桩声道与绑表清掉。
+  await reloadIniWith("damage_fx_thunder_concurrency", capThunder);
   windowShim.SgsThunderSfx = realThunderSfx06;
+  vm.runInContext(
+    "delete damageSfxLanes.SgsThunderSfx; damageSfxBound.clear();", context);
   drainTimers();
 
   // ---- 对照组：有来源时航线起点在画面内（> 0），与 U-DMG-06 的 off-stage 形成对照 ----
