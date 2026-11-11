@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -62,7 +62,9 @@ from sgs.effects import (
     locate,
     move_card,
     need_card_floor,
+    next_need_card_tier,
     record_need_card_choice,
+    record_need_card_floor,
     targets_within_attack_range,
 )
 from sgs.resolution import (
@@ -1830,16 +1832,64 @@ class Engine:
 
         拿到应答之后顺手记下这次选中的**优先级档**（票 03 §4-2）：【闪】与求桃是四扇
         需要牌窗口里的两扇，闸门的输入由 :meth:`_note_need_card_choice` 一处写。
+
+        **按档逐档问**（table-ux-overhaul 票 04 / Q13 / Q17）：【闪】与求桃的候选面
+        （``legal_actions_for``）只铺**当前这一档**；玩家答 ``Pass`` = **本档不发动**，
+        引擎用 :func:`~sgs.effects.next_need_card_tier` 现算下一档、把档写进承载帧、
+        **再问一次**（同一张面重入时按新档重铺）。最后一档的 ``Pass`` 才是"这次需要牌
+        不满足"，窗口照旧收尾（它收到的那一条 ``Pass`` 没变）。故窗口不需要知道"哪一档"，
+        分层完全落在"问一次 / 答一次"这两条既有接缝之间。
         """
-        action = self.ask(
-            lambda seq: self._build_query(
-                kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
-            ),
-            identity=self._ask_identity(kind, actor, frame),
-        )
-        if kind in (QueryKind.DODGE, QueryKind.PEACH):
+        need_card = kind in (QueryKind.DODGE, QueryKind.PEACH)
+        identity = self._ask_identity(kind, actor, frame)
+        while True:
+            action = self.ask(
+                lambda seq: self._build_query(
+                    kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
+                ),
+                identity=identity,
+            )
+            if self.suspended(action) or not need_card:
+                return action
+            if isinstance(action, Pass) and self._advance_need_card_tier(
+                frame, actor, kind, payload, dying=dying
+            ):
+                # 进下一档：承载帧里的 floor 已经写成下一档，本次询问按它重新铺面。
+                if payload is not None:
+                    payload = replace(payload, floor=need_card_floor(frame, actor))
+                continue
             self._note_need_card_choice(frame, actor, action)
-        return action
+            return action
+
+    def _advance_need_card_tier(
+        self,
+        frame: Frame | None,
+        actor: int,
+        kind: QueryKind,
+        payload: Any,
+        *,
+        dying: int | None = None,
+    ) -> bool:
+        """``Pass`` 之后进**下一档**：写进承载帧并返回 ``True``；最后一档 ⇒ ``False``。
+
+        判据与候选生成**同源**（:func:`~sgs.effects.next_need_card_tier` 读同一个
+        ``_actions_for``），故"还有没有下一档"与"下一问会铺哪一档"不可能漂移。
+        没有承载帧（理论上的裸询问）⇒ 不进档：``Pass`` 就是放弃这次需要牌。
+        """
+        if frame is None:
+            return False
+        next_tier = next_need_card_tier(
+            self.state,
+            actor,
+            kind,
+            answers_seq=self._seq + 1,
+            dying=dying,
+            payload=payload,
+        )
+        if next_tier is None:
+            return False
+        record_need_card_floor(frame, actor, next_tier)
+        return True
 
     def ask_arrange(
         self,
@@ -2665,35 +2715,45 @@ class Engine:
         **本票不加任何置位调用点**：真正的消费者（无懈 / 闪 / 求桃 / 护驾 / 决斗 /
         南蛮万箭五处窗口）在票 05，且要先过 :meth:`should_ask_respond` 的总开关。
 
-        ``floor`` **不由调用方给**：它读承载帧里这一座位已定下的优先级档（票 03 §4-2，
+        ``floor`` **不由调用方给**：它读承载帧里这一座位已过完的档（票 03 §4-2，
         :func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
         拿到应答之后再记回这一档（:meth:`_note_need_card_choice`）。改判窗口（``REJUDGE``）
         不是使用 / 打出 ⇒ 既不读也不记。
+
+        **按档逐档问**（票 04 / Q13 / Q17）：候选面只铺当前这一档；``Pass`` = 本档不发动
+        ⇒ 写下一档、**再问一次**（见 :meth:`ask_query` 的同一段说明）。
         """
         need_card = mode is not RespondMode.REJUDGE
-        payload = RespondContext(
-            cause=cause,
-            required=required,
-            target=target,
-            window_frame=window_frame,
-            mode=mode,
-            use_targets=tuple(use_targets),
-            providers_used=tuple(providers_used),
-            zones=tuple(zones),
-            declared=declared,
-            rejudge_offers=tuple(rejudge_offers),
-            floor=need_card_floor(frame, actor) if need_card else 0,
-            skip_if_empty=skip_if_empty,
-        )
-        action = self.ask(
-            lambda seq: self._build_query(
-                QueryKind.RESPOND, actor, timing, seq, payload=payload
-            ),
-            identity=self._ask_identity(QueryKind.RESPOND, actor, frame),
-        )
-        if need_card:
+        identity = self._ask_identity(QueryKind.RESPOND, actor, frame)
+        while True:
+            payload = RespondContext(
+                cause=cause,
+                required=required,
+                target=target,
+                window_frame=window_frame,
+                mode=mode,
+                use_targets=tuple(use_targets),
+                providers_used=tuple(providers_used),
+                zones=tuple(zones),
+                declared=declared,
+                rejudge_offers=tuple(rejudge_offers),
+                floor=need_card_floor(frame, actor) if need_card else 0,
+                skip_if_empty=skip_if_empty,
+            )
+            action = self.ask(
+                lambda seq: self._build_query(
+                    QueryKind.RESPOND, actor, timing, seq, payload=payload
+                ),
+                identity=identity,
+            )
+            if self.suspended(action) or not need_card:
+                return action
+            if isinstance(action, Pass) and self._advance_need_card_tier(
+                frame, actor, QueryKind.RESPOND, payload
+            ):
+                continue
             self._note_need_card_choice(frame, actor, action)
-        return action
+            return action
 
     def _note_need_card_choice(
         self, frame: Frame | None, actor: int, action: Any

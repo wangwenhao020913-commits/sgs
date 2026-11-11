@@ -3589,6 +3589,15 @@ class ActiveSkill(HeroSkillDecl):
     由 :data:`~sgs.skills.preactivation.FLOWS` 的派生照常登记（与被动技同一条派生）。
     """
 
+    need_card_tier: int | None = None
+    """作为**"需要牌"窗口的提供者**时的优先级档覆盖位（票 04 §3；缺省 ``None`` = 按载体派生）。
+
+    只服务"载体与产物不同档"的转化类提供者：载体是武将牌（= 武将档 0）、产物却是转化牌，
+    而 Q16 / Q17 裁定"转化牌与真牌同为第 2 档" ⇒ 今天的两个消费者（【蛊惑】与界【渐营】②）
+    在各自声明上写 ``2``。原样透传给 ``SkillDef.need_card_tier``，判据只在
+    :func:`~sgs.effects.need_card_tier` 读它——派发逻辑里没有技能 id 名单。
+    """
+
     def __post_init__(self) -> None:
         if (self.activate is None) == (self.flow is None):
             raise ValueError(f"{self.skill_id} 必须恰有 activate / flow 之一")
@@ -7374,6 +7383,10 @@ _JIE_JIANYING = ActiveSkill(
         "name": "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）",
         "seat": "选择这张牌的目标（目标由牌名决定时不出现这一步）",
     },
+    # ② 的**提供者档** = 第 2 档（票 04 §3 / Q16 / Q17）：它是转化类提供者（载体 = 武将牌，
+    # 产物 = 转化牌）⇒ 与真牌同档。不写覆盖位时它按载体算成武将档 0，会在需要牌窗口里
+    # 抢在装备档 / 真牌之前单独上脸。
+    need_card_tier=2,
 )
 """界沮授移动版【渐营】的完整声明（① 的钩子 + ② 的预发动清单，同一个技能 id）。"""
 
@@ -7650,6 +7663,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         ),
         # 提供者入口的候选（第二条 `CANDIDATES` 回调，与出牌阶段那条并存：两条读不同
         # 的 `ctx.scope`，互不打扰）。provider 回调由 `catalog.py` 末尾登记进 `PROVIDERS`。
+        # 作为提供者的档 = **第 2 档**（票 04 §3 / Q16 / Q17）：载体是武将牌、产物却是
+        # 转化牌（"扣置一张手牌当它"）⇒ 与真牌同档。写覆盖位，不在派发里认技能名。
+        need_card_tier=2,
         extra_modifiers=(
             Modifier(ModifierPoint.CANDIDATES, _guohuo_provider_offers),
         ),
@@ -7892,6 +7908,8 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             ),
             # W6 票 06 的加法：主动技同时带的钩子原样透传（缺省空 ⇒ 既有声明零改动）。
             hooks=skill.hooks,
+            # 票 04 的加法：作为"需要牌"提供者时的档覆盖位（缺省 None ⇒ 按载体派生）。
+            need_card_tier=skill.need_card_tier,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             # 声明级覆盖优先（标准 / 界同短 id 但步骤次序 / 角色不同，M6 票 14）。
             step_requirements=(

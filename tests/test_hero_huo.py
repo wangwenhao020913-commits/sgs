@@ -3397,11 +3397,22 @@ def test_bazhen_black_judgment_does_not_cancel_the_slash():
     assert engine.state.player(1).hp == 3, "判黑 ⇒ 【杀】照常造成 1 点伤害"
 
 
-def test_bazhen_is_offered_once_per_dodge_window():
-    """【无双】要两张【闪】：八阵在同一窗口里只出现一次（`providers_used` 的既有口径）。"""
-    red = _judge_card(Color.RED)
-    red2 = _judge_card(Color.RED)
+def test_bazhen_is_offered_again_in_the_second_dodge_event():
+    """【无双】的两张【闪】= **两次需要牌事件** ⇒ 提供者封禁按事件复位（票 04 §5）。
+
+    改造前的口径是"同一窗口里八阵只出现一次"（``providers_used`` 只在帧的**目标推进**时清）
+    ——那正是实机缺陷：八卦阵判定失败后用真【闪】补上第一张，第二张却不能再发动八卦阵。
+    语义应当是"一次杀的结算过程内，一旦以任何方式使用 / 打出了【闪】，封禁解除"。
+    判据 = 第二个事件的面里八阵**重新可点**，再判一次红就凑够两张、抵消【杀】。
+    """
+    red, red2 = _colored_cards("slash", Color.RED)[:2]
     slash = _slashes(1)[0]
+    excluded = {red, red2, slash}
+    fillers = [
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
+    ]
+    # 摸牌阶段先取走两张，然后两次判定依次取「红 / 红」。
+    deck = (fillers[0], fillers[1], red, red2, *fillers[2:])
     state = build_state(
         pack=PACK,
         seats=[
@@ -3410,7 +3421,7 @@ def test_bazhen_is_offered_once_per_dodge_window():
             SeatSpec(identity=Identity.LOYALIST),
             SeatSpec(identity=Identity.RENEGADE),
         ],
-        deck=_deck_with_top(PACK, red, slash, red2),
+        deck=deck,
         turn_seat=0,
         phase=Phase.PLAY,
         rule_config=RuleConfig(player_count=4),
@@ -3429,14 +3440,11 @@ def test_bazhen_is_offered_once_per_dodge_window():
         defender.dodges[0],
         lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
     ), "第一次可以发动"
-    assert (
-        find_action(
-            defender.dodges[1],
-            lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
-        )
-        is None
-    ), "同一窗口的第二次不再给八阵（每提供者只问一次）"
-    assert engine.state.player(1).hp == 3, "只挡了第一张【闪】，第二张没挡 ⇒ 照常受伤"
+    assert find_action(
+        defender.dodges[1],
+        lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+    ), "第二张 = 新的需要牌事件 ⇒ 八阵再次上脸（提供者封禁按事件复位）"
+    assert engine.state.player(1).hp == 4, "两次判定都红 ⇒ 两张【闪】凑够 ⇒ 抵消"
 
 
 # ---------------------------------------------------------------------------

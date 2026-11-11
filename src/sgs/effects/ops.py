@@ -46,7 +46,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .actions import need_card_floor, reset_need_card_floor
+from .actions import need_card_floor, reset_need_card_event
 from .behaviors import SLASH_FAMILY_KEY, DamageNature
 from .modifiers import responder_role, response_count
 
@@ -487,7 +487,7 @@ def _duel_accepted(
     §2.1.2.2(2) 的"每时机一次响应机会"），第二张仍可从任意档起手（第一张用真牌，第二张
     照样能发动提供者）。
     """
-    reset_need_card_floor(frame, seat)
+    reset_need_card_event(frame, seat)
     op["duel_plays"] = op.get("duel_plays", 0) + 1
     if op["duel_plays"] >= required:
         op["duel_plays"] = 0

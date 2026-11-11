@@ -453,6 +453,20 @@ class SkillDef:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
         return priority_class_of(self.carrier)
 
+    need_card_tier: int | None = None
+    """这条技能作为**"需要（使用 / 打出）牌"窗口的提供者**时的优先级档覆盖位（票 04 §3）。
+
+    缺省 ``None`` = 由载体派生（:attr:`priority_class`：武将档 0 / 装备档 1）。只有在
+    "载体与产物不同档"时才写它：**转化类提供者**的载体是武将牌、产物却是转化牌，而 Q16 /
+    Q17 裁定"转化牌与真牌同为第 2 档" ⇒ 【蛊惑】（移动版于吉）与界【渐营】② 在这里写
+    ``2``。判据只有这一处声明（:func:`~sgs.effects.need_card_tier` 读它），派发逻辑里
+    **没有技能 id 名单**。
+
+    它**只**作用于四扇需要牌窗口的候选面；同一时机的激活结算（SKILL_ACTIVATION 的
+    ``ActivationCandidate.tier``）仍读 :attr:`priority_class`——那里问的是"谁先发动"
+    （武将技 > 装备技），与"这一步要的是哪一档的牌"是两个问题。
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class HeroSkillDecl:
@@ -1607,7 +1621,8 @@ PASS_STATE_KEY = "skill_pass"
 （本轮强制段）、``pass_forced_at``（跑到第几条）、``pass_optional``（本轮可选项；``None`` =
 问之前要按活状态重估）、``pass_chosen``（本轮选中的那一条）、``pass_terminated``（R5 收口）
 与 ``pass_mandatory``（``Pass`` 之后还要跑的强制段，每项 = ``(候选, 只跑强制项)``）/
-``pass_mandatory_at``（跑到第几条）。
+``pass_mandatory_at``（跑到第几条）/ ``pass_mandatory_next``（跑完之后回哪一相：``"start"``
+= 还有更低优先的档、继续问下一张面；``"seat"`` = 这个座位的时机结束）。
 
 **为什么必须住帧私有**：挂起重入时派发环从头再跑，进度只能由帧里的**显式**游标表达；
 靠"重新算候选集合"隐式表达会在效果结算后答错轮（票 01 §6）。帧私有 ⇒ 不进记录流，
@@ -1689,6 +1704,7 @@ def _new_pass_state() -> dict[str, Any]:
         "pass_terminated": False,
         "pass_mandatory": (),
         "pass_mandatory_at": 0,
+        "pass_mandatory_next": "seat",
     }
 
 
@@ -1726,6 +1742,7 @@ def _pass_next_seat(state: dict[str, Any]) -> None:
     state["pass_chosen"] = None
     state["pass_mandatory"] = ()
     state["pass_mandatory_at"] = 0
+    state["pass_mandatory_next"] = "seat"
 
 
 def terminate_activation_pass(frame: Frame, *, timing: Timing, key: str) -> None:
@@ -2001,8 +2018,8 @@ def _dispatch(
 
     规则出处：仓内 §4.16 L443–L466（逐角色 / 同档内次序归玩家）+ 补充一手 §2.1.2.2(2) /
     §2.1.2.3（一次一个 / 不升档 / 每技能一次 / 终止即收口）。改造前是"按 ``skill_id`` 定序
-    逐个实例问"，每实例一条裸 ``ActivateSkill``；现在**每个座位一轮一次询问**，面上是本轮
-    全部可选项（票 01 §4 / §5）。
+    逐个实例问"，每实例一条裸 ``ActivateSkill``；票 01 起**每个座位一轮一次询问**，票 04 起
+    那张面**只有当前这一档**（Q1 / Q13 的"按档逐档问"）。
 
     每轮（= 一次"选一条"）的顺序：
 
@@ -2010,9 +2027,12 @@ def _dispatch(
     2. **强制段按档跑**（``locked`` / 觉醒 / ``Hook.forced``）：不问、不上脸；只跑**当前最高
        优先档**（``min(tier)``）的那几条——票 01 §4-5「在本档轮到它时」；跑完再重新收集，
        更低档的强制段留到下一轮（同档内"强制段先于可选项"是本仓的登记口径）；
-    3. **可选项合成一张面**问一次（面**跨档**，票 01 §8-3）；``Pass`` = 结束本座位的
-       **选择**，剩下的强制段由 :func:`_mandatory_entries` 接着跑（强制效果不随 ``Pass``
-       消失），跑完才轮到下一个座位；
+    3. **可选项合成一张面**问一次：面里**只有最小档**的那几条（票 04 §2——不同档不混面）；
+       ``Pass`` = **本档不发动** ⟹ 还有更低优先的档就写 ``pass_floor = 下一档`` 再问一张面
+       （本档混合实例的强制项照跑）；已经是最后一档才回到票 01 §4-6 的语义（结束本座位的
+       **选择**，剩下的强制段由 :func:`_mandatory_entries` 接着跑，跑完才轮到下一个座位）。
+       全**不可放弃段**的顺序面（锁定侧）不走"进下一档"：那张面的 ``Pass`` 是"剩下按默认
+       次序跑完"（lei-shenganning 票 95）；
     4. 派发选中的那一条 → 记 ``pass_used``、``pass_floor`` 落到它的档 → 下一轮。
 
     **重入**（§6）：进度只由 :data:`PASS_STATE_KEY` 的显式游标表达——``"stay"`` 回来时
@@ -2074,8 +2094,13 @@ def _dispatch(
                     for candidate in same_tier
                     if candidate.forced and not _locked_like(candidate)
                 )
+                # **同一张面 = 同一档**（票 04 / Q13 / Q17）：可选项只收**当前最小档**的那几条。
+                # 改造前面跨档（先点低档就把高档关掉，玩家读成"选了一个另一个没了"）；现在
+                # 档序由引擎给、Pass = 本档不发动、进下一档（见 ``ask`` 相里的那段）。
                 declinable = tuple(
-                    candidate for candidate in candidates if not candidate.forced
+                    candidate
+                    for candidate in candidates
+                    if not candidate.forced and candidate.tier == tier
                 )
                 if len(locked_mandatory) >= 2:
                     state["pass_optional"] = locked_mandatory
@@ -2124,18 +2149,22 @@ def _dispatch(
                 optional = state["pass_optional"]
                 allow_pass = state["pass_allow_pass"]
                 if optional is None:
+                    rest = _activation_candidates(
+                        host,
+                        frame,
+                        match,
+                        seat=seat,
+                        extra_instances=extra_instances,
+                        floor=state["pass_floor"],
+                        used=state["pass_used"],
+                    )
+                    # 重估之后同样**只收最小档**（票 04）：强制段跑完回到这里时，档序不能
+                    # 因为"新出现的更低档"而把两档又混回一张面。
+                    current = min((candidate.tier for candidate in rest), default=0)
                     optional = tuple(
                         candidate
-                        for candidate in _activation_candidates(
-                            host,
-                            frame,
-                            match,
-                            seat=seat,
-                            extra_instances=extra_instances,
-                            floor=state["pass_floor"],
-                            used=state["pass_used"],
-                        )
-                        if not candidate.forced
+                        for candidate in rest
+                        if not candidate.forced and candidate.tier == current
                     )
                     state["pass_optional"] = optional
                     allow_pass = _face_allows_pass(optional)
@@ -2160,9 +2189,57 @@ def _dispatch(
                 if host.suspended(active):
                     return "stay"
                 if not isinstance(active, ActivateSkill):
-                    # ``Pass`` = 结束本座位的**选择**（票 01 §4-6）——不是它的强制效果：还没
-                    # 跑的强制段（全强制候选 + 混合实例的 ``Hook.forced`` 项）按链序接着跑，
-                    # 跑完才轮到下一个座位（复核修复 F1；票 01 §4-5「在本档轮到它时」）。
+                    # ``Pass`` = **本档不发动**（票 04 §2 / Q1）：本座位的这张面上只有当前
+                    # 最小档，Pass 因此是"这一档我不发动"，下面按两种情形分流——
+                    #
+                    # ① 还有更低优先的档 ⇒ 写 ``pass_floor = 下一档``、回 ``start``；
+                    #    当前档里混合实例的 ``Hook.forced`` 项仍按链序照跑（Pass 只放弃
+                    #    "可以"的那半），更高档的强制段留到它自己的档去跑。
+                    # ② 已经最后一档 ⇒ 既有语义（票 01 §4-6）：剩下的强制段按链序跑完，
+                    #    然后轮到下一个座位。
+                    #
+                    # 全是**不可放弃段**的顺序面（锁定侧）不走 ①：那张面的 Pass 是"剩下按
+                    # 默认次序跑完"（lei-shenganning 票 95），不是"这一档不发动"。
+                    face = state["pass_optional"] or ()
+                    face_tier = min(
+                        (candidate.tier for candidate in face), default=None
+                    )
+                    higher = (
+                        _activation_candidates(
+                            host,
+                            frame,
+                            match,
+                            seat=seat,
+                            extra_instances=extra_instances,
+                            floor=face_tier + 1,
+                            used=state["pass_used"],
+                        )
+                        if face_tier is not None and any(not c.forced for c in face)
+                        else ()
+                    )
+                    if higher:
+                        state["pass_floor"] = min(
+                            candidate.tier for candidate in higher
+                        )
+                        state["pass_mandatory"] = tuple(
+                            entry
+                            for entry in _mandatory_entries(
+                                host,
+                                frame,
+                                match,
+                                seat=seat,
+                                extra_instances=extra_instances,
+                                used=state["pass_used"],
+                            )
+                            if entry[0].tier <= face_tier
+                        )
+                        state["pass_mandatory_at"] = 0
+                        state["pass_mandatory_next"] = "start"
+                        # 下一档是**新的一问**：轮次 +1 ⇒ 答案缓存键（含轮次）不会把上一档
+                        # 那条 Pass 直接还回来。
+                        state["pass_round"] += 1
+                        state["pass_phase"] = "mandatory"
+                        continue
                     state["pass_mandatory"] = _mandatory_entries(
                         host,
                         frame,
@@ -2172,6 +2249,7 @@ def _dispatch(
                         used=state["pass_used"],
                     )
                     state["pass_mandatory_at"] = 0
+                    state["pass_mandatory_next"] = "seat"
                     state["pass_phase"] = "mandatory"
                     continue
                 chosen = next(
@@ -2210,7 +2288,13 @@ def _dispatch(
                         return control
                     state["pass_used"] = (*state["pass_used"], candidate.skill_id)
                     state["pass_mandatory_at"] += 1
-                # 强制段跑完 = 这个座位的时机结束：``Pass`` 之后不再重开选择（§4-6）。
+                if state["pass_mandatory_next"] == "start":
+                    # 进下一档：本档的收尾跑完 ⇒ 回到 ``start`` 重新收集（下一档的可选项
+                    # 会作为一张新面问出来；座位的**选择**没结束，结束的只是这一档）。
+                    state["pass_mandatory_next"] = "seat"
+                    state["pass_phase"] = "start"
+                    continue
+                # 最后一档的强制段跑完 = 这个座位的时机结束（§4-6）。
                 _pass_next_seat(state)
                 continue
             # 阶段机的最后一相：跑本轮选中的那一条（挂起重入时从这里续跑）。

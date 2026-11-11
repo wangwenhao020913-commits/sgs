@@ -55,7 +55,7 @@ from sgs.effects import (
     ModifierRole,
     need_card_floor,
     recover_amount,
-    reset_need_card_floor,
+    reset_need_card_event,
     response_count,
     target_is_effective,
 )
@@ -699,11 +699,13 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     （``start_use``），收尾共用 :func:`_accept`；没有产物 = 主公技式（别人已打出过一张），
     只记一次成功、不压帧。
 
-    **优先级档**（票 03 §4-2 / §4-3）：本窗口读 :func:`~sgs.effects.need_card_floor` 写进
-    ``DodgeContext``——选中一条之后档由 :meth:`~sgs.engine.Engine.ask_query` 记进承载帧，
-    更高优先（更小档）的候选下一次不再进面。曹操先发动【八卦阵】（装备档）⇒ 判定黑 ⇒
-    下一次询问里没有〖护驾〗（武将档），而真【闪】（使用牌档）照旧可点；floor 在
-    :func:`_accept` 里清回最高档，故【无双】的第二张【闪】仍可发动【八卦阵】。
+    **优先级档 = 按档逐档问**（票 03 §4-2 / 票 04 §2）：本窗口把
+    :func:`~sgs.effects.need_card_floor` 写进 ``DodgeContext``，候选生成口只铺**当前这一档**
+    （武将档 0 的【护驾】→ 装备档 1 的【八卦阵】→ 牌档 2 的真【闪】）。玩家 ``Pass`` =
+    本档不发动，引擎写下一档并**重问本窗口**（同一帧、同一目标，面换了）；选中一条之后档由
+    引擎记进承载帧，更高优先的档不再进面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的
+    时机了）。floor 与**提供者封禁**一起在 :func:`_accept` 里清回最高档，故【无双】的第二张
+    【闪】仍可发动【八卦阵】（两次需要牌事件）。
     """
     # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
     # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
@@ -730,7 +732,8 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         nonlocal done
         done += 1
         frame.data["dodges_done"] = done
-        reset_need_card_floor(frame, target)
+        # 一次需要牌**事件成立**：不升档 floor 与提供者封禁在同一个点复位（票 04 §5）。
+        reset_need_card_event(frame, target)
         if done >= required:
             frame.data["canceled"] = True
         if card is not None:
@@ -1554,7 +1557,7 @@ def _peach_use(host: FrameHost, frame: Frame, *, asker: int, target: int, card: 
     本次需要牌事件结束，不升档的 floor 清回最高档（回退开的新窗是**新**事件）。
     """
     frame.data["pending_response"] = (int(frame.data["next"]), host.state.player(target).hp)
-    reset_need_card_floor(frame)
+    reset_need_card_event(frame)
     host.recover_from_peach(frame, card, asker=asker, dying=target)
     return "stay"  # 响应链出栈后重入本步：此处判回退
 
