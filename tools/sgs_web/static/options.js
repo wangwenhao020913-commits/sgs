@@ -559,10 +559,14 @@ function renderOwnHandPick(pending) {
   $("btn-cancel").disabled = true;
 }
 
-/** 从自己手牌 / 装备区选**多张**的牌桌步（结姻两张 / 贯石斧两张等）：同样不铺槽位块。
+/** 从自己手牌 / 装备区选**多张**的牌桌步（结姻两张 / 贯石斧两张 / 业炎四色成本等）：
+ *  同样不铺槽位块。
  *
  * 点牌 = 收进 / 移出 `state.picks`（面内位置）；「提交」按候选骨架补 `picks` 后送出，
  * 右端「放弃」是候选里真有的那条 `Pass`。
+ *
+ * **票 09 ③**：面自家声明了 `spec.max_per_suit` 时（业炎四色成本），步骤提示把这条**声明**
+ * 说出来，并说明同花色其余牌会置灰——文案只读 `spec`，不抄规则。
  */
 function renderOwnZonePick(pending) {
   const index = (pending.legal_actions || []).findIndex(
@@ -576,8 +580,12 @@ function renderOwnZonePick(pending) {
     const least = Math.max(1, Number(total[0]) || 1);
     const most = Math.max(least, Number(total[1]) || least);
     const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
-    hint.textContent = `${requirement}：点选${where}中的 ${howMany}，再点「提交」；`
-      + "也可以点右端「放弃」。";
+    const suitCap = Number((pending.spec || {}).max_per_suit) || 0;
+    const suitNote = suitCap
+      ? `每种花色至多 ${suitCap} 张，同花色其余牌已置灰；`
+      : "";
+    hint.textContent = `${requirement}：点选${where}中的 ${howMany}，${suitNote}`
+      + "再点「提交」；也可以点右端「放弃」。";
   }
   $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
 }
@@ -989,6 +997,10 @@ function dialogSlotPickAllowed(pending) {
  *
  * 上限是服务端 ``spec.total`` 的纯函数（与 :func:`cardFace` 同一条"当前状态的纯函数"纪律），
  * 故这里只做越界拒绝，不做任何跨询问的记账。
+ *
+ * **票 09 ③**：自己区域面自家声明了 `spec.max_per_suit`（业炎四色成本）时，同花色已满的
+ * 其余槽位**点不动**（置灰在 `cardFace`，同一判据 `candidates.js:ownZoneSuitTaken`）。
+ * 这是"每花色至多 k 张"这一条**局部约束**的前端止损，完整的后端现算由票 11 / 12 接手。
  */
 function toggleSlotPick(pending, index) {
   // 选择面槽位是牌桌选择入口（D8）：只读态里 no-op，与点牌 / 点座共用一条判据。
@@ -1004,6 +1016,7 @@ function toggleSlotPick(pending, index) {
     return;
   }
   if (state.picks.length >= selectionCap(pending)) return;
+  if (ownZoneSuitTaken(pending, index)) return;
   state.picks.push(index);
 }
 

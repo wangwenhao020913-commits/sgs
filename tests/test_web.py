@@ -57,6 +57,7 @@ from sgs.state import (  # noqa: E402
     SelectCards,
     SelectCardsQuery,
     SelectionSpec,
+    SelectOption,
     SelectOptionQuery,
     SelectOptionsContext,
     SelectOptionsQuery,
@@ -9740,8 +9741,18 @@ def test_fire_attack_target_index_lists_only_seats_with_hand_cards_including_sel
     assert snapshot["players"][2]["hand_count"] == 0
 
 
-def test_the_human_targets_fire_attack_reveal_step_uses_the_reveal_dialog_without_leaking() -> None:
-    """人类被指定：亮牌步 = U2 亮牌模板（dialog=reveal），只有本人的手牌；外人拿不到牌面。"""
+def test_the_human_targets_fire_attack_reveal_step_is_a_table_direct_pick_without_leaking() -> None:
+    """人类被指定：亮牌步 = **牌桌直选**（`dialog: null` + 可见槽），牌面只发给本人。
+
+    spec §1 #12 / 票 09 ②：投影原先把**己方手牌**槽位塞进 `payload["revealed"]`
+    ⇒ `dialog="reveal"` ⇒ 前端 `isRevealStep` 短路 `isOwnZonePick` ⇒ 亮牌弹窗。
+    槽位本来就是 `reveal_hand=True` 铺的可见槽（牌面已在 `view.self_hand` 里），
+    那份"授予"是**重复**的 ⇒ 槽位全是应答者自己的手牌时不再授予，`dialog` 随之变 `null`，
+    界面走既有的 own-hand-pick（同一技能第二步「同花色弃牌」的先例）。
+
+    这是**读取方**断言：前端 `candidates.js:isOwnZonePick` 读的就是 `dialog`（经
+    `stepDialogKind`）与 `slots[].card`——引擎的真实槽位可见性与前端判据同源。
+    """
     spade = _fire_suit_cards(Suit.SPADE)[0]
     heart = _fire_suit_cards(Suit.HEART)[0]
     session = _fire_session(user_hand=(spade, heart), target_hand=())
@@ -9754,21 +9765,165 @@ def test_the_human_targets_fire_attack_reveal_step_uses_the_reveal_dialog_withou
     )
     assert reveal is not None
     payload = pending_payload(session)
-    assert payload["dialog"] == "reveal", "人类被指定 ⇒ 亮牌模板（四类弹窗之一）"
+    assert payload["dialog"] is None, "己方手牌的可选面是牌桌直选，不是亮牌弹窗"
+    assert not payload["revealed"], (
+        "己方手牌不是「观看授予」（`view.self_hand` 已有牌面）⇒ 不再塞进 revealed"
+    )
     assert payload["harvest"] is None, "火攻没有五谷的 harvest 状态"
     assert payload["context"]["name"] == "火攻"
     assert "亮出" in payload["context"]["requirement"]
     own_hand = [card["card_id"] for card in payload["view"]["self_hand"]]
-    revealed = [card["card_id"] for card in payload["revealed"]]
-    assert revealed == [slot["card"]["card_id"] for slot in payload["slots"]]
-    assert set(revealed) == set(own_hand), "亮牌窗里是本人手牌；牌面只发给询问者本人"
-    assert all(card["description"] for card in payload["revealed"]), "卡面契约随亮牌下发"
+    slot_faces = [slot["card"] for slot in payload["slots"]]
+    assert slot_faces and all(face is not None for face in slot_faces), (
+        "槽位是目标自己的手牌（`reveal_hand=True`）⇒ 牌面对本人可见（前端直选的唯一判据）"
+    )
+    assert [face["card_id"] for face in slot_faces] == own_hand
+    assert all(face["description"] for face in slot_faces), "卡面契约随可见槽下发"
 
     # 外人的载荷：不是询问者 ⇒ 没有 dialog / revealed，槽位只剩位置。
     foreign = pending_payload(session.pending, human_seat=1)
     assert foreign["dialog"] is None
     assert foreign["revealed"] == []
     assert foreign["slots"] and all(slot["card"] is None for slot in foreign["slots"])
+
+
+def _assert_own_hand_direct_pick_payload(payload: dict, *, actor: int) -> None:
+    """前端 `candidates.js:isOwnZonePick` 读的那几个键，逐条核（票 09 ④的回环判据）。
+
+    ``isOwnZonePick`` = ``SELECT_CARDS`` ∧ 不是「提供一张 B」∧ `stepDialogKind` 为 null
+    （= `dialog` 不是任何一个模板）∧ 槽位全在应答者自己的手牌 / 装备区且**牌面可见**。
+    `isOwnHandSinglePick` 再加一条 `selectionCap == 1`。这里只在**引擎真实 pending 的载荷**
+    上读同一批键——两处各自实现一份"槽位可见性"是本票要消灭的断点。
+    """
+    assert payload["kind"] == "SELECT_CARDS"
+    assert payload["actor"] == actor
+    assert payload["dialog"] is None, "牌桌直选的面不该带任何弹窗模板标记"
+    assert not payload["revealed"], "自己手牌的牌面不是「观看授予」"
+    assert payload["provide_type"] is None, "不是「提供一张 B」（那一档有自己的就地渲染）"
+    assert payload["arrange"] is None, "不是排列面"
+    slots = payload["slots"]
+    assert slots, "面里要有槽位"
+    for slot in slots:
+        assert slot["ref"]["seat"] == actor, f"槽位必须来自应答者自己：{slot['ref']}"
+        assert slot["ref"]["zone"] == "hand", f"这一步是自己的手牌区：{slot['ref']}"
+        assert slot["card"] is not None, "槽位牌面必须可见（否则前端只会画「?」位置）"
+    assert payload["spec"]["zones"] == ["hand"]
+    assert payload["spec"]["total"] == [1, 1], "单张选择 ⇒ isOwnHandSinglePick（点一张即提交）"
+
+
+class _SlashAtSeat:
+    """座位 0 的脚本：出牌阶段对 ``target`` 使用【杀】并发动装备技（雌雄双股剑）。
+
+    其余询问退到最小合法应答（放弃 / 结束阶段）——本用例只把会话推到目标 1 的弃手牌步。
+    """
+
+    def __init__(self, slash: int, target: int) -> None:
+        self._slash = slash
+        self._target = target
+        self._fallback = _FireDriver()
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == self._slash
+                    and action.targets == (self._target,)
+                ):
+                    return action
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill):
+                    return action
+        return self._fallback.answer(query)
+
+
+def _double_sword_session(*, target_hand: tuple[int, ...]):
+    """真会话：座位 0（男）持【雌雄双股剑】对座位 1（女，人类）用【杀】，停在目标的弃牌步。"""
+    from sgs.data import Gender as _Gender
+    from sgs.data import RuleConfig as _RuleConfig
+    from sgs_web.session import Session as _Session
+
+    pack = _context_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    sword = cards_of_type(pack, "double_sword")[0]
+    used = {slash, sword, *target_hand}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hand=(slash,), equip=(sword,), gender=_Gender.MALE),
+            SeatSpec(hp=4, hand=target_hand, gender=_Gender.FEMALE),
+            SeatSpec(hp=4, hand=()),
+            SeatSpec(hp=4, hand=()),
+        ],
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=1,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 1 else _SlashAtSeat(slash, 1) for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def test_the_own_hand_direct_pick_payloads_start_from_a_real_engine_pending() -> None:
+    """票 09 ④：两个"自家手牌直选"的载荷必须**从引擎真实 pending 出发**核（不是合成 Query）。
+
+    合成 ``Query`` 的用例（本文件 5b 段那类）掩盖了这个断点：它能构造出"槽位可见 + dialog
+    为 null"，而**引擎**这一侧可能根本没铺可见槽（雌雄漏传 `reveal_hand`）、或者投影自己
+    塞了 `revealed`（火攻）。两处各自实现一份"自己手牌的牌面可见性"正是本票要消灭的第二份
+    真源。故这里走完整回环：真会话 → 真引擎询问 → `pending_payload` → 前端判据读的那几个键。
+    """
+    # ---- ① 雌雄双股剑：目标选「弃一张手牌」后的选择面 ----
+    pack = _context_pack()
+    target_hand = (
+        cards_of_type(pack, "peach")[0],
+        cards_of_type(pack, "dodge")[0],
+    )
+    session = _double_sword_session(target_hand=target_hand)
+    option = session.pending
+    assert option is not None and option.kind == QueryKind.SELECT_OPTION, (
+        f"雌雄先说选择权在目标：{option and option.kind}"
+    )
+    assert option.actor == 1, "选择权在目标（人类座位）"
+    session.submit_answer(
+        next(
+            action
+            for action in option.legal_actions
+            if isinstance(action, SelectOption) and action.choice == "discard_one"
+        )
+    )
+    discard = session.pending
+    assert discard is not None and discard.kind == QueryKind.SELECT_CARDS, (
+        f"目标选「弃一张手牌」后进选牌步：{discard and discard.kind}"
+    )
+    payload = pending_payload(session)
+    _assert_own_hand_direct_pick_payload(payload, actor=1)
+    faces = [slot["card"]["card_id"] for slot in payload["slots"]]
+    assert set(faces) == set(target_hand), "面里是目标自己的那几张手牌（牌面对本人可见）"
+
+    # ---- ② 火攻：目标亮自己一张手牌的那一步 ----
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    fire_session = _fire_session(user_hand=(spade, heart), target_hand=())
+    fire_session.submit_answer(_fire_use_action(fire_session.pending, target=0))
+    fire_reveal = _step_until(
+        fire_session,
+        lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0,
+    )
+    assert fire_reveal is not None
+    _assert_own_hand_direct_pick_payload(pending_payload(fire_session), actor=0)
 
 
 def test_the_human_targets_reveal_is_public_and_leaves_no_known_marker() -> None:

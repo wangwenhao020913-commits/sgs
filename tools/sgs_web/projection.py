@@ -1638,6 +1638,31 @@ def _fire_attack_step(engine: Any, query: Query) -> dict[str, Any] | None:
     }
 
 
+def _own_hand_face(query: Query) -> bool:
+    """这一步的选择面是不是**应答者自己的手牌**（每一槽都是 ``ref.seat == actor`` 的手牌）。
+
+    票 09 / spec §1 #12：自己的手牌对本人**天然可见**（``view.self_hand`` 已有同一批牌面），
+    所以它不是"观看授予"（``revealed`` 那一档的语义 = 发给应答者的**额外**牌面）。投影原先在
+    【火攻】亮牌步把己方手牌槽位抄进 ``payload["revealed"]`` ⇒ ``dialog="reveal"`` ⇒
+    前端 ``modal.js:isRevealStep`` 短路 ``candidates.js:isOwnZonePick`` ⇒ 亮牌弹窗。
+
+    判据与前端 ``candidates.js:isOwnZonePick`` 的**形状**同源（`SELECT_CARDS` ∧ 槽位全在
+    应答者自己的手牌区）：引擎的真实槽位可见性和前端判据必须是同一份事实，不是两份。
+    空槽位 / 取不到应答者 ⇒ ``False``（fail-open 到既有的「授予」路径，不因守卫吞掉别的面）。
+    """
+    slots = tuple(getattr(query, "slots", ()) or ())
+    if not slots or getattr(query, "actor", None) is None:
+        return False
+    actor = int(query.actor)
+    for slot in slots:
+        ref = getattr(slot, "ref", None)
+        if ref is None or getattr(ref, "seat", None) is None:
+            return False
+        if int(ref.seat) != actor or ref.zone is not Zone.HAND:
+            return False
+    return True
+
+
 def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
     """这次询问的两行人话：**正在发生什么**（``label``）+ **需要做什么**（``requirement``）。
 
@@ -2509,18 +2534,24 @@ def pending_payload(
         option_source(session.engine, query) if isinstance(session, Session) else None
     )
     # M5-08a（D10 / §5.1.4）：【火攻】的两步选牌。读取方 = 亮牌模板 / 牌桌点手牌：
-    #   - 亮牌步：``dialog = "reveal"`` + ``revealed``（**只发给目标本人**；他点一张即亮出）；
+    #   - 亮牌步：牌桌直选（票 09 / spec §1 #12）——槽位全是应答者**自己的手牌**，
+    #     牌面本来就在 `view.self_hand` 里，故**不**授予 ``revealed``（见 :func:`_own_hand_face`）；
+    #     授予一旦为空，下面的 ``dialog`` 派生自然给 ``null``，界面走既有的 own-hand-pick。
     #   - 弃牌步：``reveal`` = 已经公开的那一张（使用者据此在中央舞台看到亮牌）。
     # 两步的牌面都只在本座位载荷里；别人的载荷由既有的 ``_mask_watched_faces`` 抹掉。
     fire_attack = _fire_attack_step(session.engine, query) if isinstance(session, Session) else None
     payload["reveal"] = None
-    if fire_attack is not None and not foreign:
-        if fire_attack["step"] == "reveal":
-            payload["revealed"] = [
-                slot.card.model_dump(mode="json")
-                for slot in query.slots
-                if getattr(slot, "card", None) is not None
-            ]
+    if (
+        fire_attack is not None
+        and not foreign
+        and fire_attack["step"] == "reveal"
+        and not _own_hand_face(query)
+    ):
+        payload["revealed"] = [
+            slot.card.model_dump(mode="json")
+            for slot in query.slots
+            if getattr(slot, "card", None) is not None
+        ]
 
     # U2-08（D10）：花色是**会被复用的枚举模板**，中文名 / 符号 / 红黑由服务端派生一次；
     # 选项闭集里只要不全是花色就是 ``None``（界面据此决定画选择型弹窗还是小选项组）。

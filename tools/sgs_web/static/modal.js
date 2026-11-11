@@ -365,7 +365,10 @@ function isHarvestActive(pending) {
  *    且必须还有**当前目标**（``harvest.current`` 非空）——结算末尾没有当前目标时不开。
  *  - ``pending.dialog === "reveal"``：服务端给**观看牌面**的选牌步打上的**显式模板标记**
  *    （U2-12：【遗计】的牌堆顶两张没有五谷的 target 列表；``projection.pending_payload``
- *    以``SELECT_CARDS`` + 授予牌面这个**形状**派生，前端不认技能 id）。
+ *    以``SELECT_CARDS`` + 授予牌面这个**形状**派生，前端不认技能 id）。**票 09** 起服务端
+ *    不再对"槽位全是应答者自己手牌"的面给这个标记（那不是观看授予）；本函数另加一条
+ *    **对称否决**（:func:`ownHandSlotsKnown`）兜住旧载荷 / 合成载荷——面里的牌已经在
+ *    本人手牌快照里 ⇒ 牌桌直选，不在亮牌窗里再摆一遍。
  *
  * 判据只看"这一步是不是亮牌面"，不看 actor 是不是人类（`syncDialog` 另问 `isOwnPending`；
  * 五谷的 AI 拿牌阶段要显示在人类屏幕上，见 `syncDialog` 的 harvest 例外）。
@@ -380,6 +383,7 @@ function isRevealStep(pending) {
       && Array.isArray(cards) && cards.length > 0;
   }
   if (pending.kind !== "SELECT_CARDS") return false;
+  if (ownHandSlotsKnown(pending)) return false;
   if (pending.dialog === DIALOG_KINDS.reveal) return true;
   if (!isHarvestActive(pending)) return false;
   const zones = (pending.spec && pending.spec.zones) || [];

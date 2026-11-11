@@ -885,6 +885,75 @@ def test_double_sword_discards_the_chosen_card_to_the_discard_pile():
     ), "目标是弃牌而不是让使用者摸牌；询问之后使用者这条链上不该有摸牌"
 
 
+def test_double_sword_discard_face_is_visible_to_the_target():
+    """【雌雄双股剑】弃手牌那一步挑的是**目标自己的区** ⇒ 选择面必须铺**可见槽**。
+
+    spec §1 #7 / 票 09 ①：隐藏槽（``slot.card is None`` + 位置打乱）是"挑别人的手牌"的形状；
+    这一步的挑牌人**就是**手牌持有者本人，隐藏槽把界面挤进"未知区域只有位置"的那张面。
+    ``Engine.selection_face(..., reveal_hand=True)`` 的注释**早点名**本技能是它的消费者
+    （``engine/game.py`` 的 ``selection_face`` 文档串），代码却漏传 ⇒ 本条钉住"覆盖了"。
+
+    断言读的是**真实面**（引擎记录流里的那条 ``SELECT_CARDS`` 询问），不是合成载荷：
+    每一槽都带牌面，且槽位顺序 = 目标手牌顺序（``reveal_hand=True`` 分支逐张按手牌铺，
+    隐藏分支则逐槽 ``card=None`` + ``select_shift`` 打乱位置）。
+    """
+    other = _cards("peach")[0]
+    dodge = _cards("dodge")[0]
+    duel = _cards("duel")[0]
+    hand = (other, dodge, duel)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(DOUBLE_SWORD,), gender=Gender.MALE),
+            SeatSpec(hand=hand, gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(SLASH, DOUBLE_SWORD, *hand),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    def defender(query):
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, Pass))
+        if query.kind == "SELECT_OPTION":
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == "discard_one",
+            )
+        if query.kind == "SELECT_CARDS":
+            return _find(query, lambda action: isinstance(action, SelectCards))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    discard_query = next(
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_CARDS"
+    )
+    assert discard_query.actor == 1, "这一步问的是目标自己"
+    assert [slot.ref.seat for slot in discard_query.slots] == [1] * len(hand), (
+        "面铺的是目标自己的手牌区"
+    )
+    assert all(slot.card is not None for slot in discard_query.slots), (
+        "reveal_hand 没生效：自己挑自己的手牌却拿到隐藏槽（界面因此开「未知区域窗」）"
+    )
+    assert [slot.card.card_id for slot in discard_query.slots] == list(hand), (
+        "可见槽按手牌顺序铺开（隐藏槽走的是打乱后的位置序）"
+    )
+
+
 class _DoubleSwordHost:
     """【雌雄双股剑】逐目标循环的最小宿主（只实现 ``_double_sword`` 用到的那几张面）。
 

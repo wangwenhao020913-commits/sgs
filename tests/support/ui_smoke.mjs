@@ -14409,7 +14409,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && ui.buildAction().targets.join(",") === "0",
     `targets=${JSON.stringify(ui.state.selectedTargets)} action=${JSON.stringify(ui.buildAction())}`);
 
-  // ---- ② 人类被指定：亮牌模板（点一张即提交；只读；悬停可读；其余手牌不外泄） ----
+  // ---- ② 人类被指定：**牌桌直选**（票 09 ②：不再开亮牌窗；牌面就在自己手里） ----
+  //
+  // 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：投影对"槽位全是应答者
+  // 自己手牌"的面**不再授予** `revealed` ⇒ `dialog: null`；槽位 `card` 可见（引擎
+  // `reveal_hand=True` 铺的可见槽）。前端因此走 own-hand-pick：点一张即提交。
   const revealPending = {
     kind: "SELECT_CARDS", actor: 0, seq: 2102,
     prompt: "请从选择面里选择一张牌。",
@@ -14423,8 +14427,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { ref: { seat: 0, zone: "hand" }, card: sameSuitB },
     ],
     spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
-    revealed: [sameSuitA, sameSuitB],
-    dialog: "reveal", harvest: null, reveal: null,
+    revealed: null,
+    dialog: null, harvest: null, reveal: null,
     context: fireContext("从自己的手牌里亮出一张（公开）"),
     prompt_display: {
       text: "请从选择面里选择一张牌。",
@@ -14435,38 +14439,67 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   };
   const revealView = fireView(revealPending, { hand: [sameSuitA, sameSuitB] });
   renderFire(revealView);
-  const revealCards = () => Array.from($("t-options").children[0].children[0].children);
-  check("M5-08a-b1 被指定者（人类）看到亮牌模板：标题「火攻」、两张自己的手牌、没有放弃",
-    ui.stepDialogKind(revealPending) === "reveal"
-      && $("t-dialog").hidden === false
-      && $("t-dialog-title").textContent === "火攻"
-      && ui.isPickRevealStep(revealPending) === false
-      && revealCards().length === 2
-      && revealCards().map((node) => node.getAttribute("data-card-id")).join(",") === "5,7"
+  const handDis = () => Array.from($("t-hand").children)
+    .map((node) => node.classList.contains("dis"));
+  check("M5-08a-b1 被指定者（人类）在牌桌直选：不开弹窗、不铺槽位面、两张手牌都可点",
+    ui.stepDialogKind(revealPending) === null
+      && $("t-dialog").hidden === true
+      && ui.isRevealStep(revealPending) === false
+      && ui.isOwnHandSinglePick(revealPending) === true
+      && ui.selectionEnabled() === true
+      && $("t-options").children.length === 0
+      && $("t-hand").children.length === 2
+      && handDis().join(",") === "false,false"
+      && $("t-target-hint").textContent.includes("亮出")
       && $("btn-pass").hidden === true
       && $("btn-submit").disabled === true,
-    `kind=${ui.stepDialogKind(revealPending)} title="${$("t-dialog-title").textContent}" cards=${revealCards().length} submit=${$("btn-submit").disabled}`);
-  check("M5-08a-b2 亮牌弹窗打开时牌桌只读，但牌面悬停描述照常可读",
-    ui.selectionEnabled() === false
-      && revealCards()[0].getAttribute("title").includes("闪电的描述")
-      && revealCards()[1].getAttribute("title").includes("杀的描述")
-      && $("t-modal-backdrop").hidden === false,
-    `enabled=${ui.selectionEnabled()} backdrop=${$("t-modal-backdrop").hidden} titles=${revealCards().map((n) => n.getAttribute("title")).join("|")}`);
-  const focusBefore = ui.state.focusCardId;
-  await clickHand(5);
-  check("M5-08a-b3 只读态：点自己的手牌不产生选择（选择只在亮牌窗里）",
-    ui.state.focusCardId === focusBefore && ui.state.picks.length === 0,
-    `focus=${ui.state.focusCardId} picks=${JSON.stringify(ui.state.picks)}`);
+    `kind=${ui.stepDialogKind(revealPending)} hidden=${$("t-dialog").hidden} options=${$("t-options").children.length} dis=${handDis()} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}"`);
+  check("M5-08a-b2 牌桌可点且牌面悬停描述照常可读（直选不借弹窗也能看牌）",
+    handNode(5).getAttribute("title").includes("闪电的描述")
+      && handNode(7).getAttribute("title").includes("杀的描述")
+      && $("t-modal-backdrop").hidden === true,
+    `titles=${[5, 7].map((id) => handNode(id).getAttribute("title")).join("|")} backdrop=${$("t-modal-backdrop").hidden}`);
   const beforeReveal = calls.length;
   staleAnswerStatus = 400;
-  (revealCards()[0].listeners.click || []).forEach((fn) => fn({ target: revealCards()[0] }));
+  await clickHand(5);
   await settle();
   staleAnswerStatus = null;
   const revealAnswers = answersSince(beforeReveal);
-  check("M5-08a-b4 点一张亮牌 = 恰一条 SelectCards（picks 填面内位置），不手拼 Action",
+  check("M5-08a-b3 点第一张手牌 = 恰一条 SelectCards（面内位置 0），不手拼 Action",
     revealAnswers.length === 1
       && JSON.stringify(revealAnswers[0].body.action) === JSON.stringify(revealPending.legal_actions[0]),
     `answers=${revealAnswers.length} action=${JSON.stringify(revealAnswers[0] && revealAnswers[0].body.action)}`);
+  // 第二张：重渲染后从同一份载荷点另一张，提交的应是面内位置 1 那条候选。
+  renderFire(revealView);
+  const beforeRevealSecond = calls.length;
+  staleAnswerStatus = 400;
+  await clickHand(7);
+  await settle();
+  staleAnswerStatus = null;
+  const revealSecondAnswers = answersSince(beforeRevealSecond);
+  check("M5-08a-b4 点第二张手牌 = 提交面内位置 1 那条候选（点哪张亮哪张）",
+    revealSecondAnswers.length === 1
+      && JSON.stringify(revealSecondAnswers[0].body.action) === JSON.stringify(revealPending.legal_actions[1]),
+    `answers=${revealSecondAnswers.length} action=${JSON.stringify(revealSecondAnswers[0] && revealSecondAnswers[0].body.action)}`);
+
+  // 旧服务端载荷（仍带 `dialog: "reveal"` + `revealed`）：前端**对称否决**——面里的牌已经在
+  // `self_hand` 里（= 不是观看授予），绝不在自己手牌上再开一遍亮牌窗。
+  // 【遗计】/【从讨】一类**观看授予**把牌摆在同样的 `zone:"hand"` 可见槽上，但那几张牌
+  // **不在**本人在手牌里 ⇒ U2-12 的弹窗照旧（见本文件 遗计 段）。
+  const staleReveal = {
+    ...revealPending,
+    seq: 2108,
+    dialog: "reveal",
+    revealed: [sameSuitA, sameSuitB],
+  };
+  const staleView = fireView(staleReveal, { hand: [sameSuitA, sameSuitB] });
+  renderFire(staleView);
+  check("M5-08a-b6 旧载荷（dialog 仍是 reveal）被对称否决：己方在手牌里的牌 ⇒ 牌桌直选",
+    ui.stepDialogKind(staleReveal) === null
+      && $("t-dialog").hidden === true
+      && ui.isOwnHandSinglePick(staleReveal) === true
+      && ui.selectionEnabled() === true,
+    `kind=${ui.stepDialogKind(staleReveal)} hidden=${$("t-dialog").hidden} enabled=${ui.selectionEnabled()}`);
 
   // 别人的载荷：不是询问者 ⇒ 不开窗、不放牌面（未亮出的牌一张都不出现）。
   const foreignPending = {
@@ -14648,6 +14681,143 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && $("t-context").textContent.includes("展示"),
     `fadeAt=${popFadeAt} dwell=${popDwell}`
       + ` processing=${$("t-processing").text()} context="${$("t-context").textContent}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
+/* ============ 票 09 ①（spec §1 #7）：雌雄双股剑弃手牌 = 牌桌直选 ============
+ *
+ * 修复前：引擎 `selection_face(target, (Zone.HAND,))` 漏传 `reveal_hand=True` ⇒ 槽位
+ * `card=None` + 位置打乱 ⇒ 前端 `isOwnZonePick` 判假 ⇒ 落到 `SELECT_CARDS → slots` 的
+ * 通用槽位面（"隐藏区域的槽位只有位置"，就是用户报障的"未知区域窗"）。修复后槽位可见 ⇒
+ * own-hand single pick：点手牌即提交。
+ *
+ * 引擎那一侧由 `tests/test_skills.py::test_double_sword_discard_face_is_visible_to_the_target`
+ * 与 `tests/test_web.py` 的**同源回环**断言（真会话 pending ⇒ 载荷 ⇒ 前端读的同一份形状）
+ * 钉住；本段只钉**界面读法**，载荷与真会话同形。本步此前**没有任何前端用例**。
+ */
+{
+  const cxDiscardPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2201,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2201, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2201, picks: [1] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: { ...synthCard(4001, "桃"), suit: "heart" } },
+      { ref: { seat: 0, zone: "hand" }, card: { ...synthCard(4002, "闪"), suit: "diamond" } },
+    ],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "雌雄双股剑", targets: [0],
+      label: "0号位对0号位使用雌雄双股剑", requirement: "弃置一张手牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2201, picks: [0] },
+      default_label: "超时将自动选择第一张手牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const cxCards = cxDiscardPending.slots.map((slot) => slot.card);
+  const cxSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261017,
+  });
+  const cxView = synthView(cxDiscardPending);
+  cxView.snapshot.self_hand = cxCards;
+  cxView.snapshot.players[0].hand_count = cxCards.length;
+  const renderCx = () => {
+    ui.state.view = cxView;
+    ui.state.sessionId = cxSession.session_id;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(cxView);
+  };
+  const cxHand = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
+  const clickCx = async (cardId) => {
+    const node = cxHand(cardId);
+    if (!node) return;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+  };
+  const settleCx = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const cxAnswersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+
+  renderCx();
+  const cxDis = () => Array.from($("t-hand").children).map((node) => node.classList.contains("dis"));
+  check("U-CX-01a 雌雄弃牌步在牌桌直选：不开弹窗、不铺「未知区域」槽位面、两张手牌都可点",
+    ui.stepDialogKind(cxDiscardPending) === null
+      && $("t-dialog").hidden === true
+      && ui.isOwnHandSinglePick(cxDiscardPending) === true
+      && ui.selectionEnabled() === true
+      && $("t-options").children.length === 0
+      && $("t-hand").children.length === 2
+      && cxDis().join(",") === "false,false"
+      && $("t-target-hint").textContent.includes("弃置一张手牌")
+      && $("btn-submit").disabled === true,
+    `kind=${ui.stepDialogKind(cxDiscardPending)} hidden=${$("t-dialog").hidden} options=${$("t-options").children.length} dis=${cxDis()} hint="${$("t-target-hint").textContent}"`);
+
+  const cxBefore = calls.length;
+  staleAnswerStatus = 400;
+  await clickCx(4001);
+  await settleCx();
+  staleAnswerStatus = null;
+  const cxAnswers = cxAnswersSince(cxBefore);
+  check("U-CX-01b 点一张手牌 = 恰一条 SelectCards（面内位置 0），不手拼 Action",
+    cxAnswers.length === 1
+      && JSON.stringify(cxAnswers[0].body.action) === JSON.stringify(cxDiscardPending.legal_actions[0]),
+    `answers=${cxAnswers.length} action=${JSON.stringify(cxAnswers[0] && cxAnswers[0].body.action)}`);
+
+  renderCx();
+  const cxSecondBefore = calls.length;
+  staleAnswerStatus = 400;
+  await clickCx(4002);
+  await settleCx();
+  staleAnswerStatus = null;
+  const cxSecondAnswers = cxAnswersSince(cxSecondBefore);
+  check("U-CX-01c 点另一张 = 面内位置 1 那条候选（点哪张弃哪张）",
+    cxSecondAnswers.length === 1
+      && JSON.stringify(cxSecondAnswers[0].body.action) === JSON.stringify(cxDiscardPending.legal_actions[1]),
+    `answers=${cxSecondAnswers.length} action=${JSON.stringify(cxSecondAnswers[0] && cxSecondAnswers[0].body.action)}`);
+
+  // 反面对照：槽位 `card=None`（隐藏槽，修复前那份载荷）时**确实**落到通用槽位面——
+  // 这一条钉住"可见槽是唯一判据"，也说明 U-CX-01a 的红不是垫片自己造的。
+  const cxHidden = {
+    ...cxDiscardPending,
+    seq: 2202,
+    slots: cxDiscardPending.slots.map(() => ({ ref: { seat: 0, zone: "hand" }, card: null })),
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2202, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2202, picks: [1] },
+    ],
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2202, picks: [0] },
+      default_label: "超时将自动选择第一个槽位",
+    },
+  };
+  const cxHiddenView = synthView(cxHidden);
+  cxHiddenView.snapshot.self_hand = cxCards;
+  ui.state.view = cxHiddenView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(cxHiddenView);
+  check("U-CX-01d 隐藏槽（修复前的形状）确实落进通用槽位面：可见槽是直选判据的唯一依据",
+    ui.stepDialogKind(cxHidden) === null
+      && ui.isOwnHandSinglePick(cxHidden) === false
+      && $("t-options").children.length > 0
+      && $("t-options").text().includes("隐藏区域的槽位只有位置"),
+    `kind=${ui.stepDialogKind(cxHidden)} single=${ui.isOwnHandSinglePick(cxHidden)} options=${$("t-options").children.length}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;
@@ -14962,15 +15132,20 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `label="${reforgeLabel}" masked="${maskedReforgeLabel}" line="${moveLine}"`);
 
   // ---- ⑧ 弹窗步骤沿 U2：只读判据仍是 selectionEnabled()，重铸入口不出现 ----
+  //
+  // 夹具说明（票 09）：原先这里借的是【火攻】亮牌步的"自己手牌亮牌"形状；票 09 起那种面
+  // （槽位全是应答者自己的手牌、牌面已在 `self_hand` 里）是**牌桌直选**，不再是弹窗。
+  // 本段要证的是"弹窗步骤 ⇒ 牌桌只读"，故改用**观看授予**形状：被亮的那张（无懈）不在
+  // 自己手里 ⇒ `dialog: "reveal"` 的亮牌窗照旧成立。
   const dialogPending = {
     kind: "SELECT_CARDS", actor: 0, seq: 3103, dialog: "reveal",
     prompt: "请从选择面里选择一张牌。",
     legal_actions: [{ kind: "SelectCards", answers_seq: 3103, picks: [0] }],
     candidate_index: {}, virtual_index: {}, option_seats: {},
-    slots: [{ ref: { seat: 0, zone: "hand" }, card: slash }],
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: nullify }],
     spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
-    revealed: [slash], harvest: null, reveal: null,
-    context: { ...ironContext, requirement: "从自己的手牌里亮出一张（公开）" },
+    revealed: [nullify], harvest: null, reveal: null,
+    context: { ...ironContext, requirement: "观看牌堆顶的一张牌" },
     prompt_display: {
       text: "请从选择面里选择一张牌。",
       default_action: { kind: "SelectCards", answers_seq: 3103, picks: [0] },
@@ -15676,15 +15851,19 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${answersSince(beforeCancel).length} focus=${ui.state.focusCardId} submit=${$("btn-submit").disabled}`);
 
   // ---- ⑥ 只读态：弹窗步骤里点【酒】不选、零提交（判据仍是 stepDialogKind） ----
+  //
+  // 夹具说明（票 09）：原先借【火攻】亮牌步的"自己手牌亮牌"形状；票 09 起那种面是**牌桌
+  // 直选**（槽位全是自己的手牌、牌面已在 `self_hand` 里），不再是弹窗。这里改用**观看授予**
+  // 形状（被亮的桃不在自己手里），弹窗判据与被验证的只读行为都不变。
   const dialogPending = {
     kind: "SELECT_CARDS", actor: 0, seq: 3306, dialog: "reveal",
     prompt: "请从选择面里选择一张牌。",
     legal_actions: [{ kind: "SelectCards", answers_seq: 3306, picks: [0] }],
     candidate_index: {}, virtual_index: {}, option_seats: {},
-    slots: [{ ref: { seat: 0, zone: "hand" }, card: wine }],
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: peach }],
     spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
-    revealed: [wine], harvest: null, reveal: null,
-    context: { ...context, requirement: "从自己的手牌里亮出一张（公开）" },
+    revealed: [peach], harvest: null, reveal: null,
+    context: { ...context, requirement: "观看牌堆顶的一张牌" },
     prompt_display: {
       text: "请从选择面里选择一张牌。",
       default_action: { kind: "SelectCards", answers_seq: 3306, picks: [0] },
@@ -22031,6 +22210,118 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && JSON.stringify(pickAnswers[0].body.action) === JSON.stringify(pickAction),
     `answers=${pickAnswers.length} action=${JSON.stringify(pickAnswers[0] && pickAnswers[0].body.action)}`);
 }
+
+/* ============ 票 09 ③（spec §1 #6 / §2 Q6）：业炎四色的同花色置灰（前端止损） ============
+ *
+ * 业炎代价步的面 = `SELECT_CARDS` + `spec.max_per_suit = 1` + 槽位全在**自己手牌**
+ * （`skills/active.py` 的 `_yeyan_cost_face`：`reveal_hand=True` 的可见槽）。修复前花色审查
+ * 只住在 `reveal.js:isSuitPickStep`（第一道门 = 槽位全在处理区）⇒ 手牌面**整面无置灰**，
+ * 四同花只在提交时被 `answer.js` 的逐字段自检挡住。
+ *
+ * 票 09 把它搬进 own-zone 直选判据（`card-face.js:cardFace` 置灰 / `options.js:toggleSlotPick`
+ * 拒点，两者共用 `candidates.js:ownZoneSuitTaken`），**只覆盖"每花色至多 k 张"这一条局部
+ * 约束**；完整的"每一步都由后端算"由票 11（步骤预览端点）/ 票 12 接手，届时这条置灰退役。
+ *
+ * 判据只读 `spec.max_per_suit`（服务端声明），前端不写死"同花色一张"。
+ */
+{
+  const ysCards = [
+    { ...synthCard(301, "桃"), suit: "heart", rank: 5, color: "red", type: "peach" },
+    { ...synthCard(302, "杀"), suit: "heart", rank: 9, color: "red", type: "slash" },
+    { ...synthCard(303, "闪"), suit: "spade", rank: 7, color: "black", type: "dodge" },
+    { ...synthCard(304, "过河拆桥"), suit: "club", rank: 3, color: "black", type: "dismantlement" },
+    { ...synthCard(305, "无中生有"), suit: "diamond", rank: 10, color: "red", type: "ex_nihilo" },
+  ];
+  // 四色各一的组合只有两条（两张红桃各配另外三色）——与真引擎 `combinations()` 的枚举同形。
+  const ysCombos = [[0, 2, 3, 4], [1, 2, 3, 4]];
+  const ysPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2311,
+    prompt: "请从选择面里选择四张牌。",
+    legal_actions: ysCombos.map((picks) => ({
+      kind: "SelectCards", answers_seq: 2311, picks,
+    })),
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: ysCards.map((card) => ({ ref: { seat: 0, zone: "hand" }, card })),
+    spec: { zones: ["hand"], total: [4, 4], max_per_suit: 1 },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "业炎", targets: [],
+      label: "0号位神周瑜移动版发动业炎",
+      requirement: "弃置四张花色各不相同的手牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择四张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2311, picks: [0, 2, 3, 4] },
+      default_label: "超时将自动选择四张花色各不相同的手牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const ysView = synthView(ysPending);
+  ysView.snapshot.self_hand = ysCards;
+  ysView.snapshot.players[0].hand_count = ysCards.length;
+  const renderYs = () => {
+    ui.state.view = ysView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(ysView);
+  };
+  const ysHand = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
+  const clickYs = (cardId) => {
+    const node = ysHand(cardId);
+    if (!node) return;
+    (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
+  };
+  const ysDis = () => ysCards.map((card) => ysHand(card.card_id).classList.contains("dis"));
+
+  renderYs();
+  check("U-YS-01a 业炎代价步走 own-zone 直选（不是弹窗）、五张手牌初始都可点、四张未齐时不可提交",
+    ui.stepDialogKind(ysPending) === null
+      && ui.isOwnZonePick(ysPending) === true
+      && $("t-dialog").hidden === true
+      && ysDis().join(",") === [false, false, false, false, false].join(",")
+      && $("btn-submit").disabled === true
+      && $("t-target-hint").textContent.includes("每种花色至多 1 张"),
+    `kind=${ui.stepDialogKind(ysPending)} dis=${ysDis()} submit=${$("btn-submit").disabled} hint="${$("t-target-hint").textContent}"`);
+
+  // ---- 第 1 张红桃：同花色的**其余**牌立刻置灰（`spec.max_per_suit = 1`） ----
+  clickYs(301);
+  check("U-YS-01b 点第 1 张红桃后：另一张红桃置灰、其余三色照常可点（置灰只按花色）",
+    JSON.stringify(ui.state.picks) === "[0]"
+      && ysDis().join(",") === [false, true, false, false, false].join(",")
+      && $("btn-submit").disabled === true,
+    `picks=${JSON.stringify(ui.state.picks)} dis=${ysDis()} submit=${$("btn-submit").disabled}`);
+
+  // ---- 置灰的牌点不动（置灰与拒点是同一条判据，不只靠 CSS） ----
+  clickYs(302);
+  check("U-YS-01c 点置灰的第二张红桃 = 不收下（判据不只在样式上）",
+    JSON.stringify(ui.state.picks) === "[0]",
+    `picks=${JSON.stringify(ui.state.picks)}`);
+
+  // ---- 凑齐四色：提交可点，载荷 = 候选里那条升序 SelectCards ----
+  clickYs(303);
+  clickYs(304);
+  clickYs(305);
+  const ysBuilt = ui.buildAction();
+  check("U-YS-01d 四花色齐了才可提交：载荷是候选里那条 SelectCards（面内位置升序）",
+    JSON.stringify(ui.state.picks) === "[0,2,3,4]"
+      && $("btn-submit").disabled === false
+      && !!ysBuilt
+      && JSON.stringify(ysBuilt) === JSON.stringify(ysPending.legal_actions[0]),
+    `picks=${JSON.stringify(ui.state.picks)} submit=${$("btn-submit").disabled} built=${JSON.stringify(ysBuilt)}`);
+
+  // ---- 取消第 1 张后：那一张的置灰跟着解除（置灰是当前选择的纯函数，不粘滞） ----
+  clickYs(301);
+  check("U-YS-01e 取消已选的红桃 ⇒ 同花色置灰立刻解除（纯函数，不粘滞）",
+    JSON.stringify(ui.state.picks) === "[2,3,4]"
+      && ysDis().join(",") === [false, false, false, false, false].join(",")
+      && $("btn-submit").disabled === true,
+    `picks=${JSON.stringify(ui.state.picks)} dis=${ysDis()} submit=${$("btn-submit").disabled}`);
+
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 
 /* ============ huo-shenzhugeliang 票 02：两个新面（合成载荷） ============
  *

@@ -8923,3 +8923,91 @@ def test_the_prompt_template_keys_are_real_skill_ids_and_real_step_names() -> No
         assert steps, f"{key} 没有任何步骤模板"
         for step in steps:
             assert step in known, f"{key} 的步骤名 {step} 不在声明里：{sorted(known)}"
+
+
+# ---------------------------------------------------------------------------
+# 票 09（table-ux-overhaul）：自家手牌直选三例的静态判据
+# ---------------------------------------------------------------------------
+
+
+def test_the_own_zone_suit_cap_is_one_shared_predicate_reading_the_payload() -> None:
+    """票 09 ③：业炎四色的同花色置灰 = **前端止损**，静态面只允许一条判据。
+
+    行为归 `ui_smoke.mjs`（`U-YS-01a..e`），这里钉结构：
+
+    - 判据只有一处实现：`candidates.js:ownZoneSuitTaken`，读服务端声明 `spec.max_per_suit`
+      （前端不写死"同花色一张"），同花色计数**复用**涉猎 / 两行观看手牌那份
+      `reveal.js:suitSlotState`（不另写第二套）；
+    - 两个消费者共用它：`card-face.js:cardFace`（手牌置灰）与 `options.js:toggleSlotPick`
+      （拒点——置灰不能只在样式上）；
+    - **止损的退役条件写进了注释**：票 11 / 12 落地后这条判据改读步骤预览、然后删除。
+      本断言同时是"别在这里长出第二份规则"的闸门：`ownZoneSuitTaken` 之外，
+      `candidates.js` 里不许再出现 `max_per_suit` 的计数分支。
+    """
+    candidates = _strip_js_comments((STATIC_DIR / "candidates.js").read_text(encoding="utf-8"))
+    card_face = _strip_js_comments((STATIC_DIR / "card-face.js").read_text(encoding="utf-8"))
+    options = _strip_js_comments((STATIC_DIR / "options.js").read_text(encoding="utf-8"))
+
+    taken = _js_function(candidates, "ownZoneSuitTaken")
+    assert "isOwnZonePick(pending)" in taken, f"只在自己区域的直选面上生效：{taken}"
+    assert "spec || {}).max_per_suit" in taken, f"读服务端声明，不写死花色张数：{taken}"
+    assert "suitSlotState(pending, index) === \"taken\"" in taken, (
+        f"同花色计数复用涉猎那一份（不另写第二套）：{taken}"
+    )
+    assert "票 11" in (STATIC_DIR / "candidates.js").read_text(encoding="utf-8"), (
+        "退役条件（票 11 / 12 接手后删除本条判据）必须写在判据旁边"
+    )
+
+    face = _js_function(card_face, "cardFace")
+    assert "ownZoneSuitTaken(pending, slotIndex)" in face, f"手牌置灰读同一条判据：{face}"
+    assert "taken" in face, face
+
+    toggle = _js_function(options, "toggleSlotPick")
+    assert "ownZoneSuitTaken(pending, index)" in toggle, (
+        f"拒点读同一条判据（置灰不能只在样式上）：{toggle}"
+    )
+
+    # 唯一判据：`candidates.js` 里对 `max_per_suit` 的计数只允许出现在 `ownZoneSuitTaken`
+    # 里（其余出现只允许是注释——这里读的是剥掉注释后的源码）。
+    assert candidates.count("max_per_suit") == 1, (
+        f"`candidates.js` 只允许一处读 max_per_suit：{candidates.count('max_per_suit')}"
+    )
+
+
+def test_the_own_zone_direct_pick_shape_is_one_predicate_without_a_dialog_deadlock() -> None:
+    """票 09 ①②：直选判据与亮牌否决共用**同一份形状**，且否决不读 `stepDialogKind`。
+
+    - `ownZoneSlotsVisible` 是形状的唯一实现（槽位全在应答者自己的手牌 / 装备区、牌面可见），
+      `isOwnZonePick` 与 `isRevealStep` 的否决都调它；
+    - 它**不许**读 `stepDialogKind`：那个函数会调亮牌判据，读它会绕成死循环（本文件读源码钉死）；
+    - 亮牌否决另加一条 `ownHandSlotsKnown`：面里的牌必须在**本人手牌快照**里——【遗计】/
+      【从讨】的观看授予也把牌摆在 `zone:"hand"` 的可见槽上（那几张牌不在手里），
+      它们必须继续开亮牌窗；
+    - 否决排在 `pending.dialog === DIALOG_KINDS.reveal` **之前**（排在后面等于不否决）。
+    """
+    candidates = _strip_js_comments((STATIC_DIR / "candidates.js").read_text(encoding="utf-8"))
+    modal = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+
+    shape = _js_function(candidates, "ownZoneSlotsVisible")
+    assert "SELECT_CARDS" in shape, shape
+    assert "stepDialogKind" not in shape, (
+        f"形状判据不许读弹窗种类（会被亮牌判据反过来调用 ⇒ 死循环）：{shape}"
+    )
+    assert "slot.card" in shape, f"牌面可见是判据的一半：{shape}"
+
+    own_pick = _js_function(candidates, "isOwnZonePick")
+    assert "ownZoneSlotsVisible(pending)" in own_pick, (
+        f"直选判据复用同一份形状（不再自己抄一遍槽位循环）：{own_pick}"
+    )
+
+    known = _js_function(candidates, "ownHandSlotsKnown")
+    assert "ownZoneSlotsVisible(pending)" in known, known
+    assert "self_hand" in known, f"「已经在我手里」才是「不是观看授予」的事实依据：{known}"
+
+    reveal = _js_function(modal, "isRevealStep")
+    assert "ownHandSlotsKnown(pending)" in reveal, (
+        f"亮牌判据要有对称否决（旧载荷 / 合成载荷兜底）：{reveal}"
+    )
+    assert reveal.index("ownHandSlotsKnown(pending)") < reveal.index(
+        "pending.dialog === DIALOG_KINDS.reveal"
+    ), f"否决必须排在模板标记之前，否则等于不否决：{reveal}"

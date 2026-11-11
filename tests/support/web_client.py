@@ -294,6 +294,36 @@ _FIRE_TAPES = (
 )
 
 
+def _is_own_hand_face(pending: dict[str, Any]) -> bool:
+    """这一步的选择面是不是**人类自己的手牌**（票 09 的形状判据，与前端同源）。
+
+    前端 `candidates.js:isOwnZonePick` 读的就是这份形状：`SELECT_CARDS` ∧ 每槽
+    `ref.seat == actor` ∧ `ref.zone == "hand"` ∧ 牌面可见。票 09 ①（雌雄）与 ②（火攻亮牌步）
+    都靠它落成**牌桌直选**——`dialog` 不再给 `"reveal"`。
+    """
+    if pending.get("kind") != "SELECT_CARDS":
+        return False
+    slots = pending.get("slots") or []
+    if not slots:
+        return False
+    actor = pending.get("actor")
+    return all(
+        (slot.get("ref") or {}).get("seat") == actor
+        and (slot.get("ref") or {}).get("zone") == "hand"
+        and slot.get("card")
+        for slot in slots
+    )
+
+
+def _fire_reveal_step(pending: dict[str, Any]) -> bool:
+    """【火攻】的**亮牌步**（票 09 起是牌桌直选）：自己的可见手牌面 + 还没亮出公开牌。
+
+    同一个技能**第二步**（同花色弃牌）的槽位形状一样，区别是它的载荷带 `reveal`
+    （已公开的那一张）——故用这个键把两步分开。
+    """
+    return pending.get("reveal") is None and _is_own_hand_face(pending)
+
+
 def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -> tuple[dict[str, Any], str]:
     """火攻 tape 的固定策略：返回（原样取自 ``legal_actions`` 的动作, 这一步的名字）。"""
     actions = pending.get("legal_actions") or []
@@ -309,7 +339,7 @@ def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -
             if not target_self and targets and targets != [0]:
                 return action, "fire_attack"
     if kind == "SELECT_CARDS":
-        if pending.get("dialog") == "reveal":
+        if _fire_reveal_step(pending):
             for action in actions:
                 if action.get("kind") == "SelectCards" and len(action.get("picks") or []) == 1:
                     return action, "reveal"
@@ -467,6 +497,17 @@ def fire_attack_tape(base: str) -> int:
             continue
         if not fa_used:
             print(f"FAIL 火攻 tape {label}：整局没有用出【火攻】（tape 失效）")
+            failures += 1
+            continue
+        if target_self and not reveal_seen:
+            # 票 09 ②：人类**自己**被指定时的亮牌步是**牌桌直选**（`dialog` 为空、牌面在
+            # `slots[].card` 里）。这一条把"固定策略还认得出亮牌步"钉住——认不出就说明
+            # 载荷形状又漂了。人类指定 AI 的那一段亮牌由 AI 做（人类载荷里没有这一步），
+            # 故只在 `target_self` 这一段要求。
+            print(
+                f"FAIL 火攻 tape {label}：亮牌步没有被识别成牌桌直选"
+                "（票 09 起的形状：SELECT_CARDS + 己方可见手牌 + dialog 为空）"
+            )
             failures += 1
             continue
         if not reveal_records:
@@ -1021,15 +1062,24 @@ def _fire_attack_fixed(base: str) -> int:
                     state["reveal"] = record.get("card") or {}
                     state["reveal_count"] = state.get("reveal_count", 0) + 1
                     state["reveal_seat"] = record.get("seat")
-            if pending is not None and pending.get("dialog") == "reveal":
+            if pending is not None and _fire_reveal_step(pending):
                 # A2：亮牌必须是一条**人类**的 SelectCards POST（不是 AI 亮牌）：人类座位
                 # 自己的应答记录 + 紧接着的 card_reveal 公开 delta 都落在这一次 POST 的响应里。
+                # 票 09 ②：亮牌步是**牌桌直选**——牌面在 `slots[].card` 里（不再是 `revealed`
+                # 授予），`dialog` 为空；本段顺带钉住这两条。
                 accepted = accepted_actions(records, pending.get("seq"))
                 if len(accepted) != 1 or accepted[0].get("kind") != "SelectCards":
                     print(f"FAIL 火攻固定 tape：亮牌应答不是一条人类 SelectCards：{accepted}")
                     return False
+                if pending.get("dialog") is not None or pending.get("revealed"):
+                    print(
+                        "FAIL 火攻固定 tape：己方手牌的亮牌步仍是弹窗载荷"
+                        f"（dialog={pending.get('dialog')} revealed={pending.get('revealed')}）"
+                    )
+                    return False
                 faces = {
-                    card.get("card_id") for card in pending.get("revealed") or []
+                    (slot.get("card") or {}).get("card_id")
+                    for slot in pending.get("slots") or []
                 }
                 revealed = [
                     (record.get("card") or {}).get("card_id")
@@ -1069,12 +1119,26 @@ def _fire_attack_fixed(base: str) -> int:
         if kind == "pending" and pending is not None:
             if not opponent_hand_not_leaked(body):
                 return False
-            if pending.get("dialog") == "reveal":
+            if _fire_reveal_step(pending):
                 if pending.get("actor") != 0:
                     print(f"FAIL 火攻固定 tape：亮牌询问不是人类座位：{pending.get('actor')}")
                     return False
+                # 票 09 ②：这一步是**牌桌直选**——`dialog` 为空、己方手牌的牌面不再塞进
+                # `revealed`；牌面读 `slots[].card`（与前端 `isOwnZonePick` 同一份形状）。
+                if pending.get("dialog") is not None:
+                    print(
+                        "FAIL 火攻固定 tape：亮牌步仍带弹窗标记"
+                        f"（dialog={pending.get('dialog')}）——票 09 起是牌桌直选"
+                    )
+                    return False
+                if pending.get("revealed"):
+                    print(
+                        "FAIL 火攻固定 tape：己方手牌的牌面仍被塞进 revealed"
+                        f"（票 09 起不授予）：{pending.get('revealed')}"
+                    )
+                    return False
                 slots = pending.get("slots") or []
-                faces = [card.get("card_id") for card in pending.get("revealed") or []]
+                faces = [(slot.get("card") or {}).get("card_id") for slot in slots]
                 if not faces or any(
                     (slot.get("ref") or {}).get("seat") != 0
                     or (slot.get("ref") or {}).get("zone") != "hand"

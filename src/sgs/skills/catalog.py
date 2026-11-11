@@ -3064,7 +3064,11 @@ def _double_sword(host: Any, frame: Frame) -> Control:
                 actor=target,
                 timing=Timing.USE_AFTER_DESIGNATE_TARGET,
                 spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
-                build_face=lambda: host.selection_face(target, (Zone.HAND,)),
+                # 挑牌的人**就是**手牌持有者本人（票 09 / spec §1 #7）：``reveal_hand=True``
+                # 让目标自己的手牌铺成**可见槽**——「挑牌者就是手牌持有者本人」正是
+                # `engine/game.py:selection_face` 文档串里点名本技能的用法。漏传时槽位
+                # `card=None` + 位置打乱，界面因此落进"未知区域只有位置"那张面。
+                build_face=lambda: host.selection_face(target, (Zone.HAND,), reveal_hand=True),
             )
             if host.suspended(picked):
                 return "stay"

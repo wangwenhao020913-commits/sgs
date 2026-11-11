@@ -119,16 +119,14 @@ function isDiscardPick(pending) {
   return Boolean(pending) && pending.kind === "DISCARD";
 }
 
-/** **从自己的手牌 / 装备区里选牌**的牌桌步（火攻 / 铁骑 / 青囊 / 结姻等）。
+/** 面里的每一槽都是**应答者自己的可见区**（手牌 / 装备，牌面非空）。
  *
- * 形状全部读载荷：`SELECT_CARDS`、面里每一槽都是**应答者本人**的手牌或装备区、牌面可见，
- * 且这一步不是「提供一张 B」/ 弹窗模板。命中时不再铺左下角选择面，而是在牌桌的牌面上
- * 直接点选；单张选择点一张即提交，多张选择点选后由「提交」送出。判据只是**渲染路径**，
- * 不裁决合法性（候选仍由 `legal_actions` 给）。
+ * 这是 :func:`isOwnZonePick` 与亮牌否决（`modal.js:isRevealStep`）共用的**形状判据**，
+ * 故意**不读** `stepDialogKind`：`stepDialogKind` 自己会调亮牌判据，读它会绕成死循环。
+ * 票 09（spec §1 #12）：自己的区对本人天然可见 ⇒ 它不是"观看授予"的亮牌面。
  */
-function isOwnZonePick(pending) {
+function ownZoneSlotsVisible(pending) {
   if (!pending || pending.kind !== "SELECT_CARDS") return false;
-  if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
   const slots = pending.slots || [];
   if (!slots.length) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
@@ -140,6 +138,60 @@ function isOwnZonePick(pending) {
       && (ref.zone === "hand" || ref.zone === "equip")
       && Boolean(slot.card);
   });
+}
+
+/** **从自己的手牌 / 装备区里选牌**的牌桌步（火攻 / 铁骑 / 青囊 / 结姻等）。
+ *
+ * 形状全部读载荷：`SELECT_CARDS`、面里每一槽都是**应答者本人**的手牌或装备区、牌面可见，
+ * 且这一步不是「提供一张 B」/ 弹窗模板。命中时不再铺左下角选择面，而是在牌桌的牌面上
+ * 直接点选；单张选择点一张即提交，多张选择点选后由「提交」送出。判据只是**渲染路径**，
+ * 不裁决合法性（候选仍由 `legal_actions` 给）。
+ */
+function isOwnZonePick(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
+  return ownZoneSlotsVisible(pending);
+}
+
+/** 面里的牌**已经在本人手牌快照里**（= 不是"观看授予"，票 09 ②的对称兜底）。
+ *
+ * ``revealed`` 的语义是发给应答者的**额外**牌面；自己的手牌在 ``self_hand`` 里本来就有
+ * 同一批牌面，故投影对"槽位全是应答者自己手牌"的面**不再授予** ``revealed``
+ * （`tools/sgs_web/projection.py:_own_hand_face`），``dialog`` 随之变 ``null``。前端这一条
+ * 是**对称否决**：旧服务端载荷 / 合成载荷里 ``dialog`` 仍是 ``"reveal"`` 时不误开亮牌窗，
+ * 直接走牌桌直选。
+ *
+ * **判据不能只看"己方可见槽位"**：【遗计】/【藏匿】一类**观看授予**也把牌摆在
+ * ``ref: {seat: actor, zone: "hand"}`` 的可见槽上（那几张牌还没进手牌、是授予的观看面），
+ * 它们**必须**继续开亮牌窗。两者的分界就是"这几张牌在不在本人手牌快照里"。
+ * 读 ``pending.view`` 优先（真载荷里挂着同一份内嵌视角），合成载荷退回 ``state.view``——
+ * 与 `modal.js:activationFaceSurface` 读 `state.preactivation` 同一姿态（`stepDialogKind`
+ * 本来就允许读一点本地态）。
+ */
+function ownHandSlotsKnown(pending) {
+  if (!ownZoneSlotsVisible(pending)) return false;
+  const view = (pending && pending.view) || state.view;
+  const hand = (view && (view.self_hand || (view.snapshot && view.snapshot.self_hand))) || [];
+  if (!hand.length) return false;
+  const known = new Set(hand.map((card) => String(card.card_id)));
+  return (pending.slots || []).every((slot) => slot.card && known.has(String(slot.card.card_id)));
+}
+
+/** 自己区域面里的**花色上限**（`spec.max_per_suit`）：这一槽是否因同花色已满而必须置灰。
+ *
+ * 票 09 ③（spec §1 #6 的业炎半 / §2 Q6）：`max_per_suit` 是服务端 `SelectionSpec` 上的
+ * **一条局部约束的声明**（"每种花色至多 k 张"），前端只把这条声明读成置灰 / 拒点，
+ * **不**重算任何其它合法性（张数 / 区域 / 同花色以外的规则仍由候选与提交裁决）。
+ * 判据与涉猎 / 两行观看手牌**同一份**（`reveal.js:suitSlotState`），不另写一套。
+ *
+ * **止损**：这是前端实现一遍规则的第二份真源，只允许覆盖"每花色至多 k 张"这一条；
+ * 完整的"每一步都由后端算"由票 11（步骤预览端点）/ 票 12 接手，届时本函数应改读预览
+ * 结果并删除（票面 §3 "要做什么" ③ 的退役条件）。
+ */
+function ownZoneSuitTaken(pending, index) {
+  if (!isOwnZonePick(pending)) return false;
+  if (!((pending.spec || {}).max_per_suit)) return false;
+  return suitSlotState(pending, index) === "taken";
 }
 
 /** 只选一张的自己区域面：点一张即提交（与多张选择的"点选 + 提交"分开）。 */
