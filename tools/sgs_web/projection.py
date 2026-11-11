@@ -2676,6 +2676,48 @@ def query_actor_map(records: Iterable[object]) -> dict[int, int]:
     return actors
 
 
+def _record_payload(record: object) -> dict[str, Any]:
+    """一条记录 → JSON-ready dict（票 01：**直接** ``model_dump``，不做 JSON 文本往返）。
+
+    旧实现在这里 ``json.loads(record_json(record))``：``record_json`` 自己就是
+    ``model_dump + json.dumps``，于是每条记录白白多出一次序列化 + 一次解析——``view()``
+    每次下发都会走这条路径（一局 6612 条记录实测 128 ms）。形状与 ``record_json`` 逐键
+    相同（``mode="json"`` 已经把枚举 / 元组都翻成 JSON 值），故下标方一个字不用改。
+
+    非 pydantic 记录（旧夹具 / 第三方对象）保留文本往返兜底：它们没有 ``model_dump``。
+    """
+    dump = getattr(record, "model_dump", None)
+    if callable(dump):
+        payload = dump(mode="json")
+        if isinstance(payload, dict):
+            return payload
+    return json.loads(record_json(record))
+
+
+def _record_last_seq(records: Iterable[object]) -> int | None:
+    """记录流里最大的 ``seq``（``header`` 没有 ``seq``，不参与）。
+
+    派生通道的"与记录对齐"上界。只读属性，**不**做 ``model_dump`` / JSON 往返——记录是
+    pydantic 对象或已序列化的 dict，``getattr`` / ``.get`` 就够（票 01）。
+    """
+    last_seq: int | None = None
+    for record in records:
+        if isinstance(record, Mapping):
+            seq = record.get("seq")
+        else:
+            seq = getattr(record, "seq", None)
+        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
+            last_seq = seq
+    return last_seq
+
+
+def _action_field(action: object, name: str) -> Any:
+    """动作记录里的一个字段（记录模型 / 已序列化 JSON 同一份读法）；没有就是 ``None``。"""
+    if isinstance(action, Mapping):
+        return action.get(name)
+    return getattr(action, name, None)
+
+
 def visible_record(
     record: object,
     *,
@@ -2714,7 +2756,8 @@ def visible_record(
     kind = getattr(record, "kind", None)
     if kind == "query":
         return {"kind": "query", "seq": record.seq, "query": _query_summary(record.query)}
-    raw = json.loads(record_json(record))
+    # 票 01：直接取模型的 JSON 形态（不再走 `json.dumps + json.loads` 的文本往返）。
+    raw = _record_payload(record)
     if kind == "delta":
         delta_type = raw.get("delta_type")
         if delta_type == "card_reveal":
@@ -2853,6 +2896,7 @@ def skill_events_after(
     after: int,
     state: Any,
     activations: Iterable[Any] = (),
+    query_actors: Mapping[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """从**未裁剪**的记录流派生技能发动事件（spec D8.2）：``seq > after`` 的那几条。
 
@@ -2885,31 +2929,45 @@ def skill_events_after(
 
     ``activations`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路
     表现（锁定技 / 转化技不飘字），记录流那一路照旧——这是缓冲**不进记录流**的必然边界。
+
+    ``query_actors`` = 调用方**已经算好**的应答者表（``Session.window().query_actors``）。
+    缺省时从传入的 ``records`` 现算（单测 / 静态录像的用法）；``serve.view`` 传全量表，
+    因为本批 ``tail`` 里只有 ``seq > after`` 的记录、而应答指向的询问可能更早。
     """
-    records = list(records)
-    # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
-    query_actors = query_actor_map(records)
+    if query_actors is None:
+        # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
+        # 先落成 list：`records` 可能是**一次性迭代器**（生成器），映射那一趟会把它耗掉。
+        records = list(records)
+        query_actors = query_actor_map(records)
     events: list[dict[str, Any]] = []
     for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        kind = record.get("kind")
-        seq = record.get("seq")
+        # 票 01：记录模型直接读属性，**不**做 JSON 文本往返（旧实现在这里
+        # `json.loads(record_json(raw))`，四条派生通道因此把整条记录流序列化两遍）。
+        if isinstance(raw, Mapping):
+            kind = raw.get("kind")
+            seq = raw.get("seq")
+            accepted = raw.get("accepted")
+            action = raw.get("action")
+        else:
+            kind = getattr(raw, "kind", None)
+            seq = getattr(raw, "seq", None)
+            accepted = getattr(raw, "accepted", None)
+            action = getattr(raw, "action", None)
         if kind == "query":
             continue
-        if kind != "action" or not record.get("accepted"):
-            continue
-        action = record.get("action")
-        if not isinstance(action, Mapping):
+        if kind != "action" or not accepted:
             continue
         # 判据 = "这条已接受的动作**点名了技能**"（不按动作种类打表）：`ActivateSkill` 与
         # `SubstituteJudgeCard` 今天都满足；使用牌 / 打出牌 / 选牌没有这个键。
-        if not str(action.get("skill_id") or ""):
+        skill_id = _action_field(action, "skill_id")
+        if not str(skill_id or ""):
             continue
         if not isinstance(seq, int) or seq <= after:
             continue
-        skill_id = str(action.get("skill_id") or "")
+        skill_id = str(skill_id)
+        answers_seq = _action_field(action, "answers_seq")
         targets: list[int] = []
-        for choice in action.get("choices") or ():
+        for choice in _action_field(action, "choices") or ():
             if not isinstance(choice, str) or not choice.startswith(SEAT_PREFIX):
                 continue
             try:
@@ -2919,7 +2977,7 @@ def skill_events_after(
         events.append(
             {
                 "seq": seq,
-                "seat": query_actors.get(action.get("answers_seq")),
+                "seat": query_actors.get(answers_seq),
                 "skill_id": skill_id,
                 "name": _skill_display_name(state, skill_id) or skill_id,
                 "targets": targets,
@@ -2967,7 +3025,9 @@ def damage_events_after(
       ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复下发；
     - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
       时才下发，超出上界的留到下一次轮询——那时 ``after`` 仍小于它的 ``seq``，``seq > after``
-      照成立，一条都不会丢；
+      照成立，一条都不会丢。**传本批（``seq > after`` 的尾部窗口）就够**（票 01）：
+      ``serve.view`` 传 ``Session.window().tail``；尾部非空时上界与整条流逐条相同，尾部为空
+      时本批本来就没有可下发的事件；
     - ``state`` 只用来**夹座位**（``target`` / ``source`` 必须落在本局座位里）：越界条目是坏
       数据，宁可不下发也不让前端拿它去量一张不存在的武将牌。
 
@@ -2977,12 +3037,8 @@ def damage_events_after(
     ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
     （没有剑光），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
     """
-    last_seq: int | None = None
-    for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        seq = record.get("seq")
-        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
-            last_seq = seq
+    # 票 01：上界只读属性（`_record_last_seq`），不再把整条记录流做 JSON 文本往返。
+    last_seq = _record_last_seq(records)
     seat_count = len(getattr(state, "players", ()) or ())
     out: list[dict[str, Any]] = []
     for event in events or ():
@@ -3039,7 +3095,9 @@ def life_loss_events_after(
       ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复下发；
     - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
       时才下发，超出上界的留到下一次轮询——那时 ``after`` 仍小于它的 ``seq``，``seq > after``
-      照成立，一条都不会丢；
+      照成立，一条都不会丢。**传本批（``seq > after`` 的尾部窗口）就够**（票 01）：
+      ``serve.view`` 传 ``Session.window().tail``；尾部非空时上界与整条流逐条相同，尾部为空
+      时本批本来就没有可下发的事件；
     - ``state`` 只用来**夹座位**（``seat`` 必须落在本局座位里）：越界条目是坏数据，宁可不下发
       也不让前端拿它去量一张不存在的武将牌。
 
@@ -3050,12 +3108,8 @@ def life_loss_events_after(
     ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
     （没有墨），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
     """
-    last_seq: int | None = None
-    for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        seq = record.get("seq")
-        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
-            last_seq = seq
+    # 票 01：上界只读属性（`_record_last_seq`），不再把整条记录流做 JSON 文本往返。
+    last_seq = _record_last_seq(records)
     seat_count = len(getattr(state, "players", ()) or ())
     out: list[dict[str, Any]] = []
     for event in events or ():
@@ -3095,7 +3149,9 @@ def card_events_after(
     - ``seq`` 是引擎在帧压栈之后取的最后一条记录序号，故与 ``records`` 共用同一个
       ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复出声；
     - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
-      时才下发，超出上界的留到下一次轮询；
+      时才下发，超出上界的留到下一次轮询。**传本批（``seq > after`` 的尾部窗口）就够**
+      （票 01）：``serve.view`` 传 ``Session.window().tail``；尾部非空时上界与整条流逐条
+      相同，尾部为空时本批本来就没有可下发的事件；
     - ``state`` 只用来**夹座位**（``seat`` 必须落在本局座位里）：越界条目是坏数据，宁可不下发
       也不让前端拿它去查一个不存在的座位。
 
@@ -3106,12 +3162,8 @@ def card_events_after(
     ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
     （没有卡牌语音），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
     """
-    last_seq: int | None = None
-    for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        seq = record.get("seq")
-        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
-            last_seq = seq
+    # 票 01：上界只读属性（`_record_last_seq`），不再把整条记录流做 JSON 文本往返。
+    last_seq = _record_last_seq(records)
     seat_count = len(getattr(state, "players", ()) or ())
     out: list[dict[str, Any]] = []
     for event in events or ():

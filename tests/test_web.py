@@ -3048,6 +3048,166 @@ def test_the_registry_drops_old_finished_sessions_after_saving(tmp_path: Path) -
     assert len(list(tmp_path.glob("*.jsonl"))) == 3
 
 
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 01：性能（派生通道游标化 / 会话回收 / 事件流上限）
+# ---------------------------------------------------------------------------
+
+
+def test_the_view_payload_never_json_round_trips_the_record_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """票 01：`view()` 不许再用 canonical JSON 文本往返来派生任何东西。
+
+    旧实现里四条派生通道（skill / damage / card / life_loss）**只为算 `last_seq`** 就把
+    整条记录流 `model_dump + json.dumps + json.loads` 一遍；`visible_record` 也走同一条
+    文本往返。实测 N=6612 条记录时单次 `view()` 2.7 s，其中四条通道合计 2.38 s。
+
+    这里把 `record_json` 换成"一调就炸"：`view()` 照常返回 ⇒ 视图路径一个字节都没被
+    JSON 文本往返过（与 perf-web 票 01 对 `list_runs` / `read_journal` 的做法同型）。
+    """
+    import sgs_web.projection as projection_module
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 103, "timeout_seconds": None}
+    )
+
+    def _forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("view() 不许把记录流做 JSON 文本往返（派生通道只读属性）")
+
+    monkeypatch.setattr(projection_module, "record_json", _forbidden)
+
+    body = registry.view(session, after=-1, logs_after=0)
+
+    kinds = {record["kind"] for record in body["records"]}
+    assert "header" in kinds and "query" in kinds, f"视图必须照常返回记录：{kinds}"
+    assert body["snapshot"] and body["pending"], "视图载荷不得因禁用文本往返而残缺"
+
+
+def test_an_abandoned_session_is_pruned_when_a_new_one_is_created(tmp_path: Path) -> None:
+    """票 01：中途放弃的局不再常驻内存——建新局时回收"久未访问的未终局会话"。
+
+    旧口径只在 `save_if_finished` 里回收 ⇒ 只有**打到终局**的局才会被回收；中途放弃
+    （关掉标签页、输了就跑）的局永远留在 `GameRegistry.sessions` 里，实测每局峰值
+    +9~23 MB（RSS 47→64→87→101→110 MB / 4 局）——这是"同一进程第二局也卡"的机制。
+
+    判据 = **最后访问时刻**：久未访问且未终局 ⇒ 下一次 `create` 时回收（`get()` 抛
+    `KeyError`，HTTP 层 404）。近期还访问过的不回收——同一个进程里可能还有页面在轮询。
+    """
+    from sgs_web.serve import ABANDONED_SESSION_SECONDS, GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    abandoned = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 11, "timeout_seconds": None}
+    )
+    keeper = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 12, "timeout_seconds": None}
+    )
+    # 放弃的那局：没有终局，也没人再来轮询 —— 最后访问时刻停在很久以前。
+    abandoned.last_access = keeper.last_access - ABANDONED_SESSION_SECONDS - 1.0
+
+    fresh = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 13, "timeout_seconds": None}
+    )
+
+    assert abandoned.session_id not in registry.sessions, "久未访问的未终局会话必须被回收"
+    with pytest.raises(KeyError):
+        registry.get(abandoned.session_id)
+    assert keeper.session_id in registry.sessions, "近期访问过的未终局会话不许回收"
+    assert fresh.session_id in registry.sessions
+
+
+def test_the_view_only_derives_the_new_narrative_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """票 01：叙事只派生**新增的那一段**，不再从头重建再按 seq 过滤（176–201 ms/次）。
+
+    判据落在真实的 `view()` 上：首屏取全量（建缓存），之后每批只把**新记录**喂给生成器。
+    这里数 `narrative._payload` 的调用次数——它就是"一条记录 → 叙事"的唯一入口
+    （旧实现每请求调用 N 次，新实现只调用本批条数次）。
+    """
+    import sgs_web.narrative as narrative_module
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 103, "timeout_seconds": None}
+    )
+    first = registry.view(session, after=-1, logs_after=0)
+    assert first["narrative"], "前置：首屏必须有叙事条目"
+    cursor = first["cursor"]
+    session.submit_answer(session.pending.legal_actions[0])
+    expected = narrative_module.narrative_after(
+        session.records(),
+        after=cursor,
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert expected, "前置：这一批必须真的有新叙事（否则本条测不到东西）"
+
+    seen: list[object] = []
+    original = narrative_module._payload
+
+    def _counting(record: object) -> dict[str, object]:
+        seen.append(record)
+        return original(record)
+
+    monkeypatch.setattr(narrative_module, "_payload", _counting)
+
+    body = registry.view(session, after=cursor, logs_after=0)
+
+    assert body["narrative"] == expected, "增量叙事必须与整份重建的结果逐条相同"
+    assert len(seen) == len(session.records_after(cursor)), (
+        f"只派生新增的那一段：喂了 {len(seen)} 条，本批 {len(session.records_after(cursor))} 条"
+    )
+
+
+def test_the_event_log_keeps_a_bounded_number_of_nodes() -> None:
+    """票 01：`#t-log` 只留最近 `LOG_ITEM_LIMIT` 条（垫片里数 `#t-log` 子节点）。
+
+    旧实现每条记录一枚 `<li>` 且只增不减（一局 4671 条 ≈ 4671 个节点），每一步的
+    `scrollIntoView` 都随子树线性变贵。这里把**真的** `log.js` 放进最小 DOM 垫片，走
+    **生产入口**（`appendNarrativeEntry` 简易档 / `appendLog` 完整档）各喂 2×上限条数，
+    再数 `#t-log` 的子节点：必须停在同一个上限，且留下的是**最新**的那几条。
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    probe = REPO_ROOT / "tests" / "support" / "log_cap_probe.mjs"
+    assert probe.is_file(), f"缺少事件流上限探针：{probe.relative_to(REPO_ROOT)}"
+
+    result = subprocess.run(
+        [node, str(probe.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"事件流上限探针失败（exit {result.returncode}）：\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    limit = payload["limit"]
+    appended = payload["appended"]
+
+    assert isinstance(limit, int) and 0 < limit < appended, (
+        f"事件流必须有上限（喂了 {appended} 条）：limit={limit}"
+    )
+    assert payload["narrativeNodes"] == limit, (
+        f"叙事档必须停在 {limit} 条：{payload['narrativeNodes']}"
+    )
+    assert payload["logNodes"] == limit, (
+        f"完整档必须停在 {limit} 条：{payload['logNodes']}"
+    )
+    assert payload["newestKept"] is True, "留下的必须是最新的那几条（从头部摘）"
+
+
 def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_path: Path) -> None:
     """W4-6：回放页的询问面板 / 手牌 / 装备 / 判定 / 处理区**只能**从这份 API 读。
 

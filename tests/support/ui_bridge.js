@@ -123,6 +123,10 @@
     // huo-taishici-xunyu 票 04：拼点弹窗——载荷派生 / 回放入口 / 停留常量（只读展示面）。
     "pindianPlan", "applyPindianDelta", "showPindian", "hidePindian",
     "PINDIAN_HOLD_MS", "PINDIAN_VERDICTS",
+    // table-ux-overhaul 票 01：事件流滚动窗口（DOM 上限 / 两份本地序列的裁剪）与
+    // "这一条记录会不会改表体"的快速判据（回放步不再每条都整桌重建）。
+    "LOG_ITEM_LIMIT", "appendNarrativeEntry", "appendLog", "trimLogItems", "trimStreamState",
+    "recordTouchesTableView", "NON_TABLE_DELTAS",
   ];
   const out = {};
   for (const name of names) {

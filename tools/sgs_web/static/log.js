@@ -10,6 +10,15 @@
 
 /* ------------------------------------------------------------------ 日志 */
 
+/** 事件流的**滚动窗口**（table-ux-overhaul 票 01）：`#t-log` 的 `<li>` 与两份本地序列
+ *  （`state.logRecords` / `state.narrative`）共用同一个上限，**与详略档无关**。
+ *
+ *  为什么：一局 8 人长局实测 6612 条记录（`timing` 3080 / `query` 1052 / `action` 1052 /
+ *  `frame` 838 / `delta` 588）。此前每个 `<li>` 都留着，且每一步 `scrollLogToBottom()`
+ *  都要 `scrollIntoView` 一次——强制布局的成本随子树线性增长，这是"越打越卡"的前端那一半。
+ *  500 条 ≈ 面板一屏的几十倍，滚回去看历史的窗口足够；更早的条目仍可从回放页看。 */
+const LOG_ITEM_LIMIT = 500;
+
 /** 事件流的详略；`simple` = 默认的服务端叙事，`focus` = 隐藏对手之间的响应往来。 */
 const LOG_MODES = ["simple", "focus", "all"];
 
@@ -50,6 +59,31 @@ function playbackSeqLimit() {
   return record && typeof record.seq === "number" ? record.seq : -1;
 }
 
+/** `#t-log` 只留最近 `LOG_ITEM_LIMIT` 条（两条追加口共用；滚动条贴底逻辑不变）。
+ *
+ *  从**头部**摘（最旧的先走），保留最新的那一段：面板平时就贴在底部，用户看到的是最新
+ *  的几百条。`children` 是活视图，故每摘一条都重新取下标 0，不先拷贝一份列表。 */
+function trimLogItems(log = $("t-log")) {
+  if (!log || typeof log.removeChild !== "function") return;
+  while (log.children.length > LOG_ITEM_LIMIT && log.children.length) {
+    log.removeChild(log.children[0]);
+  }
+}
+
+/** 两份本地序列也只留最近 `LOG_ITEM_LIMIT` 条（票 01；`state.narrativeShown` 是下标，
+ *  摘掉几条就前移几条，否则下一次 `appendNarrativeThrough` 会漏播一段）。
+ *
+ *  调用点是**推入方**（`session.js`）：收拢在这里是因为上限只该有一份真源。 */
+function trimStreamState() {
+  const dropRecords = state.logRecords.length - LOG_ITEM_LIMIT;
+  if (dropRecords > 0) state.logRecords.splice(0, dropRecords);
+  const dropNarrative = state.narrative.length - LOG_ITEM_LIMIT;
+  if (dropNarrative > 0) {
+    state.narrative.splice(0, dropNarrative);
+    state.narrativeShown = Math.max(0, state.narrativeShown - dropNarrative);
+  }
+}
+
 /** 一条叙事条目 → `<li>`：分隔线只写文本；行动行把服务端的颜色类原样搬到 span 上。 */
 function appendNarrativeEntry(entry, log = $("t-log")) {
   if (!log || !entry) return null;
@@ -67,6 +101,7 @@ function appendNarrativeEntry(entry, log = $("t-log")) {
     }
   }
   log.appendChild(item);
+  trimLogItems(log);
   return item;
 }
 
@@ -96,6 +131,8 @@ function appendLog(
   if (banner) item.className = "banner";
   item.innerHTML = describeRecord(record);
   log.appendChild(item);
+  // 票 01：只留最近 `LOG_ITEM_LIMIT` 条（渲染形状一个字不改）。
+  trimLogItems(log);
   return true;
 }
 

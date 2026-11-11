@@ -46,7 +46,7 @@ ensure_engine_importable()
 
 from sgs.data import DataLoadError, enabled_hero_ids, hero_by_id, load_content_pack  # noqa: E402
 from sgs.engine import IllegalActionError  # noqa: E402
-from sgs_web.narrative import narrative_after  # noqa: E402
+from sgs_web.narrative import NarrativeCursor  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     card_events_after,
@@ -57,7 +57,6 @@ from sgs_web.projection import (  # noqa: E402
     live_tag_deltas_after,
     life_loss_events_after,
     pending_payload,
-    query_actor_map,
     skill_events_after,
     visible_record,
     visible_snapshot,
@@ -65,6 +64,7 @@ from sgs_web.projection import (  # noqa: E402
 from sgs_web.replay import list_runs, load_run, save_run  # noqa: E402
 from sgs_web.session import (  # noqa: E402
     DEFAULT_TIMEOUT_SECONDS,
+    RecordWindow,
     Session,
     StaleAnswer,
     create_session,
@@ -270,12 +270,33 @@ KEEP_FINISHED_SESSIONS = 2
 以及"刚打完、页面可能还在轮询的那几局"，故留最近 2 局当缓冲。
 """
 
+ABANDONED_SESSION_SECONDS = 30 * 60.0
+"""未终局会话**多久没人访问**就算放弃（table-ux-overhaul 票 01）。
+
+旧口径只在 `save_if_finished` 里回收 ⇒ 只有**打到终局**的局才会被回收；中途关掉标签页 /
+输了就跑的局永远留在 `GameRegistry.sessions` 里，实测每局 +9~23 MB（RSS 47→64→87→101→110
+MB / 4 局）——这就是"同一进程第二局也卡"的机制。阈值取 30 分钟：比任何一次真的思考 / 看
+录像都长，又远短于"人已经走了、进程还开着"。
+"""
+
+KEEP_LIVE_SESSIONS = 2
+"""未终局会话的**保底面**：最近访问的这几局永不按空闲回收（table-ux-overhaul 票 01）。
+
+"最近"按 `Session.last_access` 算。与 :data:`KEEP_FINISHED_SESSIONS` 同姿态：内存里只需
+"还在打的"那几局，超出且久未访问的局回收后客户端拿 404（页面自己会提示重新开局）。
+"""
+
 
 class GameRegistry:
     """内存里的会话表；**一局一个会话**，进程重启即丢（D15、`06` §2"单机跑通再谈"）。
 
-    **终局回收**（perf-web 票 01）：`save_if_finished` 落盘成功后，较旧的已终局会话从
-    :attr:`sessions` 里移除（保留最近 :data:`KEEP_FINISHED_SESSIONS` 局 + 全部未终局）。
+    **会话回收**（perf-web 票 01 + table-ux-overhaul 票 01）三条口径：
+
+    1. **终局落盘后**回收较旧的已终局会话（保留最近 :data:`KEEP_FINISHED_SESSIONS` 局）；
+    2. **建新局时**回收"久未访问且未终局"的会话（保留最近 :data:`KEEP_LIVE_SESSIONS` 局）——
+       中途放弃的局此前永远留在内存里，这是"同一进程第二局也卡"的机制；
+    3. **每次取增量**时顺带按同一判据扫一眼（闲置进程不靠"有人建局"才回收）。
+
     被回收的会话再取 ⇒ :meth:`get` 抛 ``KeyError``（HTTP 层 404）；它的回放改走文件，
     不受影响。
     """
@@ -327,6 +348,10 @@ class GameRegistry:
         )
         session.mark_pending(time.monotonic())
         self.sessions[session.session_id] = session
+        # **先登记、再回收**（table-ux-overhaul 票 01）：建局这一刻是回收"中途放弃的局"的
+        # 时机——它们不会因为不再有人访问而自己消失。新局刚刚打了"此刻"的访问戳，永远排在
+        # "最近 N 局"里，不会被这一趟误收。
+        self._prune_abandoned(time.monotonic())
         return session
 
     def get(self, session_id: str) -> Session:
@@ -340,18 +365,27 @@ class GameRegistry:
     def advance_clock(self, session: Session) -> None:
         """到点就代答，可能连续代答多次（超时后引擎又停在同一个人类的下一问）。"""
         now = time.monotonic()
+        # `mark_pending` 顺带打上"最后访问时刻"（票 01 的会话回收判据）。
         session.mark_pending(now)
+        # 取增量是全进程最频繁的入口：顺手扫一次放弃的局，不必等"有人建新局"才回收。
+        self._prune_abandoned(now)
         while session.expire_if_due(time.monotonic(), fallback_action):
             pass
 
     def view(self, session: Session, *, after: int, logs_after: int) -> dict[str, Any]:
-        """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。"""
-        all_records = session.records()
-        window = session.records_after(after)
+        """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。
+
+        **记录流只扫一趟**（table-ux-overhaul 票 01）：`Session.window(after)` 一次给出
+        本批切片 / 新游标 / 应答者表 / 序号上界；四条派生通道读**尾部窗口**而不是整条流，
+        叙事走会话自己的增量缓存。此前这里对记录流扫了 7 趟，其中四条通道把整条流
+        `model_dump + json.dumps + json.loads` 一遍（N=6612 时 2.38 s / 单次 view 2.7 s）。
+        """
+        batch = session.window(after)
+        window = batch.tail
         # U4-06 / D13：`action` 记录按查看者放行——只有人类座位自己的应答展开细节。
         # 应答者 = `answers_seq` 指向的那次询问的 actor；映射取**全量**记录（询问可能
         # 早于 `after` 游标），展开只对窗口里的记录做。
-        query_actors = query_actor_map(all_records)
+        query_actors = batch.query_actors
         # 掩码按"**这批记录里**谁在验明之前就在处理区"算，而不是只按当下的结算栈算：
         # 一次没有目标步的【蛊惑】会在同一批记录里走完扣置 → 验明，等这批下发时栈上已经
         # 不剩什么，只看栈就会把扣置那条搬牌记录连同**源牌牌面**一起发出去（用户实机
@@ -391,7 +425,7 @@ class GameRegistry:
             "timeout_seconds": session.timeout_seconds,
             "pending_since": session.pending_since,
             "finished": session.finished,
-            "cursor": session.next_cursor(after),
+            "cursor": batch.cursor,
             "log_seq": session.log_seq,
             "snapshot": snapshot,
             "skills": build_skills(session, session.human_seat),
@@ -406,30 +440,26 @@ class GameRegistry:
             ),
             # U1-05 叙事契约：简易事件流的条目由服务端生成、按查看者过滤；前端只渲染。
             # 游标复用记录流的 `after`——条目自带产生它的记录 `seq`，两批拼接 = 全量。
-            "narrative": narrative_after(
-                all_records,
-                after=after,
-                viewer=session.human_seat,
-                heroes=session.hero_assignments,
-                pack_id=session.pack.pack_id,
-            ),
+            "narrative": self._narrative(session, batch, after),
             # U3-04 / D8.2 + lei 票 06：技能发动是**派生通道**，不是记录流的新事实——
             # 两路合成同一条 `skill_events`：① 未裁剪记录里「已接受、动作点名了技能」的
             # 那几条（补上被 `visible_record` 裁掉的 skill_id / choices）；② 引擎的发动缓冲
             # `Engine.skill_activations`（记录面没有技能归属的锁定技 / 转化技）。与
             # `records` 共用同一个 `after` 游标。
             "skill_events": skill_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 activations=session.engine.skill_activations,
+                # 应答指向的询问可能早于本批游标 ⇒ 应答者表取**全量**那一份。
+                query_actors=query_actors,
             ),
             # damage-fx 票 02：伤害事实是**第二条派生通道**，与 `skill_events` 同姿态——
             # 事实来源是引擎的只增缓冲 `Engine.damage_events`（票 01），共用同一个 `after`
             # 游标 ⇒ 轮询不重复下发。`HpChangeDelta` 里没有来源与属性，剑光的起 / 落点只能
             # 从这里读；伤害是公开事实（血条本来就公开），不按视角过滤。
             "damage_events": damage_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 events=session.engine.damage_events,
@@ -440,7 +470,7 @@ class GameRegistry:
             # `card_move(reason=USE)`，而"这次当成什么牌用掉"（转化 / 纯虚拟的产物牌型）
             # 与"使用者性别"都只能从这里读；使用 / 打出是公开事实，不按视角过滤。
             "card_events": card_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 events=session.engine.card_events,
@@ -451,13 +481,41 @@ class GameRegistry:
             # `LIFE_DECREASE_DAMAGE_KEY`，不进记录流），墨因此只能从这里读；体力是公开事实，
             # 不按视角过滤。排播 / 画面不在本票（票 02 / 03）。
             "life_loss_events": life_loss_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 events=session.engine.life_loss_events,
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }
+
+    # -- 叙事增量缓存（票 01） -----------------------------------------------
+
+    def _narrative(
+        self, session: Session, batch: RecordWindow, after: int
+    ) -> list[dict[str, Any]]:
+        """本批的叙事条目（票 01：只派生**新增的那一段**，不再整份重建再过滤）。
+
+        缓存挂在会话自己身上（``Session.narrative_cursor``）：随会话一起建、一起丢，既不
+        需要第二张注册表，也不会在回收会话时漏掉。首见 / 键（查看者·阵容·内容包）变了
+        才喂**整条**记录流（保住轮次 / 阶段 / 亮牌帧这些跨批上下文），之后只喂尾部窗口。
+        """
+        cursor = session.narrative_cursor
+        if not isinstance(cursor, NarrativeCursor) or not cursor.accepts(
+            viewer=session.human_seat,
+            heroes=session.hero_assignments,
+            pack_id=session.pack.pack_id,
+        ):
+            cursor = NarrativeCursor(
+                viewer=session.human_seat,
+                heroes=session.hero_assignments,
+                pack_id=session.pack.pack_id,
+            )
+            cursor.extend(batch.records)
+            session.narrative_cursor = cursor
+        else:
+            cursor.extend(batch.tail)
+        return cursor.entries_after(after)
 
     # -- 应答 ---------------------------------------------------------------
 
@@ -499,7 +557,30 @@ class GameRegistry:
         """回收较旧的已终局会话：保留最近 :data:`KEEP_FINISHED_SESSIONS` 局 + 全部未终局。"""
         while len(self._finished_order) > KEEP_FINISHED_SESSIONS:
             oldest = self._finished_order.pop(0)
-            self.sessions.pop(oldest, None)
+            self._drop_session(oldest)
+
+    def _prune_abandoned(self, now: float) -> None:
+        """回收"久未访问且未终局"的会话：保留最近 :data:`KEEP_LIVE_SESSIONS` 局（票 01）。
+
+        "最近"按 :attr:`Session.last_access`（GET / answer / create 三条入口都会打戳）：
+        最近那几局**永不**按空闲回收——同一进程里可能还有页面在轮询；更旧的局只有空闲超过
+        :data:`ABANDONED_SESSION_SECONDS` 才收。未落盘的**已终局**会话不在本函数的回收面内
+        （它们马上会被 :meth:`save_if_finished` 写成文件，丢了就真丢了）。
+        """
+        live = [session for session in self.sessions.values() if not session.finished]
+        if len(live) <= KEEP_LIVE_SESSIONS:
+            return
+        live.sort(key=lambda session: session.last_access, reverse=True)
+        for session in live[KEEP_LIVE_SESSIONS:]:
+            if not session.last_access:  # 直接构造、没打过戳的会话：无从判"久未访问"
+                continue
+            if now - session.last_access < ABANDONED_SESSION_SECONDS:
+                continue
+            self._drop_session(session.session_id)
+
+    def _drop_session(self, session_id: str) -> None:
+        """把一局从内存里摘掉（会话本身带着自己的叙事缓存，故这里只有一张表要清）。"""
+        self.sessions.pop(session_id, None)
 
 
 class _Handler(BaseHTTPRequestHandler):

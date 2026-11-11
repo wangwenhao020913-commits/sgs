@@ -695,6 +695,9 @@ function applyView(body) {
   // U1-05：叙事条目随视图增量下发（服务端已按查看者过滤）。先收进本地序列，
   // 再按记录回放的进度逐条铺——不在前端补事实 / 判断隐藏信息。
   for (const entry of body.narrative || []) state.narrative.push(entry);
+  // 票 01：叙事序列也只留最近 `LOG_ITEM_LIMIT` 条（`narrativeShown` 跟着前移，
+  // 与 `#t-log` 的 DOM 窗口是同一个上限）。
+  trimStreamState();
   // `live_deltas` = 被人类记录流裁掉、但牌面已公开的标签增删（网页展示通道）。
   // 与可见记录按 seq 合并后走同一条逐事件回放；它们不写事件流 / 舞台。
   const incoming = mergeLiveDeltas(body.records || [], body.live_deltas || []);
@@ -903,6 +906,45 @@ function stepPlaybackWhenFree() {
   schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS);
 }
 
+/** 这一条记录会不会改**表体**（座位 / 手牌 / 舞台以外的那一层）——票 01 的快速判据。
+ *
+ *  背景：回放每步都 `renderTable()` 会把整桌重建一遍（一局 4745 条记录 = 4745 次整桌
+ *  重建）。判据只看这条记录**自己**能不能改快照：回放期 `tableViewForRender()` 已经把
+ *  `pending` 收成 null，故询问 / 应答 / 结算帧 / 终局 / 大部分时机都改不了表体——它们只
+ *  动事件流与舞台（舞台另由 `renderProcessing()` 重画）。
+ *
+ *  **拿不准的一律 `true`**：宁可多重建一次，也不许少画一帧。判据与 `applyLiveDelta` 的
+ *  分支**同源**（那边没有分支的 delta 就改不了快照），新增一条 delta 分支时要同时看这里。
+ *  不改 DOM 形状：跳过的只是"重建"，其余入口一个不动。
+ */
+const NON_TABLE_DELTAS = new Set([
+  // 纯展示：亮牌进舞台展示组、拼点进拼点弹窗，都不写快照。
+  "card_reveal",
+  "pindian",
+]);
+/** 只在**表体**之外留痕的时机：其余的时机都会改快照（回合 / 阶段 / 阵亡），必须重建。 */
+const TABLE_TIMINGS = ["TURN_BEFORE_START", "TURN_START", "DEATH_BEFORE_START"];
+
+function recordTouchesTableView(record) {
+  if (!record) return true;
+  // 标签增删改的是手牌 / 舞台卡上的标签（`liveUpdateCardTags` 写 live view）⇒ 必须重建。
+  if (record.live_only) return true;
+  const kind = record.kind;
+  // 询问 / 应答 / 结算帧 / 终局都不写快照：它们在回放期只进事件流，舞台走 `applyEffectDelta`。
+  if (kind === "query" || kind === "action" || kind === "frame" || kind === "game_end") {
+    return false;
+  }
+  if (kind === "timing") {
+    const timing = String(record.timing || "");
+    // `PHASE_*` 改顶栏阶段；三条具名时机改回合 / 阵亡（见 `applyLiveDelta`）。
+    return timing.startsWith("PHASE_") || TABLE_TIMINGS.includes(timing);
+  }
+  if (kind === "delta") {
+    return !NON_TABLE_DELTAS.has(String(record.delta_type || ""));
+  }
+  return true; // `header` / 未知 kind：交给整桌重建兜底
+}
+
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
  *
  * ``immediate`` = 测试 / 批量冲刷用：不排计时器，由 :func:`flushPlayback` 直接连跑。
@@ -923,6 +965,8 @@ function stepPlayback(immediate) {
       state.lastQuerySeat = record.query.actor;
     }
     state.logRecords.push(record);
+    // 票 01：本地记录序列只留最近 `LOG_ITEM_LIMIT` 条（与 `#t-log` 同一个上限）。
+    trimStreamState();
     // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
     if (logMode() === "simple") appendNarrativeThrough(record.seq);
     else appendLog(record, playback.querySeat);
@@ -954,7 +998,9 @@ function stepPlayback(immediate) {
   if (playback.live && state.liveView) {
     applyLiveDelta(record, state.liveView);
     // renderTable 末尾就是舞台重绘（`renderProcessing`），播放期也走同一条口。
-    renderTable();
+    // 票 01：改不了表体的记录（询问 / 应答 / 结算帧 / 大部分时机）只重画舞台，不整桌重建。
+    if (recordTouchesTableView(record)) renderTable();
+    else renderProcessing();
   } else if (!liveOnly) {
     // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
     renderProcessing();

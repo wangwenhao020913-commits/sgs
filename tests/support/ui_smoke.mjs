@@ -9627,6 +9627,110 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U1-05m 再次点击收起（展开常驻，不自动关）", $("t-log-panel").hidden === true);
 }
 
+/* ---- table-ux-overhaul 票 01：事件流滚动窗口（`#t-log` 与两份本地序列同一上限） ----
+ *
+ * 判据是"节点数停在上限、留下的是最新的"：一局 6612 条记录全留成 `<li>` 是"越打越卡"的
+ * 前端那一半（每步 `scrollIntoView` 的强制布局随子树线性变贵）。两条生产追加口各喂 2×
+ * 上限条数，走的是 `stepPlayback` / `appendNarrativeThrough` 用的**同两个函数**。
+ */
+{
+  const limit = ui.LOG_ITEM_LIMIT;
+  check("票01L1 事件流窗口有显式上限（500 条滚动窗口，与 loglevel 无关）",
+    Number.isFinite(limit) && limit > 0, `LOG_ITEM_LIMIT=${limit}`);
+  await newSession(31, { player_count: 5 });
+  setSelect("t-log-mode", "simple");
+  $("t-log").innerHTML = "";
+  for (let index = 0; index < limit * 2; index += 1) {
+    ui.appendNarrativeEntry({
+      kind: "line", seq: index + 1, text: `窗口 ${index + 1}`,
+      segments: [{ text: `窗口 ${index + 1}`, cls: "act" }],
+    });
+  }
+  check("票01L2 简易档：`#t-log` 只留最近 N 条，且留下的是最新的",
+    logCount() === limit && $("t-log").lastChild.textContent.includes(String(limit * 2)),
+    `count=${logCount()} last="${$("t-log").lastChild ? $("t-log").lastChild.textContent : "缺"}"`);
+
+  setSelect("t-log-mode", "all");
+  $("t-log").innerHTML = "";
+  for (let index = 0; index < limit * 2; index += 1) {
+    ui.appendLog(
+      { kind: "query", seq: index + 1, query: { kind: "RESPOND", actor: 0 } },
+      0,
+      { mode: "all" },
+    );
+  }
+  check("票01L3 完整档同一个上限（与详略档无关）",
+    logCount() === limit && $("t-log").lastChild.innerHTML.includes(`#${limit * 2}`),
+    `count=${logCount()} last="${$("t-log").lastChild ? $("t-log").lastChild.innerHTML : "缺"}"`);
+
+  // 两份本地序列：生产调用点 = `session.js` 推入后调 `trimStreamState()`。
+  const kept = { records: ui.state.logRecords, narrative: ui.state.narrative };
+  ui.state.logRecords = Array.from({ length: limit * 2 }, (_, i) => ({ kind: "action", seq: i + 1 }));
+  ui.state.narrative = Array.from(
+    { length: limit * 2 }, (_, i) => ({ kind: "line", seq: i + 1, text: "", segments: [] }),
+  );
+  ui.state.narrativeShown = limit + 7;
+  ui.trimStreamState();
+  check("票01L4 本地序列也只留最近 N 条（`narrativeShown` 是下标，跟着前移）",
+    ui.state.logRecords.length === limit && ui.state.narrative.length === limit
+      && ui.state.narrativeShown === 7,
+    `records=${ui.state.logRecords.length} narrative=${ui.state.narrative.length} `
+      + `shown=${ui.state.narrativeShown}`);
+  ui.state.logRecords = kept.records;
+  ui.state.narrative = kept.narrative;
+  ui.state.narrativeShown = 0;
+  setSelect("t-log-mode", "simple");
+}
+
+/* ---- table-ux-overhaul 票 01：回放步不再每条都整桌重建（DOM 形状不变） ----
+ *
+ * 纯函数判据（哪些记录改得了表体）+ 一条接线断言（真回放一步之后座位节点**是同一份
+ * DOM 节点**）：两者缺一，要么判据写错、要么 `stepPlayback` 没接上。
+ */
+{
+  check("票01T1 询问 / 应答 / 结算帧 / 终局 / 纯展示时机不改表体 ⇒ 不重建整桌",
+    ui.recordTouchesTableView({ kind: "query", seq: 1, query: { actor: 0 } }) === false
+      && ui.recordTouchesTableView({ kind: "action", seq: 2, accepted: true }) === false
+      && ui.recordTouchesTableView({ kind: "frame", seq: 3, op: "push", frame_kind: "DAMAGE", depth: 1 }) === false
+      && ui.recordTouchesTableView({ kind: "game_end", seq: 4 }) === false
+      && ui.recordTouchesTableView({ kind: "timing", seq: 5, timing: "USE_ON_USE" }) === false,
+    `query=${ui.recordTouchesTableView({ kind: "query", seq: 1 })} `
+      + `action=${ui.recordTouchesTableView({ kind: "action", seq: 2 })} `
+      + `frame=${ui.recordTouchesTableView({ kind: "frame", seq: 3 })}`);
+  check("票01T2 改快照的记录仍然整桌重建（拿不准的一律重建）",
+    ui.recordTouchesTableView({ kind: "delta", seq: 6, delta_type: "card_move" }) === true
+      && ui.recordTouchesTableView({ kind: "delta", seq: 7, delta_type: "hp_change" }) === true
+      && ui.recordTouchesTableView({ kind: "delta", seq: 8, delta_type: "tag_add", live_only: true }) === true
+      && ui.recordTouchesTableView({ kind: "timing", seq: 9, timing: "DEATH_BEFORE_START" }) === true
+      && ui.recordTouchesTableView({ kind: "timing", seq: 10, timing: "PHASE_PLAY_START" }) === true
+      && ui.recordTouchesTableView({ kind: "header", seed: 1 }) === true,
+    `card_move=${ui.recordTouchesTableView({ kind: "delta", seq: 6, delta_type: "card_move" })} `
+      + `tag=${ui.recordTouchesTableView({ kind: "delta", seq: 8, delta_type: "tag_add", live_only: true })}`);
+
+  const live = await newSession(31, { player_count: 5 });
+  const seatBefore = seatBox(1);
+  const at = Number(live.cursor || 0);
+  ui.applyViewRaw({
+    ...live,
+    cursor: at + 2,
+    log_seq: 0,
+    narrative: [],
+    live_deltas: [],
+    records: [
+      { kind: "query", seq: at + 1, query: { kind: "RESPOND", actor: 1 } },
+      { kind: "action", seq: at + 2, accepted: true, action: { kind: "Pass", answers_seq: at + 1 } },
+    ],
+  });
+  ui.stepPlayback(true);
+  check("票01T3 这类记录回放一步后座位节点未被重建（同一份 DOM 节点）",
+    !!seatBefore && seatBox(1) === seatBefore,
+    seatBefore ? `重建=${seatBox(1) !== seatBefore}` : "前置：座位 1 的节点缺失");
+  ui.flushPlayback();
+  // 上面这批是**合成**记录（服务端没有它们）：重开一局把客户端游标复位，别把
+  // `state.cursor` 留在"比服务端大 2"的位置上影响后面的用例。
+  await newSession(31, { player_count: 5 });
+}
+
 /* ---- 回放页：默认简易档，读同一份服务端叙事；完整全部仍可切 ---- */
 {
   // 前面的 W4-6 用例收尾时清掉了 `state.replay`；这里**重新打开**一局真录像，

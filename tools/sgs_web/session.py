@@ -12,9 +12,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from sgs.agents import HeuristicPlayer, Participant, RandomPlayer
 from sgs.data import (
@@ -35,6 +35,7 @@ __all__ = [
     "DEFAULT_PLAYER_COUNT",
     "DEFAULT_TIMEOUT_SECONDS",
     "Halt",
+    "RecordWindow",
     "Session",
     "SessionLogEntry",
     "StaleAnswer",
@@ -109,6 +110,28 @@ class _HaltPlayer:
         raise Halt(query)
 
 
+@dataclass(frozen=True)
+class RecordWindow:
+    """一次取增量需要的记录流切片——**一趟扫描**的全部产出（票 01）。
+
+    记录流只增且 ``seq`` 单调，所以"取增量"只需要知道四样东西；此前每一样各自全扫一遍
+    （``records`` / ``records_after`` / ``next_cursor`` / ``query_actor_map`` / 四条派生
+    通道各扫一次），一次 ``view()`` 对记录流扫了 7 趟。现在一趟扫完，派生通道只读
+    ``tail``（见 :func:`sgs_web.projection.skill_events_after` 等）。
+
+    - ``records``：全部记录的快照（一份元组，**不是**深拷贝；元素是引擎的只读记录模型）；
+    - ``tail``：``seq > after`` 的那一段；``after < 0`` 时含 ``header``（它没有 ``seq``）；
+    - ``cursor``：本次下发之后的新游标 = 记录流里最大的 ``seq``；
+    - ``query_actors``：``query.seq → query.actor``（**全量**：一条应答的 ``answers_seq``
+      可能指向早于本批游标的询问，故应答者判据不能只看 ``tail``）。
+    """
+
+    records: tuple[object, ...]
+    tail: tuple[object, ...]
+    cursor: int
+    query_actors: Mapping[int, int]
+
+
 class Session:
     """一局对局的接入层状态：引擎、参与者、座位、游标与侧车日志。
 
@@ -161,6 +184,13 @@ class Session:
         self.pending_since: float | None = None
         self._pending_seq: int | None = None
         self.timeouts = 0
+        # 接入层的**最后访问时刻**（票 01 的会话回收判据）：由 :meth:`mark_pending` /
+        # :meth:`touch` 打戳，时钟一律由调用方传进来（本模块不 import time）。
+        # ``0.0`` = 还没有任何接入层访问（直接构造的会话），回收时按"不知道"跳过。
+        self.last_access = 0.0
+        # 叙事增量缓存（票 01）：形如 ``narrative.NarrativeCursor``，由 ``serve.GameRegistry.view``
+        # 建 / 填。本模块只当它是"一局一份、可丢的派生缓存"——不读、不写、不序列化它。
+        self.narrative_cursor: Any = None
 
         content = pack if pack is not None else load_content_pack()
         self.pack = content
@@ -229,7 +259,11 @@ class Session:
         幂等按**询问身份**（``seq``）而不是"有没有戳"：同一次询问上重复打戳不刷新起点
         （否则每次轮询都会把倒计时重置，超时永远不会到点），但**换了询问**就从这一刻重新
         起算——一次询问一个时限，前一次的思考时长不欠到后一次头上（报障 1）。
+
+        顺带打上**最后访问时刻**（票 01）：GET / answer / create 三条 HTTP 入口都经过这里，
+        故"放弃的对局"与"还开着的页面"用同一个戳区分，不必在每个路由里各记一次。
         """
+        self.touch(now)
         pending = self.pending
         if pending is None:
             self.pending_since = None
@@ -238,36 +272,59 @@ class Session:
             self.pending_since = now
             self._pending_seq = pending.seq
 
+    def touch(self, now: float) -> None:
+        """记一次接入层访问时刻（会话回收的唯一输入；时钟由调用方给）。"""
+        self.last_access = now
+
     @property
     def hero_assignments(self) -> tuple[str | None, ...]:
         """逐座位武将 id（``None`` = 未发放）；侧车元数据的真源（地图 D12）。"""
         return tuple(player.hero for player in self.engine.state.players)
 
     def records(self) -> tuple[object, ...]:
-        """本局全部记录（全知；接入层按可见性口径裁剪后才下发）。"""
-        return tuple(self.engine.records)
+        """本局全部记录的一份快照（一次拷贝；热路径改用 :meth:`window`，不从全量取增量）。"""
+        return self.engine.records
+
+    def window(self, after: int) -> RecordWindow:
+        """把一次取增量要的东西**一趟扫完**（票 01；一趟 ≈ 1 ms / 6600 条）。
+
+        此前 ``view()`` 对记录流扫了 7 趟（``records`` / ``records_after`` /
+        ``next_cursor`` / 应答者表 / 四条派生通道），每趟都全量。这里的判据只有
+        ``getattr(record, "seq")`` / ``kind`` / ``query.actor``——**不做**任何
+        ``model_dump`` / JSON 文本往返（那是 2.4 s 的来源）。
+        """
+        records = self.engine.records
+        tail: list[object] = []
+        actors: dict[int, int] = {}
+        cursor = 0 if after < 0 else after
+        for record in records:
+            seq = getattr(record, "seq", None)
+            if not isinstance(seq, int):
+                if after < 0:  # `header`：没有 seq，只在首屏下发
+                    tail.append(record)
+                continue
+            if seq > cursor:
+                cursor = seq
+            if seq > after:
+                tail.append(record)
+            if getattr(record, "kind", None) == "query":
+                actor = getattr(getattr(record, "query", None), "actor", None)
+                if isinstance(actor, int):
+                    actors[seq] = actor
+        return RecordWindow(
+            records=records,
+            tail=tuple(tail),
+            cursor=cursor,
+            query_actors=actors,
+        )
 
     def records_after(self, after: int) -> tuple[object, ...]:
         """``seq > after`` 的记录；``header``（无 ``seq``）只在 ``after < 0`` 时给出。"""
-        out: list[object] = []
-        for record in self.engine.records:
-            seq = getattr(record, "seq", None)
-            if seq is None:
-                if after < 0:
-                    out.append(record)
-                continue
-            if seq > after:
-                out.append(record)
-        return tuple(out)
+        return self.window(after).tail
 
     def next_cursor(self, after: int) -> int:
         """本次下发之后的新游标 = 记录流里最大的 ``seq``（``header`` 不参与）。"""
-        cursor = 0 if after < 0 else after
-        for record in self.engine.records:
-            seq = getattr(record, "seq", None)
-            if isinstance(seq, int) and seq > cursor:
-                cursor = seq
-        return cursor
+        return self.window(after).cursor
 
     # -- 驱动 ---------------------------------------------------------------
 

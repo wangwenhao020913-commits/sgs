@@ -45,7 +45,13 @@ from sgs.state import CardRef
 from .display import card_display
 from .visibility import cards_visible
 
-__all__ = ["NARRATIVE_SEGMENT_CLASSES", "NO_VIEWER", "build_narrative", "narrative_after"]
+__all__ = [
+    "NARRATIVE_SEGMENT_CLASSES",
+    "NO_VIEWER",
+    "NarrativeCursor",
+    "build_narrative",
+    "narrative_after",
+]
 
 NO_VIEWER: Final[int] = -1
 """没有人类座位的**观察者**（全是 AI 的录像）：公开区照写，隐藏区只给张数。
@@ -94,6 +100,80 @@ _IDENTITY_BY_VALUE: Final[dict[str, str]] = {
 }
 
 
+class NarrativeCursor:
+    """一局的叙事**增量缓存**（table-ux-overhaul 票 01）：只处理还没派生的那一截。
+
+    旧实现每请求 `build_narrative(整条记录流)` 再按 `seq` 过滤——记录流只增，于是每次
+    轮询都把一局的记录重放一遍（实测 6612 条 ≈ 200 ms/次，且随局内记录数线性增长）。
+    记录流单调 ⇒ 生成器（:class:`_Narrator`）的状态可以**攒着**：首见喂全量，之后只喂
+    ``seq`` 超过已处理上界的新记录。条目按产生它的记录 `seq` 升序追加，故"过滤缓存"与
+    "整份重建再过滤"逐条相同。
+
+    **不是第二份真源**：只缓存生成器的派生结果，记录流仍是唯一事实来源；本对象随会话
+    （``Session.narrative_cursor``）一起丢，不落盘、不进录像、不进记录流。
+
+    键（``viewer`` / ``heroes`` / ``pack_id``）一条会话内不变；真的变了 ⇒ :meth:`accepts`
+    为假，调用方重建（从整条记录流重新喂），不会静默用旧名字。
+    """
+
+    def __init__(
+        self,
+        *,
+        viewer: int | None,
+        heroes: Sequence[str | None] = (),
+        pack_id: str,
+    ) -> None:
+        self.viewer = viewer
+        self.heroes = tuple(heroes)
+        self.pack_id = pack_id
+        self.processed_seq: int | None = None
+        self._hero_table, skill_names = _name_tables(pack_id)
+        self._narrator = _Narrator(
+            viewer=viewer,
+            seat_names={
+                seat: name
+                for seat, hero_id in enumerate(self.heroes)
+                if hero_id is not None
+                and (name := self._hero_table.get(str(hero_id))) is not None
+            },
+            skill_names=skill_names,
+        )
+
+    def accepts(
+        self, *, viewer: int | None, heroes: Sequence[str | None], pack_id: str
+    ) -> bool:
+        """这份缓存能不能服务这个（查看者, 阵容, 内容包）三元组。"""
+        return (
+            self.viewer == viewer
+            and self.heroes == tuple(heroes)
+            and self.pack_id == pack_id
+        )
+
+    def extend(self, records: Iterable[object]) -> None:
+        """把**还没处理过**的记录喂给生成器（``seq`` 不增的记录重复喂也不会重复出条目）。
+
+        先读 ``seq``（一次属性读）再决定要不要 `_payload`：轮询里传进来的尾部窗口可能
+        包含**已经派生过**的记录（客户端游标比服务端缓存旧），那些连 `model_dump` 都不做。
+        """
+        for raw in records:
+            seq = _record_seq(raw)
+            if not isinstance(seq, int):
+                continue
+            if self.processed_seq is not None and seq <= self.processed_seq:
+                continue
+            self.processed_seq = seq
+            self._narrator.absorb(_payload(raw))
+
+    @property
+    def entries(self) -> list[dict[str, Any]]:
+        """到目前为止派生出的**全部**条目（按 ``seq`` 升序，与 :func:`build_narrative` 同形）。"""
+        return self._narrator.entries
+
+    def entries_after(self, after: int) -> list[dict[str, Any]]:
+        """``seq > after`` 的条目（缓存条目按 ``seq`` 升序，故可直接过滤）。"""
+        return [entry for entry in self._narrator.entries if entry["seq"] > after]
+
+
 def build_narrative(
     records: Iterable[object],
     *,
@@ -108,24 +188,12 @@ def build_narrative(
     ``None`` = 全知（U2 的上帝视角；U1 没有入口）。
     ``heroes`` = 逐座位武将 id（``Session.hero_assignments`` / 录像 meta），只用于把座位
     换成武将中文名；空序列时只写座位号。``pack_id`` 决定武将名 / 装备技能名 / 牌名的数据源。
+
+    一次性用法（录像 / 单测）：每次都从头生成。牌桌的增量路径走 :class:`NarrativeCursor`。
     """
-    hero_table, skill_names = _name_tables(pack_id)
-    seat_names = {
-        seat: name
-        for seat, hero_id in enumerate(heroes)
-        if hero_id is not None and (name := hero_table.get(str(hero_id))) is not None
-    }
-    state = _Narrator(
-        viewer=viewer,
-        seat_names=seat_names,
-        skill_names=skill_names,
-    )
-    for raw in records:
-        record = _payload(raw)
-        if record.get("kind") == "header":
-            continue
-        state.absorb(record)
-    return state.entries
+    cursor = NarrativeCursor(viewer=viewer, heroes=heroes, pack_id=pack_id)
+    cursor.extend(records)
+    return cursor.entries
 
 
 def narrative_after(
@@ -138,16 +206,13 @@ def narrative_after(
 ) -> list[dict[str, Any]]:
     """``seq > after`` 的叙事条目（HTTP 增量游标与记录流共用同一个 ``seq``）。
 
-    重新生成再过滤，而不是在服务端维护第二份游标：记录流本身就是单调的，生成器是纯函数。
+    一次性用法（录像 / 单测 / 旧录像回放）：从头生成再过滤，**纯函数**。牌桌的增量路径
+    由 :class:`NarrativeCursor` 缓存生成器状态（票 01）——调用方传不起它时才走这里。
     分隔线的 ``seq`` 取**它所引出的那一行**，故跨批次时不会丢上下文。
     """
-    return [
-        entry
-        for entry in build_narrative(
-            records, viewer=viewer, heroes=heroes, pack_id=pack_id
-        )
-        if entry["seq"] > after
-    ]
+    cursor = NarrativeCursor(viewer=viewer, heroes=heroes, pack_id=pack_id)
+    cursor.extend(records)
+    return cursor.entries_after(after)
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +769,13 @@ class _Narrator:
 # ---------------------------------------------------------------------------
 # 小工具
 # ---------------------------------------------------------------------------
+
+
+def _record_seq(record: object) -> object:
+    """记录的 ``seq``（只读属性 / 已序列化 dict 的键）；``header`` 没有它 ⇒ ``None``。"""
+    if isinstance(record, Mapping):
+        return record.get("seq")
+    return getattr(record, "seq", None)
 
 
 def _payload(record: object) -> dict[str, Any]:

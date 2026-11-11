@@ -30,7 +30,7 @@
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
 | `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`；多选面共用的查找实现 `selectOptionsAction`（勾选 `multiSelectAction` / 座位 `seatMultiAction`，右端「放弃」仍是候选里那条 `Pass`）；三个前端代答例外（观星 `ARRANGE` / 涉猎 `suit` / 计数式分配 `DISTRIBUTE` 到点提交当前选择）；涉猎提交后的 2.5 秒结果态。 |
-| `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
+| `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。**滚动窗口**（table-ux-overhaul 票 01）：`LOG_ITEM_LIMIT = 500`——两条追加口（`appendNarrativeEntry` / `appendLog`）共用 `trimLogItems()` 从头部摘，`trimStreamState()` 用**同一个上限**裁 `state.logRecords` / `state.narrative`（`narrativeShown` 是下标、跟着前移）。滚动条贴底逻辑与 `appendLog` 的渲染形状都不变。 |
 | `replay.js` | 回放页：录像列表、按记录重建座位全区（含 `armor_change` 的护甲值——从 0 起逐条 `after` 重建，`> 0` 才在座位行里写「护甲 N」）、询问面板与播放控制。 |
 | `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；阶段 / 回合飘字（U4-04）的 `#t-anim-phase` 层与 `animPlanPhase` 也在这里；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |
 | `fx-core.js` | 无属性伤害演出的**画面**：`SgsDamageFX`（纯 Canvas 2D，零依赖、零请求、不接管 DOM）。四档 `VARIANTS`（伤害值 / 剑光粗细配色 / 刀痕 / 屏闪 / 劈屏）；两档时间轴——`export`（素材库 12s，`?still` / `?export` / `renderAt(t)` 走这条）与 `game`（牌桌：19 个 `damage_fx_*` 键来自 `anim.ini`，缺键回退 `DEFAULT_TIMING`，四条钳制含 `total ≤ MAX_TOTAL_MS = 2200`；另导出由那张表的键生成的 `TIMING_FIELDS` / `TIMING_KEYS`——六个时长字段名的**唯一真源**，`damage-fx.js` 的读取面与 `test_web_static` 都从它派生，票 10）。入口 `create(canvas, {variant, profile: "game", timing, amount, stage, view, bare, numberKeepOut})` 与 `gameTiming(variant, raw)`；牌桌档 `bare: true` 只出剑光 / 刀痕 / 墨点 / 飘字（宣纸底与样例武将牌不画）；命中白闪的档位闸门是 `!bare || variant.dmg > 1`——牌桌 1 点档**没有**整屏白闪（票 06），导出档照旧，且它与 3 / 4 点档的**灰阶窗口**是两套效果。 |
@@ -92,7 +92,7 @@
 | `mergeEffectCards(cards)` | `session.js` | 把 `snapshot.processing` 合并回舞台，保留承载帧 kind 与来源区。 |
 | `stageLane(item, now)` | `session.js` | **纯函数**寿命判定：`visible` / `fading` / `gone`；测试直接喂 `now`。 |
 | `tableViewForRender()` | `table.js` | 回放期读逐事件派生的 `state.liveView`（`pending` 收起），其余读权威视图。 |
-| `stepPlayback(immediate)` | `session.js` | 回放一条记录：日志 → 效果 / 亮牌 → `applyLiveDelta` → 重绘 → 动效 → 技能事件；收尾的下一步只经 `schedulePlaybackStep(delayOf(record))`（`immediate` 侧不过暂停门）。**暂停只停记录推进，不停演出自身的帧与声**。 |
+| `stepPlayback(immediate)` | `session.js` | 回放一条记录：日志 → 效果 / 亮牌 → `applyLiveDelta` → 重绘 → 动效 → 技能事件；**重绘分两档**（table-ux-overhaul 票 01）：`recordTouchesTableView(record)` 为真才整桌 `renderTable()`，否则只 `renderProcessing()`（询问 / 应答 / 结算帧 / 终局 / 改不了快照的时机——判据与 `applyLiveDelta` 的分支同源，拿不准的一律重建；DOM 形状不变）；收尾的下一步只经 `schedulePlaybackStep(delayOf(record))`（`immediate` 侧不过暂停门）。**暂停只停记录推进，不停演出自身的帧与声**。 |
 | `schedulePlaybackStep(base)` | `session.js` | 排下一步回放（票 07）：先等 `base`，**唤醒时**才问 `playbackHoldReason()`；判据非空 ⇒ 不推进记录，改排 `PLAYBACK_HOLD_POLL_MS` 轮询，直到放空。**没有上限**（票 09）：判据一直为真就一直等（不许"等够久就放行"），故暂停路径里没有墙钟。`immediate` 侧不经过它。 |
 | `registerPlaybackHold(name, probe)` | `session.js` | **回放暂停的通用口**（票 07）：登记一条只读判据 `() => 原因串`（空串 = 不暂停），同名就地替换。伤害家族在 `damage-fx.js` 文件末尾登记一条（3 / 4 档在播）；**回复体力 3+ 档**（`vital-fx.js`）就是第二个登记者（`registerPlaybackHold("vital", vitalFxPlaybackHold)`，原因串 `"heal:3"`）——排播侧不认来源。 |
 | `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 护甲 `armor_change` / 手牌数 / 装备 / 阶段 / 标记数量 `marker_change` …）。 |
