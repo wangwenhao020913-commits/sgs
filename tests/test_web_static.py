@@ -5876,6 +5876,28 @@ def test_the_death_sfx_is_a_one_shot_scheduler_behind_the_same_switch() -> None:
     assert "AudioContext" not in death, "画面侧不碰音频 API（音效层的事）"
 
 
+def test_the_new_families_never_touch_the_full_screen_flash() -> None:
+    """spec §硬约束：铁索 / 阵亡 / 卡牌语音**都没有整屏闪**——不碰 `.fx-flash` / 表壳 `filter`。
+
+    `.fx-flash` 是**属性伤害**的整屏闪通道（ADR-021 的着色子层）；`#table-shell` 的 `filter`
+    是**无属性** 3 / 4 档的灰阶窗口。两张新覆盖层与语音各占一条通道，把它们接到整屏闪上
+    等于让一次横置 / 一次阵亡顺手闪一下全屏——三套演出都不做，故逐文件钉住零引用。
+    """
+    for name in (
+        "fx-chain.js",
+        "sfx-chain.js",
+        "fx-death.js",
+        "sfx-death.js",
+        "sfx-voices.js",
+    ):
+        text = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        for token in ("fx-flash", "table-shell", "style.filter"):
+            assert token not in text, (
+                f"{name} 不许碰整屏闪 / 表壳 filter（spec §硬约束：这三套演出都没有整屏闪）："
+                f"命中 {token!r}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # chain-death-voices 票 03：卡牌语音（`sfx-voices.js` + `static/voices/` + 三条接线）
 #
@@ -5959,11 +5981,30 @@ vm.runInContext(readFileSync("tools/sgs_web/static/sfx-voices.js", "utf8"), cont
 });
 const report = vm.runInContext(`(() => {
   const V = SgsCardVoice;
+  const mutedByDefault = V.play({ card_type: "slash", gender: "male" }) === null;
+  V.unlock();
+  V.mute(false);
+  const noGender = V.play({ card_type: "slash" });
+  const noGenderSrc = noGender && noGender.src;
+  const female = V.play({ card_type: "slash", gender: "female" });
+  const femaleSrc = female && female.src;
+  const silentRow = V.play({ card_type: "peach", gender: "male" });
+  const unknownType = V.play({ card_type: "no_such_card_type" });
+  const counted = V.count();
+  V.mute(true);
   return JSON.stringify({
     table: V.CARD_VOICES,
     types: Object.keys(V.CARD_VOICES),
     api: ["play", "stopAll", "mute", "unlock", "last", "count"].map((k) => typeof V[k]),
     bareGlobal: typeof SgsCardVoice,
+    fallback: {
+      mutedByDefault: mutedByDefault,
+      noGenderSrc: noGenderSrc,
+      femaleSrc: femaleSrc,
+      silentRowIsNull: silentRow === null,
+      unknownTypeIsNull: unknownType === null,
+      counted: counted,
+    },
   });
 })()`, context);
 console.log(report);
@@ -6097,6 +6138,23 @@ def test_the_card_voice_module_plays_each_asset_on_its_own_behind_the_switch(
     assert "stopAudio(" in stop, "`stopAll` 才 pause 存活的那几路"
     mute = _inner_js_function(voices, "mute")
     assert "stopAll()" in mute, "关「♪」= 停掉全部存活语音并清表"
+
+    # `gender` 空（无武将模式 / 老载荷）⇒ 前端回落 `male`：服务端**不猜**（`card_events` 下发
+    # `null`），回落只发生在选文件名这一处（spec §Solution 3 / §演出口径「卡牌语音」）。
+    # 探针驱动真 `play()`：缺省静音不建、无性别走男声、`female` 走女声、空表项 / 未知类型静默。
+    fallback = card_voice_probe["fallback"]
+    assert fallback["mutedByDefault"] is True, "缺省静音：第一条 `play()` 连 Audio 都不建"
+    assert fallback["noGenderSrc"] == "voices/slash_male.mp3", (
+        f"gender 空必须回落 male：{fallback['noGenderSrc']}"
+    )
+    assert fallback["femaleSrc"] == "voices/slash_female.mp3", (
+        f"gender=female 走女声：{fallback['femaleSrc']}"
+    )
+    assert fallback["silentRowIsNull"] is True, "表项 null（【桃】待补）⇒ 一声不出、返回 null"
+    assert fallback["unknownTypeIsNull"] is True, "未知牌型 ⇒ 静默，不退回别的牌型"
+    assert fallback["counted"] == 2, (
+        f"count() 只数真的出了声的两条（无性别 + 女声）：{fallback['counted']}"
+    )
 
     # `.mp3` 的 MIME（缺了会回 `application/octet-stream`）。
     if str(REPO_ROOT / "tools") not in sys.path:

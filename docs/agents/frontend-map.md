@@ -51,9 +51,23 @@
 弃牌堆面板的模态挂载点 `#t-discard-modal`（含自己的 `#t-discard-backdrop`，正文由 `table.js:renderDiscardPanel` 画）
 也在这里；`style.css` 是样式与设计单位，动效时长 / 尺寸的机械断言在 `tests/test_web_static.py`。
 
+**三张演出覆盖层各归各的家族**（chain-death-voices 票 01 / 02 新增后两张；ADR-024）：
 
-**音频素材**只有一处：`static/voices/`（chain-death-voices 票 03，卡牌语音的用户素材，40 条 mp3 +
-同表 `README.md`）。其余音效全部 Web Audio 现场合成——白名单目录之外出现音频文件，
+| 层 | 家族 / 模块 | z-index | 生命周期 | 为什么不吃指针 |
+|---|---|---|---|---|
+| `#t-damage-fx` | 伤害（`damage-fx.js` 排播 + `fx-core` / `fx-thunder` / `fx-fire` 画面） | 19（`.damage-fx-layer`）；整屏着色闪 `.fx-flash` 在 20 | 常驻**空** div；`startDamagePlay` 挂**唯一**一张 canvas（离屏舞台按槽复用），到 `duration` 摘 | `pointer-events: none`——牌桌的点击判据只在座位 / 牌 / 面板上，演出层纯视觉 |
+| `#t-chain-fx` | 铁索（`fx-chain.js`） | 19（`.chain-fx-layer`，与伤害层同档） | 常驻空 div；入链 / 解锁**一条演出一张** canvas（两条同批各在各的牌上），到该条的 `total` 摘；`chainFxSync()` 每次重绘后重贴、`clearChainFx()` 换局清 | 同上；层 `inset: 0` + `overflow: hidden` 把画布裁在壳内 |
+| `#t-death-fx` | 阵亡（`fx-death.js`） | 19（`.death-fx-layer`） | 常驻空 div；**每场阵亡一张**铺满壳的 canvas（`data-death-seat` 记是哪块牌），到 `duration` 摘；`deathFxSync()` 重贴 `data-death-fx`、`clearDeathFx()` 换局清 | 同上 |
+
+三张层都**不**塞进彼此（`#t-damage-fx` 始终是空 div，`U-DMG-01c` 正向断言"层里只有一张 canvas"）；
+询问弹窗（`.modal`）排在三张层之上，演出永远让位给询问面。铁索的**常态贴图**不走层：它是座位块里的
+`.chain-mark` 画布（`z-index: 4`，与 `.dead-tag` 同层、DOM 次序让「阵亡」压在上面）。
+
+**音频素材**只有一处：`static/voices/`（chain-death-voices 票 03，卡牌语音的用户素材，**40 条 mp3**
+合计 **653,098 B**（约 638 KiB；spec 正文的"约 256KB"是估错的数）+ 同表 `README.md`）。映射表的
+唯一真源是 `sfx-voices.js` 顶部的 `CARD_VOICES`（160 档 **43** 类，缺素材显式 `null`：22 种装备是
+预期终态、只有【桃】待补），`README.md` 是同一张表（静态用例逐行比对）。其余音效全部 Web Audio
+现场合成——白名单目录之外出现音频文件，
 `tests/test_web_static.py:test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_files` 判红。
 
 ## 舞台 / live view / 轮询 / 动效入口
@@ -121,7 +135,13 @@
   **只排队不自动跑**的 `setTimeout` / `requestAnimationFrame`（演出寿命 / 错开按毫秒读，
   `U-DMG-*` / `U-CHAIN-*` / `U-DEATH-*` 用 `runEarliest` 显式推进），以及 `localStorage` 与一次性的
   `removeEventListener`（`U-SFX-*` 的解锁与开关记忆）。阵亡的 `#t-death-fx` 与另两张演出层一样
-  在 `RECT_TABLE` 里有整壳矩形（`damageFxBoxOf` 的换算依赖它）。
+  在 `RECT_TABLE` 里有整壳矩形（`damageFxBoxOf` 的换算依赖它）。卡牌语音再补一个**假 `Audio`**
+  （记录每个实例的 `src` / `pause`；`U-VOICE-*` 只读这份日志，页面上没有 `AudioContext`，
+  语音模块也不建它）。铁索常态贴图的 `bakeStatic()` 结果**按尺寸缓存**（同一尺寸只烘一次），
+  烟测 `M5-08d-b1` 读的是"贴图真的画进去了"（`#t-self-chain` 的 `width/height > 0`）。
+- `tests/test_web_static.py` 里两个新家族的**模块形状**由 node 探针驱动真函数（不是读源码正则）：
+  `SgsChainFX` 的 `create` / `bakeStatic` / `gameTiming` / `MODES` / `STATIC` 与 `SgsDeathFX` 的
+  `create` / `PARAMS` / `gameTiming` 各跑一次，`anim.ini` 与 `DEFAULT_TIMING` 逐键对表。
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。
