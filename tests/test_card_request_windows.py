@@ -543,3 +543,74 @@ def test_the_refusal_windows_are_registered_as_not_participating() -> None:
     assert required_card(
         ModifierContext(subject=0, scope=CandidateScope.DODGE, respond_required="dodge")
     ) == "dodge"
+
+
+# ---------------------------------------------------------------------------
+# 断言 5：五处 A 类窗口都接了询问策略的预筛口（table-ux-overhaul 票 05）
+# ---------------------------------------------------------------------------
+#
+# spec §2 Q3 = (i)「只问合格者 + 同窗一次呈现」。落地方式**不是**在每扇窗口里各写一份
+# "这个座位有没有牌 / 有没有转化能力"的判据，而是五处窗口在发问**之前**统一过票 02 的
+# 预筛口，并把窗口类别位（`skip_if_empty=True`）显式交给它——判据只有一处（那个预览读的
+# 就是窗口真发问时用的 `legal_actions_for`）。本断言钉"五处都接了、且都带类别位"：
+# 少接一处 ⇒ 那扇窗口在网页会话里仍会向空手座位发询问（spec §1 #8 的报障原样回来）。
+
+A_CLASS_WINDOWS: tuple[tuple[str, str, str], ...] = (
+    ("src/sgs/engine/steps.py", "_collected_response_window", "should_ask_respond"),
+    ("src/sgs/engine/steps.py", "_dodge_window", "should_ask_query"),
+    ("src/sgs/engine/steps.py", "near_death_ask", "should_ask_query"),
+    ("src/sgs/skills/lord_request.py", "_run_lord_request", "should_ask_respond"),
+    ("src/sgs/effects/ops.py", "resolve_duel", "should_ask_respond"),
+    ("src/sgs/effects/ops.py", "_resist_or_damage", "should_ask_respond"),
+)
+"""五处 A 类窗口（无懈 / 闪 / 求桃 / 护驾求助 / 决斗·南蛮·万箭）→ (路径, 函数, 预筛口)。
+
+`_resist_or_damage` 是【南蛮】与【万箭】共用的主体，故六行覆盖"五处窗口"。
+预筛口分两个名字是因为候选载荷分家：RESPOND 用 `RespondContext`（`should_ask_respond`），
+【闪】/ 求桃用 `DodgeContext` / `PeachContext`（`should_ask_query`）。
+"""
+
+
+def scan_prefilter_sites() -> set[tuple[str, str, str]]:
+    """全树扫 `should_ask_respond` / `should_ask_query` 的调用点（`(路径, 函数, 名字)`）。
+
+    只收**带 `skip_if_empty=True`** 的调用：类别位缺席的调用等于没接（预筛口恒放行）。
+    """
+    sites: set[tuple[str, str, str]] = set()
+    for file in sorted(SRC_ROOT.rglob("*.py")):
+        if "__pycache__" in file.parts:
+            continue
+        tree = ast.parse(file.read_text(encoding="utf-8"))
+        parents = _parent_map(tree)
+        rel = file.relative_to(REPO_ROOT).as_posix()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _callee(node)
+            if name not in ("should_ask_respond", "should_ask_query"):
+                continue
+            keywords = {key.arg: key.value for key in node.keywords if key.arg is not None}
+            bit = keywords.get("skip_if_empty")
+            if not (isinstance(bit, ast.Constant) and bit.value is True):
+                continue
+            sites.add((rel, _owner(node, parents), name))
+    return sites
+
+
+def test_every_a_class_window_consults_the_ask_policy_prefilter() -> None:
+    """五处 A 类窗口逐个认领预筛口；多出来的（没登记的）预筛调用同样判红。"""
+    expected = set(A_CLASS_WINDOWS)
+    sites = scan_prefilter_sites()
+
+    missing = expected - sites
+    assert not missing, (
+        "这些 A 类窗口没有接询问策略的预筛口（或没给 `skip_if_empty=True`）：\n"
+        + "\n".join(f"  - {path} :: {owner} → {name}" for path, owner, name in sorted(missing))
+        + "\n\n票 05 的接线口径：发问**之前**用与随后那次 ask 逐项同名的入参调一次预筛；"
+        "缺了它，网页会话里空手座位仍会收到只有 Pass 的询问。"
+    )
+    unexpected = sites - expected
+    assert not unexpected, (
+        "这些预筛调用点不在 A 类窗口登记表里（新窗口 ⇒ 先在 A_CLASS_WINDOWS 里认领）：\n"
+        + "\n".join(f"  - {path} :: {owner} → {name}" for path, owner, name in sorted(unexpected))
+    )

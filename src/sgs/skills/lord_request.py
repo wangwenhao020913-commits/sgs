@@ -58,6 +58,7 @@ from sgs.effects import (
     ModifierPoint,
     check_targets,
     check_usable,
+    need_card_floor,
     satisfies_required,
 )
 from sgs.resolution import Control, Frame, Tag, has_tag
@@ -378,6 +379,20 @@ def _run_lord_request(
         return None
     while request["next"] < len(request["askers"]):
         asker = request["askers"][request["next"]]
+        if not host.should_ask_respond(
+            asker,
+            cause=WindowCause.LORD_REQUEST,
+            required=skill.required,
+            target=actor,
+            mode=RespondMode.PLAY,
+            floor=need_card_floor(frame, asker),
+            skip_if_empty=True,
+        ):
+            # 票 05：这个同势力座位**没有任何**办法打出这张牌（真牌 ∪ 转化 / 提供者）
+            # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（轮到下一个应答者）。总开关在会话
+            # 策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+            request["next"] += 1
+            continue
         action = host.ask_respond(
             frame,
             asker,
@@ -387,6 +402,7 @@ def _run_lord_request(
             target=actor,
             window_frame=frame.frame_id,
             mode=RespondMode.PLAY,
+            skip_if_empty=True,
         )
         if host.suspended(action):
             return "stay"

@@ -565,6 +565,21 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
             return _duel_accepted(frame, op, seat=turn, other=other, required=required)
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
+    providers_used = tuple(frame.data.get("providers_used", ()))
+    if not host.should_ask_respond(
+        turn,
+        cause=WindowCause.DUEL,
+        required="slash",
+        target=None,
+        providers_used=providers_used,
+        floor=need_card_floor(frame, turn),
+        skip_if_empty=True,
+    ):
+        # 票 05：这个座位**没有任何**办法打出【杀】（真牌 ∪ 转化 / 提供者）⇒ 不问，
+        # 语义与它答 ``Pass`` 逐字相同（受到对方 1 点伤害）。总开关在会话策略；引擎
+        # 缺省 OFF ⇒ 恒 True（金录像零变化）。
+        _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
+        return None
     action = host.ask_respond(
         frame,
         turn,
@@ -573,7 +588,8 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         required="slash",
         target=None,
         window_frame=frame.frame_id,
-        providers_used=tuple(frame.data.get("providers_used", ())),
+        providers_used=providers_used,
+        skip_if_empty=True,
     )
     if host.suspended(action):
         return "stay"
@@ -801,6 +817,20 @@ def _resist_or_damage(
         if frame.data.pop("skill_result"):
             return None  # 红 ⇒ 视为打出【闪】，需要被满足、不受伤害
     providers_used = tuple(frame.data.get("providers_used", ()))
+    if not host.should_ask_respond(
+        target,
+        cause=cause,
+        required=required,
+        target=None,
+        providers_used=providers_used,
+        floor=need_card_floor(frame, target),
+        skip_if_empty=True,
+    ):
+        # 票 05：这个座位**没有任何**办法打出这张牌（真牌 ∪ 转化 / 提供者）⇒ 不问，
+        # 语义与它答 ``Pass`` 逐字相同（受到 1 点伤害）。总开关在会话策略；引擎缺省
+        # OFF ⇒ 恒 True（金录像零变化）。
+        _push_damage(host, frame, source=frame.data["source"], target=target, amount=amount)
+        return None
     action = host.ask_respond(
         frame,
         target,
@@ -810,6 +840,7 @@ def _resist_or_damage(
         target=None,
         window_frame=frame.frame_id,
         providers_used=providers_used,
+        skip_if_empty=True,
     )
     if host.suspended(action):
         return "stay"

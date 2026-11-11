@@ -283,6 +283,32 @@ class FrameHost(StepHost, Protocol):
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
     ) -> tuple[Any, ...]: ...
 
+    def should_ask_respond(
+        self,
+        actor: int,
+        *,
+        cause: WindowCause,
+        required: str | None = None,
+        target: int | None = None,
+        mode: RespondMode = RespondMode.PLAY,
+        use_targets: tuple[int, ...] = (),
+        providers_used: tuple[str, ...] = (),
+        declared: bool = False,
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        floor: int = 0,
+        skip_if_empty: bool = False,
+    ) -> bool: ...
+
+    def should_ask_query(
+        self,
+        kind: QueryKind,
+        actor: int,
+        *,
+        dying: int | None = None,
+        payload: Any = None,
+        skip_if_empty: bool = False,
+    ) -> bool: ...
+
     def suspended(self, value: Any) -> bool: ...
 
     def selection_face(
@@ -760,15 +786,27 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
             )
             return "stay"
     providers_used = tuple(frame.data.get("providers_used", ()))
+    payload = DodgeContext(
+        providers_used=providers_used,
+        floor=need_card_floor(frame, target),
+    )
+    if not host.should_ask_query(
+        QueryKind.DODGE,
+        target,
+        payload=payload,
+        skip_if_empty=True,
+    ):
+        # 票 05：这个座位**没有任何**办法打出 / 视为打出【闪】（真牌 ∪ 转化 ∪ 提供者）
+        # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（不抵消、照常结算）。类别位由本窗口给，
+        # 总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+        frame.data["canceled"] = False
+        return "stay"
     action = host.ask_query(
         QueryKind.DODGE,
         target,
         Timing.RESOLVE_BEFORE_EFFECT,
         frame=frame,
-        payload=DodgeContext(
-            providers_used=providers_used,
-            floor=need_card_floor(frame, target),
-        ),
+        payload=payload,
     )
     if host.suspended(action):
         return "stay"
@@ -843,6 +881,23 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
         if control is not None:
             return control
         if satisfied is None:
+            declared_already = bool(frame.data["response_declared"])
+            if not host.should_ask_respond(
+                asker,
+                cause=WindowCause.NULLIFY,
+                required=NULLIFY_RESPONSE_CARD,
+                target=target,
+                mode=RespondMode.USE,
+                declared=declared_already,
+                floor=need_card_floor(frame, asker),
+                skip_if_empty=True,
+            ):
+                # 票 05：这个座位**没有任何**办法打出【无懈可击】（真牌 ∪ 转化 / 提供者，
+                # 判据来自同一个 ``legal_actions_for``）⇒ 不问。语义与它答 ``Pass`` 逐字
+                # 相同：不声明、不耗牌、不压帧，窗口照旧问下一个座位。类别位由本窗口给，
+                # 总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+                frame.data["response_next"] = index + 1
+                continue
             action = host.ask_respond(
                 frame,
                 asker,
@@ -852,7 +907,8 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
                 target=target,
                 window_frame=frame.frame_id,
                 mode=RespondMode.USE,
-                declared=bool(frame.data["response_declared"]),
+                declared=declared_already,
+                skip_if_empty=True,
             )
             if host.suspended(action):
                 return "stay"
@@ -1510,13 +1566,26 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
         if control is not None:
             return control
         if satisfied is None:
+            payload = PeachContext(floor=need_card_floor(frame, asker))
+            if not host.should_ask_query(
+                QueryKind.PEACH,
+                asker,
+                dying=target,
+                payload=payload,
+                skip_if_empty=True,
+            ):
+                # 票 05：这个座位**没有任何**办法用出【桃】（真牌 ∪ 转化 / 提供者）
+                # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（下一个座位）。总开关在会话策略；
+                # 引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+                frame.data["next"] = idx + 1
+                continue
             action = host.ask_query(
                 QueryKind.PEACH,
                 asker,
                 Timing.NEAR_DEATH_AT,
                 frame=frame,
                 dying=target,
-                payload=PeachContext(floor=need_card_floor(frame, asker)),
+                payload=payload,
             )
             if host.suspended(action):
                 return "stay"

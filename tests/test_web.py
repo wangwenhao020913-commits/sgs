@@ -174,6 +174,9 @@ def test_the_halt_driven_journal_is_byte_identical_to_a_one_shot_run(seed: int) 
         pack=session.pack,
         heroes=session.heroes,
         hero_pool=session.hero_pool,
+        # 同一份询问策略（票 05）：缺省"引擎 OFF / 网页 ON"两档不同，不带上它这条对照就
+        # 比的是两份不同的配置——而本判据要证的只是"挂起驱动不改变记录流"。
+        ask_policy=session.ask_policy,
     )
     straight.run([_FirstChoice(), RandomPlayer(ai_stream(seed, 1))])
 
@@ -194,6 +197,9 @@ def test_the_halt_driven_journal_replays_through_the_tape_player() -> None:
         pack=session.pack,
         heroes=session.heroes,
         hero_pool=session.hero_pool,
+        # 录像里的询问序列是**会话策略 ON** 下产出的（票 05）：回放引擎要同一份策略，
+        # 否则它会问出录像里没有的空询问，磁带对不上。
+        ask_policy=session.ask_policy,
     )
     replay.run([TapePlayer(tape)] * session.rule_config.player_count)
 
@@ -1416,6 +1422,11 @@ def test_the_respond_query_carries_no_second_target_stage() -> None:
     seed 31 的随机路径提前分出生死（175 → 55 步、RESPOND 94 → 26 次），两条种子的合计因此
     从 106 掉到 38，低于下面的 50。按 `CODING_STANDARDS.md` §5 **加样本、不降阈值**：补 seed
     43（它含移动版于吉，顺带覆盖本票新增的提供者路径，单种 90 次），合计 128（≈ 2.5× 阈值）。
+
+    **样本量（票 05，2026-11-11）**：网页会话缺省 **ON** 之后，人类座位自己的 RESPOND 询问
+    从每局几十条掉到个位数——空手座位不再被问（本票的报障就是这个）。取样因此改从
+    **记录流**读：每个座位的 RESPOND 询问都在里面（同一份 `RespondQuery` 模型，形状与下发
+    面一致），三颗种子合计 89 次（≈ 1.8× 阈值）；阈值一个字不降。
     """
     checked = 0
     for seed in (31, 37, 43):
@@ -1423,13 +1434,17 @@ def test_the_respond_query_carries_no_second_target_stage() -> None:
         guard = 0
         while session.pending is not None and guard < 400:
             guard += 1
-            query = session.pending
-            if str(query.kind) == "RESPOND":
-                checked += 1
-                payload = query.model_dump(mode="json")
-                assert "use_targets" not in payload, "RESPOND 询问不得带 use_targets（第二阶段不存在）"
-                assert "mode" not in payload, "RESPOND 询问不得带 mode（候选里读得出是打出还是使用）"
-            session.submit_answer(query.legal_actions[0])
+            session.submit_answer(session.pending.legal_actions[0])
+        for record in session.records():
+            if getattr(record, "kind", None) != "query":
+                continue
+            query = record.query
+            if str(query.kind) != "RESPOND":
+                continue
+            checked += 1
+            payload = query.model_dump(mode="json")
+            assert "use_targets" not in payload, "RESPOND 询问不得带 use_targets（第二阶段不存在）"
+            assert "mode" not in payload, "RESPOND 询问不得带 mode（候选里读得出是打出还是使用）"
     # 覆盖元断言：一条"逐条检查"的循环若一条都没检查到，它就是空转通过。
     assert checked >= 50, f"取样太少（只查到 {checked} 次 RESPOND），断言谈不上机械"
 
@@ -2984,9 +2999,57 @@ def test_the_sidecar_meta_carries_the_outcome(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 询问策略位（table-ux-overhaul 票 02 / spec §2 Q4 + §3 注①）
 #
-# 本票只落管道、不接窗口：策略缺省"引擎 OFF / 网页 ON"，预筛口只被断言调用、
-# 生产代码里一个调用点都没有 ⇒ 记录流逐字节不变（硬验收见 tools/check_goldens.sh）。
+# 票 02 只落管道、不接窗口（预筛口零调用点 ⇒ 记录流逐字节不变，硬验收见
+# tools/check_goldens.sh）；票 05 把五处 A 类窗口接上去，本节因此多了一条**消费者**断言：
+# 同一扇真实的无懈窗口，装"引擎缺省"和"网页缺省"两份策略，问到的座位不一样。
 # ---------------------------------------------------------------------------
+
+
+class _PlaysTheTrick:
+    """出牌阶段使用**指定的那一张**牌，其余询问一律按 :class:`PassPlayer` 答。
+
+    只服务 :func:`_nullify_window_askers` 的驱动：让"无懈窗口"真的由一次锦囊结算开出来，
+    而不是手搓一个合成载荷（``CODING_STANDARDS.md`` §6）。
+    """
+
+    def __init__(self, type_id: str) -> None:
+        self.type_id = type_id
+        self.done = False
+
+    def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+        if not self.done and query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.type == self.type_id:
+                    self.done = True
+                    return action
+        return PassPlayer().respond(query)
+
+
+def _nullify_window_askers(ask_policy: AskPolicy) -> list[int]:
+    """一扇**真实**无懈窗口里被问到的座位：座位 0 用锦囊（手里没有无懈）、座位 1 空手。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    trick = cards_of_type(pack, "ex_nihilo")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(trick,)), SeatSpec()],
+        deck=deck_excluding(pack, trick),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11, ask_policy=ask_policy)
+    run_queries(
+        engine,
+        [_PlaysTheTrick("ex_nihilo"), PassPlayer()],
+        lambda e: ran_timing(e, Timing.RESOLVE_END),
+    )
+    return [
+        record.query.actor
+        for record in engine.records
+        if record.kind == "query"
+        # `RespondQuery.kind` 是报文值（`"RESPOND"`），按 ``==`` 比 enum（str 枚举两边相等）。
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.NULLIFY
+        and record.query.target == 0
+    ]
 
 
 def test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session() -> None:
@@ -3012,6 +3075,31 @@ def test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session() -> 
         seed=1, ai="random", timeout_seconds=None, ask_policy=AskPolicy(), **TWO_PLAYERS
     )
     assert explicit_off.engine.ask_policy.auto_skip is False, "显式 OFF 必须能盖过网页缺省"
+
+
+def test_a_web_session_defaults_the_policy_on_and_the_engine_defaults_it_off() -> None:
+    """票 05：票 02 的两份**真实缺省**各有**消费者**——同一扇无懈窗口问到的座位不一样。
+
+    缺省值本身由 ``test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session``
+    钉住（本用例不重复那三条断言，也不重写预筛口判据）；这里只钉"它们真的改变窗口行为"：
+    引擎缺省 ⇒ 照问全场（旧口径逐字节可复现），网页会话缺省 ⇒ 空手座位连询问都不发。
+    两份策略都从**真实构造路径**取（``Engine.new_game`` / ``Session.__init__``），不写
+    ``AskPolicy(auto_skip=...)`` 字面量——判据因此读的是产品缺省，不是测试自造的配置。
+    """
+    engine = Engine.new_game(
+        seed=1,
+        rule_config=validate_rule_config(TWO_PLAYERS),
+        pack=load_content_pack(deck_profile="standard_108"),
+    )
+    session = Session(seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+
+    # 座位 0 刚把锦囊用掉、座位 1 空手：两个人都没有能打出【无懈可击】的牌。
+    assert _nullify_window_askers(engine.ask_policy) == [0, 1], (
+        "引擎缺省 OFF ⇒ 无懈窗口照问全场（旧口径逐字节可复现）"
+    )
+    assert _nullify_window_askers(session.ask_policy) == [], (
+        "网页缺省 ON ⇒ 没有任何办法打出【无懈可击】的座位连询问都不发"
+    )
 
 
 def _nullify_window_state():

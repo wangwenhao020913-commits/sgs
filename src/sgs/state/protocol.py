@@ -330,7 +330,9 @@ class AskPolicy:
 
     ``auto_skip`` 只是**总开关**：它不自己判断"这扇窗口可不可跳过"——那一位由调用方按
     窗口类别声明（:attr:`RespondContext.skip_if_empty`），两者与候选预览一起收口在
-    :meth:`~sgs.engine.Engine.should_ask_respond` 里。本票只落这条管道，不接任何窗口。
+    :meth:`~sgs.engine.Engine.should_ask_respond` / :meth:`~sgs.engine.Engine.should_ask_query`
+    里。**消费者 = 五处 A 类窗口**（无懈 / 闪 / 求桃 / 护驾求助 / 决斗·南蛮·万箭，
+    table-ux-overhaul 票 05）：引擎侧缺省 OFF，故金录像 / AI 对战 / 旧录像回放逐字节不变。
     """
 
     auto_skip: bool = False
@@ -374,7 +376,7 @@ class RespondContext:
     缺省 ``False`` = 照问）。它是**逐窗口的类别位**，与会话级总开关
     :class:`AskPolicy` 分开：A 类（需要 / 可以使用或打出一张牌：无懈 / 闪 / 求桃 / 护驾 /
     决斗 / 南蛮万箭）由调用方置 ``True``；C 类（可以放弃的询问）留给各自窗口决定。
-    **本票只加字段与文档，不加任何置位调用点**——真正的消费者在票 05。
+    **置位调用点 = 票 05 接上的五处 A 类窗口**（发问前用同一个值调预筛口）。
     **不进记录流**（同上）。
     """
 

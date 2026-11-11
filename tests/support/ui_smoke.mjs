@@ -1603,14 +1603,16 @@ if (auto) {
 await openSession(created);
 const pending0 = ui.state.view.pending;
 check("建局后有挂起询问", !!pending0, pending0 && pending0.kind);
-// 唯一候选**不铺按钮**：界面只说"将提交什么"（spec D9）。建局后那个 RESPOND 往往正是这种
-// （合法行动只有"放弃"），所以这里断言的是"零按钮 + 说明将提交什么"，而不是"零选项 = 坏了"。
+// 唯一候选**不铺按钮**：界面只说"将提交什么"（spec D9）。旧口径下"建局后那个 RESPOND
+// 合法行动只有放弃"正是这种；**票 05 起**这类空询问不再发（网页会话缺省 ON 的预筛），
+// 首问换成真正的表面（选牌 / 手牌直选），故判据改成**不管落到哪一档都不许出现候选行按钮**，
+// 而 `direct` 那一档仍钉"零按钮 + 说明将提交什么"。
 check("唯一候选不铺按钮，只说明将提交什么", (() => {
   const rk = ui.renderKind(pending0, pending0.legal_actions);
   if (rk === "direct") {
     return $("t-options").children.length === 0 && /将提交/.test($("t-choice").textContent);
   }
-  return $("t-options").children.length > 0;
+  return candidateRowButtons().length === 0;
 })(), `${ui.renderKind(pending0, pending0.legal_actions)} / ${pending0.legal_actions.map((a) => a.kind).join(",")} / ${JSON.stringify(pending0.legal_actions[0])} / choice="${$("t-choice").textContent}"`);
 check("询问文案已渲染", $("t-prompt").textContent.length > 0, $("t-prompt").textContent.slice(0, 40));
 // item 4：询问面板 = **效果区说明**（#t-context，跟处理区走）+ **需要做什么**
@@ -9627,6 +9629,77 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U1-05m 再次点击收起（展开常驻，不自动关）", $("t-log-panel").hidden === true);
 }
 
+/* ---- table-ux-overhaul 票 05：同一 `window_frame` 的无懈窗口只占一条事件流条目 ----
+ *
+ * 票面判据（§要做什么 4）：无懈是**收集式**窗口——引擎按应答者区间逐座位各发一次询问，
+ * 事件流里**不能**逐座刷行；同一 `window_frame` 的若干条询问 / 声明并进**一条**
+ * 「无懈窗口」条目，玩家自己的那一问仍由 `pending.js` 单独呈现（本块只喂各座位的记录，
+ * 不碰 pending）。走的是真追加口：`applyView` → `stepPlayback` → `appendLog`。
+ */
+{
+  const savedView = ui.state.view;
+  const savedLog = ui.state.logRecords;
+  const savedNarrative = ui.state.narrative;
+  const savedSession = ui.state.sessionId;
+  // 线上报文的形状：应答记录的 `answers_seq` 在顶层（内联行动里也有一份派生副本）。
+  const nullifyRecords = [
+    { kind: "query", seq: 21, query: { kind: "RESPOND", actor: 0, cause: "NULLIFY", required: "nullify", target: 0, window_frame: 41 } },
+    { kind: "action", seq: 22, accepted: true, answers_seq: 21, action: { kind: "Pass", answers_seq: 21 } },
+    { kind: "query", seq: 23, query: { kind: "RESPOND", actor: 1, cause: "NULLIFY", required: "nullify", target: 0, window_frame: 41 } },
+    { kind: "action", seq: 24, accepted: true, answers_seq: 23, action: { kind: "UseCard", card: { card_id: 9, name: "无懈可击" }, answers_seq: 23 } },
+    { kind: "query", seq: 25, query: { kind: "RESPOND", actor: 2, cause: "NULLIFY", required: "nullify", target: 0, window_frame: 41 } },
+    { kind: "action", seq: 26, accepted: true, answers_seq: 25, action: { kind: "Pass", answers_seq: 25 } },
+  ];
+  ui.state.view = null;
+  ui.state.logRecords = [];
+  ui.state.narrative = [];
+  ui.state.narrativeShown = 0;
+  ui.state.sessionId = null;
+  $("t-log").innerHTML = "";
+  setSelect("t-log-mode", "all");
+  ui.applyView({
+    ...synthView(null), session_id: "", cursor: 26, log_seq: 0,
+    records: nullifyRecords, narrative: [], finished: false,
+  });
+
+  check("票05W1 同一 window_frame 的若干条声明只占**一条**事件流条目（不逐座刷）",
+    logCount() === 1 && logText().includes("无懈窗口"),
+    `count=${logCount()} text="${logText().replace(/\s+/g, " ").slice(0, 120)}"`);
+  check("票05W2 合并条目写全窗口事实：目标 / 被问的座位 / 声明者与牌名",
+    logText().includes("目标 座位 0")
+      && logText().includes("询问 座位 0、1、2")
+      && logText().includes("座位 1 声明【无懈可击】"),
+    `text="${logText().replace(/\s+/g, " ").slice(0, 160)}"`);
+  const mergedItem = $("t-log").children[0];
+  check("票05W3 合并条目仍是普通 <li>，且**不再**逐条画询问 / 应答",
+    mergedItem.tagName === "LI"
+      && logCount() === 1
+      && !logText().includes("询问 RESPOND")
+      && !logText().includes("应答"),
+    `tag=${mergedItem.tagName} count=${logCount()} text="${logText().replace(/\s+/g, " ").slice(0, 120)}"`);
+
+  // 另一个窗口（不同帧号）必须另起一条：合并不是"把无懈都并成一条"。
+  ui.applyView({
+    ...synthView(null), session_id: "", cursor: 28, log_seq: 0,
+    records: [
+      { kind: "query", seq: 27, query: { kind: "RESPOND", actor: 0, cause: "NULLIFY", required: "nullify", target: 1, window_frame: 42 } },
+      { kind: "action", seq: 28, accepted: true, answers_seq: 27, action: { kind: "Pass", answers_seq: 27 } },
+    ],
+    narrative: [], finished: false,
+  });
+  check("票05W4 另一层（另一个 window_frame）另起一条", logCount() === 2,
+    `count=${logCount()}`);
+
+  // 恢复：后面的用例（票 01 的滚动窗口等）仍看得到真视图与真记录。
+  setSelect("t-log-mode", "simple");
+  ui.state.view = savedView;
+  ui.state.logRecords = savedLog;
+  ui.state.narrative = savedNarrative;
+  ui.state.sessionId = savedSession;
+  $("t-log").innerHTML = "";
+  ui.resetSelection();
+}
+
 /* ---- table-ux-overhaul 票 01：事件流滚动窗口（`#t-log` 与两份本地序列同一上限） ----
  *
  * 判据是"节点数停在上限、留下的是最新的"：一局 6612 条记录全留成 `<li>` 是"越打越卡"的
@@ -13475,9 +13548,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
   const realPick = ui.state.view ? ui.state.view.pending : null;
   const realPickHarvest = realPick && realPick.harvest;
+  // **票 05 起 `declined` 可以为 0**：人类把唯一一张【无懈】用掉之后，其余目标的窗口里它
+  // 没有任何可打的牌 ⇒ 网页会话（策略缺省 ON）不再问它，循环直接落到取牌步。旧断言
+  // `declined > 0` 钉的是"每个目标的窗口都问人类一遍"——那正是本票修掉的行为。
   check("U2-R11 真会话驱动到真实取牌步：同一个链键 / 同一个窗口，正文切回取牌模式",
-    declined > 0
-      && !!realPick && realPick.kind === "SELECT_CARDS"
+    !!realPick && realPick.kind === "SELECT_CARDS"
       && !!realPickHarvest && realPickHarvest.key === (realHarvest && realHarvest.key)
       && ui.state.dialog.key === realKey
       && $("t-dialog").hidden === false

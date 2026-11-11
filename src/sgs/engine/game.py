@@ -2712,8 +2712,9 @@ class Engine:
 
         ``skip_if_empty``（table-ux-overhaul 票 02）是**按窗口类别**声明的"没有可行动的
         候选时可以不问"，落进 :class:`RespondContext` 供预筛口读；缺省 ``False`` = 照问。
-        **本票不加任何置位调用点**：真正的消费者（无懈 / 闪 / 求桃 / 护驾 / 决斗 /
-        南蛮万箭五处窗口）在票 05，且要先过 :meth:`should_ask_respond` 的总开关。
+        置位调用点 = 三扇 ``ask_respond`` 驱动的 A 类窗口（无懈 / 护驾求助 / 决斗·南蛮·
+        万箭，票 05），且它们都在发问**之前**先过 :meth:`should_ask_respond` 的总开关
+        ——同一个值传给两处（前者决定问不问，后者让候选载荷带上同一份窗口声明）。
 
         ``floor`` **不由调用方给**：它读承载帧里这一座位已过完的档（票 03 §4-2，
         :func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
@@ -2850,10 +2851,11 @@ class Engine:
         不问、不记、不耗序号，也不另写"这个座位有没有真牌 / 真转化能力"的判据——票 05 的
         无懈合格者（真【无懈可击】∪ 【看破】一类转化能力）因此与窗口真发问时同源。
 
-        **本票只加这个函数，不调用它**：五处 A 类窗口（无懈 / 闪 / 求桃 / 护驾 /
-        决斗·南蛮·万箭）在票 05 才接上来。参数与 :meth:`ask_respond` 对齐，调用方在发问前
-        用同一份入参问一句即可；``floor`` 与 ``declared`` 也要与随后那次发问一致
-        （有承载帧时 ``floor = need_card_floor(frame, actor)``）。
+        **调用点 = 三扇 ``ask_respond`` 驱动的 A 类窗口**（票 05：无懈 / 护驾求助 / 决斗·
+        南蛮·万箭）；另两扇（【闪】/ 求桃）走 :meth:`ask_query`，预筛口是它的姊妹
+        :meth:`should_ask_query`——同一句判据、只是候选载荷不同。参数与 :meth:`ask_respond`
+        对齐，调用方在发问前用同一份入参问一句即可；``floor`` 与 ``declared`` 也要与随后
+        那次发问一致（有承载帧时 ``floor = need_card_floor(frame, actor)``）。
         """
         if not (self.ask_policy.auto_skip and skip_if_empty):
             return True
@@ -2868,6 +2870,41 @@ class Engine:
             declared=declared,
             rejudge_offers=rejudge_offers,
             floor=floor,
+        )
+        return any(not isinstance(action, Pass) for action in candidates)
+
+    def should_ask_query(
+        self,
+        kind: QueryKind,
+        actor: int,
+        *,
+        dying: int | None = None,
+        payload: Any = None,
+        skip_if_empty: bool = False,
+    ) -> bool:
+        """**统一预筛口**的另一半：``ask_query`` 驱动的两扇需要牌窗口（【闪】/ 求桃）。
+
+        与 :meth:`should_ask_respond` 是**同一句判据**（会话策略 × 窗口类别位 × 候选
+        预览），只在候选载荷上分家：这两扇窗口的候选由
+        :func:`~sgs.effects.legal_actions_for` 按 :class:`~sgs.state.DodgeContext` /
+        :class:`~sgs.state.PeachContext` 现算，**不经过** :class:`RespondContext`——硬塞进
+        同一个入口就得在一处伪造另一种载荷，预览与真询问也就不同源了。
+
+        ``payload`` 必须是窗口**这一次发问会带的那一份**（【闪】的 ``providers_used`` +
+        ``floor``、求桃的 ``floor``）：预览因此与真询问铺同一张面。
+
+        ``skip_if_empty``（A 类窗口的类别位，票 02）由窗口显式给：本函数不按候选内容替
+        调用方猜"这扇窗可不可跳过"；策略 OFF（引擎缺省）⇒ 恒 ``True``（照问）。
+        """
+        if not (self.ask_policy.auto_skip and skip_if_empty):
+            return True
+        candidates = legal_actions_for(
+            self.state,
+            actor,
+            kind,
+            answers_seq=self._seq + 1,
+            dying=dying,
+            payload=payload,
         )
         return any(not isinstance(action, Pass) for action in candidates)
 

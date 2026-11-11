@@ -723,6 +723,9 @@ function applyView(body) {
     state.lifeLossEvents = [];
     // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
     state.liveView = null;
+    // 票 05：事件流的「无懈窗口」合并记账按帧号（`window_frame`）索引，帧号跨局会重复
+    // ⇒ 换会话时清掉，否则新局第一扇窗口会并进上一局那条已经不该显示的条目里。
+    resetWindowLogs($("t-log"));
   }
   // U3-04 / D8.2：技能发动是随视图下发的派生通道；先收进队列，回放走到对应的记录 seq
   // 才演出（飘名 / 白光 / 线），而不是响应一到就全部同时出现。
