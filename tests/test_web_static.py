@@ -6384,11 +6384,12 @@ _VITAL_FX_JS = STATIC_DIR / "vital-fx.js"
 
 # vital-fx 票 03 / 04 的四个模块（画面 / 音效各两份）。这张表是"新模块必须登记"的落点：
 # 它逐行断言"清单里有、磁盘上有、挂了全局名、不发请求、不接管 DOM"。
-# 票 03 追加了两行（本票交付）；票 04 再追加
-# `{"fx-heal.js": "SgsHealFX", "sfx-heal.js": "SgsHealSfx"}`。
+# 票 03 追加失去体力两行；票 04 追加回复体力两行（spec §硬约束把四个全局名逐名列了出来）。
 _VITAL_FX_GLOBALS: dict[str, str] = {
     "fx-hp-loss.js": "SgsHpLossFX",
     "sfx-hp-loss.js": "SgsHpLossSfx",
+    "fx-heal.js": "SgsHealFX",
+    "sfx-heal.js": "SgsHealSfx",
 }
 
 
@@ -6441,9 +6442,9 @@ def test_the_vital_fx_playback_layer_is_listed_next_to_damage_fx() -> None:
 def test_vital_fx_scripts_keep_their_global_names_and_stay_static() -> None:
     """票 03 / 04 的四个模块（画面 / 音效）逐行登记在 `_VITAL_FX_GLOBALS` 里。
 
-    票 02 建这张表时它是空的（四个模块还不存在）；票 03 补上失去体力的两行之后，它逐行断言
-    "清单里有、磁盘上有、顺序在 `sfx-ui.js` 之前、挂了全局名、不发请求、不接管 DOM"。
-    剩下的 `fx-heal.js` / `sfx-heal.js` 是票 04 的文件。
+    票 02 建这张表时它是空的（四个模块还不存在）；票 03 补上失去体力的两行、票 04 补上回复体力
+    的两行之后，它逐行断言"清单里有、磁盘上有、顺序在 `sfx-ui.js` 之前、挂了全局名、不发请求、
+    不接管 DOM"。四个模块现在都在清单里（票 04 起 `fx-heal.js` / `sfx-heal.js` 允许且必须加载）。
     """
     srcs = _script_srcs()
     for name, global_name in _VITAL_FX_GLOBALS.items():
@@ -6465,10 +6466,6 @@ def test_vital_fx_scripts_keep_their_global_names_and_stay_static() -> None:
         assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", text), (
             f"{name} 不接管 DOM（覆盖层与挂载是排播层的事）"
         )
-    # 前提：回复体力那两份是票 04 的文件，本票**不许**提前挂进清单。
-    assert not any(name in srcs for name in ("fx-heal.js", "sfx-heal.js")), (
-        "回复体力的画面 / 音效模块是票 04 的文件：本票不许提前把它们挂进清单"
-    )
 
 
 def test_the_vital_fx_layer_is_its_own_overlay_next_to_the_damage_layer() -> None:
@@ -7626,5 +7623,810 @@ def test_the_hp_loss_sfx_lane_schedules_every_tier_without_a_real_audio_context(
         )
     assert probe["tiers"]["3"]["sources"] > probe["tiers"]["1"]["sources"], (
         "3 档（三颗墨珠 + 墨气）排出的音源必须多于 1 档（一颗）："
+        f"{probe['tiers']['3']['sources']} vs {probe['tiers']['1']['sources']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 04：回复体力家族（画面 `SgsHealFX` + 音效 `SgsHealSfx`，**3+ 档时停**）
+#
+# 与票 03 同样的三块（画面模块与音效模块是同两个形状，只换素材与字段）：
+# 1. **清单 / 静态契约**：两份新脚本进清单（画面紧跟 `fx-hp-loss.js`、音效紧跟
+#    `sfx-hp-loss.js`），都是严格模式普通脚本（`_VITAL_FX_GLOBALS` 那条用例覆盖全局名 /
+#    不发请求 / 不碰 DOM）；
+# 2. **画面模块的形状与双时间轴**：`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` /
+#    `TIMING_KEYS` / `MAX_TOTAL_MS` 与雷 / 火 / 失去体力同形；字段名由 `DEFAULT_TIMING` 生成；
+#    导出档照素材页的 3.20 / 3.55 / 4.45 秒链；牌桌档把素材页的拍子按**锚点**压到 ini 的
+#    `total` / `gather` / `hold` / `burst` / `num` 上（`warp`），钳制
+#    `gather + hold ≤ burst ≤ num ≤ total ≤ 2200` 在模块内部；
+# 3. **音效车道适配器**：`create(timeline)` → `{start, stop, mute, tick}`（与 `SgsSfx` 同形），
+#    cue 时刻从时间轴读，三档排程在假 Web Audio 上整条走一遍。
+#
+# **只 3+ 档有 `gather` / `hold` / `burst`**（与 `fx-thunder.js` 的 `strobe` / `flash` 同姿态：
+# 1 / 2 档不硬造这三个键），`TIMING_FIELDS` 由 `DEFAULT_TIMING` 的键生成、没有第二处名单。
+# **档位判据只有一处**（spec §档位）：`vital-fx.js:vitalFxVariantOf(amount)`——画面模块只认
+# 排播层交给它的 `variant`，素材包的 `tierFor()` 不许作为第二份判据活下来。
+# 行为（层出现 / 三档读数 / 飘字 / 摘层时刻 / **3+ 档时停** / 兜底绿闪）归烟测 `U-VITAL-1x`；
+# 时停的真源是家族表的 `holdsAt: 3`（票 02 的用例已逐档钉死），本块只钉"模块自己不登记暂停"。
+# ---------------------------------------------------------------------------
+
+_HEAL_JS = STATIC_DIR / "fx-heal.js"
+_HEAL_SFX_JS = STATIC_DIR / "sfx-heal.js"
+
+# `heal_fx_<档>_<字段>`。**不带档位号**的 `heal_fx_concurrency`（票 02 的并发表）不是时长键，
+# 别混进这张对照表。
+_HEAL_TIMING_KEY = re.compile(r"^heal_fx_\d+_")
+
+_HEAL_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 记录型 2D 上下文（与票 03 的探针同一张垫片）：`create()` / `draw()` 全走真代码，像素不参与
+ * 断言。所有离屏画布的 `fillText` 收进**同一份**日志：飘字是烘在贴图上的（`bakeNumber` 用
+ * fillText 烘、`draw()` 只 drawImage），所以"飘字写真实点数"只能从这份日志读。 */
+const texts = [];
+function makeCtx() {
+  const gradient = { addColorStop() {} };
+  const target = { texts };
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+      if (prop === "measureText") return () => ({ width: 10 });
+      if (prop === "fillText") return (text) => { texts.push(String(text)); };
+      if (prop in obj) return obj[prop];
+      const fn = () => {};
+      obj[prop] = fn;
+      return fn;
+    },
+    set(obj, prop, value) { obj[prop] = value; return true; },
+  });
+}
+
+function makeCanvas() {
+  const ctx = makeCtx();
+  return { width: 0, height: 0, getContext: () => ctx };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout,
+  document: {
+    getElementById: () => null,
+    createElement: (tag) => (tag === "canvas" ? makeCanvas() : {
+      style: {}, setAttribute() {}, appendChild() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+context.texts = texts;
+
+vm.runInContext(readFileSync(staticPath("fx-heal.js"), "utf8"), context,
+                { filename: "fx-heal.js" });
+
+const report = vm.runInContext(`(() => {
+  const fx = SgsHealFX;
+  const dst = { cx: 600, cy: 300, w: 240, h: 160 };
+  const make = (opts) => fx.create(document.createElement("canvas"), opts);
+  const game = (id, amount, extra) => make(Object.assign({
+    variant: id, profile: "game", amount, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src: null, dst }, numberKeepOut: 70,
+  }, extra || {}));
+  const shapes = {};
+  const drawn = {};
+  for (const id of [1, 2, 3]) {
+    const inst = game(id, id);
+    shapes[id] = {
+      keys: Object.keys(inst).sort(),
+      duration: inst.duration,
+      profile: inst.profile,
+      timing: inst.timing,
+      timeline: inst.timeline,
+      metrics: inst.metrics,
+      variant: inst.variant,
+      amount: inst.amount,
+      bare: inst.bare,
+      width: inst.width,
+      height: inst.height,
+    };
+    try {
+      for (let step = 0; step <= 24; step += 1) inst.draw((inst.duration * step) / 24);
+      drawn[id] = "ok";
+    } catch (error) { drawn[id] = String(error && error.stack || error); }
+  }
+  /* 不传 stage（覆盖层量不到布局 / node 探针 / 导出档）：退参考舞台，不抛错。 */
+  const fallback = make({
+    variant: 3, profile: "game", amount: 3, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 },
+  });
+  try {
+    for (const t of [0, 0.4, 0.9, 1.5, 1.8]) fallback.draw(t);
+    drawn.fallback = "ok";
+  } catch (error) { drawn.fallback = String(error && error.stack || error); }
+  /* 导出档：照素材页的 3.20 / 3.55 / 4.45 秒链（node 探针逐帧导静帧靠它）。 */
+  const exported = {};
+  for (const id of [1, 2, 3]) {
+    const inst = make({ variant: id, profile: "export", amount: id + 1, dpr: 1 });
+    exported[id] = { duration: inst.duration, timeline: inst.timeline, profile: inst.profile };
+    try {
+      for (let step = 0; step <= 24; step += 1) inst.draw((inst.duration * step) / 24);
+      drawn["export" + id] = "ok";
+    } catch (error) { drawn["export" + id] = String(error && error.stack || error); }
+  }
+  /* 真实点数：amount = 4 仍按 3 档演，飘字是 +4（不是档位号 3 / 也不是 1）。 */
+  texts.length = 0;
+  const four = game(3, 4);
+  const fourTexts = texts.slice();
+  four.draw(four.timeline.NUM + 0.02);
+  const fourDrawnTexts = texts.slice();
+  function ordered(ms) {
+    if (!(ms.total >= 0 && ms.total <= fx.MAX_TOTAL_MS)) return false;
+    if (!(ms.num >= 0 && ms.num <= ms.total)) return false;
+    if (ms.gather === undefined) return true;
+    return ms.gather >= 0 && ms.gather + ms.hold <= ms.burst && ms.burst <= ms.num;
+  }
+  function messy(id) {
+    const out = {};
+    out["heal_fx_" + id + "_total"] = 9000;
+    out["heal_fx_" + id + "_num"] = 5000;
+    if (id === 3) {
+      out["heal_fx_3_gather"] = 5000;
+      out["heal_fx_3_hold"] = 5000;
+      out["heal_fx_3_burst"] = 5000;
+    }
+    return out;
+  }
+  const clamps = {
+    total: fx.gameTiming(1, { heal_fx_1_total: 9999 }).ms.total,
+    numAboveTotal: fx.gameTiming(1, { heal_fx_1_total: 900, heal_fx_1_num: 5000 }).ms.num,
+    junk: fx.gameTiming(2, { heal_fx_2_total: "abc", heal_fx_2_num: -1 }).ms,
+    missing: fx.gameTiming(1, { heal_fx_1_total: 900 }).ms,
+    three: fx.gameTiming(3).ms,
+    one: fx.gameTiming(1).ms,
+    two: fx.gameTiming(2).ms,
+    oneKeys: Object.keys(fx.gameTiming(1).ms),
+    twoKeys: Object.keys(fx.gameTiming(2).ms),
+    threeKeys: Object.keys(fx.gameTiming(3).ms),
+    gatherOverTotal: fx.gameTiming(3, { heal_fx_3_total: 1000, heal_fx_3_gather: 5000 }).ms,
+    holdOverTotal: fx.gameTiming(3, { heal_fx_3_gather: 600, heal_fx_3_hold: 5000 }).ms,
+    burstBelow: fx.gameTiming(3, {
+      heal_fx_3_total: 2000, heal_fx_3_gather: 500, heal_fx_3_hold: 100, heal_fx_3_burst: 10,
+    }).ms,
+    numBelowBurst: fx.gameTiming(3, { heal_fx_3_burst: 900, heal_fx_3_num: 100 }).ms,
+    zero: fx.gameTiming(3, { heal_fx_3_total: 0 }).timeline,
+  };
+  return JSON.stringify({
+    prefix: fx.TIMING_PREFIX,
+    maxTotal: fx.MAX_TOTAL_MS,
+    fields: fx.TIMING_FIELDS,
+    keys: fx.TIMING_KEYS,
+    defaults: fx.DEFAULT_TIMING,
+    frozen: [Object.isFrozen(fx.TIMING_FIELDS), Object.isFrozen(fx.TIMING_KEYS)],
+    surface: Object.keys(fx).sort(),
+    hasTierFor: Object.prototype.hasOwnProperty.call(fx, "tierFor"),
+    hasVariantOf: Object.prototype.hasOwnProperty.call(fx, "variantOf"),
+    tiers: { 1: fx.TIERS[1].duration, 2: fx.TIERS[2].duration, 3: fx.TIERS[3].duration },
+    shapes: shapes,
+    exported: exported,
+    fallback: {
+      stage: fallback.stage,
+      duration: fallback.duration,
+      timeline: fallback.timeline,
+    },
+    four: {
+      variant: four.variant,
+      amount: four.amount,
+      texts: fourTexts,
+      drawnTexts: fourDrawnTexts,
+      numberText: four.metrics.numberText,
+    },
+    clamps: clamps,
+    ordered: [1, 2, 3].map((id) => ordered(fx.gameTiming(id).ms)),
+    orderedMessy: [1, 2, 3].map((id) => ordered(fx.gameTiming(id, messy(id)).ms)),
+    warp: {
+      1: fx.gameTiming(1).warp,
+      2: fx.gameTiming(2).warp,
+      3: fx.gameTiming(3).warp,
+    },
+    drawn: drawn,
+  });
+})()`, context, { filename: "heal_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def _heal_fx_probe() -> dict:
+    """跑真 `fx-heal.js`（node vm + 记录型 2D 上下文），拿回解算 / 实例 / 导出链的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "heal_probe.mjs"
+        probe.write_text(_HEAL_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"回复体力画面探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def heal_fx_probe() -> dict:
+    """一次探针跑完，形状 / 钳制 / 导出链几条用例共用。"""
+    return _heal_fx_probe()
+
+
+def test_the_heal_family_scripts_are_listed_next_to_their_hp_loss_twins() -> None:
+    """票 04 §3：`fx-heal.js` 紧跟 `fx-hp-loss.js`、`sfx-heal.js` 紧跟 `sfx-hp-loss.js`。
+
+    spec §硬约束把这条次序逐名列出来了（`fx-fire` → `fx-hp-loss` → `fx-heal` → 音效组 →
+    `sfx-ui.js` → `main.js`）。"跟着失去体力那一份"而不是"跟着火那一份"：两个体力家族是
+    **并列**的两份，画面 / 音效各自按家族顺序排，票 03 的
+    `srcs.index("fx-hp-loss.js") == srcs.index("fx-fire.js") + 1` 因此仍然成立。
+    """
+    srcs = _script_srcs()
+    for name in ("fx-heal.js", "sfx-heal.js"):
+        assert name in srcs, f"index.html 的脚本清单里必须有 {name}：{srcs}"
+    assert srcs.index("fx-heal.js") == srcs.index("fx-hp-loss.js") + 1, (
+        f"fx-heal.js 必须紧跟 fx-hp-loss.js（画面组按家族顺序）：{srcs}"
+    )
+    assert srcs.index("sfx-heal.js") == srcs.index("sfx-hp-loss.js") + 1, (
+        f"sfx-heal.js 必须紧跟 sfx-hp-loss.js（音效组按家族顺序）：{srcs}"
+    )
+    assert srcs.index("fx-fire.js") < srcs.index("fx-hp-loss.js") < srcs.index("fx-heal.js"), (
+        f"spec §硬约束的画面顺序：fx-fire → fx-hp-loss → fx-heal：{srcs}"
+    )
+    assert srcs.index("fx-heal.js") < srcs.index("sfx.js"), (
+        "画面组整组排在音效组之前（总谱对：fx-core / fx-thunder / fx-fire / fx-hp-loss / fx-heal）"
+    )
+    assert srcs.index("sfx-heal.js") < srcs.index("sfx-ui.js"), (
+        "sfx-ui.js 的声道池读它的 gameTiming ⇒ 必须排在它之前"
+    )
+    assert srcs.index("fx-heal.js") < srcs.index("sfx-heal.js"), (
+        "画面在音效之前（spec §硬约束的清单顺序）"
+    )
+
+
+def test_the_heal_renderer_keeps_the_hp_loss_renderer_shape(heal_fx_probe: dict) -> None:
+    """`SgsHealFX` 与 `SgsHpLossFX` / `SgsFireFX` 同形：排播层不认第二种形状。
+
+    - 导出面：`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_PREFIX` / `TIMING_FIELDS` /
+      `TIMING_KEYS` / `MAX_TOTAL_MS`，字段名由 `DEFAULT_TIMING` 生成（唯一真源）；
+    - **没有 `tierFor` / `variantOf`**（档位判据只有 `vital-fx.js:vitalFxVariantOf` 一处）；
+    - `create()` 返回 `draw / duration / timeline / timing / metrics / stage`；
+    - 牌桌档：`duration = total`（秒）；`total / num` 全档都有，`gather / hold / burst`
+      **只有 3 档**（1 / 2 档不硬造这三个键）；
+    - 真实点数：`amount: 4` 按 3 档演，飘字是 `+4`；
+    - 量不到座位矩形 ⇒ 退参考舞台，逐帧 draw 不抛错。
+    """
+    probe = heal_fx_probe
+    assert probe["prefix"] == "heal_fx_"
+    assert probe["maxTotal"] == 2200, "单档总时长上限 2200（3+ 档是时停窗口，2.2s 是下限）"
+    assert probe["fields"] == ["total", "num", "gather", "hold", "burst"], (
+        f"字段名由 DEFAULT_TIMING 的键生成（`total / num` 全档、`gather / hold / burst` 只 3 档）："
+        f"{probe['fields']}"
+    )
+    assert probe["keys"] == list(probe["defaults"]), "TIMING_KEYS 必须就是 DEFAULT_TIMING 的键"
+    assert probe["frozen"] == [True, True], "TIMING_FIELDS / TIMING_KEYS 是冻结数组"
+    derived: list[str] = []
+    for key in probe["defaults"]:
+        field = key[len(probe["prefix"]):].split("_", 1)[1]
+        if field not in derived:
+            derived.append(field)
+    assert list(probe["fields"]) == derived, (
+        f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(probe['fields'])}"
+    )
+    for name in (
+        "create", "gameTiming", "DEFAULT_TIMING", "TIMING_PREFIX",
+        "TIMING_FIELDS", "TIMING_KEYS", "MAX_TOTAL_MS",
+    ):
+        assert name in probe["surface"], f"SgsHealFX 缺少导出 {name}：{probe['surface']}"
+    assert probe["hasTierFor"] is False and probe["hasVariantOf"] is False, (
+        "档位判据只有 `vitalFxVariantOf` 一处：模块不许再导出一份 tierFor / variantOf（spec §档位）"
+    )
+    source = _strip_js_comments(_HEAL_JS.read_text(encoding="utf-8"))
+    assert "tierFor" not in source and "variantOf" not in source, (
+        "画面模块里不许残留第二份档位判据（素材包的 tierFor / 自造的 variantOf）"
+    )
+
+    fields_of_tier = {
+        "1": {"total", "num"},
+        "2": {"total", "num"},
+        "3": {"total", "num", "gather", "hold", "burst"},
+    }
+    for variant in ("1", "2", "3"):
+        shape = probe["shapes"][variant]
+        for key in (
+            "draw", "duration", "timeline", "timing", "metrics", "stage",
+            "variant", "profile", "amount", "bare", "width", "height",
+        ):
+            assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
+        timing = shape["timing"]
+        timeline = shape["timeline"]
+        assert shape["profile"] == "game" and shape["bare"] is True
+        assert shape["width"] == 1440 and shape["height"] == 810, "牌桌档按 view 建画布"
+        assert set(timing) == fields_of_tier[variant], (
+            f"{variant} 档的字段集：`total / num` 全档、3 档才多 gather / hold / burst —— "
+            f"{sorted(timing)}"
+        )
+        assert timing["total"] <= probe["maxTotal"], (
+            f"{variant} 档总时长必须 ≤ SgsHealFX.MAX_TOTAL_MS（{probe['maxTotal']}）"
+        )
+        assert shape["duration"] == pytest.approx(timing["total"] / 1000)
+        assert timeline["DURATION"] == pytest.approx(shape["duration"])
+        assert timeline["TIER"] == int(variant), "时间轴带上档位号（音效按档选音色）"
+        assert 0 < timeline["GLOW"] < timeline["NUM"] < timeline["DURATION"]
+        assert timeline["NUM"] == pytest.approx(timing["num"] / 1000)
+        if variant == "3":
+            assert timeline["GATHER"] == pytest.approx(timing["gather"] / 1000), "聚气**结束**时刻"
+            assert timeline["BURST"] == pytest.approx(timing["burst"] / 1000), "迸发时刻"
+            assert timeline["HOLD"] == pytest.approx(timing["hold"] / 1000), "白住时长"
+            assert timeline["GATHER"] + timeline["HOLD"] == pytest.approx(timeline["BURST"]), (
+                f"聚气结束 + 白住时长 = 迸发时刻：{timeline}"
+            )
+            assert timeline["GATHER"] < timeline["BURST"] <= timeline["NUM"], (
+                f"拍子必须按「聚气 → 白住 → 迸发 → 飘字」排：{timeline}"
+            )
+        else:
+            assert timeline["GATHER"] == 0 and timeline["BURST"] == 0 and timeline["HOLD"] == 0, (
+                f"{variant} 档没有聚气 / 白住 / 迸发这三拍：{timeline}"
+            )
+        metrics = shape["metrics"]
+        assert metrics["number"] > 0
+        assert metrics["numberBox"]["height"] == pytest.approx(metrics["number"])
+        assert metrics["number"] <= 0.35 * metrics["card"]["h"] + 0.05, (
+            "字高不得超过牌高 35%（压住体力读数）"
+        )
+        assert metrics["numberBox"]["top"] >= metrics["keepOut"] + 0.02 * metrics["card"]["h"] - 0.05, (
+            "飘字包围盒的顶边不得压到体力条（留 2% 牌高余量）"
+        )
+        assert 0 < metrics["whiteAlpha"] < 1, (
+            "白化的峰值必须是**半透明白**叠在覆盖层上（1 = 不透明板，牌桌被盖住）："
+            f"{metrics['whiteAlpha']}"
+        )
+        assert probe["drawn"][variant] == "ok", f"{variant} 档逐帧绘制抛错：{probe['drawn'][variant]}"
+
+    four = probe["four"]
+    assert four["variant"] == 3, "amount ≥ 3 按 3 档演"
+    assert four["amount"] == 4, "飘字数字来自服务端 amount，不是档位号"
+    assert four["numberText"] == "+4", f"飘字必须是真实点数（amount = 4 ⇒ +4）：{four['numberText']!r}"
+    assert "+4" in four["texts"], f"字身要用 fillText 画出来：{four['texts']}"
+    assert "3" not in four["texts"], (
+        f"不许把档位号当点数写（amount = 4 时写 +3 是错的）：{four['texts']}"
+    )
+
+    fallback = probe["fallback"]
+    assert fallback["stage"]["dst"]["w"] > 0 and fallback["stage"]["dst"]["h"] > 0
+    assert probe["drawn"]["fallback"] == "ok", f"退参考舞台那一分支绘制抛错：{probe['drawn']['fallback']}"
+
+
+def test_the_heal_export_chain_keeps_the_material_package_beats(heal_fx_probe: dict) -> None:
+    """导出档照素材页的 3.20 / 3.55 / 4.45 秒链（`gather` 0.22→1.24、`hold` 0.30、`burst` 1.54）。
+
+    牌桌档只把**拍子**压到 ini 上：「比例不变」的判据是 `warp` 的锚点——素材页的
+    `gather.at` / 聚气结束 / `burst.at` / `numAt` / `duration` 各自对到 ini 的
+    `gather` / `burst` / `num` / `total` 上，**段内线性**。
+    """
+    probe = heal_fx_probe
+    assert probe["tiers"] == {"1": 3.20, "2": 3.55, "3": 4.45}, (
+        f"导出档三档时长照素材页：{probe['tiers']}"
+    )
+    expected = {
+        "1": {"duration": 3.20, "GLOW": 0.16, "NUM": 0.54, "TIER": 1},
+        "2": {"duration": 3.55, "GLOW": 0.16, "NUM": 0.54, "TIER": 2},
+        "3": {
+            "duration": 4.45, "GLOW": 0.16, "NUM": 1.60, "TIER": 3,
+            "GATHER_START": 0.22, "GATHER": 1.24, "HOLD": 0.30, "BURST": 1.54,
+        },
+    }
+    for variant, want in expected.items():
+        export = probe["exported"][variant]
+        assert export["profile"] == "export"
+        assert export["duration"] == pytest.approx(want["duration"])
+        timeline = export["timeline"]
+        assert timeline["DURATION"] == pytest.approx(want["duration"])
+        for key in ("GLOW", "NUM", "TIER"):
+            assert timeline[key] == pytest.approx(want[key]), f"{variant} 档导出档的 {key}: {timeline}"
+        if variant == "3":
+            for key in ("GATHER_START", "GATHER", "HOLD", "BURST"):
+                assert timeline[key] == pytest.approx(want[key]), (
+                    f"3 档导出档的 {key}：{timeline}"
+                )
+            assert timeline["GATHER"] == pytest.approx(timeline["GATHER_START"] + 1.02), (
+                "素材页的聚气段是 0.22 → 1.24（1.02s）"
+            )
+            assert timeline["GATHER"] + timeline["HOLD"] == pytest.approx(timeline["BURST"])
+        else:
+            assert timeline["BURST"] == 0 and timeline["GATHER"] == 0 and timeline["HOLD"] == 0
+        assert probe["drawn"]["export" + variant] == "ok", (
+            f"导出档 {variant} 逐帧绘制抛错：{probe['drawn']['export' + variant]}"
+        )
+
+    # 牌桌档的锚点：素材页秒 → 牌桌秒（段内线性，端点精确落在 ini 的毫秒上）。
+    anchors = {
+        "1": [(0.54, 0.350), (3.20, 1.100)],
+        "2": [(0.54, 0.350), (3.55, 1.300)],
+        # 聚气起点按素材页的比例压：620 × 0.22 / 1.24 = 110ms（聚气段仍占 ~28%）。
+        "3": [(0.22, 0.110), (1.24, 0.620), (1.54, 0.780), (1.60, 0.860), (4.45, 2.200)],
+    }
+    for variant in ("1", "2", "3"):
+        pairs = probe["warp"][variant]
+        assert pairs[0] == {"e": 0, "g": 0}, f"{variant} 档锚点从 (0, 0) 开始：{pairs}"
+        want_pairs = anchors[variant]
+        assert len(pairs) == len(want_pairs) + 1, f"{variant} 档锚点对：{pairs}"
+        for got, (export_at, game_at) in zip(pairs[1:], want_pairs):
+            assert got["e"] == pytest.approx(export_at), (
+                f"{variant} 档的素材页端点必须逐拍对上：{pairs}"
+            )
+            assert got["g"] == pytest.approx(game_at), f"{variant} 档的牌桌端点：{pairs}"
+
+    # 聚气起点的口径：`gather` 是聚气**结束**的时刻，起点的比例与素材页一致。
+    source = _HEAL_JS.read_text(encoding="utf-8")
+    assert "gather" in source and "聚气" in source, "聚气起点的换算要在注释里写清（票面 §1）"
+
+
+def test_the_heal_timing_table_clamps_inside_the_module(heal_fx_probe: dict) -> None:
+    """缺键 / 非法值退 `DEFAULT_TIMING`；钳制在**模块内部**：
+    `gather + hold ≤ burst ≤ num ≤ total ≤ 2200`。
+
+    三档缺省 = spec §游戏档缺省时长（SGS-INTEGRATION §6.2 的压缩表）：1 = 1100（num 350）、
+    2 = 1300（num 350）、3 = 2200（gather 620 / hold 160 / burst 780 / num 860）。
+    `gather` 是聚气**结束**的时刻、`hold` 是白住**时长**、`burst` 是迸发**时刻** —— 所以
+    `620 + 160 = 780 = burst` 是这张表自洽的判据（票面 §1 的"聚气 ≤ 白住起点 ≤ 迸发"）。
+    """
+    probe = heal_fx_probe
+    clamps = probe["clamps"]
+    assert clamps["one"] == {"total": 1100, "num": 350}, f"1 档缺省：{clamps['one']}"
+    assert clamps["two"] == {"total": 1300, "num": 350}, f"2 档缺省：{clamps['two']}"
+    assert clamps["three"] == {
+        "total": 2200, "gather": 620, "hold": 160, "burst": 780, "num": 860,
+    }, f"3 档缺省按 SGS-INTEGRATION §6.2：{clamps['three']}"
+    assert clamps["three"]["gather"] + clamps["three"]["hold"] == clamps["three"]["burst"], (
+        f"620 + 160 = 780 = 迸发时刻（`gather` 是聚气结束、`hold` 是白住时长）：{clamps['three']}"
+    )
+    assert clamps["oneKeys"] == ["total", "num"] and clamps["twoKeys"] == ["total", "num"], (
+        "1 / 2 档**只有** total / num（不硬造 gather / hold / burst）："
+        f"{clamps['oneKeys']} / {clamps['twoKeys']}"
+    )
+    assert clamps["threeKeys"] == ["total", "num", "gather", "hold", "burst"], (
+        f"3 档五个字段齐全：{clamps['threeKeys']}"
+    )
+    assert probe["ordered"] == [True, True, True], "三档缺省都在钳制范围内"
+    assert probe["orderedMessy"] == [True, True, True], (
+        "五个字段全给非法大数时仍须守住 gather + hold ≤ burst ≤ num ≤ total ≤ 2200"
+    )
+    assert clamps["total"] == 2200, "total 超出 MAX_TOTAL_MS 即钳到 2200"
+    assert clamps["numAboveTotal"] == 900, "num ≤ total"
+    assert clamps["junk"] == {"total": 1300, "num": 350}, (
+        f"非法值（非数字 / 负数）退回内置默认：{clamps['junk']}"
+    )
+    assert clamps["missing"] == {"total": 900, "num": 350}, (
+        f"只改 total，其余退回内置默认：{clamps['missing']}"
+    )
+    assert clamps["gatherOverTotal"] == {
+        "total": 1000, "gather": 1000, "hold": 0, "burst": 1000, "num": 1000,
+    }, f"gather 超上限时钳到 total，白住与迸发跟着收在 total：{clamps['gatherOverTotal']}"
+    assert clamps["holdOverTotal"] == {
+        "total": 2200, "gather": 600, "hold": 1600, "burst": 2200, "num": 2200,
+    }, f"hold 不许把迸发顶出 total：{clamps['holdOverTotal']}"
+    assert clamps["burstBelow"] == {
+        "total": 2000, "gather": 500, "hold": 100, "burst": 600, "num": 860,
+    }, f"burst 小于聚气结束时被抬到 gather + hold（不是退默认）：{clamps['burstBelow']}"
+    assert clamps["numBelowBurst"] == {
+        "total": 2200, "gather": 620, "hold": 160, "burst": 900, "num": 900,
+    }, f"num 不许早于迸发：{clamps['numBelowBurst']}"
+    assert clamps["zero"]["DURATION"] == 0, "total = 0（用户关掉这一档）⇒ 一条空时间轴"
+    # 缺省值本身是 spec 的压缩表（改 ini 等于改用户可见的节奏；换掉缺省先改 spec）。
+    defaults = probe["defaults"]
+    assert [defaults[f"heal_fx_{v}_total"] for v in (1, 2, 3)] == [1100, 1300, 2200]
+    assert [defaults[f"heal_fx_{v}_num"] for v in (1, 2, 3)] == [350, 350, 860]
+    assert defaults["heal_fx_3_gather"] == 620
+    assert defaults["heal_fx_3_hold"] == 160
+    assert defaults["heal_fx_3_burst"] == 780
+    assert not any(key.startswith(("heal_fx_1_gather", "heal_fx_2_gather")) for key in defaults), (
+        f"1 / 2 档不许有 gather / hold / burst 的键：{sorted(defaults)}"
+    )
+
+
+def test_anim_ini_lists_the_heal_durations_per_variant(heal_fx_probe: dict) -> None:
+    """`anim.ini` 的 `heal_fx_<档>_<字段>` 键块与 `SgsHealFX.DEFAULT_TIMING` 逐键同值。
+
+    键表**不在测试里写第二份**：`SgsHealFX.TIMING_KEYS` 是唯一真源，这里只与磁盘上的
+    `anim.ini` 对表（同剑光 / 雷电 / 火焰 / 铁索 / 阵亡 / 失去体力的姿态）。
+    """
+    entries = {
+        key: value for key, value in _ini_entries().items()
+        if _HEAL_TIMING_KEY.match(key)
+    }
+    expected = set(heal_fx_probe["keys"])
+    assert set(entries) == expected, (
+        f"回复体力的时长键必须与 fx-heal 的 DEFAULT_TIMING 一致："
+        f"缺 {sorted(expected - set(entries))}；多 {sorted(set(entries) - expected)}"
+    )
+    values = {key: float(value) for key, value in entries.items()}
+    max_total = heal_fx_probe["maxTotal"]
+    for variant in (1, 2):
+        total = values[f"heal_fx_{variant}_total"]
+        num = values[f"heal_fx_{variant}_num"]
+        assert 0 < num < total <= max_total, (
+            f"{variant} 档的绝对毫秒必须递增且 total ≤ {max_total}：num={num} / total={total}"
+        )
+    total = values["heal_fx_3_total"]
+    gather = values["heal_fx_3_gather"]
+    hold = values["heal_fx_3_hold"]
+    burst = values["heal_fx_3_burst"]
+    num = values["heal_fx_3_num"]
+    assert 0 < gather < burst < num < total <= max_total, (
+        f"3 档的四个绝对毫秒必须递增且 total ≤ {max_total}："
+        f"gather={gather} / burst={burst} / num={num} / total={total}"
+    )
+    assert gather + hold == burst, (
+        f"聚气结束 + 白住时长 = 迸发时刻（620 + 160 = 780）：{gather} + {hold} != {burst}"
+    )
+    assert hold / total == pytest.approx(0.073, abs=0.01), (
+        f"白住占整段的 ~7%（SGS-INTEGRATION §3 B4 的比例）：{hold / total:.3f}"
+    )
+    assert gather / total == pytest.approx(0.282, abs=0.01), (
+        f"聚气占整段的 ~28%（B4：压缩时聚气可略升到 ~28%）：{gather / total:.3f}"
+    )
+    totals = [values[f"heal_fx_{variant}_total"] for variant in (1, 2, 3)]
+    assert totals == [1100, 1300, 2200], f"spec §游戏档缺省时长：{totals}"
+    ini_text = _ANIM_INI.read_text(encoding="utf-8")
+    assert "体力演出 · 回复体力" in ini_text, "键块要有自己的标题（用户改得动）"
+    assert values == {
+        key: float(value) for key, value in heal_fx_probe["defaults"].items()
+    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变三档节奏）"
+
+
+def test_the_heal_module_never_freezes_playback_itself_and_has_no_screen_flash() -> None:
+    """回复的 3+ 档时停**不写在这份文件里**：真源是家族表的 `holdsAt: 3`（票 02）。
+
+    - 画面模块不登记 `registerPlaybackHold`（登记在 `vital-fx.js` 文件末尾）；
+    - 没有整屏闪：不碰 `.fx-flash`、不碰 `#table-shell`、不挂 CSS `filter`；
+    - `bare` 下的白化是**半透明白**叠在覆盖层上（不隐藏牌面），峰值是**唯一命名常量**
+      `BARE_WHITE_PEAK`，注释写明素材页的 α 是照浅色样例牌调的、**最终值以实机为准**。
+    """
+    source = _strip_js_comments(_HEAL_JS.read_text(encoding="utf-8"))
+    assert "registerPlaybackHold" not in source, (
+        "回复 3+ 档的时停登记在 vital-fx.js（家族表 holdsAt），画面模块不碰暂停表"
+    )
+    assert "PlaybackHold" not in source, "画面模块不认识排播侧的暂停判据"
+    assert "fx-flash" not in source, "不能碰整屏闪的着色子层"
+    assert "table-shell" not in source, "不碰表壳（也就不会有 filter / containing block）"
+    assert not re.search(r"\.style\.filter\b", source), "不许给任何节点挂 CSS filter"
+    assert "getComputedStyle" not in source, "不读 DOM 样式（覆盖层与布局是排播层的事）"
+    match = re.search(r"var BARE_WHITE_PEAK = ([0-9.]+);", source)
+    assert match is not None, "bare 下的白化峰值必须是一个**命名常量**（可调、可实机校）"
+    assert 0 < float(match.group(1)) < 1, (
+        f"BARE_WHITE_PEAK 必须在 (0, 1) 之间（1 = 不透明的白板）：{match.group(1)}"
+    )
+    raw = _HEAL_JS.read_text(encoding="utf-8")
+    assert "实机" in raw, "注释里要写明最终白化的 α 以实机为准（票面 §1 的 bare 口径）"
+    assert "样例牌" in raw or "真实牌面" in raw, "注释里要写明素材页的 α 是照样例牌调的"
+    # 牌桌档不画宣纸底与样例牌（bare 口径）：两份贴图只在导出档取。
+    assert "bare ? null" in source, "宣纸 / 样例牌必须按 bare 分支跳过"
+
+
+_HEAL_SFX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 假 Web Audio（与票 03 那张垫片同源，多一个 `createDelay`：回复的磬 / 泛音要一条反馈延迟
+ * 留尾）。每个节点只有 connect / start / stop 与参数 setter；`start(when)` 的**时刻**记下来
+ * ——"cue 从时间轴读"就靠它判。 */
+function makeParam() {
+  const p = {
+    value: 0,
+    setValueAtTime(v) { p.value = v; return p; },
+    exponentialRampToValueAtTime(v) { p.value = v; return p; },
+    linearRampToValueAtTime(v) { p.value = v; return p; },
+    setTargetAtTime(v) { p.value = v; return p; },
+  };
+  return p;
+}
+
+function makeNode(kind, graph) {
+  const node = {
+    kind,
+    connect() { return node; },
+    disconnect() {},
+    start(when) {
+      graph.started += 1;
+      if (typeof when === "number" && isFinite(when)) graph.whens.push(when);
+    },
+    stop() {},
+  };
+  if (kind === "gain") node.gain = makeParam();
+  if (kind === "oscillator") { node.frequency = makeParam(); node.type = "sine"; }
+  if (kind === "bufferSource") { node.buffer = null; node.loop = false; }
+  if (kind === "filter") { node.frequency = makeParam(); node.Q = makeParam(); node.type = "lowpass"; }
+  if (kind === "delay") node.delayTime = makeParam();
+  if (kind === "compressor") {
+    node.threshold = makeParam(); node.knee = makeParam(); node.ratio = makeParam();
+    node.attack = makeParam(); node.release = makeParam();
+  }
+  return node;
+}
+
+function makeGraph() {
+  const graph = { nodes: 0, started: 0, whens: [] };
+  const ctx = {
+    sampleRate: 44100,
+    currentTime: 0,
+    state: "running",
+    destination: { connect() {} },
+    resume() { return Promise.resolve(); },
+    createGain() { graph.nodes += 1; return makeNode("gain", graph); },
+    createOscillator() { graph.nodes += 1; return makeNode("oscillator", graph); },
+    createBufferSource() { graph.nodes += 1; return makeNode("bufferSource", graph); },
+    createBiquadFilter() { graph.nodes += 1; return makeNode("filter", graph); },
+    createDelay() { graph.nodes += 1; return makeNode("delay", graph); },
+    createDynamicsCompressor() { graph.nodes += 1; return makeNode("compressor", graph); },
+    createBuffer(channels, length) {
+      const data = new Float32Array(Math.max(1, length));
+      return {
+        numberOfChannels: channels, length: data.length, sampleRate: 44100,
+        getChannelData: () => data,
+      };
+    },
+  };
+  return { ctx, graph };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout, Math, Array, Float32Array, Object, JSON, Promise,
+  document: { createElement: () => ({ width: 0, height: 0, getContext: () => null }) },
+});
+context.globalThis = context;
+context.window = context;
+context.makeGraph = makeGraph;
+vm.runInContext(readFileSync(staticPath("fx-heal.js"), "utf8"), context, { filename: "fx-heal.js" });
+vm.runInContext(readFileSync(staticPath("sfx-heal.js"), "utf8"), context, { filename: "sfx-heal.js" });
+
+const report = await vm.runInContext(`(async () => {
+  const fx = window.SgsHealFX;
+  const sfx = window.SgsHealSfx;
+
+  let offline = null;
+  window.OfflineAudioContext = function OfflineAudioContext() {
+    const made = makeGraph();
+    made.ctx.startRendering = () => Promise.resolve({
+      numberOfChannels: 2,
+      length: 128,
+      sampleRate: 44100,
+      getChannelData: () => new Float32Array(128).fill(0.1),
+    });
+    offline = made.graph;
+    return made.ctx;
+  };
+
+  const live = makeGraph();
+  window.AudioContext = function AudioContext() { return live.ctx; };
+
+  const out = {};
+  for (const id of [1, 2, 3]) {
+    const clock = fx.gameTiming(id);
+    const timeline = Object.assign({}, clock.timeline);
+    const lane = sfx.create(timeline);
+    let error = null;
+    let started = false;
+    const before = { nodes: live.graph.nodes, sources: live.graph.started };
+    try {
+      started = lane.start();
+      const frames = 24;
+      for (let step = 1; step <= frames; step += 1) {
+        lane.tick((clock.timeline.DURATION * step) / frames, { dmg: id });
+      }
+      lane.mute(true);
+      lane.mute(false);
+      lane.stop();
+    } catch (e) { error = String(e && e.stack || e); }
+
+    let offlineError = null;
+    let levels = null;
+    try {
+      levels = await sfx.renderOffline(id, timeline, clock.timeline.DURATION + 0.3);
+    } catch (e) { offlineError = String(e && e.stack || e); }
+
+    out[id] = {
+      started, error,
+      nodes: live.graph.nodes - before.nodes,
+      sources: live.graph.started - before.sources,
+      offlineError,
+      offlinePeak: levels ? levels.total.peak : null,
+      offlineRms: levels ? levels.total.rms : null,
+      whens: (offline ? offline.whens.slice().sort((a, b) => a - b) : []),
+      timeline: {
+        glow: clock.timeline.GLOW,
+        gatherStart: clock.timeline.GATHER_START,
+        gather: clock.timeline.GATHER,
+        hold: clock.timeline.HOLD,
+        burst: clock.timeline.BURST,
+        num: clock.timeline.NUM,
+        duration: clock.timeline.DURATION,
+        tier: clock.timeline.TIER,
+      },
+    };
+    offline = null;
+  }
+  return JSON.stringify({
+    surface: Object.keys(sfx).sort(),
+    tiers: out,
+  });
+})()`, context, { filename: "heal_sfx_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def test_the_heal_sfx_lane_schedules_every_tier_without_a_real_audio_context() -> None:
+    """`SgsHealSfx` 是**车道适配器**（`create(timeline)` → `{start, stop, mute, tick}`）：
+    三档都能建图、按时间轴排完、收声，且 cue 时刻**跟着时间轴走**。
+
+    素材页的 3+ 档是「吸气（1.02s）→ 留白（~0.3s）→ 落点 → 长余韵」；牌桌档压到 2.2s 之后，
+    这三拍的位置**由 `SgsHealFX.create()` 写进时间轴**（`GATHER_START / GATHER / HOLD / BURST`），
+    音效模块不另写一份秒数——所以判据是"吸气落在聚气起点、落点落在迸发、飘字落在 NUM"。
+    烟测里没有 `AudioContext`（垫片故意不建），这一条补上**真模块**这一侧。
+    """
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "heal_sfx_probe.mjs"
+        probe.write_text(_HEAL_SFX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"回复体力音效探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    probe = json.loads(result.stdout)
+    for name in ("create", "renderOffline"):
+        assert name in probe["surface"], f"SgsHealSfx 缺少 {name}：{probe['surface']}"
+    for variant in ("1", "2", "3"):
+        tier = probe["tiers"][variant]
+        assert tier["error"] is None, f"{variant} 档排程抛错：{tier['error']}"
+        assert tier["started"] is True, f"{variant} 档 start() 建出了共享图"
+        assert tier["nodes"] > 0 and tier["sources"] > 0, f"{variant} 档一个音源都没排出来"
+        assert tier["offlineError"] is None, f"{variant} 档离线排程抛错：{tier['offlineError']}"
+        assert tier["offlinePeak"] and tier["offlinePeak"] > 0, (
+            f"{variant} 档离线渲染一个采样都没有（峰值 {tier['offlinePeak']}）"
+        )
+        timeline = tier["timeline"]
+        whens = tier["whens"]
+        assert whens, f"{variant} 档没有任何 start(when) 时刻"
+        assert whens[0] == pytest.approx(timeline["glow"], abs=0.02), (
+            f"{variant} 档的第一声是起光（在时间轴的 GLOW）：{whens[:3]}"
+        )
+        assert any(
+            timeline["num"] - 0.02 <= when <= timeline["num"] + 0.02 for when in whens
+        ), f"{variant} 档缺少飘字那一声（NUM = {timeline['num']}）：{whens}"
+        assert max(whens) <= timeline["duration"] + 0.05, (
+            f"{variant} 档不许排到摘层之后（DURATION = {timeline['duration']}）：{max(whens)}"
+        )
+        if variant == "3":
+            assert any(
+                timeline["gatherStart"] - 0.02 <= when <= timeline["gatherStart"] + 0.02
+                for when in whens
+            ), f"3 档缺少吸气的起点（GATHER_START = {timeline['gatherStart']}）：{whens}"
+            assert any(
+                timeline["burst"] - 0.02 <= when <= timeline["burst"] + 0.06 for when in whens
+            ), f"3 档缺少迸发那一声（BURST = {timeline['burst']}）：{whens}"
+    assert probe["tiers"]["3"]["sources"] > probe["tiers"]["1"]["sources"], (
+        "3 档（吸气 + 停顿 + 落点 + 余韵）排出的音源必须多于 1 档（一声清磬）："
         f"{probe['tiers']['3']['sources']} vs {probe['tiers']['1']['sources']}"
     )
