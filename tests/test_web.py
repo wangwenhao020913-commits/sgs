@@ -100,7 +100,7 @@ from support.positions import (  # noqa: E402
     cards_of_type,
     deck_excluding,
 )
-from support.scripts import PassPlayer, run_queries  # noqa: E402
+from support.scripts import PassPlayer, ran_timing, run_queries  # noqa: E402
 
 TWO_PLAYERS = {"player_count": 2}
 """2 人局：无身份 1v1，跑得快，且足以覆盖"挂起 → 应答 → 续跑"的全部分支。"""
@@ -12031,3 +12031,327 @@ def test_a_real_tiancheng_reveal_names_the_skill_and_carries_the_card_face() -> 
     assert len(wusheng) == 1 and wusheng[0]["disabled"] is True
     assert wusheng[0]["description"] == SKILL_DESCRIPTIONS[wusheng[0]["choice"]]
     assert str(query.skill_id).startswith(TIANCHENG)
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 01：失去体力的事实源（引擎缓冲 → 投影 → 视图 → 前端 state）
+#
+# 「失去体力」与「受到伤害」在记录面同形（都落 `FrameKind.LIFE_DECREASE` / `hp_change`），
+# 唯一判据是帧私有的 `LIFE_DECREASE_DAMAGE_KEY`；而那个键**不进记录流**。于是这一票照
+# `damage_events` 的姿态加一条**只增缓冲** `Engine.life_loss_events`：只 `append`，不写
+# 状态、不发记录、不取随机数 ⇒ 47 条金录像逐字节不变。
+#
+# 取数路径（`CODING_STANDARDS.md` §6）：【苦肉】走**真实会话**（点将黄盖 + 真出牌阶段
+# 询问），伤害对照走**真实【杀】使用链**；护甲全吸收与多座位各掉血走人为局面（与引擎在
+# 伤害链里压的帧逐字同形，先例见 `tests/test_damage_events.py`）。
+# ---------------------------------------------------------------------------
+
+KUROU = "hero.huanggai.kurou"
+LIFE_LOSS_PACK = load_content_pack(deck_profile="standard_108")
+
+
+def _life_after_count(engine: Engine) -> int:
+    """记录流里 `LIFE_DECREASE_AFTER` 的条数（按帧数数，不按"发过没有"）。"""
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_AFTER
+    )
+
+
+def _life_decrease_frame(*, target: int, amount: int) -> dict:
+    """与引擎在【苦肉】/【反间】一类"失去体力"里压的子帧逐字同形：**没有伤害键**。"""
+    return {"target": target, "source": None, "amount": amount}
+
+
+def _life_loss_engine(*, amount: int = 2, target: int = 1, hp=(4, 5)) -> Engine:
+    """人为局面：压一条**没有** `LIFE_DECREASE_DAMAGE_KEY` 的帧（= 真正的失去体力）。"""
+    specs = [SeatSpec(hp=hp[index], hp_max=5) for index in range(len(hp))]
+    state = build_state(pack=LIFE_LOSS_PACK, seats=specs, deck=deck_excluding(LIFE_LOSS_PACK))
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.LIFE_DECREASE,
+        _life_decrease_frame(target=target, amount=amount),
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+    return run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: _life_after_count(e) >= 1,
+    )
+
+
+def _kurou_session() -> Session:
+    """真会话：点将黄盖，停在第一问（出牌阶段）上——还没发动【苦肉】。"""
+    session = Session(
+        seed=11,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        my_hero="huanggai",
+    )
+    query = session.pending
+    assert query is not None, "开局第一问应当挂在人类座位上"
+    return session
+
+
+def _submit_kurou(session: Session) -> None:
+    query = session.pending
+    assert query is not None
+    action = next(
+        (
+            candidate
+            for candidate in query.legal_actions
+            if isinstance(candidate, ActivateSkill) and candidate.skill_id == KUROU
+        ),
+        None,
+    )
+    assert action is not None, "点将黄盖的第一问就是出牌阶段：候选里必须有【苦肉】"
+    session.submit_answer(action)
+
+
+def test_kurou_through_a_real_session_records_exactly_one_life_loss_fact() -> None:
+    """【苦肉】失去 1 点体力 ⇒ `engine.life_loss_events` 恰好 1 条、`amount == 1`。
+
+    走**真实会话**（真发牌 / 真出牌阶段询问 / 真结算）：这条缓冲的唯一写入口就是
+    「失去体力」帧的结算，没有另一条产品路径能伪造它。
+    """
+    from sgs.engine.game import LifeLossEvent
+
+    session = _kurou_session()
+    assert session.engine.life_loss_events == (), "开局还没有任何失去体力事实"
+
+    _submit_kurou(session)
+
+    events = session.engine.life_loss_events
+    assert len(events) == 1, f"一次【苦肉】= 一次失去体力（不逐点、不重复）：{events}"
+    event = events[0]
+    assert isinstance(event, LifeLossEvent)
+    assert (event.seat, event.amount) == (0, 1), "座位是发动者、数量是这次真的掉的血"
+    assert session.engine.state.player(0).hp == 3, "规则面照常结算（缓冲不替代任何判据）"
+    seqs = {
+        record.seq
+        for record in session.engine.records
+        if getattr(record, "seq", None) is not None
+    }
+    assert event.seq in seqs, "锚点必须是本批里真实存在的一条记录（前端按记录序号释放）"
+    assert all(
+        record.kind != "life_loss_event" for record in session.engine.records
+    ), "失去体力事实不进记录流（进了就会改 47 条金录像的字节）"
+
+
+def test_a_real_slash_hit_records_no_life_loss_fact() -> None:
+    """【杀】命中掉 1 点 ⇒ **0 条**：挨打是伤害，不是失去体力（判据只有那个帧私有键）。"""
+    slash = cards_of_type(LIFE_LOSS_PACK, "slash")[0]
+    state = build_state(
+        pack=LIFE_LOSS_PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hp=4)],
+        deck=deck_excluding(LIFE_LOSS_PACK, slash),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    engine.start_use(state.card(slash), source=0, targets=(1,))
+
+    run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    assert engine.state.player(1).hp == 3, "伤害照常结算"
+    assert engine.damage_events, "对照组：伤害事实照样记一条"
+    assert engine.life_loss_events == (), "受到伤害 ≠ 失去体力：一条都不记"
+
+
+def test_a_fully_absorbed_hit_records_no_life_loss_fact() -> None:
+    """护甲全吸收的伤害 ⇒ **0 条**（伤害链那帧 `hp_loss == 0`，一条 `hp_change` 都没有）。"""
+    specs = [SeatSpec(hp=4, hp_max=4), SeatSpec(hp=3, hp_max=4)]
+    state = build_state(pack=LIFE_LOSS_PACK, seats=specs, deck=deck_excluding(LIFE_LOSS_PACK))
+    state.players[1].armor = 2
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 0,
+            "targets": (1,),
+            "card": None,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 1,
+            "channel": None,
+            "nature": None,
+            "chain": False,
+            "amount": 2,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    assert engine.state.player(1).armor == 0 and engine.state.player(1).hp == 3, "全被护甲吸收"
+    assert engine.damage_events, "全吸收也是一次伤害事件"
+    assert engine.life_loss_events == (), "护甲吸收的那一帧 `hp_loss == 0` ⇒ 不是失去体力"
+
+
+def test_each_seat_losing_hp_gets_its_own_fact() -> None:
+    """多目标 / 连环传导：每掉一次体力各 1 条，不按"一批一条"吞掉。
+
+    两条帧都**没有**伤害键（真正的失去体力），一起结算时各自留下自己的座位与数量。
+    """
+    specs = [SeatSpec(hp=4, hp_max=5), SeatSpec(hp=4, hp_max=5)]
+    state = build_state(pack=LIFE_LOSS_PACK, seats=specs, deck=deck_excluding(LIFE_LOSS_PACK))
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.LIFE_DECREASE,
+        _life_decrease_frame(target=1, amount=1),
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+    engine.push_frame(
+        FrameKind.LIFE_DECREASE,
+        _life_decrease_frame(target=0, amount=2),
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+
+    run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: _life_after_count(e) >= 2)
+
+    events = engine.life_loss_events
+    assert sorted((event.seat, event.amount) for event in events) == [(0, 2), (1, 1)], (
+        f"两次失去体力（两个座位、两个数量）必须各留一条事实：{events}"
+    )
+    assert (engine.state.player(0).hp, engine.state.player(1).hp) == (2, 3)
+
+
+def test_a_single_life_loss_frame_with_amount_two_records_the_real_loss() -> None:
+    """数量取 `before - after`（不是帧上的 `amount`）：这一次真的掉了 2 点。"""
+    engine = _life_loss_engine(amount=2, target=1, hp=(4, 5))
+
+    assert len(engine.life_loss_events) == 1
+    assert engine.life_loss_events[0].amount == 2
+    assert engine.state.player(1).hp == 3
+
+
+def test_the_session_view_carries_life_loss_events_by_the_record_cursor() -> None:
+    """视图：`GET /api/sessions/<id>?after=0` 带 `life_loss_events`；`after` 推过锚点后为空。
+
+    本票只做**事件源**：字段与 `damage_events` 并列、用同一个 `after` 游标，前端只把它落进
+    `state.lifeLossEvents`（排播 / 画面是票 02 / 03）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    session = _kurou_session()
+    _submit_kurou(session)
+    anchor = session.engine.life_loss_events[0].seq
+    registry = GameRegistry(runs_dir="/tmp/unused")
+
+    first = registry.view(session, after=0, logs_after=0)
+    assert "life_loss_events" in first, "视图必须与 damage_events 并列下发这一路"
+    assert first["life_loss_events"] == [{"seq": anchor, "seat": 0, "amount": 1}], (
+        f"条目形状 = 引擎缓冲原样（{{seq, seat, amount}}）：{first['life_loss_events']}"
+    )
+
+    pushed = registry.view(session, after=anchor, logs_after=0)
+    assert pushed["life_loss_events"] == [], "同一个 `after` 游标：推过锚点后不再重复下发"
+
+
+def _life_loss_fact(*, seq: int, seat: int, amount: int):
+    """一条**合成**的失去体力事实（投影层是纯函数：坏数据 / 排序只能用合成条目钉）。"""
+    from sgs.engine.game import LifeLossEvent
+
+    return LifeLossEvent(seq=seq, seat=seat, amount=amount)
+
+
+def test_the_life_loss_projection_follows_the_same_record_cursor_as_damage() -> None:
+    """投影：`seq > after` 才下发；游标推过锚点 ⇒ 空（不重复下发）。
+
+    与 :func:`sgs_web.projection.damage_events_after` 逐条同构（同一批断言换名字）。
+    """
+    from sgs_web.projection import life_loss_events_after
+
+    engine = _life_loss_engine(amount=2, target=1, hp=(4, 5))
+    anchor = engine.life_loss_events[0].seq
+
+    batch = life_loss_events_after(
+        engine.records,
+        after=-1,
+        state=engine.state,
+        events=engine.life_loss_events,
+    )
+    assert batch == [{"seq": anchor, "seat": 1, "amount": 2}], (
+        f"条目形状只有 {{seq, seat, amount}}（失去体力没有来源 / 属性）：{batch}"
+    )
+    assert life_loss_events_after(
+        engine.records, after=anchor, state=engine.state, events=engine.life_loss_events
+    ) == [], "游标推过锚点 ⇒ 一条都不重复下发"
+
+
+def test_the_life_loss_projection_uses_the_records_only_as_the_batch_upper_bound() -> None:
+    """`records` 只定**这批的上界**：锚点记录还没进这批 ⇒ 留到下一次轮询（`seq > after` 照成立）。"""
+    from sgs_web.projection import life_loss_events_after
+
+    engine = _life_loss_engine(amount=1, target=1, hp=(4, 5))
+    anchor = engine.life_loss_events[0].seq
+
+    later = life_loss_events_after(
+        [{"seq": anchor - 1}],
+        after=-1,
+        state=engine.state,
+        events=engine.life_loss_events,
+    )
+    assert later == [], "锚点记录不在这一批 ⇒ 不下发（超出上界的留到下一次）"
+    arrived = life_loss_events_after(
+        [{"seq": anchor}],
+        after=-1,
+        state=engine.state,
+        events=engine.life_loss_events,
+    )
+    assert [entry["seq"] for entry in arrived] == [anchor], "锚点一进这批就下发"
+
+
+def test_the_life_loss_projection_only_clamps_seats_and_never_filters_by_viewpoint() -> None:
+    """`state` 只用来**夹座位**；**不按视角过滤**——体力是公开事实（血条本来就公开）。"""
+    from sgs_web.projection import life_loss_events_after
+
+    engine = _life_loss_engine(amount=1, target=1, hp=(4, 5))
+    anchor = engine.life_loss_events[0].seq
+    seat_count = len(engine.state.players)
+
+    out_of_range = life_loss_events_after(
+        engine.records,
+        after=-1,
+        state=engine.state,
+        events=[_life_loss_fact(seq=anchor, seat=seat_count, amount=1)],
+    )
+    assert out_of_range == [], "越界的座位是坏数据：宁可不下发也不让前端去量不存在的武将牌"
+
+    other_seat = life_loss_events_after(
+        engine.records,
+        after=-1,
+        state=engine.state,
+        events=[_life_loss_fact(seq=anchor, seat=1, amount=1)],
+    )
+    assert [entry["seat"] for entry in other_seat] == [1], (
+        "对手（非查看者）失去体力照常下发：投影不按视角过滤"
+    )
+
+
+def test_the_life_loss_projection_is_empty_for_static_journals() -> None:
+    """只喂静态 jsonl 录像的读取方（不重跑引擎）只少这一路：`events` 缺省 ⇒ 空表，不抛错。"""
+    from sgs_web.projection import life_loss_events_after
+
+    engine = _life_loss_engine(amount=1, target=1, hp=(4, 5))
+
+    assert life_loss_events_after(engine.records, after=-1, state=engine.state) == []
+
+
+def test_the_life_loss_projection_sorts_the_batch_by_record_seq() -> None:
+    """同一批多条按记录序号排（前端"逐条播、相邻错开"依赖这个次序）。"""
+    from sgs_web.projection import life_loss_events_after
+
+    engine = _life_loss_engine(amount=1, target=1, hp=(4, 5))
+    anchor = engine.life_loss_events[0].seq
+
+    batch = life_loss_events_after(
+        [{"seq": anchor}],
+        after=-1,
+        state=engine.state,
+        events=[
+            _life_loss_fact(seq=anchor, seat=1, amount=1),
+            _life_loss_fact(seq=1, seat=0, amount=2),
+        ],
+    )
+    assert [entry["seq"] for entry in batch] == [1, anchor]

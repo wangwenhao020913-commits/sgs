@@ -51,6 +51,13 @@
     // damage-fx-natures 票 07 / 09：回放暂停——登记口（通用：以后 回复体力 3 档 / 其它演出同形）
     // + 只读读数（原因串）与轮询间隔。烟测据此断"不是只有伤害能冻住回放"与"没有上限"。
     "registerPlaybackHold", "playbackHoldReason", "PLAYBACK_HOLD_POLL_MS",
+    // vital-fx 票 02：体力演出的排播层——家族表 / 唯一的 cap 口 / 时停判据 / 两条事件源与
+    // 三处收尾钩子（`vital-fx.js`）。烟测只读这几口，不碰它的内部状态。
+    "VITAL_FX_FAMILIES", "VITAL_FX_STAGGER_MS", "VITAL_FX_CONCURRENCY",
+    "vitalFxFamilyFor", "vitalFxRendererFor", "vitalFxCapFor", "vitalFxTiming",
+    "vitalFxVariantOf", "vitalFxHoldFor", "vitalFxPlaybackHold",
+    "fireHpLossEventsThrough", "fireVitalEventsThrough",
+    "vitalDropStalePlays", "clearVitalFx",
     // U3-01 / D5：舞台项寿命的纯函数——烟测直接喂 `now` 断 visible / fading / gone（D15）
     "stageLane",
     // U4-03 / D9：批量停留的纯函数（0.5×(N+1) 秒）——烟测直接喂 N（缺省按 1）。

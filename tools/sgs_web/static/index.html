@@ -326,6 +326,12 @@
          （`bare: true`）一概不画，牌桌全程透得出来；两张武将块的矩形由 `damage-fx.js`
          量出来换算成舞台坐标，交给 `SgsDamageFX.create(canvas, {stage, bare: true})`。 -->
     <div id="t-damage-fx" class="damage-fx-layer" aria-hidden="true"></div>
+    <!-- 体力演出层（vital-fx 票 02）：失去体力 / 回复体力的一块**透明**画布，铺满牌桌壳、
+         不吃指针，z 与伤害层同档（19）、DOM 排在它之后 ⇒ 画在伤害层之上；`.fx-flash`（20）
+         与卡牌预览（55）都不动。层里**只有一张**可见 canvas（跨演出复用、闲置摘掉），
+         离屏舞台按槽复用、数量随在播数增长。**没有整屏闪**：这两套演出既不挂 `filter`，
+         也不碰 `.fx-flash`。排播住 `vital-fx.js`（紧挨 `damage-fx.js` 的下一份脚本）。 -->
+    <div id="t-vital-fx" class="vital-fx-layer" aria-hidden="true"></div>
     <!-- 铁索连环演出层（chain-death-voices 票 01）：入链 / 解锁两条演进各挂**一张**按武将块
          大小的 canvas（位置 = 武将块 + 两侧 `STATIC.overL/overR` 余量），演完摘掉。与伤害层
          **各自独立**（同 z-index 档，`U-DMG-01c` 正向断言伤害层里只有一张 canvas），所以不许
@@ -435,6 +441,13 @@
      sfx-ui.js 读它的三个纯读口（DAMAGE_FX_MAX_VARIANT / damageFxCapFor /
      damageFxNatureKind），故也排在它之后。 -->
 <script src="damage-fx.js"></script>
+<!-- vital-fx 票 02：体力演出（失去体力 / 回复体力）的**排播**（队列 / cap / 错开 / 时停按家族 /
+     画布生命周期）。与 `damage-fx.js` 同姿态但**独立**一层：自己的家族表 / cap 口 / 队列，
+     且不认识伤害家族的三个函数。依赖 `effects.js` 的 rectOf / heroBlockFor /
+     descendantWithClass 与 `session.js` 的 stageNow / registerPlaybackHold（都调用时解析）
+     ⇒ 紧跟 damage-fx.js 之后；`sfx-ui.js` 读它的 `vitalFxCapFor`（声道池长），故也排在它之后。
+     两个画面模块（fx-hp-loss.js / fx-heal.js）是票 03 / 04 的文件，按全局名在此之后解析。 -->
+<script src="vital-fx.js"></script>
 <script src="preactivation.js"></script>
 <script src="interaction.js"></script>
 <script src="pending.js"></script>
@@ -463,6 +476,19 @@
      逐字同形（同一套 create / gameTiming / DEFAULT_TIMING / TIMING_FIELDS / TIMING_KEYS）；
      画面紧挨雷、音效紧挨雷的音效，两份同样在 sfx-ui.js 之前。 -->
 <script src="fx-fire.js"></script>
+<!-- vital-fx 票 03：**失去体力**家族的画面（SgsHpLossFX）。与雷 / 火逐字同形（同一套
+     create / gameTiming / DEFAULT_TIMING / TIMING_FIELDS / TIMING_KEYS）；画面紧挨火那份，
+     也在 sfx-ui.js 之前。素材包 `outputs/sgs-hp-loss-fx/` 是参考实现；牌桌档只读
+     `anim.ini` 的 `hp_loss_fx_*`（钳制在模块内部），**永不冻回放**（时停真源在
+     vital-fx.js 的家族表，本文件不登记暂停判据）。 -->
+<script src="fx-hp-loss.js"></script>
+<!-- vital-fx 票 04：**回复体力**家族的画面（SgsHealFX）。与失去体力那份逐字同形（同一套
+     create / gameTiming / DEFAULT_TIMING / TIMING_FIELDS / TIMING_KEYS），紧挨失去体力那份
+     ——spec §硬约束的画面顺序是 `fx-fire` → `fx-hp-loss` → `fx-heal`。牌桌档只读
+     `anim.ini` 的 `heal_fx_*`（钳制在模块内部）；**3+ 档有时停**，但时停真源不在这里
+     （家族表的 `holdsAt: 3` 住 vital-fx.js，本文件不登记暂停判据）。素材包
+     `outputs/sgs-heal-fx/` 是参考实现。 -->
+<script src="fx-heal.js"></script>
 <!-- chain-death-voices 票 01：**铁索连环**家族的画面 + 排播（SgsChainFX）与音效（SgsChainSfx）。
      画面紧挨 fx-fire、音效紧挨 sfx-fire；两份都在 sfx-ui.js 之前（它按名惰性建那一路排程器）。
      fx-chain.js 同时是铁索的排播层（与 damage-fx.js 同姿态）：`session.js:stepPlayback` 调它的
@@ -479,6 +505,17 @@
 <script src="sfx.js"></script>
 <script src="sfx-thunder.js"></script>
 <script src="sfx-fire.js"></script>
+<!-- vital-fx 票 03：**失去体力**家族的音效（SgsHpLossSfx）。与火那份同形（车道适配器：
+     create(timeline) → start / stop / mute / tick），紧挨 sfx-fire、也在 sfx-ui.js 之前
+     （音效 UI 的声道池按模块分组、池长读 `vitalFxCapFor("HP_LOSS")`）。cue 时刻全部读
+     排播层写进声道的 `timeline`（SPOT / BREAK / IMPACT / NUM / COUNT），不另写一份时间表。 -->
+<script src="sfx-hp-loss.js"></script>
+<!-- vital-fx 票 04：**回复体力**家族的音效（SgsHealSfx）。与失去体力那份同形（车道适配器：
+     create(timeline) → start / stop / mute / tick），紧挨 sfx-hp-loss、也在 sfx-ui.js 之前
+     （音效 UI 的声道池按模块分组、池长读 `vitalFxCapFor("HEAL")`）。cue 时刻全部读排播层
+     写进声道的 `timeline`（GLOW / GATHER_START / GATHER / HOLD / BURST / NUM / TIER），
+     素材页那条「吸气 → 留白 → 落点 → 长余韵」因此跟着 2.2s 的压缩表一起缩，不另写一份秒数。 -->
+<script src="sfx-heal.js"></script>
 <script src="sfx-chain.js"></script>
 <script src="sfx-death.js"></script>
 <!-- chain-death-voices 票 03：**卡牌语音**（SgsCardVoice）。SGS OL 的原声素材（用户提供，

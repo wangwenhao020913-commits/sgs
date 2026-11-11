@@ -83,6 +83,8 @@ const RECT_TABLE = new Map(Object.entries({
   "t-chain-fx": { left: 0, top: 0, width: 1440, height: 810 },
   // chain-death-voices 票 02：阵亡的覆盖层同样是整壳覆盖层（`damageFxBoxOf` 按它算出 stage）。
   "t-death-fx": { left: 0, top: 0, width: 1440, height: 810 },
+  // vital-fx 票 02：体力演出层也是整壳覆盖层——目标武将块的矩形按它换算成覆盖层坐标。
+  "t-vital-fx": { left: 0, top: 0, width: 1440, height: 810 },
 }));
 let rectSeq = 0;
 /* damage-fx 票 05：武将块的垫片矩形默认按座位固定派生（跨重绘稳定）；用例改这个数就能
@@ -23947,15 +23949,23 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const groupedLanes = JSON.parse(vm.runInContext(
     "JSON.stringify(Object.keys(damageSfxLanes).map((key) => [key, damageSfxLanes[key].length]))",
     context));
-  check("U-SFX-02c 声道池按模块分组：剑 / 雷 / 火各 3 条（雷与火在垫片里没有 AudioContext ⇒ live=false）",
+  check("U-SFX-02c 声道池按模块分组：剑 / 雷 / 火各 3 条，体力两族（失去体力 / 回复，"
+    + "vital-fx 票 03 / 04）各 2 条（雷 / 火 / 体力在垫片里没有 AudioContext ⇒ live=false）",
     JSON.stringify(groupedLanes) === JSON.stringify(
-      [["SgsSfx", 3], ["SgsThunderSfx", 3], ["SgsFireSfx", 3]])
+      [["SgsSfx", 3], ["SgsThunderSfx", 3], ["SgsFireSfx", 3],
+        ["SgsHpLossSfx", 2], ["SgsHealSfx", 2]])
       && vm.runInContext(
         "JSON.stringify(damageSfxLanes.SgsThunderSfx.map((lane) => lane.live))", context)
         === "[false,false,false]"
       && vm.runInContext(
         "JSON.stringify(damageSfxLanes.SgsFireSfx.map((lane) => lane.live))", context)
-        === "[false,false,false]",
+        === "[false,false,false]"
+      && vm.runInContext(
+        "JSON.stringify(damageSfxLanes.SgsHpLossSfx.map((lane) => lane.live))", context)
+        === "[false,false]"
+      && vm.runInContext(
+        "JSON.stringify(damageSfxLanes.SgsHealSfx.map((lane) => lane.live))", context)
+        === "[false,false]",
     `groups=${JSON.stringify(groupedLanes)}`);
 
   // ---- U-SFX-03：tick 吃**演出自己的** seconds（与 fx.draw 同一个数），cue 时刻取该档时间轴 ----
@@ -25416,6 +25426,856 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     ui.state.view = null;
     ui.state.sessionId = null;
     ui.resetSelection();
+  }
+}
+
+
+/* ============ vital-fx 票 01：失去体力事实落进 state（U-VITAL-01）============
+ *
+ * 本票只做**事件源**：服务端每次失去体力下发 `{seq, seat, amount}`（与 `damage_events`
+ * 并列、共用同一个 `after` 游标），前端只把它收进 `state.lifeLossEvents`。判据来自票面
+ * §验收 5：同一批两条事实 ⇒ 长度 2；换局归零。**不排播、不画**——所以这里同时钉住
+ * "舞台一个节点都不多"，消费这个队列的排播层是票 02 的新文件。
+ */
+{
+  const vitalView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.snapshot.processing = [];
+    return out;
+  };
+  const vitalBatch = (session, cursor, events, records = []) => ui.applyViewRaw({
+    ...vitalView(session),
+    cursor, log_seq: 0, records, life_loss_events: events, finished: false,
+  });
+
+  vitalBatch("u-vital-01", 0, []);
+  check("U-VITAL-01a 换局后队列存在且为空（`applyView` 的换会话分支建的表）",
+    Array.isArray(ui.state.lifeLossEvents) && ui.state.lifeLossEvents.length === 0,
+    `queue=${JSON.stringify(ui.state.lifeLossEvents)}`);
+
+  const facts = [
+    { seq: 11, seat: 0, amount: 1 },
+    { seq: 12, seat: 1, amount: 2 },
+  ];
+  const stageBefore = $("t-processing").children.length;
+  /* vital-fx 票 02 起这条队列有**消费方**了：没有记录的那一批会被 `applyView` 的盲刷路径
+   * （`fireHpLossEventsThrough(Infinity)`，与伤害事件同姿态）立刻排上。要观察"事实停在队列里"
+   * 这个票 01 的交付，就必须让回放停在它们之前——这里带一条更早的记录（seq 10）。 */
+  vitalBatch("u-vital-01", 12, facts, [{
+    kind: "delta", delta_type: "hp_change", seq: 10, frame_id: 3, depth: 1,
+    seat: 1, before: 4, after: 3, amount: -1,
+  }]);
+  check("U-VITAL-01b 两条事实 ⇒ state.lifeLossEvents 长度 2（{seq, seat, amount} 原样透传）",
+    ui.state.lifeLossEvents.length === 2
+      && ui.state.lifeLossEvents[0].seq === 11
+      && ui.state.lifeLossEvents[0].seat === 0
+      && ui.state.lifeLossEvents[1].seq === 12
+      && ui.state.lifeLossEvents[1].seat === 1
+      && ui.state.lifeLossEvents[1].amount === 2,
+    `queue=${JSON.stringify(ui.state.lifeLossEvents)}`);
+  check("U-VITAL-01c 本票不排播、不画：舞台一个节点都不多（队列只增，没有演出层消费它）",
+    $("t-processing").children.length === stageBefore
+      && ui.state.lifeLossEvents.length === 2,
+    `stage=${$("t-processing").children.length} queue=${ui.state.lifeLossEvents.length}`);
+
+  vitalBatch("u-vital-02", 0, []);
+  check("U-VITAL-01d 换局（新 session_id）⇒ 队列归零",
+    ui.state.lifeLossEvents.length === 0,
+    `queue=${JSON.stringify(ui.state.lifeLossEvents)}`);
+
+  ui.flushPlayback();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
+/* ============ vital-fx 票 02：体力演出的排播层（U-VITAL-02..08）============
+ *
+ * 本票只交付**排播**：两个画面模块（`fx-hp-loss.js` / `fx-heal.js`）与两个音效模块是
+ * 票 03 / 04 的文件，这里用**桩**（记下 `create()` 的选项、给一个固定寿命），所以断言全部
+ * 落在 DOM 读数 / 计时器毫秒 / 暂停读数上——画布像素不可断言（也不该断言）。
+ *
+ * 两个事件源与真响应同形：**失去体力**走 `life_loss_events`（票 01 的缓冲，共用 `seq` 游标），
+ * **回复**走 `hp_change` 记录里 `after > before` 的那一条（不需要服务端改动）。
+ *
+ * 时间仍不靠真实等待：`setTimeout` 只排队，`runEarliest()` 按虚拟时钟推进（与 `U-DMG-*` 同
+ * 一套垫片）；`stageNow()` 是墙钟，故闸门的"错开 120ms"照伤害层的口径在计时器回调里把游标
+ * 推到"现在"再重排——一次 `runEarliest()` 就能让下一条开演。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name) || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+
+  /** 体力演出层与它上面**唯一**那张 canvas（票面 §4：一个层里复用一张）。 */
+  const layer = () => $("t-vital-fx");
+  const layerCanvases = () => Array.from(layer().children)
+    .filter((node) => String(node.tagName || "").toUpperCase() === "CANVAS");
+  const liveCount = () => Number(attr(layer(), "data-vital-fx-live") || 0);
+  const playCount = () => Number(attr(layer(), "data-vital-fx-plays") || 0);
+  const layerHold = () => String(attr(layer(), "data-vital-fx-hold") || "");
+  const damageHold = () => String(attr($("t-damage-fx"), "data-damage-fx-hold") || "");
+  const htmlHold = () => String(attr(documentShim.documentElement, "data-playback-hold") || "");
+  const playbackIndex = () => (ui.state.playback ? ui.state.playback.index : null);
+
+  /** `anim.ini` 里一条并发上限（期望值从磁盘读，测试里不另写第二份数字）。 */
+  const iniNumber = (key) => {
+    const match = readIniFile().match(new RegExp(`^\\s*${key}\\s*=\\s*(\\d+)`, "m"));
+    if (!match) throw new Error(`anim.ini 缺少 ${key}`);
+    return Number(match[1]);
+  };
+
+  /** 跑**最先到期**的那个计时器（与 `U-DMG-*` 同一套：按虚拟时钟的到期时刻取，跑前把虚拟
+   *  时钟推到那一刻），并在每次推进后记一次"在播峰值 / 两个 hold 读数"——时停口径的断言
+   *  因此是**整段窗口**的，不只是一个瞬间。 */
+  const seen = { peak: 0, holds: new Set() };
+  const observe = () => {
+    seen.peak = Math.max(seen.peak, liveCount());
+    if (liveCount()) seen.holds.add(`${htmlHold()}|${layerHold()}`);
+  };
+  const resetObserve = () => { seen.peak = 0; seen.holds.clear(); };
+  const runEarliest = () => {
+    for (;;) {
+      const entries = Array.from(timerDue.entries())
+        .sort((left, right) => left[1] - right[1] || left[0] - right[0]);
+      if (!entries.length) return false;
+      const [id, due] = entries[0];
+      if (!pendingTimers.has(id)) {
+        timerDue.delete(id);
+        timerDelays.delete(id);
+        continue;
+      }
+      const fn = pendingTimers.get(id);
+      pendingTimers.delete(id);
+      timerDelays.delete(id);
+      timerDue.delete(id);
+      if (due > shimClock) shimClock = due;
+      if (typeof fn !== "function") return false;
+      fn();
+      runFrame();
+      observe();
+      return true;
+    }
+  };
+  const runUntil = (done, limit = 400) => {
+    let steps = 0;
+    while (!done() && steps < limit) {
+      if (!runEarliest()) break;
+      steps += 1;
+    }
+    observe();
+    return done();
+  };
+  const drainTimers = (limit = 400) => {
+    let steps = 0;
+    while (steps < limit && runEarliest()) steps += 1;
+    return steps;
+  };
+  const newDelays = (before) => Array.from(timerDelays.values()).filter((ms) => !before.has(ms));
+
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const baseView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+      seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+    ];
+    return out;
+  };
+  const hpChange = (seq, seat, before, after) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: 3, depth: 1,
+    seat, before, after, amount: after - before,
+  });
+
+  /** 票 03 / 04 的画面模块**桩**：只读"排播层把哪条事件交给了谁"（选项形状 + 寿命）。 */
+  const PLAY_MS = { HP_LOSS: 900, HEAL: 1200 };
+  const fxLog = [];
+  const stubFx = (family) => ({
+    TIMING_FIELDS: [],
+    create(canvas, options) {
+      fxLog.push({ family, options });
+      return { duration: PLAY_MS[family] / 1000, timeline: {}, timing: {}, draw() {} };
+    },
+  });
+  /* 票 02 的 U-VITAL-02..08 全部用桩（只验排播）；票 03 的 U-VITAL-09..11 换回**真**模块。
+   * 真模块必须在盖桩**之前**抓下来（`windowShim` 就是页面的 window）。 */
+  const realHpLossFx = windowShim.SgsHpLossFX;
+  /* 票 04 的真回复模块同样要在盖桩**之前**抓下来（`vital-fx` 的家族表按全局名调用时解析，
+   * 盖了桩之后页面里就只剩桩了）。 */
+  const realHealFxApi = windowShim.SgsHealFX;
+  windowShim.SgsHpLossFX = stubFx("HP_LOSS");
+  windowShim.SgsHealFX = stubFx("HEAL");
+  const playsOf = (family) => fxLog.filter((entry) => entry.family === family);
+
+  // 判据前提：伤害层没有在播演出（它的 `-hold` 读数因此恒空）。体力层是独立的另一层。
+  vm.runInContext("clearDamageFx()", context);
+  ui.state.animScale = 0;
+  $("t-self-hero").className = "hero-block";
+
+  let serial = 0;
+  /** 落一份干净会话（走真实换会话清屏路径），再起一份带记录 + 失去体力事实的回放。 */
+  const loadVitalBatch = (records, facts) => {
+    ui.flushPlayback();
+    serial += 1;
+    const session = `u-vital-pb-${serial}`;
+    ui.applyViewRaw({
+      ...baseView(session), cursor: 0, log_seq: 0, records: [],
+      life_loss_events: [], finished: false,
+    });
+    ui.applyViewRaw({
+      ...baseView(session), cursor: records.length, log_seq: 0,
+      records, life_loss_events: facts, finished: false,
+    });
+    return session;
+  };
+  const step = (count = 1) => {
+    for (let index = 0; index < count; index += 1) ui.stepPlayback(true);
+    observe();
+  };
+
+  fxLog.length = 0;
+  // ---- U-VITAL-02：失去体力 3 条同批 ⇒ cap 2、错开 120ms、第 3 条丢队尾、**整段不冻** ----
+  const hpCap = iniNumber("hp_loss_fx_concurrency");
+  check("U-VITAL-02a 并发表：失去体力的 cap = vitalFxCapFor（唯一读口），缺省 2",
+    hpCap === 2 && ui.vitalFxCapFor("HP_LOSS") === hpCap && ui.vitalFxCapFor("HEAL") === iniNumber("heal_fx_concurrency"),
+    `ini=${hpCap}/${iniNumber("heal_fx_concurrency")} `
+      + `cap=${ui.vitalFxCapFor("HP_LOSS")}/${ui.vitalFxCapFor("HEAL")}`);
+
+  const facts02 = [
+    { seq: 1, seat: 0, amount: 1 },
+    { seq: 1, seat: 1, amount: 2 },
+    { seq: 1, seat: 2, amount: 3 },
+  ];
+  const before02 = playCount();
+  const holdsBefore02 = new Set(timerDelays.values());
+  resetObserve();
+  loadVitalBatch([hpChange(1, 0, 4, 3)], facts02);
+  check("U-VITAL-02b 记录还没走到：三条事实只在 state 里等着（触发点仍是 seq 游标）",
+    playCount() === before02 && liveCount() === 0 && ui.state.lifeLossEvents.length === 3,
+    `plays=${playCount() - before02} live=${liveCount()} queue=${ui.state.lifeLossEvents.length}`);
+  step();
+  check("U-VITAL-02c 走到 seq 1：第一条立刻开演（层里一张 canvas、在播 1 条）",
+    liveCount() === 1 && layerCanvases().length === 1 && playCount() === before02 + 1,
+    `live=${liveCount()} canvases=${layerCanvases().length} plays=${playCount() - before02}`);
+  check("U-VITAL-02d 同批三条、cap 2 ⇒ 队列只留 2 条 + 错开 120ms（第 3 条丢队尾）",
+    ui.state.lifeLossEvents.length === 0 && playsOf("HP_LOSS").length === 1
+      && newDelays(holdsBefore02).includes(ui.VITAL_FX_STAGGER_MS),
+    `queued=${playsOf("HP_LOSS").length} delays=${JSON.stringify(newDelays(holdsBefore02))}`);
+  runUntil(() => liveCount() === 2, 30);
+  check("U-VITAL-02e 到点后第二条开演：同时在播 2 条 = 该家族的 cap（不超发）",
+    liveCount() === 2 && playsOf("HP_LOSS").length === 2 && seen.peak === hpCap,
+    `live=${liveCount()} plays=${playsOf("HP_LOSS").length} peak=${seen.peak}`);
+  const firstTwo = playsOf("HP_LOSS");
+  check("U-VITAL-02f 交给画面模块的选项：真实点数 / 档位 / 只量目标一块（没有来源）/ bare",
+    firstTwo.length === 2
+      && firstTwo[0].options.amount === 1 && firstTwo[0].options.variant === 1
+      && firstTwo[1].options.amount === 2 && firstTwo[1].options.variant === 2
+      && firstTwo.every((entry) => entry.options.profile === "game"
+        && entry.options.bare === true
+        && entry.options.stage.src === null
+        && entry.options.stage.dst.w > 0 && entry.options.stage.dst.h > 0),
+    JSON.stringify(firstTwo.map((entry) => ({
+      amount: entry.options.amount, variant: entry.options.variant,
+      src: entry.options.stage.src, w: entry.options.stage.dst.w,
+    }))));
+  runUntil(() => layerCanvases().length === 0, 80);
+  drainTimers();
+  check("U-VITAL-02g 第三条被丢掉（只演了 2 条）、收尾后层空、读数归零",
+    playsOf("HP_LOSS").length === 2 && layer().children.length === 0 && liveCount() === 0
+      && seen.peak === hpCap,
+    `plays=${playsOf("HP_LOSS").length} children=${layer().children.length} `
+      + `live=${liveCount()} peak=${seen.peak}`);
+  check("U-VITAL-02h 整个失去体力窗口**不冻回放**：<html data-playback-hold> 与两层的 -hold 读数为空",
+    !Array.from(seen.holds).some((mark) => mark !== "|") && htmlHold() === ""
+      && layerHold() === "" && damageHold() === "",
+    `observed=${JSON.stringify(Array.from(seen.holds))} html="${htmlHold()}" `
+      + `vital="${layerHold()}" damage="${damageHold()}"`);
+
+  fxLog.length = 0;
+  // ---- U-VITAL-03：回复 3+ 档 ⇒ 串行 + 独占牌桌 + 窗口里冻住回放（`heal:3`）----
+  const records03 = [hpChange(20, 1, 3, 6), hpChange(21, 2, 3, 6)];
+  resetObserve();
+  loadVitalBatch(records03, []);
+  const opened03 = runUntil(() => playbackIndex() === 1, 6);
+  check("U-VITAL-03a 回复 3 档开演：层读数 hold=1、排播侧要求暂停（原因串 heal:3）",
+    opened03 && liveCount() === 1 && layerHold() === "1"
+      && ui.vitalFxPlaybackHold() === "heal:3" && ui.playbackHoldReason() === "heal:3",
+    `open=${opened03} live=${liveCount()} layer-hold="${layerHold()}" `
+      + `reason="${ui.vitalFxPlaybackHold()}"`);
+  const held03 = runUntil(() => htmlHold() === "heal:3", 6);
+  check("U-VITAL-03b 窗口里记录流冻住：<html data-playback-hold> = heal:3、index 不动",
+    held03 && playbackIndex() === 1 && liveCount() === 1,
+    `held=${held03} index=${playbackIndex()} hold="${htmlHold()}"`);
+  for (let index = 0; index < 5; index += 1) runEarliest();
+  check("U-VITAL-03c 串行 + 独占：连跑 5 轮轮询仍只有一条在播（第二条不抢跑）",
+    playbackIndex() === 1 && liveCount() === 1 && playsOf("HEAL").length === 1,
+    `index=${playbackIndex()} live=${liveCount()} plays=${playsOf("HEAL").length}`);
+  const playedOut03 = runUntil(() => liveCount() === 0, 200);
+  check("U-VITAL-03d 第一条播满自己的 total 才摘层：摘层后 hold 读数立刻清空",
+    playedOut03 && layerHold() === "" && ui.vitalFxPlaybackHold() === "",
+    `playedOut=${playedOut03} live=${liveCount()} layer-hold="${layerHold()}"`);
+  const second03 = runUntil(() => playsOf("HEAL").length === 2, 240);
+  check("U-VITAL-03e 交接：回放继续推进 → 第二条 3 档回复接上（在播 1 条，从不并存）",
+    second03 && playbackIndex() === 2 && liveCount() === 1 && seen.peak === 1,
+    `second=${second03} index=${playbackIndex()} live=${liveCount()} peak=${seen.peak}`);
+  const done03 = runUntil(() => ui.state.playback === null && liveCount() === 0, 400);
+  check("U-VITAL-03f 整段收尾：两条都演过、读数全清、回放收尾",
+    done03 && playsOf("HEAL").length === 2 && htmlHold() === "" && layerHold() === ""
+      && layerCanvases().length === 0,
+    `done=${done03} plays=${playsOf("HEAL").length} hold="${htmlHold()}" `
+      + `layer-hold="${layerHold()}" canvases=${layerCanvases().length}`);
+
+  fxLog.length = 0;
+  // ---- U-VITAL-04：回复 1 / 2 档**不冻**（用户口径只有 3+ 档有时停）----
+  resetObserve();
+  loadVitalBatch([hpChange(30, 1, 3, 4), hpChange(31, 2, 3, 5), hpChange(32, 3, 3, 5)], []);
+  const opened04 = runUntil(() => playbackIndex() === 1, 6);
+  check("U-VITAL-04a 1 档回复开演但不冻：排播侧判据空、层读数空",
+    opened04 && liveCount() === 1 && ui.vitalFxPlaybackHold() === ""
+      && layerHold() === "" && htmlHold() === "",
+    `open=${opened04} live=${liveCount()} reason="${ui.vitalFxPlaybackHold()}" `
+      + `layer-hold="${layerHold()}" html="${htmlHold()}"`);
+  const advanced04 = runUntil(() => playbackIndex() >= 2, 30);
+  check("U-VITAL-04b 1 / 2 档窗口里记录照常前进（演出仍在播）、reason 整段为空",
+    advanced04 && liveCount() >= 1 && htmlHold() === ""
+      && !Array.from(seen.holds).some((mark) => mark !== "|"),
+    `advanced=${advanced04} index=${playbackIndex()} live=${liveCount()} `
+      + `observed=${JSON.stringify(Array.from(seen.holds))}`);
+  runUntil(() => ui.state.playback === null, 400);
+  drainTimers();
+
+  fxLog.length = 0;
+  // ---- U-VITAL-05：同座位 500ms 规则（只对回复）——旧的一条提前收掉再起新的 ----
+  loadVitalBatch([hpChange(40, 1, 3, 4), hpChange(41, 1, 4, 5)], []);
+  step(2);
+  const foldStarted = runUntil(() => playsOf("HEAL").length >= 2, 40);
+  check("U-VITAL-05 同座位 500ms 内又来一条回复：旧的提前收掉（在播仍只有 1 条，不互相盖住）",
+    foldStarted && liveCount() === 1 && playsOf("HEAL").length === 2,
+    `started=${foldStarted} live=${liveCount()} plays=${playsOf("HEAL").length}`);
+  drainTimers();
+
+  fxLog.length = 0;
+  // ---- U-VITAL-06：版式作废（座位矩形变了）⇒ 摘掉在播的，不留计时器 ----
+  loadVitalBatch([hpChange(50, 1, 3, 6)], []);
+  const paused06 = runUntil(() => playbackIndex() === 1 && liveCount() === 1, 6)
+    && layerHold() === "1";
+  const playsBefore06 = playCount();
+  heroBlockShift = 260;
+  ui.renderTable();   // → vitalDropStalePlays ⇒ 在播表空
+  check("U-VITAL-06a 版式变了 ⇒ 在播的立刻摘掉、hold 读数清空、画布摘净",
+    paused06 && liveCount() === 0 && layerHold() === ""
+      && layerCanvases().length === 0 && ui.vitalFxPlaybackHold() === "",
+    `paused=${paused06} live=${liveCount()} layer-hold="${layerHold()}" `
+      + `canvases=${layerCanvases().length}`);
+  heroBlockShift = 0;
+  ui.flushPlayback();
+  drainTimers();
+  check("U-VITAL-06b 作废之后不补播、不留计时器与节点",
+    playCount() === playsBefore06 && liveCount() === 0 && layer().children.length === 0
+      && pendingTimers.size === 0,
+    `plays=${playCount() - playsBefore06} live=${liveCount()} `
+      + `children=${layer().children.length} timers=${pendingTimers.size}`);
+
+  fxLog.length = 0;
+  // ---- U-VITAL-07：换局 ⇒ 队列 / 画布 / 读数全清（上一局那条回复不在新桌上播）----
+  loadVitalBatch([hpChange(60, 1, 3, 6)], []);
+  const live07 = runUntil(() => playbackIndex() === 1 && liveCount() === 1, 6)
+    && layerHold() === "1";
+  const playsBefore07 = playCount();
+  loadVitalBatch([], []);   // 换局（flushPlayback + 新 session ⇒ commitView ⇒ clearVitalFx）
+  const cleared07 = liveCount() === 0 && layer().children.length === 0
+    && layerHold() === "" && htmlHold() === "";
+  drainTimers();
+  check("U-VITAL-07 换局：队列 / 画布 / 读数全清，跑空计时器也不补播",
+    live07 && cleared07 && playCount() === playsBefore07 && layer().children.length === 0,
+    `live=${live07} cleared=${cleared07} plays=${playCount() - playsBefore07} `
+      + `children=${layer().children.length} layer-hold="${layerHold()}" html="${htmlHold()}"`);
+
+  /* ---- U-VITAL-08：音效接缝——体力两族的模块（票 03 / 04）**都已就位** ----
+   *
+   * `VITAL_SFX_ENGINES` 里 `HP_LOSS` → `SgsHpLossSfx`、`HEAL` → `SgsHealSfx` 现在都真的存在：
+   * `vitalSfxEnsureModules` 给两族各建声道（池长 = 各自的 `vitalFxCapFor` = 2）；垫片**故意**
+   * 没有 `AudioContext`，所以每一路都 `live: false`（`start()` 返回 false）——`vitalSfxStart`
+   * 仍静默返回 null，画面照旧。
+   */
+  const sfxWas = storage.get("sgs.sfx");
+  const sfxProbe = JSON.parse(vm.runInContext(`(function () {
+    let threw = "";
+    let vitalLive = null;
+    try {
+      vitalLive = vitalSfxEnsureModules();
+      damageSfxSetEnabled(true);
+      damageSfxSetEnabled(false);
+    } catch (error) {
+      threw = String(error);
+    }
+    return JSON.stringify({
+      threw,
+      vitalLive,
+      lanes: Object.keys(damageSfxLanes),
+      hpLossLanes: (damageSfxLanes.SgsHpLossSfx || []).length,
+      hpLossLive: (damageSfxLanes.SgsHpLossSfx || []).filter((lane) => lane.live).length,
+      healLanes: (damageSfxLanes.SgsHealSfx || []).length,
+      healLive: (damageSfxLanes.SgsHealSfx || []).filter((lane) => lane.live).length,
+      engines: Object.keys(VITAL_SFX_ENGINES),
+    });
+  })()`, context));
+  if (sfxWas === undefined) storage.delete("sgs.sfx");
+  else storage.set("sgs.sfx", sfxWas);
+  check("U-VITAL-08 体力两族的音效模块都已就位：各建池 2 条、没有 AudioContext ⇒ 一条都出不了声、不抛错",
+    sfxProbe.threw === "" && sfxProbe.vitalLive === 0
+      && sfxProbe.engines.join(",") === "HP_LOSS,HEAL"
+      && sfxProbe.lanes.includes("SgsHpLossSfx")
+      && sfxProbe.hpLossLanes === 2 && sfxProbe.hpLossLive === 0
+      && sfxProbe.lanes.includes("SgsHealSfx")
+      && sfxProbe.healLanes === 2 && sfxProbe.healLive === 0,
+    JSON.stringify(sfxProbe));
+
+  // 收尾：清掉体力层的残留（下一个用例 / 文件末尾不受它影响）。
+  vm.runInContext("clearVitalFx()", context);
+  loadVitalBatch([], []);
+  drainTimers();
+  check("U-VITAL-08b 收尾：体力层空、两个读数归零",
+    layer().children.length === 0 && liveCount() === 0 && layerHold() === "",
+    `children=${layer().children.length} live=${liveCount()} layer-hold="${layerHold()}"`);
+
+  /* ============ vital-fx 票 03：失去体力家族（**真模块**；U-VITAL-09..11）============
+   *
+   * 票 02 的 U-VITAL-02..08 用桩验排播；这一块换成票 03 的**真** `SgsHpLossFX`（画面）与
+   * `SgsHpLossSfx`（音效），断言落在三层：
+   *   ① 三档（1 / 2 / 3+ 点）：层出现、读数（`data-vital-fx-family` / `-variant` / `-amount`）、
+   *      飘字写**真实点数**、按该档 `total`（`anim.ini` 的 `hp_loss_fx_<档>_total`）摘层；
+   *   ② 整个窗口 `<html data-playback-hold>` 与两层的 `-hold` 读数**恒为空**（用户口径：
+   *      失去体力永不冻回放）；
+   *   ③ **不漏墨**：普通伤害（只有 `hp_change`、没有 `life_loss_events`）与护甲全吸收的伤害
+   *      （服务端连 `hp_change` 都没有）都在 `#t-vital-fx` 上留不下任何一条演出。
+   * 画布像素不可断言；"模块真的把画布建起来了"读它写进去的 width / height。
+   */
+  {
+    const hpTotal = (tier) => iniNumber(`hp_loss_fx_${tier}_total`);
+    const numberText = (text) => String(text || "");
+    const layerNumber = () => numberText(attr(layer(), "data-vital-fx-amount"));
+    const layerVariant = () => Number(attr(layer(), "data-vital-fx-variant"));
+    const layerFamily = () => String(attr(layer(), "data-vital-fx-family") || "");
+
+    /* 真模块外面套一层：只记下"排播层把什么交给了它、它把画布建成了多大"。 */
+    const realCreate = realHpLossFx.create;
+    const created = [];
+    windowShim.SgsHpLossFX = Object.assign({}, realHpLossFx, {
+      create(stageCanvas, options) {
+        const fx = realCreate.call(realHpLossFx, stageCanvas, options);
+        created.push({ fx, options, width: stageCanvas.width, height: stageCanvas.height });
+        return fx;
+      },
+    });
+
+    const tiers = [
+      { amount: 1, variant: 1, tier: 1 },
+      { amount: 2, variant: 2, tier: 2 },
+      { amount: 4, variant: 3, tier: 3 },
+    ];
+    for (const spec of tiers) {
+      created.length = 0;
+      resetObserve();
+      /* 一条**伤害样**的 hp_change（after < before）+ 一条失去体力事实：只钉"体力演出这一层"。
+       * before / after 取 8 起的数，别让自座位真掉到 0（阵亡会让座位块变高、演出被版式作废）。 */
+      /* 座位 1（对手）：它的武将块矩形来自 `data-seat`（垫片里跨重绘稳定），版式作废那条用例
+       * 才能真的把它挪走；自座位的 `#t-self-hero` 在垫片里走的是通用矩形。 */
+      loadVitalBatch([hpChange(90 + spec.tier, 1, 8, 8 - spec.amount)], [
+        { seq: 90 + spec.tier, seat: 1, amount: spec.amount },
+      ]);
+      const clockAtStart = shimClock;
+      step();
+      const live = layerCanvases();
+      const built = created[0] || null;
+      check(`U-VITAL-09a ${spec.amount} 点：真模块开演（层里一张 canvas、读数 family=HP_LOSS / variant=${spec.variant} / amount=${spec.amount}）`,
+        liveCount() === 1 && live.length === 1
+          && layerFamily() === "HP_LOSS" && layerVariant() === spec.variant
+          && layerNumber() === String(spec.amount),
+        `live=${liveCount()} canvases=${live.length} family="${layerFamily()}" `
+          + `variant=${layerVariant()} amount="${layerNumber()}"`);
+      check(`U-VITAL-09b ${spec.amount} 点：飘字是真实点数 −${spec.amount}、档位参数由排播层给（${spec.variant}）`,
+        Boolean(built) && numberText(built.fx.metrics.numberText) === `\u2212${spec.amount}`
+          && built.fx.variant === spec.variant && built.options.amount === spec.amount
+          && built.options.bare === true && built.options.stage.src === null,
+        built
+          ? `text="${built.fx.metrics.numberText}" variant=${built.fx.variant} `
+            + `amount=${built.options.amount} bare=${built.options.bare}`
+          : "模块没有被调用");
+      check(`U-VITAL-09c ${spec.amount} 点：画面模块按 view 建画布（1440×810，dpr=1）`,
+        Boolean(built) && built.width === 1440 && built.height === 810
+          && built.options.view.width === 1440 && built.options.view.height === 810,
+        built ? `${built.width}×${built.height}` : "模块没有被调用");
+      const total = hpTotal(spec.tier);
+      const timers = Array.from(timerDelays.values());
+      check(`U-VITAL-09d ${spec.amount} 点：按该档 total=${total}ms 摘层（读 anim.ini 的 hp_loss_fx_${spec.tier}_total）`,
+        timers.some((ms) => Math.abs(ms - total) < 0.5),
+        `delays=${JSON.stringify(timers)} total=${total}`);
+      const gone = runUntil(() => liveCount() === 0, 400);
+      const elapsed = shimClock - clockAtStart;
+      check(`U-VITAL-09e ${spec.amount} 点：到点摘层、画布摘净、耗时≈total（${elapsed.toFixed(1)} / ${total}）`,
+        gone && layerCanvases().length === 0 && layer().children.length === 0
+          && Math.abs(elapsed - total) < 1,
+        `gone=${gone} elapsed=${elapsed.toFixed(1)} total=${total} `
+          + `children=${layer().children.length}`);
+      check(`U-VITAL-09f ${spec.amount} 点：整个窗口不冻回放（html / 体力层 / 伤害层的 -hold 恒空）`,
+        !Array.from(seen.holds).some((mark) => mark !== "|")
+          && htmlHold() === "" && layerHold() === "" && damageHold() === "",
+        `observed=${JSON.stringify(Array.from(seen.holds))} html="${htmlHold()}" `
+          + `vital="${layerHold()}" damage="${damageHold()}"`);
+      drainTimers();
+    }
+
+    fxLog.length = 0;
+    created.length = 0;
+    // ---- U-VITAL-10：普通伤害（只有 hp_change、没有 life_loss_events）⇒ 一滴墨都不出 ----
+    resetObserve();
+    const playsBefore10 = playCount();
+    loadVitalBatch([hpChange(100, 0, 4, 3)], []);
+    step();
+    check("U-VITAL-10a 普通伤害：伤害走 damage-fx，#t-vital-fx 上没有任何演出",
+      liveCount() === 0 && playCount() === playsBefore10
+        && layer().children.length === 0 && created.length === 0,
+      `live=${liveCount()} plays=${playCount() - playsBefore10} `
+        + `children=${layer().children.length} created=${created.length}`);
+    drainTimers();
+
+    // ---- U-VITAL-11：护甲全吸收的伤害（服务端连 hp_change 都没有）⇒ 同样没有墨 ----
+    const playsBefore11 = playCount();
+    loadVitalBatch([], []);
+    check("U-VITAL-11 护甲全吸收：没有 hp_change 也没有 life_loss_events ⇒ 体力层空、无演出",
+      liveCount() === 0 && playCount() === playsBefore11
+        && layer().children.length === 0 && seesNothing(),
+      `live=${liveCount()} plays=${playCount() - playsBefore11} `
+        + `children=${layer().children.length}`);
+
+    function seesNothing() {
+      return layerCanvases().length === 0 && layerHold() === "" && htmlHold() === "";
+    }
+
+    // ---- U-VITAL-12：版式作废（目标块矩形变了）⇒ 真模块的在播演出立刻摘掉、不留计时器 ----
+    created.length = 0;
+    resetObserve();
+    loadVitalBatch([hpChange(120, 1, 8, 7)], [{ seq: 120, seat: 1, amount: 1 }]);
+    step();
+    const live12 = liveCount() === 1 && created.length === 1;
+    heroBlockShift = 260;
+    ui.renderTable();   // → vitalDropStalePlays ⇒ 在播表空
+    heroBlockShift = 0;
+    check("U-VITAL-12a 版式变了（真模块）：在播的失去体力立刻摘掉、画布摘净、hold 读数清空",
+      live12 && liveCount() === 0 && layerCanvases().length === 0 && layerHold() === ""
+        && ui.vitalFxPlaybackHold() === "",
+      `live=${live12} now=${liveCount()} canvases=${layerCanvases().length} `
+        + `layer-hold="${layerHold()}"`);
+    drainTimers();
+    check("U-VITAL-12b 作废之后不补播、不留计时器",
+      layer().children.length === 0 && pendingTimers.size === 0,
+      `children=${layer().children.length} timers=${pendingTimers.size}`);
+
+    // ---- U-VITAL-13：换局 ⇒ 真模块的画布 / 计时器全清（上一局那条墨不在新桌上播）----
+    loadVitalBatch([hpChange(130, 1, 8, 6)], [{ seq: 130, seat: 1, amount: 2 }]);
+    step();
+    const live13 = liveCount() === 1;
+    loadVitalBatch([], []);   // 换局（flushPlayback + 新 session ⇒ commitView ⇒ clearVitalFx）
+    const cleared13 = liveCount() === 0 && layer().children.length === 0
+      && layerHold() === "" && htmlHold() === "";
+    drainTimers();
+    check("U-VITAL-13 换局（真模块）：画布 / 读数全清，跑空计时器也不补播",
+      live13 && cleared13 && layer().children.length === 0 && pendingTimers.size === 0,
+      `live=${live13} cleared=${cleared13} children=${layer().children.length} `
+        + `timers=${pendingTimers.size}`);
+
+    // 收尾：真模块撤掉、体力层清干净（文件末尾与后续用例不受影响）。
+    windowShim.SgsHpLossFX = realHpLossFx;
+    vm.runInContext("clearVitalFx()", context);
+    loadVitalBatch([], []);
+    drainTimers();
+    check("U-VITAL-11b 收尾：真模块撤下、体力层空",
+      layer().children.length === 0 && liveCount() === 0 && windowShim.SgsHpLossFX === realHpLossFx,
+      `children=${layer().children.length} live=${liveCount()}`);
+  }
+
+  /* ============ vital-fx 票 04：回复体力家族（**真模块**；U-VITAL-14..21）============
+   *
+   * 票 02 的 U-VITAL-02..08 用桩验排播、票 03 的 U-VITAL-09..13 换真 `SgsHpLossFX` 验失去体力；
+   * 这一块换成票 04 的**真** `SgsHealFX`（画面）与 `SgsHealSfx`（音效），断言落在四层：
+   *   ① 三档（1 / 2 / 3+ 点）：层出现、读数（`family=HEAL` / `-variant` / `-amount`）、飘字
+   *      `+N`、按该档 `total`（`anim.ini` 的 `heal_fx_<档>_total`）摘层；
+   *   ② **时停按档**（用户口径「回复 3+ 档有时停」）：3+ 档窗口里
+   *      `<html data-playback-hold>` = `heal:3`、层读数 `-hold` = `1`、记录流冻住，摘层后清空
+   *      并一次补齐；**1 / 2 档整段为空**、回放照常推进（两个方向都要钉，别只钉有时停那一侧）；
+   *   ③ 同座位 500ms 内两条回复：新的一条把旧的提前收掉；伤害与回复同批：两层各自播、
+   *      互不取消；版式作废 / 换局：摘层、清队列、无残留计时器；
+   *   ④ **兜底**：把 `SgsHealFX` 置空后重跑，`flashHeroHp` 的 0.4s 绿闪仍在（`.hp-flash-up`）
+   *      ——`.hp-flash` 口径不动，它是缺件时唯一反馈。
+   * 画布像素不可断言；"模块真的把画布建起来了"读它写进去的 width / height。
+   */
+  {
+    const healTotal = (tier) => iniNumber(`heal_fx_${tier}_total`);
+    const layerFamily = () => String(attr(layer(), "data-vital-fx-family") || "");
+    const layerVariant = () => Number(attr(layer(), "data-vital-fx-variant"));
+    const layerAmount = () => String(attr(layer(), "data-vital-fx-amount") || "");
+    const dmgLayer = () => $("t-damage-fx");
+    const dmgLive = () => Number(attr(dmgLayer(), "data-damage-fx-live") || 0);
+    const dmgPlays = () => Number(attr(dmgLayer(), "data-damage-fx-plays") || 0);
+    const hasClassOf = (node, name) => Boolean(node && (
+      node.classList.contains(name)
+        || String(node.className || "").split(/\s+/).includes(name)));
+    const blockOf = (seat) => {
+      const selfSeat = ui.state.view && ui.state.view.snapshot
+        ? ui.state.view.snapshot.seat : null;
+      if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+        return $("t-self-hero");
+      }
+      const seatNode = seatNodesNow().find((node) => attr(node, "data-seat") === String(seat));
+      return seatNode ? descendants(seatNode).find((node) => hasClassOf(node, "hero-block")) || null : null;
+    };
+
+    /** 真模块外面套一层：只记下"排播层把什么交给了它、它把画布建成了多大"。 */
+    const realHealFx = realHealFxApi;   /* 盖桩前抓下来的真模块（见票 02 那一段） */
+    const realCreate = realHealFx.create;
+    const created = [];
+    const wrappedHealFx = Object.assign({}, realHealFx, {
+      create(stageCanvas, options) {
+        const fx = realCreate.call(realHealFx, stageCanvas, options);
+        created.push({ fx, options, width: stageCanvas.width, height: stageCanvas.height });
+        return fx;
+      },
+    });
+    windowShim.SgsHealFX = wrappedHealFx;
+
+    /** 伤害 + 回复同批：`damage_events` 与 `hp_change` 记录一起下发（同一个 view）。 */
+    let mixedSerial = 0;
+    const loadMixedBatch = (records, damageFacts) => {
+      ui.flushPlayback();
+      mixedSerial += 1;
+      const session = `u-vital-mixed-${mixedSerial}`;
+      ui.applyViewRaw({
+        ...baseView(session), cursor: 0, log_seq: 0, records: [],
+        damage_events: [], life_loss_events: [], finished: false,
+      });
+      ui.applyViewRaw({
+        ...baseView(session), cursor: records.length, log_seq: 0,
+        records, damage_events: damageFacts, life_loss_events: [], finished: false,
+      });
+      return session;
+    };
+    function descendants(node) {
+      const out = [];
+      const walk = (root) => {
+        for (const child of (root && root.children) || []) { out.push(child); walk(child); }
+      };
+      walk(node);
+      return out;
+    }
+
+    const tiers = [
+      { amount: 1, variant: 1, tier: 1 },
+      { amount: 2, variant: 2, tier: 2 },
+      { amount: 4, variant: 3, tier: 3 },
+    ];
+    for (const spec of tiers) {
+      created.length = 0;
+      resetObserve();
+      /* 一条**回复**记录：`hp_change` 里 `after > before`（不需要服务端通道；`flashHeroHp`
+       * 的 0.4s 闪同时照旧触发，两件事互不相干）。座位 1 是对手——它的武将块矩形来自
+       * `data-seat`（垫片里跨重绘稳定）。 */
+      loadVitalBatch([hpChange(170 + spec.tier, 1, 4, 4 + spec.amount)], []);
+      const clockAtStart = shimClock;
+      step();
+      const live = layerCanvases();
+      const built = created[0] || null;
+      check(`U-VITAL-14a ${spec.amount} 点：真模块开演（层里一张 canvas、读数 family=HEAL / variant=${spec.variant} / amount=${spec.amount}）`,
+        liveCount() === 1 && live.length === 1
+          && layerFamily() === "HEAL" && layerVariant() === spec.variant
+          && layerAmount() === String(spec.amount),
+        `live=${liveCount()} canvases=${live.length} family="${layerFamily()}" `
+          + `variant=${layerVariant()} amount="${layerAmount()}"`);
+      check(`U-VITAL-14b ${spec.amount} 点：飘字写真实回复量 +${spec.amount}、档位参数由排播层给（${spec.variant}）`,
+        Boolean(built) && String(built.fx.metrics.numberText) === `+${spec.amount}`
+          && built.fx.variant === spec.variant && built.options.amount === spec.amount
+          && built.options.profile === "game" && built.options.bare === true
+          && built.options.stage.src === null
+          && Number(built.fx.metrics.whiteAlpha) < 1,
+        built
+          ? `text="${built.fx.metrics.numberText}" variant=${built.fx.variant} `
+            + `amount=${built.options.amount} bare=${built.options.bare} `
+            + `white=${built.fx.metrics.whiteAlpha}`
+          : "模块没有被调用");
+      check(`U-VITAL-14c ${spec.amount} 点：画面模块按 view 建画布（1440×810，dpr=1）`,
+        Boolean(built) && built.width === 1440 && built.height === 810
+          && built.options.view.width === 1440 && built.options.view.height === 810,
+        built ? `${built.width}×${built.height}` : "模块没有被调用");
+      const total = healTotal(spec.tier);
+      const timers = Array.from(timerDelays.values());
+      check(`U-VITAL-14d ${spec.amount} 点：按该档 total=${total}ms 摘层（读 anim.ini 的 heal_fx_${spec.tier}_total）`,
+        timers.some((ms) => Math.abs(ms - total) < 0.5),
+        `delays=${JSON.stringify(timers)} total=${total}`);
+      if (spec.tier === 3) {
+        /* 3+ 档：<html> 的读数由排播侧的轮询写（`stepPlaybackWhenFree`），层读数是开演即写。 */
+        const frozen = runUntil(() => htmlHold() === "heal:3", 8);
+        check("U-VITAL-15a 3+ 档：窗口里 <html data-playback-hold> = heal:3、体力层 -hold = 1",
+          frozen && layerHold() === "1" && ui.vitalFxPlaybackHold() === "heal:3"
+            && ui.playbackHoldReason() === "heal:3",
+          `frozen=${frozen} layer-hold="${layerHold()}" `
+            + `reason="${ui.vitalFxPlaybackHold()}" html="${htmlHold()}"`);
+      }
+      const gone = runUntil(() => liveCount() === 0, 400);
+      const elapsed = shimClock - clockAtStart;
+      check(`U-VITAL-14e ${spec.amount} 点：到点摘层、画布摘净、耗时≈total（${elapsed.toFixed(1)} / ${total}）`,
+        gone && layerCanvases().length === 0 && layer().children.length === 0
+          && Math.abs(elapsed - total) < 1,
+        `gone=${gone} elapsed=${elapsed.toFixed(1)} total=${total} `
+          + `children=${layer().children.length}`);
+      if (spec.tier === 3) {
+        const cleared = runUntil(() => htmlHold() === "", 8);
+        check("U-VITAL-15b 3+ 档：摘层后 hold 读数清空（<html> / 层 / 判据三处都空）",
+          cleared && layerHold() === "" && htmlHold() === ""
+            && ui.vitalFxPlaybackHold() === "",
+          `cleared=${cleared} layer-hold="${layerHold()}" html="${htmlHold()}" `
+            + `reason="${ui.vitalFxPlaybackHold()}"`);
+        /* 开演那一瞬间排播侧的轮询还没跑，`<html>` 上仍是空串（层读数是开演即写）——
+         * 所以窗口内的观测只允许两种：`|1`（刚开演）与 `heal:3|1`（冻住之后）。 */
+        check("U-VITAL-15c 3+ 档：整个窗口都在停（观测到的在播读数只有 heal:3|1 与开演那一瞬的 |1）",
+          Array.from(seen.holds).includes("heal:3|1")
+            && Array.from(seen.holds).every((mark) => mark === "heal:3|1" || mark === "|1"),
+          `observed=${JSON.stringify(Array.from(seen.holds))}`);
+      } else {
+        check(`U-VITAL-16 ${spec.amount} 点：整个窗口不冻回放（html / 体力层 / 伤害层的 -hold 恒空）`,
+          !Array.from(seen.holds).some((mark) => mark !== "|") && htmlHold() === ""
+            && layerHold() === "" && damageHold() === "",
+          `observed=${JSON.stringify(Array.from(seen.holds))} html="${htmlHold()}" `
+            + `vital="${layerHold()}" damage="${damageHold()}"`);
+      }
+      drainTimers();
+    }
+
+    // ---- U-VITAL-17：3+ 档 ⇒ 记录流冻住、摘层后一次补齐（真模块的 4.5s 窗口，读 ini）----
+    created.length = 0;
+    resetObserve();
+    loadVitalBatch([hpChange(160, 0, 4, 7), hpChange(161, 1, 4, 7)], []);
+    const opened17 = runUntil(() => playbackIndex() === 1, 8);
+    const held17 = runUntil(() => htmlHold() === "heal:3", 8);
+    const total17 = healTotal(3);
+    check("U-VITAL-17a 3+ 档回复：第一条开演，窗口里 <html> = heal:3（真模块的 4.5s total 排上了计时器）",
+      opened17 && held17 && playbackIndex() === 1 && liveCount() === 1
+        && Array.from(timerDelays.values()).some((ms) => Math.abs(ms - total17) < 0.5),
+      `open=${opened17} held=${held17} index=${playbackIndex()} live=${liveCount()} `
+        + `delays=${JSON.stringify(Array.from(timerDelays.values()))}`);
+    for (let index = 0; index < 5; index += 1) runEarliest();
+    check("U-VITAL-17b 窗口里记录流冻住：连跑 5 轮轮询 index 仍是 1、第二条不抢跑（在播恒 1 条）",
+      playbackIndex() === 1 && liveCount() === 1 && seen.peak === 1,
+      `index=${playbackIndex()} live=${liveCount()} peak=${seen.peak}`);
+    const playedOut17 = runUntil(() => layerHold() === "", 400);
+    check("U-VITAL-17c 一条播满自己的 total 才摘层：摘层后层读数立刻清空",
+      playedOut17 && layerHold() === "" && ui.vitalFxPlaybackHold() === "",
+      `playedOut=${playedOut17} layer-hold="${layerHold()}"`);
+    const caughtUp17 = runUntil(() => playbackIndex() === 2, 200);
+    check("U-VITAL-17d 摘层后记录流一次补齐：index 追到 2，第二条 3 档回复接上（仍在播 1 条）",
+      caughtUp17 && playbackIndex() === 2 && liveCount() === 1 && created.length === 2,
+      `caught=${caughtUp17} index=${playbackIndex()} live=${liveCount()} creates=${created.length}`);
+    runUntil(() => ui.state.playback === null && liveCount() === 0, 600);
+    drainTimers();
+
+    // ---- U-VITAL-18：同座位 500ms 内又来一条回复 ⇒ 旧的提前收掉（真模块，不叠成一团）----
+    created.length = 0;
+    resetObserve();
+    loadVitalBatch([hpChange(175, 1, 4, 5), hpChange(176, 1, 5, 6)], []);
+    step(2);
+    /* 轻演出相邻错开 120ms（票 02 的闸门）：第二条排在那只错开计时器上，跑掉它才开演。 */
+    const foldStarted18 = runUntil(() => created.length >= 2, 40);
+    check("U-VITAL-18 同座位 500ms 内两条回复：旧的一条被提前收掉（在播恒 1 条、两次 create）",
+      foldStarted18 && created.length === 2 && liveCount() === 1 && seen.peak === 1
+        && layerCanvases().length === 1,
+      `fold=${foldStarted18} creates=${created.length} live=${liveCount()} peak=${seen.peak} `
+        + `children=${layer().children.length}`);
+    drainTimers();
+
+    // ---- U-VITAL-19：伤害与回复同批（可能）⇒ 两层各自播、互不取消 ----
+    created.length = 0;
+    resetObserve();
+    const dmgBefore19 = dmgPlays();
+    loadMixedBatch(
+      [hpChange(180, 1, 4, 3), hpChange(181, 2, 4, 5)],
+      [{ seq: 180, source: 0, target: 1, amount: 1, nature: "NORMAL" }],
+    );
+    step(2);
+    check("U-VITAL-19a 伤害与回复同批：两层各自开演（伤害层 1 条、体力层 1 条，互不取消）",
+      dmgLive() === 1 && dmgPlays() === dmgBefore19 + 1 && liveCount() === 1
+        && created.length === 1,
+      `damage-live=${dmgLive()} damage-plays=${dmgPlays() - dmgBefore19} `
+        + `vital-live=${liveCount()} creates=${created.length}`);
+    const healGone19 = runUntil(() => liveCount() === 0, 80);
+    check("U-VITAL-19b 回复那一层先收（1300 < 1500）：伤害层仍在播、次数没被抹掉",
+      healGone19 && dmgLive() === 1 && dmgPlays() === dmgBefore19 + 1,
+      `healGone=${healGone19} damage-live=${dmgLive()} `
+        + `damage-plays=${dmgPlays() - dmgBefore19}`);
+    runUntil(() => dmgLive() === 0, 120);
+    drainTimers();
+
+    // ---- U-VITAL-20：版式作废 / 换局（真模块）⇒ 摘层、清队列、无残留计时器 ----
+    created.length = 0;
+    loadVitalBatch([hpChange(190, 1, 4, 7)], []);
+    step();
+    const live20 = liveCount() === 1 && created.length === 1;
+    heroBlockShift = 260;
+    ui.renderTable();   // → vitalDropStalePlays ⇒ 在播表空
+    heroBlockShift = 0;
+    check("U-VITAL-20a 版式变了（真模块）：在播的回复立刻摘掉、画布摘净、hold 读数清空",
+      live20 && liveCount() === 0 && layerCanvases().length === 0 && layerHold() === "",
+      `live=${live20} now=${liveCount()} canvases=${layerCanvases().length} `
+        + `layer-hold="${layerHold()}"`);
+    drainTimers();
+    loadVitalBatch([hpChange(191, 1, 4, 7)], []);
+    step();
+    const live20b = liveCount() === 1;
+    loadVitalBatch([], []);   // 换局（flushPlayback + 新 session ⇒ commitView ⇒ clearVitalFx）
+    const cleared20 = liveCount() === 0 && layer().children.length === 0
+      && layerHold() === "" && htmlHold() === "";
+    drainTimers();
+    check("U-VITAL-20b 换局（真模块）：画布 / 读数全清，跑空计时器也不补播",
+      live20b && cleared20 && layer().children.length === 0 && pendingTimers.size === 0,
+      `live=${live20b} cleared=${cleared20} children=${layer().children.length} `
+        + `timers=${pendingTimers.size}`);
+
+    // ---- U-VITAL-21：兜底——`SgsHealFX` 缺件时 `flashHeroHp` 的 0.4s 绿闪仍在 ----
+    /* 票 04 验收 4：`.hp-flash` 是**兜底**，不是被替代品（`HP_FLASH_MS = 400` / `#2e7d32`
+     * 的口径一个字没动）。把画面模块置空后重跑同一条回复记录：体力层一条都不演，
+     * 武将块照旧闪绿——这才是"模块没加载 / 动画被关"时的最小反馈。 */
+    const playsBefore21 = playCount();
+    windowShim.SgsHealFX = null;
+    try {
+      loadVitalBatch([hpChange(200, 1, 4, 6)], []);
+      step();
+      const flashBlock = blockOf(1);
+      check("U-VITAL-21 兜底：SgsHealFX 缺件 ⇒ 体力层不演，.hp-flash + hp-flash-up 的 0.4s 绿闪照旧",
+        liveCount() === 0 && playCount() === playsBefore21
+          && layer().children.length === 0
+          && hasClassOf(flashBlock, "hp-flash") && hasClassOf(flashBlock, "hp-flash-up")
+          && !hasClassOf(flashBlock, "hp-flash-down"),
+        `live=${liveCount()} plays=${playCount() - playsBefore21} `
+          + `children=${layer().children.length} class="${flashBlock ? flashBlock.className : ""}"`);
+    } finally {
+      windowShim.SgsHealFX = wrappedHealFx;
+    }
+
+    // 收尾：真模块撤掉、体力层清干净（文件末尾与后续用例不受影响）。
+    windowShim.SgsHealFX = realHealFx;
+    vm.runInContext("clearVitalFx()", context);
+    loadVitalBatch([], []);
+    drainTimers();
+    check("U-VITAL-21b 收尾：真模块撤下、体力层空",
+      layer().children.length === 0 && liveCount() === 0
+        && windowShim.SgsHealFX === realHealFx,
+      `children=${layer().children.length} live=${liveCount()}`);
   }
 }
 

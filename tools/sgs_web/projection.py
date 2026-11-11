@@ -3019,6 +3019,64 @@ def damage_events_after(
     return out
 
 
+def life_loss_events_after(
+    records: Iterable[object],
+    *,
+    after: int,
+    state: Any,
+    events: Iterable[Any] = (),
+) -> list[dict[str, Any]]:
+    """从**未裁剪**的记录流派生失去体力事实（vital-fx 票 01 / spec §Solution 1）：``seq > after``
+    的那几条。
+
+    判据、游标、去重口径**与** :func:`damage_events_after` 完全一致，只换事实来源与条目形状：
+
+    - 事实来源是引擎的只增缓冲 ``Engine.life_loss_events``——记录面分不出「失去体力」与
+      「受到伤害」：两者都落 ``FrameKind.LIFE_DECREASE`` / ``hp_change``，唯一判据是帧私有的
+      ``LIFE_DECREASE_DAMAGE_KEY``，而那个键**不进记录流**；护甲全吸收的伤害又连一条
+      ``hp_change`` 都没有；
+    - ``seq`` 是引擎在体力写入那一刻取的最后一条记录序号，故与 ``records`` 共用同一个
+      ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复下发；
+    - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
+      时才下发，超出上界的留到下一次轮询——那时 ``after`` 仍小于它的 ``seq``，``seq > after``
+      照成立，一条都不会丢；
+    - ``state`` 只用来**夹座位**（``seat`` 必须落在本局座位里）：越界条目是坏数据，宁可不下发
+      也不让前端拿它去量一张不存在的武将牌。
+
+    **不按视角过滤**：体力是**公开事实**（血条本来就公开），与伤害同一档。失去体力**没有
+    来源、没有属性**（不走伤害修正链、不能被护甲吸收），故条目只有 ``seq / seat / amount``；
+    ``amount`` 是服务端算好的**真实掉血**（``before - after``），前端不自己算。
+
+    ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
+    （没有墨），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
+    """
+    last_seq: int | None = None
+    for raw in records:
+        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
+        seq = record.get("seq")
+        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
+            last_seq = seq
+    seat_count = len(getattr(state, "players", ()) or ())
+    out: list[dict[str, Any]] = []
+    for event in events or ():
+        seq = getattr(event, "seq", None)
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        if last_seq is not None and seq > last_seq:
+            continue
+        seat = getattr(event, "seat", None)
+        amount = getattr(event, "amount", None)
+        if seat is None or amount is None:
+            continue
+        seat = int(seat)
+        if seat_count and not 0 <= seat < seat_count:
+            continue
+        out.append({"seq": seq, "seat": seat, "amount": int(amount)})
+    # 同一批里多条失去体力按记录序号排：前端"逐条播、相邻错开 120ms"（spec §演出口径）。
+    out.sort(key=lambda event: event["seq"])
+    return out
+
+
 def card_events_after(
     records: Iterable[object],
     *,

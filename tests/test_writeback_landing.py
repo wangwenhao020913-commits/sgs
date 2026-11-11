@@ -529,6 +529,53 @@ def test_the_chain_death_voice_ledger_rows_are_present_and_carry_a_test_landing(
         )
 
 
+# vital-fx 票 05 收口的三条账本行（ADR-025）。与上一族同一姿态：这三行钉的是 spec §Solution 5
+# 的三条分界——独立排播层 / 时停按家族 / 两条事件源——它们**只有 ADR 行与变更块是读不到落点的**，
+# 删掉一整行也不会让任何通用断言变红（§5 表还有别的行），故逐条钉标题 + 落点必须同时有正式
+# pytest 名与**真的存在**的 `ui_smoke` 用例 id（只写 `tests/support/ui_smoke.mjs` 这个文件名
+# 不算落点，`CODING_STANDARDS.md` §1）。
+VF_LEDGER_HEADINGS: tuple[str, ...] = (
+    "**体力演出是独立排播层**（ADR-025）",
+    "**时停按家族判**（ADR-025）",
+    "**体力演出的两条事件源**（ADR-025）",
+)
+
+VF_SMOKE_CASE_ID_RE = re.compile(r"\bU-VITAL-0[1-9][A-Za-z0-9]*\b")
+
+
+def test_the_vital_fx_ledger_rows_are_present_and_carry_a_test_landing() -> None:
+    """三条裁定行逐条在 §5，且「落地位置」列有可核的测试落点（正式的 + 烟测的）。
+
+    动机与 U1 / U2 / chain-death-voices 三条相同：账本是手写的长表，删一行、把落点改成一个
+    文件名、或引一条不存在的烟测 id，都不会让别的断言变红。这三行是 ADR-025 的唯一落地账本，
+    所以逐条钉标题，并要求落点里两种证据并存（静态用例钉结构、烟测钉行为）。
+    """
+    rows = section5_rows()
+    smoke = SMOKE_TEST.read_text(encoding="utf-8")
+    for heading in VF_LEDGER_HEADINGS:
+        matches = [
+            (line_no, line) for line_no, line in rows if line.startswith(f"| {heading}")
+        ]
+        assert len(matches) == 1, (
+            f"`06`（§5「程序化约定与偏离一手」）应恰好有一条以 {heading!r} 开头的收口账本行，"
+            f"实际 {len(matches)} 条"
+        )
+        line_no, line = matches[0]
+        landing = _landing_cell(line)
+        assert "tests/" in landing, f"§5:{line_no}: 账本行的落点缺少 tests/ 引用：{landing}"
+        assert "::test_" in landing, (
+            f"§5:{line_no}: 账本行的落点没有正式 pytest 名（只有烟测 id 不够）：{landing}"
+        )
+        case_ids = VF_SMOKE_CASE_ID_RE.findall(landing)
+        assert case_ids, (
+            f"§5:{line_no}: 账本行的落点没有具体 ui_smoke 用例 id：{landing}"
+        )
+        missing = [case_id for case_id in case_ids if case_id not in smoke]
+        assert not missing, (
+            f"§5:{line_no}: 账本行引用的 ui_smoke 用例不存在：{missing}"
+        )
+
+
 def test_doc06_superseded_by_in_landing_cells_is_well_formed() -> None:
     errors = _superseded_by_errors()
     assert errors == [], "\n".join(errors)

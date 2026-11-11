@@ -232,6 +232,9 @@ function damageSfxEnsureModules() {
   chainSfxEnsure();
   // chain-death-voices 票 02：阵亡那一路同样在这一个手势里建（池长 1，惰性）。
   deathSfxEnsure();
+  // vital-fx 票 02：体力演出两个模块（票 03 / 04）也在**同一个手势**里建；缺件就跳过，
+  // 于是"模块还不存在"与"没有 AudioContext"走同一条静默降级路径。
+  live += vitalSfxEnsureModules();
   // chain-death-voices 票 03：卡牌语音也要在同一次手势里解锁（`Audio.play()` 的自动播放
   // 策略只认手势；语音模块自己没有开关，`unlock()` 只记"手势已发生"）。
   cardVoiceUnlock();
@@ -415,6 +418,139 @@ function deathSfxMute(on) {
   if (typeof deathSfxLane.player.mute === "function") deathSfxLane.player.mute(Boolean(on));
 }
 
+/* ---------------------------------------------- 体力演出的音效（vital-fx 票 02） */
+
+/** 体力家族 → **音效引擎 + 它的画面模块**（声道池按模块分组；时间轴从画面模块的
+ *  `gameTiming` 取）。这是音效这一侧唯一的查表处（与 `DAMAGE_SFX_ENGINES` 同姿态）。
+ *
+ * 两个音效模块是票 03 / 04 的文件（`sfx-hp-loss.js` / `sfx-heal.js`）：**本票交付时一个都
+ * 不存在**，于是 `vitalSfxEnsureModules` 逐行走 `if (!engine.sfx) continue;`——不抛错、不建
+ * `AudioContext`、也不在 `damageSfxLanes` 里留空桶（"整套音效不存在"那条降级路径）。
+ *
+ * 为什么不复用 `DAMAGE_SFX_ENGINES`：那张表按**伤害属性**分派（`damageFxNatureKind`），而
+ * spec §硬约束明说两条体力家族不许进伤害的属性家族——映射只能在体力这一侧说。
+ */
+const VITAL_SFX_ENGINES = {
+  HP_LOSS: { key: "SgsHpLossSfx", fx: "SgsHpLossFX" },
+  HEAL: { key: "SgsHealSfx", fx: "SgsHealFX" },
+};
+
+/** 家族 → 三个**调用时**才解析的全局名（音效模块 / 它的画面模块）；未登记家族全 null。 */
+function vitalSfxEngineFor(family) {
+  const name = String(family || "").toUpperCase();
+  const spec = VITAL_SFX_ENGINES[name] || null;
+  return {
+    key: spec ? spec.key : "",
+    family: name,
+    sfx: spec ? window[spec.key] || null : null,
+    fx: spec ? window[spec.fx] || null : null,
+  };
+}
+
+/** 给**一个**已加载的体力音效模块建声道池（惰性：没有该模块就一条都不建）。
+ *
+ * 与伤害声道池**同一张表**（`damageSfxLanes` 按 key 分桶）、同一个机制：起始池长 = 该家族的
+ * cap（`vital-fx.js:vitalFxCapFor`，1–8、缺省 2），槽号被别家顶高时按 `need` 补建；
+ * 每条声道持有一份**可变**时间轴，开演时把该档的 cue 时刻写进去（跨演出复用）。
+ */
+function vitalSfxEnsureLanes(engine, need) {
+  if (!engine || !engine.sfx || typeof engine.sfx.create !== "function") return [];
+  const key = engine.key;
+  if (!damageSfxLanes[key]) damageSfxLanes[key] = [];
+  const lanes = damageSfxLanes[key];
+  const cap = vitalFxCapFor(engine.family);
+  const want = Math.max(cap, Math.round(Number(need) || 0));
+  const base = damageSfxBaseTimeline(engine.fx);
+  while (lanes.length < want) {
+    const timeline = damageSfxTimeline(base);
+    const player = engine.sfx.create(timeline);
+    if (!player || typeof player.tick !== "function") break;
+    const started = typeof player.start === "function" ? player.start() : false;
+    lanes.push({ player, timeline, live: started === true });
+  }
+  damageSfxMute(!damageSfxOn);
+  return lanes;
+}
+
+/** 给**页面上已经加载**的体力音效模块各建一套声道（票 03 / 04 的模块缺件就跳过谁）。
+ *
+ * 由 `damageSfxEnsureModules` 在**同一个手势 / 开关**里顺手调（与剑 / 雷 / 火同一姿态）：
+ * `AudioContext` 必须在手势的同一个 tick 里 resume，所以不能等第一次演出。返回出得了声的
+ * 声道数——两个模块都不存在时就是 **0**（不抛错）。
+ */
+function vitalSfxEnsureModules() {
+  let live = 0;
+  for (const family of Object.keys(VITAL_SFX_ENGINES)) {
+    const engine = vitalSfxEngineFor(family);
+    if (!engine.sfx) continue;
+    for (const lane of vitalSfxEnsureLanes(engine)) {
+      if (lane.live) live += 1;
+    }
+  }
+  return live;
+}
+
+/** 一条体力演出开演：按 `play.family` 取该模块的声道池，把**这一档**的 cue 时刻写进去、
+ *  `start()` 重置游标。与 `damageSfxStart` 同一口径：开关关着时只复用已有声道、不补建新的；
+ *  槽号超出池长时（跨家族）**就地补建**；模块缺件 ⇒ 返回 null（画面照旧）。
+ */
+function vitalSfxStart(play) {
+  if (!play) return null;
+  const engine = vitalSfxEngineFor(play.family);
+  if (!engine.sfx) return null;
+  const slot = Math.max(0, Math.round(Number(play.slot) || 0));
+  let lanes = damageSfxLanes[engine.key];
+  if (lanes && lanes.length <= slot && damageSfxOn) {
+    lanes = vitalSfxEnsureLanes(engine, slot + 1);
+  }
+  if (!lanes || !lanes.length) return null;
+  const lane = lanes[slot];
+  if (!lane || !lane.live) return null;
+  Object.assign(lane.timeline, damageSfxTimeline(play.fx && play.fx.timeline));
+  if (typeof lane.player.start === "function") lane.player.start();
+  if (typeof lane.player.mute === "function") lane.player.mute(!damageSfxOn);
+  play.sfxLane = lane;
+  damageSfxBound.add(play);
+  return lane;
+}
+
+/** 每帧：喂**演出自己的** `seconds`（与 `fx.draw(t)` 同一个数），不另起墙钟。
+ *
+ *  两个新音效模块的 cue 只从时间轴读、`tick(t, voice)` 的 `voice` 不用，所以这里只喂时钟。 */
+function vitalSfxTick(play, seconds) {
+  const lane = play && play.sfxLane;
+  if (!lane || !lane.live || typeof lane.player.tick !== "function") return;
+  lane.player.tick(seconds);
+}
+
+/** 一段演出收尾：这条声道静音并停 cue（下次开演重新 `start()`）。 */
+function vitalSfxStop(play) {
+  if (!play) return;
+  damageSfxBound.delete(play);
+  const lane = play.sfxLane;
+  if (!lane) return;
+  play.sfxLane = null;
+  if (lane.player && typeof lane.player.stop === "function") lane.player.stop();
+}
+
+/** 换局 / 版式作废：在播的体力演出全部收声（本文件自己记的那几条）。 */
+function vitalSfxStopAll() {
+  for (const play of damageSfxBound) {
+    if (play && VITAL_SFX_ENGINES[String(play.family || "").toUpperCase()]) vitalSfxStop(play);
+  }
+}
+
+/** 开关灌到体力那两路（`damageSfxMute` 顺手调它：同一个开关管所有声音）。 */
+function vitalSfxMute(muted) {
+  for (const family of Object.keys(VITAL_SFX_ENGINES)) {
+    const key = VITAL_SFX_ENGINES[family].key;
+    for (const lane of damageSfxLanes[key] || []) {
+      if (!lane || !lane.player || typeof lane.player.mute !== "function") continue;
+      lane.player.mute(Boolean(muted));
+    }
+  }
+}
+
 /** 把开关灌到所有声道上（没有声道时只是空转：状态仍由 `damageSfxOn` 记着）。 */
 function damageSfxMute(muted) {
   for (const key of Object.keys(damageSfxLanes)) {
@@ -429,6 +565,8 @@ function damageSfxMute(muted) {
   deathSfxMute(Boolean(muted));
   // 卡牌语音同一个开关（chain-death-voices 票 03）：关的时候停掉全部存活语音。
   cardVoiceMute(Boolean(muted));
+  // 体力那两路同一个开关（vital-fx 票 02；模块缺件时是空转）。
+  vitalSfxMute(Boolean(muted));
 }
 
 /** 启动时读一次记忆并刷按钮（`main.js:wire()` 里调一次）。 */
@@ -550,9 +688,15 @@ function damageSfxStop(play) {
  *
  * 「在播的」= 本文件**自己记的**那几条（`damageSfxBound`）：收声是音效层的事，
  * 清场由调用方（`damage-fx.js:clearDamageFx`）决定，音效层不需要知道伤害排播的内部结构。
+ *
+ * vital-fx 票 02 起这张绑表里也会出现体力演出的声道（两族共用同一个池表），但**各收各的**：
+ * 伤害层的清场不掐体力那一层（体力那条由 `vitalSfxStopAll` 收，调用方是 `clearVitalFx`）。
  */
 function damageSfxStopAll() {
-  for (const play of damageSfxBound) damageSfxStop(play);
+  for (const play of damageSfxBound) {
+    if (play && VITAL_SFX_ENGINES[String(play.family || "").toUpperCase()]) continue;
+    damageSfxStop(play);
+  }
 }
 
 /** URL 里有没有 `?audiotest=1`（`damage-fx 票 06` 的离线自检口）。 */

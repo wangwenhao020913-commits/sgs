@@ -564,6 +564,42 @@ class DamageEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class LifeLossEvent:
+    """一次**失去体力事实**的公共面（vital-fx 票 01）：谁失去了多少点、锚在哪条记录。
+
+    与 :class:`DamageEvent` / :class:`SkillActivation` 同一姿态：**不是**记录流的一条记录，
+    而是引擎侧的只增缓冲（:attr:`Engine.life_loss_events`）里的一条。理由：记录面分不出
+    「失去体力」与「受到伤害」——两者都落 ``FrameKind.LIFE_DECREASE`` / ``hp_change``，
+    唯一判据是帧私有的 ``LIFE_DECREASE_DAMAGE_KEY``（**不进记录流**）；而护甲全吸收的伤害
+    又连一条 ``hp_change`` 都没有。失去体力因此需要一条自己的事件源。
+
+    失去体力**没有来源、没有属性**（【苦肉】/【反间】/【诈降】的代价：不走伤害修正链、
+    也不碰护甲）：故这里只有 ``seq`` / ``seat`` / ``amount`` 三个字段，前端**不猜来源**。
+
+    它**只服务表现层**：规则层一个读者都没有（不进帧私有数据、不参与任何判据），也不消耗
+    随机数 ⇒ 既有金录像逐字节不变。缺省为空元组的读取方（只喂静态 jsonl 录像的回放）因此
+    只少这一路表现。
+    """
+
+    seq: int
+    """锚点 = 体力写入那一刻**最后一条记录**的 ``seq``（前端回放到它时演出）。
+
+    即这次失去体力产生的那条 ``hp_change`` 记录：与 ``note_damage`` 同一"按记录序号释放"
+    口径，也保证它一定落在本批记录里（``seq > after`` 恒成立），轮询不重复下发。
+    """
+
+    seat: int
+    """失去体力的座位号（失去体力没有"来源"，它**就是**这个座位自己）。"""
+
+    amount: int
+    """这次**真的**掉了多少点体力 = ``before - after``（不是帧上的 ``amount``）。
+
+    失去体力没有伤害修正链，两者今天相等；但取差值才是"真的掉了多少"的定义，将来夹体力
+    上限 / 别的子帧也不会漂。
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class CardUseEvent:
     """一次**卡牌使用 / 打出**事实的公共面（chain-death-voices 票 03）：谁用了、什么牌、锚在哪。
 
@@ -851,6 +887,14 @@ class Engine:
         "一次使用 / 打出 ⇒ 恰好一条"。与 :attr:`_damage_events` 同一姿态：只 ``append``，
         不写状态、不发记录、不取随机数。
         """
+        self._life_loss_events: list[LifeLossEvent] = []
+        """**失去体力事实**的只增缓冲（vital-fx 票 01；表现层专用，不进记录流）。
+
+        唯一追加点 = :meth:`note_life_loss`，只由 ``steps.life_decrease_on`` 在
+        "扣减体力时"那一步的末尾调用一次，且只对**不是伤害**（没有
+        ``LIFE_DECREASE_DAMAGE_KEY``）且真的掉了体力的帧——故"一次失去体力 ⇒ 恰好一条"。
+        与 :attr:`_damage_events` 同一姿态：只 ``append``，不写状态、不发记录、不取随机数。
+        """
         self._started = False
         self._l0_in_progress = False
         """L0 派发（:meth:`_start`）**是否已经开始过**。
@@ -1068,6 +1112,34 @@ class Engine:
                 amount=int(amount),
                 nature=None if nature is None else DamageNature(nature),
             )
+        )
+
+    @property
+    def life_loss_events(self) -> tuple[LifeLossEvent, ...]:
+        """**失去体力事实**的派生面（vital-fx 票 01）：只增缓冲的只读视图。
+
+        与 :attr:`damage_events` 同一姿态：不进 ``records``、不消耗随机数 ⇒ 47 条金录像
+        逐字节不变。缺省为空元组的读取方（只喂静态 jsonl 录像的回放）因此不抛错、只少这一路。
+        """
+        return tuple(self._life_loss_events)
+
+    def note_life_loss(self, seat: int, amount: int) -> None:
+        """记一次**失去体力事件**（vital-fx 票 01；表现层专用）。
+
+        唯一调用点 = ``steps.life_decrease_on`` 里"扣减体力时"那一步的**末尾**，且只在
+        "这一帧不是伤害"（帧私有 ``LIFE_DECREASE_DAMAGE_KEY`` 缺省）且真的掉了体力
+        （``hp_loss > 0``）时调用，故：
+
+        - 一次失去体力事件只记一条（那一步每帧只跑一次）；
+        - ``amount`` 是这次**真的**掉了多少体力——调用点算 ``before - after``，**不是**帧上的
+          ``amount``（护甲分账 / 将来夹体力上限都不会让它漂）；
+        - ``seq`` 取**此刻最后一条记录**的序号，与 ``damage_events`` 同一"按记录序号释放"
+          口径，也保证它一定落在本批记录里（``seq > after`` 恒成立），轮询不重复下发。
+
+        只 ``append``：不写状态、不发记录、不取随机数。
+        """
+        self._life_loss_events.append(
+            LifeLossEvent(seq=self._last_seq, seat=int(seat), amount=int(amount))
         )
 
     @property

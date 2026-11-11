@@ -610,7 +610,7 @@ _ANIM_INI = STATIC_DIR / "anim.ini"
 # 住在同一份 `anim.ini` 里、但**默认值与钳制都不在本文件**的外来键前缀（`anim.js` 只搬数字）：
 # damage-fx 的三族 + chain-death-voices 的铁索。`test_anim_ini_lists_the_d8_durations_...` 用
 # 它把"不属于任何演出家族的键"过滤出来，逐族键表归各自的用例钉。
-_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_", "death_fx_")
+_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_", "death_fx_", "hp_loss_fx_", "heal_fx_")
 
 _D8_INI_KEYS = {
     "base_step",
@@ -6273,12 +6273,16 @@ def test_the_card_voice_wiring_is_one_way_from_sfx_ui_and_rides_the_same_seq_cur
 
 
 def test_the_playback_hooks_fire_in_damage_card_chain_death_order() -> None:
-    """`stepPlayback` 的四条演出钩子次序 = **伤害 → 卡牌语音 → 铁索 → 阵亡**。
+    """`stepPlayback` 的演出钩子次序 = **回复 → 伤害 → 失去体力 → 卡牌语音 → 铁索 → 阵亡**。
 
     票 01 / 票 03 落笔时各自写过「紧挨 `fireDamageEventsThrough(record.seq)` 的下一行」；
     后来卡牌语音插在伤害与铁索之间、阵亡又接在铁索之后——于是「下一行」只对卡牌语音成立。
-    这里按**真实相邻次序**一次钉住四条，并禁止相邻两条之间再插别的 `fire*EventsThrough`
+    这里按**真实相邻次序**一次钉住，并禁止相邻两条之间再插别的 `fire*EventsThrough`
     钩子（acceptance-map §1.1 的载体）：次序被改、或又插一条演出钩子，这条就红。
+
+    vital-fx 票 02 有意加了两条（这是本票的交付，不是漂移）：**回复**的钩子接在
+    `applyRecordEffects` 之后（它读记录本身），**失去体力**的钩子紧挨伤害那条（同一个 seq
+    游标）。两条都钉进来，下一次再插钩子照样红。
     """
     session = _SESSION_JS.read_text(encoding="utf-8")
     match = _STEP_PLAYBACK_RE.search(session)
@@ -6292,14 +6296,2150 @@ def test_the_playback_hooks_fire_in_damage_card_chain_death_order() -> None:
     assert "fireDamageEventsThrough" in calls, (
         f"伤害演出的钩子不在 stepPlayback 里：{calls}"
     )
-    # 从伤害那一条起切（技能演出钩子排在它之前，不在这条的契约里）。
-    order = calls[calls.index("fireDamageEventsThrough"):]
+    # 从**回复**那一条起切（技能演出钩子排在它之后、伤害之前，不在这条的契约里）。
+    order = calls[calls.index("fireVitalEventsThrough"):]
     assert order == [
+        "fireVitalEventsThrough",
+        "fireSkillEventsThrough",
         "fireDamageEventsThrough",
+        "fireHpLossEventsThrough",
         "fireCardEventsThrough",
         "fireChainEventsThrough",
         "fireDeathEventsThrough",
     ], (
-        "stepPlayback 的演出钩子必须依次是 伤害 → 卡牌语音 → 铁索 → 阵亡，"
-        f"且相邻两条之间不许插别的 `fire*EventsThrough`，实际：{calls}"
+        "stepPlayback 的演出钩子必须依次是 回复 → 技能 → 伤害 → 失去体力 → 卡牌语音 → "
+        f"铁索 → 阵亡，且相邻两条之间不许插别的 `fire*EventsThrough`，实际：{calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 01：失去体力事实只落进前端 state（本票不排播、不画）
+# ---------------------------------------------------------------------------
+
+
+def test_life_loss_facts_land_in_the_frontend_state_without_any_playback() -> None:
+    """`applyView` 收 `body.life_loss_events` ⇒ `state.lifeLossEvents`；换局清空。
+
+    票面 §做法 5：本票**只做事件源**——不排播、不画、不加演出钩子（排播层 `vital-fx.js`
+    是票 02，本票不许凭空多出消费方）。所以这里钉三处接线，再反向钉住"伤害 / 舞台两层都
+    不认识这个队列"与"session.js 里没有第二个读它的地方"。
+
+    **票 02 已经接上消费方**（`vital-fx.js:fireHpLossEventsThrough`），但消费方**不在**
+    `session.js` 里读这张表（钩子只传 seq），所以这条用例一个字不用改：它钉的仍是
+    "事实落进 state 这几处接线"与"伤害 / 动效 / 舞台三层不认识这个队列"。
+    """
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    apply_view = _js_function(session, "applyView")
+
+    assert "if (!Array.isArray(state.lifeLossEvents)) state.lifeLossEvents = [];" in apply_view, (
+        "`applyView` 要照 `state.damageEvents` 的姿态惰性初始化队列"
+    )
+    assert (
+        "for (const event of body.life_loss_events || []) state.lifeLossEvents.push(event);"
+        in apply_view
+    ), "`applyView` 必须把载荷里的 `body.life_loss_events` 收进队列"
+    assert "state.lifeLossEvents = [];" in apply_view, (
+        "换会话要清空（上一局的事实不属于新局）"
+    )
+
+    commit = _js_function(session, "commitView")
+    assert "state.lifeLossEvents = [];" in commit, (
+        "换局的另一处同样清空（与 `state.damageEvents` 同一块，别只在 applyView 清一半）"
+    )
+
+    body = _strip_js_comments(session)
+    touched = [line.strip() for line in body.splitlines() if "lifeLossEvents" in line]
+    assert len(touched) == 4, (
+        "`session.js` 里只许有这几处读写（换会话复位 / 惰性初始化 + push / commit 清空）："
+        f"本票不排播、不画，多出来的引用就是提前接上了还没到的层：{touched}"
+    )
+
+    for name in ("effects.js", "damage-fx.js", "fx-core.js", "table.js"):
+        source = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        assert "lifeLossEvents" not in source, (
+            f"{name} 不认识 `state.lifeLossEvents`：失去体力的排播 / 画面是票 02 / 03，"
+            "伤害 / 动效两层一个字都不动"
+        )
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 02：体力演出的排播缝（`vital-fx.js`）
+#
+# 机械的四半（行为归烟测 `U-VITAL-02..`）：
+# 1. **脚本清单 / 层 / 样式**：`vital-fx.js` 紧挨 `damage-fx.js`（且排在 `sfx-ui.js` 之前，
+#    后者要读 `vitalFxCapFor` 定声道池长）；`#t-vital-fx.vital-fx-layer` 是壳里又一张透明
+#    覆盖层（z 与伤害层同档、DOM 在后 ⇒ 画在伤害层之上），**不挂 `filter`、不碰 `.fx-flash`**。
+# 2. **家族表 + 三个只读口**（node 探针驱动真函数）：`vitalFxRendererFor` /
+#    `vitalFxCapFor`（1–8、缺省 2、钳在读者侧）/ `vitalFxHoldFor`（HP_LOSS 恒 false、
+#    HEAL 3+ true）。
+# 3. **两条事件源 + 一把闸门 + 时停登记**：`stepPlayback` 里
+#    `fireHpLossEventsThrough(record.seq)` 紧挨伤害那条、`fireVitalEventsThrough(record)`
+#    在 `applyRecordEffects` 之后；`registerPlaybackHold("vital", vitalFxPlaybackHold)`；
+#    三处收尾钩子（`renderTable` / `commitView` / 换局清 `state.lifeLossEvents`）。
+# 4. **音效接缝**：`VITAL_SFX_ENGINES` + 四个 `vitalSfx*` 调用点，缺件静默（票 03 / 04 之前
+#    两个模块都不存在，这一条今天就生效）。
+# ---------------------------------------------------------------------------
+
+_VITAL_FX_JS = STATIC_DIR / "vital-fx.js"
+
+# vital-fx 票 03 / 04 的四个模块（画面 / 音效各两份）。这张表是"新模块必须登记"的落点：
+# 它逐行断言"清单里有、磁盘上有、挂了全局名、不发请求、不接管 DOM"。
+# 票 03 追加失去体力两行；票 04 追加回复体力两行（spec §硬约束把四个全局名逐名列了出来）。
+_VITAL_FX_GLOBALS: dict[str, str] = {
+    "fx-hp-loss.js": "SgsHpLossFX",
+    "sfx-hp-loss.js": "SgsHpLossSfx",
+    "fx-heal.js": "SgsHealFX",
+    "sfx-heal.js": "SgsHealSfx",
+}
+
+
+def test_the_vital_fx_playback_layer_is_listed_next_to_damage_fx() -> None:
+    """`vital-fx.js` 进清单、紧挨 `damage-fx.js`，且仍是一份**独立**的普通严格脚本。
+
+    「独立」是 spec §硬约束：它有自己的家族表 / cap 口 / 队列 / 时停判据，**不许**借伤害
+    家族的三个函数（`damageFxNatureKind` / `damageFxRendererFor` / `damageFxCapFor`）——
+    那样两条家族的 cap / 错开 / 灰阶口径会互相打架。三个借来的只读小工具（布局 / 时钟）
+    都按 `typeof` 在**调用时**解析，与 `damage-fx.js` 同一个方向。
+    """
+    srcs = _script_srcs()
+    assert "vital-fx.js" in srcs, f"index.html 必须加载 vital-fx.js：{srcs}"
+    assert (STATIC_DIR / "vital-fx.js").is_file(), "static/ 里缺少 vital-fx.js"
+    assert srcs.index("vital-fx.js") == srcs.index("damage-fx.js") + 1, (
+        f"vital-fx.js 必须紧挨 damage-fx.js（同姿态的独立排播层）：{srcs}"
+    )
+    assert srcs.index("vital-fx.js") < srcs.index("sfx-ui.js"), (
+        "vital-fx.js 要排在 sfx-ui.js 之前（后者读 vitalFxCapFor 定声道池长）"
+    )
+
+    text = _VITAL_FX_JS.read_text(encoding="utf-8")
+    assert _LEADING_COMMENT.sub("", text, count=1).startswith('"use strict";'), (
+        "vital-fx.js 的首条语句必须是 \"use strict\";"
+    )
+    assert not re.search(r"^\s*(?:import|export)\b", text, re.M), (
+        "vital-fx.js 是普通脚本：不许 ESM"
+    )
+    body = _strip_js_comments(text)
+    assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", body), "vital-fx.js 不发请求"
+    assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", body), (
+        "vital-fx.js 不自己取 DOM：层用 `$(\"t-vital-fx\")`，布局工具借 effects.js"
+    )
+    for name in ("damageFxNatureKind", "damageFxRendererFor", "damageFxCapFor"):
+        assert name not in body, (
+            f"vital-fx.js 不许调 {name}：两条家族不共用户口（spec §硬约束）"
+        )
+    assert re.search(r'^const VITAL_FX_FAMILIES = \{$', body, re.M), (
+        "家族表必须是这一份文件里的唯一查表处（`const VITAL_FX_FAMILIES = {`）"
+    )
+    assert re.search(r'^  HP_LOSS:\s+\{', body, re.M) and re.search(r'^  HEAL:\s+\{', body, re.M), (
+        "家族表有且只有 HP_LOSS / HEAL 两行"
+    )
+    assert 'registerPlaybackHold("vital", vitalFxPlaybackHold);' in body, (
+        "文件末尾要把 `vitalFxPlaybackHold` 登记进排播侧的暂停表（登记名 = vital）"
+    )
+    assert '$("t-vital-fx")' in body, "层节点按 id 取（`$` 是 core.js 的读取口）"
+
+
+def test_vital_fx_scripts_keep_their_global_names_and_stay_static() -> None:
+    """票 03 / 04 的四个模块（画面 / 音效）逐行登记在 `_VITAL_FX_GLOBALS` 里。
+
+    票 02 建这张表时它是空的（四个模块还不存在）；票 03 补上失去体力的两行、票 04 补上回复体力
+    的两行之后，它逐行断言"清单里有、磁盘上有、顺序在 `sfx-ui.js` 之前、挂了全局名、不发请求、
+    不接管 DOM"。四个模块现在都在清单里（票 04 起 `fx-heal.js` / `sfx-heal.js` 允许且必须加载）。
+    """
+    srcs = _script_srcs()
+    for name, global_name in _VITAL_FX_GLOBALS.items():
+        assert name in srcs, f"index.html 必须加载 {name}：{srcs}"
+        assert (STATIC_DIR / name).is_file(), f"static/ 里缺少 {name}"
+        assert srcs.index(name) < srcs.index("sfx-ui.js"), (
+            f"{name} 必须在 sfx-ui.js 之前（音效 / 声道池按名取它）"
+        )
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert _LEADING_COMMENT.sub("", text, count=1).startswith('"use strict";'), (
+            f"{name} 的首条语句必须是 \"use strict\";"
+        )
+        assert re.search(rf"global\.{global_name}\s*=\s*\{{", text), (
+            f"{name} 必须把入口挂在 window.{global_name}"
+        )
+        assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", text), (
+            f"{name} 是纯静态脚本：不发请求"
+        )
+        assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", text), (
+            f"{name} 不接管 DOM（覆盖层与挂载是排播层的事）"
+        )
+
+
+def test_the_vital_fx_layer_is_its_own_overlay_next_to_the_damage_layer() -> None:
+    """`#t-vital-fx` / `.vital-fx-layer` 是**独立**的覆盖层，且**没有**整屏闪。
+
+    - 层：壳里的常驻空 div、`pointer-events: none`、z 与 `.damage-fx-layer` 同档（19）；
+      DOM 排在 `#t-damage-fx` 之后 ⇒ 同 z 下画在伤害层之上（spec §做法 4）；
+    - **不碰 `.fx-flash`、不挂 `filter`**：素材页这两套演出没有整屏闪（spec §硬约束）；
+    - 层里只放**一张**可见 canvas（跨演出复用），离屏舞台按槽复用、数量随在播数增长。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<div\b[^>]*\bid=\"t-vital-fx\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少体力演出层 #t-vital-fx"
+    assert re.search(r'class="[^"]*vital-fx-layer', tag.group(0)), tag.group(0)
+    assert "aria-hidden" in tag.group(0), "体力演出是纯视觉层，必须 aria-hidden"
+    assert html.index('id="table-shell"') < html.index('id="t-vital-fx"'), (
+        "体力层必须住在 .table-shell 里（座位矩形按壳内坐标量）"
+    )
+    assert html.index('id="t-damage-fx"') < html.index('id="t-vital-fx"'), (
+        "层排在 #t-damage-fx 之后（同 z-index 档 ⇒ 体力画在伤害之上）"
+    )
+    assert re.search(r'<div\b[^>]*\bid="t-vital-fx"[^>]*></div>', html), (
+        "层必须仍是空的常驻 div（画布由排播层挂 / 摘）"
+    )
+
+    rule = _css_rule(".vital-fx-layer")
+    for pattern, why in (
+        (r"position:\s*absolute", "绝对定位"),
+        (r"inset:\s*0", "铺满表壳"),
+        (r"pointer-events:\s*none", "不吃指针"),
+        (r"overflow:\s*hidden", "画布裁在壳内"),
+    ):
+        assert re.search(pattern, rule), f"层必须{why}：{rule}"
+    assert _layer_z_index(".vital-fx-layer") == _layer_z_index(".damage-fx-layer") == 19, (
+        "体力层与伤害层同 z-index 档（19）：DOM 在后 ⇒ 画在上面"
+    )
+    assert _layer_z_index(".vital-fx-layer") < _layer_z_index(".card-preview"), (
+        "层在卡牌预览（55）之下"
+    )
+    assert re.search(r"\.vital-fx-layer canvas\s*\{[^}]*width:\s*100%", _CSS_TEXT), (
+        "层里那张 canvas 按层的 CSS 尺寸铺满（view 与 dpr 由 JS 算）"
+    )
+
+    body = _strip_js_comments(_VITAL_FX_JS.read_text(encoding="utf-8"))
+    assert "fx-flash" not in body, "这两套演出没有整屏闪：不碰 `.fx-flash`"
+    assert not re.search(r"\.style\.filter\b|\bfilter\s*:", body), (
+        "这两套演出没有整屏闪：不挂 `filter`（spec §硬约束；`Array.filter` 不算）"
+    )
+    assert "grayscale" not in body, "没有整屏灰阶"
+
+
+def test_anim_ini_registers_the_vital_fx_concurrency_keys() -> None:
+    """`hp_loss_fx_concurrency` / `heal_fx_concurrency`（1–8、缺省 2）进 `anim.ini`。
+
+    两份键与三个伤害并发表同一口径：缺键 / 非数字回退缺省 2、`0` / 负数钳到 1、`> 8` 钳到 8
+    ——钳制在**读者侧**（`vitalFxCapFor`），`anim.js` 只搬数字。新前缀必须同批登记为外来键，
+    否则 `anim.js` 会把它们当未知键删掉、用户改了不生效。
+    """
+    entries = _ini_entries()
+    for key, family in (("hp_loss_fx_concurrency", "HP_LOSS"), ("heal_fx_concurrency", "HEAL")):
+        assert key in entries, f"anim.ini 缺少并发表键 {key}（{family} 的 cap）"
+        assert float(entries[key]) == 2, f"{key} 的缺省是 2（spec §多目标）：{entries[key]}"
+    ini_text = _ANIM_INI.read_text(encoding="utf-8")
+    for key, family in (("hp_loss_fx_concurrency", "HP_LOSS"), ("heal_fx_concurrency", "HEAL")):
+        assert re.search(rf"^{key}\s*=\s*2\s+#\s*\S+", ini_text, re.M), (
+            f"{key} 必须带一行注释（用户改得动）：{entries[key]}"
+        )
+    assert "并发表" in ini_text, "并发表那一块的口径要写清（1–8 / 缺省 2 / 钳在读者侧）"
+
+    anim_js = _ANIM_JS.read_text(encoding="utf-8")
+    prefixes = re.search(r"^const ANIM_FOREIGN_KEY_PREFIXES = \[(?P<body>[^\]]*)\];$", anim_js, re.M)
+    assert prefixes is not None, "anim.js 里找不到 ANIM_FOREIGN_KEY_PREFIXES"
+    for prefix in ("hp_loss_fx_", "heal_fx_"):
+        assert f'"{prefix}"' in prefixes.group("body"), (
+            f"anim.js 必须把 {prefix} 登记成外来键（默认值 / 钳制在票 03 / 04 的模块里）"
+        )
+
+
+_VITAL_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
+
+/* 每份脚本单独编译、同一个 context 的全局词法作用域跨脚本可见——与页面一致的加载方式。
+ * 每个 ini 变体起**新的** sandbox（= 用户改完文件刷新页面）：`animLoadConfig` 只做
+ * `Object.assign`，上一份表里留下的键不会因为这一份删了而消失。 */
+function makeSandbox(iniText = ini) {
+  const noteNode = { textContent: "", hidden: true };
+  const context = vm.createContext({
+    console,
+    setTimeout,
+    clearTimeout,
+    fetch: async () => ({ ok: true, text: async () => iniText }),
+    document: {
+      getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+      createElement: () => ({
+        style: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        appendChild() {},
+        setAttribute() {},
+      }),
+    },
+  });
+  context.globalThis = context;
+  context.window = context;
+  context.$ = (id) => context.document.getElementById(id);
+  for (const name of ["anim.js", "vital-fx.js"]) {
+    vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+  }
+  return context;
+}
+
+const context = makeSandbox();
+const report = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     const row = (name) => {
+       const spec = VITAL_FX_FAMILIES[name];
+       return {
+         renderer: spec.renderer,
+         fallback: spec.fallback,
+         holdsAt: String(spec.holdsAt),
+         cap: spec.cap,
+         stagger: spec.stagger,
+       };
+     };
+     // 画面模块按**全局名**调用时解析：缺件 ⇒ null（不播，事件仍被消费）。
+     const missing = vitalFxRendererFor("HP_LOSS");
+     const unknownFamily = vitalFxFamilyFor("POISON");
+     const stub = {
+       create() {},
+       TIMING_PREFIX: "hp_loss_fx_",
+       TIMING_FIELDS: ["total", "fade"],
+     };
+     window.SgsHpLossFX = stub;
+     const resolvedAtCallTime = vitalFxRendererFor("HP_LOSS") === stub;
+     // 时间轴字段表：前缀 / 字段名都从画面模块读，缺键不硬造，非数字跳过。
+     Object.assign(animConfig, {
+       hp_loss_fx_3_total: 1800,
+       hp_loss_fx_3_fade: 250,
+       hp_loss_fx_2_total: "abc",
+     });
+     const timing = {
+       three: vitalFxTiming("HP_LOSS", 3),
+       two: vitalFxTiming("HP_LOSS", 2),
+     };
+     delete window.SgsHpLossFX;
+     const afterDelete = vitalFxRendererFor("HP_LOSS");
+     const withoutModule = vitalFxTiming("HP_LOSS", 3);
+     // 时停判据：在播表 + 队列都算（回复 3+ 档串行，交接缝隙也不许漏冻）。
+     const holdEmpty = vitalFxPlaybackHold();
+     vitalPlays.push({ family: "HEAL", variant: 3 });
+     const holdLiveHeal = vitalFxPlaybackHold();
+     vitalPlays.length = 0;
+     vitalQueue.push({ family: "HEAL", amount: 3 });
+     const holdQueuedHeal = vitalFxPlaybackHold();
+     vitalQueue.length = 0;
+     vitalPlays.push({ family: "HP_LOSS", variant: 3 });
+     const holdLiveHpLoss = vitalFxPlaybackHold();
+     vitalPlays.length = 0;
+     vitalQueue.push({ family: "HEAL", amount: 2 });
+     const holdQueuedHealLight = vitalFxPlaybackHold();
+     vitalQueue.length = 0;
+     return JSON.stringify({
+       families: Object.keys(VITAL_FX_FAMILIES),
+       hpLoss: row("HP_LOSS"),
+       heal: row("HEAL"),
+       missing,
+       unknownFamily,
+       resolvedAtCallTime,
+       afterDelete,
+       timing,
+       withoutModule,
+       hold: {
+         empty: holdEmpty,
+         liveHeal: holdLiveHeal,
+         queuedHeal: holdQueuedHeal,
+         liveHpLoss: holdLiveHpLoss,
+         queuedHealLight: holdQueuedHealLight,
+         hpLossAlways: [vitalFxHoldFor("HP_LOSS", 1), vitalFxHoldFor("HP_LOSS", 3)],
+         healByTier: [
+           vitalFxHoldFor("HEAL", 1),
+           vitalFxHoldFor("HEAL", 2),
+           vitalFxHoldFor("HEAL", 3),
+           vitalFxHoldFor("HEAL", 4),
+         ],
+         unknown: vitalFxHoldFor("POISON", 3),
+       },
+       variant: {
+         one: vitalFxVariantOf(1),
+         two: vitalFxVariantOf(2),
+         three: vitalFxVariantOf(3),
+         four: vitalFxVariantOf(4),
+         zero: vitalFxVariantOf(0),
+         junk: vitalFxVariantOf("abc"),
+       },
+       caps: {
+         hpLoss: vitalFxCapFor("HP_LOSS"),
+         heal: vitalFxCapFor("HEAL"),
+         unknown: vitalFxCapFor("POISON"),
+       },
+       constants: {
+         stagger: VITAL_FX_STAGGER_MS,
+         concurrency: VITAL_FX_CONCURRENCY,
+         capMin: VITAL_FX_CAP_MIN,
+         capMax: VITAL_FX_CAP_MAX,
+         maxVariant: VITAL_FX_MAX_VARIANT,
+       },
+       note: $("t-anim-note").textContent,
+       animConfigKeys: Object.keys(animConfig),
+     });
+   })()`,
+  context,
+  { filename: "vital_fx_probe.js" },
+);
+console.log(report);
+"""
+
+
+def _vital_fx_probe() -> dict:
+    """跑真 `anim.js` + 真 `vital-fx.js`（node vm），拿回家族表 / 三个只读口 / 时停判据。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "vital_fx_probe.mjs"
+        probe.write_text(_VITAL_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"vital-fx 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def vital_fx_probe() -> dict:
+    """一次探针跑完，家族表 / cap / 时停几条用例共用。"""
+    return _vital_fx_probe()
+
+
+def test_the_vital_fx_family_table_is_the_only_lookup_and_its_rows_say_everything(
+    vital_fx_probe: dict,
+) -> None:
+    """票面 §1：家族表两行、字段齐全；`holdsAt` 是时停的唯一真源。
+
+    - `renderer` / `fallback` 存**全局名**（调用时解析）——两个画面模块是票 03 / 04 的文件，
+      今天都不存在；
+    - `holdsAt`：失去体力 `Infinity`（永不冻）、回复 `3`（3+ 档冻）；
+    - `cap`：`anim.ini` 的键名，只在这张表里写一次；
+    - `fallback: null` = 模块缺件就不播（与雷 / 火同姿态），事件仍被消费。
+    """
+    probe = vital_fx_probe
+    assert probe["families"] == ["HP_LOSS", "HEAL"], f"家族表只有两行：{probe['families']}"
+    assert probe["hpLoss"] == {
+        "renderer": "SgsHpLossFX", "fallback": None, "holdsAt": "Infinity",
+        "cap": "hp_loss_fx_concurrency", "stagger": True,
+    }, f"失去体力那一行：{probe['hpLoss']}"
+    assert probe["heal"] == {
+        "renderer": "SgsHealFX", "fallback": None, "holdsAt": "3",
+        "cap": "heal_fx_concurrency", "stagger": True,
+    }, f"回复那一行：{probe['heal']}"
+
+    # 全局名调用时解析：现在都没有模块 ⇒ 不播；装上就是它；卸掉又变回 null。
+    assert probe["missing"] is None, "缺件必须返回 null（不播，事件仍被消费）"
+    assert probe["unknownFamily"] is None, "未登记的家族没有 fallback"
+    assert probe["resolvedAtCallTime"] is True, "`vitalFxRendererFor` 必须在调用时解析全局名"
+    assert probe["afterDelete"] is None, "模块不在时不许记缓存（缺件 → 不播）"
+
+    # 三条硬口径常量（票面 §1 / §2 / §3）。
+    assert probe["constants"] == {
+        "stagger": 120, "concurrency": 2, "capMin": 1, "capMax": 8, "maxVariant": 3,
+    }, f"常量：{probe['constants']}"
+    assert probe["variant"] == {
+        "one": 1, "two": 2, "three": 3, "four": 3, "zero": 1, "junk": 1,
+    }, f"档位换算（3+ 一律 3 档）：{probe['variant']}"
+    # cap 键名只在家族表里写一次（读的一侧是 `vitalFxCapFor`）。
+    body = _strip_js_comments(_VITAL_FX_JS.read_text(encoding="utf-8"))
+    for key in ("hp_loss_fx_concurrency", "heal_fx_concurrency"):
+        assert body.count(f'"{key}"') == 1, f"{key} 只许在家族表里出现一次：{body.count(key)}"
+
+
+def test_the_vital_fx_hold_is_per_family_and_counts_plays_and_queue(vital_fx_probe: dict) -> None:
+    """票面 §3：`vitalFxHoldFor(family, variant)` 的矩阵 + 原因串。
+
+    - `HP_LOSS` **恒 false**（用户口径：失去体力不冻回放），1 档到 3+ 档都一样；
+    - `HEAL` **3+ 档 true**、1 / 2 档 false；
+    - `vitalFxPlaybackHold()` 返回原因串 `"heal:3"`，**在播表与队列都算**（票面 §3 / trap：
+      重演出串行后"上一条摘层、下一条还没起"的缝隙也不许漏冻）。
+    """
+    hold = vital_fx_probe["hold"]
+    assert hold["hpLossAlways"] == [False, False], f"失去体力永不冻：{hold['hpLossAlways']}"
+    assert hold["healByTier"] == [False, False, True, True], (
+        f"回复 1 / 2 档不冻、3+ 档冻：{hold['healByTier']}"
+    )
+    assert hold["unknown"] is False, "未登记家族不冻"
+    assert hold["empty"] == "", "没有在播 / 排队 ⇒ 空串（不要求暂停）"
+    assert hold["liveHeal"] == "heal:3", f"3+ 档回复在播：{hold['liveHeal']}"
+    assert hold["queuedHeal"] == "heal:3", (
+        f"排队里的 3+ 档回复也算（串行交接的缝隙不许漏冻）：{hold['queuedHeal']}"
+    )
+    assert hold["liveHpLoss"] == "", (
+        f"失去体力在播也不许要求暂停（`hp-loss` 这个原因串永远不返回）：{hold['liveHpLoss']}"
+    )
+    assert hold["queuedHealLight"] == "", "排队的 2 档回复不冻"
+    # 原因串里的数字来自家族表（不另写一份 3）。
+    body = _strip_js_comments(_VITAL_FX_JS.read_text(encoding="utf-8"))
+    reason = _js_function(body, "vitalFxHoldReason")
+    assert "spec.holdsAt" in reason, f"原因串必须从家族表取阈值：{reason}"
+    assert "heal:3" not in body, "别在别处硬写 `heal:3`（唯一真源是家族表的 holdsAt）"
+
+
+def test_the_vital_fx_cap_is_read_per_family_from_anim_ini(vital_fx_probe: dict) -> None:
+    """票面 §1：cap 键只写在家族表里、读的一侧是 `vitalFxCapFor`，**钳在读者侧**。
+
+    每个变体都是**一份真 ini 文本 → 全新 sandbox → `animLoadConfig()`**（= 用户改完文件刷新
+    页面），这条链同时证明：新键没被 `anim.js` 的未知键过滤器删掉、解析出的就是生效值。
+    缺键 / 非数字 → 2；`0` / 负数 → 1；`> 8` → 8；小数取整（cap 是条数）。
+    """
+    caps = vital_fx_probe["caps"]
+    assert caps == {"hpLoss": 2, "heal": 2, "unknown": 2}, (
+        f"真 ini 的缺省都是 2（spec §多目标）；未登记家族也走缺省：{caps}"
+    )
+    # 静态口径：读口唯一、调 animTiming（不是自己缓存一份数字）。
+    cap_for = _js_function(_VITAL_FX_JS.read_text(encoding="utf-8"), "vitalFxCapFor")
+    assert "animTiming(" in cap_for, "cap 的读取入口必须**调用时**解析 anim.ini"
+    assert "VITAL_FX_CONCURRENCY" in cap_for, "缺键 / 非数字回退缺省 2"
+    assert "VITAL_FX_CAP_MIN" in cap_for and "VITAL_FX_CAP_MAX" in cap_for, "钳制在读者侧"
+    assert "Math.round" in cap_for, "cap 是条数：小数取整"
+
+
+def test_the_vital_fx_timing_reader_derives_fields_from_the_renderer_module(
+    vital_fx_probe: dict,
+) -> None:
+    """票面 §1：`vitalFxTiming` 只搬数字，字段名 / 前缀来自画面模块（票 03 / 04 的 `DEFAULT_TIMING`）。
+
+    缺键不硬造、非数字跳过；画面模块缺件 ⇒ 空表（`create()` 根本不会被调到）。
+    """
+    timing = vital_fx_probe["timing"]
+    assert timing["three"] == {"hp_loss_fx_3_total": 1800, "hp_loss_fx_3_fade": 250}, (
+        f"字段名从前缀 + TIMING_FIELDS 得来、值原样搬：{timing['three']}"
+    )
+    assert timing["two"] == {}, f"非数字跳过、缺键不硬造：{timing['two']}"
+    assert vital_fx_probe["withoutModule"] == {}, (
+        "画面模块缺件 ⇒ 时间轴空表（与 `renderer: null` 一致：不播）"
+    )
+
+
+def test_the_vital_fx_playback_hooks_are_wired_into_session_and_table() -> None:
+    """票面 §2 / §4：两条事件源的触发点 + 三处收尾钩子。
+
+    - **失去体力**：`fireHpLossEventsThrough(record.seq)` 与伤害事件**共用同一条 seq 游标**，
+      紧挨 `fireDamageEventsThrough(record.seq)` 的下一行；两条盲刷路径（无记录 / 批尾兜底）
+      也照伤害那两处写成 `Infinity`；
+    - **回复**：`fireVitalEventsThrough(record)` 在 `applyRecordEffects(record, …)` **之后**
+      （一条 `hp_change` 记录就是回复的事实源）；
+    - **收尾**：`table.js:renderTable` 末尾 `vitalDropStalePlays()`（紧挨伤害那条）、
+      `session.js:commitView` 换会话时 `clearVitalFx()`，`state.lifeLossEvents = []` 仍由
+      `commitView` 自己清（票 01 落的那一行）。
+    """
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = _strip_js_comments(match.group("body"))
+
+    damage_call = "fireDamageEventsThrough(record.seq);"
+    hp_call = "fireHpLossEventsThrough(record.seq);"
+    assert damage_call in body and hp_call in body, (
+        "失去体力的排播钩子必须挂在伤害事件同一条 seq 游标上"
+    )
+    damage_at = body.index(damage_call)
+    hp_at = body.index(hp_call)
+    assert body[damage_at + len(damage_call):hp_at].strip() == "", (
+        "`fireHpLossEventsThrough(record.seq)` 必须紧挨 `fireDamageEventsThrough(record.seq)` 的下一行"
+    )
+    apply_at = body.index("applyRecordEffects(record")
+    heal_at = body.index("fireVitalEventsThrough(record);")
+    assert apply_at < heal_at, "回复的排播钩子在 `applyRecordEffects` 之后调"
+    assert heal_at < body.index("fireSkillEventsThrough(record.seq);"), (
+        "回复钩子与其它演出钩子同一段（`applyRecordEffects` 之后、别的演出之前）"
+    )
+
+    # 两条盲刷路径照伤害层的姿态（无记录时的纯刷新 / 批尾兜底）。
+    apply_view = _js_function(session, "applyView")
+    assert "fireHpLossEventsThrough(Infinity);" in apply_view, (
+        "纯刷新没有回放时，失去体力事实按响应立即消费（照 fireDamageEventsThrough 的姿态）"
+    )
+    finish = _js_function(session, "finishPlayback")
+    assert "fireHpLossEventsThrough(Infinity);" in finish, "批尾兜底同样消费到点的事实"
+
+    # 收尾钩子（反向零调用：排播层不自己挂到动效层里）。
+    table = _TABLE_JS.read_text(encoding="utf-8")
+    render = _strip_js_comments(_js_function(table, "renderTable"))
+    drop = "damageDropStalePlays();"
+    vital_drop = "vitalDropStalePlays();"
+    assert drop in render and vital_drop in render, "`renderTable` 末尾要按矩形作废体力在播演出"
+    assert render[render.index(drop) + len(drop):render.index(vital_drop)].strip() == "", (
+        "`vitalDropStalePlays()` 紧挨 `damageDropStalePlays()`（两层各判各的，两行挨着）"
+    )
+
+    commit = _js_function(session, "commitView")
+    assert "clearVitalFx();" in commit, "换局要清体力演出的队列 / 画布 / 计时器 / 声音"
+    assert commit.index("clearDamageFx();") < commit.index("clearVitalFx();"), (
+        "两层各清各的（体力层的清场挨着伤害层那一段）"
+    )
+    assert commit.index("clearVitalFx();") < commit.index("state.lifeLossEvents = [];"), (
+        "先清演出、再清事实队列（与 `state.damageEvents` 同姿态）"
+    )
+
+
+def test_the_vital_sfx_seam_sits_behind_the_same_switch_and_degrades_silently() -> None:
+    """票面 §5：`VITAL_SFX_ENGINES` + 四个 `vitalSfx*` 调用点，三条既有口径逐字沿用。
+
+    「同一套开关」= **缺省静音** / **一次性手势** / **没有 `AudioContext` 就静默降级**；
+    声道池按模块分组的机制复用伤害那张表（`damageSfxLanes` 按 key 分桶、池长 = `vitalFxCapFor`、
+    槽位超出补建）。本票交付时两个音效模块（票 03 / 04）**都还不存在**：`vitalSfxEnsureModules`
+    必须逐行走 `if (!engine.sfx) continue;`——不抛错、不建 `AudioContext`、也不留空桶
+    （行为由烟测 `U-VITAL-08` 钉，这里钉接线与缺件分支的位置）。
+    """
+    sfx_ui = (STATIC_DIR / "sfx-ui.js").read_text(encoding="utf-8")
+    vital = (STATIC_DIR / "vital-fx.js").read_text(encoding="utf-8")
+
+    # 1) 引擎表：全局名照票面（票 03 / 04 的文件名不在这张表里）。
+    assert re.search(r"^const VITAL_SFX_ENGINES = \{$", sfx_ui, re.M), (
+        "sfx-ui.js 里缺少 `const VITAL_SFX_ENGINES = {`"
+    )
+    assert 'HP_LOSS: { key: "SgsHpLossSfx", fx: "SgsHpLossFX" },' in sfx_ui, "失去体力的音效 / 画面模块名"
+    assert 'HEAL: { key: "SgsHealSfx", fx: "SgsHealFX" },' in sfx_ui, "回复的音效 / 画面模块名"
+
+    # 2) 四个调用点 + 池长读唯一的 cap 口（不另写一份 2）。
+    lanes = _js_function(sfx_ui, "vitalSfxEnsureLanes")
+    assert "damageSfxLanes[key]" in lanes, "复用伤害那张按模块分桶的声道池"
+    assert "vitalFxCapFor(engine.family)" in lanes, "池的起始长度 = 该家族的 cap（唯一读口）"
+    assert "engine.sfx.create(timeline)" in lanes, "没有模块就一条声道都不建"
+    for name in ("vitalSfxStart", "vitalSfxTick", "vitalSfxStop", "vitalSfxStopAll"):
+        assert re.search(rf"^function {name}\(", sfx_ui, re.M), f"sfx-ui.js 缺 {name}()"
+        assert name in vital, f"vital-fx.js 要在四个点调 {name}（单向缝：它只接 play 对象）"
+    # 3) 缺件静默：`vitalSfxEnsureModules` 先跳过没加载的模块，`damageSfxEnsureModules` 顺手调它。
+    ensure = _js_function(sfx_ui, "vitalSfxEnsureModules")
+    assert "if (!engine.sfx) continue;" in ensure, (
+        "模块缺件必须**先跳过**再谈声道（本票两个模块都不存在，这条是今天唯一的分支）"
+    )
+    assert ensure.index("if (!engine.sfx) continue;") < ensure.index("vitalSfxEnsureLanes"), (
+        "跳过要发生在建声道之前（不许先建池再跳过）"
+    )
+    modules = _js_function(sfx_ui, "damageSfxEnsureModules")
+    assert "vitalSfxEnsureModules()" in modules, (
+        "体力两个模块要在**同一个手势**里建（damageSfxEnsureModules 顺手调它）"
+    )
+    mute = _js_function(sfx_ui, "damageSfxMute")
+    assert "vitalSfxMute" in mute, "开关要灌到体力那两路（与伤害声道同一次静音）"
+
+    # 4) 单向缝：排播层不碰音频 API，也不读开关的内部状态。
+    body = _strip_js_comments(vital)
+    assert "AudioContext" not in body, "vital-fx.js 不碰音频 API（音效层的事）"
+    assert "localStorage" not in body, "开关的记忆归 sfx-ui.js（排播层不认识 sgs.sfx）"
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 03：失去体力家族（画面 `SgsHpLossFX` + 音效 `SgsHpLossSfx`，**无时停**）
+#
+# 与 damage-fx-natures 票 01 / 03 同样的三块：
+# 1. **清单 / 静态契约**：两份新脚本进清单（画面紧跟 `fx-fire.js`、音效紧跟 `sfx-fire.js`），
+#    都是严格模式普通脚本（`_VITAL_FX_GLOBALS` 那条用例已覆盖全局名 / 不发请求 / 不碰 DOM）；
+# 2. **画面模块的形状与双时间轴**：`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` /
+#    `TIMING_KEYS` / `MAX_TOTAL_MS` 与剑 / 雷 / 火同形；字段名由 `DEFAULT_TIMING` 生成；导出档
+#    照素材页的 2.65 / 2.90 / 3.35 秒链；牌桌档把素材页的四个拍子（`spotAt` / 第一次 `detachAt` /
+#    `numAt` / `duration`）按**锚点**压到 ini 的 `spot` / `break` / `num` / `total` 上（`warp`），
+#    钳制 `spot ≤ break ≤ num ≤ total ≤ 2200` 在模块内部；
+# 3. **音效车道适配器**：`create(timeline)` → `{start, stop, mute, tick}`（与 `SgsSfx` 同形），
+#    cue 时刻从时间轴读，四档排程在假 Web Audio 上整条走一遍。
+#
+# **档位判据只有一处**（spec §档位）：`vital-fx.js:vitalFxVariantOf(amount)`。素材包的
+# `SgsHpLossFX.tierFor()` 不许作为第二份判据活下来——画面模块只认排播层交给它的 `variant`。
+# 行为（层出现 / 三档读数 / 飘字 / 摘层时刻 / 全程不冻 / 伤害不漏墨）归烟测 `U-VITAL-09*`。
+# ---------------------------------------------------------------------------
+
+_HP_LOSS_JS = STATIC_DIR / "fx-hp-loss.js"
+_HP_LOSS_SFX_JS = STATIC_DIR / "sfx-hp-loss.js"
+
+# `hp_loss_fx_<档>_<字段>`。**不带档位号**的 `hp_loss_fx_concurrency`（票 02 的并发表）不是
+# 时长键，别混进这张对照表。
+_HP_LOSS_TIMING_KEY = re.compile(r"^hp_loss_fx_\d+_")
+
+_HP_LOSS_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 记录型 2D 上下文：`create()` / `draw()` 全走真代码，像素不参与断言。所有离屏画布的
+ * `fillText` 收进**同一份**日志：飘字是烘在贴图上的（`bakeNumber` 用 fillText 烘、`draw()`
+ * 只 drawImage），所以"飘字写真实点数"只能从这份日志读。 */
+const texts = [];
+function makeCtx() {
+  const gradient = { addColorStop() {} };
+  const target = { texts };
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+      if (prop === "measureText") return () => ({ width: 10 });
+      if (prop === "fillText") return (text) => { texts.push(String(text)); };
+      if (prop in obj) return obj[prop];
+      const fn = () => {};
+      obj[prop] = fn;
+      return fn;
+    },
+    set(obj, prop, value) { obj[prop] = value; return true; },
+  });
+}
+
+function makeCanvas() {
+  const ctx = makeCtx();
+  return { width: 0, height: 0, getContext: () => ctx };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout,
+  document: {
+    getElementById: () => null,
+    createElement: (tag) => (tag === "canvas" ? makeCanvas() : {
+      style: {}, setAttribute() {}, appendChild() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+/* 外层变量在 vm 的脚本里看不见：把文本日志挂到沙箱全局上（探针里叫 `texts`）。 */
+context.texts = texts;
+
+vm.runInContext(readFileSync(staticPath("fx-hp-loss.js"), "utf8"), context,
+                { filename: "fx-hp-loss.js" });
+
+const report = vm.runInContext(`(() => {
+  const fx = SgsHpLossFX;
+  const dst = { cx: 600, cy: 300, w: 240, h: 160 };
+  const make = (opts) => fx.create(document.createElement("canvas"), opts);
+  const game = (id, amount, extra) => make(Object.assign({
+    variant: id, profile: "game", amount, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src: null, dst }, numberKeepOut: 70,
+  }, extra || {}));
+  const shapes = {};
+  const drawn = {};
+  for (const id of [1, 2, 3]) {
+    const inst = game(id, id);
+    shapes[id] = {
+      keys: Object.keys(inst).sort(),
+      duration: inst.duration,
+      profile: inst.profile,
+      timing: inst.timing,
+      timeline: inst.timeline,
+      metrics: inst.metrics,
+      variant: inst.variant,
+      amount: inst.amount,
+      bare: inst.bare,
+      width: inst.width,
+      height: inst.height,
+    };
+    try {
+      for (let step = 0; step <= 24; step += 1) inst.draw((inst.duration * step) / 24);
+      drawn[id] = "ok";
+    } catch (error) { drawn[id] = String(error && error.stack || error); }
+  }
+  /* 不传 stage（覆盖层量不到布局 / node 探针）：退参考舞台，不抛错。 */
+  const fallback = make({
+    variant: 3, profile: "game", amount: 3, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 },
+  });
+  const fallbackStage = fallback.stage;
+  try {
+    for (const t of [0, 0.4, 0.9, 1.5, 1.8]) fallback.draw(t);
+    drawn.fallback = "ok";
+  } catch (error) { drawn.fallback = String(error && error.stack || error); }
+  /* 导出档：照素材页的 2.65 / 2.90 / 3.35 秒链（node 探针逐帧导静帧靠它）。 */
+  const exported = {};
+  for (const id of [1, 2, 3]) {
+    const inst = make({ variant: id, profile: "export", amount: id + 1, dpr: 1 });
+    exported[id] = { duration: inst.duration, timeline: inst.timeline, profile: inst.profile };
+    try {
+      for (let step = 0; step <= 24; step += 1) inst.draw((inst.duration * step) / 24);
+      drawn["export" + id] = "ok";
+    } catch (error) { drawn["export" + id] = String(error && error.stack || error); }
+  }
+  /* 真实点数：amount = 4 仍按 3 档演，飘字是 −4（不是档位号 3 / 也不是 1）。 */
+  texts.length = 0;
+  const four = game(3, 4);
+  const fourTexts = texts.slice();
+  four.draw(four.timeline.NUM + 0.02);
+  function ordered(ms) {
+    return ms.spot >= 0 && ms.spot <= ms.break && ms.break <= ms.num
+      && ms.num <= ms.total && ms.total <= fx.MAX_TOTAL_MS;
+  }
+  const messy = (id) => ({
+    ["hp_loss_fx_" + id + "_spot"]: 5000,
+    ["hp_loss_fx_" + id + "_break"]: 5000,
+    ["hp_loss_fx_" + id + "_num"]: 5000,
+    ["hp_loss_fx_" + id + "_total"]: 9000,
+  });
+  return JSON.stringify({
+    prefix: fx.TIMING_PREFIX,
+    maxTotal: fx.MAX_TOTAL_MS,
+    fields: fx.TIMING_FIELDS,
+    keys: fx.TIMING_KEYS,
+    defaults: fx.DEFAULT_TIMING,
+    frozen: [Object.isFrozen(fx.TIMING_FIELDS), Object.isFrozen(fx.TIMING_KEYS)],
+    surface: Object.keys(fx).sort(),
+    hasTierFor: Object.prototype.hasOwnProperty.call(fx, "tierFor"),
+    tiers: { 1: fx.TIERS[1].duration, 2: fx.TIERS[2].duration, 3: fx.TIERS[3].duration },
+    shapes: shapes,
+    exported: exported,
+    fallback: {
+      stage: fallbackStage,
+      duration: fallback.duration,
+      timeline: fallback.timeline,
+    },
+    four: {
+      variant: four.variant,
+      amount: four.amount,
+      texts: fourTexts,
+      numberText: four.metrics.numberText,
+    },
+    clamps: {
+      total: fx.gameTiming(1, { hp_loss_fx_1_total: 9999 }).ms.total,
+      spot: fx.gameTiming(1, { hp_loss_fx_1_total: 1000, hp_loss_fx_1_spot: 5000 }).ms.spot,
+      breakBelowSpot: fx.gameTiming(1, { hp_loss_fx_1_break: 10 }).ms.break,
+      numAboveTotal: fx.gameTiming(1, { hp_loss_fx_1_total: 900, hp_loss_fx_1_num: 5000 }).ms.num,
+      junk: fx.gameTiming(2, { hp_loss_fx_2_total: "abc", hp_loss_fx_2_spot: -1 }).ms,
+      missing: fx.gameTiming(1, { hp_loss_fx_1_total: 900 }).ms,
+      three: fx.gameTiming(3).ms,
+    },
+    ordered: [1, 2, 3].map((id) => ordered(fx.gameTiming(id).ms)),
+    orderedMessy: [1, 2, 3].map((id) => ordered(fx.gameTiming(id, messy(id)).ms)),
+    warp: {
+      1: fx.gameTiming(1).warp,
+      2: fx.gameTiming(2).warp,
+      3: fx.gameTiming(3).warp,
+    },
+    drawn: drawn,
+  });
+})()`, context, { filename: "hp_loss_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def _hp_loss_fx_probe() -> dict:
+    """跑真 `fx-hp-loss.js`（node vm + 记录型 2D 上下文），拿回解算 / 实例 / 导出链的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "hp_loss_probe.mjs"
+        probe.write_text(_HP_LOSS_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"失去体力画面探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def hp_loss_fx_probe() -> dict:
+    """一次探针跑完，形状 / 钳制 / 导出链几条用例共用。"""
+    return _hp_loss_fx_probe()
+
+
+def test_the_hp_loss_family_scripts_are_listed_next_to_their_fire_twins() -> None:
+    """票 03 §4：`fx-hp-loss.js` 紧跟 `fx-fire.js`、`sfx-hp-loss.js` 紧跟 `sfx-fire.js`，
+    两份都在 `sfx-ui.js` 之前（音效 UI 的声道池按名取它们的 `gameTiming`）。
+
+    spec §硬约束把这条次序逐名列出来了（损伤组 → 体力组 → 音效组 → `sfx-ui.js` → `main.js`）。
+    """
+    srcs = _script_srcs()
+    for name in ("fx-hp-loss.js", "sfx-hp-loss.js"):
+        assert name in srcs, f"index.html 的脚本清单里必须有 {name}：{srcs}"
+    assert srcs.index("fx-hp-loss.js") == srcs.index("fx-fire.js") + 1, (
+        f"fx-hp-loss.js 必须紧跟 fx-fire.js（画面组按家族顺序）：{srcs}"
+    )
+    assert srcs.index("sfx-hp-loss.js") == srcs.index("sfx-fire.js") + 1, (
+        f"sfx-hp-loss.js 必须紧跟 sfx-fire.js（音效组按家族顺序）：{srcs}"
+    )
+    assert srcs.index("fx-hp-loss.js") < srcs.index("sfx.js"), (
+        "画面组整组排在音效组之前（总谱对：fx-core / fx-thunder / fx-fire / fx-hp-loss）"
+    )
+    assert srcs.index("sfx-hp-loss.js") < srcs.index("sfx-ui.js"), (
+        "sfx-ui.js 的声道池读它的 gameTiming ⇒ 必须排在它之前"
+    )
+    assert srcs.index("fx-hp-loss.js") < srcs.index("sfx-hp-loss.js"), (
+        "画面在音效之前（spec §硬约束的清单顺序）"
+    )
+
+
+def test_the_hp_loss_renderer_keeps_the_fire_renderer_shape(hp_loss_fx_probe: dict) -> None:
+    """`SgsHpLossFX` 与 `SgsFireFX` / `SgsThunderFX` 同形：排播层不认第二种形状。
+
+    - 导出面：`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_PREFIX` / `TIMING_FIELDS` /
+      `TIMING_KEYS` / `MAX_TOTAL_MS`，字段名由 `DEFAULT_TIMING` 生成；
+    - **没有 `tierFor`**（档位判据只有 `vital-fx.js:vitalFxVariantOf` 一处）；
+    - `create()` 返回 `draw / duration / timeline / timing / metrics / stage`；
+    - 牌桌档：`duration = total`（秒）、`SPOT < BREAK < IMPACT < NUM < DURATION`（牌脚凝墨 →
+      断开 → 落地 → 飘字 → 摘层），`COUNT` = 该档的墨珠数；
+    - 真实点数：`amount: 4` 按 3 档演，飘字是 `−4`；
+    - 量不到座位矩形 ⇒ 退参考舞台，逐帧 draw 不抛错。
+    """
+    probe = hp_loss_fx_probe
+    assert probe["prefix"] == "hp_loss_fx_"
+    assert probe["maxTotal"] == 2200, "单档总时长上限 2200（失去体力不冻回放，压在 2s 级）"
+    assert probe["fields"] == ["total", "spot", "break", "num"], (
+        f"四个字段（都是**从开演算的绝对毫秒**，不是间隔）：{probe['fields']}"
+    )
+    assert probe["keys"] == list(probe["defaults"]), "TIMING_KEYS 必须就是 DEFAULT_TIMING 的键"
+    assert probe["frozen"] == [True, True], "TIMING_FIELDS / TIMING_KEYS 是冻结数组"
+    derived: list[str] = []
+    for key in probe["defaults"]:
+        field = key[len(probe["prefix"]):].split("_", 1)[1]
+        if field not in derived:
+            derived.append(field)
+    assert list(probe["fields"]) == derived, (
+        f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(probe['fields'])}"
+    )
+    for name in (
+        "create", "gameTiming", "DEFAULT_TIMING", "TIMING_PREFIX",
+        "TIMING_FIELDS", "TIMING_KEYS", "MAX_TOTAL_MS",
+    ):
+        assert name in probe["surface"], f"SgsHpLossFX 缺少导出 {name}：{probe['surface']}"
+    assert probe["hasTierFor"] is False, (
+        "档位判据只有 `vitalFxVariantOf` 一处：模块不许再导出一份 tierFor（spec §档位）"
+    )
+    source = _strip_js_comments(_HP_LOSS_JS.read_text(encoding="utf-8"))
+    assert "tierFor" not in source, "画面模块里不许残留 tierFor（素材包的第二份判据）"
+
+    counts = {"1": 1, "2": 2, "3": 3}
+    for variant in ("1", "2", "3"):
+        shape = probe["shapes"][variant]
+        for key in (
+            "draw", "duration", "timeline", "timing", "metrics", "stage",
+            "variant", "profile", "amount", "bare", "width", "height",
+        ):
+            assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
+        timing = shape["timing"]
+        timeline = shape["timeline"]
+        assert shape["profile"] == "game" and shape["bare"] is True
+        assert shape["width"] == 1440 and shape["height"] == 810, "牌桌档按 view 建画布"
+        assert timing["total"] <= probe["maxTotal"], (
+            f"{variant} 档总时长必须 ≤ SgsHpLossFX.MAX_TOTAL_MS（{probe['maxTotal']}）"
+        )
+        assert shape["duration"] == pytest.approx(timing["total"] / 1000)
+        assert timeline["DURATION"] == pytest.approx(shape["duration"])
+        assert timeline["COUNT"] == counts[variant], "墨珠数来自三档表"
+        assert timeline["SPOT"] == pytest.approx(timing["spot"] / 1000)
+        assert timeline["BREAK"] == pytest.approx(timing["break"] / 1000)
+        assert timeline["NUM"] == pytest.approx(timing["num"] / 1000)
+        assert 0 < timeline["SPOT"] < timeline["BREAK"] < timeline["IMPACT"] < timeline["NUM"], (
+            f"{variant} 档的拍子必须按「湿 → 断 → 坠 → 数」排：{timeline}"
+        )
+        assert timeline["IMPACT"] <= timeline["NUM"] < timeline["DURATION"]
+        metrics = shape["metrics"]
+        assert metrics["number"] > 0
+        assert metrics["numberBox"]["height"] == pytest.approx(metrics["number"])
+        assert metrics["number"] <= 0.35 * metrics["card"]["h"] + 0.05, (
+            "字高不得超过牌高 35%（压住体力读数）"
+        )
+        assert metrics["numberBox"]["top"] >= metrics["keepOut"] + 0.02 * metrics["card"]["h"] - 0.05, (
+            "飘字包围盒的顶边不得压到体力条（留 2% 牌高余量）"
+        )
+        assert 0 < metrics["inkAlpha"] < 1, (
+            "bare 下墨是实色（透明覆盖层上的 multiply）：必须有一个 < 1 的起始透明度"
+            f"（最终值以实机为准）：{metrics['inkAlpha']}"
+        )
+        assert probe["drawn"][variant] == "ok", f"{variant} 档逐帧绘制抛错：{probe['drawn'][variant]}"
+
+    four = probe["four"]
+    assert four["variant"] == 3, "amount ≥ 3 按 3 档演"
+    assert four["amount"] == 4, "飘字数字来自服务端 amount，不是档位号"
+    assert four["numberText"] in ("-4", "\u22124"), (
+        f"飘字必须是真实点数（amount = 4 ⇒ −4）：{four['numberText']!r}"
+    )
+    assert "4" in four["texts"], (
+        f"字身要用 fillText 画出来（负号是另外一笔短横）：{four['texts']}"
+    )
+    assert "3" not in four["texts"], (
+        f"不许把档位号当点数写（amount = 4 时写 -3 是错的）：{four['texts']}"
+    )
+
+    fallback = probe["fallback"]
+    assert fallback["stage"]["dst"]["w"] > 0 and fallback["stage"]["dst"]["h"] > 0
+    assert probe["drawn"]["fallback"] == "ok", f"退参考舞台那一分支绘制抛错：{probe['drawn']['fallback']}"
+
+
+def test_the_hp_loss_export_chain_keeps_the_material_package_beats(hp_loss_fx_probe: dict) -> None:
+    """导出档照素材页的 2.65 / 2.90 / 3.35 秒链（`numAt` 不变）；牌桌档只把**拍子**压到 ini 上。
+
+    「比例不变」的判据是 `warp` 的锚点：素材页的 `spotAt` / 第一次 `detachAt` / `numAt` /
+    `duration` 各自对到 ini 的 `spot` / `break` / `num` / `total` 上，**段内线性**——墨珠
+    「湿 → 挂 → 断 → 坠 → 洇 → 数」的相对节奏因此跟着一起压，不是逐拍各压一个系数。
+    """
+    probe = hp_loss_fx_probe
+    assert probe["tiers"] == {"1": 2.65, "2": 2.90, "3": 3.35}, (
+        f"导出档三档时长照素材页：{probe['tiers']}"
+    )
+    expected = {
+        "1": {"duration": 2.65, "SPOT": 0.06, "BREAK": 0.60, "NUM": 0.86, "COUNT": 1},
+        "2": {"duration": 2.90, "SPOT": 0.05, "BREAK": 0.56, "NUM": 0.92, "COUNT": 2},
+        "3": {"duration": 3.35, "SPOT": 0.04, "BREAK": 0.52, "NUM": 0.90, "COUNT": 3},
+    }
+    for variant, want in expected.items():
+        export = probe["exported"][variant]
+        assert export["profile"] == "export"
+        assert export["duration"] == pytest.approx(want["duration"])
+        timeline = export["timeline"]
+        assert timeline["DURATION"] == pytest.approx(want["duration"])
+        assert timeline["SPOT"] == pytest.approx(want["SPOT"])
+        assert timeline["BREAK"] == pytest.approx(want["BREAK"])
+        assert timeline["NUM"] == pytest.approx(want["NUM"]), "导出档的 numAt 不变"
+        assert timeline["COUNT"] == want["COUNT"]
+        assert timeline["BREAK"] < timeline["IMPACT"] < timeline["NUM"] < timeline["DURATION"]
+        assert probe["drawn"]["export" + variant] == "ok", (
+            f"导出档 {variant} 逐帧绘制抛错：{probe['drawn']['export' + variant]}"
+        )
+
+    # 牌桌档的锚点：素材页秒 → 牌桌秒（段内线性，端点精确落在 ini 的毫秒上）。
+    anchors = {"1": (0.06, 0.60, 0.86, 2.65), "2": (0.05, 0.56, 0.92, 2.90), "3": (0.04, 0.52, 0.90, 3.35)}
+    for variant in ("1", "2", "3"):
+        ms = probe["shapes"][variant]["timing"]
+        pairs = probe["warp"][variant]
+        assert pairs[0] == {"e": 0, "g": 0}, f"{variant} 档锚点从 (0, 0) 开始：{pairs}"
+        spot_at, detach_at, num_at, duration = anchors[variant]
+        want = [
+            {"e": spot_at, "g": pytest.approx(ms["spot"] / 1000)},
+            {"e": detach_at, "g": pytest.approx(ms["break"] / 1000)},
+            {"e": num_at, "g": pytest.approx(ms["num"] / 1000)},
+            {"e": duration, "g": pytest.approx(ms["total"] / 1000)},
+        ]
+        assert len(pairs) == len(want) + 1, f"{variant} 档锚点对：{pairs}"
+        for got, expected_pair in zip(pairs[1:], want):
+            assert got["e"] == pytest.approx(expected_pair["e"]), (
+                f"{variant} 档的素材页端点必须逐拍对上：{pairs}"
+            )
+            assert got["g"] == expected_pair["g"], f"{variant} 档的牌桌端点：{pairs}"
+
+
+def test_the_hp_loss_timing_table_clamps_inside_the_module(hp_loss_fx_probe: dict) -> None:
+    """缺键 / 非法值退 `DEFAULT_TIMING`；钳制在**模块内部**：`spot ≤ break ≤ num ≤ total ≤ 2200`。
+
+    三档缺省 = spec §游戏档缺省时长（绝对毫秒，不是间隔）：1 = 1200 / 80 / 320 / 560，
+    2 = 1500 / 80 / 360 / 640，3 = 1800 / 80 / 380 / 720。
+    """
+    probe = hp_loss_fx_probe
+    assert probe["clamps"]["three"] == {"total": 1800, "spot": 80, "break": 380, "num": 720}, (
+        f"3 档缺省按 spec：{probe['clamps']['three']}"
+    )
+    assert probe["ordered"] == [True, True, True], "三档缺省都在钳制范围内"
+    assert probe["orderedMessy"] == [True, True, True], (
+        "四个字段全给非法大数时仍须守住 spot ≤ break ≤ num ≤ total ≤ 2200"
+    )
+    clamps = probe["clamps"]
+    assert clamps["total"] == 2200, "total 超出 MAX_TOTAL_MS 即钳到 2200"
+    assert clamps["spot"] == 1000, "spot ≤ total"
+    assert clamps["breakBelowSpot"] == 80, "break 小于 spot 时被抬到 spot（不是退默认）"
+    assert clamps["numAboveTotal"] == 900, "num ≤ total"
+    assert clamps["junk"] == {"total": 1500, "spot": 80, "break": 360, "num": 640}, (
+        f"非法值（非数字 / 负数）退回内置默认：{clamps['junk']}"
+    )
+    assert clamps["missing"] == {"total": 900, "spot": 80, "break": 320, "num": 560}, (
+        f"只改 total，其余退回内置默认：{clamps['missing']}"
+    )
+    # 缺省值本身是 spec 的压缩表（改 ini 等于改用户可见的节奏；换掉缺省先改 spec）。
+    defaults = probe["defaults"]
+    assert [defaults[f"hp_loss_fx_{v}_total"] for v in (1, 2, 3)] == [1200, 1500, 1800]
+    assert [defaults[f"hp_loss_fx_{v}_spot"] for v in (1, 2, 3)] == [80, 80, 80]
+    assert [defaults[f"hp_loss_fx_{v}_break"] for v in (1, 2, 3)] == [320, 360, 380]
+    assert [defaults[f"hp_loss_fx_{v}_num"] for v in (1, 2, 3)] == [560, 640, 720]
+
+
+def test_anim_ini_lists_the_hp_loss_durations_per_variant(hp_loss_fx_probe: dict) -> None:
+    """`anim.ini` 的 `hp_loss_fx_<档>_<字段>` 键块与 `SgsHpLossFX.DEFAULT_TIMING` 逐键同值。
+
+    键表**不在测试里写第二份**：`SgsHpLossFX.TIMING_KEYS` 是唯一真源，这里只与磁盘上的
+    `anim.ini` 对表（同剑光 / 雷电 / 火焰 / 铁索 / 阵亡的姿态）。
+    """
+    entries = {
+        key: value for key, value in _ini_entries().items()
+        if _HP_LOSS_TIMING_KEY.match(key)
+    }
+    expected = set(hp_loss_fx_probe["keys"])
+    assert set(entries) == expected, (
+        f"失去体力的时长键必须与 fx-hp-loss 的 DEFAULT_TIMING 一致："
+        f"缺 {sorted(expected - set(entries))}；多 {sorted(set(entries) - expected)}"
+    )
+    values = {key: float(value) for key, value in entries.items()}
+    max_total = hp_loss_fx_probe["maxTotal"]
+    for variant in (1, 2, 3):
+        total = values[f"hp_loss_fx_{variant}_total"]
+        spot = values[f"hp_loss_fx_{variant}_spot"]
+        break_at = values[f"hp_loss_fx_{variant}_break"]
+        num = values[f"hp_loss_fx_{variant}_num"]
+        assert 0 < spot < break_at < num < total <= max_total, (
+            f"{variant} 档的四个绝对毫秒必须递增且 total ≤ {max_total}："
+            f"spot={spot} / break={break_at} / num={num} / total={total}"
+        )
+    totals = [values[f"hp_loss_fx_{variant}_total"] for variant in (1, 2, 3)]
+    assert totals == [1200, 1500, 1800], f"spec §游戏档缺省时长：{totals}"
+    ini_text = _ANIM_INI.read_text(encoding="utf-8")
+    assert "体力演出 · 失去体力" in ini_text, "键块要有自己的标题（用户改得动）"
+    assert values == {
+        key: float(value) for key, value in hp_loss_fx_probe["defaults"].items()
+    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变三档节奏）"
+
+
+def test_the_hp_loss_module_never_freezes_playback_and_has_no_screen_flash() -> None:
+    """失去体力**永不冻回放**（用户口径），也没有整屏闪——两者都是"这一层不该有的东西"。
+
+    - 不登记 `registerPlaybackHold`（时停真源是家族表的 `holdsAt: Infinity`）；
+    - 不碰 `.fx-flash` / `#table-shell` / 任何 CSS `filter`（素材页也没有）；
+    - `bare` 下的墨用**一个 < 1 的起始透明度**（`BARE_INK_ALPHA`）：透明覆盖层上的
+      `multiply` 只对画布内已画的东西生效，墨会变实色——**最终色值以实机为准**，
+      票面不预设数字，所以这里只钉"有一个可调的单一常量、注释写明了要实机校"。
+    """
+    source = _strip_js_comments(_HP_LOSS_JS.read_text(encoding="utf-8"))
+    assert "registerPlaybackHold" not in source, "失去体力永不冻回放：不登记暂停判据"
+    assert "fx-flash" not in source, "不能碰整屏闪的着色子层"
+    assert "table-shell" not in source, "不碰表壳（也就不会有 filter / containing block）"
+    assert not re.search(r"\.style\.filter\b", source), "不许给任何节点挂 CSS filter"
+    match = re.search(r"var BARE_INK_ALPHA = ([0-9.]+);", source)
+    assert match is not None, "bare 下的墨色必须是一个**命名常量**（可调、可实机校）"
+    assert 0 < float(match.group(1)) < 1, (
+        f"BARE_INK_ALPHA 必须在 (0, 1) 之间（1 = 不透明的实色墨）：{match.group(1)}"
+    )
+    assert "实机" in _HP_LOSS_JS.read_text(encoding="utf-8"), (
+        "注释里要写明最终色值以实机为准（票面 §1 的 bare 口径）"
+    )
+
+
+_HP_LOSS_SFX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 假 Web Audio：node 没有 AudioContext / OfflineAudioContext，而排程代码必须整条走一遍。
+ * 每个节点只有 connect / start / stop 与参数 setter；`start(when)` 的**时刻**记下来——
+ * "cue 从时间轴读"就靠它判（不是在音效模块里再写死一份秒数）。
+ * 两个入口各用一张图：实时车道（`start` / `tick`）与离线渲染（`renderOffline`，`exact` 模式
+ * 会给出精确的 `when`）。 */
+function makeParam() {
+  const p = {
+    value: 0,
+    setValueAtTime(v) { p.value = v; return p; },
+    exponentialRampToValueAtTime(v) { p.value = v; return p; },
+    linearRampToValueAtTime(v) { p.value = v; return p; },
+    setTargetAtTime(v) { p.value = v; return p; },
+  };
+  return p;
+}
+
+function makeNode(kind, graph) {
+  const node = {
+    kind,
+    connect() { return node; },
+    disconnect() {},
+    start(when) {
+      graph.started += 1;
+      if (typeof when === "number" && isFinite(when)) graph.whens.push(when);
+    },
+    stop() {},
+  };
+  if (kind === "gain") node.gain = makeParam();
+  if (kind === "oscillator") { node.frequency = makeParam(); node.type = "sine"; }
+  if (kind === "bufferSource") { node.buffer = null; node.loop = false; }
+  if (kind === "filter") { node.frequency = makeParam(); node.Q = makeParam(); node.type = "lowpass"; }
+  if (kind === "compressor") {
+    node.threshold = makeParam(); node.knee = makeParam(); node.ratio = makeParam();
+    node.attack = makeParam(); node.release = makeParam();
+  }
+  return node;
+}
+
+function makeGraph() {
+  const graph = { nodes: 0, started: 0, whens: [] };
+  const ctx = {
+    sampleRate: 44100,
+    currentTime: 0,
+    state: "running",
+    destination: { connect() {} },
+    resume() { return Promise.resolve(); },
+    createGain() { graph.nodes += 1; return makeNode("gain", graph); },
+    createOscillator() { graph.nodes += 1; return makeNode("oscillator", graph); },
+    createBufferSource() { graph.nodes += 1; return makeNode("bufferSource", graph); },
+    createBiquadFilter() { graph.nodes += 1; return makeNode("filter", graph); },
+    createDynamicsCompressor() { graph.nodes += 1; return makeNode("compressor", graph); },
+    createBuffer(channels, length) {
+      const data = new Float32Array(Math.max(1, length));
+      return {
+        numberOfChannels: channels, length: data.length, sampleRate: 44100,
+        getChannelData: () => data,
+      };
+    },
+  };
+  return { ctx, graph };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout, Math, Array, Float32Array, Object, JSON, Promise,
+  document: { createElement: () => ({ width: 0, height: 0, getContext: () => null }) },
+});
+context.globalThis = context;
+context.window = context;
+/* 假图的构造器在外面写，但要在沙箱里调（vm 的脚本看不到外层变量）。 */
+context.makeGraph = makeGraph;
+vm.runInContext(readFileSync(staticPath("fx-hp-loss.js"), "utf8"), context, { filename: "fx-hp-loss.js" });
+vm.runInContext(readFileSync(staticPath("sfx-hp-loss.js"), "utf8"), context, { filename: "sfx-hp-loss.js" });
+
+const report = await vm.runInContext(`(async () => {
+  const fx = window.SgsHpLossFX;
+  const sfx = window.SgsHpLossSfx;
+
+  /* 离线渲染的假图：start(when) 记的就是时间轴上的绝对秒数（exact 模式）。 */
+  let offline = null;
+  window.OfflineAudioContext = function OfflineAudioContext() {
+    const made = makeGraph();
+    made.ctx.startRendering = () => Promise.resolve({
+      numberOfChannels: 2,
+      length: 128,
+      sampleRate: 44100,
+      /* 填一个常数：renderOffline 的电平统计要跑通（"有波形、未削波"这一层由真
+       * OfflineAudioContext 在浏览器里证；垫片只证**链路**与窗口口径）。 */
+      getChannelData: () => new Float32Array(128).fill(0.1),
+    });
+    offline = made.graph;
+    return made.ctx;
+  };
+
+  /* 实时车道：假 AudioContext + 逐帧 tick（抓排程代码里的拼写 / 参数错误）。 */
+  const live = makeGraph();
+  window.AudioContext = function AudioContext() { return live.ctx; };
+
+  const out = {};
+  for (const id of [1, 2, 3]) {
+    const clock = fx.gameTiming(id);
+    const timeline = Object.assign({}, clock.timeline);
+    const lane = sfx.create(timeline);
+    let error = null;
+    let started = false;
+    const before = { nodes: live.graph.nodes, sources: live.graph.started };
+    try {
+      started = lane.start();
+      const frames = 24;
+      for (let step = 1; step <= frames; step += 1) {
+        lane.tick((clock.timeline.DURATION * step) / frames, { dmg: id });
+      }
+      lane.mute(true);
+      lane.mute(false);
+      lane.stop();
+    } catch (e) { error = String(e && e.stack || e); }
+
+    /* 离线：同一份时间轴，exact 模式给出精确 cue 时刻。 */
+    let offlineError = null;
+    let levels = null;
+    try {
+      levels = await sfx.renderOffline(id, timeline, clock.timeline.DURATION + 0.3);
+    } catch (e) { offlineError = String(e && e.stack || e); }
+
+    out[id] = {
+      started, error,
+      nodes: live.graph.nodes - before.nodes,
+      sources: live.graph.started - before.sources,
+      offlineError,
+      offlinePeak: levels ? levels.total.peak : null,
+      whens: (offline ? offline.whens.slice().sort((a, b) => a - b) : []),
+      timeline: {
+        spot: clock.timeline.SPOT,
+        break: clock.timeline.BREAK,
+        impact: clock.timeline.IMPACT,
+        num: clock.timeline.NUM,
+        duration: clock.timeline.DURATION,
+        count: clock.timeline.COUNT,
+      },
+    };
+    offline = null;
+  }
+  return JSON.stringify({
+    surface: Object.keys(sfx).sort(),
+    tiers: out,
+  });
+})()`, context, { filename: "hp_loss_sfx_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def test_the_hp_loss_sfx_lane_schedules_every_tier_without_a_real_audio_context() -> None:
+    """`SgsHpLossSfx` 是**车道适配器**（`create(timeline)` → `{start, stop, mute, tick}`）：
+    三档都能建图、按时间轴排完、收声，且 cue 时刻**跟着时间轴走**。
+
+    烟测里没有 `AudioContext`（垫片故意不建），所以这条补上**真模块**这一侧：真
+    `create` / `start` / `tick` / `stop` 在假图（记录型 `AudioContext`）上跑一遍，抓音色函数里
+    的拼写 / 参数错误。声音本身（听感）仍只能在浏览器里听——`renderOffline` 接进
+    `?audiotest=1` 不在本票（见 spec §已知缺口 5）。
+    """
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "hp_loss_sfx_probe.mjs"
+        probe.write_text(_HP_LOSS_SFX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"失去体力音效探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    probe = json.loads(result.stdout)
+    for name in ("create", "renderOffline"):
+        assert name in probe["surface"], f"SgsHpLossSfx 缺少 {name}：{probe['surface']}"
+    for variant in ("1", "2", "3"):
+        tier = probe["tiers"][variant]
+        assert tier["error"] is None, f"{variant} 档排程抛错：{tier['error']}"
+        assert tier["started"] is True, f"{variant} 档 start() 建出了共享图"
+        assert tier["nodes"] > 0 and tier["sources"] > 0, f"{variant} 档一个音源都没排出来"
+        assert tier["offlineError"] is None, f"{variant} 档离线排程抛错：{tier['offlineError']}"
+        assert tier["offlinePeak"] and tier["offlinePeak"] > 0, (
+            f"{variant} 档离线渲染一个采样都没有（峰值 {tier['offlinePeak']}）"
+        )
+        timeline = tier["timeline"]
+        whens = tier["whens"]
+        assert whens, f"{variant} 档没有任何 start(when) 时刻"
+        assert whens[0] == pytest.approx(timeline["spot"], abs=0.02), (
+            f"{variant} 档的第一声是纸吸水（在时间轴的 SPOT）：{whens[:3]}"
+        )
+        assert any(
+            timeline["impact"] - 0.02 <= when <= timeline["impact"] + 0.04 for when in whens
+        ), f"{variant} 档缺少落地那一声（IMPACT = {timeline['impact']}）：{whens}"
+        assert any(
+            timeline["num"] - 0.02 <= when <= timeline["num"] + 0.02 for when in whens
+        ), f"{variant} 档缺少飘字那一声（NUM = {timeline['num']}）：{whens}"
+        assert max(whens) <= timeline["duration"] + 0.05, (
+            f"{variant} 档不许排到摘层之后（DURATION = {timeline['duration']}）：{max(whens)}"
+        )
+    assert probe["tiers"]["3"]["sources"] > probe["tiers"]["1"]["sources"], (
+        "3 档（三颗墨珠 + 墨气）排出的音源必须多于 1 档（一颗）："
+        f"{probe['tiers']['3']['sources']} vs {probe['tiers']['1']['sources']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 04：回复体力家族（画面 `SgsHealFX` + 音效 `SgsHealSfx`，**3+ 档时停**）
+#
+# 与票 03 同样的三块（画面模块与音效模块是同两个形状，只换素材与字段）：
+# 1. **清单 / 静态契约**：两份新脚本进清单（画面紧跟 `fx-hp-loss.js`、音效紧跟
+#    `sfx-hp-loss.js`），都是严格模式普通脚本（`_VITAL_FX_GLOBALS` 那条用例覆盖全局名 /
+#    不发请求 / 不碰 DOM）；
+# 2. **画面模块的形状与双时间轴**：`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_FIELDS` /
+#    `TIMING_KEYS` / `MAX_TOTAL_MS` 与雷 / 火 / 失去体力同形；字段名由 `DEFAULT_TIMING` 生成；
+#    导出档照素材页的 3.20 / 3.55 / 4.45 秒链；牌桌档把素材页的拍子按**锚点**压到 ini 的
+#    `total` / `gather` / `hold` / `burst` / `num` 上（`warp`），钳制
+#    `gather + hold ≤ burst ≤ num ≤ total ≤ 4500` 在模块内部；
+# 3. **音效车道适配器**：`create(timeline)` → `{start, stop, mute, tick}`（与 `SgsSfx` 同形），
+#    cue 时刻从时间轴读，三档排程在假 Web Audio 上整条走一遍。
+#
+# **只 3+ 档有 `gather` / `hold` / `burst`**（与 `fx-thunder.js` 的 `strobe` / `flash` 同姿态：
+# 1 / 2 档不硬造这三个键），`TIMING_FIELDS` 由 `DEFAULT_TIMING` 的键生成、没有第二处名单。
+# **档位判据只有一处**（spec §档位）：`vital-fx.js:vitalFxVariantOf(amount)`——画面模块只认
+# 排播层交给它的 `variant`，素材包的 `tierFor()` 不许作为第二份判据活下来。
+# 行为（层出现 / 三档读数 / 飘字 / 摘层时刻 / **3+ 档时停** / 兜底绿闪）归烟测 `U-VITAL-1x`；
+# 时停的真源是家族表的 `holdsAt: 3`（票 02 的用例已逐档钉死），本块只钉"模块自己不登记暂停"。
+# ---------------------------------------------------------------------------
+
+_HEAL_JS = STATIC_DIR / "fx-heal.js"
+_HEAL_SFX_JS = STATIC_DIR / "sfx-heal.js"
+
+# `heal_fx_<档>_<字段>`。**不带档位号**的 `heal_fx_concurrency`（票 02 的并发表）不是时长键，
+# 别混进这张对照表。
+_HEAL_TIMING_KEY = re.compile(r"^heal_fx_\d+_")
+
+_HEAL_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 记录型 2D 上下文（与票 03 的探针同一张垫片）：`create()` / `draw()` 全走真代码，像素不参与
+ * 断言。所有离屏画布的 `fillText` 收进**同一份**日志：飘字是烘在贴图上的（`bakeNumber` 用
+ * fillText 烘、`draw()` 只 drawImage），所以"飘字写真实点数"只能从这份日志读。 */
+const texts = [];
+function makeCtx() {
+  const gradient = { addColorStop() {} };
+  const target = { texts };
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop === "createRadialGradient" || prop === "createLinearGradient") return () => gradient;
+      if (prop === "measureText") return () => ({ width: 10 });
+      if (prop === "fillText") return (text) => { texts.push(String(text)); };
+      if (prop in obj) return obj[prop];
+      const fn = () => {};
+      obj[prop] = fn;
+      return fn;
+    },
+    set(obj, prop, value) { obj[prop] = value; return true; },
+  });
+}
+
+function makeCanvas() {
+  const ctx = makeCtx();
+  return { width: 0, height: 0, getContext: () => ctx };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout,
+  document: {
+    getElementById: () => null,
+    createElement: (tag) => (tag === "canvas" ? makeCanvas() : {
+      style: {}, setAttribute() {}, appendChild() {},
+    }),
+  },
+});
+context.globalThis = context;
+context.window = context;
+context.texts = texts;
+
+vm.runInContext(readFileSync(staticPath("fx-heal.js"), "utf8"), context,
+                { filename: "fx-heal.js" });
+
+const report = vm.runInContext(`(() => {
+  const fx = SgsHealFX;
+  const dst = { cx: 600, cy: 300, w: 240, h: 160 };
+  const make = (opts) => fx.create(document.createElement("canvas"), opts);
+  const game = (id, amount, extra) => make(Object.assign({
+    variant: id, profile: "game", amount, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 }, stage: { src: null, dst }, numberKeepOut: 70,
+  }, extra || {}));
+  const shapes = {};
+  const drawn = {};
+  for (const id of [1, 2, 3]) {
+    const inst = game(id, id);
+    shapes[id] = {
+      keys: Object.keys(inst).sort(),
+      duration: inst.duration,
+      profile: inst.profile,
+      timing: inst.timing,
+      timeline: inst.timeline,
+      metrics: inst.metrics,
+      variant: inst.variant,
+      amount: inst.amount,
+      bare: inst.bare,
+      width: inst.width,
+      height: inst.height,
+    };
+    try {
+      for (let step = 0; step <= 24; step += 1) inst.draw((inst.duration * step) / 24);
+      drawn[id] = "ok";
+    } catch (error) { drawn[id] = String(error && error.stack || error); }
+  }
+  /* 不传 stage（覆盖层量不到布局 / node 探针 / 导出档）：退参考舞台，不抛错。 */
+  const fallback = make({
+    variant: 3, profile: "game", amount: 3, bare: true, dpr: 1,
+    view: { width: 1440, height: 810 },
+  });
+  try {
+    for (const t of [0, 0.4, 0.9, 1.5, 1.8]) fallback.draw(t);
+    drawn.fallback = "ok";
+  } catch (error) { drawn.fallback = String(error && error.stack || error); }
+  /* 导出档：照素材页的 3.20 / 3.55 / 4.45 秒链（node 探针逐帧导静帧靠它）。 */
+  const exported = {};
+  for (const id of [1, 2, 3]) {
+    const inst = make({ variant: id, profile: "export", amount: id + 1, dpr: 1 });
+    exported[id] = { duration: inst.duration, timeline: inst.timeline, profile: inst.profile };
+    try {
+      for (let step = 0; step <= 24; step += 1) inst.draw((inst.duration * step) / 24);
+      drawn["export" + id] = "ok";
+    } catch (error) { drawn["export" + id] = String(error && error.stack || error); }
+  }
+  /* 真实点数：amount = 4 仍按 3 档演，飘字是 +4（不是档位号 3 / 也不是 1）。 */
+  texts.length = 0;
+  const four = game(3, 4);
+  const fourTexts = texts.slice();
+  four.draw(four.timeline.NUM + 0.02);
+  const fourDrawnTexts = texts.slice();
+  function ordered(ms) {
+    if (!(ms.total >= 0 && ms.total <= fx.MAX_TOTAL_MS)) return false;
+    if (!(ms.num >= 0 && ms.num <= ms.total)) return false;
+    if (ms.gather === undefined) return true;
+    return ms.gather >= 0 && ms.gather + ms.hold <= ms.burst && ms.burst <= ms.num;
+  }
+  function messy(id) {
+    const out = {};
+    out["heal_fx_" + id + "_total"] = 9000;
+    out["heal_fx_" + id + "_num"] = 5000;
+    if (id === 3) {
+      out["heal_fx_3_gather"] = 5000;
+      out["heal_fx_3_hold"] = 5000;
+      out["heal_fx_3_burst"] = 5000;
+    }
+    return out;
+  }
+  const clamps = {
+    total: fx.gameTiming(1, { heal_fx_1_total: 9999 }).ms.total,
+    numAboveTotal: fx.gameTiming(1, { heal_fx_1_total: 900, heal_fx_1_num: 5000 }).ms.num,
+    junk: fx.gameTiming(2, { heal_fx_2_total: "abc", heal_fx_2_num: -1 }).ms,
+    missing: fx.gameTiming(1, { heal_fx_1_total: 900 }).ms,
+    three: fx.gameTiming(3).ms,
+    one: fx.gameTiming(1).ms,
+    two: fx.gameTiming(2).ms,
+    oneKeys: Object.keys(fx.gameTiming(1).ms),
+    twoKeys: Object.keys(fx.gameTiming(2).ms),
+    threeKeys: Object.keys(fx.gameTiming(3).ms),
+    gatherOverTotal: fx.gameTiming(3, { heal_fx_3_total: 1000, heal_fx_3_gather: 5000 }).ms,
+    holdOverTotal: fx.gameTiming(3, { heal_fx_3_gather: 600, heal_fx_3_hold: 5000 }).ms,
+    burstBelow: fx.gameTiming(3, {
+      heal_fx_3_total: 2000, heal_fx_3_gather: 500, heal_fx_3_hold: 100, heal_fx_3_burst: 10,
+    }).ms,
+    numBelowBurst: fx.gameTiming(3, { heal_fx_3_burst: 900, heal_fx_3_num: 100 }).ms,
+    zero: fx.gameTiming(3, { heal_fx_3_total: 0 }).timeline,
+  };
+  return JSON.stringify({
+    prefix: fx.TIMING_PREFIX,
+    maxTotal: fx.MAX_TOTAL_MS,
+    fields: fx.TIMING_FIELDS,
+    keys: fx.TIMING_KEYS,
+    defaults: fx.DEFAULT_TIMING,
+    frozen: [Object.isFrozen(fx.TIMING_FIELDS), Object.isFrozen(fx.TIMING_KEYS)],
+    surface: Object.keys(fx).sort(),
+    hasTierFor: Object.prototype.hasOwnProperty.call(fx, "tierFor"),
+    hasVariantOf: Object.prototype.hasOwnProperty.call(fx, "variantOf"),
+    tiers: { 1: fx.TIERS[1].duration, 2: fx.TIERS[2].duration, 3: fx.TIERS[3].duration },
+    shapes: shapes,
+    exported: exported,
+    fallback: {
+      stage: fallback.stage,
+      duration: fallback.duration,
+      timeline: fallback.timeline,
+    },
+    four: {
+      variant: four.variant,
+      amount: four.amount,
+      texts: fourTexts,
+      drawnTexts: fourDrawnTexts,
+      numberText: four.metrics.numberText,
+    },
+    clamps: clamps,
+    ordered: [1, 2, 3].map((id) => ordered(fx.gameTiming(id).ms)),
+    orderedMessy: [1, 2, 3].map((id) => ordered(fx.gameTiming(id, messy(id)).ms)),
+    warp: {
+      1: fx.gameTiming(1).warp,
+      2: fx.gameTiming(2).warp,
+      3: fx.gameTiming(3).warp,
+    },
+    drawn: drawn,
+  });
+})()`, context, { filename: "heal_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def _heal_fx_probe() -> dict:
+    """跑真 `fx-heal.js`（node vm + 记录型 2D 上下文），拿回解算 / 实例 / 导出链的实测结果。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "heal_probe.mjs"
+        probe.write_text(_HEAL_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"回复体力画面探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def heal_fx_probe() -> dict:
+    """一次探针跑完，形状 / 钳制 / 导出链几条用例共用。"""
+    return _heal_fx_probe()
+
+
+def test_the_heal_family_scripts_are_listed_next_to_their_hp_loss_twins() -> None:
+    """票 04 §3：`fx-heal.js` 紧跟 `fx-hp-loss.js`、`sfx-heal.js` 紧跟 `sfx-hp-loss.js`。
+
+    spec §硬约束把这条次序逐名列出来了（`fx-fire` → `fx-hp-loss` → `fx-heal` → 音效组 →
+    `sfx-ui.js` → `main.js`）。"跟着失去体力那一份"而不是"跟着火那一份"：两个体力家族是
+    **并列**的两份，画面 / 音效各自按家族顺序排，票 03 的
+    `srcs.index("fx-hp-loss.js") == srcs.index("fx-fire.js") + 1` 因此仍然成立。
+    """
+    srcs = _script_srcs()
+    for name in ("fx-heal.js", "sfx-heal.js"):
+        assert name in srcs, f"index.html 的脚本清单里必须有 {name}：{srcs}"
+    assert srcs.index("fx-heal.js") == srcs.index("fx-hp-loss.js") + 1, (
+        f"fx-heal.js 必须紧跟 fx-hp-loss.js（画面组按家族顺序）：{srcs}"
+    )
+    assert srcs.index("sfx-heal.js") == srcs.index("sfx-hp-loss.js") + 1, (
+        f"sfx-heal.js 必须紧跟 sfx-hp-loss.js（音效组按家族顺序）：{srcs}"
+    )
+    assert srcs.index("fx-fire.js") < srcs.index("fx-hp-loss.js") < srcs.index("fx-heal.js"), (
+        f"spec §硬约束的画面顺序：fx-fire → fx-hp-loss → fx-heal：{srcs}"
+    )
+    assert srcs.index("fx-heal.js") < srcs.index("sfx.js"), (
+        "画面组整组排在音效组之前（总谱对：fx-core / fx-thunder / fx-fire / fx-hp-loss / fx-heal）"
+    )
+    assert srcs.index("sfx-heal.js") < srcs.index("sfx-ui.js"), (
+        "sfx-ui.js 的声道池读它的 gameTiming ⇒ 必须排在它之前"
+    )
+    assert srcs.index("fx-heal.js") < srcs.index("sfx-heal.js"), (
+        "画面在音效之前（spec §硬约束的清单顺序）"
+    )
+
+
+def test_the_heal_renderer_keeps_the_hp_loss_renderer_shape(heal_fx_probe: dict) -> None:
+    """`SgsHealFX` 与 `SgsHpLossFX` / `SgsFireFX` 同形：排播层不认第二种形状。
+
+    - 导出面：`create` / `gameTiming` / `DEFAULT_TIMING` / `TIMING_PREFIX` / `TIMING_FIELDS` /
+      `TIMING_KEYS` / `MAX_TOTAL_MS`，字段名由 `DEFAULT_TIMING` 生成（唯一真源）；
+    - **没有 `tierFor` / `variantOf`**（档位判据只有 `vital-fx.js:vitalFxVariantOf` 一处）；
+    - `create()` 返回 `draw / duration / timeline / timing / metrics / stage`；
+    - 牌桌档：`duration = total`（秒）；`total / num` 全档都有，`gather / hold / burst`
+      **只有 3 档**（1 / 2 档不硬造这三个键）；
+    - 真实点数：`amount: 4` 按 3 档演，飘字是 `+4`；
+    - 量不到座位矩形 ⇒ 退参考舞台，逐帧 draw 不抛错。
+    """
+    probe = heal_fx_probe
+    assert probe["prefix"] == "heal_fx_"
+    assert probe["maxTotal"] == 4500, "单档总时长上限 4500（3+ 档是时停窗口，4.5s 是它的窗口）"
+    assert probe["fields"] == ["total", "num", "gather", "hold", "burst"], (
+        f"字段名由 DEFAULT_TIMING 的键生成（`total / num` 全档、`gather / hold / burst` 只 3 档）："
+        f"{probe['fields']}"
+    )
+    assert probe["keys"] == list(probe["defaults"]), "TIMING_KEYS 必须就是 DEFAULT_TIMING 的键"
+    assert probe["frozen"] == [True, True], "TIMING_FIELDS / TIMING_KEYS 是冻结数组"
+    derived: list[str] = []
+    for key in probe["defaults"]:
+        field = key[len(probe["prefix"]):].split("_", 1)[1]
+        if field not in derived:
+            derived.append(field)
+    assert list(probe["fields"]) == derived, (
+        f"`TIMING_FIELDS` 必须由 `DEFAULT_TIMING` 的键生成：期望 {derived}，实际 {list(probe['fields'])}"
+    )
+    for name in (
+        "create", "gameTiming", "DEFAULT_TIMING", "TIMING_PREFIX",
+        "TIMING_FIELDS", "TIMING_KEYS", "MAX_TOTAL_MS",
+    ):
+        assert name in probe["surface"], f"SgsHealFX 缺少导出 {name}：{probe['surface']}"
+    assert probe["hasTierFor"] is False and probe["hasVariantOf"] is False, (
+        "档位判据只有 `vitalFxVariantOf` 一处：模块不许再导出一份 tierFor / variantOf（spec §档位）"
+    )
+    source = _strip_js_comments(_HEAL_JS.read_text(encoding="utf-8"))
+    assert "tierFor" not in source and "variantOf" not in source, (
+        "画面模块里不许残留第二份档位判据（素材包的 tierFor / 自造的 variantOf）"
+    )
+
+    fields_of_tier = {
+        "1": {"total", "num"},
+        "2": {"total", "num"},
+        "3": {"total", "num", "gather", "hold", "burst"},
+    }
+    for variant in ("1", "2", "3"):
+        shape = probe["shapes"][variant]
+        for key in (
+            "draw", "duration", "timeline", "timing", "metrics", "stage",
+            "variant", "profile", "amount", "bare", "width", "height",
+        ):
+            assert key in shape["keys"], f"{variant} 档的实例缺少 {key}：{shape['keys']}"
+        timing = shape["timing"]
+        timeline = shape["timeline"]
+        assert shape["profile"] == "game" and shape["bare"] is True
+        assert shape["width"] == 1440 and shape["height"] == 810, "牌桌档按 view 建画布"
+        assert set(timing) == fields_of_tier[variant], (
+            f"{variant} 档的字段集：`total / num` 全档、3 档才多 gather / hold / burst —— "
+            f"{sorted(timing)}"
+        )
+        assert timing["total"] <= probe["maxTotal"], (
+            f"{variant} 档总时长必须 ≤ SgsHealFX.MAX_TOTAL_MS（{probe['maxTotal']}）"
+        )
+        assert shape["duration"] == pytest.approx(timing["total"] / 1000)
+        assert timeline["DURATION"] == pytest.approx(shape["duration"])
+        assert timeline["TIER"] == int(variant), "时间轴带上档位号（音效按档选音色）"
+        assert 0 < timeline["GLOW"] < timeline["NUM"] < timeline["DURATION"]
+        assert timeline["NUM"] == pytest.approx(timing["num"] / 1000, abs=1e-3), (
+            "飘字时刻读 ini 的 num；3+ 档 `num` 与 `burst` 同刻（票 07）时 `warpPairs` "
+            f"把牌桌锚点抬 0.1ms（严格递增），读数差 ≤ 1ms：{timeline['NUM']} vs {timing['num']}"
+        )
+        if variant == "3":
+            assert timeline["GATHER"] == pytest.approx(timing["gather"] / 1000), "聚气**结束**时刻"
+            assert timeline["BURST"] == pytest.approx(timing["burst"] / 1000), "迸发时刻"
+            assert timeline["HOLD"] == pytest.approx(timing["hold"] / 1000), "白住时长"
+            assert timeline["GATHER"] + timeline["HOLD"] == pytest.approx(timeline["BURST"]), (
+                f"聚气结束 + 白住时长 = 迸发时刻：{timeline}"
+            )
+            assert timeline["GATHER"] < timeline["BURST"] <= timeline["NUM"], (
+                f"拍子必须按「聚气 → 白住 → 迸发 → 飘字」排：{timeline}"
+            )
+        else:
+            assert timeline["GATHER"] == 0 and timeline["BURST"] == 0 and timeline["HOLD"] == 0, (
+                f"{variant} 档没有聚气 / 白住 / 迸发这三拍：{timeline}"
+            )
+        metrics = shape["metrics"]
+        assert metrics["number"] > 0
+        assert metrics["numberBox"]["height"] == pytest.approx(metrics["number"])
+        assert metrics["number"] <= 0.35 * metrics["card"]["h"] + 0.05, (
+            "字高不得超过牌高 35%（压住体力读数）"
+        )
+        assert metrics["numberBox"]["top"] >= metrics["keepOut"] + 0.02 * metrics["card"]["h"] - 0.05, (
+            "飘字包围盒的顶边不得压到体力条（留 2% 牌高余量）"
+        )
+        assert 0 < metrics["whiteAlpha"] < 1, (
+            "白化的峰值必须是**半透明白**叠在覆盖层上（1 = 不透明板，牌桌被盖住）："
+            f"{metrics['whiteAlpha']}"
+        )
+        assert probe["drawn"][variant] == "ok", f"{variant} 档逐帧绘制抛错：{probe['drawn'][variant]}"
+
+    four = probe["four"]
+    assert four["variant"] == 3, "amount ≥ 3 按 3 档演"
+    assert four["amount"] == 4, "飘字数字来自服务端 amount，不是档位号"
+    assert four["numberText"] == "+4", f"飘字必须是真实点数（amount = 4 ⇒ +4）：{four['numberText']!r}"
+    assert "+4" in four["texts"], f"字身要用 fillText 画出来：{four['texts']}"
+    assert "3" not in four["texts"], (
+        f"不许把档位号当点数写（amount = 4 时写 +3 是错的）：{four['texts']}"
+    )
+
+    fallback = probe["fallback"]
+    assert fallback["stage"]["dst"]["w"] > 0 and fallback["stage"]["dst"]["h"] > 0
+    assert probe["drawn"]["fallback"] == "ok", f"退参考舞台那一分支绘制抛错：{probe['drawn']['fallback']}"
+
+
+def test_the_heal_export_chain_keeps_the_material_package_beats(heal_fx_probe: dict) -> None:
+    """导出档照素材页的 3.20 / 3.55 / 4.45 秒链（`gather` 0.22→1.24、`hold` 0.30、`burst` 1.54）。
+
+    牌桌档只把**拍子**压到 ini 上：「比例不变」的判据是 `warp` 的锚点——素材页的
+    `gather.at` / 聚气结束 / `burst.at` / `numAt` / `duration` 各自对到 ini 的
+    `gather` / `burst` / `num` / `total` 上，**段内线性**。
+    """
+    probe = heal_fx_probe
+    assert probe["tiers"] == {"1": 3.20, "2": 3.55, "3": 4.45}, (
+        f"导出档三档时长照素材页：{probe['tiers']}"
+    )
+    expected = {
+        "1": {"duration": 3.20, "GLOW": 0.16, "NUM": 0.54, "TIER": 1},
+        "2": {"duration": 3.55, "GLOW": 0.16, "NUM": 0.54, "TIER": 2},
+        "3": {
+            "duration": 4.45, "GLOW": 0.16, "NUM": 1.60, "TIER": 3,
+            "GATHER_START": 0.22, "GATHER": 1.24, "HOLD": 0.30, "BURST": 1.54,
+        },
+    }
+    for variant, want in expected.items():
+        export = probe["exported"][variant]
+        assert export["profile"] == "export"
+        assert export["duration"] == pytest.approx(want["duration"])
+        timeline = export["timeline"]
+        assert timeline["DURATION"] == pytest.approx(want["duration"])
+        for key in ("GLOW", "NUM", "TIER"):
+            assert timeline[key] == pytest.approx(want[key]), f"{variant} 档导出档的 {key}: {timeline}"
+        if variant == "3":
+            for key in ("GATHER_START", "GATHER", "HOLD", "BURST"):
+                assert timeline[key] == pytest.approx(want[key]), (
+                    f"3 档导出档的 {key}：{timeline}"
+                )
+            assert timeline["GATHER"] == pytest.approx(timeline["GATHER_START"] + 1.02), (
+                "素材页的聚气段是 0.22 → 1.24（1.02s）"
+            )
+            assert timeline["GATHER"] + timeline["HOLD"] == pytest.approx(timeline["BURST"])
+        else:
+            assert timeline["BURST"] == 0 and timeline["GATHER"] == 0 and timeline["HOLD"] == 0
+        assert probe["drawn"]["export" + variant] == "ok", (
+            f"导出档 {variant} 逐帧绘制抛错：{probe['drawn']['export' + variant]}"
+        )
+
+    # 牌桌档的锚点：素材页秒 → 牌桌秒（段内线性，端点精确落在 ini 的毫秒上）。
+    anchors = {
+        "1": [(0.54, 0.350), (3.20, 1.100)],
+        "2": [(0.54, 0.350), (3.55, 1.300)],
+        # 牌桌端点读 ini 的缺省（票 07：gather 2000 / burst 2500 / num 2500 / total 4500）。
+        # 聚气起点按素材页的比例压成 2000 × 0.22 / 1.24 ≈ 355ms；burst 与 num 同刻时
+        # `warpPairs` 仍把牌桌端点抬 0.1ms（游戏侧锚点必须严格递增）⇒ 1.60 对 2.5001。
+        "3": [
+            (0.22, 2000 * (0.22 / 1.24) / 1000),
+            (1.24, 2.000), (1.54, 2.500), (1.60, 2500 / 1000 + 1e-4), (4.45, 4.500),
+        ],
+    }
+    for variant in ("1", "2", "3"):
+        pairs = probe["warp"][variant]
+        assert pairs[0] == {"e": 0, "g": 0}, f"{variant} 档锚点从 (0, 0) 开始：{pairs}"
+        want_pairs = anchors[variant]
+        assert len(pairs) == len(want_pairs) + 1, f"{variant} 档锚点对：{pairs}"
+        for got, (export_at, game_at) in zip(pairs[1:], want_pairs):
+            assert got["e"] == pytest.approx(export_at), (
+                f"{variant} 档的素材页端点必须逐拍对上：{pairs}"
+            )
+            assert got["g"] == pytest.approx(game_at), f"{variant} 档的牌桌端点：{pairs}"
+
+    # 聚气起点的口径：`gather` 是聚气**结束**的时刻，起点的比例与素材页一致。
+    source = _HEAL_JS.read_text(encoding="utf-8")
+    assert "gather" in source and "聚气" in source, "聚气起点的换算要在注释里写清（票面 §1）"
+
+
+def test_the_heal_timing_table_clamps_inside_the_module(heal_fx_probe: dict) -> None:
+    """缺键 / 非法值退 `DEFAULT_TIMING`；钳制在**模块内部**：
+    `gather + hold ≤ burst ≤ num ≤ total ≤ 4500`。
+
+    三档缺省 = 用户 2026-11-11 实机手调的口径（票 07；spec §游戏档缺省时长）：1 = 1100
+    （num 350）、2 = 1300（num 350）、3 = 4500（gather 2000 / hold 500 / burst 2500 /
+    num 2500；聚气 44.4% / 白住 11.1% / 迸发 55.6% / 余韵 44.4%，尾巴与聚气等长）。
+    `SGS-INTEGRATION` §6.2 的示例表仍是不动比例的参考；失去体力与伤害的 2200 不动。
+    `gather` 是聚气**结束**的时刻、`hold` 是白住**时长**、`burst` 是迸发**时刻** —— 所以
+    `2000 + 500 = 2500 = burst` 是这张表自洽的判据（票面 §1 的"聚气 ≤ 白住起点 ≤ 迸发"）。
+    """
+    probe = heal_fx_probe
+    clamps = probe["clamps"]
+    assert clamps["one"] == {"total": 1100, "num": 350}, f"1 档缺省：{clamps['one']}"
+    assert clamps["two"] == {"total": 1300, "num": 350}, f"2 档缺省：{clamps['two']}"
+    assert clamps["three"] == {
+        "total": 4500, "gather": 2000, "hold": 500, "burst": 2500, "num": 2500,
+    }, f"3 档缺省按用户实机手调的口径（票 07）：{clamps['three']}"
+    assert clamps["three"]["gather"] + clamps["three"]["hold"] == clamps["three"]["burst"], (
+        f"2000 + 500 = 2500 = 迸发时刻（`gather` 是聚气结束、`hold` 是白住时长）：{clamps['three']}"
+    )
+    assert clamps["oneKeys"] == ["total", "num"] and clamps["twoKeys"] == ["total", "num"], (
+        "1 / 2 档**只有** total / num（不硬造 gather / hold / burst）："
+        f"{clamps['oneKeys']} / {clamps['twoKeys']}"
+    )
+    assert clamps["threeKeys"] == ["total", "num", "gather", "hold", "burst"], (
+        f"3 档五个字段齐全：{clamps['threeKeys']}"
+    )
+    assert probe["ordered"] == [True, True, True], "三档缺省都在钳制范围内"
+    assert probe["orderedMessy"] == [True, True, True], (
+        "五个字段全给非法大数时仍须守住 gather + hold ≤ burst ≤ num ≤ total ≤ 4500"
+    )
+    assert clamps["total"] == 4500, "total 超出 MAX_TOTAL_MS 即钳到 4500（票 06 的新上限）"
+    assert clamps["numAboveTotal"] == 900, "num ≤ total"
+    assert clamps["junk"] == {"total": 1300, "num": 350}, (
+        f"非法值（非数字 / 负数）退回内置默认：{clamps['junk']}"
+    )
+    assert clamps["missing"] == {"total": 900, "num": 350}, (
+        f"只改 total，其余退回内置默认：{clamps['missing']}"
+    )
+    assert clamps["gatherOverTotal"] == {
+        "total": 1000, "gather": 1000, "hold": 0, "burst": 1000, "num": 1000,
+    }, f"gather 超上限时钳到 total，白住与迸发跟着收在 total：{clamps['gatherOverTotal']}"
+    assert clamps["holdOverTotal"] == {
+        "total": 4500, "gather": 600, "hold": 3900, "burst": 4500, "num": 4500,
+    }, f"hold 不许把迸发顶出 total：{clamps['holdOverTotal']}"
+    assert clamps["burstBelow"] == {
+        "total": 2000, "gather": 500, "hold": 100, "burst": 600, "num": 2000,
+    }, f"burst 小于聚气结束时被抬到 gather + hold（不是退默认）；num 的缺省 2500 超过 total ⇒ 钳到 total：{clamps['burstBelow']}"
+    assert clamps["numBelowBurst"] == {
+        "total": 4500, "gather": 2000, "hold": 500, "burst": 2500, "num": 2500,
+    }, f"num 不许早于迸发：{clamps['numBelowBurst']}"
+    assert clamps["zero"]["DURATION"] == 0, "total = 0（用户关掉这一档）⇒ 一条空时间轴"
+    # 缺省值本身是实机手感的口径（票 07；改 ini 等于改用户可见的节奏；换掉缺省先改 spec）。
+    defaults = probe["defaults"]
+    assert [defaults[f"heal_fx_{v}_total"] for v in (1, 2, 3)] == [1100, 1300, 4500]
+    assert [defaults[f"heal_fx_{v}_num"] for v in (1, 2, 3)] == [350, 350, 2500]
+    assert defaults["heal_fx_3_gather"] == 2000
+    assert defaults["heal_fx_3_hold"] == 500
+    assert defaults["heal_fx_3_burst"] == 2500
+    assert not any(key.startswith(("heal_fx_1_gather", "heal_fx_2_gather")) for key in defaults), (
+        f"1 / 2 档不许有 gather / hold / burst 的键：{sorted(defaults)}"
+    )
+
+
+def test_anim_ini_lists_the_heal_durations_per_variant(heal_fx_probe: dict) -> None:
+    """`anim.ini` 的 `heal_fx_<档>_<字段>` 键块与 `SgsHealFX.DEFAULT_TIMING` 逐键同值。
+
+    键表**不在测试里写第二份**：`SgsHealFX.TIMING_KEYS` 是唯一真源，这里只与磁盘上的
+    `anim.ini` 对表（同剑光 / 雷电 / 火焰 / 铁索 / 阵亡 / 失去体力的姿态）。
+    """
+    entries = {
+        key: value for key, value in _ini_entries().items()
+        if _HEAL_TIMING_KEY.match(key)
+    }
+    expected = set(heal_fx_probe["keys"])
+    assert set(entries) == expected, (
+        f"回复体力的时长键必须与 fx-heal 的 DEFAULT_TIMING 一致："
+        f"缺 {sorted(expected - set(entries))}；多 {sorted(set(entries) - expected)}"
+    )
+    values = {key: float(value) for key, value in entries.items()}
+    max_total = heal_fx_probe["maxTotal"]
+    for variant in (1, 2):
+        total = values[f"heal_fx_{variant}_total"]
+        num = values[f"heal_fx_{variant}_num"]
+        assert 0 < num < total <= max_total, (
+            f"{variant} 档的绝对毫秒必须递增且 total ≤ {max_total}：num={num} / total={total}"
+        )
+    total = values["heal_fx_3_total"]
+    gather = values["heal_fx_3_gather"]
+    hold = values["heal_fx_3_hold"]
+    burst = values["heal_fx_3_burst"]
+    num = values["heal_fx_3_num"]
+    assert 0 < gather < burst <= num < total <= max_total, (
+        f"3 档的四个绝对毫秒必须递增（迸发与飘字同刻允许相等）且 total ≤ {max_total}："
+        f"gather={gather} / burst={burst} / num={num} / total={total}"
+    )
+    assert gather + hold == burst, (
+        f"聚气结束 + 白住时长 = 迸发时刻（2000 + 500 = 2500）：{gather} + {hold} != {burst}"
+    )
+    assert hold / total == pytest.approx(0.111, abs=0.01), (
+        f"白住占整段的 11.1%（票 07 实机手调：500 / 4500）：{hold / total:.3f}"
+    )
+    assert gather / total == pytest.approx(0.444, abs=0.01), (
+        f"聚气占整段的 44.4%（票 07 实机手调：2000 / 4500）：{gather / total:.3f}"
+    )
+    totals = [values[f"heal_fx_{variant}_total"] for variant in (1, 2, 3)]
+    assert totals == [1100, 1300, 4500], (
+        f"spec §游戏档缺省时长（票 06 改判 3+ = 4500，票 07 定拍子）：{totals}"
+    )
+    ini_text = _ANIM_INI.read_text(encoding="utf-8")
+    assert "体力演出 · 回复体力" in ini_text, "键块要有自己的标题（用户改得动）"
+    assert values == {
+        key: float(value) for key, value in heal_fx_probe["defaults"].items()
+    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变三档节奏）"
+
+
+def test_the_heal_module_never_freezes_playback_itself_and_has_no_screen_flash() -> None:
+    """回复的 3+ 档时停**不写在这份文件里**：真源是家族表的 `holdsAt: 3`（票 02）。
+
+    - 画面模块不登记 `registerPlaybackHold`（登记在 `vital-fx.js` 文件末尾）；
+    - 没有整屏闪：不碰 `.fx-flash`、不碰 `#table-shell`、不挂 CSS `filter`；
+    - `bare` 下的白化是**半透明白**叠在覆盖层上（不隐藏牌面），峰值是**具名常量**
+      `BARE_WHITE_PEAK`（导出档另有一个同值的 `EXPORT_WHITE_PEAK`：两条路径各一具名常量，
+      不是散落的字面量），注释写明素材页的 α 是照浅色样例牌调的、**最终值以实机为准**。
+    """
+    source = _strip_js_comments(_HEAL_JS.read_text(encoding="utf-8"))
+    assert "registerPlaybackHold" not in source, (
+        "回复 3+ 档的时停登记在 vital-fx.js（家族表 holdsAt），画面模块不碰暂停表"
+    )
+    assert "PlaybackHold" not in source, "画面模块不认识排播侧的暂停判据"
+    assert "fx-flash" not in source, "不能碰整屏闪的着色子层"
+    assert "table-shell" not in source, "不碰表壳（也就不会有 filter / containing block）"
+    assert not re.search(r"\.style\.filter\b", source), "不许给任何节点挂 CSS filter"
+    assert "getComputedStyle" not in source, "不读 DOM 样式（覆盖层与布局是排播层的事）"
+    match = re.search(r"var BARE_WHITE_PEAK = ([0-9.]+);", source)
+    assert match is not None, "bare 下的白化峰值必须是一个**命名常量**（可调、可实机校）"
+    assert 0 < float(match.group(1)) < 1, (
+        f"BARE_WHITE_PEAK 必须在 (0, 1) 之间（1 = 不透明的白板）：{match.group(1)}"
+    )
+    raw = _HEAL_JS.read_text(encoding="utf-8")
+    assert "实机" in raw, "注释里要写明最终白化的 α 以实机为准（票面 §1 的 bare 口径）"
+    assert "样例牌" in raw or "真实牌面" in raw, "注释里要写明素材页的 α 是照样例牌调的"
+    # 牌桌档不画宣纸底与样例牌（bare 口径）：两份贴图只在导出档取。
+    assert "bare ? null" in source, "宣纸 / 样例牌必须按 bare 分支跳过"
+
+
+_HEAL_SFX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const staticPath = (name) => `tools/sgs_web/static/${name}`;
+
+/* 假 Web Audio（与票 03 那张垫片同源，多一个 `createDelay`：回复的磬 / 泛音要一条反馈延迟
+ * 留尾）。每个节点只有 connect / start / stop 与参数 setter；`start(when)` 的**时刻**记下来
+ * ——"cue 从时间轴读"就靠它判。 */
+function makeParam() {
+  const p = {
+    value: 0,
+    setValueAtTime(v) { p.value = v; return p; },
+    exponentialRampToValueAtTime(v) { p.value = v; return p; },
+    linearRampToValueAtTime(v) { p.value = v; return p; },
+    setTargetAtTime(v) { p.value = v; return p; },
+  };
+  return p;
+}
+
+function makeNode(kind, graph) {
+  const node = {
+    kind,
+    connect() { return node; },
+    disconnect() {},
+    start(when) {
+      graph.started += 1;
+      if (typeof when === "number" && isFinite(when)) graph.whens.push(when);
+    },
+    stop() {},
+  };
+  if (kind === "gain") node.gain = makeParam();
+  if (kind === "oscillator") { node.frequency = makeParam(); node.type = "sine"; }
+  if (kind === "bufferSource") { node.buffer = null; node.loop = false; }
+  if (kind === "filter") { node.frequency = makeParam(); node.Q = makeParam(); node.type = "lowpass"; }
+  if (kind === "delay") node.delayTime = makeParam();
+  if (kind === "compressor") {
+    node.threshold = makeParam(); node.knee = makeParam(); node.ratio = makeParam();
+    node.attack = makeParam(); node.release = makeParam();
+  }
+  return node;
+}
+
+function makeGraph() {
+  const graph = { nodes: 0, started: 0, whens: [] };
+  const ctx = {
+    sampleRate: 44100,
+    currentTime: 0,
+    state: "running",
+    destination: { connect() {} },
+    resume() { return Promise.resolve(); },
+    createGain() { graph.nodes += 1; return makeNode("gain", graph); },
+    createOscillator() { graph.nodes += 1; return makeNode("oscillator", graph); },
+    createBufferSource() { graph.nodes += 1; return makeNode("bufferSource", graph); },
+    createBiquadFilter() { graph.nodes += 1; return makeNode("filter", graph); },
+    createDelay() { graph.nodes += 1; return makeNode("delay", graph); },
+    createDynamicsCompressor() { graph.nodes += 1; return makeNode("compressor", graph); },
+    createBuffer(channels, length) {
+      const data = new Float32Array(Math.max(1, length));
+      return {
+        numberOfChannels: channels, length: data.length, sampleRate: 44100,
+        getChannelData: () => data,
+      };
+    },
+  };
+  return { ctx, graph };
+}
+
+const context = vm.createContext({
+  console, setTimeout, clearTimeout, Math, Array, Float32Array, Object, JSON, Promise,
+  document: { createElement: () => ({ width: 0, height: 0, getContext: () => null }) },
+});
+context.globalThis = context;
+context.window = context;
+context.makeGraph = makeGraph;
+vm.runInContext(readFileSync(staticPath("fx-heal.js"), "utf8"), context, { filename: "fx-heal.js" });
+vm.runInContext(readFileSync(staticPath("sfx-heal.js"), "utf8"), context, { filename: "sfx-heal.js" });
+
+const report = await vm.runInContext(`(async () => {
+  const fx = window.SgsHealFX;
+  const sfx = window.SgsHealSfx;
+
+  let offline = null;
+  window.OfflineAudioContext = function OfflineAudioContext() {
+    const made = makeGraph();
+    made.ctx.startRendering = () => Promise.resolve({
+      numberOfChannels: 2,
+      length: 128,
+      sampleRate: 44100,
+      getChannelData: () => new Float32Array(128).fill(0.1),
+    });
+    offline = made.graph;
+    return made.ctx;
+  };
+
+  const live = makeGraph();
+  window.AudioContext = function AudioContext() { return live.ctx; };
+
+  const out = {};
+  for (const id of [1, 2, 3]) {
+    const clock = fx.gameTiming(id);
+    const timeline = Object.assign({}, clock.timeline);
+    const lane = sfx.create(timeline);
+    let error = null;
+    let started = false;
+    const before = { nodes: live.graph.nodes, sources: live.graph.started };
+    try {
+      started = lane.start();
+      const frames = 24;
+      for (let step = 1; step <= frames; step += 1) {
+        lane.tick((clock.timeline.DURATION * step) / frames, { dmg: id });
+      }
+      lane.mute(true);
+      lane.mute(false);
+      lane.stop();
+    } catch (e) { error = String(e && e.stack || e); }
+
+    let offlineError = null;
+    let levels = null;
+    try {
+      levels = await sfx.renderOffline(id, timeline, clock.timeline.DURATION + 0.3);
+    } catch (e) { offlineError = String(e && e.stack || e); }
+
+    out[id] = {
+      started, error,
+      nodes: live.graph.nodes - before.nodes,
+      sources: live.graph.started - before.sources,
+      offlineError,
+      offlinePeak: levels ? levels.total.peak : null,
+      offlineRms: levels ? levels.total.rms : null,
+      whens: (offline ? offline.whens.slice().sort((a, b) => a - b) : []),
+      timeline: {
+        glow: clock.timeline.GLOW,
+        gatherStart: clock.timeline.GATHER_START,
+        gather: clock.timeline.GATHER,
+        hold: clock.timeline.HOLD,
+        burst: clock.timeline.BURST,
+        num: clock.timeline.NUM,
+        duration: clock.timeline.DURATION,
+        tier: clock.timeline.TIER,
+      },
+    };
+    offline = null;
+  }
+  return JSON.stringify({
+    surface: Object.keys(sfx).sort(),
+    tiers: out,
+  });
+})()`, context, { filename: "heal_sfx_probe.js" });
+process.stdout.write(report);
+"""
+
+
+def test_the_heal_sfx_lane_schedules_every_tier_without_a_real_audio_context() -> None:
+    """`SgsHealSfx` 是**车道适配器**（`create(timeline)` → `{start, stop, mute, tick}`）：
+    三档都能建图、按时间轴排完、收声，且 cue 时刻**跟着时间轴走**。
+
+    素材页的 3+ 档是「吸气（1.02s）→ 留白（~0.3s）→ 落点 → 长余韵」；牌桌档压到牌桌时长
+    （3+ 档 4.5s，票 06）之后，这三拍的位置**由 `SgsHealFX.create()` 写进时间轴**（`GATHER_START / GATHER / HOLD / BURST`），
+    音效模块不另写一份秒数——所以判据是"吸气落在聚气起点、落点落在迸发、飘字落在 NUM"。
+    烟测里没有 `AudioContext`（垫片故意不建），这一条补上**真模块**这一侧。
+    """
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "heal_sfx_probe.mjs"
+        probe.write_text(_HEAL_SFX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"回复体力音效探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    probe = json.loads(result.stdout)
+    for name in ("create", "renderOffline"):
+        assert name in probe["surface"], f"SgsHealSfx 缺少 {name}：{probe['surface']}"
+    for variant in ("1", "2", "3"):
+        tier = probe["tiers"][variant]
+        assert tier["error"] is None, f"{variant} 档排程抛错：{tier['error']}"
+        assert tier["started"] is True, f"{variant} 档 start() 建出了共享图"
+        assert tier["nodes"] > 0 and tier["sources"] > 0, f"{variant} 档一个音源都没排出来"
+        assert tier["offlineError"] is None, f"{variant} 档离线排程抛错：{tier['offlineError']}"
+        assert tier["offlinePeak"] and tier["offlinePeak"] > 0, (
+            f"{variant} 档离线渲染一个采样都没有（峰值 {tier['offlinePeak']}）"
+        )
+        timeline = tier["timeline"]
+        whens = tier["whens"]
+        assert whens, f"{variant} 档没有任何 start(when) 时刻"
+        assert whens[0] == pytest.approx(timeline["glow"], abs=0.02), (
+            f"{variant} 档的第一声是起光（在时间轴的 GLOW）：{whens[:3]}"
+        )
+        assert any(
+            timeline["num"] - 0.02 <= when <= timeline["num"] + 0.02 for when in whens
+        ), f"{variant} 档缺少飘字那一声（NUM = {timeline['num']}）：{whens}"
+        assert max(whens) <= timeline["duration"] + 0.05, (
+            f"{variant} 档不许排到摘层之后（DURATION = {timeline['duration']}）：{max(whens)}"
+        )
+        if variant == "3":
+            assert any(
+                timeline["gatherStart"] - 0.02 <= when <= timeline["gatherStart"] + 0.02
+                for when in whens
+            ), f"3 档缺少吸气的起点（GATHER_START = {timeline['gatherStart']}）：{whens}"
+            assert any(
+                timeline["burst"] - 0.02 <= when <= timeline["burst"] + 0.06 for when in whens
+            ), f"3 档缺少迸发那一声（BURST = {timeline['burst']}）：{whens}"
+    assert probe["tiers"]["3"]["sources"] > probe["tiers"]["1"]["sources"], (
+        "3 档（吸气 + 停顿 + 落点 + 余韵）排出的音源必须多于 1 档（一声清磬）："
+        f"{probe['tiers']['3']['sources']} vs {probe['tiers']['1']['sources']}"
     )
