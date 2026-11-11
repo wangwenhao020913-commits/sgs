@@ -10,8 +10,10 @@
 | #3 性能：`view()` 不再 JSON 往返整条记录流 | `tests/test_web.py::test_the_view_payload_never_json_round_trips_the_record_stream` | 待实现（票 01） |
 | #3 性能：放弃的对局会被回收 | `tests/test_web.py::test_an_abandoned_session_is_pruned_when_a_new_one_is_created` | 待实现（票 01） |
 | #3 性能：事件流节点数有上限 | `tests/support/ui_smoke.mjs`（U-LOG-01） | 待实现（票 01） |
-| #10 A 类窗口无合法候选时不问 | `tests/test_nullify.py::test_a_seat_without_any_legal_response_card_is_not_asked_when_auto_skip_is_on` | 待实现（票 02） |
-| #10 开关关闭时照问 | `tests/test_nullify.py::test_auto_skip_off_still_asks_a_pass_only_window` | 待实现（票 02） |
+| #10 策略位（管道）默认值：引擎 OFF / 网页 ON | `tests/test_web.py::test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session` | 待实现（票 02） |
+| #10 预筛口是纯预览（不耗序号、不写记录） | `tests/test_web.py::test_the_prefilter_helper_does_not_consume_a_query_slot` | 待实现（票 02） |
+| #10 A 类窗口无合法候选时不问（**策略 ON**） | `tests/test_nullify.py::test_a_seat_without_a_nullify_or_any_conversion_is_not_asked` | 待实现（票 05） |
+| #10 引擎缺省 OFF ⇒ 旧口径照问（可复现） | `tests/test_nullify.py::test_auto_skip_off_still_asks_a_pass_only_window` | 待实现（票 05） |
 | #10 B 类无合法目标直接跳过 | `tests/test_skills.py::test_a_forced_skill_with_no_legal_target_is_not_run_and_records_nothing` | 待实现（票 02） |
 | #10 策略进侧车 meta 且回放还原 | `tests/test_web.py::test_the_sidecar_meta_freezes_the_ask_policy_and_replay_restores_it` | 待实现（票 02） |
 | #2 雄乱不复活借刀/拆顺/封印/空城 | `tests/test_hero_lei.py::test_xiongluan_never_resurrects_a_borrowed_sword_target_without_a_weapon` | 待实现（票 03） |
@@ -49,3 +51,5 @@
 | 记录流不含显示层文案 | 现有 `tests/test_replays.py` 的字节判据 + 票 07 的"只做显示覆盖"静态断言 |
 | 任何新事件通道按 after 游标 | 票 01 的 `record_json` monkeypatch 判据 |
 | 拿不到池 ⇒ 点不了（fail-closed） | 票 11 的预览失败烟测 `U-PV-02` + 票 08 的"退化不自动推进" |
+| **引擎缺省 OFF ⇒ 金录像逐字节不变** | 票 02 / 05 的硬验收：`bash tools/check_goldens.sh` 必须绿（见 `spec §3 注①`） |
+| **重录只与行为改动同提交** | 票 04 的 `## Answer` 必须带重录清单 + `goals.py` 机制断言未改弱 |

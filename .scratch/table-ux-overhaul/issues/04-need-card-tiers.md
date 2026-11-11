@@ -58,4 +58,10 @@ Ruling: spec §2 Q1 / Q13 / Q16 / Q17（用户 2026-11-11 签）
   （四张闪的局面：判定失败 → 真闪 → 第二张闪仍可发动八卦阵）。
 - 新增：`test_a_conversion_provider_is_tier_two`（蛊惑/渐营② 与真牌同档，不先问）。
 - 改写：`tests/test_timing.py:1326`（"低档关掉高档"改为"按档迭代，高档先问"）与 `:1849`。
-- 记录流会变（询问条数增加）⇒ **基准重录并入票 06**，本票先列清单。
+- 记录流会变（询问条数增加）⇒ **本票自己在同一个提交里重录**：先跑 `bash tools/check_goldens.sh`
+  拿到变红清单，再 `.venv/bin/pytest tests/test_replays.py --update-golden` 重录，
+  复核 `check_goldens.sh` 全绿 + `goals.py` 的机制断言未改弱。
+  **重录清单**（哪条基准 / 变了什么 / 为什么）写进 `## Answer`。
+  理由：`.githooks/pre-commit` 会在 `src/`、`tests/` 改动时跑全量门禁，
+  而 `test_golden_replay_matches_byte_for_byte` 是"真重跑引擎 + 逐字节比对"——
+  金录像红就**提交不进去**，所以重录不能拖到票 06（见 `spec §3 注①`）。
