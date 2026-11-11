@@ -4884,8 +4884,9 @@ _YEYAN = ActiveSkill(
 #
 # - ``COUNT_LIMIT``：赢 ⇒ ``current + 1``；没赢 ⇒ **0**（只挡**使用**，不挡**打出**——
 #   牌面写的是"不能使用【杀】"，账本 774④ 把使用与打出分列）；
-# - ``TARGET_POOL``：赢 ⇒ 把全部其他存活座位并入池（"无距离限制" = 目标集豁免，
-#   **不是**把 ``DISTANCE`` 改 0，账本 827 行）；
+# - ``TARGET_RANGE_EXEMPT``：赢 ⇒ 本阶段使用【杀】**无距离限制** = ② 的豁免座位集
+#   （**不是**把 ``DISTANCE`` 改 0，账本 827 行；也不是 ``TARGET_POOL`` 并集——那会在
+#   ④⑤ 之后加成员，票 03 的缺陷类）；
 # - ``TARGET_COUNT``：赢 ⇒ ``current + 1``（与方天画戟 +2 同一条加式链）。
 #
 # 作用域 = **本阶段**（移动版牌面）；清理点与界【诈降】同一处（``_phase_play_end``）。
@@ -4981,15 +4982,20 @@ def _tianyi_count_limit(state: GameState, ctx: ModifierContext, current: Any) ->
 
 
 def _tianyi_no_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``TARGET_POOL``：赢 ⇒ 本阶段使用【杀】**无距离限制**（目标集并集）。"""
+    """``TARGET_RANGE_EXEMPT``：赢 ⇒ 本阶段使用【杀】**无距离限制**（② 的豁免座位集）。
+
+    逐座位豁免而不是改 ``DISTANCE``（账本 827 行），也不是在 ``TARGET_POOL`` 里并集：
+    本挂点在 ③④⑤ **之前**求值，被它放行的座位马上还要过延时封印 / 附加谓词 /
+    ``TARGET_POOL`` 链，故"放宽距离"不会连带放宽目标合法性（票 03）。
+    """
     if ctx.owner != ctx.subject or ctx.card is None or not is_slash(behavior_for(ctx.card)):
         return current
     if not _tianyi_won(state, ctx.owner):
         return current
-    everyone = tuple(
+    others = tuple(
         player.seat for player in state.players if player.alive and player.seat != ctx.subject
     )
-    return tuple(dict.fromkeys((*current, *everyone)))
+    return tuple(dict.fromkeys((*current, *others)))
 
 
 def _tianyi_target_count(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -5003,7 +5009,7 @@ def _tianyi_target_count(state: GameState, ctx: ModifierContext, current: Any) -
 
 TIANYI_MODIFIERS: tuple[Modifier, ...] = (
     Modifier(ModifierPoint.COUNT_LIMIT, _tianyi_count_limit),
-    Modifier(ModifierPoint.TARGET_POOL, _tianyi_no_distance),
+    Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _tianyi_no_distance),
     Modifier(ModifierPoint.TARGET_COUNT, _tianyi_target_count),
 )
 """【天义】的三条连续型修饰器（读座位三态，不落标记）。"""
@@ -5159,7 +5165,8 @@ QUHU_FLOW = SkillFlow(
 # - 「废除」是**一个事件**（lukang-mobile 票 03 的框架面 `Engine.abolish_slots` /
 #   `restore_slots`，状态粒度 = 槽）：槽里牌先强制弃置（按来源区分组搬牌）、再落封印；
 # - 「你对其使用牌无距离与次数限制」= **按目标收窄**（只对那名角色）：
-#   * 距离侧 = `TARGET_POOL` 修饰器把他补回候选池（豁免距离 / 攻击范围）；
+#   * 距离侧 = `TARGET_RANGE_EXEMPT` 修饰器把他加进 ② 的**豁免座位集**（票 03：豁免在
+#     ③④⑤ **之前**求值，故它只让他跳过距离判据，不会让他成为被判定非法的目标）；
 #   * 次数侧 = `COUNT_EXEMPT` 修饰器按 `ModifierContext.use_targets` 判（目标集合 ⊆ {他}
 #     才豁免；候选生成期由 `check_count` 的目标维度收窄，不是整张牌放行）；
 # - 「其不能使用或打出手牌」复用【义绝】的座位级禁令（本回合，回合末清）。
@@ -5230,21 +5237,26 @@ XIONGLUAN_FLOW = SkillFlow(
 """【雄乱】的一步流水线：选一名其他角色（确认即发动）。"""
 
 
-def _xiongluan_distance_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``TARGET_POOL`` 回调：把我对其使用牌的目标补回池里（距离 / 攻击范围豁免）。
+def _xiongluan_range_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_RANGE_EXEMPT`` 回调：我对其使用牌**无距离限制** ⇒ 把雄乱目标加进豁免集。
 
-    **只放宽距离，不放宽目标合法性**（lei-batch 票 04 的缺陷 B）：``TARGET_POOL`` 这个手法
-    本身能**给自用牌补目标**（将来"可以对别人使用【无中生有】/【桃】"类技能的模板，故不删
-    这个能力）；但雄乱的牌面只豁免"距离与次数"，而【无中生有】/【桃】/【酒】/装备牌的
-    "只能对自己"（:attr:`~sgs.effects.TargetRule.self_only`）是**目标规则**，不在这两条
-    豁免里——不给这道守卫，雄乱生效时这些牌就能指定雄乱目标（用户实机发现）。
+    牌面的豁免只有"距离与次数"两条：
+
+    - **距离 / 攻击范围** = 本挂点（② 求值、在 ③④⑤ **之前**）⇒ 被豁免的座位只是**跳过**
+      距离那两条判据，随后照常过延时封印、附加谓词与 ``TARGET_POOL`` 链。旧写法把它落在
+      ``TARGET_POOL`` 的并集里 = **在 ④⑤ 之后**无条件加成员 ⇒ 复活被判定非法的座位
+      （票 03 的整类缺陷：【借刀杀人】可指定无武器角色、拆 / 顺可指定无牌角色、
+      【乐不思蜀】可落判定区已封印者、【空城】的座位被加回）；
+    - **次数** = ``COUNT_EXEMPT``（``_xiongluan_count_exempt``，按目标集合判）。
+
+    自用牌（【无中生有】/【桃】/【酒】/装备牌，"只能对自己"）的 ``TargetRule.self_only``
+    是**目标规则**、不在这两条豁免里；① 在 ② 之前就返回，故这里**不再需要** lei-batch
+    票 04 的那道 ``self_only`` 守卫——结构上走不到距离判据。
     """
-    if ctx.card is None or behavior_for(ctx.card).target_rule.self_only:
+    if ctx.owner != ctx.subject or ctx.card is None:
         return current
     target = state.player(ctx.subject).xiongluan_target
-    if target is None or target in current:
-        return current
-    if not state.player(target).alive:
+    if target is None or not state.player(target).alive:
         return current
     return (*current, target)
 
@@ -5284,7 +5296,7 @@ _XIONGLUAN = ActiveSkill(
     skill_type=SkillType.LIMITED,
     preactivated=True,
     extra_modifiers=(
-        Modifier(ModifierPoint.TARGET_POOL, _xiongluan_distance_pool),
+        Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _xiongluan_range_exempt),
         Modifier(ModifierPoint.COUNT_EXEMPT, _xiongluan_count_exempt),
     ),
     requirement=(
@@ -5979,8 +5991,8 @@ _JIEYUE = ActiveSkill(
 # 用户 2026-11-07 签字的四条口径：
 #
 # - 【决堰】的「使用牌无距离限制」= **含【杀】**（攻击范围照免）+ **含【锦囊】**（【顺手
-#   牵羊】/【兵粮寸断】的额定距离）——实现 = `TARGET_POOL`（只对【杀】族并入全体其他存活
-#   座位，与【诈降】/【天义】同一手法）+ `DISTANCE_LIMIT`（有额定距离的牌返回 ``None``）；
+#   牵羊】/【兵粮寸断】的额定距离）——实现 = 一条 `TARGET_RANGE_EXEMPT`（逐座位跳过 ② 的
+#   两条距离判据，与【诈降】/【天义】同一个挂点，票 03）；
 # - 废除 = **一个事件**废除该栏的槽（武器 1 / 防具 1 / 两个坐骑 2），走票 03 的
 #   `Engine.abolish_slots`；
 # - 「可以」= 整条发动可选；发动之后**必须**选一项（选项步无 `Pass`）；四个槽全封 ⇒ 连入口
@@ -6109,36 +6121,25 @@ def _duanyan_slash_limit(state: GameState, ctx: ModifierContext, current: Any) -
     return int(current) + amount
 
 
-def _duanyan_no_distance_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``TARGET_POOL``：【两个坐骑栏】「使用牌无距离限制」的**【杀】**那一轴。
+def _duanyan_range_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_RANGE_EXEMPT``：【两个坐骑栏】「本回合你使用牌无距离限制」。
 
-    与【诈降】/【天义】同一手法（并入全体其他存活座位 = 不查攻击范围）。只对【杀】族生效：
-    其它牌的"距离"走 ``DISTANCE_LIMIT``（见下一条）——并入会**放宽目标合法性**（例：
-    【顺手牵羊】的"区域里有牌"），那是另一回事。
+    一条回调覆盖**两条距离轴**（票 03 的挂点语义 = 逐座位跳过 ② 的距离 / 攻击范围两条
+    判据）：【杀】的攻击范围，与【顺手牵羊】/【兵粮寸断】一类牌的**额定距离**
+    （``TargetRule.max_distance``）。牌面写的是"使用**牌**"，故不按牌名收窄。
+
+    旧写法是两条修饰器（``TARGET_POOL`` 只对【杀】并入全体 + ``DISTANCE_LIMIT`` 返回
+    ``None``），合并后行为等价、且不再在 ④⑤ 之后加成员：被放行的座位照样过附加谓词
+    （例：【顺手牵羊】的"区域里有牌"）与 ``TARGET_POOL`` 链。
     """
     if ctx.owner != ctx.subject or ctx.card is None:
         return current
     if not state.player(ctx.owner).duanyan_no_distance:
-        return current
-    if not is_slash(behavior_for(ctx.card)):
         return current
     others = tuple(
         player.seat for player in state.players if player.alive and player.seat != ctx.subject
     )
     return tuple(dict.fromkeys((*current, *others)))
-
-
-def _duanyan_no_distance_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``DISTANCE_LIMIT``：【两个坐骑栏】的**额定距离**豁免（【顺手牵羊】/【兵粮寸断】等）。
-
-    只在 ``max_distance is not None`` 的牌上派发（见 :func:`check_targets`），故"无距离
-    限制"在这里读作"不查距离"（返回 ``None``），与【奇才】同一姿态。
-    """
-    if ctx.owner != ctx.subject or ctx.card is None:
-        return current
-    if not state.player(ctx.owner).duanyan_no_distance:
-        return current
-    return None
 
 
 _DUANYAN = ActiveSkill(
@@ -6154,8 +6155,7 @@ _DUANYAN = ActiveSkill(
     step_requirements={"column": "废除你装备区里的一种装备栏（然后执行对应的选项）"},
     extra_modifiers=(
         Modifier(ModifierPoint.COUNT_LIMIT, _duanyan_slash_limit),
-        Modifier(ModifierPoint.TARGET_POOL, _duanyan_no_distance_pool),
-        Modifier(ModifierPoint.DISTANCE_LIMIT, _duanyan_no_distance_limit),
+        Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _duanyan_range_exempt),
     ),
 )
 

@@ -146,7 +146,8 @@
 | 修饰点 | 归属 |
 |---|---|
 | `CANDIDATES` | 补候选（转化技 / 护驾 / 激将 / 蛊惑）。语境由 `CandidateScope` 区分：`PLAY`（出牌阶段）、`DODGE`（【闪】）、`RESPOND`（打出 / 使用的响应窗口）、`PEACH`（濒死求【桃】）、`NULLIFY`（无懈的收集式窗口）、`CARD`（逐张牌的常规候选）。"这扇窗口要一张什么牌"随 `ModifierContext.respond_required` 下传（六扇窗口都填；`DODGE` 恒为 `dodge`）。**窗口本身的登记**（scope / cause / mode / 要的牌 / 需要还是可以 / 谁可以参与 + 源码站点）住 §3.8 的 `CARD_REQUEST_WINDOWS`；共享判据 = `src/sgs/skills/catalog.py:required_card`（技能不再各写一份"哪些 scope 算要牌"） |
-| `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降）。**补目标能放宽"自用牌"**（给【无中生有】/【桃】一类 `TargetRule.self_only` 的牌加别人，是"可对别人使用自用牌"类技能的模板）——但补目标前先分清自己豁免的是**距离**还是**目标合法性**：雄乱（`hero.zhangxiu.xiongluan`）只豁免距离与次数，故回调按 `TargetRule.self_only` 收窄（lei-batch 票 04 的缺陷 B：不加这道守卫，雄乱生效时【无中生有】/【桃】就能指定雄乱目标） |
+| `TARGET_RANGE_EXEMPT` | **本次使用可以无视距离 / 攻击范围的座位集**（票 03 的加法；table-ux-overhaul spec §1 #2 / §2 Q2）。`current` 从**空元组**起，回调**追加**被豁免的座位（集合语义），**只许加**。求值点在 `src/sgs/effects/actions.py:check_targets` 的 ②「距离与攻击范围」，**在 ③④⑤ 之前**：被豁免的座位只是**跳过**距离两条判据（攻击范围 + `TargetRule.max_distance`），随后照常走延时 / 封印、附加谓词 `TARGET_FILTERS` 与 `TARGET_POOL` 链 ⇒ **不可能**让被 ③④⑤ 判非法的座位复活，也**不能**产出池成员。消费面：天义 / 雄乱 / 决堰 / 诈降 / 烈弓 / 界武圣② / 武神②；【神速】那类"技能侧自算池"的载体走 `check_targets(..., distance_exempt=True)`（同一个 ②，不经过修饰器链）。新增"无距离限制"效果**一律**挂这里，不要写 `TARGET_POOL` 并集 |
+| `TARGET_POOL` | 目标池的**合法性增删**（空城 / 谦逊 / 帷幕的"不能成为目标"剔除；方天画戟的"额外目标合法性同标准"空操作）。**回调不许新增池成员**，除非能证明该成员已通过 ③④（④ 的附加谓词 + ③ 的延时封印）——票 03 的缺陷类就是"在 ⑤ 里并集放宽距离"，它把 ④/⑤ 判非法的座位加了回来（复用旧口径的反例：雄乱把无武器角色变成【借刀杀人】的目标、把无牌角色变成【拆/顺】的目标、复活【空城】删掉的座位）。"放宽距离"与"补目标"是两件事：前者挂 `TARGET_RANGE_EXEMPT`（②），后者今天**没有**合法消费者（"可以对别人使用【无中生有】/【桃】"类需求要先证明 ③④ 仍成立，或另立挂点在 ④ 之后重跑 ③④）。全部消费者由 `tests/test_hero_catalog.py::test_the_target_pool_point_only_carries_legality_add_and_remove` 钉成名单 |
 | `TARGET_COUNT` | 额定目标数（方天画戟类） |
 | `DISTANCE` | 座位距离（马术、义从、坐骑） |
 | `DISTANCE_LIMIT` | 额定距离上限（奇才） |

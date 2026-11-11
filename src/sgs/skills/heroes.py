@@ -20,7 +20,7 @@ r"""武将技能的**定义**（票 03 起；全表登记归票 12）。
 甘宁【奇袭】  黑色牌、手牌∪装备     【过河拆桥】          单源、``PLAY``
 界关羽【武圣】 红色牌、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
                                                       ＋②方块【杀】无距离限制
-                                                      （同一技能上的 ``TARGET_POOL``）
+                                                      （同一技能上的 ``TARGET_RANGE_EXEMPT``）
 ===========  ==================  ==================  ==============================
 
 **区域默认**（W4-3 / `GLOSSARY.md`）：五条牌面都只写"一张牌"，没有一条写"区域内的牌"
@@ -407,11 +407,11 @@ def _diamond_slash_target_pool(
 ) -> Any:
     """界关羽【武圣】②：你使用**方块【杀】无距离限制**（§十九 L2084–L2086）。
 
-    落点是 ``TARGET_POOL``（"无距离限制" = 目标池豁免"距离 ≤ 攻击范围"这一条判据）：
-    把**全部其他存活座位**并进池子。用"并集"而不是直接返回全集，是为了不与链上**其它**
-    目标池修饰器打架——**修饰器管道序** ``(priority_class, skill_id, owner)``（= 解析序，不是
-    票 05 的派发链序）里后跑的回调（如
-    【空城】的剔除）仍能删掉不合法的目标；本回调只**补上**被攻击范围挡掉的那些。
+    落点是 ``TARGET_RANGE_EXEMPT``（票 03 的挂点，"无距离限制" = ② 逐座位跳过"距离 ≤
+    攻击范围"）：把**全部其他存活座位**加进豁免集。豁免在 ③④⑤ **之前**求值，故链上
+    **其它**目标池修饰器（如【空城】的剔除）一律在它之后跑、照样能删掉不合法的目标——
+    不再依赖"本回调的链序恰好排在剔除回调之前"（旧写法是 ``TARGET_POOL`` 并集，那条链
+    按 skill_id 字典序，`hero.jie_guanyu.wusheng` 恰好早于空城才没出事）。
 
     牌面判据读 ``ctx.card`` 的**花色 + 族**：方块是 `CardRef.suit` 的牌面事实（转化牌
     单源继承花色，故"方块牌当【杀】"同样命中）；族判据走 :func:`~sgs.effects.is_slash`
@@ -423,10 +423,10 @@ def _diamond_slash_target_pool(
         return current
     if ctx.card.suit != Suit.DIAMOND.value:
         return current
-    everyone = tuple(
+    others = tuple(
         player.seat for player in state.players if player.alive and player.seat != ctx.subject
     )
-    return tuple(dict.fromkeys((*current, *everyone)))
+    return tuple(dict.fromkeys((*current, *others)))
 
 
 def _heart(state: GameState, card_id: int) -> bool:
@@ -439,6 +439,8 @@ def _heart_slash_target_pool(
 ) -> Any:
     """神关羽【武神】②：你使用**红桃【杀】**无距离限制（与界武圣②同形）。
 
+    同样落在 ``TARGET_RANGE_EXEMPT``（② 求值、在 ③④⑤ 之前，票 03）：豁免集 = 全体其他
+    存活座位，被放行的座位随后照常过延时封印 / 附加谓词 / ``TARGET_POOL`` 链。
     牌面判据 = ``ctx.card`` 的**花色 + 族**；单源转化继承来源花色，故"红桃手牌当【杀】"
     也命中；族判据走 :func:`~sgs.effects.is_slash`（火 / 雷【杀】同族）。
     """
@@ -448,10 +450,10 @@ def _heart_slash_target_pool(
         return current
     if ctx.card.suit != Suit.HEART.value:
         return current
-    everyone = tuple(
+    others = tuple(
         player.seat for player in state.players if player.alive and player.seat != ctx.subject
     )
-    return tuple(dict.fromkeys((*current, *everyone)))
+    return tuple(dict.fromkeys((*current, *others)))
 
 
 def _wushen_forbidden(
@@ -570,7 +572,8 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张红色牌当【杀】使用或打出",
     ),
     # 界关羽【武圣】（M6 票 04，§十九 L2084–L2086）：①与标准版逐字相同（红牌当【杀】）；
-    # ②"你使用**方块**【杀】无距离限制"是同一技能的连续型效果，挂在 TARGET_POOL 上。
+    # ②"你使用**方块**【杀】无距离限制"是同一技能的连续型效果，挂在 TARGET_RANGE_EXEMPT 上
+    # （票 03 起；旧落点 TARGET_POOL 会复活被后面几层判非法的座位）。
     ConversionSkill(
         hero_id="jie_guanyu",
         short_id="wusheng",
@@ -578,7 +581,9 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         source_zone=_hand_equip,
         predicate=_red,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
-        modifiers=(Modifier(ModifierPoint.TARGET_POOL, _diamond_slash_target_pool),),
+        modifiers=(
+            Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _diamond_slash_target_pool),
+        ),
         requirement="选择1张红色牌当【杀】使用或打出；方块【杀】无距离限制",
     ),
     # 神关羽【武神】（票 04 / 票 05；移动版牌面）：锁定转化 + 红桃手牌牌级禁令 + 红桃【杀】
@@ -593,7 +598,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         locked=True,
         forced=True,
         modifiers=(
-            Modifier(ModifierPoint.TARGET_POOL, _heart_slash_target_pool),
+            Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _heart_slash_target_pool),
             Modifier(ModifierPoint.FORBIDDEN, _wushen_forbidden),
         ),
         requirement="选择1张红桃手牌当【杀】使用或打出；使用红桃【杀】无距离限制",

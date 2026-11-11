@@ -376,7 +376,9 @@ def _count_exempt_targets(
     )
 
 
-def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]:
+def check_targets(
+    state: GameState, seat: int, card: CardRef, *, distance_exempt: bool = False
+) -> tuple[int, ...]:
     """L3.3 ``USE_CHECK_TARGETS``：这张牌当前的合法目标池（可为空）。
 
     目标数为 0 的响应牌（【闪】/【无懈可击】）返回空元组——它们响应的是那张牌 /
@@ -390,8 +392,24 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     - **附加谓词** ``behavior.target_filters``（【过河拆桥】/【顺手牵羊】"区域里有牌"、
       【借刀杀人】"有武器且有合法【杀】目标"），经 :data:`TARGET_FILTERS` 注册表解析。
 
-    延时锦囊另有一条**规则层**限制：判定区按**牌名**禁同名（票 03 §5），故已有同名
-    延时锦囊的目标不是合法目标（标准版下这是"不合法"的唯一来源，票 03 §6）。
+    票 03 把这五层排成**单向的合法性阶梯**，每一层只负责自己那件事：
+
+    ① ``TargetRule``（只能对自己 / 目标数 0）→ ② **距离与攻击范围**（本层读
+    :data:`~sgs.skills.ModifierPoint.TARGET_RANGE_EXEMPT` 的"豁免座位集"）→ ③ 延时锦囊 /
+    封印规则 → ④ :data:`TARGET_FILTERS` 附加谓词 → ⑤
+    :data:`~sgs.skills.ModifierPoint.TARGET_POOL` 合法性增删链。
+
+    **距离豁免挂点在 ②、且在 ③④⑤ 之前**（票 03 的核心）：被豁免的座位只是**跳过**距离
+    两条判据，随后照常走 ③④⑤。故"放宽距离"**不能**复活任何被后面几层判非法的座位——旧
+    写法（在 ⑤ 里并集"全体其他存活座位"）会复活它们，实测【雄乱】能把无武器的座位变成
+    【借刀杀人】的目标、把无牌角色变成【过河拆桥】的目标、把判定区已封印 / 【空城】的座位
+    重新加回池。
+
+    ``distance_exempt``（关键字、缺省 ``False``）= **调用方**声明"这一次使用无视距离 /
+    攻击范围"，用于**技能侧自算池**的载体（唯一读者：【神速】视为使用一张"无距离限制的"
+    【杀】——那张纯虚拟牌不经过本函数前面的候选生成，故豁免只能由调用方给）。它跳过的是
+    同一处 ②，③④⑤ 照常跑，**不会**放宽任何目标合法性。没有"强制查距离"的读者，故这里
+    只有一个方向。
     """
     behavior = behavior_for(card)
     rule = behavior.target_rule
@@ -418,30 +436,46 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
                 ModifierContext(subject=seat, card=card),
                 max_distance,
             )
+        # ② 的距离 / 攻击范围豁免（票 03 的新挂点）：本次使用的**豁免座位集**，``current``
+        # 从空元组起、回调只许追加。求值点在 ③④⑤ **之前** ⇒ 下面被它放行的座位马上还要
+        # 过延时封印、附加谓词与 TARGET_POOL 链，"放宽距离"因此不可能复活非法座位。
+        exempt: tuple[int, ...] = (
+            ()
+            if distance_exempt
+            else apply_modifiers(
+                ModifierPoint.TARGET_RANGE_EXEMPT,
+                state,
+                ModifierContext(subject=seat, card=card),
+                (),
+            )
+        )
         pool = []
         for player in state.players:
             if not player.alive:
                 continue
             if player.seat == seat and not rule.includes_self_in_pool():
                 continue
-            if rule.needs_distance and distance(state, seat, player.seat) > attack_range(
-                state, seat
-            ):
-                continue
-            if max_distance is not None and distance(
-                state, seat, player.seat
-            ) > max_distance:
-                continue
+            if not distance_exempt and player.seat not in exempt:
+                if rule.needs_distance and distance(
+                    state, seat, player.seat
+                ) > attack_range(state, seat):
+                    continue
+                if max_distance is not None and distance(
+                    state, seat, player.seat
+                ) > max_distance:
+                    continue
             pool.append(player.seat)
+    # ③ 延时锦囊另有一条**规则层**限制：判定区按**牌名**禁同名（票 03 §5），且判定区被
+    # 封印的角色不是合法目标（lei-batch 票 02）——被封印者不落【乐不思蜀】/【兵粮寸断】、
+    # 【闪电】越过（后者另见 `delayed_settle_target`）。
     if behavior.is_delayed:
         pool = [
             target
             for target in pool
-            # 废除区域（lei-batch 票 02）：判定区被封印的角色**不是延时锦囊的合法目标**
-            # （乐不思蜀 / 兵粮寸断不落、闪电越过——后者另见 `delayed_settle_target`）。
             if not zone_sealed(state.player(target), SEALED_ZONE_JUDGE)
             and not _same_named_in_judge(state, target, card)
         ]
+    # ④ 附加谓词（行为表声明，TARGET_FILTERS 注册表解析）。
     pool = [
         target
         for target in pool
@@ -449,9 +483,11 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             TARGET_FILTERS[name](state, seat, target) for name in behavior.target_filters
         )
     ]
-    # 第 0 层定集合之后过 TARGET_POOL 链（票 07 §3 的挂点）：M2 的【方天画戟】在此不改池
+    # ⑤ 第 0 层定集合之后过 TARGET_POOL 链（票 07 §3 的挂点）：M2 的【方天画戟】在此不改池
     # （额定与额外目标的合法性检测标准相同，`A/flow_condition.txt:46`），M3 的"标准不同"
-    # 类效果从这里分叉。无修饰器时原样返回，故 M1 的候选逐字节不变。
+    # 类效果从这里分叉。**票 03 起这条链只做合法性增删**（空城 / 谦逊 / 帷幕的剔除）——
+    # "放宽距离 / 攻击范围"已迁到 ② 的 TARGET_RANGE_EXEMPT，故本链的回调不许把被 ③④ 判
+    # 非法的座位加回来（今天也没有这种回调）。无修饰器时原样返回，故 M1 的候选逐字节不变。
     return tuple(
         apply_modifiers(
             ModifierPoint.TARGET_POOL,

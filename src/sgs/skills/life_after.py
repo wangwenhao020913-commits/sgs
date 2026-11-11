@@ -23,8 +23,9 @@ r"""**失去体力后**（M6 票 17 新建的族）：界黄盖【诈降】。
   ``_phase_play_end`` 调用；``_phase_play_start`` 再兜一次）——不残留到下一个阶段 / 下一个
   回合的借刀杀人被迫【杀】；
 - **三条连续型效果**（只在红色【杀】 / 【杀】上分支）：
-  ① ``TARGET_POOL`` 豁免"距离 ≤ 攻击范围"（把全部其他存活座位并进池，与界【武圣】② 同一个
-  挂点姿态）；② ``USE_AFTER_DESIGNATE_TARGET`` 钩子给本次使用打**全场档**
+  ① ``TARGET_RANGE_EXEMPT`` 豁免"距离 ≤ 攻击范围"（把全部其他存活座位加进 ② 的豁免集，
+  与界【武圣】② 同一个挂点姿态；求值在 ③④⑤ **之前** ⇒ 只放宽距离、不放宽目标合法性）；
+  ② ``USE_AFTER_DESIGNATE_TARGET`` 钩子给本次使用打**全场档**
   ``Tag.UNRESPONSIVE``（窗口照常"该不该存在"由行为表定，标签只负责这一次不响应，与
   【铁骑】/界【离间】同一条读取面）；③ ``COUNT_LIMIT`` 给【杀】的次数上限 +1（"使用【杀】
   的次数上限 +1"不限定红色——牌面只在"红色【杀】"那一句里放了前两条）。
@@ -129,10 +130,11 @@ def _zhaxiang_red_slash(state: GameState, card: Any) -> bool:
 def _zhaxiang_no_distance(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
-    """``TARGET_POOL``：本阶段你使用的红色【杀】**无距离限制**（与界【武圣】② 同姿态）。
+    """``TARGET_RANGE_EXEMPT``：本阶段你使用的红色【杀】**无距离限制**（与界【武圣】② 同姿态）。
 
-    用"并集"而不是直接返回全集：链上其它目标池修饰器（【空城】一类剔除）仍能删掉不合法的
-    目标，本回调只**补上**被攻击范围挡掉的那些。
+    豁免落在 ②（**在 ③④⑤ 之前**，票 03）而不是 ``TARGET_POOL`` 的并集：被放行的座位只是
+    跳过距离判据，随后照常过延时封印、附加谓词与 ``TARGET_POOL`` 链（【空城】一类剔除仍能
+    删目标）。旧写法在 ⑤ 之后并集，会把被判定非法的座位加回来。
     """
     if ctx.owner != ctx.subject:
         return current
@@ -140,10 +142,10 @@ def _zhaxiang_no_distance(
         return current
     if not _zhaxiang_red_slash(state, ctx.card):
         return current
-    everyone = tuple(
+    others = tuple(
         player.seat for player in state.players if player.alive and player.seat != ctx.subject
     )
-    return tuple(dict.fromkeys((*current, *everyone)))
+    return tuple(dict.fromkeys((*current, *others)))
 
 
 def _zhaxiang_extra_slash(
@@ -184,7 +186,7 @@ def life_after_skill_definitions() -> tuple[SkillDef, ...]:
     """E 族（失去体力后）一条技能的 :class:`SkillDef`：界黄盖【诈降】。
 
     锁定技（技能面写"锁定技"）⇒ ``locked=True``、"是否发动"一个询问都不发；三条连续型效果
-    里的两条落修饰器（``TARGET_POOL`` / ``COUNT_LIMIT``）、"不能被【闪】响应"落帧标签，
+    里的两条落修饰器（``TARGET_RANGE_EXEMPT`` / ``COUNT_LIMIT``）、"不能被【闪】响应"落帧标签，
     故形态是「锁定技」格（`tests/test_hero_catalog.py` 的形态表由机制读出来）。
     """
     return (
@@ -205,7 +207,7 @@ def life_after_skill_definitions() -> tuple[SkillDef, ...]:
                 ),
             ),
             modifiers=(
-                Modifier(ModifierPoint.TARGET_POOL, _zhaxiang_no_distance),
+                Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _zhaxiang_no_distance),
                 Modifier(ModifierPoint.COUNT_LIMIT, _zhaxiang_extra_slash),
             ),
             requirement=(

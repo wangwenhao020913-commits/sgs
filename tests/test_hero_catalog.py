@@ -2963,6 +2963,62 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
     assert not definition.hooks and not definition.seams and not definition.locked
 
 
+def _modifier_carriers(point: ModifierPoint) -> set[str]:
+    """声明了这个挂点的全部技能 id（读 ``CATALOG`` 的修饰器表）。"""
+    return {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if any(modifier.point is point for modifier in definition.modifiers)
+    }
+
+
+def test_the_target_pool_point_only_carries_legality_add_and_remove() -> None:
+    """票 03 的结构性纪律：``TARGET_POOL`` 只做**合法性增删**，不再承担"放宽距离"。
+
+    分工（票 03 spec §1 #2）：
+
+    - 「无距离限制」= ② 的 ``TARGET_RANGE_EXEMPT``（求值在 ③④⑤ **之前**，只让被距离挡掉
+      的座位**重新走进**后面的判据）；
+    - ``TARGET_POOL`` = ⑤ 的合法性增删。回调**不许**新增池成员——那等于在 ④⑤ 之后复活
+      已被判非法的座位（【雄乱】复活【借刀杀人】/拆顺/【乐不思蜀】/【空城】的整类缺陷）。
+
+    这条把**当前的全部消费者**钉成显式名单（名单本身就是"该拦 / 不该拦"的登记）：
+    新增一条要同时想清楚它属于哪一半，并证明新增的成员已通过 ③④。行为面的层次由
+    ``tests/test_hero_lei.py::test_the_range_exempt_hook_is_evaluated_before_the_target_filters``
+    用合成修饰器钉住；本测试只钉**声明形状**。
+    """
+    assert _modifier_carriers(ModifierPoint.TARGET_POOL) == {
+        # 空操作：额外目标与额定目标的合法性检测标准相同（W7-01，行为由方天的两条断言钉）
+        "equip.halberd",
+        # 下面四条都是"删自己"的"不能成为目标"：
+        "hero.zhugeliang.kongcheng",  # 无手牌时不能成为【杀】/【决斗】的目标
+        "hero.jie_zhugeliang.kongcheng",
+        "hero.luxun.qianxun",  # 不能成为【顺手牵羊】/【乐不思蜀】的目标
+        "hero.jiaxu_mobile.weimu",  # 不能成为黑色锦囊牌的目标
+    }, "TARGET_POOL 只许放合法性增删；'放宽距离'请挂 TARGET_RANGE_EXEMPT"
+
+
+def test_the_range_exempt_point_carries_the_six_no_distance_consumers() -> None:
+    """票 03 的迁移面：五条**修饰器形态**的"无距离限制"技能 + 界武圣② / 武神②。
+
+    【神速】是第六个消费者，但它的豁免由**调用方声明**（``check_targets(...,
+    distance_exempt=True)``：那张纯虚拟【杀】不经过常规候选生成），故它没有修饰器、不在这
+    份名单里——行为由 ``tests/test_hero_feng.py`` 的神速组钉住。
+
+    界武圣② / 武神② 不在票面的六条名单里，但它们是同一个缺陷类（旧落点
+    ``TARGET_POOL`` 并集）⇒ 票面第 3 条"``TARGET_POOL`` 只留合法性增删"要求一并迁移。
+    """
+    assert _modifier_carriers(ModifierPoint.TARGET_RANGE_EXEMPT) == {
+        "hero.taishici.tianyi",  # 【天义】赢 ⇒ 使用【杀】无距离限制
+        "hero.zhangxiu.xiongluan",  # 【雄乱】对雄乱目标
+        "hero.lukang_mobile.duanyan",  # 【决堰】两个坐骑栏 ⇒ 使用**牌**无距离限制
+        "hero.jie_huanggai.zhaxiang",  # 界【诈降】红色【杀】
+        "hero.jie_huangzhong_mobile.liegong",  # 界【烈弓】① 距 ≤ 点数
+        "hero.jie_guanyu.wusheng",  # 界【武圣】② 方块【杀】
+        "hero.shen_guanyu_mobile.wushen",  # 【武神】② 红桃【杀】
+    }
+
+
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     """91 在内 / 83 在外（174 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(

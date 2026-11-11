@@ -158,7 +158,21 @@ class ModifierPoint(str, Enum):
       **不**走本挂点：它是 D9 的一次性效果，住 ``Player.hand_limit_bonus``、查询期由
       :func:`~sgs.effects.hand_limit` 在替换链之后再加，故「来源技能失去 / 失效后
       替换式立刻消失、已落的一次性增量不撤回」是结构事实，不靠回调自己判；
-    - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
+    - ``TARGET_RANGE_EXEMPT``：本次使用**可以无视距离 / 攻击范围**的座位集（票 03 的加法；
+      【雄乱】【天义】【决堰】【诈降】【烈弓】、界【武圣】②、【武神】②）。``current`` 从
+      **空元组**起，回调**追加**被豁免的座位（语义 = 集合，重复无意义），**只许加**。
+      求值点在 :func:`~sgs.effects.check_targets` 的 ②「距离与攻击范围」，**在 ③④⑤ 之前**：
+      被豁免的座位只是**跳过距离那两条判据**，随后照常走延时 / 封印规则、附加谓词
+      ``TARGET_FILTERS`` 与 ``TARGET_POOL`` 链 ⇒ 它**不可能**让任何被 ③④⑤ 判非法的座位
+      复活，也**不能**产出池成员（池成员仍由 ② 的座位环产出）。与 ``DISTANCE_LIMIT`` 的
+      分工：那一条改**这张牌的额定距离上限**（对本牌所有目标同一个值），本挂点改**这一次
+      使用对谁**不查距离（逐座位、且**同时**覆盖攻击范围与额定距离两条轴——【决堰】的
+      「使用牌无距离限制」因此只需一条回调）；
+    - ``TARGET_POOL``：目标池的**合法性增删**（方天画戟的"额外目标合法性同标准"空操作；
+      空城 / 谦逊 / 帷幕的剔除）。票 03 起它**不再是**"放宽距离"的落点——那是
+      ``TARGET_RANGE_EXEMPT``；回调**不许**新增池成员，除非能证明该成员已通过 ③④
+      （今天没有这种消费者，将来"可以对别人使用自用牌"一类需求要先按本句证明，或另立挂点
+      在 ④ 之后重跑 ③④）；
     - ``TARGET_COUNT``：本牌**最大目标数**（方天画戟 +2；只对 ``TargetCount.RATED``
       的牌查链，见下）；
     - ``DISTANCE``：座位距离（六坐骑：客体 +1 / 主体 −1）；
@@ -195,6 +209,7 @@ class ModifierPoint(str, Enum):
     COUNT_EXEMPT = "COUNT_EXEMPT"
     DISTANCE_LIMIT = "DISTANCE_LIMIT"
     HAND_LIMIT_REPLACE = "HAND_LIMIT_REPLACE"
+    TARGET_RANGE_EXEMPT = "TARGET_RANGE_EXEMPT"
     TARGET_POOL = "TARGET_POOL"
     TARGET_COUNT = "TARGET_COUNT"
     DISTANCE = "DISTANCE"

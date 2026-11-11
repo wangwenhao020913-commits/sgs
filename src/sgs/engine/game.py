@@ -5053,8 +5053,9 @@ class Engine:
         """**陆抗移动版【决堰】·两个坐骑栏**：本回合「使用牌无距离限制」的开关。
 
         写入唯一入口（【决堰】的提交点）；作用域 = **本回合**（回合末由
-        :meth:`_clear_turn_effects` 清）。读取方是同一条技能定义上的 ``TARGET_POOL`` 与
-        ``DISTANCE_LIMIT`` 两条修饰器。**不发 delta**：与 ``set_duanyan_slash_bonus`` 同姿态。
+        :meth:`_clear_turn_effects` 清）。读取方是同一条技能定义上的
+        ``TARGET_RANGE_EXEMPT`` 修饰器（票 03：逐座位豁免距离 / 攻击范围两条判据）。
+        **不发 delta**：与 ``set_duanyan_slash_bonus`` 同姿态。
         """
         self.state.player(seat).duanyan_no_distance = bool(active)
 

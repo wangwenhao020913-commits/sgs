@@ -632,7 +632,7 @@ class Player(BaseModel):
     ``slash_in_play_phase`` 的"阶段起点复位"不同："本阶段"的效果必须在阶段**结束**就消失，
     否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到这三条加成。
 
-    读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_POOL`` / ``COUNT_LIMIT`` /
+    读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_RANGE_EXEMPT`` / ``COUNT_LIMIT`` /
     ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
     """
     tianyi_won: bool = False
@@ -788,9 +788,9 @@ class Player(BaseModel):
 
     写入方 = 【雄乱】的提交点（一次发动只写一个座位）；回合末由
     ``Engine._clear_turn_effects`` 清掉。读取方是同一条技能定义上的两个修饰器：
-    ``TARGET_POOL``（把他补回候选池 ⇒ 豁免距离 / 攻击范围）与 ``COUNT_EXEMPT``
-    （``ModifierContext.use_targets`` ⊆ {他} ⇒ 这一次使用不受次数上限；候选生成期由
-    ``check_count`` 的目标维度收窄，不是把整张牌放行）。**不发 delta**：与
+    ``TARGET_RANGE_EXEMPT``（把他加进 ② 的豁免座位集 ⇒ 只跳过距离 / 攻击范围，票 03）
+    与 ``COUNT_EXEMPT``（``ModifierContext.use_targets`` ⊆ {他} ⇒ 这一次使用不受次数上限；
+    候选生成期由 ``check_count`` 的目标维度收窄，不是把整张牌放行）。**不发 delta**：与
     ``hand_card_prohibited`` 同姿态（回放按同一条技能动作重跑即可重建）。
     """
     heart_slash_bonus_against: list[int] = Field(default_factory=list)
@@ -839,9 +839,9 @@ class Player(BaseModel):
     """本回合「使用牌无距离限制」是否生效（【决堰】·两个坐骑栏；lukang-mobile 票 01）。
 
     写入唯一入口 :meth:`Engine.set_duanyan_no_distance`；**清理点 = 回合末**
-    （:meth:`Engine._clear_turn_effects`——牌面写「本回合」）。读取方是同一条技能定义上的两条
-    修饰器：``TARGET_POOL``（【杀】族把全体其他存活座位并入池 = 豁免攻击范围，与【诈降】
-    同一手法）与 ``DISTANCE_LIMIT``（有额定距离上限的牌返回 ``None`` = 豁免距离）。**不发 delta**。
+    （:meth:`Engine._clear_turn_effects`——牌面写「本回合」）。读取方是同一条技能定义上的
+    一条修饰器：``TARGET_RANGE_EXEMPT``（逐座位跳过 ② 的两条距离判据 = 同时覆盖【杀】的
+    攻击范围与【顺手牵羊】一类牌的额定距离，票 03）。**不发 delta**。
     """
     paoxiao_bonus: bool = False
     """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。

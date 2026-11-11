@@ -22,15 +22,16 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import load_content_pack
+from sgs.data import Suit, load_content_pack
 from sgs.effects import (
     check_count,
     check_targets,
     delayed_settle_target,
+    designation_actions_for,
     distance,
     legal_actions_for,
 )
-from sgs.engine import Engine
+from sgs.engine import Engine, IllegalActionError
 from sgs.resolution import Frame
 from sgs.state import (
     ActivateSkill,
@@ -613,9 +614,10 @@ def test_xiongluan_multi_target_card_counts_unless_only_the_chosen_target():
 def test_xiongluan_does_not_widen_self_only_cards():
     """雄乱只豁免**距离 / 攻击范围**：自用牌的"只能对自己"是目标合法性，池保持原样。
 
-    lei-batch 票 04 的缺陷 B：``TARGET_POOL`` 能把"自用牌"的目标放宽到别人（这是**保留**
-    的手法，将来"可对别人使用【无中生有】/【桃】"类技能的模板），但雄乱这条修饰器不能
-    顺手放宽它——否则雄乱生效时【无中生有】/【桃】能指定雄乱目标。
+    lei-batch 票 04 的缺陷 B（当年靠回调里的 ``TargetRule.self_only`` 守卫挡的那一半）：
+    雄乱生效时【无中生有】/【桃】不能指定雄乱目标。票 03 把它变成**结构事实**——自用牌在
+    ① `TargetRule` 就返回了，走不到 ② 的距离豁免，故守卫本身随旧落点一起删掉；本用例钉住
+    "删了守卫之后这条判据仍然成立"。
     """
     ex_nihilo = cards_of_type(PACK, "ex_nihilo")[0]
     peach = cards_of_type(PACK, "peach")[0]
@@ -694,6 +696,207 @@ def test_xiongluan_waives_distance_against_the_chosen_target():
     state.player(0).xiongluan_target = 2
     assert candidates() == ((1,), (2,), (3,)), (
         "雄乱点名 ⇒ 距离豁免只把座位 2 补回池（1 / 3 的次序不变）"
+    )
+
+
+def _xiongluan_board(*, hand=(), seats=()):
+    """张绣（座位 0）出牌阶段；``seats`` = 座位 1 起的构造参数（缺省两个空白座位）。"""
+    specs = [SeatSpec(hero="zhangxiu", hand=hand), *(seats or (SeatSpec(), SeatSpec()))]
+    used = {card for spec in specs for card in (*spec.hand, *spec.equip, *spec.judge)}
+    deck = tuple(card_id for card_id in range(60, 108) if card_id not in used)
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 票 03：雄乱只豁免**距离 / 攻击范围**，且豁免求值在 ③④⑤ **之前** ⇒ 任何被
+# TargetRule / 延时封印 / TARGET_FILTERS / TARGET_POOL 判非法的座位都不能被它复活。
+#
+# 四条用例的**观测面都两处**：``check_targets``（池本身）与出牌阶段的真实询问
+# （``Engine`` 建出来的 ``PLAY_PHASE`` query）——后者的「第二处」按牌型落在不同字段上：
+# 借刀是 ``card_preactivations``（裸候选已从 ``legal_actions`` 收回，清单是唯一入口），
+# 其余三张是 ``legal_actions`` 里的 ``UseCard.targets``。
+# ---------------------------------------------------------------------------
+
+
+def test_xiongluan_never_resurrects_a_borrowed_sword_target_without_a_weapon():
+    """【借刀杀人】：④「有武器 ∧ 攻击范围内有合法【杀】目标」判非法的座位，雄乱**不**复活。
+
+    票 03 的根因（spec §1 #2）：旧回调在 ⑤ 里无条件 ``(*current, target)`` ⇒ 池 ``()`` 变
+    ``(1,)``，清单文案仍写"装备区有武器"、提交被接受；持刀者没有武器 ⇒ 交给武器那步读
+    ``None`` ⇒ **整张牌空转**。新挂点在 ② 只豁免距离，④ 之后照旧 ⇒ 座位 1 进不了池，
+    清单与提交两侧一起关死。
+    """
+    borrowed = cards_of_type(PACK, "borrowed_sword")[0]
+    state = _xiongluan_board(hand=(borrowed,))
+    state.player(0).xiongluan_target = 1
+    assert state.player(1).equip == [], "前提：座位 1 装备区没有武器"
+
+    assert check_targets(state, 0, state.card(borrowed)) == ()
+    assert designation_actions_for(state, 0, answers_seq=1) == (), "清单与池同源"
+
+    engine = Engine.from_state(state, seed=7)
+    query = _play_phase(engine, [Scripted(activate=False) for _ in range(3)])
+    assert dict(query.card_preactivations) == {}, (
+        "清单渲不出来 = 此刻不可用（不 fail-open）"
+    )
+    assert query.designation_actions == (), "内部附带指定池同样空"
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            UseCard(
+                card=state.card(borrowed),
+                targets=(1,),
+                designations=(2,),
+                answers_seq=query.seq,
+            )
+        )
+    assert "候选池" in caught.value.message, "不在池里的附带指定必须被拒（旧实现会接受）"
+
+
+def test_xiongluan_never_resurrects_a_dismantle_target_with_no_cards():
+    """【过河拆桥】：④ ``has_zone_cards`` 判非法的座位，雄乱**不**复活。"""
+    dismantle = cards_of_type(PACK, "dismantlement")[0]
+    filler = cards_of_type(PACK, "slash")[0]
+    state = _xiongluan_board(
+        hand=(dismantle,), seats=(SeatSpec(hand=(filler,)), SeatSpec())
+    )
+    state.player(0).xiongluan_target = 2
+    empty = state.player(2)
+    assert not (empty.hand or empty.equip or empty.judge), "前提：座位 2 三个区都空"
+
+    assert check_targets(state, 0, state.card(dismantle)) == (1,)
+
+    engine = Engine.from_state(state, seed=7)
+    query = _play_phase(engine, [Scripted(activate=False) for _ in range(3)])
+    assert _targets_in(query, "dismantlement") == ((1,),), (
+        "出牌阶段的候选面读同一份池：座位 2 不出现"
+    )
+
+
+def test_xiongluan_never_resurrects_a_sealed_judge_area_target():
+    """【乐不思蜀】：③「判定区已封印」判非法的座位，雄乱**不**复活。"""
+    indulgence = cards_of_type(PACK, "indulgence")[0]
+    state = _xiongluan_board(hand=(indulgence,))
+    engine = Engine.from_state(state, seed=7)
+    assert (
+        engine.abolish_slots(
+            Frame(kind=FrameKind.SKILL, data={"skill_owner": 0}), 1, JUDGE_SLOTS
+        )
+        is None
+    ), "前提：座位 1 的判定区一次封完"
+    state = engine.state
+    state.player(0).xiongluan_target = 1
+    assert judge_zone_sealed(state.player(1)), "前提：座位 1 判定区已封印"
+
+    assert check_targets(state, 0, state.card(indulgence)) == (2,)
+
+    query = _play_phase(engine, [Scripted(activate=False) for _ in range(3)])
+    assert _targets_in(query, "indulgence") == ((2,),), (
+        "出牌阶段的候选面读同一份池：判定区已封印的座位 1 不出现"
+    )
+
+
+def test_xiongluan_never_resurrects_a_kongcheng_seat():
+    """【空城】：⑤ 里删掉的座位不被雄乱加回（修饰器管道序把雄乱排在界诸葛亮**之后**）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _xiongluan_board(
+        hand=(slash,), seats=(SeatSpec(), SeatSpec(hero="jie_zhugeliang"))
+    )
+    state.player(0).xiongluan_target = 2
+    assert state.player(2).hand == [], "前提：界诸葛亮没有手牌 ⇒ 【空城】生效"
+    assert distance(state, 0, 2) <= 1, "前提：座位 2 在攻击范围内（只由 ⑤ 删它）"
+
+    assert check_targets(state, 0, state.card(slash)) == (1,)
+
+    engine = Engine.from_state(state, seed=7)
+    query = _play_phase(engine, [Scripted(activate=False) for _ in range(3)])
+    assert _targets_in(query, "slash") == ((1,),), (
+        "出牌阶段的候选面读同一份池：【空城】删掉的座位 2 不出现"
+    )
+
+
+def _targets_in(query, card_type: str):
+    """出牌阶段询问里某牌名的全部 ``UseCard.targets``（次序 = 引擎给的次序，不排序）。"""
+    return tuple(
+        action.targets
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == card_type
+    )
+
+
+def test_the_range_exempt_hook_is_evaluated_before_the_target_filters(monkeypatch):
+    """票 03 的层次：② 的新挂点只让"被距离挡掉"的座位**重新走进** ③④⑤。
+
+    合成修饰器（替换张绣【雄乱】的修饰器表，回调不认任何牌面）= 本次使用对**全体其他存活
+    座位**豁免距离。局面（六人环，座位 0 攻击范围 1，黑色【顺手牵羊】额定距离 1）：
+
+    - 座位 1 / 5（距离 1）：本来就在池里；
+    - 座位 4（距离 2、区域里有牌）：**挂点把它补进池**——旧写法只能靠 `TARGET_POOL` 并集；
+    - 座位 3（距离 3、区域里**没有牌**）：被 ④ ``has_zone_cards`` 判非法 ⇒ 挂点救不回来；
+    - 座位 2（距离 2、区域里有牌，但是贾诩【帷幕】）：被 ⑤ 删掉 ⇒ 挂点也救不回来。
+
+    期望池 = (1, 4, 5)：座位 3 / 2 各自钉住"④ / ⑤ 在挂点**之后**照常跑"，座位 4 钉住
+    "挂点确实在 ② 生效"——少了任何一半，下面的断言都会给出另一个元组。
+    """
+    from dataclasses import replace as dc_replace
+    from types import MappingProxyType
+
+    import sgs.skills.catalog as catalog_module
+    from sgs.effects import Modifier, ModifierPoint
+
+    snatch = next(
+        card_id
+        for card_id in cards_of_type(PACK, "snatch")
+        if PACK.deck.cards[card_id].suit is Suit.SPADE
+    )
+    state = _xiongluan_board(
+        hand=(snatch,),
+        seats=(
+            SeatSpec(hand=(0,)),
+            SeatSpec(hero="jiaxu_mobile", hand=(1,)),
+            SeatSpec(),
+            SeatSpec(hand=(2,)),
+            SeatSpec(hand=(3,)),
+        ),
+    )
+    assert (distance(state, 0, 1), distance(state, 0, 2), distance(state, 0, 3), distance(state, 0, 4), distance(state, 0, 5)) == (1, 2, 3, 2, 1), (
+        "前提：六人环上到座位 2 / 3 / 4 的距离分别是 2 / 3 / 2"
+    )
+    assert check_targets(state, 0, state.card(snatch)) == (1, 5), (
+        "没有豁免挂点时：距离 2 的座位 4（有牌）被 ② 挡掉；座位 3 被 ④ 挡、座位 2 被 ⑤ 挡"
+    )
+
+    def _exempt_everyone(state_, ctx, current):
+        """合成回调：本次使用对全体其他存活座位豁免距离（只**追加**座位）。"""
+        return (
+            *current,
+            *(
+                player.seat
+                for player in state_.players
+                if player.alive and player.seat != ctx.subject
+            ),
+        )
+
+    definition = dc_replace(
+        catalog_module.CATALOG["hero.zhangxiu.xiongluan"],
+        modifiers=(Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _exempt_everyone),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType(
+            {**catalog_module.CATALOG, "hero.zhangxiu.xiongluan": definition}
+        ),
+    )
+
+    assert check_targets(state, 0, state.card(snatch)) == (1, 4, 5), (
+        "挂点在 ② 只补回被距离挡掉的座位 4；④ / ⑤ 的判据在它之后照常跑"
     )
 
 
