@@ -748,6 +748,8 @@ function applyView(body) {
     // 纯刷新没有回放：技能发动的演出按响应立即触发（不等一个不存在的记录步）。
     fireSkillEventsThrough(Infinity);
     fireDamageEventsThrough(Infinity);
+    // vital-fx 票 02：失去体力的事实与伤害事件同姿态——纯刷新也要按响应立即消费。
+    fireHpLossEventsThrough(Infinity);
     commitView(body);
     return;
   }
@@ -965,6 +967,10 @@ function stepPlayback(immediate) {
     // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
     // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
     applyRecordEffects(record, playback.querySeat);
+    // vital-fx 票 02：**回复体力**的事实源就是这条记录（`hp_change` 里 `after > before`），
+    // 所以在 `applyRecordEffects` 之后（`flashHeroHp` 的 0.4s 闪保留作兜底）紧接着排播：
+    // 判据只看记录、不认技能名，与本函数下一段的其它演出钩子同一个姿态。
+    fireVitalEventsThrough(record);
     // A1：洛神连续判定——弹窗已开着时，用刚进处理区的判定牌续上同一个窗口。
     // 只读 JUDGE 帧 + `card_move(reason=JUDGE)` 这两条服务端事实，不认技能名；舞台已由
     // `applyEffectDelta` 照常派生（弹窗不往舞台上加卡）。
@@ -975,6 +981,10 @@ function stepPlayback(immediate) {
     // damage-fx 票 05：伤害演出挂在**同一条 seq 游标**上（这是它唯一的触发点：不在
     // `applyLiveDelta` 里、也不在提交视图时触发）。
     fireDamageEventsThrough(record.seq);
+    // vital-fx 票 02：**失去体力**的演出挂在**同一条 seq 游标**上（事件源是票 01 的
+    // `state.lifeLossEvents` 缓冲，与 `damage_events` 并列）。**永不冻回放**：这里没有任何
+    // 时停登记会因它变真（家族的 `holdsAt` 是 `Infinity`），演出与后续记录并行是口径。
+    fireHpLossEventsThrough(record.seq);
     // chain-death-voices 票 03：卡牌语音挂在**同一条 seq 游标**上（到点的事实逐条播，其余
     // 留在 `state.cardEvents` 里等下一批）。**每条自起一路**、可重叠不打断，所以这里既不
     // 排播也不等待——出口只有 `SgsCardVoice.play`。
@@ -1030,6 +1040,7 @@ function finishPlayback() {
   // 兜底：旧录像 / 合成载荷若没有同 seq 的记录，播完立即触发，不让事件跨到下一批。
   fireSkillEventsThrough(Infinity);
   fireDamageEventsThrough(Infinity);
+  fireHpLossEventsThrough(Infinity);
   commitView(playback.body);
 }
 
@@ -1451,6 +1462,9 @@ function commitView(body) {
     // 全部存活的那几路并清表）；队列同时清空（`applyView` 的换会话分支也清一次）。
     SgsCardVoice.stopAll();
     state.cardEvents = [];
+    // vital-fx 票 02：体力演出（自己的覆盖层 `#t-vital-fx`、自己的队列 / 计时器 / 音效声道）
+    // 是**另一层**的一次演出，换局同样连声音一起收掉：上一局那条回复不能留在新桌上。
+    clearVitalFx();
     // vital-fx 票 01：失去体力事实的队列同样属于上一局（与 `state.damageEvents` 同块清）。
     state.lifeLossEvents = [];
   }

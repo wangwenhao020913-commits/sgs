@@ -1067,6 +1067,25 @@ button.mini-slot { cursor: pointer; }
   height: 100%;
 }
 
+/* ---------- 体力演出层（vital-fx 票 02）：失去体力 / 回复体力 ---------- */
+
+/* 与伤害层**各自独立**（spec §硬约束：不许把体力演出塞进 `#t-damage-fx`）、同一 z-index 档：
+ * DOM 排在伤害层之后 ⇒ 同 z 下画在它上面。层里只有**一张**可见 canvas（跨演出复用、播完
+ * 摘掉），离屏舞台按槽复用。**没有整屏闪**：这两套演出不挂 `filter`、也不碰 `.fx-flash`
+ * ——`#t-vital-fx` 只是又一张铺满表壳的透明覆盖层，`.card-preview`（55）依旧在它之上。 */
+.vital-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 19;
+}
+.vital-fx-layer canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* ---------- 铁索连环演出层（chain-death-voices 票 01）：入链 / 解锁 ---------- */
 
 /* 与伤害层**各自独立**（spec §硬约束：不许往 `#t-damage-fx` 里塞画布）、同一 z-index 档：

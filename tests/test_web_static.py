@@ -610,7 +610,7 @@ _ANIM_INI = STATIC_DIR / "anim.ini"
 # 住在同一份 `anim.ini` 里、但**默认值与钳制都不在本文件**的外来键前缀（`anim.js` 只搬数字）：
 # damage-fx 的三族 + chain-death-voices 的铁索。`test_anim_ini_lists_the_d8_durations_...` 用
 # 它把"不属于任何演出家族的键"过滤出来，逐族键表归各自的用例钉。
-_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_", "death_fx_")
+_ANIM_FOREIGN_PREFIXES = ("damage_fx_", "chain_fx_", "death_fx_", "hp_loss_fx_", "heal_fx_")
 
 _D8_INI_KEYS = {
     "base_step",
@@ -6273,12 +6273,16 @@ def test_the_card_voice_wiring_is_one_way_from_sfx_ui_and_rides_the_same_seq_cur
 
 
 def test_the_playback_hooks_fire_in_damage_card_chain_death_order() -> None:
-    """`stepPlayback` 的四条演出钩子次序 = **伤害 → 卡牌语音 → 铁索 → 阵亡**。
+    """`stepPlayback` 的演出钩子次序 = **回复 → 伤害 → 失去体力 → 卡牌语音 → 铁索 → 阵亡**。
 
     票 01 / 票 03 落笔时各自写过「紧挨 `fireDamageEventsThrough(record.seq)` 的下一行」；
     后来卡牌语音插在伤害与铁索之间、阵亡又接在铁索之后——于是「下一行」只对卡牌语音成立。
-    这里按**真实相邻次序**一次钉住四条，并禁止相邻两条之间再插别的 `fire*EventsThrough`
+    这里按**真实相邻次序**一次钉住，并禁止相邻两条之间再插别的 `fire*EventsThrough`
     钩子（acceptance-map §1.1 的载体）：次序被改、或又插一条演出钩子，这条就红。
+
+    vital-fx 票 02 有意加了两条（这是本票的交付，不是漂移）：**回复**的钩子接在
+    `applyRecordEffects` 之后（它读记录本身），**失去体力**的钩子紧挨伤害那条（同一个 seq
+    游标）。两条都钉进来，下一次再插钩子照样红。
     """
     session = _SESSION_JS.read_text(encoding="utf-8")
     match = _STEP_PLAYBACK_RE.search(session)
@@ -6292,16 +6296,19 @@ def test_the_playback_hooks_fire_in_damage_card_chain_death_order() -> None:
     assert "fireDamageEventsThrough" in calls, (
         f"伤害演出的钩子不在 stepPlayback 里：{calls}"
     )
-    # 从伤害那一条起切（技能演出钩子排在它之前，不在这条的契约里）。
-    order = calls[calls.index("fireDamageEventsThrough"):]
+    # 从**回复**那一条起切（技能演出钩子排在它之后、伤害之前，不在这条的契约里）。
+    order = calls[calls.index("fireVitalEventsThrough"):]
     assert order == [
+        "fireVitalEventsThrough",
+        "fireSkillEventsThrough",
         "fireDamageEventsThrough",
+        "fireHpLossEventsThrough",
         "fireCardEventsThrough",
         "fireChainEventsThrough",
         "fireDeathEventsThrough",
     ], (
-        "stepPlayback 的演出钩子必须依次是 伤害 → 卡牌语音 → 铁索 → 阵亡，"
-        f"且相邻两条之间不许插别的 `fire*EventsThrough`，实际：{calls}"
+        "stepPlayback 的演出钩子必须依次是 回复 → 技能 → 伤害 → 失去体力 → 卡牌语音 → "
+        f"铁索 → 阵亡，且相邻两条之间不许插别的 `fire*EventsThrough`，实际：{calls}"
     )
 
 
@@ -6316,6 +6323,10 @@ def test_life_loss_facts_land_in_the_frontend_state_without_any_playback() -> No
     票面 §做法 5：本票**只做事件源**——不排播、不画、不加演出钩子（排播层 `vital-fx.js`
     是票 02，本票不许凭空多出消费方）。所以这里钉三处接线，再反向钉住"伤害 / 舞台两层都
     不认识这个队列"与"session.js 里没有第二个读它的地方"。
+
+    **票 02 已经接上消费方**（`vital-fx.js:fireHpLossEventsThrough`），但消费方**不在**
+    `session.js` 里读这张表（钩子只传 seq），所以这条用例一个字不用改：它钉的仍是
+    "事实落进 state 这几处接线"与"伤害 / 动效 / 舞台三层不认识这个队列"。
     """
     session = _SESSION_JS.read_text(encoding="utf-8")
     apply_view = _js_function(session, "applyView")
@@ -6349,3 +6360,572 @@ def test_life_loss_facts_land_in_the_frontend_state_without_any_playback() -> No
             f"{name} 不认识 `state.lifeLossEvents`：失去体力的排播 / 画面是票 02 / 03，"
             "伤害 / 动效两层一个字都不动"
         )
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 02：体力演出的排播缝（`vital-fx.js`）
+#
+# 机械的四半（行为归烟测 `U-VITAL-02..`）：
+# 1. **脚本清单 / 层 / 样式**：`vital-fx.js` 紧挨 `damage-fx.js`（且排在 `sfx-ui.js` 之前，
+#    后者要读 `vitalFxCapFor` 定声道池长）；`#t-vital-fx.vital-fx-layer` 是壳里又一张透明
+#    覆盖层（z 与伤害层同档、DOM 在后 ⇒ 画在伤害层之上），**不挂 `filter`、不碰 `.fx-flash`**。
+# 2. **家族表 + 三个只读口**（node 探针驱动真函数）：`vitalFxRendererFor` /
+#    `vitalFxCapFor`（1–8、缺省 2、钳在读者侧）/ `vitalFxHoldFor`（HP_LOSS 恒 false、
+#    HEAL 3+ true）。
+# 3. **两条事件源 + 一把闸门 + 时停登记**：`stepPlayback` 里
+#    `fireHpLossEventsThrough(record.seq)` 紧挨伤害那条、`fireVitalEventsThrough(record)`
+#    在 `applyRecordEffects` 之后；`registerPlaybackHold("vital", vitalFxPlaybackHold)`；
+#    三处收尾钩子（`renderTable` / `commitView` / 换局清 `state.lifeLossEvents`）。
+# 4. **音效接缝**：`VITAL_SFX_ENGINES` + 四个 `vitalSfx*` 调用点，缺件静默（票 03 / 04 之前
+#    两个模块都不存在，这一条今天就生效）。
+# ---------------------------------------------------------------------------
+
+_VITAL_FX_JS = STATIC_DIR / "vital-fx.js"
+
+# vital-fx 票 03 / 04 的四个模块（画面 / 音效各两份）。**本票一行都不许加**：那四份脚本还不
+# 存在，预先登记会让下面那条用例立刻红（它逐行断言"清单里有、磁盘上有、挂了全局名"）。
+# 票 03 追加 `{"fx-hp-loss.js": "SgsHpLossFX", "sfx-hp-loss.js": "SgsHpLossSfx"}`；
+# 票 04 追加 `{"fx-heal.js": "SgsHealFX", "sfx-heal.js": "SgsHealSfx"}`。
+_VITAL_FX_GLOBALS: dict[str, str] = {}
+
+
+def test_the_vital_fx_playback_layer_is_listed_next_to_damage_fx() -> None:
+    """`vital-fx.js` 进清单、紧挨 `damage-fx.js`，且仍是一份**独立**的普通严格脚本。
+
+    「独立」是 spec §硬约束：它有自己的家族表 / cap 口 / 队列 / 时停判据，**不许**借伤害
+    家族的三个函数（`damageFxNatureKind` / `damageFxRendererFor` / `damageFxCapFor`）——
+    那样两条家族的 cap / 错开 / 灰阶口径会互相打架。三个借来的只读小工具（布局 / 时钟）
+    都按 `typeof` 在**调用时**解析，与 `damage-fx.js` 同一个方向。
+    """
+    srcs = _script_srcs()
+    assert "vital-fx.js" in srcs, f"index.html 必须加载 vital-fx.js：{srcs}"
+    assert (STATIC_DIR / "vital-fx.js").is_file(), "static/ 里缺少 vital-fx.js"
+    assert srcs.index("vital-fx.js") == srcs.index("damage-fx.js") + 1, (
+        f"vital-fx.js 必须紧挨 damage-fx.js（同姿态的独立排播层）：{srcs}"
+    )
+    assert srcs.index("vital-fx.js") < srcs.index("sfx-ui.js"), (
+        "vital-fx.js 要排在 sfx-ui.js 之前（后者读 vitalFxCapFor 定声道池长）"
+    )
+
+    text = _VITAL_FX_JS.read_text(encoding="utf-8")
+    assert _LEADING_COMMENT.sub("", text, count=1).startswith('"use strict";'), (
+        "vital-fx.js 的首条语句必须是 \"use strict\";"
+    )
+    assert not re.search(r"^\s*(?:import|export)\b", text, re.M), (
+        "vital-fx.js 是普通脚本：不许 ESM"
+    )
+    body = _strip_js_comments(text)
+    assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", body), "vital-fx.js 不发请求"
+    assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", body), (
+        "vital-fx.js 不自己取 DOM：层用 `$(\"t-vital-fx\")`，布局工具借 effects.js"
+    )
+    for name in ("damageFxNatureKind", "damageFxRendererFor", "damageFxCapFor"):
+        assert name not in body, (
+            f"vital-fx.js 不许调 {name}：两条家族不共用户口（spec §硬约束）"
+        )
+    assert re.search(r'^const VITAL_FX_FAMILIES = \{$', body, re.M), (
+        "家族表必须是这一份文件里的唯一查表处（`const VITAL_FX_FAMILIES = {`）"
+    )
+    assert re.search(r'^  HP_LOSS:\s+\{', body, re.M) and re.search(r'^  HEAL:\s+\{', body, re.M), (
+        "家族表有且只有 HP_LOSS / HEAL 两行"
+    )
+    assert 'registerPlaybackHold("vital", vitalFxPlaybackHold);' in body, (
+        "文件末尾要把 `vitalFxPlaybackHold` 登记进排播侧的暂停表（登记名 = vital）"
+    )
+    assert '$("t-vital-fx")' in body, "层节点按 id 取（`$` 是 core.js 的读取口）"
+
+
+def test_vital_fx_scripts_keep_their_global_names_and_stay_static() -> None:
+    """票 03 / 04 的四个模块（画面 / 音效）逐行登记在 `_VITAL_FX_GLOBALS` 里。
+
+    本票**还没有**这四个模块：表是空的，于是这条用例今天是空转的；票 03 / 04 各补两行之后
+    它立刻变成真断言（清单里有、顺序在 `sfx-ui.js` 之前、挂了全局名、不发请求、不接管 DOM）。
+    这张表留在这里而不是等票 03 再建，是为了让"新模块必须登记"这件事从本票起就有落点。
+    """
+    srcs = _script_srcs()
+    for name, global_name in _VITAL_FX_GLOBALS.items():
+        assert name in srcs, f"index.html 必须加载 {name}：{srcs}"
+        assert (STATIC_DIR / name).is_file(), f"static/ 里缺少 {name}"
+        assert srcs.index(name) < srcs.index("sfx-ui.js"), (
+            f"{name} 必须在 sfx-ui.js 之前（音效 / 声道池按名取它）"
+        )
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert _LEADING_COMMENT.sub("", text, count=1).startswith('"use strict";'), (
+            f"{name} 的首条语句必须是 \"use strict\";"
+        )
+        assert re.search(rf"global\.{global_name}\s*=\s*\{{", text), (
+            f"{name} 必须把入口挂在 window.{global_name}"
+        )
+        assert not re.search(r"\b(?:fetch|XMLHttpRequest)\s*\(", text), (
+            f"{name} 是纯静态脚本：不发请求"
+        )
+        assert not re.search(r"\bdocument\.(?:querySelector|getElementById)\b", text), (
+            f"{name} 不接管 DOM（覆盖层与挂载是排播层的事）"
+        )
+    # 前提：这四行只会在票 03 / 04 出现；本票交付时表必须为空（模块还不存在）。
+    assert not any(name in srcs for name in ("fx-hp-loss.js", "fx-heal.js", "sfx-hp-loss.js", "sfx-heal.js")), (
+        "画面 / 音效模块是票 03 / 04 的文件：本票不许提前把它们挂进清单"
+    )
+
+
+def test_the_vital_fx_layer_is_its_own_overlay_next_to_the_damage_layer() -> None:
+    """`#t-vital-fx` / `.vital-fx-layer` 是**独立**的覆盖层，且**没有**整屏闪。
+
+    - 层：壳里的常驻空 div、`pointer-events: none`、z 与 `.damage-fx-layer` 同档（19）；
+      DOM 排在 `#t-damage-fx` 之后 ⇒ 同 z 下画在伤害层之上（spec §做法 4）；
+    - **不碰 `.fx-flash`、不挂 `filter`**：素材页这两套演出没有整屏闪（spec §硬约束）；
+    - 层里只放**一张**可见 canvas（跨演出复用），离屏舞台按槽复用、数量随在播数增长。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<div\b[^>]*\bid=\"t-vital-fx\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少体力演出层 #t-vital-fx"
+    assert re.search(r'class="[^"]*vital-fx-layer', tag.group(0)), tag.group(0)
+    assert "aria-hidden" in tag.group(0), "体力演出是纯视觉层，必须 aria-hidden"
+    assert html.index('id="table-shell"') < html.index('id="t-vital-fx"'), (
+        "体力层必须住在 .table-shell 里（座位矩形按壳内坐标量）"
+    )
+    assert html.index('id="t-damage-fx"') < html.index('id="t-vital-fx"'), (
+        "层排在 #t-damage-fx 之后（同 z-index 档 ⇒ 体力画在伤害之上）"
+    )
+    assert re.search(r'<div\b[^>]*\bid="t-vital-fx"[^>]*></div>', html), (
+        "层必须仍是空的常驻 div（画布由排播层挂 / 摘）"
+    )
+
+    rule = _css_rule(".vital-fx-layer")
+    for pattern, why in (
+        (r"position:\s*absolute", "绝对定位"),
+        (r"inset:\s*0", "铺满表壳"),
+        (r"pointer-events:\s*none", "不吃指针"),
+        (r"overflow:\s*hidden", "画布裁在壳内"),
+    ):
+        assert re.search(pattern, rule), f"层必须{why}：{rule}"
+    assert _layer_z_index(".vital-fx-layer") == _layer_z_index(".damage-fx-layer") == 19, (
+        "体力层与伤害层同 z-index 档（19）：DOM 在后 ⇒ 画在上面"
+    )
+    assert _layer_z_index(".vital-fx-layer") < _layer_z_index(".card-preview"), (
+        "层在卡牌预览（55）之下"
+    )
+    assert re.search(r"\.vital-fx-layer canvas\s*\{[^}]*width:\s*100%", _CSS_TEXT), (
+        "层里那张 canvas 按层的 CSS 尺寸铺满（view 与 dpr 由 JS 算）"
+    )
+
+    body = _strip_js_comments(_VITAL_FX_JS.read_text(encoding="utf-8"))
+    assert "fx-flash" not in body, "这两套演出没有整屏闪：不碰 `.fx-flash`"
+    assert not re.search(r"\.style\.filter\b|\bfilter\s*:", body), (
+        "这两套演出没有整屏闪：不挂 `filter`（spec §硬约束；`Array.filter` 不算）"
+    )
+    assert "grayscale" not in body, "没有整屏灰阶"
+
+
+def test_anim_ini_registers_the_vital_fx_concurrency_keys() -> None:
+    """`hp_loss_fx_concurrency` / `heal_fx_concurrency`（1–8、缺省 2）进 `anim.ini`。
+
+    两份键与三个伤害并发表同一口径：缺键 / 非数字回退缺省 2、`0` / 负数钳到 1、`> 8` 钳到 8
+    ——钳制在**读者侧**（`vitalFxCapFor`），`anim.js` 只搬数字。新前缀必须同批登记为外来键，
+    否则 `anim.js` 会把它们当未知键删掉、用户改了不生效。
+    """
+    entries = _ini_entries()
+    for key, family in (("hp_loss_fx_concurrency", "HP_LOSS"), ("heal_fx_concurrency", "HEAL")):
+        assert key in entries, f"anim.ini 缺少并发表键 {key}（{family} 的 cap）"
+        assert float(entries[key]) == 2, f"{key} 的缺省是 2（spec §多目标）：{entries[key]}"
+    ini_text = _ANIM_INI.read_text(encoding="utf-8")
+    for key, family in (("hp_loss_fx_concurrency", "HP_LOSS"), ("heal_fx_concurrency", "HEAL")):
+        assert re.search(rf"^{key}\s*=\s*2\s+#\s*\S+", ini_text, re.M), (
+            f"{key} 必须带一行注释（用户改得动）：{entries[key]}"
+        )
+    assert "并发表" in ini_text, "并发表那一块的口径要写清（1–8 / 缺省 2 / 钳在读者侧）"
+
+    anim_js = _ANIM_JS.read_text(encoding="utf-8")
+    prefixes = re.search(r"^const ANIM_FOREIGN_KEY_PREFIXES = \[(?P<body>[^\]]*)\];$", anim_js, re.M)
+    assert prefixes is not None, "anim.js 里找不到 ANIM_FOREIGN_KEY_PREFIXES"
+    for prefix in ("hp_loss_fx_", "heal_fx_"):
+        assert f'"{prefix}"' in prefixes.group("body"), (
+            f"anim.js 必须把 {prefix} 登记成外来键（默认值 / 钳制在票 03 / 04 的模块里）"
+        )
+
+
+_VITAL_FX_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ini = readFileSync("tools/sgs_web/static/anim.ini", "utf8");
+
+/* 每份脚本单独编译、同一个 context 的全局词法作用域跨脚本可见——与页面一致的加载方式。
+ * 每个 ini 变体起**新的** sandbox（= 用户改完文件刷新页面）：`animLoadConfig` 只做
+ * `Object.assign`，上一份表里留下的键不会因为这一份删了而消失。 */
+function makeSandbox(iniText = ini) {
+  const noteNode = { textContent: "", hidden: true };
+  const context = vm.createContext({
+    console,
+    setTimeout,
+    clearTimeout,
+    fetch: async () => ({ ok: true, text: async () => iniText }),
+    document: {
+      getElementById: (id) => (id === "t-anim-note" ? noteNode : null),
+      createElement: () => ({
+        style: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        appendChild() {},
+        setAttribute() {},
+      }),
+    },
+  });
+  context.globalThis = context;
+  context.window = context;
+  context.$ = (id) => context.document.getElementById(id);
+  for (const name of ["anim.js", "vital-fx.js"]) {
+    vm.runInContext(readFileSync(`tools/sgs_web/static/${name}`, "utf8"), context, { filename: name });
+  }
+  return context;
+}
+
+const context = makeSandbox();
+const report = await vm.runInContext(
+  `(async () => {
+     await animReady;
+     const row = (name) => {
+       const spec = VITAL_FX_FAMILIES[name];
+       return {
+         renderer: spec.renderer,
+         fallback: spec.fallback,
+         holdsAt: String(spec.holdsAt),
+         cap: spec.cap,
+         stagger: spec.stagger,
+       };
+     };
+     // 画面模块按**全局名**调用时解析：缺件 ⇒ null（不播，事件仍被消费）。
+     const missing = vitalFxRendererFor("HP_LOSS");
+     const unknownFamily = vitalFxFamilyFor("POISON");
+     const stub = {
+       create() {},
+       TIMING_PREFIX: "hp_loss_fx_",
+       TIMING_FIELDS: ["total", "fade"],
+     };
+     window.SgsHpLossFX = stub;
+     const resolvedAtCallTime = vitalFxRendererFor("HP_LOSS") === stub;
+     // 时间轴字段表：前缀 / 字段名都从画面模块读，缺键不硬造，非数字跳过。
+     Object.assign(animConfig, {
+       hp_loss_fx_3_total: 1800,
+       hp_loss_fx_3_fade: 250,
+       hp_loss_fx_2_total: "abc",
+     });
+     const timing = {
+       three: vitalFxTiming("HP_LOSS", 3),
+       two: vitalFxTiming("HP_LOSS", 2),
+     };
+     delete window.SgsHpLossFX;
+     const afterDelete = vitalFxRendererFor("HP_LOSS");
+     const withoutModule = vitalFxTiming("HP_LOSS", 3);
+     // 时停判据：在播表 + 队列都算（回复 3+ 档串行，交接缝隙也不许漏冻）。
+     const holdEmpty = vitalFxPlaybackHold();
+     vitalPlays.push({ family: "HEAL", variant: 3 });
+     const holdLiveHeal = vitalFxPlaybackHold();
+     vitalPlays.length = 0;
+     vitalQueue.push({ family: "HEAL", amount: 3 });
+     const holdQueuedHeal = vitalFxPlaybackHold();
+     vitalQueue.length = 0;
+     vitalPlays.push({ family: "HP_LOSS", variant: 3 });
+     const holdLiveHpLoss = vitalFxPlaybackHold();
+     vitalPlays.length = 0;
+     vitalQueue.push({ family: "HEAL", amount: 2 });
+     const holdQueuedHealLight = vitalFxPlaybackHold();
+     vitalQueue.length = 0;
+     return JSON.stringify({
+       families: Object.keys(VITAL_FX_FAMILIES),
+       hpLoss: row("HP_LOSS"),
+       heal: row("HEAL"),
+       missing,
+       unknownFamily,
+       resolvedAtCallTime,
+       afterDelete,
+       timing,
+       withoutModule,
+       hold: {
+         empty: holdEmpty,
+         liveHeal: holdLiveHeal,
+         queuedHeal: holdQueuedHeal,
+         liveHpLoss: holdLiveHpLoss,
+         queuedHealLight: holdQueuedHealLight,
+         hpLossAlways: [vitalFxHoldFor("HP_LOSS", 1), vitalFxHoldFor("HP_LOSS", 3)],
+         healByTier: [
+           vitalFxHoldFor("HEAL", 1),
+           vitalFxHoldFor("HEAL", 2),
+           vitalFxHoldFor("HEAL", 3),
+           vitalFxHoldFor("HEAL", 4),
+         ],
+         unknown: vitalFxHoldFor("POISON", 3),
+       },
+       variant: {
+         one: vitalFxVariantOf(1),
+         two: vitalFxVariantOf(2),
+         three: vitalFxVariantOf(3),
+         four: vitalFxVariantOf(4),
+         zero: vitalFxVariantOf(0),
+         junk: vitalFxVariantOf("abc"),
+       },
+       caps: {
+         hpLoss: vitalFxCapFor("HP_LOSS"),
+         heal: vitalFxCapFor("HEAL"),
+         unknown: vitalFxCapFor("POISON"),
+       },
+       constants: {
+         stagger: VITAL_FX_STAGGER_MS,
+         concurrency: VITAL_FX_CONCURRENCY,
+         capMin: VITAL_FX_CAP_MIN,
+         capMax: VITAL_FX_CAP_MAX,
+         maxVariant: VITAL_FX_MAX_VARIANT,
+       },
+       note: $("t-anim-note").textContent,
+       animConfigKeys: Object.keys(animConfig),
+     });
+   })()`,
+  context,
+  { filename: "vital_fx_probe.js" },
+);
+console.log(report);
+"""
+
+
+def _vital_fx_probe() -> dict:
+    """跑真 `anim.js` + 真 `vital-fx.js`（node vm），拿回家族表 / 三个只读口 / 时停判据。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "vital_fx_probe.mjs"
+        probe.write_text(_VITAL_FX_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"vital-fx 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def vital_fx_probe() -> dict:
+    """一次探针跑完，家族表 / cap / 时停几条用例共用。"""
+    return _vital_fx_probe()
+
+
+def test_the_vital_fx_family_table_is_the_only_lookup_and_its_rows_say_everything(
+    vital_fx_probe: dict,
+) -> None:
+    """票面 §1：家族表两行、字段齐全；`holdsAt` 是时停的唯一真源。
+
+    - `renderer` / `fallback` 存**全局名**（调用时解析）——两个画面模块是票 03 / 04 的文件，
+      今天都不存在；
+    - `holdsAt`：失去体力 `Infinity`（永不冻）、回复 `3`（3+ 档冻）；
+    - `cap`：`anim.ini` 的键名，只在这张表里写一次；
+    - `fallback: null` = 模块缺件就不播（与雷 / 火同姿态），事件仍被消费。
+    """
+    probe = vital_fx_probe
+    assert probe["families"] == ["HP_LOSS", "HEAL"], f"家族表只有两行：{probe['families']}"
+    assert probe["hpLoss"] == {
+        "renderer": "SgsHpLossFX", "fallback": None, "holdsAt": "Infinity",
+        "cap": "hp_loss_fx_concurrency", "stagger": True,
+    }, f"失去体力那一行：{probe['hpLoss']}"
+    assert probe["heal"] == {
+        "renderer": "SgsHealFX", "fallback": None, "holdsAt": "3",
+        "cap": "heal_fx_concurrency", "stagger": True,
+    }, f"回复那一行：{probe['heal']}"
+
+    # 全局名调用时解析：现在都没有模块 ⇒ 不播；装上就是它；卸掉又变回 null。
+    assert probe["missing"] is None, "缺件必须返回 null（不播，事件仍被消费）"
+    assert probe["unknownFamily"] is None, "未登记的家族没有 fallback"
+    assert probe["resolvedAtCallTime"] is True, "`vitalFxRendererFor` 必须在调用时解析全局名"
+    assert probe["afterDelete"] is None, "模块不在时不许记缓存（缺件 → 不播）"
+
+    # 三条硬口径常量（票面 §1 / §2 / §3）。
+    assert probe["constants"] == {
+        "stagger": 120, "concurrency": 2, "capMin": 1, "capMax": 8, "maxVariant": 3,
+    }, f"常量：{probe['constants']}"
+    assert probe["variant"] == {
+        "one": 1, "two": 2, "three": 3, "four": 3, "zero": 1, "junk": 1,
+    }, f"档位换算（3+ 一律 3 档）：{probe['variant']}"
+    # cap 键名只在家族表里写一次（读的一侧是 `vitalFxCapFor`）。
+    body = _strip_js_comments(_VITAL_FX_JS.read_text(encoding="utf-8"))
+    for key in ("hp_loss_fx_concurrency", "heal_fx_concurrency"):
+        assert body.count(f'"{key}"') == 1, f"{key} 只许在家族表里出现一次：{body.count(key)}"
+
+
+def test_the_vital_fx_hold_is_per_family_and_counts_plays_and_queue(vital_fx_probe: dict) -> None:
+    """票面 §3：`vitalFxHoldFor(family, variant)` 的矩阵 + 原因串。
+
+    - `HP_LOSS` **恒 false**（用户口径：失去体力不冻回放），1 档到 3+ 档都一样；
+    - `HEAL` **3+ 档 true**、1 / 2 档 false；
+    - `vitalFxPlaybackHold()` 返回原因串 `"heal:3"`，**在播表与队列都算**（票面 §3 / trap：
+      重演出串行后"上一条摘层、下一条还没起"的缝隙也不许漏冻）。
+    """
+    hold = vital_fx_probe["hold"]
+    assert hold["hpLossAlways"] == [False, False], f"失去体力永不冻：{hold['hpLossAlways']}"
+    assert hold["healByTier"] == [False, False, True, True], (
+        f"回复 1 / 2 档不冻、3+ 档冻：{hold['healByTier']}"
+    )
+    assert hold["unknown"] is False, "未登记家族不冻"
+    assert hold["empty"] == "", "没有在播 / 排队 ⇒ 空串（不要求暂停）"
+    assert hold["liveHeal"] == "heal:3", f"3+ 档回复在播：{hold['liveHeal']}"
+    assert hold["queuedHeal"] == "heal:3", (
+        f"排队里的 3+ 档回复也算（串行交接的缝隙不许漏冻）：{hold['queuedHeal']}"
+    )
+    assert hold["liveHpLoss"] == "", (
+        f"失去体力在播也不许要求暂停（`hp-loss` 这个原因串永远不返回）：{hold['liveHpLoss']}"
+    )
+    assert hold["queuedHealLight"] == "", "排队的 2 档回复不冻"
+    # 原因串里的数字来自家族表（不另写一份 3）。
+    body = _strip_js_comments(_VITAL_FX_JS.read_text(encoding="utf-8"))
+    reason = _js_function(body, "vitalFxHoldReason")
+    assert "spec.holdsAt" in reason, f"原因串必须从家族表取阈值：{reason}"
+    assert "heal:3" not in body, "别在别处硬写 `heal:3`（唯一真源是家族表的 holdsAt）"
+
+
+def test_the_vital_fx_cap_is_read_per_family_from_anim_ini(vital_fx_probe: dict) -> None:
+    """票面 §1：cap 键只写在家族表里、读的一侧是 `vitalFxCapFor`，**钳在读者侧**。
+
+    每个变体都是**一份真 ini 文本 → 全新 sandbox → `animLoadConfig()`**（= 用户改完文件刷新
+    页面），这条链同时证明：新键没被 `anim.js` 的未知键过滤器删掉、解析出的就是生效值。
+    缺键 / 非数字 → 2；`0` / 负数 → 1；`> 8` → 8；小数取整（cap 是条数）。
+    """
+    caps = vital_fx_probe["caps"]
+    assert caps == {"hpLoss": 2, "heal": 2, "unknown": 2}, (
+        f"真 ini 的缺省都是 2（spec §多目标）；未登记家族也走缺省：{caps}"
+    )
+    # 静态口径：读口唯一、调 animTiming（不是自己缓存一份数字）。
+    cap_for = _js_function(_VITAL_FX_JS.read_text(encoding="utf-8"), "vitalFxCapFor")
+    assert "animTiming(" in cap_for, "cap 的读取入口必须**调用时**解析 anim.ini"
+    assert "VITAL_FX_CONCURRENCY" in cap_for, "缺键 / 非数字回退缺省 2"
+    assert "VITAL_FX_CAP_MIN" in cap_for and "VITAL_FX_CAP_MAX" in cap_for, "钳制在读者侧"
+    assert "Math.round" in cap_for, "cap 是条数：小数取整"
+
+
+def test_the_vital_fx_timing_reader_derives_fields_from_the_renderer_module(
+    vital_fx_probe: dict,
+) -> None:
+    """票面 §1：`vitalFxTiming` 只搬数字，字段名 / 前缀来自画面模块（票 03 / 04 的 `DEFAULT_TIMING`）。
+
+    缺键不硬造、非数字跳过；画面模块缺件 ⇒ 空表（`create()` 根本不会被调到）。
+    """
+    timing = vital_fx_probe["timing"]
+    assert timing["three"] == {"hp_loss_fx_3_total": 1800, "hp_loss_fx_3_fade": 250}, (
+        f"字段名从前缀 + TIMING_FIELDS 得来、值原样搬：{timing['three']}"
+    )
+    assert timing["two"] == {}, f"非数字跳过、缺键不硬造：{timing['two']}"
+    assert vital_fx_probe["withoutModule"] == {}, (
+        "画面模块缺件 ⇒ 时间轴空表（与 `renderer: null` 一致：不播）"
+    )
+
+
+def test_the_vital_fx_playback_hooks_are_wired_into_session_and_table() -> None:
+    """票面 §2 / §4：两条事件源的触发点 + 三处收尾钩子。
+
+    - **失去体力**：`fireHpLossEventsThrough(record.seq)` 与伤害事件**共用同一条 seq 游标**，
+      紧挨 `fireDamageEventsThrough(record.seq)` 的下一行；两条盲刷路径（无记录 / 批尾兜底）
+      也照伤害那两处写成 `Infinity`；
+    - **回复**：`fireVitalEventsThrough(record)` 在 `applyRecordEffects(record, …)` **之后**
+      （一条 `hp_change` 记录就是回复的事实源）；
+    - **收尾**：`table.js:renderTable` 末尾 `vitalDropStalePlays()`（紧挨伤害那条）、
+      `session.js:commitView` 换会话时 `clearVitalFx()`，`state.lifeLossEvents = []` 仍由
+      `commitView` 自己清（票 01 落的那一行）。
+    """
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = _strip_js_comments(match.group("body"))
+
+    damage_call = "fireDamageEventsThrough(record.seq);"
+    hp_call = "fireHpLossEventsThrough(record.seq);"
+    assert damage_call in body and hp_call in body, (
+        "失去体力的排播钩子必须挂在伤害事件同一条 seq 游标上"
+    )
+    damage_at = body.index(damage_call)
+    hp_at = body.index(hp_call)
+    assert body[damage_at + len(damage_call):hp_at].strip() == "", (
+        "`fireHpLossEventsThrough(record.seq)` 必须紧挨 `fireDamageEventsThrough(record.seq)` 的下一行"
+    )
+    apply_at = body.index("applyRecordEffects(record")
+    heal_at = body.index("fireVitalEventsThrough(record);")
+    assert apply_at < heal_at, "回复的排播钩子在 `applyRecordEffects` 之后调"
+    assert heal_at < body.index("fireSkillEventsThrough(record.seq);"), (
+        "回复钩子与其它演出钩子同一段（`applyRecordEffects` 之后、别的演出之前）"
+    )
+
+    # 两条盲刷路径照伤害层的姿态（无记录时的纯刷新 / 批尾兜底）。
+    apply_view = _js_function(session, "applyView")
+    assert "fireHpLossEventsThrough(Infinity);" in apply_view, (
+        "纯刷新没有回放时，失去体力事实按响应立即消费（照 fireDamageEventsThrough 的姿态）"
+    )
+    finish = _js_function(session, "finishPlayback")
+    assert "fireHpLossEventsThrough(Infinity);" in finish, "批尾兜底同样消费到点的事实"
+
+    # 收尾钩子（反向零调用：排播层不自己挂到动效层里）。
+    table = _TABLE_JS.read_text(encoding="utf-8")
+    render = _strip_js_comments(_js_function(table, "renderTable"))
+    drop = "damageDropStalePlays();"
+    vital_drop = "vitalDropStalePlays();"
+    assert drop in render and vital_drop in render, "`renderTable` 末尾要按矩形作废体力在播演出"
+    assert render[render.index(drop) + len(drop):render.index(vital_drop)].strip() == "", (
+        "`vitalDropStalePlays()` 紧挨 `damageDropStalePlays()`（两层各判各的，两行挨着）"
+    )
+
+    commit = _js_function(session, "commitView")
+    assert "clearVitalFx();" in commit, "换局要清体力演出的队列 / 画布 / 计时器 / 声音"
+    assert commit.index("clearDamageFx();") < commit.index("clearVitalFx();"), (
+        "两层各清各的（体力层的清场挨着伤害层那一段）"
+    )
+    assert commit.index("clearVitalFx();") < commit.index("state.lifeLossEvents = [];"), (
+        "先清演出、再清事实队列（与 `state.damageEvents` 同姿态）"
+    )
+
+
+def test_the_vital_sfx_seam_sits_behind_the_same_switch_and_degrades_silently() -> None:
+    """票面 §5：`VITAL_SFX_ENGINES` + 四个 `vitalSfx*` 调用点，三条既有口径逐字沿用。
+
+    「同一套开关」= **缺省静音** / **一次性手势** / **没有 `AudioContext` 就静默降级**；
+    声道池按模块分组的机制复用伤害那张表（`damageSfxLanes` 按 key 分桶、池长 = `vitalFxCapFor`、
+    槽位超出补建）。本票交付时两个音效模块（票 03 / 04）**都还不存在**：`vitalSfxEnsureModules`
+    必须逐行走 `if (!engine.sfx) continue;`——不抛错、不建 `AudioContext`、也不留空桶
+    （行为由烟测 `U-VITAL-08` 钉，这里钉接线与缺件分支的位置）。
+    """
+    sfx_ui = (STATIC_DIR / "sfx-ui.js").read_text(encoding="utf-8")
+    vital = (STATIC_DIR / "vital-fx.js").read_text(encoding="utf-8")
+
+    # 1) 引擎表：全局名照票面（票 03 / 04 的文件名不在这张表里）。
+    assert re.search(r"^const VITAL_SFX_ENGINES = \{$", sfx_ui, re.M), (
+        "sfx-ui.js 里缺少 `const VITAL_SFX_ENGINES = {`"
+    )
+    assert 'HP_LOSS: { key: "SgsHpLossSfx", fx: "SgsHpLossFX" },' in sfx_ui, "失去体力的音效 / 画面模块名"
+    assert 'HEAL: { key: "SgsHealSfx", fx: "SgsHealFX" },' in sfx_ui, "回复的音效 / 画面模块名"
+
+    # 2) 四个调用点 + 池长读唯一的 cap 口（不另写一份 2）。
+    lanes = _js_function(sfx_ui, "vitalSfxEnsureLanes")
+    assert "damageSfxLanes[key]" in lanes, "复用伤害那张按模块分桶的声道池"
+    assert "vitalFxCapFor(engine.family)" in lanes, "池的起始长度 = 该家族的 cap（唯一读口）"
+    assert "engine.sfx.create(timeline)" in lanes, "没有模块就一条声道都不建"
+    for name in ("vitalSfxStart", "vitalSfxTick", "vitalSfxStop", "vitalSfxStopAll"):
+        assert re.search(rf"^function {name}\(", sfx_ui, re.M), f"sfx-ui.js 缺 {name}()"
+        assert name in vital, f"vital-fx.js 要在四个点调 {name}（单向缝：它只接 play 对象）"
+    # 3) 缺件静默：`vitalSfxEnsureModules` 先跳过没加载的模块，`damageSfxEnsureModules` 顺手调它。
+    ensure = _js_function(sfx_ui, "vitalSfxEnsureModules")
+    assert "if (!engine.sfx) continue;" in ensure, (
+        "模块缺件必须**先跳过**再谈声道（本票两个模块都不存在，这条是今天唯一的分支）"
+    )
+    assert ensure.index("if (!engine.sfx) continue;") < ensure.index("vitalSfxEnsureLanes"), (
+        "跳过要发生在建声道之前（不许先建池再跳过）"
+    )
+    modules = _js_function(sfx_ui, "damageSfxEnsureModules")
+    assert "vitalSfxEnsureModules()" in modules, (
+        "体力两个模块要在**同一个手势**里建（damageSfxEnsureModules 顺手调它）"
+    )
+    mute = _js_function(sfx_ui, "damageSfxMute")
+    assert "vitalSfxMute" in mute, "开关要灌到体力那两路（与伤害声道同一次静音）"
+
+    # 4) 单向缝：排播层不碰音频 API，也不读开关的内部状态。
+    body = _strip_js_comments(vital)
+    assert "AudioContext" not in body, "vital-fx.js 不碰音频 API（音效层的事）"
+    assert "localStorage" not in body, "开关的记忆归 sfx-ui.js（排播层不认识 sgs.sfx）"

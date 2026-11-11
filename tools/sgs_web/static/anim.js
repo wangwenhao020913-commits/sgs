@@ -123,8 +123,12 @@ function animParseIni(text) {
  *
  * chain-death-voices 票 02：阵亡的那个 ``death_fx_total`` 同理，内置默认在 `fx-death.js`
  * （`SgsDeathFX.DEFAULT_TIMING`，钳制 1200–3200ms 也在那里）。
+ *
+ * vital-fx 票 02：体力演出的两条并发表 ``hp_loss_fx_concurrency`` / ``heal_fx_concurrency``
+ * 同姿态（缺省 2、1–8，钳制在 `vital-fx.js:vitalFxCapFor` 的读者侧）；票 03 / 04 的时长键
+ * 也会落在这两个前缀下面，故**本票就把前缀登记好**——它们只加不删，不会把用户的改动当未知键。
  */
-const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_", "chain_fx_", "death_fx_"];
+const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_", "chain_fx_", "death_fx_", "hp_loss_fx_", "heal_fx_"];
 
 /** 这个键是不是别的模块的（前缀登记过 ⇒ 原样留在 `animConfig` 里）。 */
 function animIsForeignKey(key) {
