@@ -518,11 +518,21 @@ class ActivationPlan:
     摸一张牌"——决定者是事件的当事角色，受益者（``skill_owner``）仍是技能持有者。它是
     座位号而不是布尔：同一个技能在不同帧上可以由不同的人决定，故取值由计划的构造方
     按帧算（:func:`~sgs.skills.lord_request.jie_hujia_activation_plan`）。
+
+    ``mandatory_targets``（table-ux-overhaul 票 02 的加法，缺省 ``None`` = 无目标维度）：
+    **B 类**（强制生效非牌类）技能的"必选目标"档——声明这条技能此刻**必须**指定的目标
+    候选。``None`` = 这条技能没有目标维度（既有技能全部走这一档，行为一字不变）；
+    **空元组** = 必选而**没有合法目标** ⇒ :func:`activation_plan` 把 ``available`` 压成
+    ``False``，候选收集口因此一个候选都不造（不问、不跑、不记）。
+    这与今天"flow 的必选目标步返回 ``"cancel"`` 静默跳过"**行为等价**：记录流逐字节不变，
+    差别只在不再产出一条"I 跑过了"的发动事实（``Engine.skill_activations`` 是表现层缓冲，
+    不进记录流）。非空元组 = 有目标可指，``available`` 仍由既有判据决定。
     """
 
     optional: bool = True
     available: bool = True
     actor: int | None = None
+    mandatory_targets: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2498,11 +2508,23 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
 
 
 def activation_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    """本实例在当前帧上的发动形态（缺省 = 裸询问、可选、无成本面）。"""
+    """本实例在当前帧上的发动形态（缺省 = 裸询问、可选、无成本面）。
+
+    **必选目标维度**（table-ux-overhaul 票 02 / :attr:`ActivationPlan.mandatory_targets`）：
+    计划声明了目标候选而**一个都没有**时，这里把 ``available`` 压成 ``False`` —— B 类
+    （强制生效非牌类）技能因此"没有合法目标就不进候选"。它与今天 flow 的必选目标步
+    ``"cancel"`` 静默跳过**行为等价**：候选收集口不跑它、不写任何记录，只是不再往表现层
+    的发动缓冲里记一条空转。没有声明该字段的技能（目前的全部技能）走同一条返回路径，
+    行为一字不变。
+    """
     builder = ACTIVATION_PLANS.get(instance.skill_id)
     if builder is None:
-        return _default_plan(state, frame, instance)
-    return builder(state, frame, instance)
+        plan = _default_plan(state, frame, instance)
+    else:
+        plan = builder(state, frame, instance)
+    if plan.mandatory_targets is not None and not plan.mandatory_targets:
+        plan = replace(plan, available=False)
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -4205,6 +4227,31 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         reason=(
             "**不是窗口**：引擎把「这扇窗口要哪张牌」交给技能层的转发点（窗口的受理面由"
             "`sgs.skills.lord_request.start_provider` 收口）。"
+        ),
+    ),
+    CardRequestWindow(
+        key="prefilter.respond",
+        kind=REQUEST_PLUMBING,
+        label="响应窗口的**统一预筛口**（`Engine.should_ask_respond` 的内部预览）",
+        scope=None,
+        causes=(),
+        modes=(),
+        required="调用方给的窗口参数（cause / required / mode 原样转发）",
+        axis=None,
+        providers=False,
+        sites=(
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/engine/game.py",
+                owner="Engine.should_ask_respond",
+                fingerprint="cause=cause required=required mode=mode",
+            ),
+        ),
+        reason=(
+            "**不是窗口**：它是「这扇窗口该不该问这个座位」的统一预筛口（table-ux-overhaul "
+            "票 02），内部把调用方给的同一组窗口参数原样转交给 `respond_candidates` 预览一次。"
+            "票 05 的五处 A 类窗口（无懈 / 闪 / 求桃 / 护驾 / 决斗·南蛮·万箭）都从这里汇合，"
+            "故登记的是**这一个转发入口**，不是每扇窗口各加一条 preview。"
         ),
     ),
 )

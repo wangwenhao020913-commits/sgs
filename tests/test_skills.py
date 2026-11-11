@@ -52,7 +52,15 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state, cards_of_type, run_until
+from support import (
+    PassPlayer,
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    ran_timing,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -2318,3 +2326,98 @@ def test_the_peach_window_offers_only_real_peaches_and_a_hand_peach_rescues():
 
     assert engine.state.player(1).hp == 1, "真【桃】把濒死者救回 1 点"
     assert real_peach in engine.state.discard, "用掉的是手牌里的那张真【桃】"
+
+
+# ---------------------------------------------------------------------------
+# 询问策略位：B 类（强制生效非牌类）的**目标维度**（table-ux-overhaul 票 02 §4）
+# ---------------------------------------------------------------------------
+
+
+def test_a_forced_skill_with_no_legal_target_is_not_run_and_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """强制技能"必选而无合法目标"⇒ 连候选都不造，派发环不跑它。
+
+    判据的声明点是 :attr:`~sgs.skills.catalog.ActivationPlan.mandatory_targets`：空元组 =
+    必选而无合法目标 ⇒ :func:`~sgs.skills.catalog.activation_plan` 把它压成
+    ``available=False``，:func:`~sgs.skills.catalog._activation_candidates` 因此连候选都不
+    产出。与今天"flow 的目标步 ``"cancel"`` 静默跳过"**行为等价**：记录流逐字节相同
+    （``dump_journal`` 对照断言），差别只在**不再**产出一条"I 跑过了"的发动事实
+    （``engine.skill_activations``，表现层专用、不进记录流）——空转不再被播出来。
+
+    载体是合成的一条锁定技：真实目录里今天**没有**"强制段 + 必选目标步"的技能（普查：
+    ``locked`` / ``Hook.forced`` 的流水线全是无步骤或选项步），故这里按
+    ``test_an_unknown_locked_skill_gets_the_effect_without_any_table`` 的同一姿态合成。
+    """
+    from types import MappingProxyType
+
+    from sgs.engine import dump_journal
+    from sgs.skills import CarrierKind, Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills.catalog import ActivationPlan
+    from sgs.skills.flow import PickSeats, SkillFlow
+
+    synthetic = "test.ask02.forced_without_target"
+
+    def _no_target(state, frame, owner, chosen):  # noqa: ANN001 - 与 SeatPool 协议一致
+        del state, frame, owner, chosen
+        return ()
+
+    def _effect(host, frame, answers):  # noqa: ANN001 - 与 FlowEffect 协议一致
+        del host, frame, answers
+        return None
+
+    flow = SkillFlow(
+        name="test_ask02_forced_without_target",
+        steps=(PickSeats(lo=1, hi=1, pool=_no_target, optional=False, key="seat"),),
+        effect=_effect,
+    )
+    definitions = dict(catalog_module.CATALOG)
+    definitions[synthetic] = SkillDef(
+        skill_id=synthetic,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.PHASE_DRAW, flow=flow),),
+    )
+    monkeypatch.setattr(catalog_module, "CATALOG", MappingProxyType(definitions))
+
+    def _engine() -> Engine:
+        state = build_state(
+            pack=PACK,
+            seats=[SeatSpec(), SeatSpec()],
+            deck=tuple(range(60, 108)),
+            turn_seat=0,
+            phase=Phase.DRAW,
+        )
+        state.player(0).granted_skills.append(synthetic)
+        return Engine.from_state(state, seed=3)
+
+    def _announced(engine: Engine) -> list[str]:
+        return [event.skill_id for event in engine.skill_activations]
+
+    # 旧口径（对照组）：强制段照跑，flow 在必选目标步静默取消 —— 记录流里什么都没有，
+    # 但"跑过了"这件事进了发动缓冲。
+    control = _engine()
+    run_until(control, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.PHASE_DRAW))
+    assert synthetic in _announced(control), "对照组必须真的跑到那条强制段（否则本用例没测到东西）"
+
+    # 新口径：计划声明"必选目标"，此刻无合法目标 ⇒ available=False ⇒ 不跑。
+    monkeypatch.setattr(
+        catalog_module,
+        "ACTIVATION_PLANS",
+        MappingProxyType(
+            {
+                **dict(catalog_module.ACTIVATION_PLANS),
+                synthetic: lambda state, frame, instance: ActivationPlan(
+                    mandatory_targets=()
+                ),
+            }
+        ),
+    )
+    gated = _engine()
+    run_until(gated, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.PHASE_DRAW))
+
+    assert synthetic not in _announced(gated), "必选而无合法目标时不得空跑这条强制技能"
+    assert dump_journal(gated.records) == dump_journal(control.records), (
+        "行为等价：跳过的是空转，不是任何一条记录（记录流必须逐字节不变）"
+    )

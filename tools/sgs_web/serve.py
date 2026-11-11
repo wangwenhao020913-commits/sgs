@@ -68,6 +68,7 @@ from sgs_web.session import (  # noqa: E402
     Session,
     StaleAnswer,
     create_session,
+    parse_ask_policy,
 )
 from sgs_web.timeout import fallback_action  # noqa: E402
 
@@ -343,6 +344,9 @@ class GameRegistry:
             # 不读本地存档——存档只是开局页的编辑器初值，玩家点了「开始」就以当时的集合为准。
             banned_heroes=body.get("banned_heroes") or (),
             timeout_seconds=body.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
+            # 询问策略（table-ux-overhaul 票 02）：会话配置，缺省 **ON**（网页口径）。
+            # 引擎缺省 OFF 的旧口径由"字段缺席"以外的一切调用方保持，见 AskPolicy。
+            ask_policy=parse_ask_policy(body.get("ask_policy")),
             pack=pack,
             session_id=f"s{self._counter}",
         )

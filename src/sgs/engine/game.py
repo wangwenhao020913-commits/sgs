@@ -122,6 +122,7 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     ArmorChangeDelta,
+    AskPolicy,
     CardRef,
     Distribute,
     DistributeContext,
@@ -764,8 +765,18 @@ class Engine:
         init_records: Sequence[JournalRecord] = (),
         shuffle_source: Randomness | None = None,
         journal: bool = True,
+        ask_policy: AskPolicy = AskPolicy(),
     ) -> None:
         self.state = state
+        self.ask_policy = ask_policy
+        """本局的**询问策略**（table-ux-overhaul 票 02 / spec §2 Q4）。
+
+        缺省 ``AskPolicy()`` = **OFF**：没有调用方显式打开时行为与旧口径逐字节相同
+        （金录像 / ``batch_games`` / ``ai_eval`` / 旧录像回放都走这条缺省）。网页会话由
+        :class:`sgs_web.session.Session` 显式传 ON。它是**会话事实**、不进记录流；随侧车
+        元数据落盘、由 ``replay_journal`` 还原（:attr:`RespondContext.skip_if_empty` 是
+        逐窗口的类别位，两者在 :meth:`should_ask_respond` 里收口）。
+        """
         self._journal = journal
         """是否**保留**记录流（票 11 的 opt-in 开关；缺省 ``True`` = 既有行为一字不变）。
 
@@ -1000,6 +1011,7 @@ class Engine:
         pinned_seat: int = 0,
         hero_config: HeroDealConfig | None = None,
         journal: bool = True,
+        ask_policy: AskPolicy = AskPolicy(),
     ) -> "Engine":
         """造初始状态（实例化 → 洗牌 → 发身份 → 发武将 → 发牌）并带上开局那几条记录。
 
@@ -1009,6 +1021,7 @@ class Engine:
         ``pinned_hero`` / ``pinned_seat`` 同义（票 19 的点将：钉住一个座位、其余随机）；
         ``hero_config`` 是票 12 的**会话配置**（禁将 + 手选），与种子一起冻结、不进记录流。
         ``journal`` 见 :meth:`__init__`：开局那几条记录**照常构造**，``False`` 时只是不保留。
+        ``ask_policy`` 见 :attr:`ask_policy`：缺省 OFF（旧口径）。
         """
         shuffle_source = RandomSource(seed).substream("shuffle")
         state, init_records = build_initial(
@@ -1028,12 +1041,20 @@ class Engine:
             init_records=init_records,
             shuffle_source=shuffle_source,
             journal=journal,
+            ask_policy=ask_policy,
         )
 
     @classmethod
-    def from_state(cls, state: GameState, *, seed: int, journal: bool = True) -> "Engine":
+    def from_state(
+        cls,
+        state: GameState,
+        *,
+        seed: int,
+        journal: bool = True,
+        ask_policy: AskPolicy = AskPolicy(),
+    ) -> "Engine":
         """低层入口：从**人为指定的局面**起跑（只写 header，不虚构开局记录）。"""
-        return cls(state, seed=seed, journal=journal)
+        return cls(state, seed=seed, journal=journal, ask_policy=ask_policy)
 
     # -- 记录流 -------------------------------------------------------------
 
@@ -2625,6 +2646,7 @@ class Engine:
         zones: tuple[Zone, ...] = (Zone.HAND,),
         declared: bool = False,
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        skip_if_empty: bool = False,
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
@@ -2637,6 +2659,11 @@ class Engine:
         :func:`~sgs.skills.rejudge_card_zones` 传入（界【鬼才】含装备区，M6 票 14）。
         ``declared`` 只服务**收集式**窗口（票 03）：赢家已定（首个声明者）时提供者闭嘴
         ——它的产物要扣置一张手牌，赢家已定时不会进结算。
+
+        ``skip_if_empty``（table-ux-overhaul 票 02）是**按窗口类别**声明的"没有可行动的
+        候选时可以不问"，落进 :class:`RespondContext` 供预筛口读；缺省 ``False`` = 照问。
+        **本票不加任何置位调用点**：真正的消费者（无懈 / 闪 / 求桃 / 护驾 / 决斗 /
+        南蛮万箭五处窗口）在票 05，且要先过 :meth:`should_ask_respond` 的总开关。
 
         ``floor`` **不由调用方给**：它读承载帧里这一座位已定下的优先级档（票 03 §4-2，
         :func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
@@ -2656,6 +2683,7 @@ class Engine:
             declared=declared,
             rejudge_offers=tuple(rejudge_offers),
             floor=need_card_floor(frame, actor) if need_card else 0,
+            skip_if_empty=skip_if_empty,
         )
         action = self.ask(
             lambda seq: self._build_query(
@@ -2693,6 +2721,7 @@ class Engine:
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
+        declared: bool = False,
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
         floor: int = 0,
     ) -> tuple[Action, ...]:
@@ -2708,6 +2737,9 @@ class Engine:
         ``floor``（票 03 §4-2）同样要与 :meth:`ask_respond` 一致：调用方有承载帧时传
         ``need_card_floor(frame, actor)``，否则保留缺省 0——预览因此不会把已被闸门挡掉的
         提供者当成"a 可行"（借刀杀人的 auto-b 判据就建在这份预览上）。
+
+        ``declared``（票 02 起的对齐参数）同样与 :meth:`ask_respond` 同义：收集式窗口里
+        赢家已定时提供者闭嘴，预览要给出与真询问**同一张面**。
         """
         payload = RespondContext(
             cause=cause,
@@ -2717,6 +2749,7 @@ class Engine:
             mode=mode,
             use_targets=tuple(use_targets),
             providers_used=tuple(providers_used),
+            declared=declared,
             rejudge_offers=tuple(rejudge_offers),
             floor=0 if mode is RespondMode.REJUDGE else floor,
         )
@@ -2727,6 +2760,56 @@ class Engine:
             answers_seq=self._seq + 1,
             payload=payload,
         )
+
+    def should_ask_respond(
+        self,
+        actor: int,
+        *,
+        cause: WindowCause,
+        required: str | None = None,
+        target: int | None = None,
+        mode: RespondMode = RespondMode.PLAY,
+        use_targets: tuple[int, ...] = (),
+        providers_used: tuple[str, ...] = (),
+        declared: bool = False,
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        floor: int = 0,
+        skip_if_empty: bool = False,
+    ) -> bool:
+        """**统一预筛口**：这扇窗口该不该问这个座位（table-ux-overhaul 票 02 §3）。
+
+        判据 = **会话策略** × **窗口类别位** × **候选预览**，三者合成一句回答：
+
+        - 策略 OFF（引擎缺省）⇒ 恒 ``True``（照问）。旧录像 / AI 对战 / 金录像因此与旧口径
+          逐字节相同——这是票 05 接窗口时"引擎侧零变化"的唯一保证；
+        - 窗口没声明 ``skip_if_empty``（缺省 ``False``）⇒ 恒 ``True``（照问）：本函数不按
+          候选内容替调用方猜"这扇窗可不可跳过"，类别位必须由窗口显式给；
+        - 两条都成立 ⇒ 真去预览一次候选，回答"除 ``Pass`` 外还有没有别的候选"。
+
+        预览走 :meth:`respond_candidates`（**同一个** ``legal_actions_for`` 生成器）：
+        不问、不记、不耗序号，也不另写"这个座位有没有真牌 / 真转化能力"的判据——票 05 的
+        无懈合格者（真【无懈可击】∪ 【看破】一类转化能力）因此与窗口真发问时同源。
+
+        **本票只加这个函数，不调用它**：五处 A 类窗口（无懈 / 闪 / 求桃 / 护驾 /
+        决斗·南蛮·万箭）在票 05 才接上来。参数与 :meth:`ask_respond` 对齐，调用方在发问前
+        用同一份入参问一句即可；``floor`` 与 ``declared`` 也要与随后那次发问一致
+        （有承载帧时 ``floor = need_card_floor(frame, actor)``）。
+        """
+        if not (self.ask_policy.auto_skip and skip_if_empty):
+            return True
+        candidates = self.respond_candidates(
+            actor,
+            cause=cause,
+            required=required,
+            target=target,
+            mode=mode,
+            use_targets=use_targets,
+            providers_used=providers_used,
+            declared=declared,
+            rejudge_offers=rejudge_offers,
+            floor=floor,
+        )
+        return any(not isinstance(action, Pass) for action in candidates)
 
     def accepted_selection(
         self, frame: Frame, *, owner: Any, key: str

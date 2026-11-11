@@ -43,6 +43,7 @@ from sgs.state import (  # noqa: E402
     Action,
     ActivateSkill,
     ArrangeQuery,
+    AskPolicy,
     EndPhase,
     FrameKind,
     Pass,
@@ -52,6 +53,7 @@ from sgs.state import (  # noqa: E402
     PlayPhaseQuery,
     QueryKind,
     RespondQuery,
+    RespondMode,
     SelectCards,
     SelectCardsQuery,
     SelectionSpec,
@@ -2977,6 +2979,138 @@ def test_the_sidecar_meta_carries_the_outcome(tmp_path: Path) -> None:
     assert isinstance(meta.get("human_seat_won"), bool), meta.get("human_seat_won")
     # 与"真去读记录流"的旧算法一致（终局记录的 winners 里有没有人类座位）。
     assert meta["human_seat_won"] is (meta["human_seat"] in session.records()[-1].winners)
+
+
+# ---------------------------------------------------------------------------
+# 询问策略位（table-ux-overhaul 票 02 / spec §2 Q4 + §3 注①）
+#
+# 本票只落管道、不接窗口：策略缺省"引擎 OFF / 网页 ON"，预筛口只被断言调用、
+# 生产代码里一个调用点都没有 ⇒ 记录流逐字节不变（硬验收见 tools/check_goldens.sh）。
+# ---------------------------------------------------------------------------
+
+
+def test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session() -> None:
+    """Q4(a)：引擎缺省 OFF（金录像 / 旧录像逐字节可复现），网页会话缺省 ON。
+
+    两档都从**真实构造路径**读：引擎走 ``Engine.new_game``、会话走 ``Session.__init__``，
+    并且断言会话的配置**真的落到了它自己的引擎上**（否则"网页缺省 ON"只是一句注释）。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    engine = Engine.new_game(
+        seed=1,
+        rule_config=validate_rule_config(TWO_PLAYERS),
+        pack=pack,
+    )
+    assert engine.ask_policy == AskPolicy(), "引擎缺省必须是 OFF（不为旧调用方打开新策略）"
+    assert engine.ask_policy.auto_skip is False
+
+    session = Session(seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    assert session.ask_policy.auto_skip is True, "网页会话缺省 ON（玩家立刻看到效果）"
+    assert session.engine.ask_policy == session.ask_policy, "会话配置必须落到引擎上"
+
+    explicit_off = Session(
+        seed=1, ai="random", timeout_seconds=None, ask_policy=AskPolicy(), **TWO_PLAYERS
+    )
+    assert explicit_off.engine.ask_policy.auto_skip is False, "显式 OFF 必须能盖过网页缺省"
+
+
+def _nullify_window_state():
+    """一扇合成的无懈窗口局面：座位 0 手里有一张【无懈可击】，座位 1 空手。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    nullify = cards_of_type(pack, "nullify")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(nullify,)), SeatSpec()],
+        deck=deck_excluding(pack, nullify),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return state
+
+
+def _nullify_window_kwargs() -> dict:
+    from sgs.effects import NULLIFY_RESPONSE_CARD
+
+    return {
+        "cause": WindowCause.NULLIFY,
+        "required": NULLIFY_RESPONSE_CARD,
+        "mode": RespondMode.USE,
+        "skip_if_empty": True,
+    }
+
+
+def test_the_prefilter_helper_picks_no_candidate_beyond_pass_as_askable() -> None:
+    """预筛口 = "除 ``Pass`` 外还有没有候选"；两档输入（会话策略 + 窗口类别位）缺一不可。
+
+    - 策略 ON 且窗口声明可跳过：只有 ``Pass`` 的座位不 askable，有真牌的座位 askable；
+    - 策略 OFF（引擎缺省）：照问——旧口径逐字节可复现；
+    - 窗口没声明可跳过：照问——判据由调用方按类别给，预筛口不替它猜。
+    """
+    state = _nullify_window_state()
+    engine = Engine.from_state(state, seed=11, ask_policy=AskPolicy(auto_skip=True))
+    kwargs = _nullify_window_kwargs()
+
+    assert engine.should_ask_respond(0, **kwargs) is True, "有真【无懈可击】的座位必须被问"
+    assert engine.should_ask_respond(1, **kwargs) is False, "只有 Pass 的座位不该被问"
+
+    off_engine = Engine.from_state(_nullify_window_state(), seed=11)
+    assert off_engine.should_ask_respond(1, **kwargs) is True, "引擎缺省 OFF ⇒ 照问"
+
+    no_category_bit = {**kwargs, "skip_if_empty": False}
+    assert engine.should_ask_respond(1, **no_category_bit) is True, (
+        "窗口没声明「可以跳过」⇒ 照问（预筛口不按候选猜类别）"
+    )
+
+
+def test_the_prefilter_helper_does_not_consume_a_query_slot() -> None:
+    """预筛是**纯预览**（与 ``respond_candidates`` 同一姿态）：不建询问、不记、不耗序号。"""
+    from sgs.effects import NULLIFY_RESPONSE_CARD
+
+    session = Session(seed=13, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    pending = session.pending
+    assert pending is not None, "建局后应当停在一个询问上"
+    before = (pending.seq, len(session.records()))
+    engine = session.engine
+
+    for seat in range(session.rule_config.player_count):
+        decided = engine.should_ask_respond(
+            seat,
+            cause=WindowCause.NULLIFY,
+            required=NULLIFY_RESPONSE_CARD,
+            mode=RespondMode.USE,
+            skip_if_empty=True,
+        )
+        assert decided in (True, False)
+
+    after = session.pending
+    assert after is pending, "预筛不得换掉当前挂起的询问"
+    assert (after.seq, len(session.records())) == before, (
+        "预筛不得消耗询问序号，也不得往记录流里写任何一条"
+    )
+
+
+def test_the_sidecar_meta_freezes_the_ask_policy_and_replay_restores_it(
+    tmp_path: Path,
+) -> None:
+    """会话事实：策略进侧车 meta，回放按它重建引擎；旧录像没有该字段 ⇒ 引擎缺省 OFF。"""
+    from sgs_web.replay import engine_from_meta, read_run_meta
+
+    def _round_trip(session: Session) -> dict:
+        journal = save_run(tmp_path, session)
+        return read_run_meta(tmp_path, journal.name[: -len(".jsonl")])
+
+    off_meta = _round_trip(_finished_session(seed=107, ask_policy=AskPolicy(auto_skip=False)))
+    assert off_meta["ask_policy"] == {"auto_skip": False}
+    assert engine_from_meta(off_meta).ask_policy == AskPolicy(auto_skip=False)
+
+    on_meta = _round_trip(_finished_session(seed=109))
+    assert on_meta["ask_policy"] == {"auto_skip": True}, "网页会话缺省 ON 必须被冻结"
+    assert engine_from_meta(on_meta).ask_policy == AskPolicy(auto_skip=True)
+
+    legacy = {key: value for key, value in on_meta.items() if key != "ask_policy"}
+    assert engine_from_meta(legacy).ask_policy == AskPolicy(), (
+        "本票之前的录像没有该字段 ⇒ 回放必须回落引擎缺省 OFF（旧行为可复现）"
+    )
 
 
 def test_listing_runs_never_parses_the_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

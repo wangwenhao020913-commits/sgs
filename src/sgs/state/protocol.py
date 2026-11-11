@@ -38,6 +38,7 @@ __all__ = [
     "ArrangeCards",
     "ArrangeContext",
     "ArrangeQuery",
+    "AskPolicy",
     "DiscardCards",
     "DiscardQuery",
     "DodgeContext",
@@ -312,6 +313,35 @@ class Step(_FrozenModel):
 
 
 @dataclass(frozen=True, slots=True)
+class AskPolicy:
+    """**询问策略**：无合法候选时要不要问（table-ux-overhaul 票 02 / spec §2 Q4）。
+
+    这是**会话配置**，不是规则配置：它不进 :class:`~sgs.data.RuleConfig`（那会进 journal
+    header ⇒ 打翻全部金录像字节），而是随 :class:`~sgs.engine.Engine` 构造进来、
+    随网页会话冻结进侧车元数据（``tools/sgs_web/replay.build_meta``）、由
+    ``replay_journal`` 还原。
+
+    两档缺省**按调用方分**（这是本票最要紧的一条）：
+
+    - **引擎构造缺省 OFF**（``AskPolicy()``）：金录像、``batch_games``、``ai_eval`` 与旧
+      录像回放因此逐字节可复现——没人显式打开就照旧"一律照问"；
+    - **网页会话缺省 ON**（``Session`` 的构造缺省）：玩家在网页里立刻看到"没有合法候选的
+      座位不再被问"。
+
+    ``auto_skip`` 只是**总开关**：它不自己判断"这扇窗口可不可跳过"——那一位由调用方按
+    窗口类别声明（:attr:`RespondContext.skip_if_empty`），两者与候选预览一起收口在
+    :meth:`~sgs.engine.Engine.should_ask_respond` 里。本票只落这条管道，不接任何窗口。
+    """
+
+    auto_skip: bool = False
+    """``True`` = 允许"无合法候选就跳过"；``False``（缺省）= 一律照问（旧行为）。
+
+    缺省取 ``False`` 是**有意的**：引擎是金录像 / AI 对战 / 旧录像回放的共同底座，
+    它的缺省必须仍是"旧口径"；网页的"玩家侧新口径"由会话层显式打开。
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class RespondContext:
     """``RESPOND`` 候选生成的类型化载荷（票 19 §4 的 ``payload``）。
 
@@ -337,6 +367,13 @@ class RespondContext:
     窗口在"这一次响应成立"处把它清回 0（``_dodge_window`` 的 ``dodges_done`` 每加一、
     【决斗】每收下一次响应）——floor 的粒度是**一个需要牌事件**，不是整扇窗口（补充一手
     §2.1.2.2(2) 的"每时机一次响应机会"+ §4.2.2 的 ❶❷❸）。**不进记录流**（同上）。
+
+    ``skip_if_empty`` = 这扇窗口**按类别**声明"没有可行动的候选时可以不问"（票 02，
+    缺省 ``False`` = 照问）。它是**逐窗口的类别位**，与会话级总开关
+    :class:`AskPolicy` 分开：A 类（需要 / 可以使用或打出一张牌：无懈 / 闪 / 求桃 / 护驾 /
+    决斗 / 南蛮万箭）由调用方置 ``True``；C 类（可以放弃的询问）留给各自窗口决定。
+    **本票只加字段与文档，不加任何置位调用点**——真正的消费者在票 05。
+    **不进记录流**（同上）。
     """
 
     cause: WindowCause
@@ -350,6 +387,7 @@ class RespondContext:
     declared: bool = False
     rejudge_offers: tuple[RejudgeOffer, ...] = ()
     floor: int = 0
+    skip_if_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)

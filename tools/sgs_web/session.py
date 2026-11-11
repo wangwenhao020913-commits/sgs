@@ -26,7 +26,7 @@ from sgs.data import (
     validate_rule_config,
 )
 from sgs.engine import Engine, ai_stream, new_seed
-from sgs.state import Action, Query
+from sgs.state import Action, AskPolicy, Query
 
 __all__ = [
     "AI_TIERS",
@@ -34,12 +34,14 @@ __all__ = [
     "DEFAULT_HUMAN_SEAT",
     "DEFAULT_PLAYER_COUNT",
     "DEFAULT_TIMEOUT_SECONDS",
+    "DEFAULT_WEB_ASK_POLICY",
     "Halt",
     "RecordWindow",
     "Session",
     "SessionLogEntry",
     "StaleAnswer",
     "create_session",
+    "parse_ask_policy",
 ]
 
 DEFAULT_PLAYER_COUNT: Final[int] = 8
@@ -55,6 +57,38 @@ AI_TIERS: Final[tuple[str, ...]] = ("heuristic", "random")
 """人类座位之外的参与者档位；缺省启发式（地图 D3）。"""
 
 DEFAULT_AI: Final[str] = "heuristic"
+
+
+DEFAULT_WEB_ASK_POLICY: Final[AskPolicy] = AskPolicy(auto_skip=True)
+"""网页会话的**询问策略缺省值**（table-ux-overhaul 票 02 / spec §2 Q4(a)）。
+
+引擎缺省是 **OFF**（金录像 / AI 对战 / 旧录像回放逐字节可复现）；玩家在网页里是 **ON**
+——同一个开关、两个缺省，由"谁是调用方"决定，而不是由规则配置决定（那会进 header 字节面）。
+"""
+
+
+def parse_ask_policy(raw: object, *, default: AskPolicy = DEFAULT_WEB_ASK_POLICY) -> AskPolicy:
+    """把建局 body / 侧车 meta 里的 JSON 形态解析成 :class:`~sgs.state.AskPolicy`。
+
+    **两个缺省是两个调用方的口径**：``raw is None``（字段缺席）⇒ ``default``。建局请求用
+    网页缺省 ON；``replay_journal`` 回放**旧录像**时显式传引擎缺省 OFF（本票之前的录像没有
+    这个字段，它拍下来的行为就是旧口径）。
+
+    接受两种形态：``bool``（简写）与 ``{"auto_skip": bool}``（侧车 meta 的冻结形态）。
+    形状不对一律 ``ValueError``（HTTP 层映射成 400，不静默回落）。
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return AskPolicy(auto_skip=raw)
+    if isinstance(raw, Mapping):
+        unknown = sorted(set(raw) - {"auto_skip"})
+        if unknown:
+            raise ValueError(f"询问策略有不认识的字段：{unknown}（只认 auto_skip）")
+        if "auto_skip" not in raw or not isinstance(raw["auto_skip"], bool):
+            raise ValueError(f"询问策略缺 auto_skip 或它不是布尔值：{raw!r}")
+        return AskPolicy(auto_skip=raw["auto_skip"])
+    raise ValueError(f"询问策略必须是布尔值或 {{'auto_skip': bool}}：{raw!r}")
 
 
 class StaleAnswer(Exception):
@@ -152,9 +186,12 @@ class Session:
         timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
         pack: ContentPack | None = None,
         session_id: str = "",
+        ask_policy: AskPolicy = DEFAULT_WEB_ASK_POLICY,
     ) -> None:
         if ai not in AI_TIERS:
             raise ValueError(f"AI 档位非法：{ai!r}（可选 {AI_TIERS}）")
+        if not isinstance(ask_policy, AskPolicy):
+            raise ValueError(f"询问策略必须是 AskPolicy：{ask_policy!r}")
         if hero_pool == "enabled" and heroes:
             hero_pool = None  # 显式武将优先；池不参与（引擎在 heroes 非空时直接早退）
         if my_hero is not None and not isinstance(my_hero, str):
@@ -176,6 +213,9 @@ class Session:
         self.human_seat = human_seat
         self.ai = ai
         self.timeout_seconds = timeout_seconds
+        self.ask_policy = ask_policy
+        """本局的**询问策略**（table-ux-overhaul 票 02）：网页缺省 ON，随会话冻结进侧车
+        元数据、由 ``replay_journal`` 还原。它是会话事实，**不进记录流**、不进 ``RuleConfig``。"""
         self.cursor = 0
         self.session_log: list[SessionLogEntry] = []
         # 询问发出的接入层时刻；由 HTTP 层在用 pending 回话时打戳（超时判定的输入之一）。
@@ -222,6 +262,7 @@ class Session:
             heroes=self.heroes,
             hero_pool=self.hero_pool,
             hero_config=self.hero_config,
+            ask_policy=ask_policy,
         )
 
         self._halt_player = _HaltPlayer(self)
