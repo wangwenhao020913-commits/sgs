@@ -178,4 +178,42 @@ Ruling: spec §2 Q11 / Q18 / Q23（用户 2026-11-11 签）
 - `.venv/bin/pytest tests/test_web.py` → **305 passed**。
 - `bash tests/test_web.sh`（端到端）→ PASS。
 - `bash tools/check_goldens.sh` → **47 条标准 108 金录像逐字节不变**（文案只做显示覆盖）。
-- 全量：`git commit` 的 pre-commit hook（`tests/run_all.sh --quiet`）通过。
+- 全量：`git commit` 的 pre-commit hook（`tests/run_all.sh --quiet`）→ **ALL TESTS PASSED**。
+- 实机（bsk）：页面加载 / 静态资源 200 / 零页面 console 错误已核；**点选被 bsk 的 cooperate
+  握手拒绝**（`browser_interact` 的 click / fill / select 全被拒），交互那几步留给用户按
+  `## 复现配方` 走——`bash tests/smoke-web.sh` 的 16 条（含离间的三级逐字、keepDialog 镜像、
+  终局三件套、编辑 + 导出）是同一批 DOM 行为的自动半边。
+
+## 复现配方（实机，票 07）
+
+**环境**：`bash tools/check_env.sh` → PASS（含「bsk 可用」）。
+
+**本次 agent 侧只走完"页面加载"**（受管后台任务起服务，收尾已 `job_kill`）：
+
+```bash
+.venv/bin/python tools/sgs_web/serve.py --host 127.0.0.1 --port 8137 --quiet \
+  --runs-dir .scratch/table-ux-overhaul/runs      # 受管后台任务，不要 nohup
+# 浏览器：http://127.0.0.1:8137/
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8137/prompts.json   # 200
+```
+
+- 开局页正常渲染；**页面级 console 零错误**（只有 `chrome-extension://` 自己的加载噪音）。
+- `prompts.js` / `prompts.json` 都经静态路由取到（200，同一份 `_serve_static`）。
+- **点选 / 填表全部被 bsk 拒绝**：`This action requires the context returned by the latest
+  cooperate sync`（`browser_interact` 的 click / fill / select 与 `browser_page reload` 都是这一条；
+  换新 session、`noFocus` 起、resize 也一样）。本会话的浏览器只能**读**不能**驱动**，故
+  交互那几步按下面的配方留给用户 / 下一次 bsk 握手正常时走。
+
+**用户点选配方**（4 人 / 点将 = 界貂蝉；其余随机，牌堆「标准 108」、时限 0、种子任选）：
+
+1. 开局 → 进牌桌；底部技能区点「离间」进预发动清单。提示行应为
+   `第 1/3 步：选择1张牌弃置（1–1 张，已选 0 张）。`，右下动作行出现「改这段文案」。
+2. 点一张手牌 + 「下一步」→ 提示行变成
+   `第 2/3 步：弃置一张【<牌名><花色><点数>】，选择1名男性角色成为决斗目标（点场上武将选择）。`
+3. 点一名男性角色 → 提示行变成
+   `第 3/3 步：弃置一张【<牌名><花色><点数>】，选择1名男性角色对【<N>号位<武将名>】使用决斗（点场上武将选择）。`
+4. 点「改这段文案」→ 浏览器原生输入框 → 改一句 → 提示行立刻用新文案（覆盖层只改这一格）；
+   右下出现「导出文案 JSON」，点它可复制 `localStorage['sgs.prompts']` 的 JSON 贴回仓里。
+5. 打完 / 终局屏：`#t-prompt` = "本局已结束。"、页脚 = "已结束（录像已存）"，
+   技能串 / 步骤提示 / 描述（`#t-context`）/ 选项格 / 技能组 / 弹窗标题条全空。
+6. 顺带的最小覆盖（同一局就能看到）：进入处理区、舞台卡更新、弃牌堆 1s 停留 + 1s 淡出。
