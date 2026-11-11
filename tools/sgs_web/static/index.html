@@ -481,6 +481,13 @@
 <script src="sfx-fire.js"></script>
 <script src="sfx-chain.js"></script>
 <script src="sfx-death.js"></script>
+<!-- chain-death-voices 票 03：**卡牌语音**（SgsCardVoice）。SGS OL 的原声素材（用户提供，
+     40 条 mp3 在 `static/voices/`，是仓里唯一的音频文件类），按"使用 / 打出"的产物牌型 +
+     使用者性别播；每条自起一路 `Audio`、可重叠不打断。排在 sfx-death.js 之后、sfx-ui.js
+     之前（后者在同一手势 / 开关里把 `unlock()` / `mute()` 单向灌进来）。
+     `session.js:stepPlayback` 调它的 `fireCardEventsThrough(record.seq)`（到点逐条播）、
+     `commitView` 换局调 `SgsCardVoice.stopAll()`。 -->
+<script src="sfx-voices.js"></script>
 <!-- damage-fx 票 08：音效 UI（顶栏「♪」开关 / localStorage 记忆 / 按模块分组的声道池 /
      ?audiotest）。读 damage-fx.js 的 DAMAGE_FX_MAX_VARIANT 与 damageFxCapFor(nature)（票 02
      起池长按属性读 anim.ini 的并发表，槽位超出时就地补建），都在调用时才解析 ⇒ 排在

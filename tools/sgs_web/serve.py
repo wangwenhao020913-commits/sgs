@@ -49,6 +49,7 @@ from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
+    card_events_after,
     concealed_by_later_reveal,
     concealed_guohuo_cards,
     damage_events_after,
@@ -100,6 +101,9 @@ _CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
+    # chain-death-voices 票 03：卡牌语音是**用户素材**（`static/voices/*.mp3`）。缺了这一行
+    # 浏览器拿到的是 `application/octet-stream`，`<audio>` / `Audio` 仍能放，但类型是错的。
+    ".mp3": "audio/mpeg",
 }
 
 
@@ -428,6 +432,17 @@ class GameRegistry:
                 after=after,
                 state=session.engine.state,
                 events=session.engine.damage_events,
+            ),
+            # chain-death-voices 票 03：卡牌使用 / 打出事实是**第三条派生通道**，与
+            # `damage_events` 同姿态——事实来源是引擎的只增缓冲 `Engine.card_events`，
+            # 共用同一个 `after` 游标 ⇒ 轮询不重复出声。记录面只有
+            # `card_move(reason=USE)`，而"这次当成什么牌用掉"（转化 / 纯虚拟的产物牌型）
+            # 与"使用者性别"都只能从这里读；使用 / 打出是公开事实，不按视角过滤。
+            "card_events": card_events_after(
+                all_records,
+                after=after,
+                state=session.engine.state,
+                events=session.engine.card_events,
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }

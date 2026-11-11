@@ -3505,7 +3505,18 @@ def test_the_damage_playback_module_is_a_one_way_seam_out_of_the_effects_layer()
 
 
 def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_files() -> None:
-    """调音台：`VOICE` 表在文件顶部单独一段，六个声音是六个独立函数，仓库里没有音频文件。"""
+    """调音台：`VOICE` 表在文件顶部单独一段，六个声音是六个独立函数；**音频文件只在白名单里**。
+
+    chain-death-voices 票 03 改了后半条**口径**（用户给了 SGS OL 的卡牌语音素材）：
+
+    - 伤害音效（`sfx.js` / `sfx-thunder.js` / `sfx-fire.js` / 铁索 / 阵亡）仍**全部现场合成**，
+      一行音频文件都不读——六声音调音台那半因此**原样保留**；
+    - 卡牌语音是**用户素材**（本仓新增的资产类）：mp3 只许落在
+      `tools/sgs_web/static/voices/`，其余目录（`src/` / `tests/` / `docs/` / `开发文档/`
+      照旧全扫）出现音频文件仍判红；
+    - `voices/` 目录里的每条都被映射表引用、表里的每个文件名都有文件——那两条由
+      `test_the_card_voice_table_covers_the_160_deck_and_the_assets_match_it` 钉。
+    """
     text = (STATIC_DIR / "sfx.js").read_text(encoding="utf-8")
     block = re.search(r"var VOICE = \{(?P<body>.*?)\n  \};", text, re.S)
     assert block is not None, "sfx.js 顶部必须有一张 `var VOICE = { … }` 调音台"
@@ -3525,6 +3536,7 @@ def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_fil
     )
 
     audio_suffixes = {".mp3", ".ogg", ".wav", ".m4a", ".flac", ".aac"}
+    whitelist = STATIC_DIR / "voices"
     found: list[Path] = []
     for root in (
         REPO_ROOT / "tools", REPO_ROOT / "src", REPO_ROOT / "tests",
@@ -3536,9 +3548,16 @@ def test_the_sfx_mixer_table_is_on_top_with_six_separate_voices_and_no_audio_fil
             path for path in root.rglob("*")
             if path.is_file() and path.suffix.lower() in audio_suffixes
         )
-    assert not found, (
-        f"音效全部现场合成，仓库里不得出现音频文件（票面 §音效以后怎么改）：{[str(p) for p in found[:5]]}"
+    outside = [path for path in found if whitelist not in path.parents]
+    assert not outside, (
+        "伤害音效仍**全部现场合成**：白名单之外不得出现音频文件"
+        f"（只许 `static/voices/`，用户素材）：{[str(p) for p in outside[:5]]}"
     )
+    assert found, "白名单里应当有卡牌语音素材（40 条）——本条不是把「有音频」也禁掉"
+    for path in found:
+        assert path.suffix.lower() == ".mp3", (
+            f"卡牌语音素材只收 mp3（映射表与 MIME 都只认它）：{path}"
+        )
 
 
 def test_the_heavy_damage_plays_are_serialized_and_exclusive() -> None:
@@ -4777,12 +4796,13 @@ _FX_CHAIN_JS = STATIC_DIR / "fx-chain.js"
 _SFX_CHAIN_JS = STATIC_DIR / "sfx-chain.js"
 
 # chain-death-voices 票 01：本 effort 新加的两个全局名（票 02 / 03 会往这张表继续加）。
-# 票 02 追加阵亡的两份（`SgsDeathFX` / `SgsDeathSfx`）。
+# 票 02 追加阵亡的两份（`SgsDeathFX` / `SgsDeathSfx`）；票 03 追加卡牌语音（`SgsCardVoice`）。
 _FX_EXTRA_GLOBALS = {
     "fx-chain.js": "SgsChainFX",
     "sfx-chain.js": "SgsChainSfx",
     "fx-death.js": "SgsDeathFX",
     "sfx-death.js": "SgsDeathSfx",
+    "sfx-voices.js": "SgsCardVoice",
 }
 
 
@@ -4831,6 +4851,11 @@ def test_the_fx_extra_globals_are_listed_in_order_and_stay_static() -> None:
     )
     assert srcs.index("fx-death.js") < srcs.index("sfx-death.js"), (
         "画面在前、音效在后（阵亡的音效报点从 SgsDeathFX.PARAMS 读）"
+    )
+    # 票 03：卡牌语音紧跟 sfx-death.js、排在 sfx-ui.js 之前（后者在同一手势 / 开关里
+    # 把 unlock / mute 单向灌进来）。
+    assert srcs.index("sfx-death.js") < srcs.index("sfx-voices.js") < srcs.index("sfx-ui.js"), (
+        f"sfx-voices.js 必须紧跟 sfx-death.js、排在 sfx-ui.js 之前：{srcs}"
     )
 
 
@@ -5849,3 +5874,285 @@ def test_the_death_sfx_is_a_one_shot_scheduler_behind_the_same_switch() -> None:
             f"fx-death.js 要按 typeof 守卫调 {name}（缺 sfx-ui.js 的探针里仍是一份独立排播）"
         )
     assert "AudioContext" not in death, "画面侧不碰音频 API（音效层的事）"
+
+
+# ---------------------------------------------------------------------------
+# chain-death-voices 票 03：卡牌语音（`sfx-voices.js` + `static/voices/` + 三条接线）
+#
+# 机械的四半：
+# 1. **映射表是唯一真源**：`CARD_VOICES` 覆盖 160 档全部 43 类（期望牌型清单从 `sgs.data` 读，
+#    不手抄），有素材的恰好 20 类、`null` 的恰好 23 类（22 种装备是预期终态 + 【桃】待补）；
+#    108 档的 32 类全在表内（160 是超集，两份 profile 各跑一次）。
+# 2. **资产对表**：表里每个文件名都在 `static/voices/` 下存在；目录里没有孤儿（每条都被引用）；
+#    `voices/README.md` 是同一张表（逐行比对）。
+# 3. **接线**（单向缝 + 同一游标）：`session.js` 收进 `state.cardEvents`、在
+#    `fireDamageEventsThrough` 之后调 `fireCardEventsThrough`、换局 `SgsCardVoice.stopAll()`；
+#    `sfx-ui.js` 把 `unlock` / `mute` 单向灌进去，语音模块不读开关的内部状态。
+# 4. **播放口径的静态半边**：静音先于建 `Audio`、每条 `new Ctor(src)` 自起一路、`stopAll`
+#    才 `pause`；`.mp3` 的 MIME 在 `serve.py` 的 `_CONTENT_TYPES` 里。
+#
+# 行为（到点播 / 两条重叠 / 转化与虚拟 / 开关 / 未知与 null / 换局）归烟测 `U-VOICE-01..`。
+# ---------------------------------------------------------------------------
+
+_SFX_VOICES_JS = STATIC_DIR / "sfx-voices.js"
+_VOICES_DIR = STATIC_DIR / "voices"
+
+# 期望牌型清单**从数据读**（`sgs.data` 的牌型表 + 各牌堆档的 `expect.by_type`），不在测试里
+# 手抄一份 43 行的名单——漂了就是这条用例红，而不是"测试跟着抄"。
+_DECK_PROFILES = ("standard_108", "standard_ex_160")
+
+_VOICE_README_ROW = re.compile(
+    r"^\| `(?P<type>[a-z_]+)` \| (?P<name>[^|]+?) \| (?P<male>[^|]+?) \| (?P<female>[^|]+?) "
+    r"\| (?P<note>[^|]+?) \|\s*$",
+    re.M,
+)
+
+
+def _inner_js_function(source: str, name: str) -> str:
+    """取**缩进一层**的函数正文（`sfx-voices.js` 的函数都住在 IIFE 里，收尾是行首两个空格 + `}`）。"""
+    match = re.search(rf"^  function {name}\((?P<args>[^)]*)\) \{{(?P<body>.*?)\n  \}}", source, re.S | re.M)
+    assert match is not None, f"sfx-voices.js 里找不到 IIFE 内的函数 {name}()"
+    return match.group("body")
+
+
+def _readme_voices() -> dict[str, dict[str, str | None]]:
+    """`voices/README.md` 那张表（`—` = `null`）；形状与 `CARD_VOICES` 逐键可比。"""
+    def cell(text: str) -> str | None:
+        value = text.strip().strip("`")
+        return None if value in ("—", "-", "") else value
+
+    rows: dict[str, dict[str, str | None]] = {}
+    for match in _VOICE_README_ROW.finditer(
+        (_VOICES_DIR / "README.md").read_text(encoding="utf-8")
+    ):
+        if match.group("type") == "card_type":  # 表头那一行
+            continue
+        rows[match.group("type")] = {
+            "male": cell(match.group("male")),
+            "female": cell(match.group("female")),
+        }
+    return rows
+
+
+_CARD_VOICE_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const played = [];
+class FakeAudio {
+  constructor(src) {
+    this.src = src;
+    this.volume = 1;
+    this.paused = false;
+    played.push(this);
+  }
+  play() { return Promise.resolve(); }
+  pause() { this.paused = true; }
+  addEventListener() {}
+}
+
+const window = { Audio: FakeAudio };
+const context = vm.createContext({ window, console, Date });
+context.globalThis = context;
+vm.runInContext(readFileSync("tools/sgs_web/static/sfx-voices.js", "utf8"), context, {
+  filename: "sfx-voices.js",
+});
+const report = vm.runInContext(`(() => {
+  const V = SgsCardVoice;
+  return JSON.stringify({
+    table: V.CARD_VOICES,
+    types: Object.keys(V.CARD_VOICES),
+    api: ["play", "stopAll", "mute", "unlock", "last", "count"].map((k) => typeof V[k]),
+    bareGlobal: typeof SgsCardVoice,
+  });
+})()`, context);
+console.log(report);
+"""
+
+
+def _card_voice_probe() -> dict:
+    """跑真 `sfx-voices.js`（node vm + 假 `Audio`），拿回映射表与模块形状。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "card_voice_probe.mjs"
+        probe.write_text(_CARD_VOICE_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"卡牌语音探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def card_voice_probe() -> dict:
+    """一次探针跑完，映射表 / 资产 / README 三条用例共用。"""
+    return _card_voice_probe()
+
+
+def test_the_card_voice_table_covers_the_160_deck_and_the_assets_match_it(
+    card_voice_probe: dict,
+) -> None:
+    """映射表 = 160 档全部 43 类；有素材恰好 20 类、`null` 恰好 23 类；资产与表一一对应。"""
+    from sgs.data import load_content_pack
+
+    pack = load_content_pack(deck_profile="standard_108")
+    card_types = {card_type.id for card_type in pack.card_types}
+    equipment = {
+        card_type.id
+        for card_type in pack.card_types
+        if str(getattr(card_type.category, "value", card_type.category)) == "equipment"
+    }
+    table = card_voice_probe["table"]
+    assert set(table) == card_types, (
+        "映射表必须覆盖牌型表的全部 43 类（不许漏项）："
+        f"缺 {sorted(card_types - set(table))}；多 {sorted(set(table) - card_types)}"
+    )
+    assert len(equipment) == 22, f"装备牌型应为 22 种：{sorted(equipment)}"
+
+    # 每份牌堆档的牌型都落在表内（160 是超集；108 的 32 类也必须全在）。
+    for profile in _DECK_PROFILES:
+        deck_types = set(pack.decks[profile].expect.by_type)
+        assert deck_types <= set(table), (
+            f"{profile} 的牌型里有 {sorted(deck_types - set(table))} 不在映射表里"
+        )
+    assert len(set(pack.decks["standard_108"].expect.by_type)) == 32
+    assert len(set(pack.decks["standard_ex_160"].expect.by_type)) == 43
+
+    voiced = {
+        type_id
+        for type_id, row in table.items()
+        if isinstance(row.get("male"), str) or isinstance(row.get("female"), str)
+    }
+    silent = set(table) - voiced
+    assert len(voiced) == 20, f"有素材的必须恰好 20 类（40 条 = 20 × 男 / 女）：{sorted(voiced)}"
+    assert len(silent) == 23, f"null 的必须恰好 23 类：{sorted(silent)}"
+    # `null` 的 23 类 = 22 种装备（**预期终态**，SGS OL 本就没有装备卡语音）+ 【桃】（待补素材）。
+    assert silent == equipment | {"peach"}, (
+        "静默的只有「22 种装备 + 【桃】」两类：装备是预期终态、桃是待补素材；"
+        f"多出来的静默项：{sorted(silent - equipment - {'peach'})}"
+    )
+    assert "peach" in silent, "【桃】先静默等素材（用户 2026-11-11）"
+    for type_id in voiced:
+        row = table[type_id]
+        assert row["male"] == f"{type_id}_male.mp3", f"{type_id} 的男声文件名：{row['male']}"
+        assert row["female"] == f"{type_id}_female.mp3", f"{type_id} 的女声文件名：{row['female']}"
+    for type_id in silent:
+        assert table[type_id] == {"male": None, "female": None}, (
+            f"{type_id} 没有素材 ⇒ 两格都显式 null（不许漏项）：{table[type_id]}"
+        )
+
+    # 资产对表：表里每个文件名都存在；目录里没有孤儿（每条 mp3 都被表引用）。
+    referenced = {
+        row[gender] for row in table.values() for gender in ("male", "female") if row[gender]
+    }
+    on_disk = {path.name for path in _VOICES_DIR.glob("*.mp3")}
+    assert referenced <= on_disk, (
+        f"映射表引用了不存在的素材：{sorted(referenced - on_disk)}"
+    )
+    assert on_disk <= referenced, f"目录里的孤儿素材（没被表引用）：{sorted(on_disk - referenced)}"
+    assert len(on_disk) == 40, f"素材必须恰好 40 条（20 类 × 男 / 女）：{len(on_disk)}"
+
+    # README 是同一张表（逐键比对，漂移即红）。
+    readme = _readme_voices()
+    assert readme == table, (
+        "voices/README.md 的覆盖表必须与 sfx-voices.js 的 CARD_VOICES 逐格相同："
+        f"README 缺 {sorted(set(table) - set(readme))}；多 {sorted(set(readme) - set(table))}；"
+        f"值不同 {sorted(k for k in set(table) & set(readme) if table[k] != readme[k])}"
+    )
+
+
+def test_the_card_voice_module_plays_each_asset_on_its_own_behind_the_switch(
+    card_voice_probe: dict,
+) -> None:
+    """模块形状与播放口径的静态半边：静音先于建 `Audio`、每条自起一路、`stopAll` 才 `pause`。"""
+    assert card_voice_probe["api"] == ["function"] * 6, (
+        f"模块的六个入口都要导出：{card_voice_probe['api']}"
+    )
+    assert card_voice_probe["bareGlobal"] == "object", (
+        "顶层的 `var SgsCardVoice = window.SgsCardVoice;` 桥接要在（session.js 按裸名调它）"
+    )
+    voices = _SFX_VOICES_JS.read_text(encoding="utf-8")
+    assert voices.index("var CARD_VOICES") < voices.index("function play("), (
+        "映射表必须在播放函数**之前**（表 → 查表 → 播的次序）"
+    )
+    play = _inner_js_function(voices, "play")
+    muted_at = play.index("if (muted) return null;")
+    build_at = play.index("new Ctor(src)")
+    assert muted_at < build_at, "静音检查必须在建 `Audio` 之前（关「♪」⇒ 一条都不建、不发请求）"
+    assert "stopAudio" not in play and "stopAll" not in play, (
+        "播放里不许停任何一条：后一条从不打断前一条（用户口径「可以重复、不会被打断」）"
+    )
+    assert "pending.catch(function () {})" in play, "自动播放被拒的 Promise 要静默吞掉"
+    assert "audio.volume = VOLUME" in play, "音量只有一个数（响度归一不在本票）"
+    stop = _inner_js_function(voices, "stopAll")
+    assert "stopAudio(" in stop, "`stopAll` 才 pause 存活的那几路"
+    mute = _inner_js_function(voices, "mute")
+    assert "stopAll()" in mute, "关「♪」= 停掉全部存活语音并清表"
+
+    # `.mp3` 的 MIME（缺了会回 `application/octet-stream`）。
+    if str(REPO_ROOT / "tools") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+    from sgs_web.serve import _CONTENT_TYPES
+
+    assert _CONTENT_TYPES.get(".mp3") == "audio/mpeg", (
+        f"serve.py 的 _CONTENT_TYPES 必须给 .mp3 一个 audio/mpeg：{_CONTENT_TYPES}"
+    )
+
+
+def test_the_card_voice_wiring_is_one_way_from_sfx_ui_and_rides_the_same_seq_cursor() -> None:
+    """接线（票面 §做法 3）：同一 seq 游标、换局收声、开关与手势**单向**从 `sfx-ui.js` 灌入。"""
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    sfx_ui = (STATIC_DIR / "sfx-ui.js").read_text(encoding="utf-8")
+    core = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    voices = _SFX_VOICES_JS.read_text(encoding="utf-8")
+
+    # 1. 待触发队列（与 `state.damageEvents` 同姿态）与它的两处生命周期。
+    assert re.search(r"^  cardEvents: \[\],", core, re.M), "core.js 的 state 要有 cardEvents: []"
+    apply_view = _js_function(session, "applyView")
+    assert "for (const event of body.card_events || []) state.cardEvents.push(event);" in apply_view, (
+        "applyView 必须把载荷收进队列"
+    )
+    assert "state.cardEvents = [];" in apply_view, "换会话要清空（上一局的事实不属于新局）"
+    commit = _js_function(session, "commitView")
+    assert "SgsCardVoice.stopAll();" in commit, "换局收声：上一局的语音不拖进新局"
+    assert "state.cardEvents = [];" in commit
+
+    # 2. 触发点 = 与伤害演出**同一条 seq 游标**（紧挨它的下一行）。
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    damage_at = body.find("fireDamageEventsThrough(record.seq)")
+    voice_at = body.find("fireCardEventsThrough(record.seq)")
+    assert damage_at >= 0 and voice_at > damage_at, (
+        "卡牌语音必须挂在伤害演出的下一行（同一游标、同一批记录）"
+    )
+
+    # 3. 排播钩子住在语音模块（与伤害 / 铁索同姿态）：到点逐条播、其余留队。
+    hook = re.search(
+        r"^var fireCardEventsThrough = function \(seq\) \{(?P<body>.*?)\n\};", voices, re.S | re.M
+    )
+    assert hook is not None, "sfx-voices.js 要提供顶层 `var fireCardEventsThrough` 排播钩子"
+    hook_body = hook.group("body")
+    assert "state.cardEvents" in hook_body and "SgsCardVoice.play(event)" in hook_body
+    assert "setTimeout" not in hook_body, "语音不排播：到点直接播，可重叠"
+
+    # 4. 单向缝：开关 / 手势从 sfx-ui.js 灌进去；语音模块不读它的内部状态。
+    modules = _js_function(sfx_ui, "damageSfxEnsureModules")
+    assert "cardVoiceUnlock()" in modules, "手势要在同一个 tick 里灌进去"
+    mute = _js_function(sfx_ui, "damageSfxMute")
+    assert "cardVoiceMute(" in mute, "开关要灌进去（关 = 停掉全部存活语音）"
+    unlock = _js_function(sfx_ui, "damageSfxUnlock")
+    assert "cardVoiceUnlock()" in unlock, "手势解锁在同一处（缺省静音时的第一次点击也算）"
+    for leaked in ("damageSfxOn", "damageSfxMute", "damageSfxSetEnabled", "localStorage"):
+        assert leaked not in _strip_js_comments(voices), (
+            f"语音模块不许读 sfx-ui.js 的内部状态（{leaked}）：缝只朝一个方向"
+        )

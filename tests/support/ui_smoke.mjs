@@ -25135,4 +25135,258 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 }
 
+
+/* ============ chain-death-voices 票 03：卡牌语音（U-VOICE-01..06）============
+ *
+ * 判据来自票面 §验收 4 与 spec §演出口径「卡牌语音」。载荷是**与响应体同形**的合成 `view` +
+ * 记录 + `card_events`（服务端每次使用 / 打出都下发
+ * `{seq, seat, card_type, card_name, gender, virtual}`）：断言只落在**假 `Audio`** 的读数上
+ * ——建了几个、`src` 是什么、有没有被 `pause` / 清空——不碰真实音频。
+ *
+ * 时间不靠真实等待：`window.setTimeout` 是**只排队**的垫片，`stepPlayback(true)` 直接推进
+ * 回放（语音挂在同一条 seq 游标上）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const holdMark = () => String(attr(documentShim.documentElement, "data-playback-hold") || "");
+
+  /* 假 `Audio`：记录**每一个实例**与它们的 `src` / `pause`。页面上没有 `AudioContext`，
+   * 语音模块也不该建它（它只 `new Audio`）；这条路径就是"没有 Web Audio 也能播语音"。 */
+  const audioLog = [];
+  class FakeAudio {
+    constructor(src) {
+      this.src = src;
+      this.volume = 1;
+      this.paused = false;
+      this.playCalls = 0;
+      this.listeners = {};
+      audioLog.push(this);
+    }
+
+    play() {
+      this.playCalls += 1;
+      return Promise.resolve();
+    }
+
+    pause() {
+      this.paused = true;
+    }
+
+    addEventListener(name, fn) {
+      (this.listeners[name] = this.listeners[name] || []).push(fn);
+    }
+  }
+  windowShim.Audio = FakeAudio;
+  const builtSince = (mark) => audioLog.slice(mark);
+  const moduleOf = () => windowShim.SgsCardVoice;
+
+  /** 一条使用记录（真录像里那条 `card_move(reason=USE)`）+ 它的卡牌事实。 */
+  const useRecord = (seq, seat, cardId, name) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 2, depth: 1, reason: "USE",
+    owner: seat,
+    from_zone: { seat, zone: "hand" },
+    to_zone: { seat: null, zone: "processing" },
+    cards: [synthCard(cardId, name)],
+  });
+  const cardEvent = (seq, seat, typeId, name, gender, virtual = false) => ({
+    seq, seat, card_type: typeId, card_name: name, gender, virtual,
+  });
+  const filler = (seq) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: 1, depth: 1,
+    seat: 1, before: 4, after: 4, amount: 0,
+  });
+
+  let voiceSerial = 0;
+  let voiceSession = "";
+  let voiceSeq = 0;
+  const voiceView = () => {
+    const out = synthView(null);
+    out.session_id = voiceSession;
+    out.snapshot.processing = [];
+    out.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+      identity: null, chained: false, wine_active: false, flipped: false,
+    }));
+    return out;
+  };
+  /** 换一份干净会话（走真实的换局路径：`applyView` 换会话分支 + `commitView` 的收尾）。 */
+  const openVoiceSession = () => {
+    ui.flushPlayback();
+    voiceSerial += 1;
+    voiceSession = `u-voice-${voiceSerial}`;
+    voiceSeq = 0;
+    ui.applyViewRaw({
+      ...voiceView(), cursor: 0, log_seq: 0, records: [], card_events: [], finished: false,
+    });
+  };
+  /** 同一 session 的下一批：记录 + 卡牌事实（服务端形状，一条不多一条不少）。 */
+  const voiceBatch = (records, events) => {
+    voiceSeq = records.reduce((max, record) => Math.max(max, Number(record.seq) || 0), voiceSeq);
+    ui.applyViewRaw({
+      ...voiceView(), cursor: voiceSeq, log_seq: 0,
+      records, card_events: events, finished: false,
+    });
+  };
+  const step = (count = 1) => {
+    for (let index = 0; index < count; index += 1) ui.stepPlayback(true);
+  };
+
+  const sfxWasOn = Boolean(vm.runInContext("damageSfxOn", context));
+  const voiceWasOn = () => {
+    // 「♪」开着的时候才可能有声音（缺省静音：localStorage['sgs.sfx'] 缺省 off）。
+    vm.runInContext("damageSfxSetEnabled(true)", context);
+  };
+  try {
+    /* ---- U-VOICE-01：一条【杀】的使用 ⇒ 到点播 `slash_<gender>.mp3` ---- */
+    voiceWasOn();
+    openVoiceSession();
+    const mark01 = audioLog.length;
+    voiceBatch([useRecord(10, 0, 6, "杀")], [cardEvent(10, 0, "slash", "杀", "male")]);
+    check("U-VOICE-01a 事件随载荷先入队、还没到那条记录 ⇒ 一条 Audio 都不建",
+      ui.state.cardEvents.length === 1 && builtSince(mark01).length === 0,
+      `queue=${ui.state.cardEvents.length} built=${builtSince(mark01).length}`);
+    step();
+    const built01 = builtSince(mark01);
+    const last01 = moduleOf().last();
+    check("U-VOICE-01b 回放到那条记录的 seq ⇒ 恰好一条 Audio，src = voices/slash_male.mp3",
+      built01.length === 1 && built01[0].src === "voices/slash_male.mp3"
+        && built01[0].playCalls === 1 && built01[0].volume === moduleOf().VOLUME,
+      `built=${JSON.stringify(built01.map((a) => a.src))} play=${built01[0] && built01[0].playCalls}`);
+    check("U-VOICE-01c `last()` 与事件一致（产物牌型 + 使用者性别 + 同一个文件名），count() 记 1",
+      Boolean(last01)
+        && last01.type === "slash" && last01.gender === "male"
+        && last01.src === "voices/slash_male.mp3" && moduleOf().count() === 1,
+      `last=${JSON.stringify(last01)} count=${moduleOf().count()}`);
+    check("U-VOICE-01d 队列已清空（到点的事实不会在下一批再响一次）",
+      ui.state.cardEvents.length === 0, `queue=${ui.state.cardEvents.length}`);
+    check("U-VOICE-01e 裸全局名也能读到读数（session.js 按裸名调它；垫片的 window 是另一个对象）",
+      vm.runInContext("SgsCardVoice === window.SgsCardVoice && SgsCardVoice.count() === 1", context),
+      `same=${vm.runInContext("SgsCardVoice === window.SgsCardVoice", context)}`);
+    // 素材真的下发了（并且是 audio/mpeg）：MIME 缺了会回 application/octet-stream。
+    const asset = await fetch(`${BASE}/voices/slash_male.mp3`);
+    const assetType = String(asset.headers.get("content-type") || "");
+    const assetBytes = (await asset.arrayBuffer()).byteLength;
+    check("U-VOICE-01f GET /voices/slash_male.mp3 ⇒ 200 + audio/mpeg（白名单素材真的服务得出去）",
+      asset.status === 200 && assetType.startsWith("audio/mpeg") && assetBytes > 1024,
+      `status=${asset.status} type="${assetType}" bytes=${assetBytes}`);
+
+    /* ---- U-VOICE-02：连续两条（快）⇒ 两个 Audio 实例，前一条没有被停（可重叠）---- */
+    const mark02 = audioLog.length;
+    voiceBatch(
+      [useRecord(11, 0, 6, "杀"), useRecord(12, 1, 7, "杀")],
+      [
+        cardEvent(11, 0, "slash", "杀", "male"),
+        cardEvent(12, 1, "slash", "杀", "female"),
+      ],
+    );
+    step();
+    check("U-VOICE-02a 两条事件**各自**一个 Audio 实例（不是复用一个元素）",
+      builtSince(mark02).length === 1, `built=${builtSince(mark02).length}`);
+    step();
+    const built02 = builtSince(mark02);
+    check("U-VOICE-02b 两条叠着响：后一条起来时前一条**没有** pause、src 也还在",
+      built02.length === 2
+        && built02[0].src === "voices/slash_male.mp3" && built02[0].paused === false
+        && built02[1].src === "voices/slash_female.mp3" && built02[1].paused === false,
+      `srcs=${JSON.stringify(built02.map((a) => a.src))} `
+        + `paused=${JSON.stringify(built02.map((a) => a.paused))}`);
+    check("U-VOICE-02c 语音**不**冻记录流（无时停：<html> 上没有 data-playback-hold）",
+      holdMark() === "", `hold="${holdMark()}"`);
+
+    /* ---- U-VOICE-03：转化 / 虚拟 ⇒ 按**产物**播 ---- */
+    const mark03 = audioLog.length;
+    voiceBatch(
+      [useRecord(13, 0, 6, "闪"), useRecord(14, 2, 3, "八卦阵")],
+      [
+        cardEvent(13, 0, "slash", "杀（龙胆）", "male", true),
+        cardEvent(14, 2, "dodge", "闪（八卦阵）", "female", true),
+      ],
+    );
+    step(2);
+    const built03 = builtSince(mark03);
+    check("U-VOICE-03 转化 / 虚拟按**产物**播：闪当杀 ⇒ slash_male，八卦阵视为闪 ⇒ dodge_female",
+      built03.length === 2
+        && built03[0].src === "voices/slash_male.mp3"
+        && built03[1].src === "voices/dodge_female.mp3",
+      `srcs=${JSON.stringify(built03.map((a) => a.src))}`);
+
+    /* ---- U-VOICE-04：顶栏「♪」是唯一开关（关 ⇒ 一条都不建；开 ⇒ 照常；关 ⇒ 停掉存活）---- */
+    vm.runInContext("damageSfxSetEnabled(false)", context);
+    const mark04 = audioLog.length;
+    const countBefore04 = moduleOf().count();
+    voiceBatch([useRecord(15, 0, 6, "杀")], [cardEvent(15, 0, "slash", "杀", "male")]);
+    step();
+    check("U-VOICE-04a 关「♪」⇒ 一条 Audio 都不建、count() 不动（连请求都不发）",
+      builtSince(mark04).length === 0 && moduleOf().count() === countBefore04,
+      `built=${builtSince(mark04).length} count=${moduleOf().count()}`);
+    vm.runInContext("damageSfxSetEnabled(true)", context);
+    const mark04b = audioLog.length;
+    voiceBatch([useRecord(16, 0, 6, "杀")], [cardEvent(16, 0, "slash", "杀", "male")]);
+    step();
+    check("U-VOICE-04b 从关到开：下一条照样自起一路（开关只拦「建」，不改排播）",
+      builtSince(mark04b).length === 1 && builtSince(mark04b)[0].src === "voices/slash_male.mp3",
+      `built=${builtSince(mark04b).length}`);
+    const liveBefore04 = builtSince(mark04b)[0];
+    vm.runInContext("damageSfxSetEnabled(false)", context);
+    check("U-VOICE-04c 从开到关：mute(true) 停掉**存活**的那几路并清表（pause + 清 src）",
+      liveBefore04.paused === true && liveBefore04.src === "",
+      `paused=${liveBefore04.paused} src="${liveBefore04.src}"`);
+    vm.runInContext("damageSfxSetEnabled(true)", context);
+
+    /* ---- U-VOICE-05：未知类型 / null 表项 / 没有 Audio ⇒ 静默、不抛错 ---- */
+    const mark05 = audioLog.length;
+    const countBefore05 = moduleOf().count();
+    voiceBatch(
+      [useRecord(17, 0, 6, "杀"), useRecord(18, 1, 3, "桃"), useRecord(19, 2, 9, "诸葛连弩")],
+      [
+        cardEvent(17, 0, "no_such_card_type", "？", "male"),
+        cardEvent(18, 1, "peach", "桃", "female"),
+        cardEvent(19, 2, "crossbow", "诸葛连弩", "male"),
+      ],
+    );
+    step(3);
+    check("U-VOICE-05a 未知类型 / 【桃】(待补) / 装备(null) ⇒ 一条都不建、队列照常清空（不卡住回放）",
+      builtSince(mark05).length === 0 && moduleOf().count() === countBefore05
+        && ui.state.cardEvents.length === 0,
+      `built=${builtSince(mark05).length} count=${moduleOf().count()} `
+        + `queue=${ui.state.cardEvents.length}`);
+    const mark05b = audioLog.length;
+    delete windowShim.Audio;                 // 没有 Audio（也没有 AudioContext）
+    voiceBatch([useRecord(20, 0, 6, "杀")], [cardEvent(20, 0, "slash", "杀", "male")]);
+    step();
+    check("U-VOICE-05b 没有 Audio 也没有 AudioContext ⇒ 静默降级（不抛错、一条都不建、队列清空）",
+      builtSince(mark05b).length === 0 && ui.state.cardEvents.length === 0,
+      `built=${builtSince(mark05b).length} queue=${ui.state.cardEvents.length}`);
+    windowShim.Audio = FakeAudio;
+    const mark05c = audioLog.length;
+    voiceBatch([useRecord(21, 0, 6, "杀")], [cardEvent(21, 0, "slash", "杀", "male")]);
+    step();
+    check("U-VOICE-05c 静默降级之后恢复：下一条又出声（降级不是把模块弄坏了）",
+      builtSince(mark05c).length === 1, `built=${builtSince(mark05c).length}`);
+
+    /* ---- U-VOICE-06：换局 ⇒ stopAll()（上一局的语音不拖进新局）---- */
+    const liveBeforeSwap = builtSince(mark05c)[0];
+    openVoiceSession();
+    check("U-VOICE-06a 换局：存活的那几路被停掉并清 src，待触发队列也清了",
+      liveBeforeSwap.paused === true && liveBeforeSwap.src === ""
+        && ui.state.cardEvents.length === 0,
+      `paused=${liveBeforeSwap.paused} src="${liveBeforeSwap.src}" `
+        + `queue=${ui.state.cardEvents.length}`);
+    const mark06 = audioLog.length;
+    voiceBatch([useRecord(1, 0, 6, "杀")], [cardEvent(1, 0, "slash", "杀", "male")]);
+    step();
+    check("U-VOICE-06b 新局 seq 游标从新（seq=1 的事件照常播、不残留上一局的读数）",
+      builtSince(mark06).length === 1 && moduleOf().last().type === "slash",
+      `built=${builtSince(mark06).length} last=${JSON.stringify(moduleOf().last())}`);
+  } finally {
+    // 还回去：没有假 Audio 的垫片 + 原来的开关状态 + 干净的会话。
+    delete windowShim.Audio;
+    vm.runInContext(`damageSfxSetEnabled(${sfxWasOn ? "true" : "false"})`, context);
+    ui.flushPlayback();
+    ui.state.view = null;
+    ui.state.sessionId = null;
+    ui.resetSelection();
+  }
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

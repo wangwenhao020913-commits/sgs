@@ -232,7 +232,40 @@ function damageSfxEnsureModules() {
   chainSfxEnsure();
   // chain-death-voices 票 02：阵亡那一路同样在这一个手势里建（池长 1，惰性）。
   deathSfxEnsure();
+  // chain-death-voices 票 03：卡牌语音也要在同一次手势里解锁（`Audio.play()` 的自动播放
+  // 策略只认手势；语音模块自己没有开关，`unlock()` 只记"手势已发生"）。
+  cardVoiceUnlock();
   return live;
+}
+
+/* ---------------------------------------------- 卡牌语音（chain-death-voices 票 03） */
+
+/** 卡牌语音模块（`sfx-voices.js` 的 `SgsCardVoice`）：**不是**声道池，也不是一次性排程器
+ *  ——它每条语音自起一路 `Audio`、可重叠不打断。这里只做一件事：把手势 / 开关**单向**灌进去
+ *  （`unlock` / `mute`）；本文件**不读**语音模块的任何状态（在播表 / 计数器都不碰）。
+ *
+ * 没有 `SgsCardVoice`（缺件）⇒ 整套卡牌语音就是**不存在**，不报错（与其它音效同一条降级口径）。 */
+function cardVoiceModule() {
+  return window.SgsCardVoice && typeof window.SgsCardVoice === "object"
+    ? window.SgsCardVoice
+    : null;
+}
+
+/** 手势灌进去（`damageSfxEnsureModules` 在同一个 tick 里顺手调）。 */
+function cardVoiceUnlock() {
+  const api = cardVoiceModule();
+  if (!api || typeof api.unlock !== "function") return false;
+  return api.unlock() !== false;
+}
+
+/** 开关灌进去（`damageSfxMute` 顺手调它：同一个开关管所有声音）。
+ *
+ * 关 = 停掉全部存活语音并清表（`SgsCardVoice.mute(true)` 自己 `stopAll`）；开 = 下一次事实
+ * 才建 `Audio`。**单向**：语音模块不读 `damageSfxOn`，只认这一次灌入。 */
+function cardVoiceMute(muted) {
+  const api = cardVoiceModule();
+  if (!api || typeof api.mute !== "function") return;
+  api.mute(Boolean(muted));
 }
 
 /* ---------------------------------------------- 铁索连环的音效（chain-death-voices 票 01） */
@@ -370,6 +403,8 @@ function damageSfxMute(muted) {
   chainSfxMute(Boolean(muted));
   // 阵亡那一路同一个开关（chain-death-voices 票 02）。
   deathSfxMute(Boolean(muted));
+  // 卡牌语音同一个开关（chain-death-voices 票 03）：关的时候停掉全部存活语音。
+  cardVoiceMute(Boolean(muted));
 }
 
 /** 启动时读一次记忆并刷按钮（`main.js:wire()` 里调一次）。 */
@@ -388,6 +423,9 @@ function damageSfxSync() {
 function damageSfxUnlock() {
   if (damageSfxUnlocked) return false;
   damageSfxUnlocked = true;
+  // chain-death-voices 票 03：卡牌语音记下"手势已发生"（与开关无关：缺省静音时用户先点
+  // 「开始对局」、之后才开「♪」也是常见路径，那次点击同样是手势）。
+  cardVoiceUnlock();
   if (!damageSfxOn) return false;
   return damageSfxEnsureModules() > 0;
 }
