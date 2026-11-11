@@ -7638,7 +7638,7 @@ def test_the_hp_loss_sfx_lane_schedules_every_tier_without_a_real_audio_context(
 #    `TIMING_KEYS` / `MAX_TOTAL_MS` 与雷 / 火 / 失去体力同形；字段名由 `DEFAULT_TIMING` 生成；
 #    导出档照素材页的 3.20 / 3.55 / 4.45 秒链；牌桌档把素材页的拍子按**锚点**压到 ini 的
 #    `total` / `gather` / `hold` / `burst` / `num` 上（`warp`），钳制
-#    `gather + hold ≤ burst ≤ num ≤ total ≤ 2200` 在模块内部；
+#    `gather + hold ≤ burst ≤ num ≤ total ≤ 4500` 在模块内部；
 # 3. **音效车道适配器**：`create(timeline)` → `{start, stop, mute, tick}`（与 `SgsSfx` 同形），
 #    cue 时刻从时间轴读，三档排程在假 Web Audio 上整条走一遍。
 #
@@ -7909,7 +7909,7 @@ def test_the_heal_renderer_keeps_the_hp_loss_renderer_shape(heal_fx_probe: dict)
     """
     probe = heal_fx_probe
     assert probe["prefix"] == "heal_fx_"
-    assert probe["maxTotal"] == 2200, "单档总时长上限 2200（3+ 档是时停窗口，2.2s 是下限）"
+    assert probe["maxTotal"] == 4500, "单档总时长上限 4500（3+ 档是时停窗口，4.5s 是它的窗口）"
     assert probe["fields"] == ["total", "num", "gather", "hold", "burst"], (
         f"字段名由 DEFAULT_TIMING 的键生成（`total / num` 全档、`gather / hold / burst` 只 3 档）："
         f"{probe['fields']}"
@@ -8054,8 +8054,11 @@ def test_the_heal_export_chain_keeps_the_material_package_beats(heal_fx_probe: d
     anchors = {
         "1": [(0.54, 0.350), (3.20, 1.100)],
         "2": [(0.54, 0.350), (3.55, 1.300)],
-        # 聚气起点按素材页的比例压：620 × 0.22 / 1.24 = 110ms（聚气段仍占 ~28%）。
-        "3": [(0.22, 0.110), (1.24, 0.620), (1.54, 0.780), (1.60, 0.860), (4.45, 2.200)],
+        # 聚气起点按素材页的比例压：1270 × 0.22 / 1.24 ≈ 225ms（聚气段仍占 ~28%）。
+        "3": [
+            (0.22, 1270 * (0.22 / 1.24) / 1000),
+            (1.24, 1.270), (1.54, 1.600), (1.60, 1.760), (4.45, 4.500),
+        ],
     }
     for variant in ("1", "2", "3"):
         pairs = probe["warp"][variant]
@@ -8075,22 +8078,24 @@ def test_the_heal_export_chain_keeps_the_material_package_beats(heal_fx_probe: d
 
 def test_the_heal_timing_table_clamps_inside_the_module(heal_fx_probe: dict) -> None:
     """缺键 / 非法值退 `DEFAULT_TIMING`；钳制在**模块内部**：
-    `gather + hold ≤ burst ≤ num ≤ total ≤ 2200`。
+    `gather + hold ≤ burst ≤ num ≤ total ≤ 4500`。
 
     三档缺省 = spec §游戏档缺省时长（SGS-INTEGRATION §6.2 的压缩表）：1 = 1100（num 350）、
-    2 = 1300（num 350）、3 = 2200（gather 620 / hold 160 / burst 780 / num 860）。
+    2 = 1300（num 350）、3 = 4500（gather 1270 / hold 330 / burst 1600 / num 1760）；
+    3+ 档是票 06 的改判——把 2200 版按同一组比例放大（28.2% / 7.3% / 35.5% / 39.1%），
+    失去体力与伤害的 2200 不动。
     `gather` 是聚气**结束**的时刻、`hold` 是白住**时长**、`burst` 是迸发**时刻** —— 所以
-    `620 + 160 = 780 = burst` 是这张表自洽的判据（票面 §1 的"聚气 ≤ 白住起点 ≤ 迸发"）。
+    `1270 + 330 = 1600 = burst` 是这张表自洽的判据（票面 §1 的"聚气 ≤ 白住起点 ≤ 迸发"）。
     """
     probe = heal_fx_probe
     clamps = probe["clamps"]
     assert clamps["one"] == {"total": 1100, "num": 350}, f"1 档缺省：{clamps['one']}"
     assert clamps["two"] == {"total": 1300, "num": 350}, f"2 档缺省：{clamps['two']}"
     assert clamps["three"] == {
-        "total": 2200, "gather": 620, "hold": 160, "burst": 780, "num": 860,
-    }, f"3 档缺省按 SGS-INTEGRATION §6.2：{clamps['three']}"
+        "total": 4500, "gather": 1270, "hold": 330, "burst": 1600, "num": 1760,
+    }, f"3 档缺省按 spec §游戏档缺省时长（票 06 改判）：{clamps['three']}"
     assert clamps["three"]["gather"] + clamps["three"]["hold"] == clamps["three"]["burst"], (
-        f"620 + 160 = 780 = 迸发时刻（`gather` 是聚气结束、`hold` 是白住时长）：{clamps['three']}"
+        f"1270 + 330 = 1600 = 迸发时刻（`gather` 是聚气结束、`hold` 是白住时长）：{clamps['three']}"
     )
     assert clamps["oneKeys"] == ["total", "num"] and clamps["twoKeys"] == ["total", "num"], (
         "1 / 2 档**只有** total / num（不硬造 gather / hold / burst）："
@@ -8101,9 +8106,9 @@ def test_the_heal_timing_table_clamps_inside_the_module(heal_fx_probe: dict) -> 
     )
     assert probe["ordered"] == [True, True, True], "三档缺省都在钳制范围内"
     assert probe["orderedMessy"] == [True, True, True], (
-        "五个字段全给非法大数时仍须守住 gather + hold ≤ burst ≤ num ≤ total ≤ 2200"
+        "五个字段全给非法大数时仍须守住 gather + hold ≤ burst ≤ num ≤ total ≤ 4500"
     )
-    assert clamps["total"] == 2200, "total 超出 MAX_TOTAL_MS 即钳到 2200"
+    assert clamps["total"] == 4500, "total 超出 MAX_TOTAL_MS 即钳到 4500（票 06 的新上限）"
     assert clamps["numAboveTotal"] == 900, "num ≤ total"
     assert clamps["junk"] == {"total": 1300, "num": 350}, (
         f"非法值（非数字 / 负数）退回内置默认：{clamps['junk']}"
@@ -8115,22 +8120,22 @@ def test_the_heal_timing_table_clamps_inside_the_module(heal_fx_probe: dict) -> 
         "total": 1000, "gather": 1000, "hold": 0, "burst": 1000, "num": 1000,
     }, f"gather 超上限时钳到 total，白住与迸发跟着收在 total：{clamps['gatherOverTotal']}"
     assert clamps["holdOverTotal"] == {
-        "total": 2200, "gather": 600, "hold": 1600, "burst": 2200, "num": 2200,
+        "total": 4500, "gather": 600, "hold": 3900, "burst": 4500, "num": 4500,
     }, f"hold 不许把迸发顶出 total：{clamps['holdOverTotal']}"
     assert clamps["burstBelow"] == {
-        "total": 2000, "gather": 500, "hold": 100, "burst": 600, "num": 860,
+        "total": 2000, "gather": 500, "hold": 100, "burst": 600, "num": 1760,
     }, f"burst 小于聚气结束时被抬到 gather + hold（不是退默认）：{clamps['burstBelow']}"
     assert clamps["numBelowBurst"] == {
-        "total": 2200, "gather": 620, "hold": 160, "burst": 900, "num": 900,
+        "total": 4500, "gather": 1270, "hold": 330, "burst": 1600, "num": 1600,
     }, f"num 不许早于迸发：{clamps['numBelowBurst']}"
     assert clamps["zero"]["DURATION"] == 0, "total = 0（用户关掉这一档）⇒ 一条空时间轴"
     # 缺省值本身是 spec 的压缩表（改 ini 等于改用户可见的节奏；换掉缺省先改 spec）。
     defaults = probe["defaults"]
-    assert [defaults[f"heal_fx_{v}_total"] for v in (1, 2, 3)] == [1100, 1300, 2200]
-    assert [defaults[f"heal_fx_{v}_num"] for v in (1, 2, 3)] == [350, 350, 860]
-    assert defaults["heal_fx_3_gather"] == 620
-    assert defaults["heal_fx_3_hold"] == 160
-    assert defaults["heal_fx_3_burst"] == 780
+    assert [defaults[f"heal_fx_{v}_total"] for v in (1, 2, 3)] == [1100, 1300, 4500]
+    assert [defaults[f"heal_fx_{v}_num"] for v in (1, 2, 3)] == [350, 350, 1760]
+    assert defaults["heal_fx_3_gather"] == 1270
+    assert defaults["heal_fx_3_hold"] == 330
+    assert defaults["heal_fx_3_burst"] == 1600
     assert not any(key.startswith(("heal_fx_1_gather", "heal_fx_2_gather")) for key in defaults), (
         f"1 / 2 档不许有 gather / hold / burst 的键：{sorted(defaults)}"
     )
@@ -8169,7 +8174,7 @@ def test_anim_ini_lists_the_heal_durations_per_variant(heal_fx_probe: dict) -> N
         f"gather={gather} / burst={burst} / num={num} / total={total}"
     )
     assert gather + hold == burst, (
-        f"聚气结束 + 白住时长 = 迸发时刻（620 + 160 = 780）：{gather} + {hold} != {burst}"
+        f"聚气结束 + 白住时长 = 迸发时刻（1270 + 330 = 1600）：{gather} + {hold} != {burst}"
     )
     assert hold / total == pytest.approx(0.073, abs=0.01), (
         f"白住占整段的 ~7%（SGS-INTEGRATION §3 B4 的比例）：{hold / total:.3f}"
@@ -8178,7 +8183,7 @@ def test_anim_ini_lists_the_heal_durations_per_variant(heal_fx_probe: dict) -> N
         f"聚气占整段的 ~28%（B4：压缩时聚气可略升到 ~28%）：{gather / total:.3f}"
     )
     totals = [values[f"heal_fx_{variant}_total"] for variant in (1, 2, 3)]
-    assert totals == [1100, 1300, 2200], f"spec §游戏档缺省时长：{totals}"
+    assert totals == [1100, 1300, 4500], f"spec §游戏档缺省时长（票 06 改判 3+ = 4500）：{totals}"
     ini_text = _ANIM_INI.read_text(encoding="utf-8")
     assert "体力演出 · 回复体力" in ini_text, "键块要有自己的标题（用户改得动）"
     assert values == {
@@ -8373,8 +8378,8 @@ def test_the_heal_sfx_lane_schedules_every_tier_without_a_real_audio_context() -
     """`SgsHealSfx` 是**车道适配器**（`create(timeline)` → `{start, stop, mute, tick}`）：
     三档都能建图、按时间轴排完、收声，且 cue 时刻**跟着时间轴走**。
 
-    素材页的 3+ 档是「吸气（1.02s）→ 留白（~0.3s）→ 落点 → 长余韵」；牌桌档压到 2.2s 之后，
-    这三拍的位置**由 `SgsHealFX.create()` 写进时间轴**（`GATHER_START / GATHER / HOLD / BURST`），
+    素材页的 3+ 档是「吸气（1.02s）→ 留白（~0.3s）→ 落点 → 长余韵」；牌桌档压到牌桌时长
+    （3+ 档 4.5s，票 06）之后，这三拍的位置**由 `SgsHealFX.create()` 写进时间轴**（`GATHER_START / GATHER / HOLD / BURST`），
     音效模块不另写一份秒数——所以判据是"吸气落在聚气起点、落点落在迸发、飘字落在 NUM"。
     烟测里没有 `AudioContext`（垫片故意不建），这一条补上**真模块**这一侧。
     """

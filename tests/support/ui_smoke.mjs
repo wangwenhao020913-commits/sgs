@@ -26158,14 +26158,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       drainTimers();
     }
 
-    // ---- U-VITAL-17：3+ 档 ⇒ 记录流冻住、摘层后一次补齐（真模块的 2.2s 窗口）----
+    // ---- U-VITAL-17：3+ 档 ⇒ 记录流冻住、摘层后一次补齐（真模块的 4.5s 窗口，读 ini）----
     created.length = 0;
     resetObserve();
     loadVitalBatch([hpChange(160, 0, 4, 7), hpChange(161, 1, 4, 7)], []);
     const opened17 = runUntil(() => playbackIndex() === 1, 8);
     const held17 = runUntil(() => htmlHold() === "heal:3", 8);
     const total17 = healTotal(3);
-    check("U-VITAL-17a 3+ 档回复：第一条开演，窗口里 <html> = heal:3（真模块的 2.2s total 排上了计时器）",
+    check("U-VITAL-17a 3+ 档回复：第一条开演，窗口里 <html> = heal:3（真模块的 4.5s total 排上了计时器）",
       opened17 && held17 && playbackIndex() === 1 && liveCount() === 1
         && Array.from(timerDelays.values()).some((ms) => Math.abs(ms - total17) < 0.5),
       `open=${opened17} held=${held17} index=${playbackIndex()} live=${liveCount()} `
