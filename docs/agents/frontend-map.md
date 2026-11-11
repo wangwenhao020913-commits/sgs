@@ -96,8 +96,8 @@
 | `stepPlayback(immediate)` | `session.js` | 回放一条记录：日志 → 效果 / 亮牌 → `applyLiveDelta` → 重绘 → 动效 → 技能事件；**重绘分两档**（table-ux-overhaul 票 01）：`recordTouchesTableView(record)` 为真才整桌 `renderTable()`，否则只 `renderProcessing()`（询问 / 应答 / 结算帧 / 终局 / 改不了快照的时机——判据与 `applyLiveDelta` 的分支同源，拿不准的一律重建；DOM 形状不变）；收尾的下一步只经 `schedulePlaybackStep(delayOf(record))`（`immediate` 侧不过暂停门）。**暂停只停记录推进，不停演出自身的帧与声**。 |
 | `schedulePlaybackStep(base)` | `session.js` | 排下一步回放（票 07）：先等 `base`，**唤醒时**才问 `playbackHoldReason()`；判据非空 ⇒ 不推进记录，改排 `PLAYBACK_HOLD_POLL_MS` 轮询，直到放空。**没有上限**（票 09）：判据一直为真就一直等（不许"等够久就放行"），故暂停路径里没有墙钟。`immediate` 侧不经过它。 |
 | `registerPlaybackHold(name, probe)` | `session.js` | **回放暂停的通用口**（票 07）：登记一条只读判据 `() => 原因串`（空串 = 不暂停），同名就地替换。伤害家族在 `damage-fx.js` 文件末尾登记一条（3 / 4 档在播）；**回复体力 3+ 档**（`vital-fx.js`）就是第二个登记者（`registerPlaybackHold("vital", vitalFxPlaybackHold)`，原因串 `"heal:3"`）——排播侧不认来源。 |
-| `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 护甲 `armor_change` / 手牌数 / 装备 / 阶段 / 标记数量 `marker_change` …）。 |
-| `poll()` | `session.js` | 2s 静默轮询；idle 分两条：**快照指纹变了**（`snapshotFingerprint`，`players[]` 可见字段 + 三组牌）⇒ `applyIdleRepaint` 重绘座位块但**不清选择**（票 07 的第三条出口；票 10 在这条缝上接武将牌区派生），指纹没变才只更新时钟；失败静默。`state.playback` 非空时**本来就不发**——回放暂停期间服务端超时代答不会插进窗口（票 07 的已知取舍）。 |
+| `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 体力上限 `hp_max_change` / 护甲 `armor_change` / 手牌数 / **武将牌上的牌区**（`card_move` 的 `hero` 那一侧：区键 = `zone_ref.skill_instance`，空区**整行删掉**；票 10）/ 装备 / 阶段 / 标记数量 `marker_change` …）。 |
+| `poll()` | `session.js` | 2s 静默轮询；idle 分两条：**快照指纹变了**（`snapshotFingerprint`，`players[]` 可见字段 + 三组牌 + **武将牌上的牌区**（区键 × 张数 × 宿主拿得到的牌面；票 10 接进来的——`hero_zone_count` 不进网页载荷，也看不出同座位"一进一出、张数不变"））⇒ `applyIdleRepaint` 重绘座位块但**不清选择**（票 07 的第三条出口；票 10 在这条缝上接武将牌区派生），指纹没变才只更新时钟；失败静默。`state.playback` 非空时**本来就不发**——回放暂停期间服务端超时代答不会插进窗口（票 07 的已知取舍）。 |
 | `drawTargetLines(actor, targets, now)` | `effects.js` | 每个目标一条金色 SVG 线（跳过自己 / 阵亡）；端点只读一次布局。 |
 | `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。**不判断"哪些技能该有特效"**：`event` 由服务端下发（见下一条），前端只画。 |
 | `fireSkillEventsThrough(seq)` | `effects.js` | 回放到某条记录时释放 `state.skillEvents` 队列。 |

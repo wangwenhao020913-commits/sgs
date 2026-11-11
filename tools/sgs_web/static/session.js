@@ -417,6 +417,108 @@ function liveRemoveCards(list, cards) {
   return (list || []).filter((item) => !gone.has(String(item.card_id)));
 }
 
+/** 一个**武将牌上的牌区**的区键：`owner:skill_id`（票 10）。
+ *
+ * 记录里的区引用只有合起来的 `zone_ref.skill_instance`；投影下发的行只有 `skill_id` /
+ * `owner` 两半（`projection.py:seat_hero_zones`）——两边是**同一个**派生
+ * （`sgs.skills.catalog.hero_card_zone_key`），故这里按同一形状拼出来比对。行里将来若
+ * 直接带 `skill_instance`，就用它（唯一真源仍是那个键）。
+ */
+function liveHeroZoneKey(zone) {
+  if (!zone) return "";
+  if (zone.skill_instance !== undefined && zone.skill_instance !== null) {
+    return String(zone.skill_instance);
+  }
+  if (zone.skill_id === undefined || zone.skill_id === null) return "";
+  if (zone.owner === undefined || zone.owner === null) return "";
+  return `${Number(zone.owner)}:${String(zone.skill_id)}`;
+}
+
+/** `skill_instance`（`owner:skill_id`）拆回两半；不合形返回 `null`（不猜）。 */
+function liveHeroZoneParts(skillInstance) {
+  const text = String(skillInstance || "");
+  const at = text.indexOf(":");
+  if (at <= 0 || at === text.length - 1) return null;
+  const owner = Number(text.slice(0, at));
+  if (!Number.isFinite(owner)) return null;
+  return { owner, skill_id: text.slice(at + 1) };
+}
+
+/** 武将牌上牌区的**展示名**：同一份快照里座位技能清单的中文名（票 10）。
+ *
+ * 放置 / 归还的 `card_move` 只带 `skill_instance`，不带中文名；技能清单是同一份快照里的
+ * **公开事实**（`projection.py:seat_skill_display`），故按它翻。翻不到退回技能 id——与投影
+ * 的 fail-visible 口径一致（`_skill_display_name(...) or zone.skill_id`），不编名字。
+ */
+function liveHeroZoneName(players, skillId) {
+  const wanted = String(skillId || "");
+  if (!wanted) return "";
+  for (const player of players || []) {
+    for (const skill of player.skills || []) {
+      if (skill && skill.skill_id === wanted && skill.name) return String(skill.name);
+    }
+  }
+  return wanted;
+}
+
+/** 一条 `card_move` 的**一侧**（`from_zone` / `to_zone` = `hero`）落到 live view（票 10）。
+ *
+ * 区按 `zone_ref.skill_instance` 认，`ref.seat` = 武将牌的主人（区可跨座位）。牌面只有宿主
+ * 拿得到（`visibility.py:hero_zone_ref_visible`）：有牌面就按牌面增删，非宿主只有
+ * `card_count` ⇒ 只改张数、不碰 `cards`。
+ *
+ * **区空了整行删掉**（不是留一行 0 张）：投影只画有牌的区（`projection.py:643`），界面留
+ * 一行空框就是报障的"牌已回手、行还在"。反方向，空批移动不建区（引擎同样不建）。
+ */
+function liveHeroZoneMove(players, ref, cards, count, adding) {
+  if (!ref) return;
+  const holder = (players || []).find(
+    (player) => Number(player.seat) === Number(ref.seat));
+  if (!holder) return;
+  // 区引用不带 `skill_instance` 就不是武将牌上的牌区（列表非空只在 HERO 区有，见
+  // `models.py:_zone_ref_wire`）；不合形（没有 `owner:skill_id`）⇒ 不猜、零动作。
+  const key = String(ref.skill_instance || "");
+  if (key.indexOf(":") < 0) return;
+  const zones = (holder.hero_zones || []).slice();
+  const at = zones.findIndex((zone) => liveHeroZoneKey(zone) === key);
+  const held = at >= 0 ? zones[at] : null;
+  const faces = Array.isArray(cards) ? cards : [];
+  let heldCards = held ? (held.cards || []).slice() : [];
+  let heldCount = held ? Number(held.count) : 0;
+  if (!Number.isFinite(heldCount)) heldCount = heldCards.length;
+  if (adding) {
+    if (faces.length) {
+      heldCards = heldCards.concat(faces);
+      heldCount = heldCards.length;
+    } else {
+      heldCount += count;
+    }
+    if (heldCount <= 0) return;
+    const parts = liveHeroZoneParts(key);
+    const row = held || {
+      skill_id: parts ? parts.skill_id : key,
+      skill_name: liveHeroZoneName(players, parts ? parts.skill_id : key),
+      owner: parts ? parts.owner : Number(ref.seat),
+      cards: [],
+      count: 0,
+    };
+    const next = { ...row, cards: heldCards, count: heldCount };
+    if (at >= 0) zones[at] = next;
+    else zones.push(next);
+  } else {
+    if (!held) return;
+    if (faces.length) {
+      heldCards = liveRemoveCards(heldCards, faces);
+      heldCount = heldCards.length;
+    } else {
+      heldCount = Math.max(0, heldCount - count);
+    }
+    if (heldCount <= 0) zones.splice(at, 1);
+    else zones[at] = { ...held, cards: heldCards, count: heldCount };
+  }
+  holder.hero_zones = zones;
+}
+
 /** 把展示通道的标签 delta 与**可见记录**按 `seq` 合并，交给同一条逐事件回放。
  *
  * `live_deltas` 是服务端从被记录流裁掉（但牌面已公开）的 `tag_add` / `tag_remove`
@@ -492,13 +594,15 @@ function liveUpdateCardTags(view, cardId, tag, adding) {
 
 /** 一条记录对 live view 的**可见**贡献（D11）：只写记录里真有的派生事实。
  *
- * 可派生：体力（`hp_change.after`）、护甲（`armor_change.after`，W7 的第二条体力轴）、
+ * 可派生：体力（`hp_change.after`）与体力上限（`hp_max_change.after`；票 10 补，座位卡的
+ * 血条分母读它）、护甲（`armor_change.after`，W7 的第二条体力轴）、
  * 手牌数（`card_move` 的牌面 / `card_count`）、自己的手牌面、装备与判定区（公开区牌面）、
+ * 武将牌上的牌区（`card_move` 的 `hero` 那一侧，按 `skill_instance` 认区、空区删行；票 10）、
  * 牌堆与弃牌数（含 `deck_shuffle` 的重洗）、横置、
  * 酒、亮明身份、阵亡（`DEATH_BEFORE_START` 的 `actor`）、回合 / 阶段（`TURN_*` / `PHASE_*`）。
  *
- * **不可派生的字段一律不猜**：技能可用性、体力上限、当前询问、武将名与势力留在最近一次
- * 提交的视图里，由下一次 `commitView` 覆盖（D11）。`snapshot.processing` 也不在这里推：
+ * **不可派生的字段一律不猜**：技能可用性、当前询问、武将名与势力留在最近一次提交的视图里，
+ * 由下一次 `commitView` 覆盖（D11）。`snapshot.processing` 也不在这里推：
  * 舞台的处理中组由 `applyEffectDelta` 单独派生（转化牌要显示产物，快照里的实体来源牌
  * 不是那个形状），表体渲染不读它。
  *
@@ -527,6 +631,15 @@ function applyLiveDelta(record, view = state.liveView) {
     if (record.delta_type === "hp_change") {
       const player = playerAt(record.seat);
       if (player) player.hp = Number(record.after);
+      return view;
+    }
+    if (record.delta_type === "hp_max_change") {
+      // 体力上限与当前体力是**两条独立事实**（`state/deltas.py:HpMaxChangeDelta`）：觉醒技
+      // 减上限、开局 init 期改上限都落这一条。座位卡的血条分母读它，故必须逐条派生——
+      // 不派生时整批回放期间上限停在上一份快照值（spec §1 #1 的"开局就 5/5"是同一条缝；
+      // 票 10 只落前端这一半，票 14 的服务端 `setup` 底稿靠它才不必倒推）。
+      const player = playerAt(record.seat);
+      if (player) player.hp_max = Number(record.after);
       return view;
     }
     if (record.delta_type === "armor_change") {
@@ -661,6 +774,14 @@ function applyLiveDelta(record, view = state.liveView) {
       const player = playerAt(to.seat);
       if (player) player[to.zone] = (player[to.zone] || []).concat(cards);
     }
+    // 武将牌上的牌区（票 10 / spec §1 #11）：区键 = 记录里的 `zone_ref.skill_instance`，
+    // 宿主 = `ref.seat`。**空区整行删掉**（投影只画有牌的区，`projection.py:643`）——
+    // 这一条就是"【谦逊】的牌回手了、武将牌上的那一行还在"的修法：以前 `card_move` 的
+    // 分支只派生 deck / discard / hand / equip / judge，而 `cloneLiveView` 又深拷贝
+    // `hero_zones` ⇒ 整批回放期间那个区停在上一份快照值，只能等 `commitView` 整桌重建。
+    // 手牌数 / 手牌面的两半由上面的 `to.zone === "hand"` 分支管，这里不重复加。
+    if (from.zone === "hero") liveHeroZoneMove(players, from, cards, count, false);
+    if (to.zone === "hero") liveHeroZoneMove(players, to, cards, count, true);
     return view;
   }
   if (record.kind !== "timing") return view;
@@ -1651,11 +1772,19 @@ function applyIdlePoll(body) {
  * 票 10 的"标记不消失"住在这条缝里）。
  *
  * 纯函数、不碰 DOM：只把 `players[]` 的可见字段与牌桌三组拼成一行。**字段表是显式的**——
- * 以后座位块多读一格，就在这里多登记一格（票 10 会把武将牌上的牌接进来）。
+ * 座位块多读一格，就在这里多登记一格。票 10 接进来的是**武将牌上的牌区**：按区键
+ * （`owner:skill_id`，与记录里的 `skill_instance` 同形）+ 张数 + 宿主拿得到的牌面拼起来。
+ * 只登记 `hero_zone_count`（`PlayerPublic` 的公开张数）不够——那个字段 `exclude=True`
+ * 不进网页载荷，而且"同一座位一进一出、张数不变"的换牌它看不出来。
  */
 function snapshotFingerprint(snapshot) {
   if (!snapshot) return "";
   const cardIds = (cards) => (cards || []).map((card) => String(card && card.card_id)).join(",");
+  const heroZones = (zones) => (zones || []).map((zone) => {
+    const count = Number(zone && zone.count);
+    return `${liveHeroZoneKey(zone)}×${Number.isFinite(count) ? count : (zone.cards || []).length}`
+      + `:${cardIds(zone && zone.cards)}`;
+  }).join("+");
   const players = (snapshot.players || []).map((player) => [
     player.seat,
     player.hp,
@@ -1668,7 +1797,7 @@ function snapshotFingerprint(snapshot) {
     player.chained ? 1 : 0,
     player.flipped ? 1 : 0,
     player.wine_active ? 1 : 0,
-    player.hero_zone_count === undefined ? "" : player.hero_zone_count,
+    heroZones(player.hero_zones),
     cardIds(player.equip),
     cardIds(player.judge),
     (player.sealed_zones || []).join("+"),

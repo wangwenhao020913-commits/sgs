@@ -385,6 +385,10 @@ const realFetch = globalThis.fetch;
 let staleAnswerStatus = null;   // 下一次 `/answer` 直接回这个状态码（409）
 let nextGetPending = null;      // 下一次 `GET /api/sessions` 把 `pending` 换成这一份
 let nextGetPendingSticky = false; // true = 这份注入一直有效到显式清掉（409 刷新窗口用）
+/* table-ux-overhaul 票 10：空转轮询的**快照指纹**用例要"服务端只重算投影、不记新记录"的
+ * 那一类响应——用一次性的整份 body 改写注入（`(body) => {…}`），用完即清，姿态同
+ * `nextGetPending`。用例只动 `body.snapshot`（游标 / 询问序号保持原样 = 空转）。 */
+let nextGetSnapshot = null;
 /* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
  * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
 let failNextGets = 0;
@@ -443,6 +447,14 @@ globalThis.fetch = async (path, options) => {
       return { ok: false, status, text: async () => text, json: async () => JSON.parse(text) };
     }
     const response = await realFetch(`${BASE}${path}`, options);
+    if (nextGetSnapshot && !(options && options.method && options.method !== "GET")) {
+      const patch = nextGetSnapshot;
+      nextGetSnapshot = null;
+      const body = await response.json();
+      patch(body);
+      const text = JSON.stringify(body);
+      return { ok: response.ok, status: response.status, text: async () => text, json: async () => JSON.parse(text) };
+    }
     if (nextGetPending && !(options && options.method && options.method !== "GET")) {
       const body = await response.json();
       const pending = nextGetPending;
@@ -27007,6 +27019,155 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + `choice="${$("t-choice").textContent}" context="${$("t-context").textContent}" `
       + `hint="${$("t-target-hint").textContent}" options=${$("t-options").children.length} `
       + `buttons=${$("t-prompt-skills").children.length}`);
+  ui.state.view = null;
+  ui.state.sessionId = null;
+
+  /* ======================================== 票 10：武将牌上的牌区（live 派生 + 空转重绘）
+   *
+   * 报障（spec §1 #11）：回合结束拿回【谦逊】牌后，武将牌上的标记（= 武将牌上的牌区那一行）
+   * 不消失——"牌已回手、行还在"，要等这一批播完、`commitView` 整桌重建才刷新。两条判据：
+   *
+   *   U-QX-01   —— 牌回手牌的**同一步**那一行就消失（批还没播完，不是等下一次询问）；
+   *   U-IDLE-01 —— 没有新记录、只有快照变了的空转轮询也要重绘座位块，且不换视图、不清选择。
+   *
+   * "标记"= 武将牌上的牌区（`GLOSSARY.md`「武将牌上的牌」），不是 `markers` 那条标记行；
+   * 两行同骨架异色，这里按 `data-zone="hero"` 认。
+   */
+
+  /** 自己武将块里的武将牌上的牌区行（`#t-self-hero-zones` 由 `fillHeroZones` 铺）。 */
+  const zoneRowOf = (box) => (box ? Array.from(box.children).find(
+    (node) => node.getAttribute && node.getAttribute("data-zone") === "hero") || null : null);
+  /** 那一行里的标签（文本 = `<技能名> <张数>`）。 */
+  const zoneTagOf = (box) => {
+    const row = zoneRowOf(box);
+    if (!row) return null;
+    return Array.from(row.children).find(
+      (node) => String(node.className || "").split(/\s+/).includes("hero-zone-tag")) || null;
+  };
+
+  /* ------------------------------------------------------------ U-QX-01 */
+  const qxZoneCards = [synthCard(21, "杀"), synthCard(22, "闪")];
+  const qxView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9510,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9510 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 底稿 = "牌已在武将牌上、还没回手"：手牌 1 张、区里 2 张（区里的牌**不算**手牌）。
+  qxView.snapshot.players[0].hand_count = 1;
+  qxView.snapshot.self_hand = [synthCard(20, "桃")];
+  qxView.snapshot.players[0].hero_zones = [{
+    skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 0, count: 2,
+    cards: qxZoneCards.map((card) => ({ ...card })),
+  }];
+  ui.state.view = qxView;
+  ui.resetSelection();
+  ui.renderTable();
+  const qxBefore = {
+    row: Boolean(zoneRowOf($("t-self-hero-zones"))),
+    tag: (zoneTagOf($("t-self-hero-zones")) || {}).textContent,
+    reading: $("t-self-hand").textContent,
+    hand: $("t-hand").children.length,
+  };
+  // 回合末的归还：一条 HERO → HAND 的 `card_move`（真形状：`from_zone` 带 `skill_instance`），
+  // 目标快照是服务端那一份（区不下发、手牌数补齐）。`applyViewRaw` = 不自动冲刷回放。
+  ui.applyViewRaw({
+    ...qxView,
+    cursor: 9511, log_seq: 0, narrative: [], pending: null,
+    snapshot: {
+      ...qxView.snapshot,
+      players: qxView.snapshot.players.map((player) => (player.seat === 0
+        ? { ...player, hand_count: 3, hero_zones: [] }
+        : player)),
+      self_hand: [synthCard(20, "桃"), ...qxZoneCards.map((card) => ({ ...card }))],
+    },
+    records: [{
+      kind: "delta", delta_type: "card_move", seq: 9511,
+      cards: qxZoneCards.map((card) => ({ ...card })),
+      from_zone: { zone: "hero", seat: 0, skill_instance: "0:hero.jie_luxun.qianxun" },
+      to_zone: { zone: "hand", seat: 0 },
+      reason: "PUT", owner: 0,
+    }],
+  });
+  ui.stepPlayback(true);   // 只播这一条（批还没播完 ⇒ 还没 commitView）
+  const qxAfter = {
+    row: Boolean(zoneRowOf($("t-self-hero-zones"))),
+    hidden: $("t-self-hero-zones").hidden,
+    reading: $("t-self-hand").textContent,
+    hand: $("t-hand").children.length,
+    inBatch: Boolean(ui.state.playback),
+  };
+  check("U-QX-01 回合结束拿回【谦逊】牌：牌进手牌区的**同一步**，武将牌上的牌区那一行消失（不等下一次询问）",
+    qxBefore.row && qxBefore.tag === "谦逊 2" && qxBefore.reading === "1/1"
+      && qxBefore.hand === 1
+      && qxAfter.inBatch === true
+      && !qxAfter.row && qxAfter.hidden === true
+      && qxAfter.reading === "3/3" && qxAfter.hand === 3,
+    `before=${JSON.stringify(qxBefore)} after=${JSON.stringify(qxAfter)}`);
+  ui.flushPlayback();
+  check("U-QX-01b 播完提交后同一形状（派生与服务端快照对得上、不留残影）",
+    !zoneRowOf($("t-self-hero-zones")) && $("t-self-hero-zones").hidden === true
+      && $("t-self-hand").textContent === "3/3" && $("t-hand").children.length === 3,
+    `row=${Boolean(zoneRowOf($("t-self-hero-zones")))} `
+      + `hidden=${$("t-self-hero-zones").hidden} reading=${$("t-self-hand").textContent} `
+      + `hand=${$("t-hand").children.length}`);
+
+  /* ---------------------------------------------------------- U-IDLE-01 */
+  ui.show("table");
+  const idleSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261211,
+  });
+  await openSession(idleSession);
+  const idleTimer = intervals.filter((entry) => entry.ms === 2000).at(-1);
+  const idleView = ui.state.view;
+  const idlePending = idleView.pending;
+  const idleFocus = (idleView.snapshot.self_hand[0] || {}).card_id;
+  const idleRingFirst = $("t-seats").children[0];
+  const idleClock = ui.state.pendingClock.receivedAt;
+  // 选到一半：焦点 / 已选目标 / 预发动本地态都摆上（轻路径不许清掉任何一样）。
+  ui.state.focusCardId = idleFocus;
+  ui.state.selectedTargets = [1];
+  ui.state.preactivation = {
+    skillId: "hero.test.skill", name: "测试技", steps: [], answers: [], cursor: 0,
+  };
+  // 服务端只重算投影、不记新记录的那一类变化：武将牌上的牌区整行长出来。
+  nextGetSnapshot = (body) => {
+    body.snapshot.players[0].hero_zones = [{
+      skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 0, count: 2, cards: [],
+    }];
+  };
+  await idleTimer.fn();
+  const idleZoneTag = zoneTagOf($("t-self-hero-zones"));
+  check("U-IDLE-01 空转轮询：只有快照变了 ⇒ 重绘座位块（区那一行长出来），不换视图、不清选择",
+    ui.state.view === idleView && ui.state.view.pending === idlePending
+      && $("t-seats").children[0] !== idleRingFirst
+      && Boolean(zoneRowOf($("t-self-hero-zones")))
+      && Boolean(idleZoneTag) && idleZoneTag.textContent === "谦逊 2"
+      && ui.state.focusCardId === idleFocus
+      && ui.state.selectedTargets.join(",") === "1"
+      && ui.state.preactivation && ui.state.preactivation.name === "测试技"
+      && ui.state.pendingClock.receivedAt === idleClock,
+    `viewSame=${ui.state.view === idleView} pendingSame=${ui.state.view.pending === idlePending}`
+      + ` ringRedrawn=${$("t-seats").children[0] !== idleRingFirst}`
+      + ` tag=${idleZoneTag ? idleZoneTag.textContent : "(无)"}`
+      + ` focus=${ui.state.focusCardId} targets=${ui.state.selectedTargets.join(",")}`
+      + ` pre=${ui.state.preactivation ? ui.state.preactivation.name : "(清空)"}`
+      + ` clockSame=${ui.state.pendingClock.receivedAt === idleClock}`);
+  const idleRingSecond = $("t-seats").children[0];
+  nextGetSnapshot = (body) => { body.snapshot.players[0].hero_zones = []; };
+  await idleTimer.fn();
+  check("U-IDLE-01b 反向：区归空 ⇒ 同一条轻路径再重绘一次，那一行消失（选择仍在）",
+    ui.state.view === idleView && !zoneRowOf($("t-self-hero-zones"))
+      && $("t-self-hero-zones").hidden === true
+      && $("t-seats").children[0] !== idleRingSecond
+      && ui.state.focusCardId === idleFocus
+      && ui.state.selectedTargets.join(",") === "1",
+    `row=${Boolean(zoneRowOf($("t-self-hero-zones")))} ringRedrawn=`
+      + `${$("t-seats").children[0] !== idleRingSecond} focus=${ui.state.focusCardId}`);
+  ui.state.focusCardId = null;
+  ui.state.selectedTargets = [];
+  ui.state.preactivation = null;
   ui.state.view = null;
   ui.state.sessionId = null;
 }

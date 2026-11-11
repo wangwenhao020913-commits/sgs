@@ -7263,6 +7263,270 @@ def test_the_replay_all_knowing_view_still_sees_hero_zone_cards() -> None:
     )
 
 
+def _run_live_delta_probe(payload: dict[str, object]) -> dict[str, object]:
+    """把一份**真载荷**喂给 ``tests/support/live_delta_probe.mjs``（里面跑真的 `session.js`）。
+
+    与 ``log_cap_probe`` / ``action_probe`` 同姿态：前端判据只测一份，不在这里另抄；
+    垫片里没有 DOM，故只断"回放期的 live view 长什么样"，重绘归烟测（U-QX-01 / U-IDLE-01）。
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    probe = REPO_ROOT / "tests" / "support" / "live_delta_probe.mjs"
+    assert probe.is_file(), f"缺少回放派生探针：{probe.relative_to(REPO_ROOT)}"
+    result = subprocess.run(
+        [node, str(probe.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"回放派生探针失败（exit {result.returncode}）：\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def _qianxun_zones_engine() -> tuple[object, object]:
+    """一个**真引擎**：座位 0 = 人类界陆逊（手牌 3 张，其中 2 张待放上武将牌）。
+
+    返回 ``(engine, session)``；``session`` 是投影要的那几个字段的最小外壳（``visible_snapshot``
+    只读 ``engine`` / ``human_seat`` / ``pack``）——与投影用例同一个构造口。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    peaches = cards_of_type(pack, "peach")
+    slashes = cards_of_type(pack, "slash")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="jie_luxun", hand=(peaches[0], *slashes[:2])),
+            SeatSpec(hp=4, hero="zhaoyun", hand=(peaches[1],)),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    return engine, SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+
+def test_a_hero_zone_return_is_applied_to_the_live_view_of_the_same_batch() -> None:
+    """票 10（spec §1 #11）：【谦逊】的牌回手那一刻，武将牌上的牌区在**同一条记录**上消失。
+
+    报障的形状是"牌已回手、行还在"：`applyLiveDelta` 的 `card_move` 分支只派生
+    deck / discard / hand / equip / judge，而 `cloneLiveView` 又深拷贝 `hero_zones`
+    ⇒ 回放期那个区停在上一份快照值，要等这一批播完、`commitView` 整桌重建才刷新。
+    与票 07 的 `U3-05*` 同一条纪律（`CODING_STANDARDS.md` §7）：寿命断言要在**多步回放**
+    里收敛——所以这里断的是"第 k 条之后"，不是"commit 之后"。
+
+    走**真实产出路径**（`CODING_STANDARDS.md` §6）：真引擎的 `place_on_hero_card` /
+    `return_hero_card_zones` 产记录，`visible_snapshot` 产底稿，`visible_record` 产人类
+    载荷，前端跑真的 `session.js`（`tests/support/live_delta_probe.mjs` 的
+    `cloneLiveView` + `applyLiveDelta`，与 `stepPlayback` 同一条派生口）。
+    """
+    from sgs_web.projection import visible_snapshot
+
+    engine, session = _qianxun_zones_engine()
+    hand_cards = tuple(engine.state.player(0).hand)
+    placed = hand_cards[1:]
+    assert len(hand_cards) == 3 and len(placed) == 2, (
+        f"夹具失效：座位 0 应有三张手牌、放上去两张（实际 {hand_cards}）"
+    )
+    before = visible_snapshot(session)
+    assert before["players"][0]["hero_zones"] == [], "底稿：放置之前武将牌上没有区"
+    hand_before = before["players"][0]["hand_count"]
+    assert hand_before == len(hand_cards) == 3
+
+    # ① 放置：产品写入路径（`place_on_hero_card` = 搬牌 + 一条 hand→hero 的 card_move）。
+    engine.place_on_hero_card(
+        None,
+        owner=0,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(placed),
+    )
+    place = next(
+        record
+        for record in reversed(engine.records)
+        if getattr(record, "delta_type", None) == "card_move"
+        and getattr(getattr(record, "to_zone", None), "zone", None) is Zone.HERO
+    )
+    # ② 归还：产品写入路径（回合末的 `return_hero_card_zones` 逐区一条 HERO → HAND）。
+    assert engine.return_hero_card_zones() is None, "归还路径不该挂起（本夹具没有获得牌后的钩子）"
+    back = next(
+        record
+        for record in reversed(engine.records)
+        if getattr(record, "delta_type", None) == "card_move"
+        and getattr(getattr(record, "from_zone", None), "zone", None) is Zone.HERO
+    )
+    after = visible_snapshot(session)
+    assert after["players"][0]["hero_zones"] == [], "终态：归还后投影不再下发这个区"
+    assert after["players"][0]["hand_count"] == hand_before, "终态：牌真的回了手牌区"
+
+    payload = _run_live_delta_probe({
+        "base": {
+            "session_id": "ticket-10-qianxun",
+            "human_seat": session.human_seat,
+            "cursor": 93,
+            "pending": None,
+            "skills": before["players"][0]["skills"],
+            "snapshot": before,
+        },
+        "records": [
+            visible_record(place, viewer=session.human_seat),
+            visible_record(back, viewer=session.human_seat),
+        ],
+    })
+    frames = payload["frames"]
+    assert len(frames) == 3, f"应有三帧（底稿 + 放置 + 归还），实际 {len(frames)}"
+
+    key = "0:hero.jie_luxun.qianxun"
+    placed_frame = frames[1]["players"]["0"]
+    assert frames[0]["players"]["0"]["hero_zones"] == [], "底稿帧没有区"
+    assert [zone["key"] for zone in placed_frame["hero_zones"]] == [key], (
+        f"放置那一条之后，live view 必须长出区（区键 = zone_ref.skill_instance）："
+        f"{placed_frame['hero_zones']}"
+    )
+    zone = placed_frame["hero_zones"][0]
+    assert zone["skill_name"] == "谦逊", (
+        "区标签取同一份快照里的技能清单（记录里只有 skill_instance）："
+        f"{zone}"
+    )
+    assert zone["count"] == 2, f"区里两张：{zone}"
+    assert zone["card_ids"] == [str(card) for card in sorted(placed)], (
+        f"宿主拿得到牌面，增删按牌面走：{zone}"
+    )
+    assert placed_frame["hand_count"] == hand_before - 2, (
+        "同一侧的 hand_count 只由现存的 to/from=hand 两半扣，不重复扣"
+    )
+    assert frames[1]["self_hand"] == [str(hand_cards[0])], (
+        f"自己经手的移动牌面同步：{frames[1]['self_hand']}"
+    )
+
+    returned_frame = frames[2]["players"]["0"]
+    assert returned_frame["hero_zones"] == [], (
+        "归还那一条之后**整行删除**（投影只画有牌的区，空区不下发）——"
+        f"不是等 commitView：{returned_frame['hero_zones']}"
+    )
+    assert returned_frame["hand_count"] == hand_before, (
+        f"牌回手牌区的同一步把张数补齐（不重复加）：{returned_frame['hand_count']}"
+    )
+    assert sorted(frames[2]["self_hand"]) == sorted(str(card) for card in hand_cards), (
+        f"两张牌回到自己的手牌面（一张不多、一张不少）：{frames[2]['self_hand']}"
+    )
+
+
+def test_the_idle_repaint_fingerprint_covers_hero_zone_rows() -> None:
+    """票 10 第 2 条：空转轮询的**快照指纹**必须看得见武将牌上的牌区。
+
+    票 07 立的出口是「游标与询问序号都没变，但快照指纹变了 ⇒ 只重绘座位块、不清选择」。
+    指纹的字段表是**显式**的：座位块读得到的每一格都要登记，否则"快照变了"会被判成
+    "什么都没变"，又回到"没有新记录就永不重绘"。这里断两件事：
+
+    - 只把武将牌上的牌区整行拿掉（其余字段逐字段相同）⇒ 指纹**必须**变（空转出口接上）；
+    - 同一份内容（服务端原样再回一次）⇒ 指纹不变（它是纯摘要，不是随机标记）。
+    """
+    from sgs_web.projection import visible_snapshot
+
+    engine, session = _qianxun_zones_engine()
+    placed = tuple(engine.state.player(0).hand)[1:]
+    engine.place_on_hero_card(
+        None,
+        owner=0,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(placed),
+    )
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"][0]["hero_zones"], "前置：这一份快照里必须有武将牌上的牌区"
+    base = {
+        "session_id": "ticket-10-idle",
+        "human_seat": session.human_seat,
+        "cursor": 7,
+        "pending": None,
+        "skills": snapshot["players"][0]["skills"],
+        "snapshot": snapshot,
+    }
+    # "区整行消失、其余逐字段相同"——空转期真会出现的差异（服务端只重算投影，不记新记录）。
+    gone = json.loads(json.dumps(snapshot))
+    gone["players"][0]["hero_zones"] = []
+
+    changed = _run_live_delta_probe({"base": base, "records": [], "idleSnapshot": gone})
+    assert changed["idle"]["isIdle"] is True, (
+        "前置：游标与询问序号都没变（否则走的是有新记录的那条路，测不到空转出口）"
+    )
+    assert changed["fingerprint"]["changed"] is True, (
+        "空转期武将牌上的牌区消失 ⇒ 指纹必须变（座位块才会重绘）："
+        f"{changed['fingerprint']}"
+    )
+
+    same = _run_live_delta_probe({"base": base, "records": [], "idleSnapshot": json.loads(
+        json.dumps(snapshot))})
+    assert same["fingerprint"]["changed"] is False, (
+        f"同一份内容再回一次 ⇒ 指纹不变（纯时钟刷新那条）：{same['fingerprint']}"
+    )
+
+
+def test_a_hp_max_change_is_applied_to_the_live_view_ceiling() -> None:
+    """票 10 第 3 条（与票 14 共用的那一半）：体力上限变化逐条派生进 live view。
+
+    `hp_max_change` 是**公开事实**（投影里本来就有 `players[].hp_max`），但前端以前没有这条
+    分支 ⇒ 整批回放期间血条分母停在上一份快照值（spec §1 #1 的"开局就 5/5"是同一条缝）。
+    票 10 落**前端**这一半，票 14 只加服务端 `setup` 底稿 + 删 `openingLiveView` 的倒推。
+
+    记录来自**产品写入口**（`Engine.raise_hp_max` 推一条 `MAXLIFE` 帧，`support.positions.
+    maxlife_engine`）；期望值取**引擎状态**（独立真源），不是"代码怎么写就怎么断"。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+    from support.positions import M1_DECK_PROFILE, maxlife_engine
+
+    engine = maxlife_engine()
+    record = next(
+        item
+        for item in engine.records
+        if getattr(item, "delta_type", None) == "hp_max_change"
+    )
+    live_hp_max = engine.state.player(record.seat).hp_max
+    assert record.after == live_hp_max and record.before != record.after, (
+        f"前置：上限真的变了（before={record.before} after={record.after}）"
+    )
+    session = SimpleNamespace(
+        engine=engine, human_seat=0, pack=load_content_pack(deck_profile=M1_DECK_PROFILE)
+    )
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"][record.seat]["hp_max"] == live_hp_max, (
+        "前置：投影与引擎同源"
+    )
+    # 底稿 = **变化之前**的那一份（只改上限这一格，其余字段原样）：这一批里上限还没落。
+    before = json.loads(json.dumps(snapshot))
+    before["players"][record.seat]["hp_max"] = record.before
+    payload = _run_live_delta_probe({
+        "base": {
+            "session_id": "ticket-10-hpmax",
+            "human_seat": session.human_seat,
+            "cursor": record.seq,
+            "pending": None,
+            "skills": snapshot["players"][record.seat]["skills"],
+            "snapshot": before,
+        },
+        "records": [visible_record(record, viewer=session.human_seat)],
+    })
+    frames = payload["frames"]
+    assert len(frames) == 2, f"应有两帧（底稿 + 上限变化），实际 {len(frames)}"
+    assert frames[0]["players"][str(record.seat)]["hp_max"] == record.before
+    assert frames[1]["players"][str(record.seat)]["hp_max"] == live_hp_max, (
+        "同一条记录之后血条分母就变了（不等 commitView）："
+        f"{frames[1]['players'][str(record.seat)]}"
+    )
+
+
 def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view() -> None:
     """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。"""
     from types import SimpleNamespace
