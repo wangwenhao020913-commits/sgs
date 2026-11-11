@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -25,7 +25,13 @@ from sgs.timing import Timing
 
 from .active import ACTIVE_SKILLS, ActiveSkill
 from .catalog import CATALOG, SkillDef
-from .flow import SkillFlow, manifest, validate_flow_activation
+from .flow import (
+    SkillFlow,
+    StepPreview,
+    manifest,
+    preview_step,
+    validate_flow_activation,
+)
 
 __all__ = [
     "FLOWS",
@@ -33,6 +39,7 @@ __all__ = [
     "preactivation_for",
     "preactivated_skill_ids",
     "preactivations_for",
+    "preview_activation",
     "validate_activation",
 ]
 
@@ -177,4 +184,28 @@ def validate_activation(
         tuple(int(card_id) for card_id in picks),
         tuple(str(choice) for choice in choices),
         frame=frame,
+    )
+
+
+def preview_activation(
+    state: GameState,
+    actor: int,
+    skill_id: str,
+    answers: Sequence[tuple[str, Sequence[object]]],
+    steps: Sequence[Step],
+    *,
+    timing: Timing | None = None,
+    frame: Any = None,
+) -> StepPreview:
+    """**步骤预览**的公开入口（票 11）：清单的一步此刻能点谁 / 能不能进下一步 / 能不能提交。
+
+    ``steps`` 是**这次询问已经下发的那份清单**（``Step.order`` 映射回流水线）；预览不重渲
+    清单、不碰 ``view()`` / 投影 / 快照，只调与校验器同一份派生（:func:`~sgs.skills.flow.preview_step`）。
+    技能没有流水线 ⇒ ``ValueError``（HTTP 层映射成 400：这类技能不走清单，也就没有"预览"）。
+    """
+    flow = flow_for(skill_id, timing)
+    if flow is None:
+        raise ValueError(f"技能 {skill_id} 没有预发动清单")
+    return preview_step(
+        flow, state, actor, answers, steps=steps, frame=frame
     )

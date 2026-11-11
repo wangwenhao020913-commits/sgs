@@ -181,6 +181,7 @@ from .preactivation import (
     preactivation_for,
     preactivated_skill_ids,
     preactivations_for,
+    preview_activation,
     validate_activation,
 )
 from .move_after import (

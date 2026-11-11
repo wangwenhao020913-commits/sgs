@@ -868,10 +868,17 @@ def test_manifest_collapses_a_pool_that_does_not_depend_on_prior_steps():
     assert steps[1].pool == (StepPool(when=(), options=("seat:1", "seat:2")),)
 
 
-def test_manifest_degrades_to_one_row_over_the_pool_limit():
-    """前序组合数超过上限 ⇒ 退化：一行 ``when=()``、不下发候选（合法性仍走校验器）。"""
-    first, second = _cards("slash")[:2]
-    state = _manifest_state(hand=(first, second))
+def test_manifest_never_degrades_however_many_prior_options_there_are():
+    """前序组合再多也**不退化**：逐选项各一行照发（用户裁定「永不退化」，spec §2 Q6）。
+
+    改前这里钉的是相反的行为：组合数超过 ``MANIFEST_POOL_LIMIT = 32`` 就把该步的
+    ``pool`` 整格抽掉，界面只能靠"全都点得动"兜底——票 11 删掉了那条路（同一步内"还能点谁"
+    改由**步骤预览**端点现算），清单因此永远下发它算得出来的候选。
+
+    证据取 33 张手牌（> 32）：每张各一行，行数与候选数一个不少。
+    """
+    hand = tuple(range(33))
+    state = _manifest_state(hand=hand)
 
     def pool(state, frame, owner, chosen):
         del state, owner, chosen
@@ -879,12 +886,15 @@ def test_manifest_degrades_to_one_row_over_the_pool_limit():
 
     flow, _captured = _two_step_flow(pool)
 
-    steps = manifest(flow, state, 0, limit=1)
+    steps = manifest(flow, state, 0)
 
-    assert steps[1].pool == (), (
-        "退化只削弱界面提示：**不下发候选索引**（接入层退化为全都点得动），"
-        "校验器仍按真谓词裁决"
+    assert len(hand) > 32, "夹具要**超过**旧上限，否则这条断言分不出退化与不退化"
+    assert len(steps[1].pool) == len(hand), (
+        f"每个前序选项一行：给了 {len(hand)} 张手牌，只见 {len(steps[1].pool)} 行"
     )
+    assert [row.options for row in steps[1].pool] == [
+        (f"seat:{card}",) for card in hand
+    ], "每一行的候选 = 该前序答案下池回调给的真池"
 
 
 def test_manifest_stops_at_the_first_step_answered_by_someone_else():

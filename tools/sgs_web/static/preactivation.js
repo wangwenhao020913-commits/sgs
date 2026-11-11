@@ -36,6 +36,7 @@ function toggleConvertSkill(skill) {
   if (state.preactivation) {
     prunePreativationAnswers(state.preactivation, pending);
     state.lastRejectReason = "";
+    schedulePreativationPreview();
     renderTable();
     renderPending(state.view);
     return;
@@ -195,21 +196,33 @@ function preactivationPoolRow(pa, index) {
   return exact || any || null;
 }
 
-/** 一步的候选：命中行的 `options`。
- *  `null` = 服务端退化掉了候选索引（或本步没有池）——界面退化为"全都点得动"，
- *  合法性仍由服务端校验器裁决（`04` §4.1：前端不裁决规则）。 */
+/** 一步的候选：**先读步骤预览回包**（服务端现算），再退回清单里的静态池行。
+ *
+ *  预览（票 11）是"这一刻能点谁"的唯一真源：同一步内的动态约束（【除疠】势力互异、
+ *  【业炎】同花色）静态行根本表达不了。`pa.preview` 只在一件事上无效——**失败过**
+ *  （`pa.previewError`）：那时既不自动推进也不许提交，候选退回"没有"（fail-closed，
+ *  取不到就是点不了，绝不兜底成"全都点得动"，spec §6 #5）。
+ *
+ *  `null` = 这一步**没有**候选索引：界面必须当成"点不了"。
+ */
 function preactivationOptions(pa, index) {
+  if (pa && pa.preview && !pa.previewError && pa.preview.cursor === index) {
+    return (pa.preview.options || []).map(String);
+  }
   const row = preactivationPoolRow(pa, index);
   return row ? (row.options || []) : null;
 }
 
-/** 本步**显示但不可选**的候选（服务端 `StepPool.disabled`，票 04 §3 的置灰通道）。
+/** 本步**显示但不可选**的候选（服务端 `StepPool.disabled` / 预览回包的 `disabled`）。
  *
  *  "列出来"与"能选"是两件事：蛊惑的牌名弹窗要列全牌堆名（用户 Q1A），而"此刻没有合法
  *  目标"的那几个只能画灰。**界面只管画灰**——合法性由服务端校验器裁决（它拒收 disabled
- *  里的项），故这里返回 null（没有候选索引 / 服务端没下发）时退化成"全都点得动"。
+ *  里的项）。`null` = 没有置灰信息（与"空置灰表"同义）。
  */
 function preactivationDisabled(pa, index) {
+  if (pa && pa.preview && !pa.previewError && pa.preview.cursor === index) {
+    return (pa.preview.disabled || []).map(String);
+  }
   const row = preactivationPoolRow(pa, index);
   return row ? (row.disabled || []) : null;
 }
@@ -301,6 +314,200 @@ function preactivationAnswerTexts(step, values) {
   return values.map((value) => String(value));
 }
 
+/* ------------------------------------------------ 步骤预览（table-ux-overhaul 票 11）
+
+ * 合法性只有一处算（服务端算、前端只读）。每变一次选择（点牌 / 点座位 / 点选项 / 取消 /
+ * 回第一步）就发一次 `POST …/preview`，拿回"这一步此刻还能点谁 / 能不能进下一步 /
+ * 能不能提交"，界面只画那份数据——同一步内的动态约束（势力互异、花色上限）因此与校验器
+ * 同一份判据。
+ *
+ * 三条纪律：
+ *  1. **去抖**（80–120 ms）：连点只发最后一次；一次选择变化最多一个往返。
+ *  2. **本地版本号**：过期回包一律丢弃（`pa.previewVersion` 只增）。
+ *  3. **fail-closed**：取不到（失败 / 超时 / 409）⇒ 这一步**不自动推进、不许提交**，
+ *     提示"取不到候选，请重试"；**绝不**退回"全都点得动"（spec §6 #5）。
+ */
+
+const PREACTIVATION_PREVIEW_DEBOUNCE_MS = 90;
+/** 预览请求的墙钟上限：超时按**失败**处理（与 HTTP 失败同一条 fail-closed 路径）。 */
+const PREACTIVATION_PREVIEW_TIMEOUT_MS = 3000;
+/** 取不到候选时的提示（fail-closed 的话术，测试按它断言）。 */
+const PREACTIVATION_PREVIEW_ERROR = "取不到候选，请重试";
+
+/** 这一问的清单能不能走**步骤预览**。
+ *
+ * 只有服务端在询问载荷里声明了 `preview: true` 才问（票 11 的"新信息通道"开关）：
+ * 合成载荷 / 没有流水线的转化清单 / 借刀的附带指定清单都不带这个键，界面照旧读清单里的
+ * 静态池——旧载荷因此逐字段、逐行为不变。
+ */
+function preactivationPreviewEnabled(pending) {
+  return Boolean(pending && pending.preview === true && state.sessionId);
+}
+
+/** 本地答案 → 预览请求的 `answers`（**清单步名的前缀**，含正在编辑的那一步）。
+ *
+ * 服务端的光标规则与这里的本地光标同源：选牌 / 提供 / 多选座位步要显式点「下一步」，
+ * 故"最后一条答案"可以就是玩家还在挑的那一步——它的 `values` 是**本步已选**，服务端据此
+ * 排除已选目标（除疠的势力互异就是这么变灰的）。光标之后的一律不发（服务端也只认前缀）。
+ */
+function preactivationPreviewAnswers(pa) {
+  const out = [];
+  const upto = Math.min(pa.cursor, pa.steps.length - 1);
+  for (let index = 0; index <= upto; index += 1) {
+    const answer = pa.answers[index];
+    out.push({
+      name: String(pa.steps[index].name),
+      values: (answer ? answer.values : []).slice(),
+    });
+  }
+  return out;
+}
+
+/** 发一次预览（去抖 + 版本号）。失败 / 超时 ⇒ fail-closed 态 + 提示。 */
+function schedulePreativationPreview() {
+  const pa = state.preactivation;
+  const pending = state.view ? state.view.pending : null;
+  if (!pa || !pending || state.playback) return;
+  if (!pa.skillId) return; // 手牌入口（借刀）的清单没有技能 → 预览端点不服务它
+  if (!preactivationPreviewEnabled(pending)) return;
+  const version = (pa.previewVersion || 0) + 1;
+  pa.previewVersion = version;
+  // 新一轮尝试先清掉旧的失败态：界面照旧用**上一份**真候选（服务端算过的那份），
+  // 但在这一问出结果之前不许提交 / 自动推进（见 `preactivationSubmitAllowed`）。
+  pa.previewError = false;
+  const seq = pending.seq;
+  const body = {
+    answers_seq: seq,
+    skill_id: pa.skillId,
+    answers: preactivationPreviewAnswers(pa),
+  };
+  if (pa.previewTimer) window.clearTimeout(pa.previewTimer);
+  pa.previewTimer = window.setTimeout(() => {
+    pa.previewTimer = null;
+    if (state.preactivation !== pa) return; // 中途退出预发动：连请求都不发
+    requestPreativationPreview(pa, body, version, seq);
+  }, PREACTIVATION_PREVIEW_DEBOUNCE_MS);
+}
+
+/** 真发请求。回包按**版本号 + 询问序号**双重核对：任一过期就丢弃（迟到的旧回包不许改界面）。 */
+async function requestPreativationPreview(pa, body, version, seq) {
+  const path = `/api/sessions/${state.sessionId}/preview`;
+  let timer = null;
+  const timeout = new Promise((resolve, reject) => {
+    timer = window.setTimeout(
+      () => reject(new Error(`${PREACTIVATION_PREVIEW_ERROR}（超时）`)),
+      PREACTIVATION_PREVIEW_TIMEOUT_MS,
+    );
+  });
+  try {
+    const answer = await Promise.race([post(path, body), timeout]);
+    if (timer) window.clearTimeout(timer);
+    if (state.preactivation !== pa || pa.previewVersion !== version) return; // 过期的回包
+    const now = state.view ? state.view.pending : null;
+    if (!now || now.seq !== seq) return; // 询问换了：这一份不再描述界面上的那一问
+    pa.preview = answer;
+    pa.previewToken = version;
+    pa.previewError = false;
+    if (preactivationShouldAutoAdvance(pa, answer)) {
+      // 光标跟着**服务端**说的走（不是 +1：多选步停在原地、单值步前进一步都由它定）。
+      pa.cursor = answer.cursor;
+      applyPreativationDefaults(pa, state.view ? state.view.pending : null);
+      schedulePreativationPreview(); // 下一步的候选接着问（版本号自增，旧回包作废）
+    }
+    renderTable();
+    renderPending(state.view);
+  } catch (error) {
+    if (timer) window.clearTimeout(timer);
+    if (state.preactivation !== pa || pa.previewVersion !== version) return;
+    // fail-closed：拿不到候选 ⇒ 这一步不许推进、不许提交；提示一条可重试的话术。
+    pa.preview = null;
+    pa.previewToken = null;
+    pa.previewError = true;
+    state.lastRejectReason = "";
+    renderTable();
+    renderPending(state.view);
+  }
+}
+
+/** 手里这份回包描述的是**当下**这一步吗（最新一版 + 光标对得上）。
+ *
+ * 一旦又排了新的一版（`previewVersion` 自增），旧回包就只是"上一刻的快照"：候选照旧可以用
+ * （服务端算过的那一份），但"能不能进下一步 / 能不能提交"要退回清单的本地判据——否则
+ * 刚点完一张牌的那 100 ms 里，「下一步」会因为上一份回包说 `can_advance: false` 而点不动。
+ */
+function preactivationPreviewCurrent(pa, index) {
+  return Boolean(
+    pa && pa.preview && !pa.previewError
+      && pa.previewToken === pa.previewVersion && pa.preview.cursor === index,
+  );
+}
+
+/** 「下一步」能不能点：回包说 `can_advance`（前缀每一步都满足）时听服务端的。
+ *
+ * 预览失败 ⇒ 恒假（fail-closed，这一步既不推进也不许提交）；回包过期 / 没有预览通道 ⇒
+ * 退回清单的本地判据（"填满了没有"是形状，不是规则——提交时服务端仍会再验一次）。
+ */
+function preactivationAdvanceAllowed(pa, index) {
+  if (!pa) return false;
+  if (pa.previewError) return false;
+  if (preactivationPreviewCurrent(pa, index)) return Boolean(pa.preview.can_advance);
+  return preactivationStepFilled(pa, index) && preactivationStepLegal(pa, index);
+}
+
+/** 能不能提交：回包说 `can_submit`（**整条清单**都满足）时听服务端的。
+ *
+ * 预览失败 ⇒ 恒假。回包过期 / 没有预览通道 ⇒ 清单本地的 `preactivationReady`（行为不变）。
+ */
+function preactivationSubmitAllowed(pa) {
+  if (!pa) return false;
+  if (pa.previewError) return false;
+  if (preactivationPreviewCurrent(pa, pa.cursor)) return Boolean(pa.preview.can_submit);
+  return preactivationReady(pa) && preactivationSourcesLegal(pa);
+}
+
+/** 这一步要不要玩家**自己点「下一步」**（服务端 `preview_step` 的 `explicit` 同一判据）。
+ *
+ * 选牌 / 提供步总要显式确认（多选、上限可能是"任意张"），座位步只在 ``max > min``
+ * （1..max 多选）时要；选项步选完就走。
+ */
+function preactivationNeedsExplicitStep(step) {
+  if (!step) return true;
+  const kind = preactivationStepKind(step);
+  if (kind === "card") return true;
+  if (kind === "seat") return preactivationSeatMulti(step);
+  return false;
+}
+
+/** 选择变化后**要不要当场**自动进下一步（单值座位步 / 选项步的既有形状）。
+ *
+ * 两类情形一律**不**当场推进：
+ *
+ * - **有预览通道**（票 11）：推进与否由**服务端的回包**说了算（回包里的 `can_advance` +
+ *   `next`，见 `requestPreativationPreview`）——界面不自己算"这一步填完了没有"；
+ * - **预览失败**（fail-closed）：这一步不自动推进、也不许提交，提示"取不到候选，请重试"。
+ *
+ * 没有预览通道的旧载荷（合成载荷 / 没有流水线的清单）保持既有行为：选完就走。
+ */
+function preactivationAutoAdvanceAllowed(pa) {
+  if (!pa) return false;
+  if (pa.previewError) return false;
+  return !preactivationPreviewEnabled(state.view ? state.view.pending : null);
+}
+
+/** 服务端回包说"可以离开这一步了"吗：`can_advance` 且它给的光标**往前**了。
+ *
+ * **判据全在服务端**：`can_advance` = 已填的前缀每一步都满足，`cursor` = 服务端认为的
+ * 当前步（单值步答完就 +1，多选 / 选牌步停在原地）。前端只补一条**交互形状**：
+ * 选牌 / 多选座位步要玩家自己点「下一步」（与清单渲染的按钮同一判据）——所以这里只在
+ * 光标确实往前走时才动，且**不**自己算"填满没有"。
+ */
+function preactivationShouldAutoAdvance(pa, answer) {
+  if (!pa || !answer) return false;
+  if (answer.can_advance !== true) return false;
+  if (!Number.isInteger(answer.cursor) || answer.cursor <= pa.cursor) return false;
+  return !preactivationNeedsExplicitStep(pa.steps[pa.cursor]);
+}
+
 /** 进入预发动：**不压帧、不计次数**，只把清单与本地答案摊开（W4-1）。
  *
  * `composite` 只区分**文案**（"复合动作" / "这次的使用 / 响应"）：W4-fix-2 起两类入口的
@@ -322,7 +529,12 @@ function enterPreativation(skill, manifest) {
   state.selectedTargets = [];
   state.selectedOption = null;
   state.lastRejectReason = "";
+  state.preactivation.preview = null;
+  state.preactivation.previewToken = null;
+  state.preactivation.previewError = false;
+  state.preactivation.previewVersion = 0;
   applyPreativationDefaults(state.preactivation, state.view ? state.view.pending : null);
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -352,6 +564,7 @@ function enterConvertedForm(pending, card) {
   pa.answers[0].texts = preactivationAnswerTexts(pa.steps[0], [card.card_id]);
   if (pa.steps.length > 1) pa.cursor = 1;
   applyPreativationDefaults(pa, pending);
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -416,7 +629,8 @@ function preactivationCardPickable(pending, card, zone) {
   if (!zones.includes(zone)) return false;
   const options = preactivationCardOptions(pending);
   if (options === undefined) return false;
-  if (!(options === null || options.includes(String(card.card_id)))) return false;
+  // `null` = 服务端没给候选 ⇒ 点不了（fail-closed）；`undefined` = 这一步不是选牌步（上面已拦）。
+  if (options === null || !options.includes(String(card.card_id))) return false;
   const answer = pa.answers[pa.cursor];
   const values = answer ? answer.values : [];
   return values.includes(card.card_id)
@@ -431,7 +645,7 @@ function togglePreativationCard(cardId) {
   const step = pa.steps[pa.cursor];
   if (preactivationStepKind(step) !== "card") return;
   const options = preactivationOptions(pa, pa.cursor);
-  if (options && !options.includes(String(cardId))) return;
+  if (options === null || !options.includes(String(cardId))) return;
   const answer = pa.answers[pa.cursor];
   const at = answer.values.indexOf(cardId);
   // 票 10：**追加**要过合法来源组合（取消恒可）；卡面的 `.dis` 是第一道，这里是
@@ -443,6 +657,7 @@ function togglePreativationCard(cardId) {
   }
   answer.texts = preactivationAnswerTexts(step, answer.values);
   state.lastRejectReason = "";
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -456,11 +671,12 @@ function togglePreativationCard(cardId) {
 function advancePreativation() {
   const pa = state.preactivation;
   if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
-  if (!preactivationStepFilled(pa, pa.cursor)) return;
-  if (!preactivationStepLegal(pa, pa.cursor)) return;
+  // 判据由服务端给（预览回包的 `can_advance`）：取不到候选时恒假 ⇒ 这一步不许推进。
+  if (!preactivationAdvanceAllowed(pa, pa.cursor)) return;
   pa.cursor += 1;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -541,7 +757,8 @@ function selectPreativationSeat(seat) {
   if (preactivationStepKind(step) !== "seat") return;
   const options = preactivationOptions(pa, pa.cursor);
   const text = `${SEAT_PREFIX}${seat}`;
-  if (options && !options.includes(text)) return;
+  // 拿不到候选 = 点不了（fail-closed，spec §6 #5：不许兜底成"全都点得动"）。
+  if (options === null || !options.includes(text)) return;
   if (preactivationSeatMulti(step)) {
     const answer = pa.answers[pa.cursor];
     const at = answer.values.indexOf(seat);
@@ -555,14 +772,19 @@ function selectPreativationSeat(seat) {
     }
     answer.texts = preactivationAnswerTexts(step, answer.values);
     state.lastRejectReason = "";
+    schedulePreativationPreview();
     renderTable();
     renderPending(state.view);
     return;
   }
   pa.answers[pa.cursor] = { values: [seat], texts: [text] };
-  pa.cursor += 1;
-  applyPreativationDefaults(pa, pending);
+  // 单值座位步的既有形状是"点完自动进下一步"；预览失败时**不许**自动推进（fail-closed）。
+  if (preactivationAutoAdvanceAllowed(pa)) {
+    pa.cursor += 1;
+    applyPreativationDefaults(pa, pending);
+  }
   state.lastRejectReason = "";
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -574,14 +796,17 @@ function selectPreativationOption(text) {
   const step = pa.steps[pa.cursor];
   if (preactivationStepKind(step) !== "option") return;
   const options = preactivationOptions(pa, pa.cursor);
-  if (options && !options.includes(text)) return;
-  // 置灰项在闭集里但**不可选**：按钮本来就不接 click，这里是第二道（键盘 / 合成事件）。
+  // 拿不到候选 = 点不了（fail-closed）；置灰项在闭集里但**不可选**（第二道：键盘 / 合成事件）。
+  if (options === null || !options.includes(text)) return;
   const blocked = preactivationDisabled(pa, pa.cursor);
   if (blocked && blocked.includes(text)) return;
   pa.answers[pa.cursor] = { values: [text], texts: [text] };
-  pa.cursor += 1;
-  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
+  if (preactivationAutoAdvanceAllowed(pa)) {
+    pa.cursor += 1;
+    applyPreativationDefaults(pa, state.view ? state.view.pending : null);
+  }
   state.lastRejectReason = "";
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -605,6 +830,7 @@ function jumpPreativationStep(index) {
   pa.cursor = landing;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
+  schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
@@ -657,7 +883,8 @@ function preactivationReady(pa) {
  *   动作都由**服务端**按同一份清单声明解析，界面不拼牌、也不要求它出现在候选里。
  */
 function buildPreativationAction(pending, pa) {
-  if (!pending || !pa || !preactivationReady(pa)) return null;
+  // 提交的可否由服务端给（预览回包的 `can_submit`）；预览失败 ⇒ 恒不可提交（fail-closed）。
+  if (!pending || !pa || !preactivationSubmitAllowed(pa)) return null;
   // 票 10：来源不是合法组合 ⇒ **拼不出**这次提交（陈旧 / 合成载荷的最后一道闸；
   // 服务端仍然会 400——这只是不让界面主动发一条注定被拒的动作）。
   if (!preactivationSourcesLegal(pa)) return null;
@@ -727,6 +954,8 @@ function preactivationStepQuestion(pa, step, index) {
 
 function preactivationStepHint(pa, pending) {
   if (!pa) return "";
+  // fail-closed 的话术优先：取不到候选时既不能推进也不能提交，玩家要知道"重试"是出路。
+  if (pa.previewError) return `${PREACTIVATION_PREVIEW_ERROR}。`;
   // 票 10：已选来源凑不成合法组合 ⇒ 说清"换一张牌"，而不是继续画"第 k 步…"。
   if (!preactivationSourcesLegal(pa)) return PREACTIVATION_GROUP_HINT;
   // 光标越过清单末尾时没有"当前步"：清单还有空步就**指回第一个空步**，不能说
@@ -840,14 +1069,11 @@ function renderPreativation(pending) {
     // 座位步的候选在**模态正文里也铺一遍**（U1-03 / 评审 P0）：模态窗口居中后可能挡住
     // 环上某几个座位，只靠点场上武将就点不到被挡的那个。两份入口调同一个
     // `selectPreativationSeat`；牌桌不再 inert（D8），环上高亮照旧。
-    const options = preactivationOptions(pa, pa.cursor);
-    const seats = options
-      ? options
-        .map((value) => Number(String(value).slice(SEAT_PREFIX.length)))
-        .filter((seat) => Number.isInteger(seat))
-      : ((state.view && state.view.snapshot && state.view.snapshot.players) || [])
-        .filter((player) => player.alive)
-        .map((player) => Number(player.seat));
+    // 候选只读服务端（预览回包 / 清单的静态行）。取不到 ⇒ **一个都不画**：兜底成
+    // "所有存活座位"就是在猜合法性（spec §6 #5 明禁），而且会把 400 直接送到玩家脸上。
+    const seats = (preactivationOptions(pa, pa.cursor) || [])
+      .map((value) => Number(String(value).slice(SEAT_PREFIX.length)))
+      .filter((seat) => Number.isInteger(seat));
     const answer = pa.answers[pa.cursor];
     for (const seat of seats) {
       const button = document.createElement("button");
@@ -869,8 +1095,7 @@ function renderPreativation(pending) {
     next.type = "button";
     next.className = "opt";
     next.textContent = "下一步";
-    next.disabled = !preactivationStepFilled(pa, pa.cursor)
-      || !preactivationStepLegal(pa, pa.cursor);
+    next.disabled = !preactivationAdvanceAllowed(pa, pa.cursor);
     next.addEventListener("click", advancePreativation);
     box.appendChild(next);
   }

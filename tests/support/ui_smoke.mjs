@@ -392,6 +392,12 @@ let nextGetSnapshot = null;
 /* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
  * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
 let failNextGets = 0;
+/* table-ux-overhaul 票 11：步骤预览（`POST …/preview`）的**一次性回包注入**。
+ * 合成载荷的 seq 在真服务端上必然 409，故预览用例自己注入那一刻的回包；
+ * `nextPreview = {...}` → 200 + 该 body，`failNextPreviews = N` → 接下来 N 次直接失败
+ * （钉 fail-closed）。都不注入时照常打到真服务端。 */
+let nextPreview = null;
+let failNextPreviews = 0;
 /* U4-01：飞行时间表 `anim.ini` 是相对静态文件的 fetch（不是 `/api/` 请求）。烟测默认回
  * **磁盘上的真文件**（改 ini 即生效的口径）；用例可注入下一份 `{ok, text}` 看缺键 /
  * 非法值 / 未知键的退回默认与"一行提示"。 */
@@ -439,6 +445,19 @@ globalThis.fetch = async (path, options) => {
     if (failNextGets > 0 && !(options && options.method) && path.startsWith("/api/sessions/")) {
       failNextGets -= 1;
       throw new Error("注入的取增量失败");
+    }
+    if (path.includes("/preview")) {
+      // 预览注入在**打真服务端之前**：合成载荷没有真实会话，打过去只会拿到 409。
+      if (failNextPreviews > 0) {
+        failNextPreviews -= 1;
+        throw new Error("注入的预览失败");
+      }
+      const injected = nextPreview;
+      nextPreview = null;
+      if (injected) {
+        const text = JSON.stringify(injected);
+        return { ok: true, status: 200, text: async () => text, json: async () => JSON.parse(text) };
+      }
     }
     if (staleAnswerStatus && path.includes("/answer")) {
       const status = staleAnswerStatus;
@@ -587,6 +606,23 @@ const setEquals = (actual, expected) => {
  *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。 */
 const clickAndWait = async (node, event = null) => {
   for (const fn of node.listeners.click || []) await fn(event || { target: node });
+};
+/** table-ux-overhaul 票 11：跑掉**这一步**的预览去抖计时器，再等一次往返。
+ *
+ *  步骤预览是"选择一变就问一次后端"（去抖 90 ms）：点完之后 `cursor` / 可点集合 /
+ *  提交可点都等**回包**说了算，故同步点完就断言会读到旧态。计时器只排队、不自动跑
+ *  （垫片的既有纪律），这里按 `pa.previewTimer` 精确跑那一个，不碰别的计时器。 */
+const flushPreativationPreview = async () => {
+  const pa = ui.state.preactivation;
+  const id = pa ? pa.previewTimer : null;
+  if (id !== null && id !== undefined && pendingTimers.has(id)) {
+    const fn = pendingTimers.get(id);
+    pendingTimers.delete(id);
+    timerDelays.delete(id);
+    timerDue.delete(id);
+    if (typeof fn === "function") fn();
+  }
+  await new Promise((resolve) => setTimeout(resolve, 25));
 };
 /** 候选行的文本指纹（U2-03 起界面**不再**把 `legal_actions` 逐条铺成按钮）：
  *  任何一条命中都说明旧的逃生梯又长回来了。 */
@@ -4352,6 +4388,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         && !Array.from($("t-options").children).some((b) => /发动技能/.test(b.textContent)),
       `disabled=${button && button.disabled} pre=${button && button.getAttribute("data-preactivation")}`);
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+    await flushPreativationPreview(); // 进清单就问了一次预览（真端点）
     const pa = ui.state.preactivation;
     const options = ui.preactivationOptions(pa, 0) || [];
     const cardId = Number(options[0]);
@@ -4365,14 +4402,21 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     check("㉿R10 真局里点清单候选 = 收进本地答案（不提交）",
       !!pa && JSON.stringify(pa.answers[0].values) === JSON.stringify([cardId]),
       `answers=${pa && JSON.stringify(pa.answers[0])}`);
+    // 票 11：选完一格要等**回包**说"可以离开这一步"（`can_advance`），「下一步」才可点。
+    await flushPreativationPreview();
+    check("㉿R10a 真局里预览回包说「可以离开第 1 步」（can_advance）",
+      !!pa && pa.previewError === false && !!pa.preview && pa.preview.can_advance === true,
+      `preview=${JSON.stringify(pa && pa.preview)} err=${pa && pa.previewError}`);
     const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
     if (next) (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+    await flushPreativationPreview();
     const seats = pa ? ui.preactivationOptions(pa, 1) : null;
     const firstListedSeat = Array.from($("t-seats").children).find(
       (c) => seats && seats.includes(`seat:${c.getAttribute("data-seat")}`));
     if (firstListedSeat) {
       (firstListedSeat.listeners.click || []).forEach((fn) => fn({ target: firstListedSeat }));
     }
+    await flushPreativationPreview(); // 最后一步的答案 ⇒ 回包说 can_submit
     const composite = ui.buildAction();
     check("㉿R10b 真局里清单填完 = 复合动作（不要求是候选）",
       !!composite && composite.kind === "ActivateSkill"
@@ -4688,47 +4732,185 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
 }
 
-/* ⑤ W4-1：退化清单（服务端 `pool=()`）——不铺候选索引，座位步退化为"全都点得动"，
- *    仍能把复合动作拼出来（合法性由服务端校验器裁决，界面不裁决规则）。
+/* ⑤ table-ux-overhaul 票 11：**没有候选**的座位步 = 点不了（fail-closed）。
+ *
+ * 改前这里钉的是相反的行为："清单退化（`pool=()`）⇒ 所有存活座位全都点得动"（PZ10–12）。
+ * 用户裁定「永不退化」之后这条兜底被删掉了（spec §6 #5：拿不到池就是点不了，不许猜：
+ * 界面兜底成"全都点得动"等于替引擎裁决合法性）。清单的 `pool=()` 仍是合法形状（多选前序
+ * 对不上行时服务端就不发行），只是它现在**只**意味着"这一格没有候选"。
  */
 {
-  const degradedPending = {
+  const blindPending = {
     kind: "PLAY_PHASE", actor: 0, seq: 78,
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
     legal_actions: [{ kind: "EndPhase", answers_seq: 78 }],
     candidate_index: {}, option_seats: {}, context: null,
     preactivations: {
-      "demo.degraded": [
-        { name: "seat", zones: [], min: 1, max: 1, order: 0, pool: [] },
+      "demo.blind": [
+        { name: "seat", kind: "seat", zones: [], min: 1, max: 1, order: 0, pool: [] },
       ],
     },
     preactivation: [],
   };
-  const degradedView = synthView(degradedPending);
-  degradedView.skills = [{
-    skill_id: "demo.degraded", name: "退化技", skill_type: "NORMAL", locked: false,
+  const blindView = synthView(blindPending);
+  blindView.skills = [{
+    skill_id: "demo.blind", name: "无候选技", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true, preactivated: true,
     ui: { requirement: "", convert_sources: [] },
   }];
-  ui.state.view = degradedView;
+  ui.state.view = blindView;
   ui.resetSelection();
   ui.renderTable();
-  ui.renderPending(degradedView);
+  ui.renderPending(blindView);
   const button = () => Array.from($("t-skills").children).find(
-    (b) => b.getAttribute("data-skill-id") === "demo.degraded",
+    (b) => b.getAttribute("data-skill-id") === "demo.blind",
   );
   (button().listeners.click || []).forEach((fn) => fn({ target: button() }));
-  check("㉿PZ10 退化清单的座位步被识别为座位（不是选项步，不会死路）",
-    ui.preactivationStepKind(degradedPending.preactivations["demo.degraded"][0]) === "seat"
+  check("㉿PZ10 无候选的座位步仍被识别为座位（不是选项步，不会死路）",
+    ui.preactivationStepKind(blindPending.preactivations["demo.blind"][0]) === "seat"
       && ui.preactivationOptions(ui.state.preactivation, 0) === null);
-  check("㉿PZ11 退化后座位仍可点（全都点得动，合法性交给校验器）",
-    seatBox(1).classList.contains("targetable") && seatBox(2).classList.contains("targetable"));
+  check("㉿PZ11 拿不到候选 ⇒ 座位**一个都不点**（删掉了「全都点得动」的兜底）",
+    !seatBox(1).classList.contains("targetable")
+      && !seatBox(2).classList.contains("targetable")
+      && !seatBox(2).classList.contains("tsel"));
   (seatBox(1).listeners.click || []).forEach((fn) => fn({ target: seatBox(1) }));
-  const degradedAction = ui.buildAction();
-  check("㉿PZ12 退化清单仍能拼出复合动作",
-    !!degradedAction && degradedAction.kind === "ActivateSkill"
-      && JSON.stringify(degradedAction.choices) === '["seat:1"]',
-    JSON.stringify(degradedAction));
+  check("㉿PZ12 没有候选 ⇒ 点座位无效、拼不出复合动作（不发明合法性）",
+    ui.state.preactivation.cursor === 0
+      && ui.state.preactivation.answers.every((answer) => answer.values.length === 0)
+      && ui.buildAction() === null,
+    `cursor=${ui.state.preactivation.cursor} action=${JSON.stringify(ui.buildAction())}`);
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
+/* ⑥ table-ux-overhaul 票 11：步骤预览（`U-PV-*`）—— 每一步的可点集合由**后端现算**。
+ *
+ * 载荷 `pending.preview = true` 是**新信息通道的开关**（与 `structural` / `default_choice`
+ * 同一姿态：只有这一档才带这个键）：界面据此每变一次选择就 `POST …/preview` 问一次，
+ * 用回包刷新"可点集合 / 下一步 / 提交"。合成载荷的 seq 在真服务端上必然 409，故这里用
+ * 垫片的**一次性回包注入**（姿态同 `nextGetPending`）。
+ */
+{
+  const pvPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 91, preview: true,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 91 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.preview": [
+        // 【除疠】形状：一步多选座位步，**没有静态候选行**（池只能由服务端现算）。
+        { name: "seat", kind: "seat", zones: [], min: 1, max: 4, order: 0, pool: [] },
+      ],
+    },
+    preactivation: [],
+  };
+  const pvView = synthView(pvPending);
+  // 4 人环（【除疠】形状：1 / 2 同势力、3 异势力）：默认合成局面只有 3 个座位。
+  pvView.snapshot.players = [
+    ...pvView.snapshot.players,
+    { ...pvView.snapshot.players[2], seat: 3 },
+  ];
+  pvView.skills = [{
+    skill_id: "demo.preview", name: "预览技", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [] },
+  }];
+  ui.state.view = pvView;
+  ui.state.sessionId = "smoke-preview";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pvView);
+  const pvButton = () => Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "demo.preview",
+  );
+  const pvCalls = () => calls.filter((call) => call.path.includes("/preview"));
+  const settlePreview = flushPreativationPreview;
+
+  // 进预发动：第一次预览问的是"这一步（还没选）能点谁"。
+  nextPreview = {
+    cursor: 0, kind: "seat", options: ["seat:1", "seat:2", "seat:3"], disabled: [],
+    can_advance: false, can_submit: false, next: null,
+  };
+  const before = pvCalls().length;
+  (pvButton().listeners.click || []).forEach((fn) => fn({ target: pvButton() }));
+  await settlePreview();
+  check("㉿U-PV-01a 进预发动就发一次预览（body = answers_seq + skill_id + 步名前缀）",
+    pvCalls().length === before + 1
+      && pvCalls().at(-1).body.answers_seq === 91
+      && pvCalls().at(-1).body.skill_id === "demo.preview"
+      && JSON.stringify(pvCalls().at(-1).body.answers) === '[{"name":"seat","values":[]}]',
+    JSON.stringify(pvCalls().at(-1)));
+  check("㉿U-PV-01b 可点集合 = 预览回包的 `options`（静态行是空的）",
+    ["1", "2", "3"].every((seat) => seatBox(Number(seat)).classList.contains("targetable")),
+    `targetable=${[1, 2, 3].map((seat) => seatBox(seat).classList.contains("targetable"))}`);
+
+  // 选 1 号位：同势力（2 号位）立刻变灰——**服务端现算**的那一份候选。
+  nextPreview = {
+    cursor: 0, kind: "seat", options: ["seat:3"], disabled: [],
+    can_advance: true, can_submit: true, next: null,
+  };
+  (seatBox(1).listeners.click || []).forEach((fn) => fn({ target: seatBox(1) }));
+  await settlePreview();
+  check("㉿U-PV-01 除疠形状：选了 1 号位之后，同势力的 2 号位立刻变灰（options 由预览回包给）",
+    !seatBox(2).classList.contains("targetable")
+      && seatBox(3).classList.contains("targetable")
+      && JSON.stringify(pvCalls().at(-1).body.answers)
+        === '[{"name":"seat","values":[1]}]',
+    `targetable2=${seatBox(2).classList.contains("targetable")}`
+      + ` targetable3=${seatBox(3).classList.contains("targetable")}`
+      + ` answers=${JSON.stringify(pvCalls().at(-1).body.answers)}`);
+  check("㉿U-PV-01c 光标停在多选步上（回包说 can_advance 也不自动跳走）",
+    ui.state.preactivation.cursor === 0);
+  check("㉿U-PV-01d 提交可点 = 回包的 `can_submit`（服务端说整条清单都满足了）",
+    $("btn-submit").disabled === false && ui.buildAction() !== null,
+    `submit=${$("btn-submit").disabled} action=${JSON.stringify(ui.buildAction())}`);
+
+  // U-PV-02：预览**失败** ⇒ 不许自动推进、不许提交、提示重试（fail-closed）。
+  const failPending = {
+    ...pvPending,
+    seq: 92,
+    preactivations: {
+      "demo.preview": [
+        { name: "seat", kind: "seat", zones: [], min: 1, max: 1, order: 0, pool: [] },
+      ],
+    },
+  };
+  const failView = synthView(failPending);
+  failView.skills = pvView.skills;
+  ui.state.view = failView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(failView);
+  nextPreview = {
+    cursor: 0, kind: "seat", options: ["seat:1", "seat:2"], disabled: [],
+    can_advance: false, can_submit: false, next: null,
+  };
+  const failButton = () => Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "demo.preview",
+  );
+  (failButton().listeners.click || []).forEach((fn) => fn({ target: failButton() }));
+  await settlePreview();
+  check("㉿U-PV-02a 预览成功时座位可点（对照组）",
+    seatBox(1).classList.contains("targetable"));
+  failNextPreviews = 1; // 这一次预览失败
+  (seatBox(1).listeners.click || []).forEach((fn) => fn({ target: seatBox(1) }));
+  await settlePreview();
+  check("㉿U-PV-02 预览失败 ⇒ 不许自动推进（单值座位步也停在原地）",
+    ui.state.preactivation.cursor === 0
+      && ui.state.preactivation.previewError === true,
+    `cursor=${ui.state.preactivation.cursor} err=${ui.state.preactivation.previewError}`);
+  check("㉿U-PV-02b 预览失败 ⇒ 不许提交、提示「取不到候选，请重试」",
+    $("btn-submit").disabled === true
+      && ui.buildAction() === null
+      && $("t-target-hint").textContent.includes("取不到候选，请重试")
+      && $("t-choice").textContent.includes("取不到候选，请重试"),
+    `submit=${$("btn-submit").disabled} hint="${$("t-target-hint").textContent}"`
+      + ` foot="${$("t-choice").textContent}"`);
+  check("㉿U-PV-02c 预览失败 ⇒ 可点集合退回静态行（这一步没有 ⇒ 一个都不点）",
+    !seatBox(1).classList.contains("targetable")
+      && !seatBox(2).classList.contains("targetable"));
+  ui.state.sessionId = null;
+  ui.resetSelection();
 }
 
 /* ⑥ W4-2：被动入口（时机询问随附清单）——不画"发动技能 XXX"，只给入口 + 放弃。

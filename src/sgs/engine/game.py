@@ -1065,6 +1065,16 @@ class Engine:
         return tuple(self._records)
 
     @property
+    def activation_frame(self) -> Frame | None:
+        """**只读**：最近一次 ``SKILL_ACTIVATION`` 询问的承载帧（票 11 的步骤预览读它）。
+
+        预览要调与校验器**同一个**池回调，而被动技的池常读帧（【流离】的使用者 /
+        【麒麟弓】的目标）。校验器的取法是"栈顶优先、栈空退回这份承载帧"
+        （:meth:`_validate_structured`），预览照抄同一条：调用方自己判栈。
+        """
+        return self._activation_frame
+
+    @property
     def skill_activations(self) -> tuple[SkillActivation, ...]:
         """**技能发动**的派生面（lei 票 06）：只增缓冲的只读视图。
 

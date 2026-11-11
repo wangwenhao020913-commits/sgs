@@ -90,6 +90,7 @@ __all__ = [
     "damage_events_after",
     "decorate_records_card_tags",
     "harvest_state",
+    "issued_manifest",
     "live_tag_deltas_after",
     "option_seats",
     "option_source",
@@ -1899,6 +1900,58 @@ def _preactivation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
     return {key: _steps_payload(steps) for key, steps in manifests.items()}
 
 
+def issued_manifest(query: Any, skill_id: str) -> tuple[Any, ...] | None:
+    """这次询问**已经下发**给 ``skill_id`` 的那份预发动清单（票 11 的预览端点唯一的取法）。
+
+    顺序与 ``engine._validate_structured`` 的成员判定同源（"清单发过没有"与"复合动作收不收"
+    不能各说一套）：逐候选清单 → 主动入口表 → 转化清单，最后是单份清单（键 = 询问自己的
+    ``skill_id``）。返回 ``None`` = 这次询问没有给它下发过清单（预览请求该被拒）。
+
+    预览**不重渲**清单：重渲要枚举全部前序组合（那正是本票要退役的开销），而玩家看到的
+    就是这一份——读它才是"预览 = 所见即所得"。
+    """
+    if not isinstance(skill_id, str) or not skill_id:
+        return None
+    for attribute in (
+        "activation_preactivations",
+        "preactivations",
+        "transform_preactivations",
+    ):
+        manifests = getattr(query, attribute, None) or {}
+        steps = manifests.get(skill_id)
+        if steps:
+            return tuple(steps)
+    if getattr(query, "skill_id", None) == skill_id:
+        steps = getattr(query, "preactivation", ()) or ()
+        if steps:
+            return tuple(steps)
+    return None
+
+
+def _preview_supported(query: Any) -> bool:
+    """这一问的清单能不能走**步骤预览**（票 11）：任一清单的技能有流水线即可。
+
+    判据与 :func:`issued_manifest` 同源（预览端点自己也会再核一次"这一问有没有那份清单"），
+    只是这里只回答"值不值得让前端去问"：没有流水线的技能（转化清单的【龙胆】一类、
+    借刀的附带指定清单）根本没有池回调可现算，声明能力只会让界面白问一次并落到
+    fail-closed 的提示上。
+    """
+    from sgs.skills import flow_for
+
+    timing = getattr(query, "timing", None)
+    for attribute in (
+        "activation_preactivations",
+        "preactivations",
+        "transform_preactivations",
+    ):
+        for skill_id in (getattr(query, attribute, None) or {}):
+            if flow_for(skill_id, timing) is not None:
+                return True
+    single = getattr(query, "preactivation", ()) or ()
+    skill_id = getattr(query, "skill_id", None)
+    return bool(single) and flow_for(skill_id, timing) is not None
+
+
 def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     """查看者不是询问者时，抹掉清单里**属于询问者**的牌面（W4-1；与观看私密同一条纪律）。
 
@@ -2482,6 +2535,12 @@ def pending_payload(
     payload["activation_preactivations"] = _preactivation_payload(
         getattr(query, "activation_preactivations", None) or {}
     )
+    # **步骤预览的可用声明**（table-ux-overhaul 票 11）：这一问有"有流水线的清单"才带
+    # ``"preview": true``——即 ``POST …/preview`` 对这一问真能算。前端据此决定"每次选择
+    # 变化问一次后端"；**键的缺席是保证**：合成载荷 / 没有流水线的转化清单 / 旧载荷都不带
+    # 它，界面照旧读清单里的静态池（与 ``structural`` / ``default_choice`` 同一姿态）。
+    if _preview_supported(query):
+        payload["preview"] = True
     # 「是否发动」的**默认候选**（yijiang-2014-round2 票 15 / 路线 B）：投影按
     # :data:`_DEFAULT_ACTIVATE_SKILLS` 登记表下发；前端 ``answer.js:buildAction`` 在玩家
     # 没选任何候选时据此返回候选里那条 ``ActivateSkill``。**只有登记过的技能才带这个键**

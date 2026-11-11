@@ -1101,7 +1101,11 @@ function refreshSubmit(pending) {
     // 转化。缺省 `groups` 的步恒真；有 `groups` 时，陈旧 / 合成载荷也过不了这道闸，
     // 「提交」不会亮、更不会发出一条注定 400 的 `ActivateSkill`。
     const legal = preactivationSourcesLegal(pa);
-    const ready = preactivationReady(pa);
+    // 可提交与否由**服务端**给（预览回包的 `can_submit`；票 11）：多选步停在最后一步上时
+    // 光标还没走到末尾，但清单已经填满了——本地 `preactivationReady` 会把提交键一直按灰。
+    // 预览失败 / 没有预览通道时退回复清单的本地判据（fail-closed 那条在
+    // `preactivationSubmitAllowed` 里，取不到候选恒假）。
+    const ready = preactivationSubmitAllowed(pa);
     $("btn-submit").disabled = !legal || !ready || buildAction() === null;
     if (!legal) {
       // 通用文案（不认牌名 / 花色）：说清这一组不能一起转化，出口 = 取消再重选。

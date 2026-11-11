@@ -5120,6 +5120,242 @@ def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
     assert payload["preactivation"] and payload["preactivation"][0]["name"] == "card"
     assert payload["preactivation"][0]["pool"][0]["options"] == ["7"]
     assert payload["preactivations"] == {}, "被动入口没有「技能 id → 清单」那张表"
+    assert payload["preview"] is True, (
+        "【青釭剑】有流水线 ⇒ 这一问声明**步骤预览**可用（票 11 的新信息通道）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 票 11：步骤预览端点——预发动清单一步的**只读**现算（与校验器同一份池回调）
+# ---------------------------------------------------------------------------
+
+CHULI = "hero.jie_huatuo.chuli"
+
+
+def _session_at_chuli_play_phase() -> Session:
+    """真会话：4 人局，人类 = 界华佗（群），对面曹操 / 司马懿（魏）、刘备（蜀）。
+
+    停在【除疠】的出牌阶段：清单是**一步多选座位步**（任意名、势力互异），候选池按
+    "本步已选的座位"现算——静态清单表达不了这条（`ordered=True, hi>1` 的步不下发候选），
+    正是预览要服务的形状。
+    """
+    session = Session(
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        heroes=("jie_huatuo", "caocao", "simayi", "liubei"),
+        human_seat=0,
+    )
+    for _ in range(400):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到【除疠】的出牌阶段")
+        if pending.kind == "PLAY_PHASE" and CHULI in (pending.preactivations or {}):
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("400 次应答内没走到【除疠】的出牌阶段")
+
+
+def _registry_with(session: Session):
+    """把**已经驱动到目标询问**的会话挂进一个真注册表（HTTP 用例的进入姿势）。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry.sessions[session.session_id] = session
+    return registry
+
+
+def _preview(registry, session: Session, body: dict) -> tuple[int, dict]:
+    """打真处理器（不开端口）：路由、409 / 400 的映射与 JSON 都是产品代码给出的。"""
+    return _post_with_the_real_handler(
+        registry, f"/api/sessions/{session.session_id}/preview", body
+    )
+
+
+def test_the_preview_endpoint_returns_the_same_pool_the_validator_uses() -> None:
+    """票 11 的同源断言：预览的 ``options`` 与 ``validate_activation`` 的裁决必须一致。
+
+    【除疠】的座位池按"本步已选的座位"现算（势力互异）：先点 1 号位（魏），同势力的
+    2 号位必须立刻从候选里消失。判据不是"预览说得像"，而是**同一个** ``_chuli_targets``：
+    预览说能点的每个座位，校验器都收；预览说不能点的，校验器就拒。
+    """
+    from sgs.skills.preactivation import validate_activation
+
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+    state, owner = session.engine.state, pending.actor
+
+    assert pending_payload(session)["preview"] is True, (
+        "真载荷声明预览可用：前端只在**带了这个键**的询问上发预览（旧载荷逐字段不变）"
+    )
+
+    status, first = _preview(
+        registry, session, {"answers_seq": pending.seq, "skill_id": CHULI, "answers": []}
+    )
+    assert status == 200
+    assert first["cursor"] == 0 and first["kind"] == "seat"
+    assert {"seat:1", "seat:2"} <= set(first["options"]), (
+        f"一开始两名魏将都能选：{first['options']}"
+    )
+    assert first["can_submit"] is False, "一名目标都还没选 ⇒ 不能提交"
+
+    status, second = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": pending.seq,
+            "skill_id": CHULI,
+            "answers": [{"name": "seat", "values": [1]}],
+        },
+    )
+    assert status == 200
+    assert second["cursor"] == 0, "多选座位步：光标停在它上面（还能继续加人）"
+    assert "seat:2" not in second["options"], "同势力（魏）的 2 号位必须立刻变灰"
+    assert "seat:3" in second["options"], "异势力（蜀）照旧可选"
+    assert second["can_submit"] is True, "已经够 1 名 ⇒ 此刻就能提交"
+
+    # **同源**：候选 → 校验器逐个对表（不重算池，也不读另一份实现）。
+    for option in second["options"]:
+        assert validate_activation(state, owner, CHULI, (), ("seat:1", option)) is None, (
+            f"预览说 {option} 能点 ⇒ 校验器必须收"
+        )
+    assert validate_activation(state, owner, CHULI, (), ("seat:1", "seat:2")) is not None, (
+        "预览说 2 号位不能点 ⇒ 校验器必须拒（势力互异）"
+    )
+
+
+def test_the_preview_endpoint_writes_nothing() -> None:
+    """只读全停：不建询问、不写记录、不耗序号、不搬牌、不抽随机数。
+
+    与 :meth:`Engine.respond_candidates` 同一条纪律——预览是"每变一次选择问一次"的热路径，
+    它一旦有副作用，最轻的症状就是记录流里凭空多一条。
+    """
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+    records = session.engine.records
+    hand_sizes = tuple(len(player.hand) for player in session.engine.state.players)
+
+    for answers in ([], [{"name": "seat", "values": [1]}]):
+        status, _body = _preview(
+            registry,
+            session,
+            {"answers_seq": pending.seq, "skill_id": CHULI, "answers": answers},
+        )
+        assert status == 200
+
+    assert session.engine.records == records, "记录流一条都不能多（含拒绝记录）"
+    assert len(session.engine.records) == len(records)
+    assert session.pending is pending and session.pending.seq == pending.seq, (
+        "当前挂起与它的序号都不许动（没有建询问、没有耗序号）"
+    )
+    assert tuple(len(player.hand) for player in session.engine.state.players) == hand_sizes, (
+        "一张牌都不许搬"
+    )
+
+
+def test_the_preview_endpoint_rejects_a_stale_answers_seq() -> None:
+    """``answers_seq`` 对不上当前挂起 ⇒ 409，**与 ``/answer`` 同形**（错误 + 当前挂起）。"""
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    status, body = _preview(
+        registry,
+        session,
+        {"answers_seq": pending.seq + 1, "skill_id": CHULI, "answers": []},
+    )
+
+    assert status == 409
+    assert set(body) == {"error", "pending"}, "与 /answer 的 409 同一个形状"
+    assert body["pending"]["seq"] == pending.seq, "下发的是**当前**那一问"
+    assert "过期" in body["error"]
+
+
+def test_the_preview_endpoint_rejects_a_skill_without_an_issued_manifest() -> None:
+    """``skill_id`` 必须是这次询问里**下发过清单**的技能（否则 400，不静默回一份空候选）。"""
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+
+    status, body = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": session.pending.seq,
+            "skill_id": "hero.liubei.rende",
+            "answers": [],
+        },
+    )
+
+    assert status == 400
+    assert "预发动清单" in body["error"]
+
+
+def test_the_preview_endpoint_rejects_a_malformed_answers_prefix() -> None:
+    """``answers`` 必须是**清单步名的前缀**；形状 / 步名 / 长度不对一律 400（不猜、不静默纠正）。"""
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    seq = session.pending.seq
+
+    # 步名不是清单里的那一步（清单只有一步 `seat`）
+    status, body = _preview(
+        registry,
+        session,
+        {"answers_seq": seq, "skill_id": CHULI, "answers": [{"name": "card", "values": []}]},
+    )
+    assert status == 400 and "步名" in body["error"]
+
+    # 前缀比清单还长
+    status, body = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": CHULI,
+            "answers": [{"name": "seat", "values": []}, {"name": "seat", "values": [1]}],
+        },
+    )
+    assert status == 400
+
+    # `answers` 不是数组
+    status, body = _preview(
+        registry, session, {"answers_seq": seq, "skill_id": CHULI, "answers": "seat"}
+    )
+    assert status == 400 and "数组" in body["error"]
+
+
+def test_the_preview_endpoint_is_cheap_enough_for_every_selection_change() -> None:
+    """性能底线：单次预览是本机 **< 5 ms** 的量级（票面口径），且**不碰** ``view()``。
+
+    预览只调这一步骤的派生回调（座位池 / 选项闭集 / 选牌面），**不**建投影、不扫记录流
+    ——票 01 之前一次 ``view()`` 要 2.4 s。这里钉一条宽上限（20 ms），实测值写进票面
+    ``## Answer``。
+    """
+    import statistics
+    import time
+
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+    body = {
+        "answers_seq": pending.seq,
+        "skill_id": CHULI,
+        "answers": [{"name": "seat", "values": [1]}],
+    }
+    registry.preview(session, body)  # 预热（首次会填 CATALOG 的惰性缓存）
+
+    samples = []
+    for _ in range(200):
+        started = time.perf_counter()
+        registry.preview(session, body)
+        samples.append(time.perf_counter() - started)
+    median = statistics.median(samples)
+    p95 = statistics.quantiles(samples, n=20)[18]
+
+    assert median < 0.020, f"单次预览中位 {median * 1000:.3f} ms 太慢（票面口径 < 5 ms）"
+    assert p95 < 0.020, f"单次预览 p95 {p95 * 1000:.3f} ms 太慢"
 
 
 # ---------------------------------------------------------------------------

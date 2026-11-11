@@ -11,6 +11,7 @@
 ``POST``         ``/api/sessions``                   建局；返回首个挂起与快照
 ``GET``          ``/api/sessions/<id>?after=&logs=`` 取增量；**顺带判定超时**
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
+``POST``         ``/api/sessions/<id>/preview``      预发动清单一步的**只读**预览（票 11）
 ``GET``          ``/api/heroes``                     开局页将池（启用并集、按真名分组的版本）
 ``GET``          ``/api/hero-presets``               将池存档（5 个常驻槽位 + 活动槽位）
 ``POST``         ``/api/hero-presets``               保存某个槽位并置为活动（覆盖该槽位）
@@ -54,6 +55,7 @@ from sgs_web.projection import (  # noqa: E402
     concealed_guohuo_cards,
     damage_events_after,
     decorate_records_card_tags,
+    issued_manifest,
     live_tag_deltas_after,
     life_loss_events_after,
     pending_payload,
@@ -150,6 +152,31 @@ def _empty_presets() -> dict[str, Any]:
         "active": 0,
         "slots": [{"banned_heroes": []} for _ in range(HERO_POOL_SLOTS)],
     }
+
+
+def _preview_answers(raw: object) -> list[tuple[str, tuple[object, ...]]]:
+    """预览请求体里的 ``answers`` → ``[(步名, 值元组)]``（**只**校验形状，非法 ⇒ 400）。
+
+    "步名与顺序对不对"不是这里判的：那是预览自己的判据（它拿着这次下发的清单，按
+    ``Step.name`` 逐步比对）。这里只保证载荷是个数组、每项有字符串步名与数组 ``values``
+    —— 把 ``{"values": 3}`` 这类形状错当成"空答案"会让预览悄悄回一个错误的步。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"预览请求的 answers 必须是数组：{raw!r}")
+    out: list[tuple[str, tuple[object, ...]]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(f"预览答案的每一项都必须是对象：{entry!r}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"预览答案缺步名：{entry!r}")
+        values = entry.get("values", [])
+        if not isinstance(values, list):
+            raise ValueError(f"预览答案的 values 必须是数组：{entry!r}")
+        out.append((name, tuple(values)))
+    return out
 
 
 def _known_hero_ids() -> set[str]:
@@ -535,6 +562,66 @@ class GameRegistry:
         self.advance_clock(session)
         return self.view(session, after=after, logs_after=logs_after)
 
+    # -- 步骤预览（票 11：只读） ---------------------------------------------
+
+    def preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
+        """预发动清单**一步**的现算候选：能点谁 / 能不能进下一步 / 能不能提交（票 11）。
+
+        读的是与校验器**同一份**池 / 界回调（:func:`sgs.skills.flow.preview_step` 复用
+        ``_with_answers`` + ``_seat_bounds`` / ``_resolve_options`` / ``_card_options``），
+        故"预览说能点"与"提交会被接受"不可能各说一套。
+
+        **只读全停**：不建询问、不写记录、不耗序号、不搬牌、不抽随机数（与
+        :meth:`Engine.respond_candidates` 同一条纪律），也不碰 ``view()`` / 投影 / 快照
+        ——预览是"每变一次选择问一次"的热路径，票面的性能底线就落在这条上。
+
+        ``answers_seq`` 对不上当前挂起 ⇒ :class:`StaleAnswer`（409，与 ``/answer`` 同形：
+        服务端唯一承认的"当前询问"仍是那一个）。**不**走 :meth:`advance_clock`：预览不能
+        触发超时代答（那会改状态），只打一次"最后访问"戳（会话回收的判据）。
+        """
+        from sgs.skills import preview_activation
+
+        pending = session.pending
+        answers_seq = body.get("answers_seq")
+        if pending is None or answers_seq != pending.seq:
+            raise StaleAnswer(pending, human_seat=session.human_seat)
+        skill_id = body.get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id:
+            raise ValueError("预览请求缺 skill_id")
+        steps = issued_manifest(pending, skill_id)
+        if not steps:
+            raise ValueError(f"技能 {skill_id} 不在这次询问下发的预发动清单里")
+        answers = _preview_answers(body.get("answers"))
+        engine = session.engine
+        # 承载上下文与校验器**同一条取法**（栈顶优先，帧外时机退回那一次的承载帧）：
+        # 池回调读的帧必须与复合动作提交时那份一致，否则预览与裁决会各说一套。
+        frame = engine.stack.top if engine.stack else engine.activation_frame
+        try:
+            preview = preview_activation(
+                engine.state,
+                pending.actor,
+                skill_id,
+                answers,
+                steps,
+                timing=pending.timing,
+                frame=frame,
+            )
+        except KeyError as error:
+            # 池回调要帧上下文而这一问没有 / 提供步给了不在池里的牌 id：都是"这份载荷此刻
+            # 算不出来"⇒ 结构非法（400）。**不能**漏成 KeyError——那会被 `do_POST` 的
+            # "未知会话"分支接走，回一个与真相无关的 404。
+            raise ValueError(f"预览算不出这一步的候选：{error}") from error
+        session.touch(time.monotonic())
+        return {
+            "cursor": preview.cursor,
+            "kind": preview.kind,
+            "options": list(preview.options),
+            "disabled": list(preview.disabled),
+            "can_advance": preview.can_advance,
+            "can_submit": preview.can_submit,
+            "next": preview.next,
+        }
+
     # -- 终局落盘 -----------------------------------------------------------
 
     def save_if_finished(self, session: Session) -> Path | None:
@@ -688,6 +775,10 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/sessions":
                 session = self.registry.create(body)
                 self._send_json(200, self.registry.view(session, after=-1, logs_after=0))
+                return
+            if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/preview"):
+                session_id = parsed.path[len("/api/sessions/") : -len("/preview")]
+                self._send_json(200, self.registry.preview(self.registry.get(session_id), body))
                 return
             if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/answer"):
                 session_id = parsed.path[len("/api/sessions/") : -len("/answer")]
