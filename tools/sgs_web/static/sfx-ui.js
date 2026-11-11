@@ -507,8 +507,6 @@ function vitalSfxStart(play) {
   const lane = lanes[slot];
   if (!lane || !lane.live) return null;
   Object.assign(lane.timeline, damageSfxTimeline(play.fx && play.fx.timeline));
-  // 档位参数照伤害那一份（两个新音效模块的 `tick(t, v)` 只读它需要的字段；缺的读 0）。
-  play.sfxVoice = damageSfxVoice(play);
   if (typeof lane.player.start === "function") lane.player.start();
   if (typeof lane.player.mute === "function") lane.player.mute(!damageSfxOn);
   play.sfxLane = lane;
@@ -516,13 +514,13 @@ function vitalSfxStart(play) {
   return lane;
 }
 
-/** 每帧：喂**演出自己的** `seconds`（与 `fx.draw(t)` 同一个数），不另起墙钟。 */
+/** 每帧：喂**演出自己的** `seconds`（与 `fx.draw(t)` 同一个数），不另起墙钟。
+ *
+ *  两个新音效模块的 cue 只从时间轴读、`tick(t, voice)` 的 `voice` 不用，所以这里只喂时钟。 */
 function vitalSfxTick(play, seconds) {
   const lane = play && play.sfxLane;
   if (!lane || !lane.live || typeof lane.player.tick !== "function") return;
-  const voice = play.sfxVoice || null;
-  if (!voice) return;
-  lane.player.tick(seconds, voice);
+  lane.player.tick(seconds);
 }
 
 /** 一段演出收尾：这条声道静音并停 cue（下次开演重新 `start()`）。 */

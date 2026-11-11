@@ -81,11 +81,15 @@
   /* 量不到座位矩形时的舞台 = 参考舞台（`s = 1`，素材页那条链逐字节不变）。 */
   var REF_RECT = { cx: DST.cx, cy: DST.cy, w: DST.w, h: DST.h };
 
-  /* **bare 档白化的峰值**（票面 §1 的注意）：素材页的 α 是照着**浅色样例牌**调的，接真实牌面
+  /* **白化的峰值**（票面 §1 的注意）：素材页的 α 是照着**浅色样例牌**调的，接真实牌面
    * 时要按牌底色重调一档（真实牌面比样例牌更花，白到底通常要**更高**才盖得住牌名 / 技能字）。
-   * 这里是**唯一**的可调常量，`2e-3` 级的小数留到实机再定：**最终值以实机为准，票面不预设**。
-   * 只在牌桌档（bare）生效；导出档照素材页 1:1。 */
+   * 两个具名常量、同一素材包原值（`0.985`），两档各管各的，都按**实机**可再调一档：
+   *   - `BARE_WHITE_PEAK`：牌桌档（bare）。`2e-3` 级的小数留到实机再定：
+   *     **最终值以实机为准，票面不预设**；
+   *   - `EXPORT_WHITE_PEAK`：导出档（照素材页 1:1）。要改也照真实牌面**实机**校，
+   *     别动素材页那条链。 */
   var BARE_WHITE_PEAK = 0.985;
+  var EXPORT_WHITE_PEAK = 0.985;
 
   /* 飘字口径（与 `fx-core.js` / `fx-hp-loss.js` 同一套包围盒判据）：
    *   字高 ∈ [SCREEN_MIN_NUMBER, 35% × 牌高]（牌高小的时候上限优先：宁可小，也不能压住体力
@@ -942,9 +946,9 @@
 
     /* 白到头：近乎实白，牌名 / 技能字全部盖住。牌桌档这一层**盖在真实牌面之上**（覆盖层是
      * 透明的，白是半透明白叠上去）——**不是**用 CSS 把牌藏起来：那样牌会先消失再出现。
-     * 峰值是 `BARE_WHITE_PEAK`（照样例牌调的，真实牌面按实机再调一档）。 */
+     * 峰值按档取具名常量：牌桌档 `BARE_WHITE_PEAK`、导出档 `EXPORT_WHITE_PEAK`（同值，各按实机可调）。 */
     if (cover > 0.01) {
-      var peak = BARE ? BARE_WHITE_PEAK : 0.985;
+      var peak = BARE ? BARE_WHITE_PEAK : EXPORT_WHITE_PEAK;
       c.fillStyle = "rgba(255,255,255," + (peak * Math.pow(cover, 1.05)) + ")";
       c.fillRect(x0, y0, DST.w, DST.h);
       var gw = c.createRadialGradient(DST.cx, DST.cy, 0, DST.cx, DST.cy, DST.w * 0.9);
