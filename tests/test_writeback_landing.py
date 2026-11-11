@@ -485,6 +485,50 @@ def test_the_u2_ledger_rows_are_present_and_carry_a_test_landing() -> None:
         )
 
 
+# chain-death-voices 票 04 的三条收口账本行（ADR-022 / ADR-023 / ADR-024）。与 U1 / U2 两族
+# 同一姿态：删掉一整行不会让任何通用断言变红（表还有别的行），故逐条钉标题 + 要求落点里
+# 既有正式 pytest 名、也有**真的存在**的 `ui_smoke` 用例 id（只写文件名不算落点）。
+CDV_LEDGER_HEADINGS: tuple[str, ...] = (
+    "**铁索 / 阵亡都不暂停回放**（ADR-022）",
+    "**卡牌语音 = 用户素材 + 服务端派生通道**（ADR-023）",
+    "**演出覆盖层按家族独立**（ADR-024）",
+)
+
+CDV_SMOKE_CASE_ID_RE = re.compile(r"\bU-(?:CHAIN|DEATH|VOICE)-0[1-9][A-Za-z0-9]*\b")
+
+
+def test_the_chain_death_voice_ledger_rows_are_present_and_carry_a_test_landing() -> None:
+    """三条裁定行逐条在 §5，且「落地位置」列有可核的测试落点（正式的 + 烟测的）。
+
+    动机与 U1 / U2 两条相同。这三行各自的落点是**两种**并存：静态用例钉结构、烟测钉行为；
+    只引其中一半（或引一条不存在的烟测 id）都算落点不完整/不可核。
+    """
+    rows = section5_rows()
+    smoke = SMOKE_TEST.read_text(encoding="utf-8")
+    for heading in CDV_LEDGER_HEADINGS:
+        matches = [
+            (line_no, line) for line_no, line in rows if line.startswith(f"| {heading}")
+        ]
+        assert len(matches) == 1, (
+            f"`06`（§5「程序化约定与偏离一手」）应恰好有一条以 {heading!r} 开头的收口账本行，"
+            f"实际 {len(matches)} 条"
+        )
+        line_no, line = matches[0]
+        landing = _landing_cell(line)
+        assert "tests/" in landing, f"§5:{line_no}: 账本行的落点缺少 tests/ 引用：{landing}"
+        assert "::test_" in landing, (
+            f"§5:{line_no}: 账本行的落点没有正式 pytest 名（只有烟测 id 不够）：{landing}"
+        )
+        case_ids = CDV_SMOKE_CASE_ID_RE.findall(landing)
+        assert case_ids, (
+            f"§5:{line_no}: 账本行的落点没有具体 ui_smoke 用例 id：{landing}"
+        )
+        missing = [case_id for case_id in case_ids if case_id not in smoke]
+        assert not missing, (
+            f"§5:{line_no}: 账本行引用的 ui_smoke 用例不存在：{missing}"
+        )
+
+
 def test_doc06_superseded_by_in_landing_cells_is_well_formed() -> None:
     errors = _superseded_by_errors()
     assert errors == [], "\n".join(errors)

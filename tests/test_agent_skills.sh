@@ -76,6 +76,62 @@ check_file docs/agents/domain.md ".scratch/m2-standard-identity/issues/" "M2 决
 check_file docs/agents/domain.md ".scratch/m2-standard-identity/writeback.md" "票级行索引指针"
 check_file docs/agents/domain.md "存在时才读，缺则跳过" "gitignored 产物的读法"
 
+# 术语表：伤害档（damage-fx-natures 票 05 收口守护；词条在该 effort 的票 01 之前就已落地）。
+# 属性选**演出家族**、伤害档选**家族内强度**，两轴正交——这张票的一切"按属性分派"都由它派生。
+check_file GLOSSARY.md "**伤害档**：" "伤害档词条（damage-fx-natures 的词汇层）"
+check_file GLOSSARY.md "它与**属性伤害**里的**属性**正交" "伤害档 = 属性 × 强度（两轴正交）"
+
+# 前端地图失真守护（damage-fx-natures 票 05）：票 01–03 把旧口径「只有无属性 / 同时在播
+# 上限 3 条 / 最多 3 张离屏舞台 / 三条声道池」换成了三族并列。旧措辞一旦回来，地图就会
+# 把下一个改前端的人指向已经不存在的形状；这几条把它们挡在门禁上（docs 快速档也跑本文件）。
+FRONTEND_MAP_STALE=(
+  "同时在播上限 3 条"
+  "最多 3 张离屏舞台"
+  "三条声道池"
+  '只有 `FIRE` / `THUNDER` 跳过'
+  "无属性伤害演出的**排播"
+)
+
+frontend_map_stale_phrases() { # $1=仓库根；打印命中的旧措辞（每行一条），无命中则空
+  local root="${1:-.}" stale
+  for stale in "${FRONTEND_MAP_STALE[@]}"; do
+    if grep -qF "$stale" "$root/docs/agents/frontend-map.md" 2>/dev/null; then
+      printf '%s\n' "$stale"
+    fi
+  done
+}
+
+if [ ! -f docs/agents/frontend-map.md ]; then
+  echo "FAIL: 缺少 docs/agents/frontend-map.md"
+  fail=1
+else
+  stale_hits="$(frontend_map_stale_phrases .)"
+  if [ -n "$stale_hits" ]; then
+    while IFS= read -r stale; do
+      echo "FAIL: docs/agents/frontend-map.md 仍含旧措辞『$stale』（damage-fx-natures 票 05）"
+    done <<< "$stale_hits"
+    fail=1
+  else
+    echo "PASS: docs/agents/frontend-map.md 不含 damage-fx 时代的 ${#FRONTEND_MAP_STALE[@]} 条旧措辞"
+  fi
+fi
+
+# 合成反例：把一条旧措辞写进副本 ⇒ 同一条判据必须命中（防 grep 路径写错时空转通过）。
+frontend_map_probe_goes_red() {
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  mkdir -p "$probe/docs/agents"
+  { cat docs/agents/frontend-map.md; printf '\n同时在播上限 3 条\n'; } \
+    > "$probe/docs/agents/frontend-map.md"
+  out="$(frontend_map_stale_phrases "$probe")"
+  rm -rf "$probe"
+  [ -n "$out" ]
+}
+if ! frontend_map_probe_goes_red; then
+  echo "FAIL: 合成反例未变红——旧措辞写进 frontend-map 副本后未被判红（grep 空转）"
+  fail=1
+fi
+
 # coding standards（票 04）：评审期的判断题标准存在，且 AGENTS.md 只留导航指针。
 check_exists CODING_STANDARDS.md
 check_file AGENTS.md "### Coding standards" "coding standards 子段"

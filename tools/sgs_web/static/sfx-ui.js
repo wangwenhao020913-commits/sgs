@@ -228,7 +228,191 @@ function damageSfxEnsureModules() {
       if (lane.live) live += 1;
     }
   }
+  // chain-death-voices 票 01：铁索的**一路**排程器也在这一个手势 / 开关里建（同一个 tick）。
+  chainSfxEnsure();
+  // chain-death-voices 票 02：阵亡那一路同样在这一个手势里建（池长 1，惰性）。
+  deathSfxEnsure();
+  // chain-death-voices 票 03：卡牌语音也要在同一次手势里解锁（`Audio.play()` 的自动播放
+  // 策略只认手势；语音模块自己没有开关，`unlock()` 只记"手势已发生"）。
+  cardVoiceUnlock();
   return live;
+}
+
+/* ---------------------------------------------- 卡牌语音（chain-death-voices 票 03） */
+
+/** 卡牌语音模块（`sfx-voices.js` 的 `SgsCardVoice`）：**不是**声道池，也不是一次性排程器
+ *  ——它每条语音自起一路 `Audio`、可重叠不打断。这里只做一件事：把手势 / 开关**单向**灌进去
+ *  （`unlock` / `mute`）；本文件**不读**语音模块的任何状态（在播表 / 计数器都不碰）。
+ *
+ * 没有 `SgsCardVoice`（缺件）⇒ 整套卡牌语音就是**不存在**，不报错（与其它音效同一条降级口径）。 */
+function cardVoiceModule() {
+  return window.SgsCardVoice && typeof window.SgsCardVoice === "object"
+    ? window.SgsCardVoice
+    : null;
+}
+
+/** 手势灌进去（`damageSfxEnsureModules` 在同一个 tick 里顺手调）。 */
+function cardVoiceUnlock() {
+  const api = cardVoiceModule();
+  if (!api || typeof api.unlock !== "function") return false;
+  return api.unlock() !== false;
+}
+
+/** 开关灌进去（`damageSfxMute` 顺手调它：同一个开关管所有声音）。
+ *
+ * 关 = 停掉全部存活语音并清表（`SgsCardVoice.mute(true)` 自己 `stopAll`）；开 = 下一次事实
+ * 才建 `Audio`。**单向**：语音模块不读 `damageSfxOn`，只认这一次灌入。 */
+function cardVoiceMute(muted) {
+  const api = cardVoiceModule();
+  if (!api || typeof api.mute !== "function") return;
+  api.mute(Boolean(muted));
+}
+
+/* ---------------------------------------------- 铁索连环的音效（chain-death-voices 票 01） */
+
+/** 铁索那一路（`SgsChainSfx` 是**一次性排程器**：`play(mode)` 排完整段、`stop()` 收掉，
+ *  没有逐帧 `tick`，所以不进上面按模块分组的伤害声道池）。池长 **1**——横置不是高频事件
+ *  （spec §演出口径）。惰性建：只有页面上加载了该模块、且用户开过「♪」时才建
+ *  （`damageSfxEnsureModules` 在同一个手势 / 开关里顺手建它）。 */
+let chainSfxLane = null;
+
+/** 这句话现在属于谁（评审修复：收尾停声要认主人）。
+ *
+ * 一个 bus + 模块的 `play()` 先 `stopAll()` ⇒ 后开的一声会顶掉前一条；同批两条链差 120ms
+ * 时，先收尾的那条若照旧无条件 `stop()`，就会把**后一条还在演的那声**掐断。故
+ * `chainSfxPlay` 每次开声发一个递增 token，`chainSfxStop(owner)` 只在 owner 是当前主人时停；
+ * 不带参 = 换局 / 关「♪」那类**强制**收声（`clearChainFx` 仍走那一档）。 */
+let chainSfxOwner = 0;
+let chainSfxOwnerToken = null;
+
+/** 惰性建那一路并解锁（`unlock()` 必须在真实手势的同一个 tick 里调）。
+ *
+ * 没有 `SgsChainSfx`（缺件）/ 没有 `AudioContext` 时返回 `null`：整套铁索音效就是
+ * **不存在**，不报错（与伤害声道同一条降级口径）。
+ */
+function chainSfxEnsure() {
+  if (!chainSfxLane) {
+    const api = window.SgsChainSfx;
+    if (!api || typeof api.create !== "function") return null;
+    const player = api.create();
+    if (!player || typeof player.play !== "function") return null;
+    chainSfxLane = { player };
+  }
+  if (typeof chainSfxLane.player.unlock === "function") {
+    try {
+      chainSfxLane.player.unlock();
+    } catch (error) {
+      // 没有 AudioContext / 被策略禁用：静默降级，画面照旧。
+    }
+  }
+  chainSfxMute(!damageSfxOn);
+  return chainSfxLane;
+}
+
+/** 铁索一次演出开声（`fx-chain.js` 的 `startChainPlay` 调；**单向缝**：它只认这两个口）。
+ *
+ * 「♪」关着时 `return null`——一声都不出，而且**连 `AudioContext` 都不建**（缺省静音是
+ * 零代价的，三条既有口径之一）。
+ *
+ * 返回值 = 这一声的 **owner token**（没出声就是 `null`）：`fx-chain.js` 把它记在 play 上，
+ * 收尾时原样交回 `chainSfxStop`，只有当前声音的主人能停。
+ */
+function chainSfxPlay(mode) {
+  if (!damageSfxOn) return null;
+  const lane = chainSfxEnsure();
+  if (!lane) return null;
+  if (typeof lane.player.play === "function") {
+    lane.player.play(mode === "break" ? "break" : "link", 0, 1.0);
+  }
+  chainSfxOwnerToken = chainSfxOwner + 1;
+  chainSfxOwner = chainSfxOwnerToken;
+  return chainSfxOwnerToken;
+}
+
+/** 一次演出收尾：**只有当前声音的主人**能停（画面摘层时由 `fx-chain.js:finishChainPlay` 调）。
+ *
+ * 不带 `owner` = 强制收声（换局 / 关「♪」的路径仍然这么调）；带了 owner 但不是当前主人
+ * ⇒ 零动作：后开的那一声还在演，先收尾的那条不许掐断它。
+ */
+function chainSfxStop(owner) {
+  if (!chainSfxLane) return false;
+  if (owner !== undefined) {
+    /* `null` 不是主人（这一场没出声）——只有开声时发出去的 token 才许停。 */
+    if (owner === null || owner !== chainSfxOwnerToken) return false;
+  }
+  if (typeof chainSfxLane.player.stop === "function") chainSfxLane.player.stop();
+  chainSfxOwnerToken = null;
+  return true;
+}
+
+/** 开关灌到铁索这一路（`damageSfxMute` 顺手调它：同一个开关管所有声音）。 */
+function chainSfxMute(on) {
+  if (!chainSfxLane) return;
+  if (typeof chainSfxLane.player.mute === "function") chainSfxLane.player.mute(Boolean(on));
+}
+
+/* ---------------------------------------------- 阵亡的音效（chain-death-voices 票 02） */
+
+/** 阵亡那一路（`SgsDeathSfx` 与 `SgsChainSfx` 同姿态：**一次性排程器**
+ *  `play(fromT, speed)` 排完整段、`stop()` 收掉，没有逐帧 `tick`，不进伤害声道池）。
+ *  池长 **1**——模块里只有一个 bus（素材包 §7 的已知边界），并发上限 2 时后一条顶掉前一条。
+ *  惰性建：只有页面上加载了该模块、且用户开过「♪」时才建（`damageSfxEnsureModules` 在
+ *  同一个手势 / 开关里顺手建它）。 */
+let deathSfxLane = null;
+
+/** 惰性建那一路并解锁（`unlock()` 必须在真实手势的同一个 tick 里调）。
+ *
+ * 没有 `SgsDeathSfx`（缺件）/ 没有 `AudioContext` 时返回 `null`：整套阵亡音效就是
+ * **不存在**，不报错（与伤害 / 铁索声道同一条降级口径）。 */
+function deathSfxEnsure() {
+  if (!deathSfxLane) {
+    const api = window.SgsDeathSfx;
+    if (!api || typeof api.create !== "function") return null;
+    const player = api.create();
+    if (!player || typeof player.play !== "function") return null;
+    deathSfxLane = { player };
+  }
+  if (typeof deathSfxLane.player.unlock === "function") {
+    try {
+      deathSfxLane.player.unlock();
+    } catch (error) {
+      // 没有 AudioContext / 被策略禁用：静默降级，画面照旧。
+    }
+  }
+  deathSfxMute(!damageSfxOn);
+  return deathSfxLane;
+}
+
+/** 一次阵亡开声（`fx-death.js` 的 `startDeathPlay` 调；**单向缝**：它只认这三个口）。
+ *
+ * 「♪」关着时 `return null`——一声都不出，而且**连 `AudioContext` 都不建**（缺省静音是
+ * 零代价的，三条既有口径之一）。
+ *
+ * `speed` = `3.05 / 牌桌秒`（画面 `draw(t)` 用的是同一个倍率）：音效模块只认 `fromT` /
+ * `speed`，报点从 `SgsDeathFX.PARAMS` 读，两边同一张表。
+ */
+function deathSfxPlay(fromT, speed) {
+  if (!damageSfxOn) return null;
+  const lane = deathSfxEnsure();
+  if (!lane) return null;
+  if (typeof lane.player.play === "function") {
+    const at = Number(fromT);
+    const rate = Number(speed);
+    lane.player.play(Number.isFinite(at) && at > 0 ? at : 0, Number.isFinite(rate) && rate > 0 ? rate : 1);
+  }
+  return lane;
+}
+
+/** 一次演出收尾：这一声停掉（画面摘层时由 `fx-death.js:finishDeathPlay` 调）。 */
+function deathSfxStop() {
+  if (!deathSfxLane) return;
+  if (typeof deathSfxLane.player.stop === "function") deathSfxLane.player.stop();
+}
+
+/** 开关灌到阵亡这一路（`damageSfxMute` 顺手调它：同一个开关管所有声音）。 */
+function deathSfxMute(on) {
+  if (!deathSfxLane) return;
+  if (typeof deathSfxLane.player.mute === "function") deathSfxLane.player.mute(Boolean(on));
 }
 
 /** 把开关灌到所有声道上（没有声道时只是空转：状态仍由 `damageSfxOn` 记着）。 */
@@ -239,6 +423,12 @@ function damageSfxMute(muted) {
       lane.player.mute(Boolean(muted));
     }
   }
+  // 铁索那一路同一个开关（chain-death-voices 票 01）。
+  chainSfxMute(Boolean(muted));
+  // 阵亡那一路同一个开关（chain-death-voices 票 02）。
+  deathSfxMute(Boolean(muted));
+  // 卡牌语音同一个开关（chain-death-voices 票 03）：关的时候停掉全部存活语音。
+  cardVoiceMute(Boolean(muted));
 }
 
 /** 启动时读一次记忆并刷按钮（`main.js:wire()` 里调一次）。 */
@@ -257,6 +447,9 @@ function damageSfxSync() {
 function damageSfxUnlock() {
   if (damageSfxUnlocked) return false;
   damageSfxUnlocked = true;
+  // chain-death-voices 票 03：卡牌语音记下"手势已发生"（与开关无关：缺省静音时用户先点
+  // 「开始对局」、之后才开「♪」也是常见路径，那次点击同样是手势）。
+  cardVoiceUnlock();
   if (!damageSfxOn) return false;
   return damageSfxEnsureModules() > 0;
 }

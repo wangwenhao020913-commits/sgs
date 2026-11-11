@@ -334,6 +334,14 @@ function renderTable() {
   // 每步都重绘全表）不打断。这行原来住在 `effects.js:syncTransientEffects` 里（动效层 →
   // 伤害层的反向钩子）；排播搬进 `damage-fx.js` 后由**重绘的调用方**显式说这句话。
   damageDropStalePlays();
+  // chain-death-voices 票 01：横置的常态铁索贴图与"演完才挂"的抑制态都是**贴上去的**，座位节点
+  // 每次重绘都会被重建 ⇒ 回放每走一步都要重贴一次（否则一步 `renderTable` 就把它们打回原点）。
+  // 同一个钩子还顺手比一次在播演出的武将块矩形：版式变了就摘掉那几条（口径同伤害层）。
+  chainFxSync();
+  // chain-death-voices 票 02：阵亡演出的 `data-death-fx`（`hold` / `gone`）同样是**贴上去
+  // 的**，座位节点每次重绘都会被重建 ⇒ 这里重贴一遍；同一个钩子顺手比一次在播演出的武将块
+  // 矩形，版式变了就整条作废（摘层 + 清属性——属性留着会让那张牌永远不灰）。
+  deathFxSync();
 
   // 快照到达时把处理区并进 `state.effectCards`（同一张牌保留回放期间的使用者标注）；
   // 回放期间不并——那份是逐事件派生的，快照要等播完才提交。

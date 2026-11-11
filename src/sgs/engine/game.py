@@ -21,6 +21,7 @@ from sgs.data import (
     CardTagClear,
     Color,
     ContentPack,
+    Gender,
     Hero,
     HeroDealConfig,
     Identity,
@@ -562,6 +563,45 @@ class DamageEvent:
     """
 
 
+@dataclass(frozen=True, slots=True)
+class CardUseEvent:
+    """一次**卡牌使用 / 打出**事实的公共面（chain-death-voices 票 03）：谁用了、什么牌、锚在哪。
+
+    与 :class:`DamageEvent` / :class:`SkillActivation` 同一姿态：**不是**记录流的一条记录，
+    而是引擎侧的只增缓冲（:attr:`Engine.card_events`）里的一条。理由：记录流里一次使用只有
+    ``card_move(reason=USE)``（手牌 → 处理区），而
+    :class:`~sgs.state.deltas.CardMoveDelta` 只有 ``cards / from_zone / to_zone / reason``
+    ——金录像逐字节冻结，一格都加不得——但"这次**当成什么牌**使用 / 打出"（转化 / 纯虚拟的
+    产物牌型）与"使用者是男是女"这两样事实，记录面根本没有；合成 / 猜测都不行。
+
+    它**只服务表现层**（卡牌语音按产物牌型 + 使用者性别选素材）：规则层一个读者都没有，
+    也不消耗随机数 ⇒ 既有金录像逐字节不变。缺省为空元组的读取方（只喂静态 jsonl 录像的
+    回放）因此只少这一路表现。
+    """
+
+    seq: int
+    """锚点 = ``push_frame`` 之后**最后一条记录**的 ``seq``（前端回放到它时出声）。
+
+    两个入口都在自己的帧（``USE`` / ``PLAY``）压栈**之后**立刻取它，故锚点恒是那条帧记录；
+    与 ``damage_events`` 同一"按记录序号释放"口径——``seq > after`` 才下发，轮询不重复。
+    """
+
+    seat: int
+    """使用 / 打出的座位号（前端据此找"使用者"的性别——性别是**武将牌**的事实）。"""
+
+    card_type: str
+    """**产物**牌型（转化 / 纯虚拟 = "当成什么牌"，不是来源实体牌）。语音按它查表。"""
+
+    card_name: str
+    """产物牌名（展示事实，与 ``card_type`` 同源；前端不按它查表）。"""
+
+    gender: Gender | None
+    """使用者的武将性别；``None`` = 无武将模式（前端回落 ``male``，引擎不猜）。"""
+
+    virtual: bool
+    """``True`` = 转化 / 纯虚拟产物（同一条语音，但事实要分辨得出来）。"""
+
+
 def _card_from_hand(state: GameState, source: int, card: CardRef) -> bool:
     """这张使用 / 打出的牌此刻是不是**手牌**（M6 票 16 的界【涯角】判据）。
 
@@ -803,6 +843,14 @@ class Engine:
         与 :attr:`_skill_activations` 同一姿态：不耗随机数、不改状态、不进记录 ⇒
         47 条金录像逐字节不变。
         """
+        self._card_events: list[CardUseEvent] = []
+        """**卡牌使用 / 打出事实**的只增缓冲（chain-death-voices 票 03；表现层专用）。
+
+        唯一追加点 = :meth:`note_card_use`，只由 :meth:`start_use` / :meth:`play_card`
+        两个入口在各自的帧压栈之后调一次（两入口互斥：一次动作只走其中一条）⇒
+        "一次使用 / 打出 ⇒ 恰好一条"。与 :attr:`_damage_events` 同一姿态：只 ``append``，
+        不写状态、不发记录、不取随机数。
+        """
         self._started = False
         self._l0_in_progress = False
         """L0 派发（:meth:`_start`）**是否已经开始过**。
@@ -1019,6 +1067,46 @@ class Engine:
                 target=int(target),
                 amount=int(amount),
                 nature=None if nature is None else DamageNature(nature),
+            )
+        )
+
+    @property
+    def card_events(self) -> tuple[CardUseEvent, ...]:
+        """**卡牌使用 / 打出事实**的派生面（chain-death-voices 票 03）：只增缓冲的只读视图。
+
+        与 :attr:`damage_events` 同一姿态：不进 ``records``、不消耗随机数 ⇒ 47 条金录像
+        逐字节不变。缺省为空元组的读取方（只喂静态 jsonl 录像的回放）因此不抛错、只少这一路。
+        """
+        return tuple(self._card_events)
+
+    def note_card_use(self, *, seat: int, card: CardRef) -> None:
+        """记一次**卡牌使用 / 打出**（chain-death-voices 票 03；表现层专用）。
+
+        只由两处调用，都在**牌真正被用掉、且自己的帧已经压栈之后**：
+
+        - :meth:`start_use`（使用链：真牌、转化产物、纯虚拟产物；``steps.py`` 的【闪】
+          响应也走它）；
+        - :meth:`play_card`（``PLAY`` 帧：响应 / 打出窗口）。
+
+        两个入口互斥（一次动作只走其中一条），故一次使用 / 打出恰好记一条。
+
+        ``seq`` 取 ``push_frame`` 之后**最后一条记录**的序号（锚在 ``USE`` / ``PLAY`` 的
+        push 记录上），与 ``damage_events`` 同一"按记录序号释放"口径。
+
+        ``card_type`` / ``card_name`` 取**产物** ``CardRef``（转化 / 纯虚拟都是"当成什么牌"），
+        ``gender`` 取使用者自己的武将性别（``None`` = 无武将模式，前端回落 ``male``）。
+
+        只 ``append``：不写状态、不发记录、不取随机数。
+        """
+        gender = self.state.player(seat).gender
+        self._card_events.append(
+            CardUseEvent(
+                seq=self._last_seq,
+                seat=int(seat),
+                card_type=str(card.type),
+                card_name=str(card.name),
+                gender=None if gender is None else Gender(gender),
+                virtual=bool(card.is_virtual),
             )
         )
 
@@ -1854,6 +1942,9 @@ class Engine:
             data,
             timing=use_timing if use_timing is not None else Timing.USE_CHOOSE_TARGET,
         )
+        # chain-death-voices 票 03：卡牌事实锚在**刚压上的 USE 帧记录**上（必须在
+        # `set_wine_active` 之前——那条会再发一条记录、锚点就漂到它上面去了）。
+        self.note_card_use(seat=source, card=card)
         if deal_bonus:
             self.set_wine_active(frame, source, False)
         return frame
@@ -1872,7 +1963,7 @@ class Engine:
         座位级事实；判据与 ``start_use`` 共用 :meth:`_note_play_phase_slash`。
         """
         self._note_play_phase_slash(card, source)
-        return self.push_frame(
+        frame = self.push_frame(
             FrameKind.PLAY,
             {
                 "card": card,
@@ -1882,6 +1973,9 @@ class Engine:
             },
             timing=timing,
         )
+        # chain-death-voices 票 03：打出与使用是**互斥的两个入口**，各记一条（锚在 PLAY 帧上）。
+        self.note_card_use(seat=source, card=card)
+        return frame
 
     def start_skill(self, action: ActivateSkill, *, source: int) -> Frame:
         """发动一个**主动技**：压入 SKILL 帧（票 04）。

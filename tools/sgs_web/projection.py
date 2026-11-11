@@ -84,6 +84,7 @@ __all__ = [
     "HARVEST_REQUIREMENT",
     "build_skills",
     "candidate_index",
+    "card_events_after",
     "concealed_by_later_reveal",
     "concealed_guohuo_cards",
     "damage_events_after",
@@ -3014,5 +3015,74 @@ def damage_events_after(
             }
         )
     # 同一批里多条伤害事件按记录序号排：前端"逐条播、相邻错开 120ms"（spec §演出口径）。
+    out.sort(key=lambda event: event["seq"])
+    return out
+
+
+def card_events_after(
+    records: Iterable[object],
+    *,
+    after: int,
+    state: Any,
+    events: Iterable[Any] = (),
+) -> list[dict[str, Any]]:
+    """从**未裁剪**的记录流派生卡牌使用 / 打出事实（chain-death-voices 票 03）：``seq > after``
+    的那几条。
+
+    判据、游标、去重口径**与** :func:`damage_events_after` 完全一致，只换事实来源：
+
+    - 事实来源是引擎的只增缓冲 ``Engine.card_events``——记录流里一次使用只有
+      ``card_move(reason=USE)``，而"这次**当成什么牌**用掉"（转化 / 纯虚拟的产物牌型）与
+      "使用者是男是女"这两样事实记录面根本没有，猜不出来；
+    - ``seq`` 是引擎在帧压栈之后取的最后一条记录序号，故与 ``records`` 共用同一个
+      ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复出声；
+    - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
+      时才下发，超出上界的留到下一次轮询；
+    - ``state`` 只用来**夹座位**（``seat`` 必须落在本局座位里）：越界条目是坏数据，宁可不下发
+      也不让前端拿它去查一个不存在的座位。
+
+    **不按视角过滤**：使用 / 打出是**公开事实**（牌本来就明置），与伤害同一档。
+    ``card_type`` / ``card_name`` 原样透传**产物**（转化 / 纯虚拟是"当成什么牌"）；
+    ``gender`` 原样透传使用者性别，``None``（无武将模式）不替前端回落。
+
+    ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
+    （没有卡牌语音），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
+    """
+    last_seq: int | None = None
+    for raw in records:
+        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
+        seq = record.get("seq")
+        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
+            last_seq = seq
+    seat_count = len(getattr(state, "players", ()) or ())
+    out: list[dict[str, Any]] = []
+    for event in events or ():
+        seq = getattr(event, "seq", None)
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        if last_seq is not None and seq > last_seq:
+            continue
+        seat = getattr(event, "seat", None)
+        if seat is None:
+            continue
+        seat = int(seat)
+        if seat_count and not 0 <= seat < seat_count:
+            continue
+        card_type = getattr(event, "card_type", None)
+        if not card_type:
+            continue
+        gender = getattr(event, "gender", None)
+        out.append(
+            {
+                "seq": seq,
+                "seat": seat,
+                "card_type": str(card_type),
+                "card_name": str(getattr(event, "card_name", "") or ""),
+                # `Gender` 是 str 枚举：读它的 `.value`；无武将模式保持 `None`（前端回落 male）。
+                "gender": None if gender is None else str(getattr(gender, "value", gender)),
+                "virtual": bool(getattr(event, "virtual", False)),
+            }
+        )
+    # 同一批里多条按记录序号排：前端按回放游标逐条放，不攒播（语音可重叠）。
     out.sort(key=lambda event: event["seq"])
     return out

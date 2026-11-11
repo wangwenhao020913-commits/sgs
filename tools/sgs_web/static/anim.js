@@ -117,8 +117,14 @@ function animParseIni(text) {
  * damage-fx 票 04：19 个 ``damage_fx_*`` 键住同一份 ``anim.ini``（用户改一份文件就能调
  * 两套时长），它们的**内置默认在 `fx-core.js`**（`SgsDamageFX.DEFAULT_TIMING`，那是时间轴
  * 语义的拥有者）。本文件只负责"读进来、别当未知键删掉"——不抄第二份默认值，也不替它钳制。
+ *
+ * chain-death-voices 票 01：铁索连环的两个 ``chain_fx_*`` 键同姿态，内置默认在
+ * `fx-chain.js`（`SgsChainFX.DEFAULT_TIMING`，钳制 800–2400ms 也在那里）。
+ *
+ * chain-death-voices 票 02：阵亡的那个 ``death_fx_total`` 同理，内置默认在 `fx-death.js`
+ * （`SgsDeathFX.DEFAULT_TIMING`，钳制 1200–3200ms 也在那里）。
  */
-const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_"];
+const ANIM_FOREIGN_KEY_PREFIXES = ["damage_fx_", "chain_fx_", "death_fx_"];
 
 /** 这个键是不是别的模块的（前缀登记过 ⇒ 原样留在 `animConfig` 里）。 */
 function animIsForeignKey(key) {

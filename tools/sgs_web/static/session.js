@@ -712,6 +712,9 @@ function applyView(body) {
     // damage-fx 票 05：伤害演出同理——上一局那一剑不能劈在新局的牌桌上（覆盖层与在播演出
     // 由 commitView 换会话时显式调 `clearDamageFx()` 摘掉，票 09 起不再经动效层转手）。
     state.damageEvents = [];
+    // chain-death-voices 票 03：上一局还没到点的卡牌事实不属于新局（语音本身由 commitView
+    // 换会话时 `SgsCardVoice.stopAll()` 收掉）。
+    state.cardEvents = [];
     // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
     state.liveView = null;
   }
@@ -723,6 +726,11 @@ function applyView(body) {
   // 回放走到那条记录的 `seq` 才挥剑。默认空表由这里建（`state` 的其余字段在 core.js）。
   if (!Array.isArray(state.damageEvents)) state.damageEvents = [];
   for (const event of body.damage_events || []) state.damageEvents.push(event);
+  // chain-death-voices 票 03：卡牌使用 / 打出事实是**第三条派生通道**（服务端在每次使用 /
+  // 打出时下发 `{seq, seat, card_type, card_name, gender, virtual}`），与 `damage_events`
+  // 同姿态——先收进队列，回放走到那条记录的 `seq` 才出声。
+  if (!Array.isArray(state.cardEvents)) state.cardEvents = [];
+  for (const event of body.card_events || []) state.cardEvents.push(event);
   // U1-07：快照的处理区已经是**产物**（服务端把转化来源组换成了虚拟牌），回放期间也要
   // 按同一份映射把"来源牌进处理区"渲染成产物，否则用户会先看到两张源牌再被快照纠正。
   state.processingProducts = processingProductMap(
@@ -959,6 +967,22 @@ function stepPlayback(immediate) {
     // damage-fx 票 05：伤害演出挂在**同一条 seq 游标**上（这是它唯一的触发点：不在
     // `applyLiveDelta` 里、也不在提交视图时触发）。
     fireDamageEventsThrough(record.seq);
+    // chain-death-voices 票 03：卡牌语音挂在**同一条 seq 游标**上（到点的事实逐条播，其余
+    // 留在 `state.cardEvents` 里等下一批）。**每条自起一路**、可重叠不打断，所以这里既不
+    // 排播也不等待——出口只有 `SgsCardVoice.play`。
+    fireCardEventsThrough(record.seq);
+    // chain-death-voices 票 01：铁索连环的横置 / 重置演出**紧挨着**伤害演出的下一行。
+    // 与伤害不同，它读的是**整条记录**（判据 `delta_type === "chained_change"`，座位在
+    // `record.seat`）；首批用它自己的 `state.chainSeq` 游标压掉历史，打开一局已横置的对局
+    // 不会补播入链。**无时停**：这里没有任何登记，演出与后续记录并行是口径。
+    fireChainEventsThrough(record);
+    // chain-death-voices 票 02：阵亡演出也挂在**同一条 seq 游标**上（触发判据只看记录：
+    // `kind === "timing"` ∧ `timing === "DEATH_BEFORE_START"`，座位 = `record.actor`；
+    // **不用** `hp_change` 到 0 去猜——护甲全吸收 / 濒死被救都会猜错）。**无时停**：这里没有
+    // 任何登记，2.2s 里记录流照常推进是用户口径（后续事件画在"正在碎的牌"旁边是预期）。
+    // 上面的 `renderTable()` 已经把这张牌画成"已阵亡"；演出层自己贴 `data-death-fx`
+    // 把灰与「阵亡」标签压到收尾那一刻（三条覆盖规则，见 `style.css`）。
+    fireDeathEventsThrough(record.seq);
     scrollLogToBottom();
   }
   playback.index += 1;
@@ -1407,6 +1431,18 @@ function commitView(body) {
     // 上一局那一剑不能劈在新桌上，也不能在新桌上响完。
     clearDamageFx();
     state.damageEvents = [];
+    // chain-death-voices 票 01：铁索的入链 / 解锁是**另一层**的一次演出（自己的覆盖层
+    // `#t-chain-fx`、自己的队列 / 计时器 / 常态贴图），换局同样连声音一起收掉。`state.chainSeq`
+    // 也在这里清回 `null`——新局首批的记录是历史，不该补播入链。
+    clearChainFx();
+    // chain-death-voices 票 02：阵亡演出同理（自己的覆盖层 `#t-death-fx`、自己的计时器、
+    // 座位上的 `data-death-fx`）。**必须清属性**：覆盖规则留着会让上一局的座位在新桌上
+    // 永远不灰（或永远不显示）——spec §硬约束。
+    clearDeathFx();
+    // chain-death-voices 票 03：上一局的卡牌语音不拖进新局（每条语音自己一路 `Audio`，停掉
+    // 全部存活的那几路并清表）；队列同时清空（`applyView` 的换会话分支也清一次）。
+    SgsCardVoice.stopAll();
+    state.cardEvents = [];
   }
   state.view = body;
   // U3-05（D11）：提交即权威——live view 用这份快照整份覆盖（下一批事件从它起算）。

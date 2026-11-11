@@ -76,6 +76,33 @@ check "06-里程碑与风险.md" "风险清单与对策" "风险"
 check "06-里程碑与风险.md" "决策记录（ADR）" "决策记录"
 check "06-里程碑与风险.md" "ADR-001" "存疑点登记"
 
+# damage-fx-natures 票 05 收口：三属性伤害演出的两条形状裁定（排播共享 / 整屏闪通道）。
+# 变化时 §4 的常设规矩要求同步规则文档 / 配置项 / 测试；这里只钉"裁定行与变更块还在"，
+# 落地位置与断言由 test_writeback_landing 核 §5 账本行。
+check "06-里程碑与风险.md" '| ADR-020 | 三属性伤害演出的形状' "ADR-020 三属性伤害演出的形状"
+check "06-里程碑与风险.md" '| ADR-021 | 整屏闪的实现通道' "ADR-021 整屏闪的实现通道"
+check "06-里程碑与风险.md" '> **ADR-020 变更说明（依据' "ADR-020 变更说明块（替换『只有无属性』旧口径）"
+check "06-里程碑与风险.md" '> **ADR-021 变更说明（依据' "ADR-021 变更说明块（着色子层不是 filter）"
+
+# chain-death-voices 票 04 收口：铁索 / 阵亡无时停、卡牌语音的派生通道、覆盖层按家族独立。
+# 与上一段同姿态：只钉"裁定行与变更块还在"，落地位置与断言由 test_writeback_landing 核 §5 账本行。
+check "06-里程碑与风险.md" '| ADR-022 | 铁索 / 阵亡演出的回放时序' "ADR-022 铁索 / 阵亡演出的回放时序"
+check "06-里程碑与风险.md" '| ADR-023 | 卡牌语音的事实来源与素材口径' "ADR-023 卡牌语音的事实来源与素材口径"
+check "06-里程碑与风险.md" '| ADR-024 | 演出覆盖层的组织方式' "ADR-024 演出覆盖层的组织方式"
+check "06-里程碑与风险.md" '> **ADR-022 变更说明（依据' "ADR-022 变更说明块（无时停，素材包 hold 建议不采纳）"
+check "06-里程碑与风险.md" '> **ADR-023 变更说明（依据' "ADR-023 变更说明块（派生通道 + 素材白名单）"
+check "06-里程碑与风险.md" '> **ADR-024 变更说明（依据' "ADR-024 变更说明块（每家族一张覆盖层）"
+check "06-里程碑与风险.md" '### 5.7 铁索 / 阵亡 / 卡牌语音' "§5.7 账本小节（三条裁定各一行）"
+
+# chain-death-voices 两轴评审的 RECORD 项（只写裁定、不改行为）：胶水重复是 spec §不做 的直接
+# 后果（已知债务）、card_events_after 照 damage_events_after 逐字加、两种排播入参由票 01/02
+# 各自点名、isUnlocked 是实机配方的唯一手势读数、gender 以裸字符串过线。钉在 ADR 变更块里。
+check "06-里程碑与风险.md" '提取共享 helper 记为**已知债务**' "ADR-022 变更块记下胶水重复是已知债务"
+check "06-里程碑与风险.md" '`fireDeathEventsThrough(seq)` 收 seq' "ADR-022 变更块记下两种排播入参"
+check "06-里程碑与风险.md" '`card_events_after` 与 `damage_events_after` 同形' "ADR-023 变更块记下同形是照写"
+check "06-里程碑与风险.md" '`SgsCardVoice.isUnlocked()` 不是推测性 API' "ADR-023 变更块记下 isUnlocked 的读取方"
+check "06-里程碑与风险.md" '`gender` 以裸字符串过线' "ADR-023 变更块记下跨线 JSON 只传字符串"
+
 # 票 02（M0 收尾）回写《开发文档/02-规则引擎设计.md》§3 的时机系统：D-1…D-9。
 # 依据：.scratch/m1-engine-skeleton/research/01-timing-enum-alignment.md §5.2；
 # 权威表 = src/sgs/timing/enum.py 的 83 节点。
@@ -310,6 +337,9 @@ check "$GLOSSARY" '失去装备 ≠ 弃置' "术语表：装备区条含『失�
 check "$GLOSSARY" '已有牌时走**顶替**' "术语表：装备区条点明顶替"
 check "$GLOSSARY" '不约束已冻结的报文字段标识符' "术语表：_Avoid_ 让步纪律"
 check "$GLOSSARY" '移动报文（`CardMoveDelta`）里的 **`owner`**' "术语表：归属条点明英文标识符 owner"
+# chain-death-voices 票 04：卡牌语音的词条（只写定义与 _Avoid_，实现细节在本账本与前端地图）。
+check "$GLOSSARY" '**卡牌语音**：' "术语表：卡牌语音词条"
+check "$GLOSSARY" '技能语音 / 声优台词' "术语表：卡牌语音的 _Avoid_"
 check "$GLOSSARY" '**程序化约定**：' "术语表：程序化约定词条"
 check "$GLOSSARY" '**偏离一手**：' "术语表：偏离一手词条"
 check "$GLOSSARY" '**无一手源**：' "术语表：无一手源词条"
@@ -419,7 +449,10 @@ check "$DOC06" '拼点 / 翻面 / 横置 / 标记零载体' "M3 账本：拼点 
 # 这条防的是两件事：① 漏写一条连带同步；② 加了新 ADR 却忘了同时补断言与集合。
 # 集合只列**由改判/重述产生变更说明**的 ADR；维持原决定（002 / 005）不在其内。
 # ADR-006 在 M6 界限突破收口改判（只存 OL 版 / 宝物与木牛流马推迟），同批加变更块。
-ADR_SYNC_ADRS="001 003 004 006 007 008 009 010 011 012 013 014 015"
+# ADR-020 / ADR-021 由 damage-fx-natures 票 05 新增（三族并列 / 着色闪子层），各自带变更块。
+# ADR-022 / ADR-023 / ADR-024 由 chain-death-voices 票 04 新增（无时停 / 派生通道 / 覆盖层独立），
+# 同样各带变更块；编号按落地顺序续编。
+ADR_SYNC_ADRS="001 003 004 006 007 008 009 010 011 012 013 014 015 020 021 022 023 024"
 adr_sync_block_count() {
   local n expected=0 adr
   n="$(grep -c '连带同步（本节「必须同步」要求，逐条记录）' "$DOC_DIR/$DOC06" || true)"
