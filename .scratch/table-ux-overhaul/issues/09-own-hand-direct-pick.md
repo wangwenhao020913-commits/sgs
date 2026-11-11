@@ -132,8 +132,8 @@ Ruling: spec §2 Q6 / Q20
    `..._is_a_table_direct_pick_without_leaking`）。
 2. `ui_smoke.mjs` 的 `M5-08a-b1..b4`：从"亮牌弹窗只读 + 点窗内牌"改写为"牌桌直选 + 点手牌"，
    一条不多一条不少（`b1..b4`）。
-3. **两处**借了"火攻亮牌步"当"弹窗步骤"夹具的**无关**断言被连带改写（这是本票唯一的额外
-   改动面，刻意登记）：`M5-08b-e1`（铁索段的"弹窗步骤 ⇒ 牌桌只读 + 无重铸入口"）与
+3. **两处**借了"火攻亮牌步"当"弹窗步骤"夹具的**无关**断言被连带改写（刻意登记）：
+   `M5-08b-e1`（铁索段的"弹窗步骤 ⇒ 牌桌只读 + 无重铸入口"）与
    `M5-08c-d1`（酒段的"弹窗步骤里点牌不设焦点"）。夹具换成**观看授予**形状（被亮的那张不在
    自己手里），被验证的行为一字未改；两处都写了夹具说明。
 4. **`tests/support/web_client.py`（真 HTTP 的 tape 驱动，也是"前端读取方"的一份）**：
@@ -150,7 +150,10 @@ Ruling: spec §2 Q6 / Q20
    `test_fire_attack_without_a_same_suit_card_has_no_discard_query_and_narrates_auto_pass`；
    票面写的 `9430/9500/9535` 是旧行号）不受影响，照旧绿。
 7. `tests/test_web_static.py` 无既有断言变红（只**新增**两条）；`docs/agents/frontend-map.md`
-   的 `candidates.js` / `modal.js` 两行补了新判据（导航图跟着改）。
+   的 `candidates.js` / `modal.js` 两行补了新判据（导航图跟着改）；`开发文档/04-AI与交互设计.md`
+   的 M5 火攻那条补了"票 09 起是牌桌直选、亮牌弹窗只留给观看授予"的后续口径（原句保留为
+   "M5 当时的样子"）。后两项与 `tests/support/web_client.py` 是本次**额外的**改动面，
+   一并登记在这里。
 
 ### 门禁结果
 
@@ -169,8 +172,9 @@ Ruling: spec §2 Q6 / Q20
   （该录像走的是 `draw_one` 分支）；投影是纯派生、不进记录流，火攻也不在标准 108 里 ⇒ 零重录。
 - `.venv/bin/python tools/check_acceptance.py .scratch/table-ux-overhaul` → **PASS**（本 effort
   8 张票共 52 个引用的测试名都存在且绿）。
-- 全量：`git commit` 的 pre-commit hook（`tests/run_all.sh --quiet`）→ 见提交本体（本票的验证
-  = 那次提交；hook 拒绝则修完重提）。
+- 全量：`git commit` 的 pre-commit hook（`tests/run_all.sh --quiet`）→ **ALL TESTS PASSED**
+  （10 段 shell 检查 + pytest 全绿；实现提交 `f340fa0`）。第一轮提交曾被 hook 拒（真 HTTP 的
+  tape 驱动 `tests/support/web_client.py` 还按旧载荷读亮牌步），修完那份读取方后重提通过。
 - `bsk`：**未驱动**（本环境 `browser_interact` 的 cooperate 握手失败，与票 07 同一实测结论），
   交互那半边由 `bash tests/smoke-web.sh`（同一批 DOM 行为的自动半边）+ 下面的配方兜。
 
