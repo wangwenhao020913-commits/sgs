@@ -133,6 +133,10 @@ class FrameHost(StepHost, Protocol):
         """记一条**伤害事实**（damage-fx 票 01；表现层专用，见 ``Engine.damage_events``）。"""
         ...
 
+    def note_life_loss(self, seat: int, amount: int) -> None:
+        """记一条**失去体力事实**（vital-fx 票 01；表现层专用，见 ``Engine.life_loss_events``）."""
+        ...
+
     def move_used_card_to_processing(self, frame: Frame) -> Control: ...
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
@@ -1313,8 +1317,18 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
         host.apply_armor_change(frame, target, player.armor - absorbed)
     # 护甲全吸收 ⇒ 体力一点没动（``hp_loss == 0``）且护甲确实动过 ⇒ **一条 hp_change 都不发**。
     hp_loss = amount - absorbed
+    # 失去体力**真的掉了多少** = ``before - after``（不是帧上的 ``amount``）：失去体力没有伤害
+    # 修正链，今天两者相等；取差值才是定义（vital-fx 票 01 §做法 2）。
+    hp_before = player.hp
     if hp_loss > 0 or absorbed == 0:
         host.apply_hp_change(frame, target, player.hp - hp_loss)
+        # vital-fx 票 01：**失去体力 ≠ 受到伤害**。判据**只有**帧私有的
+        # ``LIFE_DECREASE_DAMAGE_KEY``：由 :func:`damage_push_life_decrease` 置真（= 伤害，
+        # 照旧只走 ``damage_events``）；缺省 = 真正的失去体力（【苦肉】/【反间】/【诈降】的
+        # 代价）。**新加压 ``FrameKind.LIFE_DECREASE`` 的点要先读这一段**：带键与不带键决定
+        # 这一帧进哪一条事件通道。护甲全吸收的伤害那帧 ``hp_loss == 0``，也不记。
+        if hp_loss > 0 and not frame.data.get(LIFE_DECREASE_DAMAGE_KEY):
+            host.note_life_loss(target, hp_before - host.state.player(target).hp)
     frame.data["dying"] = host.state.player(target).hp <= 0
     return None
 

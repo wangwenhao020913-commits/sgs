@@ -25419,4 +25419,59 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 }
 
+
+/* ============ vital-fx 票 01：失去体力事实落进 state（U-VITAL-01）============
+ *
+ * 本票只做**事件源**：服务端每次失去体力下发 `{seq, seat, amount}`（与 `damage_events`
+ * 并列、共用同一个 `after` 游标），前端只把它收进 `state.lifeLossEvents`。判据来自票面
+ * §验收 5：同一批两条事实 ⇒ 长度 2；换局归零。**不排播、不画**——所以这里同时钉住
+ * "舞台一个节点都不多"，消费这个队列的排播层是票 02 的新文件。
+ */
+{
+  const vitalView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.snapshot.processing = [];
+    return out;
+  };
+  const vitalBatch = (session, cursor, events) => ui.applyViewRaw({
+    ...vitalView(session),
+    cursor, log_seq: 0, records: [], life_loss_events: events, finished: false,
+  });
+
+  vitalBatch("u-vital-01", 0, []);
+  check("U-VITAL-01a 换局后队列存在且为空（`applyView` 的换会话分支建的表）",
+    Array.isArray(ui.state.lifeLossEvents) && ui.state.lifeLossEvents.length === 0,
+    `queue=${JSON.stringify(ui.state.lifeLossEvents)}`);
+
+  const facts = [
+    { seq: 11, seat: 0, amount: 1 },
+    { seq: 12, seat: 1, amount: 2 },
+  ];
+  const stageBefore = $("t-processing").children.length;
+  vitalBatch("u-vital-01", 12, facts);
+  check("U-VITAL-01b 两条事实 ⇒ state.lifeLossEvents 长度 2（{seq, seat, amount} 原样透传）",
+    ui.state.lifeLossEvents.length === 2
+      && ui.state.lifeLossEvents[0].seq === 11
+      && ui.state.lifeLossEvents[0].seat === 0
+      && ui.state.lifeLossEvents[1].seq === 12
+      && ui.state.lifeLossEvents[1].seat === 1
+      && ui.state.lifeLossEvents[1].amount === 2,
+    `queue=${JSON.stringify(ui.state.lifeLossEvents)}`);
+  check("U-VITAL-01c 本票不排播、不画：舞台一个节点都不多（队列只增，没有演出层消费它）",
+    $("t-processing").children.length === stageBefore
+      && ui.state.lifeLossEvents.length === 2,
+    `stage=${$("t-processing").children.length} queue=${ui.state.lifeLossEvents.length}`);
+
+  vitalBatch("u-vital-02", 0, []);
+  check("U-VITAL-01d 换局（新 session_id）⇒ 队列归零",
+    ui.state.lifeLossEvents.length === 0,
+    `queue=${JSON.stringify(ui.state.lifeLossEvents)}`);
+
+  ui.flushPlayback();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

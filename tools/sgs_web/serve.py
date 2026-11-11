@@ -55,6 +55,7 @@ from sgs_web.projection import (  # noqa: E402
     damage_events_after,
     decorate_records_card_tags,
     live_tag_deltas_after,
+    life_loss_events_after,
     pending_payload,
     query_actor_map,
     skill_events_after,
@@ -443,6 +444,17 @@ class GameRegistry:
                 after=after,
                 state=session.engine.state,
                 events=session.engine.card_events,
+            ),
+            # vital-fx 票 01：失去体力事实是**第四条派生通道**，与 `damage_events` 同姿态——
+            # 事实来源是引擎的只增缓冲 `Engine.life_loss_events`，共用同一个 `after` 游标
+            # ⇒ 轮询不重复下发。记录面分不出「失去体力」与「受到伤害」（判据是帧私有的
+            # `LIFE_DECREASE_DAMAGE_KEY`，不进记录流），墨因此只能从这里读；体力是公开事实，
+            # 不按视角过滤。排播 / 画面不在本票（票 02 / 03）。
+            "life_loss_events": life_loss_events_after(
+                all_records,
+                after=after,
+                state=session.engine.state,
+                events=session.engine.life_loss_events,
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }

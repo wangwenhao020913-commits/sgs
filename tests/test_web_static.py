@@ -6303,3 +6303,49 @@ def test_the_playback_hooks_fire_in_damage_card_chain_death_order() -> None:
         "stepPlayback 的演出钩子必须依次是 伤害 → 卡牌语音 → 铁索 → 阵亡，"
         f"且相邻两条之间不许插别的 `fire*EventsThrough`，实际：{calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# vital-fx 票 01：失去体力事实只落进前端 state（本票不排播、不画）
+# ---------------------------------------------------------------------------
+
+
+def test_life_loss_facts_land_in_the_frontend_state_without_any_playback() -> None:
+    """`applyView` 收 `body.life_loss_events` ⇒ `state.lifeLossEvents`；换局清空。
+
+    票面 §做法 5：本票**只做事件源**——不排播、不画、不加演出钩子（排播层 `vital-fx.js`
+    是票 02，本票不许凭空多出消费方）。所以这里钉三处接线，再反向钉住"伤害 / 舞台两层都
+    不认识这个队列"与"session.js 里没有第二个读它的地方"。
+    """
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    apply_view = _js_function(session, "applyView")
+
+    assert "if (!Array.isArray(state.lifeLossEvents)) state.lifeLossEvents = [];" in apply_view, (
+        "`applyView` 要照 `state.damageEvents` 的姿态惰性初始化队列"
+    )
+    assert (
+        "for (const event of body.life_loss_events || []) state.lifeLossEvents.push(event);"
+        in apply_view
+    ), "`applyView` 必须把载荷里的 `body.life_loss_events` 收进队列"
+    assert "state.lifeLossEvents = [];" in apply_view, (
+        "换会话要清空（上一局的事实不属于新局）"
+    )
+
+    commit = _js_function(session, "commitView")
+    assert "state.lifeLossEvents = [];" in commit, (
+        "换局的另一处同样清空（与 `state.damageEvents` 同一块，别只在 applyView 清一半）"
+    )
+
+    body = _strip_js_comments(session)
+    touched = [line.strip() for line in body.splitlines() if "lifeLossEvents" in line]
+    assert len(touched) == 4, (
+        "`session.js` 里只许有这几处读写（换会话复位 / 惰性初始化 + push / commit 清空）："
+        f"本票不排播、不画，多出来的引用就是提前接上了还没到的层：{touched}"
+    )
+
+    for name in ("effects.js", "damage-fx.js", "fx-core.js", "table.js"):
+        source = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        assert "lifeLossEvents" not in source, (
+            f"{name} 不认识 `state.lifeLossEvents`：失去体力的排播 / 画面是票 02 / 03，"
+            "伤害 / 动效两层一个字都不动"
+        )

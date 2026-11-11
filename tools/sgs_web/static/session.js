@@ -715,6 +715,9 @@ function applyView(body) {
     // chain-death-voices 票 03：上一局还没到点的卡牌事实不属于新局（语音本身由 commitView
     // 换会话时 `SgsCardVoice.stopAll()` 收掉）。
     state.cardEvents = [];
+    // vital-fx 票 01：失去体力事实同理——上一局那条墨不属于新局（消费它的是票 02 的
+    // 独立排播层，本票只把事实落进 state）。
+    state.lifeLossEvents = [];
     // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
     state.liveView = null;
   }
@@ -731,6 +734,11 @@ function applyView(body) {
   // 同姿态——先收进队列，回放走到那条记录的 `seq` 才出声。
   if (!Array.isArray(state.cardEvents)) state.cardEvents = [];
   for (const event of body.card_events || []) state.cardEvents.push(event);
+  // vital-fx 票 01：失去体力事实是**第四条派生通道**（服务端在每次失去体力时下发
+  // `{seq, seat, amount}`），与 `damage_events` 同姿态——先收进队列。**本票不排播、不画**：
+  // 只把事实落进 `state`，由票 02 的独立排播层按记录 `seq` 消费（伤害演出一个字不动）。
+  if (!Array.isArray(state.lifeLossEvents)) state.lifeLossEvents = [];
+  for (const event of body.life_loss_events || []) state.lifeLossEvents.push(event);
   // U1-07：快照的处理区已经是**产物**（服务端把转化来源组换成了虚拟牌），回放期间也要
   // 按同一份映射把"来源牌进处理区"渲染成产物，否则用户会先看到两张源牌再被快照纠正。
   state.processingProducts = processingProductMap(
@@ -1443,6 +1451,8 @@ function commitView(body) {
     // 全部存活的那几路并清表）；队列同时清空（`applyView` 的换会话分支也清一次）。
     SgsCardVoice.stopAll();
     state.cardEvents = [];
+    // vital-fx 票 01：失去体力事实的队列同样属于上一局（与 `state.damageEvents` 同块清）。
+    state.lifeLossEvents = [];
   }
   state.view = body;
   // U3-05（D11）：提交即权威——live view 用这份快照整份覆盖（下一批事件从它起算）。
