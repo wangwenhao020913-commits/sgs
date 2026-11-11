@@ -94,6 +94,15 @@ check "06-里程碑与风险.md" '> **ADR-023 变更说明（依据' "ADR-023 �
 check "06-里程碑与风险.md" '> **ADR-024 变更说明（依据' "ADR-024 变更说明块（每家族一张覆盖层）"
 check "06-里程碑与风险.md" '### 5.7 铁索 / 阵亡 / 卡牌语音' "§5.7 账本小节（三条裁定各一行）"
 
+# chain-death-voices 两轴评审的 RECORD 项（只写裁定、不改行为）：胶水重复是 spec §不做 的直接
+# 后果（已知债务）、card_events_after 照 damage_events_after 逐字加、两种排播入参由票 01/02
+# 各自点名、isUnlocked 是实机配方的唯一手势读数、gender 以裸字符串过线。钉在 ADR 变更块里。
+check "06-里程碑与风险.md" '提取共享 helper 记为**已知债务**' "ADR-022 变更块记下胶水重复是已知债务"
+check "06-里程碑与风险.md" '`fireDeathEventsThrough(seq)` 收 seq' "ADR-022 变更块记下两种排播入参"
+check "06-里程碑与风险.md" '`card_events_after` 与 `damage_events_after` 同形' "ADR-023 变更块记下同形是照写"
+check "06-里程碑与风险.md" '`SgsCardVoice.isUnlocked()` 不是推测性 API' "ADR-023 变更块记下 isUnlocked 的读取方"
+check "06-里程碑与风险.md" '`gender` 以裸字符串过线' "ADR-023 变更块记下跨线 JSON 只传字符串"
+
 # 票 02（M0 收尾）回写《开发文档/02-规则引擎设计.md》§3 的时机系统：D-1…D-9。
 # 依据：.scratch/m1-engine-skeleton/research/01-timing-enum-alignment.md §5.2；
 # 权威表 = src/sgs/timing/enum.py 的 83 节点。

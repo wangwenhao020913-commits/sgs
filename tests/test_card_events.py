@@ -150,14 +150,23 @@ def test_the_two_entries_are_mutually_exclusive_for_one_action():
 
 
 def test_a_transformed_card_records_the_product_type_not_the_source_card():
-    """【龙胆】/【武圣】把一张<别的牌>转成【杀】⇒ 事件是"杀"、且 ``virtual = True``。"""
-    engine, state = _engine([SeatSpec(hand=(SLASH,), gender=Gender.MALE), SeatSpec(hp=4)])
-    product = transformed_card(state, (SLASH,), "slash")
+    """【龙胆】闪→杀（也可读作【武圣】红牌→杀）：事件取**产物**牌型、且 ``virtual = True``。
+
+    来源牌型与产物牌型**必须不同**：拿【杀】当来源时，读来源与读产物都得到 ``"slash"``，
+    断言分不出来（评审 FIX 2）。这里来源是【闪】、产物是【杀】——读来源就会红。
+    """
+    dodge = cards_of_type(PACK, "dodge")[0]
+    engine, state = _engine(
+        [SeatSpec(hand=(dodge,), gender=Gender.MALE), SeatSpec(hp=4)], hand=dodge
+    )
+    assert state.card(dodge).type == "dodge", "先确认来源实体牌真的是【闪】（与产物不同）"
+    product = transformed_card(state, (dodge,), "slash")
+    assert product.type == "slash", "产物是【杀】"
 
     engine.start_use(product, source=0, targets=(1,))
 
     event = engine.card_events[0]
-    assert event.card_type == "slash", "产物牌型（来源实体牌是【杀】也不能读它）"
+    assert event.card_type == "slash", "产物牌型（来源实体牌是【闪】⇒ 读来源会得到 dodge）"
     assert event.card_name == "杀"
     assert event.virtual is True, "转化产物 ⇒ virtual（同一条语音，但事实要分辨得出来）"
 
@@ -217,8 +226,26 @@ def test_using_an_equipment_records_only_the_use_not_the_put_into_the_slot():
 
 
 def test_drawing_and_discarding_in_a_quiet_turn_records_nothing():
-    """摸牌 / 弃置不是使用：一整回合一张牌都没用时，事件缓冲一条都不长。"""
-    engine, _state = _engine([SeatSpec(), SeatSpec()])
+    """摸牌 / 弃置不是使用：一整回合一张牌都没用时，事件缓冲一条都不长。
+
+    弃置**必须真的发生**（评审 FIX 1）：手牌上限 = 体力，故座位 0 以 2 体力、2 张手牌起手，
+    摸 2 张后弃牌阶段要真的弃 2 张（``DiscardQuery`` → ``MoveReason.DISCARD``）——空手
+    走完回合只会证明摸牌不触发，证明不了弃置。先钉 ``DISCARD`` 真的落进记录流，再钉零事件。
+
+    重铸不塞进这一回合：它有自己的真引擎入口用例
+    （``test_a_reforge_is_not_a_use_and_records_nothing``，同样先钉 ``REFORGE`` 再钉零事件）；
+    判定同理由 ``test_a_judgement_card_records_nothing`` 钉住。spec 那一行的四种来源因此
+    各有**真执行**证据，没有一条靠"没跑到"假装覆盖。
+    """
+    first = cards_of_type(PACK, "dodge")[0]
+    second = cards_of_type(PACK, "peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=2, hp_max=4, hand=(first, second)), SeatSpec()],
+        deck=deck_excluding(PACK, first, second),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
 
     run_queries(
         engine,
@@ -232,6 +259,10 @@ def test_drawing_and_discarding_in_a_quiet_turn_records_nothing():
         if record.kind == "delta" and record.delta_type == "card_move"
     }
     assert MoveReason.DRAW in reasons, "先确认摸牌真的发生了"
+    assert MoveReason.DISCARD in reasons, (
+        "先确认弃置真的发生了（2 体力 / 2 手牌起手、摸 2 张 ⇒ 弃牌阶段弃 2 张）："
+        f"{sorted(reason.value for reason in reasons)}"
+    )
     assert engine.card_events == (), f"摸牌 / 弃置不是使用 / 打出：{engine.card_events}"
 
 

@@ -1765,6 +1765,8 @@
       startedAt: stageNow(),
       duration: Math.max(0, Number(fx.duration) || 0) * 1000,
       boxKey: chainBoxKey(box),
+      /* 这一声的主人（`sfx-ui.js:chainSfxPlay` 返回的 token；没出声 = null）。 */
+      sfxToken: null,
       timer: null
     };
     chainPlays.push(play);
@@ -1772,7 +1774,9 @@
     chainSetSeatFlag(seat, play.mode);
     /* 入链：演完才挂常态 ⇒ 先把这张画布清掉（座位上的 `.chain-mark` 由 CSS 一起藏掉）。 */
     if (play.mode === "link") chainClearMark(chainMarkOf(seat, block));
-    if (typeof chainSfxPlay === "function") chainSfxPlay(play.mode);
+    /* 声音只开一路（后开的一声顶掉前一条）⇒ 记下 token，收尾只有主人能停（评审修复）：
+     * 同批两条链差 120ms 时，先收尾的那条不许把后一条还在演的那声掐断。 */
+    if (typeof chainSfxPlay === "function") play.sfxToken = chainSfxPlay(play.mode);
     play.timer = window.setTimeout(function () { finishChainPlay(play); }, play.duration);
     chainFxMark(layer);
     chainRequestFrame();
@@ -1787,7 +1791,8 @@
       window.clearTimeout(play.timer);
     }
     play.timer = null;
-    if (typeof chainSfxStop === "function") chainSfxStop();
+    /* 交回开演时拿到的 token：不是当前声音的主人 ⇒ `chainSfxStop` 零动作（不掐断后一条）。 */
+    if (typeof chainSfxStop === "function") chainSfxStop(play.sfxToken);
     var canvas = play.canvas;
     if (canvas && typeof canvas.getContext === "function") {
       var ctx = canvas.getContext("2d");

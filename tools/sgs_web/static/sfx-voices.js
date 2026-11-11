@@ -13,8 +13,10 @@
  *    本模块**不读** `sfx-ui.js` 的任何内部状态；关着时**连 `Audio` 都不建**（零请求）。
  *    `unlock()` 只记"手势已发生"（浏览器的自动播放策略；首次点击「开始对局」后即满足）。
  *
- * 读数（实机 / 烟测用，**不写 DOM**）：`SgsCardVoice.last()`（最近一条 `{type, gender, src, at}`）
- * 与 `SgsCardVoice.count()`（累计真的出了声的条数）。
+ * 读数（实机 / 烟测用，**不写 DOM**）：`SgsCardVoice.last()`（最近一条真的出了声的事实
+ * `{type, gender, name, virtual, src, at}`——`name` / `virtual` 让"这一次是哪张产物牌、
+ * 是不是转化 / 虚拟牌"在读数里就是事实，不必只靠载荷用例验；触发仍只按 `type` / `gender`
+ * 查表）与 `SgsCardVoice.count()`（累计真的出了声的条数）。
  *
  * 没有 `Audio`（node 垫片 / 关掉媒体能力的浏览器）⇒ 静默降级：返回 `null`，不抛错。
  *
@@ -144,6 +146,13 @@
     var type = event ? event.card_type : null;
     // `gender` 空（无武将模式 / 老载荷）⇒ 回落 `male`（spec：前端回落，服务端不猜）。
     var gender = event && event.gender === "female" ? "female" : "male";
+    // `card_name` / `virtual` **不参与查表**（触发仍只按 type / gender）：它们是 `last()` 的
+    // 读数载荷，让"这一次是哪张产物牌、是不是转化 / 虚拟牌"有第二个读取方（评审修复）。
+    var cardName =
+      event && event.card_name !== undefined && event.card_name !== null
+        ? String(event.card_name)
+        : null;
+    var virtual = Boolean(event && event.virtual);
     var name = fileNameFor(type, gender);
     if (!name) return null;
     var Ctor = audioCtor();
@@ -178,6 +187,8 @@
     lastEvent = {
       type: String(type),
       gender: gender,
+      name: cardName,
+      virtual: virtual,
       src: src,
       at: typeof Date !== "undefined" && Date.now ? Date.now() : 0
     };
@@ -210,6 +221,8 @@
     return {
       type: lastEvent.type,
       gender: lastEvent.gender,
+      name: lastEvent.name,
+      virtual: lastEvent.virtual,
       src: lastEvent.src,
       at: lastEvent.at
     };

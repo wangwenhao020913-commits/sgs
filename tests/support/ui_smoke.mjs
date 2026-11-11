@@ -24622,6 +24622,29 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     check("U-CHAIN-07c 演出收尾：那一声 stop（不留给下一场）",
       stoppedByeFinish && chainSfxLog.stop >= 1,
       `stop=${chainSfxLog.stop}`);
+
+    /* ---- U-CHAIN-07d/e：一个 bus、后开的一声顶掉前一条 ⇒ 先收尾的那条不许掐断后一条 ----
+     * 评审修复：收尾的 `chainSfxStop` 认 owner token，只有当前声音的主人能停。 */
+    clockNow += 300;
+    const playedBefore07d = chainSfxLog.play.length;
+    const stoppedBefore07d = chainSfxLog.stop;
+    chainBatch([chainedChange(4, 1, true), chainedChange(5, 2, true)]);
+    step(2);
+    clockNow += 120;
+    runUntil(() => liveCount() === 2);
+    const twoSounds07 = chainSfxLog.play.length === playedBefore07d + 2;
+    const stoppedMid07 = chainSfxLog.stop;
+    runUntil(() => liveCount() === 1);
+    const stoppedAfterFirst07 = chainSfxLog.stop;
+    check("U-CHAIN-07d 同批两条链差 120ms：先收尾的那条**不**停声道（后一条的声音还在）",
+      twoSounds07 && stoppedAfterFirst07 === stoppedMid07,
+      `plays=${chainSfxLog.play.length - playedBefore07d} `
+        + `stop=${stoppedMid07}→${stoppedAfterFirst07}`);
+    runUntil(() => liveCount() === 0);
+    const stoppedAfterLast07 = chainSfxLog.stop;
+    check("U-CHAIN-07e 最后一条收尾才 stop（owner 守卫：只有当前声音的主人能停）",
+      stoppedAfterLast07 === stoppedBefore07d + 1,
+      `stop=${stoppedBefore07d}→${stoppedAfterLast07}`);
     // 还回去：真模块 + 原来的开关状态 + 清掉桩建的声道（后面的用例从干净状态起）。
     windowShim.SgsChainSfx = realChainSfx;
     vm.runInContext("chainSfxLane = null;", context);
@@ -25252,9 +25275,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       built01.length === 1 && built01[0].src === "voices/slash_male.mp3"
         && built01[0].playCalls === 1 && built01[0].volume === moduleOf().VOLUME,
       `built=${JSON.stringify(built01.map((a) => a.src))} play=${built01[0] && built01[0].playCalls}`);
-    check("U-VOICE-01c `last()` 与事件一致（产物牌型 + 使用者性别 + 同一个文件名），count() 记 1",
+    check("U-VOICE-01c `last()` 与事件一致（产物牌型 + 性别 + 牌名 / virtual + 同一个文件名），count() 记 1",
       Boolean(last01)
         && last01.type === "slash" && last01.gender === "male"
+        && last01.name === "杀" && last01.virtual === false
         && last01.src === "voices/slash_male.mp3" && moduleOf().count() === 1,
       `last=${JSON.stringify(last01)} count=${moduleOf().count()}`);
     check("U-VOICE-01d 队列已清空（到点的事实不会在下一批再响一次）",
@@ -25304,11 +25328,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     );
     step(2);
     const built03 = builtSince(mark03);
+    const last03 = moduleOf().last();
     check("U-VOICE-03 转化 / 虚拟按**产物**播：闪当杀 ⇒ slash_male，八卦阵视为闪 ⇒ dodge_female",
       built03.length === 2
         && built03[0].src === "voices/slash_male.mp3"
         && built03[1].src === "voices/dodge_female.mp3",
       `srcs=${JSON.stringify(built03.map((a) => a.src))}`);
+    // 评审修复 FIX 6：`card_name` / `virtual` 的读取方 = `last()` 读数（不只载荷测试）。
+    check("U-VOICE-03b `last()` 带出 `card_name` / `virtual`：转化 / 虚拟的产物事实读得出",
+      Boolean(last03) && last03.type === "dodge"
+        && last03.name === "闪（八卦阵）" && last03.virtual === true,
+      `last=${JSON.stringify(last03)}`);
 
     /* ---- U-VOICE-04：顶栏「♪」是唯一开关（关 ⇒ 一条都不建；开 ⇒ 照常；关 ⇒ 停掉存活）---- */
     vm.runInContext("damageSfxSetEnabled(false)", context);

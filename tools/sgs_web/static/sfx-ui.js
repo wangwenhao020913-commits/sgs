@@ -276,6 +276,15 @@ function cardVoiceMute(muted) {
  *  （`damageSfxEnsureModules` 在同一个手势 / 开关里顺手建它）。 */
 let chainSfxLane = null;
 
+/** 这句话现在属于谁（评审修复：收尾停声要认主人）。
+ *
+ * 一个 bus + 模块的 `play()` 先 `stopAll()` ⇒ 后开的一声会顶掉前一条；同批两条链差 120ms
+ * 时，先收尾的那条若照旧无条件 `stop()`，就会把**后一条还在演的那声**掐断。故
+ * `chainSfxPlay` 每次开声发一个递增 token，`chainSfxStop(owner)` 只在 owner 是当前主人时停；
+ * 不带参 = 换局 / 关「♪」那类**强制**收声（`clearChainFx` 仍走那一档）。 */
+let chainSfxOwner = 0;
+let chainSfxOwnerToken = null;
+
 /** 惰性建那一路并解锁（`unlock()` 必须在真实手势的同一个 tick 里调）。
  *
  * 没有 `SgsChainSfx`（缺件）/ 没有 `AudioContext` 时返回 `null`：整套铁索音效就是
@@ -304,6 +313,9 @@ function chainSfxEnsure() {
  *
  * 「♪」关着时 `return null`——一声都不出，而且**连 `AudioContext` 都不建**（缺省静音是
  * 零代价的，三条既有口径之一）。
+ *
+ * 返回值 = 这一声的 **owner token**（没出声就是 `null`）：`fx-chain.js` 把它记在 play 上，
+ * 收尾时原样交回 `chainSfxStop`，只有当前声音的主人能停。
  */
 function chainSfxPlay(mode) {
   if (!damageSfxOn) return null;
@@ -312,13 +324,25 @@ function chainSfxPlay(mode) {
   if (typeof lane.player.play === "function") {
     lane.player.play(mode === "break" ? "break" : "link", 0, 1.0);
   }
-  return lane;
+  chainSfxOwnerToken = chainSfxOwner + 1;
+  chainSfxOwner = chainSfxOwnerToken;
+  return chainSfxOwnerToken;
 }
 
-/** 一次演出收尾：这一声停掉（画面摘层时由 `fx-chain.js:finishChainPlay` 调）。 */
-function chainSfxStop() {
-  if (!chainSfxLane) return;
+/** 一次演出收尾：**只有当前声音的主人**能停（画面摘层时由 `fx-chain.js:finishChainPlay` 调）。
+ *
+ * 不带 `owner` = 强制收声（换局 / 关「♪」的路径仍然这么调）；带了 owner 但不是当前主人
+ * ⇒ 零动作：后开的那一声还在演，先收尾的那条不许掐断它。
+ */
+function chainSfxStop(owner) {
+  if (!chainSfxLane) return false;
+  if (owner !== undefined) {
+    /* `null` 不是主人（这一场没出声）——只有开声时发出去的 token 才许停。 */
+    if (owner === null || owner !== chainSfxOwnerToken) return false;
+  }
   if (typeof chainSfxLane.player.stop === "function") chainSfxLane.player.stop();
+  chainSfxOwnerToken = null;
+  return true;
 }
 
 /** 开关灌到铁索这一路（`damageSfxMute` 顺手调它：同一个开关管所有声音）。 */

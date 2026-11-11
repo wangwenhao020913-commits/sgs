@@ -4784,8 +4784,10 @@ def test_the_thunder_conduction_fixture_is_what_todays_engine_produces() -> None
 # 3. **`.chain-line` 被整体替换成 `.chain-mark`**（虚线 ⇒ 铁索贴图画布）：全仓静态脚本里
 #    不再有 `.chain-line`；`#t-self-chain` 是常驻 canvas 且 `hidden` 协议不变；CSS 四条
 #    （absolute / 外扩 / pointer-events / z-index 4）+ 入链期间的抑制规则。
-# 4. **排播钩子**：`stepPlayback` 里 `fireChainEventsThrough(record)` 紧挨
-#    `fireDamageEventsThrough(record.seq)` 的下一行；`renderTable` 末尾 `chainFxSync()`；
+# 4. **排播钩子**：`stepPlayback` 里四条演出钩子的真实次序是
+#    **伤害 → 卡牌语音 → 铁索 → 阵亡**（跨票次序由
+#    `::test_the_playback_hooks_fire_in_damage_card_chain_death_order` 一次钉住）；
+#    `renderTable` 末尾 `chainFxSync()`；
 #    `commitView` 换会话时 `clearChainFx()`；`state.chainSeq` 游标 / 120ms 错开 / 200ms 同座位
 #    / 在播上限 8；**两个文件里都没有 `registerPlaybackHold`**（无时停）。
 #
@@ -5017,18 +5019,24 @@ def test_the_chain_fx_module_shape_and_its_two_timing_keys(chain_fx_probe: dict)
     assert set(defaults) == set(_CHAIN_MODES), f"DEFAULT_TIMING 的模式：{sorted(defaults)}"
     assert defaults["link"] == {"total": 1360}, f"link 缺省 1360ms：{defaults['link']}"
     assert defaults["break"] == {"total": 1240}, f"break 缺省 1240ms：{defaults['break']}"
-    # 字段名由 `DEFAULT_TIMING` 生成（票面：字段名只有一处真源）。
-    from_defaults = sorted({field for mode in defaults.values() for field in mode})
-    assert list(probe["timingFields"]) == from_defaults, (
-        f"TIMING_FIELDS 必须由 DEFAULT_TIMING 生成：{probe['timingFields']} vs {from_defaults}"
+    # 字段名由 `DEFAULT_TIMING` 生成（票面：字段名只有一处真源）。**次序就是契约**：
+    # `TIMING_FIELDS` / `TIMING_KEYS` 是冻结**数组**、消费方按它迭代，故这里直接比序列，
+    # 不先 `sorted()`（`CODING_STANDARDS.md` §4：断次序的断言不许先把次序归一化）。
+    from_defaults = list(
+        dict.fromkeys(field for mode in defaults.values() for field in mode)
     )
-    expected_keys = sorted(
+    assert list(probe["timingFields"]) == from_defaults, (
+        "TIMING_FIELDS 必须按 DEFAULT_TIMING 的模式 / 字段声明次序生成（不是集合相等）："
+        f"{probe['timingFields']} vs {from_defaults}"
+    )
+    expected_keys = [
         f"{probe['prefix']}{mode}_{field}"
         for mode, fields in defaults.items()
         for field in fields
-    )
-    assert sorted(probe["timingKeys"]) == expected_keys, (
-        f"TIMING_KEYS 必须由前缀 + 模式 + 字段生成：{probe['timingKeys']} vs {expected_keys}"
+    ]
+    assert list(probe["timingKeys"]) == expected_keys, (
+        "TIMING_KEYS 必须按前缀 + 模式 + 字段的声明次序生成（不是集合相等）："
+        f"{probe['timingKeys']} vs {expected_keys}"
     )
     assert probe["frozen"] == [True, True], "TIMING_FIELDS / TIMING_KEYS 冻结（别被就地改写）"
     assert probe["prefix"] == "chain_fx_", f"anim.ini 前缀：{probe['prefix']}"
@@ -5241,14 +5249,15 @@ def test_the_chain_playback_is_scheduled_from_the_seq_cursor_without_holding() -
     assert step_at < sync_at, "chainFxSync() 排在 damageDropStalePlays() 之后（同一处重绘钩子）"
     assert "chainFxSync" in table, "renderTable 必须重贴常态贴图"
 
-    # 触发点：紧挨伤害演出的下一行（同一条 seq 游标）；换局在 commitView 里清场。
+    # 触发点：在伤害演出**之后**（与卡牌语音 / 阵亡的相邻次序由跨票次序用例一次钉住）。
     match = _STEP_PLAYBACK_RE.search(session)
     assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
     body = match.group("body")
     damage_at = body.find("fireDamageEventsThrough(record.seq)")
     chain_at = body.find("fireChainEventsThrough(record)")
     assert damage_at >= 0 and chain_at > damage_at, (
-        "铁索演出必须挂在伤害演出的**下一行**（票面 §做法 1）"
+        "铁索演出必须挂在伤害演出之后（票面 §做法 1）；真实相邻次序是 伤害 → 卡牌语音 → 铁索，"
+        "见 ::test_the_playback_hooks_fire_in_damage_card_chain_death_order"
     )
     commit = _js_function(session, "commitView")
     assert "clearChainFx()" in commit, "换局要清铁索的队列 / 画布 / 计时器 / 声音"
@@ -5290,6 +5299,21 @@ def test_the_chain_sfx_is_a_one_shot_scheduler_behind_the_same_switch() -> None:
         "「♪」关着时一声都不出、也不建 AudioContext（`SgsChainSfx.create` 都不许走到）"
     )
     assert "lane.player.play(" in play, "开着一场一声（play(mode, 0, 1)）"
+    # 收尾停声认主人（评审修复）：一个 bus、后开的一声顶掉前一条 ⇒ 同批两条链差 120ms 时，
+    # 先收尾的那条不许把后一条还在演的那声掐断。
+    stop = _js_function(sfx_ui, "chainSfxStop")
+    assert "chainSfxOwnerToken" in stop and "owner !== undefined" in stop, (
+        "chainSfxStop(owner) 必须带 owner 守卫；不带参 = 换局 / 关「♪」的强制收声"
+    )
+    assert "play.sfxToken = chainSfxPlay(play.mode)" in chain, (
+        "开演时记下这一声的主人（chainSfxPlay 返回的 owner token）"
+    )
+    assert "chainSfxStop(play.sfxToken)" in chain, (
+        "fx-chain.js 收尾必须交回 token（只有当前声音的主人能停）"
+    )
+    assert "chainSfxStop();" in chain, (
+        "换局 / 关「♪」的强制收声仍不带 owner（clearChainFx 走那一档）"
+    )
     mute = _js_function(sfx_ui, "damageSfxMute")
     assert "chainSfxMute" in mute, "开关要灌到铁索那一路（与伤害声道同一次静音）"
     assert "SgsChainSfx" not in sfx_ui.split("DAMAGE_SFX_ENGINES = {")[1].split("};")[0], (
@@ -5988,6 +6012,13 @@ const report = vm.runInContext(`(() => {
   const noGenderSrc = noGender && noGender.src;
   const female = V.play({ card_type: "slash", gender: "female" });
   const femaleSrc = female && female.src;
+  /* 评审修复 FIX 6：card_name / virtual 的读取方 = last() 读数（不只是载荷测试）。
+   * 这一条是转化 / 纯虚拟的产物事实（闪当杀），触发仍只按 type / gender 查表。 */
+  const product = V.play({
+    card_type: "slash", gender: "male", card_name: "杀（龙胆）", virtual: true,
+  });
+  const productSrc = product && product.src;
+  const last = V.last();
   const silentRow = V.play({ card_type: "peach", gender: "male" });
   const unknownType = V.play({ card_type: "no_such_card_type" });
   const counted = V.count();
@@ -6004,6 +6035,11 @@ const report = vm.runInContext(`(() => {
       silentRowIsNull: silentRow === null,
       unknownTypeIsNull: unknownType === null,
       counted: counted,
+    },
+    product: {
+      src: productSrc,
+      last: last,
+      lastKeys: last ? Object.keys(last).sort() : [],
     },
   });
 })()`, context);
@@ -6152,8 +6188,28 @@ def test_the_card_voice_module_plays_each_asset_on_its_own_behind_the_switch(
     )
     assert fallback["silentRowIsNull"] is True, "表项 null（【桃】待补）⇒ 一声不出、返回 null"
     assert fallback["unknownTypeIsNull"] is True, "未知牌型 ⇒ 静默，不退回别的牌型"
-    assert fallback["counted"] == 2, (
-        f"count() 只数真的出了声的两条（无性别 + 女声）：{fallback['counted']}"
+    assert fallback["counted"] == 3, (
+        f"count() 只数真的出了声的三条（无性别 + 女声 + 产物读数那条）：{fallback['counted']}"
+    )
+
+    # 评审修复 FIX 6：`card_name` / `virtual` 的**读取方**就是 `last()` 读数（不再只是载荷
+    # 测试在读）；形状即 `{type, gender, name, virtual, src, at}`，触发仍只按 type / gender。
+    product = card_voice_probe["product"]
+    assert product["src"] == "voices/slash_male.mp3", (
+        f"产物那条按产物牌型 + 性别查表（不读来源）：{product['src']}"
+    )
+    assert product["lastKeys"] == ["at", "gender", "name", "src", "type", "virtual"], (
+        f"last() 的读数形状必须是 {{type, gender, name, virtual, src, at}}：{product['lastKeys']}"
+    )
+    assert (product["last"]["type"], product["last"]["gender"]) == ("slash", "male")
+    assert product["last"]["name"] == "杀（龙胆）", (
+        f"last().name 要带出事件里的产物牌名（card_name）：{product['last']}"
+    )
+    assert product["last"]["virtual"] is True, (
+        f"last().virtual 要带出事件里的转化 / 虚拟事实：{product['last']}"
+    )
+    assert isinstance(product["last"]["at"], int) and product["last"]["at"] > 0, (
+        f"last().at 仍是毫秒时间戳：{product['last']}"
     )
 
     # `.mp3` 的 MIME（缺了会回 `application/octet-stream`）。
@@ -6214,3 +6270,36 @@ def test_the_card_voice_wiring_is_one_way_from_sfx_ui_and_rides_the_same_seq_cur
         assert leaked not in _strip_js_comments(voices), (
             f"语音模块不许读 sfx-ui.js 的内部状态（{leaked}）：缝只朝一个方向"
         )
+
+
+def test_the_playback_hooks_fire_in_damage_card_chain_death_order() -> None:
+    """`stepPlayback` 的四条演出钩子次序 = **伤害 → 卡牌语音 → 铁索 → 阵亡**。
+
+    票 01 / 票 03 落笔时各自写过「紧挨 `fireDamageEventsThrough(record.seq)` 的下一行」；
+    后来卡牌语音插在伤害与铁索之间、阵亡又接在铁索之后——于是「下一行」只对卡牌语音成立。
+    这里按**真实相邻次序**一次钉住四条，并禁止相邻两条之间再插别的 `fire*EventsThrough`
+    钩子（acceptance-map §1.1 的载体）：次序被改、或又插一条演出钩子，这条就红。
+    """
+    session = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(session)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    # 注释不算调用点（`CODING_STANDARDS.md` §1）：先剥注释，再数真实的 `fire*EventsThrough(`。
+    body = _strip_js_comments(match.group("body"))
+
+    calls = [
+        found.group(1) for found in re.finditer(r"(fire[A-Za-z]+EventsThrough)\(", body)
+    ]
+    assert "fireDamageEventsThrough" in calls, (
+        f"伤害演出的钩子不在 stepPlayback 里：{calls}"
+    )
+    # 从伤害那一条起切（技能演出钩子排在它之前，不在这条的契约里）。
+    order = calls[calls.index("fireDamageEventsThrough"):]
+    assert order == [
+        "fireDamageEventsThrough",
+        "fireCardEventsThrough",
+        "fireChainEventsThrough",
+        "fireDeathEventsThrough",
+    ], (
+        "stepPlayback 的演出钩子必须依次是 伤害 → 卡牌语音 → 铁索 → 阵亡，"
+        f"且相邻两条之间不许插别的 `fire*EventsThrough`，实际：{calls}"
+    )
