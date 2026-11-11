@@ -28,6 +28,10 @@
    `python` 不在 PATH，门禁也只认 `$ROOT/.venv/bin/pytest`、不回退系统 pytest —— 或
    `bash tests/smoke-web.sh`（实测 60–70 s）。**全量失败先 `grep -nE 'FAIL|失败' <log>`**
    看完全部失败，不要只 `tail`。
+   **新机器 / 换机器**：先跑 **`bash tools/setup-dev.sh`**（幂等：关换行转换、装 hook、建
+   `.venv`、环境预检——这三样都不随 clone 走，缺一样就是"门禁静默不跑"或"金录像因 CRLF
+   整片变红"）。装完日常换机器只剩 `git pull` / `git push`。换行口径的唯一真源是仓根的
+   `.gitattributes`（全仓 LF，`tests/replays/*.jsonl` 连文本都不当）。
 3. **派发子代理之前先提交**（或先明确告知它"当前工作树未提交"）。子代理会在自己的会话里
    跑 git 命令收尾自己的临时改动；工作树未提交时，一条 `git checkout -- <file>`
    就把你手上的活打回 HEAD 了。本仓已发生过两次：`ui_smoke.mjs` 被抹回 HEAD；票 13 的实现者

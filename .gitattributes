@@ -1,0 +1,11 @@
+# 换行：全仓统一 LF。Windows / WSL 上的 Git for Windows 默认 core.autocrlf=true，
+# 会在 checkout 时把文本转成 CRLF、提交时再转回去；而本仓的金录像是**逐字节**判据
+# （tests/test_replays.py::test_the_47_standard_108_replays_keep_their_frozen_bytes），
+# 一行 CRLF 就能让它整片变红。`eol=lf` 让 checkout / commit 两端都钉死在 LF。
+* text=auto eol=lf
+
+# 冻结字节的基准：连"文本"都不当，**绝不**做任何换行转换。
+tests/replays/*.jsonl -text
+
+# 唯一的音频素材（卡牌语音，40 条 mp3）：显式声明二进制，别让任何过滤规则碰它。
+tools/sgs_web/static/voices/*.mp3 -text
