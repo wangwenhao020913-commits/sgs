@@ -203,7 +203,7 @@ function vitalFxHoldFor(family, variant) {
 let vitalQueue = [];
 
 /** 正在播的演出：`[{family, seq, seat, variant, amount, fx, canvas, slot, plan, startedAt,
- *  duration, timer, sfxLane, sfxVoice}]`。 */
+ *  duration, timer, sfxLane}]`。 */
 const vitalPlays = [];
 
 /** 累计开演次数（只增；写在层的 `data-vital-fx-plays` 上，实机 / 烟测都读得懂）。 */
@@ -461,9 +461,9 @@ function startVitalPlay(event) {
     startedAt: stageNow(),
     duration: Math.max(0, Number(fx.duration) || 0) * 1000,
     timer: null,
-    // 音效那侧的两口（`vitalSfxStart` 里填）：这条演出占用的声道与档位参数。
+    // 音效那侧的那一口（`vitalSfxStart` 里填）：这条演出占用的声道。体力两族的音效模块
+    // **只吃时间轴**（`tick(t, voice)` 不读第二参），所以不再备"档位参数"那一口。
     sfxLane: null,
-    sfxVoice: null,
   };
   vitalPlays.push(play);
   vitalStartedCount += 1;

@@ -8191,8 +8191,9 @@ def test_the_heal_module_never_freezes_playback_itself_and_has_no_screen_flash()
 
     - 画面模块不登记 `registerPlaybackHold`（登记在 `vital-fx.js` 文件末尾）；
     - 没有整屏闪：不碰 `.fx-flash`、不碰 `#table-shell`、不挂 CSS `filter`；
-    - `bare` 下的白化是**半透明白**叠在覆盖层上（不隐藏牌面），峰值是**唯一命名常量**
-      `BARE_WHITE_PEAK`，注释写明素材页的 α 是照浅色样例牌调的、**最终值以实机为准**。
+    - `bare` 下的白化是**半透明白**叠在覆盖层上（不隐藏牌面），峰值是**具名常量**
+      `BARE_WHITE_PEAK`（导出档另有一个同值的 `EXPORT_WHITE_PEAK`：两条路径各一具名常量，
+      不是散落的字面量），注释写明素材页的 α 是照浅色样例牌调的、**最终值以实机为准**。
     """
     source = _strip_js_comments(_HEAL_JS.read_text(encoding="utf-8"))
     assert "registerPlaybackHold" not in source, (
