@@ -8443,3 +8443,483 @@ def test_the_heal_sfx_lane_schedules_every_tier_without_a_real_audio_context() -
         "3 档（吸气 + 停顿 + 落点 + 余韵）排出的音源必须多于 1 档（一声清磬）："
         f"{probe['tiers']['3']['sources']} vs {probe['tiers']['1']['sources']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 07：提示区单一 reset + 可编辑文案模板
+# ---------------------------------------------------------------------------
+
+_PENDING_JS = STATIC_DIR / "pending.js"
+_PROMPTS_JS = STATIC_DIR / "prompts.js"
+_PROMPTS_JSON = STATIC_DIR / "prompts.json"
+
+# 询问面的七件套 + 归属说明：resetAskSurface 必须**每一格**都负责（票面 A 的第一条）。
+_ASK_SURFACE_NODES = (
+    "t-prompt",
+    "t-target-hint",
+    "t-dialog-hint",
+    "t-skill-hints",
+    "t-choice",
+    "t-options",
+    "t-prompt-skills",
+    "t-context",
+)
+
+# `#t-choice`（页脚）唯一写入口是 `setAskChoice`（带寿命），唯一清除点是 `resetAskChoice`。
+# 这三份文件里不许再有直写——`answer.js` 的七处与 `core.js:showPageNotice` 那一处是票面点名的。
+_ASK_CHOICE_WRITERS = ("pending.js", "answer.js", "core.js")
+
+
+def _js_function_body(text: str, name: str) -> str:
+    """截出 `function <name>(…) {…}` 的函数体（花括号配对；找不到 / 没闭合即失败）。"""
+    marker = f"function {name}("
+    start = text.find(marker)
+    assert start >= 0, f"找不到 function {name}(…)"
+    brace = text.find("{", text.find(")", start))
+    assert brace > start, f"function {name}(…) 没有函数体"
+    depth = 0
+    for at in range(brace, len(text)):
+        char = text[at]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : at + 1]
+    raise AssertionError(f"function {name}(…) 的花括号没闭合")
+
+
+def test_the_ask_surface_is_cleared_by_one_single_function() -> None:
+    """票 07 A：清询问面收敛成**一个实现**、**三个调用点**，`#t-choice` 只剩一个带寿命的口。
+
+    四类残留（spec §1 #5）都是"清除点分散"造成的：起播只清一两样、弹窗镜像没人清、
+    终局分支在 `renderPending` 之前 return、`#t-choice` 七处只写不清。这里把"清"钉成
+    结构事实：`resetAskSurface()` 是唯一实现，`blankAskSurface`（起播）/ `renderPending`
+    （每次重绘之前）/ 终局分支三处都走它，别处一个字都不写。
+    """
+    pending = _PENDING_JS.read_text(encoding="utf-8")
+    session = _SESSION_JS.read_text(encoding="utf-8")
+
+    assert pending.count("function resetAskSurface(") == 1, (
+        "清询问面只能有**一个**实现（票面 A 的第一条）"
+    )
+    reset_body = _js_function_body(pending, "resetAskSurface")
+    # `#t-dialog-hint` 是 `#t-target-hint` 的**镜像**（写入住 `modal.js:syncDialogHint`）：
+    # 它的清除口也留在 `modal.js:resetDialogHint`，由 reset 触发——两边各写一份就是票面
+    # 第二类缺欠（清的是另一个元素）的翻版。
+    assert "resetDialogHint(" in reset_body, "弹窗标题条镜像必须由 reset 一起撤掉"
+    hint_body = _js_function_body((STATIC_DIR / "modal.js").read_text(encoding="utf-8"), "resetDialogHint")
+    assert '"t-dialog-hint"' in hint_body, "resetDialogHint 必须真的清掉 #t-dialog-hint"
+    # `#t-choice` 有自己的寿命口（`resetAskChoice` 作废在飞的超时），clear 也在那一处。
+    assert "resetAskChoice(" in reset_body, "页脚的清除必须走带寿命的口（resetAskChoice）"
+    choice_body = _js_function_body(pending, "resetAskChoice")
+    assert '"t-choice"' in choice_body, "resetAskChoice 必须真的清掉 #t-choice"
+    assert '$("t-choice").textContent =' not in pending, (
+        "pending.js 自己也不许再直写 #t-choice：唯一写入口是 setAskChoice"
+    )
+    for node in _ASK_SURFACE_NODES:
+        if node in ("t-dialog-hint", "t-choice"):
+            continue
+        assert f'"{node}"' in reset_body, (
+            f"resetAskSurface 必须负责 #{node}（七件套 + `#t-context` 归属说明）"
+        )
+    assert "resetAskChoice(" in reset_body, (
+        "`#t-choice` 的清除必须走带寿命的那个口（resetAskChoice），不许另写一句 textContent = \"\""
+    )
+
+    # 调用点 ①：起播（blankAskSurface 自己不再逐格清）。
+    blank = _js_function_body(pending, "blankAskSurface")
+    assert blank.count("resetAskSurface(") == 1, "起播必须走同一个 reset"
+    for node in _ASK_SURFACE_NODES:
+        if node in ("t-dialog-hint", "t-options", "t-prompt-skills"):
+            continue  # 镜像 / 选项格 / 技能组要读父节点判断保留态，见函数体
+        assert f'"{node}"' not in blank, (
+            f"blankAskSurface 里不许再出现 #{node}：清除实现只有 resetAskSurface 一处"
+        )
+
+    # 调用点 ②：每次 renderPending 之前（且在花色结果态那条捷径**之前**）。
+    render = _js_function_body(pending, "renderPending")
+    assert render.count("resetAskSurface(") == 1, "renderPending 必须从清空的询问面开始"
+    assert render.find("resetAskSurface(") < render.find("suitResultActive()"), (
+        "reset 必须在花色结果态的分支之前（否则结果态会把上一问的残片一起画出来）"
+    )
+
+    # 调用点 ③：终局分支（`commitView` 在 `renderPending` 之前 return 的那一段）。
+    assert session.count("resetAskSurface(") == 1, "终局分支是唯一的第三处调用点"
+    finished_at = session.find("if (body.finished) {")
+    assert finished_at >= 0, "session.js 里找不到终局分支"
+    finished = session[finished_at : finished_at + 1500]
+    assert "resetAskSurface(" in finished, (
+        "终局分支在 return 之前必须先 reset（否则技能串 / 页脚 / 描述停在上一问）"
+    )
+    assert finished.find("resetAskSurface(") < finished.find("return;"), (
+        "reset 必须早于终局分支的 return"
+    )
+
+    # `#t-choice` 只有一个写入口：直写一处都不剩（七处 answer.js + core.js 的页脚提示）。
+    for name in _ASK_CHOICE_WRITERS:
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert '$("t-choice").textContent =' not in text, (
+            f"{name} 里还有直写 #t-choice 的地方：写入必须走 pending.js:setAskChoice（带寿命）"
+        )
+    writer = _js_function_body(pending, "setAskChoice")
+    assert "seq" in writer and "setTimeout" in writer, (
+        "setAskChoice 必须给 `#t-choice` **显式寿命**（序号 + 超时），不许再靠下一次 renderPending 兜"
+    )
+
+
+_PROMPT_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const STATIC = "tools/sgs_web/static";
+const read = (name) => readFileSync(`${STATIC}/${name}`, "utf8");
+const fileText = read("prompts.json");
+
+/* 一份最小的 DOM / Storage 垫片：`prompts.js` 只碰 `$`（core.js）、`state`（core.js）、
+ * 卡面纯函数（card-view.js）与 `preactivationStepKind`（preactivation.js）——四份都是
+ * **真脚本**，垫片只补环境，不替它们实现任何判据。 */
+function makeSandbox({ promptsText = fileText, overlay = null } = {}) {
+  const nodes = new Map();
+  const makeNode = (tag, id = "") => {
+    const node = {
+      tagName: String(tag || "div").toUpperCase(),
+      id,
+      textContent: "",
+      innerHTML: "",
+      hidden: false,
+      disabled: false,
+      className: "",
+      children: [],
+      parentNode: null,
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+      addEventListener() {},
+      setAttribute() {},
+      getAttribute() { return null; },
+      querySelector() { return null; },
+    };
+    if (id) nodes.set(id, node);
+    return node;
+  };
+  // index.html 里 prompts.js 会碰到的静态节点：动作行 + 提交键（按钮挂进 `.prompt-actions`）。
+  const actions = makeNode("div");
+  const submit = makeNode("button", "btn-submit");
+  nodeParent(submit, actions);
+  function nodeParent(child, parent) { child.parentNode = parent; parent.children.push(child); }
+  const storage = new Map();
+  if (overlay) storage.set("sgs.prompts", JSON.stringify(overlay));
+  const context = vm.createContext({
+    console,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    fetch: async () => ({ ok: true, status: 200, text: async () => promptsText }),
+    document: { getElementById: (id) => nodes.get(id) || makeNode("div", id), createElement: (tag) => makeNode(tag) },
+    JSON, Object, Array, Number, String, Math, Date, RegExp,
+    localStorage: {
+      getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
+      setItem: (key, value) => storage.set(String(key), String(value)),
+      removeItem: (key) => storage.delete(String(key)),
+    },
+  });
+  context.globalThis = context;
+  context.window = context;
+  // 页面里这些纯函数来自前面几份脚本（加载顺序见 index.html）；探针按同一顺序载入。
+  for (const name of ["core.js", "card-view.js", "preactivation.js"]) {
+    vm.runInContext(read(name), context, { filename: name });
+  }
+  vm.runInContext(read("prompts.js"), context, { filename: "prompts.js" });
+  context.__nodes = nodes;
+  context.__storage = storage;
+  // `state` 是 core.js 顶层 `const`（global lexical，不是 globalThis 的属性）：从同一个
+  // context 里取一次引用，夹具构造器与用例脚本都只通过它读写（与页面同一个对象）。
+  context.__state = vm.runInContext("state", context);
+  context.setup = () => setup(context.__state);
+  return context;
+}
+
+/* 一份**界【离间】**的三步清单（步骤名 / wording 取自 `src/sgs/skills/active.py` 的
+ * `JIE_LIJIAN_FLOW` 与 `step_requirements`），界版的顺序是 card → victim → user。 */
+const LIJIAN_STEPS = [
+  { name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+    wording: "弃置1张牌（手牌 / 装备区）" },
+  { name: "victim", kind: "seat", min: 1, max: 1, order: 1,
+    wording: "选择决斗目标（场上的一名男性角色；先点他，【决斗】打向他）" },
+  { name: "user", kind: "seat", min: 1, max: 1, order: 2,
+    wording: "选择决斗使用者（另一名男性角色；由他对目标使用【决斗】）" },
+];
+
+function setup(state) {
+  state.view = {
+    heroes: { 0: "diaochan", 1: "guanyu", 2: "zhangfei", 3: "luxun" },
+    snapshot: {
+      self_hand: [{ card_id: 7, name: "桃", suit: "heart", rank: 7, type: "peach", color: "red", virtual_sources: [] }],
+      players: [],
+    },
+    pending: null,
+  };
+  state.heroCatalog = [
+    { true_name: "陆逊", versions: [{ id: "luxun", name: "陆逊", version: "standard" }] },
+  ];
+  state.preactivation = {
+    skillId: "hero.jie_diaochan.lijian",
+    name: "界离间",
+    composite: true,
+    steps: LIJIAN_STEPS.map((step) => ({ ...step })),
+    answers: [{ values: [], texts: [] }, { values: [], texts: [] }, { values: [], texts: [] }],
+    cursor: 0,
+  };
+  return state.preactivation;
+}
+
+const report = {};
+
+/* ① 文件层：真的 prompts.json 读进来之后的形状。 */
+{
+  const context = makeSandbox();
+  report.file = await vm.runInContext(`(async () => {
+    await promptReady;
+    const keys = Object.keys(promptFileTemplates).sort();
+    const ok = promptFileLoaded;
+    const problems = promptProblems();
+    return JSON.stringify({
+      ok,
+      keys,
+      problems,
+      lijian: promptTemplateFor("hero.jie_diaochan.lijian"),
+      steps: promptFileTemplates["hero.jie_diaochan.lijian"],
+    });
+  })()`, context).then(JSON.parse);
+}
+
+/* ② 逐级累加：界【离间】三级的文案（用户给的三句，逐字）。 */
+{
+  const context = makeSandbox();
+  report.chain = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    const levels = [promptComposedText(pa, 0)];
+    pa.answers[0] = { values: [7], texts: ["7"] };
+    levels.push(promptComposedText(pa, 1));
+    pa.answers[1] = { values: [3], texts: ["seat:3"] };
+    levels.push(promptComposedText(pa, 2));
+    return JSON.stringify({ levels, joined: levels.join(" → ") });
+  })()`, context).then(JSON.parse);
+}
+
+/* ③ 三层回退：模板层缺键 → `Step.wording` → 前端通用文案。 */
+{
+  const context = makeSandbox({ promptsText: "{}" });
+  report.levels = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    const step = pa.steps[0];
+    const wordingStep = { name: "card", kind: "card", zones: ["hand"], min: 2, max: 2, wording: "服务端那句" };
+    const bareCard = { name: "card", kind: "card", zones: ["hand"], min: 2, max: 2 };
+    const bareSeat = { name: "seat", kind: "seat", min: 1, max: 1 };
+    const bareOption = { name: "option", kind: "option", min: 1, max: 1 };
+    return JSON.stringify({
+      // 空表 ⇒ 模板层什么都没有
+      composedWhenMissing: promptComposedText(pa, 0),
+      // ② 服务端 wording
+      wording: promptQuestionForStep(pa, step, 0),
+      // ③ 前端通用文案（wording 也没有）
+      genericCard: promptQuestionForStep(null, bareCard, 0),
+      genericSeat: promptQuestionForStep(null, bareSeat, 0),
+      genericOption: promptQuestionForStep(null, bareOption, 0),
+      // 第二层优先于第三层
+      wordingWins: promptQuestionForStep(null, wordingStep, 0),
+    });
+  })()`, context).then(JSON.parse);
+}
+
+/* ④ 占位符白名单：写错即回退（不把 {…} 原样印出来）；值取不到也回退。 */
+{
+  const bad = { "hero.jie_diaochan.lijian": { steps: { card: { ask: "弃置{who}的牌" } } } };
+  const context = makeSandbox({ promptsText: JSON.stringify(bad) });
+  report.whitelist = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    return JSON.stringify({
+      allowed: PROMPT_SLOT_WHITELIST,
+      badComposed: promptComposedText(pa, 0),
+      badQuestion: promptQuestionForStep(pa, pa.steps[0], 0),
+      rawBad: promptRenderTemplate("弃置{who}的牌", { who: "郭嘉" }),
+      missingValue: promptRenderTemplate("弃置【{card}】", {}),
+      filled: promptRenderTemplate("【{card}】【{name}】{suit}{rank} {seat} {hero} {n}",
+        { card: "桃♥7", name: "桃", suit: "♥", rank: "7", seat: "3号位陆逊", hero: "陆逊", n: "1" }),
+      emptyTemplate: promptRenderTemplate("   ", {}),
+    });
+  })()`, context).then(JSON.parse);
+}
+
+/* ⑤ 覆盖层（`localStorage['sgs.prompts']`）：键级叠加 + 导出 + 清除。 */
+{
+  const overlay = {
+    "hero.jie_diaochan.lijian": { steps: { card: { ask: "覆盖层：选一张牌弃置" } } },
+  };
+  const context = makeSandbox({ overlay });
+  report.overlay = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    const merged = promptTemplateFor("hero.jie_diaochan.lijian");
+    const composed = promptComposedText(pa, 0);
+    const saved = promptSaveOverride("hero.jie_diaochan.lijian", "card", "ask", "游戏内改过的问句");
+    const stored = JSON.parse(window.localStorage.getItem("sgs.prompts"));
+    const exported = promptExportOverlay();
+    const editTarget = promptEditTarget();
+    promptClearOverlay();
+    const cleared = window.localStorage.getItem("sgs.prompts");
+    return JSON.stringify({
+      merged, composed, saved, stored, exported, editTarget, cleared,
+      afterClear: promptComposedText(setup(), 0),
+    });
+  })()`, context).then(JSON.parse);
+}
+
+process.stdout.write(JSON.stringify(report));
+"""
+
+
+def _prompt_probe() -> dict:
+    """跑真 `core.js` + `card-view.js` + `preactivation.js` + `prompts.js`（node vm），拿回实测读数。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "prompt_probe.mjs"
+        probe.write_text(_PROMPT_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"提示区文案模板探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def prompt_probe() -> dict:
+    """一次探针跑完，两条用例共用。"""
+    return _prompt_probe()
+
+
+def test_the_prompt_templates_are_loaded_with_a_documented_fallback_chain(
+    prompt_probe: dict,
+) -> None:
+    """票 07 B：`prompts.json` 与 `anim.ini` 同姿态载入，缺键逐级回退（三层）。"""
+    srcs = _script_srcs()
+    assert "prompts.js" in srcs, f"index.html 必须加载文案模板脚本：{srcs}"
+    assert srcs.index("core.js") < srcs.index("prompts.js") < srcs.index("main.js"), (
+        "prompts.js 只借 core.js 的 `$` / `state` / 卡面纯函数，且必须早于 wire()"
+    )
+    assert _PROMPTS_JSON.is_file(), "文案模板初稿 prompts.json 缺失（与 anim.ini 同目录）"
+    text = _PROMPTS_JS.read_text(encoding="utf-8")
+    for level in ("prompts.json", "Step.wording", "选择{n}张牌", "选择{n}名角色"):
+        assert level in text, f"三层回退里少了「{level}」这一层（票面要求逐级回退写清楚）"
+    assert "Query.prompt" in text, (
+        "硬约束（spec §6 #3）必须写进实现：模板只做显示覆盖，绝不写进 Query.prompt"
+    )
+
+    # 文件层：载入成功、键族合规、至少覆盖到界【离间】的三步。
+    file = prompt_probe["file"]
+    assert file["ok"] is True, "prompts.json 没载入成功"
+    assert not file["problems"], f"prompts.json 有解析问题：{file['problems']}"
+    assert len(file["keys"]) >= 34, f"初稿键太少（{len(file['keys'])}）：由 step_requirements 反推"
+    pattern = re.compile(r"^(?:hero|equip|lord)\.[a-z0-9_]+\.[a-z0-9_]+$|^window:[A-Za-z_]+$")
+    for key in file["keys"]:
+        assert pattern.match(key), f"模板键不合形状（技能 id / window:<cause>）：{key}"
+    lijian = file["steps"] or {}
+    assert set(lijian) >= {"steps"}, f"界离间必须有一对以上的 ask/done：{lijian}"
+    assert set((lijian["steps"] or {})) >= {"card", "victim", "user"}, (
+        f"界离间的三步都要有模板：{sorted((lijian['steps'] or {}))}"
+    )
+
+    # ① 模板层：逐级累加 = 用户 2026-11-11 给的三句（逐字）。
+    levels = prompt_probe["chain"]["levels"]
+    assert levels[0] == "选择1张牌弃置", f"第 1 级不对：{levels[0]!r}"
+    assert levels[1] == "弃置一张【桃♥7】，选择1名男性角色成为决斗目标", (
+        f"第 2 级不对：{levels[1]!r}"
+    )
+    assert levels[2] == "弃置一张【桃♥7】，选择1名男性角色对【3号位陆逊】使用决斗", (
+        f"第 3 级不对：{levels[2]!r}"
+    )
+
+    # ② 缺键 → 服务端 `Step.wording`；③ 连 wording 都没有 → 前端通用文案。
+    fallback = prompt_probe["levels"]
+    assert fallback["composedWhenMissing"] is None, "空表时模板层必须让位（返回 null）"
+    assert fallback["wording"] == "弃置1张牌（手牌 / 装备区）", fallback["wording"]
+    assert fallback["wordingWins"] == "服务端那句", "第二层必须优先于第三层"
+    assert fallback["genericCard"] == "选择2张牌", fallback["genericCard"]
+    assert fallback["genericSeat"] == "选择1名角色", fallback["genericSeat"]
+    assert fallback["genericOption"] == "选一项", fallback["genericOption"]
+
+    # 覆盖层：键级叠加（覆盖层只改它写的那一格，文件层的 done 仍在）。
+    overlay = prompt_probe["overlay"]
+    assert overlay["merged"]["steps"]["card"] == {
+        "ask": "覆盖层：选一张牌弃置",
+        "done": "弃置一张【{card}】",
+    }, f"覆盖层不是键级叠加：{overlay['merged']['steps']['card']}"
+    assert overlay["composed"] == "覆盖层：选一张牌弃置", overlay["composed"]
+    assert overlay["saved"] is True and overlay["stored"]["hero.jie_diaochan.lijian"]["steps"]["card"]["ask"] == (
+        "游戏内改过的问句"
+    ), "游戏内编辑必须写进 localStorage['sgs.prompts']"
+    assert "游戏内改过的问句" in overlay["exported"], "「导出 JSON」要给出能贴回仓里的覆盖层"
+    assert overlay["editTarget"]["key"] == "hero.jie_diaochan.lijian", overlay["editTarget"]
+    assert overlay["cleared"] is None, "清覆盖层要真的从 localStorage 里删掉"
+    assert overlay["afterClear"] == "选择1张牌弃置", "清掉覆盖层后回到文件层"
+
+
+def test_a_template_slot_whitelist_rejects_unknown_placeholders(prompt_probe: dict) -> None:
+    """票 07 B：占位符白名单只有七个；写错 / 取不到都**整条回退**，绝不原样印出来。"""
+    whitelist = prompt_probe["whitelist"]
+    assert whitelist["allowed"] == ["card", "seat", "name", "n", "suit", "rank", "hero"], (
+        f"占位符白名单必须逐字是票面那七个：{whitelist['allowed']}"
+    )
+    assert whitelist["badComposed"] is None, "带未知占位符的模板必须整条作废"
+    assert whitelist["badQuestion"] == "弃置1张牌（手牌 / 装备区）", (
+        f"未知占位符要回退到服务端文案：{whitelist['badQuestion']!r}"
+    )
+    assert whitelist["rawBad"] is None, "未知占位符不许被渲染成字面量"
+    assert whitelist["missingValue"] is None, (
+        "白名单内的槽取不到值也必须回退（不许把 {card} 原样印到界面上）"
+    )
+    assert whitelist["filled"] == "【桃♥7】【桃】♥7 3号位陆逊 陆逊 1", whitelist["filled"]
+    assert whitelist["emptyTemplate"] is None, "空模板不算模板（否则会把问句清成空）"
+
+
+def test_the_prompt_template_keys_are_real_skill_ids_and_real_step_names() -> None:
+    """初稿的键 / 步骤名与**引擎声明**对得上（跨语言副本纪律，同 `IDENTITY_RATIOS` 那条）。
+
+    `prompts.json` 是前端唯一的一份文案副本，键 = 服务端 `view.skills[].skill_id`、步骤名 =
+    `Step.name`。手改一个字（技能 id 打错 / 步骤名打错）**不会报错**，只会让那一整条模板
+    永远不生效——用户改完字以为生效了，界面上其实还是服务端那句。故这里拿真声明核一遍：
+    `sgs.skills.catalog.CATALOG[skill_id]` 存在，且每个步骤名都出现在该技能的
+    `step_requirements` 或 `SkillFlow` 的步骤键里。
+    """
+    from sgs.skills.catalog import CATALOG  # 只读声明，不跑引擎、不进记录流
+
+    draft = json.loads(_PROMPTS_JSON.read_text(encoding="utf-8"))
+    assert draft, "prompts.json 是空表"
+    window_keys = [key for key in draft if key.startswith("window:")]
+    for key in window_keys:
+        assert re.fullmatch(r"window:[A-Za-z_]+", key), f"窗口键不合形状：{key}"
+    for key, entry in draft.items():
+        if key.startswith("window:"):
+            assert isinstance(entry.get("ask"), str), f"{key} 只有一句 ask（窗口没有步骤）"
+            continue
+        definition = CATALOG.get(key)
+        assert definition is not None, f"prompts.json 的键不是真技能 id：{key}"
+        known = set(getattr(definition, "step_requirements", None) or ())
+        flow = getattr(definition, "flow", None)
+        if flow is not None:
+            known |= {step.key for step in flow.steps}
+        steps = entry.get("steps") or {}
+        assert steps, f"{key} 没有任何步骤模板"
+        for step in steps:
+            assert step in known, f"{key} 的步骤名 {step} 不在声明里：{sorted(known)}"

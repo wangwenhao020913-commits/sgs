@@ -446,7 +446,7 @@ async function submitRightAction(kind) {
   // 票 07：排列没有可用布局（规格缺失 / 顺序不完整）时不要退回成"送 Pass"。
   if (pending && pending.kind === "ARRANGE" && kind === RIGHT_ACTION_KINDS.pass
     && !arrangeAction(pending)) {
-    $("t-choice").textContent = "排列不可用，请刷新";
+    setAskChoice("排列不可用，请刷新", ASK_CHOICE_VERDICT_TTL_MS);
     return;
   }
   // 先留一份**点击前**的选择快照：失败时原样还回去（界面 DOM 本来就没动）。
@@ -472,13 +472,13 @@ async function submitAction(restoreSelection = null) {
   if (state.playback || state.submitBusy) return;
   const action = buildAction();
   if (!action) {
-    $("t-choice").textContent = "没有可提交的候选：先选一张牌或一个选项。";
+    setAskChoice("没有可提交的候选：先选一张牌或一个选项。", ASK_CHOICE_VERDICT_TTL_MS);
     return;
   }
   const pending = state.view.pending;
   const blocked = selectionError(action, pending);
   if (blocked) {
-    $("t-choice").textContent = blocked;
+    setAskChoice(blocked, ASK_CHOICE_VERDICT_TTL_MS);
     return;
   }
   // 预发动 / 手牌清单入口的确认动作**不在** `legal_actions` 里：
@@ -506,7 +506,7 @@ async function submitAction(restoreSelection = null) {
     // 最后一道自检：造出来的必须**逐字段**是候选里的那一条（否则引擎会拒，且错在界面）。
     // 预发动 / 不枚举档是**仅有的**让开处：复合动作由服务端校验器验（W4-1），不枚举档的
     // 答案由服务端的形状谓词验。
-    $("t-choice").textContent = "这个组合不在合法候选里，请换一个选择。";
+    setAskChoice("这个组合不在合法候选里，请换一个选择。", ASK_CHOICE_VERDICT_TTL_MS);
     return;
   }
   // U2-03：POST 在飞 = 提示区四键全部禁用（快照留到结束）；轮询刷新也让路（见 refresh）。
@@ -542,7 +542,7 @@ async function submitAction(restoreSelection = null) {
     state.submitBusy = false;
     if (error.status === 409) {
       // 409 = 询问过期：允许刷新到**新的**询问；刷新失败才退回点击前那一面。
-      $("t-choice").textContent = "这个询问已过期（可能刚被代答）：已为你刷新。";
+      setAskChoice("这个询问已过期（可能刚被代答）：已为你刷新。", ASK_CHOICE_VERDICT_TTL_MS);
       await refresh(true);
       if (state.view === viewBefore && !state.playback) {
         if (restoreSelection) restoreSelectionState(restoreSelection);
@@ -556,7 +556,7 @@ async function submitAction(restoreSelection = null) {
     // 400 / 其它拒绝：恢复点击前的选择与四键，DOM 只多一行错误文案。
     if (restoreSelection) restoreSelectionState(restoreSelection);
     releaseActionButtons(true);
-    $("t-choice").textContent = `提交被拒：${error.message}`;
+    setAskChoice(`提交被拒：${error.message}`, ASK_CHOICE_VERDICT_TTL_MS);
   }
 }
 
@@ -565,7 +565,8 @@ async function takeover() {
    * 也不越过 legal_actions。故这个按钮只做一件事——催服务端判定一次（取增量即判定）。 */
   if (state.playback) return;
   await refresh();
-  $("t-choice").textContent = "已请服务端判定一次（到时限即自动代答）。";
+  // 这句写在 `refresh()` **之后**：不给自己寿命就只能等下一次 renderPending 冲掉（票面根因）。
+  setAskChoice("已请服务端判定一次（到时限即自动代答）。", ASK_CHOICE_VERDICT_TTL_MS);
 }
 
 function clearSelection() {

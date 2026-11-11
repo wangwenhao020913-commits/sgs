@@ -51,33 +51,104 @@ function isRightAction(action) {
     && (action.kind === RIGHT_ACTION_KINDS.endPhase || action.kind === RIGHT_ACTION_KINDS.pass);
 }
 
-/* ------------------------------------------------------------ 询问渲染 */
+/* ------------------------------------------------------------ 询问面的生命周期 */
 
-/** **清空询问面**：提示文本 / 询问文本 / 技能串 / 目标提示 / 选项格 / 询问弹窗。
+/** 页脚 `#t-choice` 的**显式寿命**（票 07）：每次写入带一个序号，下一次 reset / 下一条
+ *  写入 / 超时都能只清"自己那一代"——不再靠"下一次 `renderPending` 恰好被调到"兜底。
  *
- * 回放期演的是"上一问**已经答完**"之后发生的事（`session.js:applyView` 在起播时调用）：
- * 旧询问的这几样都不再属于当前这一步。此前只有 `#t-prompt` / `#t-choice` 被清，其余
- * 五样一直挂到**下一次** `renderPending` 才被冲掉——那一问可能隔着几十条记录，于是：
- * 观星的排列弹窗在效果演完前一直留在场上、五谷的亮牌格留在提示区、其它座位的询问来了
- * 提示区还是上一问的技能文案（M6 实机报障的三条同源症状）。
- *
- * **亮牌窗例外**：`state.dialog.kind` 是 `reveal` 时窗口与它的正文都留着——亮牌是公开 /
- * 授予的牌面展示，记录流还会往里追加（洛神的连续判定靠 `refreshJudgmentReveal` 把 JUDGE
- * 记录接在已开的窗口上；五谷的持久亮牌跨整个结算）。它自己的出口有两条：源结算帧出栈
- * （`modal.js:syncPlaybackDialog`）或下一问提交（`syncDialog`）。持久亮牌模式下正文画在
- * `#t-dialog-reveal`、`#t-options` 留在提示区 ⇒ 那份仍属于上一问，照样清。
+ *  票面根因（spec §1 #5 第一类）：`answer.js` 七处只写不清（含 `takeover()` 那句写在
+ *  `refresh()` **之后**的"已请服务端判定一次…"），于是页脚会停在上一问的判定文案上。
+ *  现在**唯一**写入口是 :func:`setAskChoice`，**唯一**清除点是 :func:`resetAskChoice`。
  */
-function blankAskSurface() {
+const askChoiceLifetime = { seq: 0, timer: null };
+
+/** `#t-choice` 的兜底寿命（毫秒）：只给**判定类**文案（提交被拒 / 已请判定 / 已过期）。
+ *
+ *  状态类文案（"将提交：…" / "还要选 2 名角色"）**不超时**——它们由渲染重算，超时清掉
+ *  会让页脚在玩家没动的时候自己变空。故 `ttlMs` 缺省 0 = 不排计时器，只受 reset 管。
+ */
+const ASK_CHOICE_VERDICT_TTL_MS = 8000;
+
+/** 写页脚 `#t-choice`（**唯一**写入口）；`ttlMs > 0` 时到期自动清掉这一代。 */
+function setAskChoice(text, ttlMs = 0) {
+  const node = $("t-choice");
+  askChoiceLifetime.seq += 1;
+  const token = askChoiceLifetime.seq;
+  if (askChoiceLifetime.timer !== null) {
+    window.clearTimeout(askChoiceLifetime.timer);
+    askChoiceLifetime.timer = null;
+  }
+  if (node) node.textContent = text === undefined || text === null ? "" : String(text);
+  if (ttlMs > 0) {
+    askChoiceLifetime.timer = window.setTimeout(() => {
+      askChoiceLifetime.timer = null;
+      // 已经被下一条写入 / 一次 reset 取代 ⇒ 这一代不许再动 DOM。
+      if (askChoiceLifetime.seq !== token) return;
+      const target = $("t-choice");
+      if (target) target.textContent = "";
+    }, ttlMs);
+  }
+}
+
+/** 清页脚并**作废在飞的超时**（只由 :func:`resetAskSurface` 调）。 */
+function resetAskChoice() {
+  askChoiceLifetime.seq += 1;
+  if (askChoiceLifetime.timer !== null) {
+    window.clearTimeout(askChoiceLifetime.timer);
+    askChoiceLifetime.timer = null;
+  }
+  const node = $("t-choice");
+  if (node) node.textContent = "";
+}
+
+/** **清空询问面**（票 07 A：**唯一**实现）：提示文本 / 询问文本 / 技能串 / 目标提示 /
+ *  选项格 / 技能按钮组 / 页脚 / 弹窗标题条镜像，并复位 `#t-context` 的归属说明。
+ *
+ *  三个调用点（别处一个字都不写）：
+ *  ① :func:`blankAskSurface` —— 一批记录起播；
+ *  ② :func:`renderPending` **头部** —— 每次重绘都从清空的面开始；
+ *  ③ `session.js:commitView` 的**终局分支** —— 它在 `renderPending` 之前 `return`。
+ *
+ *  `keepOptions`：亮牌窗的**累积正文**挂在 `#t-options` 上（洛神连续判定 / 五谷持久展示），
+ *  起播时它属于"这一问还在继续"，故由 `blankAskSurface` 显式保留；其余调用一律清。
+ */
+function resetAskSurface({ keepOptions = false } = {}) {
   const prompt = $("t-prompt");
   if (prompt) prompt.textContent = "";
-  const choice = $("t-choice");
-  if (choice) choice.textContent = "";
   const hints = $("t-skill-hints");
   if (hints) hints.textContent = "";
   const targetHint = $("t-target-hint");
   if (targetHint) targetHint.textContent = "";
   const promptSkills = $("t-prompt-skills");
   if (promptSkills) promptSkills.innerHTML = "";
+  if (!keepOptions) {
+    const options = $("t-options");
+    if (options) options.innerHTML = "";
+  }
+  // 弹窗标题条的**镜像**（`modal.js:syncDialogHint` 把 `#t-target-hint` 抄过去）：窗口不关时
+  // 没人重算它 ⇒ 上一问的步骤提示会留在标题条上（`keepDialog` 分支的残留）。
+  resetDialogHint();
+  // `#t-context` 全项目原本**没有清除点**：终局 / 起播后它停在上一批的"处理中：【X】"上。
+  const contextNode = $("t-context");
+  if (contextNode) contextNode.textContent = "";
+  resetAskChoice();
+  // 文案编辑器的显隐读的是同一份"当前这一步"：顺手同步，免得按钮停在上一问的状态。
+  if (typeof promptSyncEditor === "function") promptSyncEditor();
+}
+
+/** **清空询问面（起播）**：回放期演的是"上一问**已经答完**"之后发生的事。
+ *
+ *  `session.js:applyView` 在一批记录起播时调用。旧询问的七件套都不再属于当前这一步；
+ *  此前只有 `#t-prompt` / `#t-choice` 被清，其余几样一直挂到**下一次** `renderPending`
+ *  才被冲掉——那一问可能隔着几十条记录（M6 实机报障的三条同源症状）。
+ *
+ *  **亮牌窗例外**：`state.dialog.kind` 是 `reveal` 时窗口与它的正文都留着——亮牌是公开 /
+ *  授予的牌面展示，记录流还会往里追加（洛神的连续判定靠 `refreshJudgmentReveal` 把 JUDGE
+ *  记录接在已开的窗口上；五谷的持久亮牌跨整个结算）。它自己的出口有两条：源结算帧出栈
+ *  （`modal.js:syncPlaybackDialog`）或下一问提交（`syncDialog`）。持久亮牌模式下正文画在
+ *  `#t-dialog-reveal`、`#t-options` 留在提示区 ⇒ 那份仍属于上一问，照样清。
+ */
+function blankAskSurface() {
   const options = $("t-options");
   const body = $("t-dialog-body");
   // 正文这时**挂在弹窗正文槽里**吗（`renderPending` 的分派器把它写进 `#t-options`，
@@ -89,18 +160,24 @@ function blankAskSurface() {
     && (state.dialog.kind === DIALOG_KINDS.reveal
       || (state.dialog.kind === DIALOG_KINDS.suit && suitResultActive()));
   if (!keepDialog) {
-    // 弹窗收起时 `closeDialogDom()` 会把 `#t-options` 搬回提示区，故清格子放在它**之后**：
+    // 弹窗收起时 `closeDialogDom()` 会把 `#t-options` 搬回提示区，故 reset 放在它**之后**：
     // 上一问的排列面 / 选项 / 槽位不跟着回到提示条上。
     closeDialogDom();
-    if (options) options.innerHTML = "";
-    return;
   }
-  if (!bodyOwnsOptions && options) options.innerHTML = "";
+  resetAskSurface({ keepOptions: keepDialog && bodyOwnsOptions });
 }
+
+/* ------------------------------------------------------------ 询问渲染 */
 
 /** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
 function renderPending(view) {
   const pending = view && view.pending;
+  // 票 07 A（调用点 ②）：**每一次** renderPending 都从清空的询问面开始——旧的页脚寿命、
+  // 目标提示、技能串、选项格不会再跨问残留（此前只清其中两样，其余等下一次渲染兜）。
+  resetAskSurface();
+  // 提示区技能组是询问面的一部分（reset 会清它）：立刻按**这一问**重铺。它只读 view
+  // （不依赖别的渲染器的产物），故放在最前面——后面每条 return 都不必记得补一次。
+  if (typeof renderPromptSkills === "function") renderPromptSkills(view);
   // 票 01：涉猎提交后的 2.5 秒结果态（仅发动者本地）。它**压过**下一问的表面直到计时
   // 结束：牌桌已按新视图重画，询问面留在这里展示"拿走了哪几张"；计时结束再画真正的下一步。
   if (!state.playback && suitResultActive()) {
@@ -163,7 +240,6 @@ function renderPending(view) {
   // 排列是**强制、无取消**（spec §4.3 / Q9(d)）：进入排列面时把取消按钮整个藏起来；
   // 其余询问路径照旧显示（本行是唯一的复位点，分支只负责按需隐藏）。
   $("btn-cancel").hidden = false;
-  $("t-choice").textContent = "";
   const targetHint = $("t-target-hint");
   if (targetHint) targetHint.textContent = "";
   if (!pending) {
@@ -192,7 +268,6 @@ function renderPending(view) {
     if (stepDialogKind(pending) === DIALOG_KINDS.watchTwoRows) {
       renderWatchRows(pending, { interactive: false });
     }
-    $("t-choice").textContent = "";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
     resetRightActions();
@@ -273,6 +348,9 @@ function renderPending(view) {
   refreshSubmit(pending);
   renderRightActions(pending, view);
   renderCountdown(view);
+  // 票 07：窗口式询问的模板层（`prompts.json` 的 `window:<cause>`）**只填空**——渲染器
+  // 已经写了步骤提示就以渲染器为准；缺键时零动作（回退到服务端 prompt / 规则话术）。
+  if (typeof promptApplyWindowAsk === "function") promptApplyWindowAsk(pending);
   // U2-06：询问弹窗的生命周期在**每次渲染末尾**按当前步骤的表面同步一次（开 / 关 /
   // 同一问只换正文）。它必须是最后一步：上面的渲染器刚把内容写进 `#t-options`。
   syncDialog();
@@ -452,12 +530,12 @@ function renderDirectSkill(pending, actions) {
   }
   const index = actions.indexOf(action);
   if (index >= 0 && state.selectedOption === null) state.selectedOption = index;
-  $("t-choice").textContent = `将提交：${skillActionLabel(action)}`;
+  setAskChoice(`将提交：${skillActionLabel(action)}`);
 }
 
 /** 没有专用面的询问：fail-closed。一句明话，不铺任何可点控件（含右端动作）。 */
 function renderUnsupported() {
-  $("t-choice").textContent = "这一步没有可用的界面";
+  setAskChoice("这一步没有可用的界面");
 }
 
 /** ``SELECT_OPTION`` 里形如 ``seat:N`` 的选项（服务端已解析成 ``option_seats``）。 */
@@ -833,7 +911,7 @@ function renderDirect(only, pending) {
   const label = only && only.kind === "ActivateSkill"
     ? skillActionLabel(only)
     : (only ? alternativeLabel(pending, only) : "");
-  $("t-choice").textContent = only ? `将提交：${label}` : "";
+  setAskChoice(only ? `将提交：${label}` : "");
 }
 
 /** 「显式选中的候选」是否已可提交：`blocked` / `ready` 的唯一算法。
@@ -860,8 +938,8 @@ function refreshSubmit(pending) {
     // 严格顺序：这批事件播完之前不接任何提交。
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
-    $("t-choice").textContent = "正在播放事件…";
-    if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;
+    setAskChoice("正在播放事件…");
+    if (state.lastRejectReason) setAskChoice(state.lastRejectReason);
     return;
   }
   // 弹窗模板（票 08）：内容按钮**一击即提交**，右端没有"下一步"要按；这里只把
@@ -880,8 +958,8 @@ function refreshSubmit(pending) {
   // 提不出去——提交键恒灰、提示条被改写成面内那句）。
   if (activationFaceSurface(pending)) {
     $("btn-submit").disabled = true;
-    $("t-choice").textContent = state.lastRejectReason
-      || "点一条技能发动；不发动就点「都不发动」。";
+    setAskChoice(state.lastRejectReason
+      || "点一条技能发动；不发动就点「都不发动」。");
     return;
   }
   // 票 01：按花色取牌（涉猎）——「提交」恒可点（0 张也合法）；「放弃」在右端，与提交同义，
@@ -889,9 +967,9 @@ function refreshSubmit(pending) {
   if (dialogKind === DIALOG_KINDS.suit) {
     const ready = buildAction() !== null;
     $("btn-submit").disabled = !ready;
-    $("t-choice").textContent = state.lastRejectReason
+    setAskChoice(state.lastRejectReason
       || `点选每种花色至多一张（已选 ${state.picks.length} 张）；`
-      + "点「提交」或右端「放弃」都按当前选择结算。";
+      + "点「提交」或右端「放弃」都按当前选择结算。");
     return;
   }
   // 座位多选面（W1）：牌桌上点多个座位，「提交」是**唯一**提交点。可点态 = 本地选中集合
@@ -905,10 +983,10 @@ function refreshSubmit(pending) {
     const picked = seatMultiChosenSeats(pending).length;
     const ready = picked >= least && picked <= most && buildAction() !== null;
     $("btn-submit").disabled = !ready;
-    if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;
-    else if (ready) $("t-choice").textContent = "可以提交。";
-    else if (picked < least) $("t-choice").textContent = `还要选 ${least - picked} 名角色（已选 ${picked} 名）。`;
-    else $("t-choice").textContent = `最多选 ${most} 名角色（已选 ${picked} 名）：再点一下已选的武将可取消。`;
+    if (state.lastRejectReason) setAskChoice(state.lastRejectReason);
+    else if (ready) setAskChoice("可以提交。");
+    else if (picked < least) setAskChoice(`还要选 ${least - picked} 名角色（已选 ${picked} 名）。`);
+    else setAskChoice(`最多选 ${most} 名角色（已选 ${picked} 名）：再点一下已选的武将可取消。`);
     return;
   }
   // 票 93：两行观看手牌——「提交」只在**四色各一**（picks 凑满 `spec.total` 下限）时可点；
@@ -922,15 +1000,15 @@ function refreshSubmit(pending) {
       && buildAction() !== null;
     $("btn-submit").disabled = !ready;
     if (state.lastRejectReason) {
-      $("t-choice").textContent = state.lastRejectReason;
+      setAskChoice(state.lastRejectReason);
     } else if (duplicate) {
-      $("t-choice").textContent = WATCH_DUPLICATE_MESSAGE;
+      setAskChoice(WATCH_DUPLICATE_MESSAGE);
     } else if (empty) {
-      $("t-choice").textContent = WATCH_EMPTY_MESSAGE;
+      setAskChoice(WATCH_EMPTY_MESSAGE);
     } else {
-      $("t-choice").textContent = ready
+      setAskChoice(ready
         ? "可以提交。"
-        : `必须四种花色各一张才能提交（已选 ${state.picks.length}/${required} 张）。`;
+        : `必须四种花色各一张才能提交（已选 ${state.picks.length}/${required} 张）。`);
     }
     return;
   }
@@ -942,21 +1020,21 @@ function refreshSubmit(pending) {
     const blocked = selected === null ? null : selectionError(selected, pending);
     const ready = blocked === null && buildAction() !== null;
     $("btn-submit").disabled = !ready;
-    $("t-choice").textContent = state.lastRejectReason
-      || (ready ? "可以提交。" : "点右端「提交」继续，或「放弃」停止。");
+    setAskChoice(state.lastRejectReason
+      || (ready ? "可以提交。" : "点右端「提交」继续，或「放弃」停止。"));
     return;
   }
   if (dialogKind === DIALOG_KINDS.reveal && isPickRevealStep(pending)) {
     const { blocked, ready } = selectionReady(pending);
     $("btn-submit").disabled = !ready;
     if (state.lastRejectReason) {
-      $("t-choice").textContent = state.lastRejectReason;
+      setAskChoice(state.lastRejectReason);
     } else if (blocked) {
       const [least, most] = selectionRange(pending);
       const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
-      $("t-choice").textContent = `选 ${howMany}后点右端「提交」（已选 ${state.picks.length} 张）。`;
+      setAskChoice(`选 ${howMany}后点右端「提交」（已选 ${state.picks.length} 张）。`);
     } else {
-      $("t-choice").textContent = "可以提交。";
+      setAskChoice("可以提交。");
     }
     return;
   }
@@ -964,18 +1042,18 @@ function refreshSubmit(pending) {
   // 没有可点的红桃时唯一出口是右端「放弃」。
   if (dialogKind === DIALOG_KINDS.reveal && hasPassAction(pending)) {
     $("btn-submit").disabled = true;
-    $("t-choice").textContent = state.lastRejectReason
+    setAskChoice(state.lastRejectReason
       || ((pending.slots || []).length
         ? "点一张红桃牌即展示；也可以点右端「放弃」。"
-        : "没有可展示的红桃牌，点右端「放弃」结束。");
+        : "没有可展示的红桃牌，点右端「放弃」结束。"));
     return;
   }
   // 只从自己手牌 / 装备区选一张（火攻 / 铁骑等）：点牌即提交；出口是内容点击或右端「放弃」。
   if (isOwnHandSinglePick(pending)) {
     $("btn-submit").disabled = true;
     const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
-    $("t-choice").textContent = state.lastRejectReason
-      || `点一张亮起的${where}即提交；也可以点右端「放弃」。`;
+    setAskChoice(state.lastRejectReason
+      || `点一张亮起的${where}即提交；也可以点右端「放弃」。`);
     return;
   }
   // 未知区域弹窗的**多选档**（票 06，【定乱】展示至多 X 张牌）：点牌只切换选中态，
@@ -987,18 +1065,18 @@ function refreshSubmit(pending) {
     const [least, most] = selectionRange(pending);
     const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
     $("btn-submit").disabled = !ready;
-    $("t-choice").textContent = state.lastRejectReason
-      || (ready ? "可以提交。" : `点选 ${howMany}牌（已选 ${state.picks.length} 张），再点「提交」。`);
+    setAskChoice(state.lastRejectReason
+      || (ready ? "可以提交。" : `点选 ${howMany}牌（已选 ${state.picks.length} 张），再点「提交」。`));
     return;
   }
   if (dialogDisablesPass(dialogKind, pending)) {
     $("btn-submit").disabled = true;
-    $("t-choice").textContent = state.lastRejectReason
+    setAskChoice(state.lastRejectReason
       || (dialogKind === DIALOG_KINDS.choice
         ? "点一个选项即提交（这一步不能放弃）。"
         : (dialogKind === DIALOG_KINDS.unknown
           ? "点一张牌即提交（这一步不能放弃）。"
-          : "点一张亮牌即提交（这一步不能放弃）。"));
+          : "点一张亮牌即提交（这一步不能放弃）。")));
     return;
   }
   const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];
@@ -1007,13 +1085,13 @@ function refreshSubmit(pending) {
   $("btn-submit").disabled = !ready;
   if (isOwnZonePick(pending)) {
     const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
-    $("t-choice").textContent = state.lastRejectReason
+    setAskChoice(state.lastRejectReason
       || blocked
-      || (ready ? "可以提交。" : `点选${where}（已选 ${state.picks.length} 张）。`);
+      || (ready ? "可以提交。" : `点选${where}（已选 ${state.picks.length} 张）。`));
     return;
   }
-  if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
-  if (blocked) { $("t-choice").textContent = blocked; return; }
+  if (state.lastRejectReason) { setAskChoice(state.lastRejectReason); return; }
+  if (blocked) { setAskChoice(blocked); return; }
   if (state.preactivation) {
     const pa = state.preactivation;
     // 复合动作：填完就交（服务端校验器裁决）；转化技的本地入口：填完还得**查得到候选**
@@ -1027,18 +1105,18 @@ function refreshSubmit(pending) {
     $("btn-submit").disabled = !legal || !ready || buildAction() === null;
     if (!legal) {
       // 通用文案（不认牌名 / 花色）：说清这一组不能一起转化，出口 = 取消再重选。
-      $("t-choice").textContent = PREACTIVATION_GROUP_HINT;
+      setAskChoice(PREACTIVATION_GROUP_HINT);
     } else if (!ready) {
       // 未填完 = 说**同一句**步骤提示（标题 `#t-target-hint` 读的也是它）：光标到末尾但
       // 还有空步时它会指回第一个空步，不再出现标题说「清单已填完」、页脚说「还有步骤
       // 没填完」的矛盾（票 08）。
-      $("t-choice").textContent = preactivationStepHint(pa, pending);
+      setAskChoice(preactivationStepHint(pa, pending));
     } else {
-      $("t-choice").textContent = pa.cardEntry
+      setAskChoice(pa.cardEntry
         ? "可以确认使用（提交一次带附带指定 [持刀者, Bn] 的使用）。"
         : (pa.composite
           ? "可以确认发动（提交一个复合动作）。"
-          : "可以确认发动（服务端会把它解析成这次的使用 / 响应）。");
+          : "可以确认发动（服务端会把它解析成这次的使用 / 响应）。"));
     }
     return;
   }
@@ -1050,59 +1128,59 @@ function refreshSubmit(pending) {
     // 说反话。没有这个键的被动入口（苦肉 / 洛神 / …）末尾两句一字不变。
     if (pending.default_choice === "activate") {
       const activate = selectedSkillAction(pending, pending.legal_actions || []);
-      $("t-choice").textContent = ready && activate
+      setAskChoice(ready && activate
         ? `将提交：${skillActionLabel(activate)}`
-        : "";
+        : "");
       return;
     }
-    $("t-choice").textContent = ready ? "可以提交：放弃。" : "点「进入预发动」，或点「放弃」。";
+    setAskChoice(ready ? "可以提交：放弃。" : "点「进入预发动」，或点「放弃」。");
     return;
   }
   if (pending.kind === "ARRANGE") {
     // 规格缺失 = 409 裸 Query / 无技能定义（投影 fail-closed）：不猜顺序，只说刷新。
     // 票 07：出口按**实际候选**说话（文案唯一一份住 `arrange.js:arrangeExitHint`）。
     const exit = arrangeExitHint(pending);
-    $("t-choice").textContent = !arrangeSpec(pending)
+    setAskChoice(!arrangeSpec(pending)
       ? "排列不可用，请刷新"
       : (ready
         ? `可以确认：提交你摆放的顺序（上行左→右，再接下行左→右）。${exit}`
-        : `先把全部卡牌排成一个完整顺序。${exit}`);
+        : `先把全部卡牌排成一个完整顺序。${exit}`));
     return;
   }
   // 弹窗模板（票 08）的分支在函数开头（`blocked` 之前）已经返回：这里不会再走到
   // choice / unknown。
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
-    $("t-choice").textContent = ready ? "可以提交。" : "点场上武将选择交给谁。";
+    setAskChoice(ready ? "可以提交。" : "点场上武将选择交给谁。");
     return;
   }
   // 技能直提态：把下一条要提交的技能候选写成中文技能名（不重铺候选行）。
   const skillAction = selectedSkillAction(pending, pending.legal_actions || []);
   if (skillAction) {
     const built = ready ? buildAction() : null;
-    $("t-choice").textContent = built && built.kind === "ActivateSkill"
+    setAskChoice(built && built.kind === "ActivateSkill"
       ? `将提交：${skillActionLabel(skillAction)}`
-      : "";
+      : "");
     return;
   }
   // `SELECT_OPTION` 的非座位形态：小选项按钮组。
   if (pending.kind === "SELECT_OPTION") {
-    $("t-choice").textContent = ready ? "可以提交。" : "点一个选项。";
+    setAskChoice(ready ? "可以提交。" : "点一个选项。");
     return;
   }
   if (isDiscardPick(pending)) {
     const need = pending.count || 0;
-    $("t-choice").textContent = ready
+    setAskChoice(ready
       ? "可以提交。"
-      : `还要选 ${Math.max(0, need - state.picks.length)} 张手牌弃置。`;
+      : `还要选 ${Math.max(0, need - state.picks.length)} 张手牌弃置。`);
     return;
   }
   if (state.focusCardId !== null && isHandPick(pending)) {
-    $("t-choice").textContent = ready ? "可以提交。" : pickerTargetHint(pending);
+    setAskChoice(ready ? "可以提交。" : pickerTargetHint(pending));
     return;
   }
   if (directAction(pending)) {
     renderDirect((pending.legal_actions || [])[0], pending);
     return;
   }
-  $("t-choice").textContent = ready ? "" : "先选一项，或点一张可用的手牌再提交。";
+  setAskChoice(ready ? "" : "先选一项，或点一张可用的手牌再提交。");
 }

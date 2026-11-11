@@ -127,6 +127,15 @@
     // "这一条记录会不会改表体"的快速判据（回放步不再每条都整桌重建）。
     "LOG_ITEM_LIMIT", "appendNarrativeEntry", "appendLog", "trimLogItems", "trimStreamState",
     "recordTouchesTableView", "NON_TABLE_DELTAS",
+    // table-ux-overhaul 票 07：提示区单一 reset（`#t-choice` 的寿命口）+ 文案模板
+    // （逐级累加 / 三层回退 / 白名单 / 覆盖层）+ 空转期的快照指纹（与票 10 共用）。
+    "resetAskSurface", "setAskChoice", "resetAskChoice", "ASK_CHOICE_VERDICT_TTL_MS",
+    "promptReady", "promptLoadTemplates", "promptTemplateFor", "promptComposedText",
+    "promptQuestionForStep", "promptGenericStepText", "promptStepSlots", "promptRenderTemplate",
+    "promptWindowAsk", "promptApplyWindowAsk", "promptEditTarget", "promptEditCurrent",
+    "promptSaveOverride", "promptClearOverlay", "promptExportOverlay", "promptExportCurrent",
+    "promptProblems", "promptFileTemplates", "PROMPT_SLOT_WHITELIST",
+    "snapshotFingerprint", "applyIdleRepaint",
   ];
   const out = {};
   for (const name of names) {

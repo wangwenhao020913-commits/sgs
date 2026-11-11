@@ -688,6 +688,18 @@ function showReopenButton(kind, visible) {
 
 /* ------------------------------------------------------------ 询问弹窗 */
 
+/** 清弹窗标题条的**镜像**（`#t-target-hint` 的副本）。票 07：`resetAskSurface` 在
+ *  **窗口不关**的那条路上（亮牌 / 涉猎结果态）也要能单独撤掉它——镜子的写入仍只在下一条
+ *  函数里，这里只是同一格的清除口，免得上一问的步骤提示留在标题条上。 */
+function resetDialogHint() {
+  const hint = $("t-dialog-hint");
+  if (hint) {
+    hint.textContent = "";
+    hint.hidden = true;
+  }
+  if (state.dialog) state.dialog.hintOverride = null;
+}
+
 /** 步骤提示：模板把"现在要做什么"写在提示条的 `#t-target-hint`；折叠后它必须还在，
  *  所以这里镜像一份到标题条。空文本时整个提示隐藏（"可选"的步骤提示）。
  *  五谷的持久展示例外：那一步的提示条属于无懈窗口，亮牌窗读自己的提示

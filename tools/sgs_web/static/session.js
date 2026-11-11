@@ -1536,14 +1536,17 @@ function commitView(body) {
   scrollLogToBottom();
   if (body.finished) {
     state.timer = null;
+    // 票 07 A（调用点 ③）：这一支在 `renderPending` **之前** return，旧实现在这里只清了
+    // `#t-options` / `#t-target-hint` 两格 ⇒ 技能串 / 页脚 / 描述停在上一问上（spec §1 #5
+    // 的第三类缺欠）。现在走**同一个** `resetAskSurface`；`#t-prompt` 与页脚随后写的是
+    // 终局文案（新事实），不是残留。
+    resetAskSurface();
     resetCountdown();
     resetRightActions();
     syncDialog();
     $("t-prompt").textContent = "本局已结束。";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
-    $("t-options").innerHTML = "";
-    $("t-target-hint").textContent = "";
     showPageNotice("已结束（录像已存）");
     loadRuns();
     return;
@@ -1641,6 +1644,63 @@ function applyIdlePoll(body) {
   syncPendingClock(state.view);
 }
 
+/** **快照指纹**（票 07 A 的第三条出口；与票 10 共用）：座位块会读的那些快照字段的一行摘要。
+ *
+ * 为什么需要它：`pollIsIdle` 只看游标与询问序号，`applyIdlePoll` 只同步时钟 ⇒ 任何
+ * **"无新记录的状态变化"永远不会重绘**（`live_deltas` 改的标记 / 武将牌上的牌就是这一类，
+ * 票 10 的"标记不消失"住在这条缝里）。
+ *
+ * 纯函数、不碰 DOM：只把 `players[]` 的可见字段与牌桌三组拼成一行。**字段表是显式的**——
+ * 以后座位块多读一格，就在这里多登记一格（票 10 会把武将牌上的牌接进来）。
+ */
+function snapshotFingerprint(snapshot) {
+  if (!snapshot) return "";
+  const cardIds = (cards) => (cards || []).map((card) => String(card && card.card_id)).join(",");
+  const players = (snapshot.players || []).map((player) => [
+    player.seat,
+    player.hp,
+    player.hp_max,
+    player.armor,
+    player.hand_count,
+    player.alive ? 1 : 0,
+    player.hero || "",
+    player.identity || "",
+    player.chained ? 1 : 0,
+    player.flipped ? 1 : 0,
+    player.wine_active ? 1 : 0,
+    player.hero_zone_count === undefined ? "" : player.hero_zone_count,
+    cardIds(player.equip),
+    cardIds(player.judge),
+    (player.sealed_zones || []).join("+"),
+    (player.markers || []).map((marker) => `${marker.name || marker.id || ""}×${marker.count}`).join("+"),
+  ].join(":")).join(";");
+  return [
+    snapshot.seat,
+    snapshot.turn_seat,
+    snapshot.phase,
+    snapshot.deck_count,
+    cardIds(snapshot.self_hand),
+    cardIds(snapshot.processing),
+    Array.isArray(snapshot.discard) ? cardIds(snapshot.discard) : String(snapshot.discard),
+    players,
+  ].join("|");
+}
+
+/** 空转期快照**变了**吗（票 07）：变了 ⇒ 座位块要重绘，但**不清本地选择**（没有新事实）。
+ *
+ * 为什么不像"有新记录"那样走 `applyView` → `commitView`：那条路无条件 `resetSelection()`，
+ * 会把玩家选到一半的牌清掉。这里只把快照换成服务端那份、重绘表体，询问面仍是当前这一问。
+ */
+function applyIdleRepaint(body) {
+  if (!state.view || !body) return false;
+  state.view.snapshot = body.snapshot;
+  if (Array.isArray(body.skills)) state.view.skills = body.skills;
+  state.view.pending_since = body.pending_since;
+  syncPendingClock(state.view);
+  renderTable();
+  return true;
+}
+
 /** 一拍轮询：播放中 / 提交在飞时**暂停**（下一次 tick 自然恢复），弹窗打开时照常进行。
  *
  * - 播放中取增量会把半批事件换成"播放中快照"（提交按钮 / 倒计时都会跳），故让路；
@@ -1656,6 +1716,12 @@ async function poll() {
     const body = await fetchView();
     pollFailures = 0;
     if (pollIsIdle(body)) {
+      // 票 07：空转**不等于**"什么都没变"——快照指纹变了就重绘座位块（不清选择）。
+      // 指纹没变才是纯时钟刷新（D12 的静默分支）。
+      if (snapshotFingerprint(body.snapshot) !== snapshotFingerprint(state.view.snapshot)) {
+        applyIdleRepaint(body);
+        return;
+      }
       applyIdlePoll(body);
       return;
     }

@@ -184,6 +184,11 @@ class El {
    *  读法在垫片里恒假（真浏览器恒真）。这里补成一对访问器。 */
   get className() { return Array.from(this.classList.set).join(" "); }
   set className(v) { this.classList.set = new Set(String(v).split(/\s+/).filter(Boolean)); }
+  /* 真 DOM 的 `document.getElementById` 认得**动态设置**的 id（票 07 的文案编辑按钮就是
+   * `createElement` 之后挂 id 的）：垫片此前只认 index.html 里的静态 id，于是
+   * `$("btn-prompt-edit")` 会再造一个**不同**的空节点，点它什么都不会发生。 */
+  get id() { return this._id || ""; }
+  set id(v) { this._id = String(v || ""); if (this._id) registerElementId(this); }
   /** 活的 HTMLCollection 形状视图（真 DOM 的 `element.children`）。 */
   get children() { return this._childrenView; }
   get textContent() { return this._text + this._children.map((c) => c.textContent || c.text()).join(""); }
@@ -316,6 +321,10 @@ class CanvasEl extends El {
 }
 
 const byId = new Map();
+/** 动态 / 静态挂上去的 id 都进这张表（`El` 的 id setter 调它；函数声明提升，构造期可见）。 */
+function registerElementId(node) {
+  if (node && node.id) byId.set(String(node.id), node);
+}
 const el = (tag, id) => { const n = new El(tag, id); if (id) byId.set(id, n); return n; };
 const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
 for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a|canvas)\b[^>]*\bid="([^"]+)"/g)) {
@@ -386,8 +395,27 @@ let iniInjection = null;
 const readIniFile = () => {
   try { return readFileSync("tools/sgs_web/static/anim.ini", "utf8"); } catch { return ""; }
 };
+/* table-ux-overhaul 票 07：提示区文案模板 `prompts.json` 与 `anim.ini` 同姿态——相对静态
+ * 文件的 fetch。默认回**磁盘上的真文件**（用户改字即生效），用例可注入一份看缺键回退。 */
+let promptsInjection = null;
+const readPromptsFile = () => {
+  try { return readFileSync("tools/sgs_web/static/prompts.json", "utf8"); } catch { return ""; }
+};
 
 globalThis.fetch = async (path, options) => {
+  if (path === "prompts.json") {
+    const injected = promptsInjection;
+    promptsInjection = null;
+    if (injected) {
+      return {
+        ok: injected.ok !== false,
+        status: injected.ok === false ? 404 : 200,
+        text: async () => String(injected.text || ""),
+        json: async () => ({}),
+      };
+    }
+    return { ok: true, status: 200, text: async () => readPromptsFile(), json: async () => ({}) };
+  }
   if (path === "anim.ini") {
     const injected = iniInjection;
     iniInjection = null;
@@ -4519,8 +4547,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `${stepChipText(1)} / ${$("t-target-hint").textContent}`);
 
   renderFor(plain);
-  check("㉿WD4 没有 wording 时退回旧通用文案（步骤条\"选牌\"、提示也一样）",
-    stepChipText(0).includes("选牌") && $("t-target-hint").textContent.includes("选牌"),
+  // 票 07：第三层（前端通用文案）从"选牌 / 选目标"升级成 `选择{n}张牌` / `选择{n}名角色`
+  // （spec §2 Q18 的措辞）；步骤**条**仍是短标签"选牌"，提示行是完整的一句。
+  check("㉿WD4 没有 wording 时退回前端通用文案（步骤条\"选牌\"、提示行\"选择1张牌\"）",
+    stepChipText(0).includes("选牌") && $("t-target-hint").textContent.includes("选择1张牌"),
     `${stepChipText(0)} / ${$("t-target-hint").textContent}`);
 }
 
@@ -26456,6 +26486,238 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         && windowShim.SgsHealFX === realHealFx,
       `children=${layer().children.length} live=${liveCount()}`);
   }
+}
+
+
+/* ============ 票 07：提示区单一 reset + 可编辑文案模板 ============
+ *
+ * 三件事都走**真实产出路径**：
+ *  ① `resetAskSurface` 的三个调用点里最难观察的那个——**亮牌窗不关**（keepDialog）时
+ *     标题条镜像必须立刻空掉（票面根因第二类：`blankAskSurface` 只清源、不通知镜像）；
+ *  ② 终局分支（`commitView` 在 `renderPending` 前 return）之后的提示区三件套；
+ *  ③ 界【离间】三级的累加文案 = 用户 2026-11-11 给的三句（逐字），外加游戏内编辑 /
+ *     导出覆盖层那两下（`localStorage['sgs.prompts']`，键级叠加）。
+ */
+{
+  await ui.promptReady;
+
+  /* ---------------------------------------------------------- ① 镜像不残留 */
+  const revealCard = (id, name, type) => ({
+    ...synthCard(id, name), type, display_name: name, kind: "normal", source_cards: [],
+  });
+  const wugu = revealCard(5, "五谷丰登", "harvest");
+  const shownA = revealCard(2, "闪", "dodge");
+  const shownB = revealCard(3, "桃", "peach");
+  const revealPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 7001, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 7001, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: null, zone: "processing" }, card: shownA }],
+    spec: { zones: ["processing"], total: [1, 1], sequential: false, optional: false },
+    harvest: {
+      active: true, key: "harvest:70:5:0", title: "五谷丰登", hint: "从亮出的牌里选一张获得",
+      source: 0, card: wugu, revealed: [shownA, shownB],
+      targets: [{ seat: 0, status: "current", card: null, cancelled: false, reason: null }],
+      current: 0,
+    },
+    context: {
+      actor: 0, name: "五谷丰登", targets: [0], label: "0号位使用五谷丰登",
+      requirement: "从亮出的牌里选一张获得", skill_hints: [],
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const revealView = synthView(revealPending);
+  ui.state.view = revealView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(revealView);
+  check("票 07-K1 前置：亮牌窗开着、标题条镜像里有步骤提示",
+    $("t-dialog").hidden === false && $("t-dialog-hint").textContent.length > 0,
+    `hidden=${$("t-dialog").hidden} hint="${$("t-dialog-hint").textContent}"`);
+  // 起播一批带记录的视图：blankAskSurface 会走 keepDialog（亮牌窗**不关**）。
+  const drawRecord = {
+    kind: "delta", delta_type: "card_move", seq: 7002, reason: "DRAW", owner: 0,
+    from_zone: { seat: null, zone: "deck" }, to_zone: { seat: 0, zone: "hand" },
+    cards: [synthCard(70, "杀")],
+  };
+  ui.applyViewRaw({ ...revealView, cursor: 7002, log_seq: 0, records: [drawRecord] });
+  check("票 07-K2 keepDialog（亮牌窗不关）时标题条镜像立刻清空——上一问的步骤提示不残留",
+    $("t-dialog").hidden === false && $("t-dialog-hint").textContent === ""
+      && $("t-dialog-hint").hidden === true,
+    `hidden=${$("t-dialog").hidden} hint="${$("t-dialog-hint").textContent}" mirrorHidden=${$("t-dialog-hint").hidden}`);
+  check("票 07-K3 回放期 `#t-prompt` / `#t-skill-hints` / `#t-target-hint` 也一起清空",
+    $("t-prompt").textContent === "" && $("t-skill-hints").textContent === ""
+      && $("t-target-hint").textContent === "",
+    `prompt="${$("t-prompt").textContent}" skills="${$("t-skill-hints").textContent}" hint="${$("t-target-hint").textContent}"`);
+  ui.flushPlayback();
+
+  /* ---------------------------------------------------------- ③ 离间三级累加 */
+  const peach = { ...synthCard(7, "桃"), suit: "heart", rank: 7, type: "peach", color: "red" };
+  const lijianSteps = [
+    { name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["7"] }],
+      wording: "弃置1张牌（手牌 / 装备区）" },
+    { name: "victim", kind: "seat", min: 1, max: 1, order: 1,
+      pool: [{ when: ["7"], options: ["seat:1", "seat:2", "seat:3"] }],
+      wording: "选择决斗目标（场上的一名男性角色；先点他，【决斗】打向他）" },
+    { name: "user", kind: "seat", min: 1, max: 1, order: 2,
+      pool: [{ when: ["7", "seat:3"], options: ["seat:1", "seat:2"] }],
+      wording: "选择决斗使用者（另一名男性角色；由他对目标使用【决斗】）" },
+  ];
+  const lijianPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 7100,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 7100 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    preactivations: { "hero.jie_diaochan.lijian": lijianSteps },
+    preactivation: [],
+    context: {
+      requirement: "弃一张牌，依次选择两名男性角色", skill_hints: [],
+    },
+  };
+  const lijianView = synthView(lijianPending);
+  lijianView.heroes = { 0: "jie_diaochan", 1: "guanyu", 2: "zhangfei", 3: "luxun" };
+  lijianView.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    sealed_zones: [], identity: null,
+  }));
+  lijianView.snapshot.self_hand = [peach];
+  lijianView.skills = [{
+    skill_id: "hero.jie_diaochan.lijian", name: "界离间", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "弃一张牌，依次选择两名男性角色", convert_sources: [] },
+  }];
+  ui.state.view = lijianView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(lijianView);
+  const lijianButton = Array.from($("t-skills").children).find(
+    (node) => node.getAttribute("data-skill-id") === "hero.jie_diaochan.lijian");
+  (lijianButton.listeners.click || []).forEach((fn) => fn({ target: lijianButton }));
+  const lijianPa = () => ui.state.preactivation;
+  check("票 07-T0 界【离间】进预发动：三步清单、光标停在第 1 步",
+    !!lijianPa() && lijianPa().steps.length === 3 && lijianPa().cursor === 0,
+    `cursor=${lijianPa() && lijianPa().cursor}`);
+
+  const sentence1 = "选择1张牌弃置";
+  const sentence2 = "弃置一张【桃♥7】，选择1名男性角色成为决斗目标";
+  const sentence3 = "弃置一张【桃♥7】，选择1名男性角色对【3号位陆逊】使用决斗";
+  const composedNow = () => ui.promptComposedText(lijianPa(), lijianPa().cursor);
+  check("票 07-T1 第 1 级：`选择1张牌弃置`（逐字）",
+    composedNow() === sentence1 && $("t-target-hint").textContent.includes(sentence1),
+    `composed=${JSON.stringify(composedNow())} hint="${$("t-target-hint").textContent}"`);
+
+  const peachChip = $("t-hand").children[0];
+  (peachChip.listeners.click || []).forEach((fn) => fn({ target: peachChip }));
+  const nextStep = Array.from($("t-options").children).find(
+    (node) => node.textContent === "下一步");
+  (nextStep.listeners.click || []).forEach((fn) => fn({ target: nextStep }));
+  check("票 07-T2 第 2 级：`弃置一张【桃♥7】，选择1名男性角色成为决斗目标`（逐字）",
+    composedNow() === sentence2 && $("t-target-hint").textContent.includes(sentence2),
+    `composed=${JSON.stringify(composedNow())} hint="${$("t-target-hint").textContent}"`);
+
+  const luxunBox = Array.from($("t-seats").children).find(
+    (node) => node.getAttribute("data-seat") === "3");
+  (luxunBox.listeners.click || []).forEach((fn) => fn({ target: luxunBox }));
+  check("票 07-T3 第 3 级：`弃置一张【桃♥7】，选择1名男性角色对【3号位陆逊】使用决斗`（逐字）",
+    composedNow() === sentence3 && $("t-target-hint").textContent.includes(sentence3),
+    `composed=${JSON.stringify(composedNow())} hint="${$("t-target-hint").textContent}"`);
+
+  /* ---------------------------------------------------- 游戏内编辑 + 导出 */
+  check("票 07-T4 进到模板覆盖的步骤 ⇒「改这段文案」出现（最小编辑面，不新开屏幕）",
+    $("btn-prompt-edit").hidden === false && $("btn-prompt-edit").disabled === false
+      && (($("btn-prompt-edit").listeners.click || []).length) === 1,
+    `hidden=${$("btn-prompt-edit").hidden} click=${($("btn-prompt-edit").listeners.click || []).length}`);
+  let edited = null;
+  windowShim.prompt = (message) => { edited = message; return "选择一名男性角色对【{seat}】使用决斗（改）"; };
+  const editButton = $("btn-prompt-edit");
+  (editButton.listeners.click || []).forEach((fn) => fn({ target: editButton }));
+  const overlayStored = storage.get("sgs.prompts");
+  const overlayJson = overlayStored ? JSON.parse(overlayStored) : {};
+  const mergedAfterSave = ui.promptTemplateFor("hero.jie_diaochan.lijian");
+  check("票 07-T5 编辑只写覆盖层的那一格（localStorage 里保持稀疏），文件层的 done 仍在合并结果里",
+    overlayJson["hero.jie_diaochan.lijian"].steps.user.ask
+      === "选择一名男性角色对【{seat}】使用决斗（改）"
+      && !overlayJson["hero.jie_diaochan.lijian"].steps.card
+      && mergedAfterSave.steps.card.done === "弃置一张【{card}】",
+    `stored=${overlayStored} mergedCard=${JSON.stringify(mergedAfterSave.steps.card)}`);
+  check("票 07-T6 改完立刻重画：提示行跟上覆盖层的文案（文件层的 done 仍在）",
+    $("t-target-hint").textContent.includes("弃置一张【桃♥7】，选择一名男性角色对【3号位陆逊】使用决斗（改）"),
+    `hint="${$("t-target-hint").textContent}"`);
+  let exportedText = null;
+  windowShim.prompt = (message, initial) => { exportedText = initial; return null; };
+  check("票 07-T7「导出文案 JSON」随覆盖层出现",
+    $("btn-prompt-export").hidden === false, `hidden=${$("btn-prompt-export").hidden}`);
+  const exportButton = $("btn-prompt-export");
+  (exportButton.listeners.click || []).forEach((fn) => fn({ target: exportButton }));
+  check("票 07-T8 导出的是当前覆盖层（能贴回仓里的 JSON）",
+    typeof exportedText === "string" && exportedText.includes("选择一名男性角色对【{seat}】使用决斗（改）"),
+    `exported=${String(exportedText).slice(0, 120)}`);
+  ui.promptClearOverlay();
+  check("票 07-T9 清掉覆盖层 ⇒ 回到文件层（同一个光标位置逐字回到用户那第三句）",
+    composedNow() === sentence3 && !storage.has("sgs.prompts"),
+    `composed=${JSON.stringify(composedNow())} stored=${storage.has("sgs.prompts")}`);
+  delete windowShim.prompt;
+
+  /* --------------------------------------- 窗口式询问的一句问法（window:<cause>） */
+  const dodgePending = {
+    kind: "RESPOND", cause: "DODGE", actor: 0, seq: 7200,
+    prompt: "请打出一张【闪】。",
+    legal_actions: [{ kind: "Pass", answers_seq: 7200 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const dodgeView = synthView(dodgePending);
+  ui.state.view = dodgeView;
+  ui.resetSelection();
+  ui.renderPending(dodgeView);
+  const hintBeforeWindowTemplate = $("t-target-hint").textContent;
+  promptsInjection = { text: JSON.stringify({ "window:DODGE": { ask: "是否打出【闪】" } }) };
+  await ui.promptLoadTemplates();
+  ui.renderPending(dodgeView);
+  check("票 07-W1 机读窗口模板（window:<cause>）只填空：提示行为「是否打出【闪】」，问句仍来自服务端",
+    $("t-target-hint").textContent === "是否打出【闪】"
+      && $("t-prompt").textContent === "请打出一张【闪】。"
+      && hintBeforeWindowTemplate === "",
+    `before="${hintBeforeWindowTemplate}" after="${$("t-target-hint").textContent}" prompt="${$("t-prompt").textContent}"`);
+  await ui.promptLoadTemplates();  // 回到磁盘上的真文件
+
+  /* ---------------------------------------------------------- ② 终局三件套 */
+  ui.show("table");
+  // 先把上一问的残留摆满：技能串 / 页脚 / 描述（进入预发动那一问仍在屏上）。
+  ui.state.view = lijianView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(lijianView);
+  lijianView.pending.context.skill_hints = [
+    { name: "界离间", requirement: "弃一张牌，依次选择两名男性角色" },
+  ];
+  ui.state.preactivation = null;
+  ui.renderPending(lijianView);
+  // `#t-prompt-skills` 是渲染器按"真正给了入口的技能"铺的；这里直接种一颗残留（判据是 reset）。
+  // `#t-prompt-skills` 是渲染器按"真正给了入口的技能"铺的；这里直接种一颗残留子节点
+  // （判据是 reset 清不清它，垫片不解析 innerHTML，故用 appendChild 造真子节点）。
+  $("t-prompt-skills").appendChild(documentShim.createElement("button"));
+  check("票 07-E0 前置：提示区确实有残留（技能串 / 页脚 / 描述 / 技能组）",
+    $("t-skill-hints").textContent.length > 0 && $("t-choice").textContent.length > 0
+      && $("t-context").textContent.length > 0 && $("t-prompt-skills").children.length > 0,
+    `skills="${$("t-skill-hints").textContent}" choice="${$("t-choice").textContent}" `
+      + `context="${$("t-context").textContent}" buttons=${$("t-prompt-skills").children.length}`);
+  ui.applyView({ ...lijianView, finished: true, cursor: 7101, log_seq: 0, records: [] });
+  check("票 07-E1 终局后提示区三件套全空（终局分支先 reset 再 return）",
+    $("t-skill-hints").textContent === "" && $("t-context").textContent === ""
+      && $("t-choice").textContent === "已结束（录像已存）"
+      && $("t-target-hint").textContent === "" && $("t-dialog-hint").textContent === ""
+      && $("t-options").innerHTML === "" && $("t-prompt-skills").children.length === 0
+      && $("t-prompt").textContent === "本局已结束。",
+    `prompt="${$("t-prompt").textContent}" skills="${$("t-skill-hints").textContent}" `
+      + `choice="${$("t-choice").textContent}" context="${$("t-context").textContent}" `
+      + `hint="${$("t-target-hint").textContent}" options=${$("t-options").children.length} `
+      + `buttons=${$("t-prompt-skills").children.length}`);
+  ui.state.view = null;
+  ui.state.sessionId = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

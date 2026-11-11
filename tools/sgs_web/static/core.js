@@ -365,7 +365,14 @@ function showPageNotice(text) {
   const target = $("view-replay").hidden === false ? $("r-empty-guide")
     : $("view-table").hidden === false ? $("t-choice")
       : $("lobby-hint");
-  if (target) target.textContent = text;
+  if (!target) return;
+  // 票 07：牌桌那一格是**有寿命**的页脚（唯一写入口在 `pending.js:setAskChoice`），
+  // 逾期自己消失——否则一次跨页错误会一直挂在询问条右端，直到下一次重绘。
+  if (target === $("t-choice")) {
+    setAskChoice(text, ASK_CHOICE_VERDICT_TTL_MS);
+    return;
+  }
+  target.textContent = text;
 }
 
 function show(view) {

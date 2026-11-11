@@ -1,0 +1,759 @@
+{
+  "hero.caopi_mobile.fangzhu": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色"
+      }
+    }
+  },
+  "hero.chenqun.dingpin": {
+    "steps": {
+      "card": {
+        "ask": "弃置一张手牌（不能是本回合使用或弃置过的类型：基本 / 锦囊 / 装备）"
+      },
+      "seat": {
+        "ask": "令一名已受伤的角色进行一次判定"
+      }
+    }
+  },
+  "hero.daqiao.liuli": {
+    "steps": {
+      "card": {
+        "ask": "弃置一张牌（手牌 / 装备区）"
+      },
+      "seat": {
+        "ask": "选择将此【杀】转移给哪名其他角色"
+      }
+    }
+  },
+  "hero.dianwei_mobile.qiangxi": {
+    "steps": {
+      "option": {
+        "ask": "选择一项：失去1点体力 / 弃置一张武器牌"
+      },
+      "card": {
+        "ask": "弃置一张武器牌（手牌或装备区）"
+      },
+      "target": {
+        "ask": "选择你攻击范围内的一名其他角色"
+      }
+    }
+  },
+  "hero.diaochan.lijian": {
+    "steps": {
+      "card": {
+        "ask": "选择1张牌弃置",
+        "done": "弃置一张【{card}】"
+      },
+      "user": {
+        "ask": "选择1名男性角色成为决斗使用者",
+        "done": "选择【{seat}】成为决斗使用者"
+      },
+      "victim": {
+        "ask": "选择1名男性角色成为决斗目标"
+      }
+    }
+  },
+  "hero.dongzhuo_mobile.bengkuai": {
+    "steps": {
+      "option": {
+        "ask": "选择一项：1.失去1点体力；2.减1点体力上限"
+      }
+    }
+  },
+  "hero.feng_yujin.dingluan": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名角色（可以是自己）"
+      },
+      "card": {
+        "ask": "展示该角色至多 X 张牌并标记为【定乱】牌（X = 3 − 已被定乱过的角色数）"
+      }
+    }
+  },
+  "hero.feng_yujin.jieyue": {
+    "steps": {
+      "seat": {
+        "ask": "选择你攻击范围内的一名其他角色"
+      },
+      "card": {
+        "ask": "选择你自己的至多两张牌（手牌 / 装备区）"
+      },
+      "choice": {
+        "ask": "选择一项：标记并交给该角色 / 弃置并造成伤害"
+      }
+    }
+  },
+  "hero.guojia.yiji": {
+    "steps": {
+      "card": {
+        "ask": "从亮出的牌里选择一至两张"
+      },
+      "give": {
+        "ask": "选择将这些牌交给哪名角色"
+      }
+    }
+  },
+  "hero.guyong.bingyi": {
+    "steps": {
+      "seat": {
+        "ask": "选择令其摸一张牌的角色（可多选，选好后提交）"
+      }
+    }
+  },
+  "hero.guyong.shenxing": {
+    "steps": {
+      "card": {
+        "ask": "弃置两张牌（手牌 / 装备区）"
+      }
+    }
+  },
+  "hero.haozhao.zhengku": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色"
+      },
+      "card": {
+        "ask": "弃置至与你手牌数相同"
+      }
+    }
+  },
+  "hero.huatuo.qingnang": {
+    "steps": {
+      "card": {
+        "ask": "弃置1张手牌"
+      },
+      "seat": {
+        "ask": "选择一名已受伤角色回复1点体力"
+      }
+    }
+  },
+  "hero.jiaxu_mobile.luanwu": {
+    "steps": {
+      "target": {
+        "ask": "选择距离最近的一名角色作为【杀】的目标"
+      }
+    }
+  },
+  "hero.jie_chenqun_mobile.dingpin": {
+    "steps": {
+      "card": {
+        "ask": "弃置一张牌（不能是本回合使用或弃置过的类型：基本 / 锦囊 / 装备）"
+      },
+      "seat": {
+        "ask": "选择一名角色进行一次判定"
+      }
+    }
+  },
+  "hero.jie_daqiao.liuli": {
+    "steps": {
+      "card": {
+        "ask": "弃置一张牌（手牌 / 装备区）"
+      },
+      "seat": {
+        "ask": "选择将此【杀】转移给哪名其他角色"
+      }
+    }
+  },
+  "hero.jie_diaochan.lijian": {
+    "steps": {
+      "card": {
+        "ask": "选择1张牌弃置",
+        "done": "弃置一张【{card}】"
+      },
+      "victim": {
+        "ask": "选择1名男性角色成为决斗目标"
+      },
+      "user": {
+        "ask": "选择1名男性角色对【{seat}】使用决斗"
+      }
+    }
+  },
+  "hero.jie_gongsunzan.qiaomeng": {
+    "steps": {
+      "card": {
+        "ask": "选择受伤角色区域里的一张牌"
+      }
+    }
+  },
+  "hero.jie_guanyu.yijue": {
+    "steps": {
+      "card": {
+        "ask": "弃置一张牌；随后由被指定者展示一张手牌"
+      },
+      "seat": {
+        "ask": "选择一名有手牌的其他角色"
+      }
+    }
+  },
+  "hero.jie_guojia.yiji": {
+    "steps": {
+      "card": {
+        "ask": "选择要交给其他角色的手牌（至多两张）"
+      },
+      "give": {
+        "ask": "选择将这张牌交给哪名其他角色"
+      }
+    }
+  },
+  "hero.jie_guyong_mobile.bingyi": {
+    "steps": {
+      "seat": {
+        "ask": "选择令其摸一张牌的角色（可多选，选好后提交）"
+      }
+    }
+  },
+  "hero.jie_guyong_mobile.shenxing": {
+    "steps": {
+      "card": {
+        "ask": "弃置两张牌（手牌 / 装备区）"
+      }
+    }
+  },
+  "hero.jie_jushou_mobile.jianying": {
+    "steps": {
+      "card": {
+        "ask": "选择一张牌（手牌 / 装备区）"
+      },
+      "name": {
+        "ask": "选择当作哪一张基本牌使用（此刻用不了的名字置灰、不可选）"
+      },
+      "seat": {
+        "ask": "选择这张牌的目标（目标由牌名决定时不出现这一步）"
+      }
+    }
+  },
+  "hero.jie_lidian.wangxi": {
+    "steps": {
+      "card": {
+        "ask": "选择交给该角色的一张牌"
+      }
+    }
+  },
+  "hero.jie_liubei.jijiang": {
+    "steps": {
+      "seat": {
+        "ask": "选择【杀】的目标"
+      }
+    }
+  },
+  "hero.jie_liubei.rende": {
+    "steps": {
+      "card": {
+        "ask": "选择任意张要交给其他角色的手牌"
+      },
+      "seat": {
+        "ask": "选择交给哪名其他角色"
+      }
+    }
+  },
+  "hero.jie_lvbu.liyu": {
+    "steps": {
+      "card": {
+        "ask": "获得受伤角色区域内的一张牌"
+      }
+    }
+  },
+  "hero.jie_lvmeng.gongxin": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名手牌非空的其他角色"
+      },
+      "card": {
+        "ask": "观看其手牌：选择一张红桃牌展示（可放弃）"
+      },
+      "option": {
+        "ask": "选择：弃置此牌 / 将此牌置于牌堆顶"
+      }
+    }
+  },
+  "hero.jie_lvmeng.qinxue": {
+    "steps": {
+      "choice": {
+        "ask": "选择一项：1. 摸两张牌；2. 回复 1 点体力"
+      }
+    }
+  },
+  "hero.jie_machao.tieqi": {
+    "steps": {
+      "card": {
+        "ask": "弃置一张与判定结果花色相同的牌（由被指定者选择）"
+      }
+    }
+  },
+  "hero.jie_simayi.fankui": {
+    "steps": {
+      "card": {
+        "ask": "获得伤害来源的一张牌"
+      }
+    }
+  },
+  "hero.jie_sunquan.zhiheng": {
+    "steps": {
+      "card": {
+        "ask": "弃置任意张牌（手牌 / 装备区）"
+      }
+    }
+  },
+  "hero.jie_sunshangxiang.jieyin": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名男性角色"
+      },
+      "option": {
+        "ask": "选择弃置一张手牌，或将一张装备牌置入其装备区"
+      },
+      "card": {
+        "ask": "弃置一张手牌 / 置入一张装备牌（目标同槽必须有空位）"
+      }
+    }
+  },
+  "hero.jie_weiyan_mobile.kuanggu": {
+    "steps": {
+      "opt": {
+        "ask": "选择一项：1.回复1点体力；2.摸一张牌"
+      }
+    }
+  },
+  "hero.jie_weiyan_mobile.qimou": {
+    "steps": {
+      "option": {
+        "ask": "选择失去的体力值 X（1..当前体力）"
+      }
+    }
+  },
+  "hero.jie_xiahoudun.ganglie": {
+    "steps": {
+      "choice": {
+        "ask": "选择弃置两张手牌或受到 1 点伤害"
+      },
+      "card": {
+        "ask": "选择弃置的两张手牌"
+      }
+    }
+  },
+  "hero.jie_xiahouyuan_mobile.shensu": {
+    "steps": {
+      "items": {
+        "ask": "选择至多三项（可勾选任意组合；没有可弃的装备牌时【2】置灰）"
+      },
+      "card": {
+        "ask": "弃置一张装备牌（手牌或装备区）"
+      },
+      "target": {
+        "ask": "选择一张无距离限制的【杀】的目标"
+      }
+    }
+  },
+  "hero.jie_xuchu.luoyi": {
+    "steps": {
+      "gain": {
+        "ask": "选择是否获得亮出牌里的基本牌 / 武器牌 /【决斗】；不获得则三张置入弃牌堆，正常摸两张"
+      }
+    }
+  },
+  "hero.jie_xushu.jianyan": {
+    "steps": {
+      "type": {
+        "ask": "选择一种牌的类别或颜色（基本牌 / 锦囊牌 / 装备牌 / 红色 / 黑色）"
+      },
+      "seat": {
+        "ask": "选择一名男性角色获得这张牌"
+      }
+    }
+  },
+  "hero.jie_zhangjiao_mobile.huangtian": {
+    "steps": {
+      "card": {
+        "ask": "选择一张【闪】或【闪电】交给张角"
+      }
+    }
+  },
+  "hero.jie_zhangjiao_mobile.leiji": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色进行判定"
+      }
+    }
+  },
+  "hero.jie_zhangliao.tuxi": {
+    "steps": {
+      "seat": {
+        "ask": "选择至多两名其他角色（各获得其中一张手牌）"
+      }
+    }
+  },
+  "hero.jie_zhenji.luoshen": {
+    "steps": {
+      "repeat": {
+        "ask": "选择是否再进行一次【洛神】判定"
+      }
+    }
+  },
+  "hero.jie_zhouyu.fanjian": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色"
+      },
+      "suit": {
+        "ask": "由目标选择一种花色"
+      },
+      "card": {
+        "ask": "由目标从你的手牌中选择一张"
+      }
+    }
+  },
+  "hero.liubei.jijiang": {
+    "steps": {
+      "seat": {
+        "ask": "选择【杀】的目标"
+      }
+    }
+  },
+  "hero.liubei.rende": {
+    "steps": {
+      "card": {
+        "ask": "选择任意张要交给其他角色的手牌"
+      },
+      "seat": {
+        "ask": "选择交给哪名其他角色"
+      }
+    }
+  },
+  "hero.lu_su_mobile.dimeng": {
+    "steps": {
+      "first": {
+        "ask": "选择两名其他角色（第一名）"
+      },
+      "second": {
+        "ask": "选择两名其他角色（第二名，不能与第一名相同）"
+      },
+      "cost": {
+        "ask": "弃置 X 张牌（X 为两名角色的手牌数之差）"
+      },
+      "card": {
+        "ask": "弃置 X 张牌（X 为两名角色的手牌数之差）"
+      }
+    }
+  },
+  "hero.lu_su_mobile.haoshi": {
+    "steps": {
+      "seat": {
+        "ask": "交给除你以外全场手牌数最少的一名其他角色"
+      },
+      "give": {
+        "ask": "从你的手牌里选出一半（向下取整）交给该角色"
+      },
+      "card": {
+        "ask": "从你的手牌里选出一半（向下取整）交给该角色"
+      }
+    }
+  },
+  "hero.lukang_mobile.duanyan": {
+    "steps": {
+      "column": {
+        "ask": "废除你装备区里的一种装备栏（然后执行对应的选项）"
+      }
+    }
+  },
+  "hero.lukang_mobile.huairou": {
+    "steps": {
+      "card": {
+        "ask": "重铸一张装备牌（手牌 / 装备区）"
+      }
+    }
+  },
+  "hero.pangde_mobile.mengjin": {
+    "steps": {
+      "card": {
+        "ask": "弃置其一张牌（手牌 / 装备区）"
+      }
+    }
+  },
+  "hero.shen_caocao_mobile.guixin": {
+    "steps": {
+      "card": {
+        "ask": "获得一名其他角色区域里的一张牌"
+      }
+    }
+  },
+  "hero.shen_ganning.jieying": {
+    "steps": {
+      "seat": {
+        "ask": "将“营”标记交给一名其他角色"
+      }
+    }
+  },
+  "hero.shen_ganning.poxi": {
+    "steps": {
+      "seat": {
+        "ask": "观看一名其他角色的手牌"
+      }
+    }
+  },
+  "hero.shen_guanyu_mobile.wuhun": {
+    "steps": {
+      "pick": {
+        "ask": "选择一名拥有最多「梦魇」标记的角色"
+      }
+    }
+  },
+  "hero.shen_lvmeng_mobile.gongxin": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名手牌非空的其他角色"
+      },
+      "card": {
+        "ask": "观看其手牌：选择一张红桃牌展示（可放弃）"
+      },
+      "option": {
+        "ask": "选择：弃置此牌 / 将此牌置于牌堆顶"
+      }
+    }
+  },
+  "hero.shen_lvmeng_mobile.shelie": {
+    "steps": {
+      "card": {
+        "ask": "获得其中每种花色的牌各一张（每种花色至多一张，可一张不选；未获得的置入弃牌堆）"
+      }
+    }
+  },
+  "hero.shen_zhouyu_mobile.qinyin": {
+    "steps": {
+      "option": {
+        "ask": "选择一项：令所有角色各回复1点体力 / 令所有角色各失去1点体力"
+      }
+    }
+  },
+  "hero.shen_zhouyu_mobile.yeyan": {
+    "steps": {
+      "distribute": {
+        "ask": "为角色分配火焰伤害（合计至多3点；点一次计数 +1，可重置，随时提交）"
+      },
+      "card": {
+        "ask": "弃置四张花色各不相同的手牌（四种花色各一张）"
+      }
+    }
+  },
+  "hero.shen_zhugeliang.dawu": {
+    "steps": {
+      "card": {
+        "ask": "移去任意张“星”（上限 = min(星数, 存活角色数)）"
+      },
+      "seat": {
+        "ask": "选择等量名角色（含自己，互不相同）"
+      }
+    }
+  },
+  "hero.shen_zhugeliang.kuangfeng": {
+    "steps": {
+      "card": {
+        "ask": "移去一张“星”（武将牌上的牌）"
+      },
+      "seat": {
+        "ask": "选择一名角色（含自己）"
+      }
+    }
+  },
+  "hero.simayi.fankui": {
+    "steps": {
+      "card": {
+        "ask": "获得伤害来源的一张牌"
+      }
+    }
+  },
+  "hero.sunjian_mobile.yinghun": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色"
+      },
+      "option": {
+        "ask": "选择一项：1.令其摸X张牌，然后其弃置一张牌；2.令其摸一张牌，然后其弃置X张牌"
+      },
+      "card": {
+        "ask": "令其弃置一张牌 / X张牌"
+      },
+      "discard": {
+        "ask": "令其弃置一张牌 / X张牌"
+      }
+    }
+  },
+  "hero.sunquan.zhiheng": {
+    "steps": {
+      "card": {
+        "ask": "弃置任意张牌（手牌 / 装备区）"
+      }
+    }
+  },
+  "hero.sunshangxiang.jieyin": {
+    "steps": {
+      "card": {
+        "ask": "弃置2张手牌"
+      },
+      "seat": {
+        "ask": "选择一名已受伤男性角色回复1点体力"
+      }
+    }
+  },
+  "hero.taishici.tianyi": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名有手牌的其他角色拼点"
+      }
+    }
+  },
+  "hero.tao_caocao.changyi": {
+    "steps": {
+      "grant": {
+        "ask": "令其获得【倡义】"
+      },
+      "choice": {
+        "ask": "选择一项：弃牌并伤害 / 摸牌并失去此技能"
+      },
+      "card": {
+        "ask": "弃置至少X张牌（手牌 + 装备区）"
+      },
+      "target": {
+        "ask": "选择一名没有【倡义】的角色"
+      },
+      "boost": {
+        "ask": "是否令本次拼点的点数+X"
+      }
+    }
+  },
+  "hero.tao_caocao.hongzhi": {
+    "steps": {
+      "card": {
+        "ask": "弃置若干手牌，使手牌数等于体力上限（至多为5）"
+      }
+    }
+  },
+  "hero.tao_liubei.yiqi": {
+    "steps": {
+      "type": {
+        "ask": "观看弃牌堆顶的 x 张牌（只有你能看），选择一种类型：获得其中该类型的所有牌（必须选一项）"
+      }
+    }
+  },
+  "hero.xiahoudun.ganglie": {
+    "steps": {
+      "choice": {
+        "ask": "选择弃置两张手牌或受到 1 点伤害"
+      },
+      "card": {
+        "ask": "选择弃置的两张手牌"
+      }
+    }
+  },
+  "hero.xiahouyuan.shensu": {
+    "steps": {
+      "items": {
+        "ask": "选择一至两项：【1】跳过判定阶段和摸牌阶段；【2】跳过出牌阶段并弃置一张装备牌"
+      },
+      "target": {
+        "ask": "选择一张无距离限制的普通【杀】的目标"
+      },
+      "card": {
+        "ask": "弃置一张装备牌（手牌或装备区）"
+      }
+    }
+  },
+  "hero.xuchu.luoyi": {
+    "steps": {
+      "gain": {
+        "ask": "选择是否获得亮出牌里的基本牌 / 武器牌 /【决斗】；不获得则三张置入弃牌堆，正常摸两张"
+      }
+    }
+  },
+  "hero.xunyu.jieming": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名角色，令其将手牌摸至体力上限（至多摸至五张）"
+      }
+    }
+  },
+  "hero.xunyu.quhu": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名体力值大于你、且有手牌的角色拼点"
+      },
+      "receiver": {
+        "ask": "选择该角色攻击范围内的一名角色承受 1 点伤害（不能是该角色本身）"
+      }
+    }
+  },
+  "hero.yuji_mobile.guohuo": {
+    "steps": {
+      "card": {
+        "ask": "扣置一张手牌"
+      },
+      "name": {
+        "ask": "声明一种牌名：基本牌或普通锦囊牌（此刻没有合法目标的名字置灰、不可选）"
+      },
+      "target": {
+        "ask": "（按声明的牌名）选择目标"
+      },
+      "designation": {
+        "ask": "选择持刀者的【杀】打向谁（【借刀杀人】的附带指定）"
+      }
+    }
+  },
+  "hero.zhangjiao_mobile.huangtian": {
+    "steps": {
+      "card": {
+        "ask": "选择一张【闪】或【闪电】交给张角"
+      }
+    }
+  },
+  "hero.zhangjiao_mobile.leiji": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名角色进行判定"
+      }
+    }
+  },
+  "hero.zhangliao.tuxi": {
+    "steps": {
+      "seat": {
+        "ask": "选择至多两名其他角色（各获得其中一张手牌）"
+      }
+    }
+  },
+  "hero.zhangxiu.congjian": {
+    "steps": {
+      "card": {
+        "ask": "交给一名其他目标角色一张牌"
+      },
+      "seat": {
+        "ask": "选择交给哪名其他目标角色"
+      }
+    }
+  },
+  "hero.zhangxiu.xiongluan": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色"
+      }
+    }
+  },
+  "hero.zhenji.luoshen": {
+    "steps": {
+      "repeat": {
+        "ask": "选择是否再进行一次【洛神】判定"
+      }
+    }
+  },
+  "hero.zhouyu.fanjian": {
+    "steps": {
+      "seat": {
+        "ask": "选择一名其他角色"
+      },
+      "suit": {
+        "ask": "由目标选择一种花色"
+      },
+      "card": {
+        "ask": "由目标从你的手牌中选择一张"
+      }
+    }
+  }
+}

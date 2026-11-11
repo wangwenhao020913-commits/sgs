@@ -714,6 +714,17 @@ function preactivationStepLabel(step) {
   return "选一项";
 }
 
+/** 这一步的**问法**（票 07）：三层回退的唯一实现住 `prompts.js:promptQuestionForStep`
+ *  （模板层逐级累加 → 服务端 `Step.wording` → 前端通用文案）。
+ *
+ *  步骤**条**仍用 :func:`preactivationStepLabel`（它要短），这里给的是提示行那一整句：
+ *  `#t-target-hint` 与页脚 `#t-choice` 都读这一份，两处不会各说一套。
+ */
+function preactivationStepQuestion(pa, step, index) {
+  if (typeof promptQuestionForStep === "function") return promptQuestionForStep(pa, step, index);
+  return preactivationStepLabel(step);
+}
+
 function preactivationStepHint(pa, pending) {
   if (!pa) return "";
   // 票 10：已选来源凑不成合法组合 ⇒ 说清"换一张牌"，而不是继续画"第 k 步…"。
@@ -727,10 +738,11 @@ function preactivationStepHint(pa, pending) {
     return pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。";
   }
   const step = pa.steps[at];
-  const wording = preactivationWording(step);
+  // 票 07：这一句问法走**三层回退的唯一实现**（模板层 → `Step.wording` → 前端通用文案）。
+  // 模板层缺键时它逐字等于 `Step.wording`（改前的输出），故没有模板的技能行为不变。
+  const what = preactivationStepQuestion(pa, step, at);
   if (preactivationStepKind(step) === "card") {
     const count = pa.answers[at].values.length;
-    const what = wording || "选牌";
     return `第 ${at + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。`;
   }
   if (preactivationStepKind(step) === "seat") {
@@ -738,7 +750,6 @@ function preactivationStepHint(pa, pending) {
     const required = preactivationRequiredSeat(pa, pending, at);
     const requiredText = required === null ? "" : "；借刀指定的目标（必选）";
     if (preactivationSeatMulti(step)) {
-      const what = wording || "选目标";
       const cap = preactivationStepCap(pa, at);
       if (cap !== null && cap <= step.min) {
         return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${cap} 个${requiredText}）。`;
@@ -746,11 +757,9 @@ function preactivationStepHint(pa, pending) {
       const upper = cap === null ? "max" : cap;
       return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。`;
     }
-    if (wording) return `第 ${at + 1}/${pa.steps.length} 步：${wording}（点场上武将选择）。`;
-    return `第 ${at + 1}/${pa.steps.length} 步：点场上武将选目标。`;
+    return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将选择）。`;
   }
-  if (wording) return `第 ${at + 1}/${pa.steps.length} 步：${wording}`;
-  return `第 ${at + 1}/${pa.steps.length} 步：选一项。`;
+  return `第 ${at + 1}/${pa.steps.length} 步：${what}`;
 }
 
 /** 清单已经选中的来源牌会以哪张**产物**使用（U1-07）：读服务端 `transform_products`。
