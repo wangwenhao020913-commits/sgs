@@ -46,7 +46,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .actions import need_card_floor, reset_need_card_event
+from .actions import reset_need_card_event
 from .behaviors import SLASH_FAMILY_KEY, DamageNature
 from .modifiers import responder_role, response_count
 
@@ -566,30 +566,27 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
     providers_used = tuple(frame.data.get("providers_used", ()))
-    if not host.should_ask_respond(
+    # 这一扇窗口的**同一份**载荷：预筛口与真询问共用它（票 02 的类别位只有一处）。
+    ctx = host.respond_context(
+        frame,
         turn,
         cause=WindowCause.DUEL,
         required="slash",
         target=None,
         providers_used=providers_used,
-        floor=need_card_floor(frame, turn),
         skip_if_empty=True,
-    ):
+    )
+    if not host.should_ask_respond(turn, ctx):
         # 票 05：这个座位**没有任何**办法打出【杀】（真牌 ∪ 转化 / 提供者）⇒ 不问，
-        # 语义与它答 ``Pass`` 逐字相同（受到对方 1 点伤害）。总开关在会话策略；引擎
-        # 缺省 OFF ⇒ 恒 True（金录像零变化）。
+        # 语义与它答 ``Pass`` 逐字相同（受到对方 1 点伤害）。类别位由本窗口写在载荷里，
+        # 总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
     action = host.ask_respond(
         frame,
         turn,
         Timing.RESOLVE_AFTER_EFFECT,
-        cause=WindowCause.DUEL,
-        required="slash",
-        target=None,
-        window_frame=frame.frame_id,
-        providers_used=providers_used,
-        skip_if_empty=True,
+        ctx,
     )
     if host.suspended(action):
         return "stay"
@@ -702,20 +699,20 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         _use_at_bn(produced)
         return None
     providers_used = tuple(frame.data.get("providers_used", ()))
+    # 预览与真询问读**同一份**窗口载荷（auto-b 与 a 面因此不可能对"有没有候选"两说）。
+    ctx = host.respond_context(
+        frame,
+        holder,
+        cause=WindowCause.BORROWED_SWORD,
+        required=SLASH_FAMILY_KEY,
+        target=holder,
+        mode=RespondMode.USE,
+        use_targets=use_targets,
+        providers_used=providers_used,
+    )
     offers = [
         action
-        for action in host.respond_candidates(
-            holder,
-            cause=WindowCause.BORROWED_SWORD,
-            required=SLASH_FAMILY_KEY,
-            target=holder,
-            mode=RespondMode.USE,
-            use_targets=use_targets,
-            providers_used=providers_used,
-            # 与下面那次真询问**同一个** floor（票 03 §4-2）：预览若漏了它，闸门挡掉的
-            # 提供者仍会被当成"a 可行"，auto-b 就判错。
-            floor=need_card_floor(frame, holder),
-        )
+        for action in host.respond_candidates(holder, ctx)
         if not isinstance(action, Pass)
     ]
     if not offers:
@@ -725,13 +722,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         frame,
         holder,
         Timing.RESOLVE_AFTER_EFFECT,
-        cause=WindowCause.BORROWED_SWORD,
-        required=SLASH_FAMILY_KEY,
-        target=holder,
-        window_frame=frame.frame_id,
-        mode=RespondMode.USE,
-        use_targets=use_targets,
-        providers_used=providers_used,
+        ctx,
     )
     if host.suspended(action):
         return "stay"
@@ -817,30 +808,27 @@ def _resist_or_damage(
         if frame.data.pop("skill_result"):
             return None  # 红 ⇒ 视为打出【闪】，需要被满足、不受伤害
     providers_used = tuple(frame.data.get("providers_used", ()))
-    if not host.should_ask_respond(
+    # 这一扇窗口的**同一份**载荷：预筛口与真询问共用它（票 02 的类别位只有一处）。
+    ctx = host.respond_context(
+        frame,
         target,
         cause=cause,
         required=required,
         target=None,
         providers_used=providers_used,
-        floor=need_card_floor(frame, target),
         skip_if_empty=True,
-    ):
+    )
+    if not host.should_ask_respond(target, ctx):
         # 票 05：这个座位**没有任何**办法打出这张牌（真牌 ∪ 转化 / 提供者）⇒ 不问，
-        # 语义与它答 ``Pass`` 逐字相同（受到 1 点伤害）。总开关在会话策略；引擎缺省
-        # OFF ⇒ 恒 True（金录像零变化）。
+        # 语义与它答 ``Pass`` 逐字相同（受到 1 点伤害）。类别位由本窗口写在载荷里，
+        # 总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
         _push_damage(host, frame, source=frame.data["source"], target=target, amount=amount)
         return None
     action = host.ask_respond(
         frame,
         target,
         Timing.RESOLVE_AFTER_EFFECT,
-        cause=cause,
-        required=required,
-        target=None,
-        window_frame=frame.frame_id,
-        providers_used=providers_used,
-        skip_if_empty=True,
+        ctx,
     )
     if host.suspended(action):
         return "stay"

@@ -58,7 +58,6 @@ from sgs.effects import (
     ModifierPoint,
     check_targets,
     check_usable,
-    need_card_floor,
     satisfies_required,
 )
 from sgs.resolution import Control, Frame, Tag, has_tag
@@ -379,30 +378,27 @@ def _run_lord_request(
         return None
     while request["next"] < len(request["askers"]):
         asker = request["askers"][request["next"]]
-        if not host.should_ask_respond(
+        # 这一扇窗口的**同一份**载荷：预筛口与真询问共用它（票 02 的类别位只有一处）。
+        ctx = host.respond_context(
+            frame,
             asker,
             cause=WindowCause.LORD_REQUEST,
             required=skill.required,
             target=actor,
             mode=RespondMode.PLAY,
-            floor=need_card_floor(frame, asker),
             skip_if_empty=True,
-        ):
+        )
+        if not host.should_ask_respond(asker, ctx):
             # 票 05：这个同势力座位**没有任何**办法打出这张牌（真牌 ∪ 转化 / 提供者）
-            # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（轮到下一个应答者）。总开关在会话
-            # 策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+            # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（轮到下一个应答者）。类别位由本窗口
+            # 写在载荷里，总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
             request["next"] += 1
             continue
         action = host.ask_respond(
             frame,
             asker,
             timing,
-            cause=WindowCause.LORD_REQUEST,
-            required=skill.required,
-            target=actor,
-            window_frame=frame.frame_id,
-            mode=RespondMode.PLAY,
-            skip_if_empty=True,
+            ctx,
         )
         if host.suspended(action):
             return "stay"

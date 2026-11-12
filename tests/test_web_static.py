@@ -9011,3 +9011,99 @@ def test_the_own_zone_direct_pick_shape_is_one_predicate_without_a_dialog_deadlo
     assert reveal.index("ownHandSlotsKnown(pending)") < reveal.index(
         "pending.dialog === DIALOG_KINDS.reveal"
     ), f"否决必须排在模板标记之前，否则等于不否决：{reveal}"
+
+
+# ---------------------------------------------------------------------------
+# 表体重建判据 ↔ `applyLiveDelta` 的 delta 分支同步（table-ux-overhaul 票 01 的评审 R4）
+#
+# `recordTouchesTableView`（回放期"这一条记录要不要整桌重建"）是一个**负判据**：
+# `NON_TABLE_DELTAS` 只列"不写快照"的那几类，其余 delta 一律 `true`。它和
+# `applyLiveDelta` 的分支是同一件事的两面（"有没有派生进 live view"），但两边没有共享
+# 代码——正确性此前只靠 `recordTouchesTableView` 的注释（"那边没有分支的 delta 就改不了
+# 快照"）。本测试把两侧与**服务端**的 delta 闭集对起来：多一类 delta 而它不在任何一侧
+# ⇒ 红（要么补 live 派生 + 加进 NON_TABLE，要么登记成"只触发保守重建"）。
+# ---------------------------------------------------------------------------
+
+_LIVE_DELTA_BRANCH = re.compile(r'record\.delta_type\s*(?:===|!==)\s*"(?P<name>[a-z_]+)"')
+"""`applyLiveDelta` 函数体里的 ``record.delta_type === "x"`` / ``!==`` 比较。"""
+
+_NON_TABLE_BLOCK = re.compile(r"const NON_TABLE_DELTAS = new Set\(\[(?P<body>.*?)\]\);", re.S)
+_NON_TABLE_ENTRY = re.compile(r'"(?P<name>[a-z_]+)"')
+
+_SERVER_DELTA_TYPE = re.compile(r'delta_type: Literal\["(?P<name>[a-z_]+)"\]')
+"""服务端 delta 类型的**闭集**（`src/sgs/state/deltas.py` 的判别字段声明）。"""
+
+REBUILD_ONLY_DELTAS = frozenset({"skill_gain", "skill_lose", "skill_suppress"})
+"""**只触发保守重建**的 delta：技能三态（获得 / 失去 / 失效）不从 delta 派生。
+
+`applyLiveDelta` 的口径是"不可派生的字段一律不猜"（技能可用性只在快照里），故这三条既不
+进 `NON_TABLE_DELTAS`（它们**要**重建）、也没有 live 分支；其余 delta 必须二选一地落在
+`applyLiveDelta`（派生进 live view）或 `NON_TABLE_DELTAS`（不写快照，纯展示）里。
+"""
+
+
+def _live_delta_branches() -> set[str]:
+    """`session.js:applyLiveDelta` 认得的 delta 类型（只扫**函数体**，不扫整个文件）。"""
+    text = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    assert "function applyLiveDelta(" in text
+    body = text.split("function applyLiveDelta(", 1)[1].split("\nfunction ", 1)[0]
+    names = {match.group("name") for match in _LIVE_DELTA_BRANCH.finditer(body)}
+    assert names, "没扫到 applyLiveDelta 的任何 delta 分支（扫描失效）"
+    return names
+
+
+def _non_table_deltas() -> set[str]:
+    """`session.js:NON_TABLE_DELTAS` 的分类（"不写快照"的 delta 类型）。"""
+    text = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    block = _NON_TABLE_BLOCK.search(text)
+    assert block is not None, "session.js 里找不到 `const NON_TABLE_DELTAS = new Set([...]);`"
+    names = {match.group("name") for match in _NON_TABLE_ENTRY.finditer(block.group("body"))}
+    assert names, "NON_TABLE_DELTAS 是空的（分类失效）"
+    return names
+
+
+def _server_delta_types() -> set[str]:
+    """服务端 delta 类型的闭集（改 `state/deltas.py` 加一类 ⇒ 这里自动跟着变）。"""
+    from sgs.state import deltas as deltas_module
+
+    text = Path(deltas_module.__file__).read_text(encoding="utf-8")
+    names = {match.group("name") for match in _SERVER_DELTA_TYPE.finditer(text)}
+    assert len(names) >= 15, f"只扫到 {len(names)} 类 delta；扫描疑似失效"
+    return names
+
+
+def test_the_delta_kinds_apply_live_delta_handles_and_non_table_deltas_stay_in_sync() -> None:
+    """每一类服务端 delta 都必须落在"派生进 live view"或"不写快照"里（或登记为只重建）。
+
+    新增一类 delta 而两侧都没登记 ⇒ 回放期它会被当成"要重建的表体记录"白重建一次（性能
+    问题），或者更糟：以为它不写快照却其实要写。判据是**三集合的划分**，不是逐个对照。
+    """
+    handled = _live_delta_branches()
+    non_table = _non_table_deltas()
+    server = _server_delta_types()
+
+    assert handled.isdisjoint(non_table), (
+        "同一类 delta 既派生进 live view、又被标成「不写快照」（自相矛盾）："
+        f"{sorted(handled & non_table)}"
+    )
+    assert handled.isdisjoint(REBUILD_ONLY_DELTAS)
+    assert non_table.isdisjoint(REBUILD_ONLY_DELTAS)
+    assert REBUILD_ONLY_DELTAS <= server, (
+        "登记成只重建的 delta 在服务端已不存在（改名 / 删类后忘了同步这张名单）："
+        f"{sorted(REBUILD_ONLY_DELTAS - server)}"
+    )
+
+    uncovered = server - handled - non_table - REBUILD_ONLY_DELTAS
+    assert not uncovered, (
+        "这些 delta 类型既不在 `applyLiveDelta` 的分支里、也不在 `NON_TABLE_DELTAS` 里"
+        f"（新加一类 delta 时两侧都要想清楚）：{sorted(uncovered)}\n"
+        "· 它改快照 ⇒ 在 `applyLiveDelta` 里加分支（回放期逐事件画出来）；\n"
+        "· 它只做展示（舞台 / 弹窗）⇒ 加进 `NON_TABLE_DELTAS`；\n"
+        "· 它不可派生（如技能三态）⇒ 登记进本文件的 `REBUILD_ONLY_DELTAS` 并写理由。"
+    )
+    ghosts = handled - server
+    assert not ghosts, (
+        f"`applyLiveDelta` 里有服务端不存在的 delta 分支（改名 / 删类后忘了改前端）：{sorted(ghosts)}"
+    )
+    dead = non_table - server
+    assert not dead, f"`NON_TABLE_DELTAS` 里有服务端不存在的 delta 类型：{sorted(dead)}"

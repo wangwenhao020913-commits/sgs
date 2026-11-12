@@ -41,6 +41,7 @@ from sgs.skills.flow import (
     _flow_step_cards,
     _flow_step_option,
     manifest,
+    preview_step,
     run_flow,
     validate_flow_activation,
     watched_cards,
@@ -1902,3 +1903,41 @@ def test_an_empty_pool_on_the_first_run_still_cancels_with_zero_side_effects():
         for record in engine.records
         if record.kind == "query" and record.query.kind == QueryKind.SELECT_OPTION
     ], "空池不发询问（记录流里一条 SELECT_OPTION 都没有）"
+
+
+# ---------------------------------------------------------------------------
+# 步骤预览的 fail-closed（table-ux-overhaul 票 11 的评审 P1）
+# ---------------------------------------------------------------------------
+
+
+def test_preview_step_clears_can_advance_and_can_submit_when_the_pool_needs_a_frame():
+    """池回调要帧上下文、而这次预览没有真帧 ⇒ 候选空**且**「能推进 / 能提交」都为假。
+
+    spec §6 不变量 5：界面只能点预览说能点的东西。这一步已填满（``lo = 0``）且 ``hi > lo``
+    （多选座位步要显式确认）——旧行为只清 ``options`` / ``disabled``，``can_advance`` 保留
+    上面算出的真值，于是预览答 ``can_advance: true, options: []``：界面画出一个没有可点项、
+    却声称"能继续"的步骤（同一份载荷自相矛盾）。拿不到候选时"这一步满没满"**不知道**，
+    故按没满足答（fail-closed）。
+    """
+    state = _manifest_state(hand=())
+
+    def needs_frame(state, frame, owner, chosen):
+        """只有**真帧**才有的键：预览的替身帧里没有 ⇒ KeyError（池回调的正常失败形态）。"""
+        return tuple(frame.data["only_a_real_frame_has_this"])
+
+    flow = SkillFlow(
+        name="preview_fail_closed",
+        steps=(PickSeats(lo=0, hi=2, pool=needs_frame, key="seat"),),
+        effect=lambda host, frame, answers: None,
+    )
+    # 清单形状由 manifest 渲染（这里不调它：它自己会先拿替身帧探一次池，同样会 KeyError），
+    # 只给预览它真正读的三格：``order`` / ``name`` / ``kind``。
+    steps = (Step(name="seat", kind="seat", min=0, max=2, order=0),)
+
+    preview = preview_step(flow, state, 0, [("seat", ())], steps=steps)
+
+    assert preview.options == (), "拿不到池 ⇒ 候选空（不回退成'全都点得动'）"
+    assert preview.disabled == ()
+    assert preview.cursor == 0, "光标仍停在这一步（玩家还在它上面）"
+    assert preview.can_advance is False, "没有候选却说'能推进'= 自相矛盾"
+    assert preview.can_submit is False, "没有候选却说'能提交'= 自相矛盾"

@@ -133,6 +133,7 @@ from sgs.state import (
     SlotKind,
     UseCard,
     WindowCause,
+    step_option_key,
 )
 
 __all__ = ["SKILL_VALUES", "HeuristicPlayer"]
@@ -2416,21 +2417,22 @@ _DYNAMIC_POOL_SEAT_STEPS: frozenset[str] = frozenset(
         "chuli:seat",
     }
 )
-"""池**按已选收缩**（除"排除已选"之外还有别的约束）的座位步（键 = ``<短 id>:<步骤键>``）。
+"""池**按已选收缩**（除"排除已选"之外还有别的约束）的座位步（键 = ``<短 id>:<步骤键>``，
+由 :func:`~sgs.state.step_option_key` 现拼，与 ``SELECT_OPTION`` 的 ``skill_id`` 同形）。
 
 清单 / 不枚举面给的是**首问快照**：引擎的 ``pool(chosen)`` 在选人过程中会变窄（除疠的
 势力互异），而 AI 手里只有"第一问能选谁"。故这些步骤 AI 必须自己按**公开事实**再收窄
 （势力是公开信息，见 :func:`_distinct_kingdom_options`），否则它会把一条服务端不会铺出来的
 集合交上去——引擎按前缀池复核后整步取消（零副作用），人类看起来就是"发了技能什么都没发生"。
 
+**登记表**（`docs/agents/ai-adaptation.md` §4「维护责任表」的那一行）：列在这里的键必须是
+**真实存在、且池真的随已选收窄**的座位步——由
+``tests/test_ai_adaptation.py::test_every_dynamic_pool_seat_step_is_a_real_contracting_step``
+机械核（新技能出现这种池而不登记 ⇒ 上面那句"发了技能什么都没发生"会静默回来）。
+
 与 :data:`_HAND_REQUIRED_SEAT_STEPS` 同一姿态：判据只读公开的 ``PlayerView``，不读暗牌、
 不查状态。
 """
-
-
-def _seat_step_key(skill_id: object, step_name: object) -> str:
-    """``(全限定技能 id, 步骤键)`` → ``<短 id>:<步骤键>``（清单侧的键形；与询问的 ``skill_id`` 同形）。"""
-    return f"{str(skill_id).rsplit('.', 1)[-1]}:{str(step_name)}"
 
 
 def _distinct_kingdom_options(
@@ -2472,12 +2474,16 @@ def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     池与上限读引擎的**同一份派生**（``sgs.effects.usable_options`` / ``cap_of``，谓词的另一
     半）：构造器的 ``cap`` / ``floor`` 因此天然落在 ``is_legal_option_set`` 的区间内——构造器
     不该产出非法集合，越界即打分 / 构造的编程错误（这里**不**再拿 assert 兜一遍：``-O`` 下
-    断言会被剥掉，兜不住任何东西）。
+    断言会被剥掉，兜不住任何东西）。上限的第二次夹取**只**发生在收窄过的那一档（见下）。
     """
     options = usable_options(query)
+    cap = cap_of(query)
     if str(query.skill_id) in _DYNAMIC_POOL_SEAT_STEPS:
         options = _distinct_kingdom_options(query.view, options)
-    cap = min(cap_of(query), len(options))
+        # 上限跟着**收窄后**的池：``cap_of`` 已按"可选项数"封顶，但那一份是收窄**前**的
+        # 池 ⇒ 这里再按实际构造的池夹一次（只有这一档会真的变窄；别的询问上它是恒等，
+        # 故不把全局口径改掉——票 13 的裁定只覆盖"池按已选收缩"的步骤）。
+        cap = min(cap, len(options))
     ranked = sorted(
         (-_option_choice_value(query, option), index, option)
         for index, option in enumerate(options)
@@ -2887,7 +2893,7 @@ def _fill_activation(
                 )
                 if not options:
                     return None
-            if _seat_step_key(skill_id, step.name) in _DYNAMIC_POOL_SEAT_STEPS:
+            if step_option_key(skill_id, step.name) in _DYNAMIC_POOL_SEAT_STEPS:
                 # 清单只下发**首问**快照（除疠的势力互异在 `pool(chosen)` 里）⇒ 按公开的
                 # 势力收窄，否则复合动作会被引擎的前缀复核拒成非法应答。
                 options = _distinct_kingdom_options(query.view, options)

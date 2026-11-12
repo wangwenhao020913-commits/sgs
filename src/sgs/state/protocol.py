@@ -74,6 +74,7 @@ __all__ = [
     "UseCard",
     "WindowCause",
     "parse_action",
+    "step_option_key",
 ]
 
 
@@ -347,7 +348,8 @@ class AskPolicy:
     ``auto_skip`` 只是**总开关**：它不自己判断"这扇窗口可不可跳过"——那一位由调用方按
     窗口类别声明（:attr:`RespondContext.skip_if_empty`），两者与候选预览一起收口在
     :meth:`~sgs.engine.Engine.should_ask_respond` / :meth:`~sgs.engine.Engine.should_ask_query`
-    里。**消费者 = 五处 A 类窗口**（无懈 / 闪 / 求桃 / 护驾求助 / 决斗·南蛮·万箭，
+    里（前者的类别位住在窗口载荷里、后者仍作参数给）。**消费者 = 五处 A 类窗口**（无懈 /
+    闪 / 求桃 / 护驾求助 / 决斗·南蛮·万箭，
     table-ux-overhaul 票 05）：引擎侧缺省 OFF，故金录像 / AI 对战 / 旧录像回放逐字节不变。
     """
 
@@ -392,7 +394,10 @@ class RespondContext:
     缺省 ``False`` = 照问）。它是**逐窗口的类别位**，与会话级总开关
     :class:`AskPolicy` 分开：A 类（需要 / 可以使用或打出一张牌：无懈 / 闪 / 求桃 / 护驾 /
     决斗 / 南蛮万箭）由调用方置 ``True``；C 类（可以放弃的询问）留给各自窗口决定。
-    **置位调用点 = 票 05 接上的五处 A 类窗口**（发问前用同一个值调预筛口）。
+    **读取方 = :meth:`~sgs.engine.Engine.should_ask_respond`**：窗口用
+    :meth:`~sgs.engine.Engine.respond_context` 建**这一份**载荷，同一个对象既交给预筛口
+    也交给真询问，故类别位只有一处声明、没有第二份同名参数。（【闪】/ 求桃的候选载荷不是
+    本类，它们的类别位仍是 :meth:`~sgs.engine.Engine.should_ask_query` 的参数。）
     **不进记录流**（同上）。
     """
 
@@ -936,6 +941,24 @@ def parse_action(raw: object) -> Action:
     故参与者照常可以直接返回协议对象。
     """
     return _ACTION_ADAPTER.validate_python(raw)
+
+
+def step_option_key(skill_id: object, key: object, index: int | None = None) -> str:
+    """**步骤键**的唯一形状：``<短 id>:<步骤键>``（同一步问多次时补 ``:<序号>``）。
+
+    三个消费者读同一个文本（故只在这里拼一次）：
+
+    - :attr:`SelectOptionQuery.skill_id`——``SELECT_OPTION`` 询问上的技能标识；
+    - 流水线的 ``ask_answers`` 缓存键（:func:`sgs.skills.flow._flow_option_id` 造它）；
+    - 预发动清单的步骤键（``manifest`` 的 ``Step.name`` 不是它，单问步骤的询问才是）——
+      启发式 AI 的分组表（``_DYNAMIC_POOL_SEAT_STEPS`` 一类）按它比对。
+
+    短 id = 全限定 id 的最后一段（``hero.jie_huatuo.chuli`` → ``chuli``）：主动技的
+    ``SKILL`` 帧把全限定 id 写在 ``frame.data["skill_id"]``，被动技只写 ``running_skill``
+    ——取短 id 的那一侧负责先读帧，本函数只认文本。
+    """
+    short = str(skill_id).rsplit(".", 1)[-1]
+    return f"{short}:{key}" if index is None else f"{short}:{key}:{index}"
 
 
 # ---------------------------------------------------------------------------

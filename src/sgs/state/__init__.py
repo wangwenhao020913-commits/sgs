@@ -104,6 +104,7 @@ from .protocol import (
     UseCard,
     WindowCause,
     parse_action,
+    step_option_key,
 )
 from .seating import (
     alive_seat_at,
@@ -216,4 +217,5 @@ __all__ = (
     "project",
     "rejudge_askers",
     "seats_from",
+    "step_option_key",
 )

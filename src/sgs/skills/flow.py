@@ -59,6 +59,7 @@ from sgs.state import (
     UseCard,
     Zone,
     ZoneRef,
+    step_option_key,
 )
 from sgs.timing import Timing
 
@@ -643,6 +644,9 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     读冒号后那段 ⇒ 直接命中 ``SkillDef.step_requirements``）；同一步问多次时补序号，
     既避免缓存撞车，也让两问可以各有各的文案（键形如 ``seat:0`` / ``seat:1``）。
 
+    **形状只有一处**：拼法住 :func:`~sgs.state.step_option_key`（``SELECT_OPTION`` 询问上的
+    ``skill_id`` 是协议字段，AI 侧的分组表也按它比对，故不是流水线的私有知识）。
+
     **短 id 的取法分两档**（票 08 的加法）：主动技的 ``SKILL`` 帧把全限定 id 写在
     ``frame.data["skill_id"]``；被动技**没有**这个键，派发环只写 ``running_skill``
     （见 :func:`~sgs.skills.catalog._dispatch`）。【流离】是第一条带座位步的被动技
@@ -650,8 +654,7 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     这里只读帧里的**既有键**，不新增协议字段——故记录流除新询问本身外不变。
     """
     raw = frame.data.get("skill_id") or frame.data.get("running_skill") or ""
-    short = str(raw).rsplit(".", 1)[-1]
-    return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
+    return step_option_key(raw, key, index if multi else None)
 
 
 def _zone_cards(state: GameState, ref: Any) -> list[int]:
@@ -2310,9 +2313,13 @@ def preview_step(
             raise ValueError(f"步骤 {step.key} 不能出现在预发动清单里")
     except KeyError:
         # 池回调要帧上下文（被动技的池读帧），而这次预览拿不到真帧：失败即"没有候选"
-        # （fail-closed），不猜、也不回退成"全都点得动"。
+        # （fail-closed），不猜、也不回退成"全都点得动"。**能不能提交 / 推进也一并关掉**：
+        # 候选空着还说"能走下一步"自相矛盾（spec §6 不变量 5），界面会停在一步没有可点
+        # 项的面上。这一步的满足与否在拿不到候选时**不知道**，故按"没满足"答。
         options = ()
         disabled = ()
+        can_advance = False
+        can_submit = False
 
     return StepPreview(
         cursor=cursor,

@@ -830,19 +830,11 @@ def _targets_in(query, card_type: str):
     )
 
 
-def test_the_range_exempt_hook_is_evaluated_before_the_target_filters(monkeypatch):
-    """票 03 的层次：② 的新挂点只让"被距离挡掉"的座位**重新走进** ③④⑤。
+def _exempt_everyone_board(monkeypatch):
+    """合成局面：张绣【雄乱】的修饰器被换成"对**全体其他存活**座位豁免距离"。
 
-    合成修饰器（替换张绣【雄乱】的修饰器表，回调不认任何牌面）= 本次使用对**全体其他存活
-    座位**豁免距离。局面（六人环，座位 0 攻击范围 1，黑色【顺手牵羊】额定距离 1）：
-
-    - 座位 1 / 5（距离 1）：本来就在池里；
-    - 座位 4（距离 2、区域里有牌）：**挂点把它补进池**——旧写法只能靠 `TARGET_POOL` 并集；
-    - 座位 3（距离 3、区域里**没有牌**）：被 ④ ``has_zone_cards`` 判非法 ⇒ 挂点救不回来；
-    - 座位 2（距离 2、区域里有牌，但是贾诩【帷幕】）：被 ⑤ 删掉 ⇒ 挂点也救不回来。
-
-    期望池 = (1, 4, 5)：座位 3 / 2 各自钉住"④ / ⑤ 在挂点**之后**照常跑"，座位 4 钉住
-    "挂点确实在 ② 生效"——少了任何一半，下面的断言都会给出另一个元组。
+    六人环、座位 0 攻击范围 1、黑色【顺手牵羊】额定距离 1 ⇒ 距离分别 1 / 2 / 3 / 2 / 1。
+    回调不认任何牌面（不查【杀】/ 回合），故两条豁免路径拿到的是**同一份**豁免集。
     """
     from dataclasses import replace as dc_replace
     from types import MappingProxyType
@@ -864,12 +856,6 @@ def test_the_range_exempt_hook_is_evaluated_before_the_target_filters(monkeypatc
             SeatSpec(hand=(2,)),
             SeatSpec(hand=(3,)),
         ),
-    )
-    assert (distance(state, 0, 1), distance(state, 0, 2), distance(state, 0, 3), distance(state, 0, 4), distance(state, 0, 5)) == (1, 2, 3, 2, 1), (
-        "前提：六人环上到座位 2 / 3 / 4 的距离分别是 2 / 3 / 2"
-    )
-    assert check_targets(state, 0, state.card(snatch)) == (1, 5), (
-        "没有豁免挂点时：距离 2 的座位 4（有牌）被 ② 挡掉；座位 3 被 ④ 挡、座位 2 被 ⑤ 挡"
     )
 
     def _exempt_everyone(state_, ctx, current):
@@ -894,7 +880,27 @@ def test_the_range_exempt_hook_is_evaluated_before_the_target_filters(monkeypatc
             {**catalog_module.CATALOG, "hero.zhangxiu.xiongluan": definition}
         ),
     )
+    return state, snatch
 
+
+def test_the_range_exempt_hook_is_evaluated_before_the_target_filters(monkeypatch):
+    """票 03 的层次：② 的新挂点只让"被距离挡掉"的座位**重新走进** ③④⑤。
+
+    合成修饰器（替换张绣【雄乱】的修饰器表，回调不认任何牌面）= 本次使用对**全体其他存活
+    座位**豁免距离。局面（六人环，座位 0 攻击范围 1，黑色【顺手牵羊】额定距离 1）：
+
+    - 座位 1 / 5（距离 1）：本来就在池里；
+    - 座位 4（距离 2、区域里有牌）：**挂点把它补进池**——旧写法只能靠 `TARGET_POOL` 并集；
+    - 座位 3（距离 3、区域里**没有牌**）：被 ④ ``has_zone_cards`` 判非法 ⇒ 挂点救不回来；
+    - 座位 2（距离 2、区域里有牌，但是贾诩【帷幕】）：被 ⑤ 删掉 ⇒ 挂点也救不回来。
+
+    期望池 = (1, 4, 5)：座位 3 / 2 各自钉住"④ / ⑤ 在挂点**之后**照常跑"，座位 4 钉住
+    "挂点确实在 ② 生效"——少了任何一半，下面的断言都会给出另一个元组。
+    """
+    state, snatch = _exempt_everyone_board(monkeypatch)
+    assert (distance(state, 0, 1), distance(state, 0, 2), distance(state, 0, 3), distance(state, 0, 4), distance(state, 0, 5)) == (1, 2, 3, 2, 1), (
+        "前提：六人环上到座位 2 / 3 / 4 的距离分别是 2 / 3 / 2"
+    )
     assert check_targets(state, 0, state.card(snatch)) == (1, 4, 5), (
         "挂点在 ② 只补回被距离挡掉的座位 4；④ / ⑤ 的判据在它之后照常跑"
     )
@@ -2509,3 +2515,32 @@ def test_huairou_rejects_a_non_equipment_card():
             ActivateSkill(skill_id=HUAJROU, picks=(slash,), answers_seq=query.seq)
         )
     assert slash in player.hand, "非装备牌不是合法载荷（校验器拒收）"
+
+def test_the_caller_range_exempt_flag_feeds_the_same_single_evaluation(monkeypatch):
+    """P3：``check_targets(..., distance_exempt=True)`` 与豁免钩子**同一份求值**。
+
+    两条声明来源（调用方布尔 / `TARGET_RANGE_EXEMPT` 钩子）都只回答"② 的豁免集是哪些座位"，
+    随后走同一条 ``player.seat not in exempt`` 判据。故在同一个局面、同一份豁免集下，两条路
+    必须给出**逐值相同**的合法座位集：
+
+    - 座位 4（距离 2、区域里有牌）两条路都补回；
+    - 座位 3（④ ``has_zone_cards`` 判非法）与座位 2（⑤ `TARGET_POOL` 删掉）两条路都救不
+      回来——豁免在 ③④⑤ **之前**求值，`TARGET_POOL` 的删也不能被它抵消。
+
+    少了任何一半，"同一份求值"就会退化成两份各说各话的实现（一条 `if distance_exempt`
+    短路、一条走修饰器链）。
+    """
+    state, snatch = _exempt_everyone_board(monkeypatch)
+    card = state.card(snatch)
+
+    hooked = check_targets(state, 0, card)
+    flagged = check_targets(state, 0, card, distance_exempt=True)
+
+    assert hooked == (1, 4, 5), "钩子路径：② 的豁免集 = 全体其他存活座位"
+    assert flagged == hooked, (
+        "调用方布尔必须与豁免钩子给出同一个座位集："
+        f"布尔路径 {flagged}、钩子路径 {hooked}"
+    )
+    assert 3 not in flagged, "④（区域里有牌）判非法的座位不许被任何一条豁免路径复活"
+    assert 2 not in flagged, "⑤（TARGET_POOL）删掉的座位不许被任何一条豁免路径复活"
+

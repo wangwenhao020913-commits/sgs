@@ -817,12 +817,16 @@ class _NullifyWindowHost:
     def advance_provider(self, frame, timing):
         return None, None, None
 
-    def should_ask_respond(self, actor, **kwargs):
-        # 票 05 的预筛口：本宿主只钉"未登记提供者 fail-closed"，一律照问
-        # （与引擎缺省 OFF 同一口径；预筛选人与否由真引擎的用例覆盖）。
+    def respond_context(self, frame, actor, **kwargs):
+        # 真窗口用 `Engine.respond_context` 建载荷；本宿主只钉"未登记提供者 fail-closed"，
+        # 故把窗口给的字段原样装回一个真的 `RespondContext`（预筛 / 发问收的是同一个对象）。
+        return RespondContext(**kwargs)
+
+    def should_ask_respond(self, actor, ctx):
+        # 票 05 的预筛口：一律照问（与引擎缺省 OFF 同一口径；预筛选人与否由真引擎覆盖）。
         return True
 
-    def ask_respond(self, frame, actor, timing, **kwargs):
+    def ask_respond(self, frame, actor, timing, ctx):
         return self.answer
 
     def suspended(self, action):

@@ -3135,15 +3135,18 @@ def _nullify_window_state():
     return state
 
 
-def _nullify_window_kwargs() -> dict:
+def _nullify_window_context(engine, *, skip_if_empty: bool = True):
+    """一扇无懈窗口的**同一份**载荷（`Engine.respond_context` 建，预筛口只收它）。"""
     from sgs.effects import NULLIFY_RESPONSE_CARD
 
-    return {
-        "cause": WindowCause.NULLIFY,
-        "required": NULLIFY_RESPONSE_CARD,
-        "mode": RespondMode.USE,
-        "skip_if_empty": True,
-    }
+    return engine.respond_context(
+        None,
+        0,
+        cause=WindowCause.NULLIFY,
+        required=NULLIFY_RESPONSE_CARD,
+        mode=RespondMode.USE,
+        skip_if_empty=skip_if_empty,
+    )
 
 
 def test_the_prefilter_helper_picks_no_candidate_beyond_pass_as_askable() -> None:
@@ -3152,19 +3155,22 @@ def test_the_prefilter_helper_picks_no_candidate_beyond_pass_as_askable() -> Non
     - 策略 ON 且窗口声明可跳过：只有 ``Pass`` 的座位不 askable，有真牌的座位 askable；
     - 策略 OFF（引擎缺省）：照问——旧口径逐字节可复现；
     - 窗口没声明可跳过：照问——判据由调用方按类别给，预筛口不替它猜。
+
+    类别位住在**窗口建的那一份载荷**里（R2 的统一形状）：预筛口只收 `ctx`，不再收
+    `skip_if_empty=` 参数，所以"这一问可不可跳过"只有一个声明点。
     """
     state = _nullify_window_state()
     engine = Engine.from_state(state, seed=11, ask_policy=AskPolicy(auto_skip=True))
-    kwargs = _nullify_window_kwargs()
 
-    assert engine.should_ask_respond(0, **kwargs) is True, "有真【无懈可击】的座位必须被问"
-    assert engine.should_ask_respond(1, **kwargs) is False, "只有 Pass 的座位不该被问"
+    context = _nullify_window_context(engine)
+    assert engine.should_ask_respond(0, context) is True, "有真【无懈可击】的座位必须被问"
+    assert engine.should_ask_respond(1, context) is False, "只有 Pass 的座位不该被问"
 
     off_engine = Engine.from_state(_nullify_window_state(), seed=11)
-    assert off_engine.should_ask_respond(1, **kwargs) is True, "引擎缺省 OFF ⇒ 照问"
+    assert off_engine.should_ask_respond(1, context) is True, "引擎缺省 OFF ⇒ 照问"
 
-    no_category_bit = {**kwargs, "skip_if_empty": False}
-    assert engine.should_ask_respond(1, **no_category_bit) is True, (
+    no_category_bit = _nullify_window_context(engine, skip_if_empty=False)
+    assert engine.should_ask_respond(1, no_category_bit) is True, (
         "窗口没声明「可以跳过」⇒ 照问（预筛口不按候选猜类别）"
     )
 
@@ -3182,10 +3188,14 @@ def test_the_prefilter_helper_does_not_consume_a_query_slot() -> None:
     for seat in range(session.rule_config.player_count):
         decided = engine.should_ask_respond(
             seat,
-            cause=WindowCause.NULLIFY,
-            required=NULLIFY_RESPONSE_CARD,
-            mode=RespondMode.USE,
-            skip_if_empty=True,
+            engine.respond_context(
+                None,
+                seat,
+                cause=WindowCause.NULLIFY,
+                required=NULLIFY_RESPONSE_CARD,
+                mode=RespondMode.USE,
+                skip_if_empty=True,
+            ),
         )
         assert decided in (True, False)
 

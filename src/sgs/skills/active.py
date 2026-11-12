@@ -71,7 +71,6 @@ from sgs.effects import (
     is_own_play_phase,
     is_slash,
     locate,
-    need_card_floor,
     needs_designation,
     satisfies_required,
     targets_within_attack_range,
@@ -6365,9 +6364,9 @@ def _luanwu_legal_targets(
 
     只读状态：``respond_candidates`` 是窗口候选的**同一个**生成器（借刀的 auto-b 同一条
     理由）——不记询问、不耗序号、不搬牌。真牌 / 转化【杀】/ 蛊惑产物三种候选都算"可用"；
-    ``floor`` 与随后那次真询问同源（票 03 §4-2）。
+    载荷由 :meth:`~sgs.engine.Engine.respond_context` 建，与随后那次真询问**同一份**
+    （``floor`` / ``providers_used`` 同源，票 03 §4-2）。
     """
-    floor = need_card_floor(frame, seat)
     providers_used = tuple(frame.data.get(f"{_LUANWU_PROVIDERS_KEY}:{seat}", ()))
     return tuple(
         candidate
@@ -6376,13 +6375,16 @@ def _luanwu_legal_targets(
             not isinstance(action, Pass)
             for action in host.respond_candidates(
                 seat,
-                cause=WindowCause.LUANWU,
-                required=LUANWU_RESPONSE_CARD,
-                target=seat,
-                mode=RespondMode.USE,
-                use_targets=(candidate,),
-                providers_used=providers_used,
-                floor=floor,
+                host.respond_context(
+                    frame,
+                    seat,
+                    cause=WindowCause.LUANWU,
+                    required=LUANWU_RESPONSE_CARD,
+                    target=seat,
+                    mode=RespondMode.USE,
+                    use_targets=(candidate,),
+                    providers_used=providers_used,
+                ),
             )
         )
     )
@@ -6479,14 +6481,17 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
             frame,
             seat,
             timing,
-            cause=WindowCause.LUANWU,
-            required=LUANWU_RESPONSE_CARD,
-            target=seat,
-            window_frame=frame.frame_id,
-            mode=RespondMode.USE,
-            use_targets=(int(target),),
-            providers_used=tuple(
-                frame.data.get(f"{_LUANWU_PROVIDERS_KEY}:{seat}", ())
+            host.respond_context(
+                frame,
+                seat,
+                cause=WindowCause.LUANWU,
+                required=LUANWU_RESPONSE_CARD,
+                target=seat,
+                mode=RespondMode.USE,
+                use_targets=(int(target),),
+                providers_used=tuple(
+                    frame.data.get(f"{_LUANWU_PROVIDERS_KEY}:{seat}", ())
+                ),
             ),
         )
         if host.suspended(action):

@@ -178,6 +178,7 @@ S1 起【据守】要判"这一次翻面是翻回正面（不跳回合、三张�
 | 实现站点改名 / 搬家 | 动站点的那张票 | `importlib` 解析失败 = 红 |
 | 新技能 / 新装备 | 一将一票的作者 | `tests/test_heuristic_ai.py` 的三向同步 |
 | 新选项文本 / 新的靶向座位步 | 技能票的作者 | **无**机械面（`_OPTION_VALUES` / `_HOSTILE_SEAT_STEPS` 一类分组表），靠 §1 第 2–3 条与评审 |
+| **池按已选收缩**的座位步（`pool(chosen)` 会变窄，如【除疠】的势力互异） | 技能票的作者 | 登记进 `src/sgs/agents/heuristic.py:_DYNAMIC_POOL_SEAT_STEPS`（键 = 步骤键）；`tests/test_ai_adaptation.py::test_every_dynamic_pool_seat_step_is_a_real_contracting_step` 逐键核"是真步骤 + 池真的随已选收窄"。**不登记**的症状不是红，而是"技能发动了、什么都没发生"（AI 交一条服务端铺不出来的集合，引擎按前缀池复核后整步取消） |
 
 ## 5 · 边界（不做什么）
 

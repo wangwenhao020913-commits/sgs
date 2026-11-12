@@ -798,7 +798,7 @@ class Engine:
         （金录像 / ``batch_games`` / ``ai_eval`` / 旧录像回放都走这条缺省）。网页会话由
         :class:`sgs_web.session.Session` 显式传 ON。它是**会话事实**、不进记录流；随侧车
         元数据落盘、由 ``replay_journal`` 还原（:attr:`RespondContext.skip_if_empty` 是
-        逐窗口的类别位，两者在 :meth:`should_ask_respond` 里收口）。
+        逐窗口的类别位，读取方是 :meth:`should_ask_respond`）。
         """
         self._journal = journal
         """是否**保留**记录流（票 11 的 opt-in 开关；缺省 ``True`` = 既有行为一字不变）。
@@ -2711,16 +2711,14 @@ class Engine:
                 return card
         return None
 
-    def ask_respond(
+    def respond_context(
         self,
-        frame: Frame,
+        frame: Frame | None,
         actor: int,
-        timing: Timing,
         *,
         cause: WindowCause,
         required: str | None = None,
         target: int | None = None,
-        window_frame: int = 0,
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
@@ -2728,50 +2726,72 @@ class Engine:
         declared: bool = False,
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
         skip_if_empty: bool = False,
+    ) -> RespondContext:
+        """**一扇响应窗口的同一份载荷**：预筛口、预览与真询问共用这一个对象。
+
+        窗口在发问**之前**建**一次**（:meth:`ask_respond` / :meth:`should_ask_respond` /
+        :meth:`respond_candidates` 三个入口都只收它，不再各收一份窗口参数）⇒ 预筛看到的面
+        与真发出去的面**结构上是同一份**，`skip_if_empty`（A 类窗口的类别位）也因此只有
+        一处：字段写在载荷里，读取方是 :meth:`should_ask_respond`。
+
+        参数语义与 :meth:`ask_respond` 逐条相同（``mode`` / ``providers_used`` / ``zones`` /
+        ``declared`` / ``rejudge_offers`` 都只影响候选生成，不进记录流）：
+
+        - ``window_frame`` = **承载帧**的 id（嵌套无懈的层靠它区分，票 19 §9）；无承载帧
+          （单测 / 无帧预览）⇒ 0；
+        - ``floor``（票 03 §4-2）**不由调用方给**：它当场读承载帧里这一座位已过完的档
+          （:func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
+          改判（``REJUDGE``）不是使用 / 打出 ⇒ 恒 0，既不读也不记。
+
+        缺省 ``skip_if_empty = False`` = 照问；三扇 ``ask_respond`` 驱动的 A 类窗口（无懈 /
+        护驾求助 / 决斗·南蛮·万箭，票 05）显式置 ``True``。
+        """
+        need_card = mode is not RespondMode.REJUDGE
+        return RespondContext(
+            cause=cause,
+            required=required,
+            target=target,
+            window_frame=0 if frame is None else frame.frame_id,
+            mode=mode,
+            use_targets=tuple(use_targets),
+            providers_used=tuple(providers_used),
+            zones=tuple(zones),
+            declared=declared,
+            rejudge_offers=tuple(rejudge_offers),
+            floor=(
+                0
+                if frame is None or not need_card
+                else need_card_floor(frame, actor)
+            ),
+            skip_if_empty=skip_if_empty,
+        )
+
+    def ask_respond(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        ctx: RespondContext,
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
-        ``mode = USE`` 时候选是"使用某张牌"：``use_targets`` 非空时每个目标一个候选
-        （借刀杀人迫使的【杀】），**为空时是无目标的响应使用**（无懈一类的牌，目标由
-        ``window_frame`` + ``target`` 承载）；``mode = PLAY`` 是打出（无目标）。
+        ``ctx`` = :meth:`respond_context` 建的那**一份**窗口载荷：``mode = USE`` 时候选是
+        "使用某张牌"（``use_targets`` 非空时每个目标一个候选 = 借刀杀人迫使的【杀】；
+        为空 = 无目标的响应使用，目标由 ``window_frame`` + ``target`` 承载）；``mode =
+        PLAY`` 是打出。``providers_used`` / ``zones`` / ``declared`` / ``rejudge_offers``
+        都是候选生成输入，不进记录流。
 
-        ``providers_used`` 供"需要【闪】"窗口过滤已问过的装备提供者（票 10 §5.5）。
-        ``zones`` = 候选牌取自应答者的哪几个区（缺省手牌）；改判窗口按
-        :func:`~sgs.skills.rejudge_card_zones` 传入（界【鬼才】含装备区，M6 票 14）。
-        ``declared`` 只服务**收集式**窗口（票 03）：赢家已定（首个声明者）时提供者闭嘴
-        ——它的产物要扣置一张手牌，赢家已定时不会进结算。
-
-        ``skip_if_empty``（table-ux-overhaul 票 02）是**按窗口类别**声明的"没有可行动的
-        候选时可以不问"，落进 :class:`RespondContext` 供预筛口读；缺省 ``False`` = 照问。
-        置位调用点 = 三扇 ``ask_respond`` 驱动的 A 类窗口（无懈 / 护驾求助 / 决斗·南蛮·
-        万箭，票 05），且它们都在发问**之前**先过 :meth:`should_ask_respond` 的总开关
-        ——同一个值传给两处（前者决定问不问，后者让候选载荷带上同一份窗口声明）。
-
-        ``floor`` **不由调用方给**：它读承载帧里这一座位已过完的档（票 03 §4-2，
-        :func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
-        拿到应答之后再记回这一档（:meth:`_note_need_card_choice`）。改判窗口（``REJUDGE``）
+        拿到应答之后再记回这一档（:meth:`_note_need_card_choice`）；改判窗口（``REJUDGE``）
         不是使用 / 打出 ⇒ 既不读也不记。
 
         **按档逐档问**（票 04 / Q13 / Q17）：候选面只铺当前这一档；``Pass`` = 本档不发动
-        ⇒ 写下一档、**再问一次**（见 :meth:`ask_query` 的同一段说明）。
+        ⇒ 写下一档、**再问一次**（见 :meth:`ask_query` 的同一段说明）。下一张面只换
+        ``ctx.floor``（档位的唯一写入点是承载帧），其余字段仍是调用方那一份。
         """
-        need_card = mode is not RespondMode.REJUDGE
+        need_card = ctx.mode is not RespondMode.REJUDGE
         identity = self._ask_identity(QueryKind.RESPOND, actor, frame)
+        payload = ctx
         while True:
-            payload = RespondContext(
-                cause=cause,
-                required=required,
-                target=target,
-                window_frame=window_frame,
-                mode=mode,
-                use_targets=tuple(use_targets),
-                providers_used=tuple(providers_used),
-                zones=tuple(zones),
-                declared=declared,
-                rejudge_offers=tuple(rejudge_offers),
-                floor=need_card_floor(frame, actor) if need_card else 0,
-                skip_if_empty=skip_if_empty,
-            )
             action = self.ask(
                 lambda seq: self._build_query(
                     QueryKind.RESPOND, actor, timing, seq, payload=payload
@@ -2783,6 +2803,7 @@ class Engine:
             if isinstance(action, Pass) and self._advance_need_card_tier(
                 frame, actor, QueryKind.RESPOND, payload
             ):
+                payload = replace(ctx, floor=need_card_floor(frame, actor))
                 continue
             self._note_need_card_choice(frame, actor, action)
             return action
@@ -2804,79 +2825,43 @@ class Engine:
         record_need_card_choice(frame, actor, action)
 
     def respond_candidates(
-        self,
-        actor: int,
-        *,
-        cause: WindowCause,
-        required: str | None = None,
-        target: int | None = None,
-        mode: RespondMode = RespondMode.PLAY,
-        use_targets: tuple[int, ...] = (),
-        providers_used: tuple[str, ...] = (),
-        declared: bool = False,
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
-        floor: int = 0,
+        self, actor: int, ctx: RespondContext
     ) -> tuple[Action, ...]:
         """**预览**一次响应窗口的候选（W5-02b 的 auto-b）：不问、不记、不耗序号。
 
-        读的是与 :meth:`ask_respond` **同一个**候选生成器（``legal_actions_for``）——"此刻
-        有没有 a"因此不会与"窗口真发出来时给什么"漂移。补充说明两点：
+        读的是与 :meth:`ask_respond` **同一个**候选生成器（``legal_actions_for``）与**同一份**
+        窗口载荷 ``ctx``（:meth:`respond_context` 建的）——"此刻有没有 a"因此不会与"窗口真
+        发出来时给什么"漂移。补充说明两点：
 
         - **只读状态**：不压帧、不搬牌、不抽随机数（转化候选的生成也全是纯谓词）；
         - ``answers_seq`` 取 ``self._seq + 1``——这正是随后那次 ``ask`` 会拿到的序号；
           预览的产物只是被丢弃的候选，序号在这里不承载语义，但也不造出一个"未来值"。
 
-        ``floor``（票 03 §4-2）同样要与 :meth:`ask_respond` 一致：调用方有承载帧时传
-        ``need_card_floor(frame, actor)``，否则保留缺省 0——预览因此不会把已被闸门挡掉的
-        提供者当成"a 可行"（借刀杀人的 auto-b 判据就建在这份预览上）。
-
-        ``declared``（票 02 起的对齐参数）同样与 :meth:`ask_respond` 同义：收集式窗口里
-        赢家已定时提供者闭嘴，预览要给出与真询问**同一张面**。
+        调用方传**与随后那次发问同一个对象**时，``floor`` / ``declared`` / ``providers_used``
+        这些会改变候选面的输入天然对齐（借刀杀人的 auto-b 判据就建在这份预览上）。
         """
-        payload = RespondContext(
-            cause=cause,
-            required=required,
-            target=target,
-            window_frame=0,
-            mode=mode,
-            use_targets=tuple(use_targets),
-            providers_used=tuple(providers_used),
-            declared=declared,
-            rejudge_offers=tuple(rejudge_offers),
-            floor=0 if mode is RespondMode.REJUDGE else floor,
-        )
         return legal_actions_for(
             self.state,
             actor,
             QueryKind.RESPOND,
             answers_seq=self._seq + 1,
-            payload=payload,
+            payload=ctx,
         )
 
-    def should_ask_respond(
-        self,
-        actor: int,
-        *,
-        cause: WindowCause,
-        required: str | None = None,
-        target: int | None = None,
-        mode: RespondMode = RespondMode.PLAY,
-        use_targets: tuple[int, ...] = (),
-        providers_used: tuple[str, ...] = (),
-        declared: bool = False,
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
-        floor: int = 0,
-        skip_if_empty: bool = False,
-    ) -> bool:
+    def should_ask_respond(self, actor: int, ctx: RespondContext) -> bool:
         """**统一预筛口**：这扇窗口该不该问这个座位（table-ux-overhaul 票 02 §3）。
 
         判据 = **会话策略** × **窗口类别位** × **候选预览**，三者合成一句回答：
 
         - 策略 OFF（引擎缺省）⇒ 恒 ``True``（照问）。旧录像 / AI 对战 / 金录像因此与旧口径
           逐字节相同——这是票 05 接窗口时"引擎侧零变化"的唯一保证；
-        - 窗口没声明 ``skip_if_empty``（缺省 ``False``）⇒ 恒 ``True``（照问）：本函数不按
-          候选内容替调用方猜"这扇窗可不可跳过"，类别位必须由窗口显式给；
+        - 窗口没声明可跳过（``ctx.skip_if_empty`` 缺省 ``False``）⇒ 恒 ``True``（照问）：本
+          函数不按候选内容替调用方猜"这扇窗可不可跳过"，类别位必须由窗口建载荷时显式给；
         - 两条都成立 ⇒ 真去预览一次候选，回答"除 ``Pass`` 外还有没有别的候选"。
+
+        ``ctx`` 就是 :meth:`ask_respond` 随后收到的那**同一个对象**（:meth:`respond_context`
+        建一次）——类别位因此只有一个落点：字段写在载荷里、读取方是这里（调用方不再把
+        ``skip_if_empty`` 传两份）。
 
         预览走 :meth:`respond_candidates`（**同一个** ``legal_actions_for`` 生成器）：
         不问、不记、不耗序号，也不另写"这个座位有没有真牌 / 真转化能力"的判据——票 05 的
@@ -2884,24 +2869,12 @@ class Engine:
 
         **调用点 = 三扇 ``ask_respond`` 驱动的 A 类窗口**（票 05：无懈 / 护驾求助 / 决斗·
         南蛮·万箭）；另两扇（【闪】/ 求桃）走 :meth:`ask_query`，预筛口是它的姊妹
-        :meth:`should_ask_query`——同一句判据、只是候选载荷不同。参数与 :meth:`ask_respond`
-        对齐，调用方在发问前用同一份入参问一句即可；``floor`` 与 ``declared`` 也要与随后
-        那次发问一致（有承载帧时 ``floor = need_card_floor(frame, actor)``）。
+        :meth:`should_ask_query`——同一句判据、只是候选载荷不同（那两扇不是
+        :class:`RespondContext`，类别位仍作参数给）。
         """
-        if not (self.ask_policy.auto_skip and skip_if_empty):
+        if not (self.ask_policy.auto_skip and ctx.skip_if_empty):
             return True
-        candidates = self.respond_candidates(
-            actor,
-            cause=cause,
-            required=required,
-            target=target,
-            mode=mode,
-            use_targets=use_targets,
-            providers_used=providers_used,
-            declared=declared,
-            rejudge_offers=rejudge_offers,
-            floor=floor,
-        )
+        candidates = self.respond_candidates(actor, ctx)
         return any(not isinstance(action, Pass) for action in candidates)
 
     def should_ask_query(

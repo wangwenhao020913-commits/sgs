@@ -3991,10 +3991,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 kind="preview",
                 path="src/sgs/effects/ops.py",
                 owner="resolve_borrowed_sword",
-                fingerprint=(
-                    "cause=WindowCause.BORROWED_SWORD required=SLASH_FAMILY_KEY "
-                    "mode=RespondMode.USE"
-                ),
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
             CardRequestSite(
                 kind="ask",
@@ -4048,6 +4045,12 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                     "cause=WindowCause.LUANWU required=LUANWU_RESPONSE_CARD "
                     "mode=RespondMode.USE"
                 ),
+            ),
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/skills/active.py",
+                owner="_luanwu_legal_targets",
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
             CardRequestSite(
                 kind="ask",
@@ -4212,16 +4215,14 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 kind="preview",
                 path="src/sgs/engine/steps.py",
                 owner="_rejudge_window",
-                fingerprint=(
-                    "cause=WindowCause.REJUDGE required=<default> mode=RespondMode.REJUDGE"
-                ),
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
             CardRequestSite(
                 kind="ask",
                 path="src/sgs/engine/steps.py",
                 owner="_rejudge_window",
                 fingerprint=(
-                    "cause=WindowCause.REJUDGE required=None mode=RespondMode.REJUDGE"
+                    "cause=WindowCause.REJUDGE required=<default> mode=RespondMode.REJUDGE"
                 ),
             ),
         ),
@@ -4324,7 +4325,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         scope=None,
         causes=(),
         modes=(),
-        required="调用方给的窗口参数（cause / required / mode 原样转发）",
+        required="窗口自己建的那一份 `RespondContext`（预筛口不再收窗口参数）",
         axis=None,
         providers=False,
         sites=(
@@ -4332,14 +4333,16 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 kind="preview",
                 path="src/sgs/engine/game.py",
                 owner="Engine.should_ask_respond",
-                fingerprint="cause=cause required=required mode=mode",
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
         ),
         reason=(
             "**不是窗口**：它是「这扇窗口该不该问这个座位」的统一预筛口（table-ux-overhaul "
-            "票 02），内部把调用方给的同一组窗口参数原样转交给 `respond_candidates` 预览一次。"
+            "票 02），消费**窗口自己建的**那一份 `RespondContext`（`Engine.respond_context`，"
+            "与随后那次 `ask_respond` 同一个对象）并把它转交给 `respond_candidates` 预览一次。"
             "票 05 的五处 A 类窗口（无懈 / 闪 / 求桃 / 护驾 / 决斗·南蛮·万箭）都从这里汇合，"
-            "故登记的是**这一个转发入口**，不是每扇窗口各加一条 preview。"
+            "故登记的是**这一个转发入口**，不是每扇窗口各加一条 preview；指纹三格全 `<default>`"
+            "正是「它不重复声明窗口事实」的机械证据。"
         ),
     ),
 )

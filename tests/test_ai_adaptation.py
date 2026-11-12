@@ -486,3 +486,117 @@ def test_an_empty_mode_site_reason_goes_red():
     gaps = _mode_gaps_with({Mode.NO_IDENTITY: {"relation": ModeSite((), "  ")}})
 
     assert any(f"{Mode.NO_IDENTITY.value}.relation" in gap for gap in gaps), gaps
+
+
+# ---------------------------------------------------------------------------
+# 第四张表：池**按已选收缩**的座位步 `_DYNAMIC_POOL_SEAT_STEPS`（table-ux-overhaul 票 13）
+#
+# 契约正文 = `docs/agents/ai-adaptation.md` §4「维护责任表」的那一行（"新的靶向座位步"）。
+# 与 `_HOSTILE_SEAT_STEPS` / `_HAND_REQUIRED_SEAT_STEPS` 同姿态：表住代码里，机械面钉它
+# 不是死账——每个键必须指到**真实存在、且池真的随已选收窄**的座位步。
+# ---------------------------------------------------------------------------
+
+
+def _dynamic_pool_state():
+    """除疠的最小局面：0 = 界华佗（群），1 / 2 同属魏，3 属蜀，四人都有一张牌。
+
+    ``_chuli_targets`` 要"有牌可弃"才进池，故每个候选座位各给一张手牌；两个魏将让
+    "势力互异"这条约束真的能把池收窄一格。
+    """
+    from sgs.data import Kingdom, load_content_pack
+
+    from support import SeatSpec, build_state, deck_excluding
+
+    pack = load_content_pack(deck_profile="standard_108")
+    hand = tuple(range(4))
+    return build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(hand[0],), hero="jie_huatuo", kingdom=Kingdom.QUN),
+            SeatSpec(hand=(hand[1],), kingdom=Kingdom.WEI),
+            SeatSpec(hand=(hand[2],), kingdom=Kingdom.WEI),
+            SeatSpec(hand=(hand[3],), kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(pack, *hand),
+        turn_seat=0,
+    )
+
+
+def test_every_dynamic_pool_seat_step_is_a_real_contracting_step() -> None:
+    """`_DYNAMIC_POOL_SEAT_STEPS` 的每个键都指到真步骤，且那个池**真的**随已选收窄。
+
+    两个方向都判红（这是"技能发动了、什么都没发生"那个报障的机械面）：
+
+    - 键指不到任何清单里的座位步（改名 / 死账）⇒ AI 的收窄永远不会发生；
+    - 指到了、但那个池其实**不收缩**（登记多余）⇒ AI 白收窄一遍，把合法目标丢掉。
+
+    新技能出现"池按已选收缩"时，把它登记进 `_DYNAMIC_POOL_SEAT_STEPS` 并跑这条：红行会
+    打印到底是哪一半不成立。
+    """
+    from sgs.skills.active import ACTIVE_SKILLS
+    from sgs.skills.catalog import CATALOG
+    from sgs.skills.flow import PickSeats
+    from sgs.state import step_option_key
+
+    # 流水线的两个声明口：A 族的 `ActiveSkill.flow` 与声明级 `SkillDef.flow`（A 族在
+    # `CATALOG` 里的 `SkillDef.flow` 是 `None`——清单由 `ActiveSkill.flow` 渲染）。
+    flows = [
+        (skill_id, definition.flow)
+        for skill_id, definition in CATALOG.items()
+        if definition.flow is not None
+    ]
+    flows.extend(
+        (skill.skill_id, skill.flow)
+        for skill in ACTIVE_SKILLS
+        if getattr(skill, "flow", None) is not None
+    )
+
+    state = _dynamic_pool_state()
+    for key in sorted(heuristic._DYNAMIC_POOL_SEAT_STEPS):
+        short, _sep, step_name = str(key).partition(":")
+        matches = [
+            (skill_id, step)
+            for skill_id, flow in flows
+            if str(skill_id).rsplit(".", 1)[-1] == short
+            for step in flow.steps
+            if isinstance(step, PickSeats) and step.key == step_name
+        ]
+        assert len(matches) == 1, (
+            f"{key} 没有唯一的真实座位步（找到 {len(matches)} 处）："
+            f"{[skill_id for skill_id, _step in matches]}"
+        )
+        skill_id, step = matches[0]
+        assert step_option_key(skill_id, step.key) == key
+        assert callable(step.pool), f"{key} 的 pool 不是可调用档（不是「按已选收缩」的池）"
+        full = tuple(step.pool(state, None, 0, ()))
+        assert len(full) >= 2, f"{key} 的前提不成立：首问池只有 {full}"
+        narrowed = tuple(step.pool(state, None, 0, (full[0],)))
+        assert set(narrowed) < set(full), (
+            f"{key} 的池**没有**随已选收窄（首问 {full}，选 {full[0]} 之后 {narrowed}）——"
+            "登记多余，AI 会白丢合法目标"
+        )
+        assert full[0] not in narrowed, f"{key} 的池没有排除已选的 {full[0]}"
+
+
+def test_the_ai_step_key_is_the_one_the_engine_writes_into_the_query() -> None:
+    """AI 分组表的键 = 引擎写进 `SELECT_OPTION.skill_id` 的那个文本（**一处**拼法）。
+
+    两侧曾经各抄一次 `f"{short}:{step}"`：引擎那份住 `skills/flow.py`、AI 那份住
+    `agents/heuristic.py`。现在住 `sgs.state.step_option_key`（协议字段的形状），本断言钉
+    两侧读的是同一个实现——不是"恰好现在一样"。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills.flow import _flow_option_id
+    from sgs.state import step_option_key
+
+    frame = SimpleNamespace(data={"skill_id": "hero.jie_huatuo.chuli"})
+    assert _flow_option_id(frame, "seat", 0, multi=False) == step_option_key(
+        "hero.jie_huatuo.chuli", "seat"
+    )
+    assert _flow_option_id(frame, "seat", 1, multi=True) == step_option_key(
+        "hero.jie_huatuo.chuli", "seat", 1
+    )
+    # 被动技那一档（帧里只有 `running_skill`）同样走同一个形状。
+    passive = SimpleNamespace(data={"running_skill": "hero.daqiao.liuli"})
+    assert _flow_option_id(passive, "seat", 0, multi=False) == "liuli:seat"

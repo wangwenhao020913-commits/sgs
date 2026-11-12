@@ -87,6 +87,7 @@ from sgs.state import (
     Pass,
     PeachContext,
     QueryKind,
+    RespondContext,
     RespondMode,
     RejudgeOffer,
     SelectionSpec,
@@ -258,33 +259,9 @@ class FrameHost(StepHost, Protocol):
         payload: Any = None,
     ) -> Any: ...
 
-    def ask_respond(
+    def respond_context(
         self,
-        frame: Frame,
-        actor: int,
-        timing: Timing,
-        *,
-        cause: WindowCause,
-        required: str | None = None,
-        target: int | None = None,
-        window_frame: int = 0,
-        mode: RespondMode = RespondMode.PLAY,
-        use_targets: tuple[int, ...] = (),
-        zones: tuple[Zone, ...] = (Zone.HAND,),
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
-    ) -> Any: ...
-
-    def respond_candidates(
-        self,
-        actor: int,
-        *,
-        cause: WindowCause,
-        mode: RespondMode = RespondMode.PLAY,
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
-    ) -> tuple[Any, ...]: ...
-
-    def should_ask_respond(
-        self,
+        frame: Frame | None,
         actor: int,
         *,
         cause: WindowCause,
@@ -293,11 +270,27 @@ class FrameHost(StepHost, Protocol):
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
+        zones: tuple[Zone, ...] = (Zone.HAND,),
         declared: bool = False,
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
-        floor: int = 0,
         skip_if_empty: bool = False,
-    ) -> bool: ...
+    ) -> RespondContext: ...
+
+    def ask_respond(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        ctx: RespondContext,
+    ) -> Any: ...
+
+    def respond_candidates(
+        self,
+        actor: int,
+        ctx: RespondContext,
+    ) -> tuple[Any, ...]: ...
+
+    def should_ask_respond(self, actor: int, ctx: RespondContext) -> bool: ...
 
     def should_ask_query(
         self,
@@ -882,33 +875,29 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
             return control
         if satisfied is None:
             declared_already = bool(frame.data["response_declared"])
-            if not host.should_ask_respond(
+            # 这一扇窗口的**同一份**载荷：预筛口与真询问共用它（票 02 的类别位只有一处）。
+            ctx = host.respond_context(
+                frame,
                 asker,
                 cause=WindowCause.NULLIFY,
                 required=NULLIFY_RESPONSE_CARD,
                 target=target,
                 mode=RespondMode.USE,
                 declared=declared_already,
-                floor=need_card_floor(frame, asker),
                 skip_if_empty=True,
-            ):
+            )
+            if not host.should_ask_respond(asker, ctx):
                 # 票 05：这个座位**没有任何**办法打出【无懈可击】（真牌 ∪ 转化 / 提供者，
                 # 判据来自同一个 ``legal_actions_for``）⇒ 不问。语义与它答 ``Pass`` 逐字
-                # 相同：不声明、不耗牌、不压帧，窗口照旧问下一个座位。类别位由本窗口给，
-                # 总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+                # 相同：不声明、不耗牌、不压帧，窗口照旧问下一个座位。类别位由本窗口给
+                # （写在载荷里），总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
                 frame.data["response_next"] = index + 1
                 continue
             action = host.ask_respond(
                 frame,
                 asker,
                 Timing.RESOLVE_BEFORE_EFFECT,
-                cause=WindowCause.NULLIFY,
-                required=NULLIFY_RESPONSE_CARD,
-                target=target,
-                window_frame=frame.frame_id,
-                mode=RespondMode.USE,
-                declared=declared_already,
-                skip_if_empty=True,
+                ctx,
             )
             if host.suspended(action):
                 return "stay"
@@ -1912,12 +1901,15 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
         if seat is None:
             return None
         offers = rejudge_offers(host.state, seat)
-        preview = host.respond_candidates(
+        # 预览与真询问读**同一份**窗口载荷（改判不是使用 / 打出 ⇒ 恒无档、不让预筛口插队）。
+        ctx = host.respond_context(
+            frame,
             seat,
             cause=WindowCause.REJUDGE,
             mode=RespondMode.REJUDGE,
             rejudge_offers=offers,
         )
+        preview = host.respond_candidates(seat, ctx)
         if not any(not isinstance(candidate, Pass) for candidate in preview):
             asked.append(seat)
             continue
@@ -1925,11 +1917,7 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
             frame,
             seat,
             Timing.JUDGE_CARD_BEFORE_EFFECT,
-            cause=WindowCause.REJUDGE,
-            required=None,
-            window_frame=frame.frame_id,
-            mode=RespondMode.REJUDGE,
-            rejudge_offers=offers,
+            ctx,
         )
         if host.suspended(action):
             return "stay"

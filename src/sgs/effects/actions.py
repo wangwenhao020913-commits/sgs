@@ -410,9 +410,11 @@ def check_targets(
 
     ``distance_exempt``（关键字、缺省 ``False``）= **调用方**声明"这一次使用无视距离 /
     攻击范围"，用于**技能侧自算池**的载体（唯一读者：【神速】视为使用一张"无距离限制的"
-    【杀】——那张纯虚拟牌不经过本函数前面的候选生成，故豁免只能由调用方给）。它跳过的是
-    同一处 ②，③④⑤ 照常跑，**不会**放宽任何目标合法性。没有"强制查距离"的读者，故这里
-    只有一个方向。
+    【杀】——那张纯虚拟牌不经过本函数前面的候选生成，故豁免只能由调用方给）。它**不是**
+    第二条豁免路径：它只把"全体座位"喂进 ② 的**同一个**豁免集（与
+    :data:`~sgs.skills.ModifierPoint.TARGET_RANGE_EXEMPT` 的钩子同一个求值点、同一条
+    ``player.seat not in exempt`` 判据，见下面的实现），③④⑤ 照常跑，**不会**放宽任何
+    目标合法性。没有"强制查距离"的读者，故这里只有一个方向。
     """
     behavior = behavior_for(card)
     rule = behavior.target_rule
@@ -442,8 +444,13 @@ def check_targets(
         # ② 的距离 / 攻击范围豁免（票 03 的新挂点）：本次使用的**豁免座位集**，``current``
         # 从空元组起、回调只许追加。求值点在 ③④⑤ **之前** ⇒ 下面被它放行的座位马上还要
         # 过延时封印、附加谓词与 TARGET_POOL 链，"放宽距离"因此不可能复活非法座位。
+        #
+        # **两条声明来源、同一份求值**（票 13 的评审 P3）：调用方的 ``distance_exempt``（技能
+        # 侧自算池的载体）只是把"全体座位"喂进**同一个**豁免集，随后仍走下面那一条
+        # ``player.seat not in exempt`` 判据——没有第二套"整条跳过距离"的实现，两条路因此
+        # 不可能给出不同的合法座位集（③④⑤ 也都在它们之后照常跑）。
         exempt: tuple[int, ...] = (
-            ()
+            tuple(player.seat for player in state.players)
             if distance_exempt
             else apply_modifiers(
                 ModifierPoint.TARGET_RANGE_EXEMPT,
@@ -458,7 +465,7 @@ def check_targets(
                 continue
             if player.seat == seat and not rule.includes_self_in_pool():
                 continue
-            if not distance_exempt and player.seat not in exempt:
+            if player.seat not in exempt:
                 if rule.needs_distance and distance(
                     state, seat, player.seat
                 ) > attack_range(state, seat):

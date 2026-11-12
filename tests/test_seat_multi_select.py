@@ -343,3 +343,80 @@ def test_the_ai_fills_the_whole_seat_set_in_one_answer() -> None:
     assert 1 <= len(action.choices) <= 1, "k = 1 ⇒ 恰好一名（cap 由引擎给）"
     assert set(action.choices) <= set(query.options), "集合的成员必须来自服务端下发的池"
     engine.submit(action)  # 引擎接受 ⇒ 形状谓词满足（拒绝会抛 IllegalActionError）
+
+
+# ---------------------------------------------------------------------------
+# P5（票 13 的评审）：**池按已选收缩**的座位步 —— AI 自建集合的上限只在这一档重夹。
+#
+# 不枚举档的候选只是骨架，集合由 `heuristic._assembled_option_set` 自己拼。对普通座位步
+# 上限 = `cap_of`（= min(max_selected, 可选项数)）；只有"询问只带首问快照、真正的约束住
+# 在 `pool(chosen)`"的那一档（除疠）会先按公开势力收窄，再按**收窄后的**池重夹一次——
+# 否则 AI 会交一条服务端铺不出来的集合（引擎按前缀池复核后整步取消，人类看到的是
+# "技能发动了、什么都没发生"）。
+# ---------------------------------------------------------------------------
+
+CHULI_SKILL = "hero.jie_huatuo.chuli"
+
+
+def _chuli_pending_query():
+    """真引擎停在【除疠】的座位多选上：1 / 2 同属魏、3 属蜀。"""
+    from sgs.data import Kingdom
+
+    hand = tuple(cards_of_type(PACK, "slash")[:4])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(hand[0],), hero="jie_huatuo", kingdom=Kingdom.QUN),
+            SeatSpec(hand=(hand[1],), kingdom=Kingdom.WEI),
+            SeatSpec(hand=(hand[2],), kingdom=Kingdom.WEI),
+            SeatSpec(hand=(hand[3],), kingdom=Kingdom.SHU),
+        ],
+        deck=deck_excluding(PACK, *hand),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=13)
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _activate(query, CHULI_SKILL)
+        return None
+
+    run_until(
+        engine,
+        [_Scripted(driver), PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SELECT_OPTIONS
+        and str(e.pending.skill_id).startswith("chuli:"),
+    )
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.SELECT_OPTIONS
+    return query
+
+
+def test_the_ai_never_offers_two_same_kingdom_seats_for_a_contracting_pool() -> None:
+    """【除疠】：AI 自建集合必须按**公开势力**收窄，且仍落在形状谓词的区间内。
+
+    询问带的池是**首问快照**（`seat:1` / `seat:2` 同属魏，两个都在面上）；服务端
+    `pool(chosen)` 会拒掉"两个同势力"的集合。AI 因此自己按势力收窄——收窄之后 `cap`
+    跟着**实际参与构造的池**走（P5：这一档之外的询问上那一步是恒等）。
+    """
+    from sgs.agents import heuristic
+    from sgs.effects import is_legal_option_set
+
+    query = _chuli_pending_query()
+    assert {"seat:1", "seat:2", "seat:3"} <= set(query.options), (
+        f"前提：首问快照里两个魏将都在面上：{query.options}"
+    )
+
+    assembled = heuristic._assembled_option_set(query)
+
+    assert is_legal_option_set(query, assembled.choices), (
+        f"构造器交了一条越界集合：{assembled.choices}（区间 = "
+        f"[{query.min_selected}, {query.max_selected}]）"
+    )
+    seats = [int(str(choice).removeprefix("seat:")) for choice in assembled.choices]
+    kingdoms = [query.view.players[seat].kingdom for seat in seats]
+    assert len(kingdoms) == len(set(kingdoms)), (
+        f"AI 同时选了同一势力的两名：{assembled.choices}（服务端的 pool(chosen) 会拒）"
+    )
+    assert assembled.choices, "除疠至少选一名（min_selected = 1）"
