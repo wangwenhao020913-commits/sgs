@@ -678,16 +678,6 @@ const candidateRowButtons = () => Array.from($("t-options").children).filter(
 const seatNodes = () => [...$("t-seats").children, $("t-self-seat")];
 const seatBox = (seat) => seatNodes().find(
   (node) => node.getAttribute("data-seat") === String(seat)) || null;
-/** 预发动步骤条的 chip 行（`renderPreativation` 铺在 `#t-options` 里的那个 `.cards` DIV）。
- *  预发动用例共用同一处查找：步骤 chip 的文本 / 点击都不各自再抄一遍。 */
-const preactivationStepRow = () => Array.from($("t-options").children).find(
-  (node) => node.tagName === "DIV") || null;
-const preactivationStepChip = (index) => {
-  const row = preactivationStepRow();
-  if (!row) return null;
-  return Array.from(row.children).find(
-    (node) => node.getAttribute("data-step") === String(index)) || null;
-};
 /** 自己装备区里的第一张牌（就地高亮的用例共用一处查找）。
  *
  * U1-02 起自己的装备区是**固定四槽**（武器 / 防具 / 攻马 / 防马），槽位节点自己带
@@ -4601,13 +4591,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !seatBox(0).classList.contains("targetable"),
     `seat1=${seatBox(1).classList.contains("targetable")} seat0=${seatBox(0).classList.contains("targetable")}`);
 
-  // 重选第 1 步：清空第 1..N 步（用户裁定的"重选第 K 步清空 K..N"）。
-  const stepChip = preactivationStepChip(0);
-  (stepChip.listeners.click || []).forEach((fn) => fn({ target: stepChip }));
-  check("㉿PZ7 重选第 1 步清空第 1..N 步",
+  // 回到第一步：票 16 起步骤**不再画成按钮**，唯一复位点 = 「取消」（票 08 的语义：
+  // 清空 K..N 步重新选）。旧用例点第 1 步的 step chip，那个入口已随步骤条一起删掉。
+  await ui.cancelOrClear();
+  check("㉿PZ7 取消 = 回第一步（答案全清、光标 0；控件区里没有可点的步骤 chip）",
     ui.state.preactivation.cursor === 0
-      && ui.state.preactivation.answers.every((answer) => answer.values.length === 0),
-    JSON.stringify(ui.state.preactivation.answers));
+      && ui.state.preactivation.answers.every((answer) => answer.values.length === 0)
+      && !Array.from($("t-options").children).some(
+        (node) => node.getAttribute("data-step") !== undefined),
+    `answers=${JSON.stringify(ui.state.preactivation.answers)}`
+    + ` options=${$("t-options").children.length}`);
 
   // 再走一遍，确认复合动作的拼装（票 08：单值选牌步点牌即自动进第 2 步，没有「下一步」）。
   (handChips()[0].listeners.click || []).forEach((fn) => fn({ target: handChips()[0] }));
@@ -4683,39 +4676,46 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       (b) => b.getAttribute("data-skill-id") === "demo.wording");
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
   };
-  const stepChipText = (index) => {
-    const chip = preactivationStepChip(index);
-    return chip ? chip.textContent : "";
-  };
+  const hintText = () => $("t-target-hint").textContent;
+  /** 控件区里是不是又出现了**步骤按钮**（票 16 删掉的那一排：`data-step` + "1. …" 文案）。 */
+  const stepButtons = () => Array.from($("t-options").children).filter(
+    (node) => node.getAttribute("data-step") !== undefined
+      || /^\d+\.\s/.test(String(node.textContent || "").trim()));
 
   renderFor(worded);
-  check("㉿WD1 有 wording：步骤条画的是这一问的人话（步 1）",
-    stepChipText(0).includes("弃掉一张牌") && !stepChipText(0).includes("选牌"),
-    stepChipText(0));
-  check("㉿WD2 有 wording：提示行也用它（步 1）",
-    $("t-target-hint").textContent.includes("弃掉一张牌"),
-    $("t-target-hint").textContent);
+  check("㉿WD1 有 wording：提示行画的是这一问的人话（步 1，控件区没有步骤按钮）",
+    hintText().includes("弃掉一张牌") && !hintText().includes("选牌"),
+    hintText());
+  check("㉿WD2 有 wording：页脚与提示行读**同一句**（票 16 的单一判据），且控件区为空",
+    $("t-choice").textContent === hintText()
+      && $("t-options").children.length === 0 && stepButtons().length === 0,
+    `foot="${$("t-choice").textContent}" hint="${hintText()}"`
+    + ` options=${$("t-options").children.length}`);
   ($("t-hand").children[0].listeners.click || []).forEach((fn) => fn({ target: $("t-hand").children[0] }));
   ui.advancePreativation();
-  check("㉿WD3 有 wording：目标步写明\"决斗目标\"（步 2）",
-    stepChipText(1).includes("选择决斗目标") && $("t-target-hint").textContent.includes("选择决斗目标"),
-    `${stepChipText(1)} / ${$("t-target-hint").textContent}`);
+  check("㉿WD3 有 wording：目标步写明\"决斗目标\"（步 2；提示行只说当前这一步，不再出现步 1 的问法）",
+    hintText().includes("选择决斗目标") && !hintText().includes("弃掉一张牌"),
+    hintText());
 
   renderFor(plain);
   // 票 07：第三层（前端通用文案）从"选牌 / 选目标"升级成 `选择{n}张牌` / `选择{n}名角色`
-  // （spec §2 Q18 的措辞）；步骤**条**仍是短标签"选牌"，提示行是完整的一句。
-  check("㉿WD4 没有 wording 时退回前端通用文案（步骤条\"选牌\"、提示行\"选择1张牌\"）",
-    stepChipText(0).includes("选牌") && $("t-target-hint").textContent.includes("选择1张牌"),
-    `${stepChipText(0)} / ${$("t-target-hint").textContent}`);
+  // （spec §2 Q18 的措辞）。票 16 起步骤条整排删掉，故这里只钉提示行那完整的一句。
+  check("㉿WD4 没有 wording 时退回前端通用文案（提示行\"选择1张牌\"、控件区为空）",
+    hintText().includes("选择1张牌") && !hintText().includes("选牌")
+      && $("t-options").children.length === 0,
+    `${hintText()} / options=${$("t-options").children.length}`);
 }
 
 /* ④c 票 08：预发动**不许越步** + 标题 / 页脚同源（三步清单：seat → option → card）。
  *
  * 旧实现允许点第 2 步的步骤 chip 跳过空着的第 1 步；把后面两步填满后光标到末尾而第 1 步
- * 仍空 ⇒ 标题（`#t-target-hint`，只看 `pa.cursor`）写「清单已填完」，页脚（`#t-choice`，
- * 按 `preactivationReady`）写「清单里还有步骤没填完。」，确认按钮禁用；此时点场上武将无效
- * （座位步只认当前光标），点第 1 步 chip 又会把第 2/3 步清空 ⇒ 死锁。
- * 修法：`firstUnfilledPreativationStep` 是**唯一判据**——ready / 提示 / chip 落点都读它。
+ * 仍空 ⇒ 标题（`#t-target-hint`，只看 `pa.cursor`）写「清单已填完」，页脚（`#t-choice`）
+ * 写「清单里还有步骤没填完。」，确认按钮禁用；此时点场上武将无效（座位步只认当前光标），
+ * 点第 1 步 chip 又会把第 2/3 步清空 ⇒ 死锁。
+ * 修法：`firstUnfilledPreativationStep` 是**唯一**的"填完没有"判据，标题 / 页脚 /
+ * 提交可点态都读它。票 16 进一步把步骤 chip 整排删掉（"不许越步"因此是结构事实），
+ * 并把"能不能交"收敛成**一处**实现（`preactivationSubmitAllowed`；旧的两份判据在
+ * `cursor` 停在最后一步之后必然打架）。
  *
  * 清单形状与**写入面同源**（界孙尚香【结姻】的 `step_requirements` + `JIE_JIEYIN_OPTIONS`，
  * `src/sgs/skills/active.py`）：选项步的池值是**机器 id**（实机渲染的就是这个），不是文案。
@@ -4776,15 +4776,18 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!t8Pa() && t8Pa().cursor === 0 && t8Pa().steps.length === 3,
     `cursor=${t8Pa() && t8Pa().cursor} steps=${t8Pa() && t8Pa().steps.length}`);
 
-  // 空着第 1 步点第 2 步的 chip：旧实现跳过去，修后钳回第一个空步。
-  t8Click(preactivationStepChip(1));
-  check("㉿JS2 不许越步：点第 2 步 chip 落回第 1 步（钳到第一个空步）",
-    !!t8Pa() && t8Pa().cursor === 0
-      && t8Pa().answers.every((answer) => answer.values.length === 0),
-    `cursor=${t8Pa() && t8Pa().cursor} answers=${JSON.stringify(t8Pa() && t8Pa().answers)}`);
-  check("㉿JS2b 唯一判据：第 1 步就是第一个空步、清单未 ready",
-    !!t8Pa() && t8First(t8Pa()) === 0 && ui.preactivationReady(t8Pa()) === false,
-    `first=${t8Pa() && t8First(t8Pa())} ready=${!!t8Pa() && ui.preactivationReady(t8Pa())}`);
+  // 票 16：步骤**不再画成按钮**——控件区没有可点的步骤 chip，也就没有"点后面一步跳过空步"
+  // 这条入口（票 08 的"不许越步"从此是结构事实，不是钳位）。
+  check("㉿JS2 控件区没有步骤按钮（票 16 删掉了那一排 chip，座位步是牌桌表面）",
+    $("t-options").children.length === 0
+      && !Array.from($("t-options").children).some(
+        (node) => node.getAttribute("data-step") !== undefined),
+    `options=${$("t-options").children.length}`);
+  check("㉿JS2b 单一判据：第 1 步就是第一个空步、整条清单**不可提交**",
+    !!t8Pa() && t8First(t8Pa()) === 0
+      && ui.preactivationSubmitAllowed(t8Pa()) === false,
+    `first=${t8Pa() && t8First(t8Pa())}`
+    + ` submit=${!!t8Pa() && ui.preactivationSubmitAllowed(t8Pa())}`);
   check("㉿JS3 标题与页脚同源：都指第 1 步、都不说「清单已填完」、确认禁用",
     t8Hint().includes("第 1/3 步") && t8Hint().includes("选择一名男性角色")
       && t8Foot().includes("第 1/3 步")
@@ -4805,13 +4808,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("btn-submit").disabled === true,
     `cursor=${t8Pa() && t8Pa().cursor} hint="${t8Hint()}" submit=${$("btn-submit").disabled}`);
   // 票 08（table-ux-overhaul）：选牌步 min==max==1 ⇒ 点牌即自动到底（「下一步」按钮已删），
-  // 「提交」才是最后一步的出口。
+  // 「提交」才是最后一步的出口。票 16：可点态与页脚读**同一个**判据
+  // （`preactivationSubmitAllowed`），旧的两份判据在这里一个说满、一个说没满。
   t8Click(t8Hand());
-  check("㉿JS6 按序填完 = 标题才说「清单已填完」、页脚说可以确认、按钮启用",
-    !!t8Pa() && ui.preactivationReady(t8Pa()) === true
+  check("㉿JS6 按序填完 = 标题才说「清单已填完」、页脚说可以确认、按钮启用（同一判据）",
+    !!t8Pa() && ui.preactivationSubmitAllowed(t8Pa()) === true
       && t8Hint().includes("清单已填完") && t8Hint().includes("可以确认发动")
       && t8Foot().includes("可以确认发动") && !t8Foot().includes("还有步骤没填完")
-      && $("btn-submit").disabled === false,
+      && !t8Foot().includes("还没填完") && $("btn-submit").disabled === false,
     `hint="${t8Hint()}" foot="${t8Foot()}" submit=${$("btn-submit").disabled}`);
 
   // 兜底支路：「光标在末尾、第 1 步空」旧版跳步能造出来；跳步已被钳住 ⇒ 这里直接合成
@@ -4824,8 +4828,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !t8Hint().includes("清单已填完")
       && $("btn-submit").disabled === true,
     `hint="${t8Hint()}" foot="${t8Foot()}" submit=${$("btn-submit").disabled}`);
-  t8Click(preactivationStepChip(2));
-  check("㉿JS8 坏态下点第 3 步 chip ⇒ 落回第 1 步（目标步补得回来，不再死锁）",
+  // 票 16：坏态的出口是「取消」= 回第一步（票 08 的唯一复位点）；步骤 chip 已不存在，
+  // 不再有"点第 3 步 chip 把光标拨回去"这条路径。
+  await ui.cancelOrClear();
+  check("㉿JS8 坏态下点「取消」⇒ 回第一步（目标步补得回来，不再死锁）",
     !!t8Pa() && t8Pa().cursor === 0
       && t8Pa().answers.every((answer) => answer.values.length === 0),
     `cursor=${t8Pa() && t8Pa().cursor} answers=${JSON.stringify(t8Pa() && t8Pa().answers)}`);
@@ -5246,12 +5252,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       $("t-dialog").hidden === true && !dialogInBody()
         && $("t-dialog-body").children.length === 0,
       `hidden=${$("t-dialog").hidden} inBody=${dialogInBody()} body=${$("t-dialog-body").children.length}`);
-    check("U-PA-01b 座位步不铺座位按钮、任何步都没有「下一步」（步骤条仍在提示区）",
+    check("U-PA-01b 座位步不铺座位按钮、任何步都没有「下一步」（步骤不再画成按钮：控件区空）",
       seatButtons().length === 0 && nextButtons().length === 0
-        && !!preactivationStepChip(0) && !!preactivationStepChip(1)
+        && $("t-options").children.length === 0
         && answerCalls(before).length === 0,
       `座位按钮=${JSON.stringify(seatButtons().map((n) => n.textContent))}`
-      + ` 下一步=${nextButtons().length} chips=${!!preactivationStepChip(0)}/${!!preactivationStepChip(1)}`);
+      + ` 下一步=${nextButtons().length} options=${$("t-options").children.length}`);
     clickNode($("t-hand").children[0]);
     check("U-PA-01c 点手牌 = 收进答案并**自动**进第 2 步（min==max 填满即走，没有「下一步」可按）",
       JSON.stringify(answers()[0]) === "[71]" && pa().cursor === 1
@@ -5532,15 +5538,223 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       },
     }));
     enter();
-    check("U-PA-06c 转化清单的第 1 步（选源牌）仍是牌桌表面（不开窗）",
-      $("t-dialog").hidden === true && !!preactivationStepChip(1),
-      `hidden=${$("t-dialog").hidden} chip=${!!preactivationStepChip(1)}`);
+    check("U-PA-06c 转化清单的第 1 步（选源牌）仍是牌桌表面（不开窗、控件区为空）",
+      $("t-dialog").hidden === true && $("t-options").children.length === 0,
+      `hidden=${$("t-dialog").hidden} options=${$("t-options").children.length}`);
     clickNode($("t-hand").children[0]);
     check("U-PA-06d 走到选牌名步（4 项）⇒ 开询问弹窗，选项列在正文里",
       $("t-dialog").hidden === false && dialogInBody()
         && setEquals(optionLabels(), ["杀", "闪", "桃", "酒"]),
       `hidden=${$("t-dialog").hidden} inBody=${dialogInBody()}`
       + ` options=${JSON.stringify(optionLabels())}`);
+  }
+
+  /* ---- U-PA-07（票 16 的实机报障）：填满之后页脚**不许**再说"还没填完"，且「提交」真发出 ----
+   *
+   * 症状：提示行写「清单已填完，可以确认发动。」、「确认发动」也亮着，页脚却写
+   * 「预发动清单还没填完。」、按下什么都不发生。根因是**两份提交判据**：提示行 / 可点态按
+   * 票 08 的语义（光标停在最后一步、最后一步填满即可交），页脚与 `answer.js` 的提交闸按
+   * 票 08 **之前**的语义（光标必须越过清单末尾）——后者在光标停在原地之后恒假。
+   * 修法：三处同读 `preactivationSubmitAllowed`（本票只留这一处实现）。
+   */
+  {
+    // 形状 ①（截图：界【离间】）：选牌步 → 座位步。有预览通道 ⇒ 光标**停在最后一步**。
+    const pending = demoPending(9307, {
+      preview: true,
+      preactivations: {
+        "demo.surface": [
+          { name: "card", kind: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+            pool: [{ when: [], options: ["71"] }], wording: "弃置1张牌" },
+          { name: "victim", kind: "seat", zones: [], min: 1, max: 1, order: 1,
+            pool: [{ when: [], options: ["seat:1", "seat:2"] }], wording: "选择决斗目标" },
+        ],
+      },
+    });
+    render(pending);
+    ui.state.sessionId = "smoke-preview";
+    nextPreview = { cursor: 0, kind: "card", options: ["71"], disabled: [],
+      can_advance: false, can_submit: false, next: "victim" };
+    enter();
+    await flushPreativationPreview();
+    nextPreview = { cursor: 1, kind: "seat", options: ["seat:1", "seat:2"], disabled: [],
+      can_advance: true, can_submit: false, next: null };
+    clickNode($("t-hand").children[0]);
+    await flushPreativationPreview();
+    clickNode(seatBox(2));
+    nextPreview = { cursor: 1, kind: "seat", options: ["seat:1", "seat:2"], disabled: [],
+      can_advance: true, can_submit: true, next: null };
+    await flushPreativationPreview();
+    check("U-PA-07a 填满后：提示行说「清单已填完」⇒ 页脚**不再**说「还没填完」、控件区无步骤按钮",
+      !!pa() && pa().cursor === 1
+        && $("t-target-hint").textContent.includes("清单已填完")
+        && !$("t-choice").textContent.includes("还没填完")
+        && $("btn-submit").disabled === false
+        && $("t-options").children.length === 0,
+      `cursor=${pa() && pa().cursor} hint="${$("t-target-hint").textContent}"`
+      + ` foot="${$("t-choice").textContent}" submit=${$("btn-submit").disabled}`);
+    const beforeSubmit1 = calls.length;
+    await clickAndWait($("btn-submit"));
+    const sent1 = answerCalls(beforeSubmit1).map((call) => call.body && call.body.action);
+    check("U-PA-07b 按「确认发动」真的发出 ActivateSkill（旧实现被「还没填完」拦下，零请求）",
+      sent1.length === 1 && !!sent1[0] && sent1[0].kind === "ActivateSkill"
+        && sent1[0].skill_id === "demo.surface"
+        && JSON.stringify(sent1[0].picks) === "[71]"
+        && JSON.stringify(sent1[0].choices) === '["seat:2"]'
+        && !$("t-choice").textContent.includes("还没填完"),
+      `sent=${JSON.stringify(sent1)} foot="${$("t-choice").textContent}"`);
+
+    // 形状 ②（截图：一步选牌步 + 一步选项步）：选项步同样停在最后一步等提交。
+    const pairPending = demoPending(9308, {
+      preview: true,
+      preactivations: {
+        "demo.surface": [
+          { name: "card", kind: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+            pool: [{ when: [], options: ["71"] }], wording: "弃置1张牌" },
+          { name: "branch", kind: "option", zones: [], min: 1, max: 1, order: 1,
+            pool: [{ when: [], options: ["break_armor", "break_speed"] }],
+            wording: "选择一项" },
+        ],
+      },
+    });
+    render(pairPending);
+    ui.state.sessionId = "smoke-preview";
+    nextPreview = { cursor: 0, kind: "card", options: ["71"], disabled: [],
+      can_advance: false, can_submit: false, next: "branch" };
+    enter();
+    await flushPreativationPreview();
+    nextPreview = { cursor: 1, kind: "option", options: ["break_armor", "break_speed"],
+      disabled: [], can_advance: true, can_submit: false, next: null };
+    clickNode($("t-hand").children[0]);
+    await flushPreativationPreview();
+    nextPreview = { cursor: 1, kind: "option", options: ["break_armor", "break_speed"],
+      disabled: [], can_advance: true, can_submit: true, next: null };
+    clickNode(optionButtons().find((node) => node.textContent === "break_speed"));
+    await flushPreativationPreview();
+    check("U-PA-07c 一步选牌 + 一步选项：填满后页脚同样不写「还没填完」、提交键可点",
+      !!pa() && pa().cursor === 1
+        && $("t-target-hint").textContent.includes("清单已填完")
+        && !$("t-choice").textContent.includes("还没填完")
+        && $("btn-submit").disabled === false,
+      `cursor=${pa() && pa().cursor} hint="${$("t-target-hint").textContent}"`
+      + ` foot="${$("t-choice").textContent}" submit=${$("btn-submit").disabled}`);
+    const beforeSubmit2 = calls.length;
+    await clickAndWait($("btn-submit"));
+    const sent2 = answerCalls(beforeSubmit2).map((call) => call.body && call.body.action);
+    check("U-PA-07d 选项步这一形状也真的发出 ActivateSkill（choices = 选项值）",
+      sent2.length === 1 && !!sent2[0] && sent2[0].kind === "ActivateSkill"
+        && JSON.stringify(sent2[0].picks) === "[71]"
+        && JSON.stringify(sent2[0].choices) === '["break_speed"]'
+        && !$("t-choice").textContent.includes("还没填完"),
+      `sent=${JSON.stringify(sent2)} foot="${$("t-choice").textContent}"`);
+  }
+
+  /* ---- U-PA-08（票 16）：`#t-options` 里**没有步骤按钮**，提示行只说**当前**这一步 ----
+   *
+   * 用户口径：提示区的提示文本 / 询问文本用字符串而不是选项组件，除非是真的选项
+   * （【雌雄双股剑】那种）；"现在是哪一步就显示哪一步，不要都显示"。
+   */
+  {
+    const pending = demoPending(9310, {
+      preactivations: {
+        "demo.surface": [
+          { name: "card", kind: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+            pool: [{ when: [], options: ["71"] }], wording: "弃置1张牌" },
+          { name: "victim", kind: "seat", zones: [], min: 1, max: 1, order: 1,
+            pool: [{ when: [], options: ["seat:1", "seat:2"] }], wording: "选择决斗目标" },
+          { name: "user", kind: "seat", zones: [], min: 1, max: 1, order: 2,
+            pool: [{ when: [], options: ["seat:1", "seat:2"] }], wording: "选择决斗使用者" },
+        ],
+      },
+    });
+    render(pending);
+    enter();
+    const stepButtons = () => Array.from($("t-options").children).filter(
+      (node) => node.getAttribute("data-step") !== undefined
+        || /^\d+\.\s/.test(String(node.textContent || "").trim()));
+    const hint = () => $("t-target-hint").textContent;
+    check("U-PA-08a 选牌步：控件区**空**（步骤 chip 行已删，不再往这里铺按钮）",
+      $("t-options").children.length === 0 && stepButtons().length === 0,
+      `options=${$("t-options").children.length}`);
+    check("U-PA-08b 提示行只说**当前**这一步（不含后两步的问法、没有「1. … / 2. …」清单）",
+      hint().includes("第 1/3 步") && hint().includes("弃置1张牌")
+        && !hint().includes("选择决斗目标") && !hint().includes("选择决斗使用者")
+        && !/\d+\.\s/.test(hint()),
+      `hint="${hint()}"`);
+    clickNode($("t-hand").children[0]);
+    check("U-PA-08c 座位步：控件区仍空（座位只在牌桌上点）",
+      pa().cursor === 1 && $("t-options").children.length === 0,
+      `cursor=${pa().cursor} options=${$("t-options").children.length}`);
+    check("U-PA-08d 打到第 2 步：提示行换成第 2 步的问法，第 1 / 第 3 步的问法都不出现",
+      hint().includes("第 2/3 步") && hint().includes("选择决斗目标")
+        && !hint().includes("弃置1张牌") && !hint().includes("选择决斗使用者"),
+      `hint="${hint()}"`);
+
+    // 选项步：控件区里只有**真选项**，仍然没有步骤按钮。
+    const optionPending = demoPending(9311, {
+      preactivations: {
+        "demo.surface": [
+          { name: "card", kind: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+            pool: [{ when: [], options: ["71"] }] },
+          { name: "name", kind: "option", zones: [], min: 1, max: 1, order: 1,
+            pool: [{ when: [], options: ["杀", "闪"] }], wording: "选择当作哪一张基本牌" },
+        ],
+      },
+    });
+    render(optionPending);
+    enter();
+    clickNode($("t-hand").children[0]);
+    check("U-PA-08e 选项步：控件区只有两份真选项，步骤按钮一个都没有",
+      setEquals(optionLabels(), ["杀", "闪"]) && stepButtons().length === 0
+        && $("t-options").children.length === 2,
+      `options=${JSON.stringify(optionLabels())} chips=${stepButtons().length}`);
+  }
+
+  /* ---- U-PA-09（票 16）：**真选项**仍是按钮（【雌雄双股剑】的一次性二选一） ---- */
+  {
+    // ① 询问面（`SELECT_OPTION`）里的雌雄二选一：两个中文按钮，点一下 = 选中那条候选。
+    const pair = {
+      kind: "SELECT_OPTION", actor: 0, seq: 9312, skill_id: "equip.double_sword",
+      prompt: "请选择一项。",
+      legal_actions: [
+        { kind: "SelectOption", choice: "discard_one", answers_seq: 9312 },
+        { kind: "SelectOption", choice: "draw_one", answers_seq: 9312 },
+      ],
+      candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+      preactivations: {}, preactivation: [],
+    };
+    render(pair);
+    check("U-PA-09 雌雄双股剑的一次性二选一仍画成按钮（真选项不随步骤按钮一起消失）",
+      setEquals(optionLabels(), ["弃置 1 张手牌", "令其摸一张牌"])
+        && $("t-dialog").hidden === true,
+      `options=${JSON.stringify(optionLabels())} hidden=${$("t-dialog").hidden}`);
+    clickNode(optionButtons().find((node) => node.textContent === "令其摸一张牌"));
+    const pairAction = ui.buildAction();
+    check("U-PA-09b 点得动：选中那条 SelectOption(draw_one)，提交原样取候选",
+      ui.state.selectedOption === 1 && $("btn-submit").disabled === false
+        && !!pairAction && pairAction.kind === "SelectOption"
+        && pairAction.choice === "draw_one",
+      `option=${ui.state.selectedOption} action=${JSON.stringify(pairAction)}`);
+
+    // ② 预发动里的选项步：同一对值仍是可点按钮（点一下写进答案，清单随即可交）。
+    render(demoPending(9313, {
+      preactivations: {
+        "demo.surface": [
+          { name: "pair", kind: "option", zones: [], min: 1, max: 1, order: 0,
+            pool: [{ when: [], options: ["discard_one", "draw_one"] }], wording: "选择一项" },
+        ],
+      },
+    }));
+    enter();
+    check("U-PA-09c 预发动选项步的真选项仍是按钮（且不是步骤按钮：没有 data-step 行）",
+      setEquals(optionLabels(), ["discard_one", "draw_one"])
+        && !Array.from($("t-options").children).some(
+          (node) => node.getAttribute("data-step") !== undefined),
+      `options=${JSON.stringify(optionLabels())}`);
+    clickNode(optionButtons().find((node) => node.textContent === "draw_one"));
+    check("U-PA-09d 点真选项 = 写进答案、清单立刻可交（不用再点步骤条 / 下一步）",
+      !!pa() && JSON.stringify(answers()[0]) === '["draw_one"]'
+        && ui.buildAction() !== null && $("btn-submit").disabled === false,
+      `answers=${JSON.stringify(answers())} action=${JSON.stringify(ui.buildAction())}`);
   }
 
   ui.state.sessionId = null;
@@ -5734,10 +5948,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   (entry ? entry.listeners.click || [] : []).forEach((fn) => fn({ target: entry }));
 
   // 票 08（table-ux-overhaul）：控件区不再有「下一步」——`min != max` 的选牌步用底部
-  // 「提交」确认这一步；单值座位步在牌桌上点。
-  check("㉿PZ19 被动入口进入预发动后，第 1 步选牌在牌桌上点（控件区没有「下一步」）",
+  // 「提交」确认这一步；单值座位步在牌桌上点。票 16：连步骤 chip 也不铺，控件区为空。
+  check("㉿PZ19 被动入口进入预发动后，第 1 步选牌在牌桌上点（控件区没有「下一步」、没有步骤按钮）",
     !optionButtons().some((node) => String(node.textContent || "").trim() === "下一步")
-      && !!preactivationStepChip(0),
+      && $("t-options").children.length === 0,
     `选项=${optionTexts()}`);
 
   // 选满 3 张手牌（清单第 1 步的候选正好这 3 张）。
@@ -5984,12 +6198,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   showMixedFace();
   await clickAndWait(mixedRow("示例甲"));
-  // 票 08：预发动是牌桌表面（不开弹窗），控件区只有步骤条 + 这一步的控件，没有「下一步」。
-  check("㉿AF12 点带清单的候选 ⇒ 进入它自己的清单（表面切到预发动、步骤条可见、不开弹窗）",
+  // 票 08：预发动是牌桌表面（不开弹窗），控件区只有这一步的控件，没有「下一步」。
+  // 票 16：步骤不再画成按钮 ⇒ 选牌步的控件区是空的。
+  check("㉿AF12 点带清单的候选 ⇒ 进入它自己的清单（表面切到预发动、控件区为空、不开弹窗）",
     !!ui.state.preactivation && ui.state.preactivation.skillId === "demo.alpha"
       && ui.renderKind(mixedView.pending, mixedView.pending.legal_actions) === "preactivation"
       && $("t-dialog").hidden === true
-      && !!preactivationStepChip(0)
+      && $("t-options").children.length === 0
       && !mixedRows().some((node) => String(node.textContent || "").trim() === "下一步"),
     `skillId=${ui.state.preactivation && ui.state.preactivation.skillId}`
       + ` kind=${ui.renderKind(mixedView.pending, mixedView.pending.legal_actions)}`
@@ -6261,9 +6476,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(action.choices) === "[\"seat:1\"]"
       && !(view.pending.legal_actions || []).some((c) => c.kind === "UseCard"),
     JSON.stringify(action));
-  check("㉿T5 只填了源牌、没选目标时不能确认",
-    ui.state.preactivation.cursor === 2 && ui.preactivationReady(ui.state.preactivation) === true,
-    `cursor=${ui.state.preactivation.cursor}`);
+  check("㉿T5 两步填完 ⇒ **唯一**的提交判据说可以交（光标停在最后一步 / 越过末尾两种形状同读一处）",
+    ui.state.preactivation.cursor === 2
+      && ui.preactivationSubmitAllowed(ui.state.preactivation) === true,
+    `cursor=${ui.state.preactivation.cursor}`
+    + ` submit=${ui.preactivationSubmitAllowed(ui.state.preactivation)}`);
 }
 
 /* 求桃窗口：急救的清单 = 一张红牌、**无目标步**（濒死者由窗口固定）。 */
@@ -7035,10 +7252,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(action.choices) === '["seat:2","seat:0","seat:3"]',
     JSON.stringify(action));
 
-  // 重选第 1 步会清空来源与目标；重新选源、再进目标步时**预选**重新生效。
-  ui.jumpPreativationStep(0);
+  // 回第一步会清空来源与目标（票 16 起唯一入口 = 「取消」，步骤 chip 已删）；
+  // 重新选源、再进目标步时**预选**重新生效。
+  await ui.cancelOrClear();
   (dodgeChip.listeners.click || []).forEach((fn) => fn({ target: dodgeChip }));
-  check("㉿BN7 重选来源步后再进目标步，Bn 的预选重新生效",
+  check("㉿BN7 取消回第一步再选源 ⇒ 进目标步时 Bn 的预选重新生效",
     JSON.stringify(ui.state.preactivation.answers[1].values) === "[2]",
     JSON.stringify(ui.state.preactivation.answers[1].values));
   ui.resetSelection();
@@ -7275,8 +7493,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(cappedAction.choices) === '["seat:1"]',
     JSON.stringify(cappedAction));
 
-  // 重选来源：手牌的最后一张红牌 ⇒ 同一目标步的上限变成 3。
-  ui.jumpPreativationStep(0);
+  // 换来源（票 16：回第一步的唯一入口是「取消」，步骤 chip 已删）：手牌的最后一张红牌
+  // ⇒ 同一目标步的上限变成 3。
+  await ui.cancelOrClear();
   (handChip().listeners.click || []).forEach((fn) => fn({ target: handChip() }));
   const paHand = ui.state.preactivation;
   check("㉿WC5 选手牌红牌（最后一张手牌）⇒ 目标步上限 3",
@@ -9393,12 +9612,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       ui.renderPending(view);
       const before = calls.length;
       clickNode(promptSkill("hero.demo.flow"));
-      // 票 08：预发动不开弹窗、也不改 `#t-prompt`；控件区画的是步骤条 + 这一步的控件，
-      // 「现在第几步」住提示行（票 07 的模板层）。
+      // 票 08：预发动不开弹窗、也不改 `#t-prompt`；「现在第几步」住提示行（票 07 的模板层）。
+      // 票 16：步骤不再画成按钮 ⇒ 选牌步的控件区是空的（旧用例断的是"步骤条在"）。
       return !!ui.state.preactivation
         && ui.state.preactivation.skillId === "hero.demo.flow"
         && $("t-dialog").hidden === true
-        && $("t-options").children.length > 0
+        && $("t-options").children.length === 0
         && $("t-target-hint").textContent.includes("第 1/1 步")
         && calls.length === before;
     })(),

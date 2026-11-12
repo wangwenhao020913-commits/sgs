@@ -8568,6 +8568,77 @@ def test_the_ask_surface_is_cleared_by_one_single_function() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 16：预发动「能不能交」只有一处判据 + 步骤不再画成按钮
+# ---------------------------------------------------------------------------
+
+_PREACTIVATION_JS = STATIC_DIR / "preactivation.js"
+_OPTIONS_JS = STATIC_DIR / "options.js"
+
+
+def test_the_preactivation_submit_verdict_has_one_single_implementation() -> None:
+    """票 16：提交判据**单源**——提示行 / 页脚 / 实际提交三处同读 `preactivationSubmitAllowed`。
+
+    实机报障：提示行写「清单已填完，可以确认发动。」、「确认发动」也亮着，页脚却写
+    「预发动清单还没填完。」、按下去什么都不发生。根因是**两份判据**：票 08 让光标停在
+    最后一步之后，另一份"光标要**越过**清单末尾才算填完"的旧谓词恒假。
+    这里把"只有一处实现"钉成结构事实，防它再长回来：
+
+    ① 旧谓词（`preactivationReady`）在静态源码里一个字都不剩（注释里也不留，好让
+       "再长出来"永远是一条显式的红）；
+    ② 判据只有一个定义，其本地兜底是"**最后一步**填满"（`steps.length - 1`），
+       不是"光标越过末尾"（`cursor < pa.steps.length`）；
+    ③ 页脚那句未就绪原因（`options.js:selectionError`）与真正拼动作的
+       `buildPreativationAction` 读**同一个**函数；
+    ④ 全站再没有第二个 `preactivation…Ready(…)` 式谓词；
+    ⑤ 步骤不再画成按钮：`renderPreativation` 不铺 `data-step`，跳步入口已删（无生产调用方）。
+    """
+    pre = _PREACTIVATION_JS.read_text(encoding="utf-8")
+    options = _OPTIONS_JS.read_text(encoding="utf-8")
+
+    assert "preactivationReady" not in pre, (
+        "旧的 `preactivationReady` 判据必须删净（票 08 之后它恒假，正是本票的症状来源）"
+    )
+    assert pre.count("function preactivationSubmitAllowed(") == 1, (
+        "「能不能交」只能有**一个**实现（`preactivationSubmitAllowed`）"
+    )
+    verdict = _js_function_body(pre, "preactivationSubmitAllowed")
+    assert "steps.length - 1" in verdict, (
+        "本地兜底必须是「**最后一步**填满即可交」（票 08：光标停在最后一步等提交）"
+    )
+    assert "cursor < pa.steps.length" not in verdict, (
+        "判据里不许再出现「光标必须越过清单末尾」的旧语义（那样它恒假）"
+    )
+    assert "preactivationSubmitAllowed(" not in verdict, "判据不许转发到第二份实现"
+
+    assert not re.findall(r"function preactivation[A-Za-z]*Ready\(", pre), (
+        "别给这份判据再起第二个名字：单源才能保证提示行 / 页脚 / 提交三处一致"
+    )
+
+    footer = _js_function_body(options, "selectionError")
+    assert "preactivationSubmitAllowed(" in footer, (
+        "页脚那句未就绪原因（`selectionError`）必须读同一个判据，否则会与提示行打架"
+    )
+    assert "预发动清单还没填完。" in footer, "页脚仍要说清「还没填完」这条未就绪原因"
+    submit = _js_function_body(pre, "buildPreativationAction")
+    assert "preactivationSubmitAllowed(" in submit, (
+        "真正拼动作的那一处也必须读同一个判据（不然按钮亮着却发不出去）"
+    )
+    hint = _js_function_body(pre, "preactivationStepHint")
+    assert "preactivationSubmitAllowed(" in hint, (
+        "提示行的「清单已填完」也读它：三处一个来源"
+    )
+
+    assert "data-step" not in pre, "步骤不再画成按钮（`data-step` 的 chip 行已删）"
+    assert "jumpPreativationStep" not in pre, (
+        "跳步入口失去生产调用方 ⇒ 删掉（不留只有测试在调的死代码）；回第一步走「取消」"
+    )
+    render = _js_function_body(pre, "renderPreativation")
+    assert "preactivationStepLabel" not in render, (
+        "步骤条已删：渲染器不再把每一步画成带标签的按钮"
+    )
+
+
 _PROMPT_PROBE = r"""
 import { readFileSync } from "node:fs";
 import vm from "node:vm";

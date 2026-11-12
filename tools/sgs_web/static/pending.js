@@ -1129,9 +1129,10 @@ function refreshSubmit(pending) {
     // 「提交」不会亮、更不会发出一条注定 400 的 `ActivateSkill`。
     const legal = preactivationSourcesLegal(pa);
     // 可提交与否由**服务端**给（预览回包的 `can_submit`；票 11）：多选步停在最后一步上时
-    // 光标还没走到末尾，但清单已经填满了——本地 `preactivationReady` 会把提交键一直按灰。
-    // 预览失败 / 没有预览通道时退回复清单的本地判据（fail-closed 那条在
-    // `preactivationSubmitAllowed` 里，取不到候选恒假）。
+    // 光标还没走到末尾，但清单已经填满了——一份"光标越过末尾才算填完"的旧判据会把提交键
+    // 一直按灰（票 16 已删掉那份，可点态 / 页脚 / 实际提交三处现在同读
+    // `preactivationSubmitAllowed`）。预览失败 / 没有预览通道时退回清单的本地形状判据
+    // （fail-closed 那条也在同一处实现里，取不到候选恒假）。
     //
     // 票 08：**中间步**的「提交」是"确认这一步"（`min != max` 的步不自动走）——可点态读
     // `preactivationAdvanceAllowed`（服务端回包的 `can_advance`），且不要求 `buildAction`

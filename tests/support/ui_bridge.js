@@ -35,12 +35,13 @@
     // W4-1 / W4-2：预发动清单（本地态、复合动作、取消零提交、被动入口）
     "preactivationManifest", "enterPreativation", "togglePreativationCard",
     "advancePreativation", "selectPreativationSeat", "selectPreativationOption",
-    "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
-    // 票 08：清单"填完没有"的唯一判据（ready / 步骤提示 / 重选落点同读）
+    "buildPreativationAction",
+    // 票 08：清单"填完没有"的唯一判据（步骤提示 / 提交 / 页脚同读）
     "firstUnfilledPreativationStep",
     // 票 08（table-ux-overhaul）：去弹窗 / 自动推进 / 取消回第一步——判据与复位口
     "preactivationStepSingleValue", "preactivationNeedsExplicitStep",
     "preactivationShouldAutoAdvance", "preactivationAdvanceAllowed",
+    // 票 16：「能不能交」只有这一个判据（页脚 / 提交键 / buildAction 同读）
     "preactivationSubmitAllowed", "preactivationPreviewFresh",
     "preactivationAdvanceNow", "preactivationConfirmable",
     "preactivationAtFirstStep", "resetPreativationProgress",

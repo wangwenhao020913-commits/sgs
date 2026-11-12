@@ -424,8 +424,10 @@ function promptGenericStepText(step) {
 
 /** **三层回退的唯一实现**：① 模板层 → ② 服务端 `Step.wording` → ③ 前端通用文案。
  *
- * 三个消费点（预发动步骤提示 / 步骤条标签 / 窗口问法）都读这里：模板层缺键时输出与
- * 改前逐字相同，故"没有模板的技能"行为不变（票面 §会红的既有断言）。
+ * 消费点只有一个：预发动提示行那一句问法（`preactivation.js:preactivationStepHint`）；
+ * 票 16 起步骤不再画成按钮，故也没有第二个读它去铺"步骤条标签"的地方。窗口式询问的
+ * `window:<cause>` 走本文件 :func:`promptWindowAsk`，同一份模板表、同样缺键即回退。
+ * 模板层缺键时输出与改前逐字相同，故"没有模板的技能"行为不变（票面 §会红的既有断言）。
  */
 function promptQuestionForStep(pa, step, index) {
   const composed = promptComposedText(pa, index);

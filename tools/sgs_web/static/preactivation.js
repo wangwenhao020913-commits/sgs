@@ -287,7 +287,7 @@ function preactivationStepLegal(pa, index) {
   return preactivationGroupHolds(pa, index, answer ? answer.values : []);
 }
 
-/** 清单里**全部**选牌步的来源是不是都合法（`preactivationReady` 只看填完没有）。
+/** 清单里**全部**选牌步的来源是不是都合法（"填完没有"由 :func:`preactivationStepFilled` 回答）。
  *
  * 「提交」/ 步骤提示 / 自动推进都读这一处：陈旧的来源 / 合成载荷也走同一条闸，绝不把
  * 注定 400 的组合发出去（票 10 §4 的死路正是这样来的）。 */
@@ -496,18 +496,22 @@ function preactivationPreviewFresh(pa) {
 
 /** 能不能提交：回包说 `can_submit`（**整条清单**都满足）时听服务端的。
  *
- * 预览失败 ⇒ 恒假。回包过期 / 没有预览通道 ⇒ 清单本地的 `preactivationReady`（行为不变）。
+ * 预览失败 ⇒ 恒假。回包过期 / 没有预览通道 ⇒ 清单本地的形状判据：**最后一步填满**即为可提交
+ * （票 08：`min != max` 的步不自动走，最后一步等玩家自己点「提交」——光标因此停在最后一步上，
+ * 不再被推出清单）。
+ *
+ * **「能不能交」的判据只有这一处实现**（table-ux-overhaul 票 16）：「提交」可点态、页脚那句
+ * 未就绪原因（`options.js:selectionError`）、提示行的「清单已填完」三处都读它。票 08 之前另有
+ * 一份要求光标**越过**清单末尾的旧判据——光标停在最后一步之后它恒假，于是提示行说填完了、
+ * 页脚说没填完、按下「提交」一个请求都不发（用户实机报障）；那份判据已随本票删除，别再长回来。
  */
 function preactivationSubmitAllowed(pa) {
   if (!pa) return false;
   if (pa.previewError) return false;
   if (preactivationPreviewFresh(pa)) return Boolean(pa.preview.can_submit);
-  if (preactivationReady(pa)) return preactivationSourcesLegal(pa);
-  // 没有预览通道、光标也没走到末尾：**最后一步填满**即为可提交（票 08：`min != max` 的步
-  // 不自动走，最后一步等玩家自己点「提交」——光标因此停在最后一步上，不再被推出清单）。
+  if (!preactivationSourcesLegal(pa)) return false;
   return pa.cursor >= pa.steps.length - 1
-    && firstUnfilledPreativationStep(pa) === null
-    && preactivationSourcesLegal(pa);
+    && firstUnfilledPreativationStep(pa) === null;
 }
 
 /** 这一步只要**一个**答案吗（`min == max`）：单值步填满就自动进下一步（spec §2 Q5）。
@@ -838,7 +842,7 @@ function togglePreativationCard(cardId) {
 /**
  * 确认这一步（`min != max` 的步由玩家点「提交」触发）：填完、且来源是**合法组合**才放行。
  *
- * 填完的判据与 chip ✓ / ready 同一处（:func:`preactivationStepFilled`）；合法来源组合
+ * 填完的判据只住 :func:`preactivationStepFilled` 一处；合法来源组合
  * 另判（票 10）：让 cursor 走到末尾就是 §4 的死路——提交键亮着、手牌全灰、每一按都 400。
  */
 function advancePreativation() {
@@ -983,34 +987,9 @@ function selectPreativationOption(text) {
   renderPending(state.view);
 }
 
-/** 重选第 K 步：清空 K..N（用户裁定），把光标拨回去。
- *
- * **不许跳过空步**（票 08）：落点钳到 `firstUnfilledPreativationStep`——前面的步骤还空着
- * 时，点后面的步骤 chip 只会落在那个空步上，不再出现"光标在末尾、前面还有空格"的坏态
- * （标题说填完了 / 页脚说没填完 / 确认禁用 / 补选时一点就清空后面）。清空仍从**落点**
- * 开始：落点之前填好的答案不动。
- */
-function jumpPreativationStep(index) {
-  const pa = state.preactivation;
-  if (state.playback || !pa) return;
-  const first = firstUnfilledPreativationStep(pa);
-  const ceiling = first === null ? pa.steps.length : first;
-  const landing = Math.max(0, Math.min(index, ceiling));
-  for (let at = landing; at < pa.steps.length; at += 1) {
-    pa.answers[at] = { values: [], texts: [] };
-  }
-  pa.cursor = landing;
-  pa.touched = true;
-  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
-  state.lastRejectReason = "";
-  schedulePreativationPreview();
-  renderTable();
-  renderPending(state.view);
-}
-
 /** 这一步是否已按 `(min, cap)` 填齐（`cap` = 逐来源上限，`null` = 不限）。
  *
- * "这一步填完没有"的**本地**判据只算这一处：`firstUnfilledPreativationStep`、步骤 chip 的 ✓、
+ * "这一步填完没有"的**本地**判据只算这一处：`firstUnfilledPreativationStep`、
  * 没有预览通道时的自动推进 / 「提交」可点态读它（票 08）。**有预览通道**时以服务端回包为准
  * （`can_advance` / `can_submit`），本地这一份只给兜底（回包过期的那几十毫秒）。
  */
@@ -1029,9 +1008,9 @@ function preactivationStepFilled(pa, index) {
 
 /** 第一个**没填完**的步骤下标；全部填完 ⇒ `null`。
  *
- * 清单**每一步**填完没有的**唯一判据**（票 08）：`preactivationReady`（= 光标到末尾 **且**
- * 它返回 `null`）/ 步骤提示 / 重选落点三处都读它，不再各算一套。光标**不许越过**它——
- * 越过去就是"光标在末尾、前面还有空格"，标题与页脚会各说一套，确认按钮禁用且补不回来。
+ * 清单**每一步**填完没有的**唯一判据**（票 08）：`preactivationSubmitAllowed` / 步骤提示
+ * 都读它，不再各算一套。光标**不许越过**它——越过去就是"光标在末尾、前面还有空格"，
+ * 标题与页脚会各说一套，确认按钮禁用且补不回来。
  */
 function firstUnfilledPreativationStep(pa) {
   if (!pa) return null;
@@ -1039,12 +1018,6 @@ function firstUnfilledPreativationStep(pa) {
     if (!preactivationStepFilled(pa, index)) return index;
   }
   return null;
-}
-
-/** 清单是否已按每一步的 `(min, max)` 填完。 */
-function preactivationReady(pa) {
-  if (!pa || pa.cursor < pa.steps.length) return false;
-  return firstUnfilledPreativationStep(pa) === null;
 }
 
 /** 预发动的提交载荷：`ActivateSkill(picks, choices)`（**不**在 `legal_actions` 里拼候选）。
@@ -1118,8 +1091,9 @@ function preactivationStepLabel(step) {
 /** 这一步的**问法**（票 07）：三层回退的唯一实现住 `prompts.js:promptQuestionForStep`
  *  （模板层逐级累加 → 服务端 `Step.wording` → 前端通用文案）。
  *
- *  步骤**条**仍用 :func:`preactivationStepLabel`（它要短），这里给的是提示行那一整句：
- *  `#t-target-hint` 与页脚 `#t-choice` 都读这一份，两处不会各说一套。
+ *  提示行 `#t-target-hint` 与页脚 `#t-choice` 都读这一份，两处不会各说一套；**只有当前这一步**
+ *  的问法进提示行（票 16 起步骤不再画成一排按钮，前三步的"完成分量"由模板层的 `done` 累加
+ *  带出来，不另铺一份清单）。`prompts.js` 缺件时退回 :func:`preactivationStepLabel` 的短标签。
  */
 function preactivationStepQuestion(pa, step, index) {
   if (typeof promptQuestionForStep === "function") return promptQuestionForStep(pa, step, index);
@@ -1139,9 +1113,9 @@ function preactivationStepHint(pa, pending) {
     ? (pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。")
     : "";
   // 光标越过清单末尾时没有"当前步"：清单还有空步就**指回第一个空步**，不能说
-  // 「清单已填完」（票 08：判据与 `preactivationReady` 同源；标题 `#t-target-hint`
-  // 与页脚 `#t-choice` 都读这一份提示，不再一处看 cursor、一处看 ready）。
-  // 这是兜底支路：跳步已被钳住，正常交互走不到"光标在末尾、前面还有空格"。
+  // 「清单已填完」（票 08：判据与「提交」同一处——`preactivationSubmitAllowed`；标题
+  // `#t-target-hint` 与页脚 `#t-choice` 都读这一份提示，不再一处看 cursor、一处看另一份判据）。
+  // 这是兜底支路：正常交互走不到"光标在末尾、前面还有空格"。
   const at = pa.cursor < pa.steps.length ? pa.cursor : firstUnfilledPreativationStep(pa);
   if (at === null) {
     return pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。";
@@ -1170,7 +1144,9 @@ function preactivationStepHint(pa, pending) {
     }
     return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将选择）。${settle}`;
   }
-  return `第 ${at + 1}/${pa.steps.length} 步：${what}${settle}`;
+  // 选项步：真选项住在控件区 / 弹窗正文，这里只写问法；句号不能省——后面直接接
+  // 「清单已填完，可以确认发动。」（票 16 起这一行是玩家唯一的那句提示）。
+  return `第 ${at + 1}/${pa.steps.length} 步：${what}。${settle}`;
 }
 
 /** 清单已经选中的来源牌会以哪张**产物**使用（U1-07）：读服务端 `transform_products`。
@@ -1195,14 +1171,19 @@ function preactivationProductHint(pa, pending) {
   return `将以【${cardName(matches[0])}】使用。`;
 }
 
-/** 清单驱动的预发动界面（W4-1 / 票 08）：步骤条 + **当前这一步的控件**。
+/** 清单驱动的预发动界面（W4-1 / 票 08 / 票 16）：**当前这一步**的控件。
  *
  * 表面按步骤形状分派（spec §2 Q12，判据不认技能名）：
- *  - **座位步 / 选牌步**：牌桌表面——这里**只**画步骤条，座位与牌都在牌桌上点
- *    （旧实现在弹窗正文里还铺了一遍座位按钮，票 08 删掉：那是「仁德第二步列出所有其他
- *    玩家」的来源，也让"只在牌桌上点"这条口径有两个入口）；
- *  - **选项步 ≤2 项**：控件区按钮，点一下即选中并自动进下一步；
+ *  - **座位步 / 选牌步**：牌桌表面——`#t-options` **一个按钮都不铺**，座位与牌都在牌桌上点
+ *    （票 08 删掉了弹窗正文里的座位按钮，票 16 删掉了步骤条：那是"第一步文本被第二第三步挤到
+ *    上面去看不到"的原因）；
+ *  - **选项步 ≤2 项**：控件区按钮（真选项，如【雌雄双股剑】的二选一），点一下即选中并自动进
+ *    下一步；
  *  - **选项步 ≥3 项 / 复选**：同一份按钮画在询问弹窗正文里（`dialogWantedKind` 开窗）。
+ *
+ * **步骤本身不画成按钮**（票 16 的用户口径）：当前是哪一步只由提示行那句问法表达
+ * （`preactivationStepHint`），"前面几步已完成"由模板层的 `done` 累加带出来；回到第一步的
+ * 唯一入口是「取消」（票 08：取消 = 回第一步）。
  *
  * 任何步都**没有**「下一步」（Q5 的自动推进取代了它）；`min != max` 的步用底部「提交」
  * 确认，最后一步的「提交」才是确认发动。
@@ -1217,20 +1198,6 @@ function renderPreativation(pending) {
   box.classList.remove("opt-compact");
   const hint = $("t-target-hint");
   if (hint) hint.textContent = `${preactivationProductHint(pa, pending)}${preactivationStepHint(pa, pending)}`;
-  const row = document.createElement("div");
-  row.className = "cards";
-  pa.steps.forEach((step, index) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "opt";
-    if (index === pa.cursor) chip.classList.add("sel");
-    const done = preactivationStepFilled(pa, index);
-    chip.textContent = `${index + 1}. ${preactivationStepLabel(step)}${done ? " ✓" : ""}`;
-    chip.setAttribute("data-step", String(index));
-    chip.addEventListener("click", () => jumpPreativationStep(index));
-    row.appendChild(chip);
-  });
-  box.appendChild(row);
   if (pa.cursor >= pa.steps.length) {
     $("btn-cancel").disabled = false;
     return;

@@ -394,7 +394,12 @@ function optionText(choice, pending) {
 function selectionError(action, pending) {
   if (state.preactivation && action.kind === "ActivateSkill") {
     // 张数 / 目标 / 区域的规则由服务端校验器裁决；本地只拦"清单没填完"。
-    return preactivationReady(state.preactivation) ? null : "预发动清单还没填完。";
+    // 票 16：这里读的必须是**同一个**判据——`preactivationSubmitAllowed`，与「提交」可点态、
+    // 提示行的「清单已填完」同源。另一份"光标越过末尾才算填完"的旧判据在票 08 之后恒假，
+    // 于是按钮亮着、按下去只换来这句"还没填完"、一个请求都不发（用户实机报障）。
+    return preactivationSubmitAllowed(state.preactivation)
+      ? null
+      : "预发动清单还没填完。";
   }
   if (action.kind === "SelectCards") {
     const total = (pending.spec && pending.spec.total) || [1, 1];
