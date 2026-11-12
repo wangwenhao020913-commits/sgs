@@ -46,9 +46,7 @@ from .flow import (
     PickSeats,
     SkillFlow,
     TwoRowArrange,
-    option_seat,
     run_flow,
-    seat_choice,
     watched_cards,
 )
 
@@ -391,38 +389,45 @@ def _dawu_prevent(host: Any, frame: Frame) -> Any:
 
 
 def _dawu_apply(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
-    """提交点：弃置所选的星 → 逐座选人（k 由星数定）→ 每人一枚「大雾」。"""
+    """提交点：弃置所选的星 → **一次**选等量名角色 → 每人一枚「大雾」。
+
+    选人由 :meth:`Engine.ask_seats` **一次问齐**（table-ux-overhaul 票 13）：区间
+    ``[min(k, 池), k]``、``optional=False`` —— 牌面写"令至多 X 名角色各获得一枚"，而选星
+    那一步已经定下了 k；旧逐座档在没有 ``Pass`` 的情况下**必然**选满 k 名（池不够时选满
+    池），故这里的下限 = "池里能选到几个就几个"、上限 = k，语义逐字不变。
+
+    **先选齐人、再逐座结算**：``dawu_targets``（已选）/ ``dawu_marked``（已挂）两个帧内
+    游标记住进度，挂起续跑不重选、不重挂。
+    """
     stars = tuple(answers.get("card") or ())
     if not stars:
         return None
     seat = int(frame.data["skill_owner"])
-    chosen = list(frame.data.get("dawu_targets", ()))
+    chosen = tuple(frame.data.get("dawu_targets", ()))
     if int(frame.data.get("dawu_stage", 0)) == 0:
         control = _discard(host, frame, seat, stars)
         if control == "stay":
             return "stay"
         frame.data["dawu_stage"] = 1
-    while len(chosen) < len(stars):
-        pool = tuple(
-            player.seat
-            for player in host.state.players
-            if player.alive and player.seat not in chosen
-        )
-        if not pool:
-            break
-        answer = host.ask_option(
-            frame,
-            seat,
-            Timing.PHASE_FINISH,
-            skill_id=f"dawu:seat:{len(chosen)}",
-            options=tuple(seat_choice(candidate) for candidate in pool),
-            optional=False,
-        )
-        if host.suspended(answer):
-            frame.data["dawu_targets"] = tuple(chosen)
-            return "stay"
-        chosen.append(option_seat(answer))
-        frame.data["dawu_targets"] = tuple(chosen)
+    if not frame.data.get("dawu_picked"):
+        pool = tuple(player.seat for player in host.state.players if player.alive)
+        if pool:
+            answer = host.ask_seats(
+                frame,
+                seat,
+                Timing.PHASE_FINISH,
+                skill_id="dawu:seat",
+                pool=pool,
+                # k 由星数定格；池装不下 k 名时下限跟着池走（旧逐座档选满池即收尾）。
+                lo=min(len(stars), len(pool)),
+                hi=len(stars),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            chosen = tuple(answer)
+        frame.data["dawu_targets"] = chosen
+        frame.data["dawu_picked"] = True
     marked = set(frame.data.get("dawu_marked", ()))
     for target in chosen:
         if target in marked:

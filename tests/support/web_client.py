@@ -1455,6 +1455,15 @@ def _hero_zone_handlers():
                         state["lianying_seat"] = True
                         return action
             return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+        if kind == "SELECT_OPTIONS":
+            # table-ux-overhaul 票 13：【连营】一次问齐 ⇒ 骨架候选（= 池里第一个座位，
+            # 也就是"令自己摸"）就是本 tape 要的那份答案；不另造集合。
+            if str(pending.get("skill_id") or "").startswith("lianying:"):
+                skeleton = _pick_action(pending, kind="SelectOptions")
+                if skeleton is not None:
+                    state["lianying_seat"] = True
+                    return skeleton
+            return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
         return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
 
     def observe(kind, body, pending, state) -> bool:  # noqa: ANN001

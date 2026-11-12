@@ -62,7 +62,7 @@ from sgs.state import (
     MoveReason,
     Pass,
     QueryKind,
-    SelectOption,
+    SelectOptions,
     UseCard,
     Zone,
     ZoneRef,
@@ -381,12 +381,17 @@ def _activate(query, skill_id: str):
     )
 
 
-def _seat_option(query, seat: int):
-    return _find(
-        query,
-        lambda action: isinstance(action, SelectOption)
-        and action.choice == f"seat:{seat}",
+def _seat_set(query, seats: tuple[int, ...]):
+    """座位多选（票 13）的应答：从这一问的候选里挑出 ``seats``。
+
+    只承认服务端**下发过**的座位选项（前端不许自己发明座位）：``choices`` 全在
+    ``query.options`` 里，否则测试自己就该红。
+    """
+    choices = tuple(f"seat:{seat}" for seat in seats)
+    assert set(choices) <= set(query.options), (
+        f"座位集合 {choices} 不在服务端下发的池 {query.options} 里"
     )
+    return SelectOptions(choices=choices, answers_seq=query.seq)
 
 
 def _decline(query):
@@ -729,8 +734,25 @@ def _draw_records_until_return(engine: Engine, after_seq: int) -> list:
     return [record for record in _draw_records(engine, after_seq) if record.seq < end]
 
 
-def test_lianying_counts_the_hand_cards_lost_this_time_and_draws_for_each_chosen_seat() -> None:
-    """正例（X = 2）：【谦逊】一次扣下两张手牌 ⇒ 至多选 2 名角色各摸一张。
+def _seat_multi_face(query) -> dict[str, int]:
+    """座位多选面：服务端派生的 ``option_seats``（界面据此在牌桌上点多个武将）。"""
+    import sys
+    from pathlib import Path
+
+    tools = str(Path(__file__).resolve().parent.parent / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from sgs_web.projection import option_seats
+
+    return option_seats(query)
+
+
+def test_jie_lianying_picks_all_targets_in_one_ask() -> None:
+    """票 13：X = 2 ⇒ **一次**座位多选问两名角色，各摸一张（不再逐座两次单选）。
+
+    【谦逊】一次扣下两张手牌 ⇒ 至多选 2 名角色各摸一张。判据是这一问的**形状**：
+    ``SELECT_OPTIONS``（不是两次 ``SELECT_OPTION``）、``option_seats`` 非空（界面进牌桌
+    多选、一次提交）、区间 ``[1, X]``（「至多 X 名」+ 可放弃）。
 
     触发锦囊取【决斗】而不是【过河拆桥】：后者的"弃置其区域里的一张牌"在【谦逊】/【连营】
     之后结算，而【连营】摸到的那张牌此时是陆逊**唯一**的手牌——被弃掉会再触发一次【连营】
@@ -740,18 +762,16 @@ def test_lianying_counts_the_hand_cards_lost_this_time_and_draws_for_each_chosen
     trick = _card("duel")
     hand = _spare_cards(trick)
     engine = Engine.from_state(_trick_state(victim_hand=hand, trick=trick), seed=7)
-    asked: list[tuple[str, ...]] = []
+    asked: list = []
 
     def victim(query):
         if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_QIANXUN:
             return _activate(query, JIE_QIANXUN)
         if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LIANYING:
             return _activate(query, JIE_LIANYING)
-        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("lianying:"):
-            asked.append(tuple(query.options))
-            if len(asked) == 1:
-                return _seat_option(query, VICTIM)
-            return _seat_option(query, USER)
+        if query.kind == QueryKind.SELECT_OPTIONS and query.skill_id.startswith("lianying:"):
+            asked.append(query)
+            return _seat_set(query, (VICTIM, USER))
         return None
 
     run_turns(
@@ -760,9 +780,19 @@ def test_lianying_counts_the_hand_cards_lost_this_time_and_draws_for_each_chosen
         turns=1,
     )
 
-    assert len(asked) == 2, "X = 此次失去的两张手牌 ⇒ 最多问两次『选谁』"
-    assert asked[0] == ("seat:0", "seat:1")
-    assert asked[1] == ("seat:0",), "同一步的第二次询问排除已选的角色"
+    assert len(asked) == 1, "X = 此次失去的两张手牌 ⇒ **一次**问齐（不是两次单选）"
+    query = asked[0]
+    assert query.skill_id == "lianying:seat"
+    assert tuple(query.options) == ("seat:0", "seat:1")
+    assert (_seat_multi_face(query)) == {"seat:0": 0, "seat:1": 1}, (
+        "``option_seats`` 非空 ⇒ 界面按座位多选面渲染（牌桌点人、一次提交）"
+    )
+    assert (query.min_selected, query.max_selected) == (1, 2), "「至多 X 名」= [1, X] + 可放弃"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_OPTION
+    ], "一次提交之后不该再有逐座单选"
     placement = _hero_deltas(engine, VICTIM)[0]
     draws = _draw_records_until_return(engine, placement.seq)
     assert [(record.to_zone.seat, len(record.cards)) for record in draws] == [
@@ -772,7 +802,7 @@ def test_lianying_counts_the_hand_cards_lost_this_time_and_draws_for_each_chosen
 
 
 def test_lianying_triggers_when_a_trick_takes_the_last_hand_card() -> None:
-    """正例（X = 1）：只剩一张手牌被【过河拆桥】拿走 ⇒ 选一名角色摸一张。"""
+    """正例（X = 1）：只剩一张手牌被【过河拆桥】拿走 ⇒ 一次多选，选一名角色摸一张。"""
     trick = _card("dismantlement")
     last = _card("peach")
     state = _trick_state(victim_hand=(last,), trick=trick)
@@ -782,9 +812,9 @@ def test_lianying_triggers_when_a_trick_takes_the_last_hand_card() -> None:
     def victim(query):
         if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LIANYING:
             return _activate(query, JIE_LIANYING)
-        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("lianying:"):
+        if query.kind == QueryKind.SELECT_OPTIONS and query.skill_id.startswith("lianying:"):
             asked.append(tuple(query.options))
-            return _seat_option(query, VICTIM)
+            return _seat_set(query, (VICTIM,))
         return None
 
     hand_before = len(engine.state.player(VICTIM).hand)
@@ -798,7 +828,7 @@ def test_lianying_triggers_when_a_trick_takes_the_last_hand_card() -> None:
     prompts = _skill_prompts(victim_player, JIE_LIANYING)
     assert len(prompts) == 1, "失去最后一张手牌 ⇒ 问一次【连营】"
     assert hand_before == 1
-    assert len(asked) == 1 and asked[0] == ("seat:0", "seat:1"), "X = 1 ⇒ 只问一次"
+    assert len(asked) == 1 and asked[0] == ("seat:0", "seat:1"), "X = 1 ⇒ 只问一次（一名角色）"
     draws = _draw_records(engine, prompts[0].seq)
     assert [(record.to_zone.seat, len(record.cards)) for record in draws] == [(VICTIM, 1)]
     assert len(engine.state.player(VICTIM).hand) == 1, "失去最后一张 + 连营摸回一张"
@@ -823,9 +853,9 @@ def test_lianying_triggers_when_the_last_hand_card_goes_into_another_hand() -> N
             return _find(query, lambda action: isinstance(action, Pass))
         if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LIANYING:
             return _activate(query, JIE_LIANYING)
-        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("lianying:"):
+        if query.kind == QueryKind.SELECT_OPTIONS and query.skill_id.startswith("lianying:"):
             asked.append(tuple(query.options))
-            return _seat_option(query, VICTIM)
+            return _seat_set(query, (VICTIM,))
         return None
 
     player = Scripted(victim)
@@ -917,17 +947,16 @@ def test_lianying_keeps_drawing_after_a_qingjian_ask_suspends_mid_loop() -> None
             return _activate(query, JIE_QIANXUN)
         if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LIANYING:
             return _activate(query, JIE_LIANYING)
-        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("lianying:"):
+        if query.kind == QueryKind.SELECT_OPTIONS and query.skill_id.startswith("lianying:"):
             asked.append(tuple(query.options))
-            # 先选座位 0（触发清俭的内层摸牌），再选座位 1。
-            return _seat_option(query, USER if len(asked) == 1 else VICTIM)
+            # 座位的结算序与提交序一致：先摸座位 0（触发清俭的内层摸牌），再摸座位 1。
+            return _seat_set(query, (USER, VICTIM))
         return None
 
     run_turns(engine, [Scripted(user), Scripted(victim)], turns=1)
 
-    assert len(asked) == 2, "X = 2 的两张手牌 ⇒ 两次选人询问"
+    assert len(asked) == 1, "X = 2 的两张手牌 ⇒ 一次问齐两名角色"
     assert asked[0] == ("seat:0", "seat:1")
-    assert asked[1] == ("seat:1",), "同一步的第二次询问排除已选的角色"
     assert len(qingjian) == 1, "座位 0 获得牌 ⇒ 清俭问一次（内层挂起的来源）"
     assert depths == [2], "内层挂起时外层（连营）仍在挂起栈里（单槽会只剩 1）"
     assert not engine._move_pending, "两座都摸完 ⇒ 挂起栈清空"
@@ -1150,13 +1179,11 @@ class _DoubleTriggerPlayer:
                 if getattr(action, "kind", None) == "ActivateSkill":
                     return action
             return next(action for action in query.legal_actions if isinstance(action, Pass))
-        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id).startswith(
+        if query.kind == QueryKind.SELECT_OPTIONS and str(query.skill_id).startswith(
             "lianying:"
         ):
-            for action in query.legal_actions:
-                if isinstance(action, SelectOption) and action.choice == "seat:0":
-                    return action
-            return next(action for action in query.legal_actions if isinstance(action, Pass))
+            # 一次选齐：只点座位 0（座位 0 = 自己会摸回一张）。
+            return SelectOptions(choices=("seat:0",), answers_seq=query.seq)
         for action in query.legal_actions:
             if isinstance(action, Pass):
                 return action
@@ -1164,7 +1191,7 @@ class _DoubleTriggerPlayer:
 
 
 def test_a_second_lianying_trigger_in_the_same_frame_asks_a_fresh_question() -> None:
-    """票 12 留下的隐患：``ask_option`` 的帧内缓存按 ``(skill_id, actor)`` 分桶。
+    """票 12 留下的隐患：作答缓存按 ``(skill_id, actor, 派发范围)`` 分桶。
 
     复现（混合池 seed=148 暴露过的组合，本测试用构造局面焊死）：界陆逊【谦逊】把全部
     手牌放上武将牌 ⇒ 这次移动的 ``MOVE_AFTER`` 里【连营】问"令谁摸牌"（答案选了座位 0，
@@ -1173,7 +1200,8 @@ def test_a_second_lianying_trigger_in_the_same_frame_asks_a_fresh_question() -> 
 
     旧实现：这一问的缓存键与上一次相同（``lianying:seat:0``），于是**不问**、直接复用上次
     的选择（记录流里凭空多摸一张，人类 / AI 都没被问过）。判据 = 同一帧里出现**两次**
-    ``lianying:seat:0`` 询问；修好后第二次也真的发问。
+    ``lianying:`` 询问；修好后第二次也真的发问（票 13 起一次问齐，形状是
+    ``SELECT_OPTIONS``，缓存键 = ``lianying:seat`` + 派发范围）。
     """
     dismantle = cards_of_type(PACK, "dismantlement")[0]
     hand0 = tuple(cards_of_type(PACK, "slash")[:2])
@@ -1219,7 +1247,7 @@ def test_a_second_lianying_trigger_in_the_same_frame_asks_a_fresh_question() -> 
         record.query
         for record in engine.records
         if record.kind == "query"
-        and record.query.kind == QueryKind.SELECT_OPTION
+        and record.query.kind == QueryKind.SELECT_OPTIONS
         and str(record.query.skill_id).startswith("lianying:")
         and lose.seq < record.seq < resolve_end.seq
     ]

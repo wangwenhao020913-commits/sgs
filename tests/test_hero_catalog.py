@@ -46,6 +46,7 @@ from sgs.state import (
     Pass,
     Phase,
     SelectOption,
+    SelectOptions,
     UseCard,
     Zone,
     ZoneRef,
@@ -705,15 +706,16 @@ class _TuxiPlayer:
                     if getattr(action, "kind", None) == "ActivateSkill":
                         return action
             return next(action for action in query.legal_actions if isinstance(action, Pass))
-        if query.kind == "SELECT_OPTION" and str(query.skill_id).startswith("tuxi:"):
+        if query.kind == "SELECT_OPTIONS" and str(query.skill_id).startswith("tuxi:"):
+            # table-ux-overhaul 票 13：座位多选一次问齐 —— ``seats`` 一次性提交成集合。
             self.options.append(query)
-            if self._seats:
-                seat = self._seats.pop(0)
-                return next(
-                    action
-                    for action in query.legal_actions
-                    if isinstance(action, SelectOption)
-                    and action.choice == f"seat:{seat}"
+            choices = tuple(
+                f"seat:{seat}" for seat in self._seats if f"seat:{seat}" in query.options
+            )
+            self._seats.clear()
+            if choices:
+                return SelectOptions(
+                    choices=choices, answers_seq=query.seq
                 )
             for action in query.legal_actions:
                 if isinstance(action, Pass):
@@ -750,9 +752,9 @@ def test_tuxi_takes_one_hidden_hand_card_from_up_to_two_others_instead_of_drawin
     _run(engine, [player, _PASS, _PASS], lambda e: _after(e, Timing.PHASE_DRAW))
 
     assert len(player.queries) == 1, "摸牌阶段问一次「是否发动」"
-    assert len(player.options) == 2, "至多两名 ⇒ 选完一人再问一人"
+    assert len(player.options) == 1, "至多两名 ⇒ **一次**问齐（座位多选）"
     assert "seat:1" in player.options[0].options and "seat:2" in player.options[0].options
-    assert "seat:1" not in player.options[1].options, "同一角色只取一张"
+    assert player.options[0].max_selected == 2, "「至多两名」的上限由引擎给"
     assert sorted(engine.state.player(0).hand) == sorted([hand_a, hand_b])
     assert engine.state.player(1).hand == []
     assert engine.state.player(2).hand == []
@@ -779,7 +781,7 @@ def test_tuxi_can_take_from_only_one_character():
 
     _run(engine, [player, _PASS, _PASS], lambda e: _after(e, Timing.PHASE_DRAW))
 
-    assert len(player.options) == 2, "第一问选人、第二问放弃"
+    assert len(player.options) == 1, "一次问齐：只选一名（可少选）"
     assert sorted(engine.state.player(0).hand) == [hand_a]
     assert engine.state.player(1).hand == []
     assert engine.state.player(2).hand == [hand_b], "没被选中的人手牌不动"

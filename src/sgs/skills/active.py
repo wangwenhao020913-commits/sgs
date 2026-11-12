@@ -1795,11 +1795,13 @@ CHULI_FLOW = SkillFlow(
             lo=1,
             hi=_CHULI_MAX_TARGETS,
             pool=_chuli_targets,
-            # **有序多选**：第二问起依赖"本步已选"的势力（``chosen`` 传入池），清单语言
-            # 只能表达第一问。翻 ``ordered`` 让清单**不下发候选索引**（``manifest`` 的
-            # "有序多选"分支），复合动作因此不成立——人 / AI 都走执行期的逐步询问。
-            # 这一步不放宽任何规则：校验器与执行器读的是同一个 ``pool(chosen)``。
-            ordered=True,
+            # **一次选齐**（table-ux-overhaul 票 13）：``hi > 1 ∧ not ordered`` ⇒ 执行器走
+            # ``Engine.ask_seats``（``SELECT_OPTIONS`` + 不枚举档），答案是一个座位集合。
+            # "势力互异"由票 11 的**预览**按同一份 ``_chuli_targets(state, frame, owner,
+            # chosen)`` 现算置灰（每变一次选择问一次后端），不在前端另推规则。
+            # 这一步不放宽任何规则：执行器仍按前缀池复核答案、校验器与副动入口读同一个
+            # ``pool(chosen)`` —— 越池的集合两边都拒。
+            ordered=False,
             optional=True,
             key="seat",
         ),

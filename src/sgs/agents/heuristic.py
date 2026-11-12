@@ -2410,6 +2410,49 @@ def _score_select_options(query: Query, action: Action) -> float:
     return sum(_option_choice_value(query, choice) for choice in action.choices)
 
 
+_DYNAMIC_POOL_SEAT_STEPS: frozenset[str] = frozenset(
+    {
+        # 【除疠】"势力各不相同的其他角色"：池按**已选**收缩（`skills.active._chuli_targets`）。
+        "chuli:seat",
+    }
+)
+"""池**按已选收缩**（除"排除已选"之外还有别的约束）的座位步（键 = ``<短 id>:<步骤键>``）。
+
+清单 / 不枚举面给的是**首问快照**：引擎的 ``pool(chosen)`` 在选人过程中会变窄（除疠的
+势力互异），而 AI 手里只有"第一问能选谁"。故这些步骤 AI 必须自己按**公开事实**再收窄
+（势力是公开信息，见 :func:`_distinct_kingdom_options`），否则它会把一条服务端不会铺出来的
+集合交上去——引擎按前缀池复核后整步取消（零副作用），人类看起来就是"发了技能什么都没发生"。
+
+与 :data:`_HAND_REQUIRED_SEAT_STEPS` 同一姿态：判据只读公开的 ``PlayerView``，不读暗牌、
+不查状态。
+"""
+
+
+def _seat_step_key(skill_id: object, step_name: object) -> str:
+    """``(全限定技能 id, 步骤键)`` → ``<短 id>:<步骤键>``（清单侧的键形；与询问的 ``skill_id`` 同形）。"""
+    return f"{str(skill_id).rsplit('.', 1)[-1]}:{str(step_name)}"
+
+
+def _distinct_kingdom_options(
+    view: PlayerView, options: tuple[str, ...]
+) -> tuple[str, ...]:
+    """**每个势力只留第一个**座位（按选项原序）：动态池座位步的公开事实收窄。
+
+    名单按座位序保留 ⇒ 这份名单的**任意子集**都还能按原序从真池里一步步拼出来（与引擎
+    执行器的前缀复核同一条判据）；势力未知（``None``）的座位自成一组，不猜。
+    """
+    seen: set[object] = set()
+    kept: list[str] = []
+    for option in options:
+        seat = int(str(option).removeprefix(_SEAT_PREFIX))
+        kingdom = view.players[seat].kingdom if 0 <= seat < len(view.players) else None
+        if kingdom in seen:
+            continue
+        seen.add(kingdom)
+        kept.append(option)
+    return tuple(kept)
+
+
 def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     """**不枚举档**多选面：AI 自己拼一个合法集合（yijiang-2014-round2 票 21）。
 
@@ -2423,6 +2466,8 @@ def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     - **下限**：不足 ``min_selected`` 时按同一排名补（副作用最小的）项，绝不交一条越界集合；
     - **次序** = 询问 ``options`` 的**原序**（常规结算顺序；用户 2026-11-09 的裁定：默认按
       常规结算顺序，"依次"要有技能明说才另开一档）——打分排名只决定**选谁**，不决定次序。
+    - **池按已选收缩的步骤**（票 13 的【除疠】）先按 :func:`_distinct_kingdom_options` 收窄：
+      询问只带**首问**那一份池，真正的约束（势力互异）不在 ``options`` 里。
 
     池与上限读引擎的**同一份派生**（``sgs.effects.usable_options`` / ``cap_of``，谓词的另一
     半）：构造器的 ``cap`` / ``floor`` 因此天然落在 ``is_legal_option_set`` 的区间内——构造器
@@ -2430,7 +2475,9 @@ def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     断言会被剥掉，兜不住任何东西）。
     """
     options = usable_options(query)
-    cap = cap_of(query)
+    if str(query.skill_id) in _DYNAMIC_POOL_SEAT_STEPS:
+        options = _distinct_kingdom_options(query.view, options)
+    cap = min(cap_of(query), len(options))
     ranked = sorted(
         (-_option_choice_value(query, option), index, option)
         for index, option in enumerate(options)
@@ -2838,6 +2885,12 @@ def _fill_activation(
                     for text in options
                     if query.view.players[int(text.removeprefix(_SEAT_PREFIX))].hand_count > 0
                 )
+                if not options:
+                    return None
+            if _seat_step_key(skill_id, step.name) in _DYNAMIC_POOL_SEAT_STEPS:
+                # 清单只下发**首问**快照（除疠的势力互异在 `pool(chosen)` 里）⇒ 按公开的
+                # 势力收窄，否则复合动作会被引擎的前缀复核拒成非法应答。
+                options = _distinct_kingdom_options(query.view, options)
                 if not options:
                     return None
             chosen = _pick_options(

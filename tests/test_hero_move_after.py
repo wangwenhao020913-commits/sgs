@@ -40,7 +40,7 @@ from sgs.state import (
     MoveReason,
     Pass,
     QueryKind,
-    SelectOption,
+    SelectOptions,
     UseCard,
     Zone,
     ZoneRef,
@@ -1093,17 +1093,16 @@ def _queries(engine, kind: str, *, skill_id: str | None = None, prefix: str | No
 
 
 def _pick_our_own_seat(query):
-    """界【连营】逐座选人那一步选座位 0（主公会自己摸）。
+    """界【连营】座位多选那一步只点座位 0（主公会自己摸）。
 
-    选人询问的 ``skill_id`` 是 ``<短 id>:seat:<n>``，故按前缀认；发动询问交给
-    :class:`Scripted` 的缺省逻辑（``_activate``）——本问只钉"那一问之后选谁"。
+    选人询问的 ``skill_id`` 是 ``<短 id>:seat``（table-ux-overhaul 票 13 起一次问齐），
+    故按前缀认；发动询问交给 :class:`Scripted` 的缺省逻辑（``_activate``）——本问只钉
+    "那一问之后选谁"。
     """
-    if query.kind == "SELECT_OPTION" and str(getattr(query, "skill_id", "")).startswith(
+    if query.kind == "SELECT_OPTIONS" and str(getattr(query, "skill_id", "")).startswith(
         "lianying:seat"
     ):
-        for action in query.legal_actions:
-            if isinstance(action, SelectOption) and action.choice == "seat:0":
-                return action
+        return SelectOptions(choices=("seat:0",), answers_seq=query.seq)
     return None
 
 
@@ -1160,8 +1159,8 @@ def test_lianying_fires_when_the_lord_kills_a_loyalist_and_loses_the_whole_hand(
     _assert_penalty_discard(
         engine, peach, seat=0, from_zone=Zone.HAND, skill_id=JIE_LIANYING, draws=1
     )
-    assert len(_queries(engine, "SELECT_OPTION", prefix="lianying:seat")) == 1, (
-        "X = 1 ⇒ 逐座选人只问一次"
+    assert len(_queries(engine, "SELECT_OPTIONS", prefix="lianying:seat")) == 1, (
+        "X = 1 ⇒ 座位多选只问一次"
     )
     assert len(engine.state.player(0).hand) == 1, "主公手牌从 0 变 1"
     dead_moves = _moves_touching(engine, dead_card)

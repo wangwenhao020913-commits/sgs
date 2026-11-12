@@ -41,11 +41,9 @@ from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
 from sgs.effects import CarrierKind
-from sgs.state import Pass
 from sgs.timing import Timing
 
 from .catalog import Hook, SkillDef
-from .flow import option_seat, seat_choice
 
 __all__ = [
     "FENWEI",
@@ -104,40 +102,36 @@ def _fenwei_condition(host: Any, frame: Any) -> bool:
 
 
 def _fenwei_handler(host: Any, frame: Any) -> Any:
-    """【奋威】的执行体：逐问"还要令这个目标无效吗"，选完把集合落进帧。
+    """【奋威】的执行体：**一次**选出要令其无效的目标集合，落进帧。
 
-    一次询问一个目标（选项 ``seat:N``，与【突袭】的座位步同一形态）；**至少选一名**
-    （第一次询问不可 ``Pass``——答"不发动"的出口是发动前的询问），选满全部目标即收尾。
-    重入纪律：每个轮次一个独立的 ``skill_id``（``fenwei:<序号>``），故挂起后从头重跑
-    循环时命中的是**同一批**已存答案，不会重问、也不会把同一目标记两次；
+    牌面写"令其中任意名目标无效" ⇒ 区间 ``[1, len(targets)]``、``optional=False``：
+    至少一名（答"不发动"的出口是发动前的询问），最多全部。选人由
+    :meth:`Engine.ask_seats` **一次问齐**（table-ux-overhaul 票 13），不再逐目标发问。
+    重入纪律：``FENWEI_DONE_KEY`` 一位收尾 ⇒ 挂起续跑不会重问、也不会把同一目标记两次；
     写入 :data:`TARGET_INEFFECTIVE_KEY` 是幂等的。
     """
     owner = frame.data["skill_owner"]
     if frame.data.get(FENWEI_DONE_KEY):
         return None
     targets = _fenwei_targets(frame)
-    chosen: list[int] = []
-    while True:
-        pool = tuple(target for target in targets if target not in chosen)
-        if not pool:
-            break
-        answer = host.ask_option(
-            frame,
-            owner,
-            Timing.USE_AFTER_DESIGNATE_TARGET,
-            skill_id=f"fenwei:{len(chosen)}",
-            options=tuple(seat_choice(target) for target in pool),
-            # "任意名"：至少一名；选满之后循环自然结束。
-            optional=bool(chosen),
-        )
-        if host.suspended(answer):
-            return "stay"
-        if isinstance(answer, Pass):
-            break
-        chosen.append(option_seat(answer))
+    if not targets:
+        return None
+    answer = host.ask_seats(
+        frame,
+        owner,
+        Timing.USE_AFTER_DESIGNATE_TARGET,
+        skill_id="fenwei:seat",
+        pool=targets,
+        lo=1,
+        hi=len(targets),
+        optional=False,
+    )
+    if host.suspended(answer):
+        return "stay"
     frame.data[FENWEI_DONE_KEY] = True
+    chosen = tuple(answer)
     if chosen:
-        mark_targets_ineffective(frame, tuple(chosen))
+        mark_targets_ineffective(frame, chosen)
     return None
 
 

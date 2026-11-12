@@ -87,7 +87,6 @@ from .catalog import (
     round_skill_uses,
 )
 from .flow import (
-    SEAT_PREFIX,
     Arrange,
     DeckTopArrange,
     FixedSplit,
@@ -95,7 +94,6 @@ from .flow import (
     PickOption,
     PickSeats,
     SkillFlow,
-    seat_choice,
     watched_cards,
     zero_step_effect,
 )
@@ -2039,16 +2037,14 @@ def _bingyi_reveal(host: Any, frame: Frame, owner: int) -> None:
 def _bingyi_seats(host: Any, frame: Frame, owner: int, skill_id: str = BINGYI) -> Any:
     """效果第 2 段：**一次**多选至多 N 名角色（可放弃）；返回座位元组 / ``"stay"``。
 
-    面 = W1 的座位多选面：``options`` 全是 ``seat:N`` ⇒ 服务端派生的 ``option_seats`` 非空
-    ⇒ 界面进牌桌多选、**一次提交**（用户 2026-11-09 的 Q-W1 原话："一次点选多个座位（类似
-    【铁索连环】），不要选好一个提交再继续选"）。池 = 全部存活角色（**含自己**，Q-G2 = A），
-    按座位序；``[1, N]`` + ``optional=True`` = 「至多」（上限 + 可放弃，账本 L775 / L753）。
+    面 = W1 的座位多选面（本模板的**首个载体**）：``options`` 全是 ``seat:N`` ⇒ 服务端派生的
+    ``option_seats`` 非空 ⇒ 界面进牌桌多选、**一次提交**（用户 2026-11-09 的 Q-W1 原话：
+    "一次点选多个座位（类似【铁索连环】），不要选好一个提交再继续选"）。池 = 全部存活角色
+    （**含自己**，Q-G2 = A），按座位序；``[1, N]`` + ``optional=True`` = 「至多」（上限 +
+    可放弃，账本 L775 / L753）。
 
-    ``enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21）：这一问的子集数
-    是 ``Σ C(座位数, k)`` —— 8 人局、上限 4 时 **162 条**（+ 放弃 = 163），撞穿
-    `tests/test_fuzz.py` 的候选上界 128。上限 N 还会随**手牌数**长大（残局 5 张手牌 ⇒ 更多），
-    按子集枚举在生产路径上是指数级的。故这一档只发**一条骨架候选**、答案由界面 / AI 组装，
-    引擎按 ``is_legal_option_set`` 校验形状（池内 / 无重复 / 无置灰 / 长度在 ``[1, N]`` 内）。
+    table-ux-overhaul 票 13 起这一问走 :meth:`Engine.ask_seats`（"一次选多名角色"的唯一入口）：
+    载荷（不枚举档）与返回形状都收在那里，"至多 N 名"不再由每个技能各写一遍。
 
     ``skill_id`` = **正在跑的那一版**（两版各自一条声明，A4）：它拼出这一步的询问 id
     （``hero.jie_guyong_mobile.bingyi:seat``），投影的 ``_step_requirement`` 据此查**那条
@@ -2056,22 +2052,19 @@ def _bingyi_seats(host: Any, frame: Frame, owner: int, skill_id: str = BINGYI) -
     """
     cap = int(frame.data[_BINGYI_CAP])
     pool = tuple(player.seat for player in host.state.players if player.alive)
-    answer = host.ask_options(
+    answer = host.ask_seats(
         frame,
         owner,
         Timing.PHASE_FINISH,
         skill_id=f"{skill_id}:seat",
-        options=tuple(seat_choice(seat) for seat in pool),
-        min_selected=1,
-        max_selected=cap,
+        pool=pool,
+        lo=1,
+        hi=cap,
         optional=True,
-        enumerate_candidates=False,
     )
     if host.suspended(answer):
         return "stay"
-    if isinstance(answer, Pass):
-        return ()
-    return tuple(int(choice.removeprefix(SEAT_PREFIX)) for choice in answer.choices)
+    return tuple(answer)
 
 
 def _bingyi_draw(host: Any, frame: Frame, chosen: tuple[int, ...]) -> Any:

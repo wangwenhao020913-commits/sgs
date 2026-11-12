@@ -1091,7 +1091,17 @@ def _flow_step_seats(
     timing: Timing,
     ask_owner: Any,
 ) -> tuple[str, object]:
-    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。
+    """跑一步选座位（一次问齐 / ``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。
+
+    **一条流水线里只有两种座位步**（table-ux-overhaul 票 13 起）：
+
+    - ``hi > 1`` 且 ``not ordered`` ⇒ **一次问齐**（:meth:`Engine.ask_seats`，``SELECT_OPTIONS``
+      + ``enumerate_candidates=False``）。这就是"一次选多名角色"的唯一形状：【突袭】的
+      1–2 名、【除疠】的任意名都在这一档 —— 不再逐座发问、也不再逐座排除已选（答案是集合，
+      重复由形状谓词自己挡）。
+    - 其余（``hi == 1`` 的定值步，或 ``ordered`` 的**有序**多选）⇒ 保持逐座 ``ask_option``
+      的既有形状：``ordered`` 的池依赖"本步已选"的座位，先后两问的问法由
+      ``step_requirements`` 分别给（目前没有消费者落在这一档；【除疠】改走预览后已不是它）。
 
     **先认已接受的答案，再算池**（本 effort 票 01）：这一问若已经答过，答案就是这一步的
     裁决，``pool`` 一次都不算。挂起续跑时 effect 已经改过 ``pool`` 要读的状态（【攻心】
@@ -1101,9 +1111,11 @@ def _flow_step_seats(
     （:meth:`Engine.accepted_option`），故"重跑 steps 不重发询问"这条既有设计不变，只是
     把"现算 pool"从重入路径上摘掉了。
     """
-    del ask_owner  # 座位步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
+    del ask_owner  # 座位步走 ``ask_option`` / ``ask_seats``，其询问名是 ``skill_id``
     actor = _flow_actor(step, host.state, frame, owner, answers)
     lo, hi = _seat_bounds(step, host.state, frame, owner, answers)
+    if not step.ordered and hi > 1:
+        return _flow_step_seats_once(host, frame, step, owner, actor, lo, hi, timing)
     chosen: list[int] = []
     while len(chosen) < hi:
         option_id = _flow_option_id(frame, step.key, len(chosen), multi=hi > 1)
@@ -1137,6 +1149,110 @@ def _flow_step_seats(
     if len(chosen) < lo:
         return "cancel", ()
     return "ok", tuple(chosen)
+
+
+_SEAT_SET_CHECKED = "seat_set_checked"
+"""帧私有：已经复核过"能不能从这个池里拼出来"的座位集合（键 = 步骤的询问 id）。
+
+**不是**答案缓存（那是 ``ask_answers``）：它只回答"这份集合复核过了没有"。第 2 次重入起
+状态已被 effect 改过（除疠弃掉的牌会让目标掉出池），照活状态再复核就会把一次已经发生过
+副作用的发动误判成 "cancel"（``run_flow`` 因此抛 RuntimeError）；复核只在**答案落地后的
+第一次重入**（effect 尚未开始）那一次跑，结果记在这里。
+"""
+
+
+def _flow_step_seats_once(
+    host: Any,
+    frame: Any,
+    step: PickSeats,
+    owner: int,
+    actor: int,
+    lo: int,
+    hi: int,
+    timing: Timing,
+) -> tuple[str, object]:
+    """**一次选齐**座位多选步（``hi > 1 ∧ not ordered``；table-ux-overhaul 票 13）。
+
+    询问名不带序号（一件事只有一问）：``<短 id>:<步骤键>``。复核在
+    :func:`_seat_set_is_buildable`：池仍然是"按已选现算"的那一份（除疠的势力互异），
+    故一份越池的集合不会被当成合法答案——它与"凑不够 ``lo``"同一条出口（``"cancel"``，
+    零副作用），而不是把一条非法的目标集合交给 ``effect``。
+    """
+    option_id = _flow_option_id(frame, step.key, 0, multi=False)
+    checked = frame.data.setdefault(_SEAT_SET_CHECKED, {})
+    accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
+    if accepted is not None:
+        chosen = (
+            ()
+            if isinstance(accepted, Pass)
+            else tuple(_seat_of(choice) for choice in accepted.choices)
+        )
+        if checked.get(option_id) != chosen:
+            if not _seat_set_is_buildable(step, host.state, frame, owner, chosen):
+                return "cancel", ()
+            checked[option_id] = chosen
+        return _seat_set_verdict(chosen, lo)
+    pool = tuple(int(seat) for seat in step.pool(host.state, frame, owner, ()))
+    if len(pool) < lo:
+        # 池里连下限都装不到（旧逐座档在池空时 break 出去，同一条出口）。
+        return "cancel", ()
+    if not pool:
+        return _seat_set_verdict((), lo)
+    answer = host.ask_seats(
+        frame,
+        actor,
+        timing,
+        skill_id=option_id,
+        pool=pool,
+        lo=lo,
+        hi=hi,
+        optional=step.optional,
+    )
+    if host.suspended(answer):
+        return "stay", ()
+    chosen = tuple(answer)
+    if not _seat_set_is_buildable(step, host.state, frame, owner, chosen):
+        return "cancel", ()
+    checked[option_id] = chosen
+    return _seat_set_verdict(chosen, lo)
+
+
+def _seat_set_verdict(chosen: tuple[int, ...], lo: int) -> tuple[str, object]:
+    """座位多选的三态裁决：凑够 ``lo`` ⇒ 提交，否则取消（与逐座档同一条出口）。"""
+    if len(chosen) < lo:
+        return "cancel", ()
+    return "ok", tuple(chosen)
+
+
+def _seat_set_is_buildable(
+    step: PickSeats,
+    state: GameState,
+    frame: Any,
+    owner: int,
+    chosen: tuple[int, ...],
+) -> bool:
+    """这份座位集合能不能按**声明序**从池里一步步拼出来。
+
+    "池依赖已选"的步骤（除疠的势力互异）与形状谓词
+    （:func:`~sgs.effects.is_legal_option_set`：池内 / 无重复 / 区间）不是一回事：后者的
+    ``options`` 是**首问**那一份快照，收不下"第二名的势力必须与第一名不同"。故这里按
+    ``step.pool`` 的**前缀**逐个复核（与 ``_assign_activation`` 的复合动作校验、与前端的
+    预览是同一份回调），越池即整步取消——服务端不采信一份它自己不会铺出来的集合。
+    """
+    prefix: list[int] = []
+    for seat in chosen:
+        if seat in prefix:
+            return False
+        pool = tuple(int(item) for item in step.pool(state, frame, owner, tuple(prefix)))
+        if seat not in pool:
+            return False
+        prefix.append(seat)
+    return True
+
+
+def _seat_of(choice: str) -> int:
+    """``seat:N`` 文本 → 座位号（``SelectOptions.choices`` 的一项）。"""
+    return int(str(choice).removeprefix(SEAT_PREFIX))
 
 
 def _flow_step_option(

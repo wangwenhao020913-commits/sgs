@@ -52,6 +52,7 @@ from sgs.state import (
     QueryKind,
     SelectCards,
     SelectOption,
+    SelectOptions,
     UseCard,
     Zone,
 )
@@ -1724,7 +1725,12 @@ def _flow_seat_queries(engine):
 
 
 def test_the_flow_shape_can_express_a_dependent_two_seat_pick(monkeypatch):
-    """``pool(state, frame, owner, chosen)`` 拿得到第一次的结果 ⇒ 能照真牌 ``check_targets`` 收窄。"""
+    """``pool(state, frame, owner, chosen)`` 拿得到第一次的结果 ⇒ 能照真牌 ``check_targets`` 收窄。
+
+    table-ux-overhaul 票 13 起"第二问依赖第一问"的那一档归 ``ordered=True``
+    （``hi > 1 ∧ not ordered`` 改成**一次问齐**）——本用例钉的正是有序档：两问、第二问
+    的池建在第一次的结果上。
+    """
     _card, state = _flow_two_male_state()
     duel = pure_virtual_card(state, "duel")
     seen: list[tuple[int, ...]] = []
@@ -1743,7 +1749,7 @@ def test_the_flow_shape_can_express_a_dependent_two_seat_pick(monkeypatch):
             name="probe_dependent_seats",
             steps=(
                 active_module.PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
-                active_module.PickSeats(lo=2, hi=2, pool=pool, key="seat"),
+                active_module.PickSeats(lo=2, hi=2, ordered=True, pool=pool, key="seat"),
             ),
             effect=lambda host, frame, answers: None,
         ),
@@ -1764,6 +1770,76 @@ def test_the_flow_shape_can_express_a_dependent_two_seat_pick(monkeypatch):
     assert (1,) in seen, "第二次的池建在第一次的结果之上（check_targets 据此收窄）"
     assert seats[0].options == ("seat:1", "seat:2"), "第一次：全部合法男性"
     assert seats[1].options == ("seat:2",), "第二次：check_targets 只留下座位 2"
+
+
+def test_a_multi_seat_step_is_asked_once_in_a_single_select_options(monkeypatch):
+    """``hi > 1 ∧ not ordered`` ⇒ **一次问齐**（table-ux-overhaul 票 13 的步骤语言档）。
+
+    同一份"两名角色"的声明，不再是两问 ``SELECT_OPTION``，而是一问 ``SELECT_OPTIONS``
+    （座位多选面、不枚举档）：池 = **首问**那一份（``chosen = ()``），答案是一个座位集合，
+    引擎按 ``is_legal_option_set`` 校验形状。``effect`` 读到的仍是 ``answers["seat"]``
+    的座位元组——声明面没变，只有询问形状变了。
+    """
+    _card, state = _flow_two_male_state()
+    seen: list[tuple[int, ...]] = []
+    captured: dict[str, object] = {}
+
+    def pool(state_, frame, owner, chosen):
+        del frame, owner
+        seen.append(tuple(chosen))
+        return (1, 2)
+
+    def effect(host, frame, answers):
+        captured["seat"] = answers["seat"]
+
+    _inject_flow_skill(
+        monkeypatch,
+        active_module.SkillFlow(
+            name="probe_multi_seats",
+            steps=(
+                active_module.PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
+                active_module.PickSeats(lo=1, hi=2, pool=pool, key="seat"),
+            ),
+            effect=effect,
+        ),
+    )
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == KUROU,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        if query.kind == QueryKind.SELECT_OPTIONS and str(query.skill_id).startswith("kurou:"):
+            return SelectOptions(choices=("seat:1", "seat:2"), answers_seq=query.seq)
+        return _decline(query)
+
+    engine = _run(
+        state,
+        [Scripted(driver), Scripted(_decline), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    kinds = [
+        record.query.kind for record in engine.records if record.kind == "query"
+    ]
+    assert kinds[:3] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTIONS"], (
+        "①选牌 → ②**一次**座位多选（不是两次 SELECT_OPTION）"
+    )
+    multi = [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_OPTIONS
+    ]
+    assert len(multi) == 1 and str(multi[0].skill_id) == "kurou:seat"
+    assert tuple(multi[0].options) == ("seat:1", "seat:2")
+    assert (multi[0].min_selected, multi[0].max_selected) == (1, 2)
+    assert tuple(captured["seat"]) == (1, 2), "effect 读到的仍是座位元组（声明面未变）"
+    assert tuple(seen[0]) == (), "一次问齐：池只按**首问**（空前缀）算一次"
 
 
 def test_the_flow_shape_ordered_pick_never_re_offers_the_chosen_seat(monkeypatch):

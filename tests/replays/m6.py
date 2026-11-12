@@ -38,6 +38,7 @@ from sgs.state import (
     Query,
     SelectCards,
     SelectOption,
+    SelectOptions,
     UseCard,
     Zone,
 )
@@ -65,12 +66,19 @@ M6_DECK_PROFILE = "standard_108"
 
 @dataclass(frozen=True)
 class Step:
-    """计划里的一步：座位 + 询问种类 + 候选谓词。"""
+    """计划里的一步：座位 + 询问种类 + 候选谓词（或**组装器**）。"""
 
     actor: int
     kind: str
     matches: Callable[[Query, Action], bool] | None = None
     label: str = ""
+    build: Callable[[Query], Action] | None = None
+    """``build`` = 这一步的答案由**计划自己组装**（不枚举档的 ``SELECT_OPTIONS``）。
+
+    座位多选恒走不枚举档（table-ux-overhaul 票 13）：候选里只有一条骨架，真正的答案
+    （一个座位集合）由客户端拼出来、引擎按同一份形状谓词校验。故这一档的计划给的是
+    构造器而不是"从 ``legal_actions`` 里挑"的谓词——录下来的仍是引擎放行的那条应答
+    （``submit`` 的 ``structural`` 那一道闸）。"""
 
 
 @dataclass
@@ -174,6 +182,30 @@ def _option(prefix: str, choice: str) -> Callable[[Query, Action], bool]:
 
 def _option_seat(prefix: str, seat: int) -> Callable[[Query, Action], bool]:
     return _option(prefix, f"seat:{seat}")
+
+
+def _seat_set(prefix: str, seats: Sequence[int]) -> Callable[[Query], Action]:
+    """**组装**一次座位多选（票 13）：一次提交一个座位集合（不枚举档的合法答案）。"""
+
+    def build(query: Query) -> Action:
+        skill_id = str(getattr(query, "skill_id", ""))
+        assert skill_id.startswith(prefix), f"座位多选询问的 skill_id 是 {skill_id!r}"
+        return SelectOptions(
+            choices=tuple(f"seat:{seat}" for seat in seats), answers_seq=query.seq
+        )
+
+    return build
+
+
+def _seat_set_pass(prefix: str) -> Callable[[Query], Action]:
+    """座位多选的「放弃」：``optional`` 那一问的 ``Pass``（Pass 不在骨架候选里）。"""
+
+    def build(query: Query) -> Action:
+        skill_id = str(getattr(query, "skill_id", ""))
+        assert skill_id.startswith(prefix), f"座位多选询问的 skill_id 是 {skill_id!r}"
+        return Pass(answers_seq=query.seq)
+
+    return build
 
 
 def _discard_four_suits(query: Query, action: Action) -> bool:
@@ -281,11 +313,21 @@ def _plan_58(pack: ContentPack) -> Plan:
             Step(1, "PLAY_PHASE", _use("dismantlement", targets=(0,)), label="拆桥指向座位 0"),
             Step(0, "SKILL_ACTIVATION", _activate("hero.jie_luxun.qianxun"), label="发动【谦逊】"),
             Step(0, "SKILL_ACTIVATION", _activate("hero.jie_luxun.lianying"), label="发动【连营】"),
-            Step(0, "SELECT_OPTION", _option_seat("lianying:", 0), label="连营令自己摸"),
-            Step(0, "SELECT_OPTION", _option("lianying:", "seat:1"), label="连营令座位 1 摸"),
+            # 票 13 起座位多选**一次问齐**：一个 SELECT_OPTIONS 里点齐两名角色（含自己）。
+            Step(
+                0,
+                "SELECT_OPTIONS",
+                build=_seat_set("lianying:", (0, 1)),
+                label="连营一次点齐座位 0 / 1",
+            ),
             # 同一帧里的第二次【连营】——答案缓存修正后它必须**重新发问**（票 20）：
             # 这一步与下一条同形，作为"真的又问了"的磁带证据。
-            Step(0, "SELECT_OPTION", _pass, label="第二次连营不再选人"),
+            Step(
+                0,
+                "SELECT_OPTIONS",
+                build=_seat_set_pass("lianying:"),
+                label="第二次连营不再选人",
+            ),
             Step(1, "PLAY_PHASE", _end_phase, label="座位 1 收手（回合末归还）"),
             Step(0, "PLAY_PHASE", _use("slash", targets=(1,)), label="【杀】收局"),
         ),
@@ -416,6 +458,11 @@ class M6Player:
                 continue
             if step.actor != self.seat or step.kind != query.kind:
                 continue
+            if step.build is not None:
+                action = step.build(query)
+                if self.progress.complete(index, len(self.plan.steps)) and self.recording:
+                    self.recording.announce(self.seat)
+                return action
             assert step.matches is not None
             for action in query.legal_actions:
                 if step.matches(query, action):

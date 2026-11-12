@@ -26,7 +26,7 @@ from typing import Any
 
 from sgs.data import Category, SkillType, card_category
 from sgs.effects import CarrierKind, behavior_for
-from sgs.state import GameState, Pass, Zone
+from sgs.state import GameState, Zone
 from sgs.timing import Timing
 
 from .catalog import (
@@ -36,7 +36,7 @@ from .catalog import (
     Hook,
     SkillDef,
 )
-from .flow import SkillFlow, option_seat, seat_choice, zero_step_effect
+from .flow import SkillFlow, zero_step_effect
 from .move_after import MoveEvent, loses_card, move_event
 
 __all__ = [
@@ -183,40 +183,40 @@ def _lianying_targets(state: GameState, chosen: tuple[int, ...]) -> tuple[int, .
 
 
 def _lianying(host: Any, frame: Any) -> Any:
-    """提交点：逐次选角色（可提前放弃），选中的角色各摸一张。
+    """提交点：**一次**选多名角色（至多 X 名、可放弃），选中的角色各摸一张。
 
     手写帧内游标（与【寒冰剑】的多轮弃牌同姿态，不落成步骤原语）：
 
     - ``lianying_drawn`` = **已经摸过的座位**：摸牌走帧外 / 帧内移动，可能内联派发别的
       "失去牌后"钩子并挂起，续跑时据此不重复摸；
-    - 选座位的询问名带**轮号**（``lianying:seat:<n>``）：同一步问多次、答案按
-      ``(skill_id, actor)`` 在帧内分桶，故每次是独立的一问；``Pass``（``optional``）
-      表示"不再选"；
+    - 选座位的询问由 :meth:`Engine.ask_seats` **一次问齐**（table-ux-overhaul 票 13：
+      ``[1, X]`` + ``optional`` = 「至多 X 名」，答案是一个座位集合，不再逐座发问）；
     - X 由本次移动的载荷定格（不在选人过程中重算）：与触发条件读同一份事实。
+
+    **先选齐人、再逐座结算**（与【除疠】同姿态）：摸牌可能内联挂起，故"选人"与"摸牌"
+    两段分开，摸牌段靠 ``lianying_drawn`` 幂等。
     """
     owner = frame.data["skill_owner"]
     x = _lost_hand_cards(move_event(frame), owner)
     if x <= 0:
         return None
     drawn: list[int] = frame.data.setdefault(_LIANYING_DRAWN_KEY, [])
-    chosen: list[int] = []
-    while len(chosen) < x:
-        pool = _lianying_targets(host.state, tuple(chosen))
-        if not pool:
-            break
-        answer = host.ask_option(
+    chosen: tuple[int, ...] = ()
+    pool = _lianying_targets(host.state, ())
+    if pool:
+        answer = host.ask_seats(
             frame,
             owner,
             Timing.MOVE_AFTER,
-            skill_id=f"lianying:seat:{len(chosen)}",
-            options=tuple(seat_choice(seat) for seat in pool),
+            skill_id="lianying:seat",
+            pool=pool,
+            lo=1,
+            hi=x,
             optional=True,
         )
         if host.suspended(answer):
             return "stay"
-        if isinstance(answer, Pass):
-            break
-        chosen.append(option_seat(answer))
+        chosen = tuple(answer)
     for seat in chosen:
         if seat in drawn:
             continue

@@ -177,6 +177,8 @@ from .flow import (
     SEAT_PREFIX,
     card_preactivations,
     manifest,
+    option_seat,
+    seat_choice,
     validate_flow_activation,
 )
 from .preactivation import (
@@ -582,6 +584,8 @@ __all__ = (
     "use_after_skill_definitions",
     "virtual_card_id",
     "virtual_dodge",
+    "option_seat",
+    "seat_choice",
 )
 
 

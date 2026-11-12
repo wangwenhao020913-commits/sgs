@@ -82,6 +82,7 @@ from sgs.skills import (
     MATCH_ACTOR_KEY,
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
+    SEAT_PREFIX,
     SKILL_JUDGMENT_CARD_KEY,
     STATE_CHANGE_KEY,
     ActivationCandidate,
@@ -113,6 +114,7 @@ from sgs.skills import (
     reset_turn_skill_state,
     round_limit_present,
     resolve_conversion_confirmation,
+    seat_choice,
     start_provider,
     timing_hooks_present,
     transform_candidates,
@@ -3345,6 +3347,55 @@ class Engine:
         assert isinstance(action, (SelectOptions, Pass))
         answers[answer_key] = action
         return action
+
+    def ask_seats(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        skill_id: str,
+        pool: Sequence[int],
+        lo: int,
+        hi: int,
+        optional: bool = False,
+    ) -> Any:
+        """发一次**座位多选**询问（table-ux-overhaul 票 13）：「一次选多名角色」的**唯一**入口。
+
+        与 :meth:`ask_option` 的"一次一个座位"是两种形状：这里把**整池**座位一次发给应答者，
+        答案是一个座位**集合**（界面 = 牌桌上多点、一次提交；先例 = 界顾雍【秉壹】）。
+        三条载荷口径固定在这一处，调用方只给「池 + 区间」：
+
+        - ``options`` = 池里每个座位的 :func:`~sgs.skills.seat_choice` 文本（座位序 = 池序）；
+        - ``min_selected = lo`` / ``max_selected = hi`` —— "至多 N 名"这句话因此**只写一次**
+          （计划里要选几个就填几个，不在每个技能里再写一遍边界）；
+        - ``enumerate_candidates=False``（**不枚举档**，先例
+          :meth:`ask_options` 的同名档）：子集数随座位数组合爆炸（8 人局、上限 4 ⇒ 162 条），
+          故候选只留一条骨架，答案由界面 / 参与者组装、引擎按
+          :func:`~sgs.effects.is_legal_option_set` 校验形状。
+
+        返回**座位元组**：``Pass``（``optional=True`` 才有）⇒ 空元组——"这一步取消"由调用方
+        按 ``lo`` 判（与 :meth:`ask_option` 把 ``Pass`` 原样交还同一姿态）；挂起照旧返回
+        :data:`SUSPEND`。答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（与
+        :meth:`ask_options` 同键同源），钩子重入不重发。
+        """
+        seats = tuple(int(seat) for seat in pool)
+        answer = self.ask_options(
+            frame,
+            actor,
+            timing,
+            skill_id=skill_id,
+            options=tuple(seat_choice(seat) for seat in seats),
+            min_selected=lo,
+            max_selected=hi,
+            optional=optional,
+            enumerate_candidates=False,
+        )
+        if answer is SUSPEND:
+            return SUSPEND
+        if isinstance(answer, Pass):
+            return ()
+        return tuple(int(choice.removeprefix(SEAT_PREFIX)) for choice in answer.choices)
 
     def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None:
         """技能触发的一次**惰性判定**：压 JUDGE 帧（票 10 §1 / §5.3）。

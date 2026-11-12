@@ -130,7 +130,7 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 | `55-fan-converts-normal-slash` | 【朱雀羽扇】转化火【杀】 | 军争机制 | `standard_ex_160` | 2 | 票 09 起改为**询问式**（"当你使用普通【杀】时，可以将其转化为火【杀】"）：先装扇（`PUT → EQUIP`）、再用普通【杀】⇒ 引擎开一次「是否发动」（零步流水线，骨架 `ActivateSkill`）+ 确认后这次使用按**虚拟火【杀】**结算并造成火焰伤害（记录流里的 `UseCard` 仍是玩家选的那张普通【杀】） |
 | `56-jie-guanyu-yijue-suppress` | 【义绝】施加技能失效 → 回合末到期 | 界局机制 | `standard_108` | 2 | 界关羽【义绝】弃一张牌 ⇒ 目标展示黑牌 ⇒ 座位级失效落一条 `skill_suppress`（`suppressed=true`，`scope=turn`），同一回合末落一条 `suppressed=false`；目标手里那张牌只以 `card_reveal` 公开、不移动 |
 | `57-jie-xushu-awakening` | 【潜心】觉醒 → ☆【荐言】 | 界局机制 | `standard_108` | 2 | 觉醒技强制发动：造成伤害后（来源是自己、且自己已受伤）落 `hp_max_change`（4 → 3）与 `skill_gain`（☆【荐言】），两者之间没有「是否发动」询问；随后 ☆ 技能作为 `PLAY_PHASE` 的裸 `ActivateSkill` 候选真的被发动 |
-| `58-jie-luxun-hero-zone` | 【谦逊】武将牌上的牌区 · 放置与归还 | 界局机制 | `standard_108` | 2 | 一张延时 / 普通锦囊唯一指向界陆逊 ⇒ 【谦逊】把**全部手牌**置于 `Zone.HERO`（区键 `0:hero.jie_luxun.qianxun`，`card_move` 的 `to_zone.skill_instance` 非空）并触发【连营】；当前回合结束时整批归还（`HERO → HAND`）。同一帧里【连营】第二次触发**重新发问**（答案缓存按派发范围分桶） |
+| `58-jie-luxun-hero-zone` | 【谦逊】武将牌上的牌区 · 放置与归还 | 界局机制 | `standard_108` | 2 | 一张延时 / 普通锦囊唯一指向界陆逊 ⇒ 【谦逊】把**全部手牌**置于 `Zone.HERO`（区键 `0:hero.jie_luxun.qianxun`，`card_move` 的 `to_zone.skill_instance` 非空）并触发【连营】——「令至多 X 名角色各摸一张」是**一次**座位多选（`SELECT_OPTIONS` + 不枚举档，`lianying:seat`，一次点齐座位 0 / 1）；当前回合结束时整批归还（`HERO → HAND`）。同一帧里【连营】第二次触发**重新发问**（答案缓存按派发范围分桶） |
 | `59-jie-lvmeng-extra-turn` | 【博图】额外回合 + 轮次变化 | 界局机制 | `standard_108` | 2 | 弃牌阶段弃出四花色 ⇒ 回合结束时【博图】给一个额外回合：`TURN_START` 序列出现同座位连着的两个回合，`turn_change` 先落 `extra=true`（轮次不变）；额外回合不推进自然指针、也不刷新「每轮限 X 次」，回到座位 0 的自然回合时落 `extra=false` 且 `round=2` |
 | `60-jie-zhenji-luoshen-tags` | 【洛神】牌标签 · 增与删 | 界局机制 | `standard_108` | 2 | 界甄姬【洛神】判定为黑色 ⇒ 获得此牌并挂「本回合不计入」标签：`tag_add` 带牌面 + 标签类型 + 来源实例；回合末清除落同形的 `tag_remove`。标签与所在区域无关、也不改变公开的「手牌数」（手牌计数是另一个查询） |
 
@@ -199,3 +199,21 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 `goals.py` **一字未改、一条未放宽**（判据仍断言"这条基准在证什么"）；其余 51 条基准
 逐字节不变。重录只换字节，不换口径：`pytest --update-golden` 是唯一入口，冻结表
 （`tests/test_replays.py` 的 `STANDARD_108_REPLAY_BYTES`）与本文档同批更新。
+
+## 重录登记：座位多选收口（table-ux-overhaul 票 13）
+
+**行为有意改变**（spec §3 注① / §4：本 effort 只有票 04 与票 13 可以动基准字节）：
+"一次选多名角色"的询问从**逐座多次** `SELECT_OPTION`（`lianying:seat:<n>` /
+`dawu:seat:<n>` / `fenwei:<n>`）收口成**一次** `SELECT_OPTIONS`（`enumerate_candidates=False`
+的不枚举档，答案是一个座位集合）；步骤语言的 `PickSeats(hi > 1 ∧ not ordered)` 同批走
+`Engine.ask_seats`（【突袭】/ 界【突袭】/【除疠】）。
+
+| 基准 | 变了什么 | 为什么 |
+|---|---|---|
+| `58-jie-luxun-hero-zone` | 同种子重录（56,187 → 54,999 字节；153 → 151 条记录） | 界陆逊【连营】的两步逐座询问合成一步座位多选：询问从 2 条 `SELECT_OPTION` 变成 1 条 `SELECT_OPTIONS`（同一次触发里"点齐座位 0 / 1"），同一帧里第二次【连营】的"重新发问"证据保留（第二次是一次「放弃」） |
+
+`goals.py` **一字未改、一条未放宽**（`_m6_hero_zone` 仍断言 HERO 区域的放置 / 归还与
+【谦逊】的发动）；其余 59 条基准逐字节不变，种子也未重选（对局长度不变）。`58` 属于 M6
+构造基准，不在 `STANDARD_108_REPLAY_BYTES` 的 47 条冻结表里，故那张表无需改动。
+`replays/m6.py` 的 `Step.build` 是这一档的录制入口：不枚举档的答案由计划**组装**、引擎按
+同一份形状谓词校验（与界面 / AI 走同一条路）。
