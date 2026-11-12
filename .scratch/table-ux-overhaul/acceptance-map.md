@@ -155,3 +155,14 @@
 | P3 | `Q2` 的第 6 个消费者【神速】仍走 `check_targets(..., distance_exempt=True)`，是挂点之外的第二条豁免路径 | **已修**：布尔改为喂同一份豁免求值（一个实现、一份座位集），并加"两条路径同样座位集"的断言；`shapes.md` §3.3 措辞同步 |
 | P4 | `flow.preview_step` 的 fail-closed 只清候选、没清 `can_advance`，与 docstring 与 `§6` 不变量 5 矛盾 | **已修**：错误分支把 `can_advance` / `can_submit` 一并置假，并加真形状断言 |
 | P5 | `heuristic._assembled_option_set` 把 `cap = min(cap, len(options))` 夹到**所有** `SELECT_OPTIONS`（票面只要求除疠的动态池） | **已修（收敛作用域）**：只有登记的动态池步骤再夹，并加真询问断言（AI 自建集合不得含同势力两名） |
+
+## §8 收口后用户实机报障（票 16–19；不在 spec §1 的 13 项里）
+
+| 报障 | 落地 / 断言 | 票 | 状态 |
+|---|---|---|---|
+| 预发动填完却提交不了（标题说已填完、页脚说还没填完） | 烟测 U-PA-07a–d（真实发出 `ActivateSkill`、页脚无该句）+ `tests/test_web_static.py::test_the_preactivation_submit_verdict_has_one_single_implementation` | 16 | ✅ |
+| 提示区被步骤按钮挤占：只要当前一步、要字符串 | 烟测 U-PA-08a–e（`#t-options` 无步骤按钮、提示行只说当前步）+ U-PA-09（真选项仍是按钮） | 16 | ✅ |
+| 【大雾】【狂风】在准备阶段被问 | `tests/test_hero_huo.py::test_dawu_and_kuangfeng_are_never_offered_at_turn_start`（修复前 256 次 TURN_START 面 → 0；基线 `3a37f57` 上同样 256 次 ⇒ 陈年缺陷）+ `::test_the_turn_start_expiry_still_runs_without_a_question` | 17 | ✅ |
+| 五谷亮牌面：目标条压住牌面 | 烟测 U-HV-02（`reveal-targets` 进流）+ `test_web_static` 静态判据 | 18 | ✅ |
+| 五谷：被拿走的牌不刷新 | 服务端 `view.harvest`（`tests/test_web.py` 的真会话视图断言）+ 烟测 U-HV-01/01b/01c/03a/03b/04 | 18 | ✅（人类自己取牌后可见） |
+| 五谷：**AI 目标**取牌仍要等结算结束才跳变（逐目标可见） | 设计已写进票 19（`Session.drive` 逐目标暂停）+ `map.md` 缺口 #癸；**用户 2026-11-11「点到为止」主动叫停**，票 19 保持 `open`、未开工 | 19 | ⏸ 未做（用户叫停） |
