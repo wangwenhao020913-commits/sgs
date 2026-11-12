@@ -81,7 +81,10 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
      **不要求 `current`**——最后一名目标取走后没有当前目标，那正是"全部拿完"那一帧）。
    - `modal.js:dialogRevealSource()`：亮牌窗的数据源 = 有询问用询问，否则用视图级 harvest；
      `syncDialog` 的空闲分支据此把窗口**保持打开**（同链键、`persistent` ⇒ 不暗化），
-     `applyDialogContentMode` 的持久分支 / 标题 / 提示都改读这个 source。
+     `applyDialogContentMode` 的持久分支读它；标题走 `dialogTitleSource(kind)`（只有亮牌
+     模板读那份「只有 harvest」的最小载荷）。
+   - `pending.js`：空窗里提示行写 `harvest.hint`（这一步是什么），不再说「（没有待应答的询问）」
+     ——与弹窗标题条的「等待N号位拿牌…」不再打架。
    - 窗口自己重画仍走**同一个** `renderReveal`；`view.harvest` 变 `null` 的那一拍照旧收窗。
 5. **测试**：3 条新 pytest（真会话 + 真 `GameRegistry` 的 answer / advance_clock / view 三条
    产品路由）+ 烟测 `U-HV-05a..d`；改写"驱动到终局"的循环（它们现在要知道"没有 pending"
@@ -160,13 +163,19 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
 
 ### 门禁结果
 
-- `.venv/bin/pytest -q` ⇒ **3942 passed**（562.9 s，全量）。
-- `bash tests/smoke-web.sh` ⇒ `PASS: 前端渲染冒烟`（含 `U-HV-05a..d`；`U2-R11/12/13`、`U-HV-04`、`M6-B1` 按新节奏改写后全绿）。
-- `bash tests/test_web.sh` ⇒ `PASS: M4 端到端门禁全部通过`（8 人正局 / 军争 160 / 409 / 火攻 / 酒 / 构造 tape / `--host 0.0.0.0`）。
+- `.venv/bin/pytest -q` ⇒ **3942 passed**（全量，实现后与评审修复后各独立复跑一次；
+  修复那次由提交 hook 的 `tests/run_all.sh --quiet` 再跑一遍）。
+- `bash tests/smoke-web.sh` ⇒ `PASS: 前端渲染冒烟`（含 `U-HV-05a..d`；`U2-R11/12/13`、
+  `U-HV-04`、`M6-B1` 按新节奏改写后全绿）。
+- `bash tests/test_web.sh` ⇒ `PASS: M4 端到端门禁全部通过`（8 人正局 / 军争 160 / 409 /
+  火攻 / 酒 / 构造 tape / `--host 0.0.0.0`；评审修复后再跑一次仍全绿）。
 - `bash tools/check_goldens.sh` ⇒ `PASS: 47 条标准 108 金录像逐字节不变`。
+- `.venv/bin/python tools/check_acceptance.py .scratch/table-ux-overhaul` ⇒ `PASS`（19 张票 /
+  110 个引用测试名全部存在且绿）。
 - 判据代价（全 AI 自对弈一局 1593 条记录）：`_harvest_pick_pause_due` 调用 **1424 次**、
   总耗时 **5.61 ms**（≈ **4 µs/次**；没有五谷帧时是"取栈 → 早退"）。没有新增长扫。
-- 提交时由 pre-commit hook 跑全量 `tests/run_all.sh --quiet`（结果见本次提交）。
+- 两次提交都由 pre-commit hook 跑全量 `tests/run_all.sh --quiet` ⇒ `ALL TESTS PASSED`
+  （`5139275` 与 `50e67f2`）。
 
 ### Touches 扩面（实施期裁定，票面外但被逼出来的面）
 
@@ -231,6 +240,7 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
 | Standards J | `frontend-map` 漏了决定性的 `syncDialog` 一跳 | **已改** |
 | Spec 1 | 「不得在有人类 pending 时暂停」没有用例钉住 | **部分**：判据里的 `pending` 守卫是**防死锁**的安全条件（一个 `_step` 同时落取牌移动与 AI 询问时，若在这里停，`run` 会带着 AI 的 pending 退出、下一趟 `drive` 永不推进）。构造这种局面需要 MOVE_AFTER 类钩子，`_harvest_game` 的两个局面都没有；本轮按"注释写明为什么存在"处理，不造假夹具 |
 | Spec 2 | 「弃牌不进判据」只有论证没有断言 | **已改**：3 目标用例的 `_pick_moves == [1, 1, 1]` 从**记录**侧面钉住"恰好三条取牌移动"——结算收尾的 `processing → discard` 若也停，就会是 4 份视图 / 多一条移动 |
+| Standards J | 引擎 `stop_when` 的**问时机**没有引擎级用例 | 接受（已由上层钉住）：如果引擎在 `_step` **之前**问、或问完不让出，逐目标的"已拿数"序列就会整段错位——`[1,2,3,4]` / `[1,2,3]` / `[[taken,current,…], …]` 三组字面序列会当场红。再加一条只读引擎的用例不会增加覆盖 |
 | Spec 3 | 3 目标靠 `dead_seat` 夹具而非真发牌 | 接受：与票 18 的既有夹具同源；`get/finished` 的随机局里有真发牌覆盖（`_play_to_end` 那个测试助手驱动的那批） |
 | Spec b | `tests/test_web.py` 顺手把 ~20 处 `GameRegistry(runs_dir=…)` 改成 `_registry()`，属可避免的 churn | **已改**：除票 19 的新用例，其余调用点恢复原样 |
 
