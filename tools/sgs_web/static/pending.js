@@ -214,13 +214,11 @@ function renderPending(view) {
     || null;
   $("t-prompt").textContent = requirement
     || (pending ? pending.prompt : "（没有待应答的询问）");
-  // 预发动 / 转化技正在等玩家点牌时，说清"现在要做什么"：
-  // 这些是**界面自己**开的模式，服务端的通用 prompt 读不出它。
-  if (state.preactivation) {
-    $("t-prompt").textContent = state.preactivation.cardEntry
-      ? `使用【${state.preactivation.name}】：按清单选择持刀者与【杀】的目标。`
-      : `预发动【${state.preactivation.name}】：按清单逐步选择。`;
-  } else if (state.convertSkill !== null) {
+  // 转化技正在等玩家点牌时，说清"现在要做什么"：这是**界面自己**开的模式，服务端的
+  // 通用 prompt 读不出它。**预发动不再改这里**（票 08 第 7 条）：它把"现在第几步、要做什么"
+  // 交给提示行 / 页脚的文案模板（`preactivationStepHint` → `promptQuestionForStep`），
+  // `#t-prompt` 保持服务端那句，免得两条泛化文案各说一套。
+  if (state.convertSkill !== null) {
     const skill = (view.skills || []).find((item) => item.skill_id === state.convertSkill);
     const text = skill && skill.ui && skill.ui.requirement;
     if (text) $("t-prompt").textContent = text;
@@ -359,15 +357,22 @@ function renderPending(view) {
 }
 
 /** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」；手牌入口 = 「确认使用 / 取消选择」；
- *  被动入口 = 「放弃」；排列 = 「确认」（取消按钮在排列面里整个隐藏）。 */
+ *  被动入口 = 「放弃」；排列 = 「确认」（取消按钮在排列面里整个隐藏）。
+ *
+ * 票 08：预发动里「提交」有**两档含义**（spec §2 Q5）——中间步（`min != max`，等玩家说
+ * "就选这些"）= 「提交」；最后一步 = 「确认发动 / 确认使用」。判据与可点态同源
+ * （`preactivationConfirmable`）。 */
 function setActionLabels(inPreativation, passiveEntry, arrange = false) {
   const submit = $("btn-submit");
   const cancel = $("btn-cancel");
   const cardEntry = Boolean(inPreativation && state.preactivation && state.preactivation.cardEntry);
+  const stepConfirm = Boolean(inPreativation) && preactivationConfirmable();
   if (submit) {
     submit.textContent = arrange
       ? "确认"
-      : (inPreativation ? (cardEntry ? "确认使用" : "确认发动") : "提交");
+      : (stepConfirm
+        ? "提交"
+        : (inPreativation ? (cardEntry ? "确认使用" : "确认发动") : "提交"));
   }
   if (cancel) {
     cancel.textContent = cardEntry
@@ -577,11 +582,17 @@ function cancelAction(pending) {
 async function cancelOrClear() {
   if (state.playback || state.submitBusy) return;
   const pending = state.view ? state.view.pending : null;
-  // 预发动（W4-1 / W4-2）：主动入口的取消只是退出**接入层**的本地态，**一个 action 都
-  // 不提交**（回到同一个出牌阶段询问）。被动入口的取消是「放弃」——**送出那条 `Pass`**，
-  // 时机随之消费、不重问（`GLOSSARY.md`「放弃」）；没进入本地态时同样可以直接放弃。
+  // 预发动（W4-1 / W4-2 / 票 08）：**「取消」= 回第一步**（spec §2 Q5）——已经动过的清单
+  // 先整体复位（清答案 / 光标 / 转化模式 / 焦点 / 已选牌与选项 / 预览态）并重铺提示区，
+  // 仍在预发动里。**已在第一步**的取消才是退出：主动入口退出本地态（**一个 action 都
+  // 不提交**，回到同一个出牌阶段询问）、被动入口是「放弃」——**送出那条 `Pass`**，时机
+  // 随之消费、不重问（`GLOSSARY.md`「放弃」）；没进入本地态时同样可以直接放弃。
   if (state.preactivation || isPassivePreativation(pending)) {
     const passive = isPassivePreativation(pending);
+    if (state.preactivation && !preactivationAtFirstStep(state.preactivation)) {
+      resetPreativationProgress(state.preactivation);
+      return;
+    }
     if (passive) {
       const pass = (pending.legal_actions || []).find((action) => action.kind === "Pass");
       if (pass) {
@@ -616,6 +627,18 @@ async function cancelOrClear() {
   state.preactivation = null;
   state.lastRejectReason = "";
   await submitAction(before);
+}
+
+/** 底部「提交」键：预发动里它有两档（票 08 / spec §2 Q5）——**中间步**确认这一步
+ *  （`min != max` 的步不自动走），**最后一步**才是确认发动 / 确认使用（`submitAction`）。
+ *  与 `cancelOrClear` 同姿态：两档都由 `preactivationConfirmable` 一处判。 */
+async function submitLeftAction() {
+  if (state.playback || state.submitBusy) return;
+  if (preactivationConfirmable()) {
+    advancePreativation();
+    return;
+  }
+  await submitAction();
 }
 
 /** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
@@ -1105,11 +1128,19 @@ function refreshSubmit(pending) {
     // 光标还没走到末尾，但清单已经填满了——本地 `preactivationReady` 会把提交键一直按灰。
     // 预览失败 / 没有预览通道时退回复清单的本地判据（fail-closed 那条在
     // `preactivationSubmitAllowed` 里，取不到候选恒假）。
-    const ready = preactivationSubmitAllowed(pa);
-    $("btn-submit").disabled = !legal || !ready || buildAction() === null;
+    //
+    // 票 08：**中间步**的「提交」是"确认这一步"（`min != max` 的步不自动走）——可点态读
+    // `preactivationAdvanceAllowed`（服务端回包的 `can_advance`），且不要求 `buildAction`
+    // 拼得出复合动作（那一步还不该提交整条清单）。
+    const stepConfirm = preactivationConfirmable(pa);
+    const ready = stepConfirm || preactivationSubmitAllowed(pa);
+    $("btn-submit").disabled = !legal || !ready
+      || (!stepConfirm && buildAction() === null);
     if (!legal) {
       // 通用文案（不认牌名 / 花色）：说清这一组不能一起转化，出口 = 取消再重选。
       setAskChoice(PREACTIVATION_GROUP_HINT);
+    } else if (stepConfirm) {
+      setAskChoice(`点「提交」确认这一步，进入第 ${pa.cursor + 2}/${pa.steps.length} 步。`);
     } else if (!ready) {
       // 未填完 = 说**同一句**步骤提示（标题 `#t-target-hint` 读的也是它）：光标到末尾但
       // 还有空步时它会指回第一个空步，不再出现标题说「清单已填完」、页脚说「还有步骤

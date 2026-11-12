@@ -116,7 +116,9 @@ function wire() {
   // **选择快照**，不是事件。直接挂 `submitAction` 会让真实点击把 `MouseEvent` 当快照传进去，
   // 400 回滚时 `restoreSelectionState(event)` 读 `event.selectedTargets` 抛异常、四键停在
   // 冻结态。改成无参箭头：点击不再冒充快照。
-  $("btn-submit").addEventListener("click", () => submitAction());
+  // 票 08：预发动里这个键有两档（中间步确认这一步 / 最后一步确认发动），分派住
+  // `pending.js:submitLeftAction`——点击口只挂它，不在两处各判一次。
+  $("btn-submit").addEventListener("click", () => submitLeftAction());
   $("btn-cancel").addEventListener("click", cancelOrClear);
   // U1-03：提示条右端的两个"到此为止"动作（结束出牌 / 放弃），词表由服务端候选决定。
   $("btn-end-phase").addEventListener("click", () => submitRightAction(RIGHT_ACTION_KINDS.endPhase));

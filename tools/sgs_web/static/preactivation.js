@@ -35,6 +35,7 @@ function toggleConvertSkill(skill) {
   const pending = state.view ? state.view.pending : null;
   if (state.preactivation) {
     prunePreativationAnswers(state.preactivation, pending);
+    state.preactivation.touched = true;
     state.lastRejectReason = "";
     schedulePreativationPreview();
     renderTable();
@@ -410,9 +411,16 @@ async function requestPreativationPreview(pa, body, version, seq) {
     pa.previewError = false;
     if (preactivationShouldAutoAdvance(pa, answer)) {
       // 光标跟着**服务端**说的走（不是 +1：多选步停在原地、单值步前进一步都由它定）。
-      pa.cursor = answer.cursor;
-      applyPreativationDefaults(pa, state.view ? state.view.pending : null);
-      schedulePreativationPreview(); // 下一步的候选接着问（版本号自增，旧回包作废）
+      // 上界 = **最后一步**（`next === null` 那一档）：整条清单填完后停在这里只亮「提交」，
+      // 不把光标推出清单、更不自动提交（spec §2 Q5）。
+      const decided = Number.isInteger(answer.cursor) ? answer.cursor : 0;
+      const ceiling = Math.max(0, pa.steps.length - 1);
+      const target = Math.min(Math.max(decided, pa.cursor + 1), ceiling);
+      if (target > pa.cursor) {
+        pa.cursor = target;
+        applyPreativationDefaults(pa, state.view ? state.view.pending : null);
+        schedulePreativationPreview(); // 下一步的候选接着问（版本号自增，旧回包作废）
+      }
     }
     renderTable();
     renderPending(state.view);
@@ -454,6 +462,18 @@ function preactivationAdvanceAllowed(pa, index) {
   return preactivationStepFilled(pa, index) && preactivationStepLegal(pa, index);
 }
 
+/** 手里这份回包是**最新一版**吗（版本号相等 ⇒ 之后没有新的选择变化）。
+ *
+ * 与 :func:`preactivationPreviewCurrent` 的分工：「这一步能点谁 / 能不能走」要**光标对得上**
+ * （回包描述的是哪一步）；「整条清单能不能提交」只问最新一版——单值步答完服务端会把光标
+ * 推过这一步，`cursor` 因此可能已经越过本地光标，拿它比会把"填完了"读成"回包过期"。
+ */
+function preactivationPreviewFresh(pa) {
+  return Boolean(
+    pa && pa.preview && !pa.previewError && pa.previewToken === pa.previewVersion,
+  );
+}
+
 /** 能不能提交：回包说 `can_submit`（**整条清单**都满足）时听服务端的。
  *
  * 预览失败 ⇒ 恒假。回包过期 / 没有预览通道 ⇒ 清单本地的 `preactivationReady`（行为不变）。
@@ -461,24 +481,35 @@ function preactivationAdvanceAllowed(pa, index) {
 function preactivationSubmitAllowed(pa) {
   if (!pa) return false;
   if (pa.previewError) return false;
-  if (preactivationPreviewCurrent(pa, pa.cursor)) return Boolean(pa.preview.can_submit);
-  return preactivationReady(pa) && preactivationSourcesLegal(pa);
+  if (preactivationPreviewFresh(pa)) return Boolean(pa.preview.can_submit);
+  if (preactivationReady(pa)) return preactivationSourcesLegal(pa);
+  // 没有预览通道、光标也没走到末尾：**最后一步填满**即为可提交（票 08：`min != max` 的步
+  // 不自动走，最后一步等玩家自己点「提交」——光标因此停在最后一步上，不再被推出清单）。
+  return pa.cursor >= pa.steps.length - 1
+    && firstUnfilledPreativationStep(pa) === null
+    && preactivationSourcesLegal(pa);
 }
 
-/** 这一步要不要玩家**自己点「下一步」**（服务端 `preview_step` 的 `explicit` 同一判据）。
+/** 这一步只要**一个**答案吗（`min == max`）：单值步填满就自动进下一步（spec §2 Q5）。
  *
- * 选牌 / 提供步总要显式确认（多选、上限可能是"任意张"），座位步只在 ``max > min``
- * （1..max 多选）时要；选项步选完就走。
+ * 判据只读**步骤声明**（服务端下发的规则级事实）；"填没填满"由预览回包说 / 本地判据数，
+ * 这里不碰。选项步的 `min = max = 1`，故同样算单值步。
+ */
+function preactivationStepSingleValue(step) {
+  if (!step) return false;
+  return Number.isInteger(step.min) && Number.isInteger(step.max) && step.min === step.max;
+}
+
+/** 这一步要不要玩家**自己点「提交」**确认（"弃置任意张 / 选择任意名"）。
+ *
+ * 唯一判据 = `min != max`（spec §2 Q5）；单值步填满即走，只有合法答案唯一时也直接走。
  */
 function preactivationNeedsExplicitStep(step) {
   if (!step) return true;
-  const kind = preactivationStepKind(step);
-  if (kind === "card") return true;
-  if (kind === "seat") return preactivationSeatMulti(step);
-  return false;
+  return !preactivationStepSingleValue(step);
 }
 
-/** 选择变化后**要不要当场**自动进下一步（单值座位步 / 选项步的既有形状）。
+/** 没有预览通道的载荷要不要**本地**自动推进（合成载荷 / 借刀清单：服务端不现算）。
  *
  * 两类情形一律**不**当场推进：
  *
@@ -486,7 +517,8 @@ function preactivationNeedsExplicitStep(step) {
  *   `next`，见 `requestPreativationPreview`）——界面不自己算"这一步填完了没有"；
  * - **预览失败**（fail-closed）：这一步不自动推进、也不许提交，提示"取不到候选，请重试"。
  *
- * 没有预览通道的旧载荷（合成载荷 / 没有流水线的清单）保持既有行为：选完就走。
+ * 没有预览通道的旧载荷（合成载荷 / 没有流水线的清单）退回清单的**形状**判据，见
+ * :func:`preactivationAdvanceNow`。
  */
 function preactivationAutoAdvanceAllowed(pa) {
   if (!pa) return false;
@@ -494,18 +526,48 @@ function preactivationAutoAdvanceAllowed(pa) {
   return !preactivationPreviewEnabled(state.view ? state.view.pending : null);
 }
 
-/** 服务端回包说"可以离开这一步了"吗：`can_advance` 且它给的光标**往前**了。
+/** 服务端回包说"这一步可以走了"吗：判据全在服务端，界面只补**交互形状**。
  *
- * **判据全在服务端**：`can_advance` = 已填的前缀每一步都满足，`cursor` = 服务端认为的
- * 当前步（单值步答完就 +1，多选 / 选牌步停在原地）。前端只补一条**交互形状**：
- * 选牌 / 多选座位步要玩家自己点「下一步」（与清单渲染的按钮同一判据）——所以这里只在
- * 光标确实往前走时才动，且**不**自己算"填满没有"。
+ * 回包的 `cursor` 是服务端认为玩家此刻该看的那一步，三种情形：
+ *
+ *  1. `cursor > 本地光标` —— 服务端**已经替我们走过去了**（这一步不需要显式确认：单值
+ *     座位步 / 选项步满足后它就把光标推到下一步）。跟着走，界面不再自己判"填满没有"；
+ *  2. `cursor == 本地光标` 且 `can_advance` —— 这一步满足了，但服务端标了"显式确认"（选牌步 /
+ *     `min != max` 的多选步）。按 spec §2 Q5：**单值步（`min == max`）填满即走**，
+ *     `min != max` 的步停下等「提交」确认；**例外**：回包只给一个合法答案（没得选）也走；
+ *  3. `cursor` 到末尾（整条清单都填完）—— `next === null`：停在**最后一步**上，**只亮
+ *     「提交」**，既不再推进也绝不自动提交（Q5）。
+ *
+ * 推进的落点由 `requestPreativationPreview` 算；这里只回答"要不要动"。
  */
 function preactivationShouldAutoAdvance(pa, answer) {
   if (!pa || !answer) return false;
+  if (!Number.isInteger(answer.cursor)) return false;
+  const step = pa.steps[pa.cursor];
+  if (!step) return false;
+  if (answer.cursor > pa.cursor) return true;
   if (answer.can_advance !== true) return false;
-  if (!Number.isInteger(answer.cursor) || answer.cursor <= pa.cursor) return false;
-  return !preactivationNeedsExplicitStep(pa.steps[pa.cursor]);
+  if (preactivationStepSingleValue(step)) return true;
+  return (answer.options || []).length === 1;
+}
+
+/** 选择变化后：**没有预览通道**时按清单的形状本地判断要不要自动进下一步。
+ *
+ * 只给没有 `preview` 能力的载荷用（借刀清单 / 合成夹具）：单值步（`min == max`）或
+ * 合法答案唯一时向前走一步。**取不到候选（`options === null`）⇒ 不推进**（fail-closed，
+ * spec §6 #5：不许兜底成"全都点得动"，也不替玩家猜答案）。
+ */
+function preactivationAdvanceNow(pa) {
+  if (!pa || pa.cursor >= pa.steps.length) return false;
+  if (!preactivationAutoAdvanceAllowed(pa)) return false;
+  const step = pa.steps[pa.cursor];
+  const options = preactivationOptions(pa, pa.cursor);
+  if (options === null) return false;
+  if (!preactivationStepSingleValue(step) && options.length !== 1) return false;
+  if (!preactivationStepFilled(pa, pa.cursor)) return false;
+  pa.cursor += 1;
+  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
+  return true;
 }
 
 /** 进入预发动：**不压帧、不计次数**，只把清单与本地答案摊开（W4-1）。
@@ -522,6 +584,9 @@ function enterPreativation(skill, manifest) {
     steps: manifest,
     answers: manifest.map(() => ({ values: [], texts: [] })),
     cursor: 0,
+    // 玩家还没动过这一轮清单：「取消」在**第一步** = 退出本地态（主动）/ 放弃（被动）；
+    // 动过之后第一次取消只是「回第一步」（spec §2 Q5，见 `resetPreativationProgress`）。
+    touched: false,
   };
   state.convertSkill = null;
   state.picks = [];
@@ -562,6 +627,8 @@ function enterConvertedForm(pending, card) {
   if (!pa || !pa.steps.length) return;
   pa.answers[0].values = [card.card_id];
   pa.answers[0].texts = preactivationAnswerTexts(pa.steps[0], [card.card_id]);
+  // 进入即预选了来源牌 ⇒ 这一轮已经动过（取消回到的"第一步"仍是它被选之前的那一步）。
+  pa.touched = true;
   if (pa.steps.length > 1) pa.cursor = 1;
   applyPreativationDefaults(pa, pending);
   schedulePreativationPreview();
@@ -586,6 +653,11 @@ function enterCardPreativation(pending, card, manifest) {
     steps: manifest,
     answers: manifest.map(() => ({ values: [], texts: [] })),
     cursor: 0,
+    touched: false,
+    preview: null,
+    previewToken: null,
+    previewError: false,
+    previewVersion: 0,
   };
   state.convertSkill = null;
   state.picks = [];
@@ -596,6 +668,82 @@ function enterCardPreativation(pending, card, manifest) {
   applyPreativationDefaults(state.preactivation, state.view ? state.view.pending : null);
   renderTable();
   renderPending(state.view);
+}
+
+/** 取消预发动的**统一复位点**（spec §2 Q5）：「取消」= **回第一步**。
+ *
+ * 清掉 `pa.answers` / `cursor = 0` / 预览态（含在飞的去抖计时器）/ `convertSkill` / 焦点 /
+ * `picks` / `selectedTargets` / `selectedOption` / `lastRejectReason` / 弹窗折叠态，再按清单
+ * 重铺提示区。**已在第一步**的取消不走这里——那是退出：主动入口直接退出本地态（零提交）、
+ * 被动入口送 `Pass`（见 `pending.js:cancelOrClear`）。
+ */
+function resetPreativationProgress(pa = state.preactivation) {
+  if (!pa || state.playback) return;
+  for (let index = 0; index < pa.steps.length; index += 1) {
+    pa.answers[index] = { values: [], texts: [] };
+  }
+  pa.cursor = 0;
+  pa.touched = false;
+  pa.preview = null;
+  pa.previewToken = null;
+  pa.previewError = false;
+  if (pa.previewTimer) {
+    window.clearTimeout(pa.previewTimer);
+    pa.previewTimer = null;
+  }
+  state.convertSkill = null;
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [];
+  state.selectedOption = null;
+  state.lastRejectReason = "";
+  // 折叠态：换回第一步可能换表面（选项 ≥3 的步才开窗），别让新一步的正文藏在上一屏的
+  // 收起态后面。
+  if (state.dialog && state.dialog.open && state.dialog.collapsed) setDialogCollapsed(false);
+  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
+  schedulePreativationPreview();
+  renderTable();
+  renderPending(state.view);
+}
+
+/** 玩家还**没动过**这一轮清单（「取消」在第一步 = 退出 / 放弃的判据）。
+ *
+ * 只看本地标记「动过没有」，不看答案是否为空：借刀窗口的必选首项（Bn）是**进入时**就
+ * 预选的默认值，按答案判会把"刚进来"读成"已经选过"（取消因此永远退不出去）。
+ */
+function preactivationAtFirstStep(pa = state.preactivation) {
+  if (!pa) return true;
+  return pa.cursor === 0 && pa.touched !== true;
+}
+
+/** 「提交」此刻是不是**确认这一步**（不是发动）：还没到最后一步、且这一步已填满。
+ *
+ * 两档含义住同一个按钮（spec §2 Q5：`min != max` 的步要玩家自己点「提交」确认；
+ * 最后一步的「提交」才是确认发动）。判据与自动推进同源（`preactivationAdvanceAllowed`）。
+ */
+function preactivationConfirmable(pa = state.preactivation) {
+  if (!pa || state.playback) return false;
+  if (pa.cursor >= pa.steps.length - 1) return false;
+  return preactivationAdvanceAllowed(pa, pa.cursor);
+}
+
+/** 预发动**这一步**要不要开询问弹窗（spec §2 Q12 / Q5）：只有牌桌承载不了的表面才开。
+ *
+ * 判据只看步骤形状（不认技能名）：`option` 步的选项 **≥3 项**或**复选**（`min != max`）
+ * 才进弹窗（界【神速】的三项 / 转化清单的牌名列表）——两三项住提示区按钮（如【破围】）。
+ * 座位步 / 选牌步恒为牌桌表面；取不到候选（`options === null`）也**不**靠弹窗兜底。
+ * `null` = 这一步不开窗。
+ */
+function preactivationDialogKind() {
+  const pa = state.preactivation;
+  if (!pa || pa.cursor >= pa.steps.length) return null;
+  const step = pa.steps[pa.cursor];
+  if (!step || preactivationStepKind(step) !== "option") return null;
+  const options = preactivationOptions(pa, pa.cursor);
+  if (!options || !options.length) return null;
+  return (preactivationNeedsExplicitStep(step) || options.length >= 3)
+    ? "preactivation"
+    : null;
 }
 
 /** 当前这一步是不是选牌步；是则返回它的候选 card_id 集合（`null` = 退化，全都可点）。 */
@@ -656,14 +804,16 @@ function togglePreativationCard(cardId) {
     answer.values.push(cardId);
   }
   answer.texts = preactivationAnswerTexts(step, answer.values);
+  pa.touched = true;
   state.lastRejectReason = "";
+  preactivationAdvanceNow(pa);
   schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
 
 /**
- * 选牌步的"下一步"：这一步按 `(min, cap)` 填完、且来源是**合法组合**才放行。
+ * 确认这一步（`min != max` 的步由玩家点「提交」触发）：填完、且来源是**合法组合**才放行。
  *
  * 填完的判据与 chip ✓ / ready 同一处（:func:`preactivationStepFilled`）；合法来源组合
  * 另判（票 10）：让 cursor 走到末尾就是 §4 的死路——提交键亮着、手牌全灰、每一按都 400。
@@ -673,6 +823,7 @@ function advancePreativation() {
   if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
   // 判据由服务端给（预览回包的 `can_advance`）：取不到候选时恒假 ⇒ 这一步不许推进。
   if (!preactivationAdvanceAllowed(pa, pa.cursor)) return;
+  pa.touched = true;
   pa.cursor += 1;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
@@ -743,11 +894,11 @@ function applyPreativationDefaults(pa, pending) {
   }
 }
 
-/** 点场上武将：选座位步的答案。
+/** 点场上武将：选座位步的答案（座位步**只在牌桌上点**，spec §2 Q12）。
  *
- * - **多选座位步**（W7-01b）：点座位 = 选 / 取消，`min..max` 计数，之后点「下一步」；
+ * - **多选座位步**（W7-01b）：点座位 = 选 / 取消，`min..max` 计数，之后点「提交」确认这一步；
  *   借刀窗口的必选首项（Bn）**预选且不可取消**。
- * - **单选座位步**：既有形状——写单值并自动进下一步。
+ * - **单选座位步**：写单值并自动进下一步（有预览通道时由回包推进）。
  */
 function selectPreativationSeat(seat) {
   const pending = state.view ? state.view.pending : null;
@@ -771,6 +922,7 @@ function selectPreativationSeat(seat) {
       if (cap === null || answer.values.length < cap) answer.values.push(seat);
     }
     answer.texts = preactivationAnswerTexts(step, answer.values);
+    pa.touched = true;
     state.lastRejectReason = "";
     schedulePreativationPreview();
     renderTable();
@@ -778,18 +930,16 @@ function selectPreativationSeat(seat) {
     return;
   }
   pa.answers[pa.cursor] = { values: [seat], texts: [text] };
-  // 单值座位步的既有形状是"点完自动进下一步"；预览失败时**不许**自动推进（fail-closed）。
-  if (preactivationAutoAdvanceAllowed(pa)) {
-    pa.cursor += 1;
-    applyPreativationDefaults(pa, pending);
-  }
+  pa.touched = true;
+  // 单值座位步 = 点完自动进下一步（有预览通道时由回包推进；预览失败时**不许**推进）。
+  preactivationAdvanceNow(pa);
   state.lastRejectReason = "";
   schedulePreativationPreview();
   renderTable();
   renderPending(state.view);
 }
 
-/** 点选项步的一项；选完自动进下一步。 */
+/** 点选项步的一项；选完自动进下一步（选项 ≤2 项住提示区，≥3 项住弹窗正文，spec §2 Q12）。 */
 function selectPreativationOption(text) {
   const pa = state.preactivation;
   if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
@@ -801,10 +951,8 @@ function selectPreativationOption(text) {
   const blocked = preactivationDisabled(pa, pa.cursor);
   if (blocked && blocked.includes(text)) return;
   pa.answers[pa.cursor] = { values: [text], texts: [text] };
-  if (preactivationAutoAdvanceAllowed(pa)) {
-    pa.cursor += 1;
-    applyPreativationDefaults(pa, state.view ? state.view.pending : null);
-  }
+  pa.touched = true;
+  preactivationAdvanceNow(pa);
   state.lastRejectReason = "";
   schedulePreativationPreview();
   renderTable();
@@ -828,6 +976,7 @@ function jumpPreativationStep(index) {
     pa.answers[at] = { values: [], texts: [] };
   }
   pa.cursor = landing;
+  pa.touched = true;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
   schedulePreativationPreview();
@@ -837,8 +986,9 @@ function jumpPreativationStep(index) {
 
 /** 这一步是否已按 `(min, cap)` 填齐（`cap` = 逐来源上限，`null` = 不限）。
  *
- * "这一步填完没有"**只算这一处**：`firstUnfilledPreativationStep`、步骤 chip 的 ✓、
- * `advancePreativation` 与「下一步」的可点态都读它（票 08）。
+ * "这一步填完没有"的**本地**判据只算这一处：`firstUnfilledPreativationStep`、步骤 chip 的 ✓、
+ * 没有预览通道时的自动推进 / 「提交」可点态读它（票 08）。**有预览通道**时以服务端回包为准
+ * （`can_advance` / `can_submit`），本地这一份只给兜底（回包过期的那几十毫秒）。
  */
 function preactivationStepFilled(pa, index) {
   const step = pa && pa.steps[index];
@@ -958,6 +1108,12 @@ function preactivationStepHint(pa, pending) {
   if (pa.previewError) return `${PREACTIVATION_PREVIEW_ERROR}。`;
   // 票 10：已选来源凑不成合法组合 ⇒ 说清"换一张牌"，而不是继续画"第 k 步…"。
   if (!preactivationSourcesLegal(pa)) return PREACTIVATION_GROUP_HINT;
+  // **最后一步填完** ⇒ 停在原地等「提交」（spec §2 Q5：最后一步不自动提交）。能提交的判据
+  // 由服务端回包说（没有预览通道时退回清单本地判据）；这句话**接在**步骤提示后面，
+  // 计数 / 已选张数这些"这一步的状态"照旧要说。
+  const settle = pa.cursor < pa.steps.length && preactivationSubmitAllowed(pa)
+    ? (pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。")
+    : "";
   // 光标越过清单末尾时没有"当前步"：清单还有空步就**指回第一个空步**，不能说
   // 「清单已填完」（票 08：判据与 `preactivationReady` 同源；标题 `#t-target-hint`
   // 与页脚 `#t-choice` 都读这一份提示，不再一处看 cursor、一处看 ready）。
@@ -970,9 +1126,11 @@ function preactivationStepHint(pa, pending) {
   // 票 07：这一句问法走**三层回退的唯一实现**（模板层 → `Step.wording` → 前端通用文案）。
   // 模板层缺键时它逐字等于 `Step.wording`（改前的输出），故没有模板的技能行为不变。
   const what = preactivationStepQuestion(pa, step, at);
+  // `min != max`（"任意张 / 任意名"）的步不会自动走：出口是底部「提交」——提示里说清。
+  const confirm = preactivationNeedsExplicitStep(step) ? "选好后点「提交」确认这一步。" : "";
   if (preactivationStepKind(step) === "card") {
     const count = pa.answers[at].values.length;
-    return `第 ${at + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。`;
+    return `第 ${at + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。${confirm}${settle}`;
   }
   if (preactivationStepKind(step) === "seat") {
     const count = pa.answers[at].values.length;
@@ -981,14 +1139,14 @@ function preactivationStepHint(pa, pending) {
     if (preactivationSeatMulti(step)) {
       const cap = preactivationStepCap(pa, at);
       if (cap !== null && cap <= step.min) {
-        return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${cap} 个${requiredText}）。`;
+        return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${cap} 个${requiredText}）。${confirm}${settle}`;
       }
       const upper = cap === null ? "max" : cap;
-      return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。`;
+      return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。${confirm}${settle}`;
     }
-    return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将选择）。`;
+    return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将选择）。${settle}`;
   }
-  return `第 ${at + 1}/${pa.steps.length} 步：${what}`;
+  return `第 ${at + 1}/${pa.steps.length} 步：${what}${settle}`;
 }
 
 /** 清单已经选中的来源牌会以哪张**产物**使用（U1-07）：读服务端 `transform_products`。
@@ -1013,7 +1171,18 @@ function preactivationProductHint(pa, pending) {
   return `将以【${cardName(matches[0])}】使用。`;
 }
 
-/** 清单驱动的预发动界面（W4-1）：步骤条 + 当前的选牌 / 选目标 / 选项。 */
+/** 清单驱动的预发动界面（W4-1 / 票 08）：步骤条 + **当前这一步的控件**。
+ *
+ * 表面按步骤形状分派（spec §2 Q12，判据不认技能名）：
+ *  - **座位步 / 选牌步**：牌桌表面——这里**只**画步骤条，座位与牌都在牌桌上点
+ *    （旧实现在弹窗正文里还铺了一遍座位按钮，票 08 删掉：那是「仁德第二步列出所有其他
+ *    玩家」的来源，也让"只在牌桌上点"这条口径有两个入口）；
+ *  - **选项步 ≤2 项**：控件区按钮，点一下即选中并自动进下一步；
+ *  - **选项步 ≥3 项 / 复选**：同一份按钮画在询问弹窗正文里（`dialogWantedKind` 开窗）。
+ *
+ * 任何步都**没有**「下一步」（Q5 的自动推进取代了它）；`min != max` 的步用底部「提交」
+ * 确认，最后一步的「提交」才是确认发动。
+ */
 function renderPreativation(pending) {
   const pa = state.preactivation;
   const box = $("t-options");
@@ -1065,39 +1234,6 @@ function renderPreativation(pending) {
       box.appendChild(button);
     }
   }
-  if (kind === "seat") {
-    // 座位步的候选在**模态正文里也铺一遍**（U1-03 / 评审 P0）：模态窗口居中后可能挡住
-    // 环上某几个座位，只靠点场上武将就点不到被挡的那个。两份入口调同一个
-    // `selectPreativationSeat`；牌桌不再 inert（D8），环上高亮照旧。
-    // 候选只读服务端（预览回包 / 清单的静态行）。取不到 ⇒ **一个都不画**：兜底成
-    // "所有存活座位"就是在猜合法性（spec §6 #5 明禁），而且会把 400 直接送到玩家脸上。
-    const seats = (preactivationOptions(pa, pa.cursor) || [])
-      .map((value) => Number(String(value).slice(SEAT_PREFIX.length)))
-      .filter((seat) => Number.isInteger(seat));
-    const answer = pa.answers[pa.cursor];
-    for (const seat of seats) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "opt seat-opt";
-      button.setAttribute("data-seat", String(seat));
-      const chosen = answer.values.includes(seat);
-      if (chosen) button.classList.add("sel");
-      const hero = (state.view && state.view.heroes && state.view.heroes[seat]) || "";
-      button.textContent = `座位 ${seat}${hero ? ` ${hero}` : ""}${chosen ? " ✓" : ""}`;
-      button.addEventListener("click", () => selectPreativationSeat(seat));
-      box.appendChild(button);
-    }
-  }
-  if (kind === "card" || (kind === "seat" && preactivationSeatMulti(step))) {
-    // 多选座位步与选牌步共用同一个「下一步」入口（W7-01b）：单选座位步仍由点座位 / 点
-    // 模态里的座位按钮直接自动进下一步，不铺按钮。
-    const next = document.createElement("button");
-    next.type = "button";
-    next.className = "opt";
-    next.textContent = "下一步";
-    next.disabled = !preactivationAdvanceAllowed(pa, pa.cursor);
-    next.addEventListener("click", advancePreativation);
-    box.appendChild(next);
-  }
+  // 座位步 / 选牌步到此为止：两者都是**牌桌表面**，提示区一个按钮都不铺（spec §2 Q12）。
   $("btn-cancel").disabled = false;
 }

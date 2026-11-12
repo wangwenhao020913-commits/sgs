@@ -15,7 +15,9 @@
  *    `table.js:renderDiscardPanel()` 从表体同一份视图画。
  *
  * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`）。另外两个
- * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形），
+ * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形；
+ * table-ux-overhaul 票 08 起**只有**牌桌承载不了的那一步借容器——选项 ≥3 项 / 复选，
+ * 判据 = `preactivation.js:preactivationDialogKind`，座位步与选牌步一律留在牌桌上），
  * 以及五谷整段结算的**持久展示**（无懈 / 反无懈的 RESPOND 期间只展示亮牌 + 目标条，
  * 见 `persistentRevealPending`）。同一问的重复渲染只更新正文、保留折叠；换问（新 `seq`）
  * 或表面不再是弹窗时**关旧开新 / 直接关**，
@@ -419,9 +421,13 @@ function selectionEnabled(view = state.view) {
 }
 
 /** 当前是否需要询问弹窗：本地态（预发动清单）优先，其次看这一步的表面，最后才是
- *  五谷的**持久展示**（表面是牌桌、但结算帧还活着）。`null` = 不需要。 */
+ *  五谷的**持久展示**（表面是牌桌、但结算帧还活着）。`null` = 不需要。
+ *
+ *  **预发动不是弹窗**（table-ux-overhaul 票 08 / spec §2 Q12）：预发动期间只有牌桌承载
+ *  不了的那一步开窗——判据住 `preactivation.js:preactivationDialogKind`（只看步骤形状：
+ *  选项 ≥3 项 / 复选），座位步与选牌步一律留在牌桌上点。 */
 function dialogWantedKind(pending) {
-  if (state.preactivation) return "preactivation";
+  if (state.preactivation) return preactivationDialogKind();
   const stepKind = stepDialogKind(pending);
   if (stepKind !== null) return stepKind;
   return persistentRevealPending(pending) ? DIALOG_KINDS.reveal : null;
