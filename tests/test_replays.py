@@ -1067,15 +1067,15 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "32-five-grains-selection": (605191, "ab41daf266306c95da82a44698f714a58d26fdb8e5cac446cd5b1c5c31630462"),
     "33-borrowed-sword-use-slash": (1149248, "e69ee120a8e4f3df3beebd29f8ee80b78f652482e29422faf21b9cd3b702aecb"),
     "34-dismantle-or-snatch-equip-judge": (378817, "b93d65499fc674a84113879903f1b539afc496d47eccf1963c79a2ee951362a7"),
-    "35-hero-damage-points": (527522, "bf07fb64d69170a6e351447d58084e5a2ed5bc2f0a737bc40f82fe1cd5209b30"),
-    "36-hero-rejudge-cycle": (437144, "caa55e5e74376aab370c6bcb0dd68d7b86c55c0af43458d378b91e0f46871816"),
+    "35-hero-damage-points": (530701, "cd90e981d8ebbf6205bba4e06e177c1e8b12936f193b51330e7c07dfeca2e477"),
+    "36-hero-rejudge-cycle": (441569, "86fa7bf5b852da57998beecae873cec7cecca42d38b11fa421decbc53d27993c"),
     "37-hero-lord-request": (625069, "c19bce9b108f7b9e1ee2f57811a5ab7ea7f7f68c5af7eebbd89f808f2e09fc77"),
-    "38-hero-lost-cards": (857045, "8e7dad34b0e4b5bf4c4d032efa28d8ab402dfcf5cbff66699b3a27131fb524a9"),
-    "39-hero-target-pool": (2586144, "3409eb95b9a2460fc9b844e5eb521fe537f6c2f600630c11bd4b18fc400ed928"),
-    "40-hero-wushuang": (359502, "ebfbda32bae631d9533396ac3e5eab51e8c75e7f0c778c86709c668a70b90ca7"),
-    "41-hero-guanxing": (815491, "3cd14e5c0364b9cff3ff0f3ca3b396e871ba158363434e96af54944dde62db7f"),
+    "38-hero-lost-cards": (863306, "91b3f25add8c19f6cd18afa8c904ea839298ef4259b359513f674d067fddf789"),
+    "39-hero-target-pool": (2600758, "08dc0c308cc0cd24397f60f68597c27874af7362a2ab5e42d07057a9473cdc79"),
+    "40-hero-wushuang": (361264, "eea7e9a1aa54a74b99828f21bd8cbfa0f5aa24f03178f18f17b69ef4f90a4e71"),
+    "41-hero-guanxing": (818469, "e0dc21aa2b289e27bb67db955d1227e4490d090d4096b8635f180a93d7ddbb97"),
     "42-hero-transform": (835090, "ae39e725a5c94a2a8fa08b95e914c6618a14c0223b44b3372dd22c95c9263f75"),
-    "43-double-sword-opposite-gender": (387810, "426a5647e9332c78458ed737863eae5a297406f9c28ce9b0cbeb9f2914cd2aec"),
+    "43-double-sword-opposite-gender": (392753, "c4c4908a1553ac3a826cc778f5054bb5fb54593aa23dfbc83e984b948d0df630"),
     "44-preactivation-cancel-no-side-effect": (193552, "c1dd71f3e039631927404af475017579c58792bde78dc5f7208bb297c75973e9"),
     "45-borrowed-sword-auto-handover": (484984, "fa0fa716de76231743f3fffc717e9d6a9fadbaffaaebc927bf6df274eb8be6b4"),
     "46-borrowed-sword-transform-slash": (1146397, "7a5aa42497ab98f549272393803374fd710840825c5d8e339624422883ac16a4"),
@@ -1110,6 +1110,15 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
 ``scenarios.py`` 记录的纪律**重新选种**，``29 / 42`` 等未受影响的基准不动。重录清单与
 "哪条基准 / 变了什么 / 为什么"写在票面 ``## Answer`` 与 ``tests/replays/README.md``
 的「重录登记」一节。
+**第三次显式重基线（2026-11-13，sp5-pangtong-liuqi 报障修复，用户已签）**：
+「摸牌」对 `MOVE_AFTER` 可见——**摸牌阶段的摸牌**与**反贼奖惩摸牌**改走移动入口
+（原先用 `move_card` 旁路），否则「获得牌 / 摸牌后」类技能（【清俭】【展骥】）在这些路径上
+静默不触发。记录流因此**只多出** `MOVE_AFTER` 时机记录（每次摸牌一条），**query / action /
+delta / frame 一条不变**（逐条核对过：35 +8、36 +11、38 +16、39 +36、40 +4、41 +7、43 +12、
+50 +3、58 +1）。七条在冻结表里的（`35 / 36 / 38 / 39 / 40 / 41 / 43`）按新字节重基线；
+`50 / 58` 不在本表、由逐文件比对覆盖。`goals.py` 判据**一字未改、一条未放宽**；其余 40 条
+标准 108 基准逐字节不变（惰性守卫：没有 MOVE_AFTER 提供者时一条记录都不落）。重录清单见
+`tests/replays/README.md` 的「重录登记：摸牌对 MOVE_AFTER 可见」一节。
 """
 
 

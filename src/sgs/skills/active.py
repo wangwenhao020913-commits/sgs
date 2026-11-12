@@ -7569,7 +7569,9 @@ def _guolun_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 GUOLUN_FLOW = SkillFlow(
     name="guolun",
     steps=(
-        PickSeats(lo=1, hi=1, pool=_guolun_targets, key="seat"),
+        # 发动之后「展示一名其他角色的一张手牌」是**强制**的（「可以」只修饰发动与
+        # 交换那两句）⇒ 两个步骤都不许放弃（用户 2026-11-13 报障的同一类）。
+        PickSeats(lo=1, hi=1, pool=_guolun_targets, key="seat", optional=False),
         # 盲挑目标的一张**手牌**：应答者是庞统（``actor`` 缺省），选择面铺目标的隐藏槽。
         PickCards(
             zones=(Zone.HAND,),
@@ -7578,6 +7580,7 @@ GUOLUN_FLOW = SkillFlow(
             key="card",
             face=_guolun_face,
             reveal_hand=False,
+            optional=False,
         ),
     ),
     effect=_guolun_effect,

@@ -205,11 +205,15 @@ TAGGED = 2
 """其中被挂上标签的那一张（弃牌阶段不该再数它）。"""
 
 
-def _count_state(*, hand=HAND, hp: int = 4, turn_seat: int = 0):
-    """座位 0 有 ``hand``、体力 ``hp``（⇒ 上限 = hp）的构造局面。"""
+def _count_state(*, hand=HAND, hp: int = 4, turn_seat: int = 0, hero: str | None = None):
+    """座位 0 有 ``hand``、体力 ``hp``（⇒ 上限 = hp）的构造局面。
+
+    ``hero``：需要让**标签的来源实例真实存在**时给（``prune_card_tags`` 会清掉"来源实例已
+    消失"的标签——见下条用例；随手挂一个不存在的来源会被第一次移动清掉）。
+    """
     return build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=hp, hand=hand), SeatSpec()],
+        seats=[SeatSpec(hp=hp, hand=hand, hero=hero), SeatSpec()],
         deck=tuple(range(20, 40)),
         turn_seat=turn_seat,
     )
@@ -240,7 +244,9 @@ def test_discarding_the_tagged_card_does_not_end_the_discard_phase_early() -> No
     于是出现"计数仍 > 上限"的非法边界（M6 票 12 的混合局由 fuzz 抓到）。判据 = 询问
     次数与最终边界：第一次弃掉带标签的牌之后还要再问，直到计数回落到上限。
     """
-    state = _count_state(hand=(0, 1, 2, 3, 4, 5))
+    # 座位 0 给界甄姬：【洛神】是标签的来源实例，真实存在 ⇒ `prune_card_tags` 不会清它
+    # （sp5-pangtong-liuqi 报障修复后，摸牌阶段的摸牌也经移动入口 ⇒ 每次移动都会 prune）
+    state = _count_state(hand=(0, 1, 2, 3, 4, 5), hero="jie_zhenji")
     state.card_tags[TAGGED] = (_tag(CardTagType.LUOSHEN_HAND),)
     engine = Engine.from_state(state, seed=7)
     queries = []

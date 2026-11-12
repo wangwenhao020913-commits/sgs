@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from sgs.data import (
+    Identity,
     Kingdom,
     RuleConfig,
     Suit,
@@ -360,6 +361,9 @@ class _GuanweiScript:
                 if isinstance(action, ActivateSkill)
             )
         if query.kind == "SELECT_CARDS":
+            self.pass_offered = any(
+                isinstance(action, Pass) for action in query.legal_actions
+            )
             for index, slot in enumerate(query.slots):
                 card = slot.card
                 if card is not None and card.card_id == self.discard_card:
@@ -570,6 +574,9 @@ class _GuolunScript:
             )
         if query.kind == "SELECT_OPTION":
             self.seat_queries += 1
+            self.seat_pass_offered = any(
+                isinstance(action, Pass) for action in query.legal_actions
+            )
             for action in query.legal_actions:
                 if isinstance(action, SelectOption) and action.choice == f"seat:{self.target}":
                     return action
@@ -814,43 +821,102 @@ class _UseOneCardScript:
         return PassPlayer().respond(query)
 
 
+def _grant_zhanji(engine, seat: int = 0) -> None:
+    """把 ☆【展骥】直接授予座位（它只经"获得"存在；送丧那条路径由 §送丧 的用例覆盖）。"""
+    engine.state.player(seat).granted_skills.append(ZHANJI)
+
+
+def _zhanji_engine(*, hand=(), seed: int = 34):
+    seats = [
+        SeatSpec(hero=PANGTONG, hand=tuple(hand), hp=3, hp_max=3),
+        SeatSpec(),
+        SeatSpec(),
+    ]
+    used = set(hand)
+    deck = tuple(
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in used
+    )
+    return Engine.from_state(_table(seats, deck=deck), seed=seed)
+
+
 def test_zhanji_draws_one_more_card_when_the_owner_draws_in_the_play_phase():
-    """展骥：出牌阶段内**摸牌** ⇒ 单独再摸一张（不是把本次摸牌数 +1）。"""
-    card = _WUZHONG
-    seats = [
-        SeatSpec(hero=PANGTONG, hand=(card,), hp=3, hp_max=3),
-        SeatSpec(),
-        SeatSpec(),
-    ]
-    engine = Engine.from_state(
-        _table(seats, deck=deck_excluding(PACK, card)), seed=34
-    )
-    script = _UseOneCardScript(engine.state.card(card), target=0)  # 无中生有对自己
-    run_queries(
-        engine,
-        [script, PassPlayer(), PassPlayer()],
-        lambda current: len(current.state.player(0).hand) == 5,
-    )
-    # 起手 1 + 摸牌阶段 2 - 用掉 1 + 无中 2 + 展骥 1
-    assert len(engine.state.player(0).hand) == 5, "无中摸 2 ⇒ 展骥再单独摸 1"
-    assert engine.state.player(0).hand.count(card) == 0
+    """展骥：**每一次**"非展骥"摸牌都单独再摸 1 张（不是把本次摸牌数 +1）。
+
+    同一局面跑两遍（授 / 不授展骥），在两个观测点各比一次：
+    ① 出牌阶段开始（刚过摸牌阶段）② 无中结算完（回到出牌阶段）。
+    差值 = 该区间里"独立的摸牌事件"数（本段 = 摸牌阶段 1 次 + 无中 1 次 = 2）。
+    """
+    observed = {}
+    for granted in (False, True):
+        card = _WUZHONG
+        engine = _zhanji_engine(hand=(card,), seed=34)
+        if granted:
+            _grant_zhanji(engine)
+        script = _UseOneCardScript(engine.state.card(card), target=0)  # 无中生有对自己
+        run_queries(
+            engine,
+            [script, PassPlayer(), PassPlayer()],
+            lambda current: current.pending is not None
+            and current.pending.kind == "PLAY_PHASE",
+        )
+        play_start = len(engine.state.player(0).hand)
+        script.used = False
+        run_queries(
+            engine,
+            [script, PassPlayer(), PassPlayer()],
+            lambda current: script.used
+            and current.pending is not None
+            and current.pending.kind == "PLAY_PHASE",
+        )
+        observed[granted] = (play_start, len(engine.state.player(0).hand))
+    assert observed[False] == (3, 4), "起手 1 + 摸牌阶段 2 = 3；无中摸 2、用掉 1 ⇒ 4"
+    assert observed[True] == (4, 6), "两次独立摸牌各 +1（摸牌阶段 / 无中）"
 
 
-def test_zhanji_does_not_trigger_outside_the_play_phase():
-    """「于出牌阶段内」按自己的回合读：摸牌阶段摸的 2 张不触发。"""
-    seats = [
-        SeatSpec(hero=PANGTONG, hp=3, hp_max=3),
-        SeatSpec(),
-        SeatSpec(),
-    ]
-    engine = Engine.from_state(_table(seats, deck=deck_excluding(PACK)), seed=35)
-    run_queries(
-        engine,
-        [PassPlayer() for _ in range(3)],
-        lambda current: current.pending is not None
-        and current.pending.kind == "PLAY_PHASE",
-    )
-    assert len(engine.state.player(0).hand) == 2, "摸牌阶段没有多摸（展骥不触发）"
+def test_zhanji_triggers_on_the_draw_phase_draw():
+    """**任何"非展骥"摸牌都触发**（用户 2026-11-13 报障）：摸牌阶段摸 2 张 ⇒ 再单独摸 1 张。"""
+    hands = {}
+    for granted in (False, True):
+        engine = _zhanji_engine(seed=35)
+        if granted:
+            _grant_zhanji(engine)
+        run_queries(
+            engine,
+            [PassPlayer() for _ in range(3)],
+            lambda current: current.pending is not None
+            and current.pending.kind == "PLAY_PHASE",
+        )
+        hands[granted] = len(engine.state.player(0).hand)
+    assert hands[True] == hands[False] + 1, "摸牌阶段 2 张 ⇒ 展骥再单独摸 1 张"
+
+
+def test_zhanji_triggers_on_the_rebel_kill_reward_draw():
+    """奖惩摸牌也是一次"摸牌"（用户 2026-11-13 报障）：杀反贼摸 3 张 ⇒ 展骥再 +1。"""
+    hands = {}
+    for granted in (False, True):
+        seats = [
+            SeatSpec(hero=PANGTONG, hp=3, hp_max=3, identity=Identity.LORD),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ]
+        state = build_state(
+            pack=PACK,
+            seats=seats,
+            deck=deck_excluding(PACK),
+            rule_config=RuleConfig(player_count=4),
+        )
+        engine = Engine.from_state(state, seed=36)
+        if granted:
+            _grant_zhanji(engine)
+        declare_death(engine, 1, killer=0)
+        run_queries(
+            engine,
+            [PassPlayer() for _ in range(4)],
+            lambda current: ran_timing(current, Timing.DEATH_AFTER),
+        )
+        hands[granted] = len(engine.state.player(0).hand)
+    assert hands[True] == hands[False] + 1, "奖惩 3 张 ⇒ 展骥单独再摸 1 张"
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +932,7 @@ class _WenjiActor:
         self.target = target
         self.activations = 0
         self.seat_queries = 0
+        self.seat_pass_offered = False
         self.played = False
 
     def respond(self, query):
@@ -876,6 +943,9 @@ class _WenjiActor:
             )
         if query.kind == "SELECT_OPTION":
             self.seat_queries += 1
+            self.seat_pass_offered = any(
+                isinstance(action, Pass) for action in query.legal_actions
+            )
             for action in query.legal_actions:
                 if isinstance(action, SelectOption) and action.choice == f"seat:{self.target}":
                     return action
@@ -900,9 +970,13 @@ class _WenjiGiver:
     def __init__(self, *, give: int):
         self.give = give
         self.dodges = 0
+        self.pass_offered = False
 
     def respond(self, query):
         if query.kind == "SELECT_CARDS":
+            self.pass_offered = any(
+                isinstance(action, Pass) for action in query.legal_actions
+            )
             for index, slot in enumerate(query.slots):
                 if slot.card is not None and slot.card.card_id == self.give:
                     for action in query.legal_actions:
@@ -948,6 +1022,24 @@ def test_wenji_takes_a_card_and_blocks_the_same_name_for_the_turn():
     assert engine.state.player(0).designated_other_this_turn is True, "【杀】指定了别人"
     assert giver.dodges == 0, "同名牌不能被其他角色响应（连【闪】窗口都不产生）"
     assert engine.state.player(1).hp == 2, "【杀】直接命中（3 → 2）"
+
+
+def test_wenji_the_giver_must_hand_over_a_card():
+    """「令」且无「可以」⇒ 发起之后目标**必交**（用户 2026-11-13 报障）。
+
+    两个步骤都不给 `Pass`：唯一的放弃出口是**发动**那一问（牌面的「你可以」）。
+    """
+    slash = _card_by_type("slash")
+    engine, actor, giver = _wenji_engine(give=slash, play_after=None)
+    run_queries(
+        engine,
+        [actor, giver, PassPlayer()],
+        lambda current: current.state.player(0).wenji_names == ("slash",),
+    )
+    assert actor.seat_pass_offered is False, "选座位这一步没有「放弃」"
+    assert giver.pass_offered is False, "交牌这一步没有「放弃」（令 = 必交）"
+    assert slash not in giver.hand if hasattr(giver, "hand") else True
+    assert engine.state.player(0).wenji_names == ("slash",), "牌确实交到了刘琦手里"
 
 
 def test_wenji_does_not_block_a_card_with_another_name():

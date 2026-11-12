@@ -352,6 +352,12 @@ _DEAD_CARDS_CLEARED = "dead_cards_cleared"
 **状态巧合**，钩子若在结算中途往死者的区里放了牌，第二次进来会把它当成 Ⅰ.a 的遗漏。
 """
 
+_REWARD_DRAWN = "reward_drawn"
+"""帧私有：反贼奖惩**摸到的那批牌**（``draw_from_deck`` 不幂等 ⇒ 首次进入即定格）。"""
+
+_REWARD_SHORT = "reward_short"
+"""帧私有：这批奖惩摸牌**短摸了**（平局判定只做一次，重入不再重判）。"""
+
 _LORD_PENALTY_GROUPS = "lord_penalty_groups"
 """死亡帧私有槽名：主公杀忠臣那一次弃置要搬的**来源区分组**（票 33）。
 
@@ -1528,8 +1534,7 @@ class Engine:
         dead = frame.data["target"]
         dead_identity = self.state.player(dead).identity
         if dead_identity is Identity.REBEL:
-            self._reward_killer_draws(frame, killer)
-            return None
+            return self._reward_killer_draws(frame, killer)
         if dead_identity is Identity.LOYALIST and self.state.player(killer).identity is Identity.LORD:
             return self._lord_discards_everything(frame, killer)
         return None
@@ -1578,34 +1583,47 @@ class Engine:
             frame.data[_LORD_PENALTY_MOVED] = moved
         return None
 
-    def _reward_killer_draws(self, frame: Frame, killer: int) -> None:
+    def _reward_killer_draws(self, frame: Frame, killer: int) -> Control:
         """杀死反贼的奖惩摸牌：与摸牌阶段**同一原语、同一洗牌子流**（票 14 §5）。
 
         短摸（两堆皆空）⇒ 置 ``both_decks_empty`` 平局并**覆盖**已定胜负；
         摸到几张进几张（可能 0 张、不发 ``card_move``）。
+
+        **经移动入口搬牌**（sp5-pangtong-liuqi 报障修复）：这是一次**存活角色**的"摸牌"，
+        与主公弃牌（票 33）同一条道理——``MOVE_AFTER`` 必须派发，否则"获得牌 / 摸牌后"类
+        技能（【清俭】【展骥】…）在这条路径上静默不触发。钩子提问时本方法返回 ``"stay"``，
+        由 ``apply_death_rewards`` → ``death_settle_cards`` 原样透传。
+
+        **重入按"定格的这批牌"续**（:data:`_REWARD_DRAWN`）：``draw_from_deck`` 不幂等，
+        故摸到哪几张在首次进入时就写进帧私有；续跑只重交同一批牌（搬牌本身由
+        :data:`_MOVE_DONE` 的重入判据挡掉）。洗牌 delta 与平局判定各只做一次。
         """
-        drawn = draw_from_deck(self.state, REBEL_REWARD_DRAW, self._shuffle)
-        if drawn.shuffle is not None:
-            self.emit_delta(drawn.shuffle, frame_id=frame.frame_id, depth=self.stack.depth)
-        if drawn.cards:
-            ctx = EffectContext(
-                actor=killer,
-                source=killer,
-                targets=(frame.data["target"],),
-                frame_id=frame.frame_id,
-                depth=self.stack.depth,
-            )
-            delta = move_card(
-                self.state,
-                ctx,
-                drawn.cards,
+        refs = frame.data.get(_REWARD_DRAWN)
+        short = bool(frame.data.get(_REWARD_SHORT))
+        if refs is None:
+            drawn = draw_from_deck(self.state, REBEL_REWARD_DRAW, self._shuffle)
+            if drawn.shuffle is not None:
+                self.emit_delta(
+                    drawn.shuffle, frame_id=frame.frame_id, depth=self.stack.depth
+                )
+            refs = tuple(drawn.cards)
+            short = len(drawn.cards) < REBEL_REWARD_DRAW
+            frame.data[_REWARD_DRAWN] = refs
+            frame.data[_REWARD_SHORT] = short
+        if refs:
+            control = self.move_in_frame(
+                frame,
+                refs,
                 to_zone=ZoneRef(Zone.HAND, killer),
                 reason=MoveReason.DRAW,
                 owner=killer,
+                actor=killer,
             )
-            self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
-        if len(drawn.cards) < REBEL_REWARD_DRAW:
+            if control == "stay":
+                return "stay"
+        if short:
             self.check_game_end(draw_reason="both_decks_empty")
+        return None
 
     def pop_frame(self) -> Frame:
         frame = self.stack.pop()
@@ -6898,6 +6916,10 @@ class Engine:
             return "stay"
         if self._turn_data.get("phase_draw_drawn"):
             # 钩子在同一阶段体里提过问：重入时只补完基础摸牌、不重摸。
+            # 短摸的平局判定若因挂起被推迟到这里，补做一次（只做一次）。
+            if self._turn_data.pop("phase_draw_short", False):
+                self.check_game_end(draw_reason="both_decks_empty")
+                self.finish()
             return None
         self._turn_data["phase_draw_drawn"] = True
         # M6 票 01：阶段体钩子可以把**基础摸牌数**改写（【突袭】0 = 放弃摸牌、【裸衣】少一张）。
@@ -6907,17 +6929,27 @@ class Engine:
         if drawn.shuffle is not None:
             # 重洗只发**一条** deck_shuffle（记洗后顺序），不另发牌移动事件（票 08 §5 / 票 23）。
             self.emit_delta(drawn.shuffle)
+        short = len(drawn.cards) < count
         if drawn.cards:
-            delta = move_card(
-                self.state,
-                EffectContext(actor=seat),
+            # **经移动入口搬牌**（sp5-pangtong-liuqi 报障修复）：摸牌阶段的摸牌是**存活
+            # 角色**的"摸牌"，「获得牌 / 摸牌后」类技能（【清俭】【展骥】…）按规则必须被
+            # 派发。无承载帧（回合环步骤）⇒ 走 ``frame=None`` 的帧外分支，记录坐标仍取
+            # ``frame_id=0``，与改写前那条 ``card_move`` 逐字相同；没有 MOVE_AFTER 提供者时
+            # 惰性守卫一条记录都不落（47 条金录像因此不变）。
+            control = self.move_in_frame(
+                None,
                 drawn.cards,
                 to_zone=ZoneRef(Zone.HAND, seat),
                 reason=MoveReason.DRAW,
                 owner=seat,
+                actor=seat,
             )
-            self.emit_delta(delta)
-        if len(drawn.cards) < count:
+            if control == "stay":
+                # 钩子提问挂起：续跑由 ``_flush_pending_move`` 接管，本步重入时不再重摸；
+                # 短摸的平局判定留到重入（否则会被"已摸过"的早退吞掉）。
+                self._turn_data["phase_draw_short"] = short
+                return "stay"
+        if short:
             # 短摸 ⟺ 两堆皆空：弃牌堆非空时 draw_from_deck 已经重洗补足（票 23）。
             self.check_game_end(draw_reason="both_decks_empty")
             self.finish()

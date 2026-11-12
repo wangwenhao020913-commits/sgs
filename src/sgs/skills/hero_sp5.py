@@ -526,14 +526,15 @@ SONGSANG_FLOW = SkillFlow(name="songsang", steps=(), effect=_songsang_effect)
 
 
 def _zhanji_condition(host: Any, frame: Frame) -> bool:
-    """触发条件：**自己**于**自己的出牌阶段**内**摸牌**（非展骥自己摸的 + 非无点数限制面）。
+    """触发条件：**自己**摸了牌（"非因展骥"）。
 
-    三个判据都读帧私有载荷 / 座位事实，不读"引擎今天怎么排"：
+    两个判据都读帧私有载荷，不读"引擎今天怎么排"：
     ① ``MoveEvent.reason is MoveReason.DRAW``（**摸牌**——不是"获得牌"：顺手牵羊 / 交出 /
     置入装备区都不算，"摸牌"只认牌堆 → 手牌）；
-    ② 落点 = 自己的手牌（``to_zone``）；
-    ③ ``state.turn_seat == owner and state.phase is Phase.PLAY``（"于出牌阶段内"按默认读法
-    （二）④ 读**自己的**回合，别人的回合里被令摸牌不算）。
+    ② 落点 = 自己的手牌（``to_zone``）。
+
+    **不拦阶段 / 不拦回合**（用户 2026-11-13 报障：摸牌阶段摸牌、击败反贼的奖惩摸牌都要
+    触发）——"因此技能"才是唯一的排除面，见 :data:`_ZHANJI_GUARD`。
     """
     owner = frame.data.get(MATCH_OWNER_KEY)
     if owner is None:
@@ -544,9 +545,10 @@ def _zhanji_condition(host: Any, frame: Frame) -> bool:
         return False
     if event.to_zone.zone is not Zone.HAND or event.to_zone.seat != owner:
         return False
-    state = host.state
-    if state.turn_seat != owner or state.phase is not Phase.PLAY:
-        return False
+    # **任何"非展骥"的摸牌都触发**（用户 2026-11-13 报障：摸牌阶段 / 击败反贼的奖惩摸牌
+    # 同样触发）——牌面写的「于出牌阶段内」不按"自己的出牌阶段"拦，判据只排除"因展骥
+    # 自己这一摸"（`_ZHANJI_GUARD`）。账本 §5.12 记录这处实现口径。
+    del host
     return not frame.data.get(_ZHANJI_GUARD)
 
 
@@ -677,7 +679,9 @@ def _wenji_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
 WENJI_FLOW = SkillFlow(
     name="wenji",
     steps=(
-        PickSeats(lo=1, hi=1, pool=_wenji_targets, key="seat"),
+        # 「令一名其他角色交给你一张牌」：**令**、且没有「可以」⇒ 发起后目标必交
+        # （用户 2026-11-13 报障：唯一可放弃的出口是**发动**那一问，不是这两步）。
+        PickSeats(lo=1, hi=1, pool=_wenji_targets, key="seat", optional=False),
         # L1092：应答者 / 选择面 = 目标本人（自己的手牌 + 装备区，可见可选）。
         PickCards(
             zones=(Zone.HAND, Zone.EQUIP),
@@ -687,6 +691,7 @@ WENJI_FLOW = SkillFlow(
             actor=_wenji_giver,
             face=_wenji_giver,
             reveal_hand=True,
+            optional=False,
         ),
     ),
     effect=_wenji_effect,

@@ -325,7 +325,12 @@ def test_lianying_does_not_fire_while_cards_remain_in_hand():
 
 
 def test_lianying_ignores_the_draw_phase_move():
-    """摸牌（牌堆 → 手牌）不算失去（票 07 §验收 1 的"摸牌把手牌从 0 变 1 不触发"）。"""
+    """摸牌（牌堆 → 手牌）**不算失去**（票 07 §验收 1 的"摸牌把手牌从 0 变 1 不触发"）。
+
+    sp5-pangtong-liuqi 报障修复后，摸牌阶段**派发** ``MOVE_AFTER``（载荷 = 摸到的那几张，
+    ``reason = DRAW``）："获得牌 / 摸牌后"类技能（【清俭】【展骥】）按规则必须看得到它。
+    连营这种"失去牌后"的判据仍是假 ⇒ 不触发、也不多摸。
+    """
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="luxun"), SeatSpec()],
@@ -336,7 +341,9 @@ def test_lianying_ignores_the_draw_phase_move():
     engine = _at_play_phase(Engine.from_state(state, seed=7), players)
 
     assert len(_hand(engine, 0)) == 2, "摸牌阶段把手牌从 0 变 2（没有种牌，保留原样）"
-    assert _move_after_cards(engine) == [], "摸牌不派发'失去牌后'"
+    assert len(_move_after_cards(engine)) == 2, (
+        "摸牌**派发** MOVE_AFTER（载荷 = 摸到的两张）；连营的『失去牌后』判据为假 ⇒ 不再多摸"
+    )
 
 
 def test_lianying_fires_when_a_discard_empties_the_hand():
