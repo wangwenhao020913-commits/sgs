@@ -565,13 +565,15 @@ function renderOwnHandPick(pending) {
  * 点牌 = 收进 / 移出 `state.picks`（面内位置）；「提交」按候选骨架补 `picks` 后送出，
  * 右端「放弃」是候选里真有的那条 `Pass`。
  *
- * **票 09 ③**：面自家声明了 `spec.max_per_suit` 时（业炎四色成本），步骤提示把这条**声明**
- * 说出来，并说明同花色其余牌会置灰——文案只读 `spec`，不抄规则。
+ * **票 15**：这一步一出现就排一次**选牌预览**（`candidates.js:ownPickPreviewSchedule`），
+ * 置灰与拒点都读回包的 `disabled`——文案只说"灰是什么意思"与"取不到候选怎么办"，
+ * 不抄任何规则（同花色的张数上限由后端算，前端零推导）。
  */
 function renderOwnZonePick(pending) {
   const index = (pending.legal_actions || []).findIndex(
     (action) => action.kind === "SelectCards");
   if (index >= 0) state.selectedOption = index;
+  ownPickPreviewSchedule(pending);
   const hint = $("t-target-hint");
   if (hint) {
     const requirement = (pending.context && pending.context.requirement) || "选择牌";
@@ -580,12 +582,11 @@ function renderOwnZonePick(pending) {
     const least = Math.max(1, Number(total[0]) || 1);
     const most = Math.max(least, Number(total[1]) || least);
     const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
-    const suitCap = Number((pending.spec || {}).max_per_suit) || 0;
-    const suitNote = suitCap
-      ? `每种花色至多 ${suitCap} 张，同花色其余牌已置灰；`
-      : "";
-    hint.textContent = `${requirement}：点选${where}中的 ${howMany}，${suitNote}`
-      + "再点「提交」；也可以点右端「放弃」。";
+    const issue = ownPickPreviewIssue(pending);
+    hint.textContent = issue
+      ? `${requirement}：${issue}`
+      : `${requirement}：点选${where}中的 ${howMany}，`
+        + `${ownPickGreyNote(pending)}再点「提交」；也可以点右端「放弃」。`;
   }
   $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
 }
@@ -998,9 +999,9 @@ function dialogSlotPickAllowed(pending) {
  * 上限是服务端 ``spec.total`` 的纯函数（与 :func:`cardFace` 同一条"当前状态的纯函数"纪律），
  * 故这里只做越界拒绝，不做任何跨询问的记账。
  *
- * **票 09 ③**：自己区域面自家声明了 `spec.max_per_suit`（业炎四色成本）时，同花色已满的
- * 其余槽位**点不动**（置灰在 `cardFace`，同一判据 `candidates.js:ownZoneSuitTaken`）。
- * 这是"每花色至多 k 张"这一条**局部约束**的前端止损，完整的后端现算由票 11 / 12 接手。
+ * **票 15**：自己区域的多选面上，"这一槽此刻点不动"由预览回包的 ``disabled`` 回答
+ * （`candidates.js:ownPickSlotDisabled`，与 :func:`cardFace` 的置灰**同一条**判据）——
+ * 置灰不只在样式上，点击口同样拒收。点/取消之后重排一次预览（服务端现算新的一组）。
  */
 function toggleSlotPick(pending, index) {
   // 选择面槽位是牌桌选择入口（D8）：只读态里 no-op，与点牌 / 点座共用一条判据。
@@ -1013,11 +1014,13 @@ function toggleSlotPick(pending, index) {
   const at = state.picks.indexOf(index);
   if (at >= 0) {
     state.picks.splice(at, 1);
+    if (isOwnZonePick(pending)) ownPickPreviewSchedule(pending);
     return;
   }
   if (state.picks.length >= selectionCap(pending)) return;
-  if (ownZoneSuitTaken(pending, index)) return;
+  if (ownPickSlotDisabled(pending, index)) return;
   state.picks.push(index);
+  if (isOwnZonePick(pending)) ownPickPreviewSchedule(pending);
 }
 
 /** 「提供一张 B」面（票 14 §C）：渲染实现**不是**选择面块——候选牌已经在 :func:`renderTable`

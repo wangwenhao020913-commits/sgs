@@ -73,8 +73,8 @@ function cardFace(pending, card) {
   }
   if (isOwnZonePick(pending)) {
     // 多张自己区域面（结姻两张 / 贯石斧两张 / 业炎四色成本等）：点牌收进 `picks`，
-    // 点「提交」送出。**票 09 ③**：面自己声明了 `spec.max_per_suit` 时，同花色已满的
-    // 其余牌置灰（判据 = `candidates.js:ownZoneSuitTaken`，与涉猎 / 两行观看手牌同源）。
+    // 点「提交」送出。**票 15**：哪几张此刻点得动由预览回包的 `disabled` 回答（服务端
+    // 用候选生成期那个枚举器现算），前端不数花色、不推导任何规则。
     const slots = pending.slots || [];
     const slotIndex = slots.findIndex(
       (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
@@ -82,7 +82,7 @@ function cardFace(pending, card) {
     const picked = slotIndex >= 0 && state.picks.includes(slotIndex);
     const total = (pending.spec && pending.spec.total) || [1, 1];
     const full = state.picks.length >= Math.max(1, total[1]);
-    const taken = slotIndex >= 0 && ownZoneSuitTaken(pending, slotIndex);
+    const taken = slotIndex >= 0 && ownPickSlotDisabled(pending, slotIndex);
     return {
       selectable: slotIndex >= 0 && (picked || (!taken && !full)),
       selected: false,

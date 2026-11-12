@@ -8930,47 +8930,89 @@ def test_the_prompt_template_keys_are_real_skill_ids_and_real_step_names() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_the_own_zone_suit_cap_is_one_shared_predicate_reading_the_payload() -> None:
-    """票 09 ③：业炎四色的同花色置灰 = **前端止损**，静态面只允许一条判据。
+def test_the_own_zone_suit_cap_reads_the_pick_preview_instead_of_counting_suits() -> None:
+    """票 15：自家手牌面的置灰 = **读预览回包的** ``disabled``，前端**零花色推导**。
 
-    行为归 `ui_smoke.mjs`（`U-YS-01a..e`），这里钉结构：
+    行为归 `ui_smoke.mjs`（`U-YS-01a..e` + `U-YS-02`），这里钉结构。票 09 的止损
+    （`candidates.js:ownZoneSuitTaken` + `reveal.js:suitSlotState`）在本票**退役**，
+    故这四条同时成立：
 
-    - 判据只有一处实现：`candidates.js:ownZoneSuitTaken`，读服务端声明 `spec.max_per_suit`
-      （前端不写死"同花色一张"），同花色计数**复用**涉猎 / 两行观看手牌那份
-      `reveal.js:suitSlotState`（不另写第二套）；
+    - `ownZoneSuitTaken` 在 `static/` 里**一处都不剩**，`max_per_suit` / `suitSlotState`
+      这三个自家区域文件里也不再出现（否则就是"前端又数了一遍花色"）；
+    - 判据只有一处实现：`candidates.js:ownPickSlotDisabled`，读预览回包的
+      `ownPickPreview.disabled`（服务端现算的 `slot:N` 禁用集）；
     - 两个消费者共用它：`card-face.js:cardFace`（手牌置灰）与 `options.js:toggleSlotPick`
       （拒点——置灰不能只在样式上）；
-    - **止损的退役条件写进了注释**：票 11 / 12 落地后这条判据改读步骤预览、然后删除。
-      本断言同时是"别在这里长出第二份规则"的闸门：`ownZoneSuitTaken` 之外，
-      `candidates.js` 里不许再出现 `max_per_suit` 的计数分支。
+    - **fail-closed**：没有当前这一问的回包（还没回来 / 失败）⇒ 一律 `true`（点不动），
+      **不许**退回"全都点得动"（`spec §6` 不变量 5）。这条与前者是同一函数的两个分支，
+      故本断言同时是"别在这里长出第二份规则"的闸门。
     """
-    candidates = _strip_js_comments((STATIC_DIR / "candidates.js").read_text(encoding="utf-8"))
-    card_face = _strip_js_comments((STATIC_DIR / "card-face.js").read_text(encoding="utf-8"))
-    options = _strip_js_comments((STATIC_DIR / "options.js").read_text(encoding="utf-8"))
+    static_dir = STATIC_DIR
+    candidates_all = (static_dir / "candidates.js").read_text(encoding="utf-8")
+    candidates = _strip_js_comments(candidates_all)
+    card_face = _strip_js_comments((static_dir / "card-face.js").read_text(encoding="utf-8"))
+    options = _strip_js_comments((static_dir / "options.js").read_text(encoding="utf-8"))
 
-    taken = _js_function(candidates, "ownZoneSuitTaken")
-    assert "isOwnZonePick(pending)" in taken, f"只在自己区域的直选面上生效：{taken}"
-    assert "spec || {}).max_per_suit" in taken, f"读服务端声明，不写死花色张数：{taken}"
-    assert "suitSlotState(pending, index) === \"taken\"" in taken, (
-        f"同花色计数复用涉猎那一份（不另写第二套）：{taken}"
+    # ① 止损一处都不剩：三个文件的**源码**里没有花色推导的入口。
+    for name in ("candidates.js", "card-face.js", "options.js"):
+        source = _strip_js_comments((static_dir / name).read_text(encoding="utf-8"))
+        assert "ownZoneSuitTaken" not in source, f"{name} 还留着票 09 的止损判据"
+        assert "max_per_suit" not in source, (
+            f"{name} 还在读 spec.max_per_suit（前端不许自己推导花色上限）"
+        )
+        assert "suitSlotState" not in source, (
+            f"{name} 还在数花色（`suitSlotState` 是涉猎 / 两行观看手牌那一份，不是自家手牌面）"
+        )
+
+    # ② 唯一判据读的是**回包**：`disabled` 是服务端现算的 `slot:N` 集合。
+    disabled = _js_function(candidates, "ownPickSlotDisabled")
+    assert "ownPickPreviewEnabled(pending)" in disabled, f"先在通道之外不拦：{disabled}"
+    assert "ownPickPreview.disabled" in disabled, f"读的是预览回包的禁用集：{disabled}"
+    assert "`slot:${index}`" in disabled or "slot:${index}" in disabled, (
+        f"回包与请求同一套文本口径（slot:N）：{disabled}"
     )
-    assert "票 11" in (STATIC_DIR / "candidates.js").read_text(encoding="utf-8"), (
-        "退役条件（票 11 / 12 接手后删除本条判据）必须写在判据旁边"
+    assert "state.picks.indexOf(index) >= 0" in disabled, (
+        f"已选的槽位恒可点（再点 = 取消，否则退不出来）：{disabled}"
+    )
+    assert "return true" in disabled, (
+        f"fail-closed：没有当前这一问的回包就是「点不动」：{disabled}"
     )
 
+    # ③ 两个消费者共用同一条判据（置灰与拒点同源）。
     face = _js_function(card_face, "cardFace")
-    assert "ownZoneSuitTaken(pending, slotIndex)" in face, f"手牌置灰读同一条判据：{face}"
+    assert "ownPickSlotDisabled(pending, slotIndex)" in face, f"手牌置灰读同一条判据：{face}"
     assert "taken" in face, face
-
     toggle = _js_function(options, "toggleSlotPick")
-    assert "ownZoneSuitTaken(pending, index)" in toggle, (
+    assert "ownPickSlotDisabled(pending, index)" in toggle, (
         f"拒点读同一条判据（置灰不能只在样式上）：{toggle}"
     )
 
-    # 唯一判据：`candidates.js` 里对 `max_per_suit` 的计数只允许出现在 `ownZoneSuitTaken`
-    # 里（其余出现只允许是注释——这里读的是剥掉注释后的源码）。
-    assert candidates.count("max_per_suit") == 1, (
-        f"`candidates.js` 只允许一处读 max_per_suit：{candidates.count('max_per_suit')}"
+    # ④ 预览客户端是票 11 那一套姿态：去抖 + 版本号 + 墙钟超时 + 失败话术。
+    for literal in (
+        "OWN_PICK_PREVIEW_DEBOUNCE_MS",
+        "OWN_PICK_PREVIEW_TIMEOUT_MS",
+        "OWN_PICK_PREVIEW_ERROR",
+        "ownPickPreview.version",
+        "ownPickPreview.retryAt",
+    ):
+        assert literal in candidates, f"预览客户端缺 {literal}（去抖 / 版本号 / 超时 / 重问）"
+    schedule = _js_function(candidates, "ownPickPreviewSchedule")
+    assert "answers_seq: seq" in schedule and "picks:" in schedule, (
+        f"请求体 = 询问序号 + 已选槽位（没有 skill_id）：{schedule}"
+    )
+    assert "setTimeout" in schedule, f"变化要**去抖**，不是点一下就发：{schedule}"
+    request = _js_function(candidates, "requestOwnPickPreview")
+    assert "ownPickPreview.version !== version" in request, (
+        f"过期的回包一律丢弃（版本号只增）：{request}"
+    )
+
+    # ⑤ 通道 = 载荷的 `pick_preview`（键的缺席是保证：合成 / 旧载荷逐行为不变），
+    #    且只服务**多张**的自己区域面（单张面点一张即提交，没有"凑组合"可算）。
+    supported = _js_function(candidates, "ownPickPreviewSupported")
+    assert "pick_preview === true" in supported, f"读服务端的能力声明：{supported}"
+    enabled = _js_function(candidates, "ownPickPreviewEnabled")
+    assert "isOwnZonePick(pending)" in enabled and "isOwnHandSinglePick(pending)" in enabled, (
+        f"只服务多张的自己区域面：{enabled}"
     )
 
 

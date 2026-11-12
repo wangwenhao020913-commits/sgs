@@ -49,7 +49,9 @@ from sgs.state import (
     SelectOptions,
     SelectOptionsContext,
     SelectOptionsQuery,
+    SelectionSpec,
     SkillActivationContext,
+    Slot,
     SubstituteJudgeCard,
     SlotKind,
     SEALED_ZONE_JUDGE,
@@ -1381,6 +1383,63 @@ def _respond_scope(required: str | None) -> CandidateScope | None:
     return None
 
 
+def select_card_picks(
+    slots: Sequence[Slot], spec: SelectionSpec
+) -> tuple[tuple[int, ...], ...]:
+    """``spec`` 允许的**全部**选牌组合（面内下标升序 = 枚举顺序）——选牌面的唯一枚举器。
+
+    两个消费者读**同一份**：
+
+    - 候选生成（:func:`_select_cards`）把它逐条装成 ``SelectCards``，提交时按成员判定收；
+    - 接入层的**选牌预览**（``POST /api/sessions/<id>/preview``，table-ux-overhaul 票 15）
+      反过来回答"给定已选的这几张，哪些槽位还出现在**某个合法补全**里"。界面据此置灰
+      ——【业炎】的四色上限（``max_per_suit``）因此与"提交会被接受"逐项同源，前端不再
+      自己数花色（spec §6 不变量 1）。
+
+    ``max_per_suit`` 是**候选生成期**的收窄（不是提交校验）：只枚举"每种花色至多 k 张"的
+    组合。槽位没有牌面（隐藏槽）时无法判花色——那种询问不该设这个字段，故按"不拦"处理
+    （fail-open 只会在配置错误时出现，不会让非法组合进候选）。
+    """
+    low, high = spec.total
+    per_suit = spec.max_per_suit
+
+    def allowed(picks: tuple[int, ...]) -> bool:
+        if per_suit is None:
+            return True
+        counts: dict[str, int] = {}
+        for index in picks:
+            card = slots[index].card
+            suit = None if card is None else card.suit
+            if suit is None:
+                continue
+            counts[suit] = counts.get(suit, 0) + 1
+            if counts[suit] > per_suit:
+                return False
+        return True
+
+    return tuple(
+        picks
+        for count in range(low, min(high, len(slots)) + 1)
+        for picks in combinations(range(len(slots)), count)
+        if allowed(picks)
+    )
+
+
+def pick_completions(
+    slots: Sequence[Slot], spec: SelectionSpec, picks: Sequence[int]
+) -> tuple[tuple[int, ...], ...]:
+    """**含已选这几张**的全部合法组合（= 这一步此刻还走得下去的补全）。
+
+    ``disabled`` 的判据就落在这上面：不在任何补全里的槽位，玩家再点也凑不出合法答案
+    （选牌预览，table-ux-overhaul 票 15）。判据只有一份——枚举仍由
+    :func:`select_card_picks` 给，"某槽位还点不点得动"**不是**另一条规则。
+    """
+    current = frozenset(int(pick) for pick in picks)
+    return tuple(
+        combo for combo in select_card_picks(slots, spec) if current <= frozenset(combo)
+    )
+
+
 def _select_cards(
     state: GameState, seat: int, answers_seq: int, ctx: SelectContext
 ) -> list[Action]:
@@ -1394,30 +1453,14 @@ def _select_cards(
     判据是**候选生成期**的（不是界面灰显）：不在候选里的组合，引擎会拒；界面读同一份
     候选把同花色的其余牌置灰。槽位没有牌面（隐藏槽）时无法判花色——那种询问不该设这个
     字段，故按"不拦"处理（fail-open 只会在配置错误时出现，不会让非法组合进候选）。
+
+    枚举本身住在 :func:`select_card_picks`：接入层的选牌预览（票 15）读**同一个**函数回答
+    "这一组还能怎么补全"，故"预览说点得动"与"候选里有这条"不可能各说一套。
     """
     del state, seat
-    low, high = ctx.spec.total
-    per_suit = ctx.spec.max_per_suit
-
-    def allowed(picks: tuple[int, ...]) -> bool:
-        if per_suit is None:
-            return True
-        counts: dict[str, int] = {}
-        for index in picks:
-            card = ctx.slots[index].card
-            suit = None if card is None else card.suit
-            if suit is None:
-                continue
-            counts[suit] = counts.get(suit, 0) + 1
-            if counts[suit] > per_suit:
-                return False
-        return True
-
     actions: list[Action] = [
         SelectCards(picks=picks, answers_seq=answers_seq)
-        for count in range(low, min(high, len(ctx.slots)) + 1)
-        for picks in combinations(range(len(ctx.slots)), count)
-        if allowed(picks)
+        for picks in select_card_picks(ctx.slots, ctx.spec)
     ]
     if ctx.spec.optional:
         actions.append(Pass(answers_seq=answers_seq))

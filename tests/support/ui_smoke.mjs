@@ -652,6 +652,22 @@ const flushPreativationPreview = async () => {
   }
   await new Promise((resolve) => setTimeout(resolve, 25));
 };
+/** table-ux-overhaul 票 15：跑掉**选牌预览**的去抖计时器，再等一次往返。
+ *
+ *  与 :func:`flushPreativationPreview` 同一个垫片纪律（计时器只排队、不自动跑），只是本地态
+ *  住在 `state.ownPickPreview`（自家手牌面的合法性预览）。 */
+const flushOwnPickPreview = async () => {
+  const preview = ui.state.ownPickPreview;
+  const id = preview ? preview.timer : null;
+  if (id !== null && id !== undefined && pendingTimers.has(id)) {
+    const fn = pendingTimers.get(id);
+    pendingTimers.delete(id);
+    timerDelays.delete(id);
+    timerDue.delete(id);
+    if (typeof fn === "function") fn();
+  }
+  await new Promise((resolve) => setTimeout(resolve, 25));
+};
 /** 候选行的文本指纹（U2-03 起界面**不再**把 `legal_actions` 逐条铺成按钮）：
  *  任何一条命中都说明旧的逃生梯又长回来了。 */
 const CANDIDATE_ROW_PATTERN = /发动技能 |选项：|选择座位 |使用【|弃牌（\d|排列（\d/;
@@ -23068,18 +23084,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${pickAnswers.length} action=${JSON.stringify(pickAnswers[0] && pickAnswers[0].body.action)}`);
 }
 
-/* ============ 票 09 ③（spec §1 #6 / §2 Q6）：业炎四色的同花色置灰（前端止损） ============
+/* ============ 票 09 ③ / 票 15（spec §1 #6 / §2 Q6）：业炎四色的置灰改由**后端现算** ============
  *
  * 业炎代价步的面 = `SELECT_CARDS` + `spec.max_per_suit = 1` + 槽位全在**自己手牌**
- * （`skills/active.py` 的 `_yeyan_cost_face`：`reveal_hand=True` 的可见槽）。修复前花色审查
- * 只住在 `reveal.js:isSuitPickStep`（第一道门 = 槽位全在处理区）⇒ 手牌面**整面无置灰**，
- * 四同花只在提交时被 `answer.js` 的逐字段自检挡住。
+ * （`skills/active.py` 的 `_yeyan_cost_face`：`reveal_hand=True` 的可见槽）。票 09 曾在前端
+ * 数花色止损（`candidates.js:ownZoneSuitTaken`）；**票 15 起这条止损退役**：置灰与拒点都读
+ * `POST …/preview` 回包的 `disabled`——端点用候选生成期那个枚举器回答"这一组还能怎么补全"，
+ * 前端零花色推导（spec §6 不变量 1）。
  *
- * 票 09 把它搬进 own-zone 直选判据（`card-face.js:cardFace` 置灰 / `options.js:toggleSlotPick`
- * 拒点，两者共用 `candidates.js:ownZoneSuitTaken`），**只覆盖"每花色至多 k 张"这一条局部
- * 约束**；完整的"每一步都由后端算"由票 11（步骤预览端点）/ 票 12 接手，届时这条置灰退役。
- *
- * 判据只读 `spec.max_per_suit`（服务端声明），前端不写死"同花色一张"。
+ * 本块的服务端替身按**请求里的 picks** 从两条合法组合（`ysCombos`）里挑补全，语义与真端点
+ * 一致；真判据（引擎拒与回包逐项对齐）在 `tests/test_web.py`
+ * `test_the_pick_preview_disables_the_slots_the_engine_would_reject`。
  */
 {
   const ysCards = [
@@ -23094,6 +23109,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const ysPending = {
     kind: "SELECT_CARDS", actor: 0, seq: 2311,
     prompt: "请从选择面里选择四张牌。",
+    // 票 15 的新信息通道：**只有带这个键的载荷**才问选牌预览（合成 / 旧载荷逐行为不变）。
+    pick_preview: true,
     legal_actions: ysCombos.map((picks) => ({
       kind: "SelectCards", answers_seq: 2311, picks,
     })),
@@ -23116,6 +23133,19 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const ysView = synthView(ysPending);
   ysView.snapshot.self_hand = ysCards;
   ysView.snapshot.players[0].hand_count = ysCards.length;
+  /** 这一面的服务端替身：`disabled` = 不在任何**含当前 picks 的补全**里的槽位。 */
+  const ysPreview = (body) => {
+    const picks = (body.picks || []).slice().sort((left, right) => left - right);
+    const completions = ysCombos.filter((combo) => picks.every((index) => combo.includes(index)));
+    const reachable = new Set(completions.flat());
+    return {
+      disabled: ysCards.map((_card, index) => index)
+        .filter((index) => !picks.includes(index) && !reachable.has(index))
+        .map((index) => `slot:${index}`),
+      can_submit: completions.some((combo) => combo.length === picks.length),
+      can_advance: completions.length > 0,
+    };
+  };
   const renderYs = () => {
     ui.state.view = ysView;
     ui.resetSelection();
@@ -23131,19 +23161,30 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   };
   const ysDis = () => ysCards.map((card) => ysHand(card.card_id).classList.contains("dis"));
 
+  previewResponder = ysPreview;
+  ui.state.sessionId = "smoke-pick-preview";
+
   renderYs();
-  check("U-YS-01a 业炎代价步走 own-zone 直选（不是弹窗）、五张手牌初始都可点、四张未齐时不可提交",
+  check("U-YS-01a 业炎代价步走 own-zone 直选（不是弹窗）；回包还没到 ⇒ 一个都点不动（fail-closed）",
     ui.stepDialogKind(ysPending) === null
       && ui.isOwnZonePick(ysPending) === true
       && $("t-dialog").hidden === true
-      && ysDis().join(",") === [false, false, false, false, false].join(",")
-      && $("btn-submit").disabled === true
-      && $("t-target-hint").textContent.includes("每种花色至多 1 张"),
-    `kind=${ui.stepDialogKind(ysPending)} dis=${ysDis()} submit=${$("btn-submit").disabled} hint="${$("t-target-hint").textContent}"`);
+      && ysDis().join(",") === [true, true, true, true, true].join(",")
+      && $("t-target-hint").textContent.includes("取不到候选，请重试")
+      && $("btn-submit").disabled === true,
+    `kind=${ui.stepDialogKind(ysPending)} dis=${ysDis()} hint="${$("t-target-hint").textContent}"`);
 
-  // ---- 第 1 张红桃：同花色的**其余**牌立刻置灰（`spec.max_per_suit = 1`） ----
+  await flushOwnPickPreview();
+  check("U-YS-01b 回包说没有禁用槽位 ⇒ 五张手牌全部可点（置灰只由回包决定）",
+    ysDis().join(",") === [false, false, false, false, false].join(",")
+      && $("t-target-hint").textContent.includes("置灰的牌凑不出合法组合")
+      && $("btn-submit").disabled === true,
+    `dis=${ysDis()} hint="${$("t-target-hint").textContent}"`);
+
+  // ---- 第 1 张红桃：回包说同花色的**其余**那张（slot:1）禁用 ----
   clickYs(301);
-  check("U-YS-01b 点第 1 张红桃后：另一张红桃置灰、其余三色照常可点（置灰只按花色）",
+  await flushOwnPickPreview();
+  check("U-YS-01c 点第 1 张红桃 + 回包过后：另一张红桃由**回包**置灰、其余三色照常可点",
     JSON.stringify(ui.state.picks) === "[0]"
       && ysDis().join(",") === [false, true, false, false, false].join(",")
       && $("btn-submit").disabled === true,
@@ -23151,7 +23192,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // ---- 置灰的牌点不动（置灰与拒点是同一条判据，不只靠 CSS） ----
   clickYs(302);
-  check("U-YS-01c 点置灰的第二张红桃 = 不收下（判据不只在样式上）",
+  check("U-YS-01d 点置灰的第二张红桃 = 不收下（判据不只在样式上）",
     JSON.stringify(ui.state.picks) === "[0]",
     `picks=${JSON.stringify(ui.state.picks)}`);
 
@@ -23159,22 +23200,110 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   clickYs(303);
   clickYs(304);
   clickYs(305);
+  await flushOwnPickPreview();
   const ysBuilt = ui.buildAction();
-  check("U-YS-01d 四花色齐了才可提交：载荷是候选里那条 SelectCards（面内位置升序）",
+  check("U-YS-01e 四花色齐了才可提交：载荷是候选里那条 SelectCards（面内位置升序）",
     JSON.stringify(ui.state.picks) === "[0,2,3,4]"
       && $("btn-submit").disabled === false
       && !!ysBuilt
       && JSON.stringify(ysBuilt) === JSON.stringify(ysPending.legal_actions[0]),
     `picks=${JSON.stringify(ui.state.picks)} submit=${$("btn-submit").disabled} built=${JSON.stringify(ysBuilt)}`);
 
-  // ---- 取消第 1 张后：那一张的置灰跟着解除（置灰是当前选择的纯函数，不粘滞） ----
+  // ---- 取消第 1 张后：回包说没有禁用槽位（置灰是"当前已选"的纯函数，不粘滞） ----
   clickYs(301);
-  check("U-YS-01e 取消已选的红桃 ⇒ 同花色置灰立刻解除（纯函数，不粘滞）",
+  await flushOwnPickPreview();
+  check("U-YS-01f 取消已选的红桃 ⇒ 回包解除置灰、提交又灰（不粘滞）",
     JSON.stringify(ui.state.picks) === "[2,3,4]"
       && ysDis().join(",") === [false, false, false, false, false].join(",")
       && $("btn-submit").disabled === true,
     `picks=${JSON.stringify(ui.state.picks)} dis=${ysDis()} submit=${$("btn-submit").disabled}`);
 
+  previewResponder = null;
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ 票 15：取不到选牌预览 ⇒ 这一步一个都点不动（fail-closed） ============
+ *
+ * 与票 11 的 `U-PV-02` 同一条纪律（spec §6 不变量 5）：**没有回包就是"点不了"**，绝不退回
+ * "全都点得动"。失败后按 `OWN_PICK_PREVIEW_RETRY_MS` 重问（真机上由 2 s 轮询的渲染触发），
+ * 这里模拟"下一次渲染"：垫片不控真实时钟，故把重问时刻清零再渲染一次。
+ */
+{
+  const failCards = [
+    { ...synthCard(311, "桃"), suit: "heart", rank: 5, color: "red", type: "peach" },
+    { ...synthCard(312, "杀"), suit: "spade", rank: 9, color: "black", type: "slash" },
+    { ...synthCard(313, "闪"), suit: "diamond", rank: 7, color: "red", type: "dodge" },
+  ];
+  const failPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2322,
+    prompt: "请从选择面里选择两张牌。",
+    pick_preview: true,
+    legal_actions: [{ kind: "SelectCards", answers_seq: 2322, picks: [0, 1] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: failCards.map((card) => ({ ref: { seat: 0, zone: "hand" }, card })),
+    spec: { zones: ["hand"], total: [2, 2] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "结姻", targets: [],
+      label: "0号位孙尚香发动结姻",
+      requirement: "弃置两张手牌", skill_hints: [],
+    },
+    prompt_display: null,
+    preactivations: {}, preactivation: [],
+  };
+  const failView = synthView(failPending);
+  failView.snapshot.self_hand = failCards;
+  failView.snapshot.players[0].hand_count = failCards.length;
+  const renderFail = () => {
+    ui.state.view = failView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(failView);
+  };
+  const failHand = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
+  const clickFail = (cardId) => {
+    const node = failHand(cardId);
+    if (!node) return;
+    (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
+  };
+  const failDis = () => failCards.map((card) => failHand(card.card_id).classList.contains("dis"));
+
+  ui.state.sessionId = "smoke-pick-preview-fail";
+  failNextPreviews = 1;
+  renderFail();
+  await flushOwnPickPreview();
+  check("U-YS-02a 预览失败 ⇒ 这一步一个都点不动（fail-closed，不回退成「全都点得动」）",
+    failDis().join(",") === [true, true, true].join(",")
+      && ui.state.ownPickPreview.error === true,
+    `dis=${failDis()} err=${ui.state.ownPickPreview.error}`);
+
+  check("U-YS-02b 失败时标题条与页脚**同读**「取不到候选，请重试」",
+    $("t-target-hint").textContent.includes("取不到候选，请重试")
+      && $("t-choice").textContent.includes("取不到候选，请重试"),
+    `hint="${$("t-target-hint").textContent}" choice="${$("t-choice").textContent}"`);
+
+  clickFail(311);
+  check("U-YS-02c 失败时点灰着的牌不收下（不是只画灰）",
+    JSON.stringify(ui.state.picks) === "[]" && $("btn-submit").disabled === true,
+    `picks=${JSON.stringify(ui.state.picks)} submit=${$("btn-submit").disabled}`);
+
+  // 恢复：服务端回包再来一次 ⇒ 置灰解除、可点（失败态不是粘的）。
+  previewResponder = () => ({
+    disabled: ["slot:2"], can_submit: false, can_advance: true,
+  });
+  ui.state.ownPickPreview.retryAt = 0; // 模拟"下一次轮询渲染"（真实时钟在垫片外）
+  renderFail();
+  await flushOwnPickPreview();
+  check("U-YS-02d 恢复后重新问一次 ⇒ 回包说了算（可点集合 = 回包 disabled 之外）",
+    failDis().join(",") === [false, false, true].join(",")
+      && ui.state.ownPickPreview.error === false,
+    `dis=${failDis()} err=${ui.state.ownPickPreview.error}`);
+
+  previewResponder = null;
+  ui.state.sessionId = null;
   ui.state.view = null;
   ui.resetSelection();
 }

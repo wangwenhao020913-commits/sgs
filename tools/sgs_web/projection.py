@@ -2601,6 +2601,14 @@ def pending_payload(
     # 它，界面照旧读清单里的静态池（与 ``structural`` / ``default_choice`` 同一姿态）。
     if _preview_supported(query):
         payload["preview"] = True
+    # **选牌预览的可用声明**（table-ux-overhaul 票 15）：``SELECT_CARDS`` 且查看者就是应答者
+    # 时带 ``"pick_preview": true``——``POST …/preview`` 的选牌那一档对这一问真能算
+    # （端点的判据与这里同源：kind + actor）。前端据此在**自家手牌面**上每次选牌问一次
+    # "哪些槽位还点得动"；**键的缺席是保证**：合成载荷 / 别人的面 / 旧载荷都不带它，界面
+    # 照旧只按面形状渲染（与 ``preview`` / ``structural`` 同一姿态）。
+    # 它是**网页载荷**字段、不是 ``Query`` 模型字段 ⇒ 不进记录流、金录像逐字节不变。
+    if str(getattr(query, "kind", "")) == "SELECT_CARDS" and not foreign:
+        payload["pick_preview"] = True
     # 「是否发动」的**默认候选**（yijiang-2014-round2 票 15 / 路线 B）：投影按
     # :data:`_DEFAULT_ACTIVATE_SKILLS` 登记表下发；前端 ``answer.js:buildAction`` 在玩家
     # 没选任何候选时据此返回候选里那条 ``ActivateSkill``。**只有登记过的技能才带这个键**

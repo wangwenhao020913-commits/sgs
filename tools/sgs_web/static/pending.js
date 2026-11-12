@@ -1104,11 +1104,15 @@ function refreshSubmit(pending) {
   }
   const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];
   const blocked = selected === null ? null : selectionError(selected, pending);
-  const ready = blocked === null && buildAction() !== null;
+  // 票 15：多张的自己区域面（业炎四色成本…）**另读**选牌预览的回包——服务端说这一组
+  // picks 还不是合法答案时就不给提交（`can_submit`；回包未到 / 过期时这条放行，退回下面
+  // 的候选成员判定，两者同源：同一个枚举器算出来的那一条）。
+  const ready = blocked === null && buildAction() !== null && ownPickSubmitAllowed(pending);
   $("btn-submit").disabled = !ready;
   if (isOwnZonePick(pending)) {
     const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
     setAskChoice(state.lastRejectReason
+      || ownPickPreviewIssue(pending)
       || blocked
       || (ready ? "可以提交。" : `点选${where}（已选 ${state.picks.length} 张）。`));
     return;

@@ -179,6 +179,35 @@ def _preview_answers(raw: object) -> list[tuple[str, tuple[object, ...]]]:
     return out
 
 
+def _pick_slots(raw: object, slot_count: int) -> tuple[int, ...]:
+    """选牌预览请求体里的 ``picks`` → 面内下标元组（**只**校验形状，非法 ⇒ 400）。
+
+    两种写法都收（与票 11 预览的座位 ``3`` / ``"seat:3"`` 同一姿态）：座位号式的
+    ``"slot:3"`` 文本（`StepPool` 的文本候选同口径）与裸整数。**不**猜"越界的当没选"：
+    槽位是这一面的下标，越界 / 重复 / 认不出的写法都按结构非法回落 400（fail-closed，
+    静默纠正会让界面把"看不见的面"读成"全都点得动"）。
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"选牌预览的 picks 必须是数组：{raw!r}")
+    slots: list[int] = []
+    for entry in raw:
+        if isinstance(entry, str) and entry.startswith("slot:"):
+            entry = entry[len("slot:") :]
+        # 只认整数与 `slot:N` 文本：bool 是 int 的子类、float 会被 int() 悄悄截断，先挡掉。
+        if isinstance(entry, bool) or not isinstance(entry, (int, str)):
+            raise ValueError(f"选牌预览的 picks 只认面内下标：{entry!r}")
+        try:
+            index = int(entry)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"选牌预览的 picks 只认面内下标：{entry!r}") from error
+        if not 0 <= index < slot_count:
+            raise ValueError(f"选牌预览的 picks 越界（这一面只有 {slot_count} 槽）：{index}")
+        if index in slots:
+            raise ValueError(f"选牌预览的 picks 有重复的槽位：{index}")
+        slots.append(index)
+    return tuple(sorted(slots))
+
+
 def _known_hero_ids() -> set[str]:
     """可被禁的版本全集 = 启用池（与 :func:`hero_catalog` / 发放段同源）。"""
     return set(enabled_hero_ids())
@@ -584,11 +613,16 @@ class GameRegistry:
     # -- 步骤预览（票 11：只读） ---------------------------------------------
 
     def preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
-        """预发动清单**一步**的现算候选：能点谁 / 能不能进下一步 / 能不能提交（票 11）。
+        """**只读**预览：这一步此刻的候选 / 还能点哪些槽位（票 11 落清单步，票 15 扩选牌面）。
 
-        读的是与校验器**同一份**池 / 界回调（:func:`sgs.skills.flow.preview_step` 复用
-        ``_with_answers`` + ``_seat_bounds`` / ``_resolve_options`` / ``_card_options``），
-        故"预览说能点"与"提交会被接受"不可能各说一套。
+        两种形状、同一份纪律：
+
+        - **预发动清单一步**（body 带 ``skill_id`` + ``answers``）⇒ :meth:`_manifest_preview`。
+          读的是与校验器**同一份**池 / 界回调（:func:`sgs.skills.flow.preview_step` 复用
+          ``_with_answers`` + ``_seat_bounds`` / ``_resolve_options`` / ``_card_options``），
+          故"预览说能点"与"提交会被接受"不可能各说一套。
+        - **选牌面**（body 只带 ``picks``）⇒ :meth:`_pick_preview`：自家手牌面上"还要点哪
+          几张才凑得出合法答案"由引擎的选牌枚举器现算，前端只读 ``disabled``。
 
         **只读全停**：不建询问、不写记录、不耗序号、不搬牌、不抽随机数（与
         :meth:`Engine.respond_candidates` 同一条纪律），也不碰 ``view()`` / 投影 / 快照
@@ -598,12 +632,22 @@ class GameRegistry:
         服务端唯一承认的"当前询问"仍是那一个）。**不**走 :meth:`advance_clock`：预览不能
         触发超时代答（那会改状态），只打一次"最后访问"戳（会话回收的判据）。
         """
-        from sgs.skills import preview_activation
-
         pending = session.pending
         answers_seq = body.get("answers_seq")
         if pending is None or answers_seq != pending.seq:
             raise StaleAnswer(pending, human_seat=session.human_seat)
+        if "picks" in body:
+            return self._pick_preview(session, body)
+        return self._manifest_preview(session, body)
+
+    def _manifest_preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
+        """预发动清单**一步**的现算候选：能点谁 / 能不能进下一步 / 能不能提交（票 11）。
+
+        行为与回包字段自票 11 起**逐字不变**（票 15 只把 ``preview`` 拆成两档，没动这一档）。
+        """
+        from sgs.skills import preview_activation
+
+        pending = session.pending
         skill_id = body.get("skill_id")
         if not isinstance(skill_id, str) or not skill_id:
             raise ValueError("预览请求缺 skill_id")
@@ -639,6 +683,51 @@ class GameRegistry:
             "can_advance": preview.can_advance,
             "can_submit": preview.can_submit,
             "next": preview.next,
+        }
+
+    def _pick_preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
+        """选牌面**此刻还能点哪些槽位**（table-ux-overhaul 票 15；body 只带 ``picks``）。
+
+        判据**不是**另一条规则：它读 :func:`sgs.effects.pick_completions`——与候选生成
+        同一个枚举器（`effects/actions.py:select_card_picks`）——回答"给定已选的这几张，
+        哪些槽位还出现在某个**合法补全**里"。故"预览说点得动"与"候选里真有那条"不可能
+        各说一套：`max_per_suit` 这类候选生成期的收窄因此自动同源，前端不再自己数花色。
+
+        三个字段：
+
+        - ``disabled`` = 不在任何含当前 picks 的补全里的槽位。**已选的除外**：再点一下是
+          取消，把它锁死会让玩家退不出这一组（服务端自己的候选也从不排除"再点一次"）。
+        - ``can_submit`` = 当前 picks **本身**就是一条合法答案（= 提交会被接受）。
+        - ``can_advance`` = 还补得下去（``False`` = 这组选择已是死路，得先退一张）。
+
+        与 :meth:`_manifest_preview` 同一条只读纪律：不建询问、不写记录、不耗序号、
+        不搬牌、不抽随机数，也不碰 ``view()`` / 投影 / 快照。
+        """
+        from sgs.effects import pick_completions
+
+        pending = session.pending
+        if str(getattr(pending, "kind", "")) != "SELECT_CARDS":
+            raise ValueError("这一问不是选牌面，不能问选牌预览")
+        if int(pending.actor) != int(session.human_seat):
+            raise ValueError("选牌预览只服务应答者本人的选牌面")
+        skill_id = body.get("skill_id")
+        if isinstance(skill_id, str) and skill_id:
+            # 两种形状各有各的必需键。混着发会让"缺 skill_id"与"缺 picks"两条 400 互相
+            # 掩盖，前端也就分不清自己问的是哪一种。
+            raise ValueError("选牌预览的载荷不带 skill_id（那是预发动清单预览的形状）")
+        slots = tuple(getattr(pending, "slots", ()) or ())
+        picks = _pick_slots(body.get("picks"), len(slots))
+        completions = pick_completions(slots, pending.spec, picks)
+        reachable = {index for combo in completions for index in combo}
+        session.touch(time.monotonic())
+        return {
+            "disabled": [
+                f"slot:{index}"
+                for index in range(len(slots))
+                if index not in picks and index not in reachable
+            ],
+            "can_submit": picks in completions,
+            "can_advance": bool(completions),
         }
 
     # -- 终局落盘 -----------------------------------------------------------

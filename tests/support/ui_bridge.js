@@ -116,8 +116,10 @@
     // M5-08a：火攻 —— 亮牌步（亮牌模板 / 一击提交）+ 同花色弃牌（点自己的手牌）+ 舞台亮牌
     "isPickRevealStep", "isOwnHandSinglePick", "renderOwnHandPick", "submitOwnHandSinglePick",
     // table-ux-overhaul 票 09：自己区域的直选判据（火攻亮牌步 / 雌雄弃牌步）与花色上限置灰
-    // （业炎的 `spec.max_per_suit`；前端止损，退役条件见 `candidates.js:ownZoneSuitTaken`）。
-    "isOwnZonePick", "ownZoneSlotsVisible", "ownHandSlotsKnown", "ownZoneSuitTaken",
+    // 票 15 起置灰改读**选牌预览**回包的 `disabled`（票 09 的 `ownZoneSuitTaken` 已退役）。
+    "isOwnZonePick", "ownZoneSlotsVisible", "ownHandSlotsKnown",
+    "ownPickPreviewSupported", "ownPickPreviewEnabled", "ownPickSlotDisabled",
+    "ownPickSubmitAllowed", "ownPickPreviewIssue", "ownPickGreyNote",
     "applyRevealDelta", "stageRevealCards", "renderRevealedCards", "describeReveals",
     // M5-08b：铁索 1–2 目标（沿用点座位多选）+ 重铸入口（独立 Reforge，一击即提交）
     "reforgeAction", "renderReforgeEntry", "submitReforge", "describeRecord",

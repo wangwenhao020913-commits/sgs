@@ -121,9 +121,9 @@ Ruling: spec §2 Q6 / Q20
 | ① 雌雄选择面可见 + `reveal_hand` 生效 | `test_skills.py::test_double_sword_discard_face_is_visible_to_the_target`（真引擎记录流里的那条 `SELECT_CARDS`：每槽 `card is not None`、`ref.seat == 1`、槽位顺序 = 目标手牌顺序）；回环半边 = `test_web.py::test_the_own_hand_direct_pick_payloads_start_from_a_real_engine_pending` |
 | ② 火攻载荷从 `dialog=="reveal"` 改为 `dialog is None` | `test_web.py::test_the_human_targets_fire_attack_reveal_step_is_a_table_direct_pick_without_leaking`（`dialog is None` / 无 `revealed` / 槽位带牌面且 = `view.self_hand` / 外人仍抹空） |
 | ② 烟测四条改写为牌桌直选 | 烟测 `M5-08a-b1`（不开弹窗、不铺槽位面、两张手牌都可点）/ `b2`（悬停描述照常可读）/ `b3`（点第一张 = 面内位置 0 的 `SelectCards`）/ `b4`（点第二张 = 面内位置 1）；另加 `M5-08a-b6`（旧载荷被对称否决） |
-| ③ 烟测 `U-YS-01`：点第 1 张红桃后其余红桃置灰、四花色齐才可提交 | 烟测 `U-YS-01a`（五张初始都可点 + 提示写"每种花色至多 1 张" + 未齐不可提交）/ `b`（另一张红桃置灰、其余三色照常）/ `c`（置灰的牌点不动）/ `d`（四色齐 ⇒ 提交可点 + 载荷 = 候选那条升序 `SelectCards`）/ `e`（取消后置灰立刻解除） |
+| ③ 烟测 `U-YS-01`：点第 1 张红桃后其余红桃置灰、四花色齐才可提交（**票 15 起置灰由后端预览回包给**，`U-YS-01a..f` 同批次改写） | 烟测 `U-YS-01a`（五张初始都可点 + 提示写"每种花色至多 1 张" + 未齐不可提交）/ `b`（另一张红桃置灰、其余三色照常）/ `c`（置灰的牌点不动）/ `d`（四色齐 ⇒ 提交可点 + 载荷 = 候选那条升序 `SelectCards`）/ `e`（取消后置灰立刻解除） |
 | ④ 烟测 `U-CX-01`：雌雄弃牌步直接在手牌区点选（本步此前没有前端用例） | 烟测 `U-CX-01a`（不开弹窗 / 不铺未知区域槽位面 / 两张都可点）/ `b`（点一张 = `SelectCards` 位置 0）/ `c`（点另一张 = 位置 1）/ `d`（**反面对照**：隐藏槽形状确实落回通用槽位面 ⇒ 可见槽是唯一判据） |
-| 静态：判据只有一份、置灰与拒点同源、退役条件写在旁边 | `test_web_static.py::test_the_own_zone_suit_cap_is_one_shared_predicate_reading_the_payload` 与 `::test_the_own_zone_direct_pick_shape_is_one_predicate_without_a_dialog_deadlock` |
+| 静态：判据只有一份、置灰与拒点同源、退役条件写在旁边 | `test_web_static.py::test_the_own_zone_suit_cap_reads_the_pick_preview_instead_of_counting_suits`（**票 15 改名**：原来的 `..._is_one_shared_predicate_reading_the_payload` 那份止损判据已退役，本行按当时的**现行名**回填）与 `::test_the_own_zone_direct_pick_shape_is_one_predicate_without_a_dialog_deadlock` |
 
 ### 会红的既有断言（已**刻意改写**）
 

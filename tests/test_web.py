@@ -5389,6 +5389,239 @@ def test_the_preview_endpoint_is_cheap_enough_for_every_selection_change() -> No
 
 
 # ---------------------------------------------------------------------------
+# 票 15：选牌面预览——自家手牌面上的"哪些槽位还点得动"由后端现算（`SELECT_CARDS`）
+# ---------------------------------------------------------------------------
+
+YEYAN = "hero.shen_zhouyu_mobile.yeyan"
+
+
+def _session_at_yeyan_cost_face() -> Session:
+    """真会话：4 人局，人类 = 神周瑜（移动版），停在【业炎】的**代价选牌步**。
+
+    【业炎】的代价面是 ``SelectionSpec(zones=(HAND,), total=(4,4), max_per_suit=1)``
+    （`skills/active.py:_yeyan_effect`）：候选枚举只留"四花色各一张"的组合，提交是
+    fail-closed 的成员判定——正是本票要同源复用的那一条。
+
+    驱动是确定性的（种子 4；其余询问取超时兜底）：出牌阶段发动【业炎】→ 分配弹窗里给
+    1 号位计 2 点（计数 ≥ 2 才要付代价）→ 停在四色选牌面。
+    """
+    session = Session(
+        seed=4,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        heroes=("shen_zhouyu_mobile", "caocao", "sunquan", "liubei"),
+        human_seat=0,
+    )
+    activated = False
+    for _ in range(600):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到【业炎】的代价选牌步")
+        if pending.kind == "PLAY_PHASE" and not activated:
+            action = next(
+                (
+                    item
+                    for item in pending.legal_actions
+                    if getattr(item, "skill_id", None) == YEYAN
+                ),
+                None,
+            )
+            if action is not None:
+                activated = True
+                session.submit_answer(action)
+                continue
+        if pending.kind == "DISTRIBUTE" and activated:
+            heavy = next(
+                (
+                    item
+                    for item in pending.legal_actions
+                    if item.kind == "Distribute" and dict(item.counts) == {1: 2}
+                ),
+                None,
+            )
+            assert heavy is not None, "付得起代价时单座上限必须是 3（计数 2 才进代价步）"
+            session.submit_answer(heavy)
+            continue
+        if pending.kind == "SELECT_CARDS" and getattr(pending, "skill_id", None) == YEYAN:
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("600 次应答内没走到【业炎】的代价选牌步")
+
+
+def _pick_preview(registry, session: Session, picks: object) -> tuple[int, dict]:
+    """打真处理器的选牌预览（body = ``answers_seq`` + ``picks``，**没有** ``skill_id``）。"""
+    return _post_with_the_real_handler(
+        registry,
+        f"/api/sessions/{session.session_id}/preview",
+        {"answers_seq": session.pending.seq, "picks": picks},
+    )
+
+
+def test_the_pick_preview_disables_the_slots_the_engine_would_reject() -> None:
+    """票 15 的同源断言：预览的 ``disabled`` = 引擎**真提交**会拒的那些槽位。
+
+    判据不是"预览说得像"：``disabled`` 的每个槽位都拿一条**含它的满额组合**去真提交，
+    引擎必须拒；反过来，预览说"点得动"的槽位必须存在于某条被接受的组合里
+    （``can_submit`` 就是那一档：这组 picks **本身**是合法答案）。
+
+    业炎代价面（真引擎，种子 4）= 6 张手牌 ♣♥♥♣♦♠、4 条"四色各一"的合法组合：
+
+    - 什么都没点 ⇒ 每一槽都在某个合法补全里 ⇒ ``disabled`` 空；
+    - 点第 1 张♣ ⇒ 另一张♣（面内位置 3）补不出四色 ⇒ 立刻进 ``disabled``；
+    - 再点第 1 张♥ ⇒ 这一组只留在一条组合里 ⇒ 另一张♥也进 ``disabled``；
+    - 四张齐 ⇒ ``can_submit`` 真、``disabled`` 仍是那两张被占用的花色。
+    """
+    from sgs.engine import IllegalActionError
+
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    assert pending_payload(session)["pick_preview"] is True, (
+        "真载荷声明**选牌预览**可用（前端只在带了这个键的询问上发预览）"
+    )
+
+    status, first = _pick_preview(registry, session, [])
+    assert status == 200, first
+    assert first["disabled"] == [], f"一个都没点时每一槽都点得动：{first}"
+    assert first["can_submit"] is False, "0 张不是合法答案（total=(4,4)）"
+    assert first["can_advance"] is True, "还没走进死路（凑得出合法的四色）"
+
+    # 点第 1 张♣（面内位置 0）⇒ 另一张♣（位置 3）补不出"四色各一"。
+    status, second = _pick_preview(registry, session, [0])
+    assert status == 200, second
+    assert second["disabled"] == ["slot:3"], (
+        f"同花色的另一张必须灰（四色各一凑不出来）：{second['disabled']}"
+    )
+    assert second["can_submit"] is False and second["can_advance"] is True
+
+    # 再点第 1 张♥（位置 1）⇒ 只剩 (0,1,4,5) 这一条补全，另一张♥（位置 2）也灰。
+    status, third = _pick_preview(registry, session, ["slot:0", "slot:1"])
+    assert status == 200, third
+    assert third["disabled"] == ["slot:2", "slot:3"], (
+        f"两条被占用的花色各剩一张都点不动：{third['disabled']}"
+    )
+    assert third["can_advance"] is True
+
+    # ---- 同源：预览说不能点的，真提交必须被拒（缺满额 / 同花色重复两种形状）----
+    without_disabled = [
+        slot for slot in range(len(pending.slots)) if f"slot:{slot}" not in third["disabled"]
+    ]
+    assert without_disabled == [0, 1, 4, 5], "预览说点得动的恰好是那条唯一补全"
+    assert pending.legal_actions and any(
+        tuple(action.picks) == (0, 1, 4, 5) for action in pending.legal_actions
+    ), "那条补全必须是候选里真有的那条"
+    for disabled in (2, 3):
+        swapped = tuple(sorted((0, 1, 4, disabled)))
+        with pytest.raises(IllegalActionError):
+            session.engine.submit(SelectCards(picks=swapped, answers_seq=pending.seq))
+        assert session.pending is pending, "被拒的提交不改变挂起态"
+    with pytest.raises(IllegalActionError):
+        session.engine.submit(SelectCards(picks=(0, 1, 4), answers_seq=pending.seq))
+
+    # 四张齐 ⇒ can_submit 真（这一组就是候选里那条），而灰的那两张不变。
+    status, fourth = _pick_preview(registry, session, [0, 1, 4, 5])
+    assert status == 200, fourth
+    assert fourth["can_submit"] is True and fourth["can_advance"] is True
+    assert fourth["disabled"] == ["slot:2", "slot:3"]
+    session.engine.submit(SelectCards(picks=(0, 1, 4, 5), answers_seq=pending.seq))
+    assert session.pending is not pending, "预览说能提交的那组，引擎必须真的收下"
+
+
+def test_the_pick_preview_rejects_malformed_picks_and_the_wrong_face() -> None:
+    """畸形 ``picks`` ⇒ 400；不是选牌面 ⇒ 400（不猜、不静默回一份空 ``disabled``）。
+
+    静默回落会让界面把"看不到来源的面"当成"全都点得动"（spec §6 #5），故形状不对一律
+    400——与票 11 的 ``answers`` 前缀同一条纪律。
+    """
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    # 不是数组 / 越界 / 重复 / 布尔 / 小数 / 认不出的写法。
+    for malformed in ("slot:0", [len(pending.slots)], [0, 0], [True], [1.5], ["slot:x"], [-1]):
+        status, body = _pick_preview(registry, session, malformed)
+        assert status == 400, f"{malformed!r} 应当 400：{body}"
+        assert body["error"], "400 必须带一句人话（前端据此写重试提示）"
+
+    # 这一问不是选牌面（【除疠】的出牌阶段）：带 picks 的载荷 400，而不是回一份猜的禁用集。
+    other = _session_at_chuli_play_phase()
+    other_registry = _registry_with(other)
+    status, body = _post_with_the_real_handler(
+        other_registry,
+        f"/api/sessions/{other.session_id}/preview",
+        {"answers_seq": other.pending.seq, "picks": []},
+    )
+    assert status == 400, body
+    assert "选牌" in body["error"]
+
+
+def test_the_pick_preview_writes_nothing() -> None:
+    """只读全停：不建询问、不写记录、不耗序号、不搬牌、不抽随机数。"""
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+    records = session.engine.records
+    hand_sizes = tuple(len(player.hand) for player in session.engine.state.players)
+    deck = tuple(session.engine.state.deck)
+
+    for picks in ([], [0], [0, 1], [0, 1, 4, 5]):
+        status, _body = _pick_preview(registry, session, picks)
+        assert status == 200
+
+    assert session.engine.records == records, "记录流一条都不能多（含拒绝记录）"
+    assert len(session.engine.records) == len(records)
+    assert session.pending is pending and session.pending.seq == pending.seq
+    assert tuple(len(player.hand) for player in session.engine.state.players) == hand_sizes
+    assert tuple(session.engine.state.deck) == deck, "牌堆顺序也不许动（没抽随机数）"
+
+
+def test_the_pick_preview_rejects_a_stale_answers_seq() -> None:
+    """``answers_seq`` 对不上当前挂起 ⇒ 409，**与 ``/answer`` / 票 11 的预览同形**。"""
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    status, body = _post_with_the_real_handler(
+        registry,
+        f"/api/sessions/{session.session_id}/preview",
+        {"answers_seq": pending.seq + 1, "picks": []},
+    )
+
+    assert status == 409
+    assert set(body) == {"error", "pending"}, "与 /answer 的 409 同一个形状"
+    assert body["pending"]["seq"] == pending.seq
+    assert "过期" in body["error"]
+
+
+def test_the_pick_preview_is_cheap_enough_for_every_pick() -> None:
+    """性能底线：单次选牌预览也是 **< 5 ms** 的量级（每次点牌问一次）。
+
+    它只枚举这一面的组合（`effects/actions.py:select_card_picks`，与候选生成同一条），
+    **不**建投影、不扫记录流。这里钉一条宽上限（20 ms），实测值写进票面 ``## Answer``。
+    """
+    import statistics
+    import time
+
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+    registry.preview(session, {"answers_seq": pending.seq, "picks": [0, 1]})  # 预热
+
+    samples = []
+    for _ in range(200):
+        started = time.perf_counter()
+        registry.preview(session, {"answers_seq": pending.seq, "picks": [0, 1]})
+        samples.append(time.perf_counter() - started)
+    median = statistics.median(samples)
+    p95 = statistics.quantiles(samples, n=20)[18]
+
+    assert median < 0.020, f"单次选牌预览中位 {median * 1000:.3f} ms 太慢（票面口径 < 5 ms）"
+    assert p95 < 0.020, f"单次选牌预览 p95 {p95 * 1000:.3f} ms 太慢"
+
+
+# ---------------------------------------------------------------------------
 # 票 02：同一时机的激活面——N ≥ 2 条候选时**逐候选**下发各自的预发动清单
 # ---------------------------------------------------------------------------
 
