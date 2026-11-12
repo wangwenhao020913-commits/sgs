@@ -2750,7 +2750,6 @@ def _marker(seat: int, *, count: int = 1, source_seat: int = 1) -> dict:
         "source_seat": source_seat,
         "source_skill_id": WUHUN,
         "count": count,
-        "clear_on_source_death": True,
     }
 
 
@@ -2797,7 +2796,6 @@ def test_wuhun_marker_is_public_with_its_source_label():
         source_seat=1,
         source_skill_id=WUHUN,
         count=2,
-        clear_on_source_death=True,
     )
     view = project(engine.state, 0)
     payload = seat_display(
@@ -2806,6 +2804,23 @@ def test_wuhun_marker_is_public_with_its_source_label():
     marker = payload["markers"][0]
     assert (marker["name"], marker["count"]) == ("梦魇", 2)
     assert "神关羽" in marker["source_label"] and "武魂" in marker["source_label"]
+
+
+def test_wuhun_markers_are_cleared_when_the_skill_is_lost():
+    """失去【武魂】⇒ 它产生的「梦魇」全清（2018 口径；shan-baozuoci 票 01）。
+
+    旧版这条**不清**（梦魇没有声明"失去技能时清"）——正是本票收成通则的行为。
+    """
+    state = _four_seat_state(shen_hp=4)
+    engine = Engine.from_state(state, seed=7)
+    engine.add_marker(
+        None, 0, name="梦魇", source_seat=1, source_skill_id=WUHUN, count=2
+    )
+    assert engine.state.player(0).markers, "构造：梦魇在座位 0 身上，来源是座位 1"
+
+    assert engine.lose_skill(1, WUHUN) is True
+
+    assert engine.state.player(0).markers == (), "失去武魂 ⇒ 梦魇清空"
 
 
 def test_wuhun_without_marks_does_nothing_on_death():

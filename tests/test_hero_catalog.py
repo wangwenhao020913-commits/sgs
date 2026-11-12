@@ -1533,7 +1533,6 @@ def _zhengku_probe_state() -> GameState:
             source_seat=ME,
             source_skill_id="hero.haozhao.zhengku",
             count=2,
-            clear_on_source_death=True,
         ),
     )
     return state
@@ -3236,14 +3235,13 @@ def _marker_effect_catalog(monkeypatch, effect_id: str = "test.marker_effect"):
     return effect_id
 
 
-def _marker(effect: str | None, *, name: str = "营", clear_on_source_skill_lost: bool = True):
+def _marker(effect: str | None, *, name: str = "营"):
     return Marker(
         name=name,
         source_seat=0,
         source_skill_id="hero.shen_ganning.jieying",
         count=1,
         effect=effect,
-        clear_on_source_skill_lost=clear_on_source_skill_lost,
     )
 
 
@@ -3273,21 +3271,32 @@ def test_a_marker_carries_its_own_effect_and_suppression_does_not_stop_it(monkey
     )
 
 
-def test_losing_the_source_skill_removes_only_the_markers_that_ask_for_it(monkeypatch):
+def test_losing_the_source_skill_removes_every_marker_it_produced(monkeypatch):
+    """失去技能 ⇒ **它产生的全部标记**移除（2018 口径；shan-baozuoci 票 01）。
+
+    旧版只移除"声明了寿命策略"的那些、留一条当对照——那条对照现在应当是**同一技能**的
+    标记也一并消失，而**别的技能**产生的标记不动。
+    """
     from sgs.skills import resolve_instances
 
     effect_id = _marker_effect_catalog(monkeypatch)
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
     state.player(1).markers = (
         _marker(effect_id),
-        _marker(None, name="测试·不随技能失去", clear_on_source_skill_lost=False),
+        _marker(None, name="测试·同一技能的另一枚"),
+        Marker(
+            name="测试·别的技能的标记",
+            source_seat=0,
+            source_skill_id="hero.anyone.other",
+            count=1,
+        ),
     )
     engine = Engine.from_state(state, seed=1)
 
     engine.lose_skill(0, "hero.shen_ganning.jieying")
 
     names = tuple(marker.name for marker in engine.state.player(1).markers)
-    assert names == ("测试·不随技能失去",), f"只移除声明了那条寿命策略的标记；实得 {names}"
+    assert names == ("测试·别的技能的标记",), f"只移除这条技能产生的标记；实得 {names}"
     assert not [item for item in resolve_instances(engine.state) if item.skill_id == effect_id], (
         "标记没了 ⇒ 它的效果实例也没了"
     )
@@ -3296,6 +3305,7 @@ def test_losing_the_source_skill_removes_only_the_markers_that_ask_for_it(monkey
         for record in engine.records
         if record.kind == "delta" and record.delta_type == "marker_change"
     ]
-    assert [(record.name, record.count) for record in removed] == [("营", 0)], (
-        "移除走唯一写入口 ⇒ 照常落一条 marker_change（绝对值 0）"
-    )
+    assert [(record.name, record.count) for record in removed] == [
+        ("营", 0),
+        ("测试·同一技能的另一枚", 0),
+    ], "移除走唯一写入口 ⇒ 照常落一条 marker_change（绝对值 0）"

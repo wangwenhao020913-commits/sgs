@@ -10,7 +10,7 @@
 
 - Q1 = A：弃哪些牌由**目标自己**选（``SELECT_CARDS`` 的 ``actor`` = 目标）；
 - Q2 = A：「至多摸至五张」= **手牌终值上限 5**（同【节命】）；
-- Q3 = A：标记来源阵亡 ⇒ 标记清除（``clear_on_source_death``）、该次结算不发生；
+- Q3 = A：标记来源阵亡 ⇒ 标记清除（2018 口径的通则，无开关）、该次结算不发生；
 - Q4 = A：目标的"下个回合"被跳过（翻面）⇒ 顺延到下一个真实执行的回合末；
 - Q5 = A：郝昭在自己回合内阵亡 ⇒ 第 1 次结算不发生。
 
@@ -211,7 +211,6 @@ def test_zhengku_marks_the_target_with_two_owed_settlements():
     assert len(players[0].queries) == 1, "结束阶段问一次「是否发动」"
     assert _marker_counts(engine) == [(1, 2), (1, 1)], "挂 2、我的回合末减到 1"
     assert _markers(engine, 1)[0].count == 1
-    assert _markers(engine, 1)[0].clear_on_source_death is True, "Q3：来源阵亡即清除"
 
 
 def test_declining_zhengku_leaves_no_marker_and_no_adjustment():
@@ -1466,8 +1465,6 @@ def _ying(engine, holder: int, *, source: int = 0) -> None:
         source_skill_id=JIEYING,
         count=1,
         effect=JIEYING_EFFECT,
-        clear_on_source_death=True,
-        clear_on_source_skill_lost=True,
     )
 
 
@@ -1777,9 +1774,6 @@ def test_jieying_gains_the_marker_at_the_turn_start():
     assert _marker_changes(engine)[0] == (0, YING, 1)
     marker = engine.state.player(0).markers[0]
     assert marker.effect == JIEYING_EFFECT, "标记带着**自身效果**的定义 id"
-    assert marker.clear_on_source_death and marker.clear_on_source_skill_lost, (
-        "两条寿命策略都在（来源阵亡 / 来源失去【劫营】）"
-    )
     assert player.activations, "① 是强制段 ⇒ 不问；这一条问的是 ②（结束阶段交营）"
 
 
@@ -1877,7 +1871,6 @@ def test_jieying_and_zhengku_force_an_order_at_turn_end():
         source_seat=0,
         source_skill_id=ZHENGKU,
         count=1,
-        clear_on_source_death=True,
     )
     orders: list = []
 
@@ -2544,3 +2537,14 @@ def test_the_caller_range_exempt_flag_feeds_the_same_single_evaluation(monkeypat
     assert 3 not in flagged, "④（区域里有牌）判非法的座位不许被任何一条豁免路径复活"
     assert 2 not in flagged, "⑤（TARGET_POOL）删掉的座位不许被任何一条豁免路径复活"
 
+
+
+def test_losing_zhengku_clears_its_marker():
+    """失去【镇骨】⇒ 它产生的「镇骨」标记清空（2018 通则；shan-baozuoci 票 01）。"""
+    engine = Engine.from_state(_state(owner_hand=(0, 1), target_hand=(10,)), seed=7)
+    engine.add_marker(None, 1, name=MARK, source_seat=0, source_skill_id=ZHENGKU, count=2)
+    assert engine.state.player(1).markers
+
+    assert engine.lose_skill(0, ZHENGKU) is True
+
+    assert engine.state.player(1).markers == (), "失去镇骨 ⇒ 标记清空"

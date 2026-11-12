@@ -2596,7 +2596,8 @@ class Engine:
         ``owner`` = 放置技能实例的持有者（这批牌的归属、也是回合末归还的收件人）；
         ``skill_id`` = 放置技能的 id（区键的第二维）；``holder`` = **武将牌的主人**
         （扣在谁身上，可跨座位）。区 = （holder 座位, ``owner:skill_id``），第一次放置时
-        建区（同键复用；空区保留，规则 15.2：失去技能不影响武将牌上的牌）。
+        建区（同键复用；空区保留——区键是技能身份，牌被清掉后区键不删）。**失去技能**时
+        由 :meth:`_drop_hero_zones_of_lost_skill` 清"上"不清"旁"（shan-baozuoci 票 01）。
 
         **放置类技能必须在代码里登记**（``SkillDef.places_on_hero_card``）：未登记的技能
         走到这里即编程错误（不是静默造区）。搬牌走 :meth:`move_in_frame`，故照常记
@@ -4832,8 +4833,6 @@ class Engine:
         max_count: int | None = None,
         effect: str | None = None,
         description: str | None = None,
-        clear_on_source_death: bool = False,
-        clear_on_source_skill_lost: bool = False,
     ) -> bool:
         """给 ``seat`` 加一枚/几枚标记（票 06 的唯一写入口）。
 
@@ -4844,8 +4843,8 @@ class Engine:
 
         ``effect``（lei-shenganning 票 94）：标记**自身的效果**定义 id —— 非空时
         :func:`~sgs.skills.resolve_instances` 会以 ``MARKER`` 载体产出实例（不受技能失效
-        影响）。``clear_on_source_skill_lost``：来源**失去**放置它的那条技能时移除本标记
-        （与 ``clear_on_source_death`` 并列的另一条寿命策略）。
+        影响）。**寿命没有开关**（shan-baozuoci 票 01）：来源失去产生它的技能 / 来源阵亡 /
+        目标阵亡三档一律清（2018 官方口径），见 :class:`~sgs.state.Marker`。
         """
         player = self.state.player(seat)
         for index, marker in enumerate(player.markers):
@@ -4876,8 +4875,6 @@ class Engine:
             max_count=max_count,
             effect=effect,
             description=description,
-            clear_on_source_death=clear_on_source_death,
-            clear_on_source_skill_lost=clear_on_source_skill_lost,
         )
         player.markers = (*player.markers, marker)
         self._emit_marker_change(frame, seat, marker)
@@ -4941,19 +4938,19 @@ class Engine:
         )
 
     def _clear_dead_markers(self, frame: Frame, seat: int) -> None:
-        """阵亡清标记（票 06；用户 Q6 规则 7）：目标为死者全清；来源身死的按寿命策略清。
+        """阵亡清标记（票 06；shan-baozuoci 票 01 收成 2018 口径）：死者自己的全清，
+        **因死者技能产生的**也全清（不论在谁身上）。
 
         与死者的弃牌**同一钩子**（:meth:`discard_dead_cards`；用户本轮："梦魇清除时机和
         阵亡后弃置卡牌同一钩子"）。逐条发 ``marker_change(count=0)``；顺序 = 座位序 +
-        标记插入序，保同种子逐字节复现。
+        标记插入序，保同种子逐字节复现。依据 = 官方规则集 2018.3-16 死亡流程 Ⅰ.c
+        "棄其所有標記和所有角色因發動其技能獲得的所有標記"（用户 2026-11-13 签"乙"）。
         """
         for player in self.state.players:
             kept: list[Marker] = []
             removed: list[Marker] = []
             for marker in player.markers:
-                if player.seat == seat or (
-                    marker.clear_on_source_death and marker.source_seat == seat
-                ):
+                if player.seat == seat or marker.source_seat == seat:
                     removed.append(marker)
                 else:
                     kept.append(marker)
@@ -5135,10 +5132,14 @@ class Engine:
         仍在"减失去"那一步被减掉（记录照写，但那是一次可见的无效授予）。
         失去让 per-instance 状态随来源一起清掉（``prune_skill_state``）。
 
-        **标记的两条寿命策略之一是这一处**（lei-shenganning 票 94）：``clear_on_source_skill_lost``
-        的标记在"来源失去放置它的那条技能"时一并移除（``marker_change`` 绝对值 0）；
-        **失效（:meth:`suppress_skills`）一个字都不碰标记**——用户 2026-11-07 裁定
-        "被无效不影响，营标记还在"。
+        **失去的即时清理**（shan-baozuoci 票 01；用户 2026-11-13 签"乙"，官方规则集
+        2018.3-16 专题二）：①它产生的**全部标记**移除（``marker_change`` 绝对值 0）；
+        ②它放在**自己**武将牌上的牌置入弃牌堆（:meth:`_drop_hero_zones_of_lost_skill`；
+        放在别人武将牌上的"旁"牌不动）。**失效（:meth:`suppress_skills`）一个字都不碰**
+        这两样——"无效 ≠ 失去"（用户 2026-11-07："被无效不影响，营标记还在"）。
+
+        **唯一写入口**：技能回调不得直接改 ``Player.lost_skills``；该由"失去"造成的一切
+        后果都从这里过（左慈的**可逆**失去走 :meth:`revoke_skill`，共用同一条后果链）。
         """
         player = self.state.player(seat)
         if skill_id in player.lost_skills:
@@ -5149,26 +5150,38 @@ class Engine:
             frame_id=(frame.frame_id if frame is not None else 0),
             depth=self.stack.depth,
         )
+        self._skill_gone(seat, skill_id, frame)
+        return True
+
+    def _skill_gone(self, seat: int, skill_id: str, frame: Frame | None) -> None:
+        """**"这条技能不再存在"的标准后果链**（票 01 抽出来的共用段）。
+
+        四步固定次序：清 per-instance 状态（``prune_skill_state``）→ 清随来源消失的牌标签
+        （``_prune_card_tags``）→ 移除它产生的标记 → 把它放在自己武将牌上的牌置入弃牌堆。
+        永久失去（:meth:`lose_skill`）走这里；shan-baozuoci 票 02 的**可逆**失去（左慈换
+        化身）也走同一条链，故以后要给"技能消失"加特例，只改这里一处。
+        """
         prune_skill_state(self.state)
         # 牌标签的第四项声明（M6 票 09）：来源实例真的消失 ⇒ 随来源消失的标签一并清掉。
         self._prune_card_tags()
         self._drop_markers_of_lost_skill(frame, seat, skill_id)
-        return True
+        self._drop_hero_zones_of_lost_skill(frame, seat, skill_id)
 
     def _drop_markers_of_lost_skill(
         self, frame: Frame | None, seat: int, skill_id: str
     ) -> None:
-        """来源失去技能 ⇒ 移除它放的、声明了 ``clear_on_source_skill_lost`` 的标记（票 94）。
+        """来源失去技能 ⇒ 移除它产生的**全部**标记（票 94 起；票 01 收成 2018 口径）。
 
-        只动 ``source_seat == seat`` 且 ``source_skill_id == skill_id`` 的那些；每个真实移除
-        各发一条 ``marker_change``（与 :meth:`remove_marker` 同一写入面，故记录形态不变）。
+        只动 ``source_seat == seat`` 且 ``source_skill_id == skill_id`` 的那些（在谁身上都动）；
+        每个真实移除各发一条 ``marker_change``（与 :meth:`remove_marker` 同一写入面，故记录
+        形态不变）。依据 = 官方规则集 2018.3-16 专题二"棄所有因其發動技能 a 產生的標記"；
+        **失效（无效）不走这里**，故"被无效不影响，营标记还在"仍成立（用户 2026-11-07）。
         """
         for holder in self.state.players:
             for marker in tuple(holder.markers):
                 if (
                     marker.source_seat == seat
                     and marker.source_skill_id == skill_id
-                    and marker.clear_on_source_skill_lost
                 ):
                     self.remove_marker(
                         frame,
@@ -5177,6 +5190,47 @@ class Engine:
                         source_seat=marker.source_seat,
                         source_skill_id=marker.source_skill_id,
                     )
+
+    def _drop_hero_zones_of_lost_skill(
+        self, frame: Frame | None, seat: int, skill_id: str
+    ) -> None:
+        """来源失去技能 ⇒ 把它因该技能放在**自己**武将牌上的牌置入弃牌堆（2018 口径）。
+
+        shan-baozuoci 票 01（用户 2026-11-13 签"乙"）。判据 = 区键的两半：``zone.owner ==
+        seat``（是 A 的技能放的）、``zone.skill_id == skill_id``（同一条技能）且**宿主座位
+        == ``seat``**（在 A **自己的**武将牌上）。放在别人武将牌上的（武将牌"旁"，
+        ``owner != 宿主``）**不动**——官方规则集 2018.3-16 用语"武將牌上的牌需置入棄牌堆，
+        而武將牌旁的牌不需要"。
+
+        照 :meth:`discard_dead_cards` 的姿态：直接用 :func:`~sgs.effects.move_card` +
+        ``emit_delta``，**不派发** ``MOVE_AFTER``（系统清理不是"失去牌"，票 33 的既定缺口；
+        因此本方法不会挂起，``lose_skill`` 的签名不用改）。搬牌原因 = ``PUT``（规则性置入
+        弃牌堆，同界【裸衣】的裁定），归属 = 失去技能的人。清空的区键保留（区键是技能身份）。
+        """
+        player = self.state.player(seat)
+        for key in tuple(player.hero_cards):
+            zone = player.hero_cards[key]
+            if not zone.cards or zone.owner != seat or zone.skill_id != skill_id:
+                continue
+            frame_id = frame.frame_id if frame is not None else 0
+            ctx = EffectContext(
+                actor=seat,
+                source=(frame.data.get("source") if frame is not None else None),
+                targets=(),
+                frame_id=frame_id,
+                depth=self.stack.depth,
+            )
+            delta = move_card(
+                self.state,
+                ctx,
+                self.state.refs(tuple(zone.cards)),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.PUT,
+                owner=seat,
+            )
+            self.emit_delta(delta, frame_id=frame_id, depth=self.stack.depth)
+            # 进入弃牌堆即止的标签寿命照常兑现（与阵亡清区同一姿态）。
+            self._clear_enter_discard_tags(delta.cards)
 
     def suppress_skills(
         self,

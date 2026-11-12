@@ -93,7 +93,7 @@ def _mark_condition(host: Any, frame: Any) -> bool:
 
 
 def _mark(host: Any, frame: Any) -> None:
-    """①：给伤害来源加 1 枚「梦魇」（来源 = 神关羽的武魂；寿命随来源身死）。"""
+    """①：给伤害来源加 1 枚「梦魇」（来源 = 神关羽的武魂；寿命是 2018 口径的通则）。"""
     owner = int(frame.data["skill_owner"])
     source = int(frame.data["source"])
     host.add_marker(
@@ -103,7 +103,6 @@ def _mark(host: Any, frame: Any) -> None:
         source_seat=owner,
         source_skill_id=WUHUN,
         count=1,
-        clear_on_source_death=True,
     )
 
 

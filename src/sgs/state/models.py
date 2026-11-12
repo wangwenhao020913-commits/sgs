@@ -241,8 +241,11 @@ class HeroCardZone(BaseModel):
 
     规则性质（`三国杀详细规则.txt` §十五）：这些牌是"移出游戏的牌"，不为任何角色所拥有、
     不在手牌 / 装备 / 判定 / 牌堆 / 弃牌堆 / 处理区，故**不算手牌**、不计入手牌上限，
-    也不能被拆 / 顺指定。区在**失去技能时不受影响**（规则 15.2 明文），故这里的字段是
-    技能的**身份**（持有者 + 技能 id），不引用运行期 ``SkillInstance``（那个会随失去消失）。
+    也不能被拆 / 顺指定。**失去技能时按"上 / 旁"分两档**（shan-baozuoci 票 01；官方规则集
+    2018.3-16 用语"武将牌上 / 武将牌旁"）：因该技能置于**自己**武将牌上的牌置入弃牌堆，
+    置于**武将牌旁**的牌（别人放的）不动——本类的 ``owner``（放置者）与宿主座位正好把两档
+    分开。区键因此是技能的**身份**（持有者 + 技能 id），不引用运行期 ``SkillInstance``
+    （那个会随失去消失；清空的区键保留，见 :attr:`Player.hero_cards`）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -444,10 +447,14 @@ class Marker(_FrozenModel):
     ``effect`` 存一个 ``CATALOG`` 里的**效果定义 id**（与技能 id 同形），该定义由
     :func:`sgs.skills.resolve_instances` 以 ``MARKER`` 载体产出实例——**不受技能失效影响**
     （用户 2026-11-07 裁定："这个标记本身具有效果，所以就算劫营这个技能失效了，依然享受
-    以上所说的3种加成"），标记不在 ⇒ 实例不在。两条寿命策略：``clear_on_source_death``
-    （来源座位身死时清空，梦魇 True）与 ``clear_on_source_skill_lost``（来源**失去**放置它的
-    那条技能时清空，营 True；"被无效不影响，营标记还在"——用户 2026-11-07）。目标身死则
-    无条件清空（规则 §14.4 / 用户规则 7）。
+    以上所说的3种加成"），标记不在 ⇒ 实例不在。
+
+    **寿命 = 一行通则、没有开关**（shan-baozuoci 票 01；用户 2026-11-13 签"乙"）：
+    来源**失去**产生它的那条技能 ⇒ 清（：meth:`Engine._drop_markers_of_lost_skill`）；
+    来源阵亡 / 目标阵亡 ⇒ 清（：meth:`Engine._clear_dead_markers`）；**被无效（suppressed）
+    不动标记**（"被无效不影响，营标记还在"——用户 2026-11-07）。依据 =《三國殺官方規則集
+    2018.3-16》专题二"棄所有因其發動技能 a 產生的標記"与死亡流程 Ⅰ.c。旧版的逐技能
+    ``clear_on_source_death`` / ``clear_on_source_skill_lost`` 两个开关已按该口径删除。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -459,8 +466,6 @@ class Marker(_FrozenModel):
     max_count: int | None = None
     effect: str | None = None
     description: str | None = None
-    clear_on_source_death: bool = False
-    clear_on_source_skill_lost: bool = False
 
 
 class Player(BaseModel):
@@ -516,12 +521,13 @@ class Player(BaseModel):
 
     区键 = 放置技能的**实例键** ``owner:skill_id``（``skills.hero_card_zone_key`` 是唯一
     派生处）：座位 = 这张武将牌的主人（扣牌的目标，可跨座位），键里的 ``owner`` = 放置技能
-    的持有者。字典按插入序（同种子逐字节复现），空区**保留**（规则 15.2：失去技能不影响
-    武将牌上的牌，区本身不随一次归还消失；再次放置进同一个键）。
+    的持有者。字典按插入序（同种子逐字节复现），空区**保留**（区键是技能的身份；牌被技能
+    消费 / 被系统清掉之后区本身不删，再次放置进同一个键）。
 
     这些牌**不在手牌区**，故手牌数 / 手牌上限 / 拆顺的候选都自动不含它们（票面验收）。
     写入唯一入口 :meth:`Engine.place_on_hero_card`；回合末归还由
-    :meth:`Engine.return_hero_card_zones` 按数据声明做，阵亡清区在
+    :meth:`Engine.return_hero_card_zones` 按数据声明做；**失去技能**清"上"不清"旁"走
+    :meth:`Engine._drop_hero_zones_of_lost_skill`（shan-baozuoci 票 01）；阵亡清区在
     :meth:`Engine.discard_dead_cards`。
     """
     chained: bool = False

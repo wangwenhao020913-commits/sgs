@@ -2622,7 +2622,6 @@ def test_kuangfeng_spends_a_star_and_marks_the_chosen_character():
     assert marker.source_seat == 0 and marker.source_skill_id == KUANGFENG_SKILL
     assert marker.count == 1 and marker.max_count is None
     assert marker.effect is None and marker.description is None, "标记自身无效果（用户口径）"
-    assert marker.clear_on_source_death is True, "来源阵亡后消失"
     # 面内 = 开局扣置的 7 张（`GAME_START` 的强制段）+ 本用例注入的 2 张 = 9 张；
     # 狂风移去 1 张（面内第 1 槽 = 注入的第一张）⇒ 8 张，且那 1 张进了弃牌堆。
     assert len(_star_ids(engine)) == 8, "移去了一张星"
@@ -4147,14 +4146,12 @@ def test_the_two_expiry_hooks_run_silently_in_chain_order():
             source_seat=0,
             source_skill_id=KUANGFENG_SKILL,
             count=1,
-            clear_on_source_death=True,
         ),
         Marker(
             name="大雾",
             source_seat=0,
             source_skill_id=DAWU_SKILL,
             count=1,
-            clear_on_source_death=True,
         ),
     )
     run_queries(
@@ -4175,3 +4172,23 @@ def test_the_two_expiry_hooks_run_silently_in_chain_order():
     assert [
         skills for timing, skills in _activation_faces(engine) if timing is Timing.TURN_START
     ] == [], "到期清扫是簿记段，不摆「先清哪一条」的面（票 17）"
+
+
+def test_losing_kuangfeng_clears_only_its_own_markers():
+    """失去【狂风】⇒ 只清它产生的「狂风」，「大雾」不动（shan-baozuoci 票 01）。
+
+    旧版两条标记都没有声明"失去技能时清"——本票收成 2018 通则后，按 skill_id 精确清。
+    """
+    engine = _shen_engine(seed=7, seats=2)
+    engine.add_marker(
+        None, 1, name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=1
+    )
+    engine.add_marker(
+        None, 1, name="大雾", source_seat=0, source_skill_id=DAWU_SKILL, count=1
+    )
+
+    assert engine.lose_skill(0, KUANGFENG_SKILL) is True
+
+    assert [marker.name for marker in engine.state.player(1).markers] == ["大雾"], (
+        "只清这条技能产生的标记"
+    )

@@ -3636,8 +3636,6 @@ def test_the_marker_own_effect_is_not_listed_as_a_skill() -> None:
         source_skill_id="hero.shen_ganning.jieying",
         count=1,
         effect="hero.shen_ganning.jieying_mark",
-        clear_on_source_death=True,
-        clear_on_source_skill_lost=True,
     )
 
     listed = {entry["skill_id"] for entry in build_skills(session, seat)}

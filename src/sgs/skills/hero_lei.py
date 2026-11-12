@@ -23,7 +23,7 @@
 - **Q2 = A**：「（摸牌时至多摸至五张）」= **手牌终值上限 5**（与【节命】的
   ``JIEMING_CAP`` 同一口径，不是"最多摸 5 张"）；
 - **Q3 = A**：标记来源（郝昭）阵亡 ⇒ 标记随死亡清除、该次结算不发生
-  （``clear_on_source_death=True``）；
+  （寿命是 2018 口径的通则，`Marker` 不再有开关；shan-baozuoci 票 01）；
 - **Q4 = A**：目标的"下个回合"被跳过（翻面）⇒ 该轮没有回合结束，结算顺延到目标
   **下一个真实执行的回合末**（标记留着，等真的 ``TURN_END``）；
 - **Q5 = A**：郝昭在自己回合内阵亡 ⇒ 第 1 次结算不发生（死者不结算，标记同 Q3 清除）。
@@ -172,7 +172,6 @@ def _zhengku_apply(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         source_seat=owner,
         source_skill_id=ZHENGKU,
         count=2,
-        clear_on_source_death=True,
     )
     return None
 
@@ -814,8 +813,8 @@ LEI_SKILL_DEFS = (*LEI_SKILL_DEFS, _ZUILUN, _FUYIN)
 #   （框架票 95）：它们都是不可放弃的强制段 ⇒ 那一张面**没有 Pass**、必须选一条。
 # - **营的三个加成是「标记本身的效果」**（框架票 94）：`Marker.effect` 指向下面那条
 #   **效果定义**（`carrier = MARKER`），不是本技能的钩子 / 修饰器 ⇒ **【劫营】失效（被无效）
-#   也照常享受**；寿命由两条策略给：来源**阵亡**（`clear_on_source_death`）或来源**失去**
-#   【劫营】（`clear_on_source_skill_lost`）。失效不动标记。
+#   也照常享受**；寿命是 2018 口径的通则（shan-baozuoci 票 01）：来源**阵亡**或来源**失去**
+#   【劫营】都清（不再有开关）。**失效不动标记**。
 #
 # 标记记法：全场**最多一枚**「营」（① 只在场上没有营时发）。它的 `source_seat` 恒是
 # 神甘宁（`count` 恒 1，不做计数），持有者随 ② 转移；③ 之后清空 —— 于是"谁有营"只需
@@ -877,7 +876,7 @@ def _jieying_grant_condition(host: Any, frame: Any) -> bool:
 
 
 def _jieying_grant(host: Any, frame: Any) -> Any:
-    """① 的强制段：场上没有「营」时，自己获得一枚（带标记自身效果与两条寿命策略）。
+    """① 的强制段：场上没有「营」时，自己获得一枚（带标记自身效果）。
 
     「若场上没有角色有营标记」= 按**标记名**全场判（含**别人**身上的那一枚）：神甘宁把营
     交出去之后，自己每个回合开始都不该再获得一枚。
@@ -893,8 +892,6 @@ def _jieying_grant(host: Any, frame: Any) -> Any:
         source_skill_id=JIEYING,
         count=1,
         effect=JIEYING_EFFECT,
-        clear_on_source_death=True,
-        clear_on_source_skill_lost=True,
     )
     return None
 
@@ -930,8 +927,6 @@ def _jieying_hand_over(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         source_skill_id=JIEYING,
         count=1,
         effect=JIEYING_EFFECT,
-        clear_on_source_death=True,
-        clear_on_source_skill_lost=True,
     )
     host.remove_marker(
         frame,

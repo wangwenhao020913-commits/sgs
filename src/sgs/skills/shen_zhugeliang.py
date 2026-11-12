@@ -9,7 +9,8 @@
 - **狂风**：结束阶段移去一张「星」、选一名角色，令其获得一枚「狂风」标记；**标记没有
   自身效果**（`effect=None` / `description=None`），增伤由**这条技能**监听：目标身上每枚
   「狂风」+1（限火焰伤害），技能被失效即不进修饰器链 ⇒ 不增伤。寿命 = 来源的下个回合
-  开始时（本技能的 `TURN_START` 强制钩子）+ 来源阵亡（`clear_on_source_death`）。
+  开始时（本技能的 `TURN_START` 强制钩子）+ 来源阵亡 / 来源失去【狂风】（2018 口径的通则，
+  shan-baozuoci 票 01）。
 - **大雾**：同步骤，移去 1..min(星数, 存活数) 张「星」、选等量名角色各得一枚「大雾」；
   防止由**这条技能**监听：`DAMAGE_DEAL` 强制钩子写帧标签 `PREVENTED`（非雷电伤害），
   失效即不防止。
@@ -336,7 +337,6 @@ def _kuangfeng_apply(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
             source_seat=seat,
             source_skill_id=KUANGFENG,
             count=1,
-            clear_on_source_death=True,
         )
         frame.data["kuangfeng_stage"] = 2
     return None
@@ -442,7 +442,6 @@ def _dawu_apply(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
             source_seat=seat,
             source_skill_id=DAWU,
             count=1,
-            clear_on_source_death=True,
         )
         marked.add(target)
         frame.data["dawu_marked"] = tuple(sorted(marked))

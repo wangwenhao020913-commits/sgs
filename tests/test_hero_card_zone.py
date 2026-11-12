@@ -1257,3 +1257,91 @@ def test_a_second_lianying_trigger_in_the_same_frame_asks_a_fresh_question() -> 
         "没有任何 lianying: 询问"
     )
     assert engine.finished, "修好缓存键后这一局仍必须跑完"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 失去技能时的清理（shan-baozuoci 票 01；用户 2026-11-13 签"乙"，2018 官方口径）
+# ---------------------------------------------------------------------------
+
+
+def test_a_lost_skill_discards_the_cards_it_placed_on_your_own_hero_card() -> None:
+    """失去技能 ⇒ 它放在**自己**武将牌上的牌**当场**进弃牌堆（不是等回合末归还）。"""
+    state = _zone_state()
+    engine = Engine.from_state(state, seed=7)
+    engine.place_on_hero_card(
+        None, owner=0, skill_id=JIE_QIANXUN, holder=0, cards=state.refs((0, 1))
+    )
+    assert state.hero_zone(0, QIANXUN_ZONE) == (0, 1)
+
+    assert engine.lose_skill(0, JIE_QIANXUN) is True
+
+    assert state.hero_zone(0, QIANXUN_ZONE) == (), "失去技能 ⇒ 区里的牌被清"
+    assert state.player(0).hand == [], "不是归还给持有者（那是回合末的归还）"
+    assert {0, 1} <= set(state.discard), "牌进弃牌堆"
+    to_discard = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and record.to_zone.zone is Zone.DISCARD
+    ]
+    assert len(to_discard) == 1 and to_discard[0].reason is MoveReason.PUT, (
+        "一条 card_move：规则性置入弃牌堆（MoveReason.PUT，同界【裸衣】的裁定）"
+    )
+    assert sorted(card.card_id for card in to_discard[0].cards) == [0, 1]
+    assert QIANXUN_ZONE in state.player(0).hero_cards, "空区键保留（区键是技能身份）"
+
+
+def test_a_lost_skill_leaves_the_zone_on_another_seats_hero_card_alone() -> None:
+    """武将牌**旁**的牌（别人放的）不动：失去技能只清"上"（``zone.owner == 宿主``）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=None), SeatSpec(hero=JIE_LUXUN, hand=(0, 1))],
+        deck=deck_excluding(PACK, 0, 1),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=7)
+    cross = hero_card_zone_key(1, JIE_QIANXUN)
+    engine.place_on_hero_card(
+        None, owner=1, skill_id=JIE_QIANXUN, holder=0, cards=state.refs((0, 1))
+    )
+    assert state.hero_zone(0, cross) == (0, 1)
+
+    assert engine.lose_skill(1, JIE_QIANXUN) is True
+
+    assert state.hero_zone(0, cross) == (0, 1), "武将牌旁的牌不受失去技能影响"
+    assert not [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and record.to_zone.zone is Zone.DISCARD
+    ], "没有任何搬牌"
+
+
+def test_a_lost_skill_discards_a_zone_that_would_never_return() -> None:
+    """``return_timing = never`` 的区同样清（七星：hidden / never / extra_effect）。"""
+    state = _zone_state()
+    engine = Engine.from_state(state, seed=7)
+    engine.place_on_hero_card(
+        None, owner=0, skill_id=QIXING, holder=0, cards=state.refs((0, 1))
+    )
+    key = hero_card_zone_key(0, QIXING)
+
+    assert engine.lose_skill(0, QIXING) is True
+
+    assert state.hero_zone(0, key) == (), "永不自动归还的区也照样清"
+    assert {0, 1} <= set(state.discard)
+
+
+def test_suppression_does_not_touch_the_hero_card_zone() -> None:
+    """**失效 ≠ 失去**：失效不动区里的牌（与营的"被无效不影响"同一条分界）。"""
+    state = _zone_state()
+    engine = Engine.from_state(state, seed=7)
+    engine.place_on_hero_card(
+        None, owner=0, skill_id=JIE_QIANXUN, holder=0, cards=state.refs((0, 1))
+    )
+
+    assert engine.suppress_skills(0, "hero.anyone.tieqi") is True
+
+    assert state.hero_zone(0, QIANXUN_ZONE) == (0, 1), "失效不清区"
+    assert state.player(0).hand == []
