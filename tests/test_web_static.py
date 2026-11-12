@@ -316,6 +316,52 @@ def test_target_line_layer_is_full_shell_above_seats_below_modals() -> None:
     )
 
 
+def test_ink_table_skin_layers_and_paper_are_wired() -> None:
+    """ink-table-skin 票 01/02：水墨底在壳里、底让得开、椭圆删干净。
+
+    结构断言放这里（`ui_smoke.mjs` 的垫片没有父子关系，断不了 DOM 顺序）；
+    行为（起停 / 定帧）归烟测。**只钉形状**，不钉像素与观感。
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert html.count('id="ink-bg"') == 1, "牌桌壳里应当恰好有一块 #ink-bg 画布"
+    shell_at = html.index('id="table-shell"')
+    ink_at = html.index('id="ink-bg"')
+    topbar_at = html.index('id="table-topbar"')
+    bottom_at = html.index('id="table-bottom"')
+    assert shell_at < ink_at < topbar_at < bottom_at, (
+        f"水墨底必须是壳的第一个子节点（壳 {shell_at} < 画布 {ink_at} < 顶栏 {topbar_at}）"
+        "——DOM 顺序就是同 z 档里的压层顺序，排到顶栏之后就盖住顶栏了"
+    )
+
+    rule = _css_rule(".ink-bg")
+    assert re.search(r"position:\s*absolute", rule), f"水墨底必须绝对定位，实际：{rule}"
+    assert re.search(r"inset:\s*0\b", rule), f"水墨底必须铺满壳（inset: 0），实际：{rule}"
+    assert re.search(r"pointer-events:\s*none", rule), f"水墨底不能吃指针，实际：{rule}"
+    assert not re.search(r"filter\s*:", rule), f"水墨底上不许挂 CSS filter（会重锚 fixed 层）：{rule}"
+
+    shell = _css_rule(".table-shell")
+    assert not re.search(r"background:\s*radial-gradient", shell), (
+        f"壳的底色已经让给水墨底，不该再留 radial-gradient 底色（注释里提到它不算）：{shell}"
+    )
+    assert re.search(r"width:\s*min\(100%,\s*calc\(100vh \* 16 / 9\)\)", shell), (
+        f"壳的 16:9 宽度是 U2-01/D6 的判据，换底色不许动它：{shell}"
+    )
+
+    bottom = _css_rule(".table-bottom")
+    assert not re.search(r"background:\s*linear-gradient", bottom), (
+        f"底栏的底色已经让给水墨底，不该再留 linear-gradient 底色（注释里提到它不算）：{bottom}"
+    )
+    assert re.search(r"flex:\s*0\s+0\s+27\.5%", bottom), (
+        f"底栏高度是 U1-01 的判据，换底色不许动它：{bottom}"
+    )
+
+    stage = _CSS_TEXT
+    assert ".table-stage::before" not in stage, (
+        "装饰椭圆（.table-stage::before）已整块删除；座位几何的真源是 table.js:RING_STAGE，"
+        "CSS 里不该再留一份"
+    )
+
+
 def test_target_line_is_gold_two_and_half_units_with_ten_unit_arrow() -> None:
     """D8.1 的样式：线宽 2.5 设计单位、箭头 10 设计单位、统一金色 `#d9b45c`。"""
     assert _EFFECTS_JS.is_file(), "缺少 effects.js（目标线 / 高亮 / 体力闪的渲染口）"

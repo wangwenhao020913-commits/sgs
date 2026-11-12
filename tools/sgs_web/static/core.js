@@ -401,6 +401,13 @@ function show(view) {
   syncNavState();
   // 离开回放页就停掉播放：定时器不该在看不见的页面上继续跑。
   if (view !== "replay") stopReplayPlay();
+  // ink-table-skin 票 01：水墨底的帧循环跟着牌桌页走。看不见的页面上壳是 `[hidden]`
+  // （`display: none`），画布尺寸归零——接着画只是白烧合成器，故切走即 pause。
+  // 读 `window.SgsInkBg` 而不是裸名字：烟测垫片里 `window` 是个独立对象，模块挂在它上面。
+  if (window.SgsInkBg) {
+    if (view === "table") window.SgsInkBg.resume();
+    else window.SgsInkBg.pause();
+  }
   // U1-03 / U2-06：牌桌的三段布局不在屏幕上时，询问弹窗与武将详情都收起（不在别的页面上
   // 留一层遮罩）；回到牌桌时按当前询问重新挂上（预发动 / 排列的本地态不因切页丢失）。
   if (view === "table") {

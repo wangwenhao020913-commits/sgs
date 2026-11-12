@@ -323,6 +323,18 @@ class Ctx2D {
   measureText() { return { width: 10 }; }
   createRadialGradient() { return { addColorStop() {} }; }
   createLinearGradient() { return { addColorStop() {} }; }
+  /* ink-table-skin 票 01：水墨底烘静态层时要造一张颗粒贴图——`createImageData` 写像素、
+   * `putImageData` 贴回、`createPattern` 拿去铺满纸面。垫片给**最小可用**实现（数据够写不越界、
+   * pattern 拿得到值），于是 `SgsInkBg.mount()` 走的是同一份真代码，而不是被能力探测挡掉的
+   * 降级路径——与 damage-fx 票 05 立下的口径一致。 */
+  createImageData(width, height) {
+    const w = Math.max(1, width | 0);
+    const h = Math.max(1, height | 0);
+    return { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };
+  }
+  getImageData(x, y, width, height) { return this.createImageData(width, height); }
+  putImageData() {}
+  createPattern() { return { pattern: true }; }
 }
 class CanvasEl extends El {
   constructor() {
@@ -374,6 +386,9 @@ const localStorageShim = {
 };
 
 const documentListeners = {};
+/* ink-table-skin 票 01：`window` 上的监听器（目前只有水墨底的 `resize`）。
+ * `fireWindow` 供用例显式触发——垫片不排版，resize 不会自己来。 */
+const windowListeners = {};
 const documentShim = {
   getElementById: (id) => byId.get(id) || (byId.set(id, el("div", id)), byId.get(id)),
   // damage-fx 票 05：`<canvas>` 走上面那个带 2D 上下文的子类（其余标签仍是普通元素）。
@@ -391,6 +406,7 @@ const documentShim = {
   documentElement: el("html", ""),
 };
 const fireDocument = (name, event) => (documentListeners[name] || []).slice().forEach((fn) => fn(event));
+const fireWindow = (name, event) => (windowListeners[name] || []).slice().forEach((fn) => fn(event));
 
 /* -------------------------------------------------- 只记录前端发出的请求 */
 
@@ -573,6 +589,16 @@ const windowShim = {
     return id;
   },
   cancelAnimationFrame: (id) => { pendingFrames.delete(id); },
+  /* ink-table-skin 票 01：水墨底在 mount() 里挂一次 `resize`（容器尺寸只随视口变）。
+   * 真浏览器里 `window.addEventListener` 一定有，垫片没理由缺——补上并记下来，
+   * 用例要触发就调 `fireWindow("resize")`，不让模块为垫片写降级分支。 */
+  addEventListener: (name, fn) => { (windowListeners[name] ||= []).push(fn); },
+  removeEventListener: (name, fn) => {
+    const list = windowListeners[name];
+    if (!list) return;
+    const at = list.indexOf(fn);
+    if (at >= 0) list.splice(at, 1);
+  },
   // damage-fx 票 06：开关的记忆口与 `?audiotest=1` 的查询串（页面里都是 `window.*`）。
   localStorage: localStorageShim,
   location: { search: "" },
@@ -28854,6 +28880,46 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.playback = null;
   ui.state.cursor = -1;
   ui.resetSelection();
+}
+
+/* ==================================================================== *
+ * ink-table-skin 票 01：牌桌的水墨动态底（`static/ink-bg.js`）
+ * 环境是垫片（没有排版，也没有真的 rAF），所以这里只断"同一份真代码被走到了"：
+ * 模块装上了、起停跟着视图、定帧不推进时钟。像素与观感归实机验收管。
+ * ==================================================================== */
+{
+  const ink = context.window.SgsInkBg;
+  const canvas = $("ink-bg");
+  const hasCtx = Boolean(canvas) && typeof canvas.getContext === "function"
+    && Boolean(canvas.getContext("2d"));
+  check("INK-01a 牌桌壳里有一块 2D 画布，水墨模块 mount 成功（走的是真绘制路径）",
+    Boolean(ink) && typeof ink.mount === "function" && hasCtx && ink.state().mounted === true,
+    `ink=${Boolean(ink)} ctx=${hasCtx} mounted=${Boolean(ink && ink.state().mounted)}`);
+
+  check("INK-01b 后备缓冲按容器尺寸开（垫片里落到 320×240 的最小尺寸，不是 0×0）",
+    canvas.width > 0 && canvas.height > 0 && ink.state().reduced === false,
+    `backing=${canvas.width}x${canvas.height} reduced=${ink.state().reduced}`);
+
+  ui.show("table");
+  const onTable = ink.state().running;
+  ui.show("lobby");
+  const onLobby = ink.state().running;
+  check("INK-01c 进牌桌起帧、切到开局页即停（rAF 生命周期跟着视图走）",
+    onTable === true && onLobby === false, `table=${onTable} lobby=${onLobby}`);
+
+  const clockBefore = ink.state().seconds;
+  ink.draw(0);
+  ink.draw(0);
+  check("INK-01c2 定帧 `draw(t)` 不推进播放时钟（只画，不走时）",
+    ink.state().seconds === clockBefore,
+    `before=${clockBefore} after=${ink.state().seconds}`);
+
+  ui.show("replay");
+  const onReplay = ink.state().running;
+  ui.show("table");
+  const backOnTable = ink.state().running;
+  check("INK-01d 回放页也停、回牌桌又起（三个视图都认）",
+    onReplay === false && backOnTable === true, `replay=${onReplay} table=${backOnTable}`);
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

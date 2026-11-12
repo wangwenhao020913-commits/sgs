@@ -3,6 +3,10 @@
   --dim: #6f6a62;
   --line: #ddd8d0;
   --bg: #f7f5f1;
+  /* ink-table-skin 票 02：生宣纸色。`--paper` 是实色（body / 兜底），`--paper-rgb` 给
+   * 半透的顶栏 / 底栏用——墨度压在 0 与 1 之间是这一票唯一的旋钮，故两档都从同一处来。 */
+  --paper: #f2ecde;
+  --paper-rgb: 242, 236, 222;
   --card: #fffdf8;
   --accent: #9c2b1b;
   --accent-soft: #f3e2dd;
@@ -14,7 +18,9 @@
 * { box-sizing: border-box; }
 body {
   margin: 0;
-  background: var(--bg);
+  /* ink-table-skin 票 02：纸色改成生宣，与牌桌背景同色——16:9 壳在超宽屏上居中时
+   * 两侧露出的就是这块，换成 `--bg` 会在背景旁边留一条更白的带。 */
+  background: var(--paper);
   color: var(--ink);
   font: 15px/1.65 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 }
@@ -434,13 +440,29 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: radial-gradient(ellipse at 50% 55%, #f8f0df 0%, #f2e7d2 62%, #eaddc4 100%);
-  border-left: 1px solid var(--line);
-  border-right: 1px solid var(--line);
+  /* ink-table-skin 票 02：底色让给 `#ink-bg`（壳内第一子节点、水墨山水画布）。
+   * 原来这里是 radial-gradient，会把画整个盖住；边框也让开，画到壳的边上。 */
+  background: none;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
   /* 设计单位：1 单位 = 1600×900 设计稿的 1px。卡面 / 槽位等**固定设计尺寸**乘上它，
    * 于是 1280 宽与 1920 宽下比例一致（U1-02；壳整体不缩放，环桌仍是百分比定位）。 */
   container-type: inline-size;
   --dsu: calc(100cqw / 1600);
+}
+
+/* ink-table-skin 票 01：水墨动态底。壳里 `inset: 0` 铺满、z0（后续兄弟全是定位元素，
+ * 按 DOM 顺序压在它上面）、不吃指针；`z-index: 0` 而不是负值——负值会落到壳的背景底下。
+ * **不要**在壳或画布上挂 CSS `filter`：那会给 `position: fixed` 的 `#t-anim-note`
+ * 与 `#t-card-preview` 重建 containing block（`tests/test_web_static.py` 钉着）。 */
+.ink-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  display: block;
 }
 
 /* ---------- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 回放 ---------- */
@@ -453,8 +475,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   justify-content: space-between;
   gap: 10px;
   padding: 0 0.9%;
-  background: rgba(255, 253, 247, .9);
-  border-bottom: 1px solid var(--line);
+  /* ink-table-skin 票 02：顶栏让成半透宣纸，否则它是壳顶一条近白杠，和背景的远山硬切。
+   * 只改 `.table-topbar`——`.topbar` 是开局 / 回放页共用的，那边保持原样。 */
+  background: rgba(var(--paper-rgb), .55);
+  border-bottom: 1px solid rgba(58, 51, 43, .18);
   position: relative;
   z-index: 20;
 }
@@ -507,18 +531,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 /* ---------- 中央舞台：上层当前动作 / 下层处理区 ---------- */
 
 .table-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
-/* 环桌椭圆 = 座位中心所在的 rx 680 / ry 235 椭圆（1600×608 设计舞台的 85% × 77.3%）。 */
-.table-stage::before {
-  content: "";
-  position: absolute; left: 50%; top: 60.85%;
-  width: 85%; height: 77.3%;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  border: 2px solid rgba(150, 122, 82, .26);
-  background: radial-gradient(ellipse at center, rgba(255, 251, 239, .88) 0%, rgba(231, 215, 186, .55) 58%, rgba(205, 184, 148, .32) 100%);
-  box-shadow: inset 0 0 80px rgba(120, 92, 54, .10);
-  pointer-events: none;
-}
+/* ink-table-skin 票 05a：这里原来画着「环桌椭圆」——描边环 + 径向亮底 + inset 阴影，几何抄的是
+ * 座位中心所在的 rx 680 / ry 235 椭圆。用户明确不要，整块删掉。
+ * 座位位置**不**依赖它：几何的真源在 `table.js:RING_STAGE`，CSS 这份从来只是注释级重复。 */
 
 .seats.ring { position: absolute; inset: 0; display: block; }
 
@@ -1213,8 +1228,10 @@ button.mini-slot { cursor: pointer; }
   align-items: stretch;
   gap: 0.6%;
   padding: 0.55% 0.9% 0.65%;
-  background: linear-gradient(180deg, #f3ead9 0%, #eee1ca 100%);
-  border-top: 1px solid var(--line);
+  /* ink-table-skin 票 02：同顶栏，半透宣纸。`flex: 0 0 27.5%` 与 `z-index: 10` 被
+   * 烟测 / 静态形状检查钉着，一个字不动；只换底与上边线。 */
+  background: rgba(var(--paper-rgb), .55);
+  border-top: 1px solid rgba(58, 51, 43, .18);
   position: relative;
   z-index: 10;
 }

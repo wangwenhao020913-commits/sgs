@@ -88,6 +88,11 @@
      U2-01：导航三键搬进顶栏右端，旧的「回放」图标按钮删除。 -->
 <main id="view-table" class="view table-view" hidden>
   <div id="table-shell" class="table-shell">
+    <!-- 水墨山水动态底（ink-table-skin 票 01）：壳里第一个子节点，z 在一切内容之下，
+         不吃指针、不含文字。画布内容由 `ink-bg.js` 现画（程序生成、零外部资源）；
+         尺寸 = 壳尺寸（硬 16:9，与 1920×1080 设计坐标同构 ⇒ 不裁不拉伸）。
+         起停跟着 `#view-table` 的显隐走（`core.js:show()`），切走即停。 -->
+    <canvas id="ink-bg" class="ink-bg" aria-hidden="true"></canvas>
     <!-- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 导航三键。不放计时器。 -->
     <div id="table-topbar" class="topbar table-topbar">
       <div id="t-identity-panel" class="topbar-left">
@@ -534,6 +539,10 @@
      damage-fx.js 之后、main.js 之前；damage-fx.js 的四个调用点运行时才触发，wire() 里的
      damageSfxSync() 也在这之后。 -->
 <script src="sfx-ui.js"></script>
+<!-- ink-table-skin 票 01：牌桌的水墨动态底。载入期什么都不做（烟测垫片没有 location /
+     performance.now / 裸 requestAnimationFrame，顶层碰一下就会打断整轮烟测），
+     由 main.js:wire() 末尾 `mount(#ink-bg)` 才起帧；显隐由 core.js:show() 控。 -->
+<script src="ink-bg.js"></script>
 <script src="main.js"></script>
 </body>
 </html>

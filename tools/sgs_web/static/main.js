@@ -163,6 +163,14 @@ function wire() {
   // U3-05 / D12：静默轮询——每 2 秒取一次增量。播放中 / 提交在飞时 `poll` 自己让路
   // （下一次 tick 自然恢复）；弹窗打开时照常轮询（服务端的超时代答只在这一步判定）。
   window.setInterval(poll, POLL_INTERVAL_MS);
+  // ink-table-skin 票 01：水墨底在 wire() 末尾起一次帧（此时壳已挂上、尺寸可量）。
+  // 首屏是开局页 ⇒ `show("lobby")` 走 `core.js:show()` 会立刻把它 pause 住，进牌桌才动。
+  // `mount()` 自己扛住"没有 2D 上下文"的环境（返回 state，不抛错）：背景是装饰，
+  // 它坏了不该把牌桌一起带走。
+  if (window.SgsInkBg && typeof window.SgsInkBg.mount === "function") {
+    window.SgsInkBg.mount($("ink-bg"));
+    if ($("view-table").hidden) window.SgsInkBg.pause();
+  }
 }
 
 wire();
