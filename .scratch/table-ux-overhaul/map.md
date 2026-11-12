@@ -34,6 +34,11 @@
 | 2026-11-11 | Q15/Q20 转化清单三级置灰 | 12 |
 | 2026-11-11 | Q16 转化牌与真牌同档（官方规则集无条文 + 移动版实际行为） | 04 |
 | 2026-11-11 | Q21 并发写者已收口（HEAD `a36acf0`，工作树仅 2 个 untracked） | — |
+| 2026-11-11 | **实施期裁定（缺口 #甲）**：票 13 会改 `58-jie-luxun-hero-zone.jsonl` 的记录流，而票 06 是纯文档、排在 13 之前 ⇒ **由票 13 在自己的提交里重录自己的基准**（照 `spec §3 注①` 的纪律，而非票 13 原文"交票 06"）。票 06 的账本行改成通式"重录随行为票同提交" | 06 / 13 |
+| 2026-11-11 | **实施期裁定（缺口 #乙）**：票 11 §C 说清单"不再下发 `pool`/`groups`/`disabled`"，票 12 又要求源牌级/产物级 `disabled` ⇒ **11 退役的是"逐组合静态池行"与 `MANIFEST_POOL_LIMIT` 退化分支；`disabled` 字段保留并由票 12 重新定义语义**（源牌级 / 产物级，询问时算一次） | 11 / 12 |
+| 2026-11-11 | **实施期裁定（缺口 #丙）**：`开发文档/04-AI与交互设计.md` 在票 06 的 Touches 里但「要写什么」未要求（06 有意不扩面）⇒ **改由票 08 在其提交里一并收口**（§4「预发动」的"不是弹窗 / 取消回第一步"实现口径 + §1"每层 N 次询问"在网页缺省 ON 后 N = 合格者数） | 08 |
+| 2026-11-11 | **实施期裁定（缺口 #丁）**：票 10 与票 14 都写了"补 `hp_max_change`/`armor_change`/`marker_change` 派生" ⇒ **归票 10**（前端 live 派生 + 空转指纹字段），**票 14 只做服务端 `setup` 底稿 + 删 `openingLiveView` 的倒推**，不重复实现派生 | 10 / 14 |
+| 2026-11-11 | **实施期裁定（缺口 #戊，`spec §5` 的实机条目）**：本机 `bsk` **不可驱动**——`browser_session start` 成功、但所有 `browser_page navigate` / `browser_tabs create` / `browser_interact` 均被 `Page frames cannot be observed: 0 (about:)` 与 `requires the context returned by the latest cooperate sync` 拒绝（子代理与编排者各撞一次，换 session / noFocus / reload 无效；`tools/check_env.sh` 只做"插件在不在"的静态预检，故仍报 PASS）。⇒ 按仓规改为**配方 + 结束 turn**：票 07/08/09/10/13/14 的 `## Answer` 各带实机配方，DOM 形状的功能面由 `bash tests/smoke-web.sh` + `tests/test_action_contract.py` + `bash tests/test_web.sh`（真 HTTP tape）覆盖；**真实浏览器那一步留给用户**（验收清单见本次交付报告） | 07/08/09/10/13/14 |
 
 ## Fog（已知未知，实现时会撞上）
 
