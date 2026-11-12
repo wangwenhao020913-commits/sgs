@@ -18,7 +18,10 @@
 
 - 标记只记事实：名称 / 来源 / 数量 / 上限 / 无效果 / 无说明；
 - 「强制段」用 :attr:`~sgs.skills.catalog.Hook.forced` 声明（票 04）：不问"是否发动"，
-  但仍随实例失效而停摆（`forced` **不**进 `_skill_is_suppressed`）。
+  但仍随实例失效而停摆（`forced` **不**进 `_skill_is_suppressed`）；
+- 标记的**到期清扫**另外声明 :attr:`~sgs.skills.catalog.Hook.bookkeeping`（table-ux-overhaul
+  票 17）：它是技能自己的记账，连"同座位同档多段强制效果由玩家选先后"的面也不进——否则
+  准备阶段会冒出一张「是否发动大雾 / 狂风」的面（用户 2026-11-11 实机报障）。
 """
 
 from __future__ import annotations
@@ -503,10 +506,13 @@ def shen_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
                 Hook(Timing.PHASE_FINISH, flow=KUANGFENG_FLOW, condition=_own_turn_phase),
                 # 到期清扫：**来源的**下个回合开始时清掉自己来源的标记（**强制**，不问；
                 # 但要自校"这是不是我的回合开始"——TURN_START 每座都派发）。
+                # **簿记段**（table-ux-overhaul 票 17）：清扫是这条技能自己的记账，没有
+                # "发动形态"、先后也无意义 ⇒ 按链序静默跑，不在准备阶段摆出"是否发动"的面。
                 Hook(
                     Timing.TURN_START,
                     handler=_kuangfeng_expire,
                     forced=True,
+                    bookkeeping=True,
                     condition=_own_turn_start,
                 ),
             ),
@@ -533,6 +539,7 @@ def shen_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
                     Timing.TURN_START,
                     handler=_dawu_expire,
                     forced=True,
+                    bookkeeping=True,
                     condition=_own_turn_start,
                 ),
             ),

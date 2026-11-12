@@ -5635,10 +5635,11 @@ def _session_at_a_two_skill_activation_face() -> Session:
     ``heroes=("shen_zhugeliang", ...)`` 直接把神诸葛亮钉在人类座位上（不点将也确定）；
     其余询问取超时兜底（排列 = 恒等、技能 = 放弃），故驱动是确定性的。
 
-    **必须钉在 ``PHASE_FINISH``**（lei-shenganning 票 95）：同一时机的两段**强制**效果现在也
-    合成一张"先结哪一条"的面（【狂风】【大雾】的 ``TURN_START`` 到期清扫就是这种面，而且
-    两段都不可放弃 ⇒ 面上**没有** Pass）。这张用例钉的是"可选段的两候选面带 Pass"，故不能
-    停在那种强制面上。
+    **必须钉在 ``PHASE_FINISH``**（lei-shenganning 票 95；table-ux-overhaul 票 17）：本用例
+    钉的是"**可选段**的两候选面带 Pass"——同一时机的多段**强制**效果也会合成"先结哪一条"的
+    面（面上**没有** Pass，例如【劫营】③ +【镇骨】），那张面不是本用例的判据。神诸葛亮
+    ``TURN_START`` 的到期清扫曾在准备阶段摆出这种面，票 17 起它是**簿记段**、不再成面
+    （`tests/test_hero_huo.py::test_dawu_and_kuangfeng_are_never_offered_at_turn_start`）。
     """
     session = Session(
         seed=7,

@@ -264,9 +264,34 @@ class Hook:
     缺省 ``False`` ⇒ 既有 145 条技能逐字节不变。
     """
 
+    bookkeeping: bool = False
+    """这一条强制钩子是**簿记段**（table-ux-overhaul 票 17，缺省 ``False``）：
+    按链序**静默**跑，**绝不进玩家可见的面**（既不撑起"先结哪一条"，也不跟可选项拼面）。
+
+    判据为什么不能只看形状：票 17 的根因是「全是 ``forced`` 纯 handler（``flow is None``）」
+    这条**形状**判据把**簿记段**与**真效果**混成了一类。后者确实存在——【劫营】③ 与【镇骨】
+    在 ``TURN_END`` 上都是 ``forced=True`` 的纯回调，而它们**必须**合成"两条都得跑、先跑哪个
+    由你定"的面（用户 2026-11-07 口径，`tests/test_hero_lei.py` 钉住）。纯被动钩子的
+    "顺序面"是**真效果**的排序，不是簿记冲突；故"是不是簿记"只能是**声明**（这一位），
+    不能由形状推。
+
+    ``True`` 的语义 = "这条钩子只是技能自己的**记账**（标记到期清扫一类），规则上没有可选的
+    发动形态，先后也无意义"：候选的**全部**匹配项都是簿记段时，派发环（:func:`_dispatch`）
+    把它们按链序跑完（与既有强制段同一条路：不问、``announce=True``），再摆可选面。
+    :attr:`ActivationCandidate.bookkeeping` 是这条判据的**唯一读取方**。
+
+    形状由本类自己把关：簿记段必须是 ``forced`` 的 **handler**（``flow is None``）——
+    有流水线的段有"发动形态"，不该被声明成簿记；非强制的段本来就会被问。
+    """
+
     def __post_init__(self) -> None:
         if (self.handler is None) == (self.flow is None):
             raise ValueError(f"{self.timing.value} 上的钩子必须恰有 handler / flow 之一")
+        if self.bookkeeping and not (self.forced and self.flow is None):
+            raise ValueError(
+                f"{self.timing.value} 上的簿记段必须是 forced 的 handler"
+                "（有流水线 / 会被问的段不是簿记）"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,6 +585,8 @@ class ActivationCandidate:
     ``forced=True`` = **强制段**（锁定技 / 觉醒技 / 逐条 ``Hook.forced``）：不问、不上脸，
     本档轮到它时直接跑；``False`` = 进"是否发动"的面。``False`` 但含 ``Hook.forced`` 项的
     **混合实例**仍上一次脸；那些强制项在 ``Pass`` 之后照跑（见 :func:`_mandatory_entries`）。
+    ``bookkeeping=True``（票 17）= 全部匹配项都是**簿记段**：这类候选只按链序静默跑，
+    **绝不拼进任何面**（见 :attr:`bookkeeping` / :attr:`Hook.bookkeeping`）。
     """
 
     instance: SkillInstance
@@ -580,6 +607,23 @@ class ActivationCandidate:
     def actor(self) -> int:
         """这一项**由谁应答**：计划指定者优先，否则是技能持有者（缺省口径）。"""
         return self.instance.owner if self.plan.actor is None else int(self.plan.actor)
+
+    @property
+    def bookkeeping(self) -> bool:
+        """这一批匹配项是否**全是簿记段**（table-ux-overhaul 票 17）——是则只静默跑。
+
+        判据只有一条：**全部**匹配项都在声明上写了 :attr:`Hook.bookkeeping`。形状（``forced``
+        的纯 handler）由 :class:`Hook` 自己把关，故这里不重复看 ``flow`` / ``forced``——一份
+        判据一处维护。
+
+        它**不是**"强制段"的同义词：``forced`` 的**真效果**（【劫营】③ /【镇骨】在
+        ``TURN_END`` 上的结算）仍然可以进"先结哪一条"的顺序面；只有声明为簿记的段
+        （标记到期清扫一类）永不上脸（见 :attr:`Hook.bookkeeping`）。
+        帧内接缝（:class:`Seam`）没有这一位 ⇒ ``getattr`` 缺省 ``False``。
+        """
+        return bool(self.items) and all(
+            bool(getattr(item, "bookkeeping", False)) for item in self.items
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2080,19 +2124,32 @@ def _dispatch(
                 #     Pass（Pass 只放弃这些，强制段随后照跑）；全是不可放弃的段 ⇒ **没有**
                 #     Pass，必须选一条（劫营③ + 镇骨）；
                 #   · 单段强制 ⇒ 仍不问、直接跑（与票 01 逐字节同形）。
+                #
+                # **簿记段不进面**（table-ux-overhaul 票 17）：`Hook.bookkeeping` 的强制
+                # 纯回调（标记到期清扫一类）在这一档先按链序静默跑完（与"强制段先于可选项"
+                # 同姿态，`announce=True` 同一路），然后才轮到任何面。它们既不撑起"先结哪
+                # 一条"，也不跟可选项拼面——否则玩家会在**准备阶段**被问"是否发动大雾/狂风"，
+                # 而那两条规则上只在结束阶段发动。
                 tier = min(candidate.tier for candidate in candidates)
                 same_tier = tuple(
                     candidate for candidate in candidates if candidate.tier == tier
                 )
+                bookkeeping = tuple(
+                    candidate for candidate in same_tier if candidate.bookkeeping
+                )
                 locked_mandatory = tuple(
                     candidate
                     for candidate in same_tier
-                    if candidate.forced and _locked_like(candidate)
+                    if candidate.forced
+                    and _locked_like(candidate)
+                    and not candidate.bookkeeping
                 )
                 open_mandatory = tuple(
                     candidate
                     for candidate in same_tier
-                    if candidate.forced and not _locked_like(candidate)
+                    if candidate.forced
+                    and not _locked_like(candidate)
+                    and not candidate.bookkeeping
                 )
                 # **同一张面 = 同一档**（票 04 / Q13 / Q17）：可选项只收**当前最小档**的那几条。
                 # 改造前面跨档（先点低档就把高档关掉，玩家读成"选了一个另一个没了"）；现在
@@ -2102,6 +2159,14 @@ def _dispatch(
                     for candidate in candidates
                     if not candidate.forced and candidate.tier == tier
                 )
+                if bookkeeping:
+                    # 簿记段：按链序静默跑完（`announce=True`，与既有强制段同一条路），
+                    # 再回 ``ask`` 重估可选项 —— 票 17 §4 的"簿记段先跑、面后问"。
+                    state["pass_forced"] = bookkeeping
+                    state["pass_forced_at"] = 0
+                    state["pass_optional"] = None
+                    state["pass_phase"] = "forced"
+                    continue
                 if len(locked_mandatory) >= 2:
                     state["pass_optional"] = locked_mandatory
                     state["pass_allow_pass"] = True

@@ -89,6 +89,13 @@
 > 样板 = 界华雄【耀武】`hero.jie_huaxiong.yaowu`（造伤后自动效果）；风包魏延【狂骨】
 > `hero.weiyan.kuanggu` 是它的"两条钩子"版：一条在 `DAMAGE_TAKE` 定格距离、一条在
 > `DAMAGE_AFTER_DEAL` 逐点回复。
+>
+> **簿记段**（table-ux-overhaul 票 17）：强制段里只做**记账**的那一类（标记到期清扫）再加
+> `bookkeeping=True`——它连"同座位同档多段强制效果由玩家选先后"的面也**不进**，只按链序
+> 静默跑。判据不能只看形状：`forced` 的**真效果**（【劫营】③ +【镇骨】在 `TURN_END` 上的
+> 结算）同样是"纯 handler"，而那张"两条都得跑、先跑哪个由你定"的面必须照旧出现，故
+> "是不是簿记"只能是声明。样板 = `hero.shen_zhugeliang.kuangfeng` / `hero.shen_zhugeliang.dawu`
+> 的 `TURN_START` 到期清扫（玩家此前会在准备阶段被问"是否发动"）。
 
 > 表里没有的形状，就是 C1：**停手开架构缺口票**，不许在技能代码里绕。
 
