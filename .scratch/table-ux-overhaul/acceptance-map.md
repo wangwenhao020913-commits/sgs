@@ -105,7 +105,7 @@
 | 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 19 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS | ✅ |
 | 新增断言落在真实产出路径 | 票 09 的"回环"用例从真引擎 pending 取载荷；票 11 的同源断言直接调校验器；票 13 的除疠越池用例真跑执行器 | ✅ |
 | 前端行为变更过 `bash tests/smoke-web.sh` | 票 07/08/09/10/11/12/13/14 的 Answer 均记录 smoke-web PASS（票 14 1635→1690+ PASS / 0 FAIL） | ✅ |
-| 改 DOM API 形状的票要走 `bsk` 实机 | **未执行**：本机 bsk 的 cooperate 握手一直失败（所有 `browser_interact` / `navigate` 被 "requires the context returned by the latest cooperate sync" 拒绝）。已按仓规改为"配方 + 结束 turn 交用户"：票 07/08/09/10/13/14 的 `## Answer` 各带配方；功能面由 smoke-web + `tests/test_action_contract.py` 覆盖 | `[R]` 见 `map.md` 缺口 #戊 |
+| 改 DOM API 形状的票要走 `bsk` 实机 | **未执行**：本机 bsk 的 cooperate 握手一直失败（所有 `browser_interact` / `navigate` 被 "requires the context returned by the latest cooperate sync" 拒绝）。已按仓规改为"配方 + 结束 turn 交用户"：票 07/08/09/10/13/14 的 `## Answer` 各带配方；功能面由 smoke-web + `tests/test_action_contract.py` 覆盖。**票 19 的用户实机验收已过**（2026-11-12，按票面配方：4 人 / 种子 15 / 座位 0 / random AI） | `[R]` 见 `map.md` 缺口 #戊 |
 | 新机制过 `docs/agents/ai-adaptation.md` §1 | 票 02/03/04/05/11/12/13 的 Answer 逐条判"不适用/已登记"；票 11 判不适用（只读预览通道不改 `QueryKind`/动作面），票 13 的 `_DYNAMIC_POOL_SEAT_STEPS` 登记为 AI 侧新纪律 | ✅ |
 | 全量门禁收口跑一次 | 收口独立复跑 `bash tests/run_all.sh`（结果见交付报告） | ✅ |
 
