@@ -14,7 +14,7 @@
  */
 {
   const names = [
-    "state", "applyView", "renderPending", "buildAction", "submitAction",
+    "state", "applyView", "renderPending", "skillInkOpacityAt", "skillInkFxClear", "buildAction", "submitAction",
     "loadRuns", "openReplay", "renderReplay", "renderLog", "phaseLabel",
     "cardUsable", "cardCandidates", "clearSelection", "renderTable", "actionLabel", "renderSkills",
     "ACTION_KIND_LABELS", "PHASE_LABELS", "keepRecord", "timingLabel",

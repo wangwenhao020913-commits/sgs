@@ -429,7 +429,7 @@ function damageFxMountCanvas(layer) {
  *  `data-damage-fx-hold` = 这条演出正要求"暂停回放"吗（`"1"` / 空串，票 07）。
  *
  * 画布像素不可断言（也不该断言），故把"演了几条 / 在播几条"写在节点上——烟测与实机
- * 验收都读它，与 `.skill-float` 的 `data-skill-stack` 同一姿态。
+ * 验收都读它，与技能墨字层 `#t-skill-ink` 的 `data-skill-ink` 同一姿态。
  */
 function damageFxMark(layer, play = null) {
   if (!layer || !layer.setAttribute) return;

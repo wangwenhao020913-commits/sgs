@@ -637,6 +637,11 @@ if (!scriptSrcs.length) throw new Error("index.html 没有 <script src> 清单�
 for (const src of scriptSrcs) {
   vm.runInContext(readFileSync(`tools/sgs_web/static/${src}`, "utf8"), context, { filename: src });
 }
+/* ink-table-skin 票 03：技能墨字的**烘焙**在 Node 的 vm 里比 Chromium 慢约 35 倍
+ * （实测 create() 135ms → 4.5s），而套件要发动一百多次技能 ⇒ 70 秒的烟测会变成 12 分钟。
+ * 垫片本来就画不出像素（`drawImage` / `putImageData` 都是空实现），断言只看 DOM 与生命周期，
+ * 故声明"不烘焙"：canvas 照建、属性照记、摘层照走，只跳过烘 + 画。 */
+windowShim.__sgsNoInkBake = true;
 const bridge = readFileSync("tests/support/ui_bridge.js", "utf8");
 vm.runInContext(bridge, context, { filename: "ui_bridge.js" });
 const ui = context.__bridge;
@@ -18162,9 +18167,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` fadeAt=${replayFadeAt} dwell=${replayDwell} effect="${$("r-effect").textContent}"`);
   check("U3-01u 回放页不出现目标线 / 技能名 / 白光（04 的范围裁定）",
     byClass($("table-stage"), "target-line").length === 0
-      && byClass($("table-stage"), "skill-float").length === 0
+      && byClass($("table-stage"), "skill-ink-canvas").length === 0
       && byClass($("table-stage"), "hero-flash").length === 0,
-    `lines=${byClass($("table-stage"), "target-line").length} floats=${byClass($("table-stage"), "skill-float").length}`);
+    `lines=${byClass($("table-stage"), "target-line").length} inks=${byClass($("table-stage"), "skill-ink-canvas").length}`);
 
   // 真 DOM 回归（U3 验收缺陷）：`node.children` 是 HTMLCollection——只有 length / item /
   // 索引 / 迭代，**没有 `.find`**。舞台卡复用更新（renderEffectCards → updateStageCardNode）
@@ -18680,8 +18685,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 /* ============ U3-04（票 04）：技能名 / 白光 / 技能目标线 ============
  *
  * 判据来自票面与 spec D8.2 / D9 / D15。载荷是**与响应体同形**的合成 `view` + 记录 +
- * `skill_events`（派生通道由服务端下发）：断言只落在 DOM——`.skill-float` 的文本 /
- * 座位 / 叠放属性与坐标、武将块的 `.skill-sweep`、线层的 `data-line-to`。
+ * `skill_events`（派生通道由服务端下发）：断言只落在 DOM——墨字 canvas 的
+ * `data-skill-ink-name` / `data-skill-ink-seat` 与矩形、武将块的 `.skill-sweep`、
+ * 线层的 `data-line-to`。
  * 时间不靠真实等待：`state.animScale = 0`（淡出立即完成），回放用 `stepPlayback(true)`
  * 逐条推进；纯刷新走"没有 records 的 applyView"。
  */
@@ -18712,8 +18718,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       (node) => walk(node).filter((child) => hasClass(child, "hero-block"))),
     $("t-self-hero"),
   ];
-  const floats = () => walk($("t-skill-floats")).filter(
-    (node) => hasClass(node, "skill-float"));
+  /* ink-table-skin 票 03：金色飘字退役，`floats()` 现在指**墨字 canvas**。
+   * 画布本身没有文字，名字与座位挂在 `data-skill-ink-name` / `data-skill-ink-seat` 上
+   * （`skill-ink-fx.js` 写的两枚可断言读数）。 */
+  const floats = () => walk($("t-skill-ink")).filter(
+    (node) => hasClass(node, "skill-ink-canvas"));
   const lineNodes = () => walk($("t-target-lines")).filter(
     (node) => hasClass(node, "target-line"))
     .filter((node) => attr(node, "data-line-to") !== undefined);
@@ -18789,13 +18798,25 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const afterQuery = floats().length;
   step();  // action(2) = 发动
   const node = floats()[0];
+  const inkError = () => attr($("t-skill-ink"), "data-skill-ink-error");
+  /* 用户 2026-11-13 Q14/Q17B 的淡出口径：0.53s 起（= 朱印落完）线性 1 → 0.55，
+   * 止于 1.28s（= 素材内部 fadeAt 1.46 的同比位置），其后交给模块自己的化墨。 */
+  const opacityAt = (t) => ui.skillInkOpacityAt(t);
+  check("U3-04n 墨字淡出曲线：0.53s 前满不透明、0.53→1.28s 线性降到 0.55、之后保持",
+    opacityAt(0) === 1 && opacityAt(0.53) === 1
+      && Math.abs(opacityAt(0.905) - 0.775) < 1e-9
+      && Math.abs(opacityAt(1.28) - 0.55) < 1e-9
+      && Math.abs(opacityAt(1.7) - 0.55) < 1e-9,
+    `0=${opacityAt(0)} 0.53=${opacityAt(0.53)} 0.905=${opacityAt(0.905)}`
+      + ` 1.28=${opacityAt(1.28)} 1.7=${opacityAt(1.7)}`);
   check("U3-04a 技能名在**发动那条记录**的步上飘出（query 步不飘、响应到达时不出现）",
     atArrival === 0 && pendingAtArrival === 1 && afterQuery === 0
       && floats().length === 1 && Boolean(node)
-      && node.textContent === "反间"
-      && attr(node, "data-skill-seat") === "1",
+      && attr(node, "data-skill-ink-name") === "反间"
+      && attr(node, "data-skill-ink-seat") === "1",
     `arrival=${atArrival} pending=${pendingAtArrival} afterQuery=${afterQuery}`
-      + ` floats=${floats().map((item) => item.textContent).join(",")}`);
+      + ` inks=${floats().map((item) => attr(item, "data-skill-ink-name")).join(",")}`
+      + ` err=${inkError()} diag=${JSON.stringify(context.window.skillInkDiag)}`);
   check("U3-04b 反间的目标线复用 U3-03 的线层：发动者 1 → 目标 0（data-line-to=0）",
     lineNodes().length === 1
       && attr(lineNodes()[0], "data-line-to") === "0"
@@ -18810,22 +18831,22 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     sweepAtActivation,
     `seat1=${sweepAtActivation} self=${hasClass($("t-self-hero"), "skill-sweep")}`);
 
-  // ---- 同一武将块 2s 内两条：不合并 / 不去重；后一条起点抬高 14 设计单位 ----
+  // ---- 同一武将块 2s 内两条：**先摘旧的**（用户 2026-11-13 Q10A 改口径）----
+  // 旧口径（D9）是"不合并、不去重，后一条起点抬高 14 设计单位"；换成墨字之后那张墨是
+  // 盖在牌心上的，叠两张就是糊成一团，故裁定改为"同一武将块只留在播的那一张"。
   loadSkillBatch(
     [query(1, 1), skillAction(2), query(3, 1), skillAction(4)],
     [skillEvent(2, 1, "反间", []), skillEvent(4, 1, "制衡", [])],
   );
   step(4);
   const stacked = floats();
-  const tops = stacked.map((item) => parseFloat(item.style.top));
-  check("U3-04d 同一武将块 2s 内两条：两个独立飘字，后一条起点抬高 14 设计单位",
-    stacked.length === 2
-      && stacked[0].textContent === "反间" && stacked[1].textContent === "制衡"
-      && attr(stacked[0], "data-skill-stack") === "0"
-      && attr(stacked[1], "data-skill-stack") === "1"
-      && Math.abs((tops[0] - tops[1]) - 14) < 1e-6,
-    `n=${stacked.length} stacks=${stacked.map((item) => attr(item, "data-skill-stack")).join(",")}`
-      + ` tops=${tops.join(",")}`);
+  check("U3-04d 同一武将块 2s 内两条：只留在播的那一张墨，名字换成最新那条",
+    stacked.length === 1
+      && attr(stacked[0], "data-skill-ink-name") === "制衡"
+      && attr(stacked[0], "data-skill-ink-seat") === "1"
+      && attr($("t-skill-ink"), "data-skill-ink") === "1",
+    `n=${stacked.length} names=${stacked.map((item) => attr(item, "data-skill-ink-name")).join(",")}`
+      + ` layer=${attr($("t-skill-ink"), "data-skill-ink")}`);
   check("U3-04e 没有指定目标的发动（制衡 / 装备技）：只飘名 + 白光，一条线都不画",
     lineNodes().length === 0 && hasClass(heroBlockOf(1), "skill-sweep"),
     `lines=${lineNodes().length} sweep=${hasClass(heroBlockOf(1), "skill-sweep")}`);
@@ -18837,7 +18858,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   );
   step(2);
   check("U3-04f 自己的发动：飘字挂在自己武将块上、白光落在 #t-self-hero、并向目标画线",
-    floats().length === 1 && attr(floats()[0], "data-skill-seat") === "0"
+    floats().length === 1 && attr(floats()[0], "data-skill-ink-seat") === "0"
       && hasClass($("t-self-hero"), "skill-sweep")
       && lineNodes().length === 1 && attr(lineNodes()[0], "data-line-to") === "2",
     `floats=${floats().length} selfSweep=${hasClass($("t-self-hero"), "skill-sweep")}`
@@ -18862,7 +18883,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const beforeRefresh = floats().length;
   ui.applyViewRaw({
     ...baseView(refreshSession), cursor: 2, log_seq: 0, records: [],
-    skill_events: [skillEvent(6, 1, "反间", [])], finished: false,
+    skill_events: [skillEvent(6, 2, "遗计", [])], finished: false,
   });
   check("U3-04h 纯刷新（无回放）：技能名立即演出，不丢事件、不等不存在的记录步",
     beforeRefresh === 1 && floats().length === 2
@@ -18876,8 +18897,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   );
   step(2);
   check("U3-04j 飘字的文本就是下发载荷的 name（前端没有 skill_id → 中文常量表）",
-    floats().length === 1 && floats()[0].textContent === "服务端命名",
-    `floats=${floats().map((item) => item.textContent).join(",")}`);
+    floats().length === 1 && attr(floats()[0], "data-skill-ink-name") === "服务端命名",
+    `inks=${floats().map((item) => attr(item, "data-skill-ink-name")).join(",")}`);
 
   // ---- 换会话：飘字 / 白光 / 待触发事件一起清掉，不给下一局留残影 ----
   ui.applyViewRaw({
@@ -18907,11 +18928,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   step(2);
   check("U3-04k 锁定技的发动事件（没有激活应答）：父荫在持有者武将块飘字 + 白光，不画线",
     floats().length === 1
-      && floats()[0].textContent === "父荫"
-      && attr(floats()[0], "data-skill-seat") === "1"
+      && attr(floats()[0], "data-skill-ink-name") === "父荫"
+      && attr(floats()[0], "data-skill-ink-seat") === "1"
       && hasClass(heroBlockOf(1), "skill-sweep")
       && lineNodes().length === 0,
-    `floats=${floats().map((item) => item.textContent).join(",")}`
+    `inks=${floats().map((item) => attr(item, "data-skill-ink-name")).join(",")}`
       + ` sweep=${hasClass(heroBlockOf(1), "skill-sweep")} lines=${lineNodes().length}`);
 
   // ---- lei 票 06：**转化技**（【武圣】这类确认后走普通 UseCard 的）同样演出 ----
@@ -18927,13 +18948,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const convertSweep = hasClass(heroBlockOf(2), "skill-sweep");
   check("U3-04l 转化技的发动事件：武圣在发动者武将块飘字 + 白光，并画线到目标",
     floats().length === 1
-      && floats()[0].textContent === "武圣"
-      && attr(floats()[0], "data-skill-seat") === "2"
+      && attr(floats()[0], "data-skill-ink-name") === "武圣"
+      && attr(floats()[0], "data-skill-ink-seat") === "2"
       && convertSweep
       && lineNodes().length === 1
       && attr(lineNodes()[0], "data-line-from") === "2"
       && attr(lineNodes()[0], "data-line-to") === "0",
-    `floats=${floats().map((item) => item.textContent).join(",")}`
+    `inks=${floats().map((item) => attr(item, "data-skill-ink-name")).join(",")}`
       + ` sweep=${convertSweep}`
       + ` lines=${lineNodes().map((item) => `${attr(item, "data-line-from")}->${attr(item, "data-line-to")}`).join(",")}`);
 
@@ -19273,8 +19294,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   });
   const lineCount = () => walk($("t-target-lines")).filter(
     (node) => hasClass(node, "target-line") && attr(node, "data-line-to") !== undefined).length;
-  const floatCount = () => walk($("t-skill-floats")).filter(
-    (node) => hasClass(node, "skill-float")).length;
+  const floatCount = () => walk($("t-skill-ink")).filter(
+    (node) => hasClass(node, "skill-ink-canvas")).length;
   const actingCount = () => seatNodesNow().filter((node) => hasClass(node, "acting")).length;
   const sweptCount = () => seatNodesNow().filter((node) => {
     const block = walk(node).find((child) => hasClass(child, "hero-block"));
@@ -21473,37 +21494,39 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `seat=${fallbackSeat && attr(fallbackSeat, "data-anim-phase-seat")}`
       + ` anchor=${fallbackSeat && attr(fallbackSeat, "data-anim-phase-anchor")}`);
 
-  // ---- 与技能名飘字同时：同座位、不同层 / 不同锚（技能名住武将块正上方） ----
+  // ---- 与技能墨字同时：同座位、不同层 / 不同锚（墨写的是武将块矩形本身） ----
+  // ink-table-skin 票 03 的口径变化：金色飘字曾经"住武将块正上方一行"（锚点 = 块中心上方
+  // 8 设计单位），墨字则是**整块武将牌的框**——故这里改成断"画布矩形 == 武将块矩形"，而阶段
+  // 飘字仍锚在判定/装备区上方，两者不叠。
   load([timingRecord(71, "PHASE_DRAW_START", 1)], {
     skill_events: [{ seq: 71, seat: 1, skill_id: "hero.zhouyu.fanjian", name: "反间", targets: [] }],
   });
   step();
   const phaseNode = floatNodes()[0] || null;
-  const skillNode = walk($("t-skill-floats"))
-    .find((node) => hasClass(node, "skill-float")) || null;
+  const inkNode = walk($("t-skill-ink"))
+    .find((node) => hasClass(node, "skill-ink-canvas")) || null;
   const skillBlock = heroBlock(1);
   const skillBlockRect = skillBlock ? skillBlock.getBoundingClientRect() : null;
-  const skillLayerRect = $("t-skill-floats").getBoundingClientRect();
+  const skillLayerRect = $("t-skill-ink").getBoundingClientRect();
   const judgeRect1 = judgeRow(1) ? judgeRow(1).getBoundingClientRect() : null;
   const phaseLeftH = phaseNode ? px(phaseNode.style.left) : Number.NaN;
   const phaseTopH = phaseNode ? px(phaseNode.style.top) : Number.NaN;
-  const skillLeftH = skillNode ? px(skillNode.style.left) : Number.NaN;
-  const skillTopH = skillNode ? px(skillNode.style.top) : Number.NaN;
+  const inkLeftH = inkNode ? px(inkNode.style.left) : Number.NaN;
+  const inkTopH = inkNode ? px(inkNode.style.top) : Number.NaN;
   check("U4-04-h 同座位「发动技能 + 阶段切换」同时发生：两个节点各占一层、各锚各的区，不叠",
-    Boolean(phaseNode) && Boolean(skillNode)
+    Boolean(phaseNode) && Boolean(inkNode)
       && phaseNode.parentNode === layer()
-      && skillNode.parentNode === $("t-skill-floats")
+      && inkNode.parentNode === $("t-skill-ink")
       && attr(phaseNode, "data-anim-phase-seat") === "1"
-      && attr(skillNode, "data-skill-seat") === "1"
+      && attr(inkNode, "data-skill-ink-seat") === "1"
       && Boolean(skillBlockRect) && Boolean(judgeRect1)
       && Math.abs(phaseLeftH - (judgeRect1.left + judgeRect1.width / 2)) < 1e-6
       && phaseTopH < judgeRect1.top
-      && Math.abs(skillLeftH
-        - (skillBlockRect.left - skillLayerRect.left + skillBlockRect.width / 2)) < 1e-6
-      && skillTopH < skillBlockRect.top
-      && Math.abs(phaseLeftH - skillLeftH) > 1e-6,
+      && Math.abs(inkLeftH - (skillBlockRect.left - skillLayerRect.left)) < 1e-6
+      && Math.abs(inkTopH - (skillBlockRect.top - skillLayerRect.top)) < 1e-6
+      && Math.abs(phaseLeftH - inkLeftH) > 1e-6,
     `phase=${phaseLeftH},${phaseTopH}@${phaseNode && phaseNode.parentNode && phaseNode.parentNode.id}`
-      + ` skill=${skillLeftH},${skillTopH}@${skillNode && skillNode.parentNode && skillNode.parentNode.id}`
+      + ` ink=${inkLeftH},${inkTopH}@${inkNode && inkNode.parentNode && inkNode.parentNode.id}`
       + ` judge=${judgeRect1 && judgeRect1.left} hero=${skillBlockRect && skillBlockRect.left}`);
 
   // ---- 不占步长：durationOf(timing) = 0、delayOf 只吃 base；收尾不另排计时器 ----

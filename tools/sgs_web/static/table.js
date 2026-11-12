@@ -380,6 +380,9 @@ function renderTable() {
   renderPromptSkills(view);
   // U4-05（D11）：弃牌堆面板开着时，每次提交 / 回放步都从同一份视图重画（关着时 no-op）。
   renderDiscardPanel();
+  // ink-table-skin 票 03：座位节点在本次重建里可能被换掉，而墨层的 canvas 不跟着重建。
+  // 牌挪了 / 换座 / 阵亡重建 ⇒ 这一场直接作废（不追着牌跑），照 chainFxSync / deathFxSync 的先例。
+  if (typeof skillInkFxSync === "function") skillInkFxSync();
 }
 
 /* --------------------------------------------------- 弃牌堆面板（U4-05 / D11） */

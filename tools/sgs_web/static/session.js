@@ -1627,6 +1627,9 @@ function commitView(body) {
     // 座位上的 `data-death-fx`）。**必须清属性**：覆盖规则留着会让上一局的座位在新桌上
     // 永远不灰（或永远不显示）——spec §硬约束。
     clearDeathFx();
+    // ink-table-skin 票 03：技能墨字（自己的覆盖层 `#t-skill-ink`）同理——上一局那张墨
+    // 不能留在新桌上。紧挨上面三个 clear*，同一处换局清场。
+    if (typeof skillInkFxClear === "function") skillInkFxClear();
     // chain-death-voices 票 03：上一局的卡牌语音不拖进新局（每条语音自己一路 `Audio`，停掉
     // 全部存活的那几路并清表）；队列同时清空（`applyView` 的换会话分支也清一次）。
     SgsCardVoice.stopAll();

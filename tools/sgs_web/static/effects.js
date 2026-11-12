@@ -37,10 +37,9 @@ const TARGET_ARROW_HALF_WIDTH = 5;
 const ACTING_HIGHLIGHT_MS = 500;
 const HP_FLASH_MS = 400;
 
-/** 技能名 / 白光的时长与设计单位（U3-04 / D9；CSS 里是同一份裁定）。 */
-const SKILL_FLOAT_MS = 2000;
-const SKILL_FLOAT_GAP_UNITS = 8;
-const SKILL_FLOAT_STACK_UNITS = 14;
+/** 白光扫过牌面的时长（U3-04 / D9；CSS 里是同一份裁定）。
+ *  ink-table-skin 票 03：同一处的**金色技能名飘字**已退役（换成武将牌水墨艺术字，
+ *  见 `skill-ink-fx.js`），故 `SKILL_FLOAT_*` 三个常量随之一并删除。 */
 const SKILL_SWEEP_MS = 600;
 const SKILL_SWEEP_STAGGER_MS = 120;
 
@@ -55,10 +54,6 @@ let actingTimer = null;
 
 /** 正在闪的武将块：`seat → {direction, timer}`（同一座位连续掉血 / 回复不叠计时器）。 */
 const hpFlashes = new Map();
-
-/** 技能名飘字（D9）：`seat → [{node, enteredAt, timer}]`；同一武将块 2s 内的后一条
- *  起点依次抬高 14（**不合并不去重**——两次发动就是两次演出）。 */
-const skillFloats = new Map();
 
 /** 白光（D9）：`seat → {until, timer}`；武将块在 commit 时会被重建，重绘后按它补类。 */
 const skillSweeps = new Map();
@@ -348,50 +343,7 @@ function flashHeroHp(seat, before, after) {
   hpFlashes.set(key, { direction, timer });
 }
 
-/* ------------------------------------------------------------ 技能名 / 白光（U3-04 / D9） */
-
-/** 技能名飘字：在发动者武将块正上方 8 设计单位起飘，2s 内上浮 20 并淡出（D9）。
- *
- * 同一武将块 2s 内的多条**不合并、不去重**：后一条的起点再抬高 14 设计单位，节点各自
- * 保留（`data-skill-stack` 是这条口径的可断言读法）。位置只在创建时读一次布局：
- * 与目标线一致，已经在播的飘字不随窗口尺寸变化重算。
- */
-function showSkillFloat(seat, name, now = stageNow()) {
-  const layer = $("t-skill-floats");
-  const shell = $("table-shell");
-  const block = heroBlockFor(seat);
-  if (!layer || !shell || !block) return null;
-  const key = String(seat);
-  const active = (skillFloats.get(key) || []).filter(
-    (entry) => now - Number(entry.enteredAt) < SKILL_FLOAT_MS,
-  );
-  const stack = active.length;
-  const node = document.createElement("div");
-  node.className = "skill-float";
-  node.classList.add("skill-float");
-  node.setAttribute("data-skill-seat", key);
-  node.setAttribute("data-skill-stack", String(stack));
-  node.textContent = name;
-  const layerRect = rectOf(layer);
-  const blockRect = rectOf(block);
-  const designUnit = designUnitOf(shell);
-  const left = blockRect.left - layerRect.left + (Number(blockRect.width) || 0) / 2;
-  const top = blockRect.top - layerRect.top
-    - (SKILL_FLOAT_GAP_UNITS + stack * SKILL_FLOAT_STACK_UNITS) * designUnit;
-  node.style.left = `${left}px`;
-  node.style.top = `${top}px`;
-  layer.appendChild(node);
-  const entry = { node, enteredAt: now, timer: null };
-  entry.timer = window.setTimeout(() => {
-    if (node.parentNode) node.parentNode.removeChild(node);
-    const kept = (skillFloats.get(key) || []).filter((item) => item !== entry);
-    if (kept.length) skillFloats.set(key, kept);
-    else skillFloats.delete(key);
-  }, Math.max(0, SKILL_FLOAT_MS * animScale()));
-  active.push(entry);
-  skillFloats.set(key, active);
-  return node;
-}
+/* ------------------------------------------------------------ 白光（U3-04 / D9） */
 
 /** 白光：武将块扫过一道白光 0.6s；粗 8 / 细 3，细带晚 0.12s（CSS 的伪元素）。
  *
@@ -430,7 +382,9 @@ function playSkillEvent(event, now = stageNow()) {
   const seat = Number(event.seat);
   if (!Number.isFinite(seat)) return;
   const name = String(event.name || "").trim();
-  if (name) showSkillFloat(seat, name, now);
+  /* 技能名不住飘字了：墨字由 `skill-ink-fx.js` 自己排播（`typeof` 守卫是为了
+   * "只加载了 effects.js 的探针"不炸——与 `damageFx*` 同一口径）。 */
+  if (typeof skillInkFxPlay === "function") skillInkFxPlay(event);
   flashSkillSweep(seat, now);
   const targets = Array.isArray(event.targets) ? event.targets : [];
   if (targets.length) drawTargetLines(seat, targets, now);
@@ -504,16 +458,6 @@ function clearTransientEffects() {
     if (block) block.classList.remove("skill-sweep");
   }
   skillSweeps.clear();
-  for (const entries of skillFloats.values()) {
-    for (const entry of entries) {
-      if (entry.timer !== null && window.clearTimeout) window.clearTimeout(entry.timer);
-      const node = entry.node;
-      if (node && node.parentNode) node.parentNode.removeChild(node);
-    }
-  }
-  skillFloats.clear();
-  const floatLayer = $("t-skill-floats");
-  if (floatLayer) floatLayer.innerHTML = "";
   // 换会话后上一批的待触发事件不属于新局（换会话的清空同时写在 applyView 里，这里兜底）。
   state.skillEvents = [];
   // damage-fx 票 09：伤害队列与覆盖层不在这里收——`session.js:commitView` 在本函数之后显式

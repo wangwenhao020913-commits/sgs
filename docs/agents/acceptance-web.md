@@ -60,8 +60,10 @@ browser_interact click|fill|press # 点座位 / 手牌 / 按钮，填输入框
 - **`browser_inspect html` 会序列化整页**（含全部座位 / 手牌 / 覆盖层，几百 KB，常被截断）：
   只在必须读 DOM 属性 / 类名时用，并尽量带 ref 或选择器做**有界**读取；日常观察用
   `observe` / `screenshot`。
-- `#t-skill-floats` 与 `#t-target-lines` 是**非交互覆盖层**（`pointer-events: none`，
-  技能名 / 目标线的动画层），不要试图点它们；它们的窗口只有 0.4–2 秒，**截图**比读 DOM 可靠。
+- `#t-skill-ink` 与 `#t-target-lines` 是**非交互覆盖层**（`pointer-events: none`，
+  技能墨字 / 目标线的动画层），不要试图点它们；它们的窗口只有 0.4–2 秒（墨字整段 1.8s），
+  **截图**比读 DOM 可靠。墨字画布上没有文字：名字与座位读 `data-skill-ink-name` /
+  `data-skill-ink-seat`。
 - 截图证据放 `.scratch/<effort>/screenshots/`，文件名带票号与场景。
 
 ## 4 · 种子 12 配方

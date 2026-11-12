@@ -992,27 +992,25 @@ button.mini-slot { cursor: pointer; }
 
 /* ---------- 牌桌动效（U3-04 / D9）：技能名飘字 / 白光 ---------- */
 
-/* 技能名层：与目标线层一样覆盖整个牌桌壳、不吃指针；层级在线层（15）之上、弹窗（60）
- * 之下。飘字**不住武将块里**——武将块要 `overflow: hidden` 裁白光（D9），住进去会把
- * 上浮的技能名一起裁掉；两条要求因此各用一层。 */
-.skill-floats {
+/* 技能墨字层（ink-table-skin 票 03）：覆盖整个牌桌壳、不吃指针、裁在壳内；层级 z19，
+ * DOM 排在 `#t-death-fx` 之后 ⇒ 压在伤害数字 / 铁索 / 阵亡蒙灰之上（技能名本身是信息，
+ * 置顶才读得懂"谁发动了什么"）。墨**不住武将块里**：`.hero-block` 要 `overflow: hidden`
+ * 裁白光，且每次 renderTable 会被整个换掉 ⇒ 墨住独立层，借武将块的矩形定位。
+ * 混色挂在**层**上而不是 canvas 上：z-index 让层自己成为独立合成组，canvas 上的 multiply
+ * 只能跟层内透明背景混，压不到牌面；层自己混才可以。 */
+.skill-ink-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
   overflow: hidden;
-  z-index: 16;
+  z-index: 19;
+  mix-blend-mode: multiply;
 }
-/* 发动者武将块正上方 8 设计单位起飘（JS 定位），2s 内上浮 20 设计单位并淡出；
- * 金色加粗 16 设计单位。同一武将块 2s 内的后一条由 JS 把起点再抬高 14（`data-skill-stack`）。 */
-.skill-float {
+/* 每个在播的技能一张 canvas，框 = 武将块矩形（只量一次，之后位置不动——不漂移不缩放）。 */
+.skill-ink-layer canvas {
   position: absolute;
-  transform: translate(-50%, -100%);
-  white-space: nowrap;
-  font-size: calc(16 * var(--dsu));
-  font-weight: 700;
-  color: #d9b45c;
-  text-shadow: 0 1px calc(2 * var(--dsu)) rgba(43, 36, 28, .35);
-  animation: skill-float-rise 2s ease-out 1 forwards;
+  display: block;
+  pointer-events: none;
 }
 
 /* ---------- 飞行层（U4-01 / D1 / D2）：与舞台区互不依赖的牌面副本 ---------- */
@@ -1050,17 +1048,6 @@ button.mini-slot { cursor: pointer; }
   font: 12px/1.4 system-ui;
   pointer-events: none;
 }
-@keyframes skill-float-rise {
-  0% {
-    transform: translate(-50%, -100%) translateY(0);
-    opacity: 1;
-  }
-  100% {
-    transform: translate(-50%, -100%) translateY(calc(-20 * var(--dsu)));
-    opacity: 0;
-  }
-}
-
 /* ---------- 无属性伤害演出层（damage-fx 票 05）：剑光 / 刀痕 / 飘字 ---------- */
 
 /* 覆盖整个牌桌壳、不吃指针、裁在壳内。层级 19 = 在飞行层（18）之上、弹窗 / 询问窗（60）

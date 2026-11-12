@@ -232,6 +232,8 @@ function damageSfxEnsureModules() {
   chainSfxEnsure();
   // chain-death-voices 票 02：阵亡那一路同样在这一个手势里建（池长 1，惰性）。
   deathSfxEnsure();
+  // ink-table-skin 票 03：技能墨字那一路也在**同一个手势**里建（Safari 只认真实手势）。
+  skillInkSfxEnsure();
   // vital-fx 票 02：体力演出两个模块（票 03 / 04）也在**同一个手势**里建；缺件就跳过，
   // 于是"模块还不存在"与"没有 AudioContext"走同一条静默降级路径。
   live += vitalSfxEnsureModules();
@@ -352,6 +354,54 @@ function chainSfxStop(owner) {
 function chainSfxMute(on) {
   if (!chainSfxLane) return;
   if (typeof chainSfxLane.player.mute === "function") chainSfxLane.player.mute(Boolean(on));
+}
+
+/* ------------------------------------------ 技能墨字的音效（ink-table-skin 票 03） */
+
+/** 技能墨字那一路（`SgsSkillInkSfx` 与 `SgsChainSfx` / `SgsDeathSfx` 同姿态：**一次性排程器**
+ *  `play(fromT, speed, 字数)` 把落墨 / 扫笔 / 落印 / 化墨四拍排完，没有逐帧 `tick`，
+ *  不进伤害声道池）。模块内部最多 4 路并发，后开的不掐前一条。
+ *  惰性建：只有页面上加载了该模块、且用户开过「♪」时才建；缺件就静默跳过（不建
+ *  `AudioContext`，也不报错）。 */
+let skillInkSfxLane = null;
+
+function skillInkSfxEnsure() {
+  if (!skillInkSfxLane) {
+    const api = window.SgsSkillInkSfx;
+    if (!api || typeof api.create !== "function") return null;
+    const player = api.create({ muted: !damageSfxOn });
+    if (!player || typeof player.play !== "function") return null;
+    skillInkSfxLane = { player };
+  }
+  if (typeof skillInkSfxLane.player.unlock === "function") {
+    try {
+      skillInkSfxLane.player.unlock();
+    } catch (error) {
+      // 没有 AudioContext / 被策略禁用：静默降级，画面照旧。
+    }
+  }
+  skillInkSfxMute(!damageSfxOn);
+  return skillInkSfxLane;
+}
+
+/** 一次技能发动开声（`skill-ink-fx.js` 的 `skillInkFxPlay` 调；**单向缝**）。
+ *  「♪」关着时一声都不出，而且连 `AudioContext` 都不建。 */
+function skillInkSfxPlay(name) {
+  if (!damageSfxOn) return;
+  const lane = skillInkSfxEnsure();
+  if (!lane) return;
+  const chars = Array.from(String(name || "")).length || 1;
+  try {
+    lane.player.play(0, 1, chars);
+  } catch (error) {
+    // 排程失败不影响画面：这一声就算了。
+  }
+}
+
+/** 开关灌到技能墨字这一路（`damageSfxMute` 顺手调它：同一个开关管所有声音）。 */
+function skillInkSfxMute(on) {
+  if (!skillInkSfxLane) return;
+  if (typeof skillInkSfxLane.player.mute === "function") skillInkSfxLane.player.mute(Boolean(on));
 }
 
 /* ---------------------------------------------- 阵亡的音效（chain-death-voices 票 02） */
@@ -563,6 +613,8 @@ function damageSfxMute(muted) {
   chainSfxMute(Boolean(muted));
   // 阵亡那一路同一个开关（chain-death-voices 票 02）。
   deathSfxMute(Boolean(muted));
+  // 技能墨字那一路同一个开关（ink-table-skin 票 03）。
+  skillInkSfxMute(Boolean(muted));
   // 卡牌语音同一个开关（chain-death-voices 票 03）：关的时候停掉全部存活语音。
   cardVoiceMute(Boolean(muted));
   // 体力那两路同一个开关（vital-fx 票 02；模块缺件时是空转）。

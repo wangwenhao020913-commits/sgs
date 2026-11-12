@@ -473,32 +473,51 @@ def test_skill_sweep_is_a_thick_and_thin_white_band_clipped_inside_the_hero_bloc
     )
 
 
-def test_skill_float_uses_the_d9_design_units_and_stack_offset() -> None:
-    """D9 的飘字：16 设计单位金色加粗、2s 上浮 20、同一武将块 2s 内叠加抬高 14。"""
-    style = _css_rule(".skill-float")
-    assert re.search(r"font-size:\s*calc\(16 \* var\(--dsu\)\)", style), (
-        f"技能名字号必须是 16 设计单位，实际：{style}"
-    )
-    assert re.search(r"font-weight:\s*700", style), f"技能名必须加粗，实际：{style}"
-    assert "#d9b45c" in style.lower(), f"技能名必须是金色，实际：{style}"
-    assert re.search(r"animation:\s*skill-float-rise\s+2s\b", style), (
-        f"技能名必须在 2s 内上浮并淡出，实际：{style}"
-    )
-    rise = _keyframes("skill-float-rise")
-    assert re.search(r"calc\(-20 \* var\(--dsu\)\)", rise), (
-        f"上浮必须走 20 设计单位（不是 CSS px），实际：{rise}"
-    )
-    assert re.search(r"opacity:\s*0", rise), f"上浮结束必须淡出，实际：{rise}"
+def test_skill_ink_layer_replaces_the_gold_skill_float() -> None:
+    """ink-table-skin 票 03：金色技能名飘字整层退役，换成武将牌水墨艺术字的独立覆盖层。
 
-    js = _EFFECTS_JS.read_text(encoding="utf-8")
-    for name, value in (
-        ("SKILL_FLOAT_GAP_UNITS", 8),
-        ("SKILL_FLOAT_STACK_UNITS", 14),
-    ):
-        found = re.search(rf"const\s+{name}\s*=\s*(\d+)\b", js)
-        assert found is not None and int(found.group(1)) == value, (
-            f"{name} 必须是 {value} 设计单位（JS 定位与 CSS 是同一份裁定）"
-        )
+    层序是本票的硬约束（用户 Q13A）：墨压在伤害数字 / 铁索 / 阵亡蒙灰之上——技能名本身是
+    信息，置顶才读得懂"谁发动了什么"。故 `z-index: 19` 且 DOM 排在 `#t-death-fx` 之后。
+    混色必须挂在**层**上（挂 canvas 上只能跟层内透明背景混，压不到牌面）。
+    """
+    layer = _css_rule(".skill-ink-layer")
+    assert re.search(r"position:\s*absolute", layer), f"墨字层必须绝对定位：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"墨字层必须铺满壳：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"墨字层不能吃指针：{layer}"
+    assert re.search(r"overflow:\s*hidden", layer), f"墨字层必须裁在壳内：{layer}"
+    assert re.search(r"z-index:\s*19\b", layer), f"墨字层必须是 z19（与其它演出层同档）：{layer}"
+    assert re.search(r"mix-blend-mode:\s*multiply", layer), (
+        f"混色必须挂在层上（挂 canvas 混不到牌面）：{layer}"
+    )
+    canvas = _css_rule(".skill-ink-layer canvas")
+    assert re.search(r"position:\s*absolute", canvas), f"每场的 canvas 绝对定位：{canvas}"
+    assert re.search(r"pointer-events:\s*none", canvas), f"canvas 不吃指针：{canvas}"
+
+    # 旧层必须真的没了：留一半（比如只删 CSS 不删节点）就是两套并存。
+    assert ".skill-floats" not in _CSS_TEXT, "金色飘字层（.skill-floats）应已整块删除"
+    assert ".skill-float " not in _CSS_TEXT and ".skill-float{" not in _CSS_TEXT, (
+        "金色飘字（.skill-float）应已整块删除"
+    )
+    assert "skill-float-rise" not in _CSS_TEXT, "上浮关键帧应随飘字一起删除"
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="t-skill-floats"' not in html, "index.html 里不该再留 #t-skill-floats 层"
+    assert html.index('id="t-death-fx"') < html.index('id="t-skill-ink"'), (
+        "墨字层必须排在 #t-death-fx 之后（同 z 档里 DOM 顺序就是压层顺序）"
+    )
+
+    effects = _EFFECTS_JS.read_text(encoding="utf-8")
+    for gone in ("showSkillFloat", "skillFloats", "SKILL_FLOAT_MS"):
+        assert gone not in effects, f"金色飘字的实现（{gone}）应已从 effects.js 删除"
+    assert "skillInkFxPlay(event)" in effects, "playSkillEvent 必须把发动交给墨字排播"
+
+    player = (STATIC_DIR / "skill-ink-fx.js").read_text(encoding="utf-8")
+    assert "1800" in player and "2050 / 1800" in player, (
+        "整段演出必须是 1.8s，且按契约用 2050/1800 把秒数换算给素材（不改模块常数）"
+    )
+    assert re.search(r"SKILL_INK_FADE_AT\s*=\s*0\.53", player), "淡出必须从 0.53s 起（= 朱印落完）"
+    assert not re.search(r"translate|top\s*\+=", player), (
+        "墨字不许有位移：位置只在创建时量一次（不漂移、不缩放）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1480,7 +1499,7 @@ def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> 
         return int(found.group(1))
 
     assert z_index(".anim-layer") > z_index(".target-lines") > 0
-    assert z_index(".anim-layer") > z_index(".skill-floats") > 0
+    assert z_index(".skill-ink-layer") >= z_index(".anim-layer") > 0
     assert z_index(".anim-layer") < z_index(".modal")
 
     flight = _css_rule(".anim-flight")
@@ -1721,7 +1740,8 @@ def test_anim_phase_layer_sits_between_the_skill_floats_and_the_flight_layer() -
         assert found is not None, f"{selector} 里找不到 z-index"
         return int(found.group(1))
 
-    assert z_index(".anim-layer") > z_index(".anim-phase-layer") > z_index(".skill-floats") > 0
+    assert z_index(".anim-layer") > z_index(".anim-phase-layer") > 0
+    assert z_index(".skill-ink-layer") >= z_index(".anim-layer")
     assert z_index(".anim-phase-layer") > z_index(".target-lines") > 0
     assert z_index(".anim-phase-layer") < z_index(".modal")
 
