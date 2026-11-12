@@ -45,6 +45,7 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     Randomness,
+    SLASH_FAMILY_KEY,
     UseContext,
     WINE_COUNT_KEY,
     WINE_DAMAGE_BONUS,
@@ -999,6 +1000,23 @@ class Engine:
         :meth:`_finish_round_and_advance` 的"轮次 +1"处重新置真。**没有载体时不落任何
         记录**（:meth:`_dispatch_round_start` 先探 ``timing_hooks_present``），标准对局的
         记录流因此逐字节不变。
+        """
+        self._phase_entry_steps: frozenset[Callable[[], Any]] = frozenset(
+            (
+                self._phase_prepare,
+                self._phase_judge,
+                self._phase_draw_start,
+                self._phase_play_start,
+                self._phase_discard_start,
+                self._phase_finish,
+            )
+        )
+        """六个**阶段起点**步骤（【凤魄】的「每阶段每项限一次」读 ``GameState.phase_seq``）。
+
+        :meth:`_step_turn` 在"**新步进入**"（``_turn_pc`` 变了）且这一步在集合里时给
+        ``phase_seq`` +1；同一步因挂起续跑 / 判定阶段自循环而重入时游标未变 ⇒ 不 +1。
+        额外回合与额外的出牌阶段同样经过这些起点（用户 2026-11 裁定：每一个角色的每一个
+        阶段都重置）。
         """
         self._turn_steps: tuple[Callable[[], Any], ...] = (
             self._turn_before_start,
@@ -2091,6 +2109,9 @@ class Engine:
         # jie-yijiang-2014-mobile 票 01【定品】：本回合"使用过的牌"的座位事实（用户 Q2 签）。
         # 与上一条同一个入口、同一时机；它**不看**本阶段，作用域由回合末复位给出。
         self._note_turn_card(card, source)
+        # SP武将组5 潘濬【观微】：本回合"使用过的牌"的**花色**（逐次记，含无花色档；
+        # 用户 2026-11 签 Q10 = 引擎侧记录）。打出不算（走 play_card，不经过本入口）。
+        self._note_turn_card_suit(card, source)
         deal_bonus = 0
         if is_slash(behavior) and self.state.player(source).wine_active:
             deal_bonus = WINE_DAMAGE_BONUS
@@ -3717,6 +3738,25 @@ class Engine:
         """
         self.state.extra_turns.append(seat)
 
+    def schedule_extra_play_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**当前出牌阶段结束后**再执行一个额外的出牌阶段（潘濬【观微】）。
+
+        与 :meth:`schedule_extra_turn` 的区别是**层级**：那是回合级（额外回合仍按六个阶段
+        整段再跑一遍）；本方法是**阶段级**——只多一个出牌阶段段，之后照常进弃牌阶段。
+        用户 2026-11 裁定的落地：阶段级调度是本批新增的框架原语（见
+        `.scratch/sp5-mayunlu-panjun/issues/03-guanwei-extra-play-phase.md`）。
+
+        只对**当前回合角色**、且**出牌阶段正在进行中**时生效；其余情形静默 no-op（在别人
+        的回合 / 别的阶段调用不是编程错误，只是没有效果）。状态住 ``_turn_data``（引擎
+        私有、每回合清空）⇒ 不新增 ``GameState`` 字段、不发 delta：回放按同一条技能动作
+        重建。消费点 = :meth:`_phase_play_end`（"本阶段"清理**之后**回拨游标）。
+        """
+        if self.state.turn_seat != seat or self.state.phase is not Phase.PLAY:
+            return
+        self._turn_data["extra_play_phases"] = (
+            int(self._turn_data.get("extra_play_phases", 0)) + 1
+        )
+
     def consume_delayed_card(self, frame: Frame) -> None:
         """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
 
@@ -4236,6 +4276,16 @@ class Engine:
         if any(entry_id == card.card_id for entry_id, _ in entries):
             return
         entries.append((card.card_id, category.value))
+
+    def _note_turn_card_suit(self, card: CardRef, source: int) -> None:
+        """记「这张牌是 ``source`` 本回合使用过的一张」的**花色**（【观微】判据）。
+
+        与 :meth:`_note_turn_card` 同一个调用点（``start_use`` 入口，**打出不算**），但
+        **不**按牌名大类 fail-closed、**不**去重：牌面要的是"本回合使用过的牌**花色均
+        相同**"，缺一条使用就会把条件误判成成立；无花色的牌（多源转化 / 纯虚拟）记
+        ``None``，由读方按账本 L896 的 fail-closed 口径判成"不构成均相同"。
+        """
+        self.state.player(source).turn_card_suits.append(card.suit)
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
         """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
@@ -5169,6 +5219,21 @@ class Engine:
         """清掉 ``seat`` 的【烈弓】② 本次使用记账（``RESOLVE_AFTER_END`` 清扫钩子）。"""
         self.state.player(seat).liegong_bonus = None
 
+    def set_fengpo_bonus(self, seat: int, card_id: int, amount: int) -> None:
+        """记下"**本次使用**的这张牌基础伤害 +amount"（马云騄【凤魄】②）。
+
+        唯一写入方是【凤魄】的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子（选到选项 2 时）；读取方
+        是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器。**卡牌级**：按 ``card_id`` 命中，
+        不要求来源是持有者（输掉自己使用的【决斗】时对方造成的伤害同样 +X，用户 2026-11 签）。
+        作用域 = 本次使用：清理点 = ``RESOLVE_AFTER_END`` 清扫钩子 + 回合末兜底。**不发
+        delta**：与 :meth:`add_liegong_bonus` 同姿态。
+        """
+        self.state.player(seat).fengpo_bonus = (int(card_id), int(amount))
+
+    def clear_fengpo_bonus(self, seat: int) -> None:
+        """清掉 ``seat`` 的【凤魄】② 本次使用记账（``RESOLVE_AFTER_END`` / 回合末兜底）。"""
+        self.state.player(seat).fengpo_bonus = None
+
     def set_qimou(self, seat: int, amount: int) -> None:
         """落「界魏延移动版【奇谋】」的两段座位修饰：距离 -X（本回合）/ 次数 +X（本阶段）。
 
@@ -5360,6 +5425,11 @@ class Engine:
             player.damage_taken_this_turn = 0
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
+            # SP武将组5【观微】的「本回合使用过的牌花色」记录（Q10 = 引擎侧）与【凤魄】的
+            # 记账：作用域 = 本回合 / 本阶段，回合末一并兜底清掉。
+            player.turn_card_suits.clear()
+            player.fengpo_bonus = None
+            player.fengpo_used = None
             # jie-yijiang-2014-mobile 票 01【定品】的两条本回合事实：使用 / 弃置过的牌的
             # 大类记录与"不能再对其发动"的禁令，作用域都是**一个回合**（与上一位同一复位点）。
             player.turn_card_entries.clear()
@@ -6368,6 +6438,13 @@ class Engine:
             self._settle_abandoned_judgment()
             self._turn_pc = self._turn_steps.index(self._turn_after_end)
         step = self._turn_steps[self._turn_pc]
+        # **新步进入**才可能是"阶段开始"：挂起续跑（``step`` 返回 ``"stay"``）与判定阶段
+        # 自循环都停在同一游标上，故判据只有"游标变了"这一条。额外的出牌阶段会把游标拨回
+        # ``_phase_play_start``（游标从"出牌阶段结束之后"变回它）⇒ 也算一次新阶段。
+        if self._turn_data.get("_step_pc") != self._turn_pc:
+            self._turn_data["_step_pc"] = self._turn_pc
+            if step in self._phase_entry_steps:
+                self.state.phase_seq += 1
         if step() == "stay":
             return
         self._turn_pc += 1
@@ -6855,6 +6932,12 @@ class Engine:
         # M6 票 03【克己】："本回合**出牌阶段内**是否使用 / 打出过【杀】"。复位点就是
         # 出牌阶段起点（被【乐不思蜀】跳过时也复位——本阶段一张都没用，事实为假）。
         if self.state.turn_seat is not None:
+            # 【杀】的「每出牌阶段限一次」按**出牌阶段**复位（用户 2026-11 裁定：不是每回合；
+            # 额外的出牌阶段因此能再用一张）。只弹【杀】族的计数键，其余计数键（【酒】一类
+            # 每回合限一次）仍由座位自己的 TURN_START 复位。
+            self.state.player(self.state.turn_seat).card_use_counts.pop(
+                SLASH_FAMILY_KEY, None
+            )
             self.state.player(self.state.turn_seat).slash_in_play_phase = False
             # jushou-lusu 票 01【渐营】：「本阶段上一张使用牌」的一对格子同一复位点。
             self.state.player(self.state.turn_seat).play_phase_last_card = None
@@ -6940,6 +7023,20 @@ class Engine:
             self._clear_qimou_count(self.state.turn_seat)
             # lukang-mobile 票 01 陆抗移动版【决堰】·武器栏：牌面写「此阶段内」，同一收尾点。
             self._clear_duanyan_slash_bonus(self.state.turn_seat)
+        # 潘濬【观微】（用户 2026-11 裁定）：本阶段结束后**再执行一个额外的出牌阶段**。
+        # 排在"本阶段"清理**之后**（技能在"出牌阶段结束时"看到的是完整事实），把回合环的
+        # 游标拨回 `_phase_play_start`：它重跑阶段起点（复位 + 派发 PHASE_PLAY_START），
+        # 再走一遍空闲窗口与本收尾，之后照常进弃牌阶段。`play_idle_emitted` 一并清掉，
+        # 新阶段照常落 PHASE_PLAY_IDLE 记录。
+        if int(self._turn_data.get("extra_play_phases", 0)) > 0:
+            self._turn_data["extra_play_phases"] -= 1
+            # 新阶段要重新派发 `PHASE_PLAY_START` / `PHASE_PLAY_END`：`_dispatch_phase_body`
+            # 用 `_turn_data` 的键做"本阶段只派发一次"的幂等闸，不清掉它们，额外阶段会
+            # 静默跳过两个时点（连时机记录都不落）。
+            self._turn_data.pop("play_idle_emitted", None)
+            self._turn_data.pop("phase_play_start", None)
+            self._turn_data.pop("phase_play_end", None)
+            self._skip_to(self._phase_play_start)
         return None
 
     def _phase_discard_start(self) -> str | None:

@@ -530,7 +530,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 96 → 97 / 64 不变。
     # yijiang-2014-round2 票 01（W3）：界一将成名-2014·移动版加界沮授移动版（真名「沮授」
     # 已在池里）⇒ 97 → 98 / 64 不变。
-    assert len(flat) == 98 and len(catalog) == 64, (
+    assert len(flat) == 100 and len(catalog) == 66, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -1348,8 +1348,10 @@ def test_an_idle_poll_is_silent_until_the_deadline_answers_for_you() -> None:
     from sgs_web.serve import GameRegistry
 
     registry = GameRegistry(runs_dir="/tmp/unused")
+    # sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66：旧种子 20261013 的第一趟驱动
+    # 停在五谷逐目标暂停上（不是人类询问），按同一判据换种 ⇒ 20261014。
     session = registry.create(
-        {"player_count": 4, "ai": "random", "seed": 20261013, "timeout_seconds": 10.0}
+        {"player_count": 4, "ai": "random", "seed": 20261014, "timeout_seconds": 10.0}
     )
     # 建局响应止于 GAME_START（票 14）：先取一次增量（真 HTTP GET 走的就是这一条路），
     # 这一份才是"停在人类第一个询问上"的那一份。
@@ -1760,7 +1762,9 @@ def test_the_virtual_index_aliases_a_conversion_source_to_its_virtual_card() -> 
 
 def test_the_pending_payload_carries_the_virtual_source_index() -> None:
     """跨线契约：``pending_payload`` 必须下发 ``virtual_index``（否则前端读不到）。"""
-    session = Session(seed=20261012, ai="random", timeout_seconds=None, player_count=8)
+    # sp5-mayunlu-panjun 票 01 / 02：旧种子 20261012 构造后没有停在任何询问上（五谷暂停），
+    # 换到 20261018（同一判据：构造后停在人类第一问）。
+    session = Session(seed=20261018, ai="random", timeout_seconds=None, player_count=8)
 
     payload = pending_payload(session)
 
@@ -3490,7 +3494,9 @@ def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_pa
     # 换池历史：神吕蒙移动版进池（57 → 58）后 seed 1 的 2 人局不再走过"带槽位的选牌"；
     # 按同一判据（终局 + 至少一条带非空 slots 的 SELECT_CARDS + 牌移动覆盖
     # hand / equip / judge / processing）从 1 重扫到 **seed 3**。
-    session = _finished_session(seed=3)
+    # sp5-mayunlu-panjun 票 01 / 02（池 98 → 100）后 seed 3 没有判定区的牌移动 ⇒ 按同一
+    # 判据重扫，取 **seed 9**（终局、slots 非空、四个区都覆盖）。
+    session = _finished_session(seed=9)
     save_run(tmp_path, session)
     name = next(tmp_path.glob("*.jsonl")).name[: -len(".jsonl")]
 
@@ -8080,8 +8086,10 @@ def test_the_create_response_stops_at_the_end_of_game_start() -> None:
     from sgs_web.serve import GameRegistry
 
     registry = GameRegistry(runs_dir="/tmp/unused")
+    # sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66：旧种子 12 的下一份增量不再停在
+    # 人类询问上（停在了五谷暂停 / 还没轮到人），按同一条判据换种 ⇒ 13。
     session = registry.create(
-        {"player_count": 8, "ai": "heuristic", "seed": 12, "timeout_seconds": None}
+        {"player_count": 8, "ai": "heuristic", "seed": 13, "timeout_seconds": None}
     )
     body = registry.view(session, after=-1, logs_after=0)
 
@@ -9202,7 +9210,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205。
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206。
-    assert len(expected_skills) == 206, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 210, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

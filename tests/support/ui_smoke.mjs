@@ -735,10 +735,17 @@ const submitLobby = async () => {
  *  没有询问，故它不满足第一条判据 —— 于是这个循环等的就是 `finishPlayback` 里那次
  *  `refresh()` 的回包（真 HTTP 往返，故按 5 ms 让出事件循环，最多 3 秒）。 */
 const settleOpening = async () => {
-  for (let waited = 0; waited < 3000; waited += 5) {
+  for (let waited = 0; waited < 5000; waited += 5) {
     ui.flushPlayback();
     const view = ui.state.view;
     if (!ui.state.playback && view && (view.pending || view.finished)) return view;
+    // 中间态（开局批里 AI 的五谷逐目标暂停 / 还没轮到人类）：真客户端靠 2 s 轮询继续；
+    // 烟测的计时器是空实现，故这里显式再取一次增量（与 `finishPlayback` 的立即 refresh
+    // 同一条路）。判据仍是"停在人类的询问上或已终局"，没有放宽。
+    if (!ui.state.playback && ui.refresh) {
+      await ui.refresh();
+      continue;
+    }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("开局批播完之后没有拿到下一份视图（票 14 的立即 refresh 没发生？）");
@@ -787,7 +794,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // yijiang-2014 票 02：一将成名-2014 加陈群（真名「陈群」已在池里）⇒ 真名不变、版本 95 → 96。
   // yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 真名不变、版本 96 → 97。
   // yijiang-2014-round2 票 01（W3）：界沮授移动版（真名「沮授」已在池里）⇒ 真名不变、版本 97 → 98。
-  ui.state.heroCatalog.length === 64 && catalogVersions.length === 98,
+  ui.state.heroCatalog.length === 66 && catalogVersions.length === 100,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -1127,8 +1134,10 @@ const scanCases = async () => {
 // 复合 `ActivateSkill` 的 W4-6 断言照旧通过），故种子不变。
 // M6 票 18 换池（版本 50 → 54）：20261053 的座位 0 变成界华雄，按同一判据
 // （8 席全是标准版 + 该局仍有复合 `ActivateSkill` 应答）重扫到 20273291。
+// sp5-mayunlu-panjun 票 01 / 02（池 98 → 100）：20273291 的开局批不再含 RESPOND 询问
+// （㉿1c 的前提），按同一判据（开局批里有 RESPOND + 停在人类的 PLAY_PHASE）重扫到 20273298。
 const created = await post("/api/sessions", {
-  player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20273291,
+  player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20273298,
 });
 ui.state.sessionId = created.session_id;
 ui.applyView(created);
@@ -1898,6 +1907,48 @@ check("有时限时倒计时已显示", /剩余|时限/.test($("t-timer").textCo
 
 /* ------------------------------------------------------ ④ 录像列表 + 回放页 */
 
+// 前置（W4-6）：录像里必须有一条**复合** ActivateSkill（`picks` / `choices` 非空）。
+// 烟测自己那些 AI 局里有没有，取决于池与种子（sp5-mayunlu-panjun 把池加到 100 / 66 之后
+// 就没有了）⇒ 这里**自己造一局**：孙权【制衡】是预发动技能，人类座位直接按内部形状提交
+// 一条带 picks 的 ActivateSkill，然后把这一局推到底（终局自动落盘成录像）。
+{
+  // 4 人 / heuristic：这一局要有判定区的牌移动（W4-6 的"四区"断言同读这份录像）。
+  const prepBody = await post("/api/sessions", {
+    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 424242,
+    my_hero: "sunquan",
+  });
+  const prepId = prepBody.session_id;
+  let prepView = await get(`/api/sessions/${prepId}`);
+  let submitted = false;
+  for (let guard = 0; guard < 600 && prepView && !prepView.finished; guard += 1) {
+    const pending = prepView.pending;
+    if (!pending) {
+      prepView = await get(`/api/sessions/${prepId}`);
+      continue;
+    }
+    if (!submitted && pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0
+        && prepView.snapshot.self_hand.length > 0) {
+      const cardId = prepView.snapshot.self_hand[0].card_id;
+      prepView = await post(`/api/sessions/${prepId}/answer`, {
+        action: {
+          kind: "ActivateSkill", skill_id: "hero.sunquan.zhiheng",
+          picks: [cardId], choices: [], answers_seq: pending.seq,
+        },
+      });
+      submitted = true;
+      continue;
+    }
+    const acts = pending.legal_actions || [];
+    const fallback = acts.find((action) => action.kind === "Pass")
+      || acts.find((action) => action.kind === "EndPhase")
+      || acts[0];
+    prepView = await post(`/api/sessions/${prepId}/answer`, { action: fallback });
+  }
+  check("W4-6 前置：自造一局含复合 ActivateSkill 的录像（孙权【制衡】）",
+    submitted && prepView && prepView.finished,
+    `submitted=${submitted} finished=${prepView && prepView.finished}`);
+}
+
 const runs = await get("/api/runs");
 check("录像列表接口可用", Array.isArray(runs.runs) && runs.runs.length > 0, `${runs.runs.length} 局`);
 ui.state.runs = runs.runs;
@@ -1915,7 +1966,10 @@ const isCompositeActivate = (record) => record.kind === "action" && record.actio
 // 一局都没有时退回第一局 8 人（断言照旧会红，红得也说得清）。
 const eightRunList = runs.runs.filter((run) => run.player_count === 8);
 let target = eightRunList[0] || runs.runs[0];
-for (const candidate of eightRunList) {
+// sp5-mayunlu-panjun 票 01 / 02（池 98 → 100）后 8 人录像里不一定有复合应答 ⇒ 先扫**全部**
+// 录像（判据仍是"这一局真的有复合 ActivateSkill"），没有再退回第一局 8 人。
+const allRuns = [...runs.runs];
+for (const candidate of allRuns) {
   const body = await get(`/api/runs/${encodeURIComponent(candidate.name)}`);
   if ((body.records || []).some(isCompositeActivate)) {
     target = candidate;
@@ -16677,13 +16731,16 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         + `另一张可重铸=${scenario.second.card_id} 手牌=${hand().map((card) => card.card_id).join(",")}`
       : "8 个种子内没找到（庞统移动版 / 4 人 / 座位 0）");
 
-  // 票 05 §2/§5 点名的是**种子 4**，并给了摸牌后的六张手牌（♣借刀杀人 106 / ♥桃 16 /
+  // 票 05 §2/§5 点名的是**种子 4**，并给了摸牌后的六张手牌（原：♣借刀杀人 106 / ♥桃 16 /
   // ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♠杀 47 / ♠绝影 37）。上面的种子扫描在 4 号不再命中时
   // 会**悄悄**换到后面的种子，本段的语义就漂了——这里把「就是种子 4 + 这一手」显式锚住。
+  // sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66 ⇒ 发将多抽两张、初始手牌随之重排：
+  // 种子 4 的新六张 = ♣借刀杀人 106 / ♥桃 16 / ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♦顺手牵羊 61 /
+  // ♠顺手牵羊 35（票 05 的判据「一张♣牌同时有牌名级预发动与【连环】重铸」仍成立）。
   const TICKET05_SEED = 4;
   const TICKET05_HAND = [
     [106, "♣借刀杀人"], [16, "♥桃"], [26, "♥爪黄飞电"],
-    [82, "♣诸葛连弩"], [47, "♠杀"], [37, "♠绝影"],
+    [82, "♣诸葛连弩"], [61, "♦顺手牵羊"], [35, "♠顺手牵羊"],
   ];
   const settledHand = hand().map((card) => Number(card.card_id));
   const settledIds = settledHand.slice().sort((a, b) => a - b);
@@ -16713,6 +16770,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       `focus=${ui.state.focusCardId} entry=${reforgeNode() && reforgeNode().textContent}`);
     const handBeforeFirst = hand().length;
     const discardBeforeFirst = (ui.state.view.snapshot.discard || []).length;
+    // 带牌标签的牌离手会触发**标签自身效果**（这张是【定乱】标签 ⇒ 额外摸一张）：
+    // 此时"重铸 = 弃一摸一"的净张数不再是等量，判据只保留"弃一张进弃牌堆"那一半。
+    const secondCard = hand().find((card) => Number(card.card_id) === secondId) || {};
+    const taggedSecond = Array.isArray(secondCard.tags) && secondCard.tags.length > 0;
     await clickHand(secondId);
     const firstEntry = reforgeNode();
     check("票 05-A2 点♣装备 = 给焦点 + 「重铸」入口（M5-08b 既有行为不回归）",
@@ -16728,9 +16789,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         && firstCalls[0].body.action.kind === "Reforge"
         && Number(firstCalls[0].body.action.card.card_id) === secondId
         && (ui.state.view.snapshot.discard || []).length === discardBeforeFirst + 1
-        && hand().length === handBeforeFirst
+        && (taggedSecond ? hand().length >= handBeforeFirst : hand().length === handBeforeFirst)
         && !hand().some((card) => Number(card.card_id) === secondId),
       `answers=${firstCalls.length} discard=${discardBeforeFirst}→${(ui.state.view.snapshot.discard || []).length} `
+        + `before=${handBeforeFirst} second=${secondId} tagged=${taggedSecond} `
         + `hand=${hand().map((card) => card.card_id).join(",")}`);
 
     // ==== ②（票 §5 缺陷 B）重铸之后其余牌照旧可用：没有一片 dis、点得动 ====
@@ -19209,7 +19271,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   // ---- ④ 静默 2s 轮询（真会话）：没新事实时不清选择 ----
   ui.show("table");
   const pollSession = await post("/api/sessions", {
-    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261013,
+    // sp5-mayunlu-panjun 票 01 / 02（池 98 → 100）：旧种子 20261013 停不到人类询问上
+    // （五谷逐目标暂停），换 20261014（同一判据）。
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261014,
   });
   await openSession(pollSession);
   const pollTimer = intervals.find((entry) => entry.ms === 2000);

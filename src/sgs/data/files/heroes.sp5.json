@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "pack_id": "sp5",
+  "heroes": [
+    {
+      "id": "mayunlu",
+      "name": "马云騄",
+      "true_name": "马云騄",
+      "kingdom": "shu",
+      "gender": "female",
+      "hp_max": 4,
+      "version": "sp5",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "fengpo",
+          "name": "凤魄",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "mashu",
+          "name": "马术",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "panjun",
+      "name": "潘濬",
+      "true_name": "潘濬",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "sp5",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guanwei",
+          "name": "观微",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "gongqing",
+          "name": "公清",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

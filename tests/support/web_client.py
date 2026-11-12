@@ -704,7 +704,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 9
+_WINE_TAPE_NEAR_DEATH_SEED = 12
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再加太史慈标准版 / 荀彧标准版）
@@ -737,7 +737,12 @@ table-ux-overhaul 票 05（询问策略：网页会话缺省 ON）：每次 driv
 `hp == 1`，自救本身是成功的：hp 0→1 的 `hp_change` 在记录流里）。按**同一固定策略、同一命中
 判据**从 1 起重扫（本文件就是探针：`:func:`_wine_tape_near_death` 逐 seed 跑，`io.redirect_stdout`
 吞掉逐条 FAIL），命中最短路径的 **seed 9**（17 次真实 POST）；9 未被其余 tape 占用
-（火攻 4 / 16、出牌阶段 65）。"""
+（火攻 4 / 16、出牌阶段 65）。
+
+sp5-mayunlu-panjun 票 01 / 02（默认池 98/64 → 100/66，SP武将组5 两将）再换池：seed 9 的对局
+在出现自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
+`.scratch/sp5-mayunlu-panjun/scan_wine_seed.py`，逐字复用 `_wine_tape_near_death` 的策略），
+首个命中 **seed 12**（7 次真实 POST 推进到 0 血 + 求桃窗口里的【酒】目标为自己、回复到 1）；12 未被其余 tape 占用（火攻 4 / 16、出牌阶段 65）。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:

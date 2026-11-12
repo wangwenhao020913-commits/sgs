@@ -56,6 +56,9 @@
     "cardPreactivationManifest", "enterCardPreativation", "alternativeLabel",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
+    // 票 14：开局批之后的"立即 refresh"——烟测没有计时器垫片自己跑轮询，暂停在中间态时
+    // （五谷逐目标 / 还没轮到人类）由它显式再取一次增量，与真客户端的 2 s 轮询同一条路。
+    "refresh",
     // damage-fx-natures 票 07 / 09：回放暂停——登记口（通用：以后 回复体力 3 档 / 其它演出同形）
     // + 只读读数（原因串）与轮询间隔。烟测据此断"不是只有伤害能冻住回放"与"没有上限"。
     "registerPlaybackHold", "playbackHoldReason", "PLAYBACK_HOLD_POLL_MS",

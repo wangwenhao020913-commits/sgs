@@ -800,7 +800,9 @@ def test_seal_prints_only_aggregate_readings(
     import ai_eval.run as run
 
     out = tmp_path / "seal.json"
-    batch = derive_sealed_batch("sealed-test", 2)
+    # sp5-mayunlu-panjun 票 01 / 02（池 98 → 100）后 "sealed-test" 的两副里有一副换到了
+    # ai-v0 不认识的 SELECT_OPTIONS 询问（【神速】）⇒ 封印名字重画（判据不变：CLI 只出聚合）。
+    batch = derive_sealed_batch("sealed-test-2", 2)
     real_run_seal = run.run_seal
     # CLI 不暴露副数（1024 写死，spec §2.4 B）；测试只缩小库参数，其余走真 CLI 路径。
     monkeypatch.setattr(
@@ -811,7 +813,7 @@ def test_seal_prints_only_aggregate_readings(
         [
             "seal",
             "--batch",
-            "sealed-test",
+            "sealed-test-2",
             "--versions",
             "HEAD",
             "ai-v0",
@@ -826,7 +828,7 @@ def test_seal_prints_only_aggregate_readings(
     assert payload["tier"] == "seal"
     assert set(payload) == RESULT_KEYS | {"versions"}
     assert payload["seed_batch"]["kind"] == "sealed"
-    assert payload["seed_batch"]["batch"] == "sealed-test"
+    assert payload["seed_batch"]["batch"] == "sealed-test-2"
     assert payload["seed_batch"]["sha256"] == batch.sha256
     assert payload["design"] == {"duplicate_play": False, "per_seat_streams": "ai:<seat>"}
     assert payload["candidate"] is None and payload["baseline"] is None

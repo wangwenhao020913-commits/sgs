@@ -92,6 +92,7 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "lin_mobile",
     "yijiang_2014",
     "jie_yijiang_2014_mobile",
+    "sp5",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 
@@ -134,6 +135,13 @@ jushou-lusu 票 01 起）：与 ``feng`` 同一姿态——一个**独立系列�
 也不是移动版），故单独一表、版本标记取 ``"yijiang-2014"``、显示名不带任何版本后缀
 （首个载体 = 沮授【渐营】【矢北】）。一将成名按年份分包，``yijiang_2011`` / ``2012`` /
 ``2013`` 将来各自另开一表，与 ``yijiang_2014`` 平行。
+
+``sp5`` 是**SP武将组5** 那一份（``files/heroes.sp5.json``，sp5-mayunlu-panjun 票 01 起）：
+与 ``feng`` / ``lei`` / ``yijiang_2014`` 同一姿态——一个**独立的系列包**（OL 的 SP 武将按
+组分包），故单独一表、版本标记取 ``"sp5"``、显示名不带任何版本后缀。首个载体 = 马云騄
+【凤魄】【马术】、潘濬【观微】【公清】。SP 其余组将来各自另开一表（``sp4`` / ``sp6`` …），
+与 ``sp5`` 平行；移动版 SP 届时另开 ``sp5-mobile`` 表（用户 2026-11 签：本批只实现 OL
+文本，不加移动版后缀）。
 
 ``jie_yijiang_2014_mobile`` 是**界一将成名-2014·移动版**那一份
 （``files/heroes.jie_yijiang_2014_mobile.json``，jie-yijiang-2014-mobile 票 01 起）：

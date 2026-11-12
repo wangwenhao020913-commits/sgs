@@ -1963,6 +1963,10 @@ def _score_select_cards(query: Query, action: Action) -> float:
 
 _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
     {
+        # SP武将组5 马云騄【凤魄】（票 01）：X 未知时按"伤害一点 ≈ 2.8"估——对单目标【杀】，
+        # +X 伤害通常比摸 X 张更值（摸牌还要再转化），但 X 小时两者接近。
+        "fengpo:draw": 1.0,
+        "fengpo:damage": 1.6,
         # 【雌雄双股剑】目标侧的两种损失：弃一张手牌 vs 令使用者摸一张。
         "discard_one": -1.0,
         "draw_one": -1.5,
@@ -4021,6 +4025,25 @@ def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
 
 
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
+    # SP武将组5（sp5-mayunlu-panjun 票 01 / 02）：马术 / 公清是锁定技（没有「是否发动」，
+    # 按纪律写 0.0 + 说明）；凤魄 / 观微按收益给正分。
+    "hero.mayunlu.mashu": (
+        _constant(0.0),
+        "锁定技：距离 -1，恒生效、没有询问（不入表就是漏登记）",
+    ),
+    "hero.panjun.gongqing": (
+        _constant(0.0),
+        "锁定技：按伤害来源的攻击范围封顶 / 加一，恒生效、没有询问",
+    ),
+    "hero.mayunlu.fengpo": (
+        _constant(2.4),
+        "单目标【杀】/【决斗】后二选一：摸 X 张或 +X 伤害，X = 双方手牌 + 装备区的 ♦ 数；"
+        "通常净赚 1~2 张 / 1~2 点伤害，恒高于放弃（两个选项的分差由 _OPTION_VALUES 定）",
+    ),
+    "hero.panjun.guanwei": (
+        _constant(2.0),
+        "弃一张换其摸两张 + 一个额外出牌阶段：多一段用牌窗口，通常净正（代价是自己的一张牌）",
+    ),
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
     # 神周瑜移动版（huo-shenzhouyu-mobile 票 01）：【琴音】是"全体 1 点"的收益（净收益按

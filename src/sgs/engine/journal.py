@@ -300,6 +300,9 @@ class IdentityRevealRecord(IdentityRevealDelta):
 
 DeltaRecord = Annotated[
     CardMoveRecord
+    # W7 的第二条体力轴：``armor_change`` 一直由写入口落盘，但**读取面**此前漏了这个成员
+    # （``read_journal`` 遇到带护甲的局就整条读不动）。sp5 批的烟测自造局暴露了它。
+    | ArmorChangeRecord
     | HpChangeRecord
     | HpMaxChangeRecord
     | ChainedChangeRecord

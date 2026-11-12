@@ -362,6 +362,11 @@ const OPTION_LABELS = Object.freeze({
   // （没有「放弃」；`PickOption(optional=False)`）⇒ 两项都列、都不置灰。
   bengkuai_lose_hp: "失去1点体力",
   bengkuai_reduce_max: "减1点体力上限",
+  // SP武将组5 马云騄【凤魄】（sp5-mayunlu-panjun 票 01）：每阶段每项限一次；标签逐字写
+  // 「X」，**不**渲染成具体数字（X 含目标手牌的 ♦ 数，是暗信息）。已用项由
+  // `OPTION_PAIRS` 恒画整对 + `renderOptionButtons` 的 `index < 0` 置灰。
+  "fengpo:draw": "摸X张牌",
+  "fengpo:damage": "令此牌的基础伤害值+X",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。
@@ -373,6 +378,9 @@ const OPTION_LABELS = Object.freeze({
 const OPTION_PAIRS = Object.freeze([
   Object.freeze(["discard_one", "draw_one"]),
   Object.freeze(["luoyi_gain", "luoyi_skip"]),
+  // SP武将组5 马云騄【凤魄】：两项是"每阶段每项限一次"的一对——已用项仍要画出来
+  // （灰、点不动），否则只剩一项时玩家看不到"哪一项用过了"。
+  Object.freeze(["fengpo:draw", "fengpo:damage"]),
 ]);
 
 /** 选项按钮上的文字：已知的一次性选项用中文；其余选项保留**原值**（复用标签待票 08）。 */
