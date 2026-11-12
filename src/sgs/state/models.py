@@ -765,13 +765,33 @@ class Player(BaseModel):
     与装备区 / 虚拟授予 / 武将牌三种载体并列，由 :meth:`Engine.grant_skill` 写入；
     载体解析读它产出 ``SkillSourceKind.GRANTED`` 实例。M6 没有"获得技能"的武将
     （觉醒技的 ☆ 技能由票 06 用同一个入口授予），故本票只以构造测试钉住形状。
+
+    **可逆的一档**（shan-baozuoci 票 02）：左慈【化身】换技能时走
+    :meth:`Engine.revoke_skill` —— 从本表移除、**不写** ``lost_skills``，故同一个
+    技能以后还能再"获得"一次（2018 官方左慈条：进行化身 = 失去上一次获得的技能 +
+    获得此次选择的技能）。
     """
     lost_skills: list[str] = Field(default_factory=list)
-    """**已失去**的技能 id（M6 票 04；`GLOSSARY.md`「技能失去」）。
+    """**已失去 / 不可恢复**的技能 id（M6 票 04；`GLOSSARY.md`「技能失去」）。
 
     失去 = 实例**不再存在**且不可恢复：载体解析在去重之后减去这一份，故武将牌上的技能
     清单一字未动、实例照样不产出，连续型效果（距离 / 目标池）随之消失。写入唯一入口
-    :meth:`Engine.lose_skill`；M6 无载体（断肠 / 左慈留给后续里程碑）。
+    :meth:`Engine.lose_skill`（断肠 / 义起一类）；**可逆的失去**走
+    :meth:`Engine.revoke_skill`，它不碰本表（shan-baozuoci 票 02）。
+    """
+    avatar_cards: list[str] = Field(default_factory=list)
+    """**化身牌**：座位持有的**武将牌** id（shan-baozuoci 票 02；左慈【化身】/【新生】）。
+
+    是**武将牌**，不是游戏牌：不进任何 ``Zone``、不占牌守恒、没有 ``CardRef``。
+    由 :meth:`Engine.draw_hero_cards` 抽出（抽到的真名当场进
+    :attr:`GameState.drawn_true_names`，本局不再可抽），经
+    :meth:`Engine.gain_avatar_cards` 放进本表；失去【化身】时由
+    :meth:`Engine.clear_avatar_cards` 整批清空并 ``release_drawn_true_name`` 解除禁用
+    （左慈 tips 3 的"清空化身库 + 所有化身牌解除禁用"）。
+
+    **不发 delta、不进记录流**：与 ``drawn_true_names`` 同姿态（武将牌不是牌，没有
+    JSON 读者；回放按同一条技能动作重跑即可重建）。**不是** ``resolve_instances`` 的
+    读点——技能的来源在 ``granted_skills``，本表只回答"手里有哪几张化身牌"。
     """
     suppressed_skills: list[SkillSuppression] = Field(default_factory=list)
     """**失效**记录（M6 票 04；`GLOSSARY.md`「技能失效」）：座位级的条件记录。

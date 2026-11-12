@@ -309,10 +309,13 @@ class SkillGainDelta(_FrozenModel):
 
 
 class SkillLoseDelta(_FrozenModel):
-    """一个座位**失去**了一条技能（M6 票 04）：实例不再存在，且不可恢复。
+    """一个座位**失去**了一条技能（M6 票 04）：实例不再存在。
 
     与 :class:`SkillGainDelta` 同形；"失去 ≠ 失效"由两个 delta 类型分开表达
-    （`GLOSSARY.md`：失效可恢复、失去不可恢复）。
+    （`GLOSSARY.md`：失效可恢复、失去是实例消失）。**永久与可逆共用本类型**
+    （shan-baozuoci 票 02）：`Engine.lose_skill` 写 ``lost_skills``（断肠 / 义起那种
+    永久失去），`Engine.revoke_skill` 只从授予表里移除（左慈换化身，以后还能再获得）。
+    记录流不区分"可不可逆"——那是写入口的语义，回放按同一条技能动作重跑即可重建。
     """
 
     delta_type: Literal["skill_lose"] = "skill_lose"

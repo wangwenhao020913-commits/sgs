@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import RuleConfig, load_content_pack
+from sgs.data import Gender, Kingdom, RuleConfig, hero_by_id, load_content_pack
 from sgs.effects import distance
 from sgs.engine import Engine
-from sgs.skills import SkillSourceKind, resolve_instances
+from sgs.skills import SkillSourceKind, hero_card_zone_key, resolve_instances
+from sgs.state.projection import project
 from sgs.timing import Timing
 
 from support import (
@@ -204,6 +205,80 @@ def test_losing_a_skill_prunes_its_per_instance_state():
     engine.lose_skill(0, MASHU)
 
     assert key not in engine.state.skill_state
+
+
+# ---------------------------------------------------------------------------
+# 可逆的失去 / 化身库 / 性别势力（shan-baozuoci 票 02；左慈）
+# ---------------------------------------------------------------------------
+
+JIE_QIANXUN = "hero.jie_luxun.qianxun"
+"""【谦逊】：已登记的放置类技能，用它把"可逆失去的后果链"里的武将区清理跑出来。"""
+
+
+def test_a_revoked_skill_can_be_gained_again_and_runs_the_whole_cleanup():
+    """可逆失去 = 从授予表移除、不写 ``lost_skills``；后果链与永久失去同一段（2018 左慈口径）。"""
+    engine = _engine(seats=2)
+    state = engine.state
+    assert engine.grant_skill(0, JIE_QIANXUN) is True, "构造：先把【谦逊】授予座位 0"
+    cards = tuple(state.deck[:2])
+    engine.place_on_hero_card(
+        None, owner=0, skill_id=JIE_QIANXUN, holder=0, cards=state.refs(cards)
+    )
+    key = hero_card_zone_key(0, JIE_QIANXUN)
+    assert state.hero_zone(0, key) == cards, "构造：牌在座位 0 自己的武将牌上"
+    engine.add_marker(
+        None, 1, name="测试·化身", source_seat=0, source_skill_id=JIE_QIANXUN, count=1
+    )
+
+    assert engine.revoke_skill(0, JIE_QIANXUN) is True
+
+    assert state.player(0).lost_skills == [], "可逆失去**不写** lost_skills"
+    assert JIE_QIANXUN not in _instances(state, 0), "实例消失"
+    assert state.hero_zone(0, key) == (), "武将区照常清（与永久失去同一条后果链）"
+    assert state.player(1).markers == (), "它产生的标记照常清"
+    losses = _deltas(engine, "skill_lose")
+    assert [(record.seat, record.skill_id) for record in losses] == [(0, JIE_QIANXUN)]
+
+    assert engine.grant_skill(0, JIE_QIANXUN) is True
+    assert JIE_QIANXUN in _instances(state, 0), "再获得 ⇒ 同一个技能实例回来（左慈重选同一技能）"
+
+
+def test_revoking_a_skill_that_was_not_granted_is_a_no_op():
+    engine = _engine(("machao",))
+    assert engine.revoke_skill(0, MASHU) is False, "武将牌自带的技能不是'获得来的''"
+    assert engine.state.player(0).granted_skills == []
+    assert _deltas(engine, "skill_lose") == []
+
+
+def test_avatar_cards_are_held_per_seat_and_released_on_clear():
+    """化身库：抽到的武将牌进座位手里、抽走的真名不再可抽；清空 = 解除禁用。"""
+    engine = _engine(seats=2)
+    drawn = engine.draw_hero_cards(2)
+    assert len(drawn) == 2
+    true_names = {hero_by_id(item).true_name for item in drawn}
+    assert true_names <= set(engine.state.drawn_true_names), "抽到即入禁用集合"
+
+    assert engine.gain_avatar_cards(0, drawn) == 2
+    assert tuple(engine.state.player(0).avatar_cards) == drawn
+    assert engine.gain_avatar_cards(0, drawn) == 0, "同一张不会重复进库（幂等）"
+
+    assert engine.clear_avatar_cards(0) == drawn
+    assert engine.state.player(0).avatar_cards == []
+    assert engine.state.drawn_true_names == (), "失去【化身】⇒ 化身牌解除禁用（回到武将牌堆）"
+    assert engine.clear_avatar_cards(0) == (), "空库再清是零动作"
+
+
+def test_gender_and_kingdom_can_be_changed_at_runtime():
+    engine = _engine(seats=2)
+    state = engine.state
+
+    assert engine.set_gender(0, Gender.FEMALE) is True
+    assert engine.set_gender(0, Gender.FEMALE) is False, "同值不是一次变化"
+    assert state.player(0).gender is Gender.FEMALE
+
+    assert engine.set_kingdom(0, Kingdom.WU) is True
+    assert engine.set_kingdom(0, Kingdom.WU) is False
+    assert project(state, 1).players[0].kingdom is Kingdom.WU, "势力是公开事实（投影看得见）"
 
 
 # ---------------------------------------------------------------------------

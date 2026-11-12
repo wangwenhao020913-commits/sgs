@@ -25,6 +25,7 @@ from sgs.data import (
     Hero,
     HeroDealConfig,
     Identity,
+    Kingdom,
     Mode,
     PlacementReturn,
     RuleConfig,
@@ -115,6 +116,7 @@ from sgs.skills import (
     reset_turn_skill_state,
     round_limit_present,
     resolve_conversion_confirmation,
+    resolve_instances,
     seat_choice,
     start_provider,
     timing_hooks_present,
@@ -4519,6 +4521,45 @@ class Engine:
             self.note_drawn_true_name(true_name)
         return tuple(drawn)
 
+    def gain_avatar_cards(self, seat: int, hero_ids: tuple[str, ...]) -> int:
+        """把抽到的武将牌放进 ``seat`` 的**化身库**（shan-baozuoci 票 02 的唯一写入口）。
+
+        ``hero_ids`` 来自 :meth:`draw_hero_cards`（抽到即已写进 ``drawn_true_names``，
+        本局不可再抽）；本方法只负责"这些牌在这个座位手里"。已持有同一张 ⇒ 跳过
+        （幂等），返回值 = 真的加进去几张。**不发 delta、不进记录流**：武将牌不是游戏牌，
+        没有 JSON 读者（与 ``drawn_true_names`` 同姿态）。
+
+        左慈【新生】在受伤后调它一张；【化身】开局调它两张。
+        """
+        player = self.state.player(seat)
+        added = 0
+        for hero_id in hero_ids:
+            if hero_id in player.avatar_cards:
+                continue
+            player.avatar_cards.append(hero_id)
+            added += 1
+        return added
+
+    def clear_avatar_cards(self, seat: int) -> tuple[str, ...]:
+        """清空 ``seat`` 的**化身库**并**解除禁用**（shan-baozuoci 票 02 的唯一写入口）。
+
+        左慈 tips 3："失去这个技能时（不包括无效），清空化身库，把所有的化身牌解除禁用"
+        ——本方法逐张 ``release_drawn_true_name``（它们重新回到"未加入游戏的武将牌堆"），
+        再清空 :attr:`~sgs.state.Player.avatar_cards`。返回值 = 被清掉的武将牌 id（清空序）；
+        库本来就是空 ⇒ ``()`` 且状态一个字节都不动。
+
+        **失效（无效）不走这里**：被无效不影响化身库（tips 3 的括号）。
+        """
+        player = self.state.player(seat)
+        released = tuple(player.avatar_cards)
+        for hero_id in released:
+            hero = hero_by_id(hero_id, pack_id=self.state.pack_id)
+            if hero is None:
+                raise ValueError(f"化身库里的 {hero_id!r} 不是已知武将：无法解除禁用")
+            self.release_drawn_true_name(hero.true_name)
+        player.avatar_cards.clear()
+        return released
+
     def note_damage_dealt(self, seat: int) -> bool:
         """记"``seat`` 本回合**造成过伤害**"的座位级事实（M6 票 06 的【诛害】判据）。
 
@@ -5111,6 +5152,11 @@ class Engine:
         装备 / 虚拟授予 / 武将牌同一条链、同一条去重口径。``frame`` 是承载帧（觉醒技在
         技能帧里授予 ☆ 技能），帧外写状态时为 ``None``（记录坐标 ``frame_id = 0``）。
         M6 没有"获得技能"的武将（票 06 的 ☆ 技能是第一个消费者），故本票只以构造测试钉形状。
+
+        **技能得失的唯一入口**（shan-baozuoci 票 02 的用户口径）：技能回调不得直接改
+        ``granted_skills`` / ``lost_skills``——获得走本方法，失去走 :meth:`lose_skill`
+        （永久）或 :meth:`revoke_skill`（可逆）。这样"得失的后果"（标记 / 武将区 / 标签 /
+        per-instance 状态）只有一处，以后某条技能要为自己的得 / 失加特例也只改那一处。
         """
         player = self.state.player(seat)
         if skill_id in player.granted_skills:
@@ -5151,6 +5197,67 @@ class Engine:
             depth=self.stack.depth,
         )
         self._skill_gone(seat, skill_id, frame)
+        return True
+
+    def revoke_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
+        """**可逆地**失去一条**获得来的**技能（shan-baozuoci 票 02 的唯一写入口）。
+
+        用于左慈【化身】换技能（官方规则集 2018.3-16 左慈条："進行化身……（1）**失去**你
+        上一次以此法獲得的技能……（2）**獲得**你此次以此法選擇的技能"）。与
+        :meth:`lose_skill` 的区别只有一处：**不写** ``Player.lost_skills``——它把技能从
+        :attr:`~sgs.state.Player.granted_skills` 里**移除**，于是以后还能再"获得"一次
+        （左慈重选同一张化身牌的同一技能）。其余后果完全相同：落一条 ``skill_lose``，
+        再走 :meth:`_skill_gone` 的标准后果链（per-instance 状态 / 标签 / 标记 / 武将区）。
+
+        ``skill_id`` 不在 ``granted_skills`` 里 ⇒ ``False`` 且状态一个字节都不动
+        （fail-closed：可逆失去只对"获得来的"技能有意义）。移除后如果**别的载体**仍提供
+        同名技能（武将牌 / 装备 / 虚拟授予），实例没有消失，本方法跳过后果链——清标记 /
+        清武将区只属于"技能真的没了"。
+
+        记录形态 = 与永久失去同一个 ``skill_lose`` delta：回放按同一条技能动作重跑即可
+        重建，"可不可逆"是写入口的语义，不是记录流需要区分的事实。
+        """
+        player = self.state.player(seat)
+        if skill_id not in player.granted_skills:
+            return False
+        player.granted_skills.remove(skill_id)
+        self.emit_delta(
+            SkillLoseDelta(seat=seat, skill_id=skill_id),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        still_alive = any(
+            instance.owner == seat and instance.skill_id == skill_id
+            for instance in resolve_instances(self.state)
+        )
+        if not still_alive:
+            self._skill_gone(seat, skill_id, frame)
+        return True
+
+    def set_gender(self, seat: int, gender: Gender | None) -> bool:
+        """改一个座位的**性别**（shan-baozuoci 票 02 的唯一写入口）。
+
+        左慈【化身】"你的性别……视为与'化身牌'相同"的落点：换化身时写当前化身牌的性别，
+        失去【化身】时写回原值（男）。**不发 delta**：性别是公开的派生事实、投影每次现算，
+        回放按同一条技能动作重跑即可重建（与 ``hand_limit_bonus`` 同姿态）。返回值 = 变了没。
+        """
+        player = self.state.player(seat)
+        if player.gender == gender:
+            return False
+        player.gender = gender
+        return True
+
+    def set_kingdom(self, seat: int, kingdom: Kingdom | None) -> bool:
+        """改一个座位的**势力**（shan-baozuoci 票 02 的唯一写入口）。
+
+        左慈【化身】"势力视为与'化身牌'相同"的落点；写回 = 群。势力是公开事实
+        （``PlayerPublic.kingdom``），改完下一次投影就看得见；**不发 delta**（同
+        :meth:`set_gender`）。返回值 = 变了没。
+        """
+        player = self.state.player(seat)
+        if player.kingdom == kingdom:
+            return False
+        player.kingdom = kingdom
         return True
 
     def _skill_gone(self, seat: int, skill_id: str, frame: Frame | None) -> None:
