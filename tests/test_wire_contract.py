@@ -210,7 +210,10 @@ def test_every_pending_of_a_real_session_is_wire_safe(seed: int, heroes: Any) ->
     )
 
     pendings = actions = card_ids = 0
+    steps = 0
     while not session.finished and pendings < 200:
+        steps += 1
+        assert steps < 10_000, f"seed={seed}: 挂起驱动没有推进（活锁）"
         query = session.pending
         if query is None:
             session.drive()  # 五谷逐目标暂停（table-ux-overhaul 票 19）：没有挂起也要接着驱动

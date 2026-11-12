@@ -21,8 +21,9 @@
 ===============  ==================================  ==================================
 
 **一次请求最多推进到下一个暂停点或终局**（D16，由 :meth:`Session.drive` 保证）。
-票 19 起"五谷的每名目标取牌之后"也是一个暂停点（逐目标可见），故一次响应最多交出一个
-这样的中间视图（:meth:`Session.pause_delivered` 在视图下发时消费它）。
+票 19 起"五谷的每名目标取牌之后"也是一个暂停点（逐目标可见）：:meth:`Session.submit_answer`
+的返回值说明"这一趟已经交出了一个中间视图"，故 :meth:`GameRegistry.advance_clock` 在同一趟
+响应里不再补推一步——一次响应最多一个暂停点，这是**同一调用栈上的事实**，不落在会话上。
 **过期应答 409、结构非法 400、未知会话 404，三种都不写记录、不改状态**（D15）。
 """
 
@@ -429,7 +430,7 @@ class GameRegistry:
 
     # -- 取增量（**超时判定的唯一触发点**） ---------------------------------
 
-    def advance_clock(self, session: Session) -> None:
+    def advance_clock(self, session: Session, *, drive: bool = True) -> None:
         """取增量这一条路上的两件事：**把引擎推到下一个暂停点** + 到点就代答。
 
         前者是 table-ux-overhaul 票 14 的 L0 边界：建局响应止于 ``GAME_START``，人类第一问
@@ -438,11 +439,11 @@ class GameRegistry:
         顺序不能倒：先驱动、后打戳（``mark_pending`` 看到的那一问才是这一趟刚产出的那一问，
         倒计时从它出现的那一刻起算）。
 
-        五谷逐目标暂停（票 19）：``submit_answer`` 已经停在取牌暂停点上时**不再推进**——
-        那一次的视图就是中间状态本身，多推一步会把两个暂停点并进一份响应（客户端看不到
-        前一次）。这个事实由 :meth:`Session.pause_delivered` 在视图下发后消费。
+        五谷逐目标暂停（票 19）：``drive=False`` = 这一趟的应答（``submit_answer``）**已经**
+        停在取牌暂停点上（它的返回值就是这件事），那一次的视图就是中间状态本身——多推一步
+        会把两个暂停点并进一份响应，前一个就看不见了。
         """
-        if not session.harvest_paused:
+        if drive:
             session.drive()
         now = time.monotonic()
         # `mark_pending` 顺带打上"最后访问时刻"（票 01 的会话回收判据）。
@@ -581,10 +582,6 @@ class GameRegistry:
         # 回放底稿，不再从 post-init 快照倒推。其余批**不带这个键**（不是 `null`）。
         if after < 0:
             payload["setup"] = session.setup
-        # 五谷逐目标暂停（票 19）：这一份视图就是暂停点上的那份中间状态 ⇒ 把它交出去，
-        # **下一次**驱动（下一个 HTTP 请求）才继续推进。三条路由（建局 / 取增量 / 应答）
-        # 共用这一个出口，故"一次响应最多一个暂停点"只在这一处成立一次。
-        session.pause_delivered()
         return payload
 
     # -- 叙事增量缓存（票 01） -----------------------------------------------
@@ -625,8 +622,8 @@ class GameRegistry:
             action = parse_action(raw)
         except Exception as error:  # pydantic ValidationError：结构非法
             raise ValueError(f"应答结构非法：{error}") from error
-        session.submit_answer(action)
-        self.advance_clock(session)
+        paused = session.submit_answer(action)
+        self.advance_clock(session, drive=not paused)
         return self.view(session, after=after, logs_after=logs_after)
 
     # -- 步骤预览（票 11：只读） ---------------------------------------------

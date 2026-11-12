@@ -14565,7 +14565,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const idlePersistent = ui.state.dialog.persistent;
   check("U-HV-05a 没有询问的空窗里亮牌窗保持打开：已拿的牌置灰 + 座0，目标条第 1 枚 is-taken",
     ui.state.view.pending === null
-      && ui.idleHarvestState() === ui.state.view.harvest
+      && ui.harvestStateWithoutPending() === ui.state.view.harvest
       && idleWindowOpen
       && idleKeyNow === `reveal:${idleKey}`
       && idlePersistent === true
@@ -14580,8 +14580,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && idleChips()[1].classList.contains("is-current")
       && idleChips()[2].classList.contains("is-pending")
       && $("t-dialog-hint").textContent.includes("等待1号位拿牌")
+      // 提示行说的是这一步是什么（服务端 `harvest.hint`），不是「（没有待应答的询问）」。
+      && $("t-prompt").textContent === "从亮出的牌里选一张获得"
       && $("t-modal-backdrop").hidden === true,
-    `open=${idleWindowOpen} key=${idleKeyNow} persistent=${idlePersistent} bodyHidden=${$("t-dialog-body").hidden} taken=${idleCards().map((n) => n.getAttribute("data-taken-by")).join("|")} chips=${idleChips().map((n) => n.getAttribute("data-state")).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+    `open=${idleWindowOpen} key=${idleKeyNow} persistent=${idlePersistent} bodyHidden=${$("t-dialog-body").hidden} taken=${idleCards().map((n) => n.getAttribute("data-taken-by")).join("|")} chips=${idleChips().map((n) => n.getAttribute("data-state")).join(",")} prompt="${$("t-prompt").textContent}" hint="${$("t-dialog-hint").textContent}"`);
 
   // 第二拍（又一次轮询，同样没有询问）：第二名目标取走第二张。
   render(idleView(
@@ -14620,12 +14622,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // 结算结束（帧出栈 ⇒ `view.harvest` 变 null）：同一拍收窗。
   render(wuguView(null, 2));
-  check("U-HV-05d 结算结束（`view.harvest` 变 null）：亮牌窗收起、链键清空，不留半个窗口",
+  check("U-HV-05d 结算结束（`view.harvest` 变 null）：亮牌窗收起、链键清空，提示行回到中性文案",
     $("t-dialog").hidden === true
       && ui.state.dialog.key === null
       && ui.state.dialog.open === false
-      && $("t-dialog-reveal").hidden === true,
-    `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} open=${ui.state.dialog.open} revealHidden=${$("t-dialog-reveal").hidden}`);
+      && $("t-dialog-reveal").hidden === true
+      && $("t-prompt").textContent === "（没有待应答的询问）",
+    `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} open=${ui.state.dialog.open} revealHidden=${$("t-dialog-reveal").hidden} prompt="${$("t-prompt").textContent}"`);
 
   ui.state.sessionId = null;
   ui.state.view = null;

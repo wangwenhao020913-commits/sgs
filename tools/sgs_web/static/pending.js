@@ -207,8 +207,12 @@ function renderPending(view) {
   // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
   // 亮牌（票 11）另有一条派生文案 `harvest.hint`：409 裸 Query 没有 `context` 时也用它，
   // 不会掉回引擎那句通用的「请从选择面里选择一张牌」（公开处理区的文案 bug）。
+  // 票 19：**没有询问**、但五谷结算帧还活着（逐目标暂停的中间视图）时同样读 `harvest.hint`
+  // ——亮牌窗正开着等下一名目标拿牌，提示行不该说「（没有待应答的询问）」。
+  const pendingless = pending ? null : harvestStateWithoutPending();
   const requirement = (pending && pending.context && pending.context.requirement)
     || (pending && pending.harvest && pending.harvest.hint)
+    || (pendingless ? pendingless.hint : null)
     || null;
   $("t-prompt").textContent = requirement
     || (pending ? pending.prompt : "（没有待应答的询问）");

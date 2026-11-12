@@ -17,6 +17,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 
@@ -61,31 +62,39 @@ def settle_after_create(base: str, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def settle_pauses(
-    base: str, session_id: str, body: dict[str, Any], *, limit: int = 400
-) -> list[dict[str, Any]]:
+    base: str,
+    session_id: str,
+    body: dict[str, Any],
+    *,
+    limit: int = 400,
+    visit: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], int]:
     """把五谷的**逐目标暂停**取到下一个挂起 / 终局（table-ux-overhaul 票 19）。
 
     接入层在每个目标取牌后让出一次驱动：一次应答之后 ``pending is None`` 但还没终局是
     **合法**态，人类的下一个询问要由下一次取增量驱动出来——真网页客户端这时就是再取一次
     增量（2 s 轮询那条路）。这里逐次取，直到视图里又有挂起 / 终局。
 
-    返回**中途的每一份视图**（最后一份就是带挂起 / 终局的那份）；调用方用它的
-    ``cursor`` / ``log_seq`` / ``records`` 接着走，别把中间那一批记录丢了。
-    构造局面夹具（``m5_fixture_server`` / ``m6_fixture_server``）的 tape 里没有五谷，
-    故那两条固定 tape 的返回恒为空表；真正的 8 人正局会撞到它。
+    每次取到的视图先交给 ``visit``（可选：调用方用它收账 / 收叙事，**中间那一批记录不能丢**），
+    然后返回 ``(最后一份视图, 取了几次)``；``0`` = 一次都没取（调用方传进来的 body 已经带
+    挂起 / 终局，或第一次请求就失败）。构造局面夹具（``m5_fixture_server`` /
+    ``m6_fixture_server``）的 tape 里没有五谷，故那几条固定 tape 恒取 0 次；真正的 8 人
+    正局会撞到它。
     """
-    views: list[dict[str, Any]] = []
+    polls = 0
     for _ in range(limit):
         if body.get("finished") or body.get("pending") is not None:
-            return views
+            return body, polls
         status, body = call(
             f"{base}/api/sessions/{session_id}?after={body['cursor']}&logs={body['log_seq']}"
         )
         if status != 200:
             print(f"FAIL 暂停后的取增量失败：HTTP {status} {body}")
-            return views
-        views.append(body)
-    return views
+            return body, polls
+        polls += 1
+        if visit is not None:
+            visit(body)
+    return body, polls
 
 
 def _identity_win_failure(
@@ -169,27 +178,29 @@ def play(
     game_end: dict[str, Any] | None = None
     reveals: list[dict[str, Any]] = []
 
+    def note_pause_records(payload: dict[str, Any]) -> None:
+        """五谷逐目标暂停取回来的那几份视图照样要收账（终局记录可能就在里面）。"""
+        nonlocal game_end
+        for record in payload["records"]:
+            if record["kind"] == "game_end":
+                game_end = record
+            if record.get("delta_type") == "identity_reveal":
+                reveals.append(record)
+
     while not body["finished"]:
         pending = body["pending"]
         if pending is None:
             # 票 19：五谷的逐目标暂停 —— 没有 pending 是合法态，真客户端这时再取一次增量。
-            settled = settle_pauses(base, session_id, body)
-            if not settled:
+            body, polls = settle_pauses(base, session_id, body, visit=note_pause_records)
+            if polls == 0:
                 print("FAIL 未终局但也没有待应答的询问（取增量也没有推进）")
                 return 1
-            pauses += len(settled)
+            pauses += polls
             if pauses > 400:
                 print("FAIL 超过 400 次暂停取增量仍未终局")
                 return 1
-            for extra in settled:
-                body = extra
-                cursor = body["cursor"]
-                log_seq = body["log_seq"]
-                for record in body["records"]:
-                    if record["kind"] == "game_end":
-                        game_end = record
-                    if record.get("delta_type") == "identity_reveal":
-                        reveals.append(record)
+            cursor = body["cursor"]
+            log_seq = body["log_seq"]
             continue
         queries += 1
         # 从候选里取第一个**合法**候选——前端也是这么做的（原样取自 legal_actions）。
@@ -515,17 +526,21 @@ def fire_attack_tape(base: str) -> int:
             pending = body["pending"]
             if pending is None:
                 # 票 19：五谷的逐目标暂停。这条 tape 的构造局面里没有五谷（`_m5_create`
-                # 的 fixture 手牌写死），故恒为空表；真出现就是夹具换了，按失败报出来。
-                settled = settle_pauses(base, session_id, body)
-                if not settled:
+                # 的 fixture 手牌写死），故恒取 0 次；真出现就是夹具换了，按失败报出来。
+                body, polls = settle_pauses(
+                    base,
+                    session_id,
+                    body,
+                    visit=lambda payload: narrative.extend(
+                        entry["text"] for entry in payload.get("narrative") or []
+                    ),
+                )
+                if polls == 0:
                     print(f"FAIL 火攻 tape {label}：未终局但也没有待应答的询问")
                     failures += 1
                     break
-                for extra in settled:
-                    body = extra
-                    cursor = body["cursor"]
-                    log_seq = body["log_seq"]
-                    narrative.extend(entry["text"] for entry in body.get("narrative") or [])
+                cursor = body["cursor"]
+                log_seq = body["log_seq"]
                 continue
             action, step = _fire_choice(pending, target_self=target_self, fa_used=fa_used)
             if not any(action == candidate for candidate in pending["legal_actions"]):
@@ -844,14 +859,12 @@ def _wine_tape_near_death(base: str) -> int:
         pending = body.get("pending") or {}
         if not pending:
             # 票 19：五谷的逐目标暂停 —— 没有 pending 是合法态，取增量接着走。
-            settled = settle_pauses(base, session_id, body)
-            if not settled:
+            body, polls = settle_pauses(base, session_id, body)
+            if polls == 0:
                 print("FAIL 酒 tape（濒死）：未终局但也没有待应答的询问")
                 return 1
-            for extra in settled:
-                body = extra
-                cursor = body["cursor"]
-                log_seq = body["log_seq"]
+            cursor = body["cursor"]
+            log_seq = body["log_seq"]
             continue
         offers = _wine_offers(pending)
         if pending.get("kind") == "PEACH" and pending.get("actor") == 0 and offers:
@@ -1028,16 +1041,13 @@ def _m5_play(
     while not body.get("finished"):
         pending = body.get("pending")
         if not pending:
-            # 票 19：五谷的逐目标暂停。构造局面夹具里没有五谷 ⇒ 恒为空表；真出现就是
+            # 票 19：五谷的逐目标暂停。构造局面夹具里没有五谷 ⇒ 恒取 0 次；真出现就是
             # 夹具换了。中间那几份视图照样 `collect`（终局记录可能就在里面）。
-            settled = settle_pauses(base, session_id, body)
-            if not settled:
+            body, polls = settle_pauses(base, session_id, body, visit=collect)
+            if polls == 0:
                 print(f"FAIL 固定 tape（{fixture}）：未终局但也没有待应答的询问")
                 return 1
-            for extra in settled:
-                cursor, log_seq = extra["cursor"], extra["log_seq"]
-                collect(extra)
-            body = settled[-1]
+            cursor, log_seq = body["cursor"], body["log_seq"]
             if body.get("pending") is None and not body.get("finished"):
                 print(f"FAIL 固定 tape（{fixture}）：取增量也没有推进出下一个询问")
                 return 1

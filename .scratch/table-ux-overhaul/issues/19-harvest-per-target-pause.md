@@ -64,17 +64,20 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
    为真就返回。缺省 `None` ⇒ 金录像 / `batch_games` / `ai_eval` / 录像回放逐字节不变
    （它们都不传）。**它只改"这一次驱动停在哪"**：记录流、随机数、询问条数一条都不动。
 2. **接入层（`tools/sgs_web/session.py`）**：
-   - `drive()` 把 `stop_when=self._harvest_pick_pause_due` 交给引擎；`run` 正常返回的三种
-     原因（终局 / L0 边界 / 五谷暂停）都算"这一趟停过了"，故一律返回、不在同一趟里续推。
+   - `drive()` 把 `stop_when=…` 交给引擎；`run` 正常返回的三种原因（终局 / L0 边界 /
+     五谷暂停）都算"这一趟停过了"，故一律返回、不在同一趟里续推。**返回值** =
+     "这一趟停在五谷逐目标暂停上"（`submit_answer` 原样透传）。
    - `_harvest_pick_pause_due()` = 暂停判据（见下「暂停判据」），进度记在
      `_harvest_pause_mark`（`(链键, 已拿数)`），同一份进度不二次停。
-   - `harvest_paused`（只读属性）+ `pause_delivered()`：暂停点**由一次视图下发消费**。
-3. **HTTP 面（`tools/sgs_web/serve.py`）**：`advance_clock` 在 `harvest_paused` 为真时
-   **不再推进**（否则一次应答把两个暂停点并进一份响应，前一次就看不见了）；
-   `view()` 末尾调 `session.pause_delivered()`，三条路由（建局 / 取增量 / 应答）共用这一处。
+   - **没有会话级的暂停标志**：这个事实只活在一次调用栈里（`submit_answer` 返回 →
+     HTTP 层据此不再补推）。跨请求的标志会要求"谁先下发视图谁清它"，而会话本来就不加锁
+     （`ThreadingHTTPServer`）——把它做成返回值，那类竞态不存在。
+3. **HTTP 面（`tools/sgs_web/serve.py`）**：`answer()` 拿到 `submit_answer` 的返回值，
+   给 `advance_clock(..., drive=not paused)`（否则一次应答把两个暂停点并进一份响应，
+   前一次就看不见了）。`view()` 是纯投影（不再改会话状态）。
 4. **客户端不改判据、只补窗寿命**（票面「客户端不改判据」= `taken_by` / `status` 仍全部
    来自服务端派生）：
-   - `reveal.js:idleHarvestState()`：**没有询问**时亮牌窗该不该显示（读 `view.harvest`；
+   - `reveal.js:harvestStateWithoutPending()`：**没有询问**时亮牌窗该不该显示（读 `view.harvest`；
      **不要求 `current`**——最后一名目标取走后没有当前目标，那正是"全部拿完"那一帧）。
    - `modal.js:dialogRevealSource()`：亮牌窗的数据源 = 有询问用询问，否则用视图级 harvest；
      `syncDialog` 的空闲分支据此把窗口**保持打开**（同链键、`persistent` ⇒ 不暗化），
@@ -84,7 +87,7 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
    产品路由）+ 烟测 `U-HV-05a..d`；改写"驱动到终局"的循环（它们现在要知道"没有 pending"
    也是合法态）。
 6. **文档**：`docs/agents/frontend-map.md` 的 `reveal.js` / `modal.js` 两行补上
-   `idleHarvestState` / `dialogRevealSource` 与空窗窗寿命。
+   `harvestStateWithoutPending` / `dialogRevealSource` 与空窗窗寿命。
 
 ### 每名目标的视图读法
 
@@ -127,9 +130,9 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
   之后每次 2 s 轮询推进一个暂停点：`advance_clock` 驱动 → 又一名目标拿牌 → 让出 → 视图。
   4 名目标合计 4 份中间视图（最后一份全员 `taken`、`current = null`），第 5 次取增量才结算
   结束（`view.harvest` 变 `null`，窗在同一拍收起）。
-- **一次响应最多一个暂停点**：`submit_answer` 已经停在暂停点上时，同一次响应的
-  `advance_clock` 不再推进（`harvest_paused` 为真）；这份事实由 `view()` 的
-  `pause_delivered()` 消费。于是"每个暂停点都真的交给浏览器一次"，不会两个并成一个。
+- **一次响应最多一个暂停点**：`submit_answer` 的返回值说明"这一趟已经有一个中间视图"，
+  同一次响应的 `advance_clock` 因此不再推进。于是"每个暂停点都真的交给浏览器一次"，
+  不会两个并成一个。这个事实**只活在一次调用栈里**（会话上不留标志）。
 
 ### 会红的既有断言（本票故意改写，判据一条都没放宽）
 
@@ -148,7 +151,9 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
 | 每名目标取牌都能在视图里读到（4 座 / AI 目标） | `test_each_harvest_target_pick_is_observable_in_a_view` | `tests/test_web.py` |
 | 取 3 名目标 ⇒ **恰好** 3 次中间视图（每名只停一次） | `test_the_harvest_pause_stops_once_per_target` | `tests/test_web.py` |
 | 纯驱动节流（记录流逐字节不变） | `test_the_harvest_pause_is_pure_driving_throttling` | `tests/test_web.py` |
-| 烟测：空窗两次"轮询"⇒ 置灰 + 座N + 目标条翻态；第三名再翻；结算结束收窗 | `U-HV-05a` / `U-HV-05b` / `U-HV-05c` / `U-HV-05d` | `tests/support/ui_smoke.mjs` |
+| 每份中间视图**恰好**带走一条取牌移动（不多停 = 不并批、不少停 = 不跳目标） | `test_the_harvest_pause_stops_once_per_target` 的 `_pick_moves == [1, 1, 1]`（读视图自带的 `records`） | `tests/test_web.py` |
+| 暂停点是 `drive()` 的返回值（HTTP 层据此不补推） | 同一用例的 `session.submit_answer(...) is True` | `tests/test_web.py` |
+| 烟测：空窗两次"轮询"⇒ 置灰 + 座N + 目标条翻态（提示行写这一步是什么）；第三名再翻；结算结束收窗 + 提示行回中性 | `U-HV-05a` / `U-HV-05b` / `U-HV-05c` / `U-HV-05d` | `tests/support/ui_smoke.mjs` |
 | 真 HTTP tape（建局 / 8 人正局 / 160 张 / 火攻 / 酒 / 固定 tape） | `bash tests/test_web.sh` | 见下 |
 | 票 14 的 L0 停点不变 | `test_the_create_response_stops_at_the_end_of_game_start` | `tests/test_web.py`（保持绿） |
 | 金录像 47 条不变 | `bash tools/check_goldens.sh` | 见下 |
@@ -160,7 +165,7 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
 - `bash tests/test_web.sh` ⇒ `PASS: M4 端到端门禁全部通过`（8 人正局 / 军争 160 / 409 / 火攻 / 酒 / 构造 tape / `--host 0.0.0.0`）。
 - `bash tools/check_goldens.sh` ⇒ `PASS: 47 条标准 108 金录像逐字节不变`。
 - 判据代价（全 AI 自对弈一局 1593 条记录）：`_harvest_pick_pause_due` 调用 **1424 次**、
-  总耗时 **6.33 ms**（≈ **4 µs/次**；没有五谷帧时是"取栈 → 早退"）。没有新增长扫。
+  总耗时 **5.61 ms**（≈ **4 µs/次**；没有五谷帧时是"取栈 → 早退"）。没有新增长扫。
 - 提交时由 pre-commit hook 跑全量 `tests/run_all.sh --quiet`（结果见本次提交）。
 
 ### Touches 扩面（实施期裁定，票面外但被逼出来的面）
@@ -170,8 +175,16 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
 | `src/sgs/engine/game.py` | 停点住在 `run` 的循环内部（`_step` 之后那一刻外面看不见）；与票 14 的 `stop_after_game_start` 同一种机制、同一个参数风格 |
 | `tools/sgs_web/serve.py` | "一次响应最多一个暂停点"与"视图下发即消费"只能落在 `advance_clock` / `view` 两处 |
 | `tools/sgs_web/static/{reveal,modal}.js` | 空窗里 `pending` 是 `null`，原 `syncDialog` 会**关窗**——不补这一段，"到得了浏览器"的中间状态仍然看不见（票面「客户端不改判据」指 `taken_by`/`status` 仍全部来自服务端，不是"客户端一个字都不改"） |
-| `tests/support/{ui_bridge.js,web_client.py}` | 烟测桥要暴露 `idleHarvestState`；HTTP tape 的驱动循环要知道"没有 pending 也是合法态" |
+| `tests/support/{ui_bridge.js,web_client.py}` | 烟测桥要暴露 `harvestStateWithoutPending`；HTTP tape 的驱动循环要知道"没有 pending 也是合法态" |
 | `tests/test_{armor,m5_no_leak,wire_contract}.py` | 同上的驱动循环（不改会**静默**少取样） |
+
+### AI 适配（`docs/agents/ai-adaptation.md` §1）
+
+**不适用**：本票没有新增 `QueryKind`、没有改动作面（`legal_actions` / 复合候选一个字段没动）、
+没有新增或遮挡可见区。引擎那边只是给 `run` 多一个**驱动**判据（谁传它由调用方决定，AI 侧
+`batch_games` / `ai_eval` / 录像回放都不传），`Query` / `PlayerView` / 记录流的读点一个都没变；
+记牌守恒量（53 / 108 / 160）与身份推断的输入不变。客户端那段是纯显示窗寿命（数据仍来自
+`view.harvest`）。
 
 ### 实机验收配方（`bsk` 在本机**不可驱动** ⇒ 交用户）
 
@@ -198,3 +211,31 @@ AI 目标的取牌由 `Session.drive()` **同步答完**：一局五谷的整段
       目标拿完后**仍是**"全员 ✓、没有 ◀"那一帧（窗还开着，`等待其他座位拿牌…`）；
    ④ 再一拍（2 秒）窗收起、回到自己的出牌阶段——**没有**"整段不变然后一下跳到结算结束"。
 4. 反向自查：五谷结算完之后 `#t-dialog` 必须已经 `hidden`；中途折叠 / 展开照旧可用。
+
+### `## 评审处置`（`/code-review` 双轴，范围 `0bce39c...5139275`）
+
+两轴各出一份报告，处置如下（修复全在工作树，见本票的后续提交）。
+
+| 轴 | finding | 处置 |
+|---|---|---|
+| Standards H | "一次响应最多一个暂停点"靠一个跨请求的会话布尔，`ThreadingHTTPServer` 下无锁 ⇒ 响应对不上号 | **已改**：删掉 `harvest_paused` / `pause_delivered` / `view()` 的副作用；事实改成 `drive()` / `submit_answer()` 的**返回值**，`answer()` 据此给 `advance_clock(drive=not paused)`。同一调用栈，无跨请求状态 |
+| Standards H | `_l0_boundary_reached` 在**任何**正常返回上都置真，注释却宣称"L0 边界" | **已改**：先判"这一趟是不是五谷暂停"，是就不碰 L0 标志（`stop_when` 若在首次驱动就让出，票 14 的建局停点不会被吞掉） |
+| Standards H | `test_m5_no_leak.py` 的三条 sweep 在 `pending is None` 时 `drive(); continue`，暂停那几拍**没有被查**，与 docstring 的"每一次"矛盾 | **已改**：空窗里**快照照样过** `_assert_snapshot`（没有询问载荷，但下发面还在）；三条 sweep + `test_armor` / `test_wire_contract` 补上驱动步上限（活锁现在是红，不是挂死） |
+| Standards J | 引擎 `stop_when` 的 docstring 写"只读引擎已有的事实"，不可机械核 | **已改**：写成"**判据不得改引擎状态**"（可审的那一半） |
+| Standards J | 空窗窗寿命没有 `applyViewRaw + stepPlayback` 的**批中**用例（票 18 的 §7 要求） | 见下「未做（如实记录）」 |
+| Standards J | `web_client.py` 的 settle 循环复制了 4 处 | **已改**：`settle_pauses(..., visit=…)` 返回 `(body, polls)`，四个调用点各自只留一句 |
+| Standards J | `dialogRevealSource()` 把"只有 harvest 的合成载荷"喂给所有模板的标题 | **已改**：新增 `dialogTitleSource(kind)`——只有亮牌模板读它，其余模板照读 `pending` |
+| Standards J | `idleHarvestState` 名不副实（说"空闲"，实为"没有询问"） | **已改**：改名 `harvestStateWithoutPending`，docstring 写明与 `poll()` 的空转分支不是一回事 |
+| Standards J | `assert session.harvest_paused is False` 是重言式 | **已删**：标志已不存在；改断 `submit_answer(...) is True` 与 `_pick_moves == [1,1,1]` |
+| Standards J | 暂停期 `#t-prompt` 写「（没有待应答的询问）」，与弹窗"等待N号位拿牌…"打架 | **已改**：`renderPending` 的提示链补上 `view.harvest.hint`（空窗里说这一步是什么），`U-HV-05a` 钉文案、`U-HV-05d` 钉收窗后回中性文案 |
+| Standards J | `frontend-map` 漏了决定性的 `syncDialog` 一跳 | **已改** |
+| Spec 1 | 「不得在有人类 pending 时暂停」没有用例钉住 | **部分**：判据里的 `pending` 守卫是**防死锁**的安全条件（一个 `_step` 同时落取牌移动与 AI 询问时，若在这里停，`run` 会带着 AI 的 pending 退出、下一趟 `drive` 永不推进）。构造这种局面需要 MOVE_AFTER 类钩子，`_harvest_game` 的两个局面都没有；本轮按"注释写明为什么存在"处理，不造假夹具 |
+| Spec 2 | 「弃牌不进判据」只有论证没有断言 | **已改**：3 目标用例的 `_pick_moves == [1, 1, 1]` 从**记录**侧面钉住"恰好三条取牌移动"——结算收尾的 `processing → discard` 若也停，就会是 4 份视图 / 多一条移动 |
+| Spec 3 | 3 目标靠 `dead_seat` 夹具而非真发牌 | 接受：与票 18 的既有夹具同源；`get/finished` 的随机局里有真发牌覆盖（`_play_to_end` 那个测试助手驱动的那批） |
+| Spec b | `tests/test_web.py` 顺手把 ~20 处 `GameRegistry(runs_dir=…)` 改成 `_registry()`，属可避免的 churn | **已改**：除票 19 的新用例，其余调用点恢复原样 |
+
+**未做（如实记录）**：空窗窗寿命的"批中"用例（`applyViewRaw + stepPlayback`）没补——现有
+`U-HV-05a..d` 走的是**提交那一次**（`render()` = commit 形态），而批中形态由 `blankAskSurface`
+的 `keepDialog` 分支兜住（票 18 的 `M6-B1` 覆盖的是同一分支的关闭方向）。真机验收（配方见上）
+会把这 2 秒窗口走一遍；若用户验收时看到"先关再开"，按本票的 `syncDialog` 顺序（`blankAskSurface`
+先保留、commit 后重画）应当是关不掉的，届时再补这条用例。

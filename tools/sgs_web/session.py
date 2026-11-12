@@ -22,8 +22,8 @@
    "已拿"的目标数 +1）的那一步之后让出：浏览器因此每一次取牌都拿到一份中间视图
    （``view.harvest``），而不是等整段结算跑完才看到跳变。判据读记录流事实（见
    :meth:`Session._harvest_pick_pause_due`），同一名目标只停一次；一局可以停多次。
-   暂停点由**下一次视图下发**消费（:meth:`Session.pause_delivered`），故一次 HTTP
-   响应里最多只有一个这样的停点。
+   这一次停点由 :meth:`Session.drive` 的**返回值**交给调用方（"这一趟已经有一个中间
+   视图了"），故一次 HTTP 响应里最多只有一个这样的停点。
 3. **人类座位的询问**——``_HaltPlayer`` 抛 :class:`Halt` 让 ``engine.run()`` 退出来。
 4. **终局**。
 
@@ -309,15 +309,10 @@ class Session:
         self.participants: tuple[Participant, ...] = tuple(players)
         # L0 边界只停一次：`pause_after_game_start` 关掉时等于"已经越过"（永不在那里停）。
         self._l0_boundary_reached = not pause_after_game_start
-        # 五谷逐目标暂停（table-ux-overhaul 票 19）。两件事实都住在会话上，都不是会话的
-        # 规则状态（不进记录流 / 侧车 / 金录像）：
-        #   ``_harvest_pause_mark`` = 已经让出过的那个五谷结算「链键 + 已拿数」——
-        #     同一条进度不二次停，换一局五谷结算（链键变了）自然重新起算；
-        #   ``_harvest_paused`` = 这个停点还没被任何一次视图下发交出去
-        #     （``serve.GameRegistry`` 据此不在同一趟响应里再推进一次，见
-        #     :meth:`pause_delivered`）。
+        # 五谷逐目标暂停（table-ux-overhaul 票 19）的**进度**：已经让出过的那个五谷结算
+        # 「链键 + 已拿数」。同一条进度不二次停；换一局五谷结算（链键变了）自然重新起算。
+        # 它只是驱动进度，不是会话的规则状态（不进记录流 / 侧车 / 金录像）。
         self._harvest_pause_mark: tuple[str, int] | None = None
-        self._harvest_paused = False
         # **开局底稿必须在 drive() 之前冻结**（票 14）：此刻 `engine.state` 是
         # `build_initial` 的产物、`_start` 一条都没跑过——「游戏开始时」的技能（【天成】
         # 会改体力上限、摸牌）一跑，这份局面就再也回不来了。
@@ -338,16 +333,6 @@ class Session:
     def pending(self) -> Query | None:
         """当前待应答的询问；``None`` = 终局或尚未开始。"""
         return self.engine.pending
-
-    @property
-    def harvest_paused(self) -> bool:
-        """上一次 :meth:`drive` 停在五谷逐目标取牌的暂停点上、且还没被视图交出去。
-
-        ``True`` 时这一趟 HTTP 响应**已经**有中间状态可发了：``serve.GameRegistry``
-        不再推进（否则一次应答会把两个暂停点并进一份视图），由 :meth:`pause_delivered`
-        在视图下发后清掉。
-        """
-        return self._harvest_paused
 
     @property
     def log_seq(self) -> int:
@@ -433,8 +418,8 @@ class Session:
 
     # -- 驱动 ---------------------------------------------------------------
 
-    def drive(self) -> None:
-        """推进到**下一个暂停点或终局**并返回（D16；暂停点见模块 docstring）。
+    def drive(self) -> bool:
+        """推进到**下一个暂停点或终局**并返回"这一趟是不是停在五谷逐目标暂停上"。
 
         ``engine.run`` 只在人类座位的替身处退出（:class:`Halt`）；退出时 ``engine.pending``
         就是那次询问——``ask()`` 早已把 ``QueryRecord`` 写进记录流，故挂起/续跑不会重发询问。
@@ -444,26 +429,42 @@ class Session:
 
         五谷逐目标取牌（票 19）的停点交给引擎的 ``stop_when`` 判据：每名目标拿走牌之后
         让出一次（见 :meth:`_harvest_pick_pause_due`）。它和 L0 边界是**同一种机制**：
-        停点住在引擎循环内部，外面看不见那一刻；会话只负责记住"这一趟停过了"。
+        停点住在引擎循环内部，外面看不见那一刻。
+
+        **返回值就是"这一趟交出了一个中间视图"**（``True``）：调用方（``GameRegistry``）
+        据此在**同一趟响应**里不再补推一步，否则一次应答会把两个暂停点并进一份视图，
+        前一个就看不见了。事实随返回值走、不落到会话上：没有跨请求的生命周期要维护
+        （HTTP 那一层是 ``ThreadingHTTPServer``，会话本来就不加锁）。
 
         ``run`` 正常返回只有三种原因：终局 / L0 边界 / 五谷逐目标暂停——每一种都是
         "这一趟已经停过了"，故一律返回，不在同一趟里接着驱动。
         """
         if self.engine.finished or self.engine.pending is not None:
-            return
+            return False
         stop_at_l0_boundary = not self._l0_boundary_reached
+        paused = False
+
+        def stop_when() -> bool:
+            nonlocal paused
+            paused = self._harvest_pick_pause_due()
+            return paused
+
         try:
             self.engine.run(
                 self.participants,
                 stop_after_game_start=stop_at_l0_boundary,
-                stop_when=self._harvest_pick_pause_due,
+                stop_when=stop_when,
             )
         except Halt:
-            return
-        if stop_at_l0_boundary:
-            # ``run`` 在 L0 边界让出（``_started`` 刚翻真、回合环一条都还没跑）。
-            # 这一种要**记住**再也不会停在那里（一局只停一次）。
+            return False
+        if paused:
+            return True
+        if not self.engine.finished:
+            # ``run`` 正常返回、又不是终局、也不是五谷暂停 ⇒ 只剩 **L0 边界**这一种
+            # （引擎的 ``stop_after_game_start`` 在"游戏开始时"派发完之后让出）。判据读
+            # 引擎的公开事实，不靠"哪一支先跑"；这一种要**记住**再也不会停在那里。
             self._l0_boundary_reached = True
+        return False
 
     def _harvest_pick_pause_due(self) -> bool:
         """五谷**又有一名目标拿走了牌** ⇒ 让出驱动一次（table-ux-overhaul 票 19）。
@@ -498,21 +499,13 @@ class Session:
         self._harvest_pause_mark = mark
         if taken == 0 or self.engine.pending is not None:
             return False
-        self._harvest_paused = True
         return True
 
-    def pause_delivered(self) -> None:
-        """一次视图下发把暂停点交出去了（票 19）：下一次 :meth:`drive` 才继续推进。
-
-        调用点只有 :meth:`sgs_web.serve.GameRegistry.view`（建局 / 取增量 / 应答三处共用
-        的那一个）。它让"一次 HTTP 响应最多交出一个中间视图"成为结构事实：应答里
-        ``submit_answer`` 已经停在一个取牌暂停点上，同一次响应的 ``advance_clock``
-        就不会再推进到下一个人。
-        """
-        self._harvest_paused = False
-
-    def submit_answer(self, action: object) -> None:
+    def submit_answer(self, action: object) -> bool:
         """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。
+
+        返回值 = :meth:`drive` 的"这一趟停在五谷逐目标暂停上"（票 19）：HTTP 那一层据此
+        不在同一趟响应里再推一步（见 :meth:`drive` 的 docstring）。
 
         异常里一并带出 ``human_seat``：409 的下发方（``serve.py``）只有那份裸 ``Query``，
         没有它判不了"这张观看牌面该不该下发"（票 15 / 评审 finding ①）。
@@ -522,7 +515,7 @@ class Session:
         if pending is None or answers_seq != pending.seq:
             raise StaleAnswer(pending, human_seat=self.human_seat)
         self.engine.submit(action)
-        self.drive()
+        return self.drive()
 
     # -- 侧车日志 -----------------------------------------------------------
 

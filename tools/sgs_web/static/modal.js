@@ -442,8 +442,19 @@ function dialogWantedKind(pending) {
 function dialogRevealSource() {
   const pending = state.view ? state.view.pending : null;
   if (pending) return pending;
-  const harvest = idleHarvestState();
+  const harvest = harvestStateWithoutPending();
   return harvest ? { harvest } : null;
+}
+
+/** 弹窗标题的数据源：亮牌模板读 `dialogRevealSource()`（空窗里也能读），其余模板读询问。
+ *
+ * 为什么按 `kind` 收口：`dialogRevealSource()` 在**没有询问**时返回一份**只有 `harvest`**
+ * 的最小载荷（不是真询问），只有亮牌模板的三个读点认这个形状；别的模板万一读到它，
+ * 读到的是 `undefined` 而不是别人的残值——这一层就是防那种"将来某模板开始读 `pending.seq`"。
+ */
+function dialogTitleSource(kind) {
+  if (kind === DIALOG_KINDS.reveal) return dialogRevealSource();
+  return state.view ? state.view.pending : null;
 }
 
 /** 弹窗实例键：**同一键 = 同一「步」的重复渲染**（保留折叠、只换内容）；
@@ -790,9 +801,8 @@ function openDialogDom(kind) {
   const body = $("t-dialog-body");
   const title = $("t-dialog-title");
   if (!dialog || !body) return;
-  // 票 19：没有询问的空窗里标题也读视图级 `view.harvest`（`dialogRevealSource` 有询问时
-  // 原样返回那份询问，故其余模板一字不变）。
-  if (title) title.textContent = dialogTitleFor(kind, dialogRevealSource());
+  // 票 19：亮牌模板的标题在空窗里也读视图级 `view.harvest`（其余模板照旧读询问）。
+  if (title) title.textContent = dialogTitleFor(kind, dialogTitleSource(kind));
   state.dialog.open = true;
   state.dialog.kind = kind;
   state.dialog.collapsed = false;
@@ -820,9 +830,8 @@ function updateDialogDom(kind) {
     openDialogDom(kind);
     return;
   }
-  // 票 19：没有询问的空窗里标题也读视图级 `view.harvest`（`dialogRevealSource` 有询问时
-  // 原样返回那份询问，故其余模板一字不变）。
-  if (title) title.textContent = dialogTitleFor(kind, dialogRevealSource());
+  // 票 19：亮牌模板的标题在空窗里也读视图级 `view.harvest`（其余模板照旧读询问）。
+  if (title) title.textContent = dialogTitleFor(kind, dialogTitleSource(kind));
   state.dialog.kind = kind;
   applyDialogContentMode(kind);
   applyDialogCollapseChrome();
@@ -903,9 +912,9 @@ function syncPlaybackDialog(record) {
 function syncDialog() {
   const pending = state.view ? state.view.pending : null;
   // 票 19：**没有询问**、但五谷结算帧还活着（逐目标暂停的中间视图）⇒ 亮牌窗保持打开。
-  // 判据只读服务端的 `view.harvest`（见 `reveal.js:idleHarvestState`）；有询问时恒为
+  // 判据只读服务端的 `view.harvest`（见 `reveal.js:harvestStateWithoutPending`）；有询问时恒为
   // `null`，下面每一条分支都与本票之前逐字相同。
-  const idle = pending ? null : idleHarvestState();
+  const pendingless = pending ? null : harvestStateWithoutPending();
   // 只有**自己的**询问才在自己的屏幕上开弹窗：目标座位是 AI 时（人类是周瑜、目标是 AI），
   // 花色 / 盲挑这两问会出现在视图里，但它们不是给人类答的——不在这里开一个人工弹窗
   // （牌桌仍按 `selectionEnabled` 只读，等 AI 答完下一步）。
@@ -930,7 +939,7 @@ function syncDialog() {
     ? DIALOG_KINDS.suit
     : (state.playback
       ? null
-      : (idle
+      : (pendingless
         ? DIALOG_KINDS.reveal
         : ((own || publicHarvest) ? dialogWantedKind(pending) : null)));
   if (!kind) {
@@ -942,8 +951,8 @@ function syncDialog() {
   // "等下一名目标"时不关窗重开，只换正文归属（`persistent` 变真）。
   const key = settle
     ? "suit-result"
-    : (idle ? `reveal:${idle.key}` : dialogKeyFor(kind, pending));
-  const persistentMode = persistent || Boolean(idle);
+    : (pendingless ? `reveal:${pendingless.key}` : dialogKeyFor(kind, pending));
+  const persistentMode = persistent || Boolean(pendingless);
   if (key !== state.dialog.key || !state.dialog.open) {
     closeDialogDom();
     state.dialog.key = key;
