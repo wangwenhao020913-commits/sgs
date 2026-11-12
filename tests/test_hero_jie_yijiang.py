@@ -2956,13 +2956,10 @@ def test_jie_chenqun_wording_is_its_own_row():
     assert JIE_FAEN in descriptions and OL_FAEN in descriptions, "两行描述都存在"
     ours_text = descriptions[JIE_FAEN]
     ol_text = descriptions[OL_FAEN]
-    assert ours_text.startswith(FAEN_FACE), "界版描述以牌面逐字开头"
-    assert ol_text.startswith(FAEN_FACE), "OL 版描述以同一句牌面开头"
-    assert ours_text.split("。", 1)[0] == ol_text.split("。", 1)[0] == FAEN_FACE, (
-        "首句（牌面）逐字相同"
-    )
-    assert "铁索连环后" not in ours_text, "本仓按状态事件读（读法一），不是牌名事件"
-    assert "重置" in ours_text, "界版描述带上票 10 的方向口径（重置不问，界版复用同一判据）"
+    # 2026-11-12 用户裁定（表现层白名单 A）：`descriptions.json` 的**文案**是用户可自由改的表现层资产，
+    # 门禁只核覆盖（两行都在），不再核"以牌面逐字开头"。
+    assert ours_text and ol_text
+    # 文案本身（首句是否逐字、是否点明"重置"口径）属用户可自由改的表现层，不再钉。
 
 
 # ===========================================================================
@@ -3300,9 +3297,8 @@ def test_jie_bingyi_wording_is_its_own_row():
     assert OL_BINGYI in descriptions, "OL 那一行照旧在"
     ours_text = descriptions[JIE_BINGYI]
     ol_text = descriptions[OL_BINGYI]
-    assert ours_text.startswith(JIE_BINGYI_FACE), "界版描述以界版牌面逐字开头"
-    assert ol_text.startswith(OL_BINGYI_FACE), "OL 版描述以 OL 牌面逐字开头"
-    assert ours_text != ol_text
+    # 同上（2026-11-12 用户裁定（表现层白名单 A））：只核两行都在、都非空。
+    assert ours_text and ol_text
 
     engine = _park_bingyi(_bingyi_state(mine=(_card_of_color("red"),)))
     _declare_bingyi(engine)

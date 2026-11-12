@@ -139,6 +139,23 @@
 | `applyPindianDelta(record)` | `pindian.js` | 拼点弹窗（票 04）：一条 `pindian` delta → 弹窗开 3 秒；只读、全场可见（AI 打 AI 也弹），不读 `state.dialog`。 |
 | `openDiscardPanel()` | `modal.js` | 顶栏「弃牌 N」的点击入口：开 `#t-discard-modal`（复用模态壳，点背景 / Esc 关）。 |
 
+## 表现层自由区（用户可调，门禁只验形状）
+
+用户 2026-11-12 裁定 A：下面三份是**表现层资产**，数值 / 文案可以随便改，门禁不比对具体值
+（只验键集、可解析 / 非空、以及注册表里的结构不变式）。改完刷新页面即生效（静态文件每次
+请求都从磁盘读），不必重启服务。
+
+| 文件 | 管什么 | 门禁保留的判据 |
+|---|---|---|
+| `static/anim.ini` | 飞行 / 错峰 / 阶段飘字 / 各演出家族（剑光 / 雷电 / 火焰 / 铁索 / 阵亡 / 失血 / 回血）的毫秒数 | 键集与各模块的 `TIMING_KEYS` 一致、数值可解析、`0 < flight < impact ≤ total ≤ 上限`、`impact + fade ≤ total`、缺键退回内置默认 |
+| `static/prompts.json` | 询问文案模板（键 = 技能 id + 步骤名） | 键是真技能 id、步骤名在 `step_requirements` / `SkillFlow` 里、非空 |
+| `descriptions.json` | 技能 / 牌名描述全文 | 键集 == `CATALOG`（覆盖）、全文非空 |
+
+**为什么曾经会红**：`anim.ini` 的家族键块要求「磁盘值 == 前端 `DEFAULT_TIMING`」（删一行
+ini 不静默改时长）；`descriptions.json` 有 6 处「以牌面逐字开头」的断言。裁定 A 把这两类
+等值 / 逐字断言降为上面表里的形状判据——**只改 ini / 文案不再红**；代价是删一行 ini 不再有
+测试提醒（行为由"缺键退回默认"兜住）。
+
 ## 页面层
 
 - **开局页** `#page-lobby`：`lobby.js` + `core.js` 的目录请求；建局成功后 `applyView`。

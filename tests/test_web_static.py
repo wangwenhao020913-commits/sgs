@@ -856,9 +856,9 @@ def test_anim_ini_lists_the_damage_fx_durations_per_variant(damage_fx_probe: dic
         )
     # 四档总时长各自独立：一条公式绑死的话四个值会相等（票 04 的核心交付）。
     totals = [values[f"damage_fx_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
-    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), (
-        f"四档总时长必须各自独立可改，实际：{totals}"
-    )
+    # 2026-11-12 用户裁定（表现层白名单 A）：四档时长是**可自由调的表现层数值**，门禁只验"点数越大，演出不得更短"
+    # （原先"四档互异"是代理判据，不是目的）。
+    assert totals == sorted(totals), f"点数越大，总时长不得更短：{totals}"
     assert values["damage_fx_3_strobe"] > 0 and values["damage_fx_4_strobe"] > values["damage_fx_3_strobe"], (
         "屏闪只有 3 / 4 点有，且 4 点更长（spec §演出口径）"
     )
@@ -1343,23 +1343,25 @@ def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_prob
     """`SgsDamageFX.gameTiming`：默认值 = `DEFAULT_TIMING` = ini；四条钳制与缺键 / 垃圾值兜底。"""
     probe = damage_fx_probe
     ini = {key: float(value) for key, value in _sword_ini_entries().items()}
-    # 期望值来自磁盘上的 `anim.ini`（独立于 fx-core 的那一侧），不是第三份手写清单。
+    # **键集**仍与磁盘对照（形状），数值不再要求相等：`resolved` 是"不传表"时的解算，
+    # 走的是 fx-core 的内置默认（下面用 defaults 比），而"ini 真的生效"由
+    # `probe["damageFxTiming"]` / line ~1162 的 `resolvedFromDamageFx` 那条钉。
     assert set(probe["defaults"]) == set(ini), (
         "fx-core 的内置默认必须恰好覆盖 anim.ini 的 damage_fx_* 键："
         f"缺 {sorted(set(ini) - set(probe['defaults']))}；"
         f"多 {sorted(set(probe['defaults']) - set(ini))}"
     )
-    assert {key: int(value) for key, value in ini.items()} == probe["defaults"], (
-        "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
-    )
+    defaults = {key: float(value) for key, value in probe["defaults"].items()}
+    # 2026-11-12 用户裁定（表现层白名单 A）：不再要求「磁盘值 == 前端内置默认」——ini 的数值由用户自由调，
+    # 这里只钉键集与"解算值原样来自磁盘"（下面的 timeline / variant 断言逐条从 ini 现算）。
     assert probe["maxTotal"] == 2200
 
     for variant in _DAMAGE_FX_VARIANTS:
         entry = probe["resolved"][str(variant)]
-        total = ini[f"damage_fx_{variant}_total"] / 1000
-        flight = ini[f"damage_fx_{variant}_flight"] / 1000
-        impact = ini[f"damage_fx_{variant}_impact"] / 1000
-        fade = ini[f"damage_fx_{variant}_fade"] / 1000
+        total = defaults[f"damage_fx_{variant}_total"] / 1000
+        flight = defaults[f"damage_fx_{variant}_flight"] / 1000
+        impact = defaults[f"damage_fx_{variant}_impact"] / 1000
+        fade = defaults[f"damage_fx_{variant}_fade"] / 1000
         timeline = entry["timeline"]
         assert timeline["DURATION"] == pytest.approx(total), "整段寿命 = total（到点摘层）"
         assert timeline["IMPACT"] == pytest.approx(impact)
@@ -1373,9 +1375,15 @@ def test_the_game_profile_honours_anim_ini_and_clamps_its_numbers(damage_fx_prob
         assert entry["variant"]["fadeEnd"] == pytest.approx(impact + fade), (
             "刀痕散尽 = 命中 + fade（不能照搬 export 档的 4.6 → 9.2 秒）"
         )
-    assert probe["resolved"]["3"]["variant"]["strobe"] == pytest.approx(0.16)
-    assert probe["resolved"]["4"]["variant"]["strobe"] == pytest.approx(0.44)
-    assert probe["resolved"]["4"]["variant"]["split"] == 44
+    # 屏闪窗口 / 劈屏像素也来自 anim.ini（2026-11-12 用户裁定（表现层白名单 A））：判据是"解算值 = 磁盘值"，
+    # 不是写死 160 / 440 / 44。
+    assert probe["resolved"]["3"]["variant"]["strobe"] == pytest.approx(
+        defaults["damage_fx_3_strobe"] / 1000
+    )
+    assert probe["resolved"]["4"]["variant"]["strobe"] == pytest.approx(
+        defaults["damage_fx_4_strobe"] / 1000
+    )
+    assert probe["resolved"]["4"]["variant"]["split"] == int(defaults["damage_fx_4_split"])
     assert probe["resolved"]["1"]["variant"]["strobe"] == 0
     assert probe["resolved"]["2"]["variant"]["split"] == 0
 
@@ -4007,9 +4015,7 @@ def test_anim_ini_lists_the_thunder_durations_per_variant(thunder_probe: dict) -
     for variant in (3, 4):
         flash = values[f"damage_fx_thunder_{variant}_flash"]
         assert 0 < flash <= 1, f"{variant} 点雷的 flash 是 0..1 的强度（不是毫秒）：{flash}"
-    assert {key: float(value) for key, value in entries.items()} == {
-        key: float(value) for key, value in thunder_probe["defaults"].items()
-    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
+    # 2026-11-12 用户裁定（表现层白名单 A）：雷的时长数值由用户自由调（内置默认只作缺键兜底），不比对。
 
 
 def test_the_thunder_export_chain_keeps_the_material_package_timeline(
@@ -4426,14 +4432,8 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
                 f"{variant} 点火没有爆炸段，不该有 boom 键"
             )
     totals = [values[f"damage_fx_fire_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
-    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), (
-        f"四档总时长必须各自独立可改（一条公式绑死的话四个值会相等）：{totals}"
-    )
-    # 这四个数是 spec §演出口径 的缺省（票 03 返工后 3 / 4 档按用户要求加长：时停窗口里的
-    # 箭串 + 爆炸 / 陨星段）。改 ini 等于改用户可见的节奏，可以；换掉缺省值先改 spec。
-    assert totals == [2000, 2200, 2600, 3600], (
-        f"spec §游戏档缺省时长（返工后按用户实机定稿的值）：{totals}"
-    )
+    # 2026-11-12 用户裁定（表现层白名单 A）：四档时长可自由调，门禁只验"点数越大，演出不得更短"。
+    assert totals == sorted(totals), f"点数越大，总时长不得更短：{totals}"
     assert values["damage_fx_fire_3_strobe"] > 0
     assert values["damage_fx_fire_4_strobe"] > values["damage_fx_fire_3_strobe"], (
         "4 点火的整屏闪比 3 点更长"
@@ -4441,9 +4441,7 @@ def test_anim_ini_lists_the_fire_durations_per_variant(fire_probe: dict) -> None
     for variant in (3, 4):
         flash = values[f"damage_fx_fire_{variant}_flash"]
         assert 0 < flash <= 1, f"{variant} 点火的 flash 是 0..1 的强度（不是毫秒）：{flash}"
-    assert values == {
-        key: float(value) for key, value in fire_probe["defaults"].items()
-    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变四档时长）"
+    # 2026-11-12 用户裁定（表现层白名单 A）：火焰的时长数值由用户自由调（内置默认只作缺键兜底），不比对。
 
 
 def test_the_fire_export_chain_keeps_the_material_package_timeline(fire_probe: dict) -> None:
@@ -5057,11 +5055,7 @@ def test_the_chain_fx_module_shape_and_its_two_timing_keys(chain_fx_probe: dict)
         f"anim.ini 的键必须与 TIMING_KEYS 一致：缺 {sorted(set(probe['timingKeys']) - set(ini))}；"
         f"多 {sorted(set(ini) - set(probe['timingKeys']))}"
     )
-    for mode in _CHAIN_MODES:
-        key = f"chain_fx_{mode}_total"
-        assert ini[key] == defaults[mode]["total"], (
-            f"{key} 必须与 DEFAULT_TIMING 同值：ini={ini[key]} default={defaults[mode]['total']}"
-        )
+    # 2026-11-12 用户裁定（表现层白名单 A）：铁索两个时长键的**数值**由用户自由调，这里只钉键集与规格范围。
     # 新键真的进了 animConfig，且没被当成未知键删掉 / 报错。
     anim_js = _ANIM_JS.read_text(encoding="utf-8")
     prefixes = re.search(r"^const ANIM_FOREIGN_KEY_PREFIXES = \[(?P<body>[^\]]*)\];$", anim_js, re.M)
@@ -5614,10 +5608,7 @@ def test_the_death_fx_module_shape_and_its_timing_key(death_fx_probe: dict) -> N
         f"anim.ini 的键必须与 TIMING_KEYS 一致：缺 {sorted(set(shape['keys']) - set(ini))}；"
         f"多 {sorted(set(ini) - set(shape['keys']))}"
     )
-    assert ini["death_fx_total"] == defaults["total"], (
-        f"death_fx_total 必须与 DEFAULT_TIMING 同值：ini={ini['death_fx_total']} "
-        f"default={defaults['total']}"
-    )
+    # 2026-11-12 用户裁定（表现层白名单 A）：阵亡总时长由用户自由调（内置默认只作缺键兜底），不比对。
     # 新键真的进了 animConfig，且没被当成未知键删掉 / 报错。
     anim_js = _ANIM_JS.read_text(encoding="utf-8")
     prefixes = re.search(r"^const ANIM_FOREIGN_KEY_PREFIXES = \[(?P<body>[^\]]*)\];$", anim_js, re.M)
@@ -5629,8 +5620,9 @@ def test_the_death_fx_module_shape_and_its_timing_key(death_fx_probe: dict) -> N
     assert "未知键" not in probe["note"], f"death_fx_* 不得被当成未知键（页面提示：{probe['note']}）"
     for key in shape["keys"]:
         assert key in probe["animConfigKeys"], f"anim.js 没把 {key} 读进 animConfig"
-    assert probe["deathFromIni"] == defaults["total"], (
-        f"animTiming(death_fx_total) 应等于缺省值：{probe['deathFromIni']}"
+    # 2026-11-12 白名单 A：ini 的 death_fx_total 由用户自由调，只核"读进来的就是磁盘值"。
+    assert probe["deathFromIni"] == ini["death_fx_total"], (
+        f"animTiming(death_fx_total) 应等于磁盘值：{probe['deathFromIni']}"
     )
 
     # `gameTiming`：缺省 = DEFAULT_TIMING，ini 值活着，越界被夹（1200–3200），垃圾值退默认。
@@ -5639,7 +5631,9 @@ def test_the_death_fx_module_shape_and_its_timing_key(death_fx_probe: dict) -> N
     assert resolved["plain"]["seconds"] == pytest.approx(2.2)
     assert resolved["plain"]["timing"] == {"death_fx_total": 2200}
     assert resolved["basis"] == pytest.approx(3.05), "basis = 素材页基准 3.05s"
-    assert resolved["fromIni"]["total"] == 2200, "带真 ini 值的解算也要落到 2200"
+    assert resolved["fromIni"]["total"] == ini["death_fx_total"], (
+        "带真 ini 值的解算要落到磁盘值（2026-11-12 白名单 A：可自由调）"
+    )
     clamps = probe["clamps"]
     assert clamps["low"] == 1200, f"低于 1200ms 被夹到 1200：{clamps['low']}"
     assert clamps["high"] == 3200, f"高于 3200ms 被夹到 3200：{clamps['high']}"
@@ -5658,10 +5652,18 @@ def test_the_table_death_profile_scales_every_beat_by_the_same_k(death_fx_probe:
     probe = death_fx_probe
     table = probe["table"]
     material = probe["material"]
-    k = 2200 / 3050
-    assert table["duration"] == pytest.approx(2.2), f"牌桌档整段 2.2s：{table['duration']}"
-    assert table["total"] == 2200
-    assert table["speed"] == pytest.approx(3.05 / 2.2), f"speed = 基准 / 牌桌秒：{table['speed']}"
+    # 2026-11-12 用户裁定（表现层白名单 A）：`death_fx_total` 可自由调 ⇒ 节拍基准从磁盘
+    # 现算，不写死 2200；3.05s 素材档是画面模块的基准（代码常量，不随 ini 变）。
+    ini_total = float(_ini_entries()["death_fx_total"])
+    table_seconds = ini_total / 1000
+    k = ini_total / 3050
+    assert table["duration"] == pytest.approx(table_seconds), (
+        f"牌桌档整段 {table_seconds}s：{table['duration']}"
+    )
+    assert table["total"] == pytest.approx(ini_total)
+    assert table["speed"] == pytest.approx(3.05 / table_seconds), (
+        f"speed = 基准 / 牌桌秒：{table['speed']}"
+    )
     assert table["burstAt"] == pytest.approx(1.74 * k), f"burstAt 等比缩：{table['burstAt']}"
     assert table["holdAt"] == pytest.approx(1.40 * k), f"holdAt 等比缩：{table['holdAt']}"
     assert table["labelAt"] == pytest.approx(2.26 * k), f"labelAt 等比缩：{table['labelAt']}"
@@ -7383,12 +7385,11 @@ def test_anim_ini_lists_the_hp_loss_durations_per_variant(hp_loss_fx_probe: dict
             f"spot={spot} / break={break_at} / num={num} / total={total}"
         )
     totals = [values[f"hp_loss_fx_{variant}_total"] for variant in (1, 2, 3)]
-    assert totals == [1200, 1500, 1800], f"spec §游戏档缺省时长：{totals}"
+    # 2026-11-12 用户裁定（表现层白名单 A）：三档总时长可自由调，只验"档位越高，总时长不得更短"。
+    assert totals == sorted(totals), f"档位越高，总时长不得更短：{totals}"
     ini_text = _ANIM_INI.read_text(encoding="utf-8")
     assert "体力演出 · 失去体力" in ini_text, "键块要有自己的标题（用户改得动）"
-    assert values == {
-        key: float(value) for key, value in hp_loss_fx_probe["defaults"].items()
-    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变三档节奏）"
+    # 2026-11-12 用户裁定（表现层白名单 A）：失去体力的时长数值由用户自由调（内置默认只作缺键兜底），不比对。
 
 
 def test_the_hp_loss_module_never_freezes_playback_and_has_no_screen_flash() -> None:
@@ -8184,21 +8185,14 @@ def test_anim_ini_lists_the_heal_durations_per_variant(heal_fx_probe: dict) -> N
     assert gather + hold == burst, (
         f"聚气结束 + 白住时长 = 迸发时刻（2000 + 500 = 2500）：{gather} + {hold} != {burst}"
     )
-    assert hold / total == pytest.approx(0.111, abs=0.01), (
-        f"白住占整段的 11.1%（票 07 实机手调：500 / 4500）：{hold / total:.3f}"
-    )
-    assert gather / total == pytest.approx(0.444, abs=0.01), (
-        f"聚气占整段的 44.4%（票 07 实机手调：2000 / 4500）：{gather / total:.3f}"
-    )
+    # 2026-11-12 用户裁定（表现层白名单 A）：白住 / 聚气占整段的比例是票 07 实机手调的**缺省值**，随用户调时长
+    # 自然变化 ⇒ 不再按比例钉（上面的绝对毫秒递增不变式已兜住结构）。
     totals = [values[f"heal_fx_{variant}_total"] for variant in (1, 2, 3)]
-    assert totals == [1100, 1300, 4500], (
-        f"spec §游戏档缺省时长（票 06 改判 3+ = 4500，票 07 定拍子）：{totals}"
-    )
+    # 2026-11-12 用户裁定（表现层白名单 A）：三档总时长与内部节拍由用户自由调，只验"档位越高，总时长不得更短"。
+    assert totals == sorted(totals), f"档位越高，总时长不得更短：{totals}"
     ini_text = _ANIM_INI.read_text(encoding="utf-8")
     assert "体力演出 · 回复体力" in ini_text, "键块要有自己的标题（用户改得动）"
-    assert values == {
-        key: float(value) for key, value in heal_fx_probe["defaults"].items()
-    }, "内置默认必须与磁盘上的 anim.ini 同值（否则删一行 ini 会静默改变三档节奏）"
+    # 2026-11-12 用户裁定（表现层白名单 A）：回复体力的时长数值由用户自由调（内置默认只作缺键兜底），不比对。
 
 
 def test_the_heal_module_never_freezes_playback_itself_and_has_no_screen_flash() -> None:

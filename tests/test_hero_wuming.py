@@ -727,9 +727,8 @@ def test_the_wuming_hero_sheet_and_its_catalog_entry_are_registered():
     assert definition.locked is True
     assert [hook.timing for hook in definition.hooks] == [Timing.GAME_START]
     assert TIANCHENG in SKILL_DESCRIPTIONS, "描述全文只有一份（服务端 descriptions.json）"
-    assert SKILL_DESCRIPTIONS[TIANCHENG].startswith(TIANCHENG_REQUIREMENT.split("（X为")[0]), (
-        "描述以牌面原文逐字开头（后面接『本仓实现』）"
-    )
+    # 2026-11-12 用户裁定（表现层白名单 A）：描述文案可自由改，只核条目存在与非空。
+    assert SKILL_DESCRIPTIONS[TIANCHENG]
 
 
 if __name__ == "__main__":  # pragma: no cover

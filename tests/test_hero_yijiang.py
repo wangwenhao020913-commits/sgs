@@ -2119,7 +2119,8 @@ def test_chenqun_faen_wording_is_its_own_row():
     descriptions = json.loads(path.read_text(encoding="utf-8"))["skills"]
     assert FAEN in descriptions, "本行有自己的 descriptions.json 条目"
     text = descriptions[FAEN]
-    assert text.startswith(FAEN_FACE), "牌面逐字（OL 陈群那版）"
+    # 2026-11-12 用户裁定（表现层白名单 A）：描述文案可自由改，只核条目存在与非空。
+    assert text
     assert "铁索连环后" not in text, "本仓按状态事件读（读法一），不是牌名事件"
 
 
