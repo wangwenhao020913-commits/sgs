@@ -3,18 +3,41 @@
 **机制（挂起驱动）**：引擎的 ``pending`` 字段与 ``submit()`` 方法本来就是公开面，
 而 ``ask()`` 在挂起时**已经**把询问写进了记录流。所以人类座位的参与者只需要
 "记下询问、抛 :class:`Halt` 让 ``engine.run()`` 退出来"；应答由接入层
-``submit()`` 送回、再 ``run()`` 续跑。**引擎一行不改**，也不使用线程或协程
+``submit()`` 送回、再 ``run()`` 续跑。**规则面一行不改**（票 14 起引擎只多一个
+"L0 边界让出"的**驱动开关** ``Engine.run(stop_after_game_start=)``，缺省关），
+也不使用线程或协程
 （``src/sgs/**`` 被源码纪律扫描禁止并发原语，故"等待"只能是"请求还没来"）。
 
 **驱动粒度（D16）**：一次 :meth:`Session.drive` 最多推进到**下一个暂停点或终局**，
 绝不"驱动到人类再次被问"——否则 AI 之间的长结算会把一个 HTTP 请求拖成几十秒。
+
+**暂停点**（table-ux-overhaul 票 14 / 19 起有四处，次序就是发生次序）：
+
+1. **L0 边界**——"游戏开始时"（``GAME_START``）派发完、第一回合的回合环还没起跑
+   （引擎的 ``_started`` 由假翻真）。建局响应就止在这里：玩家看到的顺序是"安排座位 /
+   初始化体力 / 发初始牌 → 游戏开始时"，AI 的第一个回合留给**下一次取增量**
+   （现有的 ``after`` 游标机制，零新增协议）。这个停点只停**一次**——撞到之后
+   :attr:`Session._l0_boundary_reached` 置真，同一局后面的驱动不再在这里停。
+2. **五谷逐目标取牌**（票 19）——五谷结算里**又一名目标拿走了牌**（派生状态里
+   "已拿"的目标数 +1）的那一步之后让出：浏览器因此每一次取牌都拿到一份中间视图
+   （``view.harvest``），而不是等整段结算跑完才看到跳变。判据读记录流事实（见
+   :meth:`Session._harvest_pick_pause_due`），同一名目标只停一次；一局可以停多次。
+   这一次停点由 :meth:`Session.drive` 的**返回值**交给调用方（"这一趟已经有一个中间
+   视图了"），故一次 HTTP 响应里最多只有一个这样的停点。
+3. **人类座位的询问**——``_HaltPlayer`` 抛 :class:`Halt` 让 ``engine.run()`` 退出来。
+4. **终局**。
+
+**开局底稿**（票 14）：:attr:`Session.setup` 是**发牌前**（``build_initial`` 之后、
+``_start`` 之前）的那一帧权威事实，只在 ``after < 0`` 的那份视图里下发，前端据此从
+"发牌前"起播，不再从 post-init 快照倒推。它由 :meth:`Session.__init__` 在 ``drive()``
+**之前**冻结——一旦驱动跑过 ``GAME_START``，那份局面就再也回不来了。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from sgs.agents import HeuristicPlayer, Participant, RandomPlayer
 from sgs.data import (
@@ -26,7 +49,7 @@ from sgs.data import (
     validate_rule_config,
 )
 from sgs.engine import Engine, ai_stream, new_seed
-from sgs.state import Action, Query
+from sgs.state import Action, AskPolicy, Query
 
 __all__ = [
     "AI_TIERS",
@@ -34,11 +57,14 @@ __all__ = [
     "DEFAULT_HUMAN_SEAT",
     "DEFAULT_PLAYER_COUNT",
     "DEFAULT_TIMEOUT_SECONDS",
+    "DEFAULT_WEB_ASK_POLICY",
     "Halt",
+    "RecordWindow",
     "Session",
     "SessionLogEntry",
     "StaleAnswer",
     "create_session",
+    "parse_ask_policy",
 ]
 
 DEFAULT_PLAYER_COUNT: Final[int] = 8
@@ -54,6 +80,38 @@ AI_TIERS: Final[tuple[str, ...]] = ("heuristic", "random")
 """人类座位之外的参与者档位；缺省启发式（地图 D3）。"""
 
 DEFAULT_AI: Final[str] = "heuristic"
+
+
+DEFAULT_WEB_ASK_POLICY: Final[AskPolicy] = AskPolicy(auto_skip=True)
+"""网页会话的**询问策略缺省值**（table-ux-overhaul 票 02 / spec §2 Q4(a)）。
+
+引擎缺省是 **OFF**（金录像 / AI 对战 / 旧录像回放逐字节可复现）；玩家在网页里是 **ON**
+——同一个开关、两个缺省，由"谁是调用方"决定，而不是由规则配置决定（那会进 header 字节面）。
+"""
+
+
+def parse_ask_policy(raw: object, *, default: AskPolicy = DEFAULT_WEB_ASK_POLICY) -> AskPolicy:
+    """把建局 body / 侧车 meta 里的 JSON 形态解析成 :class:`~sgs.state.AskPolicy`。
+
+    **两个缺省是两个调用方的口径**：``raw is None``（字段缺席）⇒ ``default``。建局请求用
+    网页缺省 ON；``replay_journal`` 回放**旧录像**时显式传引擎缺省 OFF（本票之前的录像没有
+    这个字段，它拍下来的行为就是旧口径）。
+
+    接受两种形态：``bool``（简写）与 ``{"auto_skip": bool}``（侧车 meta 的冻结形态）。
+    形状不对一律 ``ValueError``（HTTP 层映射成 400，不静默回落）。
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return AskPolicy(auto_skip=raw)
+    if isinstance(raw, Mapping):
+        unknown = sorted(set(raw) - {"auto_skip"})
+        if unknown:
+            raise ValueError(f"询问策略有不认识的字段：{unknown}（只认 auto_skip）")
+        if "auto_skip" not in raw or not isinstance(raw["auto_skip"], bool):
+            raise ValueError(f"询问策略缺 auto_skip 或它不是布尔值：{raw!r}")
+        return AskPolicy(auto_skip=raw["auto_skip"])
+    raise ValueError(f"询问策略必须是布尔值或 {{'auto_skip': bool}}：{raw!r}")
 
 
 class StaleAnswer(Exception):
@@ -109,6 +167,28 @@ class _HaltPlayer:
         raise Halt(query)
 
 
+@dataclass(frozen=True)
+class RecordWindow:
+    """一次取增量需要的记录流切片——**一趟扫描**的全部产出（票 01）。
+
+    记录流只增且 ``seq`` 单调，所以"取增量"只需要知道四样东西；此前每一样各自全扫一遍
+    （``records`` / ``records_after`` / ``next_cursor`` / ``query_actor_map`` / 四条派生
+    通道各扫一次），一次 ``view()`` 对记录流扫了 7 趟。现在一趟扫完，派生通道只读
+    ``tail``（见 :func:`sgs_web.projection.skill_events_after` 等）。
+
+    - ``records``：全部记录的快照（一份元组，**不是**深拷贝；元素是引擎的只读记录模型）；
+    - ``tail``：``seq > after`` 的那一段；``after < 0`` 时含 ``header``（它没有 ``seq``）；
+    - ``cursor``：本次下发之后的新游标 = 记录流里最大的 ``seq``；
+    - ``query_actors``：``query.seq → query.actor``（**全量**：一条应答的 ``answers_seq``
+      可能指向早于本批游标的询问，故应答者判据不能只看 ``tail``）。
+    """
+
+    records: tuple[object, ...]
+    tail: tuple[object, ...]
+    cursor: int
+    query_actors: Mapping[int, int]
+
+
 class Session:
     """一局对局的接入层状态：引擎、参与者、座位、游标与侧车日志。
 
@@ -129,9 +209,19 @@ class Session:
         timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
         pack: ContentPack | None = None,
         session_id: str = "",
+        ask_policy: AskPolicy = DEFAULT_WEB_ASK_POLICY,
+        pause_after_game_start: bool = False,
     ) -> None:
+        """``pause_after_game_start``（table-ux-overhaul 票 14）＝**建局就停在 L0 边界**。
+
+        打开时（接入层 ``GameRegistry.create`` 的建局口径）这一次 ``drive()`` 只跑到
+        "游戏开始时"派发完，人类第一问留给下一次取增量——建局响应因此止于 ``GAME_START``。
+        缺省关闭＝直接驱动到人类第一问（库层 / 构造局面夹具 / 单测的旧口径，一字未变）。
+        """
         if ai not in AI_TIERS:
             raise ValueError(f"AI 档位非法：{ai!r}（可选 {AI_TIERS}）")
+        if not isinstance(ask_policy, AskPolicy):
+            raise ValueError(f"询问策略必须是 AskPolicy：{ask_policy!r}")
         if hero_pool == "enabled" and heroes:
             hero_pool = None  # 显式武将优先；池不参与（引擎在 heroes 非空时直接早退）
         if my_hero is not None and not isinstance(my_hero, str):
@@ -153,6 +243,9 @@ class Session:
         self.human_seat = human_seat
         self.ai = ai
         self.timeout_seconds = timeout_seconds
+        self.ask_policy = ask_policy
+        """本局的**询问策略**（table-ux-overhaul 票 02）：网页缺省 ON，随会话冻结进侧车
+        元数据、由 ``replay_journal`` 还原。它是会话事实，**不进记录流**、不进 ``RuleConfig``。"""
         self.cursor = 0
         self.session_log: list[SessionLogEntry] = []
         # 询问发出的接入层时刻；由 HTTP 层在用 pending 回话时打戳（超时判定的输入之一）。
@@ -161,6 +254,19 @@ class Session:
         self.pending_since: float | None = None
         self._pending_seq: int | None = None
         self.timeouts = 0
+        # 接入层的**最后访问时刻**（票 01 的会话回收判据）：由 :meth:`mark_pending` /
+        # :meth:`touch` 打戳，时钟一律由调用方传进来（本模块不 import time）。
+        # ``0.0`` = 还没有任何接入层访问（直接构造的会话），回收时按"不知道"跳过。
+        self.last_access = 0.0
+        # 叙事增量缓存（票 01）：形如 ``narrative.NarrativeCursor``，由 ``serve.GameRegistry.view``
+        # 建 / 填。本模块只当它是"一局一份、可丢的派生缓存"——不读、不写、不序列化它。
+        self.narrative_cursor: Any = None
+        # 五谷派生状态的**扫描缓存**（table-ux-overhaul 票 18 / 服务端 D 方案）：键 =
+        # (记录条数, 五谷帧 id)，值是两次全记录扫描的中间事实（亮牌集合 / 获得者表）。
+        # 由 ``projection.harvest_state`` 独占读写；``view`` 与 ``pending`` 两处派生共用。
+        # 与 ``narrative_cursor`` 同姿态：一局一份、可丢的派生缓存，**不是会话事实**——
+        # 不进记录流、不进侧车元数据、不进金录像。
+        self.harvest_cache: dict[str, Any] = {}
 
         content = pack if pack is not None else load_content_pack()
         self.pack = content
@@ -192,6 +298,7 @@ class Session:
             heroes=self.heroes,
             hero_pool=self.hero_pool,
             hero_config=self.hero_config,
+            ask_policy=ask_policy,
         )
 
         self._halt_player = _HaltPlayer(self)
@@ -200,6 +307,19 @@ class Session:
             for seat in range(rule_config.player_count)
         ]
         self.participants: tuple[Participant, ...] = tuple(players)
+        # L0 边界只停一次：`pause_after_game_start` 关掉时等于"已经越过"（永不在那里停）。
+        self._l0_boundary_reached = not pause_after_game_start
+        # 五谷逐目标暂停（table-ux-overhaul 票 19）的**进度**：已经让出过的那个五谷结算
+        # 「链键 + 已拿数」。同一条进度不二次停；换一局五谷结算（链键变了）自然重新起算。
+        # 它只是驱动进度，不是会话的规则状态（不进记录流 / 侧车 / 金录像）。
+        self._harvest_pause_mark: tuple[str, int] | None = None
+        # **开局底稿必须在 drive() 之前冻结**（票 14）：此刻 `engine.state` 是
+        # `build_initial` 的产物、`_start` 一条都没跑过——「游戏开始时」的技能（【天成】
+        # 会改体力上限、摸牌）一跑，这份局面就再也回不来了。
+        # 延迟导入：projection 反向依赖本模块的 Session（模块级导入会成环）。
+        from sgs_web.projection import setup_snapshot
+
+        self.setup: dict[str, Any] = setup_snapshot(self)
         self.drive()
 
     # -- 只读面 -------------------------------------------------------------
@@ -229,7 +349,11 @@ class Session:
         幂等按**询问身份**（``seq``）而不是"有没有戳"：同一次询问上重复打戳不刷新起点
         （否则每次轮询都会把倒计时重置，超时永远不会到点），但**换了询问**就从这一刻重新
         起算——一次询问一个时限，前一次的思考时长不欠到后一次头上（报障 1）。
+
+        顺带打上**最后访问时刻**（票 01）：GET / answer / create 三条 HTTP 入口都经过这里，
+        故"放弃的对局"与"还开着的页面"用同一个戳区分，不必在每个路由里各记一次。
         """
+        self.touch(now)
         pending = self.pending
         if pending is None:
             self.pending_since = None
@@ -238,53 +362,150 @@ class Session:
             self.pending_since = now
             self._pending_seq = pending.seq
 
+    def touch(self, now: float) -> None:
+        """记一次接入层访问时刻（会话回收的唯一输入；时钟由调用方给）。"""
+        self.last_access = now
+
     @property
     def hero_assignments(self) -> tuple[str | None, ...]:
         """逐座位武将 id（``None`` = 未发放）；侧车元数据的真源（地图 D12）。"""
         return tuple(player.hero for player in self.engine.state.players)
 
     def records(self) -> tuple[object, ...]:
-        """本局全部记录（全知；接入层按可见性口径裁剪后才下发）。"""
-        return tuple(self.engine.records)
+        """本局全部记录的一份快照（一次拷贝；热路径改用 :meth:`window`，不从全量取增量）。"""
+        return self.engine.records
+
+    def window(self, after: int) -> RecordWindow:
+        """把一次取增量要的东西**一趟扫完**（票 01；一趟 ≈ 1 ms / 6600 条）。
+
+        此前 ``view()`` 对记录流扫了 7 趟（``records`` / ``records_after`` /
+        ``next_cursor`` / 应答者表 / 四条派生通道），每趟都全量。这里的判据只有
+        ``getattr(record, "seq")`` / ``kind`` / ``query.actor``——**不做**任何
+        ``model_dump`` / JSON 文本往返（那是 2.4 s 的来源）。
+        """
+        records = self.engine.records
+        tail: list[object] = []
+        actors: dict[int, int] = {}
+        cursor = 0 if after < 0 else after
+        for record in records:
+            seq = getattr(record, "seq", None)
+            if not isinstance(seq, int):
+                if after < 0:  # `header`：没有 seq，只在首屏下发
+                    tail.append(record)
+                continue
+            if seq > cursor:
+                cursor = seq
+            if seq > after:
+                tail.append(record)
+            if getattr(record, "kind", None) == "query":
+                actor = getattr(getattr(record, "query", None), "actor", None)
+                if isinstance(actor, int):
+                    actors[seq] = actor
+        return RecordWindow(
+            records=records,
+            tail=tuple(tail),
+            cursor=cursor,
+            query_actors=actors,
+        )
 
     def records_after(self, after: int) -> tuple[object, ...]:
         """``seq > after`` 的记录；``header``（无 ``seq``）只在 ``after < 0`` 时给出。"""
-        out: list[object] = []
-        for record in self.engine.records:
-            seq = getattr(record, "seq", None)
-            if seq is None:
-                if after < 0:
-                    out.append(record)
-                continue
-            if seq > after:
-                out.append(record)
-        return tuple(out)
+        return self.window(after).tail
 
     def next_cursor(self, after: int) -> int:
         """本次下发之后的新游标 = 记录流里最大的 ``seq``（``header`` 不参与）。"""
-        cursor = 0 if after < 0 else after
-        for record in self.engine.records:
-            seq = getattr(record, "seq", None)
-            if isinstance(seq, int) and seq > cursor:
-                cursor = seq
-        return cursor
+        return self.window(after).cursor
 
     # -- 驱动 ---------------------------------------------------------------
 
-    def drive(self) -> None:
-        """推进到**下一个暂停点或终局**并返回（D16）。
+    def drive(self) -> bool:
+        """推进到**下一个暂停点或终局**并返回"这一趟是不是停在五谷逐目标暂停上"。
 
         ``engine.run`` 只在人类座位的替身处退出（:class:`Halt`）；退出时 ``engine.pending``
         就是那次询问——``ask()`` 早已把 ``QueryRecord`` 写进记录流，故挂起/续跑不会重发询问。
-        """
-        while not self.engine.finished and self.engine.pending is None:
-            try:
-                self.engine.run(self.participants)
-            except Halt:
-                break
 
-    def submit_answer(self, action: object) -> None:
+        L0 边界（票 14）在一局里只停**一次**：:attr:`_l0_boundary_reached` 为假时把
+        ``stop_after_game_start`` 交给引擎，它一让出就置真并返回；之后的驱动不再停在那里。
+
+        五谷逐目标取牌（票 19）的停点交给引擎的 ``stop_when`` 判据：每名目标拿走牌之后
+        让出一次（见 :meth:`_harvest_pick_pause_due`）。它和 L0 边界是**同一种机制**：
+        停点住在引擎循环内部，外面看不见那一刻。
+
+        **返回值就是"这一趟交出了一个中间视图"**（``True``）：调用方（``GameRegistry``）
+        据此在**同一趟响应**里不再补推一步，否则一次应答会把两个暂停点并进一份视图，
+        前一个就看不见了。事实随返回值走、不落到会话上：没有跨请求的生命周期要维护
+        （HTTP 那一层是 ``ThreadingHTTPServer``，会话本来就不加锁）。
+
+        ``run`` 正常返回只有三种原因：终局 / L0 边界 / 五谷逐目标暂停——每一种都是
+        "这一趟已经停过了"，故一律返回，不在同一趟里接着驱动。
+        """
+        if self.engine.finished or self.engine.pending is not None:
+            return False
+        stop_at_l0_boundary = not self._l0_boundary_reached
+        paused = False
+
+        def stop_when() -> bool:
+            nonlocal paused
+            paused = self._harvest_pick_pause_due()
+            return paused
+
+        try:
+            self.engine.run(
+                self.participants,
+                stop_after_game_start=stop_at_l0_boundary,
+                stop_when=stop_when,
+            )
+        except Halt:
+            return False
+        if paused:
+            return True
+        if not self.engine.finished:
+            # ``run`` 正常返回、又不是终局、也不是五谷暂停 ⇒ 只剩 **L0 边界**这一种
+            # （引擎的 ``stop_after_game_start`` 在"游戏开始时"派发完之后让出）。判据读
+            # 引擎的公开事实，不靠"哪一支先跑"；这一种要**记住**再也不会停在那里。
+            self._l0_boundary_reached = True
+        return False
+
+    def _harvest_pick_pause_due(self) -> bool:
+        """五谷**又有一名目标拿走了牌** ⇒ 让出驱动一次（table-ux-overhaul 票 19）。
+
+        判据只读服务端已有的两件事实：**结算栈上还活着的五谷 ``RESOLVE`` 帧**（帧没了 =
+        结算完了，不必再停）与**记录流**（谁拿走了哪张）。两件都由 :func:`harvest_state`
+        派生——与 ``view.harvest`` / ``pending.harvest`` **同一份**（票 18 的服务端 D 方案，
+        连扫描缓存 ``harvest_cache`` 也是同一份），不是第二判据。这里只读它的
+        ``targets[*].status``：``taken`` 的目标数就是"已经取过牌的人数"。
+
+        - **一次取牌只停一次**：进度用 ``(链键, 已拿数)`` 记在 :attr:`_harvest_pause_mark`
+          上，同一份进度不二次停（与票 14 的 ``_l0_boundary_reached`` 同姿态：停过一次就
+          记下来，下一次驱动不再因同一条记录停）。五谷帧换了一张牌 / 换了一局 ⇒ 链键变，
+          进度自然重新起算。
+        - **有人类询问时不在这里停**（那时 ``run`` 的下一轮本来就会驱动到人类询问上）：
+          但**进度照样记下**——那一问的视图里已经带着这份派生（``view.harvest``），
+          再停一次只会多一份没有新信息的中间视图。
+        - **不改记录流 / 随机数 / 询问条数**：判据只读，让出的是"循环在哪一步退出"。
+          返回真不影响引擎状态：下一次 :meth:`drive` 从同一步的下一步继续。
+        """
+        # 延迟导入（与 `setup_snapshot` 同一条理由：projection 反向依赖本模块的 Session）。
+        from sgs_web.projection import harvest_state
+
+        harvest = harvest_state(self.engine, cache=self.harvest_cache)
+        if harvest is None:
+            # 没有活跃的五谷结算（帧已出栈 / 一张亮牌都没有）：没有可取牌的进度。
+            return False
+        taken = sum(1 for target in harvest["targets"] if target["status"] == "taken")
+        mark = (harvest["key"], taken)
+        if mark == self._harvest_pause_mark:
+            return False
+        self._harvest_pause_mark = mark
+        if taken == 0 or self.engine.pending is not None:
+            return False
+        return True
+
+    def submit_answer(self, action: object) -> bool:
         """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。
+
+        返回值 = :meth:`drive` 的"这一趟停在五谷逐目标暂停上"（票 19）：HTTP 那一层据此
+        不在同一趟响应里再推一步（见 :meth:`drive` 的 docstring）。
 
         异常里一并带出 ``human_seat``：409 的下发方（``serve.py``）只有那份裸 ``Query``，
         没有它判不了"这张观看牌面该不该下发"（票 15 / 评审 finding ①）。
@@ -294,7 +515,7 @@ class Session:
         if pending is None or answers_seq != pending.seq:
             raise StaleAnswer(pending, human_seat=self.human_seat)
         self.engine.submit(action)
-        self.drive()
+        return self.drive()
 
     # -- 侧车日志 -----------------------------------------------------------
 

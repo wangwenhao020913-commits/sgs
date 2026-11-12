@@ -295,13 +295,14 @@ function renderTable() {
   // 已选 / 置灰集合**每次渲染只算一份**（逐座位现算是 O(n²)）；判据见 `seatMultiPickable`。
   const chosenSeats = seatMulti ? new Set(seatMultiChosenSeats(pendingNow)) : new Set();
   const disabledChoices = seatMulti ? seatMultiDisabledSet(pendingNow) : new Set();
-  // 预发动（W4-1）：当前的选目标步 ⇒ 可点的座位来自**清单**（服务端已按前序选择算好）。
+  // 预发动（W4-1）：当前的选目标步 ⇒ 可点的座位来自**服务端**：优先步骤预览回包（票 11
+  // 现算的那份），退回清单里的静态池行。**取不到就是一个都不点**——兜底成"所有存活座位"
+  // 是界面在替引擎裁决合法性（spec §6 #5 明禁），而票 11 起那份数据恒由服务端给。
   const preStep = state.preactivation && state.preactivation.cursor < state.preactivation.steps.length
     ? state.preactivation.steps[state.preactivation.cursor]
     : null;
   const preSeats = preStep && preactivationStepKind(preStep) === "seat"
-    ? (preactivationOptions(state.preactivation, state.preactivation.cursor)
-      || snapshot.players.filter((player) => player.alive).map((player) => `${SEAT_PREFIX}${player.seat}`))
+    ? (preactivationOptions(state.preactivation, state.preactivation.cursor) || [])
     : null;
   // U1-02：座位卡的状态类（自己 / 阵亡 / 当前回合 / 横置 / 酒）+ 交互态（可指定 / 已选 /
   // 必选）在一处拼齐，环上与底部面板因此不会各写一套判据。2 人局 = 无身份局 ⇒ 不画「?」。
@@ -370,7 +371,7 @@ function renderTable() {
     hand.appendChild(
       cardChip(
         form ? { ...form, card_id: card.card_id } : card, face.selected, false, face.selectable,
-        () => activateCard(pendingNow, card, face), face.picked,
+        () => activateCard(pendingNow, card, face), face.picked, face.note || "",
       ),
     );
   }

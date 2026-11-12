@@ -143,15 +143,17 @@ SESSION_JSON="$(curl -s -X POST "http://127.0.0.1:$PORT/api/sessions" \
   -H 'Content-Type: application/json' \
   -d '{"player_count":2,"ai":"random","seed":5,"timeout_seconds":null}')"
 SESSION_ID="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['session_id'])" "$SESSION_JSON")"
-# 先取一次增量：过期判定的触发点是取增量，取过之后"当前挂起"才是被判定过的那一个。
-curl -s -o /dev/null "http://127.0.0.1:$PORT/api/sessions/$SESSION_ID?after=-1"
+# 建局响应止于 GAME_START（table-ux-overhaul 票 14）：`pending` 是 null，人类第一问要由
+# **下一次取增量**驱动出来。这一次 GET 同时完成两件事——拿到挂起询问，且过期判定的触发点
+# （取增量）已经跑过，于是"当前挂起"就是被判定过的那一个。
+VIEW_JSON="$(curl -s "http://127.0.0.1:$PORT/api/sessions/$SESSION_ID?after=-1&logs=0")"
 STALE_ACTION="$("$PYTHON" -c "
 import json, sys
 body = json.loads(sys.argv[1])
 action = body['pending']['legal_actions'][0]
 action['answers_seq'] = -1  # 陈旧序号
 print(json.dumps({'action': action}))
-" "$SESSION_JSON")"
+" "$VIEW_JSON")"
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
   "http://127.0.0.1:$PORT/api/sessions/$SESSION_ID/answer" \
   -H 'Content-Type: application/json' -d "$STALE_ACTION")"

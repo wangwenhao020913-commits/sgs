@@ -38,6 +38,7 @@ __all__ = [
     "ArrangeCards",
     "ArrangeContext",
     "ArrangeQuery",
+    "AskPolicy",
     "DiscardCards",
     "DiscardQuery",
     "DodgeContext",
@@ -73,6 +74,7 @@ __all__ = [
     "UseCard",
     "WindowCause",
     "parse_action",
+    "step_option_key",
 ]
 
 
@@ -208,10 +210,13 @@ class StepPool(_FrozenModel):
     ``seat:N``，选项步给选项文本。空元组 = 这份子池与前序选择无关。
 
     **逐选项子池一次下发**：池依赖前序步骤的技能（【流离】选不选武器、【离间】先点谁）
-    会为每个前序选项各给一行；接入层按玩家当前已选的值找对应行。行数超过
-    :data:`~sgs.skills.flow.MANIFEST_POOL_LIMIT`、或前序是**多选**步且池确实随它变时，
-    引擎**退化**为该步不下发候选（``Step.pool = ()``），由校验器裁决——退化只削弱界面
-    提示，不改变合法性。
+    会为每个前序选项各给一行；接入层按玩家当前已选的值找对应行。前序是**多选**步且池
+    确实随它变时不下发行（``Step.pool = ()``）——那几行与"选中的那几张"对不上。
+
+    **同一步内的动态约束不在这一格**（table-ux-overhaul 票 11）：静态行是询问那一刻的
+    快照，表达不了"选了 A 之后 B 变灰"（【除疠】势力互异、【业炎】同花色）。"此刻还能点谁"
+    由**步骤预览**端点按同一份池回调现算（``server /api/sessions/<id>/preview``），
+    清单的静态行退为快照 / 兼容载荷。**没有"组合太多就整步退化"那一档了**。
 
     ``max``（W7-03）是**这一行**最多可选几个：``None`` = 与步骤的 ``Step.max`` 相同。
     多选座位步的 ``Step.max`` 是**全局**最大值，而同一个技能的不同来源组可以有不同上限
@@ -219,11 +224,23 @@ class StepPool(_FrozenModel):
     不回答"最多点几个"，故逐来源上限必须由行自己带出——界面据此把可选数收在该来源的
     合法数目内。值不进记录流（清单整体 ``exclude``），且缺省 ``None`` 时不序列化。
 
-    ``disabled``（票 04 §3）：``options`` 里**显示但不可选**的那些。选项原本只有"在不在
-    候选里"两态，而【蛊惑】的牌名弹窗要"列全牌堆名、把这个名字此刻用不了的那几项置灰"
-    ——"列出来"是提示（"此刻没有合法目标"），"选不了"是合法性，两件事各由一格回答。
-    **校验器与它同源**（:func:`sgs.skills.flow._assign_activation` 拒绝 disabled 里的项），
-    故置灰不是靠界面挡的。缺省空元组**不进序列化**（与 ``max`` 同姿态）。
+    ``disabled``（票 04 §3 / table-ux-overhaul 票 12）：``options`` 里**显示但不可选**的
+    那些。``options`` 原本只有"在不在候选里"两态，而【蛊惑】的牌名弹窗要"列全牌堆名、
+    把这个名字此刻用不了的那几项置灰"——"列出来"是提示（"此刻没有合法目标"），"选不了"是
+    合法性，两件事各由一格回答。
+
+    票 12 起这一格回答**三种**置灰里的前两种，判据都只有一份（引擎谓词，界面不重算）：
+
+    - **产物级**（选项步）：这个牌名 / 产物此刻能不能用 = ``check_usable`` 的**整条**
+      使用前校验（含"有没有合法目标"）；
+    - **源牌级**（转化清单的来源步，``Step.kind == "card"``）：这张源牌**每一个产物都
+      不可用**才灰，判据只读 ``check_usable`` 的**前三条**（时机 / 禁用 / 次数）——
+      "没有合法目标"属于产物级与目标级，不算源牌不可用。
+
+    灰的项**仍进** ``options``（删掉会让玩家以为清单漏牌）：可点集合 = ``options`` −
+    ``disabled``。**校验器与它同源**（:func:`sgs.skills.flow._assign_activation` 拒绝
+    disabled 里的项；转化确认则由候选池成员判定回答），故置灰不是靠界面挡的。缺省空元组
+    **不进序列化**（与 ``max`` 同姿态）。
     """
 
     when: tuple[str, ...] = ()
@@ -253,8 +270,9 @@ class Step(_FrozenModel):
     ``order`` = 步骤序号（0 起）。
 
     清单由 ``SkillFlow.steps`` **渲染**而来（:func:`sgs.skills.flow.manifest`），校验器读
-    同一份声明——两者不是两套规则。``pool`` 为空元组 = 本步没有（或退化掉了）候选索引，
-    接入层可退化为"全部都点得动、提交时由校验器裁决"。``wording`` 是本步的人话文案
+    同一份声明——两者不是两套规则。``pool`` 为空元组 = 本步没有候选索引（多选前序对不上
+    行）——界面**不许**据此"全都点得动"（spec §6 #5）；此刻的候选由步骤预览端点现算
+    （票 11）。``wording`` 是本步的人话文案
     （W4-fix-3，见字段注释）。
     """
 
@@ -297,7 +315,7 @@ class Step(_FrozenModel):
     （``options = []``、``max = 0``）；界面若拿**第一行**的 ``options[0]`` 猜类型，
     这一行排在最前时整步会被读成选项步，于是"自动跳过空步"那一支永不触发。
 
-    缺省 ``None`` = 旧载荷（合成夹具 / 退化前的清单），读取方退回形状判据。
+    缺省 ``None`` = 旧载荷（合成夹具），读取方退回形状判据。
     **不进记录流**（清单整体在询问字段里 ``exclude``），缺省时不序列化。
     """
 
@@ -309,6 +327,38 @@ class Step(_FrozenModel):
         if data.get("kind") is None:
             data.pop("kind", None)
         return data
+
+
+@dataclass(frozen=True, slots=True)
+class AskPolicy:
+    """**询问策略**：无合法候选时要不要问（table-ux-overhaul 票 02 / spec §2 Q4）。
+
+    这是**会话配置**，不是规则配置：它不进 :class:`~sgs.data.RuleConfig`（那会进 journal
+    header ⇒ 打翻全部金录像字节），而是随 :class:`~sgs.engine.Engine` 构造进来、
+    随网页会话冻结进侧车元数据（``tools/sgs_web/replay.build_meta``）、由
+    ``replay_journal`` 还原。
+
+    两档缺省**按调用方分**（这是本票最要紧的一条）：
+
+    - **引擎构造缺省 OFF**（``AskPolicy()``）：金录像、``batch_games``、``ai_eval`` 与旧
+      录像回放因此逐字节可复现——没人显式打开就照旧"一律照问"；
+    - **网页会话缺省 ON**（``Session`` 的构造缺省）：玩家在网页里立刻看到"没有合法候选的
+      座位不再被问"。
+
+    ``auto_skip`` 只是**总开关**：它不自己判断"这扇窗口可不可跳过"——那一位由调用方按
+    窗口类别声明（:attr:`RespondContext.skip_if_empty`），两者与候选预览一起收口在
+    :meth:`~sgs.engine.Engine.should_ask_respond` / :meth:`~sgs.engine.Engine.should_ask_query`
+    里（前者的类别位住在窗口载荷里、后者仍作参数给）。**消费者 = 五处 A 类窗口**（无懈 /
+    闪 / 求桃 / 护驾求助 / 决斗·南蛮·万箭，
+    table-ux-overhaul 票 05）：引擎侧缺省 OFF，故金录像 / AI 对战 / 旧录像回放逐字节不变。
+    """
+
+    auto_skip: bool = False
+    """``True`` = 允许"无合法候选就跳过"；``False``（缺省）= 一律照问（旧行为）。
+
+    缺省取 ``False`` 是**有意的**：引擎是金录像 / AI 对战 / 旧录像回放的共同底座，
+    它的缺省必须仍是"旧口径"；网页的"玩家侧新口径"由会话层显式打开。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,12 +381,24 @@ class RespondContext:
     后面再声明的牌**不会进结算**。提供者（【蛊惑】）据此收口——它的产物是扣置一张手牌换来的，
     让它在赢家已定之后还发候选，玩家点下去只会白扣一张牌。**不进记录流**（同上）。
 
-    ``floor`` = 本次需要牌**事件**里已经定下的优先级档（票 03 §4-2；档越小越优先，
-    ``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``）。候选生成口据此执行"不升档"：
-    档 < ``floor`` 的候选不进面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的时机了）。
-    窗口在"这一次响应成立"处把它清回 0（``_dodge_window`` 的 ``dodges_done`` 每加一、
-    【决斗】每收下一次响应）——floor 的粒度是**一个需要牌事件**，不是整扇窗口（补充一手
-    §2.1.2.2(2) 的"每时机一次响应机会"+ §4.2.2 的 ❶❷❸）。**不进记录流**（同上）。
+    ``floor`` = 本次需要牌**事件**里**已经过完**的档（票 03 §4-2 / 票 04 §2；档越小越
+    优先，``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``）。候选生成口据此**分面**（票 04）：
+    只把"最小档 ≥ ``floor``"的那一档铺成面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的
+    时机了；玩家 ``Pass`` 掉一档 ⇒ floor 写成下一档、引擎重问，见
+    :func:`~sgs.effects.next_need_card_tier`）。窗口在"这一次响应成立"处把它清回 0
+    （``_dodge_window`` 的 ``dodges_done`` 每加一、【决斗】每收下一次响应）——floor 的粒度是
+    **一个需要牌事件**，不是整扇窗口（补充一手 §2.1.2.2(2) 的"每时机一次响应机会"+ §4.2.2
+    的 ❶❷❸）。**不进记录流**（同上）。
+
+    ``skip_if_empty`` = 这扇窗口**按类别**声明"没有可行动的候选时可以不问"（票 02，
+    缺省 ``False`` = 照问）。它是**逐窗口的类别位**，与会话级总开关
+    :class:`AskPolicy` 分开：A 类（需要 / 可以使用或打出一张牌：无懈 / 闪 / 求桃 / 护驾 /
+    决斗 / 南蛮万箭）由调用方置 ``True``；C 类（可以放弃的询问）留给各自窗口决定。
+    **读取方 = :meth:`~sgs.engine.Engine.should_ask_respond`**：窗口用
+    :meth:`~sgs.engine.Engine.respond_context` 建**这一份**载荷，同一个对象既交给预筛口
+    也交给真询问，故类别位只有一处声明、没有第二份同名参数。（【闪】/ 求桃的候选载荷不是
+    本类，它们的类别位仍是 :meth:`~sgs.engine.Engine.should_ask_query` 的参数。）
+    **不进记录流**（同上）。
     """
 
     cause: WindowCause
@@ -350,6 +412,7 @@ class RespondContext:
     declared: bool = False
     rejudge_offers: tuple[RejudgeOffer, ...] = ()
     floor: int = 0
+    skip_if_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,10 +444,12 @@ class DodgeContext:
     "每提供者只问一次"（票 10 §5）：【八卦阵】判定未通过后，再次询问同一个"需要【闪】"
     的窗口时必须不再提供它。载荷只装**已经问过**的技能 id，候选生成器据此过滤。
 
-    ``floor`` = 本次**需要【闪】事件**里已经定下的优先级档（票 03 §4-2，语义与
-    :attr:`RespondContext.floor` 逐字相同）：档 < ``floor`` 的候选不进面，档值越小越优先。
-    ``_dodge_window`` 在 ``dodges_done`` 每加一处把它清回 0——【无双】的两张【闪】是
-    **两次**需要牌事件，第二张的 floor 从头开始（补充一手 §2.1.2.2(2)）。**不进记录流**。
+    ``floor`` = 本次**需要【闪】事件**里已经过完的档（票 03 §4-2 / 票 04 §2，语义与
+    :attr:`RespondContext.floor` 逐字相同）：候选生成口只铺"最小档 ≥ ``floor``"的那一张面
+    （武将档 0 的【护驾】→ 装备档 1 的【八卦阵】→ 牌档 2 的真【闪】），``Pass`` = 本档不
+    发动 ⇒ 引擎写下一档并重问。``_dodge_window`` 在 ``dodges_done`` 每加一处把它清回 0
+    ——【无双】的两张【闪】是**两次**需要牌事件，第二张的 floor 从头开始（补充一手
+    §2.1.2.2(2)）。**不进记录流**。
     """
 
     providers_used: tuple[str, ...] = ()
@@ -393,11 +458,12 @@ class DodgeContext:
 
 @dataclass(frozen=True, slots=True)
 class PeachContext:
-    """``PEACH`` 候选生成的类型化载荷（票 03 §4）：本次求桃里已定下的优先级档 ``floor``。
+    """``PEACH`` 候选生成的类型化载荷（票 03 §4）：本次求桃里**已经过完**的档 ``floor``。
 
     求桃窗口此前没有载荷（候选只由真牌 / 转化源构成）；票 03 起它也有**提供者**
-    （【蛊惑】"扣置一张手牌当【桃】"），故与另外三扇需要牌窗口走**同一道**"不升档"闸门，
-    载荷与 :class:`DodgeContext` 同形（档 < ``floor`` 的候选不进面；档越小越优先）。
+    （【蛊惑】"扣置一张手牌当【桃】"），故与另外三扇需要牌窗口走**同一道**闸门；票 04 起
+    这条闸门是**按档逐档问**：载荷与 :class:`DodgeContext` 同形（面 = 最小档 ≥ ``floor``；
+    ``Pass`` = 本档不发动 ⇒ 引擎写下一档并重问）。
 
     求桃的"这一次响应成立"= :func:`sgs.engine.steps._peach_use`（回复结算开始的那一刻）：
     在那之后要么脱离濒死、要么回退开新窗（同一帧内的**新**事件），floor 都在那里清回 0。
@@ -443,10 +509,12 @@ class SkillActivationContext:
     ``CARD_USE=2``（越小越先），闸门据此判"不升档"。
     """
     floor: int = 0
-    """**不升档**闸门（票 01 §4-3）：档 < ``floor`` 的候选不进面。
+    """**已过完的档**：下一问只铺"最小档 ≥ ``floor``"的那一张面（票 01 §4-3 / 票 04 §2）。
 
-    初值 = 最高档（``HERO`` = 0，故首轮全部档都进面）；每选定一条后 ``floor = 它的档``，
-    低档照进、高档不再进（选过装备档之后武将档不再上脸）。本 pass 结束即随帧私有游标清。
+    初值 = 最高档（``HERO`` = 0）；每选定一条后 ``floor = 它的档``（低档照进、高档不再进）。
+    票 04 起它同时是**按档逐档问**的游标：玩家 ``Pass`` = 本档不发动 ⇒ 派发环把 ``floor``
+    写成**下一档**并重问，最后一档的 ``Pass`` 才是"结束本座位的选择"。本 pass 结束即随帧
+    私有游标清。
     """
     used: tuple[str, ...] = ()
     """本座位本 pass **已经跑过**的技能 id（每技能一次；票 01 §4-6）。
@@ -873,6 +941,24 @@ def parse_action(raw: object) -> Action:
     故参与者照常可以直接返回协议对象。
     """
     return _ACTION_ADAPTER.validate_python(raw)
+
+
+def step_option_key(skill_id: object, key: object, index: int | None = None) -> str:
+    """**步骤键**的唯一形状：``<短 id>:<步骤键>``（同一步问多次时补 ``:<序号>``）。
+
+    三个消费者读同一个文本（故只在这里拼一次）：
+
+    - :attr:`SelectOptionQuery.skill_id`——``SELECT_OPTION`` 询问上的技能标识；
+    - 流水线的 ``ask_answers`` 缓存键（:func:`sgs.skills.flow._flow_option_id` 造它）；
+    - 预发动清单的步骤键（``manifest`` 的 ``Step.name`` 不是它，单问步骤的询问才是）——
+      启发式 AI 的分组表（``_DYNAMIC_POOL_SEAT_STEPS`` 一类）按它比对。
+
+    短 id = 全限定 id 的最后一段（``hero.jie_huatuo.chuli`` → ``chuli``）：主动技的
+    ``SKILL`` 帧把全限定 id 写在 ``frame.data["skill_id"]``，被动技只写 ``running_skill``
+    ——取短 id 的那一侧负责先读帧，本函数只认文本。
+    """
+    short = str(skill_id).rsplit(".", 1)[-1]
+    return f"{short}:{key}" if index is None else f"{short}:{key}:{index}"
 
 
 # ---------------------------------------------------------------------------

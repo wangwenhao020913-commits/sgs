@@ -10,6 +10,15 @@
 
 /* ------------------------------------------------------------------ 日志 */
 
+/** 事件流的**滚动窗口**（table-ux-overhaul 票 01）：`#t-log` 的 `<li>` 与两份本地序列
+ *  （`state.logRecords` / `state.narrative`）共用同一个上限，**与详略档无关**。
+ *
+ *  为什么：一局 8 人长局实测 6612 条记录（`timing` 3080 / `query` 1052 / `action` 1052 /
+ *  `frame` 838 / `delta` 588）。此前每个 `<li>` 都留着，且每一步 `scrollLogToBottom()`
+ *  都要 `scrollIntoView` 一次——强制布局的成本随子树线性增长，这是"越打越卡"的前端那一半。
+ *  500 条 ≈ 面板一屏的几十倍，滚回去看历史的窗口足够；更早的条目仍可从回放页看。 */
+const LOG_ITEM_LIMIT = 500;
+
 /** 事件流的详略；`simple` = 默认的服务端叙事，`focus` = 隐藏对手之间的响应往来。 */
 const LOG_MODES = ["simple", "focus", "all"];
 
@@ -50,6 +59,31 @@ function playbackSeqLimit() {
   return record && typeof record.seq === "number" ? record.seq : -1;
 }
 
+/** `#t-log` 只留最近 `LOG_ITEM_LIMIT` 条（两条追加口共用；滚动条贴底逻辑不变）。
+ *
+ *  从**头部**摘（最旧的先走），保留最新的那一段：面板平时就贴在底部，用户看到的是最新
+ *  的几百条。`children` 是活视图，故每摘一条都重新取下标 0，不先拷贝一份列表。 */
+function trimLogItems(log = $("t-log")) {
+  if (!log || typeof log.removeChild !== "function") return;
+  while (log.children.length > LOG_ITEM_LIMIT && log.children.length) {
+    log.removeChild(log.children[0]);
+  }
+}
+
+/** 两份本地序列也只留最近 `LOG_ITEM_LIMIT` 条（票 01；`state.narrativeShown` 是下标，
+ *  摘掉几条就前移几条，否则下一次 `appendNarrativeThrough` 会漏播一段）。
+ *
+ *  调用点是**推入方**（`session.js`）：收拢在这里是因为上限只该有一份真源。 */
+function trimStreamState() {
+  const dropRecords = state.logRecords.length - LOG_ITEM_LIMIT;
+  if (dropRecords > 0) state.logRecords.splice(0, dropRecords);
+  const dropNarrative = state.narrative.length - LOG_ITEM_LIMIT;
+  if (dropNarrative > 0) {
+    state.narrative.splice(0, dropNarrative);
+    state.narrativeShown = Math.max(0, state.narrativeShown - dropNarrative);
+  }
+}
+
 /** 一条叙事条目 → `<li>`：分隔线只写文本；行动行把服务端的颜色类原样搬到 span 上。 */
 function appendNarrativeEntry(entry, log = $("t-log")) {
   if (!log || !entry) return null;
@@ -67,6 +101,7 @@ function appendNarrativeEntry(entry, log = $("t-log")) {
     }
   }
   log.appendChild(item);
+  trimLogItems(log);
   return item;
 }
 
@@ -85,6 +120,10 @@ function appendNarrativeThrough(limit) {
  *
  * 简易档不消费记录流，故 `appendLog` 只为完整档服务。`log` / `mode` / `humanSeat`
  * 让回放页显式传入自己的容器与查看者，不再复制一套 DOM 拼接。
+ *
+ * **无懈窗口合并**（table-ux-overhaul 票 05）：同一 `window_frame` 的若干条询问 / 声明
+ * 先试 :func:`mergeNullifyWindow`——并得进去就没有新行（DOM 形状仍是一个普通 `<li>`，
+ * 只是它被就地更新）。回放的"当前位置"那条（`banner`）不合并：它要单独高亮。
  */
 function appendLog(
   record,
@@ -92,10 +131,125 @@ function appendLog(
   { log = $("t-log"), mode = logMode(), humanSeat = undefined, banner = false } = {},
 ) {
   if (!keepRecord(record, querySeat, mode, humanSeat)) return false;
+  if (!banner && mergeNullifyWindow(record, log)) return true;
   const item = document.createElement("li");
   if (banner) item.className = "banner";
   item.innerHTML = describeRecord(record);
   log.appendChild(item);
+  // 票 01：只留最近 `LOG_ITEM_LIMIT` 条（渲染形状一个字不改）。
+  trimLogItems(log);
+  return true;
+}
+
+/* ------------------------------------------------------------------ 无懈窗口的合并条目 */
+
+/** 同一 `window_frame` 的若干条询问 / 声明只占**一条**「无懈窗口」条目（票 05）。
+ *
+ *  无懈是**收集式**窗口：引擎按应答者区间逐个座位发一次 `RESPOND`（每个座位一条询问 +
+ *  一条应答记录），六人局就是十几条记录。事件流按"一个窗口一件事"读才对得上规则（收齐
+ *  声明、首个声明者生效），故这里把同一 `window_frame` 的记录并进一条条目：每问一个座位
+ *  就把它添进「询问」列表，每声明一次就补一条「声明」，**不逐座刷行**。玩家**自己的**
+ *  那一问仍由 `pending.js` 的 `isOwnPending` 单独呈现——合并只动事件流，不动询问面。
+ *
+ *  记账按**事件流容器**分开（牌桌 `#t-log` 与回放 `#r-log` 互不串味）：`window_frame`
+ *  是引擎帧号、跨局会重复，故清空容器时必须调 :func:`resetWindowLogs`，否则窗口会并进
+ *  一个已经不在文档里的旧节点（看起来像记录被吞了）。
+ */
+const windowLogStates = new WeakMap();
+
+function windowLogState(log) {
+  let entry = windowLogStates.get(log);
+  if (!entry) {
+    entry = { windows: new Map(), queries: new Map() };
+    windowLogStates.set(log, entry);
+  }
+  return entry;
+}
+
+/** 丢掉某个事件流容器的合并记账（重画整条流 / 换局时调用）。 */
+function resetWindowLogs(log = $("t-log")) {
+  if (log) windowLogStates.delete(log);
+}
+
+/** 这条询问属于哪一层无懈窗口：`window_frame`（帧号）；不是这扇窗口 ⇒ `null`。 */
+function nullifyWindowFrame(query) {
+  if (!query || query.kind !== "RESPOND" || query.cause !== "NULLIFY") return null;
+  const frame = Number(query.window_frame || 0);
+  return frame > 0 ? frame : null;
+}
+
+/** 合并条目的文案：「无懈窗口 · 目标 座位 N · 询问 座位 0、1 · 声明 座位 1【无懈可击】」。 */
+function nullifyWindowText(entry) {
+  const parts = [`<span class="k">#${entry.seq}</span> 无懈窗口`];
+  if (entry.target !== null && entry.target !== undefined) {
+    parts.push(`目标 座位 ${entry.target}`);
+  }
+  if (entry.askers.length) {
+    parts.push(`询问 座位 ${entry.askers.join("、")}`);
+  }
+  for (const line of entry.declared) parts.push(line);
+  return parts.join(" · ");
+}
+
+/** 一条声明的人话：真牌走牌名，`ActivateSkill`（提供者 / 转化）走技能名。
+ *
+ *  投影会裁掉**别人**应答的牌面 / 技能细节（只留 `kind` + `answers_seq`）：那时只说
+ *  「座位 N 声明」——合并条目不许比逐条渲染多泄露一格。
+ */
+function nullifyDeclaration(seat, action) {
+  if (!action) return `座位 ${seat} 声明`;
+  if (action.skill_id || action.skill_name) {
+    return `座位 ${seat} 声明（${skillActionLabel(action)}）`;
+  }
+  if (action.card) return `座位 ${seat} 声明【${cardName(action.card)}】`;
+  return `座位 ${seat} 声明`;
+}
+
+/** 把一条记录并进「无懈窗口」条目；不是这扇窗口 ⇒ `false`（调用方照常逐条渲染）。
+ *
+ *  询问记录 = 某个座位被问了一次（登记 `seq → 窗口`，应答靠 `answers_seq` 找回来）；
+ *  应答记录 = 它声明了（只有**接受且不是 `Pass`** 的才进"声明"列表）。
+ */
+function mergeNullifyWindow(record, log) {
+  if (!log) return false;
+  const logState = windowLogState(log);
+  if (record.kind === "query") {
+    const frame = nullifyWindowFrame(record.query);
+    if (frame === null) return false;
+    logState.queries.set(record.seq, { frame, seat: record.query.actor });
+    let entry = logState.windows.get(frame);
+    if (!entry) {
+      entry = {
+        seq: record.seq,
+        target: record.query.target,
+        askers: [],
+        declared: [],
+        item: document.createElement("li"),
+      };
+      logState.windows.set(frame, entry);
+      log.appendChild(entry.item);
+    }
+    if (!entry.askers.includes(record.query.actor)) {
+      entry.askers.push(record.query.actor);
+    }
+    entry.item.innerHTML = nullifyWindowText(entry);
+    trimLogItems(log);
+    return true;
+  }
+  if (record.kind !== "action") return false;
+  // 应答靠 `answers_seq` 找回它回答的那一问：线上报文把它放在记录顶层（派生字段），
+  // 合成夹具也可能只在行动里带一份——两处都认，别让合并依赖某一种形状。
+  const answered = record.answers_seq !== undefined
+    ? record.answers_seq
+    : (record.action && record.action.answers_seq);
+  const asked = logState.queries.get(answered);
+  if (!asked) return false;
+  const entry = logState.windows.get(asked.frame);
+  if (!entry) return false;
+  if (record.accepted && record.action && record.action.kind !== "Pass") {
+    entry.declared.push(nullifyDeclaration(asked.seat, record.action));
+    entry.item.innerHTML = nullifyWindowText(entry);
+  }
   return true;
 }
 
@@ -115,6 +269,8 @@ function scrollLogToBottom(log = $("t-log")) {
 function renderLog() {
   const log = $("t-log");
   log.innerHTML = "";
+  // 票 05：整条流重画 ⇒ 无懈窗口的合并记账跟着清（否则并进已摘掉的旧节点）。
+  resetWindowLogs(log);
   state.narrativeShown = 0;
   if (!state.view) return;
   if (logMode() === "simple") {

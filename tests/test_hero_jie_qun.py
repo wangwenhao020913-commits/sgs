@@ -34,6 +34,7 @@ from sgs.data import Kingdom, load_content_pack
 from sgs.effects import legal_actions_for
 from sgs.engine import Engine
 from sgs.skills import conversion_offers
+from sgs.skills.active import CHULI_FLOW
 from sgs.state import (
     ActivateSkill,
     MoveReason,
@@ -42,6 +43,7 @@ from sgs.state import (
     QueryKind,
     SelectCards,
     SelectOption,
+    SelectOptions,
     UseCard,
 )
 
@@ -200,7 +202,7 @@ def _chuli_state(*, own_card: int, wei_a: int, wei_b: int, shu: int):
 
 
 def _chuli_players(*, picks: tuple[str, ...], cards: tuple[int, ...] = (0,)):
-    """脚本：发动【除疠】→ 依次点座位 → 每次选牌都点面内第 ``cards[i]`` 个。
+    """脚本：发动【除疠】→ **一次**点齐座位（票 13 的座位多选）→ 每次选牌都点面内第 ``cards[i]`` 个。
 
     只对**技能帧里的** ``SELECT_CARDS`` 应答（``query.skill_id == CHULI``）：弃牌阶段的
     自弃也走同一询问类型，不加这道过滤会把它也算成【除疠】的成本。
@@ -220,12 +222,15 @@ def _chuli_players(*, picks: tuple[str, ...], cards: tuple[int, ...] = (0,)):
             if action is not None:
                 state["activated"] = True
                 return action
-        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id).startswith("chuli:seat"):
-            state["seat_queries"].append(tuple(query.legal_actions))
-            if state["seats"]:
-                choice = state["seats"].pop(0)
-                return SelectOption(choice=choice, answers_seq=query.seq)
-            return _find(query, lambda a: isinstance(a, Pass))
+        if query.kind == QueryKind.SELECT_OPTIONS and str(query.skill_id).startswith(
+            "chuli:seat"
+        ):
+            state["seat_queries"].append(query)
+            seats = tuple(state["seats"])
+            state["seats"].clear()
+            if not seats:
+                return _find(query, lambda a: isinstance(a, Pass))
+            return SelectOptions(choices=seats, answers_seq=query.seq)
         if query.kind == QueryKind.SELECT_CARDS and query.skill_id == CHULI:
             index = state["cards"].pop(0)
             state["cards"].append(index)
@@ -265,8 +270,61 @@ def test_chuli_discards_one_card_from_self_and_each_distinct_kingdom_target():
     assert len(engine.state.player(3).hand) == 0
 
 
-def test_chuli_second_target_must_have_a_different_kingdom():
-    """反例（势力重复）：选了魏之后，另一名魏势力角色不再出现在座位池里。"""
+def test_chuli_grays_out_same_kingdom_seats_after_the_first_pick():
+    """票 13：座位步改成**一次多选**之后，"势力互异"靠**服务端预览**现算置灰。
+
+    座位步不再问两次（第二次的池排除已选势力），而是一次 `SELECT_OPTIONS`：**首问**那一份
+    `options` 是"此刻能选谁"的快照，"第二名必须换势力"由票 11 的预览按同一份
+    `_chuli_targets(state, frame, owner, chosen)` 现算。判据走三个真产出路径：
+
+    1. **清单**（`manifest`）：这一步是一次多选的座位步（`min=1`，`pool` 非空）；
+    2. **预览**（`preview_step`，票 11 端点读的就是它）：选了魏（1 号位）之后，同势力的
+       2 号位立刻从 `options` 里消失，异势力的 3 号位照旧可选，光标仍停在这一步；
+    3. **校验器**（`validate_activation`）：对同一份池逐个对表——预览说能点的都收，
+       预览说不能点的（同势力组合）就拒。
+    """
+    from sgs.skills.flow import manifest, preview_step
+    from sgs.skills.preactivation import validate_activation
+
+    own = _with_suit("slash", "spade")
+    wei = _with_suit("slash", "spade", skip=1)
+    wei_other = _with_suit("peach", "heart")
+    shu = _with_suit("slash", "club")
+    state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
+
+    steps = manifest(CHULI_FLOW, state, 0)
+    assert [step.name for step in steps] == ["seat"], "只有一步（座位多选）"
+    assert steps[0].min == 1 and steps[0].pool, "首问的候选索引由后端给出"
+
+    first = preview_step(CHULI_FLOW, state, 0, [], steps=steps)
+    assert first.kind == "seat"
+    assert {"seat:1", "seat:2", "seat:3"} <= set(first.options), (
+        f"一开始两名魏将 + 一名蜀将都能选：{first.options}"
+    )
+    assert not any("seat:0" in option for option in first.options), "不含自己"
+
+    second = preview_step(CHULI_FLOW, state, 0, [("seat", ("seat:1",))], steps=steps)
+    assert second.cursor == 0, "多选座位步：光标停在它上面（还能继续加人）"
+    assert "seat:2" not in second.options, "同势力（魏）的 2 号位必须立刻变灰"
+    assert "seat:3" in second.options, "异势力（蜀）照旧可选"
+    assert second.can_submit is True, "已经够 1 名 ⇒ 此刻就能提交"
+
+    for option in second.options:
+        assert validate_activation(state, 0, CHULI, (), ("seat:1", option)) is None, (
+            f"预览说 {option} 能点 ⇒ 校验器必须收"
+        )
+    assert validate_activation(state, 0, CHULI, (), ("seat:1", "seat:2")) is not None, (
+        "预览说 2 号位不能点 ⇒ 校验器必须拒（势力互异）"
+    )
+
+
+def test_chuli_still_asks_one_discard_per_target_after_the_seat_step():
+    """票 13：座位步变成一次多选之后，提交点里**逐名问"弃哪张"**的询问保持原样。
+
+    座位只问一次（`SELECT_OPTIONS`），但成本牌仍按"自己 + 每名目标"各问一次
+    （`SELECT_CARDS`，`reveal_hand=True` ⇒ 牌桌直选，靠票 09 的判据）——两步不能并成一步：
+    弃哪张是逐名角色的独立选择。
+    """
     own = _with_suit("slash", "spade")
     wei = _with_suit("slash", "spade", skip=1)
     wei_other = _with_suit("peach", "heart")
@@ -274,16 +332,56 @@ def test_chuli_second_target_must_have_a_different_kingdom():
     state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
     recorded, players = _chuli_players(picks=("seat:1", "seat:3"), cards=(0, 0, 0))
 
-    _run(state, players, _phase_over)
+    engine = _run(state, players, _phase_over)
 
-    assert len(recorded["seat_queries"]) >= 2, "两次座位询问：首名 + 次名"
-    second = recorded["seat_queries"][1]
-    second_options = {
-        action.choice for action in second if isinstance(action, SelectOption)
-    }
-    assert "seat:2" not in second_options, "魏势力重复 ⇒ 2 号位不能成为第二名目标"
-    assert "seat:3" in second_options
-    assert not any("seat:0" in option for option in second_options), "不含自己"
+    assert len(recorded["seat_queries"]) == 1, "座位一次问齐（不是两次单选）"
+    seat_query = recorded["seat_queries"][0]
+    assert seat_query.kind == QueryKind.SELECT_OPTIONS
+    assert (seat_query.min_selected, seat_query.max_selected) == (1, 5), "任意名（≥1）"
+    assert tuple(seat_query.options) == ("seat:1", "seat:2", "seat:3"), (
+        "首问的池 = 全部有牌可弃的异势力其他角色（含两名魏将——同势力由预览收窄）"
+    )
+    card_asks = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_CARDS
+        and record.query.skill_id == CHULI
+    ]
+    assert len(card_asks) == 3, "自己 + 两名目标 ⇒ 三次『弃哪张』"
+
+    assert _moves_of(engine, own) == [("hand", "discard", "DISCARD")]
+    assert _moves_of(engine, wei) == [("hand", "discard", "DISCARD")]
+    assert _moves_of(engine, shu) == [("hand", "discard", "DISCARD")]
+    assert _moves_of(engine, wei_other) == [], "没被选中的角色一张都不弃"
+
+
+def test_chuli_refuses_a_same_kingdom_set_the_pool_never_offered():
+    """票 13：服务端不采信一份"它自己不会铺出来"的集合（越池 ⇒ 整步取消，零副作用）。
+
+    前端按预览置灰，正常提交不到这里；但形状谓词（池内 / 无重复 / 区间）**收不下**
+    "势力互异"，故执行器仍按 `step.pool` 的**前缀**复核一遍（与校验器 / 预览同一份回调）。
+    判据 = 越池的那份集合让整步取消：一张牌都不弃、次数不消耗。
+    """
+    own = _with_suit("slash", "spade")
+    wei = _with_suit("slash", "spade", skip=1)
+    wei_other = _with_suit("peach", "heart")
+    shu = _with_suit("slash", "club")
+    state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
+    recorded, players = _chuli_players(
+        picks=("seat:1", "seat:2"), cards=(0, 0, 0)
+    )
+
+    engine = _run(state, players, _phase_over)
+
+    assert len(recorded["seat_queries"]) == 1, "座位只问一次"
+    assert not any(
+        record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DISCARD
+        for record in engine.records
+    ), "两名都是魏 ⇒ 越池 ⇒ 整步取消（零副作用）"
+    assert _offers(engine.state, CHULI), "取消不消耗「出牌阶段限一次」"
 
 
 def test_chuli_with_zero_targets_is_cancelled_and_costs_nothing():

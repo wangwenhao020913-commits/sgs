@@ -55,7 +55,7 @@ from sgs.effects import (
     ModifierRole,
     need_card_floor,
     recover_amount,
-    reset_need_card_floor,
+    reset_need_card_event,
     response_count,
     target_is_effective,
 )
@@ -87,6 +87,7 @@ from sgs.state import (
     Pass,
     PeachContext,
     QueryKind,
+    RespondContext,
     RespondMode,
     RejudgeOffer,
     SelectionSpec,
@@ -258,30 +259,48 @@ class FrameHost(StepHost, Protocol):
         payload: Any = None,
     ) -> Any: ...
 
+    def respond_context(
+        self,
+        frame: Frame | None,
+        actor: int,
+        *,
+        cause: WindowCause,
+        required: str | None = None,
+        target: int | None = None,
+        mode: RespondMode = RespondMode.PLAY,
+        use_targets: tuple[int, ...] = (),
+        providers_used: tuple[str, ...] = (),
+        zones: tuple[Zone, ...] = (Zone.HAND,),
+        declared: bool = False,
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        skip_if_empty: bool = False,
+    ) -> RespondContext: ...
+
     def ask_respond(
         self,
         frame: Frame,
         actor: int,
         timing: Timing,
-        *,
-        cause: WindowCause,
-        required: str | None = None,
-        target: int | None = None,
-        window_frame: int = 0,
-        mode: RespondMode = RespondMode.PLAY,
-        use_targets: tuple[int, ...] = (),
-        zones: tuple[Zone, ...] = (Zone.HAND,),
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        ctx: RespondContext,
     ) -> Any: ...
 
     def respond_candidates(
         self,
         actor: int,
-        *,
-        cause: WindowCause,
-        mode: RespondMode = RespondMode.PLAY,
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        ctx: RespondContext,
     ) -> tuple[Any, ...]: ...
+
+    def should_ask_respond(self, actor: int, ctx: RespondContext) -> bool: ...
+
+    def should_ask_query(
+        self,
+        kind: QueryKind,
+        actor: int,
+        *,
+        dying: int | None = None,
+        payload: Any = None,
+        skip_if_empty: bool = False,
+    ) -> bool: ...
 
     def suspended(self, value: Any) -> bool: ...
 
@@ -699,11 +718,13 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     （``start_use``），收尾共用 :func:`_accept`；没有产物 = 主公技式（别人已打出过一张），
     只记一次成功、不压帧。
 
-    **优先级档**（票 03 §4-2 / §4-3）：本窗口读 :func:`~sgs.effects.need_card_floor` 写进
-    ``DodgeContext``——选中一条之后档由 :meth:`~sgs.engine.Engine.ask_query` 记进承载帧，
-    更高优先（更小档）的候选下一次不再进面。曹操先发动【八卦阵】（装备档）⇒ 判定黑 ⇒
-    下一次询问里没有〖护驾〗（武将档），而真【闪】（使用牌档）照旧可点；floor 在
-    :func:`_accept` 里清回最高档，故【无双】的第二张【闪】仍可发动【八卦阵】。
+    **优先级档 = 按档逐档问**（票 03 §4-2 / 票 04 §2）：本窗口把
+    :func:`~sgs.effects.need_card_floor` 写进 ``DodgeContext``，候选生成口只铺**当前这一档**
+    （武将档 0 的【护驾】→ 装备档 1 的【八卦阵】→ 牌档 2 的真【闪】）。玩家 ``Pass`` =
+    本档不发动，引擎写下一档并**重问本窗口**（同一帧、同一目标，面换了）；选中一条之后档由
+    引擎记进承载帧，更高优先的档不再进面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的
+    时机了）。floor 与**提供者封禁**一起在 :func:`_accept` 里清回最高档，故【无双】的第二张
+    【闪】仍可发动【八卦阵】（两次需要牌事件）。
     """
     # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
     # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
@@ -730,7 +751,8 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         nonlocal done
         done += 1
         frame.data["dodges_done"] = done
-        reset_need_card_floor(frame, target)
+        # 一次需要牌**事件成立**：不升档 floor 与提供者封禁在同一个点复位（票 04 §5）。
+        reset_need_card_event(frame, target)
         if done >= required:
             frame.data["canceled"] = True
         if card is not None:
@@ -757,15 +779,27 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
             )
             return "stay"
     providers_used = tuple(frame.data.get("providers_used", ()))
+    payload = DodgeContext(
+        providers_used=providers_used,
+        floor=need_card_floor(frame, target),
+    )
+    if not host.should_ask_query(
+        QueryKind.DODGE,
+        target,
+        payload=payload,
+        skip_if_empty=True,
+    ):
+        # 票 05：这个座位**没有任何**办法打出 / 视为打出【闪】（真牌 ∪ 转化 ∪ 提供者）
+        # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（不抵消、照常结算）。类别位由本窗口给，
+        # 总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+        frame.data["canceled"] = False
+        return "stay"
     action = host.ask_query(
         QueryKind.DODGE,
         target,
         Timing.RESOLVE_BEFORE_EFFECT,
         frame=frame,
-        payload=DodgeContext(
-            providers_used=providers_used,
-            floor=need_card_floor(frame, target),
-        ),
+        payload=payload,
     )
     if host.suspended(action):
         return "stay"
@@ -840,16 +874,30 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
         if control is not None:
             return control
         if satisfied is None:
+            declared_already = bool(frame.data["response_declared"])
+            # 这一扇窗口的**同一份**载荷：预筛口与真询问共用它（票 02 的类别位只有一处）。
+            ctx = host.respond_context(
+                frame,
+                asker,
+                cause=WindowCause.NULLIFY,
+                required=NULLIFY_RESPONSE_CARD,
+                target=target,
+                mode=RespondMode.USE,
+                declared=declared_already,
+                skip_if_empty=True,
+            )
+            if not host.should_ask_respond(asker, ctx):
+                # 票 05：这个座位**没有任何**办法打出【无懈可击】（真牌 ∪ 转化 / 提供者，
+                # 判据来自同一个 ``legal_actions_for``）⇒ 不问。语义与它答 ``Pass`` 逐字
+                # 相同：不声明、不耗牌、不压帧，窗口照旧问下一个座位。类别位由本窗口给
+                # （写在载荷里），总开关在会话策略；引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+                frame.data["response_next"] = index + 1
+                continue
             action = host.ask_respond(
                 frame,
                 asker,
                 Timing.RESOLVE_BEFORE_EFFECT,
-                cause=WindowCause.NULLIFY,
-                required=NULLIFY_RESPONSE_CARD,
-                target=target,
-                window_frame=frame.frame_id,
-                mode=RespondMode.USE,
-                declared=bool(frame.data["response_declared"]),
+                ctx,
             )
             if host.suspended(action):
                 return "stay"
@@ -1507,13 +1555,26 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
         if control is not None:
             return control
         if satisfied is None:
+            payload = PeachContext(floor=need_card_floor(frame, asker))
+            if not host.should_ask_query(
+                QueryKind.PEACH,
+                asker,
+                dying=target,
+                payload=payload,
+                skip_if_empty=True,
+            ):
+                # 票 05：这个座位**没有任何**办法用出【桃】（真牌 ∪ 转化 / 提供者）
+                # ⇒ 不问，语义与它答 ``Pass`` 逐字相同（下一个座位）。总开关在会话策略；
+                # 引擎缺省 OFF ⇒ 恒 True（金录像零变化）。
+                frame.data["next"] = idx + 1
+                continue
             action = host.ask_query(
                 QueryKind.PEACH,
                 asker,
                 Timing.NEAR_DEATH_AT,
                 frame=frame,
                 dying=target,
-                payload=PeachContext(floor=need_card_floor(frame, asker)),
+                payload=payload,
             )
             if host.suspended(action):
                 return "stay"
@@ -1554,7 +1615,7 @@ def _peach_use(host: FrameHost, frame: Frame, *, asker: int, target: int, card: 
     本次需要牌事件结束，不升档的 floor 清回最高档（回退开的新窗是**新**事件）。
     """
     frame.data["pending_response"] = (int(frame.data["next"]), host.state.player(target).hp)
-    reset_need_card_floor(frame)
+    reset_need_card_event(frame)
     host.recover_from_peach(frame, card, asker=asker, dying=target)
     return "stay"  # 响应链出栈后重入本步：此处判回退
 
@@ -1840,12 +1901,15 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
         if seat is None:
             return None
         offers = rejudge_offers(host.state, seat)
-        preview = host.respond_candidates(
+        # 预览与真询问读**同一份**窗口载荷（改判不是使用 / 打出 ⇒ 恒无档、不让预筛口插队）。
+        ctx = host.respond_context(
+            frame,
             seat,
             cause=WindowCause.REJUDGE,
             mode=RespondMode.REJUDGE,
             rejudge_offers=offers,
         )
+        preview = host.respond_candidates(seat, ctx)
         if not any(not isinstance(candidate, Pass) for candidate in preview):
             asked.append(seat)
             continue
@@ -1853,11 +1917,7 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
             frame,
             seat,
             Timing.JUDGE_CARD_BEFORE_EFFECT,
-            cause=WindowCause.REJUDGE,
-            required=None,
-            window_frame=frame.frame_id,
-            mode=RespondMode.REJUDGE,
-            rejudge_offers=offers,
+            ctx,
         )
         if host.suspended(action):
             return "stay"

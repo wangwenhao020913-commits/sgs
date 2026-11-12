@@ -1119,10 +1119,12 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
     界【结姻】的候选，改取 ``100``（**396 次决策 / 3 138 次推进迭代**）；
     林包移动版三将进池（83 → 86）⇒ ``100`` 不再走到界【结姻】的候选，按同一支判据重扫
     60–400，取首个命中 ``292``（**334 次决策**；探针
-    ``.scratch/lin-batch/probes/scan_jieyin_seed.py``，判据逐字未改）。上限取 **12 000**
-    ——远低于修复前的 2 万步，真回退了会**断言失败**而不是把 CI 挂死。
+    ``.scratch/lin-batch/probes/scan_jieyin_seed.py``，判据逐字未改）。
+    sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66 ⇒ ``292`` 不再走到界【结姻】的
+    候选，按同一支判据重扫 60–499，取首个命中 ``145``（**518 次决策 / 5 075 条记录**）。
+    上限取 **12 000** ——远低于修复前的 2 万步，真回退了会**断言失败**而不是把 CI 挂死。
     """
-    seed = 292
+    seed = 145
     engine = Engine.new_game(
         seed=seed,
         rule_config=RuleConfig(player_count=5),

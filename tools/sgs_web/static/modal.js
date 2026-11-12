@@ -15,7 +15,9 @@
  *    `table.js:renderDiscardPanel()` 从表体同一份视图画。
  *
  * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`）。另外两个
- * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形），
+ * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形；
+ * table-ux-overhaul 票 08 起**只有**牌桌承载不了的那一步借容器——选项 ≥3 项 / 复选，
+ * 判据 = `preactivation.js:preactivationDialogKind`，座位步与选牌步一律留在牌桌上），
  * 以及五谷整段结算的**持久展示**（无懈 / 反无懈的 RESPOND 期间只展示亮牌 + 目标条，
  * 见 `persistentRevealPending`）。同一问的重复渲染只更新正文、保留折叠；换问（新 `seq`）
  * 或表面不再是弹窗时**关旧开新 / 直接关**，
@@ -365,7 +367,10 @@ function isHarvestActive(pending) {
  *    且必须还有**当前目标**（``harvest.current`` 非空）——结算末尾没有当前目标时不开。
  *  - ``pending.dialog === "reveal"``：服务端给**观看牌面**的选牌步打上的**显式模板标记**
  *    （U2-12：【遗计】的牌堆顶两张没有五谷的 target 列表；``projection.pending_payload``
- *    以``SELECT_CARDS`` + 授予牌面这个**形状**派生，前端不认技能 id）。
+ *    以``SELECT_CARDS`` + 授予牌面这个**形状**派生，前端不认技能 id）。**票 09** 起服务端
+ *    不再对"槽位全是应答者自己手牌"的面给这个标记（那不是观看授予）；本函数另加一条
+ *    **对称否决**（:func:`ownHandSlotsKnown`）兜住旧载荷 / 合成载荷——面里的牌已经在
+ *    本人手牌快照里 ⇒ 牌桌直选，不在亮牌窗里再摆一遍。
  *
  * 判据只看"这一步是不是亮牌面"，不看 actor 是不是人类（`syncDialog` 另问 `isOwnPending`；
  * 五谷的 AI 拿牌阶段要显示在人类屏幕上，见 `syncDialog` 的 harvest 例外）。
@@ -380,6 +385,7 @@ function isRevealStep(pending) {
       && Array.isArray(cards) && cards.length > 0;
   }
   if (pending.kind !== "SELECT_CARDS") return false;
+  if (ownHandSlotsKnown(pending)) return false;
   if (pending.dialog === DIALOG_KINDS.reveal) return true;
   if (!isHarvestActive(pending)) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
@@ -415,12 +421,40 @@ function selectionEnabled(view = state.view) {
 }
 
 /** 当前是否需要询问弹窗：本地态（预发动清单）优先，其次看这一步的表面，最后才是
- *  五谷的**持久展示**（表面是牌桌、但结算帧还活着）。`null` = 不需要。 */
+ *  五谷的**持久展示**（表面是牌桌、但结算帧还活着）。`null` = 不需要。
+ *
+ *  **预发动不是弹窗**（table-ux-overhaul 票 08 / spec §2 Q12）：预发动期间只有牌桌承载
+ *  不了的那一步开窗——判据住 `preactivation.js:preactivationDialogKind`（只看步骤形状：
+ *  选项 ≥3 项 / 复选），座位步与选牌步一律留在牌桌上点。 */
 function dialogWantedKind(pending) {
-  if (state.preactivation) return "preactivation";
+  if (state.preactivation) return preactivationDialogKind();
   const stepKind = stepDialogKind(pending);
   if (stepKind !== null) return stepKind;
   return persistentRevealPending(pending) ? DIALOG_KINDS.reveal : null;
+}
+
+/** 亮牌窗的**数据源**（table-ux-overhaul 票 19）：有询问用询问（交互面 + 载荷），
+ *  没有询问但五谷结算帧还活着时用视图级 `view.harvest`（只读展示）。
+ *
+ * 票 19 起接入层在每个目标取牌后让出一次驱动 ⇒ 空窗里 `pending` 是 `null`、而
+ * `view.harvest` 还带着半程状态。两者是**同一份**服务端派生（同一个链键），这里只
+ * 决定"这一屏按谁画"，不产生任何规则判断。返回 `null` = 这一屏没有亮牌可画。 */
+function dialogRevealSource() {
+  const pending = state.view ? state.view.pending : null;
+  if (pending) return pending;
+  const harvest = harvestStateWithoutPending();
+  return harvest ? { harvest } : null;
+}
+
+/** 弹窗标题的数据源：亮牌模板读 `dialogRevealSource()`（空窗里也能读），其余模板读询问。
+ *
+ * 为什么按 `kind` 收口：`dialogRevealSource()` 在**没有询问**时返回一份**只有 `harvest`**
+ * 的最小载荷（不是真询问），只有亮牌模板的三个读点认这个形状；别的模板万一读到它，
+ * 读到的是 `undefined` 而不是别人的残值——这一层就是防那种"将来某模板开始读 `pending.seq`"。
+ */
+function dialogTitleSource(kind) {
+  if (kind === DIALOG_KINDS.reveal) return dialogRevealSource();
+  return state.view ? state.view.pending : null;
 }
 
 /** 弹窗实例键：**同一键 = 同一「步」的重复渲染**（保留折叠、只换内容）；
@@ -633,20 +667,22 @@ function applyDialogContentMode(kind) {
   // 在 `openDialogDom` / `updateDialogDom` 里已先写好，故两者一致。
   const persistent = dialogRevealMode() && kind === DIALOG_KINDS.reveal;
   const pending = state.view ? state.view.pending : null;
+  // 票 19：没有询问的空窗里数据源换成视图级 `view.harvest`（逐目标暂停的中间视图）；
+  // 有询问时 `dialogRevealSource()` 原样返回那份询问，行为一字不变。
+  const source = dialogRevealSource();
   state.dialog.hintOverride = null;
-  if (persistent && pending) {
+  if (persistent && source) {
     showOptionsHome();
     clearDialogReveal();
     if (reveal) {
       reveal.hidden = state.dialog.collapsed;
-      renderReveal(pending, {
+      renderReveal(source, {
         container: reveal,
         interactive: false,
         promptHint: false,
-        bodyClass: false,
       });
     }
-    state.dialog.hintOverride = harvestWaitHint(pending);
+    state.dialog.hintOverride = harvestWaitHint(source);
     return;
   }
   clearDialogReveal();
@@ -657,6 +693,44 @@ function applyDialogContentMode(kind) {
     renderHeroCardBody(pending);
   }
   if (options && body && options.parentNode !== body) body.appendChild(options);
+}
+
+/** 用**视图级**五谷状态重画亮牌节点（table-ux-overhaul 票 18 / 服务端 D 方案）。
+ *
+ * 与 `applyDialogContentMode` 的持久分支是**同一个渲染器**（`renderReveal`），差别只在数据
+ * 来源：这里显式拿 `view.harvest` 当底，询问载荷（`pending`）只提供交互面（`slots` / 点选
+ * 入口）。服务端现在把同一份派生状态挂在每一次视图下发上，故"谁拿走了哪张"不必等
+ * 下一条带 `harvest` 的询问——这一拍就能重画。
+ *
+ * 纪律（与 `applyIdleRepaint` 同一条）：
+ *   - **不动本地选择**：`state.picks` / 焦点 / 目标原样（选到一半的牌不会因刷新丢）；
+ *   - 不动折叠（`state.dialog.collapsed` 只决定显隐）、不动只读判据、不提交；
+ *   - 只在亮牌窗开着、且链键与 `view.harvest.key` 一致时动手（别的窗口 / 换了一局都不碰）。
+ *
+ * 返回 `true` = 真的重画了（调用方据此决定要不要再走别的空转出口）。
+ */
+function repaintRevealFromHarvest(harvest) {
+  if (!harvest || typeof harvest !== "object") return false;
+  if (!state.dialog.open || state.dialog.key !== `reveal:${harvest.key}`) return false;
+  const pending = state.view ? state.view.pending : null;
+  // 询问载荷为底（交互面），视图级 harvest 覆盖亮牌数据（同一份派生，链键相同）。
+  const base = pending ? { ...pending, harvest } : { harvest };
+  if (dialogRevealMode()) {
+    const reveal = dialogRevealNode();
+    if (!reveal) return false;
+    clearDialogReveal();
+    reveal.hidden = state.dialog.collapsed;
+    renderReveal(base, { container: reveal, interactive: false, promptHint: false });
+    state.dialog.hintOverride = harvestWaitHint(base);
+  } else {
+    const options = $("t-options");
+    if (!options) return false;
+    options.innerHTML = "";
+    renderReveal(base, { interactive: isOwnPending(base) });
+    state.dialog.hintOverride = null;
+  }
+  syncDialogHint();
+  return true;
 }
 
 /** 折叠 / 展开：**只**隐藏正文，不动只读判据、不动任何选择态、不提交。 */
@@ -688,6 +762,18 @@ function showReopenButton(kind, visible) {
 
 /* ------------------------------------------------------------ 询问弹窗 */
 
+/** 清弹窗标题条的**镜像**（`#t-target-hint` 的副本）。票 07：`resetAskSurface` 在
+ *  **窗口不关**的那条路上（亮牌 / 涉猎结果态）也要能单独撤掉它——镜子的写入仍只在下一条
+ *  函数里，这里只是同一格的清除口，免得上一问的步骤提示留在标题条上。 */
+function resetDialogHint() {
+  const hint = $("t-dialog-hint");
+  if (hint) {
+    hint.textContent = "";
+    hint.hidden = true;
+  }
+  if (state.dialog) state.dialog.hintOverride = null;
+}
+
 /** 步骤提示：模板把"现在要做什么"写在提示条的 `#t-target-hint`；折叠后它必须还在，
  *  所以这里镜像一份到标题条。空文本时整个提示隐藏（"可选"的步骤提示）。
  *  五谷的持久展示例外：那一步的提示条属于无懈窗口，亮牌窗读自己的提示
@@ -715,7 +801,8 @@ function openDialogDom(kind) {
   const body = $("t-dialog-body");
   const title = $("t-dialog-title");
   if (!dialog || !body) return;
-  if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
+  // 票 19：亮牌模板的标题在空窗里也读视图级 `view.harvest`（其余模板照旧读询问）。
+  if (title) title.textContent = dialogTitleFor(kind, dialogTitleSource(kind));
   state.dialog.open = true;
   state.dialog.kind = kind;
   state.dialog.collapsed = false;
@@ -743,7 +830,8 @@ function updateDialogDom(kind) {
     openDialogDom(kind);
     return;
   }
-  if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
+  // 票 19：亮牌模板的标题在空窗里也读视图级 `view.harvest`（其余模板照旧读询问）。
+  if (title) title.textContent = dialogTitleFor(kind, dialogTitleSource(kind));
   state.dialog.kind = kind;
   applyDialogContentMode(kind);
   applyDialogCollapseChrome();
@@ -767,7 +855,6 @@ function closeDialogDom() {
     body.innerHTML = "";
     body.scrollTop = 0;
     body.hidden = false;
-    body.classList.remove("reveal-body");
   }
   if (title) title.textContent = "";
   if (hint) {
@@ -824,6 +911,10 @@ function syncPlaybackDialog(record) {
  */
 function syncDialog() {
   const pending = state.view ? state.view.pending : null;
+  // 票 19：**没有询问**、但五谷结算帧还活着（逐目标暂停的中间视图）⇒ 亮牌窗保持打开。
+  // 判据只读服务端的 `view.harvest`（见 `reveal.js:harvestStateWithoutPending`）；有询问时恒为
+  // `null`，下面每一条分支都与本票之前逐字相同。
+  const pendingless = pending ? null : harvestStateWithoutPending();
   // 只有**自己的**询问才在自己的屏幕上开弹窗：目标座位是 AI 时（人类是周瑜、目标是 AI），
   // 花色 / 盲挑这两问会出现在视图里，但它们不是给人类答的——不在这里开一个人工弹窗
   // （牌桌仍按 `selectionEnabled` 只读，等 AI 答完下一步）。
@@ -846,22 +937,31 @@ function syncDialog() {
   const settle = suitResultActive();
   const kind = settle
     ? DIALOG_KINDS.suit
-    : (state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending));
+    : (state.playback
+      ? null
+      : (pendingless
+        ? DIALOG_KINDS.reveal
+        : ((own || publicHarvest) ? dialogWantedKind(pending) : null)));
   if (!kind) {
     closeDialogDom();
     syncHeroModal();
     return;
   }
-  const key = settle ? "suit-result" : dialogKeyFor(kind, pending);
+  // 票 19 的空窗与询问共用同一个链键（`reveal:${harvest.key}`）：从"自己的取牌步"切到
+  // "等下一名目标"时不关窗重开，只换正文归属（`persistent` 变真）。
+  const key = settle
+    ? "suit-result"
+    : (pendingless ? `reveal:${pendingless.key}` : dialogKeyFor(kind, pending));
+  const persistentMode = persistent || Boolean(pendingless);
   if (key !== state.dialog.key || !state.dialog.open) {
     closeDialogDom();
     state.dialog.key = key;
-    state.dialog.persistent = persistent;
+    state.dialog.persistent = persistentMode;
     openDialogDom(kind);
     syncHeroModal();
     return;
   }
-  state.dialog.persistent = persistent;
+  state.dialog.persistent = persistentMode;
   updateDialogDom(kind);
   syncHeroModal();
 }

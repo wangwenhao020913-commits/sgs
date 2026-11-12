@@ -439,8 +439,15 @@ def _real_armor_session_lines() -> str:
         heroes=("jie_jushou_mobile", "xuchu", "shen_zhugeliang", "jiaxu_mobile"),
     )
     answers = 0
-    while session.pending is not None:
-        session.submit_answer(session.pending.legal_actions[0])
+    steps = 0
+    while not session.finished:
+        steps += 1
+        assert steps < 10_000, "挂起驱动没有推进（活锁）"
+        pending = session.pending
+        if pending is None:
+            session.drive()  # 五谷逐目标暂停（table-ux-overhaul 票 19）：没有挂起也要接着驱动
+            continue
+        session.submit_answer(pending.legal_actions[0])
         answers += 1
     assert answers and session.finished, "真对局必须真的跑完"
     entries = build_narrative(

@@ -426,6 +426,9 @@
 <!-- U1-00：前端按职责拆成普通脚本，**这里的顺序就是运行顺序**；页面与
      tests/support/ui_smoke.mjs 共用这一份清单（不引入 npm / 打包 / ES module）。 -->
 <script src="core.js"></script>
+<!-- table-ux-overhaul 票 07：提示区文案模板（`prompts.json` 与 `anim.ini` 同姿态，
+     页面启动即异步载入；缺键逐级回退到服务端 wording → 前端通用文案）。 -->
+<script src="prompts.js"></script>
 <script src="lobby.js"></script>
 <script src="session.js"></script>
 <script src="candidates.js"></script>

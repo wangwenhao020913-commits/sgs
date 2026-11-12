@@ -2301,6 +2301,26 @@ def _queries_of(engine: Engine, skill_id: str) -> list:
     ]
 
 
+def _activation_faces(engine: Engine) -> list[tuple[Timing, tuple[str, ...]]]:
+    """记录流里的每张"是否发动"面：``(时机, 该面提供的技能 id)``（票 17 的读取面）。
+
+    以**询问自带的 `timing`** 归位（询问模型是外部的唯一读取面），不靠"最近的时机记录"
+    去推——两者本该一致，但询问自己说了算的那一份才是契约。
+    """
+    return [
+        (
+            record.query.timing,
+            tuple(
+                action.skill_id
+                for action in record.query.legal_actions
+                if isinstance(action, ActivateSkill)
+            ),
+        )
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SKILL_ACTIVATION"
+    ]
+
+
 class _ShenDriver:
     """神诸葛亮的脚本玩家：排列按 ``order`` 答（``None`` = 恒等 = 不换），其余取最小合法应答。
 
@@ -2656,6 +2676,82 @@ def test_mark_expiry_hooks_only_fire_on_the_sources_own_turn_start():
         assert hook.condition(engine, own_turn) is True, (
             f"{skill_id}：自己的回合开始才清"
         )
+
+
+def test_dawu_and_kuangfeng_are_never_offered_at_turn_start():
+    """票 17（用户 2026-11-11 报障「大雾狂风在准备阶段触发了」）：准备阶段不问，结束阶段照问。
+
+    两条技能的钩子形状是「``PHASE_FINISH`` 的 flow（真发动）+ ``TURN_START`` 的强制纯回调
+    （标记到期清扫）」。清扫是**簿记段**（`Hook.bookkeeping`）：按链序静默跑，不跟同一时机的
+    另一段拼成「先结哪一条」的面——否则玩家在准备阶段会看到一张只含 `dawu` / `kuangfeng`
+    两条 `ActivateSkill`、提示语还是「是否发动该技能？」的面（与真正的结束阶段面长得一样）。
+
+    驱动**一整回合**（开局扣置 → 准备 → 摸牌 → 出牌 → 弃牌 → 结束阶段），以结束阶段那张
+    两条候选的面为停止点：准备阶段此前也是两条候选的面，现在一个技能都不该被问。
+    """
+    engine = _shen_engine(seed=7, seats=2)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: any(
+            timing is Timing.PHASE_FINISH
+            and {DAWU_SKILL, KUANGFENG_SKILL}.issubset(skill_ids)
+            for timing, skill_ids in _activation_faces(e)
+        ),
+    )
+    faces = _activation_faces(engine)
+    at_turn_start = [skills for timing, skills in faces if timing is Timing.TURN_START]
+    assert at_turn_start == [], (
+        f"准备阶段不问任何技能（两条到期清扫是簿记段）；实得 {at_turn_start}"
+    )
+    at_finish = [set(skills) for timing, skills in faces if timing is Timing.PHASE_FINISH]
+    assert at_finish == [{DAWU_SKILL, KUANGFENG_SKILL}], (
+        f"结束阶段照旧问「大雾 / 狂风」两条：实得 {at_finish}"
+    )
+
+
+def test_the_turn_start_expiry_still_runs_without_a_question():
+    """票 17：清扫照旧发生，只是不再有「是否发动」的面、记录流里也没有应答。
+
+    局面从座位 0 的回合开始跑，两枚标记的来源都是座位 0 ⇒ 第一步的 ``TURN_START`` 清扫就
+    该把它们清掉。正向断言落在**标记变化的 delta** 上（不是只看终局状态）：两条 delta 都是
+    `count=0`，所以这个用例不会因为"标记本来就没有"而空过。
+    """
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="大雾", source_seat=0, source_skill_id=DAWU_SKILL, count=1),
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=1),
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: not e.state.player(1).markers,
+    )
+
+    assert engine.state.player(1).markers == (), "标记照旧在来源的回合开始时清掉"
+    cleared = {
+        record.source_skill_id
+        for record in engine.records
+        if record.kind == "delta"
+        and getattr(record, "delta_type", None) == "marker_change"
+        and record.seat == 1
+        and record.count == 0
+    }
+    assert {DAWU_SKILL, KUANGFENG_SKILL} <= cleared, f"两条清扫都发生了；实得 {cleared}"
+    answered = [
+        record.action.skill_id
+        for record in engine.records
+        if record.kind == "action"
+        and isinstance(record.action, ActivateSkill)
+        and record.action.skill_id in (DAWU_SKILL, KUANGFENG_SKILL)
+    ]
+    assert answered == [], f"清扫不问发动 ⇒ 记录流里没有这两条技能的应答：实得 {answered}"
+    assert [
+        skills for timing, skills in _activation_faces(engine) if timing is Timing.TURN_START
+    ] == [], "清扫这一步不摆面"
 
 
 def test_dawu_prevents_non_thunder_damage_but_lets_thunder_through():
@@ -3397,11 +3493,22 @@ def test_bazhen_black_judgment_does_not_cancel_the_slash():
     assert engine.state.player(1).hp == 3, "判黑 ⇒ 【杀】照常造成 1 点伤害"
 
 
-def test_bazhen_is_offered_once_per_dodge_window():
-    """【无双】要两张【闪】：八阵在同一窗口里只出现一次（`providers_used` 的既有口径）。"""
-    red = _judge_card(Color.RED)
-    red2 = _judge_card(Color.RED)
+def test_bazhen_is_offered_again_in_the_second_dodge_event():
+    """【无双】的两张【闪】= **两次需要牌事件** ⇒ 提供者封禁按事件复位（票 04 §5）。
+
+    改造前的口径是"同一窗口里八阵只出现一次"（``providers_used`` 只在帧的**目标推进**时清）
+    ——那正是实机缺陷：八卦阵判定失败后用真【闪】补上第一张，第二张却不能再发动八卦阵。
+    语义应当是"一次杀的结算过程内，一旦以任何方式使用 / 打出了【闪】，封禁解除"。
+    判据 = 第二个事件的面里八阵**重新可点**，再判一次红就凑够两张、抵消【杀】。
+    """
+    red, red2 = _colored_cards("slash", Color.RED)[:2]
     slash = _slashes(1)[0]
+    excluded = {red, red2, slash}
+    fillers = [
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
+    ]
+    # 摸牌阶段先取走两张，然后两次判定依次取「红 / 红」。
+    deck = (fillers[0], fillers[1], red, red2, *fillers[2:])
     state = build_state(
         pack=PACK,
         seats=[
@@ -3410,7 +3517,7 @@ def test_bazhen_is_offered_once_per_dodge_window():
             SeatSpec(identity=Identity.LOYALIST),
             SeatSpec(identity=Identity.RENEGADE),
         ],
-        deck=_deck_with_top(PACK, red, slash, red2),
+        deck=deck,
         turn_seat=0,
         phase=Phase.PLAY,
         rule_config=RuleConfig(player_count=4),
@@ -3429,14 +3536,11 @@ def test_bazhen_is_offered_once_per_dodge_window():
         defender.dodges[0],
         lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
     ), "第一次可以发动"
-    assert (
-        find_action(
-            defender.dodges[1],
-            lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
-        )
-        is None
-    ), "同一窗口的第二次不再给八阵（每提供者只问一次）"
-    assert engine.state.player(1).hp == 3, "只挡了第一张【闪】，第二张没挡 ⇒ 照常受伤"
+    assert find_action(
+        defender.dodges[1],
+        lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+    ), "第二张 = 新的需要牌事件 ⇒ 八阵再次上脸（提供者封禁按事件复位）"
+    assert engine.state.player(1).hp == 4, "两次判定都红 ⇒ 两张【闪】凑够 ⇒ 抵消"
 
 
 # ---------------------------------------------------------------------------
@@ -4022,11 +4126,17 @@ def test_shuangxiong_is_offered_only_in_its_own_draw_phase():
     assert probe.Asked == 0, "不是自己的摸牌阶段 ⇒ 这条实例连「是否发动」都不问"
 
 
-def test_the_two_expiry_hooks_share_an_order_face_without_a_pass():
-    """【狂风】【大雾】的 ``TURN_START`` 到期清扫撞同一时机 ⇒ 一张"先清哪一条"的面、**没有** Pass。
+def test_the_two_expiry_hooks_run_silently_in_chain_order():
+    """【狂风】【大雾】的 ``TURN_START`` 到期清扫撞同一时机 ⇒ **静默**按链序跑完，不摆面。
 
-    lei-shenganning 票 95 的用户口径：同一时机的多段**技能**效果由玩家选顺序；两段都不可放弃
-    （都是 ``Hook.forced``、且都不是锁定技）⇒ 面上没有「放弃」，必须选一条。
+    table-ux-overhaul 票 17 的裁定：这两条清扫是**簿记段**（`Hook.bookkeeping=True`），
+    不是 lei-shenganning 票 95 那种"同一时机的多段**真效果**由玩家选先后"（【劫营】③ +
+    【镇骨】仍走那张面，`tests/test_hero_lei.py` 钉住）。簿记段按链序（`_chain_order`：
+    同座位同档按 ``skill_id``，故 ``dawu`` 先于 ``kuangfeng``）静默跑完：玩家既不会被问
+    "先清哪一条"，也不会在**准备阶段**看到一张「是否发动大雾 / 狂风」的面。
+
+    修复前的口径（用户 2026-11-11 实机报障）正是后者：那张面无 Pass、必须选一条，玩家
+    选中的"技能"会真的把结束阶段的流水线在准备阶段跑一遍。
     """
     from sgs.state import Marker
 
@@ -4047,27 +4157,12 @@ def test_the_two_expiry_hooks_share_an_order_face_without_a_pass():
             clear_on_source_death=True,
         ),
     )
-    player = _ShenDriver(activate_skills=(DAWU_SKILL,))
     run_queries(
         engine,
-        [player, PassPlayer()],
+        [PassPlayer(), PassPlayer()],
         lambda e: not e.state.player(1).markers,
     )
 
-    faces = [query for query in player.queries if query.kind == QueryKind.SKILL_ACTIVATION]
-    order_face = next(
-        query
-        for query in faces
-        if {
-            action.skill_id
-            for action in query.legal_actions
-            if isinstance(action, ActivateSkill)
-        }
-        == {KUANGFENG_SKILL, DAWU_SKILL}
-    )
-    assert not any(isinstance(action, Pass) for action in order_face.legal_actions), (
-        "两段都不可放弃 ⇒ 面上没有「放弃」出口（用户 2026-11-07 口径）"
-    )
     assert not engine.state.player(1).markers, "两条清扫都跑完了"
     removed = [
         record.name
@@ -4076,4 +4171,7 @@ def test_the_two_expiry_hooks_share_an_order_face_without_a_pass():
         and record.delta_type == "marker_change"
         and record.count == 0
     ]
-    assert removed == ["大雾", "狂风"], f"按玩家选的顺序结算；实得 {removed}"
+    assert removed == ["大雾", "狂风"], f"按链序静默结算；实得 {removed}"
+    assert [
+        skills for timing, skills in _activation_faces(engine) if timing is Timing.TURN_START
+    ] == [], "到期清扫是簿记段，不摆「先清哪一条」的面（票 17）"

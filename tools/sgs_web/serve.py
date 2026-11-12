@@ -11,6 +11,7 @@
 ``POST``         ``/api/sessions``                   建局；返回首个挂起与快照
 ``GET``          ``/api/sessions/<id>?after=&logs=`` 取增量；**顺带判定超时**
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
+``POST``         ``/api/sessions/<id>/preview``      预发动清单一步的**只读**预览（票 11）
 ``GET``          ``/api/heroes``                     开局页将池（启用并集、按真名分组的版本）
 ``GET``          ``/api/hero-presets``               将池存档（5 个常驻槽位 + 活动槽位）
 ``POST``         ``/api/hero-presets``               保存某个槽位并置为活动（覆盖该槽位）
@@ -20,6 +21,9 @@
 ===============  ==================================  ==================================
 
 **一次请求最多推进到下一个暂停点或终局**（D16，由 :meth:`Session.drive` 保证）。
+票 19 起"五谷的每名目标取牌之后"也是一个暂停点（逐目标可见）：:meth:`Session.submit_answer`
+的返回值说明"这一趟已经交出了一个中间视图"，故 :meth:`GameRegistry.advance_clock` 在同一趟
+响应里不再补推一步——一次响应最多一个暂停点，这是**同一调用栈上的事实**，不落在会话上。
 **过期应答 409、结构非法 400、未知会话 404，三种都不写记录、不改状态**（D15）。
 """
 
@@ -46,7 +50,7 @@ ensure_engine_importable()
 
 from sgs.data import DataLoadError, enabled_hero_ids, hero_by_id, load_content_pack  # noqa: E402
 from sgs.engine import IllegalActionError  # noqa: E402
-from sgs_web.narrative import narrative_after  # noqa: E402
+from sgs_web.narrative import NarrativeCursor  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     card_events_after,
@@ -54,10 +58,11 @@ from sgs_web.projection import (  # noqa: E402
     concealed_guohuo_cards,
     damage_events_after,
     decorate_records_card_tags,
+    issued_manifest,
     live_tag_deltas_after,
     life_loss_events_after,
     pending_payload,
-    query_actor_map,
+    session_harvest_state,
     skill_events_after,
     visible_record,
     visible_snapshot,
@@ -65,9 +70,11 @@ from sgs_web.projection import (  # noqa: E402
 from sgs_web.replay import list_runs, load_run, save_run  # noqa: E402
 from sgs_web.session import (  # noqa: E402
     DEFAULT_TIMEOUT_SECONDS,
+    RecordWindow,
     Session,
     StaleAnswer,
     create_session,
+    parse_ask_policy,
 )
 from sgs_web.timeout import fallback_action  # noqa: E402
 
@@ -149,6 +156,60 @@ def _empty_presets() -> dict[str, Any]:
         "active": 0,
         "slots": [{"banned_heroes": []} for _ in range(HERO_POOL_SLOTS)],
     }
+
+
+def _preview_answers(raw: object) -> list[tuple[str, tuple[object, ...]]]:
+    """预览请求体里的 ``answers`` → ``[(步名, 值元组)]``（**只**校验形状，非法 ⇒ 400）。
+
+    "步名与顺序对不对"不是这里判的：那是预览自己的判据（它拿着这次下发的清单，按
+    ``Step.name`` 逐步比对）。这里只保证载荷是个数组、每项有字符串步名与数组 ``values``
+    —— 把 ``{"values": 3}`` 这类形状错当成"空答案"会让预览悄悄回一个错误的步。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"预览请求的 answers 必须是数组：{raw!r}")
+    out: list[tuple[str, tuple[object, ...]]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(f"预览答案的每一项都必须是对象：{entry!r}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"预览答案缺步名：{entry!r}")
+        values = entry.get("values", [])
+        if not isinstance(values, list):
+            raise ValueError(f"预览答案的 values 必须是数组：{entry!r}")
+        out.append((name, tuple(values)))
+    return out
+
+
+def _pick_slots(raw: object, slot_count: int) -> tuple[int, ...]:
+    """选牌预览请求体里的 ``picks`` → 面内下标元组（**只**校验形状，非法 ⇒ 400）。
+
+    两种写法都收（与票 11 预览的座位 ``3`` / ``"seat:3"`` 同一姿态）：座位号式的
+    ``"slot:3"`` 文本（`StepPool` 的文本候选同口径）与裸整数。**不**猜"越界的当没选"：
+    槽位是这一面的下标，越界 / 重复 / 认不出的写法都按结构非法回落 400（fail-closed，
+    静默纠正会让界面把"看不见的面"读成"全都点得动"）。
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"选牌预览的 picks 必须是数组：{raw!r}")
+    slots: list[int] = []
+    for entry in raw:
+        if isinstance(entry, str) and entry.startswith("slot:"):
+            entry = entry[len("slot:") :]
+        # 只认整数与 `slot:N` 文本：bool 是 int 的子类、float 会被 int() 悄悄截断，先挡掉。
+        if isinstance(entry, bool) or not isinstance(entry, (int, str)):
+            raise ValueError(f"选牌预览的 picks 只认面内下标：{entry!r}")
+        try:
+            index = int(entry)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"选牌预览的 picks 只认面内下标：{entry!r}") from error
+        if not 0 <= index < slot_count:
+            raise ValueError(f"选牌预览的 picks 越界（这一面只有 {slot_count} 槽）：{index}")
+        if index in slots:
+            raise ValueError(f"选牌预览的 picks 有重复的槽位：{index}")
+        slots.append(index)
+    return tuple(sorted(slots))
 
 
 def _known_hero_ids() -> set[str]:
@@ -270,12 +331,33 @@ KEEP_FINISHED_SESSIONS = 2
 以及"刚打完、页面可能还在轮询的那几局"，故留最近 2 局当缓冲。
 """
 
+ABANDONED_SESSION_SECONDS = 30 * 60.0
+"""未终局会话**多久没人访问**就算放弃（table-ux-overhaul 票 01）。
+
+旧口径只在 `save_if_finished` 里回收 ⇒ 只有**打到终局**的局才会被回收；中途关掉标签页 /
+输了就跑的局永远留在 `GameRegistry.sessions` 里，实测每局 +9~23 MB（RSS 47→64→87→101→110
+MB / 4 局）——这就是"同一进程第二局也卡"的机制。阈值取 30 分钟：比任何一次真的思考 / 看
+录像都长，又远短于"人已经走了、进程还开着"。
+"""
+
+KEEP_LIVE_SESSIONS = 2
+"""未终局会话的**保底面**：最近访问的这几局永不按空闲回收（table-ux-overhaul 票 01）。
+
+"最近"按 `Session.last_access` 算。与 :data:`KEEP_FINISHED_SESSIONS` 同姿态：内存里只需
+"还在打的"那几局，超出且久未访问的局回收后客户端拿 404（页面自己会提示重新开局）。
+"""
+
 
 class GameRegistry:
     """内存里的会话表；**一局一个会话**，进程重启即丢（D15、`06` §2"单机跑通再谈"）。
 
-    **终局回收**（perf-web 票 01）：`save_if_finished` 落盘成功后，较旧的已终局会话从
-    :attr:`sessions` 里移除（保留最近 :data:`KEEP_FINISHED_SESSIONS` 局 + 全部未终局）。
+    **会话回收**（perf-web 票 01 + table-ux-overhaul 票 01）三条口径：
+
+    1. **终局落盘后**回收较旧的已终局会话（保留最近 :data:`KEEP_FINISHED_SESSIONS` 局）；
+    2. **建新局时**回收"久未访问且未终局"的会话（保留最近 :data:`KEEP_LIVE_SESSIONS` 局）——
+       中途放弃的局此前永远留在内存里，这是"同一进程第二局也卡"的机制；
+    3. **每次取增量**时顺带按同一判据扫一眼（闲置进程不靠"有人建局"才回收）。
+
     被回收的会话再取 ⇒ :meth:`get` 抛 ``KeyError``（HTTP 层 404）；它的回放改走文件，
     不受影响。
     """
@@ -322,11 +404,22 @@ class GameRegistry:
             # 不读本地存档——存档只是开局页的编辑器初值，玩家点了「开始」就以当时的集合为准。
             banned_heroes=body.get("banned_heroes") or (),
             timeout_seconds=body.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
+            # 询问策略（table-ux-overhaul 票 02）：会话配置，缺省 **ON**（网页口径）。
+            # 引擎缺省 OFF 的旧口径由"字段缺席"以外的一切调用方保持，见 AskPolicy。
+            ask_policy=parse_ask_policy(body.get("ask_policy")),
             pack=pack,
             session_id=f"s{self._counter}",
+            # L0 边界（table-ux-overhaul 票 14）：建局响应止于"游戏开始时"派发完——
+            # 这是**接入层的建局口径**，故只在这一条生产路径上打开；库层（单测 / 构造
+            # 局面夹具）缺省仍是一路驱动到人类第一问。
+            pause_after_game_start=True,
         )
         session.mark_pending(time.monotonic())
         self.sessions[session.session_id] = session
+        # **先登记、再回收**（table-ux-overhaul 票 01）：建局这一刻是回收"中途放弃的局"的
+        # 时机——它们不会因为不再有人访问而自己消失。新局刚刚打了"此刻"的访问戳，永远排在
+        # "最近 N 局"里，不会被这一趟误收。
+        self._prune_abandoned(time.monotonic())
         return session
 
     def get(self, session_id: str) -> Session:
@@ -337,21 +430,43 @@ class GameRegistry:
 
     # -- 取增量（**超时判定的唯一触发点**） ---------------------------------
 
-    def advance_clock(self, session: Session) -> None:
-        """到点就代答，可能连续代答多次（超时后引擎又停在同一个人类的下一问）。"""
+    def advance_clock(self, session: Session, *, drive: bool = True) -> None:
+        """取增量这一条路上的两件事：**把引擎推到下一个暂停点** + 到点就代答。
+
+        前者是 table-ux-overhaul 票 14 的 L0 边界：建局响应止于 ``GAME_START``，人类第一问
+        要由**下一次取增量**驱动出来（``Session.drive`` 只在 L0 边界停一次，第二趟就一路
+        跑到人类第一问）。对已经停在询问上 / 已终局的会话它是零动作。
+        顺序不能倒：先驱动、后打戳（``mark_pending`` 看到的那一问才是这一趟刚产出的那一问，
+        倒计时从它出现的那一刻起算）。
+
+        五谷逐目标暂停（票 19）：``drive=False`` = 这一趟的应答（``submit_answer``）**已经**
+        停在取牌暂停点上（它的返回值就是这件事），那一次的视图就是中间状态本身——多推一步
+        会把两个暂停点并进一份响应，前一个就看不见了。
+        """
+        if drive:
+            session.drive()
         now = time.monotonic()
+        # `mark_pending` 顺带打上"最后访问时刻"（票 01 的会话回收判据）。
         session.mark_pending(now)
+        # 取增量是全进程最频繁的入口：顺手扫一次放弃的局，不必等"有人建新局"才回收。
+        self._prune_abandoned(now)
         while session.expire_if_due(time.monotonic(), fallback_action):
             pass
 
     def view(self, session: Session, *, after: int, logs_after: int) -> dict[str, Any]:
-        """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。"""
-        all_records = session.records()
-        window = session.records_after(after)
+        """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。
+
+        **记录流只扫一趟**（table-ux-overhaul 票 01）：`Session.window(after)` 一次给出
+        本批切片 / 新游标 / 应答者表 / 序号上界；四条派生通道读**尾部窗口**而不是整条流，
+        叙事走会话自己的增量缓存。此前这里对记录流扫了 7 趟，其中四条通道把整条流
+        `model_dump + json.dumps + json.loads` 一遍（N=6612 时 2.38 s / 单次 view 2.7 s）。
+        """
+        batch = session.window(after)
+        window = batch.tail
         # U4-06 / D13：`action` 记录按查看者放行——只有人类座位自己的应答展开细节。
         # 应答者 = `answers_seq` 指向的那次询问的 actor；映射取**全量**记录（询问可能
         # 早于 `after` 游标），展开只对窗口里的记录做。
-        query_actors = query_actor_map(all_records)
+        query_actors = batch.query_actors
         # 掩码按"**这批记录里**谁在验明之前就在处理区"算，而不是只按当下的结算栈算：
         # 一次没有目标步的【蛊惑】会在同一批记录里走完扣置 → 验明，等这批下发时栈上已经
         # 不剩什么，只看栈就会把扣置那条搬牌记录连同**源牌牌面**一起发出去（用户实机
@@ -381,7 +496,7 @@ class GameRegistry:
         # 标签 delta 仍不进人类记录流（`visible_record` 裁掉）；这张牌的**可见**增删
         # 另走展示通道，前端据此逐事件更新 live view，不必等下一次询问。
         decorate_records_card_tags(records, session.engine.state, session.human_seat)
-        return {
+        payload: dict[str, Any] = {
             "session_id": session.session_id,
             "seed": session.seed,
             "player_count": session.rule_config.player_count,
@@ -391,11 +506,18 @@ class GameRegistry:
             "timeout_seconds": session.timeout_seconds,
             "pending_since": session.pending_since,
             "finished": session.finished,
-            "cursor": session.next_cursor(after),
+            "cursor": batch.cursor,
             "log_seq": session.log_seq,
             "snapshot": snapshot,
             "skills": build_skills(session, session.human_seat),
             "pending": pending_payload(session),
+            # table-ux-overhaul 票 18（服务端 D 方案）：五谷结算的**视图级**派生状态，与
+            # `pending.harvest` 同一份派生（`projection.session_harvest_state`，共用
+            # `Session.harvest_cache`）。它让亮牌面**不依赖"这一次询问是不是亮牌步"**——
+            # 客户端每次视图提交都能拿到结算的最新状态（谁拿走了哪张 / 目标条四态 / 当前
+            # 目标），不必等下一条恰好带 `harvest` 的询问。键恒在（没有活跃结算 ⇒ None）；
+            # 只读派生，不进记录流 / 金录像。
+            "harvest": session_harvest_state(session),
             "records": records,
             "live_deltas": live_tag_deltas_after(
                 window,
@@ -406,30 +528,26 @@ class GameRegistry:
             ),
             # U1-05 叙事契约：简易事件流的条目由服务端生成、按查看者过滤；前端只渲染。
             # 游标复用记录流的 `after`——条目自带产生它的记录 `seq`，两批拼接 = 全量。
-            "narrative": narrative_after(
-                all_records,
-                after=after,
-                viewer=session.human_seat,
-                heroes=session.hero_assignments,
-                pack_id=session.pack.pack_id,
-            ),
+            "narrative": self._narrative(session, batch, after),
             # U3-04 / D8.2 + lei 票 06：技能发动是**派生通道**，不是记录流的新事实——
             # 两路合成同一条 `skill_events`：① 未裁剪记录里「已接受、动作点名了技能」的
             # 那几条（补上被 `visible_record` 裁掉的 skill_id / choices）；② 引擎的发动缓冲
             # `Engine.skill_activations`（记录面没有技能归属的锁定技 / 转化技）。与
             # `records` 共用同一个 `after` 游标。
             "skill_events": skill_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 activations=session.engine.skill_activations,
+                # 应答指向的询问可能早于本批游标 ⇒ 应答者表取**全量**那一份。
+                query_actors=query_actors,
             ),
             # damage-fx 票 02：伤害事实是**第二条派生通道**，与 `skill_events` 同姿态——
             # 事实来源是引擎的只增缓冲 `Engine.damage_events`（票 01），共用同一个 `after`
             # 游标 ⇒ 轮询不重复下发。`HpChangeDelta` 里没有来源与属性，剑光的起 / 落点只能
             # 从这里读；伤害是公开事实（血条本来就公开），不按视角过滤。
             "damage_events": damage_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 events=session.engine.damage_events,
@@ -440,7 +558,7 @@ class GameRegistry:
             # `card_move(reason=USE)`，而"这次当成什么牌用掉"（转化 / 纯虚拟的产物牌型）
             # 与"使用者性别"都只能从这里读；使用 / 打出是公开事实，不按视角过滤。
             "card_events": card_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 events=session.engine.card_events,
@@ -451,13 +569,48 @@ class GameRegistry:
             # `LIFE_DECREASE_DAMAGE_KEY`，不进记录流），墨因此只能从这里读；体力是公开事实，
             # 不按视角过滤。排播 / 画面不在本票（票 02 / 03）。
             "life_loss_events": life_loss_events_after(
-                all_records,
+                window,
                 after=after,
                 state=session.engine.state,
                 events=session.engine.life_loss_events,
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }
+        # 开局底稿（table-ux-overhaul 票 14）：**发牌前**那一帧的权威快照，只在
+        # `after < 0`（首屏 / 建局那一次）随载荷下发。它不是记录流的一部分（不进
+        # `records`、不是 delta），回放单独喂记录流时逐字节不受影响；前端拿它当开局批的
+        # 回放底稿，不再从 post-init 快照倒推。其余批**不带这个键**（不是 `null`）。
+        if after < 0:
+            payload["setup"] = session.setup
+        return payload
+
+    # -- 叙事增量缓存（票 01） -----------------------------------------------
+
+    def _narrative(
+        self, session: Session, batch: RecordWindow, after: int
+    ) -> list[dict[str, Any]]:
+        """本批的叙事条目（票 01：只派生**新增的那一段**，不再整份重建再过滤）。
+
+        缓存挂在会话自己身上（``Session.narrative_cursor``）：随会话一起建、一起丢，既不
+        需要第二张注册表，也不会在回收会话时漏掉。首见 / 键（查看者·阵容·内容包）变了
+        才喂**整条**记录流（保住轮次 / 阶段 / 亮牌帧这些跨批上下文），之后只喂尾部窗口。
+        """
+        cursor = session.narrative_cursor
+        if not isinstance(cursor, NarrativeCursor) or not cursor.accepts(
+            viewer=session.human_seat,
+            heroes=session.hero_assignments,
+            pack_id=session.pack.pack_id,
+        ):
+            cursor = NarrativeCursor(
+                viewer=session.human_seat,
+                heroes=session.hero_assignments,
+                pack_id=session.pack.pack_id,
+            )
+            cursor.extend(batch.records)
+            session.narrative_cursor = cursor
+        else:
+            cursor.extend(batch.tail)
+        return cursor.entries_after(after)
 
     # -- 应答 ---------------------------------------------------------------
 
@@ -469,9 +622,129 @@ class GameRegistry:
             action = parse_action(raw)
         except Exception as error:  # pydantic ValidationError：结构非法
             raise ValueError(f"应答结构非法：{error}") from error
-        session.submit_answer(action)
-        self.advance_clock(session)
+        paused = session.submit_answer(action)
+        self.advance_clock(session, drive=not paused)
         return self.view(session, after=after, logs_after=logs_after)
+
+    # -- 步骤预览（票 11：只读） ---------------------------------------------
+
+    def preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
+        """**只读**预览：这一步此刻的候选 / 还能点哪些槽位（票 11 落清单步，票 15 扩选牌面）。
+
+        两种形状、同一份纪律：
+
+        - **预发动清单一步**（body 带 ``skill_id`` + ``answers``）⇒ :meth:`_manifest_preview`。
+          读的是与校验器**同一份**池 / 界回调（:func:`sgs.skills.flow.preview_step` 复用
+          ``_with_answers`` + ``_seat_bounds`` / ``_resolve_options`` / ``_card_options``），
+          故"预览说能点"与"提交会被接受"不可能各说一套。
+        - **选牌面**（body 只带 ``picks``）⇒ :meth:`_pick_preview`：自家手牌面上"还要点哪
+          几张才凑得出合法答案"由引擎的选牌枚举器现算，前端只读 ``disabled``。
+
+        **只读全停**：不建询问、不写记录、不耗序号、不搬牌、不抽随机数（与
+        :meth:`Engine.respond_candidates` 同一条纪律），也不碰 ``view()`` / 投影 / 快照
+        ——预览是"每变一次选择问一次"的热路径，票面的性能底线就落在这条上。
+
+        ``answers_seq`` 对不上当前挂起 ⇒ :class:`StaleAnswer`（409，与 ``/answer`` 同形：
+        服务端唯一承认的"当前询问"仍是那一个）。**不**走 :meth:`advance_clock`：预览不能
+        触发超时代答（那会改状态），只打一次"最后访问"戳（会话回收的判据）。
+        """
+        pending = session.pending
+        answers_seq = body.get("answers_seq")
+        if pending is None or answers_seq != pending.seq:
+            raise StaleAnswer(pending, human_seat=session.human_seat)
+        if "picks" in body:
+            return self._pick_preview(session, body)
+        return self._manifest_preview(session, body)
+
+    def _manifest_preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
+        """预发动清单**一步**的现算候选：能点谁 / 能不能进下一步 / 能不能提交（票 11）。
+
+        行为与回包字段自票 11 起**逐字不变**（票 15 只把 ``preview`` 拆成两档，没动这一档）。
+        """
+        from sgs.skills import preview_activation
+
+        pending = session.pending
+        skill_id = body.get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id:
+            raise ValueError("预览请求缺 skill_id")
+        steps = issued_manifest(pending, skill_id)
+        if not steps:
+            raise ValueError(f"技能 {skill_id} 不在这次询问下发的预发动清单里")
+        answers = _preview_answers(body.get("answers"))
+        engine = session.engine
+        # 承载上下文与校验器**同一条取法**（栈顶优先，帧外时机退回那一次的承载帧）：
+        # 池回调读的帧必须与复合动作提交时那份一致，否则预览与裁决会各说一套。
+        frame = engine.stack.top if engine.stack else engine.activation_frame
+        try:
+            preview = preview_activation(
+                engine.state,
+                pending.actor,
+                skill_id,
+                answers,
+                steps,
+                timing=pending.timing,
+                frame=frame,
+            )
+        except KeyError as error:
+            # 池回调要帧上下文而这一问没有 / 提供步给了不在池里的牌 id：都是"这份载荷此刻
+            # 算不出来"⇒ 结构非法（400）。**不能**漏成 KeyError——那会被 `do_POST` 的
+            # "未知会话"分支接走，回一个与真相无关的 404。
+            raise ValueError(f"预览算不出这一步的候选：{error}") from error
+        session.touch(time.monotonic())
+        return {
+            "cursor": preview.cursor,
+            "kind": preview.kind,
+            "options": list(preview.options),
+            "disabled": list(preview.disabled),
+            "can_advance": preview.can_advance,
+            "can_submit": preview.can_submit,
+            "next": preview.next,
+        }
+
+    def _pick_preview(self, session: Session, body: dict[str, Any]) -> dict[str, Any]:
+        """选牌面**此刻还能点哪些槽位**（table-ux-overhaul 票 15；body 只带 ``picks``）。
+
+        判据**不是**另一条规则：它读 :func:`sgs.effects.pick_completions`——与候选生成
+        同一个枚举器（`effects/actions.py:select_card_picks`）——回答"给定已选的这几张，
+        哪些槽位还出现在某个**合法补全**里"。故"预览说点得动"与"候选里真有那条"不可能
+        各说一套：`max_per_suit` 这类候选生成期的收窄因此自动同源，前端不再自己数花色。
+
+        三个字段：
+
+        - ``disabled`` = 不在任何含当前 picks 的补全里的槽位。**已选的除外**：再点一下是
+          取消，把它锁死会让玩家退不出这一组（服务端自己的候选也从不排除"再点一次"）。
+        - ``can_submit`` = 当前 picks **本身**就是一条合法答案（= 提交会被接受）。
+        - ``can_advance`` = 还补得下去（``False`` = 这组选择已是死路，得先退一张）。
+
+        与 :meth:`_manifest_preview` 同一条只读纪律：不建询问、不写记录、不耗序号、
+        不搬牌、不抽随机数，也不碰 ``view()`` / 投影 / 快照。
+        """
+        from sgs.effects import pick_completions
+
+        pending = session.pending
+        if str(getattr(pending, "kind", "")) != "SELECT_CARDS":
+            raise ValueError("这一问不是选牌面，不能问选牌预览")
+        if int(pending.actor) != int(session.human_seat):
+            raise ValueError("选牌预览只服务应答者本人的选牌面")
+        skill_id = body.get("skill_id")
+        if isinstance(skill_id, str) and skill_id:
+            # 两种形状各有各的必需键。混着发会让"缺 skill_id"与"缺 picks"两条 400 互相
+            # 掩盖，前端也就分不清自己问的是哪一种。
+            raise ValueError("选牌预览的载荷不带 skill_id（那是预发动清单预览的形状）")
+        slots = tuple(getattr(pending, "slots", ()) or ())
+        picks = _pick_slots(body.get("picks"), len(slots))
+        completions = pick_completions(slots, pending.spec, picks)
+        reachable = {index for combo in completions for index in combo}
+        session.touch(time.monotonic())
+        return {
+            "disabled": [
+                f"slot:{index}"
+                for index in range(len(slots))
+                if index not in picks and index not in reachable
+            ],
+            "can_submit": picks in completions,
+            "can_advance": bool(completions),
+        }
 
     # -- 终局落盘 -----------------------------------------------------------
 
@@ -499,7 +772,30 @@ class GameRegistry:
         """回收较旧的已终局会话：保留最近 :data:`KEEP_FINISHED_SESSIONS` 局 + 全部未终局。"""
         while len(self._finished_order) > KEEP_FINISHED_SESSIONS:
             oldest = self._finished_order.pop(0)
-            self.sessions.pop(oldest, None)
+            self._drop_session(oldest)
+
+    def _prune_abandoned(self, now: float) -> None:
+        """回收"久未访问且未终局"的会话：保留最近 :data:`KEEP_LIVE_SESSIONS` 局（票 01）。
+
+        "最近"按 :attr:`Session.last_access`（GET / answer / create 三条入口都会打戳）：
+        最近那几局**永不**按空闲回收——同一进程里可能还有页面在轮询；更旧的局只有空闲超过
+        :data:`ABANDONED_SESSION_SECONDS` 才收。未落盘的**已终局**会话不在本函数的回收面内
+        （它们马上会被 :meth:`save_if_finished` 写成文件，丢了就真丢了）。
+        """
+        live = [session for session in self.sessions.values() if not session.finished]
+        if len(live) <= KEEP_LIVE_SESSIONS:
+            return
+        live.sort(key=lambda session: session.last_access, reverse=True)
+        for session in live[KEEP_LIVE_SESSIONS:]:
+            if not session.last_access:  # 直接构造、没打过戳的会话：无从判"久未访问"
+                continue
+            if now - session.last_access < ABANDONED_SESSION_SECONDS:
+                continue
+            self._drop_session(session.session_id)
+
+    def _drop_session(self, session_id: str) -> None:
+        """把一局从内存里摘掉（会话本身带着自己的叙事缓存，故这里只有一张表要清）。"""
+        self.sessions.pop(session_id, None)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -603,6 +899,10 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/sessions":
                 session = self.registry.create(body)
                 self._send_json(200, self.registry.view(session, after=-1, logs_after=0))
+                return
+            if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/preview"):
+                session_id = parsed.path[len("/api/sessions/") : -len("/preview")]
+                self._send_json(200, self.registry.preview(self.registry.get(session_id), body))
                 return
             if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/answer"):
                 session_id = parsed.path[len("/api/sessions/") : -len("/answer")]

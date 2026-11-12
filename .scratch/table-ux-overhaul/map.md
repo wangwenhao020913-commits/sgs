@@ -34,6 +34,16 @@
 | 2026-11-11 | Q15/Q20 转化清单三级置灰 | 12 |
 | 2026-11-11 | Q16 转化牌与真牌同档（官方规则集无条文 + 移动版实际行为） | 04 |
 | 2026-11-11 | Q21 并发写者已收口（HEAD `a36acf0`，工作树仅 2 个 untracked） | — |
+| 2026-11-11 | **实施期裁定（缺口 #甲）**：票 13 会改 `58-jie-luxun-hero-zone.jsonl` 的记录流，而票 06 是纯文档、排在 13 之前 ⇒ **由票 13 在自己的提交里重录自己的基准**（照 `spec §3 注①` 的纪律，而非票 13 原文"交票 06"）。票 06 的账本行改成通式"重录随行为票同提交" | 06 / 13 |
+| 2026-11-11 | **实施期裁定（缺口 #乙）**：票 11 §C 说清单"不再下发 `pool`/`groups`/`disabled`"，票 12 又要求源牌级/产物级 `disabled` ⇒ **11 退役的是"逐组合静态池行"与 `MANIFEST_POOL_LIMIT` 退化分支；`disabled` 字段保留并由票 12 重新定义语义**（源牌级 / 产物级，询问时算一次） | 11 / 12 |
+| 2026-11-11 | **实施期裁定（缺口 #丙）**：`开发文档/04-AI与交互设计.md` 在票 06 的 Touches 里但「要写什么」未要求（06 有意不扩面）⇒ **改由票 08 在其提交里一并收口**（§4「预发动」的"不是弹窗 / 取消回第一步"实现口径 + §1"每层 N 次询问"在网页缺省 ON 后 N = 合格者数） | 08 |
+| 2026-11-11 | **实施期裁定（缺口 #丁）**：票 10 与票 14 都写了"补 `hp_max_change`/`armor_change`/`marker_change` 派生" ⇒ **归票 10**（前端 live 派生 + 空转指纹字段），**票 14 只做服务端 `setup` 底稿 + 删 `openingLiveView` 的倒推**，不重复实现派生 | 10 / 14 |
+| 2026-11-11 | **实施期裁定（缺口 #戊，`spec §5` 的实机条目）**：本机 `bsk` **不可驱动**——`browser_session start` 成功、但所有 `browser_page navigate` / `browser_tabs create` / `browser_interact` 均被 `Page frames cannot be observed: 0 (about:)` 与 `requires the context returned by the latest cooperate sync` 拒绝（子代理与编排者各撞一次，换 session / noFocus / reload 无效；`tools/check_env.sh` 只做"插件在不在"的静态预检，故仍报 PASS）。⇒ 按仓规改为**配方 + 结束 turn**：票 07/08/09/10/13/14 的 `## Answer` 各带实机配方，DOM 形状的功能面由 `bash tests/smoke-web.sh` + `tests/test_action_contract.py` + `bash tests/test_web.sh`（真 HTTP tape）覆盖；**真实浏览器那一步留给用户**（验收清单见本次交付报告） | 07/08/09/10/13/14 |
+| 2026-11-11 | **实施期裁定（缺口 #己，Q18 文案对的覆盖度）**：`prompts.json` 现状 142 条 `ask` / 3 条 `done`。按 Q23（"我先出初稿，用户改字"）+ §7 风险（"文案普查是大头工作量"），**本轮交付的是初稿**：`ask` 已铺满、`done` 只落在逐级累加被行使的用例上（离间三步），机制（三层回退 / 累加 / 键名合法性）已实现并钉住；**其余 139 步的 `done` 措辞属用户的改字那一遍**，不视为机制缺口 | 07 |
+| 2026-11-11 | **实施期裁定（缺口 #庚，review 发现的未归属规格）**：`/code-review` 的 Spec 轴指出 `spec §2 Q6` 的"业炎花色由后端算"没有任何一票接手（09 只落止损、11/12 按各自票面没收）⇒ **新增票 15** `issues/15-own-hand-legality-preview.md`（预览端点扩到 `SELECT_CARDS`，退役 `ownZoneSuitTaken`）。Q22 的"14 票"因此变为 15 票（过程事实，不回溯改 spec §3 的批次表） | 15 |
+| 2026-11-11 | **实施期裁定（缺口 #辛，评审修复的口径变化）**：`RespondContext.skip_if_empty` 曾是"写进载荷但无人读"的字段（违 `CODING_STANDARDS` §1）⇒ 评审修复 `eb1c50a` 把它改成**唯一载体**：新增 `Engine.respond_context(...)` 建一份 `RespondContext`，`should_ask_respond` / `respond_candidates` / `ask_respond` **只收这一个对象**，类别位由 `should_ask_respond` 读 `ctx.skip_if_empty`。**新纪律**：RESPOND 窗口的"这次要不要问"声明点 = `respond_context`；`ask_respond` / `respond_candidates` 只是消费者，不许再各自接一份参数字段 | 02 / 05 / 15 |
+| 2026-11-11 | **实施期裁定（缺口 #壬，用户实机报障后的口径）**：① `preactivationReady`（票 08 前的"光标须越过末尾"语义）与 `preactivationSubmitAllowed`（票 08/11 后的"最后一步填满即可"）是**两份判据** ⇒ 页脚说"还没填完"而标题说"已填完"、按下不能提交（离间 / 贯石斧两张截图）。**判据单源**，旧语义删除 ② 步骤**不再画成按钮**：提示区只显示**当前这一步**的字符串问法（票 07 的累加文案已表达"前几步完成"），只有真选项（雌雄二选一）是按钮，且尺寸收紧。`spec §2 Q12` 的"控件区按钮"只指**真选项**，不指步骤条 ⇒ 新增票 16 | 16 |
+| 2026-11-11 | **实施期裁定（缺口 #癸，用户第二轮实机报障，两条都**不是**本 effort 的回归）**：① 【大雾】【狂风】在**准备阶段**被问——`_dispatch` 的"同座位同档多段强制效果选先后"面把 `TURN_START` 上的 **handler-only 强制段**（标记过期）也收进了面；基线 `3a37f57` 上逐字相同。口径：**簿记段静默跑**，玩家可见面只收有发动形态（flow / 可放弃段）的候选 ⇒ 票 17 ② 五谷丰登亮牌面**目标条压住牌面**且**被拿走的牌不刷新**——数据侧已对（`tests/test_web.py` 的真会话断言证明 `taken_by` / `status` 跨目标正确），是 `.reveal-targets` 的绝对定位 + 亮牌节点不随新 pending 重画 ⇒ 票 18 | 17 / 18 |
 
 ## Fog（已知未知，实现时会撞上）
 
@@ -43,3 +53,5 @@
 4. **文案模板的默认值覆盖度**（票 07）：63 处 `step_requirements` 之外还有 34 条 flow 的步骤名；缺的用通用模板，不强求一次补齐。
 5. **重录清单的粒度**（票 06）：按"基准文件"还是按"记录 seq"登记——建议按文件 + 一条摘要，逐条列在票面 `## 重录清单`。
 6. **引擎侧是否有别的"询问无文本"面**（票 07 顺带核）：`_build_query` 逐类写死 prompt，需确认没有空串分支。
+| 2026-11-11 | **收口后的收尾（缺口 #癸 补记）**：票 17 的落地不是字面判据（劫营③/镇骨实测也是 handler-only forced），而是显式 `Hook.bookkeeping` 声明（只给两条 `TURN_START` 清扫），已登记 `shapes.md`；票 18 落 `view.harvest`（服务端同一份派生）+ CSS 目标条进流。票 19（逐目标可见）在设计写清后**用户叫停**，保持 `open`，未开工 | 17 / 18 / 19 |
+| 2026-11-12 | **实施期裁定（缺口 #子，票 19 扩面）**：票面只列了接入层与断言，但"停点交给浏览器"要落三处票面外的东西：① 引擎 `run` 多一个**驱动判据** `stop_when`（与票 14 的 `stop_after_game_start` 同一种机制、同一风格，缺省关）；② HTTP 面"一次响应最多一个暂停点"（`drive()` / `submit_answer()` 返回"这一趟停在暂停点上"，`answer()` 据此给 `advance_clock(drive=False)`——**同一调用栈**，不落会话标志）；③ 客户端**空窗窗寿命**（`pending` 为 null 时原 `syncDialog` 直接关窗）⇒ `harvestStateWithoutPending` / `dialogRevealSource`。判据本身仍是**票 18 的同一份派生**（`harvest_state` + 同一份扫描缓存），不是第二份。另：票 19 的"client 不改判据"按"`taken_by`/`status` 仍全部来自服务端"执行，不是"客户端零改动"。**用户实机验收通过**（2026-11-12） | 19 |

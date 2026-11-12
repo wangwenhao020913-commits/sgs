@@ -29,6 +29,7 @@ from sgs.effects import (
     TargetCount,
     TargetRule,
     apply_modifiers,
+    check_usable,
     legal_actions_for,
     locate,
     target_is_effective,
@@ -38,10 +39,13 @@ from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
     VirtualSourceError,
+    conversion_sources_by_product,
     kind_source_ceiling,
     preactivation_for,
+    transform_candidates,
     transformed_card,
     transformed_slash,
+    unusable_transform_sources,
     virtual_card_id,
     virtual_dodge,
 )
@@ -3305,4 +3309,128 @@ def test_a_transformed_borrowed_confirmation_resolves_bn_plus_two_extra_targets(
     )
     assert [player.hp for player in engine.state.players] == [3, 4, 3, 3], (
         "Bn（座位 0）+ 两个额外目标（2 / 3）各结算一次【杀】"
+    )
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 12：转化清单的**源牌级置灰**与**产物级置灰**（spec §2 Q15 / Q20）
+#
+# 三级置灰的落点（本票只落前两级；第三级“目标级”由票 11 的步骤预览回答）：
+#
+# - **源牌级**：这张源牌**全部产物都不可用**才灰。判据只读 `check_usable` 的**前三条**
+#   （时机 / 禁用 / 次数）——不含“有没有合法目标”，因为那是产物级与目标级的事。
+# - **产物级**：选定源牌后逐产物判“此刻能不能用”，读**整条** `check_usable`（含目标池）。
+#   本仓唯一有“产物步”（牌名步）的转化 = 界沮授【渐营】②（见 `test_hero_jie_yijiang.py`
+#   的同名用例）：H 族转化清单没有牌名步，一张源牌在一条技能下只对应一个产物，所以那里的
+#   产物级判据必然退化成源牌级——本票不在两级之间造第二种形状。
+#
+# **灰的仍要看得见**：置灰项留在 `options` 里（`options` 从“能点的来源”升级成“这一步
+# 列出的来源”，可点集合 = `options − disabled`），同时进 `StepPool.disabled` 让界面画灰 +
+# 悬停说明。删掉它们会让玩家以为清单漏牌。
+# ---------------------------------------------------------------------------
+
+
+def test_a_source_card_with_no_usable_product_is_disabled_in_the_manifest():
+    """源牌级置灰：**所有产物都不可用**的源牌进 ``disabled``，且仍在 ``options`` 里。
+
+    局面：赵云【龙胆】出牌阶段，手里一张【杀】+ 一张【闪】。
+
+    - 【闪】当【杀】：产物【杀】有合法目标 ⇒ 是候选 ⇒ 源牌亮；
+    - 【杀】当【闪】：产物【闪】在**出牌阶段没有使用时机**（``check_usable`` 的第 1 条）
+      ⇒ 这张【杀】此刻一个产物都用不上 ⇒ 源牌级置灰。
+
+    反面对照（同一份判据的边界）：**“没有合法目标”不算源牌级不可用**。关羽手里一张红牌、
+    对手【空城】时【杀】没有可指的人，但这仍是“产物级 / 目标级”的结论 ⇒
+    :func:`~sgs.skills.unusable_transform_sources` 不把那张红牌算成灰。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_SLASH, RED_DODGE), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_SLASH, RED_DODGE),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    steps = _manifest(state, _virtual_actions(state), ZHAOYUN_SLASH)
+    source = steps[0]
+    assert source.name == "card"
+    row = source.pool[0]
+    assert set(row.options) == {str(RED_SLASH), str(RED_DODGE)}, (
+        f"灰的源牌也必须列出来（玩家会以为清单漏牌）：{row.options}"
+    )
+    assert tuple(row.disabled) == (str(RED_SLASH),), (
+        f"【杀】当【闪】在出牌阶段没有时机 ⇒ 这张【杀】的产物全都不可用 ⇒ 灰：{row.disabled}"
+    )
+    assert str(RED_DODGE) not in row.disabled, "【闪】当【杀】此刻能用 ⇒ 不许灰"
+    assert len(steps) == 2 and steps[1].name == "seat", (
+        "候选仍在 ⇒ 目标步照旧下发（灰项不改变清单形状）"
+    )
+
+    # 边界：源牌级**不**读目标池。空城 ⇒ 【杀】没有合法目标，但那属于产物级 / 目标级。
+    kongcheng = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    kongcheng.player(1).granted_skills.append("hero.zhugeliang.kongcheng")
+    assert not _virtual(_play_candidates(kongcheng), "slash"), (
+        "前提：【空城】让【杀】产不出候选（没有合法目标）"
+    )
+    assert unusable_transform_sources(kongcheng, 0, GUANYU) == (), (
+        "源牌级只看前三条 ⇒ 不许把“没有合法目标”读成“这张牌没用”"
+    )
+
+
+def test_every_transform_source_is_checked_against_the_engine_predicate():
+    """**同源断言**：清单里的 ``disabled`` 与引擎谓词的差集必须为空。
+
+    三个方向各钉一次（判据只有一份，界面 / 清单不重算）：
+
+    1. 灰的**不在**候选来源里（候选 = 引擎说“此刻能这样用”的那一份）；
+    2. 灰的**每一个**产物都过不了 ``check_usable`` 的前三条（没有把能用的牌画灰）；
+    3. ``options`` 里**没灰的**每一张都真有一个产物此刻可用（没有把不可用的牌画亮）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_SLASH, RED_DODGE, BLACK_SLASH), hero="zhaoyun"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_SLASH, RED_DODGE, BLACK_SLASH),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    actions = _virtual_actions(state)
+    candidates = transform_candidates(QueryKind.PLAY_PHASE, actions)
+    offered_sources = {
+        int(source) for action in candidates for source in action.card.virtual_sources
+    }
+    steps = _manifest(state, actions, ZHAOYUN_SLASH)
+    row = steps[0].pool[0]
+    disabled = {int(source) for source in row.disabled}
+    listed = {int(source) for source in row.options}
+
+    assert disabled, f"这个局面必须真有一张灰的源牌（否则断言没有内容）：{row.options}"
+    assert not disabled & offered_sources, (
+        f"引擎给了候选的源牌不许灰：{sorted(disabled & offered_sources)}"
+    )
+    products = conversion_sources_by_product(state, 0, ZHAOYUN_SLASH)
+    for source in sorted(disabled):
+        assert all(
+            not check_usable(
+                state, 0, transformed_card(state, (source,), product), require_targets=False
+            )
+            for product in products[source]
+        ), f"灰的源牌 {source} 有一个产物其实可用（把能用的牌画灰了）"
+    for source in sorted(listed - disabled):
+        assert any(
+            check_usable(
+                state, 0, transformed_card(state, (source,), product), require_targets=False
+            )
+            for product in products[source]
+        ), f"没灰的源牌 {source} 其实一个产物都用不了（把不可用的牌画亮了）"
+    # 灰集合 = 引擎谓词对**声明全集**的判定减去候选（差集为空 = 没有第二份判据）。
+    assert disabled == set(unusable_transform_sources(state, 0, ZHAOYUN_SLASH)) - (
+        offered_sources
     )

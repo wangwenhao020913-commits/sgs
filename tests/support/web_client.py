@@ -17,6 +17,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 
@@ -34,6 +35,66 @@ def call(url: str, payload: dict[str, Any] | None = None) -> tuple[int, Any]:
             return error.code, json.loads(body)
         except json.JSONDecodeError:
             return error.code, {"error": body}
+
+
+def settle_after_create(base: str, body: dict[str, Any]) -> dict[str, Any]:
+    """建局之后**取一次增量**，把引擎推过 L0 边界（table-ux-overhaul 票 14）。
+
+    建局响应止于"游戏开始时"（``GAME_START`` 派发完、第一回合之前）：那一份里
+    ``pending is None`` 是**合法**态，人类第一问要由下一次取增量驱动出来——真网页客户端
+    走的也是这条路（开局批播完立刻 ``refresh()``）。本助手就是那一次取增量，返回收口后的
+    视图（它带 ``pending``；若该局在 L0 就走到了终局则照返回）。
+
+    调用点只有三个**真产品服务**的建局（正局 / 火攻 tape / 酒 tape）；构造局面夹具
+    （``m5_fixture_server`` / ``m6_fixture_server``）不传 ``pause_after_game_start``，
+    建局即停在人类第一问上，故不经这里。
+    """
+    if body.get("finished") or body.get("pending") is not None:
+        return body
+    status, settled = call(
+        f"{base}/api/sessions/{body['session_id']}"
+        f"?after={body['cursor']}&logs={body['log_seq']}"
+    )
+    if status != 200:
+        print(f"FAIL 建局后的第一次取增量失败：HTTP {status} {settled}")
+        return body
+    return settled
+
+
+def settle_pauses(
+    base: str,
+    session_id: str,
+    body: dict[str, Any],
+    *,
+    limit: int = 400,
+    visit: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """把五谷的**逐目标暂停**取到下一个挂起 / 终局（table-ux-overhaul 票 19）。
+
+    接入层在每个目标取牌后让出一次驱动：一次应答之后 ``pending is None`` 但还没终局是
+    **合法**态，人类的下一个询问要由下一次取增量驱动出来——真网页客户端这时就是再取一次
+    增量（2 s 轮询那条路）。这里逐次取，直到视图里又有挂起 / 终局。
+
+    每次取到的视图先交给 ``visit``（可选：调用方用它收账 / 收叙事，**中间那一批记录不能丢**），
+    然后返回 ``(最后一份视图, 取了几次)``；``0`` = 一次都没取（调用方传进来的 body 已经带
+    挂起 / 终局，或第一次请求就失败）。构造局面夹具（``m5_fixture_server`` /
+    ``m6_fixture_server``）的 tape 里没有五谷，故那几条固定 tape 恒取 0 次；真正的 8 人
+    正局会撞到它。
+    """
+    polls = 0
+    for _ in range(limit):
+        if body.get("finished") or body.get("pending") is not None:
+            return body, polls
+        status, body = call(
+            f"{base}/api/sessions/{session_id}?after={body['cursor']}&logs={body['log_seq']}"
+        )
+        if status != 200:
+            print(f"FAIL 暂停后的取增量失败：HTTP {status} {body}")
+            return body, polls
+        polls += 1
+        if visit is not None:
+            visit(body)
+    return body, polls
 
 
 def _identity_win_failure(
@@ -103,6 +164,8 @@ def play(
     if deck_profile is not None and body.get("deck_profile") != deck_profile:
         print(f"FAIL 建局档位不是 {deck_profile}：{body.get('deck_profile')}")
         return 1
+    # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
+    body = settle_after_create(base, body)
 
     session_id = body["session_id"]
     cursor = body["cursor"]
@@ -111,14 +174,34 @@ def play(
     rejected = 0
     human_answers = 0
     queries = 0
+    pauses = 0
     game_end: dict[str, Any] | None = None
     reveals: list[dict[str, Any]] = []
+
+    def note_pause_records(payload: dict[str, Any]) -> None:
+        """五谷逐目标暂停取回来的那几份视图照样要收账（终局记录可能就在里面）。"""
+        nonlocal game_end
+        for record in payload["records"]:
+            if record["kind"] == "game_end":
+                game_end = record
+            if record.get("delta_type") == "identity_reveal":
+                reveals.append(record)
 
     while not body["finished"]:
         pending = body["pending"]
         if pending is None:
-            print("FAIL 未终局但也没有待应答的询问")
-            return 1
+            # 票 19：五谷的逐目标暂停 —— 没有 pending 是合法态，真客户端这时再取一次增量。
+            body, polls = settle_pauses(base, session_id, body, visit=note_pause_records)
+            if polls == 0:
+                print("FAIL 未终局但也没有待应答的询问（取增量也没有推进）")
+                return 1
+            pauses += polls
+            if pauses > 400:
+                print("FAIL 超过 400 次暂停取增量仍未终局")
+                return 1
+            cursor = body["cursor"]
+            log_seq = body["log_seq"]
+            continue
         queries += 1
         # 从候选里取第一个**合法**候选——前端也是这么做的（原样取自 legal_actions）。
         action = pending["legal_actions"][0]
@@ -294,6 +377,36 @@ _FIRE_TAPES = (
 )
 
 
+def _is_own_hand_face(pending: dict[str, Any]) -> bool:
+    """这一步的选择面是不是**人类自己的手牌**（票 09 的形状判据，与前端同源）。
+
+    前端 `candidates.js:isOwnZonePick` 读的就是这份形状：`SELECT_CARDS` ∧ 每槽
+    `ref.seat == actor` ∧ `ref.zone == "hand"` ∧ 牌面可见。票 09 ①（雌雄）与 ②（火攻亮牌步）
+    都靠它落成**牌桌直选**——`dialog` 不再给 `"reveal"`。
+    """
+    if pending.get("kind") != "SELECT_CARDS":
+        return False
+    slots = pending.get("slots") or []
+    if not slots:
+        return False
+    actor = pending.get("actor")
+    return all(
+        (slot.get("ref") or {}).get("seat") == actor
+        and (slot.get("ref") or {}).get("zone") == "hand"
+        and slot.get("card")
+        for slot in slots
+    )
+
+
+def _fire_reveal_step(pending: dict[str, Any]) -> bool:
+    """【火攻】的**亮牌步**（票 09 起是牌桌直选）：自己的可见手牌面 + 还没亮出公开牌。
+
+    同一个技能**第二步**（同花色弃牌）的槽位形状一样，区别是它的载荷带 `reveal`
+    （已公开的那一张）——故用这个键把两步分开。
+    """
+    return pending.get("reveal") is None and _is_own_hand_face(pending)
+
+
 def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -> tuple[dict[str, Any], str]:
     """火攻 tape 的固定策略：返回（原样取自 ``legal_actions`` 的动作, 这一步的名字）。"""
     actions = pending.get("legal_actions") or []
@@ -309,7 +422,7 @@ def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -
             if not target_self and targets and targets != [0]:
                 return action, "fire_attack"
     if kind == "SELECT_CARDS":
-        if pending.get("dialog") == "reveal":
+        if _fire_reveal_step(pending):
             for action in actions:
                 if action.get("kind") == "SelectCards" and len(action.get("picks") or []) == 1:
                     return action, "reveal"
@@ -393,6 +506,8 @@ def fire_attack_tape(base: str) -> int:
             print(f"FAIL 火攻 tape {label}：档位不是 standard_ex_160：{body.get('deck_profile')}")
             failures += 1
             continue
+        # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
+        body = settle_after_create(base, body)
         session_id = body["session_id"]
         cursor = body["cursor"]
         log_seq = body["log_seq"]
@@ -410,9 +525,23 @@ def fire_attack_tape(base: str) -> int:
         while not body["finished"]:
             pending = body["pending"]
             if pending is None:
-                print(f"FAIL 火攻 tape {label}：未终局但也没有待应答的询问")
-                failures += 1
-                break
+                # 票 19：五谷的逐目标暂停。这条 tape 的构造局面里没有五谷（`_m5_create`
+                # 的 fixture 手牌写死），故恒取 0 次；真出现就是夹具换了，按失败报出来。
+                body, polls = settle_pauses(
+                    base,
+                    session_id,
+                    body,
+                    visit=lambda payload: narrative.extend(
+                        entry["text"] for entry in payload.get("narrative") or []
+                    ),
+                )
+                if polls == 0:
+                    print(f"FAIL 火攻 tape {label}：未终局但也没有待应答的询问")
+                    failures += 1
+                    break
+                cursor = body["cursor"]
+                log_seq = body["log_seq"]
+                continue
             action, step = _fire_choice(pending, target_self=target_self, fa_used=fa_used)
             if not any(action == candidate for candidate in pending["legal_actions"]):
                 print(f"FAIL 火攻 tape {label}：提交动作不在 legal_actions 里：{action}")
@@ -467,6 +596,17 @@ def fire_attack_tape(base: str) -> int:
             continue
         if not fa_used:
             print(f"FAIL 火攻 tape {label}：整局没有用出【火攻】（tape 失效）")
+            failures += 1
+            continue
+        if target_self and not reveal_seen:
+            # 票 09 ②：人类**自己**被指定时的亮牌步是**牌桌直选**（`dialog` 为空、牌面在
+            # `slots[].card` 里）。这一条把"固定策略还认得出亮牌步"钉住——认不出就说明
+            # 载荷形状又漂了。人类指定 AI 的那一段亮牌由 AI 做（人类载荷里没有这一步），
+            # 故只在 `target_self` 这一段要求。
+            print(
+                f"FAIL 火攻 tape {label}：亮牌步没有被识别成牌桌直选"
+                "（票 09 起的形状：SELECT_CARDS + 己方可见手牌 + dialog 为空）"
+            )
             failures += 1
             continue
         if not reveal_records:
@@ -564,7 +704,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 16
+_WINE_TAPE_NEAR_DEATH_SEED = 12
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再加太史慈标准版 / 荀彧标准版）
@@ -590,7 +730,19 @@ lin-batch2 票 03（默认池 88/59 → 89/60，林包移动版加贾诩移动�
 自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（同一个探针
 `.scratch/lin-batch2/scan_wine_near_death_seed.py`，策略与命中断言逐字未改），1–15 全部未命中、
 首个命中 **seed 16**（25 次真实 POST 推进到 0 血 + 一次【酒】自救）；16 未被其余 tape 占用
-（火攻 4 / 46、出牌阶段 65），故取它。"""
+（火攻 4 / 46、出牌阶段 65），故取它。
+
+table-ux-overhaul 票 05（询问策略：网页会话缺省 ON）：每次 drive 问人类座位的次数变少 ⇒ 一次
+响应里 AI 回合跑得更远，seed 16 在"自救成功"之后、人类被问到下一问之前就死了（快照读不到
+`hp == 1`，自救本身是成功的：hp 0→1 的 `hp_change` 在记录流里）。按**同一固定策略、同一命中
+判据**从 1 起重扫（本文件就是探针：`:func:`_wine_tape_near_death` 逐 seed 跑，`io.redirect_stdout`
+吞掉逐条 FAIL），命中最短路径的 **seed 9**（17 次真实 POST）；9 未被其余 tape 占用
+（火攻 4 / 16、出牌阶段 65）。
+
+sp5-mayunlu-panjun 票 01 / 02（默认池 98/64 → 100/66，SP武将组5 两将）再换池：seed 9 的对局
+在出现自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
+`.scratch/sp5-mayunlu-panjun/scan_wine_seed.py`，逐字复用 `_wine_tape_near_death` 的策略），
+首个命中 **seed 12**（7 次真实 POST 推进到 0 血 + 求桃窗口里的【酒】目标为自己、回复到 1）；12 未被其余 tape 占用（火攻 4 / 16、出牌阶段 65）。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:
@@ -611,6 +763,8 @@ def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, i
     if body.get("deck_profile") != "standard_ex_160":
         print(f"FAIL 酒 tape：档位不是 standard_ex_160：{body.get('deck_profile')}")
         return None
+    # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
+    body = settle_after_create(base, body)
     return body["session_id"], body["cursor"], body["log_seq"], body
 
 
@@ -709,8 +863,14 @@ def _wine_tape_near_death(base: str) -> int:
     while not body.get("finished"):
         pending = body.get("pending") or {}
         if not pending:
-            print("FAIL 酒 tape（濒死）：未终局但也没有待应答的询问")
-            return 1
+            # 票 19：五谷的逐目标暂停 —— 没有 pending 是合法态，取增量接着走。
+            body, polls = settle_pauses(base, session_id, body)
+            if polls == 0:
+                print("FAIL 酒 tape（濒死）：未终局但也没有待应答的询问")
+                return 1
+            cursor = body["cursor"]
+            log_seq = body["log_seq"]
+            continue
         offers = _wine_offers(pending)
         if pending.get("kind") == "PEACH" and pending.get("actor") == 0 and offers:
             if (body.get("snapshot") or {}).get("players", [{}])[0].get("hp") != 0:
@@ -886,8 +1046,17 @@ def _m5_play(
     while not body.get("finished"):
         pending = body.get("pending")
         if not pending:
-            print(f"FAIL 固定 tape（{fixture}）：未终局但也没有待应答的询问")
-            return 1
+            # 票 19：五谷的逐目标暂停。构造局面夹具里没有五谷 ⇒ 恒取 0 次；真出现就是
+            # 夹具换了。中间那几份视图照样 `collect`（终局记录可能就在里面）。
+            body, polls = settle_pauses(base, session_id, body, visit=collect)
+            if polls == 0:
+                print(f"FAIL 固定 tape（{fixture}）：未终局但也没有待应答的询问")
+                return 1
+            cursor, log_seq = body["cursor"], body["log_seq"]
+            if body.get("pending") is None and not body.get("finished"):
+                print(f"FAIL 固定 tape（{fixture}）：取增量也没有推进出下一个询问")
+                return 1
+            continue
         if observe is not None and not observe("pending", body, pending, state):
             return 1
         action = choose(pending, state)
@@ -1014,15 +1183,24 @@ def _fire_attack_fixed(base: str) -> int:
                     state["reveal"] = record.get("card") or {}
                     state["reveal_count"] = state.get("reveal_count", 0) + 1
                     state["reveal_seat"] = record.get("seat")
-            if pending is not None and pending.get("dialog") == "reveal":
+            if pending is not None and _fire_reveal_step(pending):
                 # A2：亮牌必须是一条**人类**的 SelectCards POST（不是 AI 亮牌）：人类座位
                 # 自己的应答记录 + 紧接着的 card_reveal 公开 delta 都落在这一次 POST 的响应里。
+                # 票 09 ②：亮牌步是**牌桌直选**——牌面在 `slots[].card` 里（不再是 `revealed`
+                # 授予），`dialog` 为空；本段顺带钉住这两条。
                 accepted = accepted_actions(records, pending.get("seq"))
                 if len(accepted) != 1 or accepted[0].get("kind") != "SelectCards":
                     print(f"FAIL 火攻固定 tape：亮牌应答不是一条人类 SelectCards：{accepted}")
                     return False
+                if pending.get("dialog") is not None or pending.get("revealed"):
+                    print(
+                        "FAIL 火攻固定 tape：己方手牌的亮牌步仍是弹窗载荷"
+                        f"（dialog={pending.get('dialog')} revealed={pending.get('revealed')}）"
+                    )
+                    return False
                 faces = {
-                    card.get("card_id") for card in pending.get("revealed") or []
+                    (slot.get("card") or {}).get("card_id")
+                    for slot in pending.get("slots") or []
                 }
                 revealed = [
                     (record.get("card") or {}).get("card_id")
@@ -1062,12 +1240,26 @@ def _fire_attack_fixed(base: str) -> int:
         if kind == "pending" and pending is not None:
             if not opponent_hand_not_leaked(body):
                 return False
-            if pending.get("dialog") == "reveal":
+            if _fire_reveal_step(pending):
                 if pending.get("actor") != 0:
                     print(f"FAIL 火攻固定 tape：亮牌询问不是人类座位：{pending.get('actor')}")
                     return False
+                # 票 09 ②：这一步是**牌桌直选**——`dialog` 为空、己方手牌的牌面不再塞进
+                # `revealed`；牌面读 `slots[].card`（与前端 `isOwnZonePick` 同一份形状）。
+                if pending.get("dialog") is not None:
+                    print(
+                        "FAIL 火攻固定 tape：亮牌步仍带弹窗标记"
+                        f"（dialog={pending.get('dialog')}）——票 09 起是牌桌直选"
+                    )
+                    return False
+                if pending.get("revealed"):
+                    print(
+                        "FAIL 火攻固定 tape：己方手牌的牌面仍被塞进 revealed"
+                        f"（票 09 起不授予）：{pending.get('revealed')}"
+                    )
+                    return False
                 slots = pending.get("slots") or []
-                faces = [card.get("card_id") for card in pending.get("revealed") or []]
+                faces = [(slot.get("card") or {}).get("card_id") for slot in slots]
                 if not faces or any(
                     (slot.get("ref") or {}).get("seat") != 0
                     or (slot.get("ref") or {}).get("zone") != "hand"
@@ -1383,6 +1575,15 @@ def _hero_zone_handlers():
                     if action.get("choice") == "seat:0":
                         state["lianying_seat"] = True
                         return action
+            return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+        if kind == "SELECT_OPTIONS":
+            # table-ux-overhaul 票 13：【连营】一次问齐 ⇒ 骨架候选（= 池里第一个座位，
+            # 也就是"令自己摸"）就是本 tape 要的那份答案；不另造集合。
+            if str(pending.get("skill_id") or "").startswith("lianying:"):
+                skeleton = _pick_action(pending, kind="SelectOptions")
+                if skeleton is not None:
+                    state["lianying_seat"] = True
+                    return skeleton
             return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
         return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
 

@@ -13,12 +13,15 @@ function identityLabel(identity) {
  * 手牌 / 处理区 / 中央舞台 / 回放页共用这一份；`static` 牌不可点（公开信息），但仍带
  * 悬停全文。置灰 / 选中 / 已选只由调用方给（手牌走 `cardFace` 的纯函数结果）。
  */
-function cardChip(card, selected, isStatic, usable = true, onClick = null, picked = false) {
+function cardChip(
+  card, selected, isStatic, usable = true, onClick = null, picked = false, note = "",
+) {
   return cardFaceNode(card, {
     selected,
     picked,
     static: isStatic,
     usable,
+    note,
     onClick: onClick || (() => toggleFocus(card.card_id)),
   });
 }

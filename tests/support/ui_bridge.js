@@ -35,9 +35,17 @@
     // W4-1 / W4-2：预发动清单（本地态、复合动作、取消零提交、被动入口）
     "preactivationManifest", "enterPreativation", "togglePreativationCard",
     "advancePreativation", "selectPreativationSeat", "selectPreativationOption",
-    "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
-    // 票 08：清单"填完没有"的唯一判据（ready / 步骤提示 / 重选落点同读）
+    "buildPreativationAction",
+    // 票 08：清单"填完没有"的唯一判据（步骤提示 / 提交 / 页脚同读）
     "firstUnfilledPreativationStep",
+    // 票 08（table-ux-overhaul）：去弹窗 / 自动推进 / 取消回第一步——判据与复位口
+    "preactivationStepSingleValue", "preactivationNeedsExplicitStep",
+    "preactivationShouldAutoAdvance", "preactivationAdvanceAllowed",
+    // 票 16：「能不能交」只有这一个判据（页脚 / 提交键 / buildAction 同读）
+    "preactivationSubmitAllowed", "preactivationPreviewFresh",
+    "preactivationAdvanceNow", "preactivationConfirmable",
+    "preactivationAtFirstStep", "resetPreativationProgress",
+    "preactivationDialogKind", "preactivationStepHint", "submitLeftAction",
     "preactivationStepKind", "preactivationOptions", "preactivationCardOptions",
     "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
     // W7-01b：清单座位步多选（max > min）+ 借刀窗口首项（Bn）预选 / 必选
@@ -48,6 +56,9 @@
     "cardPreactivationManifest", "enterCardPreativation", "alternativeLabel",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
+    // 票 14：开局批之后的"立即 refresh"——烟测没有计时器垫片自己跑轮询，暂停在中间态时
+    // （五谷逐目标 / 还没轮到人类）由它显式再取一次增量，与真客户端的 2 s 轮询同一条路。
+    "refresh",
     // damage-fx-natures 票 07 / 09：回放暂停——登记口（通用：以后 回复体力 3 档 / 其它演出同形）
     // + 只读读数（原因串）与轮询间隔。烟测据此断"不是只有伤害能冻住回放"与"没有上限"。
     "registerPlaybackHold", "playbackHoldReason", "PLAYBACK_HOLD_POLL_MS",
@@ -108,6 +119,11 @@
     "WATCH_EMPTY_MESSAGE", "WATCH_DUPLICATE_MESSAGE",
     // M5-08a：火攻 —— 亮牌步（亮牌模板 / 一击提交）+ 同花色弃牌（点自己的手牌）+ 舞台亮牌
     "isPickRevealStep", "isOwnHandSinglePick", "renderOwnHandPick", "submitOwnHandSinglePick",
+    // table-ux-overhaul 票 09：自己区域的直选判据（火攻亮牌步 / 雌雄弃牌步）与花色上限置灰
+    // 票 15 起置灰改读**选牌预览**回包的 `disabled`（票 09 的 `ownZoneSuitTaken` 已退役）。
+    "isOwnZonePick", "ownZoneSlotsVisible", "ownHandSlotsKnown",
+    "ownPickPreviewSupported", "ownPickPreviewEnabled", "ownPickSlotDisabled",
+    "ownPickSubmitAllowed", "ownPickPreviewIssue", "ownPickGreyNote",
     "applyRevealDelta", "stageRevealCards", "renderRevealedCards", "describeReveals",
     // M5-08b：铁索 1–2 目标（沿用点座位多选）+ 重铸入口（独立 Reforge，一击即提交）
     "reforgeAction", "renderReforgeEntry", "submitReforge", "describeRecord",
@@ -123,6 +139,24 @@
     // huo-taishici-xunyu 票 04：拼点弹窗——载荷派生 / 回放入口 / 停留常量（只读展示面）。
     "pindianPlan", "applyPindianDelta", "showPindian", "hidePindian",
     "PINDIAN_HOLD_MS", "PINDIAN_VERDICTS",
+    // table-ux-overhaul 票 01：事件流滚动窗口（DOM 上限 / 两份本地序列的裁剪）与
+    // "这一条记录会不会改表体"的快速判据（回放步不再每条都整桌重建）。
+    "LOG_ITEM_LIMIT", "appendNarrativeEntry", "appendLog", "trimLogItems", "trimStreamState",
+    "recordTouchesTableView", "NON_TABLE_DELTAS",
+    // table-ux-overhaul 票 07：提示区单一 reset（`#t-choice` 的寿命口）+ 文案模板
+    // （逐级累加 / 三层回退 / 白名单 / 覆盖层）+ 空转期的快照指纹（与票 10 共用）。
+    "resetAskSurface", "setAskChoice", "resetAskChoice", "ASK_CHOICE_VERDICT_TTL_MS",
+    "promptReady", "promptLoadTemplates", "promptTemplateFor", "promptComposedText",
+    "promptQuestionForStep", "promptGenericStepText", "promptStepSlots", "promptRenderTemplate",
+    "promptWindowAsk", "promptApplyWindowAsk", "promptEditTarget", "promptEditCurrent",
+    "promptSaveOverride", "promptClearOverlay", "promptExportOverlay", "promptExportCurrent",
+    "promptProblems", "promptFileTemplates", "PROMPT_SLOT_WHITELIST",
+    "snapshotFingerprint", "applyIdleRepaint",
+    // 票 18（服务端 D 方案）：**视图级**五谷状态（`view.harvest`）——空转期重画亮牌节点、
+    // 内容指纹（同状态不重画）、以及"用视图级状态重画"这一个口。烟测喂合成 `view.harvest`。
+    // 票 19：`harvestStateWithoutPending` = **没有询问**的空窗里还该不该显示亮牌窗（逐目标暂停）。
+    "applyIdleHarvest", "harvestFingerprint", "viewHarvestState", "repaintRevealFromHarvest",
+    "harvestStateWithoutPending",
   ];
   const out = {};
   for (const name of names) {

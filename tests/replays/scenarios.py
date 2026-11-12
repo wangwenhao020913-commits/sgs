@@ -272,7 +272,10 @@ M2_SCENARIOS: dict[str, Scenario] = {
     "16-nullify-cancels-a-trick": _m2(
         "16-nullify-cancels-a-trick", seed=298, player_count=6
     ),
-    "17-nullify-nested-two": _m2("17-nullify-nested-two", seed=117, player_count=4),
+    # table-ux-overhaul 票 04：需要牌窗口改**按档逐档问**后随机驱动的行动序列改变，
+    # 117 那局涨到 1963 条 / 1.7 MB；按本模块纪律**重新选种**而不是放宽判据：
+    # 163 命中同一判据（两层无懈嵌套）且是 0–399 里未被他条占用的最少候选（1065 条）。
+    "17-nullify-nested-two": _m2("17-nullify-nested-two", seed=163, player_count=4),
     "18-nullify-nested-three": _m2("18-nullify-nested-three", seed=14, player_count=4),
     "19-nullify-on-multi-target": _m2(
         "19-nullify-on-multi-target", seed=213, player_count=5
@@ -311,15 +314,22 @@ M2_SCENARIOS: dict[str, Scenario] = {
         player_count=4,
         deck_profile=M2_DECK_PROFILE,
     ),
+    # 种子 230 → 904（table-ux-overhaul 票 04）：按档逐档问改变了随机驱动的行动序列，230 那局
+    # 涨到 4188 条 / 4.3 MiB（超单文件体积绊线）；按本模块纪律**重新选种**而不是调预算：
+    # 904 命中同一判据（方天画戟一次指定 3 个目标）且是 0–1799 里记录条数最少的候选
+    # （2845 条，约 2.9 MB），人数档（6）不变。
     "30-halberd-three-targets": _m2(
-        "30-halberd-three-targets", seed=230, player_count=6
+        "30-halberd-three-targets", seed=904, player_count=6
     ),
     "31-play-card-response": _m2("31-play-card-response", seed=190, player_count=4),
     "32-five-grains-selection": _m2(
         "32-five-grains-selection", seed=170, player_count=4
     ),
+    # table-ux-overhaul 票 04：按档逐档问改变了随机驱动的行动序列，288 那局涨到 2083 条 /
+    # 1.7 MB；按本模块纪律**重新选种**而不是放宽判据：187 命中同一判据（拆顺取装备区 /
+    # 判定区）且是 0–299 里未被他条占用的最少候选（746 条）。
     "34-dismantle-or-snatch-equip-judge": _m2(
-        "34-dismantle-or-snatch-equip-judge", seed=288, player_count=4
+        "34-dismantle-or-snatch-equip-judge", seed=187, player_count=4
     ),
 }
 """M2 的 27 条基准（票 32 §1）：随机驱动 + 事后判据，种子由开发期搜索得到。
@@ -351,24 +361,33 @@ M3_SCENARIOS: dict[str, Scenario] = {
     # 不再命中判据（≥2 次逐点发动）——``Pass`` 是一整类候选，删掉它改变了随机档的行动序列。
     # 按同一纪律**重新选种**而不是放宽判据：198 在同样四名武将下命中判据，且记录条数最少
     # （804 条，票 10 的 ``yiji_seed_probe.py 200`` 扫 1–200 的候选集得到）。
+    # 种子 198 → 73（table-ux-overhaul 票 04）：按档逐档问改变了随机驱动的行动序列，198 那局
+    # 涨到 1592 条；按同一纪律**重新选种**而不是放宽判据：73 在同样四名武将下命中判据
+    # （【遗计】逐点 ≥2 次），且是 0–399 里未被他条占用的最少候选（905 条）。
     "35-hero-damage-points": _m3(
         "35-hero-damage-points",
-        seed=198,
+        seed=73,
         heroes=("guojia", "caocao", "simayi", "luxun"),
     ),
     # I 族改判循环：司马懿【鬼才】的改判窗口（判定牌生效前打出代替）。
+    # 种子 169 → 167（table-ux-overhaul 票 04）：按档逐档问改变了随机驱动的行动序列，169 那局
+    # 涨到 2114 条；按本模块纪律**重新选种**而不是放宽判据：167 在同样四名武将下命中判据
+    # （改判窗口开过），且是 0–299 里未被他条占用的最少候选（853 条）。
     "36-hero-rejudge-cycle": _m3(
         "36-hero-rejudge-cycle",
-        seed=169,
+        seed=167,
         heroes=("simayi", "guojia", "sunquan", "luxun"),
     ),
     # F 族势力求助窗口：主公在曹操 / 刘备之中，且**同势力**的求助对象在场（司马懿 / 关羽）。
     # 种子 116 → 94：【奸雄】修复（牌不再被 L5.6 从曹操手里弃掉）后，116 那局的走向改变、
     # 势力求助窗口不再出现。按本模块纪律**重新选种**而不是放宽判据：94 在同样四名武将下
     # 命中判据，且记录条数更少（910 vs 原局）。
+    # 种子 94 → 209（table-ux-overhaul 票 04）：94 那局在新行为下**不再命中**判据（势力求助
+    # 窗口根本没开）——按本模块纪律**重新选种**而不是放宽判据：209 在同样四名武将下命中
+    # 判据，是 0–399 里未被他条占用的最少候选（948 条，约 1.4 MB → 0.9 MB）。
     "37-hero-lord-request": _m3(
         "37-hero-lord-request",
-        seed=94,
+        seed=209,
         heroes=("caocao", "simayi", "liubei", "guanyu"),
     ),
     # D 族失去牌后：【连营】+【枭姬】含顶替。

@@ -53,8 +53,8 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
-    apply_modifiers,
     behavior_for,
+    check_targets,
     is_slash,
     locate,
     place_on_deck,
@@ -87,7 +87,6 @@ from .catalog import (
     round_skill_uses,
 )
 from .flow import (
-    SEAT_PREFIX,
     Arrange,
     DeckTopArrange,
     FixedSplit,
@@ -95,7 +94,6 @@ from .flow import (
     PickOption,
     PickSeats,
     SkillFlow,
-    seat_choice,
     watched_cards,
     zero_step_effect,
 )
@@ -1205,11 +1203,12 @@ _TISHEN = PhaseBodySkill(
 # 三条落地判据（票面 §1.6 的 R1–R4）：
 # - **一至两项** = 三档单选项（`{【1】}` / `{【2】}` / `{两项都选}`）：`SELECT_OPTION` 只有
 #   单选控件，把子集摊成三档**不引入新询问形态**；两项按【1】→【2】逐项结算完。
-# - **无距离限制** = 这一次使用的距离条件豁免：目标池在**技能侧**自算（全体其他存活 →
-#   `TARGET_POOL` 链）。**不**用"修饰器并集"（界武圣② / 武神② 的写法）：**修饰器管道序**
-#   （= `resolve_instances` 的解析序，不是票 05 的派发链序）按 skill_id
-#   字典序，`hero.xiahouyuan.shensu` 排在 `hero.jie_zhugeliang.kongcheng` 之后，并集会把
-#   【空城】刚删掉的目标加回来（探针 `.scratch/feng-xiahouyuan/probe_target_pool_order.py`）。
+# - **无距离限制** = 这一次使用的距离条件豁免：目标池走**同一套**分层判据
+#   （`check_targets(..., distance_exempt=True)` = ② 距离整条跳过、③④⑤ 照常）。**不**在
+#   技能侧预先摊"全体其他存活"再喂 `TARGET_POOL`：那是票 03 之前的手法，`TARGET_POOL` 的
+#   链序（修饰器管道序 = `resolve_instances` 的解析序，按 skill_id 字典序；
+#   `hero.xiahouyuan.shensu` 排在 `hero.jie_zhugeliang.kongcheng` 之后）会让"并集"一类回调
+#   把【空城】刚删掉的目标加回来（探针 `.scratch/feng-xiahouyuan/probe_target_pool_order.py`）。
 # - **跳过阶段** = 阶段推进状态（`host.skip_*_phase`），不新增 `Timing`；被跳过的判定阶段
 #   **不消费**判定区里的牌（规则 §11.5 / 账本行）。
 # ---------------------------------------------------------------------------
@@ -1287,23 +1286,15 @@ def _shensu_options(
 
 
 def _shensu_target_pool(state: GameState, owner: int, card: Any) -> tuple[int, ...]:
-    """虚拟【杀】的目标池：**全体其他存活角色**（无距离限制）再过 `TARGET_POOL` 链。
+    """虚拟【杀】的目标池：**距离整条豁免**（② 跳过）后照常过 ③④⑤。
 
     距离条件整条豁免（规则 §17.3 L1702–L1704：声明"使用【杀】无距离限制"即可指定任意
-    其他**合法**角色），但"不能成为目标"那一层照常——【空城】【谦逊】一类的删目标回调
-    在这条链上跑（与 `check_targets` 的链尾同源，只是省掉了距离筛）。
+    其他**合法**角色），但"不能成为目标"那一层照常——走 `check_targets` 的**同一套分层**，
+    只是用 ``distance_exempt=True`` 声明"这一次使用不看距离"（票 03：③④⑤ 必须照常跑，
+    否则【空城】/【谦逊】删掉的座位会被池的构造方式悄悄复活）。池因此逐值等于"全体其他
+    存活角色"，只是"合法"那几层由引擎算，不在技能侧手写一遍。
     """
-    everyone = tuple(
-        player.seat for player in state.players if player.alive and player.seat != owner
-    )
-    return tuple(
-        apply_modifiers(
-            ModifierPoint.TARGET_POOL,
-            state,
-            ModifierContext(subject=owner, card=card),
-            everyone,
-        )
-    )
+    return check_targets(state, owner, card, distance_exempt=True)
 
 
 def _shensu_use_slash(host: Any, frame: Frame, owner: int, index: int) -> Control:
@@ -2046,16 +2037,14 @@ def _bingyi_reveal(host: Any, frame: Frame, owner: int) -> None:
 def _bingyi_seats(host: Any, frame: Frame, owner: int, skill_id: str = BINGYI) -> Any:
     """效果第 2 段：**一次**多选至多 N 名角色（可放弃）；返回座位元组 / ``"stay"``。
 
-    面 = W1 的座位多选面：``options`` 全是 ``seat:N`` ⇒ 服务端派生的 ``option_seats`` 非空
-    ⇒ 界面进牌桌多选、**一次提交**（用户 2026-11-09 的 Q-W1 原话："一次点选多个座位（类似
-    【铁索连环】），不要选好一个提交再继续选"）。池 = 全部存活角色（**含自己**，Q-G2 = A），
-    按座位序；``[1, N]`` + ``optional=True`` = 「至多」（上限 + 可放弃，账本 L775 / L753）。
+    面 = W1 的座位多选面（本模板的**首个载体**）：``options`` 全是 ``seat:N`` ⇒ 服务端派生的
+    ``option_seats`` 非空 ⇒ 界面进牌桌多选、**一次提交**（用户 2026-11-09 的 Q-W1 原话：
+    "一次点选多个座位（类似【铁索连环】），不要选好一个提交再继续选"）。池 = 全部存活角色
+    （**含自己**，Q-G2 = A），按座位序；``[1, N]`` + ``optional=True`` = 「至多」（上限 +
+    可放弃，账本 L775 / L753）。
 
-    ``enumerate_candidates=False``（**不枚举档**，yijiang-2014-round2 票 21）：这一问的子集数
-    是 ``Σ C(座位数, k)`` —— 8 人局、上限 4 时 **162 条**（+ 放弃 = 163），撞穿
-    `tests/test_fuzz.py` 的候选上界 128。上限 N 还会随**手牌数**长大（残局 5 张手牌 ⇒ 更多），
-    按子集枚举在生产路径上是指数级的。故这一档只发**一条骨架候选**、答案由界面 / AI 组装，
-    引擎按 ``is_legal_option_set`` 校验形状（池内 / 无重复 / 无置灰 / 长度在 ``[1, N]`` 内）。
+    table-ux-overhaul 票 13 起这一问走 :meth:`Engine.ask_seats`（"一次选多名角色"的唯一入口）：
+    载荷（不枚举档）与返回形状都收在那里，"至多 N 名"不再由每个技能各写一遍。
 
     ``skill_id`` = **正在跑的那一版**（两版各自一条声明，A4）：它拼出这一步的询问 id
     （``hero.jie_guyong_mobile.bingyi:seat``），投影的 ``_step_requirement`` 据此查**那条
@@ -2063,22 +2052,19 @@ def _bingyi_seats(host: Any, frame: Frame, owner: int, skill_id: str = BINGYI) -
     """
     cap = int(frame.data[_BINGYI_CAP])
     pool = tuple(player.seat for player in host.state.players if player.alive)
-    answer = host.ask_options(
+    answer = host.ask_seats(
         frame,
         owner,
         Timing.PHASE_FINISH,
         skill_id=f"{skill_id}:seat",
-        options=tuple(seat_choice(seat) for seat in pool),
-        min_selected=1,
-        max_selected=cap,
+        pool=pool,
+        lo=1,
+        hi=cap,
         optional=True,
-        enumerate_candidates=False,
     )
     if host.suspended(answer):
         return "stay"
-    if isinstance(answer, Pass):
-        return ()
-    return tuple(int(choice.removeprefix(SEAT_PREFIX)) for choice in answer.choices)
+    return tuple(answer)
 
 
 def _bingyi_draw(host: Any, frame: Frame, chosen: tuple[int, ...]) -> Any:

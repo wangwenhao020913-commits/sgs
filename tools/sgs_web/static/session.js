@@ -283,43 +283,35 @@ function viewStartsNewSession(body) {
   return body.session_id !== state.view.session_id;
 }
 
-/** 新局开局的**回放底稿**：权威快照 → "发牌前"的骨架（M6 报障 2）。
+/** 新局开局的**回放底稿**：服务端下发的 `setup`（发牌前那一帧）。
  *
- * 建局响应带的是**整段开局**（发牌 + 若干 AI 回合，直到人类第一个询问），`snapshot` 是这段
- * 跑完后的局面。要让这段按正常步长逐条演（既不能拿上一局的视图当底稿、也不能一次性冲完），
- * 底稿必须是**开局前**：身份未发、手牌 0、体力满、装备 / 判定 / 武将牌区空、牌堆 0
- * （由首条 `deck_shuffle` 的 `card_count` 写回）、阶段与回合空、没有询问。
+ * 建局响应止于"游戏开始时"（`GAME_START` 派发完、第一回合之前），带一份 `setup` 快照
+ * ——座位 / 武将 / 技能 / 满体力 / 护甲 / 标记 / 手牌上限 / 武将块标签，手牌 0、各区空、
+ * 无阶段无回合无询问。这份底稿是**服务端**从 `build_initial` 之后的引擎状态导出的
+ * （`projection.py:setup_snapshot`），前端**只显示**：不再像旧实现那样从 post-init 快照
+ * 倒推（`hp = hp_max ?? hp`、`hp_max` / `armor` / `markers` 原样继承、再扫
+ * `hp_max_change.before` 反推开局上限）——那是"界面从记录猜规则"，也正是"init 没走完
+ * AI 已经在操作"的观感来源（spec §1 #1）。
  *
- * **保留**的只有开局前就公开、且整段不变的东西：座位、武将、技能。其余全部交给记录里的
- * `identity_deal` / `deck_shuffle` / `card_move` / `hp_change` / 时机（见 `applyLiveDelta`）。
- * 所以"有没有上一局"不再影响这一批的底稿与节奏——两条路走同一份初始化。
+ * 之后的一切仍逐条由记录派生（`identity_deal` / `deck_shuffle` / `card_move` /
+ * `hp_change` / `hp_max_change` …，见 :func:`applyLiveDelta`），故"有没有上一局"不影响
+ * 这一批的底稿与节奏。
+ *
+ * 没有 `setup` 的载荷（旧录像 / 合成视图 / 老服务端）**不猜**发牌前长什么样：直接以权威
+ * 快照起播（少一段开局动画，多一个控制台提示）。
  */
 function openingLiveView(body) {
-  const view = cloneLiveView(body);
-  const snapshot = view.snapshot;
-  snapshot.players = (snapshot.players || []).map((player) => ({
-    ...player,
-    identity: null,
-    identity_label: null,
-    hand_count: 0,
-    hp: Number(player.hp_max ?? player.hp) || 0,
-    equip: [],
-    judge: [],
-    hero_zones: [],
-    hero_tags: [],
-    chained: false,
-    flipped: false,
-    wine_active: false,
-    alive: true,
-  }));
-  snapshot.self_hand = [];
-  snapshot.discard = [];
-  snapshot.processing = [];
-  snapshot.deck_count = 0;
-  snapshot.phase = null;
-  snapshot.turn_seat = null;
-  snapshot.turn_extra = false;
-  snapshot.round = 1;
+  const setup = body && body.setup;
+  if (!setup) {
+    const fallback = cloneLiveView(body);
+    fallback.pending = null;
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[opening] 载荷没有 setup 底稿：开局批从权威快照起播（不发牌前动画）");
+    }
+    return fallback;
+  }
+  // `cloneLiveView` 深拷贝牌桌会改写的容器 ⇒ 回放不碰 `body.setup`（它是权威载荷的一部分）。
+  const view = cloneLiveView({ ...body, snapshot: setup });
   view.pending = null;
   return view;
 }
@@ -417,6 +409,108 @@ function liveRemoveCards(list, cards) {
   return (list || []).filter((item) => !gone.has(String(item.card_id)));
 }
 
+/** 一个**武将牌上的牌区**的区键：`owner:skill_id`（票 10）。
+ *
+ * 记录里的区引用只有合起来的 `zone_ref.skill_instance`；投影下发的行只有 `skill_id` /
+ * `owner` 两半（`projection.py:seat_hero_zones`）——两边是**同一个**派生
+ * （`sgs.skills.catalog.hero_card_zone_key`），故这里按同一形状拼出来比对。行里将来若
+ * 直接带 `skill_instance`，就用它（唯一真源仍是那个键）。
+ */
+function liveHeroZoneKey(zone) {
+  if (!zone) return "";
+  if (zone.skill_instance !== undefined && zone.skill_instance !== null) {
+    return String(zone.skill_instance);
+  }
+  if (zone.skill_id === undefined || zone.skill_id === null) return "";
+  if (zone.owner === undefined || zone.owner === null) return "";
+  return `${Number(zone.owner)}:${String(zone.skill_id)}`;
+}
+
+/** `skill_instance`（`owner:skill_id`）拆回两半；不合形返回 `null`（不猜）。 */
+function liveHeroZoneParts(skillInstance) {
+  const text = String(skillInstance || "");
+  const at = text.indexOf(":");
+  if (at <= 0 || at === text.length - 1) return null;
+  const owner = Number(text.slice(0, at));
+  if (!Number.isFinite(owner)) return null;
+  return { owner, skill_id: text.slice(at + 1) };
+}
+
+/** 武将牌上牌区的**展示名**：同一份快照里座位技能清单的中文名（票 10）。
+ *
+ * 放置 / 归还的 `card_move` 只带 `skill_instance`，不带中文名；技能清单是同一份快照里的
+ * **公开事实**（`projection.py:seat_skill_display`），故按它翻。翻不到退回技能 id——与投影
+ * 的 fail-visible 口径一致（`_skill_display_name(...) or zone.skill_id`），不编名字。
+ */
+function liveHeroZoneName(players, skillId) {
+  const wanted = String(skillId || "");
+  if (!wanted) return "";
+  for (const player of players || []) {
+    for (const skill of player.skills || []) {
+      if (skill && skill.skill_id === wanted && skill.name) return String(skill.name);
+    }
+  }
+  return wanted;
+}
+
+/** 一条 `card_move` 的**一侧**（`from_zone` / `to_zone` = `hero`）落到 live view（票 10）。
+ *
+ * 区按 `zone_ref.skill_instance` 认，`ref.seat` = 武将牌的主人（区可跨座位）。牌面只有宿主
+ * 拿得到（`visibility.py:hero_zone_ref_visible`）：有牌面就按牌面增删，非宿主只有
+ * `card_count` ⇒ 只改张数、不碰 `cards`。
+ *
+ * **区空了整行删掉**（不是留一行 0 张）：投影只画有牌的区（`projection.py:643`），界面留
+ * 一行空框就是报障的"牌已回手、行还在"。反方向，空批移动不建区（引擎同样不建）。
+ */
+function liveHeroZoneMove(players, ref, cards, count, adding) {
+  if (!ref) return;
+  const holder = (players || []).find(
+    (player) => Number(player.seat) === Number(ref.seat));
+  if (!holder) return;
+  // 区引用不带 `skill_instance` 就不是武将牌上的牌区（列表非空只在 HERO 区有，见
+  // `models.py:_zone_ref_wire`）；不合形（没有 `owner:skill_id`）⇒ 不猜、零动作。
+  const key = String(ref.skill_instance || "");
+  if (key.indexOf(":") < 0) return;
+  const zones = (holder.hero_zones || []).slice();
+  const at = zones.findIndex((zone) => liveHeroZoneKey(zone) === key);
+  const held = at >= 0 ? zones[at] : null;
+  const faces = Array.isArray(cards) ? cards : [];
+  let heldCards = held ? (held.cards || []).slice() : [];
+  let heldCount = held ? Number(held.count) : 0;
+  if (!Number.isFinite(heldCount)) heldCount = heldCards.length;
+  if (adding) {
+    if (faces.length) {
+      heldCards = heldCards.concat(faces);
+      heldCount = heldCards.length;
+    } else {
+      heldCount += count;
+    }
+    if (heldCount <= 0) return;
+    const parts = liveHeroZoneParts(key);
+    const row = held || {
+      skill_id: parts ? parts.skill_id : key,
+      skill_name: liveHeroZoneName(players, parts ? parts.skill_id : key),
+      owner: parts ? parts.owner : Number(ref.seat),
+      cards: [],
+      count: 0,
+    };
+    const next = { ...row, cards: heldCards, count: heldCount };
+    if (at >= 0) zones[at] = next;
+    else zones.push(next);
+  } else {
+    if (!held) return;
+    if (faces.length) {
+      heldCards = liveRemoveCards(heldCards, faces);
+      heldCount = heldCards.length;
+    } else {
+      heldCount = Math.max(0, heldCount - count);
+    }
+    if (heldCount <= 0) zones.splice(at, 1);
+    else zones[at] = { ...held, cards: heldCards, count: heldCount };
+  }
+  holder.hero_zones = zones;
+}
+
 /** 把展示通道的标签 delta 与**可见记录**按 `seq` 合并，交给同一条逐事件回放。
  *
  * `live_deltas` 是服务端从被记录流裁掉（但牌面已公开）的 `tag_add` / `tag_remove`
@@ -492,13 +586,15 @@ function liveUpdateCardTags(view, cardId, tag, adding) {
 
 /** 一条记录对 live view 的**可见**贡献（D11）：只写记录里真有的派生事实。
  *
- * 可派生：体力（`hp_change.after`）、护甲（`armor_change.after`，W7 的第二条体力轴）、
+ * 可派生：体力（`hp_change.after`）与体力上限（`hp_max_change.after`；票 10 补，座位卡的
+ * 血条分母读它）、护甲（`armor_change.after`，W7 的第二条体力轴）、
  * 手牌数（`card_move` 的牌面 / `card_count`）、自己的手牌面、装备与判定区（公开区牌面）、
+ * 武将牌上的牌区（`card_move` 的 `hero` 那一侧，按 `skill_instance` 认区、空区删行；票 10）、
  * 牌堆与弃牌数（含 `deck_shuffle` 的重洗）、横置、
  * 酒、亮明身份、阵亡（`DEATH_BEFORE_START` 的 `actor`）、回合 / 阶段（`TURN_*` / `PHASE_*`）。
  *
- * **不可派生的字段一律不猜**：技能可用性、体力上限、当前询问、武将名与势力留在最近一次
- * 提交的视图里，由下一次 `commitView` 覆盖（D11）。`snapshot.processing` 也不在这里推：
+ * **不可派生的字段一律不猜**：技能可用性、当前询问、武将名与势力留在最近一次提交的视图里，
+ * 由下一次 `commitView` 覆盖（D11）。`snapshot.processing` 也不在这里推：
  * 舞台的处理中组由 `applyEffectDelta` 单独派生（转化牌要显示产物，快照里的实体来源牌
  * 不是那个形状），表体渲染不读它。
  *
@@ -527,6 +623,15 @@ function applyLiveDelta(record, view = state.liveView) {
     if (record.delta_type === "hp_change") {
       const player = playerAt(record.seat);
       if (player) player.hp = Number(record.after);
+      return view;
+    }
+    if (record.delta_type === "hp_max_change") {
+      // 体力上限与当前体力是**两条独立事实**（`state/deltas.py:HpMaxChangeDelta`）：觉醒技
+      // 减上限、开局 init 期改上限都落这一条。座位卡的血条分母读它，故必须逐条派生——
+      // 不派生时整批回放期间上限停在上一份快照值（spec §1 #1 的"开局就 5/5"是同一条缝；
+      // 票 10 只落前端这一半，票 14 的服务端 `setup` 底稿靠它才不必倒推）。
+      const player = playerAt(record.seat);
+      if (player) player.hp_max = Number(record.after);
       return view;
     }
     if (record.delta_type === "armor_change") {
@@ -661,6 +766,14 @@ function applyLiveDelta(record, view = state.liveView) {
       const player = playerAt(to.seat);
       if (player) player[to.zone] = (player[to.zone] || []).concat(cards);
     }
+    // 武将牌上的牌区（票 10 / spec §1 #11）：区键 = 记录里的 `zone_ref.skill_instance`，
+    // 宿主 = `ref.seat`。**空区整行删掉**（投影只画有牌的区，`projection.py:643`）——
+    // 这一条就是"【谦逊】的牌回手了、武将牌上的那一行还在"的修法：以前 `card_move` 的
+    // 分支只派生 deck / discard / hand / equip / judge，而 `cloneLiveView` 又深拷贝
+    // `hero_zones` ⇒ 整批回放期间那个区停在上一份快照值，只能等 `commitView` 整桌重建。
+    // 手牌数 / 手牌面的两半由上面的 `to.zone === "hand"` 分支管，这里不重复加。
+    if (from.zone === "hero") liveHeroZoneMove(players, from, cards, count, false);
+    if (to.zone === "hero") liveHeroZoneMove(players, to, cards, count, true);
     return view;
   }
   if (record.kind !== "timing") return view;
@@ -695,6 +808,9 @@ function applyView(body) {
   // U1-05：叙事条目随视图增量下发（服务端已按查看者过滤）。先收进本地序列，
   // 再按记录回放的进度逐条铺——不在前端补事实 / 判断隐藏信息。
   for (const entry of body.narrative || []) state.narrative.push(entry);
+  // 票 01：叙事序列也只留最近 `LOG_ITEM_LIMIT` 条（`narrativeShown` 跟着前移，
+  // 与 `#t-log` 的 DOM 窗口是同一个上限）。
+  trimStreamState();
   // `live_deltas` = 被人类记录流裁掉、但牌面已公开的标签增删（网页展示通道）。
   // 与可见记录按 seq 合并后走同一条逐事件回放；它们不写事件流 / 舞台。
   const incoming = mergeLiveDeltas(body.records || [], body.live_deltas || []);
@@ -720,6 +836,9 @@ function applyView(body) {
     state.lifeLossEvents = [];
     // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
     state.liveView = null;
+    // 票 05：事件流的「无懈窗口」合并记账按帧号（`window_frame`）索引，帧号跨局会重复
+    // ⇒ 换会话时清掉，否则新局第一扇窗口会并进上一局那条已经不该显示的条目里。
+    resetWindowLogs($("t-log"));
   }
   // U3-04 / D8.2：技能发动是随视图下发的派生通道；先收进队列，回放走到对应的记录 seq
   // 才演出（飘名 / 白光 / 线），而不是响应一到就全部同时出现。
@@ -764,7 +883,7 @@ function applyView(body) {
   if (live) state.liveView = opening ? openingLiveView(body) : cloneLiveView(state.view);
   if (live && incoming.some(isSkillDeltaRecord)) adoptSkillLists(state.liveView, body);
   state.playback = {
-    body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live,
+    body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live, opening,
   };
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
@@ -903,6 +1022,45 @@ function stepPlaybackWhenFree() {
   schedulePlaybackStep(PLAYBACK_HOLD_POLL_MS);
 }
 
+/** 这一条记录会不会改**表体**（座位 / 手牌 / 舞台以外的那一层）——票 01 的快速判据。
+ *
+ *  背景：回放每步都 `renderTable()` 会把整桌重建一遍（一局 4745 条记录 = 4745 次整桌
+ *  重建）。判据只看这条记录**自己**能不能改快照：回放期 `tableViewForRender()` 已经把
+ *  `pending` 收成 null，故询问 / 应答 / 结算帧 / 终局 / 大部分时机都改不了表体——它们只
+ *  动事件流与舞台（舞台另由 `renderProcessing()` 重画）。
+ *
+ *  **拿不准的一律 `true`**：宁可多重建一次，也不许少画一帧。判据与 `applyLiveDelta` 的
+ *  分支**同源**（那边没有分支的 delta 就改不了快照），新增一条 delta 分支时要同时看这里。
+ *  不改 DOM 形状：跳过的只是"重建"，其余入口一个不动。
+ */
+const NON_TABLE_DELTAS = new Set([
+  // 纯展示：亮牌进舞台展示组、拼点进拼点弹窗，都不写快照。
+  "card_reveal",
+  "pindian",
+]);
+/** 只在**表体**之外留痕的时机：其余的时机都会改快照（回合 / 阶段 / 阵亡），必须重建。 */
+const TABLE_TIMINGS = ["TURN_BEFORE_START", "TURN_START", "DEATH_BEFORE_START"];
+
+function recordTouchesTableView(record) {
+  if (!record) return true;
+  // 标签增删改的是手牌 / 舞台卡上的标签（`liveUpdateCardTags` 写 live view）⇒ 必须重建。
+  if (record.live_only) return true;
+  const kind = record.kind;
+  // 询问 / 应答 / 结算帧 / 终局都不写快照：它们在回放期只进事件流，舞台走 `applyEffectDelta`。
+  if (kind === "query" || kind === "action" || kind === "frame" || kind === "game_end") {
+    return false;
+  }
+  if (kind === "timing") {
+    const timing = String(record.timing || "");
+    // `PHASE_*` 改顶栏阶段；三条具名时机改回合 / 阵亡（见 `applyLiveDelta`）。
+    return timing.startsWith("PHASE_") || TABLE_TIMINGS.includes(timing);
+  }
+  if (kind === "delta") {
+    return !NON_TABLE_DELTAS.has(String(record.delta_type || ""));
+  }
+  return true; // `header` / 未知 kind：交给整桌重建兜底
+}
+
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
  *
  * ``immediate`` = 测试 / 批量冲刷用：不排计时器，由 :func:`flushPlayback` 直接连跑。
@@ -923,6 +1081,8 @@ function stepPlayback(immediate) {
       state.lastQuerySeat = record.query.actor;
     }
     state.logRecords.push(record);
+    // 票 01：本地记录序列只留最近 `LOG_ITEM_LIMIT` 条（与 `#t-log` 同一个上限）。
+    trimStreamState();
     // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
     if (logMode() === "simple") appendNarrativeThrough(record.seq);
     else appendLog(record, playback.querySeat);
@@ -954,7 +1114,9 @@ function stepPlayback(immediate) {
   if (playback.live && state.liveView) {
     applyLiveDelta(record, state.liveView);
     // renderTable 末尾就是舞台重绘（`renderProcessing`），播放期也走同一条口。
-    renderTable();
+    // 票 01：改不了表体的记录（询问 / 应答 / 结算帧 / 大部分时机）只重画舞台，不整桌重建。
+    if (recordTouchesTableView(record)) renderTable();
+    else renderProcessing();
   } else if (!liveOnly) {
     // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
     renderProcessing();
@@ -1042,6 +1204,13 @@ function finishPlayback() {
   fireDamageEventsThrough(Infinity);
   fireHpLossEventsThrough(Infinity);
   commitView(playback.body);
+  // 票 14：**开局批播完、还没有挂起询问** ⇒ 立刻再取一次增量，不等 2 s 轮询。
+  // 建局响应止于"游戏开始时"（L0 边界），人类第一问 / AI 的第一回合在下一份增量里；
+  // 等轮询会让玩家盯着"（没有待应答的询问）"空两秒，白等掉的正是这一票要收的那段观感。
+  // 判据只看这份载荷自己：开局批 ∧ 没询问 ∧ 没终局（有询问 = 已经停在暂停点上，无事可拉）。
+  if (playback.opening && !playback.body.pending && !playback.body.finished) {
+    refresh();
+  }
 }
 
 /** 逐目标结算的 C 段时机：它们的 ``targets`` 是**当前正在结算的那个目标**。
@@ -1487,14 +1656,17 @@ function commitView(body) {
   scrollLogToBottom();
   if (body.finished) {
     state.timer = null;
+    // 票 07 A（调用点 ③）：这一支在 `renderPending` **之前** return，旧实现在这里只清了
+    // `#t-options` / `#t-target-hint` 两格 ⇒ 技能串 / 页脚 / 描述停在上一问上（spec §1 #5
+    // 的第三类缺欠）。现在走**同一个** `resetAskSurface`；`#t-prompt` 与页脚随后写的是
+    // 终局文案（新事实），不是残留。
+    resetAskSurface();
     resetCountdown();
     resetRightActions();
     syncDialog();
     $("t-prompt").textContent = "本局已结束。";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
-    $("t-options").innerHTML = "";
-    $("t-target-hint").textContent = "";
     showPageNotice("已结束（录像已存）");
     loadRuns();
     return;
@@ -1547,8 +1719,13 @@ async function refresh(force = false) {
   // 提交在飞时不取增量：轮询重绘会把"点击前那一面"换掉，失败后就没得恢复（U2-03）。
   // 409 的刷新走 `refresh(true)`——那是请求**结束后**才发生的，必须放行。
   if (state.submitBusy && !force) return;
+  // 票 14：开局批播完时这里会自动跑一次（不等 2 s 轮询）⇒ "回包比换局慢"真的会撞到：
+  // 玩家在这几秒里回到开局页又开一局，旧会话的回包不许覆盖新牌桌。发起时记下会话身份。
+  const sessionId = state.sessionId;
   try {
-    applyView(await fetchView());
+    const body = await fetchView();
+    if (sessionId !== state.sessionId) return;
+    applyView(body);
   } catch (error) {
     showPageNotice(`取增量失败：${error.message}`);
   }
@@ -1592,6 +1769,95 @@ function applyIdlePoll(body) {
   syncPendingClock(state.view);
 }
 
+/** **快照指纹**（票 07 A 的第三条出口；与票 10 共用）：座位块会读的那些快照字段的一行摘要。
+ *
+ * 为什么需要它：`pollIsIdle` 只看游标与询问序号，`applyIdlePoll` 只同步时钟 ⇒ 任何
+ * **"无新记录的状态变化"永远不会重绘**（`live_deltas` 改的标记 / 武将牌上的牌就是这一类，
+ * 票 10 的"标记不消失"住在这条缝里）。
+ *
+ * 纯函数、不碰 DOM：只把 `players[]` 的可见字段与牌桌三组拼成一行。**字段表是显式的**——
+ * 座位块多读一格，就在这里多登记一格。票 10 接进来的是**武将牌上的牌区**：按区键
+ * （`owner:skill_id`，与记录里的 `skill_instance` 同形）+ 张数 + 宿主拿得到的牌面拼起来。
+ * 只登记 `hero_zone_count`（`PlayerPublic` 的公开张数）不够——那个字段 `exclude=True`
+ * 不进网页载荷，而且"同一座位一进一出、张数不变"的换牌它看不出来。
+ */
+function snapshotFingerprint(snapshot) {
+  if (!snapshot) return "";
+  const cardIds = (cards) => (cards || []).map((card) => String(card && card.card_id)).join(",");
+  const heroZones = (zones) => (zones || []).map((zone) => {
+    const count = Number(zone && zone.count);
+    return `${liveHeroZoneKey(zone)}×${Number.isFinite(count) ? count : (zone.cards || []).length}`
+      + `:${cardIds(zone && zone.cards)}`;
+  }).join("+");
+  const players = (snapshot.players || []).map((player) => [
+    player.seat,
+    player.hp,
+    player.hp_max,
+    player.armor,
+    player.hand_count,
+    player.alive ? 1 : 0,
+    player.hero || "",
+    player.identity || "",
+    player.chained ? 1 : 0,
+    player.flipped ? 1 : 0,
+    player.wine_active ? 1 : 0,
+    heroZones(player.hero_zones),
+    cardIds(player.equip),
+    cardIds(player.judge),
+    (player.sealed_zones || []).join("+"),
+    (player.markers || []).map((marker) => `${marker.name || marker.id || ""}×${marker.count}`).join("+"),
+  ].join(":")).join(";");
+  return [
+    snapshot.seat,
+    snapshot.turn_seat,
+    snapshot.phase,
+    snapshot.deck_count,
+    cardIds(snapshot.self_hand),
+    cardIds(snapshot.processing),
+    Array.isArray(snapshot.discard) ? cardIds(snapshot.discard) : String(snapshot.discard),
+    players,
+  ].join("|");
+}
+
+/** 空转期快照**变了**吗（票 07）：变了 ⇒ 座位块要重绘，但**不清本地选择**（没有新事实）。
+ *
+ * 为什么不像"有新记录"那样走 `applyView` → `commitView`：那条路无条件 `resetSelection()`，
+ * 会把玩家选到一半的牌清掉。这里只把快照换成服务端那份、重绘表体，询问面仍是当前这一问。
+ */
+function applyIdleRepaint(body) {
+  if (!state.view || !body) return false;
+  state.view.snapshot = body.snapshot;
+  if (Array.isArray(body.skills)) state.view.skills = body.skills;
+  state.view.pending_since = body.pending_since;
+  syncPendingClock(state.view);
+  renderTable();
+  return true;
+}
+
+/** 空转期的**亮牌重画**（table-ux-overhaul 票 18 / 服务端 D 方案）。
+ *
+ * 为什么需要它：亮牌面过去只在"下一次带 `harvest` 的询问"到达时重画；五谷的整段结算里
+ * **不是每个目标都有一条 pending**（AI 目标的取牌在服务端 `Session.drive()` 内部同步答完），
+ * 于是"谁拿走了哪张"永远等不到一次重画。服务端现在把**同一份**派生状态挂在每一次视图
+ * 下发上（`view.harvest`），这一拍就把它并进视图，内容变了就重画亮牌节点。
+ *
+ * 与 `applyIdleRepaint` **同一条纪律**：换内容**不清选择**（`state.picks` / 焦点 / 目标原样），
+ * 也没有新事实——不走 `commitView`（那条路无条件 `resetSelection()`）。折叠与只读判据不动。
+ * 返回 `true` = 这一拍真的重画了亮牌。
+ */
+function applyIdleHarvest(body) {
+  if (!state.view || !body) return false;
+  const incoming = body.harvest && typeof body.harvest === "object" ? body.harvest : null;
+  const previous = state.view.harvest && typeof state.view.harvest === "object"
+    ? state.view.harvest
+    : null;
+  state.view.harvest = incoming;
+  if (!incoming) return false;
+  // 同一份状态不重画（空转每 2 秒一拍，重建节点会丢悬停 / 焦点）。
+  if (harvestFingerprint(incoming) === harvestFingerprint(previous)) return false;
+  return repaintRevealFromHarvest(incoming);
+}
+
 /** 一拍轮询：播放中 / 提交在飞时**暂停**（下一次 tick 自然恢复），弹窗打开时照常进行。
  *
  * - 播放中取增量会把半批事件换成"播放中快照"（提交按钮 / 倒计时都会跳），故让路；
@@ -1607,6 +1873,15 @@ async function poll() {
     const body = await fetchView();
     pollFailures = 0;
     if (pollIsIdle(body)) {
+      // 票 18：空转期的**视图级五谷状态**（`view.harvest`）变了 ⇒ 重画亮牌节点（不清选择）。
+      // 它与下面两条空转出口互不排斥，故不在这里 return。
+      applyIdleHarvest(body);
+      // 票 07：空转**不等于**"什么都没变"——快照指纹变了就重绘座位块（不清选择）。
+      // 指纹没变才是纯时钟刷新（D12 的静默分支）。
+      if (snapshotFingerprint(body.snapshot) !== snapshotFingerprint(state.view.snapshot)) {
+        applyIdleRepaint(body);
+        return;
+      }
       applyIdlePoll(body);
       return;
     }

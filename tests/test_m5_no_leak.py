@@ -138,7 +138,11 @@ def _human_action(query) -> object:
 
 
 def test_the_human_payload_of_a_full_160_game_never_leaks_hands_identities_or_deck() -> None:
-    """逐次询问检查：160 张 8 人局的每一次快照 / 挂起载荷都不泄露。"""
+    """逐次询问检查：160 张 8 人局的每一次快照 / 挂起载荷都不泄露。
+
+    五谷逐目标暂停（table-ux-overhaul 票 19）的**空窗**里没有询问载荷可查，但快照仍在
+    ⇒ 那几步照样过 ``_assert_snapshot``（"每一次"不因没有询问而跳过证据）。
+    """
     session = Session(
         seed=EIGHT_SEED,
         player_count=8,
@@ -148,10 +152,19 @@ def test_the_human_payload_of_a_full_160_game_never_leaks_hands_identities_or_de
         pack=PACK,
     )
     checks = 0
+    steps = 0
     lord_seen = False
     while not session.finished:
+        steps += 1
+        assert steps < 10_000, "挂起驱动没有推进（活锁）"
         query = session.pending
-        assert query is not None, "未终局却没有挂起询问"
+        if query is None:
+            # 五谷逐目标暂停（table-ux-overhaul 票 19）：没有挂起是**合法**态（结算还没跑完），
+            # 真客户端这时再取一次增量；这里再驱动一次。**快照照样要查**（载荷不存在，但
+            # 下发面还在）。
+            _assert_snapshot(visible_snapshot(session), human_seat=session.human_seat)
+            session.drive()
+            continue
         snapshot = visible_snapshot(session)
         _assert_snapshot(snapshot, human_seat=session.human_seat)
         payload = pending_payload(session)
@@ -238,7 +251,10 @@ def test_the_human_log_records_never_name_hidden_card_moves_in_a_full_160_game()
     }
     public_zones_seen: set[str] = set()
     after = -1
+    steps = 0
     while True:
+        steps += 1
+        assert steps < 10_000, "挂起驱动没有推进（活锁）"
         for record in session.records_after(after):
             if getattr(record, "kind", None) != "delta":
                 continue
@@ -289,7 +305,9 @@ def test_the_human_log_records_never_name_hidden_card_moves_in_a_full_160_game()
         if session.finished:
             break
         query = session.pending
-        assert query is not None, "未终局却没有挂起询问"
+        if query is None:
+            session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+            continue
         after = session.next_cursor(after)
         session.submit_answer(_human_action(query))
 
@@ -317,7 +335,13 @@ def test_the_served_view_payload_filters_hidden_card_moves_for_the_human_seat() 
         timeout_seconds=None,
         pack=PACK,
     )
+    steps = 0
     while not session.finished:
+        steps += 1
+        assert steps < 10_000, "挂起驱动没有推进（活锁）"
+        if session.pending is None:
+            session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+            continue
         session.submit_answer(_human_action(session.pending))
     view = GameRegistry().view(session, after=-1, logs_after=0)
     assert view["human_seat"] == session.human_seat

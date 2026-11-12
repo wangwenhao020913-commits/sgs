@@ -336,7 +336,7 @@ SITES: dict[Site, Rule] = {
         "src/sgs/skills/negation.py",
         "_fenwei_handler",
         TARGET_INVALID_WRITE_TOKEN,
-        "mark_targets_ineffective(frame, tuple(chosen))",
+        "mark_targets_ineffective(frame, chosen)",
     ): Rule(
         "target-level-invalid",
         1,

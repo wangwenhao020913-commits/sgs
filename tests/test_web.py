@@ -43,6 +43,7 @@ from sgs.state import (  # noqa: E402
     Action,
     ActivateSkill,
     ArrangeQuery,
+    AskPolicy,
     EndPhase,
     FrameKind,
     Pass,
@@ -52,9 +53,11 @@ from sgs.state import (  # noqa: E402
     PlayPhaseQuery,
     QueryKind,
     RespondQuery,
+    RespondMode,
     SelectCards,
     SelectCardsQuery,
     SelectionSpec,
+    SelectOption,
     SelectOptionQuery,
     SelectOptionsContext,
     SelectOptionsQuery,
@@ -77,6 +80,7 @@ from sgs_web.display import (  # noqa: E402
     suit_labels,
 )
 from sgs_web.descriptions import SKILL_DESCRIPTIONS, skill_description  # noqa: E402
+from sgs_web import projection as _projection  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     HARVEST_REQUIREMENT,
     build_skills,
@@ -114,12 +118,37 @@ class _FirstChoice:
 
 
 def _play_to_end(session: Session) -> int:
-    """用 :class:`Session` 的挂起驱动把一局走完，返回应答次数。"""
+    """用 :class:`Session` 的挂起驱动把一局走完，返回应答次数。
+
+    先 ``drive()`` 一次：经 ``GameRegistry.create`` 建的会话停在 L0 边界（票 14 的建局口径），
+    人类第一问要驱动一下才出来；已经停在询问上的会话它是零动作。
+
+    **五谷逐目标暂停（票 19）**：一次应答之后可能**没有 pending**（结算里每名目标取牌后都
+    让出一次，中间状态交给视图）。真客户端这时再取一次增量，这里再 ``drive()`` 一次。
+    """
+    session.drive()
     answers = 0
-    while session.pending is not None:
-        session.submit_answer(session.pending.legal_actions[0])
+    for _ in range(10_000):
+        pending = session.pending
+        if pending is None:
+            if session.finished:
+                return answers
+            session.drive()
+            continue
+        session.submit_answer(pending.legal_actions[0])
         answers += 1
-    return answers
+    raise AssertionError("挂起驱动没有把这一局走完（活锁）")
+
+
+def _settle(registry, session: Session) -> dict:
+    """建一局之后**取一次增量**，返回那时那份 ``after < 0`` 的视图（票 14）。
+
+    建局响应止于 ``GAME_START``（L0 边界），人类第一问由下一次取增量驱动出来——真客户端
+    走的是同一条路（``advance_clock`` → ``view``）。绝大多数断言要的是"开局已收口"那一份，
+    它等价于本票之前建局响应里给的那一份。
+    """
+    registry.advance_clock(session)
+    return registry.view(session, after=-1, logs_after=0)
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +201,9 @@ def test_the_halt_driven_journal_is_byte_identical_to_a_one_shot_run(seed: int) 
         pack=session.pack,
         heroes=session.heroes,
         hero_pool=session.hero_pool,
+        # 同一份询问策略（票 05）：缺省"引擎 OFF / 网页 ON"两档不同，不带上它这条对照就
+        # 比的是两份不同的配置——而本判据要证的只是"挂起驱动不改变记录流"。
+        ask_policy=session.ask_policy,
     )
     straight.run([_FirstChoice(), RandomPlayer(ai_stream(seed, 1))])
 
@@ -192,6 +224,9 @@ def test_the_halt_driven_journal_replays_through_the_tape_player() -> None:
         pack=session.pack,
         heroes=session.heroes,
         hero_pool=session.hero_pool,
+        # 录像里的询问序列是**会话策略 ON** 下产出的（票 05）：回放引擎要同一份策略，
+        # 否则它会问出录像里没有的空询问，磁带对不上。
+        ask_policy=session.ask_policy,
     )
     replay.run([TapePlayer(tape)] * session.rule_config.player_count)
 
@@ -495,7 +530,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 96 → 97 / 64 不变。
     # yijiang-2014-round2 票 01（W3）：界一将成名-2014·移动版加界沮授移动版（真名「沮授」
     # 已在池里）⇒ 97 → 98 / 64 不变。
-    assert len(flat) == 98 and len(catalog) == 64, (
+    assert len(flat) == 100 and len(catalog) == 66, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -1313,10 +1348,14 @@ def test_an_idle_poll_is_silent_until_the_deadline_answers_for_you() -> None:
     from sgs_web.serve import GameRegistry
 
     registry = GameRegistry(runs_dir="/tmp/unused")
+    # sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66：旧种子 20261013 的第一趟驱动
+    # 停在五谷逐目标暂停上（不是人类询问），按同一判据换种 ⇒ 20261014。
     session = registry.create(
-        {"player_count": 4, "ai": "random", "seed": 20261013, "timeout_seconds": 10.0}
+        {"player_count": 4, "ai": "random", "seed": 20261014, "timeout_seconds": 10.0}
     )
-    first = registry.view(session, after=-1, logs_after=0)
+    # 建局响应止于 GAME_START（票 14）：先取一次增量（真 HTTP GET 走的就是这一条路），
+    # 这一份才是"停在人类第一个询问上"的那一份。
+    first = _settle(registry, session)
     assert first["pending"] is not None, "人类座位应当停在第一个询问上"
 
     # 无事发生的一次轮询（与 HTTP GET 同一条路径：先 advance_clock，再 view）。
@@ -1414,20 +1453,32 @@ def test_the_respond_query_carries_no_second_target_stage() -> None:
     seed 31 的随机路径提前分出生死（175 → 55 步、RESPOND 94 → 26 次），两条种子的合计因此
     从 106 掉到 38，低于下面的 50。按 `CODING_STANDARDS.md` §5 **加样本、不降阈值**：补 seed
     43（它含移动版于吉，顺带覆盖本票新增的提供者路径，单种 90 次），合计 128（≈ 2.5× 阈值）。
+
+    **样本量（票 05，2026-11-11）**：网页会话缺省 **ON** 之后，人类座位自己的 RESPOND 询问
+    从每局几十条掉到个位数——空手座位不再被问（本票的报障就是这个）。取样因此改从
+    **记录流**读：每个座位的 RESPOND 询问都在里面（同一份 `RespondQuery` 模型，形状与下发
+    面一致），三颗种子合计 89 次（≈ 1.8× 阈值）；阈值一个字不降。
     """
     checked = 0
     for seed in (31, 37, 43):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
         guard = 0
-        while session.pending is not None and guard < 400:
+        while not session.finished and guard < 400:
             guard += 1
-            query = session.pending
-            if str(query.kind) == "RESPOND":
-                checked += 1
-                payload = query.model_dump(mode="json")
-                assert "use_targets" not in payload, "RESPOND 询问不得带 use_targets（第二阶段不存在）"
-                assert "mode" not in payload, "RESPOND 询问不得带 mode（候选里读得出是打出还是使用）"
-            session.submit_answer(query.legal_actions[0])
+            if session.pending is None:
+                session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+                continue
+            session.submit_answer(session.pending.legal_actions[0])
+        for record in session.records():
+            if getattr(record, "kind", None) != "query":
+                continue
+            query = record.query
+            if str(query.kind) != "RESPOND":
+                continue
+            checked += 1
+            payload = query.model_dump(mode="json")
+            assert "use_targets" not in payload, "RESPOND 询问不得带 use_targets（第二阶段不存在）"
+            assert "mode" not in payload, "RESPOND 询问不得带 mode（候选里读得出是打出还是使用）"
     # 覆盖元断言：一条"逐条检查"的循环若一条都没检查到，它就是空转通过。
     assert checked >= 50, f"取样太少（只查到 {checked} 次 RESPOND），断言谈不上机械"
 
@@ -1449,9 +1500,12 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 seed=seed, ai="random", timeout_seconds=None, player_count=player_count
             )
             guard = 0
-            while session.pending is not None and guard < 400:
+            while not session.finished and guard < 400:
                 guard += 1
                 query = session.pending
+                if query is None:
+                    session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+                    continue
                 index = candidate_index(query)
                 payload = pending_payload(session)
                 assert payload is not None
@@ -1708,7 +1762,9 @@ def test_the_virtual_index_aliases_a_conversion_source_to_its_virtual_card() -> 
 
 def test_the_pending_payload_carries_the_virtual_source_index() -> None:
     """跨线契约：``pending_payload`` 必须下发 ``virtual_index``（否则前端读不到）。"""
-    session = Session(seed=20261012, ai="random", timeout_seconds=None, player_count=8)
+    # sp5-mayunlu-panjun 票 01 / 02：旧种子 20261012 构造后没有停在任何询问上（五谷暂停），
+    # 换到 20261018（同一判据：构造后停在人类第一问）。
+    session = Session(seed=20261018, ai="random", timeout_seconds=None, player_count=8)
 
     payload = pending_payload(session)
 
@@ -2843,9 +2899,12 @@ def test_the_candidate_index_never_carries_rule_judgements() -> None:
     for seed in (13, 29):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
         guard = 0
-        while session.pending is not None and guard < 300:
+        while not session.finished and guard < 300:
             guard += 1
             query = session.pending
+            if query is None:
+                session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+                continue
             index = candidate_index(query)
             expected: dict[str, set[int]] = {}
             for action in query.legal_actions:
@@ -2979,6 +3038,221 @@ def test_the_sidecar_meta_carries_the_outcome(tmp_path: Path) -> None:
     assert meta["human_seat_won"] is (meta["human_seat"] in session.records()[-1].winners)
 
 
+# ---------------------------------------------------------------------------
+# 询问策略位（table-ux-overhaul 票 02 / spec §2 Q4 + §3 注①）
+#
+# 票 02 只落管道、不接窗口（预筛口零调用点 ⇒ 记录流逐字节不变，硬验收见
+# tools/check_goldens.sh）；票 05 把五处 A 类窗口接上去，本节因此多了一条**消费者**断言：
+# 同一扇真实的无懈窗口，装"引擎缺省"和"网页缺省"两份策略，问到的座位不一样。
+# ---------------------------------------------------------------------------
+
+
+class _PlaysTheTrick:
+    """出牌阶段使用**指定的那一张**牌，其余询问一律按 :class:`PassPlayer` 答。
+
+    只服务 :func:`_nullify_window_askers` 的驱动：让"无懈窗口"真的由一次锦囊结算开出来，
+    而不是手搓一个合成载荷（``CODING_STANDARDS.md`` §6）。
+    """
+
+    def __init__(self, type_id: str) -> None:
+        self.type_id = type_id
+        self.done = False
+
+    def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+        if not self.done and query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.type == self.type_id:
+                    self.done = True
+                    return action
+        return PassPlayer().respond(query)
+
+
+def _nullify_window_askers(ask_policy: AskPolicy) -> list[int]:
+    """一扇**真实**无懈窗口里被问到的座位：座位 0 用锦囊（手里没有无懈）、座位 1 空手。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    trick = cards_of_type(pack, "ex_nihilo")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(trick,)), SeatSpec()],
+        deck=deck_excluding(pack, trick),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11, ask_policy=ask_policy)
+    run_queries(
+        engine,
+        [_PlaysTheTrick("ex_nihilo"), PassPlayer()],
+        lambda e: ran_timing(e, Timing.RESOLVE_END),
+    )
+    return [
+        record.query.actor
+        for record in engine.records
+        if record.kind == "query"
+        # `RespondQuery.kind` 是报文值（`"RESPOND"`），按 ``==`` 比 enum（str 枚举两边相等）。
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.NULLIFY
+        and record.query.target == 0
+    ]
+
+
+def test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session() -> None:
+    """Q4(a)：引擎缺省 OFF（金录像 / 旧录像逐字节可复现），网页会话缺省 ON。
+
+    两档都从**真实构造路径**读：引擎走 ``Engine.new_game``、会话走 ``Session.__init__``，
+    并且断言会话的配置**真的落到了它自己的引擎上**（否则"网页缺省 ON"只是一句注释）。
+    """
+    pack = load_content_pack(deck_profile="standard_108")
+    engine = Engine.new_game(
+        seed=1,
+        rule_config=validate_rule_config(TWO_PLAYERS),
+        pack=pack,
+    )
+    assert engine.ask_policy == AskPolicy(), "引擎缺省必须是 OFF（不为旧调用方打开新策略）"
+    assert engine.ask_policy.auto_skip is False
+
+    session = Session(seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    assert session.ask_policy.auto_skip is True, "网页会话缺省 ON（玩家立刻看到效果）"
+    assert session.engine.ask_policy == session.ask_policy, "会话配置必须落到引擎上"
+
+    explicit_off = Session(
+        seed=1, ai="random", timeout_seconds=None, ask_policy=AskPolicy(), **TWO_PLAYERS
+    )
+    assert explicit_off.engine.ask_policy.auto_skip is False, "显式 OFF 必须能盖过网页缺省"
+
+
+def test_a_web_session_defaults_the_policy_on_and_the_engine_defaults_it_off() -> None:
+    """票 05：票 02 的两份**真实缺省**各有**消费者**——同一扇无懈窗口问到的座位不一样。
+
+    缺省值本身由 ``test_the_ask_policy_defaults_off_at_the_engine_and_on_in_a_web_session``
+    钉住（本用例不重复那三条断言，也不重写预筛口判据）；这里只钉"它们真的改变窗口行为"：
+    引擎缺省 ⇒ 照问全场（旧口径逐字节可复现），网页会话缺省 ⇒ 空手座位连询问都不发。
+    两份策略都从**真实构造路径**取（``Engine.new_game`` / ``Session.__init__``），不写
+    ``AskPolicy(auto_skip=...)`` 字面量——判据因此读的是产品缺省，不是测试自造的配置。
+    """
+    engine = Engine.new_game(
+        seed=1,
+        rule_config=validate_rule_config(TWO_PLAYERS),
+        pack=load_content_pack(deck_profile="standard_108"),
+    )
+    session = Session(seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+
+    # 座位 0 刚把锦囊用掉、座位 1 空手：两个人都没有能打出【无懈可击】的牌。
+    assert _nullify_window_askers(engine.ask_policy) == [0, 1], (
+        "引擎缺省 OFF ⇒ 无懈窗口照问全场（旧口径逐字节可复现）"
+    )
+    assert _nullify_window_askers(session.ask_policy) == [], (
+        "网页缺省 ON ⇒ 没有任何办法打出【无懈可击】的座位连询问都不发"
+    )
+
+
+def _nullify_window_state():
+    """一扇合成的无懈窗口局面：座位 0 手里有一张【无懈可击】，座位 1 空手。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    nullify = cards_of_type(pack, "nullify")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(nullify,)), SeatSpec()],
+        deck=deck_excluding(pack, nullify),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return state
+
+
+def _nullify_window_context(engine, *, skip_if_empty: bool = True):
+    """一扇无懈窗口的**同一份**载荷（`Engine.respond_context` 建，预筛口只收它）。"""
+    from sgs.effects import NULLIFY_RESPONSE_CARD
+
+    return engine.respond_context(
+        None,
+        0,
+        cause=WindowCause.NULLIFY,
+        required=NULLIFY_RESPONSE_CARD,
+        mode=RespondMode.USE,
+        skip_if_empty=skip_if_empty,
+    )
+
+
+def test_the_prefilter_helper_picks_no_candidate_beyond_pass_as_askable() -> None:
+    """预筛口 = "除 ``Pass`` 外还有没有候选"；两档输入（会话策略 + 窗口类别位）缺一不可。
+
+    - 策略 ON 且窗口声明可跳过：只有 ``Pass`` 的座位不 askable，有真牌的座位 askable；
+    - 策略 OFF（引擎缺省）：照问——旧口径逐字节可复现；
+    - 窗口没声明可跳过：照问——判据由调用方按类别给，预筛口不替它猜。
+
+    类别位住在**窗口建的那一份载荷**里（R2 的统一形状）：预筛口只收 `ctx`，不再收
+    `skip_if_empty=` 参数，所以"这一问可不可跳过"只有一个声明点。
+    """
+    state = _nullify_window_state()
+    engine = Engine.from_state(state, seed=11, ask_policy=AskPolicy(auto_skip=True))
+
+    context = _nullify_window_context(engine)
+    assert engine.should_ask_respond(0, context) is True, "有真【无懈可击】的座位必须被问"
+    assert engine.should_ask_respond(1, context) is False, "只有 Pass 的座位不该被问"
+
+    off_engine = Engine.from_state(_nullify_window_state(), seed=11)
+    assert off_engine.should_ask_respond(1, context) is True, "引擎缺省 OFF ⇒ 照问"
+
+    no_category_bit = _nullify_window_context(engine, skip_if_empty=False)
+    assert engine.should_ask_respond(1, no_category_bit) is True, (
+        "窗口没声明「可以跳过」⇒ 照问（预筛口不按候选猜类别）"
+    )
+
+
+def test_the_prefilter_helper_does_not_consume_a_query_slot() -> None:
+    """预筛是**纯预览**（与 ``respond_candidates`` 同一姿态）：不建询问、不记、不耗序号。"""
+    from sgs.effects import NULLIFY_RESPONSE_CARD
+
+    session = Session(seed=13, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    pending = session.pending
+    assert pending is not None, "建局后应当停在一个询问上"
+    before = (pending.seq, len(session.records()))
+    engine = session.engine
+
+    for seat in range(session.rule_config.player_count):
+        decided = engine.should_ask_respond(
+            seat,
+            engine.respond_context(
+                None,
+                seat,
+                cause=WindowCause.NULLIFY,
+                required=NULLIFY_RESPONSE_CARD,
+                mode=RespondMode.USE,
+                skip_if_empty=True,
+            ),
+        )
+        assert decided in (True, False)
+
+    after = session.pending
+    assert after is pending, "预筛不得换掉当前挂起的询问"
+    assert (after.seq, len(session.records())) == before, (
+        "预筛不得消耗询问序号，也不得往记录流里写任何一条"
+    )
+
+
+def test_the_sidecar_meta_freezes_the_ask_policy_and_replay_restores_it(
+    tmp_path: Path,
+) -> None:
+    """会话事实：策略进侧车 meta，回放按它重建引擎；旧录像没有该字段 ⇒ 引擎缺省 OFF。"""
+    from sgs_web.replay import engine_from_meta, read_run_meta
+
+    def _round_trip(session: Session) -> dict:
+        journal = save_run(tmp_path, session)
+        return read_run_meta(tmp_path, journal.name[: -len(".jsonl")])
+
+    off_meta = _round_trip(_finished_session(seed=107, ask_policy=AskPolicy(auto_skip=False)))
+    assert off_meta["ask_policy"] == {"auto_skip": False}
+    assert engine_from_meta(off_meta).ask_policy == AskPolicy(auto_skip=False)
+
+    on_meta = _round_trip(_finished_session(seed=109))
+    assert on_meta["ask_policy"] == {"auto_skip": True}, "网页会话缺省 ON 必须被冻结"
+    assert engine_from_meta(on_meta).ask_policy == AskPolicy(auto_skip=True)
+
+    legacy = {key: value for key, value in on_meta.items() if key != "ask_policy"}
+    assert engine_from_meta(legacy).ask_policy == AskPolicy(), (
+        "本票之前的录像没有该字段 ⇒ 回放必须回落引擎缺省 OFF（旧行为可复现）"
+    )
+
+
 def test_listing_runs_never_parses_the_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """perf-web 票 01：列表**只读侧车元数据**。
 
@@ -3048,6 +3322,168 @@ def test_the_registry_drops_old_finished_sessions_after_saving(tmp_path: Path) -
     assert len(list(tmp_path.glob("*.jsonl"))) == 3
 
 
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 01：性能（派生通道游标化 / 会话回收 / 事件流上限）
+# ---------------------------------------------------------------------------
+
+
+def test_the_view_payload_never_json_round_trips_the_record_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """票 01：`view()` 不许再用 canonical JSON 文本往返来派生任何东西。
+
+    旧实现里四条派生通道（skill / damage / card / life_loss）**只为算 `last_seq`** 就把
+    整条记录流 `model_dump + json.dumps + json.loads` 一遍；`visible_record` 也走同一条
+    文本往返。实测 N=6612 条记录时单次 `view()` 2.7 s，其中四条通道合计 2.38 s。
+
+    这里把 `record_json` 换成"一调就炸"：`view()` 照常返回 ⇒ 视图路径一个字节都没被
+    JSON 文本往返过（与 perf-web 票 01 对 `list_runs` / `read_journal` 的做法同型）。
+    """
+    import sgs_web.projection as projection_module
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 103, "timeout_seconds": None}
+    )
+    # 票 14：先取一次增量把引擎推到人类的第一个询问（建局响应止于 GAME_START）。
+    registry.advance_clock(session)
+
+    def _forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("view() 不许把记录流做 JSON 文本往返（派生通道只读属性）")
+
+    monkeypatch.setattr(projection_module, "record_json", _forbidden)
+
+    body = registry.view(session, after=-1, logs_after=0)
+
+    kinds = {record["kind"] for record in body["records"]}
+    assert "header" in kinds and "query" in kinds, f"视图必须照常返回记录：{kinds}"
+    assert body["snapshot"] and body["pending"], "视图载荷不得因禁用文本往返而残缺"
+
+
+def test_an_abandoned_session_is_pruned_when_a_new_one_is_created(tmp_path: Path) -> None:
+    """票 01：中途放弃的局不再常驻内存——建新局时回收"久未访问的未终局会话"。
+
+    旧口径只在 `save_if_finished` 里回收 ⇒ 只有**打到终局**的局才会被回收；中途放弃
+    （关掉标签页、输了就跑）的局永远留在 `GameRegistry.sessions` 里，实测每局峰值
+    +9~23 MB（RSS 47→64→87→101→110 MB / 4 局）——这是"同一进程第二局也卡"的机制。
+
+    判据 = **最后访问时刻**：久未访问且未终局 ⇒ 下一次 `create` 时回收（`get()` 抛
+    `KeyError`，HTTP 层 404）。近期还访问过的不回收——同一个进程里可能还有页面在轮询。
+    """
+    from sgs_web.serve import ABANDONED_SESSION_SECONDS, GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    abandoned = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 11, "timeout_seconds": None}
+    )
+    keeper = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 12, "timeout_seconds": None}
+    )
+    # 放弃的那局：没有终局，也没人再来轮询 —— 最后访问时刻停在很久以前。
+    abandoned.last_access = keeper.last_access - ABANDONED_SESSION_SECONDS - 1.0
+
+    fresh = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 13, "timeout_seconds": None}
+    )
+
+    assert abandoned.session_id not in registry.sessions, "久未访问的未终局会话必须被回收"
+    with pytest.raises(KeyError):
+        registry.get(abandoned.session_id)
+    assert keeper.session_id in registry.sessions, "近期访问过的未终局会话不许回收"
+    assert fresh.session_id in registry.sessions
+
+
+def test_the_view_only_derives_the_new_narrative_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """票 01：叙事只派生**新增的那一段**，不再从头重建再按 seq 过滤（176–201 ms/次）。
+
+    判据落在真实的 `view()` 上：首屏取全量（建缓存），之后每批只把**新记录**喂给生成器。
+    这里数 `narrative._payload` 的调用次数——它就是"一条记录 → 叙事"的唯一入口
+    （旧实现每请求调用 N 次，新实现只调用本批条数次）。
+    """
+    import sgs_web.narrative as narrative_module
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 103, "timeout_seconds": None}
+    )
+    first = _settle(registry, session)
+    assert first["narrative"], "前置：首屏必须有叙事条目"
+    cursor = first["cursor"]
+    session.submit_answer(session.pending.legal_actions[0])
+    expected = narrative_module.narrative_after(
+        session.records(),
+        after=cursor,
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert expected, "前置：这一批必须真的有新叙事（否则本条测不到东西）"
+
+    seen: list[object] = []
+    original = narrative_module._payload
+
+    def _counting(record: object) -> dict[str, object]:
+        seen.append(record)
+        return original(record)
+
+    monkeypatch.setattr(narrative_module, "_payload", _counting)
+
+    body = registry.view(session, after=cursor, logs_after=0)
+
+    assert body["narrative"] == expected, "增量叙事必须与整份重建的结果逐条相同"
+    assert len(seen) == len(session.records_after(cursor)), (
+        f"只派生新增的那一段：喂了 {len(seen)} 条，本批 {len(session.records_after(cursor))} 条"
+    )
+
+
+def test_the_event_log_keeps_a_bounded_number_of_nodes() -> None:
+    """票 01：`#t-log` 只留最近 `LOG_ITEM_LIMIT` 条（垫片里数 `#t-log` 子节点）。
+
+    旧实现每条记录一枚 `<li>` 且只增不减（一局 4671 条 ≈ 4671 个节点），每一步的
+    `scrollIntoView` 都随子树线性变贵。这里把**真的** `log.js` 放进最小 DOM 垫片，走
+    **生产入口**（`appendNarrativeEntry` 简易档 / `appendLog` 完整档）各喂 2×上限条数，
+    再数 `#t-log` 的子节点：必须停在同一个上限，且留下的是**最新**的那几条。
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    probe = REPO_ROOT / "tests" / "support" / "log_cap_probe.mjs"
+    assert probe.is_file(), f"缺少事件流上限探针：{probe.relative_to(REPO_ROOT)}"
+
+    result = subprocess.run(
+        [node, str(probe.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"事件流上限探针失败（exit {result.returncode}）：\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    limit = payload["limit"]
+    appended = payload["appended"]
+
+    assert isinstance(limit, int) and 0 < limit < appended, (
+        f"事件流必须有上限（喂了 {appended} 条）：limit={limit}"
+    )
+    assert payload["narrativeNodes"] == limit, (
+        f"叙事档必须停在 {limit} 条：{payload['narrativeNodes']}"
+    )
+    assert payload["logNodes"] == limit, (
+        f"完整档必须停在 {limit} 条：{payload['logNodes']}"
+    )
+    assert payload["newestKept"] is True, "留下的必须是最新的那几条（从头部摘）"
+
+
 def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_path: Path) -> None:
     """W4-6：回放页的询问面板 / 手牌 / 装备 / 判定 / 处理区**只能**从这份 API 读。
 
@@ -3058,7 +3494,9 @@ def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_pa
     # 换池历史：神吕蒙移动版进池（57 → 58）后 seed 1 的 2 人局不再走过"带槽位的选牌"；
     # 按同一判据（终局 + 至少一条带非空 slots 的 SELECT_CARDS + 牌移动覆盖
     # hand / equip / judge / processing）从 1 重扫到 **seed 3**。
-    session = _finished_session(seed=3)
+    # sp5-mayunlu-panjun 票 01 / 02（池 98 → 100）后 seed 3 没有判定区的牌移动 ⇒ 按同一
+    # 判据重扫，取 **seed 9**（终局、slots 非空、四个区都覆盖）。
+    session = _finished_session(seed=9)
     save_run(tmp_path, session)
     name = next(tmp_path.glob("*.jsonl")).name[: -len(".jsonl")]
 
@@ -4737,6 +5175,475 @@ def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
     assert payload["preactivation"] and payload["preactivation"][0]["name"] == "card"
     assert payload["preactivation"][0]["pool"][0]["options"] == ["7"]
     assert payload["preactivations"] == {}, "被动入口没有「技能 id → 清单」那张表"
+    assert payload["preview"] is True, (
+        "【青釭剑】有流水线 ⇒ 这一问声明**步骤预览**可用（票 11 的新信息通道）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 票 11：步骤预览端点——预发动清单一步的**只读**现算（与校验器同一份池回调）
+# ---------------------------------------------------------------------------
+
+CHULI = "hero.jie_huatuo.chuli"
+
+
+def _session_at_chuli_play_phase() -> Session:
+    """真会话：4 人局，人类 = 界华佗（群），对面曹操 / 司马懿（魏）、刘备（蜀）。
+
+    停在【除疠】的出牌阶段：清单是**一步多选座位步**（任意名、势力互异），候选池按
+    "本步已选的座位"现算——静态清单表达不了这条（`ordered=True, hi>1` 的步不下发候选），
+    正是预览要服务的形状。
+    """
+    session = Session(
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        heroes=("jie_huatuo", "caocao", "simayi", "liubei"),
+        human_seat=0,
+    )
+    for _ in range(400):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到【除疠】的出牌阶段")
+        if pending.kind == "PLAY_PHASE" and CHULI in (pending.preactivations or {}):
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("400 次应答内没走到【除疠】的出牌阶段")
+
+
+def _registry_with(session: Session):
+    """把**已经驱动到目标询问**的会话挂进一个真注册表（HTTP 用例的进入姿势）。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry.sessions[session.session_id] = session
+    return registry
+
+
+def _preview(registry, session: Session, body: dict) -> tuple[int, dict]:
+    """打真处理器（不开端口）：路由、409 / 400 的映射与 JSON 都是产品代码给出的。"""
+    return _post_with_the_real_handler(
+        registry, f"/api/sessions/{session.session_id}/preview", body
+    )
+
+
+def test_the_preview_endpoint_returns_the_same_pool_the_validator_uses() -> None:
+    """票 11 的同源断言：预览的 ``options`` 与 ``validate_activation`` 的裁决必须一致。
+
+    【除疠】的座位池按"本步已选的座位"现算（势力互异）：先点 1 号位（魏），同势力的
+    2 号位必须立刻从候选里消失。判据不是"预览说得像"，而是**同一个** ``_chuli_targets``：
+    预览说能点的每个座位，校验器都收；预览说不能点的，校验器就拒。
+    """
+    from sgs.skills.preactivation import validate_activation
+
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+    state, owner = session.engine.state, pending.actor
+
+    assert pending_payload(session)["preview"] is True, (
+        "真载荷声明预览可用：前端只在**带了这个键**的询问上发预览（旧载荷逐字段不变）"
+    )
+
+    status, first = _preview(
+        registry, session, {"answers_seq": pending.seq, "skill_id": CHULI, "answers": []}
+    )
+    assert status == 200
+    assert first["cursor"] == 0 and first["kind"] == "seat"
+    assert {"seat:1", "seat:2"} <= set(first["options"]), (
+        f"一开始两名魏将都能选：{first['options']}"
+    )
+    assert first["can_submit"] is False, "一名目标都还没选 ⇒ 不能提交"
+
+    status, second = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": pending.seq,
+            "skill_id": CHULI,
+            "answers": [{"name": "seat", "values": [1]}],
+        },
+    )
+    assert status == 200
+    assert second["cursor"] == 0, "多选座位步：光标停在它上面（还能继续加人）"
+    assert "seat:2" not in second["options"], "同势力（魏）的 2 号位必须立刻变灰"
+    assert "seat:3" in second["options"], "异势力（蜀）照旧可选"
+    assert second["can_submit"] is True, "已经够 1 名 ⇒ 此刻就能提交"
+
+    # **同源**：候选 → 校验器逐个对表（不重算池，也不读另一份实现）。
+    for option in second["options"]:
+        assert validate_activation(state, owner, CHULI, (), ("seat:1", option)) is None, (
+            f"预览说 {option} 能点 ⇒ 校验器必须收"
+        )
+    assert validate_activation(state, owner, CHULI, (), ("seat:1", "seat:2")) is not None, (
+        "预览说 2 号位不能点 ⇒ 校验器必须拒（势力互异）"
+    )
+
+
+def test_the_preview_endpoint_writes_nothing() -> None:
+    """只读全停：不建询问、不写记录、不耗序号、不搬牌、不抽随机数。
+
+    与 :meth:`Engine.respond_candidates` 同一条纪律——预览是"每变一次选择问一次"的热路径，
+    它一旦有副作用，最轻的症状就是记录流里凭空多一条。
+    """
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+    records = session.engine.records
+    hand_sizes = tuple(len(player.hand) for player in session.engine.state.players)
+
+    for answers in ([], [{"name": "seat", "values": [1]}]):
+        status, _body = _preview(
+            registry,
+            session,
+            {"answers_seq": pending.seq, "skill_id": CHULI, "answers": answers},
+        )
+        assert status == 200
+
+    assert session.engine.records == records, "记录流一条都不能多（含拒绝记录）"
+    assert len(session.engine.records) == len(records)
+    assert session.pending is pending and session.pending.seq == pending.seq, (
+        "当前挂起与它的序号都不许动（没有建询问、没有耗序号）"
+    )
+    assert tuple(len(player.hand) for player in session.engine.state.players) == hand_sizes, (
+        "一张牌都不许搬"
+    )
+
+
+def test_the_preview_endpoint_rejects_a_stale_answers_seq() -> None:
+    """``answers_seq`` 对不上当前挂起 ⇒ 409，**与 ``/answer`` 同形**（错误 + 当前挂起）。"""
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    status, body = _preview(
+        registry,
+        session,
+        {"answers_seq": pending.seq + 1, "skill_id": CHULI, "answers": []},
+    )
+
+    assert status == 409
+    assert set(body) == {"error", "pending"}, "与 /answer 的 409 同一个形状"
+    assert body["pending"]["seq"] == pending.seq, "下发的是**当前**那一问"
+    assert "过期" in body["error"]
+
+
+def test_the_preview_endpoint_rejects_a_skill_without_an_issued_manifest() -> None:
+    """``skill_id`` 必须是这次询问里**下发过清单**的技能（否则 400，不静默回一份空候选）。"""
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+
+    status, body = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": session.pending.seq,
+            "skill_id": "hero.liubei.rende",
+            "answers": [],
+        },
+    )
+
+    assert status == 400
+    assert "预发动清单" in body["error"]
+
+
+def test_the_preview_endpoint_rejects_a_malformed_answers_prefix() -> None:
+    """``answers`` 必须是**清单步名的前缀**；形状 / 步名 / 长度不对一律 400（不猜、不静默纠正）。"""
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    seq = session.pending.seq
+
+    # 步名不是清单里的那一步（清单只有一步 `seat`）
+    status, body = _preview(
+        registry,
+        session,
+        {"answers_seq": seq, "skill_id": CHULI, "answers": [{"name": "card", "values": []}]},
+    )
+    assert status == 400 and "步名" in body["error"]
+
+    # 前缀比清单还长
+    status, body = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": CHULI,
+            "answers": [{"name": "seat", "values": []}, {"name": "seat", "values": [1]}],
+        },
+    )
+    assert status == 400
+
+    # `answers` 不是数组
+    status, body = _preview(
+        registry, session, {"answers_seq": seq, "skill_id": CHULI, "answers": "seat"}
+    )
+    assert status == 400 and "数组" in body["error"]
+
+
+def test_the_preview_endpoint_is_cheap_enough_for_every_selection_change() -> None:
+    """性能底线：单次预览是本机 **< 5 ms** 的量级（票面口径），且**不碰** ``view()``。
+
+    预览只调这一步骤的派生回调（座位池 / 选项闭集 / 选牌面），**不**建投影、不扫记录流
+    ——票 01 之前一次 ``view()`` 要 2.4 s。这里钉一条宽上限（20 ms），实测值写进票面
+    ``## Answer``。
+    """
+    import statistics
+    import time
+
+    session = _session_at_chuli_play_phase()
+    registry = _registry_with(session)
+    pending = session.pending
+    body = {
+        "answers_seq": pending.seq,
+        "skill_id": CHULI,
+        "answers": [{"name": "seat", "values": [1]}],
+    }
+    registry.preview(session, body)  # 预热（首次会填 CATALOG 的惰性缓存）
+
+    samples = []
+    for _ in range(200):
+        started = time.perf_counter()
+        registry.preview(session, body)
+        samples.append(time.perf_counter() - started)
+    median = statistics.median(samples)
+    p95 = statistics.quantiles(samples, n=20)[18]
+
+    assert median < 0.020, f"单次预览中位 {median * 1000:.3f} ms 太慢（票面口径 < 5 ms）"
+    assert p95 < 0.020, f"单次预览 p95 {p95 * 1000:.3f} ms 太慢"
+
+
+# ---------------------------------------------------------------------------
+# 票 15：选牌面预览——自家手牌面上的"哪些槽位还点得动"由后端现算（`SELECT_CARDS`）
+# ---------------------------------------------------------------------------
+
+YEYAN = "hero.shen_zhouyu_mobile.yeyan"
+
+
+def _session_at_yeyan_cost_face() -> Session:
+    """真会话：4 人局，人类 = 神周瑜（移动版），停在【业炎】的**代价选牌步**。
+
+    【业炎】的代价面是 ``SelectionSpec(zones=(HAND,), total=(4,4), max_per_suit=1)``
+    （`skills/active.py:_yeyan_effect`）：候选枚举只留"四花色各一张"的组合，提交是
+    fail-closed 的成员判定——正是本票要同源复用的那一条。
+
+    驱动是确定性的（种子 4；其余询问取超时兜底）：出牌阶段发动【业炎】→ 分配弹窗里给
+    1 号位计 2 点（计数 ≥ 2 才要付代价）→ 停在四色选牌面。
+    """
+    session = Session(
+        seed=4,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        heroes=("shen_zhouyu_mobile", "caocao", "sunquan", "liubei"),
+        human_seat=0,
+    )
+    activated = False
+    for _ in range(600):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到【业炎】的代价选牌步")
+        if pending.kind == "PLAY_PHASE" and not activated:
+            action = next(
+                (
+                    item
+                    for item in pending.legal_actions
+                    if getattr(item, "skill_id", None) == YEYAN
+                ),
+                None,
+            )
+            if action is not None:
+                activated = True
+                session.submit_answer(action)
+                continue
+        if pending.kind == "DISTRIBUTE" and activated:
+            heavy = next(
+                (
+                    item
+                    for item in pending.legal_actions
+                    if item.kind == "Distribute" and dict(item.counts) == {1: 2}
+                ),
+                None,
+            )
+            assert heavy is not None, "付得起代价时单座上限必须是 3（计数 2 才进代价步）"
+            session.submit_answer(heavy)
+            continue
+        if pending.kind == "SELECT_CARDS" and getattr(pending, "skill_id", None) == YEYAN:
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("600 次应答内没走到【业炎】的代价选牌步")
+
+
+def _pick_preview(registry, session: Session, picks: object) -> tuple[int, dict]:
+    """打真处理器的选牌预览（body = ``answers_seq`` + ``picks``，**没有** ``skill_id``）。"""
+    return _post_with_the_real_handler(
+        registry,
+        f"/api/sessions/{session.session_id}/preview",
+        {"answers_seq": session.pending.seq, "picks": picks},
+    )
+
+
+def test_the_pick_preview_disables_the_slots_the_engine_would_reject() -> None:
+    """票 15 的同源断言：预览的 ``disabled`` = 引擎**真提交**会拒的那些槽位。
+
+    判据不是"预览说得像"：``disabled`` 的每个槽位都拿一条**含它的满额组合**去真提交，
+    引擎必须拒；反过来，预览说"点得动"的槽位必须存在于某条被接受的组合里
+    （``can_submit`` 就是那一档：这组 picks **本身**是合法答案）。
+
+    业炎代价面（真引擎，种子 4）= 6 张手牌 ♣♥♥♣♦♠、4 条"四色各一"的合法组合：
+
+    - 什么都没点 ⇒ 每一槽都在某个合法补全里 ⇒ ``disabled`` 空；
+    - 点第 1 张♣ ⇒ 另一张♣（面内位置 3）补不出四色 ⇒ 立刻进 ``disabled``；
+    - 再点第 1 张♥ ⇒ 这一组只留在一条组合里 ⇒ 另一张♥也进 ``disabled``；
+    - 四张齐 ⇒ ``can_submit`` 真、``disabled`` 仍是那两张被占用的花色。
+    """
+    from sgs.engine import IllegalActionError
+
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    assert pending_payload(session)["pick_preview"] is True, (
+        "真载荷声明**选牌预览**可用（前端只在带了这个键的询问上发预览）"
+    )
+
+    status, first = _pick_preview(registry, session, [])
+    assert status == 200, first
+    assert first["disabled"] == [], f"一个都没点时每一槽都点得动：{first}"
+    assert first["can_submit"] is False, "0 张不是合法答案（total=(4,4)）"
+    assert first["can_advance"] is True, "还没走进死路（凑得出合法的四色）"
+
+    # 点第 1 张♣（面内位置 0）⇒ 另一张♣（位置 3）补不出"四色各一"。
+    status, second = _pick_preview(registry, session, [0])
+    assert status == 200, second
+    assert second["disabled"] == ["slot:3"], (
+        f"同花色的另一张必须灰（四色各一凑不出来）：{second['disabled']}"
+    )
+    assert second["can_submit"] is False and second["can_advance"] is True
+
+    # 再点第 1 张♥（位置 1）⇒ 只剩 (0,1,4,5) 这一条补全，另一张♥（位置 2）也灰。
+    status, third = _pick_preview(registry, session, ["slot:0", "slot:1"])
+    assert status == 200, third
+    assert third["disabled"] == ["slot:2", "slot:3"], (
+        f"两条被占用的花色各剩一张都点不动：{third['disabled']}"
+    )
+    assert third["can_advance"] is True
+
+    # ---- 同源：预览说不能点的，真提交必须被拒（缺满额 / 同花色重复两种形状）----
+    without_disabled = [
+        slot for slot in range(len(pending.slots)) if f"slot:{slot}" not in third["disabled"]
+    ]
+    assert without_disabled == [0, 1, 4, 5], "预览说点得动的恰好是那条唯一补全"
+    assert pending.legal_actions and any(
+        tuple(action.picks) == (0, 1, 4, 5) for action in pending.legal_actions
+    ), "那条补全必须是候选里真有的那条"
+    for disabled in (2, 3):
+        swapped = tuple(sorted((0, 1, 4, disabled)))
+        with pytest.raises(IllegalActionError):
+            session.engine.submit(SelectCards(picks=swapped, answers_seq=pending.seq))
+        assert session.pending is pending, "被拒的提交不改变挂起态"
+    with pytest.raises(IllegalActionError):
+        session.engine.submit(SelectCards(picks=(0, 1, 4), answers_seq=pending.seq))
+
+    # 四张齐 ⇒ can_submit 真（这一组就是候选里那条），而灰的那两张不变。
+    status, fourth = _pick_preview(registry, session, [0, 1, 4, 5])
+    assert status == 200, fourth
+    assert fourth["can_submit"] is True and fourth["can_advance"] is True
+    assert fourth["disabled"] == ["slot:2", "slot:3"]
+    session.engine.submit(SelectCards(picks=(0, 1, 4, 5), answers_seq=pending.seq))
+    assert session.pending is not pending, "预览说能提交的那组，引擎必须真的收下"
+
+
+def test_the_pick_preview_rejects_malformed_picks_and_the_wrong_face() -> None:
+    """畸形 ``picks`` ⇒ 400；不是选牌面 ⇒ 400（不猜、不静默回一份空 ``disabled``）。
+
+    静默回落会让界面把"看不到来源的面"当成"全都点得动"（spec §6 #5），故形状不对一律
+    400——与票 11 的 ``answers`` 前缀同一条纪律。
+    """
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    # 不是数组 / 越界 / 重复 / 布尔 / 小数 / 认不出的写法。
+    for malformed in ("slot:0", [len(pending.slots)], [0, 0], [True], [1.5], ["slot:x"], [-1]):
+        status, body = _pick_preview(registry, session, malformed)
+        assert status == 400, f"{malformed!r} 应当 400：{body}"
+        assert body["error"], "400 必须带一句人话（前端据此写重试提示）"
+
+    # 这一问不是选牌面（【除疠】的出牌阶段）：带 picks 的载荷 400，而不是回一份猜的禁用集。
+    other = _session_at_chuli_play_phase()
+    other_registry = _registry_with(other)
+    status, body = _post_with_the_real_handler(
+        other_registry,
+        f"/api/sessions/{other.session_id}/preview",
+        {"answers_seq": other.pending.seq, "picks": []},
+    )
+    assert status == 400, body
+    assert "选牌" in body["error"]
+
+
+def test_the_pick_preview_writes_nothing() -> None:
+    """只读全停：不建询问、不写记录、不耗序号、不搬牌、不抽随机数。"""
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+    records = session.engine.records
+    hand_sizes = tuple(len(player.hand) for player in session.engine.state.players)
+    deck = tuple(session.engine.state.deck)
+
+    for picks in ([], [0], [0, 1], [0, 1, 4, 5]):
+        status, _body = _pick_preview(registry, session, picks)
+        assert status == 200
+
+    assert session.engine.records == records, "记录流一条都不能多（含拒绝记录）"
+    assert len(session.engine.records) == len(records)
+    assert session.pending is pending and session.pending.seq == pending.seq
+    assert tuple(len(player.hand) for player in session.engine.state.players) == hand_sizes
+    assert tuple(session.engine.state.deck) == deck, "牌堆顺序也不许动（没抽随机数）"
+
+
+def test_the_pick_preview_rejects_a_stale_answers_seq() -> None:
+    """``answers_seq`` 对不上当前挂起 ⇒ 409，**与 ``/answer`` / 票 11 的预览同形**。"""
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+
+    status, body = _post_with_the_real_handler(
+        registry,
+        f"/api/sessions/{session.session_id}/preview",
+        {"answers_seq": pending.seq + 1, "picks": []},
+    )
+
+    assert status == 409
+    assert set(body) == {"error", "pending"}, "与 /answer 的 409 同一个形状"
+    assert body["pending"]["seq"] == pending.seq
+    assert "过期" in body["error"]
+
+
+def test_the_pick_preview_is_cheap_enough_for_every_pick() -> None:
+    """性能底线：单次选牌预览也是 **< 5 ms** 的量级（每次点牌问一次）。
+
+    它只枚举这一面的组合（`effects/actions.py:select_card_picks`，与候选生成同一条），
+    **不**建投影、不扫记录流。这里钉一条宽上限（20 ms），实测值写进票面 ``## Answer``。
+    """
+    import statistics
+    import time
+
+    session = _session_at_yeyan_cost_face()
+    registry = _registry_with(session)
+    pending = session.pending
+    registry.preview(session, {"answers_seq": pending.seq, "picks": [0, 1]})  # 预热
+
+    samples = []
+    for _ in range(200):
+        started = time.perf_counter()
+        registry.preview(session, {"answers_seq": pending.seq, "picks": [0, 1]})
+        samples.append(time.perf_counter() - started)
+    median = statistics.median(samples)
+    p95 = statistics.quantiles(samples, n=20)[18]
+
+    assert median < 0.020, f"单次选牌预览中位 {median * 1000:.3f} ms 太慢（票面口径 < 5 ms）"
+    assert p95 < 0.020, f"单次选牌预览 p95 {p95 * 1000:.3f} ms 太慢"
 
 
 # ---------------------------------------------------------------------------
@@ -4753,10 +5660,11 @@ def _session_at_a_two_skill_activation_face() -> Session:
     ``heroes=("shen_zhugeliang", ...)`` 直接把神诸葛亮钉在人类座位上（不点将也确定）；
     其余询问取超时兜底（排列 = 恒等、技能 = 放弃），故驱动是确定性的。
 
-    **必须钉在 ``PHASE_FINISH``**（lei-shenganning 票 95）：同一时机的两段**强制**效果现在也
-    合成一张"先结哪一条"的面（【狂风】【大雾】的 ``TURN_START`` 到期清扫就是这种面，而且
-    两段都不可放弃 ⇒ 面上**没有** Pass）。这张用例钉的是"可选段的两候选面带 Pass"，故不能
-    停在那种强制面上。
+    **必须钉在 ``PHASE_FINISH``**（lei-shenganning 票 95；table-ux-overhaul 票 17）：本用例
+    钉的是"**可选段**的两候选面带 Pass"——同一时机的多段**强制**效果也会合成"先结哪一条"的
+    面（面上**没有** Pass，例如【劫营】③ +【镇骨】），那张面不是本用例的判据。神诸葛亮
+    ``TURN_START`` 的到期清扫曾在准备阶段摆出这种面，票 17 起它是**簿记段**、不再成面
+    （`tests/test_hero_huo.py::test_dawu_and_kuangfeng_are_never_offered_at_turn_start`）。
     """
     session = Session(
         seed=7,
@@ -5349,7 +6257,14 @@ def test_the_source_groups_are_masked_for_a_foreign_viewer() -> None:
             zones=(Zone.HAND,),
             min=2,
             max=2,
-            pool=(StepPool(when=(), options=(str(left), str(right))),),
+            pool=(
+                StepPool(
+                    when=(),
+                    options=(str(left), str(right)),
+                    # 票 12：源牌级置灰的 id 也是询问者的手牌 ⇒ 与 options 同一条泄露面。
+                    disabled=(str(right),),
+                ),
+            ),
             order=0,
             groups=((str(left), str(right)),),
         ),
@@ -5377,10 +6292,16 @@ def test_the_source_groups_are_masked_for_a_foreign_viewer() -> None:
     assert own_steps[0]["groups"] == [[str(left), str(right)]], (
         "询问者自己那份原样带出（界面据此把不同花色的牌置灰）"
     )
+    assert own_steps[0]["pool"][0]["disabled"] == [str(right)], (
+        "票 12 的源牌级置灰原样带出（询问者自己的手牌，可以露）"
+    )
 
     foreign = pending_payload(query, human_seat=None)
     masked_card, masked_seat = foreign["preactivations"]["hero.yuanshao_mobile.luanji"]
     assert masked_card["pool"][0]["options"] == [], "候选照旧清空（来源牌 id 不能露）"
+    assert masked_card["pool"][0].get("disabled") == [], (
+        "票 12：置灰的源牌 id 同样是询问者的手牌 ⇒ 一并清空"
+    )
     assert "groups" not in masked_card, (
         f"来源组合也不能露：{masked_card.get('groups')}"
     )
@@ -6880,6 +7801,459 @@ def test_the_replay_all_knowing_view_still_sees_hero_zone_cards() -> None:
     )
 
 
+def _run_live_delta_probe(payload: dict[str, object]) -> dict[str, object]:
+    """把一份**真载荷**喂给 ``tests/support/live_delta_probe.mjs``（里面跑真的 `session.js`）。
+
+    与 ``log_cap_probe`` / ``action_probe`` 同姿态：前端判据只测一份，不在这里另抄；
+    垫片里没有 DOM，故只断"回放期的 live view 长什么样"，重绘归烟测（U-QX-01 / U-IDLE-01）。
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    probe = REPO_ROOT / "tests" / "support" / "live_delta_probe.mjs"
+    assert probe.is_file(), f"缺少回放派生探针：{probe.relative_to(REPO_ROOT)}"
+    result = subprocess.run(
+        [node, str(probe.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"回放派生探针失败（exit {result.returncode}）：\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def _qianxun_zones_engine() -> tuple[object, object]:
+    """一个**真引擎**：座位 0 = 人类界陆逊（手牌 3 张，其中 2 张待放上武将牌）。
+
+    返回 ``(engine, session)``；``session`` 是投影要的那几个字段的最小外壳（``visible_snapshot``
+    只读 ``engine`` / ``human_seat`` / ``pack``）——与投影用例同一个构造口。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    peaches = cards_of_type(pack, "peach")
+    slashes = cards_of_type(pack, "slash")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="jie_luxun", hand=(peaches[0], *slashes[:2])),
+            SeatSpec(hp=4, hero="zhaoyun", hand=(peaches[1],)),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    return engine, SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+
+def test_a_hero_zone_return_is_applied_to_the_live_view_of_the_same_batch() -> None:
+    """票 10（spec §1 #11）：【谦逊】的牌回手那一刻，武将牌上的牌区在**同一条记录**上消失。
+
+    报障的形状是"牌已回手、行还在"：`applyLiveDelta` 的 `card_move` 分支只派生
+    deck / discard / hand / equip / judge，而 `cloneLiveView` 又深拷贝 `hero_zones`
+    ⇒ 回放期那个区停在上一份快照值，要等这一批播完、`commitView` 整桌重建才刷新。
+    与票 07 的 `U3-05*` 同一条纪律（`CODING_STANDARDS.md` §7）：寿命断言要在**多步回放**
+    里收敛——所以这里断的是"第 k 条之后"，不是"commit 之后"。
+
+    走**真实产出路径**（`CODING_STANDARDS.md` §6）：真引擎的 `place_on_hero_card` /
+    `return_hero_card_zones` 产记录，`visible_snapshot` 产底稿，`visible_record` 产人类
+    载荷，前端跑真的 `session.js`（`tests/support/live_delta_probe.mjs` 的
+    `cloneLiveView` + `applyLiveDelta`，与 `stepPlayback` 同一条派生口）。
+    """
+    from sgs_web.projection import visible_snapshot
+
+    engine, session = _qianxun_zones_engine()
+    hand_cards = tuple(engine.state.player(0).hand)
+    placed = hand_cards[1:]
+    assert len(hand_cards) == 3 and len(placed) == 2, (
+        f"夹具失效：座位 0 应有三张手牌、放上去两张（实际 {hand_cards}）"
+    )
+    before = visible_snapshot(session)
+    assert before["players"][0]["hero_zones"] == [], "底稿：放置之前武将牌上没有区"
+    hand_before = before["players"][0]["hand_count"]
+    assert hand_before == len(hand_cards) == 3
+
+    # ① 放置：产品写入路径（`place_on_hero_card` = 搬牌 + 一条 hand→hero 的 card_move）。
+    engine.place_on_hero_card(
+        None,
+        owner=0,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(placed),
+    )
+    place = next(
+        record
+        for record in reversed(engine.records)
+        if getattr(record, "delta_type", None) == "card_move"
+        and getattr(getattr(record, "to_zone", None), "zone", None) is Zone.HERO
+    )
+    # ② 归还：产品写入路径（回合末的 `return_hero_card_zones` 逐区一条 HERO → HAND）。
+    assert engine.return_hero_card_zones() is None, "归还路径不该挂起（本夹具没有获得牌后的钩子）"
+    back = next(
+        record
+        for record in reversed(engine.records)
+        if getattr(record, "delta_type", None) == "card_move"
+        and getattr(getattr(record, "from_zone", None), "zone", None) is Zone.HERO
+    )
+    after = visible_snapshot(session)
+    assert after["players"][0]["hero_zones"] == [], "终态：归还后投影不再下发这个区"
+    assert after["players"][0]["hand_count"] == hand_before, "终态：牌真的回了手牌区"
+
+    payload = _run_live_delta_probe({
+        "base": {
+            "session_id": "ticket-10-qianxun",
+            "human_seat": session.human_seat,
+            "cursor": 93,
+            "pending": None,
+            "skills": before["players"][0]["skills"],
+            "snapshot": before,
+        },
+        "records": [
+            visible_record(place, viewer=session.human_seat),
+            visible_record(back, viewer=session.human_seat),
+        ],
+    })
+    frames = payload["frames"]
+    assert len(frames) == 3, f"应有三帧（底稿 + 放置 + 归还），实际 {len(frames)}"
+
+    key = "0:hero.jie_luxun.qianxun"
+    placed_frame = frames[1]["players"]["0"]
+    assert frames[0]["players"]["0"]["hero_zones"] == [], "底稿帧没有区"
+    assert [zone["key"] for zone in placed_frame["hero_zones"]] == [key], (
+        f"放置那一条之后，live view 必须长出区（区键 = zone_ref.skill_instance）："
+        f"{placed_frame['hero_zones']}"
+    )
+    zone = placed_frame["hero_zones"][0]
+    assert zone["skill_name"] == "谦逊", (
+        "区标签取同一份快照里的技能清单（记录里只有 skill_instance）："
+        f"{zone}"
+    )
+    assert zone["count"] == 2, f"区里两张：{zone}"
+    assert zone["card_ids"] == [str(card) for card in sorted(placed)], (
+        f"宿主拿得到牌面，增删按牌面走：{zone}"
+    )
+    assert placed_frame["hand_count"] == hand_before - 2, (
+        "同一侧的 hand_count 只由现存的 to/from=hand 两半扣，不重复扣"
+    )
+    assert frames[1]["self_hand"] == [str(hand_cards[0])], (
+        f"自己经手的移动牌面同步：{frames[1]['self_hand']}"
+    )
+
+    returned_frame = frames[2]["players"]["0"]
+    assert returned_frame["hero_zones"] == [], (
+        "归还那一条之后**整行删除**（投影只画有牌的区，空区不下发）——"
+        f"不是等 commitView：{returned_frame['hero_zones']}"
+    )
+    assert returned_frame["hand_count"] == hand_before, (
+        f"牌回手牌区的同一步把张数补齐（不重复加）：{returned_frame['hand_count']}"
+    )
+    assert sorted(frames[2]["self_hand"]) == sorted(str(card) for card in hand_cards), (
+        f"两张牌回到自己的手牌面（一张不多、一张不少）：{frames[2]['self_hand']}"
+    )
+
+
+def test_the_idle_repaint_fingerprint_covers_hero_zone_rows() -> None:
+    """票 10 第 2 条：空转轮询的**快照指纹**必须看得见武将牌上的牌区。
+
+    票 07 立的出口是「游标与询问序号都没变，但快照指纹变了 ⇒ 只重绘座位块、不清选择」。
+    指纹的字段表是**显式**的：座位块读得到的每一格都要登记，否则"快照变了"会被判成
+    "什么都没变"，又回到"没有新记录就永不重绘"。这里断两件事：
+
+    - 只把武将牌上的牌区整行拿掉（其余字段逐字段相同）⇒ 指纹**必须**变（空转出口接上）；
+    - 同一份内容（服务端原样再回一次）⇒ 指纹不变（它是纯摘要，不是随机标记）。
+    """
+    from sgs_web.projection import visible_snapshot
+
+    engine, session = _qianxun_zones_engine()
+    placed = tuple(engine.state.player(0).hand)[1:]
+    engine.place_on_hero_card(
+        None,
+        owner=0,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(placed),
+    )
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"][0]["hero_zones"], "前置：这一份快照里必须有武将牌上的牌区"
+    base = {
+        "session_id": "ticket-10-idle",
+        "human_seat": session.human_seat,
+        "cursor": 7,
+        "pending": None,
+        "skills": snapshot["players"][0]["skills"],
+        "snapshot": snapshot,
+    }
+    # "区整行消失、其余逐字段相同"——空转期真会出现的差异（服务端只重算投影，不记新记录）。
+    gone = json.loads(json.dumps(snapshot))
+    gone["players"][0]["hero_zones"] = []
+
+    changed = _run_live_delta_probe({"base": base, "records": [], "idleSnapshot": gone})
+    assert changed["idle"]["isIdle"] is True, (
+        "前置：游标与询问序号都没变（否则走的是有新记录的那条路，测不到空转出口）"
+    )
+    assert changed["fingerprint"]["changed"] is True, (
+        "空转期武将牌上的牌区消失 ⇒ 指纹必须变（座位块才会重绘）："
+        f"{changed['fingerprint']}"
+    )
+
+    same = _run_live_delta_probe({"base": base, "records": [], "idleSnapshot": json.loads(
+        json.dumps(snapshot))})
+    assert same["fingerprint"]["changed"] is False, (
+        f"同一份内容再回一次 ⇒ 指纹不变（纯时钟刷新那条）：{same['fingerprint']}"
+    )
+
+
+def test_a_hp_max_change_is_applied_to_the_live_view_ceiling() -> None:
+    """票 10 第 3 条（与票 14 共用的那一半）：体力上限变化逐条派生进 live view。
+
+    `hp_max_change` 是**公开事实**（投影里本来就有 `players[].hp_max`），但前端以前没有这条
+    分支 ⇒ 整批回放期间血条分母停在上一份快照值（spec §1 #1 的"开局就 5/5"是同一条缝）。
+    票 10 落**前端**这一半，票 14 只加服务端 `setup` 底稿 + 删 `openingLiveView` 的倒推。
+
+    记录来自**产品写入口**（`Engine.raise_hp_max` 推一条 `MAXLIFE` 帧，`support.positions.
+    maxlife_engine`）；期望值取**引擎状态**（独立真源），不是"代码怎么写就怎么断"。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+    from support.positions import M1_DECK_PROFILE, maxlife_engine
+
+    engine = maxlife_engine()
+    record = next(
+        item
+        for item in engine.records
+        if getattr(item, "delta_type", None) == "hp_max_change"
+    )
+    live_hp_max = engine.state.player(record.seat).hp_max
+    assert record.after == live_hp_max and record.before != record.after, (
+        f"前置：上限真的变了（before={record.before} after={record.after}）"
+    )
+    session = SimpleNamespace(
+        engine=engine, human_seat=0, pack=load_content_pack(deck_profile=M1_DECK_PROFILE)
+    )
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"][record.seat]["hp_max"] == live_hp_max, (
+        "前置：投影与引擎同源"
+    )
+    # 底稿 = **变化之前**的那一份（只改上限这一格，其余字段原样）：这一批里上限还没落。
+    before = json.loads(json.dumps(snapshot))
+    before["players"][record.seat]["hp_max"] = record.before
+    payload = _run_live_delta_probe({
+        "base": {
+            "session_id": "ticket-10-hpmax",
+            "human_seat": session.human_seat,
+            "cursor": record.seq,
+            "pending": None,
+            "skills": snapshot["players"][record.seat]["skills"],
+            "snapshot": before,
+        },
+        "records": [visible_record(record, viewer=session.human_seat)],
+    })
+    frames = payload["frames"]
+    assert len(frames) == 2, f"应有两帧（底稿 + 上限变化），实际 {len(frames)}"
+    assert frames[0]["players"][str(record.seat)]["hp_max"] == record.before
+    assert frames[1]["players"][str(record.seat)]["hp_max"] == live_hp_max, (
+        "同一条记录之后血条分母就变了（不等 commitView）："
+        f"{frames[1]['players'][str(record.seat)]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 14：建局止于 GAME_START（L0 边界）+ 服务端开局底稿
+# ---------------------------------------------------------------------------
+
+
+def test_the_create_response_stops_at_the_end_of_game_start() -> None:
+    """票 14 第 1 条（spec §1 #1 / §2 Q7）：**建局响应止于"游戏开始时"**。
+
+    报障的形状是"init 没走完 AI 已经在操作"：建局响应原本一次给到**人类第一问**（8 人局
+    实测 56 条记录，seq20–54 是 2 号位 AI 主公的整个第一回合、seq55 才是人类的 RESPOND）。
+    驱动因此多一个暂停点——引擎的 ``_started`` 由假翻真、回合环还没起跑（``GAME_START``
+    派发完）——建局响应停在那里，AI 的回合留给客户端**下一次取增量**（现有的 ``after``
+    游标机制，零新增协议；顺序见 spec §2 Q7 的"init 的定义"）。
+
+    判据是次序事实（`CODING_STANDARDS.md` §4）：整批里**没有一条** ``TURN_*`` 时机（回合环
+    一条都没跑）、最后一条就是 ``GAME_START``；而紧接着那一次取增量（与真客户端走同一条
+    ``advance_clock`` → ``view`` 路）把人类的第一个询问交出来。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    # sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66：旧种子 12 的下一份增量不再停在
+    # 人类询问上（停在了五谷暂停 / 还没轮到人），按同一条判据换种 ⇒ 13。
+    session = registry.create(
+        {"player_count": 8, "ai": "heuristic", "seed": 13, "timeout_seconds": None}
+    )
+    body = registry.view(session, after=-1, logs_after=0)
+
+    assert body["finished"] is False, "开局那一批不可能已终局"
+    assert body["pending"] is None, "建局响应不许停在询问上（L0 边界之后、人类第一问之前）"
+    timings = [
+        record["timing"] for record in body["records"] if record.get("kind") == "timing"
+    ]
+    assert timings[-1] == "GAME_START", f"最后一条时机必须是 GAME_START：{timings}"
+    assert [timing for timing in timings if timing.startswith("TURN_")] == [], (
+        f"建局响应里不许有回合环的时机：{timings}"
+    )
+    assert body["records"][-1]["kind"] == "timing", (
+        f"最后一条记录必须是那条 GAME_START 时机：{body['records'][-1].get('kind')}"
+    )
+
+    # 后续记录由客户端下一次取增量拉——与 HTTP GET 同一条路径（advance_clock → view）。
+    registry.advance_clock(session)
+    nxt = registry.view(session, after=body["cursor"], logs_after=body["log_seq"])
+    assert nxt["cursor"] > body["cursor"], "AI 的第一回合真的落在下一份增量里"
+    assert nxt["pending"] is not None, "下一份增量停在人类的第一个询问上"
+    assert any(
+        record.get("kind") == "timing" and record["timing"].startswith("TURN_")
+        for record in nxt["records"]
+    ), "回合环是在**下一份增量**里起跑的"
+
+
+def test_the_create_response_carries_a_pre_game_setup_snapshot() -> None:
+    """票 14 第 2 条：**开局底稿由服务端下发**（前端不再从 post-init 快照倒推）。
+
+    底稿 = "发牌前"那一帧：座位 / 武将 / 技能 / 满体力 / 护甲 / 标记 / 手牌上限 / 武将块
+    标签，手牌 0、各区空、无阶段无回合无询问。它由 ``Session.__init__`` 在 ``drive()``
+    **之前**从 ``build_initial`` 的产物导出（``projection.py:setup_snapshot``），只在
+    ``after < 0`` 那份视图里出现，**不进记录流**。
+
+    期望值取自**独立真源**：武将数据表的基础体力上限（主公 +1 的公开规则），以及"发牌前
+    与现在的差别"这条局面事实——不是拿服务端算出来的数再比一遍。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 8, "ai": "heuristic", "seed": 12, "timeout_seconds": None}
+    )
+    body = registry.view(session, after=-1, logs_after=0)
+    setup = body["setup"]
+    assert setup is not None and setup["players"], "建局响应必须带开局底稿"
+
+    assert body["records"][0]["kind"] == "header", "前置：这一份是首屏那一次（after < 0）"
+    assert "setup" not in registry.view(session, after=body["cursor"], logs_after=0), (
+        "底稿只随 after < 0 下发：之后的每一份增量都不带这个键（不是 null）"
+    )
+    assert not [
+        record for record in body["records"] if "setup" in json.dumps(record)
+    ], "底稿不进记录流（回放逐字节不受影响）"
+
+    assert setup["seat"] == session.human_seat
+    assert setup["self_hand"] == [] and setup["discard"] == [] and setup["processing"] == []
+    assert setup["deck_count"] == 0, "牌堆张数由首条 deck_shuffle 写回（底稿从 0 起）"
+    assert setup["phase"] is None and setup["turn_seat"] is None
+    assert setup["turn_extra"] is False and setup["round"] == 1
+
+    for player in setup["players"]:
+        seat = player["seat"]
+        assert player["hand_count"] == 0, f"座位 {seat} 发牌前手牌为 0"
+        assert player["hp"] == player["hp_max"], f"座位 {seat} 发牌前满体力"
+        assert player["equip"] == [] and player["judge"] == [] and player["hero_zones"] == []
+        assert player["markers"] == [], "发牌前没有标记"
+        assert player["alive"] is True
+        assert player["identity"] is None and player["identity_label"] is None, (
+            "身份不在底稿里：identity_deal 那条记录才亮（本人 / 主公可见），"
+            "底稿先给等于 t0 就把全场身份摆在桌上"
+        )
+        assert player["skills"], f"座位 {seat} 的详情技能清单要带（与 visible_snapshot 同源）"
+        # 体力上限 = 该武将的基础值（主公 +1 是公开规则，由引擎在 build_initial 里加）。
+        hero = hero_by_id(session.hero_assignments[seat])
+        assert hero is not None
+        lord = session.engine.state.player(seat).identity is Identity.LORD
+        assert player["hp_max"] == hero.hp_max + (1 if lord else 0), (
+            f"座位 {seat} 的 {hero.id} 基础上限 {hero.hp_max}"
+            f"（主公 +1 = {lord}），实得 {player['hp_max']}"
+        )
+        # 票 10 刻意**没有**派生的两个字段：底稿必须补上（否则前端只能再猜一次）。
+        assert isinstance(player["hand_limit"], int) and player["hand_limit"] >= player["hp"]
+        assert player["hand_limit"] == body["snapshot"]["players"][seat]["hand_limit"], (
+            "手牌上限是服务端派生量：这一局 GAME_START 没改体力，底稿与权威快照同源"
+        )
+        assert player["hero_tags"] == body["snapshot"]["players"][seat]["hero_tags"]
+
+    # 底稿与权威快照的差别，正好是"发牌前 vs 发完牌"这条局面事实。
+    assert body["snapshot"]["players"][session.human_seat]["hand_count"] > 0
+    assert body["snapshot"]["deck_count"] > 0
+
+
+def test_a_game_start_max_hp_change_does_not_leak_into_the_opening_frame() -> None:
+    """票 14 第 3 条：开局批的 t0 显示**基础**体力上限（spec §1 #1 的真凶）。
+
+    旧实现的 ``openingLiveView`` 从 post-init 快照倒推：``hp`` 写成 ``hp_max ?? hp``、
+    ``hp_max`` **原样继承**，而 ``applyLiveDelta`` 当时没有 ``hp_max_change`` 分支 ⇒ 播到
+    中间血条反而倒退。现在底稿是服务端的"发牌前"，上限逐条由 ``hp_max_change`` 抬。
+
+    走**真实产出路径**（`CODING_STANDARDS.md` §6）：无名（自制包，基础上限 2）坐在 AI 座位，
+    真引擎的「游戏开始时」【天成】连按三次"加体力上限"（启发式对效果行的估值 2.5 > 技能行
+    2.0，故三次都选它），底稿 / 记录 / 权威快照全部由产品代码产出，前端跑真的 ``session.js``
+    （``tests/support/live_delta_probe.mjs`` 的 ``openingLiveView`` + ``applyLiveDelta``，
+    与 ``applyView`` / ``stepPlayback`` 同一条派生口）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = Session(
+        seed=7,
+        player_count=2,
+        ai="heuristic",
+        human_seat=0,
+        # 无名坐在**非人类**座位：它的三次【天成】展示由启发式当场答完（L0 里不问人类）。
+        heroes=("guanyu", "wuming"),
+        timeout_seconds=None,
+        pause_after_game_start=True,
+    )
+    body = registry.view(session, after=-1, logs_after=0)
+    seat = session.hero_assignments.index("wuming")
+    assert seat != session.human_seat, "前置：无名在 AI 座位上（否则人类会被 L0 的展示问住）"
+    assert body["pending"] is None, "前置：这一批停在 L0 边界"
+
+    changes = [
+        record for record in body["records"] if record.get("delta_type") == "hp_max_change"
+    ]
+    assert [record["seat"] for record in changes] == [seat] * 3, (
+        f"【天成】三次都选「加体力上限」（启发式对效果行的估值更高）：{changes}"
+    )
+    assert [record["after"] for record in changes] == [3, 4, 5], (
+        f"2 → 3 → 4 → 5 逐条抬（无名基础上限 2，无身份局不加主公那一点）：{changes}"
+    )
+    assert body["setup"]["players"][seat]["hp_max"] == 2, "底稿：基础上限"
+    assert body["snapshot"]["players"][seat]["hp_max"] == 5, (
+        "前置：权威快照是这一段跑完的终值——旧实现拿它倒推，t0 就会写成 5"
+    )
+
+    payload = _run_live_delta_probe(
+        {"base": body, "records": body["records"], "opening": True}
+    )
+    frames = payload["frames"]
+    ceilings = [frame["players"][str(seat)]["hp_max"] for frame in frames]
+    assert ceilings[0] == 2, f"t0 的血条分母是基础上限，不是终值：{ceilings[0]}"
+    assert ceilings == sorted(ceilings), f"回放期上限只增不减（不倒退回滚）：{ceilings}"
+    assert ceilings[-1] == 5
+
+    first_change = next(
+        index
+        for index, record in enumerate(body["records"])
+        if record.get("delta_type") == "hp_max_change"
+    )
+    assert all(value == 2 for value in ceilings[: first_change + 1]), (
+        f"第一条 hp_max_change 之前一帧都不许变：{ceilings[: first_change + 1]}"
+    )
+    for index, record in enumerate(body["records"]):
+        if record.get("delta_type") != "hp_max_change":
+            continue
+        assert frames[index + 1]["players"][str(seat)]["hp_max"] == record["after"], (
+            f"第 {index} 条记录之后上限就变成 {record['after']}（不等 commitView）"
+        )
+
+
 def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view() -> None:
     """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。"""
     from types import SimpleNamespace
@@ -7836,7 +9210,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # yijiang-2014-round2 票 01（W3）：界沮授移动版两条（渐营 / 矢北）⇒ 202 → 204。
     # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 204 → 205。
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206。
-    assert len(expected_skills) == 206, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 210, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -8753,11 +10127,22 @@ class _HarvestDriver:
         return query.legal_actions[0]
 
 
-def _harvest_game(*, nullify: bool = False, reverse: bool = False):
+def _harvest_game(
+    *,
+    nullify: bool = False,
+    reverse: bool = False,
+    dead_seat: int | None = None,
+    ask_policy: AskPolicy | None = None,
+):
     """构造一局 4 座局面并返回 ``(engine, driver)``：座位 0 手牌是五谷，牌堆有序。
 
     座位 1 / 2 的手牌按需放无懈（反无懈需要两张）。牌堆 = 其余实体牌，顺序即数据表顺序，
     故亮出的牌可预测；测试只比较"记录里亮出的集合 / 顺序"与载荷，不硬编码牌 id。
+
+    ``dead_seat`` 让一个座位在构造期就阵亡：五谷的目标表**只收存活角色**（票 19 的
+    "取 3 名目标"就是靠它造出来的），亮牌张数也是 3。``ask_policy`` 缺省是引擎口径
+    （``None`` ⇒ 引擎缺省 OFF）；票 19 的真会话用**网页缺省**（``auto_skip`` ON），
+    否则每个目标的无懈窗口都会问人类一次（`tests/test_web.py` 的库里口径是 OFF）。
     """
     from sgs.data import RuleConfig as _RuleConfig
 
@@ -8772,6 +10157,8 @@ def _harvest_game(*, nullify: bool = False, reverse: bool = False):
     if reverse:
         used.add(nullifies[1])
         seats[2] = SeatSpec(hand=(nullifies[1],))
+    if dead_seat is not None:
+        seats[dead_seat] = SeatSpec(alive=False)
     deck = tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id not in used)
     state = build_state(
         pack=pack,
@@ -8780,7 +10167,9 @@ def _harvest_game(*, nullify: bool = False, reverse: bool = False):
         turn_seat=0,
         rule_config=_RuleConfig(first_seat=0),
     )
-    engine = Engine.from_state(state, seed=1)
+    engine = Engine.from_state(
+        state, seed=1, ask_policy=AskPolicy() if ask_policy is None else ask_policy
+    )
     return engine, _HarvestDriver(nullify=nullify, reverse=reverse)
 
 
@@ -8924,6 +10313,301 @@ def test_a_nullify_window_in_a_harvest_resolution_still_carries_the_active_harve
     assert payload["harvest"] is not None, "RESPOND 载荷同样要带 harvest（前端持久显示读它）"
     assert payload["harvest"]["key"] == harvest["key"]
     assert payload["harvest"]["current"] == harvest["current"]
+
+
+def _registry() -> object:
+    """一个空注册表（不登记会话、不落盘）：走到 ``view`` / ``answer`` / ``advance_clock`` 三条产品路由。"""
+    from sgs_web.serve import GameRegistry
+
+    return GameRegistry(runs_dir="/tmp/unused")
+
+
+def _registry_view(session: Session, *, after: int = -1, logs_after: int = 0) -> dict:
+    """一次真 ``view()`` 载荷（只建一个空注册表，不登记会话、不落盘）。"""
+    return _registry().view(session, after=after, logs_after=logs_after)
+
+
+def test_the_view_payload_carries_the_active_harvest_state_with_an_ai_pick() -> None:
+    """D 方案（table-ux-overhaul 票 18）：**视图级** `harvest` = 与 `pending.harvest` 同一份派生。
+
+    生产事实：五谷的整段结算里**只有一部分目标会变成一条 pending**——AI 目标的取牌在
+    `Session.drive()` 内部同步答完，浏览器收不到那次询问。故"谁拿走了哪张"必须挂在**每一次
+    视图下发**上（`view.harvest`），不能只挂询问载荷；客户端因此每一拍都能重画亮牌面。
+
+    这里走到目标 1 的取牌步：目标 0（AI）已经拿走了第一张牌 ⇒ 视图级载荷里就要标出来。
+    """
+    engine, driver = _harvest_game()
+    first = _drive_to_harvest_pick(engine, driver, 0)
+    engine.submit(fallback_action(first))
+    second = _drive_to_harvest_pick(engine, driver, 1)
+    assert second.actor == 1
+    session = _web_session_for(engine, human_seat=1)
+    payload = _registry_view(session)
+    harvest = payload["harvest"]
+    assert harvest is not None, "结算中视图级 harvest 必须键恒在（不能只挂 pending）"
+    pending_harvest = (payload["pending"] or {}).get("harvest")
+    assert pending_harvest is not None
+    assert harvest["key"] == pending_harvest["key"], "两处是同一个链键（同一份派生）"
+    assert [card["taken_by"] for card in harvest["revealed"]] == [0, None, None, None], (
+        "AI（座位 0）拿走的牌在**视图级**载荷里就标出来，不等下一条带 harvest 的询问"
+    )
+    assert [target["status"] for target in harvest["targets"]] == [
+        "taken", "current", "pending", "pending",
+    ]
+    assert harvest["current"] == 1
+    assert [card["taken_by"] for card in pending_harvest["revealed"]] == [0, None, None, None]
+    # 结算结束后帧出栈 ⇒ 视图级同样是 None（键恒在：客户端 fail-closed 关窗）。
+    for _ in range(4_000):
+        pending = engine.pending
+        if pending is None:
+            engine._step()
+            if engine.finished:  # pragma: no cover - 构造局面不会走到终局
+                break
+            continue
+        engine.submit(driver.respond(engine, pending))
+        if harvest_state(engine) is None:
+            break
+    assert harvest_state(engine) is None
+    assert _registry_view(session)["harvest"] is None, "结算结束 ⇒ view.harvest 是 None"
+
+
+def test_the_view_harvest_derivation_is_cached_by_the_record_cursor(monkeypatch) -> None:
+    """轮询是最热入口：**没有新记录**的空转不许重扫整条记录流（票 18 / 票 01 的纪律）。
+
+    缓存的键 =（记录条数, 五谷帧 id），由 `Session.harvest_cache` 持有；`view` 与 `pending`
+    两处派生共用，故一次视图下发最多扫一次。
+    """
+    engine, driver = _harvest_game()
+    first = _drive_to_harvest_pick(engine, driver, 0)
+    engine.submit(fallback_action(first))
+    second = _drive_to_harvest_pick(engine, driver, 1)
+    session = _web_session_for(engine, human_seat=1)
+    scans: list[int] = []
+    original = _projection._harvest_revealed_ids
+
+    def counting(*args, **kwargs):
+        scans.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(_projection, "_harvest_revealed_ids", counting)
+    before = len(engine.records)
+    payload = _registry_view(session)
+    assert payload["harvest"] is not None
+    assert len(scans) == 1, f"一次视图下发只许扫一次记录流（实得 {len(scans)} 次）"
+    # 空转（同一游标、没有新记录）：命中缓存，一次都不许再扫。
+    empty = _registry_view(session, after=payload["cursor"], logs_after=payload["log_seq"])
+    assert empty["harvest"] is not None
+    assert len(engine.records) == before
+    assert len(scans) == 1, f"空转轮询重扫了记录流（实得 {len(scans)} 次）"
+    # 新记录（下一问的应答）⇒ 键变了，允许再扫一次。
+    engine.submit(fallback_action(second))
+    _registry_view(session, after=payload["cursor"], logs_after=payload["log_seq"])
+    assert len(scans) == 2, f"新记录之后应恰好再扫一次（实得 {len(scans)} 次）"
+
+
+# ---------------------------------------------------------------------------
+# 票 19：五谷**逐目标**可见 —— drive() 在每名目标取牌后交还控制权
+#
+# 生产事实（票 18 的残余缺口）：AI 目标的取牌在 `Session.drive()` 里一次驱动跑完，浏览器只
+# 收到最后一批记录。修法 = 接入层在**每名目标取牌后**让出一次（与票 14 的 L0 边界同一种
+# 机制），中间状态由下一次取增量带走。下面三条都走**真会话 + 真 GameRegistry**（answer /
+# advance_clock / view 三条产品路由），不造载荷。
+# ---------------------------------------------------------------------------
+
+
+def _harvest_pause_session(*, dead_seat: int | None = None) -> Session:
+    """真会话停在**人类（座位 0）自己的出牌询问**上；人类手里有【五谷丰登】。
+
+    参与者的询问策略取**网页缺省**（``auto_skip`` ON）：这是 `GameRegistry.create` 建出来的
+    会话语义（引擎库层缺省 OFF）。不打开它，每个目标的无懈窗口都会问人类一次，测试就走不到
+    "除了自己那一问之外没有任何 pending"的生产形状。
+    """
+    engine, _ = _harvest_game(dead_seat=dead_seat, ask_policy=AskPolicy(auto_skip=True))
+    session = _web_session_for(engine, human_seat=0)
+    session.drive()
+    assert session.pending is not None
+    assert session.pending.kind == QueryKind.PLAY_PHASE, session.pending.kind
+    return session
+
+
+def _post_action(
+    registry, session: Session, payload: dict, action: dict
+) -> dict:
+    """走 `GameRegistry.answer`（HTTP ``/answer`` 的那条路）提交一条**载荷原样**的候选。"""
+    return registry.answer(
+        session,
+        {"action": action},
+        after=payload["cursor"],
+        logs_after=payload["log_seq"],
+    )
+
+
+def _use_harvest(session: Session, registry) -> dict:
+    """人类用出五谷，返回**自己取牌那一问**的应答视图（``pending`` 就是那条取牌询问）。"""
+    payload = registry.view(session, after=-1, logs_after=0)
+    use = next(
+        action
+        for action in payload["pending"]["legal_actions"]
+        if (action.get("card") or {}).get("type") == "harvest"
+    )
+    payload = _post_action(registry, session, payload, use)
+    pick = payload["pending"]
+    assert pick is not None and pick["kind"] == "SELECT_CARDS", pick
+    assert pick["harvest"]["current"] == 0
+    return payload
+
+
+def _pick_moves(payload: dict) -> int:
+    """这一份视图自带的记录里，``processing → hand`` 的取牌移动有几条（票 19 的「不多停」）。
+
+    一次暂停点应当**恰好**带走一条取牌移动：多于一条 = 停了两次并成一份（前一个看不见），
+    零条 = 停在别的东西上。
+    """
+    count = 0
+    for record in payload["records"]:
+        if record.get("kind") != "delta" or record.get("delta_type") != "card_move":
+            continue
+        if (record.get("from_zone") or {}).get("zone") != "processing":
+            continue
+        if (record.get("to_zone") or {}).get("zone") != "hand":
+            continue
+        count += 1
+    return count
+
+
+def _pause_views(registry, session: Session, *, limit: int = 8) -> tuple[list[dict], dict | None]:
+    """从"上一份视图已经把暂停点交出去"起，逐次取增量，收集**暂停点上的中间视图**。
+
+    返回 ``(中间视图列表, 结算结束后的第一份视图)``；后者用于断言"结算完就不再停"。
+    每一步都是产品路径：``advance_clock``（= GET 路由先驱动）+ ``view``。
+    """
+    views: list[dict] = []
+    cursor = session.next_cursor(-1)
+    for _ in range(limit):
+        if session.finished:
+            return views, None
+        registry.advance_clock(session)
+        payload = registry.view(session, after=cursor, logs_after=0)
+        cursor = payload["cursor"]
+        if payload["harvest"] is None:
+            return views, payload
+        views.append(payload)
+        if payload["pending"] is not None:
+            return views, payload
+    raise AssertionError(f"步数上限内五谷结算没有结束：{len(views)} 份中间视图")
+
+
+def _taken_cards(payload: dict) -> list[int | None]:
+    return [card["taken_by"] for card in payload["harvest"]["revealed"]]
+
+
+def test_each_harvest_target_pick_is_observable_in_a_view() -> None:
+    """票 19：AI 目标的取牌**每一张都能在一份视图里读到**（票 18 缺的断言）。
+
+    4 座、人类坐 0：人类自己取一张之后，其余三名 AI 各取一张。修法前这三张要等整段结算
+    跑完（``harvest`` 变 ``None``）才一起反映；现在每取一张就有一份视图，``taken_by``
+    恰好每次多一个非空项，且那份视图里 ``harvest`` 非空。
+    """
+    session = _harvest_pause_session()
+    registry = _registry()
+    pick_payload = _use_harvest(session, registry)
+
+    # 人类取牌那一次的应答就是第一个暂停点：没有 pending、`view.harvest` 半程状态。
+    # 走 `GameRegistry.answer`（HTTP ``/answer`` 那条路），因此连"同一趟不再补推一步"
+    # 也一起钉住（否则这份应答里会并进下一名目标的取牌）。
+    first = _post_action(registry, session, pick_payload, pick_payload["pending"]["legal_actions"][0])
+    assert first["pending"] is None, "人类取完牌应当停在逐目标暂停点上（不越过下一名目标）"
+    assert first["harvest"] is not None
+    assert _taken_cards(first).count(None) == 3, "只拿走了人类自己那一张"
+    assert _pick_moves(first) == 1, "一份中间视图恰好带走一条取牌移动"
+
+    views, after_end = _pause_views(registry, session)
+    assert after_end is not None and after_end["harvest"] is None, "整段结算结束后不再有 harvest"
+    every = [first, *views]
+    assert len(every) == 4, f"4 名目标 ⇒ 4 份中间视图（实得 {len(every)}）"
+    assert len({view["harvest"]["key"] for view in every}) == 1, (
+        "同一个链键跨 X 个目标不变（票 18 的派生键）"
+    )
+
+    # 判据逐条：连续两次取增量之间，`revealed[*].taken_by` 至少多一个非空项。
+    taken = [_taken_cards(view) for view in every]
+    for before, after in zip(taken, taken[1:]):
+        gained = sum(
+            1 for old, new in zip(before, after) if old is None and new is not None
+        )
+        assert gained == 1, f"每一拍应当恰好多一张牌被拿走：{before} -> {after}"
+    assert [sum(1 for by in row if by is not None) for row in taken] == [1, 2, 3, 4]
+
+    # 目标条四态跟着走：已拿的翻成 taken，当前目标一路前移，最后一帧没有当前目标。
+    statuses = [[target["status"] for target in view["harvest"]["targets"]] for view in every]
+    assert statuses == [
+        ["taken", "current", "pending", "pending"],
+        ["taken", "taken", "current", "pending"],
+        ["taken", "taken", "taken", "current"],
+        ["taken", "taken", "taken", "taken"],
+    ], statuses
+    assert [view["harvest"]["current"] for view in every] == [1, 2, 3, None]
+
+
+def test_the_harvest_pause_stops_once_per_target() -> None:
+    """票 19：取 3 名目标 ⇒ **恰好 3 次**中间视图，不多不少；每名目标只停一次。
+
+    3 名目标靠"座位 3 阵亡"造出来（死者不进目标表，也不占亮牌份额）。判据两条，一条数
+    视图，一条数**记录**：每份中间视图自带的记录窗口里**恰好**一条 ``processing → hand``
+    的取牌移动——多于一条 = 两次暂停被并成一份（前一个看不见），零条 = 停在别的东西上。
+
+    人类取牌这一步走 ``Session.submit_answer``（而不是 HTTP 那条路），因为"这一趟停在
+    暂停点上"这件事**就是它的返回值**（``GameRegistry.answer`` 拿它决定同一趟不再补推）。
+    """
+    session = _harvest_pause_session(dead_seat=3)
+    registry = _registry()
+    pick_payload = _use_harvest(session, registry)
+    assert [target["seat"] for target in pick_payload["pending"]["harvest"]["targets"]] == [
+        0, 1, 2,
+    ]
+    assert session.submit_answer(fallback_action(session.pending)) is True, (
+        "人类取牌之后 drive 应当停在逐目标暂停点上（返回值 = 这件事）"
+    )
+    first = registry.view(
+        session, after=pick_payload["cursor"], logs_after=pick_payload["log_seq"]
+    )
+
+    views, after_end = _pause_views(registry, session)
+    every = [first, *views]
+    assert len(every) == 3, f"3 名目标 ⇒ 恰好 3 份中间视图（实得 {len(every)}）"
+    assert [sum(1 for by in _taken_cards(view) if by is not None) for view in every] == [1, 2, 3]
+    assert [_pick_moves(view) for view in every] == [1, 1, 1], (
+        "每份中间视图恰好带走一条取牌移动（不多停 = 不并批、不少停 = 不跳过目标）"
+    )
+    # 最后一名目标取完 ⇒ 没有当前目标（目标条全绿），然后下一次取增量结算结束。
+    assert [view["harvest"]["current"] for view in every] == [1, 2, None]
+    assert [target["status"] for target in every[-1]["harvest"]["targets"]] == ["taken"] * 3
+    assert after_end is not None and after_end["harvest"] is None
+
+
+def test_the_harvest_pause_is_pure_driving_throttling() -> None:
+    """票 19：暂停只改"这一次驱动停在哪"——**记录流逐字节不变**。
+
+    同种子同参与者两局：一局经 :class:`Session`（会逐目标让出），一局直接
+    ``Engine.run(...)``。记录流相等 ⇒ 暂停没有多问一次、没有重放一步、没有多抽一个随机数
+    （这些都会改变记录或让 AI 的子流错位）。
+    """
+    engine, _ = _harvest_game(ask_policy=AskPolicy(auto_skip=True))
+    session = _web_session_for(engine, human_seat=0)
+    session.participants = tuple(RandomPlayer(ai_stream(1, seat)) for seat in range(4))
+    drives = 0
+    while not session.finished:
+        session.drive()
+        drives += 1
+        assert drives < 10_000, "挂起驱动没有推进（活锁）"
+    assert drives > 1, "这一局应当至少让出一次（五谷的逐目标暂停）"
+
+    plain, _ = _harvest_game(ask_policy=AskPolicy(auto_skip=True))
+    plain.run(tuple(RandomPlayer(ai_stream(1, seat)) for seat in range(4)))
+
+    assert dump_journal(session.records()) == dump_journal(plain.records), (
+        "逐目标暂停是纯驱动节流：记录流必须与一次性跑法逐字节相同"
+    )
 
 
 @pytest.mark.parametrize(("reverse", "expected"), [(False, "invalid"), (True, "taken")])
@@ -9358,8 +11042,18 @@ def test_fire_attack_target_index_lists_only_seats_with_hand_cards_including_sel
     assert snapshot["players"][2]["hand_count"] == 0
 
 
-def test_the_human_targets_fire_attack_reveal_step_uses_the_reveal_dialog_without_leaking() -> None:
-    """人类被指定：亮牌步 = U2 亮牌模板（dialog=reveal），只有本人的手牌；外人拿不到牌面。"""
+def test_the_human_targets_fire_attack_reveal_step_is_a_table_direct_pick_without_leaking() -> None:
+    """人类被指定：亮牌步 = **牌桌直选**（`dialog: null` + 可见槽），牌面只发给本人。
+
+    spec §1 #12 / 票 09 ②：投影原先把**己方手牌**槽位塞进 `payload["revealed"]`
+    ⇒ `dialog="reveal"` ⇒ 前端 `isRevealStep` 短路 `isOwnZonePick` ⇒ 亮牌弹窗。
+    槽位本来就是 `reveal_hand=True` 铺的可见槽（牌面已在 `view.self_hand` 里），
+    那份"授予"是**重复**的 ⇒ 槽位全是应答者自己的手牌时不再授予，`dialog` 随之变 `null`，
+    界面走既有的 own-hand-pick（同一技能第二步「同花色弃牌」的先例）。
+
+    这是**读取方**断言：前端 `candidates.js:isOwnZonePick` 读的就是 `dialog`（经
+    `stepDialogKind`）与 `slots[].card`——引擎的真实槽位可见性与前端判据同源。
+    """
     spade = _fire_suit_cards(Suit.SPADE)[0]
     heart = _fire_suit_cards(Suit.HEART)[0]
     session = _fire_session(user_hand=(spade, heart), target_hand=())
@@ -9372,21 +11066,165 @@ def test_the_human_targets_fire_attack_reveal_step_uses_the_reveal_dialog_withou
     )
     assert reveal is not None
     payload = pending_payload(session)
-    assert payload["dialog"] == "reveal", "人类被指定 ⇒ 亮牌模板（四类弹窗之一）"
+    assert payload["dialog"] is None, "己方手牌的可选面是牌桌直选，不是亮牌弹窗"
+    assert not payload["revealed"], (
+        "己方手牌不是「观看授予」（`view.self_hand` 已有牌面）⇒ 不再塞进 revealed"
+    )
     assert payload["harvest"] is None, "火攻没有五谷的 harvest 状态"
     assert payload["context"]["name"] == "火攻"
     assert "亮出" in payload["context"]["requirement"]
     own_hand = [card["card_id"] for card in payload["view"]["self_hand"]]
-    revealed = [card["card_id"] for card in payload["revealed"]]
-    assert revealed == [slot["card"]["card_id"] for slot in payload["slots"]]
-    assert set(revealed) == set(own_hand), "亮牌窗里是本人手牌；牌面只发给询问者本人"
-    assert all(card["description"] for card in payload["revealed"]), "卡面契约随亮牌下发"
+    slot_faces = [slot["card"] for slot in payload["slots"]]
+    assert slot_faces and all(face is not None for face in slot_faces), (
+        "槽位是目标自己的手牌（`reveal_hand=True`）⇒ 牌面对本人可见（前端直选的唯一判据）"
+    )
+    assert [face["card_id"] for face in slot_faces] == own_hand
+    assert all(face["description"] for face in slot_faces), "卡面契约随可见槽下发"
 
     # 外人的载荷：不是询问者 ⇒ 没有 dialog / revealed，槽位只剩位置。
     foreign = pending_payload(session.pending, human_seat=1)
     assert foreign["dialog"] is None
     assert foreign["revealed"] == []
     assert foreign["slots"] and all(slot["card"] is None for slot in foreign["slots"])
+
+
+def _assert_own_hand_direct_pick_payload(payload: dict, *, actor: int) -> None:
+    """前端 `candidates.js:isOwnZonePick` 读的那几个键，逐条核（票 09 ④的回环判据）。
+
+    ``isOwnZonePick`` = ``SELECT_CARDS`` ∧ 不是「提供一张 B」∧ `stepDialogKind` 为 null
+    （= `dialog` 不是任何一个模板）∧ 槽位全在应答者自己的手牌 / 装备区且**牌面可见**。
+    `isOwnHandSinglePick` 再加一条 `selectionCap == 1`。这里只在**引擎真实 pending 的载荷**
+    上读同一批键——两处各自实现一份"槽位可见性"是本票要消灭的断点。
+    """
+    assert payload["kind"] == "SELECT_CARDS"
+    assert payload["actor"] == actor
+    assert payload["dialog"] is None, "牌桌直选的面不该带任何弹窗模板标记"
+    assert not payload["revealed"], "自己手牌的牌面不是「观看授予」"
+    assert payload["provide_type"] is None, "不是「提供一张 B」（那一档有自己的就地渲染）"
+    assert payload["arrange"] is None, "不是排列面"
+    slots = payload["slots"]
+    assert slots, "面里要有槽位"
+    for slot in slots:
+        assert slot["ref"]["seat"] == actor, f"槽位必须来自应答者自己：{slot['ref']}"
+        assert slot["ref"]["zone"] == "hand", f"这一步是自己的手牌区：{slot['ref']}"
+        assert slot["card"] is not None, "槽位牌面必须可见（否则前端只会画「?」位置）"
+    assert payload["spec"]["zones"] == ["hand"]
+    assert payload["spec"]["total"] == [1, 1], "单张选择 ⇒ isOwnHandSinglePick（点一张即提交）"
+
+
+class _SlashAtSeat:
+    """座位 0 的脚本：出牌阶段对 ``target`` 使用【杀】并发动装备技（雌雄双股剑）。
+
+    其余询问退到最小合法应答（放弃 / 结束阶段）——本用例只把会话推到目标 1 的弃手牌步。
+    """
+
+    def __init__(self, slash: int, target: int) -> None:
+        self._slash = slash
+        self._target = target
+        self._fallback = _FireDriver()
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == self._slash
+                    and action.targets == (self._target,)
+                ):
+                    return action
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill):
+                    return action
+        return self._fallback.answer(query)
+
+
+def _double_sword_session(*, target_hand: tuple[int, ...]):
+    """真会话：座位 0（男）持【雌雄双股剑】对座位 1（女，人类）用【杀】，停在目标的弃牌步。"""
+    from sgs.data import Gender as _Gender
+    from sgs.data import RuleConfig as _RuleConfig
+    from sgs_web.session import Session as _Session
+
+    pack = _context_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    sword = cards_of_type(pack, "double_sword")[0]
+    used = {slash, sword, *target_hand}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hand=(slash,), equip=(sword,), gender=_Gender.MALE),
+            SeatSpec(hp=4, hand=target_hand, gender=_Gender.FEMALE),
+            SeatSpec(hp=4, hand=()),
+            SeatSpec(hp=4, hand=()),
+        ],
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=1,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 1 else _SlashAtSeat(slash, 1) for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def test_the_own_hand_direct_pick_payloads_start_from_a_real_engine_pending() -> None:
+    """票 09 ④：两个"自家手牌直选"的载荷必须**从引擎真实 pending 出发**核（不是合成 Query）。
+
+    合成 ``Query`` 的用例（本文件 5b 段那类）掩盖了这个断点：它能构造出"槽位可见 + dialog
+    为 null"，而**引擎**这一侧可能根本没铺可见槽（雌雄漏传 `reveal_hand`）、或者投影自己
+    塞了 `revealed`（火攻）。两处各自实现一份"自己手牌的牌面可见性"正是本票要消灭的第二份
+    真源。故这里走完整回环：真会话 → 真引擎询问 → `pending_payload` → 前端判据读的那几个键。
+    """
+    # ---- ① 雌雄双股剑：目标选「弃一张手牌」后的选择面 ----
+    pack = _context_pack()
+    target_hand = (
+        cards_of_type(pack, "peach")[0],
+        cards_of_type(pack, "dodge")[0],
+    )
+    session = _double_sword_session(target_hand=target_hand)
+    option = session.pending
+    assert option is not None and option.kind == QueryKind.SELECT_OPTION, (
+        f"雌雄先说选择权在目标：{option and option.kind}"
+    )
+    assert option.actor == 1, "选择权在目标（人类座位）"
+    session.submit_answer(
+        next(
+            action
+            for action in option.legal_actions
+            if isinstance(action, SelectOption) and action.choice == "discard_one"
+        )
+    )
+    discard = session.pending
+    assert discard is not None and discard.kind == QueryKind.SELECT_CARDS, (
+        f"目标选「弃一张手牌」后进选牌步：{discard and discard.kind}"
+    )
+    payload = pending_payload(session)
+    _assert_own_hand_direct_pick_payload(payload, actor=1)
+    faces = [slot["card"]["card_id"] for slot in payload["slots"]]
+    assert set(faces) == set(target_hand), "面里是目标自己的那几张手牌（牌面对本人可见）"
+
+    # ---- ② 火攻：目标亮自己一张手牌的那一步 ----
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    fire_session = _fire_session(user_hand=(spade, heart), target_hand=())
+    fire_session.submit_answer(_fire_use_action(fire_session.pending, target=0))
+    fire_reveal = _step_until(
+        fire_session,
+        lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0,
+    )
+    assert fire_reveal is not None
+    _assert_own_hand_direct_pick_payload(pending_payload(fire_session), actor=0)
 
 
 def test_the_human_targets_reveal_is_public_and_leaves_no_known_marker() -> None:

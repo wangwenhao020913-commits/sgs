@@ -1152,10 +1152,17 @@ class _BorrowedHost:
     def advance_provider(self, frame, timing):
         return None, None, None
 
-    def respond_candidates(self, actor, **kwargs):
+    def respond_context(self, frame, actor, **kwargs):
+        from sgs.state import RespondContext
+
+        # 真窗口用 `Engine.respond_context` 建载荷；本宿主把它原样装回一个真的
+        # `RespondContext`——预览与（若发生的）发问收的是同一个对象。
+        return RespondContext(**kwargs)
+
+    def respond_candidates(self, actor, ctx):
         return self.offers
 
-    def ask_respond(self, frame, actor, timing, **kwargs):
+    def ask_respond(self, frame, actor, timing, ctx):
         self.asked += 1
         raise AssertionError("auto-b：没有非 Pass 候选就不许发询问")
 

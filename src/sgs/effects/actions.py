@@ -49,7 +49,9 @@ from sgs.state import (
     SelectOptions,
     SelectOptionsContext,
     SelectOptionsQuery,
+    SelectionSpec,
     SkillActivationContext,
+    Slot,
     SubstituteJudgeCard,
     SlotKind,
     SEALED_ZONE_JUDGE,
@@ -106,7 +108,10 @@ __all__ = [
     "need_card_floor",
     "need_card_tier",
     "needs_designation",
+    "next_need_card_tier",
     "record_need_card_choice",
+    "record_need_card_floor",
+    "reset_need_card_event",
     "reset_need_card_floor",
     "seat_distance",
     "target_combos",
@@ -376,7 +381,9 @@ def _count_exempt_targets(
     )
 
 
-def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]:
+def check_targets(
+    state: GameState, seat: int, card: CardRef, *, distance_exempt: bool = False
+) -> tuple[int, ...]:
     """L3.3 ``USE_CHECK_TARGETS``：这张牌当前的合法目标池（可为空）。
 
     目标数为 0 的响应牌（【闪】/【无懈可击】）返回空元组——它们响应的是那张牌 /
@@ -390,8 +397,26 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     - **附加谓词** ``behavior.target_filters``（【过河拆桥】/【顺手牵羊】"区域里有牌"、
       【借刀杀人】"有武器且有合法【杀】目标"），经 :data:`TARGET_FILTERS` 注册表解析。
 
-    延时锦囊另有一条**规则层**限制：判定区按**牌名**禁同名（票 03 §5），故已有同名
-    延时锦囊的目标不是合法目标（标准版下这是"不合法"的唯一来源，票 03 §6）。
+    票 03 把这五层排成**单向的合法性阶梯**，每一层只负责自己那件事：
+
+    ① ``TargetRule``（只能对自己 / 目标数 0）→ ② **距离与攻击范围**（本层读
+    :data:`~sgs.skills.ModifierPoint.TARGET_RANGE_EXEMPT` 的"豁免座位集"）→ ③ 延时锦囊 /
+    封印规则 → ④ :data:`TARGET_FILTERS` 附加谓词 → ⑤
+    :data:`~sgs.skills.ModifierPoint.TARGET_POOL` 合法性增删链。
+
+    **距离豁免挂点在 ②、且在 ③④⑤ 之前**（票 03 的核心）：被豁免的座位只是**跳过**距离
+    两条判据，随后照常走 ③④⑤。故"放宽距离"**不能**复活任何被后面几层判非法的座位——旧
+    写法（在 ⑤ 里并集"全体其他存活座位"）会复活它们，实测【雄乱】能把无武器的座位变成
+    【借刀杀人】的目标、把无牌角色变成【过河拆桥】的目标、把判定区已封印 / 【空城】的座位
+    重新加回池。
+
+    ``distance_exempt``（关键字、缺省 ``False``）= **调用方**声明"这一次使用无视距离 /
+    攻击范围"，用于**技能侧自算池**的载体（唯一读者：【神速】视为使用一张"无距离限制的"
+    【杀】——那张纯虚拟牌不经过本函数前面的候选生成，故豁免只能由调用方给）。它**不是**
+    第二条豁免路径：它只把"全体座位"喂进 ② 的**同一个**豁免集（与
+    :data:`~sgs.skills.ModifierPoint.TARGET_RANGE_EXEMPT` 的钩子同一个求值点、同一条
+    ``player.seat not in exempt`` 判据，见下面的实现），③④⑤ 照常跑，**不会**放宽任何
+    目标合法性。没有"强制查距离"的读者，故这里只有一个方向。
     """
     behavior = behavior_for(card)
     rule = behavior.target_rule
@@ -418,30 +443,51 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
                 ModifierContext(subject=seat, card=card),
                 max_distance,
             )
+        # ② 的距离 / 攻击范围豁免（票 03 的新挂点）：本次使用的**豁免座位集**，``current``
+        # 从空元组起、回调只许追加。求值点在 ③④⑤ **之前** ⇒ 下面被它放行的座位马上还要
+        # 过延时封印、附加谓词与 TARGET_POOL 链，"放宽距离"因此不可能复活非法座位。
+        #
+        # **两条声明来源、同一份求值**（票 13 的评审 P3）：调用方的 ``distance_exempt``（技能
+        # 侧自算池的载体）只是把"全体座位"喂进**同一个**豁免集，随后仍走下面那一条
+        # ``player.seat not in exempt`` 判据——没有第二套"整条跳过距离"的实现，两条路因此
+        # 不可能给出不同的合法座位集（③④⑤ 也都在它们之后照常跑）。
+        exempt: tuple[int, ...] = (
+            tuple(player.seat for player in state.players)
+            if distance_exempt
+            else apply_modifiers(
+                ModifierPoint.TARGET_RANGE_EXEMPT,
+                state,
+                ModifierContext(subject=seat, card=card),
+                (),
+            )
+        )
         pool = []
         for player in state.players:
             if not player.alive:
                 continue
             if player.seat == seat and not rule.includes_self_in_pool():
                 continue
-            if rule.needs_distance and distance(state, seat, player.seat) > attack_range(
-                state, seat
-            ):
-                continue
-            if max_distance is not None and distance(
-                state, seat, player.seat
-            ) > max_distance:
-                continue
+            if player.seat not in exempt:
+                if rule.needs_distance and distance(
+                    state, seat, player.seat
+                ) > attack_range(state, seat):
+                    continue
+                if max_distance is not None and distance(
+                    state, seat, player.seat
+                ) > max_distance:
+                    continue
             pool.append(player.seat)
+    # ③ 延时锦囊另有一条**规则层**限制：判定区按**牌名**禁同名（票 03 §5），且判定区被
+    # 封印的角色不是合法目标（lei-batch 票 02）——被封印者不落【乐不思蜀】/【兵粮寸断】、
+    # 【闪电】越过（后者另见 `delayed_settle_target`）。
     if behavior.is_delayed:
         pool = [
             target
             for target in pool
-            # 废除区域（lei-batch 票 02）：判定区被封印的角色**不是延时锦囊的合法目标**
-            # （乐不思蜀 / 兵粮寸断不落、闪电越过——后者另见 `delayed_settle_target`）。
             if not zone_sealed(state.player(target), SEALED_ZONE_JUDGE)
             and not _same_named_in_judge(state, target, card)
         ]
+    # ④ 附加谓词（行为表声明，TARGET_FILTERS 注册表解析）。
     pool = [
         target
         for target in pool
@@ -449,9 +495,11 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             TARGET_FILTERS[name](state, seat, target) for name in behavior.target_filters
         )
     ]
-    # 第 0 层定集合之后过 TARGET_POOL 链（票 07 §3 的挂点）：M2 的【方天画戟】在此不改池
+    # ⑤ 第 0 层定集合之后过 TARGET_POOL 链（票 07 §3 的挂点）：M2 的【方天画戟】在此不改池
     # （额定与额外目标的合法性检测标准相同，`A/flow_condition.txt:46`），M3 的"标准不同"
-    # 类效果从这里分叉。无修饰器时原样返回，故 M1 的候选逐字节不变。
+    # 类效果从这里分叉。**票 03 起这条链只做合法性增删**（空城 / 谦逊 / 帷幕的剔除）——
+    # "放宽距离 / 攻击范围"已迁到 ② 的 TARGET_RANGE_EXEMPT，故本链的回调不许把被 ③④ 判
+    # 非法的座位加回来（今天也没有这种回调）。无修饰器时原样返回，故 M1 的候选逐字节不变。
     return tuple(
         apply_modifiers(
             ModifierPoint.TARGET_POOL,
@@ -468,6 +516,7 @@ def check_usable(
     card: CardRef,
     *,
     context: UseContext = UseContext.PLAY_PHASE,
+    require_targets: bool = True,
 ) -> bool:
     """``seat`` 此刻**能不能用**这张牌：L3 的"使用前校验"整条链，合成一个可调用的档。
 
@@ -490,6 +539,12 @@ def check_usable(
     公开出来供新读点使用——故**不改变**任何既有技能的候选。
 
     ``card`` 可以是实体牌，也可以是转化 / 虚拟产物（判据只读行为表与牌面，不要求它在某区）。
+
+    ``require_targets=False``（table-ux-overhaul 票 12 / spec §2 Q20）：只读**前三条**
+    （时机 / 禁用 / 次数），不读第 4 条目标池。这是**源牌级**置灰的判据——"这张源牌有
+    没有任何产物此刻可用"问的是"能不能用"，不是"这一步选谁"；目标维度属于**产物级**
+    与**目标级**（前者读整条，后者由座位池 / 预览回答）。两档**同一个**实现：置灰判据
+    因此只有一份，不新造第二条使用校验链。
     """
     behavior = behavior_for(card)
     if not _usable_in(behavior, context, None):
@@ -500,6 +555,8 @@ def check_usable(
         return False
     if check_count(state, seat, card):
         return False
+    if not require_targets:
+        return True
     return bool(check_targets(state, seat, card))
 
 
@@ -800,11 +857,50 @@ def legal_actions_for(
     而不是应答者自己，故目标不走行为表的目标规则（票 07 §4 / 票 21 §7）。
     票 27 的新 kind 走**类型化 ``payload``**（票 19 §4）；票 30 再补三类。
 
-    **需要（使用 / 打出）牌窗口的档位闸门**（票 03 §4-2）：四扇窗口（【闪】/ 求桃 /
-    打出·使用响应 / 无懈）的候选在生成之后统一过"不升档"——档 < ``payload.floor`` 的
-    候选不进面。闸门放在这里而不是各窗口里：本函数是全部询问候选的**唯一生成口**，
-    四扇窗口因此不可能只有三扇接线。其余询问走别的 ``payload``、也**不跑**这条闸门，
-    故它们的候选一条不动（改判窗口同样不跑：改判不是"使用 / 打出"）。
+    **需要（使用 / 打出）牌窗口按档逐档问**（table-ux-overhaul 票 04 / Q13 / Q17）：
+    四扇窗口（【闪】/ 求桃 / 打出·使用响应 / 无懈）的候选先取全部档
+    （:func:`_actions_for`），再交给 :func:`_need_card_face` 切成"**只留最小档**"的一张面
+    ——档 < ``payload.floor`` 的候选（上一档已过）与更高档的候选都**不在这一问里**。
+    分面放在这里而不是各窗口里：本函数是全部询问候选的**唯一生成口**，四扇窗口因此
+    不可能只有三扇接线，窗口自己也不必知道"现在问哪一档"。
+    其余询问走别的 ``payload``、也**不跑**这条闸门，故它们的候选一条不动
+    （改判窗口同样不跑：改判不是"使用 / 打出"）。
+
+    "``Pass`` 之后进下一档"由引擎驱动（:func:`~sgs.engine.Engine.ask_query` 用
+    :func:`next_need_card_tier` 现算下一档），窗口只按收到的应答收尾——故"最后一档
+    ``Pass`` = 这次需要牌不满足"仍是各窗口既有的那条分支。
+    """
+    actions = _actions_for(
+        state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
+    )
+    floor = _window_floor(kind, payload)
+    if floor is None:
+        return actions
+    return _need_card_face(actions, floor=floor)
+
+
+def _actions_for(
+    state: GameState,
+    seat: int,
+    kind: QueryKind,
+    *,
+    answers_seq: int,
+    dying: int | None = None,
+    payload: RespondContext
+    | SelectContext
+    | DodgeContext
+    | PeachContext
+    | SkillActivationContext
+    | SelectOptionContext
+    | SelectOptionsContext
+    | DistributeContext
+    | None = None,
+) -> tuple[Action, ...]:
+    """**全部档**的候选（唯一生成口）：过"能不能用"与禁令，但**不分面**。
+
+    :func:`legal_actions_for`（分面后交给玩家）与 :func:`next_need_card_tier`（``Pass``
+    之后现算下一档）读**同一份**生成——分面只在一处发生，两处不可能对"还有没有下一档"
+    给出相反的回答。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
@@ -813,20 +909,14 @@ def legal_actions_for(
     elif kind is QueryKind.DODGE:
         ctx = payload if isinstance(payload, DodgeContext) else DodgeContext()
         candidates = _dodge(state, seat, answers_seq, ctx.providers_used)
-        candidates = _above_floor(candidates, floor=ctx.floor)
     elif kind is QueryKind.PEACH:
         if dying is None:
             raise ValueError("PEACH 询问必须给出濒死者座位")
-        ctx = payload if isinstance(payload, PeachContext) else PeachContext()
         candidates = _peach(state, seat, dying, answers_seq)
-        candidates = _above_floor(candidates, floor=ctx.floor)
     elif kind is QueryKind.RESPOND:
         if not isinstance(payload, RespondContext):
             raise ValueError("RESPOND 询问必须给出 RespondContext")
         candidates = _respond(state, seat, answers_seq, payload)
-        if payload.mode is not RespondMode.REJUDGE:
-            # 改判不是"使用 / 打出"（它不压 USE 帧、不触发使用后钩子），故不在这条通道上。
-            candidates = _above_floor(candidates, floor=payload.floor)
     elif kind is QueryKind.SELECT_CARDS:
         if not isinstance(payload, SelectContext):
             raise ValueError("SELECT_CARDS 询问必须给出 SelectContext")
@@ -864,6 +954,22 @@ def legal_actions_for(
             if not _uses_hand_card(state, seat, action)
         ]
     return tuple(sorted(candidates, key=_sort_key))
+
+
+def _window_floor(kind: QueryKind, payload: Any) -> int | None:
+    """这扇询问的"已过档"闸门输入；``None`` = **不是**需要（使用 / 打出）牌窗口（不分面）。
+
+    四扇需要牌窗口的载荷都带 ``floor``（票 03 §4-2）；改判同样带 ``RespondContext``，但
+    改判**不是**使用 / 打出（不压 USE 帧、不触发使用后钩子），故它走 ``None`` 这一档。
+    """
+    if kind is QueryKind.DODGE:
+        return 0 if not isinstance(payload, DodgeContext) else int(payload.floor)
+    if kind is QueryKind.PEACH:
+        return 0 if not isinstance(payload, PeachContext) else int(payload.floor)
+    if kind is QueryKind.RESPOND:
+        if isinstance(payload, RespondContext) and payload.mode is not RespondMode.REJUDGE:
+            return int(payload.floor)
+    return None
 
 
 def _uses_hand_card(state: GameState, seat: int, action: Action) -> bool:
@@ -1277,6 +1383,63 @@ def _respond_scope(required: str | None) -> CandidateScope | None:
     return None
 
 
+def select_card_picks(
+    slots: Sequence[Slot], spec: SelectionSpec
+) -> tuple[tuple[int, ...], ...]:
+    """``spec`` 允许的**全部**选牌组合（面内下标升序 = 枚举顺序）——选牌面的唯一枚举器。
+
+    两个消费者读**同一份**：
+
+    - 候选生成（:func:`_select_cards`）把它逐条装成 ``SelectCards``，提交时按成员判定收；
+    - 接入层的**选牌预览**（``POST /api/sessions/<id>/preview``，table-ux-overhaul 票 15）
+      反过来回答"给定已选的这几张，哪些槽位还出现在**某个合法补全**里"。界面据此置灰
+      ——【业炎】的四色上限（``max_per_suit``）因此与"提交会被接受"逐项同源，前端不再
+      自己数花色（spec §6 不变量 1）。
+
+    ``max_per_suit`` 是**候选生成期**的收窄（不是提交校验）：只枚举"每种花色至多 k 张"的
+    组合。槽位没有牌面（隐藏槽）时无法判花色——那种询问不该设这个字段，故按"不拦"处理
+    （fail-open 只会在配置错误时出现，不会让非法组合进候选）。
+    """
+    low, high = spec.total
+    per_suit = spec.max_per_suit
+
+    def allowed(picks: tuple[int, ...]) -> bool:
+        if per_suit is None:
+            return True
+        counts: dict[str, int] = {}
+        for index in picks:
+            card = slots[index].card
+            suit = None if card is None else card.suit
+            if suit is None:
+                continue
+            counts[suit] = counts.get(suit, 0) + 1
+            if counts[suit] > per_suit:
+                return False
+        return True
+
+    return tuple(
+        picks
+        for count in range(low, min(high, len(slots)) + 1)
+        for picks in combinations(range(len(slots)), count)
+        if allowed(picks)
+    )
+
+
+def pick_completions(
+    slots: Sequence[Slot], spec: SelectionSpec, picks: Sequence[int]
+) -> tuple[tuple[int, ...], ...]:
+    """**含已选这几张**的全部合法组合（= 这一步此刻还走得下去的补全）。
+
+    ``disabled`` 的判据就落在这上面：不在任何补全里的槽位，玩家再点也凑不出合法答案
+    （选牌预览，table-ux-overhaul 票 15）。判据只有一份——枚举仍由
+    :func:`select_card_picks` 给，"某槽位还点不点得动"**不是**另一条规则。
+    """
+    current = frozenset(int(pick) for pick in picks)
+    return tuple(
+        combo for combo in select_card_picks(slots, spec) if current <= frozenset(combo)
+    )
+
+
 def _select_cards(
     state: GameState, seat: int, answers_seq: int, ctx: SelectContext
 ) -> list[Action]:
@@ -1290,30 +1453,14 @@ def _select_cards(
     判据是**候选生成期**的（不是界面灰显）：不在候选里的组合，引擎会拒；界面读同一份
     候选把同花色的其余牌置灰。槽位没有牌面（隐藏槽）时无法判花色——那种询问不该设这个
     字段，故按"不拦"处理（fail-open 只会在配置错误时出现，不会让非法组合进候选）。
+
+    枚举本身住在 :func:`select_card_picks`：接入层的选牌预览（票 15）读**同一个**函数回答
+    "这一组还能怎么补全"，故"预览说点得动"与"候选里有这条"不可能各说一套。
     """
     del state, seat
-    low, high = ctx.spec.total
-    per_suit = ctx.spec.max_per_suit
-
-    def allowed(picks: tuple[int, ...]) -> bool:
-        if per_suit is None:
-            return True
-        counts: dict[str, int] = {}
-        for index in picks:
-            card = ctx.slots[index].card
-            suit = None if card is None else card.suit
-            if suit is None:
-                continue
-            counts[suit] = counts.get(suit, 0) + 1
-            if counts[suit] > per_suit:
-                return False
-        return True
-
     actions: list[Action] = [
         SelectCards(picks=picks, answers_seq=answers_seq)
-        for count in range(low, min(high, len(ctx.slots)) + 1)
-        for picks in combinations(range(len(ctx.slots)), count)
-        if allowed(picks)
+        for picks in select_card_picks(ctx.slots, ctx.spec)
     ]
     if ctx.spec.optional:
         actions.append(Pass(answers_seq=answers_seq))
@@ -1321,16 +1468,25 @@ def _select_cards(
 
 
 NEED_CARD_FLOOR_KEY = "need_card_floor"
-"""帧私有键：四扇**需要（使用 / 打出）牌**窗口的不升档游标（票 03 §4-2），按座位分槽。
+"""帧私有键：四扇**需要（使用 / 打出）牌**窗口的"已过档"游标（票 03 §4-2 / 票 04 §2），
+按座位分槽。
 
-形态 = ``{座位: int}``（缺项 = 0 = 最高档）。"不升档"是**逐角色**的（仓内 §4.16 L443
-"先逐角色、角色内部再按优先级"），故：求桃 / 无懈 / 势力求助逐个应答者、【决斗】双方轮流
-——同一帧里会有多个座位的档，挤在一个 int 里会串味。
+形态 = ``{座位: int}``（缺项 = 0 = 从最小档起算）= **下一次该问的最小档**。"不升档"是
+**逐角色**的（仓内 §4.16 L443 "先逐角色、角色内部再按优先级"），故：求桃 / 无懈 / 势力求助
+逐个应答者、【决斗】双方轮流——同一帧里会有多个座位的档，挤在一个 int 里会串味。
+
+票 04 起它的语义从"闸门下限"扩成"**按档逐档问**的游标"：
+
+- 候选生成口（:func:`legal_actions_for`）只把**最小档 ≥ floor** 的那一条面交给玩家；
+- 玩家 ``Pass`` ⇒ 引擎用 :func:`next_need_card_tier` 现算下一档，由
+  :func:`record_need_card_floor` 写进这里（``Pass`` = 本档不发动、进下一档）；
+- 选了一条候选 ⇒ 记它的档（:func:`record_need_card_choice`）：同档仍可再问（提供者可能
+  没通过），更高优先的档不再进面；
+- 最后一档 ``Pass`` = 这次需要牌不满足，窗口照旧收尾。
 
 floor 的粒度是**一个需要牌事件**（补充一手 §4.2.2 的 ❶ ②③ + §2.1.2.2(2) 的"每时机一次
-响应机会"）：选了提供者而它**没通过**时 floor 留着（曹操先发动【八卦阵】⇒ 没有〖护驾〗的
-时机了）；**这一次响应成立**时清回 0（【无双】的两张【闪】是两次事件）。清点由各窗口的
-成功分支调 :func:`reset_need_card_floor`。
+响应机会"）：**这一次响应成立**时清回 0（【无双】的两张【闪】是两次事件），清点由各窗口的
+成功分支调 :func:`reset_need_card_event`（连 ``providers_used`` 一起复位）。
 
 **帧私有**（不进记录流）；它是**逐目标**分槽的状态，故必须登记在
 :data:`sgs.engine.steps._PER_TARGET_FRAME_KEYS`——否则同一帧的下一个目标会继承上一个目标的
@@ -1342,21 +1498,25 @@ def tier_not_downgraded(tier: int, floor: int) -> bool:
     """**不升档**（补充一手 §2.1.2.3）：档值越小越优先，故闸门 = ``tier >= floor``。
 
     小于 ``floor`` 的档（= 比上一次更高优先）不再进面，同档与更低优先的档照进。这一行
-    判据由两处消费：票 01 的 :func:`activation_allowed`（同一时机的激活结算）与票 03 的
-    四个需要牌窗口（:func:`_above_floor`）。写在**一处**，两边不可能对"高档 / 低档"给出
-    相反的读法。
+    判据由三处消费：票 01 的 :func:`activation_allowed`（同一时机的激活结算）、票 03 的
+    四个需要牌窗口（:func:`_need_card_face`）与票 04 的"下一档"现算
+    （:func:`next_need_card_tier`）。写在**一处**，三边不可能对"高档 / 低档"给出相反的读法。
     """
     return int(tier) >= int(floor)
 
 
 def need_card_tier(action: Action) -> int:
-    """一条"需要（使用 / 打出）牌"候选的**优先级档**（票 03 §4-1）。
+    """一条"需要（使用 / 打出）牌"候选的**优先级档**（票 03 §4-1 / 票 04 §1-§3）。
 
     - 真牌 / 转化牌（``UseCard`` / ``PlayCard``）= ``CARD_USE``（2）：窗口要的是**一张牌**，
       牌从手牌来还是从装备区 / 转化来，不改变这一档；
-    - ``ActivateSkill``（提供者）= 该技能定义声明的 :attr:`~sgs.skills.SkillDef.priority_class`：
-      【八卦阵】= **装备档**（1），【护驾】/【激将】/【蛊惑】= **武将档**（0）。声明只有
-      一份（由载体派生），本函数不另判——也不在这里写技能 id 名单。
+    - ``ActivateSkill``（提供者）= 该技能定义声明的
+      :attr:`~sgs.skills.SkillDef.need_card_tier`；没写覆盖位时由载体派生
+      （:attr:`~sgs.skills.SkillDef.priority_class`）：【八卦阵】= **装备档**（1），
+      【护驾】/【激将】= **武将档**（0）。
+    - **转化类提供者落第 2 档**（Q16 / Q17）：【蛊惑】/ 界【渐营】② 的载体是武将牌，产物
+      却是转化牌 ⇒ 它们在各自的声明上写 ``need_card_tier=2``。本函数不写技能名名单，
+      覆盖位是**定义**的属性（账本行由票 06 落）。
 
     档是**定义**的属性、不是局面属性，故判据不读 ``GameState``。提供者候选必然来自一条
     **解析得到的实例**（``CANDIDATES`` 链只遍历 :func:`sgs.skills.resolve_instances` 的
@@ -1367,34 +1527,91 @@ def need_card_tier(action: Action) -> int:
         return int(PriorityClass.CARD_USE)
     from sgs.skills import catalog as catalog_module
 
-    return int(catalog_module.CATALOG[action.skill_id].priority_class)
+    definition = catalog_module.CATALOG[action.skill_id]
+    if definition.need_card_tier is not None:
+        return int(definition.need_card_tier)
+    return int(definition.priority_class)
 
 
-def _above_floor(candidates: Iterable[Action], *, floor: int) -> list[Action]:
-    """过"不升档"闸门：``Pass`` 恒留，其余按 :func:`need_card_tier` 判。
+def _need_card_face(candidates: Iterable[Action], *, floor: int) -> list[Action]:
+    """把全档候选切成**一档一张面**（票 04 §2）：``Pass`` 恒留 + 最小档的那些候选。
 
-    ``floor <= 0``（= 初值 / 最高档）时没有可挡的候选，原样返回：其余询问的 ``payload``
-    没有 ``floor``、四扇窗口的首问也是 0，故这条闸门在常态下零开销、零变化。
+    ``floor`` 是"已经过完的档"：档 < ``floor`` 的候选（A 档已经 Pass / 已经试过，不能
+    往回升）与比最小档更低的档都**不进这一问**——于是"不同档混在一张面里"这件事不再
+    可能发生，玩家也不必靠点选顺序去撞它（票面根因 1）。
+
+    面里**没有非 Pass 候选**时只剩 ``Pass``：引擎在发问之前就用
+    :func:`next_need_card_tier` 判过"还有没有下一档"，故这一支只在窗口自己没料到时出现
+    （既有语义：``Pass`` 恒可选）。
     """
-    if int(floor) <= 0:
-        return list(candidates)
+    pool = [action for action in candidates if not isinstance(action, Pass)]
+    tiers = sorted(need_card_tier(action) for action in pool)
+    visible = [tier for tier in tiers if tier_not_downgraded(tier, floor)]
+    if not visible:
+        return [action for action in candidates if isinstance(action, Pass)]
+    face = visible[0]
     return [
         action
         for action in candidates
-        if isinstance(action, Pass)
-        or tier_not_downgraded(need_card_tier(action), floor)
+        if isinstance(action, Pass) or need_card_tier(action) == face
     ]
 
 
-def need_card_floor(frame: Any, seat: int) -> int:
-    """``seat`` 在这扇需要牌窗口里**已经定下**的优先级档（读 :data:`NEED_CARD_FLOOR_KEY`）。
+def next_need_card_tier(
+    state: GameState,
+    seat: int,
+    kind: QueryKind,
+    *,
+    answers_seq: int,
+    dying: int | None = None,
+    payload: Any = None,
+) -> int | None:
+    """``Pass`` 之后**还有没有下一档**：返回下一档（比本档更低优先的那一档）；``None`` = 没有。
 
-    缺项 = 0 = 最高档（首问一律全档上脸）。
+    判据与 :func:`legal_actions_for` **同源**（同一个 :func:`_actions_for` 生成口）：
+    本函数只回答"这张面之后还有没有更低的档"，不另算一份"哪些候选可用"。
+    本档 = 最小档 ≥ ``payload.floor``（就是玩家刚看到的那一张面）；下一档 = 比它大的最小档。
+
+    消费点只有一处：引擎拿到 ``Pass`` 之后用它决定"换一档再问"还是"这次需要牌不满足"
+    （:meth:`~sgs.engine.Engine.ask_query` / :meth:`~sgs.engine.Engine.ask_respond`）。
+    """
+    actions = _actions_for(
+        state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
+    )
+    floor = _window_floor(kind, payload) or 0
+    tiers = sorted(
+        {
+            need_card_tier(action)
+            for action in actions
+            if not isinstance(action, Pass)
+            and tier_not_downgraded(need_card_tier(action), floor)
+        }
+    )
+    if not tiers:
+        return None
+    face = tiers[0]
+    return next((tier for tier in tiers if tier > face), None)
+
+
+def need_card_floor(frame: Any, seat: int) -> int:
+    """``seat`` 在这扇需要牌窗口里**已经过完**的档（读 :data:`NEED_CARD_FLOOR_KEY`）。
+
+    缺项 = 0 = 最高档（首问一律从最小档起算）。
     """
     floors = frame.data.get(NEED_CARD_FLOOR_KEY)
     if not floors:
         return 0
     return int(floors.get(seat, 0))
+
+
+def record_need_card_floor(frame: Any, seat: int, tier: int) -> None:
+    """把"下一档"写进承载帧（``Pass`` = 本档不发动 ⇒ 进下一档的唯一写入点，票 04 §2）。
+
+    与 :func:`record_need_card_choice` 同一张表（:data:`NEED_CARD_FLOOR_KEY`），区别只在
+    来源：一条是"选中的候选的档"，一条是"引擎现算出来的下一档"。
+    """
+    floors = frame.data.setdefault(NEED_CARD_FLOOR_KEY, {})
+    floors[seat] = int(tier)
 
 
 def record_need_card_choice(frame: Any, seat: int, action: Action) -> None:
@@ -1403,12 +1620,12 @@ def record_need_card_choice(frame: Any, seat: int, action: Action) -> None:
     调用点只在引擎**拿到应答之后**的统一收口处（``Engine.ask_query`` 的【闪】/ 求桃 与
     ``Engine.ask_respond`` 的真牌 / 无懈窗口）：窗口随后按"这一次响应成不成立"决定是否
     :func:`reset_need_card_floor`——提供者没通过时 floor 留着（曹操例），成立时清掉
-    （【无双】的第二张【闪】）。``Pass`` 不记：玩家放弃之后没有"上一档"可谈。
+    （【无双】的第二张【闪】）。``Pass`` 不记：它的下一档由 :func:`record_need_card_floor`
+    写（那是"本档不发动、进下一档"，不是"选了哪一档"）。
     """
     if isinstance(action, Pass):
         return
-    floors = frame.data.setdefault(NEED_CARD_FLOOR_KEY, {})
-    floors[seat] = need_card_tier(action)
+    record_need_card_floor(frame, seat, need_card_tier(action))
 
 
 def reset_need_card_floor(frame: Any, seat: int | None = None) -> None:
@@ -1423,6 +1640,22 @@ def reset_need_card_floor(frame: Any, seat: int | None = None) -> None:
     floors = frame.data.get(NEED_CARD_FLOOR_KEY)
     if floors:
         floors.pop(seat, None)
+
+
+def reset_need_card_event(frame: Any, seat: int | None = None) -> None:
+    """一次需要牌**事件成立**：不升档 floor 与**提供者封禁**在同一个点一起复位（票 04 §5）。
+
+    ``providers_used``（"每提供者只问一次"的黑名单）的粒度与 floor **同构**——都是
+    "一个需要牌事件"，不是"整扇窗口"也不是"整张目标"。改造前它只在帧的**目标推进**时
+    清（:data:`sgs.engine.steps._PER_TARGET_FRAME_KEYS`）⇒【无双】要两张【闪】时，第一张
+    先发动【八卦阵】判定失败、再用真【闪】补上，第二张就已经不能再发动【八卦阵】——
+    语义应当是"一次杀的结算过程内，一旦以任何方式使用 / 打出了【闪】，封禁解除"。
+
+    因此它的复位点**就是** :func:`reset_need_card_floor` 的复位点（各窗口"这一次响应
+    成立"的那一行），本函数把两者收在一处，调用方只调这一条。
+    """
+    reset_need_card_floor(frame, seat)
+    frame.data.pop("providers_used", None)
 
 
 def activation_allowed(

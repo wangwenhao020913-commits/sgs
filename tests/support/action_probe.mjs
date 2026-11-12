@@ -72,7 +72,7 @@ for (const name of [
   "state",
   "enterPreativation",
   "togglePreativationCard",
-  "advancePreativation",
+  "preactivationSubmitAllowed",
   "selectPreativationSeat",
   "toggleSeatMultiPick",
 ]) {
@@ -345,10 +345,19 @@ ui.state.playback = null;
 ui.state.view = { human_seat: 0, pending: lianhuanPending };
 ui.enterPreativation(lianhuanSkill, lianhuanManifest);
 ui.togglePreativationCard(52); // 来源步：那张♣手牌
-ui.advancePreativation();
+/* 票 08（table-ux-overhaul）：清单不再有「下一步」按钮——`min == max` 的单值步填满即
+ * **自动**进下一步（没有预览通道时按清单形状本地判，见 `preactivation.js:preactivationAdvanceNow`），
+ * 最后一步（这里是 1..2 的多选座位步）填满后停在原地，等底部「提交」。
+ * 故这里不再直调 `advancePreativation`：来源步的点牌本身就把它推进了，多选座位步只用
+ * 提交判据验"可以交"。 */
+if (!ui.state.preactivation || ui.state.preactivation.cursor !== 1) {
+  throw new Error("来源步点牌后没有自动进座位步（票 08 的自动推进失效）");
+}
 ui.selectPreativationSeat(3); // 点击顺序：先 3
 ui.selectPreativationSeat(1); // 再 1
-ui.advancePreativation(); // 多选座位步的「下一步」
+if (!ui.preactivationSubmitAllowed(ui.state.preactivation)) {
+  throw new Error("多选座位步填满后「提交」不可用（票 08：最后一步等玩家点提交）");
+}
 const clickOrdered = ui.buildPreativationAction(lianhuanPending, ui.state.preactivation);
 if (!clickOrdered) throw new Error("buildPreativationAction 没拼出有序目标的 ActivateSkill（点击夹具失效）");
 

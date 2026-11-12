@@ -121,13 +121,16 @@ from .heroes import (
     conversion_offers,
     conversion_offers_by_source,
     conversion_preactivations,
+    conversion_product_types,
     conversion_skill_ids,
+    conversion_sources_by_product,
     near_death_conversion_offers,
     is_forced_conversion,
     is_transformed_action,
     owned_conversion_skill_ids,
     resolve_conversion_confirmation,
     transform_candidates,
+    unusable_transform_sources,
 )
 from .arrange import (
     GUANXING,
@@ -174,6 +177,8 @@ from .flow import (
     SEAT_PREFIX,
     card_preactivations,
     manifest,
+    option_seat,
+    seat_choice,
     validate_flow_activation,
 )
 from .preactivation import (
@@ -181,6 +186,7 @@ from .preactivation import (
     preactivation_for,
     preactivated_skill_ids,
     preactivations_for,
+    preview_activation,
     validate_activation,
 )
 from .move_after import (
@@ -571,10 +577,15 @@ __all__ = (
     "timing_hooks_present",
     "transform_candidates",
     "transformed_card",
+    "unusable_transform_sources",
+    "conversion_product_types",
+    "conversion_sources_by_product",
     "transformed_slash",
     "use_after_skill_definitions",
     "virtual_card_id",
     "virtual_dodge",
+    "option_seat",
+    "seat_choice",
 )
 
 

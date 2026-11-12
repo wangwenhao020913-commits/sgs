@@ -14,11 +14,17 @@ r"""技能制作文档 ↔ 代码的**漂移审计**（票 23 的「制作武将
    不许悄悄放宽"什么时候必须停"。
 
 外加两条轻量体检：文档本身有实质内容（≥ 30 行），两份工具能被导入并给出形状（CLI 坏掉时红）。
+
+**第 5 条**是跨仓的那一半：`/hero-skill` 的入口文件住在用户家目录（`~/.dsh/skills/`），不在
+版本库里，它的死法比文档更隐蔽——文档改了指不到、或它自己悄悄复述了一份旧口径。瘦身后的
+入口只留锚点与一行基线，于是能机械核的恰好两件：**引用的 § 真在**、**基线 commit 真在**。
+该文件缺席（别的机器 / CI）⇒ skip，不算红。
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -333,3 +339,69 @@ def test_the_similarity_tool_ranks_candidates_and_skips_itself():
     assert scored, "按【结姻】的形状找不到任何相似技能（反查失效？）"
     assert all(item.shape.skill_id != "hero.jie_sunshangxiang.jieyin" for item in scored)
     assert [item.score for item in scored] == sorted((i.score for i in scored), reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# 7. 入口 skill（`/hero-skill`）的锚点与基线：跨仓文件，存在才核、缺席 skip
+# ---------------------------------------------------------------------------
+
+ENTRY_SKILL = Path.home() / ".dsh" / "skills" / "hero-skill" / "SKILL.md"
+"""`/hero-skill` 触发的入口文件。它不在版本库里，所以本文件对它是**软依赖**。"""
+
+_SECTION_RE = re.compile(r"^#{1,6}\s+(\d+(?:\.\d+)?)\.?\s", re.MULTILINE)
+"""过程文档的节号集合（`## 2.1 规范确认门` / `## 4. 硬停判据` 两种写法都认）。"""
+
+_ANCHOR_RE = re.compile(r"`skill-authoring\.md`\s*§(\d+(?:\.\d+)?)")
+"""入口 skill 里的锚点：`` `skill-authoring.md` §2.1 ``。"""
+
+_BASELINE_RE = re.compile(r"基线：对齐 SGS `([0-9a-f]{7,40})`")
+"""入口 skill 里的基线戳：`基线：对齐 SGS `<hash>`（<日期>）`。"""
+
+
+def _entry_skill_text() -> str:
+    if not ENTRY_SKILL.is_file():
+        pytest.skip(f"没有入口 skill（{ENTRY_SKILL}）——本机没装 `/hero-skill`")
+    return ENTRY_SKILL.read_text(encoding="utf-8")
+
+
+def test_the_entry_skill_points_at_sections_that_exist():
+    """入口 skill 引用的 `` `skill-authoring.md` §N `` 必须真的存在。
+
+    它瘦身后只留锚点，所以"指向一个不存在的节"就是它的全部分量——这条钉住那一半。
+    """
+    text = _entry_skill_text()
+    anchors = _ANCHOR_RE.findall(text)
+    assert anchors, (
+        f"{ENTRY_SKILL} 里没有一处 `skill-authoring.md` §N 锚点：入口不该自包含，"
+        "它只该指路"
+    )
+    sections = set(_SECTION_RE.findall(PROCESS_DOC.read_text(encoding="utf-8")))
+    missing = sorted({anchor for anchor in anchors if anchor not in sections})
+    assert not missing, (
+        f"入口 skill 指向不存在的节：{missing}\n"
+        f"`skill-authoring.md` 现有节号：{sorted(sections)}\n"
+        f"改节号要同时改 {ENTRY_SKILL}"
+    )
+
+
+def test_the_entry_skill_baseline_names_a_known_commit():
+    """入口 skill 的基线戳必须是本仓认得的 commit（它声明"对齐到哪一版"）。"""
+    text = _entry_skill_text()
+    found = _BASELINE_RE.findall(text)
+    assert found, (
+        f"{ENTRY_SKILL} 没有基线戳（写成 `基线：对齐 SGS `<hash>`（<日期>）`）："
+        "没有它就无法判断这份 skill 落在哪一版代码上"
+    )
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("不在 git 工作树里，无法核基线 commit")
+    for rev in found:
+        probe = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{rev}^{{commit}}"],
+            capture_output=True,
+            text=True,
+        )
+        assert probe.returncode == 0, (
+            f"入口 skill 的基线 `{rev}` 不是本仓的 commit（git cat-file 失败："
+            f"{probe.stderr.strip()}）——把 `基线：对齐 SGS` 更新到当前 HEAD"
+        )
+

@@ -133,6 +133,7 @@ from sgs.state import (
     SlotKind,
     UseCard,
     WindowCause,
+    step_option_key,
 )
 
 __all__ = ["SKILL_VALUES", "HeuristicPlayer"]
@@ -267,6 +268,16 @@ _EQUIP_SETUP_MARGIN = 0.1
 _DODGE_VALUE = 5.0
 _DODGE_SKILL_VALUE = 4.5
 _RESPOND_VALUE = 5.0
+"""响应窗口的分值（真牌略高于提供者）。
+
+**同一张面 = 同一档**（table-ux-overhaul 票 04 / Q13 / Q17）：引擎把"需要（使用 / 打出）牌"
+的窗口按档拆成多张面（武将档 → 装备档 → 牌档），一次询问里**只有一档**的候选。这几个常量的
+相对高低因此只在**同档内**比较（真正会撞上的只有牌档那一张面：真牌 vs 转化类提供者，
+例如【蛊惑】）；跨档的"真牌比【八卦阵】高 0.5"不构成决策——档序由引擎给，拒绝低档才会被
+问到下一档，而每一档的 ``Pass`` 都在面上。打分器因此不需要按档重标定：它只在"这一档里选
+最好的 / 都不发动"之间比较，也不会因为分面漏填（每一档都有一张完整的合法面）。
+"""
+
 _ILLEGAL_PENALTY = -100.0
 _UNKNOWN_SKILL_VALUE = -1.0
 """表里没有的技能：**低于 Pass**（0.0）⇒ 缺省保守，拿不准就不发动。"""
@@ -1952,6 +1963,10 @@ def _score_select_cards(query: Query, action: Action) -> float:
 
 _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
     {
+        # SP武将组5 马云騄【凤魄】（票 01）：X 未知时按"伤害一点 ≈ 2.8"估——对单目标【杀】，
+        # +X 伤害通常比摸 X 张更值（摸牌还要再转化），但 X 小时两者接近。
+        "fengpo:draw": 1.0,
+        "fengpo:damage": 1.6,
         # 【雌雄双股剑】目标侧的两种损失：弃一张手牌 vs 令使用者摸一张。
         "discard_one": -1.0,
         "draw_one": -1.5,
@@ -2400,6 +2415,50 @@ def _score_select_options(query: Query, action: Action) -> float:
     return sum(_option_choice_value(query, choice) for choice in action.choices)
 
 
+_DYNAMIC_POOL_SEAT_STEPS: frozenset[str] = frozenset(
+    {
+        # 【除疠】"势力各不相同的其他角色"：池按**已选**收缩（`skills.active._chuli_targets`）。
+        "chuli:seat",
+    }
+)
+"""池**按已选收缩**（除"排除已选"之外还有别的约束）的座位步（键 = ``<短 id>:<步骤键>``，
+由 :func:`~sgs.state.step_option_key` 现拼，与 ``SELECT_OPTION`` 的 ``skill_id`` 同形）。
+
+清单 / 不枚举面给的是**首问快照**：引擎的 ``pool(chosen)`` 在选人过程中会变窄（除疠的
+势力互异），而 AI 手里只有"第一问能选谁"。故这些步骤 AI 必须自己按**公开事实**再收窄
+（势力是公开信息，见 :func:`_distinct_kingdom_options`），否则它会把一条服务端不会铺出来的
+集合交上去——引擎按前缀池复核后整步取消（零副作用），人类看起来就是"发了技能什么都没发生"。
+
+**登记表**（`docs/agents/ai-adaptation.md` §4「维护责任表」的那一行）：列在这里的键必须是
+**真实存在、且池真的随已选收窄**的座位步——由
+``tests/test_ai_adaptation.py::test_every_dynamic_pool_seat_step_is_a_real_contracting_step``
+机械核（新技能出现这种池而不登记 ⇒ 上面那句"发了技能什么都没发生"会静默回来）。
+
+与 :data:`_HAND_REQUIRED_SEAT_STEPS` 同一姿态：判据只读公开的 ``PlayerView``，不读暗牌、
+不查状态。
+"""
+
+
+def _distinct_kingdom_options(
+    view: PlayerView, options: tuple[str, ...]
+) -> tuple[str, ...]:
+    """**每个势力只留第一个**座位（按选项原序）：动态池座位步的公开事实收窄。
+
+    名单按座位序保留 ⇒ 这份名单的**任意子集**都还能按原序从真池里一步步拼出来（与引擎
+    执行器的前缀复核同一条判据）；势力未知（``None``）的座位自成一组，不猜。
+    """
+    seen: set[object] = set()
+    kept: list[str] = []
+    for option in options:
+        seat = int(str(option).removeprefix(_SEAT_PREFIX))
+        kingdom = view.players[seat].kingdom if 0 <= seat < len(view.players) else None
+        if kingdom in seen:
+            continue
+        seen.add(kingdom)
+        kept.append(option)
+    return tuple(kept)
+
+
 def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     """**不枚举档**多选面：AI 自己拼一个合法集合（yijiang-2014-round2 票 21）。
 
@@ -2413,14 +2472,22 @@ def _assembled_option_set(query: SelectOptionsQuery) -> SelectOptions:
     - **下限**：不足 ``min_selected`` 时按同一排名补（副作用最小的）项，绝不交一条越界集合；
     - **次序** = 询问 ``options`` 的**原序**（常规结算顺序；用户 2026-11-09 的裁定：默认按
       常规结算顺序，"依次"要有技能明说才另开一档）——打分排名只决定**选谁**，不决定次序。
+    - **池按已选收缩的步骤**（票 13 的【除疠】）先按 :func:`_distinct_kingdom_options` 收窄：
+      询问只带**首问**那一份池，真正的约束（势力互异）不在 ``options`` 里。
 
     池与上限读引擎的**同一份派生**（``sgs.effects.usable_options`` / ``cap_of``，谓词的另一
     半）：构造器的 ``cap`` / ``floor`` 因此天然落在 ``is_legal_option_set`` 的区间内——构造器
     不该产出非法集合，越界即打分 / 构造的编程错误（这里**不**再拿 assert 兜一遍：``-O`` 下
-    断言会被剥掉，兜不住任何东西）。
+    断言会被剥掉，兜不住任何东西）。上限的第二次夹取**只**发生在收窄过的那一档（见下）。
     """
     options = usable_options(query)
     cap = cap_of(query)
+    if str(query.skill_id) in _DYNAMIC_POOL_SEAT_STEPS:
+        options = _distinct_kingdom_options(query.view, options)
+        # 上限跟着**收窄后**的池：``cap_of`` 已按"可选项数"封顶，但那一份是收窄**前**的
+        # 池 ⇒ 这里再按实际构造的池夹一次（只有这一档会真的变窄；别的询问上它是恒等，
+        # 故不把全局口径改掉——票 13 的裁定只覆盖"池按已选收缩"的步骤）。
+        cap = min(cap, len(options))
     ranked = sorted(
         (-_option_choice_value(query, option), index, option)
         for index, option in enumerate(options)
@@ -2828,6 +2895,12 @@ def _fill_activation(
                     for text in options
                     if query.view.players[int(text.removeprefix(_SEAT_PREFIX))].hand_count > 0
                 )
+                if not options:
+                    return None
+            if step_option_key(skill_id, step.name) in _DYNAMIC_POOL_SEAT_STEPS:
+                # 清单只下发**首问**快照（除疠的势力互异在 `pool(chosen)` 里）⇒ 按公开的
+                # 势力收窄，否则复合动作会被引擎的前缀复核拒成非法应答。
+                options = _distinct_kingdom_options(query.view, options)
                 if not options:
                     return None
             chosen = _pick_options(
@@ -3952,6 +4025,25 @@ def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
 
 
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
+    # SP武将组5（sp5-mayunlu-panjun 票 01 / 02）：马术 / 公清是锁定技（没有「是否发动」，
+    # 按纪律写 0.0 + 说明）；凤魄 / 观微按收益给正分。
+    "hero.mayunlu.mashu": (
+        _constant(0.0),
+        "锁定技：距离 -1，恒生效、没有询问（不入表就是漏登记）",
+    ),
+    "hero.panjun.gongqing": (
+        _constant(0.0),
+        "锁定技：按伤害来源的攻击范围封顶 / 加一，恒生效、没有询问",
+    ),
+    "hero.mayunlu.fengpo": (
+        _constant(2.4),
+        "单目标【杀】/【决斗】后二选一：摸 X 张或 +X 伤害，X = 双方手牌 + 装备区的 ♦ 数；"
+        "通常净赚 1~2 张 / 1~2 点伤害，恒高于放弃（两个选项的分差由 _OPTION_VALUES 定）",
+    ),
+    "hero.panjun.guanwei": (
+        _constant(2.0),
+        "弃一张换其摸两张 + 一个额外出牌阶段：多一段用牌窗口，通常净正（代价是自己的一张牌）",
+    ),
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
     # 神周瑜移动版（huo-shenzhouyu-mobile 票 01）：【琴音】是"全体 1 点"的收益（净收益按

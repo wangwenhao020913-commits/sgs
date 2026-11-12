@@ -26,11 +26,20 @@ from typing import Any
 from sgs.agents import TapePlayer, tape_from_journal
 from sgs.data import load_content_pack, validate_rule_config
 from sgs.engine import Engine, dump_journal, read_journal
+from sgs.state import AskPolicy
 
 from .narrative import NO_VIEWER, build_narrative
-from .session import Session
+from .session import Session, parse_ask_policy
 
-__all__ = ["META_VERSION", "list_runs", "load_run", "read_run_meta", "save_run", "replay_journal"]
+__all__ = [
+    "META_VERSION",
+    "engine_from_meta",
+    "list_runs",
+    "load_run",
+    "read_run_meta",
+    "save_run",
+    "replay_journal",
+]
 
 META_VERSION = 1
 """侧车元数据的结构版本；与记录流的 ``event_schema_version`` 各自升版。"""
@@ -69,7 +78,12 @@ def _human_seat_won_from_records(records: tuple[Any, ...], human_seat: int | Non
 
 
 def build_meta(session: Session, when: datetime) -> dict[str, Any]:
-    """侧车元数据的内容：重放所需的前置事实 + 接入层事实。"""
+    """侧车元数据的内容：重放所需的前置事实 + 接入层事实。
+
+    ``ask_policy``（table-ux-overhaul 票 02）是**会话配置**，与种子 / 武将 / 点将同姿态：
+    不进 journal header（那会打翻全部基准字节），只冻结在这里、由 :func:`engine_from_meta`
+    还原。旧录像没有该字段 ⇒ :func:`replay_journal` 回落引擎缺省 OFF（旧口径）。
+    """
     seed, tape = tape_from_journal(session.records())
     return {
         "version": META_VERSION,
@@ -88,6 +102,8 @@ def build_meta(session: Session, when: datetime) -> dict[str, Any]:
         "ai": session.ai,
         "timeout_seconds": session.timeout_seconds,
         "timeouts": session.timeouts,
+        # table-ux-overhaul 票 02：询问策略是会话事实（引擎缺省 OFF / 网页缺省 ON）。
+        "ask_policy": {"auto_skip": session.ask_policy.auto_skip},
         "finished_at": when.isoformat(),
         "session_log": [entry.as_dict() for entry in session.session_log],
         "tape": [action.model_dump(mode="json") for action in tape],
@@ -221,21 +237,34 @@ def load_run(runs_dir: Path, name: str) -> dict[str, Any]:
     }
 
 
-def replay_journal(meta: dict[str, Any]) -> tuple[Any, ...]:
-    """用侧车元数据重开一局并把磁带跑完，返回**这次重放**的记录。
+def engine_from_meta(meta: dict[str, Any]) -> Engine:
+    """用侧车元数据**重建一局**（尚未跑磁带）；回放与"读方断言"共用的唯一重建入口。
 
-    这是"回放闭环"判据的落点：调用方拿它与录像里的记录流逐行比对。
-    武将走 meta 的 ``heroes`` / ``hero_pool``（与基准测试同一姿态，
-    因为**武将不是 header 的一部分**）。
+    武将走 meta 的 ``heroes`` / ``hero_pool``（与基准测试同一姿态，因为**武将不是 header
+    的一部分**）；``ask_policy`` 是会话事实（table-ux-overhaul 票 02）——**旧录像没有该字段**
+    ⇒ 回落引擎缺省 OFF，按它当年拍下来的旧口径重放。
+
+    拆出来是刻意的：``replay_journal`` 只负责"跑磁带 + 读记录流"，而"一局是怎么配置起来的"
+    必须有**一个**可被读取方（票面验收 / 后续票）直接观测的入口——否则"回放还原了策略"只能
+    靠跑出来的记录流反推，而策略本身恰恰不进记录流。
     """
     pack = load_content_pack(meta["pack_id"], deck_profile=meta["deck_profile"])
-    engine = Engine.new_game(
+    return Engine.new_game(
         seed=meta["seed"],
         rule_config=validate_rule_config(meta["rule_config"]),
         pack=pack,
         heroes=tuple(meta.get("heroes") or ()),
         hero_pool=None if meta.get("hero_pool") is None else tuple(meta["hero_pool"]),
+        ask_policy=parse_ask_policy(meta.get("ask_policy"), default=AskPolicy()),
     )
+
+
+def replay_journal(meta: dict[str, Any]) -> tuple[Any, ...]:
+    """用侧车元数据重开一局并把磁带跑完，返回**这次重放**的记录。
+
+    这是"回放闭环"判据的落点：调用方拿它与录像里的记录流逐行比对。
+    """
+    engine = engine_from_meta(meta)
     from sgs.state import parse_action
 
     tape = tuple(parse_action(raw) for raw in meta["tape"])

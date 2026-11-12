@@ -479,11 +479,15 @@ def test_an_illegal_bn_leaves_no_halberd_candidate_and_the_preview_agrees():
     engine = Engine.from_state(state, seed=1)
     preview = engine.respond_candidates(
         1,
-        cause=WindowCause.BORROWED_SWORD,
-        required="slash",
-        target=1,
-        mode=RespondMode.USE,
-        use_targets=(2,),
+        engine.respond_context(
+            None,
+            1,
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            target=1,
+            mode=RespondMode.USE,
+            use_targets=(2,),
+        ),
     )
     assert not [
         action for action in preview if isinstance(action, UseCard)

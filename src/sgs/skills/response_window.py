@@ -508,10 +508,11 @@ LIEGONG_FLOW = SkillFlow(name="liegong", steps=(), effect=zero_step_effect(LIEGO
 #
 # 与标版【烈弓】的三处不同（标版是「出牌阶段内 + 手牌数/攻击范围 ⇒ 不能闪」）：
 # - **不限阶段**：牌面没有「出牌阶段内」⇒ 借刀杀人逼出的【杀】也触发（标版不触发）；
-# - **①距离豁免**：距 ≤ 点数 ⇒ 目标进池（`TARGET_POOL` 并集，界武圣② 同姿态）；
+# - **①距离豁免**：距 ≤ 点数 ⇒ 逐座位豁免距离（`TARGET_RANGE_EXEMPT`，界武圣② 同姿态）；
 # - **②两分支各自生效**：条件 1 打 `UNRESPONSIVE`、条件 2 记「本次使用 + 该目标 +1」。
 #
-# 用户 2026-11-06 签字轮：①=并集；无点数【杀】⇒ ① 不生效（`01a` 裁定 A）；②的「基础伤害
+# 用户 2026-11-06 签字轮：①=**并集语义**（把够得着的座位加进豁免集，不是把距离改 0）——
+# 票 03 起落点迁到 `TARGET_RANGE_EXEMPT`；无点数【杀】⇒ ① 不生效（`01a` 裁定 A）；②的「基础伤害
 # +1」与 OL「伤害值 +1」同落 `DAMAGE_DEAL_AMOUNT`（账本 L788）。口径 = **移动版**，故武将
 # 显示名带「移动版」后缀、技能 id 走 `jie_huangzhong_mobile`（与 `jie_caoren_mobile` 同形）。
 # ---------------------------------------------------------------------------
@@ -580,13 +581,13 @@ JIE_LIEGONG_MOBILE_FLOW = SkillFlow(
 def _jie_liegong_mobile_no_distance(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
-    """``TARGET_POOL``：距 ≤ 本次【杀】点数的其他角色不受距离限制（**并集**写法）。
+    """``TARGET_RANGE_EXEMPT``：距 ≤ 本次【杀】点数的其他角色不受距离限制（**逐座位**豁免）。
 
-    与界关羽【武圣】② / 界黄盖【诈降】同一姿态：只**补**被攻击范围挡掉的座位，链上其它
-    剔除类修饰器（【空城】/界【谦逊】）仍能删目标——本技能的 skill_id（`hero.jie_huangzhong_mobile.liegong`）
-    排在 `hero.jie_zhugeliang.kongcheng` / `hero.zhugeliang.kongcheng` **之前**，故并集先跑、
-    剔除后跑（账本 L828 的【神速】顺序坑在这里是有利方向）。
-    **无点数 ⇒ 不补**（`01a` 裁定 A：无点数时这个比较不成立）。
+    与界关羽【武圣】② / 界黄盖【诈降】同一个挂点（票 03）：距离豁免在 ② 求值、**在 ③④⑤
+    之前**，故链上其它剔除类修饰器（【空城】/界【谦逊】）仍能删目标，**不再**依赖"本技能的
+    skill_id 恰好排在剔除回调之前"这种链序巧合（旧写法是 `TARGET_POOL` 并集 + 账本 L828 的
+    顺序坑）。
+    **无点数 ⇒ 不豁免**（`01a` 裁定 A：无点数时这个比较不成立）。
     """
     if ctx.owner != ctx.subject or ctx.card is None:
         return current
@@ -750,8 +751,8 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=_REQUIREMENTS["liegong"],
         ),
         # 界黄忠移动版【烈弓】（jie-feng-batch 票 01；用户 2026-11-06 签）：
-        # ① TARGET_POOL 并集（距 ≤ 点数；无点数不生效）+ ② 零步钩子（逐目标封闪 / 记 +1）
-        # + RESOLVE_AFTER_END 清扫钩子（本次使用结束清掉 +1 记账）。
+        # ① TARGET_RANGE_EXEMPT 逐座位豁免（距 ≤ 点数；无点数不生效）+ ② 零步钩子
+        # （逐目标封闪 / 记 +1）+ RESOLVE_AFTER_END 清扫钩子（本次使用结束清掉 +1 记账）。
         SkillDef(
             skill_id=JIE_LIEGONG_MOBILE,
             locked=False,
@@ -772,7 +773,7 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             ),
             modifiers=(
                 Modifier(
-                    ModifierPoint.TARGET_POOL, _jie_liegong_mobile_no_distance
+                    ModifierPoint.TARGET_RANGE_EXEMPT, _jie_liegong_mobile_no_distance
                 ),
                 Modifier(
                     ModifierPoint.DAMAGE_DEAL_AMOUNT,

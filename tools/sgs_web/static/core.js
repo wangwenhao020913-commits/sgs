@@ -306,6 +306,16 @@ const state = {
   // 文案快照（失败时原样恢复）；`submitBusy` = 有 POST 在飞（挡住重复提交与轮询重绘）。
   submitBusy: false,
   actionFreeze: null,
+  // table-ux-overhaul 票 15：自家手牌选牌面的**合法性预览**本地态（`candidates.js` 的
+  // `ownPickPreview*` 是唯一读写方）。`seq` = 这份态属于哪一问；`asked` = 回包是按哪一组
+  // picks 问的（升序逗号分隔，`null` = 还没有回包）；`disabled` = 服务端回的 `slot:N`
+  // 禁用集；`key` / `version` / `timer` 是"同一状态只问一次 + 丢弃过期回包"的那套账；
+  // `error` / `retryAt` 是 fail-closed 态与重问间隔。**不进任何载荷**。
+  ownPickPreview: {
+    seq: null, asked: null, key: null, disabled: null,
+    canSubmit: false, canAdvance: false, error: false,
+    version: 0, timer: null, retryAt: 0,
+  },
 };
 
 /* ------------------------------------------------------------------ 网络 */
@@ -365,7 +375,14 @@ function showPageNotice(text) {
   const target = $("view-replay").hidden === false ? $("r-empty-guide")
     : $("view-table").hidden === false ? $("t-choice")
       : $("lobby-hint");
-  if (target) target.textContent = text;
+  if (!target) return;
+  // 票 07：牌桌那一格是**有寿命**的页脚（唯一写入口在 `pending.js:setAskChoice`），
+  // 逾期自己消失——否则一次跨页错误会一直挂在询问条右端，直到下一次重绘。
+  if (target === $("t-choice")) {
+    setAskChoice(text, ASK_CHOICE_VERDICT_TTL_MS);
+    return;
+  }
+  target.textContent = text;
 }
 
 function show(view) {

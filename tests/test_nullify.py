@@ -32,11 +32,13 @@ from sgs.engine.steps import _collected_response_window, _dodge_window
 from sgs.resolution import Frame
 from sgs.state import (
     ActivateSkill,
+    AskPolicy,
     DodgeContext,
     EndPhase,
     FrameKind,
     MoveReason,
     Pass,
+    PeachContext,
     Phase,
     PlayCard,
     QueryKind,
@@ -167,6 +169,7 @@ def _engine(
     nullify: dict[int, int] | None = None,
     respond: str = "pass",
     phase=None,
+    ask_policy: AskPolicy | None = None,
 ):
     plan = _Plan(play=play, nullify=dict(nullify or {}), respond=respond)
     used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
@@ -178,7 +181,11 @@ def _engine(
         phase=phase,
         rule_config=RuleConfig(first_seat=turn_seat),
     )
-    engine = Engine.from_state(state, seed=seed)
+    # ``ask_policy=None`` = 引擎缺省（OFF）：本文件绝大多数用例断的是**旧口径**。
+    # 票 05 的用例显式传 ``AskPolicy(auto_skip=True)`` 构造网页会话的口径。
+    engine = Engine.from_state(
+        state, seed=seed, ask_policy=ask_policy if ask_policy is not None else AskPolicy()
+    )
     players = [_Planned(plan) for _ in seats]
     return engine, plan, players
 
@@ -747,6 +754,10 @@ class _DodgeWindowHost:
     def advance_provider(self, frame, timing):
         return None, None, None
 
+    def should_ask_query(self, kind, actor, **kwargs):
+        # 票 05 的预筛口：本宿主只钉"非【闪】不许当成响应"，一律照问（引擎缺省 OFF）。
+        return True
+
     def ask_query(self, kind, actor, timing, *, frame=None, payload=None):
         return self.answer
 
@@ -806,7 +817,16 @@ class _NullifyWindowHost:
     def advance_provider(self, frame, timing):
         return None, None, None
 
-    def ask_respond(self, frame, actor, timing, **kwargs):
+    def respond_context(self, frame, actor, **kwargs):
+        # 真窗口用 `Engine.respond_context` 建载荷；本宿主只钉"未登记提供者 fail-closed"，
+        # 故把窗口给的字段原样装回一个真的 `RespondContext`（预筛 / 发问收的是同一个对象）。
+        return RespondContext(**kwargs)
+
+    def should_ask_respond(self, actor, ctx):
+        # 票 05 的预筛口：一律照问（与引擎缺省 OFF 同一口径；预筛选人与否由真引擎覆盖）。
+        return True
+
+    def ask_respond(self, frame, actor, timing, ctx):
         return self.answer
 
     def suspended(self, action):
@@ -839,3 +859,161 @@ def test_a_nullify_window_still_rejects_an_activation_without_a_provider(pack):
         _collected_response_window(host, frame, 1)
 
     assert frame.data.get("response_declared") == [], "被拒绝的声明不许进声明表"
+
+
+# ---------------------------------------------------------------------------
+# 询问策略位（table-ux-overhaul 票 05 / spec §2 Q3）：无懈窗口只问合格者
+#
+# 五处 A 类窗口在发问**之前**先过票 02 的统一预筛口（``should_ask_respond`` /
+# ``should_ask_query``），窗口类别位由窗口自己声明。**引擎缺省 OFF** ⇒ 旧口径逐字节不变
+# （本文件上面那条 ``test_every_alive_seat_is_asked_once_per_layer_even_without_nullify``
+# 就是 OFF 的判据，一条不改）；下面几条全部在**策略 ON** 的引擎上构造。
+#
+# 「合格」= **同一个候选生成器**能给出的非 ``Pass`` 候选（真牌 ∪ 转化 / 提供者），不是
+# 另写一份"有没有真无懈"的判据——票 02 的 ``respond_candidates`` 就是窗口真发问时的那份。
+# ---------------------------------------------------------------------------
+
+
+def _nullify_layer(engine: Engine, target: int = 0) -> list:
+    """某一层无懈窗口的询问（``target`` = 这一次结算针对的座位）。"""
+    return [
+        query
+        for query in _queries(engine, QueryKind.RESPOND)
+        if query.cause is WindowCause.NULLIFY and query.target == target
+    ]
+
+
+def _black_card(pack, *exclude: int) -> int:
+    """一张**黑色**牌（【看破】的源牌谓词是"黑色手牌"）。"""
+    from sgs.data import Color, color_of_suit
+
+    for card_id, card in enumerate(pack.deck.cards):
+        if card_id in exclude:
+            continue
+        if color_of_suit(card.suit) is Color.BLACK:
+            return card_id
+    raise AssertionError("标准 108 档里没有黑色牌？")
+
+
+def test_a_seat_without_a_nullify_or_any_conversion_is_not_asked(pack):
+    """ON：真【无懈可击】0、任何转化 / 提供者 0 的座位**连询问都不发**（不再只有 Pass）。"""
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[SeatSpec(hand=(ex_nihilo,)), SeatSpec(hand=(nullify,)), SeatSpec()],
+        nullify={1: 1},
+        ask_policy=AskPolicy(auto_skip=True),
+    )
+
+    assert [query.actor for query in _nullify_layer(engine)] == [1], (
+        "只有持真【无懈可击】的座位 1 被问；座位 0（使用者）与座位 2（空手）不该收到"
+        "只有 Pass 的询问"
+    )
+    assert _stages(engine, _resolve_frame_id(engine)) == list(RESOLVE_STAGES_CANCELED), (
+        "跳过空座位不改变声明语义：座位 1 的声明照样抵消这张锦囊"
+    )
+
+
+def test_a_seat_with_kanpo_black_card_is_still_asked(pack):
+    """卧龙诸葛【看破】：真【无懈可击】0、黑牌 1 ⇒ ON 也必须被问（转化能力算合格）。"""
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    black = _black_card(pack, ex_nihilo)
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[
+            SeatSpec(hand=(ex_nihilo,)),
+            SeatSpec(hero="wolong_zhugeliang", hand=(black,)),
+            SeatSpec(),
+        ],
+        nullify={},
+        ask_policy=AskPolicy(auto_skip=True),
+    )
+
+    layer = _nullify_layer(engine)
+    assert [query.actor for query in layer] == [1], (
+        "手里没有真【无懈可击】但有【看破】的座位仍必须被问"
+    )
+    # 【看破】是**单源转化**：候选是一张虚拟【无懈可击】的 `UseCard`（不是 `ActivateSkill`），
+    # 住在询问的**转化清单**里（`transform_actions`——W4-fix-2 把它从 `legal_actions` 收回），
+    # 源牌就是那张黑牌。它在这张面上 ⇒ 预筛读的是与真询问**同一份**生成器。
+    virtuals = [action.card for action in layer[0].transform_actions]
+    assert [(card.type, tuple(card.virtual_sources)) for card in virtuals] == [
+        ("nullify", (black,))
+    ], f"【看破】的虚拟无懈就在这张面里。实得 {virtuals}"
+
+
+def test_a_seat_with_jianying_conversion_is_still_asked(pack):
+    """界【渐营】②（求桃窗口的提供者）：真【桃】0、转化能力 1 ⇒ ON 也必须被问。
+
+    这一扇走 ``ask_query``（``QueryKind.PEACH``），预筛口是它的姊妹
+    ``should_ask_query``：预览与真询问读**同一份** ``PeachContext``（``floor`` 同源）。
+    """
+    slash = cards_of_type(pack, "slash")[0]
+    source = _black_card(pack, slash)
+    engine, plan, players = _engine(
+        pack,
+        play="slash",
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=3, hp_max=3, hand=(slash, source)),
+            SeatSpec(hp=1),
+        ],
+        turn_seat=0,
+        phase=Phase.PLAY,
+        ask_policy=AskPolicy(auto_skip=True),
+    )
+    assert plan.play == "slash"
+    run_until(engine, players, lambda e: bool(_queries(e, QueryKind.PEACH)))
+
+    peaches = _queries(engine, QueryKind.PEACH)
+    assert peaches, "座位 1 被打到 0 体力，求桃窗口应当打开"
+    assert peaches[0].actor == 0, "回合角色先被问"
+    assert peaches[0].dying == 1
+    offers = [
+        action.skill_id
+        for action in peaches[0].legal_actions
+        if isinstance(action, ActivateSkill)
+    ]
+    assert [skill_id for skill_id in offers if skill_id.endswith(".jianying")], (
+        f"没有真【桃】但有界【渐营】② 的座位仍必须被问。实得 {offers}"
+    )
+
+
+def test_two_declarations_keep_the_higher_priority_one_and_the_loser_keeps_the_card(pack):
+    """ON：两条声明 ⇒ 首个声明者（应答者区间序）生效，输家的牌不消耗、不压帧。
+
+    策略只改"问不问"，**不改**收集式窗口的赢家 / 输家语义（spec 票 05 §要做什么 3）。
+    """
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    winner = cards_of_type(pack, "nullify")[0]
+    loser = cards_of_type(pack, "nullify")[1]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[
+            SeatSpec(hand=(ex_nihilo,)),
+            SeatSpec(hand=(winner,)),
+            SeatSpec(hand=(loser,)),
+            SeatSpec(),
+        ],
+        nullify={1: 1, 2: 1},
+        ask_policy=AskPolicy(auto_skip=True),
+    )
+
+    assert [query.actor for query in _nullify_layer(engine)] == [1, 2], (
+        "两个持牌的座位都被问；空手座位不在这条链里"
+    )
+    frame_id = _resolve_frame_id(engine)
+    assert _stages(engine, frame_id) == list(RESOLVE_STAGES_CANCELED), "赢家的声明生效"
+    assert winner in engine.state.discard, "赢家那张真的用掉了"
+    assert loser in engine.state.player(2).hand, "输家手牌张数不变（声明不耗牌）"
+    assert loser not in engine.state.discard
+    assert not [
+        delta
+        for delta in _deltas(engine, "card_move")
+        if any(card.card_id == loser for card in delta.cards)
+    ], "输家的牌没有任何移动（不耗牌、不进处理区）"
+    assert len(_use_frames(engine)) == 2, "只有原锦囊 + 赢家两条使用事件"
+    assert len(_declared(engine, loser)) == 1, "输家的声明被接受，但没有产生使用"

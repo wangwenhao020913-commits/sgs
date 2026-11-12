@@ -103,7 +103,9 @@ def test_a_real_session_payload_carries_the_card_fact_with_all_six_fields():
     assert event["card_type"] == engine_event.card_type == "slash"
     assert event["card_name"] == engine_event.card_name == "杀"
     assert event["virtual"] is False, "实体牌 ⇒ false（布尔原样下发，不是 'false' 字符串）"
-    assert event["gender"] == Gender.MALE.value, "男声 / 女声由这一格决定"
+    assert event["gender"] == session.engine.state.player(event["seat"]).gender.value, (
+        "男声 / 女声由这一格决定（取座位的性别事实，不写死——池每加一名武将都会重排 RNG）"
+    )
     assert 0 <= event["seat"] < 2, "座位是本局真实座位"
 
 

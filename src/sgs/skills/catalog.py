@@ -264,9 +264,34 @@ class Hook:
     缺省 ``False`` ⇒ 既有 145 条技能逐字节不变。
     """
 
+    bookkeeping: bool = False
+    """这一条强制钩子是**簿记段**（table-ux-overhaul 票 17，缺省 ``False``）：
+    按链序**静默**跑，**绝不进玩家可见的面**（既不撑起"先结哪一条"，也不跟可选项拼面）。
+
+    判据为什么不能只看形状：票 17 的根因是「全是 ``forced`` 纯 handler（``flow is None``）」
+    这条**形状**判据把**簿记段**与**真效果**混成了一类。后者确实存在——【劫营】③ 与【镇骨】
+    在 ``TURN_END`` 上都是 ``forced=True`` 的纯回调，而它们**必须**合成"两条都得跑、先跑哪个
+    由你定"的面（用户 2026-11-07 口径，`tests/test_hero_lei.py` 钉住）。纯被动钩子的
+    "顺序面"是**真效果**的排序，不是簿记冲突；故"是不是簿记"只能是**声明**（这一位），
+    不能由形状推。
+
+    ``True`` 的语义 = "这条钩子只是技能自己的**记账**（标记到期清扫一类），规则上没有可选的
+    发动形态，先后也无意义"：候选的**全部**匹配项都是簿记段时，派发环（:func:`_dispatch`）
+    把它们按链序跑完（与既有强制段同一条路：不问、``announce=True``），再摆可选面。
+    :attr:`ActivationCandidate.bookkeeping` 是这条判据的**唯一读取方**。
+
+    形状由本类自己把关：簿记段必须是 ``forced`` 的 **handler**（``flow is None``）——
+    有流水线的段有"发动形态"，不该被声明成簿记；非强制的段本来就会被问。
+    """
+
     def __post_init__(self) -> None:
         if (self.handler is None) == (self.flow is None):
             raise ValueError(f"{self.timing.value} 上的钩子必须恰有 handler / flow 之一")
+        if self.bookkeeping and not (self.forced and self.flow is None):
+            raise ValueError(
+                f"{self.timing.value} 上的簿记段必须是 forced 的 handler"
+                "（有流水线 / 会被问的段不是簿记）"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +478,20 @@ class SkillDef:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
         return priority_class_of(self.carrier)
 
+    need_card_tier: int | None = None
+    """这条技能作为**"需要（使用 / 打出）牌"窗口的提供者**时的优先级档覆盖位（票 04 §3）。
+
+    缺省 ``None`` = 由载体派生（:attr:`priority_class`：武将档 0 / 装备档 1）。只有在
+    "载体与产物不同档"时才写它：**转化类提供者**的载体是武将牌、产物却是转化牌，而 Q16 /
+    Q17 裁定"转化牌与真牌同为第 2 档" ⇒ 【蛊惑】（移动版于吉）与界【渐营】② 在这里写
+    ``2``。判据只有这一处声明（:func:`~sgs.effects.need_card_tier` 读它），派发逻辑里
+    **没有技能 id 名单**。
+
+    它**只**作用于四扇需要牌窗口的候选面；同一时机的激活结算（SKILL_ACTIVATION 的
+    ``ActivationCandidate.tier``）仍读 :attr:`priority_class`——那里问的是"谁先发动"
+    （武将技 > 装备技），与"这一步要的是哪一档的牌"是两个问题。
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class HeroSkillDecl:
@@ -518,11 +557,21 @@ class ActivationPlan:
     摸一张牌"——决定者是事件的当事角色，受益者（``skill_owner``）仍是技能持有者。它是
     座位号而不是布尔：同一个技能在不同帧上可以由不同的人决定，故取值由计划的构造方
     按帧算（:func:`~sgs.skills.lord_request.jie_hujia_activation_plan`）。
+
+    ``mandatory_targets``（table-ux-overhaul 票 02 的加法，缺省 ``None`` = 无目标维度）：
+    **B 类**（强制生效非牌类）技能的"必选目标"档——声明这条技能此刻**必须**指定的目标
+    候选。``None`` = 这条技能没有目标维度（既有技能全部走这一档，行为一字不变）；
+    **空元组** = 必选而**没有合法目标** ⇒ :func:`activation_plan` 把 ``available`` 压成
+    ``False``，候选收集口因此一个候选都不造（不问、不跑、不记）。
+    这与今天"flow 的必选目标步返回 ``"cancel"`` 静默跳过"**行为等价**：记录流逐字节不变，
+    差别只在不再产出一条"I 跑过了"的发动事实（``Engine.skill_activations`` 是表现层缓冲，
+    不进记录流）。非空元组 = 有目标可指，``available`` 仍由既有判据决定。
     """
 
     optional: bool = True
     available: bool = True
     actor: int | None = None
+    mandatory_targets: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +585,8 @@ class ActivationCandidate:
     ``forced=True`` = **强制段**（锁定技 / 觉醒技 / 逐条 ``Hook.forced``）：不问、不上脸，
     本档轮到它时直接跑；``False`` = 进"是否发动"的面。``False`` 但含 ``Hook.forced`` 项的
     **混合实例**仍上一次脸；那些强制项在 ``Pass`` 之后照跑（见 :func:`_mandatory_entries`）。
+    ``bookkeeping=True``（票 17）= 全部匹配项都是**簿记段**：这类候选只按链序静默跑，
+    **绝不拼进任何面**（见 :attr:`bookkeeping` / :attr:`Hook.bookkeeping`）。
     """
 
     instance: SkillInstance
@@ -556,6 +607,23 @@ class ActivationCandidate:
     def actor(self) -> int:
         """这一项**由谁应答**：计划指定者优先，否则是技能持有者（缺省口径）。"""
         return self.instance.owner if self.plan.actor is None else int(self.plan.actor)
+
+    @property
+    def bookkeeping(self) -> bool:
+        """这一批匹配项是否**全是簿记段**（table-ux-overhaul 票 17）——是则只静默跑。
+
+        判据只有一条：**全部**匹配项都在声明上写了 :attr:`Hook.bookkeeping`。形状（``forced``
+        的纯 handler）由 :class:`Hook` 自己把关，故这里不重复看 ``flow`` / ``forced``——一份
+        判据一处维护。
+
+        它**不是**"强制段"的同义词：``forced`` 的**真效果**（【劫营】③ /【镇骨】在
+        ``TURN_END`` 上的结算）仍然可以进"先结哪一条"的顺序面；只有声明为簿记的段
+        （标记到期清扫一类）永不上脸（见 :attr:`Hook.bookkeeping`）。
+        帧内接缝（:class:`Seam`）没有这一位 ⇒ ``getattr`` 缺省 ``False``。
+        """
+        return bool(self.items) and all(
+            bool(getattr(item, "bookkeeping", False)) for item in self.items
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1597,7 +1665,8 @@ PASS_STATE_KEY = "skill_pass"
 （本轮强制段）、``pass_forced_at``（跑到第几条）、``pass_optional``（本轮可选项；``None`` =
 问之前要按活状态重估）、``pass_chosen``（本轮选中的那一条）、``pass_terminated``（R5 收口）
 与 ``pass_mandatory``（``Pass`` 之后还要跑的强制段，每项 = ``(候选, 只跑强制项)``）/
-``pass_mandatory_at``（跑到第几条）。
+``pass_mandatory_at``（跑到第几条）/ ``pass_mandatory_next``（跑完之后回哪一相：``"start"``
+= 还有更低优先的档、继续问下一张面；``"seat"`` = 这个座位的时机结束）。
 
 **为什么必须住帧私有**：挂起重入时派发环从头再跑，进度只能由帧里的**显式**游标表达；
 靠"重新算候选集合"隐式表达会在效果结算后答错轮（票 01 §6）。帧私有 ⇒ 不进记录流，
@@ -1679,6 +1748,7 @@ def _new_pass_state() -> dict[str, Any]:
         "pass_terminated": False,
         "pass_mandatory": (),
         "pass_mandatory_at": 0,
+        "pass_mandatory_next": "seat",
     }
 
 
@@ -1716,6 +1786,7 @@ def _pass_next_seat(state: dict[str, Any]) -> None:
     state["pass_chosen"] = None
     state["pass_mandatory"] = ()
     state["pass_mandatory_at"] = 0
+    state["pass_mandatory_next"] = "seat"
 
 
 def terminate_activation_pass(frame: Frame, *, timing: Timing, key: str) -> None:
@@ -1991,8 +2062,8 @@ def _dispatch(
 
     规则出处：仓内 §4.16 L443–L466（逐角色 / 同档内次序归玩家）+ 补充一手 §2.1.2.2(2) /
     §2.1.2.3（一次一个 / 不升档 / 每技能一次 / 终止即收口）。改造前是"按 ``skill_id`` 定序
-    逐个实例问"，每实例一条裸 ``ActivateSkill``；现在**每个座位一轮一次询问**，面上是本轮
-    全部可选项（票 01 §4 / §5）。
+    逐个实例问"，每实例一条裸 ``ActivateSkill``；票 01 起**每个座位一轮一次询问**，票 04 起
+    那张面**只有当前这一档**（Q1 / Q13 的"按档逐档问"）。
 
     每轮（= 一次"选一条"）的顺序：
 
@@ -2000,9 +2071,12 @@ def _dispatch(
     2. **强制段按档跑**（``locked`` / 觉醒 / ``Hook.forced``）：不问、不上脸；只跑**当前最高
        优先档**（``min(tier)``）的那几条——票 01 §4-5「在本档轮到它时」；跑完再重新收集，
        更低档的强制段留到下一轮（同档内"强制段先于可选项"是本仓的登记口径）；
-    3. **可选项合成一张面**问一次（面**跨档**，票 01 §8-3）；``Pass`` = 结束本座位的
-       **选择**，剩下的强制段由 :func:`_mandatory_entries` 接着跑（强制效果不随 ``Pass``
-       消失），跑完才轮到下一个座位；
+    3. **可选项合成一张面**问一次：面里**只有最小档**的那几条（票 04 §2——不同档不混面）；
+       ``Pass`` = **本档不发动** ⟹ 还有更低优先的档就写 ``pass_floor = 下一档`` 再问一张面
+       （本档混合实例的强制项照跑）；已经是最后一档才回到票 01 §4-6 的语义（结束本座位的
+       **选择**，剩下的强制段由 :func:`_mandatory_entries` 接着跑，跑完才轮到下一个座位）。
+       全**不可放弃段**的顺序面（锁定侧）不走"进下一档"：那张面的 ``Pass`` 是"剩下按默认
+       次序跑完"（lei-shenganning 票 95）；
     4. 派发选中的那一条 → 记 ``pass_used``、``pass_floor`` 落到它的档 → 下一轮。
 
     **重入**（§6）：进度只由 :data:`PASS_STATE_KEY` 的显式游标表达——``"stay"`` 回来时
@@ -2050,23 +2124,49 @@ def _dispatch(
                 #     Pass（Pass 只放弃这些，强制段随后照跑）；全是不可放弃的段 ⇒ **没有**
                 #     Pass，必须选一条（劫营③ + 镇骨）；
                 #   · 单段强制 ⇒ 仍不问、直接跑（与票 01 逐字节同形）。
+                #
+                # **簿记段不进面**（table-ux-overhaul 票 17）：`Hook.bookkeeping` 的强制
+                # 纯回调（标记到期清扫一类）在这一档先按链序静默跑完（与"强制段先于可选项"
+                # 同姿态，`announce=True` 同一路），然后才轮到任何面。它们既不撑起"先结哪
+                # 一条"，也不跟可选项拼面——否则玩家会在**准备阶段**被问"是否发动大雾/狂风"，
+                # 而那两条规则上只在结束阶段发动。
                 tier = min(candidate.tier for candidate in candidates)
                 same_tier = tuple(
                     candidate for candidate in candidates if candidate.tier == tier
                 )
+                bookkeeping = tuple(
+                    candidate for candidate in same_tier if candidate.bookkeeping
+                )
                 locked_mandatory = tuple(
                     candidate
                     for candidate in same_tier
-                    if candidate.forced and _locked_like(candidate)
+                    if candidate.forced
+                    and _locked_like(candidate)
+                    and not candidate.bookkeeping
                 )
                 open_mandatory = tuple(
                     candidate
                     for candidate in same_tier
-                    if candidate.forced and not _locked_like(candidate)
+                    if candidate.forced
+                    and not _locked_like(candidate)
+                    and not candidate.bookkeeping
                 )
+                # **同一张面 = 同一档**（票 04 / Q13 / Q17）：可选项只收**当前最小档**的那几条。
+                # 改造前面跨档（先点低档就把高档关掉，玩家读成"选了一个另一个没了"）；现在
+                # 档序由引擎给、Pass = 本档不发动、进下一档（见 ``ask`` 相里的那段）。
                 declinable = tuple(
-                    candidate for candidate in candidates if not candidate.forced
+                    candidate
+                    for candidate in candidates
+                    if not candidate.forced and candidate.tier == tier
                 )
+                if bookkeeping:
+                    # 簿记段：按链序静默跑完（`announce=True`，与既有强制段同一条路），
+                    # 再回 ``ask`` 重估可选项 —— 票 17 §4 的"簿记段先跑、面后问"。
+                    state["pass_forced"] = bookkeeping
+                    state["pass_forced_at"] = 0
+                    state["pass_optional"] = None
+                    state["pass_phase"] = "forced"
+                    continue
                 if len(locked_mandatory) >= 2:
                     state["pass_optional"] = locked_mandatory
                     state["pass_allow_pass"] = True
@@ -2114,18 +2214,22 @@ def _dispatch(
                 optional = state["pass_optional"]
                 allow_pass = state["pass_allow_pass"]
                 if optional is None:
+                    rest = _activation_candidates(
+                        host,
+                        frame,
+                        match,
+                        seat=seat,
+                        extra_instances=extra_instances,
+                        floor=state["pass_floor"],
+                        used=state["pass_used"],
+                    )
+                    # 重估之后同样**只收最小档**（票 04）：强制段跑完回到这里时，档序不能
+                    # 因为"新出现的更低档"而把两档又混回一张面。
+                    current = min((candidate.tier for candidate in rest), default=0)
                     optional = tuple(
                         candidate
-                        for candidate in _activation_candidates(
-                            host,
-                            frame,
-                            match,
-                            seat=seat,
-                            extra_instances=extra_instances,
-                            floor=state["pass_floor"],
-                            used=state["pass_used"],
-                        )
-                        if not candidate.forced
+                        for candidate in rest
+                        if not candidate.forced and candidate.tier == current
                     )
                     state["pass_optional"] = optional
                     allow_pass = _face_allows_pass(optional)
@@ -2150,9 +2254,57 @@ def _dispatch(
                 if host.suspended(active):
                     return "stay"
                 if not isinstance(active, ActivateSkill):
-                    # ``Pass`` = 结束本座位的**选择**（票 01 §4-6）——不是它的强制效果：还没
-                    # 跑的强制段（全强制候选 + 混合实例的 ``Hook.forced`` 项）按链序接着跑，
-                    # 跑完才轮到下一个座位（复核修复 F1；票 01 §4-5「在本档轮到它时」）。
+                    # ``Pass`` = **本档不发动**（票 04 §2 / Q1）：本座位的这张面上只有当前
+                    # 最小档，Pass 因此是"这一档我不发动"，下面按两种情形分流——
+                    #
+                    # ① 还有更低优先的档 ⇒ 写 ``pass_floor = 下一档``、回 ``start``；
+                    #    当前档里混合实例的 ``Hook.forced`` 项仍按链序照跑（Pass 只放弃
+                    #    "可以"的那半），更高档的强制段留到它自己的档去跑。
+                    # ② 已经最后一档 ⇒ 既有语义（票 01 §4-6）：剩下的强制段按链序跑完，
+                    #    然后轮到下一个座位。
+                    #
+                    # 全是**不可放弃段**的顺序面（锁定侧）不走 ①：那张面的 Pass 是"剩下按
+                    # 默认次序跑完"（lei-shenganning 票 95），不是"这一档不发动"。
+                    face = state["pass_optional"] or ()
+                    face_tier = min(
+                        (candidate.tier for candidate in face), default=None
+                    )
+                    higher = (
+                        _activation_candidates(
+                            host,
+                            frame,
+                            match,
+                            seat=seat,
+                            extra_instances=extra_instances,
+                            floor=face_tier + 1,
+                            used=state["pass_used"],
+                        )
+                        if face_tier is not None and any(not c.forced for c in face)
+                        else ()
+                    )
+                    if higher:
+                        state["pass_floor"] = min(
+                            candidate.tier for candidate in higher
+                        )
+                        state["pass_mandatory"] = tuple(
+                            entry
+                            for entry in _mandatory_entries(
+                                host,
+                                frame,
+                                match,
+                                seat=seat,
+                                extra_instances=extra_instances,
+                                used=state["pass_used"],
+                            )
+                            if entry[0].tier <= face_tier
+                        )
+                        state["pass_mandatory_at"] = 0
+                        state["pass_mandatory_next"] = "start"
+                        # 下一档是**新的一问**：轮次 +1 ⇒ 答案缓存键（含轮次）不会把上一档
+                        # 那条 Pass 直接还回来。
+                        state["pass_round"] += 1
+                        state["pass_phase"] = "mandatory"
+                        continue
                     state["pass_mandatory"] = _mandatory_entries(
                         host,
                         frame,
@@ -2162,6 +2314,7 @@ def _dispatch(
                         used=state["pass_used"],
                     )
                     state["pass_mandatory_at"] = 0
+                    state["pass_mandatory_next"] = "seat"
                     state["pass_phase"] = "mandatory"
                     continue
                 chosen = next(
@@ -2200,7 +2353,13 @@ def _dispatch(
                         return control
                     state["pass_used"] = (*state["pass_used"], candidate.skill_id)
                     state["pass_mandatory_at"] += 1
-                # 强制段跑完 = 这个座位的时机结束：``Pass`` 之后不再重开选择（§4-6）。
+                if state["pass_mandatory_next"] == "start":
+                    # 进下一档：本档的收尾跑完 ⇒ 回到 ``start`` 重新收集（下一档的可选项
+                    # 会作为一张新面问出来；座位的**选择**没结束，结束的只是这一档）。
+                    state["pass_mandatory_next"] = "seat"
+                    state["pass_phase"] = "start"
+                    continue
+                # 最后一档的强制段跑完 = 这个座位的时机结束（§4-6）。
                 _pass_next_seat(state)
                 continue
             # 阶段机的最后一相：跑本轮选中的那一条（挂起重入时从这里续跑）。
@@ -2498,11 +2657,23 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
 
 
 def activation_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    """本实例在当前帧上的发动形态（缺省 = 裸询问、可选、无成本面）。"""
+    """本实例在当前帧上的发动形态（缺省 = 裸询问、可选、无成本面）。
+
+    **必选目标维度**（table-ux-overhaul 票 02 / :attr:`ActivationPlan.mandatory_targets`）：
+    计划声明了目标候选而**一个都没有**时，这里把 ``available`` 压成 ``False`` —— B 类
+    （强制生效非牌类）技能因此"没有合法目标就不进候选"。它与今天 flow 的必选目标步
+    ``"cancel"`` 静默跳过**行为等价**：候选收集口不跑它、不写任何记录，只是不再往表现层
+    的发动缓冲里记一条空转。没有声明该字段的技能（目前的全部技能）走同一条返回路径，
+    行为一字不变。
+    """
     builder = ACTIVATION_PLANS.get(instance.skill_id)
     if builder is None:
-        return _default_plan(state, frame, instance)
-    return builder(state, frame, instance)
+        plan = _default_plan(state, frame, instance)
+    else:
+        plan = builder(state, frame, instance)
+    if plan.mandatory_targets is not None and not plan.mandatory_targets:
+        plan = replace(plan, available=False)
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -2958,7 +3129,11 @@ def _double_sword(host: Any, frame: Frame) -> Control:
                 actor=target,
                 timing=Timing.USE_AFTER_DESIGNATE_TARGET,
                 spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
-                build_face=lambda: host.selection_face(target, (Zone.HAND,)),
+                # 挑牌的人**就是**手牌持有者本人（票 09 / spec §1 #7）：``reveal_hand=True``
+                # 让目标自己的手牌铺成**可见槽**——「挑牌者就是手牌持有者本人」正是
+                # `engine/game.py:selection_face` 文档串里点名本技能的用法。漏传时槽位
+                # `card=None` + 位置打乱，界面因此落进"未知区域只有位置"那张面。
+                build_face=lambda: host.selection_face(target, (Zone.HAND,), reveal_hand=True),
             )
             if host.suspended(picked):
                 return "stay"
@@ -3881,10 +4056,7 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 kind="preview",
                 path="src/sgs/effects/ops.py",
                 owner="resolve_borrowed_sword",
-                fingerprint=(
-                    "cause=WindowCause.BORROWED_SWORD required=SLASH_FAMILY_KEY "
-                    "mode=RespondMode.USE"
-                ),
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
             CardRequestSite(
                 kind="ask",
@@ -3938,6 +4110,12 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                     "cause=WindowCause.LUANWU required=LUANWU_RESPONSE_CARD "
                     "mode=RespondMode.USE"
                 ),
+            ),
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/skills/active.py",
+                owner="_luanwu_legal_targets",
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
             CardRequestSite(
                 kind="ask",
@@ -4102,16 +4280,14 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
                 kind="preview",
                 path="src/sgs/engine/steps.py",
                 owner="_rejudge_window",
-                fingerprint=(
-                    "cause=WindowCause.REJUDGE required=<default> mode=RespondMode.REJUDGE"
-                ),
+                fingerprint="cause=<default> required=<default> mode=<default>",
             ),
             CardRequestSite(
                 kind="ask",
                 path="src/sgs/engine/steps.py",
                 owner="_rejudge_window",
                 fingerprint=(
-                    "cause=WindowCause.REJUDGE required=None mode=RespondMode.REJUDGE"
+                    "cause=WindowCause.REJUDGE required=<default> mode=RespondMode.REJUDGE"
                 ),
             ),
         ),
@@ -4205,6 +4381,33 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
         reason=(
             "**不是窗口**：引擎把「这扇窗口要哪张牌」交给技能层的转发点（窗口的受理面由"
             "`sgs.skills.lord_request.start_provider` 收口）。"
+        ),
+    ),
+    CardRequestWindow(
+        key="prefilter.respond",
+        kind=REQUEST_PLUMBING,
+        label="响应窗口的**统一预筛口**（`Engine.should_ask_respond` 的内部预览）",
+        scope=None,
+        causes=(),
+        modes=(),
+        required="窗口自己建的那一份 `RespondContext`（预筛口不再收窗口参数）",
+        axis=None,
+        providers=False,
+        sites=(
+            CardRequestSite(
+                kind="preview",
+                path="src/sgs/engine/game.py",
+                owner="Engine.should_ask_respond",
+                fingerprint="cause=<default> required=<default> mode=<default>",
+            ),
+        ),
+        reason=(
+            "**不是窗口**：它是「这扇窗口该不该问这个座位」的统一预筛口（table-ux-overhaul "
+            "票 02），消费**窗口自己建的**那一份 `RespondContext`（`Engine.respond_context`，"
+            "与随后那次 `ask_respond` 同一个对象）并把它转交给 `respond_candidates` 预览一次。"
+            "票 05 的五处 A 类窗口（无懈 / 闪 / 求桃 / 护驾 / 决斗·南蛮·万箭）都从这里汇合，"
+            "故登记的是**这一个转发入口**，不是每扇窗口各加一条 preview；指纹三格全 `<default>`"
+            "正是「它不重复声明窗口事实」的机械证据。"
         ),
     ),
 )
@@ -4418,6 +4621,9 @@ from .hero_lin import (  # noqa: E402  （末尾 import 是刻意的）
 from .state_after import (  # noqa: E402  （末尾 import 是刻意的）
     state_after_skill_definitions,
 )
+from .hero_sp5 import (  # noqa: E402  （末尾 import 是刻意的）
+    sp5_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -4485,6 +4691,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *yujin_skill_definitions(),
             *lin_skill_definitions(),
             *state_after_skill_definitions(),
+            *sp5_skill_definitions(),
         )
     }
 )

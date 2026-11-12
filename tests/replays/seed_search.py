@@ -48,6 +48,7 @@ from sgs.engine import Engine
 __all__ = [
     "FREE_TIERS",
     "SKELETON_TIERS",
+    "RARE_GOAL_TIERS",
     "TIERS",
     "Candidate",
     "Slot",
@@ -97,8 +98,24 @@ SKELETON_TIERS: dict[str, tuple[Tier, ...]] = {
 """人数骨架：4/5/6/7/8 人各锁死一条，种子范围要够大到能搜出命中局。"""
 
 
+RARE_GOAL_TIERS: dict[str, tuple[Tier, ...]] = {
+    "30-halberd-three-targets": (Tier(6, 1000),),
+}
+"""判据命中率极低、需要更宽种子空间的个别基准（**逐条显式声明**，不是全局放宽）。
+
+``tiers_for`` 先查这张表：声明空间必须**包含** ``scenarios.py`` 写死的值，否则
+``test_every_recorded_seed_lies_inside_its_declared_tier`` 判红。今天只有一条：
+【方天画戟】"一次指定 3 个目标"要求这张【杀】是**最后的手牌**且场上有 3 个合法目标 ⇒
+0–299 里只有 1 个命中（230）。table-ux-overhaul 票 04 重录时 230 的新局涨到 4188 条 /
+4.3 MiB（越过 4 MiB 单文件绊线），在 0–1799 里搜到 904（2845 条，约 2.9 MB）⇒ 把这一条的
+6 人档种子范围声明为 1000，判据与人数档都不动。
+"""
+
+
 def tiers_for(slug: str) -> tuple[Tier, ...]:
-    """一条基准的人数档：骨架用 :data:`SKELETON_TIERS`，其余用 :data:`FREE_TIERS`。"""
+    """一条基准的人数档：个别极稀有判据 → 骨架 → 自由档（顺序就是优先级）。"""
+    if slug in RARE_GOAL_TIERS:
+        return RARE_GOAL_TIERS[slug]
     return SKELETON_TIERS.get(slug, FREE_TIERS)
 
 

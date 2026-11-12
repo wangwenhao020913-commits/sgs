@@ -632,7 +632,7 @@ class Player(BaseModel):
     ``slash_in_play_phase`` 的"阶段起点复位"不同："本阶段"的效果必须在阶段**结束**就消失，
     否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到这三条加成。
 
-    读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_POOL`` / ``COUNT_LIMIT`` /
+    读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_RANGE_EXEMPT`` / ``COUNT_LIMIT`` /
     ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
     """
     tianyi_won: bool = False
@@ -788,9 +788,9 @@ class Player(BaseModel):
 
     写入方 = 【雄乱】的提交点（一次发动只写一个座位）；回合末由
     ``Engine._clear_turn_effects`` 清掉。读取方是同一条技能定义上的两个修饰器：
-    ``TARGET_POOL``（把他补回候选池 ⇒ 豁免距离 / 攻击范围）与 ``COUNT_EXEMPT``
-    （``ModifierContext.use_targets`` ⊆ {他} ⇒ 这一次使用不受次数上限；候选生成期由
-    ``check_count`` 的目标维度收窄，不是把整张牌放行）。**不发 delta**：与
+    ``TARGET_RANGE_EXEMPT``（把他加进 ② 的豁免座位集 ⇒ 只跳过距离 / 攻击范围，票 03）
+    与 ``COUNT_EXEMPT``（``ModifierContext.use_targets`` ⊆ {他} ⇒ 这一次使用不受次数上限；
+    候选生成期由 ``check_count`` 的目标维度收窄，不是把整张牌放行）。**不发 delta**：与
     ``hand_card_prohibited`` 同姿态（回放按同一条技能动作重跑即可重建）。
     """
     heart_slash_bonus_against: list[int] = Field(default_factory=list)
@@ -812,6 +812,27 @@ class Player(BaseModel):
     与 :attr:`heart_slash_bonus_against`（【义绝】，**本回合**）**分字段**：作用域不同，
     与 :attr:`luoyi_until_next_turn` 的分字段同一条理由。**不发 delta**：没有 JSON 读者，
     回放按同一条技能动作重跑即可重建。
+    """
+    fengpo_bonus: tuple[int, int] | None = None
+    """**本次使用**的「马云騄【凤魄】② 此牌的基础伤害值 +X」记账：``(渠道牌 id, X)``。
+
+    写入唯一入口 :meth:`Engine.set_fengpo_bonus`（【凤魄】的
+    ``USE_AFTER_DESIGNATE_TARGET`` 钩子选到选项 2 时）；读取方是同一条技能定义上的
+    ``DAMAGE_DEAL_AMOUNT`` 修饰器——**卡牌级**：只认 ``ctx.card.card_id`` 与记录一致，
+    **不**要求 ``ctx.owner == ctx.subject``（用户 2026-11 签：牌面写的是「此牌」，没有
+    「你为伤害来源」；马云騄输掉自己使用的【决斗】时，对方造成的伤害同样 +X）。
+    清理 = 本次使用结束时（``RESOLVE_AFTER_END`` 清扫钩子）与回合末
+    （:meth:`Engine._clear_turn_effects` 兜底）。**不发 delta**：与 ``liegong_bonus``
+    同姿态（没有 JSON 读者，回放按同一条技能动作重建）。
+    """
+    fengpo_used: tuple[int, int] | None = None
+    """【凤魄】两项**本阶段**各是否已用：``(阶段序号, 位掩码)``（位 0 = 摸 X，位 1 = +X）。
+
+    作用域 = **一个阶段**，而且是**每一个角色的每一个阶段**（用户 2026-11 裁定：不只出牌
+    阶段、不只自己的阶段；其他角色的技能可能在非出牌阶段令马云騄使用【杀】/【决斗】）。
+    故这里存的是**全局阶段序号**（:attr:`GameState.phase_seq`）：序号与当下不同 ⇒ 两项
+    都视作未用（**惰性复位**，不需要在每个阶段起点逐个清字段）。写入 / 读取都在
+    :mod:`sgs.skills.hero_sp5` 的凤魄小节。**不发 delta**：与 ``fengpo_bonus`` 同姿态。
     """
     qimou_distance_x: int = 0
     """本回合「你计算与其他角色的距离 -X」的 X（界魏延移动版【奇谋】）。
@@ -839,9 +860,9 @@ class Player(BaseModel):
     """本回合「使用牌无距离限制」是否生效（【决堰】·两个坐骑栏；lukang-mobile 票 01）。
 
     写入唯一入口 :meth:`Engine.set_duanyan_no_distance`；**清理点 = 回合末**
-    （:meth:`Engine._clear_turn_effects`——牌面写「本回合」）。读取方是同一条技能定义上的两条
-    修饰器：``TARGET_POOL``（【杀】族把全体其他存活座位并入池 = 豁免攻击范围，与【诈降】
-    同一手法）与 ``DISTANCE_LIMIT``（有额定距离上限的牌返回 ``None`` = 豁免距离）。**不发 delta**。
+    （:meth:`Engine._clear_turn_effects`——牌面写「本回合」）。读取方是同一条技能定义上的
+    一条修饰器：``TARGET_RANGE_EXEMPT``（逐座位跳过 ② 的两条距离判据 = 同时覆盖【杀】的
+    攻击范围与【顺手牵羊】一类牌的额定距离，票 03）。**不发 delta**。
     """
     paoxiao_bonus: bool = False
     """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。
@@ -879,6 +900,16 @@ class Player(BaseModel):
     纯虚拟牌 / 查不到牌名大类的牌**不记录**（``card_category`` fail-closed 返回 ``None``）；
     对应的成本面同样把它们排除在外（"证不出它不属于用过的类型" ⇒ 不能当代价）。
     **不发 delta**：与 ``discarded_this_turn`` 同姿态——回放按同一批使用 / 弃置动作重建。
+    """
+    turn_card_suits: list[str | None] = Field(default_factory=list)
+    """本回合该座位**使用过**的牌的花色（按使用顺序、逐次追加；``None`` = 无花色）。
+
+    写入唯一入口 = :meth:`Engine._note_turn_card_suit`（``start_use`` 入口，与
+    ``turn_card_entries`` 同一个调用点；**打出不算**）。与 ``turn_card_entries`` 的区别：
+    后者按 ``card_id`` 去重、只记查得到大类的牌、且**含弃置**（【定品】判据）；本字段
+    **逐次记**每一次使用、含纯虚拟牌的无花色档（``None``），服务的是【观微】的
+    「本回合使用过的牌花色均相同」。作用域 = **本回合**：回合末由
+    :meth:`Engine._clear_turn_effects` 清空。**不发 delta**：与 ``turn_card_entries`` 同姿态。
     """
     dingpin_barred_targets: list[int] = Field(default_factory=list)
     """本回合**不能再对其发动【定品】**的目标座位（去重、座位升序）。
@@ -929,6 +960,15 @@ class GameState(BaseModel):
     """
     turn_seat: int | None = None
     phase: Phase | None = None
+    phase_seq: int = 0
+    """**全局阶段序号**：任一角色的任一阶段真正开始一次就 +1（用户 2026-11 裁定）。
+
+    写入唯一入口 = :meth:`Engine._step_turn`（回合环的**新步进入**判定：步骤游标变了且
+    这一步是六个阶段起点之一 ⇒ +1；同一步因挂起续跑 / 判定阶段自循环而重入时**不** +1）。
+    读取方 = 【凤魄】的「每阶段每项限一次」（:attr:`Player.fengpo_used` 的惰性复位）。
+    额外回合 / 额外的出牌阶段同样经过阶段起点 ⇒ 一并生效（用户裁定：每一个角色的每一个
+    阶段都重置）。**不发 delta**：没有 JSON 读者；回放按同一串动作重建（阶段顺序确定）。
+    """
     round: int = 1
     """当前**轮次**（M6 票 11；spec D13 / §回合与轮次）：自然回合转完一圈 +1，从 1 起。
 

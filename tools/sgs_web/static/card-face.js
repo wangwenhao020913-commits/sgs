@@ -72,15 +72,19 @@ function cardFace(pending, card) {
     return { selectable: slotIndex >= 0, selected: false, picked: false, slotIndex };
   }
   if (isOwnZonePick(pending)) {
-    // 多张自己区域面（结姻两张 / 贯石斧两张等）：点牌收进 `picks`，点「提交」送出。
+    // 多张自己区域面（结姻两张 / 贯石斧两张 / 业炎四色成本等）：点牌收进 `picks`，
+    // 点「提交」送出。**票 15**：哪几张此刻点得动由预览回包的 `disabled` 回答（服务端
+    // 用候选生成期那个枚举器现算），前端不数花色、不推导任何规则。
     const slots = pending.slots || [];
     const slotIndex = slots.findIndex(
       (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
     );
     const picked = slotIndex >= 0 && state.picks.includes(slotIndex);
     const total = (pending.spec && pending.spec.total) || [1, 1];
+    const full = state.picks.length >= Math.max(1, total[1]);
+    const taken = slotIndex >= 0 && ownPickSlotDisabled(pending, slotIndex);
     return {
-      selectable: slotIndex >= 0 && (picked || state.picks.length < Math.max(1, total[1])),
+      selectable: slotIndex >= 0 && (picked || (!taken && !full)),
       selected: false,
       picked,
       slotIndex,
@@ -98,18 +102,22 @@ function cardFace(pending, card) {
     const options = preactivationCardOptions(pending);
     const answer = pa.answers[pa.cursor];
     const picked = Boolean(answer && answer.values.includes(card.card_id));
+    // 票 12：``options`` 从"能点的来源"升级成"这一步列出的来源"——置灰的源牌也在里面
+    // （删掉会让玩家以为清单漏牌），可点集合 = ``options − disabled``。
     const offered = options !== undefined
       && (options === null || options.includes(String(card.card_id)));
+    const blocked = preactivationItemDisabled(pa, pa.cursor, card.card_id);
     // 票 10（多来源步的 `groups`）：已选的牌恒可点（再点 = 取消）；其余牌还要能**落进**
     // 某一组合法来源才可点 ⇒ 点过 ♦9杀 之后 ♠ / ♣ 直接置灰，凑不出不同花色的一对
     // （§4 的死路从源头消失）。`groups` 缺省 ⇒ 与改前逐张一致。
-    const selectable = offered && (picked
+    const selectable = !blocked && offered && (picked
       || preactivationGroupAccepts(pa, pa.cursor, answer ? answer.values : [], card.card_id));
     return {
       selectable,
       selected: false,
       picked,
       slotIndex: -1,
+      note: blocked ? PREACTIVATION_SOURCE_NO_PRODUCT : "",
     };
   }
   // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单。同一张牌**还**有技能授予的重铸时

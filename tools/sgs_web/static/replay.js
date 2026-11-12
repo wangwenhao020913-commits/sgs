@@ -292,6 +292,8 @@ function renderReplayLog(replay) {
   const log = $("r-log");
   if (!log) return;
   log.innerHTML = "";
+  // 票 05：整条流重画 ⇒ 无懈窗口的合并记账跟着清（回放每步都重画这一段）。
+  resetWindowLogs(log);
   if (replayLogMode() === "simple") {
     const current = replay.records[replay.index] || {};
     // 首条 `header` 没有 `seq`：它之前没有叙事（不能把 `Infinity` 当成"已到终局"，

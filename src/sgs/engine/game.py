@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -45,6 +45,8 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     Randomness,
+    SLASH_FAMILY_KEY,
+    UseContext,
     WINE_COUNT_KEY,
     WINE_DAMAGE_BONUS,
     apply_armor,
@@ -62,7 +64,9 @@ from sgs.effects import (
     locate,
     move_card,
     need_card_floor,
+    next_need_card_tier,
     record_need_card_choice,
+    record_need_card_floor,
     targets_within_attack_range,
 )
 from sgs.resolution import (
@@ -79,6 +83,7 @@ from sgs.skills import (
     MATCH_ACTOR_KEY,
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
+    SEAT_PREFIX,
     SKILL_JUDGMENT_CARD_KEY,
     STATE_CHANGE_KEY,
     ActivationCandidate,
@@ -110,6 +115,7 @@ from sgs.skills import (
     reset_turn_skill_state,
     round_limit_present,
     resolve_conversion_confirmation,
+    seat_choice,
     start_provider,
     timing_hooks_present,
     transform_candidates,
@@ -122,6 +128,7 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     ArmorChangeDelta,
+    AskPolicy,
     CardRef,
     Distribute,
     DistributeContext,
@@ -753,6 +760,24 @@ def _activation_payload(
     return payload
 
 
+def _conversion_use_context(kind: QueryKind) -> UseContext:
+    """询问种类 → 转化清单源牌置灰读的**使用语境**（table-ux-overhaul 票 12）。
+
+    映射只在这里做一次，清单派生（:func:`~sgs.skills.conversion_preactivations`）不按
+    询问种类自己猜：``check_usable`` 的第一条就是"这个语境下有没有使用时机"，而三个语境
+    恰好是候选生成侧已有的三档（:class:`~sgs.effects.UseContext`）：
+
+    - ``PEACH``（濒死求桃）⇒ ``NEAR_DEATH``；
+    - ``DODGE`` / ``RESPOND``（响应窗口）⇒ ``RESPONSE``；
+    - 其余（今天只有 ``PLAY_PHASE`` 会带转化候选）⇒ ``PLAY_PHASE``。
+    """
+    if kind is QueryKind.PEACH:
+        return UseContext.NEAR_DEATH
+    if kind in (QueryKind.DODGE, QueryKind.RESPOND):
+        return UseContext.RESPONSE
+    return UseContext.PLAY_PHASE
+
+
 class Engine:
     """一局的驱动器：显式结算栈 + 回合环 + 记录流。"""
 
@@ -764,8 +789,18 @@ class Engine:
         init_records: Sequence[JournalRecord] = (),
         shuffle_source: Randomness | None = None,
         journal: bool = True,
+        ask_policy: AskPolicy = AskPolicy(),
     ) -> None:
         self.state = state
+        self.ask_policy = ask_policy
+        """本局的**询问策略**（table-ux-overhaul 票 02 / spec §2 Q4）。
+
+        缺省 ``AskPolicy()`` = **OFF**：没有调用方显式打开时行为与旧口径逐字节相同
+        （金录像 / ``batch_games`` / ``ai_eval`` / 旧录像回放都走这条缺省）。网页会话由
+        :class:`sgs_web.session.Session` 显式传 ON。它是**会话事实**、不进记录流；随侧车
+        元数据落盘、由 ``replay_journal`` 还原（:attr:`RespondContext.skip_if_empty` 是
+        逐窗口的类别位，读取方是 :meth:`should_ask_respond`）。
+        """
         self._journal = journal
         """是否**保留**记录流（票 11 的 opt-in 开关；缺省 ``True`` = 既有行为一字不变）。
 
@@ -966,6 +1001,23 @@ class Engine:
         记录**（:meth:`_dispatch_round_start` 先探 ``timing_hooks_present``），标准对局的
         记录流因此逐字节不变。
         """
+        self._phase_entry_steps: frozenset[Callable[[], Any]] = frozenset(
+            (
+                self._phase_prepare,
+                self._phase_judge,
+                self._phase_draw_start,
+                self._phase_play_start,
+                self._phase_discard_start,
+                self._phase_finish,
+            )
+        )
+        """六个**阶段起点**步骤（【凤魄】的「每阶段每项限一次」读 ``GameState.phase_seq``）。
+
+        :meth:`_step_turn` 在"**新步进入**"（``_turn_pc`` 变了）且这一步在集合里时给
+        ``phase_seq`` +1；同一步因挂起续跑 / 判定阶段自循环而重入时游标未变 ⇒ 不 +1。
+        额外回合与额外的出牌阶段同样经过这些起点（用户 2026-11 裁定：每一个角色的每一个
+        阶段都重置）。
+        """
         self._turn_steps: tuple[Callable[[], Any], ...] = (
             self._turn_before_start,
             self._turn_start,
@@ -1000,6 +1052,7 @@ class Engine:
         pinned_seat: int = 0,
         hero_config: HeroDealConfig | None = None,
         journal: bool = True,
+        ask_policy: AskPolicy = AskPolicy(),
     ) -> "Engine":
         """造初始状态（实例化 → 洗牌 → 发身份 → 发武将 → 发牌）并带上开局那几条记录。
 
@@ -1009,6 +1062,7 @@ class Engine:
         ``pinned_hero`` / ``pinned_seat`` 同义（票 19 的点将：钉住一个座位、其余随机）；
         ``hero_config`` 是票 12 的**会话配置**（禁将 + 手选），与种子一起冻结、不进记录流。
         ``journal`` 见 :meth:`__init__`：开局那几条记录**照常构造**，``False`` 时只是不保留。
+        ``ask_policy`` 见 :attr:`ask_policy`：缺省 OFF（旧口径）。
         """
         shuffle_source = RandomSource(seed).substream("shuffle")
         state, init_records = build_initial(
@@ -1028,18 +1082,36 @@ class Engine:
             init_records=init_records,
             shuffle_source=shuffle_source,
             journal=journal,
+            ask_policy=ask_policy,
         )
 
     @classmethod
-    def from_state(cls, state: GameState, *, seed: int, journal: bool = True) -> "Engine":
+    def from_state(
+        cls,
+        state: GameState,
+        *,
+        seed: int,
+        journal: bool = True,
+        ask_policy: AskPolicy = AskPolicy(),
+    ) -> "Engine":
         """低层入口：从**人为指定的局面**起跑（只写 header，不虚构开局记录）。"""
-        return cls(state, seed=seed, journal=journal)
+        return cls(state, seed=seed, journal=journal, ask_policy=ask_policy)
 
     # -- 记录流 -------------------------------------------------------------
 
     @property
     def records(self) -> tuple[JournalRecord, ...]:
         return tuple(self._records)
+
+    @property
+    def activation_frame(self) -> Frame | None:
+        """**只读**：最近一次 ``SKILL_ACTIVATION`` 询问的承载帧（票 11 的步骤预览读它）。
+
+        预览要调与校验器**同一个**池回调，而被动技的池常读帧（【流离】的使用者 /
+        【麒麟弓】的目标）。校验器的取法是"栈顶优先、栈空退回这份承载帧"
+        （:meth:`_validate_structured`），预览照抄同一条：调用方自己判栈。
+        """
+        return self._activation_frame
 
     @property
     def skill_activations(self) -> tuple[SkillActivation, ...]:
@@ -1809,16 +1881,64 @@ class Engine:
 
         拿到应答之后顺手记下这次选中的**优先级档**（票 03 §4-2）：【闪】与求桃是四扇
         需要牌窗口里的两扇，闸门的输入由 :meth:`_note_need_card_choice` 一处写。
+
+        **按档逐档问**（table-ux-overhaul 票 04 / Q13 / Q17）：【闪】与求桃的候选面
+        （``legal_actions_for``）只铺**当前这一档**；玩家答 ``Pass`` = **本档不发动**，
+        引擎用 :func:`~sgs.effects.next_need_card_tier` 现算下一档、把档写进承载帧、
+        **再问一次**（同一张面重入时按新档重铺）。最后一档的 ``Pass`` 才是"这次需要牌
+        不满足"，窗口照旧收尾（它收到的那一条 ``Pass`` 没变）。故窗口不需要知道"哪一档"，
+        分层完全落在"问一次 / 答一次"这两条既有接缝之间。
         """
-        action = self.ask(
-            lambda seq: self._build_query(
-                kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
-            ),
-            identity=self._ask_identity(kind, actor, frame),
-        )
-        if kind in (QueryKind.DODGE, QueryKind.PEACH):
+        need_card = kind in (QueryKind.DODGE, QueryKind.PEACH)
+        identity = self._ask_identity(kind, actor, frame)
+        while True:
+            action = self.ask(
+                lambda seq: self._build_query(
+                    kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
+                ),
+                identity=identity,
+            )
+            if self.suspended(action) or not need_card:
+                return action
+            if isinstance(action, Pass) and self._advance_need_card_tier(
+                frame, actor, kind, payload, dying=dying
+            ):
+                # 进下一档：承载帧里的 floor 已经写成下一档，本次询问按它重新铺面。
+                if payload is not None:
+                    payload = replace(payload, floor=need_card_floor(frame, actor))
+                continue
             self._note_need_card_choice(frame, actor, action)
-        return action
+            return action
+
+    def _advance_need_card_tier(
+        self,
+        frame: Frame | None,
+        actor: int,
+        kind: QueryKind,
+        payload: Any,
+        *,
+        dying: int | None = None,
+    ) -> bool:
+        """``Pass`` 之后进**下一档**：写进承载帧并返回 ``True``；最后一档 ⇒ ``False``。
+
+        判据与候选生成**同源**（:func:`~sgs.effects.next_need_card_tier` 读同一个
+        ``_actions_for``），故"还有没有下一档"与"下一问会铺哪一档"不可能漂移。
+        没有承载帧（理论上的裸询问）⇒ 不进档：``Pass`` 就是放弃这次需要牌。
+        """
+        if frame is None:
+            return False
+        next_tier = next_need_card_tier(
+            self.state,
+            actor,
+            kind,
+            answers_seq=self._seq + 1,
+            dying=dying,
+            payload=payload,
+        )
+        if next_tier is None:
+            return False
+        record_need_card_floor(frame, actor, next_tier)
+        return True
 
     def ask_arrange(
         self,
@@ -1989,6 +2109,9 @@ class Engine:
         # jie-yijiang-2014-mobile 票 01【定品】：本回合"使用过的牌"的座位事实（用户 Q2 签）。
         # 与上一条同一个入口、同一时机；它**不看**本阶段，作用域由回合末复位给出。
         self._note_turn_card(card, source)
+        # SP武将组5 潘濬【观微】：本回合"使用过的牌"的**花色**（逐次记，含无花色档；
+        # 用户 2026-11 签 Q10 = 引擎侧记录）。打出不算（走 play_card，不经过本入口）。
+        self._note_turn_card_suit(card, source)
         deal_bonus = 0
         if is_slash(behavior) and self.state.player(source).wine_active:
             deal_bonus = WINE_DAMAGE_BONUS
@@ -2609,63 +2732,102 @@ class Engine:
                 return card
         return None
 
-    def ask_respond(
+    def respond_context(
         self,
-        frame: Frame,
+        frame: Frame | None,
         actor: int,
-        timing: Timing,
         *,
         cause: WindowCause,
         required: str | None = None,
         target: int | None = None,
-        window_frame: int = 0,
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
         zones: tuple[Zone, ...] = (Zone.HAND,),
         declared: bool = False,
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
-    ) -> Any:
-        """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
+        skip_if_empty: bool = False,
+    ) -> RespondContext:
+        """**一扇响应窗口的同一份载荷**：预筛口、预览与真询问共用这一个对象。
 
-        ``mode = USE`` 时候选是"使用某张牌"：``use_targets`` 非空时每个目标一个候选
-        （借刀杀人迫使的【杀】），**为空时是无目标的响应使用**（无懈一类的牌，目标由
-        ``window_frame`` + ``target`` 承载）；``mode = PLAY`` 是打出（无目标）。
+        窗口在发问**之前**建**一次**（:meth:`ask_respond` / :meth:`should_ask_respond` /
+        :meth:`respond_candidates` 三个入口都只收它，不再各收一份窗口参数）⇒ 预筛看到的面
+        与真发出去的面**结构上是同一份**，`skip_if_empty`（A 类窗口的类别位）也因此只有
+        一处：字段写在载荷里，读取方是 :meth:`should_ask_respond`。
 
-        ``providers_used`` 供"需要【闪】"窗口过滤已问过的装备提供者（票 10 §5.5）。
-        ``zones`` = 候选牌取自应答者的哪几个区（缺省手牌）；改判窗口按
-        :func:`~sgs.skills.rejudge_card_zones` 传入（界【鬼才】含装备区，M6 票 14）。
-        ``declared`` 只服务**收集式**窗口（票 03）：赢家已定（首个声明者）时提供者闭嘴
-        ——它的产物要扣置一张手牌，赢家已定时不会进结算。
+        参数语义与 :meth:`ask_respond` 逐条相同（``mode`` / ``providers_used`` / ``zones`` /
+        ``declared`` / ``rejudge_offers`` 都只影响候选生成，不进记录流）：
 
-        ``floor`` **不由调用方给**：它读承载帧里这一座位已定下的优先级档（票 03 §4-2，
-        :func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
-        拿到应答之后再记回这一档（:meth:`_note_need_card_choice`）。改判窗口（``REJUDGE``）
-        不是使用 / 打出 ⇒ 既不读也不记。
+        - ``window_frame`` = **承载帧**的 id（嵌套无懈的层靠它区分，票 19 §9）；无承载帧
+          （单测 / 无帧预览）⇒ 0；
+        - ``floor``（票 03 §4-2）**不由调用方给**：它当场读承载帧里这一座位已过完的档
+          （:func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
+          改判（``REJUDGE``）不是使用 / 打出 ⇒ 恒 0，既不读也不记。
+
+        缺省 ``skip_if_empty = False`` = 照问；三扇 ``ask_respond`` 驱动的 A 类窗口（无懈 /
+        护驾求助 / 决斗·南蛮·万箭，票 05）显式置 ``True``。
         """
         need_card = mode is not RespondMode.REJUDGE
-        payload = RespondContext(
+        return RespondContext(
             cause=cause,
             required=required,
             target=target,
-            window_frame=window_frame,
+            window_frame=0 if frame is None else frame.frame_id,
             mode=mode,
             use_targets=tuple(use_targets),
             providers_used=tuple(providers_used),
             zones=tuple(zones),
             declared=declared,
             rejudge_offers=tuple(rejudge_offers),
-            floor=need_card_floor(frame, actor) if need_card else 0,
-        )
-        action = self.ask(
-            lambda seq: self._build_query(
-                QueryKind.RESPOND, actor, timing, seq, payload=payload
+            floor=(
+                0
+                if frame is None or not need_card
+                else need_card_floor(frame, actor)
             ),
-            identity=self._ask_identity(QueryKind.RESPOND, actor, frame),
+            skip_if_empty=skip_if_empty,
         )
-        if need_card:
+
+    def ask_respond(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        ctx: RespondContext,
+    ) -> Any:
+        """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
+
+        ``ctx`` = :meth:`respond_context` 建的那**一份**窗口载荷：``mode = USE`` 时候选是
+        "使用某张牌"（``use_targets`` 非空时每个目标一个候选 = 借刀杀人迫使的【杀】；
+        为空 = 无目标的响应使用，目标由 ``window_frame`` + ``target`` 承载）；``mode =
+        PLAY`` 是打出。``providers_used`` / ``zones`` / ``declared`` / ``rejudge_offers``
+        都是候选生成输入，不进记录流。
+
+        拿到应答之后再记回这一档（:meth:`_note_need_card_choice`）；改判窗口（``REJUDGE``）
+        不是使用 / 打出 ⇒ 既不读也不记。
+
+        **按档逐档问**（票 04 / Q13 / Q17）：候选面只铺当前这一档；``Pass`` = 本档不发动
+        ⇒ 写下一档、**再问一次**（见 :meth:`ask_query` 的同一段说明）。下一张面只换
+        ``ctx.floor``（档位的唯一写入点是承载帧），其余字段仍是调用方那一份。
+        """
+        need_card = ctx.mode is not RespondMode.REJUDGE
+        identity = self._ask_identity(QueryKind.RESPOND, actor, frame)
+        payload = ctx
+        while True:
+            action = self.ask(
+                lambda seq: self._build_query(
+                    QueryKind.RESPOND, actor, timing, seq, payload=payload
+                ),
+                identity=identity,
+            )
+            if self.suspended(action) or not need_card:
+                return action
+            if isinstance(action, Pass) and self._advance_need_card_tier(
+                frame, actor, QueryKind.RESPOND, payload
+            ):
+                payload = replace(ctx, floor=need_card_floor(frame, actor))
+                continue
             self._note_need_card_choice(frame, actor, action)
-        return action
+            return action
 
     def _note_need_card_choice(
         self, frame: Frame | None, actor: int, action: Any
@@ -2684,49 +2846,92 @@ class Engine:
         record_need_card_choice(frame, actor, action)
 
     def respond_candidates(
-        self,
-        actor: int,
-        *,
-        cause: WindowCause,
-        required: str | None = None,
-        target: int | None = None,
-        mode: RespondMode = RespondMode.PLAY,
-        use_targets: tuple[int, ...] = (),
-        providers_used: tuple[str, ...] = (),
-        rejudge_offers: tuple[RejudgeOffer, ...] = (),
-        floor: int = 0,
+        self, actor: int, ctx: RespondContext
     ) -> tuple[Action, ...]:
         """**预览**一次响应窗口的候选（W5-02b 的 auto-b）：不问、不记、不耗序号。
 
-        读的是与 :meth:`ask_respond` **同一个**候选生成器（``legal_actions_for``）——"此刻
-        有没有 a"因此不会与"窗口真发出来时给什么"漂移。补充说明两点：
+        读的是与 :meth:`ask_respond` **同一个**候选生成器（``legal_actions_for``）与**同一份**
+        窗口载荷 ``ctx``（:meth:`respond_context` 建的）——"此刻有没有 a"因此不会与"窗口真
+        发出来时给什么"漂移。补充说明两点：
 
         - **只读状态**：不压帧、不搬牌、不抽随机数（转化候选的生成也全是纯谓词）；
         - ``answers_seq`` 取 ``self._seq + 1``——这正是随后那次 ``ask`` 会拿到的序号；
           预览的产物只是被丢弃的候选，序号在这里不承载语义，但也不造出一个"未来值"。
 
-        ``floor``（票 03 §4-2）同样要与 :meth:`ask_respond` 一致：调用方有承载帧时传
-        ``need_card_floor(frame, actor)``，否则保留缺省 0——预览因此不会把已被闸门挡掉的
-        提供者当成"a 可行"（借刀杀人的 auto-b 判据就建在这份预览上）。
+        调用方传**与随后那次发问同一个对象**时，``floor`` / ``declared`` / ``providers_used``
+        这些会改变候选面的输入天然对齐（借刀杀人的 auto-b 判据就建在这份预览上）。
         """
-        payload = RespondContext(
-            cause=cause,
-            required=required,
-            target=target,
-            window_frame=0,
-            mode=mode,
-            use_targets=tuple(use_targets),
-            providers_used=tuple(providers_used),
-            rejudge_offers=tuple(rejudge_offers),
-            floor=0 if mode is RespondMode.REJUDGE else floor,
-        )
         return legal_actions_for(
             self.state,
             actor,
             QueryKind.RESPOND,
             answers_seq=self._seq + 1,
+            payload=ctx,
+        )
+
+    def should_ask_respond(self, actor: int, ctx: RespondContext) -> bool:
+        """**统一预筛口**：这扇窗口该不该问这个座位（table-ux-overhaul 票 02 §3）。
+
+        判据 = **会话策略** × **窗口类别位** × **候选预览**，三者合成一句回答：
+
+        - 策略 OFF（引擎缺省）⇒ 恒 ``True``（照问）。旧录像 / AI 对战 / 金录像因此与旧口径
+          逐字节相同——这是票 05 接窗口时"引擎侧零变化"的唯一保证；
+        - 窗口没声明可跳过（``ctx.skip_if_empty`` 缺省 ``False``）⇒ 恒 ``True``（照问）：本
+          函数不按候选内容替调用方猜"这扇窗可不可跳过"，类别位必须由窗口建载荷时显式给；
+        - 两条都成立 ⇒ 真去预览一次候选，回答"除 ``Pass`` 外还有没有别的候选"。
+
+        ``ctx`` 就是 :meth:`ask_respond` 随后收到的那**同一个对象**（:meth:`respond_context`
+        建一次）——类别位因此只有一个落点：字段写在载荷里、读取方是这里（调用方不再把
+        ``skip_if_empty`` 传两份）。
+
+        预览走 :meth:`respond_candidates`（**同一个** ``legal_actions_for`` 生成器）：
+        不问、不记、不耗序号，也不另写"这个座位有没有真牌 / 真转化能力"的判据——票 05 的
+        无懈合格者（真【无懈可击】∪ 【看破】一类转化能力）因此与窗口真发问时同源。
+
+        **调用点 = 三扇 ``ask_respond`` 驱动的 A 类窗口**（票 05：无懈 / 护驾求助 / 决斗·
+        南蛮·万箭）；另两扇（【闪】/ 求桃）走 :meth:`ask_query`，预筛口是它的姊妹
+        :meth:`should_ask_query`——同一句判据、只是候选载荷不同（那两扇不是
+        :class:`RespondContext`，类别位仍作参数给）。
+        """
+        if not (self.ask_policy.auto_skip and ctx.skip_if_empty):
+            return True
+        candidates = self.respond_candidates(actor, ctx)
+        return any(not isinstance(action, Pass) for action in candidates)
+
+    def should_ask_query(
+        self,
+        kind: QueryKind,
+        actor: int,
+        *,
+        dying: int | None = None,
+        payload: Any = None,
+        skip_if_empty: bool = False,
+    ) -> bool:
+        """**统一预筛口**的另一半：``ask_query`` 驱动的两扇需要牌窗口（【闪】/ 求桃）。
+
+        与 :meth:`should_ask_respond` 是**同一句判据**（会话策略 × 窗口类别位 × 候选
+        预览），只在候选载荷上分家：这两扇窗口的候选由
+        :func:`~sgs.effects.legal_actions_for` 按 :class:`~sgs.state.DodgeContext` /
+        :class:`~sgs.state.PeachContext` 现算，**不经过** :class:`RespondContext`——硬塞进
+        同一个入口就得在一处伪造另一种载荷，预览与真询问也就不同源了。
+
+        ``payload`` 必须是窗口**这一次发问会带的那一份**（【闪】的 ``providers_used`` +
+        ``floor``、求桃的 ``floor``）：预览因此与真询问铺同一张面。
+
+        ``skip_if_empty``（A 类窗口的类别位，票 02）由窗口显式给：本函数不按候选内容替
+        调用方猜"这扇窗可不可跳过"；策略 OFF（引擎缺省）⇒ 恒 ``True``（照问）。
+        """
+        if not (self.ask_policy.auto_skip and skip_if_empty):
+            return True
+        candidates = legal_actions_for(
+            self.state,
+            actor,
+            kind,
+            answers_seq=self._seq + 1,
+            dying=dying,
             payload=payload,
         )
+        return any(not isinstance(action, Pass) for action in candidates)
 
     def accepted_selection(
         self, frame: Frame, *, owner: Any, key: str
@@ -3137,6 +3342,55 @@ class Engine:
         answers[answer_key] = action
         return action
 
+    def ask_seats(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        skill_id: str,
+        pool: Sequence[int],
+        lo: int,
+        hi: int,
+        optional: bool = False,
+    ) -> Any:
+        """发一次**座位多选**询问（table-ux-overhaul 票 13）：「一次选多名角色」的**唯一**入口。
+
+        与 :meth:`ask_option` 的"一次一个座位"是两种形状：这里把**整池**座位一次发给应答者，
+        答案是一个座位**集合**（界面 = 牌桌上多点、一次提交；先例 = 界顾雍【秉壹】）。
+        三条载荷口径固定在这一处，调用方只给「池 + 区间」：
+
+        - ``options`` = 池里每个座位的 :func:`~sgs.skills.seat_choice` 文本（座位序 = 池序）；
+        - ``min_selected = lo`` / ``max_selected = hi`` —— "至多 N 名"这句话因此**只写一次**
+          （计划里要选几个就填几个，不在每个技能里再写一遍边界）；
+        - ``enumerate_candidates=False``（**不枚举档**，先例
+          :meth:`ask_options` 的同名档）：子集数随座位数组合爆炸（8 人局、上限 4 ⇒ 162 条），
+          故候选只留一条骨架，答案由界面 / 参与者组装、引擎按
+          :func:`~sgs.effects.is_legal_option_set` 校验形状。
+
+        返回**座位元组**：``Pass``（``optional=True`` 才有）⇒ 空元组——"这一步取消"由调用方
+        按 ``lo`` 判（与 :meth:`ask_option` 把 ``Pass`` 原样交还同一姿态）；挂起照旧返回
+        :data:`SUSPEND`。答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（与
+        :meth:`ask_options` 同键同源），钩子重入不重发。
+        """
+        seats = tuple(int(seat) for seat in pool)
+        answer = self.ask_options(
+            frame,
+            actor,
+            timing,
+            skill_id=skill_id,
+            options=tuple(seat_choice(seat) for seat in seats),
+            min_selected=lo,
+            max_selected=hi,
+            optional=optional,
+            enumerate_candidates=False,
+        )
+        if answer is SUSPEND:
+            return SUSPEND
+        if isinstance(answer, Pass):
+            return ()
+        return tuple(int(choice.removeprefix(SEAT_PREFIX)) for choice in answer.choices)
+
     def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None:
         """技能触发的一次**惰性判定**：压 JUDGE 帧（票 10 §1 / §5.3）。
 
@@ -3483,6 +3737,25 @@ class Engine:
         开始**的那一刻落 ``turn_change``（记事实，不记打算）。
         """
         self.state.extra_turns.append(seat)
+
+    def schedule_extra_play_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**当前出牌阶段结束后**再执行一个额外的出牌阶段（潘濬【观微】）。
+
+        与 :meth:`schedule_extra_turn` 的区别是**层级**：那是回合级（额外回合仍按六个阶段
+        整段再跑一遍）；本方法是**阶段级**——只多一个出牌阶段段，之后照常进弃牌阶段。
+        用户 2026-11 裁定的落地：阶段级调度是本批新增的框架原语（见
+        `.scratch/sp5-mayunlu-panjun/issues/03-guanwei-extra-play-phase.md`）。
+
+        只对**当前回合角色**、且**出牌阶段正在进行中**时生效；其余情形静默 no-op（在别人
+        的回合 / 别的阶段调用不是编程错误，只是没有效果）。状态住 ``_turn_data``（引擎
+        私有、每回合清空）⇒ 不新增 ``GameState`` 字段、不发 delta：回放按同一条技能动作
+        重建。消费点 = :meth:`_phase_play_end`（"本阶段"清理**之后**回拨游标）。
+        """
+        if self.state.turn_seat != seat or self.state.phase is not Phase.PLAY:
+            return
+        self._turn_data["extra_play_phases"] = (
+            int(self._turn_data.get("extra_play_phases", 0)) + 1
+        )
 
     def consume_delayed_card(self, frame: Frame) -> None:
         """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
@@ -4003,6 +4276,16 @@ class Engine:
         if any(entry_id == card.card_id for entry_id, _ in entries):
             return
         entries.append((card.card_id, category.value))
+
+    def _note_turn_card_suit(self, card: CardRef, source: int) -> None:
+        """记「这张牌是 ``source`` 本回合使用过的一张」的**花色**（【观微】判据）。
+
+        与 :meth:`_note_turn_card` 同一个调用点（``start_use`` 入口，**打出不算**），但
+        **不**按牌名大类 fail-closed、**不**去重：牌面要的是"本回合使用过的牌**花色均
+        相同**"，缺一条使用就会把条件误判成成立；无花色的牌（多源转化 / 纯虚拟）记
+        ``None``，由读方按账本 L896 的 fail-closed 口径判成"不构成均相同"。
+        """
+        self.state.player(source).turn_card_suits.append(card.suit)
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
         """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
@@ -4936,6 +5219,21 @@ class Engine:
         """清掉 ``seat`` 的【烈弓】② 本次使用记账（``RESOLVE_AFTER_END`` 清扫钩子）。"""
         self.state.player(seat).liegong_bonus = None
 
+    def set_fengpo_bonus(self, seat: int, card_id: int, amount: int) -> None:
+        """记下"**本次使用**的这张牌基础伤害 +amount"（马云騄【凤魄】②）。
+
+        唯一写入方是【凤魄】的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子（选到选项 2 时）；读取方
+        是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器。**卡牌级**：按 ``card_id`` 命中，
+        不要求来源是持有者（输掉自己使用的【决斗】时对方造成的伤害同样 +X，用户 2026-11 签）。
+        作用域 = 本次使用：清理点 = ``RESOLVE_AFTER_END`` 清扫钩子 + 回合末兜底。**不发
+        delta**：与 :meth:`add_liegong_bonus` 同姿态。
+        """
+        self.state.player(seat).fengpo_bonus = (int(card_id), int(amount))
+
+    def clear_fengpo_bonus(self, seat: int) -> None:
+        """清掉 ``seat`` 的【凤魄】② 本次使用记账（``RESOLVE_AFTER_END`` / 回合末兜底）。"""
+        self.state.player(seat).fengpo_bonus = None
+
     def set_qimou(self, seat: int, amount: int) -> None:
         """落「界魏延移动版【奇谋】」的两段座位修饰：距离 -X（本回合）/ 次数 +X（本阶段）。
 
@@ -4970,8 +5268,9 @@ class Engine:
         """**陆抗移动版【决堰】·两个坐骑栏**：本回合「使用牌无距离限制」的开关。
 
         写入唯一入口（【决堰】的提交点）；作用域 = **本回合**（回合末由
-        :meth:`_clear_turn_effects` 清）。读取方是同一条技能定义上的 ``TARGET_POOL`` 与
-        ``DISTANCE_LIMIT`` 两条修饰器。**不发 delta**：与 ``set_duanyan_slash_bonus`` 同姿态。
+        :meth:`_clear_turn_effects` 清）。读取方是同一条技能定义上的
+        ``TARGET_RANGE_EXEMPT`` 修饰器（票 03：逐座位豁免距离 / 攻击范围两条判据）。
+        **不发 delta**：与 ``set_duanyan_slash_bonus`` 同姿态。
         """
         self.state.player(seat).duanyan_no_distance = bool(active)
 
@@ -5126,6 +5425,11 @@ class Engine:
             player.damage_taken_this_turn = 0
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
+            # SP武将组5【观微】的「本回合使用过的牌花色」记录（Q10 = 引擎侧）与【凤魄】的
+            # 记账：作用域 = 本回合 / 本阶段，回合末一并兜底清掉。
+            player.turn_card_suits.clear()
+            player.fengpo_bonus = None
+            player.fengpo_used = None
             # jie-yijiang-2014-mobile 票 01【定品】的两条本回合事实：使用 / 弃置过的牌的
             # 大类记录与"不能再对其发动"的禁令，作用域都是**一个回合**（与上一位同一复位点）。
             player.turn_card_entries.clear()
@@ -5586,6 +5890,9 @@ class Engine:
                 QueryKind.DODGE,
                 QueryKind.RESPOND,
             ),
+            # 票 12：源牌级置灰要读**语境**（`check_usable` 的第一条是时机）。映射只在这里
+            # 做一次，清单派生不自己按询问种类猜。
+            context=_conversion_use_context(kind),
         )
         actions = tuple(action for action in actions if not is_transformed_action(action))
         view = project(self.state, actor)
@@ -5919,11 +6226,38 @@ class Engine:
 
     # -- 驱动 ---------------------------------------------------------------
 
-    def run(self, participants: Sequence[Participant]) -> tuple[JournalRecord, ...]:
-        """推进到终局；每次询问交给 ``participants[actor]`` 应答。"""
+    def run(
+        self,
+        participants: Sequence[Participant],
+        *,
+        stop_after_game_start: bool = False,
+        stop_when: Callable[[], bool] | None = None,
+    ) -> tuple[JournalRecord, ...]:
+        """推进到终局；每次询问交给 ``participants[actor]`` 应答。
+
+        ``stop_after_game_start=True`` = **L0 边界让出**（table-ux-overhaul 票 14）：
+        ``GAME_START`` 派发一完成就返回，第一回合环一条都不跑。边界住在循环内部——
+        :meth:`_step` 里 :meth:`_start` 跑完就 ``return``（``_started`` 由假翻真），外面
+        看不见那一刻 ⇒ 不带这个开关的驱动只能一路跑到下一个询问 / 终局。接入层
+        （``sgs_web.session.Session.drive``）用它把**建局响应**截在"游戏开始时"。
+
+        ``stop_when`` = **逐步骤的让出判据**（table-ux-overhaul 票 19）：每个 :meth:`_step`
+        之后问一次"要不要让出"，为真就返回（询问 / 终局两种返回不变）。**判据不得改引擎
+        状态**（它只该读；自己那边的驱动进度由调用方记）——这个开关只改"这一次驱动停在哪"，
+        不改记录流、随机数或询问条数。接入层用它把五谷的逐目标取牌一段一段交给浏览器
+        （每一段一份中间视图）。
+
+        两个开关缺省都关 ⇒ 旧行为逐字节不变：金录像 / ``batch_games`` / ``ai_eval`` /
+        录像回放都不传它们，``_started`` 的翻转与 ``stop_when`` 的询问对它们没有任何可见效果。
+        """
         while not self.finished:
             if self.pending is None:
+                started = self._started
                 self._step()
+                if stop_after_game_start and self._started and not started:
+                    break
+                if stop_when is not None and stop_when():
+                    break
                 continue
             query = self.pending
             self.submit(participants[query.actor].respond(query))
@@ -6104,6 +6438,13 @@ class Engine:
             self._settle_abandoned_judgment()
             self._turn_pc = self._turn_steps.index(self._turn_after_end)
         step = self._turn_steps[self._turn_pc]
+        # **新步进入**才可能是"阶段开始"：挂起续跑（``step`` 返回 ``"stay"``）与判定阶段
+        # 自循环都停在同一游标上，故判据只有"游标变了"这一条。额外的出牌阶段会把游标拨回
+        # ``_phase_play_start``（游标从"出牌阶段结束之后"变回它）⇒ 也算一次新阶段。
+        if self._turn_data.get("_step_pc") != self._turn_pc:
+            self._turn_data["_step_pc"] = self._turn_pc
+            if step in self._phase_entry_steps:
+                self.state.phase_seq += 1
         if step() == "stay":
             return
         self._turn_pc += 1
@@ -6591,6 +6932,12 @@ class Engine:
         # M6 票 03【克己】："本回合**出牌阶段内**是否使用 / 打出过【杀】"。复位点就是
         # 出牌阶段起点（被【乐不思蜀】跳过时也复位——本阶段一张都没用，事实为假）。
         if self.state.turn_seat is not None:
+            # 【杀】的「每出牌阶段限一次」按**出牌阶段**复位（用户 2026-11 裁定：不是每回合；
+            # 额外的出牌阶段因此能再用一张）。只弹【杀】族的计数键，其余计数键（【酒】一类
+            # 每回合限一次）仍由座位自己的 TURN_START 复位。
+            self.state.player(self.state.turn_seat).card_use_counts.pop(
+                SLASH_FAMILY_KEY, None
+            )
             self.state.player(self.state.turn_seat).slash_in_play_phase = False
             # jushou-lusu 票 01【渐营】：「本阶段上一张使用牌」的一对格子同一复位点。
             self.state.player(self.state.turn_seat).play_phase_last_card = None
@@ -6676,6 +7023,20 @@ class Engine:
             self._clear_qimou_count(self.state.turn_seat)
             # lukang-mobile 票 01 陆抗移动版【决堰】·武器栏：牌面写「此阶段内」，同一收尾点。
             self._clear_duanyan_slash_bonus(self.state.turn_seat)
+        # 潘濬【观微】（用户 2026-11 裁定）：本阶段结束后**再执行一个额外的出牌阶段**。
+        # 排在"本阶段"清理**之后**（技能在"出牌阶段结束时"看到的是完整事实），把回合环的
+        # 游标拨回 `_phase_play_start`：它重跑阶段起点（复位 + 派发 PHASE_PLAY_START），
+        # 再走一遍空闲窗口与本收尾，之后照常进弃牌阶段。`play_idle_emitted` 一并清掉，
+        # 新阶段照常落 PHASE_PLAY_IDLE 记录。
+        if int(self._turn_data.get("extra_play_phases", 0)) > 0:
+            self._turn_data["extra_play_phases"] -= 1
+            # 新阶段要重新派发 `PHASE_PLAY_START` / `PHASE_PLAY_END`：`_dispatch_phase_body`
+            # 用 `_turn_data` 的键做"本阶段只派发一次"的幂等闸，不清掉它们，额外阶段会
+            # 静默跳过两个时点（连时机记录都不落）。
+            self._turn_data.pop("play_idle_emitted", None)
+            self._turn_data.pop("phase_play_start", None)
+            self._turn_data.pop("phase_play_end", None)
+            self._skip_to(self._phase_play_start)
         return None
 
     def _phase_discard_start(self) -> str | None:

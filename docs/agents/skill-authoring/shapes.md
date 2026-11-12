@@ -89,6 +89,13 @@
 > 样板 = 界华雄【耀武】`hero.jie_huaxiong.yaowu`（造伤后自动效果）；风包魏延【狂骨】
 > `hero.weiyan.kuanggu` 是它的"两条钩子"版：一条在 `DAMAGE_TAKE` 定格距离、一条在
 > `DAMAGE_AFTER_DEAL` 逐点回复。
+>
+> **簿记段**（table-ux-overhaul 票 17）：强制段里只做**记账**的那一类（标记到期清扫）再加
+> `bookkeeping=True`——它连"同座位同档多段强制效果由玩家选先后"的面也**不进**，只按链序
+> 静默跑。判据不能只看形状：`forced` 的**真效果**（【劫营】③ +【镇骨】在 `TURN_END` 上的
+> 结算）同样是"纯 handler"，而那张"两条都得跑、先跑哪个由你定"的面必须照旧出现，故
+> "是不是簿记"只能是声明。样板 = `hero.shen_zhugeliang.kuangfeng` / `hero.shen_zhugeliang.dawu`
+> 的 `TURN_START` 到期清扫（玩家此前会在准备阶段被问"是否发动"）。
 
 > 表里没有的形状，就是 C1：**停手开架构缺口票**，不许在技能代码里绕。
 
@@ -146,7 +153,8 @@
 | 修饰点 | 归属 |
 |---|---|
 | `CANDIDATES` | 补候选（转化技 / 护驾 / 激将 / 蛊惑）。语境由 `CandidateScope` 区分：`PLAY`（出牌阶段）、`DODGE`（【闪】）、`RESPOND`（打出 / 使用的响应窗口）、`PEACH`（濒死求【桃】）、`NULLIFY`（无懈的收集式窗口）、`CARD`（逐张牌的常规候选）。"这扇窗口要一张什么牌"随 `ModifierContext.respond_required` 下传（六扇窗口都填；`DODGE` 恒为 `dodge`）。**窗口本身的登记**（scope / cause / mode / 要的牌 / 需要还是可以 / 谁可以参与 + 源码站点）住 §3.8 的 `CARD_REQUEST_WINDOWS`；共享判据 = `src/sgs/skills/catalog.py:required_card`（技能不再各写一份"哪些 scope 算要牌"） |
-| `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降）。**补目标能放宽"自用牌"**（给【无中生有】/【桃】一类 `TargetRule.self_only` 的牌加别人，是"可对别人使用自用牌"类技能的模板）——但补目标前先分清自己豁免的是**距离**还是**目标合法性**：雄乱（`hero.zhangxiu.xiongluan`）只豁免距离与次数，故回调按 `TargetRule.self_only` 收窄（lei-batch 票 04 的缺陷 B：不加这道守卫，雄乱生效时【无中生有】/【桃】就能指定雄乱目标） |
+| `TARGET_RANGE_EXEMPT` | **本次使用可以无视距离 / 攻击范围的座位集**（票 03 的加法；table-ux-overhaul spec §1 #2 / §2 Q2）。`current` 从**空元组**起，回调**追加**被豁免的座位（集合语义），**只许加**。求值点在 `src/sgs/effects/actions.py:check_targets` 的 ②「距离与攻击范围」，**在 ③④⑤ 之前**：被豁免的座位只是**跳过**距离两条判据（攻击范围 + `TargetRule.max_distance`），随后照常走延时 / 封印、附加谓词 `TARGET_FILTERS` 与 `TARGET_POOL` 链 ⇒ **不可能**让被 ③④⑤ 判非法的座位复活，也**不能**产出池成员。消费面：天义 / 雄乱 / 决堰 / 诈降 / 烈弓 / 界武圣② / 武神②；【神速】那类"技能侧自算池"的载体走 `check_targets(..., distance_exempt=True)`——那个布尔**不是第二套豁免路径**：它只把"全体座位"喂进 ② 的**同一个**豁免集（同一个求值点、同一条 `player.seat not in exempt` 判据，票 13 评审 P3），故两条路给出的合法座位集逐值相同。新增"无距离限制"效果**一律**挂这里，不要写 `TARGET_POOL` 并集 |
+| `TARGET_POOL` | 目标池的**合法性增删**（空城 / 谦逊 / 帷幕的"不能成为目标"剔除；方天画戟的"额外目标合法性同标准"空操作）。**回调不许新增池成员**，除非能证明该成员已通过 ③④（④ 的附加谓词 + ③ 的延时封印）——票 03 的缺陷类就是"在 ⑤ 里并集放宽距离"，它把 ④/⑤ 判非法的座位加了回来（复用旧口径的反例：雄乱把无武器角色变成【借刀杀人】的目标、把无牌角色变成【拆/顺】的目标、复活【空城】删掉的座位）。"放宽距离"与"补目标"是两件事：前者挂 `TARGET_RANGE_EXEMPT`（②），后者今天**没有**合法消费者（"可以对别人使用【无中生有】/【桃】"类需求要先证明 ③④ 仍成立，或另立挂点在 ④ 之后重跑 ③④）。全部消费者由 `tests/test_hero_catalog.py::test_the_target_pool_point_only_carries_legality_add_and_remove` 钉成名单 |
 | `TARGET_COUNT` | 额定目标数（方天画戟类） |
 | `DISTANCE` | 座位距离（马术、义从、坐骑） |
 | `DISTANCE_LIMIT` | 额定距离上限（奇才） |
@@ -173,7 +181,7 @@
 | `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判；`spec.max_per_suit` 存在时按花色收窄（涉猎，0 下限由牌面决定） |
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
 | `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它。**逐步询问**这一面自票 07 起同样有置灰口：`Engine.ask_option(..., disabled=..., hero_card=..., option_texts=...)` 把置灰项留在询问的 `options` 里、只从 `legal_actions` 剔除（提交被拒），投影派生 `option_details`（技能名 / `descriptions.json` 原文 / 置灰标记）给界面画灰——目前唯一载体是"展示武将牌"那一类（票 02 §4.2 B 段），首个真实调用者 = 【天成】（`hero.wuming.tiancheng`；选项 id 带展示序号 `tiancheng:reveal:<k>`，效果行文本给具体 X） |
-| `SELECT_OPTIONS` | **多选选项**（界夏侯渊【神速】的「至多三项」= 首个载体，jie-feng-batch2 票 01a）：一张弹窗里逐项勾选 | 答案 = `Action.SelectOptions(choices)`（集合，**不是**单个 `choice`）；候选 = `[min_selected, max_selected]` 内、不含 `disabled` 的**每个子集**的全量枚举（空集排第一 ⇒ 超时兜底 = 一项都不做）；**不枚举档**（`Engine.ask_options(enumerate_candidates=False)`，yijiang-2014-round2 票 21；先例 = `ARRANGE` 的两行交换）则只给一条**骨架**兜底（`options` 序的前 `min_selected` 个可选项），答案由界面 / AI 自己组装、引擎按 `is_legal_option_set` 校验形状（池内 / 无重复 / 无置灰 / 长度在区间内）——座位多选的子集数随人数组合爆炸（8 人局、上限 4 = 162 条），故【秉壹】走这一档；`disabled` 与单选面同语义（留在 `options` 里画灰、不进候选）；引擎入口 `Engine.ask_options`（手写询问，**不进** `steps` 闭集、不进预发动清单） |
+| `SELECT_OPTIONS` | **多选选项**（界夏侯渊【神速】的「至多三项」= 首个载体，jie-feng-batch2 票 01a）：一张弹窗里逐项勾选 | 答案 = `Action.SelectOptions(choices)`（集合，**不是**单个 `choice`）；候选 = `[min_selected, max_selected]` 内、不含 `disabled` 的**每个子集**的全量枚举（空集排第一 ⇒ 超时兜底 = 一项都不做）；**不枚举档**（`Engine.ask_options(enumerate_candidates=False)`，yijiang-2014-round2 票 21；先例 = `ARRANGE` 的两行交换）则只给一条**骨架**兜底（`options` 序的前 `min_selected` 个可选项），答案由界面 / AI 自己组装、引擎按 `is_legal_option_set` 校验形状（池内 / 无重复 / 无置灰 / 长度在区间内）——座位多选的子集数随人数组合爆炸（8 人局、上限 4 = 162 条），故【秉壹】走这一档；`disabled` 与单选面同语义（留在 `options` 里画灰、不进候选）；引擎入口 `Engine.ask_options`（手写询问，**不进** `steps` 闭集、不进预发动清单）。**座位多选**（table-ux-overhaul 票 13）不再由技能各写一遍：`Engine.ask_seats(frame, actor, timing, *, skill_id, pool, lo, hi, optional)` 是"一次选多名角色"的**唯一**入口（内部固定 `options = seat:N` / `min_selected=lo` / `max_selected=hi` / `enumerate_candidates=False`，返回座位元组），步骤语言里 `PickSeats(hi > 1 ∧ not ordered)` 也走它；首个载体是界顾雍【秉壹】 |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |
 | `DISTRIBUTE` | **计数式分配**（神周瑜移动版【业炎】= 首个载体，huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数（`seats` / `max_total` / `per_seat_max`） | 候选 = 「每座 0..单座上限、合计 ≤ 上限」的全量枚举；答案 = `Action.Distribute(counts)`（座位升序、省略 0）；`counts=()` 键最小 ⇒ 超时兜底 = 不分配 |
 
@@ -323,6 +331,18 @@ extra_modifiers=(Modifier(ModifierPoint.CANDIDATES, MY_PROVIDER_WINDOWS.offers),
 A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住在 `Hook` / `Seam` 上——
 **三条登记互不覆盖**（同一 id 的两条 `SkillDef` 会被 `CATALOG` 的字典推导静默覆盖，故
 "一条技能两半"必须挂在**同一条**声明上）。
+
+### 3.10 未落文档的框架能力（缺口登记）
+
+这三条**已经在代码里活着**，但 `开发文档/` 与 `docs/` 都没有对应记载——它们是"框架有心跳、
+文档没跟上"的登记，不是示范。写到它们时：(a) 读下面点名的符号；(b) 不许另写一份；(c) 语义
+有歧义就按 §4 的 **D1 停**、开裁定票。补齐后把该行挪进对应的 §3.x 表、本节删掉。
+
+| 能力 | 落点 | 状态 | 缺口 |
+|---|---|---|---|
+| 转化清单**逐张置灰**（源牌级 / 产物级） | `src/sgs/skills/heroes.py:unusable_transform_sources`、`src/sgs/skills/heroes.py:conversion_product_types`、`src/sgs/skills/heroes.py:conversion_sources_by_product`；判据共用 `src/sgs/effects/actions.py:check_usable` | 已实现（table-ux-overhaul 票 12） | 源牌级 = 这张源牌的**所有产物都不可用**才置灰，**灰的仍进 `options`**（同时进 `StepPool.disabled`）、不删行；产物级 = 牌名步按 `check_usable` 整条判（空城 ⇒【杀】灰、满血 ⇒【桃】灰） |
+| 座位步的**动态上下界** `SeatBound` | `src/sgs/skills/flow.py:SeatBound`、`src/sgs/skills/flow.py:_seat_bounds` | 已实现（yijiang-2014-round2 票 18 / P9） | `04` / `06` / 本文件都没有这一节；执行器 / 校验器 / 预览清单三处共读它，别各写一份。目标由牌名决定时 `lo=0` ⇒ 清单不下发该步、或标 `StepPool.max = 0` 自动跳过 |
+| 「这张牌此刻能不能用」`check_usable` | `src/sgs/effects/actions.py:check_usable`（`require_targets=` 两档） | 已实现（票 12 扩） | 新写同类判据**应当读它**，不许各自重写一份；语义口径未落文档 |
 
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 

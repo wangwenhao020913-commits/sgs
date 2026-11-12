@@ -559,6 +559,10 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             # 票 18（D1）：无懈窗口的 `RespondQuery.cause` 就是它；AI 按 `NULLIFY` 分派
             # 目标化判据。它是询问自带面的一部分，不是全知状态。
             "WindowCause",
+            # 票 13 的评审 R3：步骤键的**唯一拼法**（`SELECT_OPTION` 的 `skill_id` 形状）。
+            # 纯字符串函数、不读任何状态；放在这里是为了让引擎（流水线）与 AI（分组表）
+            # 拼同一处，而不是各抄一遍 `f"{short}:{step}"`。
+            "step_option_key",
         }
     ),
 }

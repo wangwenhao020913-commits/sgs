@@ -29,7 +29,7 @@ r"""通用**步骤流水线**（票 02 起；票 07 抽成独立模块）。
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
 from types import MappingProxyType
@@ -59,12 +59,12 @@ from sgs.state import (
     UseCard,
     Zone,
     ZoneRef,
+    step_option_key,
 )
 from sgs.timing import Timing
 
 __all__ = [
     "FREE_SPLIT",
-    "MANIFEST_POOL_LIMIT",
     "SEAT_PREFIX",
     "ActorRef",
     "Arrange",
@@ -82,12 +82,14 @@ __all__ = [
     "SeatPool",
     "SeatBound",
     "SkillFlow",
+    "StepPreview",
     "activation_answers",
     "ask_key_of",
     "card_pool_size",
     "card_preactivations",
     "manifest",
     "option_seat",
+    "preview_step",
     "provide_source_id",
     "run_flow",
     "seat_choice",
@@ -642,6 +644,9 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     读冒号后那段 ⇒ 直接命中 ``SkillDef.step_requirements``）；同一步问多次时补序号，
     既避免缓存撞车，也让两问可以各有各的文案（键形如 ``seat:0`` / ``seat:1``）。
 
+    **形状只有一处**：拼法住 :func:`~sgs.state.step_option_key`（``SELECT_OPTION`` 询问上的
+    ``skill_id`` 是协议字段，AI 侧的分组表也按它比对，故不是流水线的私有知识）。
+
     **短 id 的取法分两档**（票 08 的加法）：主动技的 ``SKILL`` 帧把全限定 id 写在
     ``frame.data["skill_id"]``；被动技**没有**这个键，派发环只写 ``running_skill``
     （见 :func:`~sgs.skills.catalog._dispatch`）。【流离】是第一条带座位步的被动技
@@ -649,8 +654,7 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     这里只读帧里的**既有键**，不新增协议字段——故记录流除新询问本身外不变。
     """
     raw = frame.data.get("skill_id") or frame.data.get("running_skill") or ""
-    short = str(raw).rsplit(".", 1)[-1]
-    return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
+    return step_option_key(raw, key, index if multi else None)
 
 
 def _zone_cards(state: GameState, ref: Any) -> list[int]:
@@ -1090,7 +1094,17 @@ def _flow_step_seats(
     timing: Timing,
     ask_owner: Any,
 ) -> tuple[str, object]:
-    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。
+    """跑一步选座位（一次问齐 / ``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。
+
+    **一条流水线里只有两种座位步**（table-ux-overhaul 票 13 起）：
+
+    - ``hi > 1`` 且 ``not ordered`` ⇒ **一次问齐**（:meth:`Engine.ask_seats`，``SELECT_OPTIONS``
+      + ``enumerate_candidates=False``）。这就是"一次选多名角色"的唯一形状：【突袭】的
+      1–2 名、【除疠】的任意名都在这一档 —— 不再逐座发问、也不再逐座排除已选（答案是集合，
+      重复由形状谓词自己挡）。
+    - 其余（``hi == 1`` 的定值步，或 ``ordered`` 的**有序**多选）⇒ 保持逐座 ``ask_option``
+      的既有形状：``ordered`` 的池依赖"本步已选"的座位，先后两问的问法由
+      ``step_requirements`` 分别给（目前没有消费者落在这一档；【除疠】改走预览后已不是它）。
 
     **先认已接受的答案，再算池**（本 effort 票 01）：这一问若已经答过，答案就是这一步的
     裁决，``pool`` 一次都不算。挂起续跑时 effect 已经改过 ``pool`` 要读的状态（【攻心】
@@ -1100,9 +1114,11 @@ def _flow_step_seats(
     （:meth:`Engine.accepted_option`），故"重跑 steps 不重发询问"这条既有设计不变，只是
     把"现算 pool"从重入路径上摘掉了。
     """
-    del ask_owner  # 座位步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
+    del ask_owner  # 座位步走 ``ask_option`` / ``ask_seats``，其询问名是 ``skill_id``
     actor = _flow_actor(step, host.state, frame, owner, answers)
     lo, hi = _seat_bounds(step, host.state, frame, owner, answers)
+    if not step.ordered and hi > 1:
+        return _flow_step_seats_once(host, frame, step, owner, actor, lo, hi, timing)
     chosen: list[int] = []
     while len(chosen) < hi:
         option_id = _flow_option_id(frame, step.key, len(chosen), multi=hi > 1)
@@ -1136,6 +1152,110 @@ def _flow_step_seats(
     if len(chosen) < lo:
         return "cancel", ()
     return "ok", tuple(chosen)
+
+
+_SEAT_SET_CHECKED = "seat_set_checked"
+"""帧私有：已经复核过"能不能从这个池里拼出来"的座位集合（键 = 步骤的询问 id）。
+
+**不是**答案缓存（那是 ``ask_answers``）：它只回答"这份集合复核过了没有"。第 2 次重入起
+状态已被 effect 改过（除疠弃掉的牌会让目标掉出池），照活状态再复核就会把一次已经发生过
+副作用的发动误判成 "cancel"（``run_flow`` 因此抛 RuntimeError）；复核只在**答案落地后的
+第一次重入**（effect 尚未开始）那一次跑，结果记在这里。
+"""
+
+
+def _flow_step_seats_once(
+    host: Any,
+    frame: Any,
+    step: PickSeats,
+    owner: int,
+    actor: int,
+    lo: int,
+    hi: int,
+    timing: Timing,
+) -> tuple[str, object]:
+    """**一次选齐**座位多选步（``hi > 1 ∧ not ordered``；table-ux-overhaul 票 13）。
+
+    询问名不带序号（一件事只有一问）：``<短 id>:<步骤键>``。复核在
+    :func:`_seat_set_is_buildable`：池仍然是"按已选现算"的那一份（除疠的势力互异），
+    故一份越池的集合不会被当成合法答案——它与"凑不够 ``lo``"同一条出口（``"cancel"``，
+    零副作用），而不是把一条非法的目标集合交给 ``effect``。
+    """
+    option_id = _flow_option_id(frame, step.key, 0, multi=False)
+    checked = frame.data.setdefault(_SEAT_SET_CHECKED, {})
+    accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
+    if accepted is not None:
+        chosen = (
+            ()
+            if isinstance(accepted, Pass)
+            else tuple(_seat_of(choice) for choice in accepted.choices)
+        )
+        if checked.get(option_id) != chosen:
+            if not _seat_set_is_buildable(step, host.state, frame, owner, chosen):
+                return "cancel", ()
+            checked[option_id] = chosen
+        return _seat_set_verdict(chosen, lo)
+    pool = tuple(int(seat) for seat in step.pool(host.state, frame, owner, ()))
+    if len(pool) < lo:
+        # 池里连下限都装不到（旧逐座档在池空时 break 出去，同一条出口）。
+        return "cancel", ()
+    if not pool:
+        return _seat_set_verdict((), lo)
+    answer = host.ask_seats(
+        frame,
+        actor,
+        timing,
+        skill_id=option_id,
+        pool=pool,
+        lo=lo,
+        hi=hi,
+        optional=step.optional,
+    )
+    if host.suspended(answer):
+        return "stay", ()
+    chosen = tuple(answer)
+    if not _seat_set_is_buildable(step, host.state, frame, owner, chosen):
+        return "cancel", ()
+    checked[option_id] = chosen
+    return _seat_set_verdict(chosen, lo)
+
+
+def _seat_set_verdict(chosen: tuple[int, ...], lo: int) -> tuple[str, object]:
+    """座位多选的三态裁决：凑够 ``lo`` ⇒ 提交，否则取消（与逐座档同一条出口）。"""
+    if len(chosen) < lo:
+        return "cancel", ()
+    return "ok", tuple(chosen)
+
+
+def _seat_set_is_buildable(
+    step: PickSeats,
+    state: GameState,
+    frame: Any,
+    owner: int,
+    chosen: tuple[int, ...],
+) -> bool:
+    """这份座位集合能不能按**声明序**从池里一步步拼出来。
+
+    "池依赖已选"的步骤（除疠的势力互异）与形状谓词
+    （:func:`~sgs.effects.is_legal_option_set`：池内 / 无重复 / 区间）不是一回事：后者的
+    ``options`` 是**首问**那一份快照，收不下"第二名的势力必须与第一名不同"。故这里按
+    ``step.pool`` 的**前缀**逐个复核（与 ``_assign_activation`` 的复合动作校验、与前端的
+    预览是同一份回调），越池即整步取消——服务端不采信一份它自己不会铺出来的集合。
+    """
+    prefix: list[int] = []
+    for seat in chosen:
+        if seat in prefix:
+            return False
+        pool = tuple(int(item) for item in step.pool(state, frame, owner, tuple(prefix)))
+        if seat not in pool:
+            return False
+        prefix.append(seat)
+    return True
+
+
+def _seat_of(choice: str) -> int:
+    """``seat:N`` 文本 → 座位号（``SelectOptions.choices`` 的一项）。"""
+    return int(str(choice).removeprefix(SEAT_PREFIX))
 
 
 def _flow_step_option(
@@ -1314,16 +1434,6 @@ _UNSET = _Unset()
 # ---------------------------------------------------------------------------
 # 预发动清单 + 复合动作校验（W4-1）
 # ---------------------------------------------------------------------------
-
-MANIFEST_POOL_LIMIT = 32
-"""一步的**逐选项子池**最多下发多少行（W4-1）。
-
-池依赖前序选择的技能（【流离】选了武器 ⇒ 攻击范围变、【离间】先点使用者）要给每个前序
-选项各渲一行。前序选项的组合数超过本上限时**退化**：该步的 ``pool`` 置空
-（不下发候选索引），合法性仍由 :func:`validate_flow_activation` 按真谓词裁决——退化只
-削弱界面提示，不放宽任何规则。
-"""
-
 
 class _ActivationFrame:
     """没有真帧时给步骤池用的最小帧替身（只实现 ``data``）。"""
@@ -1504,9 +1614,15 @@ def _sampled_answers(step: FlowStep, values: tuple[object, ...]) -> list[object]
 
 
 def _prior_contexts(
-    domains: list[tuple[FlowStep, tuple[object, ...]]], limit: int
-) -> list[dict[str, object]] | None:
-    """前序步骤的代表答案组合；超过 ``limit`` ⇒ ``None``（退化）。"""
+    domains: list[tuple[FlowStep, tuple[object, ...]]],
+) -> list[dict[str, object]]:
+    """前序步骤的代表答案组合（**全量**，不设上限）。
+
+    table-ux-overhaul 票 11 按用户裁定删掉了"超过 ``MANIFEST_POOL_LIMIT`` 就整步退化"那条
+    路（spec §2 Q6「**永不退化**」）：退化把一步的候选整格抽掉，界面只能靠"全都点得动"兜底
+    ——那正是这张票要消掉的东西。逐步的现算候选现在由**步骤预览**端点给
+    （:func:`preview_step`），清单不再需要"组合太多就假装没有候选"这一档。
+    """
     per_step: list[list[object]] = []
     for step, values in domains:
         maximum = _step_max(step)
@@ -1518,11 +1634,6 @@ def _prior_contexts(
         if not answers:
             return []
         per_step.append(answers)
-    total = 1
-    for answers in per_step:
-        total *= len(answers)
-    if total > limit:
-        return None
     keys = [step.key for step, _ in domains]
     return [dict(zip(keys, combo)) for combo in product(*per_step)]
 
@@ -1546,8 +1657,10 @@ def _pool_rows(
 ) -> tuple[StepPool, ...]:
     """去重后转成协议形状（保留首次出现的次序，确定性）。
 
-    每行是 ``(when, options, disabled)``：``disabled`` 只有选项步会填（置灰项，见
-    :class:`PickOption` 的 ``disabled``），其余步骤一律空元组。
+    每行是 ``(when, options, disabled)``：``disabled`` 由**产出它的那一步**填——选项步的
+    置灰项（见 :class:`PickOption` 的 ``disabled``）、以及转化清单来源步的**源牌级置灰**
+    （table-ux-overhaul 票 12，产出方在 :func:`sgs.skills.heroes._manifest_steps`；本模块
+    渲染的流水线步骤今天一律空元组）。
 
     若所有前序组合给出的候选**完全相同**（含义上的相同：候选与置灰项都一样），收成一行
     ``when=()``："这一步的池与前序选择无关"——比逐项重复 N 遍更小，也让接入层不必为无关的
@@ -1662,18 +1775,21 @@ def manifest(
     owner: int,
     *,
     frame: Any = None,
-    limit: int = MANIFEST_POOL_LIMIT,
     step_requirements: Mapping[str, str] | None = None,
 ) -> tuple[Step, ...]:
     """把一条 :class:`SkillFlow` 的步骤声明渲染成**预发动清单**（W4-1）。
 
     只渲染**由 ``owner`` 本人应答的前缀**：遇到第一步的 ``actor`` 解析成别人就停
     （反间猜花色 / 挑牌这类"换应答者的第二段"仍逐步询问，不进预发动）。``pool`` 是
-    "前序选择 → 这一步的候选"的函数，按前序选项逐行下发；组合数超过 ``limit`` 时
-    退化成一行（见 :data:`MANIFEST_POOL_LIMIT`）。渲染**只读状态**：不铺选择面、不抽
-    随机数、不搬牌。逐选项子池按前序步骤的**单个选项**取键（流离的一张牌、离间的一名
+    "前序选择 → 这一步的候选"的函数，按前序选项逐行下发。渲染**只读状态**：不铺选择面、
+    不抽随机数、不搬牌。逐选项子池按前序步骤的**单个选项**取键（流离的一张牌、离间的一名
     使用者），不枚举多选步的幂集——多选步之后的池若真依赖"选中的那几张"，要在 W4-2
     按技能显式收窄，而不是让清单按 2ⁿ 行下发。
+
+    **不再有"组合数超上限就退化"这一档**（table-ux-overhaul 票 11 / spec §2 Q6「永不退化」）：
+    静态行只是快照，同一步内的动态约束根本表达不了；"此刻还能点谁"由 :func:`preview_step`
+    （步骤预览端点）按同一份池回调现算。清单因此**永远**下发它算得出来的候选，界面也就
+    不需要"取不到就全都点得动"这种兜底。
 
     返回空元组 = 这条技能此刻没有可用的预发动清单（没有 flow / 首步无候选 /
     选取面不可见 / 由别人应答 / **含** :class:`Arrange` 步）。最后一档是 W6-02 的裁定：
@@ -1725,10 +1841,7 @@ def manifest(
         answers = probe_answers()
         if _flow_actor(step, state, _with_answers(base, answers), owner, answers) != owner:
             break
-        combos = _prior_contexts(domains, limit)
-        degraded = combos is None
-        if degraded:
-            combos = [{}]
+        combos = _prior_contexts(domains)
         multi_prior = any(
             _step_max(prior) is None or (_step_max(prior) or 0) > 1
             for prior, _ in domains
@@ -1789,26 +1902,6 @@ def manifest(
 
         elif isinstance(step, PickSeats):
             dynamic = callable(step.lo) or callable(step.hi)
-            if dynamic and degraded:
-                # 退化的清单（前序组合数超过 :data:`MANIFEST_POOL_LIMIT`）读不出"这一步
-                # 在这个牌名下要选几个"——不能假装"没有目标"把步整条拿掉（那会让界面上
-                # 再也选不到目标），也不能按某个抽样组合硬写个数（【桃】/【酒】会被要求
-                # 选一个不存在的东西）。故步照旧下发、**不下发候选索引**（界面退化为全都
-                # 点得动），个数交给校验器按**本次真实答案**裁决：``min = 0`` 只是把
-                # "能不能提交"交还给服务端，规则一条都不放宽。
-                steps.append(
-                    Step(
-                        name=step.key,
-                        kind="seat",
-                        min=0,
-                        max=1,
-                        pool=(),
-                        order=index,
-                        wording=wording(step),
-                    )
-                )
-                domains.append((step, ()))
-                continue
             # 第 4 格 = 这一行要多选几个（只有可调用档才下发 ``StepPool.max``；定值步
             # 的载荷保持原样，既有清单逐字节不变）。
             seat_rows: list[
@@ -1818,15 +1911,9 @@ def manifest(
             for combo in combos:
                 answers = answer_map(combo)
                 framed = _with_answers(base, answers)
-                try:
-                    pool = tuple(int(seat) for seat in step.pool(state, framed, owner, ()))
-                except KeyError:
-                    if not degraded:
-                        raise
-                    # 退化路径没有前序答案可喂；不假装"没有目标"，改成不下发候选索引。
-                    seat_rows = []
-                    bounds = []
-                    break
+                pool = tuple(
+                    int(seat) for seat in step.pool(state, framed, owner, ())
+                )
                 row_max: int | None = None
                 if dynamic:
                     lo, hi = _seat_bounds(step, state, framed, owner, answers)
@@ -1976,6 +2063,274 @@ def manifest(
             domains.append((step, tuple(dict.fromkeys(values))))
 
     return tuple(steps)
+
+
+# ---------------------------------------------------------------------------
+# 步骤预览（table-ux-overhaul 票 11 / spec §2 Q6 Q10）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StepPreview:
+    """清单里**光标那一步**此刻的真候选 —— 只读派生，与校验器同一份池回调（票 11）。
+
+    ``options`` / ``disabled`` 是服务端此刻算出来的"能点谁"，口径与
+    :class:`~sgs.state.StepPool` 的 ``options`` / ``disabled`` 逐字相同（座位 = ``seat:N``、
+    选牌 = 牌 id 的十进制文本、选项 = 选项文本）：前端的可点集合只读这一份，不自己推规则。
+
+    ``can_advance`` = **已填的前缀每一步都满足**（可以离开这一步：进下一步或提交）；
+    ``can_submit`` = **整条清单**都满足（最后一步必须点提交 —— spec §2 Q5）；
+    ``next`` = 光标之后那一步的步骤键（``None`` = 这已是最后一步）。
+    两个判据都在服务端算：自动推进（票 08）与"最后一步必须点提交"因此不落地前端判据。
+
+    ``cursor`` = 预览的那一步在**清单**里的下标（清单的步骤与 ``flow.steps`` 不必一一对应：
+    含 ``Arrange`` / 观看步 / 换应答者的流水线整条不出现，动态座位步在"没有目标"时被跳过，
+    故下标一律按**清单**数，映射回流水线走 :attr:`~sgs.state.Step.order`）。
+    """
+
+    cursor: int
+    name: str | None
+    kind: Literal["card", "seat", "option"] | None
+    options: tuple[str, ...]
+    disabled: tuple[str, ...]
+    can_advance: bool
+    can_submit: bool
+    next: str | None
+
+
+def _preview_seats(values: Sequence[object]) -> tuple[int, ...]:
+    """预览请求里的座位答案 → ``tuple[int, ...]``（接受 ``3`` 与 ``"seat:3"`` 两种写法）。
+
+    两种写法都收是**读取方纪律**：清单下发的候选是 ``seat:N`` 文本（界面照抄），而记录流 /
+    复合动作里的 ``choices`` 也是同一份文本；同时让手写 / 脚本调用能直接给座位号。
+    """
+    out: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError(f"座位答案不接受布尔值：{value!r}")
+        if isinstance(value, int):
+            seat = value
+        elif isinstance(value, str) and value.startswith(SEAT_PREFIX):
+            try:
+                seat = int(value.removeprefix(SEAT_PREFIX))
+            except ValueError as error:
+                raise ValueError(f"座位文本损坏：{value!r}") from error
+        else:
+            raise ValueError(f"座位答案必须是座位号或 seat:N：{value!r}")
+        if seat in out:
+            raise ValueError(f"座位 {seat} 重复")
+        out.append(seat)
+    return tuple(out)
+
+
+def _preview_ids(values: Sequence[object]) -> tuple[int, ...]:
+    """预览请求里的选牌 / 提供答案 → ``tuple[int, ...]``（实体牌 id）。"""
+    out: list[int] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError(f"选牌答案必须是牌 id：{value!r}")
+        try:
+            card_id = int(value)
+        except ValueError as error:
+            raise ValueError(f"选牌答案必须是牌 id：{value!r}") from error
+        if card_id in out:
+            raise ValueError(f"牌 {card_id} 重复")
+        out.append(card_id)
+    return tuple(out)
+
+
+def _preview_answer(
+    step: FlowStep,
+    state: GameState,
+    framed: Any,
+    owner: int,
+    raw: Sequence[object],
+    prior: FlowAnswers,
+) -> tuple[object, bool, bool]:
+    """一份预览答案 → ``(答案形状, 是否已满足, 要不要显式确认)``。
+
+    答案形状与 :func:`_assign_activation` 逐字相同；"已满足"只回答**这一步填完了没有**
+    （张数落在 ``lo..hi``、选项在闭集里且没被置灰），上下界与闭集都读校验器读的同一份派生
+    （``_seat_bounds`` / ``_resolve_options`` / ``_card_options``），故"预览说能点"与
+    "校验器说合法"不可能各说一套。第三格与界面的「下一步」同源：选牌 / 提供步总要显式
+    确认，座位步只在 ``hi > lo``（1..max 多选）时要。
+    """
+    if isinstance(step, PickSeats):
+        lo, hi = _seat_bounds(step, state, framed, owner, prior)
+        answer = _preview_seats(raw)
+        return answer, lo <= len(answer) <= hi, hi > lo
+    if isinstance(step, PickOption):
+        if len(raw) != 1:
+            raise ValueError(f"选项步只接受一个值，收到 {len(raw)} 个")
+        answer = str(raw[0])
+        legal = _resolve_options(step.options, state, framed, owner, prior)
+        blocked = _resolve_options(step.disabled, state, framed, owner, prior)
+        return answer, answer in legal and answer not in blocked, False
+    if isinstance(step, PickCards):
+        answer = _preview_ids(raw)
+        face = _resolve_face(step.face, state, framed, owner, prior)
+        options = (
+            () if face == () else _card_options(state, int(face), step, framed, owner, prior)
+        )
+        hi = step.hi if step.hi is not None else len(options)
+        return answer, step.lo <= len(answer) <= hi, True
+    if isinstance(step, PickProvide):
+        ids = _preview_ids(raw)
+        refs = _provide_refs(state, _flow_actor(step, state, framed, owner, prior), step)
+        try:
+            answer = tuple(refs[card_id] for card_id in ids)
+        except KeyError as error:
+            raise ValueError(
+                f"步骤 {step.key} 的牌 {error.args[0]} 不在可选范围内"
+            ) from error
+        hi = step.hi if step.hi is not None else len(refs)
+        return answer, step.lo <= len(ids) <= hi, True
+    raise ValueError(f"步骤 {step.key} 不能出现在预发动清单里")  # Arrange / 观看步
+
+
+def preview_step(
+    flow: SkillFlow,
+    state: GameState,
+    owner: int,
+    answers: Sequence[tuple[str, Sequence[object]]],
+    *,
+    steps: Sequence[Step],
+    frame: Any = None,
+) -> StepPreview:
+    """``answers`` 前缀 → 清单那一步的**现算**候选（只读；与校验器同一份池 / 界回调）。
+
+    ``answers`` 是玩家已经填的答案（**清单**步名的前缀、按顺序），最后一条可以是他**正在
+    编辑**的那一步：``values`` 非空时这一步的池按它排除已选目标（【除疠】的"势力互异"、
+    【离间】的第二问都靠这条）。``steps`` 是**这次询问已经下发的那份清单**——预览不重渲
+    清单（那要枚举全部前序组合），映射回流水线只读 :attr:`~sgs.state.Step.order`。
+
+    **只读**：只调池 / 界的派生回调，不压帧、不搬牌、不抽随机数、不写记录（与
+    :meth:`Engine.respond_candidates` 同一条纪律）。池回调要帧上下文而这次预览没有真帧时
+    （``PLAY_PHASE`` 的清单就是这种）⇒ 候选置空、``can_advance`` 为假（fail-closed：
+    前端据此"点不了"，不回退成"全都点得动"）。
+
+    光标规则（前端的本地光标与它同源，故两边不会各指一步）：
+
+    - 最后一条答案那一步**还要显式确认**（选牌 / 提供步，或 ``hi > lo`` 的多选座位步）⇒
+      光标停在它上面：玩家还在这一步上挑，"还能点谁"是这一步的问题；
+    - 最后一条答案**没填满**（张数不在 ``lo..hi``、选项被置灰）⇒ 光标停在它上面；
+    - 其余 ⇒ 光标 = 已填步数（预览**下一步**）。
+    """
+    base = frame if frame is not None else _ActivationFrame()
+    given = [(name, tuple(values)) for name, values in answers]
+    if len(given) > len(steps):
+        raise ValueError(f"答案前缀比清单还长（{len(given)} > {len(steps)}）")
+    recorded: dict[str, object] = {}
+    cursor = len(steps)
+    satisfied_prefix = True
+    cursor_satisfied = False
+    cursor_prior: dict[str, object] = {}
+    for index, manifest_step in enumerate(steps):
+        if index >= len(given):
+            cursor = index
+            cursor_prior = dict(recorded)
+            break
+        name, raw = given[index]
+        if name != manifest_step.name:
+            raise ValueError(
+                f"答案第 {index} 步的步名是 {manifest_step.name!r}，不是 {name!r}"
+                "（答案必须是清单步名的前缀、且按顺序）"
+            )
+        step = flow.steps[manifest_step.order]
+        prior = dict(recorded)
+        answer, satisfied, explicit = _preview_answer(
+            step, state, _with_answers(base, prior), owner, raw, prior
+        )
+        recorded[step.key] = answer
+        satisfied_prefix = satisfied_prefix and satisfied
+        if not satisfied or (index == len(given) - 1 and explicit):
+            cursor = index
+            cursor_prior = prior
+            cursor_satisfied = satisfied
+            break
+
+    if cursor >= len(steps):
+        # 整条清单都填完了：没有"下一步"可预览，只剩能不能提交。
+        return StepPreview(
+            cursor=cursor,
+            name=None,
+            kind=None,
+            options=(),
+            disabled=(),
+            can_advance=satisfied_prefix,
+            can_submit=satisfied_prefix and len(given) == len(steps),
+            next=None,
+        )
+
+    # "能不能提交"与光标停在哪一步无关：整条清单都填好且每一步都满足 ⇒ 现在就能提交
+    # （多选座位步停在最后一步上时也是这一档——最后一步必须点提交，spec §2 Q5）。
+    can_submit = satisfied_prefix and len(given) == len(steps)
+    # "能不能进下一步"= **连光标这一步也满足了**：这一步还空着（或张数不够）时当然不能走。
+    can_advance = satisfied_prefix and cursor_satisfied
+    manifest_step = steps[cursor]
+    step = flow.steps[manifest_step.order]
+    framed = _with_answers(base, cursor_prior)
+    chosen = _preview_seats(given[cursor][1]) if cursor < len(given) else ()
+    nxt = steps[cursor + 1].name if cursor + 1 < len(steps) else None
+    options: tuple[str, ...] = ()
+    disabled: tuple[str, ...] = ()
+    try:
+        if isinstance(step, PickSeats):
+            options = tuple(
+                seat_choice(int(seat)) for seat in step.pool(state, framed, owner, chosen)
+            )
+        elif isinstance(step, PickOption):
+            options = tuple(
+                str(item)
+                for item in _resolve_options(
+                    step.options, state, framed, owner, cursor_prior
+                )
+            )
+            disabled = tuple(
+                str(item)
+                for item in _resolve_options(
+                    step.disabled, state, framed, owner, cursor_prior
+                )
+            )
+        elif isinstance(step, PickCards):
+            face = _resolve_face(step.face, state, framed, owner, cursor_prior)
+            options = (
+                ()
+                if face == ()
+                else tuple(
+                    str(card_id)
+                    for card_id in _card_options(
+                        state, int(face), step, framed, owner, cursor_prior
+                    )
+                )
+            )
+        elif isinstance(step, PickProvide):
+            actor = _flow_actor(step, state, framed, owner, cursor_prior)
+            options = tuple(
+                str(card_id) for card_id in _provide_options(state, actor, step)
+            )
+        else:  # pragma: no cover - 清单不含 Arrange / 观看步
+            raise ValueError(f"步骤 {step.key} 不能出现在预发动清单里")
+    except KeyError:
+        # 池回调要帧上下文（被动技的池读帧），而这次预览拿不到真帧：失败即"没有候选"
+        # （fail-closed），不猜、也不回退成"全都点得动"。**能不能提交 / 推进也一并关掉**：
+        # 候选空着还说"能走下一步"自相矛盾（spec §6 不变量 5），界面会停在一步没有可点
+        # 项的面上。这一步的满足与否在拿不到候选时**不知道**，故按"没满足"答。
+        options = ()
+        disabled = ()
+        can_advance = False
+        can_submit = False
+
+    return StepPreview(
+        cursor=cursor,
+        name=manifest_step.name,
+        kind=manifest_step.kind,
+        options=options,
+        disabled=tuple(item for item in disabled if item in options),
+        can_advance=can_advance,
+        can_submit=can_submit,
+        next=nxt,
+    )
 
 
 def _picks_for_step(

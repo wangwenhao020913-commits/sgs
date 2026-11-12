@@ -115,7 +115,31 @@ dd029e5..HEAD -- 'tests/replays/*.jsonl'`` 为空即证（README / 生成器按�
 （``[0, 1]`` 之外再有 ``[1, 0]``），于是**含铁索出牌阶段的 49 / 54** 两份 160 档构造基准由
 ``pytest --update-golden`` 重录：逐行比对只见那一条候选多出来（磁带上记录的动作一字未变，
 ``goals.py`` 的判据照旧命中）。标准 108 的 47 条与其余 6 条 M5 基准逐字节不变——出牌阶段
-含铁索的只有这两条。"""
+含铁索的只有这两条。
+
+**table-ux-overhaul 票 04（需要牌按档逐档问）后的实测**：60 条合计 **50,610,471 字节
+≈ 48.27 MiB**，最大单文件 **3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）
+——仍在两句上限之内，故**不动预算**。需要牌窗口的候选面按档拆开后，一次需要牌事件可能问
+2–3 次（每档一张面：「武将档 → 装备档 → 牌档」），随机驱动的行动序列也随之改变：9 条标准
+108 基准（``09 / 17 / 20 / 30 / 31 / 34 / 35 / 36 / 37``）由
+``pytest --update-golden`` 重录；其中 30（涨过 4 MiB 单文件绊线）与 17 / 34 / 35 / 36 / 37
+（换了更长的随机局）按本模块纪律**重新选种**（30: 230 → 904、17: 117 → 163、
+34: 288 → 187、35: 198 → 73、36: 169 → 167、37: 94 → 209，判据与人数档一律不变），
+其余 51 条逐字节不变。
+
+**table-ux-overhaul 票 13（座位多选收口）后的实测**：60 条合计 **50,609,283 字节
+≈ 48.26 MiB**，最大单文件 **3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）
+——仍在两句上限之内，故**不动预算**。本条只动**一条** M6 构造基准：
+``58-jie-luxun-hero-zone``（56,187 → 54,999 字节；151 行）—— 界陆逊【连营】的"令至多 X 名
+各摸一张"由**逐座两次** ``SELECT_OPTION``（``lianying:seat:0`` / ``lianying:seat:1``）改成
+**一次** ``SELECT_OPTIONS``（``lianying:seat``，不枚举档，``min=max=X``）；计划里那两步
+因此合成一步"一次点齐座位 0 / 1"（`replays/m6.py` 的 ``Step.build``：不枚举档的答案由
+计划组装、引擎按同一份形状谓词校验），同一帧里第二次【连营】的"重新发问"证据仍保留
+（第二次是一次「放弃」）。``goals.py`` 的判据（``_m6_hero_zone``）**一字未改、一条未放宽**，
+重录后仍命中；其余 59 条逐字节不变（``git status --porcelain tests/replays/`` 只报这一条），
+种子也未重选（对局长度不变：153 → 151 条记录）。58 属于 M6 构造基准，**不在**
+:data:`STANDARD_108_REPLAY_BYTES` 的 47 条冻结表里，故那张表无需改动。
+"""
 
 
 def _write(path: Path, text: str) -> Path:
@@ -1017,7 +1041,7 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "06-deck-reshuffle": (615957, "37841aa948d281495fb7687aa9af8d415d490169b41ca3a641712be9bcf50224"),
     "07-identity-4p-rebel-win": (416007, "80cfce029194cdb36ca95054548133238fa3abea3639ba4a817f0bc1193268e6"),
     "08-identity-5p-lord-win": (1089436, "f0f52483480e7a9592161081500151d76e58703c365d1507858872ff7469983d"),
-    "09-identity-6p-renegade-win": (2931297, "073813439df46b8de856e1e475baad49121a91b8d44259ae0abb88dfbc4328e1"),
+    "09-identity-6p-renegade-win": (2936011, "d289ef95ee1f6b2c2b8e9f452a478222ce1829932b8e6181b1353d8d6fac6bf4"),
     "10-identity-7p-lord-win": (3334043, "9e52615a41de7aa32e544a55376a46cb9ca66ac94e8cf8c42c46c4cac81928e8"),
     "11-identity-8p-rebel-win": (1883336, "492dcb7e2e568e2e99f9eb97a2273833125e539d206b04eaaaf3834c7aeaded4"),
     "12-indulgence-skips-play": (1217689, "b895a9998687587186777798a3c7ad8d43604eb5fc7ded61ad1fda31b89f0203"),
@@ -1025,10 +1049,10 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "14-lightning-thunder-damage": (530891, "d2a5311557165cca33ae4bf2ed595d51bcb71ca8b737c3bfefa18fc2d60bebbe"),
     "15-lightning-defers-next-seat": (576031, "e679a58c4aea112d8f978cada05cfcc8207004ade4b35927eb88a46c204bc6ba"),
     "16-nullify-cancels-a-trick": (1701176, "efd0352c0899aad5717f5c1c77e8f1dabf6132a395b54acba35ab90c2b275a86"),
-    "17-nullify-nested-two": (917417, "77e9970e928adf0419ddf124ae731a197ed02daef32a52a46dbf64848885ee5f"),
+    "17-nullify-nested-two": (724162, "1a2fcd13d43340a98c8081781bc0f0ad3c7f3b4fd050c0b0c95904d8dd49258c"),
     "18-nullify-nested-three": (2087671, "c6c978a964987af8ff6a91dcf95bde7bcc03355fee9557d0fc83544edee19584"),
     "19-nullify-on-multi-target": (708234, "b331118a440a55a35071b878e8bb58ad23017eecbe4487e4092afd9afbcd9740"),
-    "20-nullify-lightning-defers": (706210, "53c20f1fc75097ebd9060ad5369ace6ad0b674e56d3289a7631ecb14fcfd4e8d"),
+    "20-nullify-lightning-defers": (780102, "d57b6e2eb7305ba5cbe8435383d28b23ada16ad50cbf1169eab09e1b0c18d7f7"),
     "21-rebel-killed-reward": (1178637, "eba5d7c0ddfcaae552632bc43a14e45d53453bbe7062397acea481d5f5da3444"),
     "22-lord-kills-loyalist": (1588956, "7cb0e7c80fa5dc89a3a814f0b23ee666cde906318aee1253a297add1dbafca6a"),
     "23-two-deaths-revealed": (1483342, "8dd11aac660caf79f4621bfdd92a4c63bf94789f33b59596873367a436c58c20"),
@@ -1038,14 +1062,14 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "27-slash-beyond-adjacent": (805123, "b43bfd3e41f45b3316064fa84cea1f163de373eb3ed6646bf9c19291e99589b3"),
     "28-equipment-replacement": (686849, "311e06a607ca3b41e0534ae5a2d53560b769b35999674e7e7d2fd876bb552540"),
     "29-serpent-spear-virtual-slash": (361109, "5f872af688f162346e2171a17ecd3f69451a5be1337a5adca0b1e6c5f1cc0e53"),
-    "30-halberd-three-targets": (2858367, "c6baeff1cc184b26a8039a81f62807403125d90ab71f64e380df5197daaa13b1"),
-    "31-play-card-response": (2700271, "8a6cfc3643345355e5a42887e4c361297411c47be07a29946c06900c083e3898"),
+    "30-halberd-three-targets": (3324619, "09ada3101c5a7b2c2e48354ae1362fe8279ed181bbe3dde594c8b9e229783bf7"),
+    "31-play-card-response": (2651417, "d4516a46920d0ea6ff2253e2e3fd6c01e19b2112a7cdfcc616b515d801b2993c"),
     "32-five-grains-selection": (605191, "ab41daf266306c95da82a44698f714a58d26fdb8e5cac446cd5b1c5c31630462"),
     "33-borrowed-sword-use-slash": (1149248, "e69ee120a8e4f3df3beebd29f8ee80b78f652482e29422faf21b9cd3b702aecb"),
-    "34-dismantle-or-snatch-equip-judge": (802508, "672687163dfa779b39f0794e3e4c64de6d72bfc88af91f09fe91f9648ddede2c"),
-    "35-hero-damage-points": (465008, "053c6a7fd33d4e018c643c2d0de0772ca4ce20f56ff3f9f4660f51f89d760d35"),
-    "36-hero-rejudge-cycle": (1228848, "9d80fa3751927bc33bd3f1c2861405a89631ef2ce4e281032002331b74729e97"),
-    "37-hero-lord-request": (1430299, "66ad3ef3d6b8a06ac7a44bc109ec0671fc2f6cae4d98d291ac79dc0b181e306c"),
+    "34-dismantle-or-snatch-equip-judge": (378817, "b93d65499fc674a84113879903f1b539afc496d47eccf1963c79a2ee951362a7"),
+    "35-hero-damage-points": (527522, "bf07fb64d69170a6e351447d58084e5a2ed5bc2f0a737bc40f82fe1cd5209b30"),
+    "36-hero-rejudge-cycle": (437144, "caa55e5e74376aab370c6bcb0dd68d7b86c55c0af43458d378b91e0f46871816"),
+    "37-hero-lord-request": (625069, "c19bce9b108f7b9e1ee2f57811a5ab7ea7f7f68c5af7eebbd89f808f2e09fc77"),
     "38-hero-lost-cards": (857045, "8e7dad34b0e4b5bf4c4d032efa28d8ab402dfcf5cbff66699b3a27131fb524a9"),
     "39-hero-target-pool": (2586144, "3409eb95b9a2460fc9b844e5eb521fe537f6c2f600630c11bd4b18fc400ed928"),
     "40-hero-wushuang": (359502, "ebfbda32bae631d9533396ac3e5eab51e8c75e7f0c778c86709c668a70b90ca7"),
@@ -1076,6 +1100,16 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
 （顶替白银狮子：旧装备离场 → 回复 → 新装备入槽，逐条比记录流序列）与
 `tests/test_hero_move_after.py::test_xiaoji_fires_on_replacement_even_though_the_equipment_is_not_discarded`
 （顶替算失去装备、但不算弃置 ⇒【枭姬】恰好触发一次，且新装备的 ``PUT`` 排在【枭姬】之后）。
+
+**第二次显式重基线（2026-11-11，table-ux-overhaul 票 04，用户已签 spec §3 注① / §4）**：
+「需要（使用 / 打出）牌」的窗口改**按档逐档问**（武将档 → 装备档 → 牌档）并修
+``providers_used`` 按事件复位后，同一时机的候选面与询问条数**有意改变**，故
+``09 / 17 / 20 / 30 / 31 / 34 / 35 / 36 / 37`` 九条逐字节不同；其余 38 条一字未动。
+按本文件所在模块的纪律：这九条的 ``goals.py`` 判据**一条未改、一条未放宽**，其中
+``30``（单文件涨过 4 MiB 绊线）与 ``17 / 34 / 35 / 36 / 37``（短局换长局）按
+``scenarios.py`` 记录的纪律**重新选种**，``29 / 42`` 等未受影响的基准不动。重录清单与
+"哪条基准 / 变了什么 / 为什么"写在票面 ``## Answer`` 与 ``tests/replays/README.md``
+的「重录登记」一节。
 """
 
 

@@ -90,6 +90,7 @@ __all__ = [
     "damage_events_after",
     "decorate_records_card_tags",
     "harvest_state",
+    "issued_manifest",
     "live_tag_deltas_after",
     "option_seats",
     "option_source",
@@ -98,6 +99,7 @@ __all__ = [
     "seat_hero_zones",
     "seat_skill_display",
     "serialize_record",
+    "setup_snapshot",
     "skill_events_after",
     "virtual_index",
     "visible_record",
@@ -613,6 +615,62 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     payload["round"] = int(state.round)
     payload["turn_extra"] = bool(state.turn_extra)
     return payload
+
+
+_SETUP_EMPTY_ZONES: tuple[str, ...] = ("equip", "judge", "hero_zones")
+"""开局底稿里**必然空着**的牌区键（座位载荷里三者的形状都是列表）。"""
+
+
+def setup_snapshot(session: Session) -> dict[str, Any]:
+    """**开局底稿**：发牌前那一帧的权威快照（table-ux-overhaul 票 14 / spec §2 Q7）。
+
+    为什么需要它：建局响应止于"游戏开始时"（``Session.drive`` 的 L0 边界），前端要逐条
+    从**发牌前**演起。此前这份骨架是前端从 post-init 快照**倒推**出来的
+    （``session.js:openingLiveView`` 把 ``hp`` 写成 ``hp_max ?? hp``、``hp_max`` / ``armor``
+    / ``markers`` 原样继承）——载荷只给终值，界面就只能从记录猜规则。现在改成服务端下发：
+    底稿里的每一个字都由引擎状态导出，前端只显示。
+
+    **调用时机是契约的一半**：只能在 ``_start``（``GAME_START`` 派发）**之前**调。此刻
+    ``engine.state`` 是 ``build_initial`` 的产物——座位 / 武将 / 技能 / 体力上限 / 护甲 /
+    标记都是开局事实，而「游戏开始时」的钩子（【天成】改上限、摸牌）**还没跑**。
+    ``Session.__init__`` 因此在 ``drive()`` 之前把它冻结成 ``Session.setup``。
+
+    与 :func:`visible_snapshot` 同一份过滤口径（座位 / 武将 / 技能 / 标记 / 手牌上限 /
+    封印区都直接读它），只把"发牌前还没发生"的那几格按住：
+
+    - ``hand_count = 0`` 与 ``self_hand = []``：起始手牌是这条记录流的第一批 ``card_move``
+      演的，底稿必须从"一张都没有"起；
+    - ``hp = hp_max``：发牌前满体力。**不读此刻的 ``hp``**——它只是碰巧也满；
+    - ``identity / identity_label = None``：身份由 ``identity_deal`` 逐条亮（本人 / 主公
+      可见、其余 ``null``，与 :func:`~sgs.state.project` 的可见性同源）。底稿先给 = t0
+      就把全场身份摆上桌，那才是泄露；
+    - ``deck_count = 0``：牌堆张数由第一条 ``deck_shuffle`` 记录写回（``applyLiveDelta``
+      的 ``from_zone = null`` 分支）；
+    - ``discard`` / ``processing`` / 三个牌区 / ``phase`` / ``turn_seat`` / ``turn_extra``：
+      发牌前一律空 / 假（无身份局与身份局同形）；
+    - ``round = 1``：``_start`` 之前引擎的 ``state.round`` 还是 0（它由 ``_start`` 写 1），
+      而底稿是"第一轮即将开始"那一帧——写 1，与随后第一条 ``turn_change`` 一致。
+
+    **不进记录流**（不是 ``JournalRecord``，不是 delta），只随 ``after < 0`` 的那份视图下发；
+    回放（记录流单独喂引擎）因此逐字节不受影响。
+    """
+    snapshot = visible_snapshot(session)
+    for player in snapshot["players"]:
+        player["hand_count"] = 0
+        player["hp"] = player["hp_max"]
+        player["identity"] = None
+        player["identity_label"] = None
+        for zone in _SETUP_EMPTY_ZONES:
+            player[zone] = []
+    snapshot["self_hand"] = []
+    snapshot["discard"] = []
+    snapshot["processing"] = []
+    snapshot["deck_count"] = 0
+    snapshot["phase"] = None
+    snapshot["turn_seat"] = None
+    snapshot["turn_extra"] = False
+    snapshot["round"] = 1
+    return snapshot
 
 
 def seat_hero_zones(
@@ -1638,6 +1696,31 @@ def _fire_attack_step(engine: Any, query: Query) -> dict[str, Any] | None:
     }
 
 
+def _own_hand_face(query: Query) -> bool:
+    """这一步的选择面是不是**应答者自己的手牌**（每一槽都是 ``ref.seat == actor`` 的手牌）。
+
+    票 09 / spec §1 #12：自己的手牌对本人**天然可见**（``view.self_hand`` 已有同一批牌面），
+    所以它不是"观看授予"（``revealed`` 那一档的语义 = 发给应答者的**额外**牌面）。投影原先在
+    【火攻】亮牌步把己方手牌槽位抄进 ``payload["revealed"]`` ⇒ ``dialog="reveal"`` ⇒
+    前端 ``modal.js:isRevealStep`` 短路 ``candidates.js:isOwnZonePick`` ⇒ 亮牌弹窗。
+
+    判据与前端 ``candidates.js:isOwnZonePick`` 的**形状**同源（`SELECT_CARDS` ∧ 槽位全在
+    应答者自己的手牌区）：引擎的真实槽位可见性和前端判据必须是同一份事实，不是两份。
+    空槽位 / 取不到应答者 ⇒ ``False``（fail-open 到既有的「授予」路径，不因守卫吞掉别的面）。
+    """
+    slots = tuple(getattr(query, "slots", ()) or ())
+    if not slots or getattr(query, "actor", None) is None:
+        return False
+    actor = int(query.actor)
+    for slot in slots:
+        ref = getattr(slot, "ref", None)
+        if ref is None or getattr(ref, "seat", None) is None:
+            return False
+        if int(ref.seat) != actor or ref.zone is not Zone.HAND:
+            return False
+    return True
+
+
 def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
     """这次询问的两行人话：**正在发生什么**（``label``）+ **需要做什么**（``requirement``）。
 
@@ -1874,6 +1957,58 @@ def _preactivation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
     return {key: _steps_payload(steps) for key, steps in manifests.items()}
 
 
+def issued_manifest(query: Any, skill_id: str) -> tuple[Any, ...] | None:
+    """这次询问**已经下发**给 ``skill_id`` 的那份预发动清单（票 11 的预览端点唯一的取法）。
+
+    顺序与 ``engine._validate_structured`` 的成员判定同源（"清单发过没有"与"复合动作收不收"
+    不能各说一套）：逐候选清单 → 主动入口表 → 转化清单，最后是单份清单（键 = 询问自己的
+    ``skill_id``）。返回 ``None`` = 这次询问没有给它下发过清单（预览请求该被拒）。
+
+    预览**不重渲**清单：重渲要枚举全部前序组合（那正是本票要退役的开销），而玩家看到的
+    就是这一份——读它才是"预览 = 所见即所得"。
+    """
+    if not isinstance(skill_id, str) or not skill_id:
+        return None
+    for attribute in (
+        "activation_preactivations",
+        "preactivations",
+        "transform_preactivations",
+    ):
+        manifests = getattr(query, attribute, None) or {}
+        steps = manifests.get(skill_id)
+        if steps:
+            return tuple(steps)
+    if getattr(query, "skill_id", None) == skill_id:
+        steps = getattr(query, "preactivation", ()) or ()
+        if steps:
+            return tuple(steps)
+    return None
+
+
+def _preview_supported(query: Any) -> bool:
+    """这一问的清单能不能走**步骤预览**（票 11）：任一清单的技能有流水线即可。
+
+    判据与 :func:`issued_manifest` 同源（预览端点自己也会再核一次"这一问有没有那份清单"），
+    只是这里只回答"值不值得让前端去问"：没有流水线的技能（转化清单的【龙胆】一类、
+    借刀的附带指定清单）根本没有池回调可现算，声明能力只会让界面白问一次并落到
+    fail-closed 的提示上。
+    """
+    from sgs.skills import flow_for
+
+    timing = getattr(query, "timing", None)
+    for attribute in (
+        "activation_preactivations",
+        "preactivations",
+        "transform_preactivations",
+    ):
+        for skill_id in (getattr(query, attribute, None) or {}):
+            if flow_for(skill_id, timing) is not None:
+                return True
+    single = getattr(query, "preactivation", ()) or ()
+    skill_id = getattr(query, "skill_id", None)
+    return bool(single) and flow_for(skill_id, timing) is not None
+
+
 def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     """查看者不是询问者时，抹掉清单里**属于询问者**的牌面（W4-1；与观看私密同一条纪律）。
 
@@ -1901,8 +2036,11 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
             # 先抹来源组合（只可能出现在选牌步上，但漏一条分支就是一条泄露面）。
             step.pop("groups", None)
             if step.get("zones"):
+                # 票 12：选牌步的 ``disabled`` 与 ``options`` 是**同一条泄露面**（源牌级
+                # 置灰的那些 id 同样来自询问者的手牌 / 装备），故一起清空。
                 step["pool"] = [
-                    {**entry, "options": []} for entry in (step.get("pool") or [])
+                    {**entry, "options": [], "disabled": []}
+                    for entry in (step.get("pool") or [])
                 ]
                 continue
             options: list[Any] = []
@@ -2127,7 +2265,37 @@ def _harvest_taken(engine: Any, frame: Any, revealed: tuple[int, ...]) -> dict[i
     return taken
 
 
-def harvest_state(engine: Any) -> dict[str, Any] | None:
+def _harvest_facts(
+    engine: Any,
+    frames: list[Any],
+    frame: Any,
+    cache: dict[str, Any] | None,
+) -> tuple[tuple[int, ...], dict[int, int]]:
+    """亮牌集合 + 获得者表（两次**全记录扫描**）的缓存版（table-ux-overhaul 票 18）。
+
+    五谷状态现在挂在**每一次视图下发**上（`view.harvest`），而轮询是最热的入口：不缓存
+    就是每拍两次全记录扫描。两件事实都只由「记录条数 + 五谷帧 id」决定——
+    ``pick_harvest`` 的搬牌与帧数据的改写都发生在同一条 ``card_move`` 记录里（记录只增），
+    故同一个键 ⇒ 同一个结果。缓存只存这两件**中间事实**，不存载荷本身：调用方每次仍拿到
+    新造的 dict，查看者标签（`_decorate_card_tags`）不会跨次残留。
+
+    ``cache`` 由会话持有（``Session.harvest_cache``），`view` 与 `pending` 两处派生共用；
+    ``None`` = 不缓存（单测 / 探针直接调 :func:`harvest_state` 时）。
+    """
+    records = getattr(engine, "records", ()) or ()
+    key = (len(records), getattr(frame, "frame_id", None))
+    if cache is not None and cache.get("key") == key:
+        return cache["revealed"], cache["taken"]
+    revealed = _harvest_revealed_ids(engine, frames, frame)
+    taken = _harvest_taken(engine, frame, revealed) if revealed else {}
+    if cache is not None:
+        cache["key"] = key
+        cache["revealed"] = revealed
+        cache["taken"] = taken
+    return revealed, taken
+
+
+def harvest_state(engine: Any, *, cache: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """【五谷丰登】结算的**服务端派生状态**（U2-11 / D10）：只读公开事实，进询问载荷。
 
     数据源只有两处：
@@ -2136,6 +2304,9 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
       ``canceled``（当前目标刚被无懈）、``source`` / ``card``；
     - **记录流**：亮牌那条 ``deck → processing`` 的 ``card_move``（完整集合 + 亮牌顺序）与
       每次取牌的 ``processing → hand`` 移动（``card_id → 座位``）。
+
+    ``cache`` = 那两次全记录扫描的**按键缓存**（票 18；见 :func:`_harvest_facts`）。键只由
+    记录条数与五谷帧决定，故"没有新记录的空转轮询"不重扫整条流。
 
     它**不改记录流、不进金录像**：字段只在下发时现算，引擎的帧 / delta / 查询一个字节不动。
 
@@ -2157,10 +2328,9 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
     if frame is None:
         return None
     frames = list(getattr(getattr(engine, "stack", None), "frames", ()) or ())
-    revealed = _harvest_revealed_ids(engine, frames, frame)
+    revealed, taken = _harvest_facts(engine, frames, frame, cache)
     if not revealed:
         return None
-    taken = _harvest_taken(engine, frame, revealed)
     state = getattr(engine, "state", None)
     lookup = _card_lookup(state) if state is not None else {}
     card = frame.data.get("card")
@@ -2214,6 +2384,29 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
         "targets": targets_payload,
         "current": current,
     }
+
+
+def session_harvest_state(session: Session) -> dict[str, Any] | None:
+    """五谷结算的**视图级**派生状态（table-ux-overhaul 票 18 / 服务端 D 方案）。
+
+    与 `pending_payload` 里的 ``harvest`` **同一份**派生（:func:`harvest_state`，同一份
+    `Session.harvest_cache`），只是不再挂在某一次询问上：会话的 ``view`` 每次下发都带它
+    （键恒在，结算结束 ⇒ ``None``）。客户端因此每次视图提交都能读到"谁拿走了哪张 / 目标条
+    四态 / 当前目标"，不必等**下一条恰好带 harvest 的询问**——五谷整段结算里只有一部分
+    目标会真的变成一条 pending。
+
+    牌面标签与询问载荷同一条口径（``_decorate_card_tags``：牌面已公开 ⇒ 带标签），亮牌是
+    公开处理区，故不按"是不是应答者"收口。返回值是**新造的 dict**：缓存只存中间事实
+    （见 :func:`_harvest_facts`），标签不会跨次残留。
+    """
+    harvest = harvest_state(session.engine, cache=getattr(session, "harvest_cache", None))
+    if harvest is None:
+        return None
+    state = getattr(session.engine, "state", None)
+    _decorate_card_tags(harvest.get("card"), state, session.human_seat)
+    for card in harvest.get("revealed") or []:
+        _decorate_card_tags(card, state, session.human_seat)
+    return harvest
 
 
 _LUOSHEN_REPEAT_PREFIX = "luoshen:repeat:"
@@ -2457,6 +2650,20 @@ def pending_payload(
     payload["activation_preactivations"] = _preactivation_payload(
         getattr(query, "activation_preactivations", None) or {}
     )
+    # **步骤预览的可用声明**（table-ux-overhaul 票 11）：这一问有"有流水线的清单"才带
+    # ``"preview": true``——即 ``POST …/preview`` 对这一问真能算。前端据此决定"每次选择
+    # 变化问一次后端"；**键的缺席是保证**：合成载荷 / 没有流水线的转化清单 / 旧载荷都不带
+    # 它，界面照旧读清单里的静态池（与 ``structural`` / ``default_choice`` 同一姿态）。
+    if _preview_supported(query):
+        payload["preview"] = True
+    # **选牌预览的可用声明**（table-ux-overhaul 票 15）：``SELECT_CARDS`` 且查看者就是应答者
+    # 时带 ``"pick_preview": true``——``POST …/preview`` 的选牌那一档对这一问真能算
+    # （端点的判据与这里同源：kind + actor）。前端据此在**自家手牌面**上每次选牌问一次
+    # "哪些槽位还点得动"；**键的缺席是保证**：合成载荷 / 别人的面 / 旧载荷都不带它，界面
+    # 照旧只按面形状渲染（与 ``preview`` / ``structural`` 同一姿态）。
+    # 它是**网页载荷**字段、不是 ``Query`` 模型字段 ⇒ 不进记录流、金录像逐字节不变。
+    if str(getattr(query, "kind", "")) == "SELECT_CARDS" and not foreign:
+        payload["pick_preview"] = True
     # 「是否发动」的**默认候选**（yijiang-2014-round2 票 15 / 路线 B）：投影按
     # :data:`_DEFAULT_ACTIVATE_SKILLS` 登记表下发；前端 ``answer.js:buildAction`` 在玩家
     # 没选任何候选时据此返回候选里那条 ``ActivateSkill``。**只有登记过的技能才带这个键**
@@ -2509,18 +2716,24 @@ def pending_payload(
         option_source(session.engine, query) if isinstance(session, Session) else None
     )
     # M5-08a（D10 / §5.1.4）：【火攻】的两步选牌。读取方 = 亮牌模板 / 牌桌点手牌：
-    #   - 亮牌步：``dialog = "reveal"`` + ``revealed``（**只发给目标本人**；他点一张即亮出）；
+    #   - 亮牌步：牌桌直选（票 09 / spec §1 #12）——槽位全是应答者**自己的手牌**，
+    #     牌面本来就在 `view.self_hand` 里，故**不**授予 ``revealed``（见 :func:`_own_hand_face`）；
+    #     授予一旦为空，下面的 ``dialog`` 派生自然给 ``null``，界面走既有的 own-hand-pick。
     #   - 弃牌步：``reveal`` = 已经公开的那一张（使用者据此在中央舞台看到亮牌）。
     # 两步的牌面都只在本座位载荷里；别人的载荷由既有的 ``_mask_watched_faces`` 抹掉。
     fire_attack = _fire_attack_step(session.engine, query) if isinstance(session, Session) else None
     payload["reveal"] = None
-    if fire_attack is not None and not foreign:
-        if fire_attack["step"] == "reveal":
-            payload["revealed"] = [
-                slot.card.model_dump(mode="json")
-                for slot in query.slots
-                if getattr(slot, "card", None) is not None
-            ]
+    if (
+        fire_attack is not None
+        and not foreign
+        and fire_attack["step"] == "reveal"
+        and not _own_hand_face(query)
+    ):
+        payload["revealed"] = [
+            slot.card.model_dump(mode="json")
+            for slot in query.slots
+            if getattr(slot, "card", None) is not None
+        ]
 
     # U2-08（D10）：花色是**会被复用的枚举模板**，中文名 / 符号 / 红黑由服务端派生一次；
     # 选项闭集里只要不全是花色就是 ``None``（界面据此决定画选择型弹窗还是小选项组）。
@@ -2530,8 +2743,9 @@ def pending_payload(
     # 目标）。只读结算栈与记录流，**不进**记录流 / 金录像。这是**公开处理区**的事实，故不按
     # 查看者收口：AI 目标拿牌时，人类屏幕上的亮牌弹窗也要显示同一份状态。取不到引擎
     # （409 里附带的裸 ``Query``）⇒ ``None``（键恒在，前端 fail-closed 不开窗）。
+    # 票 18 起与视图级 ``view.harvest`` 走**同一个口**（同一份派生 + 同一份扫描缓存）。
     payload["harvest"] = (
-        harvest_state(session.engine) if isinstance(session, Session) else None
+        session_harvest_state(session) if isinstance(session, Session) else None
     )
     # U2-12（D3 / D10）：**观看牌面**的选牌步 = 亮牌弹窗。判据读**形状**而不是技能 id：
     # ``SELECT_CARDS`` 且这一问带着**授予的牌面**（``revealed`` 非空，票 15 的私密观看通道）。
@@ -2676,6 +2890,48 @@ def query_actor_map(records: Iterable[object]) -> dict[int, int]:
     return actors
 
 
+def _record_payload(record: object) -> dict[str, Any]:
+    """一条记录 → JSON-ready dict（票 01：**直接** ``model_dump``，不做 JSON 文本往返）。
+
+    旧实现在这里 ``json.loads(record_json(record))``：``record_json`` 自己就是
+    ``model_dump + json.dumps``，于是每条记录白白多出一次序列化 + 一次解析——``view()``
+    每次下发都会走这条路径（一局 6612 条记录实测 128 ms）。形状与 ``record_json`` 逐键
+    相同（``mode="json"`` 已经把枚举 / 元组都翻成 JSON 值），故下标方一个字不用改。
+
+    非 pydantic 记录（旧夹具 / 第三方对象）保留文本往返兜底：它们没有 ``model_dump``。
+    """
+    dump = getattr(record, "model_dump", None)
+    if callable(dump):
+        payload = dump(mode="json")
+        if isinstance(payload, dict):
+            return payload
+    return json.loads(record_json(record))
+
+
+def _record_last_seq(records: Iterable[object]) -> int | None:
+    """记录流里最大的 ``seq``（``header`` 没有 ``seq``，不参与）。
+
+    派生通道的"与记录对齐"上界。只读属性，**不**做 ``model_dump`` / JSON 往返——记录是
+    pydantic 对象或已序列化的 dict，``getattr`` / ``.get`` 就够（票 01）。
+    """
+    last_seq: int | None = None
+    for record in records:
+        if isinstance(record, Mapping):
+            seq = record.get("seq")
+        else:
+            seq = getattr(record, "seq", None)
+        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
+            last_seq = seq
+    return last_seq
+
+
+def _action_field(action: object, name: str) -> Any:
+    """动作记录里的一个字段（记录模型 / 已序列化 JSON 同一份读法）；没有就是 ``None``。"""
+    if isinstance(action, Mapping):
+        return action.get(name)
+    return getattr(action, name, None)
+
+
 def visible_record(
     record: object,
     *,
@@ -2714,7 +2970,8 @@ def visible_record(
     kind = getattr(record, "kind", None)
     if kind == "query":
         return {"kind": "query", "seq": record.seq, "query": _query_summary(record.query)}
-    raw = json.loads(record_json(record))
+    # 票 01：直接取模型的 JSON 形态（不再走 `json.dumps + json.loads` 的文本往返）。
+    raw = _record_payload(record)
     if kind == "delta":
         delta_type = raw.get("delta_type")
         if delta_type == "card_reveal":
@@ -2853,6 +3110,7 @@ def skill_events_after(
     after: int,
     state: Any,
     activations: Iterable[Any] = (),
+    query_actors: Mapping[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """从**未裁剪**的记录流派生技能发动事件（spec D8.2）：``seq > after`` 的那几条。
 
@@ -2885,31 +3143,45 @@ def skill_events_after(
 
     ``activations`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路
     表现（锁定技 / 转化技不飘字），记录流那一路照旧——这是缓冲**不进记录流**的必然边界。
+
+    ``query_actors`` = 调用方**已经算好**的应答者表（``Session.window().query_actors``）。
+    缺省时从传入的 ``records`` 现算（单测 / 静态录像的用法）；``serve.view`` 传全量表，
+    因为本批 ``tail`` 里只有 ``seq > after`` 的记录、而应答指向的询问可能更早。
     """
-    records = list(records)
-    # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
-    query_actors = query_actor_map(records)
+    if query_actors is None:
+        # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
+        # 先落成 list：`records` 可能是**一次性迭代器**（生成器），映射那一趟会把它耗掉。
+        records = list(records)
+        query_actors = query_actor_map(records)
     events: list[dict[str, Any]] = []
     for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        kind = record.get("kind")
-        seq = record.get("seq")
+        # 票 01：记录模型直接读属性，**不**做 JSON 文本往返（旧实现在这里
+        # `json.loads(record_json(raw))`，四条派生通道因此把整条记录流序列化两遍）。
+        if isinstance(raw, Mapping):
+            kind = raw.get("kind")
+            seq = raw.get("seq")
+            accepted = raw.get("accepted")
+            action = raw.get("action")
+        else:
+            kind = getattr(raw, "kind", None)
+            seq = getattr(raw, "seq", None)
+            accepted = getattr(raw, "accepted", None)
+            action = getattr(raw, "action", None)
         if kind == "query":
             continue
-        if kind != "action" or not record.get("accepted"):
-            continue
-        action = record.get("action")
-        if not isinstance(action, Mapping):
+        if kind != "action" or not accepted:
             continue
         # 判据 = "这条已接受的动作**点名了技能**"（不按动作种类打表）：`ActivateSkill` 与
         # `SubstituteJudgeCard` 今天都满足；使用牌 / 打出牌 / 选牌没有这个键。
-        if not str(action.get("skill_id") or ""):
+        skill_id = _action_field(action, "skill_id")
+        if not str(skill_id or ""):
             continue
         if not isinstance(seq, int) or seq <= after:
             continue
-        skill_id = str(action.get("skill_id") or "")
+        skill_id = str(skill_id)
+        answers_seq = _action_field(action, "answers_seq")
         targets: list[int] = []
-        for choice in action.get("choices") or ():
+        for choice in _action_field(action, "choices") or ():
             if not isinstance(choice, str) or not choice.startswith(SEAT_PREFIX):
                 continue
             try:
@@ -2919,7 +3191,7 @@ def skill_events_after(
         events.append(
             {
                 "seq": seq,
-                "seat": query_actors.get(action.get("answers_seq")),
+                "seat": query_actors.get(answers_seq),
                 "skill_id": skill_id,
                 "name": _skill_display_name(state, skill_id) or skill_id,
                 "targets": targets,
@@ -2967,7 +3239,9 @@ def damage_events_after(
       ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复下发；
     - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
       时才下发，超出上界的留到下一次轮询——那时 ``after`` 仍小于它的 ``seq``，``seq > after``
-      照成立，一条都不会丢；
+      照成立，一条都不会丢。**传本批（``seq > after`` 的尾部窗口）就够**（票 01）：
+      ``serve.view`` 传 ``Session.window().tail``；尾部非空时上界与整条流逐条相同，尾部为空
+      时本批本来就没有可下发的事件；
     - ``state`` 只用来**夹座位**（``target`` / ``source`` 必须落在本局座位里）：越界条目是坏
       数据，宁可不下发也不让前端拿它去量一张不存在的武将牌。
 
@@ -2977,12 +3251,8 @@ def damage_events_after(
     ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
     （没有剑光），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
     """
-    last_seq: int | None = None
-    for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        seq = record.get("seq")
-        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
-            last_seq = seq
+    # 票 01：上界只读属性（`_record_last_seq`），不再把整条记录流做 JSON 文本往返。
+    last_seq = _record_last_seq(records)
     seat_count = len(getattr(state, "players", ()) or ())
     out: list[dict[str, Any]] = []
     for event in events or ():
@@ -3039,7 +3309,9 @@ def life_loss_events_after(
       ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复下发；
     - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
       时才下发，超出上界的留到下一次轮询——那时 ``after`` 仍小于它的 ``seq``，``seq > after``
-      照成立，一条都不会丢；
+      照成立，一条都不会丢。**传本批（``seq > after`` 的尾部窗口）就够**（票 01）：
+      ``serve.view`` 传 ``Session.window().tail``；尾部非空时上界与整条流逐条相同，尾部为空
+      时本批本来就没有可下发的事件；
     - ``state`` 只用来**夹座位**（``seat`` 必须落在本局座位里）：越界条目是坏数据，宁可不下发
       也不让前端拿它去量一张不存在的武将牌。
 
@@ -3050,12 +3322,8 @@ def life_loss_events_after(
     ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
     （没有墨），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
     """
-    last_seq: int | None = None
-    for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        seq = record.get("seq")
-        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
-            last_seq = seq
+    # 票 01：上界只读属性（`_record_last_seq`），不再把整条记录流做 JSON 文本往返。
+    last_seq = _record_last_seq(records)
     seat_count = len(getattr(state, "players", ()) or ())
     out: list[dict[str, Any]] = []
     for event in events or ():
@@ -3095,7 +3363,9 @@ def card_events_after(
     - ``seq`` 是引擎在帧压栈之后取的最后一条记录序号，故与 ``records`` 共用同一个
       ``after`` 游标：``seq > after`` 才下发，轮询因此不会重复出声；
     - ``records`` 只用来定**这批的上界**（"与记录对齐"）：事件只在它的锚点记录已经进了这批
-      时才下发，超出上界的留到下一次轮询；
+      时才下发，超出上界的留到下一次轮询。**传本批（``seq > after`` 的尾部窗口）就够**
+      （票 01）：``serve.view`` 传 ``Session.window().tail``；尾部非空时上界与整条流逐条
+      相同，尾部为空时本批本来就没有可下发的事件；
     - ``state`` 只用来**夹座位**（``seat`` 必须落在本局座位里）：越界条目是坏数据，宁可不下发
       也不让前端拿它去查一个不存在的座位。
 
@@ -3106,12 +3376,8 @@ def card_events_after(
     ``events`` 缺省为空：**只喂静态 jsonl 录像**的读取方（不重跑引擎）因此只少这一路表现
     （没有卡牌语音），记录流那一路照旧——这是缓冲**不进记录流**的必然边界，不是错误。
     """
-    last_seq: int | None = None
-    for raw in records:
-        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
-        seq = record.get("seq")
-        if isinstance(seq, int) and (last_seq is None or seq > last_seq):
-            last_seq = seq
+    # 票 01：上界只读属性（`_record_last_seq`），不再把整条记录流做 JSON 文本往返。
+    last_seq = _record_last_seq(records)
     seat_count = len(getattr(state, "players", ()) or ())
     out: list[dict[str, Any]] = []
     for event in events or ():

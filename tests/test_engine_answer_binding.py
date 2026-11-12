@@ -88,11 +88,14 @@ def _ask_nullify_window(engine: Engine, frame: Frame):
         frame,
         0,
         Timing.RESOLVE_BEFORE_EFFECT,
-        cause=WindowCause.NULLIFY,
-        required="nullify",
-        target=0,
-        window_frame=frame.frame_id,
-        mode=RespondMode.USE,
+        engine.respond_context(
+            frame,
+            0,
+            cause=WindowCause.NULLIFY,
+            required="nullify",
+            target=0,
+            mode=RespondMode.USE,
+        ),
     )
 
 

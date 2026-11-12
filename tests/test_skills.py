@@ -52,7 +52,15 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state, cards_of_type, run_until
+from support import (
+    PassPlayer,
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    ran_timing,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -875,6 +883,75 @@ def test_double_sword_discards_the_chosen_card_to_the_discard_pile():
         and record.seq > option_query.seq
         for record in engine.records
     ), "目标是弃牌而不是让使用者摸牌；询问之后使用者这条链上不该有摸牌"
+
+
+def test_double_sword_discard_face_is_visible_to_the_target():
+    """【雌雄双股剑】弃手牌那一步挑的是**目标自己的区** ⇒ 选择面必须铺**可见槽**。
+
+    spec §1 #7 / 票 09 ①：隐藏槽（``slot.card is None`` + 位置打乱）是"挑别人的手牌"的形状；
+    这一步的挑牌人**就是**手牌持有者本人，隐藏槽把界面挤进"未知区域只有位置"的那张面。
+    ``Engine.selection_face(..., reveal_hand=True)`` 的注释**早点名**本技能是它的消费者
+    （``engine/game.py`` 的 ``selection_face`` 文档串），代码却漏传 ⇒ 本条钉住"覆盖了"。
+
+    断言读的是**真实面**（引擎记录流里的那条 ``SELECT_CARDS`` 询问），不是合成载荷：
+    每一槽都带牌面，且槽位顺序 = 目标手牌顺序（``reveal_hand=True`` 分支逐张按手牌铺，
+    隐藏分支则逐槽 ``card=None`` + ``select_shift`` 打乱位置）。
+    """
+    other = _cards("peach")[0]
+    dodge = _cards("dodge")[0]
+    duel = _cards("duel")[0]
+    hand = (other, dodge, duel)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(DOUBLE_SWORD,), gender=Gender.MALE),
+            SeatSpec(hand=hand, gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(SLASH, DOUBLE_SWORD, *hand),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    def defender(query):
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, Pass))
+        if query.kind == "SELECT_OPTION":
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == "discard_one",
+            )
+        if query.kind == "SELECT_CARDS":
+            return _find(query, lambda action: isinstance(action, SelectCards))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    discard_query = next(
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_CARDS"
+    )
+    assert discard_query.actor == 1, "这一步问的是目标自己"
+    assert [slot.ref.seat for slot in discard_query.slots] == [1] * len(hand), (
+        "面铺的是目标自己的手牌区"
+    )
+    assert all(slot.card is not None for slot in discard_query.slots), (
+        "reveal_hand 没生效：自己挑自己的手牌却拿到隐藏槽（界面因此开「未知区域窗」）"
+    )
+    assert [slot.card.card_id for slot in discard_query.slots] == list(hand), (
+        "可见槽按手牌顺序铺开（隐藏槽走的是打乱后的位置序）"
+    )
 
 
 class _DoubleSwordHost:
@@ -2318,3 +2395,98 @@ def test_the_peach_window_offers_only_real_peaches_and_a_hand_peach_rescues():
 
     assert engine.state.player(1).hp == 1, "真【桃】把濒死者救回 1 点"
     assert real_peach in engine.state.discard, "用掉的是手牌里的那张真【桃】"
+
+
+# ---------------------------------------------------------------------------
+# 询问策略位：B 类（强制生效非牌类）的**目标维度**（table-ux-overhaul 票 02 §4）
+# ---------------------------------------------------------------------------
+
+
+def test_a_forced_skill_with_no_legal_target_is_not_run_and_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """强制技能"必选而无合法目标"⇒ 连候选都不造，派发环不跑它。
+
+    判据的声明点是 :attr:`~sgs.skills.catalog.ActivationPlan.mandatory_targets`：空元组 =
+    必选而无合法目标 ⇒ :func:`~sgs.skills.catalog.activation_plan` 把它压成
+    ``available=False``，:func:`~sgs.skills.catalog._activation_candidates` 因此连候选都不
+    产出。与今天"flow 的目标步 ``"cancel"`` 静默跳过"**行为等价**：记录流逐字节相同
+    （``dump_journal`` 对照断言），差别只在**不再**产出一条"I 跑过了"的发动事实
+    （``engine.skill_activations``，表现层专用、不进记录流）——空转不再被播出来。
+
+    载体是合成的一条锁定技：真实目录里今天**没有**"强制段 + 必选目标步"的技能（普查：
+    ``locked`` / ``Hook.forced`` 的流水线全是无步骤或选项步），故这里按
+    ``test_an_unknown_locked_skill_gets_the_effect_without_any_table`` 的同一姿态合成。
+    """
+    from types import MappingProxyType
+
+    from sgs.engine import dump_journal
+    from sgs.skills import CarrierKind, Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills.catalog import ActivationPlan
+    from sgs.skills.flow import PickSeats, SkillFlow
+
+    synthetic = "test.ask02.forced_without_target"
+
+    def _no_target(state, frame, owner, chosen):  # noqa: ANN001 - 与 SeatPool 协议一致
+        del state, frame, owner, chosen
+        return ()
+
+    def _effect(host, frame, answers):  # noqa: ANN001 - 与 FlowEffect 协议一致
+        del host, frame, answers
+        return None
+
+    flow = SkillFlow(
+        name="test_ask02_forced_without_target",
+        steps=(PickSeats(lo=1, hi=1, pool=_no_target, optional=False, key="seat"),),
+        effect=_effect,
+    )
+    definitions = dict(catalog_module.CATALOG)
+    definitions[synthetic] = SkillDef(
+        skill_id=synthetic,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.PHASE_DRAW, flow=flow),),
+    )
+    monkeypatch.setattr(catalog_module, "CATALOG", MappingProxyType(definitions))
+
+    def _engine() -> Engine:
+        state = build_state(
+            pack=PACK,
+            seats=[SeatSpec(), SeatSpec()],
+            deck=tuple(range(60, 108)),
+            turn_seat=0,
+            phase=Phase.DRAW,
+        )
+        state.player(0).granted_skills.append(synthetic)
+        return Engine.from_state(state, seed=3)
+
+    def _announced(engine: Engine) -> list[str]:
+        return [event.skill_id for event in engine.skill_activations]
+
+    # 旧口径（对照组）：强制段照跑，flow 在必选目标步静默取消 —— 记录流里什么都没有，
+    # 但"跑过了"这件事进了发动缓冲。
+    control = _engine()
+    run_until(control, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.PHASE_DRAW))
+    assert synthetic in _announced(control), "对照组必须真的跑到那条强制段（否则本用例没测到东西）"
+
+    # 新口径：计划声明"必选目标"，此刻无合法目标 ⇒ available=False ⇒ 不跑。
+    monkeypatch.setattr(
+        catalog_module,
+        "ACTIVATION_PLANS",
+        MappingProxyType(
+            {
+                **dict(catalog_module.ACTIVATION_PLANS),
+                synthetic: lambda state, frame, instance: ActivationPlan(
+                    mandatory_targets=()
+                ),
+            }
+        ),
+    )
+    gated = _engine()
+    run_until(gated, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.PHASE_DRAW))
+
+    assert synthetic not in _announced(gated), "必选而无合法目标时不得空跑这条强制技能"
+    assert dump_journal(gated.records) == dump_journal(control.records), (
+        "行为等价：跳过的是空转，不是任何一条记录（记录流必须逐字节不变）"
+    )

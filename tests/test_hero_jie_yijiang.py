@@ -3311,3 +3311,113 @@ def test_jie_bingyi_wording_is_its_own_row():
     assert str(query.skill_id) == f"{JIE_BINGYI}:seat", (
         "座位面挂在**界版**技能 id 上（投影据此查界版那一行逐步文案，A4）"
     )
+
+
+# ===========================================================================
+# table-ux-overhaul 票 12（spec §2 Q15 / Q20）：转化清单的**三级置灰** + 渐营的动态目标池
+#
+# 界沮授【渐营】② 是本仓唯一"源牌 → **产物**（牌名）→ 目标"三级都在清单里的转化技，故
+# 产物级置灰（图鉴口径：这一张牌名此刻能不能用 = `check_usable` 的**整条**判据，含
+# "有没有合法目标"）与目标级（座位可点集合由票 11 的预览回包回答）都在这里落点。
+# ===========================================================================
+
+
+def test_a_product_without_legal_targets_is_disabled_but_the_source_card_stays_enabled():
+    """产物级置灰：产物没有合法目标 ⇒ **产物**灰，**源牌**不灰（两级判据不同）。
+
+    局面（`空城诸葛亮`）：2 人局、界沮授 2/3 体力、手里一张♥5【麒麟弓】；对手挂【空城】
+    且没有手牌 ⇒ 【杀】一个合法目标都没有。
+
+    - **源牌级**（`check_usable` 的**前三条**）：这张牌还能变成【桃】⇒ 源牌亮；
+    - **产物级**（整条 `check_usable`）：【杀】没有合法目标 ⇒ 灰；【桃】2/3 体力 ⇒ 亮；
+      【闪】在出牌阶段没有使用时机 ⇒ 也灰。
+
+    灰的产物仍留在闭集里（`options` 列全、`disabled` 标灰）：删掉它们玩家会以为漏牌。
+    """
+    from sgs.effects import check_usable
+    from sgs.skills import transformed_card
+
+    state, engine = _jie_ready(hand=(HEART_BOW,), hp=2, hp_max=3, seats=2)
+    state.player(1).granted_skills.append("hero.zhugeliang.kongcheng")
+    # 【空城】是**目标池**上的判据 ⇒ 必须在局面成立之后再取清单（与既有一致：重新问一次）。
+    engine = _jie_drive(Engine.from_state(state, seed=7), _jie_is_idle)
+    steps = _jie_manifest(engine.pending)
+    assert [step.name for step in steps] == ["card", "name"], (
+        "【桃】的目标由牌名决定 ⇒ 清单只有两步（没有空的第 3 步）"
+    )
+
+    source_step, name_step = steps
+    assert str(HEART_BOW) in _jie_step_options(source_step), (
+        f"源牌必须列出来（{HEART_BOW}）：{_jie_step_options(source_step)}"
+    )
+    assert _jie_step_disabled(source_step) == (), (
+        "源牌级只看前三条：【桃】可用 ⇒ 这张牌不许灰（它仍有可用产物）"
+    )
+    assert "杀" in _jie_step_options(name_step), "【杀】要列全（此刻用不了 ⇒ 置灰，不是删掉）"
+    assert "杀" in _jie_step_disabled(name_step), "【杀】没有合法目标（空城）⇒ 产物级置灰"
+    assert "桃" in _jie_step_options(name_step) and "桃" not in _jie_step_disabled(name_step), (
+        f"2/3 体力 ⇒ 【桃】此刻可用（实得灰表 {_jie_step_disabled(name_step)}）"
+    )
+    assert "闪" in _jie_step_disabled(name_step), "出牌阶段没有【闪】的使用时机 ⇒ 也灰"
+
+    # 同源：灰表 = 引擎 `check_usable` 的裁决（整条，含目标池）。
+    assert check_usable(state, 0, transformed_card(state, (HEART_BOW,), "slash")) is False
+    assert check_usable(state, 0, transformed_card(state, (HEART_BOW,), "peach")) is True
+
+
+def test_jianying_target_step_has_a_live_pool_with_many_cards():
+    """渐营第 3 步（选目标）的池**现算**：20 张自有牌也不退化，且池 = 同一个函数的结果。
+
+    旧实现按"源牌 × 牌名"逐组合预生成行，组合数超过 32 就整步退化（`pool = ()` +
+    `min = 0, max = 1`，界面兜底成"所有存活座位可点"）；spec §2 Q6 裁定**永不退化**，
+    同一步内的可点集合改由票 11 的步骤预览现算。这条用例钉两件事：
+
+    - 20 张自有牌（组合数远超旧上限 32）时目标步**仍有池**（没有退化档）；
+    - 池就是 :func:`_jie_jianying_target_pool` 的结果——预览回包、清单行、池回调**同一份**，
+      不另写第二份判据（"4 人环上攻击范围 1 ⇒ 只有左右两家"这条规则只在那个函数里）。
+    """
+    from sgs.skills import preview_activation
+    from sgs.skills.active import _jie_jianying_target_pool
+    from sgs.skills.flow import _with_answers
+
+    hand = tuple(cards_of_type(PACK, "slash"))[:20]
+    assert len(hand) == 20, f"160/108 档的【杀】不足 20 张：{len(hand)}"
+    state, engine = _jie_ready_four(hand=hand, hp=2, hp_max=3)
+    steps = _jie_manifest(engine.pending)
+    assert [step.name for step in steps] == ["card", "name", "seat"], (
+        f"4 人局【杀】有得选 ⇒ 目标是第 3 步：{[step.name for step in steps]}"
+    )
+    seat_step = steps[2]
+    assert seat_step.pool, "20 张自有牌（组合数 > 旧上限 32）⇒ 目标步仍有池，没有整步退化"
+    assert (seat_step.min, seat_step.max) == (1, 1)
+
+    source = hand[0]
+    expected = tuple(
+        f"seat:{seat}"
+        for seat in _jie_jianying_target_pool(
+            state, _with_answers(None, {"card": (source,), "name": "杀"}), 0, ()
+        )
+    )
+    assert expected == ("seat:1", "seat:3"), (
+        f"4 人环上攻击范围 1 ⇒ 左右两家（隔位的 2 号位不在池里）：{expected}"
+    )
+    # (1) 预览回包（票 11 的现算通道）——就是这份池。
+    preview = preview_activation(
+        state,
+        0,
+        JIE_JIANYING,
+        [("card", (source,)), ("name", ("杀",))],
+        steps,
+        timing=Timing.PHASE_PLAY_IDLE,
+    )
+    assert preview.cursor == 2 and preview.kind == "seat"
+    assert preview.options == expected, (
+        f"预览的座位池必须等于 _jie_jianying_target_pool：{preview.options} != {expected}"
+    )
+    # (2) 清单里那一行（静态快照 / `max = 0` 自动跳过的载体）也必须是同一份池。
+    row = next(
+        row for row in seat_step.pool if row.when == (str(source), "杀")
+    )
+    assert tuple(row.options) == expected and row.max == 1, (
+        f"清单行的池与上限同源：{row.options} / max={row.max}"
+    )

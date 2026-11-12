@@ -81,8 +81,9 @@ Ruling: <若本票依赖某条既有裁定，写账本行关键词>
 
 - [ ] 票头 `规范确认:` 已填日期（「询问剧本」已由用户签）
 - [ ] 批内每条技能：已实现（带回归）或已摘出（附票）
+- [ ] `bash tests/smoke-web.sh` 绿（**每票**一次——DoD 的「已实现」要它绿；hook 只跑同源的 `test_web.sh`）
 - [ ] `bash tools/check_goldens.sh` 绿
-- [ ] `bash tests/run_all.sh --quiet` 绿（**整批只跑这一次**）
+- [ ] `.venv/bin/python tools/pool_census.py --check` 退出 0（加武将 / 改池必跑）
 - [ ] 账本写入（若有新裁定）——**只提案，等用户签**
 - [ ] `docs/agents/frontend-map.md` / `AGENTS.md` 若有触点变化已同步
 
@@ -107,9 +108,9 @@ Ruling: <若本票依赖某条既有裁定，写账本行关键词>
 
 | 时点 | 动作 |
 |---|---|
-| 迭代期（逐技能） | `.venv/bin/pytest -q tests/test_hero_<包>.py`；`bash tests/smoke-web.sh`；`bash tools/check_goldens.sh`。**不提交** |
-| 批次收口 | `bash tests/run_all.sh --quiet`（一次） |
-| 提交 | 一次 commit（不做 `wip:` 提交——hook 对 `wip:` 也跑全量） |
+| 迭代期（逐票） | `.venv/bin/pytest -q tests/test_hero_<包>.py`；`bash tests/smoke-web.sh`；`bash tools/check_goldens.sh`。**不提交** |
+| 批次收口 | **不手跑全量**：提交即门禁，pre-commit hook 跑全量（≈8 分钟）。手工全量只在"不提交、先看红/绿"时用**不带参数**的 `tests/run_all.sh` |
+| 提交 | 一次 commit。`wip:` 分档：≤30 分钟的票不做；>30 分钟或中断风险高时过半落一个（交付前 squash / amend），且每个 `wip:` 也付一次全量 hook |
 | 实机验收 | 只有新增询问形态 / 改 DOM 形状才做；配方写进票面（`## 复现配方`） |
 
 ## 为什么是"一将一票"

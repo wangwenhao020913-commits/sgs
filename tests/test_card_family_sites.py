@@ -246,7 +246,13 @@ ALLOWLIST: dict[Site, Rule] = {
         "src/sgs/effects/ops.py",
         "resolve_duel",
         'required="slash",',
-    ): Rule(FAMILY, 1, "决斗的响应请求是杀族请求；ask_respond 的候选成员判定走 satisfies_required"),
+    ): Rule(
+        FAMILY,
+        1,
+        "决斗的响应请求是杀族请求；ask_respond 的候选成员判定走 satisfies_required。"
+        "票 05 的预筛口与真询问共用**同一份** `RespondContext`（`Engine.respond_context`）"
+        "⇒ 这个字面量在源码里只出现一次（票 13 的评审 R2 把重复的参数表收成一个对象）",
+    ),
     # 借刀的两处请求（offers 预检 / 真询问）票 03 起读 `SLASH_FAMILY_KEY`（同一个线上取值，
     # 不再写字面量），故本清单里没有对应站点；提供者那条分支读同一份常量。
     (

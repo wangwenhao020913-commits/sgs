@@ -57,6 +57,7 @@ from sgs.state import (
     PlayCard,
     QueryKind,
     SelectOption,
+    SelectOptions,
     UseCard,
     WindowCause,
 )
@@ -520,10 +521,10 @@ PEACH_GARDEN = "peach_garden"
 
 
 def _fenwei_script(*, targets=(), decline=False, log=None):
-    """座位 1（界甘宁）的脚本：答【奋威】的"是否发动"、按 ``targets`` 逐个选无效目标。
+    """座位 1（界甘宁）的脚本：答【奋威】的"是否发动"、**一次**点齐 ``targets``。
 
-    ``targets`` 的有序答案就是玩家逐问的选择；``log`` 收下两类询问供断言
-    （"是否发动" / 选无效目标的选项列表）。
+    票 13 起选无效目标是一问的座位多选（``SELECT_OPTIONS``），故 ``targets`` 一次性
+    提交成一个集合；``log`` 收下两类询问供断言（"是否发动" / 选无效目标的那一问）。
     """
 
     def driver(query):
@@ -533,12 +534,14 @@ def _fenwei_script(*, targets=(), decline=False, log=None):
             if decline:
                 return _find(query, lambda action: isinstance(action, Pass))
             return _activate(query, FENWEI)
-        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("fenwei:"):
+        if query.kind == QueryKind.SELECT_OPTIONS and query.skill_id.startswith("fenwei:"):
             if log is not None:
                 log.append(query)
-            for seat in targets:
-                if f"seat:{seat}" in query.options:
-                    return _seat_option(query, seat)
+            choices = tuple(
+                f"seat:{seat}" for seat in targets if f"seat:{seat}" in query.options
+            )
+            if choices:
+                return SelectOptions(choices=choices, answers_seq=query.seq)
             return _find(query, lambda action: isinstance(action, Pass))
         return _decline(query)
 
@@ -657,7 +660,7 @@ def test_fenwei_may_invalidate_the_user_when_the_card_targets_him():
     option_queries = [
         query
         for query in log
-        if query.kind == QueryKind.SELECT_OPTION.value
+        if query.kind == QueryKind.SELECT_OPTIONS.value
         and query.skill_id.startswith("fenwei:")
     ]
     assert option_queries, "选无效目标的询问确实发生了"

@@ -283,6 +283,9 @@ function miniSlotNode(options) {
     if (face.selected) node.classList.add("sel");
     if (face.picked) node.classList.add("picked");
     if (!face.selectable) node.classList.add("dis");
+    // 票 12：源牌级置灰要说清"为什么点不动"（槽位的常规悬停是卡面预览，不会读 title，
+    // 故只在有说明时补这一格——正常槽位仍不挂原生 title）。
+    if (face.note) node.setAttribute("title", face.note);
     node.onclick = (event) => {
       if (event && event.stopPropagation) event.stopPropagation();
       activateCard(ctx.pendingNow, card, face);

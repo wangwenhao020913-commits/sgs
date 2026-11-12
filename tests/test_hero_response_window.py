@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from sgs.data import load_content_pack
+from sgs.data import Identity, Kingdom, load_content_pack
 from sgs.engine import Engine
 from sgs.engine.steps import _PER_TARGET_FRAME_KEYS, resolve_advance
 from sgs.resolution import (
@@ -36,7 +36,10 @@ from sgs.state import (
     EndPhase,
     FrameKind,
     Pass,
+    PeachContext,
+    Phase,
     PlayCard,
+    QueryKind,
     UseCard,
     WindowCause,
 )
@@ -382,22 +385,32 @@ def _wushuang_provider_state(dodge: int | None, judge_card: int):
 
 
 def test_wushuang_a_red_eight_diagrams_counts_as_one_of_the_two_dodges():
-    """【八卦阵】判定为红算作**一张**【闪】；两张的来源可以是"真牌 + 八卦阵"（票 08 §验收 3）。"""
+    """【八卦阵】判定为红算作**一张**【闪】；两张的来源可以是"真牌 + 八卦阵"（票 08 §验收 3）。
+
+    票 04 起需要牌窗口**按档逐档问**：第一张的面只有装备档的【八卦阵】（一张面），红判定成立
+    = 一张【闪】；第二张是**新的需要牌事件**（不升档 floor 与提供者封禁一起复位）⇒【八卦阵】
+    再次上脸，Pass 掉它才轮到牌档的真【闪】。两张的来源因此仍是"八卦阵 + 真牌"。
+    """
     red_judge = _first_by_color("peach", black=False)
-    slash, state = _wushuang_provider_state(_cards("dodge")[0], red_judge)
+    dodge = _cards("dodge")[0]
+    slash, state = _wushuang_provider_state(dodge, red_judge)
 
     def attacker(query):
         if query.kind == "PLAY_PHASE":
             return _use(query, slash, 1)
         return None
 
+    faces: list[tuple] = []
+
     def defender(query):
-        if query.kind == "DODGE":
-            skill = _find(query, lambda action: isinstance(action, ActivateSkill))
-            if skill is not None:
-                return skill
-            return _find(query, lambda action: isinstance(action, UseCard))
-        return None
+        if query.kind != "DODGE":
+            return None
+        faces.append(tuple(query.legal_actions))
+        if len(faces) == 1:
+            return _find(query, lambda action: isinstance(action, ActivateSkill))  # 八卦阵
+        if len(faces) == 2:
+            return _find(query, lambda action: isinstance(action, Pass))  # 本档不发动
+        return _find(query, lambda action: isinstance(action, UseCard))  # 牌档：真【闪】
 
     engine = run_until(
         Engine.from_state(state, seed=1),
@@ -405,25 +418,28 @@ def test_wushuang_a_red_eight_diagrams_counts_as_one_of_the_two_dodges():
         lambda e: _slash_done(e, slash),
     )
 
-    dodges = _queries(engine, "DODGE")
-    assert len(dodges) == 2, "两张【闪】：八卦阵一张 + 真牌一张"
-    assert any(isinstance(action, ActivateSkill) for action in dodges[0].legal_actions)
-    assert not any(isinstance(action, ActivateSkill) for action in dodges[1].legal_actions), (
-        "每提供者只问一次：第二张不再给【八卦阵】"
+    assert len(faces) == 3, "装备档 + （Pass 之后的）第二张装备档 + 牌档：三张面"
+    assert _face_skills(faces[0]) == ("equip.eight_diagrams",), "首问只有装备档"
+    assert _face_skills(faces[1]) == ("equip.eight_diagrams",), (
+        "第二张 = 新的需要牌事件 ⇒【八卦阵】再次上脸（票 04 §5：提供者封禁按事件复位）"
+    )
+    assert (_face_skills(faces[2]), _face_cards(faces[2])) == ((), (dodge,)), (
+        "Pass 掉装备档 ⇒ 牌档一张真【闪】"
     )
     assert engine.state.player(1).hp == 4, "两张都成功 ⇒ 抵消"
 
 
 def test_wushuang_a_real_dodge_first_still_offers_the_provider_for_the_second():
-    """票 03 §5-2（floor 按**需要牌事件**重置）：第一张【闪】用真牌 ⇒ 第二张仍可发动【八卦阵】。
+    """票 03 §5-2 + 票 04 §5：floor 与提供者封禁都按**需要牌事件**复位。
 
-    【无双】要两张【闪】= **两次**需要牌事件（补充一手 §2.1.2.2(2)）：真牌是 ``CARD_USE``
-    （2，最低优先），若 floor 跨事件残留，第二张就会被自己的"不升档"挡掉——而规则只要求
-    **同一事件内**不升档。判据 = 第二问的面里【八卦阵】仍在，且红判定让它凑够两张、抵消
-    【杀】。
+    【无双】要两张【闪】= **两次**需要牌事件（补充一手 §2.1.2.2(2)）：第一张 Pass 掉装备档、
+    用真【闪】（牌档 2）。若 floor 跨事件残留，第二张的【八卦阵】（装备档 1）就会被自己的
+    "不升档"挡掉——而规则只要求**同一事件内**不升档。判据 = 第三个面里【八卦阵】仍在，且
+    红判定让它凑够两张、抵消【杀】。
     """
     red_judge = _first_by_color("peach", black=False)
-    slash, state = _wushuang_provider_state(_cards("dodge")[0], red_judge)
+    dodge = _cards("dodge")[0]
+    slash, state = _wushuang_provider_state(dodge, red_judge)
 
     def attacker(query):
         if query.kind == "PLAY_PHASE":
@@ -433,18 +449,14 @@ def test_wushuang_a_real_dodge_first_still_offers_the_provider_for_the_second():
     faces: list[tuple[str, ...]] = []
 
     def defender(query):
-        if query.kind == "DODGE":
-            faces.append(
-                tuple(
-                    action.skill_id
-                    for action in query.legal_actions
-                    if isinstance(action, ActivateSkill)
-                )
-            )
-            if len(faces) == 1:
-                return _find(query, lambda action: isinstance(action, UseCard))
-            return _find(query, lambda action: isinstance(action, ActivateSkill))
-        return None
+        if query.kind != "DODGE":
+            return None
+        faces.append(_face_skills(tuple(query.legal_actions)))
+        if len(faces) == 1:
+            return _find(query, lambda action: isinstance(action, Pass))  # 装备档不发动
+        if len(faces) == 2:
+            return _find(query, lambda action: isinstance(action, UseCard))  # 牌档：真【闪】
+        return _find(query, lambda action: isinstance(action, ActivateSkill))  # 第二张：八卦阵
 
     engine = run_until(
         Engine.from_state(state, seed=1),
@@ -452,10 +464,13 @@ def test_wushuang_a_real_dodge_first_still_offers_the_provider_for_the_second():
         lambda e: _slash_done(e, slash),
     )
 
-    assert len(faces) == 2, "两次需要牌事件各问一次"
-    assert "equip.eight_diagrams" in faces[1], (
+    assert len(faces) == 3, "第一次需要牌事件两张面 + 第二次装备档一张面"
+    assert faces[0] == ("equip.eight_diagrams",) and faces[1] == (), (
+        "第一次事件：装备档一张面、牌档一张面"
+    )
+    assert faces[2] == ("equip.eight_diagrams",), (
         "第一张【闪】用真牌 ⇒ 第二张的 floor 已重置，【八卦阵】仍可点："
-        f"实得第二问 {faces[1]}"
+        f"实得第二问 {faces[2]}"
     )
     assert engine.state.player(1).hp == 4, "真牌 + 八卦阵凑够两张 ⇒ 抵消"
 
@@ -513,7 +528,11 @@ def test_wushuang_a_real_slash_first_still_offers_guohuo_for_the_second():
 
 
 def test_wushuang_a_black_eight_diagrams_does_not_count():
-    """判定为黑 ⇒ 该提供者机会用尽、只算零张；真牌只够一张 ⇒ 照常受伤。"""
+    """判定为黑 ⇒ 该提供者机会用尽、只算零张；真牌只够一张 ⇒ 照常受伤。
+
+    票 04 起档序固定：第一张先问装备档（八卦阵，黑 ⇒ 零张）⇒ 牌档真【闪】补上第一张 ⇒
+    第二张是新的需要牌事件（八卦阵再次上脸，这次放弃）⇒ 手里没有第二张牌 ⇒ 只凑到一张。
+    """
     black_judge = _first_by_color("slash", black=True)
     slash, state = _wushuang_provider_state(_cards("dodge")[0], black_judge)
 
@@ -522,13 +541,17 @@ def test_wushuang_a_black_eight_diagrams_does_not_count():
             return _use(query, slash, 1)
         return None
 
+    faces: list[tuple] = []
+
     def defender(query):
-        if query.kind == "DODGE":
-            skill = _find(query, lambda action: isinstance(action, ActivateSkill))
-            if skill is not None:
-                return skill
-            return _find(query, lambda action: isinstance(action, UseCard))
-        return None
+        if query.kind != "DODGE":
+            return None
+        faces.append(tuple(query.legal_actions))
+        if len(faces) == 1:
+            return _find(query, lambda action: isinstance(action, ActivateSkill))  # 八卦阵（黑）
+        if len(faces) == 2:
+            return _find(query, lambda action: isinstance(action, UseCard))  # 牌档：真【闪】
+        return _find(query, lambda action: isinstance(action, Pass))  # 第二次事件的装备档
 
     engine = run_until(
         Engine.from_state(state, seed=1),
@@ -536,7 +559,10 @@ def test_wushuang_a_black_eight_diagrams_does_not_count():
         lambda e: _slash_done(e, slash),
     )
 
-    assert len(_queries(engine, "DODGE")) == 3, "黑 ⇒ 重问真牌窗口；真牌只有一张，再问一次"
+    assert len(_queries(engine, "DODGE")) == 3, (
+        "黑 ⇒ 重问牌档；第二张再问一次装备档（它的下一档没有候选 ⇒ 窗口到此为止）"
+    )
+    assert _face_skills(faces[0]) == ("equip.eight_diagrams",), "首问只有装备档"
     assert engine.state.player(1).hp == 3, "黑判定不算一张，真牌凑不齐两张 ⇒ 受伤"
 
 
@@ -882,3 +908,237 @@ def test_both_tag_tiers_survive_a_cursor_advance_without_crossing_targets():
     assert has_tag(frame, Tag.UNRESPONSIVE, target=1), "逐目标档也跨目标存活（本次使用内有效）"
     assert not has_tag(frame, Tag.UNRESPONSIVE, target=2), "不串目标：目标 2 读不到目标 1 的标签"
 
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 需要【闪】的窗口**按档逐档问**（table-ux-overhaul 票 04 / spec §2 Q13 / Q16 / Q17）
+#
+# 档表（Q17）：0 = 非转化类**技能**（护驾 / 激将 / 傲才）、1 = 非转化**装备技**（八卦阵）、
+# 2 = **真牌 + 一切转化**（蛊惑 / 渐营② / 龙胆 / 武圣 / 看破 / 急救 / 丈八…）。
+# 一次"需要牌事件"里**每档一张面**、先最小档；Pass = 本档不发动 ⇒ 进下一档；
+# 最后一档 Pass = 这次需要牌不满足。同档内仍是"选一条 / 都不发动"的合并面。
+# ---------------------------------------------------------------------------
+
+HUJIA = "hero.caocao.hujia"
+GUOHUO = "hero.yuji_mobile.guohuo"
+JIE_JIANYING = "hero.jie_jushou_mobile.jianying"
+
+
+def _face_skills(face) -> tuple[str, ...]:
+    """一张面上的提供者 id（次序本身，不排序：`CODING_STANDARDS.md` §4）。"""
+    return tuple(action.skill_id for action in face if isinstance(action, ActivateSkill))
+
+
+def _face_cards(face) -> tuple[int, ...]:
+    """一张面上的真牌候选 id（同上）。"""
+    return tuple(action.card.card_id for action in face if isinstance(action, UseCard))
+
+
+def test_a_dodge_window_asks_hero_tier_then_equipment_tier_then_card_tier():
+    """Q13 / Q17（曹操场景）：需要【闪】的窗口逐档问 —— 【护驾】→【八卦阵】→ 真【闪】。
+
+    一次需要牌事件里先问最小档（武将档 0 的【护驾】）；``Pass`` = **本档不发动**、进下一档
+    （装备档 1 的【八卦阵】）；再 ``Pass`` 才轮到牌档（2 的真【闪】）。三档**不混在一张面
+    里**（票面根因 1），而"Pass 掉一档"不等于"这次不需要牌了"。
+    """
+    slash, dodge, ally_dodge = _cards("slash")[0], _cards("dodge")[0], _cards("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,)),
+            SeatSpec(
+                hero="caocao",
+                identity=Identity.LORD,
+                kingdom=Kingdom.WEI,
+                hand=(dodge,),
+                equip=(EIGHT_DIAGRAMS,),
+            ),
+            SeatSpec(kingdom=Kingdom.WEI, hand=(ally_dodge,)),
+        ],
+        deck=_deck_excluding(slash, dodge, ally_dodge, EIGHT_DIAGRAMS),
+        turn_seat=0,
+    )
+
+    faces: list[tuple] = []
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, slash, 1)
+        return None
+
+    def defender(query):
+        if query.kind != "DODGE":
+            return None
+        faces.append(tuple(query.legal_actions))
+        if len(faces) < 3:
+            return _find(query, lambda action: isinstance(action, Pass))  # 本档不发动
+        return _find(query, lambda action: isinstance(action, UseCard))  # 牌档：真【闪】
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender), Scripted()],
+        lambda e: _slash_done(e, slash),
+    )
+
+    assert [_face_skills(face) for face in faces] == [
+        (HUJIA,),
+        ("equip.eight_diagrams",),
+        (),
+    ], f"三档各一张面、按档序问：实得 {[_face_skills(face) for face in faces]}"
+    assert [_face_cards(face) for face in faces] == [(), (), (dodge,)], (
+        "最小档只有提供者、最后一档才是牌："
+        f"实得 {[_face_cards(face) for face in faces]}"
+    )
+    assert engine.state.player(1).hp == 4, "最后一档的真【闪】成立 ⇒ 抵消"
+    assert list(engine.state.player(2).hand) == [ally_dodge], "护驾没发动 ⇒ 盟友的【闪】不动"
+
+
+def test_wushuang_a_failed_bagua_judgment_still_allows_bagua_again_after_a_real_dodge():
+    """票面 5（`providers_used` 按**需要牌事件**复位）：【无双】的两张【闪】是两次事件。
+
+    第一张：【八卦阵】判定黑（没通过）⇒ 提供者不再上脸、档进到牌档 ⇒ 真【闪】补上第一张
+    （**事件成立** ⇒ 提供者封禁与不升档一起复位）；第二张【闪】的面里【八卦阵】**仍可点**。
+    改造前 ``providers_used`` 只在"帧的目标推进"时清 ⇒ 第二张起八卦阵永远不再上脸。
+    """
+    black = _first_by_color("slash", black=True)
+    red = _first_by_color("peach", black=False)
+    slash, dodge1, dodge2 = _cards("slash")[0], _cards("dodge")[0], _cards("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), hero="lvbu"),
+            SeatSpec(hand=(dodge1, dodge2), equip=(EIGHT_DIAGRAMS,)),
+        ],
+        deck=_two_judge_deck(
+            black, red, used=(slash, dodge1, dodge2, EIGHT_DIAGRAMS)
+        ),
+        turn_seat=0,
+    )
+
+    faces: list[tuple] = []
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, slash, 1)
+        return None
+
+    def defender(query):
+        if query.kind != "DODGE":
+            return None
+        faces.append(tuple(query.legal_actions))
+        index = len(faces) - 1
+        if index in (0, 2):
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return _find(query, lambda action: isinstance(action, UseCard))
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: _slash_done(e, slash),
+    )
+
+    assert len(faces) == 3, "黑判定重问（牌档）+ 第二次需要牌事件（装备档）各一次"
+    assert _face_skills(faces[0]) == ("equip.eight_diagrams",), "装备档只有八卦阵"
+    assert _face_skills(faces[1]) == (), "判定没通过 ⇒ 提供者不再上脸"
+    assert dodge1 in _face_cards(faces[1]) and dodge2 in _face_cards(faces[1]), (
+        f"进牌档：两张真【闪】同面（同档合并）；实得 {_face_cards(faces[1])}"
+    )
+    assert "equip.eight_diagrams" in _face_skills(faces[2]), (
+        "第一张【闪】成立 = 一次需要牌事件结束 ⇒ 提供者封禁复位，第二张仍可发动八卦阵："
+        f"实得 {_face_skills(faces[2])}"
+    )
+    assert engine.state.player(1).hp == 4, "真牌 + 八卦阵凑够两张 ⇒ 抵消"
+
+
+def test_a_conversion_provider_is_tier_two():
+    """Q16 / Q17 / 票面 3：**转化类提供者与真牌同档（第 2 档）**，不单独先问。
+
+    【蛊惑】与界【渐营】② 是 ``ActivateSkill`` 提供者、载体是武将牌（载体派生 = 武将档 0），
+    产物却是转化牌 ⇒ 技能定义上的 ``need_card_tier`` 覆盖成 2（派发逻辑里**没有**技能名名单）。
+    判据 = 它们的候选与真牌落在**同一张面**上，且每一条的档都读 ``CARD_USE``。
+
+    【渐营】② 只在**自己的出牌阶段**的求桃窗口里提供（票 24 收窄了它的窗口声明），故那一半
+    直接读同一个候选生成口（``legal_actions_for`` 就是引擎建询问时调的那一个），不绕过判据。
+    """
+    from sgs.effects import PriorityClass, legal_actions_for, need_card_tier
+
+    dodge = _cards("dodge")[0]
+    slash, other = _cards("slash")[0], _cards("slash")[1]
+
+    # ① 【蛊惑】端到端：一张真【闪】+【蛊惑】在同一张【闪】面上（不先按武将档单独问）。
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,)),
+            SeatSpec(hero="yuji_mobile", hp=3, hp_max=3, hand=(dodge, other)),
+        ],
+        deck=_deck_excluding(slash, dodge, other),
+        turn_seat=0,
+    )
+    faces: list[tuple] = []
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, slash, 1)
+        return None
+
+    def defender(query):
+        if query.kind != "DODGE":
+            return None
+        faces.append(tuple(query.legal_actions))
+        return _find(query, lambda action: isinstance(action, Pass))
+
+    run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: _slash_done(e, slash),
+    )
+
+    assert len(faces) == 1, (
+        "【蛊惑】与真牌同档 ⇒ 只有一张面（改造前它带着武将档混在面里，"
+        f"先点真牌就把它挡掉了）：实得 {[_face_skills(face) for face in faces]}"
+    )
+    assert set(_face_skills(faces[0])) == {GUOHUO}, (
+        f"【蛊惑】就在这张面里：实得 {_face_skills(faces[0])}"
+    )
+    assert dodge in _face_cards(faces[0]), "真【闪】也在这张面里"
+    assert {
+        need_card_tier(action)
+        for action in faces[0]
+        if not isinstance(action, Pass)
+    } == {int(PriorityClass.CARD_USE)}, (
+        "【蛊惑】的档必须是 CARD_USE（与真牌同档）：实得 "
+        f"{[need_card_tier(action) for action in faces[0]]}"
+    )
+
+    # ② 界【渐营】②：求桃窗口（票 24 声明里它唯一参与的窗口）的面上与真【桃】同档。
+    peach = _cards("peach")[0]
+    dying_state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hp=3, hp_max=3, hand=(peach, other)),
+            SeatSpec(hp=0),
+        ],
+        deck=_deck_excluding(peach, other),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    face = legal_actions_for(
+        dying_state,
+        0,
+        QueryKind.PEACH,
+        answers_seq=1,
+        dying=1,
+        payload=PeachContext(),
+    )
+
+    assert set(_face_skills(face)) == {JIE_JIANYING}, (
+        f"界【渐营】② 在求桃面上：实得 {_face_skills(face)}"
+    )
+    assert peach in _face_cards(face), "真【桃】与它在同一张面上（同档合并）"
+    assert {
+        need_card_tier(action) for action in face if not isinstance(action, Pass)
+    } == {int(PriorityClass.CARD_USE)}, (
+        "界【渐营】② 的覆盖位也必须是 CARD_USE：实得 "
+        f"{[need_card_tier(action) for action in face]}"
+    )

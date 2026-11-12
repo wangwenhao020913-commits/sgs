@@ -3996,7 +3996,10 @@ def test_anim_ini_lists_the_thunder_durations_per_variant(thunder_probe: dict) -
             f"实际 {impact} + {fade} > {total}"
         )
     totals = [values[f"damage_fx_thunder_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
-    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), f"四档总时长必须各自独立可改：{totals}"
+    # 四档**不必互异**：2026-11-12 用户裁定 3 档与 4 档同为 2000（3 档拉长余电、4 档拉长飞行，
+    # 两条都落在同一总时长上），"四档各自独立可改"是当初的代理判据、不是目的。留下真正的不变式：
+    # 点数越大，演出不得更短。
+    assert totals == sorted(totals), f"点数越大，总时长不得更短：{totals}"
     assert values["damage_fx_thunder_3_strobe"] > 0
     assert values["damage_fx_thunder_4_strobe"] > values["damage_fx_thunder_3_strobe"], (
         "4 点雷的整屏闪比 3 点更长"
@@ -8443,3 +8446,881 @@ def test_the_heal_sfx_lane_schedules_every_tier_without_a_real_audio_context() -
         "3 档（吸气 + 停顿 + 落点 + 余韵）排出的音源必须多于 1 档（一声清磬）："
         f"{probe['tiers']['3']['sources']} vs {probe['tiers']['1']['sources']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 07：提示区单一 reset + 可编辑文案模板
+# ---------------------------------------------------------------------------
+
+_PENDING_JS = STATIC_DIR / "pending.js"
+_PROMPTS_JS = STATIC_DIR / "prompts.js"
+_PROMPTS_JSON = STATIC_DIR / "prompts.json"
+
+# 询问面的七件套 + 归属说明：resetAskSurface 必须**每一格**都负责（票面 A 的第一条）。
+_ASK_SURFACE_NODES = (
+    "t-prompt",
+    "t-target-hint",
+    "t-dialog-hint",
+    "t-skill-hints",
+    "t-choice",
+    "t-options",
+    "t-prompt-skills",
+    "t-context",
+)
+
+# `#t-choice`（页脚）唯一写入口是 `setAskChoice`（带寿命），唯一清除点是 `resetAskChoice`。
+# 这三份文件里不许再有直写——`answer.js` 的七处与 `core.js:showPageNotice` 那一处是票面点名的。
+_ASK_CHOICE_WRITERS = ("pending.js", "answer.js", "core.js")
+
+
+def _js_function_body(text: str, name: str) -> str:
+    """截出 `function <name>(…) {…}` 的函数体（花括号配对；找不到 / 没闭合即失败）。"""
+    marker = f"function {name}("
+    start = text.find(marker)
+    assert start >= 0, f"找不到 function {name}(…)"
+    brace = text.find("{", text.find(")", start))
+    assert brace > start, f"function {name}(…) 没有函数体"
+    depth = 0
+    for at in range(brace, len(text)):
+        char = text[at]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : at + 1]
+    raise AssertionError(f"function {name}(…) 的花括号没闭合")
+
+
+def test_the_ask_surface_is_cleared_by_one_single_function() -> None:
+    """票 07 A：清询问面收敛成**一个实现**、**三个调用点**，`#t-choice` 只剩一个带寿命的口。
+
+    四类残留（spec §1 #5）都是"清除点分散"造成的：起播只清一两样、弹窗镜像没人清、
+    终局分支在 `renderPending` 之前 return、`#t-choice` 七处只写不清。这里把"清"钉成
+    结构事实：`resetAskSurface()` 是唯一实现，`blankAskSurface`（起播）/ `renderPending`
+    （每次重绘之前）/ 终局分支三处都走它，别处一个字都不写。
+    """
+    pending = _PENDING_JS.read_text(encoding="utf-8")
+    session = _SESSION_JS.read_text(encoding="utf-8")
+
+    assert pending.count("function resetAskSurface(") == 1, (
+        "清询问面只能有**一个**实现（票面 A 的第一条）"
+    )
+    reset_body = _js_function_body(pending, "resetAskSurface")
+    # `#t-dialog-hint` 是 `#t-target-hint` 的**镜像**（写入住 `modal.js:syncDialogHint`）：
+    # 它的清除口也留在 `modal.js:resetDialogHint`，由 reset 触发——两边各写一份就是票面
+    # 第二类缺欠（清的是另一个元素）的翻版。
+    assert "resetDialogHint(" in reset_body, "弹窗标题条镜像必须由 reset 一起撤掉"
+    hint_body = _js_function_body((STATIC_DIR / "modal.js").read_text(encoding="utf-8"), "resetDialogHint")
+    assert '"t-dialog-hint"' in hint_body, "resetDialogHint 必须真的清掉 #t-dialog-hint"
+    # `#t-choice` 有自己的寿命口（`resetAskChoice` 作废在飞的超时），clear 也在那一处。
+    assert "resetAskChoice(" in reset_body, "页脚的清除必须走带寿命的口（resetAskChoice）"
+    choice_body = _js_function_body(pending, "resetAskChoice")
+    assert '"t-choice"' in choice_body, "resetAskChoice 必须真的清掉 #t-choice"
+    assert '$("t-choice").textContent =' not in pending, (
+        "pending.js 自己也不许再直写 #t-choice：唯一写入口是 setAskChoice"
+    )
+    for node in _ASK_SURFACE_NODES:
+        if node in ("t-dialog-hint", "t-choice"):
+            continue
+        assert f'"{node}"' in reset_body, (
+            f"resetAskSurface 必须负责 #{node}（七件套 + `#t-context` 归属说明）"
+        )
+    assert "resetAskChoice(" in reset_body, (
+        "`#t-choice` 的清除必须走带寿命的那个口（resetAskChoice），不许另写一句 textContent = \"\""
+    )
+
+    # 调用点 ①：起播（blankAskSurface 自己不再逐格清）。
+    blank = _js_function_body(pending, "blankAskSurface")
+    assert blank.count("resetAskSurface(") == 1, "起播必须走同一个 reset"
+    for node in _ASK_SURFACE_NODES:
+        if node in ("t-dialog-hint", "t-options", "t-prompt-skills"):
+            continue  # 镜像 / 选项格 / 技能组要读父节点判断保留态，见函数体
+        assert f'"{node}"' not in blank, (
+            f"blankAskSurface 里不许再出现 #{node}：清除实现只有 resetAskSurface 一处"
+        )
+
+    # 调用点 ②：每次 renderPending 之前（且在花色结果态那条捷径**之前**）。
+    render = _js_function_body(pending, "renderPending")
+    assert render.count("resetAskSurface(") == 1, "renderPending 必须从清空的询问面开始"
+    assert render.find("resetAskSurface(") < render.find("suitResultActive()"), (
+        "reset 必须在花色结果态的分支之前（否则结果态会把上一问的残片一起画出来）"
+    )
+
+    # 调用点 ③：终局分支（`commitView` 在 `renderPending` 之前 return 的那一段）。
+    assert session.count("resetAskSurface(") == 1, "终局分支是唯一的第三处调用点"
+    finished_at = session.find("if (body.finished) {")
+    assert finished_at >= 0, "session.js 里找不到终局分支"
+    finished = session[finished_at : finished_at + 1500]
+    assert "resetAskSurface(" in finished, (
+        "终局分支在 return 之前必须先 reset（否则技能串 / 页脚 / 描述停在上一问）"
+    )
+    assert finished.find("resetAskSurface(") < finished.find("return;"), (
+        "reset 必须早于终局分支的 return"
+    )
+
+    # `#t-choice` 只有一个写入口：直写一处都不剩（七处 answer.js + core.js 的页脚提示）。
+    for name in _ASK_CHOICE_WRITERS:
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert '$("t-choice").textContent =' not in text, (
+            f"{name} 里还有直写 #t-choice 的地方：写入必须走 pending.js:setAskChoice（带寿命）"
+        )
+    writer = _js_function_body(pending, "setAskChoice")
+    assert "seq" in writer and "setTimeout" in writer, (
+        "setAskChoice 必须给 `#t-choice` **显式寿命**（序号 + 超时），不许再靠下一次 renderPending 兜"
+    )
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 16：预发动「能不能交」只有一处判据 + 步骤不再画成按钮
+# ---------------------------------------------------------------------------
+
+_PREACTIVATION_JS = STATIC_DIR / "preactivation.js"
+_OPTIONS_JS = STATIC_DIR / "options.js"
+
+
+def test_the_preactivation_submit_verdict_has_one_single_implementation() -> None:
+    """票 16：提交判据**单源**——提示行 / 页脚 / 实际提交三处同读 `preactivationSubmitAllowed`。
+
+    实机报障：提示行写「清单已填完，可以确认发动。」、「确认发动」也亮着，页脚却写
+    「预发动清单还没填完。」、按下去什么都不发生。根因是**两份判据**：票 08 让光标停在
+    最后一步之后，另一份"光标要**越过**清单末尾才算填完"的旧谓词恒假。
+    这里把"只有一处实现"钉成结构事实，防它再长回来：
+
+    ① 旧谓词（`preactivationReady`）在静态源码里一个字都不剩（注释里也不留，好让
+       "再长出来"永远是一条显式的红）；
+    ② 判据只有一个定义，其本地兜底是"**最后一步**填满"（`steps.length - 1`），
+       不是"光标越过末尾"（`cursor < pa.steps.length`）；
+    ③ 页脚那句未就绪原因（`options.js:selectionError`）与真正拼动作的
+       `buildPreativationAction` 读**同一个**函数；
+    ④ 全站再没有第二个 `preactivation…Ready(…)` 式谓词；
+    ⑤ 步骤不再画成按钮：`renderPreativation` 不铺 `data-step`，跳步入口已删（无生产调用方）。
+    """
+    pre = _PREACTIVATION_JS.read_text(encoding="utf-8")
+    options = _OPTIONS_JS.read_text(encoding="utf-8")
+
+    assert "preactivationReady" not in pre, (
+        "旧的 `preactivationReady` 判据必须删净（票 08 之后它恒假，正是本票的症状来源）"
+    )
+    assert pre.count("function preactivationSubmitAllowed(") == 1, (
+        "「能不能交」只能有**一个**实现（`preactivationSubmitAllowed`）"
+    )
+    verdict = _js_function_body(pre, "preactivationSubmitAllowed")
+    assert "steps.length - 1" in verdict, (
+        "本地兜底必须是「**最后一步**填满即可交」（票 08：光标停在最后一步等提交）"
+    )
+    assert "cursor < pa.steps.length" not in verdict, (
+        "判据里不许再出现「光标必须越过清单末尾」的旧语义（那样它恒假）"
+    )
+    assert "preactivationSubmitAllowed(" not in verdict, "判据不许转发到第二份实现"
+
+    assert not re.findall(r"function preactivation[A-Za-z]*Ready\(", pre), (
+        "别给这份判据再起第二个名字：单源才能保证提示行 / 页脚 / 提交三处一致"
+    )
+
+    footer = _js_function_body(options, "selectionError")
+    assert "preactivationSubmitAllowed(" in footer, (
+        "页脚那句未就绪原因（`selectionError`）必须读同一个判据，否则会与提示行打架"
+    )
+    assert "预发动清单还没填完。" in footer, "页脚仍要说清「还没填完」这条未就绪原因"
+    submit = _js_function_body(pre, "buildPreativationAction")
+    assert "preactivationSubmitAllowed(" in submit, (
+        "真正拼动作的那一处也必须读同一个判据（不然按钮亮着却发不出去）"
+    )
+    hint = _js_function_body(pre, "preactivationStepHint")
+    assert "preactivationSubmitAllowed(" in hint, (
+        "提示行的「清单已填完」也读它：三处一个来源"
+    )
+
+    assert "data-step" not in pre, "步骤不再画成按钮（`data-step` 的 chip 行已删）"
+    assert "jumpPreativationStep" not in pre, (
+        "跳步入口失去生产调用方 ⇒ 删掉（不留只有测试在调的死代码）；回第一步走「取消」"
+    )
+    render = _js_function_body(pre, "renderPreativation")
+    assert "preactivationStepLabel" not in render, (
+        "步骤条已删：渲染器不再把每一步画成带标签的按钮"
+    )
+
+
+_PROMPT_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const STATIC = "tools/sgs_web/static";
+const read = (name) => readFileSync(`${STATIC}/${name}`, "utf8");
+const fileText = read("prompts.json");
+
+/* 一份最小的 DOM / Storage 垫片：`prompts.js` 只碰 `$`（core.js）、`state`（core.js）、
+ * 卡面纯函数（card-view.js）与 `preactivationStepKind`（preactivation.js）——四份都是
+ * **真脚本**，垫片只补环境，不替它们实现任何判据。 */
+function makeSandbox({ promptsText = fileText, overlay = null } = {}) {
+  const nodes = new Map();
+  const makeNode = (tag, id = "") => {
+    const node = {
+      tagName: String(tag || "div").toUpperCase(),
+      id,
+      textContent: "",
+      innerHTML: "",
+      hidden: false,
+      disabled: false,
+      className: "",
+      children: [],
+      parentNode: null,
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+      addEventListener() {},
+      setAttribute() {},
+      getAttribute() { return null; },
+      querySelector() { return null; },
+    };
+    if (id) nodes.set(id, node);
+    return node;
+  };
+  // index.html 里 prompts.js 会碰到的静态节点：动作行 + 提交键（按钮挂进 `.prompt-actions`）。
+  const actions = makeNode("div");
+  const submit = makeNode("button", "btn-submit");
+  nodeParent(submit, actions);
+  function nodeParent(child, parent) { child.parentNode = parent; parent.children.push(child); }
+  const storage = new Map();
+  if (overlay) storage.set("sgs.prompts", JSON.stringify(overlay));
+  const context = vm.createContext({
+    console,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    fetch: async () => ({ ok: true, status: 200, text: async () => promptsText }),
+    document: { getElementById: (id) => nodes.get(id) || makeNode("div", id), createElement: (tag) => makeNode(tag) },
+    JSON, Object, Array, Number, String, Math, Date, RegExp,
+    localStorage: {
+      getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
+      setItem: (key, value) => storage.set(String(key), String(value)),
+      removeItem: (key) => storage.delete(String(key)),
+    },
+  });
+  context.globalThis = context;
+  context.window = context;
+  // 页面里这些纯函数来自前面几份脚本（加载顺序见 index.html）；探针按同一顺序载入。
+  for (const name of ["core.js", "card-view.js", "preactivation.js"]) {
+    vm.runInContext(read(name), context, { filename: name });
+  }
+  vm.runInContext(read("prompts.js"), context, { filename: "prompts.js" });
+  context.__nodes = nodes;
+  context.__storage = storage;
+  // `state` 是 core.js 顶层 `const`（global lexical，不是 globalThis 的属性）：从同一个
+  // context 里取一次引用，夹具构造器与用例脚本都只通过它读写（与页面同一个对象）。
+  context.__state = vm.runInContext("state", context);
+  context.setup = () => setup(context.__state);
+  return context;
+}
+
+/* 一份**界【离间】**的三步清单（步骤名 / wording 取自 `src/sgs/skills/active.py` 的
+ * `JIE_LIJIAN_FLOW` 与 `step_requirements`），界版的顺序是 card → victim → user。 */
+const LIJIAN_STEPS = [
+  { name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+    wording: "弃置1张牌（手牌 / 装备区）" },
+  { name: "victim", kind: "seat", min: 1, max: 1, order: 1,
+    wording: "选择决斗目标（场上的一名男性角色；先点他，【决斗】打向他）" },
+  { name: "user", kind: "seat", min: 1, max: 1, order: 2,
+    wording: "选择决斗使用者（另一名男性角色；由他对目标使用【决斗】）" },
+];
+
+function setup(state) {
+  state.view = {
+    heroes: { 0: "diaochan", 1: "guanyu", 2: "zhangfei", 3: "luxun" },
+    snapshot: {
+      self_hand: [{ card_id: 7, name: "桃", suit: "heart", rank: 7, type: "peach", color: "red", virtual_sources: [] }],
+      players: [],
+    },
+    pending: null,
+  };
+  state.heroCatalog = [
+    { true_name: "陆逊", versions: [{ id: "luxun", name: "陆逊", version: "standard" }] },
+  ];
+  state.preactivation = {
+    skillId: "hero.jie_diaochan.lijian",
+    name: "界离间",
+    composite: true,
+    steps: LIJIAN_STEPS.map((step) => ({ ...step })),
+    answers: [{ values: [], texts: [] }, { values: [], texts: [] }, { values: [], texts: [] }],
+    cursor: 0,
+  };
+  return state.preactivation;
+}
+
+const report = {};
+
+/* ① 文件层：真的 prompts.json 读进来之后的形状。 */
+{
+  const context = makeSandbox();
+  report.file = await vm.runInContext(`(async () => {
+    await promptReady;
+    const keys = Object.keys(promptFileTemplates).sort();
+    const ok = promptFileLoaded;
+    const problems = promptProblems();
+    return JSON.stringify({
+      ok,
+      keys,
+      problems,
+      lijian: promptTemplateFor("hero.jie_diaochan.lijian"),
+      steps: promptFileTemplates["hero.jie_diaochan.lijian"],
+    });
+  })()`, context).then(JSON.parse);
+}
+
+/* ② 逐级累加：界【离间】三级的文案（用户给的三句，逐字）。 */
+{
+  const context = makeSandbox();
+  report.chain = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    const levels = [promptComposedText(pa, 0)];
+    pa.answers[0] = { values: [7], texts: ["7"] };
+    levels.push(promptComposedText(pa, 1));
+    pa.answers[1] = { values: [3], texts: ["seat:3"] };
+    levels.push(promptComposedText(pa, 2));
+    return JSON.stringify({ levels, joined: levels.join(" → ") });
+  })()`, context).then(JSON.parse);
+}
+
+/* ③ 三层回退：模板层缺键 → `Step.wording` → 前端通用文案。 */
+{
+  const context = makeSandbox({ promptsText: "{}" });
+  report.levels = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    const step = pa.steps[0];
+    const wordingStep = { name: "card", kind: "card", zones: ["hand"], min: 2, max: 2, wording: "服务端那句" };
+    const bareCard = { name: "card", kind: "card", zones: ["hand"], min: 2, max: 2 };
+    const bareSeat = { name: "seat", kind: "seat", min: 1, max: 1 };
+    const bareOption = { name: "option", kind: "option", min: 1, max: 1 };
+    return JSON.stringify({
+      // 空表 ⇒ 模板层什么都没有
+      composedWhenMissing: promptComposedText(pa, 0),
+      // ② 服务端 wording
+      wording: promptQuestionForStep(pa, step, 0),
+      // ③ 前端通用文案（wording 也没有）
+      genericCard: promptQuestionForStep(null, bareCard, 0),
+      genericSeat: promptQuestionForStep(null, bareSeat, 0),
+      genericOption: promptQuestionForStep(null, bareOption, 0),
+      // 第二层优先于第三层
+      wordingWins: promptQuestionForStep(null, wordingStep, 0),
+    });
+  })()`, context).then(JSON.parse);
+}
+
+/* ④ 占位符白名单：写错即回退（不把 {…} 原样印出来）；值取不到也回退。 */
+{
+  const bad = { "hero.jie_diaochan.lijian": { steps: { card: { ask: "弃置{who}的牌" } } } };
+  const context = makeSandbox({ promptsText: JSON.stringify(bad) });
+  report.whitelist = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    return JSON.stringify({
+      allowed: PROMPT_SLOT_WHITELIST,
+      badComposed: promptComposedText(pa, 0),
+      badQuestion: promptQuestionForStep(pa, pa.steps[0], 0),
+      rawBad: promptRenderTemplate("弃置{who}的牌", { who: "郭嘉" }),
+      missingValue: promptRenderTemplate("弃置【{card}】", {}),
+      filled: promptRenderTemplate("【{card}】【{name}】{suit}{rank} {seat} {hero} {n}",
+        { card: "桃♥7", name: "桃", suit: "♥", rank: "7", seat: "3号位陆逊", hero: "陆逊", n: "1" }),
+      emptyTemplate: promptRenderTemplate("   ", {}),
+    });
+  })()`, context).then(JSON.parse);
+}
+
+/* ⑤ 覆盖层（`localStorage['sgs.prompts']`）：键级叠加 + 导出 + 清除。 */
+{
+  const overlay = {
+    "hero.jie_diaochan.lijian": { steps: { card: { ask: "覆盖层：选一张牌弃置" } } },
+  };
+  const context = makeSandbox({ overlay });
+  report.overlay = await vm.runInContext(`(async () => {
+    await promptReady;
+    const pa = setup();
+    const merged = promptTemplateFor("hero.jie_diaochan.lijian");
+    const composed = promptComposedText(pa, 0);
+    const saved = promptSaveOverride("hero.jie_diaochan.lijian", "card", "ask", "游戏内改过的问句");
+    const stored = JSON.parse(window.localStorage.getItem("sgs.prompts"));
+    const exported = promptExportOverlay();
+    const editTarget = promptEditTarget();
+    promptClearOverlay();
+    const cleared = window.localStorage.getItem("sgs.prompts");
+    return JSON.stringify({
+      merged, composed, saved, stored, exported, editTarget, cleared,
+      afterClear: promptComposedText(setup(), 0),
+    });
+  })()`, context).then(JSON.parse);
+}
+
+process.stdout.write(JSON.stringify(report));
+"""
+
+
+def _prompt_probe() -> dict:
+    """跑真 `core.js` + `card-view.js` + `preactivation.js` + `prompts.js`（node vm），拿回实测读数。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "prompt_probe.mjs"
+        probe.write_text(_PROMPT_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"提示区文案模板探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def prompt_probe() -> dict:
+    """一次探针跑完，两条用例共用。"""
+    return _prompt_probe()
+
+
+def test_the_prompt_templates_are_loaded_with_a_documented_fallback_chain(
+    prompt_probe: dict,
+) -> None:
+    """票 07 B：`prompts.json` 与 `anim.ini` 同姿态载入，缺键逐级回退（三层）。"""
+    srcs = _script_srcs()
+    assert "prompts.js" in srcs, f"index.html 必须加载文案模板脚本：{srcs}"
+    assert srcs.index("core.js") < srcs.index("prompts.js") < srcs.index("main.js"), (
+        "prompts.js 只借 core.js 的 `$` / `state` / 卡面纯函数，且必须早于 wire()"
+    )
+    assert _PROMPTS_JSON.is_file(), "文案模板初稿 prompts.json 缺失（与 anim.ini 同目录）"
+    text = _PROMPTS_JS.read_text(encoding="utf-8")
+    for level in ("prompts.json", "Step.wording", "选择{n}张牌", "选择{n}名角色"):
+        assert level in text, f"三层回退里少了「{level}」这一层（票面要求逐级回退写清楚）"
+    assert "Query.prompt" in text, (
+        "硬约束（spec §6 #3）必须写进实现：模板只做显示覆盖，绝不写进 Query.prompt"
+    )
+
+    # 文件层：载入成功、键族合规、至少覆盖到界【离间】的三步。
+    file = prompt_probe["file"]
+    assert file["ok"] is True, "prompts.json 没载入成功"
+    assert not file["problems"], f"prompts.json 有解析问题：{file['problems']}"
+    assert len(file["keys"]) >= 34, f"初稿键太少（{len(file['keys'])}）：由 step_requirements 反推"
+    pattern = re.compile(r"^(?:hero|equip|lord)\.[a-z0-9_]+\.[a-z0-9_]+$|^window:[A-Za-z_]+$")
+    for key in file["keys"]:
+        assert pattern.match(key), f"模板键不合形状（技能 id / window:<cause>）：{key}"
+    lijian = file["steps"] or {}
+    assert set(lijian) >= {"steps"}, f"界离间必须有一对以上的 ask/done：{lijian}"
+    assert set((lijian["steps"] or {})) >= {"card", "victim", "user"}, (
+        f"界离间的三步都要有模板：{sorted((lijian['steps'] or {}))}"
+    )
+
+    # ① 模板层：逐级累加 = 用户 2026-11-11 给的三句（逐字）。
+    levels = prompt_probe["chain"]["levels"]
+    assert levels[0] == "选择1张牌弃置", f"第 1 级不对：{levels[0]!r}"
+    assert levels[1] == "弃置一张【桃♥7】，选择1名男性角色成为决斗目标", (
+        f"第 2 级不对：{levels[1]!r}"
+    )
+    assert levels[2] == "弃置一张【桃♥7】，选择1名男性角色对【3号位陆逊】使用决斗", (
+        f"第 3 级不对：{levels[2]!r}"
+    )
+
+    # ② 缺键 → 服务端 `Step.wording`；③ 连 wording 都没有 → 前端通用文案。
+    fallback = prompt_probe["levels"]
+    assert fallback["composedWhenMissing"] is None, "空表时模板层必须让位（返回 null）"
+    assert fallback["wording"] == "弃置1张牌（手牌 / 装备区）", fallback["wording"]
+    assert fallback["wordingWins"] == "服务端那句", "第二层必须优先于第三层"
+    assert fallback["genericCard"] == "选择2张牌", fallback["genericCard"]
+    assert fallback["genericSeat"] == "选择1名角色", fallback["genericSeat"]
+    assert fallback["genericOption"] == "选一项", fallback["genericOption"]
+
+    # 覆盖层：键级叠加（覆盖层只改它写的那一格，文件层的 done 仍在）。
+    overlay = prompt_probe["overlay"]
+    assert overlay["merged"]["steps"]["card"] == {
+        "ask": "覆盖层：选一张牌弃置",
+        "done": "弃置一张【{card}】",
+    }, f"覆盖层不是键级叠加：{overlay['merged']['steps']['card']}"
+    assert overlay["composed"] == "覆盖层：选一张牌弃置", overlay["composed"]
+    assert overlay["saved"] is True and overlay["stored"]["hero.jie_diaochan.lijian"]["steps"]["card"]["ask"] == (
+        "游戏内改过的问句"
+    ), "游戏内编辑必须写进 localStorage['sgs.prompts']"
+    assert "游戏内改过的问句" in overlay["exported"], "「导出 JSON」要给出能贴回仓里的覆盖层"
+    assert overlay["editTarget"]["key"] == "hero.jie_diaochan.lijian", overlay["editTarget"]
+    assert overlay["cleared"] is None, "清覆盖层要真的从 localStorage 里删掉"
+    assert overlay["afterClear"] == "选择1张牌弃置", "清掉覆盖层后回到文件层"
+
+
+def test_a_template_slot_whitelist_rejects_unknown_placeholders(prompt_probe: dict) -> None:
+    """票 07 B：占位符白名单只有七个；写错 / 取不到都**整条回退**，绝不原样印出来。"""
+    whitelist = prompt_probe["whitelist"]
+    assert whitelist["allowed"] == ["card", "seat", "name", "n", "suit", "rank", "hero"], (
+        f"占位符白名单必须逐字是票面那七个：{whitelist['allowed']}"
+    )
+    assert whitelist["badComposed"] is None, "带未知占位符的模板必须整条作废"
+    assert whitelist["badQuestion"] == "弃置1张牌（手牌 / 装备区）", (
+        f"未知占位符要回退到服务端文案：{whitelist['badQuestion']!r}"
+    )
+    assert whitelist["rawBad"] is None, "未知占位符不许被渲染成字面量"
+    assert whitelist["missingValue"] is None, (
+        "白名单内的槽取不到值也必须回退（不许把 {card} 原样印到界面上）"
+    )
+    assert whitelist["filled"] == "【桃♥7】【桃】♥7 3号位陆逊 陆逊 1", whitelist["filled"]
+    assert whitelist["emptyTemplate"] is None, "空模板不算模板（否则会把问句清成空）"
+
+
+def test_the_prompt_template_keys_are_real_skill_ids_and_real_step_names() -> None:
+    """初稿的键 / 步骤名与**引擎声明**对得上（跨语言副本纪律，同 `IDENTITY_RATIOS` 那条）。
+
+    `prompts.json` 是前端唯一的一份文案副本，键 = 服务端 `view.skills[].skill_id`、步骤名 =
+    `Step.name`。手改一个字（技能 id 打错 / 步骤名打错）**不会报错**，只会让那一整条模板
+    永远不生效——用户改完字以为生效了，界面上其实还是服务端那句。故这里拿真声明核一遍：
+    `sgs.skills.catalog.CATALOG[skill_id]` 存在，且每个步骤名都出现在该技能的
+    `step_requirements` 或 `SkillFlow` 的步骤键里。
+    """
+    from sgs.skills.catalog import CATALOG  # 只读声明，不跑引擎、不进记录流
+
+    draft = json.loads(_PROMPTS_JSON.read_text(encoding="utf-8"))
+    assert draft, "prompts.json 是空表"
+    window_keys = [key for key in draft if key.startswith("window:")]
+    for key in window_keys:
+        assert re.fullmatch(r"window:[A-Za-z_]+", key), f"窗口键不合形状：{key}"
+    for key, entry in draft.items():
+        if key.startswith("window:"):
+            assert isinstance(entry.get("ask"), str), f"{key} 只有一句 ask（窗口没有步骤）"
+            continue
+        definition = CATALOG.get(key)
+        assert definition is not None, f"prompts.json 的键不是真技能 id：{key}"
+        known = set(getattr(definition, "step_requirements", None) or ())
+        flow = getattr(definition, "flow", None)
+        if flow is not None:
+            known |= {step.key for step in flow.steps}
+        steps = entry.get("steps") or {}
+        assert steps, f"{key} 没有任何步骤模板"
+        for step in steps:
+            assert step in known, f"{key} 的步骤名 {step} 不在声明里：{sorted(known)}"
+
+
+# ---------------------------------------------------------------------------
+# 票 09（table-ux-overhaul）：自家手牌直选三例的静态判据
+# ---------------------------------------------------------------------------
+
+
+def test_the_own_zone_suit_cap_reads_the_pick_preview_instead_of_counting_suits() -> None:
+    """票 15：自家手牌面的置灰 = **读预览回包的** ``disabled``，前端**零花色推导**。
+
+    行为归 `ui_smoke.mjs`（`U-YS-01a..e` + `U-YS-02`），这里钉结构。票 09 的止损
+    （`candidates.js:ownZoneSuitTaken` + `reveal.js:suitSlotState`）在本票**退役**，
+    故这四条同时成立：
+
+    - `ownZoneSuitTaken` 在 `static/` 里**一处都不剩**，`max_per_suit` / `suitSlotState`
+      这三个自家区域文件里也不再出现（否则就是"前端又数了一遍花色"）；
+    - 判据只有一处实现：`candidates.js:ownPickSlotDisabled`，读预览回包的
+      `ownPickPreview.disabled`（服务端现算的 `slot:N` 禁用集）；
+    - 两个消费者共用它：`card-face.js:cardFace`（手牌置灰）与 `options.js:toggleSlotPick`
+      （拒点——置灰不能只在样式上）；
+    - **fail-closed**：没有当前这一问的回包（还没回来 / 失败）⇒ 一律 `true`（点不动），
+      **不许**退回"全都点得动"（`spec §6` 不变量 5）。这条与前者是同一函数的两个分支，
+      故本断言同时是"别在这里长出第二份规则"的闸门。
+    """
+    static_dir = STATIC_DIR
+    candidates_all = (static_dir / "candidates.js").read_text(encoding="utf-8")
+    candidates = _strip_js_comments(candidates_all)
+    card_face = _strip_js_comments((static_dir / "card-face.js").read_text(encoding="utf-8"))
+    options = _strip_js_comments((static_dir / "options.js").read_text(encoding="utf-8"))
+
+    # ① 止损一处都不剩：三个文件的**源码**里没有花色推导的入口。
+    for name in ("candidates.js", "card-face.js", "options.js"):
+        source = _strip_js_comments((static_dir / name).read_text(encoding="utf-8"))
+        assert "ownZoneSuitTaken" not in source, f"{name} 还留着票 09 的止损判据"
+        assert "max_per_suit" not in source, (
+            f"{name} 还在读 spec.max_per_suit（前端不许自己推导花色上限）"
+        )
+        assert "suitSlotState" not in source, (
+            f"{name} 还在数花色（`suitSlotState` 是涉猎 / 两行观看手牌那一份，不是自家手牌面）"
+        )
+
+    # ② 唯一判据读的是**回包**：`disabled` 是服务端现算的 `slot:N` 集合。
+    disabled = _js_function(candidates, "ownPickSlotDisabled")
+    assert "ownPickPreviewEnabled(pending)" in disabled, f"先在通道之外不拦：{disabled}"
+    assert "ownPickPreview.disabled" in disabled, f"读的是预览回包的禁用集：{disabled}"
+    assert "`slot:${index}`" in disabled or "slot:${index}" in disabled, (
+        f"回包与请求同一套文本口径（slot:N）：{disabled}"
+    )
+    assert "state.picks.indexOf(index) >= 0" in disabled, (
+        f"已选的槽位恒可点（再点 = 取消，否则退不出来）：{disabled}"
+    )
+    assert "return true" in disabled, (
+        f"fail-closed：没有当前这一问的回包就是「点不动」：{disabled}"
+    )
+
+    # ③ 两个消费者共用同一条判据（置灰与拒点同源）。
+    face = _js_function(card_face, "cardFace")
+    assert "ownPickSlotDisabled(pending, slotIndex)" in face, f"手牌置灰读同一条判据：{face}"
+    assert "taken" in face, face
+    toggle = _js_function(options, "toggleSlotPick")
+    assert "ownPickSlotDisabled(pending, index)" in toggle, (
+        f"拒点读同一条判据（置灰不能只在样式上）：{toggle}"
+    )
+
+    # ④ 预览客户端是票 11 那一套姿态：去抖 + 版本号 + 墙钟超时 + 失败话术。
+    for literal in (
+        "OWN_PICK_PREVIEW_DEBOUNCE_MS",
+        "OWN_PICK_PREVIEW_TIMEOUT_MS",
+        "OWN_PICK_PREVIEW_ERROR",
+        "ownPickPreview.version",
+        "ownPickPreview.retryAt",
+    ):
+        assert literal in candidates, f"预览客户端缺 {literal}（去抖 / 版本号 / 超时 / 重问）"
+    schedule = _js_function(candidates, "ownPickPreviewSchedule")
+    assert "answers_seq: seq" in schedule and "picks:" in schedule, (
+        f"请求体 = 询问序号 + 已选槽位（没有 skill_id）：{schedule}"
+    )
+    assert "setTimeout" in schedule, f"变化要**去抖**，不是点一下就发：{schedule}"
+    request = _js_function(candidates, "requestOwnPickPreview")
+    assert "ownPickPreview.version !== version" in request, (
+        f"过期的回包一律丢弃（版本号只增）：{request}"
+    )
+
+    # ⑤ 通道 = 载荷的 `pick_preview`（键的缺席是保证：合成 / 旧载荷逐行为不变），
+    #    且只服务**多张**的自己区域面（单张面点一张即提交，没有"凑组合"可算）。
+    supported = _js_function(candidates, "ownPickPreviewSupported")
+    assert "pick_preview === true" in supported, f"读服务端的能力声明：{supported}"
+    enabled = _js_function(candidates, "ownPickPreviewEnabled")
+    assert "isOwnZonePick(pending)" in enabled and "isOwnHandSinglePick(pending)" in enabled, (
+        f"只服务多张的自己区域面：{enabled}"
+    )
+
+
+def test_the_own_zone_direct_pick_shape_is_one_predicate_without_a_dialog_deadlock() -> None:
+    """票 09 ①②：直选判据与亮牌否决共用**同一份形状**，且否决不读 `stepDialogKind`。
+
+    - `ownZoneSlotsVisible` 是形状的唯一实现（槽位全在应答者自己的手牌 / 装备区、牌面可见），
+      `isOwnZonePick` 与 `isRevealStep` 的否决都调它；
+    - 它**不许**读 `stepDialogKind`：那个函数会调亮牌判据，读它会绕成死循环（本文件读源码钉死）；
+    - 亮牌否决另加一条 `ownHandSlotsKnown`：面里的牌必须在**本人手牌快照**里——【遗计】/
+      【从讨】的观看授予也把牌摆在 `zone:"hand"` 的可见槽上（那几张牌不在手里），
+      它们必须继续开亮牌窗；
+    - 否决排在 `pending.dialog === DIALOG_KINDS.reveal` **之前**（排在后面等于不否决）。
+    """
+    candidates = _strip_js_comments((STATIC_DIR / "candidates.js").read_text(encoding="utf-8"))
+    modal = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+
+    shape = _js_function(candidates, "ownZoneSlotsVisible")
+    assert "SELECT_CARDS" in shape, shape
+    assert "stepDialogKind" not in shape, (
+        f"形状判据不许读弹窗种类（会被亮牌判据反过来调用 ⇒ 死循环）：{shape}"
+    )
+    assert "slot.card" in shape, f"牌面可见是判据的一半：{shape}"
+
+    own_pick = _js_function(candidates, "isOwnZonePick")
+    assert "ownZoneSlotsVisible(pending)" in own_pick, (
+        f"直选判据复用同一份形状（不再自己抄一遍槽位循环）：{own_pick}"
+    )
+
+    known = _js_function(candidates, "ownHandSlotsKnown")
+    assert "ownZoneSlotsVisible(pending)" in known, known
+    assert "self_hand" in known, f"「已经在我手里」才是「不是观看授予」的事实依据：{known}"
+
+    reveal = _js_function(modal, "isRevealStep")
+    assert "ownHandSlotsKnown(pending)" in reveal, (
+        f"亮牌判据要有对称否决（旧载荷 / 合成载荷兜底）：{reveal}"
+    )
+    assert reveal.index("ownHandSlotsKnown(pending)") < reveal.index(
+        "pending.dialog === DIALOG_KINDS.reveal"
+    ), f"否决必须排在模板标记之前，否则等于不否决：{reveal}"
+
+
+# ---------------------------------------------------------------------------
+# 表体重建判据 ↔ `applyLiveDelta` 的 delta 分支同步（table-ux-overhaul 票 01 的评审 R4）
+#
+# `recordTouchesTableView`（回放期"这一条记录要不要整桌重建"）是一个**负判据**：
+# `NON_TABLE_DELTAS` 只列"不写快照"的那几类，其余 delta 一律 `true`。它和
+# `applyLiveDelta` 的分支是同一件事的两面（"有没有派生进 live view"），但两边没有共享
+# 代码——正确性此前只靠 `recordTouchesTableView` 的注释（"那边没有分支的 delta 就改不了
+# 快照"）。本测试把两侧与**服务端**的 delta 闭集对起来：多一类 delta 而它不在任何一侧
+# ⇒ 红（要么补 live 派生 + 加进 NON_TABLE，要么登记成"只触发保守重建"）。
+# ---------------------------------------------------------------------------
+
+_LIVE_DELTA_BRANCH = re.compile(r'record\.delta_type\s*(?:===|!==)\s*"(?P<name>[a-z_]+)"')
+"""`applyLiveDelta` 函数体里的 ``record.delta_type === "x"`` / ``!==`` 比较。"""
+
+_NON_TABLE_BLOCK = re.compile(r"const NON_TABLE_DELTAS = new Set\(\[(?P<body>.*?)\]\);", re.S)
+_NON_TABLE_ENTRY = re.compile(r'"(?P<name>[a-z_]+)"')
+
+_SERVER_DELTA_TYPE = re.compile(r'delta_type: Literal\["(?P<name>[a-z_]+)"\]')
+"""服务端 delta 类型的**闭集**（`src/sgs/state/deltas.py` 的判别字段声明）。"""
+
+REBUILD_ONLY_DELTAS = frozenset({"skill_gain", "skill_lose", "skill_suppress"})
+"""**只触发保守重建**的 delta：技能三态（获得 / 失去 / 失效）不从 delta 派生。
+
+`applyLiveDelta` 的口径是"不可派生的字段一律不猜"（技能可用性只在快照里），故这三条既不
+进 `NON_TABLE_DELTAS`（它们**要**重建）、也没有 live 分支；其余 delta 必须二选一地落在
+`applyLiveDelta`（派生进 live view）或 `NON_TABLE_DELTAS`（不写快照，纯展示）里。
+"""
+
+
+def _live_delta_branches() -> set[str]:
+    """`session.js:applyLiveDelta` 认得的 delta 类型（只扫**函数体**，不扫整个文件）。"""
+    text = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    assert "function applyLiveDelta(" in text
+    body = text.split("function applyLiveDelta(", 1)[1].split("\nfunction ", 1)[0]
+    names = {match.group("name") for match in _LIVE_DELTA_BRANCH.finditer(body)}
+    assert names, "没扫到 applyLiveDelta 的任何 delta 分支（扫描失效）"
+    return names
+
+
+def _non_table_deltas() -> set[str]:
+    """`session.js:NON_TABLE_DELTAS` 的分类（"不写快照"的 delta 类型）。"""
+    text = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    block = _NON_TABLE_BLOCK.search(text)
+    assert block is not None, "session.js 里找不到 `const NON_TABLE_DELTAS = new Set([...]);`"
+    names = {match.group("name") for match in _NON_TABLE_ENTRY.finditer(block.group("body"))}
+    assert names, "NON_TABLE_DELTAS 是空的（分类失效）"
+    return names
+
+
+def _server_delta_types() -> set[str]:
+    """服务端 delta 类型的闭集（改 `state/deltas.py` 加一类 ⇒ 这里自动跟着变）。"""
+    from sgs.state import deltas as deltas_module
+
+    text = Path(deltas_module.__file__).read_text(encoding="utf-8")
+    names = {match.group("name") for match in _SERVER_DELTA_TYPE.finditer(text)}
+    assert len(names) >= 15, f"只扫到 {len(names)} 类 delta；扫描疑似失效"
+    return names
+
+
+def test_the_delta_kinds_apply_live_delta_handles_and_non_table_deltas_stay_in_sync() -> None:
+    """每一类服务端 delta 都必须落在"派生进 live view"或"不写快照"里（或登记为只重建）。
+
+    新增一类 delta 而两侧都没登记 ⇒ 回放期它会被当成"要重建的表体记录"白重建一次（性能
+    问题），或者更糟：以为它不写快照却其实要写。判据是**三集合的划分**，不是逐个对照。
+    """
+    handled = _live_delta_branches()
+    non_table = _non_table_deltas()
+    server = _server_delta_types()
+
+    assert handled.isdisjoint(non_table), (
+        "同一类 delta 既派生进 live view、又被标成「不写快照」（自相矛盾）："
+        f"{sorted(handled & non_table)}"
+    )
+    assert handled.isdisjoint(REBUILD_ONLY_DELTAS)
+    assert non_table.isdisjoint(REBUILD_ONLY_DELTAS)
+    assert REBUILD_ONLY_DELTAS <= server, (
+        "登记成只重建的 delta 在服务端已不存在（改名 / 删类后忘了同步这张名单）："
+        f"{sorted(REBUILD_ONLY_DELTAS - server)}"
+    )
+
+    uncovered = server - handled - non_table - REBUILD_ONLY_DELTAS
+    assert not uncovered, (
+        "这些 delta 类型既不在 `applyLiveDelta` 的分支里、也不在 `NON_TABLE_DELTAS` 里"
+        f"（新加一类 delta 时两侧都要想清楚）：{sorted(uncovered)}\n"
+        "· 它改快照 ⇒ 在 `applyLiveDelta` 里加分支（回放期逐事件画出来）；\n"
+        "· 它只做展示（舞台 / 弹窗）⇒ 加进 `NON_TABLE_DELTAS`；\n"
+        "· 它不可派生（如技能三态）⇒ 登记进本文件的 `REBUILD_ONLY_DELTAS` 并写理由。"
+    )
+    ghosts = handled - server
+    assert not ghosts, (
+        f"`applyLiveDelta` 里有服务端不存在的 delta 分支（改名 / 删类后忘了改前端）：{sorted(ghosts)}"
+    )
+    dead = non_table - server
+    assert not dead, f"`NON_TABLE_DELTAS` 里有服务端不存在的 delta 类型：{sorted(dead)}"
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 18：五谷亮牌面——目标条在正文流里 + `renderReveal` 是唯一渲染器
+# ---------------------------------------------------------------------------
+
+_REVEAL_JS = STATIC_DIR / "reveal.js"
+_MODAL_JS = STATIC_DIR / "modal.js"
+_SESSION_JS = STATIC_DIR / "session.js"
+
+# 亮牌正文里"被拿走的牌 / 目标条"这两类节点的全部写点（属性 / 类名 / 文案）。
+_REVEAL_PAINT_MARKERS = ("taken-by", "reveal-targets", "reveal-target ", "data-taken-by")
+
+
+def test_the_target_bar_sits_in_the_reveal_flow_instead_of_over_the_cards() -> None:
+    """目标条**不许**绝对定位，正文也**不许**靠固定下内边距给它让位（票 18）。
+
+    旧的 `.reveal-targets { position: absolute; left/bottom }` + `.dialog-body.reveal-body
+    { padding-bottom: 52px }` 是"牌面行高度恒定"的假设：牌一换行 / 一滚动，绝对定位的条就
+    压在牌面底部（用户实机截图：5 张牌被条切去底部）。修法是让它成为 `.reveal` 的普通弹性
+    子项——高度由内容决定，滚动归外层正文槽；**不许**用更大的固定 padding 掩盖。
+    """
+    bar = re.search(r"\.reveal-targets\s*\{(?P<body>[^}]*)\}", _CSS_TEXT)
+    assert bar is not None, "style.css 里找不到 .reveal-targets 规则"
+    assert "position" not in bar.group("body"), (
+        f"目标条不许再绝对定位（它是 .reveal 正文流里的一行）：{bar.group('body')}"
+    )
+    assert "padding-bottom: 52px" not in _CSS_TEXT, (
+        "给目标条预留的固定下内边距必须删除（牌面行高度不定，固定 padding 一定会再撞）"
+    )
+    pane = re.search(r"\.dialog-reveal\s*\{(?P<body>[^}]*)\}", _CSS_TEXT)
+    assert pane is not None, "style.css 里找不到 .dialog-reveal 规则"
+    assert "52px" not in pane.group("body"), (
+        f"持久展示正文同样不再给绝对定位的条留高度：{pane.group('body')}"
+    )
+    assert ".dialog-body.reveal-body" not in _CSS_TEXT, (
+        "`reveal-body` 内边距预留随绝对定位一起退役（牌面高度不定）"
+    )
+    assert ".reveal {\n  display: flex; flex-direction: column" in _CSS_TEXT or re.search(
+        r"\.reveal\s*\{[^}]*flex-direction:\s*column", _CSS_TEXT
+    ), "目标条要作为 `.reveal` 的弹性子项排在牌面行**下面**"
+    # 页面 / 脚本里也不该再出现这个退役的类名（退役要退干净，别留半截接线）。
+    for name in ("reveal.js", "modal.js", "pending.js"):
+        source = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert "reveal-body" not in source, f"{name} 里还留着已退役的 reveal-body 类"
+
+
+def test_render_reveal_is_the_only_painter_of_taken_badges_and_the_target_bar() -> None:
+    """`renderReveal` 是亮牌唯一的渲染器：没有第二份"taken 徽标 / 目标条"实现（票 18）。
+
+    票面的约束是"每个新输入都用**同一份**渲染器重画"，不是再写一条"谁拿了牌"的判据。
+    这里按**写点**钉：`taken-by` / `reveal-targets` / `data-taken-by` 这些节点只在
+    `reveal.js` 里被创建，且都在 `renderReveal` 的正文里；别的脚本只许读（选择器 / 测试）。
+    """
+    for name in ("modal.js", "session.js", "pending.js", "options.js", "table.js"):
+        source = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        for marker in _REVEAL_PAINT_MARKERS:
+            assert marker not in source, (
+                f"{name} 里出现了亮牌节点的第二份写点 `{marker}`——"
+                "被拿走的牌 / 目标条只许由 reveal.js:renderReveal 画"
+            )
+    reveal = _strip_js_comments(_REVEAL_JS.read_text(encoding="utf-8"))
+    render = _js_function(reveal, "renderReveal")
+    for marker in ("taken-by", "reveal-targets", "data-taken-by"):
+        assert marker in render, f"renderReveal 才是唯一的写点，缺 `{marker}`"
+    assert reveal.count('className = "taken-by"') == 1, "taken 徽标只许有一份实现"
+    assert reveal.count('className = "reveal-targets"') == 1, "目标条只许有一份实现"
+
+
+def test_the_view_level_harvest_channel_is_repainted_but_never_resets_the_selection() -> None:
+    """服务端 D 方案（票 18）的前端接线：`view.harvest` 变了就重画，**不**清本地选择。
+
+    判据只看三件事：
+      - `revealData` 优先读视图级 `view.harvest`（同一份派生，链键一致才认）；
+      - 空转轮询有一个专门的重画口（`applyIdleHarvest` → `repaintRevealFromHarvest`），
+        它走同一条 `renderReveal`，且**不调用** `resetSelection`；
+      - 链键对不上（别的模板 / 别的局）就拒绝动手。
+    """
+    reveal = _strip_js_comments(_REVEAL_JS.read_text(encoding="utf-8"))
+    data = _js_function(reveal, "revealData")
+    assert "viewHarvestState(pending) || own" in data, (
+        f"视图级 harvest 是优先来源（询问载荷兜底）：{data}"
+    )
+    view_harvest = _js_function(reveal, "viewHarvestState")
+    assert "state.view" in view_harvest and "harvest.key" in view_harvest, (
+        f"链键不一致时必须不认（不猜链）：{view_harvest}"
+    )
+    session = _strip_js_comments(_SESSION_JS.read_text(encoding="utf-8"))
+    idle = _js_function(session, "applyIdleHarvest")
+    assert "repaintRevealFromHarvest" in idle
+    assert "resetSelection" not in idle, "空转重画不许清本地选择（与 applyIdleRepaint 同一条纪律）"
+    assert "applyIdleHarvest(body)" in _js_function(session, "poll"), (
+        "空转轮询必须接上视图级五谷状态的重画口"
+    )
+    modal = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+    repaint = _js_function(modal, "repaintRevealFromHarvest")
+    assert "renderReveal(" in repaint, "重画必须走唯一的渲染器 renderReveal"
+    assert "state.dialog.key !== `reveal:${harvest.key}`" in repaint, (
+        f"链键对不上（别的模板 / 别的局）就拒绝动手：{repaint}"
+    )
+    assert "resetSelection" not in repaint, "重画不许清本地选择"

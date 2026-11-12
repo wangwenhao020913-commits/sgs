@@ -54,6 +54,7 @@ from sgs.state import (
     SubstituteJudgeCard,
     SelectCards,
     SelectOption,
+    SelectOptions,
     UseCard,
     WindowCause,
     Zone,
@@ -533,16 +534,19 @@ class _TuxiPlayer:
                     if getattr(action, "kind", None) == "ActivateSkill":
                         return action
             return next(action for action in query.legal_actions if isinstance(action, Pass))
-        if query.kind == "SELECT_OPTION" and str(query.skill_id).startswith(("tuxi:", "jie_tuxi:")):
+        if query.kind == "SELECT_OPTIONS" and str(query.skill_id).startswith(
+            ("tuxi:", "jie_tuxi:")
+        ):
+            # table-ux-overhaul 票 13：座位多选一次问齐 —— ``seats`` 一次性提交成集合。
             self.options.append(query)
-            if self._seats:
-                seat = self._seats.pop(0)
-                return next(
-                    action
-                    for action in query.legal_actions
-                    if isinstance(action, SelectOption)
-                    and action.choice == f"{TUXI_SEAT_PREFIX}{seat}"
-                )
+            choices = tuple(
+                f"{TUXI_SEAT_PREFIX}{seat}"
+                for seat in self._seats
+                if f"{TUXI_SEAT_PREFIX}{seat}" in query.options
+            )
+            self._seats.clear()
+            if choices:
+                return SelectOptions(choices=choices, answers_seq=query.seq)
             return next(action for action in query.legal_actions if isinstance(action, Pass))
         if query.kind == "PLAY_PHASE":
             return next(action for action in query.legal_actions if isinstance(action, EndPhase))

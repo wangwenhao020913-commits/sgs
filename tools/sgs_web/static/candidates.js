@@ -119,16 +119,14 @@ function isDiscardPick(pending) {
   return Boolean(pending) && pending.kind === "DISCARD";
 }
 
-/** **从自己的手牌 / 装备区里选牌**的牌桌步（火攻 / 铁骑 / 青囊 / 结姻等）。
+/** 面里的每一槽都是**应答者自己的可见区**（手牌 / 装备，牌面非空）。
  *
- * 形状全部读载荷：`SELECT_CARDS`、面里每一槽都是**应答者本人**的手牌或装备区、牌面可见，
- * 且这一步不是「提供一张 B」/ 弹窗模板。命中时不再铺左下角选择面，而是在牌桌的牌面上
- * 直接点选；单张选择点一张即提交，多张选择点选后由「提交」送出。判据只是**渲染路径**，
- * 不裁决合法性（候选仍由 `legal_actions` 给）。
+ * 这是 :func:`isOwnZonePick` 与亮牌否决（`modal.js:isRevealStep`）共用的**形状判据**，
+ * 故意**不读** `stepDialogKind`：`stepDialogKind` 自己会调亮牌判据，读它会绕成死循环。
+ * 票 09（spec §1 #12）：自己的区对本人天然可见 ⇒ 它不是"观看授予"的亮牌面。
  */
-function isOwnZonePick(pending) {
+function ownZoneSlotsVisible(pending) {
   if (!pending || pending.kind !== "SELECT_CARDS") return false;
-  if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
   const slots = pending.slots || [];
   if (!slots.length) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
@@ -142,9 +140,245 @@ function isOwnZonePick(pending) {
   });
 }
 
+/** **从自己的手牌 / 装备区里选牌**的牌桌步（火攻 / 铁骑 / 青囊 / 结姻等）。
+ *
+ * 形状全部读载荷：`SELECT_CARDS`、面里每一槽都是**应答者本人**的手牌或装备区、牌面可见，
+ * 且这一步不是「提供一张 B」/ 弹窗模板。命中时不再铺左下角选择面，而是在牌桌的牌面上
+ * 直接点选；单张选择点一张即提交，多张选择点选后由「提交」送出。判据只是**渲染路径**，
+ * 不裁决合法性（候选仍由 `legal_actions` 给）。
+ */
+function isOwnZonePick(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
+  return ownZoneSlotsVisible(pending);
+}
+
+/** 面里的牌**已经在本人手牌快照里**（= 不是"观看授予"，票 09 ②的对称兜底）。
+ *
+ * ``revealed`` 的语义是发给应答者的**额外**牌面；自己的手牌在 ``self_hand`` 里本来就有
+ * 同一批牌面，故投影对"槽位全是应答者自己手牌"的面**不再授予** ``revealed``
+ * （`tools/sgs_web/projection.py:_own_hand_face`），``dialog`` 随之变 ``null``。前端这一条
+ * 是**对称否决**：旧服务端载荷 / 合成载荷里 ``dialog`` 仍是 ``"reveal"`` 时不误开亮牌窗，
+ * 直接走牌桌直选。
+ *
+ * **判据不能只看"己方可见槽位"**：【遗计】/【藏匿】一类**观看授予**也把牌摆在
+ * ``ref: {seat: actor, zone: "hand"}`` 的可见槽上（那几张牌还没进手牌、是授予的观看面），
+ * 它们**必须**继续开亮牌窗。两者的分界就是"这几张牌在不在本人手牌快照里"。
+ * 读 ``pending.view`` 优先（真载荷里挂着同一份内嵌视角），合成载荷退回 ``state.view``——
+ * 与 `modal.js:activationFaceSurface` 读 `state.preactivation` 同一姿态（`stepDialogKind`
+ * 本来就允许读一点本地态）。
+ */
+function ownHandSlotsKnown(pending) {
+  if (!ownZoneSlotsVisible(pending)) return false;
+  const view = (pending && pending.view) || state.view;
+  const hand = (view && (view.self_hand || (view.snapshot && view.snapshot.self_hand))) || [];
+  if (!hand.length) return false;
+  const known = new Set(hand.map((card) => String(card.card_id)));
+  return (pending.slots || []).every((slot) => slot.card && known.has(String(slot.card.card_id)));
+}
+
 /** 只选一张的自己区域面：点一张即提交（与多张选择的"点选 + 提交"分开）。 */
 function isOwnHandSinglePick(pending) {
   return isOwnZonePick(pending) && selectionCap(pending) === 1;
+}
+
+/* ------------------------------- 自家手牌选牌的合法性预览（table-ux-overhaul 票 15）
+
+ * 合法性只有一处算（服务端算、前端只读）。多张的自己区域选牌面（【业炎】四色成本 /
+ * 【结姻】两张 / 【贯石斧】两张…）每变一次选牌就 `POST …/preview` 问一次"哪些槽位还
+ * 出现在某个**合法补全**里"，界面只把回包的 `disabled` 画成置灰 + 拒点。同一步内"选了
+ * A 之后 B 就凑不出来了"这条动态约束（`SelectionSpec.max_per_suit` 一类的候选生成期
+ * 收窄）因此与提交时的成员判定**同源**（spec §2 Q6/Q10）：票 09 的止损
+ * `ownZoneSuitTaken` 已在此退役——前端一处都不再数花色（spec §6 不变量 1）。
+ *
+ * 三条纪律与票 11（预发动步骤预览）同一份：
+ *  1. **去抖** 90 ms + **本地版本号**：过期回包一律丢弃（`version` 只增）；
+ *  2. **已选的槽位恒可点**（再点 = 取消）：服务端也不把它们放进 `disabled`，否则玩家
+ *     退不出已经选上的那一组；
+ *  3. **fail-closed**：没有当前这一问的回包（还没回来 / 失败 / 超时）⇒ 这一步**一个都
+ *     点不动**，并提示「取不到候选，请重试」——**绝不**退回"全都点得动"（§6 不变量 5）。
+ *     同一问内可以沿用上一份回包（点完牌到新回包之间的百来毫秒里），两个方向都安全：
+ *     已选只增时补全集合只减 ⇒ 旧 `disabled` 只少不多（新回包只会再多灰几张）；已选减少时
+ *     旧集合可能多灰一张 ⇒ 只是把那一张晚一个往返打开（仍是 fail-closed 方向）。
+ */
+const OWN_PICK_PREVIEW_DEBOUNCE_MS = 90;
+/** 预览请求的墙钟上限：超时按**失败**处理（与 HTTP 失败同一条 fail-closed 路径）。 */
+const OWN_PICK_PREVIEW_TIMEOUT_MS = 3000;
+/** 取不到候选时的提示（fail-closed 的话术，测试按它断言）。 */
+const OWN_PICK_PREVIEW_ERROR = "取不到候选，请重试";
+/** 失败后的重问间隔：拉到轮询那一档，别让一个坏会话把端点打成忙轮。 */
+const OWN_PICK_PREVIEW_RETRY_MS = 2000;
+/** 死路（这一组凑不出任何合法补全）时的话术：出口是退一张，不是换一张。 */
+const OWN_PICK_PREVIEW_DEAD_END = "这一组凑不出合法组合，点已选的牌取消一张";
+
+/** 预览本地态（住在 `state` 里：与其余本地态同一处，烟测直读 `state.ownPickPreview`）。 */
+const ownPickPreview = state.ownPickPreview;
+
+/** 这一问**声明了**选牌预览吗（服务端载荷的 `pick_preview: true` = 票 15 的信息通道）。
+ *
+ * 键的缺席是保证：合成载荷 / 旧服务端载荷 / 不是应答者本人的面都不带它，界面照旧只按
+ * 面形状渲染（与票 11 的 `pending.preview` 同一姿态）。
+ */
+function ownPickPreviewSupported(pending) {
+  return Boolean(pending) && pending.pick_preview === true;
+}
+
+/** 这一面**用不用**选牌预览：多张的自己区域直选面 + 有会话 + 不在回放。
+ *
+ * 单张面（`isOwnHandSinglePick`）不在此列：它的候选恒是"每一槽一张"，点一张即提交，
+ * 没有"凑组合"可算 ⇒ 问一次只会白加一个往返和一段全灰窗口。
+ */
+function ownPickPreviewEnabled(pending) {
+  if (!ownPickPreviewSupported(pending) || !state.sessionId || state.playback) return false;
+  return isOwnZonePick(pending) && !isOwnHandSinglePick(pending);
+}
+
+/** 已选槽位的**规范化**键（升序）：选牌语义是集合，点选先后不该触发第二次预览。 */
+function ownPickPreviewKey() {
+  return state.picks.slice().sort((left, right) => left - right).join(",");
+}
+
+/** 回包描述的是**当下**这一组 picks 吗（最新一版 + 同一问 + 同一组已选）。 */
+function ownPickPreviewCurrent(pending) {
+  return Boolean(
+    ownPickPreviewEnabled(pending)
+      && ownPickPreview.seq === pending.seq
+      && ownPickPreview.asked === ownPickPreviewKey(),
+  );
+}
+
+/** 掉这一问的预览态（换问 / 离开这一步）。 */
+function ownPickPreviewForget() {
+  if (ownPickPreview.timer) window.clearTimeout(ownPickPreview.timer);
+  ownPickPreview.timer = null;
+  ownPickPreview.seq = null;
+  ownPickPreview.asked = null;
+  ownPickPreview.key = null;
+  ownPickPreview.disabled = null;
+  ownPickPreview.canSubmit = false;
+  ownPickPreview.canAdvance = false;
+  ownPickPreview.error = false;
+  ownPickPreview.retryAt = 0;
+}
+
+/** 排一次预览（去抖 + 版本号）。同一问同一组 picks 只问一次（渲染幂等）。 */
+function ownPickPreviewSchedule(pending) {
+  // 回放期不排预览，也**不丢**已经拿到的回包（播完还要接着用；与票 11 同一姿态）。
+  if (state.playback) return;
+  if (!ownPickPreviewEnabled(pending)) {
+    ownPickPreviewForget();
+    return;
+  }
+  if (ownPickPreview.seq !== pending.seq) {
+    // 换问了：上一问的回包不再描述界面上的这一面。
+    ownPickPreviewForget();
+    ownPickPreview.seq = pending.seq;
+  }
+  const key = ownPickPreviewKey();
+  if (ownPickPreview.key === key && !ownPickPreview.error) return;
+  if (ownPickPreview.error && Date.now() < ownPickPreview.retryAt) return;
+  ownPickPreview.key = key;
+  const version = ownPickPreview.version + 1;
+  ownPickPreview.version = version;
+  const seq = pending.seq;
+  const body = {
+    answers_seq: seq,
+    picks: key === "" ? [] : key.split(",").map((index) => Number(index)),
+  };
+  if (ownPickPreview.timer) window.clearTimeout(ownPickPreview.timer);
+  ownPickPreview.timer = window.setTimeout(() => {
+    ownPickPreview.timer = null;
+    const now = state.view ? state.view.pending : null;
+    if (!now || now.seq !== seq) return; // 中途离开这一步：连请求都不发
+    requestOwnPickPreview(body, version, seq, key);
+  }, OWN_PICK_PREVIEW_DEBOUNCE_MS);
+}
+
+/** 真发请求。回包按**版本号 + 询问序号**双重核对：任一过期就丢弃（迟到的旧回包不许改界面）。 */
+async function requestOwnPickPreview(body, version, seq, key) {
+  const path = `/api/sessions/${state.sessionId}/preview`;
+  let timer = null;
+  const timeout = new Promise((resolve, reject) => {
+    timer = window.setTimeout(
+      () => reject(new Error(`${OWN_PICK_PREVIEW_ERROR}（超时）`)),
+      OWN_PICK_PREVIEW_TIMEOUT_MS,
+    );
+  });
+  try {
+    const answer = await Promise.race([post(path, body), timeout]);
+    if (timer) window.clearTimeout(timer);
+    if (ownPickPreview.version !== version) return; // 过期的回包
+    const now = state.view ? state.view.pending : null;
+    if (!now || now.seq !== seq) return; // 询问换了：这一份不再描述界面上的那一问
+    ownPickPreview.asked = key;
+    ownPickPreview.disabled = ((answer && answer.disabled) || []).map(String);
+    ownPickPreview.canSubmit = Boolean(answer && answer.can_submit === true);
+    ownPickPreview.canAdvance = Boolean(answer && answer.can_advance === true);
+    ownPickPreview.error = false;
+    ownPickPreview.retryAt = 0;
+    renderTable();
+    renderPending(state.view);
+  } catch (error) {
+    if (timer) window.clearTimeout(timer);
+    if (ownPickPreview.version !== version) return;
+    // fail-closed：拿不到候选 ⇒ 这一步一个都点不动，提示一条可重试的话术。
+    ownPickPreview.asked = null;
+    ownPickPreview.disabled = null;
+    ownPickPreview.canSubmit = false;
+    ownPickPreview.canAdvance = false;
+    ownPickPreview.error = true;
+    ownPickPreview.retryAt = Date.now() + OWN_PICK_PREVIEW_RETRY_MS;
+    state.lastRejectReason = "";
+    renderTable();
+    renderPending(state.view);
+  }
+}
+
+/** 这一槽**点不动**吗（选牌面置灰 / 拒点的**唯一**判据，`card-face.js` 与 `options.js` 共用）。
+ *
+ * 顺序就是纪律的顺序：没有预览通道 ⇒ 不拦（形状由服务端下发的面回答，前端不推导规则）；
+ * 已选 ⇒ 恒可点（再点 = 取消）；没有当前这一问的回包 ⇒ **全灰**（fail-closed）。
+ */
+function ownPickSlotDisabled(pending, index) {
+  if (!ownPickPreviewEnabled(pending)) return false;
+  if (state.picks.indexOf(index) >= 0) return false;
+  if (ownPickPreview.seq !== pending.seq || !ownPickPreview.disabled) return true;
+  return ownPickPreview.disabled.indexOf(`slot:${index}`) >= 0;
+}
+
+/** 这一面此刻能不能提交：回包描述的是**当前**这组 picks 时听服务端的 `can_submit`.
+ *
+ * 回包未到 / 过期 ⇒ 放行给调用方的候选成员判定（`answer.js:buildAction` 找的是服务端
+ * 下发的 `legal_actions`，与 `can_submit` 同源：同一个枚举器算出来的那一条）。
+ * **失败也不锁提交**：fail-closed 锁的是"点不动"这一半——picks 若已经是候选里那条，
+ * 提交仍会被服务端接受；锁死它反而让玩家在没有可点项时连出口都没有。
+ */
+function ownPickSubmitAllowed(pending) {
+  if (!ownPickPreviewCurrent(pending)) return true;
+  return ownPickPreview.canSubmit;
+}
+
+/** 这一步的预览**异常**一句（还没回包 / 失败 / 死路）；正常返回空串。
+ *
+ * 两处同读（`#t-target-hint` 与 `#t-choice`，与票 11 同一份姿态）。**"还没回包"与"失败"
+ * 是同一个态**——都没有可读的候选集，故都读「取不到候选，请重试」（票面原话；真机上这段
+ * 窗口 ≈ 去抖 90 ms + 一个往返）。死路（这一组凑不出任何补全）另给一句退路。
+ */
+function ownPickPreviewIssue(pending) {
+  if (!ownPickPreviewEnabled(pending)) return "";
+  if (ownPickPreview.error || ownPickPreview.seq !== pending.seq || !ownPickPreview.disabled) {
+    return `${OWN_PICK_PREVIEW_ERROR}。`;
+  }
+  if (ownPickPreviewCurrent(pending) && !ownPickPreview.canAdvance) {
+    return `${OWN_PICK_PREVIEW_DEAD_END}。`;
+  }
+  return "";
+}
+
+/** 置灰的**读法**一句（不是规则，是"灰是什么意思"）：只在预览通道开着时出现。 */
+function ownPickGreyNote(pending) {
+  if (!ownPickPreviewEnabled(pending)) return "";
+  return "置灰的牌凑不出合法组合；";
 }
 
 /** 这一类「自己区域内选牌」是否包含装备区（决定提示文案 / 装备槽是否接点击）。 */

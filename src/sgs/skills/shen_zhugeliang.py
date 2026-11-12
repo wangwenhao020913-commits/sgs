@@ -18,7 +18,10 @@
 
 - 标记只记事实：名称 / 来源 / 数量 / 上限 / 无效果 / 无说明；
 - 「强制段」用 :attr:`~sgs.skills.catalog.Hook.forced` 声明（票 04）：不问"是否发动"，
-  但仍随实例失效而停摆（`forced` **不**进 `_skill_is_suppressed`）。
+  但仍随实例失效而停摆（`forced` **不**进 `_skill_is_suppressed`）；
+- 标记的**到期清扫**另外声明 :attr:`~sgs.skills.catalog.Hook.bookkeeping`（table-ux-overhaul
+  票 17）：它是技能自己的记账，连"同座位同档多段强制效果由玩家选先后"的面也不进——否则
+  准备阶段会冒出一张「是否发动大雾 / 狂风」的面（用户 2026-11-11 实机报障）。
 """
 
 from __future__ import annotations
@@ -46,9 +49,7 @@ from .flow import (
     PickSeats,
     SkillFlow,
     TwoRowArrange,
-    option_seat,
     run_flow,
-    seat_choice,
     watched_cards,
 )
 
@@ -391,38 +392,45 @@ def _dawu_prevent(host: Any, frame: Frame) -> Any:
 
 
 def _dawu_apply(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
-    """提交点：弃置所选的星 → 逐座选人（k 由星数定）→ 每人一枚「大雾」。"""
+    """提交点：弃置所选的星 → **一次**选等量名角色 → 每人一枚「大雾」。
+
+    选人由 :meth:`Engine.ask_seats` **一次问齐**（table-ux-overhaul 票 13）：区间
+    ``[min(k, 池), k]``、``optional=False`` —— 牌面写"令至多 X 名角色各获得一枚"，而选星
+    那一步已经定下了 k；旧逐座档在没有 ``Pass`` 的情况下**必然**选满 k 名（池不够时选满
+    池），故这里的下限 = "池里能选到几个就几个"、上限 = k，语义逐字不变。
+
+    **先选齐人、再逐座结算**：``dawu_targets``（已选）/ ``dawu_marked``（已挂）两个帧内
+    游标记住进度，挂起续跑不重选、不重挂。
+    """
     stars = tuple(answers.get("card") or ())
     if not stars:
         return None
     seat = int(frame.data["skill_owner"])
-    chosen = list(frame.data.get("dawu_targets", ()))
+    chosen = tuple(frame.data.get("dawu_targets", ()))
     if int(frame.data.get("dawu_stage", 0)) == 0:
         control = _discard(host, frame, seat, stars)
         if control == "stay":
             return "stay"
         frame.data["dawu_stage"] = 1
-    while len(chosen) < len(stars):
-        pool = tuple(
-            player.seat
-            for player in host.state.players
-            if player.alive and player.seat not in chosen
-        )
-        if not pool:
-            break
-        answer = host.ask_option(
-            frame,
-            seat,
-            Timing.PHASE_FINISH,
-            skill_id=f"dawu:seat:{len(chosen)}",
-            options=tuple(seat_choice(candidate) for candidate in pool),
-            optional=False,
-        )
-        if host.suspended(answer):
-            frame.data["dawu_targets"] = tuple(chosen)
-            return "stay"
-        chosen.append(option_seat(answer))
-        frame.data["dawu_targets"] = tuple(chosen)
+    if not frame.data.get("dawu_picked"):
+        pool = tuple(player.seat for player in host.state.players if player.alive)
+        if pool:
+            answer = host.ask_seats(
+                frame,
+                seat,
+                Timing.PHASE_FINISH,
+                skill_id="dawu:seat",
+                pool=pool,
+                # k 由星数定格；池装不下 k 名时下限跟着池走（旧逐座档选满池即收尾）。
+                lo=min(len(stars), len(pool)),
+                hi=len(stars),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            chosen = tuple(answer)
+        frame.data["dawu_targets"] = chosen
+        frame.data["dawu_picked"] = True
     marked = set(frame.data.get("dawu_marked", ()))
     for target in chosen:
         if target in marked:
@@ -498,10 +506,13 @@ def shen_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
                 Hook(Timing.PHASE_FINISH, flow=KUANGFENG_FLOW, condition=_own_turn_phase),
                 # 到期清扫：**来源的**下个回合开始时清掉自己来源的标记（**强制**，不问；
                 # 但要自校"这是不是我的回合开始"——TURN_START 每座都派发）。
+                # **簿记段**（table-ux-overhaul 票 17）：清扫是这条技能自己的记账，没有
+                # "发动形态"、先后也无意义 ⇒ 按链序静默跑，不在准备阶段摆出"是否发动"的面。
                 Hook(
                     Timing.TURN_START,
                     handler=_kuangfeng_expire,
                     forced=True,
+                    bookkeeping=True,
                     condition=_own_turn_start,
                 ),
             ),
@@ -528,6 +539,7 @@ def shen_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
                     Timing.TURN_START,
                     handler=_dawu_expire,
                     forced=True,
+                    bookkeeping=True,
                     condition=_own_turn_start,
                 ),
             ),
