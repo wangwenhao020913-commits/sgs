@@ -5,7 +5,7 @@
 `map.md` 的「Decisions-so-far」缺口编号。
 
 机械核对：`.venv/bin/python tools/check_acceptance.py .scratch/table-ux-overhaul`
-（扫 14 张票 `## Answer` 里的全部 `test_*` 引用，逐个核"存在且绿"）。
+（扫 15 张票 `## Answer` 里的全部 `test_*` 引用，逐个核"存在且绿"）。
 本文件另供 `/code-review` 的 Spec 轴使用。
 
 ## §1 报障（13 项）
@@ -33,7 +33,10 @@
 | 6 | 源牌级判据与引擎谓词同源 | `tests/test_hero_transform.py::test_every_transform_source_is_checked_against_the_engine_predicate` | 12 |
 | 6 | 渐营目标步有活池（20 张牌不退化） | `tests/test_hero_jie_yijiang.py::test_jianying_target_step_has_a_live_pool_with_many_cards` | 12 |
 | 6 | 渐营可点座位 = 预览回包的池 | 烟测 U-TF-02 / U-TF-02a / U-TF-02b / U-TF-02c | 12 |
-| 6 | 业炎花色置灰（每花色至多 k 张） | `tests/test_web_static.py::test_the_own_zone_suit_cap_is_one_shared_predicate_reading_the_payload`（烟测 U-YS-01） | 09 |
+| 6 | 业炎花色置灰由**后端**算（不再是前端第二份真源） | `tests/test_web_static.py::test_the_own_zone_suit_cap_reads_the_pick_preview_instead_of_counting_suits`（烟测 U-YS-01） | 15（09 的止损在此退役） |
+| 6 | 选牌预览与候选枚举**同源**（禁的正是引擎会拒的槽位） | `tests/test_web.py::test_the_pick_preview_disables_the_slots_the_engine_would_reject` | 15 |
+| 6 | 选牌预览只读 / 409 / 400 | `tests/test_web.py::test_the_pick_preview_writes_nothing` / `…::test_the_pick_preview_rejects_a_stale_answers_seq` / `…::test_the_pick_preview_rejects_malformed_picks_and_the_wrong_face` | 15 |
+| 6 | 选牌预览失败 ⇒ 一个都点不动（fail-closed） | 烟测 U-YS-02 | 15 |
 | 7 | 雌雄弃牌面可见（`reveal_hand=True`） | `tests/test_skills.py::test_double_sword_discard_face_is_visible_to_the_target` | 09 |
 | 7 | 雌雄弃牌步牌桌直选 | 烟测 U-CX-01a–d | 09 |
 | 7 | 自家手牌载荷来自**真引擎 pending**（回环） | `tests/test_web.py::test_the_own_hand_direct_pick_payloads_start_from_a_real_engine_pending` | 09 |
@@ -71,7 +74,7 @@
 | Q3 只问合格者 + 同窗呈现 | 预筛 + `window_frame` 日志合并 | 见 §1 #8 四条；前端合并键断言在 `tests/support/ui_smoke.mjs`（票 05 组） |
 | Q4 会话配置 + 侧车 meta | `AskPolicy`（引擎 OFF / 网页 ON），不进 `RuleConfig` | §1 #10 三条 |
 | Q5 自动推进 / 最后一步提交 / 保删弹窗 | 服务端 `can_advance`/`can_submit`/`next` 说，前端只读 | 烟测 U-PA-01c/01e、U-PA-02、U-PA-03、U-PA-06 |
-| Q6/Q10 永不退化 + 预览请求 | `POST /api/sessions/<id>/preview`，同源调 `pool(chosen)` | `tests/test_web.py::test_the_preview_endpoint_returns_the_same_pool_the_validator_uses` / `…::test_the_preview_endpoint_writes_nothing` / `…::test_the_preview_endpoint_rejects_a_stale_answers_seq` / `…::test_the_preview_endpoint_rejects_a_malformed_answers_prefix` / `…::test_the_preview_endpoint_is_cheap_enough_for_every_selection_change` |
+| Q6/Q10 永不退化 + 预览请求 | `POST /api/sessions/<id>/preview`，同源调 `pool(chosen)`；**覆盖 = 预发动清单步 + `SELECT_CARDS` 选牌面**（后者由票 15 补齐） | 清单档：`tests/test_web.py::test_the_preview_endpoint_returns_the_same_pool_the_validator_uses` / `…::test_the_preview_endpoint_writes_nothing` / `…::test_the_preview_endpoint_rejects_a_stale_answers_seq` / `…::test_the_preview_endpoint_rejects_a_malformed_answers_prefix` / `…::test_the_preview_endpoint_is_cheap_enough_for_every_selection_change`；选牌档：见 §1 #6 四条 + `…::test_the_pick_preview_is_cheap_enough_for_every_pick` |
 | Q7 建局 | L0 边界暂停 + 服务端 `setup` | 见 §1 #1 三条（+ 烟测 U-INIT-01a–g） |
 | Q8 性能三处全修 | 游标化 / 回收 / 节点上限 | 见 §1 #3 四条 |
 | Q11/Q18/Q23 文案模板 | `prompts.json` + 三层回退 + 占位符白名单 + localStorage 覆盖 | 见 §1 #5 三条；键名合法性 `tests/test_web_static.py::test_the_prompt_template_keys_are_real_skill_ids_and_real_step_names` |
@@ -81,7 +84,7 @@
 | Q16 转化牌与真牌同档 | 覆盖位 `SkillDef.need_card_tier=2`，无技能名名单 | §1 #9 转化提供者那条 + 账本行 1226 |
 | Q19/Q4 引擎 OFF ⇒ 零重录 | 金录像逐字节 + 网页会话 ON | `bash tools/check_goldens.sh` 47 条；§1 #10 三条 |
 | Q21 并发写者 | 单个实现者串行（本 run 一票一实现者） | 本表即过程证据（见 `map.md`） |
-| Q22 14 票 | 14 张票全 `resolved` | `.scratch/table-ux-overhaul/issues/*.md` Status |
+| Q22 票数 | 用户签的是 14 票；评审发现 `Q6` 的业炎半无人接手 ⇒ 追加票 15（裁定见 `map.md` 缺口 #庚），**15 张票全 `resolved`** | `.scratch/table-ux-overhaul/issues/*.md` Status |
 
 ## §4 金录像（行为有意变更 ⇒ 重录与实现同提交）
 
@@ -96,7 +99,7 @@
 
 | 条目 | 证据 | 状态 |
 |---|---|---|
-| 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 14 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS（覆盖 242 张 resolved） | ✅ |
+| 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 15 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS（覆盖 242 张 resolved） | ✅ |
 | 新增断言落在真实产出路径 | 票 09 的"回环"用例从真引擎 pending 取载荷；票 11 的同源断言直接调校验器；票 13 的除疠越池用例真跑执行器 | ✅ |
 | 前端行为变更过 `bash tests/smoke-web.sh` | 票 07/08/09/10/11/12/13/14 的 Answer 均记录 smoke-web PASS（票 14 1635→1690+ PASS / 0 FAIL） | ✅ |
 | 改 DOM API 形状的票要走 `bsk` 实机 | **未执行**：本机 bsk 的 cooperate 握手一直失败（所有 `browser_interact` / `navigate` 被 "requires the context returned by the latest cooperate sync" 拒绝）。已按仓规改为"配方 + 结束 turn 交用户"：票 07/08/09/10/13/14 的 `## Answer` 各带配方；功能面由 smoke-web + `tests/test_action_contract.py` 覆盖 | `[R]` 见 `map.md` 缺口 #戊 |
@@ -107,7 +110,7 @@
 
 | 不变量 | 断言 |
 |---|---|
-| 候选 = 接受（前端不猜） | 票 11 同源断言 + 票 12 差集断言 + 票 13 `test_chuli_refuses_a_same_kingdom_set_the_pool_never_offered`（越池提交被引擎整步取消） |
+| 候选 = 接受（前端不猜） | 票 11 同源断言 + 票 12 差集断言 + 票 13 `test_chuli_refuses_a_same_kingdom_set_the_pool_never_offered`（越池提交被引擎整步取消）+ 票 15 `test_the_pick_preview_disables_the_slots_the_engine_would_reject`（选牌面同源） |
 | 记录流 = 权威事实（文案不进 `Query.prompt`） | `tests/test_replays.py::test_golden_replay_matches_byte_for_byte`（47 条冻结字节）+ 重录只发生两次且均为行为变更 |
 | 派生通道只增 + `after` 游标 | `test_the_view_payload_never_json_round_trips_the_record_stream` + `test_skill_events_follow_the_record_cursor_and_only_cover_accepted_activations` |
 | 前端不猜：拿不到池 ⇒ 点不了 | 烟测 U-PV-02 / U-PV-02a–c（fail-closed）+ 票 08 "退化不自动推进" + U-TF-02b（池外点不动） |
@@ -122,3 +125,30 @@
 | 丙 | `开发文档/04` 在票 06 的 Touches 里但 06 未改 | 由票 08 收口（§4 预发动 + §1 N = 合格者数） |
 | 丁 | 票 10 与票 14 都写"补 `hp_max_change` 派生" | 派生归票 10；票 14 只做服务端 `setup` + 删倒推 |
 | 戊 | spec §5"改 DOM 形状要走 bsk" | 本机 bsk 不可驱动（cooperate 握手失败）⇒ 以冒烟 + 真 HTTP tape 覆盖，配方交用户实机补验 |
+
+## §7 `/code-review` 双轴评审：findings 与处置
+
+评审面 = `git diff 3a37f57...HEAD`（排除 `tests/replays/*.jsonl` 与 `.scratch/`）。
+两轴各自独立出报告，处置如下（修复提交 `eb1c50a`；规格缺口另开票 15，提交 `ba65987`）。
+
+### Standards 轴（2 hard + 5 judgement）
+
+| # | finding | 处置 |
+|---|---|---|
+| S1 | `GLOSSARY.md` 的「预发动」词条带票号 / 源码路径 / "由服务端说"实现细节，违 `CODING_STANDARDS` §2（术语表只写定义 + `_Avoid_`） | **已修**：改纯定义；顺带核了「需要牌档位」「声明·生效」两条同类泄露并收口 |
+| S2 | `RespondContext.skip_if_empty` 只被写、无人读（违 §1「字段作落点前先打开读取方」），docstring 却在宣称它被读 | **已修（unify）**：新增 `Engine.respond_context` 建唯一一份上下文，`should_ask_respond` 读 `ctx.skip_if_empty`；三处重复参数消失 ⇒ 也解掉 S7 的 Data Clump。口径记进 `map.md` 缺口 #辛 |
+| S3 | `heuristic._seat_step_key` 复刻 `flow._flow_option_id` 的键形；`_DYNAMIC_POOL_SEAT_STEPS` 是只登记在被 gitignore 的 `.scratch` 里的新封闭集 | **已修**：键形下沉为 `sgs.state.step_option_key`（两侧共用）；清单登记进 `docs/agents/ai-adaptation.md` §4，并加"每个键必须是真动态池步骤"的真询问断言 |
+| S4 | `NON_TABLE_DELTAS` 是 `applyLiveDelta` 那支 switch 的反向副本，正确性依赖一句注释 | **已修**：加静态同步断言（新增 delta 类型不进任一侧即判红） |
+| S5 | `session.js` 的 `liveHeroZoneKey` 在客户端拼 / 拆 `owner:skill_id`，并对投影从不发出的形状留了分支 | **接受（不修）**：直接读服务端键要给投影 `hero_zones[]` 加 `skill_instance`，会连带改夹具形状绑定与 `test_web.py` 的夹具形状用例——超出局部前端修改；判为可接受的技术债 |
+| S6 | `records_after` / `next_cursor` 是只剩测试调用的 Middle Man | **接受（不修）**：它们是 `Session` 的公开读口，票 01 明确保留其语义；删掉会让会话窗口 API 变窄而无收益 |
+| S7 | `should_ask_respond` 的 10 参 Data Clump 复刻 `respond_candidates` | **已修**（随 S2 的 unify） |
+
+### Spec 轴（3 missing/partial + 1 bug + 1 creep）
+
+| # | finding | 处置 |
+|---|---|---|
+| P1 | `spec §2 Q6` 的"业炎花色由后端算"未兑现——前端 `ownZoneSuitTaken` 仍是第二份真源，且无票接手 | **已修（新开票 15）**：预览端点扩到 `SELECT_CARDS`（`pick_completions` 复用同一个组合枚举器），前端改读回包 `disabled`、止损判据删除；`spec §6` 不变量 1 自本票起成立 |
+| P2 | `Q18` 的"每（技能, 步骤）一对 `ask`/`done`"只做到 2%（142 ask / 3 done），缺 `done` 被静默跳过 | **部分处置 + 裁定**：机制（三层回退 / 累加 / 键名合法性）已实现并钉住；按 Q23「我先出初稿、用户改字」+ §7 风险（文案普查是大头），**其余 139 步的 `done` 措辞属用户改字那一遍**——裁定见 `map.md` 缺口 #己 |
+| P3 | `Q2` 的第 6 个消费者【神速】仍走 `check_targets(..., distance_exempt=True)`，是挂点之外的第二条豁免路径 | **已修**：布尔改为喂同一份豁免求值（一个实现、一份座位集），并加"两条路径同样座位集"的断言；`shapes.md` §3.3 措辞同步 |
+| P4 | `flow.preview_step` 的 fail-closed 只清候选、没清 `can_advance`，与 docstring 与 `§6` 不变量 5 矛盾 | **已修**：错误分支把 `can_advance` / `can_submit` 一并置假，并加真形状断言 |
+| P5 | `heuristic._assembled_option_set` 把 `cap = min(cap, len(options))` 夹到**所有** `SELECT_OPTIONS`（票面只要求除疠的动态池） | **已修（收敛作用域）**：只有登记的动态池步骤再夹，并加真询问断言（AI 自建集合不得含同势力两名） |
