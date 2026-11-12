@@ -16,7 +16,7 @@ import vm from "node:vm";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8100";
 
-const post = async (p, body) => {
+const postRaw = async (p, body) => {
   const response = await fetch(`${BASE}${p}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -26,6 +26,22 @@ const post = async (p, body) => {
   return response.json();
 };
 const get = async (p) => (await fetch(`${BASE}${p}`)).json();
+
+/* 建局：POST 之后**再取一次增量**（table-ux-overhaul 票 14）。
+ *
+ * 建局响应现在止于"游戏开始时"（L0 边界）：`pending` 是 null、整批里一条回合环都没有。
+ * 烟测里绝大多数用例要的是**开局已收口**的那一份（= 本票之前建局响应里给的那一份），
+ * 故这里走真客户端的下一步——拿游标取增量（GET 会先把引擎推到人类第一问）。
+ * 这里取 `after=-1` 的**全量**：与旧建局响应同一条记录流、同一份快照，还多带 `setup`
+ * 底稿，于是 `ui.applyView(body)` 仍把整段开局从"发牌前"演一遍（与旧口径逐条相同）。
+ *
+ * 断言**新口径本身**（建局批逐条播放、止于 GAME_START）的用例走 :func:`postRaw`，
+ * 不经过这里——U-INIT-01 就是那条。 */
+const post = async (p, body) => {
+  const created = await postRaw(p, body);
+  if (p !== "/api/sessions") return created;
+  return get(`/api/sessions/${created.session_id}?after=-1&logs=0`);
+};
 
 /* ----------------------------------------------------------------- DOM 垫片 */
 
@@ -703,7 +719,23 @@ const logCount = () => $("t-log").children.length;
 const submitLobby = async () => {
   await submitLobbyRaw();
   ui.flushPlayback();
-  return ui.state.view;
+  // 票 14：开局批**没有挂起询问**（建局响应止于 GAME_START）⇒ `finishPlayback` 会立刻
+  // 自己再取一次增量（避免 2 s 空窗）。真客户端就是这么走的，这里等它落地。
+  return await settleOpening();
+};
+/** 等"开局批播完之后的那一次增量"落地并播完；返回收口后的视图。
+ *
+ *  判据 = 回放队列空 **且**当前视图停在暂停点上（有询问 / 已终局）。建局响应本身
+ *  没有询问，故它不满足第一条判据 —— 于是这个循环等的就是 `finishPlayback` 里那次
+ *  `refresh()` 的回包（真 HTTP 往返，故按 5 ms 让出事件循环，最多 3 秒）。 */
+const settleOpening = async () => {
+  for (let waited = 0; waited < 3000; waited += 5) {
+    ui.flushPlayback();
+    const view = ui.state.view;
+    if (!ui.state.playback && view && (view.pending || view.finished)) return view;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("开局批播完之后没有拿到下一份视图（票 14 的立即 refresh 没发生？）");
 };
 /** 只提交开局表单、**不**冲刷开局批（返回时 `state.view` 可能还是 null / 上一局）。 */
 const submitLobbyRaw = async () => {
@@ -27981,6 +28013,109 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.preactivation = null;
   ui.state.view = null;
   ui.state.sessionId = null;
+}
+
+/* ============ U-INIT-01 建局止于 GAME_START：手牌 0→4 / 回合一直「—」/ 阶段空 ============
+ *
+ * 票 14 的**用户观感**断言（spec §1 #1："新开一局，init 没走完 AI 就已经在操作"）。这里走
+ * **原始建局响应**（`postRaw`——`post` 会在建局后再取一次增量，那是"已收口"的视图），
+ * 再把它当开局批逐条 `stepPlayback`，看屏上的读数：
+ *   ① 起播那一刻是"发牌前"：手牌 0 / 牌堆 0 / 阶段空 / 回合位「—」/ 没有"等待其他座位响应"；
+ *   ② 发牌那几条 `card_move` 播完：自己的手牌恰好 4 张（**0→4**）；
+ *   ③ **回放期**（commit 之前）每一步：回合位一直「—」、阶段一直空（整批一条 `TURN_*` /
+ *      `PHASE_*` 都没有），且**一次**都没出现「等待其他座位响应…」——那文案只属于"别人的
+ *      询问"，而开局批里没有任何询问（"没有任何提前出现"就是这条）；
+ *   ④ 开局批播完提交那一帧起，读数换成**权威快照**那份（"commitView = 权威"的老口径）：
+ *      阶段仍空、回合位显示引擎已定的先手座位——先手是 `_start` 定的**规则事实**，不是
+ *      "AI 已经在操作"，玩家的下一帧（立即 refresh 拉回的那份）就停在自己的第一问上。
+ *
+ * 种子与 ① 同一个（20273291）：这一局的开局批里还带一个 AI 的【游戏开始时】技能（【天成】
+ * 的三次「加体力上限」），仍然**一条人类询问都没有** ⇒ `pending` 为 null、"没有等待文案"
+ * 都是这一局的局面事实，不是假设。
+ */
+{
+  const raw = await postRaw("/api/sessions", {
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20273291,
+  });
+  check("U-INIT-01a 建局响应止于「游戏开始时」（没有待应答的询问）",
+    raw.pending === null && raw.finished === false,
+    `pending=${raw.pending ? raw.pending.kind : "null"} finished=${raw.finished}`);
+  const batchTimings = (raw.records || [])
+    .filter((record) => record.kind === "timing").map((record) => record.timing);
+  check("U-INIT-01b 建局批不含任何回合环时机（回合环一条都还没跑）",
+    batchTimings.includes("GAME_START")
+      && !batchTimings.some((timing) => timing.startsWith("TURN_")),
+    batchTimings.join(","));
+
+  // 换会话并用**原始建局响应**起播（与 `openSession` 同一份初始化，只是载荷不走 `post`）。
+  ui.state.sessionId = raw.session_id;
+  ui.state.view = null;
+  ui.state.logRecords = [];
+  ui.state.narrative = [];
+  ui.state.narrativeShown = 0;
+  ui.state.cursor = -1;
+  ui.state.logSeq = 0;
+  ui.resetSelection();
+  $("t-log").innerHTML = "";
+  ui.applyViewRaw(raw);
+
+  const handCards = () => $("t-hand").children.length;
+  const emptyPhase = ui.phaseLabel(null);
+  const problems = [];
+  if (ui.state.playback === null) problems.push("建局批没有被当成开局回放");
+  if (handCards() !== 0) problems.push(`t0 手牌 ${handCards()} 张（应 0）`);
+  if ($("t-deck").textContent !== "0") problems.push(`t0 牌堆「${$("t-deck").textContent}」（应 0）`);
+  if ($("t-turn").textContent !== "—") problems.push(`t0 回合位「${$("t-turn").textContent}」（应「—」）`);
+  if ($("t-phase").textContent !== emptyPhase) {
+    problems.push(`t0 阶段「${$("t-phase").textContent}」（应「${emptyPhase}」）`);
+  }
+  if ($("t-prompt").textContent.includes("等待其他座位响应")) {
+    problems.push(`t0 就出现「${$("t-prompt").textContent}」`);
+  }
+  check("U-INIT-01c 起播那一刻是「发牌前」：手牌 0 / 牌堆 0 / 回合「—」/ 阶段空 / 无等待文案",
+    problems.length === 0, problems.join("；") || "全部符合");
+
+  // 逐条播：每一步之后都读一遍四个读数（不排序、不去重——判次序就是判整条轨迹）。
+  const handTrail = [handCards()];
+  let turnViolations = 0;
+  let phaseViolations = 0;
+  let waitingViolations = 0;
+  let played = 0;
+  while (ui.state.playback && played < 400) {
+    ui.stepPlayback(true);
+    played += 1;
+    handTrail.push(handCards());
+    // 最后一步会顺手 `finishPlayback`（= commitView）：那一帧起读数是**权威快照**，不算回放期。
+    if (!ui.state.playback) break;
+    if ($("t-turn").textContent !== "—") turnViolations += 1;
+    if ($("t-phase").textContent !== emptyPhase) phaseViolations += 1;
+    if ($("t-prompt").textContent.includes("等待其他座位响应")) waitingViolations += 1;
+  }
+  const monotone = handTrail.every((value, index) => index === 0 || value >= handTrail[index - 1]);
+  check("U-INIT-01d 手牌 0→4：整批播完自己的手牌恰好 4 张，且只增不减",
+    played > 0 && handTrail[0] === 0 && handTrail[handTrail.length - 1] === 4 && monotone,
+    `步数 ${played} / 读数 ${handTrail.join(",")}`);
+  check("U-INIT-01e 回放期每一步回合位都「—」、阶段都空（没有 TURN_* / PHASE_* 提前出现）",
+    turnViolations === 0 && phaseViolations === 0,
+    `回合位违规 ${turnViolations} 步 / 阶段违规 ${phaseViolations} 步（回放 ${played} 步）`);
+  check("U-INIT-01f 开局批里一次都没有「等待其他座位响应」提前出现",
+    waitingViolations === 0, `违规 ${waitingViolations} 步`);
+  // 播完提交那一帧：阶段仍空，回合位 = 引擎已定的**先手**（权威快照说了算，不是前端猜的）。
+  check("U-INIT-01g 播完提交那一帧 = 权威快照：阶段仍空、回合位显示先手座位",
+    ui.state.view === raw
+      && $("t-phase").textContent === emptyPhase
+      && $("t-turn").textContent === `座位 ${raw.snapshot.turn_seat}`,
+    `viewSame=${ui.state.view === raw} phase="${$("t-phase").textContent}"`
+      + ` turn="${$("t-turn").textContent}" 先手=${raw.snapshot.turn_seat}`);
+
+  // 收尾：这次建局批没有挂起询问 ⇒ `finishPlayback` 自己再取了一次增量（票 14 的立即
+  // refresh）。等它落地，再把界面清回"没有会话"，不留给后面的用例。
+  await settleOpening();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.cursor = -1;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

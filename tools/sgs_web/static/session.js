@@ -283,43 +283,35 @@ function viewStartsNewSession(body) {
   return body.session_id !== state.view.session_id;
 }
 
-/** 新局开局的**回放底稿**：权威快照 → "发牌前"的骨架（M6 报障 2）。
+/** 新局开局的**回放底稿**：服务端下发的 `setup`（发牌前那一帧）。
  *
- * 建局响应带的是**整段开局**（发牌 + 若干 AI 回合，直到人类第一个询问），`snapshot` 是这段
- * 跑完后的局面。要让这段按正常步长逐条演（既不能拿上一局的视图当底稿、也不能一次性冲完），
- * 底稿必须是**开局前**：身份未发、手牌 0、体力满、装备 / 判定 / 武将牌区空、牌堆 0
- * （由首条 `deck_shuffle` 的 `card_count` 写回）、阶段与回合空、没有询问。
+ * 建局响应止于"游戏开始时"（`GAME_START` 派发完、第一回合之前），带一份 `setup` 快照
+ * ——座位 / 武将 / 技能 / 满体力 / 护甲 / 标记 / 手牌上限 / 武将块标签，手牌 0、各区空、
+ * 无阶段无回合无询问。这份底稿是**服务端**从 `build_initial` 之后的引擎状态导出的
+ * （`projection.py:setup_snapshot`），前端**只显示**：不再像旧实现那样从 post-init 快照
+ * 倒推（`hp = hp_max ?? hp`、`hp_max` / `armor` / `markers` 原样继承、再扫
+ * `hp_max_change.before` 反推开局上限）——那是"界面从记录猜规则"，也正是"init 没走完
+ * AI 已经在操作"的观感来源（spec §1 #1）。
  *
- * **保留**的只有开局前就公开、且整段不变的东西：座位、武将、技能。其余全部交给记录里的
- * `identity_deal` / `deck_shuffle` / `card_move` / `hp_change` / 时机（见 `applyLiveDelta`）。
- * 所以"有没有上一局"不再影响这一批的底稿与节奏——两条路走同一份初始化。
+ * 之后的一切仍逐条由记录派生（`identity_deal` / `deck_shuffle` / `card_move` /
+ * `hp_change` / `hp_max_change` …，见 :func:`applyLiveDelta`），故"有没有上一局"不影响
+ * 这一批的底稿与节奏。
+ *
+ * 没有 `setup` 的载荷（旧录像 / 合成视图 / 老服务端）**不猜**发牌前长什么样：直接以权威
+ * 快照起播（少一段开局动画，多一个控制台提示）。
  */
 function openingLiveView(body) {
-  const view = cloneLiveView(body);
-  const snapshot = view.snapshot;
-  snapshot.players = (snapshot.players || []).map((player) => ({
-    ...player,
-    identity: null,
-    identity_label: null,
-    hand_count: 0,
-    hp: Number(player.hp_max ?? player.hp) || 0,
-    equip: [],
-    judge: [],
-    hero_zones: [],
-    hero_tags: [],
-    chained: false,
-    flipped: false,
-    wine_active: false,
-    alive: true,
-  }));
-  snapshot.self_hand = [];
-  snapshot.discard = [];
-  snapshot.processing = [];
-  snapshot.deck_count = 0;
-  snapshot.phase = null;
-  snapshot.turn_seat = null;
-  snapshot.turn_extra = false;
-  snapshot.round = 1;
+  const setup = body && body.setup;
+  if (!setup) {
+    const fallback = cloneLiveView(body);
+    fallback.pending = null;
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[opening] 载荷没有 setup 底稿：开局批从权威快照起播（不发牌前动画）");
+    }
+    return fallback;
+  }
+  // `cloneLiveView` 深拷贝牌桌会改写的容器 ⇒ 回放不碰 `body.setup`（它是权威载荷的一部分）。
+  const view = cloneLiveView({ ...body, snapshot: setup });
   view.pending = null;
   return view;
 }
@@ -891,7 +883,7 @@ function applyView(body) {
   if (live) state.liveView = opening ? openingLiveView(body) : cloneLiveView(state.view);
   if (live && incoming.some(isSkillDeltaRecord)) adoptSkillLists(state.liveView, body);
   state.playback = {
-    body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live,
+    body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live, opening,
   };
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
@@ -1212,6 +1204,13 @@ function finishPlayback() {
   fireDamageEventsThrough(Infinity);
   fireHpLossEventsThrough(Infinity);
   commitView(playback.body);
+  // 票 14：**开局批播完、还没有挂起询问** ⇒ 立刻再取一次增量，不等 2 s 轮询。
+  // 建局响应止于"游戏开始时"（L0 边界），人类第一问 / AI 的第一回合在下一份增量里；
+  // 等轮询会让玩家盯着"（没有待应答的询问）"空两秒，白等掉的正是这一票要收的那段观感。
+  // 判据只看这份载荷自己：开局批 ∧ 没询问 ∧ 没终局（有询问 = 已经停在暂停点上，无事可拉）。
+  if (playback.opening && !playback.body.pending && !playback.body.finished) {
+    refresh();
+  }
 }
 
 /** 逐目标结算的 C 段时机：它们的 ``targets`` 是**当前正在结算的那个目标**。
@@ -1720,8 +1719,13 @@ async function refresh(force = false) {
   // 提交在飞时不取增量：轮询重绘会把"点击前那一面"换掉，失败后就没得恢复（U2-03）。
   // 409 的刷新走 `refresh(true)`——那是请求**结束后**才发生的，必须放行。
   if (state.submitBusy && !force) return;
+  // 票 14：开局批播完时这里会自动跑一次（不等 2 s 轮询）⇒ "回包比换局慢"真的会撞到：
+  // 玩家在这几秒里回到开局页又开一局，旧会话的回包不许覆盖新牌桌。发起时记下会话身份。
+  const sessionId = state.sessionId;
   try {
-    applyView(await fetchView());
+    const body = await fetchView();
+    if (sessionId !== state.sessionId) return;
+    applyView(body);
   } catch (error) {
     showPageNotice(`取增量失败：${error.message}`);
   }

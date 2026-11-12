@@ -3,11 +3,28 @@
 **机制（挂起驱动）**：引擎的 ``pending`` 字段与 ``submit()`` 方法本来就是公开面，
 而 ``ask()`` 在挂起时**已经**把询问写进了记录流。所以人类座位的参与者只需要
 "记下询问、抛 :class:`Halt` 让 ``engine.run()`` 退出来"；应答由接入层
-``submit()`` 送回、再 ``run()`` 续跑。**引擎一行不改**，也不使用线程或协程
+``submit()`` 送回、再 ``run()`` 续跑。**规则面一行不改**（票 14 起引擎只多一个
+"L0 边界让出"的**驱动开关** ``Engine.run(stop_after_game_start=)``，缺省关），
+也不使用线程或协程
 （``src/sgs/**`` 被源码纪律扫描禁止并发原语，故"等待"只能是"请求还没来"）。
 
 **驱动粒度（D16）**：一次 :meth:`Session.drive` 最多推进到**下一个暂停点或终局**，
 绝不"驱动到人类再次被问"——否则 AI 之间的长结算会把一个 HTTP 请求拖成几十秒。
+
+**暂停点**（table-ux-overhaul 票 14 起有三处，次序就是规则次序）：
+
+1. **L0 边界**——"游戏开始时"（``GAME_START``）派发完、第一回合的回合环还没起跑
+   （引擎的 ``_started`` 由假翻真）。建局响应就止在这里：玩家看到的顺序是"安排座位 /
+   初始化体力 / 发初始牌 → 游戏开始时"，AI 的第一个回合留给**下一次取增量**
+   （现有的 ``after`` 游标机制，零新增协议）。这个停点只停**一次**——撞到之后
+   :attr:`Session._l0_boundary_reached` 置真，同一局后面的驱动不再在这里停。
+2. **人类座位的询问**——``_HaltPlayer`` 抛 :class:`Halt` 让 ``engine.run()`` 退出来。
+3. **终局**。
+
+**开局底稿**（票 14）：:attr:`Session.setup` 是**发牌前**（``build_initial`` 之后、
+``_start`` 之前）的那一帧权威事实，只在 ``after < 0`` 的那份视图里下发，前端据此从
+"发牌前"起播，不再从 post-init 快照倒推。它由 :meth:`Session.__init__` 在 ``drive()``
+**之前**冻结——一旦驱动跑过 ``GAME_START``，那份局面就再也回不来了。
 """
 
 from __future__ import annotations
@@ -187,7 +204,14 @@ class Session:
         pack: ContentPack | None = None,
         session_id: str = "",
         ask_policy: AskPolicy = DEFAULT_WEB_ASK_POLICY,
+        pause_after_game_start: bool = False,
     ) -> None:
+        """``pause_after_game_start``（table-ux-overhaul 票 14）＝**建局就停在 L0 边界**。
+
+        打开时（接入层 ``GameRegistry.create`` 的建局口径）这一次 ``drive()`` 只跑到
+        "游戏开始时"派发完，人类第一问留给下一次取增量——建局响应因此止于 ``GAME_START``。
+        缺省关闭＝直接驱动到人类第一问（库层 / 构造局面夹具 / 单测的旧口径，一字未变）。
+        """
         if ai not in AI_TIERS:
             raise ValueError(f"AI 档位非法：{ai!r}（可选 {AI_TIERS}）")
         if not isinstance(ask_policy, AskPolicy):
@@ -271,6 +295,15 @@ class Session:
             for seat in range(rule_config.player_count)
         ]
         self.participants: tuple[Participant, ...] = tuple(players)
+        # L0 边界只停一次：`pause_after_game_start` 关掉时等于"已经越过"（永不在那里停）。
+        self._l0_boundary_reached = not pause_after_game_start
+        # **开局底稿必须在 drive() 之前冻结**（票 14）：此刻 `engine.state` 是
+        # `build_initial` 的产物、`_start` 一条都没跑过——「游戏开始时」的技能（【天成】
+        # 会改体力上限、摸牌）一跑，这份局面就再也回不来了。
+        # 延迟导入：projection 反向依赖本模块的 Session（模块级导入会成环）。
+        from sgs_web.projection import setup_snapshot
+
+        self.setup: dict[str, Any] = setup_snapshot(self)
         self.drive()
 
     # -- 只读面 -------------------------------------------------------------
@@ -370,16 +403,27 @@ class Session:
     # -- 驱动 ---------------------------------------------------------------
 
     def drive(self) -> None:
-        """推进到**下一个暂停点或终局**并返回（D16）。
+        """推进到**下一个暂停点或终局**并返回（D16；暂停点见模块 docstring）。
 
         ``engine.run`` 只在人类座位的替身处退出（:class:`Halt`）；退出时 ``engine.pending``
         就是那次询问——``ask()`` 早已把 ``QueryRecord`` 写进记录流，故挂起/续跑不会重发询问。
+
+        L0 边界（票 14）在一局里只停**一次**：:attr:`_l0_boundary_reached` 为假时把
+        ``stop_after_game_start`` 交给引擎，它一让出就置真并返回；之后的驱动不再停在那里。
         """
         while not self.engine.finished and self.engine.pending is None:
+            stop_at_l0_boundary = not self._l0_boundary_reached
             try:
-                self.engine.run(self.participants)
+                self.engine.run(
+                    self.participants, stop_after_game_start=stop_at_l0_boundary
+                )
             except Halt:
                 break
+            if stop_at_l0_boundary:
+                # ``run`` 正常返回只有两种：终局，或引擎在 L0 边界让出（``_started``
+                # 刚翻真、回合环一条都还没跑）。两种都算"这次已经停过了"。
+                self._l0_boundary_reached = True
+                return
 
     def submit_answer(self, action: object) -> None:
         """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。

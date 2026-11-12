@@ -6183,11 +6183,29 @@ class Engine:
 
     # -- 驱动 ---------------------------------------------------------------
 
-    def run(self, participants: Sequence[Participant]) -> tuple[JournalRecord, ...]:
-        """推进到终局；每次询问交给 ``participants[actor]`` 应答。"""
+    def run(
+        self,
+        participants: Sequence[Participant],
+        *,
+        stop_after_game_start: bool = False,
+    ) -> tuple[JournalRecord, ...]:
+        """推进到终局；每次询问交给 ``participants[actor]`` 应答。
+
+        ``stop_after_game_start=True`` = **L0 边界让出**（table-ux-overhaul 票 14）：
+        ``GAME_START`` 派发一完成就返回，第一回合环一条都不跑。边界住在循环内部——
+        :meth:`_step` 里 :meth:`_start` 跑完就 ``return``（``_started`` 由假翻真），外面
+        看不见那一刻 ⇒ 不带这个开关的驱动只能一路跑到下一个询问 / 终局。接入层
+        （``sgs_web.session.Session.drive``）用它把**建局响应**截在"游戏开始时"。
+
+        缺省 ``False`` ⇒ 旧行为逐字节不变：金录像 / ``batch_games`` / ``ai_eval`` /
+        录像回放都不传它，``_started`` 的翻转对它们没有任何可见效果。
+        """
         while not self.finished:
             if self.pending is None:
+                started = self._started
                 self._step()
+                if stop_after_game_start and self._started and not started:
+                    break
                 continue
             query = self.pending
             self.submit(participants[query.actor].respond(query))

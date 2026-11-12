@@ -117,12 +117,28 @@ class _FirstChoice:
 
 
 def _play_to_end(session: Session) -> int:
-    """用 :class:`Session` 的挂起驱动把一局走完，返回应答次数。"""
+    """用 :class:`Session` 的挂起驱动把一局走完，返回应答次数。
+
+    先 ``drive()`` 一次：经 ``GameRegistry.create`` 建的会话停在 L0 边界（票 14 的建局口径），
+    人类第一问要驱动一下才出来；已经停在询问上的会话它是零动作。
+    """
+    session.drive()
     answers = 0
     while session.pending is not None:
         session.submit_answer(session.pending.legal_actions[0])
         answers += 1
     return answers
+
+
+def _settle(registry, session: Session) -> dict:
+    """建一局之后**取一次增量**，返回那时那份 ``after < 0`` 的视图（票 14）。
+
+    建局响应止于 ``GAME_START``（L0 边界），人类第一问由下一次取增量驱动出来——真客户端
+    走的是同一条路（``advance_clock`` → ``view``）。绝大多数断言要的是"开局已收口"那一份，
+    它等价于本票之前建局响应里给的那一份。
+    """
+    registry.advance_clock(session)
+    return registry.view(session, after=-1, logs_after=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1325,7 +1341,9 @@ def test_an_idle_poll_is_silent_until_the_deadline_answers_for_you() -> None:
     session = registry.create(
         {"player_count": 4, "ai": "random", "seed": 20261013, "timeout_seconds": 10.0}
     )
-    first = registry.view(session, after=-1, logs_after=0)
+    # 建局响应止于 GAME_START（票 14）：先取一次增量（真 HTTP GET 走的就是这一条路），
+    # 这一份才是"停在人类第一个询问上"的那一份。
+    first = _settle(registry, session)
     assert first["pending"] is not None, "人类座位应当停在第一个询问上"
 
     # 无事发生的一次轮询（与 HTTP GET 同一条路径：先 advance_clock，再 view）。
@@ -3295,6 +3313,8 @@ def test_the_view_payload_never_json_round_trips_the_record_stream(
     session = registry.create(
         {"player_count": 2, "ai": "random", "seed": 103, "timeout_seconds": None}
     )
+    # 票 14：先取一次增量把引擎推到人类的第一个询问（建局响应止于 GAME_START）。
+    registry.advance_clock(session)
 
     def _forbidden(*args: object, **kwargs: object) -> str:
         raise AssertionError("view() 不许把记录流做 JSON 文本往返（派生通道只读属性）")
@@ -3357,7 +3377,7 @@ def test_the_view_only_derives_the_new_narrative_records(
     session = registry.create(
         {"player_count": 2, "ai": "random", "seed": 103, "timeout_seconds": None}
     )
-    first = registry.view(session, after=-1, logs_after=0)
+    first = _settle(registry, session)
     assert first["narrative"], "前置：首屏必须有叙事条目"
     cursor = first["cursor"]
     session.submit_answer(session.pending.legal_actions[0])
@@ -7774,6 +7794,193 @@ def test_a_hp_max_change_is_applied_to_the_live_view_ceiling() -> None:
         "同一条记录之后血条分母就变了（不等 commitView）："
         f"{frames[1]['players'][str(record.seat)]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 14：建局止于 GAME_START（L0 边界）+ 服务端开局底稿
+# ---------------------------------------------------------------------------
+
+
+def test_the_create_response_stops_at_the_end_of_game_start() -> None:
+    """票 14 第 1 条（spec §1 #1 / §2 Q7）：**建局响应止于"游戏开始时"**。
+
+    报障的形状是"init 没走完 AI 已经在操作"：建局响应原本一次给到**人类第一问**（8 人局
+    实测 56 条记录，seq20–54 是 2 号位 AI 主公的整个第一回合、seq55 才是人类的 RESPOND）。
+    驱动因此多一个暂停点——引擎的 ``_started`` 由假翻真、回合环还没起跑（``GAME_START``
+    派发完）——建局响应停在那里，AI 的回合留给客户端**下一次取增量**（现有的 ``after``
+    游标机制，零新增协议；顺序见 spec §2 Q7 的"init 的定义"）。
+
+    判据是次序事实（`CODING_STANDARDS.md` §4）：整批里**没有一条** ``TURN_*`` 时机（回合环
+    一条都没跑）、最后一条就是 ``GAME_START``；而紧接着那一次取增量（与真客户端走同一条
+    ``advance_clock`` → ``view`` 路）把人类的第一个询问交出来。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 8, "ai": "heuristic", "seed": 12, "timeout_seconds": None}
+    )
+    body = registry.view(session, after=-1, logs_after=0)
+
+    assert body["finished"] is False, "开局那一批不可能已终局"
+    assert body["pending"] is None, "建局响应不许停在询问上（L0 边界之后、人类第一问之前）"
+    timings = [
+        record["timing"] for record in body["records"] if record.get("kind") == "timing"
+    ]
+    assert timings[-1] == "GAME_START", f"最后一条时机必须是 GAME_START：{timings}"
+    assert [timing for timing in timings if timing.startswith("TURN_")] == [], (
+        f"建局响应里不许有回合环的时机：{timings}"
+    )
+    assert body["records"][-1]["kind"] == "timing", (
+        f"最后一条记录必须是那条 GAME_START 时机：{body['records'][-1].get('kind')}"
+    )
+
+    # 后续记录由客户端下一次取增量拉——与 HTTP GET 同一条路径（advance_clock → view）。
+    registry.advance_clock(session)
+    nxt = registry.view(session, after=body["cursor"], logs_after=body["log_seq"])
+    assert nxt["cursor"] > body["cursor"], "AI 的第一回合真的落在下一份增量里"
+    assert nxt["pending"] is not None, "下一份增量停在人类的第一个询问上"
+    assert any(
+        record.get("kind") == "timing" and record["timing"].startswith("TURN_")
+        for record in nxt["records"]
+    ), "回合环是在**下一份增量**里起跑的"
+
+
+def test_the_create_response_carries_a_pre_game_setup_snapshot() -> None:
+    """票 14 第 2 条：**开局底稿由服务端下发**（前端不再从 post-init 快照倒推）。
+
+    底稿 = "发牌前"那一帧：座位 / 武将 / 技能 / 满体力 / 护甲 / 标记 / 手牌上限 / 武将块
+    标签，手牌 0、各区空、无阶段无回合无询问。它由 ``Session.__init__`` 在 ``drive()``
+    **之前**从 ``build_initial`` 的产物导出（``projection.py:setup_snapshot``），只在
+    ``after < 0`` 那份视图里出现，**不进记录流**。
+
+    期望值取自**独立真源**：武将数据表的基础体力上限（主公 +1 的公开规则），以及"发牌前
+    与现在的差别"这条局面事实——不是拿服务端算出来的数再比一遍。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 8, "ai": "heuristic", "seed": 12, "timeout_seconds": None}
+    )
+    body = registry.view(session, after=-1, logs_after=0)
+    setup = body["setup"]
+    assert setup is not None and setup["players"], "建局响应必须带开局底稿"
+
+    assert body["records"][0]["kind"] == "header", "前置：这一份是首屏那一次（after < 0）"
+    assert "setup" not in registry.view(session, after=body["cursor"], logs_after=0), (
+        "底稿只随 after < 0 下发：之后的每一份增量都不带这个键（不是 null）"
+    )
+    assert not [
+        record for record in body["records"] if "setup" in json.dumps(record)
+    ], "底稿不进记录流（回放逐字节不受影响）"
+
+    assert setup["seat"] == session.human_seat
+    assert setup["self_hand"] == [] and setup["discard"] == [] and setup["processing"] == []
+    assert setup["deck_count"] == 0, "牌堆张数由首条 deck_shuffle 写回（底稿从 0 起）"
+    assert setup["phase"] is None and setup["turn_seat"] is None
+    assert setup["turn_extra"] is False and setup["round"] == 1
+
+    for player in setup["players"]:
+        seat = player["seat"]
+        assert player["hand_count"] == 0, f"座位 {seat} 发牌前手牌为 0"
+        assert player["hp"] == player["hp_max"], f"座位 {seat} 发牌前满体力"
+        assert player["equip"] == [] and player["judge"] == [] and player["hero_zones"] == []
+        assert player["markers"] == [], "发牌前没有标记"
+        assert player["alive"] is True
+        assert player["identity"] is None and player["identity_label"] is None, (
+            "身份不在底稿里：identity_deal 那条记录才亮（本人 / 主公可见），"
+            "底稿先给等于 t0 就把全场身份摆在桌上"
+        )
+        assert player["skills"], f"座位 {seat} 的详情技能清单要带（与 visible_snapshot 同源）"
+        # 体力上限 = 该武将的基础值（主公 +1 是公开规则，由引擎在 build_initial 里加）。
+        hero = hero_by_id(session.hero_assignments[seat])
+        assert hero is not None
+        lord = session.engine.state.player(seat).identity is Identity.LORD
+        assert player["hp_max"] == hero.hp_max + (1 if lord else 0), (
+            f"座位 {seat} 的 {hero.id} 基础上限 {hero.hp_max}"
+            f"（主公 +1 = {lord}），实得 {player['hp_max']}"
+        )
+        # 票 10 刻意**没有**派生的两个字段：底稿必须补上（否则前端只能再猜一次）。
+        assert isinstance(player["hand_limit"], int) and player["hand_limit"] >= player["hp"]
+        assert player["hand_limit"] == body["snapshot"]["players"][seat]["hand_limit"], (
+            "手牌上限是服务端派生量：这一局 GAME_START 没改体力，底稿与权威快照同源"
+        )
+        assert player["hero_tags"] == body["snapshot"]["players"][seat]["hero_tags"]
+
+    # 底稿与权威快照的差别，正好是"发牌前 vs 发完牌"这条局面事实。
+    assert body["snapshot"]["players"][session.human_seat]["hand_count"] > 0
+    assert body["snapshot"]["deck_count"] > 0
+
+
+def test_a_game_start_max_hp_change_does_not_leak_into_the_opening_frame() -> None:
+    """票 14 第 3 条：开局批的 t0 显示**基础**体力上限（spec §1 #1 的真凶）。
+
+    旧实现的 ``openingLiveView`` 从 post-init 快照倒推：``hp`` 写成 ``hp_max ?? hp``、
+    ``hp_max`` **原样继承**，而 ``applyLiveDelta`` 当时没有 ``hp_max_change`` 分支 ⇒ 播到
+    中间血条反而倒退。现在底稿是服务端的"发牌前"，上限逐条由 ``hp_max_change`` 抬。
+
+    走**真实产出路径**（`CODING_STANDARDS.md` §6）：无名（自制包，基础上限 2）坐在 AI 座位，
+    真引擎的「游戏开始时」【天成】连按三次"加体力上限"（启发式对效果行的估值 2.5 > 技能行
+    2.0，故三次都选它），底稿 / 记录 / 权威快照全部由产品代码产出，前端跑真的 ``session.js``
+    （``tests/support/live_delta_probe.mjs`` 的 ``openingLiveView`` + ``applyLiveDelta``，
+    与 ``applyView`` / ``stepPlayback`` 同一条派生口）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = Session(
+        seed=7,
+        player_count=2,
+        ai="heuristic",
+        human_seat=0,
+        # 无名坐在**非人类**座位：它的三次【天成】展示由启发式当场答完（L0 里不问人类）。
+        heroes=("guanyu", "wuming"),
+        timeout_seconds=None,
+        pause_after_game_start=True,
+    )
+    body = registry.view(session, after=-1, logs_after=0)
+    seat = session.hero_assignments.index("wuming")
+    assert seat != session.human_seat, "前置：无名在 AI 座位上（否则人类会被 L0 的展示问住）"
+    assert body["pending"] is None, "前置：这一批停在 L0 边界"
+
+    changes = [
+        record for record in body["records"] if record.get("delta_type") == "hp_max_change"
+    ]
+    assert [record["seat"] for record in changes] == [seat] * 3, (
+        f"【天成】三次都选「加体力上限」（启发式对效果行的估值更高）：{changes}"
+    )
+    assert [record["after"] for record in changes] == [3, 4, 5], (
+        f"2 → 3 → 4 → 5 逐条抬（无名基础上限 2，无身份局不加主公那一点）：{changes}"
+    )
+    assert body["setup"]["players"][seat]["hp_max"] == 2, "底稿：基础上限"
+    assert body["snapshot"]["players"][seat]["hp_max"] == 5, (
+        "前置：权威快照是这一段跑完的终值——旧实现拿它倒推，t0 就会写成 5"
+    )
+
+    payload = _run_live_delta_probe(
+        {"base": body, "records": body["records"], "opening": True}
+    )
+    frames = payload["frames"]
+    ceilings = [frame["players"][str(seat)]["hp_max"] for frame in frames]
+    assert ceilings[0] == 2, f"t0 的血条分母是基础上限，不是终值：{ceilings[0]}"
+    assert ceilings == sorted(ceilings), f"回放期上限只增不减（不倒退回滚）：{ceilings}"
+    assert ceilings[-1] == 5
+
+    first_change = next(
+        index
+        for index, record in enumerate(body["records"])
+        if record.get("delta_type") == "hp_max_change"
+    )
+    assert all(value == 2 for value in ceilings[: first_change + 1]), (
+        f"第一条 hp_max_change 之前一帧都不许变：{ceilings[: first_change + 1]}"
+    )
+    for index, record in enumerate(body["records"]):
+        if record.get("delta_type") != "hp_max_change":
+            continue
+        assert frames[index + 1]["players"][str(seat)]["hp_max"] == record["after"], (
+            f"第 {index} 条记录之后上限就变成 {record['after']}（不等 commitView）"
+        )
 
 
 def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view() -> None:

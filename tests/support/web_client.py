@@ -36,6 +36,30 @@ def call(url: str, payload: dict[str, Any] | None = None) -> tuple[int, Any]:
             return error.code, {"error": body}
 
 
+def settle_after_create(base: str, body: dict[str, Any]) -> dict[str, Any]:
+    """建局之后**取一次增量**，把引擎推过 L0 边界（table-ux-overhaul 票 14）。
+
+    建局响应止于"游戏开始时"（``GAME_START`` 派发完、第一回合之前）：那一份里
+    ``pending is None`` 是**合法**态，人类第一问要由下一次取增量驱动出来——真网页客户端
+    走的也是这条路（开局批播完立刻 ``refresh()``）。本助手就是那一次取增量，返回收口后的
+    视图（它带 ``pending``；若该局在 L0 就走到了终局则照返回）。
+
+    调用点只有三个**真产品服务**的建局（正局 / 火攻 tape / 酒 tape）；构造局面夹具
+    （``m5_fixture_server`` / ``m6_fixture_server``）不传 ``pause_after_game_start``，
+    建局即停在人类第一问上，故不经这里。
+    """
+    if body.get("finished") or body.get("pending") is not None:
+        return body
+    status, settled = call(
+        f"{base}/api/sessions/{body['session_id']}"
+        f"?after={body['cursor']}&logs={body['log_seq']}"
+    )
+    if status != 200:
+        print(f"FAIL 建局后的第一次取增量失败：HTTP {status} {settled}")
+        return body
+    return settled
+
+
 def _identity_win_failure(
     game_end: dict[str, Any], known: dict[int, str | None]
 ) -> str | None:
@@ -103,6 +127,8 @@ def play(
     if deck_profile is not None and body.get("deck_profile") != deck_profile:
         print(f"FAIL 建局档位不是 {deck_profile}：{body.get('deck_profile')}")
         return 1
+    # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
+    body = settle_after_create(base, body)
 
     session_id = body["session_id"]
     cursor = body["cursor"]
@@ -423,6 +449,8 @@ def fire_attack_tape(base: str) -> int:
             print(f"FAIL 火攻 tape {label}：档位不是 standard_ex_160：{body.get('deck_profile')}")
             failures += 1
             continue
+        # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
+        body = settle_after_create(base, body)
         session_id = body["session_id"]
         cursor = body["cursor"]
         log_seq = body["log_seq"]
@@ -659,6 +687,8 @@ def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, i
     if body.get("deck_profile") != "standard_ex_160":
         print(f"FAIL 酒 tape：档位不是 standard_ex_160：{body.get('deck_profile')}")
         return None
+    # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
+    body = settle_after_create(base, body)
     return body["session_id"], body["cursor"], body["log_seq"], body
 
 

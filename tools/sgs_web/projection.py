@@ -99,6 +99,7 @@ __all__ = [
     "seat_hero_zones",
     "seat_skill_display",
     "serialize_record",
+    "setup_snapshot",
     "skill_events_after",
     "virtual_index",
     "visible_record",
@@ -614,6 +615,62 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     payload["round"] = int(state.round)
     payload["turn_extra"] = bool(state.turn_extra)
     return payload
+
+
+_SETUP_EMPTY_ZONES: tuple[str, ...] = ("equip", "judge", "hero_zones")
+"""开局底稿里**必然空着**的牌区键（座位载荷里三者的形状都是列表）。"""
+
+
+def setup_snapshot(session: Session) -> dict[str, Any]:
+    """**开局底稿**：发牌前那一帧的权威快照（table-ux-overhaul 票 14 / spec §2 Q7）。
+
+    为什么需要它：建局响应止于"游戏开始时"（``Session.drive`` 的 L0 边界），前端要逐条
+    从**发牌前**演起。此前这份骨架是前端从 post-init 快照**倒推**出来的
+    （``session.js:openingLiveView`` 把 ``hp`` 写成 ``hp_max ?? hp``、``hp_max`` / ``armor``
+    / ``markers`` 原样继承）——载荷只给终值，界面就只能从记录猜规则。现在改成服务端下发：
+    底稿里的每一个字都由引擎状态导出，前端只显示。
+
+    **调用时机是契约的一半**：只能在 ``_start``（``GAME_START`` 派发）**之前**调。此刻
+    ``engine.state`` 是 ``build_initial`` 的产物——座位 / 武将 / 技能 / 体力上限 / 护甲 /
+    标记都是开局事实，而「游戏开始时」的钩子（【天成】改上限、摸牌）**还没跑**。
+    ``Session.__init__`` 因此在 ``drive()`` 之前把它冻结成 ``Session.setup``。
+
+    与 :func:`visible_snapshot` 同一份过滤口径（座位 / 武将 / 技能 / 标记 / 手牌上限 /
+    封印区都直接读它），只把"发牌前还没发生"的那几格按住：
+
+    - ``hand_count = 0`` 与 ``self_hand = []``：起始手牌是这条记录流的第一批 ``card_move``
+      演的，底稿必须从"一张都没有"起；
+    - ``hp = hp_max``：发牌前满体力。**不读此刻的 ``hp``**——它只是碰巧也满；
+    - ``identity / identity_label = None``：身份由 ``identity_deal`` 逐条亮（本人 / 主公
+      可见、其余 ``null``，与 :func:`~sgs.state.project` 的可见性同源）。底稿先给 = t0
+      就把全场身份摆上桌，那才是泄露；
+    - ``deck_count = 0``：牌堆张数由第一条 ``deck_shuffle`` 记录写回（``applyLiveDelta``
+      的 ``from_zone = null`` 分支）；
+    - ``discard`` / ``processing`` / 三个牌区 / ``phase`` / ``turn_seat`` / ``turn_extra``：
+      发牌前一律空 / 假（无身份局与身份局同形）；
+    - ``round = 1``：``_start`` 之前引擎的 ``state.round`` 还是 0（它由 ``_start`` 写 1），
+      而底稿是"第一轮即将开始"那一帧——写 1，与随后第一条 ``turn_change`` 一致。
+
+    **不进记录流**（不是 ``JournalRecord``，不是 delta），只随 ``after < 0`` 的那份视图下发；
+    回放（记录流单独喂引擎）因此逐字节不受影响。
+    """
+    snapshot = visible_snapshot(session)
+    for player in snapshot["players"]:
+        player["hand_count"] = 0
+        player["hp"] = player["hp_max"]
+        player["identity"] = None
+        player["identity_label"] = None
+        for zone in _SETUP_EMPTY_ZONES:
+            player[zone] = []
+    snapshot["self_hand"] = []
+    snapshot["discard"] = []
+    snapshot["processing"] = []
+    snapshot["deck_count"] = 0
+    snapshot["phase"] = None
+    snapshot["turn_seat"] = None
+    snapshot["turn_extra"] = False
+    snapshot["round"] = 1
+    return snapshot
 
 
 def seat_hero_zones(

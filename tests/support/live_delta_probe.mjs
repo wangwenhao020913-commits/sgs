@@ -1,5 +1,5 @@
-/* 回放派生的 Node 探针（table-ux-overhaul 票 10）：把**真的** `session.js` 放进最小垫片，
- * 用真记录流驱动 `applyLiveDelta`，把回放期 live view 的逐条读数打印成 JSON 给 Python 侧断。
+/* 回放派生的 Node 探针（table-ux-overhaul 票 10 / 票 14）：把**真的** `session.js` 放进最小
+ * 垫片，用真记录流驱动 `applyLiveDelta`，把回放期 live view 的逐条读数打印成 JSON 给 Python 侧断。
  *
  * 为什么不用 `ui_smoke.mjs`：那条要起真服务、跑整局（60–70 s），而本探针只断"一条记录之后
  * live view 长什么样"——把它留给烟测的 U-QX-01 / U-IDLE-01（那里有 DOM 垫片，能断重绘）。
@@ -7,14 +7,19 @@
  * `tools/sgs_web/static/` 读**真文件**，垫片只补 `state` / `document` / `$`。
  *
  * 输入（stdin，JSON）：
- *   {"base": <一份真视图载荷>, "records": [<记录>…], "idleSnapshot": <快照>}
+ *   {"base": <一份真视图载荷>, "records": [<记录>…], "idleSnapshot": <快照>,
+ *    "opening": true}
  * 输出（stdout，JSON）：
- *   {"frames": [{"index", "seq", "players": {seat: {hand_count, self_hand, hero_zones}}}, …],
+ *   {"frames": [{"index", "seq", "players": {seat: {hp, hp_max, hand_count, hero_zones}}, …}, …],
  *    "fingerprint": {"base": "…", "idle": "…", "changed": true},
  *    "idle": {"isIdle": true}}
  *
  * `frames[0]` 是**派生前**的底稿（index = -1），其余每条记录一帧——断言因此能说"在该条之后
  * 就变了"，而不是"等 commit"。
+ *
+ * ``opening: true``（票 14）= 底稿走**开局批**那条路（`openingLiveView`，读载荷里的 `setup`），
+ * 与 `applyView` 在 `opening` 分支里的取法同一个函数；不给则照票 10 的老口径取
+ * `cloneLiveView`（中途批）。
  */
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
@@ -48,6 +53,7 @@ vm.runInContext(readFileSync(`${STATIC_DIR}/session.js`, "utf8"), context, {
 vm.runInContext(
   `globalThis.__probe = {
      cloneLiveView: typeof cloneLiveView === "function" ? cloneLiveView : null,
+     openingLiveView: typeof openingLiveView === "function" ? openingLiveView : null,
      applyLiveDelta: typeof applyLiveDelta === "function" ? applyLiveDelta : null,
      snapshotFingerprint: typeof snapshotFingerprint === "function" ? snapshotFingerprint : null,
      pollIsIdle: typeof pollIsIdle === "function" ? pollIsIdle : null,
@@ -98,8 +104,16 @@ if (typeof probe.applyLiveDelta !== "function") {
 
 state.view = base;
 state.cursor = base.cursor === undefined ? null : base.cursor;
-/* 与 `applyView` 同一条生产路径：回放从容器的深拷贝起算（`cloneLiveView`）。 */
-state.liveView = probe.cloneLiveView(base);
+/* 与 `applyView` 同一条生产路径：中途批从容器的深拷贝起算（`cloneLiveView`），
+ * 开局批走 `openingLiveView`（票 14：读载荷里的 `setup` 底稿）。 */
+if (input.opening) {
+  if (typeof probe.openingLiveView !== "function") {
+    throw new Error("session.js 没有 openingLiveView：开局底稿的生产入口不在，探针无从驱动");
+  }
+  state.liveView = probe.openingLiveView(base);
+} else {
+  state.liveView = probe.cloneLiveView(base);
+}
 const frames = [frameOf(state.liveView, -1, null)];
 for (const [index, record] of (input.records || []).entries()) {
   probe.applyLiveDelta(record, state.liveView);

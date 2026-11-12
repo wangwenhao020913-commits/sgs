@@ -376,6 +376,10 @@ class GameRegistry:
             ask_policy=parse_ask_policy(body.get("ask_policy")),
             pack=pack,
             session_id=f"s{self._counter}",
+            # L0 边界（table-ux-overhaul 票 14）：建局响应止于"游戏开始时"派发完——
+            # 这是**接入层的建局口径**，故只在这一条生产路径上打开；库层（单测 / 构造
+            # 局面夹具）缺省仍是一路驱动到人类第一问。
+            pause_after_game_start=True,
         )
         session.mark_pending(time.monotonic())
         self.sessions[session.session_id] = session
@@ -394,7 +398,15 @@ class GameRegistry:
     # -- 取增量（**超时判定的唯一触发点**） ---------------------------------
 
     def advance_clock(self, session: Session) -> None:
-        """到点就代答，可能连续代答多次（超时后引擎又停在同一个人类的下一问）。"""
+        """取增量这一条路上的两件事：**把引擎推到下一个暂停点** + 到点就代答。
+
+        前者是 table-ux-overhaul 票 14 的 L0 边界：建局响应止于 ``GAME_START``，人类第一问
+        要由**下一次取增量**驱动出来（``Session.drive`` 只在 L0 边界停一次，第二趟就一路
+        跑到人类第一问）。对已经停在询问上 / 已终局的会话它是零动作。
+        顺序不能倒：先驱动、后打戳（``mark_pending`` 看到的那一问才是这一趟刚产出的那一问，
+        倒计时从它出现的那一刻起算）。
+        """
+        session.drive()
         now = time.monotonic()
         # `mark_pending` 顺带打上"最后访问时刻"（票 01 的会话回收判据）。
         session.mark_pending(now)
@@ -446,7 +458,7 @@ class GameRegistry:
         # 标签 delta 仍不进人类记录流（`visible_record` 裁掉）；这张牌的**可见**增删
         # 另走展示通道，前端据此逐事件更新 live view，不必等下一次询问。
         decorate_records_card_tags(records, session.engine.state, session.human_seat)
-        return {
+        payload: dict[str, Any] = {
             "session_id": session.session_id,
             "seed": session.seed,
             "player_count": session.rule_config.player_count,
@@ -519,6 +531,13 @@ class GameRegistry:
             ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }
+        # 开局底稿（table-ux-overhaul 票 14）：**发牌前**那一帧的权威快照，只在
+        # `after < 0`（首屏 / 建局那一次）随载荷下发。它不是记录流的一部分（不进
+        # `records`、不是 delta），回放单独喂记录流时逐字节不受影响；前端拿它当开局批的
+        # 回放底稿，不再从 post-init 快照倒推。其余批**不带这个键**（不是 `null`）。
+        if after < 0:
+            payload["setup"] = session.setup
+        return payload
 
     # -- 叙事增量缓存（票 01） -----------------------------------------------
 
