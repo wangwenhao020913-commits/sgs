@@ -42,6 +42,7 @@
 | 2026-11-11 | **实施期裁定（缺口 #己，Q18 文案对的覆盖度）**：`prompts.json` 现状 142 条 `ask` / 3 条 `done`。按 Q23（"我先出初稿，用户改字"）+ §7 风险（"文案普查是大头工作量"），**本轮交付的是初稿**：`ask` 已铺满、`done` 只落在逐级累加被行使的用例上（离间三步），机制（三层回退 / 累加 / 键名合法性）已实现并钉住；**其余 139 步的 `done` 措辞属用户的改字那一遍**，不视为机制缺口 | 07 |
 | 2026-11-11 | **实施期裁定（缺口 #庚，review 发现的未归属规格）**：`/code-review` 的 Spec 轴指出 `spec §2 Q6` 的"业炎花色由后端算"没有任何一票接手（09 只落止损、11/12 按各自票面没收）⇒ **新增票 15** `issues/15-own-hand-legality-preview.md`（预览端点扩到 `SELECT_CARDS`，退役 `ownZoneSuitTaken`）。Q22 的"14 票"因此变为 15 票（过程事实，不回溯改 spec §3 的批次表） | 15 |
 | 2026-11-11 | **实施期裁定（缺口 #辛，评审修复的口径变化）**：`RespondContext.skip_if_empty` 曾是"写进载荷但无人读"的字段（违 `CODING_STANDARDS` §1）⇒ 评审修复 `eb1c50a` 把它改成**唯一载体**：新增 `Engine.respond_context(...)` 建一份 `RespondContext`，`should_ask_respond` / `respond_candidates` / `ask_respond` **只收这一个对象**，类别位由 `should_ask_respond` 读 `ctx.skip_if_empty`。**新纪律**：RESPOND 窗口的"这次要不要问"声明点 = `respond_context`；`ask_respond` / `respond_candidates` 只是消费者，不许再各自接一份参数字段 | 02 / 05 / 15 |
+| 2026-11-11 | **实施期裁定（缺口 #壬，用户实机报障后的口径）**：① `preactivationReady`（票 08 前的"光标须越过末尾"语义）与 `preactivationSubmitAllowed`（票 08/11 后的"最后一步填满即可"）是**两份判据** ⇒ 页脚说"还没填完"而标题说"已填完"、按下不能提交（离间 / 贯石斧两张截图）。**判据单源**，旧语义删除 ② 步骤**不再画成按钮**：提示区只显示**当前这一步**的字符串问法（票 07 的累加文案已表达"前几步完成"），只有真选项（雌雄二选一）是按钮，且尺寸收紧。`spec §2 Q12` 的"控件区按钮"只指**真选项**，不指步骤条 ⇒ 新增票 16 | 16 |
 
 ## Fog（已知未知，实现时会撞上）
 

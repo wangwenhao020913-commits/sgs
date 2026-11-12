@@ -5,7 +5,7 @@
 `map.md` 的「Decisions-so-far」缺口编号。
 
 机械核对：`.venv/bin/python tools/check_acceptance.py .scratch/table-ux-overhaul`
-（扫 15 张票 `## Answer` 里的全部 `test_*` 引用，逐个核"存在且绿"）。
+（扫 16 张票 `## Answer` 里的全部 `test_*` 引用，逐个核"存在且绿"）。
 本文件另供 `/code-review` 的 Spec 轴使用。
 
 ## §1 报障（13 项）
@@ -25,6 +25,9 @@
 | 3 | 放弃的对局会被回收 | `tests/test_web.py::test_an_abandoned_session_is_pruned_when_a_new_one_is_created` | 01 |
 | 3 | 事件流节点数有上限 | `tests/test_web.py::test_the_event_log_keeps_a_bounded_number_of_nodes`（烟测 U-LOG-01…） | 01 |
 | 4 | 预发动无弹窗 / 自动推进 / 取消回第一步 | 烟测 `tests/support/ui_smoke.mjs`：U-PA-01a–e、U-PA-02、U-PA-03、U-PA-04、U-PA-05、U-PA-06 | 08 |
+| 4 | **收口后用户实机报障**：填完却提交不了（页脚说"还没填完"） | 烟测 U-PA-07a–d（真实发出 `ActivateSkill`、页脚无该句）+ `tests/test_web_static.py::test_the_preactivation_submit_verdict_has_one_single_implementation`（判据单源） | 16 |
+| 4 | 提示区只显示**当前步**的字符串问法（不再铺步骤按钮） | 烟测 U-PA-08a–e（`#t-options` 无步骤按钮、提示行只说当前步） | 16 |
+| 4 | 真选项仍是按钮（雌雄二选一 / 崩坏二选一） | 烟测 U-PA-09 / 09b–d | 16 |
 | 5 | 提示区单一 reset（三调用点） | `tests/test_web_static.py::test_the_ask_surface_is_cleared_by_one_single_function`（烟测 U-…） | 07 |
 | 5 | 文案模板三层回退 | `tests/test_web_static.py::test_the_prompt_templates_are_loaded_with_a_documented_fallback_chain` | 07 |
 | 5 | 占位符白名单拒未知占位 | `tests/test_web_static.py::test_a_template_slot_whitelist_rejects_unknown_placeholders` | 07 |
@@ -78,13 +81,13 @@
 | Q7 建局 | L0 边界暂停 + 服务端 `setup` | 见 §1 #1 三条（+ 烟测 U-INIT-01a–g） |
 | Q8 性能三处全修 | 游标化 / 回收 / 节点上限 | 见 §1 #3 四条 |
 | Q11/Q18/Q23 文案模板 | `prompts.json` + 三层回退 + 占位符白名单 + localStorage 覆盖 | 见 §1 #5 三条；键名合法性 `tests/test_web_static.py::test_the_prompt_template_keys_are_real_skill_ids_and_real_step_names` |
-| Q12 预发动各步表面 | 去弹窗 / 保窗清单 / 借刀全删弹窗 | 烟测 U-PA-01/01b/01d/04/05/06 |
+| Q12 预发动各步表面 | 去弹窗 / 保窗清单 / 借刀全删弹窗；**控件区按钮只指真选项，不指步骤条**（缺口 #壬） | 烟测 U-PA-01/01b/01d/04/05/06 + U-PA-08（无步骤按钮）+ U-PA-09（真选项仍在） |
 | Q13/Q17 三档逐档问 | 档 0/1/2 定义 + 按档迭代 | 见 §1 #9 四条；档位读法 `tests/test_timing.py::test_the_need_card_gate_reads_the_same_floor_in_all_four_windows` |
 | Q15/Q20 三级置灰 | 源牌级 / 产物级 / 目标级 | §1 #6 三条 + `tests/test_hero_jie_yijiang.py::test_a_product_without_legal_targets_is_disabled_but_the_source_card_stays_enabled`；外人抹除 `tests/test_hero_transform.py::test_the_source_groups_are_masked_for_a_foreign_viewer` |
 | Q16 转化牌与真牌同档 | 覆盖位 `SkillDef.need_card_tier=2`，无技能名名单 | §1 #9 转化提供者那条 + 账本行 1226 |
 | Q19/Q4 引擎 OFF ⇒ 零重录 | 金录像逐字节 + 网页会话 ON | `bash tools/check_goldens.sh` 47 条；§1 #10 三条 |
 | Q21 并发写者 | 单个实现者串行（本 run 一票一实现者） | 本表即过程证据（见 `map.md`） |
-| Q22 票数 | 用户签的是 14 票；评审发现 `Q6` 的业炎半无人接手 ⇒ 追加票 15（裁定见 `map.md` 缺口 #庚），**15 张票全 `resolved`** | `.scratch/table-ux-overhaul/issues/*.md` Status |
+| Q22 票数 | 用户签的是 14 票；评审发现 `Q6` 的业炎半无人接手 ⇒ 追加票 15（缺口 #庚）；用户实机报障后又追加票 16（缺口 #壬）⇒ **16 张票全 `resolved`** | `.scratch/table-ux-overhaul/issues/*.md` Status |
 
 ## §4 金录像（行为有意变更 ⇒ 重录与实现同提交）
 
@@ -99,7 +102,7 @@
 
 | 条目 | 证据 | 状态 |
 |---|---|---|
-| 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 15 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS（覆盖 242 张 resolved） | ✅ |
+| 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 16 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS（覆盖 242 张 resolved） | ✅ |
 | 新增断言落在真实产出路径 | 票 09 的"回环"用例从真引擎 pending 取载荷；票 11 的同源断言直接调校验器；票 13 的除疠越池用例真跑执行器 | ✅ |
 | 前端行为变更过 `bash tests/smoke-web.sh` | 票 07/08/09/10/11/12/13/14 的 Answer 均记录 smoke-web PASS（票 14 1635→1690+ PASS / 0 FAIL） | ✅ |
 | 改 DOM API 形状的票要走 `bsk` 实机 | **未执行**：本机 bsk 的 cooperate 握手一直失败（所有 `browser_interact` / `navigate` 被 "requires the context returned by the latest cooperate sync" 拒绝）。已按仓规改为"配方 + 结束 turn 交用户"：票 07/08/09/10/13/14 的 `## Answer` 各带配方；功能面由 smoke-web + `tests/test_action_contract.py` 覆盖 | `[R]` 见 `map.md` 缺口 #戊 |
