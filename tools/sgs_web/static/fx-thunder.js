@@ -230,12 +230,14 @@
     damage_fx_thunder_1_impact: 300, damage_fx_thunder_1_fade: 700,
     damage_fx_thunder_2_total: 1500, damage_fx_thunder_2_flight: 115,
     damage_fx_thunder_2_impact: 310, damage_fx_thunder_2_fade: 750,
-    damage_fx_thunder_3_total: 1700, damage_fx_thunder_3_flight: 120,
-    damage_fx_thunder_3_impact: 330, damage_fx_thunder_3_fade: 820,
+    /* 3 档：总时长拉到与 4 档同为 2000，余电一并拉长（2026-11-12 用户手调）。 */
+    damage_fx_thunder_3_total: 2000, damage_fx_thunder_3_flight: 120,
+    damage_fx_thunder_3_impact: 330, damage_fx_thunder_3_fade: 1000,
     damage_fx_thunder_3_strobe: 160, damage_fx_thunder_3_flash: 0.6,
+    /* 4 档：飞行拉长到 640（雷光更慢地压下来），闪光加到 0.8。 */
     damage_fx_thunder_4_total: 2000, damage_fx_thunder_4_flight: 125,
-    damage_fx_thunder_4_impact: 360, damage_fx_thunder_4_fade: 900,
-    damage_fx_thunder_4_strobe: 260, damage_fx_thunder_4_flash: 0.6
+    damage_fx_thunder_4_impact: 640, damage_fx_thunder_4_fade: 900,
+    damage_fx_thunder_4_strobe: 260, damage_fx_thunder_4_flash: 0.8
   };
 
   /* 字段名名单由 `DEFAULT_TIMING` 的键反推（票 10 同款：只许有一处真源）。 */

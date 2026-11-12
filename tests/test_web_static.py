@@ -3996,7 +3996,10 @@ def test_anim_ini_lists_the_thunder_durations_per_variant(thunder_probe: dict) -
             f"实际 {impact} + {fade} > {total}"
         )
     totals = [values[f"damage_fx_thunder_{variant}_total"] for variant in _DAMAGE_FX_VARIANTS]
-    assert len(set(totals)) == len(_DAMAGE_FX_VARIANTS), f"四档总时长必须各自独立可改：{totals}"
+    # 四档**不必互异**：2026-11-12 用户裁定 3 档与 4 档同为 2000（3 档拉长余电、4 档拉长飞行，
+    # 两条都落在同一总时长上），"四档各自独立可改"是当初的代理判据、不是目的。留下真正的不变式：
+    # 点数越大，演出不得更短。
+    assert totals == sorted(totals), f"点数越大，总时长不得更短：{totals}"
     assert values["damage_fx_thunder_3_strobe"] > 0
     assert values["damage_fx_thunder_4_strobe"] > values["damage_fx_thunder_3_strobe"], (
         "4 点雷的整屏闪比 3 点更长"
