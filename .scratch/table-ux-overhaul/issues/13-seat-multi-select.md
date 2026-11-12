@@ -4,7 +4,7 @@
 删掉手写的逐座循环；【除疠】的"势力互异"走票 11 的预览现算。
 
 **Blocked by:** 11（预览端点；除疠需要同步内动态置灰）
-Status: claimed
+Status: resolved
 Type: task
 Touches: src/sgs/engine/game.py, src/sgs/skills/flow.py, src/sgs/skills/hero_zone.py, src/sgs/skills/shen_zhugeliang.py, src/sgs/skills/phase_body.py, src/sgs/skills/negation.py, src/sgs/skills/active.py, tests/test_hero_card_zone.py, tests/test_hero_jie_qun.py
 Ruling: spec §2 Q6 / Q10；`.scratch/chenqun-guyong/issues/05-seat-multi-select.md`
