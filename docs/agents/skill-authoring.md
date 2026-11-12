@@ -12,6 +12,15 @@
 | `docs/agents/skill-authoring/edge-cases.md` | 极端情况：按形状分组的"必须回答的问题"清单 |
 | `docs/agents/skill-authoring/batch-ticket.md` | 票面骨架：一将一票、DoD、门禁与提交节奏 |
 
+这四份之外，还有四份**不是技能文档、但会改技能怎么写**的——命中对应形态时必须读：
+
+| 文件 | 什么时候必须读 |
+|---|---|
+| `开发文档/04-AI与交互设计.md` §4（人类交互设计） | 动询问面 / 候选集合 / 预览。每步的可点集合由后端**现算**（`06`（§5「程序化约定与偏离一手」）的预览端点行）⇒ 声明里的 `step.pool`、`_seat_bounds`、options 回调会被**反复调用**，必须纯净、无副作用、可重入 |
+| `开发文档/06-里程碑与风险.md` §5（程序化约定与偏离一手，含 §5.9） | 动作面约定、需要牌按档逐问、无懈只问合格者、询问跳过策略、**重录纪律**——账本行也在这个节 |
+| `GLOSSARY.md` | 「需要牌档位」「只问合格者」「预发动」这些词的定义口径；读法与账本冲突时以账本为准 |
+| `docs/agents/ai-adaptation.md`（§1 checklist + 三张登记表） | 票里带来新的机制 / 动作面 / 信息通道时，先过一遍 checklist；登记表漏登的症状常常不是红，而是"技能发动了、什么都没发生" |
+
 工具（只读）：`tools/dump_catalog.py`（形状指纹与封闭集）、`tools/similar_skills.py`（相似技能反查）、
 `tools/pool_census.py`（将池构成清单：**加武将 / 改池后先跑它**，一次列出「哪些断言写死了版本 /
 真名 / 技能数 / 形态格」并逐站点对账；`--check` 不一致即非零退出，`--json` 机读）。
@@ -66,9 +75,32 @@
 | 票的单位 | **一个武将 = 一批 = 一张票**（该武将的全部技能一起做） |
 | 迭代期 | 只跑相关单文件（`tests/test_hero_<包>.py`）+ `bash tests/smoke-web.sh`（实测 60–70 s）+ `bash tools/check_goldens.sh`（秒级）。**不提交** |
 | 收口 | 批次全部技能落地后**提交**：全量门禁由 pre-commit hook 跑（本机实测 ≈8 分钟），失败拒绝提交、工作树不动。手工跑全量只在"不提交、先看红/绿"时 |
-| 提交 | **一次** commit，不做 `wip:` 提交——hook 对 `wip:` 同样跑全量，等于白等一次 |
+| 提交 | **一次** commit。`wip:` 分档（用户 2026-11-12 裁定）：预计 **≤30 分钟**的票不做 `wip:`；预计 **>30 分钟**或机器中断风险高时，过半落一个 `wip:`（交付前 squash / amend 掉）——但每个 `wip:` 也要付一次全量 hook（≈8 分钟），别把它当免费检查点 |
 | 实机验收 | 只有"新增询问形态 / 改了 DOM 形状"才走真实浏览器（`docs/agents/acceptance-web.md`）；其余用 `tests/support/ui_smoke.mjs` 的合成载荷覆盖 |
 | DoD | 批内每条技能二选一：**已实现**（带能红的回归）或**已摘出**（附裁定票链接）。不许"做了一半" |
+
+## 3.1 多将一批（用户 2026-11-02 裁定：一次给 N 个武将时走这条）
+
+**一将一票不变、一将一提交不变**；变的只有"分析"和"签字"两段的组织方式。
+
+| 段 | 做法 |
+|---|---|
+| 分析（**并行**） | 每个武将起一个**只读**子代理：读 `readings.md` / `shapes.md` / `edge-cases.md`，跑 `similar_skills.py --like` + `dump_catalog.py --hook`，产出**自己那张票**的六问 + `### 询问剧本`；只写 `.scratch/<effort>/issues/NN-<slug>.md`，**不碰** `src/` / `tests/`，不交码 |
+| 签字（**一轮**） | N 张询问剧本表一次交给用户；一句「同意」= N 票同时过门，各票票头分别写 `规范确认: 已签（日期；多将一批一次签）` |
+| 实现（**串行**） | 两将的 `Touches:` 必然重叠（`src/sgs/agents/heuristic.py`、`tools/sgs_web/descriptions.json`、`tools/sgs_web/static/options.js`、`test_hero_catalog.py`、`test_hero_dealing.py`、`test_web.py`、`test_heuristic_ai.py`、`test_ai_cases.py`、`tests/test_all_ai_games.py`、`tests/support/ui_smoke.mjs`、`开发文档/06`）⇒ **不并行实现**；按票顺序做，默认池计数**逐票 +1**（每改完一票跑一次 `tools/pool_census.py --check`，别一次 +N） |
+| 门禁 | 迭代期逐票三件（单文件 + `smoke-web` + `check_goldens`）；提交时 hook 的全量**照旧每票一次** |
+
+两条前置，缺一条就别起并行分析：
+
+- **派发子代理之前先提交**（或先明确告知它"当前工作树未提交"）——见 `AGENTS.md` 注意事项 3。
+  本仓已发生过两次子代理把别人的活打回 HEAD。
+- **父代理核 diff、再独立跑一遍门禁**：子代理交回的表不是落地结果，`src/` / `tests/` 一律由
+  父代理串行改（派发纪律见 `docs/agents/issue-tracker.md` 那一节）。
+
+另外两条（同一次裁定）：
+
+- **不做多将一提交**：那会把 `E1` 金录像变红变成无法归因。
+- 分析子代理只交表：读不到的形态照样标出来（§2.1 第 1 条），不许猜；各表里的硬停项各自开裁定票。
 
 ## 4. 硬停判据（命中任一条，立即停）
 
@@ -113,9 +145,14 @@
 ```bash
 .venv/bin/pytest -q tests/test_skill_authoring_docs.py   # 文档与代码是否还同步
 .venv/bin/python tools/dump_catalog.py --seams --points --steps   # 框架此刻的原语面
+.venv/bin/python tools/pool_census.py --check          # 将池计数与四张登记表是否自洽（加武将后必跑）
+bash tools/setup-dev.sh                                # 只在**新机器 / 换机器**首次跑：装 hook + 建 .venv + 换行口径
 ```
 
-第一条红了 = 框架变了而文档没跟上，**先修文档再干活**。
+第一条红了 = 框架变了而文档没跟上，**先修文档再干活**。`pool_census.py --check` 非零退出 =
+有写死的版本 / 真名 / 技能数 / 形态格没跟着这次加武将改（`huo-wolong-yanliang` 那批加 2 个武将，
+首轮全量 12 条红里 9 条同源，就是它一次列出来的）。`setup-dev.sh` 不跑 = **门禁静默不跑**
+（`core.hooksPath` 不随 clone 走）或金录像因 CRLF 整片变红，别把它当成"可选步骤"。
 
 ## 7. 谁会更新这份文档
 
@@ -126,6 +163,7 @@
 | 新 UI 形态（新询问弹窗、新交互面） | 落地那张 UI 票 | 审计测试核"UI 触点表"引用的符号在 `tools/sgs_web/static/*.js` 里存在 |
 | 新**装载点 / 登记面**（声明级 `SkillDef.flow`、`register_activation`、`ACTIVATIONS` 这类"技能怎么被挂进引擎"的公共件） | 落地那张**框架**票 | 机械检查只覆盖"文档点名的 `文件:符号` 真的存在"（`tests/test_skill_authoring_docs.py`）；**"该不该有这一行"是判断题**，由评审的 Standards 轴 enforce——票 20 的 `SkillDef.flow` 就是漏在这里被评审抓到的 |
 | 新账本裁定 | **用户** | 账本行由用户签；本流程只提案 |
+| 本文件（`skill-authoring.md`）的**读单 / §6 自身体检 / §4 停手表**有改动 | 改这份文档的人 | 入口 skill `~/.dsh/skills/hero-skill/SKILL.md` 的 `基线:` 与锚点必须跟着动；`tests/test_skill_authoring_docs.py` 在该文件存在时会核（不存在则 skip） |
 
 **skill 本身不碰框架层**：它只改业务层（技能声明 / 回调）与文档、提案账本；框架层改动走
 独立的通用改动票（这就是 E2）。这条保证这套流程不会自己悄悄长出新机制。

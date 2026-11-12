@@ -66,7 +66,8 @@
    改 `virtual.py`，被迫撤回）。
 6. **长跑检查点**：预计超过约 30 分钟的票，实现者在过半时落一个 `wip:` 提交（交付前 squash
    或 amend 掉）；机器中断时，工作树就是恢复点。本仓丢过一整轮上下文，靠工作树里的半成品
-   才接上。
+   才接上。**与第 2 条不矛盾**：`wip:` 也照跑一次全量 hook（≈8 分钟），它是**中断保险**，
+   不是"中途白拿一次检查"——预计 ≤30 分钟的票不要 `wip:`。
 7. **写回 / 验收工具**：改完 `06`（§5「程序化约定与偏离一手」）先跑
    **`.venv/bin/pytest -q tests/test_writeback_landing.py && bash tests/test_dev_docs.sh`**，
    再跑全量；找该节裁定行用 **`.venv/bin/python tools/ledger_index.py --grep <票号/关键词>`**；

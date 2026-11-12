@@ -332,6 +332,18 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 **三条登记互不覆盖**（同一 id 的两条 `SkillDef` 会被 `CATALOG` 的字典推导静默覆盖，故
 "一条技能两半"必须挂在**同一条**声明上）。
 
+### 3.10 未落文档的框架能力（缺口登记）
+
+这三条**已经在代码里活着**，但 `开发文档/` 与 `docs/` 都没有对应记载——它们是"框架有心跳、
+文档没跟上"的登记，不是示范。写到它们时：(a) 读下面点名的符号；(b) 不许另写一份；(c) 语义
+有歧义就按 §4 的 **D1 停**、开裁定票。补齐后把该行挪进对应的 §3.x 表、本节删掉。
+
+| 能力 | 落点 | 状态 | 缺口 |
+|---|---|---|---|
+| 转化清单**逐张置灰**（源牌级 / 产物级） | `src/sgs/skills/heroes.py:unusable_transform_sources`、`src/sgs/skills/heroes.py:conversion_product_types`、`src/sgs/skills/heroes.py:conversion_sources_by_product`；判据共用 `src/sgs/effects/actions.py:check_usable` | 已实现（table-ux-overhaul 票 12） | 源牌级 = 这张源牌的**所有产物都不可用**才置灰，**灰的仍进 `options`**（同时进 `StepPool.disabled`）、不删行；产物级 = 牌名步按 `check_usable` 整条判（空城 ⇒【杀】灰、满血 ⇒【桃】灰） |
+| 座位步的**动态上下界** `SeatBound` | `src/sgs/skills/flow.py:SeatBound`、`src/sgs/skills/flow.py:_seat_bounds` | 已实现（yijiang-2014-round2 票 18 / P9） | `04` / `06` / 本文件都没有这一节；执行器 / 校验器 / 预览清单三处共读它，别各写一份。目标由牌名决定时 `lo=0` ⇒ 清单不下发该步、或标 `StepPool.max = 0` 自动跳过 |
+| 「这张牌此刻能不能用」`check_usable` | `src/sgs/effects/actions.py:check_usable`（`require_targets=` 两档） | 已实现（票 12 扩） | 新写同类判据**应当读它**，不许各自重写一份；语义口径未落文档 |
+
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 
 | 触点 | 位置 | 判据 |
