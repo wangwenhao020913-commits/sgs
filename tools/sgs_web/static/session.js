@@ -1834,6 +1834,30 @@ function applyIdleRepaint(body) {
   return true;
 }
 
+/** 空转期的**亮牌重画**（table-ux-overhaul 票 18 / 服务端 D 方案）。
+ *
+ * 为什么需要它：亮牌面过去只在"下一次带 `harvest` 的询问"到达时重画；五谷的整段结算里
+ * **不是每个目标都有一条 pending**（AI 目标的取牌在服务端 `Session.drive()` 内部同步答完），
+ * 于是"谁拿走了哪张"永远等不到一次重画。服务端现在把**同一份**派生状态挂在每一次视图
+ * 下发上（`view.harvest`），这一拍就把它并进视图，内容变了就重画亮牌节点。
+ *
+ * 与 `applyIdleRepaint` **同一条纪律**：换内容**不清选择**（`state.picks` / 焦点 / 目标原样），
+ * 也没有新事实——不走 `commitView`（那条路无条件 `resetSelection()`）。折叠与只读判据不动。
+ * 返回 `true` = 这一拍真的重画了亮牌。
+ */
+function applyIdleHarvest(body) {
+  if (!state.view || !body) return false;
+  const incoming = body.harvest && typeof body.harvest === "object" ? body.harvest : null;
+  const previous = state.view.harvest && typeof state.view.harvest === "object"
+    ? state.view.harvest
+    : null;
+  state.view.harvest = incoming;
+  if (!incoming) return false;
+  // 同一份状态不重画（空转每 2 秒一拍，重建节点会丢悬停 / 焦点）。
+  if (harvestFingerprint(incoming) === harvestFingerprint(previous)) return false;
+  return repaintRevealFromHarvest(incoming);
+}
+
 /** 一拍轮询：播放中 / 提交在飞时**暂停**（下一次 tick 自然恢复），弹窗打开时照常进行。
  *
  * - 播放中取增量会把半批事件换成"播放中快照"（提交按钮 / 倒计时都会跳），故让路；
@@ -1849,6 +1873,9 @@ async function poll() {
     const body = await fetchView();
     pollFailures = 0;
     if (pollIsIdle(body)) {
+      // 票 18：空转期的**视图级五谷状态**（`view.harvest`）变了 ⇒ 重画亮牌节点（不清选择）。
+      // 它与下面两条空转出口互不排斥，故不在这里 return。
+      applyIdleHarvest(body);
       // 票 07：空转**不等于**"什么都没变"——快照指纹变了就重绘座位块（不清选择）。
       // 指纹没变才是纯时钟刷新（D12 的静默分支）。
       if (snapshotFingerprint(body.snapshot) !== snapshotFingerprint(state.view.snapshot)) {

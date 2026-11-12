@@ -14345,17 +14345,169 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && JSON.stringify(nextAnswers[0].body.action.picks) === "[0]",
     `answers=${nextAnswers.length} action=${JSON.stringify(nextAnswers[0] && nextAnswers[0].body.action)} busy=${ui.state.submitBusy} session=${Boolean(ui.state.sessionId)} listeners=${(revealCards()[2].listeners.click || []).length} kind=${ui.stepDialogKind(ownNext)} picks=${JSON.stringify(ui.state.picks)}`);
 
-  check("U2-11l 亮牌 / 目标条的样式落地（置灰、四态、左下角）",
+  /* ---- 票 18：目标条进正文流（旧断言按新口径**改写**，不删） ---------------- */
+  /** 取一条 CSS 规则的正文（选择器按字面量匹配；找不到 ⇒ `null`）。 */
+  const cssRule = (selector) => {
+    const at = STYLE.indexOf(`${selector} {`);
+    if (at < 0) return null;
+    return STYLE.slice(at + selector.length, STYLE.indexOf("}", at));
+  };
+  const barCss = cssRule(".reveal-targets") || "";
+  const revealPaneCss = cssRule(".dialog-reveal") || "";
+  check("U2-11l 亮牌 / 目标条的样式落地（置灰、四态、目标条在正文流里）",
     STYLE.includes(".card.face.reveal-card.taken")
       && STYLE.includes("filter: grayscale(1)")
-      && STYLE.includes(".reveal-targets")
-      && STYLE.includes("position: absolute")
+      && barCss !== "" && !/position\s*:\s*absolute/.test(barCss)
       && STYLE.includes(".reveal-target.is-invalid")
       && STYLE.includes("background: #b3261e")
       && STYLE.includes(".reveal-target.is-current")
       && STYLE.includes(".reveal-target.is-pending")
-      && STYLE.includes(".dialog-body.reveal-body"),
-    `taken=${STYLE.includes(".card.face.reveal-card.taken")} invalid=${STYLE.includes(".reveal-target.is-invalid")} bar=${STYLE.includes(".reveal-targets")}`);
+      && revealPaneCss !== "" && !/52px/.test(revealPaneCss)
+      && !STYLE.includes("padding-bottom: 52px"),
+    `taken=${STYLE.includes(".card.face.reveal-card.taken")} invalid=${STYLE.includes(".reveal-target.is-invalid")} barCss="${barCss.trim()}" paneCss="${revealPaneCss.trim()}" fixedPadding=${STYLE.includes("padding-bottom: 52px")}`);
+
+  /* ---- 票 18（U-HV-01..03）：**视图级**五谷状态（`view.harvest`）驱动亮牌重画 --------
+   *
+   * 生产事实：五谷整段结算里只有一部分目标会变成一条 pending（AI 目标的取牌在服务端
+   * `Session.drive()` 内部同步答完）——故服务端把**同一份**派生状态挂在每一次视图下发上
+   * （`serve.py:view` 的 `harvest`），客户端在**没有新 pending** 的空转轮询里也要重画。
+   * 这三条钉的就是"没有新询问也能当场刷新"，以及"换内容不清本地选择"。
+   */
+  const hvBase = wuguPending({
+    seq: 1201, actor: 2, current: 2, key: "harvest:18:5:0",
+    revealed: [withTaker(takenCard), withTaker(secondCard), withTaker(thirdCard)],
+    targets: [targetRow(2, "current"), targetRow(3, "pending"), targetRow(4, "pending")],
+    slots: [takenCard, secondCard, thirdCard],
+  });
+  render(wuguView(hvBase, 2));
+  const hvKey = ui.state.dialog.key;
+  const hvBeforeTakers = revealCards().map((node) => node.getAttribute("data-taken-by")).join(",");
+  // 下一拍的服务端状态：座位 2 拿走了第 1 张、目标条翻到"已拿"、当前目标换成座位 3。
+  // **不换询问**（seq / actor 一字不动），只换 `view.harvest`。
+  const hvAfter = {
+    ...hvBase.harvest,
+    revealed: [withTaker(takenCard, 2), withTaker(secondCard), withTaker(thirdCard)],
+    targets: [targetRow(2, "taken", takenCard.card_id), targetRow(3, "current"), targetRow(4, "pending")],
+    current: 3,
+  };
+  const hvRepainted = ui.applyIdleHarvest({ harvest: hvAfter });
+  const hvBadge = Array.from(revealCards()[0].children)
+    .find((node) => node.classList.contains("taken-by")) || null;
+  check("U-HV-01 同一个链键下新的一拍：亮牌区当场置灰 + 座2 徽标，目标条第 1 枚翻成已拿（不等新询问）",
+    hvKey === `reveal:${hvBase.harvest.key}`
+      && hvBeforeTakers === ",,"
+      && hvRepainted === true
+      && revealCards()[0].classList.contains("taken")
+      && revealCards()[0].getAttribute("data-taken-by") === "2"
+      && hvBadge !== null && hvBadge.textContent === "座2"
+      && targetChips()[0].classList.contains("is-taken")
+      && targetChips()[0].getAttribute("data-state") === "taken"
+      && targetChips()[1].classList.contains("is-current")
+      && chipStates() === "taken,current,pending"
+      && revealBar().getAttribute("data-current") === "3"
+      && ui.state.view.pending.seq === hvBase.seq
+      && ui.stepDialogKind(ui.state.view.pending) === "reveal",
+    `key=${hvKey} repainted=${hvRepainted} taken=${revealCards()[0].getAttribute("data-taken-by")} badge=${hvBadge && hvBadge.textContent} chips=${chipStates()} current=${revealBar() && revealBar().getAttribute("data-current")} seq=${ui.state.view.pending.seq}/${hvBase.seq}`);
+  // 票面「再问一次（无人新拿）不重复变」：同一份状态**不重画**（节点身份不变、徽标不叠加）。
+  const hvCardNode = revealCards()[0];
+  const hvAgain = ui.applyIdleHarvest({ harvest: hvAfter });
+  const hvBadgeCount = () => Array.from(revealCards()[0].children)
+    .filter((node) => node.classList.contains("taken-by")).length;
+  check("U-HV-01b 同一份状态再轮询一拍：不重画（节点是同一个、徽标只一枚）",
+    hvAgain === false
+      && revealCards()[0] === hvCardNode
+      && hvBadgeCount() === 1,
+    `repainted=${hvAgain} sameNode=${revealCards()[0] === hvCardNode} badges=${hvBadgeCount()}`);
+
+  // 持久展示（无懈 RESPOND 窗口，表面是牌桌）同样每一拍都读 `view.harvest`。
+  const hvWait = {
+    ...hvBase,
+    kind: "RESPOND", seq: 1202, cause: "NULLIFY",
+    legal_actions: [{ answers_seq: 1202, kind: "Pass" }],
+    candidate_index: {}, prompt: "响应窗口：请使用一张牌，或放弃。",
+  };
+  render(wuguView(hvWait, 2));
+  const hvPersistentCss = (() => {
+    const node = $("t-dialog-reveal");
+    return node.hidden === false && node.children.length;
+  })();
+  const hvWaitAfter = {
+    ...hvWait.harvest,
+    revealed: [withTaker(takenCard, 2), withTaker(secondCard, 0), withTaker(thirdCard)],
+    targets: [targetRow(2, "taken", takenCard.card_id), targetRow(3, "taken", secondCard.card_id), targetRow(4, "current")],
+    current: 4,
+  };
+  const hvWaitRepainted = ui.applyIdleHarvest({ harvest: hvWaitAfter });
+  const hvWaitCards = () => {
+    const root = $("t-dialog-reveal").children[0];
+    return root ? Array.from(root.children[0].children) : [];
+  };
+  const hvWaitChips = () => {
+    const wrap = $("t-dialog-reveal").children[0];
+    if (!wrap) return [];
+    const bar = Array.from(wrap.children)
+      .find((node) => node.classList.contains("reveal-targets")) || null;
+    return bar
+      ? Array.from(bar.children).filter((node) => node.classList.contains("reveal-target"))
+      : [];
+  };
+  check("U-HV-01c 持久展示（无懈窗口）也按视图级状态重画：牌面 / 目标条跟着走，提示切到当前目标",
+    Boolean(hvPersistentCss)
+      && hvWaitRepainted === true
+      && hvWaitCards().map((node) => node.getAttribute("data-taken-by")).join(",") === "2,0,"
+      && hvWaitChips().map((node) => node.getAttribute("data-state")).join(",") === "taken,taken,current"
+      && $("t-dialog-hint").textContent.includes("等待4号位拿牌"),
+    `persistent=${Boolean(hvPersistentCss)} repainted=${hvWaitRepainted} taken=${hvWaitCards().map((node) => node.getAttribute("data-taken-by")).join(",")} chips=${hvWaitChips().map((node) => node.getAttribute("data-state")).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+
+  // U-HV-02：静态断言——目标条**不是**绝对定位，正文不再靠固定下内边距让位，且条在 `.reveal` 里。
+  render(wuguView(hvBase, 2));
+  check("U-HV-02 目标条在 `.reveal` 的正文流里（不是 position:absolute、正文不再留 52px 固定让位）",
+    !/position\s*:/.test(barCss)
+      && !STYLE.includes("padding-bottom: 52px")
+      && STYLE.includes(".dialog-body.reveal-body") === false
+      && revealBar() !== null
+      && revealBar().parentNode === revealWrap()
+      && revealWrap().classList.contains("reveal"),
+    `barCss="${barCss.trim()}" fixedPadding=${STYLE.includes("padding-bottom: 52px")} revealBodyClass=${STYLE.includes(".dialog-body.reveal-body")} barParent=${revealBar() && revealBar().parentNode && revealBar().parentNode.className}`);
+
+  // U-HV-03：重画**不清本地选择**（与空转重绘同一条纪律）；多选亮牌（遗计）连碰都不碰。
+  render(wuguView(hvBase, 2));
+  ui.state.picks = [1];
+  const hvPicked = ui.applyIdleHarvest({ harvest: { ...hvAfter, current: 2 } });
+  check("U-HV-03a 五谷重画保留本地选择（换内容不清 `state.picks`）",
+    hvPicked === true && JSON.stringify(ui.state.picks) === "[1]",
+    `repainted=${hvPicked} picks=${JSON.stringify(ui.state.picks)}`);
+  // 遗计式多选亮牌没有 `harvest` 链键 ⇒ 视图级五谷状态的重画口**拒绝**动手（链键不同）；
+  // 选中的两张牌原样留着，是"重画不会误伤别的模板"的证据。
+  const hvYiji = {
+    kind: "SELECT_CARDS", actor: 2, seq: 1203, dialog: "reveal",
+    prompt: "选择一至两张牌。",
+    legal_actions: [
+      { answers_seq: 1203, kind: "SelectCards", picks: [0] },
+      { answers_seq: 1203, kind: "SelectCards", picks: [0, 1] },
+      { answers_seq: 1203, kind: "SelectCards", picks: [1] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, option_labels: null,
+    revealed: [takenCard, secondCard],
+    slots: [takenCard, secondCard].map((card) => ({ ref: { seat: null, zone: "processing" }, card })),
+    spec: { zones: ["processing"], total: [1, 2], sequential: false, optional: false },
+    harvest: null, context: { actor: 2, name: "遗计", targets: [2], requirement: "选择一至两张牌", skill_hints: [] },
+    prompt_display: { text: "选择一至两张牌。", default_label: "超时将自动选择第一项" },
+    preactivations: {}, preactivation: [],
+  };
+  render(wuguView(hvYiji, 2));
+  ui.state.picks = [0, 1];
+  ui.renderPending(ui.state.view);
+  const hvYijiSel = revealCards().filter((node) => node.classList.contains("sel")).length;
+  const hvYijiBefore = ui.state.dialog.key;
+  const hvYijiTouched = ui.applyIdleHarvest({ harvest: hvAfter });
+  check("U-HV-03b 遗计多选亮牌不归五谷重画口管：链键不同 ⇒ 拒绝动手，两个选中态原样留着",
+    hvYijiBefore === "reveal:1203"
+      && hvYijiTouched === false
+      && hvYijiSel === 2
+      && revealCards().filter((node) => node.classList.contains("sel")).length === 2
+      && JSON.stringify(ui.state.picks) === "[0,1]",
+    `key=${hvYijiBefore} touched=${hvYijiTouched} sel=${hvYijiSel}/${revealCards().filter((node) => node.classList.contains("sel")).length} picks=${JSON.stringify(ui.state.picks)}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;
@@ -14691,6 +14843,27 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       )).join(",")
       && bar().getAttribute("data-current") === String(realPickHarvest.current),
     `cards=${cards().length} takenBy=${takenBy()} seats=${chipSeats()} states=${chipStates()} current=${bar() && bar().getAttribute("data-current")}`);
+
+  // 票 18（服务端 D 方案）：**视图级** `harvest`（不只看 pending）带着 AI 的取牌状态。
+  // 这一条钉的是"浏览器现在能从每一次视图下发读到谁拿走了哪张"，而不是等下一问。
+  check("U-HV-04 真会话：`view.harvest` 与 `pending.harvest` 同链键同数据，且带着 AI 的取牌",
+    !!realPickHarvest && ui.state.view.harvest !== null
+      && typeof ui.state.view.harvest === "object"
+      && ui.state.view.harvest.key === realPickHarvest.key
+      && ui.state.view.harvest.revealed
+        .map((card) => (card.taken_by === null || card.taken_by === undefined ? "" : String(card.taken_by)))
+        .join(",")
+        === realPickHarvest.revealed
+          .map((card) => (card.taken_by === null || card.taken_by === undefined ? "" : String(card.taken_by)))
+          .join(",")
+      && ui.state.view.harvest.targets
+        .map((target) => target.status).join(",") === realPickHarvest.targets.map((target) => target.status).join(",")
+      && ui.state.view.harvest.revealed
+        .some((card) => card.taken_by !== null && card.taken_by !== undefined)
+      && ui.state.view.harvest.targets.some((target) => target.status === "taken")
+      && ui.viewHarvestState(ui.state.view.pending) === ui.state.view.harvest
+      && ui.harvestFingerprint(ui.state.view.harvest) !== "",
+    `viewHarvest=${Boolean(ui.state.view.harvest)} key=${ui.state.view.harvest && ui.state.view.harvest.key} taken=${ui.state.view.harvest && ui.state.view.harvest.revealed.map((card) => card.taken_by).join("|")} pendingKey=${realPickHarvest && realPickHarvest.key}`);
 
   // 真取牌一击提交（400 注入截住 POST，断言 Action 原样取自候选）。
   const beforeRealPick = calls.length;

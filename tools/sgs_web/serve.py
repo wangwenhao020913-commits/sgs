@@ -59,6 +59,7 @@ from sgs_web.projection import (  # noqa: E402
     live_tag_deltas_after,
     life_loss_events_after,
     pending_payload,
+    session_harvest_state,
     skill_events_after,
     visible_record,
     visible_snapshot,
@@ -502,6 +503,13 @@ class GameRegistry:
             "snapshot": snapshot,
             "skills": build_skills(session, session.human_seat),
             "pending": pending_payload(session),
+            # table-ux-overhaul 票 18（服务端 D 方案）：五谷结算的**视图级**派生状态，与
+            # `pending.harvest` 同一份派生（`projection.session_harvest_state`，共用
+            # `Session.harvest_cache`）。它让亮牌面**不依赖"这一次询问是不是亮牌步"**——
+            # 客户端每次视图提交都能拿到结算的最新状态（谁拿走了哪张 / 目标条四态 / 当前
+            # 目标），不必等下一条恰好带 `harvest` 的询问。键恒在（没有活跃结算 ⇒ None）；
+            # 只读派生，不进记录流 / 金录像。
+            "harvest": session_harvest_state(session),
             "records": records,
             "live_deltas": live_tag_deltas_after(
                 window,

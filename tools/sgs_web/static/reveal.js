@@ -25,16 +25,41 @@
  */
 "use strict";
 
-/** 亮牌模板的数据源：优先服务端派生的 `harvest`，其次询问自带的 `revealed`。
+/** 视图级五谷状态（table-ux-overhaul 票 18 / 服务端 D 方案）：`view.harvest`。
+ *
+ * 服务端现在把**同一份**派生状态（`projection.session_harvest_state`）挂在**每一次视图
+ * 下发**上，而不是只挂在某一次询问上。为什么需要第二个来源：五谷的整段结算里只有一部分
+ * 目标会真的变成一条 pending（AI 目标的取牌在服务端 `Session.drive()` 内部同步答完），
+ * 故"谁拿走了哪张"不能只等"下一条带 harvest 的询问"。
+ *
+ * 链键与询问载荷不一致时不认（换了一张五谷 / 换了一局）：键是链身份的唯一真源。
+ * 没有 `view.harvest`（合成载荷 / 旧载荷）⇒ `null`，读取方退回 `pending.harvest`。
+ */
+function viewHarvestState(pending) {
+  const harvest = state.view && state.view.harvest;
+  if (!harvest || typeof harvest !== "object") return null;
+  const own = pending && pending.harvest;
+  if (own && own.key !== undefined && own.key !== null && harvest.key !== undefined
+    && harvest.key !== null && String(own.key) !== String(harvest.key)) {
+    return null;
+  }
+  return harvest;
+}
+
+/** 亮牌模板的数据源：优先服务端派生的 **视图级** `harvest`（票 18），其次询问载荷的
+ *  `harvest`，再次询问自带的 `revealed`。
  *
  * 五谷的 `harvest` 带 `title / hint / revealed / targets / current`；票 12 的遗计亮牌可以只喂
  * `pending.revealed`（两张牌堆顶，没有目标条），`pending.harvest` 里的 `revealed` 优先。
  * 不做任何规则裁决：`taken_by` / `status` / `cancelled` 都是服务端算好的事实。
  */
 function revealData(pending) {
-  const harvest = pending && pending.harvest && typeof pending.harvest === "object"
+  const own = pending && pending.harvest && typeof pending.harvest === "object"
     ? pending.harvest
     : {};
+  // 票 18：视图级那一份与询问载荷**同一份派生**，但更新一些（每个视图下发都带）——
+  // "视图级优先、询问载荷兜底"只按链键收口，不是第二份判据。
+  const harvest = viewHarvestState(pending) || own;
   // A1：洛神连续判定的**累积**判定牌由服务端派生字段给出，优先于其它亮牌来源。
   const judged = pending && pending.judgment_reveal
     && Array.isArray(pending.judgment_reveal.cards)
@@ -53,6 +78,25 @@ function revealData(pending) {
     hint: harvest.hint || null,
     title: harvest.title || null,
   };
+}
+
+/** 五谷状态的**内容指纹**（table-ux-overhaul 票 18）：链键 + 当前目标 + 每张牌的获得者 +
+ *  目标条四态。用途只有一个——判断"这一拍要不要重画"。
+ *
+ *  空转轮询每 2 秒一拍，重建亮牌节点会丢掉悬停 / 焦点；同一份状态 ⇒ 同一个指纹 ⇒ 不重画
+ *  （票面「再问一次（无人新拿）不重复变」）。纯函数：只读服务端派生字段。
+ */
+function harvestFingerprint(harvest) {
+  if (!harvest || typeof harvest !== "object") return "";
+  const taken = (harvest.revealed || []).map((card) => {
+    const by = card && card.taken_by;
+    return by === undefined || by === null ? "" : String(by);
+  }).join(",");
+  const targets = (harvest.targets || []).map((target) => {
+    const name = target && target.cancelled ? "invalid" : ((target && target.status) || "pending");
+    return `${target && target.seat}:${name}`;
+  }).join(",");
+  return `${harvest.key || ""}|${harvest.current}|${taken}|${targets}`;
 }
 
 /** 遗计式**多选**亮牌（U2-12）：服务端显式标了 `dialog: "reveal"`，且这一步不是五谷的
@@ -132,8 +176,10 @@ function harvestWaitHint(pending) {
  *
  * `opts.container` 缺省 = 提示区的 `#t-options`（正常弹窗内容）。五谷的**持久展示**
  * （无懈 / 反无懈的 RESPOND 窗口）把它改成 `#t-dialog-reveal`，并同时传
- * `promptHint: false` / `bodyClass: false`：不抢提示条的步骤提示、不给隐藏的正文槽加
- * 内边距（那一步的 `#t-options` 仍留在提示区，牌桌照常可操作）。
+ * `promptHint: false`：不抢提示条的步骤提示（那一步的 `#t-options` 仍留在提示区，
+ * 牌桌照常可操作）。
+ *
+ * 正文不再需要给目标条预留高度（票 18）：条是 `.reveal` 的普通弹性子项，跟着牌面行排。
  *
  * 遗计式多选（:func:`isPickRevealStep`）的牌面 click = **切换选中**（`.sel`），不提交；
  * 提交点只有提示条右端的「提交」。
@@ -223,10 +269,6 @@ function renderReveal(pending, opts = {}) {
     wrap.appendChild(bar);
   }
   box.appendChild(wrap);
-  if (opts.bodyClass !== false) {
-    const body = $("t-dialog-body");
-    if (body) body.classList.add("reveal-body");
-  }
 }
 
 /** 遗计式多选：点一张亮牌 = **切换**它在本次选择里的位置（`picks`），**不提交**。
@@ -372,10 +414,6 @@ function renderSuitPick(pending, opts = {}) {
   });
   wrap.appendChild(row);
   box.appendChild(wrap);
-  if (opts.bodyClass !== false) {
-    const body = $("t-dialog-body");
-    if (body) body.classList.add("reveal-body");
-  }
 }
 
 /** 提交后的 2.5 秒结果态（仅发动者本地）：获得的牌保持高亮、其余置灰。 */
@@ -407,7 +445,6 @@ function renderSuitResult() {
   });
   wrap.appendChild(row);
   box.appendChild(wrap);
-  if ($("t-dialog-body")) $("t-dialog-body").classList.add("reveal-body");
 }
 
 /** 结果态是否还在展示（2.5 秒窗口）。 */

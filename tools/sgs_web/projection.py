@@ -2265,7 +2265,37 @@ def _harvest_taken(engine: Any, frame: Any, revealed: tuple[int, ...]) -> dict[i
     return taken
 
 
-def harvest_state(engine: Any) -> dict[str, Any] | None:
+def _harvest_facts(
+    engine: Any,
+    frames: list[Any],
+    frame: Any,
+    cache: dict[str, Any] | None,
+) -> tuple[tuple[int, ...], dict[int, int]]:
+    """亮牌集合 + 获得者表（两次**全记录扫描**）的缓存版（table-ux-overhaul 票 18）。
+
+    五谷状态现在挂在**每一次视图下发**上（`view.harvest`），而轮询是最热的入口：不缓存
+    就是每拍两次全记录扫描。两件事实都只由「记录条数 + 五谷帧 id」决定——
+    ``pick_harvest`` 的搬牌与帧数据的改写都发生在同一条 ``card_move`` 记录里（记录只增），
+    故同一个键 ⇒ 同一个结果。缓存只存这两件**中间事实**，不存载荷本身：调用方每次仍拿到
+    新造的 dict，查看者标签（`_decorate_card_tags`）不会跨次残留。
+
+    ``cache`` 由会话持有（``Session.harvest_cache``），`view` 与 `pending` 两处派生共用；
+    ``None`` = 不缓存（单测 / 探针直接调 :func:`harvest_state` 时）。
+    """
+    records = getattr(engine, "records", ()) or ()
+    key = (len(records), getattr(frame, "frame_id", None))
+    if cache is not None and cache.get("key") == key:
+        return cache["revealed"], cache["taken"]
+    revealed = _harvest_revealed_ids(engine, frames, frame)
+    taken = _harvest_taken(engine, frame, revealed) if revealed else {}
+    if cache is not None:
+        cache["key"] = key
+        cache["revealed"] = revealed
+        cache["taken"] = taken
+    return revealed, taken
+
+
+def harvest_state(engine: Any, *, cache: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """【五谷丰登】结算的**服务端派生状态**（U2-11 / D10）：只读公开事实，进询问载荷。
 
     数据源只有两处：
@@ -2274,6 +2304,9 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
       ``canceled``（当前目标刚被无懈）、``source`` / ``card``；
     - **记录流**：亮牌那条 ``deck → processing`` 的 ``card_move``（完整集合 + 亮牌顺序）与
       每次取牌的 ``processing → hand`` 移动（``card_id → 座位``）。
+
+    ``cache`` = 那两次全记录扫描的**按键缓存**（票 18；见 :func:`_harvest_facts`）。键只由
+    记录条数与五谷帧决定，故"没有新记录的空转轮询"不重扫整条流。
 
     它**不改记录流、不进金录像**：字段只在下发时现算，引擎的帧 / delta / 查询一个字节不动。
 
@@ -2295,10 +2328,9 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
     if frame is None:
         return None
     frames = list(getattr(getattr(engine, "stack", None), "frames", ()) or ())
-    revealed = _harvest_revealed_ids(engine, frames, frame)
+    revealed, taken = _harvest_facts(engine, frames, frame, cache)
     if not revealed:
         return None
-    taken = _harvest_taken(engine, frame, revealed)
     state = getattr(engine, "state", None)
     lookup = _card_lookup(state) if state is not None else {}
     card = frame.data.get("card")
@@ -2352,6 +2384,29 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
         "targets": targets_payload,
         "current": current,
     }
+
+
+def session_harvest_state(session: Session) -> dict[str, Any] | None:
+    """五谷结算的**视图级**派生状态（table-ux-overhaul 票 18 / 服务端 D 方案）。
+
+    与 `pending_payload` 里的 ``harvest`` **同一份**派生（:func:`harvest_state`，同一份
+    `Session.harvest_cache`），只是不再挂在某一次询问上：会话的 ``view`` 每次下发都带它
+    （键恒在，结算结束 ⇒ ``None``）。客户端因此每次视图提交都能读到"谁拿走了哪张 / 目标条
+    四态 / 当前目标"，不必等**下一条恰好带 harvest 的询问**——五谷整段结算里只有一部分
+    目标会真的变成一条 pending。
+
+    牌面标签与询问载荷同一条口径（``_decorate_card_tags``：牌面已公开 ⇒ 带标签），亮牌是
+    公开处理区，故不按"是不是应答者"收口。返回值是**新造的 dict**：缓存只存中间事实
+    （见 :func:`_harvest_facts`），标签不会跨次残留。
+    """
+    harvest = harvest_state(session.engine, cache=getattr(session, "harvest_cache", None))
+    if harvest is None:
+        return None
+    state = getattr(session.engine, "state", None)
+    _decorate_card_tags(harvest.get("card"), state, session.human_seat)
+    for card in harvest.get("revealed") or []:
+        _decorate_card_tags(card, state, session.human_seat)
+    return harvest
 
 
 _LUOSHEN_REPEAT_PREFIX = "luoshen:repeat:"
@@ -2688,8 +2743,9 @@ def pending_payload(
     # 目标）。只读结算栈与记录流，**不进**记录流 / 金录像。这是**公开处理区**的事实，故不按
     # 查看者收口：AI 目标拿牌时，人类屏幕上的亮牌弹窗也要显示同一份状态。取不到引擎
     # （409 里附带的裸 ``Query``）⇒ ``None``（键恒在，前端 fail-closed 不开窗）。
+    # 票 18 起与视图级 ``view.harvest`` 走**同一个口**（同一份派生 + 同一份扫描缓存）。
     payload["harvest"] = (
-        harvest_state(session.engine) if isinstance(session, Session) else None
+        session_harvest_state(session) if isinstance(session, Session) else None
     )
     # U2-12（D3 / D10）：**观看牌面**的选牌步 = 亮牌弹窗。判据读**形状**而不是技能 id：
     # ``SELECT_CARDS`` 且这一问带着**授予的牌面**（``revealed`` 非空，票 15 的私密观看通道）。

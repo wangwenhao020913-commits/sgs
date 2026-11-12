@@ -1654,10 +1654,15 @@ button.mini-slot { cursor: pointer; }
 }
 
 /* ---------- 亮牌模板（U2-11 五谷 / 票 12 遗计复用；spec D3 / D4） ----------
- * 正文 = 全部亮牌（按亮牌顺序，被拿走的牌**留在原位**）+ 左下角目标条。
+ * 正文 = 全部亮牌（按亮牌顺序，被拿走的牌**留在原位**）+ 目标条。
  * 被拿走的牌置灰、牌面仍可读，右下角标写拿牌者座位号；目标条按拿牌顺序四态：
- * 未轮到（灰虚）/ 已拿（绿勾）/ 当前（高亮）/ 无效（红叉，含将来的"指定后取消"）。 */
-.reveal { display: flex; flex-direction: column; gap: 10px; }
+ * 未轮到（灰虚）/ 已拿（绿勾）/ 当前（高亮）/ 无效（红叉，含将来的"指定后取消"）。
+ *
+ * **目标条是正文里的普通弹性子项**（table-ux-overhaul 票 18）：牌面行会换行、高度不定，
+ * 过去把它 `position: absolute` 钉在窗口左下角、只靠正文下内边距预留高度，于是行数一多
+ * （5 张牌换行 / 正文字体放大）就压在牌面底部。现在它跟牌面行一起往下排，滚动交给外层
+ * 正文槽（`.dialog-body` / `.dialog-reveal`）——**不许**再靠固定 padding 让它。 */
+.reveal { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .reveal .reveal-cards { margin: 0; }
 .card.face.reveal-card { cursor: pointer; }
 .card.face.reveal-card.taken {
@@ -1686,22 +1691,20 @@ button.mini-slot { cursor: pointer; }
   border-radius: 999px; background: var(--ink); color: #fff;
   font-size: calc(10 * var(--dsu)); font-weight: 700; line-height: 1.4;
 }
-/* 目标条钉在弹窗左下角（`.dialog-window` 已是 position:relative）；
- * 正文给条留一条下内边距，内容滚到底时不遮住目标。 */
-.dialog-body.reveal-body { padding-bottom: 52px; }
 /* 五谷整段结算的**持久展示**（review-fix / D4）：无懈 / 反无懈的 RESPOND 窗口是牌桌
  * 表面，正文槽整个收起，亮牌内容改住这个兄弟节点。它是 `.dialog-window` 的弹性子项，
- * 自己滚动；目标条仍钉在 `.dialog-window` 左下角，故下方留 52px。 */
+ * 自己滚动；目标条在正文流里（见上），故底部不需要给绝对定位的条预留高度。 */
 .dialog-reveal {
   flex: 1 1 auto; min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px 52px;
+  padding: 12px 14px;
 }
 .dialog-reveal[hidden] { display: none !important; }
+/* 目标条：正文流里的普通一行（票 18）——跟着牌面行往下排、座位多时自己换行；
+ * 不再绝对定位，也不再要求正文留出固定高度。 */
 .reveal-targets {
-  position: absolute; left: 14px; bottom: 10px;
   display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
-  max-width: calc(100% - 28px);
+  max-width: 100%;
 }
 .reveal-targets-label { font-size: 11px; color: var(--dim); margin-right: 2px; }
 .reveal-target {

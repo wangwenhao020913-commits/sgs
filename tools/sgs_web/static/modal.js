@@ -653,7 +653,6 @@ function applyDialogContentMode(kind) {
         container: reveal,
         interactive: false,
         promptHint: false,
-        bodyClass: false,
       });
     }
     state.dialog.hintOverride = harvestWaitHint(pending);
@@ -667,6 +666,44 @@ function applyDialogContentMode(kind) {
     renderHeroCardBody(pending);
   }
   if (options && body && options.parentNode !== body) body.appendChild(options);
+}
+
+/** 用**视图级**五谷状态重画亮牌节点（table-ux-overhaul 票 18 / 服务端 D 方案）。
+ *
+ * 与 `applyDialogContentMode` 的持久分支是**同一个渲染器**（`renderReveal`），差别只在数据
+ * 来源：这里显式拿 `view.harvest` 当底，询问载荷（`pending`）只提供交互面（`slots` / 点选
+ * 入口）。服务端现在把同一份派生状态挂在每一次视图下发上，故"谁拿走了哪张"不必等
+ * 下一条带 `harvest` 的询问——这一拍就能重画。
+ *
+ * 纪律（与 `applyIdleRepaint` 同一条）：
+ *   - **不动本地选择**：`state.picks` / 焦点 / 目标原样（选到一半的牌不会因刷新丢）；
+ *   - 不动折叠（`state.dialog.collapsed` 只决定显隐）、不动只读判据、不提交；
+ *   - 只在亮牌窗开着、且链键与 `view.harvest.key` 一致时动手（别的窗口 / 换了一局都不碰）。
+ *
+ * 返回 `true` = 真的重画了（调用方据此决定要不要再走别的空转出口）。
+ */
+function repaintRevealFromHarvest(harvest) {
+  if (!harvest || typeof harvest !== "object") return false;
+  if (!state.dialog.open || state.dialog.key !== `reveal:${harvest.key}`) return false;
+  const pending = state.view ? state.view.pending : null;
+  // 询问载荷为底（交互面），视图级 harvest 覆盖亮牌数据（同一份派生，链键相同）。
+  const base = pending ? { ...pending, harvest } : { harvest };
+  if (dialogRevealMode()) {
+    const reveal = dialogRevealNode();
+    if (!reveal) return false;
+    clearDialogReveal();
+    reveal.hidden = state.dialog.collapsed;
+    renderReveal(base, { container: reveal, interactive: false, promptHint: false });
+    state.dialog.hintOverride = harvestWaitHint(base);
+  } else {
+    const options = $("t-options");
+    if (!options) return false;
+    options.innerHTML = "";
+    renderReveal(base, { interactive: isOwnPending(base) });
+    state.dialog.hintOverride = null;
+  }
+  syncDialogHint();
+  return true;
 }
 
 /** 折叠 / 展开：**只**隐藏正文，不动只读判据、不动任何选择态、不提交。 */
@@ -789,7 +826,6 @@ function closeDialogDom() {
     body.innerHTML = "";
     body.scrollTop = 0;
     body.hidden = false;
-    body.classList.remove("reveal-body");
   }
   if (title) title.textContent = "";
   if (hint) {

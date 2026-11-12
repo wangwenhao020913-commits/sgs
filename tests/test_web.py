@@ -80,6 +80,7 @@ from sgs_web.display import (  # noqa: E402
     suit_labels,
 )
 from sgs_web.descriptions import SKILL_DESCRIPTIONS, skill_description  # noqa: E402
+from sgs_web import projection as _projection  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     HARVEST_REQUIREMENT,
     build_skills,
@@ -10271,6 +10272,92 @@ def test_a_nullify_window_in_a_harvest_resolution_still_carries_the_active_harve
     assert payload["harvest"] is not None, "RESPOND 载荷同样要带 harvest（前端持久显示读它）"
     assert payload["harvest"]["key"] == harvest["key"]
     assert payload["harvest"]["current"] == harvest["current"]
+
+
+def _registry_view(session: Session, *, after: int = -1, logs_after: int = 0) -> dict:
+    """一次真 ``view()`` 载荷（只建一个空注册表，不登记会话、不落盘）。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    return registry.view(session, after=after, logs_after=logs_after)
+
+
+def test_the_view_payload_carries_the_active_harvest_state_with_an_ai_pick() -> None:
+    """D 方案（table-ux-overhaul 票 18）：**视图级** `harvest` = 与 `pending.harvest` 同一份派生。
+
+    生产事实：五谷的整段结算里**只有一部分目标会变成一条 pending**——AI 目标的取牌在
+    `Session.drive()` 内部同步答完，浏览器收不到那次询问。故"谁拿走了哪张"必须挂在**每一次
+    视图下发**上（`view.harvest`），不能只挂询问载荷；客户端因此每一拍都能重画亮牌面。
+
+    这里走到目标 1 的取牌步：目标 0（AI）已经拿走了第一张牌 ⇒ 视图级载荷里就要标出来。
+    """
+    engine, driver = _harvest_game()
+    first = _drive_to_harvest_pick(engine, driver, 0)
+    engine.submit(fallback_action(first))
+    second = _drive_to_harvest_pick(engine, driver, 1)
+    assert second.actor == 1
+    session = _web_session_for(engine, human_seat=1)
+    payload = _registry_view(session)
+    harvest = payload["harvest"]
+    assert harvest is not None, "结算中视图级 harvest 必须键恒在（不能只挂 pending）"
+    pending_harvest = (payload["pending"] or {}).get("harvest")
+    assert pending_harvest is not None
+    assert harvest["key"] == pending_harvest["key"], "两处是同一个链键（同一份派生）"
+    assert [card["taken_by"] for card in harvest["revealed"]] == [0, None, None, None], (
+        "AI（座位 0）拿走的牌在**视图级**载荷里就标出来，不等下一条带 harvest 的询问"
+    )
+    assert [target["status"] for target in harvest["targets"]] == [
+        "taken", "current", "pending", "pending",
+    ]
+    assert harvest["current"] == 1
+    assert [card["taken_by"] for card in pending_harvest["revealed"]] == [0, None, None, None]
+    # 结算结束后帧出栈 ⇒ 视图级同样是 None（键恒在：客户端 fail-closed 关窗）。
+    for _ in range(4_000):
+        pending = engine.pending
+        if pending is None:
+            engine._step()
+            if engine.finished:  # pragma: no cover - 构造局面不会走到终局
+                break
+            continue
+        engine.submit(driver.respond(engine, pending))
+        if harvest_state(engine) is None:
+            break
+    assert harvest_state(engine) is None
+    assert _registry_view(session)["harvest"] is None, "结算结束 ⇒ view.harvest 是 None"
+
+
+def test_the_view_harvest_derivation_is_cached_by_the_record_cursor(monkeypatch) -> None:
+    """轮询是最热入口：**没有新记录**的空转不许重扫整条记录流（票 18 / 票 01 的纪律）。
+
+    缓存的键 =（记录条数, 五谷帧 id），由 `Session.harvest_cache` 持有；`view` 与 `pending`
+    两处派生共用，故一次视图下发最多扫一次。
+    """
+    engine, driver = _harvest_game()
+    first = _drive_to_harvest_pick(engine, driver, 0)
+    engine.submit(fallback_action(first))
+    second = _drive_to_harvest_pick(engine, driver, 1)
+    session = _web_session_for(engine, human_seat=1)
+    scans: list[int] = []
+    original = _projection._harvest_revealed_ids
+
+    def counting(*args, **kwargs):
+        scans.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(_projection, "_harvest_revealed_ids", counting)
+    before = len(engine.records)
+    payload = _registry_view(session)
+    assert payload["harvest"] is not None
+    assert len(scans) == 1, f"一次视图下发只许扫一次记录流（实得 {len(scans)} 次）"
+    # 空转（同一游标、没有新记录）：命中缓存，一次都不许再扫。
+    empty = _registry_view(session, after=payload["cursor"], logs_after=payload["log_seq"])
+    assert empty["harvest"] is not None
+    assert len(engine.records) == before
+    assert len(scans) == 1, f"空转轮询重扫了记录流（实得 {len(scans)} 次）"
+    # 新记录（下一问的应答）⇒ 键变了，允许再扫一次。
+    engine.submit(fallback_action(second))
+    _registry_view(session, after=payload["cursor"], logs_after=payload["log_seq"])
+    assert len(scans) == 2, f"新记录之后应恰好再扫一次（实得 {len(scans)} 次）"
 
 
 @pytest.mark.parametrize(("reverse", "expected"), [(False, "invalid"), (True, "taken")])

@@ -255,6 +255,12 @@ class Session:
         # 叙事增量缓存（票 01）：形如 ``narrative.NarrativeCursor``，由 ``serve.GameRegistry.view``
         # 建 / 填。本模块只当它是"一局一份、可丢的派生缓存"——不读、不写、不序列化它。
         self.narrative_cursor: Any = None
+        # 五谷派生状态的**扫描缓存**（table-ux-overhaul 票 18 / 服务端 D 方案）：键 =
+        # (记录条数, 五谷帧 id)，值是两次全记录扫描的中间事实（亮牌集合 / 获得者表）。
+        # 由 ``projection.harvest_state`` 独占读写；``view`` 与 ``pending`` 两处派生共用。
+        # 与 ``narrative_cursor`` 同姿态：一局一份、可丢的派生缓存，**不是会话事实**——
+        # 不进记录流、不进侧车元数据、不进金录像。
+        self.harvest_cache: dict[str, Any] = {}
 
         content = pack if pack is not None else load_content_pack()
         self.pack = content

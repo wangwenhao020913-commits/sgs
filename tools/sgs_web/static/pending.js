@@ -204,8 +204,6 @@ function renderPending(view) {
   // 弹窗模板可能给选项组换版式（选择型的 2×2 网格）；每个询问重新渲染时先复位，
   // 避免上一问的模板类名留在下一问。
   $("t-options").classList.remove("suit-options");
-  // 亮牌模板（票 11）给正文加了下内边距（给左下角目标条让位）：换询问时复位。
-  if ($("t-dialog-body")) $("t-dialog-body").classList.remove("reveal-body");
   // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
   // 亮牌（票 11）另有一条派生文案 `harvest.hint`：409 裸 Query 没有 `context` 时也用它，
   // 不会掉回引擎那句通用的「请从选择面里选择一张牌」（公开处理区的文案 bug）。

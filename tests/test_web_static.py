@@ -9220,3 +9220,104 @@ def test_the_delta_kinds_apply_live_delta_handles_and_non_table_deltas_stay_in_s
     )
     dead = non_table - server
     assert not dead, f"`NON_TABLE_DELTAS` 里有服务端不存在的 delta 类型：{sorted(dead)}"
+
+
+# ---------------------------------------------------------------------------
+# table-ux-overhaul 票 18：五谷亮牌面——目标条在正文流里 + `renderReveal` 是唯一渲染器
+# ---------------------------------------------------------------------------
+
+_REVEAL_JS = STATIC_DIR / "reveal.js"
+_MODAL_JS = STATIC_DIR / "modal.js"
+_SESSION_JS = STATIC_DIR / "session.js"
+
+# 亮牌正文里"被拿走的牌 / 目标条"这两类节点的全部写点（属性 / 类名 / 文案）。
+_REVEAL_PAINT_MARKERS = ("taken-by", "reveal-targets", "reveal-target ", "data-taken-by")
+
+
+def test_the_target_bar_sits_in_the_reveal_flow_instead_of_over_the_cards() -> None:
+    """目标条**不许**绝对定位，正文也**不许**靠固定下内边距给它让位（票 18）。
+
+    旧的 `.reveal-targets { position: absolute; left/bottom }` + `.dialog-body.reveal-body
+    { padding-bottom: 52px }` 是"牌面行高度恒定"的假设：牌一换行 / 一滚动，绝对定位的条就
+    压在牌面底部（用户实机截图：5 张牌被条切去底部）。修法是让它成为 `.reveal` 的普通弹性
+    子项——高度由内容决定，滚动归外层正文槽；**不许**用更大的固定 padding 掩盖。
+    """
+    bar = re.search(r"\.reveal-targets\s*\{(?P<body>[^}]*)\}", _CSS_TEXT)
+    assert bar is not None, "style.css 里找不到 .reveal-targets 规则"
+    assert "position" not in bar.group("body"), (
+        f"目标条不许再绝对定位（它是 .reveal 正文流里的一行）：{bar.group('body')}"
+    )
+    assert "padding-bottom: 52px" not in _CSS_TEXT, (
+        "给目标条预留的固定下内边距必须删除（牌面行高度不定，固定 padding 一定会再撞）"
+    )
+    pane = re.search(r"\.dialog-reveal\s*\{(?P<body>[^}]*)\}", _CSS_TEXT)
+    assert pane is not None, "style.css 里找不到 .dialog-reveal 规则"
+    assert "52px" not in pane.group("body"), (
+        f"持久展示正文同样不再给绝对定位的条留高度：{pane.group('body')}"
+    )
+    assert ".dialog-body.reveal-body" not in _CSS_TEXT, (
+        "`reveal-body` 内边距预留随绝对定位一起退役（牌面高度不定）"
+    )
+    assert ".reveal {\n  display: flex; flex-direction: column" in _CSS_TEXT or re.search(
+        r"\.reveal\s*\{[^}]*flex-direction:\s*column", _CSS_TEXT
+    ), "目标条要作为 `.reveal` 的弹性子项排在牌面行**下面**"
+    # 页面 / 脚本里也不该再出现这个退役的类名（退役要退干净，别留半截接线）。
+    for name in ("reveal.js", "modal.js", "pending.js"):
+        source = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert "reveal-body" not in source, f"{name} 里还留着已退役的 reveal-body 类"
+
+
+def test_render_reveal_is_the_only_painter_of_taken_badges_and_the_target_bar() -> None:
+    """`renderReveal` 是亮牌唯一的渲染器：没有第二份"taken 徽标 / 目标条"实现（票 18）。
+
+    票面的约束是"每个新输入都用**同一份**渲染器重画"，不是再写一条"谁拿了牌"的判据。
+    这里按**写点**钉：`taken-by` / `reveal-targets` / `data-taken-by` 这些节点只在
+    `reveal.js` 里被创建，且都在 `renderReveal` 的正文里；别的脚本只许读（选择器 / 测试）。
+    """
+    for name in ("modal.js", "session.js", "pending.js", "options.js", "table.js"):
+        source = _strip_js_comments((STATIC_DIR / name).read_text(encoding="utf-8"))
+        for marker in _REVEAL_PAINT_MARKERS:
+            assert marker not in source, (
+                f"{name} 里出现了亮牌节点的第二份写点 `{marker}`——"
+                "被拿走的牌 / 目标条只许由 reveal.js:renderReveal 画"
+            )
+    reveal = _strip_js_comments(_REVEAL_JS.read_text(encoding="utf-8"))
+    render = _js_function(reveal, "renderReveal")
+    for marker in ("taken-by", "reveal-targets", "data-taken-by"):
+        assert marker in render, f"renderReveal 才是唯一的写点，缺 `{marker}`"
+    assert reveal.count('className = "taken-by"') == 1, "taken 徽标只许有一份实现"
+    assert reveal.count('className = "reveal-targets"') == 1, "目标条只许有一份实现"
+
+
+def test_the_view_level_harvest_channel_is_repainted_but_never_resets_the_selection() -> None:
+    """服务端 D 方案（票 18）的前端接线：`view.harvest` 变了就重画，**不**清本地选择。
+
+    判据只看三件事：
+      - `revealData` 优先读视图级 `view.harvest`（同一份派生，链键一致才认）；
+      - 空转轮询有一个专门的重画口（`applyIdleHarvest` → `repaintRevealFromHarvest`），
+        它走同一条 `renderReveal`，且**不调用** `resetSelection`；
+      - 链键对不上（别的模板 / 别的局）就拒绝动手。
+    """
+    reveal = _strip_js_comments(_REVEAL_JS.read_text(encoding="utf-8"))
+    data = _js_function(reveal, "revealData")
+    assert "viewHarvestState(pending) || own" in data, (
+        f"视图级 harvest 是优先来源（询问载荷兜底）：{data}"
+    )
+    view_harvest = _js_function(reveal, "viewHarvestState")
+    assert "state.view" in view_harvest and "harvest.key" in view_harvest, (
+        f"链键不一致时必须不认（不猜链）：{view_harvest}"
+    )
+    session = _strip_js_comments(_SESSION_JS.read_text(encoding="utf-8"))
+    idle = _js_function(session, "applyIdleHarvest")
+    assert "repaintRevealFromHarvest" in idle
+    assert "resetSelection" not in idle, "空转重画不许清本地选择（与 applyIdleRepaint 同一条纪律）"
+    assert "applyIdleHarvest(body)" in _js_function(session, "poll"), (
+        "空转轮询必须接上视图级五谷状态的重画口"
+    )
+    modal = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+    repaint = _js_function(modal, "repaintRevealFromHarvest")
+    assert "renderReveal(" in repaint, "重画必须走唯一的渲染器 renderReveal"
+    assert "state.dialog.key !== `reveal:${harvest.key}`" in repaint, (
+        f"链键对不上（别的模板 / 别的局）就拒绝动手：{repaint}"
+    )
+    assert "resetSelection" not in repaint, "重画不许清本地选择"
