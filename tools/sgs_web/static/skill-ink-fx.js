@@ -36,6 +36,15 @@ function skillInkLayer() {
   return $("t-skill-ink");
 }
 
+/** 演出自己的时钟：**必须**与 `requestAnimationFrame` 回调的时间戳同源（都是
+ * `performance.now()` 的相对毫秒）——绝不能混 `stageNow()`（那是 `Date.now()` 的纪元毫秒，
+ * 两者相减是巨大的负数，画面会永远画在"第负几十万秒"上，而且永远到不了摘层点）。
+ * 没有 `performance` 的老环境退回 `Date.now()`，并把 rAF 的时间戳一起当成同一把尺子用。 */
+function skillInkClock() {
+  if (window.performance && typeof window.performance.now === "function") return window.performance.now();
+  return Date.now();
+}
+
 /** 某一刻该给 canvas 的不透明度（秒；真实秒，不是素材秒）。 */
 function skillInkOpacityAt(seconds) {
   if (seconds <= SKILL_INK_FADE_AT) return 1;
@@ -59,9 +68,12 @@ function skillInkDrop(play) {
 }
 
 /** 一帧：按真实秒推进，摘层由自己算（不靠计时器——rAF 被节流时也要能正确收尾）。 */
-function skillInkFrame(play, now) {
+function skillInkFrame(play, timestamp) {
   if (!skillInkPlays.includes(play)) return;
-  const seconds = (now - play.startedAt) / 1000;
+  /* 烟测垫片的 rAF 只登记、调用时不带时间戳 ⇒ 缺省回落到同一把钟；
+   * 时间戳若早于起点（不该发生，但别让负数把画面顶掉）就夹到 0。 */
+  const now = Number.isFinite(Number(timestamp)) ? Number(timestamp) : skillInkClock();
+  const seconds = Math.max(0, now - play.startedAt) / 1000;
   if (seconds >= SKILL_INK_TOTAL_MS / 1000) {
     skillInkDrop(play);
     return;
@@ -156,7 +168,7 @@ function skillInkFxPlay(event) {
     return;
   }
 
-  const play = { seat, canvas, fx, startedAt: stageNow(), box, raf: 0 };
+  const play = { seat, canvas, fx, startedAt: skillInkClock(), box, raf: 0 };
   skillInkPlays.push(play);
   layer.setAttribute("data-skill-ink", String(skillInkPlays.length));
   layer.setAttribute("data-skill-ink-seat", String(seat));

@@ -599,6 +599,11 @@ const windowShim = {
     const at = list.indexOf(fn);
     if (at >= 0) list.splice(at, 1);
   },
+  /* ink-table-skin 票 03 报障（2026-11-13）：墨字在页面上**看不到**，因为播放器把
+   * `Date.now()`（纪元毫秒）当起点、却拿 rAF 的 `performance.now()`（导航后毫秒）去减，
+   * 算出的秒数恒为巨大负数。真浏览器两把钟都在，垫片当时两把都缺 ⇒ 整轮烟测看不见。
+   * 补上 `window.performance.now`，让"混时钟"这类缺陷在垫片里也能被判据逮到。 */
+  performance: { now: () => shimClock },
   // damage-fx 票 06：开关的记忆口与 `?audiotest=1` 的查询串（页面里都是 `window.*`）。
   localStorage: localStorageShim,
   location: { search: "" },
@@ -608,10 +613,12 @@ const windowShim = {
 /* 排队的动画帧：`runFrame()` 跑一拍（本文件末的 damage-fx 用例按需取用）。 */
 const pendingFrames = new Map();
 let nextFrameId = 1;
-const runFrame = () => {
+const runFrame = (timestamp) => {
   const queued = Array.from(pendingFrames.values());
   pendingFrames.clear();
-  for (const fn of queued) fn();
+  /* 时间戳转交给回调：rAF 的真实签名就是 `fn(now)`（`performance.now()` 同源）。
+   * 原来这里是不带参数调 `fn()`，于是"把 Date.now() 当起点"的缺陷在垫片里看不出来。 */
+  for (const fn of queued) fn(timestamp);
   return queued.length;
 };
 
@@ -619,7 +626,7 @@ const context = vm.createContext({
   document: documentShim,
   window: windowShim,
   fetch: globalThis.fetch,
-  performance: { timeOrigin: Date.now() },
+  performance: { timeOrigin: Date.now(), now: () => shimClock },
   console, Date, JSON, Object, Array, Number, String, Math, encodeURIComponent,
   // damage-fx 票 05：4 点档的劈屏要 `new Path2D()`（真浏览器一样有）。
   Path2D: class Path2D {
@@ -18817,6 +18824,26 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `arrival=${atArrival} pending=${pendingAtArrival} afterQuery=${afterQuery}`
       + ` inks=${floats().map((item) => attr(item, "data-skill-ink-name")).join(",")}`
       + ` err=${inkError()} diag=${JSON.stringify(context.window.skillInkDiag)}`);
+  /* ---- 时钟回归（2026-11-13 用户报障"墨字看不到"）----
+   * 播放器曾把 `stageNow()`（`Date.now()`）当起点、拿 rAF 的 `performance.now()` 去减：
+   * 秒数恒为巨大负数 ⇒ 永远画在"第负几十万秒"、也永远到不了 1.8s 的摘层点。垫片当时
+   * 两把钟都没有，所以整轮烟测看不见。补上 `performance.now` + 转交 rAF 时间戳之后，
+   * 这条判据能在**逻辑层**抓住"混时钟"。 */
+  const inkStart = context.performance.now();
+  const inkCanvas = floats()[0];
+  const inkOpacity = () => Number(inkCanvas.style.opacity);
+  const opacityAtStart = inkOpacity();
+  runFrame(inkStart + 905);
+  const opacityMid = inkOpacity();
+  runFrame(inkStart + 1850);
+  const goneAfterLife = floats().length;
+  check("U3-04o 墨字按 rAF 的钟推进：0.905s 降到 ≈0.775、1.85s 后整张摘掉（不混 Date.now）",
+    Math.abs(opacityAtStart - 1) < 1e-9
+      && Math.abs(opacityMid - 0.775) < 0.02
+      && goneAfterLife === 0
+      && inkError() === undefined,
+    `opacity0=${opacityAtStart} mid=${opacityMid} after=${goneAfterLife} err=${inkError()}`);
+
   check("U3-04b 反间的目标线复用 U3-03 的线层：发动者 1 → 目标 0（data-line-to=0）",
     lineNodes().length === 1
       && attr(lineNodes()[0], "data-line-to") === "0"
