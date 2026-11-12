@@ -1538,8 +1538,10 @@ def _pool_rows(
 ) -> tuple[StepPool, ...]:
     """去重后转成协议形状（保留首次出现的次序，确定性）。
 
-    每行是 ``(when, options, disabled)``：``disabled`` 只有选项步会填（置灰项，见
-    :class:`PickOption` 的 ``disabled``），其余步骤一律空元组。
+    每行是 ``(when, options, disabled)``：``disabled`` 由**产出它的那一步**填——选项步的
+    置灰项（见 :class:`PickOption` 的 ``disabled``）、以及转化清单来源步的**源牌级置灰**
+    （table-ux-overhaul 票 12，产出方在 :func:`sgs.skills.heroes._manifest_steps`；本模块
+    渲染的流水线步骤今天一律空元组）。
 
     若所有前序组合给出的候选**完全相同**（含义上的相同：候选与置灰项都一样），收成一行
     ``when=()``："这一步的池与前序选择无关"——比逐项重复 N 遍更小，也让接入层不必为无关的

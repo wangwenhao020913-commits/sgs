@@ -397,6 +397,11 @@ let failNextGets = 0;
  * `nextPreview = {...}` → 200 + 该 body，`failNextPreviews = N` → 接下来 N 次直接失败
  * （钉 fail-closed）。都不注入时照常打到真服务端。 */
 let nextPreview = null;
+/* table-ux-overhaul 票 12：**按请求回**的预览替身（`(body) => 回包 | null`）。
+ * 一次性注入适合"只问一次"的用例；**多步清单**（渐营：选牌 → 牌名 → 目标）每变一次选择
+ * 都要问一次，逐次注入会让断言依赖"第几次冲刷" ⇒ 这里让用例按**请求体**（前序答案前缀）
+ * 自己答，测试读起来就是那条流水线本身。优先于 `nextPreview`；返回 null = 这一次失败。 */
+let previewResponder = null;
 let failNextPreviews = 0;
 /* U4-01：飞行时间表 `anim.ini` 是相对静态文件的 fetch（不是 `/api/` 请求）。烟测默认回
  * **磁盘上的真文件**（改 ini 即生效的口径）；用例可注入下一份 `{ok, text}` 看缺键 /
@@ -451,6 +456,13 @@ globalThis.fetch = async (path, options) => {
       if (failNextPreviews > 0) {
         failNextPreviews -= 1;
         throw new Error("注入的预览失败");
+      }
+      if (previewResponder) {
+        const answer = previewResponder(
+          options && options.body ? JSON.parse(options.body) : null);
+        if (answer === null) throw new Error("注入的预览失败");
+        const text = JSON.stringify(answer);
+        return { ok: true, status: 200, text: async () => text, json: async () => JSON.parse(text) };
       }
       const injected = nextPreview;
       nextPreview = null;
@@ -4949,6 +4961,164 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿U-PV-02c 预览失败 ⇒ 可点集合退回静态行（这一步没有 ⇒ 一个都不点）",
     !seatBox(1).classList.contains("targetable")
       && !seatBox(2).classList.contains("targetable"));
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
+/* ⑦ table-ux-overhaul 票 12：转化清单**源牌级置灰** + 渐营的**动态目标池**（`U-TF-*`）。
+ *
+ * 两级置灰的界面判据（spec §2 Q15 / Q20）：
+ *  - **灰的仍要看得见**：`options` 是"这一步列出的来源"（`options − disabled` 才是能点的），
+ *    置灰的源牌照旧画在手牌区、带 `.dis` 与一句悬停理由——**不从清单里删掉**（玩家会以为漏牌）；
+ *  - **目标级只看服务端的池**：渐营选完源牌 + 牌名后能点谁，由票 11 的预览回包给
+ *    （`previewResponder` 按前序答案前缀作答，界面不自己判"谁在攻击范围内"）。
+ */
+{
+  // U-TF-01：龙胆的转化清单——手里一张【杀】（产物【闪】在出牌阶段没有时机 ⇒ 灰）
+  // 与一张【闪】（产物【杀】此刻能打 ⇒ 亮）。
+  const greySlash = { ...synthCard(18, "杀"), type: "slash" };
+  const liveDodge = { ...synthCard(52, "闪"), type: "dodge" };
+  const tfPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 940,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 940 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "hero.zhaoyun.longdan": [
+        { name: "card", kind: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["52", "18"], disabled: ["18"] }] },
+        { name: "seat", kind: "seat", zones: [], min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: ["seat:1"], max: 1 }] },
+      ],
+    },
+    preactivation: [],
+  };
+  const tfView = synthView(tfPending);
+  tfView.heroes = { 0: "zhaoyun", 1: "zhangfei" };
+  tfView.snapshot.self_hand = [liveDodge, greySlash];
+  tfView.skills = [{
+    skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preactivated: false,
+    ui: { requirement: "你可以把【杀】当【闪】、把【闪】当【杀】使用或打出。", convert_sources: [18, 52] },
+  }];
+  ui.state.view = tfView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(tfView);
+  const tfButton = () => Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
+  const tfHand = (index) => $("t-hand").children[index];
+  const tfClick = (node) => { (node.listeners.click || []).forEach((fn) => fn({ target: node })); };
+  tfClick(tfButton());
+  check("㉿U-TF-01a 置灰的源牌照旧画在手牌区（灰 + 一句悬停理由），不是从清单里消失",
+    !!tfHand(1) && tfHand(1).classList.contains("dis")
+      && String(tfHand(1).getAttribute("title")).includes("此刻没有可用的产物"),
+    `dis=${tfHand(1) && tfHand(1).classList.contains("dis")}`
+      + ` title="${tfHand(1) && tfHand(1).getAttribute("title")}"`);
+  tfClick(tfHand(1));
+  check("㉿U-TF-01 转化清单里灰项画出来但点不动（点了不写答案、光标不动）",
+    ui.state.preactivation.cursor === 0
+      && ui.state.preactivation.answers.every((answer) => answer.values.length === 0),
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` answers=${JSON.stringify(ui.state.preactivation.answers)}`);
+  tfClick(tfHand(0));
+  check("㉿U-TF-01b 对照组：亮的那张点得动（同一条判据，不是整列都灰）",
+    ui.state.preactivation.cursor === 1
+      && JSON.stringify(ui.state.preactivation.answers[0].values) === "[52]",
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` answers=${JSON.stringify(ui.state.preactivation.answers)}`);
+  ui.resetSelection();
+}
+
+{
+  // U-TF-02：渐营三步（选牌 → 牌名 → 目标），**目标步的座位池由预览回包给**。
+  const source = { ...synthCard(8, "麒麟弓"), type: "qilin_bow" };
+  const jyPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 941, preview: true,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 941 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "hero.jie_jushou_mobile.jianying": [
+        { name: "card", kind: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["8"] }] },
+        { name: "name", kind: "option", zones: [], min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: ["杀", "桃"], disabled: [] }] },
+        // 目标步**没有静态行**：池只能由服务端现算（票 11）。
+        { name: "seat", kind: "seat", zones: [], min: 1, max: 1, order: 2, pool: [] },
+      ],
+    },
+    preactivation: [],
+  };
+  const jyView = synthView(jyPending);
+  jyView.heroes = { 0: "jie_jushou_mobile", 1: "jie_zhangfei", 2: "diaochan", 3: "zhangfei" };
+  jyView.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 0, alive: true, equip: [], judge: [], identity: null,
+  }));
+  jyView.snapshot.self_hand = [source];
+  jyView.skills = [{
+    skill_id: "hero.jie_jushou_mobile.jianying", name: "渐营", skill_type: "NORMAL",
+    locked: false, carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [] },
+  }];
+  ui.state.view = jyView;
+  ui.state.sessionId = "smoke-transform";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(jyView);
+  // 按**前序答案前缀**作答的预览替身（与真端点的形状一致：只有池与"能不能走"，没有规则）。
+  previewResponder = (body) => {
+    const answers = (body && body.answers) || [];
+    const filled = (index) => answers[index] && (answers[index].values || []).length > 0;
+    if (!filled(0)) {
+      return { cursor: 0, kind: "card", options: ["8"], disabled: [],
+        can_advance: false, can_submit: false, next: "name" };
+    }
+    if (!filled(1)) {
+      return { cursor: 1, kind: "option", options: ["杀", "桃"], disabled: [],
+        can_advance: true, can_submit: false, next: "seat" };
+    }
+    return { cursor: 2, kind: "seat", options: ["seat:1", "seat:3"], disabled: [],
+      can_advance: true, can_submit: true, next: null };
+  };
+  const jyButton = () => Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.jie_jushou_mobile.jianying");
+  const jyOption = (text) => Array.from($("t-options").children).find(
+    (c) => c.textContent === text) || null;
+  (jyButton().listeners.click || []).forEach((fn) => fn({ target: jyButton() }));
+  await flushPreativationPreview();
+  const jySource = $("t-hand").children[0];
+  (jySource.listeners.click || []).forEach((fn) => fn({ target: jySource }));
+  await flushPreativationPreview();
+  check("㉿U-TF-02a 渐营：选完源牌后进「牌名」步（回包说能离开这一步）",
+    ui.state.preactivation.cursor === 1
+      && JSON.stringify(ui.state.preactivation.answers[0].values) === "[8]",
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` answers=${JSON.stringify(ui.state.preactivation.answers)}`);
+  (jyOption("杀").listeners.click || []).forEach((fn) => fn({ target: jyOption("杀") }));
+  await flushPreativationPreview();
+  await flushPreativationPreview();
+  check("㉿U-TF-02 渐营选完源牌 + 牌名后，可点座位 = 预览回包的池（1 / 3 可点，2 不可点）",
+    ui.state.preactivation.cursor === 2
+      && seatBox(1).classList.contains("targetable")
+      && seatBox(3).classList.contains("targetable")
+      && !seatBox(2).classList.contains("targetable"),
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` targetable=${[1, 2, 3].map((seat) => seatBox(seat).classList.contains("targetable"))}`);
+  const beforeSeat = calls.length;
+  (seatBox(2).listeners.click || []).forEach((fn) => fn({ target: seatBox(2) }));
+  check("㉿U-TF-02b 池外的座位点了没反应（目标级置灰，不是「全都点得动」）",
+    ui.state.preactivation.answers[2].values.length === 0 && calls.length === beforeSeat,
+    `values=${JSON.stringify(ui.state.preactivation.answers[2].values)}`);
+  (seatBox(1).listeners.click || []).forEach((fn) => fn({ target: seatBox(1) }));
+  await flushPreativationPreview();
+  const jyAction = ui.buildAction();
+  check("㉿U-TF-02c 池内的座位点得动，且拼出的复合动作带上它",
+    JSON.stringify(ui.state.preactivation.answers[2].values) === "[1]"
+      && !!jyAction && jyAction.kind === "ActivateSkill"
+      && JSON.stringify(jyAction.choices) === '["杀","seat:1"]',
+    JSON.stringify(jyAction));
+  previewResponder = null;
   ui.state.sessionId = null;
   ui.resetSelection();
 }

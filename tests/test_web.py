@@ -5968,7 +5968,14 @@ def test_the_source_groups_are_masked_for_a_foreign_viewer() -> None:
             zones=(Zone.HAND,),
             min=2,
             max=2,
-            pool=(StepPool(when=(), options=(str(left), str(right))),),
+            pool=(
+                StepPool(
+                    when=(),
+                    options=(str(left), str(right)),
+                    # 票 12：源牌级置灰的 id 也是询问者的手牌 ⇒ 与 options 同一条泄露面。
+                    disabled=(str(right),),
+                ),
+            ),
             order=0,
             groups=((str(left), str(right)),),
         ),
@@ -5996,10 +6003,16 @@ def test_the_source_groups_are_masked_for_a_foreign_viewer() -> None:
     assert own_steps[0]["groups"] == [[str(left), str(right)]], (
         "询问者自己那份原样带出（界面据此把不同花色的牌置灰）"
     )
+    assert own_steps[0]["pool"][0]["disabled"] == [str(right)], (
+        "票 12 的源牌级置灰原样带出（询问者自己的手牌，可以露）"
+    )
 
     foreign = pending_payload(query, human_seat=None)
     masked_card, masked_seat = foreign["preactivations"]["hero.yuanshao_mobile.luanji"]
     assert masked_card["pool"][0]["options"] == [], "候选照旧清空（来源牌 id 不能露）"
+    assert masked_card["pool"][0].get("disabled") == [], (
+        "票 12：置灰的源牌 id 同样是询问者的手牌 ⇒ 一并清空"
+    )
     assert "groups" not in masked_card, (
         f"来源组合也不能露：{masked_card.get('groups')}"
     )

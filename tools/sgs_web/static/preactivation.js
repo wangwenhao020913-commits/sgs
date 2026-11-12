@@ -228,6 +228,23 @@ function preactivationDisabled(pa, index) {
   return row ? (row.disabled || []) : null;
 }
 
+/** 源牌级置灰的悬停说明（table-ux-overhaul 票 12 / spec §2 Q20）。
+
+ *  "灰"回答的是"这张源牌的**所有产物**此刻都用不了"（时机 / 禁用 / 次数三条），不是
+ *  "这一步选谁"——目标维度由下一步的可点集合回答。文案只说事实，不讲规则（规则在服务端）。
+ */
+const PREACTIVATION_SOURCE_NO_PRODUCT = "此刻没有可用的产物";
+
+/** 这一步的这一项**显示但不可点**吗（服务端 ``disabled``）。
+
+ *  界面只管画灰 + 拒绝本地点击；合法性仍由服务端校验器裁决（它拒收 disabled 里的项），
+ *  故"灰"永远不是唯一一道闸。``null``（没有置灰信息）⇒ 恒假。
+ */
+function preactivationItemDisabled(pa, index, value) {
+  const blocked = preactivationDisabled(pa, index);
+  return Boolean(blocked) && blocked.includes(String(value));
+}
+
 /**
  * 这一步的**合法来源组合**（huo-mobile-batch 票 10）：`null` = 服务端没下发这一格。
  *
@@ -784,6 +801,8 @@ function preactivationCardPickable(pending, card, zone) {
   if (options === null || !options.includes(String(card.card_id))) return false;
   const answer = pa.answers[pa.cursor];
   const values = answer ? answer.values : [];
+  // 票 12：源牌级置灰的牌**画出来但点不动**（置灰不是"没候选"，是"所有产物都用不了"）。
+  if (preactivationItemDisabled(pa, pa.cursor, card.card_id)) return false;
   return values.includes(card.card_id)
     || preactivationGroupAccepts(pa, pa.cursor, values, card.card_id);
 }
@@ -797,6 +816,7 @@ function togglePreativationCard(cardId) {
   if (preactivationStepKind(step) !== "card") return;
   const options = preactivationOptions(pa, pa.cursor);
   if (options === null || !options.includes(String(cardId))) return;
+  if (preactivationItemDisabled(pa, pa.cursor, cardId)) return;
   const answer = pa.answers[pa.cursor];
   const at = answer.values.indexOf(cardId);
   // 票 10：**追加**要过合法来源组合（取消恒可）；卡面的 `.dis` 是第一道，这里是

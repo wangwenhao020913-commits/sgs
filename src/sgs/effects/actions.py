@@ -507,6 +507,7 @@ def check_usable(
     card: CardRef,
     *,
     context: UseContext = UseContext.PLAY_PHASE,
+    require_targets: bool = True,
 ) -> bool:
     """``seat`` 此刻**能不能用**这张牌：L3 的"使用前校验"整条链，合成一个可调用的档。
 
@@ -529,6 +530,12 @@ def check_usable(
     公开出来供新读点使用——故**不改变**任何既有技能的候选。
 
     ``card`` 可以是实体牌，也可以是转化 / 虚拟产物（判据只读行为表与牌面，不要求它在某区）。
+
+    ``require_targets=False``（table-ux-overhaul 票 12 / spec §2 Q20）：只读**前三条**
+    （时机 / 禁用 / 次数），不读第 4 条目标池。这是**源牌级**置灰的判据——"这张源牌有
+    没有任何产物此刻可用"问的是"能不能用"，不是"这一步选谁"；目标维度属于**产物级**
+    与**目标级**（前者读整条，后者由座位池 / 预览回答）。两档**同一个**实现：置灰判据
+    因此只有一份，不新造第二条使用校验链。
     """
     behavior = behavior_for(card)
     if not _usable_in(behavior, context, None):
@@ -539,6 +546,8 @@ def check_usable(
         return False
     if check_count(state, seat, card):
         return False
+    if not require_targets:
+        return True
     return bool(check_targets(state, seat, card))
 
 

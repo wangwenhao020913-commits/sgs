@@ -1979,8 +1979,11 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
             # 先抹来源组合（只可能出现在选牌步上，但漏一条分支就是一条泄露面）。
             step.pop("groups", None)
             if step.get("zones"):
+                # 票 12：选牌步的 ``disabled`` 与 ``options`` 是**同一条泄露面**（源牌级
+                # 置灰的那些 id 同样来自询问者的手牌 / 装备），故一起清空。
                 step["pool"] = [
-                    {**entry, "options": []} for entry in (step.get("pool") or [])
+                    {**entry, "options": [], "disabled": []}
+                    for entry in (step.get("pool") or [])
                 ]
                 continue
             options: list[Any] = []

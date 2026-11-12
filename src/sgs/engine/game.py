@@ -45,6 +45,7 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     Randomness,
+    UseContext,
     WINE_COUNT_KEY,
     WINE_DAMAGE_BONUS,
     apply_armor,
@@ -754,6 +755,24 @@ def _activation_payload(
     if flow is not None:
         payload["flow"] = flow.name
     return payload
+
+
+def _conversion_use_context(kind: QueryKind) -> UseContext:
+    """询问种类 → 转化清单源牌置灰读的**使用语境**（table-ux-overhaul 票 12）。
+
+    映射只在这里做一次，清单派生（:func:`~sgs.skills.conversion_preactivations`）不按
+    询问种类自己猜：``check_usable`` 的第一条就是"这个语境下有没有使用时机"，而三个语境
+    恰好是候选生成侧已有的三档（:class:`~sgs.effects.UseContext`）：
+
+    - ``PEACH``（濒死求桃）⇒ ``NEAR_DEATH``；
+    - ``DODGE`` / ``RESPOND``（响应窗口）⇒ ``RESPONSE``；
+    - 其余（今天只有 ``PLAY_PHASE`` 会带转化候选）⇒ ``PLAY_PHASE``。
+    """
+    if kind is QueryKind.PEACH:
+        return UseContext.NEAR_DEATH
+    if kind in (QueryKind.DODGE, QueryKind.RESPOND):
+        return UseContext.RESPONSE
+    return UseContext.PLAY_PHASE
 
 
 class Engine:
@@ -5777,6 +5796,9 @@ class Engine:
                 QueryKind.DODGE,
                 QueryKind.RESPOND,
             ),
+            # 票 12：源牌级置灰要读**语境**（`check_usable` 的第一条是时机）。映射只在这里
+            # 做一次，清单派生不自己按询问种类猜。
+            context=_conversion_use_context(kind),
         )
         actions = tuple(action for action in actions if not is_transformed_action(action))
         view = project(self.state, actor)

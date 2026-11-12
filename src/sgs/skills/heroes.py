@@ -60,7 +60,9 @@ from sgs.effects import (
     CARD_BEHAVIORS,
     TargetCount,
     TargetRule,
+    UseContext,
     behavior_for,
+    check_usable,
     forbidden_as_slash,
     is_slash,
     locate,
@@ -87,7 +89,7 @@ from .catalog import (
     resolve_instances,
 )
 from .flow import seat_choice
-from .virtual import card_ids, single_conversion, virtual_candidates
+from .virtual import card_ids, single_conversion, transformed_card, virtual_candidates
 
 __all__ = [
     "BAZHEN",
@@ -95,6 +97,8 @@ __all__ = [
     "conversion_offers",
     "conversion_offers_by_source",
     "conversion_preactivations",
+    "conversion_product_types",
+    "conversion_sources_by_product",
     "conversion_skill_definitions",
     "is_forced_conversion",
     "is_transformed_action",
@@ -102,6 +106,7 @@ __all__ = [
     "owned_conversion_skill_ids",
     "resolve_conversion_confirmation",
     "transform_candidates",
+    "unusable_transform_sources",
     "wolong_zhugeliang_skill_definitions",
 ]
 
@@ -1052,6 +1057,77 @@ def conversion_offers_by_source(
     return {source: tuple(skill_ids) for source, skill_ids in grouped.items()}
 
 
+def conversion_product_types(skill_id: str) -> tuple[str, ...]:
+    """一条转化技在声明表里的**全部产物牌名**（``CONVERSION_SKILLS`` 的 ``target_type_id``）。
+
+    源牌级 / 产物级置灰（table-ux-overhaul 票 12 / spec §2 Q20）要枚举"这条技能从这张牌
+    能产出哪些产物"，而**产物全集只在声明表里**——候选池只含"此刻真有合法目标"的那几条，
+    拿它当全集会把"目标不合法"读成"没有这个产物"。去重保序（【龙胆】一个 id 有四条方向）。
+
+    不在声明表里的转化（丈八蛇矛的配对谓词、朱雀羽扇、双雄）返回空元组：它们没有可枚举的
+    产物全集，调用方据此退回候选池口径（不猜）。
+    """
+    return tuple(
+        dict.fromkeys(
+            skill.target_type_id
+            for skill in CONVERSION_SKILLS
+            if skill_id in skill.skill_ids
+        )
+    )
+
+
+def conversion_sources_by_product(
+    state: GameState, owner: int, skill_id: str
+) -> dict[int, tuple[str, ...]]:
+    """``来源实体牌 id → 这条技能能从它转出的产物牌名``（**单源声明**的全集）。
+
+    与候选生成**同一份**声明表：每条 ``(source, skill_id)`` 都由 :func:`conversion_offers`
+    按 :meth:`ConversionSkill.select` 逐一核对（区域 / 颜色 / 花色 / 牌名 / 时机 / 归属），
+    故"这张牌算不算这条技能的源"不在这里重判一次。多源与未声明的转化 ⇒ ``{}``。
+    """
+    out: dict[int, list[str]] = {}
+    for product in conversion_product_types(skill_id):
+        for source, offered in conversion_offers(state, owner, product):
+            if offered != skill_id:
+                continue
+            out.setdefault(int(source), []).append(product)
+    return {source: tuple(products) for source, products in out.items()}
+
+
+def unusable_transform_sources(
+    state: GameState,
+    owner: int,
+    skill_id: str,
+    *,
+    context: UseContext = UseContext.PLAY_PHASE,
+) -> tuple[int, ...]:
+    """这条技能此刻**一个产物都用不上**的源牌（源牌级置灰的判据，spec §2 Q20）。
+
+    "可用"读 :func:`~sgs.effects.check_usable` 的**前三条**（时机 / 禁用 / 次数）——
+    源牌级只回答"这张牌还有没有任何一条路可走"，**不含**"有没有合法目标"那一条：
+    目标维度是产物级（整条判据）与目标级（座位池 / 预览）的事，混进来会把"这一刻没有
+    可指的人"读成"这张牌没用"（本票刻意读法）。
+
+    规模 = 源牌数 × 产物数（≤ 20 × 6 条纯谓词，询问时算一次）：源牌集与已选无关，
+    故它住在**清单派生**里，不走预览往返。
+    """
+    out: list[int] = []
+    declared = conversion_sources_by_product(state, owner, skill_id)
+    for source, products in sorted(declared.items()):
+        if all(
+            not check_usable(
+                state,
+                owner,
+                transformed_card(state, (source,), product),
+                context=context,
+                require_targets=False,
+            )
+            for product in products
+        ):
+            out.append(source)
+    return tuple(out)
+
+
 def conversion_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, ...]:
     """一张**转化牌**归属哪些该座位拥有的转化技（公开名）。
 
@@ -1284,6 +1360,7 @@ def conversion_preactivations(
     actions: Iterable[Any],
     *,
     fixed_target: bool = False,
+    context: UseContext = UseContext.PLAY_PHASE,
 ) -> dict[str, tuple[Step, ...]]:
     """把一次询问的**虚拟牌候选**按转化技渲染成**预发动清单**（W4-3）。
 
@@ -1317,6 +1394,11 @@ def conversion_preactivations(
     这类响应窗口的被问者、借刀的被迫使用）——候选目标**完全唯一**时清单只下来源步
     （`spec.md` §2 的急救行 / W4-fix-6 的【万箭】行）；多目标候选仍下发目标步（借刀窗口
     的 Bn 是该步的首项、必选）。
+
+    ``context``（票 12 的加法）：源牌级置灰要问"这张源牌的产物此刻能不能用"，而"能不能
+    用"的**第一条**就是时机 / 语境 ⇒ 调用方把这次询问的语境给进来（出牌阶段 / 濒死求桃 /
+    响应窗口，映射只做一处：``sgs.engine.game._conversion_use_context``）。缺省 = 出牌阶段
+    （既有调用方与直接构造清单的测试因此逐字不变）。
     """
     groups: dict[str, dict[tuple[int, ...], list[tuple[int, ...]]]] = {}
     source_zones: dict[int, Zone] = {}
@@ -1344,11 +1426,26 @@ def conversion_preactivations(
 
     out: dict[str, tuple[Step, ...]] = {}
     for skill_id in sorted(groups):
+        # **源牌级置灰**（票 12 / spec §2 Q20）：候选源已经由引擎回答"此刻能这样用"，
+        # 不必再判；剩下的**声明全集里没成候选**的源牌，才是"有没有任何产物可用"要回答
+        # 的那一批。灰的仍然留在 ``options`` 里（``StepPool.disabled``），不许删——玩家
+        # 会以为清单漏牌。
+        candidates = {source for sources in groups[skill_id] for source in sources}
+        disabled = tuple(
+            source
+            for source in unusable_transform_sources(
+                state, owner, skill_id, context=context
+            )
+            if source not in candidates
+        )
+        for source in disabled:
+            source_zones.setdefault(source, locate(state, source).zone)
         steps = _manifest_steps(
             groups[skill_id],
             source_zones,
             target_rules[skill_id],
             fixed_target=fixed_target,
+            disabled=disabled,
         )
         if steps is not None:
             out[skill_id] = steps
@@ -1361,6 +1458,7 @@ def _manifest_steps(
     target_rules: Iterable[TargetRule],
     *,
     fixed_target: bool = False,
+    disabled: tuple[int, ...] = (),
 ) -> tuple[Step, ...] | None:
     """一个技能的"来源组 → 目标组合"表 → 清单步骤；不可表达的形状返回 ``None``。
 
@@ -1388,7 +1486,13 @@ def _manifest_steps(
     - **合法来源组合**（huo-mobile-batch 票 10）：多来源步（``count > 1``）的来源步带出
       ``Step.groups`` = ``per_source`` 的键（"哪几张能配成一组"），且只在**存在非法组合**
       时才下发（任意 ``count`` 张都能配 ⇒ 省略，见 :func:`_source_groups`）。判据只读候选池
-      ——不看技能 id / 牌名，界面也不必自己判花色。
+      ——不看技能 id / 牌名，界面也不必自己判花色；
+    - **源牌级置灰**（table-ux-overhaul 票 12 / spec §2 Q20）：``disabled`` = 这条技能
+      **全部产物都不可用**的源牌（判据见 :func:`unusable_transform_sources`），它们
+      **仍进** ``options``（``options`` 从"能点的来源"升级成"这一步列出的来源"，可点集合
+      = ``options − disabled``），并同时进 ``StepPool.disabled`` 让界面画灰 + 悬停说明。
+      **不删**行是硬要求：直接删掉会让玩家以为清单漏牌。``groups`` 仍只按**候选**来源算
+      （合法组合 = 引擎认的组合，灰牌不参与组合）。
     """
     sizes = {len(sources) for sources in per_source}
     if len(sizes) != 1:
@@ -1397,7 +1501,10 @@ def _manifest_steps(
     zones_used = {
         source_zones[source] for sources in per_source for source in sources
     }
-    options = tuple(dict.fromkeys(str(source) for sources in per_source for source in sources))
+    candidates = tuple(
+        dict.fromkeys(str(source) for sources in per_source for source in sources)
+    )
+    grey = tuple(str(source) for source in disabled)
     steps = [
         Step(
             name="card",
@@ -1405,9 +1512,11 @@ def _manifest_steps(
             zones=tuple(zone for zone in _SOURCE_ZONE_ORDER if zone in zones_used),
             min=count,
             max=count,
-            pool=(StepPool(when=(), options=options),),
+            pool=(StepPool(when=(), options=(*candidates, *grey), disabled=grey),),
             order=0,
-            groups=_source_groups(per_source, count, options),
+            # 合法来源组合只按**候选**来源算：灰的源牌此刻一个产物都用不上，把它们并进
+            # "哪几张能配成一组"会让界面以为它们还能搭。
+            groups=_source_groups(per_source, count, candidates),
         )
     ]
     combos = [targets for rows in per_source.values() for targets in rows]

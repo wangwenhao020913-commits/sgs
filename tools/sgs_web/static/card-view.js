@@ -219,7 +219,11 @@ function cardFaceNode(card, opts = {}) {
   if (tags) node.appendChild(tags);
   node.appendChild(type);
   // 悬停全文（U1-04b / U1-07）：只读服务端下发的 description 与来源牌；前端不存文案。
-  node.setAttribute("title", cardHoverText(card));
+  // ``opts.note``（票 12）：一行**这一步为什么点不动**的说明（源牌级置灰），与牌面全文
+  // 分开拼、不覆盖它——两条信息都要在悬停里（用户要"灰得看得见理由"）。
+  node.setAttribute(
+    "title", [cardHoverText(card), opts.note].filter(Boolean).join("\n"),
+  );
   if (!opts.static) {
     node.addEventListener("click", (event) => {
       if (event && event.stopPropagation) event.stopPropagation();

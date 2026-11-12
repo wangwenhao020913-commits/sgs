@@ -371,7 +371,7 @@ function renderTable() {
     hand.appendChild(
       cardChip(
         form ? { ...form, card_id: card.card_id } : card, face.selected, false, face.selectable,
-        () => activateCard(pendingNow, card, face), face.picked,
+        () => activateCard(pendingNow, card, face), face.picked, face.note || "",
       ),
     );
   }
