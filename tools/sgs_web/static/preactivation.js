@@ -272,8 +272,8 @@ function preactivationStepLegal(pa, index) {
 
 /** 清单里**全部**选牌步的来源是不是都合法（`preactivationReady` 只看填完没有）。
  *
- * 提交 / 下一步 / 提示条都读这一处：陈旧的来源 / 合成载荷也走同一条闸，绝不把注定
- * 400 的组合发出去（票 10 §4 的死路正是这样来的）。 */
+ * 「提交」/ 步骤提示 / 自动推进都读这一处：陈旧的来源 / 合成载荷也走同一条闸，绝不把
+ * 注定 400 的组合发出去（票 10 §4 的死路正是这样来的）。 */
 function preactivationSourcesLegal(pa) {
   if (!pa) return true;
   for (let index = 0; index < pa.steps.length; index += 1) {
@@ -347,9 +347,10 @@ function preactivationPreviewEnabled(pending) {
 
 /** 本地答案 → 预览请求的 `answers`（**清单步名的前缀**，含正在编辑的那一步）。
  *
- * 服务端的光标规则与这里的本地光标同源：选牌 / 提供 / 多选座位步要显式点「下一步」，
- * 故"最后一条答案"可以就是玩家还在挑的那一步——它的 `values` 是**本步已选**，服务端据此
- * 排除已选目标（除疠的势力互异就是这么变灰的）。光标之后的一律不发（服务端也只认前缀）。
+ * 服务端的光标规则与这里的本地光标同源：选牌 / 提供步与 `min != max` 的多选步要玩家显式
+ * 确认（票 08 起那颗键是底部「提交」），故"最后一条答案"可以就是玩家还在挑的那一步——它的
+ * `values` 是**本步已选**，服务端据此排除已选目标（除疠的势力互异就是这么变灰的）。光标之后
+ * 的一律不发（服务端也只认前缀）。
  */
 function preactivationPreviewAnswers(pa) {
   const out = [];
@@ -441,7 +442,8 @@ async function requestPreativationPreview(pa, body, version, seq) {
  *
  * 一旦又排了新的一版（`previewVersion` 自增），旧回包就只是"上一刻的快照"：候选照旧可以用
  * （服务端算过的那一份），但"能不能进下一步 / 能不能提交"要退回清单的本地判据——否则
- * 刚点完一张牌的那 100 ms 里，「下一步」会因为上一份回包说 `can_advance: false` 而点不动。
+ * 刚点完一张牌的那 100 ms 里，自动推进 / 「提交」会因为上一份回包说 `can_advance: false`
+ * 而卡住。
  */
 function preactivationPreviewCurrent(pa, index) {
   return Boolean(
@@ -450,10 +452,11 @@ function preactivationPreviewCurrent(pa, index) {
   );
 }
 
-/** 「下一步」能不能点：回包说 `can_advance`（前缀每一步都满足）时听服务端的。
+/** 这一步能不能走（自动推进 / **中间步**「提交」的可点态）：回包说 `can_advance` 时听服务端的。
  *
  * 预览失败 ⇒ 恒假（fail-closed，这一步既不推进也不许提交）；回包过期 / 没有预览通道 ⇒
  * 退回清单的本地判据（"填满了没有"是形状，不是规则——提交时服务端仍会再验一次）。
+ * 最后一步**不**读它（`preactivationConfirmable` 排除），那里的出口是确认发动 / 使用。
  */
 function preactivationAdvanceAllowed(pa, index) {
   if (!pa) return false;
@@ -834,8 +837,9 @@ function advancePreativation() {
 
 /** 座位步是不是**多选**：`max` 是整数且大于 `min`（W7-01b 的 1..max 目标步）。
  *
- * 单选座位步（`min == max == 1`）保持既有交互——点一下就写单值并自动进下一步；
- * 多选座位步改成"点座位 = 选 / 取消 + 下一步"，与选牌步同一个 `advancePreativation`。
+ * 单选座位步（`min == max == 1`）点一下就写单值并自动进下一步；多选座位步是
+ * "点座位 = 选 / 取消"，填满后停在原地等底部「提交」。两者都不铺座位按钮（票 08：座位步
+ * 只在牌桌上点）。
  */
 function preactivationSeatMulti(step) {
   return Number.isInteger(step.max) && step.max > step.min;
