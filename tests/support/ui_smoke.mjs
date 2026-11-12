@@ -1758,7 +1758,17 @@ const renderErrors = [];
 let borrowed = 0;
 let borrowedHadStage = false;
 let steps = 0;
-while (ui.state.view.pending && steps < 4000) {
+while (!ui.state.view.finished && steps < 4000) {
+  if (!ui.state.view.pending) {
+    // 票 19：五谷的逐目标暂停 —— 没有待应答的询问是**合法**态（结算还没跑完）。
+    // 真客户端这时走 2 s 轮询（`poll()` → 取增量）；这里直接取一次增量再接着提交。
+    const paused = await get(
+      `/api/sessions/${ui.state.sessionId}?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+    );
+    ui.applyView(paused);
+    steps += 1;
+    continue;
+  }
   const p = ui.state.view.pending;
   seen.add(p.kind);
   if (p.kind === "RESPOND" && p.cause === "BORROWED_SWORD") {
@@ -14509,6 +14519,114 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && JSON.stringify(ui.state.picks) === "[0,1]",
     `key=${hvYijiBefore} touched=${hvYijiTouched} sel=${hvYijiSel}/${revealCards().filter((node) => node.classList.contains("sel")).length} picks=${JSON.stringify(ui.state.picks)}`);
 
+  /* ---- 票 19（U-HV-05）：**没有询问**的空窗里，逐目标暂停的中间视图照样到屏幕上 --------
+   *
+   * 生产时序（真会话由 `tests/test_web.py::test_each_harvest_target_pick_is_observable_in_a_view`
+   * 钉住）：每名目标取走牌之后，接入层让出一次驱动 ⇒ 下一次取增量里 `pending` 是 null、
+   * `view.harvest` 是"又多一张已拿"的半程状态。界面这一侧过去会因为"没有询问"直接关窗
+   * （`syncDialog` 只认 pending），中间状态就永远看不见。这里钉三条读法：空窗里窗**不关**、
+   * 每一拍当场置灰 + 座N、目标条翻态，最后全员拿完后仍显示（下一拍结算结束才关）。
+   */
+  const idleKey = "harvest:190:5:2";
+  const idleTargets = (rows) => rows.map(([seat, status, card]) => targetRow(seat, status, card));
+  const idleView = (revealed, targets, current) => {
+    const view = wuguView(null, 2);
+    view.harvest = {
+      active: true, key: idleKey, title: "五谷丰登", hint: "从亮出的牌里选一张获得",
+      source: 2, card: wuguCard, revealed, targets, current,
+    };
+    return view;
+  };
+  // 持久展示模式下正文画在 `#t-dialog-reveal`（`#t-options` 留在提示区）。
+  const idleCards = () => {
+    const root = $("t-dialog-reveal").children[0];
+    return root ? Array.from(root.children[0].children) : [];
+  };
+  const idleChips = () => {
+    const wrap = $("t-dialog-reveal").children[0];
+    if (!wrap) return [];
+    const bar = Array.from(wrap.children)
+      .find((node) => node.classList.contains("reveal-targets")) || null;
+    return bar
+      ? Array.from(bar.children).filter((node) => node.classList.contains("reveal-target"))
+      : [];
+  };
+  const idleBadge = (index) => (Array.from(idleCards()[index].children)
+    .find((node) => node.classList.contains("taken-by")) || {});
+
+  // 第一拍：座位 0 已经拿走第一张（服务端在人类自己取牌之后让出）。
+  render(idleView(
+    [withTaker(takenCard, 0), withTaker(secondCard), withTaker(thirdCard)],
+    idleTargets([[0, "taken", takenCard.card_id], [1, "current"], [2, "pending"]]),
+    1,
+  ));
+  const idleWindowOpen = $("t-dialog").hidden === false;
+  const idleKeyNow = ui.state.dialog.key;
+  const idlePersistent = ui.state.dialog.persistent;
+  check("U-HV-05a 没有询问的空窗里亮牌窗保持打开：已拿的牌置灰 + 座0，目标条第 1 枚 is-taken",
+    ui.state.view.pending === null
+      && ui.idleHarvestState() === ui.state.view.harvest
+      && idleWindowOpen
+      && idleKeyNow === `reveal:${idleKey}`
+      && idlePersistent === true
+      && $("t-dialog-title").textContent === "五谷丰登"
+      && $("t-dialog-body").hidden === true
+      && idleCards().length === 3
+      && idleCards()[0].classList.contains("taken")
+      && idleCards()[0].getAttribute("data-taken-by") === "0"
+      && idleBadge(0).textContent === "座0"
+      && idleCards()[1].getAttribute("data-taken-by") === ""
+      && idleChips()[0].classList.contains("is-taken")
+      && idleChips()[1].classList.contains("is-current")
+      && idleChips()[2].classList.contains("is-pending")
+      && $("t-dialog-hint").textContent.includes("等待1号位拿牌")
+      && $("t-modal-backdrop").hidden === true,
+    `open=${idleWindowOpen} key=${idleKeyNow} persistent=${idlePersistent} bodyHidden=${$("t-dialog-body").hidden} taken=${idleCards().map((n) => n.getAttribute("data-taken-by")).join("|")} chips=${idleChips().map((n) => n.getAttribute("data-state")).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+
+  // 第二拍（又一次轮询，同样没有询问）：第二名目标取走第二张。
+  render(idleView(
+    [withTaker(takenCard, 0), withTaker(secondCard, 1), withTaker(thirdCard)],
+    idleTargets([[0, "taken", takenCard.card_id], [1, "taken", secondCard.card_id], [2, "current"]]),
+    2,
+  ));
+  check("U-HV-05b 第二次轮询（同样没有询问）：第二张也当场置灰 + 座1，目标条第 2 枚翻成 is-taken",
+    ui.state.view.pending === null
+      && $("t-dialog").hidden === false
+      && idleCards().map((node) => node.getAttribute("data-taken-by")).join(",") === "0,1,"
+      && idleBadge(1).textContent === "座1"
+      && idleChips().map((node) => node.getAttribute("data-state")).join(",") === "taken,taken,current"
+      && idleChips()[1].textContent === "座1✓"
+      && $("t-dialog-hint").textContent.includes("等待2号位拿牌"),
+    `taken=${idleCards().map((n) => n.getAttribute("data-taken-by")).join(",")} chips=${idleChips().map((n) => n.getAttribute("data-state")).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+
+  // 第三拍：最后一名目标也取走 ⇒ 没有当前目标（全员 ✓），窗仍开着——这一帧不许被跳过。
+  render(idleView(
+    [withTaker(takenCard, 0), withTaker(secondCard, 1), withTaker(thirdCard, 2)],
+    idleTargets([
+      [0, "taken", takenCard.card_id],
+      [1, "taken", secondCard.card_id],
+      [2, "taken", thirdCard.card_id],
+    ]),
+    null,
+  ));
+  check("U-HV-05c 最后一名目标取完：全员 is-taken、没有当前目标，窗仍开着（下一拍结算结束才关）",
+    ui.state.view.pending === null
+      && $("t-dialog").hidden === false
+      && idleCards().map((node) => node.getAttribute("data-taken-by")).join(",") === "0,1,2"
+      && idleChips().map((node) => node.getAttribute("data-state")).join(",") === "taken,taken,taken"
+      && idleChips().every((node) => node.textContent.endsWith("✓"))
+      && $("t-dialog-hint").textContent.includes("等待其他座位拿牌"),
+    `open=${$("t-dialog").hidden === false} taken=${idleCards().map((n) => n.getAttribute("data-taken-by")).join(",")} chips=${idleChips().map((n) => n.textContent).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+
+  // 结算结束（帧出栈 ⇒ `view.harvest` 变 null）：同一拍收窗。
+  render(wuguView(null, 2));
+  check("U-HV-05d 结算结束（`view.harvest` 变 null）：亮牌窗收起、链键清空，不留半个窗口",
+    $("t-dialog").hidden === true
+      && ui.state.dialog.key === null
+      && ui.state.dialog.open === false
+      && $("t-dialog-reveal").hidden === true,
+    `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} open=${ui.state.dialog.open} revealHidden=${$("t-dialog-reveal").hidden}`);
+
   ui.state.sessionId = null;
   ui.state.view = null;
   ui.resetSelection();
@@ -14806,7 +14924,16 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   let declined = 0;
   for (let step = 0; step < 40; step += 1) {
     const pending = ui.state.view ? ui.state.view.pending : null;
-    if (!pending) break;
+    if (!pending) {
+      // 票 19：五谷的逐目标暂停 —— 空窗里没有 pending（结算还没跑完），取一次增量接着等。
+      const view = ui.state.view || {};
+      if (view.finished || !view.harvest) break;
+      const paused = await get(
+        `/api/sessions/${ui.state.sessionId}?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+      );
+      ui.applyView(paused);
+      continue;
+    }
     if (pending.kind === "SELECT_CARDS" && pending.harvest) break;
     if (pending.kind !== "RESPOND" || !pending.harvest) break;
     const pass = (pending.legal_actions || []).findIndex((action) => action.kind === "Pass");
@@ -21825,7 +21952,22 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   let closingBatch = null;
   for (let step = 0; step < 40; step += 1) {
     const pending = ui.state.view ? ui.state.view.pending : null;
-    if (!pending) break;
+    if (!pending) {
+      // 票 19：五谷的逐目标暂停 —— 空窗里没有 pending、`view.harvest` 还在。播完这一批
+      // 再取一次增量；**结算结束那一批**（`harvest` 变 null）才是 B1 要回放的那一批。
+      const view = ui.state.view || {};
+      if (view.finished || !view.harvest) break;
+      ui.flushPlayback();
+      const paused = await get(
+        `/api/sessions/${ui.state.sessionId}?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+      );
+      ui.applyViewRaw(paused);
+      if (!paused.harvest) {
+        closingBatch = ui.state.playback;
+        break;
+      }
+      continue;
+    }
     const harvest = pending.harvest;
     if (!harvest) break;
     harvestFrame = Number(String(harvest.key || "").split(":")[1]);
@@ -21837,10 +21979,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       ui.state.selectedOption = pass;
       await ui.submitActionRaw();
     } else break;
-    const nextPending = ui.state.playback
-      ? ui.state.playback.body.pending
-      : (ui.state.view ? ui.state.view.pending : null);
-    if (!(nextPending && nextPending.harvest)) {
+    const nextBody = ui.state.playback ? ui.state.playback.body : (ui.state.view || {});
+    // 票 19 起判据读**视图级** `harvest`：结算结束了它才是 null（`pending` 为 null 还可能
+    // 只是停在一个逐目标暂停点上）。
+    if (!nextBody.harvest) {
       closingBatch = ui.state.playback;
       break;
     }

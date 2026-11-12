@@ -122,13 +122,22 @@ def _play_to_end(session: Session) -> int:
 
     先 ``drive()`` 一次：经 ``GameRegistry.create`` 建的会话停在 L0 边界（票 14 的建局口径），
     人类第一问要驱动一下才出来；已经停在询问上的会话它是零动作。
+
+    **五谷逐目标暂停（票 19）**：一次应答之后可能**没有 pending**（结算里每名目标取牌后都
+    让出一次，中间状态交给视图）。真客户端这时再取一次增量，这里再 ``drive()`` 一次。
     """
     session.drive()
     answers = 0
-    while session.pending is not None:
-        session.submit_answer(session.pending.legal_actions[0])
+    for _ in range(10_000):
+        pending = session.pending
+        if pending is None:
+            if session.finished:
+                return answers
+            session.drive()
+            continue
+        session.submit_answer(pending.legal_actions[0])
         answers += 1
-    return answers
+    raise AssertionError("挂起驱动没有把这一局走完（活锁）")
 
 
 def _settle(registry, session: Session) -> dict:
@@ -344,7 +353,7 @@ def test_the_registry_passes_the_pick_through_from_the_request_body() -> None:
     """打 ``GameRegistry.create`` 这一缝：**接线断了**要比"引擎报错"先被看见。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {
             "player_count": 5,
@@ -377,7 +386,7 @@ def test_the_registry_passes_the_ban_set_through_from_the_request_body() -> None
     catalog = hero_catalog()
     keep = catalog[:8]
     ban = [version["id"] for group in catalog[8:] for version in group["versions"]]
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {
             "player_count": 8,
@@ -398,7 +407,7 @@ def test_a_manual_pick_ignores_the_ban_set() -> None:
     from sgs.data import hero_by_id
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {
             "player_count": 5,
@@ -430,7 +439,7 @@ def test_a_ban_set_that_leaves_fewer_true_names_than_seats_is_refused() -> None:
         "timeout_seconds": None,
         "banned_heroes": ban,
     }
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     with pytest.raises(ValueError) as caught:
         registry.create(body)
     assert "真名池不足" in str(caught.value), str(caught.value)
@@ -446,7 +455,7 @@ def test_an_unknown_banned_hero_is_a_400_and_creates_no_session() -> None:
     """未知禁将 id 不静默忽略：400 + 带 id 的原因，注册表干净。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     status, body = _post_with_the_real_handler(
         registry,
         "/api/sessions",
@@ -641,7 +650,7 @@ def test_the_registry_builds_the_deck_profile_from_the_request_body() -> None:
     """打 ``GameRegistry.create`` 这一缝：建局请求里的档位真的进了会话与下发体。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {
             "player_count": 2,
@@ -662,7 +671,7 @@ def test_the_registry_defaults_to_standard_108_without_a_deck_profile() -> None:
     """不传档位 = 内容包默认档；M5 之前每一局走的就是这条路。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {"player_count": 2, "ai": "random", "seed": 20261012, "timeout_seconds": None}
     )
@@ -675,7 +684,7 @@ def test_an_unknown_deck_profile_is_a_400_and_creates_no_session() -> None:
     """未知档位：HTTP 400，且 registry 里**不留半局会话**。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     status, body = _post_with_the_real_handler(
         registry,
         "/api/sessions",
@@ -1338,7 +1347,7 @@ def test_an_idle_poll_is_silent_until_the_deadline_answers_for_you() -> None:
     """
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {"player_count": 4, "ai": "random", "seed": 20261013, "timeout_seconds": 10.0}
     )
@@ -1452,8 +1461,11 @@ def test_the_respond_query_carries_no_second_target_stage() -> None:
     for seed in (31, 37, 43):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
         guard = 0
-        while session.pending is not None and guard < 400:
+        while not session.finished and guard < 400:
             guard += 1
+            if session.pending is None:
+                session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+                continue
             session.submit_answer(session.pending.legal_actions[0])
         for record in session.records():
             if getattr(record, "kind", None) != "query":
@@ -1486,9 +1498,12 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 seed=seed, ai="random", timeout_seconds=None, player_count=player_count
             )
             guard = 0
-            while session.pending is not None and guard < 400:
+            while not session.finished and guard < 400:
                 guard += 1
                 query = session.pending
+                if query is None:
+                    session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+                    continue
                 index = candidate_index(query)
                 payload = pending_payload(session)
                 assert payload is not None
@@ -2880,9 +2895,12 @@ def test_the_candidate_index_never_carries_rule_judgements() -> None:
     for seed in (13, 29):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
         guard = 0
-        while session.pending is not None and guard < 300:
+        while not session.finished and guard < 300:
             guard += 1
             query = session.pending
+            if query is None:
+                session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+                continue
             index = candidate_index(query)
             expected: dict[str, set[int]] = {}
             for action in query.legal_actions:
@@ -3530,7 +3548,7 @@ def test_the_session_view_carries_the_human_seats_skills() -> None:
     """
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     # 判据（未放宽）：人类座位发到**标准版**武将（界将的显示归票 19，名称解析仍读内容包表）。
     # M6 票 18 换池（版本 50 → 54）后 20261001 的人类是界夏侯惇，按同一判据
     # （人类座位发到**标准版**武将）重扫到 20261002；神吕蒙移动版进池（57 → 58）后
@@ -3563,7 +3581,7 @@ def test_the_session_view_keeps_a_suppressed_skill_for_the_button_icon() -> None
     """
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {
             "player_count": 2,
@@ -5192,7 +5210,7 @@ def _registry_with(session: Session):
     """把**已经驱动到目标询问**的会话挂进一个真注册表（HTTP 用例的进入姿势）。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     registry.sessions[session.session_id] = session
     return registry
 
@@ -8061,7 +8079,7 @@ def test_the_create_response_stops_at_the_end_of_game_start() -> None:
     """
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {"player_count": 8, "ai": "heuristic", "seed": 12, "timeout_seconds": None}
     )
@@ -8104,7 +8122,7 @@ def test_the_create_response_carries_a_pre_game_setup_snapshot() -> None:
     """
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = registry.create(
         {"player_count": 8, "ai": "heuristic", "seed": 12, "timeout_seconds": None}
     )
@@ -8173,7 +8191,7 @@ def test_a_game_start_max_hp_change_does_not_leak_into_the_opening_frame() -> No
     """
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     session = Session(
         seed=7,
         player_count=2,
@@ -8937,7 +8955,7 @@ def test_tag_deltas_reach_the_live_channel_with_labels_but_stay_out_of_records()
     from sgs_web.serve import GameRegistry
 
     session = Session(seed=7, ai="random", timeout_seconds=None, player_count=4)
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     first = registry.view(session, after=-1, logs_after=0)
     seat = session.human_seat
     card_id = session.engine.state.player(seat).hand[0]
@@ -9854,7 +9872,7 @@ def test_the_session_view_carries_incremental_narrative_by_the_record_cursor() -
     # 【天成】在**游戏开始时**就有一个选项询问 ⇒ 建局那一刻还没有任何 action 记录，
     # 叙事因此合法地为空。判据不放宽（"建局响应必须带叙事"），按仓纪律**重新选种**。
     session = Session(seed=12, ai="random", timeout_seconds=None, player_count=4)
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     first = registry.view(session, after=-1, logs_after=0)
     assert first["narrative"], "建局响应必须带叙事"
     assert all(entry["seq"] > -1 for entry in first["narrative"])
@@ -10101,11 +10119,22 @@ class _HarvestDriver:
         return query.legal_actions[0]
 
 
-def _harvest_game(*, nullify: bool = False, reverse: bool = False):
+def _harvest_game(
+    *,
+    nullify: bool = False,
+    reverse: bool = False,
+    dead_seat: int | None = None,
+    ask_policy: AskPolicy | None = None,
+):
     """构造一局 4 座局面并返回 ``(engine, driver)``：座位 0 手牌是五谷，牌堆有序。
 
     座位 1 / 2 的手牌按需放无懈（反无懈需要两张）。牌堆 = 其余实体牌，顺序即数据表顺序，
     故亮出的牌可预测；测试只比较"记录里亮出的集合 / 顺序"与载荷，不硬编码牌 id。
+
+    ``dead_seat`` 让一个座位在构造期就阵亡：五谷的目标表**只收存活角色**（票 19 的
+    "取 3 名目标"就是靠它造出来的），亮牌张数也是 3。``ask_policy`` 缺省是引擎口径
+    （``None`` ⇒ 引擎缺省 OFF）；票 19 的真会话用**网页缺省**（``auto_skip`` ON），
+    否则每个目标的无懈窗口都会问人类一次（`tests/test_web.py` 的库里口径是 OFF）。
     """
     from sgs.data import RuleConfig as _RuleConfig
 
@@ -10120,6 +10149,8 @@ def _harvest_game(*, nullify: bool = False, reverse: bool = False):
     if reverse:
         used.add(nullifies[1])
         seats[2] = SeatSpec(hand=(nullifies[1],))
+    if dead_seat is not None:
+        seats[dead_seat] = SeatSpec(alive=False)
     deck = tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id not in used)
     state = build_state(
         pack=pack,
@@ -10128,7 +10159,9 @@ def _harvest_game(*, nullify: bool = False, reverse: bool = False):
         turn_seat=0,
         rule_config=_RuleConfig(first_seat=0),
     )
-    engine = Engine.from_state(state, seed=1)
+    engine = Engine.from_state(
+        state, seed=1, ask_policy=AskPolicy() if ask_policy is None else ask_policy
+    )
     return engine, _HarvestDriver(nullify=nullify, reverse=reverse)
 
 
@@ -10274,12 +10307,16 @@ def test_a_nullify_window_in_a_harvest_resolution_still_carries_the_active_harve
     assert payload["harvest"]["current"] == harvest["current"]
 
 
-def _registry_view(session: Session, *, after: int = -1, logs_after: int = 0) -> dict:
-    """一次真 ``view()`` 载荷（只建一个空注册表，不登记会话、不落盘）。"""
+def _registry() -> object:
+    """一个空注册表（不登记会话、不落盘）：走到 ``view`` / ``answer`` / ``advance_clock`` 三条产品路由。"""
     from sgs_web.serve import GameRegistry
 
-    registry = GameRegistry(runs_dir="/tmp/unused")
-    return registry.view(session, after=after, logs_after=logs_after)
+    return GameRegistry(runs_dir="/tmp/unused")
+
+
+def _registry_view(session: Session, *, after: int = -1, logs_after: int = 0) -> dict:
+    """一次真 ``view()`` 载荷（只建一个空注册表，不登记会话、不落盘）。"""
+    return _registry().view(session, after=after, logs_after=logs_after)
 
 
 def test_the_view_payload_carries_the_active_harvest_state_with_an_ai_pick() -> None:
@@ -10358,6 +10395,177 @@ def test_the_view_harvest_derivation_is_cached_by_the_record_cursor(monkeypatch)
     engine.submit(fallback_action(second))
     _registry_view(session, after=payload["cursor"], logs_after=payload["log_seq"])
     assert len(scans) == 2, f"新记录之后应恰好再扫一次（实得 {len(scans)} 次）"
+
+
+# ---------------------------------------------------------------------------
+# 票 19：五谷**逐目标**可见 —— drive() 在每名目标取牌后交还控制权
+#
+# 生产事实（票 18 的残余缺口）：AI 目标的取牌在 `Session.drive()` 里一次驱动跑完，浏览器只
+# 收到最后一批记录。修法 = 接入层在**每名目标取牌后**让出一次（与票 14 的 L0 边界同一种
+# 机制），中间状态由下一次取增量带走。下面三条都走**真会话 + 真 GameRegistry**（answer /
+# advance_clock / view 三条产品路由），不造载荷。
+# ---------------------------------------------------------------------------
+
+
+def _harvest_pause_session(*, dead_seat: int | None = None) -> Session:
+    """真会话停在**人类（座位 0）自己的出牌询问**上；人类手里有【五谷丰登】。
+
+    参与者的询问策略取**网页缺省**（``auto_skip`` ON）：这是 `GameRegistry.create` 建出来的
+    会话语义（引擎库层缺省 OFF）。不打开它，每个目标的无懈窗口都会问人类一次，测试就走不到
+    "除了自己那一问之外没有任何 pending"的生产形状。
+    """
+    engine, _ = _harvest_game(dead_seat=dead_seat, ask_policy=AskPolicy(auto_skip=True))
+    session = _web_session_for(engine, human_seat=0)
+    session.drive()
+    assert session.pending is not None
+    assert session.pending.kind == QueryKind.PLAY_PHASE, session.pending.kind
+    return session
+
+
+def _post_action(
+    registry, session: Session, payload: dict, action: dict
+) -> dict:
+    """走 `GameRegistry.answer`（HTTP ``/answer`` 的那条路）提交一条**载荷原样**的候选。"""
+    return registry.answer(
+        session,
+        {"action": action},
+        after=payload["cursor"],
+        logs_after=payload["log_seq"],
+    )
+
+
+def _use_harvest_and_take_one(session: Session, registry) -> dict:
+    """人类用出五谷、并取走一张牌；返回**取牌那一次的应答视图**（票 19 的第一个中间视图）。"""
+    payload = registry.view(session, after=-1, logs_after=0)
+    use = next(
+        action
+        for action in payload["pending"]["legal_actions"]
+        if (action.get("card") or {}).get("type") == "harvest"
+    )
+    payload = _post_action(registry, session, payload, use)
+    pick = payload["pending"]
+    assert pick is not None and pick["kind"] == "SELECT_CARDS", pick
+    assert pick["harvest"]["current"] == 0
+    return _post_action(registry, session, payload, pick["legal_actions"][0])
+
+
+def _pause_views(registry, session: Session, *, limit: int = 8) -> tuple[list[dict], dict | None]:
+    """从"上一份视图已经把暂停点交出去"起，逐次取增量，收集**暂停点上的中间视图**。
+
+    返回 ``(中间视图列表, 结算结束后的第一份视图)``；后者用于断言"结算完就不再停"。
+    每一步都是产品路径：``advance_clock``（= GET 路由先驱动）+ ``view``。
+    """
+    views: list[dict] = []
+    cursor = session.next_cursor(-1)
+    for _ in range(limit):
+        if session.finished:
+            return views, None
+        registry.advance_clock(session)
+        payload = registry.view(session, after=cursor, logs_after=0)
+        cursor = payload["cursor"]
+        if payload["harvest"] is None:
+            return views, payload
+        views.append(payload)
+        if payload["pending"] is not None:
+            return views, payload
+    raise AssertionError(f"步数上限内五谷结算没有结束：{len(views)} 份中间视图")
+
+
+def _taken_cards(payload: dict) -> list[int | None]:
+    return [card["taken_by"] for card in payload["harvest"]["revealed"]]
+
+
+def test_each_harvest_target_pick_is_observable_in_a_view() -> None:
+    """票 19：AI 目标的取牌**每一张都能在一份视图里读到**（票 18 缺的断言）。
+
+    4 座、人类坐 0：人类自己取一张之后，其余三名 AI 各取一张。修法前这三张要等整段结算
+    跑完（``harvest`` 变 ``None``）才一起反映；现在每取一张就有一份视图，``taken_by``
+    恰好每次多一个非空项，且那份视图里 ``harvest`` 非空。
+    """
+    session = _harvest_pause_session()
+    registry = _registry()
+    first = _use_harvest_and_take_one(session, registry)
+
+    # 人类取牌那一次的应答就是第一个暂停点：没有 pending、`view.harvest` 半程状态。
+    assert first["pending"] is None, "人类取完牌应当停在逐目标暂停点上（不越过下一名目标）"
+    assert session.harvest_paused is False, "视图下发即消费暂停点（下一个请求才继续）"
+    assert first["harvest"] is not None
+    assert _taken_cards(first).count(None) == 3, "只拿走了人类自己那一张"
+
+    views, after_end = _pause_views(registry, session)
+    assert after_end is not None and after_end["harvest"] is None, "整段结算结束后不再有 harvest"
+    every = [first, *views]
+    assert len(every) == 4, f"4 名目标 ⇒ 4 份中间视图（实得 {len(every)}）"
+    assert len({view["harvest"]["key"] for view in every}) == 1, (
+        "同一个链键跨 X 个目标不变（票 18 的派生键）"
+    )
+
+    # 判据逐条：连续两次取增量之间，`revealed[*].taken_by` 至少多一个非空项。
+    taken = [_taken_cards(view) for view in every]
+    for before, after in zip(taken, taken[1:]):
+        gained = sum(
+            1 for old, new in zip(before, after) if old is None and new is not None
+        )
+        assert gained == 1, f"每一拍应当恰好多一张牌被拿走：{before} -> {after}"
+    assert [sum(1 for by in row if by is not None) for row in taken] == [1, 2, 3, 4]
+
+    # 目标条四态跟着走：已拿的翻成 taken，当前目标一路前移，最后一帧没有当前目标。
+    statuses = [[target["status"] for target in view["harvest"]["targets"]] for view in every]
+    assert statuses == [
+        ["taken", "current", "pending", "pending"],
+        ["taken", "taken", "current", "pending"],
+        ["taken", "taken", "taken", "current"],
+        ["taken", "taken", "taken", "taken"],
+    ], statuses
+    assert [view["harvest"]["current"] for view in every] == [1, 2, 3, None]
+
+
+def test_the_harvest_pause_stops_once_per_target() -> None:
+    """票 19：取 3 名目标 ⇒ **恰好 3 次**中间视图，不多不少；每名目标只停一次。
+
+    3 名目标靠"座位 3 阵亡"造出来（死者不进目标表，也不占亮牌份额）。多一次 = 暂停判据
+    停在同一条记录上两遍；少一次 = 某名目标的取牌被并进别人的视图里。
+    """
+    session = _harvest_pause_session(dead_seat=3)
+    registry = _registry()
+    first = _use_harvest_and_take_one(session, registry)
+    assert [target["seat"] for target in first["harvest"]["targets"]] == [0, 1, 2]
+
+    views, after_end = _pause_views(registry, session)
+    every = [first, *views]
+    assert len(every) == 3, f"3 名目标 ⇒ 恰好 3 份中间视图（实得 {len(every)}）"
+    assert [sum(1 for by in _taken_cards(view) if by is not None) for view in every] == [1, 2, 3]
+    # 最后一名目标取完 ⇒ 没有当前目标（目标条全绿），然后下一次取增量结算结束。
+    assert [view["harvest"]["current"] for view in every] == [1, 2, None]
+    assert [target["status"] for target in every[-1]["harvest"]["targets"]] == ["taken"] * 3
+    assert after_end is not None and after_end["harvest"] is None
+    # 每一份中间视图之间的记录窗口都**恰好**含一条取牌移动（不多停 = 不多走一步）。
+    assert session.harvest_paused is False, "结算结束之后不该挂着未消费的暂停点"
+
+
+def test_the_harvest_pause_is_pure_driving_throttling() -> None:
+    """票 19：暂停只改"这一次驱动停在哪"——**记录流逐字节不变**。
+
+    同种子同参与者两局：一局经 :class:`Session`（会逐目标让出），一局直接
+    ``Engine.run(...)``。记录流相等 ⇒ 暂停没有多问一次、没有重放一步、没有多抽一个随机数
+    （这些都会改变记录或让 AI 的子流错位）。
+    """
+    engine, _ = _harvest_game(ask_policy=AskPolicy(auto_skip=True))
+    session = _web_session_for(engine, human_seat=0)
+    session.participants = tuple(RandomPlayer(ai_stream(1, seat)) for seat in range(4))
+    drives = 0
+    while not session.finished:
+        session.drive()
+        drives += 1
+        assert drives < 10_000, "挂起驱动没有推进（活锁）"
+    assert drives > 1, "这一局应当至少让出一次（五谷的逐目标暂停）"
+
+    plain, _ = _harvest_game(ask_policy=AskPolicy(auto_skip=True))
+    plain.run(tuple(RandomPlayer(ai_stream(1, seat)) for seat in range(4)))
+
+    assert dump_journal(session.records()) == dump_journal(plain.records), (
+        "逐目标暂停是纯驱动节流：记录流必须与一次性跑法逐字节相同"
+    )
 
 
 @pytest.mark.parametrize(("reverse", "expected"), [(False, "invalid"), (True, "taken")])
@@ -12498,7 +12706,7 @@ def test_the_session_view_derives_skill_events_for_an_accepted_activation() -> N
     from sgs_web.serve import GameRegistry
 
     session = _session_at_the_fanjian_suit_step(timeout_seconds=None)
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
     body = registry.view(session, after=-1, logs_after=0)
 
     activation = _fanjian_activation_record(session)
@@ -13824,7 +14032,7 @@ def test_the_session_view_carries_life_loss_events_by_the_record_cursor() -> Non
     session = _kurou_session()
     _submit_kurou(session)
     anchor = session.engine.life_loss_events[0].seq
-    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry = _registry()
 
     first = registry.view(session, after=0, logs_after=0)
     assert "life_loss_events" in first, "视图必须与 damage_events 并列下发这一路"

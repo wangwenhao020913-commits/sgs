@@ -433,6 +433,19 @@ function dialogWantedKind(pending) {
   return persistentRevealPending(pending) ? DIALOG_KINDS.reveal : null;
 }
 
+/** 亮牌窗的**数据源**（table-ux-overhaul 票 19）：有询问用询问（交互面 + 载荷），
+ *  没有询问但五谷结算帧还活着时用视图级 `view.harvest`（只读展示）。
+ *
+ * 票 19 起接入层在每个目标取牌后让出一次驱动 ⇒ 空窗里 `pending` 是 `null`、而
+ * `view.harvest` 还带着半程状态。两者是**同一份**服务端派生（同一个链键），这里只
+ * 决定"这一屏按谁画"，不产生任何规则判断。返回 `null` = 这一屏没有亮牌可画。 */
+function dialogRevealSource() {
+  const pending = state.view ? state.view.pending : null;
+  if (pending) return pending;
+  const harvest = idleHarvestState();
+  return harvest ? { harvest } : null;
+}
+
 /** 弹窗实例键：**同一键 = 同一「步」的重复渲染**（保留折叠、只换内容）；
  *  换键 = 新的一问（关旧开新、清正文、折叠复位）。
  *
@@ -643,19 +656,22 @@ function applyDialogContentMode(kind) {
   // 在 `openDialogDom` / `updateDialogDom` 里已先写好，故两者一致。
   const persistent = dialogRevealMode() && kind === DIALOG_KINDS.reveal;
   const pending = state.view ? state.view.pending : null;
+  // 票 19：没有询问的空窗里数据源换成视图级 `view.harvest`（逐目标暂停的中间视图）；
+  // 有询问时 `dialogRevealSource()` 原样返回那份询问，行为一字不变。
+  const source = dialogRevealSource();
   state.dialog.hintOverride = null;
-  if (persistent && pending) {
+  if (persistent && source) {
     showOptionsHome();
     clearDialogReveal();
     if (reveal) {
       reveal.hidden = state.dialog.collapsed;
-      renderReveal(pending, {
+      renderReveal(source, {
         container: reveal,
         interactive: false,
         promptHint: false,
       });
     }
-    state.dialog.hintOverride = harvestWaitHint(pending);
+    state.dialog.hintOverride = harvestWaitHint(source);
     return;
   }
   clearDialogReveal();
@@ -774,7 +790,9 @@ function openDialogDom(kind) {
   const body = $("t-dialog-body");
   const title = $("t-dialog-title");
   if (!dialog || !body) return;
-  if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
+  // 票 19：没有询问的空窗里标题也读视图级 `view.harvest`（`dialogRevealSource` 有询问时
+  // 原样返回那份询问，故其余模板一字不变）。
+  if (title) title.textContent = dialogTitleFor(kind, dialogRevealSource());
   state.dialog.open = true;
   state.dialog.kind = kind;
   state.dialog.collapsed = false;
@@ -802,7 +820,9 @@ function updateDialogDom(kind) {
     openDialogDom(kind);
     return;
   }
-  if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
+  // 票 19：没有询问的空窗里标题也读视图级 `view.harvest`（`dialogRevealSource` 有询问时
+  // 原样返回那份询问，故其余模板一字不变）。
+  if (title) title.textContent = dialogTitleFor(kind, dialogRevealSource());
   state.dialog.kind = kind;
   applyDialogContentMode(kind);
   applyDialogCollapseChrome();
@@ -882,6 +902,10 @@ function syncPlaybackDialog(record) {
  */
 function syncDialog() {
   const pending = state.view ? state.view.pending : null;
+  // 票 19：**没有询问**、但五谷结算帧还活着（逐目标暂停的中间视图）⇒ 亮牌窗保持打开。
+  // 判据只读服务端的 `view.harvest`（见 `reveal.js:idleHarvestState`）；有询问时恒为
+  // `null`，下面每一条分支都与本票之前逐字相同。
+  const idle = pending ? null : idleHarvestState();
   // 只有**自己的**询问才在自己的屏幕上开弹窗：目标座位是 AI 时（人类是周瑜、目标是 AI），
   // 花色 / 盲挑这两问会出现在视图里，但它们不是给人类答的——不在这里开一个人工弹窗
   // （牌桌仍按 `selectionEnabled` 只读，等 AI 答完下一步）。
@@ -904,22 +928,31 @@ function syncDialog() {
   const settle = suitResultActive();
   const kind = settle
     ? DIALOG_KINDS.suit
-    : (state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending));
+    : (state.playback
+      ? null
+      : (idle
+        ? DIALOG_KINDS.reveal
+        : ((own || publicHarvest) ? dialogWantedKind(pending) : null)));
   if (!kind) {
     closeDialogDom();
     syncHeroModal();
     return;
   }
-  const key = settle ? "suit-result" : dialogKeyFor(kind, pending);
+  // 票 19 的空窗与询问共用同一个链键（`reveal:${harvest.key}`）：从"自己的取牌步"切到
+  // "等下一名目标"时不关窗重开，只换正文归属（`persistent` 变真）。
+  const key = settle
+    ? "suit-result"
+    : (idle ? `reveal:${idle.key}` : dialogKeyFor(kind, pending));
+  const persistentMode = persistent || Boolean(idle);
   if (key !== state.dialog.key || !state.dialog.open) {
     closeDialogDom();
     state.dialog.key = key;
-    state.dialog.persistent = persistent;
+    state.dialog.persistent = persistentMode;
     openDialogDom(kind);
     syncHeroModal();
     return;
   }
-  state.dialog.persistent = persistent;
+  state.dialog.persistent = persistentMode;
   updateDialogDom(kind);
   syncHeroModal();
 }

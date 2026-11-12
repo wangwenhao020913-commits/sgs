@@ -6161,6 +6161,7 @@ class Engine:
         participants: Sequence[Participant],
         *,
         stop_after_game_start: bool = False,
+        stop_when: Callable[[], bool] | None = None,
     ) -> tuple[JournalRecord, ...]:
         """推进到终局；每次询问交给 ``participants[actor]`` 应答。
 
@@ -6170,14 +6171,21 @@ class Engine:
         看不见那一刻 ⇒ 不带这个开关的驱动只能一路跑到下一个询问 / 终局。接入层
         （``sgs_web.session.Session.drive``）用它把**建局响应**截在"游戏开始时"。
 
-        缺省 ``False`` ⇒ 旧行为逐字节不变：金录像 / ``batch_games`` / ``ai_eval`` /
-        录像回放都不传它，``_started`` 的翻转对它们没有任何可见效果。
+        ``stop_when`` = **逐步骤的让出判据**（table-ux-overhaul 票 19）：每个 :meth:`_step`
+        之后问一次"要不要让出"，为真就返回（询问 / 终局两种返回不变）。判据只读引擎已有的
+        事实（记录流 / 结算栈）——它只改"这一次驱动停在哪"，不改记录流、随机数或询问条数。
+        接入层用它把五谷的逐目标取牌一段一段交给浏览器（每一段一份中间视图）。
+
+        两个开关缺省都关 ⇒ 旧行为逐字节不变：金录像 / ``batch_games`` / ``ai_eval`` /
+        录像回放都不传它们，``_started`` 的翻转与 ``stop_when`` 的询问对它们没有任何可见效果。
         """
         while not self.finished:
             if self.pending is None:
                 started = self._started
                 self._step()
                 if stop_after_game_start and self._started and not started:
+                    break
+                if stop_when is not None and stop_when():
                     break
                 continue
             query = self.pending

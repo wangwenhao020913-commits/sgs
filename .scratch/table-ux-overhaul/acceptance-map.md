@@ -87,7 +87,7 @@
 | Q16 转化牌与真牌同档 | 覆盖位 `SkillDef.need_card_tier=2`，无技能名名单 | §1 #9 转化提供者那条 + 账本行 1226 |
 | Q19/Q4 引擎 OFF ⇒ 零重录 | 金录像逐字节 + 网页会话 ON | `bash tools/check_goldens.sh` 47 条；§1 #10 三条 |
 | Q21 并发写者 | 单个实现者串行（本 run 一票一实现者） | 本表即过程证据（见 `map.md`） |
-| Q22 票数 | 用户签的是 14 票；评审发现 `Q6` 的业炎半无人接手 ⇒ 追加票 15（缺口 #庚）；用户实机报障后又追加票 16（缺口 #壬）⇒ **16 张票全 `resolved`** | `.scratch/table-ux-overhaul/issues/*.md` Status |
+| Q22 票数 | 用户签的是 14 票；评审发现 `Q6` 的业炎半无人接手 ⇒ 追加票 15（缺口 #庚）；用户实机报障后又追加票 16（#壬）/ 17–18（#癸）/ 19（#子）⇒ **19 张票全 `resolved`** | `.scratch/table-ux-overhaul/issues/*.md` Status |
 
 ## §4 金录像（行为有意变更 ⇒ 重录与实现同提交）
 
@@ -102,7 +102,7 @@
 
 | 条目 | 证据 | 状态 |
 |---|---|---|
-| 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 16 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS（覆盖 242 张 resolved） | ✅ |
+| 每票 `## Answer` 写：改动摘要 / 会红的既有断言 / 新增断言清单 / 门禁结果 | 19 张票全部有 `## Answer`；`tests/test_agent_skills.sh` 的 Answer 契约 PASS | ✅ |
 | 新增断言落在真实产出路径 | 票 09 的"回环"用例从真引擎 pending 取载荷；票 11 的同源断言直接调校验器；票 13 的除疠越池用例真跑执行器 | ✅ |
 | 前端行为变更过 `bash tests/smoke-web.sh` | 票 07/08/09/10/11/12/13/14 的 Answer 均记录 smoke-web PASS（票 14 1635→1690+ PASS / 0 FAIL） | ✅ |
 | 改 DOM API 形状的票要走 `bsk` 实机 | **未执行**：本机 bsk 的 cooperate 握手一直失败（所有 `browser_interact` / `navigate` 被 "requires the context returned by the latest cooperate sync" 拒绝）。已按仓规改为"配方 + 结束 turn 交用户"：票 07/08/09/10/13/14 的 `## Answer` 各带配方；功能面由 smoke-web + `tests/test_action_contract.py` 覆盖 | `[R]` 见 `map.md` 缺口 #戊 |
@@ -165,4 +165,4 @@
 | 【大雾】【狂风】在准备阶段被问 | `tests/test_hero_huo.py::test_dawu_and_kuangfeng_are_never_offered_at_turn_start`（修复前 256 次 TURN_START 面 → 0；基线 `3a37f57` 上同样 256 次 ⇒ 陈年缺陷）+ `::test_the_turn_start_expiry_still_runs_without_a_question` | 17 | ✅ |
 | 五谷亮牌面：目标条压住牌面 | 烟测 U-HV-02（`reveal-targets` 进流）+ `test_web_static` 静态判据 | 18 | ✅ |
 | 五谷：被拿走的牌不刷新 | 服务端 `view.harvest`（`tests/test_web.py` 的真会话视图断言）+ 烟测 U-HV-01/01b/01c/03a/03b/04 | 18 | ✅（人类自己取牌后可见） |
-| 五谷：**AI 目标**取牌仍要等结算结束才跳变（逐目标可见） | 设计已写进票 19（`Session.drive` 逐目标暂停）+ `map.md` 缺口 #癸；**用户 2026-11-11「点到为止」主动叫停**，票 19 保持 `open`、未开工 | 19 | ⏸ 未做（用户叫停） |
+| 五谷：**AI 目标**取牌仍要等结算结束才跳变（逐目标可见） | 引擎驱动判据 `Engine.run(stop_when=)` + `Session._harvest_pick_pause_due`（同一份 `harvest_state` 派生、进度 =（链键, 已拿数））+ `pause_delivered`（一次响应最多一个暂停点）+ 客户端空窗窗寿命（`idleHarvestState` / `dialogRevealSource`）。断言：`tests/test_web.py::test_each_harvest_target_pick_is_observable_in_a_view` / `::test_the_harvest_pause_stops_once_per_target`（3 名目标 ⇒ 恰好 3 次中间视图）/ `::test_the_harvest_pause_is_pure_driving_throttling`（记录流逐字节不变）+ 烟测 U-HV-05a–d + 按新节奏改写的 U2-R11/12/13 / U-HV-04 / M6-B1 | 19 | ✅ |

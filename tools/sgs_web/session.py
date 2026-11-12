@@ -11,15 +11,21 @@
 **驱动粒度（D16）**：一次 :meth:`Session.drive` 最多推进到**下一个暂停点或终局**，
 绝不"驱动到人类再次被问"——否则 AI 之间的长结算会把一个 HTTP 请求拖成几十秒。
 
-**暂停点**（table-ux-overhaul 票 14 起有三处，次序就是规则次序）：
+**暂停点**（table-ux-overhaul 票 14 / 19 起有四处，次序就是发生次序）：
 
 1. **L0 边界**——"游戏开始时"（``GAME_START``）派发完、第一回合的回合环还没起跑
    （引擎的 ``_started`` 由假翻真）。建局响应就止在这里：玩家看到的顺序是"安排座位 /
    初始化体力 / 发初始牌 → 游戏开始时"，AI 的第一个回合留给**下一次取增量**
    （现有的 ``after`` 游标机制，零新增协议）。这个停点只停**一次**——撞到之后
    :attr:`Session._l0_boundary_reached` 置真，同一局后面的驱动不再在这里停。
-2. **人类座位的询问**——``_HaltPlayer`` 抛 :class:`Halt` 让 ``engine.run()`` 退出来。
-3. **终局**。
+2. **五谷逐目标取牌**（票 19）——五谷结算里**又一名目标拿走了牌**（派生状态里
+   "已拿"的目标数 +1）的那一步之后让出：浏览器因此每一次取牌都拿到一份中间视图
+   （``view.harvest``），而不是等整段结算跑完才看到跳变。判据读记录流事实（见
+   :meth:`Session._harvest_pick_pause_due`），同一名目标只停一次；一局可以停多次。
+   暂停点由**下一次视图下发**消费（:meth:`Session.pause_delivered`），故一次 HTTP
+   响应里最多只有一个这样的停点。
+3. **人类座位的询问**——``_HaltPlayer`` 抛 :class:`Halt` 让 ``engine.run()`` 退出来。
+4. **终局**。
 
 **开局底稿**（票 14）：:attr:`Session.setup` 是**发牌前**（``build_initial`` 之后、
 ``_start`` 之前）的那一帧权威事实，只在 ``after < 0`` 的那份视图里下发，前端据此从
@@ -303,6 +309,15 @@ class Session:
         self.participants: tuple[Participant, ...] = tuple(players)
         # L0 边界只停一次：`pause_after_game_start` 关掉时等于"已经越过"（永不在那里停）。
         self._l0_boundary_reached = not pause_after_game_start
+        # 五谷逐目标暂停（table-ux-overhaul 票 19）。两件事实都住在会话上，都不是会话的
+        # 规则状态（不进记录流 / 侧车 / 金录像）：
+        #   ``_harvest_pause_mark`` = 已经让出过的那个五谷结算「链键 + 已拿数」——
+        #     同一条进度不二次停，换一局五谷结算（链键变了）自然重新起算；
+        #   ``_harvest_paused`` = 这个停点还没被任何一次视图下发交出去
+        #     （``serve.GameRegistry`` 据此不在同一趟响应里再推进一次，见
+        #     :meth:`pause_delivered`）。
+        self._harvest_pause_mark: tuple[str, int] | None = None
+        self._harvest_paused = False
         # **开局底稿必须在 drive() 之前冻结**（票 14）：此刻 `engine.state` 是
         # `build_initial` 的产物、`_start` 一条都没跑过——「游戏开始时」的技能（【天成】
         # 会改体力上限、摸牌）一跑，这份局面就再也回不来了。
@@ -323,6 +338,16 @@ class Session:
     def pending(self) -> Query | None:
         """当前待应答的询问；``None`` = 终局或尚未开始。"""
         return self.engine.pending
+
+    @property
+    def harvest_paused(self) -> bool:
+        """上一次 :meth:`drive` 停在五谷逐目标取牌的暂停点上、且还没被视图交出去。
+
+        ``True`` 时这一趟 HTTP 响应**已经**有中间状态可发了：``serve.GameRegistry``
+        不再推进（否则一次应答会把两个暂停点并进一份视图），由 :meth:`pause_delivered`
+        在视图下发后清掉。
+        """
+        return self._harvest_paused
 
     @property
     def log_seq(self) -> int:
@@ -416,20 +441,75 @@ class Session:
 
         L0 边界（票 14）在一局里只停**一次**：:attr:`_l0_boundary_reached` 为假时把
         ``stop_after_game_start`` 交给引擎，它一让出就置真并返回；之后的驱动不再停在那里。
+
+        五谷逐目标取牌（票 19）的停点交给引擎的 ``stop_when`` 判据：每名目标拿走牌之后
+        让出一次（见 :meth:`_harvest_pick_pause_due`）。它和 L0 边界是**同一种机制**：
+        停点住在引擎循环内部，外面看不见那一刻；会话只负责记住"这一趟停过了"。
+
+        ``run`` 正常返回只有三种原因：终局 / L0 边界 / 五谷逐目标暂停——每一种都是
+        "这一趟已经停过了"，故一律返回，不在同一趟里接着驱动。
         """
-        while not self.engine.finished and self.engine.pending is None:
-            stop_at_l0_boundary = not self._l0_boundary_reached
-            try:
-                self.engine.run(
-                    self.participants, stop_after_game_start=stop_at_l0_boundary
-                )
-            except Halt:
-                break
-            if stop_at_l0_boundary:
-                # ``run`` 正常返回只有两种：终局，或引擎在 L0 边界让出（``_started``
-                # 刚翻真、回合环一条都还没跑）。两种都算"这次已经停过了"。
-                self._l0_boundary_reached = True
-                return
+        if self.engine.finished or self.engine.pending is not None:
+            return
+        stop_at_l0_boundary = not self._l0_boundary_reached
+        try:
+            self.engine.run(
+                self.participants,
+                stop_after_game_start=stop_at_l0_boundary,
+                stop_when=self._harvest_pick_pause_due,
+            )
+        except Halt:
+            return
+        if stop_at_l0_boundary:
+            # ``run`` 在 L0 边界让出（``_started`` 刚翻真、回合环一条都还没跑）。
+            # 这一种要**记住**再也不会停在那里（一局只停一次）。
+            self._l0_boundary_reached = True
+
+    def _harvest_pick_pause_due(self) -> bool:
+        """五谷**又有一名目标拿走了牌** ⇒ 让出驱动一次（table-ux-overhaul 票 19）。
+
+        判据只读服务端已有的两件事实：**结算栈上还活着的五谷 ``RESOLVE`` 帧**（帧没了 =
+        结算完了，不必再停）与**记录流**（谁拿走了哪张）。两件都由 :func:`harvest_state`
+        派生——与 ``view.harvest`` / ``pending.harvest`` **同一份**（票 18 的服务端 D 方案，
+        连扫描缓存 ``harvest_cache`` 也是同一份），不是第二判据。这里只读它的
+        ``targets[*].status``：``taken`` 的目标数就是"已经取过牌的人数"。
+
+        - **一次取牌只停一次**：进度用 ``(链键, 已拿数)`` 记在 :attr:`_harvest_pause_mark`
+          上，同一份进度不二次停（与票 14 的 ``_l0_boundary_reached`` 同姿态：停过一次就
+          记下来，下一次驱动不再因同一条记录停）。五谷帧换了一张牌 / 换了一局 ⇒ 链键变，
+          进度自然重新起算。
+        - **有人类询问时不在这里停**（那时 ``run`` 的下一轮本来就会驱动到人类询问上）：
+          但**进度照样记下**——那一问的视图里已经带着这份派生（``view.harvest``），
+          再停一次只会多一份没有新信息的中间视图。
+        - **不改记录流 / 随机数 / 询问条数**：判据只读，让出的是"循环在哪一步退出"。
+          返回真不影响引擎状态：下一次 :meth:`drive` 从同一步的下一步继续。
+        """
+        # 延迟导入（与 `setup_snapshot` 同一条理由：projection 反向依赖本模块的 Session）。
+        from sgs_web.projection import harvest_state
+
+        harvest = harvest_state(self.engine, cache=self.harvest_cache)
+        if harvest is None:
+            # 没有活跃的五谷结算（帧已出栈 / 一张亮牌都没有）：没有可取牌的进度。
+            return False
+        taken = sum(1 for target in harvest["targets"] if target["status"] == "taken")
+        mark = (harvest["key"], taken)
+        if mark == self._harvest_pause_mark:
+            return False
+        self._harvest_pause_mark = mark
+        if taken == 0 or self.engine.pending is not None:
+            return False
+        self._harvest_paused = True
+        return True
+
+    def pause_delivered(self) -> None:
+        """一次视图下发把暂停点交出去了（票 19）：下一次 :meth:`drive` 才继续推进。
+
+        调用点只有 :meth:`sgs_web.serve.GameRegistry.view`（建局 / 取增量 / 应答三处共用
+        的那一个）。它让"一次 HTTP 响应最多交出一个中间视图"成为结构事实：应答里
+        ``submit_answer`` 已经停在一个取牌暂停点上，同一次响应的 ``advance_clock``
+        就不会再推进到下一个人。
+        """
+        self._harvest_paused = False
 
     def submit_answer(self, action: object) -> None:
         """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。

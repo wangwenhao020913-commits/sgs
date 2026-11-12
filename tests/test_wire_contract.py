@@ -210,8 +210,11 @@ def test_every_pending_of_a_real_session_is_wire_safe(seed: int, heroes: Any) ->
     )
 
     pendings = actions = card_ids = 0
-    while session.pending is not None and pendings < 200:
+    while not session.finished and pendings < 200:
         query = session.pending
+        if query is None:
+            session.drive()  # 五谷逐目标暂停（table-ux-overhaul 票 19）：没有挂起也要接着驱动
+            continue
         payload = pending_payload(session)
         assert payload is not None, f"seed={seed} seq={query.seq}: 挂起却没有载荷"
         where = f"seed={seed} seq={query.seq} kind={query.kind}"

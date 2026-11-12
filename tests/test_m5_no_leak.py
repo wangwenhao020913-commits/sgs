@@ -151,7 +151,11 @@ def test_the_human_payload_of_a_full_160_game_never_leaks_hands_identities_or_de
     lord_seen = False
     while not session.finished:
         query = session.pending
-        assert query is not None, "未终局却没有挂起询问"
+        if query is None:
+            # 五谷逐目标暂停（table-ux-overhaul 票 19）：没有挂起是**合法**态（结算还没跑完），
+            # 真客户端这时再取一次增量；这里再驱动一次。
+            session.drive()
+            continue
         snapshot = visible_snapshot(session)
         _assert_snapshot(snapshot, human_seat=session.human_seat)
         payload = pending_payload(session)
@@ -289,7 +293,9 @@ def test_the_human_log_records_never_name_hidden_card_moves_in_a_full_160_game()
         if session.finished:
             break
         query = session.pending
-        assert query is not None, "未终局却没有挂起询问"
+        if query is None:
+            session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+            continue
         after = session.next_cursor(after)
         session.submit_answer(_human_action(query))
 
@@ -318,6 +324,9 @@ def test_the_served_view_payload_filters_hidden_card_moves_for_the_human_seat() 
         pack=PACK,
     )
     while not session.finished:
+        if session.pending is None:
+            session.drive()  # 五谷逐目标暂停（票 19）：没有挂起也要接着驱动
+            continue
         session.submit_answer(_human_action(session.pending))
     view = GameRegistry().view(session, after=-1, logs_after=0)
     assert view["human_seat"] == session.human_seat

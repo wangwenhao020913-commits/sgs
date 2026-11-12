@@ -46,6 +46,25 @@ function viewHarvestState(pending) {
   return harvest;
 }
 
+/** 无询问期间的**视图级**五谷状态（table-ux-overhaul 票 19）。
+ *
+ * 票 19 让接入层在**每名目标取牌后**让出一次驱动：于是多出一种空窗——**没有待应答的
+ * 询问**、但五谷结算帧还活着、亮牌还在处理区。这时亮牌窗不能关（关了就要等整段结算
+ * 结束才看得见"谁拿走了哪张"，正是票 18 的残余缺口）。判据只读服务端派生的
+ * `view.harvest`，与 `pending.harvest` **同一份**：
+ *
+ *   - 没有亮牌 / `active === false` ⇒ `null`（没有可展示的结算，别开窗）；
+ *   - **刻意不要求 `current`**：最后一名目标取走牌之后没有当前目标，而那正是"全部拿完"
+ *     要显示的那一帧——`isHarvestActive`（询问面判据）仍保留"要有当前目标"的旧口径，
+ *     两者不是一回事。
+ */
+function idleHarvestState() {
+  const harvest = state.view && state.view.harvest;
+  if (!harvest || typeof harvest !== "object" || harvest.active === false) return null;
+  if (!Array.isArray(harvest.revealed) || !harvest.revealed.length) return null;
+  return harvest;
+}
+
 /** 亮牌模板的数据源：优先服务端派生的 **视图级** `harvest`（票 18），其次询问载荷的
  *  `harvest`，再次询问自带的 `revealed`。
  *
