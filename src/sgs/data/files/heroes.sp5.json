@@ -45,6 +45,56 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "pangtong_sp",
+      "name": "SP庞统",
+      "true_name": "庞统",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "sp5",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guolun",
+          "name": "过论",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "songsang",
+          "name": "送丧",
+          "skill_type": "LIMITED"
+        },
+        {
+          "id": "zhanji",
+          "name": "展骥",
+          "skill_type": "NORMAL",
+          "granted_by": "songsang"
+        }
+      ]
+    },
+    {
+      "id": "liuqi",
+      "name": "刘琦",
+      "true_name": "刘琦",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "sp5",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wenji",
+          "name": "问计",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "tunjiang",
+          "name": "屯江",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

@@ -7398,9 +7398,215 @@ _JIE_JIANYING = ActiveSkill(
 """界沮授移动版【渐营】的完整声明（① 的钩子 + ② 的预发动清单，同一个技能 id）。"""
 
 
+# ---------------------------------------------------------------------------
+# SP庞统【过论】（sp5-pangtong-liuqi 票 01；用户 2026-11-12 一次签）
+#
+#     过论
+#       出牌阶段限一次，你可以展示一名其他角色的一张手牌，然后你可以用你的一张牌交换
+#       此牌。若如此做，交换前点数小的一方摸一张牌。
+#
+# 三段的落点（票 01 §1.5 的询问剧本）：
+#
+# - **挑哪张手牌** = 庞统**盲挑**（Q3 = 对）：牌面主语是「你」，本仓对"选他人手牌里的一张"
+#   的既有读法就是**隐藏槽**（账本 L951：拆 / 顺 / 反馈同一选取面）⇒ ``PickCards`` 的
+#   ``face`` 指向目标、``reveal_hand=False``；
+# - **展示** = 挑中后一条 ``card_reveal``（公开事实、牌不动；样板 = 【火攻】，账本 L908）；
+# - **换不换** = 展示**之后**的一问（"你可以" ⇒ 必含放弃出口，账本 L1006）；住 ``effect``
+#   里手写（放 flow 第 3 步会让 ``Pass`` **取消整条流水线**，连展示一起没了——票 01 Q6）；
+# - **交换** = 经处理区的两次 ``LOSE`` + 两次 ``PUT``，两张都进**手牌**、不新增
+#   ``MoveReason.SWAP``（账本 L1096 缔盟的逐字口径；Q4 = 对）；
+# - **比点** = 交换**前**把两张牌的点数定格进帧私有（牌面写「交换前」）；点数相同 / 任一张
+#   无点数 ⇒ **无人摸**（"小的"要求严格小于；无点数按账本 L1086 fail-closed；Q5 = 对）。
+# ---------------------------------------------------------------------------
+
+GUOLUN = hero_skill_id("pangtong_sp", "guolun")
+"""SP庞统【过论】的全限定技能 id。"""
+
+_GUOLUN_REVEALED = "guolun_revealed"
+"""帧私有：展示过的那张（目标的手牌）——重入不重复展示。"""
+
+_GUOLUN_ASKED = "guolun_asked"
+"""帧私有：交换那一问已经问过（含"没有可换的牌 ⇒ 不问"这一档）。"""
+
+_GUOLUN_PICKED = "guolun_picked"
+"""帧私有：自己选中用来交换的那张（空元组 = 放弃）。"""
+
+_GUOLUN_RANKS = "guolun_ranks"
+"""帧私有：**交换前**定格的两张点数 ``(我的, 对方的)``。"""
+
+_GUOLUN_MOVED = "guolun_moved"
+"""帧私有：交换的四步里已经搬完几步（每一步都可能内联挂起）。"""
+
+_GUOLUN_DRAWN = "guolun_drawn"
+"""帧私有：比点摸牌已经做过（重入不重摸）。"""
+
+_ASK_GUOLUN_EXCHANGE = "guolun:exchange"
+
+
+def _guolun_targets(
+    state: GameState, frame: Any, owner: int, answers: Any
+) -> tuple[int, ...]:
+    """「一名其他角色」且**有手牌**（展示的前提；没手牌的不进池，G1）。"""
+    del frame, answers
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner and player.hand
+    )
+
+
+def _guolun_face(state: GameState, frame: Any, owner: int, answers: Any) -> int:
+    """第 2 步的选择面 = 第 1 步选中的那名角色（盲挑他的**手牌**）。"""
+    del state, frame, owner
+    return int(answers["seat"][0])
+
+
+def _guolun_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选恒一条骨架（出牌阶段限一次）；没有"其他 + 有手牌"的座位 ⇒ 不产出。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _guolun_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _guolun_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：展示 → 可选交换 → 过处理区交换 → 交换前的点数小的那一方摸一张。"""
+    state = host.state
+    owner = int(frame.data["source"])
+    target = _guolun_face(state, frame, owner, answers)
+
+    # ---- 段 1：展示（一次）---------------------------------------------------------
+    if _GUOLUN_REVEALED not in frame.data:
+        picked = tuple(int(card) for card in answers["card"])
+        if not picked:
+            return None
+        frame.data[_GUOLUN_REVEALED] = picked[0]
+        host.reveal_card(frame, target, state.card(picked[0]))
+    their_card = int(frame.data[_GUOLUN_REVEALED])
+
+    # ---- 段 2：可选交换（没有可换的牌 ⇒ 不发这一问，按"不换"结算）--------------------
+    if not frame.data.get(_GUOLUN_ASKED):
+        player = state.player(owner)
+        if not (player.hand or player.equip):
+            frame.data[_GUOLUN_ASKED] = True
+            frame.data[_GUOLUN_PICKED] = ()
+        else:
+            chosen = host.ask_selection(
+                frame,
+                owner=_ASK_GUOLUN_EXCHANGE,
+                key="exchange",
+                actor=owner,
+                timing=Timing.PHASE_PLAY_IDLE,
+                spec=SelectionSpec(
+                    zones=(Zone.HAND, Zone.EQUIP),
+                    total=(1, 1),
+                    optional=True,
+                ),
+                build_face=lambda: host.selection_face(
+                    owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+                ),
+            )
+            if host.suspended(chosen):
+                return "stay"
+            frame.data[_GUOLUN_ASKED] = True
+            frame.data[_GUOLUN_PICKED] = tuple(int(card) for card in (chosen or ()))
+    mine = tuple(frame.data.get(_GUOLUN_PICKED, ()))
+    if not mine:
+        return None
+    my_card = int(mine[0])
+
+    # ---- 段 3：交换前定格点数（牌面写「交换前」）--------------------------------------
+    if _GUOLUN_RANKS not in frame.data:
+        frame.data[_GUOLUN_RANKS] = (
+            state.card(my_card).rank,
+            state.card(their_card).rank,
+        )
+    mine_rank, their_rank = frame.data[_GUOLUN_RANKS]
+
+    # ---- 段 4：交换（两次 LOSE 扣置进处理区 + 两次 PUT 进对方手牌；账本 L1096）---------
+    steps: tuple[tuple[int, int, int, bool], ...] = (
+        (my_card, owner, owner, False),
+        (their_card, target, target, False),
+        (my_card, owner, target, True),
+        (their_card, target, owner, True),
+    )
+    moved = int(frame.data.get(_GUOLUN_MOVED, 0))
+    while moved < len(steps):
+        card_id, from_seat, to_seat, put = steps[moved]
+        control = host.move_in_frame(
+            frame,
+            state.refs((card_id,)),
+            to_zone=(
+                ZoneRef(Zone.HAND, to_seat) if put else ZoneRef(Zone.PROCESSING)
+            ),
+            reason=MoveReason.PUT if put else MoveReason.LOSE,
+            owner=to_seat if put else from_seat,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+        moved += 1
+        frame.data[_GUOLUN_MOVED] = moved
+
+    # ---- 段 5：交换**前**点数小的一方摸一张（相等 / 无点数 ⇒ 无人摸）------------------
+    if not frame.data.get(_GUOLUN_DRAWN):
+        frame.data[_GUOLUN_DRAWN] = True
+        if mine_rank is None or their_rank is None:
+            return None
+        if mine_rank < their_rank:
+            drawer = owner
+        elif their_rank < mine_rank:
+            drawer = target
+        else:
+            return None
+        control = host.draw_for_hand(frame, drawer, 1)
+        if control == "stay":
+            return "stay"
+    return None
+
+
+GUOLUN_FLOW = SkillFlow(
+    name="guolun",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_guolun_targets, key="seat"),
+        # 盲挑目标的一张**手牌**：应答者是庞统（``actor`` 缺省），选择面铺目标的隐藏槽。
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            key="card",
+            face=_guolun_face,
+            reveal_hand=False,
+        ),
+    ),
+    effect=_guolun_effect,
+)
+"""【过论】的两步流水线 + 手写主体：选座 → 盲挑其一张手牌 →（提交点）展示 / 交换 / 比点。"""
+
+_GUOLUN = ActiveSkill(
+    "pangtong_sp",
+    "guolun",
+    _guolun_offers,
+    flow=GUOLUN_FLOW,
+    requirement=(
+        "出牌阶段限一次，你可以展示一名其他角色的一张手牌，然后你可以用你的一张牌"
+        "交换此牌。若如此做，交换前点数小的一方摸一张牌。"
+    ),
+    step_requirements={
+        "seat": "选择一名其他角色",
+        # 逐步文案的键只读得到 ``"card"``（投影的既有约定）；这一句要同时覆盖"挑对方的手牌"
+        # 与"挑自己用来交换的牌"两步——前者是隐藏槽、后者是牌面直选，牌面已由展示公开。
+        "card": "展示其一张手牌（然后可选择用你的一张牌交换此牌）",
+        "exchange": "展示其一张手牌（然后可选择用你的一张牌交换此牌）",
+    },
+)
+"""SP庞统【过论】的声明（A 族；不翻预发动——次步读**别人手牌**的隐藏面，清单渲不出）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
-    # 鲁肃【缔盟】（神话再临·林包·移动版；jushou-lusu 票 02）：两步选人 → 弃 X 张（动态）
-    # → 双方手牌经处理区交换。
+    # SP庞统【过论】（sp5-pangtong-liuqi 票 01）：两步（选座 → 盲挑手牌）+ 手写主体。
+    _GUOLUN,
     _DIMENG,
     # 界沮授移动版【渐营】（yijiang-2014-round2 票 01 / W3）：① 钩子 + ② 转化共用**一个**
     # 技能 id（`hooks` + A 族流水线同一条声明，见 `_JIE_JIANYING` 的注释）。

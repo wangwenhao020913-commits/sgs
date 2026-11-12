@@ -458,6 +458,17 @@ SITES: dict[Site, Rule] = {
         1,
         "界黄盖【诈降】：本阶段自己使用的红色【杀】不能被【闪】响应（全场档；M6 票 17）",
     ),
+    (
+        "src/sgs/skills/hero_sp5.py",
+        "_wenji_unresponsive",
+        UNRESPONSIVE_TOKEN,
+        "add_tag(frame, Tag.UNRESPONSIVE)",
+    ): Rule(
+        "response-window-not-produced",
+        1,
+        "SP庞统 / 刘琦【问计】：本回合使用与此牌牌名相同的牌不能被其他角色响应"
+        "（全场档；sp5-pangtong-liuqi 票 02；窗口覆盖口径 = 账本 L936）",
+    ),
     # ---- 机制读取方（不是新站点：引擎按层消费符号的那几处）----
     (
         "src/sgs/effects/actions.py",

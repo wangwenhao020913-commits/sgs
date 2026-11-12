@@ -911,6 +911,39 @@ class Player(BaseModel):
     「本回合使用过的牌花色均相同」。作用域 = **本回合**：回合末由
     :meth:`Engine._clear_turn_effects` 清空。**不发 delta**：与 ``turn_card_entries`` 同姿态。
     """
+    play_phase_skipped_this_turn: bool = False
+    """本回合该座位的**出牌阶段被整体跳过**（sp5-pangtong-liuqi 票 05；刘琦【屯江】判据）。
+
+    为什么需要这个字段：跳过事实原本只住 ``Engine._turn_data["skip_play"]``（引擎私有），
+    且在 ``_phase_play_start`` 里被 ``pop`` 消费 —— 消费之后**连引擎自己也不再保留**，
+    技能读不到（票 05 §3.1 的 grep 证据）。用户 2026-11-12 签 Q6 = **引擎侧记录**。
+
+    写入唯一入口 = :meth:`Engine.skip_play_phase`（两个既有调用者：【乐不思蜀】的判定
+    后果与【神速】②；都只对**当前回合角色**生效）。作用域 = **本回合**：回合末由
+    :meth:`Engine._clear_turn_effects` 复位。**不发 delta**：与 ``discarded_this_turn``
+    同姿态（回放按同一批"跳过阶段"动作重建）。
+    """
+    designated_other_this_turn: bool = False
+    """本回合该座位**在自己的出牌阶段内用牌指定过其他角色为目标**（同上票 05）。
+
+    写入唯一入口 = :meth:`Engine.start_use`（与 ``_note_turn_card`` 同一个调用点，只认
+    "使用"、不认"打出"）：使用者是当前回合角色 ∧ 阶段是出牌阶段 ∧ 这次使用的目标里有
+    任何**别的**座位 ⇒ 置真。作用域 = **本回合**（回合末 ``_clear_turn_effects`` 复位）。
+    **不发 delta**：回放按同一批使用动作重建。
+
+    为什么不是"每次使用都记一堆目标"：判据只需要一个布尔（票 05 §4.1 #2），记目标集合会
+    把一局的使用目标全留在状态里，而没有任何读取方要它。
+    """
+    wenji_names: tuple[str, ...] = ()
+    """本回合**问计收到的那些牌的牌名**（sp5-pangtong-liuqi 票 02；刘琦【问计】）。
+
+    写入唯一入口 = :func:`sgs.skills.hero_sp5._wenji_effect`（把交来的那张牌的 ``type``
+    追加进来）；读取方 = 同一条技能的第二个钩子（``USE_AFTER_DESIGNATE_TARGET`` 上判
+    "这一次使用的牌名在不在集合里"，命中就挂 ``Tag.UNRESPONSIVE`` 全场档）。作用域 =
+    **本回合**（回合末 ``Engine._clear_turn_effects`` 复位）。用元组而不是集合：源码纪律
+    禁"for 迭代无序容器"，且这里真的只有一两条。**不发 delta**：与 ``discarded_this_turn``
+    同姿态（回放按同一次发动重建）。
+    """
     dingpin_barred_targets: list[int] = Field(default_factory=list)
     """本回合**不能再对其发动【定品】**的目标座位（去重、座位升序）。
 

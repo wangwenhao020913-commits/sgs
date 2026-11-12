@@ -48,8 +48,8 @@ from sgs.effects import (
     behavior_for,
     is_slash,
 )
-from sgs.resolution import Frame
-from sgs.state import GameState, Zone, ZoneRef
+from sgs.resolution import Frame, Tag, add_tag
+from sgs.state import FrameKind, GameState, MoveReason, Phase, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import (
@@ -60,7 +60,8 @@ from .catalog import (
     mark_skill_used_this_turn,
     skill_used_this_turn,
 )
-from .flow import FlowAnswers, PickCards, PickOption, SkillFlow
+from .flow import FlowAnswers, PickCards, PickOption, PickSeats, SkillFlow
+from .move_after import move_event
 
 __all__ = [
     "FENGPO",
@@ -71,6 +72,13 @@ __all__ = [
     "GONGQING",
     "GUANWEI",
     "GUANWEI_FLOW",
+    "SONGSANG",
+    "SONGSANG_FLOW",
+    "TUNJIANG",
+    "TUNJIANG_FLOW",
+    "WENJI",
+    "WENJI_FLOW",
+    "ZHANJI",
     "sp5_skill_definitions",
 ]
 
@@ -421,6 +429,333 @@ def _gongqing_bonus(state: GameState, ctx: Any, current: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# SP庞统【送丧】/ ☆【展骥】（sp5-pangtong-liuqi 票 01；用户 2026-11-12 一次签）
+#
+#     送丧
+#       限定技，当其他角色死亡时，若你已受伤，你可以回复1点体力；若你没有受伤，你可以
+#       增加1点体力上限。若如此做，你获得技能"展骥"。
+#
+#     ☆ 展骥
+#       锁定技，当你于出牌阶段内不因此技能摸牌时，你摸一张牌。
+#
+# 送丧：``DEATH_ON`` 钩子 + ``SkillType.LIMITED`` + 零步流水线（样板 = 庞统移动版【涅槃】；
+# 死亡时机的"其他角色"自校抄曹丕移动版【行殇】）。两支按 ``hp < hp_max`` **互斥穷尽**，
+# 故不是选项步：受伤 ⇒ 回复 1 点（``RECOVER`` 帧）；未受伤 ⇒ +1 上限（``MAXLIFE`` 帧，
+# **不同步体力**）。第三段 ``grant_skill`` 授予 ☆【展骥】——它是本仓**首例**"由限定技
+# 授予 ☆"（加载期闭集由票 03 放宽成 ``{觉醒技, 限定技}``）。
+#
+# 展骥：``MOVE_AFTER`` + ``gains_card`` 家族的**摸牌**判据（``MoveReason.DRAW``；票 24 裁定
+# "摸牌也算获得"）。锁定技 ⇒ ``locked=True``、不问（样板 = 界沮授移动版【矢北】）。
+# 「不因此技能摸牌」= 帧私有标志：``effect`` 在摸牌**之前**把它写进**同一个帧**，
+# ``draw_for_hand`` 把帧传进 ``move_in_frame`` ⇒ 内联派发用的是同一个帧、嵌套期间可见
+# （票 01 §3.5 的实现纪律；用户 2026-11-12 重申"摸一张 = 单独摸一张"，不是本次摸牌数 +1）。
+# ---------------------------------------------------------------------------
+
+SONGSANG = hero_skill_id("pangtong_sp", "songsang")
+"""SP庞统【送丧】的全限定技能 id。"""
+
+ZHANJI = hero_skill_id("pangtong_sp", "zhanji")
+"""SP庞统 ☆【展骥】的全限定技能 id（只经 ``grant_skill`` 获得）。"""
+
+_SONGSANG_STAGE = "songsang_stage"
+"""帧私有：送丧的执行阶段（``heal`` / ``maxlife`` / ``grant``）——先写再压帧，重入不重做。"""
+
+_SONGSANG_HEAL = "songsang:heal"
+_SONGSANG_MAXLIFE = "songsang:maxlife"
+_SONGSANG_GRANT = "songsang:grant"
+
+_ZHANJI_GUARD = "zhanji_guard"
+"""帧私有：本次摸牌**是展骥自己摸的**（嵌套派发期间置位，摸完清掉）。"""
+
+_ZHANJI_LAST = "zhanji_last"
+"""帧私有：已为哪一次摸牌事件追加过那"单独一张"（同一个帧会被多次移动复用 ⇒ 按事件键去重）。"""
+
+
+def _songsang_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**其他角色**死亡 ∧ 终局未判定（【行殇】的同一条自校，票 01 §2.7）。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    dead = frame.data.get("target")
+    if dead is None or int(dead) == int(owner):
+        return False
+    return not host.outcome_decided()
+
+
+def _push_recover(host: Any, frame: Frame, owner: int) -> None:
+    """压一个 ``RECOVER`` 子帧（回复 1 点；满体力时由帧夹住 ⇒ 回复 0）。"""
+    host.push_frame(
+        FrameKind.RECOVER,
+        {
+            "source": owner,
+            "targets": (owner,),
+            "card": None,
+            "use_timing": frame.data.get("use_timing"),
+            "amount": 1,
+        },
+        timing=Timing.RECOVER_VALUE,
+    )
+
+
+def _songsang_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：按体力状态二选一 → 授予 ☆【展骥】。阶段指针先写再压帧（重入不重做）。"""
+    del answers
+    owner = int(frame.data["skill_owner"])
+    stage = frame.data.get(_SONGSANG_STAGE)
+    if stage is None:
+        player = host.state.player(owner)
+        stage = _SONGSANG_HEAL if player.hp < player.hp_max else _SONGSANG_MAXLIFE
+        frame.data[_SONGSANG_STAGE] = stage
+    if stage == _SONGSANG_HEAL:
+        frame.data[_SONGSANG_STAGE] = _SONGSANG_GRANT
+        _push_recover(host, frame, owner)
+        return "stay"
+    if stage == _SONGSANG_MAXLIFE:
+        frame.data[_SONGSANG_STAGE] = _SONGSANG_GRANT
+        host.raise_hp_max(owner, 1)
+        return "stay"
+    if stage == _SONGSANG_GRANT:
+        frame.data[_SONGSANG_STAGE] = "songsang:done"
+        host.grant_skill(owner, ZHANJI, frame=frame)
+        return None
+    return None
+
+
+SONGSANG_FLOW = SkillFlow(name="songsang", steps=(), effect=_songsang_effect)
+"""【送丧】的零步流水线：只问"是否发动"，三段效果全住 ``effect`` 里。"""
+
+
+def _zhanji_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**自己**于**自己的出牌阶段**内**摸牌**（非展骥自己摸的 + 非无点数限制面）。
+
+    三个判据都读帧私有载荷 / 座位事实，不读"引擎今天怎么排"：
+    ① ``MoveEvent.reason is MoveReason.DRAW``（**摸牌**——不是"获得牌"：顺手牵羊 / 交出 /
+    置入装备区都不算，"摸牌"只认牌堆 → 手牌）；
+    ② 落点 = 自己的手牌（``to_zone``）；
+    ③ ``state.turn_seat == owner and state.phase is Phase.PLAY``（"于出牌阶段内"按默认读法
+    （二）④ 读**自己的**回合，别人的回合里被令摸牌不算）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    event = move_event(frame)
+    if event is None or event.reason is not MoveReason.DRAW:
+        return False
+    if event.to_zone.zone is not Zone.HAND or event.to_zone.seat != owner:
+        return False
+    state = host.state
+    if state.turn_seat != owner or state.phase is not Phase.PLAY:
+        return False
+    return not frame.data.get(_ZHANJI_GUARD)
+
+
+def _zhanji_event_key(event: Any) -> tuple[Any, ...]:
+    """一次摸牌事件的帧内去重键（同一个帧会被多次移动复用 ⇒ 不能只看"摸过没有"）。"""
+    return (event.to_zone.seat, event.card_ids)
+
+
+def _zhanji(host: Any, frame: Frame) -> Any:
+    """摸一张（**单独的一次摸牌**，不是把本次摸牌数 +1）。
+
+    用户 2026-11-12 重申："摸'一张'而非'多摸1张'，所以不是本次摸牌数+1，而是本次摸牌时，
+    单独摸一张"。落点 = 一次独立的 ``draw_for_hand``（它自己是一次新的 MOVE 事件）。
+
+    重入纪律（G7）：帧私有 ``_ZHANJI_LAST`` 记住"这一次事件已经追加过"，``_ZHANJI_GUARD``
+    在嵌套派发期间置位（展骥自己的那一次摸牌不再触发自己）——两者都按**事件**去重，
+    故同一个帧上的下一次摸牌仍会触发。
+    """
+    owner = int(frame.data["skill_owner"])
+    event = move_event(frame)
+    if event is None:
+        return None
+    key = _zhanji_event_key(event)
+    if frame.data.get(_ZHANJI_LAST) == key:
+        frame.data.pop(_ZHANJI_GUARD, None)
+        return None
+    frame.data[_ZHANJI_LAST] = key
+    frame.data[_ZHANJI_GUARD] = True
+    control = host.draw_for_hand(frame, owner, 1)
+    if control == "stay":
+        return "stay"
+    frame.data.pop(_ZHANJI_GUARD, None)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 刘琦【问计】/【屯江】（sp5-pangtong-liuqi 票 02；用户 2026-11-12 一次签）
+#
+#     问计
+#       出牌阶段开始时，你可以令一名其他角色交给你一张牌，然后你本回合使用与此牌牌名
+#       相同的牌不能被其他角色响应。
+#
+#     屯江
+#       结束阶段，若你本回合未跳过出牌阶段且你于本回合的出牌阶段内未使用牌指定过其他
+#       角色为目标，你可以摸X张牌（X为全场势力数）。
+#
+# 问计：``PHASE_PLAY_START`` 钩子（**本时机第一个提问型钩子**；票 02 §3.1 专项核实：
+# 复位段重入不会抹掉它落下的事实——事实只住回合作用域字段，派发进度住帧内游标）。
+# 第 2 步由**目标**作答（样板 = 锋·于禁【节钺】，账本 L1092"交给你一张牌由交出者挑"）。
+# 禁令 = 第二个 ``forced`` 钩子（``USE_AFTER_DESIGNATE_TARGET`` + ``Tag.UNRESPONSIVE``
+# 全场档，样板 = 界黄盖【诈降】；窗口覆盖口径 = 账本 L936"只关闭牌类响应窗口"）。
+#
+# 屯江：``PHASE_FINISH`` 钩子（零步；样板 = 界貂蝉【闭月】）+ 两条**回合作用域**的引擎侧
+# 事实（票 05；用户 2026-11-12 签 Q6 = 引擎侧、Q8 = 只数存活角色的势力种数）。
+# ---------------------------------------------------------------------------
+
+WENJI = hero_skill_id("liuqi", "wenji")
+"""刘琦【问计】的全限定技能 id。"""
+
+TUNJIANG = hero_skill_id("liuqi", "tunjiang")
+"""刘琦【屯江】的全限定技能 id。"""
+
+_WENJI_GIVEN = "wenji_given"
+"""帧私有：那张牌已经交到刘琦手里（重入不重搬）。"""
+
+_TUNJIANG_DRAWN = "tunjiang_drawn"
+"""帧私有：这一次发动已经摸过 X 张（重入不重摸）。"""
+
+
+def _wenji_targets(
+    state: GameState, frame: Any, owner: int, answers: Any
+) -> tuple[int, ...]:
+    """「一名其他角色」且**至少有 1 张牌**（交不出来的不算目标；座位序）。"""
+    del frame, answers
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive
+        and player.seat != owner
+        and (player.hand or player.equip)
+    )
+
+
+def _wenji_giver(state: GameState, frame: Any, owner: int, answers: Any) -> int:
+    """第 2 步的应答者 / 选择面 = 第 1 步选中的那名角色（L1092：由他挑一张交出）。"""
+    del state, frame, owner
+    return int(answers["seat"][0])
+
+
+def _wenji_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**自己的**出牌阶段开始（帧 ``source`` = 当前回合角色）∧ 有人交得出来。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    if host.state.turn_seat != owner:
+        return False
+    if frame.data.get("source") != owner:
+        return False
+    return bool(_wenji_targets(host.state, frame, owner, ()))
+
+
+def _wenji_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：把那张牌放进刘琦的手牌，并记下它的牌名（本回合内同名牌不可被响应）。"""
+    state = host.state
+    owner = int(frame.data["skill_owner"])
+    target = _wenji_giver(state, frame, owner, answers)
+    card = int(tuple(answers["card"])[0])
+    if not frame.data.get(_WENJI_GIVEN):
+        frame.data[_WENJI_GIVEN] = True
+        control = host.move_in_frame(
+            frame,
+            state.refs((card,)),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=target,
+        )
+        if control == "stay":
+            return "stay"
+    name = str(state.card(card).type)
+    player = state.player(owner)
+    if name and name not in player.wenji_names:
+        player.wenji_names = (*player.wenji_names, name)
+    return None
+
+
+WENJI_FLOW = SkillFlow(
+    name="wenji",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_wenji_targets, key="seat"),
+        # L1092：应答者 / 选择面 = 目标本人（自己的手牌 + 装备区，可见可选）。
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            key="card",
+            actor=_wenji_giver,
+            face=_wenji_giver,
+            reveal_hand=True,
+        ),
+    ),
+    effect=_wenji_effect,
+)
+"""【问计】的两步流水线：选一名其他角色 → 目标自己挑一张交给你。"""
+
+
+def _wenji_unresponsive_condition(host: Any, frame: Frame) -> bool:
+    """``USE_AFTER_DESIGNATE_TARGET``：本回合、自己使用的、牌名在禁令集合里的牌。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    if frame.data.get("source") != owner:
+        return False
+    if host.state.turn_seat != owner:
+        return False
+    card = frame.data.get("card")
+    if card is None:
+        return False
+    return str(card.type) in host.state.player(owner).wenji_names
+
+
+def _wenji_unresponsive(host: Any, frame: Frame) -> None:
+    """给本次使用打**全场档**不可响应（样板 = 界黄盖【诈降】；读取面 = 账本 L936）。"""
+    del host
+    add_tag(frame, Tag.UNRESPONSIVE)
+
+
+def _tunjiang_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：自己的结束阶段 ∧ 本回合没跳过出牌阶段 ∧ 没对别人用过牌。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    state = host.state
+    if state.turn_seat != owner:
+        return False
+    player = state.player(owner)
+    return not player.play_phase_skipped_this_turn and not (
+        player.designated_other_this_turn
+    )
+
+
+def _tunjiang_x(state: GameState) -> int:
+    """X = **全场势力数**：存活角色的**势力种数**（无势力不计；用户 2026-11-12 签 Q8）。"""
+    return len(
+        {player.kingdom for player in state.players if player.alive and player.kingdom}
+    )
+
+
+def _tunjiang_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：摸 X 张（X 在提交点现算；短摸 ⇒ 既有平局口径）。"""
+    del answers
+    if frame.data.get(_TUNJIANG_DRAWN):
+        return None
+    frame.data[_TUNJIANG_DRAWN] = True
+    owner = int(frame.data["skill_owner"])
+    control = host.draw_for_hand(frame, owner, _tunjiang_x(host.state))
+    if control == "stay":
+        return "stay"
+    return None
+
+
+TUNJIANG_FLOW = SkillFlow(name="tunjiang", steps=(), effect=_tunjiang_effect)
+"""【屯江】的零步流水线：只问"是否发动" → 摸 X 张。"""
+
+
+# ---------------------------------------------------------------------------
 # 技能声明（由 `sgs.skills.catalog` 末尾并入）
 # ---------------------------------------------------------------------------
 
@@ -442,6 +777,83 @@ _REQUIREMENT_GONGQING = (
     "【小于3】此伤害调整为1；【大于3】令此伤害+1。"
 )
 """【公清】的牌面逐字（用户 ``技能.txt``；``requirement`` 槽位）。"""
+
+_REQUIREMENT_SONGSANG = (
+    "限定技，当其他角色死亡时，若你已受伤，你可以回复1点体力；"
+    "若你没有受伤，你可以增加1点体力上限。若如此做，你获得技能“展骥”。"
+)
+"""【送丧】的牌面逐字（OL 官网 ``hero/429``；用户 ``技能.txt`` 的斜杠并置 = 两支的紧凑写法）。"""
+
+_REQUIREMENT_ZHANJI = "锁定技，当你于出牌阶段内不因此技能摸牌时，你摸一张牌。"
+"""☆【展骥】的牌面逐字（用户 2026-11-12 改后的文本；OL WIKI 同值）。"""
+
+_REQUIREMENT_WENJI = (
+    "出牌阶段开始时，你可以令一名其他角色交给你一张牌，"
+    "然后你本回合使用与此牌牌名相同的牌不能被其他角色响应。"
+)
+"""【问计】的牌面逐字（用户 ``技能.txt``）。"""
+
+_REQUIREMENT_TUNJIANG = (
+    "结束阶段，若你本回合未跳过出牌阶段且你于本回合的出牌阶段内"
+    "未使用牌指定过其他角色为目标，你可以摸X张牌（X为全场势力数）。"
+)
+"""【屯江】的牌面逐字（用户 ``技能.txt``）。"""
+
+
+_SONGSANG_DEF = SkillDef(
+    skill_id=SONGSANG,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.LIMITED,
+    hooks=(Hook(Timing.DEATH_ON, flow=SONGSANG_FLOW, condition=_songsang_condition),),
+    requirement=_REQUIREMENT_SONGSANG,
+)
+
+_ZHANJI_DEF = SkillDef(
+    skill_id=ZHANJI,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(
+            Timing.MOVE_AFTER,
+            handler=_zhanji,
+            condition=_zhanji_condition,
+        ),
+    ),
+    requirement=_REQUIREMENT_ZHANJI,
+)
+
+_WENJI_DEF = SkillDef(
+    skill_id=WENJI,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(Timing.PHASE_PLAY_START, flow=WENJI_FLOW, condition=_wenji_condition),
+        # 「不能被其他角色响应」= 帧标签（不是询问、不是修饰器；样板 = 界黄盖【诈降】）。
+        Hook(
+            Timing.USE_AFTER_DESIGNATE_TARGET,
+            handler=_wenji_unresponsive,
+            forced=True,
+            condition=_wenji_unresponsive_condition,
+        ),
+    ),
+    requirement=_REQUIREMENT_WENJI,
+    step_requirements={
+        "seat": "选择一名其他角色",
+        "card": "选择你自己的一张牌交给刘琦",
+    },
+)
+
+_TUNJIANG_DEF = SkillDef(
+    skill_id=TUNJIANG,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(Hook(Timing.PHASE_FINISH, flow=TUNJIANG_FLOW, condition=_tunjiang_condition),),
+    requirement=_REQUIREMENT_TUNJIANG,
+)
 
 _FENGPO_DEF = SkillDef(
     skill_id=FENGPO,
@@ -495,6 +907,10 @@ SP5_SKILL_DEFS: tuple[SkillDef, ...] = (
     _FENGPO_DEF,
     _GUANWEI_DEF,
     _GONGQING_DEF,
+    _SONGSANG_DEF,
+    _ZHANJI_DEF,
+    _WENJI_DEF,
+    _TUNJIANG_DEF,
 )
 """SP武将组5 的全部技能定义（马术住 :mod:`sgs.skills.target_change`，逐票追加）。"""
 

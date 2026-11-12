@@ -277,9 +277,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （同样只加技能、不加武将：启用版本 98 / 真名 64 都不变，装备 22 不变）。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 两将四技 ⇒ 206 → 210、武将技 182 → 186
     # （启用版本 98 → 100、真名 64 → 66；装备 22 不变）。
-    assert len(CATALOG) == 210
+    # sp5-pangtong-liuqi 票 01 / 02：SP庞统两将五技 ⇒ 210 → 215、武将技 186 → 191
+    # （启用版本 100 → 102、真名 66 → 67：庞统真名已在池、刘琦是新的；装备 22 不变）。
+    assert len(CATALOG) == 215
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 186
+    assert len(heroes) == 191
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -320,7 +322,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014-round2 票 11（P2）：界陈群移动版补【法恩】⇒ 180 → 181。
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 181 → 182。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技 ⇒ 182 → 186。
-    assert len(expected) == 186
+    # sp5-pangtong-liuqi 票 01 / 02：SP庞统三技 + 刘琦两技 ⇒ 186 → 191。
+    assert len(expected) == 191
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1379,6 +1382,28 @@ def _probe_state() -> GameState:
     return state
 
 
+def _own_turn_probe_state() -> GameState:
+    """sp5-pangtong-liuqi：展骥 / 问计 / 屯江 的正面对照都要求"**这是我的回合**的某个阶段"。
+
+    座位 0 手里有牌（问计的"交得出来"对象）、座位 2 也有牌；``turn_seat = ME`` ⇒ 把持有者
+    换成座位 2 后三条判据全部翻假（展骥的落点不是他、问计/屯江的回合不是他）。
+    【问计】的第二个钩子还要"这次使用的牌名在禁令集合里"——直接把 ``wenji_names`` 置成
+    这张【杀】的牌型（其余两条技能不读它）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hp=3),
+            SeatSpec(hand=(_PROBE_PROCESSING_SLASH,)),
+        ],
+        turn_seat=ME,
+        phase=Phase.PLAY,
+    )
+    state.player(ME).wenji_names = ("slash",)
+    return state
+
+
 def _bengkuai_probe_state() -> GameState:
     """【崩坏】的正面对照：**别人比我低**（ME 3 体力、座位 2 是 2 体力）。
 
@@ -1657,6 +1682,13 @@ def _probe_state_for(skill_id: str) -> GameState:
         state = _probe_state()
         state.player(ME).fengpo_bonus = (_PROBE_CHANNEL_SLASH, 1)
         return state
+    if skill_id in (
+        "hero.pangtong_sp.zhanji",
+        "hero.liuqi.wenji",
+        "hero.liuqi.tunjiang",
+    ):
+        # sp5-pangtong-liuqi：三条都要"这是我的回合 / 我的出牌阶段"，另给一份局面。
+        return _own_turn_probe_state()
     if skill_id == "hero.jie_huanggai.zhaxiang":
         return _zhaxiang_probe_state()
     if skill_id == "hero.haozhao.zhengku":
@@ -2013,6 +2045,29 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             ),
             _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
+        # sp5-pangtong-liuqi 票 01 / 02：四条带条件钩子。
+        # 展骥 = 摸牌事件（落点 = 自己的手牌、原因是 DRAW、局面是我的出牌阶段）；
+        # 问计 = ① 我的出牌阶段开始 ② 我使用的牌名在禁令集合里；
+        # 屯江 = 我的结束阶段且两条回合事实都未置位。
+        "hero.pangtong_sp.zhanji": (
+            _HookFrame(
+                source=ME,
+                move_event=MoveEvent(
+                    cards=(state.card(_PROBE_CHANNEL_SLASH),),
+                    from_zone=ZoneRef(Zone.DECK),
+                    to_zone=ZoneRef(Zone.HAND, ME),
+                    reason=MoveReason.DRAW,
+                    owner=ME,
+                    after_holder=ME,
+                    actor=ME,
+                ),
+            ),
+        ),
+        "hero.liuqi.wenji": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
+        ),
+        "hero.liuqi.tunjiang": (_HookFrame(source=ME),),
         # sp5-mayunlu-panjun 票 01：凤魄 = 触发（唯一目标 ⇒ targets 是**别人**）+ 清扫
         # （记账指向这张牌、source 是我）。
         "hero.mayunlu.fengpo": (
@@ -2105,6 +2160,12 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
         "任何角色被横置都要问陈群，把持有者换成别人后条件仍然成立，没有『我』可自校"
         "（与【奋威】/【定乱】/【行殇】同一类「不关于我」）"
     ),
+    "hero.pangtong_sp.songsang": (
+        "sp5-pangtong-liuqi 票 01（Q10 = 照【行殇】加 ``outcome_decided`` 闸）【送丧】："
+        "「当**其他角色**死亡时」与【行殇】逐字同形——条件写的是『死者 ≠ 我自己』，"
+        "把持有者换成别人后仍然成立（任何持有限定技座位的玩家都要响应别人死亡，没有『我』"
+        "可自校）；这一格与【行殇】/【法恩】同一类『不关于我』"
+    ),
     "hero.panjun.guanwei": (
         "sp5-mayunlu-panjun 票 02【观微】：触发条件关于**当前回合角色的出牌阶段末尾**"
         "（其本回合用过的牌同花色、≥2 张），不关于持有者——任何角色的出牌阶段结束都要问"
@@ -2151,6 +2212,7 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
         "hero.caopi_mobile.xingshang",
         "hero.chenqun.faen",
         "hero.jie_chenqun_mobile.faen",
+        "hero.pangtong_sp.songsang",
         "hero.panjun.guanwei",
     }, "豁免表增删必须同步本条（只许登记经过裁定的『不关于我』条件）"
     for skill_id, reason in EXEMPT_OWNER_SELF_CHECK.items():
@@ -2601,6 +2663,13 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.mayunlu.mashu": "锁定技",
     "hero.panjun.guanwei": "触发技能",
     "hero.panjun.gongqing": "锁定技",
+    # sp5-pangtong-liuqi 票 01 / 02：五技逐一归类（判据 = `_triggered_ids` /
+    # `_flow_backed_active_ids` / 零步 / 锁定四个机械谓词，不是手写印象）。
+    "hero.pangtong_sp.guolun": "主动技能",
+    "hero.pangtong_sp.songsang": "零步技能",
+    "hero.pangtong_sp.zhanji": "锁定技",
+    "hero.liuqi.wenji": "触发技能",
+    "hero.liuqi.tunjiang": "零步技能",
 
 }
 """171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
@@ -2632,11 +2701,14 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2014 票 03：一将成名-2014·顾雍【慎行】⇒ 主动技能 35 → 36。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】是"钩子 + 非空流水线"的 A 族技能
     # ⇒ 机械谓词落在**触发技能**格（主动技能因此**不加**）⇒ 26 → 27。
-    "主动技能": 36,
+    # sp5-pangtong-liuqi 票 01：SP庞统【过论】（A 族 + 两步流水线、无钩子）⇒ 36 → 37。
+    "主动技能": 37,
     # yijiang-2014-round2 票 20：标准 / 界【激将】从「候选提供者」移进「触发技能」
     # （声明级 `flow`：出牌阶段主动使用【杀】的入口）⇒ 27 → 29；候选提供者 5 → 3。
     # sp5-mayunlu-panjun 票 01 / 02：凤魄 / 观微（钩子 + 非空流水线）⇒ 29 → 31。
-    "触发技能": 31,
+    # sp5-pangtong-liuqi 票 02：刘琦【问计】（`PHASE_PLAY_START` 钩子 + 两步流水线）
+    # ⇒ 31 → 32。
+    "触发技能": 32,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
@@ -2649,7 +2721,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # `CATALOG` 条目）⇒ 39 → 40。
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（`PHASE_FINISH` + 各自的零步
     # 流水线，手写主体与 OL 顾雍【秉壹】同一份）⇒ 40 → 41。
-    "零步技能": 41,
+    # sp5-pangtong-liuqi 票 01 / 02：送丧（`DEATH_ON` + 零步）、展骥（锁定 + 零步→锁定格）、
+    # 屯江（`PHASE_FINISH` + 零步）⇒ 41 → 43。
+    "零步技能": 43,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2670,7 +2744,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【矢北】（锁定技 + 开局护甲 / 受伤后
     # 两条钩子、无流水线）⇒ 43 → 44。
     # sp5-mayunlu-panjun 票 01 / 02：马术 / 公清（纯修饰器）⇒ 44 → 46。
-    "锁定技": 46,
+    # sp5-pangtong-liuqi 票 01 / 02：展骥（锁定 + 帧标签钩子）⇒ 46 → 47。
+    "锁定技": 47,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -2882,7 +2957,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014-round2 票 11（P2）：界陈群移动版【法恩】（零步技能）⇒ 204 → 205。
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步技能）⇒ 205 → 206。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技（触发 2 / 锁定 2）⇒ 206 → 210。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 210
+    # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 215
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3094,8 +3170,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2014-round2 票 20：标准 / 界【激将】带声明级流水线 ⇒ 内 112 → 114、外 94 → 92。
     # sp5-mayunlu-panjun 票 01 / 02：凤魄 / 观微（触发技能，有流水线）⇒ 内 114 → 116；
     # 马术 / 公清（锁定技，纯修饰器）⇒ 外 92 → 94。
-    assert len(inside) == 116
-    assert len(outside) == 94
+    # sp5-pangtong-liuqi 票 01 / 02：过论（主动）/ 问计（触发）/ 送丧 / 屯江（零步）都是
+    # 步骤语言形态 ⇒ 内 116 → 120；展骥是锁定技 ⇒ 外 94 → 95。
+    assert len(inside) == 120
+    assert len(outside) == 95
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

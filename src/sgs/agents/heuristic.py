@@ -4044,6 +4044,26 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.0),
         "弃一张换其摸两张 + 一个额外出牌阶段：多一段用牌窗口，通常净正（代价是自己的一张牌）",
     ),
+    # sp5-pangtong-liuqi：SP庞统 / 刘琦（用户 2026-11-12 一次签）。
+    "hero.pangtong_sp.guolun": (
+        _constant(2.2),
+        "展示对方一张手牌 → 可换一张 → 点数小的一方摸一张：换牌本身是等价交换、"
+        "额外的收益是自己的牌点数更小（摸一张）或破坏对方手牌结构；通常净正",
+    ),
+    "hero.pangtong_sp.songsang": (
+        _constant(2.6),
+        "限定技：别的角色死亡时回 1 点体力或 +1 体力上限，并获得 ☆【展骥】"
+        "（之后出牌阶段每次摸牌都多摸一张）——整局一次的永久收益，恒发动",
+    ),
+    "hero.liuqi.wenji": (
+        _constant(2.0),
+        "出牌阶段开始时收一张 + 本回合同名牌不能被响应：净赚一张牌，且给自己一张"
+        "『穿透』的牌（对方只能挨打），通常净正",
+    ),
+    "hero.liuqi.tunjiang": (
+        _constant(2.0),
+        "结束阶段摸 X 张（X = 存活角色的势力种数）：无代价的纯收益，条件成立就发动",
+    ),
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
     # 神周瑜移动版（huo-shenzhouyu-mobile 票 01）：【琴音】是"全体 1 点"的收益（净收益按

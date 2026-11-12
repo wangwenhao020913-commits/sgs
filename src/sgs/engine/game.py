@@ -2112,6 +2112,17 @@ class Engine:
         # SP武将组5 潘濬【观微】：本回合"使用过的牌"的**花色**（逐次记，含无花色档；
         # 用户 2026-11 签 Q10 = 引擎侧记录）。打出不算（走 play_card，不经过本入口）。
         self._note_turn_card_suit(card, source)
+        # SP武将组5 刘琦【屯江】（sp5-pangtong-liuqi 票 05；用户 2026-11-12 签 Q6 = 引擎侧）：
+        # 「你于本回合的出牌阶段内使用牌指定过其他角色为目标」= 一条**回合作用域**的座位
+        # 事实。三个限定缺一不可：使用者是当前回合角色（别人的回合里被借刀一类不算
+        # "本回合的出牌阶段"）、阶段是出牌阶段（判定 / 摸牌阶段的技能使用不算）、目标里
+        # 有**别的**座位（只指定自己 / 无目标不算）。打出走 ``play_card``、不经过本入口。
+        if (
+            self.state.turn_seat == source
+            and self.state.phase is Phase.PLAY
+            and any(seat != source for seat in targets)
+        ):
+            self.state.player(source).designated_other_this_turn = True
         deal_bonus = 0
         if is_slash(behavior) and self.state.player(source).wine_active:
             deal_bonus = WINE_DAMAGE_BONUS
@@ -3644,9 +3655,16 @@ class Engine:
 
         只对**当前回合角色**生效——判定阶段本来就跑在该角色自己的回合里；跳过由
         :meth:`_phase_play_start` 消费（连阶段体一起不发，直奔弃牌阶段）。
+
+        sp5-pangtong-liuqi 票 05（用户 2026-11-12 签 Q6 = **引擎侧**）：除引擎私有的
+        ``_turn_data["skip_play"]``，同一步再落一条**回合作用域**的座位事实
+        （:attr:`~sgs.state.Player.play_phase_skipped_this_turn`）——前者在阶段起点被
+        ``pop`` 消费，消费之后技能读不到"这一步跑过没有"（刘琦【屯江】的判据）。
+        只写不读 ⇒ 没有屯江的对局行为与记录流逐字节不变。
         """
         if self.state.turn_seat == seat:
             self._turn_data["skip_play"] = True
+            self.state.player(seat).play_phase_skipped_this_turn = True
 
     def skip_judge_phase(self, seat: int) -> None:
         """让 ``seat`` 的**判定阶段**整体跳过（风包夏侯渊【神速】①）。
@@ -5425,11 +5443,17 @@ class Engine:
             player.damage_taken_this_turn = 0
             # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
             player.discarded_this_turn = False
+            # sp5-pangtong-liuqi 票 05 的两条**回合作用域**事实（刘琦【屯江】的判据；
+            # 用户 2026-11-12 签 Q6 = 引擎侧）。与上面那一批同一收尾点。
+            player.play_phase_skipped_this_turn = False
+            player.designated_other_this_turn = False
             # SP武将组5【观微】的「本回合使用过的牌花色」记录（Q10 = 引擎侧）与【凤魄】的
             # 记账：作用域 = 本回合 / 本阶段，回合末一并兜底清掉。
             player.turn_card_suits.clear()
             player.fengpo_bonus = None
             player.fengpo_used = None
+            # sp5-pangtong-liuqi 票 02 刘琦【问计】：本回合收到的牌名集合（禁令的读面）。
+            player.wenji_names = ()
             # jie-yijiang-2014-mobile 票 01【定品】的两条本回合事实：使用 / 弃置过的牌的
             # 大类记录与"不能再对其发动"的禁令，作用域都是**一个回合**（与上一位同一复位点）。
             player.turn_card_entries.clear()

@@ -868,8 +868,10 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                     )
                 )
 
-        # M6 票 06：☆ 的 ``granted_by`` 必须指向**同一武将**的一条**觉醒技**。
-        # 与技能引用闭合分开核对：觉醒技本身就在这份清单里，故不依赖"该技能已在
+        # M6 票 06：☆ 的 ``granted_by`` 必须指向**同一武将**的一条**一次性的技能**
+        # （觉醒技**或**限定技；sp5-pangtong-liuqi 票 03 用户 2026-11-12 签）。判据是
+        # "一次性转变"，不是类型名：SP庞统【送丧】是限定技，它授予 ☆【展骥】。
+        # 与技能引用闭合分开核对：被指向的技能本身就在这份清单里，故不依赖"该技能已在
         # ``CATALOG`` 里闭合"（那条只对启用的武将查）。
         declared = {skill.id: skill for skill in hero.skills}
         for skill_index, skill in enumerate(hero.skills):
@@ -881,18 +883,23 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                     LoadError(
                         file=file,
                         loc=f"{base}/skills/{skill_index}/granted_by",
-                        expected="同一武将技能清单里的一条觉醒技短 id",
+                        expected="同一武将技能清单里的一条觉醒技或限定技短 id",
                         got=repr(skill.granted_by),
                         rule_id="heroes.granted_by_unknown",
                     )
                 )
-            elif target.skill_type is not SkillType.AWAKENING:
+            elif target.skill_type not in (SkillType.AWAKENING, SkillType.LIMITED):
                 errors.append(
                     LoadError(
                         file=file,
                         loc=f"{base}/skills/{skill_index}/granted_by",
-                        expected=f"「{skill.granted_by}」是觉醒技（☆ 只能由觉醒技获得）",
+                        expected=(
+                            f"「{skill.granted_by}」是觉醒技或限定技"
+                            "（☆ 只能由一次性的技能获得）"
+                        ),
                         got=target.skill_type.value,
+                        # rule_id 保持旧名（既有红行的指纹；语义已放宽成"一次性技能"，
+                        # 改名会让既有断言与文档引用一起失效——票 03 §4.1 的裁定）。
                         rule_id="heroes.granted_by_not_awakening",
                     )
                 )

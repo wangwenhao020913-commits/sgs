@@ -949,8 +949,13 @@ def test_a_star_skill_declares_its_awakening_and_is_not_on_the_hero_card():
     )
 
 
-def test_granted_by_must_name_an_awakening_skill_of_the_same_hero():
-    """加载期校验：``granted_by`` 指向不存在的技能 / 非觉醒技，都必须报错。"""
+def test_granted_by_must_name_an_awakening_or_limited_skill_of_the_same_hero():
+    """加载期校验：``granted_by`` 指向不存在的技能 / 非一次性技能，都必须报错。
+
+    sp5-pangtong-liuqi 票 03（用户 2026-11-12 签「放宽」）：闭集从 ``{觉醒技}`` 扩到
+    ``{觉醒技, 限定技}`` —— 判据是"一次性转变"，不是类型名（SP庞统【送丧】是限定技，
+    它授予 ☆【展骥】）。指向**普通技**仍然报同一条 ``rule_id``。
+    """
     raw = load_heroes("jie").model_dump(mode="json")
     for hero in raw["heroes"]:
         if hero["id"] == "jie_xushu":
@@ -970,6 +975,20 @@ def test_granted_by_must_name_an_awakening_skill_of_the_same_hero():
     assert "heroes.granted_by_not_awakening" in {
         error.rule_id for error in excinfo.value.errors
     }
+
+
+def test_granted_by_may_name_a_limited_skill_of_the_same_hero():
+    """票 03 的正例：``granted_by`` 指向**限定技**是合法的（不抛 ``DataLoadError``）。
+
+    把【诛害】的类型改成 ``LIMITED`` 来构造"一次性技能"：校验只认"一次性"这一条，
+    与这条技能叫什么、在哪张表里无关。
+    """
+    raw = load_heroes("jie").model_dump(mode="json")
+    for hero in raw["heroes"]:
+        if hero["id"] == "jie_xushu":
+            hero["skills"][0]["skill_type"] = "LIMITED"
+            hero["skills"][2]["granted_by"] = "zhuhai"
+    validate_heroes(raw, file="heroes.jie.json")
 
 
 def test_hero_skill_ids_lookup_covers_the_jie_supplement():

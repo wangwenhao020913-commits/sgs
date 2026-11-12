@@ -794,7 +794,8 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // yijiang-2014 票 02：一将成名-2014 加陈群（真名「陈群」已在池里）⇒ 真名不变、版本 95 → 96。
   // yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 真名不变、版本 96 → 97。
   // yijiang-2014-round2 票 01（W3）：界沮授移动版（真名「沮授」已在池里）⇒ 真名不变、版本 97 → 98。
-  ui.state.heroCatalog.length === 66 && catalogVersions.length === 100,
+  // sp5-pangtong-liuqi 票 01 / 02：SP庞统（真名「庞统」已在池）+ 刘琦（新真名）⇒ 真名 67、版本 102。
+  ui.state.heroCatalog.length === 67 && catalogVersions.length === 102,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -25359,10 +25360,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const gotFlash10 = runUntil(() => flashNodeOf() !== null, 80);
   const node10 = flashNodeOf();
   const opacity10 = node10 ? Number(node10.style.opacity) : NaN;
-  check("U-DMG-10b 命中后挂着色子层（雷 = 冷白档，强度读该档 flash = 0.6），表壳 filter 始终为空",
+  // 强度读**磁盘 anim.ini** 的该档 `flash`（裁定 A：资产可自由改；缺键退回 0.6，与模块缺省同源）。
+  const thunder3Flash = Number.isFinite(Number(ui.animConfig.damage_fx_thunder_3_flash))
+    ? Number(ui.animConfig.damage_fx_thunder_3_flash)
+    : 0.6;
+  check("U-DMG-10b 命中后挂着色子层（雷 = 冷白档，强度读该档 flash），表壳 filter 始终为空",
     gotFlash10 && Boolean(node10)
       && hasClass(node10, "fx-flash") && hasClass(node10, "fx-flash-thunder")
-      && Math.abs(opacity10 - 0.6) < 1e-9 && shellFilter() === "",
+      && Math.abs(opacity10 - thunder3Flash) < 1e-9 && shellFilter() === "",
     `flash=${!!node10} class=${node10 && node10.className} `
       + `opacity=${opacity10} filter="${shellFilter()}"`);
   const removed10 = runUntil(() => flashNodeOf() === null, 120);
@@ -25460,7 +25465,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   loadDamageBatch([hpChange(46, 1, 4, 1)], [damageEvent(46, 0, 1, 3, "FIRE")]);
   step();
   const clock17 = shimClock;
-  const fire3 = windowShim.SgsFireFX.gameTiming(3).timeline;
+  const fire3 = windowShim.SgsFireFX.gameTiming(3, ui.animConfig).timeline;
   const impact17 = fire3.IMPACT * 1000;
   const blast17 = fire3.BLAST * 1000;
   check("U-DMG-17a 3 点火开演：层读数 nature = FIRE，第一支箭命中前后都还没有着色子层",
@@ -25536,7 +25541,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   loadDamageBatch([hpChange(55, 1, 4, 1)], [damageEvent(55, 0, 1, 4, "FIRE")]);
   step();
   const clock17f = shimClock;
-  const fire4 = windowShim.SgsFireFX.gameTiming(4).timeline;
+  const fire4 = windowShim.SgsFireFX.gameTiming(4, ui.animConfig).timeline;
   const impact17f = fire4.IMPACT * 1000;
   const blast17f = fire4.BLAST * 1000;
   const quiet17f = runClockTo(clock17f + impact17f + 80) && flashNodeOf() === null;
@@ -26171,11 +26176,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && thunderLanesLive === "[true,true,true]" && Boolean(thunderTick),
     `create=${thunderSfxLog.create} start=${thunderSfxLog.start} `
       + `lanes=${thunderLanesLive} ticks=${thunderSfxLog.tick.length}`);
+  // 4 档天雷的总时长按**磁盘 anim.ini** 现算（裁定 A：表现层资产可自由改，门禁只验形状）；
+  // 缺键时退回内置默认 2000ms（与 `SgsThunderFx` 的缺省同源）。
+  const thunderTotalMs = Number(ui.animConfig.damage_fx_thunder_4_total) || 2000;
   check("U-SFX-04d 雷的 cue 时间轴带 SKY_AT / EXPLODE / DURATION（4 档天雷），voice.dmg = 4",
     Boolean(thunderTick) && thunderTick.voice && thunderTick.voice.dmg === 4
       && thunderTick.timeline.SKY_AT > 0
       && thunderTick.timeline.EXPLODE > thunderTick.timeline.SKY_AT
-      && thunderTick.timeline.DURATION === 2,
+      && Math.abs(thunderTick.timeline.DURATION - thunderTotalMs / 1000) < 1e-9,
     `voice=${JSON.stringify(thunderTick && thunderTick.voice)} `
       + `timeline=${JSON.stringify(thunderTick && thunderTick.timeline)}`);
   runUntil(() => liveCount() === 0, 200);
