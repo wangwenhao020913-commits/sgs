@@ -53,7 +53,12 @@ from sgs.data import (  # noqa: E402
     validate_heroes,
 )
 from sgs.engine import Engine  # noqa: E402
-from sgs.state import ActivateSkill  # noqa: E402
+from sgs.skills import CATALOG  # noqa: E402
+from sgs.skills.zuoci import avatar_skill_rows, eligible_skill_ids  # noqa: E402
+from sgs.state import ActivateSkill, Marker, PlayerPublic  # noqa: E402
+from sgs_web.descriptions import skill_description  # noqa: E402
+from sgs_web.display import option_details, seat_display  # noqa: E402
+from sgs_web.narrative import _name_tables  # noqa: E402
 from sgs_web.projection import build_skills, seat_skill_display  # noqa: E402
 from support.positions import SeatSpec, build_state  # noqa: E402
 
@@ -115,10 +120,10 @@ def _errors(raw: dict[str, Any]) -> tuple[LoadError, ...]:
 @pytest.fixture(autouse=True)
 def _fresh_caches() -> Iterator[None]:
     """清掉进程级缓存：两个键都含 ``pack_id``，而 DIY 表只在**本测试**里存在。"""
-    for cached in (hero_card_skill_ids, hero_placement_decls):
+    for cached in (hero_card_skill_ids, hero_placement_decls, _name_tables):
         cached.cache_clear()
     yield
-    for cached in (hero_card_skill_ids, hero_placement_decls):
+    for cached in (hero_card_skill_ids, hero_placement_decls, _name_tables):
         cached.cache_clear()
 
 
@@ -131,13 +136,26 @@ def _install(
     """把加载面换成"既有武将表 + 这张 DIY 表"（**不进** ``HERO_SUPPLEMENT_PACK_IDS``）。"""
     table = _validate(raw if raw is not None else _diy_raw())
     existing = load_hero_tables() if keep_existing else ()
+    tables = (*existing, table)
     monkeypatch.setattr(
         "sgs.data.loader.load_hero_tables",
-        lambda pack_id="standard": (*existing, table),
+        lambda pack_id="standard": tables,
     )
-    for cached in (hero_card_skill_ids, hero_placement_decls):
+    # 叙事模块在导入期直接绑定了这个函数，按名补丁才算数（`sgs.data.loader` 那份读不到）。
+    monkeypatch.setattr(
+        "sgs_web.narrative.load_hero_tables",
+        lambda pack_id="standard": tables,
+    )
+    for cached in (hero_card_skill_ids, hero_placement_decls, _name_tables):
         cached.cache_clear()
     return table
+
+
+def _installed(
+    monkeypatch: pytest.MonkeyPatch, raw: dict[str, Any] | None = None
+) -> tuple[HeroTable, ...]:
+    """装好的**加载面**本身（`option_details` / `seat_display` 读 `heroes=` 的那一份）。"""
+    return (*load_hero_tables(), _install(monkeypatch, raw))
 
 
 # ---------------------------------------------------------------------------
@@ -342,3 +360,144 @@ def test_an_empty_explicit_skill_id_is_a_structural_error() -> None:
 
     assert [error.rule_id for error in errors] == ["structure.string_too_short"]
     assert errors[0].loc == "/heroes/0/skills/0/skill_id"
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 票 07：展示层名字映射 / 化身候选面读 hero_card_skill_id
+# ---------------------------------------------------------------------------
+
+
+def test_a_diy_entries_option_details_carry_the_referenced_skill_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """天成技能行：``text`` 是「武圣」、``skill_id`` 是被引用的全限定 id，不是 DIY 行键。
+
+    选项 **id** 本来就由 :func:`sgs.data.hero_card_skill_ids` 给出（正确）；坏掉的是
+    ``option_details`` 自己按短 id 建的**名字表**——于是整行退回 id 当文本、描述丢失。
+    """
+    tables = _installed(monkeypatch, _diy_raw(short_id="my_wusheng"))
+    query = SimpleNamespace(
+        options=(REUSED_SKILL,), hero_card=SimpleNamespace(hero_id="myhero")
+    )
+
+    rows = option_details(query, heroes=tables)
+
+    assert [row["text"] for row in rows] == ["武圣"]
+    assert [row["skill_id"] for row in rows] == [REUSED_SKILL]
+    assert rows[0]["description"] == skill_description(REUSED_SKILL)
+    assert "my_wusheng" not in repr(rows), "DIY 行键不是技能 id，不许出现在展示行里"
+    assert "hero.myhero.my_wusheng" not in repr(rows), "短 id 派生的幽灵 id 不许出现"
+
+
+def _player_with_marker() -> PlayerPublic:
+    """一个**只挂一条标记**的座位（``seat_display`` 的 ``players`` 也要它自己）。"""
+    return PlayerPublic(
+        seat=0,
+        hp=4,
+        hp_max=4,
+        hand_count=0,
+        alive=True,
+        equip=(),
+        judge=(),
+        hero="myhero",
+        markers=(
+            Marker(
+                name="测试标记",
+                source_seat=0,
+                source_skill_id=REUSED_SKILL,
+                count=1,
+            ),
+        ),
+    )
+
+
+def test_a_marker_from_a_diy_hero_names_the_referenced_skill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """标记悬停的来源名：按**解析后**的全限定 id 反查「武圣」，不是末段短 id。"""
+    tables = _installed(monkeypatch, _diy_raw(short_id="my_wusheng"))
+    player = _player_with_marker()
+
+    payload = seat_display(player, heroes=tables, players=(player,))
+
+    assert [item["source_label"] for item in payload["markers"]] == [
+        "座位 1 自制武将·武圣"
+    ]
+
+
+def test_a_diy_hero_has_avatar_candidates_that_exist_in_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """化身候选面：这张牌给出的每个 id 都必须是 ``CATALOG`` 里的真技能（不是短 id 派生的）。"""
+    _install(monkeypatch, _diy_raw(short_id="my_wusheng"))
+
+    rows = avatar_skill_rows("myhero", pack_id="standard")
+
+    assert rows == ((REUSED_SKILL, True),)
+    assert all(skill_id in CATALOG for skill_id, _ in rows), "化身候选必须是可以解析的技能 id"
+    assert eligible_skill_ids("myhero", pack_id="standard") == (REUSED_SKILL,)
+
+
+def test_the_narrative_name_table_keys_the_referenced_skill_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """叙事名字表：显式引用按**解析后**的 id 建键，不留短 id 派生的幽灵键。"""
+    _install(monkeypatch, _diy_raw(short_id="my_wusheng"))
+
+    _, skill_names = _name_tables("standard")
+
+    assert skill_names[REUSED_SKILL] == "武圣"
+    assert "hero.myhero.my_wusheng" not in skill_names, (
+        "显式引用不该在名字表里多出一个短 id 派生的幽灵键（名字表的两半必须同一口径）"
+    )
+
+
+def _short_id_derivation(hero: Any, skill: Any) -> str:
+    """**旧口径**：``hero.<武将>.<短 id>``（票 04 前的派生；反向检查用）。"""
+    return hero_skill_id(hero.id, skill.id)
+
+
+def _restore_short_id_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把三个读取方绑定的派生口临时换回短 id 重拼，并清掉名字表缓存。"""
+    for target in (
+        "sgs_web.display.hero_card_skill_id",
+        "sgs.skills.zuoci.hero_card_skill_id",
+        "sgs_web.narrative.hero_card_skill_id",
+    ):
+        monkeypatch.setattr(target, _short_id_derivation)
+    _name_tables.cache_clear()
+
+
+def test_the_sweep_assertions_discriminate_the_old_short_id_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """反向①：派生口换回短 id ⇒ 三处观测回到**旧坏值**（证明上面的断言不空转）。
+
+    同一条读取路径，只要派生口退回 ``hero.<武将>.<短 id>``，名字 / 说明 / 化身候选 / 叙事
+    键就一起坏掉。它守的是**反例的判别力**：若夹具退回 ``short_id="wusheng"``（短 id 恰好
+    等于被引用技能的末段），短 id 派生就不再出错，本测试随即变红，提醒"这张表不再是反例"。
+    （修复本身被改回就地重拼时，红的是那三条真断言，不是这一条。）
+    """
+    tables = _installed(monkeypatch, _diy_raw(short_id="my_wusheng"))
+    _restore_short_id_derivation(monkeypatch)
+
+    query = SimpleNamespace(
+        options=(REUSED_SKILL,), hero_card=SimpleNamespace(hero_id="myhero")
+    )
+    row = option_details(query, heroes=tables)[0]
+    assert row["text"] == REUSED_SKILL, "旧口径：整串 id 当名字"
+    assert row["description"] is None
+    assert row["skill_id"] is None
+
+    player = _player_with_marker()
+    payload = seat_display(player, heroes=tables, players=(player,))
+    assert [item["source_label"] for item in payload["markers"]] == [
+        "座位 1 自制武将·wusheng"
+    ], "旧口径：短 id 当名字"
+
+    assert avatar_skill_rows("myhero", pack_id="standard") == (
+        ("hero.myhero.my_wusheng", True),
+    ), "旧口径：化身候选指向不存在的 id"
+    assert "hero.myhero.my_wusheng" in _name_tables("standard")[1], (
+        "旧口径：叙事名字表多一个幽灵键"
+    )

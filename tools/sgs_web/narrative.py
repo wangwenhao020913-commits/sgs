@@ -38,7 +38,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, Final
 
-from sgs.data import IDENTITY_LABELS, hero_skill_id, load_content_pack, load_hero_tables
+from sgs.data import IDENTITY_LABELS, hero_card_skill_id, load_content_pack, load_hero_tables
 from sgs.engine import record_json
 from sgs.state import CardRef
 
@@ -867,7 +867,9 @@ def _name_tables(pack_id: str) -> tuple[dict[str, str], dict[str, str]]:
     for table in tables:
         for hero in table.heroes:
             for skill in hero.skills:
-                skill_names[hero_skill_id(hero.id, skill.id)] = skill.name
+                # 票 07：与武将面 / 候选面同一口径——条目可能带显式 skill_id，名字表按
+                # 数据层唯一派生口建键，否则会多出一个短 id 派生的幽灵键。
+                skill_names[hero_card_skill_id(hero, skill)] = skill.name
     for card_type in load_content_pack(pack_id).card_types:
         skill_names[f"equip.{card_type.id}"] = card_type.name
     return hero_names, skill_names

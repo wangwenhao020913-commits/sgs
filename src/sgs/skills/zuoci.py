@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import SkillType, hero_by_id, hero_skill_id
+from sgs.data import SkillType, hero_by_id, hero_card_skill_id, hero_skill_id
 from sgs.timing import Timing
 
 from .catalog import MATCH_OWNER_KEY, AppearanceKind, CarrierKind, Hook, SkillDef
@@ -89,7 +89,9 @@ def avatar_skill_rows(
     if hero is None:
         return ()
     return tuple(
-        (hero_skill_id(hero.id, skill.id), skill.skill_type is SkillType.NORMAL)
+        # 票 07：候选 id 走数据层唯一派生口——条目可能带显式 skill_id（引用别的武将名下
+        # 已登记的技能），按短 id 重拼会给出一个不在 CATALOG 里的幽灵 id，化身牌就选不到。
+        (hero_card_skill_id(hero, skill), skill.skill_type is SkillType.NORMAL)
         for skill in hero.skills
         if skill.granted_by is None
     )
