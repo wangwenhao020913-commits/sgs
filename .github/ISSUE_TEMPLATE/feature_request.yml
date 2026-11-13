@@ -1,0 +1,37 @@
+name: 功能 / 规则建议
+description: 新武将、新机制、界面与工程改进
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 想做什么
+      description: 一句话说清目标与动机。
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 属于哪一类
+      options:
+        - 新武将 / 新技能
+        - 规则引擎（结算 / 时机 / 投影）
+        - 网页牌桌 / 交互
+        - AI
+        - 文档 / 工程 / 测试
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: 一手出处
+      description: |
+        规则 / 技能类必须有牌面原文或官方规则集出处（`开发文档/` 与 `NOTICE` 的口径：
+        没有出处的裁定不收）。插件 / 平台差异请注明平台与版本。
+  - type: textarea
+    id: scope
+    attributes:
+      label: 影响面
+      description: |
+        会动到哪些判据？会改金录像的字节吗？如果会，请说明要重录哪几条、为什么。

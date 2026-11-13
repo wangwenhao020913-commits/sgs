@@ -36,8 +36,8 @@ if [ "$QUIET" -eq 1 ]; then
   LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sgs-gate.XXXXXX")"
 fi
 
-# 门禁本身跑得动，但"提交 / 合并时自动跑"靠的是 core.hooksPath。没装 = 只有人手动跑时才跑，
-# 而本仓没有 CI——"没人跑它等于零"（见 .githooks/pre-commit 的注释）。
+# 门禁本身跑得动，但"提交 / 合并时自动跑"靠的是 core.hooksPath。没装 = 只剩 CI 那一份
+# 信号（2026-11-13 起 `.github/workflows/ci.yml` 跑的就是本脚本；见 .githooks/pre-commit）。
 # 放在**开头**：先提醒再跑，别让 agent 等完三分钟才看到。
 if [ "$(git -C "$ROOT" config --get core.hooksPath || true)" != ".githooks" ]; then
   echo "⚠️  提醒：core.hooksPath 未指向 .githooks —— 改动提交 / 合并时不会自动触发本门禁。"

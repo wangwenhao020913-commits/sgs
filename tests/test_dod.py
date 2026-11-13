@@ -372,9 +372,34 @@ def test_the_gate_passes_when_scripts_and_pytest_pass(tmp_path):
 
 
 def test_there_is_no_second_gate_entry():
+    """唯一门禁仍是 `tests/run_all.sh`。**2026-11-13 起允许 CI**，但只许当它的调用方。
+
+    开源收口（`06`（§5「程序化约定与偏离一手」）§5.16）把"本仓库无 CI"这条改掉了：
+    公开仓库需要一个**外部**的红 / 绿信号，否则贡献者只能信本地 hook。变的只有入口位置，
+    判据不变——CI 里必须出现 `bash tests/run_all.sh`，且**自己不许出现 `pytest`**
+    （下面的机械扫描仍在管这条：唯一调用 pytest 的脚本只能是 run_all.sh）。
+    """
     for name in SECOND_GATE_FILES:
         assert not (ROOT / name).exists(), f"不得新增第二个门禁入口：{name}"
-    assert not (ROOT / ".github" / "workflows").exists(), "本仓库无 CI；门禁只有 run_all.sh"
+    workflows = ROOT / ".github" / "workflows"
+    if workflows.exists():
+        yamls = sorted(workflows.glob("*.yml"))
+        assert yamls, f"`.github/workflows` 在但没有 workflow：{sorted(workflows.iterdir())}"
+        for path in yamls:
+            text = path.read_text(encoding="utf-8")
+            assert "tests/run_all.sh" in text, (
+                f"CI 必须跑唯一门禁（`bash tests/run_all.sh`），实际没有：{path.name}"
+            )
+            # 注释里提到 pytest 是允许的（解释"门禁只认 .venv 里的那个"）；
+            # **不许的是自己跑它**——所以先剥掉整行注释，再看剩下的还有没有 pytest。
+            commands = "\n".join(
+                line
+                for line in text.splitlines()
+                if not line.lstrip().startswith("#")
+            )
+            assert not re.search(r"\bpytest\b", commands), (
+                f"CI 不许自己拼第二套判据（命令里出现 pytest）：{path.name}"
+            )
 
     offenders = sorted(
         path.relative_to(ROOT).as_posix()

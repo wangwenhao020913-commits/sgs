@@ -1,0 +1,57 @@
+name: gate
+
+# 唯一门禁的**外部**信号（2026-11-13 开源收口引入）。
+#
+# 规矩不变：`bash tests/run_all.sh` 是唯一门禁，CI 只是它的调用方——不要在 workflow 里
+# 拼第二套判据（`tests/test_dod.py::test_there_is_no_second_gate_entry` 会核：workflow
+# 里必须出现 `tests/run_all.sh`，且不许自己出现 pytest）。
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 金录像与历史基准要读历史（`tools/check_goldens.sh` 会取基准 ref）；
+          # 浅克隆会让它判定"基准不存在"。
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # 门禁只认 `$ROOT/.venv/bin/pytest`，不回退系统 pytest。
+      - name: 建虚拟环境
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --quiet --upgrade pip
+          .venv/bin/python -m pip install --quiet -e ".[dev]"
+
+      - name: git 身份与 hook
+        run: |
+          # 干净 clone 里 core.bare 是**未设置**，而 tools/check_env.sh 要求显式 false
+          # （它同时是 linked worktree 的护栏）；这里把它写成真实值，并装好 hook。
+          git config core.bare false
+          git config user.name "sgs-ci"
+          git config user.email "sgs-ci@localhost"
+          bash tools/install-hooks.sh
+
+      - name: 唯一门禁
+        run: bash tests/run_all.sh --quiet

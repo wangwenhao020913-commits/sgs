@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 门禁 hook（M3 retro 落地；W5-03 retro 加 docs 快路径）。
 #
-# 这个仓库没有 CI、也没有远端，唯一能替人跑门禁的地方就是这里：
+# 提交时的门禁入口就在这里（CI 跑的是同一条 run_all.sh，判据不变）：
 # `tests/run_all.sh` 再全，没人跑它等于零。默认**不装**——每个 clone 跑一次
 # `bash tools/install-hooks.sh` 把它接到 pre-commit 上。
 #

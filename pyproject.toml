@@ -4,12 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sgs"
-version = "0.0.0"
-description = "《三国杀》规则引擎（M1 引擎骨架）"
+version = "0.1.0"
+description = "《三国杀》规则引擎与网页牌桌：结算栈 + 启发式 AI + 纯静态前端"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
+keywords = ["sanguosha", "card-game", "rule-engine", "simulation", "web"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Games/Entertainment :: Board Games",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.13",
 ]
+
+[project.urls]
+Homepage = "https://github.com/wangwenhao020913-commits/sgs"
+Issues = "https://github.com/wangwenhao020913-commits/sgs/issues"
 
 [project.optional-dependencies]
 dev = [

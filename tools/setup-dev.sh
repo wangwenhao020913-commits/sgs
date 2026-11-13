@@ -11,7 +11,7 @@
 #   1) 关掉换行转换：Git for Windows 默认 core.autocrlf=true，会把 tests/replays/*.jsonl
 #      转成 CRLF，而金录像是**逐字节**判据 ⇒ 会红一片。`.gitattributes` 已兜底，这里再钉一次本地配置。
 #   2) 装 git hook：`core.hooksPath` 是**本地配置**、不随 clone 走；不装 = 提交时门禁静默不跑
-#      （本仓没有 CI，"没人跑它等于零"）。
+#      （提交时的唯一自动入口；CI 只调 run_all.sh，判据同一条）。
 #   3) 缺 `.venv` 就建：门禁只认 `$ROOT/.venv/bin/pytest`，**不回退系统 pytest**。
 #   4) 跑一次环境预检 `tools/check_env.sh`（共享 .git/config 护栏 + bsk + pytest 可用性）。
 #

@@ -1,0 +1,49 @@
+name: Bug 报告
+description: 行为不对、崩溃、界面异常
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先看一眼 `docs/agents/` 里的配方（前端问题看 `frontend-map.md`，实机验收看
+        `acceptance-web.md`）。**不要**贴令牌 / 私钥 / 自己的完整家目录路径。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 期望 vs 实际。涉及规则时请附**牌面原文**或规则集出处。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 怎么复现
+      description: |
+        最快的复现是一条命令。要有种子 / 人数 / 武将时才复现得出来的，请把它们写全。
+      placeholder: |
+        .venv/bin/sgs --players 2 --heroes zuoci,zhouyu --seed 7
+        # 或：起服务后 人数=2 / 点将=左慈 / 种子=7
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 提交号 / 版本
+      description: "`git rev-parse --short HEAD` 的输出"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: 操作系统 / Python / Node（`python -V`、`node -v`）
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前自查
+      options:
+        - label: 我跑过 `bash tools/check_env.sh`（环境类问题）
+        - label: 这不是版权素材请求（素材问题见 NOTICE）

@@ -12,3 +12,23 @@ dist/
 
 # 录像（M4 的一局游玩存档；不入库——它是游玩事实，不是门禁基准）
 runs/
+
+# 开源收口（2026-11-13）：下面这些是别人 / 本机的东西，绝不入库。
+# 注意 `.gitignore` **不支持行尾注释**——注释一律单独成行。
+
+# 第三方工具的解压目录（自用素材，不是本仓代码）
+archify-main/
+
+# 语音素材的原始目录（版权素材的来源，只在 NOTICE 里点名）
+SGS_OL_Cardvioces/
+
+# 本机截图 / 背景图（README 不放图片；真要放就显式 `git add -f`）
+pic/
+
+# Windows 快捷方式 / 代码图谱索引（本机产物）
+SGS.lnk
+codegraph.json
+
+# 素材包压缩文件，以及 Windows「下载自网络」的 ADS 标记
+*.zip
+*:Zone.Identifier

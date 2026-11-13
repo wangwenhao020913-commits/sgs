@@ -12,6 +12,8 @@
    **`.scratch/<effort>/acceptance-map.md`**（spec 验收条目 → 断言），交给 `/code-review` 的
    Spec 轴。
 2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，本机实测 **≈8 分钟**；
+   GitHub Actions 跑**同一条**门禁（`.github/workflows/ci.yml` 只调它，2026-11-13 开源收口引入），
+   本地仍以提交时的 hook 为准；
    pytest 单跑 356 s）。
    **验证改动 = 一次提交本身**：先 `git config core.hooksPath` 查一次——本 checkout 是
    `.githooks`（`bash tools/install-hooks.sh` 接的）：`src/` / `tests/` 改动跑全量，
