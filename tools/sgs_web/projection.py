@@ -29,6 +29,7 @@ from typing import Any
 from sgs.data import (
     SkillType,
     hero_by_id,
+    hero_card_skill_id,
     hero_skill_id,
     load_content_pack,
     load_hero_tables,
@@ -809,7 +810,9 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
     hero = hero_by_id(player.hero, pack_id=state.pack_id) if player.hero else None
     if hero is not None:
         for skill in hero.skills:
-            skill_id = hero_skill_id(hero.id, skill.id)
+            # diy-heroes 票 04：条目可能带显式 skill_id（引用别的武将名下已登记的技能），
+            # 故派生走数据层唯一读取口，不在这里按短 id 重拼一遍。
+            skill_id = hero_card_skill_id(hero, skill)
             definition = CATALOG.get(skill_id)
             if definition is None:
                 continue
@@ -838,7 +841,9 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
         star = bool(
             hero is not None
             and any(
-                skill.id == short and skill.granted_by is not None for skill in hero.skills
+                hero_card_skill_id(hero, skill) == skill_id
+                and skill.granted_by is not None
+                for skill in hero.skills
             )
         )
         add(definition, _skill_display_name(state, skill_id) or short, star=star)
@@ -906,11 +911,11 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     if hero_id is not None:
         hero = hero_by_id(hero_id, pack_id=state.pack_id)
         if hero is not None:
-            # 武将面里的技能 id 是**短名**（`guose`），而实例上的 `skill_id` 带命名空间
-            # （`hero.daqiao.guose`）；两边靠**末段**对上，别去猜前缀。第三项 = ☆ 标记
-            # （M6 票 19：觉醒后出现的技能在按钮上也标出来）。
+            # 票 08 A：键 = 条目的**解析后**全限定 id（数据层唯一派生口），不是短 id ——
+            # 显式 skill_id 的行键与目标技能末段可以不同，按末段撞会查不到名字 / ☆ 标记。
+            # 第三项 = ☆ 标记（M6 票 19：觉醒后出现的技能在按钮上也标出来）。
             names = {
-                skill.id.rsplit(".", 1)[-1]: (
+                hero_card_skill_id(hero, skill): (
                     skill.name,
                     getattr(skill.skill_type, "value", str(skill.skill_type)),
                     skill.granted_by is not None,
@@ -954,9 +959,8 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
         if cross_seat and not (lord_grant or (asked_here and instance.skill_id in offered)):
             continue
         suppressed = (not cross_seat) and instance.skill_id not in resolved_ids
-        short_id = instance.skill_id.rsplit(".", 1)[-1]
         name, skill_type, star = names.get(
-            short_id,
+            instance.skill_id,
             (None, getattr(definition.skill_type, "value", str(definition.skill_type)), False),
         )
         if name is None and definition.skill_id.startswith("equip."):
@@ -965,9 +969,9 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             # 分别标注（报障：装备技能此前整条被略去）。
             name = _card_type_name(state, definition.skill_id[len("equip.") :])
         if name is None:
-            # **获得**来的技能没有**本人**武将面可查：``names`` 只索引持有者的武将牌
-            # （短 id → 名字），而"获得别人的技能"（韬·刘备【义起】授予的 ☆【武圣】
-            # /【咆哮】）的短 id 根本不在那张表里。此前这里直接 ``continue``，于是
+            # **获得**来的技能没有**本人**武将牌可查：``names`` 只索引持有者的武将面
+            # （解析后 id → 名字），而"获得别人的技能"（韬·刘备【义起】授予的 ☆【武圣】
+            # /【咆哮】）的 id 根本不在那张表里。此前这里直接 ``continue``，于是
             # 授予之后按钮区一条都不出现（武将详情页看得见，因为那边走的是
             # :func:`seat_skill_display` 的 ``_skill_display_name`` 反查）——用户实机
             # 报障：义起发动后没有【武圣】【咆哮】，两条都点不到。

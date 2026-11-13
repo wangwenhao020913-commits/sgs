@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "pack_id": "diy",
+  "heroes": [
+    {
+      "id": "diy_hero",
+      "name": "自制武圣",
+      "true_name": "自制武圣",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp": 4,
+      "hp_max": 4,
+      "version": "diy",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wusheng",
+          "skill_id": "hero.jie_guanyu.wusheng",
+          "name": "武圣",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

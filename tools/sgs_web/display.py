@@ -40,7 +40,8 @@ from sgs.data import (
     HeroTable,
     Suit,
     color_of_suit,
-    hero_skill_id,
+    hero_skill_name,
+    hero_skill_names,
 )
 from sgs.state import CardRef, EndPhase, HeroCardRef, Pass, PlayerPublic, Query, SelectCards
 
@@ -337,20 +338,20 @@ def _marker_payload(
 
     文本 = 名称 + 数量（前端画 `名称×数量`）；悬停 = 来源（座位 + 武将 + 技能名）+
     效果说明（有才加）。来源座位可能不是当前座位，``players`` 是同一份投影的座位列表；
-    技能名从武将表按全限定 id 的短 id 找 ``HeroSkill.name``，找不到退回短 id。
+    技能名从武将表按**解析后的**全限定 id 反查 ``HeroSkill.name``（票 07：条目可能带显式
+    ``skill_id``，``marker.source_skill_id`` 是**实例** id，别拿末段去撞 ``HeroSkill.id``），
+    找不到退回短 id。
     """
     source_hero_id = None
     if players is not None and 0 <= marker.source_seat < len(players):
         source_hero_id = players[marker.source_seat].hero
     hero = hero_in_tables(heroes, source_hero_id)
     hero_name = hero.name if hero is not None else (source_hero_id or "无武将")
-    short_id = marker.source_skill_id.rsplit(".", 1)[-1]
-    skill_name = short_id
-    if hero is not None:
-        for skill in hero.skills:
-            if skill.id == short_id:
-                skill_name = skill.name
-                break
+    skill_name = (
+        hero_skill_name(hero, marker.source_skill_id)
+        if hero is not None
+        else marker.source_skill_id.rsplit(".", 1)[-1]
+    )
     source_label = f"座位 {marker.source_seat + 1} {hero_name}·{skill_name}"
     return {
         "name": marker.name,
@@ -433,9 +434,9 @@ def option_details(
         return None
     card = getattr(query, "hero_card", None)
     hero = hero_in_tables(heroes, card.hero_id) if card is not None else None
-    names: dict[str, str] = {}
-    if hero is not None:
-        names = {hero_skill_id(hero.id, skill.id): skill.name for skill in hero.skills}
+    # 票 08 A：名字表由数据层的唯一构造口给（显式 skill_id 按**被引用**的 id 建键），
+    # 选项 id 本身就来自 hero_card_skill_ids，两边同源。
+    names = hero_skill_names(hero) if hero is not None else {}
     texts = dict(getattr(query, "option_texts", None) or {})
     disabled = frozenset(getattr(query, "disabled", None) or ())
     rows: list[dict[str, Any]] = []
