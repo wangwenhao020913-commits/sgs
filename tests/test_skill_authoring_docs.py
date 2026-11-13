@@ -542,6 +542,16 @@ _NEW_MARKER_RE = re.compile(r"`?\s*\(new\)")
 
 _DIY_HEADING_RE = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 
+_DIY_ORDINAL_RE = re.compile(r"^\d+[.、]\s*")
+"""标题前面的「1. 」序号：比对时剥掉，只比**节名**。"""
+
+_DIY_SECTION_SEPARATORS = frozenset({"：", ":", " ", "（", "("})
+"""节名之后允许出现的分隔符。
+
+`## 5. 常见错误与排错` 的「与」**不是**分隔符 ⇒ 它不能冒充「常见错误」——旧的
+`" | ".join(headings)` 子串断言会放过它（票 08 F）。
+"""
+
 
 def _diy_named_paths(text: str) -> tuple[tuple[str, bool], ...]:
     """``(路径, 是否显式标了 `(new)`)``，按出现顺序去重；`<占位>` 形式不算路径。"""
@@ -572,10 +582,29 @@ def _diy_missing_paths(text: str, *, root: Path = REPO_ROOT) -> list[str]:
     return missing
 
 
+def _diy_headings(text: str) -> tuple[str, ...]:
+    """文档的二级标题（剥掉「1. 」序号）：`## 行` 才算，正文里提一嘴不算。"""
+    return tuple(
+        _DIY_ORDINAL_RE.sub("", heading.strip())
+        for heading in _DIY_HEADING_RE.findall(text)
+    )
+
+
 def _diy_missing_sections(text: str) -> list[str]:
-    """文档缺的那几个二级标题（只认 `## ` 行，正文里提一嘴不算）。"""
-    headings = " | ".join(_DIY_HEADING_RE.findall(text))
-    return [section for section in DIY_SECTIONS if section not in headings]
+    """文档缺（或写歪）的那几个二级标题：**逐个**比对（顺序 + 前缀 + 分隔符）。
+
+    旧实现把标题用 ``" | "`` 拼起来做子串匹配：`## 5. 常见错误与排错` 也能满足
+    「常见错误」——超集标题于是静默通过（票 08 F）。现在第 ``i`` 个标题必须**以第 ``i`` 个
+    节名开头**，且节名之后紧跟分隔符或行尾。
+    """
+    headings = _diy_headings(text)
+    missing: list[str] = []
+    for index, section in enumerate(DIY_SECTIONS):
+        heading = headings[index] if index < len(headings) else ""
+        rest = heading[len(section) :] if heading.startswith(section) else None
+        if rest is None or (rest and rest[0] not in _DIY_SECTION_SEPARATORS):
+            missing.append(section)
+    return missing
 
 
 def _diy_missing_pointers() -> list[str]:
@@ -687,6 +716,24 @@ def test_the_diy_path_audit_skips_only_paths_marked_new() -> None:
     pending = "examples/diy-hero/not_created_yet.md"
     assert _diy_missing_paths(f"{text}\n  `{pending}` (new)\n") == []
     assert _diy_missing_paths(f"{text}\n  `{pending}`\n") == [pending]
+
+
+def test_a_diy_doc_with_a_superset_section_title_is_red(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向自检④：`## 5. 常见错误与排错` 这种**超集**标题也必须红（票 08 F）。
+
+    旧的子串断言会把它当成「常见错误」放过去；新断言逐个比对标题行 + 分隔符。
+    """
+    text = DIY_DOC.read_text(encoding="utf-8").replace(
+        "## 5. 常见错误", "## 5. 常见错误与排错"
+    )
+    assert _diy_missing_sections(text) == ["常见错误"]
+
+    broken = _broken_diy_copy(tmp_path, text)
+    monkeypatch.setattr(sys.modules[__name__], "DIY_DOC", broken)
+    with pytest.raises(AssertionError, match="常见错误"):
+        test_the_diy_doc_is_audited_like_the_authoring_doc()
 
 
 def test_the_diy_noun_audit_bites_on_an_invented_symbol() -> None:

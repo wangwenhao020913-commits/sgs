@@ -260,6 +260,10 @@ SIGNED_TABLES: Final[tuple[str, ...]] = (
 （``huo-wolong-yanliang`` 票 02 的【双雄】同时满足「零步」与「转化」两个机械判据，正是靠两处
 独立手写的计数才在评审里被抓到）；``SKILL_FILES`` / ``STEP_LANGUAGE_SHAPES`` 的取值同样是人的
 判断（哪个测试文件覆盖哪条技能 / 哪五个形态在步骤语言内）。自动派生 = 把评审信号一起删掉。
+
+这条契约是**结构性**的（票 08 E）：四份字面量的行区间在 `_read_tables` 里算成
+``_Tables.protected_lines``，`plan_write` 把落进去的编辑改报「这里要人工改」、`apply_plan`
+直接拒绝落盘——不靠"编辑恰好只来自 SITES"这种间接性质。
 """
 
 
@@ -437,6 +441,8 @@ class _Tables:
     skill_files: Mapping[str, str]
     skill_files_line: int
     step_shapes: frozenset[str]
+    protected_lines: tuple[tuple[int, int], ...]
+    """四张人签表字面量的**行区间**（含端点）：``--write`` 的结构性禁区（票 08 E）。"""
     path: Path
 
 
@@ -471,6 +477,11 @@ def _read_tables(path: Path) -> _Tables:
         isinstance(shape, str) for shape in step_shapes
     ):
         raise ValueError(f"{path.name} 的 STEP_LANGUAGE_SHAPES 不是「字符串集合」字面量")
+    # 四张人签表的行区间 = `--write` 的结构性禁区：`apply_plan` 按它拒绝任何落进表里的编辑。
+    protected_lines = tuple(
+        (assignments[name][2], assignments[name][1].end_lineno or assignments[name][2])
+        for name in SIGNED_TABLES
+    )
     return _Tables(
         shape_counts=shape_counts,
         shape_count_lines=shape_lines,
@@ -479,6 +490,7 @@ def _read_tables(path: Path) -> _Tables:
         skill_files=skill_files,
         skill_files_line=skill_files_line,
         step_shapes=frozenset(step_shapes),
+        protected_lines=protected_lines,
         path=path,
     )
 
@@ -631,7 +643,7 @@ def collect(*, root: Path = ROOT) -> Report:
     sites: list[Hit] = []
     for site in SITES:
         try:
-            text = (root / site.file).read_text(encoding="utf-8")
+            text = _read_text(root / site.file)
         except OSError as error:
             failures.append(f"扫描失效：读不到 {site.file}（{error}）")
             continue
@@ -1162,6 +1174,15 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - _width(text))
 
 
+def _read_text(path: Path) -> str:
+    """按**原始字节**解码的文本（不做换行归一化）：行号与字符区间在规划 / 落盘两侧同一把尺。
+
+    ``Path.read_text`` 会把 ``\r\n`` 归一成 ``\n``；``apply_plan`` 落盘时按原字节区间替换，
+    两边混用会让 CRLF 树上每次编辑都误报"在规划之后变了"（票 08 §3 的已知局限——这里对齐掉）。
+    """
+    return path.read_bytes().decode("utf-8")
+
+
 def _relative(path: Path, *, root: Path = ROOT) -> str:
     """相对仓库根的 posix 路径（仓外路径原样返回）。"""
     try:
@@ -1238,6 +1259,13 @@ class WritePlan:
 
     edits: tuple[Edit, ...]
     manual: tuple[ManualNote, ...]
+    protected: tuple[tuple[str, int, int], ...] = ()
+    """人签登记表的**行区间**（``文件, 首行, 末行``，含端点）：``--write`` 的结构性禁区。
+
+    ``plan_write`` 按它把落进表里的编辑改报「这里要人工改」，``apply_plan`` 按它**拒绝落盘**
+    ——"四张表永不写"因此是这个字段 + 下面两条检查保证的，不是"编辑恰好只来自 SITES"的间接性质
+    （票 08 E）。
+    """
 
 
 _TABLE_REASONS: Final[Mapping[str, str]] = {
@@ -1260,6 +1288,7 @@ def plan_write(report: Report, *, root: Path = ROOT) -> WritePlan:
       ``旧值 → 新值``；``report.failures`` 也原样进 ``manual``（"这里要人工改"的完整清单）。
     """
     derived = report.derived
+    protected = _protected_lines(root)
     manual: list[ManualNote] = []
     if not derived:
         reason = report.failures[0] if report.failures else "数据面重算失败"
@@ -1269,7 +1298,7 @@ def plan_write(report: Report, *, root: Path = ROOT) -> WritePlan:
     edits: list[Edit] = []
     for site in SITES:
         try:
-            text = (root / site.file).read_text(encoding="utf-8")
+            text = _read_text(root / site.file)
         except OSError as error:
             manual.append(
                 ManualNote(site.file, None, f"{site.key}（{site.label}）", f"读不到文件：{error}")
@@ -1299,6 +1328,21 @@ def plan_write(report: Report, *, root: Path = ROOT) -> WritePlan:
             )
         )
 
+    allowed: list[Edit] = []
+    for edit in kept:
+        if _inside_protected(edit, protected):
+            manual.append(
+                ManualNote(
+                    edit.file,
+                    edit.line,
+                    edit.expression,
+                    "落在人签登记表里（结构性禁区：四张表永不落盘）",
+                )
+            )
+            continue
+        allowed.append(edit)
+    kept = tuple(allowed)
+
     for table in report.tables:
         for cell in table.hits:
             if cell.ok:
@@ -1308,7 +1352,13 @@ def plan_write(report: Report, *, root: Path = ROOT) -> WritePlan:
             if len(drifted) == 1:
                 old, new = drifted[0].value, drifted[0].expected
             detail = "；".join(reading.describe() for reading in drifted)
-            reason = _TABLE_REASONS.get(table.name, "不是能机械定位的站点数字：工具不猜")
+            # 票 08 E：`SIGNED_TABLES` 在这里**真的**参与判定（不是只被 len() 数一下）。
+            if table.name in SIGNED_TABLES:
+                reason = _TABLE_REASONS.get(
+                    table.name, "人签登记表：工具只打印新值、不落盘"
+                )
+            else:
+                reason = "不是能机械定位的站点数字：工具不猜"
             manual.append(
                 ManualNote(
                     file=cell.file,
@@ -1322,7 +1372,27 @@ def plan_write(report: Report, *, root: Path = ROOT) -> WritePlan:
     for failure in report.failures:
         manual.append(ManualNote(None, None, "", failure))
 
-    return WritePlan(edits=kept, manual=tuple(manual))
+    return WritePlan(edits=kept, manual=tuple(manual), protected=protected)
+
+
+def _protected_lines(root: Path) -> tuple[tuple[str, int, int], ...]:
+    """四张人签表在 ``test_hero_catalog.py`` 里的行区间（结构性禁区的唯一来源）。"""
+    path = root / "tests" / "test_hero_catalog.py"
+    try:
+        tables = _read_tables(path)
+    except (OSError, SyntaxError, ValueError):
+        return ()
+    label = _relative(path, root=root)
+    return tuple((label, first, last) for first, last in tables.protected_lines)
+
+
+def _inside_protected(
+    edit: Edit, protected: Sequence[tuple[str, int, int]]
+) -> bool:
+    """这处编辑是不是落进了人签登记表的行区间（区间含端点，按行号判）。"""
+    return any(
+        edit.file == file and first <= edit.line <= last for file, first, last in protected
+    )
 
 
 def _site_edits(
@@ -1387,7 +1457,17 @@ def apply_plan(plan: WritePlan, *, root: Path = ROOT) -> tuple[Edit, ...]:
 
     先读齐、逐处核对区间里**还是那个旧数字**，全部通过才写——不半途留下一套改了一半的文件。
     区间对不上 = 文件在规划之后变了 ⇒ 抛 :class:`ValueError`（由 CLI 报「这里要人工改」）。
+
+    **结构性禁区**：任何落进人签登记表行区间（``plan.protected``）的编辑一律拒收——这条检查
+    在 ``plan_write`` 之后、落盘之前再核一次（票 08 E：``apply_plan`` 也真的查 ``SIGNED_TABLES``
+    派生的禁区，而不是信任调用方）。
     """
+    blocked = [edit for edit in plan.edits if _inside_protected(edit, plan.protected)]
+    if blocked:
+        raise ValueError(
+            f"{blocked[0].location()} 落在人签登记表里（结构性禁区），拒绝落盘"
+        )
+
     grouped: dict[str, list[Edit]] = {}
     for edit in plan.edits:
         grouped.setdefault(edit.file, []).append(edit)
@@ -1395,7 +1475,7 @@ def apply_plan(plan: WritePlan, *, root: Path = ROOT) -> tuple[Edit, ...]:
     texts: dict[str, str] = {}
     for filename in grouped:
         try:
-            texts[filename] = (root / filename).read_bytes().decode("utf-8")
+            texts[filename] = _read_text(root / filename)
         except (OSError, UnicodeDecodeError) as error:
             raise ValueError(f"{filename} 读不了：{error}") from error
     for edit in plan.edits:

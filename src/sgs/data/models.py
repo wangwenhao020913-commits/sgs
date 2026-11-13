@@ -236,8 +236,11 @@ class HeroSkill(_FrozenModel):
       **数据错误**（加载期 fail-closed），不是运行期特性；条目的 ``skill_type`` 也要与
       被引用定义的 ``SkillType`` 对账。
 
-    读取方只认 :func:`sgs.data.hero_card_skill_id` 这一处派生：载体解析 / 放置声明 /
-    引用闭合都经它，故"缺省派生 vs 显式引用"不会在读方各写一遍 ``or``。
+    读取方只认 :func:`sgs.data.hero_card_skill_id` 这一处派生（载体解析 / 放置声明 / 引用闭合
+    都经它，读方不各自再写一遍 ``or``）。展示面按 id 反查条目中文名读
+    :func:`sgs.data.hero_skill_name` / :func:`sgs.data.hero_skill_names`——两者同样按**解析后**
+    的 id 建键，不按末段撞 ``HeroSkill.id``；需要条目元数据（类型 / ☆）的按钮清单按同一条
+    派生口建自己的表（票 08 A）。
     """
 
     granted_by: str | None = None

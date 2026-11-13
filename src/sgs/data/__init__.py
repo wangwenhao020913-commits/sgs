@@ -44,6 +44,9 @@ diy-heroes 票 04 增**条目的显式技能引用**（:attr:`HeroSkill.skill_id
 名下的，如自制武将复用 ``hero.jie_guanyu.wusheng``），派生仍只在数据层一处写 ``or``
 （缺省 ``None`` = 既有短 id 派生，行为一字不改）。载体解析 / 放置声明 / 引用闭合都读它；
 接入层的武将详情清单（``sgs_web.projection.seat_skill_display``）也从这里取，不按短 id 重拼。
+**按 id 反查名字**读 :func:`hero_skill_name` / :func:`hero_skill_names`（票 08 A 收口：同样按
+解析后的 id 建键，展示层 / 叙事 / 化身面不再各写一份"末段撞短 id"；按钮清单的条目元数据表
+按同一派生口建键）。
 """
 
 from .errors import DataLoadError, LoadError
@@ -69,6 +72,8 @@ from .loader import (
     hero_placement_decls,
     hero_skill_id,
     hero_skill_ids,
+    hero_skill_name,
+    hero_skill_names,
     load_content_pack,
     load_hero_tables,
     load_heroes,
@@ -148,6 +153,8 @@ __all__ = (
     "hero_placement_decls",
     "hero_skill_id",
     "hero_skill_ids",
+    "hero_skill_name",
+    "hero_skill_names",
     "load_content_pack",
     "load_hero_tables",
     "load_heroes",

@@ -52,7 +52,7 @@
 1. **技能实现**：进对应的**族模块**（例如 `src/sgs/skills/heroes.py`）写一条
    `SkillDef`，并放进该族的 `*_skill_definitions()`；`src/sgs/skills/catalog.py` 的 `CATALOG`
    在导入期把各族清单并成**唯一**登记处。
-2. **数据引用**：武将表里给这条技能写一条短 id 条目；条目的 `skill_type` 会与定义一侧对账。
+2. **数据引用**：武将表里给这条技能写一条短 id 条目；`skill_type` 是数据侧声明，只有**显式 `skill_id`** 的条目才与被引用定义对账（缺省派生的条目只核引用闭合，见第 5 节）。
 3. **文案**：`tools/sgs_web/descriptions.json` 的 `skills` 段键集必须**恰好等于** `CATALOG`
    （缺一条红、多一条也红，见 `tests/test_web.py`）；写你自己组织的描述文本，别整段抄官方牌面。
 4. **过程**：先走 `docs/agents/skill-authoring.md` 的六问，把 `### 询问剧本` 交给维护者签；
@@ -100,8 +100,9 @@ bash tests/run_all.sh                                     # 唯一门禁（≈8 
 它本身**不进**官方池，所以池计数仍是 15 处。
 
 **加进官方池就要对账 15 处计数。** `HERO_SUPPLEMENT_PACK_IDS` 里加一行会改动启用武将数、
-真名数、技能数与形态格，而它们被**写死**在 15 个站点、7 张登记表里（`tests/test_hero_catalog.py` /
-`tests/test_hero_dealing.py` / `tests/test_web.py` / `tests/support/ui_smoke.mjs`）。先跑：
+真名数、技能数与形态格，而它们被**写死**在 15 个站点（跨 **5** 个文件）、7 张登记表里
+（`tests/test_hero_catalog.py` / `tests/test_hero_dealing.py` / `tests/test_web.py` /
+`tests/test_all_ai_games.py` / `tests/support/ui_smoke.mjs`）。先跑：
 
 ```bash
 .venv/bin/python tools/pool_census.py --check
@@ -122,6 +123,7 @@ bash tests/run_all.sh                                     # 唯一门禁（≈8 
 | `[heroes.skill_id_not_found]` | 显式 `skill_id` 指向的技能不在 `CATALOG` 里（拼错，或想引用的技能还没实现） | 改成真实存在的全限定 id（`tools/dump_catalog.py` 可反查）；新技能走路线 B |
 | `[heroes.skill_id_type_mismatch]` | 条目声明的 `skill_type` 与被引用定义的 `SkillType` 不一致（只对显式引用查） | 照被引用的技能改条目：限定 / 觉醒技别写成 `NORMAL` |
 | `[heroes.skill_id_duplicate]` | 同一武将的两条条目解析到**同一个**全限定技能 id | 删掉重复条目，或让它指向另一条技能（**跨武将**复用同一条不算撞车） |
+| `[heroes.placement_conflict]` | 两个武将（可以跨包）复用同一条**放置类**技能，却写了**不同**的 `placement` 声明——全局声明表只能留一份，后写会静默覆盖先写 | 让两处声明**完全一致**（同一 `visibility` / `return_timing` / `extra_effect`）；要两种归还行为就得拆成两条技能 |
 | `[heroes.placement_missing]` | 技能定义标了"往武将牌上放牌"（`SkillDef.places_on_hero_card`），数据侧没写 `placement` 三项声明 | 补 `visibility` / `return_timing` / `extra_effect` 三项（必写、无默认） |
 | `[heroes.granted_by_unknown]` | 条目的 `granted_by` 指向的短 id 不在**同一武将**的技能清单里 | 改成同武将的觉醒技 / 限定技短 id（☆ 技能只能由一次性技能获得） |
 | `[decks.unknown_profile]` | 内容包的 `/deck_profile` 不是它自己 `decks` 里的一档（改档位名没同步最常见） | 让 `/deck_profile` 等于 `decks` 的某个键；照 `src/sgs/data/files/standard.json` 的写法 |

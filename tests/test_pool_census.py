@@ -32,6 +32,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 _TOOLS = str(ROOT / "tools")
 if _TOOLS not in sys.path:  # 只读工具不是包，只能按目录导入
@@ -284,6 +286,17 @@ def _break_shape_count(root: Path, shape: str = "主动技能") -> tuple[int, in
     return line, derived
 
 
+def _signed_text(root: Path, catalog: Path) -> dict[str, str]:
+    """四张人签表**行区间**里的源码（按区间取，不拿整份文件——同文件还有站点要改）。"""
+    lines = catalog.read_bytes().decode("utf-8").splitlines(keepends=True)
+    tables = pool_census._read_tables(catalog)
+    label = "tests/test_hero_catalog.py"
+    return {
+        f"{label}:{first}-{last}": "".join(lines[first - 1 : last])
+        for first, last in tables.protected_lines
+    }
+
+
 def test_check_is_read_only_in_a_sandbox(tmp_path, capsys) -> None:
     """``--check`` 非零退出，但**一个字节都不改**（「默认可读」的硬断言）。"""
     root = _break_sites(_sandbox(tmp_path), "dealing_enabled_pool")
@@ -341,6 +354,29 @@ def test_write_is_idempotent_and_the_second_run_touches_nothing(tmp_path, capsys
     assert "文件零改动。" in out, out
 
 
+def test_write_handles_a_crlf_tree(tmp_path, capsys) -> None:
+    """CRLF 工作树（票 08 §3）：规划与落盘按**同一把尺**（原始字节）⇒ 站点照样改对。
+
+    旧实现读侧 ``read_text`` 会把 ``\r\n`` 归一成 ``\n``，落盘侧按原始字节切片 ⇒ 每次编辑
+    都误报"在规划之后变了"。这里把一份站点文件转成 CRLF，改对之后它必须仍是 CRLF。
+    """
+    root = _sandbox(tmp_path)
+    path = root / "tests/test_hero_dealing.py"
+    text = path.read_bytes().decode("utf-8")
+    assert "\r\n" not in text, "构造前提：沙盒拷贝是 LF"
+    path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+    _break_sites(root, "dealing_enabled_pool")
+
+    assert pool_census.main(["--write"], root=root) == 0
+    out = capsys.readouterr().out
+    assert "在规划之后变了" not in out, out
+
+    after = path.read_bytes().decode("utf-8")
+    assert "\n" not in after.replace("\r\n", ""), "被改写的文件必须仍是 CRLF（别整份换行转掉）"
+    expected = pool_census.derive().counts["versions"]
+    assert f"len(expected) == {expected}" in after
+
+
 def test_write_refuses_an_unlocatable_site(tmp_path, capsys) -> None:
     """站点结构被改形（正则认不出）⇒ 报「这里要人工改」并非零退出，**不猜也不写**。"""
     root = _sandbox(tmp_path)
@@ -368,15 +404,19 @@ def test_write_never_touches_the_four_signed_tables(tmp_path, capsys) -> None:
     §5 的裁定：``SHAPE_COUNTS`` 与 ``SKILL_SHAPE`` 互为见证（【双雄】同时满足两个形态判据，
     正是靠两处独立手写才在评审里被抓到）⇒ 自动派生就删掉了评审信号。
     """
-    root = _mutated_tree(_sandbox(tmp_path))  # 站点：错误（应被 --write 改回）
+    root = _mutated_tree(_sandbox(tmp_path))  # 三处站点：错误（应被 --write 改回）
+    # 票 08 E：**同一个文件**里再错一处站点 + 一格人签表——旧测试只动 SHAPE_COUNTS，站点都在
+    # 别的文件，没证明"表与站点同住一个文件时 --write 也只碰站点"。
+    _break_sites(root, "catalog_total")
     line, expected = _break_shape_count(root)
     catalog = root / "tests/test_hero_catalog.py"
-    signed = catalog.read_bytes().decode("utf-8")
+    signed = _signed_text(root, catalog)
 
     assert pool_census.main(["--write"], root=root) == 1
     out = capsys.readouterr().out
 
-    assert catalog.read_bytes().decode("utf-8") == signed, "四张人签表一个字都不许动"
+    assert "tests/test_hero_catalog.py:" in out, "同文件的站点也要出现在改写计划里"
+    assert _signed_text(root, catalog) == signed, "四张人签表一个字都不许动"
     assert f"tests/test_hero_catalog.py:{line}" in out, out
     assert f"{expected - 1} → {expected}" in out, out
     assert "这里要人工改" in out, out
@@ -390,6 +430,41 @@ def test_write_never_touches_the_four_signed_tables(tmp_path, capsys) -> None:
         if not reading.ok
     }
     assert drift == {"shape:主动技能"}, f"改完站点后只该剩人签表那一格；实得 {drift}"
+
+
+def test_apply_plan_refuses_an_edit_inside_a_signed_table(tmp_path) -> None:
+    """结构性守卫（票 08 E）：落进人签表行区间的编辑被 ``apply_plan`` 直接拒收，文件不动。
+
+    这一条钉的是 "``SIGNED_TABLES`` 真的参与判定"：即使有人绕过 ``plan_write`` 手搓一个
+    计划，落盘前也会被禁区拦下——"永不落盘"不是"编辑恰好只来自 SITES"的间接性质。
+    """
+    root = _sandbox(tmp_path)
+    plan = pool_census.plan_write(pool_census.collect(root=root), root=root)
+    assert len(plan.protected) == len(pool_census.SIGNED_TABLES), (
+        f"计划里要带四张人签表的行区间；实得 {plan.protected}"
+    )
+    file, first, _last = plan.protected[0]
+    text = (root / file).read_bytes().decode("utf-8")
+    lines = text.splitlines(keepends=True)
+    start = sum(len(item) for item in lines[: first - 1])
+    edit = pool_census.Edit(
+        file=file,
+        line=first,
+        expression="SHAPE_COUNTS",
+        metric="catalog",
+        old=0,
+        new=1,
+        start=start,
+        end=start + 1,
+    )
+    before = _tree(root)
+
+    with pytest.raises(ValueError, match="人签登记表"):
+        pool_census.apply_plan(
+            pool_census.WritePlan(edits=(edit,), manual=(), protected=plan.protected),
+            root=root,
+        )
+    assert _tree(root) == before, "被拒的计划不许落盘"
 
 
 def test_the_real_tree_is_consistent_and_the_write_plan_is_empty(capsys) -> None:

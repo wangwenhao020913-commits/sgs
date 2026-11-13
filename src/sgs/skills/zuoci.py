@@ -25,7 +25,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import SkillType, hero_by_id, hero_card_skill_id, hero_skill_id
+from sgs.data import (
+    SkillType,
+    hero_by_id,
+    hero_card_skill_id,
+    hero_skill_id,
+    hero_skill_name,
+)
 from sgs.timing import Timing
 
 from .catalog import MATCH_OWNER_KEY, AppearanceKind, CarrierKind, Hook, SkillDef
@@ -116,11 +122,12 @@ def _pairs(state: Any, owner: int) -> tuple[tuple[str, str], ...]:
 def skill_name_on(hero: Any, skill_id: str) -> str:
     """技能 id → 它在这张**武将牌**上的中文名（查不到 ⇒ 短 id）。
 
-    数据表是唯一真源：询问的选项文本（``武将名·技能名``）与外观组件的第二行都读这一处，
-    谁都不在自己那侧再写一遍"短 id 反查"。
+    实现只经 :func:`sgs.data.hero_skill_name`（数据层唯一读取口）：询问的选项文本
+    （``武将名·技能名``）与外观组件的第二行都读它。**不按末段撞** ``HeroSkill.id``——
+    显式 ``skill_id`` 条目的行键与目标技能末段可以不同（diy-heroes 票 08 A：``my_wusheng``
+    → ``hero.jie_guanyu.wusheng``，名字必须是「武圣」而不是行键）。
     """
-    short_id = skill_id.rsplit(".", 1)[-1]
-    return next((item.name for item in hero.skills if item.id == short_id), short_id)
+    return hero_skill_name(hero, skill_id)
 
 
 def _option_texts(state: Any, pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:

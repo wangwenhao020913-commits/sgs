@@ -53,13 +53,17 @@ from sgs.data import (  # noqa: E402
     validate_heroes,
 )
 from sgs.engine import Engine  # noqa: E402
-from sgs.skills import CATALOG  # noqa: E402
+from sgs.skills import CATALOG, AppearanceKind, zuoci as zuoci_module  # noqa: E402
 from sgs.skills.zuoci import avatar_skill_rows, eligible_skill_ids  # noqa: E402
 from sgs.state import ActivateSkill, Marker, PlayerPublic  # noqa: E402
 from sgs_web.descriptions import skill_description  # noqa: E402
 from sgs_web.display import option_details, seat_display  # noqa: E402
 from sgs_web.narrative import _name_tables  # noqa: E402
-from sgs_web.projection import build_skills, seat_skill_display  # noqa: E402
+from sgs_web.projection import (  # noqa: E402
+    APPEARANCE_BUILDERS,
+    build_skills,
+    seat_skill_display,
+)
 from support.positions import SeatSpec, build_state  # noqa: E402
 
 REUSED_SKILL = "hero.jie_guanyu.wusheng"
@@ -256,6 +260,93 @@ def test_a_reused_placement_skill_still_requires_its_declaration() -> None:
     assert [error.rule_id for error in errors] == ["heroes.placement_missing"]
 
 
+def _placement(*, return_timing: str = "turn_end") -> dict[str, Any]:
+    """一项放置声明（缺省 = 界陆逊【谦逊】那份：public / turn_end / 无附加效果）。"""
+    return {
+        "visibility": "public",
+        "return_timing": return_timing,
+        "extra_effect": False,
+    }
+
+
+def _second_diy_hero(*, short_id: str, placement: dict[str, Any]) -> dict[str, Any]:
+    """同一张 DIY 表里的第二个武将：也引用同一个**放置类**技能。"""
+    return {
+        "id": "myhero2",
+        "name": "自制武将二号",
+        "true_name": "自制二号",
+        "kingdom": "shu",
+        "gender": "female",
+        "hp_max": 3,
+        "version": "diy",
+        "enabled": True,
+        "skills": [
+            {
+                "id": short_id,
+                "skill_id": PLACEMENT_SKILL,
+                "name": "谦逊",
+                "skill_type": "NORMAL",
+                "placement": placement,
+            }
+        ],
+    }
+
+
+def test_two_heroes_with_conflicting_placement_decls_are_rejected() -> None:
+    """两个武将复用同一条放置技能、**声明不同** ⇒ ``heroes.placement_conflict``（票 08 B）。
+
+    ``hero_placement_decls`` 按解析后的 id 建全局表：后写会静默覆盖先写，引擎就用 A 的归还
+    时机返回 B 的牌。既有的 ``heroes.skill_id_duplicate`` 只管**同一武将内**，管不到这里。
+    """
+    raw = _diy_raw(skill_id=PLACEMENT_SKILL, short_id="qianxun")
+    raw["heroes"][0]["skills"][0]["placement"] = _placement()
+    raw["heroes"].append(
+        _second_diy_hero(short_id="qianxun_alias", placement=_placement(return_timing="never"))
+    )
+
+    errors = _errors(raw)
+
+    assert [error.rule_id for error in errors] == ["heroes.placement_conflict"]
+    assert errors[0].loc == "/heroes/1/skills/0/placement"
+    assert "myhero" in errors[0].expected and "qianxun" in errors[0].expected, (
+        f"expected 要点名首次声明者；实得 {errors[0].expected!r}"
+    )
+    assert "myhero2" in errors[0].got and "qianxun_alias" in errors[0].got, (
+        f"got 要点名这次的声明者；实得 {errors[0].got!r}"
+    )
+    assert "turn_end" in errors[0].expected and "never" in errors[0].got
+
+
+def test_the_same_placement_declaration_on_two_heroes_is_allowed() -> None:
+    """两份**一模一样**的声明不算冲突：跨武将复用同一条技能正是票 04 要开的门。"""
+    raw = _diy_raw(skill_id=PLACEMENT_SKILL, short_id="qianxun")
+    raw["heroes"][0]["skills"][0]["placement"] = _placement()
+    raw["heroes"].append(_second_diy_hero(short_id="qianxun", placement=_placement()))
+
+    assert _validate(raw).by_id("myhero2") is not None
+
+
+def test_a_cross_table_placement_conflict_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**跨表**冲突也要红：单表校验看不见，全局声明表必须在建表时 fail-closed。
+
+    既有表的界陆逊【谦逊】声明是 ``turn_end``；DIY 包把它改成 ``never`` —— 引擎的归还时机
+    会因此取决于声明表的遍历顺序。这正是票 08 B 说的"静默后写覆盖先写"。
+    """
+    raw = _diy_raw(skill_id=PLACEMENT_SKILL, short_id="qianxun")
+    raw["heroes"][0]["skills"][0]["placement"] = _placement(return_timing="never")
+    _install(monkeypatch, raw)  # 既有表 + DIY 表：单表校验都通过
+
+    with pytest.raises(DataLoadError) as excinfo:
+        hero_placement_decls()
+
+    errors = excinfo.value.errors
+    assert [error.rule_id for error in errors] == ["heroes.placement_conflict"]
+    assert "jie_luxun" in errors[0].expected and "myhero" in errors[0].got
+    assert "turn_end" in errors[0].expected and "never" in errors[0].got
+
+
 # ---------------------------------------------------------------------------
 # ⑥ 撞车：同一武将内两条条目解析到同一个全限定 id
 # ---------------------------------------------------------------------------
@@ -438,6 +529,28 @@ def test_a_diy_hero_has_avatar_candidates_that_exist_in_the_catalog(
     assert eligible_skill_ids("myhero", pack_id="standard") == (REUSED_SKILL,)
 
 
+def test_the_avatar_face_names_the_referenced_skill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """化身面（票 08 A）：**选项文本**与**外观行第二行**都给「武圣」，不是行键 / 末段 / 整串 id。
+
+    旧 ``skill_name_on`` 拿 ``skill_id.rsplit(".", 1)[-1]``（= ``wusheng``）去撞
+    ``HeroSkill.id``；这张牌的条目行键是 ``my_wusheng`` ⇒ 撞不到，于是选项写成
+    「自制武将·wusheng」、外观行第二行也退回行键。下面四样都钉住"名字"而非"id"。
+    """
+    _install(monkeypatch, _diy_raw(short_id="my_wusheng"))
+    state = build_state(pack=load_content_pack(), seats=[SeatSpec(hero="myhero")])
+    state.player(0).avatar_cards.append("myhero")
+
+    appearance = APPEARANCE_BUILDERS[AppearanceKind.AVATAR](state, 0)
+    row = appearance["cards"][0]["skills"][0]
+    assert row["skill_id"] == REUSED_SKILL
+    assert row["name"] == "武圣", "外观行第二行必须是条目中文名（不是数据行键 / 末段 / 整串 id）"
+
+    texts = zuoci_module._option_texts(state, (("myhero", REUSED_SKILL),))
+    assert texts == {REUSED_SKILL: "自制武将·武圣"}, (
+        "化身选项文本 = 武将名·技能名；旧口径会给「自制武将·wusheng」"
+    )
+
+
 def test_the_narrative_name_table_keys_the_referenced_skill_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -458,11 +571,14 @@ def _short_id_derivation(hero: Any, skill: Any) -> str:
 
 
 def _restore_short_id_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """把三个读取方绑定的派生口临时换回短 id 重拼，并清掉名字表缓存。"""
+    """把派生口临时换回短 id 重拼，并清掉名字表缓存。
+
+    票 08 A 之后名字反查只剩**一个**实现（``sgs.data.hero_skill_name(s)``），故这里只需换
+    数据层 loader 的那一处派生 + 化身候选面自己绑定的那一份；展示层 / 叙事不再各持一份。
+    """
     for target in (
-        "sgs_web.display.hero_card_skill_id",
+        "sgs.data.loader.hero_card_skill_id",
         "sgs.skills.zuoci.hero_card_skill_id",
-        "sgs_web.narrative.hero_card_skill_id",
     ):
         monkeypatch.setattr(target, _short_id_derivation)
     _name_tables.cache_clear()
@@ -501,3 +617,29 @@ def test_the_sweep_assertions_discriminate_the_old_short_id_derivation(
     assert "hero.myhero.my_wusheng" in _name_tables("standard")[1], (
         "旧口径：叙事名字表多一个幽灵键"
     )
+
+
+def _old_skill_name_on(hero: Any, skill_id: str) -> str:
+    """**旧口径**（票 08 A 前）：``skill_id`` 末段撞 ``HeroSkill.id``，撞不到退回末段。"""
+    short_id = skill_id.rsplit(".", 1)[-1]
+    return next((item.name for item in hero.skills if item.id == short_id), short_id)
+
+
+def test_the_avatar_name_assertions_discriminate_the_old_short_id_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """反向②：名字读取口退回"末段撞短 id" ⇒ 化身面的两个观测点回到旧坏值。
+
+    证明 `test_the_avatar_face_names_the_referenced_skill` 不空转：反例正是这张
+    ``short_id="my_wusheng"`` 的牌（行键 ≠ 目标技能末段）。
+    """
+    _install(monkeypatch, _diy_raw(short_id="my_wusheng"))
+    state = build_state(pack=load_content_pack(), seats=[SeatSpec(hero="myhero")])
+    state.player(0).avatar_cards.append("myhero")
+    monkeypatch.setattr("sgs.skills.zuoci.hero_skill_name", _old_skill_name_on)
+
+    row = APPEARANCE_BUILDERS[AppearanceKind.AVATAR](state, 0)["cards"][0]["skills"][0]
+    assert row["name"] == "wusheng", "旧口径：末段撞行键撞不到 ⇒ 短 id 当名字"
+    assert zuoci_module._option_texts(state, (("myhero", REUSED_SKILL),)) == {
+        REUSED_SKILL: "自制武将·wusheng"
+    }, "旧口径：化身选项文本写成短 id"

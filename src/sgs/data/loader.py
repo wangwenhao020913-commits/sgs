@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from importlib.resources import files
 from types import MappingProxyType
@@ -56,6 +56,8 @@ __all__ = [
     "hero_placement_decls",
     "hero_skill_id",
     "hero_skill_ids",
+    "hero_skill_name",
+    "hero_skill_names",
     "load_content_pack",
     "load_hero_tables",
     "load_heroes",
@@ -735,6 +737,25 @@ def hero_card_skill_id(hero: Hero, skill: HeroSkill) -> str:
     return skill.skill_id or hero_skill_id(hero.id, skill.id)
 
 
+def hero_skill_names(hero: Hero) -> Mapping[str, str]:
+    """这张武将牌上「**解析后**的全限定技能 id → 条目中文名」（名字表的唯一构造口）。
+
+    与 :func:`hero_card_skill_id` 同一条键：显式 ``skill_id`` 的条目按**被引用的 id** 建键，
+    故按 id 反查名字的读取方（展示层 / 叙事 / 化身面）不必各写一份"末段撞 ``HeroSkill.id``"
+    （diy-heroes 票 08 A：行键 ``my_wusheng`` → ``hero.jie_guanyu.wusheng``，反查到的必须是
+    「武圣」，不是 ``my_wusheng``）。
+    """
+    return {hero_card_skill_id(hero, skill): skill.name for skill in hero.skills}
+
+
+def hero_skill_name(hero: Hero, skill_id: str) -> str:
+    """``skill_id`` 在这张武将牌上的中文名；查不到 ⇒ 短 id（既有兜底）。
+
+    单条读取口，实现只经 :func:`hero_skill_names`；化身选项文本 / 标记来源 / 化身外观行都读它。
+    """
+    return hero_skill_names(hero).get(skill_id) or skill_id.rsplit(".", 1)[-1] or skill_id
+
+
 def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
     """武将表的语义校验：结构 / 唯一性（全体）+ 技能引用（**仅启用的武将**）。
 
@@ -982,7 +1003,61 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                     )
                 )
 
+    # 放置声明跨**武将**的一致性（票 08 B）：同一解析 id 上两份不同的 ``placement`` 会让
+    # `hero_placement_decls` 的全局表后写覆盖先写，引擎于是用 A 的归还时机返回 B 的牌。
+    # 单表这里查一次（loc 精确到第二条）；**跨表**的同一条判据在 `hero_placement_decls`。
+    errors.extend(_placement_conflict_errors(((file, table),)))
     return errors
+
+
+def _placement_conflict_errors(
+    sources: Sequence[tuple[str, HeroTable]],
+) -> list[LoadError]:
+    """同一解析后技能 id 上出现**不同**的放置声明 ⇒ fail-closed（``heroes.placement_conflict``）。
+
+    ``hero_placement_decls`` 按解析后的 id 建全局表：同一技能被两张牌各声明一次、而声明不同
+    时，后一份会静默覆盖前一份。**相同**的两份（照抄）不算冲突——跨武将复用同一条技能正是
+    diy-heroes 票 04 要开的门（与 ``heroes.skill_id_duplicate`` 只管**同一武将内**同一条判据）。
+
+    消息里点名**两个来源**：``expected`` 里是首次声明者（武将 id · 条目短 id + 声明内容），
+    ``got`` 里是这次的声明者；``loc`` 指向第二处的 ``placement``。
+    """
+    first: dict[str, tuple[PlacementDecl, str, str]] = {}
+    errors: list[LoadError] = []
+    for file, table in sources:
+        for hero_index, hero in enumerate(table.heroes):
+            for skill_index, skill in enumerate(hero.skills):
+                if skill.placement is None:
+                    continue
+                full_id = hero_card_skill_id(hero, skill)
+                seen = first.get(full_id)
+                if seen is None:
+                    first[full_id] = (skill.placement, hero.id, skill.id)
+                    continue
+                if seen[0] == skill.placement:
+                    continue
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"/heroes/{hero_index}/skills/{skill_index}/placement",
+                        expected=(
+                            f"{full_id} 的放置声明在全部武将牌上一致"
+                            f"（{seen[1]}·{seen[2]} 已声明 {_placement_text(seen[0])}）"
+                        ),
+                        got=f"{hero.id}·{skill.id} 声明了 {_placement_text(skill.placement)}",
+                        rule_id="heroes.placement_conflict",
+                    )
+                )
+    return errors
+
+
+def _placement_text(decl: PlacementDecl) -> str:
+    """一份放置声明的可读形状（报错里给两份声明做对照）。"""
+    return (
+        f"visibility={decl.visibility.value} / "
+        f"return_timing={decl.return_timing.value} / "
+        f"extra_effect={decl.extra_effect}"
+    )
 
 
 def validate_heroes(raw: str | bytes | Mapping[str, Any], *, file: str = "<memory>") -> HeroTable:
@@ -1083,9 +1158,21 @@ def hero_placement_decls(pack_id: str = DEFAULT_PACK_ID) -> Mapping[str, Placeme
     返回 ``全限定技能 id → PlacementDecl``（只含**声明了** ``placement`` 的条目）。
     引擎的"当前回合结束时整批归还"按它取 ``return_timing`` / ``extra_effect``；测试的
     登记表检查按它核"每个 ``SkillDef.places_on_hero_card`` 都有一份声明"。
+
+    **跨武将冲突 fail-closed**（票 08 B）：这张表按解析后的 id 建键，同一技能被两张牌各声明
+    一次而声明不同时，后写会静默覆盖先写——故建表前先核一遍，冲突即抛
+    ``heroes.placement_conflict``（消息点名两个来源）。同一张表里的冲突在 ``validate_heroes``
+    就先红（loc 精确到条目），这里是**跨表**那一半（DIY 包复用既有放置技能时最容易漏）。
     """
+    tables = load_hero_tables(pack_id)
+    conflicts = _placement_conflict_errors(
+        tuple((f"files/heroes.{table.pack_id}.json", table) for table in tables)
+    )
+    if conflicts:
+        raise DataLoadError(conflicts)
+
     found: dict[str, PlacementDecl] = {}
-    for table in load_hero_tables(pack_id):
+    for table in tables:
         for hero in table.heroes:
             for skill in hero.skills:
                 if skill.placement is not None:
