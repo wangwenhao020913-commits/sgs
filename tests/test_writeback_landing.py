@@ -358,8 +358,16 @@ def test_doc06_ledger_landing_points_exist() -> None:
         for rel, symbol in CITATION_RE.findall(landing):
             if PSEUDO_PATH_RE.match(rel) or not CONVENTIONAL_PATH_RE.match(rel):
                 continue          # 文档号的引用（不是仓库路径）——它们由文档门禁自己核
-            target = _resolve(rel.removeprefix("./"), REPO_ROOT)
+            plain = rel.removeprefix("./")
+            target = _resolve(plain, REPO_ROOT)
             if target is None:
+                if plain.startswith(".scratch/"):
+                    # `.scratch/` 是 gitignored 的工单目录：干净 clone（CI、别人 clone）里
+                    # 根本没有它。本文件开篇那条约定就是"账本不在干净 clone 里则整组跳过"，
+                    # §5 表里指向**本机工单**的引用同理：本地有就照旧核（不给"落点写错"留
+                    # 后门），干净 clone 里不算错。缺这一条，公开仓的 CI 会永远红在这 5 条上
+                    # （2026-11-13 实测：本机全绿、CI 自引入起从未绿过）。
+                    continue
                 errors.append(f"§5:{line_no}: 落点文件不存在：`{rel}`")
                 continue
             checked += 1
