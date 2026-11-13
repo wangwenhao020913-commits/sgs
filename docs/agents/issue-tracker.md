@@ -19,6 +19,7 @@
   `Answer contract: on`：此后该 feature 的每张 `resolved` 票都必须有非空 `## Answer`
   （`tests/test_agent_skills.sh` 核）。不写则沿用旧约定（`## Comments` 收口），不追溯历史。
 - **`Touches:`**：顶部可选一行 `Touches: <逗号分隔的仓库内路径>`，声明本票会改哪些文件。
+  新增文件写成 `path (new)`（**跳过存在性检查**——否则新武将票没法声明还没创建的文件）。
   `/implement-spec` 据此**机械**判断前沿上的票能不能并行（文件不重叠才并行）；
   它也让"票面说可并行、实际全撞同一个文件"在**写票时**就暴露，而不是等执行时才发现。
   写了就必须每条路径都存在（`tests/test_agent_skills.sh` 核）。

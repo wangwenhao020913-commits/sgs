@@ -197,8 +197,24 @@ def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _Fuz
 
 
 def _play_and_check(seed: int, *, players: int, deadline: float | None = None) -> _FuzzEngine:
-    engine = _play(seed, players=players, deadline=deadline)
-    _check_journal_invariants(engine)
+    """跑一局并核全部不变量；**任何失败都把种子写进消息**（2026-11-13 的教训）。
+
+    门禁的种子基数是随机取的（:func:`_seed_base`）：失败若不带 ``seed`` / ``players``，
+    这一红就复现不了——本轮为此多付了一轮 8 分钟门禁。消息里直接给复跑命令。
+    """
+    try:
+        engine = _play(seed, players=players, deadline=deadline)
+        _check_journal_invariants(engine)
+    except AssertionError:
+        # `_fail(seed, …)` 已经把种子写进消息，原样上抛（别套两层）。
+        raise
+    except Exception as error:  # noqa: BLE001 - 任何异常都要带种子，见 docstring
+        raise AssertionError(
+            f"fuzz 局失败：seed={seed} players={players}\n"
+            f"复跑：SGS_FUZZ_SEED={seed} SGS_FUZZ_PLAYERS={players} SGS_FUZZ_GAMES=1 "
+            f".venv/bin/pytest -q tests/test_fuzz.py\n"
+            f"{type(error).__name__}: {error}"
+        ) from error
     return engine
 
 

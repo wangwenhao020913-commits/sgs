@@ -31,6 +31,11 @@
 硬编码计数不会自动被看见，要往 :data:`SITES` 加一行（新派生量也要有站点或登记表在对账，
 ``tests/test_pool_census.py`` 有一条绊线核这件事）。
 
+4. **池敏感登记面**（2026-11-13 加，加武将时最容易漏的三处）：AI 语义表
+   ``SKILL_VALUES`` 覆盖每条启用非锁定武将技；``M6_CLOSEOUT_SEEDS`` 先只**发将**核一遍
+   （每局 ≥2 个版本 ∧ 标准版在场 ∧ 真名互异）；``test_hero_catalog.py`` / ``test_hero_dealing.py``
+   两份手抄的「全部武将表并集」覆盖 ``HERO_SUPPLEMENT_PACK_IDS``。
+
 为什么 ``SKILL_FILES`` 只判「无陈旧键 + 文件名真的点名」而不是「== 全部启用技能」：那张覆盖表
 的集合只并了 8 张武将表（不含自制包 / 雷包），当前 133 / 143 条。它与既有断言同源，本工具
 **不改**既有断言 ⇒ 差额作为**注**打印（加武将时照样看得见该补哪几条），不计入 ``--check``。
@@ -72,6 +77,12 @@ ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
 TESTS_DIR: Final[Path] = ROOT / "tests"
 CATALOG_TESTS: Final[Path] = TESTS_DIR / "test_hero_catalog.py"
+AI_GAMES_TESTS: Final[Path] = TESTS_DIR / "test_all_ai_games.py"
+PACK_UNION_FILES: Final[tuple[str, ...]] = (
+    "tests/test_hero_catalog.py",
+    "tests/test_hero_dealing.py",
+)
+"""两份手抄「全部武将表并集」的测试文件（相对仓根）。"""
 
 MIN_SITE_HITS: Final[int] = 10
 """站点绊线：远低于当前命中数的下限——扫描被改坏时宁可红，也不要空转通过。"""
@@ -89,6 +100,9 @@ METRIC_LABELS: Final[dict[str, str]] = {
     "skill_shape": "SKILL_SHAPE 条数",
     "skill_files_stale": "陈旧键",
     "skill_files_unnamed": "文件名不点名",
+    "skill_values_missing": "AI 语义表缺条目",
+    "closeout_bad": "池敏感固定种子失配",
+    "pack_union_missing": "武将表并集缺包",
 }
 """派生量 → 人话（``--json`` 里仍是稳定的键名）。"""
 
@@ -574,6 +588,9 @@ def collect() -> Report:
         _skill_shape_check(tables, facts, catalog_tests, failures),
         _skill_files_check(tables, facts, failures, notes),
         _descriptions_check(facts, failures),
+        _skill_values_check(failures),
+        _closeout_seed_check(failures),
+        _pack_union_check(failures),
     ]
 
     sites: list[Hit] = []
@@ -759,6 +776,163 @@ def _unnamed_skill_files(skill_files: Mapping[str, str]) -> list[str]:
         if short_id not in text:
             unnamed.append(f"{skill_id}（{filename} 没点名）")
     return unnamed
+
+
+def _skill_values_check(failures: list[str]) -> TableCheck:
+    """**AI 语义表**（``SKILL_VALUES``）覆盖每条启用非锁定武将技。
+
+    与 ``tests/test_heuristic_ai.py::_missing_entries`` 同一判据、同一数据源（全部启用的
+    武将表；锁定技跳过）；不 import 测试模块。加武将时它只在 8 分钟门禁里爆——这里 1 秒看见。
+    """
+    from sgs.agents.heuristic import SKILL_VALUES
+    from sgs.data import enabled_hero_ids, hero_skill_id, load_hero_tables
+    from sgs.skills import CATALOG
+
+    missing: list[str] = []
+    for table in load_hero_tables():
+        for hero_id in enabled_hero_ids(table):
+            hero = table.by_id(hero_id)
+            for skill in hero.skills:
+                full_id = hero_skill_id(hero.id, skill.id)
+                definition = CATALOG.get(full_id)
+                if definition is None or definition.locked:
+                    continue
+                if full_id not in SKILL_VALUES:
+                    missing.append(full_id)
+    missing.sort()
+    if missing:
+        failures.append(
+            "AI 语义表缺条目（补 `sgs/agents/heuristic.py` 的 ``SKILL_VALUES``）："
+            + "、".join(missing)
+        )
+    return TableCheck(
+        name="AI 语义表",
+        summary=(f"{len(missing)} 条缺条目" if missing else "启用非锁定武将技都有条目"),
+        hits=(
+            Hit(
+                label="AI 语义表覆盖",
+                file="tests/test_heuristic_ai.py",
+                line=None,
+                expression="SKILL_VALUES ⊇ 启用非锁定武将技",
+                readings=(Reading("skill_values_missing", len(missing), 0),),
+            ),
+        ),
+    )
+
+
+def _closeout_seed_check(failures: list[str]) -> TableCheck:
+    """池敏感的固定种子先只做**发将**预检（8 分钟门禁的那条判据）。
+
+    池每加一个武将都会重排 RNG ⇒ 固定种子可能抽不到标准版（先例：144→145、140→141）。
+    这里不跑对局（毫秒级）：跑完 / 零非法应答 / 可回放仍由 ``test_all_ai_games`` 自己钉。
+    """
+    from sgs.data import RuleConfig, hero_by_id, load_content_pack
+    from sgs.engine import Engine
+
+    def _broken(summary: str) -> TableCheck:
+        """扫描失效的表格：**必须带一条不 ok 的读数**，否则空 hits 会被当成绿。"""
+        return TableCheck(
+            name="池敏感固定种子",
+            summary=summary,
+            hits=(
+                Hit(
+                    label="closeout 种子发将",
+                    file=_relative(AI_GAMES_TESTS),
+                    line=None,
+                    expression="M6_CLOSEOUT_SEEDS / M6_CLOSEOUT_PLAYERS",
+                    readings=(Reading("closeout_bad", 1, 0),),
+                ),
+            ),
+        )
+
+    try:
+        text = AI_GAMES_TESTS.read_text(encoding="utf-8")
+    except OSError as error:
+        failures.append(f"读不到 {_relative(AI_GAMES_TESTS)}：{error}")
+        return _broken("读不到")
+    seeds_match = re.search(r"M6_CLOSEOUT_SEEDS[^=]*=\s*\(([^)]*)\)", text)
+    players_match = re.search(r"M6_CLOSEOUT_PLAYERS\s*=\s*(\d+)", text)
+    if seeds_match is None or players_match is None:
+        failures.append("读不到 M6_CLOSEOUT_SEEDS / M6_CLOSEOUT_PLAYERS（扫描规则失效）")
+        return _broken("扫描失效")
+    seat_count = int(players_match.group(1))
+    seed_values = tuple(int(value) for value in re.findall(r"\d+", seeds_match.group(1)))
+    pack = load_content_pack(deck_profile="standard_108")
+    bad: list[str] = []
+    for seed in seed_values:
+        engine = Engine.new_game(
+            seed=seed,
+            rule_config=RuleConfig(player_count=seat_count),
+            pack=pack,
+            hero_pool=(),
+        )
+        heroes = [player.hero for player in engine.state.players]
+        versions = {hero_by_id(hero).version for hero in heroes}
+        names = {hero_by_id(hero).true_name for hero in heroes}
+        if (
+            "standard" not in versions
+            or len(versions) < 2
+            or len(set(heroes)) != seat_count
+            or len(names) != seat_count
+        ):
+            bad.append(f"seed={seed}（{sorted(versions)}）")
+    if bad:
+        failures.append(
+            "池敏感固定种子在新池下不再合格（按纪律换种不换判据）：" + "；".join(bad)
+        )
+    return TableCheck(
+        name="池敏感固定种子",
+        summary=(
+            f"{len(bad)}/{len(seed_values)} 局不合格"
+            if bad
+            else f"{len(seed_values)} 局都是混合池且含标准版"
+        ),
+        hits=(
+            Hit(
+                label="closeout 种子发将",
+                file=_relative(AI_GAMES_TESTS),
+                line=None,
+                expression="每局 ≥2 版本 ∧ standard 在场 ∧ 真名互异",
+                readings=(Reading("closeout_bad", len(bad), 0),),
+            ),
+        ),
+    )
+
+
+def _pack_union_check(failures: list[str]) -> TableCheck:
+    """两份手抄的「全部武将表并集」必须覆盖 ``HERO_SUPPLEMENT_PACK_IDS``。
+
+    新包（如 ``shan``）最容易漏：池里加了、测试的并集没加，只在门禁里红（本批 3 次本地红之一）。
+    """
+    from sgs.data import HERO_SUPPLEMENT_PACK_IDS
+
+    missing: list[str] = []
+    for relative in PACK_UNION_FILES:
+        try:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+        except OSError as error:
+            failures.append(f"读不到 {relative}：{error}")
+            continue
+        for pack_id in HERO_SUPPLEMENT_PACK_IDS:
+            if f'load_heroes("{pack_id}")' not in text:
+                missing.append(f"{relative} 缺 {pack_id}")
+        if "load_heroes()" not in text:
+            missing.append(f"{relative} 缺 standard（load_heroes()）")
+    if missing:
+        failures.append("武将表并集缺包（加包后把并集补上）：" + "；".join(missing))
+    return TableCheck(
+        name="武将表并集",
+        summary=("缺包" if missing else "两份并集都覆盖 HERO_SUPPLEMENT_PACK_IDS"),
+        hits=(
+            Hit(
+                label="武将表并集覆盖",
+                file="tests/test_hero_catalog.py",
+                line=None,
+                expression="并集 ⊇ {standard} ∪ HERO_SUPPLEMENT_PACK_IDS",
+                readings=(Reading("pack_union_missing", len(missing), 0),),
+            ),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

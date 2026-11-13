@@ -304,6 +304,14 @@ scan_issue_touches() { # $1=仓库根；返回 1 = 有错
     for item in $item; do
       item="$(printf '%s' "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
       [ -n "$item" ] || continue
+      # 新增文件写成 `path (new)`：**跳过存在性检查**（票面要能声明还没创建的文件，
+      # 否则新武将票的"文件不重叠"判断永远缺一块——2026-11-13 立）。
+      case "$item" in
+        *"(new)")
+          items+=("$(printf '%s' "${item%(new)}" | sed -e 's/[[:space:]]*$//')")
+          continue
+          ;;
+      esac
       items+=("$item")
       if [ ! -e "$root/$item" ]; then
         echo "FAIL: ${f#"$root"/} 的『Touches:』列了不存在的路径：$item"

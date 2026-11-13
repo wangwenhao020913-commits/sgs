@@ -115,3 +115,76 @@ def test_the_check_flag_is_green_and_the_json_view_carries_the_same_facts(capsys
     assert payload["ok"] is True
     assert payload["derived"]["versions"] == len(enabled_hero_ids())
     assert len(payload["sites"]) >= pool_census.MIN_SITE_HITS
+
+# ---------------------------------------------------------------------------
+# 池敏感登记面（2026-11-13 加）：AI 语义表 / 固定种子 / 武将表并集
+# ---------------------------------------------------------------------------
+
+
+def test_the_pack_union_check_flags_a_file_that_misses_a_pack(
+    monkeypatch, tmp_path
+) -> None:
+    """新包进了 `HERO_SUPPLEMENT_PACK_IDS`、却没进某份并集 ⇒ 红（本批 `shan` 的教训）。"""
+    from sgs.data import HERO_SUPPLEMENT_PACK_IDS
+
+    complete = tmp_path / "complete.py"
+    complete.write_text(
+        "\n".join(f'X = load_heroes("{pack_id}")' for pack_id in HERO_SUPPLEMENT_PACK_IDS)
+        + "\nA = load_heroes()\n",
+        encoding="utf-8",
+    )
+    incomplete = tmp_path / "incomplete.py"
+    incomplete.write_text(
+        "\n".join(
+            f'X = load_heroes("{pack_id}")' for pack_id in HERO_SUPPLEMENT_PACK_IDS[:-1]
+        )
+        + "\nA = load_heroes()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        pool_census, "PACK_UNION_FILES", (str(complete), str(incomplete))
+    )
+
+    failures: list[str] = []
+    table = pool_census._pack_union_check(failures)
+
+    assert not table.ok, "缺一个包的并集必须判红"
+    assert any(HERO_SUPPLEMENT_PACK_IDS[-1] in message for message in failures), (
+        f"失败消息里要指名缺的是哪个包；实得 {failures}"
+    )
+
+
+def test_the_skill_values_check_flags_a_missing_entry(monkeypatch) -> None:
+    """AI 语义表少一条 ⇒ 红（加武将时只在 8 分钟门禁里爆的那条）。"""
+    from sgs.agents import heuristic
+    from sgs.data import enabled_hero_ids, hero_skill_id, load_hero_tables
+    from sgs.skills import CATALOG
+
+    victim = "hero.zuoci.xinsheng"
+    table = load_hero_tables()
+    definition = CATALOG[victim]
+    assert not definition.locked, "构造前提：拿一条非锁定技当缺条目的样本"
+    pruned = {
+        key: value for key, value in heuristic.SKILL_VALUES.items() if key != victim
+    }
+    monkeypatch.setattr(heuristic, "SKILL_VALUES", pruned)
+
+    failures: list[str] = []
+    table_check = pool_census._skill_values_check(failures)
+
+    assert not table_check.ok, "缺条目必须判红"
+    assert any(victim in message for message in failures), failures
+
+
+def test_the_closeout_seed_check_reports_a_broken_scan(monkeypatch, tmp_path) -> None:
+    """读不到种子 / 玩家数（文件被改形）⇒ 红，而不是空转通过。"""
+    broken = tmp_path / "broken.py"
+    broken.write_text("SOMETHING = 1\n", encoding="utf-8")
+    monkeypatch.setattr(pool_census, "AI_GAMES_TESTS", broken)
+
+    failures: list[str] = []
+    table = pool_census._closeout_seed_check(failures)
+
+    assert not table.ok, "扫描失效必须判红"
+    assert failures, "失败原因要写进 failures"
+
