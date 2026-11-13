@@ -15,16 +15,18 @@ r"""技能制作文档 ↔ 代码的**漂移审计**（票 23 的「制作武将
 
 外加两条轻量体检：文档本身有实质内容（≥ 30 行），两份工具能被导入并给出形状（CLI 坏掉时红）。
 
-**第 5 条**是跨仓的那一半：`/hero-skill` 的入口文件住在用户家目录（`~/.dsh/skills/`），不在
-版本库里，它的死法比文档更隐蔽——文档改了指不到、或它自己悄悄复述了一份旧口径。瘦身后的
-入口只留锚点与一行基线，于是能机械核的恰好两件：**引用的 § 真在**、**基线 commit 真在**。
-该文件缺席（别的机器 / CI）⇒ skip，不算红。
+**第 5 条**是同仓的那一半（票 01「入口 skill 进仓」）：`/hero-skill` 的入口文件
+`skills/hero-skill/SKILL.md` 就住在仓里、与 `docs/agents/skill-authoring.md` 同进退。它的死法
+比文档更隐蔽——文档改了指不到、或它自己悄悄复述了一份旧口径。瘦身后的入口只留锚点与一行
+「判据版本」，于是能机械核的恰好三件：**仓内真的有它**、**引用的 § 真在**、**声明的硬停条数
+与 `STOP_IDS` 同数**。家目录的 `~/.dsh/skills/hero-skill/SKILL.md` 只是本机安装副本：仓内缺席
+时才兜底读它，而**仓内缺席本身就是红**（CI 上尤其不许 skip——那正是它漂了没人发现的原因）。
 """
 
 from __future__ import annotations
 
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -342,11 +344,14 @@ def test_the_similarity_tool_ranks_candidates_and_skips_itself():
 
 
 # ---------------------------------------------------------------------------
-# 7. 入口 skill（`/hero-skill`）的锚点与基线：跨仓文件，存在才核、缺席 skip
+# 7. 入口 skill（`/hero-skill`）住在本仓：存在性 / 锚点 / 判据版本都是硬约束
 # ---------------------------------------------------------------------------
 
-ENTRY_SKILL = Path.home() / ".dsh" / "skills" / "hero-skill" / "SKILL.md"
-"""`/hero-skill` 触发的入口文件。它不在版本库里，所以本文件对它是**软依赖**。"""
+ENTRY_SKILL = REPO_ROOT / "skills" / "hero-skill" / "SKILL.md"
+"""`/hero-skill` 触发的入口文件。**它在版本库里**——判据全在本仓文档，入口必须同仓（票 01）。"""
+
+HOME_SKILL = Path.home() / ".dsh" / "skills" / "hero-skill" / "SKILL.md"
+"""本机安装副本，只做**兜底**：仓内那份缺席时才读它；CI 上不兜底（缺席即红）。"""
 
 _SECTION_RE = re.compile(r"^#{1,6}\s+(\d+(?:\.\d+)?)\.?\s", re.MULTILINE)
 """过程文档的节号集合（`## 2.1 规范确认门` / `## 4. 硬停判据` 两种写法都认）。"""
@@ -354,14 +359,56 @@ _SECTION_RE = re.compile(r"^#{1,6}\s+(\d+(?:\.\d+)?)\.?\s", re.MULTILINE)
 _ANCHOR_RE = re.compile(r"`skill-authoring\.md`\s*§(\d+(?:\.\d+)?)")
 """入口 skill 里的锚点：`` `skill-authoring.md` §2.1 ``。"""
 
-_BASELINE_RE = re.compile(r"基线：对齐 SGS `([0-9a-f]{7,40})`")
-"""入口 skill 里的基线戳：`基线：对齐 SGS `<hash>`（<日期>）`。"""
+_SKILL_VERSION_RE = re.compile(
+    r"判据版本：与 `docs/agents/skill-authoring\.md` 同仓（硬停判据恰 (\d+) 条）"
+)
+"""入口 skill 的判据版本行；条数由本文件的 `STOP_IDS` 反向核，不再钉一个会漂的 commit。"""
+
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+"""YAML frontmatter 块（`name` / `description` / `disable-model-invocation` 住这里）。"""
+
+
+def _display(path: Path) -> str:
+    """报错里的路径：仓内的写相对路径，仓外的（反例的 `tmp_path`）写绝对路径。"""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _entry_skill_text() -> str:
-    if not ENTRY_SKILL.is_file():
-        pytest.skip(f"没有入口 skill（{ENTRY_SKILL}）——本机没装 `/hero-skill`")
-    return ENTRY_SKILL.read_text(encoding="utf-8")
+    """入口 skill 正文：仓内优先；缺席时才看家目录那份（CI 上直接判红）。"""
+    if ENTRY_SKILL.is_file():
+        return ENTRY_SKILL.read_text(encoding="utf-8")
+    if HOME_SKILL.is_file():
+        return HOME_SKILL.read_text(encoding="utf-8")
+    if os.environ.get("CI"):
+        pytest.fail(f"仓内入口 skill 缺席：{_display(ENTRY_SKILL)}（CI 上不许 skip）")
+    pytest.skip(f"仓内入口 skill 缺席（{ENTRY_SKILL}），本机也没装 `/hero-skill`")
+
+
+def test_the_entry_skill_lives_in_the_repo():
+    """入口 skill 必须在版本库里，且仍是"薄入口"：frontmatter 对、指到总入口文档。
+
+    这是票 01 的主要交付：位置从家目录搬进仓后，"别的机器 / CI 上永不检查"这个后门就关了。
+    """
+    assert ENTRY_SKILL.is_file(), (
+        f"仓内没有入口 skill：{_display(ENTRY_SKILL)}\n"
+        "`/hero-skill` 的判据全在本仓文档里，入口必须跟着仓走（家目录副本只是本机安装）"
+    )
+    text = ENTRY_SKILL.read_text(encoding="utf-8")
+    front = _FRONTMATTER_RE.match(text)
+    assert front, f"{_display(ENTRY_SKILL)} 开头不是 YAML frontmatter"
+    meta = front.group(1)
+    for must in ("name: hero-skill", "description:", "disable-model-invocation: true"):
+        assert must in meta, (
+            f"入口 skill 的 frontmatter 缺少 `{must}`（`name` / `description` / "
+            "`disable-model-invocation: true` 都要与搬之前的文件一字不改）"
+        )
+    assert "docs/agents/skill-authoring.md" in text, (
+        f"{_display(ENTRY_SKILL)} 没有指向总入口 `docs/agents/skill-authoring.md`："
+        "入口只该指路，不该自包含"
+    )
 
 
 def test_the_entry_skill_points_at_sections_that_exist():
@@ -384,24 +431,69 @@ def test_the_entry_skill_points_at_sections_that_exist():
     )
 
 
-def test_the_entry_skill_baseline_names_a_known_commit():
-    """入口 skill 的基线戳必须是本仓认得的 commit（它声明"对齐到哪一版"）。"""
+def test_the_entry_skill_declares_the_hard_stop_count():
+    """入口 skill 的「判据版本」行必须与 `STOP_IDS` 同数。
+
+    进仓后不再钉一个会漂的 commit（文档就在旁边）：改钉"它依据哪份文档、几条硬停"，条数由
+    本文件的 `STOP_IDS` 反向核——增删判据而没改入口，这条就红。
+    """
     text = _entry_skill_text()
-    found = _BASELINE_RE.findall(text)
-    assert found, (
-        f"{ENTRY_SKILL} 没有基线戳（写成 `基线：对齐 SGS `<hash>`（<日期>）`）："
-        "没有它就无法判断这份 skill 落在哪一版代码上"
+    declared = _SKILL_VERSION_RE.findall(text)
+    assert declared, (
+        f"{ENTRY_SKILL} 没有「判据版本」行（写成 "
+        "`判据版本：与 `docs/agents/skill-authoring.md` 同仓（硬停判据恰 13 条）`）："
+        "没有它就无法判断这份入口落在哪版判据上"
     )
-    if not (REPO_ROOT / ".git").exists():
-        pytest.skip("不在 git 工作树里，无法核基线 commit")
-    for rev in found:
-        probe = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{rev}^{{commit}}"],
-            capture_output=True,
-            text=True,
-        )
-        assert probe.returncode == 0, (
-            f"入口 skill 的基线 `{rev}` 不是本仓的 commit（git cat-file 失败："
-            f"{probe.stderr.strip()}）——把 `基线：对齐 SGS` 更新到当前 HEAD"
-        )
+    assert declared == [str(len(STOP_IDS))], (
+        f"{ENTRY_SKILL} 声明的硬停判据条数是 {declared}，本文件钉住的是 {len(STOP_IDS)} 条："
+        "增删判据要同时改 `STOP_IDS` 与入口 skill"
+    )
+
+
+def test_every_entry_skill_check_bites_on_a_broken_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """覆盖元断言：把入口换成一份坏的，上面三条必须全红（防断言空转）。"""
+    broken = tmp_path / "SKILL.md"
+    broken.write_text(
+        "---\nname: not-hero-skill\ndescription: 坏的\ndisable-model-invocation: false\n"
+        "---\n\n# 入口\n\n没有锚点，也没有判据版本。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "ENTRY_SKILL", broken)
+    still_green: list[str] = []
+    for name, check in (
+        ("lives_in_the_repo", test_the_entry_skill_lives_in_the_repo),
+        ("points_at_sections_that_exist", test_the_entry_skill_points_at_sections_that_exist),
+        ("declares_the_hard_stop_count", test_the_entry_skill_declares_the_hard_stop_count),
+    ):
+        try:
+            check()
+        except AssertionError:
+            continue
+        still_green.append(name)
+    assert not still_green, f"这些检查对坏入口仍然通过（断言空转）：{still_green}"
+
+
+def test_a_missing_entry_skill_is_red_not_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本票的主要交付：仓内入口缺席**直接红**，不许 skip（旧软依赖只剩下面那条兜底档）。"""
+    monkeypatch.setattr(sys.modules[__name__], "ENTRY_SKILL", tmp_path / "SKILL.md")
+    with pytest.raises(AssertionError):
+        test_the_entry_skill_lives_in_the_repo()
+
+
+def test_the_home_fallback_only_skips_outside_ci(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """家目录兜底的边界：CI 上缺席判红，非 CI + 本机也没装才 skip。"""
+    monkeypatch.setattr(sys.modules[__name__], "ENTRY_SKILL", tmp_path / "SKILL.md")
+    monkeypatch.setattr(sys.modules[__name__], "HOME_SKILL", tmp_path / "home-SKILL.md")
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(pytest.fail.Exception):
+        _entry_skill_text()
+    monkeypatch.delenv("CI")
+    with pytest.raises(pytest.skip.Exception):
+        _entry_skill_text()
 
