@@ -4408,6 +4408,62 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `playback=${!!ui.state.playback} cursor=${ui.state.view.cursor}`);
 }
 
+/* ============ 【慧识】报障：JUDGE 帧 pop 不得淡出"仍留在处理区"的判定牌 ============
+ *
+ * 根因：``applyEffectDelta`` 在**帧 pop** 时给该帧的牌统一起淡出。判定牌的每一次离区
+ * 本来都有自己的 ``card_move``（弃牌堆 / 改判者手牌 / 天妒），而【慧识】的判定牌在
+ * 流程终止前**故意留在处理区** ⇒ 帧 pop 的淡出让它一张张消失（用户 2026-11-14 报障）。
+ * 修法：JUDGE 帧 pop 不起淡出（仍留在处理区的牌由快照 / 后续 card_move 决定去留）。
+ */
+{
+  const judged = synthCard(70, "桃");
+  const base = synthView(null);
+  base.snapshot.processing = [];
+  const before = { ...base, cursor: 700, log_seq: 0, records: [], finished: false };
+  const records = [
+    { kind: "frame", op: "push", frame_id: 11, frame_kind: "JUDGE", seq: 701 },
+    {
+      kind: "delta", delta_type: "card_move", seq: 702, reason: "JUDGE", owner: 0,
+      from_zone: { seat: null, zone: "deck" },
+      to_zone: { seat: null, zone: "processing" },
+      cards: [judged],
+    },
+    { kind: "frame", op: "pop", frame_id: 11, seq: 703 },
+  ];
+  const view = {
+    ...base,
+    cursor: 800,
+    log_seq: 0,
+    finished: false,
+    records,
+    // 引擎把判定牌**留在**处理区（`open_skill_judgment(..., keep_card=True)`）：
+    // 新快照就是"它还在那里"的权威面。
+    snapshot: { ...base.snapshot, processing: [judged] },
+    pending: {
+      kind: "SELECT_OPTION", actor: 0, seq: 800,
+      prompt: "是否加1点体力上限并重复此流程？",
+      legal_actions: [{ kind: "Pass", answers_seq: 800 }],
+      candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    },
+  };
+  ui.state.logRecords = [];
+  $("t-log").innerHTML = "";
+  ui.state.view = null;
+  ui.applyViewRaw(before);
+  ui.applyViewRaw(view);
+  ui.stepPlayback(true); // frame push
+  ui.stepPlayback(true); // 判定牌进处理区
+  ui.stepPlayback(true); // JUDGE 帧 pop（旧实现：这里起淡出）
+  const node = Array.from($("t-processing").children).find(
+    (item) => item.getAttribute("data-card-id") === "70",
+  );
+  check("㉿J1 JUDGE 帧 pop 不淡出仍留在处理区的判定牌",
+    $("t-processing").text().includes("桃") && !!node
+      && !(node.classList || { contains: () => false }).contains("fading"),
+    `处理区="${$("t-processing").text().trim()}" node=${!!node}`);
+  ui.flushPlayback();
+}
+
 /* ============ 报障：描述文本的目标 / 使用者（决斗串味 + 杀缺目标 + 南蛮逐目标） ============
  *
  * 根因：卡牌在 ``USE_CHOOSE_TARGET`` 之后、``USE_DESIGNATE_TARGET`` 之前就进了处理区，

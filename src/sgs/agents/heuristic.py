@@ -4648,8 +4648,9 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     ),
     "hero.shen_guojia.hui_shi": (
         _constant(2.4),
-        "限定技：帮有未触发觉醒技的角色立即觉醒，否则其摸四张；两支都自减 2 上限。"
-        "整局一次、收益 = 一次觉醒或 4 张牌 ⇒ 恒发动为正（读 view 只用公开面）",
+        "限定技：把有未触发觉醒技的角色那条觉醒条件**标成满足**（它自己的时机到了才觉醒），"
+        "否则其摸四张；两支都自减 2 上限。整局一次、收益 = 一次觉醒或 4 张牌 ⇒ 恒发动为正"
+        "（读 view 只用公开面）",
     ),
     "hero.shen_guojia.tianyi": (
         _constant(0.0),

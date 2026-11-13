@@ -1245,6 +1245,18 @@ _TURN_USED = 0b10_0000
 """
 
 
+_CONDITION_SATISFIED = 1 << 23
+"""**觉醒条件视为已满足**位（shiji-zhi 票 01；神郭嘉【辉逝】的唯一写入者）。
+
+使用者：辉逝的「令其视为满足其一个觉醒技的觉醒条件」——它只**满足条件**，不立即结算：
+觉醒技仍要等**自己的时机**（【天翊】= 准备阶段、【勤学】= 准备 / 结束阶段、【潜心】=
+造成伤害后……）到来才触发。判据落在 per-instance 的 ``skill_state`` 上（跨回合保留、
+出牌阶段复位不清），**只在 :func:`_matching_hooks` 求值觉醒技的钩子条件时被读**：
+置位 ⇒ 该技能的钩子条件视为成立（用户 2026-11-14 的裁定：「觉醒技分为觉醒条件与判断
+是否觉醒的时机」）。位 23 是位段（6..13 仁德 / 15..22 黄天 / 24..31 定乱）之间的孤位。
+"""
+
+
 def _instance_used_this_turn(state: GameState, instance: SkillInstance) -> bool:
     """``instance`` 的**本回合已用**位（只看位，不解析实例）。"""
     return bool(state.skill_state.get(instance_key(instance), 0) & _TURN_USED)
@@ -1343,7 +1355,8 @@ def _mark_awakened(state: GameState, instance: SkillInstance) -> None:
     if instance.definition.skill_type is not SkillType.AWAKENING:
         return
     key = instance_key(instance)
-    state.skill_state[key] = state.skill_state.get(key, 0) | _AWAKENED
+    flags = state.skill_state.get(key, 0)
+    state.skill_state[key] = (flags | _AWAKENED) & ~_CONDITION_SATISFIED
 
 
 def _instance_used_once(state: GameState, instance: SkillInstance) -> bool:
@@ -1406,20 +1419,38 @@ def awakening_skill_awakened(state: GameState, seat: int, skill_id: str) -> bool
     return False
 
 
-def mark_awakening_awakened(state: GameState, seat: int, skill_id: str) -> bool:
-    """给 ``seat`` 的 ``skill_id`` 这条**觉醒技**落"已觉醒"位（shiji-zhi 票 05 的写面）。
+def awakening_condition_satisfied(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 这条觉醒技的**条件是否被"视为满足"**（只读面）。
 
-    与只读面 :func:`awakening_skill_awakened` 同姿态（``include_suppressed=True`` 解析）：
-    **失效 ≠ 未觉醒**，暂时被挡住的实例照样能落位。写入口只有两处——派发环的
-    ``_mark_awakened``（自己的时机触发）与本函数（**跨技能强制觉醒**，首个载体 = 神郭嘉
-    【辉逝】经 :meth:`~sgs.engine.Engine.force_awakening`）。没有该实例 / 不是觉醒技时
-    **零动作**并返回 ``False``（与 :func:`mark_limited_skill_used` 同一条纪律）。
+    与 :func:`awakening_skill_awakened` 同姿态（``include_suppressed=True`` 解析）；
+    没有这条实例 / 不是觉醒技时恒 ``False``。
     """
     for instance in resolve_instances(state, include_suppressed=True):
         if instance.owner == seat and instance.skill_id == skill_id:
             if instance.definition.skill_type is not SkillType.AWAKENING:
                 return False
-            _mark_awakened(state, instance)
+            return bool(
+                state.skill_state.get(instance_key(instance), 0) & _CONDITION_SATISFIED
+            )
+    return False
+
+
+def satisfy_awakening_condition(state: GameState, seat: int, skill_id: str) -> bool:
+    """把 ``seat`` 的 ``skill_id`` 这条觉醒技的**觉醒条件视为满足**（shiji-zhi 票 01 的写入面）。
+
+    只置位、**不结算**：觉醒技仍要等它自己的时机（用户 2026-11-14 裁定）。已觉醒 / 不是
+    觉醒技 / 没有实例时 **零动作**并返回 ``False``。位随实例键存活，:func:`_mark_awakened`
+    在真正觉醒时把它清掉；来源消失时 ``prune_skill_state`` 随键清。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            if instance.definition.skill_type is not SkillType.AWAKENING:
+                return False
+            key = instance_key(instance)
+            flags = state.skill_state.get(key, 0)
+            if flags & _AWAKENED:
+                return False
+            state.skill_state[key] = flags | _CONDITION_SATISFIED
             return True
     return False
 
@@ -1632,12 +1663,25 @@ def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: F
     "失去牌的是不是持有者本人"，而 ``skill_owner`` 的写入时机（回调前）保持不变。
     """
     frame.data[MATCH_OWNER_KEY] = instance.owner
+    # 觉醒技的「视为满足其觉醒条件」（shiji-zhi 票 01）：置位 ⇒ 本实例的钩子条件视为成立。
+    # 只对**觉醒技**生效（其它技能的钩子条件不受任何技能影响），且位随实例键存活。
+    satisfied = (
+        instance.definition.skill_type is SkillType.AWAKENING
+        and bool(
+            host.state.skill_state.get(instance_key(instance), 0)
+            & _CONDITION_SATISFIED
+        )
+    )
     return tuple(
         hook
         for hook in instance.definition.hooks
         if hook.timing is timing
         and (hook.per_point or damage_point_index(frame) == 0)
-        and (hook.condition is None or hook.condition(host, frame))
+        and (
+            satisfied
+            or hook.condition is None
+            or hook.condition(host, frame)
+        )
     )
 
 

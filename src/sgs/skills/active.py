@@ -158,7 +158,6 @@ __all__ = [
     "active_skill_definitions",
     "register_activation",
     "run_flow",
-    "run_forced_awakening",
 ]
 
 CANDIDATE_CAP = 128
@@ -7636,8 +7635,11 @@ _GUOLUN = ActiveSkill(
 #   花色重复 / 上限到 10 ⇒ 流程终止。
 # - 「手牌数为全场最多」= 交给之后现算、只看存活、**并列算最多**（镜像 `06` L1080③）；
 #   交给自己的也判（`06` L982「交给一名角色」含自己）。
-# - 辉逝的「视为满足觉醒条件」= **立即结算**（框架票 05 的 `Engine.force_awakening`；
-#   用户 2026-11-14 签 A）；多个未触发觉醒技时由**发动者**选一个。
+# - 辉逝的「视为满足觉醒条件」= **只满足条件、不立即结算**（用户 2026-11-14 的裁定：
+#   觉醒技分成"觉醒条件"与"判断是否觉醒的时机"两半——例如【天翊】的条件 = 所有存活角色
+#   都受过伤、时机 = 准备阶段；辉逝只让条件成立，觉醒仍要等**它自己的时机**到来才触发）。
+#   落点 = `Engine.satisfy_awakening_condition`（per-instance 条件位 + 派发时视为成立；
+#   框架票 05）。多个未触发觉醒技时由**发动者**选一个。
 # - 佐幸的「视为使用」= **无源纯虚拟牌**（用户口径："视为"是虚拟牌、"当作"才是转化）；
 #   代价**只认「神郭嘉」这个角色**——谁持有佐幸都一样（Q11）。
 # - 三条技能都**不翻预发动**：慧识 / 佐幸是零步流水线（清单渲不出），辉逝的首步是座位步且
@@ -7687,8 +7689,8 @@ _HUISHI_RECEIVER = "huishi:receiver"
 """帧私有：选中的收牌角色（交给之后才写）。"""
 
 _HUI_SHI_STAGE = "hui_shi:stage"
-"""【辉逝】帧私有段机游标：``ask-seat`` / ``branch`` / ``ask-skill`` / ``force`` /
-``draw`` / ``reduce`` / ``done``。"""
+"""【辉逝】帧私有段机游标：``branch`` / ``ask-skill`` / ``satisfy`` / ``draw`` / ``reduce`` /
+``done``（首次进入直接问座位，不单列一个段）。"""
 
 _HUI_SHI_TARGET = "hui_shi:target"
 """【辉逝】帧私有：选中的角色。"""
@@ -7763,23 +7765,12 @@ def _huishi_push_judgment(host: Any, frame: Any, owner: int) -> None:
     )
 
 
-def _huishi_gain_cards(host: Any, frame: Any, owner: int) -> Any:
-    """把留在处理区的判定牌一次性搬进神郭嘉手牌（用户口径：「神郭嘉获得这些判定牌」）。"""
-    cards = tuple(frame.data.get(_HUISHI_CARDS, ()))
-    moving = tuple(
+def _huishi_kept_cards(host: Any, frame: Any) -> tuple[Any, ...]:
+    """本次发动判出的、**仍留在处理区**的判定牌（被【天妒】一类先拿走的自然不在内）。"""
+    return tuple(
         card
-        for card in cards
+        for card in frame.data.get(_HUISHI_CARDS, ())
         if locate(host.state, card.card_id) == ZoneRef(Zone.PROCESSING)
-    )
-    if not moving:
-        return None
-    return host.move_in_frame(
-        frame,
-        moving,
-        to_zone=ZoneRef(Zone.HAND, owner),
-        reason=MoveReason.PUT,
-        owner=owner,
-        actor=owner,
     )
 
 
@@ -7788,14 +7779,14 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
     段序（全部住帧私有的 :data:`_HUISHI_STAGE`）：
 
-    1. ``judgment`` ⇒ 压一轮判定（``keep_card=True``），转 ``resolve``；
-    2. ``resolve`` ⇒ 读 `SKILL_JUDGMENT_CARD_KEY`：记花色 / 记牌；**第一张**（``round == 0``）
-       不加体力上限、只问「是否重复此流程？」；第 2 张起花色仍新且上限 < 10 ⇒ 问
-       「是否加1点体力上限并重复此流程？」；花色重复 / 上限 = 10 ⇒ 收尾；
+    1. ``judgment`` ⇒ 压一轮判定（``keep_card=True``，判定牌留在处理区），转 ``resolve``；
+    2. ``resolve`` ⇒ 读 `SKILL_JUDGMENT_CARD_KEY`：记花色 / 记牌；花色与本阶段已判过的
+       都不同（**第一张恒算"不同"**）且体力上限 < 10 ⇒ 问「是否加1点体力上限并重复此流程？」；
+       花色重复 / 上限 = 10 ⇒ 收尾；
     3. ``maxlife`` ⇒ +1 上限（``MAXLIFE`` 帧），随后压下一轮判定；
-    4. ``gain`` ⇒ 一次性获得全部判定牌，转 ``ask-give``；
-    5. ``ask-give`` ⇒ 「是否将所有生效的判定牌交给一名角色？」，转 ``give-seat`` / ``done``；
-    6. ``give-seat`` ⇒ 点场上武将，交给；转 ``reduce``；
+    4. ``ask-give`` ⇒ 判定牌**仍留在效果区**，问「是否将所有生效的判定牌交给一名角色？」；
+    5. ``give-seat`` ⇒ 点场上武将：从**处理区**直接交给该角色；转 ``reduce``；
+    6. ``gain`` ⇒ 不交（答「放弃」）时，这些牌由**神郭嘉获得**（处理区 → 手牌）；
     7. ``reduce`` ⇒ **交给之后**现算收牌人手牌数：全场最多（含并列）⇒ 神郭嘉 -1 上限
        （0 档直接死亡，`06` L1149，不兜底）。
     """
@@ -7816,7 +7807,7 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
             frame.data.pop("skill_result", None)  # 同帧的布尔结果只有本技能读，取完即弹
             if card is None:
                 # 判定没产出（短摸平局已经收局）：没有可获得的牌，直接收尾。
-                frame.data[_HUISHI_STAGE] = "gain"
+                frame.data[_HUISHI_STAGE] = "ask-give"
                 continue
             suits = (*tuple(frame.data.get(_HUISHI_SUITS, ())), card.suit)
             frame.data[_HUISHI_SUITS] = suits
@@ -7825,52 +7816,38 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
                 card,
             )
             round_no = int(frame.data[_HUISHI_ROUND])
+            # **第一张恒算"与已判过的都不同"**（此前没有结果可比）⇒ 第一张也加体力上限。
             repeated = round_no >= 1 and card.suit in suits[:-1]
             if repeated or host.state.player(owner).hp_max >= HUISHI_MAX_HP:
-                frame.data[_HUISHI_STAGE] = "gain"
-            elif round_no == 0:
-                frame.data[_HUISHI_STAGE] = "ask-repeat"
+                frame.data[_HUISHI_STAGE] = "ask-give"
             else:
                 frame.data[_HUISHI_STAGE] = "ask-plus"
             continue
-        if stage in ("ask-repeat", "ask-plus"):
+        if stage == "ask-plus":
             round_no = int(frame.data[_HUISHI_ROUND])
-            key = "repeat" if stage == "ask-repeat" else "repeat-plus"
             answer = host.ask_option(
                 frame,
                 owner,
                 Timing.PHASE_PLAY_IDLE,
-                skill_id=f"{HUISHI}:{key}:{round_no}",
+                skill_id=f"{HUISHI}:repeat-plus:{round_no}",
                 options=_HUISHI_OPTIONS,
                 optional=True,
             )
             if host.suspended(answer):
                 return "stay"
             if isinstance(answer, Pass):
-                frame.data[_HUISHI_STAGE] = "gain"
-                continue
-            frame.data[_HUISHI_ROUND] = round_no + 1
-            frame.data[_HUISHI_STAGE] = (
-                "judgment" if stage == "ask-repeat" else "maxlife"
-            )
+                frame.data[_HUISHI_STAGE] = "ask-give"
+            else:
+                frame.data[_HUISHI_ROUND] = round_no + 1
+                frame.data[_HUISHI_STAGE] = "maxlife"
             continue
         if stage == "maxlife":
             # 「加1点体力上限并重复此流程」：+1 上限（不同步体力），再压下一轮判定。
             host.raise_hp_max(owner, 1)
             frame.data[_HUISHI_STAGE] = "judgment"
             return "stay"
-        if stage == "gain":
-            frame.data[_HUISHI_STAGE] = "ask-give"
-            if _huishi_gain_cards(host, frame, owner) == "stay":
-                return "stay"
-            continue
         if stage == "ask-give":
-            givable = tuple(
-                card
-                for card in frame.data.get(_HUISHI_CARDS, ())
-                if locate(host.state, card.card_id) == ZoneRef(Zone.HAND, owner)
-            )
-            if not givable:
+            if not _huishi_kept_cards(host, frame):
                 frame.data[_HUISHI_STAGE] = "done"
                 return None
             answer = host.ask_option(
@@ -7884,15 +7861,11 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
             if host.suspended(answer):
                 return "stay"
             frame.data[_HUISHI_STAGE] = (
-                "done" if isinstance(answer, Pass) else "give-seat"
+                "gain" if isinstance(answer, Pass) else "give-seat"
             )
             continue
         if stage == "give-seat":
-            owned = tuple(
-                card
-                for card in frame.data.get(_HUISHI_CARDS, ())
-                if locate(host.state, card.card_id) == ZoneRef(Zone.HAND, owner)
-            )
+            kept = _huishi_kept_cards(host, frame)
             answer = host.ask_option(
                 frame,
                 owner,
@@ -7906,15 +7879,33 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
             receiver = _option_seat(answer)
             frame.data[_HUISHI_RECEIVER] = receiver
             frame.data[_HUISHI_STAGE] = "reduce"
-            if receiver != owner and _give(
-                host,
+            # **从处理区直接交给收牌人**（不是"先进神郭嘉手牌再转交"）：卡面是"将判定牌
+            # 交给一名角色"，效果区里那几张就是被交出的那几张（用户 2026-11-14 报障）。
+            control = host.move_in_frame(
                 frame,
-                owner,
-                receiver,
-                tuple(card.card_id for card in owned),
-                key="huishi:give",
-            ) == "stay":
+                kept,
+                to_zone=ZoneRef(Zone.HAND, receiver),
+                reason=MoveReason.PUT,
+                owner=receiver,
+                actor=owner,
+            )
+            if control == "stay":
                 return "stay"
+            continue
+        if stage == "gain":
+            frame.data[_HUISHI_STAGE] = "done"
+            kept = _huishi_kept_cards(host, frame)
+            if kept:
+                control = host.move_in_frame(
+                    frame,
+                    kept,
+                    to_zone=ZoneRef(Zone.HAND, owner),
+                    reason=MoveReason.PUT,
+                    owner=owner,
+                    actor=owner,
+                )
+                if control == "stay":
+                    return "stay"
             continue
         if stage == "reduce":
             receiver = int(frame.data.get(_HUISHI_RECEIVER, owner))
@@ -7970,11 +7961,12 @@ def _hui_shi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any
 
 
 def _hui_shi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """【辉逝】的段机：选人 → 分支（强制觉醒 / 摸四张）→ **两支都** -2 体力上限。
+    """【辉逝】的段机：选人 → 分支（满足觉醒条件 / 摸四张）→ **两支都** -2 体力上限。
 
     分支判据 = 「其有未触发的觉醒技」**且**「神郭嘉的体力上限 ≥ 存活角色数」（结算时现算）；
-    真支 = `Engine.force_awakening`（框架票 05，立即结算；多个未触发时发动者选一个）；
-    假支 = 其摸四张牌。「若如此做」⇒ 两支都 -2 上限（`06` L1146④ 的先例；0 档直接死亡）。
+    真支 = `Engine.satisfy_awakening_condition`（框架票 05：**只把觉醒条件视为满足**，
+    觉醒仍等它自己的时机；多个未触发时发动者选一个）；假支 = 其摸四张牌。
+    「若如此做」⇒ 两支都**立即** -2 上限（`06` L1146④ 的先例；0 档直接死亡）。
     """
     del answers
     owner = int(frame.data["source"])
@@ -8003,7 +7995,7 @@ def _hui_shi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
             frame.data[_HUI_SHI_STAGE] = "draw"
         elif len(awakenings) == 1:
             frame.data[_HUI_SHI_AWAKENING] = awakenings[0]
-            frame.data[_HUI_SHI_STAGE] = "force"
+            frame.data[_HUI_SHI_STAGE] = "satisfy"
         else:
             frame.data[_HUI_SHI_STAGE] = "ask-skill"
         stage = str(frame.data[_HUI_SHI_STAGE])
@@ -8022,14 +8014,15 @@ def _hui_shi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         if host.suspended(answer):
             return "stay"
         frame.data[_HUI_SHI_AWAKENING] = str(answer.choice)
-        frame.data[_HUI_SHI_STAGE] = "force"
-        stage = "force"
-    if stage == "force":
+        frame.data[_HUI_SHI_STAGE] = "satisfy"
+        stage = "satisfy"
+    if stage == "satisfy":
         target = int(frame.data[_HUI_SHI_TARGET])
         skill_id = str(frame.data[_HUI_SHI_AWAKENING])
         frame.data[_HUI_SHI_STAGE] = "reduce"
-        if host.force_awakening(target, skill_id):
-            return "stay"  # 强制觉醒子帧先跑；回来时已转 reduce
+        # **只满足条件、不结算**（用户 2026-11-14 裁定：觉醒技分成"觉醒条件"与"判断是否
+        # 觉醒的时机"两半）——觉醒仍要等**它自己的时机**到来才触发。
+        host.satisfy_awakening_condition(target, skill_id)
         stage = "reduce"
     if stage == "draw":
         target = int(frame.data[_HUI_SHI_TARGET])
@@ -8228,7 +8221,6 @@ _HUISHI = ActiveSkill(
     flow=HUISHI_FLOW,
     requirement=_HUISHI_REQUIREMENT,
     step_requirements={
-        "repeat": "是否重复此流程？（第一张判定牌不增加体力上限）",
         "repeat-plus": "是否加1点体力上限并重复此流程？",
         "give": "是否将所有生效的判定牌交给一名角色？",
         "give-seat": "交给哪名角色？（可以是自己）",
@@ -8802,72 +8794,12 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
     )
 
 
-_FORCED_AWAKENING_DONE = "forced_awakening_done"
-"""帧私有：强制觉醒的流水线已经跑完、"已觉醒"位已落（重入不重复落位）。"""
-
-
-def run_forced_awakening(host: Any, frame: Any) -> Any:
-    """跨技能**强制觉醒**的执行体（shiji-zhi 票 05；首个载体 = 神郭嘉【辉逝】）。
-
-    入口是 :meth:`~sgs.engine.Engine.force_awakening`：它已经做完前置校验并压了一个带
-    帧私有 ``forced_awakening`` 的 ``SKILL`` 帧，``skill_id`` / ``skill_owner`` 都是**目标**。
-    本函数只做三件事：
-
-    1. 取该觉醒技定义的**唯一**一条 ``SkillFlow``（觉醒技必须恰有一条：0 条或多条都是
-       声明错误——强制觉醒要跑"哪一个效果"必须是唯一的）；
-    2. ``run_flow`` 跑它（``owner`` 显式传目标座位；重入由流水线自己的帧内缓存 / 段游标
-       保证不重做，效果里的挂起与续跑照常）；
-    3. 跑完（非 ``"stay"``）后 :func:`~sgs.skills.catalog.mark_awakening_awakened` 落
-       "已觉醒"位——与派发环 ``_mark_awakened`` 同一个写面，**不问"是否发动"**（觉醒技
-       强制）、**不判条件**（"视为满足"）。
-    """
-    from .catalog import CATALOG, mark_awakening_awakened
-
-    seat = int(frame.data["skill_owner"])
-    skill_id = str(frame.data["skill_id"])
-    if frame.data.get(_FORCED_AWAKENING_DONE):
-        return None
-    definition = CATALOG.get(skill_id)
-    if definition is None:
-        raise NotImplementedError(f"强制觉醒的技能 {skill_id!r} 不在 CATALOG 里")
-    flows: list[Any] = []
-    for hook in definition.hooks:
-        if hook.flow is None:
-            continue
-        if not any(hook.flow is seen for seen in flows):
-            flows.append(hook.flow)
-    if len(flows) != 1:
-        raise ValueError(
-            f"觉醒技 {skill_id!r} 必须恰有一条 SkillFlow（现有 {len(flows)} 条）："
-            "「强制觉醒」要跑的效果不能有歧义"
-        )
-    flow = flows[0]
-    control = run_flow(
-        host,
-        frame,
-        flow,
-        owner=seat,
-        timing=Timing.PHASE_PLAY_IDLE,
-    )
-    if control == "stay":
-        return "stay"
-    frame.data[_FORCED_AWAKENING_DONE] = True
-    mark_awakening_awakened(host.state, seat, skill_id)
-    return None
-
-
 def activate_skill(host: Any, frame: Any) -> Any:
     """SKILL 帧的唯一步骤：按 ``frame.data["skill_id"]`` 查表派发发动主体。
 
     未登记 ⇒ fail-closed（加载期"启用武将的技能引用必须闭合"已在票 01 挡住漏配；
     运行期再撞到即编程错误，不静默跳过）。
-
-    **强制觉醒**（shiji-zhi 票 05）：帧私有 ``forced_awakening`` 为真 ⇒ 走
-    :func:`run_forced_awakening`，不查 ``ACTIVATIONS``（觉醒技不是 A 族、不在那张表里）。
-    没有任何既有帧带这个键 ⇒ 既有派发路径逐字节不变。
     """
-    if frame.data.get("forced_awakening"):
-        return run_forced_awakening(host, frame)
     handler = ACTIVATIONS.get(frame.data["skill_id"])
     if handler is None:
         raise NotImplementedError(f"技能 {frame.data['skill_id']!r} 没有登记发动回调")

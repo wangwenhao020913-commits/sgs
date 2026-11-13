@@ -1358,7 +1358,15 @@ function applyEffectDelta(
     if (record.op === "push" && record.frame_kind) {
       frameKinds.set(String(record.frame_id), String(record.frame_kind));
     }
-    if (record.op === "pop") stageStartFade(held, record.frame_id, now);
+    if (record.op === "pop") {
+      // **JUDGE 帧不按 pop 淡出**：判定牌的每一次离区都有自己的 `card_move`（进弃牌堆 /
+      // 改判者手牌 / 被【天妒】获得），帧 pop 时**还留在处理区**的那张是技能有意留着的
+      // （【慧识】的连续判定：判定牌一直留在效果区到流程终止）。按 pop 淡出会让它们一张张
+      // 消失（用户 2026-11-14 报障；【荐言】那种没有逐张帧 pop 的形态才是预期表现）。
+      if (frameKinds.get(String(record.frame_id)) !== "JUDGE") {
+        stageStartFade(held, record.frame_id, now);
+      }
+    }
     return held;
   }
   if (record.kind !== "delta" || record.delta_type !== "card_move") return held;

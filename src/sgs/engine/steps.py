@@ -2044,11 +2044,7 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
         base=frame.data["amount"],
     )
     player = host.state.player(target)
-    # **已经高于上限**的体力（先受伤再被减多点上限；规则 §4.15 不同步下调）回复时不得被
-    # 「夹到上限」**压低**——夹取只在低于上限时生效（shiji-zhi 票 01 的【辉逝】暴露）。
-    host.apply_hp_change(
-        frame, target, max(player.hp, min(player.hp + amount, player.hp_max))
-    )
+    host.apply_hp_change(frame, target, min(player.hp + amount, player.hp_max))
     return None
 
 
@@ -2106,7 +2102,8 @@ def maxlife_apply(host: FrameHost, frame: Frame) -> None:
     回复原语（``RECOVER`` 帧），本帧不替调用方回血（票 04 C5）。
 
     **减侧委托** :meth:`~sgs.engine.Engine.reduce_hp_max`：那是减上限的唯一实现，含
-    "满体力同步下调"与"上限减为 0 ⇒ 体力置 0 + 直接死亡"（票 04；用户 2026-11-07 裁定不兜底）。
+    "减上限后体力高于新上限 ⇒ 夹到新上限"（用户 2026-11-14 裁定：任何情况都夹）与
+    "上限减为 0 ⇒ 体力置 0 + 直接死亡"（票 04；用户 2026-11-07 裁定不兜底）。
     今天这条分支**没有调用者**，故"减死之后 ``MAXLIFE_DECREASE_AFTER`` 照旧派发"这个次序
     问题暂时无处可观察；将来真有载体时按帧内游标收尾。
     """

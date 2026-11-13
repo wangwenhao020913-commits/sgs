@@ -129,13 +129,6 @@ class _FuzzEngine(Engine):
 
     game_seed: int = 0
     game_players: int = 2
-    overmax_allowed: set[int] = set()
-    """体**合法**高于上限的座位（减上限前不是满体力 ⇒ 规则 §4.15 不同步下调）。
-
-    规则只要求"减上限前**满体力**"时把体力值同步下调；因此「先受伤、再被一次减掉
-    多点上限」（神郭嘉【辉逝】-2 / 【慧识】-1 一类）会留下 ``hp > hp_max`` 的**持久**
-    状态，直到体力再变。集合在 :func:`_check_live_invariants` 里按记录维护、每局重置。
-    """
 
     def _emit(self, record: JournalRecord) -> None:
         super()._emit(record)
@@ -186,7 +179,6 @@ def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _Fuz
     )
     engine.game_seed = seed
     engine.game_players = players
-    engine.overmax_allowed = set()
     # 开局那几条记录（初次洗牌 + 发牌）由 ``build_initial`` 直接构造、不走 ``_emit``，
     # 故在这里补一次活状态检查；其后每条记录由 ``_emit`` 覆写逐一检查。
     _check_live_invariants(engine, None)
@@ -232,18 +224,18 @@ def _play_and_check(seed: int, *, players: int, deadline: float | None = None) -
 
 
 def _hp_clamp_pending(player, record: JournalRecord | None) -> bool:
-    """上一条记录是否是"满体力减上限"的第一半：体力值待随之下调（M6 票 06）。
+    """上一条记录是否是"减体力上限"的第一半：体力值待随之下调（M6 票 06；shiji-zhi 修正）。
 
-    ``Engine.reduce_hp_max`` 在"减上限前满体力"时按规则 L436–437 先落 ``hp_max_change``、
-    再落 ``hp_change``；检查器跑在两条之间，故只放行**这一个形状**（该座的记录、它的
-    ``before`` 恰等于当前体力、``after`` 恰等于当前上限）。
+    ``Engine.reduce_hp_max`` 先落 ``hp_max_change``、再落 ``hp_change``（体力夹到新上限）；
+    检查器跑在两条之间，故只放行**这一个形状**（该座的记录、``after`` 恰等于当前上限
+    = 新上限已落、体力还没跟）。**不再要求"减前满体力"**：用户 2026-11-14 裁定减上限
+    一律夹住（3/4 一次 -2 ⇒ 2/2），故减前不满体力的那一档同样有这一对记录。
     """
     return (
         record is not None
         and getattr(record, "kind", None) == "delta"
         and getattr(record, "delta_type", None) == "hp_max_change"
         and record.seat == player.seat
-        and record.before == player.hp
         and record.after == player.hp_max
     )
 
@@ -264,26 +256,7 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         # 再落 ``hp_change`` 两条 delta。检查器跑在**每条记录之后**，在两条之间会看到
         # ``hp == 旧上限 > 新上限``——这是上一条记录自己声明的待调整状态，不是漏洞。
         # 判据收窄到"上一条记录恰为该座的 hp_max_change、且它的 before == 当前 hp"。
-        # 规则 §4.15 只要求"减上限前**满体力**"时同步下调体力；减前不满体力 ⇒ 体力保持
-        # 不变、可以**持久**高于新上限（神郭嘉【辉逝】一次 -2 就会留下这种状态）。故记一笔
-        # "这个座位的超上限是减上限造成的"，直到体力回到上限以内（或再变化）。满体力那一档
-        # 的**逐记录瞬态**仍由 :func:`_hp_clamp_pending` 单独放行。
-        if (
-            record is not None
-            and getattr(record, "kind", None) == "delta"
-            and getattr(record, "delta_type", None) == "hp_max_change"
-            and record.seat == player.seat
-            and record.after < record.before
-            and record.before > player.hp
-        ):
-            engine.overmax_allowed.add(player.seat)
-        if player.hp <= player.hp_max:
-            engine.overmax_allowed.discard(player.seat)
-        if (
-            player.hp > player.hp_max
-            and player.seat not in engine.overmax_allowed
-            and not _hp_clamp_pending(player, record)
-        ):
+        if player.hp > player.hp_max and not _hp_clamp_pending(player, record):
             _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} 超过上限 {player.hp_max}")
         if player.hp < 0 and player.alive and not _hp_may_be_negative(engine):
             _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} < 0 却没有伤害 / 濒死帧在栈上")
@@ -1049,31 +1022,43 @@ def test_the_live_checker_catches_hp_above_the_maximum():
         _check_live_invariants(engine, engine.records[-1])
 
 
-def test_the_live_checker_allows_the_paired_clamp_after_a_full_hp_max_reduction():
-    """M6 票 06 的觉醒减上限：``hp_max_change`` 与 ``hp_change`` 之间的瞬态是合法的。
+def test_the_live_checker_allows_the_paired_clamp_after_a_hp_max_reduction():
+    """减上限的 ``hp_max_change`` 与 ``hp_change`` 之间的瞬态是合法的。
 
-    正例 = 上一条记录恰为满体力减上限（``before == 当前 hp``）；反例 = 体力高于那个
-    ``before``，或记录不是该座的 ``hp_max_change``——两种都仍然判红（判据没有放宽）。
+    正例 = 上一条记录恰为该座的减上限（``after == 当前上限``）；反例 = 记录不是该座的
+    ``hp_max_change``——仍然判红（判据没有放宽）。两档都覆盖：满体力（4/4 → 3/3）与
+    不满体力（3/4 → 2/2，用户 2026-11-14 裁定后同样先减上限再夹体力）。
     """
     from sgs.engine import HpMaxChangeRecord
 
     engine = _play(1)
     player = engine.state.players[0]
-    before = 4
-    player.hp = before
-    player.hp_max = before - 1
+
+    # ① 满体力：4/4 减 1 ⇒ 先写上限 3、体力仍 4（待夹）。
+    player.hp = 4
+    player.hp_max = 3
     reduction = HpMaxChangeRecord(
-        seq=1, frame_id=0, depth=0, seat=player.seat, before=before, after=before - 1, amount=1
+        seq=1, frame_id=0, depth=0, seat=player.seat, before=4, after=3, amount=1
     )
+    _check_live_invariants(engine, reduction)
+    player.hp = 3
+    _check_live_invariants(engine, reduction)
 
-    _check_live_invariants(engine, reduction)  # 瞬态：体力仍等于旧上限
+    # ② 不满体力：3/4 减 2 ⇒ 先写上限 2、体力仍 3（待夹）。
+    player.hp = 3
+    player.hp_max = 2
+    big = HpMaxChangeRecord(
+        seq=2, frame_id=0, depth=0, seat=player.seat, before=4, after=2, amount=2
+    )
+    _check_live_invariants(engine, big)
+    player.hp = 2
+    _check_live_invariants(engine, big)
 
-    player.hp = before - 1
-    _check_live_invariants(engine, reduction)  # 调整完 ⇒ 常态
-
-    player.hp = before + 1
+    # ③ 别的记录解释不了越上限 ⇒ 判红。
+    player.hp = 3
+    player.hp_max = 2
     with pytest.raises(FuzzInvariantError, match="超过上限"):
-        _check_live_invariants(engine, reduction)
+        _check_live_invariants(engine, engine.records[-1])
 
 
 def test_the_live_checker_catches_a_hand_over_the_limit_at_the_discard_phase_end():

@@ -118,6 +118,7 @@ from sgs.skills import (
     reset_turn_skill_state,
     round_limit_present,
     resolve_conversion_confirmation,
+    satisfy_awakening_condition,
     resolve_instances,
     seat_choice,
     start_provider,
@@ -4426,8 +4427,11 @@ class Engine:
             self.apply_hp_change(frame, seat, 0)
             self.pass_away(frame, seat)
             return delta
-        if before_hp == before_max and before_hp > after_max:
-            # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
+        if before_hp > after_max:
+            # 体力**始终不得超过体力上限**：减上限后若体力高于新上限，同步下调到新上限
+            # （**不回血**，只下调）。规则 L436–437 只写了"减上限前满体力"的那一档，
+            # 用户 2026-11-14 实机裁定按"任何情况都夹住"（神郭嘉【辉逝】3/4 一次 -2
+            # ⇒ 期望 2/2；【慧识】的 -1 同理）。
             self.apply_hp_change(frame, seat, after_max)
         return delta
 
@@ -4441,8 +4445,9 @@ class Engine:
         ``amount`` = **幅度**（恒正），方向由 ``before`` / ``after`` 读出——与
         :meth:`reduce_hp_max` 的 ``HpMaxChangeDelta`` 语义一致，故那个入口一字不改。
 
-        **不动体力**：加 / 减上限本身都不回血；减上限的"满体力同步下调"由调用帧另发一条
-        ``hp_change``（规则 §4.15；HpMaxChangeDelta 的 docstring 同一姿态）。
+        **不动体力**：加 / 减上限本身都不回血；减上限后体力若高于新上限，由调用方
+        （:meth:`reduce_hp_max`）另发一条 ``hp_change`` 夹到新上限（用户 2026-11-14 裁定：
+        任何情况都夹，不再限于"减上限前满体力"那一档；规则 §4.15 只写了后者）。
         """
         player = self.state.player(seat)
         before = player.hp_max
@@ -4462,7 +4467,7 @@ class Engine:
         ``MAXLIFE_INCREASE_AFTER``。方向由**入口**（本方法）决定，幅度只能是正整数——
         别用负值绕进减侧（：meth:`reduce_hp_max` 钉的是"减"，今天不迁进本帧）。
 
-        **不同步体力**（§4.15 的"满体力同步下调"只属于减侧）："增加上限并回复一点体力"
+        **不同步体力**（只有减侧会在体力高于新上限时夹到新上限）："增加上限并回复一点体力"
         的回复是技能的第二段，走既有回复原语（``RECOVER`` 帧），本方法不替调用方回血。
 
         返回值 = 新压入的帧（调用方通常紧接着 ``return "stay"``，让引擎先把这一帧跑完）。
@@ -5184,20 +5189,18 @@ class Engine:
 
     # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
 
-    def force_awakening(self, seat: int, skill_id: str) -> bool:
-        """**跨技能强制觉醒**：令 ``seat`` 的 ``skill_id`` 视为满足觉醒条件并**立即结算**
-        （shiji-zhi 票 05；首个载体 = 神郭嘉【辉逝】）。
+    def satisfy_awakening_condition(self, seat: int, skill_id: str) -> bool:
+        """**视为满足觉醒条件**（shiji-zhi 票 01；首个载体 = 神郭嘉【辉逝】）。
 
-        规则读法（用户 2026-11-14 签 A）：牌面「令其视为满足其一个觉醒技的觉醒条件」=
-        当场跑那条觉醒技的效果，随后落"已觉醒"位。觉醒技的效果只能由它自己的时机触发
-        （``_activation_candidates`` 按座位环 + 条件收集），故本方法是**唯一**的另一条
-        入口：它不判条件、不问"是否发动"，只压一个 ``SKILL`` 帧并让
-        :func:`~sgs.skills.active.run_forced_awakening` 跑该定义的**唯一** ``SkillFlow``。
+        用户 2026-11-14 的裁定：觉醒技分成**觉醒条件**与**判断是否觉醒的时机**两半——
+        辉逝的「令其视为满足其一个觉醒技的觉醒条件」只满足**条件**，觉醒仍要等**自己的
+        时机**（【天翊】= 准备阶段、【勤学】= 准备 / 结束阶段、【潜心】= 造成伤害后……）
+        到来才触发。故本方法**只置位、不结算、不压帧**：位落在 per-instance 的
+        ``skill_state``（:data:`~sgs.skills.catalog._CONDITION_SATISFIED`），跨回合保留；
+        该实例的钩子条件在派发时视为成立，真正觉醒后由 ``_mark_awakened`` 清掉。
 
-        前置（任一不成立 ⇒ ``False``、零副作用、不压帧）：目标存活；``(seat, skill_id)``
-        有**未失效**的存活实例（失效 ≠ 未触发：被挡住的觉醒技不可被强制觉醒）；定义是
-        觉醒技；尚未觉醒。帧私有 ``forced_awakening`` 让 ``activate_skill`` 走强制分支，
-        该键不进记录流。**返回值 = 帧真的压出了。**
+        前置（任一不成立 ⇒ ``False``、零副作用）：目标存活；``(seat, skill_id)`` 有
+        **未失效**的存活实例（失效 ≠ 未触发）；定义是觉醒技；尚未觉醒。
         """
         if not self.state.player(seat).alive:
             return False
@@ -5211,18 +5214,7 @@ class Engine:
         )
         if not live or awakening_skill_awakened(self.state, seat, skill_id):
             return False
-        self.push_frame(
-            FrameKind.SKILL,
-            {
-                "skill_id": skill_id,
-                "source": seat,
-                "skill_owner": seat,
-                "targets": (seat,),
-                "forced_awakening": True,
-            },
-            timing=Timing.PHASE_PLAY_IDLE,
-        )
-        return True
+        return satisfy_awakening_condition(self.state, seat, skill_id)
 
     def grant_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
         """写一个座位的**获得**技能记录并落一条 ``skill_gain``（M6 票 04 的唯一写入口）。

@@ -16,8 +16,13 @@
 from __future__ import annotations
 
 from sgs.data import RuleConfig, Suit, hero_skill_id, load_content_pack
+from sgs.effects import DamageNature
 from sgs.engine import Engine
-from sgs.skills import awakening_skill_awakened, limited_skill_used
+from sgs.skills import (
+    awakening_condition_satisfied,
+    awakening_skill_awakened,
+    limited_skill_used,
+)
 from sgs.state import (
     ActivateSkill,
     CardRef,
@@ -29,6 +34,7 @@ from sgs.state import (
     SelectCards,
     SelectOption,
 )
+from sgs.timing import Timing
 from support import SeatSpec, build_state
 
 PACK = load_content_pack(deck_profile="standard_108")
@@ -153,6 +159,23 @@ def _state(
     )
 
 
+def _drive_until(
+    engine: Engine, players: list[Script], stop, *, limit: int = 4_000
+) -> Engine:
+    """推进到 ``stop(engine)`` 成立（询问按座位脚本应答）。"""
+    for _ in range(limit):
+        if stop(engine):
+            return engine
+        query = engine.pending
+        if query is None:
+            if engine.finished:
+                return engine
+            engine._step()
+            continue
+        engine.submit(players[query.actor].respond(query))
+    raise AssertionError("步数上限内没有到达停止条件")
+
+
 def _capture_virtual_uses(engine: Engine, captured: list[CardRef]) -> None:
     for frame in engine.stack.frames:
         if frame.kind is not FrameKind.USE:
@@ -203,23 +226,24 @@ def _drive_until_done(
 # ---------------------------------------------------------------------------
 
 
-def test_huishi_first_card_does_not_raise_max_hp_and_duplicate_ends_the_flow():
-    """第 1 张不加；第 2 张花色重复 ⇒ 不以「加1并重复」发问、直接终止。"""
+def test_huishi_first_card_also_raises_max_hp_and_duplicate_ends_the_flow():
+    """第一张判定牌**无论花色**都加体力上限（此前没有结果可比 ⇒ 恒算"均不同"）；
+    第 2 张花色重复 ⇒ 不再问、流程终止。"""
     judged = _of_suit(Suit.HEART, 2)
     state = _state(_seats(), deck=_deck_with(*judged))
     engine = Engine.from_state(state, seed=7)
     _drive_until_done(
         engine,
         HUISHI,
-        [Script({"activate": HUISHI, "repeat": "huishi_continue"}), Script()],
+        [Script({"activate": HUISHI, "repeat-plus": "huishi_continue"}), Script()],
     )
 
-    assert engine.state.player(0).hp_max == 3, "第一张判定牌不增加体力上限"
+    assert engine.state.player(0).hp_max == 4, "第一张判定就加 1 点体力上限"
     assert len(engine.state.player(0).hand) == 4, "2 张摸牌 + 两张判定牌（含重复花色那张）"
-    assert not engine.state.processing, "判定牌已离开处理区"
+    assert not engine.state.processing, "流程终止后判定牌离开处理区（不交 ⇒ 归神郭嘉）"
 
 
-def test_huishi_new_suit_raises_max_hp_once_from_the_second_card():
+def test_huishi_each_new_suit_adds_another_max_hp():
     judged = (*_of_suit(Suit.HEART), *_of_suit(Suit.SPADE, 2))
     state = _state(_seats(), deck=_deck_with(*judged))
     engine = Engine.from_state(state, seed=7)
@@ -230,61 +254,90 @@ def test_huishi_new_suit_raises_max_hp_once_from_the_second_card():
             Script(
                 {
                     "activate": HUISHI,
-                    "repeat": "huishi_continue",
-                    "repeat-plus": "huishi_continue",  # 第 2 张花色新 ⇒ 加 1 并再判
+                    "repeat-plus": "huishi_continue",  # 前两张各加 1 并继续
                 }
             ),
             Script(),
         ],
     )
 
-    assert engine.state.player(0).hp_max == 4, "第 2 张花色新 ⇒ 加 1 点体力上限"
+    assert engine.state.player(0).hp_max == 5, "两张花色不同的判定各 +1（3 → 5）"
     assert len(engine.state.player(0).hand) == 5, "2 张摸牌 + 三张判定牌"
 
 
-def test_huishi_gives_all_cards_and_only_then_checks_the_hand_count():
-    """交给之后现算：收牌人手牌 6 张（全场最多）⇒ 神郭嘉 -1 上限。"""
+def test_huishi_judged_cards_stay_in_the_effect_area_until_the_give():
+    """流程里判定牌**留在处理区**（效果区），不先进手牌；交给时**从处理区直接交出去**。"""
     other_hand = tuple(_of_suit(Suit.CLUB, 4))
     deck = _deck_with(
         *_of_suit(Suit.HEART), *_of_suit(Suit.SPADE, 2), exclude=other_hand
     )
     state = _state(_seats(other_hand=other_hand, other_hero="guojia"), deck=deck)
     engine = Engine.from_state(state, seed=7)
-    _drive_until_done(
-        engine,
-        HUISHI,
-        [
-            Script(
-                {
-                    "activate": HUISHI,
-                    "repeat": "huishi_continue",
-                    "repeat-plus": "huishi_continue",
-                    "give": "huishi_give",
-                    "give-seat": "seat:1",
-                }
-            ),
-            Script(),
-        ],
-    )
+    seen = {"at_give": None}
 
-    assert engine.state.player(0).hp_max == 3, "3 + 1（第 2 张）- 1（收牌人最多）= 3"
-    assert len(engine.state.player(0).hand) == 2, "只交出判定牌，摸来的两张还在手里"
+    def watch(query):
+        if (
+            query.kind == "SELECT_OPTION"
+            and _step_key(query.skill_id) == "give"
+        ):
+            seen["at_give"] = (
+                tuple(engine.state.processing),
+                tuple(engine.state.player(0).hand),
+                tuple(engine.state.player(1).hand),
+            )
+
+    players = [
+        Script(
+            {
+                "activate": HUISHI,
+                "repeat-plus": "huishi_continue",
+                "give": "huishi_give",
+                "give-seat": "seat:1",
+            }
+        ),
+        Script(),
+    ]
+    for _ in range(4000):
+        query = engine.pending
+        if query is None:
+            if engine.finished:
+                break
+            engine._step()
+            continue
+        watch(query)
+        if (
+            query.kind == "PLAY_PHASE"
+            and not any(
+                isinstance(item, ActivateSkill) and item.skill_id == HUISHI
+                for item in query.legal_actions
+            )
+        ):
+            break
+        engine.submit(players[query.actor].respond(query))
+
+    processing, hand0, hand1 = seen["at_give"]
+    assert len(processing) == 3, "问「是否交出」时三张判定牌仍在处理区"
+    assert len(hand0) == 2, "判定牌没有先进神郭嘉的手牌（只有摸牌阶段的 2 张）"
+    assert len(hand1) == 4, "收牌人还没收到"
+    assert engine.state.player(0).hp_max == 4, "3 + 2（两张花色不同）- 1（收牌人最多）= 4"
+    assert len(engine.state.player(0).hand) == 2, "神郭嘉手上仍是摸来的 2 张"
     assert len(engine.state.player(1).hand) == 7, "收牌人 4 + 3 张判定牌"
 
 
-def test_huishi_declining_the_give_keeps_the_cards_and_never_reduces():
+def test_huishi_declining_the_give_gains_the_cards_and_never_reduces():
     judged = _of_suit(Suit.HEART, 1)
     state = _state(_seats(), deck=_deck_with(*judged))
     engine = Engine.from_state(state, seed=7)
     _drive_until_done(
         engine,
         HUISHI,
-        [Script({"activate": HUISHI, "repeat": None, "give": None}), Script()],
+        [Script({"activate": HUISHI, "repeat-plus": None, "give": None}), Script()],
     )
 
-    assert engine.state.player(0).hp_max == 3, "不交牌 ⇒ 不做「手牌最多」判定"
-    assert len(engine.state.player(0).hand) == 3, "一张判定牌留在手里"
+    assert engine.state.player(0).hp_max == 3, "答「不加」⇒ 不加也不交 ⇒ 不减"
+    assert len(engine.state.player(0).hand) == 3, "判定牌由神郭嘉获得"
     assert engine.state.player(1).hand == []
+    assert not engine.state.processing
 
 
 def test_huishi_not_offered_at_max_hp_ten():
@@ -296,22 +349,85 @@ def test_huishi_not_offered_at_max_hp_ten():
     assert not engine.state.processing, "上限 10 时技能不该出现"
 
 
-# ---------------------------------------------------------------------------
-# 辉逝
-# ---------------------------------------------------------------------------
-
-
-def test_huishi_limited_forces_an_untriggered_awakening_immediately():
-    state = _state(_seats(other_hero="jie_xushu"), deck=_deck_with())
+def test_huishi_satisfies_the_awakening_condition_without_resolving_it():
+    """用户 2026-11-14 裁定：觉醒技 = 觉醒条件 + 判断是否觉醒的时机。辉逝**只满足条件**，
+    觉醒仍要等它自己的时机（【潜心】= 造成伤害后）；辉逝自己的 -2 上限立即结算。"""
+    state = _state(_seats(hp=3, hp_max=4, other_hero="jie_xushu"), deck=_deck_with())
     engine = Engine.from_state(state, seed=7)
     _drive_until_done(
         engine, HUI_SHI, [Script({"activate": HUI_SHI, "seat": "seat:1"}), Script()]
     )
 
-    assert awakening_skill_awakened(engine.state, 1, QIANXUE), "目标的觉醒技立即结算"
-    assert engine.state.player(1).hp_max == 3, "【潜心】的上限 -1"
-    assert JIANYAN in engine.state.player(1).granted_skills, "☆【荐言】照常授予"
-    assert engine.state.player(0).hp_max == 1, "若如此做 ⇒ 神郭嘉减 2 上限（3 → 1）"
+    assert awakening_condition_satisfied(engine.state, 1, QIANXUE), "条件被标成「视为满足」"
+    assert awakening_skill_awakened(engine.state, 1, QIANXUE) is False, "没有立即结算"
+    assert engine.state.player(1).hp_max == 4, "【潜心】的上限 -1 还没发生"
+    assert JIANYAN not in engine.state.player(1).granted_skills, "☆【荐言】还没授予"
+    assert (engine.state.player(0).hp, engine.state.player(0).hp_max) == (2, 2), (
+        "辉逝 -2 立即结算：3/4 ⇒ 2/2（体力夹到新上限）"
+    )
+
+
+def test_huishi_flagged_awakening_triggers_when_its_own_timing_arrives():
+    """时机到了才觉醒：让界徐庶造成一次伤害 ⇒ 【潜心】（DAMAGE_AFTER_DEAL）触发。"""
+    state = _state(_seats(hp=3, hp_max=4, other_hero="jie_xushu"), deck=_deck_with())
+    engine = Engine.from_state(state, seed=7)
+    _drive_until_done(
+        engine, HUI_SHI, [Script({"activate": HUI_SHI, "seat": "seat:1"}), Script()]
+    )
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": None,
+            "use_timing": None,
+            "target": 0,
+            "channel": None,
+            "nature": DamageNature.NORMAL,
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _drive_until(
+        engine,
+        [Script(), Script()],
+        lambda e: awakening_skill_awakened(e.state, 1, QIANXUE),
+    )
+
+    assert engine.state.player(1).hp_max == 3, "【潜心】的上限 -1 在它自己的时机结算"
+    assert JIANYAN in engine.state.player(1).granted_skills
+    assert awakening_condition_satisfied(engine.state, 1, QIANXUE) is False, "觉醒后清位"
+
+
+def test_huishi_on_self_satisfies_tianyi_and_awakens_it_next_prepare_phase():
+    """对自己用辉逝：只把【天翊】的觉醒条件标成满足（不是立刻 +2 上限 / 回复）——天翊
+    仍要等**神郭嘉的下一个准备阶段**；辉逝自己的 -2 上限立即结算（4/4 ⇒ 2/2）。"""
+    state = _state(_seats(hp=4, hp_max=4), deck=_deck_with())
+    engine = Engine.from_state(state, seed=7)
+    _drive_until_done(
+        engine,
+        HUI_SHI,
+        [Script({"activate": HUI_SHI, "seat": "seat:0"}), Script()],
+    )
+
+    assert awakening_condition_satisfied(engine.state, 0, TIANYI), "只满足条件"
+    assert awakening_skill_awakened(engine.state, 0, TIANYI) is False
+    assert (engine.state.player(0).hp, engine.state.player(0).hp_max) == (2, 2), (
+        "辉逝 -2 立即结算（4/4 ⇒ 2/2）"
+    )
+    assert ZUOXING not in engine.state.player(0).granted_skills
+
+    _drive_until(
+        engine,
+        [Script({"grant-seat": "seat:0"}), Script()],
+        lambda e: awakening_skill_awakened(e.state, 0, TIANYI),
+    )
+
+    assert (engine.state.player(0).hp, engine.state.player(0).hp_max) == (3, 4), (
+        "下个准备阶段觉醒：+2 上限（2 → 4）并回复 1（2 → 3）"
+    )
+    assert ZUOXING in engine.state.player(0).granted_skills
 
 
 def test_huishi_draws_four_when_the_target_has_no_untriggered_awakening():
@@ -322,7 +438,9 @@ def test_huishi_draws_four_when_the_target_has_no_untriggered_awakening():
     )
 
     assert len(engine.state.player(1).hand) == 4, "假支 = 其摸四张牌"
-    assert engine.state.player(0).hp_max == 1, "两支都减 2 上限"
+    assert (engine.state.player(0).hp, engine.state.player(0).hp_max) == (1, 1), (
+        "3/3 减 2 ⇒ 1/1（体力同步夹到新上限）"
+    )
 
 
 def test_huishi_is_a_limited_skill_once_per_game():
