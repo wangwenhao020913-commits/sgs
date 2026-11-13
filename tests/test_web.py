@@ -532,7 +532,9 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # 已在池里）⇒ 97 → 98 / 64 不变。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统（真名已在池）+ 刘琦（新真名）⇒ 102 / 67；
     # shan-baozuoci 票 04：山包·左慈（新真名）⇒ 103 / 68。
-    assert len(flat) == 104 and len(catalog) == 69, (
+    # shiji-zhi 票 01：神郭嘉（新真名）⇒ 104 / 69；
+    # shiji-zhi-luotong-chenzhen 票 02：陈震（新真名）⇒ 105 / 70。
+    assert len(flat) == 105 and len(catalog) == 70, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -3924,7 +3926,11 @@ def test_the_lord_skill_gate_is_inherited_not_reimplemented() -> None:
 
     # 判据未放宽：人类座位发到标准版武将（界将的显示归票 19）。
     # M6 票 18 换池（版本 50 → 54）后按同一判据重扫到 20261002。
-    session = Session(seed=20261002, ai="heuristic", timeout_seconds=None, player_count=8)
+    # shiji-zhi-luotong-chenzhen 票 02 加陈震（池 104 → 105）后再扫一次 20261003：
+    # 原 20261002 现在让人类座位在中局吃到界马超【铁骑】的"本回合非锁定技失效"——
+    # 那一条是**技能失效**（清单照列、实例已被压制），与本测试要钉的"清单不另筛一遍"
+    # 是两件事，故按同一判据重扫，不放松断言。
+    session = Session(seed=20261003, ai="heuristic", timeout_seconds=None, player_count=8)
     mine = {entry["skill_id"] for entry in build_skills(session, session.human_seat)}
     owners_instances = {
         instance.skill_id
@@ -9371,7 +9377,8 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统 3 + 刘琦 2 ⇒ 215；
     # shan-baozuoci 票 04：山包·左慈 2 ⇒ 217。
-    assert len(expected_skills) == 221, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # shiji-zhi 票 01：神郭嘉 4 ⇒ 221；shiji-zhi-luotong-chenzhen 票 02：陈震 1 ⇒ 222。
+    assert len(expected_skills) == 222, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

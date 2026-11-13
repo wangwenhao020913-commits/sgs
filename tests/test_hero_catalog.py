@@ -293,9 +293,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 100 → 102、真名 66 → 67：庞统真名已在池、刘琦是新的；装备 22 不变）。
     # shan-baozuoci 票 04：山包·左慈两技 ⇒ 215 → 217、武将技 191 → 193
     # （启用版本 102 → 103、真名 67 → 68：左慈是新的；装备 22 不变）。
-    assert len(CATALOG) == 221
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222、武将技 197 → 198
+    # （启用版本 104 → 105、真名 69 → 70：陈震是新真名；装备 22 不变）。
+    assert len(CATALOG) == 222
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 197
+    assert len(heroes) == 198
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -339,7 +341,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 181 → 182。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技 ⇒ 182 → 186。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统三技 + 刘琦两技 ⇒ 186 → 191。
-    assert len(expected) == 197
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 197 → 198。
+    assert len(expected) == 198
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2722,6 +2725,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.shen_guojia.hui_shi": "零步技能",
     "hero.shen_guojia.zuoxing": "零步技能",
     "hero.shen_guojia.tianyi": "觉醒技",
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】= A 族 + **三步流水线**（选牌 → 选牌 →
+    # 选座）⇒ 落「主动技能」格。
+    "hero.chenzhen.shameng": "主动技能",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2753,7 +2759,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】是"钩子 + 非空流水线"的 A 族技能
     # ⇒ 机械谓词落在**触发技能**格（主动技能因此**不加**）⇒ 26 → 27。
     # sp5-pangtong-liuqi 票 01：SP庞统【过论】（A 族 + 两步流水线、无钩子）⇒ 36 → 37。
-    "主动技能": 37,
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族 + 三步流水线、无钩子）⇒ 37 → 38。
+    "主动技能": 38,
     # yijiang-2014-round2 票 20：标准 / 界【激将】从「候选提供者」移进「触发技能」
     # （声明级 `flow`：出牌阶段主动使用【杀】的入口）⇒ 27 → 29；候选提供者 5 → 3。
     # sp5-mayunlu-panjun 票 01 / 02：凤魄 / 观微（钩子 + 非空流水线）⇒ 29 → 31。
@@ -3015,7 +3022,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步技能）⇒ 205 → 206。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技（触发 2 / 锁定 2）⇒ 206 → 210。
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 221
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222（主动技能 37 → 38）。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 222
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3231,7 +3239,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # 步骤语言形态 ⇒ 内 116 → 120；展骥是锁定技 ⇒ 外 94 → 95。
     # shan-baozuoci 票 04：左慈【化身】（一条选项流水线）/【新生】（零步）都在步骤语言内
     # ⇒ 内 120 → 122（外 95 不变）。
-    assert len(inside) == 126
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族三步流水线）⇒ 内 126 → 127。
+    assert len(inside) == 127
     assert len(outside) == 95
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

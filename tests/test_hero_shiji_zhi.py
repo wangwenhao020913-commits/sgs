@@ -1,12 +1,18 @@
-"""始计篇-智包：神郭嘉（shiji-zhi 票 01；用户 2026-11-14 逐条签 Q1–Q13）。
+"""始计篇-智包：神郭嘉 + 陈震（shiji-zhi 票 01 / shiji-zhi-luotong-chenzhen 票 02）。
 
-四条技能各一组断言：
+神郭嘉四条技能各一组断言：
 
-- 【慧识】判定过程连续：判定牌留处理区、花色重复才终止、**第一张不加上限**、全部获得
-  （含最后那张）、交给后按"全场最多（含并列）"减上限；上限 10 时不可发动。
-- 【辉逝】真支 = **立即**强制觉醒（框架票 05）、假支 = 摸四张、两支都减 2 上限、限定技整局一次。
+- 【慧识】判定过程连续：判定牌留处理区、花色重复才终止、**第一张也加上限**、每张花色不重复
+  的判定都**直接**加上限（与"是否继续判定"无关）、全部获得（含最后那张）、交给后按"全场最多
+  （含并列）"减上限；上限 10 时不可发动、加到 10 即止。
+- 【辉逝】真支 = **只满足觉醒条件**（框架票 05：觉醒仍等它自己的时机与归属）、假支 = 摸四张、
+  两支都减 2 上限、限定技整局一次。
 - 【天翊】觉醒条件读**整局**伤害事实；+2 上限 / 回复 1 / 授予 ☆佐幸（可给自己）。
 - ☆【佐幸】代价只认「神郭嘉」这个角色；「视为使用」= 无源纯虚拟牌；牌名闭集 + 置灰。
+
+陈震【歃盟】（票 02）一组：**「两张颜色相同」是候选面上的前置约束**（第 2 步按第 1 张逐行
+下发、复合动作里的异色组合被拒收）、只手牌、目标 = 其他存活角色、取消不消耗阶段位、
+目标先摸 2 再自己摸 3、短摸平局、目标"获得牌后"钩子挂起后不重摸。
 
 驱动纪律：脚本玩家只应答**被测那一步**（按 ``skill_id`` 的步键），其余走最小合法应答
 （出牌阶段结束 / 放弃）；引擎开到"该技能从出牌阶段候选里消失"的那一刻为止（= 这次发动
@@ -15,14 +21,20 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
 from sgs.data import RuleConfig, Suit, hero_skill_id, load_content_pack
 from sgs.effects import DamageNature
-from sgs.engine import Engine
+from sgs.engine import Engine, IllegalActionError
 from sgs.skills import (
+    CATALOG,
     awakening_condition_satisfied,
     awakening_skill_awakened,
     limited_skill_used,
 )
+from sgs.skills.preactivation import preactivation_for
 from sgs.state import (
     ActivateSkill,
     CardRef,
@@ -614,3 +626,288 @@ def test_zuoxing_name_list_is_the_normal_tricks_and_disables_unusable_ones():
     assert "乐不思蜀" not in query.options, "延时锦囊不在普通锦囊闭集里"
     assert "无懈可击" in query.options
     assert "无懈可击" in query.disabled, "出牌阶段没有使用时机 ⇒ 置灰"
+
+
+# ---------------------------------------------------------------------------
+# 陈震【歃盟】（shiji-zhi-luotong-chenzhen 票 02；用户 2026-11-14 一次签 Q1–Q7）
+#
+# 交互 = 预发动清单三步（选第 1 张 → 选同色第 2 张 → 选一名其他角色）**一次提交**。
+# 「两张颜色相同」不是"提交后再判"：第 2 步的清单按第 1 张**逐行**下发（每行只留与它
+# 同色的牌），复合动作里塞异色组合会被校验器拒收（`Q1=A`）。
+# ---------------------------------------------------------------------------
+
+SHAMENG = hero_skill_id("chenzhen", "shameng")
+CHENZHEN = "chenzhen"
+
+
+def _red(count: int = 1) -> list[int]:
+    """前 ``count`` 张**红色**牌（♥）。"""
+    return _of_suit(Suit.HEART, count)
+
+
+def _black(count: int = 1) -> list[int]:
+    """前 ``count`` 张**黑色**牌（♠）。"""
+    return _of_suit(Suit.SPADE, count)
+
+
+def _shameng_state(
+    hand: tuple[int, ...],
+    *,
+    others: tuple[SeatSpec, ...] = (SeatSpec(),),
+    equip: tuple[int, ...] = (),
+    draw_phase: tuple[int, ...] = (),
+    effect_draws: tuple[int, ...] = (),
+    deck_only: tuple[int, ...] | None = None,
+) -> GameState:
+    """陈震在 0 号位、出牌阶段；``draw_phase`` = 摸牌阶段会摸到的那两张（牌堆顶）。
+
+    ``effect_draws`` = 技能结算里要摸的牌（**目标 2 张在前、自己 3 张在后**），故断言
+    可以直接点名它们。摸牌阶段的两张也算进"发动时的手牌"，本文件的先例同此。
+    ``deck_only`` = 显式给一个**很小**的牌堆（短摸用例），此时不再补其余牌。
+    """
+    top = (*draw_phase, *effect_draws)
+    used = set(hand) | set(top) | set(equip)
+    if deck_only is None:
+        deck = (*top, *(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in used))
+    else:
+        deck = deck_only
+    # ``RuleConfig.player_count`` 只收 2 / 4 / 5 / 6 / 7 / 8（身份局的人数）；3 人夹具按 4 记，
+    # 只影响身份配比，不影响本文件的断言。
+    count = 1 + len(others)
+    if count not in (2, 4, 5, 6, 7, 8):
+        count = 4
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=CHENZHEN, hp=3, hp_max=3, hand=hand, equip=equip),
+            *others,
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=count, first_seat=0),
+    )
+
+
+def _next_query(engine: Engine) -> Any:
+    """推进到下一步询问（``None`` = 局终）。"""
+    for _ in range(400):
+        if engine.pending is not None:
+            return engine.pending
+        if engine.finished:
+            return None
+        engine._step()
+    raise AssertionError("询问上限内没有下一步")
+
+
+def _pool(step: Any) -> tuple[str, ...]:
+    """清单一步的候选（逐 ``when`` 行摊平、去重保序）。"""
+    seen: list[str] = []
+    for row in step.pool:
+        for option in row.options:
+            if option not in seen:
+                seen.append(option)
+    return tuple(seen)
+
+
+def _row(step: Any, *when: str) -> tuple[str, ...]:
+    """清单一步里 ``when`` 那一行的候选；找不到 ⇒ 空元组。"""
+    for row in step.pool:
+        if tuple(row.when) == tuple(when):
+            return tuple(row.options)
+    return ()
+
+
+def _activate_shameng(query: Any, *, picks, choices) -> ActivateSkill:
+    """预发动确认的复合动作（与界面同形：一次填完三步）。"""
+    return ActivateSkill(
+        skill_id=SHAMENG,
+        picks=tuple(picks),
+        choices=tuple(choices),
+        answers_seq=query.seq,
+    )
+
+
+def test_shameng_manifest_is_two_card_steps_then_the_seat_step():
+    """清单三步；第 1 步只铺"有同色伙伴"的手牌，第 2 步按第 1 张逐行只铺同色。"""
+    red = _red(4)
+    black = _black(1)[0]
+    state = _shameng_state(
+        (red[0], red[1], black), draw_phase=(red[2], red[3])
+    )
+    engine = Engine.from_state(state, seed=7)
+    steps = tuple(engine.pending.preactivations.get(SHAMENG, ())) if engine.pending else ()
+    if not steps:
+        query = _next_query(engine)
+        steps = tuple(query.preactivations.get(SHAMENG, ()))
+
+    assert [step.name for step in steps] == ["card1", "card2", "seat"]
+    assert [step.wording for step in steps] == [
+        "选择第 1 张手牌（要与另一张手牌颜色相同）",
+        "选择与第 1 张颜色相同的第 2 张手牌",
+        "选择一名其他角色：其摸两张牌，然后你摸三张牌",
+    ]
+    assert set(_pool(steps[0])) == {str(card_id) for card_id in red}, (
+        "手里没有同色伙伴的黑牌不在第 1 步（死路不进候选面）"
+    )
+    for first in red:
+        assert set(_row(steps[1], str(first))) == {
+            str(card_id) for card_id in red if card_id != first
+        }, "第 2 步：与该行第 1 张同色的牌，且不含第 1 张自己"
+    assert set(_pool(steps[2])) == {"seat:1"}, "目标步 = 其他存活角色"
+
+
+def test_shameng_discards_two_same_coloured_cards_and_draws_two_then_three():
+    """一次提交：弃两张同色手牌 → **目标**先摸 2 → 然后自己摸 3。"""
+    red = _red(4)
+    draws = (5, 6, 7, 8, 9)
+    state = _shameng_state(
+        (red[0], red[1]), draw_phase=(red[2], red[3]), effect_draws=draws
+    )
+    engine = Engine.from_state(state, seed=7)
+    query = _next_query(engine)
+    engine.submit(_activate_shameng(query, picks=(red[0], red[1]), choices=("seat:1",)))
+    _next_query(engine)
+
+    assert engine.state.discard == [red[0], red[1]], "两张同色手牌进弃牌堆"
+    assert engine.state.player(1).hand == [draws[0], draws[1]], "目标拿到牌堆顶的两张"
+    assert engine.state.player(0).hand[-3:] == [draws[2], draws[3], draws[4]], (
+        "然后自己摸三张（顺序在目标之后）"
+    )
+
+
+def test_shameng_rejects_a_pair_of_different_colours():
+    """异色组合**不是合法动作**：复合动作被校验器拒收，且零副作用。"""
+    red = _red(4)
+    black = _black(1)[0]
+    state = _shameng_state(
+        (red[0], red[1], black), draw_phase=(red[2], red[3])
+    )
+    engine = Engine.from_state(state, seed=7)
+    query = _next_query(engine)
+
+    with pytest.raises(IllegalActionError):
+        engine.submit(_activate_shameng(query, picks=(red[0], black), choices=("seat:1",)))
+
+    assert not engine.state.discard, "被拒的提交不搬牌"
+
+
+def test_shameng_is_not_offered_without_a_same_coloured_pair():
+    """手里每张牌都凑不出同色 ⇒ 清单渲不出来 ⇒ 此刻不可用（候选阶段就不产出）。"""
+    state = _shameng_state((_red(1)[0], _black(1)[0]))
+
+    assert preactivation_for(state, 0, SHAMENG) == ()
+
+
+def test_shameng_equipment_zone_is_not_a_legal_source():
+    """牌面写「手牌」⇒ 装备区的红牌不能与手牌的红牌凑成同色成本。"""
+    red = _red(2)
+    state = _shameng_state((red[0],), equip=(red[1],))
+
+    assert preactivation_for(state, 0, SHAMENG) == (), "装备区不参与成本"
+
+
+def test_shameng_target_pool_is_the_other_living_seats():
+    """「一名其他角色」= 不含自己、不含已死亡座位。"""
+    red = _red(2)
+    state = _shameng_state(
+        (red[0], red[1]),
+        others=(SeatSpec(), SeatSpec(alive=False)),
+    )
+
+    steps = preactivation_for(state, 0, SHAMENG)
+
+    assert set(_pool(steps[2])) == {"seat:1"}
+
+
+def test_shameng_is_offered_once_per_play_phase():
+    """「出牌阶段限一次」由阶段位表达：第一条后续的 PLAY_PHASE 询问里不再有清单。"""
+    red = _red(4)
+    state = _shameng_state(
+        (red[0], red[1]), draw_phase=(red[2], red[3]), effect_draws=(5, 6, 7, 8, 9)
+    )
+    engine = Engine.from_state(state, seed=7)
+    query = _next_query(engine)
+    engine.submit(_activate_shameng(query, picks=(red[0], red[1]), choices=("seat:1",)))
+    after = _next_query(engine)
+
+    assert after is not None and after.kind == "PLAY_PHASE"
+    assert SHAMENG not in after.preactivations, "本阶段已经发动过"
+
+
+def test_shameng_not_submitting_costs_nothing_and_keeps_the_slot():
+    """取消 = 不提交复合动作：零副作用，同一阶段随时可再确认（与【青囊】同口径）。"""
+    red = _red(4)
+    state = _shameng_state(
+        (red[0], red[1]), draw_phase=(red[2], red[3]), effect_draws=(5, 6, 7, 8, 9)
+    )
+    engine = Engine.from_state(state, seed=7)
+    query = _next_query(engine)
+
+    assert SHAMENG in query.preactivations, "同一阶段随时可再确认"
+    assert not engine.state.discard, "成本没有被执行"
+    assert engine.state.player(1).hand == [], "目标没有摸牌"
+    assert engine.state.player(0).hand == [red[0], red[1], red[2], red[3]], (
+        "手牌 = 起始两张 + 摸牌阶段两张"
+    )
+
+
+def test_shameng_short_draw_ends_the_game_as_a_draw():
+    """结算里摸牌短摸（两堆皆空）⇒ 平局并终止（账本 L803）。
+
+    牌堆只放摸牌阶段那两张：成本弃掉的两张会被重洗回牌堆、正好被目标摸走，随后自己
+    那三张无处可拿 ⇒ 平局。
+    """
+    red = _red(4)
+    state = _shameng_state(
+        (red[0], red[1]),
+        draw_phase=(red[2], red[3]),
+        deck_only=(red[2], red[3]),
+    )
+    engine = Engine.from_state(state, seed=7)
+    query = _next_query(engine)
+    engine.submit(_activate_shameng(query, picks=(red[0], red[1]), choices=("seat:1",)))
+    _next_query(engine)
+
+    tail = engine.records[-1]
+    assert engine.finished
+    assert tail.kind == "game_end"
+    assert tail.result == "draw" and tail.reason == "both_decks_empty"
+
+
+def test_shameng_resumes_after_the_target_gain_hook_suspends():
+    """目标摸牌内联触发"获得牌后"钩子（界夏侯惇【清俭】）挂起；放弃后续跑**不重摸**。"""
+    red = _red(4)
+    draws = (5, 6, 7, 8, 9)
+    state = _shameng_state(
+        (red[0], red[1]),
+        others=(SeatSpec(hero="jie_xiahoudun"),),
+        draw_phase=(red[2], red[3]),
+        effect_draws=draws,
+    )
+    engine = Engine.from_state(state, seed=7)
+    query = _next_query(engine)
+    engine.submit(_activate_shameng(query, picks=(red[0], red[1]), choices=("seat:1",)))
+
+    suspended = _next_query(engine)
+    assert suspended.kind == "SKILL_ACTIVATION", "目标『获得牌后』钩子把流程挂起"
+    assert suspended.actor == 1 and suspended.skill_id == "hero.jie_xiahoudun.qingjian"
+    engine.submit(next(item for item in suspended.legal_actions if isinstance(item, Pass)))
+    _next_query(engine)
+
+    assert engine.state.player(1).hand == [draws[0], draws[1]], "目标只摸了两张（不重摸）"
+    assert engine.state.player(0).hand[-3:] == [draws[2], draws[3], draws[4]], (
+        "自己照常摸三张（只一次）"
+    )
+
+
+def test_shameng_declares_one_shared_card_wording_and_four_keys():
+    """两步选牌共用一句实时文案（`SELECT_CARDS` 恒读 `"card"`）；清单三行各读自己的 key。"""
+    definition = CATALOG[SHAMENG]
+
+    assert definition.requirement == (
+        "出牌阶段限一次，你可以弃置两张颜色相同的手牌，"
+        "令一名其他角色摸两张牌，然后你摸三张牌"
+    )
+    assert set(definition.step_requirements or {}) == {"card", "card1", "card2", "seat"}
+    assert (definition.step_requirements or {})["card"].strip(), "实时选牌那一问要有话说"

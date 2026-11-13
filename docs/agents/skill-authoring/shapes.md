@@ -56,6 +56,7 @@
 | 单步选牌 → 效果 | 「弃置任意张牌，然后摸等量的牌」 | `hero.sunquan.zhiheng` |
 | 多步：座位 → 选牌 | 「交给一名其他角色任意张手牌」 | `hero.liubei.rende` |
 | 多步：选牌 → 座位 | 「弃置一张牌，令一名…角色回复」 | `hero.huatuo.qingnang` |
+| 多步：选牌 → 选牌 → 座位（**集级成本约束**：前一步的答案决定后一步的候选面） | 「弃置两张颜色相同的手牌，令一名其他角色摸两张牌，然后你摸三张牌」 | `hero.chenzhen.shameng`（shiji-zhi-luotong-chenzhen 票 02；两步选牌 = 候选面收窄，`edge-cases.md` §2.1 C4 的唯一判据；同一步骤类型在一条流水线里出现两次的先例 = 界关羽【义绝】`hero.jie_guanyu.yijue`） |
 | 多步：座位 → 选项 → 选牌 | 「选择一名男性角色，然后弃置一张手牌或将一张装备牌置入其装备区」 | `hero.jie_sunshangxiang.jieyin` |
 | 选项步（闭集，可动态） | 「选择一项：1… 2…」 | `hero.jie_xushu.jianyan` |
 | 选项步 + **置灰**（`disabled`：列出来但此刻不可选） | 「将此牌当任意一张基本牌或普通锦囊牌」——牌名**列全**，"此刻没有合法目标"的置灰 | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】；`disabled` 见 `src/sgs/skills/flow.py:PickOption`） |

@@ -22,6 +22,19 @@
           "granted_by": "tianyi"
         }
       ]
+    },
+    {
+      "id": "chenzhen",
+      "name": "陈震",
+      "true_name": "陈震",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "shiji-zhi",
+      "enabled": true,
+      "skills": [
+        { "id": "shameng", "name": "歃盟", "skill_type": "NORMAL" }
+      ]
     }
   ]
 }

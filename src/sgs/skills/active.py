@@ -8260,11 +8260,232 @@ _ZUOXING = ActiveSkill(
 """
 
 
+# ---------------------------------------------------------------------------
+# 陈震【歃盟】（始计篇-智包；shiji-zhi-luotong-chenzhen 票 02；用户 2026-11-14 一次签 Q1–Q7）
+#
+# 牌面（用户 `技能.txt` 逐字；移动版 WIKI 同句 ⇒ 无平台差异）：
+#
+#     出牌阶段限一次，你可以弃置两张颜色相同的手牌，令一名其他角色摸两张牌，
+#     然后你摸三张牌。
+#
+# 签字的落点（票面 §0）：
+#
+# - **「两张颜色相同」是成本的前置约束，不是"提交后再判"**（Q1=A）：集级约束靠
+#   **两步选牌**落在候选面上（`PickCards.exclude_cards` 可调用档 = `edge-cases.md`
+#   §2.1 C4 的唯一判据）——第 1 步只留"手里还有同色伙伴"的牌，第 2 步只留与第 1 张
+#   同色的牌。异色因此**不是合法动作**，而不是"能点、点了白取消"。
+#   仓内先例：界关羽【义绝】一条流水线里有两个 `PickCards`（`YIJUE_FLOW`）。
+# - **只手牌**（Q4=A）：牌面明写「手牌」⇒ `zones=(Zone.HAND,)`，不套"手牌 + 装备区"。
+# - **「颜色相同」= 大色不同 ⇒ 非法**；任一张无颜色 ⇒ 不成立 ⇒ 同样非法（Q6=A；
+#   账本 L1169 与 `_shenxing_same_color` 的 fail-closed 同口径）。
+# - **取消不消耗阶段位**（Q3=A）：任一步 `Pass` ⇒ 执行器让帧出栈、`_USED` 不落 ⇒
+#   同一出牌阶段可再发动（`flow.py` 的中心契约「取消零副作用」）。
+# - **目标 = 其他存活角色**（Q5=A）：无手牌 / 距离 / 势力要求。
+# - 结算途中目标死亡（Q7=A）按"已定座位照常执行"——**今天不可达**（挂起点只有"失去牌后"
+#   钩子，它们不造成死亡），故不加分支、只留这句口径。
+#
+# 文案：`SELECT_CARDS` 的逐步文案**恒读 `"card"`**（`projection._step_requirement`），
+# 而本技能两次选牌 ⇒ 这一句要同时说清两件事（先例 = 界关羽【义绝】的同一格注释）；
+# 预发动清单的两行另按**步骤 key** 取（`flow.manifest` 的 `requirements.get(step.key)`），
+# 故声明面给四个键：`card`（两次实时选牌共用）+ `card1` / `card2` / `seat`（清单三行）。
+# ---------------------------------------------------------------------------
+
+CHENZHEN = "chenzhen"
+"""陈震的武将 id（数据面 = `heroes.shiji_zhi.json`）。"""
+
+SHAMENG = hero_skill_id(CHENZHEN, "shameng")
+"""【歃盟】的全限定技能 id。"""
+
+SHAMENG_TARGET_DRAW = 2
+"""令目标摸的张数（牌面「摸两张牌」）。"""
+
+SHAMENG_SELF_DRAW = 3
+"""然后自己摸的张数（牌面「你摸三张牌」）。"""
+
+_SHAMENG_PAID = "shameng:paid"
+"""帧私有：两张成本已经搬进弃牌堆（搬牌内联钩子挂起后的续跑不重搬）。"""
+
+_SHAMENG_TARGET_DRAWN = "shameng:target_drawn"
+"""帧私有：目标那两张已经发出（"获得牌后"钩子挂起后的续跑不重摸）。"""
+
+_SHAMENG_SELF_DRAWN = "shameng:self_drawn"
+"""帧私有：自己那三张已经发出（同上）。"""
+
+_SHAMENG_REQUIREMENT = (
+    "出牌阶段限一次，你可以弃置两张颜色相同的手牌，"
+    "令一名其他角色摸两张牌，然后你摸三张牌"
+)
+
+_SHAMENG_CARD_REQUIREMENT = "弃置两张颜色相同的手牌（先点第 1 张，再点与它同色的第 2 张）"
+
+
+def _shameng_hand_colors(state: GameState, owner: int) -> dict[int, Color | None]:
+    """手牌 → 大色（`None` = 无颜色，永不与任何牌"同色"）。"""
+    return {
+        int(card_id): color_of_suit(state.card(int(card_id)).suit)
+        for card_id in state.player(owner).hand
+    }
+
+
+def _shameng_pairs(colors: dict[int, Color | None]) -> dict[Color, tuple[int, ...]]:
+    """按大色分组（无颜色的牌不进任何组）。"""
+    groups: dict[Color, list[int]] = {}
+    for card_id, color in colors.items():
+        if color is None:
+            continue
+        groups.setdefault(color, []).append(card_id)
+    return {color: tuple(ids) for color, ids in groups.items()}
+
+
+def _shameng_has_pair(state: GameState, owner: int) -> bool:
+    """手里是否真有"两张同色"（付得起成本的唯一判据）。"""
+    return any(
+        len(ids) >= 2
+        for ids in _shameng_pairs(_shameng_hand_colors(state, owner)).values()
+    )
+
+
+def _shameng_first_excluded(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """第 1 步的黑名单：**没有同色伙伴**的牌（含无颜色的牌）一律排除。
+
+    那些牌永远凑不出"两张同色"，留在面上只会让玩家点进死路（`edge-cases.md` 的
+    「死路不算兜底」）⇒ 直接在候选面收窄。留下的是**能配成对**的牌，故第 2 步恒非空。
+    """
+    del frame, answers
+    colors = _shameng_hand_colors(state, owner)
+    paired = {
+        card_id
+        for ids in _shameng_pairs(colors).values()
+        if len(ids) >= 2
+        for card_id in ids
+    }
+    return tuple(card_id for card_id in colors if card_id not in paired)
+
+
+def _shameng_second_excluded(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """第 2 步的黑名单：第 1 张自己 + 与它**异色**的牌（含无颜色的牌）。"""
+    del frame
+    colors = _shameng_hand_colors(state, owner)
+    first = answers.get("card1") or ()
+    if len(first) != 1:
+        return tuple(colors)
+    first_id = int(first[0])
+    first_color = colors.get(first_id)
+    if first_color is None:
+        return tuple(colors)
+    return tuple(
+        card_id
+        for card_id, color in colors.items()
+        if card_id == first_id or color is not first_color
+    )
+
+
+def _shameng_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """【歃盟】的可选目标：**其他存活角色**（座位序；不含自己、不含死者）。"""
+    del frame, chosen
+    return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
+
+
+def _shameng_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：本阶段没用过 ∧ 手里有两张同色 ∧ 场上有别的存活角色。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _shameng_has_pair(state, ctx.subject):
+        return current
+    if not _shameng_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _shameng_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：弃两张（同色）→ 目标摸 2 → 自己摸 3；三段各一个帧内游标。
+
+    顺序由牌面「然后」定：**目标先摸、自己后摸**。搬牌 / 摸牌都会内联派发钩子
+    （"失去牌后" / "获得牌后"）并可能挂起 ⇒ 每段跑前先查游标、跑前置游标
+    （`Engine.draw_for_hand` 的 docstring 逐字要求的姿势）。
+    """
+    owner = int(frame.data["source"])
+    target = int(answers["seat"][0])
+    cards = tuple(int(card_id) for card_id in answers["card1"]) + tuple(
+        int(card_id) for card_id in answers["card2"]
+    )
+    if not frame.data.get(_SHAMENG_PAID):
+        frame.data[_SHAMENG_PAID] = True
+        if _move_to_discard(host, frame, cards, owner=owner, key="shameng:cost") == "stay":
+            return "stay"
+    if not frame.data.get(_SHAMENG_TARGET_DRAWN):
+        frame.data[_SHAMENG_TARGET_DRAWN] = True
+        if host.draw_for_hand(frame, target, SHAMENG_TARGET_DRAW) == "stay":
+            return "stay"
+    if not frame.data.get(_SHAMENG_SELF_DRAWN):
+        frame.data[_SHAMENG_SELF_DRAWN] = True
+        if host.draw_for_hand(frame, owner, SHAMENG_SELF_DRAW) == "stay":
+            return "stay"
+    return None
+
+
+SHAMENG_FLOW = SkillFlow(
+    name="shameng",
+    steps=(
+        # 成本第 1 张：只铺"有同色伙伴"的手牌（`_shameng_first_excluded` 的黑名单）。
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            key="card1",
+            exclude_cards=_shameng_first_excluded,
+        ),
+        # 成本第 2 张：只铺与第 1 张**同色**的手牌（异色 + 第 1 张自己都排除）。
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            key="card2",
+            exclude_cards=_shameng_second_excluded,
+        ),
+        PickSeats(lo=1, hi=1, pool=_shameng_targets, key="seat"),
+    ),
+    effect=_shameng_effect,
+)
+"""【歃盟】的三步流水线：选第 1 张 → 选同色第 2 张 → 选一名其他角色。
+
+`once_per_phase` 取缺省 `True`（执行器在 `effect` 前落 `_USED`）；任一步 `Pass` ⇒
+整条取消、零副作用、阶段位不落 ⇒ 同一阶段可再发动（Q3=A）。
+"""
+
+_SHAMENG = ActiveSkill(
+    CHENZHEN,
+    "shameng",
+    _shameng_offers,
+    flow=SHAMENG_FLOW,
+    # 首步选**自己的手牌** ⇒ 清单渲得出，翻预发动（`shapes.md` §4 准入表第 1 行）。
+    preactivated=True,
+    requirement=_SHAMENG_REQUIREMENT,
+    step_requirements={
+        # 实时询问的选牌步恒读 `"card"`（两次共用这一句，见本段注释）；
+        # 清单三行按步骤 key 取。
+        "card": _SHAMENG_CARD_REQUIREMENT,
+        "card1": "选择第 1 张手牌（要与另一张手牌颜色相同）",
+        "card2": "选择与第 1 张颜色相同的第 2 张手牌",
+        "seat": "选择一名其他角色：其摸两张牌，然后你摸三张牌",
+    },
+)
+"""陈震【歃盟】：A 族主动技 + 三步流水线（首步选自己的手牌 ⇒ 翻预发动）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 始计篇-智包·神郭嘉（shiji-zhi 票 01）：慧识 / 辉逝 / ☆佐幸。
     _HUISHI,
     _HUI_SHI,
     _ZUOXING,
+    # 始计篇-智包·陈震（shiji-zhi-luotong-chenzhen 票 02）：歃盟（A 族 + 三步流水线）。
+    _SHAMENG,
     # SP庞统【过论】（sp5-pangtong-liuqi 票 01）：两步（选座 → 盲挑手牌）+ 手写主体。
     _GUOLUN,
     _DIMENG,

@@ -4661,6 +4661,13 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "出牌阶段限一次：花神郭嘉 1 点体力上限换一张普通锦囊的'视为使用'——"
         "白得的锦囊（神郭嘉上限 > 1 才出现）⇒ 恒发动为正（读 view 只用公开面）",
     ),
+    # shiji-zhi-luotong-chenzhen 票 02：始计篇-智包·陈震【歃盟】。
+    "hero.chenzhen.shameng": (
+        _constant(2.6),
+        "出牌阶段限一次：弃两张同色手牌 ⇒ 目标摸 2、自己摸 3（净 +1 手牌、盟友 +2）⇒ "
+        "没有代价、恒发动为正（读 view 只用公开面：候选出现即说明手里有两张同色、"
+        "场上有别的存活角色）",
+    ),
     "hero.tao_caocao.changyi": (
         _constant(2.0),
         "别人的出牌阶段结束时与其拼点：赢或平点没有代价（还能把【倡义】复制一份给对方），"

@@ -2948,6 +2948,27 @@ def _coverage_qingnang():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_shameng():
+    """陈震【歃盟】（shiji-zhi-luotong-chenzhen 票 02）：已翻预发动，清单 = 两次选牌 + 选座。
+
+    局面：手里两张**红色【闪】**（凑得出"两张颜色相同"，且出牌阶段用不出去 ⇒ AI 只能改走
+    技能）、场上有一名其他存活角色 ⇒ 清单渲得出、AI 填得出一次合法发动。
+    """
+    reds = tuple(
+        card_id
+        for card_id in _ids("dodge")
+        if color_of_suit(PACK.deck.cards[card_id].suit) is Color.RED
+    )[:2]
+    assert len(reds) == 2, "标准 108 里要有两张红色【闪】当成本"
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="chenzhen", hand=reds), SeatSpec()],
+        deck=_deck_excluding(*reds),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_dimeng():
     """鲁肃【缔盟】（jushou-lusu 票 02）：已翻预发动 ⇒ 清单 = 两次座位步。
 
@@ -3363,6 +3384,8 @@ _COVERAGE_CASES = {
     "hero.chenqun.dingpin": _coverage_chenqun_dingpin,
     # yijiang-2014 票 03：顾雍（OL）【慎行】（已翻预发动，单步清单；无次数上限、恒摸一张）。
     "hero.guyong.shenxing": _coverage_guyong_shenxing,
+    # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（已翻预发动，三步清单：选牌 → 选牌 → 选座）。
+    "hero.chenzhen.shameng": _coverage_shameng,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,
