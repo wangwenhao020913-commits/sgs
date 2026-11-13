@@ -94,6 +94,11 @@ bash tests/run_all.sh                                     # 唯一门禁（≈8 
 | `tools/sgs_web/descriptions.json` | 不用改（引用的技能已有条目） | 要：`skills` 段加一条，键集与 `CATALOG` 相等 |
 | 测试 | 要一份：包能加载 + 武将进池（参考 `tests/test_hero_dealing.py` 的池断言） | 要：单文件回归（红→绿）+ 边界断言（`docs/agents/skill-authoring/edge-cases.md`） |
 
+**照抄现成样板**：`examples/diy-hero/heroes.diy.json` 是一张只复用已登记技能的自制牌
+（1 张武将 / 1 条显式 `skill_id`），旁边的 `examples/diy-hero/README.md` 写了两种接法——
+拷进 `src/sgs/data/files/` 再注册一行（会动下面的池计数），或只在测试里注入、不进池。
+它本身**不进**官方池，所以池计数仍是 15 处。
+
 **加进官方池就要对账 15 处计数。** `HERO_SUPPLEMENT_PACK_IDS` 里加一行会改动启用武将数、
 真名数、技能数与形态格，而它们被**写死**在 15 个站点、7 张登记表里（`tests/test_hero_catalog.py` /
 `tests/test_hero_dealing.py` / `tests/test_web.py` / `tests/support/ui_smoke.mjs`）。先跑：
