@@ -7661,7 +7661,7 @@ HUISHI_MAX_HP = 10
 """【慧识】的体力上限闸（「体力上限小于10」：发动前置 + 每轮 "+1" 的前置）。"""
 
 _HUISHI_CONTINUE = "huishi_continue"
-"""【慧识】两处"是否继续"问的唯一选项（单选项 + `Pass`；标签读不到，文案在
+"""【慧识】"是否继续判定？"问的唯一选项（单选项 + `Pass`；标签读不到，文案在
 ``step_requirements`` 里，见 `edge-cases.md` O4）。"""
 
 _HUISHI_OPTIONS: tuple[str, ...] = (_HUISHI_CONTINUE,)
@@ -7673,8 +7673,8 @@ _HUISHI_GIVE_OPTIONS: tuple[str, ...] = (_HUISHI_GIVE,)
 
 _HUISHI_STAGE = "huishi:stage"
 """帧私有：段机游标——``judgment``（该压下一轮判定）/ ``resolve``（读结果）/
-``ask-repeat`` / ``ask-plus`` / ``maxlife`` / ``gain`` / ``ask-give`` / ``give-seat`` /
-``reduce`` / ``done``。"""
+``maxlife``（直接 +1 上限）/ ``ask-more``（是否继续判定）/ ``ask-give`` / ``give-seat`` /
+``gain`` / ``reduce`` / ``done``。"""
 
 _HUISHI_ROUND = "huishi:round"
 """帧私有：当前是第几张判定（0 起；只用于询问标识与"第一张"判据）。"""
@@ -7711,9 +7711,9 @@ _ZUOXING_DESIGNATION = "zuoxing:designation"
 """【佐幸】帧私有：【借刀杀人】的附带指定座位。"""
 
 _HUISHI_REQUIREMENT = (
-    "出牌阶段限一次，若你的体力上限小于10，你可以进行一次判定：若判定结果与本阶段以此法"
-    "进行判定的结果的花色均不同，且此时你的体力上限小于10，你可以加1点体力上限并重复此流程。"
-    "然后你可以将所有生效的判定牌交给一名角色，若其手牌数为全场最多，你减1点体力上限。"
+    "出牌阶段限一次，若你的体力上限小于10，你可以进行一次判定：若判定结果与之前以此法"
+    "判定过的结果的花色均不同，你加1点体力上限，然后你可以重复此流程（体力上限加到10即"
+    "止）。然后你可以将所有生效的判定牌交给一名角色，若其手牌数为全场最多，你减1点体力上限。"
 )
 
 _HUI_SHI_REQUIREMENT = (
@@ -7781,13 +7781,15 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
     1. ``judgment`` ⇒ 压一轮判定（``keep_card=True``，判定牌留在处理区），转 ``resolve``；
     2. ``resolve`` ⇒ 读 `SKILL_JUDGMENT_CARD_KEY`：记花色 / 记牌；花色与本阶段已判过的
-       都不同（**第一张恒算"不同"**）且体力上限 < 10 ⇒ 问「是否加1点体力上限并重复此流程？」；
-       花色重复 / 上限 = 10 ⇒ 收尾；
-    3. ``maxlife`` ⇒ +1 上限（``MAXLIFE`` 帧），随后压下一轮判定；
-    4. ``ask-give`` ⇒ 判定牌**仍留在效果区**，问「是否将所有生效的判定牌交给一名角色？」；
-    5. ``give-seat`` ⇒ 点场上武将：从**处理区**直接交给该角色；转 ``reduce``；
-    6. ``gain`` ⇒ 不交（答「放弃」）时，这些牌由**神郭嘉获得**（处理区 → 手牌）；
-    7. ``reduce`` ⇒ **交给之后**现算收牌人手牌数：全场最多（含并列）⇒ 神郭嘉 -1 上限
+       都不同（**第一张恒算"不同"**）且体力上限 < 10 ⇒ 转 ``maxlife``；花色重复 / 上限 = 10
+       ⇒ 收尾；
+    3. ``maxlife`` ⇒ **直接** +1 上限（``MAXLIFE`` 帧，不问）：加的上限与"是否继续判定"**无关**
+       （用户 2026-11-14 订正：加是判定结果带来的，继续才是可选的）；
+    4. ``ask-more`` ⇒ 上限已到 10 ⇒ 收尾；否则问「是否继续判定？」——答否即收尾；
+    5. ``ask-give`` ⇒ 判定牌**仍留在效果区**，问「是否将所有生效的判定牌交给一名角色？」；
+    6. ``give-seat`` ⇒ 点场上武将：从**处理区**直接交给该角色；转 ``reduce``；
+    7. ``gain`` ⇒ 不交（答「放弃」）时，这些牌由**神郭嘉获得**（处理区 → 手牌）；
+    8. ``reduce`` ⇒ **交给之后**现算收牌人手牌数：全场最多（含并列）⇒ 神郭嘉 -1 上限
        （0 档直接死亡，`06` L1149，不兜底）。
     """
     del answers
@@ -7821,15 +7823,24 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
             if repeated or host.state.player(owner).hp_max >= HUISHI_MAX_HP:
                 frame.data[_HUISHI_STAGE] = "ask-give"
             else:
-                frame.data[_HUISHI_STAGE] = "ask-plus"
+                frame.data[_HUISHI_STAGE] = "maxlife"
             continue
-        if stage == "ask-plus":
+        if stage == "maxlife":
+            # 花色不重复 ⇒ **直接** +1 上限（``MAXLIFE`` 帧，不同步体力）。这一步与"要不要
+            # 继续判定"无关：加是这次判定结果带来的，继续才是可选的（用户 2026-11-14 订正）。
+            host.raise_hp_max(owner, 1)
+            frame.data[_HUISHI_STAGE] = "ask-more"
+            return "stay"
+        if stage == "ask-more":
+            if host.state.player(owner).hp_max >= HUISHI_MAX_HP:
+                frame.data[_HUISHI_STAGE] = "ask-give"  # 加到 10 即止
+                continue
             round_no = int(frame.data[_HUISHI_ROUND])
             answer = host.ask_option(
                 frame,
                 owner,
                 Timing.PHASE_PLAY_IDLE,
-                skill_id=f"{HUISHI}:repeat-plus:{round_no}",
+                skill_id=f"{HUISHI}:more:{round_no}",
                 options=_HUISHI_OPTIONS,
                 optional=True,
             )
@@ -7839,13 +7850,8 @@ def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
                 frame.data[_HUISHI_STAGE] = "ask-give"
             else:
                 frame.data[_HUISHI_ROUND] = round_no + 1
-                frame.data[_HUISHI_STAGE] = "maxlife"
+                frame.data[_HUISHI_STAGE] = "judgment"
             continue
-        if stage == "maxlife":
-            # 「加1点体力上限并重复此流程」：+1 上限（不同步体力），再压下一轮判定。
-            host.raise_hp_max(owner, 1)
-            frame.data[_HUISHI_STAGE] = "judgment"
-            return "stay"
         if stage == "ask-give":
             if not _huishi_kept_cards(host, frame):
                 frame.data[_HUISHI_STAGE] = "done"
@@ -8221,7 +8227,7 @@ _HUISHI = ActiveSkill(
     flow=HUISHI_FLOW,
     requirement=_HUISHI_REQUIREMENT,
     step_requirements={
-        "repeat-plus": "是否加1点体力上限并重复此流程？",
+        "more": "是否继续判定？",
         "give": "是否将所有生效的判定牌交给一名角色？",
         "give-seat": "交给哪名角色？（可以是自己）",
     },

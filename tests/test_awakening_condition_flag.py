@@ -8,7 +8,8 @@
 四条钉住的东西：
 
 1. 置位**不结算**（体力 / 上限 / ☆ 授予都不动）；
-2. 位把它自己时机的**条件**旁路掉：时机一到就触发（条件本来不成立也触发）；
+2. 位只旁路**觉醒条件**那一半：时机一到就触发（条件本来不成立也触发）；
+   **时机（归属）恒判**——别人的准备阶段 / 受到伤害都不触发（见第 ④ 组）；
 3. 真正觉醒后位被清掉（``_mark_awakened``），此后不再靠位产出候选；
 4. 拒绝面：非觉醒技 / 已觉醒 / 目标阵亡 / 技能已失效 ⇒ ``False`` 且零副作用。
 """
@@ -16,9 +17,11 @@
 from __future__ import annotations
 
 from sgs.data import hero_skill_id, load_content_pack
+from sgs.effects import DamageNature
 from sgs.engine import Engine
 from sgs.skills import awakening_condition_satisfied, awakening_skill_awakened
-from sgs.state import Pass, SelectOption
+from sgs.state import FrameKind, Pass, Phase, SelectOption
+from sgs.timing import Timing
 from support import SeatSpec, build_state, deck_excluding
 
 PACK = load_content_pack(deck_profile="standard_108")
@@ -138,3 +141,63 @@ def test_refuses_an_already_awakened_skill():
     assert awakening_skill_awakened(engine.state, 0, QINXUE) is True
 
     assert engine.satisfy_awakening_condition(0, QINXUE) is False
+
+
+# ---------------------------------------------------------------------------
+# ④ 时机（归属）恒判：置位只满足条件，不改变"谁的时机"
+# ---------------------------------------------------------------------------
+
+
+def test_a_satisfied_qianxue_does_not_fire_when_its_owner_takes_damage():
+    """【潜心】的时机 = **你造成**伤害后。辉逝置位后【界徐庶】**受到**伤害也不触发
+    （用户 2026-11-14 报障：「潜心的时机应该是自身造成伤害（目前受到伤害也能触发）」）。"""
+    engine = _engine([SeatSpec(hero="jie_xushu"), SeatSpec()])
+    state = engine.state
+    assert engine.satisfy_awakening_condition(0, QIANXUE) is True
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": None,
+            "use_timing": None,
+            "target": 0,
+            "channel": None,
+            "nature": DamageNature.NORMAL,
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _drive(engine, [_Answer("draw_two"), _Answer("draw_two")])
+
+    assert awakening_skill_awakened(state, 0, QIANXUE) is False, "受伤不是「你造成伤害」"
+    assert state.player(0).hp_max == 4, "上限 -1 没有发生"
+    assert JIANYAN not in state.player(0).granted_skills
+
+
+def test_a_satisfied_qinxue_ignores_another_seats_phase():
+    """【勤学】的时机 = **你的**准备 / 结束阶段。置位后别人的准备阶段也不触发。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_lvmeng", hp=4, hp_max=4), SeatSpec()],
+        deck=deck_excluding(PACK),
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=7)
+    assert engine.satisfy_awakening_condition(0, QINXUE) is True
+    players = [_Answer("draw_two"), _Answer("draw_two")]
+    for _ in range(200):
+        if state.turn_seat != 1 or state.phase is not Phase.PREPARE:
+            break  # 已经跑完座位 1 的准备阶段
+        query = engine.pending
+        if query is None:
+            if engine.finished:
+                break
+            engine._step()
+            continue
+        engine.submit(players[query.actor].respond(query))
+
+    assert awakening_skill_awakened(state, 0, QINXUE) is False, "别人的阶段不是它的时机"
+    assert state.player(0).hp_max == 4
+    assert GONGXIN not in state.player(0).granted_skills

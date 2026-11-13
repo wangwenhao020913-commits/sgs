@@ -1251,9 +1251,13 @@ _CONDITION_SATISFIED = 1 << 23
 使用者：辉逝的「令其视为满足其一个觉醒技的觉醒条件」——它只**满足条件**，不立即结算：
 觉醒技仍要等**自己的时机**（【天翊】= 准备阶段、【勤学】= 准备 / 结束阶段、【潜心】=
 造成伤害后……）到来才触发。判据落在 per-instance 的 ``skill_state`` 上（跨回合保留、
-出牌阶段复位不清），**只在 :func:`_matching_hooks` 求值觉醒技的钩子条件时被读**：
-置位 ⇒ 该技能的钩子条件视为成立（用户 2026-11-14 的裁定：「觉醒技分为觉醒条件与判断
-是否觉醒的时机」）。位 23 是位段（6..13 仁德 / 15..22 黄天 / 24..31 定乱）之间的孤位。
+出牌阶段复位不清）。位 23 是位段（6..13 仁德 / 15..22 黄天 / 24..31 定乱）之间的孤位。
+
+**读点只在条件函数自己那一半里**（shiji-zhi 票 05 修订）：觉醒技的触发判定拆成「时机」
+与「觉醒条件」两段（:func:`~sgs.skills.awakening._awakening_verdict`），只有**条件**那一半
+被本位置旁路，「时机」（帧事件的来源是不是持有者本人）恒判。**不能**在
+:func:`_matching_hooks` 里整条旁路：那样置位后【天翊】会在**别人**的准备阶段触发、
+【潜心】会在**受伤**时触发（用户 2026-11-14 报障）。
 """
 
 
@@ -1661,27 +1665,19 @@ def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: F
 
     求值前把 ``instance.owner`` 写进 :data:`MATCH_OWNER_KEY`（票 14 §2）：条件据此判
     "失去牌的是不是持有者本人"，而 ``skill_owner`` 的写入时机（回调前）保持不变。
+
+    **觉醒技的「视为满足条件」不在这一层做**（shiji-zhi 票 05 修订）：条件函数自己拆成
+    「时机」（恒判，见 :func:`~sgs.skills.awakening._awakening_verdict`）与「觉醒条件」
+    （可被 :data:`_CONDITION_SATISFIED` 旁路）两段。整条旁路的代价是时机一起被跳过——
+    辉逝置位后【天翊】会在别人准备阶段触发、【潜心】会在受伤时触发。
     """
     frame.data[MATCH_OWNER_KEY] = instance.owner
-    # 觉醒技的「视为满足其觉醒条件」（shiji-zhi 票 01）：置位 ⇒ 本实例的钩子条件视为成立。
-    # 只对**觉醒技**生效（其它技能的钩子条件不受任何技能影响），且位随实例键存活。
-    satisfied = (
-        instance.definition.skill_type is SkillType.AWAKENING
-        and bool(
-            host.state.skill_state.get(instance_key(instance), 0)
-            & _CONDITION_SATISFIED
-        )
-    )
     return tuple(
         hook
         for hook in instance.definition.hooks
         if hook.timing is timing
         and (hook.per_point or damage_point_index(frame) == 0)
-        and (
-            satisfied
-            or hook.condition is None
-            or hook.condition(host, frame)
-        )
+        and (hook.condition is None or hook.condition(host, frame))
     )
 
 

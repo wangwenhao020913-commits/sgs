@@ -59,6 +59,7 @@ from .catalog import (
     Hook,
     MATCH_OWNER_KEY,
     SkillDef,
+    awakening_condition_satisfied,
 )
 from .flow import PickCards, SkillFlow, option_seat, seat_choice
 
@@ -120,6 +121,33 @@ _ZHUHAI_STARTED = "zhuhai_started"
 """帧私有：这次【诛害】已经开出了那次使用（重入不再开第二次）。"""
 
 
+def _awakening_verdict(host: Any, frame: Any, skill_id: str) -> bool | None:
+    """觉醒技的**两段判定**（shiji-zhi 票 05；用户 2026-11-14 裁定）。
+
+    「觉醒技分为：觉醒条件、判断是否觉醒的时机」——两段分工，缺一不可：
+
+    - **时机**：帧事件的来源座位是不是**持有者本人**。阶段体帧的 ``source`` 是当前回合角色
+      ⇒ "自己的准备 / 结束阶段"；伤害帧的 ``source`` 是**伤害来源** ⇒ "自己造成伤害后"。
+      时机不符一律 ``False``：辉逝置过位也一样（它满足的是**条件**，不是时机）；
+    - **觉醒条件**：在飞（:data:`_AWAKENING_COMMITTED`，effect 已提交、重入不再按新状态
+      重算）或已被"视为满足"（:func:`~sgs.skills.catalog.awakening_condition_satisfied`，
+      辉逝置位）⇒ **``True``**；否则 **``None``**，由调用方按状态现算。
+
+    调用方（四条觉醒技的条件函数）只写**状态**那一半，本函数负责时机与两处旁路。
+    两个旁路都必须住**条件**侧而不是 :func:`~sgs.skills.catalog._matching_hooks`：
+    在那里整条跳过会连时机一起跳过（置位后【天翊】在别人准备阶段触发、【潜心】在受伤时
+    触发——用户 2026-11-14 报障）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if frame.data.get(_AWAKENING_COMMITTED) == owner:
+        return True  # 在飞：effect 已经提交，重入不再重算觉醒条件
+    if awakening_condition_satisfied(host.state, int(owner), skill_id):
+        return True  # 辉逝：条件视为满足，等的是**时机**
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 界徐庶【潜心】：当你造成伤害后，若你已受伤 ⇒ 上限 -1，获得【荐言】
 # ---------------------------------------------------------------------------
@@ -128,20 +156,16 @@ _ZHUHAI_STARTED = "zhuhai_started"
 def _qianxue_condition(host: Any, frame: Any) -> bool:
     """【潜心】的触发条件（§十九 L2130）。
 
-    两个条件在**同一时机**上是**合取**，先判归属、再判状态（`06` §5「程序化约定与偏离一手」裁定 1）：
-
-    - **归属**（"当你造成伤害后"）：本次伤害的来源是持有者本人。判据读派发器在条件求值
-      期写好的 :data:`MATCH_OWNER_KEY`（伤害帧的 ``source`` 是来源座位，不是实例持有者）；
-    - **状态**（"若你已受伤"）：``hp < hp_max``。
+    **时机**（"当你造成伤害后"）= 本次伤害的来源是持有者本人——由
+    :func:`_awakening_verdict` 恒判（伤害帧的 ``source`` 是来源座位，不是实例持有者；
+    **受伤**不触发）。**条件**（"若你已受伤"）= ``hp < hp_max``，可被辉逝视为满足。
 
     任一不成立就整条不触发——没有"只减上限 / 只给技能"的部分效果。
     """
-    owner = frame.data.get(MATCH_OWNER_KEY)
-    if owner is None or frame.data.get("source") != owner:
-        return False
-    if frame.data.get(_AWAKENING_COMMITTED) == owner:
-        return True  # 在飞：effect 已经提交，重入不再重算"已受伤"
-    player = host.state.player(int(owner))
+    verdict = _awakening_verdict(host, frame, XUSHU_QIANXUE)
+    if verdict is not None:
+        return verdict
+    player = host.state.player(int(frame.data[MATCH_OWNER_KEY]))
     return player.hp < player.hp_max
 
 
@@ -184,16 +208,14 @@ def _qinxue_condition(host: Any, frame: Any) -> bool:
     """【勤学】的触发条件：**你的**准备 / 结束阶段 ∧ 手牌数减体力值 ≥ 2。
 
     "准备阶段**或**结束阶段"是**同一条技能的两条挂接**（`06` §5「程序化约定与偏离一手」裁定 2）：两个
-    ``Hook`` 共用本条件与同一条流水线，不是两条技能。持有者自校读
-    :data:`MATCH_OWNER_KEY`；阶段体帧的 ``source`` 是当前回合角色，故"你的阶段"=
-    ``source == 持有者``。
+    ``Hook`` 共用本条件与同一条流水线，不是两条技能。**时机**（"你的阶段"，阶段体帧的
+    ``source`` 是当前回合角色）由 :func:`_awakening_verdict` 恒判；**条件**（手牌数减体力值
+    ≥ 2）可被辉逝视为满足。
     """
-    owner = frame.data.get(MATCH_OWNER_KEY)
-    if owner is None or frame.data.get("source") != owner:
-        return False
-    if frame.data.get(_AWAKENING_COMMITTED) == owner:
-        return True  # 在飞：effect 已经提交，重入不再重算"手牌数减体力值"
-    player = host.state.player(int(owner))
+    verdict = _awakening_verdict(host, frame, LVMENG_QINXUE)
+    if verdict is not None:
+        return verdict
+    player = host.state.player(int(frame.data[MATCH_OWNER_KEY]))
     return len(player.hand) - player.hp >= 2
 
 
@@ -316,13 +338,14 @@ _POSHI_SWAPPED = "poshi_swapped"
 
 
 def _poshi_condition(host: Any, frame: Any) -> bool:
-    """触发条件：**自己的**准备阶段 ∧（四个装备槽全封 **或** 体力值为 1）。"""
-    owner = frame.data.get(MATCH_OWNER_KEY)
-    if owner is None or frame.data.get("source") != owner:
-        return False
-    if frame.data.get(_AWAKENING_COMMITTED) == owner:
-        return True  # 在飞：effect 已经提交，重入不再重算条件
-    player = host.state.player(int(owner))
+    """触发条件：**自己的**准备阶段 ∧（四个装备槽全封 **或** 体力值为 1）。
+
+    时机由 :func:`_awakening_verdict` 恒判；括号里那半是**觉醒条件**，可被辉逝视为满足。
+    """
+    verdict = _awakening_verdict(host, frame, LUKANG_POSHI)
+    if verdict is not None:
+        return verdict
+    player = host.state.player(int(frame.data[MATCH_OWNER_KEY]))
     if player.hp == 1:
         return True
     return all(slot in player.sealed_zones for slot in EQUIP_SLOTS)
@@ -498,15 +521,13 @@ _TIANYI_STAGE = "tianyi:stage"
 def _tianyi_condition(host: Any, frame: Any) -> bool:
     """触发条件：**自己的**准备阶段 ∧ 所有**存活**角色本局都受到过伤害。
 
-    持有者自校读 :data:`MATCH_OWNER_KEY`（阶段体帧的 ``source`` 是当前回合角色）；
-    在飞守卫 ``_AWAKENING_COMMITTED`` 与【潜心】/【勤学】同姿态（effect 挂起后重入不再
-    重算条件）。
+    **时机**（"准备阶段"指的是**神郭嘉自己的**准备阶段，不是每个角色的准备阶段）由
+    :func:`_awakening_verdict` 恒判——阶段体帧的 ``source`` 是当前回合角色，与持有者不符
+    就是别人的阶段；**条件**（所有存活角色本局都受过伤）可被辉逝视为满足。
     """
-    owner = frame.data.get(MATCH_OWNER_KEY)
-    if owner is None or frame.data.get("source") != owner:
-        return False
-    if frame.data.get(_AWAKENING_COMMITTED) == owner:
-        return True
+    verdict = _awakening_verdict(host, frame, TIANYI)
+    if verdict is not None:
+        return verdict
     state = host.state
     return all(
         state.player(seat).damage_taken_ever for seat in alive_seats(state)

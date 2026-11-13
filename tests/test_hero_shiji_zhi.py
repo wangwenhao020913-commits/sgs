@@ -247,7 +247,7 @@ def test_huishi_first_card_also_raises_max_hp_and_duplicate_ends_the_flow():
     _drive_until_done(
         engine,
         HUISHI,
-        [Script({"activate": HUISHI, "repeat-plus": "huishi_continue"}), Script()],
+        [Script({"activate": HUISHI, "more": "huishi_continue"}), Script()],
     )
 
     assert engine.state.player(0).hp_max == 4, "第一张判定就加 1 点体力上限"
@@ -266,7 +266,7 @@ def test_huishi_each_new_suit_adds_another_max_hp():
             Script(
                 {
                     "activate": HUISHI,
-                    "repeat-plus": "huishi_continue",  # 前两张各加 1 并继续
+                    "more": "huishi_continue",  # 前两张各加 1 并继续
                 }
             ),
             Script(),
@@ -302,7 +302,7 @@ def test_huishi_judged_cards_stay_in_the_effect_area_until_the_give():
         Script(
             {
                 "activate": HUISHI,
-                "repeat-plus": "huishi_continue",
+                "more": "huishi_continue",
                 "give": "huishi_give",
                 "give-seat": "seat:1",
             }
@@ -336,20 +336,41 @@ def test_huishi_judged_cards_stay_in_the_effect_area_until_the_give():
     assert len(engine.state.player(1).hand) == 7, "收牌人 4 + 3 张判定牌"
 
 
-def test_huishi_declining_the_give_gains_the_cards_and_never_reduces():
+def test_huishi_declining_further_judgment_keeps_the_max_hp_and_gains_the_cards():
+    """「加 1 点体力上限」**不是**"继续判定"的代价（用户 2026-11-14 订正）：花色不重复
+    ⇒ 上限直接 +1；随后答「放弃」只结束流程，那 1 点照留。"""
     judged = _of_suit(Suit.HEART, 1)
     state = _state(_seats(), deck=_deck_with(*judged))
     engine = Engine.from_state(state, seed=7)
     _drive_until_done(
         engine,
         HUISHI,
-        [Script({"activate": HUISHI, "repeat-plus": None, "give": None}), Script()],
+        [Script({"activate": HUISHI, "more": None, "give": None}), Script()],
     )
 
-    assert engine.state.player(0).hp_max == 3, "答「不加」⇒ 不加也不交 ⇒ 不减"
-    assert len(engine.state.player(0).hand) == 3, "判定牌由神郭嘉获得"
+    assert engine.state.player(0).hp_max == 4, "第一张花色不重复 ⇒ 直接 +1（与继续与否无关）"
+    assert len(engine.state.player(0).hand) == 3, "只判一次 + 2 张摸牌，判定牌由神郭嘉获得"
     assert engine.state.player(1).hand == []
     assert not engine.state.processing
+
+
+def test_huishi_stops_at_max_hp_ten_without_asking_to_continue():
+    """上限 9 时判一张新花色：**直接** +1 到 10，然后不再问「是否继续判定？」（加到 10 即止）。"""
+    state = _state(_seats(hp=9, hp_max=9), deck=_deck_with(*_of_suit(Suit.HEART, 2)))
+    engine = Engine.from_state(state, seed=7)
+    asked: list[str] = []
+
+    class Recorder(Script):
+        def respond(self, query):
+            if query.kind == "SELECT_OPTION":
+                asked.append(_step_key(str(getattr(query, "skill_id", ""))))
+            return super().respond(query)
+
+    _drive_until_done(engine, HUISHI, [Recorder({"activate": HUISHI}), Script()])
+
+    assert engine.state.player(0).hp_max == 10, "第一张花色不重复 ⇒ 直接 +1 到 10"
+    assert "more" not in asked, "加到 10 即止：不再问是否继续判定"
+    assert len(engine.state.player(0).hand) == 3, "只判一张 + 2 张摸牌"
 
 
 def test_huishi_not_offered_at_max_hp_ten():
@@ -475,6 +496,28 @@ def _tianyi_state(*, damaged: bool = True) -> GameState:
     state.player(0).damage_taken_ever = damaged
     state.player(1).damage_taken_ever = damaged
     return state
+
+
+def test_tianyi_ignores_other_seats_prepare_phases():
+    """觉醒的**时机**只认神郭嘉**自己的**准备阶段（用户 2026-11-14 订正：此前每个角色的
+    准备阶段都会触发）。条件全部成立也不在别人的准备阶段觉醒。"""
+    state = _state(
+        _seats(other_hero="guojia"),
+        deck=_deck_with(),
+        phase=Phase.PREPARE,
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=7)
+    assert engine.satisfy_awakening_condition(0, TIANYI) is True, "条件被标成「视为满足」"
+    _drive_until(
+        engine,
+        [Script({"grant-seat": "seat:0"}), Script({"grant-seat": "seat:0"})],
+        lambda e: e.state.turn_seat != 1 or e.state.phase is not Phase.PREPARE,
+    )
+
+    assert awakening_skill_awakened(engine.state, 0, TIANYI) is False, "别人的准备阶段不触发"
+    assert engine.state.player(0).hp_max == 3, "上限不动"
+    assert ZUOXING not in engine.state.player(0).granted_skills
 
 
 def test_tianyi_awakens_only_when_every_living_seat_has_been_damaged():
