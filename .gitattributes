@@ -9,3 +9,9 @@ tests/replays/*.jsonl -text
 
 # 唯一的音频素材（卡牌语音，40 条 mp3）：显式声明二进制，别让任何过滤规则碰它。
 tools/sgs_web/static/voices/*.mp3 -text
+
+# 打包资产（packaging/）：exe 图标与其预览是二进制。`* text=auto` 是**启发式**判定，
+# 哪天图标内容变化让它看起来像文本，checkout 时就会被转成 CRLF——序列化位置错位，
+# 图标静默坏掉而构建照样成功。显式声明，和上面 mp3 同一个理由。
+packaging/assets/*.ico -text
+packaging/assets/*.png -text

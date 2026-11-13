@@ -26,6 +26,15 @@ browser table. Python 3.14 · no build step · one gate (`bash tests/run_all.sh`
 - **测试**：`bash tests/run_all.sh` 一条命令跑完**全部**门禁（9 条 shell 校验 + 4000+ 条 pytest，
   本机约 8 分钟），其中 47 条标准对局的**金录像逐字节冻结**。
 
+## 直接玩（Windows，不用装环境）
+
+[**Releases**](https://github.com/wangwenhao020913-commits/sgs/releases) 里下载 `SGS-win64-*.zip`，
+解压后双击 `SGS.exe`：控制台窗口起来、浏览器自动打开开局页。首次运行 Windows 会提示
+「已保护你的电脑」（exe 没有代码签名）→「更多信息」→「仍要运行」。
+
+数据（录像 / 将池存档 / 日志）在 `%LOCALAPPDATA%\SGS`，删掉包目录加它即彻底卸载：不写注册表、
+不联网、不装服务。打包配方与自检在 [`packaging/`](packaging/README.md)。下面是**从源码**跑的路。
+
 ## 快速开始
 
 需要 **Linux / macOS / WSL**（门禁是 bash + `.venv/bin/` 路径，Windows 原生跑不了）、
