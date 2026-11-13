@@ -92,6 +92,9 @@ bash tests/smoke-web.sh          # 前端快回路（起临时服务 + 跑真前
 **同一条**门禁，不另立第二套判据。详见 [`AGENTS.md`](AGENTS.md) 与 [`CODING_STANDARDS.md`](CODING_STANDARDS.md)。
 
 想加武将 / 技能：先读 `docs/agents/skill-authoring.md`（六问流水线 + 13 条硬停判据）。
+想自己做一个武将：先读 `docs/agents/diy-heroes.md`——从选路、把入口 skill 装进你的 agent，
+到要改哪几个文件、跑什么门禁、版权边界都在那一份。注意：**不写代码就做武将**还没通
+（见该文档第 1 节的「诚实边界」）；今天做新武将仍要写 `SkillDef`。
 想改网页：先读 `docs/agents/frontend-map.md`。
 
 ## 许可与免责

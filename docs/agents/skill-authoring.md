@@ -3,6 +3,8 @@
 新增或修改一条**武将技能**时走这条流水线。它只解决一件事：把"每次重新推导"变成"读表 +
 照表执行"，并且**把不确定的地方硬停下来**——歧义、缺口、拿不准的边界，一律不实现。
 
+**仓外作者（还没 clone 过本仓 / 第一次给本仓提技能）先读 `docs/agents/diy-heroes.md`**：选路、装入口 skill、要改哪几个文件、跑什么门禁、版权边界都在那一份，本文件从"选完路之后"开始。
+
 本文件是**过程与纪律**。事实分住四份子文档，本文件不复述它们：
 
 | 子文档（`docs/agents/skill-authoring/`） | 回答什么 |
@@ -159,6 +161,9 @@ bash tools/setup-dev.sh                                # 只在**新机器 / 换
 首轮全量 12 条红里 9 条同源，就是它一次列出来的）。`setup-dev.sh` 不跑 = **门禁静默不跑**
 （`core.hooksPath` 不随 clone 走）或金录像因 CRLF 整片变红，别把它当成"可选步骤"。
 
+入口 skill 也由第一条一起核：它的仓内副本是 `skills/hero-skill/SKILL.md`（`判据版本` 行与 § 锚点
+必须与本文档同进退；本机安装副本怎么装进 agent，见 `diy-heroes.md` 的「装 skill」表）。
+
 ## 7. 谁会更新这份文档
 
 | 变化 | 谁改 | 怎么逼出来 |
@@ -168,7 +173,7 @@ bash tools/setup-dev.sh                                # 只在**新机器 / 换
 | 新 UI 形态（新询问弹窗、新交互面） | 落地那张 UI 票 | 审计测试核"UI 触点表"引用的符号在 `tools/sgs_web/static/*.js` 里存在 |
 | 新**装载点 / 登记面**（声明级 `SkillDef.flow`、`register_activation`、`ACTIVATIONS` 这类"技能怎么被挂进引擎"的公共件） | 落地那张**框架**票 | 机械检查只覆盖"文档点名的 `文件:符号` 真的存在"（`tests/test_skill_authoring_docs.py`）；**"该不该有这一行"是判断题**，由评审的 Standards 轴 enforce——票 20 的 `SkillDef.flow` 就是漏在这里被评审抓到的 |
 | 新账本裁定 | **用户** | 账本行由用户签；本流程只提案 |
-| 本文件（`skill-authoring.md`）的**读单 / §6 自身体检 / §4 停手表**有改动 | 改这份文档的人 | 入口 skill `~/.dsh/skills/hero-skill/SKILL.md` 的 `基线:` 与锚点必须跟着动；`tests/test_skill_authoring_docs.py` 在该文件存在时会核（不存在则 skip） |
+| 本文件（`skill-authoring.md`）的**读单 / §6 自身体检 / §4 停手表**有改动 | 改这份文档的人 | 入口 skill `skills/hero-skill/SKILL.md` 的「判据版本」行与 § 锚点必须跟着动；`tests/test_skill_authoring_docs.py` 核（仓内那份缺席即红；本机安装副本的装法见 `diy-heroes.md` 的「装 skill」表） |
 
 **skill 本身不碰框架层**：它只改业务层（技能声明 / 回调）与文档、提案账本；框架层改动走
 独立的通用改动票（这就是 E2）。这条保证这套流程不会自己悄悄长出新机制。
