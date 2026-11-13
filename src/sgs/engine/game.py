@@ -29,6 +29,7 @@ from sgs.data import (
     Mode,
     PlacementReturn,
     RuleConfig,
+    SkillType,
     card_category,
     card_tag_spec,
     color_of_suit,
@@ -92,6 +93,7 @@ from sgs.skills import (
     SeamKind,
     StateChange,
     advance_provider,
+    awakening_skill_awakened,
     blocked_true_names,
     card_preactivations,
     dispatch_move_after,
@@ -3439,27 +3441,40 @@ class Engine:
             return ()
         return tuple(int(choice.removeprefix(SEAT_PREFIX)) for choice in answer.choices)
 
-    def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None:
+    def open_skill_judgment(
+        self,
+        frame: Frame,
+        subject: int,
+        skill_id: str,
+        *,
+        keep_card: bool = False,
+    ) -> None:
         """技能触发的一次**惰性判定**：压 JUDGE 帧（票 10 §1 / §5.3）。
 
         ``after`` 指向通用的判定后果 op；``skill_id`` + ``activation_parent`` 让后果
         把"红 / 黑"写回发起判定的那个帧（八阵出闪的成败）。
+
+        ``keep_card``（shiji-zhi 票 02；神郭嘉【慧识】= 首个消费者）：判定结算结束时
+        **不**把判定牌置入弃牌堆，让它**留在处理区（= 效果区）**，由发起技能在流程末尾
+        自己搬走。缺省 ``False`` ⇒ 既有判定（天妒除外）逐字节不变。纪律：声明了
+        ``keep_card=True`` 的技能**必须**在本次发动收尾前把这张牌搬出处理区——判定帧
+        不替它兜底（见 :meth:`discard_judge_card`）。
         """
-        self.push_frame(
-            FrameKind.JUDGE,
-            {
-                "subject": subject,
-                "targets": (subject,),
-                "source": frame.data.get("source"),
-                "card": frame.data.get("card"),
-                "judge_card": None,
-                "use_timing": frame.data.get("use_timing"),
-                "after": "after_skill_judgment",
-                "skill_id": skill_id,
-                "activation_parent": frame.frame_id,
-            },
-            timing=Timing.JUDGE_ON,
-        )
+        data: dict[str, Any] = {
+            "subject": subject,
+            "targets": (subject,),
+            "source": frame.data.get("source"),
+            "card": frame.data.get("card"),
+            "judge_card": None,
+            "use_timing": frame.data.get("use_timing"),
+            "after": "after_skill_judgment",
+            "skill_id": skill_id,
+            "activation_parent": frame.frame_id,
+        }
+        if keep_card:
+            # 帧私有键：不进记录流（回放按同一条技能动作重跑即可重建）。
+            data["keep_judge_card"] = True
+        self.push_frame(FrameKind.JUDGE, data, timing=Timing.JUDGE_ON)
 
     def note_skill_judgment(self, frame: Frame) -> None:
         """判定后果：把"红 = 成功"写回发起判定的帧（票 10 §5.3）。
@@ -3666,7 +3681,12 @@ class Engine:
 
         判定牌**已被"生效后"的效果获得**（【天妒】等）时不再入弃牌堆（规则 11.2
         "若未被【天妒】等获得"）：判据是"牌还在不在处理区"，与具体技能 id 无关。
+
+        **声明了"留在处理区"的判定**（``open_skill_judgment(..., keep_card=True)``）同样
+        跳过本步：牌留在处理区（= 效果区），由发起技能在流程末尾自己搬走（shiji-zhi 票 02）。
         """
+        if frame.data.get("keep_judge_card"):
+            return
         subject = frame.data["subject"]
         judge_card = frame.data["judge_card"]
         if judge_card.card_id not in self.state.processing:
@@ -4651,9 +4671,13 @@ class Engine:
         照样是"受到伤害"）。作用域 = **本回合**：:meth:`_clear_turn_effects` 在回合末把
         所有座位的这一位清零。**不发 delta**（没有 JSON 读者，回放按同一条伤害结算重建）。
         返回值 = 记完之后的次数。
+
+        M6 之后（shiji-zhi 票 03）：同一写点顺手置**整局**事实
+        :attr:`~sgs.state.Player.damage_taken_ever`（永不复位，【天翊】的觉醒条件读它）。
         """
         player = self.state.player(seat)
         player.damage_taken_this_turn += 1
+        player.damage_taken_ever = True
         return player.damage_taken_this_turn
 
     def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool:
@@ -5159,6 +5183,46 @@ class Engine:
         self._clear_player_flag(seat, "tianyi_lost")
 
     # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
+
+    def force_awakening(self, seat: int, skill_id: str) -> bool:
+        """**跨技能强制觉醒**：令 ``seat`` 的 ``skill_id`` 视为满足觉醒条件并**立即结算**
+        （shiji-zhi 票 05；首个载体 = 神郭嘉【辉逝】）。
+
+        规则读法（用户 2026-11-14 签 A）：牌面「令其视为满足其一个觉醒技的觉醒条件」=
+        当场跑那条觉醒技的效果，随后落"已觉醒"位。觉醒技的效果只能由它自己的时机触发
+        （``_activation_candidates`` 按座位环 + 条件收集），故本方法是**唯一**的另一条
+        入口：它不判条件、不问"是否发动"，只压一个 ``SKILL`` 帧并让
+        :func:`~sgs.skills.active.run_forced_awakening` 跑该定义的**唯一** ``SkillFlow``。
+
+        前置（任一不成立 ⇒ ``False``、零副作用、不压帧）：目标存活；``(seat, skill_id)``
+        有**未失效**的存活实例（失效 ≠ 未触发：被挡住的觉醒技不可被强制觉醒）；定义是
+        觉醒技；尚未觉醒。帧私有 ``forced_awakening`` 让 ``activate_skill`` 走强制分支，
+        该键不进记录流。**返回值 = 帧真的压出了。**
+        """
+        if not self.state.player(seat).alive:
+            return False
+        definition = CATALOG.get(skill_id)
+        if definition is None or definition.skill_type is not SkillType.AWAKENING:
+            return False
+        live = tuple(
+            instance
+            for instance in resolve_instances(self.state)
+            if instance.owner == seat and instance.skill_id == skill_id
+        )
+        if not live or awakening_skill_awakened(self.state, seat, skill_id):
+            return False
+        self.push_frame(
+            FrameKind.SKILL,
+            {
+                "skill_id": skill_id,
+                "source": seat,
+                "skill_owner": seat,
+                "targets": (seat,),
+                "forced_awakening": True,
+            },
+            timing=Timing.PHASE_PLAY_IDLE,
+        )
+        return True
 
     def grant_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
         """写一个座位的**获得**技能记录并落一条 ``skill_gain``（M6 票 04 的唯一写入口）。

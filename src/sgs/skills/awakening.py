@@ -50,6 +50,7 @@ from sgs.state import (
     Phase,
     Zone,
     ZoneRef,
+    alive_seats,
 )
 from sgs.timing import Timing
 
@@ -59,7 +60,7 @@ from .catalog import (
     MATCH_OWNER_KEY,
     SkillDef,
 )
-from .flow import PickCards, SkillFlow
+from .flow import PickCards, SkillFlow, option_seat, seat_choice
 
 __all__ = [
     "LVMENG_GONGXIN",
@@ -68,6 +69,8 @@ __all__ = [
     "LUKANG_POSHI",
     "POSHI_FLOW",
     "QINXUE_FLOW",
+    "TIANYI",
+    "SHEN_GUOJIA_TIANYI_FLOW",
     "XUSHU_JIANYAN",
     "XUSHU_QIANXUE",
     "XUSHU_ZHUHAI",
@@ -465,6 +468,97 @@ ZHUHAI_FLOW = SkillFlow(
 """【诛害】的一步流水线：选一张合法的【杀】（手牌）→ 对其使用。"""
 
 
+
+# ---------------------------------------------------------------------------
+# 始计篇-智包：神郭嘉【天翊】（shiji-zhi 票 01；用户 2026-11-14 签 Q6/Q7/Q8）
+#
+#     天翊
+#       觉醒技，准备阶段，若所有存活角色在本局游戏中均受到过伤害，你加2点体力上限并回复
+#       1点体力，然后令一名角色获得技能“佐幸”。
+#
+# 条件读的是**整局**座位事实 :attr:`~sgs.state.Player.damage_taken_ever`（框架票 03：写点
+# 与 `damage_taken_this_turn` 同一个 `Engine.note_damage_taken`，永不复位）——"所有存活
+# 角色"含神郭嘉自己、只看**此刻**存活的人（`06` L966⑤ 的动态量口径）。
+#
+# 觉醒技强制发动（不问），效果三段：+2 上限（`MAXLIFE` 帧，不同步体力）→ 回复 1（`RECOVER`
+# 帧，满体力回复 0）→ 选一名角色（点场上武将，含自己）`grant_skill` 授予 ☆【佐幸】。
+# 段机住帧私有游标；`_AWAKENING_COMMITTED` 在飞守卫与【潜心】/【勤学】同一姿态。
+# ---------------------------------------------------------------------------
+
+TIANYI = hero_skill_id("shen_guojia", "tianyi")
+"""神郭嘉【天翊】的全限定技能 id。"""
+
+ZUOXING = hero_skill_id("shen_guojia", "zuoxing")
+"""被【天翊】授予的 ☆【佐幸】的全限定技能 id（只经 ``grant_skill`` 获得）。"""
+
+_TIANYI_STAGE = "tianyi:stage"
+"""帧私有段机游标：``maxlife`` / ``recover`` / ``grant`` / ``done``。"""
+
+
+def _tianyi_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**自己的**准备阶段 ∧ 所有**存活**角色本局都受到过伤害。
+
+    持有者自校读 :data:`MATCH_OWNER_KEY`（阶段体帧的 ``source`` 是当前回合角色）；
+    在飞守卫 ``_AWAKENING_COMMITTED`` 与【潜心】/【勤学】同姿态（effect 挂起后重入不再
+    重算条件）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if frame.data.get(_AWAKENING_COMMITTED) == owner:
+        return True
+    state = host.state
+    return all(
+        state.player(seat).damage_taken_ever for seat in alive_seats(state)
+    )
+
+
+def _tianyi_effect(host: Any, frame: Any, answers: Any) -> Any:
+    """提交点：+2 上限 → 回复 1 点 → 令一名角色获得 ☆【佐幸】。
+
+    三段各有帧私有游标（阶段指针**先写再压帧/发问**）：重入既不重加、也不重回、更不重授予。
+    座位池 = 存活角色（含神郭嘉自己；Q7），已持有佐幸的座位由 ``grant_skill`` 幂等吞掉
+    （唯一授予者，正常不可达；Q8）。
+    """
+    del answers
+    owner = int(frame.data["skill_owner"])
+    frame.data[_AWAKENING_COMMITTED] = owner
+    stage = frame.data.get(_TIANYI_STAGE)
+    if stage is None:
+        frame.data[_TIANYI_STAGE] = "recover"
+        host.raise_hp_max(owner, 2)
+        return "stay"
+    if stage == "recover":
+        frame.data[_TIANYI_STAGE] = "grant"
+        _qinxue_push_recover(host, frame, owner=owner)
+        return "stay"
+    if stage == "grant":
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PREPARE,
+            skill_id=f"{TIANYI}:grant-seat",
+            options=tuple(seat_choice(seat) for seat in alive_seats(host.state)),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        frame.data[_TIANYI_STAGE] = "done"
+        host.grant_skill(option_seat(answer), ZUOXING, frame=frame)
+        return None
+    return None
+
+
+SHEN_GUOJIA_TIANYI_FLOW = SkillFlow(
+    name="shen_guojia_tianyi", steps=(), effect=_tianyi_effect
+)
+"""【天翊】的零步流水线：上限 +2 → 回复 1 → 授予 ☆【佐幸】。
+
+名字带武将前缀：`active.TIANYI_FLOW` 是太史慈【天义】的流水线，两者不能同名
+（`tests/test_ask_points.py` 的"name 唯一"断言）。
+"""
+
+
 def awakening_activation_plans() -> dict[str, Any]:
     """觉醒族并入 ``ACTIVATION_PLANS`` 的条目（只有【诛害】需要"付得起才问"）。"""
     return {XUSHU_ZHUHAI: _zhuhai_plan}
@@ -556,5 +650,23 @@ def awakening_skill_definitions() -> tuple[SkillDef, ...]:
                 ),
             ),
             requirement=_REQUIREMENTS["zhuhai"],
+        ),
+        SkillDef(
+            skill_id=TIANYI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.AWAKENING,
+            hooks=(
+                Hook(
+                    Timing.PHASE_PREPARE,
+                    flow=SHEN_GUOJIA_TIANYI_FLOW,
+                    condition=_tianyi_condition,
+                ),
+            ),
+            requirement=(
+                "觉醒技，准备阶段，若所有存活角色在本局游戏中均受到过伤害，你加2点体力上限"
+                "并回复1点体力，然后令一名角色获得技能“佐幸”"
+            ),
+            step_requirements={"grant-seat": "令一名角色获得技能“佐幸”"},
         ),
     )

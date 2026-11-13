@@ -260,14 +260,19 @@ def apply_hp(state: GameState, ctx: EffectContext, seat: int, value: int) -> HpC
     """把座位 ``seat`` 的体力**写成** ``value``，返回一条变化事件（唯一改体力的口）。
 
     ``value`` 由调用帧算好（扣减帧 = ``hp - amount``；回复帧 = ``min(hp + amount, hp_max)``）；
-    本原语只做**上限**检查——越过体力上限是编程错误，帧必须先夹住。
+    本原语只做**上限**检查——**把体力写高**到上限之外是编程错误，帧必须先夹住。
+
+    **已高于上限的体力是合法状态**（规则 §4.15 只要求"减上限前满体力"时同步下调；先受伤
+    再被一次减掉多点上限就会留下 ``hp > hp_max``，神郭嘉【辉逝】-2 是首个载体）。因此
+    「写入值 = 当前体力」的**原地写**（例如 0 点伤害 / 满体力回复产出的空操作 delta）不算
+    越界——判据是"这一写有没有把体力**抬高**，而不是"值本身是否大于上限"。
 
     **下限不在这里**：官方明说"角色的体力有可能小于 0"，体力降至 0 即进入濒死结算，
     是规则上的中间态（濒死流程归票 21）。因此这里允许写到 0 以下；调用方不得据此
     猜测"死亡"，死亡由濒死 → 死亡事件裁定。
     """
     player = state.player(seat)
-    if value > player.hp_max:
+    if value > player.hp_max and value > player.hp:
         raise ValueError(f"体力 {value} 超过上限 {player.hp_max}；回复帧必须先夹住")
     before = player.hp
     player.hp = value

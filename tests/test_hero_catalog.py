@@ -117,6 +117,10 @@ SHAN_HEROES = load_heroes("shan")
 """**神话再临·山包**那一份（shan-baozuoci 票 04 起）：独立系列包，版本字段 ``shan``、
 显示名**不加**版本后缀（左慈 / 化身 / 新生）。"""
 
+SHIJI_ZHI_HEROES = load_heroes("shiji_zhi")
+"""**始计篇-智包**那一份（shiji-zhi 票 01 起）：独立系列包，版本字段 ``shiji-zhi``、
+显示名**不加**版本后缀（神郭嘉 / 慧识 / 辉逝 / 天翊 / 佐幸）。"""
+
 JIE_YIJIANG_2014_MOBILE_HEROES = load_heroes("jie_yijiang_2014_mobile")
 """**界一将成名-2014·移动版**那一份（jie-yijiang-2014-mobile 票 01 起）：界 + 系列包 +
 移动版三者叠加 ⇒ 版本字段 ``jie-yijiang-2014-mobile``、显示名加「移动版」后缀
@@ -187,6 +191,9 @@ JIE_YIJIANG_2014_MOBILE_ENABLED = tuple(
 )
 SP5_ENABLED = tuple(hero.id for hero in SP5_HEROES.heroes if hero.enabled)
 SHAN_ENABLED = tuple(hero.id for hero in SHAN_HEROES.heroes if hero.enabled)
+SHIJI_ZHI_ENABLED = tuple(
+    hero.id for hero in SHIJI_ZHI_HEROES.heroes if hero.enabled
+)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -286,9 +293,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 100 → 102、真名 66 → 67：庞统真名已在池、刘琦是新的；装备 22 不变）。
     # shan-baozuoci 票 04：山包·左慈两技 ⇒ 215 → 217、武将技 191 → 193
     # （启用版本 102 → 103、真名 67 → 68：左慈是新的；装备 22 不变）。
-    assert len(CATALOG) == 217
+    assert len(CATALOG) == 221
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 193
+    assert len(heroes) == 197
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -312,6 +319,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             JIE_YIJIANG_2014_MOBILE_HEROES,
             SP5_HEROES,
             SHAN_HEROES,
+            SHIJI_ZHI_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -331,7 +339,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 181 → 182。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技 ⇒ 182 → 186。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统三技 + 刘琦两技 ⇒ 186 → 191。
-    assert len(expected) == 193
+    assert len(expected) == 197
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -352,6 +360,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(JIE_YIJIANG_2014_MOBILE_ENABLED)
         | set(SP5_ENABLED)
         | set(SHAN_ENABLED)
+        | set(SHIJI_ZHI_ENABLED)
     )
     for definition in CATALOG.values():
         if definition.carrier.value != "HERO":
@@ -1739,6 +1748,12 @@ def _probe_state_for(skill_id: str) -> GameState:
         return state
     if skill_id == "hero.feng_yujin.dingluan":
         return _dingluan_probe_state()
+    if skill_id == "hero.shen_guojia.tianyi":
+        # 正面对照：所有存活角色本局都受到过伤害（整局座位事实，框架票 03）。
+        state = _probe_state()
+        for player in state.players:
+            player.damage_taken_ever = True
+        return state
     if skill_id == "hero.lukang_mobile.poshi":
         # 正面对照：ME 体力 1（条件「或体力值为1」成立；装备栏不必全封）。
         return build_state(
@@ -1858,6 +1873,9 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.pangtong_mobile.niepan": (_HookFrame(target=ME),),
         # lukang-mobile 票 01：陆抗移动版【破势】——**我的**准备阶段（帧的 source 是我）。
         "hero.lukang_mobile.poshi": (_HookFrame(source=ME),),
+        # shiji-zhi 票 01：神郭嘉【天翊】——**我的**准备阶段（帧的 source 是我）；
+        # 额外状态前提（所有存活角色受过伤害）见 :func:`_tianyi_probe_state` 一类局面。
+        "hero.shen_guojia.tianyi": (_HookFrame(source=ME),),
         # huo-taishici-xunyu 票 02：荀彧【节命】——受伤的是我（逐点触发的 B 族同形）。
         "hero.xunyu.jieming": (_HookFrame(target=ME),),
         # huo-shenzhouyu-mobile 票 01/03：神周瑜移动版【琴音】——帧的 source 是我（我的
@@ -2698,7 +2716,12 @@ SKILL_SHAPE: dict[str, str] = {
     # shan-baozuoci 票 04：左慈两技（化身 = 三条钩子 + 一条选项流水线；新生 = 逐点钩子）。
     "hero.zuoci.huashen": "触发技能",
     "hero.zuoci.xinsheng": "零步技能",
-
+    # shiji-zhi 票 01：神郭嘉四条。三条 A 族主动技是**零步流水线**（段机住 effect），
+    # 机械形态落在「零步技能」格（与【苦肉】同一条判据）；【天翊】按类型单列「觉醒技」格。
+    "hero.shen_guojia.huishi": "零步技能",
+    "hero.shen_guojia.hui_shi": "零步技能",
+    "hero.shen_guojia.zuoxing": "零步技能",
+    "hero.shen_guojia.tianyi": "觉醒技",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2754,7 +2777,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # sp5-pangtong-liuqi 票 01 / 02：送丧（`DEATH_ON` + 零步）、展骥（锁定 + 零步→锁定格）、
     # 屯江（`PHASE_FINISH` + 零步）⇒ 41 → 43。
     # shan-baozuoci 票 04：左慈【新生】（逐点钩子 + 零步流水线）⇒ 43 → 44。
-    "零步技能": 44,
+    # shiji-zhi 票 01：神郭嘉【慧识】/【辉逝】/☆【佐幸】是零步主动技（A 族骨架 + 手写
+    # 段机）⇒ 44 → 47。
+    "零步技能": 47,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2781,7 +2806,8 @@ SHAPE_COUNTS: dict[str, int] = {
     "能力位": 4,
     "候选生成器": 1,
     "候选提供者": 3,
-    "觉醒技": 3,
+    # shiji-zhi 票 01：神郭嘉【天翊】（觉醒技 + 零步流水线）⇒ 3 → 4。
+    "觉醒技": 4,
 }
 """每格的条数（spec §4.4；M6 票 18 后
 17 + 13 + 26 + 3 + 13 + 30 + 13 + 2 + 1 + 5 + 2 = 125）。
@@ -2989,7 +3015,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步技能）⇒ 205 → 206。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技（触发 2 / 锁定 2）⇒ 206 → 210。
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 217
+    assert len(SKILL_SHAPE) == len(CATALOG) == 221
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3205,7 +3231,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # 步骤语言形态 ⇒ 内 116 → 120；展骥是锁定技 ⇒ 外 94 → 95。
     # shan-baozuoci 票 04：左慈【化身】（一条选项流水线）/【新生】（零步）都在步骤语言内
     # ⇒ 内 120 → 122（外 95 不变）。
-    assert len(inside) == 122
+    assert len(inside) == 126
     assert len(outside) == 95
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

@@ -218,6 +218,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     jie_yijiang_2014_mobile = load_heroes("jie_yijiang_2014_mobile")
     sp5 = load_heroes("sp5")
     shan = load_heroes("shan")
+    shiji_zhi = load_heroes("shiji_zhi")
     expected = tuple(
         hero.id
         for table in (
@@ -237,6 +238,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
             jie_yijiang_2014_mobile,
             sp5,
             shan,
+            shiji_zhi,
         )
         for hero in table.heroes
         if hero.enabled
@@ -255,7 +257,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统（真名「庞统」已在池里）+ 刘琦（新真名）
     # ⇒ 100 → 102。
     # shan-baozuoci 票 04：山包·左慈（新真名）⇒ 102 → 103。
-    assert len(expected) == 103
+    assert len(expected) == 104
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -324,7 +326,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     # （界沮授移动版）⇒ 98。
     # sp5-pangtong-liuqi：加 SP庞统 / 刘琦 ⇒ 102；shan-baozuoci 票 04：加左慈 ⇒ 103。
     ids = enabled_hero_ids()
-    assert len(ids) == 103
+    assert len(ids) == 104
 
     for hero_id in ids:
         heroes = _heroes_of(

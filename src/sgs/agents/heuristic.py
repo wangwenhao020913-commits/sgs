@@ -2046,6 +2046,10 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         #   （约 1.4）。两者接近，摸牌那格分略高：X 越大手牌收益越大，而弃牌那格的分随 X 走低。
         "changyi:draw": 1.2,
         "changyi:punish": 0.8,
+        # shiji-zhi 票 01：神郭嘉【慧识】的两处单选项——「是否继续」= 白拿一张判定牌（且
+        # 可能 +1 上限），恒为正；「是否把判定牌交给一名角色」= 送牌收益，保守给正。
+        "huishi_continue": 2.0,
+        "huishi_give": 1.5,
         # 界魏延移动版【狂骨】（jie-feng-batch 票 02）：每点二选一，必答。
         # 「摸一张牌」永不空转（满体力时回复是零收益），故略高于回复。
         "kuanggu_heal": 1.5,
@@ -4633,6 +4637,28 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.zuoci.xinsheng": (
         _constant(2.0),
         "受伤后随机获得一张新的化身牌（② 的候选池变大）：没有代价 ⇒ 恒发动为正",
+    ),
+    # shiji-zhi 票 01：始计篇-智包·神郭嘉（四条；A 族主动技不产生"是否发动"询问，
+    # 这里表示"值得点"的常量分，并写清代价 / 读哪些字段）。
+    "hero.shen_guojia.huishi": (
+        _constant(3.0),
+        "出牌阶段限一次：判定 + 花色不重复就 +1 体力上限，最后把全部判定牌交人；"
+        "只有'收牌人手牌全场最多'才反扣 1 上限。代价是白送判定牌——AI 这一档不细算"
+        "收牌人，按'多摸 1~4 张且涨上限'记正分（读 view 只用公开面：上限 < 10 才出现）",
+    ),
+    "hero.shen_guojia.hui_shi": (
+        _constant(2.4),
+        "限定技：帮有未触发觉醒技的角色立即觉醒，否则其摸四张；两支都自减 2 上限。"
+        "整局一次、收益 = 一次觉醒或 4 张牌 ⇒ 恒发动为正（读 view 只用公开面）",
+    ),
+    "hero.shen_guojia.tianyi": (
+        _constant(0.0),
+        "觉醒技：条件满足时强制发动（不问），效果纯收益（+2 上限 / 回复 1 / 授予 ☆佐幸）",
+    ),
+    "hero.shen_guojia.zuoxing": (
+        _constant(2.8),
+        "出牌阶段限一次：花神郭嘉 1 点体力上限换一张普通锦囊的'视为使用'——"
+        "白得的锦囊（神郭嘉上限 > 1 才出现）⇒ 恒发动为正（读 view 只用公开面）",
     ),
     "hero.tao_caocao.changyi": (
         _constant(2.0),

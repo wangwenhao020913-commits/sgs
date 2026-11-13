@@ -64,8 +64,10 @@ SEAT_CALLERS = (
     "skills/shen_zhugeliang.py",  # 神诸葛亮【大雾】
     "skills/negation.py",  # 界甘宁【奋威】
     "skills/phase_body.py",  # 界顾雍【秉壹】（本模板的首个载体）
+    # shiji-zhi 票 01：神郭嘉☆【佐幸】——所选普通锦囊是【铁索连环】时按 1~2 名目标多选。
+    "skills/active.py",
 )
-"""``ask_seats`` 的**全部**出现处（定义 + 五个调用点）。多一处 / 少一处都要改这张表。"""
+"""``ask_seats`` 的**全部**出现处（定义 + 六个调用点）。多一处 / 少一处都要改这张表。"""
 
 
 def _source(relative: str) -> str:
@@ -97,7 +99,7 @@ def test_ask_seats_is_the_only_multi_seat_entry() -> None:
         if "ask_seats(" in path.read_text(encoding="utf-8")
     }
     assert set(mentions) == set(SEAT_CALLERS), (
-        "``ask_seats`` 只许这五个消费者：多一处 = 又长出一份手写座位多选；"
+        "``ask_seats`` 只许这几个消费者：多一处 = 又长出一份手写座位多选；"
         f"实得 {sorted(mentions)}"
     )
     assert all(count == 1 for count in mentions.values()), (

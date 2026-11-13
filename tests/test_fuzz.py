@@ -129,6 +129,13 @@ class _FuzzEngine(Engine):
 
     game_seed: int = 0
     game_players: int = 2
+    overmax_allowed: set[int] = set()
+    """体**合法**高于上限的座位（减上限前不是满体力 ⇒ 规则 §4.15 不同步下调）。
+
+    规则只要求"减上限前**满体力**"时把体力值同步下调；因此「先受伤、再被一次减掉
+    多点上限」（神郭嘉【辉逝】-2 / 【慧识】-1 一类）会留下 ``hp > hp_max`` 的**持久**
+    状态，直到体力再变。集合在 :func:`_check_live_invariants` 里按记录维护、每局重置。
+    """
 
     def _emit(self, record: JournalRecord) -> None:
         super()._emit(record)
@@ -179,6 +186,7 @@ def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _Fuz
     )
     engine.game_seed = seed
     engine.game_players = players
+    engine.overmax_allowed = set()
     # 开局那几条记录（初次洗牌 + 发牌）由 ``build_initial`` 直接构造、不走 ``_emit``，
     # 故在这里补一次活状态检查；其后每条记录由 ``_emit`` 覆写逐一检查。
     _check_live_invariants(engine, None)
@@ -256,7 +264,26 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         # 再落 ``hp_change`` 两条 delta。检查器跑在**每条记录之后**，在两条之间会看到
         # ``hp == 旧上限 > 新上限``——这是上一条记录自己声明的待调整状态，不是漏洞。
         # 判据收窄到"上一条记录恰为该座的 hp_max_change、且它的 before == 当前 hp"。
-        if player.hp > player.hp_max and not _hp_clamp_pending(player, record):
+        # 规则 §4.15 只要求"减上限前**满体力**"时同步下调体力；减前不满体力 ⇒ 体力保持
+        # 不变、可以**持久**高于新上限（神郭嘉【辉逝】一次 -2 就会留下这种状态）。故记一笔
+        # "这个座位的超上限是减上限造成的"，直到体力回到上限以内（或再变化）。满体力那一档
+        # 的**逐记录瞬态**仍由 :func:`_hp_clamp_pending` 单独放行。
+        if (
+            record is not None
+            and getattr(record, "kind", None) == "delta"
+            and getattr(record, "delta_type", None) == "hp_max_change"
+            and record.seat == player.seat
+            and record.after < record.before
+            and record.before > player.hp
+        ):
+            engine.overmax_allowed.add(player.seat)
+        if player.hp <= player.hp_max:
+            engine.overmax_allowed.discard(player.seat)
+        if (
+            player.hp > player.hp_max
+            and player.seat not in engine.overmax_allowed
+            and not _hp_clamp_pending(player, record)
+        ):
             _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} 超过上限 {player.hp_max}")
         if player.hp < 0 and player.alive and not _hp_may_be_negative(engine):
             _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} < 0 却没有伤害 / 濒死帧在栈上")

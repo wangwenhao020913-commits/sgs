@@ -2044,7 +2044,11 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
         base=frame.data["amount"],
     )
     player = host.state.player(target)
-    host.apply_hp_change(frame, target, min(player.hp + amount, player.hp_max))
+    # **已经高于上限**的体力（先受伤再被减多点上限；规则 §4.15 不同步下调）回复时不得被
+    # 「夹到上限」**压低**——夹取只在低于上限时生效（shiji-zhi 票 01 的【辉逝】暴露）。
+    host.apply_hp_change(
+        frame, target, max(player.hp, min(player.hp + amount, player.hp_max))
+    )
     return None
 
 

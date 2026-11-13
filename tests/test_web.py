@@ -532,7 +532,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # 已在池里）⇒ 97 → 98 / 64 不变。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统（真名已在池）+ 刘琦（新真名）⇒ 102 / 67；
     # shan-baozuoci 票 04：山包·左慈（新真名）⇒ 103 / 68。
-    assert len(flat) == 103 and len(catalog) == 68, (
+    assert len(flat) == 104 and len(catalog) == 69, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -9371,7 +9371,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 205 → 206。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统 3 + 刘琦 2 ⇒ 215；
     # shan-baozuoci 票 04：山包·左慈 2 ⇒ 217。
-    assert len(expected_skills) == 217, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 221, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

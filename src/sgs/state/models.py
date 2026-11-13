@@ -678,6 +678,17 @@ class Player(BaseModel):
     作用域 = **本回合**（谁的回合都算）：回合末由 :meth:`Engine._clear_turn_effects` 把所有
     座位的这一位清零。**不发 delta**：没有 JSON 读者，回放按同一条伤害结算重建。
     """
+    damage_taken_ever: bool = False
+    """**本局游戏中**是否受到过伤害（shiji-zhi 票 03；神郭嘉【天翊】的觉醒条件）。
+
+    与 :attr:`damage_taken_this_turn` **同一条写点、同一条判据**（:meth:`Engine.note_damage_taken`
+    在数值定稿且 > 0、未被防止时写），唯一差别是**永不复位**：不进
+    :meth:`Engine._clear_turn_effects` 的清理清单，整局只为真。护甲吸收也算（写点在护甲扣减
+    之前）；无来源伤害（【闪电】一类）照样算；一次 2 点伤害只记"受过"，不计数。
+
+    **不发 delta、不进投影**：没有 JSON 读者（伤害事件本身是公开记录、可重建），故
+    47 条金录像逐字节不变；它也不进 ``PlayerView`` / ``PlayerPublic``（信息通道不变）。
+    """
     jijiang_locked: bool = False
     """【激将】的**机械锁**：本座位主动发动过、且此后还没**使用或打出**【杀】（票 20）。
 

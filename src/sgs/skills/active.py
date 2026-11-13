@@ -50,8 +50,10 @@ from sgs.data import (
     Suit,
     card_category,
     color_of_suit,
+    hero_by_id,
     hero_card_skill_ids,
     hero_skill_id,
+    hero_skill_names,
 )
 from sgs.effects import (
     CARD_BEHAVIORS,
@@ -74,6 +76,7 @@ from sgs.effects import (
     needs_designation,
     satisfies_required,
     targets_within_attack_range,
+    UseContext,
 )
 from sgs.resolution import Control, Tag, add_tag
 from sgs.state import (
@@ -101,6 +104,7 @@ from sgs.timing import Timing
 
 from .catalog import (
     SKILL_JUDGMENT_CARD_KEY,
+    awakening_skill_awakened,
     HeroSkillDecl,
     Hook,
     ProviderWindows,
@@ -154,6 +158,7 @@ __all__ = [
     "active_skill_definitions",
     "register_activation",
     "run_flow",
+    "run_forced_awakening",
 ]
 
 CANDIDATE_CAP = 128
@@ -7607,7 +7612,667 @@ _GUOLUN = ActiveSkill(
 """SP庞统【过论】的声明（A 族；不翻预发动——次步读**别人手牌**的隐藏面，清单渲不出）。"""
 
 
+# ---------------------------------------------------------------------------
+# 始计篇-智包：神郭嘉（shiji-zhi 票 01；用户 2026-11-14 逐条签 Q1–Q13）
+#
+#     慧识
+#       出牌阶段限一次，若你的体力上限小于10，你可以进行一次判定：若判定结果与本阶段以此法
+#       进行判定的结果的花色均不同，且此时你的体力上限小于10，你可以加1点体力上限并重复
+#       此流程。然后你可以将所有生效的判定牌交给一名角色，若其手牌数为全场最多，你减1点
+#       体力上限。
+#     辉逝
+#       限定技，出牌阶段，你可以选择一名角色，若其有未触发的觉醒技且你的体力上限不小于
+#       存活角色数，则你令其视为满足其一个觉醒技的觉醒条件；否则其摸四张牌。若如此做，
+#       你减2点体力上限。
+#     ☆ 佐幸
+#       出牌阶段限一次，若神郭嘉存活且体力上限大于1，你可以令神郭嘉减1点体力上限，然后
+#       你视为使用一张普通锦囊牌。
+#
+# 口径（票 01 §0.2 的签字表）：
+#
+# - **慧识的判定过程是连续的**：判定牌**留在处理区（= 效果区）**直到流程终止
+#   （`open_skill_judgment(..., keep_card=True)`，框架票 02），然后神郭嘉**一次性获得全部**
+#   判定牌（**含最后那张相同花色的**）。**第一张判定牌不增加体力上限**：+1 只随"重复"发生；
+#   花色重复 / 上限到 10 ⇒ 流程终止。
+# - 「手牌数为全场最多」= 交给之后现算、只看存活、**并列算最多**（镜像 `06` L1080③）；
+#   交给自己的也判（`06` L982「交给一名角色」含自己）。
+# - 辉逝的「视为满足觉醒条件」= **立即结算**（框架票 05 的 `Engine.force_awakening`；
+#   用户 2026-11-14 签 A）；多个未触发觉醒技时由**发动者**选一个。
+# - 佐幸的「视为使用」= **无源纯虚拟牌**（用户口径："视为"是虚拟牌、"当作"才是转化）；
+#   代价**只认「神郭嘉」这个角色**——谁持有佐幸都一样（Q11）。
+# - 三条技能都**不翻预发动**：慧识 / 佐幸是零步流水线（清单渲不出），辉逝的首步是座位步且
+#   分支依赖目标（`shapes.md` §4 的准入表）。
+
+SHEN_GUOJIA = "shen_guojia"
+"""神郭嘉的武将 id（数据面 = `heroes.shiji_zhi.json`）。"""
+
+HUISHI = hero_skill_id(SHEN_GUOJIA, "huishi")
+"""【慧识】的全限定技能 id。"""
+
+HUI_SHI = hero_skill_id(SHEN_GUOJIA, "hui_shi")
+"""【辉逝】的全限定技能 id（与【慧识】同音不同调，短 id 用下划线区分；Q12 签）。"""
+
+ZUOXING = hero_skill_id(SHEN_GUOJIA, "zuoxing")
+"""☆【佐幸】的全限定技能 id（只经 `grant_skill` 获得；`granted_by = tianyi`）。"""
+
+HUISHI_MAX_HP = 10
+"""【慧识】的体力上限闸（「体力上限小于10」：发动前置 + 每轮 "+1" 的前置）。"""
+
+_HUISHI_CONTINUE = "huishi_continue"
+"""【慧识】两处"是否继续"问的唯一选项（单选项 + `Pass`；标签读不到，文案在
+``step_requirements`` 里，见 `edge-cases.md` O4）。"""
+
+_HUISHI_OPTIONS: tuple[str, ...] = (_HUISHI_CONTINUE,)
+
+_HUISHI_GIVE = "huishi_give"
+"""【慧识】"是否把判定牌交给一名角色"问的唯一选项（同上）。"""
+
+_HUISHI_GIVE_OPTIONS: tuple[str, ...] = (_HUISHI_GIVE,)
+
+_HUISHI_STAGE = "huishi:stage"
+"""帧私有：段机游标——``judgment``（该压下一轮判定）/ ``resolve``（读结果）/
+``ask-repeat`` / ``ask-plus`` / ``maxlife`` / ``gain`` / ``ask-give`` / ``give-seat`` /
+``reduce`` / ``done``。"""
+
+_HUISHI_ROUND = "huishi:round"
+"""帧私有：当前是第几张判定（0 起；只用于询问标识与"第一张"判据）。"""
+
+_HUISHI_SUITS = "huishi:suits"
+"""帧私有：**本次发动内**已经判出的花色序列（第一张是序列首项，不参与"均不同"比较）。"""
+
+_HUISHI_CARDS = "huishi:cards"
+"""帧私有：本次发动内判出的全部判定牌（`CardRef` 元组；含最后那张相同花色的）。"""
+
+_HUISHI_RECEIVER = "huishi:receiver"
+"""帧私有：选中的收牌角色（交给之后才写）。"""
+
+_HUI_SHI_STAGE = "hui_shi:stage"
+"""【辉逝】帧私有段机游标：``ask-seat`` / ``branch`` / ``ask-skill`` / ``force`` /
+``draw`` / ``reduce`` / ``done``。"""
+
+_HUI_SHI_TARGET = "hui_shi:target"
+"""【辉逝】帧私有：选中的角色。"""
+
+_HUI_SHI_AWAKENING = "hui_shi:awakening"
+"""【辉逝】帧私有：选中的觉醒技 id（多个未触发时由发动者选一个）。"""
+
+_ZUOXING_STAGE = "zuoxing:stage"
+"""【佐幸】帧私有段机游标：``name`` / ``target`` / ``designation`` / ``use`` / ``done``。"""
+
+_ZUOXING_TYPE = "zuoxing:type"
+"""【佐幸】帧私有：选中的普通锦囊牌名 id。"""
+
+_ZUOXING_TARGETS = "zuoxing:targets"
+"""【佐幸】帧私有：选中的目标座位元组。"""
+
+_ZUOXING_DESIGNATION = "zuoxing:designation"
+"""【佐幸】帧私有：【借刀杀人】的附带指定座位。"""
+
+_HUISHI_REQUIREMENT = (
+    "出牌阶段限一次，若你的体力上限小于10，你可以进行一次判定：若判定结果与本阶段以此法"
+    "进行判定的结果的花色均不同，且此时你的体力上限小于10，你可以加1点体力上限并重复此流程。"
+    "然后你可以将所有生效的判定牌交给一名角色，若其手牌数为全场最多，你减1点体力上限。"
+)
+
+_HUI_SHI_REQUIREMENT = (
+    "限定技，出牌阶段，你可以选择一名角色，若其有未触发的觉醒技且你的体力上限不小于存活"
+    "角色数，则你令其视为满足其一个觉醒技的觉醒条件；否则其摸四张牌。若如此做，你减2点"
+    "体力上限。"
+)
+
+_ZUOXING_REQUIREMENT = (
+    "出牌阶段限一次，若神郭嘉存活且体力上限大于1，你可以令神郭嘉减1点体力上限，然后你视为"
+    "使用一张普通锦囊牌。"
+)
+
+
+def _guojia_seat(state: GameState) -> int | None:
+    """场上武将 id 为 `shen_guojia` 的座位（【佐幸】的"只认「神郭嘉」这个角色"，Q11）。"""
+    for player in state.players:
+        if player.hero == SHEN_GUOJIA:
+            return player.seat
+    return None
+
+
+def _seat_options(state: GameState, *, alive_only: bool = True) -> tuple[str, ...]:
+    """「一名角色」的候选文本（座位序；存活过滤按调用方）。"""
+    return tuple(
+        _seat_choice(player.seat)
+        for player in state.players
+        if player.alive or not alive_only
+    )
+
+
+# ---- 慧识 ----------------------------------------------------------------
+
+
+def _huishi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """【慧识】的候选闸：本人的出牌阶段、本阶段没用过、体力上限 < 10。"""
+    if not _can_offer(state, ctx):
+        return current
+    if state.player(ctx.subject).hp_max >= HUISHI_MAX_HP:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _huishi_push_judgment(host: Any, frame: Any, owner: int) -> None:
+    """压下一轮判定（判定牌**留在处理区**；框架票 02）。"""
+    frame.data[_HUISHI_STAGE] = "resolve"
+    host.open_skill_judgment(
+        frame, owner, str(frame.data["skill_id"]), keep_card=True
+    )
+
+
+def _huishi_gain_cards(host: Any, frame: Any, owner: int) -> Any:
+    """把留在处理区的判定牌一次性搬进神郭嘉手牌（用户口径：「神郭嘉获得这些判定牌」）。"""
+    cards = tuple(frame.data.get(_HUISHI_CARDS, ()))
+    moving = tuple(
+        card
+        for card in cards
+        if locate(host.state, card.card_id) == ZoneRef(Zone.PROCESSING)
+    )
+    if not moving:
+        return None
+    return host.move_in_frame(
+        frame,
+        moving,
+        to_zone=ZoneRef(Zone.HAND, owner),
+        reason=MoveReason.PUT,
+        owner=owner,
+        actor=owner,
+    )
+
+
+def _huishi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """【慧识】的**连续判定**段机（帧内游标；重入既不重做也不漏做）。
+
+    段序（全部住帧私有的 :data:`_HUISHI_STAGE`）：
+
+    1. ``judgment`` ⇒ 压一轮判定（``keep_card=True``），转 ``resolve``；
+    2. ``resolve`` ⇒ 读 `SKILL_JUDGMENT_CARD_KEY`：记花色 / 记牌；**第一张**（``round == 0``）
+       不加体力上限、只问「是否重复此流程？」；第 2 张起花色仍新且上限 < 10 ⇒ 问
+       「是否加1点体力上限并重复此流程？」；花色重复 / 上限 = 10 ⇒ 收尾；
+    3. ``maxlife`` ⇒ +1 上限（``MAXLIFE`` 帧），随后压下一轮判定；
+    4. ``gain`` ⇒ 一次性获得全部判定牌，转 ``ask-give``；
+    5. ``ask-give`` ⇒ 「是否将所有生效的判定牌交给一名角色？」，转 ``give-seat`` / ``done``；
+    6. ``give-seat`` ⇒ 点场上武将，交给；转 ``reduce``；
+    7. ``reduce`` ⇒ **交给之后**现算收牌人手牌数：全场最多（含并列）⇒ 神郭嘉 -1 上限
+       （0 档直接死亡，`06` L1149，不兜底）。
+    """
+    del answers
+    owner = int(frame.data["source"])
+    if frame.data.get(_HUISHI_STAGE) is None:
+        frame.data[_HUISHI_ROUND] = 0
+        frame.data[_HUISHI_SUITS] = ()
+        frame.data[_HUISHI_CARDS] = ()
+        frame.data[_HUISHI_STAGE] = "judgment"
+    while True:
+        stage = str(frame.data[_HUISHI_STAGE])
+        if stage == "judgment":
+            _huishi_push_judgment(host, frame, owner)
+            return "stay"
+        if stage == "resolve":
+            card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+            frame.data.pop("skill_result", None)  # 同帧的布尔结果只有本技能读，取完即弹
+            if card is None:
+                # 判定没产出（短摸平局已经收局）：没有可获得的牌，直接收尾。
+                frame.data[_HUISHI_STAGE] = "gain"
+                continue
+            suits = (*tuple(frame.data.get(_HUISHI_SUITS, ())), card.suit)
+            frame.data[_HUISHI_SUITS] = suits
+            frame.data[_HUISHI_CARDS] = (
+                *tuple(frame.data.get(_HUISHI_CARDS, ())),
+                card,
+            )
+            round_no = int(frame.data[_HUISHI_ROUND])
+            repeated = round_no >= 1 and card.suit in suits[:-1]
+            if repeated or host.state.player(owner).hp_max >= HUISHI_MAX_HP:
+                frame.data[_HUISHI_STAGE] = "gain"
+            elif round_no == 0:
+                frame.data[_HUISHI_STAGE] = "ask-repeat"
+            else:
+                frame.data[_HUISHI_STAGE] = "ask-plus"
+            continue
+        if stage in ("ask-repeat", "ask-plus"):
+            round_no = int(frame.data[_HUISHI_ROUND])
+            key = "repeat" if stage == "ask-repeat" else "repeat-plus"
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id=f"{HUISHI}:{key}:{round_no}",
+                options=_HUISHI_OPTIONS,
+                optional=True,
+            )
+            if host.suspended(answer):
+                return "stay"
+            if isinstance(answer, Pass):
+                frame.data[_HUISHI_STAGE] = "gain"
+                continue
+            frame.data[_HUISHI_ROUND] = round_no + 1
+            frame.data[_HUISHI_STAGE] = (
+                "judgment" if stage == "ask-repeat" else "maxlife"
+            )
+            continue
+        if stage == "maxlife":
+            # 「加1点体力上限并重复此流程」：+1 上限（不同步体力），再压下一轮判定。
+            host.raise_hp_max(owner, 1)
+            frame.data[_HUISHI_STAGE] = "judgment"
+            return "stay"
+        if stage == "gain":
+            frame.data[_HUISHI_STAGE] = "ask-give"
+            if _huishi_gain_cards(host, frame, owner) == "stay":
+                return "stay"
+            continue
+        if stage == "ask-give":
+            givable = tuple(
+                card
+                for card in frame.data.get(_HUISHI_CARDS, ())
+                if locate(host.state, card.card_id) == ZoneRef(Zone.HAND, owner)
+            )
+            if not givable:
+                frame.data[_HUISHI_STAGE] = "done"
+                return None
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id=f"{HUISHI}:give",
+                options=_HUISHI_GIVE_OPTIONS,
+                optional=True,
+            )
+            if host.suspended(answer):
+                return "stay"
+            frame.data[_HUISHI_STAGE] = (
+                "done" if isinstance(answer, Pass) else "give-seat"
+            )
+            continue
+        if stage == "give-seat":
+            owned = tuple(
+                card
+                for card in frame.data.get(_HUISHI_CARDS, ())
+                if locate(host.state, card.card_id) == ZoneRef(Zone.HAND, owner)
+            )
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id=f"{HUISHI}:give-seat",
+                options=_seat_options(host.state),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            receiver = _option_seat(answer)
+            frame.data[_HUISHI_RECEIVER] = receiver
+            frame.data[_HUISHI_STAGE] = "reduce"
+            if receiver != owner and _give(
+                host,
+                frame,
+                owner,
+                receiver,
+                tuple(card.card_id for card in owned),
+                key="huishi:give",
+            ) == "stay":
+                return "stay"
+            continue
+        if stage == "reduce":
+            receiver = int(frame.data.get(_HUISHI_RECEIVER, owner))
+            counts = [
+                len(player.hand) for player in host.state.players if player.alive
+            ]
+            frame.data[_HUISHI_STAGE] = "done"
+            if counts and len(host.state.player(receiver).hand) >= max(counts):
+                host.reduce_hp_max(frame, owner, 1)
+                if not host.state.player(owner).alive:
+                    return "stay"  # DEATH 帧先跑，回来时本段已收尾
+            continue
+        return None
+
+
+HUISHI_FLOW = SkillFlow(name="huishi", steps=(), effect=_huishi_effect)
+"""【慧识】的零步流水线：判定循环 / 获得 / 给牌 / 减上限全部住 ``effect`` 的段机。"""
+
+
+# ---- 辉逝 ----------------------------------------------------------------
+
+
+def _untriggered_awakenings(state: GameState, seat: int) -> tuple[str, ...]:
+    """``seat`` 身上**未触发**的觉醒技 id（未失效的存活实例；按实例解析序去重）。"""
+    found: list[str] = []
+    for instance in resolve_instances(state):
+        if instance.owner != seat:
+            continue
+        if instance.definition.skill_type is not SkillType.AWAKENING:
+            continue
+        if awakening_skill_awakened(state, seat, instance.skill_id):
+            continue
+        if instance.skill_id not in found:
+            found.append(instance.skill_id)
+    return tuple(found)
+
+
+def _awakening_option_texts(state: GameState, seat: int, skill_ids: tuple[str, ...]) -> dict[str, str]:
+    """觉醒技 id → 条目中文名（数据面 `HeroSkill.name` 的唯一读取面）。"""
+    hero = hero_by_id(state.player(seat).hero or "", pack_id=state.pack_id)
+    names = hero_skill_names(hero) if hero is not None else {}
+    return {
+        skill_id: names.get(skill_id, skill_id.rsplit(".", 1)[-1])
+        for skill_id in skill_ids
+    }
+
+
+def _hui_shi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """【辉逝】的候选闸：本人的出牌阶段（限定技的"整局已用"闸由 `_limited_offers` 另加）。"""
+    if not _can_offer(state, ctx):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _hui_shi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """【辉逝】的段机：选人 → 分支（强制觉醒 / 摸四张）→ **两支都** -2 体力上限。
+
+    分支判据 = 「其有未触发的觉醒技」**且**「神郭嘉的体力上限 ≥ 存活角色数」（结算时现算）；
+    真支 = `Engine.force_awakening`（框架票 05，立即结算；多个未触发时发动者选一个）；
+    假支 = 其摸四张牌。「若如此做」⇒ 两支都 -2 上限（`06` L1146④ 的先例；0 档直接死亡）。
+    """
+    del answers
+    owner = int(frame.data["source"])
+    stage = frame.data.get(_HUI_SHI_STAGE)
+    if stage is None:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=f"{HUI_SHI}:seat",
+            options=_seat_options(host.state),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        frame.data[_HUI_SHI_TARGET] = _option_seat(answer)
+        frame.data[_HUI_SHI_STAGE] = "branch"
+        stage = "branch"
+    if stage == "branch":
+        target = int(frame.data[_HUI_SHI_TARGET])
+        awakenings = _untriggered_awakenings(host.state, target)
+        eligible = bool(awakenings) and host.state.player(owner).hp_max >= len(
+            alive_seats(host.state)
+        )
+        if not eligible:
+            frame.data[_HUI_SHI_STAGE] = "draw"
+        elif len(awakenings) == 1:
+            frame.data[_HUI_SHI_AWAKENING] = awakenings[0]
+            frame.data[_HUI_SHI_STAGE] = "force"
+        else:
+            frame.data[_HUI_SHI_STAGE] = "ask-skill"
+        stage = str(frame.data[_HUI_SHI_STAGE])
+    if stage == "ask-skill":
+        target = int(frame.data[_HUI_SHI_TARGET])
+        awakenings = _untriggered_awakenings(host.state, target)
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=f"{HUI_SHI}:awakening",
+            options=awakenings,
+            optional=False,
+            option_texts=_awakening_option_texts(host.state, target, awakenings),
+        )
+        if host.suspended(answer):
+            return "stay"
+        frame.data[_HUI_SHI_AWAKENING] = str(answer.choice)
+        frame.data[_HUI_SHI_STAGE] = "force"
+        stage = "force"
+    if stage == "force":
+        target = int(frame.data[_HUI_SHI_TARGET])
+        skill_id = str(frame.data[_HUI_SHI_AWAKENING])
+        frame.data[_HUI_SHI_STAGE] = "reduce"
+        if host.force_awakening(target, skill_id):
+            return "stay"  # 强制觉醒子帧先跑；回来时已转 reduce
+        stage = "reduce"
+    if stage == "draw":
+        target = int(frame.data[_HUI_SHI_TARGET])
+        frame.data[_HUI_SHI_STAGE] = "reduce"
+        control = host.draw_for_hand(frame, target, 4)
+        if control == "stay":
+            return "stay"
+        if control is False:
+            return None  # 短摸 = 平局（既有 G10 口径）
+        stage = "reduce"
+    if stage == "reduce":
+        frame.data[_HUI_SHI_STAGE] = "done"
+        host.reduce_hp_max(frame, owner, 2)
+        if not host.state.player(owner).alive:
+            return "stay"  # DEATH 帧先跑
+    return None
+
+
+HUI_SHI_FLOW = SkillFlow(name="hui_shi", steps=(), effect=_hui_shi_effect)
+"""【辉逝】的零步流水线（限定技；座位 / 分支 / 强制觉醒 / 摸牌 / 减上限全在 effect）。"""
+
+
+# ---- ☆佐幸 --------------------------------------------------------------
+
+
+def _zuoxing_trick_names(state: GameState) -> dict[str, str]:
+    """此刻可声明的**普通锦囊**牌名（``显示名 → 牌型 id``）。
+
+    范围 = 本牌堆真有的普通锦囊（**排除延时锦囊**），判据与【蛊惑】的牌名表**同一份**
+    （`_guohuo_declaration_table` 只多筛掉了基本牌）：牌堆里没有的牌名不列，否则会产出一张
+    牌堆里不存在的虚拟牌（`06` L946 的"不凭空造牌堆外的牌"）。
+    """
+    return {
+        name: type_id
+        for name, type_id in _guohuo_declaration_table(state).items()
+        if card_category(state.pack_id, type_id) is Category.TRICK
+    }
+
+
+def _zuoxing_usable_names(state: GameState, holder: int) -> dict[str, str]:
+    """此刻**真的能用**的普通锦囊：逐个走真牌同一条 ``check_usable``（时机 / 禁用 / 次数 / 目标池）。
+
+    【无懈可击】是普通锦囊但**出牌阶段没有使用的时机** ⇒ ``check_usable`` 判否 ⇒ 置灰；
+    【过河拆桥】一类"全场没牌"时目标池为空 ⇒ 同样置灰（`edge-cases.md` O1 的"列出来但点不动"）。
+    """
+    usable: dict[str, str] = {}
+    for name, type_id in _zuoxing_trick_names(state).items():
+        card = pure_virtual_card(state, type_id)
+        if check_usable(state, holder, card, context=UseContext.PLAY_PHASE):
+            usable[name] = type_id
+    return usable
+
+
+def _zuoxing_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """【佐幸】的候选闸：本人出牌阶段 + 神郭嘉存活且上限 > 1 + 至少一张普通锦囊此刻能用。"""
+    if not _can_offer(state, ctx):
+        return current
+    guojia = _guojia_seat(state)
+    if guojia is None or not state.player(guojia).alive:
+        return current
+    if state.player(guojia).hp_max <= 1:
+        return current
+    if not _zuoxing_usable_names(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _zuoxing_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """【佐幸】的段机：付代价（神郭嘉 -1 上限）→ 选普通锦囊 → 目标 / 附带指定 → 视为使用。
+
+    代价**只认「神郭嘉」这个角色**（Q11）：无论谁持有佐幸，减的都是神郭嘉的体力上限；
+    「体力上限大于1」是发动前置（`06` L1149 的"兜底只来自牌面明写的前置条件"），故减后
+    恒 ≥ 1、不会减死。产物是**无源纯虚拟牌**（用户口径："视为"= 虚拟牌），花色 / 点数 /
+    颜色三者皆无（规则 §16.1）；「视为使用」仍是使用 ⇒ 计入次数、开无懈窗口（§16.4）。
+    """
+    del answers
+    holder = int(frame.data["source"])
+    guojia = _guojia_seat(host.state)
+    stage = frame.data.get(_ZUOXING_STAGE)
+    if stage is None:
+        if guojia is None:
+            return None
+        frame.data[_ZUOXING_STAGE] = "name"
+        # 代价（「你可以令神郭嘉减1点体力上限」= 发动即付；阶段指针先写再付 ⇒ 重入不重付）。
+        host.reduce_hp_max(frame, guojia, 1)
+        stage = "name"
+    if stage == "name":
+        names = _zuoxing_trick_names(host.state)
+        usable = _zuoxing_usable_names(host.state, holder)
+        answer = host.ask_option(
+            frame,
+            holder,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=f"{ZUOXING}:name",
+            options=tuple(names),
+            disabled=tuple(name for name in names if name not in usable),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        frame.data[_ZUOXING_TYPE] = names[str(answer.choice)]
+        frame.data[_ZUOXING_STAGE] = "target"
+        stage = "target"
+    if stage == "target":
+        type_id = str(frame.data[_ZUOXING_TYPE])
+        card = pure_virtual_card(host.state, type_id)
+        pool = tuple(check_targets(host.state, holder, card))
+        low, high = behavior_for(card).target_rule.target_range(len(pool))
+        chosen = frame.data.get(_ZUOXING_TARGETS)
+        if chosen is None:
+            if low <= 0 or high < low or not pool:
+                frame.data[_ZUOXING_STAGE] = "done"
+                return None
+            if low == high == len(pool):
+                targets: tuple[int, ...] = tuple(pool)
+            elif high == 1:
+                answer = host.ask_option(
+                    frame,
+                    holder,
+                    Timing.PHASE_PLAY_IDLE,
+                    skill_id=f"{ZUOXING}:target",
+                    options=tuple(_seat_choice(seat) for seat in pool),
+                    optional=False,
+                )
+                if host.suspended(answer):
+                    return "stay"
+                targets = (_option_seat(answer),)
+            else:
+                sorted_seats = host.ask_seats(
+                    frame,
+                    holder,
+                    Timing.PHASE_PLAY_IDLE,
+                    skill_id=f"{ZUOXING}:target",
+                    pool=pool,
+                    lo=low,
+                    hi=high,
+                )
+                if host.suspended(sorted_seats):
+                    return "stay"
+                if isinstance(sorted_seats, Pass) or not sorted_seats:
+                    frame.data[_ZUOXING_STAGE] = "done"
+                    return None
+                targets = tuple(sorted_seats)
+            frame.data[_ZUOXING_TARGETS] = tuple(targets)
+        frame.data[_ZUOXING_STAGE] = (
+            "designation" if needs_designation(card) else "use"
+        )
+        stage = str(frame.data[_ZUOXING_STAGE])
+    if stage == "designation":
+        card = pure_virtual_card(host.state, str(frame.data[_ZUOXING_TYPE]))
+        holder_seat = int(tuple(frame.data[_ZUOXING_TARGETS])[0])
+        pool = tuple(targets_within_attack_range(host.state, holder_seat))
+        designation = frame.data.get(_ZUOXING_DESIGNATION)
+        if designation is None:
+            if not pool:
+                frame.data[_ZUOXING_STAGE] = "done"
+                return None
+            answer = host.ask_option(
+                frame,
+                holder,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id=f"{ZUOXING}:designation",
+                options=tuple(_seat_choice(seat) for seat in pool),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            designation = _option_seat(answer)
+            frame.data[_ZUOXING_DESIGNATION] = designation
+        frame.data[_ZUOXING_STAGE] = "use"
+        stage = "use"
+    if stage == "use":
+        card = pure_virtual_card(host.state, str(frame.data[_ZUOXING_TYPE]))
+        targets = tuple(frame.data[_ZUOXING_TARGETS])
+        designation = frame.data.get(_ZUOXING_DESIGNATION)
+        frame.data[_ZUOXING_STAGE] = "done"
+        host.start_use(
+            card,
+            source=holder,
+            targets=targets,
+            designations=(int(designation),) if designation is not None else (),
+            use_timing=Timing.PHASE_PLAY_IDLE,
+        )
+        return "stay"
+    return None
+
+
+ZUOXING_FLOW = SkillFlow(name="zuoxing", steps=(), effect=_zuoxing_effect)
+"""☆【佐幸】的零步流水线（牌名闭集 / 目标 / 附带指定 / 视为使用全在 effect）。"""
+
+
+_HUISHI = ActiveSkill(
+    SHEN_GUOJIA,
+    "huishi",
+    _huishi_offers,
+    flow=HUISHI_FLOW,
+    requirement=_HUISHI_REQUIREMENT,
+    step_requirements={
+        "repeat": "是否重复此流程？（第一张判定牌不增加体力上限）",
+        "repeat-plus": "是否加1点体力上限并重复此流程？",
+        "give": "是否将所有生效的判定牌交给一名角色？",
+        "give-seat": "交给哪名角色？（可以是自己）",
+    },
+)
+
+_HUI_SHI = ActiveSkill(
+    SHEN_GUOJIA,
+    "hui_shi",
+    _hui_shi_offers,
+    flow=HUI_SHI_FLOW,
+    skill_type=SkillType.LIMITED,
+    requirement=_HUI_SHI_REQUIREMENT,
+    step_requirements={
+        "seat": "选择一名角色",
+        "awakening": "选择其一个觉醒技",
+    },
+)
+
+_ZUOXING = ActiveSkill(
+    SHEN_GUOJIA,
+    "zuoxing",
+    _zuoxing_offers,
+    flow=ZUOXING_FLOW,
+    requirement=_ZUOXING_REQUIREMENT,
+    step_requirements={
+        "name": "选择一张普通锦囊牌（此刻用不了的置灰）",
+        "target": "选择目标",
+        "designation": "其使用【杀】的目标",
+    },
+)
+"""神郭嘉的三条 A 族技能（【慧识】/【辉逝】/☆【佐幸】）。
+
+声明面与既有 A 族逐字同形：候选 = 一条 `ActivateSkill` 骨架（`CANDIDATES`），
+执行 = `run_flow`（零步 ⇒ 直接进 effect 的段机），"出牌阶段限一次"由 `_USED` 位落位、
+限定技由 `_limited_offers` + `mark_limited_skill_used` 落位。**不翻预发动**（票 01 §1 §2 §4）。
+"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
+    # 始计篇-智包·神郭嘉（shiji-zhi 票 01）：慧识 / 辉逝 / ☆佐幸。
+    _HUISHI,
+    _HUI_SHI,
+    _ZUOXING,
     # SP庞统【过论】（sp5-pangtong-liuqi 票 01）：两步（选座 → 盲挑手牌）+ 手写主体。
     _GUOLUN,
     _DIMENG,
@@ -8137,12 +8802,72 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
     )
 
 
+_FORCED_AWAKENING_DONE = "forced_awakening_done"
+"""帧私有：强制觉醒的流水线已经跑完、"已觉醒"位已落（重入不重复落位）。"""
+
+
+def run_forced_awakening(host: Any, frame: Any) -> Any:
+    """跨技能**强制觉醒**的执行体（shiji-zhi 票 05；首个载体 = 神郭嘉【辉逝】）。
+
+    入口是 :meth:`~sgs.engine.Engine.force_awakening`：它已经做完前置校验并压了一个带
+    帧私有 ``forced_awakening`` 的 ``SKILL`` 帧，``skill_id`` / ``skill_owner`` 都是**目标**。
+    本函数只做三件事：
+
+    1. 取该觉醒技定义的**唯一**一条 ``SkillFlow``（觉醒技必须恰有一条：0 条或多条都是
+       声明错误——强制觉醒要跑"哪一个效果"必须是唯一的）；
+    2. ``run_flow`` 跑它（``owner`` 显式传目标座位；重入由流水线自己的帧内缓存 / 段游标
+       保证不重做，效果里的挂起与续跑照常）；
+    3. 跑完（非 ``"stay"``）后 :func:`~sgs.skills.catalog.mark_awakening_awakened` 落
+       "已觉醒"位——与派发环 ``_mark_awakened`` 同一个写面，**不问"是否发动"**（觉醒技
+       强制）、**不判条件**（"视为满足"）。
+    """
+    from .catalog import CATALOG, mark_awakening_awakened
+
+    seat = int(frame.data["skill_owner"])
+    skill_id = str(frame.data["skill_id"])
+    if frame.data.get(_FORCED_AWAKENING_DONE):
+        return None
+    definition = CATALOG.get(skill_id)
+    if definition is None:
+        raise NotImplementedError(f"强制觉醒的技能 {skill_id!r} 不在 CATALOG 里")
+    flows: list[Any] = []
+    for hook in definition.hooks:
+        if hook.flow is None:
+            continue
+        if not any(hook.flow is seen for seen in flows):
+            flows.append(hook.flow)
+    if len(flows) != 1:
+        raise ValueError(
+            f"觉醒技 {skill_id!r} 必须恰有一条 SkillFlow（现有 {len(flows)} 条）："
+            "「强制觉醒」要跑的效果不能有歧义"
+        )
+    flow = flows[0]
+    control = run_flow(
+        host,
+        frame,
+        flow,
+        owner=seat,
+        timing=Timing.PHASE_PLAY_IDLE,
+    )
+    if control == "stay":
+        return "stay"
+    frame.data[_FORCED_AWAKENING_DONE] = True
+    mark_awakening_awakened(host.state, seat, skill_id)
+    return None
+
+
 def activate_skill(host: Any, frame: Any) -> Any:
     """SKILL 帧的唯一步骤：按 ``frame.data["skill_id"]`` 查表派发发动主体。
 
     未登记 ⇒ fail-closed（加载期"启用武将的技能引用必须闭合"已在票 01 挡住漏配；
     运行期再撞到即编程错误，不静默跳过）。
+
+    **强制觉醒**（shiji-zhi 票 05）：帧私有 ``forced_awakening`` 为真 ⇒ 走
+    :func:`run_forced_awakening`，不查 ``ACTIVATIONS``（觉醒技不是 A 族、不在那张表里）。
+    没有任何既有帧带这个键 ⇒ 既有派发路径逐字节不变。
     """
+    if frame.data.get("forced_awakening"):
+        return run_forced_awakening(host, frame)
     handler = ACTIVATIONS.get(frame.data["skill_id"])
     if handler is None:
         raise NotImplementedError(f"技能 {frame.data['skill_id']!r} 没有登记发动回调")

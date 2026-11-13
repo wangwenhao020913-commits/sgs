@@ -37,6 +37,7 @@ from support import (
     deck_excluding,
     ran_timing,
     run_queries,
+    run_turns,
 )
 
 PACK = load_content_pack(deck_profile="standard_108")
@@ -262,3 +263,59 @@ def test_every_variant_records_the_same_single_fact_with_its_own_amount(amount: 
 
     assert len(engine.damage_events) == 1
     assert engine.damage_events[0].amount == amount
+
+
+# ---------------------------------------------------------------------------
+# 票 03：本局"受到过伤害"的座位事实（神郭嘉【天翊】的觉醒条件）
+# ---------------------------------------------------------------------------
+
+
+def test_damage_taken_ever_is_set_by_the_same_write_point_as_the_turn_counter():
+    engine = _engine_with_damage()
+
+    _damage_until_end(engine)
+
+    assert engine.state.player(1).damage_taken_this_turn == 1
+    assert engine.state.player(1).damage_taken_ever is True, "整局事实与回合事实同一写点"
+    assert engine.state.player(0).damage_taken_ever is False, "没挨打的人不置位"
+
+
+def test_damage_taken_ever_ignores_prevented_and_zero_damage():
+    engine = _engine_with_damage(nature=DamageNature.NORMAL)
+    add_tag(engine.stack.top, Tag.PREVENTED)
+
+    _damage_until_end(engine)
+
+    assert engine.state.player(1).damage_taken_ever is False, "被防止的伤害不算受过伤"
+
+    engine = _engine_with_damage(amount=0)
+    _damage_until_end(engine)
+    assert engine.state.player(1).damage_taken_ever is False, "0 点伤害不算受过伤"
+
+
+def test_damage_taken_ever_counts_armor_absorbed_damage():
+    """与 ``damage_taken_this_turn`` 同判据：护甲吸收的部分不减"是否受过伤"。"""
+    engine = _engine_with_damage(armor=(0, 2))
+
+    _damage_until_end(engine)
+
+    assert engine.state.player(1).hp == 4, "伤害全被护甲吸收"
+    assert engine.state.player(1).damage_taken_this_turn == 1
+    assert engine.state.player(1).damage_taken_ever is True
+
+
+def test_damage_taken_ever_survives_turn_end():
+    """整局事实**不进** ``_clear_turn_effects``：跑完一个回合仍然为真。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4), SeatSpec(hp=4)],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    state.player(1).damage_taken_ever = True
+
+    run_turns(engine, [PassPlayer(), PassPlayer()], turns=1)
+
+    assert state.player(1).damage_taken_ever is True, "回合末不得清整局事实"
+    assert state.player(1).damage_taken_this_turn == 0, "本回合事实照旧被清"

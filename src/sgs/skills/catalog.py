@@ -1406,6 +1406,24 @@ def awakening_skill_awakened(state: GameState, seat: int, skill_id: str) -> bool
     return False
 
 
+def mark_awakening_awakened(state: GameState, seat: int, skill_id: str) -> bool:
+    """给 ``seat`` 的 ``skill_id`` 这条**觉醒技**落"已觉醒"位（shiji-zhi 票 05 的写面）。
+
+    与只读面 :func:`awakening_skill_awakened` 同姿态（``include_suppressed=True`` 解析）：
+    **失效 ≠ 未觉醒**，暂时被挡住的实例照样能落位。写入口只有两处——派发环的
+    ``_mark_awakened``（自己的时机触发）与本函数（**跨技能强制觉醒**，首个载体 = 神郭嘉
+    【辉逝】经 :meth:`~sgs.engine.Engine.force_awakening`）。没有该实例 / 不是觉醒技时
+    **零动作**并返回 ``False``（与 :func:`mark_limited_skill_used` 同一条纪律）。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            if instance.definition.skill_type is not SkillType.AWAKENING:
+                return False
+            _mark_awakened(state, instance)
+            return True
+    return False
+
+
 def same_kingdom(state: GameState, a: int, b: int) -> bool:
     """``a`` 与 ``b`` 是不是**同一势力**（票 09 §要做什么 1 的只读小工具）。
 

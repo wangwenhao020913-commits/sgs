@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "pack_id": "shiji_zhi",
+  "heroes": [
+    {
+      "id": "shen_guojia",
+      "name": "神郭嘉",
+      "true_name": "神郭嘉",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "shiji-zhi",
+      "enabled": true,
+      "skills": [
+        { "id": "huishi", "name": "慧识", "skill_type": "NORMAL" },
+        { "id": "hui_shi", "name": "辉逝", "skill_type": "LIMITED" },
+        { "id": "tianyi", "name": "天翊", "skill_type": "AWAKENING" },
+        {
+          "id": "zuoxing",
+          "name": "佐幸",
+          "skill_type": "NORMAL",
+          "granted_by": "tianyi"
+        }
+      ]
+    }
+  ]
+}
