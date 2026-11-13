@@ -8,7 +8,8 @@ r"""技能制作文档 ↔ 代码的**漂移审计**（票 23 的「制作武将
    `FrameKind` / 步骤类型 / 被武将技能用到的 `Timing`，都必须在文档里有归属。新加一个枚举成员
    而没登记 ⇒ 红。
 2. **正向（落点可核）**：文档里点名的 `文件:符号` 必须真的存在（`src/…py:name`、
-   `tools/…py:name`、`tools/sgs_web/static/…js:name`）。
+   `tools/…py:name`、`tools/sgs_web/static/…js:name`）。`diy-heroes.md` 那种不带符号的
+   **裸路径**（`src/…` / `tools/…` 等）由第 6 条用同一姿态核。
 3. **样板技能可核**：形状表里点名的样板技能 id 必须真的在 `CATALOG` 里（防止抄一个不存在的行）。
 4. **硬停判据集固定**：`skill-authoring.md` 的硬停表必须恰好是这 13 条——增删要同时改本文件，
    不许悄悄放宽"什么时候必须停"。
@@ -21,6 +22,15 @@ r"""技能制作文档 ↔ 代码的**漂移审计**（票 23 的「制作武将
 「判据版本」，于是能机械核的恰好三件：**仓内真的有它**、**引用的 § 真在**、**声明的硬停条数
 与 `STOP_IDS` 同数**。家目录的 `~/.dsh/skills/hero-skill/SKILL.md` 只是本机安装副本：仓内缺席
 时才兜底读它，而**仓内缺席本身就是红**（CI 上尤其不许 skip——那正是它漂了没人发现的原因）。
+
+**第 6 条**（diy-heroes 票 03）：`docs/agents/diy-heroes.md` 是**仓外作者的唯一入口**，按同一
+姿态进审计——文件在且够长；点名的**仓库内路径**（`src/…` / `tools/…` / `skills/…` / `docs/…` /
+`examples/…` / `tests/…` 的裸路径，散文与代码块都算）都真实存在，`(new)`（issue-tracker 的
+"还没建"约定）显式标了才跳过；7 个二级标题齐全；三向指针（`skill-authoring.md` /
+`diy-heroes.md` / `README.md`）不断；点名的四个子系统名词在源码里真的出现；且 `docs/agents/`
+下任何 `.md` 都不许再出现 `~/.dsh`（票 02 已把入口 skill 搬进仓，这条防回退）。它**不**承载
+硬停判据的条数契约：DIY 文档只**指向**停表，把第 4 条那 13 条的核对套到它身上会让两边的契约
+互相污染（票面 §1.5 的硬否定）。
 """
 
 from __future__ import annotations
@@ -497,3 +507,203 @@ def test_the_home_fallback_only_skips_outside_ci(
     with pytest.raises(pytest.skip.Exception):
         _entry_skill_text()
 
+
+
+# ---------------------------------------------------------------------------
+# 8. DIY 出口文档（`docs/agents/diy-heroes.md`）的机械审计（diy-heroes 票 03）
+# ---------------------------------------------------------------------------
+
+DIY_DOC = DOCS_DIR / "diy-heroes.md"
+"""仓外作者的**唯一入口**（票 02）：它一旦指错文件，外人第一步就撞墙。"""
+
+README = REPO_ROOT / "README.md"
+
+DIY_SECTIONS = ("两条路", "装 skill", "最小环境", "要改的文件", "常见错误", "版权边界", "提案流程")
+"""DIY 文档的**七个二级标题**：它就是这份文档的契约面，缺一个就红。"""
+
+DIY_SUBSYSTEM_NOUNS = (
+    "HERO_SUPPLEMENT_PACK_IDS",
+    "pool_census.py",
+    "hero_skill_id",
+    "CATALOG",
+)
+"""文档必须点名、且源码里必须真的有的子系统名词（反向：文档不许发明符号）。"""
+
+_HOME_REF = "~/.dsh"
+"""家目录引用（票 02 已把入口 skill 搬进仓；安装路径写 `$HOME/.dsh/` 是另一回事）。"""
+
+_DIY_PATH_RE = re.compile(
+    r"(?<![\w./-])((?:src|tools|skills|docs|examples|tests)/[A-Za-z0-9_./*+-]+)"
+)
+"""文档点名的**仓库内路径**（散文与代码块都算；`.venv/` 这类仓外路径不在扫描面里）。"""
+
+_NEW_MARKER_RE = re.compile(r"`?\s*\(new\)")
+"""`docs/agents/issue-tracker.md` 的 `(new)` 约定：**显式标了**才跳过存在性检查。"""
+
+_DIY_HEADING_RE = re.compile(r"^##\s+(.+)$", re.MULTILINE)
+
+
+def _diy_named_paths(text: str) -> tuple[tuple[str, bool], ...]:
+    """``(路径, 是否显式标了 `(new)`)``，按出现顺序去重；`<占位>` 形式不算路径。"""
+    out: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    for match in _DIY_PATH_RE.finditer(text):
+        if text.startswith(("<", ">"), match.end()):
+            continue  # `heroes.<你的包 id>.json` 这类模板不是仓内路径
+        path = match.group(1).rstrip(".,;:，。；：")
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append((path, _NEW_MARKER_RE.match(text, match.end()) is not None))
+    return tuple(out)
+
+
+def _diy_missing_paths(text: str, *, root: Path = REPO_ROOT) -> list[str]:
+    """文档点名、但在 ``root`` 下找不到的路径（显式标了 `(new)` 的跳过）。"""
+    missing: list[str] = []
+    for path, marked_new in _diy_named_paths(text):
+        if marked_new:
+            continue
+        if "*" in path:
+            if not list(root.glob(path)):
+                missing.append(path)
+        elif not (root / path).exists():
+            missing.append(path)
+    return missing
+
+
+def _diy_missing_sections(text: str) -> list[str]:
+    """文档缺的那几个二级标题（只认 `## ` 行，正文里提一嘴不算）。"""
+    headings = " | ".join(_DIY_HEADING_RE.findall(text))
+    return [section for section in DIY_SECTIONS if section not in headings]
+
+
+def _diy_missing_pointers() -> list[str]:
+    """三向指针：过程文档 ↔ DIY 文档 ↔ README（都读真文件）。"""
+    pairs = (
+        (PROCESS_DOC, "diy-heroes.md"),
+        (README, "docs/agents/diy-heroes.md"),
+        (DIY_DOC, "skill-authoring.md"),
+    )
+    return [
+        f"{_display(path)} 没指向 `{needle}`"
+        for path, needle in pairs
+        if needle not in path.read_text(encoding="utf-8")
+    ]
+
+
+def _source_contains(noun: str) -> bool:
+    """`src/` + `tools/` 的 Python 源码里有没有这个名词（文档不许发明符号）。"""
+    for base in (REPO_ROOT / "src", REPO_ROOT / "tools"):
+        for path in base.rglob("*.py"):
+            if noun in path.read_text(encoding="utf-8"):
+                return True
+    return False
+
+
+def _diy_missing_nouns(text: str) -> list[str]:
+    """文档没点名的那几个子系统名词。"""
+    return [noun for noun in DIY_SUBSYSTEM_NOUNS if noun not in text]
+
+
+def _diy_invented_nouns(nouns: tuple[str, ...] = DIY_SUBSYSTEM_NOUNS) -> list[str]:
+    """源码里根本不存在的名词（反向：文档点名了源码里没有的符号）。"""
+    return [noun for noun in nouns if not _source_contains(noun)]
+
+
+def _home_references(directory: Path) -> list[tuple[Path, list[str]]]:
+    """目录下所有 ``*.md`` 里的家目录引用：``(文件, 含引用的行)``。"""
+    offenders: list[tuple[Path, list[str]]] = []
+    for path in sorted(directory.rglob("*.md")):
+        hits = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if _HOME_REF in line
+        ]
+        if hits:
+            offenders.append((path, hits))
+    return offenders
+
+
+def test_the_diy_doc_is_audited_like_the_authoring_doc() -> None:
+    """§1.1–1.3：文件在且够长、点名的仓内路径都在、七节齐全、三向指针、名词不发明。"""
+    assert DIY_DOC.is_file(), f"缺少 DIY 出口文档：{_display(DIY_DOC)}（票 02 的交付）"
+    text = DIY_DOC.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert len(lines) >= MIN_LINES, (
+        f"{_display(DIY_DOC)} 只有 {len(lines)} 行（< {MIN_LINES}）：空壳不算文档"
+    )
+
+    problems = [
+        *(f"点名的仓内路径不存在：{path}" for path in _diy_missing_paths(text)),
+        *(f"缺少二级标题：{section}" for section in _diy_missing_sections(text)),
+        *_diy_missing_pointers(),
+        *(f"文档没点名子系统名词：{noun}" for noun in _diy_missing_nouns(text)),
+        *(f"文档点名了源码里没有的名词：{noun}" for noun in _diy_invented_nouns()),
+    ]
+    assert not problems, "diy-heroes.md 的机械审计不过：\n" + "\n".join(
+        f"  - {problem}" for problem in problems
+    )
+
+
+def test_no_home_directory_reference_in_agent_docs() -> None:
+    """`docs/agents/` 下的文档不许再出现 `~/.dsh`：入口 skill 已进仓，家目录只是本机安装副本。"""
+    offenders = _home_references(DOCS_DIR)
+    assert not offenders, "这些 agent 文档还写着家目录路径（票 02 已把入口 skill 搬进仓）：\n" + (
+        "\n".join(f"  - {_display(path)}: {hits[0]}" for path, hits in offenders)
+    )
+
+
+def _broken_diy_copy(directory: Path, text: str) -> Path:
+    """在 ``directory`` 里落一份坏掉的 DIY 文档（反向自检的靶子）。"""
+    broken = directory / "diy-heroes.md"
+    broken.write_text(text, encoding="utf-8")
+    return broken
+
+
+def test_a_diy_doc_missing_a_section_is_red(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向自检①：少一个二级标题 ⇒ 审计必须红，而且报的是缺的那一节。"""
+    text = DIY_DOC.read_text(encoding="utf-8").replace("## 5. 常见错误", "## 5. 排错")
+    monkeypatch.setattr(sys.modules[__name__], "DIY_DOC", _broken_diy_copy(tmp_path, text))
+    with pytest.raises(AssertionError, match="常见错误"):
+        test_the_diy_doc_is_audited_like_the_authoring_doc()
+
+
+def test_a_diy_doc_pointing_at_a_nonexistent_path_is_red(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向自检②：点一个不存在的仓内路径 ⇒ 审计必须红，而且报的是那条路径。"""
+    text = DIY_DOC.read_text(encoding="utf-8") + "\n见 `src/sgs/data/no_such_module.py`。\n"
+    monkeypatch.setattr(sys.modules[__name__], "DIY_DOC", _broken_diy_copy(tmp_path, text))
+    with pytest.raises(AssertionError, match="no_such_module"):
+        test_the_diy_doc_is_audited_like_the_authoring_doc()
+
+
+def test_the_diy_path_audit_skips_only_paths_marked_new() -> None:
+    """`(new)` 是"还没建的文件"的约定：**显式标了**才跳过，不标就必须真的在。"""
+    text = DIY_DOC.read_text(encoding="utf-8")
+    pending = "examples/diy-hero/not_created_yet.md"
+    assert _diy_missing_paths(f"{text}\n  `{pending}` (new)\n") == []
+    assert _diy_missing_paths(f"{text}\n  `{pending}`\n") == [pending]
+
+
+def test_the_diy_noun_audit_bites_on_an_invented_symbol() -> None:
+    """覆盖元断言：源码里根本不存在的名词必须被报出来（防"永远绿"）。"""
+    assert _diy_invented_nouns(("NO_SUCH_SYMBOL__",)) == ["NO_SUCH_SYMBOL__"]
+    assert _diy_invented_nouns(("CATALOG",)) == []
+
+
+def test_the_home_directory_ban_bites_on_a_tmp_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向自检③：tmp 目录里放一份带 `~/.dsh/` 的文档 ⇒ 家目录检查必须红。"""
+    (tmp_path / "diy-heroes.md").write_text(
+        DIY_DOC.read_text(encoding="utf-8")
+        + "\n家目录副本：`~/.dsh/skills/hero-skill/SKILL.md`。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "DOCS_DIR", tmp_path)
+    with pytest.raises(AssertionError, match=r"~/.dsh"):
+        test_no_home_directory_reference_in_agent_docs()
