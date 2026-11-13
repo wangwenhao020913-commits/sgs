@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将池构成清单（只读）：把「加一个武将必然要改的那些数字」一次列清并逐站点对账。
+"""将池构成清单（默认可读）：把「加一个武将必然要改的那些数字」一次列清并逐站点对账。
 
 为什么有这条命令（设计依据是 ``huo-wolong-yanliang`` 批的收口复盘，工单住在 gitignored 的
 ``.scratch/pool-census/``）：那批加 2 个武将时，第一次全量门禁的 12 条红里有 **9 条同源**——
@@ -9,10 +9,18 @@
 
     .venv/bin/python tools/pool_census.py            # 人看：派生量 + 逐站点对账
     .venv/bin/python tools/pool_census.py --check    # 机器：任一不一致 ⇒ 非零退出
+    .venv/bin/python tools/pool_census.py --write    # 把能机械定位的站点数字改对，再用 --check 复核
     .venv/bin/python tools/pool_census.py --json     # 同一份事实，机器可读
 
-它**只读**：不改文件、不自动改写断言（**没有** ``--write``）。这些计数是**人签的内容快照**，
-``SHAPE_COUNTS`` 与 ``SKILL_SHAPE`` 互为见证——派生掉会静默通过（见票 §「为什么不自动改写」）。
+它**默认只读**：不带参数 / ``--check`` / ``--json`` 都不碰文件；``--write`` 是**显式 opt-in**，
+且**只**改 :data:`SITES` 能机械定位的**站点数字**（数字 / 张量里的字面量——纯复述派生量的冗余，
+写出它们掩盖不了形态错误）。**任何登记表都不写**，四张人签表（``SHAPE_COUNTS`` /
+``SKILL_SHAPE`` / ``SKILL_FILES`` / ``STEP_LANGUAGE_SHAPES``）尤其**永不**落盘：
+``SHAPE_COUNTS`` 与 ``SKILL_SHAPE`` 互为见证——``huo-wolong-yanliang`` 的【双雄】同时满足
+「零步」与「转化」两个机械判据，正是靠**两处独立手写**才在评审时被看见，改成派生值就会静默通过。
+对它们 ``--write`` 只打印可直接粘贴的 ``旧值 → 新值``（算得出新值的格子）并报「这里要人工改」、
+以非零退出；算不出的一律不猜（裁定见 gitignored 的
+``.scratch/diy-heroes/issues/06-pool-census-write.md`` §5）。
 
 口径（三条）：
 
@@ -57,18 +65,25 @@ from typing import Any, Final
 
 __all__ = [
     "MIN_SITE_HITS",
+    "SIGNED_TABLES",
     "SITES",
     "SITES_BY_KEY",
+    "Edit",
     "Hit",
+    "ManualNote",
     "Reading",
     "Report",
     "Site",
     "TableCheck",
+    "WritePlan",
+    "apply_plan",
     "collect",
     "derive",
     "main",
     "payload",
+    "plan_write",
     "render",
+    "render_plan",
     "scan_text",
 ]
 
@@ -232,6 +247,20 @@ SITES: Final[tuple[Site, ...]] = (
 """
 
 SITES_BY_KEY: Final[Mapping[str, Site]] = {site.key: site for site in SITES}
+
+SIGNED_TABLES: Final[tuple[str, ...]] = (
+    "SHAPE_COUNTS",
+    "SKILL_SHAPE",
+    "SKILL_FILES",
+    "STEP_LANGUAGE_SHAPES",
+)
+"""``tests/test_hero_catalog.py`` 里四张**人签**登记表：``--write`` **永不**落盘（票 06 §5）。
+
+理由是它们**互为见证**、取值是人的判断：``SHAPE_COUNTS`` 与 ``SKILL_SHAPE`` 互为见证
+（``huo-wolong-yanliang`` 票 02 的【双雄】同时满足「零步」与「转化」两个机械判据，正是靠两处
+独立手写的计数才在评审里被抓到）；``SKILL_FILES`` / ``STEP_LANGUAGE_SHAPES`` 的取值同样是人的
+判断（哪个测试文件覆盖哪条技能 / 哪五个形态在步骤语言内）。自动派生 = 把评审信号一起删掉。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +428,7 @@ def _skill_descriptions() -> frozenset[str]:
 
 @dataclass(frozen=True)
 class _Tables:
-    """``test_hero_catalog.py`` 里的四份字面量（**人签的**快照，本工具只读不改）。"""
+    """``test_hero_catalog.py`` 里的四份字面量（**人签的**快照；``--write`` 也不碰它们）。"""
 
     shape_counts: Mapping[str, int]
     shape_count_lines: Mapping[str, int]
@@ -534,11 +563,17 @@ def scan_text(
     return tuple(hits)
 
 
-def collect() -> Report:
-    """跑一次完整对账（只读）：数据面 → 登记表 → 站点。"""
+def collect(*, root: Path = ROOT) -> Report:
+    """跑一次完整对账（只读）：数据面 → 登记表 → 站点。
+
+    ``root`` 可注入：测试在一份**沙盒仓**上跑 ``--check`` / ``--write``，绝不碰真仓
+    （缺省 = 真仓根；数据面派生量始终读已安装的 ``sgs``，与 ``root`` 无关）。
+    """
+    tests_dir = root / "tests"
+    catalog_tests = tests_dir / "test_hero_catalog.py"
     try:
         facts = derive()
-        tables = _read_tables(CATALOG_TESTS)
+        tables = _read_tables(catalog_tests)
     except (OSError, SyntaxError, ValueError) as error:
         return Report(
             derived={},
@@ -582,21 +617,21 @@ def collect() -> Report:
     if unknown_metrics:
         failures.append(f"具名规则引用了不存在的派生量：{', '.join(unknown_metrics)}")
 
-    catalog_tests = _relative(CATALOG_TESTS)
+    catalog_label = _relative(catalog_tests, root=root)
     table_checks = [
-        _shape_counts_check(tables, shapes, catalog_tests, failures),
-        _skill_shape_check(tables, facts, catalog_tests, failures),
-        _skill_files_check(tables, facts, failures, notes),
+        _shape_counts_check(tables, shapes, catalog_label, failures),
+        _skill_shape_check(tables, facts, catalog_label, failures),
+        _skill_files_check(tables, facts, tests_dir, failures, notes),
         _descriptions_check(facts, failures),
         _skill_values_check(failures),
-        _closeout_seed_check(failures),
-        _pack_union_check(failures),
+        _closeout_seed_check(failures, file=tests_dir / "test_all_ai_games.py"),
+        _pack_union_check(failures, root=root),
     ]
 
     sites: list[Hit] = []
     for site in SITES:
         try:
-            text = (ROOT / site.file).read_text(encoding="utf-8")
+            text = (root / site.file).read_text(encoding="utf-8")
         except OSError as error:
             failures.append(f"扫描失效：读不到 {site.file}（{error}）")
             continue
@@ -681,12 +716,13 @@ def _skill_shape_check(
 def _skill_files_check(
     tables: _Tables,
     facts: Facts,
+    tests_dir: Path,
     failures: list[str],
     notes: list[str],
 ) -> TableCheck:
     """``SKILL_FILES``：无陈旧键 + 每条点名的测试文件真的写了那个短 id（覆盖表的既有判据）。"""
     stale = sorted(set(tables.skill_files) - facts.hero_skills)
-    unnamed = _unnamed_skill_files(tables.skill_files)
+    unnamed = _unnamed_skill_files(tables.skill_files, tests_dir)
     if stale:
         failures.append(f"SKILL_FILES 有陈旧的键（不是启用的武将技能）：{_join(stale)}")
     if unnamed:
@@ -763,13 +799,15 @@ def _key_drift(
         failures.append(f"{stale_label}：{_join(stale)}")
 
 
-def _unnamed_skill_files(skill_files: Mapping[str, str]) -> list[str]:
+def _unnamed_skill_files(
+    skill_files: Mapping[str, str], tests_dir: Path = TESTS_DIR
+) -> list[str]:
     """登记的测试文件里没有该技能短 id 的那些（与 ``test_every_enabled_hero_skill_...`` 同判据）。"""
     unnamed: list[str] = []
     for skill_id, filename in skill_files.items():
         short_id = skill_id.rsplit(".", 1)[1]
         try:
-            text = (TESTS_DIR / filename).read_text(encoding="utf-8")
+            text = (tests_dir / filename).read_text(encoding="utf-8")
         except OSError:
             unnamed.append(f"{skill_id}（找不到 {filename}）")
             continue
@@ -778,27 +816,49 @@ def _unnamed_skill_files(skill_files: Mapping[str, str]) -> list[str]:
     return unnamed
 
 
-def _skill_values_check(failures: list[str]) -> TableCheck:
+def _enabled_card_skill_ids(tables: Sequence[Any] | None = None) -> tuple[str, ...]:
+    """启用武将**牌上**每条技能条目解析出的全限定 id（**含锁定技**；缺省读全部启用的武将表）。
+
+    ``skill_id`` 显式引用（diy-heroes 票 04）时读**被引用的那个 id**——一律经
+    :func:`sgs.data.hero_card_skill_id`，不按短 id 重拼 ``hero.<本武将>.<短 id>``。原因是一处
+    真实黑洞（票 06 §4）：自制武将把技能指向别的武将（``hero.jie_guanyu.wusheng``）时，重拼会
+    得到一个不在 ``CATALOG`` 里的幽灵 id，覆盖检查于是**静默跳过**它，而不是报红。
+
+    ``tables`` 可注入：覆盖检查的单元测试用一张合成 :class:`sgs.data.HeroTable` 钉住"读的是被
+    引用 id"，不碰真仓数据；缺省 = ``load_hero_tables()``（全部启用的武将表）。
+    """
+    from sgs.data import enabled_hero_ids, hero_card_skill_id, load_hero_tables
+
+    resolved: list[str] = []
+    for table in load_hero_tables() if tables is None else tables:
+        for hero_id in enabled_hero_ids(table):
+            hero = table.by_id(hero_id)
+            for skill in hero.skills:
+                resolved.append(hero_card_skill_id(hero, skill))
+    return tuple(resolved)
+
+
+def _skill_values_check(
+    failures: list[str], tables: Sequence[Any] | None = None
+) -> TableCheck:
     """**AI 语义表**（``SKILL_VALUES``）覆盖每条启用非锁定武将技。
 
     与 ``tests/test_heuristic_ai.py::_missing_entries`` 同一判据、同一数据源（全部启用的
     武将表；锁定技跳过）；不 import 测试模块。加武将时它只在 8 分钟门禁里爆——这里 1 秒看见。
+
+    技能 id 走 :func:`_enabled_card_skill_ids`（即 ``hero_card_skill_id``）：显式 ``skill_id``
+    的条目检查的是**被引用的 id**，派生幽灵 id 会被静默跳过（票 06 §4）。
     """
     from sgs.agents.heuristic import SKILL_VALUES
-    from sgs.data import enabled_hero_ids, hero_skill_id, load_hero_tables
     from sgs.skills import CATALOG
 
     missing: list[str] = []
-    for table in load_hero_tables():
-        for hero_id in enabled_hero_ids(table):
-            hero = table.by_id(hero_id)
-            for skill in hero.skills:
-                full_id = hero_skill_id(hero.id, skill.id)
-                definition = CATALOG.get(full_id)
-                if definition is None or definition.locked:
-                    continue
-                if full_id not in SKILL_VALUES:
-                    missing.append(full_id)
+    for full_id in _enabled_card_skill_ids(tables):
+        definition = CATALOG.get(full_id)
+        if definition is None or definition.locked:
+            continue
+        if full_id not in SKILL_VALUES:
+            missing.append(full_id)
     missing.sort()
     if missing:
         failures.append(
@@ -820,14 +880,21 @@ def _skill_values_check(failures: list[str]) -> TableCheck:
     )
 
 
-def _closeout_seed_check(failures: list[str]) -> TableCheck:
+def _closeout_seed_check(
+    failures: list[str], *, file: Path | None = None
+) -> TableCheck:
     """池敏感的固定种子先只做**发将**预检（8 分钟门禁的那条判据）。
 
     池每加一个武将都会重排 RNG ⇒ 固定种子可能抽不到标准版（先例：144→145、140→141）。
     这里不跑对局（毫秒级）：跑完 / 零非法应答 / 可回放仍由 ``test_all_ai_games`` 自己钉。
+
+    ``file`` 可注入（``collect`` 传沙盒仓里的同名文件）；缺省 = 模块常量 ``AI_GAMES_TESTS``
+    （测试用 ``monkeypatch`` 改它的既有接缝因此照旧生效）。
     """
     from sgs.data import RuleConfig, hero_by_id, load_content_pack
     from sgs.engine import Engine
+
+    seed_file = AI_GAMES_TESTS if file is None else file
 
     def _broken(summary: str) -> TableCheck:
         """扫描失效的表格：**必须带一条不 ok 的读数**，否则空 hits 会被当成绿。"""
@@ -837,7 +904,7 @@ def _closeout_seed_check(failures: list[str]) -> TableCheck:
             hits=(
                 Hit(
                     label="closeout 种子发将",
-                    file=_relative(AI_GAMES_TESTS),
+                    file=_relative(seed_file),
                     line=None,
                     expression="M6_CLOSEOUT_SEEDS / M6_CLOSEOUT_PLAYERS",
                     readings=(Reading("closeout_bad", 1, 0),),
@@ -846,9 +913,9 @@ def _closeout_seed_check(failures: list[str]) -> TableCheck:
         )
 
     try:
-        text = AI_GAMES_TESTS.read_text(encoding="utf-8")
+        text = seed_file.read_text(encoding="utf-8")
     except OSError as error:
-        failures.append(f"读不到 {_relative(AI_GAMES_TESTS)}：{error}")
+        failures.append(f"读不到 {_relative(seed_file)}：{error}")
         return _broken("读不到")
     seeds_match = re.search(r"M6_CLOSEOUT_SEEDS[^=]*=\s*\(([^)]*)\)", text)
     players_match = re.search(r"M6_CLOSEOUT_PLAYERS\s*=\s*(\d+)", text)
@@ -890,7 +957,7 @@ def _closeout_seed_check(failures: list[str]) -> TableCheck:
         hits=(
             Hit(
                 label="closeout 种子发将",
-                file=_relative(AI_GAMES_TESTS),
+                file=_relative(seed_file),
                 line=None,
                 expression="每局 ≥2 版本 ∧ standard 在场 ∧ 真名互异",
                 readings=(Reading("closeout_bad", len(bad), 0),),
@@ -899,17 +966,18 @@ def _closeout_seed_check(failures: list[str]) -> TableCheck:
     )
 
 
-def _pack_union_check(failures: list[str]) -> TableCheck:
+def _pack_union_check(failures: list[str], *, root: Path = ROOT) -> TableCheck:
     """两份手抄的「全部武将表并集」必须覆盖 ``HERO_SUPPLEMENT_PACK_IDS``。
 
     新包（如 ``shan``）最容易漏：池里加了、测试的并集没加，只在门禁里红（本批 3 次本地红之一）。
+    ``root`` 与 ``collect`` 同义（缺省真仓；测试用绝对路径改 ``PACK_UNION_FILES`` 的既有接缝照旧）。
     """
     from sgs.data import HERO_SUPPLEMENT_PACK_IDS
 
     missing: list[str] = []
     for relative in PACK_UNION_FILES:
         try:
-            text = (ROOT / relative).read_text(encoding="utf-8")
+            text = (root / relative).read_text(encoding="utf-8")
         except OSError as error:
             failures.append(f"读不到 {relative}：{error}")
             continue
@@ -1094,10 +1162,10 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - _width(text))
 
 
-def _relative(path: Path) -> str:
+def _relative(path: Path, *, root: Path = ROOT) -> str:
     """相对仓库根的 posix 路径（仓外路径原样返回）。"""
     try:
-        return path.resolve().relative_to(ROOT.resolve()).as_posix()
+        return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
 
@@ -1107,24 +1175,315 @@ def _join(items: Iterable[str], separator: str = "、") -> str:
 
 
 # ---------------------------------------------------------------------------
+# 改写（--write）：只落盘站点数字；登记表只打印「可粘贴的新值 / 这里要人工改」
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Edit:
+    """一处**能机械改**的站点数字：文件、行、旧值 → 新值，以及在文件文本里的字符区间。
+
+    ``start`` / ``end`` 是**那条具名分组的区间**（不是整行）：所以同一行有两三个数字时每处各改
+    各的，也不会碰到行里的别的数字。
+    """
+
+    file: str
+    line: int
+    expression: str
+    metric: str
+    old: int
+    new: int
+    start: int
+    end: int
+
+    def location(self) -> str:
+        return f"{self.file}:{self.line}"
+
+    def describe(self) -> str:
+        return (
+            f"{self.location()}  {self.expression}  "
+            f"{_metric_label(self.metric)} {self.old} → {self.new}"
+        )
+
+
+@dataclass(frozen=True)
+class ManualNote:
+    """一处「这里要人工改」：算得出新旧值的带上 ``旧值 → 新值``，算不出的只给理由（不猜）。"""
+
+    file: str | None
+    line: int | None
+    where: str
+    reason: str
+    old: int | None = None
+    new: int | None = None
+
+    def location(self) -> str:
+        if self.file is None:
+            return ""
+        return self.file if self.line is None else f"{self.file}:{self.line}"
+
+    def describe(self) -> str:
+        parts = [part for part in (self.location(), self.where) if part]
+        if self.old is not None and self.new is not None:
+            parts.append(f"{self.old} → {self.new}")
+        return "  ".join(parts) if parts else "（数据面）"
+
+
+@dataclass(frozen=True)
+class WritePlan:
+    """一次 ``--write`` 的**计划**：能机械改的站点 + 必须人改的地方。
+
+    ``manual`` 非空 ⇒ 跑完也不可能绿（工具不猜），``--write`` 因此以非零退出。
+    """
+
+    edits: tuple[Edit, ...]
+    manual: tuple[ManualNote, ...]
+
+
+_TABLE_REASONS: Final[Mapping[str, str]] = {
+    "SHAPE_COUNTS": "人签快照（与 SKILL_SHAPE 互为见证）：工具只打印新值、不落盘",
+    "SKILL_SHAPE": "人签快照（与 SHAPE_COUNTS 互为见证）：工具只打印新值、不落盘",
+    "SKILL_FILES": "人签登记表（哪个测试文件覆盖哪条技能）：工具不猜",
+    "STEP_LANGUAGE_SHAPES": "人签登记表（哪五个形态在步骤语言内）：工具不猜",
+}
+"""四张人签表各自的理由（与 :data:`SIGNED_TABLES` 同一条裁定，票 06 §5）。"""
+
+
+def plan_write(report: Report, *, root: Path = ROOT) -> WritePlan:
+    """把一次对账结果翻成**改写计划**（只读盘、不落盘；纯规划便于单测）。
+
+    ``root`` 必须与 ``report`` 的 ``collect`` 同源，否则"该改的值"与"要改的文本"会错位。
+
+    - 站点：重扫当前文件，每个**漂移的具名分组** = 一处编辑（区间精确到那几个数字）；
+    - 扫描失效 / 读不到文件 / 同一段数字被要求改成不同的值：进 ``manual``，**不猜**；
+    - 登记表：一律进 ``manual``（:data:`SIGNED_TABLES` 四张永不落盘），能算出新值的带上
+      ``旧值 → 新值``；``report.failures`` 也原样进 ``manual``（"这里要人工改"的完整清单）。
+    """
+    derived = report.derived
+    manual: list[ManualNote] = []
+    if not derived:
+        reason = report.failures[0] if report.failures else "数据面重算失败"
+        manual.append(ManualNote(None, None, "", f"数据面 / 登记表读不了：{reason}"))
+        return WritePlan(edits=(), manual=tuple(manual))
+
+    edits: list[Edit] = []
+    for site in SITES:
+        try:
+            text = (root / site.file).read_text(encoding="utf-8")
+        except OSError as error:
+            manual.append(
+                ManualNote(site.file, None, f"{site.key}（{site.label}）", f"读不到文件：{error}")
+            )
+            continue
+        matches = list(site.pattern.finditer(text))
+        if not matches:
+            manual.append(
+                ManualNote(
+                    site.file,
+                    None,
+                    f"{site.key}（{site.label}）",
+                    "扫描失效：这条规则一处也没命中（站点结构变了 / 断言搬了家）",
+                )
+            )
+            continue
+        edits.extend(_site_edits(site, text, derived, matches=matches))
+
+    kept, ambiguous = _resolve_edits(edits)
+    for left, right in ambiguous:
+        manual.append(
+            ManualNote(
+                left.file,
+                left.line,
+                f"{left.metric} / {right.metric}",
+                f"同一段数字被两条规则要求改成不同的值（{left.new} ≠ {right.new}）",
+            )
+        )
+
+    for table in report.tables:
+        for cell in table.hits:
+            if cell.ok:
+                continue
+            drifted = [reading for reading in cell.readings if not reading.ok]
+            old = new = None
+            if len(drifted) == 1:
+                old, new = drifted[0].value, drifted[0].expected
+            detail = "；".join(reading.describe() for reading in drifted)
+            reason = _TABLE_REASONS.get(table.name, "不是能机械定位的站点数字：工具不猜")
+            manual.append(
+                ManualNote(
+                    file=cell.file,
+                    line=cell.line,
+                    where=cell.expression,
+                    reason=f"{detail}（{reason}）" if detail else reason,
+                    old=old,
+                    new=new,
+                )
+            )
+    for failure in report.failures:
+        manual.append(ManualNote(None, None, "", failure))
+
+    return WritePlan(edits=kept, manual=tuple(manual))
+
+
+def _site_edits(
+    site: Site,
+    text: str,
+    derived: Mapping[str, int],
+    *,
+    matches: Sequence[re.Match[str]],
+) -> tuple[Edit, ...]:
+    """一条具名规则在一份文件文本里的编辑：只取**漂移**的具名分组（区间 = 那几个数字）。"""
+    edits: list[Edit] = []
+    for match in matches:
+        expression = " ".join(match.group(0).strip().splitlines()[-1].split())
+        for metric, raw in match.groupdict().items():
+            if raw is None or metric not in derived:
+                continue  # 未知派生量由 collect() 记失败，这里不重复
+            expected = derived[metric]
+            if int(raw) == expected:
+                continue
+            start, end = match.span(metric)
+            edits.append(
+                Edit(
+                    file=site.file,
+                    line=text.count("\n", 0, end) + 1,
+                    expression=expression,
+                    metric=metric,
+                    old=int(raw),
+                    new=expected,
+                    start=start,
+                    end=end,
+                )
+            )
+    return tuple(edits)
+
+
+def _resolve_edits(
+    edits: Sequence[Edit],
+) -> tuple[tuple[Edit, ...], tuple[tuple[Edit, Edit], ...]]:
+    """同一段数字被多条规则命中：值相同就**去重**，值不同就**整组放弃**（不猜）。
+
+    ``catalog_total`` 的正则能在 ``len(SKILL_SHAPE) == len(CATALOG) == 217`` 里再命中一次
+    （同一条派生量、同一个应为值）⇒ 去重后只改一次；真冲突时宁可报「这里要人工改」。
+    """
+    unique: dict[tuple[int, int], Edit] = {}
+    ambiguous: list[tuple[Edit, Edit]] = []
+    for edit in edits:
+        key = (edit.start, edit.end)
+        seen = unique.get(key)
+        if seen is None:
+            unique[key] = edit
+        elif seen.new == edit.new:
+            continue
+        else:
+            ambiguous.append((seen, edit))
+            del unique[key]
+    kept = tuple(sorted(unique.values(), key=lambda edit: (edit.file, edit.line, edit.start)))
+    return kept, tuple(ambiguous)
+
+
+def apply_plan(plan: WritePlan, *, root: Path = ROOT) -> tuple[Edit, ...]:
+    """按计划落盘（**只**碰站点数字）；没有编辑时一个文件都不碰（幂等 = 零写入）。
+
+    先读齐、逐处核对区间里**还是那个旧数字**，全部通过才写——不半途留下一套改了一半的文件。
+    区间对不上 = 文件在规划之后变了 ⇒ 抛 :class:`ValueError`（由 CLI 报「这里要人工改」）。
+    """
+    grouped: dict[str, list[Edit]] = {}
+    for edit in plan.edits:
+        grouped.setdefault(edit.file, []).append(edit)
+
+    texts: dict[str, str] = {}
+    for filename in grouped:
+        try:
+            texts[filename] = (root / filename).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise ValueError(f"{filename} 读不了：{error}") from error
+    for edit in plan.edits:
+        if texts[edit.file][edit.start : edit.end] != str(edit.old):
+            raise ValueError(f"{edit.location()} 在规划之后变了（那里不再是 {edit.old}）")
+
+    for filename, edits in grouped.items():
+        text = texts[filename]
+        for edit in sorted(edits, key=lambda item: (item.start, item.end), reverse=True):
+            text = text[: edit.start] + str(edit.new) + text[edit.end:]
+        (root / filename).write_bytes(text.encode("utf-8"))
+    return plan.edits
+
+
+def render_plan(plan: WritePlan) -> str:
+    """人看的改写计划：要改的站点 + 「这里要人工改」的登记表 / 失效项。"""
+    lines = ["改写计划（--write）："]
+    if plan.edits:
+        lines.append(f"  机械改站点（{len(plan.edits)} 处）：")
+        lines.extend(f"    {edit.describe()}" for edit in plan.edits)
+    else:
+        lines.append("  机械改站点（0 处）：没有能机械定位的漂移")
+    if plan.manual:
+        lines.append(
+            f"  这里要人工改（{len(plan.manual)} 处；"
+            f"{len(SIGNED_TABLES)} 张人签登记表不落盘）："
+        )
+        lines.extend(f"    {note.describe()}  ← 这里要人工改：{note.reason}" for note in plan.manual)
+    else:
+        lines.append("  这里要人工改：0 处")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """``--check`` 的退出码就是判据：0 = 一致，1 = 有漂移 / 失败 / 扫描失效。"""
+def _write(*, root: Path = ROOT) -> int:
+    """``--write``：计划 → 打印 → 落盘 → 用 ``--check`` 的**同一判据**复核并返回它的退出码。"""
+    report = collect(root=root)
+    plan = plan_write(report, root=root)
+    print(render_plan(plan))
+
+    try:
+        applied = apply_plan(plan, root=root)
+    except (OSError, ValueError) as error:
+        print(f"  这里要人工改：{error}")
+        return 1
+    if applied:
+        files = len({edit.file for edit in applied})
+        print(f"  已改写 {len(applied)} 处站点数字（{files} 个文件）。")
+    else:
+        print("  文件零改动。")
+
+    after = collect(root=root)
+    print()
+    print(render(after))
+    return 0 if after.ok else 1
+
+
+def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
+    """``--check`` 的退出码就是判据：0 = 一致，1 = 有漂移 / 失败 / 扫描失效。
+
+    ``--write`` 只改站点数字，改完重跑**同一判据**并以它的退出码收尾（有「要人工改」= 非零）。
+    ``root`` 可注入（沙盒仓），CLI 上不暴露 —— 真仓永远是缺省值。
+    """
     parser = argparse.ArgumentParser(
-        description="将池构成清单（只读）：数据面重算 + 逐站点对账。",
+        description="将池构成清单（默认可读）：数据面重算 + 逐站点对账；--write 只改站点数字。",
     )
     parser.add_argument(
         "--check", action="store_true", help="对账不一致 ⇒ 非零退出（机器门禁用）"
     )
-    parser.add_argument(
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--write",
+        action="store_true",
+        help="把能机械定位的站点数字改对，再用 --check 复核（四张人签登记表不写）",
+    )
+    output.add_argument(
         "--json", action="store_true", help="同一份事实的机器可读输出"
     )
     args = parser.parse_args(argv)
 
-    report = collect()
+    if args.write:
+        return _write(root=root)
+
+    report = collect(root=root)
     if args.json:
         print(json.dumps(payload(report), ensure_ascii=False, indent=2))
     else:

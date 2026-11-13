@@ -108,7 +108,11 @@ bash tests/run_all.sh                                     # 唯一门禁（≈8 
 ```
 
 一致时输出以「一致（15 处站点 / 7 张登记表）」结尾、退出 0；不一致时它把**该改哪个站点的哪个
-数字**逐条列出来。票 06 计划把这一步自动化（`--write`），落地前先用手跑。
+数字**逐条列出来。票 06 起这 15 处站点可以机械同步：`.venv/bin/python tools/pool_census.py
+--write` **只**改 `SITES` 能定位的站点数字，改完自动用 `--check` 复核并以它的退出码收尾。但
+`tests/test_hero_catalog.py` 的四张人签登记表（`SHAPE_COUNTS` / `SKILL_SHAPE` / `SKILL_FILES` /
+`STEP_LANGUAGE_SHAPES`）**不会被自动改**——`--write` 只打印可粘贴的「旧值 → 新值」并报「这里要
+人工改」（`SHAPE_COUNTS` 与 `SKILL_SHAPE` 互为见证，派生掉会静默通过），带新技能的武将仍要人签。
 
 ## 5. 常见错误
 

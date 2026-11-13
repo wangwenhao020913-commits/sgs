@@ -23,9 +23,10 @@
 | `GLOSSARY.md` | 「需要牌档位」「只问合格者」「预发动」这些词的定义口径；读法与账本冲突时以账本为准 |
 | `docs/agents/ai-adaptation.md`（§1 checklist + 三张登记表） | 票里带来新的机制 / 动作面 / 信息通道时，先过一遍 checklist；登记表漏登的症状常常不是红，而是"技能发动了、什么都没发生" |
 
-工具（只读）：`tools/dump_catalog.py`（形状指纹与封闭集）、`tools/similar_skills.py`（相似技能反查）、
+工具（默认只读）：`tools/dump_catalog.py`（形状指纹与封闭集）、`tools/similar_skills.py`（相似技能反查）、
 `tools/pool_census.py`（将池构成清单：**加武将 / 改池后先跑它**，一次列出「哪些断言写死了版本 /
-真名 / 技能数 / 形态格」并逐站点对账；`--check` 不一致即非零退出，`--json` 机读）。
+真名 / 技能数 / 形态格」并逐站点对账；`--check` 不一致即非零退出，`--json` 机读；`--write`
+显式 opt-in，只改能机械定位的站点数字，四张人签登记表仍要人改）。
 
 ---
 
