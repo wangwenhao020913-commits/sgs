@@ -29,6 +29,7 @@ from typing import Any
 from sgs.data import (
     SkillType,
     hero_by_id,
+    hero_card_skill_id,
     hero_skill_id,
     load_content_pack,
     load_hero_tables,
@@ -809,7 +810,9 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
     hero = hero_by_id(player.hero, pack_id=state.pack_id) if player.hero else None
     if hero is not None:
         for skill in hero.skills:
-            skill_id = hero_skill_id(hero.id, skill.id)
+            # diy-heroes 票 04：条目可能带显式 skill_id（引用别的武将名下已登记的技能），
+            # 故派生走数据层唯一读取口，不在这里按短 id 重拼一遍。
+            skill_id = hero_card_skill_id(hero, skill)
             definition = CATALOG.get(skill_id)
             if definition is None:
                 continue

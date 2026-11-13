@@ -13,12 +13,12 @@
 
 | 路 | 你要写什么 | 要写 Python 吗 | 今天成立吗 |
 |---|---|---|---|
-| **A. 只改数据**（复用已登记的技能） | 武将表 JSON + 包注册一行 | 不写**新**技能实现 | **只成立一半**：只能复用**同一武将 id** 下已登记的技能；跨武将复用要等 **票 04**（见下面的「诚实边界」） |
+| **A. 只改数据**（复用已登记的技能） | 武将表 JSON + 包注册一行 | 不写**新**技能实现 | 成立：条目可用**显式 `skill_id`** 复用 `CATALOG` 里**任何**已登记的技能（含**别的武将**名下的，见下面的「诚实边界」） |
 | **B. 写新技能**（新的 `SkillDef`） | 技能实现 + 登记 + 数据引用 + 测试 | 要 | 成立：走 `docs/agents/skill-authoring.md` 的六问流水线 |
 
-先记住一件事：**今天没有任何一条路能「不写代码就做出一张能进池的新武将牌」**。路线 A 的
-"只改数据"指的是**不写技能实现**；而"给你的新武将挂一条别人已经写好的技能"这件事，
-要等 **票 04** 落地。
+先记住一件事：**不写新技能实现**的极限是"这张牌挂的全是已经写好的技能"——路线 A 就是这
+个极限。路线 A 的"只改数据"指的是**不写技能实现**；显式 `skill_id`（票 04）让"给你的新
+武将挂一条别人已经写好的技能"成立。想要**一条全新的机制**，仍只有路线 B。
 
 ### 路线 A：只改数据，复用已登记的技能
 
@@ -31,17 +31,21 @@
    `CATALOG` 里就报 `[hero.skill_missing]`（规则来源见 `src/sgs/data/loader.py` 的
    `hero_skill_id` 与引用校验那一段）。
 
-> **诚实边界（票 04 落地前）**：武将的技能条目今天只有**短 id**，对外技能 id 由
-> `hero_skill_id` 一处派生为 `hero.<武将 id>.<短 id>`；而技能目录 `CATALOG` 是**模块导入期**
-> 构建的闭集（`src/sgs/skills/catalog.py`）。⇒ 给你的**新**武将 id 挂任何一条**别的**武将
-> 已登记的技能（例如 `hero.jie_guanyu.wusheng`）都会在加载期报 `[hero.skill_missing]`。
-> **票 04** 才给 `HeroSkill` 加可选的显式 `skill_id` 字段（落地后这里就能写
-> `"skill_id": "hero.jie_guanyu.wusheng"`）；在那一票落地前，路线 A 只能复用**同一武将 id**
-> 下已登记的技能，**不能**"只改数据、不写代码"就做出一张能进池的新武将牌——本文与 README
-> 都不承诺后者。换句话：今天要从零做一张新武将牌，实际只有路线 B 可走。
-
-> 维护者注（改写锚点）：**票 04** 落地后把上面这一段改写成"已成立 + 显式 `skill_id` 的写法"；
-> 本段是全文唯一的时序断言，grep `票 04` 即可定位。
+> **诚实边界（diy-heroes 票 04 起）**：技能条目可以只写**短 id**，对外技能 id 由
+> `hero_skill_id` 一处派生为 `hero.<武将 id>.<短 id>`；也可以写**显式 `skill_id`**，直接指向
+> 技能目录 `CATALOG`（`src/sgs/skills/catalog.py` 的模块导入期闭集）里**任何一条已登记**的
+> 技能——包括**别的武将**名下的。把界关羽的【武圣】挂到你的自制武将牌上，条目就这么写：
+>
+> ```json
+> {"id": "wusheng", "skill_id": "hero.jie_guanyu.wusheng", "name": "武圣", "skill_type": "NORMAL"}
+> ```
+>
+> 派生只读数据层唯一的那一处（`hero_card_skill_id`）：`id` 仍是条目的行键（不参与拼
+> 全限定 id），`skill_type` 要与被引用定义的 `SkillType` 对账。显式引用**只做引用、
+> 不造新技能**，三条 fail-closed 校验：id 不在 `CATALOG` 里报
+> `[heroes.skill_id_not_found]`；类型对不上报 `[heroes.skill_id_type_mismatch]`；同一武将内
+> 两条条目解析到同一条技能报 `[heroes.skill_id_duplicate]`（**跨武将**复用同一条不算撞车）。
+> ⇒ 路线 A 今天能做出"只改数据、不写技能实现"的新武将牌；要一条**新机制**，仍须走路线 B。
 
 ### 路线 B：写新技能（新的 `SkillDef`）
 
@@ -105,7 +109,10 @@ bash tests/run_all.sh                                     # 唯一门禁（≈8 
 
 | 报什么 | 为什么 | 怎么修 |
 |---|---|---|
-| `[hero.skill_missing]` | 短 id 派生的 `hero.<武将 id>.<短 id>` 不在 `CATALOG` 里（墙 1） | 用**同一武将 id** 下已登记的短 id；新技能写 `SkillDef`（路线 B）；或等 **票 04** 的显式 `skill_id` |
+| `[hero.skill_missing]` | 短 id 派生的 `hero.<武将 id>.<短 id>` 不在 `CATALOG` 里（墙 1） | 用**同一武将 id** 下已登记的短 id；或改写显式 `skill_id` 指向 `CATALOG` 里任何已登记的技能；真要一条新技能就写 `SkillDef`（路线 B） |
+| `[heroes.skill_id_not_found]` | 显式 `skill_id` 指向的技能不在 `CATALOG` 里（拼错，或想引用的技能还没实现） | 改成真实存在的全限定 id（`tools/dump_catalog.py` 可反查）；新技能走路线 B |
+| `[heroes.skill_id_type_mismatch]` | 条目声明的 `skill_type` 与被引用定义的 `SkillType` 不一致（只对显式引用查） | 照被引用的技能改条目：限定 / 觉醒技别写成 `NORMAL` |
+| `[heroes.skill_id_duplicate]` | 同一武将的两条条目解析到**同一个**全限定技能 id | 删掉重复条目，或让它指向另一条技能（**跨武将**复用同一条不算撞车） |
 | `[heroes.placement_missing]` | 技能定义标了"往武将牌上放牌"（`SkillDef.places_on_hero_card`），数据侧没写 `placement` 三项声明 | 补 `visibility` / `return_timing` / `extra_effect` 三项（必写、无默认） |
 | `[heroes.granted_by_unknown]` | 条目的 `granted_by` 指向的短 id 不在**同一武将**的技能清单里 | 改成同武将的觉醒技 / 限定技短 id（☆ 技能只能由一次性技能获得） |
 | `[decks.unknown_profile]` | 内容包的 `/deck_profile` 不是它自己 `decks` 里的一档（改档位名没同步最常见） | 让 `/deck_profile` 等于 `decks` 的某个键；照 `src/sgs/data/files/standard.json` 的写法 |

@@ -35,6 +35,7 @@ from .models import (
     ContentPack,
     Deck,
     Hero,
+    HeroSkill,
     HeroTable,
     PlacementDecl,
     SkillType,
@@ -48,8 +49,9 @@ __all__ = [
     "KNOWN_SCHEMA_VERSIONS",
     "card_category",
     "enabled_hero_ids",
-    "hero_card_skill_ids",
     "hero_by_id",
+    "hero_card_skill_id",
+    "hero_card_skill_ids",
     "hero_placement_decl",
     "hero_placement_decls",
     "hero_skill_id",
@@ -718,6 +720,21 @@ def hero_skill_id(hero_id: str, skill_id: str) -> str:
     return f"{HERO_SKILL_PREFIX}{hero_id}.{skill_id}"
 
 
+def hero_card_skill_id(hero: Hero, skill: HeroSkill) -> str:
+    """条目**解析后**的全限定技能 id（diy-heroes 票 04 的**唯一**派生口）。
+
+    - ``skill.skill_id`` 非空 = **显式引用** ``CATALOG`` 里已登记的技能；允许指向**别的
+      武将**（自制武将复用 ``hero.jie_guanyu.wusheng``），故不再拼 ``hero.<本武将>``；
+    - 为空 = 既有缺省派生 ``hero.<武将 id>.<短 id>``（:func:`hero_skill_id`）：**行为一字
+      不改**，既有武将表逐字节走原路。
+
+    ``or`` 只写在**这一处**：引用闭合 / 放置声明 / 载体解析（:func:`hero_skill_ids` /
+    :func:`hero_card_skill_ids`）都读它，不各自再写一遍。它只回答"这一行指向哪条技能"，
+    **不判断存在性**——"指向不存在的 id"是数据错误，由 :func:`validate_heroes` fail-closed。
+    """
+    return skill.skill_id or hero_skill_id(hero.id, skill.id)
+
+
 def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
     """武将表的语义校验：结构 / 唯一性（全体）+ 技能引用（**仅启用的武将**）。
 
@@ -816,7 +833,10 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
             )
 
         seen_skills: set[str] = set()
+        seen_resolved: dict[str, str] = {}
+        """解析后的全限定技能 id → 首次出现的短 id（显式引用与缺省派生撞车用）。"""
         for skill_index, skill in enumerate(hero.skills):
+            full_id = hero_card_skill_id(hero, skill)
             if skill.id in seen_skills:
                 errors.append(
                     LoadError(
@@ -829,21 +849,78 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                 )
             seen_skills.add(skill.id)
 
-            if not hero.enabled:
-                continue
-            full_id = hero_skill_id(hero.id, skill.id)
-            definition = CATALOG.get(full_id)
-            if definition is None:
+            # diy-heroes 票 04：既有那条比的是**短 id**；显式引用能把两条不同的短 id 解析到
+            # 同一条已登记技能上，故再核一次**解析后**的 id。判据只在**同一武将内**——跨武将
+            # 复用同一条技能正是本票要开的门（两张牌各有一份【武圣】），不是撞车。
+            # 短 id 相同时既有那条已报过，不重复报（否则既有断言会多出一条）。
+            first_short_id = seen_resolved.get(full_id)
+            if first_short_id is None:
+                seen_resolved[full_id] = skill.id
+            elif first_short_id != skill.id:
                 errors.append(
                     LoadError(
                         file=file,
-                        loc=f"{base}/skills/{skill_index}/id",
-                        expected=f"技能表里存在 {full_id}（已启用武将的技能引用必须闭合）",
-                        got=repr(skill.id),
-                        rule_id="hero.skill_missing",
+                        loc=(
+                            f"{base}/skills/{skill_index}/skill_id"
+                            if skill.skill_id is not None
+                            else f"{base}/skills/{skill_index}/id"
+                        ),
+                        expected=(
+                            f"同一武将内解析后唯一的技能 id（{full_id} 已由短 id "
+                            f"{first_short_id!r} 的条目解析到）"
+                        ),
+                        got=repr(full_id),
+                        rule_id="heroes.skill_id_duplicate",
                     )
                 )
+
+            if not hero.enabled:
                 continue
+            definition = CATALOG.get(full_id)
+            if definition is None:
+                # 显式 skill_id（diy-heroes 票 04）指向不存在的技能：它不是"暂未实现"，
+                # 而是**数据错误**——显式引用的全部卖点就是"引用 CATALOG 里已有的定义"。
+                # 缺省派生沿用旧 rule_id（既有红行的指纹），显式引用另开一条。
+                if skill.skill_id is None:
+                    errors.append(
+                        LoadError(
+                            file=file,
+                            loc=f"{base}/skills/{skill_index}/id",
+                            expected=f"技能表里存在 {full_id}（已启用武将的技能引用必须闭合）",
+                            got=repr(skill.id),
+                            rule_id="hero.skill_missing",
+                        )
+                    )
+                else:
+                    errors.append(
+                        LoadError(
+                            file=file,
+                            loc=f"{base}/skills/{skill_index}/skill_id",
+                            expected=(
+                                f"技能表里存在 {skill.skill_id}"
+                                "（显式 skill_id 只能引用已登记的技能）"
+                            ),
+                            got=repr(skill.skill_id),
+                            rule_id="heroes.skill_id_not_found",
+                        )
+                    )
+                continue
+            # 数据声明 ↔ 定义对账：被引用定义的 SkillType 必须等于条目声明的 skill_type。
+            # 只对**显式引用**查——缺省派生的条目是既有数据，历来只查闭合；给它们加新判据
+            # 会改既有数据的通过面（本票不做，见票面 §1.3）。
+            if skill.skill_id is not None and definition.skill_type is not skill.skill_type:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/skill_type",
+                        expected=(
+                            f"{full_id} 的技能类型是 {definition.skill_type.value}"
+                            "（数据声明与技能定义对账）"
+                        ),
+                        got=skill.skill_type.value,
+                        rule_id="heroes.skill_id_type_mismatch",
+                    )
+                )
             # M6 票 10：放置类技能的三项声明（可见性 / 归还时机 / 附加效果）在**数据**里，
             # "这条技能会往武将牌上放牌"在**代码**里（SkillDef.places_on_hero_card）。
             # 两半必须同时成立：代码标了而数据没写 ⇒ 放置区没人负责归还；数据写了而代码
@@ -995,7 +1072,7 @@ def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str
     for table in load_hero_tables(pack_id):
         hero = table.by_id(hero_id)
         if hero is not None:
-            return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+            return tuple(hero_card_skill_id(hero, skill) for skill in hero.skills)
     return ()
 
 
@@ -1012,7 +1089,7 @@ def hero_placement_decls(pack_id: str = DEFAULT_PACK_ID) -> Mapping[str, Placeme
         for hero in table.heroes:
             for skill in hero.skills:
                 if skill.placement is not None:
-                    found[hero_skill_id(hero.id, skill.id)] = skill.placement
+                    found[hero_card_skill_id(hero, skill)] = skill.placement
     return MappingProxyType(found)
 
 
@@ -1041,7 +1118,7 @@ def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tupl
         hero = table.by_id(hero_id)
         if hero is not None:
             return tuple(
-                hero_skill_id(hero.id, skill.id)
+                hero_card_skill_id(hero, skill)
                 for skill in hero.skills
                 if skill.granted_by is None
             )

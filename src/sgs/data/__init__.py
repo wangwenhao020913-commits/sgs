@@ -38,6 +38,12 @@ M6 票 09 增**牌标签的类型登记**（:class:`CardTagType` / :class:`CardT
 :data:`CARD_TAG_TYPES` / :func:`card_tag_spec`）：标签是牌上的持久事实（D12），其读取方 /
 生存期 / 可见性 / 是否随来源实例消失四项由类型在数据层声明；未登记的类型读取时显式失败，
 故"由标签类型声明并强制登记"落在这一层，读取方（手牌计数、投影）不各写一份名单。
+
+diy-heroes 票 04 增**条目的显式技能引用**（:attr:`HeroSkill.skill_id`）与它的唯一读取面
+:func:`hero_card_skill_id`：条目可以指向 ``CATALOG`` 里**已登记**的技能（包括**别的武将**
+名下的，如自制武将复用 ``hero.jie_guanyu.wusheng``），派生仍只在数据层一处写 ``or``
+（缺省 ``None`` = 既有短 id 派生，行为一字不改）。载体解析 / 放置声明 / 引用闭合都读它；
+接入层的武将详情清单（``sgs_web.projection.seat_skill_display``）也从这里取，不按短 id 重拼。
 """
 
 from .errors import DataLoadError, LoadError
@@ -57,6 +63,7 @@ from .loader import (
     card_category,
     enabled_hero_ids,
     hero_by_id,
+    hero_card_skill_id,
     hero_card_skill_ids,
     hero_placement_decl,
     hero_placement_decls,
@@ -135,6 +142,7 @@ __all__ = (
     "deal_heroes",
     "enabled_hero_ids",
     "hero_by_id",
+    "hero_card_skill_id",
     "hero_card_skill_ids",
     "hero_placement_decl",
     "hero_placement_decls",

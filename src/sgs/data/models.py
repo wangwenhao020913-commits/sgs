@@ -222,6 +222,24 @@ class HeroSkill(_FrozenModel):
     id: str
     name: str
     skill_type: SkillType
+    skill_id: str | None = Field(default=None, min_length=1)
+    """**显式**的全限定技能 id（diy-heroes 票 04；``None`` = 缺省的短 id 派生）。
+
+    三件事说清（spec 裁定 3 的边界：只做"复用**已登记**技能"）：
+
+    - ``None``（缺省）= 既有派生规则 ``hero.<武将 id>.<短 id>``（:func:`sgs.data.hero_skill_id`），
+      **行为一字不改**——既有武将表逐字节走原路；
+    - 给了就**不看** ``id``：``id`` 仍是必填的稳定行键（``granted_by`` 指向的短 id、形状表
+      与错误 ``loc`` 都读它），只是不再参与全限定 id 的派生；
+    - 只允许引用 ``CATALOG`` 里**已登记**的技能，且允许指向**别的武将**（如
+      ``hero.jie_guanyu.wusheng``：把【武圣】挂到一张自制武将牌上）。指向不存在的 id 是
+      **数据错误**（加载期 fail-closed），不是运行期特性；条目的 ``skill_type`` 也要与
+      被引用定义的 ``SkillType`` 对账。
+
+    读取方只认 :func:`sgs.data.hero_card_skill_id` 这一处派生：载体解析 / 放置声明 /
+    引用闭合都经它，故"缺省派生 vs 显式引用"不会在读方各写一遍 ``or``。
+    """
+
     granted_by: str | None = None
     placement: PlacementDecl | None = None
     """把牌置于武将牌上的**三项声明**（M6 票 10；``None`` = 不是放置类技能）。
