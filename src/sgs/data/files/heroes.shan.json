@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "shan",
+  "heroes": [
+    {
+      "id": "zuoci",
+      "name": "左慈",
+      "true_name": "左慈",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "shan",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "huashen",
+          "name": "化身",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "xinsheng",
+          "name": "新生",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

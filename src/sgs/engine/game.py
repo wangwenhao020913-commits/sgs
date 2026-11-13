@@ -1510,6 +1510,9 @@ class Engine:
             # 阵亡清区**不派发** MOVE_AFTER（票 33 的有意缺口）⇒ 标签自身效果不触发；
             # 但"进入弃牌堆即止"的寿命仍要兑现（否则牌重洗后还带着【定乱】）。
             self._clear_enter_discard_tags(delta.cards)
+        # 死者手里的**武将牌**（左慈的化身牌）回堆 + 解除禁用（官方规则集 2018.3-16 死亡流程
+        # Ⅰ.d"將其所有武將牌置入武將牌堆"；shan-baozuoci 票 04）。没有化身牌的座位是零动作。
+        self.clear_avatar_cards(seat)
         self._clear_dead_markers(frame, seat)
         frame.data[_DEAD_CARDS_CLEARED] = True
 

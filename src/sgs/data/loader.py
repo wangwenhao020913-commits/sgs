@@ -93,6 +93,7 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "yijiang_2014",
     "jie_yijiang_2014_mobile",
     "sp5",
+    "shan",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 

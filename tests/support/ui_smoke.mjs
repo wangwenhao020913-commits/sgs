@@ -833,7 +833,8 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // yijiang-2014 票 03：一将成名-2014 加顾雍（真名「顾雍」已在池里）⇒ 真名不变、版本 96 → 97。
   // yijiang-2014-round2 票 01（W3）：界沮授移动版（真名「沮授」已在池里）⇒ 真名不变、版本 97 → 98。
   // sp5-pangtong-liuqi 票 01 / 02：SP庞统（真名「庞统」已在池）+ 刘琦（新真名）⇒ 真名 67、版本 102。
-  ui.state.heroCatalog.length === 67 && catalogVersions.length === 102,
+  // shan-baozuoci 票 04：山包·左慈（新真名）⇒ 真名 68、版本 103。
+  ui.state.heroCatalog.length === 68 && catalogVersions.length === 103,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

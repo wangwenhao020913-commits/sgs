@@ -113,6 +113,10 @@ SP5_HEROES = load_heroes("sp5")
 """**SP武将组5** 那一份（sp5-mayunlu-panjun 票 01 起）：独立系列包（OL 的 SP 武将按组
 分包），版本字段 ``sp5``、显示名**不加**版本后缀（马云騄 / 凤魄 / 马术；潘濬 / 观微 / 公清）。"""
 
+SHAN_HEROES = load_heroes("shan")
+"""**神话再临·山包**那一份（shan-baozuoci 票 04 起）：独立系列包，版本字段 ``shan``、
+显示名**不加**版本后缀（左慈 / 化身 / 新生）。"""
+
 JIE_YIJIANG_2014_MOBILE_HEROES = load_heroes("jie_yijiang_2014_mobile")
 """**界一将成名-2014·移动版**那一份（jie-yijiang-2014-mobile 票 01 起）：界 + 系列包 +
 移动版三者叠加 ⇒ 版本字段 ``jie-yijiang-2014-mobile``、显示名加「移动版」后缀
@@ -182,6 +186,7 @@ JIE_YIJIANG_2014_MOBILE_ENABLED = tuple(
     hero.id for hero in JIE_YIJIANG_2014_MOBILE_HEROES.heroes if hero.enabled
 )
 SP5_ENABLED = tuple(hero.id for hero in SP5_HEROES.heroes if hero.enabled)
+SHAN_ENABLED = tuple(hero.id for hero in SHAN_HEROES.heroes if hero.enabled)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -279,9 +284,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 98 → 100、真名 64 → 66；装备 22 不变）。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统两将五技 ⇒ 210 → 215、武将技 186 → 191
     # （启用版本 100 → 102、真名 66 → 67：庞统真名已在池、刘琦是新的；装备 22 不变）。
-    assert len(CATALOG) == 215
+    # shan-baozuoci 票 04：山包·左慈两技 ⇒ 215 → 217、武将技 191 → 193
+    # （启用版本 102 → 103、真名 67 → 68：左慈是新的；装备 22 不变）。
+    assert len(CATALOG) == 217
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 191
+    assert len(heroes) == 193
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -304,6 +311,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             YIJIANG_2014_HEROES,
             JIE_YIJIANG_2014_MOBILE_HEROES,
             SP5_HEROES,
+            SHAN_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -323,7 +331,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版补【秉壹】⇒ 181 → 182。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技 ⇒ 182 → 186。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统三技 + 刘琦两技 ⇒ 186 → 191。
-    assert len(expected) == 191
+    assert len(expected) == 193
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -343,6 +351,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(YIJIANG_2014_ENABLED)
         | set(JIE_YIJIANG_2014_MOBILE_ENABLED)
         | set(SP5_ENABLED)
+        | set(SHAN_ENABLED)
     )
     for definition in CATALOG.values():
         if definition.carrier.value != "HERO":
@@ -1669,6 +1678,15 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _haoshi_probe_state()
     if skill_id == "hero.huangzhong.liegong":
         return _liegong_probe_state()
+    if skill_id == "hero.zuoci.huashen":
+        # shan-baozuoci 票 04：化身② 的两条条件钩子只自校"自己的回合"（库空由流水线的
+        # 空候选兜掉），故正面局面不需要化身牌，只要帧的 ``source`` 是持有者。
+        return _probe_state()
+    if skill_id == "hero.zuoci.xinsheng":
+        # 新生 = 受伤者自校 + "有【化身】"这个牌面前提：正面局面必须先给 ME 一条化身实例。
+        state = _probe_state()
+        state.player(ME).granted_skills.append("hero.zuoci.huashen")
+        return state
     if skill_id == "hero.jie_huangzhong_mobile.liegong":
         # 界烈弓的两条条件钩子：① 触发（"我用【杀】指定了目标"）；② RESOLVE_AFTER_END 清扫
         # （条件读座位上的「本次使用」记账 ⇒ 正面局面里必须先记一笔）。
@@ -1787,6 +1805,14 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         actor=ME,
     )
     return {
+        # shan-baozuoci 票 04：左慈的两条条件钩子。
+        #  - 化身② 两条（TURN_START / TURN_END）：正面对照 = 帧的 ``source`` 是持有者；
+        #  - 新生一条（DAMAGE_AFTER_TAKE）：正面对照 = 帧的 ``target`` 是持有者。
+        "hero.zuoci.huashen": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME),
+        ),
+        "hero.zuoci.xinsheng": (_HookFrame(target=ME),),
         # 每条技能一个**元组**：本技能的每条带条件钩子各一帧（【勤学】两个时机两条）。
         "hero.jie_luxun.qianxun": (
             _HookFrame(
@@ -2669,9 +2695,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.pangtong_sp.zhanji": "锁定技",
     "hero.liuqi.wenji": "触发技能",
     "hero.liuqi.tunjiang": "零步技能",
+    # shan-baozuoci 票 04：左慈两技（化身 = 三条钩子 + 一条选项流水线；新生 = 逐点钩子）。
+    "hero.zuoci.huashen": "触发技能",
+    "hero.zuoci.xinsheng": "零步技能",
 
 }
-"""171 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -2707,7 +2736,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # sp5-mayunlu-panjun 票 01 / 02：凤魄 / 观微（钩子 + 非空流水线）⇒ 29 → 31。
     # sp5-pangtong-liuqi 票 02：刘琦【问计】（`PHASE_PLAY_START` 钩子 + 两步流水线）
     # ⇒ 31 → 32。
-    "触发技能": 32,
+    # shan-baozuoci 票 04：左慈【化身】（三条钩子 + 一条选项流水线）/【新生】（逐点钩子）
+    # ⇒ 32 → 34。
+    "触发技能": 33,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
@@ -2722,7 +2753,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # 流水线，手写主体与 OL 顾雍【秉壹】同一份）⇒ 40 → 41。
     # sp5-pangtong-liuqi 票 01 / 02：送丧（`DEATH_ON` + 零步）、展骥（锁定 + 零步→锁定格）、
     # 屯江（`PHASE_FINISH` + 零步）⇒ 41 → 43。
-    "零步技能": 43,
+    # shan-baozuoci 票 04：左慈【新生】（逐点钩子 + 零步流水线）⇒ 43 → 44。
+    "零步技能": 44,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2957,7 +2989,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # yijiang-2014-round2 票 13（P4）：界顾雍移动版【秉壹】（零步技能）⇒ 205 → 206。
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技（触发 2 / 锁定 2）⇒ 206 → 210。
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 215
+    assert len(SKILL_SHAPE) == len(CATALOG) == 217
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3171,7 +3203,9 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # 马术 / 公清（锁定技，纯修饰器）⇒ 外 92 → 94。
     # sp5-pangtong-liuqi 票 01 / 02：过论（主动）/ 问计（触发）/ 送丧 / 屯江（零步）都是
     # 步骤语言形态 ⇒ 内 116 → 120；展骥是锁定技 ⇒ 外 94 → 95。
-    assert len(inside) == 120
+    # shan-baozuoci 票 04：左慈【化身】（一条选项流水线）/【新生】（零步）都在步骤语言内
+    # ⇒ 内 120 → 122（外 95 不变）。
+    assert len(inside) == 122
     assert len(outside) == 95
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

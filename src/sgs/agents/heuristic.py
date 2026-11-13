@@ -4622,6 +4622,18 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(0.6),
         "弃一张装备牌摸一张（牌质过滤，1 换 1）：略高于放弃，但不如直接出牌",
     ),
+    # 山包·左慈（shan-baozuoci 票 04）：【化身】没有 SKILL_ACTIVATION 询问（① 是强制段、
+    # ② 是强制钩子 + 选项流水线），条目只为三向同步纪律而存在；【新生】是"受伤后免费多一张
+    # 化身牌"，候选出现即无代价 ⇒ 恒为正。
+    "hero.zuoci.huashen": (
+        _constant(0.0),
+        "换化身没有直接牌收益（只改‘视为拥有’的技能与性别 / 势力）；① 强制、② 的候选由"
+        "玩家在弹窗里挑，AI 这里只表示'不参与选择'（没有 是否发动 询问）",
+    ),
+    "hero.zuoci.xinsheng": (
+        _constant(2.0),
+        "受伤后随机获得一张新的化身牌（② 的候选池变大）：没有代价 ⇒ 恒发动为正",
+    ),
     "hero.tao_caocao.changyi": (
         _constant(2.0),
         "别人的出牌阶段结束时与其拼点：赢或平点没有代价（还能把【倡义】复制一份给对方），"

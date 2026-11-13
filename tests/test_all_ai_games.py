@@ -736,11 +736,15 @@ def test_the_m6_jie_qun_heroes_finish_a_full_ai_game_cleanly_and_replay():
 # M6 票 22（收口 / spec P2-2）：**8 个固定种子**的 8 人**混合池**全 AI 局
 # ---------------------------------------------------------------------------
 
-M6_CLOSEOUT_SEEDS: tuple[int, ...] = (148, 137, 146, 145, 140, 164, 142, 143)
+M6_CLOSEOUT_SEEDS: tuple[int, ...] = (148, 137, 146, 145, 141, 164, 142, 143)
 """spec P2-2 的 **8 个固定种子**（票 22 收口批；原取 32 种子验收批的前 8 个）。
 
 写死而不是从 :data:`~support.ACCEPTANCE_SEEDS` 切片：种子批本身是验收内容，
 换批必须同时改票面 ``## Answer`` 与 ``acceptance-map.md`` 的 P2-2 行。
+
+**2026-11-13 换 1 个种子**（shan-baozuoci 票 04 把默认池加到 103 / 68）：种子 140 在新池下
+抽到的 8 人局**没有标准版**（`{lin-mobile, shan, jie-yijiang-2014-mobile, jie-ol, huo-mobile}`）
+⇒ 同一条纪律换种不换判据：140 → 141（含标准版 + 4 个版本标记，四条判据全过）。
 
 **2026-11-12 换 1 个种子**（sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66）：
 种子 149 在新池下抽到的 8 人局**没有标准版**（`{jie-ol, huo, lin-mobile, jie-mobile, feng}`）
@@ -806,8 +810,9 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    # sp5-pangtong-liuqi：SP庞统（真名已在池）+ 刘琦（新真名）⇒ 102 / 67。
-    assert (len(pool), len(true_names)) == (102, 67), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」）；tao-caocao 票 01 加自制包韬·曹操自制版 1 个 ⇒ 76 / 49（真名「曹操」已在池里）；huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 1 个 ⇒ 79 / 50（新真名「卧龙诸葛」）；票 02 加火包 OL 颜良文丑 1 个 ⇒ 80 / 51（新真名「颜良文丑」）；feng-yujin 票 01 加自制包锋·于禁 1 个 ⇒ 82 / 53（新真名「于禁」）；lin-batch 票 01 加林包移动版神曹操 1 个 ⇒ 84 / 55（新真名「神曹操」）；lin-batch 票 02 加林包移动版孙坚 1 个 ⇒ 85 / 56（新真名「孙坚」）；lin-batch 票 03 加林包移动版徐晃 1 个 ⇒ 86 / 57（新真名「徐晃」）；lin-batch2 票 01 加林包移动版曹丕 1 个 ⇒ 87 / 58（新真名「曹丕」）；lin-batch2 票 02 加林包移动版董卓 1 个 ⇒ 88 / 59（新真名「董卓」）；lin-batch2 票 03 加林包移动版贾诩 1 个 ⇒ 89 / 60（新真名「贾诩」）；jushou-lusu 票 01 加一将成名-2014 沮授 1 个 ⇒ 90 / 61（新真名「沮授」）；票 02 加林包移动版鲁肃 1 个 ⇒ 91 / 62（新真名「鲁肃」）；jie-feng-batch2 票 01 / 02 加界夏侯渊移动版 / 界张角移动版 2 个 ⇒ 93 / 62（真名均已在池里）；jie-yijiang-2014-mobile 票 01 加界陈群移动版 1 个 ⇒ 94 / 63（新真名「陈群」）；票 02 加界顾雍移动版 1 个 ⇒ 95 / 64（新真名「顾雍」）；yijiang-2014 票 02 加陈群 1 个 ⇒ 96 / 64；票 03 加顾雍 1 个 ⇒ 97 / 64；yijiang-2014-round2 票 01 加界沮授移动版 1 个 ⇒ 98 / 64）"
+    # sp5-pangtong-liuqi：SP庞统（真名已在池）+ 刘琦（新真名）⇒ 102 / 67；
+    # shan-baozuoci 票 04：山包·左慈（新真名）⇒ 103 / 68。
+    assert (len(pool), len(true_names)) == (103, 68), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）；huo-shenzhugeliang 票 01 加火包 OL 神诸葛亮 1 个 ⇒ 70 / 44（新真名「神诸葛亮」）；lei-batch 票 01 加雷包郝昭 1 个 ⇒ 73 / 47（新真名「郝昭」）；lei-batch 票 02 加雷包张绣 1 个 ⇒ 74 / 48（新真名「张绣」）；tao-caocao 票 01 加自制包韬·曹操自制版 1 个 ⇒ 76 / 49（真名「曹操」已在池里）；huo-wolong-yanliang 票 01 加火包 OL 卧龙诸葛 1 个 ⇒ 79 / 50（新真名「卧龙诸葛」）；票 02 加火包 OL 颜良文丑 1 个 ⇒ 80 / 51（新真名「颜良文丑」）；feng-yujin 票 01 加自制包锋·于禁 1 个 ⇒ 82 / 53（新真名「于禁」）；lin-batch 票 01 加林包移动版神曹操 1 个 ⇒ 84 / 55（新真名「神曹操」）；lin-batch 票 02 加林包移动版孙坚 1 个 ⇒ 85 / 56（新真名「孙坚」）；lin-batch 票 03 加林包移动版徐晃 1 个 ⇒ 86 / 57（新真名「徐晃」）；lin-batch2 票 01 加林包移动版曹丕 1 个 ⇒ 87 / 58（新真名「曹丕」）；lin-batch2 票 02 加林包移动版董卓 1 个 ⇒ 88 / 59（新真名「董卓」）；lin-batch2 票 03 加林包移动版贾诩 1 个 ⇒ 89 / 60（新真名「贾诩」）；jushou-lusu 票 01 加一将成名-2014 沮授 1 个 ⇒ 90 / 61（新真名「沮授」）；票 02 加林包移动版鲁肃 1 个 ⇒ 91 / 62（新真名「鲁肃」）；jie-feng-batch2 票 01 / 02 加界夏侯渊移动版 / 界张角移动版 2 个 ⇒ 93 / 62（真名均已在池里）；jie-yijiang-2014-mobile 票 01 加界陈群移动版 1 个 ⇒ 94 / 63（新真名「陈群」）；票 02 加界顾雍移动版 1 个 ⇒ 95 / 64（新真名「顾雍」）；yijiang-2014 票 02 加陈群 1 个 ⇒ 96 / 64；票 03 加顾雍 1 个 ⇒ 97 / 64；yijiang-2014-round2 票 01 加界沮授移动版 1 个 ⇒ 98 / 64）"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
