@@ -358,6 +358,16 @@ _REWARD_DRAWN = "reward_drawn"
 """帧私有：反贼奖惩**摸到的那批牌**（``draw_from_deck`` 不幂等 ⇒ 首次进入即定格）。"""
 
 _REWARD_SHORT = "reward_short"
+_REWARD_MOVED = "reward_moved"
+"""帧私有：奖惩摸牌的**这一批牌已经搬过**（fuzz-move-card-source 的修复）。
+
+原因：`_MOVE_DONE` 的重入判据还要求"每张牌都还在目标区"，而 `MOVE_AFTER` 里的
+【清俭】一类会把刚摸到的牌再挪走（摸牌阶段外获得牌后置于牌堆顶）。那张牌一离开手牌，
+判据就认不出这次重入 ⇒ 第二次 `move_card` 拿到"一个在手牌、一个在牌堆顶"的两张牌，
+抛 `一次 move_card 只能有一个来源区域`。奖惩摸牌的 `to_zone` 是手牌、没有搬牌前的
+挂起点，故"这一次已经搬过"可以而且只能由本帧自己记：续跑跳过搬牌，只为短摸补一次
+平局判定（`MOVE_AFTER` 的续跑由 `_flush_pending_move` 负责，不靠重复搬牌）。
+"""
 """帧私有：这批奖惩摸牌**短摸了**（平局判定只做一次，重入不再重判）。"""
 
 _LORD_PENALTY_GROUPS = "lord_penalty_groups"
@@ -1597,8 +1607,8 @@ class Engine:
         由 ``apply_death_rewards`` → ``death_settle_cards`` 原样透传。
 
         **重入按"定格的这批牌"续**（:data:`_REWARD_DRAWN`）：``draw_from_deck`` 不幂等，
-        故摸到哪几张在首次进入时就写进帧私有；续跑只重交同一批牌（搬牌本身由
-        :data:`_MOVE_DONE` 的重入判据挡掉）。洗牌 delta 与平局判定各只做一次。
+        故摸到哪几张在首次进入时就写进帧私有；搬牌只做一次（:data:`_REWARD_MOVED`），
+        续跑跳过搬牌、只为短摸补一次平局判定。洗牌 delta 与平局判定各只做一次。
         """
         refs = frame.data.get(_REWARD_DRAWN)
         short = bool(frame.data.get(_REWARD_SHORT))
@@ -1612,7 +1622,7 @@ class Engine:
             short = len(drawn.cards) < REBEL_REWARD_DRAW
             frame.data[_REWARD_DRAWN] = refs
             frame.data[_REWARD_SHORT] = short
-        if refs:
+        if refs and not frame.data.get(_REWARD_MOVED):
             control = self.move_in_frame(
                 frame,
                 refs,
@@ -1621,6 +1631,9 @@ class Engine:
                 owner=killer,
                 actor=killer,
             )
+            # 搬到手牌没有"搬牌前"的挂起点（挂起只可能来自搬完之后的 MOVE_AFTER），
+            # 故此刻无论 stay 与否，这批牌都已经搬过一次。
+            frame.data[_REWARD_MOVED] = True
             if control == "stay":
                 return "stay"
         if short:
