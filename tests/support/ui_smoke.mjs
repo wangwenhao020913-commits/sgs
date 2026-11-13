@@ -421,6 +421,10 @@ let nextGetPendingSticky = false; // true = 这份注入一直有效到显式清
  * 那一类响应——用一次性的整份 body 改写注入（`(body) => {…}`），用完即清，姿态同
  * `nextGetPending`。用例只动 `body.snapshot`（游标 / 询问序号保持原样 = 空转）。 */
 let nextGetSnapshot = null;
+/* 与 `nextGetPendingSticky` 同姿态：空转轮询那一拍可能被并发 GET（即刻增量 / 别的子用例）
+ * 抢先消费掉一次性注入，于是被测的那一拍拿到的还是旧快照 ⇒ 指纹没变 ⇒ 不重绘
+ * （U-IDLE-01 偶发红的机制）。粘住到用例显式清掉，注入就不再受"谁先到"影响。 */
+let nextGetSnapshotSticky = false;
 /* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
  * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
 let failNextGets = 0;
@@ -512,7 +516,7 @@ globalThis.fetch = async (path, options) => {
     const response = await realFetch(`${BASE}${path}`, options);
     if (nextGetSnapshot && !(options && options.method && options.method !== "GET")) {
       const patch = nextGetSnapshot;
-      nextGetSnapshot = null;
+      if (!nextGetSnapshotSticky) nextGetSnapshot = null;
       const body = await response.json();
       patch(body);
       const text = JSON.stringify(body);
@@ -773,7 +777,11 @@ const submitLobby = async () => {
  *  没有询问，故它不满足第一条判据 —— 于是这个循环等的就是 `finishPlayback` 里那次
  *  `refresh()` 的回包（真 HTTP 往返，故按 5 ms 让出事件循环，最多 3 秒）。 */
 const settleOpening = async () => {
-  for (let waited = 0; waited < 5000; waited += 5) {
+  // 预算按**迭代次数**给，不按墙钟：每轮是一次真 HTTP 往返，耗时随机器负载漂移，原来的
+  // "5 秒墙钟"在共享 runner 上会把"慢"判成"错"（2026-11-13 复现：12 轮里 1 轮红）。
+  // 另留一条宽松的墙钟上限（60 s），只用来兜"真卡死"，不参与正常判据。
+  const deadline = Date.now() + 60000;
+  for (let attempt = 0; attempt < 600 && Date.now() < deadline; attempt += 1) {
     ui.flushPlayback();
     const view = ui.state.view;
     if (!ui.state.playback && view && (view.pending || view.finished)) return view;
@@ -28791,6 +28799,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     skillId: "hero.test.skill", name: "测试技", steps: [], answers: [], cursor: 0,
   };
   // 服务端只重算投影、不记新记录的那一类变化：武将牌上的牌区整行长出来。
+  nextGetSnapshotSticky = true;
   nextGetSnapshot = (body) => {
     body.snapshot.players[0].hero_zones = [{
       skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 0, count: 2, cards: [],
@@ -28824,6 +28833,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && ui.state.selectedTargets.join(",") === "1",
     `row=${Boolean(zoneRowOf($("t-self-hero-zones")))} ringRedrawn=`
       + `${$("t-seats").children[0] !== idleRingSecond} focus=${ui.state.focusCardId}`);
+  nextGetSnapshot = null;
+  nextGetSnapshotSticky = false;
   ui.state.focusCardId = null;
   ui.state.selectedTargets = [];
   ui.state.preactivation = null;
