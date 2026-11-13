@@ -157,6 +157,18 @@
     // 票 19：`harvestStateWithoutPending` = **没有询问**的空窗里还该不该显示亮牌窗（逐目标暂停）。
     "applyIdleHarvest", "harvestFingerprint", "viewHarvestState", "repaintRevealFromHarvest",
     "harvestStateWithoutPending",
+    // shan-baozuoci 票 05：技能外观组件（化身）——判据 / 两行渲染 / 只读检视窗 / 取消文案。
+    // 烟测喂**合成载荷**（服务端那一侧由 `tests/test_web.py` 钉），这里只读这些口。
+    "APPEARANCE_KINDS", "AVATAR_LOOK_LABEL", "AVATAR_CANCEL_LABEL",
+    "appearanceKindOf", "isAvatarAppearanceStep", "appearanceTitleFor", "appearancePassLabel",
+    "avatarRowSelectable", "avatarFocusCard", "toggleAvatarCard", "avatarSkillRowNode",
+    "avatarRenderTarget", "dialogChoiceIndex",
+    // 只读检视窗的层级次序（票 05 的 ESC 判据）：烟测要同时开两窗才断得出"先关最上面那层"。
+    "syncHeroModal",
+    "submitAvatarSkill", "renderAvatarAppearance",
+    "avatarModalIsOpen", "avatarAppearanceOfSkill", "openAvatarAppearance",
+    "closeAvatarAppearance", "syncAvatarAppearance", "syncAvatarModalChrome",
+    "skillAppearanceButton", "skillOffer",
   ];
   const out = {};
   for (const name of names) {

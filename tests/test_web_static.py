@@ -2177,10 +2177,14 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
         "heroPick",
         # lei-shenganning 票 93：两行观看手牌（上行目标 / 下行自己，四色各一）——第九条。
         "watchTwoRows",
+        # shan-baozuoci 票 05：技能外观组件（化身）——第十条。它不是"又一种选项壳"：
+        # 载荷里带 `appearance` 才走到它，正文是一个**两行面**（化身牌 + 技能全文）。
+        "avatar",
     ], (
         "票 08 只加正文段（展示武将牌复用 choice）；第七条由 jie-feng-batch2 票 01a 加"
         "（多选勾选面）；第八条由 huo-shenzhugeliang 票 02 加（武将牌上的牌点选）；"
-        f"第九条由 lei-shenganning 票 93 加（两行观看手牌）：{keys}"
+        "第九条由 lei-shenganning 票 93 加（两行观看手牌）；"
+        f"第十条由 shan-baozuoci 票 05 加（技能外观组件 · 化身）：{keys}"
     )
 
     predicate = _js_function(modal, "isShowHeroCardStep")
@@ -2256,8 +2260,9 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
     assert "submitDialogChoice(pending, index)" in row, (
         f"可点行 = 选中 legal_actions 里那条候选（一击提交，不手拼 Action）：{row}"
     )
-    assert "heroCardChoiceIndex(pending, choice)" in row, (
-        "候选下标从 legal_actions 里按 choice 找（置灰项不在候选里）"
+    assert "dialogChoiceIndex(pending, choice)" in row, (
+        "候选下标从 legal_actions 里按 choice 找（置灰项不在候选里）；查找口与外观组件的"
+        "技能行共用一处（`dialogChoiceIndex`，票 05 收口重复谓词）"
     )
 
     # CSS：新正文段的类名都要有自己的规则；描述不截断（没有 line-clamp / ellipsis）。
@@ -9384,3 +9389,55 @@ def test_the_view_level_harvest_channel_is_repainted_but_never_resets_the_select
         f"链键对不上（别的模板 / 别的局）就拒绝动手：{repaint}"
     )
     assert "resetSelection" not in repaint, "重画不许清本地选择"
+
+
+# ---------------------------------------------------------------------------
+# shan-baozuoci 票 05：技能外观组件（化身）的固定尺寸与两条滑块
+# ---------------------------------------------------------------------------
+
+
+def test_the_avatar_appearance_pins_the_window_size_and_keeps_both_sliders() -> None:
+    """用户 2026-11-13 逐字："窗口大小钉死，避免切换化身时频繁改变窗口大小，容易误触"。
+
+    两行面的几何全是**常量**：`.avatar-view` 有固定高度，第一行（化身牌）`overflow-x: auto`
+    横向滑块、第二行（技能 + 详细介绍）`overflow-y: auto` 纵向滑块，且两行自己**不设**高度
+    ⇒ 切换化身牌只换第二行的内容，容器高度一个字都不变。只读检视窗另有一层**自己的遮罩**
+    （可点关闭）与高于询问弹窗（60）的层级。
+    """
+    view = _css_rule(".avatar-view")
+    height = re.search(r"height:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", view)
+    assert height is not None, f".avatar-view 必须有固定高度（钉死窗口大小），实际：{view}"
+    assert not re.search(r"max-height", view), "钉死的是 height，不是会随内容变的 max-height"
+
+    cards = _css_rule(".avatar-cards")
+    assert re.search(r"overflow-x:\s*auto", cards), f"第一行必须是横向滑块：{cards}"
+    assert re.search(r"flex:\s*0 0 auto", cards), "第一行高度由内容定（不吃第二行的空间）"
+    assert not re.search(r"height:\s*calc", cards), "固定高度只写在 `.avatar-view` 上（两行各让各的）"
+
+    skills = _css_rule(".avatar-skills")
+    assert re.search(r"overflow-y:\s*auto", skills), f"第二行必须是纵向滑块：{skills}"
+    assert re.search(r"flex:\s*1 1 auto", skills) and re.search(r"min-height:\s*0", skills), (
+        "第二行吃掉剩下的高度并自己滚（min-height: 0 是 flex 子项能缩的前提）"
+    )
+    assert not re.search(r"height:\s*calc", skills)
+
+    backdrop = _css_rule(".avatar-backdrop")
+    assert re.search(r"pointer-events:\s*auto", backdrop), "只读窗的遮罩自己吃指针（点是关闭）"
+    z_backdrop = re.search(r"z-index:\s*(\d+)", backdrop)
+    z_modal = re.search(r"z-index:\s*(\d+)", _css_rule(".avatar-modal"))
+    assert z_backdrop is not None and z_modal is not None
+    assert int(z_backdrop.group(1)) > 60, "只读窗要压在询问弹窗（z-index 60）之上"
+    assert int(z_modal.group(1)) > int(z_backdrop.group(1)), "窗口在它自己的遮罩之上"
+
+
+def test_the_avatar_appearance_script_is_listed_right_after_the_dialog_shell() -> None:
+    """组件脚本排在 `modal.js` **之后**：询问弹窗按载荷选面时要调它的渲染器。
+
+    `index.html` 的 `<script src>` 顺序是脚本清单的唯一真源；这里只钉**相邻关系**
+    （`modal.js` → `avatar-appearance.js` → `hero-detail.js`），不重抄整张清单。
+    """
+    srcs = _script_srcs()
+    assert "avatar-appearance.js" in srcs, f"外观组件的脚本不在清单里：{srcs}"
+    at = srcs.index("avatar-appearance.js")
+    assert srcs[at - 1] == "modal.js", "外观组件紧跟 modal.js（询问弹窗的选面点在这里）"
+    assert srcs[at + 1] == "hero-detail.js", "外观组件排在 hero-detail.js 之前（检视窗族相邻）"

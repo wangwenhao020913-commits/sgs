@@ -52,6 +52,10 @@ const DIALOG_KINDS = Object.freeze({
   // 两行观看手牌（lei-shenganning 票 93）：上行被观看角色的手牌、下行自己的手牌；
   // 同花色置灰、必须四色各一张才可提交（首张技能票 = 神甘宁【魄袭】）。
   watchTwoRows: "watchTwoRows",
+  // 技能外观组件（shan-baozuoci 票 05）：`SELECT_OPTION` 的载荷里带 `appearance` ⇒ 第一行
+  // 化身牌（横向滑块）、第二行该牌的技能 + 全文（纵向滑块），点技能 = 提交。渲染器与只读
+  // 检视窗共用一份（`avatar-appearance.js:renderAvatarAppearance`），这里只是**多一个面**。
+  avatar: "avatar",
 });
 
 /** 候选里有没有一条 `Pass`（判断"这一步能不能放弃"的**载荷**判据，不认技能 id）。 */
@@ -153,6 +157,10 @@ function stepDialogKind(pending) {
   // `multiChoice` 弹窗（那是文本勾选行，座位会画成 `seat:0` 这类报文串）。
   if (isSeatMultiStep(pending)) return null;
   if (pending.kind === "SELECT_OPTIONS") return DIALOG_KINDS.multiChoice;
+  // 技能外观组件（票 05）：判据 = 载荷里有没有 `appearance`（与 `heroPick` 按 `ref.zone`
+  // 选面同构）。排在两条"选项 ≥4 就开窗"的判据**之前**——化身① 常常给到 4 条以上候选，
+  // 落到 `choice` 就画成了一串"武将·技能"按钮，而不是"卡 + 技能"的两行面。
+  if (isAvatarAppearanceStep(pending)) return DIALOG_KINDS.avatar;
   // 同一时机的激活面（票 02）：N ≥ 2 条技能候选 ⇒ 用**既有** `choice` 外壳（不新增种类：
   // 一张窗选一条技能 / 末条「都不发动」，正是"选项闭集"）。`state.preactivation` 优先，
   // 与 `dialogWantedKind` 同一次序——选中某条技能进入它自己的清单后，这一步的表面是
@@ -509,6 +517,8 @@ function dialogTitleFor(kind, pending) {
   if (kind === DIALOG_KINDS.heroPick) return "选择武将牌上的牌";
   if (kind === DIALOG_KINDS.distribution) return "分配";
   if (kind === DIALOG_KINDS.multiChoice) return "多选";
+  // 技能外观组件（票 05）：标题 = 技能展示名（服务端 `context.name`，化身①/② 都是「化身」）。
+  if (kind === DIALOG_KINDS.avatar) return appearanceTitleFor(pending);
   // 票 93：两行观看面的标题 = 技能展示名（服务端 `context.name`），没有时给中性文案；
   // 行标签才写"这是谁的手牌"（见 `reveal.js:watchRowLabel`）。
   if (kind === DIALOG_KINDS.watchTwoRows) {
@@ -691,6 +701,18 @@ function applyDialogContentMode(kind) {
   // 按钮清掉），随后照常整体搬进正文槽，正文归属不改。
   if (kind === DIALOG_KINDS.choice && isShowHeroCardStep(pending)) {
     renderHeroCardBody(pending);
+  }
+  // 技能外观组件（票 05）：正文 = 两行面（化身牌 + 技能全文），渲染器与只读检视窗共用。
+  // 这里传 `pending` ⇒ 第二行的技能行可点 = 提交（Q2）；第一行的牌只切换第二行。
+  if (kind === DIALOG_KINDS.avatar && pending && pending.appearance) {
+    const box = $("t-options");
+    if (box) {
+      renderAvatarAppearance(pending.appearance, {
+        container: box,
+        interactive: true,
+        pending,
+      });
+    }
   }
   if (options && body && options.parentNode !== body) body.appendChild(options);
 }
@@ -995,8 +1017,12 @@ function heroCardSubtitle(card) {
   return `第 ${index}/${total} 张`;
 }
 
-/** 这一行在 `legal_actions` 里的下标；-1 = 不是候选（置灰项只在载荷里，不可提交）。 */
-function heroCardChoiceIndex(pending, choice) {
+/** 这一行在 `legal_actions` 里的下标；-1 = 不是候选（置灰项只在载荷里，不可提交）。
+ *
+ *  三个面共用这一个查找口（展示武将牌的选项行、技能外观组件的技能行、以及任何"一行 = 一条
+ *  `SelectOption`"的行）：下标必须取自**候选本身**，行号 / 显示序都不算数。
+ */
+function dialogChoiceIndex(pending, choice) {
   const actions = (pending && pending.legal_actions) || [];
   return actions.findIndex(
     (action) => action.kind === "SelectOption"
@@ -1038,11 +1064,11 @@ function heroCardBlockNode(card) {
 /** 一行选项（票 08）：技能名 / 效果文本 + 描述正文；置灰行只展示、不接 click。
  *
  *  可提交性只看载荷：服务端的 `row.disabled`，以及这一行在不在 `legal_actions` 里
- *  （`heroCardChoiceIndex` 找不到 = 引擎没发这条候选）——前端不猜"为什么不可选"。
+ *  （`dialogChoiceIndex` 找不到 = 引擎没发这条候选）——前端不猜"为什么不可选"。
  */
 function heroCardRowNode(pending, row) {
   const choice = row && row.choice;
-  const index = heroCardChoiceIndex(pending, choice);
+  const index = dialogChoiceIndex(pending, choice);
   const disabled = !row || row.disabled === true || index < 0;
   const node = document.createElement("button");
   node.type = "button";
@@ -1182,6 +1208,13 @@ function closeDiscardPanel() {
  * 再找不到可关的东西"，ESC 在询问弹窗上就是 no-op。 */
 function handleModalKey(event) {
   if (!event || (event.key !== "Escape" && event.key !== "Esc")) return;
+  // 用户翻出来的只读窗按**层级从高到低**关：技能外观组件（z 66/67）→ 弃牌堆面板（64/65）
+  // → 武将详情（60）。三窗能同时开着（各开各的），关的顺序必须是最上面那层先走。
+  if (avatarModalIsOpen()) {
+    if (event.preventDefault) event.preventDefault();
+    closeAvatarAppearance();
+    return;
+  }
   if (discardPanelOpen) {
     if (event.preventDefault) event.preventDefault();
     closeDiscardPanel();
@@ -1195,6 +1228,7 @@ function handleModalKey(event) {
 /** 离开牌桌页：收起三个窗口（不提交任何 action）。 */
 function closeModalForView() {
   closeDiscardPanel();
+  closeAvatarAppearance();
   closeDialogDom();
   state.modal.heroSeat = null;
   syncHeroModal();
@@ -1219,9 +1253,16 @@ function wireModal() {
   if (discardClose) discardClose.addEventListener("click", closeDiscardPanel);
   const discardBackdrop = $("t-discard-backdrop");
   if (discardBackdrop) discardBackdrop.addEventListener("click", closeDiscardPanel);
+  // 技能外观组件的只读检视窗（票 05）：关闭按钮 / **自己的**遮罩关（与弃牌堆面板同形）。
+  // 打开入口在 `table.js:renderSkills` 的「只查看」按钮与技能按钮的中键。
+  const avatarClose = $("t-avatar-close");
+  if (avatarClose) avatarClose.addEventListener("click", closeAvatarAppearance);
+  const avatarBackdrop = $("t-avatar-backdrop");
+  if (avatarBackdrop) avatarBackdrop.addEventListener("click", closeAvatarAppearance);
   document.addEventListener("keydown", handleModalKey);
   // 初始三个窗口都收起（真浏览器由 HTML 的 hidden 属性保证；DOM 垫片不解析属性）。
   closeDialogDom();
   syncHeroModal();
   syncDiscardPanelChrome();
+  syncAvatarModalChrome();
 }

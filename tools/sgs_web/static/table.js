@@ -380,6 +380,8 @@ function renderTable() {
   renderPromptSkills(view);
   // U4-05（D11）：弃牌堆面板开着时，每次提交 / 回放步都从同一份视图重画（关着时 no-op）。
   renderDiscardPanel();
+  // 技能外观组件（票 05）：只读检视窗开着时同样按这份视图重画（数据没了就收窗）。
+  if (typeof syncAvatarAppearance === "function") syncAvatarAppearance();
   // ink-table-skin 票 03：座位节点在本次重建里可能被换掉，而墨层的 canvas 不跟着重建。
   // 牌挪了 / 换座 / 阵亡重建 ⇒ 这一场直接作废（不追着牌跑），照 chainFxSync / deathFxSync 的先例。
   if (typeof skillInkFxSync === "function") skillInkFxSync();
@@ -854,7 +856,11 @@ function renderSkills(view) {
     if (passive && !skill.locked) button.classList.add("passive");
     if (clickable) button.classList.add("ready");
     else if (!offer.inert) button.classList.add("unavailable");
-    button.disabled = !clickable;
+    // **带外观组件的技能按钮不置 disabled**（票 05）：禁用的 `<button>` 在真浏览器里**收不到
+    // 任何鼠标事件**（含中键 `auxclick`），而用户的设计正是"鼠标中键点技能按钮时显示一个
+    // 弹窗"。这类按钮的左键仍然没有处理器（它不可发动），中键 / 「只查看」开只读窗。
+    const hasAppearance = Boolean(skill.appearance);
+    button.disabled = !clickable && !hasAppearance;
     button.setAttribute("data-skill-id", skill.skill_id);
     button.setAttribute("data-available", String(skill.available));
     button.setAttribute("data-usable", String(usable));
@@ -882,8 +888,47 @@ function renderSkills(view) {
     button.setAttribute("aria-label", `${skill.name}（${kind}${badge}）`);
     applySkillState(button, skill);
     if (offer.handler) button.addEventListener("click", offer.handler);
+    // 技能外观组件（票 05）：带外观组件的技能多一个只读入口。
+    //  - **中键**点技能按钮（`auxclick` 的 `button === 1`）开只读弹窗；
+    //  - 按钮区另多一格「只查看」（左键 / 中键都开）——化身是触发技、按钮本身是灰的
+    //    （禁用的 `<button>` 收不到鼠标事件），故 Q1 的签字是"按钮区多一个按钮"。
+    if (hasAppearance) {
+      button.setAttribute("data-appearance", String(skill.appearance.kind || ""));
+      button.addEventListener("auxclick", (event) => {
+        if (!event || event.button !== 1) return;
+        if (event.preventDefault) event.preventDefault();
+        openAvatarAppearance(skill.skill_id);
+      });
+      box.appendChild(button);
+      box.appendChild(skillAppearanceButton(skill));
+      continue;
+    }
     box.appendChild(button);
   }
+}
+
+/** 「只查看」按钮（票 05 / Q1）：带外观组件的技能在按钮区多出来的那一格。
+ *
+ *  左键 / 中键都只开**只读**弹窗——不发动任何东西、不改选择态、不发请求。文案是界面
+ *  自己的（不是技能名），技能名仍在悬停里说明"看的是谁的化身牌"。
+ */
+function skillAppearanceButton(skill) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "skill skill-look";
+  button.setAttribute("data-appearance-for", skill.skill_id);
+  button.textContent = AVATAR_LOOK_LABEL;
+  button.setAttribute("title", `查看【${skill.name}】的化身牌与技能（只读）`);
+  const open = (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+    openAvatarAppearance(skill.skill_id);
+  };
+  button.addEventListener("click", open);
+  button.addEventListener("auxclick", (event) => {
+    if (!event || event.button !== 1) return;
+    open(event);
+  });
+  return button;
 }
 
 /** 改判窗口的**只说明**入口文案：两版【鬼才】与张角【鬼道】的选择都是「选一张牌 → 提交」，

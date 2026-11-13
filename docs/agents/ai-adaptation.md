@@ -190,3 +190,16 @@ S1 起【据守】要判"这一次翻面是翻回正面（不跳回合、三张�
 - **不塞进 `docs/agents/skill-authoring.md`**：那边被"硬停判据恰 13 条"钉死，且只覆盖武将技能，
   新模式无处安放。两边的交叉点只有一行指针（`batch-ticket.md`）。
 - **不加"`SKILL_VALUES` 条目必须非零"**：不可机械判，还会误杀 0.0 的觉醒技先例。
+- **技能外观组件不进读点表（shan-baozuoci 票 05）**：`SkillDef.appearance`（闭集 `AppearanceKind`，
+  本轮只有 `AVATAR`）是**技能级声明**，接入层按它派生的两份载荷都是**纯显示**——
+  技能按钮上的 `appearance`（只读面）与化身询问带的 `appearance`（发动面）。
+  询问侧**一个协议字段都没加**：化身①/② 仍是 `SELECT_OPTION`，候选仍是 `legal_actions`，
+  AI 照旧只看候选；`SkillDef` 不进记录流、网页载荷不进协议模型 ⇒ `_AI_READ_POINTS` 与
+  `_SCORERS` 都不需要新行（漏登即红的那两条机械面都没被触发）。
+  **记牌 / 身份推断的输入没变**：载荷里没有牌面，只有"哪几张武将牌在谁的化身库里"——
+  那是本人已知的事实。**非持有者拿不到它**：`projection._mask_private_ask` 把这条询问的
+  **内容整份**抹掉（`appearance` / `option_details` / `option_texts` / `options` /
+  `legal_actions` / `candidate_index` / `virtual_index` / `prompt_display`——选项 id 本身
+  就点名了化身牌），只留"谁在被问、什么时机"的框；断言在
+  `tests/test_m5_no_leak.py::test_the_avatar_appearance_payload_has_a_no_leak_case`。
+  以后给第二档（博图 / 渐营的"花色小窗"）**再加**读点前先问一遍：那份数据是不是牌面。

@@ -302,6 +302,24 @@
       </div>
     </div>
 
+    <!-- 技能外观组件 · 只读检视窗（shan-baozuoci 票 05）：带外观组件的技能（本轮只有
+         化身）在技能按钮区多一个「只查看」按钮，左键 / 中键打开它；中键点技能按钮本身也开。
+         内容 = 同一个渲染器（`avatar-appearance.js:renderAvatarAppearance`）：第一行化身牌
+         （横向滑块）、第二行该牌的技能 + 全文（纵向滑块）。窗口大小**钉死**（用户逐字：
+         "窗口大小钉死，避免切换化身时频繁改变窗口大小，容易误触"）——切换化身只换第二行。
+         与弃牌堆面板同一姿态：**自己的遮罩** + 关闭按钮 + ESC，开合不改只读态、不发请求。 -->
+    <div id="t-avatar-backdrop" class="avatar-backdrop" hidden></div>
+    <div id="t-avatar-modal" class="modal avatar-modal" role="dialog" aria-modal="true"
+         aria-labelledby="t-avatar-title" hidden>
+      <div class="modal-window avatar-window">
+        <div class="modal-head">
+          <h2 id="t-avatar-title" class="modal-title">化身</h2>
+          <button id="t-avatar-close" type="button" class="ghost" title="关闭（Esc）">关闭</button>
+        </div>
+        <div id="t-avatar-body" class="modal-body avatar-body"></div>
+      </div>
+    </div>
+
     <!-- 目标线层（U3-03 / D8.1）：覆盖整个牌桌壳的 SVG（`inset: 0`、无 viewBox、不吃指针），
          在座位与底部面板之上、弹窗之下。端点只在画线时读一次布局（窗口变化不影响已在播的线）。 -->
     <svg id="t-target-lines" class="target-lines" aria-hidden="true"></svg>
@@ -468,6 +486,10 @@
      挂在 `session.js:stepPlayback` 的记录流上；`cardFaceNode` 来自 card-view.js，故排在其后。 -->
 <script src="pindian.js"></script>
 <script src="modal.js"></script>
+<!-- 技能外观组件（shan-baozuoci 票 05）：化身牌的只读检视窗 + 发动面。数据面由服务端
+     `projection.APPEARANCE_BUILDERS` 产出；发作面由 `modal.js:stepDialogKind` 按载荷里有没有
+     `appearance` 选面（`DIALOG_KINDS.avatar`），本文件只负责画与提交。 -->
+<script src="avatar-appearance.js"></script>
 <script src="hero-detail.js"></script>
 <script src="arrange.js"></script>
 <script src="answer.js"></script>

@@ -13454,10 +13454,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   // ---- ① 外壳：仍是 `choice`（**不为武将牌另立 kind**），标题来自技能名 ----
   // 种类总数在 huo-shenzhugeliang 票 02 之后是 7（新增 `heroPick` = 武将牌上的牌点选），
   // lei-shenganning 票 93 再加第八种 `watchTwoRows`（两行观看手牌），jie-feng-batch2 票 01a
-  // 再加第九种 `multiChoice`（多选勾选面）。本条判的仍是"武将牌弹窗**不**占用一个专用 kind"。
+  // 再加第九种 `multiChoice`（多选勾选面），shan-baozuoci 票 05 再加第十种 `avatar`
+  // （技能外观组件）。本条判的仍是"武将牌弹窗**不**占用一个专用 kind"。
   render(heroView(heroCardPending()));
   check("U1-08a 武将牌弹窗 = 既有选择型外壳（不另立 kind）：标题「天成」、正文在弹窗里",
-    Object.keys(ui.DIALOG_KINDS).length === 9
+    Object.keys(ui.DIALOG_KINDS).length === 10
       && !("hero" in ui.DIALOG_KINDS)
       && ui.stepDialogKind(ui.state.view.pending) === "choice"
       && $("t-dialog").hidden === false
@@ -28971,6 +28972,327 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const backOnTable = ink.state().running;
   check("INK-01d 回放页也停、回牌桌又起（三个视图都认）",
     onReplay === false && backOnTable === true, `replay=${onReplay} table=${backOnTable}`);
+}
+
+/* ==================================================================== *
+ * shan-baozuoci 票 05：技能外观组件（化身）
+ *
+ * 用户 2026-11-13 逐字设计：中键点技能按钮 ⇒ 弹窗，**第一行 = 所有化身牌**（太多时横向
+ * 滑块），**第二行 = 该化身牌的技能 + 详细介绍**（文字太多时纵向滑块，形态同【天成】的
+ * 武将牌面）。只读模式下"点击技能选项无任何效果"；发动时复用这个弹窗，"可通过点击化身牌
+ * 下方的技能选项切换技能"（Q2 签字：点技能 = 直接提交；点第一行的牌**只切换不提交**）。
+ *
+ * 载荷形状与服务端 `projection._avatar_appearance` 同形（那一侧由 `tests/test_web.py`
+ * 钉）。本段只断**界面读法**：走了真脚本的 `renderTable` / `renderPending` / 组件渲染器，
+ * 不另抄一份渲染逻辑。两段 = 票面 §5 的 `avatar-appearance-view`（中键 / 横滑 / 只读点
+ * 技能无效果）与 `avatar-appearance-pick`（发动时点技能提交 / 取消 / 置灰技能不可点）。
+ * ==================================================================== */
+{
+  const HUASHEN = "hero.zuoci.huashen";
+  const XINSHENG = "hero.zuoci.xinsheng";
+  const QIANGXI = "hero.dianwei_mobile.qiangxi";
+  const TIEQI = "hero.jie_machao.tieqi";
+  const MASHU = "hero.jie_machao.mashu";
+  const XIONGYI = "hero.jie_machao.xiongyi";
+
+  /** 合成一个 `build_skills` 条目（键集合与 `test_web.py` 那条 `set(entry)` 断言同形）。 */
+  const skillEntry = (skillId, name, extra = {}) => ({
+    skill_id: skillId, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    star: false, state: "active", available: false, preactivated: false,
+    description: `${name}的牌面全文。`,
+    ui: { requirement: "", passive: true, convert_sources: [] },
+    ...extra,
+  });
+
+  /** 外观组件的数据面（**只读面**：没有 `selectable`）。 */
+  const avatarAppearance = ({ selectable = null } = {}) => {
+    const appearance = {
+      kind: "avatar",
+      cards: [
+        {
+          hero_id: "dianwei_mobile", name: "典韦移动版",
+          skills: [{
+            skill_id: QIANGXI, name: "强袭",
+            text: "出牌阶段限一次，你可以失去1点体力或者弃置一张武器牌，然后对你攻击范围内的一名其他角色造成1点伤害。",
+            eligible: true, selected: true,
+          }],
+        },
+        {
+          hero_id: "jie_machao", name: "界马超",
+          skills: [
+            { skill_id: TIEQI, name: "铁骑", text: "当你使用【杀】指定目标后，你可以进行判定……", eligible: true, selected: false },
+            { skill_id: MASHU, name: "马术", text: "锁定技，你计算与其他角色的距离-1。", eligible: true, selected: false },
+            { skill_id: XIONGYI, name: "雄异", text: "限定技，出牌阶段，你可以……", eligible: false, selected: false },
+          ],
+        },
+      ],
+      current: { hero_id: "dianwei_mobile", skill_id: QIANGXI },
+    };
+    if (selectable) appearance.selectable = selectable;
+    return appearance;
+  };
+
+  /** 一份带外观组件技能按钮的视图（`build_skills` 的产物形状）。 */
+  const avatarView = ({ appearance = avatarAppearance(), pending = null } = {}) => {
+    const view = synthView(pending);
+    view.skills = [
+      skillEntry(HUASHEN, "化身", { appearance }),
+      skillEntry(XINSHENG, "新生"),
+    ];
+    return view;
+  };
+
+  /** 化身①的发动面（**强制段**：`legal_actions` 里没有 `Pass` ⇒ 右端没有「取消」）。 */
+  const avatarPending = ({
+    selectable = [QIANGXI, TIEQI],
+    pass = false,
+    signature = "hero.zuoci.huashen:start",
+    appearance = avatarAppearance({ selectable }),
+  } = {}) => {
+    const actions = selectable.map((choice) => ({
+      kind: "SelectOption", choice, answers_seq: 9970,
+    }));
+    if (pass) actions.push({ kind: "Pass", answers_seq: 9970 });
+    return {
+      kind: "SELECT_OPTION", actor: 0, seq: 9970,
+      skill_id: signature, prompt: "请选择一项。",
+      options: selectable, disabled: [], option_texts: {},
+      appearance,
+      legal_actions: actions,
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      context: {
+        actor: 0, name: "化身", targets: [0], label: "0号位左慈的【化身】",
+        requirement: "选择一张“化身”牌的一个技能", skill_hints: [],
+      },
+      preactivations: {}, preactivation: [],
+    };
+  };
+
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const skillButtons = () => Array.from($("t-skills").children);
+  const avatarButton = () => skillButtons().find((node) => node.getAttribute("data-skill-id") === HUASHEN);
+  const lookButton = () => skillButtons().find((node) => node.getAttribute("data-appearance-for") === HUASHEN);
+  const middleClick = (node) => {
+    (node.listeners.auxclick || []).forEach((fn) => fn({
+      button: 1, target: node, preventDefault() {},
+    }));
+  };
+  const avatarBody = () => $("t-avatar-body");
+  const avatarViewNode = (root) => Array.from(root.children).find((n) => hasClassText(n, "avatar-view"));
+  const rowOf = (node, name) => Array.from(node.children).find((n) => hasClassText(n, name));
+  const cardsOf = (node) => Array.from(rowOf(node, "avatar-cards").children);
+  const skillRowsOf = (node) => Array.from(rowOf(node, "avatar-skills").children);
+  const clickCountOf = (node) => (node.listeners.click || []).length;
+
+  // ---- ① 只读入口：技能按钮区多一格「只查看」（Q1 签字），中键点技能按钮也开 ----
+  render(avatarView());
+  check("AVATAR-01a 带外观组件的技能在按钮区多一个「只查看」按钮，没有组件的技能不多",
+    skillButtons().length === 3
+      && !!avatarButton() && !!lookButton()
+      && lookButton().textContent === ui.AVATAR_LOOK_LABEL
+      && !skillButtons().some((node) => node.getAttribute("data-appearance-for") === XINSHENG),
+    `按钮=${skillButtons().map((n) => `${n.getAttribute("data-skill-id") || "·"}:${n.textContent}`).join("|")}`);
+  const xinshengButton = () => skillButtons()
+    .find((node) => node.getAttribute("data-skill-id") === XINSHENG);
+  check("AVATAR-01b 主技能按钮带 data-appearance、**不置 disabled**（禁用的 button 收不到鼠标事件）、中键监听在它身上",
+    avatarButton().getAttribute("data-appearance") === "avatar"
+      && avatarButton().disabled === false
+      && (avatarButton().listeners.auxclick || []).length === 1
+      && xinshengButton().disabled === true,
+    `avatar disabled=${avatarButton().disabled} auxclick=${(avatarButton().listeners.auxclick || []).length} 新生disabled=${xinshengButton().disabled}`);
+
+  check("AVATAR-01c 没打开时窗口与自己的遮罩都是收起的",
+    $("t-avatar-modal").hidden === true && $("t-avatar-backdrop").hidden === true,
+    `modal=${$("t-avatar-modal").hidden} backdrop=${$("t-avatar-backdrop").hidden}`);
+
+  middleClick(avatarButton());
+  const readOnly = avatarViewNode(avatarBody());
+  check("AVATAR-02a 中键点技能按钮 ⇒ 打开只读检视窗（标题 = 技能名、窗口 + 自己的遮罩）",
+    ui.avatarModalIsOpen() === true
+      && $("t-avatar-modal").hidden === false
+      && $("t-avatar-backdrop").hidden === false
+      && $("t-avatar-title").textContent === "化身"
+      && !!readOnly,
+    `open=${ui.avatarModalIsOpen()} title="${$("t-avatar-title").textContent}" view=${!!readOnly}`);
+
+  const readCards = cardsOf(readOnly);
+  const readRows = skillRowsOf(readOnly);
+  check("AVATAR-02b 第一行 = 手里**每一张**化身牌（横向滑块的那一行）",
+    ui.APPEARANCE_KINDS.avatar === "avatar"
+      && readCards.length === 2
+      && rowOf(readOnly, "avatar-cards").className === "avatar-cards"
+      && readCards.map((node) => node.getAttribute("data-hero-id")).join(",") === "dianwei_mobile,jie_machao"
+      && readCards[0].textContent.includes("典韦移动版")
+      && readCards[1].textContent.includes("界马超"),
+    `cards=${readCards.map((n) => n.getAttribute("data-hero-id")).join(",")}`);
+
+  check("AVATAR-02c 第二行 = 该牌（当前化身那张）的技能 + 完整描述（纵向滑块那一行），当前那条标「当前」",
+    readRows.length === 1
+      && rowOf(readOnly, "avatar-skills").className === "avatar-skills"
+      && readRows[0].getAttribute("data-skill-id") === QIANGXI
+      && readRows[0].textContent.includes("强袭")
+      && rowOf(readRows[0], "avatar-skill-text").textContent.includes("出牌阶段限一次")
+      && readRows[0].classList.contains("sel")
+      && readCards[0].classList.contains("sel"),
+    `rows=${readRows.length} text="${readRows[0] && readRows[0].textContent.slice(0, 40)}"`);
+
+  // ---- ③ 只读：点技能行**无任何效果**；点化身牌只切换第二行 ----
+  const beforeReadonlyClicks = calls.length;
+  await clickAndWait(readRows[0]);
+  check("AVATAR-03a 只读模式点技能**无任何效果**：那一行根本没接监听、也不提交",
+    clickCountOf(readRows[0]) === 0
+      && ui.state.selectedOption === null
+      && calls.length === beforeReadonlyClicks,
+    `clicks=${clickCountOf(readRows[0])} selected=${ui.state.selectedOption} calls=${calls.length - beforeReadonlyClicks}`);
+  check("AVATAR-03b 只读模式下技能行是 div（不是按钮）⇒ 连键盘都点不动",
+    readRows[0].tagName === "DIV" && readRows[0].disabled !== true,
+    `tag=${readRows[0].tagName}`);
+
+  const beforeSwitch = calls.length;
+  await clickAndWait(readCards[1]);
+  const switchedRows = skillRowsOf(avatarViewNode(avatarBody()));
+  check("AVATAR-04 点第二张化身牌 ⇒ 只切换第二行（3 条技能、当前那条不再高亮），不提交",
+    switchedRows.length === 3
+      && switchedRows.map((node) => node.getAttribute("data-skill-id")).join(",") === `${TIEQI},${MASHU},${XIONGYI}`
+      && cardsOf(avatarViewNode(avatarBody()))[1].classList.contains("sel")
+      && !cardsOf(avatarViewNode(avatarBody()))[0].classList.contains("sel")
+      && ui.state.selectedOption === null
+      && calls.length === beforeSwitch,
+    `rows=${switchedRows.map((n) => n.getAttribute("data-skill-id")).join(",")} calls=${calls.length - beforeSwitch}`);
+  check("AVATAR-04b 只读面不写「不可选」：这里一行都点不动，写了等于全灰；不合格行只置灰",
+    switchedRows.filter((node) => node.textContent.includes("不可选")).length === 0
+      && switchedRows[2].classList.contains("dis")
+      && !switchedRows[0].classList.contains("dis"),
+    `不可选=${switchedRows.filter((n) => n.textContent.includes("不可选")).length} 雄异dis=${switchedRows[2].classList.contains("dis")}`);
+  check("AVATAR-04c 切换化身牌不改变窗口自身的节点（同一个 `.avatar-view` 容器，高度由 CSS 钉死）",
+    !!avatarViewNode(avatarBody())
+      && avatarBody().children.length === 1
+      && avatarViewNode(avatarBody()).getAttribute("data-appearance") === "avatar",
+    `body children=${avatarBody().children.length}`);
+
+  // ---- ⑤ 「只查看」按钮（左键）+ 关闭出口（关闭按钮 / 自己的遮罩 / ESC） ----
+  (lookButton().listeners.click || []).forEach((fn) => fn({ target: lookButton(), preventDefault() {} }));
+  check("AVATAR-05a 「只查看」左键同样只开只读窗（不发动任何东西）",
+    ui.avatarModalIsOpen() === true && calls.length === beforeSwitch,
+    `open=${ui.avatarModalIsOpen()}`);
+  (($("t-avatar-close").listeners.click) || []).forEach((fn) => fn({}));
+  check("AVATAR-05b 关闭按钮收起窗口与遮罩",
+    $("t-avatar-modal").hidden === true && $("t-avatar-backdrop").hidden === true,
+    `modal=${$("t-avatar-modal").hidden}`);
+  (lookButton().listeners.click || []).forEach((fn) => fn({ target: lookButton(), preventDefault() {} }));
+  (($("t-avatar-backdrop").listeners.click) || []).forEach((fn) => fn({}));
+  check("AVATAR-05c 自己的遮罩可以点关（与弃牌堆面板同一姿态）",
+    $("t-avatar-modal").hidden === true);
+  // 第三种出口 = ESC。它按**层级从高到低**关：外观组件（z 66/67）先于弃牌堆面板（64/65）
+  // 与武将详情（60）——两窗同开时不能让下面那层先走。
+  (lookButton().listeners.click || []).forEach((fn) => fn({ target: lookButton(), preventDefault() {} }));
+  ui.state.modal.heroSeat = 1;
+  ui.syncHeroModal();
+  const bothOpen = ui.avatarModalIsOpen() && $("t-modal").hidden === false;
+  fireDocument("keydown", { key: "Escape" });
+  check("AVATAR-05d ESC 关只读窗，且同开时**先关最上面那层**（外观组件 → 武将详情）",
+    bothOpen
+      && ui.avatarModalIsOpen() === false
+      && $("t-avatar-modal").hidden === true
+      && $("t-modal").hidden === false,
+    `bothOpen=${bothOpen} avatarOpen=${ui.avatarModalIsOpen()} heroHidden=${$("t-modal").hidden}`);
+  fireDocument("keydown", { key: "Escape" });
+  ui.state.modal.heroSeat = null;
+  ui.syncHeroModal();
+
+  // ---- ⑥ 发动面（复用同一个组件）：点技能 = 直接提交，点牌只切换 ----
+  const askView = avatarView({
+    appearance: avatarAppearance({ selectable: [QIANGXI, TIEQI] }),
+    pending: avatarPending(),
+  });
+  render(askView);
+  const askNode = avatarViewNode($("t-options"));
+  check("AVATAR-06a 发动询问按载荷里的 `appearance` 选面：`stepDialogKind` = avatar、正文进弹窗槽",
+    ui.stepDialogKind(ui.state.view.pending) === "avatar"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "化身"
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
+      && !!askNode,
+    `kind=${ui.stepDialogKind(ui.state.view.pending)} title="${$("t-dialog-title").textContent}"`);
+  check("AVATAR-06b 发动面：当前化身那张的技能行可点（button + 一条 click）且不置灰",
+    (() => {
+      const rows = skillRowsOf(askNode);
+      return rows.length === 1
+        && rows[0].tagName === "BUTTON"
+        && rows[0].getAttribute("data-skill-id") === QIANGXI
+        && clickCountOf(rows[0]) === 1
+        && !rows[0].classList.contains("dis");
+    })(),
+    `rows=${skillRowsOf(askNode).map((n) => n.getAttribute("data-skill-id")).join(",")} 首行 tag=${skillRowsOf(askNode)[0] && skillRowsOf(askNode)[0].tagName}`);
+
+  const beforePick = calls.length;
+  await clickAndWait(skillRowsOf(askNode)[0]);
+  check("AVATAR-07a 点技能 = 直接提交那条 `SelectOption`（不手拼 Action）",
+    ui.state.selectedOption === 0
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(askView.pending.legal_actions[0])
+      && calls.length === beforePick,
+    `selected=${ui.state.selectedOption} action=${JSON.stringify(ui.buildAction())}`);
+
+  // 切到第二张牌再点：这一张的候选是铁骑（第 1 条 / 马术不在本次候选里 ⇒ 置灰）。
+  const askAgain = avatarView({
+    appearance: avatarAppearance({ selectable: [QIANGXI, TIEQI] }),
+    pending: avatarPending(),
+  });
+  render(askAgain);
+  const askNode2 = avatarViewNode($("t-options"));
+  await clickAndWait(cardsOf(askNode2)[1]);
+  const secondRows = skillRowsOf(avatarViewNode($("t-options")));
+  const secondById = Object.fromEntries(secondRows.map((node) => [node.getAttribute("data-skill-id"), node]));
+  check("AVATAR-07b 发动面点化身牌**只切换第二行、绝不提交**（用户逐字：等选中一个技能后才提交）",
+    secondRows.length === 3
+      && ui.state.selectedOption === null
+      && !secondById[QIANGXI]
+      && clickCountOf(secondById[TIEQI]) === 1
+      && secondById[XIONGYI].classList.contains("dis")
+      && secondById[MASHU].classList.contains("dis")
+      && secondById[MASHU].textContent.includes("不可选"),
+    `selected=${ui.state.selectedOption} rows=${secondRows.map((n) => `${n.getAttribute("data-skill-id")}:${n.classList.contains("dis") ? "dis" : "ok"}`).join("|")}`);
+
+  await clickAndWait(secondById[TIEQI]);
+  check("AVATAR-07c 切到第二张牌后点它的技能 = 提交那一条候选（下标取自 legal_actions，不是行号）",
+    ui.state.selectedOption === 1
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(askAgain.pending.legal_actions[1])
+      && String(ui.buildAction().choice) === TIEQI,
+    `selected=${ui.state.selectedOption} action=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ⑧ ② 可放弃：右端「取消（不重新进行）」；① 强制段没有取消 ----
+  render(avatarView({ pending: avatarPending() }));
+  check("AVATAR-08a 化身①（强制段）没有「放弃」：右端 Pass 收起",
+    $("btn-pass").hidden === true,
+    `hidden=${$("btn-pass").hidden}`);
+  render(avatarView({ pending: avatarPending({ pass: true, signature: "huashen:skill" }) }));
+  check("AVATAR-08b 化身②（可放弃）右端写「取消（不重新进行）」（用户 Q2 的文案）",
+    $("btn-pass").hidden === false
+      && $("btn-pass").textContent === ui.AVATAR_CANCEL_LABEL
+      && ui.AVATAR_CANCEL_LABEL === "取消（不重新进行）",
+    `text="${$("btn-pass").textContent}" hidden=${$("btn-pass").hidden}`);
+
+  // ---- ⑨ 只读窗跟着视图重画 / 数据没了就收窗 ----
+  render(avatarView());
+  middleClick(avatarButton());
+  ui.state.view = avatarView({ appearance: { ...avatarAppearance(), cards: [], current: null } });
+  // 走**真实重绘路径**：`renderTable` 是 `stepPlayback` 每一步都会调的入口，收窗判据挂在它
+  // 末尾（`syncAvatarAppearance`），不是测试直调的私有刷新口。
+  ui.renderTable();
+  check("AVATAR-09a 化身库空了 / 技能没了 ⇒ 只读窗自己收起（走 renderTable 这条真实重绘路径）",
+    ui.avatarModalIsOpen() === false && $("t-avatar-modal").hidden === true,
+    `open=${ui.avatarModalIsOpen()}`);
+
+  // 收尾：把询问面与窗口都清回"没有会话"。
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.closeAvatarAppearance();
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

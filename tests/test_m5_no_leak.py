@@ -1103,3 +1103,78 @@ def test_a_hero_card_zone_move_is_host_only() -> None:
     assert visible_record(unregistered, viewer=1)["cards"], (
         "未登记区的宿主仍看得见（不是整块 fail-closed）"
     )
+
+
+# ---------------------------------------------------------------------------
+# shan-baozuoci 票 05：技能外观组件的**自见载荷**（化身牌只有自己可见，用户 2026-11-13）
+# ---------------------------------------------------------------------------
+
+AVATAR_HERO = "hero.zuoci.huashen"
+
+
+def test_the_avatar_appearance_payload_has_a_no_leak_case() -> None:
+    """化身的外观组件是**自见载荷**：非持有者收到的挂起载荷里一条化身数据都没有。
+
+    化身牌只有自己可见（用户 2026-11-13，与票 04 §0 第 4 条同一条裁定）。这条询问的
+    **内容整份**属于自见面，故非持有者拿到的是抹过的载荷（``projection._mask_private_ask``）：
+
+    1. ``appearance``（新载荷：化身牌名 / 技能名 / 技能全文）——连键都没有；
+    2. ``option_details`` / ``option_texts``——"武将名·技能名"，逐条点名化身牌；
+    3. **``options`` / ``legal_actions`` / ``candidate_index`` / ``virtual_index``**——选项 id
+       本身就是 ``hero.<化身牌 id>.<技能>``，泄露面与显示名同级（这一条是本票评审修出来的：
+       只抹文本时，非持有者仍能读出"典韦移动版在左慈的化身库里"）；
+    4. ``prompt_display``——提示条契约带着**超时默认动作**，里面同样是那条选项 id。
+
+    公开事实保留：``kind`` / ``actor`` / ``seq`` / ``prompt`` / ``context``（"有人在被问什么"
+    仍是可见的，界面靠它显示"等待其他座位响应…"）。
+
+    正向对照在同一个用例里：**持有者**必须真的收到（否则反向断言全是空转）。判据按
+    **查看者**（``pending_payload`` 的 ``human_seat``）而不是"这条询问属于谁"——查看者缺失
+    时 fail-closed（与 ``_mask_watched_faces`` 同一条纪律）。
+    """
+    reader = Session(
+        seed=7, ai="random", timeout_seconds=None, player_count=2, my_hero="zuoci"
+    )
+    owner = reader.human_seat
+    pending = reader.pending
+    assert pending is not None and str(pending.skill_id).startswith(AVATAR_HERO), (
+        f"构造前提：化身① 的选择询问挂起中，实际 {pending and pending.skill_id}"
+    )
+
+    own = pending_payload(reader)
+    appearance = own["appearance"]
+    cards = appearance["cards"]
+    assert cards and len(cards) == len(reader.engine.state.player(owner).avatar_cards), (
+        "正向对照：持有者收到的化身牌 = 手里每一张"
+    )
+    private = [card["name"] for card in cards] + [
+        row["text"] for card in cards for row in card["skills"]
+    ]
+
+    # 非持有者（另一个座位 / 查看者缺失）：内容一条都不可见。
+    skill_ids = [
+        row["skill_id"] for card in cards for row in card["skills"]
+    ] + [card["hero_id"] for card in cards]
+    for foreign_viewer in (1 - owner, None):
+        foreign = pending_payload(pending, human_seat=foreign_viewer)
+        assert "appearance" not in foreign, (
+            f"查看者 {foreign_viewer} 不该收到外观组件的载荷"
+        )
+        assert "option_details" not in foreign, "逐行详情（武将·技能）同样不发"
+        assert not foreign.get("option_texts"), "选项文本逐条点名了别人的化身牌"
+        assert not foreign["options"], "选项 id 本身就是 hero.<化身牌>.<技能>，候选面整份不发"
+        assert not foreign["legal_actions"], "候选同理（能提交的那一条也点名化身牌）"
+        assert not foreign["candidate_index"] and not foreign["virtual_index"]
+        assert not foreign.get("prompt_display"), "提示条契约里带着超时默认动作 = 那条选项 id"
+        # 公开形状仍然在：这一步"有人在被问"是可见的，界面靠它显示"等待其他座位响应…"。
+        # （`context` 要引擎才算得出来，裸 Query 的 409 路径给 `None`，故只断不依赖它的三项。）
+        assert foreign["kind"] == str(pending.kind) and foreign["actor"] == pending.actor
+        assert foreign["seq"] == pending.seq and foreign["prompt"]
+        dumped = json.dumps(foreign, ensure_ascii=False)
+        for text in private:
+            assert text not in dumped, f"化身数据泄露给了非持有者：{text[:24]}"
+        for token in skill_ids:
+            assert token not in dumped, f"化身牌的技能 id 泄露给了非持有者：{token}"
+
+    # 抹载荷不是"把数据藏起来"：持有者那条路照旧有全文（判据没有误伤自见面）。
+    assert any(row["text"] for card in cards for row in card["skills"])

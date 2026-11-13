@@ -28,7 +28,7 @@ from typing import Any
 from sgs.data import SkillType, hero_by_id, hero_skill_id
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, CarrierKind, Hook, SkillDef
+from .catalog import MATCH_OWNER_KEY, AppearanceKind, CarrierKind, Hook, SkillDef
 from .catalog import resolve_instances
 from .flow import PickOption, SkillFlow
 
@@ -37,6 +37,10 @@ __all__ = [
     "HUASHEN_REQUIREMENT",
     "XINSHENG",
     "XINSHENG_REQUIREMENT",
+    "avatar_skill_rows",
+    "current_avatar_skill",
+    "eligible_skill_ids",
+    "skill_name_on",
     "zuoci_skill_definitions",
 ]
 
@@ -65,19 +69,36 @@ _HUASHEN_ASKED = "huashen:asked"
 # ---------------------------------------------------------------------------
 
 
-def _eligible_skill_ids(hero_id: str, *, pack_id: str) -> tuple[str, ...]:
-    """一张化身牌上**合格**的技能（数据文件序）。
+def avatar_skill_rows(
+    hero_id: str, *, pack_id: str
+) -> tuple[tuple[str, bool], ...]:
+    """一张化身牌上**列出来**的技能与它是否**合格**：``((skill_id, eligible), ...)``。
 
-    判据 = 非 ☆ 条目（`granted_by is None`，它们不在武将牌上）且 `skill_type == NORMAL`
-    ——**限定技 / 觉醒技 / 主公技除外**，锁定技照收（锁定是另一条轴，数据侧仍是 NORMAL）。
+    两条判据分开，因为它们是两件事（用户 2026-11-13 的 Q4）：
+
+    - **列出** = 非 ☆ 条目（``granted_by is None``）。☆ 技能觉醒前根本不在武将牌上，
+      化身也拿不到它，故连"置灰"都不该出现；
+    - **合格** = ``skill_type is SkillType.NORMAL``——**限定技 / 觉醒技 / 主公技除外**，
+      锁定技照收（锁定是另一条轴，数据侧仍是 ``NORMAL``）。不合格的**列出来但置灰**
+      （带完整描述、点不动），玩家才看得出"这张牌为什么不能用"。
+
+    投影的外观组件（`sgs_web.projection` 的 ``AVATAR`` 构造器）与引擎自己的候选面
+    （:func:`eligible_skill_ids`）读**同一份**判据，前端不抄第二份。
     """
     hero = hero_by_id(hero_id, pack_id=pack_id)
     if hero is None:
         return ()
     return tuple(
-        hero_skill_id(hero.id, skill.id)
+        (hero_skill_id(hero.id, skill.id), skill.skill_type is SkillType.NORMAL)
         for skill in hero.skills
-        if skill.granted_by is None and skill.skill_type is SkillType.NORMAL
+        if skill.granted_by is None
+    )
+
+
+def eligible_skill_ids(hero_id: str, *, pack_id: str) -> tuple[str, ...]:
+    """一张化身牌上**合格**的技能（数据文件序）——化身①/② 的候选闭集。"""
+    return tuple(
+        skill_id for skill_id, eligible in avatar_skill_rows(hero_id, pack_id=pack_id) if eligible
     )
 
 
@@ -85,9 +106,19 @@ def _pairs(state: Any, owner: int) -> tuple[tuple[str, str], ...]:
     """（化身牌 id, 合格技能 id）的全部组合，按手里化身牌的顺序。"""
     out: list[tuple[str, str]] = []
     for hero_id in tuple(state.player(owner).avatar_cards):
-        for skill_id in _eligible_skill_ids(hero_id, pack_id=state.pack_id):
+        for skill_id in eligible_skill_ids(hero_id, pack_id=state.pack_id):
             out.append((hero_id, skill_id))
     return tuple(out)
+
+
+def skill_name_on(hero: Any, skill_id: str) -> str:
+    """技能 id → 它在这张**武将牌**上的中文名（查不到 ⇒ 短 id）。
+
+    数据表是唯一真源：询问的选项文本（``武将名·技能名``）与外观组件的第二行都读这一处，
+    谁都不在自己那侧再写一遍"短 id 反查"。
+    """
+    short_id = skill_id.rsplit(".", 1)[-1]
+    return next((item.name for item in hero.skills if item.id == short_id), short_id)
 
 
 def _option_texts(state: Any, pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:
@@ -97,13 +128,11 @@ def _option_texts(state: Any, pairs: tuple[tuple[str, str], ...]) -> dict[str, s
         hero = hero_by_id(hero_id, pack_id=state.pack_id)
         if hero is None:
             continue
-        short_id = skill_id.rsplit(".", 1)[-1]
-        name = next((item.name for item in hero.skills if item.id == short_id), short_id)
-        texts[skill_id] = f"{hero.name}·{name}"
+        texts[skill_id] = f"{hero.name}·{skill_name_on(hero, skill_id)}"
     return texts
 
 
-def _current_skill(state: Any, owner: int) -> str | None:
+def current_avatar_skill(state: Any, owner: int) -> str | None:
     """当前“视为拥有”的那条化身技能：授予表里、且属于手里某张化身牌的合格技能。
 
     不另存一份字段（票 02 的口径）：它可由 `avatar_cards` + `granted_skills` 派生；
@@ -126,7 +155,7 @@ def _has_huashen(state: Any, owner: int) -> bool:
 
 def _apply(host: Any, frame: Any, owner: int, skill_id: str) -> None:
     """换化身：失去旧技能（可逆）+ 获得新技能 + 写性别 / 势力。选同一条 ⇒ 零动作。"""
-    current = _current_skill(host.state, owner)
+    current = current_avatar_skill(host.state, owner)
     if current == skill_id:
         return
     if current is not None:
@@ -290,6 +319,9 @@ def zuoci_skill_definitions() -> tuple[SkillDef, ...]:
             ),
         ),
         requirement=HUASHEN_REQUIREMENT,
+        # 化身牌只有自己可见（用户 2026-11-13）⇒ 显示面由「技能外观组件」负责（票 05）：
+        # 中键 / 「只查看」开只读弹窗，发动询问复用同一个组件（第一行化身牌、第二行技能）。
+        appearance=AppearanceKind.AVATAR,
     )
     xinsheng = SkillDef(
         skill_id=XINSHENG,

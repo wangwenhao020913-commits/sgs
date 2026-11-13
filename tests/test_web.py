@@ -3962,6 +3962,165 @@ def test_availability_follows_the_pending_queries_candidates() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 技能外观组件（shan-baozuoci 票 05）：自见载荷只发给技能的持有者
+#
+# 「有些技能会记录 / 缓存一些数据，为了直观体现这些数据，有些技能会有独特的用于显示
+# 这些数据的外观组件」（用户 2026-11-13 逐字）。本轮只落**化身**一个 kind；数据面是
+# **自见载荷**（化身牌只有自己可见，用户同日裁定），故两条通道都只对持有者开口：
+#
+#   - 技能清单（`build_skills`）给按钮带一份 `appearance`，只发给本人；
+#   - 化身①/② 的选择询问（`SELECT_OPTION` + `appearance` 载荷）在**挂起者就是查看者**
+#     时才带——别人收到的是抹过的载荷（连选项文本一起，见 `pending_payload`）。
+# ---------------------------------------------------------------------------
+
+AVATAR_SKILL = "hero.zuoci.huashen"
+XINSHENG_SKILL = "hero.zuoci.xinsheng"
+
+
+def _avatar_session(seed: int = 7) -> Session:
+    """人类座位 = 左慈、两人局：建局止于 ``GAME_START`` ⇒ 挂起的就是化身①的选择询问。
+
+    化身①是**强制段**（不问"是否发动"，直接发选择询问），故建局响应里已经有这一问。
+    """
+    session = Session(
+        seed=seed, ai="random", timeout_seconds=None, player_count=2, my_hero="zuoci"
+    )
+    pending = session.pending
+    assert pending is not None, "开局停在 GAME_START：化身① 的选择询问应当挂起"
+    assert str(pending.kind) == QueryKind.SELECT_OPTION.value, pending.kind
+    assert str(pending.skill_id).startswith(AVATAR_SKILL), pending.skill_id
+    return session
+
+
+def test_the_avatar_appearance_lists_every_held_card_and_its_skills() -> None:
+    """技能按钮上的 ``appearance`` = **手里每一张**化身牌 × 该牌列出的**全部**技能。
+
+    `eligible` 是用户 2026-11-13 的 Q4：限定 / 觉醒 / 主公**列出来但置灰**（带完整描述，
+    点不动），与【天成】的 `disabled` 同一姿态；☆ 技能觉醒前不在武将牌上，故一条都不列。
+    技能全文来自 `descriptions.json`——引擎不抄第二份。
+    """
+    from sgs.data import SkillType, hero_by_id, hero_skill_id
+
+    session = _avatar_session()
+    seat = session.human_seat
+    state = session.engine.state
+    held = tuple(state.player(seat).avatar_cards)
+    assert len(held) == 2, "构造前提：化身① 抽两张化身牌"
+
+    entry = next(
+        item for item in build_skills(session, seat) if item["skill_id"] == AVATAR_SKILL
+    )
+    appearance = entry["appearance"]
+    assert appearance["kind"] == "avatar"
+    assert [card["hero_id"] for card in appearance["cards"]] == list(held), (
+        "第一行 = 手里每一张化身牌（顺序 = 化身库顺序）"
+    )
+    assert appearance["current"] is None, "开局还没选技能 ⇒ 没有当前化身"
+    assert "selectable" not in appearance, (
+        "只读面不带 `selectable`——那是**询问**的载荷（本次真正可点的技能）"
+    )
+
+    for card in appearance["cards"]:
+        hero = hero_by_id(card["hero_id"], pack_id=state.pack_id)
+        assert card["name"] == hero.name
+        assert [(item["skill_id"], item["eligible"]) for item in card["skills"]] == [
+            (hero_skill_id(hero.id, skill.id), skill.skill_type is SkillType.NORMAL)
+            for skill in hero.skills
+            if skill.granted_by is None
+        ], "列出的技能 = 武将面上非 ☆ 的条目；合格 = NORMAL（限定 / 觉醒 / 主公为 False）"
+        for item in card["skills"]:
+            assert item["text"] == skill_description(item["skill_id"]), (
+                "第二行的正文 = descriptions.json 原文（引擎 / 投影都不另写一份）"
+            )
+            assert item["text"], "每条技能都要有完整描述"
+            assert item["selected"] is False
+
+    # 没有外观组件的技能不带这个键：既有清单的键集合一字不改。
+    xinsheng = next(
+        item for item in build_skills(session, seat) if item["skill_id"] == XINSHENG_SKILL
+    )
+    assert "appearance" not in xinsheng
+
+    # 自见载荷：别人的按钮清单、以及**公开**的武将详情清单，一条化身数据都不带。
+    for other in range(len(state.players)):
+        if other == seat:
+            continue
+        assert all("appearance" not in item for item in build_skills(session, other)), (
+            f"座位 {other} 的按钮清单里不该有别人的化身载荷"
+        )
+    for viewer in range(len(state.players)):
+        assert all(
+            "appearance" not in item for item in seat_skill_display(session, viewer)
+        ), "武将详情是公开只读面，不带外观组件的自见数据"
+
+
+def test_the_avatar_appearance_payload_reaches_only_its_owner() -> None:
+    """化身询问的载荷：**挂起者就是查看者**时才带外观组件，别人连选项文本也不给。
+
+    化身①/② 走的是既有的 ``SELECT_OPTION``（选项 id = 技能 id、文本 = "武将·技能"），
+    前端按"载荷里有没有 ``appearance``"选面——与 ``heroPick`` 按 ``ref.zone`` 选面同构，
+    故引擎契约一字不改（票 04 的 comment）。
+
+    自见那一半：``selectable`` = 本次询问真正可点的技能集合（= 候选里的 ``SelectOption``），
+    前端因此不再判一次"合格 ∩ 本次候选"。当前视为拥有的那条在 ``current`` 上、行内
+    ``selected`` 同时为真（② 的弹窗里"当前那张高亮"）。
+    """
+    session = _avatar_session()
+    seat = session.human_seat
+    pending = session.pending
+
+    payload = pending_payload(session)
+    appearance = payload["appearance"]
+    assert appearance["kind"] == "avatar"
+    assert appearance["selectable"] == [
+        action.choice for action in pending.legal_actions if action.kind == "SelectOption"
+    ], "selectable = 本次询问的候选（与 legal_actions 同源，不另判一次）"
+    assert appearance["current"] is None and not any(
+        row["selected"] for card in appearance["cards"] for row in card["skills"]
+    ), "化身① 还没答：没有当前化身"
+
+    # 答掉化身①，下一秒就是化身②（自己的回合开始）——同一个组件，这时"当前那张"要高亮。
+    session.submit_answer(
+        next(action for action in pending.legal_actions if action.kind == "SelectOption")
+    )
+    again = session.pending
+    assert again is not None, "答完化身① 后引擎推进到了下一问"
+    assert str(again.skill_id).endswith(":skill"), again.skill_id
+    again_payload = pending_payload(session)
+    again_appearance = again_payload["appearance"]
+    chosen = session.engine.state.player(seat).granted_skills[-1]
+    assert again_appearance["current"]["skill_id"] == chosen
+    selected = [
+        row["skill_id"]
+        for card in again_appearance["cards"]
+        for row in card["skills"]
+        if row["selected"]
+    ]
+    assert selected == [chosen], "当前视为拥有的那条在行内也标 selected（只标一条）"
+    assert again_appearance["current"]["hero_id"] in {
+        card["hero_id"] for card in again_appearance["cards"]
+    }, "current.hero_id 必须是手里某张化身牌"
+    assert chosen in again_appearance["selectable"]
+
+    # 非持有者的载荷：这条询问的**内容整份**不发（`projection._mask_private_ask`）。
+    foreign = pending_payload(again, human_seat=1 - seat)
+    assert "appearance" not in foreign, "别人的载荷里不该有化身牌"
+    assert "option_details" not in foreign
+    assert not foreign["option_texts"], "选项文本逐条点名了别人的化身牌，同样不发"
+    assert not foreign["options"] and not foreign["legal_actions"], (
+        "选项 id 本身就是 hero.<化身牌>.<技能>：候选面也必须抹"
+    )
+    assert not foreign.get("prompt_display"), "提示条的默认动作里也是那条选项 id"
+    dumped = json.dumps(foreign, ensure_ascii=False)
+    for card in again_appearance["cards"]:
+        assert card["name"] not in dumped, f"化身牌名 {card['name']} 泄露给了非持有者"
+        assert card["hero_id"] not in dumped, f"化身牌 id {card['hero_id']} 泄露给了非持有者"
+        for row in card["skills"]:
+            assert row["text"] not in dumped, f"技能全文 {row['skill_id']} 泄露给了非持有者"
+            assert row["skill_id"] not in dumped, f"技能 id {row['skill_id']} 泄露给了非持有者"
+
+
+# ---------------------------------------------------------------------------
 # 分步技能的**逐步文案**（票 01 的【离间】样板 / 票 02 的【青囊】）
 # ---------------------------------------------------------------------------
 
@@ -14195,3 +14354,26 @@ def test_the_life_loss_projection_sorts_the_batch_by_record_seq() -> None:
         ],
     )
     assert [entry["seq"] for entry in batch] == [1, anchor]
+
+
+def test_the_appearance_kind_is_a_closed_set_with_one_builder_per_member() -> None:
+    """外观组件的**种类**是闭集（票 05）：每个成员都必须有投影的数据构造器。
+
+    加一个成员要同票落齐三件事（投影构造器 / 前端 kind 分派 / 票面与 `06` 的登记）；这条
+    只钉机器能判的那一半——``set(AppearanceKind) == APPEARANCE_BUILDERS.keys()``，漏登
+    新成员、或登记一个不存在的 kind，都即时变红。
+
+    本轮闭集只有 ``AVATAR``（化身）：博图 / 渐营的「花色小窗」按用户 2026-11-13 的话
+    **本轮不做、以后再说**，故这里写死成员集合，加第二个 kind 必须同时改这条断言（有意的
+    摩擦：那意味着三处都要动）。
+    """
+    from sgs.skills import AppearanceKind
+    from sgs_web.projection import APPEARANCE_BUILDERS
+
+    assert {kind.value for kind in AppearanceKind} == {"avatar"}, (
+        "本轮只落化身一个 kind（用户 2026-11-13：博图 / 渐营的花色小窗以后再说）"
+    )
+    assert set(APPEARANCE_BUILDERS) == set(AppearanceKind), (
+        "每个外观组件种类都必须有投影构造器（漏登 = 界面上没有数据面）"
+    )
+    assert callable(APPEARANCE_BUILDERS[AppearanceKind.AVATAR])

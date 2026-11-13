@@ -1657,6 +1657,88 @@ button.mini-slot { cursor: pointer; }
   color: var(--dim); background: #e8dfcf;
 }
 
+/* ---------- 技能外观组件 · 化身（shan-baozuoci 票 05） ----------
+ * 两行面：第一行 = 手里每一张化身牌（太多时**横向滑块**）；第二行 = 该牌的技能 + 详细介绍
+ * （文字太多时**纵向滑块**，形态同【天成】的武将牌面 `.hero-card-row`）。
+ *
+ * **窗口大小钉死**（用户 2026-11-13 逐字："窗口大小钉死，避免切换化身时频繁改变窗口大小，
+ * 容易误触"）：`.avatar-view` 的高度是常量，第一行 `flex: 0 0 auto`、第二行吃掉剩下的
+ * 高度并自己滚——切换化身牌只换第二行的内容，容器高度一个字都不变。行数 / 牌数再多也不
+ * 撑高窗口，只多一条滑块。
+ *
+ * 同一个组件、两种模式：询问弹窗（`#t-dialog`）里的正文与只读检视窗（`#t-avatar-modal`）
+ * 用的是同一份 `.avatar-view`，区别只在技能行是不是 `button`（有 `.dis` 的行一律不可点）。 */
+.avatar-view { display: flex; flex-direction: column; gap: calc(8 * var(--dsu)); height: calc(360 * var(--dsu)); }
+.avatar-cards {
+  flex: 0 0 auto;
+  display: flex; gap: calc(6 * var(--dsu));
+  padding-bottom: calc(4 * var(--dsu));
+  overflow-x: auto; overflow-y: hidden;
+}
+.avatar-card {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  min-width: calc(96 * var(--dsu));
+  padding: calc(6 * var(--dsu)) calc(10 * var(--dsu));
+  border: 1px solid var(--line); border-radius: calc(10 * var(--dsu));
+  background: #fff; color: var(--ink); font: inherit; cursor: pointer;
+}
+.avatar-card:hover { border-color: var(--accent); }
+.avatar-card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(180, 140, 70, .28) inset; background: #fffdf5; }
+.avatar-card-name {
+  font-size: calc(13 * var(--dsu)); font-weight: 700; letter-spacing: .04em;
+  white-space: nowrap;
+}
+.avatar-card.current .avatar-card-name::after {
+  content: "当前";
+  margin-left: calc(4 * var(--dsu));
+  padding: 0 calc(4 * var(--dsu));
+  border-radius: 999px;
+  font-size: calc(10 * var(--dsu)); font-weight: 400;
+  color: var(--dim); background: #e8dfcf;
+}
+.avatar-skills {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: calc(6 * var(--dsu));
+  overflow-y: auto;
+}
+.avatar-skill {
+  display: flex; flex-direction: column; gap: calc(3 * var(--dsu));
+  width: 100%; text-align: left;
+  padding: calc(6 * var(--dsu)) calc(9 * var(--dsu));
+  border: 1px solid var(--line); border-radius: calc(9 * var(--dsu));
+  background: #fff; color: var(--ink); font: inherit;
+}
+button.avatar-skill { cursor: pointer; }
+button.avatar-skill:hover { border-color: var(--accent); }
+.avatar-skill.sel { border-color: var(--accent); background: #fffdf5; }
+.avatar-skill-name { font-size: calc(13 * var(--dsu)); font-weight: 700; }
+.avatar-skill-text {
+  font-size: calc(11 * var(--dsu)); line-height: 1.55; color: var(--dim);
+  white-space: pre-wrap;
+}
+.avatar-skill-flag {
+  align-self: flex-start;
+  padding: 0 calc(5 * var(--dsu)); border-radius: 999px;
+  font-size: calc(10 * var(--dsu)); line-height: 1.6;
+  color: var(--dim); background: #e8dfcf;
+}
+.avatar-skill.dis { opacity: .45; background: #f4eee2; }
+.avatar-empty { margin: 0; padding: calc(10 * var(--dsu)); }
+
+/* 只读检视窗（Q1）：与弃牌堆面板同一姿态——**自己的遮罩**（可点关闭）+ 关闭按钮 + ESC，
+ * 层级在询问弹窗与弃牌堆面板之上（它是用户最后翻出来的那一层）。窗口大小同样钉死：
+ * 正文高度由 `.avatar-view` 决定，窗口不随切换化身牌变形。 */
+.avatar-backdrop {
+  position: absolute; left: 0; right: 0; top: 6.2%; bottom: 27.5%;
+  z-index: 66;
+  background: rgba(28, 26, 23, .42);
+  pointer-events: auto;
+}
+.avatar-backdrop[hidden] { display: none !important; }
+.avatar-modal { z-index: 67; }
+.avatar-modal .avatar-body { padding: calc(10 * var(--dsu)) calc(14 * var(--dsu)) calc(14 * var(--dsu)); }
+
 /* ---------- 亮牌模板（U2-11 五谷 / 票 12 遗计复用；spec D3 / D4） ----------
  * 正文 = 全部亮牌（按亮牌顺序，被拿走的牌**留在原位**）+ 目标条。
  * 被拿走的牌置灰、牌面仍可读，右下角标写拿牌者座位号；目标条按拿牌顺序四态：

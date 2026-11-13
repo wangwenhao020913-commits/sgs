@@ -898,6 +898,13 @@ function renderSeatMultiPick(pending) {
  * ——牌面「1.对距离最近的另一名角色使用一张【杀】；2.失去1点体力」⇒ 按钮写「失去1点体力」。
  */
 function alternativeLabel(pending, action) {
+  // 技能外观组件（票 05 / Q2）：化身② 的「放弃」= "不重新进行"，文案由组件自己给。
+  if (action.kind === "Pass" && pending) {
+    const label = typeof appearancePassLabel === "function"
+      ? appearancePassLabel(pending)
+      : null;
+    if (label) return label;
+  }
   if (action.kind === "Pass" && pending && pending.cause === "BORROWED_SWORD") {
     return "交出武器";
   }

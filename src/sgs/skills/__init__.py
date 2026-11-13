@@ -60,7 +60,6 @@ from sgs.effects import (
     apply_modifiers,
 )
 from sgs.state import GameState, RejudgeOffer, Zone
-
 from .catalog import (
     ACTIVATION_PLANS,
     CATALOG,
@@ -73,6 +72,7 @@ from .catalog import (
     STATE_CHANGE_KEY,
     ActivationCandidate,
     ActivationPlan,
+    AppearanceKind,
     Hook,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
@@ -114,6 +114,13 @@ from .catalog import (
     terminate_activation_pass,
     timing_hooks_present,
 )
+# shan-baozuoci 票 05：**化身**的数据读口（外观组件的数据面 = 化身牌 × 技能 × 当前那条）。
+# 与上面 `heroes` 那份同一个理由重导出：接入层只许 import ``sgs.skills`` 这个公开子包入口，
+# 不得深导入 ``sgs.skills.zuoci``（M4 第一纪律，`tests/test_dod_m4.py` 钉着）。
+# 位置也刻意在 ``.catalog`` **之后**：catalog 末尾会 import `zuoci`（历史循环），在它跑完
+# 之前取 zuoci 的属性拿到的是半初始化的模块。
+from .zuoci import avatar_skill_rows, current_avatar_skill, skill_name_on  # noqa: E402
+
 # 转化技的**来源查询**（票 14）：接入层只允许 import ``sgs.skills`` 这个公开子包入口，
 # 不能深导入 ``sgs.skills.heroes``（M4 第一纪律，`tests/test_dod_m4.py` 钉着），故在包入口
 # 重导出这一条只读查询。
@@ -437,6 +444,10 @@ __all__ = (
     "STATE_CHANGE_KEY",
     "ActivationCandidate",
     "ActivationPlan",
+    "AppearanceKind",
+    "avatar_skill_rows",
+    "current_avatar_skill",
+    "skill_name_on",
     "PASS_STATE_KEY",
     "ActiveSkill",
     "Arrange",

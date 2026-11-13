@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import Any
 
 from sgs.data import (
@@ -37,13 +38,17 @@ from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
     FREE_SPLIT,
+    AppearanceKind,
     JIE_LUOSHEN,
     LORD_SKILL_IDS,
     LUOSHEN,
     SEAT_PREFIX,
     ModifierPoint,
     SkillSourceKind,
+    avatar_skill_rows,
     conversion_offers_by_source,
+    current_avatar_skill,
+    skill_name_on,
     is_forced_conversion,
     lord_skill_allowed,
     resolve_instances,
@@ -55,6 +60,7 @@ from sgs.state import (
     Query,
     QueryKind,
     Reforge,
+    SelectOptionQuery,
     WindowCause,
     Zone,
     project,
@@ -81,6 +87,7 @@ from .visibility import (
 )
 
 __all__ = [
+    "APPEARANCE_BUILDERS",
     "HARVEST_REQUIREMENT",
     "build_skills",
     "candidate_index",
@@ -989,11 +996,143 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
                 "ui": ui,
             }
         )
+        if not cross_seat:
+            appearance = _appearance_entry(state, seat, definition, suppressed=suppressed)
+            if appearance is not None:
+                entry["appearance"] = appearance
         out.append(entry)
     # U1-06：按钮区顺序 = 武将技能在前、装备技能在后；同组内沿用原来的
     # （锁定 / 被动靠后、id 稳定）键，故既有读取口不会因排序改动而漂。
     out.sort(key=lambda item: (item["carrier"] != "HERO", item["locked"], item["skill_id"]))
     return out
+
+
+# ---------------------------------------------------------------------------
+# 技能外观组件（shan-baozuoci 票 05）：声明面 = `SkillDef.appearance`，数据面 = 自见载荷
+# ---------------------------------------------------------------------------
+
+
+def _avatar_appearance(
+    state: Any, owner: int, *, selectable: Iterable[str] | None = None
+) -> dict[str, Any]:
+    """**化身**组件的数据（票 05 §3）：第一行 = 手里每一张化身牌，第二行 = 该牌的技能 + 全文。
+
+    数据全部来自**技能自己写好的状态**（:attr:`~sgs.state.Player.avatar_cards`）+ 数据表，
+    这里只负责装成显示用的形状，不判断任何"能不能选"：
+
+    - ``cards[*].skills`` 列出该牌**非 ☆** 的全部技能（☆ 觉醒前不在武将牌上，列出来是幽灵）；
+    - ``eligible`` = 该技能**合格**（无标签 / 锁定）——不合格的照旧列出、由界面画灰
+      （用户 2026-11-13 的 Q4，与【天成】的 ``disabled`` 同一姿态）；
+    - ``current`` = 当前视为拥有的那条（``null`` = 还没选过 / 已失去）；
+    - ``selectable`` = **本次询问**真正可点的技能集合（只在发动面上给）：它等于询问自己的
+      选项闭集，故前端不必再猜"合格 ∩ 本次候选"。
+
+    合格判据与引擎的候选面共用 :func:`sgs.skills.zuoci.avatar_skill_rows` 一处，前端零派生。
+    """
+    held = tuple(getattr(state.player(owner), "avatar_cards", ()) or ())
+    current_skill = current_avatar_skill(state, owner)
+    current_hero: str | None = None
+    cards: list[dict[str, Any]] = []
+    for hero_id in held:
+        hero = hero_by_id(hero_id, pack_id=state.pack_id)
+        if hero is None:  # pragma: no cover - 数据面缺牌（不可能：化身牌来自武将表）
+            continue
+        rows = [
+            {
+                "skill_id": skill_id,
+                "name": skill_name_on(hero, skill_id),
+                "text": skill_description(skill_id),
+                "eligible": eligible,
+                "selected": skill_id == current_skill,
+            }
+            for skill_id, eligible in avatar_skill_rows(hero_id, pack_id=state.pack_id)
+        ]
+        if any(row["selected"] for row in rows):
+            current_hero = hero_id
+        cards.append(
+            {
+                "hero_id": hero.id,
+                "name": hero.name,
+                "skills": rows,
+            }
+        )
+    payload: dict[str, Any] = {
+        "kind": AppearanceKind.AVATAR.value,
+        "cards": cards,
+        "current": (
+            None
+            if current_skill is None
+            else {"hero_id": current_hero, "skill_id": current_skill}
+        ),
+    }
+    if selectable is not None:
+        payload["selectable"] = list(dict.fromkeys(str(item) for item in selectable))
+    return payload
+
+
+
+
+APPEARANCE_BUILDERS: Mapping[AppearanceKind, Any] = MappingProxyType(
+    {AppearanceKind.AVATAR: _avatar_appearance}
+)
+"""外观组件种类 → 它的**数据构造器**（唯一登记处；票 05）。
+
+签名 ``(state, owner, *, selectable=None) -> dict``：``state`` = ``GameState``、``owner`` =
+技能持有者（**自见载荷**：只对本人构造）。加一个 :class:`~sgs.skills.AppearanceKind` 成员
+必须同票在这里加一行，`tests/test_web.py` 按闭集核（漏登即红）。"""
+
+
+def _appearance_entry(
+    state: Any, seat: int, definition: Any, *, suppressed: bool
+) -> dict[str, Any] | None:
+    """技能按钮上的 ``appearance``（只读面）；``None`` = 这条技能不带这个键。
+
+    三条都满足才给：声明了组件、**没失效**（失效时没有入口，与 ``ui.convert_sources``
+    同一姿态）、且手里真有可显示的数据（用户 Q3：没有化身牌 ⇒ 不开弹窗，按钮也不出现
+    ——判据在这里判一次，界面不另判）。
+    """
+    kind = getattr(definition, "appearance", None)
+    if kind is None or suppressed:
+        return None
+    # 数据面读的是**这一座位**的库（化身牌住 `Player.avatar_cards`）⇒ 只对自己的实例挂。
+    # 跨座位授予（主公技授予同势力座位）的技能此刻列在别的人身上，它的库不是我的；
+    # 挂上去画出来的是"我的"库，等于把别人的技能画成我的外观组件（fail-closed 不给）。
+    payload = _appearance_payload(state, seat, kind)
+    if payload is None or not payload.get("cards"):
+        return None
+    return payload
+
+
+def _appearance_payload(
+    state: Any, owner: int, kind: AppearanceKind, *, selectable: Iterable[str] | None = None
+) -> dict[str, Any] | None:
+    """任意 kind 的数据构造口（``APPEARANCE_BUILDERS`` 的**唯一**读取面）；未登记 ⇒ ``None``。
+
+    两处消费（只读面 :func:`_appearance_entry` / 发动面 :func:`pending_payload`）都走这里，
+    "查表 + 缺登即无"只写一次。
+    """
+    builder = APPEARANCE_BUILDERS.get(kind)
+    return None if builder is None else builder(state, owner, selectable=selectable)
+
+
+def _appearance_kind_of_query(query: Query) -> AppearanceKind | None:
+    """这条询问是不是某条**带外观组件**的技能发出来的（是 ⇒ 它的 kind）。
+
+    判据只读**声明**（``query.skill_id`` → ``SkillDef.appearance``），不按选项值 / 技能 id
+    名单猜——与 ``isShowHeroCardStep`` 读 ``hero_card`` 形状同一条纪律。``skill_id`` 带步骤
+    后缀（① ``hero.zuoci.huashen:start``、② 流水线步 ``huashen:skill``），故走
+    :func:`_definition_of` 的短 id 反查（它不需要状态，只查目录）。
+
+    因此**不需要引擎**也能判"这条询问是不是自见面"：抹载荷（非持有者那一路）照样跑得动，
+    只有**构造**数据时才要 ``state``（化身库住座位状态里，拿不到就 fail-closed）。
+    """
+    if not isinstance(query, SelectOptionQuery):
+        return None
+    skill_id = getattr(query, "skill_id", None)
+    if not skill_id:
+        return None
+    definition = _definition_of(None, str(skill_id))
+    return None if definition is None else getattr(definition, "appearance", None)
 
 
 def _is_passive_skill(definition: Any) -> bool:
@@ -1943,6 +2082,33 @@ def _mask_watched_faces(payload: dict[str, Any]) -> None:
     payload["revealed"] = []
 
 
+def _mask_private_ask(payload: dict[str, Any]) -> None:
+    """把一份**自见询问**的**内容**整份抹掉（shan-baozuoci 票 05）。
+
+    化身①/② 的选项闭集就是"手里那几张化身牌的合格技能"——**选项 id 本身**（
+    ``hero.dianwei_mobile.qiangxi``）就点名了别人的化身牌。化身牌只有自己可见（用户
+    2026-11-13）⇒ 查看者不是挂起者时，这条询问只留"谁在被问、什么时机"的框：
+
+    - ``appearance`` / ``option_details`` / ``option_texts``：显示面（牌名 / 技能名 / 全文）；
+    - ``options`` / ``legal_actions`` / ``candidate_index`` / ``virtual_index``：候选面
+      （选项 id 逐条点名化身牌）；
+    - ``prompt_display``：提示条契约里带着**超时默认动作**，同样是那条选项 id。
+
+    与 :func:`_mask_watched_faces` / :func:`_mask_foreign_preactivations` 同一条纪律：
+    fail-closed、只抹**内容**、不抹"这一步存在"这件公开事实（``kind`` / ``actor`` /
+    ``seq`` / ``prompt`` / ``context`` 留着）。界面侧本来也不渲染别人的询问面
+    （``pending.js:renderPending`` 的"等待其他座位响应…"分支早退）。
+    """
+    payload.pop("appearance", None)
+    payload.pop("option_details", None)
+    payload.pop("prompt_display", None)
+    payload["option_texts"] = {}
+    payload["options"] = []
+    payload["legal_actions"] = []
+    payload["candidate_index"] = {}
+    payload["virtual_index"] = {}
+
+
 def _steps_payload(steps: Any) -> list[dict[str, Any]]:
     """预发动清单 → JSON 形状（``Step`` 的字段原样；读取方 = ``app.js`` 的清单渲染）。"""
     return [step.model_dump(mode="json") for step in steps]
@@ -2829,6 +2995,27 @@ def pending_payload(
         or getattr(query, "option_texts", None)
     ):
         payload["option_details"] = option_details(query, heroes=hero_tables)
+    # 技能外观组件（shan-baozuoci 票 05）：**自见载荷**。数据由技能自己写进状态
+    # （化身库 = `Player.avatar_cards`），组件只负责显示；判据读**声明**
+    # （`query.skill_id` → `SkillDef.appearance`），不按技能 id / 选项值猜。
+    #
+    # 化身牌只有自己可见（用户 2026-11-13）⇒ 与观看牌面同一条纪律：只有**挂起者就是
+    # 查看者**时才构造 / 下发。别人收到的是抹过的载荷——连 `option_details` /
+    # `option_texts` 一起抹（那些文本是"武将名·技能名"，逐条点名了别人的化身牌）。
+    appearance_kind = _appearance_kind_of_query(query)
+    if appearance_kind is not None and not foreign and isinstance(session, Session):
+        entry = _appearance_payload(
+            session.engine.state,
+            int(query.actor),
+            appearance_kind,
+            selectable=tuple(
+                action.choice
+                for action in query.legal_actions
+                if getattr(action, "kind", None) == "SelectOption"
+            ),
+        )
+        if entry is not None:
+            payload["appearance"] = entry
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
     # 界面要写「将以【X】使用」只能读这份派生；不是查看者的询问 ⇒ 空列表（fail-closed）。
     payload["transform_products"] = (
@@ -2857,6 +3044,10 @@ def pending_payload(
     if isinstance(session, Session) and same_viewer:
         # 只给**自己的**询问载荷补标签；foreign（409 里附带的别人的现状）连标签也不带。
         _decorate_pending_card_tags(payload, session.engine.state, viewer)
+    if foreign and appearance_kind is not None:
+        # 自见询问：查看者不是挂起者 ⇒ **内容整份不发**（见 :func:`_mask_private_ask`）。
+        # 放在最后是因为 `prompt_display` 由 `decorate_pending` 补进来。
+        _mask_private_ask(payload)
     return payload
 
 

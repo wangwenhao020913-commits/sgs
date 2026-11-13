@@ -37,6 +37,10 @@ const NEEDED = [
   "options.js",
   "reveal.js",
   "modal.js",
+  // shan-baozuoci 票 05：`modal.js:stepDialogKind` 按载荷里的 `appearance` 选面时会调
+  // 外观组件的判据 / 渲染器（`isAvatarAppearanceStep` / `renderAvatarAppearance`），
+  // 页面里它们紧跟 modal.js —— 这里照页面次序带进来，不然加载期就 ReferenceError。
+  "avatar-appearance.js",
   "arrange.js",
   "answer.js",
 ];

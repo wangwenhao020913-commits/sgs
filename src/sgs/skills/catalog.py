@@ -318,6 +318,28 @@ class RejudgeOriginal(str, Enum):
     HAND = "HAND"
 
 
+class AppearanceKind(str, Enum):
+    """技能的**外观组件**种类（shan-baozuoci 票 05；闭集）。
+
+    「技能外观组件」的定义是用户 2026-11-13 逐字给的：「有些技能会记录 / 缓存一些数据，
+    为了直观体现这些数据，有些技能会有独特的用于显示这些数据的外观组件」。它是**技能级
+    声明**（:attr:`SkillDef.appearance`），不是新原语：数据由技能自己写、组件只负责显示。
+
+    ``AVATAR``（化身）是本轮唯一的成员——博图 / 渐营的「花色小窗」按用户同日的话**本轮
+    不做、以后再说**，故闭集先留位、不铺第二档。加成员必须**同票**交齐三件事：
+
+    1. `sgs_web.projection.APPEARANCE_BUILDERS` 里一个数据构造器（键集与本节**强制相等**，
+       `tests/test_web.py` 的闭集审计用例漏登即红）；
+    2. 前端的两个读点各加一条分支——选面 `modal.js:isAvatarAppearanceStep` /
+       `stepDialogKind`（今天只认 `avatar`），渲染 `avatar-appearance.js` 的 kind 分派；
+       **只有新 kind 的渲染分支到位，按钮区的「只查看」才会为它亮起**（`table.js:renderSkills`
+       按 `skill.appearance` 是否存在挂入口，不认具体 kind）；
+    3. 票面 / `06`（§5「程序化约定与偏离一手」）的登记（含这条声明与数据面在哪儿）。
+    """
+
+    AVATAR = "avatar"
+
+
 @dataclass(frozen=True, slots=True)
 class SkillDef:
     """一张技能定义（票 07 §6 的冻结形状，票 30 / 票 01 只加可选字段）。
@@ -490,6 +512,23 @@ class SkillDef:
     它**只**作用于四扇需要牌窗口的候选面；同一时机的激活结算（SKILL_ACTIVATION 的
     ``ActivationCandidate.tier``）仍读 :attr:`priority_class`——那里问的是"谁先发动"
     （武将技 > 装备技），与"这一步要的是哪一档的牌"是两个问题。
+    """
+
+    appearance: AppearanceKind | None = None
+    """这条技能有没有**自己的显示组件**（shan-baozuoci 票 05；缺省 ``None`` = 没有）。
+
+    「有些技能会记录 / 缓存一些数据，为了直观体现这些数据，有些技能会有独特的用于显示
+    这些数据的外观组件」（用户 2026-11-13 逐字）。它是**技能级声明**，不是一个新原语：
+
+    - **数据由技能自己写**（化身库住 `Player.avatar_cards`，见 :mod:`sgs.skills.zuoci`），
+      组件只负责显示——本字段不带数据，只带"哪个组件"；
+    - **接入层**（`sgs_web.projection`）按它派生两份自见载荷：技能按钮上的 ``appearance``
+      （只读面）与选择询问带的 ``appearance``（发动面）；两份都由
+      :data:`~sgs_web.projection.APPEARANCE_BUILDERS` 里**同 kind** 的那个构造器产出；
+    - **AI 不消费**（纯显示）：询问侧的候选仍只有 ``legal_actions``，故这条声明不进
+      ``_AI_READ_POINTS``（`docs/agents/ai-adaptation.md` §5）。
+
+    ``SkillDef`` 不被序列化 ⇒ 本字段不进记录流，金录像逐字节不变。
     """
 
 
