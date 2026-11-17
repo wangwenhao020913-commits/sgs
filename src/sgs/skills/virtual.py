@@ -48,6 +48,7 @@ from sgs.effects import (
     is_slash,
     satisfies_required,
     target_combos,
+    usable_target_pool,
 )
 from sgs.state import (
     CardRef,
@@ -655,9 +656,14 @@ def virtual_card_use(
     候选算完之后统一做一次（否则先算的那组候选会改变后算那组看到的目标状态）。
     """
     if ctx.scope is CandidateScope.PLAY:
-        if check_count(state, seat, card):
+        # 次数与目标池走**与真牌同一个**入口（`usable_target_pool`）：额度用尽时它把池收窄
+        # 到"以它为目标仍被次数豁免"的座位（【雄乱】/ 刘焉【立牧】②），空池才是没有候选。
+        # 此前这里只调 `check_count`（没有目标维度 ⇒ `COUNT_EXEMPT` 不参与）就整条丢弃
+        # ⇒ 按目标豁免生效时转化【杀】一条候选都没有（用户 2026-11-17 报障：判区有
+        # 【乐不思蜀】的丈八刘焉用不了丈八蛇矛）。
+        pool = usable_target_pool(state, seat, card)
+        if check_count(state, seat, card) and not pool:
             return []
-        pool = check_targets(state, seat, card)
         behavior = behavior_for(card)
         rule = behavior.target_rule
         # **目标数区间要照真牌摊开**（huo-mobile-batch 票 02）：【铁索连环】是

@@ -41,6 +41,7 @@ from sgs.effects import (
     check_count,
     check_targets,
     distance,
+    legal_actions_for,
 )
 from sgs.engine import Engine
 from sgs.skills import CATALOG
@@ -53,6 +54,7 @@ from sgs.state import (
     GameState,
     Pass,
     Phase,
+    QueryKind,
     SelectCards,
     UseCard,
     Zone,
@@ -734,3 +736,80 @@ def test_limu_effects_stop_when_the_judge_zone_is_empty():
     assert 2 in check_targets(state, 0, card)
     state.player(0).judge = []
     assert 2 not in check_targets(state, 0, card)
+
+
+# ---------------------------------------------------------------------------
+# 立牧② × 转化牌（用户 2026-11-17 报障：判区有【乐不思蜀】的丈八刘焉用不了丈八蛇矛）
+# ---------------------------------------------------------------------------
+
+
+def _zhangba_state(*, judge: tuple[int, ...] = (), slash_used: int = 0) -> GameState:
+    """刘焉装备【丈八蛇矛】、两张手牌可转化：用于验"按目标豁免次数"也覆盖**转化牌**。"""
+    spear = _event_id("serpent_spear")
+    hand = (_event_id("dismantlement"), _event_id("harvest"))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=LIUYAN,
+                hand=hand,
+                equip=(spear,),
+                judge=judge,
+                hp=3,
+                hp_max=3,
+            ),
+            SeatSpec(hero="guojia", hand=(cards_of_type(PACK, "slash")[0],)),
+        ],
+        deck=deck_excluding(PACK, *hand, spear, *judge),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    state.player(0).card_use_counts["slash"] = slash_used
+    return state
+
+
+def _transformed_slashes(state: GameState) -> list[Any]:
+    """出牌阶段候选里**转化出来**的【杀】（丈八蛇矛的产物）。"""
+    actions = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    return [
+        action
+        for action in actions
+        if isinstance(action, UseCard)
+        and getattr(action.card, "is_virtual", False)
+        and action.card.type == "slash"
+    ]
+
+
+def test_zhangba_conversion_is_offered_when_limu_lifts_the_slash_count():
+    """报障回归：判定区有牌（立牧② 生效）+ 本阶段已用过【杀】⇒ 丈八蛇矛仍能转化出【杀】。
+
+    候选生成器此前对**转化牌**只问 ``check_count``（没有目标维度 ⇒ ``COUNT_EXEMPT`` 不参与），
+    于是整条丢弃；现在真牌与转化牌共用 ``usable_target_pool``（按目标收窄的那一趟）。
+    """
+    state = _zhangba_state(judge=(_event_id("indulgence"),), slash_used=1)
+    slashes = _transformed_slashes(state)
+    assert slashes, "立牧② 豁免次数 ⇒ 丈八蛇矛的转化【杀】该有候选"
+    assert all(action.targets == (1,) for action in slashes), "目标仍须在攻击范围内"
+
+
+def test_zhangba_conversion_stays_closed_without_limu():
+    """反例（对照）：没有立牧② 时，次数用尽 ⇒ 转化【杀】照旧没有候选（既有行为不动）。"""
+    state = _zhangba_state(slash_used=1)
+    assert _transformed_slashes(state) == []
+
+
+def test_check_usable_reads_the_target_scoped_count_exemption():
+    """源牌级置灰同一条判据：次数用尽时"还有可豁免的目标"⇒ 这张（转化）牌仍算可用。"""
+    from sgs.effects import check_usable
+    from sgs.skills.virtual import transformed_card
+
+    spear = _event_id("serpent_spear")
+    hand = (_event_id("dismantlement"), _event_id("harvest"))
+    spent = _zhangba_state(slash_used=1)
+    active = _zhangba_state(judge=(_event_id("indulgence"),), slash_used=1)
+    product = transformed_card(spent, (hand[0], hand[1]), "slash")
+    ref = transformed_card(active, (hand[0], hand[1]), "slash")
+    assert check_usable(spent, 0, product, require_targets=False) is False
+    assert check_usable(active, 0, ref, require_targets=False) is True
+    del spear

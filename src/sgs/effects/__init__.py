@@ -48,6 +48,7 @@ from .actions import (
     targets_within_attack_range,
     tier_not_downgraded,
     usable_options,
+    usable_target_pool,
 )
 from .behaviors import (
     CARD_BEHAVIORS,
@@ -187,4 +188,5 @@ __all__ = (
     "targets_within_attack_range",
     "tier_not_downgraded",
     "usable_options",
+    "usable_target_pool",
 )

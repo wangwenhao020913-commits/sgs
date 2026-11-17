@@ -381,6 +381,30 @@ def _count_exempt_targets(
     )
 
 
+def usable_target_pool(
+    state: GameState, seat: int, card: CardRef
+) -> tuple[int, ...]:
+    """这张牌此刻**可枚举的目标池**：次数额度用尽时只留"以它为目标仍被豁免"的座位。
+
+    两层判据的先后是固定的：先 :func:`check_targets`（距离 / 目标池），再用
+    :func:`check_count` 问"这张牌还准不准用"——那一问**没有目标维度**（``COUNT_EXEMPT``
+    不参与），故按目标豁免（【雄乱】「你对其使用牌无次数限制」、刘焉【立牧】②「对攻击范围
+    内的其他角色…没有次数限制」）必须在候选生成器里补第二趟：把池收窄到被豁免的座位、再
+    照常摊组合。
+
+    **真牌与转化牌读同一个入口**：真牌的候选生成器 :func:`_play_phase` 一直有这一趟，
+    转化牌（【丈八蛇矛】/【武圣】/【龙胆】…的产物）此前只调了 ``check_count`` 就整条丢弃
+    ⇒ 按目标豁免生效时，转化【杀】一条候选都没有（用户 2026-11-17 报障：判区有
+    【乐不思蜀】的丈八刘焉用不了丈八蛇矛）。空池 = 这张牌此刻没有合法目标。
+
+    没有按目标豁免的修饰器时收窄恒为空 ⇒ 行为与加本入口前逐字相同（金录像不变）。
+    """
+    pool = check_targets(state, seat, card)
+    if not check_count(state, seat, card):
+        return pool
+    return _count_exempt_targets(state, seat, card, pool)
+
+
 def check_targets(
     state: GameState, seat: int, card: CardRef, *, distance_exempt: bool = False
 ) -> tuple[int, ...]:
@@ -528,7 +552,8 @@ def check_usable(
     2. **禁止使用**（L3.1）：:func:`check_forbidden` 的 ``FORBIDDEN`` 链，以及
        :func:`forbidden_as_slash`（「不能当作【杀】使用 / 打出」的标签，按牌面牌名判）；
     3. **次数**（L3.2）：:func:`check_count`——【杀】的本回合额度、【酒】的每回合一次都在
-       这一条里（计数键由行为表声明，不按牌名特判）；
+       这一条里（计数键由行为表声明，不按牌名特判）。额度用尽时**按目标豁免**（雄乱 /
+       立牧②）仍算可用：判据与候选生成器共用 :func:`usable_target_pool`；
     4. **目标池**（L3.3）：:func:`check_targets` 非空——【桃】满体力、【杀】没有可达目标、
        【闪】这类 0 目标牌在出牌阶段没有目标，都是这一条。
 
@@ -551,9 +576,12 @@ def check_usable(
         return False
     if check_forbidden(state, seat, card):
         return False
-    if is_slash(behavior) and forbidden_as_slash(state, card):
+    # 次数档：额度用尽时"这张牌还算可用"的唯一可能是**按目标豁免**（雄乱 / 立牧②）——
+    # 与候选生成器读同一个入口；额度没用尽时它原样返回池、一行判据都不加（``require_targets
+    # = False`` 那条"不读目标池"的口径因此不受影响）。
+    if check_count(state, seat, card) and not usable_target_pool(state, seat, card):
         return False
-    if check_count(state, seat, card):
+    if is_slash(behavior) and forbidden_as_slash(state, card):
         return False
     if not require_targets:
         return True
@@ -1023,15 +1051,14 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
         exhausted = check_count(state, seat, card)
         behavior = behavior_for(card)
         rule = behavior.target_rule
-        pool = check_targets(state, seat, card)
-        if exhausted:
-            # 次数额度用尽：**仍然枚举目标**，只保留"以它为目标的那次使用仍被豁免"的座位
-            # （lei-batch 票 04：雄乱「你对其使用牌无次数限制」按目标判）。收窄后再照常
-            # 摊组合 ⇒ 多目标牌只会生成"目标集合 ⊆ 被豁免角色"的那些组合。没有豁免
-            # （绝大多数牌）⇒ 空池 ⇒ 与加本机制前同一条 ``continue``。
-            pool = _count_exempt_targets(state, seat, card, pool)
-            if not pool:
-                continue
+        # 次数额度用尽时**仍然枚举目标**：只保留"以它为目标的那次使用仍被豁免"的座位
+        # （lei-batch 票 04：雄乱「你对其使用牌无次数限制」按目标判）。收窄后再照常
+        # 摊组合 ⇒ 多目标牌只会生成"目标集合 ⊆ 被豁免角色"的那些组合。没有豁免
+        # （绝大多数牌）⇒ 空池 ⇒ 与加本机制前同一条 ``continue``。
+        # 转化牌走**同一个**入口（`virtual_card_use`），两条候选路径不再各写一份。
+        pool = usable_target_pool(state, seat, card)
+        if exhausted and not pool:
+            continue
         low, high = rule.target_range(len(pool))
         if high <= 0:
             # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由
