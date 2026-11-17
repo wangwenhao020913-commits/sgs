@@ -30,6 +30,8 @@ from pydantic import BaseModel
 
 import sgs.state as state
 
+from sgs.engine import rng as engine_rng
+
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "sgs"
 RNG_MODULE = SOURCE_ROOT / "engine" / "rng.py"
 
@@ -101,6 +103,40 @@ def test_the_rng_module_really_is_the_one_that_imports_random_and_secrets():
     imported = {module for module, _ in _imports(ast.parse(RNG_MODULE.read_text(encoding="utf-8")))}
 
     assert {"random", "secrets"} <= imported, "engine/rng.py 应当是全项目唯一 import 随机库的模块"
+
+
+def test_a_substream_name_lives_only_as_a_constant_in_the_rng_module():
+    """**子流名**只许以 ``*_SUBSTREAM`` 常量的形式住在 ``engine/rng.py``（框架票 03）。
+
+    子流 = 唯一随机源按用途切开的独立序列（``GLOSSARY.md`` §子流）；名字一旦手写在调用点，
+    "这个项目有几条流、各自叫什么"就没有单点答案，两条语义不同的流也容易被顺手合并
+    （票 01 §7.3 的反例：复用 ``shuffle`` 抽牌，会让整副牌在每次抽签后换序）。
+
+    判据 = 该常量的**字面量**不出现在任何其他源文件里：调用方只拿工厂
+    （``hero_cards_stream`` / ``deck_search_stream``），不拿名字。
+    """
+    names = {
+        name: value
+        for name, value in vars(engine_rng).items()
+        if name.endswith("_SUBSTREAM")
+    }
+
+    assert names, "前置：rng 模块里应当有 *_SUBSTREAM 常量（否则本扫描是空转）"
+    assert names.get("DECK_SEARCH_SUBSTREAM") == "deck_search", (
+        "框架票 03 新增的「按牌名从牌堆取一张」子流名"
+    )
+    assert "deck_search_stream" in engine_rng.__all__, "工厂要和常量一起导出"
+
+    offenders = []
+    for path in _source_files():
+        if path == RNG_MODULE:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for name, value in names.items():
+            if f'"{value}"' in text or f"'{value}'" in text:
+                offenders.append(f"{_relative(path)} 手写了子流名 {value!r}（{name}）")
+
+    assert not offenders, "子流名只许住在 engine/rng.py：" + "；".join(offenders)
 
 
 # ---------------------------------------------------------------------------

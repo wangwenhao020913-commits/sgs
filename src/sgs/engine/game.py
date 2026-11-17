@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, NamedTuple
 
@@ -221,7 +221,7 @@ from .journal import (
     dump_journal,
     wrap_delta,
 )
-from .rng import RandomSource, hero_cards_stream
+from .rng import RandomSource, deck_search_stream, hero_cards_stream
 from .steps import CHAIN_TRIGGER_KEY, MAXLIFE_INCREASE, RANK_COMPARE_BOOST, build_steps
 from .victory import DeathFact, Side, solve_identity_outcome
 
@@ -868,6 +868,14 @@ class Engine:
         ``None`` = 本局还没抽过武将牌。派生本身是名字哈希的纯函数、不消耗任何既有子流，
         "懒"是为了让"抽牌这件事发生了没有"在代码里也是显式的一步：不抽武将牌的对局
         一个随机数都不从这里取，既有金录像因此逐字节不变。
+        """
+
+        self._deck_search: Randomness | None = None
+        """**按牌名从牌堆取一张**的子流（框架票 03）——**懒取**：首次真的取牌时才派生。
+
+        ``None`` = 本局还没调过 :meth:`take_named_card_from_deck`（或每次调用都没有候选、
+        一个随机位都没取）。与 ``_hero_cards`` 同一条理由：派生是纯函数，"懒"让"这条子流
+        建没建"本身成为可断言的事实——不调该入口的对局一个随机数都不从这里取。
         """
 
         self.stack = ResolutionStack()
@@ -2190,6 +2198,10 @@ class Engine:
         # chain-death-voices 票 03：卡牌事实锚在**刚压上的 USE 帧记录**上（必须在
         # `set_wine_active` 之前——那条会再发一条记录、锚点就漂到它上面去了）。
         self.note_card_use(seat=source, card=card)
+        # 框架票 03：整局「使用 / 打出牌张数」的座位事实（骆统【勤政】的 X）。
+        # 与 `play_card` 是**互斥的两入口**，故一次动作恰好 +1；多源转化 / 纯虚拟都是
+        # 一次 `start_use` ⇒ 也只 +1（用户 2026-11-14 签 Q5）。不发 delta、不进投影。
+        self.state.player(source).used_or_played_ever += 1
         if deal_bonus:
             self.set_wine_active(frame, source, False)
         return frame
@@ -2220,6 +2232,8 @@ class Engine:
         )
         # chain-death-voices 票 03：打出与使用是**互斥的两个入口**，各记一条（锚在 PLAY 帧上）。
         self.note_card_use(seat=source, card=card)
+        # 框架票 03：打出算 1 张（与 `start_use` 同一格计数、同一姿态）。
+        self.state.player(source).used_or_played_ever += 1
         return frame
 
     def start_skill(self, action: ActivateSkill, *, source: int) -> Frame:
@@ -2591,6 +2605,62 @@ class Engine:
                 actor=owner,
             )
         return drawn.cards
+
+    def take_named_card_from_deck(
+        self,
+        frame: Frame | None,
+        *,
+        names: Collection[str],
+        to_seat: int,
+    ) -> CardRef | None:
+        """按**牌名集合**从牌堆取一张到 ``to_seat`` 的手牌（框架票 03；骆统【勤政】）。
+
+        候选 = ``state.deck`` 里**牌面名**（``CardRef.name``）落在 ``names`` 里的那些牌，
+        按**牌堆顺序**排定；抽哪一张由专用子流
+        :data:`~sgs.engine.rng.DECK_SEARCH_SUBSTREAM` 的 ``randbelow(len(候选))`` 决定
+        （用户 2026-11-14 签 Q4 = **均匀随机**：观星 / 五谷之后玩家**不能**靠已知牌堆顶
+        把想要的牌钉给自己）。候选按牌堆序排是确定性要求——牌名集合的迭代序不能进随机序列。
+
+        搬牌**只经** :meth:`move_in_frame`（``reason = PUT``）：
+        ``src/sgs/skills/virtual.py`` 记着实测事故——就地 ``move_card`` 不落记录，会让记录流
+        重建的牌堆与活状态分叉。``PUT`` 是本仓「获得」的既有口径（``MoveReason.DRAW`` 专给
+        **摸牌**，用它会让【展骥】/【清俭】一类"摸牌"判据误触）。
+
+        **无候选 ⇒ 返回 ``None``、不落记录、不消耗随机位**（用户 2026-11-14 签 Q3 =
+        「该次不发生」：不洗牌堆、不取弃牌堆、不判平局）。"不消耗随机位"是硬保证：候选为
+        空时连子流都不派生，故一条空调用不会平移任何后续取牌。
+
+        子流**懒取**（:attr:`_deck_search`）：本局第一次真的取牌时才派生，派生是名字哈希的
+        纯函数、不消耗任何既有子流 ⇒ 不调本入口的对局一个随机数都不从这里取（47 条金录像
+        逐字节不变）。引擎**不认识**任何具体牌名：``names`` 由调用方（技能）给
+        （主干里禁具体技能 id / 装备名，见 ``tests/test_source_discipline.py`` §5）。
+
+        **不幂等**：每调一次就抽一次签、搬一张牌。若这次搬牌内联派发的「获得牌后」钩子
+        （【清俭】一类）向玩家提问，挂起与续跑由 :meth:`_flush_pending_move` 接管（返回值
+        因此只给牌面事实，与 :meth:`draw_open` 同姿态）；调用方必须把"这次取到了哪张"存进
+        帧私有数据、重入时读它而不是再调一次（`CODING_STANDARDS.md` §3；先例 =
+        :meth:`draw_hero_cards` 的同一句）。
+        """
+        candidates = [
+            card_id
+            for card_id in self.state.deck
+            if self.state.card(card_id).name in names
+        ]
+        if not candidates:
+            return None
+        if self._deck_search is None:
+            self._deck_search = deck_search_stream(self._seed)
+        pick = candidates[self._deck_search.randbelow(len(candidates))]
+        card = self.state.card(pick)
+        self.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.HAND, to_seat),
+            reason=MoveReason.PUT,
+            owner=to_seat,
+            actor=to_seat,
+        )
+        return card
 
     def has_zone_cards(self, seat: int) -> bool:
         """``seat`` 的三区里是否至少有一张牌（拆 / 顺的第 0 层前提）。

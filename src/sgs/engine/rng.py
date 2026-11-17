@@ -9,6 +9,7 @@
   按座位分名 ``ai:<seat>``（``ai_stream``），一个座位多取数不改写其他座位；
   **武将牌堆抽取**走 ``hero_cards``（``hero_cards_stream``，票 07），**懒取**——不抽
   武将牌的对局一个随机数都不从这里取，既有金录像因此逐字节不变。
+  **按牌名从牌堆取一张**走 ``deck_search``（``deck_search_stream``，框架票 03），同样懒取。
   （`GLOSSARY.md` §子流：M2 增身份发放与隐藏槽乱序；随机 AI 按座位分名。）
 - 洗牌自己写 Fisher–Yates + 无偏取数：不押在运行时的 ``shuffle`` / 播种实现细节上
   （官方只保证 ``random()`` 的跨版本一致，其余明说 subject to change）。
@@ -21,10 +22,12 @@ import random
 import secrets
 
 __all__ = [
+    "DECK_SEARCH_SUBSTREAM",
     "HERO_CARDS_SUBSTREAM",
     "SUBSTREAM_DOMAIN",
     "RandomSource",
     "ai_stream",
+    "deck_search_stream",
     "hero_cards_stream",
     "new_seed",
 ]
@@ -135,3 +138,26 @@ def hero_cards_stream(seed: int) -> RandomSource:
     ``select`` / ``hero`` 任何一条的位置。
     """
     return RandomSource(seed).substream(HERO_CARDS_SUBSTREAM)
+
+
+DECK_SEARCH_SUBSTREAM = "deck_search"
+"""**按牌名从牌堆取一张**的专用子流名（框架票 03；骆统【勤政】的首个消费者）。
+
+与 ``shuffle``（洗牌 / 重洗）分开：那一条按"一副牌的洗混顺序"取数，被摸牌与每次洗牌共享
+一个位置；本子流只回答"在全部同名牌里挑哪一张"（用户 2026-11-14 签 Q4 = **均匀随机**），
+两件事语义不同。共用一条会让"取过一张指定牌名的牌"平移整局洗牌 / 摸牌的重洗顺序
+（票 01 §7.3 的反例），而**重洗会把整副牌换序**，重录面远大于一条新子流。
+
+**懒取**：派生是名字哈希的纯函数（不消耗任何既有子流），且只有
+:meth:`~sgs.engine.game.Engine.take_named_card_from_deck` 首次真的取牌时才派生并取数——
+不调该入口的对局一个随机数都不从这里取，既有 47 条金录像因此逐字节不变。
+"""
+
+
+def deck_search_stream(seed: int) -> RandomSource:
+    """按牌名从牌堆取牌的子流（框架票 03）：调用方 = ``Engine.take_named_card_from_deck``。
+
+    同 :func:`hero_cards_stream` 的姿态：只做名字派生，不碰 ``shuffle`` / ``select`` /
+    ``identity`` / ``ai`` / ``hero_cards`` 任何一条的位置。
+    """
+    return RandomSource(seed).substream(DECK_SEARCH_SUBSTREAM)

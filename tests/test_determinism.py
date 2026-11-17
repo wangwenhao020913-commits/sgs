@@ -29,6 +29,9 @@ HASH_SEEDS = ("0", "1")
 GATE_FILES = (TESTS_DIR / "run_all.sh", TESTS_DIR / "conftest.py", ROOT / "pyproject.toml")
 """唯一门禁的组成文件；它们都不得把 ``PYTHONHASHSEED`` 定死。"""
 
+DECK_SEARCH_PROBE = TESTS_DIR / "deck_search_probe.py"
+"""框架票 03 的**入口级**探针：按牌名从牌堆取一张（不是整局 journal 那条主缝）。"""
+
 
 def _representative_seed() -> int:
     """代表局 = **行数最多**的那条基准的 seed（票 10 §4）。"""
@@ -81,3 +84,30 @@ def test_the_gate_does_not_pin_pythonhashseed():
         assert "PYTHONHASHSEED" not in path.read_text(encoding="utf-8"), (
             f"{path.name} 固定了 PYTHONHASHSEED（票 08 §7：跨值比对在子进程里显式给两个值）"
         )
+
+
+def test_the_named_deck_search_stays_identical_across_python_hash_seeds():
+    """框架票 03 的新入口：候选按**有序的牌堆**排定，牌名集合只做成员判定。
+
+    "取哪一张"由 ``deck_search`` 子流决定；若哪天改成"迭代牌名集合挑第一张"，set 的迭代序
+    会随进程级哈希变化 —— 这条**入口级**探针（同一 seed、两个哈希种子）当场红，不必等
+    骆统进金录像才暴露。
+    """
+    runs = {}
+    for hash_seed in HASH_SEEDS:
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed)
+        result = subprocess.run(
+            [sys.executable, str(DECK_SEARCH_PROBE)],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        runs[hash_seed] = result.stdout.encode()
+
+    first = runs[HASH_SEEDS[0]]
+    assert first, "探针必须产出一条非空输出"
+    assert all(payload == first for payload in runs.values()), (
+        f"同一次按牌名取牌在两个 PYTHONHASHSEED={HASH_SEEDS} 下不是逐字节一致"
+    )
