@@ -852,11 +852,17 @@ def _bazhen_candidate(state: GameState, ctx: ModifierContext, current: Any) -> A
       判红 ⇒ ``skill_result=True`` ⇒ 与真【八卦阵】走**同一条** ``_accept(virtual_dodge(...))``
       使用链。故八阵**不新增**任何"视为使用"机制，也不写座位状态；
     - 连续型（`edge-cases.md` 2.5 的 M2）⇒ **查询期算**：每次开窗现读装备区，"装备区一变
-      立刻跟着变"是结构事实，没有事件接缝要同步。
+      立刻跟着变"是结构事实，没有事件接缝要同步；
+    - **无视防具**（yijiang-2014-round2 票 25）：``ctx.flags["ignore_armor"]`` 为真 ⇒ 本技能
+      的「视为装备着【八卦阵】」也是那件防具的**效果**，同样不追加候选（与真【八卦阵】读
+      同一个键；flag 由 :func:`sgs.engine.steps._dodge_window` 从帧标签 ``Tag.ARMOR_IGNORED``
+      抄进候选生成载荷）。
     """
     if ctx.scope is not CandidateScope.DODGE:
         return current
     if ctx.owner != ctx.subject:
+        return current
+    if ctx.flags.get("ignore_armor"):
         return current
     if any(
         state.card(card_id).slot is SlotKind.ARMOR

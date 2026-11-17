@@ -1045,7 +1045,7 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "10-identity-7p-lord-win": (3334043, "9e52615a41de7aa32e544a55376a46cb9ca66ac94e8cf8c42c46c4cac81928e8"),
     "11-identity-8p-rebel-win": (1883336, "492dcb7e2e568e2e99f9eb97a2273833125e539d206b04eaaaf3834c7aeaded4"),
     "12-indulgence-skips-play": (1217689, "b895a9998687587186777798a3c7ad8d43604eb5fc7ded61ad1fda31b89f0203"),
-    "13-indulgence-heart-misses": (2230634, "bd4fedb3c11486a4413097ce606c6c2e49510c899390ae996344850f36afd60c"),
+    "13-indulgence-heart-misses": (2371103, "1e45de5adcc0f4e10495b8a0a9445e4d774bbc474066dbd0456e6c77515b8167"),
     "14-lightning-thunder-damage": (530891, "d2a5311557165cca33ae4bf2ed595d51bcb71ca8b737c3bfefa18fc2d60bebbe"),
     "15-lightning-defers-next-seat": (576031, "e679a58c4aea112d8f978cada05cfcc8207004ade4b35927eb88a46c204bc6ba"),
     "16-nullify-cancels-a-trick": (1701176, "efd0352c0899aad5717f5c1c77e8f1dabf6132a395b54acba35ab90c2b275a86"),
@@ -1119,6 +1119,16 @@ delta / frame 一条不变**（逐条核对过：35 +8、36 +11、38 +16、39 +3
 `50 / 58` 不在本表、由逐文件比对覆盖。`goals.py` 判据**一字未改、一条未放宽**；其余 40 条
 标准 108 基准逐字节不变（惰性守卫：没有 MOVE_AFTER 提供者时一条记录都不落）。重录清单见
 `tests/replays/README.md` 的「重录登记：摸牌对 MOVE_AFTER 可见」一节。
+
+**第四次显式重基线（2026-11-17，yijiang-2014-round2 票 25，用户批准）**：青釭剑的
+「无视防具」改成"三条伤害链 + 帧标签"后，【闪】窗口的**候选面**在"青釭剑杀八卦阵"的
+局面上**有意改变**（`ActivateSkill(equip.eight_diagrams)` 不再进 `legal_actions`）。
+`13-indulgence-heart-misses` 恰好录到这一手（座位 3 装青釭剑、座位 2 装八卦阵），旧字节
+`(2230634, bd4fedb…)` → `(2371103, 1e45de5…)`，只重录这一条；其余 46 条一字未动。
+票 25 原先写的「标签不进记录流 ⇒ 47 条逐字节不变」只对**标签本身**成立，对**候选面**
+不成立——旧录像录下的正是缺陷行为。`goals.py` 判据**一字未改、一条未放宽**（回放后
+【乐不思蜀】未命中判据仍命中）。重录清单见 `tests/replays/README.md` 的
+「重录登记：青釭剑封住【八卦阵】提供者」一节。
 """
 
 

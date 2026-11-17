@@ -1955,6 +1955,16 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=ME, discard_phase_hand_discards=2),
         ),
         "equip.silver_lion": (_HookFrame(**{MOVE_EVENT_KEY: move_silver_lion}),),
+        # yijiang-2014-round2 票 25：青釭剑的 USE_AFTER_DESIGNATE_TARGET 钩子（「无视防具」的
+        # 候选面那一半）——正面对照 = 帧的 source 是持有者、渠道牌是【杀】；持有者换成别人后
+        # 条件必须翻假（"关于我"）。
+        "equip.qinggang_sword": (
+            _HookFrame(
+                source=ME,
+                card=state.card(_PROBE_CHANNEL_SLASH),
+                targets=(0,),
+            ),
+        ),
         # M6 票 08：界【集智】的正面帧与标准版同形（使用者是我 + 非延时类锦囊），但两版
         # **条件已按牌面分开**（标准版排除延时类、界版排除转化牌；M6 评审订正），此处只核
         # "关于我"；

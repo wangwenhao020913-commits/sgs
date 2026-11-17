@@ -52,11 +52,19 @@ class Tag(str, Enum):
     ``UNRESPONSIVE`` 是票 08 的"不可响应"（【铁骑】）；``PREVENTED`` 与 ``SAVED`` 是既有两个
     帧私有标志的迁移落点（【寒冰剑】的"防止此伤害"、【贯石斧】的"依然造成伤害"）——迁进同一个
     袋子后，"标志挂在帧私有载荷上、不进记录流"这条事实只有一个落点。
+
+    ``ARMOR_IGNORED``（yijiang-2014-round2 票 25）是「无视防具」的**逐目标**档标志：
+    【青釭剑】/ 吴懿【奔袭】② 在 ``USE_AFTER_DESIGNATE_TARGET`` 给目标打上，【闪】响应窗口
+    （``steps._dodge_window``）据此把该目标防具的**提供者面**（【八卦阵】/ 卧龙【八阵】的
+    "视为使用【闪】"）从候选里收掉。它与伤害链上的 ``ignore_armor`` 旁路标志同义
+    （「令其防具的**效果**无效」，OL 现行《青釭剑》文本），但作用期不同：伤害链的 flag 住在
+    一次查询的 ``ModifierContext`` 里，本标签住在**这次使用**的帧上、随帧出栈结构性消失。
     """
 
     UNRESPONSIVE = "UNRESPONSIVE"
     PREVENTED = "PREVENTED"
     SAVED = "SAVED"
+    ARMOR_IGNORED = "ARMOR_IGNORED"
 
 
 @dataclass(frozen=True, slots=True)

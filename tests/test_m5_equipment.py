@@ -15,7 +15,7 @@ from types import MappingProxyType
 
 import pytest
 
-from sgs.data import RuleConfig, load_content_pack
+from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.effects import (
     CarrierKind,
     DamageNature,
@@ -30,7 +30,16 @@ from sgs.effects import (
 from sgs.engine import Engine
 from sgs.skills import catalog as catalog_module
 from sgs.skills.catalog import SkillDef
-from sgs.state import EndPhase, FrameKind, MoveReason, Pass, QueryKind, UseCard, Zone
+from sgs.state import (
+    ActivateSkill,
+    EndPhase,
+    FrameKind,
+    MoveReason,
+    Pass,
+    QueryKind,
+    UseCard,
+    Zone,
+)
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type
@@ -637,6 +646,65 @@ def _attack(seat_specs, card_id: int, *, target: int = 1):
     players = [_Scripted(handler)] + [_Scripted() for _ in range(len(seat_specs) - 1)]
     _advance(engine, players, _use_chain_done)
     return engine
+
+
+def _queries(engine, kind):
+    """记录流里某一类询问（与 ``tests/test_hero_response_window.py`` 的同名助手同形）。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == kind
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 青釭剑 × "需要【闪】"提供者面（yijiang-2014-round2 票 25）
+#
+# 「无视防具」= 令其防具的**效果**无效（OL 现行《青釭剑》「令其防具的效果无效直到此【杀】
+# 结算结束」）：除三条伤害链外，【八卦阵】的"视为使用【闪】"也不该上【闪】面的候选。
+# ---------------------------------------------------------------------------
+
+
+def test_qinggang_sword_also_hides_the_eight_diagrams_provider():
+    """青釭剑 ⇒ DODGE 面上**没有** ``equip.eight_diagrams``（改前红：探针 25 的 face[0]）。"""
+    engine = _attack(
+        [
+            SeatSpec(hand=(SLASH[0],), equip=(QINGGANG[0],)),
+            SeatSpec(equip=(EIGHT_DIAGRAMS[0],)),
+        ],
+        SLASH[0],
+    )
+
+    dodges = _queries(engine, QueryKind.DODGE)
+    assert len(dodges) == 1, "【闪】窗口照常开（只是候选里没有防具提供者）"
+    assert not [
+        action
+        for action in dodges[0].legal_actions
+        if isinstance(action, ActivateSkill)
+        and action.skill_id == "equip.eight_diagrams"
+    ], "防具的效果无效 ⇒ 八卦阵根本不进候选（不是判定后落空）"
+    assert any(
+        isinstance(action, Pass) for action in dodges[0].legal_actions
+    ), "放弃恒在面里（目标只剩真【闪】与放弃）"
+
+
+def test_qinggang_sword_does_not_hide_the_lord_request_provider():
+    """【护驾】不是防具：同一扇【闪】窗口里照常上脸（标签只认防具的提供者）。"""
+    engine = _attack(
+        [
+            SeatSpec(hand=(SLASH[0],), equip=(QINGGANG[0],)),
+            SeatSpec(hero="caocao", identity=Identity.LORD),
+        ],
+        SLASH[0],
+    )
+
+    dodges = _queries(engine, QueryKind.DODGE)
+    assert len(dodges) == 1
+    assert [
+        action
+        for action in dodges[0].legal_actions
+        if isinstance(action, ActivateSkill) and action.skill_id == "hero.caocao.hujia"
+    ], "主公技的求助窗口不是防具效果 ⇒ 仍然进候选"
 
 
 def test_a_fire_slash_deals_two_to_vine_armor_through_the_real_damage_frame():

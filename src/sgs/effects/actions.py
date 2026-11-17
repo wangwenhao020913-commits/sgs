@@ -936,7 +936,9 @@ def _actions_for(
         candidates = _discard(state, seat, answers_seq)
     elif kind is QueryKind.DODGE:
         ctx = payload if isinstance(payload, DodgeContext) else DodgeContext()
-        candidates = _dodge(state, seat, answers_seq, ctx.providers_used)
+        candidates = _dodge(
+            state, seat, answers_seq, ctx.providers_used, armor_ignored=ctx.armor_ignored
+        )
     elif kind is QueryKind.PEACH:
         if dying is None:
             raise ValueError("PEACH 询问必须给出濒死者座位")
@@ -1121,7 +1123,12 @@ def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 
 
 def _dodge(
-    state: GameState, seat: int, answers_seq: int, providers_used: tuple[str, ...] = ()
+    state: GameState,
+    seat: int,
+    answers_seq: int,
+    providers_used: tuple[str, ...] = (),
+    *,
+    armor_ignored: bool = False,
 ) -> list[Action]:
     """【闪】的响应窗口：真【闪】候选 + "需要牌"提供者序列（票 10 §5 / 票 30）+ 放弃。
 
@@ -1133,6 +1140,10 @@ def _dodge(
     提供者（【八卦阵】）由 ``CANDIDATES`` 挂点追加为 ``ActivateSkill``；已经问过的
     提供者（``providers_used``）被过滤掉——"每个提供者只问一次"。选中才惰性判定。
     放弃恒在最后且**永远可选**（需要【闪】是"可以"，不是"必须"）。
+
+    ``armor_ignored``（票 25）= 目标防具的**效果无效**（【青釭剑】/ 吴懿【奔袭】②）：
+    与伤害链同一个键名写进 ``ModifierContext.flags["ignore_armor"]``，两条防具提供者
+    （【八卦阵】/【八阵】）据此闭嘴；真【闪】与放弃不受影响。
     """
     actions: list[Action] = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
@@ -1148,6 +1159,8 @@ def _dodge(
             scope=CandidateScope.DODGE,
             # 窗口"要一张什么牌"与另外三档同源：提供者（【蛊惑】）按它收窄声明范围。
             respond_required=DODGE_RESPONSE_CARD,
+            # 只在这一问上为真：flag 是本次候选生成的临时便签（与伤害链同一键名）。
+            flags={"ignore_armor": True} if armor_ignored else {},
         ),
         tuple(actions),
     )

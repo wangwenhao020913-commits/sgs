@@ -782,6 +782,11 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     payload = DodgeContext(
         providers_used=providers_used,
         floor=need_card_floor(frame, target),
+        # 票 25：「无视防具」= 令其防具的**效果**无效（OL 现行《青釭剑》）。标签是**逐目标**档，
+        # 由【青釭剑】/ 吴懿【奔袭】② 的 USE_AFTER_DESIGNATE_TARGET 钩子写在本帧 / 被压出的
+        # RESOLVE 帧上；候选生成口据此收掉【八卦阵】/【八阵】的提供者（伤害链上的旁路标志
+        # 到不了这一问——它早于任何伤害链）。
+        armor_ignored=has_tag(frame, Tag.ARMOR_IGNORED, target=target),
     )
     if not host.should_ask_query(
         QueryKind.DODGE,

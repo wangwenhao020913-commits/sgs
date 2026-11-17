@@ -450,10 +450,18 @@ class DodgeContext:
     发动 ⇒ 引擎写下一档并重问。``_dodge_window`` 在 ``dodges_done`` 每加一处把它清回 0
     ——【无双】的两张【闪】是**两次**需要牌事件，第二张的 floor 从头开始（补充一手
     §2.1.2.2(2)）。**不进记录流**。
+
+    ``armor_ignored``（yijiang-2014-round2 票 25）= 目标身上的防具**效果无效**（【青釭剑】/
+    吴懿【奔袭】② 的「无视防具」；OL 现行《青釭剑》「令其防具的效果无效直到此【杀】结算结束」）。
+    由 ``_dodge_window`` 从帧标签 ``Tag.ARMOR_IGNORED``（逐目标档）读出，候选生成口把它放进
+    ``ModifierContext.flags["ignore_armor"]``——与伤害链同一个键名、同一个语义。【八卦阵】/
+    卧龙【八阵】这两条 ``CANDIDATES`` 提供者据此不再追加"视为使用【闪】"的候选；【护驾】不是
+    防具，照常上脸。**不进记录流**（与 ``floor`` 同姿态）：加字段不改既有询问 / 录像的字节。
     """
 
     providers_used: tuple[str, ...] = ()
     floor: int = 0
+    armor_ignored: bool = False
 
 
 @dataclass(frozen=True, slots=True)

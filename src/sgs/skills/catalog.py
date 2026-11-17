@@ -2860,6 +2860,36 @@ def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any)
     return current
 
 
+def _qinggang_ignore_armor_condition(host: Any, frame: Frame) -> bool:
+    """青釭剑的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子条件：**这张【杀】是持有者用的**。
+
+    修饰器版本用 ``ctx.owner`` 自校（``_own_slash``），钩子的条件拿不到实例，故读派发环在
+    求值前写进 :data:`MATCH_OWNER_KEY` 的持有者，再与 ``frame.data["source"]`` 比对——
+    与【铁骑】/【雌雄双股剑】的「关于我」判据同一条。牌名走【杀】**家族**判据（火 / 雷 /
+    转化 / 虚拟【杀】同判，M5-05b），与三条伤害链上的修饰器版本**同源**。
+    """
+    del host
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    card = frame.data.get("card")
+    return card is not None and is_slash(behavior_for(card))
+
+
+def _qinggang_ignore_armor_tag(host: Any, frame: Frame) -> None:
+    """青釭剑：给本次【杀】的**每个目标**打 ``Tag.ARMOR_IGNORED``（逐目标档，票 25）。
+
+    这是"无视防具"在**候选面**上的那一半：伤害链的三条 ``Modifier`` 只能压防具的
+    ``EFFECTIVENESS`` / ``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP``，而【八卦阵】/ 卧龙【八阵】
+    是 ``CANDIDATES`` **提供者**（"视为使用【闪】"发生在【闪】窗口、早于任何伤害链）。
+    标签随本次使用（帧出栈）结构性消失，故「直到此【杀】结算结束」与【无双】的两张【闪】
+    两处都成立；它不进记录流，47 条金录像逐字节不变。
+    """
+    del host
+    for target in tuple(frame.data.get("targets", ())):
+        add_tag(frame, Tag.ARMOR_IGNORED, target=target)
+
+
 _VINE_ARMOR_IMMUNE_CARD_TYPES = frozenset({"slash", "barbarian_invasion", "arrow_barrage"})
 """藤甲"对你无效"的牌名闭集（D9：普通【杀】**按产物牌型** ``slash`` 判）。
 
@@ -3067,11 +3097,18 @@ def _eight_diagrams_candidate(state: GameState, ctx: ModifierContext, current: A
     票 09 的【黄天】式形态会在这里写 ``ctx.owner != ctx.subject`` 的分支）。
     "每提供者只问一次"由**候选生成器**统一过滤 ``ctx.providers_used``（一处实现，不在这里重复）。
     选中才惰性判定（判定帧由响应窗口步骤压出，不在候选生成期）。
+
+    **无视防具**（票 25）：``ctx.flags["ignore_armor"]`` 为真 ⇒ 本件防具的**效果**无效
+    （OL 现行《青釭剑》「令其防具的效果无效直到此【杀】结算结束」）⇒ 连候选都不追加。
+    flag 由 :func:`sgs.engine.steps._dodge_window` 从帧标签 ``Tag.ARMOR_IGNORED`` 抄进
+    候选生成载荷，故判据只有一处，卧龙【八阵】读同一个键（:func:`sgs.skills.heroes._bazhen_candidate`）。
     """
     del state
     if ctx.scope is not CandidateScope.DODGE:
         return current
     if ctx.owner != ctx.subject:
+        return current
+    if ctx.flags.get("ignore_armor"):
         return current
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
@@ -3673,6 +3710,15 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "qinggang_sword",
         locked=True,
         requirement="使用【杀】时无视目标的防具",
+        # 票 25：三条伤害链之外再挂一个**时机钩子**——「无视防具」的候选面那一半
+        # （【八卦阵】/【八阵】的"视为使用【闪】"）要在【闪】窗口之前就写进帧标签。
+        hooks=(
+            Hook(
+                Timing.USE_AFTER_DESIGNATE_TARGET,
+                handler=_qinggang_ignore_armor_tag,
+                condition=_qinggang_ignore_armor_condition,
+            ),
+        ),
         modifiers=(
             Modifier(ModifierPoint.EFFECTIVENESS, _qinggang_ignore_armor),
             Modifier(ModifierPoint.DAMAGE_TAKE_AMOUNT, _qinggang_ignore_armor),

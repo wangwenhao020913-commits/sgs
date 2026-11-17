@@ -3344,11 +3344,14 @@ class _SlashScript:
         return PassPlayer().respond(query)
 
 
-def _dodge_state(*, top: int, defender_hand=(), defender_equip=(), virtual_equipment=()):
+def _dodge_state(
+    *, top: int, defender_hand=(), defender_equip=(), virtual_equipment=(), attacker_equip=()
+):
     """座位 0 出一张【杀】打座位 1（卧龙诸葛）；判定牌 = ``top``。
 
     回合仍从摸牌阶段跑起（``phase=PLAY`` 只放阶段指针），故牌堆顶先压**两张黑牌**当
     座位 0 摸到的两张——否则判定抽到的是被摸走之后的那张，颜色不受控。
+    ``attacker_equip``（yijiang-2014-round2 票 25）：座位 0 的装备（青釭剑用例）。
     """
     slash = _slashes(1)[0]
     drawn = tuple(
@@ -3359,7 +3362,11 @@ def _dodge_state(*, top: int, defender_hand=(), defender_equip=(), virtual_equip
     state = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hand=(slash,), identity=Identity.LORD),
+            SeatSpec(
+                hand=(slash,),
+                equip=tuple(attacker_equip),
+                identity=Identity.LORD,
+            ),
             SeatSpec(
                 hero=WOLONG,
                 hand=tuple(defender_hand),
@@ -3371,7 +3378,12 @@ def _dodge_state(*, top: int, defender_hand=(), defender_equip=(), virtual_equip
             SeatSpec(identity=Identity.RENEGADE),
         ],
         deck=_deck_with_tops(
-            PACK, (*drawn, top), slash, *defender_hand, *defender_equip
+            PACK,
+            (*drawn, top),
+            slash,
+            *defender_hand,
+            *defender_equip,
+            *attacker_equip,
         ),
         turn_seat=0,
         phase=Phase.PLAY,
@@ -3427,6 +3439,27 @@ def test_bazhen_offers_a_dodge_judgment_when_the_armor_zone_is_empty():
         defender.dodges[0],
         lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
     ), "没有实体防具 ⇒ 八阵候选在【闪】窗口里"
+
+
+def test_bazhen_is_hidden_under_qinggang_sword():
+    """青釭剑「令其防具的效果无效」⇒ 八阵的"视为使用【闪】"也不上脸（票 25）。
+
+    八阵与真【八卦阵】**同形**（`huo-wolong-yanliang` 票 01 的"读法 Q"）：它也是那件防具
+    的效果，故读**同一个** ``ignore_armor`` 标志；对照 = 上一条（无青釭剑时八阵在面里）。
+    """
+    red = _judge_card(Color.RED)
+    qinggang = _cards("qinggang_sword")[0]
+    state, slash = _dodge_state(top=red, attacker_equip=(qinggang,))
+    _, _, defender = _run_slash(state, slash, bazhen=True)
+
+    assert defender.dodges, "【闪】窗口照常开（真【闪】/放弃仍在）"
+    assert (
+        find_action(
+            defender.dodges[0],
+            lambda action: isinstance(action, ActivateSkill) and action.skill_id == BAZHEN,
+        )
+        is None
+    ), "无视防具 ⇒ 八阵不进候选、也不发判定"
 
 
 def test_bazhen_is_silent_when_a_physical_armor_is_equipped():
