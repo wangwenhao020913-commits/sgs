@@ -59,7 +59,7 @@ from sgs.effects import (
     is_slash,
     targets_within_attack_range,
 )
-from sgs.resolution import Control, Frame
+from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
@@ -227,8 +227,8 @@ def _benxi_ignore_armor(state: GameState, ctx: ModifierContext, current: Any) ->
     牌面「你无视其他角色的防具」**没有**限定【杀】（用户 2026-11-17 签 Q2b = 对所有牌）⇒
     与本模块外【青釭剑】的同形回调相比，少一句 ``_own_slash``；覆盖范围按一手
     （OL 现行【青釭剑】「令其防具的**效果**无效」）= 防具的**整体效果**（仁王盾式"无效"、
-    藤甲的火焰 +1、白银狮子的封顶；【八卦阵】的"视为使用【闪】"属提供者面，由 round2 票 25
-    的帧标签承接——那条不在本回调里）。
+    藤甲的火焰 +1、白银狮子的封顶；【八卦阵】的"视为使用【闪】"属提供者面，由同一条技能的
+    :func:`_benxi_ignore_armor_tag` 钩子写帧标签承接——那条不在这条链上）。
     """
     if ctx.owner != ctx.subject:
         return current
@@ -236,6 +236,33 @@ def _benxi_ignore_armor(state: GameState, ctx: ModifierContext, current: Any) ->
         return current
     ctx.flags["ignore_armor"] = True
     return current
+
+
+def _benxi_ignore_armor_condition(host: Any, frame: Frame) -> bool:
+    """② 的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子条件：**我用的、我的回合、所有距离均为 1**。
+
+    修饰器版本用 ``ctx.owner`` 自校，钩子的条件拿不到实例，故读派发环在求值前写进
+    :data:`MATCH_OWNER_KEY` 的持有者，再与帧的 ``source`` 比对（与【青釭剑】/【铁骑】同一条
+    "关于我"判据）。距离判据复用 :func:`_benxi_all_other_distances_are_one`（连续型、查询期
+    现算，含 ① 的 −X 与地板 1）——与三条伤害链上的修饰器**同一个条件函数**，不会两处漂移。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    return _benxi_all_other_distances_are_one(host.state, owner)
+
+
+def _benxi_ignore_armor_tag(host: Any, frame: Frame) -> None:
+    """② 给本次使用的**每个目标**打 ``Tag.ARMOR_IGNORED``（候选面那一半，round2 票 25）。
+
+    与【青釭剑】的 ``_qinggang_ignore_armor_tag`` 同形、同一个标签；差别只在条件（本技能
+    Q2b = **对所有牌**，故不判【杀】家族）。帧标签是**这一次使用**的属性：随本次使用
+    （帧出栈）结构性消失，不进记录流；【闪】窗口（``steps._dodge_window``）据此把目标身上
+    【八卦阵】/ 卧龙【八阵】的"视为使用【闪】"提供者收掉。
+    """
+    del host
+    for target in tuple(frame.data.get("targets", ())):
+        add_tag(frame, Tag.ARMOR_IGNORED, target=target)
 
 
 def _feiying_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -508,12 +535,20 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
         # 一将成名-2014 吴懿【奔袭】（yijiang-2014-round3 票 01）：一条锁定技、五个修饰点——
         # ① DISTANCE（−X，X = 本回合已用牌数）；② TARGET_COUNT（【杀】额度 1 → 2）与
         # EFFECTIVENESS / DAMAGE_TAKE_AMOUNT / DAMAGE_CAP（无视防具，照【青釭剑】的三挂点）。
-        # 零询问、零钩子：② 的条件是查询期现算的纯函数。
+        # 零询问；一条强制钩子（锁定技 ⇒ 不问"是否发动"）：② 的「无视防具」在**候选面**上的
+        # 那一半（【八卦阵】/【八阵】的提供者）与【青釭剑】走同一个帧标签。
         SkillDef(
             skill_id=BENXI,
             locked=True,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(
+                    Timing.USE_AFTER_DESIGNATE_TARGET,
+                    handler=_benxi_ignore_armor_tag,
+                    condition=_benxi_ignore_armor_condition,
+                ),
+            ),
             modifiers=(
                 Modifier(ModifierPoint.DISTANCE, _benxi_distance),
                 Modifier(ModifierPoint.TARGET_COUNT, _benxi_target_count),

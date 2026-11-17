@@ -1473,6 +1473,20 @@ def _own_turn_probe_state() -> GameState:
     return state
 
 
+def _benxi_probe_state() -> GameState:
+    """【奔袭】② 的正面对照：**我的回合**、对每个其他存活座位的距离都是 1。
+
+    三座环里 ME（座位 1）到座位 0 / 2 的座位距离都是 1；``turn_seat = ME`` 是条件的第二半
+    （把持有者换成座位 2 后，「我的回合」与 ``source`` 两半同时翻假）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(), SeatSpec()],
+        turn_seat=ME,
+        phase=Phase.PLAY,
+    )
+
+
 def _bengkuai_probe_state() -> GameState:
     """【崩坏】的正面对照：**别人比我低**（ME 3 体力、座位 2 是 2 体力）。
 
@@ -1729,6 +1743,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _qianxun_probe_state()
     if skill_id == "hero.jie_caocao.hujia":
         return _hujia_probe_state()
+    if skill_id == "hero.wuyi.benxi":
+        return _benxi_probe_state()
     if skill_id == "hero.jie_sunquan.jiuyuan":
         return _jiuyuan_probe_state()
     if skill_id == "hero.tao_liubei.congtao":
@@ -1964,6 +1980,12 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
                 card=state.card(_PROBE_CHANNEL_SLASH),
                 targets=(0,),
             ),
+        ),
+        # yijiang-2014-round3 票 01：吴懿【奔袭】② 的 USE_AFTER_DESIGNATE_TARGET 钩子（同一
+        # 帧标签的武将版）——正面对照 = 帧的 source 是持有者 + **我的回合** + 所有其他座位
+        # 距离为 1（见 ``_benxi_probe_state``）；持有者换成别人后两半同时翻假。
+        "hero.wuyi.benxi": (
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH), targets=(0,)),
         ),
         # M6 票 08：界【集智】的正面帧与标准版同形（使用者是我 + 非延时类锦囊），但两版
         # **条件已按牌面分开**（标准版排除延时类、界版排除转化牌；M6 评审订正），此处只核

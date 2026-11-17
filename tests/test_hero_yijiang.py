@@ -3006,8 +3006,9 @@ def test_bingyi_wording_is_its_own_and_reads_the_seat_step():
 #       使用【杀】时可以多选择一个目标。
 #
 # 用户签的三条口径：Q1 = **累计**（用 N 张 ⇒ −N；真源 = 引擎侧的 `turn_card_suits`，
-# 不新立字段、不新开钩子）；Q2a = **覆盖【八卦阵】**（那一半住 round2 票 25，本文件不测）；
-# Q2b = **对所有牌**；Q3 = **连续型**（每次求值现算）。
+# 不新立字段）；Q2a = **覆盖【八卦阵】**（候选面那一半随 round2 票 25 的帧标签落地，本文件的
+# `test_benxi_also_hides_the_eight_diagrams_provider` 测它）；Q2b = **对所有牌**；
+# Q3 = **连续型**（每次求值现算）。
 # ---------------------------------------------------------------------------
 
 WUYI = "wuyi"
@@ -3067,6 +3068,43 @@ def _benxi_slashes(state, seat: int = 0) -> list:
     ]
 
 
+def _benxi_dodge_faces(state, *, target: int = 1) -> list[tuple]:
+    """驱动一次真实【杀】（座位 0 → ``target``），返回全部【闪】询问的候选面。
+
+    走**主缝**（``Engine`` + 询问 / 应答），不手调候选生成器：提供者面由帧标签从
+    "使用 → 指定目标后 → 响应窗口"这条链推导，只有真跑一遍才看得见（票 25 的验收口径）。
+    """
+    slash = _BENXI_SLASH[0]
+    engine = Engine.from_state(state, seed=1)
+    faces: list[tuple] = []
+    for _ in range(4_000):
+        if slash in engine.state.discard and not engine.stack:
+            break
+        if engine.pending is None:
+            engine._step()
+            continue
+        query = engine.pending
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 0:
+            action = next(
+                (
+                    candidate
+                    for candidate in query.legal_actions
+                    if isinstance(candidate, UseCard)
+                    and candidate.card.card_id == slash
+                    and candidate.targets == (target,)
+                ),
+                None,
+            )
+            assert action is not None, "【杀】应在吴懿的出牌阶段候选里"
+            engine.submit(action)
+        elif query.kind == QueryKind.DODGE:
+            faces.append(tuple(query.legal_actions))
+            engine.submit(_answer(query))
+        else:
+            engine.submit(_answer(query))
+    return faces
+
+
 def test_wuyi_is_in_the_yijiang_2014_table_with_one_skill():
     from sgs.data import load_heroes
 
@@ -3086,7 +3124,10 @@ def test_benxi_declares_the_card_text_verbatim_and_never_preactivates():
     definition = CATALOG[BENXI]
     assert definition.locked is True, "锁定技：不问「是否发动」"
     assert definition.preactivated is False
-    assert definition.hooks == (), "零询问：没有钩子"
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.USE_AFTER_DESIGNATE_TARGET
+    ], "唯一钩子 = ② 的「无视防具」帧标签（锁定技 ⇒ 不问「是否发动」）"
+    assert all(hook.flow is None for hook in definition.hooks), "纯 handler，无流水线"
     assert definition.seams == ()
     assert definition.flow is None
     assert definition.requirement == (
@@ -3282,3 +3323,46 @@ def test_benxi_ignore_armor_covers_non_slash_cards():
         pack=_BENXI_PACK_EX,
     )
     assert target_is_effective(bare, bare.card(arrow), 0, 1) is False
+
+
+def test_benxi_also_hides_the_eight_diagrams_provider():
+    """用户 Q2a：② 的「无视防具」连【八卦阵】的**候选面**一起封（round2 票 25 的标签）。
+
+    四座局里座位 0 → 座位 2 的座位距离是 2；先用掉 1 张牌（① 的 −1）把「所有其他角色」
+    压到距离 1，② 成立 ⇒ 【闪】面上没有 ``equip.eight_diagrams``，只剩真【闪】与放弃。
+    对照用一个**六座环**：即使用掉这张【杀】本身，座位 0 → 座位 3 仍是 3 − 1 = 2 ⇒ ② 不
+    成立、八卦阵照常上脸（连续型条件真的在读距离，不是恒置标签）。
+    """
+    eight = _cards("eight_diagrams")[0]
+
+    armed = _benxi_state(SeatSpec(equip=(eight,)), hand=(_BENXI_SLASH[0],))
+    _benxi_used(armed, 1)
+    faces = _benxi_dodge_faces(armed)
+    assert faces, "【闪】窗口照常开（只是候选里没有防具提供者）"
+    assert not [
+        action
+        for action in faces[0]
+        if isinstance(action, ActivateSkill) and action.skill_id == "equip.eight_diagrams"
+    ], "② 成立 ⇒ 八卦阵根本不进候选（不是判定后落空）"
+    assert any(isinstance(action, Pass) for action in faces[0]), "放弃恒在面里"
+
+    bare = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=WUYI, hand=(_BENXI_SLASH[0],)),
+            SeatSpec(equip=(eight,)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, _BENXI_SLASH[0], eight),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    bare_faces = _benxi_dodge_faces(bare)
+    assert any(
+        isinstance(action, ActivateSkill) and action.skill_id == "equip.eight_diagrams"
+        for action in bare_faces[0]
+    ), "对照：六座环里就算用掉这张【杀】，到座位 3 的距离仍是 2 ⇒ ② 不成立、八卦阵照常上脸"
