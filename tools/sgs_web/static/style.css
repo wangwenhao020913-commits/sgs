@@ -709,6 +709,16 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   grid-auto-rows: calc(42 * var(--dsu)); gap: 4px; flex: 1 1 auto;
   align-content: start;
 }
+/* 票 26：净距离读数复用坐骑槽（负 → 攻马 / 正 → 防马），不占新列、不改槽尺寸。
+   坐骑槽不画牌名，故槽内有空间：花色点数一行 + 读数一枚小胶囊。 */
+.mini-slot .distance-bonus {
+  display: inline-block; max-width: 100%;
+  margin-top: calc(1 * var(--dsu));
+  padding: 0 calc(2 * var(--dsu));
+  border-radius: 999px; background: rgba(60, 48, 30, .82); color: #fff;
+  font-size: calc(9 * var(--dsu)); line-height: 1.25; font-weight: 700;
+  pointer-events: none;
+}
 .mini-slot {
   min-width: 0; height: calc(42 * var(--dsu)); position: relative;
   border: 1px dashed var(--line); border-radius: 5px;
@@ -1435,6 +1445,7 @@ button.mini-slot { cursor: pointer; }
    （balance），四字 / 五字全名放得下；槽名（标签 12 / 判定 12）保留。 */
 .self .judge-row { flex: 0 0 calc(52 * var(--dsu)); gap: 4px; }
 .self .equip-grid { grid-auto-rows: calc(60 * var(--dsu)); gap: 5px; }
+.self .mini-slot .distance-bonus { font-size: calc(11 * var(--dsu)); }
 .self .mini-slot { height: calc(60 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
 .self .mini-slot.judge-slot { height: calc(52 * var(--dsu)); }
 .self .mini-slot .slot-k { font-size: calc(12 * var(--dsu)); }

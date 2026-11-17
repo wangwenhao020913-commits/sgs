@@ -7,6 +7,8 @@
  *   |势力-名称-身份| |判定槽 ×3|
  *   |----体力条----| |-武器-| |-防具-|
  *   |手牌：N/上限--座位号| |-攻马-| |-防马-|
+ * 两个坐骑槽（票 26）：有牌时只画花色点数 + **净距离读数**（负 → 攻马槽 / 正 → 防马槽），
+ * 不画牌名；没有坐骑牌也照样把读数画在对应槽里。净 0 时数字不存在。
  * 尺寸 / 配色在 style.css；本文件只造节点的**语义形状**（槽位、状态类、悬停全文）。
  *
  * 纪律：
@@ -148,6 +150,20 @@ function armorSegsNode(count) {
   return sleeve;
 }
 
+/** 全局距离增减读数（票 26）：**净距离**的 `−2` / `+1`（正负号恒写；0 时调用方不接节点）。
+ *
+ * 数值**原样读服务端** `player.distance_bonus`（投影用 `effects.distance_bonus` 现算：
+ * 主体侧 + 客体侧代数和，含坐骑本身）。前端不自己数坐骑、不读技能，也不夹 0 / 下限——
+ * 那会是第二份真源。渲染位置由调用方定（负 → 攻马槽 / 正 → 防马槽），本函数只管形状与
+ * 符号；`title` 只给一句人话，不列来源清单（用户口径：只显示总数）。 */
+function distanceBonusNode(value) {
+  const node = document.createElement("span");
+  node.className = "distance-bonus";
+  node.textContent = `${value > 0 ? "+" : "−"}${Math.abs(value)}`;
+  node.setAttribute("title", "本回合距离修正");
+  return node;
+}
+
 /** 手牌读数（票 09）：`张数/上限`——武将块左下的「手牌：」、武将详情与顶栏共用一句。
  *
  * 上限是**服务端下发的派生量**（`player.hand_limit` = `effects.hand_limit`：体力值 →
@@ -230,6 +246,8 @@ function equipSlotLayout(cards) {
  *  - 槽名：判定槽**常显**（窄槽读不出"这是判定区"）；装备槽**只在空槽**显示
  *    （武器 / 防具 / 攻马 / 防马），有装备时让位给牌面；
  *  - 有牌：牌名（窄槽折行，见 `style.css`）+ 花色点数（单源 / 实体牌才有）；
+ *    **两个坐骑槽例外**（票 26，用户 2026-11-17 实机口径）：不画牌名，只画花色点数，
+ *    并把**净距离读数**归到本侧（负 → 攻马槽 / 正 → 防马槽；净 0 不画）；
  *    转化牌右上角标「转」，常规卡面上的标签 / 虚拟标记仍由预览负责；
  *  - 悬停：`#t-card-preview` 里画 `cardFaceNode` 的**常规卡面**并跟随鼠标；原生的
  *    `title` 去掉（同一条信息只留一个读法）。
@@ -238,8 +256,10 @@ function equipSlotLayout(cards) {
  *  槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
  */
 function miniSlotNode(options) {
-  const { zone, slot, sealKey, card, interactive, ctx } = options;
+  const { zone, slot, sealKey, card, interactive, ctx, distanceBonus = 0 } = options;
   const judge = zone === "judge";
+  // 票 26：坐骑槽不画牌名，只画花色点数 + 归到这一侧的净距离读数。
+  const mount = slot === "horse_offense" || slot === "horse_defense";
   const node = document.createElement(interactive && card ? "button" : "div");
   if (node.tagName === "BUTTON") node.type = "button";
   node.className = `mini-slot ${judge ? "judge-slot" : "equip-slot"} ${card ? "filled" : "empty"}`;
@@ -251,7 +271,11 @@ function miniSlotNode(options) {
   label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
   // 判定槽常显槽名；装备槽只在空槽显示（有装备时不写武器 / 防具 / 攻马 / 防马）。
   if (judge || !card) node.appendChild(label);
-  if (!card) return node;
+  if (!card) {
+    // 空坐骑槽也要显示"全局数"：飞影 +1 落防马区、马术 −1 落攻马区（无花色点数）。
+    if (mount && distanceBonus) node.appendChild(distanceBonusNode(distanceBonus));
+    return node;
+  }
   node.setAttribute("data-card-id", String(card.card_id));
   // 简略表现：花色 + 点数（实体牌 / 单源转化有这两项；多源转化与虚拟牌没有）。
   const suitRank = card.suit
@@ -270,10 +294,14 @@ function miniSlotNode(options) {
     corner.setAttribute("title", "转化牌");
     node.appendChild(corner);
   }
-  const value = document.createElement("span");
-  value.className = "slot-v";
-  value.textContent = cardName(card);
-  node.appendChild(value);
+  if (!mount) {
+    const value = document.createElement("span");
+    value.className = "slot-v";
+    value.textContent = cardName(card);
+    node.appendChild(value);
+  } else if (distanceBonus) {
+    node.appendChild(distanceBonusNode(distanceBonus));
+  }
   // 悬停 = 常规卡面预览（标签 / 转化 / 虚拟都在 `cardFaceNode` 里画），跟随鼠标。
   node.addEventListener("mouseenter", (event) => showCardPreview([card], event));
   node.addEventListener("mousemove", (event) => moveCardPreview(event));
@@ -486,13 +514,21 @@ function sideBlockRows(player, ctx) {
   equip.className = "equip-grid";
   equip.setAttribute("data-zone", "equip");
   equip.setAttribute("data-seat", String(player.seat));
+  // 票 26（用户 2026-11-17 实机口径）：净距离读数**复用坐骑槽**——负的归攻马槽、正的归
+  // 防马槽（没有坐骑牌也照样画在对应槽里）；净 0 时一个数字都不加。
+  const distanceBonus = Math.trunc(Number(player && player.distance_bonus) || 0);
   for (const layout of equipSlotLayout(player.equip)) {
+    const onThisSide = (
+      (layout.slot === "horse_offense" && distanceBonus < 0)
+      || (layout.slot === "horse_defense" && distanceBonus > 0)
+    );
     const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
       interactive: baseInteractive || equipPick
         || equipCardPick(layout.card)
         || preactivationPick("equip", layout.card),
+      distanceBonus: onThisSide ? distanceBonus : 0,
       ctx,
     });
     // 装备槽同样**逐槽**一个角标（装备格本身不画）。

@@ -12689,6 +12689,173 @@ def test_m5_real_chained_and_wine_states_reach_the_seat_display_contract() -> No
 
 
 # ---------------------------------------------------------------------------
+# yijiang-2014-round2 票 26：座位卡的全局距离增减读数
+# ---------------------------------------------------------------------------
+
+
+def _distance_bonus_payload(specs, *, pack=None):
+    """真实 ``visible_snapshot`` 里每个座位的 ``distance_bonus``（票 26 的唯一读取方）。"""
+    from types import SimpleNamespace
+
+    from support import build_state
+
+    resolved = _context_pack() if pack is None else pack
+    used = [card for spec in specs for card in (*spec.hand, *spec.equip, *spec.judge)]
+    state = build_state(
+        pack=resolved,
+        seats=specs,
+        deck=tuple(
+            card_id for card_id in range(len(resolved.deck.cards)) if card_id not in used
+        ),
+        turn_seat=0,
+    )
+    snapshot = visible_snapshot(
+        SimpleNamespace(
+            engine=Engine.from_state(state, seed=1), human_seat=0, pack=resolved
+        )
+    )
+    return [player["distance_bonus"] for player in snapshot["players"]]
+
+
+def test_the_seat_payload_carries_the_global_distance_bonus(monkeypatch) -> None:
+    """票 26 §4：0 / −1 马 / −1 马 + 马术 = −2 / 只对某一座位的修饰器 = 0。
+
+    读数走**真实产出路径**（``visible_snapshot`` → ``display.seat_display``），不直调
+    ``distance_bonus``：这条断言防的是"算了却没下发"。
+    """
+    from support import SeatSpec
+
+    pack = _context_pack()
+    horses = {
+        card.type: card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.type in ("chitu", "jueying")
+    }
+    chitu, jueying = horses["chitu"], horses["jueying"]
+
+    assert _distance_bonus_payload([SeatSpec(), SeatSpec()]) == [0, 0], (
+        "没有距离修饰器 ⇒ 0（前端据此不画节点）"
+    )
+    assert _distance_bonus_payload(
+        [SeatSpec(equip=(chitu,)), SeatSpec()]
+    ) == [-1, 0], "−1 进攻马：主体侧 −1"
+    assert _distance_bonus_payload(
+        [SeatSpec(hero="machao", equip=(chitu,)), SeatSpec()]
+    ) == [-2, 0], "马术 −1 + 进攻马 −1 = −2（用户 2026-11-17 的原话）"
+    assert _distance_bonus_payload(
+        [SeatSpec(), SeatSpec(equip=(jueying,))]
+    ) == [0, 1], "+1 防御马只体现在客体侧 ⇒ 仍算进该座位的读数（口径 A）"
+
+    # 只对某一座位的修饰器：合成一条 DISTANCE 回调，**只**把"到座位 1"的距离 +1。
+    from types import MappingProxyType, SimpleNamespace
+
+    from sgs.skills import CarrierKind, Modifier, ModifierPoint, SkillDef
+    from sgs.skills import catalog as catalog_module
+
+    def _target_only(state, ctx, current):
+        del state
+        if ctx.owner != ctx.subject:
+            return current
+        return current + 1 if ctx.target == 1 else current
+
+    synthetic = "test.ticket26.target_only_distance"
+    definitions = dict(catalog_module.CATALOG)
+    definitions[synthetic] = SkillDef(
+        skill_id=synthetic,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        modifiers=(Modifier(ModifierPoint.DISTANCE, _target_only),),
+    )
+    monkeypatch.setattr(catalog_module, "CATALOG", MappingProxyType(definitions))
+
+    from sgs.effects import distance
+    from support import build_state
+
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {chitu, jueying}
+        ),
+        turn_seat=0,
+    )
+    state.player(0).granted_skills.append(synthetic)
+    assert distance(state, 0, 1) == 2, "前提：这条合成修饰器真的把距离 1 → 2"
+    snapshot = visible_snapshot(
+        SimpleNamespace(
+            engine=Engine.from_state(state, seed=1), human_seat=0, pack=pack
+        )
+    )
+    assert [player["distance_bonus"] for player in snapshot["players"]] == [0, 0], (
+        "只对某一座位的修饰器不进全局读数（哨兵 target 让逐目标回调不命中）"
+    )
+
+
+def test_every_distance_modifier_only_indexes_its_own_owner() -> None:
+    """``distance_bonus`` 两侧都可能把座位槽换成哨兵：DISTANCE 回调只许索引 ``ctx.owner``。
+
+    ``-1`` 在 Python 里仍是合法下标（末位），"读了哨兵"不会抛错、只会静默算错，故这条
+    只能是**静态**闸门：扫描 ``CATALOG`` 里全部 ``ModifierPoint.DISTANCE`` 回调的源码，
+    ``state.player(...)`` 的实参必须是 ``ctx.owner``（实例持有者恒是真座位），且不许直接
+    下标 ``state.players``。新加的距离修饰器因此会被这条拦下，而不是等实机读数漂了才查。
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from sgs.effects import ModifierPoint
+    from sgs.skills import CATALOG
+
+    handlers: dict[int, tuple[str, object]] = {}
+    for skill_id, definition in CATALOG.items():
+        for modifier in definition.modifiers:
+            if modifier.point is ModifierPoint.DISTANCE:
+                handlers.setdefault(id(modifier.handler), (skill_id, modifier.handler))
+    assert {
+        "equip.chitu",
+        "hero.machao.mashu",
+        "hero.jie_gongsunzan.yicong",
+        "hero.shen_caocao_mobile.feiying",
+        "hero.jie_weiyan_mobile.qimou",
+        "hero.wuyi.benxi",
+    } <= {skill_id for skill_id, _ in handlers.values()}, (
+        "DISTANCE 回调清单变了（新增 / 删除都要重新看一遍哨兵判据）"
+    )
+
+    offenders: list[str] = []
+    for skill_id, handler in handlers.values():
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "player"
+                and node.args
+            ):
+                arg = node.args[0]
+                owned = (
+                    isinstance(arg, ast.Attribute)
+                    and arg.attr == "owner"
+                    and isinstance(arg.value, ast.Name)
+                    and arg.value.id == "ctx"
+                )
+                if not owned:
+                    offenders.append(f"{skill_id}: {ast.unparse(node)}")
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "players"
+            ):
+                offenders.append(f"{skill_id}: {ast.unparse(node)}")
+    assert not offenders, (
+        "DISTANCE 回调把 subject / target 当座位索引了（distance_bonus 会在哨兵上取错座位）："
+        + "；".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
 # M5-bugfix（C / D）：真 HTTP 的点击顺序与预发动纯 CardRef
 #
 # 两条固定构造局面（`tests/support/m5_fixture_server.py`）经**真的** `serve._Handler`

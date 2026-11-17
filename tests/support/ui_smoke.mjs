@@ -2624,6 +2624,90 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `picks=${JSON.stringify(ui.state.picks)} disabled=${$("btn-submit").disabled}`);
 }
 
+// ②b 净距离读数（yijiang-2014-round2 票 26）：**复用坐骑槽**，负 → 攻马 / 正 → 防马。
+//     坐骑槽不画牌名，只画花色点数 + 读数；没有坐骑牌也把读数画在对应槽里；净 0 不画。
+{
+  const walk = (node, out = []) => {
+    out.push(node);
+    for (const child of node.children) walk(child, out);
+    return out;
+  };
+  const byClass = (node, name) => (node ? walk(node).filter((child) => child.classList.contains(name)) : []);
+  const zoneOf = (root, zone) => (root
+    ? walk(root).find((child) => child.getAttribute("data-zone") === zone) || null
+    : null);
+  const zoneOfSeat = (seat, zone) => {
+    if (Number(seat) === 0) return zoneOf($("t-self-zones"), zone);
+    const box = Array.from($("t-seats").children)
+      .find((c) => c.getAttribute("data-seat") === String(seat));
+    return zoneOf(box, zone);
+  };
+  const slotOf = (equip, side) => (equip
+    ? byClass(equip, "mini-slot")
+      .find((slot) => slot.getAttribute("data-slot") === side) || null
+    : null);
+  const horse = (id, name, slot, type) => ({ ...synthCard(id, name), type, slot });
+  const bonusView = synthView({
+    kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [], candidate_index: {}, context: null, option_seats: {},
+  });
+  // 座位 0：马术 −1 + 攻马 −1 = −2，且攻马槽有牌（只画 ♦/♠+点数，不画「赤兔」）。
+  bonusView.snapshot.players[0].equip = [horse(31, "赤兔", "horse_offense", "chitu")];
+  bonusView.snapshot.players[0].distance_bonus = -2;
+  // 座位 1：净 0，但防马槽有牌 ⇒ 只画花色点数、不画读数。
+  bonusView.snapshot.players[1].equip = [horse(32, "的卢", "horse_defense", "jueying")];
+  bonusView.snapshot.players[1].distance_bonus = 0;
+  // 座位 2：飞影 +1、没有坐骑牌 ⇒ 读数落在**防马空槽**里。
+  bonusView.snapshot.players[2].distance_bonus = 1;
+  ui.state.view = bonusView;
+  ui.resetSelection();
+  ui.renderTable();
+
+  const selfEquip = zoneOfSeat(0, "equip");
+  const selfAttack = slotOf(selfEquip, "horse_offense");
+  const selfNumbers = byClass(selfAttack, "distance-bonus");
+  check("㉿DB1 净 −2 落在攻马槽：只画读数与花色点数，不画牌名",
+    !!selfEquip && !!selfAttack && selfNumbers.length === 1
+      && selfNumbers[0].text() === "−2"
+      && byClass(selfAttack, "slot-suit").length === 1
+      && byClass(selfAttack, "slot-v").length === 0
+      && !selfEquip.text().includes("赤兔")
+      && byClass(selfEquip, "mini-slot").length === 4,
+    `读数=${JSON.stringify(selfNumbers.map((n) => n.text()))} 牌名=${selfEquip && selfEquip.text().includes("赤兔")} 槽=${byClass(selfEquip, "mini-slot").length}`);
+
+  const zeroEquip = zoneOfSeat(1, "equip");
+  check("㉿DB2 净 0 ⇒ 一个读数节点都没有（防马槽仍画花色点数、不画牌名）",
+    !!zeroEquip && byClass(zeroEquip, "distance-bonus").length === 0
+      && byClass(slotOf(zeroEquip, "horse_defense"), "slot-suit").length === 1
+      && byClass(slotOf(zeroEquip, "horse_defense"), "slot-v").length === 0
+      && !zeroEquip.text().includes("的卢")
+      && byClass(zeroEquip, "mini-slot").length === 4,
+    `读数=${byClass(zeroEquip, "distance-bonus").length} 牌名=${zeroEquip && zeroEquip.text().includes("的卢")}`);
+
+  const plusEquip = zoneOfSeat(2, "equip");
+  const plusDefense = slotOf(plusEquip, "horse_defense");
+  const plusNumbers = byClass(plusDefense, "distance-bonus");
+  check("㉿DB3 净 +1 落在防马**空槽**：正号恒写、槽名仍在、无花色点数",
+    plusNumbers.length === 1 && plusNumbers[0].text() === "+1"
+      && byClass(plusDefense, "slot-suit").length === 0
+      && byClass(plusDefense, "slot-k").length === 1,
+    `读数=${JSON.stringify(plusNumbers.map((n) => n.text()))}`);
+
+  // 座位 1 改成净 −1（仍无攻马牌）⇒ 负数改落攻马空槽；防马槽只剩自己的花色点数。
+  bonusView.snapshot.players[1].distance_bonus = -1;
+  ui.renderTable();
+  const negativeEquip = zoneOfSeat(1, "equip");
+  const negativeAttack = slotOf(negativeEquip, "horse_offense");
+  const negativeDefense = slotOf(negativeEquip, "horse_defense");
+  const negativeNumbers = byClass(negativeAttack, "distance-bonus");
+  check("㉿DB4 没有坐骑牌也显示：净 −1 落攻马空槽，防马槽不再带读数",
+    negativeNumbers.length === 1 && negativeNumbers[0].text() === "−1"
+      && byClass(negativeAttack, "slot-k").length === 1
+      && byClass(negativeDefense, "distance-bonus").length === 0
+      && byClass(negativeDefense, "slot-suit").length === 1,
+    `读数=${JSON.stringify(negativeNumbers.map((n) => n.text()))} 防马读数=${byClass(negativeDefense, "distance-bonus").length}`);
+}
+
 // ③ 布局壳（U1-01）：中央舞台 / 底部面板 / 顶栏。用 index.html 的结构断言——
 //    DOM 垫片不建父子关系，故直接查源串里各段的先后与归属。
 {
@@ -8678,14 +8762,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(seat1, "equip-slot").map((slot) => attr(slot, "data-slot")).join(",")
         === "weapon,armor,horse_offense,horse_defense",
     `judge=${byClass(seat1, "judge-slot").length} equip=${byClass(seat1, "equip-slot").map((s) => attr(s, "data-slot")).join(",")}`);
-  check("U1-02h2 槽里的牌画牌名 + 花色点数；有装备时**不**显示武器/防具/攻马/防马，空槽才显示；判定槽常显",
+  check("U1-02h2 槽里的牌画牌名 + 花色点数；有装备时**不**显示武器/防具/攻马/防马，空槽才显示；判定槽常显；坐骑槽只花色点数（票 26）",
     seat1.text().includes("八卦阵") && seat1.text().includes("闪电")
-      && seat2.text().includes("赤兔")
+      && !seat2.text().includes("赤兔")
       && (() => {
         const slots = byClass(seat1, "equip-slot");
         const filled = slots.filter((slot) => hasClass(slot, "filled"));
         const empty = slots.filter((slot) => hasClass(slot, "empty"));
         const judge = byClass(seat1, "judge-slot")[0];
+        const horse = byClass(seat2, "equip-slot").find(
+          (slot) => attr(slot, "data-slot") === "horse_offense");
         return filled.length === 1
           && byClass(filled[0], "slot-k").length === 0
           && byClass(filled[0], "slot-suit").length === 1
@@ -8694,7 +8780,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
           && empty.every((slot) => byClass(slot, "slot-k").some(
             (label) => /武器|防具|攻马|防马/.test(label.textContent)))
           && byClass(judge, "slot-suit").length === 1
-          && byClass(judge, "slot-k").length === 1;
+          && byClass(judge, "slot-k").length === 1
+          && !!horse && hasClass(horse, "filled")
+          && byClass(horse, "slot-suit").length === 1
+          && byClass(horse, "slot-v").length === 0
+          && horse.text().includes("♠7");
       })(),
     `seat1="${seat1.text().replace(/\s+/g, " ").trim()}"`);
 

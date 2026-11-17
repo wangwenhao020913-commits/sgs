@@ -2017,8 +2017,16 @@ def test_mini_slots_show_the_equip_label_only_when_empty() -> None:
     assert "if (judge || !card) node.appendChild(label);" in body, (
         "槽名的挂载必须按「判定槽常显 / 装备槽只在空槽」的条件来"
     )
-    assert body.find("node.appendChild(label)") < body.find("if (!card) return node;"), (
+    empty_branch = body.find("if (!card) {")
+    assert empty_branch >= 0, "空槽分支必须存在（票 26 起它还要给坐骑槽补净距离读数）"
+    assert body.find("node.appendChild(label)") < empty_branch, (
         "空槽仍要画出槽名（判定 / 武器 / 防具 / 攻马 / 防马）"
+    )
+    assert 'const mount = slot === "horse_offense" || slot === "horse_defense";' in body, (
+        "坐骑槽的判据必须只按这两个槽名（票 26 的牌名例外）"
+    )
+    assert "if (!mount) {" in body, (
+        "坐骑槽不画牌名（票 26：坐骑槽只画花色点数 + 净距离读数）"
     )
     assert 'label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空"' in body, (
         "槽名的文字必须来自「判定」/ 装备槽标签（不新建一份映射）"

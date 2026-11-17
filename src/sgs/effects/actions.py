@@ -86,6 +86,7 @@ from .modifiers import (
 )
 
 __all__ = [
+    "DISTANCE_NO_TARGET",
     "EFFECTIVENESS",
     "NEED_CARD_FLOOR_KEY",
     "TARGET_FILTERS",
@@ -100,6 +101,7 @@ __all__ = [
     "designation_actions_for",
     "discard_count",
     "distance",
+    "distance_bonus",
     "forced_use_targets",
     "hand_count",
     "hand_limit",
@@ -193,6 +195,52 @@ def distance(state: GameState, a: int, b: int) -> int:
     base = seat_distance(state, a, b)
     ctx = ModifierContext(subject=a, target=b, role=ModifierRole.TARGET)
     return max(apply_modifiers(ModifierPoint.DISTANCE, state, ctx, base), 1)
+
+
+DISTANCE_NO_TARGET = -1
+"""``distance_bonus`` 的哨兵：**不是任何座位**（票 26）。
+
+用在 ``ModifierContext`` 的 ``subject`` / ``target`` 上，让"只对某一角色"的逐目标修饰器
+天然不参与汇总。DISTANCE 链的回调因此**只许索引** ``ctx.owner``（实例持有者恒是真座位）；
+读 ``state.player(ctx.subject)`` / ``state.player(ctx.target)`` 会在哨兵上取到错的座位
+（``-1`` 在 Python 里还是末位下标，不会抛错）——`tests/test_web.py` 的静态闸门钉住这一条。
+"""
+
+
+def distance_bonus(state: GameState, seat: int) -> int:
+    """``seat`` 的**全局距离增减**（票 26 的座位卡读数）：主体侧 + 客体侧的代数和。
+
+    用户 2026-11-17 签的口径（票 26 §2 = **A**）：
+    - **主体侧**（``seat`` 到别人）= 进攻马 / 马术 / 义从① / 奇谋 / 奔袭① 一类
+      ``ctx.owner == ctx.subject`` 的修饰器；
+    - **客体侧**（别人到 ``seat``）= 防御马 / 义从② / 飞影 一类
+      ``ctx.owner == ctx.target`` 的修饰器（防御马只在这一侧 ⇒ 只算主体侧会让它永不显示）；
+    - **逐目标**（"只对某一角色"）不参与：两次查询各把一个座位槽换成
+      :data:`DISTANCE_NO_TARGET`，按那一个具体角色取值的回调不会命中；
+    - 返回**净数**（可为负、可为 0；界面在 0 时不画节点）。
+
+    这是**只读查询**：不写状态、不进记录流、不改 ``DISTANCE`` 链的语义（坐骑 / 技能
+    照常走同一条修饰器管道）。返回值**不含座位距离**，也不夹下限——它只回答"全局加减
+    多少"，不是"到某人的距离"。
+    """
+    ctx_role = ModifierRole.TARGET
+    subject_side = apply_modifiers(
+        ModifierPoint.DISTANCE,
+        state,
+        ModifierContext(
+            subject=seat, target=DISTANCE_NO_TARGET, role=ctx_role
+        ),
+        0,
+    )
+    object_side = apply_modifiers(
+        ModifierPoint.DISTANCE,
+        state,
+        ModifierContext(
+            subject=DISTANCE_NO_TARGET, target=seat, role=ctx_role
+        ),
+        0,
+    )
+    return int(subject_side) + int(object_side)
 
 
 def seat_distance(state: GameState, a: int, b: int) -> int:

@@ -34,7 +34,13 @@ from sgs.data import (
     load_content_pack,
     load_hero_tables,
 )
-from sgs.effects import behavior_for, hand_limit, responder_role, response_count
+from sgs.effects import (
+    behavior_for,
+    distance_bonus,
+    hand_limit,
+    responder_role,
+    response_count,
+)
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
@@ -569,6 +575,16 @@ def live_tag_deltas_after(
     return out
 
 
+def _seat_distance_bonuses(state: Any) -> dict[int, int]:
+    """每个座位的**全局距离增减**（yijiang-2014-round2 票 26）。
+
+    **只读现算**：直接调 :func:`sgs.effects.distance_bonus`（主体侧 + 客体侧代数和），
+    不读 ``PlayerPublic``、不写状态、不进记录流。座位卡读数的唯一真源就在这里——
+    ``display.seat_display`` 只是把它抄进网页载荷。
+    """
+    return {player.seat: distance_bonus(state, player.seat) for player in state.players}
+
+
 def visible_snapshot(session: Session) -> dict[str, Any]:
     """人类座位的**玩家视角**快照（每次现算、不缓存）。
 
@@ -594,6 +610,8 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         # UI1/UI2：验明之前的【蛊惑】扣置牌**不给牌面**（处理区是全局公开区，这里按
         # "它不是公开事实"处理），舞台改画**声明的牌名**。
         concealed=concealed_guohuo_cards(session.engine),
+        # 票 26：座位卡的全局距离增减（现算、只读；0 时前端不画节点）。
+        distance_bonuses=_seat_distance_bonuses(state),
     )
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
     # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
@@ -3043,6 +3061,12 @@ def pending_payload(
         # UI1/UI2：内嵌视角里的处理区同样不给未验明的扣置牌牌面。
         concealed=(
             concealed_guohuo_cards(session.engine) if isinstance(session, Session) else None
+        ),
+        # 票 26：内嵌视角的座位卡也要读数（同一份现算；裸 Query 没有引擎 ⇒ 缺省 0）。
+        distance_bonuses=(
+            _seat_distance_bonuses(session.engine.state)
+            if isinstance(session, Session)
+            else None
         ),
     )
     if isinstance(session, Session) and same_viewer:

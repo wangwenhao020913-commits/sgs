@@ -294,13 +294,18 @@ def seat_display(
     *,
     heroes: HeroTable | Sequence[HeroTable] | None = None,
     players: Sequence[PlayerPublic] | None = None,
+    distance_bonus: int = 0,
 ) -> dict[str, Any]:
-    """座位卡的展示字段：横置 / 酒 / **护甲**状态 + 身份标签 + 武将名称 / 势力。
+    """座位卡的展示字段：横置 / 酒 / **护甲** / **全局距离增减** + 身份标签 + 武将名称 / 势力。
 
     ``chained`` / ``wine_active`` / ``armor`` 来自投影（U1-04 起是 ``PlayerPublic`` 字段；
     ``armor`` 是 W7 的第二条体力轴，投影里 ``exclude`` ⇒ 只从这里补进网页载荷）；
     网页载荷里的身份标签由这里统一给出，前端可优先读它；旧的 ``identityLabel`` 仅作
     回放 / 合成载荷兜底。
+
+    ``distance_bonus``（yijiang-2014-round2 票 26）：**投影现算**的全局距离增减（主体侧 +
+    客体侧代数和，见 :func:`sgs.effects.distance_bonus`），不是 ``PlayerPublic`` 字段——
+    与 ``armor`` 同姿态只补进网页载荷；0 = 前端一个节点都不加（DOM 与引入前同形）。
 
     ``hero_name`` / ``kingdom`` / ``kingdom_label``（U1-02）：引擎只给武将 id
     （``PlayerPublic.hero``）与势力枚举；``heroes`` 是武将表——**可以是多张**（M6 票 19：
@@ -315,6 +320,8 @@ def seat_display(
         "wine_active": bool(player.wine_active),
         # W7 的第二条体力轴：座位卡在血条右侧画护甲段（0 = 一段都不画，DOM 与旧版逐字节同形）。
         "armor": int(player.armor),
+        # 票 26：坐骑区的全局距离增减读数（0 = 不画，DOM 与引入前同形）。
+        "distance_bonus": int(distance_bonus),
         "identity_label": (
             IDENTITY_LABELS.get(player.identity) if player.identity is not None else None
         ),
@@ -554,6 +561,7 @@ def decorate_snapshot(
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
+    distance_bonuses: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
@@ -565,6 +573,8 @@ def decorate_snapshot(
     按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
     ``concealed`` 是**未验明**的【蛊惑】扣置牌（:func:`sgs_web.projection.concealed_guohuo_cards`）：
     ``processing`` 里那几张改画"声明的牌名"（对谁都不给源牌牌面）。
+    ``distance_bonuses``（票 26）是**按座位现算**的全局距离增减（缺省/缺座 = 0）：
+    由投影层调 :func:`sgs.effects.distance_bonus` 后传进来，展示层不自己读引擎状态。
     """
     for key in ("self_hand", "discard"):
         payload[key] = _extend_card_list(payload.get(key), lookup=lookup)
@@ -581,7 +591,15 @@ def decorate_snapshot(
                 player_payload[key] = _extend_card_list(
                     player_payload.get(key), lookup=lookup
                 )
-            player_payload.update(seat_display(player, heroes=heroes, players=players))
+            player_payload.update(
+                seat_display(
+                    player,
+                    heroes=heroes,
+                    players=players,
+                    # 票 26：缺席省 = 0（合成载荷 / 旧调用点不画读数）。
+                    distance_bonus=(distance_bonuses or {}).get(player.seat, 0),
+                )
+            )
     return payload
 
 
@@ -593,8 +611,13 @@ def decorate_pending(
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
+    distance_bonuses: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
-    """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""
+    """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。
+
+    ``distance_bonuses`` 与 :func:`decorate_snapshot` 同义（票 26）：内嵌视角里的座位卡
+    用同一份现算读数，不因"这扇询问嵌在别处"退回 0。
+    """
     for entry in (payload.get("candidate_index") or {}).values():
         if isinstance(entry, dict):
             entry["card"] = _extend_card_dict(entry.get("card"), lookup=lookup)
@@ -615,6 +638,7 @@ def decorate_pending(
             heroes=heroes,
             virtual_cards=virtual_cards,
             concealed=concealed,
+            distance_bonuses=distance_bonuses,
         )
     # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
     payload["prompt_display"] = prompt_display(query) if query.legal_actions else None

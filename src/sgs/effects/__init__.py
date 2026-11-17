@@ -10,6 +10,7 @@
 """
 
 from .actions import (
+    DISTANCE_NO_TARGET,
     EFFECTIVENESS,
     NEED_CARD_FLOOR_KEY,
     TARGET_FILTERS,
@@ -25,6 +26,7 @@ from .actions import (
     designation_actions_for,
     discard_count,
     distance,
+    distance_bonus,
     forced_use_targets,
     hand_count,
     hand_limit,
@@ -106,6 +108,7 @@ from .primitives import (
 
 __all__ = (
     "CARD_BEHAVIORS",
+    "DISTANCE_NO_TARGET",
     "DODGE_RESPONSE_CARD",
     "EFFECTIVENESS",
     "NULLIFY_RESPONSE_CARD",
@@ -155,6 +158,7 @@ __all__ = (
     "designation_actions_for",
     "discard_count",
     "distance",
+    "distance_bonus",
     "draw_from_deck",
     "forced_use_targets",
     "hand_count",
