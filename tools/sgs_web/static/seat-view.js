@@ -284,7 +284,9 @@ function miniSlotNode(options) {
     : "";
   if (suitRank) {
     const suit = document.createElement("span");
-    suit.className = "slot-suit";
+    // 花色分红黑：与手牌大卡面 / 花色按钮同一份 `card.color`（`card-view.js:suitColorClass`，
+    // 本文件不抄第二份花色 → 颜色表；槽里的牌载荷里已带 `color`）。
+    suit.className = "slot-suit " + suitColorClass(card);
     suit.textContent = suitRank;
     node.appendChild(suit);
   }
@@ -417,9 +419,13 @@ function fillHeroZones(box, player) {
   for (const row of rows) box.appendChild(row);
 }
 
-/** B：武将块上的**状态标签**（服务端 `hero_tags`：[{tag,label}]）。没有标签整块隐藏。
+/** B：武将块上的**状态标签**（服务端 `hero_tags`：[{tag,label,parts?}]）。没有标签整块隐藏。
  *
- * 只渲染服务端下发的 `label` / `tag`，前端不按技能 / 牌面计算"该显示什么"。
+ * 只渲染服务端下发的 `label` / `tag` / `parts`，前端不按技能 / 牌面计算"该显示什么"。
+ * `parts` 是该标签**需要逐段上色**时的分段文本（skill-display 票 02；spec §4）：
+ * 出现时只画 parts（`label` 是同一句话的纯文本，再画一遍就重复了），每段一个
+ * `span.hero-tag-part`，`tone` 只可能是 `red` / `black`（服务端 `display.py:SUIT_LABELS`）；
+ * 没有 `parts` 时照旧一个 `textContent` 文本节点（既有标签一字不变）。
  */
 function fillHeroTags(box, player) {
   if (!box) return;
@@ -430,7 +436,18 @@ function fillHeroTags(box, player) {
     const chip = document.createElement("span");
     chip.className = "hero-tag";
     chip.setAttribute("data-tag", tag.tag || "");
-    chip.textContent = tag.label || tag.tag || "";
+    const parts = tag.parts || [];
+    if (parts.length) {
+      for (const part of parts) {
+        const span = document.createElement("span");
+        // 没有 tone 的段（技能名 / 点数）是普通文本，继承 chip 的默认色。
+        span.className = `hero-tag-part ${part.tone || ""}`;
+        span.textContent = part.text || "";
+        chip.appendChild(span);
+      }
+    } else {
+      chip.textContent = tag.label || tag.tag || "";
+    }
     box.appendChild(chip);
   }
 }

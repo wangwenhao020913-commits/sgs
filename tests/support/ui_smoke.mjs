@@ -20087,6 +20087,107 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && foeHeroTagChips.map((node) => node.textContent).join(",") === "裸衣",
     `self=${selfHeroTagChips.map((n) => n.textContent).join(",")}`
       + ` foe=${foeHeroTagChips.map((n) => n.textContent).join(",")}`);
+
+  /* skill-display 票 02：`hero_tags` 的 `parts` 逐段上色（红 / 黑与卡面同一套 token），
+   * 没有 `parts` 的标签**显示一字不变**（裸衣仍然只有一个文本节点）。spec §4 的载荷例子：
+   * `{label: "渐营 ♥7", parts: [{text:"渐营 "}, {text:"♥", tone:"red"}, {text:"7"}]}`。
+   * 垫片没有真文本节点：元素的 `children` 只数**元素**子节点，`textContent` 是自身文本 +
+   * 子节点文本的拼接。故"只画一个文本节点" = 没有元素子节点且文本等于 label；
+   * "不重复画 label" = 子节点文本拼起来**等于** label（先写 label 再挂 parts 会翻倍）。 */
+  const badgeView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9410,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9410 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  badgeView.snapshot.players[0].hero_tags = [
+    { tag: "luoyi", label: "裸衣" },
+    { tag: "jianying", label: "渐营 ♥7", parts: [
+      { text: "渐营 " }, { text: "♥", tone: "red" }, { text: "7" },
+    ] },
+    { tag: "botu", label: "博图 ♠♥♣", parts: [
+      { text: "博图 " }, { text: "♠", tone: "black" },
+      { text: "♥", tone: "red" }, { text: "♣", tone: "black" },
+    ] },
+  ];
+  ui.state.view = badgeView;
+  ui.resetSelection();
+  ui.renderTable();
+  const badgeChip = (tag) => Array.from($("t-self-hero-tags").children).find(
+    (node) => hasClass(node, "hero-tag") && node.getAttribute("data-tag") === tag) || null;
+  // 只数带 `hero-tag-part` 的元素子节点：垫片的 children 里没有文本节点。
+  const tagParts = (chip) => Array.from((chip && chip.children) || []).filter(
+    (node) => hasClass(node, "hero-tag-part"));
+  const toneClassOf = (node) => (hasClass(node, "red") ? "red"
+    : hasClass(node, "black") ? "black" : "-");
+  const plainChip = badgeChip("luoyi");
+  const jianyingChip = badgeChip("jianying");
+  const botuChip = badgeChip("botu");
+  check("BADGE-01a 无 parts 的标签照旧只画一个文本节点（裸衣的显示一字不变）",
+    !!plainChip && plainChip.children.length === 0 && plainChip.textContent === "裸衣"
+      && plainChip.className === "hero-tag",
+    plainChip
+      ? `裸衣 chip 元素子节点=${plainChip.children.length}`
+        + ` 文本=${JSON.stringify(plainChip.textContent)} class=${JSON.stringify(plainChip.className)}`
+      : "没有 luoyi chip");
+  check("BADGE-01b 有 parts 的标签按段画 span、不重复画 label（渐营 ♥7）",
+    !!jianyingChip && jianyingChip.children.length === 3
+      && tagParts(jianyingChip).map((node) => node.textContent).join("") === "渐营 ♥7"
+      && jianyingChip.textContent === "渐营 ♥7",
+    jianyingChip
+      ? `渐营 chip 元素子节点=${jianyingChip.children.length}`
+        + ` 段=${JSON.stringify(tagParts(jianyingChip).map((n) => n.textContent))}`
+        + ` 文本=${JSON.stringify(jianyingChip.textContent)}`
+      : "没有 jianying chip");
+  check("BADGE-01c parts 的 red / black 各自带正确的上色类（♥ 红、♠♣ 黑）",
+    tagParts(jianyingChip).map(toneClassOf).join(",") === "-,red,-"
+      && tagParts(botuChip).map(toneClassOf).join(",") === "-,black,red,black",
+    `渐营=${tagParts(jianyingChip).map(toneClassOf).join(",")}`
+      + ` 博图=${tagParts(botuChip).map(toneClassOf).join(",")}`);
+
+  /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
+   * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
+   * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。
+   * 多源转化牌（`virtual_sources` 且无花色）没有 `slot-suit`——槽里本就不画花色点数。 */
+  badgeView.snapshot.players[0].equip = [
+    { ...synthCard(41, "八卦阵"), slot: "armor", suit: "heart", color: "red" },
+  ];
+  badgeView.snapshot.players[0].judge = [
+    { ...synthCard(42, "闪电"), suit: "spade", color: "black" },
+  ];
+  badgeView.snapshot.players[1].equip = [
+    { ...synthCard(43, "仁王盾"), slot: "armor", suit: "club", color: "black" },
+  ];
+  badgeView.snapshot.players[2].judge = [
+    { ...synthCard(44, "兵粮寸断"), kind: "transformed", suit: null, rank: null,
+      color: null, virtual_sources: [5, 6] },
+  ];
+  ui.state.view = badgeView;
+  ui.resetSelection();
+  ui.renderTable();
+  const zoneRowOf = (seat, zone) => {
+    const box = Number(seat) === Number(badgeView.snapshot.seat)
+      ? $("t-self-zones") : seatBox(seat);
+    return box ? rowOf(box, "data-zone", zone) : null;
+  };
+  const slotSuits = (row) => boxSkills(row).filter((node) => hasClass(node, "slot-suit"));
+  const suitTone = (row) => slotSuits(row).map(toneClassOf).join(",");
+  const selfEquipRow = zoneRowOf(0, "equip");
+  const selfJudgeRow = zoneRowOf(0, "judge");
+  const foeEquipRow = zoneRowOf(1, "equip");
+  const foeJudgeRow = zoneRowOf(2, "judge");
+  check("BADGE-02a 装备槽的花色带 card.color 的红 / 黑类（本人 ♥ 红、对手 ♣ 黑）",
+    suitTone(selfEquipRow) === "red" && suitTone(foeEquipRow) === "black",
+    `本人装备=${suitTone(selfEquipRow)} 对手装备=${suitTone(foeEquipRow)}`);
+  check("BADGE-02b 判定槽同理（闪电是黑桃 ⇒ black）",
+    suitTone(selfJudgeRow) === "black",
+    `本人判定=${suitTone(selfJudgeRow)}`);
+  check("BADGE-02c 多源转化牌（无花色）的槽里没有 slot-suit",
+    !!foeJudgeRow && slotSuits(foeJudgeRow).length === 0
+      && boxSkills(foeJudgeRow).some((node) => hasClass(node, "slot-trans")),
+    `对手判定 slot-suit=${slotSuits(foeJudgeRow).length}`);
   const noZoneView = synthView({
     kind: "PLAY_PHASE", actor: 0, seq: 9403,
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
