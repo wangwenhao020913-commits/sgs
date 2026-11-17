@@ -17,6 +17,7 @@ M1 已接线四类询问：出牌阶段（【杀】/【桃】）、【闪】响�
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from itertools import combinations, permutations
 from typing import Any
 
@@ -87,6 +88,7 @@ from .modifiers import (
 
 __all__ = [
     "DISTANCE_NO_TARGET",
+    "DistanceBonus",
     "EFFECTIVENESS",
     "NEED_CARD_FLOOR_KEY",
     "TARGET_FILTERS",
@@ -207,40 +209,57 @@ DISTANCE_NO_TARGET = -1
 """
 
 
-def distance_bonus(state: GameState, seat: int) -> int:
-    """``seat`` 的**全局距离增减**（票 26 的座位卡读数）：主体侧 + 客体侧的代数和。
+@dataclass(frozen=True, slots=True)
+class DistanceBonus:
+    """座位卡的**双向**净距离读数（票 26）：``attack`` ≤ 0（攻马槽）/ ``defense`` ≥ 0（防马槽）。
 
-    用户 2026-11-17 签的口径（票 26 §2 = **A**）：
+    两侧**不互相抵消**（2026-11-17 第二次实机报障后的口径）：主体侧 −1 + 客体侧 +1 时，
+    攻马槽显示 −1 **且**防马槽显示 +1；单一净数会把 +1 吃掉（"实体加一马没有显示 +1"）。
+    每个槽的值 = 归到该符号一侧的全部修饰器之和（今天的修饰器：主体侧全为负、客体侧全为正）。
+    """
+
+    attack: int = 0
+    defense: int = 0
+
+
+def distance_bonus(state: GameState, seat: int) -> DistanceBonus:
+    """``seat`` 的**全局距离增减**（票 26 的座位卡读数）：两侧分别结算，**不跨侧抵消**。
+
+    用户 2026-11-17 的口径：
     - **主体侧**（``seat`` 到别人）= 进攻马 / 马术 / 义从① / 奇谋 / 奔袭① 一类
       ``ctx.owner == ctx.subject`` 的修饰器；
     - **客体侧**（别人到 ``seat``）= 防御马 / 义从② / 飞影 一类
       ``ctx.owner == ctx.target`` 的修饰器（防御马只在这一侧 ⇒ 只算主体侧会让它永不显示）；
     - **逐目标**（"只对某一角色"）不参与：两次查询各把一个座位槽换成
       :data:`DISTANCE_NO_TARGET`，按那一个具体角色取值的回调不会命中；
-    - 返回**净数**（可为负、可为 0；界面在 0 时不画节点）。
+    - 返回值按**符号**分槽：负的加起来进 :attr:`DistanceBonus.attack`，正的加起来进
+      :attr:`DistanceBonus.defense`；某一侧为 0 时该槽不画。
 
     这是**只读查询**：不写状态、不进记录流、不改 ``DISTANCE`` 链的语义（坐骑 / 技能
     照常走同一条修饰器管道）。返回值**不含座位距离**，也不夹下限——它只回答"全局加减
     多少"，不是"到某人的距离"。
     """
     ctx_role = ModifierRole.TARGET
-    subject_side = apply_modifiers(
-        ModifierPoint.DISTANCE,
-        state,
-        ModifierContext(
-            subject=seat, target=DISTANCE_NO_TARGET, role=ctx_role
-        ),
-        0,
+    subject_side = int(
+        apply_modifiers(
+            ModifierPoint.DISTANCE,
+            state,
+            ModifierContext(subject=seat, target=DISTANCE_NO_TARGET, role=ctx_role),
+            0,
+        )
     )
-    object_side = apply_modifiers(
-        ModifierPoint.DISTANCE,
-        state,
-        ModifierContext(
-            subject=DISTANCE_NO_TARGET, target=seat, role=ctx_role
-        ),
-        0,
+    object_side = int(
+        apply_modifiers(
+            ModifierPoint.DISTANCE,
+            state,
+            ModifierContext(subject=DISTANCE_NO_TARGET, target=seat, role=ctx_role),
+            0,
+        )
     )
-    return int(subject_side) + int(object_side)
+    return DistanceBonus(
+        attack=min(subject_side, 0) + min(object_side, 0),
+        defense=max(subject_side, 0) + max(object_side, 0),
+    )
 
 
 def seat_distance(state: GameState, a: int, b: int) -> int:

@@ -7,8 +7,9 @@
  *   |势力-名称-身份| |判定槽 ×3|
  *   |----体力条----| |-武器-| |-防具-|
  *   |手牌：N/上限--座位号| |-攻马-| |-防马-|
- * 两个坐骑槽（票 26）：有牌时只画花色点数 + **净距离读数**（负 → 攻马槽 / 正 → 防马槽），
- * 不画牌名；没有坐骑牌也照样把读数画在对应槽里。净 0 时数字不存在。
+ * 两个坐骑槽（票 26）：有牌时只画花色点数 + **该槽的距离读数**（`attack` → 攻马槽 /
+ * `defense` → 防马槽；两侧不互相抵消），不画牌名；没有坐骑牌也照样把读数画在对应槽里。
+ * 该槽为 0 时数字不存在。
  * 尺寸 / 配色在 style.css；本文件只造节点的**语义形状**（槽位、状态类、悬停全文）。
  *
  * 纪律：
@@ -150,12 +151,12 @@ function armorSegsNode(count) {
   return sleeve;
 }
 
-/** 全局距离增减读数（票 26）：**净距离**的 `−2` / `+1`（正负号恒写；0 时调用方不接节点）。
+/** 距离读数（票 26）：**本侧**合计的 `−2` / `+1`（正负号恒写；0 时调用方不接节点）。
  *
- * 数值**原样读服务端** `player.distance_bonus`（投影用 `effects.distance_bonus` 现算：
- * 主体侧 + 客体侧代数和，含坐骑本身）。前端不自己数坐骑、不读技能，也不夹 0 / 下限——
- * 那会是第二份真源。渲染位置由调用方定（负 → 攻马槽 / 正 → 防马槽），本函数只管形状与
- * 符号；`title` 只给一句人话，不列来源清单（用户口径：只显示总数）。 */
+ * 数值**原样读服务端** `player.distance_bonus.{attack,defense}`（投影用
+ * `effects.distance_bonus` 现算：主体侧 / 客体侧分别结算，两侧不互相抵消）。前端不自己数
+ * 坐骑、不读技能，也不夹 0 / 下限——那会是第二份真源。`title` 只给一句人话，不列来源清单
+ * （用户口径：只显示总数）。 */
 function distanceBonusNode(value) {
   const node = document.createElement("span");
   node.className = "distance-bonus";
@@ -247,7 +248,7 @@ function equipSlotLayout(cards) {
  *    （武器 / 防具 / 攻马 / 防马），有装备时让位给牌面；
  *  - 有牌：牌名（窄槽折行，见 `style.css`）+ 花色点数（单源 / 实体牌才有）；
  *    **两个坐骑槽例外**（票 26，用户 2026-11-17 实机口径）：不画牌名，只画花色点数，
- *    并把**净距离读数**归到本侧（负 → 攻马槽 / 正 → 防马槽；净 0 不画）；
+ *    并画出**本侧**的距离读数（攻马槽 = 负向合计 / 防马槽 = 正向合计；两侧不抵消，0 不画）；
  *    转化牌右上角标「转」，常规卡面上的标签 / 虚拟标记仍由预览负责；
  *  - 悬停：`#t-card-preview` 里画 `cardFaceNode` 的**常规卡面**并跟随鼠标；原生的
  *    `title` 去掉（同一条信息只留一个读法）。
@@ -514,21 +515,22 @@ function sideBlockRows(player, ctx) {
   equip.className = "equip-grid";
   equip.setAttribute("data-zone", "equip");
   equip.setAttribute("data-seat", String(player.seat));
-  // 票 26（用户 2026-11-17 实机口径）：净距离读数**复用坐骑槽**——负的归攻马槽、正的归
-  // 防马槽（没有坐骑牌也照样画在对应槽里）；净 0 时一个数字都不加。
-  const distanceBonus = Math.trunc(Number(player && player.distance_bonus) || 0);
+  // 票 26（用户 2026-11-17 实机口径）：距离读数**复用坐骑槽**——`attack` 归攻马槽、
+  // `defense` 归防马槽（没有坐骑牌也照样画在对应槽里）；两侧**不互相抵消**，各自为 0 时不画。
+  const bonus = (player && player.distance_bonus) || {};
+  const attackBonus = Math.min(0, Math.trunc(Number(bonus.attack) || 0));
+  const defenseBonus = Math.max(0, Math.trunc(Number(bonus.defense) || 0));
   for (const layout of equipSlotLayout(player.equip)) {
-    const onThisSide = (
-      (layout.slot === "horse_offense" && distanceBonus < 0)
-      || (layout.slot === "horse_defense" && distanceBonus > 0)
-    );
+    const distanceBonus = layout.slot === "horse_offense"
+      ? attackBonus
+      : (layout.slot === "horse_defense" ? defenseBonus : 0);
     const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
       interactive: baseInteractive || equipPick
         || equipCardPick(layout.card)
         || preactivationPick("equip", layout.card),
-      distanceBonus: onThisSide ? distanceBonus : 0,
+      distanceBonus,
       ctx,
     });
     // 装备槽同样**逐槽**一个角标（装备格本身不画）。

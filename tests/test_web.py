@@ -12718,7 +12718,8 @@ def _distance_bonus_payload(specs, *, pack=None):
 
 
 def test_the_seat_payload_carries_the_global_distance_bonus(monkeypatch) -> None:
-    """票 26 §4：0 / −1 马 / −1 马 + 马术 = −2 / 只对某一座位的修饰器 = 0。
+    """票 26 §4：0 / −1 马 / −1 马 + 马术 = −2 / 只对某一座位的修饰器 = 0；
+    另加**实体 +1 马与 −1 全局同时成立**的双向读数（2026-11-17 实机报障的回归）。
 
     读数走**真实产出路径**（``visible_snapshot`` → ``display.seat_display``），不直调
     ``distance_bonus``：这条断言防的是"算了却没下发"。
@@ -12733,18 +12734,31 @@ def test_the_seat_payload_carries_the_global_distance_bonus(monkeypatch) -> None
     }
     chitu, jueying = horses["chitu"], horses["jueying"]
 
-    assert _distance_bonus_payload([SeatSpec(), SeatSpec()]) == [0, 0], (
-        "没有距离修饰器 ⇒ 0（前端据此不画节点）"
-    )
+    def sides(attack: int, defense: int) -> dict[str, int]:
+        return {"attack": attack, "defense": defense}
+
+    assert _distance_bonus_payload([SeatSpec(), SeatSpec()]) == [
+        sides(0, 0),
+        sides(0, 0),
+    ], "没有距离修饰器 ⇒ 两侧都是 0（前端据此不画节点）"
     assert _distance_bonus_payload(
         [SeatSpec(equip=(chitu,)), SeatSpec()]
-    ) == [-1, 0], "−1 进攻马：主体侧 −1"
+    ) == [sides(-1, 0), sides(0, 0)], "−1 进攻马：攻马槽 −1"
     assert _distance_bonus_payload(
         [SeatSpec(hero="machao", equip=(chitu,)), SeatSpec()]
-    ) == [-2, 0], "马术 −1 + 进攻马 −1 = −2（用户 2026-11-17 的原话）"
+    ) == [sides(-2, 0), sides(0, 0)], "马术 −1 + 进攻马 −1 = 攻马槽 −2（用户原话）"
     assert _distance_bonus_payload(
         [SeatSpec(), SeatSpec(equip=(jueying,))]
-    ) == [0, 1], "+1 防御马只体现在客体侧 ⇒ 仍算进该座位的读数（口径 A）"
+    ) == [sides(0, 0), sides(0, 1)], "+1 防御马只体现在客体侧 ⇒ 防马槽 +1"
+    assert _distance_bonus_payload(
+        [SeatSpec(hero="machao", equip=(jueying,)), SeatSpec()]
+    ) == [sides(-1, 1), sides(0, 0)], (
+        "马术 −1 + 防御马 +1 ⇒ 攻马槽 −1 **且** 防马槽 +1（两侧不抵消；"
+        "2026-11-17 实机报障：旧实现只算净数 0，导致实体 +1 马不显示）"
+    )
+    assert _distance_bonus_payload(
+        [SeatSpec(hero="machao", equip=(chitu, jueying)), SeatSpec()]
+    ) == [sides(-2, 1), sides(0, 0)], "两个坐骑槽 + 马术同时成立：−2 / +1 各画各的"
 
     # 只对某一座位的修饰器：合成一条 DISTANCE 回调，**只**把"到座位 1"的距离 +1。
     from types import MappingProxyType, SimpleNamespace
@@ -12788,9 +12802,10 @@ def test_the_seat_payload_carries_the_global_distance_bonus(monkeypatch) -> None
             engine=Engine.from_state(state, seed=1), human_seat=0, pack=pack
         )
     )
-    assert [player["distance_bonus"] for player in snapshot["players"]] == [0, 0], (
-        "只对某一座位的修饰器不进全局读数（哨兵 target 让逐目标回调不命中）"
-    )
+    assert [player["distance_bonus"] for player in snapshot["players"]] == [
+        sides(0, 0),
+        sides(0, 0),
+    ], "只对某一座位的修饰器不进全局读数（哨兵 target 让逐目标回调不命中）"
 
 
 def test_every_distance_modifier_only_indexes_its_own_owner() -> None:

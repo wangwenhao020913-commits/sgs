@@ -35,6 +35,7 @@ from sgs.data import (
     load_hero_tables,
 )
 from sgs.effects import (
+    DistanceBonus,
     behavior_for,
     distance_bonus,
     hand_limit,
@@ -575,12 +576,12 @@ def live_tag_deltas_after(
     return out
 
 
-def _seat_distance_bonuses(state: Any) -> dict[int, int]:
-    """每个座位的**全局距离增减**（yijiang-2014-round2 票 26）。
+def _seat_distance_bonuses(state: Any) -> dict[int, DistanceBonus]:
+    """每个座位的**双向距离增减**（yijiang-2014-round2 票 26）。
 
-    **只读现算**：直接调 :func:`sgs.effects.distance_bonus`（主体侧 + 客体侧代数和），
-    不读 ``PlayerPublic``、不写状态、不进记录流。座位卡读数的唯一真源就在这里——
-    ``display.seat_display`` 只是把它抄进网页载荷。
+    **只读现算**：直接调 :func:`sgs.effects.distance_bonus`（主体侧 / 客体侧分别结算，
+    按符号分进攻马 / 防马两槽，不互相抵消），不读 ``PlayerPublic``、不写状态、不进记录流。
+    座位卡读数的唯一真源就在这里——``display.seat_display`` 只是把它抄进网页载荷。
     """
     return {player.seat: distance_bonus(state, player.seat) for player in state.players}
 

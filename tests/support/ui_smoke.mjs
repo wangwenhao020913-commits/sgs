@@ -2651,14 +2651,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
     legal_actions: [], candidate_index: {}, context: null, option_seats: {},
   });
-  // 座位 0：马术 −1 + 攻马 −1 = −2，且攻马槽有牌（只画 ♦/♠+点数，不画「赤兔」）。
+  // 座位 0：马术 −1 + 攻马 −1 = 攻马槽 −2，且攻马槽有牌（只画 ♦/♠+点数，不画「赤兔」）。
   bonusView.snapshot.players[0].equip = [horse(31, "赤兔", "horse_offense", "chitu")];
-  bonusView.snapshot.players[0].distance_bonus = -2;
-  // 座位 1：净 0，但防马槽有牌 ⇒ 只画花色点数、不画读数。
+  bonusView.snapshot.players[0].distance_bonus = { attack: -2, defense: 0 };
+  // 座位 1：两侧都 0，但防马槽有牌 ⇒ 只画花色点数、不画读数。
   bonusView.snapshot.players[1].equip = [horse(32, "的卢", "horse_defense", "jueying")];
-  bonusView.snapshot.players[1].distance_bonus = 0;
+  bonusView.snapshot.players[1].distance_bonus = { attack: 0, defense: 0 };
   // 座位 2：飞影 +1、没有坐骑牌 ⇒ 读数落在**防马空槽**里。
-  bonusView.snapshot.players[2].distance_bonus = 1;
+  bonusView.snapshot.players[2].distance_bonus = { attack: 0, defense: 1 };
   ui.state.view = bonusView;
   ui.resetSelection();
   ui.renderTable();
@@ -2666,7 +2666,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const selfEquip = zoneOfSeat(0, "equip");
   const selfAttack = slotOf(selfEquip, "horse_offense");
   const selfNumbers = byClass(selfAttack, "distance-bonus");
-  check("㉿DB1 净 −2 落在攻马槽：只画读数与花色点数，不画牌名",
+  check("㉿DB1 攻马槽 −2：只画读数与花色点数，不画牌名",
     !!selfEquip && !!selfAttack && selfNumbers.length === 1
       && selfNumbers[0].text() === "−2"
       && byClass(selfAttack, "slot-suit").length === 1
@@ -2676,7 +2676,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `读数=${JSON.stringify(selfNumbers.map((n) => n.text()))} 牌名=${selfEquip && selfEquip.text().includes("赤兔")} 槽=${byClass(selfEquip, "mini-slot").length}`);
 
   const zeroEquip = zoneOfSeat(1, "equip");
-  check("㉿DB2 净 0 ⇒ 一个读数节点都没有（防马槽仍画花色点数、不画牌名）",
+  check("㉿DB2 两侧都 0 ⇒ 一个读数节点都没有（防马槽仍画花色点数、不画牌名）",
     !!zeroEquip && byClass(zeroEquip, "distance-bonus").length === 0
       && byClass(slotOf(zeroEquip, "horse_defense"), "slot-suit").length === 1
       && byClass(slotOf(zeroEquip, "horse_defense"), "slot-v").length === 0
@@ -2687,25 +2687,28 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const plusEquip = zoneOfSeat(2, "equip");
   const plusDefense = slotOf(plusEquip, "horse_defense");
   const plusNumbers = byClass(plusDefense, "distance-bonus");
-  check("㉿DB3 净 +1 落在防马**空槽**：正号恒写、槽名仍在、无花色点数",
+  check("㉿DB3 防马 +1 落在**空槽**：正号恒写、槽名仍在、无花色点数",
     plusNumbers.length === 1 && plusNumbers[0].text() === "+1"
       && byClass(plusDefense, "slot-suit").length === 0
       && byClass(plusDefense, "slot-k").length === 1,
     `读数=${JSON.stringify(plusNumbers.map((n) => n.text()))}`);
 
-  // 座位 1 改成净 −1（仍无攻马牌）⇒ 负数改落攻马空槽；防马槽只剩自己的花色点数。
-  bonusView.snapshot.players[1].distance_bonus = -1;
+  // 两侧同时成立（2026-11-17 实机报障）：马术 −1 + 实体防马（+1）⇒ **两个槽各画各的**，
+  // 旧实现只算净数 0，会把防马槽的 +1 吃掉。
+  bonusView.snapshot.players[1].distance_bonus = { attack: -1, defense: 1 };
   ui.renderTable();
-  const negativeEquip = zoneOfSeat(1, "equip");
-  const negativeAttack = slotOf(negativeEquip, "horse_offense");
-  const negativeDefense = slotOf(negativeEquip, "horse_defense");
-  const negativeNumbers = byClass(negativeAttack, "distance-bonus");
-  check("㉿DB4 没有坐骑牌也显示：净 −1 落攻马空槽，防马槽不再带读数",
-    negativeNumbers.length === 1 && negativeNumbers[0].text() === "−1"
-      && byClass(negativeAttack, "slot-k").length === 1
-      && byClass(negativeDefense, "distance-bonus").length === 0
-      && byClass(negativeDefense, "slot-suit").length === 1,
-    `读数=${JSON.stringify(negativeNumbers.map((n) => n.text()))} 防马读数=${byClass(negativeDefense, "distance-bonus").length}`);
+  const bothEquip = zoneOfSeat(1, "equip");
+  const bothAttack = slotOf(bothEquip, "horse_offense");
+  const bothDefense = slotOf(bothEquip, "horse_defense");
+  const bothAttackNumbers = byClass(bothAttack, "distance-bonus");
+  const bothDefenseNumbers = byClass(bothDefense, "distance-bonus");
+  check("㉿DB4 两侧同时有值：攻马空槽 −1 且实体防马槽 +1（不再互相抵消）",
+    bothAttackNumbers.length === 1 && bothAttackNumbers[0].text() === "−1"
+      && byClass(bothAttack, "slot-k").length === 1
+      && bothDefenseNumbers.length === 1 && bothDefenseNumbers[0].text() === "+1"
+      && byClass(bothDefense, "slot-suit").length === 1
+      && byClass(bothDefense, "slot-v").length === 0,
+    `攻马=${JSON.stringify(bothAttackNumbers.map((n) => n.text()))} 防马=${JSON.stringify(bothDefenseNumbers.map((n) => n.text()))}`);
 }
 
 // ③ 布局壳（U1-01）：中央舞台 / 底部面板 / 顶栏。用 index.html 的结构断言——

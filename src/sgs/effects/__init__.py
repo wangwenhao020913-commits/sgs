@@ -11,6 +11,7 @@
 
 from .actions import (
     DISTANCE_NO_TARGET,
+    DistanceBonus,
     EFFECTIVENESS,
     NEED_CARD_FLOOR_KEY,
     TARGET_FILTERS,
@@ -109,6 +110,7 @@ from .primitives import (
 __all__ = (
     "CARD_BEHAVIORS",
     "DISTANCE_NO_TARGET",
+    "DistanceBonus",
     "DODGE_RESPONSE_CARD",
     "EFFECTIVENESS",
     "NULLIFY_RESPONSE_CARD",

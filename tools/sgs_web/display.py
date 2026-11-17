@@ -43,6 +43,7 @@ from sgs.data import (
     hero_skill_name,
     hero_skill_names,
 )
+from sgs.effects import DistanceBonus
 from sgs.state import CardRef, EndPhase, HeroCardRef, Pass, PlayerPublic, Query, SelectCards
 
 from .descriptions import card_description, skill_description
@@ -294,7 +295,7 @@ def seat_display(
     *,
     heroes: HeroTable | Sequence[HeroTable] | None = None,
     players: Sequence[PlayerPublic] | None = None,
-    distance_bonus: int = 0,
+    distance_bonus: DistanceBonus | None = None,
 ) -> dict[str, Any]:
     """座位卡的展示字段：横置 / 酒 / **护甲** / **全局距离增减** + 身份标签 + 武将名称 / 势力。
 
@@ -303,9 +304,10 @@ def seat_display(
     网页载荷里的身份标签由这里统一给出，前端可优先读它；旧的 ``identityLabel`` 仅作
     回放 / 合成载荷兜底。
 
-    ``distance_bonus``（yijiang-2014-round2 票 26）：**投影现算**的全局距离增减（主体侧 +
-    客体侧代数和，见 :func:`sgs.effects.distance_bonus`），不是 ``PlayerPublic`` 字段——
-    与 ``armor`` 同姿态只补进网页载荷；0 = 前端一个节点都不加（DOM 与引入前同形）。
+    ``distance_bonus``（yijiang-2014-round2 票 26）：**投影现算**的双向距离增减
+    （:class:`sgs.effects.DistanceBonus`：``attack`` ≤ 0 归攻马槽、``defense`` ≥ 0 归防马槽，
+    两侧不互相抵消），不是 ``PlayerPublic`` 字段——与 ``armor`` 同姿态只补进网页载荷；
+    缺省 / 两个 0 = 前端两个坐骑槽都不加读数（DOM 与引入前同形）。
 
     ``hero_name`` / ``kingdom`` / ``kingdom_label``（U1-02）：引擎只给武将 id
     （``PlayerPublic.hero``）与势力枚举；``heroes`` 是武将表——**可以是多张**（M6 票 19：
@@ -314,14 +316,18 @@ def seat_display(
     """
     hero = hero_in_tables(heroes, player.hero)
     kingdom = player.kingdom.value if player.kingdom is not None else None
+    bonus = distance_bonus if distance_bonus is not None else DistanceBonus()
     return {
         "chained": bool(player.chained),
         "flipped": bool(player.flipped),
         "wine_active": bool(player.wine_active),
         # W7 的第二条体力轴：座位卡在血条右侧画护甲段（0 = 一段都不画，DOM 与旧版逐字节同形）。
         "armor": int(player.armor),
-        # 票 26：坐骑区的全局距离增减读数（0 = 不画，DOM 与引入前同形）。
-        "distance_bonus": int(distance_bonus),
+        # 票 26：坐骑区的双向距离增减读数（两侧各为 0 时前端不画节点）。
+        "distance_bonus": {
+            "attack": int(bonus.attack),
+            "defense": int(bonus.defense),
+        },
         "identity_label": (
             IDENTITY_LABELS.get(player.identity) if player.identity is not None else None
         ),
@@ -561,7 +567,7 @@ def decorate_snapshot(
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
-    distance_bonuses: Mapping[int, int] | None = None,
+    distance_bonuses: Mapping[int, DistanceBonus] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
@@ -573,7 +579,7 @@ def decorate_snapshot(
     按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
     ``concealed`` 是**未验明**的【蛊惑】扣置牌（:func:`sgs_web.projection.concealed_guohuo_cards`）：
     ``processing`` 里那几张改画"声明的牌名"（对谁都不给源牌牌面）。
-    ``distance_bonuses``（票 26）是**按座位现算**的全局距离增减（缺省/缺座 = 0）：
+    ``distance_bonuses``（票 26）是**按座位现算**的双向距离增减（缺省/缺座 = 两侧 0）：
     由投影层调 :func:`sgs.effects.distance_bonus` 后传进来，展示层不自己读引擎状态。
     """
     for key in ("self_hand", "discard"):
@@ -596,8 +602,10 @@ def decorate_snapshot(
                     player,
                     heroes=heroes,
                     players=players,
-                    # 票 26：缺席省 = 0（合成载荷 / 旧调用点不画读数）。
-                    distance_bonus=(distance_bonuses or {}).get(player.seat, 0),
+                    # 票 26：缺席省 = 两侧 0（合成载荷 / 旧调用点不画读数）。
+                    distance_bonus=(distance_bonuses or {}).get(
+                        player.seat, DistanceBonus()
+                    ),
                 )
             )
     return payload
@@ -611,7 +619,7 @@ def decorate_pending(
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
-    distance_bonuses: Mapping[int, int] | None = None,
+    distance_bonuses: Mapping[int, DistanceBonus] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。
 
