@@ -295,9 +295,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 102 → 103、真名 67 → 68：左慈是新的；装备 22 不变）。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222、武将技 197 → 198
     # （启用版本 104 → 105、真名 69 → 70：陈震是新真名；装备 22 不变）。
-    assert len(CATALOG) == 222
+    # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223、武将技 198 → 199
+    # （启用版本 105 → 106、真名 70 → 71：骆统是新真名；装备 22 不变）。
+    assert len(CATALOG) == 223
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 198
+    assert len(heroes) == 199
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -342,7 +344,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技 ⇒ 182 → 186。
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统三技 + 刘琦两技 ⇒ 186 → 191。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 197 → 198。
-    assert len(expected) == 198
+    # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
+    assert len(expected) == 199
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2182,6 +2185,13 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # 用户 2026-11-09 实机报障："当你受到伤害后"漏了自校 ⇒ 别人挨打沮授也回血。
         "hero.jushou.shibei": (_HookFrame(target=ME),),
         "hero.jie_jushou_mobile.shibei": (_HookFrame(target=ME),),
+        # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】的两条钩子（使用 / 打出）共用
+        # 同一个条件对象 —— 判据只有"这张牌是**我**使用 / 打出的"（不看区域 / 回合 / 牌名），
+        # 故两帧同形：``source`` 是我、带一张牌面。
+        "hero.luotong.qinzheng": (
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
+        ),
     }
 
 
@@ -2728,6 +2738,9 @@ SKILL_SHAPE: dict[str, str] = {
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】= A 族 + **三步流水线**（选牌 → 选牌 →
     # 选座）⇒ 落「主动技能」格。
     "hero.chenzhen.shameng": "主动技能",
+    # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】= **锁定技 + 使用 / 打出两条钩子**、
+    # 无流水线（效果直接在回调里）⇒ 按锁定技单列一格（与界沮授移动版【矢北】同判据）。
+    "hero.luotong.qinzheng": "锁定技",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2808,7 +2821,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # 两条钩子、无流水线）⇒ 43 → 44。
     # sp5-mayunlu-panjun 票 01 / 02：马术 / 公清（纯修饰器）⇒ 44 → 46。
     # sp5-pangtong-liuqi 票 01 / 02：展骥（锁定 + 帧标签钩子）⇒ 46 → 47。
-    "锁定技": 47,
+    # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】（锁定 + 使用 / 打出双钩子、无流水线）
+    # ⇒ 47 → 48。
+    "锁定技": 48,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -3023,7 +3038,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # sp5-mayunlu-panjun 票 01 / 02：SP武将组5 四技（触发 2 / 锁定 2）⇒ 206 → 210。
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222（主动技能 37 → 38）。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 222
+    # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223（锁定技 47 → 48）。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 223
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3240,8 +3256,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # shan-baozuoci 票 04：左慈【化身】（一条选项流水线）/【新生】（零步）都在步骤语言内
     # ⇒ 内 120 → 122（外 95 不变）。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族三步流水线）⇒ 内 126 → 127。
+    # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】（锁定技、无 flow，效果在回调里）
+    # ⇒ 外 95 → 96。
     assert len(inside) == 127
-    assert len(outside) == 95
+    assert len(outside) == 96
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

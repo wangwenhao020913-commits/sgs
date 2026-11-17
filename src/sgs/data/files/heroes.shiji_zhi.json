@@ -35,6 +35,19 @@
       "skills": [
         { "id": "shameng", "name": "歃盟", "skill_type": "NORMAL" }
       ]
+    },
+    {
+      "id": "luotong",
+      "name": "骆统",
+      "true_name": "骆统",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "shiji-zhi",
+      "enabled": true,
+      "skills": [
+        { "id": "qinzheng", "name": "勤政", "skill_type": "NORMAL" }
+      ]
     }
   ]
 }

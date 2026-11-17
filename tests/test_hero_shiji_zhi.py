@@ -1,4 +1,5 @@
-"""始计篇-智包：神郭嘉 + 陈震（shiji-zhi 票 01 / shiji-zhi-luotong-chenzhen 票 02）。
+"""始计篇-智包：神郭嘉 + 陈震 + 骆统
+（shiji-zhi 票 01 / shiji-zhi-luotong-chenzhen 票 02 / 票 01）。
 
 神郭嘉四条技能各一组断言：
 
@@ -13,6 +14,10 @@
 陈震【歃盟】（票 02）一组：**「两张颜色相同」是候选面上的前置约束**（第 2 步按第 1 张逐行
 下发、复合动作里的异色组合被拒收）、只手牌、目标 = 其他存活角色、取消不消耗阶段位、
 目标先摸 2 再自己摸 3、短摸平局、目标"获得牌后"钩子挂起后不重摸。
+
+骆统【勤政】（票 01）一组：锁定技 + 使用 / 打出双钩子 ⇒ 整局张数 X 的 3 / 5 / 8 倍数各取一张
+对应牌名的牌；X **含**当前这一张（Q1）、多档同时命中每档各 1 张（Q2）、牌堆无同名牌该档不发生
+（Q3）、在全部同名牌里均匀抽（Q4）、同一帧重入不重复取牌；3 档的【杀】按**族**判。
 
 驱动纪律：脚本玩家只应答**被测那一步**（按 ``skill_id`` 的步键），其余走最小合法应答
 （出牌阶段结束 / 放弃）；引擎开到"该技能从出牌阶段候选里消失"的那一刻为止（= 这次发动
@@ -45,9 +50,10 @@ from sgs.state import (
     Phase,
     SelectCards,
     SelectOption,
+    Zone,
 )
 from sgs.timing import Timing
-from support import SeatSpec, build_state
+from support import SeatSpec, build_state, cards_of_type
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -954,3 +960,350 @@ def test_shameng_declares_one_shared_card_wording_and_four_keys():
     )
     assert set(definition.step_requirements or {}) == {"card", "card1", "card2", "seat"}
     assert (definition.step_requirements or {})["card"].strip(), "实时选牌那一问要有话说"
+
+
+# ---------------------------------------------------------------------------
+# 骆统【勤政】（shiji-zhi-luotong-chenzhen 票 01；用户 2026-11-14 一次签 Q1–Q6）
+#
+# 锁定技 + 「使用**或**打出」双钩子：X = ``Player.used_or_played_ever``（框架票 03），
+# 3 / 5 / 8 的倍数各取一张对应牌名的牌（Q2：每命中一档拿 1 张、按 3 → 5 → 8 结算），
+# 牌堆里没有对应牌名的那一档**该次不发生**（Q3：不洗牌堆、不取弃牌堆、不判平局），
+# 取哪一张由 ``deck_search`` 子流在**全部同名牌**里均匀抽（Q4）。
+#
+# 驱动手法：用装备牌当"用掉不触发任何响应窗口、也不消耗随机数"的牌（`start_use` 直接压
+# USE 帧，与 `tests/test_card_usage.py` 同一条口径）；X 的**写点**（Q1 = 含当前这张）由
+# 框架票 03 的 `tests/test_card_usage.py` 钉住，这里只钉"档位怎么取牌"。
+# ---------------------------------------------------------------------------
+
+LUOTONG = "luotong"
+QINZHENG = hero_skill_id(LUOTONG, "qinzheng")
+
+SLASH_FAMILY_NAMES = frozenset({"杀", "火杀", "雷杀"})
+"""3 的倍数那一档里的【杀】**族**（规则 §5.4 L587–L589「【火杀】：造成火焰伤害的【杀】」）。"""
+
+
+def _luotong_engine(
+    hand: tuple[int, ...],
+    *,
+    deck: tuple[int, ...],
+    hero: str = LUOTONG,
+    seed: int = 7,
+    pack=None,
+):
+    """骆统在 0 号位（4 体力）；**不设回合角色**——本组只跑单次使用 / 打出的结算。"""
+    content = PACK if pack is None else pack
+    state = build_state(
+        pack=content,
+        seats=[
+            SeatSpec(hero=hero, hp=4, hp_max=4, hand=hand),
+            SeatSpec(hp=4, hp_max=4),
+        ],
+        deck=deck,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    return Engine.from_state(state, seed=seed), state
+
+
+def _settle(engine: Engine) -> Engine:
+    """把已经压上的使用 / 打出帧推到出栈（本组没有回合环：构造局面没有回合角色）。"""
+    _drive_until(engine, [Script(), Script()], lambda e: not e.stack.frames)
+    return engine
+
+
+def _use(engine: Engine, state: GameState, card_id: int, *, targets=()) -> None:
+    engine.start_use(state.card(card_id), source=0, targets=tuple(targets))
+    _settle(engine)
+
+
+def _play(engine: Engine, state: GameState, card_id: int) -> None:
+    engine.play_card(state.card(card_id), source=0, timing=Timing.PLAY_DECLARE)
+    _settle(engine)
+
+
+def _gained_from_deck(engine: Engine) -> tuple[int, ...]:
+    """记录流里**牌堆 → 手牌**的那些 ``card_move``（按发生顺序摊平）。"""
+    return tuple(
+        card.card_id
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone.zone is Zone.DECK
+        and record.to_zone.zone is Zone.HAND
+        for card in record.cards
+    )
+
+
+def _equipment_cards(count: int) -> list[int]:
+    """``count`` 张装备牌（用掉不触发响应窗口、不摸牌、不消耗随机数）。"""
+    ids: list[int] = []
+    for type_id in ("renwang_shield", "chitu", "dawan", "jueying", "zixing"):
+        ids.extend(cards_of_type(PACK, type_id))
+    return ids[:count]
+
+
+def test_qinzheng_takes_one_matching_card_on_the_third_use_and_never_asks():
+    """锁定技：第 3 张使用牌触发一次、取走牌堆里唯一那张 3 档牌，全程一个询问都不发。"""
+    used = _equipment_cards(3)
+    dodge = cards_of_type(PACK, "dodge")[0]
+    engine, state = _luotong_engine(tuple(used), deck=(dodge,))
+
+    _use(engine, state, used[0])
+    assert state.player(0).used_or_played_ever == 1
+    assert _gained_from_deck(engine) == (), "X = 1：不是 3 的倍数，一档都不命中"
+
+    _use(engine, state, used[1])
+    assert state.player(0).used_or_played_ever == 2
+    assert _gained_from_deck(engine) == (), "X = 2：还不触发"
+
+    _use(engine, state, used[2])
+    assert state.player(0).used_or_played_ever == 3, "X 含当前这一张（Q1 = A）"
+    assert _gained_from_deck(engine) == (dodge,), "3 的倍数 ⇒ 取走牌堆里唯一的 3 档牌"
+    assert dodge in state.player(0).hand
+    assert dodge not in state.deck
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SKILL_ACTIVATION"
+        and getattr(record.query, "skill_id", None) == QINZHENG
+    ], "锁定技不问『是否发动』"
+
+
+def test_qinzheng_counts_a_played_card_the_same_way():
+    """「打出」也推进 X，并在第 3 张打出时取牌（触发面 = 使用 **或** 打出，两条钩子）。"""
+    dodges = cards_of_type(PACK, "dodge")[:3]
+    slash = cards_of_type(PACK, "slash")[0]
+    engine, state = _luotong_engine(tuple(dodges), deck=(slash,))
+
+    for card_id in dodges:
+        _play(engine, state, card_id)
+
+    assert state.player(0).used_or_played_ever == 3
+    assert _gained_from_deck(engine) == (slash,), "打出同样累计到 3 的倍数"
+    assert slash in state.player(0).hand
+
+
+def test_qinzheng_settles_every_hit_tier_once_in_ascending_order():
+    """多档同时命中（X = 15）：3 档与 5 档各拿 1 张，按 3 → 5 的顺序结算（Q2 = A）。"""
+    used = _equipment_cards(1)
+    dodge = cards_of_type(PACK, "dodge")[0]
+    peach = cards_of_type(PACK, "peach")[0]
+    engine, state = _luotong_engine(tuple(used), deck=(dodge, peach))
+    state.player(0).used_or_played_ever = 14  # 前 14 张已用掉（本组只测档位算术）
+
+    _use(engine, state, used[0])
+
+    assert state.player(0).used_or_played_ever == 15
+    assert _gained_from_deck(engine) == (dodge, peach), (
+        "两档各一张：先 3 的倍数（【杀】/【闪】）、后 5 的倍数（【桃】/【酒】）"
+    )
+    assert {card.name for card in (state.card(dodge), state.card(peach))} == {"闪", "桃"}
+
+
+def test_qinzheng_does_nothing_when_the_deck_has_no_matching_name():
+    """牌堆里没有对应牌名 ⇒ 该档什么都不发生（Q3 = A：不洗牌堆、不取弃牌堆、不判平局）。
+
+    牌堆只放两张**装备**（【八卦阵】/【赤兔】）：它们的牌名不在任何一档里，故"没有对应
+    牌名"是局面事实、不是另抄一份档位表——档位表只在实现里有一份。
+    """
+    used = _equipment_cards(1)
+    deck = (*cards_of_type(PACK, "eight_diagrams")[:1], *cards_of_type(PACK, "chitu")[:1])
+    engine, state = _luotong_engine(tuple(used), deck=deck)
+    state.player(0).used_or_played_ever = 2
+    deck_before = list(state.deck)
+    discard_before = list(state.discard)
+
+    _use(engine, state, used[0])
+
+    assert state.player(0).used_or_played_ever == 3, "前置：3 的倍数那一档确实命中"
+    assert _gained_from_deck(engine) == ()
+    assert state.deck == deck_before, "不洗牌堆、也不动牌堆"
+    assert state.discard == discard_before, "不取弃牌堆"
+    assert engine._deck_search is None, "连子流都没派生 ⇒ 一个随机位都没取"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "deck_shuffle"
+    ], "不洗牌堆"
+    assert not engine.finished, "不判平局"
+
+
+def test_qinzheng_three_tiers_take_one_card_each_in_one_trigger():
+    """X = 120（3 / 5 / 8 同时命中）⇒ 一次触发拿 3 张，按 3 → 5 → 8（Q2 = A 的满档形态）。"""
+    used = _equipment_cards(1)
+    dodge = cards_of_type(PACK, "dodge")[0]
+    peach = cards_of_type(PACK, "peach")[0]
+    ex_nihilo = cards_of_type(PACK, "ex_nihilo")[0]
+    engine, state = _luotong_engine(tuple(used), deck=(dodge, peach, ex_nihilo))
+    state.player(0).used_or_played_ever = 119
+
+    _use(engine, state, used[0])
+
+    assert state.player(0).used_or_played_ever == 120
+    assert _gained_from_deck(engine) == (dodge, peach, ex_nihilo), (
+        "三档各一张：3 → 5 → 8"
+    )
+    assert {state.card(card_id).name for card_id in (dodge, peach, ex_nihilo)} == {
+        "闪",
+        "桃",
+        "无中生有",
+    }
+
+
+def test_qinzheng_treats_fire_and_thunder_slash_as_slash():
+    """3 档的【杀】按**族**判：牌堆里只剩一张火【杀】时也能取到它（属性杀是【杀】）。"""
+    pack_160 = load_content_pack(deck_profile="standard_ex_160")
+    used = _equipment_cards(1)
+    fire_slash = cards_of_type(pack_160, "fire_slash")[0]
+    engine, state = _luotong_engine(tuple(used), deck=(fire_slash,), pack=pack_160)
+    state.player(0).used_or_played_ever = 2
+
+    _use(engine, state, used[0])
+
+    gained = _gained_from_deck(engine)
+    assert gained == (fire_slash,), "【火杀】属于【杀】族（规则 §5.4 L587–L589）"
+    assert state.card(fire_slash).name == "火杀"
+
+
+def test_qinzheng_takes_a_random_matching_card_not_the_first_name_match():
+    """Q4 = A：在**全部**同名牌里均匀抽，不是"按牌堆序取第一张"（观星后也钉不住）。"""
+    used = _equipment_cards(1)
+    candidates = tuple(cards_of_type(PACK, "slash")) + tuple(
+        cards_of_type(PACK, "dodge")
+    )
+    picked: list[int] = []
+    for seed in range(24):
+        engine, state = _luotong_engine(tuple(used), deck=candidates, seed=seed)
+        state.player(0).used_or_played_ever = 2
+        _use(engine, state, used[0])
+        gained = _gained_from_deck(engine)
+        assert len(gained) == 1
+        assert state.card(gained[0]).name in SLASH_FAMILY_NAMES | {"闪"}
+        picked.append(gained[0])
+
+    assert len(set(picked)) >= 5, (
+        f"24 个种子只取到 {len(set(picked))} 种结果：这不是「在全部同名牌里均匀随机」"
+    )
+
+
+def test_qinzheng_does_not_take_again_when_the_step_is_rerun():
+    """多档触发的**让出 → 续跑**里不重复取牌（每个命中档恰好一张）。
+
+    这是 `CODING_STANDARDS.md` §3.1 的实测形状：一档取完 ⇒ ``return "stay"``；派发环
+    重入同一个回调时按帧私有游标跳过已结算的档。牌堆给 3 张【闪】+ 3 张【桃】（**候选
+    富余**，否则"重取"退化成"没候选"、断言空转）：重取一次就会变成 4 条 `card_move`。
+    """
+    used = _equipment_cards(1)
+    dodges = cards_of_type(PACK, "dodge")[:3]
+    peaches = cards_of_type(PACK, "peach")[:3]
+    engine, state = _luotong_engine(tuple(used), deck=(*dodges, *peaches))
+    state.player(0).used_or_played_ever = 14
+
+    _use(engine, state, used[0])
+
+    gained = _gained_from_deck(engine)
+    assert len(gained) == 2, f"两档各一张，实得 {len(gained)} 张（重入重取了？）"
+    assert [state.card(card_id).name for card_id in gained] == ["闪", "桃"]
+
+
+def test_qinzheng_yields_to_a_gain_hook_that_asks_and_resumes_without_retaking():
+    """取牌内联派发「获得牌后」钩子（界夏侯惇【清俭】）提问 ⇒ **挂起 → 应答 → 续跑**。
+
+    `CODING_STANDARDS.md` §3.1 的判据（次序）：第 1 档取完就让出，子帧（清俭那一问）先
+    结算；应答之后重入同一个回调，按帧私有游标跳过已经取过的档。故记录流的次序必须是
+    **第 1 条的 `card_move` → 清俭的询问 → 第 2 条的 `card_move`**；断言"两次取牌"和
+    "询问夹在中间"两件事一起，才既证明让出、也证明续跑没重取。
+
+    骆统带【清俭】走 ``granted_skills``（这条路径今天唯一可达的承载者）：清俭是"每回合
+    限一次"的技能，同一帧的第二次获得**不再问**是它的既有口径（答案缓存按
+    ``(时机, 派发键, 层号, 座位, 轮次)`` 去重），与本票无关。
+    """
+    qingjian = "hero.jie_xiahoudun.qingjian"
+    used = _equipment_cards(1)
+    dodges = cards_of_type(PACK, "dodge")[:3]
+    peaches = cards_of_type(PACK, "peach")[:3]
+    engine, state = _luotong_engine(tuple(used), deck=(*dodges, *peaches))
+    state.player(0).granted_skills.append(qingjian)
+    state.player(0).used_or_played_ever = 14
+
+    engine.start_use(state.card(used[0]), source=0, targets=())
+    for _ in range(400):
+        query = engine.pending
+        if query is None:
+            if engine.finished or not engine.stack.frames:
+                break
+            engine._step()
+            continue
+        engine.submit(
+            next(item for item in query.legal_actions if isinstance(item, Pass))
+        )
+
+    records = engine.records
+    moves = [
+        index
+        for index, record in enumerate(records)
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone.zone is Zone.DECK
+        and record.to_zone.zone is Zone.HAND
+    ]
+    asks = [
+        index
+        for index, record in enumerate(records)
+        if record.kind == "query" and getattr(record.query, "skill_id", None) == qingjian
+    ]
+    answers = [index for index, record in enumerate(records) if record.kind == "action"]
+    assert [state.card(card_id).name for card_id in _gained_from_deck(engine)] == [
+        "闪",
+        "桃",
+    ], "两档各一张：让出 / 续跑没有重取（候选富余，重取会变成 4 条 card_move）"
+    assert len(asks) == 1, "清俭每回合限一次：同一帧的第二次获得不再问"
+    assert len(answers) == 1, "那一问被应答了一次"
+    assert moves[0] < asks[0] < answers[0] < moves[1], (
+        "次序断言：第一档的获得先结算、清俭那一问与它的应答都排在第二档之前"
+        "（§3.1 的让出判据：钩子的结算先于调用方的下一步副作用）"
+    )
+
+
+def test_qinzheng_ignores_another_seats_cards():
+    """别人使用 / 打出牌不推进骆统的 X，也不替他取牌（条件自校持有者）。"""
+    used = _equipment_cards(1)
+    other_card = cards_of_type(PACK, "dodge")[0]
+    dodge = cards_of_type(PACK, "dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=LUOTONG, hp=4, hp_max=4, hand=tuple(used)),
+            SeatSpec(hp=4, hp_max=4, hand=(other_card,)),
+        ],
+        deck=(dodge,),
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    state.player(0).used_or_played_ever = 2
+
+    engine.start_use(state.card(other_card), source=1, targets=())
+    _settle(engine)
+
+    assert state.player(1).used_or_played_ever == 1
+    assert state.player(0).used_or_played_ever == 2, "X 是座位级的"
+    assert _gained_from_deck(engine) == (), "别人的牌不触发勤政"
+    assert dodge in state.deck
+
+
+def test_qinzheng_declares_the_card_text_verbatim_and_stays_locked():
+    """牌面逐字进 `requirement`（`skill-authoring.md` §2.1）；锁定技 ⇒ 不问发现、无流水线。"""
+    definition = CATALOG[QINZHENG]
+
+    assert definition.requirement == (
+        "锁定技，当你使用或打出一张牌时，根据X的值（X为你本局游戏使用或打出牌的张数），"
+        "随机获得牌堆中一张对应的牌：3的倍数，【杀】或【闪】；5的倍数，【桃】或【酒】；"
+        "8的倍数，【无中生有】或【决斗】。"
+    )
+    assert definition.locked is True
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.USE_ON_USE,
+        Timing.PLAY_ON_PLAY,
+    ]
+    assert all(hook.flow is None for hook in definition.hooks), (
+        "锁定技的效果直接跑回调（`shapes.md` §2 第 1 行的锁定技变体注），不造 SkillFlow"
+    )

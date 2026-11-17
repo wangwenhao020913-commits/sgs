@@ -26,7 +26,7 @@ r"""U 族：使用牌时触发（M6 票 02）——黄月英【集智】。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from sgs.data import Category, SkillType, Suit, card_category, hero_skill_id
 from sgs.effects import (
@@ -74,6 +74,7 @@ __all__ = [
     "JIE_LEIJI_FLOW",
     "JIZHI",
     "JIZHI_FLOW",
+    "QINZHENG",
     "YAJIAO",
     "use_after_skill_definitions",
 ]
@@ -1010,15 +1011,140 @@ def _leiji_hooks() -> tuple[Hook, Hook]:
     )
 
 
+# ---------------------------------------------------------------------------
+# 骆统【勤政】（shiji-zhi-luotong-chenzhen 票 01；用户 2026-11-14 一次签 Q1–Q6）
+#
+# 牌面（`/mnt/d/SGS_HEROS/始计篇-智包/骆统/技能.txt`，逐字）：
+#   锁定技，当你使用或打出一张牌时，根据X的值（X为你本局游戏使用或打出牌的张数），
+#   随机获得牌堆中一张对应的牌：3的倍数，【杀】或【闪】；5的倍数，【桃】或【酒】；
+#   8的倍数，【无中生有】或【决斗】。
+#
+# 两件框架件由票 03 先行落地（E2：写点在**全牌入口**、随机源只许住 `engine/rng.py`）：
+# X = `Player.used_or_played_ever`（两个入口各 +1、**含**当前这一张 = Q1 = A），
+# 取牌 = `Engine.take_named_card_from_deck`（专用 `deck_search` 子流 = Q4 = A「均匀随机」）。
+# 本模块只做业务层：两条钩子 + 档位表 + 取牌调用。
+# ---------------------------------------------------------------------------
+
+LUOTONG = "luotong"
+"""骆统（吴 / 男 / 4 体力 / 始计篇-智包）的武将 id。"""
+
+QINZHENG = hero_skill_id(LUOTONG, "qinzheng")
+"""【勤政】的全限定技能 id（``hero.luotong.qinzheng``）。"""
+
+
+class QinzhengTier(NamedTuple):
+    """【勤政】的一档：``X % multiple == 0`` 时从牌堆取一张 ``names`` 里的牌。
+
+    档位**有序**（3 → 5 → 8）：多档同时命中时按这个顺序逐档结算（Q2 = A 只裁"每档各拿
+    1 张"，次序是验收时定下的读法，见 `06` §5.20）。
+    """
+
+    multiple: int
+    names: tuple[str, ...]
+
+
+_QINZHENG_FIXED_TIERS: tuple[QinzhengTier, ...] = (
+    QinzhengTier(5, ("桃", "酒")),
+    QinzhengTier(8, ("无中生有", "决斗")),
+)
+"""5 / 8 的倍数两档的**牌名集合**（牌面逐字）；3 的倍数那一档在 :func:`_qinzheng_tiers` 里
+派生（【杀】按**族**判、牌名从当前内容包取）——手抄「火杀 / 雷杀」白名单就是 M5 05b
+那两次错型的重演。
+"""
+
+_QINZHENG_TIERS_KEY = "qinzheng:tiers"
+"""帧私有：这一次发动**命中了哪几档**（触发时按 X 现算一次，重入不重算）。
+
+X 是**动态量、每次取值现算**（默认读法（二）⑤），但一次发动的"命中哪几档"必须定格：
+挂起续跑发生在效果结算途中，重算会把"跑了一半的档位表"换成另一个。本键把命中集合
+钉在触发那一刻；重入只按它续跑。
+"""
+
+_QINZHENG_SETTLED_KEY = "qinzheng:settled"
+"""帧私有：命中档里**已经结算过**哪几个（重入从下一个续跑，不重复取牌）。
+
+``take_named_card_from_deck`` **不幂等**（每调一次抽一次签、搬一张牌，见该入口的
+docstring）⇒ 同一帧上再跑一遍回调绝不能重取（`CODING_STANDARDS.md` §3；先例 = 【集智】的
+``_DRAWN_KEY``）。**存"哪一档已结算"而不是"取到哪张牌"**：重入时唯一要回答的是"这一档
+还要不要调入口"，而"同一次搬牌不重放"由 :meth:`Engine.move_in_frame` 的 ``_MOVE_DONE``
+自己认（票 03 的口径 = "别重调入口"；牌面事实没有第二个读者，存它就是死数据）。
+"""
+
+
+def _qinzheng_tiers(state: GameState) -> tuple[QinzhengTier, ...]:
+    """X 的倍数档 → 这一档能取的**牌名集合**（结算顺序 = 3 → 5 → 8）。
+
+    3 的倍数那一档 = 【杀】**族** + 【闪】。族判据读行为表（
+    :func:`~sgs.effects.is_slash`）而不是抄牌名：规则 §5.4 L587–L589（【火杀】=
+    「造成火焰伤害的【杀】」；「属性【杀】在作为【杀】使用或打出时，与普通【杀】的
+    作用完全相同」）⇒ 属性杀是【杀】。牌名从**当前内容包**派生（将来新增属性杀自动
+    并入），与 ``tests/test_card_family_sites.py`` 立的"别只认普通【杀】"同一条纪律。
+    其余两档是牌面逐字（5 的倍数 = 【桃】/【酒】；8 的倍数 = 【无中生有】/【决斗】）。
+    """
+    slash_names: list[str] = []
+    for card in state.cards:
+        if is_slash(behavior_for(card)) and card.name not in slash_names:
+            slash_names.append(card.name)
+    return (QinzhengTier(3, (*slash_names, "闪")), *_QINZHENG_FIXED_TIERS)
+
+
+def _qinzheng_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**持有者自己**使用 / 打出的这张牌——不看区域、不看回合、不看牌名。
+
+    牌面写「当你使用或打出一张牌时」，没有「回合 / 阶段 / 手牌 / 某牌」任何限定 ⇒
+    别人的回合里响应打出的【闪】、装备区的牌、转化产物、纯虚拟牌（视为使用）全算
+    （默认读法（一）④ + 账本 L965）。判据与 :func:`_leiji_condition` 同一条口径：
+    **只自校 ``source == owner``**。「使用**或**打出」由两条钩子各接一半，同一张牌只会走
+    其中一条（``Engine.start_use`` 与 ``:play_card`` 是互斥的两个入口）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return owner is not None and frame.data.get("source") == owner
+
+
+def _qinzheng(host: Any, frame: Frame) -> Any:
+    """提交点：每命中一档从牌堆取一张对应牌名（3 → 5 → 8 的顺序）。
+
+    - X = ``Player.used_or_played_ever``，**含**当前这一张（Q1 = A：写点就在两个全牌入口
+      里，钩子派发时已经 +1）；
+    - 多档同时命中时**每档各拿 1 张**（Q2 = A；X=15 拿 2 张、X=120 拿 3 张）；
+    - 牌堆里没有对应牌名的那一档**该次不发生**（Q3 = A：``take_named_card_from_deck``
+      返回 ``None``、不落记录、不消耗随机位；不洗牌堆、不取弃牌堆、不判平局）。
+
+    **压子帧 = 让出**（`CODING_STANDARDS.md` §3.1）：搬牌经 :meth:`Engine.move_in_frame`
+    内联派发「获得牌后」钩子（【清俭】一类），它可能提问或压子帧——而
+    ``take_named_card_from_deck`` 的返回值只给牌面事实（挂起由 ``_flush_pending_move``
+    接管）。故**这一档取完就让出**：``return "stay"``，剩下的档留到续跑里做，子帧先结算。
+    游标在取牌**之前**落，续跑读它跳过已经结算过的档（否则同一帧会重取）。
+    """
+    owner = int(frame.data["skill_owner"])
+    tiers = _qinzheng_tiers(host.state)
+    hit = frame.data.get(_QINZHENG_TIERS_KEY)
+    if hit is None:
+        x = host.state.player(owner).used_or_played_ever
+        hit = tuple(index for index, tier in enumerate(tiers) if x % tier.multiple == 0)
+        frame.data[_QINZHENG_TIERS_KEY] = hit
+    settled = [int(index) for index in frame.data.get(_QINZHENG_SETTLED_KEY, ())]
+    for index in hit:
+        if index in settled:
+            continue
+        settled.append(index)
+        frame.data[_QINZHENG_SETTLED_KEY] = tuple(settled)
+        host.take_named_card_from_deck(frame, names=tiers[index].names, to_seat=owner)
+        if len(settled) < len(hit):
+            return "stay"
+    return None
+
+
 def use_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """U 族**四条**技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定；【涯角】挂使用 / 打出两条钩子）。
+    """U 族全部技能的 :class:`~sgs.skills.catalog.SkillDef`（【勤政】是唯一 ``locked=True``
+    的一条：锁定技不问"是否发动"，效果直接跑回调）。
 
     标准 / 界**各自一条触发条件**，因为两版牌面不同：§九 L1013 的标准版只排除延时类
     （转化锦囊照常触发），§十九 L2120–L2121 的界版只排除转化牌（延时类照常触发）：
     :func:`_jizhi_eligible` 的两个开关各传一个。提交点仍各一条零步流水线：界版只多
     "基本牌弃置换 +1"一段。
 
-    【从讨】是 U 族的第四条（自制包韬·刘备）：挂 ``USE_BECOME_TARGET``，``per_round_limit``
+    【从讨】挂 ``USE_BECOME_TARGET``，``per_round_limit`` 置真让轮次变化进记录流
     置真让轮次变化进记录流（账本 L754 的"轮"口径只给带每轮限次的技能用）。
     """
     return (
@@ -1116,5 +1242,24 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
                 "你对其造成2点雷电伤害；♣️，你回复1点体力并对其造成1点雷电伤害。"
             ),
             step_requirements={"seat": "选择一名其他角色进行判定"},
+        ),
+        # 骆统【勤政】（shiji-zhi-luotong-chenzhen 票 01）：锁定技 + 使用 / 打出双钩子——
+        # 整局张数 X 的 3 / 5 / 8 倍数各取一张对应牌名的牌（X 与取牌都来自框架票 03）。
+        SkillDef(
+            skill_id=QINZHENG,
+            # 牌面写「锁定技」⇒ 不问"是否发动"，派发环的 forced 分支直接跑回调
+            # （`shapes.md` §2 第 1 行的锁定技变体注：效果与零步同形、不必造 `SkillFlow`）。
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(Timing.USE_ON_USE, condition=_qinzheng_condition, handler=_qinzheng),
+                Hook(Timing.PLAY_ON_PLAY, condition=_qinzheng_condition, handler=_qinzheng),
+            ),
+            requirement=(
+                "锁定技，当你使用或打出一张牌时，根据X的值（X为你本局游戏使用或打出"
+                "牌的张数），随机获得牌堆中一张对应的牌：3的倍数，【杀】或【闪】；"
+                "5的倍数，【桃】或【酒】；8的倍数，【无中生有】或【决斗】。"
+            ),
         ),
     )
