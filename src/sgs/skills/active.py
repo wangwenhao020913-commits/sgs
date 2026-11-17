@@ -89,6 +89,7 @@ from sgs.state import (
     Reforge,
     RespondMode,
     SEALED_SLOT_IDS,
+    SEALED_ZONE_JUDGE,
     SelectionSpec,
     Slot,
     SlotKind,
@@ -99,6 +100,7 @@ from sgs.state import (
     alive_seats,
     order_targets,
     seats_from,
+    zone_sealed,
 )
 from sgs.timing import Timing
 
@@ -145,6 +147,8 @@ __all__ = [
     "JIE_LIJIAN_FLOW",
     "JIE_JIANYING",
     "JIE_JIANYING_FLOW",
+    "LIMU",
+    "LIMU_FLOW",
     "POXI_CARDS",
     "POXI_FLOW",
     "ActiveSkill",
@@ -8485,6 +8489,202 @@ _SHAMENG = ActiveSkill(
 """陈震【歃盟】：A 族主动技 + 三步流水线（首步选自己的手牌 ⇒ 翻预发动）。"""
 
 
+# ---------------------------------------------------------------------------
+# 刘焉【立牧】（SP武将组8；sp8-liuyan 票 01；用户 2026-11-17 签 Q1 = R1）
+#
+# 牌面（OL 现行，逐字；账本 L963「技能文本以 OL 现行为准」）：
+#
+#     出牌阶段，你可以将一张方片牌当【乐不思蜀】对自己使用，然后回复1点体力；
+#     你的判定区有牌时，你对攻击范围内的其他角色使用牌没有距离和次数限制。
+#
+# 用户 2026-11-17 签的三条：
+#
+# - ①「一张方片牌」= **手牌 + 装备区**（区域默认读法；移动版官方攻略：「立牧这个技能方块
+#   花色的手牌或者装备都能对自己使用」）；
+# - ①「对自己使用」是牌面明文**覆盖**【乐不思蜀】自身的目标规则（规则 §6.11「对一名其他
+#   角色使用」）⇒ 不走 ``check_targets``（它按 ``_one_other`` 把自己排除），合法性由技能自己
+#   算：**自身判定区已有【乐不思蜀】时 / 判定区被废除时不能发动**（用户逐字口径）。落位仍走
+#   既有的转化延时锦囊路径（``transformed_card`` + ``start_use``）——实体来源牌进判定区、
+#   ``virtual_judge`` 记映射，判定阶段按虚拟牌结算（与界【国色】同一条路）；
+# - ② 读法 **R1**：目标须在攻击范围内（「你对你攻击范围内的其他角色使用牌」= 目标侧闸门），
+#   「没有距离限制」只豁免**牌自身的额定距离**（顺 / 兵的距离 1）与次数上限。用户对票面
+#   Q2 的裁定：「这个问题本身不成立，因为指定多目标的牌（如非无距离限制）本身就不能指定
+#   范围外的角色」——故次数豁免按"目标集合都落在攻击范围内"判，与那条规则自洽。
+# ---------------------------------------------------------------------------
+
+LIMU = hero_skill_id("liuyan", "limu")
+"""刘焉【立牧】的全限定技能 id。"""
+
+_LIMU_USED = "limu_used"
+"""帧私有：这次发动的转化【乐不思蜀】已经开过 ``USE`` 子帧（重入不再开第二次）。"""
+
+_LIMU_RECOVERED = "limu_recovered"
+"""帧私有：回复段已经压过 ``RECOVER`` 子帧（"然后"那一段只做一次）。"""
+
+_ASK_LIMU_CARD = "hero.liuyan.limu.card"
+"""【立牧】① 选方片牌的询问位置。"""
+
+_REQUIREMENT_LIMU = (
+    "出牌阶段，你可以将一张方片牌当【乐不思蜀】对自己使用，然后回复1点体力；"
+    "你的判定区有牌时，你对攻击范围内的其他角色使用牌没有距离和次数限制"
+)
+"""【立牧】的牌面逐字（OL 现行；``requirement`` 槽位）。"""
+
+
+def _limu_diamond_ids(state: GameState, owner: int) -> tuple[int, ...]:
+    """手牌 ∪ 装备区里的**方片牌**（区域默认：牌面只写"一张方片牌"）。"""
+    player = state.player(owner)
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if state.card(card_id).suit == Suit.DIAMOND.value
+    )
+
+
+def _limu_judge_ready(state: GameState, owner: int) -> bool:
+    """① 现在能不能把那张转化【乐不思蜀】落到**自己的判定区**。
+
+    两条判据都是**规则层**的，``start_use`` 不校验目标（技能自己算）：
+
+    - 判定区被废除（``zone_sealed``，与 ``check_targets`` ③ 同一条读法：整区全封才算）；
+    - 判定区里已有【乐不思蜀】（规则 §11.4 L1272 / §17.10 L1852：判定区不能放两张同名延时
+      锦囊）。判定区只装实体牌，转化出来的那张按 ``state.virtual_judge`` 的映射读牌名
+      （与界【国色】的"判定区同名"检查同一条判据）。
+    """
+    player = state.player(owner)
+    if zone_sealed(player, SEALED_ZONE_JUDGE):
+        return False
+    for card_id in player.judge:
+        effective = state.virtual_judge.get(card_id) or state.card(card_id)
+        if effective.type == "indulgence":
+            return False
+    return True
+
+
+def _limu_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段 + 本人 + 有方片牌 + 判定区能落（无同名 / 未废除）。
+
+    牌面**没有**「出牌阶段限一次」（官方攻略：「出牌阶段方块牌当乐不思蜀也不是只能发动
+    一次」）⇒ ``once_per_phase=False``；真正的闸是"判定区不能有两张同名"（见
+    :func:`_limu_judge_ready`），故它落在**候选阶段**而不是发动后取消。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _limu_diamond_ids(state, ctx.subject):
+        return current
+    if not _limu_judge_ready(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _limu_face(host: Any, owner: int) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """① 的选牌面：手牌 ∪ 装备区，只留**方片**（槽位与牌 id 同步过滤、保持同序）。"""
+    slots, card_ids = host.selection_face(owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True)
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids, strict=True)
+        if host.state.card(card_id).suit == Suit.DIAMOND.value
+    ]
+    return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
+
+
+def _limu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：选一张方片牌 → 当【乐不思蜀】对自己使用 → **然后**回复 1 点体力。
+
+    两段各一个帧内游标（"然后"的落点）：``start_use`` 压着 ``USE`` 子帧 ⇒ 先 ``return
+    "stay"``，等这次使用结算完（判定区已落位）才在重入里压 ``RECOVER``。故回复那一刻
+    立牧② **已经生效**（判定区非空），这是可观测次序。
+    """
+    del answers
+    state = host.state
+    owner = int(frame.data["source"])
+    if not frame.data.get(_LIMU_USED):
+        if not _limu_judge_ready(state, owner):
+            return None
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_LIMU_CARD,
+            key="card",
+            actor=owner,
+            timing=Timing.PHASE_PLAY_IDLE,
+            spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
+            face=_limu_face(host, owner),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            return None
+        frame.data[_LIMU_USED] = True
+        host.start_use(
+            transformed_card(state, (int(picked[0]),), "indulgence"),
+            source=owner,
+            targets=(owner,),
+            use_timing=Timing.PHASE_PLAY_IDLE,
+        )
+        return "stay"
+    if not frame.data.get(_LIMU_RECOVERED):
+        frame.data[_LIMU_RECOVERED] = True
+        _push_recover(host, frame, source=owner, target=owner)
+    return None
+
+
+LIMU_FLOW = SkillFlow(name="limu", steps=(), effect=_limu_effect, once_per_phase=False)
+"""【立牧】的零步流水线：选牌 / 使用 / 回复都由提交点手写（"没有出牌阶段限一次"）。"""
+
+
+def _limu_range_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``TARGET_RANGE_EXEMPT``：判定区有牌时，②「没有距离限制」只豁免**牌自身的额定距离**。
+
+    读法 R1（用户 2026-11-17 签）：豁免集 = **攻击范围内的其他存活座位**（
+    :func:`~sgs.effects.targets_within_attack_range`）。求值点在 ``check_targets`` 的 ②、
+    在 ③④⑤ **之前**：对【杀】它只是 no-op（攻击范围判据本来就这么判），对【顺手牵羊】/
+    【兵粮寸断】它跳过"距离 ≤ 1"那条额定距离 —— 故"攻击范围内但距离 > 1"的目标变得可用，
+    "攻击范围外"的目标仍不可用（闸门先筛人）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not state.player(ctx.owner).judge:
+        return current
+    seats = targets_within_attack_range(state, ctx.subject)
+    return tuple(dict.fromkeys((*current, *seats)))
+
+
+def _limu_count_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``COUNT_EXEMPT``：判定区有牌时，②「没有次数限制」按**这次使用的目标集合**豁免。
+
+    用户对票面 Q2 的裁定：多目标牌本来就只能在攻击范围内选目标（方天画戟的 3 个目标仍在
+    攻击范围内）⇒ 条件 = **全部目标都是攻击范围内的其他角色**；目标集合里出现任何一个
+    范围外的座位就照常计次（与【雄乱】的目标集合判据同形）。只对自己使用的牌（【酒】）
+    不在"其他角色"里 ⇒ 不豁免。
+    """
+    if ctx.owner != ctx.subject or not ctx.use_targets:
+        return current
+    if not state.player(ctx.owner).judge:
+        return current
+    others = tuple(seat for seat in ctx.use_targets if seat != ctx.subject)
+    if not others:
+        return current
+    reachable = set(targets_within_attack_range(state, ctx.subject))
+    if any(seat not in reachable for seat in others):
+        return current
+    return True
+
+
+_LIMU = ActiveSkill(
+    "liuyan",
+    "limu",
+    _limu_offers,
+    flow=LIMU_FLOW,
+    extra_modifiers=(
+        Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _limu_range_exempt),
+        Modifier(ModifierPoint.COUNT_EXEMPT, _limu_count_exempt),
+    ),
+    requirement=_REQUIREMENT_LIMU,
+    step_requirements={"card": "选择一张方片牌（手牌 / 装备区）当【乐不思蜀】对自己使用"},
+)
+"""刘焉【立牧】：A 族主动技（查看 / 选牌都由提交点手写）+ 两个常驻修饰器。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 始计篇-智包·神郭嘉（shiji-zhi 票 01）：慧识 / 辉逝 / ☆佐幸。
     _HUISHI,
@@ -8492,6 +8692,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     _ZUOXING,
     # 始计篇-智包·陈震（shiji-zhi-luotong-chenzhen 票 02）：歃盟（A 族 + 三步流水线）。
     _SHAMENG,
+    # SP武将组8·刘焉【立牧】（sp8-liuyan 票 01）：A 族 + 零步流水线（选牌 / 使用 / 回复
+    # 手写在提交点）+ 两个常驻修饰器（② 的距离 / 次数豁免）。
+    _LIMU,
     # SP庞统【过论】（sp5-pangtong-liuqi 票 01）：两步（选座 → 盲挑手牌）+ 手写主体。
     _GUOLUN,
     _DIMENG,

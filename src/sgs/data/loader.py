@@ -99,6 +99,7 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "sp5",
     "shan",
     "shiji_zhi",
+    "sp8",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 
@@ -148,6 +149,10 @@ jushou-lusu 票 01 起）：与 ``feng`` 同一姿态——一个**独立系列�
 【凤魄】【马术】、潘濬【观微】【公清】。SP 其余组将来各自另开一表（``sp4`` / ``sp6`` …），
 与 ``sp5`` 平行；移动版 SP 届时另开 ``sp5-mobile`` 表（用户 2026-11 签：本批只实现 OL
 文本，不加移动版后缀）。
+
+``sp8`` 是**SP武将组8** 那一份（``files/heroes.sp8.json``，sp8-liuyan 票 01 起）：与
+``sp5`` 同一姿态——独立的系列包、单独一表、版本标记 ``"sp8"``、显示名不带版本后缀。
+首个载体 = 刘焉【图射】【立牧】（OL 现行文本；移动版同文）。SP 其余组仍各开一表。
 
 ``jie_yijiang_2014_mobile`` 是**界一将成名-2014·移动版**那一份
 （``files/heroes.jie_yijiang_2014_mobile.json``，jie-yijiang-2014-mobile 票 01 起）：

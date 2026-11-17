@@ -845,7 +845,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi 票 01：始计篇-智包·神郭嘉（新真名）⇒ 真名 69、版本 104。
   // shiji-zhi-luotong-chenzhen 票 02：陈震（新真名）⇒ 真名 70、版本 105。
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
-  ui.state.heroCatalog.length === 71 && catalogVersions.length === 106,
+  ui.state.heroCatalog.length === 72 && catalogVersions.length === 107,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

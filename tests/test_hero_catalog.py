@@ -113,6 +113,10 @@ SP5_HEROES = load_heroes("sp5")
 """**SP武将组5** 那一份（sp5-mayunlu-panjun 票 01 起）：独立系列包（OL 的 SP 武将按组
 分包），版本字段 ``sp5``、显示名**不加**版本后缀（马云騄 / 凤魄 / 马术；潘濬 / 观微 / 公清）。"""
 
+SP8_HEROES = load_heroes("sp8")
+"""**SP武将组8** 那一份（sp8-liuyan 票 01 起）：与 ``sp5`` 同一姿态（独立系列包、单项表、
+版本字段 ``sp8``、显示名不加后缀）；首个载体 = 刘焉【图射】【立牧】。"""
+
 SHAN_HEROES = load_heroes("shan")
 """**神话再临·山包**那一份（shan-baozuoci 票 04 起）：独立系列包，版本字段 ``shan``、
 显示名**不加**版本后缀（左慈 / 化身 / 新生）。"""
@@ -190,6 +194,7 @@ JIE_YIJIANG_2014_MOBILE_ENABLED = tuple(
     hero.id for hero in JIE_YIJIANG_2014_MOBILE_HEROES.heroes if hero.enabled
 )
 SP5_ENABLED = tuple(hero.id for hero in SP5_HEROES.heroes if hero.enabled)
+SP8_ENABLED = tuple(hero.id for hero in SP8_HEROES.heroes if hero.enabled)
 SHAN_ENABLED = tuple(hero.id for hero in SHAN_HEROES.heroes if hero.enabled)
 SHIJI_ZHI_ENABLED = tuple(
     hero.id for hero in SHIJI_ZHI_HEROES.heroes if hero.enabled
@@ -297,9 +302,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 104 → 105、真名 69 → 70：陈震是新真名；装备 22 不变）。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223、武将技 198 → 199
     # （启用版本 105 → 106、真名 70 → 71：骆统是新真名；装备 22 不变）。
-    assert len(CATALOG) == 223
+    assert len(CATALOG) == 225
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 199
+    assert len(heroes) == 201
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -322,6 +327,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             YIJIANG_2014_HEROES,
             JIE_YIJIANG_2014_MOBILE_HEROES,
             SP5_HEROES,
+            SP8_HEROES,
             SHAN_HEROES,
             SHIJI_ZHI_HEROES,
         )
@@ -345,7 +351,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # sp5-pangtong-liuqi 票 01 / 02：SP庞统三技 + 刘琦两技 ⇒ 186 → 191。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 197 → 198。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
-    assert len(expected) == 199
+    # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
+    assert len(expected) == 201
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -365,6 +372,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(YIJIANG_2014_ENABLED)
         | set(JIE_YIJIANG_2014_MOBILE_ENABLED)
         | set(SP5_ENABLED)
+        | set(SP8_ENABLED)
         | set(SHAN_ENABLED)
         | set(SHIJI_ZHI_ENABLED)
     )
@@ -1866,6 +1874,15 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.huangyueying.jizhi": (
             _HookFrame(source=ME, card=state.card(_PROBE_TRICK_CARD)),
         ),
+        # sp8-liuyan 票 01【图射】：使用帧的 source 是我、产物是**非装备牌**、至少一个目标，
+        # 且**我的手牌没有基本牌**（合成局面的 ME 手牌恒为空）。换成别人当持有者 ⇒ 假。
+        "hero.liuyan.tushe": (
+            _HookFrame(
+                source=ME,
+                targets=(OTHER,),
+                card=state.card(_PROBE_TRICK_CARD),
+            ),
+        ),
         # M6 票 01【刚烈】：受伤的是我、伤害来源是座位 0（活着、不是自己）。
         "hero.xiahoudun.ganglie": (_HookFrame(target=ME, source=0),),
         "hero.daqiao.liuli": (
@@ -2400,6 +2417,10 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_zhangjiao_mobile.leiji": "触发技能",
     "hero.jie_zhangjiao_mobile.guidao": "能力位",
     "hero.jie_zhangjiao_mobile.huangtian": "主动技能",
+    # sp8-liuyan 票 01：刘焉【图射】（`USE_AFTER_DESIGNATE_TARGET` 钩子 + 零步流水线）/
+    # 【立牧】（A 族 + 零步流水线：选牌 / 使用 / 回复手写在提交点）⇒ 两格都是「零步技能」。
+    "hero.liuyan.tushe": "零步技能",
+    "hero.liuyan.limu": "零步技能",
     # 零步技能 12（SkillFlow(steps=())；执行路径统一，preactivated 不翻）
     "hero.luxun.lianying": "零步技能",
     "hero.sunshangxiang.xiaoji": "零步技能",
@@ -2799,7 +2820,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # shan-baozuoci 票 04：左慈【新生】（逐点钩子 + 零步流水线）⇒ 43 → 44。
     # shiji-zhi 票 01：神郭嘉【慧识】/【辉逝】/☆【佐幸】是零步主动技（A 族骨架 + 手写
     # 段机）⇒ 44 → 47。
-    "零步技能": 47,
+    # sp8-liuyan 票 01：刘焉【图射】（钩子 + 零步流水线）/【立牧】（A 族 + 零步流水线，
+    # 选牌 / 使用 / 回复手写在提交点，与界【国色】同形）⇒ 47 → 49。
+    "零步技能": 49,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -3039,7 +3062,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222（主动技能 37 → 38）。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223（锁定技 47 → 48）。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 223
+    assert len(SKILL_SHAPE) == len(CATALOG) == 225
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3215,6 +3238,7 @@ def test_the_range_exempt_point_carries_the_six_no_distance_consumers() -> None:
         "hero.jie_huangzhong_mobile.liegong",  # 界【烈弓】① 距 ≤ 点数
         "hero.jie_guanyu.wusheng",  # 界【武圣】② 方块【杀】
         "hero.shen_guanyu_mobile.wushen",  # 【武神】② 红桃【杀】
+        "hero.liuyan.limu",  # 【立牧】② 判定区有牌时对攻击范围内的其他角色无距离（R1）
     }
 
 
@@ -3258,7 +3282,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族三步流水线）⇒ 内 126 → 127。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】（锁定技、无 flow，效果在回调里）
     # ⇒ 外 95 → 96。
-    assert len(inside) == 127
+    assert len(inside) == 129
     assert len(outside) == 96
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

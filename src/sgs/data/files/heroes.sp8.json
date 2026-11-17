@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "sp8",
+  "heroes": [
+    {
+      "id": "liuyan",
+      "name": "刘焉",
+      "true_name": "刘焉",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "sp8",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tushe",
+          "name": "图射",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "limu",
+          "name": "立牧",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}
