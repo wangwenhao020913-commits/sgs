@@ -829,13 +829,28 @@ class Player(BaseModel):
     ``ALL_NON_LOCKED`` 影响。写入唯一入口 :meth:`Engine.suppress_skills`，回合末由
     ``Engine._clear_turn_effects`` 清掉。
     """
-    hand_card_prohibited: bool = False
-    """本回合**不能使用或打出手牌**（M6 票 04 的【义绝】黑色分支）。
+    hand_card_prohibition_sources: tuple[str, ...] = ()
+    """本回合**不能使用或打出手牌**的座位级禁令，元素 = 施加禁令的**技能 id**（M6 票 04
+    的【义绝】黑色分支；来源由 skill-display 票 00 补）。
 
+    **单一存储**：``hand_card_prohibited`` 是它派生的只读属性（``bool(来源元组)``），
+    故不存在"两个字段漂移"的可能。**有序去重（首次出现序）**：两条技能可以同时命中同一
+    座位（义绝 + 雄乱），表现层据此说出"是谁给的"，逐来源清除也不会误删另一条。
     座位级、回合末清理；候选生成在 :func:`sgs.effects.legal_actions_for` 的**唯一**闸门里
-    读它（使用 / 打出的候选按来源区过滤，弃置 / 重铸等不是"使用或打出"的动作照常）。
-    **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条技能动作重跑即可重建。
+    读派生属性（使用 / 打出的候选按来源区过滤，弃置 / 重铸等不是"使用或打出"的动作照常）。
+    写入唯一入口 :meth:`Engine.add_hand_card_prohibition` /
+    :meth:`Engine.clear_hand_card_prohibitions`。**不发 delta**：与 ``luoyi_active``
+    同姿态——回放按同一条技能动作重跑即可重建。
     """
+
+    @property
+    def hand_card_prohibited(self) -> bool:
+        """``hand_card_prohibition_sources`` 的派生只读视图："本回合不能使用或打出手牌"。
+
+        判据（"这个动作算不算使用 / 打出手牌"）仍只有一处：``effects/actions.py`` 的
+        ``_uses_hand_card``；布尔语义与票 04 的单字段时代逐字等价。
+        """
+        return bool(self.hand_card_prohibition_sources)
     xiongluan_target: int | None = None
     """本回合**我对这名角色使用牌无距离与次数限制**（张绣【雄乱】的效果①）。
 

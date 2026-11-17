@@ -554,6 +554,37 @@ def test_xiongluan_seals_the_seven_slots_and_applies_its_two_effects():
     assert check_targets(engine.state, 0, engine.state.card(spare)) == ()
 
 
+def test_turn_end_clears_every_prohibition_source():
+    """回合末清理口把禁令的**全部来源**一起清掉（不是只清最后一次写入的那一条）。"""
+    engine = Engine.from_state(_zhangxiu_state(), seed=7)
+    players = [Scripted(activate=False) for _ in range(3)]
+    query = _play_phase(engine, players)
+    engine.submit(
+        ActivateSkill(
+            skill_id="hero.zhangxiu.xiongluan",
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    run_queries(engine, players, lambda e: bool(e.state.player(0).sealed_zones))
+    target = engine.state.player(1)
+    assert target.hand_card_prohibition_sources == ("hero.zhangxiu.xiongluan",), (
+        "雄乱把自己的技能 id 记成来源"
+    )
+
+    # 同回合再来一条来源（义绝打同一座位）：两条并存，回合末**一起**清掉。
+    engine.add_hand_card_prohibition(1, "hero.jie_guanyu.yijue")
+    assert target.hand_card_prohibition_sources == (
+        "hero.zhangxiu.xiongluan",
+        "hero.jie_guanyu.yijue",
+    )
+
+    engine._clear_turn_effects()
+
+    assert target.hand_card_prohibition_sources == (), "一条来源都不留"
+    assert target.hand_card_prohibited is False
+
+
 def test_xiongluan_is_no_longer_offered_once_all_seven_slots_are_sealed():
     """隐藏 cost：7 个槽全封 ⇒ 清单渲不出、候选也没有（即使限定位被恢复）。"""
     engine = Engine.from_state(_zhangxiu_state(), seed=7)

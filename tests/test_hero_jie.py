@@ -79,6 +79,7 @@ from sgs.state import (
     ActivateSkill,
     EndPhase,
     Pass,
+    Phase,
     QueryKind,
     Reforge,
     SelectCards,
@@ -343,7 +344,7 @@ def test_the_hand_prohibition_blocks_use_and_play_but_not_reforge():
     before = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
     assert any(isinstance(action, UseCard) for action in before), "构造：本来能使用这张牌"
 
-    engine.set_hand_card_prohibition(0, True)
+    engine.add_hand_card_prohibition(0, YIJUE)
 
     after = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
     assert not any(isinstance(action, UseCard) for action in after), "使用手牌被挡"
@@ -566,6 +567,107 @@ def test_yijue_black_does_not_gain_the_revealed_card():
 
     assert black in state.player(1).hand
     assert black not in state.player(0).hand
+
+
+# ---------------------------------------------------------------------------
+# 座位级"不能使用或打出手牌"的**来源**（skill-display 票 00）
+#
+# 单一存储 = ``Player.hand_card_prohibition_sources``（施加者的技能 id，有序去重），
+# ``hand_card_prohibited`` 降为派生只读属性 ⇒ ``effects/actions.py`` 与票 04 的三条既有
+# 布尔断言一字不改。义绝与雄乱是两个施加者，故同一座位可以被两条技能同时命中。
+# ---------------------------------------------------------------------------
+
+XIONGLUAN = "hero.zhangxiu.xiongluan"
+"""张绣【雄乱】的全限定技能 id（第二条禁令来源；它的主场在 ``test_hero_lei.py``）。"""
+
+
+def _xiongluan_engine():
+    """3 人局：座位 0 = 张绣发动【雄乱】打座位 1，返回到"已生效"的引擎。
+
+    雄乱是**预发动**（清单渲得出、动作由 ``submit`` 交出——与 ``test_hero_lei.py`` 里
+    它的主场同一驱动方式），故这里手工提交 ``ActivateSkill``；座位 1 的应答面 = 选人。
+    """
+
+    def handler(query):
+        if query.kind == QueryKind.SELECT_OPTION:
+            return _seat_option(query, 1)
+        return None
+
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="zhangxiu"), SeatSpec(), SeatSpec()],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [Scripted(handler), PassPlayer(), PassPlayer()]
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and str(getattr(e.pending, "kind", "")) == "PLAY_PHASE",
+    )
+    query = engine.pending
+    assert dict(query.preactivations).get(XIONGLUAN), "雄乱已翻预发动"
+    engine.submit(
+        ActivateSkill(skill_id=XIONGLUAN, choices=("seat:1",), answers_seq=query.seq)
+    )
+    run_queries(engine, players, lambda e: bool(e.state.player(0).sealed_zones))
+    return engine
+
+
+def test_the_hand_card_prohibition_records_its_source():
+    """禁令记的是**施加者**：义绝 ⇒ 义绝 id、雄乱 ⇒ 雄乱 id；两条并存时按首次出现序。"""
+    cost = _first(type_id="slash")
+    black = _first(type_id="dismantlement", color=Color.BLACK)
+    state = _yijue_state(owner_hand=(cost,), target_hand=(black,))
+    engine = _run(
+        state,
+        [_yijue_player(cost, 1, heal=False), _reveal_player(black)],
+        lambda e: e.state.player(1).hand_card_prohibited,
+    )
+
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE,)
+
+    xiongluan = _xiongluan_engine()
+    assert xiongluan.state.player(1).hand_card_prohibition_sources == (XIONGLUAN,)
+
+    # 同回合两条都命中同一座位：两个元素、按**首次出现序**，布尔语义不变。
+    assert engine.add_hand_card_prohibition(1, XIONGLUAN) is True
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE, XIONGLUAN)
+    assert state.player(1).hand_card_prohibited is True
+
+    # 幂等：同一来源重复写不改状态（"已含该来源返回 False"）。
+    assert engine.add_hand_card_prohibition(1, XIONGLUAN) is False
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE, XIONGLUAN)
+
+
+def test_clearing_one_prohibition_keeps_the_other():
+    """逐来源清除：清掉义绝那条，雄乱那条与布尔仍成立；再清雄乱 ⇒ 禁令整体解除。"""
+    state = _yijue_state(owner_hand=(), target_hand=())
+    engine = Engine.from_state(state, seed=1)
+    assert engine.add_hand_card_prohibition(1, YIJUE) is True
+    assert engine.add_hand_card_prohibition(1, XIONGLUAN) is True
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE, XIONGLUAN)
+
+    assert engine.clear_hand_card_prohibitions(1, YIJUE) is True
+    assert state.player(1).hand_card_prohibition_sources == (XIONGLUAN,), (
+        "只清指定的那一条来源"
+    )
+    assert state.player(1).hand_card_prohibited is True, "另一条还在 ⇒ 仍不能使用或打出手牌"
+    assert engine.clear_hand_card_prohibitions(1, YIJUE) is False, "已清的来源再清是幂等的"
+
+    assert engine.clear_hand_card_prohibitions(1, XIONGLUAN) is True
+    assert state.player(1).hand_card_prohibition_sources == ()
+    assert state.player(1).hand_card_prohibited is False
+
+    # ``source=None`` = 全清（"禁令整体到期"的口子），与逐来源清同一入口。
+    assert engine.add_hand_card_prohibition(1, YIJUE) is True
+    assert engine.add_hand_card_prohibition(1, XIONGLUAN) is True
+    assert engine.clear_hand_card_prohibitions(1) is True
+    assert state.player(1).hand_card_prohibition_sources == ()
+    assert engine.clear_hand_card_prohibitions(1) is False, "本来就空 ⇒ 零动作"
 
 
 # ---------------------------------------------------------------------------

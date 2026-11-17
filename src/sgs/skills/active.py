@@ -3041,7 +3041,8 @@ QIANGXI_FLOW = SkillFlow(
 # 二次决定在 ``effect`` 里（帧内游标续跑）。黑色分支的三条效果各有落点：
 #
 # - "所有非锁定技失效" ⇒ :meth:`Engine.suppress_skills`（票 04 的座位级失效记录）；
-# - "不能使用或打出手牌" ⇒ :meth:`Engine.set_hand_card_prohibition`，唯一读取方是
+# - "不能使用或打出手牌" ⇒ :meth:`Engine.add_hand_card_prohibition`（来源 = 义绝；skill-display
+#   票 00 起禁令记施加者），唯一读取方是
 #   :func:`sgs.effects.legal_actions_for`（被禁者**所有**使用 / 打出手牌的候选消失）；
 # - "红桃【杀】伤害 +1" ⇒ ``DAMAGE_DEAL_AMOUNT`` 修饰器 + 座位级目标记录。
 # ---------------------------------------------------------------------------
@@ -3186,7 +3187,7 @@ def _yijue_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     if "yijue_black" not in frame.data:
         frame.data["yijue_black"] = True
         host.suppress_skills(target, YIJUE, frame=frame)
-        host.set_hand_card_prohibition(target, True)
+        host.add_hand_card_prohibition(target, YIJUE)
         host.add_heart_slash_bonus(owner, target)
     return None
 
@@ -5211,7 +5212,7 @@ def _xiongluan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     control = host.abolish_slots(frame, owner, _XIONGLUAN_SLOTS)
     if control == "stay":
         return "stay"
-    host.set_hand_card_prohibition(seat, True)
+    host.add_hand_card_prohibition(seat, XIONGLUAN)
     state.player(owner).xiongluan_target = seat
     return None
 
