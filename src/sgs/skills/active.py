@@ -107,6 +107,7 @@ from sgs.timing import Timing
 from .catalog import (
     SKILL_JUDGMENT_CARD_KEY,
     awakening_skill_awakened,
+    BadgeKind,
     HeroSkillDecl,
     Hook,
     ProviderWindows,
@@ -3575,6 +3576,18 @@ class ActiveSkill(HeroSkillDecl):
     而 Q16 / Q17 裁定"转化牌与真牌同为第 2 档" ⇒ 今天的两个消费者（【蛊惑】与界【渐营】②）
     在各自声明上写 ``2``。原样透传给 ``SkillDef.need_card_tier``，判据只在
     :func:`~sgs.effects.need_card_tier` 读它——派发逻辑里没有技能 id 名单。
+    """
+
+    badge: BadgeKind | None = None
+    """这条主动技有没有**座位常驻状态标签**（skill-display 票 04 的加法；缺省 ``None``）。
+
+    与 :attr:`~sgs.skills.phase_body.PhaseBodySkill.badge` **同形状**：A 族今天唯一的消费者
+    是界【渐营】——它的 ① 钩子与 ② 提供者住在**同一条**声明里，故标签位只能挂在这里。
+    原样透传给 ``SkillDef.badge``（声明面只有这一条真源），数据由投影侧登记表
+    :data:`sgs_web.projection.BADGE_PROVIDERS` 按 skill id 取——本字段不带数据、只带档位。
+
+    同一条声明同时是钩子的载体时，这个位也必须写在**这一条**上：同 id 的两条 ``SkillDef``
+    在 ``CATALOG`` 里后者静默覆盖前者，分家写等于丢一半。
     """
 
     def __post_init__(self) -> None:
@@ -7372,6 +7385,9 @@ _JIE_JIANYING = ActiveSkill(
     # 产物 = 转化牌）⇒ 与真牌同档。不写覆盖位时它按载体算成武将档 0，会在需要牌窗口里
     # 抢在装备档 / 真牌之前单独上脸。
     need_card_tier=2,
+    # skill-display 票 04：座位常驻标签「渐营 + 本阶段上一张使用牌的点数 / 花色」。与 OL
+    # 沮授那一条**同一个登记构造器**（读法逐字相同），声明面各自挂一次。
+    badge=BadgeKind.WINDOW,
 )
 """界沮授移动版【渐营】的完整声明（① 的钩子 + ② 的预发动清单，同一个技能 id）。"""
 
@@ -9194,6 +9210,8 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
                 skill.step_requirements or _STEP_REQUIREMENTS.get(skill.short_id)
             ),
             preactivated=skill.preactivated,
+            # skill-display 票 04 的加法：座位常驻状态标签（缺省 None ⇒ 既有声明零改动）。
+            badge=skill.badge,
         )
         for skill in ACTIVE_SKILLS
     )

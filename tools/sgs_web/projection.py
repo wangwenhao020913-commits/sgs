@@ -39,6 +39,7 @@ from sgs.effects import (
     behavior_for,
     distance_bonus,
     hand_limit,
+    is_own_play_phase,
     responder_role,
     response_count,
 )
@@ -78,6 +79,7 @@ from sgs.timing import Timing
 
 from .descriptions import skill_description
 from .display import (
+    SUIT_LABELS,
     card_lookup_from_query,
     card_payload,
     decorate_pending,
@@ -795,6 +797,53 @@ def _qinzheng_badge(state: Any, seat: int) -> dict[str, Any] | None:
     }
 
 
+def _jianying_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """【渐营】的座位标签 = **本阶段上一张使用牌**的点数 / 花色（skill-display 票 04）。
+
+    两版（OL 沮授 / 界沮授移动版）共用这一个构造器：读法逐字相同——都是"本阶段自己使用
+    的最后一张牌"（Q7① 的用户原话「当我每用一张牌，就立刻更新为这张牌的点数、花色」）。
+
+    三处判据，全部**取引擎既有读口**、投影只取不判：
+
+    - **读哪一格**：``Player.play_phase_last_card``，不是钩子比较用的
+      ``play_phase_previous_card``。玩家要看的是"下一次使用时的比较基准"，即最后一张；
+      技能的**比较**仍读"上一张"（那一半不归显示管）。
+    - **什么时候画**：只在**自己的出牌阶段**里（:func:`sgs.effects.is_own_play_phase`）——
+      与引擎写这一格的判据（:meth:`sgs.engine.Engine._note_play_phase_card`）**是同一个**。
+      故"出牌阶段结束 ⇒ 标签消失"是**派生**出来的：那一格在引擎侧活到下一次自己的出牌
+      阶段起点，这里**没有清除事件**（spec §2 第 2 条 / A12）。
+    - **缺项 fail-closed**（Q7①）：有花色无点数 ⇒ ``渐营 ♥``；有点数无花色 ⇒ ``渐营 7``；
+      两样都缺（多源转化 / 纯虚拟牌）⇒ 只有 ``渐营``。``parts`` **只在花色存在时**出现
+      ——花色要上色、点数从来不上色（Q14″A：只在需要上色时带）。符号与红黑取
+      :data:`sgs_web.display.SUIT_LABELS`（**唯一**映射），``parts`` 的拼接恒等于 ``label``
+      （前端有 ``parts`` 时只画 ``parts``，再画一遍 ``label`` 就会翻倍）。
+    """
+    if not is_own_play_phase(state, seat):
+        return None
+    card = state.player(seat).play_phase_last_card
+    if card is None:
+        return None
+    suit = SUIT_LABELS.get(card.suit) if card.suit is not None else None
+    face = ""
+    if suit is not None:
+        face += suit["symbol"]
+    if card.rank is not None:
+        face += str(card.rank)
+    payload: dict[str, Any] = {
+        "tag": "jianying",
+        "label": f"渐营 {face}" if face else "渐营",
+    }
+    if suit is not None:
+        parts: list[dict[str, Any]] = [
+            {"text": "渐营 "},
+            {"text": suit["symbol"], "tone": suit["color"]},
+        ]
+        if card.rank is not None:
+            parts.append({"text": str(card.rank)})
+        payload["parts"] = parts
+    return payload
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -804,6 +853,9 @@ BADGE_PROVIDERS: Mapping[
         "hero.jie_xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
         # 【勤政】恒显（含 X = 0）：读整局张数，没有"值不存在"的形态。
         "hero.luotong.qinzheng": (BadgeScope.SELF, _qinzheng_badge),
+        # 【渐营】两版都挂（spec §5 第 04 行 / Q11）：同一个构造器、同一个座位字段。
+        "hero.jushou.jianying": (BadgeScope.SELF, _jianying_badge),
+        "hero.jie_jushou_mobile.jianying": (BadgeScope.SELF, _jianying_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

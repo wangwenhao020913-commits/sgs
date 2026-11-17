@@ -20196,6 +20196,73 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         + ` class=${JSON.stringify(selfQinzhengChip.className)}`
       : "没有 qinzheng chip");
 
+  /* skill-display 票 04：沮授两版【渐营】的座位标签（服务端取值由
+   * `tests/test_web.py::test_the_jianying_badge_tracks_the_last_card_of_the_play_phase` /
+   * `::test_the_jianying_badge_omits_what_the_card_does_not_have` 从真投影钉住：读
+   * `play_phase_last_card`、只在**自己的**出牌阶段里画、缺哪项不写哪项）。这里只钉界面读法：
+   *
+   * - 有 `parts` ⇒ 按段画、花色段带上色类、**不重复**画 `label`（子节点文本拼起来 == label）；
+   * - 没有 `parts` ⇒ 照旧**只画一个文本节点**（`parts` 只在需要上色时出现，Q14″A）。
+   *
+   * 垫片没有真文本节点（元素的 `children` 只数元素子节点）⇒ "只画一个文本节点" =
+   * `children.length === 0` 且 `textContent === label`。 */
+  const jianyingView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9414,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9414 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  jianyingView.snapshot.players[0].hero_tags = [
+    { tag: "jianying", label: "渐营 ♥7", parts: [
+      { text: "渐营 " }, { text: "♥", tone: "red" }, { text: "7" },
+    ] },
+  ];
+  ui.state.view = jianyingView;
+  ui.resetSelection();
+  ui.renderTable();
+  const jianyingChipsIn = (seat) => {
+    const box = Number(seat) === Number(jianyingView.snapshot.seat)
+      ? $("t-self-hero-tags")
+      : (() => {
+        const seatNode = seatBox(seat);
+        return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+      })();
+    return box
+      ? Array.from(box.children).filter((node) => hasClass(node, "hero-tag"))
+      : [];
+  };
+  const numberedJianyingChip = jianyingChipsIn(0).find(
+    (node) => node.getAttribute("data-tag") === "jianying") || null;
+  check("JIANYING-01a 有 parts 的「渐营 ♥7」按段画、花色段带上色类、不重复画 label",
+    !!numberedJianyingChip && numberedJianyingChip.children.length === 3
+      && tagParts(numberedJianyingChip).map((node) => node.textContent).join("") === "渐营 ♥7"
+      && tagParts(numberedJianyingChip).map(toneClassOf).join(",") === "-,red,-"
+      && numberedJianyingChip.textContent === "渐营 ♥7",
+    numberedJianyingChip
+      ? `渐营 chip 元素子节点=${numberedJianyingChip.children.length}`
+        + ` 段=${JSON.stringify(tagParts(numberedJianyingChip).map((n) => n.textContent))}`
+        + ` 色=${tagParts(numberedJianyingChip).map(toneClassOf).join(",")}`
+        + ` 文本=${JSON.stringify(numberedJianyingChip.textContent)}`
+      : "没有 jianying chip");
+  // 两样都缺的牌（多源转化）⇒ 服务端只下发 `{"tag","label"}`，没有 `parts` 可画。
+  jianyingView.snapshot.players[0].hero_tags = [{ tag: "jianying", label: "渐营" }];
+  ui.state.view = jianyingView;
+  ui.resetSelection();
+  ui.renderTable();
+  const bareJianyingChip = jianyingChipsIn(0).find(
+    (node) => node.getAttribute("data-tag") === "jianying") || null;
+  check("JIANYING-01b 无 parts 的「渐营」照旧只画一个文本节点",
+    !!bareJianyingChip && bareJianyingChip.children.length === 0
+      && bareJianyingChip.textContent === "渐营"
+      && bareJianyingChip.className === "hero-tag",
+    bareJianyingChip
+      ? `文本=${JSON.stringify(bareJianyingChip.textContent)}`
+        + ` 元素子节点=${bareJianyingChip.children.length}`
+        + ` class=${JSON.stringify(bareJianyingChip.className)}`
+      : "没有 jianying chip");
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。

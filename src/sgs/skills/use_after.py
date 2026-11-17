@@ -1188,6 +1188,9 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=(
                 "当你于你的出牌阶段内使用与上一张点数或花色相同的牌时，你可以摸一张牌"
             ),
+            # skill-display 票 04：座位常驻标签「渐营 + 本阶段上一张使用牌的点数 / 花色」。
+            # 界沮授移动版那一条（`_JIE_JIANYING`）挂**同一个**登记构造器 ⇒ 两条读法一份。
+            badge=BadgeKind.WINDOW,
         ),
         SkillDef(
             skill_id=JIE_JIZHI,
