@@ -23,6 +23,34 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "sunshangxiang_sp",
+      "name": "SP孙尚香",
+      "true_name": "孙尚香",
+      "kingdom": "shu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "sp1",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "liangzhu",
+          "name": "良助",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fanxiang",
+          "name": "返乡",
+          "skill_type": "AWAKENING"
+        },
+        {
+          "id": "xiaoji",
+          "name": "枭姬",
+          "skill_type": "NORMAL",
+          "granted_by": "fanxiang"
+        }
+      ]
     }
   ]
 }

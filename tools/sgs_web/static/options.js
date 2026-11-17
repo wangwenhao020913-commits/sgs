@@ -318,6 +318,10 @@ const OPTION_LABELS = Object.freeze({
   // 界许褚【裸衣】（用户裁定）：亮出三张后的「获得 / 不获得」。
   luoyi_gain: "获得",
   luoyi_skip: "不获得",
+  // SP武将组1·SP孙尚香【良助】（sp1-sunshangxiang-maliang 票 02）：回复体力后的二选一
+  // （两项恒可执行 ⇒ 永不置灰；键带技能前缀，避免与上面通用的 `draw_one` 撞名）。
+  "liangzhu:draw_one": "摸一张牌",
+  "liangzhu:draw_two": "令其摸两张牌",
   // 攻心（票 01；界吕蒙 ☆ / 神吕蒙移动版共用）：展示红桃后的二选一。
   discard: "弃置此牌",
   deck_top: "将此牌置于牌堆顶",

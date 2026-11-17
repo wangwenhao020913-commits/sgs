@@ -317,9 +317,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 104 → 105、真名 69 → 70：陈震是新真名；装备 22 不变）。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223、武将技 198 → 199
     # （启用版本 105 → 106、真名 70 → 71：骆统是新真名；装备 22 不变）。
-    assert len(CATALOG) == 229
+    assert len(CATALOG) == 232
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 205
+    assert len(heroes) == 208
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -369,7 +369,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 197 → 198。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
-    assert len(expected) == 205
+    assert len(expected) == 208
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1765,6 +1765,33 @@ def _zishu_probe_state() -> GameState:
     return state
 
 
+def _sunshangxiang_sp_probe_state() -> GameState:
+    """SP孙尚香的正面对照局面（sp1-sunshangxiang-maliang 票 02）。
+
+    【返乡】：**我的**准备阶段（`turn_seat = ME`）+ 座位 0 已受伤 + 我对他用过良助②
+    （`skill_state` 的位段，读法是 :func:`sgs.skills.hero_sp1.liangzhu_used_on`）。
+    ☆【枭姬】与标准版同一份移动载荷，不需要额外状态。
+    """
+    hand = cards_of_type(PACK, "peach")[:1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=2),
+            SeatSpec(hero="sunshangxiang_sp", hand=hand),
+            SeatSpec(),
+        ],
+        turn_seat=ME,
+        phase=Phase.PREPARE,
+    )
+    from sgs.skills.catalog import instance_key, resolve_instances
+    from sgs.skills.hero_sp1 import LIANGZHU, _LIANGZHU_SHIFT
+
+    for instance in resolve_instances(state):
+        if instance.owner == ME and instance.skill_id == LIANGZHU:
+            state.skill_state[instance_key(instance)] = 1 << (_LIANGZHU_SHIFT + 0)
+    return state
+
+
 def _yingyuan_probe_state() -> GameState:
     """【应援】的正面对照局面：**我的回合** + 场上有其他存活角色 + 该牌名还没发动过。"""
     return build_state(
@@ -1796,6 +1823,11 @@ def _probe_state_for(skill_id: str) -> GameState:
     if skill_id in ("hero.jushou.jianying", "hero.jie_jushou_mobile.jianying"):
         # 界【渐营】的 ① 与 OL 版**逐字同句**、复用同一个条件对象 ⇒ 同一份正面局面。
         return _jianying_probe_state()
+    if skill_id in (
+        "hero.sunshangxiang_sp.fanxiang",
+        "hero.sunshangxiang_sp.xiaoji",
+    ):
+        return _sunshangxiang_sp_probe_state()
     if skill_id == "hero.maliang.zishu":
         return _zishu_probe_state()
     if skill_id == "hero.maliang.yingyuan":
@@ -2029,6 +2061,11 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
                 targets=(0,),
             ),
         ),
+        # sp1-sunshangxiang-maliang 票 02：SP孙尚香。【返乡】= 我的准备阶段（帧的 source 是我）
+        # ⇒ 换成别人当持有者后 `_awakening_verdict` 的时机半边翻假；☆【枭姬】与标准版
+        # 同一份"失去自己的装备"载荷。
+        "hero.sunshangxiang_sp.fanxiang": (_HookFrame(source=ME),),
+        "hero.sunshangxiang_sp.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
         # sp1-sunshangxiang-maliang 票 01：马良【自书】的三条条件钩子各一帧——
         # ① `MOVE_AFTER`（这次移动"关于我"：我获得牌 / 牌离开我的手牌）；
         # ② `TURN_END`（其他角色的回合结束 ∧ 回合角色存活 ∧ 我有带标记的牌）；
@@ -2419,6 +2456,12 @@ EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {
         "（其本回合用过的牌同花色、≥2 张），不关于持有者——任何角色的出牌阶段结束都要问"
         "潘濬；持有者只决定「谁弃牌」，没有『我』可自校（与【行殇】/【法恩】同一类）"
     ),
+    "hero.sunshangxiang_sp.liangzhu": (
+        "sp1-sunshangxiang-maliang 票 02【良助】：「当**一名角色**于**其**出牌阶段内回复体力后」"
+        "——条件关于**回复者**（帧的 `targets[0]`）在他的出牌阶段、且这次真的回复了 ≥1 点，"
+        "**不关于持有者**：任何人（含 SP孙尚香自己）回复都要问孙尚香，把持有者换成别人后条件"
+        "仍然成立，没有『我』可自校（与【观微】/【行殇】同一类『不关于我』）"
+    ),
     "hero.jie_chenqun_mobile.faen": (
         "yijiang-2014-round2 票 11（P2）界陈群移动版【法恩】：牌面与 OL 陈群【法恩】**逐字"
         "相同** ⇒ 两条 `Hook` 与方向判据都是**同一组对象**（`condition is` 判据直指票 10 的"
@@ -2455,6 +2498,7 @@ def test_the_owner_self_check_exemption_table_holds_only_reviewed_entries() -> N
     而没人看见：增删条目都要同步这条断言。
     """
     assert set(EXEMPT_OWNER_SELF_CHECK) == {
+        "hero.sunshangxiang_sp.liangzhu",
         "hero.jie_ganning.fenwei",
         "hero.feng_yujin.dingluan_mark",
         "hero.caopi_mobile.xingshang",
@@ -2952,6 +2996,12 @@ SKILL_SHAPE: dict[str, str] = {
     # ⇒ 「触发技能」格。
     "hero.maliang.zishu": "锁定技",
     "hero.maliang.yingyuan": "触发技能",
+    # sp1-sunshangxiang-maliang 票 02：SP孙尚香三条。【良助】= 帧外时机钩子（`RECOVER_AFTER`）
+    # + 一步选项流水线 ⇒ 「触发技能」；【返乡】= 觉醒技（零步流水线，按类型单列）；☆【枭姬】=
+    # 「零步技能」（与标准 / 界同一条流水线）。
+    "hero.sunshangxiang_sp.liangzhu": "触发技能",
+    "hero.sunshangxiang_sp.fanxiang": "觉醒技",
+    "hero.sunshangxiang_sp.xiaoji": "零步技能",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2995,8 +3045,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # shan-baozuoci 票 04：左慈【化身】（三条钩子 + 一条选项流水线）/【新生】（逐点钩子）
     # ⇒ 32 → 34。
     # sp1-sunshangxiang-maliang 票 01：马良【应援】（`MOVE_AFTER` 钩子 + 一步选座流水线）
-    # ⇒ 33 → 34。
-    "触发技能": 34,
+    # ⇒ 33 → 34；票 02：SP孙尚香【良助】（`RECOVER_AFTER` 钩子 + 一步选项流水线）⇒ 34 → 35。
+    "触发技能": 35,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
@@ -3018,7 +3068,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # 选牌 / 使用 / 回复手写在提交点，与界【国色】同形）⇒ 47 → 49。
     # sp8-liuyan 票 04：【立牧】与界【国色】都改成**有步骤**的预发动流水线 ⇒ 两条从
     # 「零步技能」挪到「主动技能」⇒ 零步 49 → 47、主动 38 → 40。
-    "零步技能": 48,
+    # sp1-sunshangxiang-maliang 票 02：SP孙尚香 ☆【枭姬】（零步流水线，第三条同形声明）
+    # ⇒ 48 → 49。
+    "零步技能": 49,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -3051,7 +3103,8 @@ SHAPE_COUNTS: dict[str, int] = {
     "候选生成器": 1,
     "候选提供者": 3,
     # shiji-zhi 票 01：神郭嘉【天翊】（觉醒技 + 零步流水线）⇒ 3 → 4。
-    "觉醒技": 4,
+    # sp1-sunshangxiang-maliang 票 02：SP孙尚香【返乡】⇒ 4 → 5。
+    "觉醒技": 5,
 }
 """每格的条数（spec §4.4；M6 票 18 后
 17 + 13 + 26 + 3 + 13 + 30 + 13 + 2 + 1 + 5 + 2 = 125）。
@@ -3261,7 +3314,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222（主动技能 37 → 38）。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223（锁定技 47 → 48）。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 229
+    assert len(SKILL_SHAPE) == len(CATALOG) == 232
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3481,7 +3534,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族三步流水线）⇒ 内 126 → 127。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】（锁定技、无 flow，效果在回调里）
     # ⇒ 外 95 → 96。
-    assert len(inside) == 131
+    assert len(inside) == 134
     assert len(outside) == 98
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

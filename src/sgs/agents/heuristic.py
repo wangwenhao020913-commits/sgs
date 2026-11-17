@@ -1963,6 +1963,11 @@ def _score_select_cards(query: Query, action: Action) -> float:
 
 _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
     {
+        # SP武将组1·SP孙尚香【良助】（sp1-sunshangxiang-maliang 票 02）：回复体力后的二选一。
+        # 「令其摸两张牌」给的是回复者（常常是队友）两张、还会推进【返乡】的觉醒条件，
+        # 比「摸一张牌」明显更值；两项都无代价，故都为正分。
+        "liangzhu:draw_one": 1.0,
+        "liangzhu:draw_two": 1.8,
         # SP武将组5 马云騄【凤魄】（票 01）：X 未知时按"伤害一点 ≈ 2.8"估——对单目标【杀】，
         # +X 伤害通常比摸 X 张更值（摸牌还要再转化），但 X 小时两者接近。
         "fengpo:draw": 1.0,
@@ -4901,6 +4906,25 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "把一张方片牌当【乐不思蜀】放到自己判定区、回复 1 点体力，换来本回合无距离 / 无次数"
         "限制（攻击范围内的其他角色）。代价 = 那张方片牌与下个判定阶段的延时风险，收益 = "
         "回血 + 不限次数的【杀】；通常净正，故给正分（`_constant` 不读任何字段）",
+    ),
+    # SP武将组1·SP孙尚香（sp1-sunshangxiang-maliang 票 02）：【良助】= 回复体力后二选一，
+    # **没有代价**（不弃牌 / 不失体力 / 无次数成本），选项侧按上面两条 `_OPTION_VALUES` 定；
+    # 【返乡】是觉醒技（强制发动、没有候选可挑）；☆【枭姬】与标准 / 界同一条零步流水线。
+    "hero.sunshangxiang_sp.liangzhu": (
+        _constant(1.5),
+        "一名角色于其出牌阶段内回复体力后二选一（我摸一 / 令其摸两张）：**没有代价**，"
+        "选项的相对价值由 `_OPTION_VALUES` 的 `liangzhu:*` 定 ⇒ 常量即正；"
+        "`_constant` 不读任何字段",
+    ),
+    "hero.sunshangxiang_sp.fanxiang": (
+        _constant(0.0),
+        "觉醒技：条件满足即强制发动，没有候选可挑（加 1 上限 + 回复 1 点 + 失去【良助】+ "
+        "获得 ☆【枭姬】）；`_constant` 不读任何字段",
+    ),
+    "hero.sunshangxiang_sp.xiaoji": (
+        _constant(3.0),
+        "失去装备区里的一张牌后摸两张（逐张触发）：**没有代价**，与标准 / 界【枭姬】"
+        "同一份牌面与同一个回调 ⇒ 同一估值；`_constant` 不读任何字段",
     ),
     # SP武将组1·马良（sp1-sunshangxiang-maliang 票 01）：【自书】是锁定技（照常"发动"、
     # 不问），按 `_missing_entries` 的既有口径**不必**登记；这里登记是为了把两段语义写在

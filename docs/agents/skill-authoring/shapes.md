@@ -137,6 +137,7 @@
 | `RANK_COMPARE_PLACED` | **拼点牌扣置入处理区后、亮出前**（韬·曹操【倡义】的「点数 +X」= 首个载体，tao-caocao 票 03；规则 12.3 L1337–L1340 的"拼点期间可以发动技能"窗口）：`RANK_COMPARE` 帧在 `place` 与 `reveal` 之间派发。此时机上的技能可经 `Engine.boost_pindian` 加**生效点数**（`rank_compare_reveal` 按牌面 + 增量算、再按规则 12.2 钳到 1..13），`pindian` delta 的 `ranks` 是该事实的公开面 |
 | `RANK_COMPARE_RESULT_AFTER` | **拼点结果后**（赢 / 没赢；票 03）：结果写回发起帧之后、拼点牌置入弃牌堆之前派发；平点 = 双方都没赢（**平点事实经 `pindian_tied` 回写发起帧**，tao-caocao 票 03——`pindian_won` 只有两态） |
 | `RECOVER_VALUE` | 回复数值确定时（界救援） |
+| `RECOVER_AFTER` | **回复体力后**（SP孙尚香【良助】= 首个载体，sp1-sunshangxiang-maliang 票 02）：`RECOVER` 帧的**第二步**派发（`src/sgs/engine/steps.py:recover_after`，`actor` = **回复者**）；**不逐点**（一次回复事件只派发一次，单体回复 2 点也只是一次）；「这次真的回复了多少点」读帧私有 `RECOVERED_AMOUNT_KEY`（被体力上限夹过；满体力时是 0）。帧外事件：任何人的出牌阶段都可能触发，条件自己判归属 |
 | `DEATH_ON` | **死亡时**技能（神关羽移动版【武魂】②：死者本人的判定 / 直接致死）——`10` 起死者在这个窗口内仍可解析，`pass_away` 收口后静默 |
 | `NEAR_DEATH_ENTER` | **濒死时**技能（庞统移动版【涅槃】：huo-mobile-batch 票 02 的首载体）——NEAR_DEATH 帧的**第一步**，在求桃窗口（`NEAR_DEATH_AT`）**之前**派发；帧外事件（任何人的回合都可能发生），效果在这里结算完 ⇒ 体力回到 1 以上时求桃窗口直接早退 |
 | `MAXLIFE_INCREASE_BEFORE` / `MAXLIFE_INCREASE_AFTER` | **加体力上限**的前 / 后（L11；规则 §4.15 L429–L439：加 / 减是两个**独立流程**，各只有「前 / 后」，没有「增减体力上限时」）。今天是**框架解封**（wuming 票 04）：唯一写入口 `Engine.raise_hp_max(seat, amount=1)` 推 `FrameKind.MAXLIFE` 帧，**首个载体 = 票 01 的【天成】**（`src/sgs/skills/start.py`）。加上限**不同步体力**——"增加上限并回复一点"的回复是技能的第二段，走 `RECOVER` 帧。**减**侧 `MAXLIFE_DECREASE_*` 仍留枚举位（`reduce_hp_max` 未迁进帧，理由见 `06`（§5「程序化约定与偏离一手」）的时机四轴计数段） |

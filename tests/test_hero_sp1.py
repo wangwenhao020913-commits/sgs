@@ -27,7 +27,7 @@ from __future__ import annotations
 from sgs.data import CardTagType, load_content_pack, hero_skill_id
 from sgs.engine import Engine
 from sgs.skills import CATALOG
-from sgs.skills.hero_sp1 import ZISHU, YINGYUAN
+from sgs.skills.hero_sp1 import FANXIANG, LIANGZHU, XIAOJI_SP, ZISHU, YINGYUAN
 from sgs.state import (
     ActivateSkill,
     CardTag,
@@ -429,3 +429,193 @@ def test_yingyuan_declining_does_not_spend_the_name():
     assert _yingyuan_condition(engine, frame) is True
     assert engine.state.player(ME).yingyuan_names == (), "只是问了一句，不占位"
     assert frame.data.get("yingyuan_done") is None
+
+
+# ---------------------------------------------------------------------------
+# SP孙尚香【良助】（sp1-sunshangxiang-maliang 票 02；用户 2026-11-18 签 Q1–Q5 / Q7）
+# ---------------------------------------------------------------------------
+
+SUNSHANGXIANG = "sunshangxiang_sp"
+
+
+def _liangzhu_frame(*, recoverer: int, amount: int, owner: int = ME):
+    """构造一份"回复者刚回复了 ``amount`` 点"的 RECOVER_AFTER 帧（只喂条件）。"""
+    from types import SimpleNamespace
+
+    from sgs.skills.catalog import MATCH_OWNER_KEY, RECOVERED_AMOUNT_KEY
+
+    return SimpleNamespace(
+        data={
+            MATCH_OWNER_KEY: owner,
+            "skill_owner": owner,
+            "source": recoverer,
+            "targets": (recoverer,),
+            "card": None,
+            RECOVERED_AMOUNT_KEY: amount,
+        }
+    )
+
+
+def _sp_state(*, turn_seat: int | None = 0, phase: Phase = Phase.PLAY, seats: int = 3):
+    """座位 1 = SP孙尚香、座位 0 = 回复者（体力 2/3）的构造局面。"""
+    specs = [SeatSpec(hp=2) for _ in range(seats)]
+    specs[ME] = SeatSpec(hero=SUNSHANGXIANG)
+    state = build_state(
+        pack=PACK,
+        seats=specs,
+        deck=_deck_excluding(),
+        turn_seat=turn_seat,
+        phase=phase,
+    )
+    return Engine.from_state(state, seed=5)
+
+
+def test_sunshangxiang_sp_lands_in_the_sp1_table_with_three_skills():
+    """数据面：``sp1`` 表里的 SP孙尚香（蜀 / 女 / 3 体力 / 真名孙尚香 / 三条技能，枭姬是 ☆）。"""
+    from sgs.data import load_heroes
+
+    table = load_heroes("sp1")
+    hero = next(h for h in table.heroes if h.id == SUNSHANGXIANG)
+    assert (hero.kingdom.value, hero.gender.value, hero.hp_max) == ("shu", "female", 3)
+    assert (hero.name, hero.true_name, hero.version) == ("SP孙尚香", "孙尚香", "sp1")
+    assert [skill.id for skill in hero.skills] == ["liangzhu", "fanxiang", "xiaoji"]
+    granted = {skill.id: skill.granted_by for skill in hero.skills}
+    assert granted["xiaoji"] == "fanxiang", "☆枭姬只由【返乡】授予"
+
+
+def test_liangzhu_declares_the_card_text_verbatim_with_one_option_step():
+    definition = CATALOG[LIANGZHU]
+    assert definition.requirement == (
+        "当一名角色于其出牌阶段内回复体力后，你可以选择一项：1.摸一张牌；2.令其摸两张牌。"
+    )
+    assert definition.locked is False
+    assert definition.preactivated is False
+    (hook,) = definition.hooks
+    assert hook.timing is Timing.RECOVER_AFTER
+    assert [type(step).__name__ for step in hook.flow.steps] == ["PickOption"]
+    assert definition.step_requirements == {"option": "选择一项：1.摸一张牌；2.令其摸两张牌"}
+
+
+def test_liangzhu_needs_the_recoverers_own_play_phase():
+    """「于**其**出牌阶段内」= 回复者自己的出牌阶段（一手：华佗【青囊】不能触发）。"""
+    from sgs.skills.hero_sp1 import _liangzhu_condition
+
+    engine = _sp_state(turn_seat=0, phase=Phase.PLAY)
+    assert _liangzhu_condition(engine, _liangzhu_frame(recoverer=0, amount=1)) is True
+    # 回复者不是回合角色（青囊那一手）⇒ 不触发
+    assert _liangzhu_condition(engine, _liangzhu_frame(recoverer=ME, amount=1)) is False
+    # 回合角色在自己的出牌阶段以外回复 ⇒ 不触发
+    engine.state.phase = Phase.DRAW
+    assert _liangzhu_condition(engine, _liangzhu_frame(recoverer=0, amount=1)) is False
+
+
+def test_liangzhu_ignores_a_zero_point_recovery():
+    """用户 2026-11-18 签 Q7：满体力时压出的"回复 0 点"不算回复事件。"""
+    from sgs.skills.hero_sp1 import _liangzhu_condition
+
+    engine = _sp_state(turn_seat=0, phase=Phase.PLAY)
+    assert _liangzhu_condition(engine, _liangzhu_frame(recoverer=0, amount=0)) is False
+
+
+class _DrawHost:
+    """只记录"谁摸了几张"的最小宿主（效果面单测；引擎整局由其他用例覆盖）。"""
+
+    def __init__(self, state):
+        self.state = state
+        self.drawn: list[tuple[int, int]] = []
+
+    def draw_for_hand(self, frame, seat, n):  # noqa: ANN001, D401
+        self.drawn.append((int(seat), int(n)))
+        return True
+
+
+def _recover_state():
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=2),
+            SeatSpec(hero=SUNSHANGXIANG),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return state
+
+
+def test_liangzhu_option_two_draws_two_for_the_recoverer_and_records_the_fact():
+    """选项 2：**回复者**摸两张 + 记"我对这个座位用过良助②"（整局按座位）。"""
+    from sgs.skills.hero_sp1 import _liangzhu_effect, liangzhu_used_on
+
+    state = _recover_state()
+    engine = Engine.from_state(state, seed=3)
+    host = _DrawHost(engine.state)
+    frame = _liangzhu_frame(recoverer=0, amount=1)
+    assert _liangzhu_effect(host, frame, {"option": "liangzhu:draw_two"}) is True
+    assert host.drawn == [(0, 2)], "摸两张的是**回复者**（座位 0），不是孙尚香"
+    assert liangzhu_used_on(engine.state, ME, 0) is True
+    assert liangzhu_used_on(engine.state, ME, OTHER) is False, "只记被选中的那个座位"
+    # 重入（挂起续跑）不重摸：游标在摸牌之前就写了
+    assert _liangzhu_effect(host, frame, {"option": "liangzhu:draw_two"}) is None
+    assert host.drawn == [(0, 2)]
+
+
+def test_liangzhu_option_one_draws_one_for_the_owner_and_records_nothing():
+    """选项 1：**我**摸一张，且**不**记事实（用户 2026-11-18 签 Q1）。"""
+    from sgs.skills.hero_sp1 import _liangzhu_effect, liangzhu_used_on
+
+    state = _recover_state()
+    engine = Engine.from_state(state, seed=3)
+    host = _DrawHost(engine.state)
+    frame = _liangzhu_frame(recoverer=0, amount=1)
+    assert _liangzhu_effect(host, frame, {"option": "liangzhu:draw_one"}) is True
+    assert host.drawn == [(ME, 1)]
+    assert liangzhu_used_on(engine.state, ME, 0) is False
+
+
+def test_fanxiang_awakens_raises_the_max_then_heals_then_swaps_the_skill():
+    """【返乡】觉醒：先 +1 上限、再回复 1 点，然后失去【良助】、获得 ☆【枭姬】。"""
+    from sgs.skills.hero_sp1 import LIANGZHU, XIAOJI_SP, liangzhu_used_on
+
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=2),
+            SeatSpec(hero=SUNSHANGXIANG, hp=1, hp_max=3),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=ME,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=9)
+    # 前置：座位 0 已受伤 ∧ 我对他用过良助②（整局位段）
+    from sgs.skills.catalog import instance_key, resolve_instances
+
+    for instance in resolve_instances(state):
+        if instance.owner == ME and instance.skill_id == LIANGZHU:
+            state.skill_state[instance_key(instance)] = 1 << (36 + 0)
+    assert liangzhu_used_on(state, ME, 0) is True
+
+    players = [PassPlayer() for _ in range(3)]
+    run_queries(
+        engine,
+        players,
+        lambda e: XIAOJI_SP in e.state.player(ME).granted_skills,
+    )
+    player = engine.state.player(ME)
+    assert player.hp_max == 4 and player.hp == 2, "先 +1 上限、再回复 1 点（1/3 → 2/4）"
+    assert LIANGZHU in player.lost_skills
+    assert XIAOJI_SP in player.granted_skills
+
+
+def test_sp_xiaoji_reuses_the_standard_declaration_and_removes_equipment():
+    """☆【枭姬】：与标准 / 界**同一条回调**；失去自己的装备即问、答发动摸两张。"""
+    from sgs.skills.move_after import XIAOJI_FLOW
+    from sgs.skills.hero_sp1 import XIAOJI_SP as SP_XIAOJI
+
+    definition = CATALOG[SP_XIAOJI]
+    (hook,) = definition.hooks
+    assert hook.flow is XIAOJI_FLOW, "同一条零步流水线"
+    assert definition.requirement == CATALOG["hero.sunshangxiang.xiaoji"].requirement

@@ -845,7 +845,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi 票 01：始计篇-智包·神郭嘉（新真名）⇒ 真名 69、版本 104。
   // shiji-zhi-luotong-chenzhen 票 02：陈震（新真名）⇒ 真名 70、版本 105。
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
-  ui.state.heroCatalog.length === 75 && catalogVersions.length === 110,
+  ui.state.heroCatalog.length === 75 && catalogVersions.length === 111,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -12133,7 +12133,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   let baguaSeed = null;
   let equippedBagua = false;
   let sawBaguaDodge = false;
-  for (const seed of [63, 66, 88, 89, 90, 29, 21, 7, 15, 20, 2, 24, 28, 38]) {
+  // sp1-sunshangxiang-maliang 票 02 换池（启用池 109 → 111）后原清单全部不再命中，按**同一判据**
+  // 重扫到 seed 52 / 83 / 262 / 263 / 276（探针 `.scratch/sp1-sunshangxiang-maliang/scan_bagua.py`：
+  // 起始手牌有【八卦阵】→ 装上 → 对手真的对座位 0 出【杀】→ DODGE 候选里有八卦 →
+  // 提交后服务端接受、且视图里还有待答或已终局——最后这一条是 U1-07l2 的判据）。
+  for (const seed of [52, 83, 262, 263, 276, 63, 66, 88, 89, 90, 29, 21, 7, 15, 20, 2, 24, 28, 38]) {
     await newSession(seed);
     equippedBagua = false;
     sawBaguaDodge = false;

@@ -613,8 +613,24 @@ _JIE_XIAOJI = MoveAfterSkill(
     trigger_count=_lost_equipment_count,
 )
 
-MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI, _JIE_XIAOJI)
-"""D 族三条技能的逐字声明（票 07 §要做什么 6 的表 + M6 票 17 界孙尚香【枭姬】）。"""
+_SUNSHANGXIANG_SP_XIAOJI = MoveAfterSkill(
+    # SP孙尚香 ☆【枭姬】（sp1-sunshangxiang-maliang 票 02）：与标准 / 界【枭姬】**同一份牌面、
+    # 同一个回调**（第三条同形声明；☆ = 由【返乡】`grant_skill` 获得）。
+    hero_id="sunshangxiang_sp",
+    short_id="xiaoji",
+    draws=2,
+    trigger=_lost_equipment,
+    flow=XIAOJI_FLOW,
+    trigger_count=_lost_equipment_count,
+)
+
+MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (
+    _LIANYING,
+    _XIAOJI,
+    _JIE_XIAOJI,
+    _SUNSHANGXIANG_SP_XIAOJI,
+)
+"""D 族四条技能的逐字声明（票 07 §要做什么 6 的表 + 界 / SP 两条同形【枭姬】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "lianying": "摸一张牌",

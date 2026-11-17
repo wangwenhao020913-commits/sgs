@@ -9,7 +9,11 @@ r"""SP武将组1 的武将技能：马良【自书】【应援】（``sp1`` 包�
   ☆【枭姬】住 :mod:`sgs.skills.move_after`（D 族"失去牌后"的唯一装载点，与马云騄【马术】
   住 :mod:`sgs.skills.target_change` 同一条理由）。
 
-牌面权威 = **用户资产**（``D:\\SGS_HEROS\\SP武将组1\\马良\\技能.txt``；用户 2026-11-18 逐条签）：
+**SP孙尚香**（票 02）同样住本模块：**良助**（`RECOVER_AFTER` 钩子 + 一步选项）、**返乡**
+（觉醒技：`PHASE_PREPARE` + 零步流水线）；☆**枭姬**住 :mod:`sgs.skills.move_after`（D 族"失去
+牌后"的唯一装载点，与标准 / 界【枭姬】**同一份牌面、同一个回调**）。
+
+票 01 牌面权威 = **用户资产**（``D:\\SGS_HEROS\\SP武将组1\\马良\\技能.txt``；用户 2026-11-18 逐条签）：
 
     自书：锁定技，①其他角色的结束阶段结束时，你将本回合获得的牌置入弃牌堆；
           ②你的回合内，当你不因此技能获得牌时，你摸一张牌。
@@ -38,23 +42,32 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import CardTagClear, CardTagType, SkillType, hero_skill_id
-from sgs.effects import CarrierKind, locate
+from sgs.effects import CarrierKind, is_own_play_phase, locate
 from sgs.resolution import Control, Frame
-from sgs.state import CardTag, GameState, MoveReason, Zone, ZoneRef
+from sgs.state import CardTag, FrameKind, GameState, MoveReason, Zone, ZoneRef, alive_seats
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
-from .flow import PickSeats, SkillFlow
+from .awakening import _AWAKENING_COMMITTED, _awakening_verdict
+from .catalog import MATCH_OWNER_KEY, RECOVERED_AMOUNT_KEY, Hook, SkillDef, instance_key
+from .flow import PickOption, PickSeats, SkillFlow
 from .move_after import gains_card, move_event
 
 __all__ = [
+    "FANXIANG",
+    "FANXIANG_FLOW",
+    "LIANGZHU",
+    "LIANGZHU_FLOW",
     "MALIANG_SKILL_DEFS",
+    "SUNSHANGXIANG_SP_SKILL_DEFS",
+    "XIAOJI_SP",
     "ZISHU",
     "ZISHU_TAG",
     "YINGYUAN",
     "YINGYUAN_FLOW",
+    "liangzhu_used_on",
     "maliang_skill_definitions",
     "sp1_skill_definitions",
+    "sunshangxiang_sp_skill_definitions",
 ]
 
 ZISHU = hero_skill_id("maliang", "zishu")
@@ -430,6 +443,240 @@ _YINGYUAN_DEF = SkillDef(
 """【应援】：触发技，钩子 + 一步选座位（`preactivated=False` ⇒ 直提态 + 逐步问）。"""
 
 
+# ---------------------------------------------------------------------------
+# SP孙尚香【良助】：当一名角色于**其**出牌阶段内回复体力后，你可以选择一项
+# （sp1-sunshangxiang-maliang 票 02；用户 2026-11-18 签 Q1–Q5）
+#
+#     良助：当一名角色于其出牌阶段内回复体力后，你可以选择一项：1.摸一张牌；2.令其摸两张牌。
+#     返乡：觉醒技，准备阶段，若场上有已受伤的角色且你对其发动过"良助"令其以此法获得过牌，
+#           你加1点体力上限并回复1点体力，然后失去技能"良助"并获得技能"枭姬"。
+#
+# 读法（票 02 §1.1 / §2.1）：
+# - 「于**其**出牌阶段内」= **回复者自己的**出牌阶段（一手：华佗对别人【青囊】时孙尚香不能
+#   对他发动良助）；判据 = `is_own_play_phase(state, 回复者)`；
+# - 触发粒度 = **逐事件**（`RECOVER` 帧一次派发一次；单体回复 2 点仍只问一次）；
+# - **回复 0 点不算事件**（用户签 Q7）：读 `RECOVERED_AMOUNT_KEY`（帧私有、被体力上限夹过）；
+# - 「令其以此法获得过牌」= **只由选项 2 写入**、**整局**寿命的按座位事实（用户签 Q1 / Q2），
+#   落 `skill_state` 的座位位段（bit 36..43，照【定乱】的 24..31），失去【良助】时随实例清；
+# - 返乡两条件**同一个座位**（一手三源同读，Q3）；**含自己**（用户 2026-11-18 补例：
+#   「对自己用选项 2，然后准备阶段自己已受伤也觉醒」）；
+# - 次序 = **先加上限、再回复**（一手「觉醒后从 3 勾玉满血变成 4 勾玉满血」），然后失去 / 获得。
+# ---------------------------------------------------------------------------
+
+LIANGZHU = hero_skill_id("sunshangxiang_sp", "liangzhu")
+"""SP孙尚香【良助】的全限定技能 id。"""
+
+FANXIANG = hero_skill_id("sunshangxiang_sp", "fanxiang")
+"""SP孙尚香【返乡】（觉醒技）的全限定技能 id。"""
+
+XIAOJI_SP = hero_skill_id("sunshangxiang_sp", "xiaoji")
+"""SP孙尚香 ☆【枭姬】的全限定技能 id（只经【返乡】的 ``grant_skill`` 获得）。"""
+
+_LIANGZHU_DRAW_ONE = "liangzhu:draw_one"
+_LIANGZHU_DRAW_TWO = "liangzhu:draw_two"
+
+_LIANGZHU_SHIFT = 36
+"""【良助】"我对座位 i 发动过良助②"位段的起始位（整局）。
+
+**为什么从 36 起**：`GameState.skill_state` 的同一个整数里还住着别的位段——0..22 是 A 族阶段位
+（每个出牌阶段清）、24..31 是【定乱】的整局座位位段、32..35 是【慎行】的本阶段次数。本事实是
+**整局**位，故取 36..43（`int` 无位宽上限；与【定乱】同一条理由）。
+"""
+
+_LIANGZHU_SEAT_BITS = 0xFF << _LIANGZHU_SHIFT
+"""座位位段：bit (36 + i) = **座位 i 被我用过良助②**（整局至多一次，无上限）。"""
+
+_LIANGZHU_DRAWN = "liangzhu_drawn"
+"""帧私有：这一次良助的摸牌已经发过（挂起续跑不重摸——照【涅槃】`_NIEPAN_DRAWN` 范式）。"""
+
+_FANXIANG_STAGE = "fanxiang:stage"
+"""帧私有段机游标：``maxlife`` / ``recover`` / ``grant`` / ``done``。"""
+
+_REQUIREMENT_LIANGZHU = (
+    "当一名角色于其出牌阶段内回复体力后，你可以选择一项：1.摸一张牌；2.令其摸两张牌。"
+)
+"""【良助】的牌面逐字（用户资产；OL 官网页同文）。"""
+
+_REQUIREMENT_FANXIANG = (
+    "觉醒技，准备阶段，若场上有已受伤的角色且你对其发动过\"良助\"令其以此法获得过牌，"
+    "你加1点体力上限并回复1点体力，然后失去技能\"良助\"并获得技能\"枭姬\"。"
+)
+"""【返乡】的牌面逐字（用户资产；OL 官网页同义）。"""
+
+
+def _liangzhu_instance(state: GameState, owner: int) -> Any:
+    """``owner`` 名下的【良助】实例（不在场 = ``None``）。"""
+    from .catalog import resolve_instances
+
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == owner and instance.skill_id == LIANGZHU:
+            return instance
+    return None
+
+
+def liangzhu_used_on(state: GameState, owner: int, seat: int) -> bool:
+    """``owner`` 是否**对这个座位**发动过【良助】②（整局事实的唯一读点）。"""
+    instance = _liangzhu_instance(state, owner)
+    if instance is None:
+        return False
+    bits = int(state.skill_state.get(instance_key(instance), 0))
+    return bool(bits >> (_LIANGZHU_SHIFT + int(seat)) & 1)
+
+
+def _mark_liangzhu_used(state: GameState, owner: int, seat: int) -> None:
+    """落"我对这个座位用过良助②"（唯一写入口；实例不在场时零动作）。"""
+    instance = _liangzhu_instance(state, owner)
+    if instance is None:
+        return None
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | (
+        1 << (_LIANGZHU_SHIFT + int(seat))
+    )
+    return None
+
+
+def _liangzhu_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：回复发生在**回复者自己的出牌阶段**，且这次**真的回复了 ≥1 点**。
+
+    「其」= 回复体力的那名角色（一手：华佗对别人【青囊】时不能发动），故判据读帧的
+    ``targets[0]``（RECOVER 帧的回复者）而不是持有者的阶段。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    targets = tuple(frame.data.get("targets") or ())
+    if not targets:
+        return False
+    recoverer = int(targets[0])
+    state = host.state
+    if not state.player(recoverer).alive:
+        return False
+    if not is_own_play_phase(state, recoverer):
+        return False
+    return int(frame.data.get(RECOVERED_AMOUNT_KEY, 0)) > 0
+
+
+def _liangzhu_effect(host: Any, frame: Frame, answers: Any) -> Control:
+    """提交点：选项 1 = 我摸一张；选项 2 = **回复者**摸两张 + 记一枚按座位的整局事实。
+
+    摸牌可能内联触发"获得牌后"并挂起（【清俭】一类）——游标**先写再摸**（挂起 = 移动已发生），
+    故续跑既不重摸、也不重复记事实。
+    """
+    owner = int(frame.data["skill_owner"])
+    target = int(tuple(frame.data["targets"])[0])
+    choice = str(answers.get("option") or "")
+    if frame.data.get(_LIANGZHU_DRAWN):
+        return None
+    frame.data[_LIANGZHU_DRAWN] = True
+    if choice == _LIANGZHU_DRAW_TWO:
+        # 「令其以此法获得过牌」= **只由选项 2** 写入（用户 2026-11-18 签 Q1）；
+        # 记在搬牌**之前**（先写再摸：挂起 = 这次发动已经发生）。
+        _mark_liangzhu_used(host.state, owner, target)
+        return host.draw_for_hand(frame, target, 2)
+    return host.draw_for_hand(frame, owner, 1)
+
+
+LIANGZHU_FLOW = SkillFlow(
+    name="liangzhu",
+    steps=(
+        # 二选一（「可以选择一项」）：放弃出口在**发动那一问**，本步必答。
+        PickOption(
+            options=(_LIANGZHU_DRAW_ONE, _LIANGZHU_DRAW_TWO),
+            optional=False,
+            key="option",
+        ),
+    ),
+    effect=_liangzhu_effect,
+)
+"""【良助】的一步流水线：二选一（两项恒可执行 ⇒ 永不置灰）。"""
+
+_LIANGZHU_DEF = SkillDef(
+    skill_id=LIANGZHU,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(Hook(Timing.RECOVER_AFTER, flow=LIANGZHU_FLOW, condition=_liangzhu_condition),),
+    requirement=_REQUIREMENT_LIANGZHU,
+    step_requirements={"option": "选择一项：1.摸一张牌；2.令其摸两张牌"},
+)
+"""【良助】：`RECOVER_AFTER` 的**首个载体**（帧外事件：任何人的出牌阶段都可能触发）。"""
+
+
+def _fanxiang_condition(host: Any, frame: Frame) -> bool:
+    """觉醒条件：**存在一个座位**同时满足「已受伤」∧「我对它用过良助②」（同一个座位，Q3）。
+
+    时机半边（自己的准备阶段）由 :func:`~sgs.skills.awakening._awakening_verdict` 恒判。
+    「场上有已受伤的角色」**含自己**（用户 2026-11-18 补例）。
+    """
+    verdict = _awakening_verdict(host, frame, FANXIANG)
+    if verdict is not None:
+        return verdict
+    owner = int(frame.data[MATCH_OWNER_KEY])
+    state = host.state
+    return any(
+        state.player(seat).hp < state.player(seat).hp_max
+        and liangzhu_used_on(state, owner, seat)
+        for seat in alive_seats(state)
+    )
+
+
+def _fanxiang_effect(host: Any, frame: Frame, answers: Any) -> Control:
+    """提交点：+1 上限（`MAXLIFE` 帧）→ 回复 1 点（`RECOVER` 帧）→ 失去【良助】→ 获得 ☆【枭姬】。
+
+    段机住帧私有游标（照【天翊】）：每段"先写游标再压帧 / 授予"，重入既不重做也不漏做。
+    次序 = **先加上限、再回复**（一手「觉醒后从 3 勾玉满血变成 4 勾玉满血」）。
+    """
+    del answers
+    owner = int(frame.data["skill_owner"])
+    frame.data[_AWAKENING_COMMITTED] = owner
+    stage = frame.data.get(_FANXIANG_STAGE)
+    if stage is None:
+        frame.data[_FANXIANG_STAGE] = "recover"
+        host.raise_hp_max(owner, 1)
+        return "stay"
+    if stage == "recover":
+        frame.data[_FANXIANG_STAGE] = "grant"
+        host.push_frame(
+            FrameKind.RECOVER,
+            {
+                "source": owner,
+                "targets": (owner,),
+                "card": None,
+                "use_timing": frame.data.get("use_timing"),
+                "amount": 1,
+            },
+            timing=Timing.RECOVER_VALUE,
+        )
+        return "stay"
+    if stage == "grant":
+        frame.data[_FANXIANG_STAGE] = "done"
+        state = host.state
+        if not state.player(owner).alive:
+            # 觉醒过程中阵亡（极端情形）：后续段不再结算（照【破势】/【勤学】）。
+            return None
+        host.lose_skill(owner, LIANGZHU, frame=frame)
+        host.grant_skill(owner, XIAOJI_SP, frame=frame)
+        return None
+    return None
+
+
+FANXIANG_FLOW = SkillFlow(name="fanxiang", steps=(), effect=_fanxiang_effect)
+"""【返乡】的零步流水线：四段全在 effect 里（"先变更状态、再压帧 / 授予"表达不成步骤）。"""
+
+_FANXIANG_DEF = SkillDef(
+    skill_id=FANXIANG,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.AWAKENING,
+    hooks=(Hook(Timing.PHASE_PREPARE, flow=FANXIANG_FLOW, condition=_fanxiang_condition),),
+    requirement=_REQUIREMENT_FANXIANG,
+)
+"""【返乡】：觉醒技（强制发动，不问"是否发动"），自己的准备阶段。"""
+
+SUNSHANGXIANG_SP_SKILL_DEFS: tuple[SkillDef, ...] = (_LIANGZHU_DEF, _FANXIANG_DEF)
+"""SP孙尚香的技能定义（☆【枭姬】住 :mod:`sgs.skills.move_after`）。"""
+
+
 MALIANG_SKILL_DEFS: tuple[SkillDef, ...] = (_ZISHU_DEF, _YINGYUAN_DEF)
 """马良的全部技能定义。"""
 
@@ -439,6 +686,11 @@ def maliang_skill_definitions() -> tuple[SkillDef, ...]:
     return MALIANG_SKILL_DEFS
 
 
+def sunshangxiang_sp_skill_definitions() -> tuple[SkillDef, ...]:
+    """SP孙尚香的技能定义（票 02 落地；由 :func:`sp1_skill_definitions` 汇总）。"""
+    return SUNSHANGXIANG_SP_SKILL_DEFS
+
+
 def sp1_skill_definitions() -> tuple[SkillDef, ...]:
     """SP武将组1 的技能定义（由 :data:`sgs.skills.CATALOG` 末尾并入）。"""
-    return (*maliang_skill_definitions(),)
+    return (*maliang_skill_definitions(), *sunshangxiang_sp_skill_definitions())

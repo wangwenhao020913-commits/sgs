@@ -1226,9 +1226,13 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
     ``.scratch/lin-batch/probes/scan_jieyin_seed.py``，判据逐字未改）。
     sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66 ⇒ ``292`` 不再走到界【结姻】的
     候选，按同一支判据重扫 60–499，取首个命中 ``145``（**518 次决策 / 5 075 条记录**）。
+    sp1-sunshangxiang-maliang 票 02（默认池 109 → 111）⇒ ``145`` 不再覆盖，按同一支判据
+    （12 000 步内自然终局 ∧ 记录流里出现过含界【结姻】的 preactivation 清单）重扫
+    60–259，取首个命中 ``96``（**271 次决策**；探针
+    ``.scratch/lin-batch/probes/scan_jieyin_seed.py 60 260``，判据逐字未改）。
     上限取 **12 000** ——远低于修复前的 2 万步，真回退了会**断言失败**而不是把 CI 挂死。
     """
-    seed = 145
+    seed = 96
     engine = Engine.new_game(
         seed=seed,
         rule_config=RuleConfig(player_count=5),
@@ -1239,7 +1243,7 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
 
     run_queries(engine, players, lambda e: e.finished, limit=12_000)
 
-    assert engine.finished, "步数上限内自然终局（实测 334 次决策）"
+    assert engine.finished, "步数上限内自然终局（实测 271 次决策）"
     assert any(
         record.kind == "query"
         and JIEYIN in (getattr(record.query, "preactivations", None) or {})

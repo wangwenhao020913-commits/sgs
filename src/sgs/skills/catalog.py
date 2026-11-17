@@ -122,6 +122,7 @@ __all__ = [
     "MATCH_ACTOR_KEY",
     "ASK_SEAT_KEY",
     "MATCH_OWNER_KEY",
+    "RECOVERED_AMOUNT_KEY",
     "ProviderWindows",
     "RUNNING_SKILL_KEY",
     "RequestAxis",
@@ -1586,6 +1587,17 @@ MATCH_OWNER_KEY = "hook_owner"
 这个槽。它与 :data:`skill_owner`（**回调执行期**才写）分开，是为了不改变既有条件的
 求值时机；票 13 起所有"关于我"的条件（【反馈】【流离】【连营】【枭姬】…）都读这个槽
 自校持有者，表驱动机械检查见 ``tests/test_hero_catalog.py`` §⑤。
+"""
+
+
+RECOVERED_AMOUNT_KEY = "recovered_amount"
+"""帧私有槽名：**这次回复实际回复了多少点**（sp1-sunshangxiang-maliang 票 02；【良助】）。
+
+`RECOVER` 帧的 ``amount`` 是**请求量**（`recover_amount` 链算出的值），写进体力时被体力上限
+夹住 ⇒ 满体力时"回复事件"实际回复 **0 点**（§4.15 L426 逐字"满体力时不回复"；既有先例 =
+【狂骨】的"满体力时不压帧"）。「回复体力后」类技能（【良助】）要判"真的回复过"就必须知道
+**实际量**，而写入点（:func:`sgs.engine.steps.recover_value`）是唯一能算出它的一处 ⇒ 在那里
+记进帧私有。帧私有数据**不进记录流**、也不改任何既有读者 ⇒ 47 条金录像逐字节不变。
 """
 
 

@@ -66,6 +66,7 @@ from sgs.skills import (
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
     JIE_JIUYUAN_REPLACED_KEY,
+    RECOVERED_AMOUNT_KEY,
     QIANXUN_PLACED_KEY,
     RejudgeOriginal,
     SeamKind,
@@ -2049,7 +2050,10 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
         base=frame.data["amount"],
     )
     player = host.state.player(target)
-    host.apply_hp_change(frame, target, min(player.hp + amount, player.hp_max))
+    delta = host.apply_hp_change(frame, target, min(player.hp + amount, player.hp_max))
+    # 帧私有：**实际**回复量（被体力上限夹过；满体力时是 0）。「回复体力后」类技能
+    # （sp1 票 02【良助】）判"真的回复过"读它——请求量 ``amount`` 在满体力时不为 0。
+    frame.data[RECOVERED_AMOUNT_KEY] = max(0, int(delta.after) - int(delta.before))
     return None
 
 
