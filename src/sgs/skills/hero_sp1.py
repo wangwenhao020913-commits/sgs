@@ -97,6 +97,16 @@ _YINGYUAN_DONE = "yingyuan_done"
 _YINGYUAN_MOVED = "yingyuan_moved"
 """帧私有：这张牌已经交给目标（搬牌挂起后的续跑不重搬）。"""
 
+_YINGYUAN_MINE = "yingyuan_mine"
+"""帧私有：这一次是「**我使用**的那张牌」进弃牌堆（**打出不算**）。
+
+`MoveReason.USE` 是**使用与打出共用的**（`Engine.move_processing_card_to_discard` 与
+`move_played_card_to_discard` 都写 `USE`）⇒ 单看移动原因会把"别人响应打出的【闪】"
+误判成"我使用的牌"（用户 2026-11-18 实机报障）。判据 = **承载帧是 USE 帧** ∧ 帧的
+`source` 是持有者；结论缓存到帧私有——挂起续跑帧的 `kind` 是 `RESOLVE`、`source` 被改写成
+`event.actor`，现算会翻假，只有帧私有会被继承。
+"""
+
 _YINGYUAN_CARD = "yingyuan_card"
 """帧私有：本次触发对应的**那张被使用的牌**。
 
@@ -370,6 +380,11 @@ def _yingyuan_condition(host: Any, frame: Frame) -> bool:
         return False
     if state.turn_seat is None or int(state.turn_seat) != owner:
         return False
+    if frame.data.get(_YINGYUAN_MINE) is None:
+        # 只有「**我使用**的牌」算：打出（别人的响应 / 我自己打出的【闪】【杀】）不算。
+        if frame.kind is not FrameKind.USE or frame.data.get("source") != owner:
+            return False
+        frame.data[_YINGYUAN_MINE] = True
     card = _yingyuan_used_card(frame)
     if card is None:
         return False

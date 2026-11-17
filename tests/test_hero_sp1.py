@@ -32,6 +32,7 @@ from sgs.state import (
     ActivateSkill,
     CardTag,
     EndPhase,
+    FrameKind,
     MoveReason,
     Pass,
     Phase,
@@ -397,6 +398,8 @@ def _yingyuan_condition_frame(engine: Engine, card_id: int):
         actor=ME,
     )
     return SimpleNamespace(
+        # 承载帧必须是 **USE 帧**（打出走 PLAY 帧 ⇒ 别人的响应不算）。
+        kind=FrameKind.USE,
         data={
             MATCH_OWNER_KEY: ME,
             "skill_owner": ME,
@@ -404,7 +407,7 @@ def _yingyuan_condition_frame(engine: Engine, card_id: int):
             "source": ME,
             "targets": (),
             MOVE_EVENT_KEY: event,
-        }
+        },
     )
 
 
@@ -619,3 +622,76 @@ def test_sp_xiaoji_reuses_the_standard_declaration_and_removes_equipment():
     (hook,) = definition.hooks
     assert hook.flow is XIAOJI_FLOW, "同一条零步流水线"
     assert definition.requirement == CATALOG["hero.sunshangxiang.xiaoji"].requirement
+
+
+def test_yingyuan_never_hands_over_a_card_another_seat_played_in_response():
+    """用户实机报障（2026-11-18）：**别人响应打出的牌**不算「你使用的牌」。
+
+    场景：马良对座位 0 使用【杀】→ 座位 0 **打出**【闪】→ 那张【闪】进弃牌堆。
+    打出与使用共用 `MoveReason.USE`（`Engine.move_played_card_to_discard` 与
+    `move_processing_card_to_discard` 都写 `USE`）⇒ 只判"进弃牌堆的原因"会把这次响应误判成
+    "我使用的牌"。【杀】自己被弃置时可以触发【应援】（发动的玩家可以选它），但**【闪】不行**。
+    """
+    slash, dodge = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(dodge,)),
+            SeatSpec(hero=MALIANG, hand=(slash,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(slash, dodge),
+        turn_seat=ME,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=21)
+
+    class _SlashAndActivate:
+        """座位 1（马良）：用一张【杀】指定座位 0；【应援】每次问都发动、目标选座位 0。"""
+
+        def __init__(self):
+            self.used = False
+            self.asked = 0
+
+        def respond(self, query):
+            if query.kind == "PLAY_PHASE":
+                if not self.used:
+                    self.used = True
+                    return UseCard(
+                        card=state.card(slash),
+                        targets=(0,),
+                        answers_seq=query.seq,
+                    )
+                return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+            if query.kind == "SKILL_ACTIVATION":
+                self.asked += 1
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == YINGYUAN:
+                        return action
+            if query.kind == "SELECT_OPTION":
+                for action in query.legal_actions:
+                    if isinstance(action, SelectOption) and str(action.choice) == "seat:0":
+                        return action
+            return _pass(query)
+
+    class _DodgeResponder:
+        """座位 0：被【杀】指定时用【闪】响应（`_dodge` 窗口的候选是 `UseCard`）。"""
+
+        def respond(self, query):
+            if query.kind == "DODGE":
+                for action in query.legal_actions:
+                    card = getattr(action, "card", None)
+                    if isinstance(action, UseCard) and getattr(card, "card_id", None) == dodge:
+                        return action
+            return _pass(query)
+
+    script = _SlashAndActivate()
+    players = [_DodgeResponder(), script, PassPlayer()]
+    run_queries(engine, players, lambda e: dodge in e.state.discard)
+    # 让【杀】自己那次应援把牌交出去（再走几步），再看谁拿到了什么。
+    run_queries(engine, players, lambda e: bool(e.state.player(0).hand) or e.finished)
+    for player in engine.state.players:
+        assert dodge not in player.hand, "别人打出的【闪】绝不能被【应援】交出去"
+    assert dodge in engine.state.discard or dodge in engine.state.processing, (
+        "那张【闪】留在弃牌堆（或结算收尾的中间态）"
+    )

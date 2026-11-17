@@ -40,6 +40,7 @@ from sgs.state import (
     HeroCardZone,
     CardRef,
     EndPhase,
+    FrameKind,
     GameState,
     Marker,
     MoveReason,
@@ -1382,9 +1383,15 @@ _PROBE_TRICK_CARD = cards_of_type(PACK, "dismantlement")[0]
 
 
 class _HookFrame:
-    """只带 ``data`` 的最小帧：``Hook.condition`` 的输入面就是 ``frame.data``（+ ``host.state``）。"""
+    """只带 ``data`` 的最小帧：``Hook.condition`` 的输入面就是 ``frame.data``（+ ``host.state``）。
 
-    def __init__(self, **data: Any) -> None:
+    ``kind``（sp1-sunshangxiang-maliang 票 01 的报障修复）：【应援】的条件还要判"承载帧是不是
+    **USE 帧**"（`MoveReason.USE` 由使用与打出共用）⇒ 最小帧也要能带帧类型，缺省 ``None``
+    （既有条件不读它）。
+    """
+
+    def __init__(self, *, kind: Any = None, **data: Any) -> None:
+        self.kind = kind
         self.data = data
 
 
@@ -2095,9 +2102,11 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=0),
             _HookFrame(source=0),
         ),
-        # 【应援】：这一次使用的牌刚进弃牌堆（`reason=USE`）、回合角色是我。
+        # 【应援】：这一次使用的牌刚进弃牌堆（`reason=USE`）、回合角色是我、**承载帧是 USE 帧**
+        # （打出走 PLAY 帧 ⇒ 别人的响应不算）。
         "hero.maliang.yingyuan": (
             _HookFrame(
+                kind=FrameKind.USE,
                 source=ME,
                 card=state.card(_PROBE_CHANNEL_SLASH),
                 **{
