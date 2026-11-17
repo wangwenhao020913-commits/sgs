@@ -20263,6 +20263,74 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         + ` class=${JSON.stringify(bareJianyingChip.className)}`
       : "没有 jianying chip");
 
+  /* skill-display 票 05：界吕蒙【博图】的座位标签（服务端取值由
+   * `tests/test_web.py::test_the_botu_badge_lists_the_discard_suits_of_this_turn` /
+   * `::test_the_botu_badge_paints_each_suit_by_the_shared_suit_table` 从真投影钉住：
+   * 读 `GameState.discard_suits_this_turn`、空集不画、顺序 = 引擎存储序）。这里只钉界面读法：
+   *
+   * - 有 `parts` ⇒ 每个花色段各自带上色类（♠ ♣ 黑、♥ 红），拼接 == `label`、不重复画；
+   * - 集合空 ⇒ 服务端**整条不下发** ⇒ 武将块上的 `hero-tags` 整块 `hidden`、一个
+   *   `hero-tag` 节点都没有（fail-closed：不画「博图」空壳）。 */
+  const botuView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9416,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9416 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  botuView.snapshot.players[0].hero_tags = [
+    { tag: "botu", label: "博图 ♠♥♣", parts: [
+      { text: "博图 " }, { text: "♠", tone: "black" },
+      { text: "♥", tone: "red" }, { text: "♣", tone: "black" },
+    ] },
+  ];
+  ui.state.view = botuView;
+  ui.resetSelection();
+  ui.renderTable();
+  const botuTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(botuView.snapshot.seat)) return $("t-self-hero-tags") || null;
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const botuChipIn = (seat) => {
+    const box = botuTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag") && node.getAttribute("data-tag") === "botu",
+      ) || null
+      : null;
+  };
+  const smokeBotuChip = botuChipIn(0);
+  check("BOTU-01a 「博图 ♠♥♣」的三个花色段各自带上色类（♠♣ 黑、♥ 红），按段画、不重复画 label",
+    !!smokeBotuChip && smokeBotuChip.children.length === 4
+      && tagParts(smokeBotuChip).map((node) => node.textContent).join("") === "博图 ♠♥♣"
+      && tagParts(smokeBotuChip).map(toneClassOf).join(",") === "-,black,red,black"
+      && smokeBotuChip.textContent === "博图 ♠♥♣",
+    smokeBotuChip
+      ? `博图 chip 元素子节点=${smokeBotuChip.children.length}`
+        + ` 段=${JSON.stringify(tagParts(smokeBotuChip).map((n) => n.textContent))}`
+        + ` 色=${tagParts(smokeBotuChip).map(toneClassOf).join(",")}`
+        + ` 文本=${JSON.stringify(smokeBotuChip.textContent)}`
+      : "没有 botu chip");
+  // 空集 ⇒ 服务端不画（fail-closed）：本人与对手的武将块都整块 hidden、没有节点。
+  botuView.snapshot.players[0].hero_tags = [];
+  botuView.snapshot.players[1].hero_tags = [];
+  ui.state.view = botuView;
+  ui.resetSelection();
+  ui.renderTable();
+  const emptySelfTagsBox = botuTagsBoxIn(0);
+  const emptyFoeTagsBox = botuTagsBoxIn(1);
+  check("BOTU-01b 本回合没有牌进过弃牌堆 ⇒ 没有 hero-tags 节点（整块 hidden，不画空壳）",
+    !!emptySelfTagsBox && emptySelfTagsBox.hidden === true
+      && emptySelfTagsBox.children.length === 0
+      && !!emptyFoeTagsBox && emptyFoeTagsBox.hidden === true
+      && emptyFoeTagsBox.children.length === 0,
+    `本人 hidden=${emptySelfTagsBox ? emptySelfTagsBox.hidden : "无节点"}`
+      + ` 子节点=${emptySelfTagsBox ? emptySelfTagsBox.children.length : "-"}`
+      + ` 对手 hidden=${emptyFoeTagsBox ? emptyFoeTagsBox.hidden : "无节点"}`
+      + ` 子节点=${emptyFoeTagsBox ? emptyFoeTagsBox.children.length : "-"}`);
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。

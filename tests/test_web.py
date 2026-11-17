@@ -8935,6 +8935,295 @@ def test_the_jianying_badge_omits_what_the_card_does_not_have() -> None:
     )
 
 
+BOTU = "hero.jie_lvmeng.botu"
+"""界吕蒙【博图】的全限定技能 id（与 ``sgs.skills.phase_body.JIE_BOTU`` 同一个字符串）。"""
+
+
+def test_the_botu_badge_lists_the_discard_suits_of_this_turn() -> None:
+    """【博图】的座位标签 = **本回合置入弃牌堆的牌出现过的花色**（skill-display 票 05）。
+
+    spec §5 第 05 行 / A3 的几条口径各有一条断言：
+
+    - 本回合还没有牌进弃牌堆 ⇒ **整条不画**（fail-closed：集合空不画空壳）；
+    - 弃一张 ♥ ⇒ ``博图 ♥``。那张 ♥ 由**对手**丢出：弃牌堆是**全场级**事实
+      （``GameState.discard_suits_this_turn`` 不分座位、不分来源，牌面写的就是"本回合
+      置入弃牌堆的牌"），但标签只画在**持有【博图】的座位**（``BadgeScope.SELF``）；
+    - 同花色再来一张 ⇒ **不重复**（去重是引擎写点 ``note_discard_suits`` 的纪律，投影只取
+      不判）；再弃一张 ♠ ⇒ ``博图 ♥♠``，顺序 = **引擎存储序（首次出现序）**，投影不排序；
+    - 回合切换 ⇒ 标签消失：引擎在 ``TURN_START`` 清空这一格，投影下一次重算就自然不画
+      （spec §2 第 2 条 / A12：没有清除事件）；
+    - **额外回合**的回合起点同样清空（作用域 = 一个回合，不是一轮）：【博图】真的发动出
+      一个额外回合之后，标签照样在额外回合的起点消失。
+
+    驱动走**真引擎路径**（搬牌原语 ``Engine.move_in_frame`` 把牌置入弃牌堆、回合环推进、
+    回合末真发动【博图】），读口走**真产出路径**（``visible_snapshot`` →
+    ``players[].hero_tags``），不在这里改字段装作发生过。``parts`` 的上色口径由
+    ``test_the_botu_badge_paints_each_suit_by_the_shared_suit_table`` 钉住，本条只看文本。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import MoveReason
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    heart_seven = cards_of_type(pack, "ex_nihilo")[0]
+    assert (pack.deck.cards[heart_seven].suit, pack.deck.cards[heart_seven].rank) == (
+        Suit.HEART,
+        7,
+    ), "前置：第一张 ♥ 就是 spec §4 载荷例子的那张真【无中生有】♥7"
+    taken = {heart_seven}
+
+    def card_of(suit: Suit) -> int:
+        """牌堆里第一张该花色（牌面事实 ⇒ 断言的花色符号是数据决定的，不是写死的）。"""
+        card_id = next(
+            index
+            for index, card in enumerate(pack.deck.cards)
+            if card.suit is suit and index not in taken
+        )
+        taken.add(card_id)
+        return card_id
+
+    opponent_heart = card_of(Suit.HEART)
+    spade = card_of(Suit.SPADE)
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_lvmeng", hand=(heart_seven, spade)),
+            SeatSpec(hero="zhenji", hand=(opponent_heart,)),
+        ],
+        deck=deck_excluding(pack, heart_seven, spade, opponent_heart),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def labels(seat: int = 0) -> list[str]:
+        return [tag["label"] for tag in hero_tags(seat)]
+
+    def turn_starts(e) -> list:  # noqa: ANN001 - 只做记录流的判据读取
+        return [
+            record.actor
+            for record in e.records
+            if record.kind == "timing" and record.timing is Timing.TURN_START
+        ]
+
+    def discard_from_hand(card_id: int, by_seat: int) -> None:
+        engine.move_in_frame(
+            None,
+            engine.state.refs((card_id,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=by_seat,
+        )
+
+    query = engine.pending
+    for _ in range(400):
+        if query is not None:
+            break
+        engine._step()
+        query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE, (
+        "前置：停在出牌阶段的空闲询问（该回合已经真的开始）"
+    )
+
+    assert hero_tags() == [], "本回合还没有牌进弃牌堆 ⇒ 整条不画（fail-closed，不画空壳）"
+    assert engine.state.discard_suits_this_turn == [], "前置：引擎侧读口也是空集"
+
+    discard_from_hand(opponent_heart, 1)
+    assert [tag["tag"] for tag in hero_tags()] == ["botu"], "有花色 ⇒ 画一条 botu 标签"
+    assert labels() == ["博图 ♥"], (
+        "弃牌堆是**全场级**事实：对手丢的 ♥ 也画在【博图】的武将块上（牌面不限来源 / 座位）"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在持有【博图】的座位（甄姬自己的武将块上没有）"
+
+    discard_from_hand(heart_seven, 0)
+    assert labels() == ["博图 ♥"], (
+        "同花色再来一张 ⇒ **不重复**显示（去重是引擎写点 note_discard_suits 的纪律）"
+    )
+    assert engine.state.discard_suits_this_turn == ["heart"], (
+        "前置：存储侧确实只有一份 ♥（投影不改写、不排序）"
+    )
+
+    discard_from_hand(spade, 0)
+    assert labels() == ["博图 ♥♠"], "按**首次出现序**：♥ 先出现、♠ 后出现"
+
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: len(turn_starts(e)) >= 2 and e.state.turn_seat == 1,
+    )
+    assert engine.state.discard_suits_this_turn == [], (
+        "回合切换 ⇒ 引擎在下一个回合的 TURN_START 清空「本回合置入弃牌堆的牌」"
+    )
+    assert labels() == [], "回合切换 ⇒ 标签消失（派生式：下一次投影自动不画，没有清除事件）"
+
+    # 座位 0 的第二个自然回合：重新凑齐四种花色，为「额外回合也复位」准备局面。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: len(turn_starts(e)) >= 3 and e.state.turn_seat == 0,
+    )
+    assert engine.state.turn_extra is False, "前置：这是座位 0 的**自然**回合（不是额外回合）"
+    assert labels() == [], "新回合起点清空之后依旧不画（不继承上一个回合的花色）"
+
+    for suit in (Suit.HEART, Suit.SPADE, Suit.CLUB, Suit.DIAMOND):
+        from_deck = next(
+            card_id
+            for card_id in engine.state.deck
+            if engine.state.card(card_id).suit == suit
+        )
+        engine.move_in_frame(
+            None,
+            engine.state.refs((from_deck,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            # 来源 = 牌堆、不经手牌：牌面只写"本回合置入弃牌堆的牌"
+            # （`06`（§5「程序化约定与偏离一手」）的裁定）。
+            reason=MoveReason.LOSE,
+            owner=None,
+        )
+    assert engine.state.discard_suits_this_turn == [
+        "heart",
+        "spade",
+        "club",
+        "diamond",
+    ], "前置：四花色按置入顺序记下（引擎存储序）"
+    assert labels() == ["博图 ♥♠♣♦"], "四色齐 ⇒ 四段全画（按存储序，不按花色枚举序）"
+
+    class _ActivatesBotu:
+        """座位 0 在回合末见到【博图】就发动——只为把**额外回合**的回合边界走一遍。"""
+
+        def __init__(self) -> None:
+            self.activated = False
+            self.labels_at_query: list[str] = []
+
+        def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+            if (
+                not self.activated
+                and query.kind == QueryKind.SKILL_ACTIVATION
+                and query.actor == 0
+            ):
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == BOTU:
+                        self.activated = True
+                        self.labels_at_query = labels()
+                        return action
+            return PassPlayer().respond(query)
+
+    driver = _ActivatesBotu()
+    run_queries(
+        engine,
+        [driver, PassPlayer()],
+        lambda e: e.state.turn_extra and len(turn_starts(e)) >= 4,
+    )
+    assert driver.activated, "前置：【博图】真的发动了（四色齐 ∧ 本轮次数未满）"
+    assert driver.labels_at_query == ["博图 ♥♠♣♦"], (
+        "前置：回合末发起【博图】时标签仍在（判据满足的那一刻确实画着四色）"
+    )
+    assert engine.state.turn_extra is True, "前置：当前正是**额外回合**（同一座位连着第二个回合）"
+    assert engine.state.discard_suits_this_turn == [], (
+        "额外回合的 TURN_START 同样清空（作用域 = 一个回合，不是一轮）"
+    )
+    assert labels() == [], "额外回合切换 ⇒ 标签同样消失（A3 的「含额外回合」）"
+
+
+def test_the_botu_badge_paints_each_suit_by_the_shared_suit_table() -> None:
+    """【博图】的每一段花色都按 `display.SUIT_LABELS` 上色（skill-display 票 05 / A9）。
+
+    三条口径：
+
+    - **顺序 = 引擎存储序（首次出现序）**，**不**排序：四张牌按 ♠ → ♥ → ♦ → ♣ 置入
+      弃牌堆，故 ``parts`` 的符号序也是 ♠♥♦♣（与花色枚举序 ♥♦♠♣、字母序都不同——排序或
+      换成"花色枚举序"这条断言立刻变红）。票面明写"不要在本票里给
+      ``discard_suits_this_turn`` 排序"：那会动到【博图】自己的判据之外的读取方。
+    - **符号与红黑取唯一映射** ``sgs_web.display.SUIT_LABELS``（``projection.py`` 里没有
+      第二份花色表）：每段的 ``text`` / ``tone`` 逐色等于 ``SUIT_LABELS[花色]`` 的
+      ``symbol`` / ``color``；``tone`` 只可能是 ``red`` / ``black``（前端契约）。
+    - **拼接恒等于 ``label``**（前端有 ``parts`` 时只画 ``parts``，再画一遍就翻倍）。
+
+    独立于实现的红黑口径另给一条：♥ / ♦ 红、♠ / ♣ 黑（规则的花色颜色），断言字面序列
+    ``black,red,red,black``——不用 ``SUIT_LABELS`` 重算也能红。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import MoveReason
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="jie_lvmeng"), SeatSpec(hero="zhenji")],
+        deck=deck_excluding(pack),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    query = engine.pending
+    for _ in range(400):
+        if query is not None:
+            break
+        engine._step()
+        query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE, (
+        "前置：停在出牌阶段的空闲询问"
+    )
+
+    # 置入序 = ♠ → ♥ → ♦ → ♣（与 Suit 枚举序 ♥♦♠♣ 不同 ⇒ 排序会被抓到）。
+    for suit in (Suit.SPADE, Suit.HEART, Suit.DIAMOND, Suit.CLUB):
+        card_id = next(
+            card_id
+            for card_id in engine.state.deck
+            if engine.state.card(card_id).suit == suit
+        )
+        engine.move_in_frame(
+            None,
+            engine.state.refs((card_id,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.LOSE,
+            owner=None,
+        )
+
+    stored = engine.state.discard_suits_this_turn
+    assert stored == ["spade", "heart", "diamond", "club"], (
+        f"前置：存储序 = 置入序（首次出现序），不是花色枚举序：{stored}"
+    )
+
+    tags = visible_snapshot(session)["players"][0]["hero_tags"]
+    assert [tag["tag"] for tag in tags] == ["botu"], "前置：只画一条【博图】标签"
+    tag = tags[0]
+    assert tag["label"] == "博图 ♠♥♦♣", "label 是同一句话的纯文本"
+    assert [part["text"] for part in tag["parts"]][0] == "博图 ", (
+        "首段是技能名 + 一个尾空格（拼接才不会粘在一起）"
+    )
+
+    suit_parts = tag["parts"][1:]
+    assert len(suit_parts) == len(stored) == 4, "一色一段，不多不少"
+    assert [part["text"] for part in suit_parts] == [
+        SUIT_LABELS[suit]["symbol"] for suit in stored
+    ], "符号按存储序逐色取 SUIT_LABELS（唯一映射）"
+    assert [part["tone"] for part in suit_parts] == [
+        SUIT_LABELS[suit]["color"] for suit in stored
+    ], "红黑按存储序逐色取 SUIT_LABELS（唯一映射）"
+    assert [part["tone"] for part in suit_parts] == ["black", "red", "red", "black"], (
+        "独立口径：♠ / ♣ 黑、♥ / ♦ 红（规则的花色颜色，不是按枚举序）"
+    )
+    assert set(part["tone"] for part in suit_parts) <= {"red", "black"}, (
+        "tone 只取 red / black（前端 hero-tag-part 只认这两个类）"
+    )
+    assert "".join(part["text"] for part in tag["parts"]) == tag["label"], (
+        "parts 的拼接必须等于 label（有 parts 时只画 parts，多一份就会翻倍）"
+    )
+
+
 def test_the_snapshot_carries_hand_limit_for_every_seat_without_touching_the_ai_projection() -> None:
     """票 09：武将块读「手牌：张数/上限」——上限只进**网页载荷**（显示层字段）。
 

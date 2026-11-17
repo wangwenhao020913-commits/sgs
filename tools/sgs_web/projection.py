@@ -844,6 +844,44 @@ def _jianying_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return payload
 
 
+def _botu_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """界吕蒙【博图】的座位标签 = **本回合置入弃牌堆的牌出现过的花色**（skill-display 票 05）。
+
+    五条口径，全部**取引擎既有读口**、投影只取不判（spec §2 第 1 条 / A3）：
+
+    - **读哪一格**：``GameState.discard_suits_this_turn``——已经**去重、按首次出现序**，
+      写入点在搬牌原语（:func:`sgs.effects.move_card` 的 ``Zone.DISCARD`` 分支）、作用域 =
+      一个回合（``TURN_START`` 复位，**含额外回合**）。投影**不数数**、不按技能 id 猜。
+    - **全场级、不分座位**：牌面写的是"本回合置入弃牌堆的牌"，不限来源（对手丢弃、判定牌、
+      阵亡清区……都算，`06`（§5「程序化约定与偏离一手」）的裁定），故取值不看 ``seat``
+      ——它只决定"画在哪"。
+    - **空集不画**：fail-closed（spec §2 第 4 条），不画 ``博图`` 空壳。
+    - **顺序 = 引擎存储序（首次出现序）**：这里**不排序**（下一行就是那条注释）。排序会让
+      界面与服务端就"哪一色先出现"说两种话，并且会动到【博图】的判据
+      （:func:`sgs.skills.phase_body._botu_available` 的 ``len(...) < len(_SUITS)``）之外的
+      读取方——去重的纪律属于引擎写点，不属于投影。
+    - **上色**：每个花色一段 ``parts``，符号 / 红黑取
+      :data:`sgs_web.display.SUIT_LABELS`（**唯一**映射；``projection.py`` 里没有第二份
+      花色表），``tone`` 只可能是 ``red`` / ``black``。``parts`` 的拼接恒等于 ``label``
+      （前端有 ``parts`` 时只画 ``parts``，再画一遍 ``label`` 就会翻倍；Q14′）。
+    """
+    # ``seat`` 只决定"画在哪"（``BadgeScope.SELF`` 的持有人）：值是**全场级**事实。
+    del seat
+    suits = state.discard_suits_this_turn
+    if not suits:
+        return None
+    # ⚠️ 顺序 = 引擎存储序（首次出现序），**不要**在这里排序：见 docstring 的第四条。
+    parts: list[dict[str, Any]] = [{"text": "博图 "}]
+    for suit in suits:
+        face = SUIT_LABELS[suit]
+        parts.append({"text": face["symbol"], "tone": face["color"]})
+    return {
+        "tag": "botu",
+        "label": "".join(part["text"] for part in parts),
+        "parts": parts,
+    }
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -856,6 +894,8 @@ BADGE_PROVIDERS: Mapping[
         # 【渐营】两版都挂（spec §5 第 04 行 / Q11）：同一个构造器、同一个座位字段。
         "hero.jushou.jianying": (BadgeScope.SELF, _jianying_badge),
         "hero.jie_jushou_mobile.jianying": (BadgeScope.SELF, _jianying_badge),
+        # 【博图】只有界吕蒙一版（spec §5 第 05 行）：读**全场级**的本回合弃牌花色。
+        "hero.jie_lvmeng.botu": (BadgeScope.SELF, _botu_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

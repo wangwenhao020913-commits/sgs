@@ -1135,6 +1135,9 @@ _BOTU = PhaseBodySkill(
     flow=BOTU_FLOW,
     available=_botu_available,
     per_round_limit=True,
+    # 座位常驻标签「博图 ♠♥♣」= 本回合进过弃牌堆的花色（skill-display 票 05；
+    # 构造器在 `sgs_web.projection._botu_badge`）。只加显示，不动上面的判据。
+    badge=BadgeKind.WINDOW,
 )
 
 
