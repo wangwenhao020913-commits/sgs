@@ -448,10 +448,17 @@ class CardTagReader(str, Enum):
     读点是"这张牌能不能占据【杀】这个牌名"的两条路——原用途（``effects/actions.py`` 的
     候选闸门，含"本来就是【杀】"的那一档）与转化候选（``skills/virtual.py`` 的
     ``virtual_candidates``，含多来源；``skills/heroes.conversion_offers`` 的界面归属面）。
+
+    ``SKILL_LOCAL``（sp1-sunshangxiang-maliang 票 01）= **没有引擎查询读它，只有赋予它的
+    技能自己读**：这一类标签只服务"那条技能自己的后续结算"，故**不能**借上面两个值——
+    ``HAND_COUNT`` 会把带标记的牌排除出手牌计数（马良的"自书"牌仍是普通手牌）、
+    ``FORBIDDEN_AS_SLASH`` 会禁掉这张牌。它**不写技能名**：判据认事实不认名字，
+    换一条技能用同一个值也成立。
     """
 
     HAND_COUNT = "hand_count"
     FORBIDDEN_AS_SLASH = "forbidden_as_slash"
+    SKILL_LOCAL = "skill_local"
 
 
 class CardTagClear(str, Enum):
@@ -497,13 +504,19 @@ class CardTagType(str, Enum):
     - ``UNTIL_PLAYED``：**到被使用 / 打出为止**（遗珠式；M6 无载体，只登记形状）；
     - ``DINGLUAN``：**【定乱】牌**（feng-yujin 票 03；首个"禁令 + 进入弃牌堆 + 自身效果"
       三合一的新形状）：不能作为【杀】使用 / 打出、进入弃牌堆即清、非因使用 / 打出进弃牌堆
-      时拥有者摸 1 张。活载体 = 锋·于禁【定乱】【节钺】，效果定义 = ``hero.feng_yujin.dingluan_mark``。
+      时拥有者摸 1 张。活载体 = 锋·于禁【定乱】【节钺】，效果定义 = ``hero.feng_yujin.dingluan_mark``；
+    - ``ZISHU``：**「自书」牌**（sp1-sunshangxiang-maliang 票 01，用户 2026-11-18 签）：
+      马良【自书】①"回合外获得的牌"的**逐张标记**——回合结束时由【自书】弃置；
+      寿命 = **离开手牌即清**（``LEAVE_ZONE``，由载体在 ``MOVE_AFTER`` 里调
+      ``clear_card_tags(..., cards=…)``）+ **回合开始时清除**（由载体自己的 ``TURN_START``
+      簿记钩子兑现）。活载体 = ``hero.maliang.zishu``。
     """
 
     LUOSHEN_HAND = "luoshen_hand"
     ZONE_HAND = "zone_hand"
     UNTIL_PLAYED = "until_played"
     DINGLUAN = "dingluan"
+    ZISHU = "zishu"
 
 
 class CardTagSpec(_FrozenModel):
@@ -566,6 +579,23 @@ CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
             disappears_with_source=False,
             carrier="hero.feng_yujin.dingluan",
             effect="hero.feng_yujin.dingluan_mark",
+        ),
+        # 【自书】（sp1-sunshangxiang-maliang 票 01；用户 2026-11-18 签 Q5 / Q6）：
+        # 逐张标记"回合外获得的牌"，寿命两条都由**载体自己**兑现——
+        # ① 离开手牌即清：声明 `LEAVE_ZONE`，载体在 MOVE_AFTER 里按"离开自己的手牌"调
+        #    `clear_card_tags(..., cards=…)`；
+        # ② 回合开始时清除：载体自己的 TURN_START **簿记钩子**（样板 = 神诸葛亮【狂风】
+        #    /【大雾】的到期清扫）——故 `CardTagSpec` 的"一格一条寿命"不必扩容。
+        # reader 取 `SKILL_LOCAL`（无引擎读点的语义档，见上）：借 HAND_COUNT 会让这些牌
+        # 不计入手牌数、借 FORBIDDEN_AS_SLASH 会禁牌——两者都是**真行为错误**。
+        # 可见性 `FACE_VISIBLE`（自己的手牌上看得到小徽章，别人看不到）；随来源消失
+        # （马良阵亡 / 失去或失效【自书】时标记一并清）。
+        CardTagType.ZISHU: CardTagSpec(
+            reader=CardTagReader.SKILL_LOCAL,
+            clear_trigger=CardTagClear.LEAVE_ZONE,
+            visibility=CardTagVisibility.FACE_VISIBLE,
+            disappears_with_source=True,
+            carrier="hero.maliang.zishu",
         ),
     }
 )

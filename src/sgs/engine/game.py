@@ -5777,6 +5777,9 @@ class Engine:
             player.fengpo_used = None
             # sp5-pangtong-liuqi 票 02 刘琦【问计】：本回合收到的牌名集合（禁令的读面）。
             player.wenji_names = ()
+            # sp1-sunshangxiang-maliang 票 01 马良【应援】：本回合已发动过的牌名
+            # （"每种牌名每回合限一次"的读面）。同一收尾点、同一姿态。
+            player.yingyuan_names = ()
             # jie-yijiang-2014-mobile 票 01【定品】的两条本回合事实：使用 / 弃置过的牌的
             # 大类记录与"不能再对其发动"的禁令，作用域都是**一个回合**（与上一位同一复位点）。
             player.turn_card_entries.clear()

@@ -88,8 +88,13 @@ from support import SeatSpec, build_state, cards_of_type  # noqa: E402
 PACK = load_content_pack(deck_profile="standard_ex_160")
 """160 张档：不泄露判据要在含 11 张新牌的档位上成立。"""
 
-EIGHT_SEED = 20261012
-"""与 ``tests/test_web.sh`` 的军争正局同一个种子（同一批行为也能在门禁里复现）。"""
+EIGHT_SEED = 20261013
+"""8 人 160 张、heuristic 对局的不泄露检查种子（初版取 ``20261012``）。
+
+**池敏感固定种子**：加武将会挪动发牌 ⇒ 旧种子走到多少个询问会变。默认池 109 → 110
+（SP武将组1）之后 ``20261012`` 只走到 9 次询问、低于"样本不少于 10"的下限，故 2026-11-18
+换成同形状的 ``20261013``（三个吃这个种子的用例同日实跑全过）。再换池时先跑
+``.scratch/sp1-sunshangxiang-maliang/find_leak_seed.py`` 那一类小工具挑种子。"""
 
 
 def _assert_player_payload(player: dict, *, human_seat: int) -> None:

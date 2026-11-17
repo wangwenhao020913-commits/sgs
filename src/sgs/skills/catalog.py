@@ -4770,6 +4770,9 @@ from .hero_sp5 import (  # noqa: E402  （末尾 import 是刻意的）
 from .hero_sp8 import (  # noqa: E402  （末尾 import 是刻意的）
     liuyan_skill_definitions,
 )
+from .hero_sp1 import (  # noqa: E402  （末尾 import 是刻意的）
+    sp1_skill_definitions,
+)
 from .zuoci import (  # noqa: E402  （末尾 import 是刻意的）
     zuoci_skill_definitions,
 )
@@ -4841,6 +4844,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *lin_skill_definitions(),
             *state_after_skill_definitions(),
             *sp5_skill_definitions(),
+            *sp1_skill_definitions(),
             *liuyan_skill_definitions(),
             *zuoci_skill_definitions(),
         )

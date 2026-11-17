@@ -923,8 +923,8 @@ def test_the_seeded_harvest_target_that_dies_before_its_pick_is_skipped():
     """回归（合并门禁的 fuzz 抓到；**预现存于** `201046a`）：五谷丰登的"死者不再拿牌"。
 
     原始种子 ``18174453931029153341`` 在添加陆抗移动版（默认池 82 → 83）之后**不再走到
-    座位 1 阵亡**（发牌变了），故换成同形状的新种子 ``389``：8 人局、局内有【五谷丰登】、
-    座位 1 阵亡。
+    座位 1 阵亡**（发牌变了），故换成同形状的新种子 ``389``；SP武将组1（默认池 109 → 110）
+    又一次挪了发牌 ⇒ 现在用 ``391``（同日实跑：8 人局、局内有【五谷丰登】、座位 1 阵亡）。
 
     五谷丰登的逐目标是"使用时"冻结的目标表；目标可能在轮到自己取牌前已经阵亡（前序目标的
     伤害 / 濒死结算把它打死，无懈窗口随后才收尾）。旧实现仍向死者发 ``SELECT_CARDS``，
@@ -934,7 +934,7 @@ def test_the_seeded_harvest_target_that_dies_before_its_pick_is_skipped():
 
     这一局只钉"死者不再拿牌"；不重录任何基准、不改 `tests/replays/`。
     """
-    engine = _play_and_check(389, players=8, deadline=time.monotonic() + 120)
+    engine = _play_and_check(391, players=8, deadline=time.monotonic() + 120)
     used = {
         record.action.card.type
         for record in engine.records

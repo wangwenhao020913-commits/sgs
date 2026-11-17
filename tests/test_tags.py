@@ -154,17 +154,23 @@ def test_reading_an_unregistered_tag_type_fails_closed() -> None:
 
 
 def test_every_tag_shape_is_registered_and_its_carrier_anchor_is_live() -> None:
-    """spec §标签：M6 三类 + feng-yujin 票 03 的【定乱】（4 类 / 2 个活载体）。"""
+    """spec §标签：M6 三类 + feng-yujin 票 03 的【定乱】+ sp1 票 01 的【自书】（5 类 / 3 个活载体）。"""
     specs = {tag_type: CARD_TAG_TYPES[tag_type] for tag_type in TAG_TYPES}
     carriers = {tag_type: spec.carrier for tag_type, spec in specs.items()}
     live = [tag_type for tag_type, carrier in carriers.items() if carrier is not None]
 
-    assert len(specs) == 4, sorted(specs)
-    assert set(live) == {CardTagType.LUOSHEN_HAND, CardTagType.DINGLUAN}, (
-        "两个活载体：界甄姬【洛神】（本回合不计入）与锋·于禁【定乱】（禁令 + 进入弃牌堆）"
+    assert len(specs) == 5, sorted(specs)
+    assert set(live) == {
+        CardTagType.LUOSHEN_HAND,
+        CardTagType.DINGLUAN,
+        CardTagType.ZISHU,
+    }, (
+        "三个活载体：界甄姬【洛神】（本回合不计入）、锋·于禁【定乱】（禁令 + 进入弃牌堆）"
+        "与马良【自书】（逐张标记 + 离手 / 回合开始清除）"
     )
     assert carriers[CardTagType.LUOSHEN_HAND] == "hero.jie_zhenji.luoshen"
     assert carriers[CardTagType.DINGLUAN] == "hero.feng_yujin.dingluan"
+    assert carriers[CardTagType.ZISHU] == "hero.maliang.zishu"
 
     turned = specs[CardTagType.LUOSHEN_HAND]
     assert turned.clear_trigger is CardTagClear.TURN_END
@@ -187,6 +193,17 @@ def test_every_tag_shape_is_registered_and_its_carrier_anchor_is_live() -> None:
     assert dingluan.disappears_with_source is False, "牌面写'直到进入弃牌堆'：于禁身死不撤回标记"
     assert dingluan.effect == "hero.feng_yujin.dingluan_mark", "标签自身效果的声明面"
     assert dingluan.effect in CATALOG, "效果定义必须真的在 CATALOG 里" 
+
+    # sp1-sunshangxiang-maliang 票 01：马良【自书】的「自书」牌——**没有引擎读取方**
+    # （`SKILL_LOCAL`：只有赋予它的技能自己读），寿命两条由载体自己兑现：
+    # 声明 `LEAVE_ZONE`（MOVE_AFTER 里按"离开自己的手牌"清）+ `TURN_START` 簿记钩子清扫；
+    # 可见性 `FACE_VISIBLE`（自己的手牌上看得到徽章），随来源实例消失。
+    zishu = specs[CardTagType.ZISHU]
+    assert zishu.reader is CardTagReader.SKILL_LOCAL, "只有技能自己读：不能借 HAND_COUNT / 禁令"
+    assert zishu.clear_trigger is CardTagClear.LEAVE_ZONE, "离开手牌即清（第一条寿命）"
+    assert zishu.visibility is CardTagVisibility.FACE_VISIBLE
+    assert zishu.disappears_with_source is True, "马良阵亡 / 失去【自书】时标记一并清"
+    assert zishu.effect is None, "自书标记没有独立效果（结算由【自书】自己的钩子做）"
 
     # 载体锚点与 ``CATALOG`` 对账：登记表说"由谁生产"，技能表里就必须真有那一条。
     for tag_type, spec in specs.items():

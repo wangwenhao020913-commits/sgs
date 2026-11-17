@@ -1011,6 +1011,16 @@ class Player(BaseModel):
     禁"for 迭代无序容器"，且这里真的只有一两条。**不发 delta**：与 ``discarded_this_turn``
     同姿态（回放按同一次发动重建）。
     """
+    yingyuan_names: tuple[str, ...] = ()
+    """本回合**已经发动过【应援】的那些牌名**（sp1-sunshangxiang-maliang 票 01；马良【应援】）。
+
+    写入唯一入口 = :func:`sgs.skills.hero_sp1._yingyuan_effect`（**提交点第一行**：把这次
+    使用的那张牌的 ``type`` 追加进来 ⇒「发动即占位、放弃不占位」，用户 2026-11-18 签 Q7）；
+    读取方 = 同一条技能的触发条件（``"每种牌名每回合限一次"``）。作用域 = **本回合**
+    （回合末 ``Engine._clear_turn_effects`` 复位）。用元组而不是集合：源码纪律禁
+    "for 迭代无序容器"，且一回合最多几条。**不发 delta**：与 ``wenji_names`` 同姿态
+    （回放按同一次发动重建）。
+    """
     dingpin_barred_targets: list[int] = Field(default_factory=list)
     """本回合**不能再对其发动【定品】**的目标座位（去重、座位升序）。
 

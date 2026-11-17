@@ -219,6 +219,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     jie_yijiang_2014_mobile = load_heroes("jie_yijiang_2014_mobile")
     sp5 = load_heroes("sp5")
     sp8 = load_heroes("sp8")
+    sp1 = load_heroes("sp1")
     shan = load_heroes("shan")
     shiji_zhi = load_heroes("shiji_zhi")
     expected = tuple(
@@ -245,6 +246,8 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
             # sp8-liuyan 票 01：SP武将组8 追加在 `HERO_SUPPLEMENT_PACK_IDS` 的**末尾**
             # （不移动既有包的并集位置 ⇒ 既有固定种子的配将结果不变）。
             sp8,
+            # sp1-sunshangxiang-maliang 票 01：SP武将组1 同样追加在**末尾**（马良 = 新真名）。
+            sp1,
         )
         for hero in table.heroes
         if hero.enabled
@@ -265,7 +268,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     # shan-baozuoci 票 04：山包·左慈（新真名）⇒ 102 → 103。
     # shiji-zhi-luotong-chenzhen 票 02：始计篇-智包·陈震（新真名）⇒ 104 → 105。
     # shiji-zhi-luotong-chenzhen 票 01：始计篇-智包·骆统（新真名）⇒ 105 → 106。
-    assert len(expected) == 109
+    assert len(expected) == 110
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -335,8 +338,9 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     # sp5-pangtong-liuqi：加 SP庞统 / 刘琦 ⇒ 102；shan-baozuoci 票 04：加左慈 ⇒ 103。
     # shiji-zhi-luotong-chenzhen 票 02：加陈震 ⇒ 105。
     # shiji-zhi-luotong-chenzhen 票 01：加骆统 ⇒ 106。
+    # sp1-sunshangxiang-maliang 票 01：加马良 ⇒ 107。
     ids = enabled_hero_ids()
-    assert len(ids) == 109
+    assert len(ids) == 110
 
     for hero_id in ids:
         heroes = _heroes_of(

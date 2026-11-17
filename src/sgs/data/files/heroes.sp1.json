@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "sp1",
+  "heroes": [
+    {
+      "id": "maliang",
+      "name": "马良",
+      "true_name": "马良",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "sp1",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zishu",
+          "name": "自书",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yingyuan",
+          "name": "应援",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}
