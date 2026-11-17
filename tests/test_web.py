@@ -8427,7 +8427,14 @@ def test_a_game_start_max_hp_change_does_not_leak_into_the_opening_frame() -> No
 
 
 def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view() -> None:
-    """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。"""
+    """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。
+
+    三个座位各测一段：0 = 只有手牌上限加式（没有【裸衣】⇒ 不画它）、1 = 标准【裸衣】、
+    2 = 界【裸衣】。**第 1 座必须是【裸衣】的持有者**——skill-display 票 01 起标签走
+    ``BADGE_PROVIDERS`` 的 ``SELF`` 档，投影先看「(座位, 技能) 真在 resolve_instances 里」；
+    "座位字段为真但该座位没有这条技能 ⇒ 不画"由
+    ``test_a_self_badge_disappears_when_the_skill_stops_resolving`` 单独钉住。
+    """
     from types import SimpleNamespace
 
     from sgs.state import PlayerView
@@ -8438,8 +8445,8 @@ def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view
     state = build_state(
         pack=pack,
         seats=[
-            SeatSpec(hp=4, hero="xuchu"),
             SeatSpec(hp=4, hero="zhenji"),
+            SeatSpec(hp=4, hero="xuchu"),
             SeatSpec(hp=4, hero="jie_xuchu"),
         ],
         deck=tuple(range(40, 50)),
@@ -8462,6 +8469,64 @@ def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view
     ], "界【裸衣】读 luoyi_until_next_turn"
     assert "hero_tags" not in PlayerView.model_fields, (
         "标签是网页显示字段，不能塞进 PlayerView（记录字节 / 金录像）"
+    )
+
+
+def test_a_self_badge_disappears_when_the_skill_stops_resolving() -> None:
+    """``SELF`` 档的标签只在技能**真在解析中**时下发（skill-display 票 01 的实例闸）。
+
+    座位字段（``Player.luoyi_active``）仍是真的、一个字没清时，技能一旦**失去**
+    （``Player.lost_skills``）或**失效**（``Player.suppressed_skills``）⇒ 该实例不在
+    :func:`sgs.skills.resolve_instances` 里 ⇒ 标签自动不画、恢复后自动回来。这正是 06 票
+    【父荫】要的"有效"判据（Q7④：不许依赖"锁定技今天不会被失效"这种巧合），也是
+    **派生式**生命周期（spec §2 第 2 条 / A12：没有清除事件，每次投影重算）。
+
+    判据走**真实产出路径**（``visible_snapshot`` 的 ``players[].hero_tags``），不直调内部；
+    对照 = 同一局里**没有**这条技能的座位：它的作用域字段也置了位，但不该出现标签——
+    ``SELF`` 档只画在持有者自己的座位。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import SkillSuppression
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="xuchu"), SeatSpec(hp=4, hero="zhenji")],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(0).luoyi_active = True
+    # 对照：哪怕引擎字段为真，没有【裸衣】的座位也不画它（SELF 档的"落座位"）。
+    state.player(1).luoyi_active = True
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=1, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert hero_tags(0) == [{"tag": "luoyi", "label": "裸衣"}], (
+        "前置：持有【裸衣】且作用域字段为真 ⇒ 标签在"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在持有者自己的座位（甄姬没有【裸衣】）"
+
+    # 失去：实例不再产出 ⇒ 标签消失（座位字段仍是真的，消失是**派生**的）。
+    engine.state.player(0).lost_skills.append("hero.xuchu.luoyi")
+    assert engine.state.player(0).luoyi_active is True, (
+        "字段没被清——消失只由实例闸派生，不靠清除事件"
+    )
+    assert hero_tags(0) == [], "技能失去后标签必须自动不画"
+
+    # 失效：实例还在、但被座位级谓词挡在解析之外 ⇒ 同样不画；作用域到期 ⇒ 自动回来。
+    engine.state.player(0).lost_skills.clear()
+    engine.state.player(0).suppressed_skills.append(
+        SkillSuppression(skill_id="hero.jie_guanyu.yijue")
+    )
+    assert hero_tags(0) == [], "技能失效期间标签必须不画"
+    engine.state.player(0).suppressed_skills.clear()
+    assert hero_tags(0) == [{"tag": "luoyi", "label": "裸衣"}], (
+        "失效可恢复 ⇒ 下一次投影里标签自动回来"
     )
 
 
@@ -14575,3 +14640,41 @@ def test_the_appearance_kind_is_a_closed_set_with_one_builder_per_member() -> No
         "每个外观组件种类都必须有投影构造器（漏登 = 界面上没有数据面）"
     )
     assert callable(APPEARANCE_BUILDERS[AppearanceKind.AVATAR])
+
+
+def test_the_badge_kind_is_a_closed_set_with_one_provider_per_declarer() -> None:
+    """小窗口类标签的**种类**是闭集（skill-display 票 01）：每条**声明**都必须有登记。
+
+    与外观组件那条同一姿态，判据换个方向：``APPEARANCE_BUILDERS`` 按 kind 索引，故核
+    "每个 kind 一条构造器"；标签登记表按 **skill id** 索引（与 ``catalog.ACTIVATION_PLANS``
+    同姿态：注册表按 skill id 索引允许，派发逻辑里不许出现技能 id 名单），故核
+    ``set(BADGE_PROVIDERS)`` **恰好等于**所有 ``SkillDef.badge is not None`` 的 skill id：
+    **漏登**（声明了却不画）与**幽灵登记**（画一条没人声明的）都即时变红。
+
+    本轮闭集只有 ``WINDOW``（座位常驻标签）；加成员必须同票交齐三件事（数据构造器 /
+    前端对 ``parts`` 的消费若需要 / 票面与 `06` 的登记），故这里写死成员集合——加第二个
+    kind 必须同时改这条断言（有意的摩擦）。**声明者名单**不写死：本票之后 03–09 票会各自
+    再加声明，而"声明 ⇔ 登记"的等式对每一次新增都同样有效。
+
+    本票只声明【裸衣】的两条定义（``hero.xuchu.luoyi`` / ``hero.jie_xuchu.luoyi``），两条
+    登记指向同一个构造器、都是 ``SELF`` 档。
+    """
+    from sgs.skills import CATALOG, BadgeKind, BadgeScope
+    from sgs_web.projection import BADGE_PROVIDERS
+
+    assert {kind.value for kind in BadgeKind} == {"window"}, (
+        "本轮只落座位常驻标签一个 kind（弹窗类仍走 AppearanceKind）"
+    )
+    declared = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.badge is not None
+    }
+    assert set(BADGE_PROVIDERS) == declared, (
+        "每条声明了 badge 的技能都必须有登记（漏登 = 标签永远不出现；"
+        f"幽灵登记 = 画一条没人声明的东西）：多 {sorted(set(BADGE_PROVIDERS) - declared)}、"
+        f"少 {sorted(declared - set(BADGE_PROVIDERS))}"
+    )
+    for scope, builder in BADGE_PROVIDERS.values():
+        assert isinstance(scope, BadgeScope), "登记表的值是 (落座位档, 构造器) 二元组"
+        assert callable(builder)

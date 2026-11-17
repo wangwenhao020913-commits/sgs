@@ -341,6 +341,47 @@ class AppearanceKind(str, Enum):
     AVATAR = "avatar"
 
 
+class BadgeKind(str, Enum):
+    """技能的**座位常驻状态标签**种类（skill-display 票 01；闭集）。
+
+    「小窗口类显示组件」的代码侧声明：一条技能在座位卡上**常驻画一句话 / 一个小值**
+    （`players[].hero_tags` → `.hero-tag` chip）。它与 :class:`AppearanceKind`（弹窗类）
+    **互不替代**：弹窗类要富数据与交互、且可以是自见信息；小窗口类只画一个字面量、公开、
+    无交互，且可以画在**别人的座位**上（【雄乱】/【义绝】/【铁骑】画在目标身上）。
+
+    ``WINDOW`` 是本轮唯一的成员。加成员必须**同票**交齐三件事（与 ``AppearanceKind``
+    同一姿态）：
+
+    1. `sgs_web.projection.BADGE_PROVIDERS` 里为**每条声明了该 kind 的技能**登记一个数据
+       构造器（键 = **skill id**，与 ``catalog.ACTIVATION_PLANS`` 同姿态：注册表按 skill id
+       索引允许，派发逻辑里不许出现技能 id 名单）。键集与"``SkillDef.badge is not None``
+       的 skill id 集合"**强制相等**——`tests/test_web.py` 的闭集审计用例对漏登与幽灵登记
+       都判红；
+    2. 该 kind 需要逐段上色时，前端要消费 ``parts``（本票只落声明面与数据面，``parts``
+       的渲染在 02 票）；
+    3. 票面 / `06`（§5「程序化约定与偏离一手」）的登记，以及 `shapes.md §3.11` 的分类表。
+
+    ``SkillDef`` 不被序列化 ⇒ 本字段不进记录流，47 条金录像逐字节不变。
+    """
+
+    WINDOW = "window"
+
+
+class BadgeScope(str, Enum):
+    """一条座位标签**画在谁的座位上**（skill-display 票 01；闭集）。
+
+    - ``SELF``：只画在**持有者自己的座位**。投影侧另有一道**实例闸**：``(seat, skill_id)``
+      必须真在 :func:`resolve_instances` 里（缺省 ``include_suppressed=False``），故技能
+      **失去 / 失效**时标签自动不画。这正是 06 票【父荫】要的"有效"判据，且不依赖
+      "锁定技今天不会被失效"这种巧合。
+    - ``ANY_SEAT``：对**每个座位**都问一次构造器（【雄乱】/【义绝】/【铁骑】画在目标身上）。
+      画不画由构造器自己按引擎既有读口判，投影侧不做座位判断（"投影只取不判"）。
+    """
+
+    SELF = "self"
+    ANY_SEAT = "any_seat"
+
+
 @dataclass(frozen=True, slots=True)
 class SkillDef:
     """一张技能定义（票 07 §6 的冻结形状，票 30 / 票 01 只加可选字段）。
@@ -530,6 +571,21 @@ class SkillDef:
       ``_AI_READ_POINTS``（`docs/agents/ai-adaptation.md` §5）。
 
     ``SkillDef`` 不被序列化 ⇒ 本字段不进记录流，金录像逐字节不变。
+    """
+
+    badge: BadgeKind | None = None
+    """这条技能有没有**座位常驻状态标签**（skill-display 票 01；缺省 ``None`` = 没有）。
+
+    「小窗口类显示组件」的声明（用户 2026-11-17 的口径，Q3B：技能级声明，不是新原语）：
+    技能记了什么就在座位卡上画什么，值由引擎**既有读口**给出、投影只取不判。与
+    :attr:`appearance`（弹窗类、自见）**互不替代**：
+
+    - **数据由投影侧的构造器取**（:data:`~sgs_web.projection.BADGE_PROVIDERS`，键 = 本技能的
+      ``skill_id``）：本字段不带数据，只带"哪一档组件"；
+    - **落座位**由登记表旁的 :class:`BadgeScope` 决定（自己的座位 / 任意座位）；
+    - **公开**：走 ``players[].hero_tags``，**不进** ``PlayerView`` / ``PlayerPublic`` /
+      记录流 ⇒ 47 条金录像逐字节不变；
+    - **AI 不消费**（纯显示）⇒ 不进 ``_AI_READ_POINTS``（`docs/agents/ai-adaptation.md` §5）。
     """
 
 

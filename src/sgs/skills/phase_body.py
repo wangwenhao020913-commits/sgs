@@ -79,6 +79,7 @@ from .catalog import (
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
     ActivationPlan,
+    BadgeKind,
     HeroSkillDecl,
     Hook,
     HookCondition,
@@ -234,6 +235,15 @@ class PhaseBodySkill(HeroSkillDecl):
     与 :meth:`flow` 的 ``Arrange`` 步引用**同一个对象**（一份声明，不是两份）：执行器读它
     求张数 / 切分，接入层（``sgs_web.projection._arrange_spec``）读 ``SkillDef.deck_arrange``
     做投影。本票的唯一消费者是界李典【恂恂】（固定切分 2 / 2）。
+    """
+
+    badge: BadgeKind | None = None
+    """这条阶段体技能有没有**座位常驻状态标签**（skill-display 票 01；缺省 ``None``）。
+
+    直接透进 :class:`~sgs.skills.catalog.SkillDef` 的同名字段（见那里的注释）；数据构造器
+    住投影侧登记表 ``sgs_web.projection.BADGE_PROVIDERS``（键 = 本技能的 ``skill_id``）。
+    首个消费者是【裸衣】的两版（标准 / 界）：它们记的作用域事实（``Player.luoyi_active`` /
+    ``Player.luoyi_until_next_turn``）在持有者的座位卡上画成「裸衣」。
     """
 
     def handler(self, host: Any, frame: Frame) -> Control:
@@ -830,6 +840,8 @@ _LUOYI = PhaseBodySkill(
     timing=Timing.PHASE_DRAW,
     flow=LUOYI_FLOW,
     modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _luoyi_damage_bonus),),
+    # skill-display 票 01：座位卡上的「裸衣」迁到声明 + 登记表（载荷一字不改）。
+    badge=BadgeKind.WINDOW,
 )
 
 
@@ -1005,6 +1017,8 @@ _JIE_LUOYI = PhaseBodySkill(
     timing=Timing.PHASE_DRAW,
     flow=JIE_LUOYI_FLOW,
     modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _jie_luoyi_damage_bonus),),
+    # skill-display 票 01：与标准版同一个登记项（同一种作用域事实的另一种字段）。
+    badge=BadgeKind.WINDOW,
     requirement=(
         "亮出牌堆顶三张牌，可获得其中的基本牌 / 武器牌 /【决斗】；若如此做，放弃摸牌，"
         "且直到你的下个回合开始【杀】或【决斗】造成的基础伤害 +1"
@@ -2319,6 +2333,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             per_round_limit=skill.per_round_limit,
             virtual_type_ids=skill.virtual_type_ids,
             virtual_source_count=skill.virtual_source_count,
+            badge=skill.badge,
         )
         for skill in PHASE_BODY_SKILLS
     )
