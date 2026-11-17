@@ -8530,6 +8530,116 @@ def test_a_self_badge_disappears_when_the_skill_stops_resolving() -> None:
     )
 
 
+def test_the_qinzheng_badge_shows_the_game_long_used_or_played_count() -> None:
+    """【勤政】的座位标签 = **本局**使用 / 打出张数（skill-display 票 03；spec §5 第 03 行）。
+
+    三条口径各有一条判据：
+
+    - **X = 0 也画**（spec §4 唯一的 fail-closed 例外）：它是玩家要看见的分母
+      （"还差几张"），故开局一张都没用时标签就在；
+    - **只数使用 + 打出**（``Player.used_or_played_ever`` 的两个写点，含当前这一张）：
+      弃置 / 摸牌 / 判定走别的入口 ⇒ 纹丝不动；跨回合**不复位**（整局作用域）；
+    - **不进协议载荷**：值由投影直接读 ``state``，``PlayerView`` 里没有这个键名
+      （``tests/test_card_usage.py`` 那条断言仍绿，47 条金录像字节不变）。
+
+    驱动走**真引擎入口**（``start_use`` / ``play_card`` / ``move_in_frame``），读口走**真产出
+    路径**（``visible_snapshot`` → ``players[].hero_tags``），不在这里改字段装作发生过。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import MoveReason, PlayerView
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    # 装备牌当"用掉不触发响应窗口"的牌（与 tests/test_hero_shiji_zhi.py 同一手法）。
+    used = (
+        cards_of_type(pack, "renwang_shield")
+        + cards_of_type(pack, "chitu")
+        + cards_of_type(pack, "dawan")
+    )[:3]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=tuple(used), hero="luotong"),
+            SeatSpec(hp=4, hero="zhenji"),
+        ],
+        deck=deck_excluding(pack, *used),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=11)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 0"}], (
+        "开局一张都没用也要画（X = 0 是玩家要看见的分母——spec §4 唯一的 fail-closed 例外）"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在骆统自己的座位（甄姬没有【勤政】）"
+
+    def settle() -> None:
+        run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: not e.stack.frames)
+
+    engine.start_use(state.card(used[0]), source=0, targets=())
+    settle()
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 1"}], "使用一张 ⇒ X = 1"
+
+    engine.play_card(state.card(used[1]), source=0, timing=Timing.PLAY_DECLARE)
+    settle()
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 2"}], (
+        "打出是另一个写点、同样 +1（两端互斥 ⇒ 一次动作恰好 +1）"
+    )
+
+    # 弃置 / 摸牌 / 判定走别的入口：计数一个都不许涨（标签只取引擎读口、不自己数）。
+    engine.move_in_frame(
+        None,
+        state.refs((used[2],)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+    )
+    engine.move_in_frame(
+        None,
+        state.refs((state.deck[0],)),
+        to_zone=ZoneRef(Zone.HAND, 0),
+        reason=MoveReason.DRAW,
+        owner=0,
+        actor=0,
+    )
+    engine.move_in_frame(
+        None,
+        state.refs((state.deck[0],)),
+        to_zone=ZoneRef(Zone.PROCESSING),
+        reason=MoveReason.JUDGE,
+        owner=None,
+    )
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 2"}], (
+        "弃置 / 摸牌 / 判定都不是使用或打出：X 不动"
+    )
+
+    # 跨回合：推进到下一个座位的第一回合开始，X 仍不回零（整局作用域、没有复位点）。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: ran_timing(e, Timing.TURN_START) and e.state.turn_seat == 1,
+    )
+    assert engine.state.turn_seat == 1, "前置：回合确实换人了"
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 2"}], (
+        "跨回合不重置（作用域 = 整局；不在回合末的清除链里）"
+    )
+
+    # 载荷里没有键名：标签是投影直读 state 的派生显示，不是协议字段（A10）。
+    snapshot = visible_snapshot(session)
+    assert "used_or_played_ever" not in json.dumps(snapshot, ensure_ascii=False), (
+        "整局张数不进网页协议载荷的任何一层（值是派生量，键名也不许出现）"
+    )
+    assert "used_or_played_ever" not in PlayerView.model_fields, (
+        "PlayerView 那条断言仍绿：不进 AI 读面 / 记录流"
+    )
+
+
 def test_the_snapshot_carries_hand_limit_for_every_seat_without_touching_the_ai_projection() -> None:
     """票 09：武将块读「手牌：张数/上限」——上限只进**网页载荷**（显示层字段）。
 

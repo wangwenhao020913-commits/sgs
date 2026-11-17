@@ -776,6 +776,25 @@ def _luoyi_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return {"tag": "luoyi", "label": "裸衣"}
 
 
+def _qinzheng_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """骆统【勤政】的座位标签 = **本局**「使用 / 打出」张数（skill-display 票 03）。
+
+    判据一字不改地取既有读口 ``Player.used_or_played_ever``（框架票 03 的框架件：两个写点
+    :meth:`sgs.engine.Engine.start_use` / :meth:`sgs.engine.Engine.play_card` 互斥 ⇒ 一次
+    动作恰好 +1；作用域 = 整局、没有复位点）。投影**不数数**、不按技能 id 猜。
+
+    **X = 0 也返回**——spec §4 的 fail-closed **唯一例外**：它是玩家全程要看见的分母
+    （"还差几张"到下一个 3 / 5 / 8 档），故这里没有"值不存在"的判据。
+
+    **载荷只有 ``{"tag", "label"}``**：纯数字、没有逐段上色的需求 ⇒ 不带 ``parts``
+    （Q14″A：只有需要上色时才出现）。
+    """
+    return {
+        "tag": "qinzheng",
+        "label": f"勤政 {state.player(seat).used_or_played_ever}",
+    }
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -783,6 +802,8 @@ BADGE_PROVIDERS: Mapping[
         # 标准 / 界【裸衣】两版是**同一种事实的两种字段**（作用域不同）⇒ 同一个构造器。
         "hero.xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
         "hero.jie_xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
+        # 【勤政】恒显（含 X = 0）：读整局张数，没有"值不存在"的形态。
+        "hero.luotong.qinzheng": (BadgeScope.SELF, _qinzheng_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

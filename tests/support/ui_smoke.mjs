@@ -20147,6 +20147,55 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `渐营=${tagParts(jianyingChip).map(toneClassOf).join(",")}`
       + ` 博图=${tagParts(botuChip).map(toneClassOf).join(",")}`);
 
+  /* skill-display 票 03：【勤政】的 `勤政 X` 走**同一条** `hero_tags` 通道（本票零前端改动）。
+   * 服务端取值由 `tests/test_web.py::test_the_qinzheng_badge_shows_the_game_long_used_or_played_count`
+   * 从真投影钉住（X = 本局使用 / 打出张数、含 0、跨回合不复位）；这里只钉界面读法：
+   * 服务端把它放在**骆统自己的**座位 ⇒ 只有那块武将牌上有；`X = 0` 不是一个"空壳"，
+   * 它是玩家要看见的分母（spec §4 唯一的 fail-closed 例外），故照常画成一个 chip。 */
+  const qinzhengView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9412,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9412 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  qinzhengView.snapshot.players[0].hero_tags = [{ tag: "qinzheng", label: "勤政 0" }];
+  qinzhengView.snapshot.players[1].hero_tags = [{ tag: "luoyi", label: "裸衣" }];
+  qinzhengView.snapshot.players[2].hero_tags = [];
+  ui.state.view = qinzhengView;
+  ui.resetSelection();
+  ui.renderTable();
+  const heroTagChipsOf = (seat) => {
+    const box = Number(seat) === Number(qinzhengView.snapshot.seat)
+      ? $("t-self-hero-tags")
+      : (() => {
+        const seatNode = seatBox(seat);
+        return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+      })();
+    return box
+      ? Array.from(box.children).filter((node) => hasClass(node, "hero-tag"))
+      : [];
+  };
+  const qinzhengChipIn = (seat) => heroTagChipsOf(seat).find(
+    (node) => node.getAttribute("data-tag") === "qinzheng") || null;
+  const selfQinzhengChip = qinzhengChipIn(0);
+  check("QINZHENG-01a 「勤政 X」只画在骆统自己的武将块上（其它座位没有）",
+    !!selfQinzhengChip && selfQinzhengChip.textContent === "勤政 0"
+      && qinzhengChipIn(1) === null && qinzhengChipIn(2) === null,
+    `self=${selfQinzhengChip ? selfQinzhengChip.textContent : "none"}`
+      + ` seat1=${heroTagChipsOf(1).map((n) => n.textContent).join(",") || "（无）"}`
+      + ` seat2=${heroTagChipsOf(2).map((n) => n.textContent).join(",") || "（无）"}`);
+  check("QINZHENG-01b X = 0 时标签仍然在（勤政是 fail-closed 的唯一例外，照常一个纯文本 chip）",
+    !!selfQinzhengChip && selfQinzhengChip.textContent === "勤政 0"
+      && selfQinzhengChip.children.length === 0
+      && selfQinzhengChip.className === "hero-tag",
+    selfQinzhengChip
+      ? `文本=${JSON.stringify(selfQinzhengChip.textContent)}`
+        + ` 元素子节点=${selfQinzhengChip.children.length}`
+        + ` class=${JSON.stringify(selfQinzhengChip.className)}`
+      : "没有 qinzheng chip");
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。
