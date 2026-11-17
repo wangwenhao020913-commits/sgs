@@ -232,6 +232,16 @@ class PickCards:
     cache_key: str | Callable[[Any], str] | None = None
     card_types: tuple[str, ...] = ()
     slot_kinds: tuple[SlotKind, ...] = ()
+    suits: tuple[str, ...] = ()
+    """**花色白名单**（sp8-liuyan 票 04 的加法；空元组 = 不筛）。
+
+    与 ``card_types``（牌**名**）同一条链路：同一份选择面、同步过滤 ``slots`` / ``card_ids``、
+    ``hi=None`` 的上限按过滤后的池重算，**清单 / 校验器 / 预览 / 执行器读同一份**
+    :func:`_kept_by_filters`。它服务的是"只铺某种花色的牌"的技能 —— 刘焉【立牧】①
+    与界大乔【国色】①「一张方块牌」：牌名白名单表达不了花色，而槽位种类也不够。
+
+    取值 = 后端的 ``Suit`` 值（``diamond`` / ``heart`` / ``spade`` / ``club``）。
+    """
     exclude_cards: (
         tuple[int, ...]
         | Callable[[GameState, Any, int, FlowAnswers], tuple[int, ...]]
@@ -750,8 +760,9 @@ def _filtered_zone_pool_size(
     card_types: tuple[str, ...],
     slot_kinds: tuple[SlotKind, ...] = (),
     exclude_cards: frozenset[int] = frozenset(),
+    suits: tuple[str, ...] = (),
 ) -> int:
-    """``card_types`` / ``slot_kinds`` / ``exclude_cards`` 过滤后，真能挑的牌数。
+    """``card_types`` / ``slot_kinds`` / ``suits`` / ``exclude_cards`` 过滤后，真能挑的牌数。
 
     只**读**区域列表（:meth:`GameState.zone`），不铺选择面 —— 故它可以在每次重入时安全
     地现算（铺面会消耗 ``select`` 子流的随机数，绝不能重复跑）。两条白名单与黑名单的空
@@ -761,7 +772,9 @@ def _filtered_zone_pool_size(
         1
         for ref in zone_refs(seat, zones)
         for card_id in _zone_cards(state, ref)
-        if _kept_by_filters(state.card(card_id), card_id, card_types, slot_kinds, exclude_cards)
+        if _kept_by_filters(
+            state.card(card_id), card_id, card_types, slot_kinds, exclude_cards, suits
+        )
     )
 
 
@@ -790,8 +803,9 @@ def _kept_by_filters(
     card_types: tuple[str, ...],
     slot_kinds: tuple[SlotKind, ...],
     exclude_cards: frozenset[int] = frozenset(),
+    suits: tuple[str, ...] = (),
 ) -> bool:
-    """这张牌是否同时过**牌名 / 槽位种类**两条白名单与**实体牌 id 黑名单**（空 = 不筛）。
+    """这张牌是否同时过**牌名 / 槽位种类 / 花色**三条白名单与**实体牌 id 黑名单**（空 = 不筛）。
 
     牌名白名单逐项按 :func:`~sgs.effects.satisfies_required` 匹配（【杀】族按共享计数键）。
 
@@ -804,6 +818,8 @@ def _kept_by_filters(
         return False
     if card_types and not any(satisfies_required(card, type_id) for type_id in card_types):
         return False
+    if suits and card.suit not in suits:
+        return False
     return not (slot_kinds and card.slot not in slot_kinds)
 
 
@@ -813,15 +829,16 @@ def _filter_face(
     card_types: tuple[str, ...],
     slot_kinds: tuple[SlotKind, ...],
     exclude_cards: frozenset[int] = frozenset(),
+    suits: tuple[str, ...] = (),
 ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """把两条白名单与一条黑名单作用在同一份选择面上（票 09 / 票 10 / W4-fix-3）。
+    """把三条白名单与一条黑名单作用在同一份选择面上（票 09 / 票 10 / W4-fix-3 / 本票）。
 
     ``slots`` 与 ``card_ids`` 是**同一份选择面**的两个投影，必须同步过滤——只改一个，
     步骤读回的实体牌 id 就会错位（【青龙偃月刀】是第一个消费者）。判据本身只有
     :func:`_kept_by_filters` 一处；这里只剩**隐藏槽**这一条形状规则：没有白名单时隐藏槽
     原样保留（他人手牌的选牌面），有白名单时它没有牌面可判、不能留在面里。
     """
-    whitelisted = bool(card_types or slot_kinds)
+    whitelisted = bool(card_types or slot_kinds or suits)
 
     def keep(slot: Slot, card_id: int) -> bool:
         if int(card_id) in exclude_cards:
@@ -829,7 +846,7 @@ def _filter_face(
         if slot.card is None:
             return not whitelisted
         return _kept_by_filters(
-            slot.card, card_id, card_types, slot_kinds, exclude_cards
+            slot.card, card_id, card_types, slot_kinds, exclude_cards, suits
         )
 
     kept = [
@@ -911,9 +928,9 @@ def _flow_step_cards(
     hi = _hi_of(step, host.state, frame, owner, answers)
     if hi is None:
         hi = _filtered_zone_pool_size(
-            host.state, face, zones, step.card_types, step.slot_kinds, excluded
+            host.state, face, zones, step.card_types, step.slot_kinds, excluded, step.suits
         )
-    if (step.card_types or step.slot_kinds or excluded) and hi < step.lo:
+    if (step.card_types or step.slot_kinds or step.suits or excluded) and hi < step.lo:
         # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
         # 同时也挡住 ``(lo, hi) = (1, 0)`` 这种会让 `_select_cards` 的 range 为空的形状。
         return "cancel", ()
@@ -934,6 +951,7 @@ def _flow_step_cards(
             step.card_types,
             step.slot_kinds,
             excluded,
+            step.suits,
         ),
     )
     if host.suspended(picks):
@@ -1501,7 +1519,12 @@ def _card_options(
     for ref in _step_zones(step, state, face, frame, owner, answers):
         for card_id in _zone_cards(state, ref):
             if _kept_by_filters(
-                state.card(card_id), card_id, step.card_types, step.slot_kinds, excluded
+                state.card(card_id),
+                card_id,
+                step.card_types,
+                step.slot_kinds,
+                excluded,
+                step.suits,
             ):
                 out.append(int(card_id))
     return tuple(out)
@@ -1532,6 +1555,7 @@ def card_pool_size(
         step.card_types,
         step.slot_kinds,
         excluded,
+        step.suits,
     )
 
 
@@ -2270,7 +2294,9 @@ def preview_step(
     manifest_step = steps[cursor]
     step = flow.steps[manifest_step.order]
     framed = _with_answers(base, cursor_prior)
-    chosen = _preview_seats(given[cursor][1]) if cursor < len(given) else ()
+    # 本步已选的座位只对**座位步**是座位答案：选牌 / 选项 / 提供步的 values 是牌 id 与
+    # 选项文本，按座位解析会把它们判成"座位文本损坏"（一个 400，界面 fail-closed）。
+    chosen = _preview_seats(given[cursor][1]) if cursor < len(given) and isinstance(step, PickSeats) else ()
     nxt = steps[cursor + 1].name if cursor + 1 < len(steps) else None
     options: tuple[str, ...] = ()
     disabled: tuple[str, ...] = ()

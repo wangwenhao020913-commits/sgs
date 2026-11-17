@@ -681,17 +681,24 @@ def _guose_setup(*, judge=(), target_hand=()):
     return diamond, state
 
 
-def _guose_driver(option, *, watch=None):
+def _guose_driver(option, *, diamond, seat=1, watch=None):
+    """界【国色】已翻预发动（sp8-liuyan 票 04）：一次提交**复合动作**（与界面同一条校验器）。
+
+    ``picks`` = 那张方块牌、``choices`` = 选项文本 + ``seat:N``（选座步）。
+    """
     used = {"count": 0}
 
     def drive(query):
         if query.kind == QueryKind.PLAY_PHASE and used["count"] == 0:
-            action = _find(
-                query, lambda a: isinstance(a, ActivateSkill) and a.skill_id == GUOSE
-            )
-            if action is not None:
+            manifests = dict(getattr(query, "preactivations", None) or ())
+            if manifests.get(GUOSE):
                 used["count"] += 1
-                return action
+                return ActivateSkill(
+                    skill_id=GUOSE,
+                    picks=(diamond,),
+                    choices=(option, f"seat:{seat}"),
+                    answers_seq=query.seq,
+                )
         if query.kind == QueryKind.SELECT_OPTION:
             if query.skill_id.endswith(":option"):
                 return SelectOption(choice=option, answers_seq=query.seq)
@@ -705,10 +712,22 @@ def _guose_driver(option, *, watch=None):
     return drive, used
 
 
+def _guose_steps(state) -> tuple:
+    """跑到第一个出牌阶段询问，返回界【国色】的预发动清单（没有 = 不可用）。"""
+    engine = Engine.from_state(state, seed=5)
+    query = run_queries(
+        engine,
+        [Scripted(), Scripted()],
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    ).pending
+    return tuple(dict(getattr(query, "preactivations", None) or ()).get(GUOSE) or ())
+
+
 def test_jie_guose_use_branch_places_a_transformed_indulgence_and_draws_one():
     """正例（选项 1）：方块牌当【乐不思蜀】真进判定区；之后摸一张。"""
     diamond, state = _guose_setup()
-    drive, used = _guose_driver("guose_use_indulgence")
+    drive, used = _guose_driver("guose_use_indulgence", diamond=diamond)
     engine = _run(state, [Scripted(drive), Scripted()], _phase_over)
 
     assert used["count"] == 1
@@ -732,7 +751,7 @@ def test_jie_guose_draws_only_after_the_chosen_option_resolves():
         deck=deck_excluding(PACK, diamond, nullify),
         turn_seat=0,
     )
-    drive, _ = _guose_driver("guose_use_indulgence")
+    drive, _ = _guose_driver("guose_use_indulgence", diamond=diamond)
     engine = Engine.from_state(state, seed=5)
     run_queries(engine, [Scripted(drive), Scripted()], _phase_over)
 
@@ -770,7 +789,7 @@ def test_jie_guose_discard_branch_discards_a_diamond_and_a_field_indulgence():
     """正例（选项 2）：弃一张方块牌 + 弃场上一张【乐不思蜀】，然后摸一张。"""
     indulgence = _cards("indulgence")[0]
     diamond, state = _guose_setup(judge=(indulgence,))
-    drive, used = _guose_driver("guose_discard_indulgence")
+    drive, used = _guose_driver("guose_discard_indulgence", diamond=diamond)
     engine = _run(state, [Scripted(drive), Scripted()], _phase_over)
 
     assert used["count"] == 1
@@ -782,22 +801,107 @@ def test_jie_guose_discard_branch_discards_a_diamond_and_a_field_indulgence():
     assert len(engine.state.player(0).hand) == 3, "起始 1 + 摸 2 − 弃 1 + 摸 1"
 
 
-def test_jie_guose_does_not_offer_option_two_without_a_field_indulgence():
-    """反例：场上没有【乐不思蜀】⇒ 选项 2 不出现（仍可选项 1）。"""
+def test_jie_guose_preactivation_manifest_carries_the_three_step_wordings():
+    """清单三步各自的问法（``Step.wording`` ⇒ 提示行那一句）：点技能后玩家看到的三句话。
+
+    第一步两个选项（牌面两条分支）、第二步一张方块牌、第三步按已选选项分叉的目标座。
+    ``Step.wording`` 是**静态**文案位，故第 3 步写两支的并集——"要贴乐 / 要拆乐"的差别
+    由牌桌上的绿色方框本身表达（候选池按前序答案现算，见下一例）。
+    """
     diamond, state = _guose_setup()
-    assert _skill_offers(state, GUOSE)
+    steps = _guose_steps(state)
 
-    options: list[str] = []
-    drive, _ = _guose_driver("guose_use_indulgence")
-    engine = Engine.from_state(state, seed=5)
+    assert [step.name for step in steps] == ["option", "card", "seat"], "顺序 = 选项 → 方块牌 → 目标"
+    assert steps[0].wording == (
+        "选择一项：将一张方块牌当【乐不思蜀】使用 / 弃置一张方块牌并弃置场上一张【乐不思蜀】"
+    )
+    assert steps[1].wording == "选择一张方块牌（手牌 / 装备区）"
+    assert steps[2].wording == "选择角色：贴【乐不思蜀】的目标，或判定区有【乐不思蜀】的角色"
 
-    def inspect(query):
-        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.endswith(":option"):
-            options.extend(query.options)
-        return drive(query)
 
-    run_queries(engine, [Scripted(inspect), Scripted()], _phase_over)
-    assert options == ["guose_use_indulgence"], "选项 2 不出现"
+def _guose_three_seat_setup():
+    """三座局面：座位 1 干净（贴乐的合法目标）、座位 2 判定区已有【乐不思蜀】（拆乐的目标）。
+
+    两支的座位池因此**互不相交**，断言不会互相遮住。
+    """
+    diamond = _diamond()
+    indulgence = _cards("indulgence")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(diamond,), hero="jie_daqiao"),
+            SeatSpec(),
+            SeatSpec(judge=(indulgence,)),
+        ],
+        deck=deck_excluding(PACK, diamond, indulgence),
+        turn_seat=0,
+    )
+    return diamond, state
+
+
+def test_jie_guose_third_step_rows_follow_the_chosen_option():
+    """第 3 步的座位行按**前序答案**分叉：贴乐 = 乐不思蜀的合法目标；拆乐 = 有乐的角色。
+
+    清单的行键（``StepPool.when``）= 前面几步的答案文本（选项文本 + 那张方块牌），界面按它
+    选行 ⇒ 绿色方框只有该分支的那几个座位。两个分支的座位池在这里**互不相交**（座位 1
+    干净、座位 2 判定区有乐），故"选错分支"不会碰巧仍合法。
+    """
+    diamond, state = _guose_three_seat_setup()
+    steps = _guose_steps(state)
+    assert [step.name for step in steps] == ["option", "card", "seat"]
+
+    rows = {tuple(row.when): tuple(row.options) for row in steps[2].pool}
+    assert rows == {
+        ("guose_use_indulgence", str(diamond)): ("seat:1",),
+        ("guose_discard_indulgence", str(diamond)): ("seat:2",),
+    }, "第 3 步两行：贴乐 ⇒ 座位 1；拆乐 ⇒ 座位 2"
+
+    # 预览通道（界面在选牌步上也会问一次）不能因为"答案不是座位文本"而 400（fail-closed）。
+    from sgs.skills.active import JIE_GUOSE_FLOW
+    from sgs.skills.flow import preview_step
+
+    preview = preview_step(
+        JIE_GUOSE_FLOW,
+        state,
+        0,
+        [("option", ("guose_use_indulgence",)), ("card", (str(diamond),))],
+        steps=steps,
+    )
+    assert preview.name == "card", "选牌步要显式确认 ⇒ 光标仍停在它上面（可继续）"
+    assert preview.can_advance is True
+
+
+def test_jie_guose_rejects_a_seat_from_the_other_branch():
+    """校验器（= 复合动作的唯一裁决口）拒收另一支的座位：绿色方框不只是画出来的。
+
+    选项 2（拆乐）只认判定区真有【乐不思蜀】的座位；选项 1（贴乐）只认【乐不思蜀】的
+    合法目标（座位 2 的判定区已有同名牌 ⇒ 不是合法目标）。
+    """
+    from sgs.skills import validate_activation
+
+    diamond, state = _guose_three_seat_setup()
+
+    def reason(option: str, seat: int) -> str | None:
+        return validate_activation(
+            state, 0, GUOSE, (diamond,), (option, f"seat:{seat}")
+        )
+
+    assert reason("guose_use_indulgence", 1) is None, "贴乐 ⇒ 座位 1 合法"
+    assert reason("guose_use_indulgence", 2) is not None, "座位 2 判定区已有乐 ⇒ 不能贴"
+    assert reason("guose_discard_indulgence", 2) is None, "拆乐 ⇒ 座位 2 合法"
+    assert reason("guose_discard_indulgence", 1) is not None, "座位 1 没有乐 ⇒ 无从拆"
+
+
+def test_jie_guose_does_not_offer_option_two_without_a_field_indulgence():
+    """反例：场上没有【乐不思蜀】⇒ 选项 2 不出现（仍可选项 1）。
+
+    选项闭集现在住在**预发动清单**的第一格（不再是逐问的 ``SELECT_OPTION``）。
+    """
+    diamond, state = _guose_setup()
+    steps = _guose_steps(state)
+    assert [step.name for step in steps] == ["option", "card", "seat"], "三步都在清单里"
+    options = tuple(steps[0].pool[0].options)
+    assert options == ("guose_use_indulgence",), "选项 2 不出现"
 
 
 def test_jie_guose_is_not_offered_without_a_diamond_card():
@@ -810,7 +914,7 @@ def test_jie_guose_is_not_offered_without_a_diamond_card():
         deck=deck_excluding(PACK, black, indulgence),
         turn_seat=0,
     )
-    assert not _skill_offers(state, GUOSE)
+    assert _guose_steps(state) == (), "没有方块牌 ⇒ 清单渲不出 ⇒ 不可用"
 
 
 def test_the_standard_daqiao_guose_remains_a_plain_conversion():

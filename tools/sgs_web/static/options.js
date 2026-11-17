@@ -367,6 +367,12 @@ const OPTION_LABELS = Object.freeze({
   // `OPTION_PAIRS` 恒画整对 + `renderOptionButtons` 的 `index < 0` 置灰。
   "fengpo:draw": "摸X张牌",
   "fengpo:damage": "令此牌的基础伤害值+X",
+  // 界大乔【国色】（sp8-liuyan 票 04）：预发动清单第 1 步的两项（= 牌面两条分支）。
+  // 选项值保持稳定短 id，中文只在这里——清单的选项按钮与逐问的选项面读同一份
+  // （`preactivation.js:renderPreativation` 与 `options.js:renderOptionButtons` 都走
+  // :func:`optionText`），于是"点技能 → 第 1 步问两个选项"看到的是牌面上的两句话。
+  guose_use_indulgence: "将一张方块牌当【乐不思蜀】使用",
+  guose_discard_indulgence: "弃置一张方块牌并弃置场上的一张【乐不思蜀】",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

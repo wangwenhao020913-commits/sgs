@@ -1213,7 +1213,10 @@ function renderPreativation(pending) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "opt";
-      button.textContent = String(option);
+      // 文案走 `optionText`（与逐问的选项面**同一个**映射）：选项值是稳定短 id，
+      // 中文只住在 `options.js:OPTION_LABELS`。界【国色】第 1 步的两项因此写牌面原话
+      // （sp8-liuyan 票 04）；没有登记的选项照旧原样印出（`optionText` 的兜底）。
+      button.textContent = optionText(option, pending);
       if (grayed) {
         // 置灰（票 04 §3）：画出来给玩家看（"这个名字此刻用不了"），不接 click。
         button.classList.add("dis");

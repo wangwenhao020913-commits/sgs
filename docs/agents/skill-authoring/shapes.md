@@ -233,7 +233,7 @@
 
 | 步骤 | 短名 | 用途 |
 |---|---|---|
-| `PickCards` | `cards` | 选牌（`lo`/`hi`/`zones`/`face`/`card_types`/`slot_kinds`/`exclude_cards`） |
+| `PickCards` | `cards` | 选牌（`lo`/`hi`/`zones`/`face`/`card_types`/`slot_kinds`/`suits`/`exclude_cards`；`suits` = **花色白名单**，sp8-liuyan 票 04 加：刘焉【立牧】/ 界【国色】的「一张方块牌」靠它把源牌步收窄，清单 / 校验器 / 执行器读同一份过滤） |
 | `PickSeats` | `seats` | 选角色（`pool` 可依赖前序答案） |
 | `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`disabled` = **显示但不可选**的那几项（同形态的可调用档）⇒ 清单的 `StepPool.disabled` 让界面置灰、校验器拒收；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
 | `PickProvide` | `provide` | 选一张用于"提供"的牌（转化 / 提供者） |

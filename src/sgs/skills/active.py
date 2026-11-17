@@ -2451,17 +2451,17 @@ JIE_GUOSE_DISCARD_FIELD = "guose_discard_indulgence"
 JIE_GUOSE_OPTIONS: tuple[str, str] = (JIE_GUOSE_USE, JIE_GUOSE_DISCARD_FIELD)
 """选项闭集（顺序 = 牌面两条分支的顺序）。"""
 
-JIE_GUOSE_ASK_OPTION = "hero.jie_daqiao.guose:option"
-_ASK_JIE_GUOSE_CARD = "hero.jie_daqiao.guose.card"
-JIE_GUOSE_ASK_SEAT = "hero.jie_daqiao.guose:seat"
-_ASK_JIE_GUOSE_FIELD = "hero.jie_daqiao.guose.field"
-
-_JIE_GUOSE_OPTION_KEY = "jie_guose_option"
 _JIE_GUOSE_CARD_KEY = "jie_guose_card"
-_JIE_GUOSE_TARGET_KEY = "jie_guose_target"
+"""帧私有：选项 2 的第 1 张（方块牌）已经弃置（重入不重弃）。"""
+
 _JIE_GUOSE_FIELD_KEY = "jie_guose_field"
+"""帧私有：选项 2 的第 2 张（场上那张【乐不思蜀】）已经弃置。"""
+
 _JIE_GUOSE_STARTED_KEY = "jie_guose_started"
+"""帧私有：所选那一支已经开跑（选项 1 = 使用链已开；选项 2 = 第一张已落）。"""
+
 _JIE_GUOSE_DONE_KEY = "jie_guose_done"
+"""帧私有：'选择结束后'那一段（摸一张）已经做过。"""
 
 
 def _diamond_ids(state: GameState, owner: int) -> tuple[int, ...]:
@@ -2482,11 +2482,17 @@ def _field_indulgence_ids(state: GameState) -> tuple[int, ...]:
     """
     cards: list[int] = []
     for player in state.players:
-        for card_id in player.judge:
-            effective = state.virtual_judge.get(card_id) or state.card(card_id)
-            if effective.type == "indulgence":
-                cards.append(card_id)
+        cards.extend(_seat_indulgence_ids(state, player.seat))
     return tuple(cards)
+
+
+def _seat_indulgence_ids(state: GameState, seat: int) -> tuple[int, ...]:
+    """某个座位判定区里的【乐不思蜀】实体牌 id（虚拟映射感知）。"""
+    return tuple(
+        card_id
+        for card_id in state.player(seat).judge
+        if (state.virtual_judge.get(card_id) or state.card(card_id)).type == "indulgence"
+    )
 
 
 def _jie_guose_options(state: GameState, owner: int) -> tuple[str, ...]:
@@ -2502,6 +2508,14 @@ def _jie_guose_options(state: GameState, owner: int) -> tuple[str, ...]:
     return tuple(options)
 
 
+def _jie_guose_option_choices(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """选项步的可调用闭集（与 :func:`_jie_guose_options` 同一条判据）。"""
+    del frame, answers
+    return _jie_guose_options(state, owner)
+
+
 def _jie_guose_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx):
         return current
@@ -2510,161 +2524,84 @@ def _jie_guose_offers(state: GameState, ctx: ModifierContext, current: Any) -> A
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
-def _jie_guose_diamond_face(
-    host: Any, owner: int
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """选项 1 / 2 的"一张方块牌"面：手牌 ∪ 装备区、只留方块。"""
-    face = host.selection_face(owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True)
-    return _filter_face(host.state, face, lambda card: card.suit == Suit.DIAMOND.value)
+def _jie_guose_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """第 3 步的座位池（按**已选的选项**分叉）。
 
-
-def _jie_guose_field_face(
-    host: Any,
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """选项 2 的"场上一张【乐不思蜀】"面：全场判定区的可选取牌合在一张面里。"""
-    state = host.state
-    slots: list[Slot] = []
-    card_ids: list[int] = []
-    for player in state.players:
-        face_slots, face_ids = host.selection_face(player.seat, (Zone.JUDGE,))
-        for slot, card_id in zip(face_slots, face_ids, strict=True):
-            effective = state.virtual_judge.get(card_id) or state.card(card_id)
-            if effective.type == "indulgence":
-                slots.append(slot)
-                card_ids.append(card_id)
-    return tuple(slots), tuple(card_ids)
+    - 选项 1：`transformed_card(方块牌 → 乐不思蜀)` 的合法目标（与候选生成同一条
+      `check_targets`：距离 / 目标池 / 判定区同名 / 封印都在里面）；
+    - 选项 2：**场上**有【乐不思蜀】的座位（判定区同名规则保证每座至多一张，故"选座位"
+      就等于"选那张牌"）。
+    """
+    # 第 4 位是**本步已选的座位**（有序多选才用）；前序答案走帧上的
+    # ``preactivation_answers`` 通道（清单渲染器与执行器共用的唯一通道）。
+    del chosen
+    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
+    option = answers.get("option")
+    if option == JIE_GUOSE_USE:
+        picks = answers.get("card") or ()
+        if not picks:
+            return ()
+        return check_targets(
+            state,
+            owner,
+            transformed_card(state, (int(picks[0]),), "indulgence"),
+        )
+    if option == JIE_GUOSE_DISCARD_FIELD:
+        return tuple(
+            player.seat
+            for player in state.players
+            if _seat_indulgence_ids(state, player.seat)
+        )
+    return ()
 
 
 def _jie_guose_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：二选一 → 执行所选分支 → 摸一张（"选择结束后"）。"""
-    del answers
+    """提交点：按所选选项执行分支，**选择结束后**摸一张牌。
+
+    选项 1 的"选择结束后"= 【乐不思蜀】的使用**结算完**（含无懈窗口、判定区落位）之后
+    —— 与账本 L928 同一口径，故先 ``start_use`` 再 ``return "stay"``，等 ``USE`` 子帧
+    出栈才摸。选项 2 是两张牌都弃完之后才摸（两张各一个帧内游标：搬牌会内联派发
+    "失去牌后"并可能挂起）。
+    """
     state = host.state
-    owner = frame.data["source"]
-    if frame.data.get(_JIE_GUOSE_DONE_KEY):
+    owner = int(frame.data["source"])
+    option = str(answers.get("option") or "")
+    picks = tuple(int(card_id) for card_id in (answers.get("card") or ()))
+    seats = tuple(int(seat) for seat in (answers.get("seat") or ()))
+    if not picks or not seats:
         return None
-    option = frame.data.get(_JIE_GUOSE_OPTION_KEY)
-    if option is None:
-        options = _jie_guose_options(state, owner)
-        if not options:
-            frame.data[_JIE_GUOSE_DONE_KEY] = True
-            return None
-        answer = host.ask_option(
-            frame,
-            owner,
-            Timing.PHASE_PLAY_IDLE,
-            skill_id=JIE_GUOSE_ASK_OPTION,
-            options=options,
-            optional=False,
-        )
-        if host.suspended(answer):
+    target = seats[0]
+    if not frame.data.get(_JIE_GUOSE_STARTED_KEY):
+        frame.data[_JIE_GUOSE_STARTED_KEY] = True
+        if option == JIE_GUOSE_USE:
+            host.start_use(
+                transformed_card(state, (picks[0],), "indulgence"),
+                source=owner,
+                targets=(target,),
+                use_timing=Timing.PHASE_PLAY_IDLE,
+            )
+            return "stay"  # USE 子帧出栈后再摸那一张（"选择结束后"）
+        control = _jie_guose_discard_branch(host, frame, owner, target, picks[0])
+        if control == "stay":
             return "stay"
-        option = str(answer.choice)
-        frame.data[_JIE_GUOSE_OPTION_KEY] = option
-    assert isinstance(option, str)
-    if option == JIE_GUOSE_USE:
-        if _jie_guose_use_branch(host, frame, owner) == "stay":
+    if not frame.data.get(_JIE_GUOSE_DONE_KEY):
+        frame.data[_JIE_GUOSE_DONE_KEY] = True
+        if host.draw_for_hand(frame, owner, 1) == "stay":
             return "stay"
-    else:
-        if _jie_guose_discard_branch(host, frame, owner) == "stay":
-            return "stay"
-    frame.data[_JIE_GUOSE_DONE_KEY] = True
-    host.draw_for_hand(frame, owner, 1)
     return None
 
 
-def _jie_guose_use_branch(host: Any, frame: Any, owner: int) -> Any:
-    """选项 1：选一张方块牌 → 选【乐不思蜀】目标 → 作为转化延时锦囊使用。"""
+def _jie_guose_discard_branch(
+    host: Any, frame: Any, owner: int, target: int, diamond: int
+) -> Any:
+    """选项 2：弃那张方块牌 + 弃目标判定区里的【乐不思蜀】（两张各一个游标）。"""
     state = host.state
-    card_id = frame.data.get(_JIE_GUOSE_CARD_KEY)
-    if card_id is None:
-        picked = host.ask_selection(
-            frame,
-            owner=_ASK_JIE_GUOSE_CARD,
-            key="diamond",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
-            face=_jie_guose_diamond_face(host, owner),
-        )
-        if host.suspended(picked):
-            return "stay"
-        if not picked:
-            frame.data[_JIE_GUOSE_DONE_KEY] = True
-            return None
-        card_id = int(picked[0])
-        frame.data[_JIE_GUOSE_CARD_KEY] = card_id
-    assert isinstance(card_id, int)
-    card = transformed_card(state, (card_id,), "indulgence")
-    target = frame.data.get(_JIE_GUOSE_TARGET_KEY)
-    if target is None:
-        pool = check_targets(state, owner, card)
-        if not pool:
-            frame.data[_JIE_GUOSE_DONE_KEY] = True
-            return None
-        answer = host.ask_option(
-            frame,
-            owner,
-            Timing.PHASE_PLAY_IDLE,
-            skill_id=JIE_GUOSE_ASK_SEAT,
-            options=tuple(f"seat:{seat}" for seat in pool),
-            optional=False,
-        )
-        if host.suspended(answer):
-            return "stay"
-        target = int(str(answer.choice).split(":", 1)[1])
-        frame.data[_JIE_GUOSE_TARGET_KEY] = target
-    if frame.data.get(_JIE_GUOSE_STARTED_KEY):
-        return None
-    frame.data[_JIE_GUOSE_STARTED_KEY] = True
-    host.start_use(
-        card, source=owner, targets=(int(target),), use_timing=Timing.PHASE_PLAY_IDLE
-    )
-    return "stay"  # USE 子帧出栈后回到提交点摸那一张（"选择结束后"）
-
-
-def _jie_guose_discard_branch(host: Any, frame: Any, owner: int) -> Any:
-    """选项 2：选一张方块牌 + 场上一张【乐不思蜀】→ 两张都弃置。"""
-    state = host.state
-    card_id = frame.data.get(_JIE_GUOSE_CARD_KEY)
-    if card_id is None:
-        picked = host.ask_selection(
-            frame,
-            owner=_ASK_JIE_GUOSE_CARD,
-            key="diamond",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
-            face=_jie_guose_diamond_face(host, owner),
-        )
-        if host.suspended(picked):
-            return "stay"
-        if not picked:
-            frame.data[_JIE_GUOSE_DONE_KEY] = True
-            return None
-        card_id = int(picked[0])
-        frame.data[_JIE_GUOSE_CARD_KEY] = card_id
-    field_card = frame.data.get(_JIE_GUOSE_FIELD_KEY)
-    if field_card is None:
-        picked = host.ask_selection(
-            frame,
-            owner=_ASK_JIE_GUOSE_FIELD,
-            key="indulgence",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(zones=(Zone.JUDGE,), total=(1, 1)),
-            face=_jie_guose_field_face(host),
-        )
-        if host.suspended(picked):
-            return "stay"
-        if not picked:
-            frame.data[_JIE_GUOSE_DONE_KEY] = True
-            return None
-        field_card = int(picked[0])
-        frame.data[_JIE_GUOSE_FIELD_KEY] = field_card
-    for cost_id in (int(card_id), int(field_card)):
+    if not frame.data.get(_JIE_GUOSE_CARD_KEY):
         control = host.move_in_frame(
             frame,
-            state.refs((cost_id,)),
+            state.refs((int(diamond),)),
             to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.DISCARD,
             owner=owner,
@@ -2672,18 +2609,50 @@ def _jie_guose_discard_branch(host: Any, frame: Any, owner: int) -> Any:
         )
         if control == "stay":
             return "stay"
+        frame.data[_JIE_GUOSE_CARD_KEY] = True
+    if not frame.data.get(_JIE_GUOSE_FIELD_KEY):
+        field_cards = _seat_indulgence_ids(state, int(target))
+        if not field_cards:
+            return None
+        control = host.move_in_frame(
+            frame,
+            state.refs((field_cards[0],)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_JIE_GUOSE_FIELD_KEY] = True
     return None
 
 
 JIE_GUOSE_FLOW = SkillFlow(
     name="jie_guose",
-    steps=(),
+    steps=(
+        # 「选择一项」：闭集随局面变化（选项 2 只在场上真有【乐不思蜀】时出现）。
+        PickOption(options=_jie_guose_option_choices, optional=False, key="option"),
+        # 「一张方块牌」= 手牌 ∪ 装备区、只铺方块（花色白名单，sp8-liuyan 票 04）。
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            key="card",
+            suits=(Suit.DIAMOND.value,),
+        ),
+        # 第 3 步按选项分叉：选项 1 = 转化【乐不思蜀】的目标；选项 2 = 持仓上那张的座位。
+        PickSeats(lo=1, hi=1, pool=_jie_guose_targets, key="seat"),
+    ),
     effect=_jie_guose_effect,
 )
-"""界【国色】的零步流水线：提交点里手写二选一 / 选牌 / 使用 / 摸一张。"""
+"""界【国色】的三步流水线：选择一项 → 一张方块牌 → 目标（选项 1）/ 持仓上的座位（选项 2）。
+
+每一步都进预发动清单：玩家点技能按钮**一次填完**再确认（与【奇袭】同一个入口），不再
+"先提交发动、再逐步答询问"。
+"""
 
 
-# ---------------------------------------------------------------------------
 # 黄盖【苦肉】（M6 票 03）：出牌阶段，你可以失去 1 点体力，然后摸两张牌
 #
 # §九 L1031 的**标准版**原文没有"限一次"、也不弃置牌：``once_per_phase=False`` ⇒
@@ -8521,9 +8490,6 @@ _LIMU_USED = "limu_used"
 _LIMU_RECOVERED = "limu_recovered"
 """帧私有：回复段已经压过 ``RECOVER`` 子帧（"然后"那一段只做一次）。"""
 
-_ASK_LIMU_CARD = "hero.liuyan.limu.card"
-"""【立牧】① 选方片牌的询问位置。"""
-
 _REQUIREMENT_LIMU = (
     "出牌阶段，你可以将一张方片牌当【乐不思蜀】对自己使用，然后回复1点体力；"
     "你的判定区有牌时，你对攻击范围内的其他角色使用牌没有距离和次数限制"
@@ -8577,46 +8543,24 @@ def _limu_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
-def _limu_face(host: Any, owner: int) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """① 的选牌面：手牌 ∪ 装备区，只留**方片**（槽位与牌 id 同步过滤、保持同序）。"""
-    slots, card_ids = host.selection_face(owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True)
-    kept = [
-        (slot, card_id)
-        for slot, card_id in zip(slots, card_ids, strict=True)
-        if host.state.card(card_id).suit == Suit.DIAMOND.value
-    ]
-    return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
-
-
 def _limu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：选一张方片牌 → 当【乐不思蜀】对自己使用 → **然后**回复 1 点体力。
+    """提交点：方片牌 → 当【乐不思蜀】对自己使用 → **然后**回复 1 点体力。
 
     两段各一个帧内游标（"然后"的落点）：``start_use`` 压着 ``USE`` 子帧 ⇒ 先 ``return
     "stay"``，等这次使用结算完（判定区已落位）才在重入里压 ``RECOVER``。故回复那一刻
     立牧② **已经生效**（判定区非空），这是可观测次序。
     """
-    del answers
     state = host.state
     owner = int(frame.data["source"])
     if not frame.data.get(_LIMU_USED):
         if not _limu_judge_ready(state, owner):
             return None
-        picked = host.ask_selection(
-            frame,
-            owner=_ASK_LIMU_CARD,
-            key="card",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
-            face=_limu_face(host, owner),
-        )
-        if host.suspended(picked):
-            return "stay"
-        if not picked:
+        picks = tuple(int(card_id) for card_id in (answers.get("card") or ()))
+        if not picks:
             return None
         frame.data[_LIMU_USED] = True
         host.start_use(
-            transformed_card(state, (int(picked[0]),), "indulgence"),
+            transformed_card(state, (picks[0],), "indulgence"),
             source=owner,
             targets=(owner,),
             use_timing=Timing.PHASE_PLAY_IDLE,
@@ -8628,8 +8572,24 @@ def _limu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     return None
 
 
-LIMU_FLOW = SkillFlow(name="limu", steps=(), effect=_limu_effect, once_per_phase=False)
-"""【立牧】的零步流水线：选牌 / 使用 / 回复都由提交点手写（"没有出牌阶段限一次"）。"""
+LIMU_FLOW = SkillFlow(
+    name="limu",
+    steps=(
+        # 「一张方片牌」= 手牌 ∪ 装备区、只铺方片：花色白名单由步骤语言回答（`suits`），
+        # 故清单 / 校验器 / 执行器看到的是**同一份**候选，玩家可以"点技能 → 选源牌 → 确认"
+        # 一次提交（与【奇袭】同一个预发动入口），不必先提交发动再答一步询问。
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            key="card",
+            suits=(Suit.DIAMOND.value,),
+        ),
+    ),
+    effect=_limu_effect,
+    once_per_phase=False,
+)
+"""【立牧】的单步流水线：选方片牌 → 使用 + 回复（"没有出牌阶段限一次"）。"""
 
 
 def _limu_range_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -8675,6 +8635,9 @@ _LIMU = ActiveSkill(
     "limu",
     _limu_offers,
     flow=LIMU_FLOW,
+    # 首步是"选自己的方片牌" ⇒ 清单渲得出，翻预发动（`shapes.md` §4 准入表第 1 行）：
+    # 玩家点技能按钮直接进预发动、选源牌后确认，与【奇袭】同一个入口。
+    preactivated=True,
     extra_modifiers=(
         Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _limu_range_exempt),
         Modifier(ModifierPoint.COUNT_EXEMPT, _limu_count_exempt),
@@ -8887,17 +8850,28 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         flow=JIE_KUROU_FLOW,
         requirement="出牌阶段限一次：弃置一张牌，失去 1 点体力",
     ),
-    # 界大乔【国色】（M6 票 17）：二选一 + 选择结束后摸一张（§十九 L2175–L2178）；
-    # 选项闭集随"场上有没有【乐不思蜀】"变化 ⇒ 提交点里手写询问，不翻预发动。
+    # 界大乔【国色】（M6 票 17）：二选一 + 选择结束后摸一张（§十九 L2175–L2178）。
     ActiveSkill(
         "jie_daqiao",
         "guose",
         _jie_guose_offers,
         flow=JIE_GUOSE_FLOW,
+        # 三步都在清单里（选择一项 / 一张方块牌 / 目标）：翻预发动，与【奇袭】同一个入口
+        # ——点技能按钮进预发动、一次填完再确认（sp8-liuyan 票 04 的统一）。
+        preactivated=True,
         requirement=(
             "出牌阶段限一次，选择一项：1. 将一张方块牌当【乐不思蜀】使用；"
             "2. 弃置一张方块牌并弃置场上的一张【乐不思蜀】。选择结束后你摸一张牌"
         ),
+        # 三步各有各的问法（清单的 ``Step.wording`` ⇒ 提示行那一句）：第 3 步的座位池按
+        # **前面选的选项**分叉，问法因此写两支的并集（选项 1 = 转化【乐不思蜀】的合法
+        # 目标；选项 2 = 判定区有【乐不思蜀】的角色），不按选项改写——``Step.wording``
+        # 是静态文案位，动态项由牌桌上的绿色方框本身表达。
+        step_requirements={
+            "option": "选择一项：将一张方块牌当【乐不思蜀】使用 / 弃置一张方块牌并弃置场上一张【乐不思蜀】",
+            "card": "选择一张方块牌（手牌 / 装备区）",
+            "seat": "选择角色：贴【乐不思蜀】的目标，或判定区有【乐不思蜀】的角色",
+        },
     ),
     # 界关羽【义绝】（M6 票 04）：弃一张牌 → 一名其他角色展示一张手牌 → 红 / 黑分叉。
     # 与【苦肉】同姿态不翻预发动：三步由发动后的询问逐步收集，骨架候选直接进 ``legal_actions``。

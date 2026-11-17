@@ -3553,6 +3553,59 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(optionNodes.map((node) => [node.textContent, node.disabled])));
 }
 
+/* ============ sp8-liuyan 票 04（合成局面）：预发动**选项步的文案** ============
+ *
+ * 选项值是稳定短 id（界【国色】= `guose_use_indulgence` / `guose_discard_indulgence`），
+ * 中文只住在 `options.js:OPTION_LABELS`。清单第 1 步的按钮与逐问的选项面读**同一份**
+ * `optionText`：按钮上写牌面原话、载荷里仍是那个短 id（校验器只认 id）。
+ */
+{
+  const view = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 906,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 906 }],
+    preactivations: {
+      "hero.jie_daqiao.guose": [
+        { name: "option", zones: [], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["guose_use_indulgence", "guose_discard_indulgence"] }],
+          wording: "选择一项" },
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: ["41"] }], wording: "选择一张方块牌（手牌 / 装备区）" },
+        { name: "seat", zones: [], min: 1, max: 1, order: 2,
+          pool: [{ when: ["guose_use_indulgence", "41"], options: ["seat:1"] }],
+          wording: "选择角色" },
+      ],
+    },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  view.heroes = { 0: "jie_daqiao", 1: "guanyu" };
+  view.snapshot.self_hand = [synthCard(41, "闪")];
+  view.skills = [{
+    skill_id: "hero.jie_daqiao.guose", name: "国色", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "出牌阶段限一次，你可以选择一项：将一张方块牌当【乐不思蜀】使用……" },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const entry = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.jie_daqiao.guose");
+  (entry.listeners.click || []).forEach((fn) => fn({ target: entry }));
+  const texts = Array.from($("t-options").children).map((node) => String(node.textContent || ""));
+  check("㉿U9 清单第 1 步的两个选项写**牌面原话**（不是 guose_use_indulgence 这类短 id）",
+    texts.includes("将一张方块牌当【乐不思蜀】使用")
+      && texts.includes("弃置一张方块牌并弃置场上的一张【乐不思蜀】"),
+    `选项=${JSON.stringify(texts)}`);
+  const use = Array.from($("t-options").children).find(
+    (node) => String(node.textContent || "") === "将一张方块牌当【乐不思蜀】使用");
+  (use.listeners.click || []).forEach((fn) => fn({ target: use }));
+  check("㉿U10 载荷载的仍是短 id（文案只在界面侧映射）",
+    JSON.stringify(ui.state.preactivation.answers[0].values) === '["guose_use_indulgence"]',
+    JSON.stringify(ui.state.preactivation.answers[0]));
+}
+
 /* ============ 报障 2026-11-02（合成局面）：**已翻预发动**的技能仍要能走"提供者"入口 ============
  *
  * 【蛊惑】封了两个入口：出牌阶段走**预发动清单**（复合动作），"需要牌时"走**提供者**
@@ -5916,13 +5969,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       },
     }));
     enter();
-    check("U-PA-09c 预发动选项步的真选项仍是按钮（且不是步骤按钮：没有 data-step 行）",
-      setEquals(optionLabels(), ["discard_one", "draw_one"])
+    check("U-PA-09c 预发动选项步的真选项仍是按钮，文案走同一份 `optionText`"
+      + "（= 询问面那两个中文标签；不是步骤按钮：没有 data-step 行）",
+      setEquals(optionLabels(), ["弃置 1 张手牌", "令其摸一张牌"])
         && !Array.from($("t-options").children).some(
           (node) => node.getAttribute("data-step") !== undefined),
       `options=${JSON.stringify(optionLabels())}`);
-    clickNode(optionButtons().find((node) => node.textContent === "draw_one"));
-    check("U-PA-09d 点真选项 = 写进答案、清单立刻可交（不用再点步骤条 / 下一步）",
+    clickNode(optionButtons().find((node) => node.textContent === "令其摸一张牌"));
+    check("U-PA-09d 点真选项 = 写进答案（**短 id**，文案只是界面映射）、清单立刻可交（不用再点步骤条 / 下一步）",
       !!pa() && JSON.stringify(answers()[0]) === '["draw_one"]'
         && ui.buildAction() !== null && $("btn-submit").disabled === false,
       `answers=${JSON.stringify(answers())} action=${JSON.stringify(ui.buildAction())}`);

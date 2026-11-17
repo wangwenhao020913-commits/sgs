@@ -2417,10 +2417,11 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_zhangjiao_mobile.leiji": "触发技能",
     "hero.jie_zhangjiao_mobile.guidao": "能力位",
     "hero.jie_zhangjiao_mobile.huangtian": "主动技能",
-    # sp8-liuyan 票 01：刘焉【图射】（`USE_AFTER_DESIGNATE_TARGET` 钩子 + 零步流水线）/
-    # 【立牧】（A 族 + 零步流水线：选牌 / 使用 / 回复手写在提交点）⇒ 两格都是「零步技能」。
+    # sp8-liuyan 票 01：刘焉【图射】（`USE_AFTER_DESIGNATE_TARGET` 钩子 + 零步流水线）。
     "hero.liuyan.tushe": "零步技能",
-    "hero.liuyan.limu": "零步技能",
+    # sp8-liuyan 票 04：【立牧】从"零步 + 手写选牌"改成**一步选牌**（方片牌的花色白名单）
+    # ⇒ A 族 + 非空流水线 = 「主动技能」（与【国色】同一次统一）。
+    "hero.liuyan.limu": "主动技能",
     # 零步技能 12（SkillFlow(steps=())；执行路径统一，preactivated 不翻）
     "hero.luxun.lianying": "零步技能",
     "hero.sunshangxiang.xiaoji": "零步技能",
@@ -2461,7 +2462,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_sunquan.jiuyuan": "零步技能",
     "hero.jie_huanggai.kurou": "主动技能",
     "hero.jie_huanggai.zhaxiang": "锁定技",
-    "hero.jie_daqiao.guose": "零步技能",
+    # sp8-liuyan 票 04：【国色】从"零步 + 手写问答"改成**三步**（选项 → 方块牌 → 目标）
+    # ⇒ 「主动技能」；与【立牧】同一次统一到预发动入口。
+    "hero.jie_daqiao.guose": "主动技能",
     "hero.jie_daqiao.liuli": "触发技能",
     "hero.jie_sunshangxiang.jieyin": "主动技能",
     "hero.jie_sunshangxiang.xiaoji": "零步技能",
@@ -2794,7 +2797,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # ⇒ 机械谓词落在**触发技能**格（主动技能因此**不加**）⇒ 26 → 27。
     # sp5-pangtong-liuqi 票 01：SP庞统【过论】（A 族 + 两步流水线、无钩子）⇒ 36 → 37。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族 + 三步流水线、无钩子）⇒ 37 → 38。
-    "主动技能": 38,
+    # sp8-liuyan 票 04：刘焉【立牧】（一步选牌）/ 界大乔【国色】（三步：选项 → 方块牌 → 目标）
+    # 从零步改成有步骤的预发动流水线 ⇒ 38 → 40。
+    "主动技能": 40,
     # yijiang-2014-round2 票 20：标准 / 界【激将】从「候选提供者」移进「触发技能」
     # （声明级 `flow`：出牌阶段主动使用【杀】的入口）⇒ 27 → 29；候选提供者 5 → 3。
     # sp5-mayunlu-panjun 票 01 / 02：凤魄 / 观微（钩子 + 非空流水线）⇒ 29 → 31。
@@ -2822,7 +2827,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # 段机）⇒ 44 → 47。
     # sp8-liuyan 票 01：刘焉【图射】（钩子 + 零步流水线）/【立牧】（A 族 + 零步流水线，
     # 选牌 / 使用 / 回复手写在提交点，与界【国色】同形）⇒ 47 → 49。
-    "零步技能": 49,
+    # sp8-liuyan 票 04：【立牧】与界【国色】都改成**有步骤**的预发动流水线 ⇒ 两条从
+    # 「零步技能」挪到「主动技能」⇒ 零步 49 → 47、主动 38 → 40。
+    "零步技能": 47,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。

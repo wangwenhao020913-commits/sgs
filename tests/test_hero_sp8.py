@@ -108,6 +108,8 @@ class Script:
         use_card: int | None = None,
         targets: tuple[int, ...] = (),
         activate: tuple[str, ...] = (),
+        picks: tuple[int, ...] = (),
+        choices: tuple[str, ...] = (),
         answer: tuple[str, ...] = ("tushe",),
         pick_card: int | None = None,
         pick_diamond: bool = False,
@@ -116,6 +118,8 @@ class Script:
         self.use_card = use_card
         self.targets = targets
         self.activate = list(activate)
+        self.picks = picks
+        self.choices = choices
         self.answer = answer
         self.pick_card = pick_card
         self.pick_diamond = pick_diamond
@@ -133,6 +137,17 @@ class Script:
                     answers_seq=query.seq,
                 )
             for skill_id in self.activate:
+                manifests = dict(getattr(query, "preactivations", None) or ())
+                if manifests.get(skill_id):
+                    # 已翻预发动：技能骨架不在 ``legal_actions`` 里，提交的是**复合动作**
+                    # （与界面"点技能 → 选源牌 → 确认"同一条校验器）。
+                    self.activate.remove(skill_id)
+                    return ActivateSkill(
+                        skill_id=skill_id,
+                        picks=self.picks,
+                        choices=self.choices,
+                        answers_seq=query.seq,
+                    )
                 action = find_action(
                     query,
                     lambda a: isinstance(a, ActivateSkill) and a.skill_id == skill_id,
@@ -487,7 +502,7 @@ def test_limu_puts_the_converted_indulgence_into_own_judge_zone_then_recovers():
         _seats(hand=(diamond, filler), hp=2, hp_max=3),
         deck=deck_excluding(PACK, diamond, filler),
     )
-    script = Script(state, activate=(LIMU,), pick_card=diamond, answer=())
+    script = Script(state, activate=(LIMU,), picks=(diamond,), answer=())
     engine = _run(
         Engine.from_state(state, seed=7),
         [script, Script(state)],
@@ -520,7 +535,7 @@ def test_limu_may_take_the_diamond_card_from_the_equip_zone():
         _seats(equip=(weapon,), hp=3, hp_max=3),
         deck=deck_excluding(PACK, weapon),
     )
-    script = Script(state, activate=(LIMU,), pick_card=weapon, answer=())
+    script = Script(state, activate=(LIMU,), picks=(weapon,), answer=())
     engine = _run(
         Engine.from_state(state, seed=7),
         [script, Script(state)],
@@ -567,18 +582,43 @@ def test_limu_is_not_offered_when_own_judge_zone_already_holds_an_indulgence():
 
 
 def test_limu_is_not_offered_when_the_judge_zone_is_abolished():
-    """用户口径：判定区被废除时不能发动。"""
-    diamond = _diamond(basic=False)
-    state = _state(_seats(hand=(diamond,)), deck=deck_excluding(PACK, diamond))
-    state.player(0).sealed_zones = tuple(SEALED_SLOT_IDS)
-    engine = Engine.from_state(state, seed=7)
-    query = _first_play_phase(engine, [Script(state), Script(state)])
+    """用户口径：判定区被废除时不能发动（候选回调不产出 ⇒ 出牌阶段不列它的清单）。
 
-    assert not [
-        action
-        for action in query.legal_actions
-        if isinstance(action, ActivateSkill) and action.skill_id == LIMU
-    ], "判定区被废除 ⇒ 立牧不该出现在出牌阶段候选里"
+    可用性住在**候选回调**（`_limu_offers`）：引擎只给"产出了骨架"的技能渲清单，故判据
+    要经过出牌阶段询问看，不能直接调 `preactivation_for`（它只渲步骤、不判可用性）。
+    """
+    diamond = _diamond(basic=False)
+
+    def offered(*, sealed: bool) -> bool:
+        state = _state(_seats(hand=(diamond,)), deck=deck_excluding(PACK, diamond))
+        if sealed:
+            state.player(0).sealed_zones = tuple(SEALED_SLOT_IDS)
+        players = [Script(state), Script(state)]
+        query = _first_play_phase(Engine.from_state(state, seed=7), players)
+        return LIMU in dict(getattr(query, "preactivations", None) or ())
+
+    assert offered(sealed=False), "正面对照：判定区正常时立牧有清单（= 可用）"
+    assert not offered(sealed=True), "判定区被废除 ⇒ 立牧不可用"
+
+
+def test_limu_preactivation_manifest_lists_only_diamond_cards():
+    """界面入口：立牧已翻预发动 ⇒ 列表恰一格「选一张方片牌」，候选**只有方片**。
+
+    这就是"点技能按钮直接进预发动"那一侧的数据面（与【奇袭】共用的清单形状）：
+    清单的候选、复合动作的校验器、执行器的选择面读**同一份** `PickCards.suits` 过滤。
+    """
+    from sgs.skills.preactivation import preactivation_for
+
+    diamond = _diamond(basic=False)
+    other = _non_basic(exclude=(diamond,))
+    state = _state(
+        _seats(hand=(diamond, other), hp=3, hp_max=3),
+        deck=deck_excluding(PACK, diamond, other),
+    )
+    steps = preactivation_for(state, 0, LIMU)
+    assert [step.name for step in steps] == ["card"], "立牧的清单只有一格选牌步"
+    options = {option for row in steps[0].pool for option in row.options}
+    assert options == {str(diamond)}, "只铺方片（另一张非方片不出现）"
 
 
 def _first_play_phase(engine: Engine, players: list[Any]):
@@ -602,7 +642,7 @@ def test_limu_second_use_is_not_offered_while_the_judge_zone_holds_one():
         _seats(hand=(diamond, filler, filler), hp=3, hp_max=3),
         deck=deck_excluding(PACK, diamond, filler),
     )
-    script = Script(state, activate=(LIMU,), pick_card=diamond, answer=())
+    script = Script(state, activate=(LIMU,), picks=(diamond,), answer=())
     engine = Engine.from_state(state, seed=7)
     _run(engine, [script, Script(state)], lambda e: bool(e.state.player(0).judge))
     # 第一次发动收尾后仍在同一出牌阶段：候选里不该再有立牧。
@@ -624,7 +664,7 @@ def test_limu_converted_indulgence_triggers_tushe():
         deck=(top[0], top[1], *deck_excluding(PACK, diamond, filler, *top)),
     )
     script = Script(
-        state, activate=(LIMU,), pick_card=diamond, answer=("tushe",)
+        state, activate=(LIMU,), picks=(diamond,), answer=("tushe",)
     )
     expected = 2 + 2 - 1 + 1  # 起始 2 + 摸牌 2（两张非基本）− 用掉 1 + 图射 1
     engine = _run(

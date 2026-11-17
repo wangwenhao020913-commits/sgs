@@ -2969,6 +2969,55 @@ def _coverage_shameng():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _diamond_card(*, exclude: tuple[int, ...] = ()) -> int:
+    """一张**出牌阶段用不出去**的方块牌（【闪】）：AI 只能改走技能，覆盖才不掺"直接出牌"。
+
+    花色白名单 = ``PickCards.suits``；选【闪】而不是随便一张方块牌，是因为清单覆盖要证明
+    "AI **从清单填**"，而一张能直接使用的方块装备会被 AI 优先用掉（首轮实测：诸葛连弩）。
+    """
+    for card_id, card in enumerate(PACK.deck.cards):
+        if card_id in exclude or card.suit != "diamond":
+            continue
+        if card.type == "dodge":
+            return card_id
+    raise AssertionError("标准 108 里找不到方块【闪】")
+
+
+def _coverage_limu():
+    """刘焉【立牧】（sp8-liuyan 票 04）：已翻预发动 ⇒ 清单一格"选一张方块牌"。
+
+    局面：手里一张方块牌、刘焉已受伤（回复有意义）、判定区空 ⇒ 清单渲得出、AI 填得出
+    一次合法发动（复合动作 = ``picks=(方块牌,)``）。
+    """
+    diamond = _diamond_card()
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="liuyan", hand=(diamond,), hp=2, hp_max=3),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(diamond),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_jie_guose():
+    """界大乔【国色】（sp8-liuyan 票 04）：已翻预发动 ⇒ 清单 = 选项 → 方块牌 → 目标座。
+
+    局面：手里一张方块牌、对面存活（选项 1 的合法目标存在）⇒ 清单渲得出、AI 填得出一次
+    合法发动（``choices = (选项文本, "seat:1")``、``picks = (方块牌,)``）。
+    """
+    diamond = _diamond_card()
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_daqiao", hand=(diamond,)), SeatSpec()],
+        deck=_deck_excluding(diamond),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_dimeng():
     """鲁肃【缔盟】（jushou-lusu 票 02）：已翻预发动 ⇒ 清单 = 两次座位步。
 
@@ -3386,6 +3435,10 @@ _COVERAGE_CASES = {
     "hero.guyong.shenxing": _coverage_guyong_shenxing,
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（已翻预发动，三步清单：选牌 → 选牌 → 选座）。
     "hero.chenzhen.shameng": _coverage_shameng,
+    # sp8-liuyan 票 04：刘焉【立牧】/ 界大乔【国色】从"零步 + 手写问答"改成**预发动清单**
+    # （与【奇袭】同一个入口）⇒ 各自一条"AI 从清单填、由引擎解析"的确定性场景。
+    "hero.liuyan.limu": _coverage_limu,
+    "hero.jie_daqiao.guose": _coverage_jie_guose,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,
