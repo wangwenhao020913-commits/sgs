@@ -24,9 +24,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import Category, SkillType, card_category
-from sgs.effects import CarrierKind, behavior_for
-from sgs.state import GameState, Zone
+from sgs.data import Category, SkillType, card_category, hero_skill_id
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    behavior_for,
+    is_slash,
+)
+from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import (
@@ -35,12 +42,16 @@ from .catalog import (
     HeroSkillDecl,
     Hook,
     SkillDef,
+    hero_card_zone_key,
 )
-from .flow import SkillFlow, zero_step_effect
+from .flow import FlowAnswers, PickCards, SkillFlow, zero_step_effect
 from .move_after import MoveEvent, loses_card, move_event
 
 __all__ = [
     "JIE_LIANYING",
+    "SIDI",
+    "SIDI_LIMIT_FLOW",
+    "SIDI_PLACE_FLOW",
     "JIE_QIANXUN",
     "QIANXUN_FLOW",
     "QIANXUN_PLACED_KEY",
@@ -234,6 +245,185 @@ _LIANYING = HeroSkillDecl(hero_id="jie_luxun", short_id="lianying")
 
 
 # ---------------------------------------------------------------------------
+# 一将成名-2014·移动版 曹真【司敌】（yijiang-2014-round3 票 03；用户 2026-11-17 签）
+#
+#     ①当你使用【闪】时，或当其他角色于你的回合内使用【闪】时，你可以将牌堆顶的一张牌
+#       置于你的武将牌上称为“司敌”牌；
+#     ②其他角色的出牌阶段开始时，你可以移去一张“司敌”牌，令其本阶段使用【杀】的次数上限-1。
+#
+# 平台口径（用户 Q1 = A 移动版）：本将住**独立移动版表**（``heroes.yijiang_2014_mobile.json``、
+# ``version = "yijiang-2014-mobile"``、显示名「曹真移动版」），OL 的【司敌】是完全另一条技能
+# （见 ``.scratch/yijiang-2014-round3/issues/04-caozhen-a1-ruling.md``）。
+#
+# 两处"本阶段 / 武将牌上的牌"的作用域：
+#
+# - ① 的放置走 M6 票 10 的通用入口（``Engine.place_on_hero_card``：来源 = ``Zone.DECK``，
+#   区键 = ``owner:skill_id``），数据侧声明 ``return_timing = never``（牌一直留着，直到 ② 移去）；
+# - ② 的「移去」= 武将牌上的牌 → 弃牌堆（规则 §15.2；``MoveReason.PUT``，样板【狂风】/【大雾】）；
+#   被限者的 -1 落座位字段 ``Player.sidi_slash_penalty``，作用域 = 那个出牌阶段（引擎在
+#   ``_phase_play_end`` 的派发**之后**清掉，与【奇谋】/【决堰】的次数轴同一收尾点）。
+#
+# **用户 2026-11-17 的口径（票 03 §0.2 Q2）**：有人指出这些「司敌」牌**并非完全等价**
+# （后续版本花色 / 牌名可能被别的技能读到），故 ② 必须**像【七星】那样自选一张**——
+# 一步步 ``PickCards(zones=(Zone.HERO,), hero_zone=…)``（前端落既有的 ``heroPick`` 弹窗），
+# 不许由实现代挑"区内序第一张"。
+# ---------------------------------------------------------------------------
+
+SIDI = hero_skill_id("caozhen_mobile", "sidi")
+"""曹真移动版【司敌】的全限定技能 id（yijiang-2014-round3 票 03）。"""
+
+_SIDI_PLACED = "sidi_placed"
+"""帧私有：这一问已经把牌堆顶那一张放到武将牌上（重入不重放）。"""
+
+_SIDI_REMOVED = "sidi_removed"
+"""帧私有：这一问已经移去过牌（重入不重移、不重复扣次数上限）。"""
+
+
+def _is_dodge_card(card: Any) -> bool:
+    """这张牌是不是【闪】（牌型判据；引擎的 ``DODGE_RESPONSE_CARD`` = ``"dodge"``）。"""
+    return card is not None and str(card.type) == "dodge"
+
+
+def _sidi_zone(state: GameState, seat: int, skill_id: str) -> tuple[int, ...]:
+    """该座位**这条技能**的武将牌上放置区（区键 = ``owner:skill_id``）。"""
+    return tuple(state.hero_zone(seat, hero_card_zone_key(seat, skill_id)))
+
+
+def _sidi_place_condition(host: Any, frame: Any) -> bool:
+    """① 的触发条件：【闪】被**使用**（打出不算）∧ 使用者是我 / 别人在我的回合里 ∧ 有牌可放。
+
+    - 使用 vs 打出：规则 §5.2「【闪】属于使用事件；只有要求『打出【闪】』的场合才走打出流程」
+      ⇒ 【万箭齐发】窗口里的【闪】是 ``PLAY`` 帧（派发 ``PLAY_ON_PLAY``），本钩子不响；
+    - 「其他角色**于你的回合内**」读 ``state.turn_seat == owner``；
+    - 牌堆与弃牌堆**皆空** ⇒ 没有牌可放 ⇒ 候选阶段就不产出（不发没有候选的询问）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    if not _is_dodge_card(frame.data.get("card")):
+        return False
+    source = frame.data.get("source")
+    if source != owner and host.state.turn_seat != owner:
+        return False
+    return bool(host.state.deck or host.state.discard)
+
+
+def _sidi_place(host: Any, frame: Any) -> Any:
+    """① 的效果：牌堆顶一张 → 自己的武将牌上（称为「司敌」牌）。
+
+    帧内游标先落再搬：搬牌会内联派发"失去牌后"一类钩子，重入时不能再搬第二张。
+    """
+    if frame.data.get(_SIDI_PLACED):
+        return None
+    owner = int(frame.data.get("skill_owner", frame.data.get(MATCH_OWNER_KEY)))
+    skill_id = str(frame.data.get(RUNNING_SKILL_KEY) or SIDI)
+    cards = host.peek_deck(frame, 1)
+    if not cards:
+        return None
+    frame.data[_SIDI_PLACED] = True
+    return host.place_on_hero_card(
+        frame,
+        owner=owner,
+        skill_id=skill_id,
+        holder=owner,
+        cards=cards,
+    )
+
+
+SIDI_PLACE_FLOW = SkillFlow(
+    name="sidi_place", steps=(), effect=zero_step_effect(_sidi_place)
+)
+"""① 的零步流水线：[是否发动] → 牌堆顶一张置于武将牌上。"""
+
+
+def _sidi_limit_condition(host: Any, frame: Any) -> bool:
+    """② 的触发条件：**其他角色**的出牌阶段开始 ∧ 我的武将牌上有「司敌」牌。
+
+    帧 ``source`` = 当前回合角色（``_dispatch_phase_body`` 的 ``actor=_TURN_SEAT``），故
+    「这是别的角色的出牌阶段」= ``source == turn_seat`` ∧ ``source != owner``。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    state = host.state
+    if state.turn_seat is None or int(state.turn_seat) == owner:
+        return False
+    if frame.data.get("source") != state.turn_seat:
+        return False
+    return bool(_sidi_zone(state, owner, SIDI))
+
+
+def _sidi_limit_zone(state: GameState, frame: Any, owner: int, answers: Any) -> str:
+    """``PickCards.hero_zone`` 的取值：**这个持有者**的「司敌」区（区键，不是牌）。
+
+    与【七星】的 ``_qixing_zone`` 同一姿态：只读**自己**这条技能的放置区（不是别人的、
+    也不是别的技能扣的牌；区键 = ``owner:skill_id``）。
+    """
+    del state, frame, answers
+    return hero_card_zone_key(int(owner), SIDI)
+
+
+def _sidi_limit(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """② 的效果：移去**玩家选的那一张**「司敌」牌，令其本阶段使用【杀】的次数上限-1。
+
+    次序：**先落状态、再搬牌**——搬牌可能内联派发钩子并挂起，先搬后落会留下"牌没了、
+    效果没生效"的窗口。游标 ``sidi_removed`` 挡住重入（重入既不重扣也不重搬）。
+    """
+    if frame.data.get(_SIDI_REMOVED):
+        return None
+    card = int(tuple(answers["card"])[0])
+    state = host.state
+    target = int(state.turn_seat)
+    frame.data[_SIDI_REMOVED] = True
+    state.player(target).sidi_slash_penalty += 1
+    return host.move_in_frame(
+        frame,
+        state.refs((card,)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.PUT,
+        owner=int(frame.data.get("skill_owner", 0)),
+        actor=int(frame.data.get("skill_owner", 0)),
+    )
+
+
+SIDI_LIMIT_FLOW = SkillFlow(
+    name="sidi_limit",
+    steps=(
+        PickCards(
+            zones=(Zone.HERO,),
+            hero_zone=_sidi_limit_zone,
+            lo=1,
+            hi=1,
+            optional=False,
+            key="card",
+        ),
+    ),
+    effect=_sidi_limit,
+)
+"""② 的一步流水线：选一张「司敌」牌（玩家自选）→ 移去并 −1。"""
+
+
+def _sidi_slash_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """② 的 ``COUNT_LIMIT``：被限者本阶段使用【杀】的次数上限 −1（只减【杀】家族）。
+
+    ``ctx.subject`` = **被问的那一名角色**（次数上限是"这张牌还能用几次"，主语是使用者），
+    ``ctx.owner`` = 曹真（本实例的持有者）——两者不是同一个人，这正是"跨座位的上限修正"。
+    「无次数限制」（``current is None``，【诸葛连弩】一类）保持无限：没有有限上限可减
+    （规则 §17.2 ④；既有 4 条 ``COUNT_LIMIT`` 回调同一写法）。
+    """
+    if current is None:
+        return None
+    if ctx.card is None or not is_slash(behavior_for(ctx.card)):
+        return current
+    penalty = state.player(ctx.subject).sidi_slash_penalty
+    if not penalty:
+        return current
+    return int(current) - penalty
+
+
+# ---------------------------------------------------------------------------
 # 逐技能落位
 # ---------------------------------------------------------------------------
 
@@ -271,5 +461,35 @@ def hero_zone_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.MOVE_AFTER, condition=_lianying_condition, handler=_lianying),),
             requirement="当你失去最后的手牌后，可以令至多 X 名角色各摸一张牌（X = 此次失去的手牌数）",
+        ),
+        # 一将成名-2014·移动版 曹真【司敌】（yijiang-2014-round3 票 03）：两个自动预发动入口
+        # （① 使用【闪】时放牌 / ② 别人的出牌阶段开始时移去一张）+ 一条跨座位的次数上限修正。
+        SkillDef(
+            skill_id=SIDI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(
+                    Timing.USE_ON_USE,
+                    condition=_sidi_place_condition,
+                    flow=SIDI_PLACE_FLOW,
+                ),
+                Hook(
+                    Timing.PHASE_PLAY_START,
+                    condition=_sidi_limit_condition,
+                    flow=SIDI_LIMIT_FLOW,
+                ),
+            ),
+            modifiers=(Modifier(ModifierPoint.COUNT_LIMIT, _sidi_slash_limit),),
+            places_on_hero_card=True,
+            requirement=(
+                "当你使用【闪】时，或当其他角色于你的回合内使用【闪】时，你可以将牌堆顶的一张牌"
+                "置于你的武将牌上称为“司敌”牌；其他角色的出牌阶段开始时，你可以移去一张“司敌”牌，"
+                "令其本阶段使用【杀】的次数上限-1"
+            ),
+            step_requirements={
+                "card": "移去一张“司敌”牌（武将牌上的牌）",
+            },
         ),
     )

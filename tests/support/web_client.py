@@ -458,6 +458,9 @@ _FIRE_TAPE_BANNED_HEROES = (
     "dongzhuo_mobile",
     # lin-batch2 票 03：林包移动版贾诩移动版（加武将重排随机配将 ⇒ 追加，**不重扫 seed**）。
     "jiaxu_mobile",
+    # yijiang-2014-round3 票 01 / 03：一将成名-2014·吴懿 + 曹真移动版进默认池（108 → 109）。
+    "wuyi",
+    "caozhen_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 

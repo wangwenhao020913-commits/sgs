@@ -55,6 +55,7 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     behavior_for,
+    distance,
     is_slash,
     targets_within_attack_range,
 )
@@ -66,6 +67,7 @@ from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
 __all__ = [
+    "BENXI",
     "JIE_LIULI",
     "LIULI_FLOW",
     "JIE_MASHU",
@@ -149,6 +151,90 @@ def _yicong_distance(state: GameState, ctx: ModifierContext, current: Any) -> An
         return current - 1
     if ctx.owner == ctx.target and state.player(ctx.owner).hp <= 2:
         return current + 1
+    return current
+
+
+# ---------------------------------------------------------------------------
+# 一将成名-2014 吴懿【奔袭】：本回合使用过的牌数 ⇒ 距离 −X；条件成立时无视防具 / 【杀】多一个目标
+# ---------------------------------------------------------------------------
+
+BENXI = hero_skill_id("wuyi", "benxi")
+"""一将成名-2014 吴懿【奔袭】的全限定技能 id（yijiang-2014-round3 票 01）。"""
+
+
+def _benxi_cards_used_this_turn(state: GameState, seat: int) -> int:
+    """① 的 X = 该座位**本回合使用过**的牌数。
+
+    **不新增字段**：``Player.turn_card_suits`` 是引擎侧既有的"本回合使用过的牌"唯一真源
+    （写点 :meth:`~sgs.engine.Engine._note_turn_card_suit`，``start_use`` 入口**逐次 append**、
+    不去重、无花色的牌也记 ``None``、**打出不算**；作用域 = 本回合，回合末
+    :meth:`~sgs.engine.Engine._clear_turn_effects` 遍历**所有座位**清空）。
+
+    "于回合内"由 ``state.turn_seat == seat`` 表达（账本 L966 ④「回合没写谁的 ⇒ 仅自己的
+    回合」）：别人回合里我响应【无懈可击】也会记进这个列表，但那不是"我的回合"。
+    """
+    if state.turn_seat != seat:
+        return 0
+    return len(state.player(seat).turn_card_suits)
+
+
+def _benxi_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """① ``DISTANCE``：持有者当主体时 −X（X = 本回合已用牌数）。
+
+    只读座位事实、**不调** :func:`~sgs.effects.distance`——否则这条回调会重入自己
+    （② 的条件才调 ``distance()``，它在别的挂点上）。下限 1 由距离管道在链后夹住。
+    """
+    if ctx.owner != ctx.subject:
+        return current
+    used = _benxi_cards_used_this_turn(state, ctx.owner)
+    if not used:
+        return current
+    return current - used
+
+
+def _benxi_all_other_distances_are_one(state: GameState, owner: int) -> bool:
+    """② 的条件：「你的回合内，若你计算与所有其他角色的距离均为 1」（现算、连续型）。
+
+    逐座位现调 :func:`~sgs.effects.distance`（它含 ① 的 −X 与链尾的「下限 1」）；
+    没有其他存活角色时条件不成立（无事可无视 / 无目标可加）。
+    """
+    if state.turn_seat != owner:
+        return False
+    others = [player.seat for player in state.players if player.alive and player.seat != owner]
+    if not others:
+        return False
+    return all(distance(state, owner, seat) == 1 for seat in others)
+
+
+def _benxi_target_count(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """② ``TARGET_COUNT``：【杀】的额定目标数 1 → 2（上限，不是强制）。
+
+    只对【杀】家族（含火【杀】 / 雷【杀】 / 转化 / 虚拟）生效——牌面写的是「使用【杀】时」；
+    这是**额度**修正，不是补池（详见账本 L884 / `shapes.md` §3.3 的 `TARGET_COUNT`）。
+    """
+    if ctx.owner != ctx.subject:
+        return current
+    if ctx.card is None or not is_slash(behavior_for(ctx.card)):
+        return current
+    if not _benxi_all_other_distances_are_one(state, ctx.owner):
+        return current
+    return int(current) + 1
+
+
+def _benxi_ignore_armor(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """② ``EFFECTIVENESS`` / ``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP``：置链内旁路标志。
+
+    牌面「你无视其他角色的防具」**没有**限定【杀】（用户 2026-11-17 签 Q2b = 对所有牌）⇒
+    与本模块外【青釭剑】的同形回调相比，少一句 ``_own_slash``；覆盖范围按一手
+    （OL 现行【青釭剑】「令其防具的**效果**无效」）= 防具的**整体效果**（仁王盾式"无效"、
+    藤甲的火焰 +1、白银狮子的封顶；【八卦阵】的"视为使用【闪】"属提供者面，由 round2 票 25
+    的帧标签承接——那条不在本回调里）。
+    """
+    if ctx.owner != ctx.subject:
+        return current
+    if not _benxi_all_other_distances_are_one(state, ctx.owner):
+        return current
+    ctx.flags["ignore_armor"] = True
     return current
 
 
@@ -418,6 +504,28 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.DISTANCE, _yicong_distance),),
             requirement="①你计算与其他角色的距离 -1；②若你的体力值不大于 2，其他角色计算与你的距离 +1",
+        ),
+        # 一将成名-2014 吴懿【奔袭】（yijiang-2014-round3 票 01）：一条锁定技、五个修饰点——
+        # ① DISTANCE（−X，X = 本回合已用牌数）；② TARGET_COUNT（【杀】额度 1 → 2）与
+        # EFFECTIVENESS / DAMAGE_TAKE_AMOUNT / DAMAGE_CAP（无视防具，照【青釭剑】的三挂点）。
+        # 零询问、零钩子：② 的条件是查询期现算的纯函数。
+        SkillDef(
+            skill_id=BENXI,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(
+                Modifier(ModifierPoint.DISTANCE, _benxi_distance),
+                Modifier(ModifierPoint.TARGET_COUNT, _benxi_target_count),
+                Modifier(ModifierPoint.EFFECTIVENESS, _benxi_ignore_armor),
+                Modifier(ModifierPoint.DAMAGE_TAKE_AMOUNT, _benxi_ignore_armor),
+                Modifier(ModifierPoint.DAMAGE_CAP, _benxi_ignore_armor),
+            ),
+            requirement=(
+                "锁定技，①当你于回合内使用牌时，本回合你计算与其他角色的距离-1；"
+                "②你的回合内，若你计算与所有其他角色的距离均为1，你无视其他角色的防具且"
+                "使用【杀】时可以多选择一个目标。"
+            ),
         ),
         # 神曹操移动版【飞影】（lin-batch 票 01）：纯修饰器 + 锁定 ⇒ 客体侧无条件 +1。
         # 声明形状抄【马术】，**判据方向抄【义从】②**（`ctx.owner == ctx.target`）。

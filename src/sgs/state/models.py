@@ -894,6 +894,20 @@ class Player(BaseModel):
     ``DISTANCE`` 修饰器（主体侧）。清理点 = 回合末（:meth:`Engine._clear_turn_effects`）。
     **不发 delta**：与 ``liegong_bonus`` 同姿态。
     """
+    sidi_slash_penalty: int = 0
+    """本阶段该座位「使用【杀】的次数上限 −X」的 X（一将成名-2014·移动版 曹真【司敌】②）。
+
+    写入唯一入口 = :func:`sgs.skills.hero_zone._sidi_limit`（曹真在**别人**的出牌阶段开始时
+    移去一张「司敌」牌 ⇒ 那个座位 +1）。**跨座位**：字段在**被限者**身上、修饰器挂在**曹真**
+    的技能实例上（`ModifierPoint.COUNT_LIMIT` 的 `ctx.subject` = 被限者）。
+
+    作用域 = **那个人的这个出牌阶段**：正常收尾在 ``Engine._phase_play_end`` 的派发**之后**
+    （与 `qimou_count_x` / `duanyan_slash_bonus` 同一收尾点），回合末
+    :meth:`Engine._clear_turn_effects` 兜底。**不进复位段**——`_phase_play_start` 的复位段
+    只清它自己那几项，本字段因此能在"② 的询问挂起 ⇒ 重入本步"之后活下来（同形先例 = 刘琦
+    【问计】在同一个时机提问并落地，见 `src/sgs/skills/hero_sp5.py` 的模块头）。
+    **不发 delta**：与 `qimou_count_x` 同姿态（没有 JSON 读者，回放按同一条技能动作重建）。
+    """
     qimou_count_x: int = 0
     """本阶段「使用【杀】的次数上限 +X」的 X（界魏延移动版【奇谋】）。
 

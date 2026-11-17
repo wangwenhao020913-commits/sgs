@@ -2996,3 +2996,289 @@ def test_bingyi_wording_is_its_own_and_reads_the_seat_step():
         "流水线名另起（tests/test_ask_points.py 机械核全部模块级 flow 名两两不同）"
     )
     assert flow.steps == (), "零步：手写主体（shapes.md §2 第 9 行）"
+
+
+# ---------------------------------------------------------------------------
+# 一将成名-2014 吴懿【奔袭】（yijiang-2014-round3 票 01；用户 2026-11-17 签）
+#
+#     锁定技，①当你于回合内使用牌时，本回合你计算与其他角色的距离-1；
+#     ②你的回合内，若你计算与所有其他角色的距离均为1，你无视其他角色的防具且
+#       使用【杀】时可以多选择一个目标。
+#
+# 用户签的三条口径：Q1 = **累计**（用 N 张 ⇒ −N；真源 = 引擎侧的 `turn_card_suits`，
+# 不新立字段、不新开钩子）；Q2a = **覆盖【八卦阵】**（那一半住 round2 票 25，本文件不测）；
+# Q2b = **对所有牌**；Q3 = **连续型**（每次求值现算）。
+# ---------------------------------------------------------------------------
+
+WUYI = "wuyi"
+BENXI = "hero.wuyi.benxi"
+_BENXI_SLASH = _cards("slash")
+_BENXI_BLACK_SLASH = next(
+    card_id
+    for card_id in _BENXI_SLASH
+    if color_of_suit(_deck_card(card_id).suit).value == "black"
+)
+_BENXI_RENWANG = _cards("renwang_shield")
+_BENXI_PACK_EX = load_content_pack(deck_profile="standard_ex_160")
+_BENXI_VINE = cards_of_type(_BENXI_PACK_EX, "vine_armor")
+_BENXI_SILVER = cards_of_type(_BENXI_PACK_EX, "silver_lion")
+_BENXI_SLASH_EX = cards_of_type(_BENXI_PACK_EX, "slash")
+
+
+def _benxi_state(
+    *specs,
+    turn_seat=0,
+    phase=Phase.PLAY,
+    hero: str | None = WUYI,
+    hand=(),
+    equip=(),
+    pack=None,
+):
+    """四座局面：0 = 吴懿（座位距离 1 / 2 / 1）；``hand`` / ``equip`` 是座位 0 的牌。"""
+    seats = [SeatSpec(hero=hero, hand=tuple(hand), equip=tuple(equip)), *specs]
+    while len(seats) < 4:
+        seats.append(SeatSpec())
+    deck_pack = PACK if pack is None else pack
+    used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
+    return build_state(
+        pack=deck_pack,
+        seats=seats,
+        deck=deck_excluding(deck_pack, *used),
+        turn_seat=turn_seat,
+        phase=phase,
+        rule_config=RuleConfig(first_seat=0),
+    )
+
+
+def _benxi_used(state, count: int) -> None:
+    """把"本回合已使用 count 张牌"写进引擎侧既有事实（真写点见下面两条压帧用例）。"""
+    state.player(0).turn_card_suits = [None] * count
+
+
+def _benxi_slashes(state, seat: int = 0) -> list:
+    from sgs.effects import legal_actions_for
+
+    return [
+        action
+        for action in legal_actions_for(
+            state, seat, QueryKind.PLAY_PHASE, answers_seq=1
+        )
+        if isinstance(action, UseCard) and action.card.card_id == _BENXI_SLASH[0]
+    ]
+
+
+def test_wuyi_is_in_the_yijiang_2014_table_with_one_skill():
+    from sgs.data import load_heroes
+
+    hero = load_heroes("yijiang_2014").by_id(WUYI)
+    assert hero is not None, "吴懿必须落在 heroes.yijiang_2014.json"
+    assert hero.true_name == "吴懿"
+    assert hero.kingdom.value == "shu" and hero.gender.value == "male"
+    assert hero.hp_max == 4
+    assert hero.version == "yijiang-2014"
+    assert hero.enabled is True
+    assert [skill.id for skill in hero.skills] == ["benxi"]
+
+
+def test_benxi_declares_the_card_text_verbatim_and_never_preactivates():
+    from sgs.skills import CATALOG
+
+    definition = CATALOG[BENXI]
+    assert definition.locked is True, "锁定技：不问「是否发动」"
+    assert definition.preactivated is False
+    assert definition.hooks == (), "零询问：没有钩子"
+    assert definition.seams == ()
+    assert definition.flow is None
+    assert definition.requirement == (
+        "锁定技，①当你于回合内使用牌时，本回合你计算与其他角色的距离-1；"
+        "②你的回合内，若你计算与所有其他角色的距离均为1，你无视其他角色的防具且"
+        "使用【杀】时可以多选择一个目标。"
+    )
+
+
+def test_benxi_distance_drops_by_one_for_each_card_used_this_turn():
+    from sgs.effects import distance
+
+    state = _benxi_state()
+    assert distance(state, 0, 2) == 2, "局面前提：座位 0 到座位 2 的座位距离 = 2"
+    for used in (0, 1, 2, 3):
+        _benxi_used(state, used)
+        assert distance(state, 0, 2) == max(2 - used, 1)
+
+
+def test_benxi_distance_bonus_is_capped_by_the_floor_of_one():
+    from sgs.effects import distance
+
+    state = _benxi_state()
+    _benxi_used(state, 5)
+    assert distance(state, 0, 1) == 1, "下限 1 由距离管道在链后夹住"
+    assert distance(state, 0, 2) == 1
+
+
+def test_benxi_does_not_change_how_others_measure_the_distance_to_you():
+    from sgs.effects import distance
+
+    state = _benxi_state()
+    _benxi_used(state, 2)
+    assert distance(state, 0, 2) == 1
+    assert distance(state, 2, 0) == 2, "主体侧：别人算到吴懿的距离不变"
+
+
+def test_benxi_distance_bonus_only_applies_in_the_owners_turn():
+    from sgs.effects import distance
+
+    state = _benxi_state(turn_seat=1)
+    _benxi_used(state, 2)
+    assert distance(state, 0, 2) == 2, "回合没写谁的 ⇒ 仅自己的回合"
+
+
+def test_benxi_counts_one_entry_for_a_two_target_slash():
+    """一次「使用」= 一个事件：多目标【杀】只让距离 −1（不是逐目标）。"""
+    from sgs.effects import distance
+
+    state = _benxi_state(hand=(_BENXI_SLASH[0],))
+    engine = Engine(state, seed=1)
+    engine.start_use(state.card(_BENXI_SLASH[0]), source=0, targets=(1, 2))
+    assert len(state.player(0).turn_card_suits) == 1
+    assert distance(state, 0, 2) == 1, "座位距离 2 − 1 = 1"
+
+
+def test_benxi_distance_bonus_resets_at_turn_end():
+    from sgs.effects import distance
+
+    state = _benxi_state(hand=(_BENXI_SLASH[0],))
+    engine = Engine(state, seed=1)
+    engine.start_use(state.card(_BENXI_SLASH[0]), source=0, targets=(1,))
+    assert distance(state, 0, 2) == 1
+    engine._clear_turn_effects()
+    assert list(state.player(0).turn_card_suits) == []
+    assert distance(state, 0, 2) == 2
+
+
+def test_benxi_raises_only_the_target_ceiling():
+    state = _benxi_state(hand=(_BENXI_SLASH[0],))
+    _benxi_used(state, 1)
+    combos = {action.targets for action in _benxi_slashes(state)}
+    assert (1,) in combos and (2,) in combos, "额度 1 → 2：1 个与 2 个目标的候选都在"
+    assert all(len(targets) <= 2 for targets in combos)
+
+
+def test_benxi_target_count_needs_the_distance_condition():
+    state = _benxi_state(hand=(_BENXI_SLASH[0],))
+    combos = {action.targets for action in _benxi_slashes(state)}
+    assert combos, "【杀】本身有候选"
+    assert all(len(targets) == 1 for targets in combos), "距离不全为 1 ⇒ 额度仍是 1"
+
+
+def test_benxi_second_clause_does_not_create_an_extra_target_out_of_the_pool():
+    """只有 1 个其他存活角色时，额度 +1 **不产生**第二个候选（池大小约束）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=WUYI, hand=(_BENXI_SLASH[0],)), SeatSpec()],
+        deck=deck_excluding(PACK, _BENXI_SLASH[0]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    _benxi_used(state, 2)
+    assert {action.targets for action in _benxi_slashes(state)} == {(1,)}
+
+
+def test_benxi_condition_is_evaluated_live():
+    """连续型（用户 Q3）：同一局面里"多用一个张牌"就翻真。"""
+    state = _benxi_state(hand=(_BENXI_SLASH[0],))
+    _benxi_used(state, 0)
+    assert all(len(action.targets) == 1 for action in _benxi_slashes(state))
+    _benxi_used(state, 1)
+    assert any(len(action.targets) == 2 for action in _benxi_slashes(state))
+
+
+def test_benxi_ignore_armor_stops_renwang_vine_armor_and_silver_lion():
+    from sgs.effects import DamageNature, damage_amount, target_is_effective
+
+    armed = _benxi_state(SeatSpec(equip=(_BENXI_RENWANG[0],)), SeatSpec())
+    _benxi_used(armed, 1)
+    bare = _benxi_state(SeatSpec(equip=(_BENXI_RENWANG[0],)), SeatSpec())
+    assert target_is_effective(armed, armed.card(_BENXI_BLACK_SLASH), 0, 1) is True, (
+        "仁王盾的「黑色【杀】对你无效」被无视"
+    )
+    assert target_is_effective(bare, bare.card(_BENXI_BLACK_SLASH), 0, 1) is False
+
+    # 藤甲 / 白银狮子在军争 160 档（档位纪律：按牌名换档，见 tests/test_m5_equipment.py）
+    slash_ex = _BENXI_SLASH_EX[0]
+    vine = _benxi_state(
+        SeatSpec(equip=(_BENXI_VINE[0],)), SeatSpec(), pack=_BENXI_PACK_EX
+    )
+    _benxi_used(vine, 1)
+    assert target_is_effective(vine, vine.card(slash_ex), 0, 1) is True
+    assert (
+        damage_amount(
+            vine,
+            source=0,
+            target=1,
+            card=vine.card(slash_ex),
+            base=1,
+            chain=False,
+            nature=DamageNature.FIRE,
+        )
+        == 1
+    ), "藤甲的火焰 +1 被无视"
+
+    silver = _benxi_state(
+        SeatSpec(equip=(_BENXI_SILVER[0],)), SeatSpec(), pack=_BENXI_PACK_EX
+    )
+    _benxi_used(silver, 1)
+    assert (
+        damage_amount(
+            silver,
+            source=0,
+            target=1,
+            card=silver.card(slash_ex),
+            base=3,
+            chain=False,
+        )
+        == 3
+    ), "白银狮子的封顶被无视"
+
+
+def test_benxi_ignore_armor_does_not_apply_to_another_seats_cards():
+    from sgs.effects import target_is_effective
+
+    state = _benxi_state(
+        SeatSpec(equip=(_BENXI_RENWANG[0],)), SeatSpec(hand=(_BENXI_BLACK_SLASH,))
+    )
+    _benxi_used(state, 1)
+    assert target_is_effective(state, state.card(_BENXI_BLACK_SLASH), 2, 1) is False, (
+        "无视防具只对吴懿的牌生效"
+    )
+
+
+def test_benxi_ignore_armor_needs_the_distance_condition():
+    from sgs.effects import target_is_effective
+
+    state = _benxi_state(SeatSpec(equip=(_BENXI_RENWANG[0],)), SeatSpec())
+    assert target_is_effective(state, state.card(_BENXI_BLACK_SLASH), 0, 1) is False, (
+        "距离不全为 1 ⇒ 无视防具不生效"
+    )
+
+
+def test_benxi_ignore_armor_covers_non_slash_cards():
+    """用户 Q2b = **对所有牌**：藤甲对【万箭齐发】的「对你无效」同样被越过。"""
+    from sgs.effects import target_is_effective
+
+    arrow = cards_of_type(_BENXI_PACK_EX, "arrow_barrage")[0]
+    armed = _benxi_state(
+        SeatSpec(equip=(_BENXI_VINE[0],), hand=(arrow,)),
+        SeatSpec(),
+        pack=_BENXI_PACK_EX,
+    )
+    _benxi_used(armed, 1)
+    assert target_is_effective(armed, armed.card(arrow), 0, 1) is True, (
+        "藤甲的「【万箭齐发】对你无效」也被无视（不是只对【杀】）"
+    )
+    bare = _benxi_state(
+        SeatSpec(equip=(_BENXI_VINE[0],), hand=(arrow,)),
+        SeatSpec(),
+        pack=_BENXI_PACK_EX,
+    )
+    assert target_is_effective(bare, bare.card(arrow), 0, 1) is False

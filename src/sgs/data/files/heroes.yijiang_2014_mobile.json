@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "yijiang_2014_mobile",
+  "heroes": [
+    {
+      "id": "caozhen_mobile",
+      "name": "曹真移动版",
+      "true_name": "曹真",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "yijiang-2014-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "sidi",
+          "name": "司敌",
+          "skill_type": "NORMAL",
+          "placement": {
+            "visibility": "public",
+            "return_timing": "never",
+            "extra_effect": true
+          }
+        }
+      ]
+    }
+  ]
+}

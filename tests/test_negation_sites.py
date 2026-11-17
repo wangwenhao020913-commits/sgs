@@ -333,6 +333,18 @@ SITES: dict[Site, Rule] = {
         "【藤甲】普通【杀】/ 南蛮 / 万箭对装备者无效：既有的目标级无效",
     ),
     (
+        "src/sgs/skills/target_change.py",
+        "target_change_skill_definitions",
+        EFFECTIVENESS_TOKEN,
+        "Modifier(ModifierPoint.EFFECTIVENESS, _benxi_ignore_armor),",
+    ): Rule(
+        "target-level-invalid",
+        1,
+        "吴懿【奔袭】②『你无视其他角色的防具』（yijiang-2014-round3 票 01）：与【青釭剑】"
+        "同一口径的**旁路**——置 `ignore_armor` 让防具侧的无效 / 加伤 / 封顶三条链让开"
+        "（不是新的一层否定，只是第 2 层的既有读取方少了一条判据）",
+    ),
+    (
         "src/sgs/skills/negation.py",
         "_fenwei_handler",
         TARGET_INVALID_WRITE_TOKEN,

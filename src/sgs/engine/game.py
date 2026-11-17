@@ -5768,6 +5768,8 @@ class Engine:
             # 用户 2026-11-12 签 Q6 = 引擎侧）。与上面那一批同一收尾点。
             player.play_phase_skipped_this_turn = False
             player.designated_other_this_turn = False
+            # yijiang-2014-round3 票 03 曹真移动版【司敌】② 的兜底（正常收尾在 `_phase_play_end`）。
+            player.sidi_slash_penalty = 0
             # SP武将组5【观微】的「本回合使用过的牌花色」记录（Q10 = 引擎侧）与【凤魄】的
             # 记账：作用域 = 本回合 / 本阶段，回合末一并兜底清掉。
             player.turn_card_suits.clear()
@@ -7382,6 +7384,10 @@ class Engine:
             self._clear_qimou_count(self.state.turn_seat)
             # lukang-mobile 票 01 陆抗移动版【决堰】·武器栏：牌面写「此阶段内」，同一收尾点。
             self._clear_duanyan_slash_bonus(self.state.turn_seat)
+            # yijiang-2014-round3 票 03 曹真移动版【司敌】②：「令**其**本阶段使用【杀】的次数
+            # 上限-1」的作用域 = 被限者的这个出牌阶段 ⇒ 同一收尾点清掉（字段在**被限者**身上，
+            # 而"被限者"恒是当前回合角色）。
+            self.state.player(self.state.turn_seat).sidi_slash_penalty = 0
         # 潘濬【观微】（用户 2026-11 裁定）：本阶段结束后**再执行一个额外的出牌阶段**。
         # 排在"本阶段"清理**之后**（技能在"出牌阶段结束时"看到的是完整事实），把回合环的
         # 游标拨回 `_phase_play_start`：它重跑阶段起点（复位 + 派发 PHASE_PLAY_START），

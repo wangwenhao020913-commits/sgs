@@ -58,6 +58,7 @@ from support import (
     SeatSpec,
     build_state,
     cards_of_type,
+    deck_excluding,
     ran_timing,
     run_queries,
 )
@@ -116,6 +117,11 @@ SP5_HEROES = load_heroes("sp5")
 SP8_HEROES = load_heroes("sp8")
 """**SP武将组8** 那一份（sp8-liuyan 票 01 起）：与 ``sp5`` 同一姿态（独立系列包、单项表、
 版本字段 ``sp8``、显示名不加后缀）；首个载体 = 刘焉【图射】【立牧】。"""
+
+YIJIANG_2014_MOBILE_HEROES = load_heroes("yijiang_2014_mobile")
+"""**一将成名-2014·移动版** 那一份（yijiang-2014-round3 票 03 起）：与 ``jie_mobile`` /
+``feng_mobile`` 同一姿态（独立移动版表、版本字段 ``yijiang-2014-mobile``、显示名加「移动版」
+后缀）；首个载体 = 曹真移动版【司敌】（用户 2026-11-17 签 A1 = 移动版）。"""
 
 SHAN_HEROES = load_heroes("shan")
 """**神话再临·山包**那一份（shan-baozuoci 票 04 起）：独立系列包，版本字段 ``shan``、
@@ -195,6 +201,9 @@ JIE_YIJIANG_2014_MOBILE_ENABLED = tuple(
 )
 SP5_ENABLED = tuple(hero.id for hero in SP5_HEROES.heroes if hero.enabled)
 SP8_ENABLED = tuple(hero.id for hero in SP8_HEROES.heroes if hero.enabled)
+YIJIANG_2014_MOBILE_ENABLED = tuple(
+    hero.id for hero in YIJIANG_2014_MOBILE_HEROES.heroes if hero.enabled
+)
 SHAN_ENABLED = tuple(hero.id for hero in SHAN_HEROES.heroes if hero.enabled)
 SHIJI_ZHI_ENABLED = tuple(
     hero.id for hero in SHIJI_ZHI_HEROES.heroes if hero.enabled
@@ -302,9 +311,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # （启用版本 104 → 105、真名 69 → 70：陈震是新真名；装备 22 不变）。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223、武将技 198 → 199
     # （启用版本 105 → 106、真名 70 → 71：骆统是新真名；装备 22 不变）。
-    assert len(CATALOG) == 225
+    assert len(CATALOG) == 227
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 201
+    assert len(heroes) == 203
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -328,6 +337,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             JIE_YIJIANG_2014_MOBILE_HEROES,
             SP5_HEROES,
             SP8_HEROES,
+            YIJIANG_2014_MOBILE_HEROES,
             SHAN_HEROES,
             SHIJI_ZHI_HEROES,
         )
@@ -352,7 +362,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 197 → 198。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
-    assert len(expected) == 201
+    assert len(expected) == 203
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -370,6 +380,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(JIE_FENG_MOBILE_ENABLED)
         | set(LIN_MOBILE_ENABLED)
         | set(YIJIANG_2014_ENABLED)
+        | set(YIJIANG_2014_MOBILE_ENABLED)
         | set(JIE_YIJIANG_2014_MOBILE_ENABLED)
         | set(SP5_ENABLED)
         | set(SP8_ENABLED)
@@ -407,6 +418,7 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
         *JIE_FENG_MOBILE_HEROES.heroes,
         *LIN_MOBILE_HEROES.heroes,
         *YIJIANG_2014_HEROES.heroes,
+        *YIJIANG_2014_MOBILE_HEROES.heroes,
         *JIE_YIJIANG_2014_MOBILE_HEROES.heroes,
     ):
         if hero.id not in (
@@ -1414,6 +1426,31 @@ def _probe_state() -> GameState:
     return state
 
 
+def _sidi_probe_state() -> GameState:
+    """【司敌】的正面对照：**座位 0 是当前回合角色**（= 别人的出牌阶段）。
+
+    - ①（``USE_ON_USE``）：帧的 ``source`` = ME（自己用【闪】）⇒ 成立；持有者换成座位 2 后
+      ``source != 2`` 且 ``turn_seat(0) != 2`` ⇒ 假；
+    - ②（``PHASE_PLAY_START``）：``turn_seat = 0`` ≠ 持有者、帧 ``source = 0``、ME 的「司敌」区
+      有牌 ⇒ 成立；换成座位 2 后他的区是空的 ⇒ 假。
+    """
+    from sgs.skills.catalog import hero_card_zone_key
+
+    dodge = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(), SeatSpec()],
+        deck=deck_excluding(PACK, dodge),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    key = hero_card_zone_key(ME, "hero.caozhen_mobile.sidi")
+    state.player(ME).hero_cards[key] = HeroCardZone(
+        skill_id="hero.caozhen_mobile.sidi", owner=ME, cards=[dodge]
+    )
+    return state
+
+
 def _own_turn_probe_state() -> GameState:
     """sp5-pangtong-liuqi：展骥 / 问计 / 屯江 的正面对照都要求"**这是我的回合**的某个阶段"。
 
@@ -1682,6 +1719,8 @@ def _jianying_probe_state() -> GameState:
 
 def _probe_state_for(skill_id: str) -> GameState:
     """逐技能的正面对照局面（默认同一份；条件里有额外状态前提的单独给）。"""
+    if skill_id == "hero.caozhen_mobile.sidi":
+        return _sidi_probe_state()
     if skill_id == "hero.jie_liubei.jijiang":
         return _jijiang_probe_state()
     if skill_id == "hero.jie_lvmeng.qinxue":
@@ -1842,6 +1881,15 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=ME),
         ),
         "hero.zuoci.xinsheng": (_HookFrame(target=ME),),
+        # yijiang-2014-round3 票 03：曹真移动版【司敌】的两条钩子——
+        # ① 使用【闪】（source = 持有者）；② 别人的出牌阶段开始（source = 当前回合角色）。
+        "hero.caozhen_mobile.sidi": (
+            _HookFrame(
+                source=ME,
+                card=_probe_state().card(cards_of_type(PACK, "dodge")[0]),
+            ),
+            _HookFrame(source=0),
+        ),
         # 每条技能一个**元组**：本技能的每条带条件钩子各一帧（【勤学】两个时机两条）。
         "hero.jie_luxun.qianxun": (
             _HookFrame(
@@ -2537,6 +2585,12 @@ SKILL_SHAPE: dict[str, str] = {
     # M6 票 16：界【空城】与标准版逐字相同（同一个目标池谓词）。
     "hero.jie_zhugeliang.kongcheng": "锁定技",
     "hero.luxun.qianxun": "锁定技",
+    # yijiang-2014-round3 票 01：一将成名-2014 吴懿【奔袭】（锁定技 + 五条纯修饰器、零询问）
+    "hero.wuyi.benxi": "锁定技",
+    # yijiang-2014-round3 票 03：曹真移动版【司敌】——机械谓词取的是 `flow_for` 的第一条
+    # （① 的零步流水线）⇒ 归「零步技能」格；② 的一步流水线（选一张「司敌」牌）是同一
+    # 声明上的第二个入口，不改变这一格的机械读法。
+    "hero.caozhen_mobile.sidi": "零步技能",
     "hero.lvbu.wushuang": "锁定技",
     "hero.sunquan.jiuyuan": "锁定技",
     "hero.machao.mashu": "锁定技",
@@ -2829,7 +2883,7 @@ SHAPE_COUNTS: dict[str, int] = {
     # 选牌 / 使用 / 回复手写在提交点，与界【国色】同形）⇒ 47 → 49。
     # sp8-liuyan 票 04：【立牧】与界【国色】都改成**有步骤**的预发动流水线 ⇒ 两条从
     # 「零步技能」挪到「主动技能」⇒ 零步 49 → 47、主动 38 → 40。
-    "零步技能": 47,
+    "零步技能": 48,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -2853,7 +2907,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # sp5-pangtong-liuqi 票 01 / 02：展骥（锁定 + 帧标签钩子）⇒ 46 → 47。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】（锁定 + 使用 / 打出双钩子、无流水线）
     # ⇒ 47 → 48。
-    "锁定技": 48,
+    # yijiang-2014-round3 票 01：吴懿【奔袭】（锁定 + 五条纯修饰器、零询问、无流水线）
+    # ⇒ 48 → 49。
+    "锁定技": 49,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -3069,7 +3125,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # sp5-pangtong-liuqi 票 01 / 02：五技（主动 1 / 触发 1 / 零步 2 / 锁定 1）⇒ 210 → 215。
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】⇒ 221 → 222（主动技能 37 → 38）。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223（锁定技 47 → 48）。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 225
+    assert len(SKILL_SHAPE) == len(CATALOG) == 227
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3289,8 +3345,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族三步流水线）⇒ 内 126 → 127。
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】（锁定技、无 flow，效果在回调里）
     # ⇒ 外 95 → 96。
-    assert len(inside) == 129
-    assert len(outside) == 96
+    assert len(inside) == 130
+    assert len(outside) == 97
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

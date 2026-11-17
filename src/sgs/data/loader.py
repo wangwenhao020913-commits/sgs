@@ -95,6 +95,9 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "jie_feng_mobile",
     "lin_mobile",
     "yijiang_2014",
+    # yijiang-2014-round3 票 03：一将成名-2014 的**移动版**独立表（曹真移动版）。
+    # 追加在既有包之后 ⇒ 既有包的并集位置不变、固定种子配将结果不动。
+    "yijiang_2014_mobile",
     "jie_yijiang_2014_mobile",
     "sp5",
     "shan",

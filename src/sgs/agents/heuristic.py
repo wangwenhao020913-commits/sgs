@@ -4244,6 +4244,19 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.machao.tieqi": (_constant(2.5), "使用【杀】后判定，通过则目标不可响应：助此【杀】命中"),
     "hero.zhugeliang.guanxing": (_constant(3.0), "准备阶段观看牌堆顶并按任意顺序放回：改善摸牌"),
     "hero.huangyueying.jizhi": (_constant(3.0), "使用非延时锦囊时摸一张：净赚"),
+    # yijiang-2014-round3 票 03：曹真移动版【司敌】——两个自动预发动入口（①②各一问）。
+    "hero.caozhen_mobile.sidi": (
+        _constant(2.0),
+        "① 使用【闪】后把牌堆顶一张扣上武将牌（免费攒牌，通常净正）；② 别人的出牌阶段开始时"
+        "移去一张令其本阶段【杀】上限 −1（控制对手输出，一张牌换一次限制）",
+    ),
+    # yijiang-2014-round3 票 01：一将成名-2014 吴懿【奔袭】——锁定技、零询问 ⇒ 这一条只服务
+    # "这条技能值多少"的语义表（锁定技不入 `_COVERAGE_CASES`：没有可发动的一问）。
+    "hero.wuyi.benxi": (
+        _constant(0.0),
+        "锁定技：本回合每用一张牌距离 −1；与所有其他角色距离均为 1 时无视防具、"
+        "【杀】目标数 +1——恒生效、没有询问、没有代价（价值已在候选面里体现，不额外加分）",
+    ),
     # 吴
     "hero.sunquan.zhiheng": (_score_zhiheng, "弃任意张摸等量：换牌质量（弃【桃】/【闪】扣分）"),
     "hero.ganning.qixi": (_constant(2.0), "黑色牌当【过河拆桥】：多一条拆牌路径"),

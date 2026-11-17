@@ -85,6 +85,9 @@ PACK = load_content_pack(deck_profile="standard_108")
 
 JIE_LUXUN = "jie_luxun"
 JIE_QIANXUN = "hero.jie_luxun.qianxun"
+SIDI = "hero.caozhen_mobile.sidi"
+"""yijiang-2014-round3 票 03：曹真移动版【司敌】——第三个放置类技能（`return_timing = never`：
+牌一直留在武将牌上，直到 ② 移去）。"""
 QIXING = "hero.shen_zhugeliang.qixing"
 """神诸葛亮【七星】的全限定技能 id（huo-shenzhugeliang 票 01）。"""
 JIE_LIANYING = "hero.jie_luxun.lianying"
@@ -269,7 +272,7 @@ def _jie_errors(raw: dict[str, Any]) -> tuple:
 def test_every_placement_skill_declares_the_three_facts():
     """登记表 ⇔ 代码标记：每个放置类技能恰有一条数据声明，且三项都在。"""
     declared = hero_placement_decls()
-    assert set(declared) == set(PLACEMENT_SKILL_IDS) == {JIE_QIANXUN, QIXING}
+    assert set(declared) == set(PLACEMENT_SKILL_IDS) == {JIE_QIANXUN, QIXING, SIDI}
     for skill_id, decl in declared.items():
         definition = CATALOG[skill_id]
         assert definition.places_on_hero_card is True, skill_id
