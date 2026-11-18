@@ -51,6 +51,11 @@ diy-heroes 票 04 增**条目的显式技能引用**（:attr:`HeroSkill.skill_id
 **按 id 反查名字**读 :func:`hero_skill_name` / :func:`hero_skill_names`（票 08 A 收口：同样按
 解析后的 id 建键，展示层 / 叙事 / 化身面不再各写一份"末段撞短 id"；按钮清单的条目元数据表
 按同一派生口建键）。
+
+**M7 票 15** 再增成长层**元层**的数据面（:class:`SkillValueTable` / :func:`load_skill_values` /
+:func:`validate_skill_values` / :func:`skill_value` 与稀有度的价 / 权重常数）：仓内默认表是
+**显式清单**（不在清单里 = 普通 + 禁用），价与权重不落表。它是"声明式进料"的一部分，
+故与武将表同层导出——剧本 / 成长引擎只经这一个公开面取表，不 import 深层模块。
 """
 
 from .errors import DataLoadError, LoadError
@@ -119,6 +124,30 @@ from .rule_config import (
     SkillGrant,
     validate_rule_config,
 )
+from .values import (
+    RARITY_PRICES,
+    RARITY_WEIGHTS,
+    RELIC_PRICE,
+    SKILL_VALUE_PRESET_SLOTS,
+    SKILL_VALUE_PRESETS_FILENAME,
+    SKILL_VALUE_PRESETS_SCHEMA_VERSION,
+    SKILL_VALUES_FILENAME,
+    SKILL_VALUES_SCHEMA_VERSION,
+    Rarity,
+    SkillValue,
+    SkillValueOverride,
+    SkillValuePreset,
+    SkillValuePresets,
+    SkillValueTable,
+    diff_skill_values,
+    learning_pool,
+    load_skill_value_presets,
+    load_skill_values,
+    merge_skill_values,
+    save_skill_value_preset,
+    skill_value,
+    validate_skill_values,
+)
 
 __all__ = (
     "CARD_TAG_TYPES",
@@ -156,14 +185,29 @@ __all__ = (
     "PlacementDecl",
     "PlacementReturn",
     "PlacementVisibility",
+    "RARITY_PRICES",
+    "RARITY_WEIGHTS",
+    "RELIC_PRICE",
+    "Rarity",
     "RuleConfig",
+    "SKILL_VALUE_PRESET_SLOTS",
+    "SKILL_VALUE_PRESETS_FILENAME",
+    "SKILL_VALUE_PRESETS_SCHEMA_VERSION",
+    "SKILL_VALUES_FILENAME",
+    "SKILL_VALUES_SCHEMA_VERSION",
     "SkillGrant",
     "SkillType",
+    "SkillValue",
+    "SkillValueOverride",
+    "SkillValuePreset",
+    "SkillValuePresets",
+    "SkillValueTable",
     "Suit",
     "card_category",
     "card_tag_spec",
     "color_of_suit",
     "deal_heroes",
+    "diff_skill_values",
     "enabled_hero_ids",
     "hero_by_id",
     "hero_card_skill_id",
@@ -174,11 +218,18 @@ __all__ = (
     "hero_skill_ids",
     "hero_skill_name",
     "hero_skill_names",
+    "learning_pool",
     "load_content_pack",
     "load_hero_tables",
     "load_heroes",
+    "load_skill_value_presets",
+    "load_skill_values",
+    "merge_skill_values",
     "roster_for",
+    "save_skill_value_preset",
+    "skill_value",
     "validate_content_pack",
     "validate_heroes",
     "validate_rule_config",
+    "validate_skill_values",
 )

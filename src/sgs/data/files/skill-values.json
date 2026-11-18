@@ -1,0 +1,854 @@
+{
+  "schema_version": 1,
+  "skills": {
+    "hero.caocao.hujia": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.caocao.jianxiong": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.caopi_mobile.fangzhu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.caopi_mobile.songwei": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.caopi_mobile.xingshang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.caozhen_mobile.sidi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.chenqun.dingpin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.chenqun.faen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.chenzhen.shameng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.daqiao.guose": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.daqiao.liuli": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.dianwei_mobile.qiangxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.diaochan.biyue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.diaochan.lijian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.dongzhuo_mobile.baonue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.dongzhuo_mobile.bengkuai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.dongzhuo_mobile.jiuchi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.dongzhuo_mobile.roulin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.feng_yujin.dingluan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.feng_yujin.jieyue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.ganning.qixi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.guanyu.wusheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.guojia.tiandu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.guojia.yiji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.guyong.bingyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.guyong.shenxing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.haozhao.zhengku": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.huanggai.kurou": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.huangyueying.jizhi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.huangyueying.qicai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.huangzhong.liegong": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.huatuo.jijiu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.huatuo.qingnang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jiaxu_mobile.luanwu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jiaxu_mobile.wansha": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jiaxu_mobile.weimu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_caocao.hujia": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_caocao.jianxiong": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_caoren_mobile.jushou": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_caozhen_mobile.sidi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_chenqun_mobile.dingpin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_chenqun_mobile.faen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_daqiao.guose": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_daqiao.liuli": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_diaochan.biyue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_diaochan.lijian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_ganning.fenwei": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_ganning.qixi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_gongsunzan.qiaomeng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_gongsunzan.yicong": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_guanyu.wusheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_guanyu.yijue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_guojia.tiandu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_guojia.yiji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_guyong_mobile.bingyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_guyong_mobile.shenxing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huanggai.kurou": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huanggai.zhaxiang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huangyueying.jizhi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huangyueying.qicai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huangzhong_mobile.liegong": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huatuo.chuli": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huatuo.jijiu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huaxiong.shizhan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_huaxiong.yaowu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_jushou_mobile.jianying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_jushou_mobile.shibei": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lidian.wangxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lidian.xunxun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_liubei.jijiang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_liubei.rende": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_luxun.lianying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_luxun.qianxun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lvbu.liyu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lvbu.wushuang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lvmeng.botu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lvmeng.gongxin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lvmeng.keji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_lvmeng.qinxue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_machao.mashu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_machao.tieqi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_simayi.fankui": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_simayi.guicai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_sunquan.jiuyuan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_sunquan.zhiheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_sunshangxiang.jieyin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_sunshangxiang.xiaoji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_weiyan_mobile.kuanggu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_weiyan_mobile.qimou": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_wuyi_mobile.benxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xiahoudun.ganglie": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xiahoudun.qingjian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xiahouyuan_mobile.shensu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xuchu.luoyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xushu.jianyan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xushu.qianxue": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_xushu.zhuhai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhangfei.paoxiao": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhangfei.tishen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhangjiao_mobile.guidao": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhangjiao_mobile.huangtian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhangjiao_mobile.leiji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhangliao.tuxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhaoyun.longdan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhaoyun.yajiao": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhenji.luoshen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhenji.qingguo": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhouyu.fanjian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhouyu.yingzi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhugeliang.guanxing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jie_zhugeliang.kongcheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jushou.jianying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.jushou.shibei": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.liubei.jijiang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.liubei.rende": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.liuqi.tunjiang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.liuqi.wenji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.liuyan.limu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.liuyan.tushe": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lu_su_mobile.dimeng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lu_su_mobile.haoshi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lukang_mobile.duanyan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lukang_mobile.huairou": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lukang_mobile.poshi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.luotong.qinzheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.luxun.lianying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.luxun.qianxun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lvbu.wushuang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.lvmeng.keji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.machao.mashu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.machao.tieqi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.maliang.yingyuan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.maliang.zishu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.mayunlu.fengpo": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.mayunlu.mashu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangde_mobile.mashu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangde_mobile.mengjin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangtong_mobile.lianhuan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangtong_mobile.niepan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangtong_sp.guolun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangtong_sp.songsang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.pangtong_sp.zhanji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.panjun.gongqing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.panjun.guanwei": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_caocao_mobile.feiying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_caocao_mobile.guixin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_ganning.jieying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_ganning.poxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_guanyu_mobile.wuhun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_guanyu_mobile.wushen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_guojia.hui_shi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_guojia.huishi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_guojia.tianyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_guojia.zuoxing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_lvmeng_mobile.gongxin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_lvmeng_mobile.shelie": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_zhouyu_mobile.qinyin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_zhouyu_mobile.yeyan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_zhugeliang.dawu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_zhugeliang.kuangfeng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shen_zhugeliang.qixing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shi_zhaoyun.cuifeng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.shi_zhaoyun.wuyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.simayi.fankui": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.simayi.guicai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunjian_mobile.yinghun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunquan.jiuyuan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunquan.zhiheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunshangxiang.jieyin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunshangxiang.xiaoji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunshangxiang_sp.fanxiang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunshangxiang_sp.liangzhu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.sunshangxiang_sp.xiaoji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.taishici.tianyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.tao_caocao.changyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.tao_caocao.hongzhi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.tao_liubei.congtao": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.tao_liubei.yiqi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.weiyan.kuanggu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.wolong_zhugeliang.bazhen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.wolong_zhugeliang.huoji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.wolong_zhugeliang.kanpo": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.wuming.tiancheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.wuyi.benxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.xiahoudun.ganglie": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.xiahouyuan.shensu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.xuchu.luoyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.xuhuang_mobile.duanliang": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.xunyu.jieming": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.xunyu.quhu": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.yanliang_wenchou.shuangxiong": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.yuanshao_mobile.luanji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.yuanshao_mobile.xueyi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.yuji_mobile.guohuo": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangfei.paoxiao": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangjiao_mobile.guidao": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangjiao_mobile.huangtian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangjiao_mobile.leiji": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangliao.tuxi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangxiu.congjian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangxiu.xiongluan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhaoyun.longdan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhenji.luoshen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhenji.qingguo": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhouyu.fanjian": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhouyu.yingzi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhugeliang.guanxing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhugeliang.kongcheng": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhugezhan.fuyin": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhugezhan.zuilun": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zuoci.huashen": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zuoci.xinsheng": {
+      "enabled": true,
+      "rarity": "common"
+    }
+  },
+  "relics": {}
+}
