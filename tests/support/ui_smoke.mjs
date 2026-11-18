@@ -20440,6 +20440,62 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` 本人 chip=${xiongluanChipIn(0) ? "有" : "（无）"}`
       + ` 座位 2 chip=${xiongluanChipIn(2) ? "有" : "（无）"}`);
 
+  /* skill-display 票 08：界关羽【义绝】的座位标签——**黑色分支生效期间画在目标身上**，
+   * 界关羽自己的那块没有它（服务端取值由
+   * `tests/test_hero_jie.py::test_yijue_marks_its_black_branch_target_until_turn_end` 从真投影
+   * 钉住：判据 = 禁令来源里有义绝的 id、回合末派生消失；红色分支不画那条由
+   * `test_yijue_red_branch_leaves_no_badge` 钉）。这里只钉界面读法：标签跟着 `hero_tags`
+   * 的**座位**走，布尔类标签照旧一个**纯文本** chip（只写技能名，没有 `parts` / 没有元素
+   * 子节点；Q7⑥ / Q14″A）。 */
+  const yijueView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9419,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9419 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 座位 0 = 界关羽（发动者）、座位 1 = 被指定的目标（义绝画在他身上）。
+  yijueView.heroes = { 0: "jie_guanyu", 1: "guanyu", 2: "diaochan" };
+  yijueView.snapshot.players[0].hero_name = "界关羽";
+  yijueView.snapshot.players[1].hero_name = "关羽";
+  yijueView.snapshot.players[0].hero_tags = [];
+  yijueView.snapshot.players[1].hero_tags = [{ tag: "yijue", label: "义绝" }];
+  yijueView.snapshot.players[2].hero_tags = [];
+  ui.state.view = yijueView;
+  ui.resetSelection();
+  ui.renderTable();
+  const yijueTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(yijueView.snapshot.seat)) {
+      return $("t-self-hero-tags") || null;
+    }
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const yijueChipIn = (seat) => {
+    const box = yijueTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag")
+          && node.getAttribute("data-tag") === "yijue",
+      ) || null
+      : null;
+  };
+  const targetYijueBox = yijueTagsBoxIn(1);
+  const targetYijueChip = yijueChipIn(1);
+  check("YIJUE-01a 「义绝」画在**目标**（座位 1）的武将块上：纯文本 chip、不带 parts",
+    !!targetYijueBox && targetYijueBox.hidden === false
+      && !!targetYijueChip && targetYijueChip.children.length === 0
+      && targetYijueChip.textContent === "义绝"
+      && targetYijueChip.className === "hero-tag"
+      && yijueChipIn(0) === null,
+    targetYijueChip
+      ? `义绝 chip 元素子节点=${targetYijueChip.children.length}`
+        + ` 文本=${JSON.stringify(targetYijueChip.textContent)}`
+        + ` class=${JSON.stringify(targetYijueChip.className)}`
+        + ` 座位 0=${yijueChipIn(0) ? "有" : "（无）"}`
+      : "座位 1 没有 yijue chip");
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。

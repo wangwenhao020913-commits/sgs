@@ -750,6 +750,164 @@ def test_two_hand_card_prohibitions_coexist():
 
 
 # ---------------------------------------------------------------------------
+# 界关羽【义绝】的座位标签：黑色分支画在目标身上、红色分支不画（skill-display 票 08）
+# ---------------------------------------------------------------------------
+
+
+def test_yijue_marks_its_black_branch_target_until_turn_end():
+    """黑色分支生效期间在**目标**座位画「义绝」，界关羽自己没有；回合末消失（票 08 / A6）。
+
+    四条口径各一条断言（spec §5 第 08 行 / Q7⑥ / Q12a / A12）：
+
+    - **落座位 = 目标**：黑色分支命中座位 1（被指定的那名角色）⇒ 那块武将块上恰好
+      ``{"tag": "yijue", "label": "义绝"}``；发动者界关羽自己（座位 0）没有——它是画在
+      别人身上的标签（``BadgeScope.ANY_SEAT``）。
+    - **只写技能名**：载荷恰好 ``tag`` / ``label`` 两键，**没有** ``parts``（Q7⑥：布尔类
+      标签不写效果；Q14″A：``parts`` 只在需要上色时出现）。
+    - **绑禁令**（Q8/Q12a）：判据读 ``Player.hand_card_prohibition_sources``；黑色分支另落
+      的 ``suppressed_skills`` / ``heart_slash_bonus_against`` **不**参与显示（两侧独立性由
+      ``test_the_badge_follows_the_prohibition_not_the_suppression`` 单独钉）。
+    - **生命周期是派生式**（A12）：回合末禁令来源清空 ⇒ **下一次投影**里标签就没了；全程
+      没有"清除事件"、没有新 delta。
+
+    驱动走**真引擎路径**（三步流水线 + 由目标展示一张黑牌），读口走**真产出路径**
+    （``visible_snapshot`` → ``players[].hero_tags``）。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+
+    cost = _first(type_id="slash")
+    black = _first(type_id="dismantlement", color=Color.BLACK)
+    state = _yijue_state(owner_hand=(cost,), target_hand=(black,))
+    players = [_yijue_player(cost, 1, heal=False), _reveal_player(black)]
+    engine = _run(state, players, lambda e: e.state.player(1).hand_card_prohibited)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=PACK)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE,), (
+        "前置：黑色分支把义绝记成禁令来源（票 00 的读口）"
+    )
+    assert hero_tags(1) == [{"tag": "yijue", "label": "义绝"}], (
+        "黑色分支生效期间，**目标座位**的武将块上常驻「义绝」"
+    )
+    assert "parts" not in hero_tags(1)[0], (
+        "布尔类标签只写技能名（Q7⑥），不需要上色 ⇒ 不带 parts（Q14″A）"
+    )
+    assert all(tag["tag"] != "yijue" for tag in hero_tags(0)), (
+        "发动者（界关羽，座位 0）自己没有这条标签"
+    )
+
+    # 回合末：禁令来源清空 ⇒ 下一次投影里标签消失（派生式，没有清除事件）。
+    _advance(engine, players, lambda e: e.state.turn_seat != 0)
+    assert state.player(1).hand_card_prohibition_sources == (), (
+        "前置：回合末把禁令来源一起清掉"
+    )
+    assert hero_tags(1) == [], "回合结束 ⇒ 目标座位上的「义绝」消失"
+
+
+def test_yijue_red_branch_leaves_no_badge():
+    """红色分支**任何座位都不画**「义绝」：它没有本回合持续状态（票 08 / A6 的后半句）。
+
+    "令其回复 1 点体力"是一次性结算（``_yijue_effect`` 的红分支只搬牌 + 推一次回复），
+    故 Q12a 的"绑禁令"在红分支上读出来是空集。这条钉的是"红分支没有持续状态"这件事：
+    若构造器改读 ``suppressed_skills``、``heart_slash_bonus_against`` 或"本回合发动过"
+    之类**别的**记录，本条就会红（红分支那三格全空，唯一可能被读到的只有帧私有键）。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+
+    cost = _first(type_id="slash")
+    red = _first(type_id="peach", suit=Suit.HEART.value)
+    state = _yijue_state(owner_hand=(cost,), target_hand=(red,), target_hp=3)
+    players = [_yijue_player(cost, 1, heal=True), _reveal_player(red)]
+    engine = _run(state, players, lambda e: e.state.player(1).hp == 4)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=PACK)
+
+    # 前置：红分支真的走完了（获得展示的牌 + 回复 1 点），不是"没发动 / 半路停住"。
+    assert red in state.player(0).hand, "前置：红分支把展示的牌交给发动者"
+    assert state.player(1).hp == 4, "前置：红分支的『回复 1 点』已结算"
+    assert not state.player(1).suppressed_skills, "前置：红分支不落失效记录"
+    assert state.player(1).hand_card_prohibition_sources == (), (
+        "前置：红分支不落禁令来源"
+    )
+    assert state.player(0).hand_card_prohibition_sources == ()
+
+    every_tag = [
+        tag
+        for player in visible_snapshot(session)["players"]
+        for tag in player["hero_tags"]
+    ]
+    assert every_tag == [], (
+        "红色分支没有本回合持续状态 ⇒ **任何座位**都不画「义绝」"
+    )
+
+
+def test_the_badge_follows_the_prohibition_not_the_suppression():
+    """标签绑的是**禁令**，不是失效：只清一边、看另一边的反应（票 08 / Q12a / A6）。
+
+    黑色分支一次落三条座位级记录（``suppressed_skills`` /
+    ``hand_card_prohibition_sources`` / ``heart_slash_bonus_against``），用户裁定显示**只绑
+    禁令**。三段落点，第 2 / 3 段各自能单独变红：
+
+    1. **前置**：三条记录都在（失效一条 + 禁令一条 + 加伤目标）；
+    2. 只清禁令来源（两条失效记录一字不动）⇒ 标签**消失**（读 ``suppressed_skills`` 的实现
+       在这一段还画 ⇒ 红）；
+    3. 反向：禁令回来、只清失效记录 ⇒ 标签**还在**（读"本回合发动过 / 失效"的实现在这一段
+       不画 ⇒ 红）。
+
+    逐来源清除走引擎入口 ``clear_hand_card_prohibitions``；``suppressed_skills`` 没有"逐来源
+    清"的公开口子（唯一清点是回合末 ``_clear_turn_effects``），故第 3 段按既有测试的姿态直接
+    清那个列表字段（``tests/test_web.py`` 的父荫用例同一手法）。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+
+    cost = _first(type_id="slash")
+    black = _first(type_id="dismantlement", color=Color.BLACK)
+    state = _yijue_state(owner_hand=(cost,), target_hand=(black,))
+    engine = _run(
+        state,
+        [_yijue_player(cost, 1, heal=False), _reveal_player(black)],
+        lambda e: e.state.player(1).hand_card_prohibited,
+    )
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=PACK)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    yijue_tag = {"tag": "yijue", "label": "义绝"}
+
+    # 1. 前置：黑色分支的三条记录各就各位。
+    assert [record.skill_id for record in state.player(1).suppressed_skills] == [YIJUE]
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE,)
+    assert state.player(0).heart_slash_bonus_against == [1]
+    assert yijue_tag in hero_tags(1), "前置：三条都在 ⇒ 标签在"
+
+    # 2. 只清**禁令**来源（失效记录不动）⇒ 标签消失。
+    assert engine.clear_hand_card_prohibitions(1, YIJUE) is True
+    assert [record.skill_id for record in state.player(1).suppressed_skills] == [YIJUE], (
+        "这一段只清禁令：失效记录必须原样留着，否则本段就分不开两条判据"
+    )
+    assert state.player(1).hand_card_prohibited is False, "前置：布尔随来源一起落"
+    assert yijue_tag not in hero_tags(1), (
+        "禁令来源没了 ⇒ 标签消失（哪怕失效记录还在）"
+    )
+
+    # 3. 反向：禁令回来、只清**失效**记录 ⇒ 标签还在。
+    assert engine.add_hand_card_prohibition(1, YIJUE) is True
+    assert yijue_tag in hero_tags(1)
+    state.player(1).suppressed_skills.clear()
+    assert yijue_tag in hero_tags(1), (
+        "标签绑的是禁令、不是失效：失效记录清掉之后标签照样在"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 界马超【铁骑】：失效 + 判定 + 由目标决定是否弃同花色牌
 # ---------------------------------------------------------------------------
 

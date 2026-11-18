@@ -52,6 +52,7 @@ from sgs.skills import (
     LORD_SKILL_IDS,
     LUOSHEN,
     SEAT_PREFIX,
+    YIJUE,
     ModifierPoint,
     SkillSourceKind,
     BadgeScope,
@@ -951,6 +952,39 @@ def _xiongluan_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return None
 
 
+def _yijue_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """界关羽【义绝】的座位标签 = **目标**座位的「义绝」（skill-display 票 08）。
+
+    一条判据，读引擎既有读口（spec §2 第 1 条：投影只取不判）：
+
+    - **生效中**：``Player.hand_card_prohibition_sources``（票 00）里有义绝这条 id 就画。
+      那一格由 ``Engine.add_hand_card_prohibition`` 写入（义绝自己的写点 =
+      ``_yijue_effect`` 的**黑色分支**）、由回合末 ``_clear_turn_effects`` 清空 ⇒ 标签随每次
+      投影重算，"回合结束 ⇒ 消失"是**派生**出来的，没有清除事件、没有新 delta
+      （spec §2 第 2 条 / A12）。
+
+    三处**故意的读法**：
+
+    - **只绑禁令、不绑另两条记录**（Q8/Q12a 用户裁定）：黑色分支一次落三条座位级记录
+      （``suppressed_skills`` / ``hand_card_prohibition_sources`` /
+      ``heart_slash_bonus_against``），显示**只认禁令**——三条各判一次会让一个座位堆三块，
+      而 Q7⑥ 要的是只写技能名的一行。与 :func:`_xiongluan_badge` 同判据（两条"其不能使用
+      或打出手牌"本来就是同一格）：同时命中一个座位时两个标签并列。
+    - **红色分支不画**：红分支没有本回合持续状态（"令其回复 1 点体力"是一次性结算）⇒ 禁令
+      来源为空 ⇒ 本构造器返回 ``None``，自然不画（A6 的后半句）。
+    - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
+      ``seat`` 是"要画的座位"而不是"谁的技能"——义绝的技能持有者是**别人**，故这里与
+      ``_fuyin_badge``（``SELF`` 档）不同：**不看** ``resolve_instances``、也不看技能是否
+      失效（禁令是引擎侧已经落下的公开事实，谁施加的不影响"这个座位不能用手牌"）。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "yijue", "label": "义绝"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if YIJUE in state.player(seat).hand_card_prohibition_sources:
+        return {"tag": "yijue", "label": "义绝"}
+    return None
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -971,6 +1005,10 @@ BADGE_PROVIDERS: Mapping[
         # 【雄乱】"生效期间画在**目标**身上"（spec §5 第 07 行 / Q8 / Q12a）⇒ ``ANY_SEAT``：
         # 每个座位各问一次，"生效中"由构造器自己从禁令来源判（这一档没有实例闸）。
         _XIONGLUAN_SKILL_ID: (BadgeScope.ANY_SEAT, _xiongluan_badge),
+        # 【义绝】同一条纪律（spec §5 第 08 行 / Q8 / Q12a）⇒ 与【雄乱】**同一个判据**（禁令
+        # 来源里有这条 id），故两条同时命中一个座位时两个标签并列；红色分支没有持续状态
+        # ⇒ 自然不画（A6 的后半句）。
+        YIJUE: (BadgeScope.ANY_SEAT, _yijue_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

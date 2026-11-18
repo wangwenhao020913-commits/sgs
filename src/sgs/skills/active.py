@@ -8905,6 +8905,11 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         extra_modifiers=(
             Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _yijue_heart_slash_bonus),
         ),
+        # skill-display 票 08：座位常驻标签「义绝」——**黑色分支生效期间画在目标身上**
+        # （`BadgeScope.ANY_SEAT`；构造器是 `sgs_web.projection._yijue_badge`）。判据 = 票 00
+        # 的禁令来源里有这条 id（Q8/Q12a：与【雄乱】同姿态只绑**禁令**，不绑失效 / 加伤两条
+        # 记录；红色分支没有本回合持续状态 ⇒ 不画）。结算三样与修饰器一字不动。
+        badge=BadgeKind.WINDOW,
     ),
     # 界徐庶 ☆【荐言】（M6 票 06）：觉醒后才有实例，故候选只在觉醒后的出牌阶段出现。
     ActiveSkill("jie_xushu", "jianyan", _jianyan_offers, flow=JIANYAN_FLOW),
