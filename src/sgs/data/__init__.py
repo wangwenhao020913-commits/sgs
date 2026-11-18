@@ -9,6 +9,10 @@
 故公开面再增 :class:`RuleConfig` 与其进料边界 :func:`validate_rule_config`。
 票 24 再增身份与模式的规则常数（:class:`Identity` / :class:`Mode` / :func:`roster_for`）：
 它们与规则配置同层，都是"进料侧"的不可变事实。
+**M7 票 07** 在同一处扩模式账：``Mode`` 增 ``PVE``、``Identity`` 增 ``ALLY`` / ``ENEMY``，
+并新增无身份局的构成表 :data:`NO_IDENTITY_LAYOUTS` 与 PvE 那一节的模型
+（:class:`PveConfig` / :class:`PveVictory` / :class:`PveVictoryKind` / :class:`SkillGrant` /
+:class:`PveSeat`）——它们全部落在 ``RuleConfig`` 里、进 header，故与规则配置同层导出。
 票 26 把 :class:`Suit`（枚举本就存在）纳入公开面：判定后果按花色判（【乐不思蜀】非红桃 /
 【闪电】黑桃），行为层需要花色这一**牌面事实**的枚举真源来解析 ``CardRef.suit`` 的字符串，
 不能各自重抄 ``"heart"`` 字面量。票 29 以同姿态把 :class:`Color` 与 :func:`color_of_suit`
@@ -56,6 +60,7 @@ from .identities import (
     IDENTITY_ROSTERS,
     MODE_SITES,
     MODE_SITE_SLOTS,
+    NO_IDENTITY_LAYOUTS,
     Identity,
     Mode,
     ModeSite,
@@ -105,7 +110,15 @@ from .models import (
     card_tag_spec,
     color_of_suit,
 )
-from .rule_config import RuleConfig, validate_rule_config
+from .rule_config import (
+    PveConfig,
+    PveSeat,
+    PveVictory,
+    PveVictoryKind,
+    RuleConfig,
+    SkillGrant,
+    validate_rule_config,
+)
 
 __all__ = (
     "CARD_TAG_TYPES",
@@ -135,10 +148,16 @@ __all__ = (
     "MODE_SITE_SLOTS",
     "Mode",
     "ModeSite",
+    "NO_IDENTITY_LAYOUTS",
+    "PveConfig",
+    "PveSeat",
+    "PveVictory",
+    "PveVictoryKind",
     "PlacementDecl",
     "PlacementReturn",
     "PlacementVisibility",
     "RuleConfig",
+    "SkillGrant",
     "SkillType",
     "Suit",
     "card_category",

@@ -86,15 +86,27 @@ __all__ = [
     "wrap_delta",
 ]
 
-EVENT_SCHEMA_VERSION = 2
+EVENT_SCHEMA_VERSION = 3
 """记录流结构版本；与数据版本 ``schema_version`` 字段名不同、各自升版（票 15 / 票 16）。
 
 M2 集体一升：区域引用升 ``ZoneRef``、``owner`` 改义、``PlayerPublic`` 增公开区字段……
 此后任何票新增 / 变更记录字段或 ``delta_type`` 一律**就地追加**到票 16 §2 的 v2 清单。
+
+M7 票 07 升 v3：``rule_config`` 里多了 ``mode`` 与 ``pve`` 两个键（票 01 §2）——60 条既有
+金录像的**首行**因此全部重录一次（那 60 条只在首行变，其余逐字节不变）。v2 与 v3 之间的
+差别**只有**这两个键：``mode`` 缺省时按座位数派生、``pve`` 缺省为 ``None``，故 v2 档不需要
+独立的读取器（见 :data:`SUPPORTED_EVENT_VERSIONS`）。记录类型、``delta_type`` 与
+``Header`` 的六键**一个都没动**。
 """
 
-SUPPORTED_EVENT_VERSIONS: frozenset[int] = frozenset({EVENT_SCHEMA_VERSION})
-"""本引擎读得懂的记录流版本集合（M2 起只有 2；**不建** v1 兼容读取器，票 16 §4）。"""
+SUPPORTED_EVENT_VERSIONS: frozenset[int] = frozenset({2, EVENT_SCHEMA_VERSION})
+"""本引擎读得懂的记录流版本集合。
+
+M2 起只有 2（**不建** v1 兼容读取器，票 16 §4）；M7 票 07 起是 ``{2, 3}``：v2 的 header
+缺 ``mode`` / ``pve``，而 :class:`~sgs.data.RuleConfig` 的两个缺省值恰好把它们补成派生结果
+（2 人 / 无身份局、``pve: None``），所以"老录像继续可播"是**一段缺省值**而不是一套读取分支。
+旧 ``runs/`` 下的局因此不用迁移；写回去时按当前形状 dump（版本号不静默改写）。
+"""
 
 
 class _FrozenModel(BaseModel):

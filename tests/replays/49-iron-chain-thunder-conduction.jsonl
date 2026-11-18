@@ -1,4 +1,4 @@
-{"deck_profile":"standard_ex_160","event_schema_version":2,"kind":"header","pack_id":"standard","rule_config":{"first_seat":0,"player_count":2,"starting_hand_size":4},"seed":902}
+{"deck_profile":"standard_ex_160","event_schema_version":3,"kind":"header","pack_id":"standard","rule_config":{"first_seat":0,"mode":"no_identity","player_count":2,"pve":null,"starting_hand_size":4},"seed":902}
 {"actor":null,"cards":[],"depth":0,"frame_id":0,"kind":"timing","seq":1,"source":null,"targets":[],"timing":"GAME_START"}
 {"actor":0,"cards":[],"depth":0,"frame_id":0,"kind":"timing","seq":2,"source":null,"targets":[],"timing":"TURN_BEFORE_START"}
 {"actor":0,"cards":[],"depth":0,"frame_id":0,"kind":"timing","seq":3,"source":null,"targets":[],"timing":"TURN_START"}

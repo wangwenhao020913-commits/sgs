@@ -107,7 +107,8 @@ DOD_ITEMS: dict[int, DoDItem] = {
             # 身份发放、模式派生与可见性（票 24）
             "tests/test_identity.py::test_a_run_reaches_game_end_in_every_identity_seat_count",
             "tests/test_identity.py::test_identity_is_visible_to_self_the_lord_and_the_dead_only",
-            "tests/test_identity_rosters.py::test_identity_labels_cover_exactly_the_four_identities",
+            # 票 07：身份从四值扩到六值（PvE 的友 / 敌），用例随概念改名（绑定同步）
+            "tests/test_identity_rosters.py::test_identity_labels_cover_exactly_the_six_identities",
             # 判定帧与延时锦囊（票 26）
             "tests/test_judgment.py::test_the_judge_frame_is_a_real_frame_with_the_three_dispatched_timings",
             "tests/test_judgment.py::test_lightning_passes_counterclockwise_to_the_first_legal_judge_zone",

@@ -45,9 +45,35 @@ def test_roster_is_fail_closed_outside_four_to_eight(count):
         roster_for(count)
 
 
-def test_identity_labels_cover_exactly_the_four_identities():
+def test_identity_labels_cover_exactly_the_six_identities():
+    """票 07 起身份是**六值**：身份局四值 + PvE 的友 / 敌（后者不进配比表）。"""
     assert set(IDENTITY_LABELS) == set(Identity)
     assert IDENTITY_LABELS[Identity.LORD] == "主公"
     assert IDENTITY_LABELS[Identity.LOYALIST] == "忠臣"
     assert IDENTITY_LABELS[Identity.REBEL] == "反贼"
     assert IDENTITY_LABELS[Identity.RENEGADE] == "内奸"
+    assert IDENTITY_LABELS[Identity.ALLY] == "友"
+    assert IDENTITY_LABELS[Identity.ENEMY] == "敌"
+
+
+def test_the_two_pve_sides_are_not_in_the_identity_roster_table():
+    """PvE 阵营**不**进配比表：它由 ``PveConfig.identities`` 逐座给出（票 01 §3）。"""
+    for count in (4, 5, 6, 7, 8):
+        assert set(roster_for(count)).isdisjoint({Identity.ALLY, Identity.ENEMY})
+
+
+def test_a_three_seat_table_is_closed_at_construction_for_both_composition_tables():
+    """票 07：3 人落在**两张构成表的缝里**——身份局配比表没有这一档、无身份局只有 2 人档。
+
+    所以它在 ``RuleConfig`` 的构造期被拒（fail-closed，不靠下游 ``KeyError`` 兜），
+    ``roster_for(3)`` 也照旧抛 ``ValueError``。要 3 人局，只能显式声明一个能容纳它的
+    模式（PvE 的布局由 ``PveConfig.identities`` 自证）——见 ``tests/test_rule_config.py``
+    的 ``test_a_pve_config_is_accepted_with_three_seats``。
+    """
+    from sgs.data import DataLoadError, validate_rule_config
+
+    with pytest.raises(ValueError):
+        roster_for(3)
+
+    with pytest.raises(DataLoadError):
+        validate_rule_config({"player_count": 3})

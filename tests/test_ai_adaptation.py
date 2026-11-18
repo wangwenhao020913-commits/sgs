@@ -23,11 +23,12 @@ import importlib
 from collections.abc import Mapping
 from typing import Any, get_args
 
+import pytest
 from pydantic import BaseModel
 
 from sgs.agents import heuristic
 from sgs.data import MODE_SITE_SLOTS, MODE_SITES, Mode
-from sgs.state import PlayerPublic, PlayerView, Query
+from sgs.state import PlayerPublic, PlayerView, Query, project
 
 ReadPoint = tuple[bool, str]
 ReadTable = Mapping[str, Mapping[str, ReadPoint]]
@@ -600,3 +601,50 @@ def test_the_ai_step_key_is_the_one_the_engine_writes_into_the_query() -> None:
     # 被动技那一档（帧里只有 `running_skill`）同样走同一个形状。
     passive = SimpleNamespace(data={"running_skill": "hero.daqiao.liuli"})
     assert _flow_option_id(passive, "seat", 0, multi=False) == "liuli:seat"
+
+
+# ---------------------------------------------------------------------------
+# PvE 模式的登记先于行为（M7 票 07）：`_identity_relation` 对友 / 敌今天恒答 (0, 0)
+#
+# 票 07 只落**数据面 + 版本面**：`Mode.PVE`、`Identity.ALLY` / `ENEMY` 与 `MODE_SITES["pve"]`
+# 的四格都进仓了，但关系判定（`ALLY → (0, 1)` / `ENEMY → (1, 0)`）归票 08，`heuristic.py`
+# 一行没改。于是今天 `_enemy_identities` / `_ally_identities` 对这两个值都落**空集**，
+# 关系恒为中性的 `(0, 0)`——一个真实的空窗。
+#
+# **空窗不靠"没人跑 PvE"兜着**：这条 `strict` xfail 就是它的显式标记。`strict` = 票 08
+# 一旦接上两个分支，这条用例**必然 XPASS → 判红**，逼着同一个提交里摘掉标记并换成
+# "读得出友 / 敌"的正面断言（`tests/test_heuristic_ai.py` 那边加关系用例）。
+# 反过来，**不写**"今天就对"的断言（比如钉住 `(0, 0)`）——那会锁死票 08 要改的行为。
+# ---------------------------------------------------------------------------
+
+
+def _pve_relation_view():
+    """3 人 PvE 局面：座位 0（本人）= 友、座位 1 = 敌、座位 2 = 友，身份全部公开。"""
+    from sgs.data import Identity, load_content_pack
+
+    from support import SeatSpec, build_state
+
+    state = build_state(
+        pack=load_content_pack(deck_profile="standard_108"),
+        seats=[
+            SeatSpec(identity=Identity.ALLY),
+            SeatSpec(identity=Identity.ENEMY),
+            SeatSpec(identity=Identity.ALLY),
+        ],
+        deck=tuple(range(10)),
+        turn_seat=0,
+    )
+    return project(state, 0)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="票 07 只登记不接行为：`_identity_relation` 的 ALLY / ENEMY 两个分支归票 08；"
+    "接上那天这条会 XPASS（strict ⇒ 红），摘掉标记即可",
+)
+def test_the_ai_reads_a_pve_enemy_as_an_enemy():
+    view = _pve_relation_view()
+
+    assert heuristic._identity_relation(view, 0) == (0.0, 1.0), "自己恒 (0, 1)"
+    assert heuristic._identity_relation(view, 1) == (1.0, 0.0), "敌座 ⇒ 敌"
+    assert heuristic._identity_relation(view, 2) == (0.0, 1.0), "友座 ⇒ 友"

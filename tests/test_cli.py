@@ -50,14 +50,24 @@ def test_each_supported_seat_count_runs_a_whole_game(count, capsys):
     assert "终局" in lines[-1], f"{count} 人局必须跑到终局"
 
 
-@pytest.mark.parametrize("count", ["0", "1", "3", "9"])
-def test_an_unsupported_seat_count_reports_to_stderr_and_exits_1(count, capsys):
+@pytest.mark.parametrize(
+    ("count", "reason"),
+    [
+        ("0", "player_count"),
+        ("1", "player_count"),
+        # 票 07：3 不在值域之外（``Literal[2..8]``），它落在**构成表的缝里**——无身份局只有
+        # 2 人档、身份局配比表没有 3 人档，故报错说的是"没有这一档布局"，不是取值范围。
+        ("3", "布局"),
+        ("9", "player_count"),
+    ],
+)
+def test_an_unsupported_seat_count_reports_to_stderr_and_exits_1(count, reason, capsys):
     assert main(["--players", count]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "人数非法" in captured.err
-    assert "player_count" in captured.err
+    assert reason in captured.err
 
 
 def test_the_renderer_labels_identity_deals_in_chinese():
@@ -217,13 +227,14 @@ def test_seed_outside_the_64_bit_range_is_rejected(capsys):
 
 
 def test_unsupported_player_count_exit_code_in_subprocess():
-    """票 23：非法人数跨进程也是退出码 1 + stderr 报告（3 人仍加载失败）。"""
+    """票 23：非法人数跨进程也是退出码 1 + stderr 报告（3 人仍加载失败——票 07 之后是因为
+    缺省派生的身份局没有 3 人布局，不是因为 3 不在值域里）。"""
     result = _run(sys.executable, "-m", "sgs", "--players", "3")
 
     assert result.returncode == 1
     assert result.stdout == ""
     assert "人数非法" in result.stderr
-    assert "player_count" in result.stderr
+    assert "布局" in result.stderr
 
 
 # ---------------------------------------------------------------------------

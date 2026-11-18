@@ -13,8 +13,22 @@ M2 没有天然嵌套死亡的路径，故"同批同时死亡"只能用受控入
 
 from __future__ import annotations
 
-from sgs.data import Identity, RuleConfig, load_content_pack
-from sgs.engine import DeathFact, Engine, solve_identity_outcome
+import pytest
+
+from sgs.data import (
+    Identity,
+    PveConfig,
+    PveVictory,
+    PveVictoryKind,
+    RuleConfig,
+    load_content_pack,
+)
+from sgs.engine import (
+    DeathFact,
+    Engine,
+    solve_identity_outcome,
+    solve_pve_outcome,
+)
 from sgs.state import FrameKind, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
@@ -102,6 +116,182 @@ def test_without_a_lord_death_the_lord_side_wins_once_every_rebel_and_renegade_i
 def test_without_a_lord_death_the_game_continues_while_a_rebel_or_renegade_lives():
     assert _solve(FOUR, [], (0, 2, 3)) is None, "反贼还活着 ⇒ 继续游戏"
     assert _solve(FOUR, [], (0, 1, 3)) is None, "内奸还活着 ⇒ 继续游戏"
+
+
+# ---------------------------------------------------------------------------
+# 纯函数：PvE 的逐场胜负（票 01 §4 / M7 票 07）
+# ---------------------------------------------------------------------------
+
+
+def _pve(
+    *,
+    sides=("ally", "enemy", "enemy"),
+    principal=0,
+    protected_ally=None,
+    victory=None,
+    boss=None,
+):
+    """一份最小的 PvE 配置；缺省的胜负条件是"全歼敌人"。"""
+    return PveConfig(
+        identities=tuple(Identity(side) for side in sides),
+        principal=principal,
+        protected_ally=protected_ally,
+        victory=victory or PveVictory(kind="rout"),
+        boss=boss,
+    )
+
+
+def _pve_solve(config, alive, round_no=1):
+    return solve_pve_outcome(config=config, alive=frozenset(alive), round_no=round_no)
+
+
+def test_rout_is_won_once_every_enemy_is_down():
+    victory = _pve_solve(_pve(), [0])
+
+    assert victory is not None
+    assert (victory.side, victory.winners) == ("ally", (0,))
+    assert victory.reason == "enemies_routed"
+
+
+def test_rout_keeps_the_game_going_while_one_enemy_lives():
+    assert _pve_solve(_pve(), [0, 2]) is None
+
+
+def test_rout_enemy_winners_include_every_enemy_seat_even_the_dead():
+    """``winners`` = 该侧**全部**座位（含阵亡者、按座位升序），与身份局同口径。"""
+    victory = _pve_solve(_pve(sides=("ally", "enemy", "enemy", "enemy")), [2, 3])
+
+    assert victory is not None
+    assert (victory.side, victory.winners) == ("enemy", (1, 2, 3))
+
+
+def test_the_principal_dying_loses_the_battle():
+    victory = _pve_solve(_pve(), [1, 2])
+
+    assert victory is not None
+    assert (victory.side, victory.winners, victory.reason) == (
+        "enemy",
+        (1, 2),
+        "principal_dead",
+    )
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        PveVictory(kind="rout"),
+        PveVictory(kind="survive_rounds", rounds=5),
+        PveVictory(kind="rout_within_rounds", rounds=5),
+        PveVictory(kind="slay_boss"),
+    ],
+    ids=["rout", "survive_rounds", "rout_within_rounds", "slay_boss"],
+)
+def test_the_protected_ally_dying_loses_the_battle_under_every_condition(condition):
+    """受保护队友阵亡是**四类条件共有的败因**（票 01 §4 的败列），不只是全歼那一类。"""
+    boss = 2 if condition.kind is PveVictoryKind.SLAY_BOSS else None
+    config = _pve(sides=("ally", "ally", "enemy"), protected_ally=1, victory=condition, boss=boss)
+
+    outcome = _pve_solve(config, [0], round_no=1)
+
+    assert outcome is not None
+    assert (outcome.side, outcome.reason) == ("enemy", "protected_ally_dead")
+
+
+def test_all_allied_seats_win_together_including_a_dead_protected_ally():
+    """受保护队友没死时，友方一侧的全部座位（含阵亡者）都记胜。"""
+    config = _pve(sides=("ally", "ally", "enemy"), protected_ally=1)
+
+    victory = _pve_solve(config, [0, 1])
+
+    assert victory is not None
+    assert (victory.side, victory.winners) == ("ally", (0, 1))
+
+
+def test_a_batch_that_kills_both_the_principal_and_the_last_enemy_is_a_loss():
+    """同批同死：**先判败**（主角阵亡 = 本场失败），不把"敌人也死了"算成胜。"""
+    victory = _pve_solve(_pve(), [])
+
+    assert victory is not None
+    assert (victory.side, victory.reason) == ("enemy", "principal_dead")
+
+
+def test_survive_rounds_is_won_only_after_the_limit_round():
+    config = _pve(victory=PveVictory(kind="survive_rounds", rounds=3))
+
+    assert _pve_solve(config, [0, 1, 2], round_no=3) is None, "第 N 轮还没到 N+1"
+    assert _pve_solve(config, [0, 1, 2], round_no=4) is not None
+
+
+def test_survive_rounds_still_loses_when_the_principal_falls_before_the_limit():
+    config = _pve(victory=PveVictory(kind="survive_rounds", rounds=3))
+
+    victory = _pve_solve(config, [1, 2], round_no=2)
+
+    assert victory is not None
+    assert (victory.side, victory.reason) == ("enemy", "principal_dead")
+
+
+def test_rout_within_rounds_is_won_before_the_limit():
+    config = _pve(victory=PveVictory(kind="rout_within_rounds", rounds=3))
+
+    victory = _pve_solve(config, [0], round_no=2)
+
+    assert victory is not None
+    assert (victory.side, victory.reason) == ("ally", "enemies_routed_in_time")
+
+
+def test_rout_within_rounds_keeps_going_on_the_limit_round_and_loses_after_it():
+    config = _pve(victory=PveVictory(kind="rout_within_rounds", rounds=3))
+
+    assert _pve_solve(config, [0, 1], round_no=3) is None
+
+    victory = _pve_solve(config, [0, 1], round_no=4)
+
+    assert victory is not None
+    assert (victory.side, victory.winners) == ("enemy", (1, 2))
+    assert victory.reason == "time_limit_exceeded"
+
+
+def test_rout_within_rounds_does_not_count_a_rout_that_lands_after_the_limit():
+    """**"N 轮内"是硬边界**：跨过 N 之后敌人再全灭也不记这一场的胜（票 01 §4 的胜列）。
+
+    票 01 §4 的表没写这一格（胜列要求"N 轮内"、败列要求"仍有 ENEMY"），实现取**败**：
+    返回 ``None`` 会让"全灭之后"的局永远跑下去，而判败与胜列的措辞不冲突。
+    经由规定的调用点（轮次 +1 之后判一次）这个局面本来也产生不出来——这里只钉住
+    纯函数在这一格上的取值，免得下一次改动把它悄悄翻成胜。
+    """
+    config = _pve(victory=PveVictory(kind="rout_within_rounds", rounds=3))
+
+    victory = _pve_solve(config, [0], round_no=4)
+
+    assert victory is not None
+    assert (victory.side, victory.reason) == ("enemy", "time_limit_exceeded")
+
+
+def test_slay_boss_is_won_when_the_boss_seat_is_down():
+    config = _pve(victory=PveVictory(kind="slay_boss"), boss=2)
+
+    victory = _pve_solve(config, [0, 1])
+
+    assert victory is not None
+    assert (victory.side, victory.winners) == ("ally", (0,))
+    assert victory.reason == "boss_slain"
+
+
+def test_slay_boss_needs_the_boss_itself_not_any_enemy():
+    config = _pve(victory=PveVictory(kind="slay_boss"), boss=2)
+
+    assert _pve_solve(config, [0, 2]) is None, "死的是另一个敌人 ⇒ 继续"
+    assert _pve_solve(config, [0, 1, 2]) is None
+
+
+def test_slay_boss_loses_when_the_principal_dies():
+    config = _pve(victory=PveVictory(kind="slay_boss"), boss=2)
+
+    victory = _pve_solve(config, [1, 2])
+
+    assert victory is not None
+    assert (victory.side, victory.reason) == ("enemy", "principal_dead")
 
 
 # ---------------------------------------------------------------------------

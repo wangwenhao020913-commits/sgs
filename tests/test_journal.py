@@ -38,6 +38,8 @@ def test_header_is_the_first_line_and_carries_the_envelope():
         "player_count": 2,
         "starting_hand_size": 4,
         "first_seat": 0,
+        "mode": "no_identity",
+        "pve": None,
     }
     assert "seq" not in header.model_dump(mode="json")
 
@@ -204,3 +206,54 @@ def test_a_card_move_carries_the_landing_spot_only_when_it_is_not_the_default(tm
         assert dump_journal(replayed) == path.read_text(encoding="utf-8"), (
             "读回再 dump 必须逐字节相同（缺省与新形状两侧都要）"
         )
+
+
+# ---------------------------------------------------------------------------
+# header v3：`mode` / `pve` 进 header，v2 档靠缺省值兼容（M7 票 07）
+# ---------------------------------------------------------------------------
+
+
+def test_the_event_schema_version_is_three_and_reads_the_previous_one():
+    """票 01 §2 / M7 票 07：升到 3，但**读得懂** v2——旧 ``runs/`` 录像继续可播。"""
+    from sgs.engine import SUPPORTED_EVENT_VERSIONS
+
+    assert EVENT_SCHEMA_VERSION == 3
+    assert SUPPORTED_EVENT_VERSIONS == frozenset({2, 3}), (
+        "v2 必须在支持集合里：仓库外的旧录像与 runs/ 下的旧局都还是 v2"
+    )
+
+
+def _v2_header_line(text: str) -> str:
+    """把一条 v3 记录流的首行改写成 v2 的形状：版本号回退、``rule_config`` 里没有新键。"""
+    line, rest = text.split("\n", 1)
+    payload = json.loads(line)
+    payload["event_schema_version"] = 2
+    payload["rule_config"].pop("mode", None)
+    payload["rule_config"].pop("pve", None)
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+        + rest
+    )
+
+
+def test_a_v2_header_reads_back_with_the_derived_mode_and_no_pve_section(tmp_path):
+    """v2 档的兼容只有一段**缺省值**：``mode`` 按座位数派生、``pve`` 补 ``None``。
+
+    不另建 v1 式读取器（票 01 §2）：``RuleConfig`` 的 before 校验器把缺省的 ``mode``
+    补成派生值，故 v2 文件走的是与 v3 完全相同的解析路径。
+    """
+    source = play_standard(seed=7)
+    v2_text = _v2_header_line(source.journal())
+    path = tmp_path / "v2.jsonl"
+    path.write_text(v2_text, encoding="utf-8")
+
+    header = read_journal(path)[0]
+
+    assert header.event_schema_version == 2, "文件里写的是几就是几（不静默改写版本号）"
+    assert header.rule_config.player_count == 2
+    assert header.rule_config.mode.value == "no_identity", "v2 的 mode 按座位数派生"
+    assert header.rule_config.pve is None, "v2 没有 PvE 那一节"
+    assert dump_journal([header]) != v2_text.split("\n", 1)[0] + "\n", (
+        "读回后按当前形状 dump 会补出新键——旧档升形只发生在内存里，从不写回文件"
+    )

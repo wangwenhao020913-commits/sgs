@@ -139,6 +139,15 @@ dd029e5..HEAD -- 'tests/replays/*.jsonl'`` 为空即证（README / 生成器按�
 重录后仍命中；其余 59 条逐字节不变（``git status --porcelain tests/replays/`` 只报这一条），
 种子也未重选（对局长度不变：153 → 151 条记录）。58 属于 M6 构造基准，**不在**
 :data:`STANDARD_108_REPLAY_BYTES` 的 47 条冻结表里，故那张表无需改动。
+
+**M7 票 07（header v3）后的实测**：60 条合计 **50,791,313 字节 ≈ 48.44 MiB**，最大单文件
+**3,334,072 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——仍在两句上限之内，故
+**不动预算**。本条不是行为改变：``rule_config`` 的 dump 多了 ``mode`` 与 ``pve``，于是
+**全部 60 条**的首行都变、其余逐字节不变（逐文件核过"除首行外 sha256 相同"）——
+23 条无身份局各涨 32 字节、37 条身份局各涨 29 字节（``"identity"`` 比 ``"no_identity"``
+短 3 字节），合计 +1,809 字节；
+``goals.py`` 判据与种子一个都没动；47 条冻结表的 sha256 因此一次重算（票 01 §2 授权的
+**唯一一次** re-freeze）。票 12 的 6 条 PvE 基准是**新增**，不碰这 60 条。
 """
 
 
@@ -179,7 +188,9 @@ def test_read_journal_rejects_an_unknown_event_schema_version_and_reports_both(t
         read_journal(path)
 
     assert caught.value.file_version == 99
-    assert caught.value.supported_versions == (EVENT_SCHEMA_VERSION,)
+    assert caught.value.supported_versions == (2, EVENT_SCHEMA_VERSION), (
+        "支持集合是 {2, 3}：v2 档继续可播（M7 票 07），更旧 / 更新的档一律拒"
+    )
     message = str(caught.value)
     assert "99" in message and str(EVENT_SCHEMA_VERSION) in message, "拒绝时必须报双方版本"
     assert str(path) in message
@@ -192,7 +203,7 @@ def test_read_journal_says_whether_the_file_is_too_old_or_too_new(tmp_path):
         read_journal(old)
     assert "过旧" in str(stale.value), "低于最低支持版本 ⇒ 文件过旧"
 
-    new = _write(tmp_path / "new.jsonl", _journal_with_version("3"))
+    new = _write(tmp_path / "new.jsonl", _journal_with_version(str(EVENT_SCHEMA_VERSION + 1)))
     with pytest.raises(JournalVersionError) as ahead:
         read_journal(new)
     assert "过新" in str(ahead.value), "高于最高支持版本 ⇒ 文件过新"
@@ -1033,60 +1044,60 @@ def test_the_golden_replays_fit_within_their_size_budget() -> None:
 
 
 STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
-    "01-slash-dodge-cancel": (579602, "39f0f169d443bb2e31581c06965c96dfead7fa5be5ffa9b5761d1102679148ff"),
-    "02-slash-hit-damage": (593788, "7758958b6424e0f59a07d375d0076224710bb82f2a444200d2fe9f65440780ce"),
-    "03-near-death-self-peach": (746027, "e6dc77639e9c0d349fff0cf53672784a11f2cc884a0d50cd1a89a2ddf1b2f63b"),
-    "04-near-death-other-peach": (559211, "ce1d8b87ea55997a4bfe1886b7957ec4793c489891af83ea0f92dae342ed3c00"),
-    "05-near-death-death": (237154, "d3ad42843fd77fe43f20ce0300b5d58b5a5e92fc9ba95ceefdf2648074ab516c"),
-    "06-deck-reshuffle": (615957, "37841aa948d281495fb7687aa9af8d415d490169b41ca3a641712be9bcf50224"),
-    "07-identity-4p-rebel-win": (416007, "80cfce029194cdb36ca95054548133238fa3abea3639ba4a817f0bc1193268e6"),
-    "08-identity-5p-lord-win": (1089436, "f0f52483480e7a9592161081500151d76e58703c365d1507858872ff7469983d"),
-    "09-identity-6p-renegade-win": (2936011, "d289ef95ee1f6b2c2b8e9f452a478222ce1829932b8e6181b1353d8d6fac6bf4"),
-    "10-identity-7p-lord-win": (3334043, "9e52615a41de7aa32e544a55376a46cb9ca66ac94e8cf8c42c46c4cac81928e8"),
-    "11-identity-8p-rebel-win": (1883336, "492dcb7e2e568e2e99f9eb97a2273833125e539d206b04eaaaf3834c7aeaded4"),
-    "12-indulgence-skips-play": (1217689, "b895a9998687587186777798a3c7ad8d43604eb5fc7ded61ad1fda31b89f0203"),
-    "13-indulgence-heart-misses": (2371103, "1e45de5adcc0f4e10495b8a0a9445e4d774bbc474066dbd0456e6c77515b8167"),
-    "14-lightning-thunder-damage": (530891, "d2a5311557165cca33ae4bf2ed595d51bcb71ca8b737c3bfefa18fc2d60bebbe"),
-    "15-lightning-defers-next-seat": (576031, "e679a58c4aea112d8f978cada05cfcc8207004ade4b35927eb88a46c204bc6ba"),
-    "16-nullify-cancels-a-trick": (1701176, "efd0352c0899aad5717f5c1c77e8f1dabf6132a395b54acba35ab90c2b275a86"),
-    "17-nullify-nested-two": (724162, "1a2fcd13d43340a98c8081781bc0f0ad3c7f3b4fd050c0b0c95904d8dd49258c"),
-    "18-nullify-nested-three": (2087671, "c6c978a964987af8ff6a91dcf95bde7bcc03355fee9557d0fc83544edee19584"),
-    "19-nullify-on-multi-target": (708234, "b331118a440a55a35071b878e8bb58ad23017eecbe4487e4092afd9afbcd9740"),
-    "20-nullify-lightning-defers": (780102, "d57b6e2eb7305ba5cbe8435383d28b23ada16ad50cbf1169eab09e1b0c18d7f7"),
-    "21-rebel-killed-reward": (1178637, "eba5d7c0ddfcaae552632bc43a14e45d53453bbe7062397acea481d5f5da3444"),
-    "22-lord-kills-loyalist": (1588956, "7cb0e7c80fa5dc89a3a814f0b23ee666cde906318aee1253a297add1dbafca6a"),
-    "23-two-deaths-revealed": (1483342, "8dd11aac660caf79f4621bfdd92a4c63bf94789f33b59596873367a436c58c20"),
-    "24-multi-player-peach-window": (1042313, "2d4feddbb319aa54ae5958141a810e184fd3efb3bea13f0c89169daa3b7c5629"),
-    "25-rollback-same-start": (305813, "ebd14b21e5a1b643351814587a7ddf1a944f406d40ee653688ac8b6b6db32319"),
-    "26-rollback-start-advances": (750488, "fd2f091b08a66215d5f08372c2b926c1c03c42a95bab106c51ffa915fd131db1"),
-    "27-slash-beyond-adjacent": (805123, "b43bfd3e41f45b3316064fa84cea1f163de373eb3ed6646bf9c19291e99589b3"),
-    "28-equipment-replacement": (686849, "311e06a607ca3b41e0534ae5a2d53560b769b35999674e7e7d2fd876bb552540"),
-    "29-serpent-spear-virtual-slash": (361109, "5f872af688f162346e2171a17ecd3f69451a5be1337a5adca0b1e6c5f1cc0e53"),
-    "30-halberd-three-targets": (3324619, "09ada3101c5a7b2c2e48354ae1362fe8279ed181bbe3dde594c8b9e229783bf7"),
-    "31-play-card-response": (2651417, "d4516a46920d0ea6ff2253e2e3fd6c01e19b2112a7cdfcc616b515d801b2993c"),
-    "32-five-grains-selection": (605191, "ab41daf266306c95da82a44698f714a58d26fdb8e5cac446cd5b1c5c31630462"),
-    "33-borrowed-sword-use-slash": (1149248, "e69ee120a8e4f3df3beebd29f8ee80b78f652482e29422faf21b9cd3b702aecb"),
-    "34-dismantle-or-snatch-equip-judge": (378817, "b93d65499fc674a84113879903f1b539afc496d47eccf1963c79a2ee951362a7"),
-    "35-hero-damage-points": (530701, "cd90e981d8ebbf6205bba4e06e177c1e8b12936f193b51330e7c07dfeca2e477"),
-    "36-hero-rejudge-cycle": (441569, "86fa7bf5b852da57998beecae873cec7cecca42d38b11fa421decbc53d27993c"),
-    "37-hero-lord-request": (625069, "c19bce9b108f7b9e1ee2f57811a5ab7ea7f7f68c5af7eebbd89f808f2e09fc77"),
-    "38-hero-lost-cards": (863306, "91b3f25add8c19f6cd18afa8c904ea839298ef4259b359513f674d067fddf789"),
-    "39-hero-target-pool": (2600758, "08dc0c308cc0cd24397f60f68597c27874af7362a2ab5e42d07057a9473cdc79"),
-    "40-hero-wushuang": (361264, "eea7e9a1aa54a74b99828f21bd8cbfa0f5aa24f03178f18f17b69ef4f90a4e71"),
-    "41-hero-guanxing": (818469, "e0dc21aa2b289e27bb67db955d1227e4490d090d4096b8635f180a93d7ddbb97"),
-    "42-hero-transform": (835090, "ae39e725a5c94a2a8fa08b95e914c6618a14c0223b44b3372dd22c95c9263f75"),
-    "43-double-sword-opposite-gender": (392753, "c4c4908a1553ac3a826cc778f5054bb5fb54593aa23dfbc83e984b948d0df630"),
-    "44-preactivation-cancel-no-side-effect": (193552, "c1dd71f3e039631927404af475017579c58792bde78dc5f7208bb297c75973e9"),
-    "45-borrowed-sword-auto-handover": (484984, "fa0fa716de76231743f3fffc717e9d6a9fadbaffaaebc927bf6df274eb8be6b4"),
-    "46-borrowed-sword-transform-slash": (1146397, "7a5aa42497ab98f549272393803374fd710840825c5d8e339624422883ac16a4"),
-    "47-halberd-borrowed-sword": (850680, "ddfc21af23189b45396c504c3c865c2c140548d533c35b205c2c81f1995e02df"),
+    "01-slash-dodge-cancel": (579634, "2848973af6868db13b18dd34de503670ef191a317223b519affc98d9f4728a65"),
+    "02-slash-hit-damage": (593820, "83996d4b4370264db45e37a1d476919c9e1f43f3e7673e8567f7cbf5fffd3eac"),
+    "03-near-death-self-peach": (746059, "984fcab0eaeec21901812655c625ccef40858901a1dfab9178479f2cc66d1fb9"),
+    "04-near-death-other-peach": (559243, "cd66dec0e54af02eec53cd9b6d8a06e36b3f12ec64e054941294666412c52a89"),
+    "05-near-death-death": (237186, "b3fbad7ac5bf8a920ee6874c847d3d6a560532589bbf0ae2acbe1790e325ce8e"),
+    "06-deck-reshuffle": (615989, "523fdd258b6722afb3da52881df69a290836353ee1c86e91d76d6d36f0e9ea92"),
+    "07-identity-4p-rebel-win": (416036, "a312ade5443c70d089a2fd37fe6f69b24bc0ce2b117ff662441ac215dfac82bf"),
+    "08-identity-5p-lord-win": (1089465, "5a5c43847ace23656ae35cc1e2a963feaa5bb3ca13f964538f5b891db94b3b40"),
+    "09-identity-6p-renegade-win": (2936040, "37ca768730e343ab7a01be18d71efdd92c9a6cad08c36d44aa5f52d1d6c9b902"),
+    "10-identity-7p-lord-win": (3334072, "d7b0464ce10042ad158246c044675c37ae7ee0dc2a2f6c1e7e9cd498276d0034"),
+    "11-identity-8p-rebel-win": (1883365, "31be8d385112e210b4b01fc5de01180272613a1cb679de0a4e89aebf3730fff8"),
+    "12-indulgence-skips-play": (1217718, "cc2c5bf1ab8ce40c49003dee3c3fce8733a0fc1a4c1ff4be8e7df13d4914819f"),
+    "13-indulgence-heart-misses": (2371132, "2c6eb9758cd225100a9f15e64b0084fb7b14a0ad7287c7ca33b7294ff74cce75"),
+    "14-lightning-thunder-damage": (530920, "22ff298a924bc1e0d40809c5bc527214bde196e5297a31d001cc2e11aae91bf9"),
+    "15-lightning-defers-next-seat": (576060, "cbd28db6486d43a0afb2b32fdbd9917884c5da048ee09ea7630cb50d6d036819"),
+    "16-nullify-cancels-a-trick": (1701205, "3bb475e22592b72245d61c9f152c8f375830342f32f21774c16dee26fd8e136f"),
+    "17-nullify-nested-two": (724191, "5194852702410f2a9ed53e395a823938a1ab8dcbc826412bb06ab20ee7ef0dfd"),
+    "18-nullify-nested-three": (2087700, "3089796ba78e632d08b039e71d92a761cef002744bf2dad1713a09eca3d3d5a1"),
+    "19-nullify-on-multi-target": (708263, "19d232fb8dfd070bae7e9dfe3a253d37bb056bc56d2c39d31e1cf5d9ed73268f"),
+    "20-nullify-lightning-defers": (780131, "72e37560a6b2b43767a79d8712e5a65f22272b75453ff02d1a2d59444e4eadbb"),
+    "21-rebel-killed-reward": (1178666, "876af7d41c20fa6675d133870f94d6568677d31fccba39903de39e334f3e6857"),
+    "22-lord-kills-loyalist": (1588985, "d62c0d2c046fb7922b528175d98eed6d8bf3e5d2be265c2978371b7df5755941"),
+    "23-two-deaths-revealed": (1483371, "78cf2eabb151046a894ab0d89e65eb321cd757e63ad3015e5c8a1438b347b322"),
+    "24-multi-player-peach-window": (1042342, "47beb8091d59018723ecd691396b28deaf9b7cfbb9820ad845c4e44821ce1f9b"),
+    "25-rollback-same-start": (305842, "2e0c1e60d712f3c72d5dd8c914daec5fd3eef0c31c01d4da886bb7f462caa7f3"),
+    "26-rollback-start-advances": (750517, "cd515adbce70c871d8911ef3130e09c301d0bb1d203716b762be7274d7cf87e8"),
+    "27-slash-beyond-adjacent": (805152, "c3cfbb8112a7598d2d867137169d276bc776a9db2546bcaf85243186b3dafee8"),
+    "28-equipment-replacement": (686878, "c79de152391dee9fb5bbf3d0f455031bf5c2876532976a9bbc87f338822ab07a"),
+    "29-serpent-spear-virtual-slash": (361138, "cb4739898de31ea4cf746bac540aae51ba1995e01813524075fef5680a87ebf3"),
+    "30-halberd-three-targets": (3324648, "bf6f3d49e8e9a8506bf9569b287e796f44cfdac609b9b58e54fb4fbfdf9a26eb"),
+    "31-play-card-response": (2651446, "1394b101dbd7c34a11c3c75e46349f444226e094c54f956a4fd9ededd27bf2e6"),
+    "32-five-grains-selection": (605220, "80f80a6df4dc0f2af65e551b7860ee363898de4e6ee2b016d1f97138c9842cc4"),
+    "33-borrowed-sword-use-slash": (1149280, "bca83e10f016dae05a39a8419b8fd6affe9c0fadb30d6c3ea80db7a9595d3a7e"),
+    "34-dismantle-or-snatch-equip-judge": (378846, "aa8ab0d84932cc0d3941871dacd75040c6726107b2d81efeb11e085b292758c6"),
+    "35-hero-damage-points": (530730, "9d96524cc6add19174e882f53ade875b4f373fd630fafa813c9ece1a155a1a87"),
+    "36-hero-rejudge-cycle": (441598, "351718db4f26cfaf5fe9160c2dab226540a8c697a8a15ba5989ea72c54a30577"),
+    "37-hero-lord-request": (625098, "a01f4429384c7dd0d52534731dd1ca02d2a416eddf434a73455c40961b2ea375"),
+    "38-hero-lost-cards": (863335, "5fe3702386359011ad6288a42e140fbb2aa44d87558e16410cd3773ee90f531d"),
+    "39-hero-target-pool": (2600787, "7216ab1166367b3a224a0570aafe80bb04156215816342b444c15f802d62967e"),
+    "40-hero-wushuang": (361293, "7c1baa61ee7ab7f9eb3d342e345899aada8f64efe151dda04e48b50eebc4dac7"),
+    "41-hero-guanxing": (818498, "2d3cff40b74921a4119a7d0f27ba5b5568810fb38948e38fb67ced77ee9db005"),
+    "42-hero-transform": (835119, "28326d79860d6549fd2b08006d3683076b1c312e71f6c0d886e927b53c646119"),
+    "43-double-sword-opposite-gender": (392782, "1b068969ef13b1971ac58e385e3afcdacec53f108c8eb933f4c39bf0807725fa"),
+    "44-preactivation-cancel-no-side-effect": (193584, "b8131afbc0b9c380a8374f962541b87f1437085db0826fd8a39e68183c1c9388"),
+    "45-borrowed-sword-auto-handover": (485016, "525e78f545b9f8a91b6c2946dbb45c4f684196c30a91a0a68ce09dc0fd655729"),
+    "46-borrowed-sword-transform-slash": (1146429, "dfbc958572b69007fbb6efc0e361679d1b8bab9ec5705dc477e76e447f517503"),
+    "47-halberd-borrowed-sword": (850709, "d6e4c10eea277d37abaedce0fed124858239357d00190591b8074f3b5270a8bc"),
 }
 """标准 108 的 **47 条金录像**逐文件 ``(字节数, sha256)``（spec D14 / M5-09a）。
 
 **故意写死**：M5 只许**新增**军争基准，标准 108 的 47 条必须逐字节不变。这张表把
 "不变"钉成门禁判据——任何重录、格式化或手改都会让对应条目变红；改它 = 一次显式决定
-（本 effort 的 D14 明确禁止，**唯一例外是下面那次经用户批准的重基线**，其判据与覆盖都
-在下面写明）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
+（本 effort 的 D14 明确禁止，**例外是下面逐次登记、经用户批准的几次重基线**，其判据与
+覆盖都在下面写明）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
 这张表钉的是 47 条的**文件字节**，两者互补。
 
 **唯一一次显式重基线（2026-11-03，票 06，用户批准）**：``38-hero-lost-cards`` 的字节由
@@ -1129,6 +1140,19 @@ delta / frame 一条不变**（逐条核对过：35 +8、36 +11、38 +16、39 +3
 不成立——旧录像录下的正是缺陷行为。`goals.py` 判据**一字未改、一条未放宽**（回放后
 【乐不思蜀】未命中判据仍命中）。重录清单见 `tests/replays/README.md` 的
 「重录登记：青釭剑封住【八卦阵】提供者」一节。
+
+**票 01 §2 授权的唯一一次 re-freeze（2026-11-19，M7 票 07）**：``rule_config`` 的 dump 从此含
+``mode`` 与 ``pve`` 两个键，于是**全部 60 条**基准的**首行**都变了——47 条冻结表里的逐条
+``(字节数, sha256)`` 因此一次重算：23 条无身份局各涨 32 字节
+（``"mode":"no_identity",`` 21 + ``"pve":null,`` 11）、37 条身份局各涨 29 字节
+（``"mode":"identity",`` 18 + 同 11），合计 +1,809 字节。这不是"某条行为变了"：逐文件核过
+**除首行外的每一行都与改前逐字节相同**（``git show HEAD:<file> | tail -n +2`` 的 sha256
+与现文件同一段相等），``goals.py`` 的判据一条未改、一条未放宽，种子一个也没重选。
+M5 的 8 条与 M6 的 5 条同一批重录（它们不在 47 条冻结表里，由逐文件比对覆盖）；
+60 条合计 50,791,313 字节 ≈ 48.44 MiB（比改前多 1,809 字节），仍在 52 MiB 总预算与
+4 MiB 单文件上限之内，故**不动预算**。这就是票 01 §2 说的"唯一一次 re-freeze"：
+``mode`` 只进 header 一次，票 09 / 10 往 ``pve`` 里填语义时标准局仍是 ``pve: null``。
+重录清单见 `tests/replays/README.md` 的「重录登记：header v3（mode / pve）」一节。
 """
 
 

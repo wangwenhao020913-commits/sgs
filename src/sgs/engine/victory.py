@@ -1,4 +1,4 @@
-"""身份局的胜负求解（票 25 / 决策回票 14 §2）。
+"""胜负求解：身份局（票 25 / 决策回票 14 §2）与 PvE（票 01 §4 / M7 票 07）。
 
 求解只读三样东西：**全座位的身份**、**本批死亡事实**、**批次末存活座位集合**。
 它不碰结算栈、不改状态，因此可以直接单测（构造事实表即判决三条分支）；
@@ -14,6 +14,11 @@
 其余一律反贼胜（反贼全灭也胜、只剩忠臣也胜）。本批无主公死亡时才判
 "所有反贼与内奸已死 ⇒ 主忠方胜"。官方对"同时死亡"零命中（U-10），
 批次规程是**程序化约定**。
+
+PvE 另起一条纯函数（:func:`solve_pve_outcome`）：它读的是**配置 + 存活集合 + 当前轮次**，
+没有死亡事实——"主角 / 受保护队友阵亡"与"轮次推进"是两个互不相干的时点，各自调一次即可，
+不需要按批汇总。四类逐场条件与两侧判据见票 01 §4 的表。
+**接进引擎的那两个调用点归票 08**（本票只落纯函数 + 登记）：死前检测点、轮次 +1 之后。
 """
 
 from __future__ import annotations
@@ -22,11 +27,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from sgs.data import Identity
+from sgs.data import Identity, PveConfig, PveVictoryKind
 
-__all__ = ["DeathFact", "Side", "Victory", "solve_identity_outcome"]
+__all__ = [
+    "DeathFact",
+    "Side",
+    "Victory",
+    "solve_identity_outcome",
+    "solve_pve_outcome",
+]
 
-Side = Literal["lord", "rebel", "renegade"]
+Side = Literal["lord", "rebel", "renegade", "ally", "enemy"]
+"""获胜一侧。身份局取前三值（决策回票 14 §1），PvE 取后两值（票 01 §4）。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +59,10 @@ class DeathFact:
 
 @dataclass(frozen=True, slots=True)
 class Victory:
-    """身份局的一次终局：获胜方 + 该侧全部座位（含阵亡者，按座位升序）+ 胜因。"""
+    """一次终局：获胜方 + 该侧全部座位（含阵亡者，按座位升序）+ 胜因。
+
+    身份局只产 ``lord`` / ``rebel`` / ``renegade`` 三侧，PvE 只产 ``ally`` / ``enemy``。
+    """
 
     side: Side
     winners: tuple[int, ...]
@@ -97,4 +112,62 @@ def solve_identity_outcome(
 
     if alive_set.isdisjoint(rebels) and alive_set.isdisjoint(renegades):
         return Victory(side="lord", winners=lord_side, reason="rebels_and_renegade_dead")
+    return None
+
+
+def solve_pve_outcome(
+    *, config: PveConfig, alive: frozenset[int], round_no: int
+) -> Victory | None:
+    """PvE 的逐场胜负：只读**配置 + 存活集合 + 当前轮次**（票 01 §4）。
+
+    判据表（``victory.kind`` = 逐场条件，侧别 = 本场的胜 / 败）：
+
+    | 条件 | 胜 | 败 |
+    |---|---|---|
+    | ``ROUT`` | 所有 ``ENEMY`` 阵亡 | 主角 / 受保护队友阵亡 |
+    | ``SURVIVE_ROUNDS(N)`` | 轮次推进到 N+1 | 同上 |
+    | ``ROUT_WITHIN_ROUNDS(N)`` | N 轮内 ``ENEMY`` 全灭 | 轮次推进到 N+1 仍有 ``ENEMY``；同上 |
+    | ``SLAY_BOSS`` | ``boss`` 座位阵亡 | 同上 |
+
+    三条**确定性细则**（官方对这几格零命中，这里是程序化约定）：
+
+    1. **败优先于胜**：主角 / 受保护队友阵亡与任何胜利条件同批发生时判败——"玩家阵亡 =
+       本场失败"是用户原话（票 01 §1），不拿"敌人也死了"去把它翻成胜；
+    2. **"N 轮内"是硬边界**：两类轮次条件都**先判轮次、后判全歼**，于是跨过 N 之后即使
+       敌人全灭也不记这一场的胜。票 01 §4 的表没写这一格（胜列要求"N 轮内"、败列要求
+       "仍有 ENEMY"），这里落到**败**而不是"不判"：返回 ``None`` 会让"全灭之后"的局
+       永远跑下去，而判败与胜列的措辞不冲突；
+    3. ``round_no`` 是 ``GameState.round`` 这个唯一计数源（M6 票 11），**不另建计数器**：
+       "推进到 N+1" = ``round_no > N``。
+    """
+    allied = config.seats_of(Identity.ALLY)
+    hostile = config.seats_of(Identity.ENEMY)
+
+    if config.principal not in alive:
+        return Victory(side="enemy", winners=hostile, reason="principal_dead")
+    if config.protected_ally is not None and config.protected_ally not in alive:
+        return Victory(side="enemy", winners=hostile, reason="protected_ally_dead")
+
+    kind = config.victory.kind
+    rounds = config.victory.rounds
+    routed = not alive.intersection(hostile)
+
+    if kind is PveVictoryKind.ROUT:
+        if routed:
+            return Victory(side="ally", winners=allied, reason="enemies_routed")
+        return None
+
+    if kind is PveVictoryKind.SLAY_BOSS:
+        if config.boss not in alive:
+            return Victory(side="ally", winners=allied, reason="boss_slain")
+        return None
+
+    # 剩下两类都带轮次上限（构造期保证 ``rounds`` 非 None）：**先判轮次、再判全歼**，
+    # 于是"N 轮内"是硬边界——跨过 N 之后敌人再全灭也不记这一场的胜。
+    if rounds is not None and round_no > rounds:
+        if kind is PveVictoryKind.SURVIVE_ROUNDS:
+            return Victory(side="ally", winners=allied, reason="rounds_survived")
+        return Victory(side="enemy", winners=hostile, reason="time_limit_exceeded")
+    if kind is PveVictoryKind.ROUT_WITHIN_ROUNDS and routed:
+        return Victory(side="ally", winners=allied, reason="enemies_routed_in_time")
     return None

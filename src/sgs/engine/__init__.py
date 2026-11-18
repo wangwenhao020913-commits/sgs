@@ -51,7 +51,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import SUBSTREAM_DOMAIN, RandomSource, ai_stream, new_seed
-from .victory import DeathFact, Side, Victory, solve_identity_outcome
+from .victory import DeathFact, Side, Victory, solve_identity_outcome, solve_pve_outcome
 
 __all__ = (
     "DRAW_COUNT",
@@ -105,5 +105,6 @@ __all__ = (
     "read_journal",
     "record_json",
     "solve_identity_outcome",
+    "solve_pve_outcome",
     "wrap_delta",
 )

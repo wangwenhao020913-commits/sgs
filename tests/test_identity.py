@@ -336,6 +336,29 @@ def test_the_lord_skill_gate_reads_identity_and_skill_type(identity):
     assert lord_skill_allowed(identity, "hero.caocao.hujia") is (identity is Identity.LORD)
 
 
+def test_the_pve_sides_exist_with_their_own_labels():
+    """票 07：``Identity`` 多两个**只属于 PvE** 的值，中文标签是"友" / "敌"。
+
+    它们不参与身份局的配比（``roster_for`` 的表里没有它们）：PvE 的阵营由
+    ``PveConfig.identities`` 逐座给出、开局即公开，不走身份发放那条子流。
+    """
+    from sgs.data import IDENTITY_LABELS
+
+    assert (Identity.ALLY.value, Identity.ENEMY.value) == ("ally", "enemy")
+    assert IDENTITY_LABELS[Identity.ALLY] == "友"
+    assert IDENTITY_LABELS[Identity.ENEMY] == "敌"
+    for count in (4, 5, 6, 7, 8):
+        assert Identity.ALLY not in roster_for(count)
+        assert Identity.ENEMY not in roster_for(count)
+
+
+@pytest.mark.parametrize("identity", [Identity.ALLY, Identity.ENEMY])
+def test_the_pve_sides_never_pass_the_lord_skill_gate(identity):
+    """票 07：PvE 的两个新阵营对主公技门禁恒 False（主公技只在身份局的"主公"上成立）。"""
+    assert lord_skill_allowed(identity, "hero.caocao.hujia") is False
+    assert lord_skill_allowed(identity, "equip.crossbow") is False
+
+
 
 
 # ---------------------------------------------------------------------------
