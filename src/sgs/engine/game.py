@@ -28,6 +28,7 @@ from sgs.data import (
     Kingdom,
     Mode,
     PlacementReturn,
+    PveConfig,
     RuleConfig,
     SkillType,
     card_category,
@@ -225,7 +226,7 @@ from .journal import (
 )
 from .rng import RandomSource, deck_search_stream, hero_cards_stream
 from .steps import CHAIN_TRIGGER_KEY, MAXLIFE_INCREASE, RANK_COMPARE_BOOST, build_steps
-from .victory import DeathFact, Side, solve_identity_outcome
+from .victory import DeathFact, Side, Victory, solve_identity_outcome, solve_pve_outcome
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
 
@@ -6586,14 +6587,25 @@ class Engine:
     def check_game_end(self, *, draw_reason: str | None = None) -> Outcome | None:
         """唯一终局入口：死亡锚点与牌堆耗尽平局共用（票 13 §3 / 票 08 §6）。
 
-        按 :attr:`RuleConfig.mode` 分支（票 25 / 决策回票 14 §1）：无身份局保持 M1 的
-        "存活数 ≤ 1"；身份局按**本批死亡事实**求解（检测点只置**暂定**结果）。
+        按 :attr:`RuleConfig.mode` 分支（票 25 / 决策回票 14 §1 / M7 票 08）：无身份局保持
+        M1 的"存活数 ≤ 1"；身份局按**本批死亡事实**求解（检测点只置**暂定**结果）；PvE 按
+        「配置 + 存活集合 + 当前轮次」求逐场胜负（:func:`solve_pve_outcome`，票 01 §4）。
         短摸平局覆盖任何已定胜负（票 14 §3）。
+
+        PvE 的**逐场胜负**有两个调用点（票 01 §4）：**死亡检测点**（与无身份局复用
+        ``death_reveal_identity_after``：主角 / 受保护队友 / Boss 阵亡在这里判）与
+        **轮次 +1 之后**（:meth:`_finish_round_and_advance`；两类轮次条件在这里判）。
+        另外，牌堆耗尽 / 轮次上限这两条**平局**入口对 PvE 同样生效（``draw_reason`` 优先于
+        任何模式分支）——PvE 不另造平局，也不改写那两条既有理由。
         """
         if draw_reason is not None:
             outcome = Outcome(result="draw", winner=None, reason=draw_reason)
         elif self.state.rule_config.mode is Mode.IDENTITY:
             outcome = self._solve_identity()
+            if outcome is None:
+                return None
+        elif self.state.rule_config.mode is Mode.PVE:
+            outcome = self._solve_pve()
             if outcome is None:
                 return None
         else:
@@ -6634,6 +6646,20 @@ class Engine:
             )
         )
 
+    def _outcome_from_victory(self, victory: Victory) -> Outcome:
+        """纯求解器的 :class:`Victory` → 终局记录用的 :class:`Outcome`（身份局 / PvE 同形）。
+
+        ``winner=None`` + ``side`` / ``winners`` 是这两个模式共用的形状（票 25 / 票 01 §4）：
+        胜负按**阵营**宣布，不指定单个座位。
+        """
+        return Outcome(
+            result="winner",
+            winner=None,
+            side=victory.side,
+            winners=victory.winners,
+            reason=victory.reason,
+        )
+
     def _solve_identity(self) -> Outcome | None:
         """按当前批次事实 + 当前存活集合求一次身份局胜负。"""
         victory = solve_identity_outcome(
@@ -6643,13 +6669,35 @@ class Engine:
         )
         if victory is None:
             return None
-        return Outcome(
-            result="winner",
-            winner=None,
-            side=victory.side,
-            winners=victory.winners,
-            reason=victory.reason,
+        return self._outcome_from_victory(victory)
+
+    def _solve_pve(self) -> Outcome | None:
+        """按当前存活集合 + 当前轮次求一次 PvE 逐场胜负（票 01 §4 / M7 票 08）。
+
+        与 :meth:`_solve_identity` 的差别是**没有批次事实**：PvE 的胜负只读配置、存活集合
+        与 ``GameState.round``（唯一计数源），故检测点求出的就是宣布的结果——不需要在批次
+        关闭点重解（那一层归身份局，PvE 不进 ``_close_death_batch`` 的重解分支）。
+        """
+        victory = solve_pve_outcome(
+            config=_pve_config(self.state.rule_config),
+            alive=frozenset(player.seat for player in self.state.players if player.alive),
+            round_no=self.state.round,
         )
+        if victory is None:
+            return None
+        return self._outcome_from_victory(victory)
+
+    def _finish_if_decided(self, *, draw_reason: str | None = None) -> bool:
+        """判一次终局，判出结果就立刻收兵；返回是否收兵（轮次推进途中两条收兵路径共用）。
+
+        调用点都是"轮次刚刚推进"的地方：``ROUND_LIMIT`` 的平局与 PvE 的轮次判定
+        （票 01 §4 / M7 票 08）。返回值让调用方**停止**这一圈的收尾动作（额外回合、
+        ``turn_change``），终局记录因此永远是流里最后一条。
+        """
+        if self.check_game_end(draw_reason=draw_reason) is None:
+            return False
+        self.finish()
+        return True
 
     def _close_death_batch(self) -> None:
         """终止点：同批最后一次 ``DEATH_AFTER`` 之后宣布胜负（票 14 §3）。
@@ -6896,12 +6944,14 @@ class Engine:
         return None
 
     def _first_seat(self) -> int:
-        """先手座位：身份局扫主公座位（从 state 派生）、无身份局读配置（票 13 §4）。
+        """先手座位：身份局扫主公座位（从 state 派生）、无身份局与 PvE 读配置。
 
         身份局里 ``rule_config.first_seat`` 不被信任（构造期已被钉为默认 0），
-        唯一真源是"谁是主公"这一状态事实。
+        唯一真源是"谁是主公"这一状态事实。PvE 没有主公可扫（票 01 §3）⇒ 与无身份局
+        同一个读法：``rule_config.first_seat``（票 13 §4 / M7 票 08）。
         """
-        if self.state.rule_config.mode is Mode.NO_IDENTITY:
+        mode = self.state.rule_config.mode
+        if mode is Mode.NO_IDENTITY or mode is Mode.PVE:
             return self.state.rule_config.first_seat
         for player in self.state.players:
             if player.identity is Identity.LORD:
@@ -6971,6 +7021,11 @@ class Engine:
                 state.next_seat = nxt
                 state.turn_seat = nxt
                 self._finish_round_and_advance(finished, nxt)
+                if self.finished:
+                    # 轮次推进的途中可能已经收兵：PvE 的轮次判定（票 01 §4 / M7 票 08），
+                    # 以及既有 `ROUND_LIMIT` 平局支。终局记录必须是流里最后一条 ⇒ 两种情况
+                    # 都不再插额外回合、也不落 ``turn_change``（待执行的额外回合随终局作废）。
+                    return
         extra = self._pop_extra_turn()
         if extra is not None:
             state.turn_seat = extra
@@ -7006,11 +7061,17 @@ class Engine:
             # 第 ROUND_LIMIT 回合**结束**（自然指针走完这一圈）⇒ 平局收兵（用户 2026-11-04）。
             # 待执行的额外回合随终局一并作废；已定的胜负（死亡路径）不被改写——那个分支
             # 早已 finish，走不到这里。
-            if self.check_game_end(draw_reason="round_limit") is not None:
-                self.finish()
+            self._finish_if_decided(draw_reason="round_limit")
             return
         state.round += 1
         state.round_start_seat = nxt
+        if state.rule_config.mode is Mode.PVE:
+            # **PvE 的轮次判定点 = 轮次 +1 之后**（票 01 §4）：`SURVIVE_ROUNDS(N)` 在这里
+            # 进到 N+1 即胜、`ROUT_WITHIN_ROUNDS(N)` 在这里跨过 N 仍有敌人即败。先判轮次、
+            # 后判全歼的那条硬边界在 `solve_pve_outcome` 里（同一票）；本处只负责**时机**：
+            # 判出结果就收兵，后续那几步（每轮开始欠账 / 每轮次数清空 / turn_change）不再跑。
+            if self._finish_if_decided():
+                return
         # 「每轮开始时」欠一次派发（feng-yujin 票 02）：记在**轮次 +1 的那一刻**，由下一次
         # ``_step_turn`` 兑现（本轮第一回合的回合开始前之前）；额外回合不经过这里 ⇒ 不触发。
         self._round_start_pending = True
@@ -7768,17 +7829,45 @@ def _enabled_true_name_versions() -> dict[str, tuple[str, ...]]:
     return {name: tuple(ids) for name, ids in versions.items()}
 
 
-def _deal_identities(*, seed: int, rule_config: RuleConfig) -> tuple[Identity, ...] | None:
-    """身份局逐座发身份；无身份局返回 ``None``（票 13 §3）。
+def _pve_config(rule_config: RuleConfig) -> PveConfig:
+    """本局的 PvE 配置（``mode is PVE`` ⇒ 非空由构造期校验保证，票 01 §1）。
 
-    座位 = 下标固定（只有身份随机）；取配比多重集、用 ``identity`` 子流洗一次，
-    **下标 i 的牌发给座位 i**。子流名与创建顺序无关，故回放与"谁先被创建"无关。
+    读数收在这一个函数里：开局发身份（:func:`_deal_identities`）与终局求解
+    （``Engine._solve_pve``）各读一次，两条路径不会各写一份 fail-closed 口径。
     """
+    config = rule_config.pve
+    if config is None:  # pragma: no cover - 构造期校验已闭合（PVE ⇒ pve 非空）
+        raise RuntimeError("PvE 局必须有 PveConfig（票 01 §1）")
+    return config
+
+
+def _deal_identities(*, seed: int, rule_config: RuleConfig) -> tuple[Identity, ...] | None:
+    """身份局逐座发身份；PvE 直接给出配置里那一串；无身份局返回 ``None``（票 13 §3）。
+
+    身份局：座位 = 下标固定（只有身份随机）；取配比多重集、用 ``identity`` 子流洗一次，
+    **下标 i 的牌发给座位 i**。子流名与创建顺序无关，故回放与"谁先被创建"无关。
+
+    PvE（票 01 §3 / M7 票 08）：阵营是**剧本给出的公开事实**（``PveConfig.identities``），
+    不洗、不查 ``IDENTITY_ROSTERS``、一个 ``identity`` 子流的随机数都不消耗。开局那几条
+    ``identity_deal`` 记录**照发**（与身份局同一条流），值就是配置里那一串。
+    """
+    if rule_config.mode is Mode.PVE:
+        return _pve_config(rule_config).identities
     if rule_config.mode is not Mode.IDENTITY:
         return None
     roster = list(roster_for(rule_config.player_count))
     RandomSource(seed).substream("identity").shuffle(roster)
     return tuple(roster)
+
+
+_IDENTITY_IS_PUBLIC_AT_START: frozenset[Identity] = frozenset(
+    {Identity.LORD, Identity.ALLY, Identity.ENEMY}
+)
+"""开局即对全桌亮明的身份：主公（身份局）与 PvE 的两个阵营（友 / 敌，票 01 §3）。
+
+投影层只认 ``Player.identity_visible`` 这一个字段（``_visible_identity``），故 PvE 的
+"阵营公开"在这里置真即可——投影层零改动。
+"""
 
 
 def _initial_player(
@@ -7794,6 +7883,9 @@ def _initial_player(
     ``test_the_gender_field_is_still_a_separate_concern`` 原先断言它恒空）：【结姻】/【离间】
     因此能在**真实对局**里进候选——那是它们唯一的性别读点，也是票 04 遗留议题的收口；
     该断言同票改判为 ``test_the_gender_field_is_filled_from_the_hero_data``。
+
+    **主公 +1 只在身份局成立**（票 01 §3）：PvE 的友 / 敌不是主公，``Identity.LORD`` 的
+    那一路读不到，故 PvE 不加体力；亮明口径见 ``_IDENTITY_IS_PUBLIC_AT_START``。
     """
     hp_max = INITIAL_HP if hero is None else hero.hp_max
     # 初始体力值（lei-shenganning 票 01）：武将数据可以声明"开局体力低于上限"（神甘宁 3/6）。
@@ -7809,7 +7901,7 @@ def _initial_player(
         hp=min(hp, hp_max),
         hp_max=hp_max,
         identity=identity,
-        identity_visible=identity is Identity.LORD,
+        identity_visible=identity in _IDENTITY_IS_PUBLIC_AT_START,
         gender=None if hero is None else hero.gender,
         hero=None if hero is None else hero.id,
         kingdom=None if hero is None else hero.kingdom,

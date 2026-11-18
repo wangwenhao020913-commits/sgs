@@ -25,6 +25,10 @@ from sgs.data import (
     ContentPack,
     Identity,
     Kingdom,
+    Mode,
+    PveConfig,
+    PveVictory,
+    PveVictoryKind,
     RuleConfig,
     load_content_pack,
     roster_for,
@@ -402,6 +406,115 @@ def test_the_projection_still_hides_a_seat_whose_field_is_false():
 
     assert project(state, 0).players[3].identity is None
     assert project(state, 1).players[3].identity is None
+
+
+# ---------------------------------------------------------------------------
+# PvE 开局（M7 票 08）：阵营由 PveConfig 直给、**全部亮明**、不加主公体力、先手读配置
+#
+# 依据票 01 §3 / §4：PvE 的阵营不是靠**洗配比**决定的——它是剧本给出的公开事实，故不洗、
+# 不查 `IDENTITY_ROSTERS`、也不消耗 `identity` 子流；开局那几条 `identity_deal` 记录**照发**
+# （与身份局同一条流），值就是配置那一串。`_visible_identity` 已认 `identity_visible` 这个
+# 字段，所以投影层零改动（这几条合起来就是"投影层零改动"的证据）。
+# 上面身份局 / 无身份局的可见性断言一字未改：PvE 是**新增**第三档，不是替换旧口径。
+# ---------------------------------------------------------------------------
+
+
+def _pve_rule(
+    identities: tuple[Identity, ...],
+    *,
+    principal: int = 0,
+    first_seat: int = 0,
+    protected_ally: int | None = None,
+) -> RuleConfig:
+    """一局 PvE 的规则配置（ROUT：全歼敌人；本文件只读开局面，不跑终局）。"""
+    return RuleConfig(
+        player_count=len(identities),
+        mode=Mode.PVE,
+        first_seat=first_seat,
+        pve=PveConfig(
+            identities=identities,
+            principal=principal,
+            protected_ally=protected_ally,
+            victory=PveVictory(kind=PveVictoryKind.ROUT),
+        ),
+    )
+
+
+def test_a_new_pve_game_deals_the_configured_sides_and_reveals_all_of_them():
+    """座位身份**逐座**等于 ``PveConfig.identities``，且全部 ``identity_visible=True``。
+
+    "等于配置"同时钉住两件事：不洗（身份局那条 ``identity`` 子流在这里一次都不消耗）、
+    不走配比表（``IDENTITY_ROSTERS`` 里根本没有友 / 敌）。
+    """
+    rule = _pve_rule((Identity.ALLY, Identity.ENEMY, Identity.ALLY))
+    engine = Engine.new_game(seed=20261119, rule_config=rule, pack=PACK)
+
+    assert [player.identity for player in engine.state.players] == [
+        Identity.ALLY,
+        Identity.ENEMY,
+        Identity.ALLY,
+    ]
+    assert all(player.identity_visible is True for player in engine.state.players), (
+        "PvE 开局阵营公开：三个座位都必须亮明（票 01 §3）"
+    )
+    dealt = [
+        (record.seat, record.identity)
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "identity_deal"
+    ]
+    assert dealt == [
+        (0, Identity.ALLY),
+        (1, Identity.ENEMY),
+        (2, Identity.ALLY),
+    ], "开局那几条 identity_deal 记录照发（与身份局同一条流），但值与配置逐座相同"
+
+
+def test_the_pve_sides_do_not_depend_on_the_seed():
+    """两个不同 seed 开出同一串身份：配置直给、不洗牌（身份局同 seed 才会洗出不同配比）。"""
+    identities = (Identity.ENEMY, Identity.ALLY, Identity.ENEMY, Identity.ALLY)
+    rule = _pve_rule(identities, principal=1)
+
+    first = Engine.new_game(seed=1, rule_config=rule, pack=PACK)
+    second = Engine.new_game(seed=99, rule_config=rule, pack=PACK)
+
+    assert tuple(player.identity for player in first.state.players) == identities
+    assert tuple(player.identity for player in second.state.players) == identities
+
+
+def test_every_pve_viewer_sees_every_seat_side():
+    """投影层零改动：三个参与者视角都看得见全桌的友 / 敌（PvE 没有"猜身份"这一步）。"""
+    rule = _pve_rule((Identity.ALLY, Identity.ENEMY, Identity.ENEMY), principal=0)
+    engine = Engine.new_game(seed=5, rule_config=rule, pack=PACK)
+    expected = [Identity.ALLY, Identity.ENEMY, Identity.ENEMY]
+
+    for viewer in range(3):
+        view = project(engine.state, viewer)
+        assert [player.identity for player in view.players] == expected, f"视角 {viewer}"
+
+
+def test_a_new_pve_game_does_not_add_the_lord_bonus():
+    """主公 +1 体力只在 ``identity is Identity.LORD`` 时发生 ⇒ PvE 三个座位都是初始体力。"""
+    rule = _pve_rule((Identity.ALLY, Identity.ENEMY, Identity.ENEMY))
+    engine = Engine.new_game(seed=7, rule_config=rule, pack=PACK)
+
+    assert [(player.hp, player.hp_max) for player in engine.state.players] == [
+        (INITIAL_HP, INITIAL_HP)
+    ] * 3, "PvE 的友 / 敌不是主公，不吃那条 +1"
+
+
+def test_the_pve_first_seat_comes_from_the_rule_config():
+    """PvE 没有主公可扫（``_first_seat`` 的 else 支会 raise）⇒ 先手读 ``first_seat``。"""
+    rule = _pve_rule((Identity.ALLY, Identity.ENEMY, Identity.ALLY), first_seat=2)
+    engine = Engine.new_game(seed=11, rule_config=rule, pack=PACK)
+
+    run_turns(engine, [RecordingPlayer() for _ in range(3)], turns=1)
+
+    starts = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing.value == "TURN_START"
+    ]
+    assert starts[0] == 2, "第一个 TURN_START 的座位就是配置里的 first_seat"
 
 
 # ---------------------------------------------------------------------------

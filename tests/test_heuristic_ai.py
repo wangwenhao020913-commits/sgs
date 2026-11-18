@@ -19,7 +19,9 @@ import math
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -40,6 +42,10 @@ from sgs.data import (
     IDENTITY_ROSTERS,
     Identity,
     Kingdom,
+    Mode,
+    PveConfig,
+    PveVictory,
+    PveVictoryKind,
     RuleConfig,
     color_of_suit,
     enabled_hero_ids,
@@ -1306,6 +1312,316 @@ def test_the_identity_posterior_falls_back_to_neutral_when_it_cannot_be_computed
     )
     assert heuristic_scoring._identity_relation(two_lords, 2) == (1.0, 0.0), (
         "已亮明的主公对反贼仍是敌人（精确档不经过配比）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 敌对值表化（M7 票 08）：``_HOSTILITY`` 是**等价重构**的判据所在
+#
+# 票 08 把 ``_enemy_identities`` / ``_ally_identities`` 的 if-chain 收成一张显式的
+# ``{我: {对方: 友 / 中立 / 敌}}`` 表，并给 PvE 补了 ALLY / ENEMY 两行两列。表化是
+# **零行为变更**的重构，故这两张字面表钉的是"旧实现的输出"，逐项手写（不 import 实现）：
+# 任何一格读错都在这里红。
+# ---------------------------------------------------------------------------
+
+# 我 → (敌人身份, 盟友身份)，逐项等于票 21 if-chain 的输出。
+_IDENTITY_MODE_SETS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = MappingProxyType(
+    {
+        "lord": (("rebel", "renegade"), ("lord", "loyalist")),
+        "loyalist": (("rebel", "renegade"), ("lord", "loyalist")),
+        "rebel": (("lord", "loyalist"), ("rebel",)),
+        # 内奸没有盟友，且**主公不是敌人**（主公早死反贼就赢）——票 21 那条语义钉子。
+        "renegade": (("loyalist", "rebel"), ()),
+    }
+)
+
+# 16 个身份对（我, 对方）→ ``_identity_relation`` 的输出，逐对等于 HEAD 的 if-chain 版。
+_IDENTITY_RELATION_PAIRS: Mapping[tuple[str, str], tuple[float, float]] = MappingProxyType(
+    {
+        ("lord", "lord"): (0.0, 1.0),
+        ("lord", "loyalist"): (0.0, 1.0),
+        ("lord", "rebel"): (1.0, 0.0),
+        ("lord", "renegade"): (1.0, 0.0),
+        ("loyalist", "lord"): (0.0, 1.0),
+        ("loyalist", "loyalist"): (0.0, 1.0),
+        ("loyalist", "rebel"): (1.0, 0.0),
+        ("loyalist", "renegade"): (1.0, 0.0),
+        ("rebel", "lord"): (1.0, 0.0),
+        ("rebel", "loyalist"): (1.0, 0.0),
+        ("rebel", "rebel"): (0.0, 1.0),
+        ("rebel", "renegade"): (0.0, 0.0),
+        ("renegade", "lord"): (0.0, 0.0),
+        ("renegade", "loyalist"): (1.0, 0.0),
+        ("renegade", "rebel"): (1.0, 0.0),
+        ("renegade", "renegade"): (0.0, 0.0),
+    }
+)
+
+
+def _all_sides_revealed_view(identities, *, viewer: int = 0):
+    """全员亮明的视角（``identity_visible`` 全开）：关系判定因此走精确档，不进后验。"""
+    return _identity_view(identities, viewer=viewer, visible=tuple(range(len(identities))))
+
+
+def test_the_hostility_table_mirrors_the_identity_values_both_ways():
+    """表的行 / 列 / 值域逐项等于数据层的真源（同 :data:`_IDENTITY_ROSTER` 的双向反查）。
+
+    三个方向都核：**行**（六个身份一个不缺、没有幽灵字符串）、**列**（每一行都回答全部
+    六个对方；漏一格会让查表落到"中立"而静默改变关系）、**值域**（只有友 / 中立 / 敌三值）。
+    再加一条结构事实：PvE × 身份局的格子恒中立——那两个模式永不共局，填中立是"永不读到"。
+    """
+    table = heuristic_scoring._HOSTILITY
+    values = {identity.value for identity in Identity}
+    domain = {heuristic_scoring._ALLY, heuristic_scoring._NEUTRAL, heuristic_scoring._ENEMY}
+
+    assert set(table) == values, "行必须是六个身份，且没有表外字符串"
+    for mine, row in table.items():
+        assert set(row) == values, f"{mine} 行的列不全（或多了表外身份）：{sorted(row)}"
+        assert set(row.values()) <= domain, f"{mine} 行出现了三值之外的关系：{row}"
+
+    pve_sides = {Identity.ALLY.value, Identity.ENEMY.value}
+    for mine, row in table.items():
+        for theirs, relation in row.items():
+            cross_mode = (mine in pve_sides) != (theirs in pve_sides)
+            if cross_mode:
+                assert relation == heuristic_scoring._NEUTRAL, (
+                    f"{mine} × {theirs} 横跨两个模式，必须恒中立"
+                )
+
+
+def test_the_identity_mode_rows_still_match_the_old_if_chain():
+    """表化是**等价重构**：四个身份局的敌人集 / 盟友集逐项等于票 21 的 if-chain 输出。
+
+    这两条断的是**集合相等**，故直接比 ``frozenset``（不先排序：排序会把"输出形状"抹成
+    "排序后的形状"，与本文件的集合契约无关；``CODING_STANDARDS.md`` §4）。
+    """
+    for mine, (enemies, allies) in _IDENTITY_MODE_SETS.items():
+        assert heuristic_scoring._enemy_identities(mine) == frozenset(enemies), mine
+        assert heuristic_scoring._ally_identities(mine) == frozenset(allies), mine
+
+
+@pytest.mark.parametrize(("mine", "theirs"), sorted(_IDENTITY_RELATION_PAIRS))
+def test_the_sixteen_identity_pairs_read_the_same_relation_as_before(mine, theirs):
+    """16 个身份对的 ``_identity_relation`` 输出与重构前逐对相同（"真的是重构"的判据）。"""
+    identities = (
+        Identity(mine),
+        Identity(theirs),
+        Identity.REBEL,
+        Identity.LOYALIST,
+    )
+    view = _all_sides_revealed_view(identities)
+
+    assert view.players[0].identity is Identity(mine)
+    assert heuristic_scoring._identity_relation(view, 1) == _IDENTITY_RELATION_PAIRS[
+        (mine, theirs)
+    ]
+
+
+def test_the_second_reader_of_the_ally_set_follows_the_same_table():
+    """``_score_baonue``（``"lord" in _ally_identities(mine)``）与表同源，不吃空集。
+
+    它是 ``_ally_identities`` 的第二个读取方：只把 :func:`_identity_relation` 改成查表、
+    把两个集合函数留成旧 if-chain 的做法会让这一处静默漂移。身份局四个身份逐个核
+    ``+1.5`` / ``-1.0``（产品上真的会走到：任何座位都可能对主公技表态）；PvE 则是另一种
+    口径——**PvE 局里没有主公座位**，``_huangtian_lord_seat`` 先返回 None ⇒ ``0.0``
+    （不表态），这里用一局真开局的 PvE 投影钉住它，而不是拿"PvE 身份 + 主公座"这种
+    永不共局的混合局面去凑 ``-1.0``。
+    """
+    expectations = {
+        Identity.LORD: 1.5,
+        Identity.LOYALIST: 1.5,
+        Identity.REBEL: -1.0,
+        Identity.RENEGADE: -1.0,
+    }
+    for identity, expected in expectations.items():
+        state = build_state(
+            pack=PACK,
+            rule_config=RuleConfig(player_count=4),
+            seats=[
+                SeatSpec(identity=identity),
+                SeatSpec(identity=Identity.LORD),
+                SeatSpec(identity=Identity.REBEL),
+                SeatSpec(identity=Identity.LOYALIST),
+            ],
+            deck=_deck_excluding(),
+        )
+        view = project(state, 0)
+        assert heuristic_scoring._huangtian_lord_seat(view) is not None, (
+            "前提：视角里有一个公开的主公座位（主公身份由 `_visible_identity` 的 LORD 支"
+            "无条件公开，不靠 `identity_visible` 字段）"
+        )
+        score = heuristic_scoring._score_baonue(None, None, view)
+        assert score == expected, f"{identity.value} 的【暴虐】打分该是 {expected}"
+
+    pve_view = _pve_view((Identity.ALLY, Identity.ALLY, Identity.ENEMY))
+    assert heuristic_scoring._huangtian_lord_seat(pve_view) is None, "PvE 没有主公座位"
+    assert heuristic_scoring._score_baonue(None, None, pve_view) == 0.0, (
+        "PvE 局里【暴虐】不表态（0.0）——不是拿身份局的关系表去凑 -1.0"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PvE 的两行两列（M7 票 08）：盟友 / 敌人是**公开的确定信息**，不走概率档
+# ---------------------------------------------------------------------------
+
+
+def _pve_rule(identities, *, principal: int = 0) -> RuleConfig:
+    """一局 PvE 的规则配置（ROUT：全歼敌人；本节的用例只读关系面）。"""
+    return RuleConfig(
+        player_count=len(identities),
+        mode=Mode.PVE,
+        pve=PveConfig(
+            identities=tuple(identities),
+            principal=principal,
+            victory=PveVictory(kind=PveVictoryKind.ROUT),
+        ),
+    )
+
+
+def _pve_view(identities, *, viewer: int = 0, principal: int = 0):
+    """**真开局**的一局 PvE 的视角：``identity_visible`` 由 ``_initial_player`` 写，测试不手改。
+
+    ``principal`` 必须是友方座位（``PveConfig`` 的构造期校验），故观察者想坐敌方时由调用方
+    指定主角座位。走 ``Engine.new_game`` 而不是手搓局面：这条断言要证明的是"AI 在**真引擎**
+    的投影上读得出确定的友 / 敌"（`CODING_STANDARDS.md` §6：读取方断言走真实产出路径）。
+    """
+    engine = Engine.new_game(
+        seed=20261119, rule_config=_pve_rule(identities, principal=principal), pack=PACK
+    )
+    return project(engine.state, viewer)
+
+
+def _hidden_pve_view(identities, *, viewer: int = 0, principal: int = 0):
+    """反面控制：**人为**把 ``identity_visible`` 全关的 PvE 视角（真开局不会这样）。
+
+    真 PvE 开局阵营全公开，这条分支在实机里走不到；它只用来证明"读不到公开身份时退回中性
+    的 (0,0)、而不是回落到身份局那条配比后验"。
+    """
+    state = build_state(
+        pack=PACK,
+        rule_config=_pve_rule(identities, principal=principal),
+        seats=[SeatSpec(identity=identity) for identity in identities],
+        deck=_deck_excluding(),
+    )
+    for player in state.players:
+        player.identity_visible = False
+    return project(state, viewer)
+
+
+def test_the_ai_reads_a_pve_ally_and_a_pve_enemy():
+    """四格：友 → 友、敌 → 敌、友 → 敌、敌 → 友（自己恒 ``(0, 1)``）。
+
+    PvE 的身份就是阵营、且开局即公开（由引擎自己置真）⇒ 两侧都读到硬 ``±1``，与配比表无关。
+    """
+    ally_view = _pve_view((Identity.ALLY, Identity.ALLY, Identity.ENEMY))
+    enemy_view = _pve_view(
+        (Identity.ENEMY, Identity.ENEMY, Identity.ALLY), viewer=0, principal=2
+    )
+
+    assert heuristic_scoring._identity_relation(ally_view, 0) == (0.0, 1.0), "自己恒是盟友"
+    assert heuristic_scoring._identity_relation(ally_view, 1) == (0.0, 1.0), "友 → 友 = 友"
+    assert heuristic_scoring._identity_relation(ally_view, 2) == (1.0, 0.0), "友 → 敌 = 敌"
+    assert heuristic_scoring._identity_relation(enemy_view, 0) == (0.0, 1.0), "自己"
+    assert heuristic_scoring._identity_relation(enemy_view, 1) == (0.0, 1.0), "敌 → 敌 = 友"
+    assert heuristic_scoring._identity_relation(enemy_view, 2) == (1.0, 0.0), "敌 → 友 = 敌"
+
+    assert heuristic_scoring._enemy_identities("ally") == frozenset({"enemy"})
+    assert heuristic_scoring._ally_identities("ally") == frozenset({"ally"})
+    assert heuristic_scoring._enemy_identities("enemy") == frozenset({"ally"})
+    assert heuristic_scoring._ally_identities("enemy") == frozenset({"enemy"})
+
+
+def test_the_pve_relation_does_not_fall_back_to_the_posterior():
+    """PvE 不走概率档：配比表里没有友 / 敌，后验那段对 PvE 恒不参与。
+
+    反面控制（人为关掉公开身份，实机走不到）两档各一条：3 座（配比表本来就没有这一档）与
+    4 座（配比表有这一档，但友 / 敌减不掉 ⇒ 同样算不出）——两种都退回中性的 ``(0, 0)``，
+    而不是像身份局那样算出一个均分概率。
+    """
+    three = _hidden_pve_view((Identity.ALLY, Identity.ENEMY, Identity.ENEMY))
+    assert heuristic_scoring._unknown_identity_remainder(three) is None
+    assert heuristic_scoring._identity_relation(three, 1) == (0.0, 0.0)
+
+    four = _hidden_pve_view((Identity.ALLY, Identity.ENEMY, Identity.ALLY, Identity.ENEMY))
+    assert heuristic_scoring._unknown_identity_remainder(four) is None, (
+        "4 座配比表存在，但友 / 敌不在表里 ⇒ 同样算不出，不许拿身份局的配比去凑"
+    )
+    assert heuristic_scoring._identity_relation(four, 1) == (0.0, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("identities", "principal", "enemy_seat"),
+    [
+        # 座位 0 = AI 队友（主角）：1 号毗邻且是**友**、3 号毗邻且是**敌**。
+        ((Identity.ALLY, Identity.ALLY, Identity.ENEMY, Identity.ENEMY), 0, 3),
+        # 同一几何、把两个阵营对调：敌方座位从 3 变成 1 ⇒ 选择必须跟着关系翻，不跟座位号。
+        ((Identity.ALLY, Identity.ENEMY, Identity.ENEMY, Identity.ALLY), 0, 1),
+    ],
+)
+def test_the_ai_teammate_does_not_target_the_ally_when_an_enemy_is_available(
+    identities, principal, enemy_seat
+):
+    """「AI 队友不把友军当目标」的关系用例（真询问、真候选）：4 座 2v2，队友与敌人都毗邻。
+
+    座位 0（AI 队友）两侧各一人、都在距离 1 内 ⇒ 友军与敌人**都是合法目标**。判据分两层：
+
+    - **分值**：两张候选只差敌友权重这一项（同一张牌、相同体力 / 手牌 / 装备），
+      故敌人目标严格高 ``_ENEMY_FOCUS``。票 21 的口径是"不给 P(友) 扣分"，所以这不是
+      "打队友为负"，而是"队友永远排在敌人后面"——两张参数化局面把座位号对调再跑一遍，
+      证明选择跟的是关系、不是座位顺序；
+    - **决策**：``HeuristicPlayer.respond`` 选中的那张【杀】必须打在敌人身上。
+    """
+    slash = _ids("slash")[0]
+    rule = RuleConfig(
+        player_count=4,
+        mode=Mode.PVE,
+        pve=PveConfig(
+            identities=identities,
+            principal=principal,
+            victory=PveVictory(kind=PveVictoryKind.ROUT),
+        ),
+    )
+    state = build_state(
+        pack=PACK,
+        rule_config=rule,
+        seats=[
+            SeatSpec(hand=(slash,), identity=identities[0]),
+            SeatSpec(identity=identities[1]),
+            SeatSpec(identity=identities[2]),
+            SeatSpec(identity=identities[3]),
+        ],
+        deck=_deck_excluding(slash),
+        turn_seat=0,
+    )
+    for player in state.players:
+        player.identity_visible = True
+
+    query = _play_phase_query(state)
+    slashes = [
+        candidate
+        for candidate in query.legal_actions
+        if isinstance(candidate, UseCard) and candidate.card.type == "slash"
+    ]
+    ally_seat = next(
+        seat
+        for seat, identity in enumerate(identities)
+        if seat != principal and identity is Identity.ALLY
+    )
+    ally_target = next((action for action in slashes if action.targets == (ally_seat,)), None)
+    enemy_target = next((action for action in slashes if action.targets == (enemy_seat,)), None)
+    assert ally_target is not None and enemy_target is not None, (
+        f"前提不成立：友军（{ally_seat}）与敌人（{enemy_seat}）不是都能打"
+        f"（候选 {[a.targets for a in slashes]}）"
+    )
+    ally_score = heuristic_scoring._score_attack(ally_target, query.view)
+    enemy_score = heuristic_scoring._score_attack(enemy_target, query.view)
+    assert enemy_score - ally_score == pytest.approx(heuristic_scoring._ENEMY_FOCUS), (
+        f"两张候选只该差敌友权重这一项（友 {ally_score} vs 敌 {enemy_score}）"
+    )
+
+    action = HeuristicPlayer(_stream(0, 0)).respond(query)
+    assert isinstance(action, UseCard) and action.targets == (enemy_seat,), (
+        f"AI 队友该打敌人（座位 {enemy_seat}，实得 {action!r}）"
     )
 
 

@@ -23,12 +23,15 @@ import importlib
 from collections.abc import Mapping
 from typing import Any, get_args
 
-import pytest
 from pydantic import BaseModel
 
 from sgs.agents import heuristic
-from sgs.data import MODE_SITE_SLOTS, MODE_SITES, Mode
-from sgs.state import PlayerPublic, PlayerView, Query, project
+from sgs.data import MODE_SITE_SLOTS, MODE_SITES, Identity, Mode
+from sgs.engine import Engine
+from sgs.engine.steps import build_steps
+from sgs.state import FrameKind, PlayerPublic, PlayerView, Query, project
+
+from support import PassPlayer
 
 ReadPoint = tuple[bool, str]
 ReadTable = Mapping[str, Mapping[str, ReadPoint]]
@@ -604,47 +607,104 @@ def test_the_ai_step_key_is_the_one_the_engine_writes_into_the_query() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PvE 模式的登记先于行为（M7 票 07）：`_identity_relation` 对友 / 敌今天恒答 (0, 0)
+# PvE 模式的四格（M7 票 07 登记 → 票 08 接行为）：**指得到**且**引擎真的走它**
 #
-# 票 07 只落**数据面 + 版本面**：`Mode.PVE`、`Identity.ALLY` / `ENEMY` 与 `MODE_SITES["pve"]`
-# 的四格都进仓了，但关系判定（`ALLY → (0, 1)` / `ENEMY → (1, 0)`）归票 08，`heuristic.py`
-# 一行没改。于是今天 `_enemy_identities` / `_ally_identities` 对这两个值都落**空集**，
-# 关系恒为中性的 `(0, 0)`——一个真实的空窗。
+# 票 07 只落数据面 + 版本面，关系判定（`ALLY → (0, 1)` / `ENEMY → (1, 0)`）归票 08；当时
+# 用一条 `strict` xfail 钉住"友 / 敌恒答 (0, 0)"的空窗。票 08 接上后那条标记摘掉，换成
+# 正面断言——而且不能只靠 `importlib` 解析（`CODING_STANDARDS.md` 第 1 条：落点要连读取方
+# 一起看，"能解析"不证明"调用方在用它"）：三条断言各走一次**真启动的引擎**：
 #
-# **空窗不靠"没人跑 PvE"兜着**：这条 `strict` xfail 就是它的显式标记。`strict` = 票 08
-# 一旦接上两个分支，这条用例**必然 XPASS → 判红**，逼着同一个提交里摘掉标记并换成
-# "读得出友 / 敌"的正面断言（`tests/test_heuristic_ai.py` 那边加关系用例）。
-# 反过来，**不写**"今天就对"的断言（比如钉住 `(0, 0)`）——那会锁死票 08 要改的行为。
+# - `relation`：注册的 reader 对 `Engine.new_game` 产出的投影读出确定的友 / 敌
+#   （`_initial_player` 置 `identity_visible` → `project` → `_identity_relation`）；
+# - `victory`：引擎模块里的那个函数对象就是注册的 `solve_pve_outcome`，且真跑完一局的
+#   终局与用它重算的答案逐项相同；
+# - `steps`：`engine.steps` 就是 `build_steps(Mode.PVE)`，DEATH 帧用 `DEATH_STEPS`。
 # ---------------------------------------------------------------------------
 
 
-def _pve_relation_view():
-    """3 人 PvE 局面：座位 0（本人）= 友、座位 1 = 敌、座位 2 = 友，身份全部公开。"""
-    from sgs.data import Identity, load_content_pack
+def _pve_engine(
+    *,
+    identities: tuple[Identity, ...] = (Identity.ALLY, Identity.ENEMY, Identity.ALLY),
+    victory=None,
+):
+    """真开局的一局 PvE（阵营全部公开由引擎自己置真，不是测试手改）。"""
+    from sgs.data import PveConfig, PveVictory, PveVictoryKind, RuleConfig, load_content_pack
 
-    from support import SeatSpec, build_state
-
-    state = build_state(
-        pack=load_content_pack(deck_profile="standard_108"),
-        seats=[
-            SeatSpec(identity=Identity.ALLY),
-            SeatSpec(identity=Identity.ENEMY),
-            SeatSpec(identity=Identity.ALLY),
-        ],
-        deck=tuple(range(10)),
-        turn_seat=0,
+    rule = RuleConfig(
+        player_count=len(identities),
+        mode=Mode.PVE,
+        pve=PveConfig(
+            identities=identities,
+            principal=0,
+            victory=victory or PveVictory(kind=PveVictoryKind.ROUT),
+        ),
     )
-    return project(state, 0)
+    return Engine.new_game(
+        seed=20261119, rule_config=rule, pack=load_content_pack(deck_profile="standard_108")
+    )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="票 07 只登记不接行为：`_identity_relation` 的 ALLY / ENEMY 两个分支归票 08；"
-    "接上那天这条会 XPASS（strict ⇒ 红），摘掉标记即可",
-)
+def _registered(slot: str):
+    """``MODE_SITES["pve"][slot]`` 的**唯一**实现站点（解析到对象）。"""
+    refs = MODE_SITES[Mode.PVE][slot].refs
+    assert len(refs) == 1, f"pve.{slot} 应有唯一实现站点，实得 {refs}"
+    return _resolve(refs[0])
+
+
 def test_the_ai_reads_a_pve_enemy_as_an_enemy():
-    view = _pve_relation_view()
+    """票 07 那条 `strict` xfail 的转正版：注册的 reader 在真引擎的投影上读出确定的友 / 敌。
 
-    assert heuristic._identity_relation(view, 0) == (0.0, 1.0), "自己恒 (0, 1)"
-    assert heuristic._identity_relation(view, 1) == (1.0, 0.0), "敌座 ⇒ 敌"
-    assert heuristic._identity_relation(view, 2) == (0.0, 1.0), "友座 ⇒ 友"
+    名字沿用票 07 的引用（它的 Answer 把这条写成"空窗标记"，票 08 摘标记后**同名转绿**），
+    断言换成三条正面事实：注册的就是 AI 真正用的 `_identity_relation`、真 PvE 开局把阵营
+    全部亮明、自己 / 敌座 / 友座读出 `(0,1)` / `(1,0)` / `(0,1)`。
+    """
+    relation = _registered("relation")
+    engine = _pve_engine()
+    view = project(engine.state, 0)
+
+    assert relation is heuristic._identity_relation, "注册的就是 AI 真正用的那个 reader"
+    assert all(player.identity_visible for player in engine.state.players), (
+        "前提：真 PvE 开局把阵营全部亮明（票 01 §3）"
+    )
+    assert relation(view, 0) == (0.0, 1.0), "自己恒 (0, 1)"
+    assert relation(view, 1) == (1.0, 0.0), "敌座 ⇒ 敌"
+    assert relation(view, 2) == (0.0, 1.0), "友座 ⇒ 友"
+
+
+def test_the_pve_victory_cell_is_the_function_the_engine_calls():
+    from sgs.data import PveVictory, PveVictoryKind
+    from sgs.engine import game as game_module
+
+    victory = _registered("victory")
+    assert victory is game_module.solve_pve_outcome, "引擎模块 import 的就是这个对象"
+
+    # 存活 1 轮：三名 PassPlayer 谁都不打牌 ⇒ 轮次推进到 2 时引擎自己收兵。
+    engine = _pve_engine(
+        victory=PveVictory(kind=PveVictoryKind.SURVIVE_ROUNDS, rounds=1)
+    )
+    engine.run([PassPlayer() for _ in range(3)])
+
+    config = engine.state.rule_config.pve
+    outcome = engine.pending_outcome
+    assert config is not None and engine.finished and outcome is not None
+    alive = frozenset(player.seat for player in engine.state.players if player.alive)
+    expected = victory(config=config, alive=alive, round_no=engine.state.round)
+    assert expected is not None
+    assert (outcome.side, outcome.winners, outcome.reason) == (
+        expected.side,
+        expected.winners,
+        expected.reason,
+    ), "宣布的终局 = 用同一函数在终局状态上重算的答案"
+    assert engine.records[-1].kind == "game_end"
+
+
+def test_the_pve_steps_cell_is_the_table_the_engine_builds():
+    from sgs.engine.steps import DEATH_STEPS, IDENTITY_DEATH_STEPS
+
+    steps = _registered("steps")
+    engine = _pve_engine()
+
+    assert steps is build_steps
+    assert engine.steps == build_steps(Mode.PVE), "引擎装配的就是注册的那张表"
+    assert engine.steps[FrameKind.DEATH] is DEATH_STEPS
+    assert engine.steps[FrameKind.DEATH] is not IDENTITY_DEATH_STEPS

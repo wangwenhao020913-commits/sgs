@@ -36,7 +36,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from sgs.data import Identity, Mode
@@ -1690,7 +1690,12 @@ def _emit_death(host: FrameHost, frame: Frame, timing: Timing) -> Control:
 def death_before_start(host: FrameHost, frame: Frame) -> Control:
     """死亡结算开始前：①主公死亡不做回合结束；②否则定格 killer、自己的回合则回合结束。
 
-    身份局才做这两件事（票 14 §4，官方 `flow_death` 首段）；无身份局保持 M1 的空实现。
+    身份局两件都做（票 14 §4，官方 `flow_death` 首段）。**PvE 只做"结束其回合"**：没有主公
+    锚点（票 01 §3）、也不发身份奖惩，但「若在自己的回合内阵亡，则结束其回合」是流程本身的
+    规则——少了这条，``_turn_is_over`` 跳过剩余阶段后记录流里会只剩 ``TURN_AFTER_END``、
+    没有 ``TURN_END``（票 01 §3 那句"non-IDENTITY 早退已经覆盖"只对主公锚点成立；1v1 首死
+    即终局故此前不可达，PvE 2v3 起可达）。无身份局保持 M1 的空实现，记录面逐字节不变。
+
     ``killer`` 只在**有来源的伤害且来源 ≠ 死者**时定格：失去体力 / 无来源伤害（闪电）/
     自杀 ⇒ 未定格 ⇒ 无奖惩。来源由死亡帧的 ``damage_source`` 带下来（帧私有载荷，
     不进 ``timing`` 记录的 ``source``，故记录面不变）。
@@ -1698,9 +1703,14 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
     control = _emit_death(host, frame, Timing.DEATH_BEFORE_START)
     if control is not None:
         return control
-    if host.state.rule_config.mode is not Mode.IDENTITY:
+    mode = host.state.rule_config.mode
+    if mode is Mode.NO_IDENTITY:
         return None
     seat = frame.data["target"]
+    if mode is Mode.PVE:
+        if host.state.turn_seat == seat:
+            return _emit(host, frame, Timing.TURN_END, actor=seat)
+        return None
     if host.state.player(seat).identity is Identity.LORD:
         # 官方"死亡结算开始前：若死亡的是主公，则游戏结束"——回合结束分支让位（票 14 §4）。
         return None
@@ -2527,8 +2537,27 @@ RANK_COMPARE_STEPS = (
 技能可在此调整点数）→ 亮出比点 → 派发 RESULT_AFTER → 置入弃牌堆。"""
 
 
+_DEATH_STEPS_BY_MODE: Mapping[Mode, tuple[Step, ...]] = {
+    Mode.NO_IDENTITY: DEATH_STEPS,
+    Mode.IDENTITY: IDENTITY_DEATH_STEPS,
+    Mode.PVE: DEATH_STEPS,
+}
+"""``Mode`` → DEATH 帧的步骤表（票 25 的分叉；M7 票 08 起三模式全登记）。
+
+**为什么是表、不是 ``if``/``else``**：写 ``IDENTITY if mode is IDENTITY else DEATH`` 时，
+将来新增的第四个 ``Mode`` 会**静默**拿到无身份局那张表——"碰巧也算对"不是分叉。这张表
+fail-closed：新加模式而忘了登记，``build_steps`` 直接 ``KeyError``。
+
+PvE 与无身份局**同表**（票 01 §5）：PvE 开局阵营全部公开 ⇒ 不亮身份、不奖惩、没有主公
+死亡锚点；三模式的同形 / 不同形都由 ``tests/test_pve_play.py`` 断言。
+"""
+
+
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
-    """按模式装配步骤表：只有 DEATH 帧的形状分叉（票 25）。"""
+    """按模式装配步骤表：只有 DEATH 帧的形状分叉（票 25 / M7 票 08）。
+
+    分叉查 :data:`_DEATH_STEPS_BY_MODE`（按模式登记，缺登记即 ``KeyError``）。
+    """
     return {
         FrameKind.USE: USE_STEPS,
         FrameKind.RESOLVE: RESOLVE_STEPS,
@@ -2538,7 +2567,7 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
-        FrameKind.DEATH: IDENTITY_DEATH_STEPS if mode is Mode.IDENTITY else DEATH_STEPS,
+        FrameKind.DEATH: _DEATH_STEPS_BY_MODE[mode],
         FrameKind.RECOVER: RECOVER_STEPS,
         FrameKind.MAXLIFE: MAXLIFE_STEPS,
         FrameKind.JUDGE: JUDGE_STEPS,

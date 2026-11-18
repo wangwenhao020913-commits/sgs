@@ -137,20 +137,21 @@ MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
                 "relation": ModeSite(
                     ("sgs.agents.heuristic:_identity_relation",),
                     "PvE 开局全部身份公开（票 01 §3）⇒ 读到的是**确定的**友 / 敌，不走概率档；"
-                    "读点仍是同一个函数、同一个 `PlayerPublic.identity` 字段（不新增读点）。"
-                    "`ALLY → (0, 1)` / `ENEMY → (1, 0)` 两个映射归票 08：今天它俩都落空集、"
-                    "答 (0, 0)，`tests/test_ai_adaptation.py` 的 strict xfail 钉住这个空窗",
+                    "读点仍是同一个函数、同一个 `PlayerPublic.identity` 字段（不新增读点）："
+                    "已亮明那一档查 `heuristic._HOSTILITY` 的 ALLY / ENEMY 两行，"
+                    "`ALLY → (0, 1)` / `ENEMY → (1, 0)`（M7 票 08）",
                 ),
                 "victory": ModeSite(
                     ("sgs.engine.victory:solve_pve_outcome",),
                     "只读「配置 + 存活集合 + 当前轮次」三样（票 01 §4）：全歼 / 存活 N 轮 / "
                     "N 轮内全歼 / 击败 Boss 四类逐场条件，胜负两侧都只判 `ally` / `enemy`；"
-                    "接进 `Engine.check_game_end` 的 PvE 分支归票 08",
+                    "`Engine._solve_pve` 接在 `check_game_end` 的 PvE 分支上，两个调用点 = "
+                    "死亡检测点（与无身份局同一步）与轮次 +1 之后（M7 票 08）",
                 ),
                 "steps": ModeSite(
                     ("sgs.engine.steps:build_steps",),
                     "DEATH 帧用 `DEATH_STEPS`——与无身份局同表（PvE 不亮身份、不奖惩、"
-                    "没有主公死亡锚点，票 01 §5）",
+                    "没有主公死亡锚点，票 01 §5）；同形 / 不同形都有断言（M7 票 08）",
                 ),
                 "projection": ModeSite(
                     ("sgs.state.projection:_visible_identity",),

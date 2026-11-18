@@ -72,6 +72,31 @@ def test_a_normal_round_does_not_end_the_game():
     assert engine.state.round == ROUND_LIMIT
 
 
+def test_a_queued_extra_turn_is_dropped_when_the_round_limit_ends_the_game():
+    """收兵那一刻排队的额外回合作废：终局记录后面不许再落 ``turn_change``。
+
+    M7 票 08 把 PvE 的轮次判定接到同一个收兵点（轮次 +1 之后）时，顺手把这条旧路径的不变量
+    钉住：``_advance_turn`` 在轮次推进途中看到 ``finished`` 就返回，不再弹额外回合、也不再
+    发 ``turn_change``——否则 ``game_end`` 会被一条"额外回合开始"的记录顶掉，回放流里就出现
+    了终局之后的回合。
+
+    排队时机：额外回合只在**自然回合结束之后**弹出（`_pop_extra_turn` 在轮次推进之后），
+    故要在"本轮最后一回合"（座位 1）进行中把它排上——那一回合结束时正好走满一圈。
+    """
+    engine = _round_limit_engine(round_no=ROUND_LIMIT)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: e.state.turn_seat == 1 and e.state.turn_extra is False,
+    )
+    engine.state.extra_turns.append(0)
+    run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: e.finished)
+
+    assert engine.records[-1].kind == "game_end", "终局记录必须是流里最后一条"
+    assert engine.state.extra_turns == [0], "待执行的额外回合随终局作废（不弹出、不落记录）"
+    assert engine.state.turn_extra is False
+
+
 def test_the_round_limit_text_reaches_the_narrative():
     """事件流末行写「大战300回合不分胜负，鸣金收兵」。"""
     engine = _round_limit_engine(round_no=ROUND_LIMIT)

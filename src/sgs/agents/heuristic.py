@@ -317,24 +317,126 @@ _SEAT_PREFIX = "seat:"
 边界不是"全场单一真源"，而是"接入层导规范值 + 两个被边界允许的带注释副本"。
 """
 
-_LORD_SIDE = frozenset({"lord", "loyalist"})
-_REBEL_SIDE = frozenset({"rebel", "renegade"})
 _LORD = "lord"
 _LOYALIST = "loyalist"
 _REBEL = "rebel"
 _RENEGADE = "renegade"
+_ALLY = "ally"
+_ENEMY = "enemy"
 """身份的**字面量**（:class:`~sgs.data.Identity` 是 ``str`` 枚举，故可直接比）。
 
 同 :data:`_PLAY_PHASE_IDLE` 的理由：``Identity`` 住在 ``sgs.data``，不在本模块的可见面
-白名单里。``frozenset`` 只作成员判定、从不迭代（源码纪律禁止的是迭代）。
+白名单里。派生出来的 ``frozenset``（:func:`_enemy_identities` / :func:`_ally_identities`）
+只作成员判定、从不迭代（源码纪律禁止的是迭代）。
+
+``_ALLY`` / ``_ENEMY``（M7 票 08）是 PvE 的两个阵营值：它们**同时**是"某人是我的友 / 敌"
+这条关系的值（见 :data:`_HOSTILITY`）——同一组字面量在两侧出现是刻意的（阵营名 = 关系名）。
 """
 
-_RENEGADE_ENEMIES = frozenset({_LOYALIST, _REBEL})
-"""内奸的对手：忠臣与反贼。**主公不在里面**——内奸要最后一个人活着，主公早死反贼就赢。
+_NEUTRAL = "neutral"
+"""敌对值表的第三值「中立」。**它不是身份**，只在这张表的值域里出现。"""
 
-这是"不把主公当优先敌人"的唯一落点：敌友概率（:func:`_identity_relation`）按这张集合
-算，故主公对内奸恒是 ``(0, 0)``（既不是敌人也不是盟友），与票 21 之前的内奸分支同义。
+_HOSTILITY: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        # 我 ↓ ／ 对方 → 关系
+        # 主公侧两行**逐格相同**（忠臣与主公同阵营）——分别写出来是为了将来能各自改，
+        # 不是漏抄了公共行。
+        _LORD: MappingProxyType(
+            {
+                _LORD: _ALLY,
+                _LOYALIST: _ALLY,
+                _REBEL: _ENEMY,
+                _RENEGADE: _ENEMY,
+                _ALLY: _NEUTRAL,
+                _ENEMY: _NEUTRAL,
+            }
+        ),
+        _LOYALIST: MappingProxyType(
+            {
+                _LORD: _ALLY,
+                _LOYALIST: _ALLY,
+                _REBEL: _ENEMY,
+                _RENEGADE: _ENEMY,
+                _ALLY: _NEUTRAL,
+                _ENEMY: _NEUTRAL,
+            }
+        ),
+        _REBEL: MappingProxyType(
+            {
+                _LORD: _ENEMY,
+                _LOYALIST: _ENEMY,
+                _REBEL: _ALLY,
+                _RENEGADE: _NEUTRAL,
+                _ALLY: _NEUTRAL,
+                _ENEMY: _NEUTRAL,
+            }
+        ),
+        _RENEGADE: MappingProxyType(
+            {
+                # 内奸**不把主公当敌人**：内奸要最后一个人活着，主公早死反贼就赢（今天这张表
+                # 里是硬常量，对忠臣 / 反贼 = 敌。按存活力量均衡算局面函数是票 32 的账）。
+                _LORD: _NEUTRAL,
+                _LOYALIST: _ENEMY,
+                _REBEL: _ENEMY,
+                _RENEGADE: _NEUTRAL,
+                _ALLY: _NEUTRAL,
+                _ENEMY: _NEUTRAL,
+            }
+        ),
+        _ALLY: MappingProxyType(
+            {
+                _LORD: _NEUTRAL,
+                _LOYALIST: _NEUTRAL,
+                _REBEL: _NEUTRAL,
+                _RENEGADE: _NEUTRAL,
+                _ALLY: _ALLY,
+                _ENEMY: _ENEMY,
+            }
+        ),
+        _ENEMY: MappingProxyType(
+            {
+                _LORD: _NEUTRAL,
+                _LOYALIST: _NEUTRAL,
+                _REBEL: _NEUTRAL,
+                _RENEGADE: _NEUTRAL,
+                _ALLY: _ENEMY,
+                _ENEMY: _ALLY,
+            }
+        ),
+    }
+)
+"""**敌对值表**：``{我: {对方: 友 / 中立 / 敌}}``——"谁恨谁"这一层的唯一真源（票 08）。
+
+值域是**三值**（友 / 中立 / 敌），不是数值：这一层只回答关系，幅度留在
+:func:`_identity_relation` 的 ``(P(敌), P(友))`` 上（权重不进这张表、也不和数据混层）。
+:func:`_enemy_identities` / :func:`_ally_identities` 是它的两个派生视图，
+:func:`_identity_relation` 的"已亮明"分支直接查它（不再是 if-chain）。
+
+身份局四行逐格等于票 21 的 if-chain（票 08 是**等价重构**，16 个身份对的输出逐对相同）：
+主公侧认忠臣为友、反贼 / 内奸为敌；反贼认主公侧为敌、反贼为友、内奸中立；内奸认忠臣 /
+反贼为敌、主公中立（**不把主公当优先敌人**）、且没有盟友。
+
+PvE 两行（盟 → 盟 = 友、敌 → 敌 = 友、盟 → 敌 = 敌、敌 → 盟 = 敌）只是把
+``PveConfig`` 的阵营名读成关系名：PvE 开局全部 ``identity_visible``（票 01 §3）⇒ 读到的是
+**确定的**友 / 敌，不走概率档。**横跨两个模式的格子恒「中立」**（主公 × 友这类永不共局）：
+填中立是"永不读到"的结构事实，不是语义选择。
+
+为什么是字面表：本模块的可见面白名单不许 import ``sgs.data``（同 :data:`_IDENTITY_ROSTER`），
+而关系是静态内容表。真源仍是数据层——``tests/test_heuristic_ai.py`` 双向核：表的行 / 列
+逐项等于 ``sgs.data.identities.Identity`` 的六个值，值域恰是这三值，且 16 个身份对的输出
+与 if-chain 版逐对相同。
 """
+
+
+def _hostility(mine: str, theirs: str) -> str:
+    """``mine`` 眼里的 ``theirs``：友 / 中立 / 敌（查 :data:`_HOSTILITY`）。
+
+    行或列不在表里（人为局面写了个不存在的身份）⇒ 中立，**不猜**——与
+    :func:`_identity_relation`"算不出就退回 (0, 0)"同一条 fail-closed 口径。
+    """
+    row = _HOSTILITY.get(mine)
+    return _NEUTRAL if row is None else row.get(theirs, _NEUTRAL)
+
 
 _IDENTITY_ROSTER: Mapping[int, tuple[str, ...]] = MappingProxyType(
     {
@@ -2089,33 +2191,35 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
 
 
 def _enemy_identities(mine: str) -> frozenset[str]:
-    """``mine`` 这个身份眼里的**敌人身份集合**。
+    """``mine`` 这个身份眼里的**敌人身份集合**（:data:`_HOSTILITY` 里标「敌」的那几列）。
 
     逐项等于票 21 之前的 :func:`_is_revealed_enemy`：主公侧 = 反贼 / 内奸、反贼 = 主公侧、
-    内奸 = 忠臣 / 反贼（**不含主公**，见 :data:`_RENEGADE_ENEMIES`）。
+    内奸 = 忠臣 / 反贼（**不含主公**）；PvE 侧 = 另一个阵营（票 08 起）。
     """
-    if mine in _LORD_SIDE:
-        return _REBEL_SIDE
-    if mine == _REBEL:
-        return _LORD_SIDE
-    if mine == _RENEGADE:
-        return _RENEGADE_ENEMIES
-    return frozenset()
+    row = _HOSTILITY.get(mine)
+    if row is None:
+        return frozenset()
+    return frozenset(theirs for theirs, relation in row.items() if relation == _ENEMY)
 
 
 def _ally_identities(mine: str) -> frozenset[str]:
-    """``mine`` 这个身份眼里的**盟友身份集合**（内奸没有盟友；按**阵营**算，不是按人）。
+    """``mine`` 这个身份眼里的**盟友身份集合**（:data:`_HOSTILITY` 里标「友」的那几列）。
 
-    比票 21 之前的 :func:`_is_revealed_ally` **宽一档**：旧函数只认"主公与我同在主公阵营"，
-    这里认整个同阵营（主公侧的忠臣 / 反贼一方的反贼）。今天只有主公与 ``identity_visible``
-    会亮明身份，故扩宽是**潜伏**的；一旦 M5 的亮明效果让忠臣 / 反贼露牌，按阵营记盟友才是
-    对的——那条语义由 :func:`_identity_relation` 的"已亮明 ⇒ 精确 0/1"分支承载。
+    按**阵营**算、不是按人（内奸没有盟友）。比票 21 之前的 :func:`_is_revealed_ally`
+    **宽一档**：旧函数只认"主公与我同在主公阵营"，这里认整个同阵营（主公侧的忠臣 /
+    反贼一方的反贼）。今天只有主公与 ``identity_visible`` 会亮明身份，故扩宽是**潜伏**的；
+    一旦 M5 的亮明效果让忠臣 / 反贼露牌，按阵营记盟友才是对的——那条语义由
+    :func:`_identity_relation` 的"已亮明 ⇒ 精确 0/1"分支承载。
+
+    **第二个读取方**：:func:`_score_baonue`（``"lord" in _ally_identities(mine)``；票 08 的
+    票面按旧名 ``_score_huangtian`` 写，那个位置现在是【暴虐】的打分器）。两个视图都从同一张
+    表派生，故改写这张表时它自动跟上——别只改 :func:`_identity_relation` 的函数体（那会让
+    那一处继续吃空集）。
     """
-    if mine in _LORD_SIDE:
-        return _LORD_SIDE
-    if mine == _REBEL:
-        return frozenset({_REBEL})
-    return frozenset()
+    row = _HOSTILITY.get(mine)
+    if row is None:
+        return frozenset()
+    return frozenset(theirs for theirs, relation in row.items() if relation == _ALLY)
 
 
 def _unknown_identity_remainder(
@@ -2166,6 +2270,11 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
     自己恒 ``(0.0, 1.0)``；``P(敌) + P(友) ≤ 1``，剩下的质量是"两边都不是"（反贼眼里的
     内奸、内奸眼里的主公）。**``P(敌)`` 只作权重**：调用方乘在原 0/1 的幅度上，不把它
     升格成"必须打谁"的硬判（spec §6.4）。
+
+    **PvE（M7 票 08）**：友 / 敌两个身份走**已经亮明**那一档、**不走概率档**——PvE 开局全部
+    ``identity_visible``（票 01 §3），且 ``PveConfig`` 的阵营就是关系本身（:data:`_HOSTILITY`
+    的 ALLY / ENEMY 两行）：``ALLY → (0, 1)``、``ENEMY → (1, 0)``，两侧都读到硬 ``±1``。
+    读点仍是同一个函数、同一个 ``PlayerPublic.identity`` 字段（不新增读点）。
     """
     if seat == view.seat:
         return 0.0, 1.0
@@ -2174,14 +2283,16 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
     mine = view.players[view.seat].identity
     if mine is None:
         return 0.0, 0.0
-    enemies = _enemy_identities(mine)
-    allies = _ally_identities(mine)
     theirs = view.players[seat].identity
     if theirs is not None:
+        # 已亮明 ⇒ **查敌对值表**（表是"谁恨谁"的唯一真源，见 :data:`_HOSTILITY`）。
+        relation = _hostility(mine, theirs)
         return (
-            1.0 if theirs in enemies else 0.0,
-            1.0 if theirs in allies else 0.0,
+            1.0 if relation == _ENEMY else 0.0,
+            1.0 if relation == _ALLY else 0.0,
         )
+    enemies = _enemy_identities(mine)
+    allies = _ally_identities(mine)
     remainder = _unknown_identity_remainder(view)
     if remainder is None:
         return 0.0, 0.0
@@ -3282,7 +3393,10 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "把已亮明的身份从配比字面表里减掉，存活未知座位按人头均分得 "
                     "(P(敌), P(友))——伤害目标 / 座位步 / 连环 / 火攻 / 无懈 / 濒死救援都读它"
                     "（救援一侧：C2 起 _rescue_probability 用它算「谁愿意救濒死者」）；"
-                    "算不出就退回中性的 (0, 0)，不做行为 / 历史推断",
+                    "算不出就退回中性的 (0, 0)，不做行为 / 历史推断。**PvE 口径（M7 票 08）**："
+                    "PvE 开局全部 identity_visible ⇒ 这个字段对全桌公开（友 / 敌），"
+                    "_identity_relation 走已亮明的 0/1 档直接读出，配比后验不参与；"
+                    "读点与字段都没变，只有读法多认两个值",
                 ),
                 "hero": (False, "武将 id 不参与打分：技能语义走 ``SKILL_VALUES``，不按武将近路"),
                 "kingdom": (False, "势力不参与打分：敌友只按 identity，不看势力同异"),
