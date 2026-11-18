@@ -184,6 +184,11 @@ class ModifierPoint(str, Enum):
     - ``CANDIDATES``：候选行动的追加（丈八蛇矛 / 八卦阵的候选注入）；
     - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
     - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）；
+    - ``DRAW_COUNT``：**摸牌阶段的额定张数**（M7 票 10 的加法）。``current`` 从
+      :data:`sgs.engine.DRAW_COUNT`（或阶段体改写后的值）起，回调返回新的张数。它是
+      **座位常驻项**的落点：「每回合摸牌 +1」这类遗物与 ``PveSeat.draw_bonus`` 走同一条链
+      （见 ``skills/catalog.py`` 的 ``_SEAT_PERSISTENT_MODIFIERS``）；唯一读点是
+      ``Engine._phase_draw``，故没有消费者的局（本期除座位表外没有）加入前的记录流逐字节不变；
     - ``DAMAGE_DEAL_AMOUNT`` / ``DAMAGE_TAKE_AMOUNT``：本次伤害的**来源侧 / 目标侧**数值
       （M5-03 的加法；【酒】/【古锭刀】与【藤甲】/【白银狮子】的落点）；
     - ``DAMAGE_CAP``：本次伤害的**目标侧上限**（M5-05a 的加法；【白银狮子】"最多 1 点"）。
@@ -229,6 +234,7 @@ class ModifierPoint(str, Enum):
     CANDIDATES = "CANDIDATES"
     RESPONSE_COUNT = "RESPONSE_COUNT"
     RECOVER_AMOUNT = "RECOVER_AMOUNT"
+    DRAW_COUNT = "DRAW_COUNT"
     DAMAGE_DEAL_AMOUNT = "DAMAGE_DEAL_AMOUNT"
     DAMAGE_TAKE_AMOUNT = "DAMAGE_TAKE_AMOUNT"
     DAMAGE_CAP = "DAMAGE_CAP"
@@ -337,7 +343,7 @@ def apply_modifiers(
     在派发时按当前实例填写，回调据此判定"本实例是否作用于本次查询"。没有命中任何修饰器时
     **原样返回**（故 `basic_53` 的 M1 行为逐字节不变）。
     """
-    from sgs.skills import resolve_instances
+    from sgs.skills import resolve_instances, seat_persistent_modifiers
 
     value = current
     for instance in resolve_instances(state):
@@ -348,6 +354,12 @@ def apply_modifiers(
                     replace(ctx, owner=instance.owner, skill_id=instance.skill_id),
                     value,
                 )
+    # **座位常驻项**（M7 票 10）：与上面那圈技能 / 遗物实例**同一条链**的最后一项。
+    # 座位的三档加成是 header 数据（`PveConfig.seats`），没有实例可解析，故它不是一个
+    # `resolve_instances` 载体——但派发点、`current` 的传递与回调签名都和实例修饰器一字
+    # 不差，故"遗物 +1 与座位 +1"落在同一次链式计算里，不会出现两套加成读取。
+    for modifier in seat_persistent_modifiers(point):
+        value = modifier.handler(state, ctx, value)
     return value
 
 

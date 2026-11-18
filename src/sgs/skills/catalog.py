@@ -37,6 +37,7 @@ from typing import Any, TypeAlias
 from sgs.data import (
     Color,
     Identity,
+    PveSeat,
     SkillType,
     card_tag_spec,
     color_of_suit,
@@ -261,6 +262,104 @@ _NEVER_SUPPRESSED_SOURCES: frozenset[SkillSourceKind] = frozenset(
 ``VIRTUAL_GRANT`` **不在这里**：它可能授予虚拟装备（免疫）、也可能授予武将技能
 （照常失效），判据是**定义**而不是来源，故它留在 :func:`_skill_is_suppressed` 里单独成支。
 """
+
+
+class SeatModifierKind(str, Enum):
+    """座位**常驻**修饰的三档（M7 票 10；票 03 §10.2 的"三个座位常驻修饰钩子"）。
+
+    常驻项与技能 / 遗物的**修正链**是同一条：前两档是链上的项
+    （:data:`_SEAT_PERSISTENT_MODIFIERS`），体力上限是**开局写定**的座位事实（不进链，
+    也没有 delta）。三档的值都从 :class:`~sgs.data.PveSeat` 的座位字段现算。
+    """
+
+    DRAW_COUNT = "draw_count"
+    """摸牌阶段的额定张数加成（``ModifierPoint.DRAW_COUNT``）。"""
+
+    DAMAGE_DEAL = "damage_deal"
+    """造成伤害的来源侧加成（``ModifierPoint.DAMAGE_DEAL_AMOUNT``；【杀】等牌的伤害同样吃）。"""
+
+    HP_MAX = "hp_max"
+    """体力上限加成（开局写定、局内不变；**不**走修正链）。"""
+
+
+def seat_persistent_bonus(spec: PveSeat | None, kind: SeatModifierKind) -> int:
+    """``spec`` 的三档常驻加成之一——**唯一**读 ``PveSeat`` 三档字段的函数（M7 票 10）。
+
+    - **查询期现算**、常驻项**不落 delta**（同 M6 的连续型效果纪律：座位字段是不变事实，
+      没有"写入时刻"可言）；
+    - ``spec is None``（非 PvE 局 / 没带座位表 / 座位越界）⇒ ``0``：标准局与不带座位表的
+      老 PvE 局一分钱不付；
+    - 三个消费者 = 摸牌阶段（经链）、伤害数值（经链）、开局体力上限（直接取）。**不许**
+      在别处再读这三个字段——``tests/test_pve_seats.py`` 里那条 AST 扫描会红。
+    """
+    if spec is None:
+        return 0
+    if kind is SeatModifierKind.DRAW_COUNT:
+        return spec.draw_bonus
+    if kind is SeatModifierKind.DAMAGE_DEAL:
+        return spec.slash_damage_bonus
+    if kind is SeatModifierKind.HP_MAX:
+        return spec.hp_max_bonus
+    raise ValueError(f"未知的座位常驻修饰档：{kind!r}")
+
+
+def _seat_draw_count_bonus(state: GameState, ctx: ModifierContext, current: int) -> int:
+    """``DRAW_COUNT`` 链上的座位常驻项：``ctx.subject`` = 摸牌的那个人。"""
+    return current + seat_persistent_bonus(
+        _pve_seat(state, ctx.subject), SeatModifierKind.DRAW_COUNT
+    )
+
+
+def _seat_damage_deal_bonus(state: GameState, ctx: ModifierContext, current: int) -> int:
+    """``DAMAGE_DEAL_AMOUNT`` 链上的座位常驻项：``ctx.subject`` = 伤害的来源。"""
+    return current + seat_persistent_bonus(
+        _pve_seat(state, ctx.subject), SeatModifierKind.DAMAGE_DEAL
+    )
+
+
+_SEAT_PERSISTENT_MODIFIERS: Mapping[ModifierPoint, Modifier] = MappingProxyType(
+    {
+        ModifierPoint.DRAW_COUNT: Modifier(
+            ModifierPoint.DRAW_COUNT, _seat_draw_count_bonus
+        ),
+        ModifierPoint.DAMAGE_DEAL_AMOUNT: Modifier(
+            ModifierPoint.DAMAGE_DEAL_AMOUNT, _seat_damage_deal_bonus
+        ),
+    }
+)
+"""座位常驻项挂在哪两个挂点上（票 10）：`{挂点: 链上的一项}`。
+
+它与技能 / 遗物实例的修饰器由**同一个** :func:`~sgs.effects.apply_modifiers` 派发
+（见 ``effects/modifiers.py`` 的链尾），故"加成本身"只有一套读取：**常驻项是链上的一项**，
+不是并行的第二个读者。`ctx.subject` = 当前动作的主体（摸牌的人 / 伤害的来源），
+故同一份数据在不同主体的回合里自然取到不同座位的加成。
+
+它**不是技能实例**（没有 ``SkillInstance`` / ``resolve_instances`` 载体），故「失效 /
+失去」两条谓词打不到它——它是 header 数据（``PveConfig.seats``），与"这个角色此刻有
+哪些技能"无关。这也正是票 03 §10.2 要的：常驻项不随技能存亡漂移。
+"""
+
+
+def seat_persistent_modifiers(point: ModifierPoint) -> tuple[Modifier, ...]:
+    """``point`` 上的**座位常驻项**（0 或 1 条；票 10 的"与遗物共用同一个入口"）。
+
+    调用方是 :func:`~sgs.effects.apply_modifiers`——它先跑技能 / 遗物实例的修饰器，再跑
+    这一项。没有 SeatSpec 或挂点不在表里时返回空元组，链的输入原样返回。
+    """
+    modifier = _SEAT_PERSISTENT_MODIFIERS.get(point)
+    return () if modifier is None else (modifier,)
+
+
+def _pve_seat(state: GameState, seat: int) -> PveSeat | None:
+    """``state`` 里 ``seat`` 的座位规格（非 PvE / 没带座位表 / 越界 ⇒ ``None``）。
+
+    座位表住在 ``RuleConfig.pve`` 里（**header 数据**），故它是整局的常量事实：这里不读
+    时间、不读可变座位状态，缓存键也因此不用登记它。
+    """
+    pve = state.rule_config.pve
+    if pve is None or not 0 <= seat < len(pve.seats):
+        return None
+    return pve.seats[seat]
 
 
 HookCondition: TypeAlias = Callable[[Any, Frame], bool]

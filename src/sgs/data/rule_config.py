@@ -71,6 +71,20 @@ _MAX_GRANTS_PER_SEAT: Mapping[str, int] = {"skill": 4, "relic": 6}
 **逐座位**算，不是全场总量：两座各 4 条出战技能是合法的（8 条）。
 """
 
+_MAX_SEAT_HP = 99
+"""座位体力 / 上限的宽上界（M7 票 10）：远大于任何武将（≤8）或 Boss 模板的体力。
+
+引擎对 ``hp`` 本身没有上界，故这里给一个"显然不是笔误"的宽区间，只拒负数 / 零 / 荒谬值
+（``hp_max`` 必须是正的，否则开局即死）；它**不是**一条玩法规则。
+"""
+
+_MAX_SEAT_BONUS = 9
+"""三档常驻加成的上界（M7 票 10）：内容期没有任何档位接近它。
+
+加成只许非负（"造成伤害 +N" 是增益通道，减益留给技能），上界存在的唯一理由是让
+header 里出现荒谬值时在构造期就拒，而不是打出一局看不出问题的怪局。
+"""
+
 
 def _catalog_skill_ids() -> frozenset[str]:
     """``CATALOG`` 的 id 集合（授予的 ``id`` 必须在这里）。
@@ -123,8 +137,12 @@ class PveSeat(BaseModel):
     """PvE 的**逐座位合成武将**与属性加成（票 03 §3 / 票 10：那里叫 ``SeatSpec``）。
 
     敌人不是武将表里的武将而是「模板 + 抽到的技能 + 属性加成」，故这些事实必须逐座
-    进 header。**校验矩阵（长度 / 数值区间 / 与 ``identities`` 对位）归票 10**——本票只落
-    骨架，不预设合成武将的取值规则。
+    进 header（否则录像重建不出同一场）。**校验矩阵见下面的几个校验器**（M7 票 10）：
+    合成武将必须有名字、数值区间合法、初始体力不得越过有效上限；长度与
+    ``identities`` 的对位由 :meth:`PveConfig._seats_line_up_with_the_identities` 管。
+
+    三档加成是**座位常驻修饰**（票 03 §10.2）：开局写定、查询期现算、**不落 delta**，
+    与遗物共用同一条修正链（读口见 ``sgs.skills.seat_persistent_bonus``）。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -135,13 +153,48 @@ class PveSeat(BaseModel):
     name: str = ""
     """模板名 / 显示名；有武将时可留空（显示取自武将表）。"""
 
-    hp: int
-    hp_max: int
-    hp_max_bonus: int = 0
-    draw_bonus: int = 0
-    slash_damage_bonus: int = 0
+    hp: int = Field(ge=1, le=_MAX_SEAT_HP)
+    """**初始体力值**：与 ``hp_max`` 分开传，模板可以给"3/4"这种不满体力开局。"""
+
+    hp_max: int = Field(ge=1, le=_MAX_SEAT_HP)
+    """模板的**体力上限**；有效上限 = 它 + ``hp_max_bonus``。"""
+
+    hp_max_bonus: int = Field(default=0, ge=0, le=_MAX_SEAT_BONUS)
+    """常驻**体力上限 +N**（开局写定、局内不变：不发 ``hp_max_change``）。"""
+
+    draw_bonus: int = Field(default=0, ge=0, le=_MAX_SEAT_BONUS)
+    """常驻**摸牌阶段 +N**（``DRAW_COUNT`` 挂点上的座位项）。"""
+
+    slash_damage_bonus: int = Field(default=0, ge=0, le=_MAX_SEAT_BONUS)
+    """常驻**造成伤害 +N**（``DAMAGE_DEAL_AMOUNT`` 挂点上的座位项；【杀】等牌的伤害同样吃）。"""
+
     kingdom: Kingdom | None = None
     gender: Gender | None = None
+
+    @model_validator(mode="after")
+    def _a_composite_seat_carries_its_template_name(self) -> "PveSeat":
+        """``hero`` 为空 = 合成武将：``name`` 是它**唯一**的身份事实（模板名）。
+
+        有武将的座位可以留空名字（显示取自武将表），故这一条只在没有武将时成立。
+        """
+        if self.hero is None and not self.name.strip():
+            raise ValueError(
+                "合成武将必须有 name（hero 为空时它就是模板名）："
+                "敌人不是武将表记录，名字没有别处可取"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_initial_hp_fits_under_the_effective_maximum(self) -> "PveSeat":
+        """``hp`` 可以低于但**不得高于**有效上限（``hp_max + hp_max_bonus``）。"""
+        ceiling = self.hp_max + self.hp_max_bonus
+        if self.hp > ceiling:
+            raise ValueError(
+                f"hp = {self.hp} 越过了有效体力上限 {ceiling}"
+                f"（hp_max {self.hp_max} + hp_max_bonus {self.hp_max_bonus}）："
+                "初始体力可以不满，但不能超过上限"
+            )
+        return self
 
 
 class PveConfig(BaseModel):
@@ -175,7 +228,7 @@ class PveConfig(BaseModel):
     :meth:`_grants_fit_the_growth_limits`，开局写入见 ``engine.game._apply_opening_grants``）。"""
 
     seats: tuple[PveSeat, ...] = ()
-    """逐座位合成武将与属性加成（语义与校验归票 10）。"""
+    """逐座位合成武将与属性加成（M7 票 10；语义与校验见 :meth:`_seats_line_up_with_the_identities`）。"""
 
     def seats_of(self, side: Identity) -> tuple[int, ...]:
         """属于 ``side`` 的座位（座位升序，**含已阵亡者**）。
@@ -183,6 +236,25 @@ class PveConfig(BaseModel):
         胜负的 ``winners`` 要列出全侧座位（与身份局同口径），故这里不筛存活。
         """
         return tuple(seat for seat, identity in enumerate(self.identities) if identity is side)
+
+    @model_validator(mode="after")
+    def _seats_line_up_with_the_identities(self) -> "PveConfig":
+        """座位表要么**整份缺席**，要么**逐座位齐全**（M7 票 10）。
+
+        - 空 = 老 PvE 局的形态（票 07/08/09），不强制升级；
+        - 非空 ⇒ 长度必须等于 ``identities`` 的长度：两张表是**同一批座位**的两面
+          （谁友谁敌 / 每座是谁），错位一格就会把敌人的属性装到友军身上。
+
+        与 ``player_count`` 的对位由 :meth:`RuleConfig._pve_section_matches_the_mode`
+        经 ``identities`` 那一关兑现——**座位数的唯一真源仍是 ``player_count``**。
+        """
+        if self.seats and len(self.seats) != len(self.identities):
+            raise ValueError(
+                f"seats 的长度必须等于 identities 的长度："
+                f"实得 {len(self.seats)} vs {len(self.identities)}"
+                "（座位表与阵营表是同一批座位的两面）"
+            )
+        return self
 
     @model_validator(mode="after")
     def _only_the_two_campaign_sides(self) -> "PveConfig":

@@ -29,6 +29,7 @@ from sgs.data import (
     Mode,
     PlacementReturn,
     PveConfig,
+    PveSeat,
     RuleConfig,
     SkillType,
     card_category,
@@ -46,6 +47,8 @@ from sgs.effects import (
     DamageNature,
     EffectContext,
     EffectStep,
+    ModifierContext,
+    ModifierPoint,
     PushFrame,
     Randomness,
     SLASH_FAMILY_KEY,
@@ -54,6 +57,7 @@ from sgs.effects import (
     WINE_DAMAGE_BONUS,
     apply_armor,
     apply_hp,
+    apply_modifiers,
     behavior_for,
     cap_of,
     delayed_settle_target,
@@ -94,6 +98,7 @@ from sgs.skills import (
     ActivationCandidate,
     MoveEvent,
     SeamKind,
+    SeatModifierKind,
     StateChange,
     advance_provider,
     awakening_skill_awakened,
@@ -124,6 +129,7 @@ from sgs.skills import (
     satisfy_awakening_condition,
     resolve_instances,
     seat_choice,
+    seat_persistent_bonus,
     start_provider,
     timing_hooks_present,
     transform_candidates,
@@ -7451,6 +7457,18 @@ class Engine:
         # M6 票 01：阶段体钩子可以把**基础摸牌数**改写（【突袭】0 = 放弃摸牌、【裸衣】少一张）。
         # 缺省仍是额定 DRAW_COUNT，故无技能时与旧路径逐字节相同。
         count = int(self._turn_data.pop("draw_count", DRAW_COUNT))
+        # **座位常驻摸牌加成**（M7 票 10）：`DRAW_COUNT` 挂点与遗物 / 技能同一条链，链尾那一项
+        # 由 `PveConfig.seats[seat].draw_bonus` 现算。没有座位表 / 没有消费者时链原样返回，
+        # 故标准局与老 PvE 局的摸牌数与记录流逐字节不变。
+        # **读法（刻意选的）**：链加在**消费那一刻**的基础值上，而基础值可能是阶段体刚改写过的
+        # （【突袭】`set_draw_phase_count(0)` / 【裸衣】少一张）⇒ 常驻 +N 与"放弃摸牌"叠加时
+        # +N 仍然生效。本期没有同时带两者的局面（PvE 座位表 + 这些武将技能），先钉这一条。
+        count = apply_modifiers(
+            ModifierPoint.DRAW_COUNT,
+            self.state,
+            ModifierContext(subject=seat, target=seat),
+            count,
+        )
         drawn = draw_from_deck(self.state, count, self._shuffle)
         if drawn.shuffle is not None:
             # 重洗只发**一条** deck_shuffle（记洗后顺序），不另发牌移动事件（票 08 §5 / 票 23）。
@@ -7871,13 +7889,23 @@ _IDENTITY_IS_PUBLIC_AT_START: frozenset[Identity] = frozenset(
 
 
 def _initial_player(
-    seat: int, identity: Identity | None, hero: Hero | None = None
+    seat: int,
+    identity: Identity | None,
+    hero: Hero | None = None,
+    pve_seat: PveSeat | None = None,
 ) -> Player:
     """开局座位：体力上限 / 势力 / 性别都由**武将数据**派生，主公 +1 的既有初始化段不动。
 
     无武将（``hero is None``）时三项全部回落到 ``None`` / 引擎常数 ``INITIAL_HP``，故 M2
     行为与 34 条基准不变。初始体力不进记录流（``Player`` 不在 header、也无 delta），
     故这一步不发 delta（票 13 §4）。
+
+    ``pve_seat``（M7 票 10）= **逐座位合成武将**的入口：PvE 的敌人不是武将表记录，故
+    体力 / 上限 / 势力 / 性别全部取自座位表（``hero`` 只是"这个座位还带武将牌技能"）。
+    体力上限的常驻加成在**开局写定、局内不变**（不落 ``hp_max_change``，见
+    :func:`sgs.skills.seat_persistent_bonus`）；座位字段没写势力 / 性别时退回武将数据。
+    座位表与 ``heroes=`` 两条入口互斥，故 ``pve_seat`` 非空时 ``hero`` 只可能是座位表
+    点名的那个武将；PvE 的座位也绝不会是主公（阵营只有友 / 敌），主公 +1 那一段进不来。
 
     ``gender`` 由票 12 从武将数据接线（票 02 曾把它钉成独立议题，
     ``test_the_gender_field_is_still_a_separate_concern`` 原先断言它恒空）：【结姻】/【离间】
@@ -7887,6 +7915,28 @@ def _initial_player(
     **主公 +1 只在身份局成立**（票 01 §3）：PvE 的友 / 敌不是主公，``Identity.LORD`` 的
     那一路读不到，故 PvE 不加体力；亮明口径见 ``_IDENTITY_IS_PUBLIC_AT_START``。
     """
+    if pve_seat is not None:
+        hp_max = pve_seat.hp_max + seat_persistent_bonus(
+            pve_seat, SeatModifierKind.HP_MAX
+        )
+        return Player(
+            seat=seat,
+            hp=min(pve_seat.hp, hp_max),
+            hp_max=hp_max,
+            identity=identity,
+            identity_visible=identity in _IDENTITY_IS_PUBLIC_AT_START,
+            gender=(
+                pve_seat.gender
+                if pve_seat.gender is not None
+                else (None if hero is None else hero.gender)
+            ),
+            hero=pve_seat.hero,
+            kingdom=(
+                pve_seat.kingdom
+                if pve_seat.kingdom is not None
+                else (None if hero is None else hero.kingdom)
+            ),
+        )
     hp_max = INITIAL_HP if hero is None else hero.hp_max
     # 初始体力值（lei-shenganning 票 01）：武将数据可以声明"开局体力低于上限"（神甘宁 3/6）。
     # **没声明 = 满体力**（= 上限，与引入本字段之前逐字节一致）。
@@ -7936,6 +7986,23 @@ def _apply_opening_grants(state: GameState, rule_config: RuleConfig) -> None:
             player.relics.append(grant.id)
 
 
+def _pve_seat_hero(spec: PveSeat, pack: ContentPack) -> Hero | None:
+    """座位表点名的武将（``hero=None`` ⇒ 合成武将，没有武将牌技能）。
+
+    **fail-closed**：点名的 id 不在内容包里时立刻报错——静默当成合成武将会让这一场
+    "少了一套武将牌技能"，而 header 看起来一切正常。
+    """
+    if spec.hero is None:
+        return None
+    hero = hero_by_id(spec.hero, pack_id=pack.pack_id)
+    if hero is None:
+        raise ValueError(
+            f"座位表点名的武将 {spec.hero!r} 不在内容包 {pack.pack_id!r} 里："
+            "座位表的 hero 必须是已登记的武将 id（合成武将请留空并写 name）"
+        )
+    return hero
+
+
 def build_initial(
     *,
     seed: int,
@@ -7970,23 +8037,51 @@ def build_initial(
     **开局授予**（M7 票 09）走 :func:`_apply_opening_grants`：``rule_config.pve.grants``
     的出战技能 / 遗物**直接写状态、不落 delta**（票 02 §10.4）。故标准局（``pve is
     None``）与不带 grants 的 PvE 局在 header 之后的记录流逐字节不变。
+
+    **逐座位合成武将**（M7 票 10）= 第二条"谁坐这个座位"的入口：``rule_config.pve.seats``
+    非空时每位座位从**座位表**起（``hero=None`` ⇒ 合成武将、没有武将牌技能），此时
+    ``heroes`` / ``hero_pool`` / ``pinned_hero`` / ``hero_config`` 全部不许给——两条入口
+    同时生效会让"这一场是谁"取决于调用方怎么传，header 自证当场失效。座位表在 header 里
+    （``PveConfig.seats``），故重开一局只读 header 就能重建同一场；它**不消耗** ``hero``
+    子流（没有武将可抽），新增子流名的既有纪律因此也不受影响。
     """
-    dealt = deal_heroes(
-        seat_count=rule_config.player_count,
-        stream=RandomSource(seed).substream("hero"),
-        heroes=heroes,
-        hero_pool=hero_pool,
-        pinned_hero=pinned_hero,
-        pinned_seat=pinned_seat,
-        hero_config=hero_config,
+    seats = () if rule_config.pve is None else rule_config.pve.seats
+    if seats and (
+        heroes or hero_pool is not None or pinned_hero is not None or hero_config is not None
+    ):
+        raise ValueError(
+            "PvE 座位表（rule_config.pve.seats）与 heroes= / hero_pool= / pinned_hero= / "
+            "hero_config= 互斥：谁坐哪个座位已经由 header 里的座位表定死（录像要能自证同一场）"
+        )
+    dealt = (
+        None
+        if seats
+        else deal_heroes(
+            seat_count=rule_config.player_count,
+            stream=RandomSource(seed).substream("hero"),
+            heroes=heroes,
+            hero_pool=hero_pool,
+            pinned_hero=pinned_hero,
+            pinned_seat=pinned_seat,
+            hero_config=hero_config,
+        )
     )
     cards = instantiate_cards(pack)
     identities = _deal_identities(seed=seed, rule_config=rule_config)
+    seat_heroes = (
+        tuple(_pve_seat_hero(spec, pack) for spec in seats)
+        if seats
+        else tuple(
+            None if dealt is None else hero_by_id(dealt[seat], pack_id=pack.pack_id)
+            for seat in range(rule_config.player_count)
+        )
+    )
     players = tuple(
         _initial_player(
             seat,
             identities[seat] if identities is not None else None,
-            None if dealt is None else hero_by_id(dealt[seat], pack_id=pack.pack_id),
+            seat_heroes[seat],
+            None if not seats else seats[seat],
         )
         for seat in range(rule_config.player_count)
     )
