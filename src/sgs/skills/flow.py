@@ -1343,6 +1343,16 @@ ARRANGE_CARDS_KEY = "arrange_cards"
 牌 id 元组，会随新牌自然分开）。
 """
 
+TWO_ROW_TOP_KEY = "two_row_arrange_top"
+"""``TwoRowArrange`` 首跑时的**上排张数快照**（帧私有，键同 ``ARRANGE_CARDS_KEY``）。
+
+为什么需要快照：牌面已经存在 ``ARRANGE_CARDS_KEY`` 里（首跑那一份），而 ``top`` / ``count``
+是**现算**的。重入时如果牌堆已经变了，现算的 ``count`` 与缓存牌面的长度就对不上 ——
+【罪论】正是这样：它的效果先把"获得"那叠移进手牌才可能挂起（移动触发 ``MOVE_AFTER``
+钩子），续跑回到本步时牌堆少了几张，而缓存里的牌面还是三张。**同一份输入只读一次**
+（`CODING_STANDARDS.md` §3 的帧私有键纪律）：牌面与切分在首跑一起定格，重入照抄。
+"""
+
 
 def watched_cards(frame: Any, flow: SkillFlow, step_key: str) -> tuple[CardRef, ...]:
     """``Arrange`` 步在本帧里**观看**的牌（帧私有 peek 缓存的读取口，W6-02）。
@@ -1383,13 +1393,18 @@ def _flow_step_arrange(
     if isinstance(spec, TwoRowArrange):
         # 两行交换（huo-shenzhugeliang 票 02）：牌由规格自己回答，不碰牌堆。
         if ask_owner not in cache:
-            cache[ask_owner] = spec.cards_of(host.state, frame)
-        cards: tuple[CardRef, ...] = cache[ask_owner]
+            # 首跑：牌面与上排张数**一起**定格；声明一致性（count == 牌面张数、top 在面内）
+            # 也只在这里核一次——重入时牌堆可能已经变了（见 ``TWO_ROW_TOP_KEY``）。
+            cards = tuple(spec.cards_of(host.state, frame))
+            top = spec.top_of(host.state, frame)
+            if spec.count_of(host.state, frame) != len(cards) or not 0 <= top <= len(cards):
+                raise ValueError("TwoRowArrange 的张数 / 上排张数与实际牌面不符（声明写错了）")
+            cache[ask_owner] = cards
+            frame.data.setdefault(TWO_ROW_TOP_KEY, {})[ask_owner] = top
+        cards = cache[ask_owner]
         if not cards:
             return "cancel", None
-        top = spec.top_of(host.state, frame)
-        if spec.count_of(host.state, frame) != len(cards) or not 0 <= top <= len(cards):
-            raise ValueError("TwoRowArrange 的张数 / 上排张数与实际牌面不符（声明写错了）")
+        top = frame.data[TWO_ROW_TOP_KEY][ask_owner]
         action = host.ask_arrange(
             frame,
             actor,

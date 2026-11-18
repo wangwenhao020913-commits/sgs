@@ -962,6 +962,21 @@ def test_the_seeded_harvest_target_that_dies_before_its_pick_is_skipped():
     assert not engine.state.players[1].equip and not engine.state.players[1].judge
 
 
+def test_the_seeded_seven_player_zuilun_arrange_resumes_after_a_hung_move():
+    """回归（合并门禁的 fuzz 抓到；**预现存于** `3e45ad1`）：两行排列续跑时按活状态重算张数。
+
+    seed=7342344365988868600 / 7 人局里有诸葛瞻【罪论】：它的效果先把"获得"那叠移进手牌，
+    移动触发 ``MOVE_AFTER`` 钩子时挂起；续跑时流水线从头重跑第一步，旧实现那里按**活状态**
+    现算 ``count`` / ``top``，而牌面读的是首跑缓存（三张）——牌堆此时已被效果搬走几张 ⇒
+    ``ValueError: TwoRowArrange 的张数 / 上排张数与实际牌面不符（声明写错了）``。
+
+    修复 = ``sgs.skills.flow.TWO_ROW_TOP_KEY``：牌面与上排张数在**首跑一起定格**、重入照抄
+    （`CODING_STANDARDS.md` §3 的帧私有键纪律）。本用例只钉"这一局现在跑完且不变量全绿"，
+    不重录任何基准、不改 `tests/replays/`。
+    """
+    _play_and_check(7342344365988868600, players=7, deadline=time.monotonic() + 120)
+
+
 def test_the_player_rotation_covers_the_six_identity_branches():
     """六档轮转是确定性的，且 2 人档（无身份分支）确在轮转里（票 17 §2）。"""
     rotation = [_players_for(index) for index in range(len(PLAYER_ROTATION))]
