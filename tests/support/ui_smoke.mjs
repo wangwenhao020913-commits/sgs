@@ -775,26 +775,39 @@ const submitLobby = async () => {
  *
  *  判据 = 回放队列空 **且**当前视图停在暂停点上（有询问 / 已终局）。建局响应本身
  *  没有询问，故它不满足第一条判据 —— 于是这个循环等的就是 `finishPlayback` 里那次
- *  `refresh()` 的回包（真 HTTP 往返，故按 5 ms 让出事件循环，最多 3 秒）。 */
+ *  `refresh()` 的回包（真 HTTP 往返，故每轮让出事件循环，最多 60 秒）。 */
 const settleOpening = async () => {
-  // 预算按**迭代次数**给，不按墙钟：每轮是一次真 HTTP 往返，耗时随机器负载漂移，原来的
-  // "5 秒墙钟"在共享 runner 上会把"慢"判成"错"（2026-11-13 复现：12 轮里 1 轮红）。
-  // 另留一条宽松的墙钟上限（60 s），只用来兜"真卡死"，不参与正常判据。
-  const deadline = Date.now() + 60000;
-  for (let attempt = 0; attempt < 600 && Date.now() < deadline; attempt += 1) {
+  // 预算 = **墙钟**，不是迭代次数（2026-11-18 修正）：每轮是一次真 HTTP 往返，RTT 随负载
+  // 从约 2 ms 涨到十几毫秒 ⇒ 旧的"600 轮"在慢机器上只有 1–3 秒耐心，**比它想替换掉的
+  // "5 秒墙钟"还短**，于是又把"慢"判成"错"（11-14 / 11-17 / 11-18 各复现一次）。
+  // 现在只留一条宽预算（60 s）兜"真卡死"：机器慢 ⇒ 多花时间，不误判。
+  const startedAt = Date.now();
+  const deadline = startedAt + 60000;
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    attempts += 1;
     ui.flushPlayback();
     const view = ui.state.view;
     if (!ui.state.playback && view && (view.pending || view.finished)) return view;
     // 中间态（开局批里 AI 的五谷逐目标暂停 / 还没轮到人类）：真客户端靠 2 s 轮询继续；
     // 烟测的计时器是空实现，故这里显式再取一次增量（与 `finishPlayback` 的立即 refresh
     // 同一条路）。判据仍是"停在人类的询问上或已终局"，没有放宽。
-    if (!ui.state.playback && ui.refresh) {
-      await ui.refresh();
-      continue;
+    // 推进标记用 `logSeq`（服务端下发、只增）：它变了 = 这一轮拿到了新记录（快路径不睡）；
+    // 没变 = 服务端还在算开局批，让 10 ms 再问，别把轮询打成 CPU 空转。
+    const progress = ui.state.logSeq;
+    if (!ui.state.playback && ui.refresh) await ui.refresh();
+    if (ui.state.logSeq === progress) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  throw new Error("开局批播完之后没有拿到下一份视图（票 14 的立即 refresh 没发生？）");
+  // 失败串自带轮数 / 耗时 / 末态：下一次红不必再翻日志猜是"卡死"还是"没刷新"。
+  const lastView = ui.state.view;
+  throw new Error(
+    "开局批播完之后没有拿到下一份视图（票 14 的立即 refresh 没发生？）"
+      + `——${attempts} 轮 / ${Date.now() - startedAt} ms，`
+      + `playback=${Boolean(ui.state.playback)}，`
+      + `view=${lastView ? `pending=${Boolean(lastView.pending)} finished=${Boolean(lastView.finished)}` : "null"}`,
+  );
 };
 /** 只提交开局表单、**不**冲刷开局批（返回时 `state.view` 可能还是 null / 上一局）。 */
 const submitLobbyRaw = async () => {

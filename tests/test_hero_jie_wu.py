@@ -1248,7 +1248,11 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
         record.kind == "query"
         and JIEYIN in (getattr(record.query, "preactivations", None) or {})
         for record in engine.records
-    ), "该种子必须真的走到界【结姻】的候选，否则它不再覆盖本回归（需重新选种）"
+    ), (
+        "该种子必须真的走到界【结姻】的候选，否则它不再覆盖本回归"
+        "（换池后要重新选种：判据与扫描脚本见本测试 docstring，取首个命中后同步改 seed 与"
+        " docstring 里的实测读数）"
+    )
 
 
 def _standard_jieyin_engine():
