@@ -1,9 +1,9 @@
 r"""界一将成名-2014·移动版 界曹真【司敌】（jie-yijiang-2014-wuyi-caozhen 票 03；用户 2026-11-18 签）。
 
-牌面（移动版 WIKI「经典」段 = 用户资产，逐字）：
+牌面（移动版 WIKI「经典」段 = 用户资产，逐字；②的牌型按用户 2026-11-18 的补正）：
 
-    ①当你使用非延时锦囊牌结算完毕后，你可以选择一名其他角色，预测其使用的下一张非延时类
-      锦囊牌指定的唯一目标。
+    ①当你使用**除延时锦囊牌以外的牌**结算完毕后，你可以选择一名其他角色，预测其使用的
+      下一张**除延时锦囊牌以外的牌**指定的唯一目标。
     ②若你预测正确且该目标：
       【是你】你摸一张牌；
       【不是你】你选择一项：
@@ -13,10 +13,13 @@ r"""界一将成名-2014·移动版 界曹真【司敌】（jie-yijiang-2014-wuy
 **用户 2026-11-18 的六条口径**（裁定票 ``04-caozhen-ruling.md`` 的 Q1–Q6）：
 
 - **Q1 = A**：实现移动版「预测型」（= 用户资产 = 移动版 WIKI 的当前版本）。
+- **牌型口径（用户 2026-11-18 补正）**：①与②的牌型都是「**除延时锦囊以外的任何牌**」
+  （基本牌 / 普通锦囊 / 装备牌都算）。用户原文：「这里是一个歧义点，其实是【除延时锦囊外的
+  任何牌】；包括预测也是【除延时锦囊外的任何牌】+唯一目标；如果要表示「非延时**锦囊**牌」，
+  一般采用"普通锦囊牌"这个说法。」⇒「非延时锦囊牌」不是官方用语，本技能**不**按它收窄。
 - **Q3 = B（锚点 = 下一张**任意**牌）**：被预测的角色**使用任意一张牌**时立刻判定——
-  中 / 没中就那一下、判完**立刻清除**。故 ① 的触发仍是"你使用非延时锦囊牌"，但 ② 的锚点
-  不是"下一张非延时锦囊"，而是"他使用的下一张牌"（与同一份资产的 tips 对齐；与 ① 的逐字
-  有张力，那一处由 Q3 一次裁掉）。
+  中 / 没中就那一下、判完**立刻清除**。② 的锚点因此与 ① 的牌型**同一档**（除延时锦囊以外
+  的任何牌），两者一起由 Q3 + 2026-11-18 的牌型补正定死。
 - **Q2 = 使用者挨打**：「你对其造成1点伤害」的「其」= **使用那张牌的角色**（被预测者），
   不是预测的目标角色。一手依据：2021-12-13 移动版技改公告的改动前文本里「其使用此牌…
   你对其造成1点伤害」的「其」就是使用者；用户给的例子（界曹真预测骆统以吕布为目标、
@@ -45,7 +48,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import Category, SkillType, card_category, hero_skill_id
+from sgs.data import SkillType, hero_skill_id
 from sgs.effects import CarrierKind, behavior_for
 from sgs.resolution import Frame
 from sgs.state import FrameKind, GameState
@@ -91,17 +94,20 @@ SIDI_DRAW_TWO = "sidi:draw_two"
 """② 二选一的选项 id：摸两张牌。"""
 
 _REQUIREMENT = (
-    "当你使用非延时锦囊牌结算完毕后，你可以选择一名其他角色，"
+    "当你使用除延时锦囊牌以外的牌结算完毕后，你可以选择一名其他角色，"
     "预测其使用的下一张牌指定的唯一目标"
 )
-"""① 的发动文案（``SkillDef.requirement``）：牌面 ① 的逐字 + Q3 的锚点口径（"下一张牌"）。"""
+"""① 的发动文案（``SkillDef.requirement``）：牌型 = 除延时锦囊以外的任何牌（用户 2026-11-18
+补正）；锚点 = 他使用的下一张牌（Q3 = B）。"""
 
 
-def _is_non_delayed_trick(state: GameState, card: Any) -> bool:
-    """这张牌是不是**非延时锦囊牌**（① 的牌型闸；读**产物**牌型，转化 / 视为使用同样算）。"""
+def _is_non_delayed_card(card: Any) -> bool:
+    """这张牌是不是**除延时锦囊以外的牌**（① 的牌型闸；读**产物**牌型，转化 / 视为使用同样算）。
+
+    用户 2026-11-18 的口径：基本牌 / 普通锦囊 / 装备牌都算，只有**延时锦囊**（
+    ``behavior.is_delayed``，【乐不思蜀】/【兵粮寸断】/【闪电】一类）不算。
+    """
     if card is None:
-        return False
-    if card_category(state.pack_id, card.type) is not Category.TRICK:
         return False
     return not behavior_for(card).is_delayed
 
@@ -131,9 +137,9 @@ def _sidi_target_pool(state: GameState, frame: Frame, owner: int, chosen: tuple[
 
 
 def _sidi_predict_condition(host: Any, frame: Frame) -> bool:
-    """① 的条件：**这张（非延时锦囊）牌是我用的** ∧ 还有可以指定的其他角色。
+    """① 的条件：**这张（除延时锦囊以外的）牌是我用的** ∧ 还有可以指定的其他角色。
 
-    自校三件：``MATCH_OWNER_KEY`` 指向我、``frame.data["source"]`` 是我、牌型是**非延时锦囊**。
+    自校三件：``MATCH_OWNER_KEY`` 指向我、``frame.data["source"]`` 是我、牌型**不是延时锦囊**。
     池为空（所有其他角色都已在预测中）⇒ 候选阶段就不产出（不发没有候选的询问）。
     """
     owner = frame.data.get(MATCH_OWNER_KEY)
@@ -142,7 +148,7 @@ def _sidi_predict_condition(host: Any, frame: Frame) -> bool:
     owner = int(owner)
     if frame.data.get("source") != owner:
         return False
-    if not _is_non_delayed_trick(host.state, frame.data.get("card")):
+    if not _is_non_delayed_card(frame.data.get("card")):
         return False
     return bool(_sidi_predict_pool(host.state, owner))
 

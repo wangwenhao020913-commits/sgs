@@ -3630,6 +3630,99 @@ def test_sidi_is_not_offered_when_every_other_character_is_already_predicted():
     assert table.activation_queries == 0, "没有可指定的其他角色 ⇒ 连问都不问（G1）"
 
 
+def test_sidi_triggers_on_a_basic_card_and_on_an_equipment():
+    """① 的牌型 = **除延时锦囊以外的任何牌**（用户 2026-11-18 的补正）。
+
+    「非延时锦囊牌」不是官方用语（官方写「普通锦囊牌」）⇒【杀】/ 装备牌同样让 ① 出现。
+    """
+    for card_type in ("slash", "renwang_shield"):
+        card = cards_of_type(PACK, card_type)[0]
+        state = _sidi_state(mine=card, user=cards_of_type(PACK, "slash")[-1])
+        engine = Engine.from_state(state, seed=31)
+        table = _SidiTable(card=card, predicted=1, predicted_target=2)
+        _run_sidi(engine, table, lambda e: bool(e.state.player(0).sidi_marks))
+        assert table.activation_queries == 1, f"{card_type} 应当让 ① 出现"
+        assert engine.state.player(0).sidi_marks == {1: 2}
+
+
+class _SidiDodgeTable:
+    """座位 1 用【杀】打座位 0（回合外），座位 0 = 界曹真用【闪】响应 ⇒ ① 该触发。"""
+
+    def __init__(self, *, slash: int, dodge: int) -> None:
+        self.slash = slash
+        self.dodge = dodge
+        self.attack_used = False
+        self.activations = 0
+        self.seats = 0
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 1 and not self.attack_used:
+            self.attack_used = True
+            return _pick_use(query, self.slash, (0,))
+        if query.kind == QueryKind.PLAY_PHASE:
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        if query.kind == QueryKind.DODGE and query.actor == 0:
+            return _pick_use(query, self.dodge, ())
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            self.activations += 1
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            if any(
+                isinstance(action, SelectOption)
+                and action.choice.startswith("seat:")
+                for action in query.legal_actions
+            ):
+                self.seats += 1
+                want = "seat:1" if self.seats == 1 else "seat:2"
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectOption) and action.choice == want
+                )
+        return PassPlayer().respond(query)
+
+
+def test_sidi_triggers_on_a_dodge_played_outside_my_turn():
+    """用户 2026-11-18 报障的场景：**回合外**用【闪】响应【杀】也要能发动 ①。
+
+    【闪】自己就是"除延时锦囊以外的牌"（它走完整的 USE 帧，`RESOLVE_AFTER_END` 照常派发）。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    deck = deck_excluding(PACK, slash, dodge)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=CAOZHEN,
+                hand=(dodge,),
+                hp=4,
+                hp_max=4,
+                identity=Identity.LORD,
+            ),
+            SeatSpec(hand=(slash,), hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=deck,
+        turn_seat=1,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=32)
+    table = _SidiDodgeTable(slash=slash, dodge=dodge)
+    _run_sidi(engine, table, lambda e: bool(e.state.player(0).sidi_marks))
+    assert table.activations == 1, "回合外用【闪】响应【杀】也要让 ① 出现"
+    assert engine.state.player(0).sidi_marks == {1: 2}
+    assert _markers(engine.state, 1) == (SIDI_MARK,)
+
+
 def test_sidi_draws_one_when_the_predicted_target_is_the_owner():
     trick = _non_delayed_trick()
     slash = cards_of_type(PACK, "slash")[0]
