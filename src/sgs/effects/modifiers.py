@@ -198,6 +198,16 @@ class ModifierPoint(str, Enum):
     万箭 / 桃园 / 五谷）的目标数由候选池决定，查链会造出**非法子集**，故读者
     （``_play_phase`` / ``_respond`` 的 USE 趟 / ``virtual_card_use``）只在 RATED 档派发。
 
+    ``TARGET_SET_FILTER``（yijiang-2014-wuyi-caozhen 票 05）：**组合级**目标资格——一次使用的
+    **整组目标**在枚举期逐组过一遍链，``current`` 从 ``True`` 起、回调**只许收窄**（返回假 =
+    这一组不合法）；``ctx.use_targets`` = 这一组本身（有序元组）。它服务的是"同一个组合里
+    **基础目标**与**额外目标**的资格不同"这一类需求（首个消费者 = 界吴懿移动版【奔袭】②
+    「额外指定至多 X 名**你计算与其距离为 1** 的角色」）。与另外三个碰目标的挂点分工：
+    ``TARGET_COUNT`` 改**数目**、``TARGET_POOL`` 改**池成员**、``TARGET_RANGE_EXEMPT`` 放宽
+    **距离**，只有本挂点能表达"整组合法吗"。求值点 = :func:`sgs.effects.filter_target_sets`
+    （``target_combos`` 之后、``CANDIDATES`` 之前的那一处）；**没有注册本挂点的修饰器时
+    入参原样返回**，故既有四个多目标载体（方天 / 天义 / 雄乱 / 决堰）的候选逐字节不变。
+
     **伤害数值为什么分成两个挂点**（M5-03）：连环传导的合同要求"来源侧加伤只算一次、
     传导目标只再吃自己的受到伤害修正"（spec §5.1.1 第 6 条）。两个挂点把这条读法变成
     **结构事实**：:func:`damage_amount` 只在 ``chain=False`` 的源头伤害帧上派发
@@ -212,6 +222,7 @@ class ModifierPoint(str, Enum):
     TARGET_RANGE_EXEMPT = "TARGET_RANGE_EXEMPT"
     TARGET_POOL = "TARGET_POOL"
     TARGET_COUNT = "TARGET_COUNT"
+    TARGET_SET_FILTER = "TARGET_SET_FILTER"
     DISTANCE = "DISTANCE"
     EFFECTIVENESS = "EFFECTIVENESS"
     FORBIDDEN = "FORBIDDEN"
