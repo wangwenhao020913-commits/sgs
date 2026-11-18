@@ -3002,6 +3002,24 @@ def _coverage_limu():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_wuyi():
+    """势赵云【武翊】（bingshi-jie 票 01）：已翻预发动 ⇒ 清单一格"选目标"。
+
+    局面：X = 1（已解锁第 1 档）、手里只有一张【闪】（**出牌阶段用不出去** ⇒ 出牌阶段的可选项
+    只有"发动武翊"与"结束阶段"，AI 才真的会去点技能），对面存活 ⇒ 清单渲得出、AI 填得出
+    一次合法发动（复合动作 = ``choices=("seat:1",)``）。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="shi_zhaoyun", hand=(dodge,)), SeatSpec()],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    state.player(0).wuyi_names = ("dodge",)
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_jie_guose():
     """界大乔【国色】（sp8-liuyan 票 04）：已翻预发动 ⇒ 清单 = 选项 → 方块牌 → 目标座。
 
@@ -3425,6 +3443,8 @@ _COVERAGE_CASES = {
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【渐营】②（已翻预发动，两步清单：
     # 选一张牌 → 选当作哪一张基本牌；① 的那个钩子与它共用同一个技能 id）。
     "hero.jie_jushou_mobile.jianying": _coverage_jie_jianying,
+    # bingshi-jie 票 01：势赵云【武翊】（已翻预发动，一步清单：选视为使用【杀】的目标）。
+    "hero.shi_zhaoyun.wuyi": _coverage_wuyi,
     # jie-yijiang-2014-mobile 票 01：界陈群移动版【定品】（已翻预发动，两步清单）。
     "hero.jie_chenqun_mobile.dingpin": _coverage_dingpin,
     # jie-yijiang-2014-mobile 票 02：界顾雍移动版【慎行】（已翻预发动，单步清单）。

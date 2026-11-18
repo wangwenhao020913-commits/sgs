@@ -41,7 +41,7 @@ import pytest
 
 import sgs.agents as agents
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
-from sgs.effects import hand_count, hand_limit
+from sgs.effects import fixed_hand_count, hand_count, hand_limit
 from sgs.engine import (
     CardMoveRecord,
     DeckShuffleRecord,

@@ -781,6 +781,25 @@ def _luoyi_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return {"tag": "luoyi", "label": "裸衣"}
 
 
+def _wuyi_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """势赵云【武翊】的座位标签 = **本局从手牌使用 / 打出的基本牌牌名数**（bingshi-jie 票 01）。
+
+    用户原话（2026-11，逐字）：「需要一个组件，显示（武翊X），X为拥有此技能后从手牌使用
+    或打出的基本牌名称数」。判据一字不改地取既有读口 ``Player.wuyi_names``（技能层自己的
+    计数钩子写的座位事实；去重、整局累计、属性【杀】并入【杀】，见 `models.py` 的字段注）。
+    投影**不数数**、不按技能 id 猜。
+
+    **X = 0 也返回**——与【勤政】同一条 fail-closed 例外：它是玩家要看的分母（"还差几个
+    牌名"到第 2/3/4 档）。
+
+    **载荷只有 ``{"tag", "label"}``**：纯数字、没有逐段上色的需求 ⇒ 不带 ``parts``。
+    """
+    return {
+        "tag": "wuyi",
+        "label": f"武翊 {len(state.player(seat).wuyi_names)}",
+    }
+
+
 def _qinzheng_badge(state: Any, seat: int) -> dict[str, Any] | None:
     """骆统【勤政】的座位标签 = **本局**「使用 / 打出」张数（skill-display 票 03）。
 
@@ -1040,6 +1059,9 @@ BADGE_PROVIDERS: Mapping[
         "hero.jie_xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
         # 【勤政】恒显（含 X = 0）：读整局张数，没有"值不存在"的形态。
         "hero.luotong.qinzheng": (BadgeScope.SELF, _qinzheng_badge),
+        # 势赵云【武翊】（bingshi-jie 票 01）：读 ``Player.wuyi_names`` 的去重牌名数，
+        # 同样恒显（含 X = 0）——它是"还差几个牌名"的进度分母。
+        "hero.shi_zhaoyun.wuyi": (BadgeScope.SELF, _wuyi_badge),
         # 【渐营】两版都挂（spec §5 第 04 行 / Q11）：同一个构造器、同一个座位字段。
         "hero.jushou.jianying": (BadgeScope.SELF, _jianying_badge),
         "hero.jie_jushou_mobile.jianying": (BadgeScope.SELF, _jianying_badge),
@@ -1937,12 +1959,23 @@ def _skill_of_query(engine: Any, query: Query, data: dict[str, Any]) -> str | No
         return str(skill_id)
     if data.get("running_skill"):
         return str(data["running_skill"])
+    # 挂起中的「失去牌后」：`running_skill` 已被 `move_in_frame` 还原，答案在另一个槽
+    # （bingshi-jie 票 01；样本 = 【武翊】④ 在重铸 / 弃牌阶段里的那一问）。
+    if data.get("suspended_skill"):
+        return str(data["suspended_skill"])
     frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
     if frames and getattr(frames[-1], "kind", None) is FrameKind.SKILL and data.get("skill_id"):
         return str(data["skill_id"])
     phase_body = getattr(engine, "phase_body_skill", None)
     if callable(phase_body):
         running = phase_body()
+        if running:
+            return str(running)
+    # 帧外派发（弃牌阶段的弃置 / 摸牌的「失去牌后」）：承载帧不在栈上，挂起的临时帧住在
+    # 引擎的 `_move_pending` 里（bingshi-jie 票 01 的加法）——【武翊】④ 的选牌文案就靠它。
+    pending_dispatch = getattr(engine, "pending_dispatch_skill", None)
+    if callable(pending_dispatch):
+        running = pending_dispatch()
         if running:
             return str(running)
     return None
@@ -2542,27 +2575,36 @@ def issued_manifest(query: Any, skill_id: str) -> tuple[Any, ...] | None:
 
 
 def _preview_supported(query: Any) -> bool:
-    """这一问的清单能不能走**步骤预览**（票 11）：任一清单的技能有流水线即可。
+    """这一问的清单能不能走**步骤预览**（票 11）：这一问下发的**每一份**清单都有流水线才行。
 
     判据与 :func:`issued_manifest` 同源（预览端点自己也会再核一次"这一问有没有那份清单"），
-    只是这里只回答"值不值得让前端去问"：没有流水线的技能（转化清单的【龙胆】一类、
-    借刀的附带指定清单）根本没有池回调可现算，声明能力只会让界面白问一次并落到
+    只是这里只回答"值不值得让前端去问"：没有流水线的技能（转化清单的【丈八蛇矛】/【龙胆】
+    一类、借刀的附带指定清单）根本没有池回调可现算，声明能力只会让界面白问一次并落到
     fail-closed 的提示上。
+
+    **`preview` 是"这一问"级别的开关，而前端把它用在每一份清单上**（`preactivation.js`
+    的 `preactivationPreviewEnabled(pending)`）：所以这里是 **all** 而不是 any——只要这一问
+    里还挂着一份没有流水线的清单（例：出牌阶段同时有【武翊】的清单与【丈八蛇矛】的转化
+    清单），整问都不声明，界面照旧读各步的静态池。曾经写成 any ⇒ 点【丈八蛇矛】就发一次
+    预览、端点按"没有预发动清单"拒掉、界面落到「取不到候选，请重试」（用户 2026-11-18
+    实机报障）。
     """
     from sgs.skills import flow_for
 
     timing = getattr(query, "timing", None)
+    issued: list[str] = []
     for attribute in (
         "activation_preactivations",
         "preactivations",
         "transform_preactivations",
     ):
-        for skill_id in (getattr(query, attribute, None) or {}):
-            if flow_for(skill_id, timing) is not None:
-                return True
+        for skill_id, steps in (getattr(query, attribute, None) or {}).items():
+            if steps:
+                issued.append(str(skill_id))
     single = getattr(query, "preactivation", ()) or ()
-    skill_id = getattr(query, "skill_id", None)
-    return bool(single) and flow_for(skill_id, timing) is not None
+    if single:
+        issued.append(str(getattr(query, "skill_id", "")))
+    return bool(issued) and all(flow_for(skill_id, timing) is not None for skill_id in issued)
 
 
 def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:

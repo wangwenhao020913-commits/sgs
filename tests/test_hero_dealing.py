@@ -222,6 +222,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     sp1 = load_heroes("sp1")
     shan = load_heroes("shan")
     shiji_zhi = load_heroes("shiji_zhi")
+    bingshi_jie = load_heroes("bingshi_jie")
     expected = tuple(
         hero.id
         for table in (
@@ -248,6 +249,9 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
             sp8,
             # sp1-sunshangxiang-maliang 票 01：SP武将组1 同样追加在**末尾**（马良 = 新真名）。
             sp1,
+            # bingshi-jie 票 01：兵势篇-节包（势赵云）同样追加在**末尾**——真名「赵云」已在
+            # 池里（与标准 / 界赵云版本并存、一局只出一个）。
+            bingshi_jie,
         )
         for hero in table.heroes
         if hero.enabled
@@ -268,7 +272,8 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     # shan-baozuoci 票 04：山包·左慈（新真名）⇒ 102 → 103。
     # shiji-zhi-luotong-chenzhen 票 02：始计篇-智包·陈震（新真名）⇒ 104 → 105。
     # shiji-zhi-luotong-chenzhen 票 01：始计篇-智包·骆统（新真名）⇒ 105 → 106。
-    assert len(expected) == 111
+    # bingshi-jie 票 01：兵势篇-节包·势赵云（真名不变）⇒ 111 → 112。
+    assert len(expected) == 112
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -339,8 +344,9 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     # shiji-zhi-luotong-chenzhen 票 02：加陈震 ⇒ 105。
     # shiji-zhi-luotong-chenzhen 票 01：加骆统 ⇒ 106。
     # sp1-sunshangxiang-maliang 票 01：加马良 ⇒ 107。
+    # bingshi-jie 票 01：加势赵云 ⇒ 112。
     ids = enabled_hero_ids()
-    assert len(ids) == 111
+    assert len(ids) == 112
 
     for hero_id in ids:
         heroes = _heroes_of(

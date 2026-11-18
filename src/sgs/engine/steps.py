@@ -2218,12 +2218,26 @@ def reforge_lose_card(host: FrameHost, frame: Frame) -> Control:
     )
 
 
+REFORGE_DRAWN = "reforge:drawn"
+"""帧私有：重铸的那一张已经摸过（挂起续跑不再摸第二张，bingshi-jie 票 01）。
+
+`draw_for_hand` 会内联派发「获得牌后」并可能挂起（【清俭】一类）——那一次本步返回
+``"stay"``、MOVE 帧留在栈上；续跑会**重入本步**，没有游标就再摸一张（实机现象：手牌
+多出一张、且【武翊】④ 在同一帧里的两次回填把这件事放大成"弃一张又摸一张"）。与
+:mod:`sgs.skills.hero_sp8` 的"游标先落、再摸"同一条纪律。
+"""
+
+
 def reforge_draw(host: FrameHost, frame: Frame) -> Control:
     """重铸第二步：摸一张牌（与其它摸牌同一 ``shuffle`` 子流、同一短摸口径）。
 
     摸牌也算「获得牌」（票 24）之后，这一摸可能触发【清俭】并挂起；帧步**必须**把
     ``"stay"`` 原样返回，否则本步被当成"完成"、MOVE 帧出栈，待答询问失去归属。
+    **游标先落**（:data:`REFORGE_DRAWN`）：续跑重入时直接收尾，不再摸第二张。
     """
+    if frame.data.get(REFORGE_DRAWN):
+        return None
+    frame.data[REFORGE_DRAWN] = True
     if host.draw_for_hand(frame, frame.data["source"], 1) == "stay":
         return "stay"
     return None

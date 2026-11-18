@@ -462,6 +462,37 @@ ALLOWLIST: dict[Site, Rule] = {
         "_zhuhai_plan",
         'and satisfies_required(state.card(card_id), "slash")',
     ): Rule(FAMILY, 1, "available 判据与选择面同源（family-aware，避免「计划问、步骤却付不起」）"),
+    # ---- skills/active.py：势赵云【武翊】（bingshi-jie 票 01）----
+    (
+        "src/sgs/skills/active.py",
+        "_wuyi_name_of",
+        'return "slash"',
+    ): Rule(
+        FAMILY,
+        1,
+        "武翊的 X 数的是**牌名**：属性【杀】并入【杀】（用户 2026-11-18 签 Q1 = A）——"
+        "这一行就是族判据的出口（上游 `is_slash` 判族后再落到这里）",
+    ),
+    (
+        "src/sgs/skills/active.py",
+        "_wuyi_offers",
+        'card = pure_virtual_card(state, "slash")',
+    ): Rule(
+        NORMAL,
+        1,
+        "① 的**产物**是普通【杀】牌型（牌面逐字「视为使用一张【杀】」）；合法目标的族判据"
+        "在下游 `check_targets` / 行为表，不在这里判",
+    ),
+    (
+        "src/sgs/skills/active.py",
+        "_wuyi_slash_targets",
+        'return check_targets(state, owner, pure_virtual_card(state, "slash"))',
+    ): Rule(NORMAL, 1, "同一产物牌型：目标池 = 普通【杀】的常规规则（距离由 ③ 的修饰器决定要不要查）"),
+    (
+        "src/sgs/skills/active.py",
+        "_wuyi_effect",
+        'pure_virtual_card(host.state, "slash"),',
+    ): Rule(NORMAL, 1, "提交点开出的也是同一张普通【杀】产物（normal-only 产物，非族判据）"),
     # ---- skills/virtual.py：虚拟牌命名空间与产物 ----
     (
         "src/sgs/skills/virtual.py",

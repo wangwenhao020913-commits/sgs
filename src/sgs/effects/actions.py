@@ -161,12 +161,43 @@ def hand_count(state: GameState, player: Player) -> int:
     ``len(hand)``（spec §投影与记录流：标签的增删不改变那个公开数字）。
     """
     return sum(
-        1
-        for card_id in player.hand
-        if not any(
-            card_tag_spec(tag.tag_type).reader is CardTagReader.HAND_COUNT
-            for tag in state.tags_of(card_id)
-        )
+        1 for card_id in player.hand if counts_toward_hand(state, card_id)
+    )
+
+
+def fixed_hand_count(state: GameState, seat: int) -> int | None:
+    """``seat`` 的手牌数被哪个值**固定住**（bingshi-jie 票 01；声明面 = ``SkillDef.fixed_hand_count``）。
+
+    读**存活实例**的声明（与 :func:`~sgs.effects.hand_limit` 的修饰器链同一姿态：失去 /
+    失效即消失），不是给"谁在半路补牌"打补丁。今天的唯一消费者是弃牌阶段——它据此决定
+    "这一次弃置就是本阶段的全部"（否则"弃一张 → 效果回填 → 再问一次"会死循环；
+    用户 2026-11-18 口径），以及 fuzz 的手牌上限不变量（被固定住的座位不受"弃牌阶段末
+    手牌 ≤ 上限"的约束）。
+    """
+    from sgs.skills import resolve_instances
+
+    for instance in resolve_instances(state):
+        if instance.owner != seat:
+            continue
+        resolver = instance.definition.fixed_hand_count
+        if resolver is None:
+            continue
+        value = resolver(state, seat)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def counts_toward_hand(state: GameState, card_id: int) -> bool:
+    """这张牌算不算进**手牌计数**（`hand_count` 的唯一逐张判据）。
+
+    bingshi-jie 票 01 的加法：弃牌阶段的"只做一次弃置"要回答"玩家这一次弃掉的牌里
+    有几张**计入**手牌数"（带「不计入」标签的那几张弃了也不降计数 ⇒ 那种情况仍要补问）。
+    抽成一处，`hand_count` 与弃牌阶段读**同一条**判据，不各写一份。
+    """
+    return not any(
+        card_tag_spec(tag.tag_type).reader is CardTagReader.HAND_COUNT
+        for tag in state.tags_of(card_id)
     )
 
 

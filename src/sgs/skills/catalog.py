@@ -125,6 +125,7 @@ __all__ = [
     "RECOVERED_AMOUNT_KEY",
     "ProviderWindows",
     "RUNNING_SKILL_KEY",
+    "SUSPENDED_SKILL_KEY",
     "RequestAxis",
     "SKILL_JUDGMENT_CARD_KEY",
     "RejudgeOriginal",
@@ -174,6 +175,9 @@ HookHandler: TypeAlias = Callable[[Any, Frame], Control]
 
 SeamHandler: TypeAlias = Callable[[Any, Frame], Control]
 """帧内接缝回调：与钩子同形，但键是 :class:`SeamKind` 而不是 ``Timing``。"""
+
+FixedHandCount: TypeAlias = Callable[[Any, int], "int | None"]
+"""``SkillDef.fixed_hand_count`` 的回调：``(state, seat) -> 固定到几 / None``（查询期现算）。"""
 
 
 class SeamKind(str, Enum):
@@ -508,6 +512,18 @@ class SkillDef:
     （``plan.actor`` 由派发环按座位覆写），效果里的"你" = 该座位。条件 / 回调从帧私有
     :data:`ASK_SEAT_KEY` 读"这一问是问谁的"（与 :data:`MATCH_OWNER_KEY` 正交：后者仍是
     持有者）。非共享技 ⇒ 一切不变（既有 171 条定义一字不改）。
+    """
+
+    fixed_hand_count: FixedHandCount | None = None
+    """这条技能有没有**把手牌数固定为 N** 的持续效果（bingshi-jie 票 01 的加法；缺省 ``None``）。
+
+    回调签名 ``(state, seat) -> int | None``（与 :func:`~sgs.effects.hand_limit` 的修饰器
+    回调同一姿态：**查询期现算**，条件成立才返回值）。读口是
+    :func:`~sgs.effects.fixed_hand_count`（按存活实例解析，失去 / 失效即消失）。今天的两个
+    消费者：弃牌阶段（被固定住的座位**只做一次**弃置——否则"弃一张 → 效果回填 → 再问一次"
+    死循环，用户 2026-11-18 口径）与 fuzz 的手牌上限不变量（这种座位在弃牌阶段末**允许**
+    手牌数大于上限——那正是它的效果）。首个（也是唯一）载体 = 势赵云【武翊】④
+    「将你的手牌数固定为4」（X ≥ 4 才返回 4）。
     """
 
     per_round_limit: bool = False
@@ -1679,6 +1695,16 @@ MATCH_ACTOR_KEY = "hook_actor"
 数据不进记录流，既有基准逐字节不受影响。
 """
 
+
+SUSPENDED_SKILL_KEY = "suspended_skill"
+"""帧私有槽名：**挂起中**的「失去牌后」派发属于哪条技能（bingshi-jie 票 01 的加法）。
+
+`RUNNING_SKILL_KEY` 在派发**返回**时会被 `move_in_frame` 还原成"进入前的事实"（那是移动
+重入判据的一部分，不能留），于是钩子在挂起期间发出的手写询问**读不到**"这是哪条技能在
+问"——投影只能退到通用文案（【武翊】④ 的「将手牌数调整为4张」退成「从选择面里选择要交出
+的牌」，用户 2026-11-18 实机报障）。故挂起时另存一份到这个键上：它只服务"这一问归谁"的
+读取方（`sgs_web.projection._skill_of_query`），派发完成时清掉。
+"""
 
 RUNNING_SKILL_KEY = "running_skill"
 """帧私有槽名：**正在执行**的钩子 / 接缝所属技能 id（code-review 复核）。
@@ -4743,9 +4769,11 @@ from .active import (  # noqa: E402  （末尾 import 是刻意的）
     GUOHUO,
     JIE_JIANYING,
     active_skill_definitions,
+    WUYI,
     guohuo_provider,
     jie_jianying_provider,
     register_activation,
+    wuyi_provider,
 )
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
@@ -4844,6 +4872,9 @@ from .hero_sp1 import (  # noqa: E402  （末尾 import 是刻意的）
 from .zuoci import (  # noqa: E402  （末尾 import 是刻意的）
     zuoci_skill_definitions,
 )
+from .hero_bingshi import (  # noqa: E402  （末尾 import 是刻意的）
+    bingshi_jie_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -4854,6 +4885,10 @@ register_provider(GUOHUO, guohuo_provider)
 # 只声明"我在哪些窗口参与"（`active.JIE_JIANYING_PROVIDER_WINDOWS`），"要的是哪张牌"
 # 由窗口经 `PROVIDER_REQUIRED_KEY` 给出，故这里不需要窗口名单。
 register_provider(JIE_JIANYING, jie_jianying_provider)
+# 兵势篇-节包·势赵云【武翊】①（bingshi-jie 票 01）："视为使用一张【闪】"走提供者面——
+# 与【八卦阵】/【八阵】同一条 `dodge` 窗口，产物是纯虚拟【闪】。候选侧由声明上的
+# `ProviderWindows.offers` 追加，这里只登记受理（与【蛊惑】/界【渐营】同一姿态）。
+register_provider(WUYI, wuyi_provider)
 # 【激将】的「出牌阶段主动**使用**【杀】」侧（yijiang-2014-round2 票 20）：它不是 A 族
 # （声明由 `lord_request._lord_request_definition` 造），故发动回调同样只能在**这里**
 # 登记——两个模块都已 import 完之后。标准 / 界两条声明共用同一条流水线。
@@ -4915,6 +4950,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *sp1_skill_definitions(),
             *liuyan_skill_definitions(),
             *zuoci_skill_definitions(),
+            *bingshi_jie_skill_definitions(),
         )
     }
 )

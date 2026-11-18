@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "bingshi_jie",
+  "heroes": [
+    {
+      "id": "shi_zhaoyun",
+      "name": "势赵云",
+      "true_name": "赵云",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "bingshi-jie",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wuyi",
+          "name": "武翊",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "cuifeng",
+          "name": "摧锋",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

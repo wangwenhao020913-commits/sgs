@@ -858,7 +858,9 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi 票 01：始计篇-智包·神郭嘉（新真名）⇒ 真名 69、版本 104。
   // shiji-zhi-luotong-chenzhen 票 02：陈震（新真名）⇒ 真名 70、版本 105。
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
-  ui.state.heroCatalog.length === 75 && catalogVersions.length === 111,
+  // bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里）⇒ 版本 111 → 112、
+  // 真名分组 75 不变。
+  ui.state.heroCatalog.length === 75 && catalogVersions.length === 112,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -28575,9 +28577,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U-VITAL-02c 走到 seq 1：第一条立刻开演（层里一张 canvas、在播 1 条）",
     liveCount() === 1 && layerCanvases().length === 1 && playCount() === before02 + 1,
     `live=${liveCount()} canvases=${layerCanvases().length} plays=${playCount() - before02}`);
+  // 错开的等待 = ``Math.round(nextStartAt - stageNow())``（`vital-fx.js`）：`stageNow()` 在同一次
+  // 调用里取两次也可能跨 1ms（慢机器 / 门禁负载下实测 119）⇒ 判据取**容差 ±2ms**，
+  // 「错开约 120ms」的意思不被计时器的毫秒粒度劫持（2039b51 同一类"慢机器误判"）。
+  const staggered = (before) => newDelays(before).some(
+    (ms) => Math.abs(ms - ui.VITAL_FX_STAGGER_MS) <= 2);
   check("U-VITAL-02d 同批三条、cap 2 ⇒ 队列只留 2 条 + 错开 120ms（第 3 条丢队尾）",
     ui.state.lifeLossEvents.length === 0 && playsOf("HP_LOSS").length === 1
-      && newDelays(holdsBefore02).includes(ui.VITAL_FX_STAGGER_MS),
+      && staggered(holdsBefore02),
     `queued=${playsOf("HP_LOSS").length} delays=${JSON.stringify(newDelays(holdsBefore02))}`);
   runUntil(() => liveCount() === 2, 30);
   check("U-VITAL-02e 到点后第二条开演：同时在播 2 条 = 该家族的 cap（不超发）",

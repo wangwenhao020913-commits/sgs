@@ -58,6 +58,7 @@ from sgs.effects import (
     delayed_settle_target,
     designation_actions_for,
     discard_count,
+    fixed_hand_count,
     draw_from_deck,
     is_legal_option_set,
     is_own_play_phase,
@@ -85,6 +86,7 @@ from sgs.skills import (
     MATCH_ACTOR_KEY,
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
+    SUSPENDED_SKILL_KEY,
     SEAT_PREFIX,
     SKILL_JUDGMENT_CARD_KEY,
     STATE_CHANGE_KEY,
@@ -4230,6 +4232,9 @@ class Engine:
             prior_skill = frame.data.get(RUNNING_SKILL_KEY)
             prior_had_skill = RUNNING_SKILL_KEY in frame.data
             result = dispatch_move_after(self, dispatch_frame)
+            # 挂起时的"这一问归哪条技能"必须**在还原之前**取：``running_skill`` 紧跟着就
+            # 被还原成进入前的事实（见 :data:`~sgs.skills.catalog.SUSPENDED_SKILL_KEY`）。
+            suspended_skill = dispatch_frame.data.get(RUNNING_SKILL_KEY)
             if prior_had_event:
                 dispatch_frame.data[MOVE_EVENT_KEY] = prior_event
             else:
@@ -4240,6 +4245,10 @@ class Engine:
                 frame.data.pop(RUNNING_SKILL_KEY, None)
             if result == "stay":
                 frame.data["_pending_move_timing"] = key
+                # 挂起时把"这一问归哪条技能"留给投影（`RUNNING_SKILL_KEY` 马上会被还原，
+                # 见 :data:`~sgs.skills.catalog.SUSPENDED_SKILL_KEY`）。
+                if suspended_skill:
+                    frame.data[SUSPENDED_SKILL_KEY] = suspended_skill
                 # 续跑帧在**还原范围之前**建：它要带着这次派发的范围，续跑里的询问才命中
                 # 同一份缓存（票 20 的答案缓存策略）。
                 self._move_pending.insert(
@@ -4253,6 +4262,7 @@ class Engine:
                 )
             else:
                 frame.data.pop("_pending_move_timing", None)
+                frame.data.pop(SUSPENDED_SKILL_KEY, None)
             if prior_had_scope:
                 dispatch_frame.data[_DISPATCH_SCOPE] = prior_scope
             else:
@@ -7126,6 +7136,22 @@ class Engine:
                     return str(skill_id)
         return None
 
+    def pending_dispatch_skill(self) -> str | None:
+        """**帧外派发**里正在跑的技能 id（挂起中的 `MOVE_AFTER` 临时帧），没有则 ``None``。
+
+        与 :meth:`phase_body_skill` 同一姿态、服务同一个读口：弃牌阶段的弃置 / 摸牌阶段的
+        摸牌这些**帧外移动**的承载帧不在结算栈上（:meth:`move_in_frame` 用一条不压栈的临时帧
+        派发），钩子里的手写询问因此拿不到"这是哪条技能在问"——投影只能退到通用文案
+        （【武翊】④ 的"将手牌数调整为4张"就退成了「从选择面里选择要交出的牌」，用户
+        2026-11-18 实机报障）。挂起的临时帧留在 :attr:`_move_pending` 里，这里把它的
+        ``running_skill`` 读出来。只读：不建帧、不改状态、不动游标。
+        """
+        for entry in reversed(self._move_pending):
+            skill_id = entry.resume_frame.data.get(RUNNING_SKILL_KEY)
+            if skill_id:
+                return str(skill_id)
+        return None
+
     def _phase_judge(self) -> str | None:
         """判定阶段：**自循环回合步骤**，逐张结算当前回合角色判定区里的延时锦囊（票 10 §3）。
 
@@ -7463,6 +7489,14 @@ class Engine:
         # （它仍是手牌），但那不会让 ``hand_count`` 下降 ⇒ 必须再问一次，直到计数 ≤ 上限。
         # 只问一次会让"弃掉带标签的牌"留下计数仍超上限的非法边界（M6 票 12 的混合局
         # 由 fuzz 抓到）。
+        #
+        # **但"手牌数被固定住"的座位只做一次**（bingshi-jie 票 01；用户 2026-11-18 逐字：
+        # 「只进行一次'弃置手牌至手牌上限'，不重复，不补发……此时弃牌阶段结束，不再让我
+        # 弃一张牌」）：【武翊】④ 会在每次手牌数变化后回填到 4，按"计数仍 > 上限"一轮轮
+        # 问下去就是死循环。判据读声明（:func:`~sgs.effects.fixed_hand_count`）而不是猜
+        # "谁在半路补牌"——别的一摸一张的钩子（锋·于禁【节制】一类）仍按原规则补问，
+        # 否则会留下"计数仍超上限"的非法边界（fuzz 立刻抓到）。
+        pinned = fixed_hand_count(self.state, seat)
         while discard_count(self.state, player) > 0:
             action = self.ask(
                 lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq),
@@ -7470,6 +7504,7 @@ class Engine:
             )
             if action is SUSPEND:
                 return "stay"
+
             # 弃牌阶段没有承载帧，但"弃置"也是**失去**（票 07 §要做什么 5）：走同一个移动入口，
             # 由它按惰性守卫派发 `MOVE_AFTER`；记录坐标（frame_id=0 / depth=stack.depth）与
             # 既有那条 `card_move` 一致——无武将时零派发，M2 基准一行不变。
@@ -7489,6 +7524,10 @@ class Engine:
                 int(self._turn_data.get("discard_phase_hand_discards", 0))
                 + len(action.cards)
             )
+            if pinned is not None:
+                # 手牌数被固定住（【武翊】④）：这一次弃置就是本阶段的全部——回填之后
+                # 不再追问（用户 2026-11-18 的口径）。
+                break
         return None
 
     def _phase_discard_end(self) -> Control:

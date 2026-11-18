@@ -63,7 +63,9 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    DODGE_RESPONSE_CARD,
     PEACH_RESPONSE_CARD,
+    SLASH_FAMILY_KEY,
     behavior_for,
     check_count,
     check_targets,
@@ -105,6 +107,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .catalog import (
+    MATCH_OWNER_KEY,
     SKILL_JUDGMENT_CARD_KEY,
     awakening_skill_awakened,
     BadgeKind,
@@ -121,10 +124,12 @@ from .catalog import (
     instance_key,
     limited_skill_used,
     mark_limited_skill_used,
+    mark_round_skill_used,
     resolve_instances,
+    round_skill_uses,
     same_kingdom,
 )
-from .virtual import pure_virtual_card, transformed_card
+from .virtual import pure_virtual_card, transformed_card, virtual_dodge
 
 # 界沮授移动版【渐营】①（yijiang-2014-round2 票 01 / W3）：牌面与 `hero.jushou.jianying`
 # **逐字同句** ⇒ 直接复用那一份条件与零步流水线（**同一对象**，裁定票 06 的 §W3 API）。
@@ -133,6 +138,12 @@ from .virtual import pure_virtual_card, transformed_card
 # （`SkillDef` / `Hook` / `MATCH_OWNER_KEY`…），**不**依赖本模块 ⇒ 不会绕回半初始化的
 # `active`。唯一的代价是 `use_after` 的模块体比 `catalog` 的末尾 import 早一步跑完。
 from .use_after import JIANYING_FLOW, _jianying_condition
+
+# 兵势篇-节包·势赵云【武翊】④（bingshi-jie 票 01）：手牌数回填的触发判据读"这次移动对我
+# 算不算获得 / 失去手牌"——那是 :mod:`sgs.skills.move_after` 的**唯一**判据（票 24 的口径），
+# 不在技能里抄第二份。import 方向与上面 `use_after` 那一行同姿态：`move_after` 只反向依赖
+# `catalog` 末尾 import 之前就已定义的声明面，不依赖本模块 ⇒ 不回环。
+from .move_after import gains_card, loses_card, move_event
 
 __all__ = [
     "ACTIVATIONS",
@@ -3588,6 +3599,24 @@ class ActiveSkill(HeroSkillDecl):
 
     同一条声明同时是钩子的载体时，这个位也必须写在**这一条**上：同 id 的两条 ``SkillDef``
     在 ``CATALOG`` 里后者静默覆盖前者，分家写等于丢一半。
+    """
+
+    fixed_hand_count: Any = None
+    """这条主动技有没有**把手牌数固定为 N** 的持续效果（bingshi-jie 票 01 的加法；缺省 ``None``）。
+
+    与 :attr:`~sgs.skills.catalog.SkillDef.fixed_hand_count` 同一个位（回调
+    ``(state, seat) -> int | None``，查询期现算），这里只是给 A 族声明留一个口子
+    （首个载体 = 势赵云【武翊】④）。读口 = :func:`~sgs.effects.fixed_hand_count`。
+    """
+
+    per_round_limit: bool = False
+    """这条主动技有没有**每轮限 X 次**（bingshi-jie 票 01 的加法；缺省 ``False``）。
+
+    与 :attr:`~sgs.skills.catalog.SkillDef.per_round_limit` **同一个位**，这里只是给它
+    留一个声明口：A 族技能的 ``SkillDef`` 由 :func:`active_skill_definitions` 统一装配，
+    没有这个字段就没法把"每轮限次"透传过去，而 ``round_limit_present()`` 正是靠那一位
+    决定记录流要不要落 ``turn_change``（不给 ⇒ 轮次不落记录、回放重建不出
+    ``round_use_counts``，每轮限次的技能会静默漂）。首个载体 = 势赵云【武翊】。
     """
 
     def __post_init__(self) -> None:
@@ -8670,7 +8699,442 @@ _LIMU = ActiveSkill(
 """刘焉【立牧】：A 族主动技（查看 / 选牌都由提交点手写）+ 两个常驻修饰器。"""
 
 
+# ---------------------------------------------------------------------------
+# 兵势篇-节包·势赵云【武翊】（bingshi-jie 票 01；用户 2026-11-18 签 Q1–Q13）
+#
+# 牌面（移动版官网逐字）：
+#
+#     若你从手牌使用或打出过的基本牌牌名数大于等于：1.每轮限一次，你可视为使用一张
+#     【杀】或【闪】。2.你使用基本牌无次数限制。3.你使用基本牌无距离限制。4.将你的
+#     手牌数固定为4。
+#
+# **四档各一张脸，必须住同一条声明**（同 id 的两条 ``SkillDef`` 会被 ``CATALOG`` 的字典
+# 推导静默覆盖 ⇒ 掉一半，`shapes.md` §3.9）：
+#
+# - ① A 族流水线（选目标 → 视为使用【杀】）+ **提供者**（【闪】窗口，``ProviderWindows``）；
+# - ② ``COUNT_LIMIT`` 返回 ``None``（使用基本牌无次数限制）；
+# - ③ ``TARGET_RANGE_EXEMPT`` 追加全部存活座位（使用基本牌无距离限制）；
+# - ④ ``MOVE_AFTER`` 强制钩子：手牌数偏离 4 ⇒ 回填（多于 4 **由自己选弃**、少于 4 摸到 4）。
+#
+# X（去重牌名数）走 ``USE_ON_USE`` / ``PLAY_ON_PLAY`` 两条强制钩子，读帧上的 ``from_hand``
+# ——「从手牌」这一条判据引擎已经给出（``_card_from_hand``，转化牌按"有一张来源在手牌"、
+# 纯虚拟牌恒 False），技能侧不再自己数来源牌。
+#
+# 用户裁定的四处（票面「用户裁定」表）：
+#
+# - **Q1 = A**：牌名只数【杀】【闪】【桃】【酒】四种；属性【杀】（火 / 雷 / 转化产物）并入
+#   【杀】——判据走 :func:`~sgs.effects.is_slash` 的**族**口径（M5-05b），四个牌名因此与
+#   牌面的四级梯一一对应；
+# - **Q2 = A**：① 的两个窗口**共用**「每轮限一次」（同一个 ``round_use_counts`` 键）；
+# - **Q3 = 直接不给出闪选项**：出牌阶段只有【杀】一项 —— 【闪】此刻走不通使用规则
+#   （规则 §17.11：只有被【杀】要求响应时才"使用"【闪】），列出来就是一条死路；
+# - **Q9 = 不清零**：X 住 ``Player.wuyi_names``（座位事实，失去 / 重新获得技能不清）。
+# ---------------------------------------------------------------------------
+
+SHI_ZHAOYUN = "shi_zhaoyun"
+"""势赵云（兵势篇-节包；真名赵云，与标准 / 界赵云版本并存）的武将 id。"""
+
+WUYI = hero_skill_id(SHI_ZHAOYUN, "wuyi")
+"""【武翊】的全限定技能 id。"""
+
+WUYI_FIXED_HAND = 4
+"""④「将你的手牌数固定为4」的那个 4（终值，不是"至多"）。"""
+
+WUYI_ROUND_LIMIT = 1
+"""①「每轮限一次」：两个窗口（出牌阶段 / 【闪】窗口）**共用**这一个额度。"""
+
+WUYI_TIERS: tuple[int, ...] = (1, 2, 3, 4)
+"""四档的解锁门槛（去重牌名数 ≥ N 即解锁第 N 档）。"""
+
+_WUYI_STARTED = "wuyi_started"
+"""帧私有：这一次发动已经开出虚拟【杀】（重入不重复 ``start_use``）。"""
+
+_WUYI_PICKED = "wuyi_picked"
+"""帧私有：④ 回填时选中的要弃的那批牌（搬牌挂起后续跑不重问）。"""
+
+_WUYI_ASK_KEY = "wuyi_ask_key"
+"""帧私有：④ 这一轮"弃置至 4"用的询问名。
+
+**必须逐轮不同**：`ask_selection` 的答案按 `(owner, key)` 在**帧内**缓存，而重铸这类
+"同一条帧里先失去一张、再摸一张"的动作会让 ④ 连跑两次（第一次补齐到 4、第二次手牌 5
+要弃 1）。共用同一个 key ⇒ 第二次直接命中第一次的答案（那几张牌已经不在手里），表现为
+"手牌 5 了却没有弃牌询问"（用户 2026-11-18 实机报障的根因）。故每次回填取一个新序号，重入
+（挂起续跑）时沿用 :data:`_WUYI_ASK_SEQ` 记下的那一份。"""
+
+_WUYI_ASK_SEQ = "wuyi_ask_seq"
+"""帧私有：本帧已经用过几个询问名（单调 +1；挂在帧上，不跨帧）。"""
+
+_ASK_WUYI_DISCARD = "hero.shi_zhaoyun.wuyi.discard"
+"""询问位置（手写回调的 ``AskIdentity``）：④ 的"弃置至 4 张"。"""
+
+
+def _wuyi_name_of(state: GameState, card: CardRef) -> str | None:
+    """这张牌算哪一个**基本牌牌名**；不是基本牌 ⇒ ``None``。
+
+    **属性【杀】并入【杀】**（用户 2026-11-18 签 Q1 = A）：族判据读
+    :func:`~sgs.effects.is_slash`（与【勤政】的 3 的倍数档、`test_card_family_sites.py`
+    同源），故普通 / 火 / 雷 / 转化的【杀】只占一个牌名；其余基本牌按 ``CardRef.type``
+    取（``dodge`` / ``peach`` / ``wine``）。大类由内容包回答，与"这张牌是不是基本牌"的
+    其余判据同一处真源（``card_category``）。
+    """
+    if card_category(state.pack_id, card.type) is not Category.BASIC:
+        return None
+    if is_slash(behavior_for(card)):
+        return "slash"
+    return card.type
+
+
+def _wuyi_names(state: GameState, seat: int) -> tuple[str, ...]:
+    """``seat`` 的 X 的底账（去重牌名，首次出现序）。"""
+    return state.player(seat).wuyi_names
+
+
+def _wuyi_unlocked(state: GameState, seat: int, tier: int) -> bool:
+    """X ≥ ``tier``（第 ``tier`` 档已解锁）。"""
+    return len(_wuyi_names(state, seat)) >= tier
+
+
+def _wuyi_fix_hand(host: Any, frame: Any, owner: int) -> Any:
+    """④ 的回填：把手牌数拉回 4（多于 4 由自己选弃、少于 4 摸到 4）。
+
+    两条支路的**差值都在调用那一刻现算**（动态量，不在解锁时快照）：
+
+    - **少于 4**：``draw_for_hand`` 一次摸够（短摸 ⇒ 既有"重洗弃牌堆 / 两堆皆空即平局"
+      口径，用户 Q4 = A）；它可能内联挂起（"获得牌后"的钩子），返回 ``"stay"`` 时原样上抛；
+    - **多于 4**：``ask_selection``（自己的手牌是**可见槽**，与【镇骨】的弃置支路同一形态）
+      让本人点出要弃的牌，再经 ``move_in_frame`` 进弃牌堆（``MoveReason.DISCARD``，故
+      【连营】一类"失去牌后"钩子照常触发）。
+
+    **收敛性**：两条支路都一步到位（一次摸够 / 一次弃够），所以这一次移动的
+    ``MOVE_AFTER`` 再派发到本函数时手牌已经是 4 ⇒ 条件不成立、不会递归；重入（挂起续跑）
+    由 ``frame.data[_WUYI_PICKED]`` 与 ``move_in_frame`` 自己的 ``_MOVE_DONE`` 兜住。
+    """
+    state = host.state
+    if not _wuyi_unlocked(state, owner, WUYI_FIXED_HAND):
+        return None
+    hand = len(state.player(owner).hand)
+    if hand == WUYI_FIXED_HAND:
+        return None
+    if hand < WUYI_FIXED_HAND:
+        if host.draw_for_hand(frame, owner, WUYI_FIXED_HAND - hand) == "stay":
+            return "stay"
+        return None
+    excess = hand - WUYI_FIXED_HAND
+    picked = frame.data.get(_WUYI_PICKED)
+    if picked is None:
+        ask_key = frame.data.get(_WUYI_ASK_KEY)
+        if ask_key is None:
+            seq = int(frame.data.get(_WUYI_ASK_SEQ, 0))
+            ask_key = f"wuyi:discard:{seq}"
+            frame.data[_WUYI_ASK_SEQ] = seq + 1
+            frame.data[_WUYI_ASK_KEY] = ask_key
+        answer = host.ask_selection(
+            frame,
+            owner=_ASK_WUYI_DISCARD,
+            key=ask_key,
+            actor=owner,
+            timing=Timing.MOVE_AFTER,
+            spec=SelectionSpec(
+                zones=(Zone.HAND,), total=(excess, excess), optional=False
+            ),
+            # 应答的是**手牌持有者本人** ⇒ 可见槽（与【镇骨】的弃置支路同一口径）。
+            build_face=lambda: host.selection_face(
+                owner, (Zone.HAND,), reveal_hand=True
+            ),
+        )
+        if host.suspended(answer):
+            return "stay"
+        picked = tuple(int(card_id) for card_id in answer)
+        frame.data[_WUYI_PICKED] = picked
+    if picked:
+        if (
+            host.move_in_frame(
+                frame,
+                state.refs(picked),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=owner,
+                actor=owner,
+            )
+            == "stay"
+        ):
+            return "stay"
+    frame.data.pop(_WUYI_PICKED, None)
+    frame.data.pop(_WUYI_ASK_KEY, None)
+    return None
+
+
+def _wuyi_condition(host: Any, frame: Any) -> bool:
+    """X 的计数条件：**持有者本人** ∧ 从手牌 ∧ 是基本牌（使用 / 打出共用）。
+
+    「打出」也数（牌面写「使用或打出」）：同一张牌只会走 ``start_use`` 与 ``play_card``
+    其中一条（两入口互斥），故两条钩子各接一半不会重复计数。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if not frame.data.get("from_hand"):
+        return False
+    card = frame.data.get("card")
+    return card is not None and _wuyi_name_of(host.state, card) is not None
+
+
+def _wuyi_note_used(host: Any, frame: Any) -> Any:
+    """计数钩子：把新牌名记进 ``Player.wuyi_names``，然后**顺手回填一次手牌**。
+
+    「首次达到武翊4时也要调整为4」（用户注意 1）落在后半句：**使用**一张牌时，实体牌在
+    ``use_choose_target`` 里就已经离开手牌（``steps.py`` 的 ``move_used_card_to_processing``
+    在 ``use_on_use`` **之前**），故那一次 ``MOVE_AFTER`` 上的 X 还是旧值、回填不会发生；
+    等本钩子把 X 抬到 4，手牌已经是 3 ⇒ 必须在这里补一次回填。**打出**相反：``PLAY_ON_PLAY``
+    先派发、之后才搬牌（``play_on_play``），那时手牌还含这张牌，回填是 no-op，随后的
+    ``MOVE_AFTER`` 会接过它。两处共用同一个幂等的 :func:`_wuyi_fix_hand`。
+    """
+    state = host.state
+    owner = int(frame.data["skill_owner"])
+    card = frame.data["card"]
+    name = _wuyi_name_of(state, card)
+    if name is not None and name not in state.player(owner).wuyi_names:
+        state.player(owner).wuyi_names = (*state.player(owner).wuyi_names, name)
+    return _wuyi_fix_hand(host, frame, owner)
+
+
+def _wuyi_hand_moved_condition(host: Any, frame: Any) -> bool:
+    """④ 的触发条件：这次移动**动过我的手牌** ∧ X ≥ 4 ∧ 手牌数此刻不是 4。
+
+    两个判据都取既有唯一实现：``gains_card`` / ``loses_card``（`move_after.py`，票 24 的
+    "摸牌也算获得"口径）。回填自己那一次移动（摸到 4 / 弃到 4）因此条件不成立 —— 收敛。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    event = move_event(frame)
+    if event is None:
+        return False
+    if not (gains_card(event, owner) or loses_card(event, owner)):
+        return False
+    if not _wuyi_unlocked(host.state, owner, WUYI_FIXED_HAND):
+        return False
+    return len(host.state.player(owner).hand) != WUYI_FIXED_HAND
+
+
+def _wuyi_hand_moved(host: Any, frame: Any) -> Any:
+    """④ 的强制钩子：手牌数一偏离 4 就回填（不问"是否发动"——牌面没有「可以」）。"""
+    return _wuyi_fix_hand(host, frame, int(frame.data["skill_owner"]))
+
+
+def _wuyi_slash_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """①「视为使用一张【杀】」的目标池 = 与真牌**同一条** ``check_targets`` 链。
+
+    ③（无距离限制）在这里自动生效：它是 ``TARGET_RANGE_EXEMPT`` 修饰器，求值点就在
+    ``check_targets`` 的 ②。故 X = 1 / 2 时虚拟【杀】照常受距离约束，X ≥ 3 时不再查。
+    """
+    del frame, chosen
+    return check_targets(state, owner, pure_virtual_card(state, "slash"))
+
+
+def _wuyi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """① 的出牌阶段候选：X ≥ 1 ∧ 本轮没用过 ∧ 有合法目标 ∧ 虚拟【杀】未超次数。
+
+    四个闸门都在**候选阶段**判（付不起 / 用不了就不产出），故玩家看不到一条点了会取消的
+    入口。次数闸门读 :func:`~sgs.effects.check_count`：X = 1 时它照常受本回合【杀】次数
+    限制（②只在 X ≥ 2 才放开），X ≥ 2 时该闸恒假。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _wuyi_unlocked(state, ctx.subject, WUYI_TIERS[0]):
+        return current
+    if round_skill_uses(state, ctx.subject, ctx.skill_id) >= WUYI_ROUND_LIMIT:
+        return current
+    card = pure_virtual_card(state, "slash")
+    if check_count(state, ctx.subject, card):
+        return current
+    if not check_targets(state, ctx.subject, card):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _wuyi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """① 的提交点：扣掉本轮额度 → 视为使用一张【杀】（纯虚拟牌，无来源）。
+
+    额度在 ``start_use`` **之前**落（``mark_round_skill_used``）：这一次使用即使被【闪】
+    抵消也已经用掉——与「每轮限一次」的既有读法同形（只数成功发动）。
+    """
+    owner = int(frame.data["source"])
+    if frame.data.get(_WUYI_STARTED):
+        return None
+    target = int(answers["seat"][0])
+    frame.data[_WUYI_STARTED] = True
+    mark_round_skill_used(host.state, owner, WUYI)
+    host.start_use(
+        pure_virtual_card(host.state, "slash"),
+        source=owner,
+        targets=(target,),
+        use_timing=Timing.PHASE_PLAY_IDLE,
+    )
+    return None
+
+
+WUYI_FLOW = SkillFlow(
+    name="wuyi",
+    steps=(PickSeats(lo=1, hi=1, pool=_wuyi_slash_targets, key="seat"),),
+    effect=_wuyi_effect,
+    # 「每轮限一次」由 `round_use_counts` 自己数，不走阶段位（`_USED` 是"出牌阶段限一次"）。
+    once_per_phase=False,
+)
+"""① 的单步流水线：选目标 → 视为使用一张【杀】（目标池 = 真牌同一条判据链）。"""
+
+
+def _wuyi_unlimited_basics(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """②「你使用基本牌无次数限制」（``COUNT_LIMIT``；``None`` = 无限制）。
+
+    只作用于**持有者自己使用的基本牌**（``ctx.owner == ctx.subject`` ∧ 大类是基本牌）：
+    对【杀】放开 1 张的额度、【酒】放开 1 张的额度；锦囊 / 装备一字不动。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not _wuyi_unlocked(state, ctx.owner, WUYI_TIERS[1]):
+        return current
+    if card_category(state.pack_id, ctx.card.type) is not Category.BASIC:
+        return current
+    return None
+
+
+def _wuyi_range_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """③「你使用基本牌无距离限制」（``TARGET_RANGE_EXEMPT``：追加全部存活座位）。
+
+    求值点在 ``check_targets`` 的 ②，**在 ③④⑤ 之前**（`shapes.md` §3.3）：被豁免的座位
+    只是跳过距离 / 攻击范围两条判据，延时锦囊封印、附加谓词、``TARGET_POOL`` 链照常跑
+    ——故"无距离"不会让任何本来非法的座位复活（例如判定区已落同名延时锦囊的角色）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not _wuyi_unlocked(state, ctx.owner, WUYI_TIERS[2]):
+        return current
+    if card_category(state.pack_id, ctx.card.type) is not Category.BASIC:
+        return current
+    return tuple(dict.fromkeys((*current, *alive_seats(state))))
+
+
+def _wuyi_dodge_payable(
+    state: GameState, ctx: ModifierContext, required: str
+) -> bool:
+    """①（【闪】窗口）付得起：X ≥ 1 ∧ 本轮额度未用完 ∧ 这一问是"**使用**"而非"打出"。
+
+    牌面写「视为**使用**一张【闪】」（用户 2026-11-18 复核：只能使用、不能打出），故
+    【万箭齐发】的"打出【闪】"必须挡掉——它与【闪】窗口共用 `CandidateScope.DODGE`
+    （`CARD_REQUEST_WINDOWS` 的 `arrow_barrage` 行：同一 scope、不同 `modes`），而
+    `_dodge` 的候选载荷**不带** mode 事实、`_respond` 那条会填 ``respond_mode``。
+    故"填了 mode = 打出窗口"⇒ 这里闭嘴。【八卦阵】/【八阵】不受影响：它们的牌面写
+    「使用**或打出**」。
+    """
+    if not _wuyi_unlocked(state, ctx.subject, WUYI_TIERS[0]):
+        return False
+    if round_skill_uses(state, ctx.subject, ctx.skill_id) >= WUYI_ROUND_LIMIT:
+        return False
+    if ctx.respond_mode is not None:
+        return False
+    return satisfies_required(virtual_dodge(state), required)
+
+
+WUYI_PROVIDER_WINDOWS = ProviderWindows(
+    # ① 的**响应面只有一扇**：被【杀】要求"**使用**一张【闪】"的那个窗口（`dodge`）。
+    #
+    # 牌面写的是「视为**使用**」——用户 2026-11-18 复核后明确「武翊确实只能使用而非打出」
+    # （先按"南蛮 / 万箭 / 决斗里也该能点出来"放开过四扇，同日回退）。故【万箭齐发】的
+    # "**打出**【闪】"（`arrow_barrage`）与【南蛮】/【决斗】的"打出【杀】"都不参与：
+    # 它们与【闪】窗口共用 `CandidateScope.DODGE` / `RESPOND`，靠 `respond_mode` 分辨
+    # （`_dodge` 那扇**不带** mode 事实，`_respond` 那几扇带 ``PLAY``）。
+    #
+    # `borrowed_sword` / `luanwu` 也不参与：那两扇要的是"**使用**一张【杀】打向窗外定死的
+    # 座位"，而提供者的产物由窗口直接 `start_use`（`ops.resolve_borrowed_sword` 的
+    # `_use_at_bn`）——那里**不重查**距离，接进去会凭空多出一条"够不着也能打"的路。
+    # 要接它们，先给那扇窗口补"产物是否够得着 Bn"的判据（与界【渐营】② 当年删掉的
+    # `forced_use_targets` 同一条）。
+    keys=("dodge",),
+    can_pay=_wuyi_dodge_payable,
+)
+"""①（【闪】窗口）的提供者窗口声明：候选追加只有 `ProviderWindows.offers` 这一份实现。"""
+
+
+def wuyi_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Control:
+    """提供者受理：【闪】窗口点【武翊】⇒ 交出一张**纯虚拟【闪】**，扣掉本轮额度。
+
+    与出牌阶段入口（A 族流水线）是**同一条声明**的两条路，共用
+    ``round_use_counts`` 的那一个额度（用户 W1 Q2 = A）。产物交给窗口
+    （``provider_deliver``）：由窗口自己 ``start_use``，"视为使用【闪】仍是**一次**使用"
+    的既有读法因此与【八卦阵】/【八阵】逐字相同。
+    """
+    # 惰性 import：`lord_request` 反向依赖 `catalog`（本模块由 catalog 末尾导入），
+    # 模块级 import 会成环（与 `guohuo_provider` / `jie_jianying_provider` 同一理由）。
+    from .lord_request import provider_deliver, provider_give_up
+
+    state = host.state
+    if not _wuyi_unlocked(state, actor, WUYI_TIERS[0]) or (
+        round_skill_uses(state, actor, WUYI) >= WUYI_ROUND_LIMIT
+    ):
+        # 候选侧已经按同一条判据挡过；走到这里说明窗口硬派发了一次 ⇒ 零副作用地放弃。
+        provider_give_up(frame)
+        return None
+    mark_round_skill_used(state, actor, WUYI)
+    provider_deliver(frame, virtual_dodge(state))
+    return None
+
+
+_WUYI = ActiveSkill(
+    SHI_ZHAOYUN,
+    "wuyi",
+    _wuyi_offers,
+    flow=WUYI_FLOW,
+    # 首步是座位步、池由 `check_targets` 保证非空（`offers` 已经判过一遍）⇒ 清单渲得出，
+    # 翻预发动（`shapes.md` §4 的准入表第 3 行）。
+    preactivated=True,
+    hooks=(
+        # ① 的计数（使用 / 打出各一半）+ ④ 的"首次到 4 也回填"。
+        Hook(Timing.USE_ON_USE, handler=_wuyi_note_used, condition=_wuyi_condition, forced=True),
+        Hook(Timing.PLAY_ON_PLAY, handler=_wuyi_note_used, condition=_wuyi_condition, forced=True),
+        # ④ 的日常回填（获得 / 失去手牌时）。
+        Hook(
+            Timing.MOVE_AFTER,
+            handler=_wuyi_hand_moved,
+            condition=_wuyi_hand_moved_condition,
+            forced=True,
+        ),
+    ),
+    extra_modifiers=(
+        Modifier(ModifierPoint.COUNT_LIMIT, _wuyi_unlimited_basics),
+        Modifier(ModifierPoint.TARGET_RANGE_EXEMPT, _wuyi_range_exempt),
+        Modifier(ModifierPoint.CANDIDATES, WUYI_PROVIDER_WINDOWS.offers),
+    ),
+    requirement=(
+        "若你从手牌使用或打出过的基本牌牌名数大于等于：1.每轮限一次，你可视为使用一张"
+        "【杀】或【闪】；2.你使用基本牌无次数限制；3.你使用基本牌无距离限制；"
+        "4.将你的手牌数固定为4"
+    ),
+    step_requirements={
+        "seat": "选择视为使用【杀】的目标",
+        # 用户 2026-11-18 逐字：④ 的回填选牌提示写成"将手牌数调整为4张"（不是通用的
+        # "从选择面里选择要交出的牌"）——它就是牌面的第 4 条原文。
+        "card": "将手牌数调整为4张",
+    },
+    # 每轮限一次：`round_limit_present()` 读这一位才会把 `turn_change` 落进记录流。
+    per_round_limit=True,
+    # ④「将你的手牌数固定为4」的声明面：弃牌阶段据此"只做一次弃置"（否则回填会死循环）。
+    # 查询期现算（X ≥ 4 才算固定住），故给的是回调而不是常量。
+    fixed_hand_count=lambda state, seat: (
+        WUYI_FIXED_HAND if _wuyi_unlocked(state, seat, WUYI_TIERS[3]) else None
+    ),
+    # skill-display 的既有登记面：座位常驻标签「武翊 X」（数据在 `BADGE_PROVIDERS`）。
+    badge=BadgeKind.WINDOW,
+)
+"""势赵云【武翊】的完整声明（四档 + 两个窗口 + 计数与回填钩子，同一个技能 id）。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
+    # 兵势篇-节包·势赵云【武翊】（bingshi-jie 票 01）：四档一张脸（A 族 + 提供者 +
+    # 两个修饰器 + 三条钩子 + 座位标签），见 `_WUYI` 的注释。
+    _WUYI,
     # 始计篇-智包·神郭嘉（shiji-zhi 票 01）：慧识 / 辉逝 / ☆佐幸。
     _HUISHI,
     _HUI_SHI,
@@ -9222,6 +9686,11 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             preactivated=skill.preactivated,
             # skill-display 票 04 的加法：座位常驻状态标签（缺省 None ⇒ 既有声明零改动）。
             badge=skill.badge,
+            # bingshi-jie 票 01 的加法：每轮限次（缺省 False ⇒ 既有 8 条 A 族声明零改动）。
+            # `round_limit_present()` 读这一位决定记录流要不要落 `turn_change`。
+            per_round_limit=skill.per_round_limit,
+            # 同票：手牌数固定为 N（缺省 None ⇒ 既有声明零改动）。
+            fixed_hand_count=skill.fixed_hand_count,
         )
         for skill in ACTIVE_SKILLS
     )
