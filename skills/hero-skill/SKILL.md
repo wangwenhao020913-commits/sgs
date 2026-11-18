@@ -27,4 +27,6 @@ docs/agents/skill-authoring.md
 
 自身体检与门禁节奏照 `skill-authoring.md` §6 / §3 跑，本文件不重抄。
 
+显示组件：见 `skill-authoring.md` §2 第 5 问。
+
 判据版本：与 `docs/agents/skill-authoring.md` 同仓（硬停判据恰 13 条）

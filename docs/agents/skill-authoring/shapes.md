@@ -357,6 +357,24 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 | 座位步的**动态上下界** `SeatBound` | `src/sgs/skills/flow.py:SeatBound`、`src/sgs/skills/flow.py:_seat_bounds` | 已实现（yijiang-2014-round2 票 18 / P9） | `04` / `06` / 本文件都没有这一节；执行器 / 校验器 / 预览清单三处共读它，别各写一份。目标由牌名决定时 `lo=0` ⇒ 清单不下发该步、或标 `StepPool.max = 0` 自动跳过 |
 | 「这张牌此刻能不能用」`check_usable` | `src/sgs/effects/actions.py:check_usable`（`require_targets=` 两档） | 已实现（票 12 扩） | 新写同类判据**应当读它**，不许各自重写一份；语义口径未落文档 |
 
+### 3.11 显示组件登记表
+
+**要不要显示组件由用户点名，本表只登记**——"什么技能需要组件"没有硬标准（Q4 宽版：技能记了
+什么就显示什么，票面第 5 问写一句"有 / 没有"）。本表回答的是：已经有组件时它属于哪一类、走哪条
+通道、**加一档**要落齐哪几处。
+
+| 类别 | 落点 | 通道 | 可见性 | 今天谁在用 | 加一档要落齐哪几处 |
+|---|---|---|---|---|---|
+| **小窗口类** | 武将块上的常驻状态标签（`seat-view.js:fillHeroTags` → `.hero-tag` chip；没有标签整块隐藏） | `players[].hero_tags`，每项 `{tag, label[, parts]}`：`label` 恒为纯文本，`parts` 只在需要**逐段上色**时出现（每段 `{text, tone?}`，`tone` ∈ `red` / `black`，取 `tools/sgs_web/display.py:SUIT_LABELS` 这唯一一份花色→颜色表），`parts` 的文本拼起来恒等于 `label`；**不进** `PlayerView` / `PlayerPublic` / 记录流 | 公开 | 手牌上限+N（通用派生量，不属于任何一条技能）、裸衣两版、勤政、渐营两版、博图、父荫、雄乱、义绝、铁骑 | ① `BadgeKind` 加成员（闭集，`tests/test_web.py` 的审计用例写死成员集合，加成员必须同票改它）；② 声明面：A 族写 `ActiveSkill.badge`、L 族写 `PhaseBodySkill.badge`，其余声明直接写 `SkillDef.badge`；③ `sgs_web.projection.BADGE_PROVIDERS` 按 **skill id** 登记构造器（键集与"声明了 `badge` 的 skill id 集"**强制相等**——漏登 = 标签永远不出现，幽灵登记 = 画一条没人声明的东西）；④ 需要上色时前端消费 `parts`；⑤ 票面 + `06`（§5「程序化约定与偏离一手」）登记 + 本表 |
+| **弹窗类** | 技能按钮 / 询问面打开的弹窗 | `SkillDef.appearance: AppearanceKind \| None` + `sgs_web.projection.APPEARANCE_BUILDERS`（按 **kind** 索引）：数据由技能自己写、组件只负责显示，接入层按它在"只读面 / 发动面"两条面上派生同一份**自见载荷** | 自见 | 化身（`AVATAR`，今天唯一成员；载荷里含别人的化身牌，故只发给持有者） | ① `AppearanceKind` 加成员（闭集审计按"一个成员恰一条构造器"核）；② 登记一条构造器 + 新增前端组件与对应弹窗模板（`modal.js:DIALOG_KINDS`）/ 技能按钮入口；③ 自见载荷是**新信息通道** ⇒ 过 `ai-adaptation.md` 的 checklist 与不泄露分类（非持有者的载荷要抹）；④ 票面 + 账本登记 + 本表 |
+
+两类**互不替代**：小窗口类只画"一句话 / 一个小值"，无交互、公开，还可以画在**别人的座位**上
+（雄乱 / 义绝 / 铁骑画在目标身上）；弹窗类要富数据与交互，且可以是自见信息。
+
+生命周期是**派生式**的：每帧投影现算，没有"清除事件"、没有新 delta——记录一清，下一次投影里
+那个标签就没了。小窗口类的两条"何时不画"闸门：`SELF` 档要求实例真在 `resolve_instances` 里
+（失去 / 失效 ⇒ 不画），`ANY_SEAT` 档由构造器自己从引擎读口判"生效中"（投影侧不做座位判断）。
+
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 
 | 触点 | 位置 | 判据 |
@@ -371,6 +389,7 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 | 舞台 / 动效 | `session.js` / `effects.js` | 见 `docs/agents/frontend-map.md` |
 | 牌面标签 | `card-view.js:cardTagsNode` | 标签类型必须在 `CARD_TAG_TYPES` 登记 |
 | 武将详情 / 被封锁技能图标 | `hero-detail.js` / `table.js` | |
+| 座位常驻状态标签 | `players[].hero_tags`（服务端 `seat_hero_tags`，前端 `seat-view.js:fillHeroTags`） | 判据 = `SkillDef.badge` 已声明**且** `BADGE_PROVIDERS` 有该 skill id（两条都齐才画；分类见 §3.11） |
 
 新增 UI 形态（垫片里没有的）= **C3**：停手，另开 UI 票并走真实浏览器验收。
 
@@ -441,5 +460,5 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 
 ## 6. 更新触发（谁改这张表）
 
-新时机 / 新接缝 / 新修饰点 / 新询问 / 新帧型 / 新区域 / 新步骤类型，或某个机制从"枚举位"被
+新时机 / 新接缝 / 新修饰点 / 新询问 / 新帧型 / 新区域 / 新步骤类型 / 新显示组件种类，或某个机制从"枚举位"被
 解封——**落地那张票**顺手改对应小节；`tests/test_skill_authoring_docs.py` 会反向核（漏登记即红）。
