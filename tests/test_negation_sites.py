@@ -366,6 +366,18 @@ SITES: dict[Site, Rule] = {
         "与【奋威】同一写入口，触发者换成目标自己（锁定技）",
     ),
     (
+        "src/sgs/skills/sidi.py",
+        "_sidi_redeem",
+        TARGET_INVALID_WRITE_TOKEN,
+        "mark_targets_ineffective(frame, (int(predicted),))",
+    ): Rule(
+        "target-level-invalid",
+        1,
+        "界曹真【司敌】②『取消之』（jie-yijiang-2014-wuyi-caozhen 票 03）：触发条件保证"
+        "它是一张**唯一目标**的牌 ⇒ 令那一个目标无效 = 整张牌不结算（与【奋威】同一写入口，"
+        "写入时机在 B5、随 use_push_resolve 继承进 RESOLVE 帧）",
+    ),
+    (
         "src/sgs/engine/steps.py",
         "resolve_start",
         TARGET_INVALID_READ_TOKEN,

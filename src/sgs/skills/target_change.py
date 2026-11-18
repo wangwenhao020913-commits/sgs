@@ -48,9 +48,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import Category, SkillType, card_category, hero_skill_id
 from sgs.effects import (
     CarrierKind,
+    TargetCount,
     Modifier,
     ModifierContext,
     ModifierPoint,
@@ -63,7 +64,7 @@ from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
+from .catalog import MATCH_OWNER_KEY, Hook, SkillDef, _move_by_source
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
 __all__ = [
@@ -73,6 +74,7 @@ __all__ = [
     "JIE_MASHU",
     "JIE_YICONG",
     "FEIYING",
+    "JIE_BENXI",
     "LIULI",
     "MASHU",
     "MAYUNLU_MASHU",
@@ -476,6 +478,214 @@ def _liuli_definition(skill_id: str) -> SkillDef:
     )
 
 
+# ---------------------------------------------------------------------------
+# 界一将成名-2014·移动版 界吴懿【奔袭】（jie-yijiang-2014-wuyi-caozhen 票 01；用户 2026-11-18 签）
+#
+#     出牌阶段开始时，你可以弃置任意张牌，令你本阶段：计算与其他角色的距离-X、使用的
+#     下一张基本牌或普通锦囊牌可以额外指定至多X名你计算与其距离为1的角色为目标
+#     （X为你以此法弃置的牌数），然后此牌结算结束后，若此牌造成过伤害，你摸五张牌。
+#
+# 三段落点（`shapes.md` §2「单步选牌 → 效果」+「钩子 + 修饰器」）：
+#
+# - **发动 / 代价**：`PHASE_PLAY_START` 上的「钩子 + 单步 SkillFlow」（弃置任意张，同
+#   【制衡】的选牌步）；提交点里先搬牌（游标）、再 `Engine.arm_jie_benxi` 落位。
+# - **本阶段两条修饰**：`DISTANCE`（主体侧 −X）与「下一张牌多指定」——后者 = `TARGET_COUNT`
+#   （额度 +X）+ `TARGET_SET_FILTER`（**额外目标必须是你计算距离 1 的角色**；框架票 05 的
+#   首个消费者）。两条都只在 `jie_benxi_armed` 且这张牌是「基本牌或普通锦囊牌」时生效。
+# - **结算后摸五张**：`DAMAGE_AFTER_DEAL` 记"那张牌造成过伤害"（卡牌级，不逐点），
+#   `RESOLVE_AFTER_END` 上一次使用收尾时兑现（**不问**：牌面没有「可以」）。
+#
+# 消费语义（用户 2026-11-18 签 Q1）：「下一张」= 紧接的那一次使用，用过即失效（不论是否
+# 真的加了额外目标）；本阶段没再用这类牌 ⇒ 阶段末失效（`Engine.clear_jie_benxi`
+# 与其它"本阶段"字段同一收尾点，距离那一半靠 `phase_seq` 惰性失效）。
+# ---------------------------------------------------------------------------
+
+JIE_BENXI = hero_skill_id("jie_wuyi_mobile", "benxi")
+"""界吴懿移动版【奔袭】的全限定技能 id（与标准吴懿的 ``hero.wuyi.benxi`` **不同 id**）。"""
+
+_JIE_BENXI_DISCARDED = "jie_benxi_discarded"
+"""帧私有：那一步弃牌已经搬完（重入不重搬）。"""
+
+_JIE_BENXI_FIVE = "jie_benxi_drawn"
+"""帧私有：这次使用收尾时已经摸过五张（重入不重摸）。"""
+
+
+def _jie_benxi_target_card(state: GameState, card: Any) -> bool:
+    """这张牌是不是「**基本牌或普通锦囊牌**」（牌面这一句是官方用语 ⇒ 不含装备 / 延时锦囊）。
+
+    读**产物**牌型（转化 / 视为使用同样算：账本 L948）。
+    """
+    if card is None:
+        return False
+    if behavior_for(card).is_delayed:
+        return False
+    return card_category(state.pack_id, card.type) in (Category.BASIC, Category.TRICK)
+
+
+def _jie_benxi_active(state: GameState, seat: int) -> bool:
+    """这个座位的【奔袭】本阶段落位还有效吗（``phase_seq`` 惰性复位）。"""
+    player = state.player(seat)
+    return player.jie_benxi_x > 0 and player.jie_benxi_seq == state.phase_seq
+
+
+def _jie_benxi_condition(host: Any, frame: Frame) -> bool:
+    """① 的条件：**我的出牌阶段刚开始** ∧ 我至少有一张牌可弃。
+
+    自校两件：``MATCH_OWNER_KEY`` 指向我、``frame.data["source"]``（= 当前回合角色）是我。
+    一张牌都没有（手牌 ∪ 装备区皆空）⇒ 候选阶段就不产出（不发没有候选的询问）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    owner = int(owner)
+    if frame.data.get("source") != owner:
+        return False
+    player = host.state.player(owner)
+    return bool(player.hand) or bool(player.equip)
+
+
+def _jie_benxi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：先弃置选中的牌（游标 + 按来源区分组），再落位本阶段的两条加成。"""
+    owner = frame.data.get("skill_owner")
+    if owner is None:
+        owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return None
+    owner = int(owner)
+    cards = tuple(int(card_id) for card_id in answers.get("card", ()))
+    if not cards:
+        return None
+    if not frame.data.get(_JIE_BENXI_DISCARDED):
+        control = _move_by_source(
+            host,
+            frame,
+            cards,
+            to_zone=ZoneRef(Zone.DISCARD),
+            owner=owner,
+            key="jie_benxi:cost",
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_JIE_BENXI_DISCARDED] = True
+    host.arm_jie_benxi(owner, len(cards))
+    return None
+
+
+JIE_BENXI_FLOW = SkillFlow(
+    name="jie_benxi",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=None,
+            key="card",
+            optional=False,
+        ),
+    ),
+    effect=_jie_benxi_effect,
+)
+"""【奔袭】的单步流水线：弃置任意张（手牌 ∪ 装备区、至少 1 张）→ 落位。"""
+
+
+def _jie_benxi_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """「计算与其他角色的距离 -X」（主体侧、加式；下限 1 由距离管道在链后夹住）。"""
+    if ctx.owner != ctx.subject or not _jie_benxi_active(state, ctx.owner):
+        return current
+    return current - state.player(ctx.owner).jie_benxi_x
+
+
+def _jie_benxi_extra_count(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """「下一张基本牌 / 普通锦囊牌**可以额外指定至多 X 名**」= 目标数上限 +X。
+
+    只对 ``TargetCount.RATED`` 的牌生效（全体牌本来就没有"额外目标"这个位置，与
+    ``TARGET_COUNT`` 的既有口径一致）；加成只在**还没被消费**时生效。
+    """
+    if ctx.owner != ctx.subject:
+        return current
+    player = state.player(ctx.owner)
+    if not player.jie_benxi_armed or player.jie_benxi_seq != state.phase_seq:
+        return current
+    if not _jie_benxi_target_card(state, ctx.card):
+        return current
+    return current + player.jie_benxi_x
+
+
+def _jie_benxi_target_set(state: GameState, ctx: ModifierContext, current: Any) -> bool:
+    """「额外指定至多 X 名**你计算与其距离为 1** 的角色」= 组合级资格（框架票 05）。
+
+    判据：这一组里**距离 > 1** 的座位数不超过**额定目标数**（多出来的那些就是"额外目标"，
+    必须都在距离 1 上）。全体牌（``ALL_ALIVE*``）不查这条链（没有额外目标的位置）⇒ 直接放行。
+    """
+    if not current:
+        return current
+    if ctx.owner != ctx.subject:
+        return current
+    player = state.player(ctx.owner)
+    if not player.jie_benxi_armed or player.jie_benxi_seq != state.phase_seq:
+        return current
+    if not _jie_benxi_target_card(state, ctx.card):
+        return current
+    behavior = behavior_for(ctx.card)
+    rule = behavior.target_rule
+    if rule.count is not TargetCount.RATED:
+        return current
+    combo = tuple(ctx.use_targets or ())
+    far = sum(1 for seat in combo if distance(state, ctx.owner, int(seat)) > 1)
+    return far <= int(rule.rated_targets)
+
+
+def _jie_benxi_consume(host: Any, frame: Frame) -> Any:
+    """``USE_ON_USE``（强制段）：这一次使用就是"下一张"⇒ 消费掉加成（用过即失效）。"""
+    owner = frame.data.get("skill_owner")
+    if owner is None:
+        return None
+    owner = int(owner)
+    source = frame.data.get("source")
+    card = frame.data.get("card")
+    if source is None or int(source) != owner or card is None:
+        return None
+    if not _jie_benxi_active(host.state, owner):
+        return None
+    if not _jie_benxi_target_card(host.state, card):
+        return None
+    host.consume_jie_benxi(owner, int(card.card_id))
+    return None
+
+
+def _jie_benxi_note_damage(host: Any, frame: Frame) -> Any:
+    """``DAMAGE_AFTER_DEAL``（强制段）：消费那张牌**造成过伤害**（卡牌级、不逐点）。"""
+    owner = frame.data.get("skill_owner")
+    card = frame.data.get("card")
+    if owner is None or card is None:
+        return None
+    owner = int(owner)
+    player = host.state.player(owner)
+    if not player.jie_benxi_card:
+        return None
+    if int(card.card_id) != int(player.jie_benxi_card):
+        return None
+    host.note_jie_benxi_dealt(owner)
+    return None
+
+
+def _jie_benxi_done(host: Any, frame: Frame) -> Any:
+    """``RESOLVE_AFTER_END``（强制段）：那张牌结算完了 ⇒ 造成过伤害就摸五张。"""
+    owner = frame.data.get("skill_owner")
+    card = frame.data.get("card")
+    if owner is None or card is None:
+        return None
+    owner = int(owner)
+    player = host.state.player(owner)
+    if not player.jie_benxi_card or int(card.card_id) != int(player.jie_benxi_card):
+        return None
+    if not player.jie_benxi_dealt:
+        return None
+    if frame.data.get(_JIE_BENXI_FIVE):
+        return None
+    frame.data[_JIE_BENXI_FIVE] = True
+    return host.draw_for_hand(frame, owner, 5)
+
+
 def target_change_skill_definitions() -> tuple[SkillDef, ...]:
     """K 族【马术】（标准 / 界两条）与 M 族【流离】（标准 / 界两条）的 :class:`SkillDef`。
 
@@ -561,6 +771,51 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
                 "②你的回合内，若你计算与所有其他角色的距离均为1，你无视其他角色的防具且"
                 "使用【杀】时可以多选择一个目标。"
             ),
+        ),
+        # 界一将成名-2014·移动版 界吴懿【奔袭】（jie-yijiang-2014-wuyi-caozhen 票 01；用户
+        # 2026-11-18 签）：出牌阶段开始时的单步流水线（弃任意张）+ 三条修饰器（距离 −X /
+        # 目标数 +X / 组合级资格 = 额外目标必须距离 1，框架票 05 的首个消费者）+ 三条强制段
+        # （消费加成 / 记"造成过伤害" / 结算后摸五张）。非锁定：① 牌面写「可以」。
+        SkillDef(
+            skill_id=JIE_BENXI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(
+                    Timing.PHASE_PLAY_START,
+                    flow=JIE_BENXI_FLOW,
+                    condition=_jie_benxi_condition,
+                ),
+                Hook(
+                    Timing.USE_ON_USE,
+                    handler=_jie_benxi_consume,
+                    forced=True,
+                ),
+                Hook(
+                    Timing.DAMAGE_AFTER_DEAL,
+                    handler=_jie_benxi_note_damage,
+                    forced=True,
+                ),
+                Hook(
+                    Timing.RESOLVE_AFTER_END,
+                    handler=_jie_benxi_done,
+                    forced=True,
+                ),
+            ),
+            modifiers=(
+                Modifier(ModifierPoint.DISTANCE, _jie_benxi_distance),
+                Modifier(ModifierPoint.TARGET_COUNT, _jie_benxi_extra_count),
+                Modifier(ModifierPoint.TARGET_SET_FILTER, _jie_benxi_target_set),
+            ),
+            preactivated=True,
+            requirement=(
+                "出牌阶段开始时，你可以弃置任意张牌，令你本阶段：计算与其他角色的距离-X、"
+                "使用的下一张基本牌或普通锦囊牌可以额外指定至多X名你计算与其距离为1的角色"
+                "为目标（X为你以此法弃置的牌数），然后此牌结算结束后，若此牌造成过伤害，"
+                "你摸五张牌。"
+            ),
+            step_requirements={"card": "弃置任意张牌"},
         ),
         # 神曹操移动版【飞影】（lin-batch 票 01）：纯修饰器 + 锁定 ⇒ 客体侧无条件 +1。
         # 声明形状抄【马术】，**判据方向抄【义从】②**（`ctx.owner == ctx.target`）。

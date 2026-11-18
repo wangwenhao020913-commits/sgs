@@ -68,6 +68,40 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_caozhen_mobile",
+      "name": "界曹真移动版",
+      "true_name": "曹真",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-yijiang-2014-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "sidi",
+          "name": "司敌",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_wuyi_mobile",
+      "name": "界吴懿移动版",
+      "true_name": "吴懿",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-yijiang-2014-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "benxi",
+          "name": "奔袭",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

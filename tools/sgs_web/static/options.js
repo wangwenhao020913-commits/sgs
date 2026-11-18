@@ -377,6 +377,11 @@ const OPTION_LABELS = Object.freeze({
   // :func:`optionText`），于是"点技能 → 第 1 步问两个选项"看到的是牌面上的两句话。
   guose_use_indulgence: "将一张方块牌当【乐不思蜀】使用",
   guose_discard_indulgence: "弃置一张方块牌并弃置场上的一张【乐不思蜀】",
+  // 界一将成名-2014·移动版 界曹真【司敌】②（jie-yijiang-2014-wuyi-caozhen 票 03）：
+  // 预测命中后的二选一——两项**恒可执行**、必答（`PickOption(optional=False)` 的口径由
+  // `ask_option` 的缺省承担），故永不置灰。
+  "sidi:cancel": "取消之（若无濒死，对其造成1点伤害）",
+  "sidi:draw_two": "摸两张牌",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。
@@ -391,6 +396,9 @@ const OPTION_PAIRS = Object.freeze([
   // SP武将组5 马云騄【凤魄】：两项是"每阶段每项限一次"的一对——已用项仍要画出来
   // （灰、点不动），否则只剩一项时玩家看不到"哪一项用过了"。
   Object.freeze(["fengpo:draw", "fengpo:damage"]),
+  // 界曹真【司敌】②：两项互斥且都恒可执行——配对只保证"另一项也画出来"（两项本来就都在
+  // 候选里，故这一行是显式声明，不改变可见性）。
+  Object.freeze(["sidi:cancel", "sidi:draw_two"]),
 ]);
 
 /** 选项按钮上的文字：已知的一次性选项用中文；其余选项保留**原值**（复用标签待票 08）。 */

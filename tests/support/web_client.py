@@ -461,6 +461,11 @@ _FIRE_TAPE_BANNED_HEROES = (
     # yijiang-2014-round3 票 01 / 03：一将成名-2014·吴懿 + 曹真移动版进默认池（108 → 109）。
     "wuyi",
     "caozhen_mobile",
+    # jie-yijiang-2014-wuyi-caozhen 票 03：界曹真移动版进默认池（112 → 113）。
+    # 按本表 docstring 的规矩**只追加禁将、不重扫 seed**。
+    "jie_caozhen_mobile",
+    # jie-yijiang-2014-wuyi-caozhen 票 01：界吴懿移动版进默认池（113 → 114）。
+    "jie_wuyi_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 
@@ -707,8 +712,16 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 2
+_WINE_TAPE_NEAR_DEATH_SEED = 108
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
+
+jie-yijiang-2014-wuyi-caozhen 票 01（默认池 112/74 → 114/75，界一将成名-2014·移动版加
+界吴懿 / 界曹真）再换池：seed 2 的对局在出现自救窗口前结束，按**同一判据、同一固定策略**
+从 1 起重扫 1–300（探针 `.scratch/jie-yijiang-2014-wuyi-caozhen/research/scan_wine_seed.py`，
+逐字复用 `_wine_tape_near_death` 的策略，判据未放宽），命中
+**74 / 84 / 108 / 156 / 174 / 192 / 226 / 239 / 256 / 264 / 296 / 297**，取 POST 次数最少的
+**seed 108**（11 次真实 POST 推进到 0 血 + 一次【酒】自救）；108 未被其余 tape 占用
+（火攻 4 / 16、出牌阶段 65）。
 
 huo-taishici-xunyu 票 01 / 02（默认池 70/44 → 72/46，火包移动版再加太史慈标准版 / 荀彧标准版）
 再换池：seed 4 的对局在出现自救窗口前结束，按同一判据从 1 起重扫到首个命中 **seed 16**

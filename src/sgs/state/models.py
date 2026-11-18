@@ -949,6 +949,47 @@ class Player(BaseModel):
     ``DISTANCE`` 修饰器（主体侧）。清理点 = 回合末（:meth:`Engine._clear_turn_effects`）。
     **不发 delta**：与 ``liegong_bonus`` 同姿态。
     """
+    jie_benxi_x: int = 0
+    """界吴懿移动版【奔袭】本阶段「计算与其他角色的距离 −X」的 X（jie-yijiang-2014-wuyi-caozhen 票 01）。
+
+    写入唯一入口 = :meth:`Engine.arm_jie_benxi`（出牌阶段开始时的弃牌步提交后落位）；
+    **有效判据 = :attr:`jie_benxi_seq` 与 :attr:`GameState.phase_seq` 相等**（惰性复位：
+    下一个出牌阶段序号一变即失效，不需要在阶段起点逐个清字段——先例 = ``fengpo_used``）。
+    读取方 = 同一条技能定义上的 ``DISTANCE`` 修饰器（主体侧）。**不发 delta**：与
+    ``fengpo_bonus`` / ``sidi_slash_penalty`` 同姿态。
+    """
+    jie_benxi_seq: int = -1
+    """【奔袭】落位时的 :attr:`GameState.phase_seq`（同上；两个字段同生同灭）。"""
+    jie_benxi_armed: bool = False
+    """【奔袭】的「下一张基本牌 / 普通锦囊牌可以额外指定至多 X 名…」**还没被消费**。
+
+    ``USE_ON_USE`` 的强制钩子把它置假并记下那张牌的 id（:attr:`jie_benxi_card`）；
+    仍为真时 ``TARGET_COUNT`` / ``TARGET_SET_FILTER`` 两条修饰器才生效。
+    """
+    jie_benxi_card: int = 0
+    """消费掉上面这次加成的**那张牌**的 ``card_id``（0 = 本阶段还没用过这类牌）。
+
+    读点 = ``DAMAGE_AFTER_DEAL``（记 :attr:`jie_benxi_dealt`）与 ``RESOLVE_AFTER_END``
+    （"此牌造成过伤害 ⇒ 摸五张"）。阶段末由 :meth:`Engine.clear_jie_benxi` 清掉
+    （牌 id 会被复用，留着会让下一阶段误判）。
+    """
+    jie_benxi_dealt: bool = False
+    """那张牌**造成过伤害**（本次使用的一次事实：任一伤害事件、不逐点）。"""
+    sidi_marks: dict[int, int] = Field(default_factory=dict)
+    """**界曹真【司敌】的预测表**（jie-yijiang-2014-wuyi-caozhen 票 03；用户 2026-11-18 签）。
+
+    键 = **被预测的角色**座位，值 = 曹真预测"他下一张使用的牌会指定的唯一目标"的座位。
+    字段住在**曹真自己**身上（与 ``hero.caozhen_mobile.sidi`` 的 :attr:`sidi_slash_penalty`
+    不同：那条是"谁被限"住在**被限者**身上），因为它是同一名角色的私有记账。
+
+    写入唯一入口 = :meth:`Engine.set_sidi_mark`（① 的两步座位流水线提交点）；清除唯一入口 =
+    :meth:`Engine.clear_sidi_mark`（② 判定那一刻**无论中没中**都清 + 阵亡 / 失去技能清）。
+    公开面只有"谁被司敌了"（``sgs_web.projection`` 的座位标签），**预测目标不进任何载荷**——
+    这是用户 2026-11-18 的 Q6 口径（「全场能看到谁被司敌了，但是不知道的是司敌预测目标为谁」）。
+
+    **不发 delta**：与 :attr:`sidi_slash_penalty` / ``liegong_bonus`` 同姿态（没有 JSON 读者；
+    回放按同一条技能动作重建）；不进 ``PlayerView`` / ``PlayerPublic``。
+    """
     sidi_slash_penalty: int = 0
     """本阶段该座位「使用【杀】的次数上限 −X」的 X（一将成名-2014·移动版 曹真【司敌】②）。
 

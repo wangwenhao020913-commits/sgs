@@ -101,6 +101,7 @@ __all__ = [
     "check_usable",
     "delayed_settle_target",
     "designation_actions_for",
+    "filter_target_sets",
     "discard_count",
     "distance",
     "distance_bonus",
@@ -810,6 +811,41 @@ def target_combos(
     )
 
 
+
+def filter_target_sets(
+    state: GameState,
+    seat: int,
+    card: CardRef,
+    combos: tuple[tuple[int, ...], ...] | list[tuple[int, ...]],
+) -> tuple[tuple[int, ...], ...]:
+    """按 ``ModifierPoint.TARGET_SET_FILTER`` 链**逐组**收窄目标组合
+    （yijiang-2014-wuyi-caozhen 票 05 的框架加法）。
+
+    ``current`` 从 ``True`` 起、回调**只许收窄**（返回假 = 这一组不合法）；``ctx.use_targets``
+    = 这一组本身（有序元组）。**没有注册该挂点的修饰器 ⇒ 入参原样返回**（既有牌型的候选
+    逐字节不变）。四个候选生成站点（``_play_phase`` / ``_respond`` 的 USE 趟 /
+    ``virtual_card_use`` 的 PLAY 趟与 RESPOND 趟）都走这一份实现，故"预览 / ``legal_actions`` /
+    AI 自建候选"三处读到的永远是同一份链值（账本 L884 的口径）。
+
+    为什么要"组合级"而不是改池：见 :class:`~sgs.effects.modifiers.ModifierPoint` 里
+    ``TARGET_SET_FILTER`` 那一段——同一个组合里**基础目标**与**额外目标**的资格可以不同，
+    而池是整张牌一份。
+    """
+    combos = tuple(tuple(int(target) for target in combo) for combo in combos)
+    if not combos:
+        return combos
+    kept: list[tuple[int, ...]] = []
+    for combo in combos:
+        allowed = apply_modifiers(
+            ModifierPoint.TARGET_SET_FILTER,
+            state,
+            ModifierContext(subject=seat, card=card, use_targets=combo),
+            True,
+        )
+        if allowed:
+            kept.append(combo)
+    return tuple(kept)
+
 def target_sets_match(chosen: Iterable[int], targets: Iterable[int]) -> bool:
     """选择的座位集合是否与候选的 ``targets`` **整组**相同（W7-01b / W7-03 的唯一判据）。
 
@@ -1173,13 +1209,18 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             )
         generated: tuple[Action, ...] = tuple(
             UseCard(card=card, targets=combo, answers_seq=answers_seq)
-            for combo in target_combos(
-                pool,
-                low,
-                high,
-                # M5-bugfix：声明了 ``preserve_target_order`` 的牌（【铁索连环】）按
-                # **点击顺序**结算，故两种顺序都是合法动作；其余牌仍只给引擎排好的升序。
-                ordered=behavior.preserve_target_order,
+            for combo in filter_target_sets(
+                state,
+                seat,
+                card,
+                target_combos(
+                    pool,
+                    low,
+                    high,
+                    # M5-bugfix：声明了 ``preserve_target_order`` 的牌（【铁索连环】）按
+                    # **点击顺序**结算，故两种顺序都是合法动作；其余牌仍只给引擎排好的升序。
+                    ordered=behavior.preserve_target_order,
+                ),
             )
         )
         ctx = ModifierContext(subject=seat, card=card)
@@ -1468,6 +1509,7 @@ def _respond(
             else:
                 pool = check_targets(state, seat, card)
                 combos = tuple((target,) for target in pool) if pool else ((),)
+            combos = filter_target_sets(state, seat, card, combos)
             for combo in combos:
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:

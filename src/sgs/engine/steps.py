@@ -547,6 +547,8 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
                 return equip_control
         else:
             host.move_processing_card_to_discard(frame)
+        frame.data["after_end_done"] = True
+    if not frame.data.get("after_end_emitted"):
         emit_control = _emit(
             host,
             frame,
@@ -554,9 +556,9 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
             actor=frame.data["source"],
             cards=(frame.data["card"],),
         )
-        frame.data["after_end_done"] = True
         if emit_control is not None:
             return emit_control
+        frame.data["after_end_emitted"] = True
     return host.apply_timing_ops(frame, Timing.RESOLVE_AFTER_END)
 
 

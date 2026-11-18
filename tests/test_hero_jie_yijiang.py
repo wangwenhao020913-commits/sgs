@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+from sgs.effects import ModifierContext, distance
 from sgs.data import (
     Color,
     Identity,
@@ -54,6 +55,7 @@ from sgs.state import (
     PlayCard,
     QueryKind,
     SelectCards,
+    SelectOption,
     SelectOptions,
     SubstituteJudgeCard,
     UseCard,
@@ -63,6 +65,8 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from support import (
+    PassPlayer,
+    declare_death,
     RecordingPlayer,
     SeatSpec,
     build_state,
@@ -3417,3 +3421,696 @@ def test_jianying_target_step_has_a_live_pool_with_many_cards():
     assert tuple(row.options) == expected and row.max == 1, (
         f"清单行的池与上限同源：{row.options} / max={row.max}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 票 03：界曹真移动版【司敌】（jie-yijiang-2014-wuyi-caozhen；用户 2026-11-18 签 Q1–Q6）
+#
+# 牌面（移动版 = 用户资产）：① 使用**非延时锦囊**结算完毕后，选一名其他角色 + 预测其下一张
+# （任意）牌的唯一目标；② 命中 ⇒ 目标是自己则摸一张，否则二选一：取消并对其 1 点伤害 / 摸两张；
+# 中与不中都当场清除。判据全走**外部缝**：`Player.sidi_marks`、座位标记、记录流、体力 / 手牌数。
+# ---------------------------------------------------------------------------
+
+CAOZHEN = "jie_caozhen_mobile"
+SIDI = "hero.jie_caozhen_mobile.sidi"
+SIDI_MARK = "司敌"
+SIDI_CANCEL = "sidi:cancel"
+SIDI_DRAW_TWO = "sidi:draw_two"
+
+
+def _pick_use(query, card_id: int, targets: tuple[int, ...], *, card_only: bool = False):
+    """从候选里取"这张牌 + 这组目标"的那条 ``UseCard``（不手拼 Action）。
+
+    ``card_only`` = 只按牌匹配（【无中生有】这类 ``self_only`` 的牌，目标恒是 (自己,)）。
+    """
+    for action in query.legal_actions:
+        if not isinstance(action, UseCard):
+            continue
+        if int(action.card.card_id) != int(card_id):
+            continue
+        if card_only:
+            return action
+        if tuple(int(seat) for seat in action.targets) == tuple(int(seat) for seat in targets):
+            return action
+    raise AssertionError(f"候选里没有 {card_id} → {targets} 的那一条")
+
+
+class _SidiTable:
+    """三名座位的脚本台：0 = 界曹真（用锦囊 + ① 两步选座 + ② 二选一），1 = 被预测者。
+
+    ``victim`` 座位 1 会在他自己的出牌阶段用一张牌（``user_card`` 打 ``user_target``）；
+    其余座位一律 :class:`PassPlayer`。没有期望的询问一出现就断言失败（不静默吞）。
+    """
+
+    def __init__(
+        self,
+        *,
+        card: int,
+        targets: tuple[int, ...] = (),
+        predicted: int | None = None,
+        predicted_target: int | None = None,
+        user_card: int | None = None,
+        user_target: int | None = None,
+        choice: str | None = None,
+    ) -> None:
+        self.card = card
+        self.targets = tuple(targets)
+        self.predicted = predicted
+        self.predicted_target = predicted_target
+        self.user_card = user_card
+        self.user_target = user_target
+        self.choice = choice
+        self.used = False
+        self.user_used = False
+        self.activation_queries = 0
+        self.seat_queries = 0
+        self.option_queries = 0
+        self._pass = PassPlayer()
+
+    # -- 两个座位各自的出牌阶段 ------------------------------------------------
+    def _play_phase(self, query):
+        if query.actor == 0 and not self.used:
+            self.used = True
+            return _pick_use(query, self.card, self.targets, card_only=True)
+        if query.actor == 1 and self.user_card is not None and not self.user_used:
+            self.user_used = True
+            return _pick_use(query, self.user_card, (int(self.user_target),))
+        return next(
+            action for action in query.legal_actions if isinstance(action, EndPhase)
+        )
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return self._play_phase(query)
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == SIDI:
+            self.activation_queries += 1
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        if query.kind == QueryKind.SELECT_OPTION and query.actor == 0:
+            choices = tuple(
+                action.choice
+                for action in query.legal_actions
+                if isinstance(action, SelectOption)
+            )
+            seats = tuple(choice for choice in choices if choice.startswith("seat:"))
+            if seats:
+                self.seat_queries += 1
+                wanted = (
+                    self.predicted if self.seat_queries == 1 else self.predicted_target
+                )
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectOption)
+                    and action.choice == f"seat:{wanted}"
+                )
+            self.option_queries += 1
+            assert self.choice is not None, "没期望 ② 出选项步"
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectOption) and action.choice == self.choice
+            )
+        return self._pass.respond(query)
+
+
+def _sidi_state(*, mine: int, user: int, victim_hand: tuple[int, ...] = ()) -> object:
+    """三座位局面：0 = 界曹真（手牌 = 那张锦囊）、1 = 被预测者（手牌 = 那张牌）、2 = 预测目标。"""
+    deck = deck_excluding(PACK, mine, user, *victim_hand)
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=CAOZHEN, hand=(mine,), hp=4, hp_max=4, identity=Identity.LORD),
+            SeatSpec(hand=(user, *victim_hand), hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+
+
+def _run_sidi(engine, table, stop, *, limit=4000):
+    players = [table for _ in engine.state.players]
+    return run_queries(engine, players, stop, limit=limit)
+
+
+def _markers(state, seat: int) -> tuple[str, ...]:
+    return tuple(marker.name for marker in state.player(seat).markers)
+
+
+def _non_delayed_trick(*, exclude=()) -> int:
+    return next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in exclude and PACK.deck.cards[card_id].type == "ex_nihilo"
+    )
+
+
+def _delayed_trick(*, exclude=()) -> int:
+    return next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in exclude and PACK.deck.cards[card_id].type == "indulgence"
+    )
+
+
+def test_sidi_records_the_prediction_and_marks_the_predicted_character():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=21)
+    table = _SidiTable(card=trick, predicted=1, predicted_target=2)
+    _run_sidi(
+        engine,
+        table,
+        lambda e: bool(e.state.player(0).sidi_marks),
+    )
+    assert engine.state.player(0).sidi_marks == {1: 2}, "预测表 = 被预测者 → 预测目标"
+    assert _markers(engine.state, 1) == (SIDI_MARK,), "被预测者身上挂公开标记「司敌」"
+    assert _markers(engine.state, 2) == (), "标记不在预测目标身上"
+    assert table.activation_queries == 1
+    assert table.seat_queries == 2
+
+
+def test_sidi_is_not_offered_after_a_delayed_trick():
+    delayed = _delayed_trick()
+    state = _sidi_state(mine=delayed, user=cards_of_type(PACK, "slash")[0])
+    engine = Engine.from_state(state, seed=22)
+    table = _SidiTable(card=delayed, targets=(1,))
+    _run_sidi(
+        engine,
+        table,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    assert table.activation_queries == 0, "延时锦囊不触发 ①"
+    assert engine.state.player(0).sidi_marks == {}
+
+
+def test_sidi_is_not_offered_when_every_other_character_is_already_predicted():
+    trick = _non_delayed_trick()
+    state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])
+    for other in (1, 2, 3):
+        state.player(0).sidi_marks[other] = 0
+    engine = Engine.from_state(state, seed=23)
+    table = _SidiTable(card=trick, predicted=1, predicted_target=2)
+    _run_sidi(
+        engine,
+        table,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    assert table.activation_queries == 0, "没有可指定的其他角色 ⇒ 连问都不问（G1）"
+
+
+def test_sidi_triggers_on_a_basic_card_and_on_an_equipment():
+    """① 的牌型 = **除延时锦囊以外的任何牌**（用户 2026-11-18 的补正）。
+
+    「非延时锦囊牌」不是官方用语（官方写「普通锦囊牌」）⇒【杀】/ 装备牌同样让 ① 出现。
+    """
+    for card_type in ("slash", "renwang_shield"):
+        card = cards_of_type(PACK, card_type)[0]
+        state = _sidi_state(mine=card, user=cards_of_type(PACK, "slash")[-1])
+        engine = Engine.from_state(state, seed=31)
+        table = _SidiTable(card=card, predicted=1, predicted_target=2)
+        _run_sidi(engine, table, lambda e: bool(e.state.player(0).sidi_marks))
+        assert table.activation_queries == 1, f"{card_type} 应当让 ① 出现"
+        assert engine.state.player(0).sidi_marks == {1: 2}
+
+
+class _SidiDodgeTable:
+    """座位 1 用【杀】打座位 0（回合外），座位 0 = 界曹真用【闪】响应 ⇒ ① 该触发。"""
+
+    def __init__(self, *, slash: int, dodge: int) -> None:
+        self.slash = slash
+        self.dodge = dodge
+        self.attack_used = False
+        self.activations = 0
+        self.seats = 0
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 1 and not self.attack_used:
+            self.attack_used = True
+            return _pick_use(query, self.slash, (0,))
+        if query.kind == QueryKind.PLAY_PHASE:
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        if query.kind == QueryKind.DODGE and query.actor == 0:
+            return _pick_use(query, self.dodge, ())
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            self.activations += 1
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            if any(
+                isinstance(action, SelectOption)
+                and action.choice.startswith("seat:")
+                for action in query.legal_actions
+            ):
+                self.seats += 1
+                want = "seat:1" if self.seats == 1 else "seat:2"
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectOption) and action.choice == want
+                )
+        return PassPlayer().respond(query)
+
+
+def test_sidi_triggers_on_a_dodge_played_outside_my_turn():
+    """用户 2026-11-18 报障的场景：**回合外**用【闪】响应【杀】也要能发动 ①。
+
+    【闪】自己就是"除延时锦囊以外的牌"（它走完整的 USE 帧，`RESOLVE_AFTER_END` 照常派发）。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    deck = deck_excluding(PACK, slash, dodge)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=CAOZHEN,
+                hand=(dodge,),
+                hp=4,
+                hp_max=4,
+                identity=Identity.LORD,
+            ),
+            SeatSpec(hand=(slash,), hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=deck,
+        turn_seat=1,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=32)
+    table = _SidiDodgeTable(slash=slash, dodge=dodge)
+    _run_sidi(engine, table, lambda e: bool(e.state.player(0).sidi_marks))
+    assert table.activations == 1, "回合外用【闪】响应【杀】也要让 ① 出现"
+    assert engine.state.player(0).sidi_marks == {1: 2}
+    assert _markers(engine.state, 1) == (SIDI_MARK,)
+
+
+def test_sidi_draws_one_when_the_predicted_target_is_the_owner():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=24)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=0,
+        user_card=slash,
+        user_target=0,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: not e.state.player(0).sidi_marks and table.user_used,
+    )
+    assert table.option_queries == 0, "预测目标是曹真自己 ⇒ 只摸一张，不问"
+    assert _markers(engine.state, 1) == (), "命中后标记清掉"
+
+
+def test_sidi_cancels_the_card_and_damages_the_user():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=25)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=slash,
+        user_target=2,
+        choice=SIDI_CANCEL,
+    )
+    _run_sidi(engine, table, lambda e: e.state.player(1).hp < 4)
+    assert table.option_queries == 1
+    assert engine.state.player(2).hp == 4, "取消之 ⇒ 那张【杀】不结算，目标不掉血"
+    assert engine.state.player(1).hp == 3, "1 点伤害落在**使用那张牌的角色**身上（Q2）"
+    assert engine.state.player(0).sidi_marks == {}
+
+
+def test_sidi_draws_two_and_spends_the_prediction():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=26)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=slash,
+        user_target=2,
+        choice=SIDI_DRAW_TWO,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: table.option_queries >= 1 and not e.state.player(0).sidi_marks,
+    )
+    assert engine.state.player(0).sidi_marks == {}
+    assert _markers(engine.state, 1) == ()
+    assert engine.state.player(2).hp == 4, "摸两张那一支不取消牌、也不造伤"
+    assert engine.state.player(1).hp == 4
+
+
+def test_sidi_prediction_fails_on_a_wrong_target_and_is_spent():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=27)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=slash,
+        user_target=0,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: not e.state.player(0).sidi_marks and table.user_used,
+    )
+    assert table.option_queries == 0, "没猜中 ⇒ 不发询问"
+    assert _markers(engine.state, 1) == (), "失败也清除（Q4）"
+
+
+def test_sidi_mark_and_prediction_are_cleared_when_the_owner_dies():
+    trick = _non_delayed_trick()
+    state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])
+    engine = Engine.from_state(state, seed=28)
+    table = _SidiTable(card=trick, predicted=1, predicted_target=2)
+    _run_sidi(
+        engine,
+        table,
+        lambda e: bool(e.state.player(0).sidi_marks),
+    )
+    assert _markers(engine.state, 1) == (SIDI_MARK,)
+    declare_death(engine, 0)
+    for _ in range(200):
+        if engine.state.player(0).sidi_marks == {}:
+            break
+        if engine.pending is not None:
+            engine.submit(PassPlayer().respond(engine.pending))
+        else:
+            engine._step()
+    assert engine.state.player(0).sidi_marks == {}, "阵亡清预测表"
+    assert _markers(engine.state, 1) == (), "阵亡清标记（2018 死亡流程 Ⅰ.c 同一姿态）"
+
+
+def test_near_death_in_flight_reads_the_stack():
+    trick = _non_delayed_trick()
+    state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])
+    engine = Engine.from_state(state, seed=29)
+    assert engine.near_death_in_flight() is False
+    engine.push_frame(
+        FrameKind.NEAR_DEATH,
+        {"source": None, "targets": (), "card": None},
+        timing=Timing.NEAR_DEATH_AT,
+    )
+    try:
+        assert engine.near_death_in_flight() is True
+    finally:
+        engine.stack.pop()
+
+
+# ---------------------------------------------------------------------------
+# 票 01：界吴懿移动版【奔袭】（jie-yijiang-2014-wuyi-caozhen；用户 2026-11-18 签 吴-A1 / 吴-C1）
+#
+# 牌面：出牌阶段开始时，弃置任意张牌 ⇒ 本阶段距离 −X、下一张基本牌 / 普通锦囊牌可额外指定
+# 至多 X 名**距离 1** 的角色、那张牌造成过伤害则摸五张。
+# ---------------------------------------------------------------------------
+
+WUYI = "jie_wuyi_mobile"
+JIE_BENXI = "hero.jie_wuyi_mobile.benxi"
+
+
+class _BenxiScript:
+    """座位 0 = 界吴懿：发动 → 弃 ``discard`` 张 → （可选）用一张牌 → 结束阶段。"""
+
+    def __init__(
+        self,
+        *,
+        discard: int = 1,
+        use_card: int | None = None,
+        use_targets: tuple[int, ...] = (),
+        activate: bool = True,
+    ) -> None:
+        self.discard = discard
+        self.use_card = use_card
+        self.use_targets = tuple(use_targets)
+        self.activate = activate
+        self.activations = 0
+        self.discards = 0
+        self.used = False
+        self._pass = PassPlayer()
+        self.dodged = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == JIE_BENXI:
+            self.activations += 1
+            if not self.activate:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, Pass)
+                )
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        if query.kind == QueryKind.SELECT_CARDS and query.actor == 0:
+            self.discards += 1
+            total = len(query.slots)
+            picks = tuple(range(total - self.discard, total))
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectCards) and tuple(action.picks) == picks
+            )
+        if query.kind == QueryKind.DODGE and query.actor == 1 and not self.dodged:
+            action = next(
+                (
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, UseCard)
+                    and str(action.card.type) == "dodge"
+                ),
+                None,
+            )
+            if action is not None:
+                self.dodged = True
+                return action
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 0:
+            if self.use_card is not None and not self.used:
+                self.used = True
+                return _pick_use(query, self.use_card, self.use_targets, card_only=True)
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        return self._pass.respond(query)
+
+
+def _benxi_state(*, mine: tuple[int, ...], seats: int = 4, others: tuple[int, ...] = ()):
+    deck = deck_excluding(PACK, *mine, *others)
+    specs = [SeatSpec(hero=WUYI, hand=mine, hp=4, hp_max=4, identity=Identity.LORD)]
+    specs.append(SeatSpec(hand=others, hp=4, hp_max=4, identity=Identity.REBEL))
+    for _ in range(seats - 2):
+        specs.append(SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL))
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=seats if seats in (2, 4, 5, 6, 7, 8) else 4, first_seat=0),
+    )
+
+
+def _run_benxi(engine, script, stop, *, limit=4000):
+    players = [script for _ in engine.state.players]
+    return run_queries(engine, players, stop, limit=limit)
+
+
+def test_jie_benxi_arms_the_phase_and_reduces_distance():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _benxi_state(mine=mine)
+    engine = Engine.from_state(state, seed=41)
+    script = _BenxiScript(discard=1)
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    assert script.activations == 1
+    assert engine.state.player(0).jie_benxi_x == 1
+    assert engine.state.player(0).jie_benxi_seq == engine.state.phase_seq
+    # 座位 0 → 座位 2 的原始距离是 2，−1 之后是 1
+    assert distance(engine.state, 0, 2) == 1
+
+
+def test_jie_benxi_is_not_offered_without_a_card_to_discard():
+    """手牌 ∪ 装备区**皆空** ⇒ 连"是否发动"都不问（G1：不发没有候选的询问）。
+
+    直接断言条件回调（``from_state`` 从回合开头跑起、摸牌阶段总会摸两张 ⇒ 局面构造不出
+    "出牌阶段开始时空手"这一档）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills.catalog import MATCH_OWNER_KEY
+    from sgs.skills.target_change import _jie_benxi_condition
+
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=WUYI, hp=4, hp_max=4, identity=Identity.LORD),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    host = SimpleNamespace(state=state)
+    frame = SimpleNamespace(data={"source": 0, MATCH_OWNER_KEY: 0})
+    assert _jie_benxi_condition(host, frame) is False, "一张牌都没有 ⇒ 条件不成立"
+    state.player(0).hand.append(0)  # 随便一张牌
+    assert _jie_benxi_condition(host, frame) is True
+    frame.data[MATCH_OWNER_KEY] = 1
+    assert _jie_benxi_condition(host, frame) is False, "关于我：持有者换成别人 ⇒ 假"
+
+
+def test_jie_benxi_distance_and_bonus_expire_with_the_play_phase():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _benxi_state(mine=mine)
+    engine = Engine.from_state(state, seed=43)
+    script = _BenxiScript(discard=1)
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    assert engine.state.player(0).jie_benxi_x == 1
+    # 直接跑过这个出牌阶段（结束阶段 + 弃牌阶段）⇒ 阶段末清理落位
+    _run_benxi(
+        engine,
+        script,
+        lambda e: e.state.player(0).jie_benxi_x == 0 and not e.state.player(0).jie_benxi_armed,
+    )
+    assert engine.state.player(0).jie_benxi_card == 0
+    assert distance(engine.state, 0, 2) == 2
+
+
+def test_jie_benxi_consumes_the_bonus_on_the_next_basic_or_trick():
+    slash = cards_of_type(PACK, "slash")[0]
+    mine = (slash,) + _hand_of(basic=1, trick=1, equipment=2, skip=(slash,))
+    state = _benxi_state(mine=mine, others=(cards_of_type(PACK, "dodge")[0],))
+    engine = Engine.from_state(state, seed=44)
+    script = _BenxiScript(discard=1, use_card=slash, use_targets=(1,))
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_card != 0)
+    assert engine.state.player(0).jie_benxi_armed is False, "用过即失效"
+    assert engine.state.player(0).jie_benxi_card == slash
+    assert engine.state.player(0).jie_benxi_x == 1, "距离那一半仍在本阶段有效"
+
+
+def test_jie_benxi_draws_five_when_the_card_dealt_damage():
+    slash = cards_of_type(PACK, "slash")[0]
+    mine = (slash,) + _hand_of(basic=1, trick=1, equipment=2, skip=(slash,))
+    state = _benxi_state(mine=mine)
+    engine = Engine.from_state(state, seed=45)
+    script = _BenxiScript(discard=1, use_card=slash, use_targets=(1,))
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    before = len(engine.state.player(0).hand)
+    # 【杀】离手 −1、结算后摸五张 ⇒ 净 +4
+    _run_benxi(
+        engine,
+        script,
+        lambda e: len(e.state.player(0).hand) >= before + 4,
+    )
+    assert engine.state.player(0).jie_benxi_dealt is True, "造成过伤害"
+    assert len(engine.state.player(0).hand) >= before + 4
+    assert engine.state.player(1).hp == 3
+
+
+def test_jie_benxi_draws_nothing_when_the_card_was_dodged():
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    mine = (slash,) + _hand_of(basic=1, trick=1, equipment=2, skip=(slash,))
+    state = _benxi_state(mine=mine, others=(dodge,))
+    engine = Engine.from_state(state, seed=46)
+    script = _BenxiScript(discard=1, use_card=slash, use_targets=(1,))
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    before = len(engine.state.player(0).hand)
+    _run_benxi(
+        engine,
+        script,
+        lambda e: e.state.player(0).jie_benxi_card != 0
+        and e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    assert script.dodged is True, "座位 1 打出了【闪】"
+    assert engine.state.player(0).jie_benxi_dealt is False, "被【闪】抵消 ⇒ 没造成过伤害"
+    assert engine.state.player(1).hp == 4
+    assert len(engine.state.player(0).hand) < before + 4, "没摸五张"
+
+
+def test_jie_benxi_extra_count_and_target_set_callbacks():
+    """两条"额外目标"修饰器的判据（直接调回调，8 人局的远座位才观察得到）。"""
+    from sgs.effects import distance as _distance
+    from sgs.skills.target_change import (
+        _jie_benxi_extra_count,
+        _jie_benxi_target_set,
+    )
+
+    duel = cards_of_type(PACK, "duel")[0]
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _benxi_state(mine=mine, seats=8)
+    called = {
+        "ctx": ModifierContext(subject=0, card=state.card(duel)),
+    }
+    engine = Engine.from_state(state, seed=47)
+    engine.arm_jie_benxi(0, 1)
+    player = engine.state.player(0)
+    player.jie_benxi_seq = engine.state.phase_seq
+    ctx = ModifierContext(subject=0, owner=0, card=engine.state.card(duel))
+    assert _jie_benxi_extra_count(engine.state, ctx, 1) == 2, "目标数 = 额定 1 + X(1)"
+    # 距离 1 的座位可以当**额外**目标（组合里"远"的座位数不超过额定数）
+    assert _jie_benxi_target_set(
+        engine.state,
+        ModifierContext(subject=0, owner=0, card=ctx.card, use_targets=(1, 2)),
+        True,
+    )
+    far = [seat for seat in range(1, 8) if _distance(engine.state, 0, seat) > 1]
+    assert far, "8 人局里一定有距离 > 1 的座位"
+    assert not _jie_benxi_target_set(
+        engine.state,
+        ModifierContext(
+            subject=0, owner=0, card=ctx.card, use_targets=(far[0], far[-1])
+        ),
+        True,
+    ), "两个都远 ⇒ 超过额定目标数 ⇒ 这一组不合法"
+    # 没 armed / 不是基本牌或普通锦囊牌 ⇒ 原样放行（不参与）
+    assert not _jie_benxi_target_set(
+        engine.state,
+        ModifierContext(subject=0, owner=0, card=ctx.card, use_targets=(1, 2)),
+        False,
+    )
+
+
+def test_jie_benxi_and_wuyi_benxi_are_distinct_declarations():
+    from sgs.skills import CATALOG
+
+    jie = CATALOG[JIE_BENXI]
+    standard = CATALOG["hero.wuyi.benxi"]
+    assert jie.skill_id != standard.skill_id
+    assert jie.locked is False and standard.locked is True
+    assert jie.requirement != standard.requirement

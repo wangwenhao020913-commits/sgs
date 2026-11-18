@@ -2452,6 +2452,20 @@ class Engine:
         seat = frame.data["source"]
         if card.is_virtual:  # 虚拟装备不是牌（票 07 §6）：装备区只放实体牌
             return None
+        player = self.state.player(seat)
+        if not player.alive:
+            # **使用者在这次使用里阵亡**（jie-yijiang-2014-wuyi-caozhen 票 03 的 fuzz 撞到：
+            # 界曹真【司敌】② 在 B5「取消之 + 对其造成 1 点伤害」可以当场打死**使用装备牌的
+            # 那个角色**）⇒ 死人没有装备区可入，这张牌按"最终去向 = 弃牌堆"处理。
+            # 阵亡清点是**死亡那一刻**做的，那时这张牌还在处理区，不在任何区里，
+            # 故不补这一刀它会一直留在死者的装备区（fuzz 的活状态不变量当场判红）。
+            return self.move_in_frame(
+                frame,
+                (card,),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.PUT,
+                owner=seat,
+            )
         if frame.data.get(_EQUIP_SLOT_SCANNED) != card.card_id:
             # 同槽扫描的游标在**压帧之前**落位（§3.1）：这次扫描只做一次，续跑只补搬还没搬完的步。
             frame.data[_EQUIP_SLOT_SCANNED] = card.card_id
@@ -4733,6 +4747,72 @@ class Engine:
                 return True
         return False
 
+    def arm_jie_benxi(self, seat: int, amount: int) -> None:
+        """界吴懿移动版【奔袭】的落位（jie-yijiang-2014-wuyi-caozhen 票 01）。
+
+        ``amount`` = 这一步弃置的牌数（X ≥ 1）。同时记下当下的 :attr:`GameState.phase_seq`
+        ——「本阶段」的有效性由它惰性判定（下一个出牌阶段序号一变，减距离与加成一起失效）。
+        **不发 delta**：与 ``fengpo_used`` / ``sidi_marks`` 同姿态。
+        """
+        player = self.state.player(seat)
+        player.jie_benxi_x = int(amount)
+        player.jie_benxi_seq = int(self.state.phase_seq)
+        player.jie_benxi_armed = True
+        player.jie_benxi_card = 0
+        player.jie_benxi_dealt = False
+
+    def consume_jie_benxi(self, seat: int, card_id: int) -> bool:
+        """【奔袭】的加成被**这张牌**消费掉（``USE_ON_USE``；用过即失效，不再等下一张）。
+
+        幂等：已经不是 armed ⇒ 返回 ``False``（同一次使用重入不重记）。
+        """
+        player = self.state.player(seat)
+        if not player.jie_benxi_armed:
+            return False
+        player.jie_benxi_armed = False
+        player.jie_benxi_card = int(card_id)
+        player.jie_benxi_dealt = False
+        return True
+
+    def clear_jie_benxi(self, seat: int) -> None:
+        """清掉【奔袭】的全部落位（**出牌阶段结束时**、与其它"本阶段"字段同一收尾点）。"""
+        player = self.state.player(seat)
+        player.jie_benxi_x = 0
+        player.jie_benxi_seq = -1
+        player.jie_benxi_armed = False
+        player.jie_benxi_card = 0
+        player.jie_benxi_dealt = False
+
+    def note_jie_benxi_dealt(self, seat: int) -> None:
+        """记"消费那张牌造成过伤害"（本次使用的一次事实，不逐点）。"""
+        self.state.player(seat).jie_benxi_dealt = True
+
+    def set_sidi_mark(self, seat: int, predicted: int, target: int) -> None:
+        """写一条【司敌】预测（界曹真移动版；jie-yijiang-2014-wuyi-caozhen 票 03）。
+
+        **写入唯一入口**：``seat`` = 曹真，``predicted`` = 被他预测的角色，``target`` = 他预测
+        "那个人下一张牌会指定的唯一目标"。同键覆盖（Q5 已把"重复指定同一人"挡在候选阶段）。
+        **不发 delta**：预测目标只在引擎侧（用户 Q6），公开面是那枚「司敌」标记。
+        """
+        self.state.player(seat).sidi_marks[int(predicted)] = int(target)
+
+    def clear_sidi_mark(self, seat: int, predicted: int) -> bool:
+        """清掉 ``seat`` 对 ``predicted`` 的那条预测（② 判定那一刻**中没中**都清）。
+
+        幂等：本来就没有 ⇒ 返回 ``False``。
+        """
+        return self.state.player(seat).sidi_marks.pop(int(predicted), None) is not None
+
+    def near_death_in_flight(self) -> bool:
+        """此刻场上**有没有濒死流程在飞**（栈上有没有 ``NEAR_DEATH`` 帧）。
+
+        只读助手（界曹真【司敌】② 的「若此时场上没有任何角色处于濒死状态」）：
+        「处于濒死状态」按规则 4.17（``详细规则`` L478–L498）= **正在走濒死流程**，而
+        L496–L497 明写同一时机不可能有两名以上角色同时处于濒死 ⇒ 判据就是"栈上有没有
+        那个帧"。纯新增读取口，不改任何既有路径。
+        """
+        return any(frame.kind is FrameKind.NEAR_DEATH for frame in self.stack.frames)
+
     def bar_dingpin_target(self, seat: int, target: int) -> bool:
         """把 ``target`` 记进"本回合不能再对其发动【定品】"的禁令（【定品】黑色判定分支）。
 
@@ -5135,6 +5215,24 @@ class Engine:
                     frame_id=frame.frame_id,
                     depth=self.stack.depth,
                 )
+        self._clear_sidi_marks_of(seat)
+
+    def _clear_sidi_marks_of(self, seat: int) -> None:
+        """座位离场 / 失去技能 ⇒ 与它有关的**预测表**条目一并作废（界曹真【司敌】）。
+
+        三档一起清：它自己做的预测（键 = 它）、它被预测（键 = 它）、它是别人预测的目标
+        （值 = 它）。**不发 delta**（预测表不进记录流；公开面只有那枚「司敌」标记，而标记
+        的清理由 :meth:`_clear_dead_markers` / :meth:`_drop_markers_of_lost_skill` 负责）。
+        依据 = `06`（§5「程序化约定与偏离一手」）的"失去技能的清理"纪律（L1265）与 2018
+        死亡流程 Ⅰ.c 的同一姿态。
+        """
+        for player in self.state.players:
+            marks = player.sidi_marks
+            if not marks:
+                continue
+            for predicted in tuple(marks):
+                if predicted == seat or marks[predicted] == seat or player.seat == seat:
+                    marks.pop(predicted, None)
 
     def set_wine_active(self, frame: Frame | None, seat: int, active: bool) -> bool:
         """写一个座位的【酒】加伤状态并落一条 ``wine_change``（M5-04 的唯一写入口）。
@@ -5449,6 +5547,10 @@ class Engine:
                         source_seat=marker.source_seat,
                         source_skill_id=marker.source_skill_id,
                     )
+        # 与标记同一时机的**座位级技能私有记录**（今天只有界曹真【司敌】的预测表）：
+        # 失去任意技能时保守地作废该座位的预测——预测表没有"来源技能"字段，而它只有一条
+        # 载体；宁可多清一次，也不让一个已不存在的技能继续留着预测（`06` §5.13 的纪律）。
+        self._clear_sidi_marks_of(seat)
 
     def _drop_hero_zones_of_lost_skill(
         self, frame: Frame | None, seat: int, skill_id: str
@@ -7442,6 +7544,9 @@ class Engine:
             self._clear_qimou_count(self.state.turn_seat)
             # lukang-mobile 票 01 陆抗移动版【决堰】·武器栏：牌面写「此阶段内」，同一收尾点。
             self._clear_duanyan_slash_bonus(self.state.turn_seat)
+            # jie-yijiang-2014-wuyi-caozhen 票 01 界吴懿移动版【奔袭】：同一个"本阶段"收尾点
+            # （牌 id 会被复用，留着会让下一阶段误判"这张牌造成过伤害"）。
+            self.clear_jie_benxi(self.state.turn_seat)
             # yijiang-2014-round3 票 03 曹真移动版【司敌】②：「令**其**本阶段使用【杀】的次数
             # 上限-1」的作用域 = 被限者的这个出牌阶段 ⇒ 同一收尾点清掉（字段在**被限者**身上，
             # 而"被限者"恒是当前回合角色）。

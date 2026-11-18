@@ -2836,6 +2836,28 @@ def _coverage_zhiheng():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_jie_benxi():
+    """界吴懿移动版【奔袭】（jie-yijiang-2014-wuyi-caozhen 票 01）：手里两张可弃的牌。
+
+    出牌阶段开始时问「是否发动」；清单第 1 步是选自己的牌（手牌 ∪ 装备区）⇒ 渲得出。
+    """
+    # 两张【闪】用不出去（不是出牌阶段的合法使用）⇒ AI 的正分动作只剩那条发动。
+    cards = tuple(_ids("dodge")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_wuyi_mobile", hand=cards), SeatSpec()],
+        deck=_deck_excluding(*cards),
+        turn_seat=0,
+    )
+    # 触发时机是**出牌阶段开始时**（不是出牌阶段的空闲窗口）⇒ 照触发技的形状造询问：
+    # 与【流离】那条同一份辅助（`_passive_preactivation_query`）。
+    frame = _ActivationFrame(source=0, targets=(), card=None, skill_owner=0)
+    query = _passive_preactivation_query(
+        state, 0, "hero.jie_wuyi_mobile.benxi", timing=Timing.PHASE_PLAY_START, frame=frame
+    )
+    return state, query, frame
+
+
 def _coverage_rende():
     low = tuple(_ids("lightning")[:2])
     state = build_state(
@@ -3415,6 +3437,7 @@ def _coverage_vermilion_feather_fan():
 
 _COVERAGE_CASES = {
     "hero.sunquan.zhiheng": _coverage_zhiheng,
+    "hero.jie_wuyi_mobile.benxi": _coverage_jie_benxi,
     "hero.liubei.rende": _coverage_rende,
     "hero.jie_liubei.rende": _coverage_jie_rende,
     # yijiang-2014-round2 票 20：【激将】的出牌阶段主动「使用【杀】」入口（声明级 flow）。

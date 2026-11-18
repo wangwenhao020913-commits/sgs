@@ -43,6 +43,7 @@ from sgs.effects import (
     behavior_for,
     check_count,
     check_targets,
+    filter_target_sets,
     forbidden_as_slash,
     forced_use_targets,
     is_slash,
@@ -683,8 +684,13 @@ def virtual_card_use(
             )
         return [
             UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
-            for combo in target_combos(
-                pool, low, high, ordered=behavior.preserve_target_order
+            for combo in filter_target_sets(
+                state,
+                seat,
+                card,
+                target_combos(
+                    pool, low, high, ordered=behavior.preserve_target_order
+                ),
             )
         ]
     if ctx.scope is CandidateScope.DODGE:
@@ -732,7 +738,7 @@ def virtual_card_use(
                 combos = tuple((target,) for target in pool) if pool else ((),)
             return [
                 UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
-                for combo in combos
+                for combo in filter_target_sets(state, seat, card, combos)
             ]
         return [PlayCard(card=card, answers_seq=ctx.answers_seq)]
     if ctx.scope is CandidateScope.NULLIFY:
