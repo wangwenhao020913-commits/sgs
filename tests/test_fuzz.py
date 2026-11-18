@@ -366,14 +366,22 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
 
     余下的：两维相乘的 ``ActivateSkill`` **按技能分别计数**（同一询问里几条互不相关的技能
     合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 = 129 总数）；
-    其余非技能候选按总数查。豁免表因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己
+    非技能候选**按"哪张牌"分别计数**（jie-yijiang-2014-wuyi-caozhen 票 01 的加法，见下）。
+    豁免表因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己
     的那一组立刻判红（``test_the_candidate_cap_checker_catches_a_two_dimensional_skill_above_the_cap``）。
     :data:`OVER_CAP_BY_DESIGN` 是留给"按裁定豁免"的落点，**现在是空集**。
+
+    **非技能候选为什么也按组计**（票 01）：与"几条互不相关的技能各有候选"同一条道理——
+    手里几张**互不相关**的牌各有自己的"牌 × 目标组合"空间，而一张牌的组合数是
+    ``Σ C(池, k)``（8 人局最多 127，仍在上界内）。界吴懿移动版【奔袭】把"下一张牌的目标数"
+    抬到 ``额定 + X`` 之后，同一手里**几张**多目标牌的合计会自然越过 128（随机局的随机玩家
+    会把整手牌弃掉换一个大 X，实测 190 条 = 7 人手牌里若干张多目标牌之和）；按牌分组后
+    "一张牌的组合爆炸"仍判红、"几张牌各自合法地多"不再误伤。
     """
     if record is None or record.kind != "query":
         return
     by_skill: dict[str, int] = {}
-    others = 0
+    by_card: dict[object, int] = {}
     for action in record.query.legal_actions:
         if _is_one_dimensional_enumeration(action):
             continue
@@ -381,7 +389,11 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
             # 审计面 = **两维相乘**的技能候选（`picks` × `choices`）：按技能分别计数。
             by_skill[action.skill_id] = by_skill.get(action.skill_id, 0) + 1
         else:
-            others += 1
+            # 非技能候选按"哪张牌"分组（票 01）：没有牌的（``EndPhase`` / ``SelectOption``…）
+            # 共用一组，与改造前"按总数查"等价。
+            card = getattr(action, "card", None)
+            key = int(card.card_id) if card is not None else None
+            by_card[key] = by_card.get(key, 0) + 1
     for skill_id, count in by_skill.items():
         if skill_id in OVER_CAP_BY_DESIGN:
             # 按裁定的例外（见该常量的说明）；当前为空集，任何技能都走下面的判红。
@@ -394,12 +406,15 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
                 f"技能 {skill_id} 的候选数 {count} 超过上界 {CANDIDATE_CAP}"
                 f"（询问 {record.query.kind}）",
             )
-    if others > CANDIDATE_CAP:
+    for key, count in by_card.items():
+        if count <= CANDIDATE_CAP:
+            continue
+        label = "无牌的候选" if key is None else f"牌 {key} 的候选"
         _fail(
             seed,
             n,
             record,
-            f"非技能候选数 {others} 超过上界 {CANDIDATE_CAP}（询问 {record.query.kind}）",
+            f"{label}数 {count} 超过上界 {CANDIDATE_CAP}（询问 {record.query.kind}）",
         )
 
 

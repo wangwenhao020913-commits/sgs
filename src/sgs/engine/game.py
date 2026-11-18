@@ -2452,6 +2452,20 @@ class Engine:
         seat = frame.data["source"]
         if card.is_virtual:  # 虚拟装备不是牌（票 07 §6）：装备区只放实体牌
             return None
+        player = self.state.player(seat)
+        if not player.alive:
+            # **使用者在这次使用里阵亡**（jie-yijiang-2014-wuyi-caozhen 票 03 的 fuzz 撞到：
+            # 界曹真【司敌】② 在 B5「取消之 + 对其造成 1 点伤害」可以当场打死**使用装备牌的
+            # 那个角色**）⇒ 死人没有装备区可入，这张牌按"最终去向 = 弃牌堆"处理。
+            # 阵亡清点是**死亡那一刻**做的，那时这张牌还在处理区，不在任何区里，
+            # 故不补这一刀它会一直留在死者的装备区（fuzz 的活状态不变量当场判红）。
+            return self.move_in_frame(
+                frame,
+                (card,),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.PUT,
+                owner=seat,
+            )
         if frame.data.get(_EQUIP_SLOT_SCANNED) != card.card_id:
             # 同槽扫描的游标在**压帧之前**落位（§3.1）：这次扫描只做一次，续跑只补搬还没搬完的步。
             frame.data[_EQUIP_SLOT_SCANNED] = card.card_id
