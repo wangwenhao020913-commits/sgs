@@ -1,0 +1,53 @@
+{
+  "script_schema_version": 1,
+  "scripts": [
+    {
+      "id": "huangjin",
+      "name": "讨伐黄巾军",
+      "version": 1,
+      "comment": "空壳（票 14）：结构合法、内容是占位；结构完整的最小可玩内容在票 28。",
+      "roster": ["nengren", "jie_liubei", "jie_guanyu"],
+      "layers": [
+        {
+          "id": "l1",
+          "name": "大节一 · 颍川道上",
+          "grid": {"rows": 2, "cols": 3},
+          "nodes": [
+            {"id": "n1", "row": 0, "col": 0, "room": "room.placeholder.shop"},
+            {"id": "n2", "row": 1, "col": 0, "room": "room.placeholder.shop"},
+            {"id": "n3", "row": 1, "col": 2, "room": "room.placeholder.shop"}
+          ],
+          "edges": [
+            {"from": "n1", "to": "n3"},
+            {"from": "n2", "to": "n3"}
+          ],
+          "default_scaling": []
+        },
+        {
+          "id": "l2",
+          "name": "大节二 · 广宗城下",
+          "grid": {"rows": 2, "cols": 2},
+          "nodes": [
+            {"id": "n1", "row": 0, "col": 0, "room": "room.placeholder.shop"},
+            {"id": "n2", "row": 1, "col": 1, "room": "room.placeholder.shop"}
+          ],
+          "edges": [{"from": "n1", "to": "n2"}],
+          "default_scaling": []
+        }
+      ]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "room.placeholder.shop",
+      "name": "行商篷车（占位）",
+      "kind": "shop",
+      "text": "票 14 的空壳房间：真实房间、模板与事件在票 28 落。"
+    }
+  ],
+  "templates": [],
+  "skill_pools": [],
+  "events": [],
+  "event_pools": [],
+  "global_skills": []
+}
