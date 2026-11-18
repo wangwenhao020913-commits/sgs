@@ -272,7 +272,12 @@ def test_non_positive_hp_max_is_rejected():
     assert errors[0].loc == "/heroes/0/hp_max"
 
 
-def test_a_hero_must_have_at_least_one_skill():
+def test_a_hero_without_skills_and_without_bare_is_rejected():
+    """零技能记录必须**显式**声明 ``bare: true``（M7 票 11；票 03 §6）。
+
+    ``bare`` 是"我故意没有技能"的声明，不是把加载器改成"零技能永远合法"：
+    合成主角之外的零技能记录（漏写技能清单 / 数据写坏）仍要在这一层判红。
+    """
     raw = _heroes_raw()
     raw["heroes"][0]["skills"] = []
 
@@ -280,6 +285,37 @@ def test_a_hero_must_have_at_least_one_skill():
 
     assert [error.rule_id for error in errors] == ["hero.skills_empty"]
     assert errors[0].loc == "/heroes/0/skills"
+    assert "bare: true" in errors[0].expected, "报错要直接告诉数据作者缺的是哪一条声明"
+
+
+def test_a_zero_skill_hero_may_load_by_declaring_bare():
+    """零技能 + ``bare: true`` 通过（schema v2 的显式零技能形状；M7 票 11）。"""
+    raw = _heroes_raw()
+    raw["schema_version"] = 2
+    raw["heroes"][0]["skills"] = []
+    raw["heroes"][0]["bare"] = True
+
+    table = _validate(raw)
+
+    hero = table.by_id(raw["heroes"][0]["id"])
+    assert hero is not None
+    assert hero.skills == () and hero.bare is True
+
+
+def test_a_bare_hero_may_not_also_have_skills():
+    """``bare`` 是"零技能"的声明，不是"少写几技能"的通行证（M7 票 11）。
+
+    与 ``CardType.delayed`` 的自洽判据同姿态：可派生的声明必须与派生态一致，否则
+    ``bare`` 会退化成无人校验的注释，将来"给裸将挂技能"的笔误就静默通过。
+    """
+    raw = _heroes_raw()
+    raw["schema_version"] = 2
+    raw["heroes"][0]["bare"] = True
+
+    errors = _errors(raw)
+
+    assert [error.rule_id for error in errors] == ["hero.bare_with_skills"]
+    assert errors[0].loc == "/heroes/0/bare"
 
 
 def test_duplicate_skill_id_within_one_hero_is_rejected():
@@ -361,7 +397,9 @@ def test_extra_field_on_a_hero_is_forbidden():
 
 def test_unknown_heroes_schema_version_is_rejected():
     raw = _heroes_raw()
-    raw["schema_version"] = 2  # 武将表认得的版本是 {1}，与内容包的 {2} 分开
+    # 武将表认得的版本是 {1, 2}（M7 票 11 起 2 也认），与内容包的 {2} 分开；
+    # 认不出的版本（这里是 3）必须在结构校验之前拦下。
+    raw["schema_version"] = 3
 
     errors = _errors(raw)
 
@@ -1104,7 +1142,7 @@ def test_the_jie_skill_references_close_against_the_catalog():
 def test_the_jie_pack_keeps_the_same_three_segment_validation():
     """扩展表走**同一套**校验：坏版本 / 缺字段 / 技能引用不闭合都照旧报错。"""
     raw = load_heroes("jie").model_dump(mode="json")
-    raw["schema_version"] = 2
+    raw["schema_version"] = 3  # 认得的是 {1, 2}（M7 票 11），3 必须报 version.unknown
     with pytest.raises(DataLoadError) as excinfo:
         validate_heroes(raw, file="heroes.jie.json")
     assert [error.rule_id for error in excinfo.value.errors] == ["version.unknown"]

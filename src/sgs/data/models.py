@@ -10,6 +10,7 @@
 M3 票 01 追加**武将面**（``Kingdom`` / ``SkillType`` / ``HeroSkill`` / ``Hero`` /
 ``HeroTable``）：数据文件只装"武将是什么"（id / 名称 / 势力 / 性别 / 体力上限 /
 技能清单 / 版本 / 启用），技能**行为**仍住 ``skills/`` 的 Python（ADR-009）。
+M7 票 11 再给零技能合成主角一条显式形状：``Hero.bare``（见该字段）。
 """
 
 from __future__ import annotations
@@ -296,6 +297,17 @@ class Hero(_FrozenModel):
     没有同名版本问题，标记仍取包名——一个真名一局只占一个座位，判据只读 ``true_name``。
     """
     enabled: bool
+    bare: bool = False
+    """**显式零技能**标记（M7 票 11；票 03 §6）：``bare: true`` = "这张武将牌故意没有技能"。
+
+    剧本的合成主角（「能人志士」一类，见 ``heroes.homebrew.json`` 的 ``nengren``）没有技能
+    可列，但"零技能"不能变成加载期的默认合法形状——否则漏写 ``skills`` 的数据会被静默放行。
+    故加载器把旧的"每名武将至少一个技能"放宽成**双向**判据：零技能 ⇔ ``bare: true``
+    （``hero.skills_empty`` / ``hero.bare_with_skills`` 两条语义错误）。
+
+    缺省 ``False``（既有 v1 数据一个字段都不用改）；字段本身不区分 schema 版本——版本闸门
+    只决定"这份表认不认"，不按字段做第二套结构。
+    """
 
 
 class HeroTable(_FrozenModel):

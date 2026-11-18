@@ -73,11 +73,13 @@ KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
 ``extra="forbid"`` 下是结构错误——这正是该由版本号先拦下的情形（票 09 §7）。
 """
 
-KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
-"""武将表（``heroes.<pack_id>.json``）认得的版本集合（票 01）。
+KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
+"""武将表（``heroes.<pack_id>.json``）认得的版本集合（票 01；M7 票 11 升 2）。
 
 与 ``KNOWN_SCHEMA_VERSIONS`` **分开**：武将表是新文件、独立升版，牌堆侧的改动不该
-牵动它，反之亦然。首版取 1。
+牵动它，反之亦然。首版取 1；**v2 只加了一条数据形状**——`Hero.bare`（零技能合成主角的
+显式声明，票 11 / 票 03 §6）。认 `{1,2}` 而不是"{2}"：既有 v1 表继续可读，字段本身不按
+版本分叉（`bare` 缺省 ``False``，v1 数据一个字段都不用改）。
 """
 
 DEFAULT_PACK_ID = "standard"
@@ -781,7 +783,8 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
     条件化是本票的核心（票 01 §Data #3；`03` §7「内容包与版本」的启用门控）：数据文件装全
     25 名，不因"还没实现"而砍表；
     ``enabled`` 的武将才要求 ``hero.<id>.<skill>`` 在 ``skills.CATALOG`` 里闭合，
-    未启用的只做结构、唯一性与"≥1 技能"校验。``CATALOG`` 在函数体内导入——
+    未启用的只做结构、唯一性与"零技能 ⇒ ``bare``"校验（M7 票 11；两条零技能判据见
+    ``hero.skills_empty`` / ``hero.bare_with_skills``）。``CATALOG`` 在函数体内导入——
     与 :func:`_card_type_errors` 同姿态，避免 ``data ↔ skills`` 的模块级环。
     """
     from sgs.skills import CATALOG
@@ -861,14 +864,31 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                 )
             )
 
-        if not hero.skills:
+        if not hero.skills and not hero.bare:
+            # M7 票 11（票 03 §6）：剧本的合成主角可以零技能，但必须**显式**声明
+            # ``bare: true``——"漏写 skills"与"故意没有技能"是两件事，不能靠放宽校验区分。
             errors.append(
                 LoadError(
                     file=file,
                     loc=f"{base}/skills",
-                    expected="每名武将至少一个技能",
+                    expected=(
+                        "至少一个技能；故意零技能的合成主角必须声明 bare: true"
+                    ),
                     got="0 条",
                     rule_id="hero.skills_empty",
+                )
+            )
+
+        if hero.skills and hero.bare:
+            # 反向的自洽判据（与 ``CardType.delayed`` 同一姿态）：``bare`` 声明"零技能"，
+            # 与技能清单并存只会让这个字段退化成注释；将来"给裸将挂技能"的笔误在这里红。
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/bare",
+                    expected="false（bare 表示故意零技能，不能再列技能）",
+                    got=repr(hero.bare),
+                    rule_id="hero.bare_with_skills",
                 )
             )
 

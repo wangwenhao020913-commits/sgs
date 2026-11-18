@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "pack_id": "homebrew",
   "heroes": [
     {
@@ -84,6 +84,18 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "nengren",
+      "name": "能人志士",
+      "true_name": "能人志士",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "homebrew",
+      "enabled": false,
+      "bare": true,
+      "skills": []
     }
   ]
 }
