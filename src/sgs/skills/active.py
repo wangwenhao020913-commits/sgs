@@ -5305,6 +5305,11 @@ _XIONGLUAN = ActiveSkill(
         "然后本回合：你对其使用牌无距离与次数限制、其不能使用或打出手牌"
     ),
     step_requirements={"seat": "选择一名其他角色"},
+    # skill-display 票 07：座位常驻标签「雄乱」——**生效期间画在目标身上**
+    # （`BadgeScope.ANY_SEAT`；构造器是 `sgs_web.projection._xiongluan_badge`）。判据 = 票 00
+    # 的禁令来源里有这条 id（Q8/Q12a：与【义绝】同姿态绑**禁令**，不绑 `xiongluan_target`）；
+    # 结算三样（封印区域 / 目标 / 禁令）与两个修饰器一字不动。
+    badge=BadgeKind.WINDOW,
 )
 
 

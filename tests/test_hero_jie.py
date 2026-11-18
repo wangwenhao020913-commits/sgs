@@ -48,6 +48,13 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_TOOLS = Path(__file__).resolve().parent.parent / "tools"
+if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同一条引导）
+    sys.path.insert(0, str(_TOOLS))
+
 from sgs.agents import tape_from_journal
 from sgs.data import (
     Category,
@@ -668,6 +675,78 @@ def test_clearing_one_prohibition_keeps_the_other():
     assert engine.clear_hand_card_prohibitions(1) is True
     assert state.player(1).hand_card_prohibition_sources == ()
     assert engine.clear_hand_card_prohibitions(1) is False, "本来就空 ⇒ 零动作"
+
+
+def test_two_hand_card_prohibitions_coexist():
+    """义绝与雄乱命中同一座位时两条来源并存、雄乱的标签照画（skill-display 票 07 / A5）。
+
+    三段，每段一条判据：
+
+    1. **来源有序去重**：先走**真引擎路径**落义绝（黑：弃一张 → 目标展示一张黑牌），再落
+       雄乱 ⇒ ``("hero.jie_guanyu.yijue", "hero.zhangxiu.xiongluan")``，按首次出现序；
+    2. **标签按「成员」判、不按「第一条」判**：义绝那条来源排在前，雄乱的标签照样出现
+       （若构造器写成 ``sources[0] ==`` / ``sources == (XIONGLUAN,)``，本段就红）；只清掉
+       义绝那条来源 ⇒ 雄乱的标签**还在**、布尔仍成立；
+    3. **一起清**：``_clear_turn_effects`` ⇒ 两条来源都空 ⇒ 这个座位上一个标签都不剩
+       （A12：派生式，没有清除事件）。
+
+    ⚠️ 两条来源**同回合并存**在真对局里到不了：两个"本回合"分属两名角色的回合（雄乱在
+    张绣的回合落、回合末清），故第 2 段用引擎的写入口 ``add_hand_card_prohibition`` 复合
+    ——与 ``test_the_hand_card_prohibition_records_its_source`` 同一手法。
+
+    ⚠️ **义绝自己的标签**（``{"tag": "yijue", "label": "义绝"}``）由票 08 的登记补上（本票
+    只落雄乱那一条）；故这里对标签的断言写成**集合成员**而不是整份 ``hero_tags`` 相等 ⇒
+    票 08 落地后两个标签并列，本用例**不用改**。判据两侧互不遮挡正是本票 Q12a 要钉的。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+
+    cost = _first(type_id="slash")
+    black = _first(type_id="dismantlement", color=Color.BLACK)
+    state = _yijue_state(owner_hand=(cost,), target_hand=(black,))
+    engine = _run(
+        state,
+        [_yijue_player(cost, 1, heal=False), _reveal_player(black)],
+        lambda e: e.state.player(1).hand_card_prohibited,
+    )
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=PACK)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    xiongluan_tag = {"tag": "xiongluan", "label": "雄乱"}
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE,), (
+        "前置：义绝先命中座位 1（真引擎路径）"
+    )
+    assert xiongluan_tag not in hero_tags(1), (
+        "前置：只有义绝那一条来源 ⇒ 雄乱的标签不画"
+    )
+
+    # 同回合再来一条来源（雄乱打同一座位）：两条并存、雄乱照画。
+    assert engine.add_hand_card_prohibition(1, XIONGLUAN) is True
+    assert state.player(1).hand_card_prohibition_sources == (YIJUE, XIONGLUAN), (
+        "有序去重：两条来源按首次出现序并存，不是互相覆盖"
+    )
+    assert state.player(1).hand_card_prohibited is True
+    assert xiongluan_tag in hero_tags(1), (
+        "两条来源并存时雄乱的标签照画（判据是成员关系，不是「第一条 / 唯一一条」）"
+    )
+    assert all(tag["tag"] != "xiongluan" for tag in hero_tags(0)), (
+        "雄乱画在**目标**身上：界关羽自己的座位（0）没有它"
+    )
+
+    # 只清义绝那一条 ⇒ 雄乱的标签不受影响（两侧判据互相独立）。
+    assert engine.clear_hand_card_prohibitions(1, YIJUE) is True
+    assert state.player(1).hand_card_prohibition_sources == (XIONGLUAN,)
+    assert state.player(1).hand_card_prohibited is True, "另一条还在 ⇒ 仍不能使用或打出手牌"
+    assert xiongluan_tag in hero_tags(1), "清掉别人的来源 ⇒ 雄乱的标签**还在**"
+
+    # 回合末一起清（两条来源同一收尾点）⇒ 标签全部消失。
+    engine._clear_turn_effects()
+    assert state.player(1).hand_card_prohibition_sources == ()
+    assert xiongluan_tag not in hero_tags(1), "回合结束 ⇒ 雄乱的标签消失（派生式）"
+    assert hero_tags(1) == [], "座位 1 上一条标签都不剩"
 
 
 # ---------------------------------------------------------------------------

@@ -913,6 +913,44 @@ def _fuyin_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return {"tag": "fuyin", "label": "父荫"}
 
 
+_XIONGLUAN_SKILL_ID = "hero.zhangxiu.xiongluan"
+"""张绣【雄乱】的 skill id（skill-display 票 07）：登记表的键与构造器的判据共用这一份。
+
+与 ``sgs.skills.active.XIONGLUAN`` 是同一个值，但接入层只许 import ``sgs.skills`` 这个公开
+子包入口（M4 第一纪律，不得深导入 ``sgs.skills.active``；那枚常量今天没有从包入口重导出）
+⇒ 与 :data:`_FUYIN_SKILL_ID` 同姿态：在这里写一次、只写一次。
+"""
+
+
+def _xiongluan_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """张绣【雄乱】的座位标签 = **目标**座位的「雄乱」（skill-display 票 07）。
+
+    一条判据，读引擎既有读口（spec §2 第 1 条：投影只取不判）：
+
+    - **生效中**：``Player.hand_card_prohibition_sources``（票 00）里有雄乱这条 id 就画。
+      那一格由 ``Engine.add_hand_card_prohibition`` 写入（雄乱自己的写点 =
+      ``_xiongluan_effect``）、由回合末 ``_clear_turn_effects`` 清空 ⇒ 标签随每次投影重算，
+      "回合结束 ⇒ 消失"是**派生**出来的，没有清除事件、没有新 delta（spec §2 第 2 条 / A12）。
+
+    两处**故意的读法**：
+
+    - **绑禁令、不绑 ``xiongluan_target``**（Q8/Q12a 用户裁定）：【义绝】与【雄乱】走同一条
+      判据（两条"其不能使用或打出手牌"本来就是同一格），故它们同时命中一个座位时两个标签
+      能并列；绑 ``xiongluan_target`` 会让两条技能各走一条判据。``ANY_SEAT`` 档**没有**实例
+      闸，故"生效中"必须由本构造器自己从读口判。
+    - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
+      ``seat`` 是"要画的座位"而不是"谁的技能"——雄乱的技能持有者是**别人**，故这里与
+      ``_fuyin_badge``（``SELF`` 档）不同：**不看** ``resolve_instances``、也不看技能是否
+      失效（禁令是引擎侧已经落下的公开事实，谁施加的不影响"这个座位不能用手牌"）。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "xiongluan", "label": "雄乱"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if _XIONGLUAN_SKILL_ID in state.player(seat).hand_card_prohibition_sources:
+        return {"tag": "xiongluan", "label": "雄乱"}
+    return None
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -930,6 +968,9 @@ BADGE_PROVIDERS: Mapping[
         # 【父荫】"本回合未发动 ∧ 有效"（spec §5 第 06 行 / Q7④）：发动位在这里读，
         # "有效"由 ``SELF`` 档的实例闸兜住（失效 / 失去 ⇒ 实例不在解析里 ⇒ 不调构造器）。
         _FUYIN_SKILL_ID: (BadgeScope.SELF, _fuyin_badge),
+        # 【雄乱】"生效期间画在**目标**身上"（spec §5 第 07 行 / Q8 / Q12a）⇒ ``ANY_SEAT``：
+        # 每个座位各问一次，"生效中"由构造器自己从禁令来源判（这一档没有实例闸）。
+        _XIONGLUAN_SKILL_ID: (BadgeScope.ANY_SEAT, _xiongluan_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

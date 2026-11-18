@@ -20376,6 +20376,70 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         + ` seat1=${fuyinChipIn(1) ? "有" : "（无）"}`
       : "没有 fuyin chip");
 
+  /* skill-display 票 07：张绣【雄乱】的座位标签——**生效期间画在被指定的那名角色身上**，
+   * 张绣自己的那块没有它（服务端取值由
+   * `tests/test_hero_lei.py::test_xiongluan_marks_its_target_until_the_turn_ends` 从真投影
+   * 钉住：判据 = 禁令来源里有雄乱的 id、回合末派生消失；两条禁令并存那条由
+   * `tests/test_hero_jie.py::test_two_hand_card_prohibitions_coexist` 钉）。这里只钉界面读法：
+   * 标签跟着 `hero_tags` 的**座位**走（谁的数据落在哪块武将牌上就画在哪块），布尔类标签
+   * 照旧一个**纯文本** chip（只写技能名，没有 `parts` / 没有元素子节点；Q7⑥ / Q14″A）。 */
+  const xiongluanView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9418,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9418 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 座位 0 = 张绣（发动者）、座位 1 = 被指定的目标（雄乱画在他身上）。
+  xiongluanView.heroes = { 0: "zhangxiu", 1: "jie_guanyu", 2: "diaochan" };
+  xiongluanView.snapshot.players[0].hero_name = "张绣";
+  xiongluanView.snapshot.players[1].hero_name = "界关羽";
+  xiongluanView.snapshot.players[0].hero_tags = [];
+  xiongluanView.snapshot.players[1].hero_tags = [{ tag: "xiongluan", label: "雄乱" }];
+  xiongluanView.snapshot.players[2].hero_tags = [];
+  ui.state.view = xiongluanView;
+  ui.resetSelection();
+  ui.renderTable();
+  const xiongluanTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(xiongluanView.snapshot.seat)) {
+      return $("t-self-hero-tags") || null;
+    }
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const xiongluanChipIn = (seat) => {
+    const box = xiongluanTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag")
+          && node.getAttribute("data-tag") === "xiongluan",
+      ) || null
+      : null;
+  };
+  const targetXiongluanBox = xiongluanTagsBoxIn(1);
+  const targetXiongluanChip = xiongluanChipIn(1);
+  check("XIONGLUAN-01a 「雄乱」画在**别人**（目标座位 1）的武将块上：纯文本 chip、不带 parts",
+    !!targetXiongluanBox && targetXiongluanBox.hidden === false
+      && !!targetXiongluanChip && targetXiongluanChip.children.length === 0
+      && targetXiongluanChip.textContent === "雄乱"
+      && targetXiongluanChip.className === "hero-tag",
+    targetXiongluanChip
+      ? `雄乱 chip 元素子节点=${targetXiongluanChip.children.length}`
+        + ` 文本=${JSON.stringify(targetXiongluanChip.textContent)}`
+        + ` class=${JSON.stringify(targetXiongluanChip.className)}`
+      : "座位 1 没有 xiongluan chip");
+  const selfXiongluanBox = xiongluanTagsBoxIn(0);
+  check("XIONGLUAN-01b 张绣自己的武将块（座位 0）上没有「雄乱」（标签画在目标身上，不在发动者身上）",
+    !!selfXiongluanBox && selfXiongluanBox.hidden === true
+      && selfXiongluanBox.children.length === 0
+      && xiongluanChipIn(0) === null
+      && xiongluanChipIn(2) === null,
+    `本人 hidden=${selfXiongluanBox ? selfXiongluanBox.hidden : "无节点"}`
+      + ` 子节点=${selfXiongluanBox ? selfXiongluanBox.children.length : "-"}`
+      + ` 本人 chip=${xiongluanChipIn(0) ? "有" : "（无）"}`
+      + ` 座位 2 chip=${xiongluanChipIn(2) ? "有" : "（无）"}`);
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。
