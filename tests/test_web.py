@@ -9224,6 +9224,226 @@ def test_the_botu_badge_paints_each_suit_by_the_shared_suit_table() -> None:
     )
 
 
+def test_the_fuyin_badge_disappears_once_the_skill_fires_this_turn() -> None:
+    """【父荫】的座位标签：本回合**没发动过**时画「父荫」，一发动就消失（skill-display 票 06）。
+
+    spec §5 第 06 行 / Q7④ / A4 的几条口径各有一条断言：
+
+    - **开局就画**：``skill_used_this_turn`` 为假 ⇒ ``{"tag": "fuyin", "label": "父荫"}``；
+    - **发动后立刻消失**：诸葛瞻成为一张【杀】的目标且条件成立（手牌数不大于使用者）⇒
+      ``fuyin_effect`` 落"本回合已用"位 ⇒ **同一次投影**里标签就不再下发。中间没有清除
+      事件，消失是每次投影重算出来的（spec §2 第 2 条 / A12）；
+    - **下一个回合重新出现**：``_clear_turn_effects`` 在回合末清掉这一位 ⇒ 下一回合的
+      ``TURN_START`` 起标签自动回来（作用域 = 一个回合）；
+    - **只写技能名**：载荷恰好 ``tag`` / ``label`` 两键，**没有** ``parts``（Q7⑥：布尔类
+      标签只写技能名、不写效果；Q14″A：``parts`` 只在需要上色时出现）。
+
+    驱动走**真引擎路径**（出牌阶段使用【杀】→ 目标派发 → 回合末清理），读口走**真产出路径**
+    （``visible_snapshot`` → ``players[].hero_tags``）。座位 0 = 诸葛瞻且**先手是攻击者**
+    （``first_seat=1``）：诸葛瞻手里 0 张、使用者出完【杀】还剩 2 张 ⇒ 条件「手牌数不大于
+    使用者」真的成立（0 ≤ 2），不是靠"掉血没发生"猜出来的。
+    """
+    from types import SimpleNamespace
+
+    from sgs.data import RuleConfig
+    from sgs.skills import skill_used_this_turn
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3),
+            SeatSpec(hand=(slash,)),
+        ],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id != slash),
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    class _PlaysFirstSlash:
+        """出牌阶段打第一张【杀】，然后结束阶段——只为把真目标派发走一遍。"""
+
+        def __init__(self) -> None:
+            self.played = False
+
+        def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+            # `PlayPhaseQuery.kind` 是裸字面量 ``"PLAY_PHASE"``（不是 ``QueryKind`` 成员）。
+            if query.kind == "PLAY_PHASE":
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == "slash":
+                        self.played = True
+                        return action
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, EndPhase)
+                )
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+
+    attacker = _PlaysFirstSlash()
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def turn_starts() -> list[int | None]:
+        return [
+            record.actor
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.TURN_START
+        ]
+
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}], (
+        "前置：本回合还没发动过 ⇒ 诸葛瞻的武将块上常驻「父荫」"
+    )
+    assert "parts" not in hero_tags()[0], (
+        "布尔类标签只写技能名（Q7⑥），不需要上色 ⇒ 不带 parts（Q14″A）"
+    )
+
+    run_queries(
+        engine,
+        [PassPlayer(), attacker],
+        lambda e: skill_used_this_turn(e.state, 0, "hero.zhugezhan.fuyin"),
+    )
+    assert attacker.played, "前置：攻击者真的在出牌阶段打出了【杀】"
+    assert engine.state.player(0).hp == 3, (
+        "前置：【父荫】真的生效了（这张【杀】被标成对你无效，没有掉体力）"
+    )
+    assert hero_tags() == [], "发动后**立刻**消失：同一次投影里就已经不画（没有清除事件）"
+
+    before = len(turn_starts())
+    run_queries(
+        engine,
+        [PassPlayer(), attacker],
+        lambda e: len(turn_starts()) > before,
+    )
+    assert engine.state.turn_seat == 0, "前置：确实进入了下一个回合（座位 0 的 TURN_START）"
+    assert not skill_used_this_turn(engine.state, 0, "hero.zhugezhan.fuyin"), (
+        "前置：回合末的 _clear_turn_effects 清掉了「本回合已用」位"
+    )
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}], (
+        "下一个回合起点 ⇒ 标签重新出现（作用域 = 一个回合）"
+    )
+
+
+def test_the_fuyin_badge_needs_a_live_skill_instance() -> None:
+    """Q7④ 的「有效」判据 = 实例是否真在解析中（skill-display 票 06）。
+
+    本票用**"把【父荫】从实例里移除"**（``Player.lost_skills``）这条手法，不用座位级失效
+    谓词：今天唯一的 ``SkillSuppressionPredicate.ALL_NON_LOCKED`` 只挡**非锁定技**
+    （``catalog.py``），而【父荫】是锁定技 ⇒ 它挡不住。票面（§3）把这条列为"以后会有锁定技
+    失效"的**预埋断言**：手段换了，判据仍是"实例不在 :func:`sgs.skills.resolve_instances`
+    里 ⇒ 标签必须消失"，与将来那种失效效果命中同一个闸。
+
+    两段：
+
+    - **失去 ⇒ 立刻不画**：``resolve_instances()`` 里没有 ``(0, FUYIN)`` ⇒ ``SELF`` 档根本
+      不调构造器。同时钉住"消失**不是**靠发动位"：``skill_used_this_turn`` 这时仍是假
+      （没有实例时它只能返回假），若把"有效"写进构造器，标签就会留着；
+    - **恢复 ⇒ 自动回来**：清掉 ``lost_skills`` 后下一次投影里标签就在（派生式，没有清除
+      事件：spec §2 第 2 条 / A12）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import resolve_instances, skill_used_this_turn
+
+    from sgs_web.projection import visible_snapshot
+
+    fuyin = "hero.zhugezhan.fuyin"
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3),
+            SeatSpec(hp=4, hero="zhenji"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def resolved_ids(seat: int = 0) -> set[str]:
+        return {
+            instance.skill_id
+            for instance in resolve_instances(engine.state)
+            if instance.owner == seat
+        }
+
+    assert fuyin in resolved_ids(), "前置：【父荫】的实例真在解析中"
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}]
+
+    # 失去技能：实例不再产出 ⇒ 标签消失（座位字段 / 发动位一个字没动）。
+    engine.state.player(0).lost_skills.append(fuyin)
+    assert fuyin not in resolved_ids(), "前置：失去后实例真的不在 resolve_instances 里"
+    assert not skill_used_this_turn(engine.state, 0, fuyin), (
+        "前置：这条不是「发动过」导致的消失——发动位仍是假，消失只由实例闸派生"
+    )
+    assert hero_tags() == [], "技能失去 ⇒ 标签必须自动不画（Q7④：失去不显示）"
+
+    # 恢复：实例重新产出 ⇒ 下一次投影里标签自动回来（没有清除事件）。
+    engine.state.player(0).lost_skills.clear()
+    assert fuyin in resolved_ids(), "前置：恢复后实例回到解析中"
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}], (
+        "恢复后标签自动回来（派生式：下一次投影重算，不靠清除事件）"
+    )
+
+
+def test_the_fuyin_badge_is_only_on_zhugezhan() -> None:
+    """「父荫」只画在**持有【父荫】的那个座位**上（skill-display 票 06；spec §5 第 06 行）。
+
+    两段判据：
+
+    - **声明面**：【父荫】声明 ``WINDOW``、登记为 ``BadgeScope.SELF``（不是 ``ANY_SEAT``
+      ——它不是画在别人身上的技能）；
+    - **行为面**：诸葛瞻坐在**非本人座位**（座位 1）时，标签跟着他的武将块走（座位 1 有、
+      座位 0 没有）⇒ "只画在自己"是**持有人**的口径，与"哪个座位是玩家自己"无关。
+
+    值的生命周期由前两条用例钉住，本条只钉落座位。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG, BadgeKind, BadgeScope
+
+    from sgs_web.projection import BADGE_PROVIDERS, visible_snapshot
+
+    fuyin = "hero.zhugezhan.fuyin"
+    assert CATALOG[fuyin].badge is BadgeKind.WINDOW, (
+        "【父荫】没有声明座位常驻标签（声明面缺 ⇒ 登记表闭集审计也会红）"
+    )
+    assert BADGE_PROVIDERS[fuyin][0] is BadgeScope.SELF, (
+        "【父荫】画在**持有者自己的**座位上（不是目标座）"
+    )
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="zhenji"),
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+    snapshot = visible_snapshot(session)
+
+    assert snapshot["players"][1]["hero_tags"] == [{"tag": "fuyin", "label": "父荫"}], (
+        "诸葛瞻在座位 1 ⇒ 标签跟着他的武将块（与「哪个座位是玩家自己」无关）"
+    )
+    assert snapshot["players"][0]["hero_tags"] == [], (
+        "别的座位没有【父荫】⇒ 一条标签都不画"
+    )
+
+
 def test_the_snapshot_carries_hand_limit_for_every_seat_without_touching_the_ai_projection() -> None:
     """票 09：武将块读「手牌：张数/上限」——上限只进**网页载荷**（显示层字段）。
 

@@ -62,6 +62,7 @@ from sgs.skills import (
     is_forced_conversion,
     lord_skill_allowed,
     resolve_instances,
+    skill_used_this_turn,
 )
 from sgs.state import (
     CardRef,
@@ -882,6 +883,36 @@ def _botu_badge(state: Any, seat: int) -> dict[str, Any] | None:
     }
 
 
+_FUYIN_SKILL_ID = "hero.zhugezhan.fuyin"
+"""诸葛瞻【父荫】的 skill id（skill-display 票 06）：登记表的键与构造器的读口共用这一份。
+
+与 ``hero_lei.FUYIN`` 是同一个值，但接入层只许 import ``sgs.skills`` 这个公开子包入口
+（M4 第一纪律，不得深导入 ``sgs.skills.hero_lei``）⇒ 在这里写一次、只写一次。
+"""
+
+
+def _fuyin_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """诸葛瞻【父荫】的座位标签 = 本回合**还没发动过**时写「父荫」（skill-display 票 06）。
+
+    两条判据，一条在这里、一条在框架：
+
+    - **本回合没发动过**：读引擎既有读口 :func:`sgs.skills.skill_used_this_turn`（per-instance
+      的「本回合已用」位）。写点 = ``fuyin_effect`` 的 ``mark_skill_used_this_turn``
+      （触发即落位），清除点 = 回合末 ``_clear_turn_effects`` → ``reset_turn_skill_state``。
+      投影**只取不判**、不新增清除事件：标签随每次投影重算（spec §2 第 2 条 / A12）。
+    - **技能有效**：由 ``BadgeScope.SELF`` 的实例闸统一兜住（``_badge_tags`` 只在
+      ``resolve_instances`` 里真有 ``(seat, FUYIN)`` 时才调本构造器）⇒ 失效 / 失去时根本
+      走不到这里。**不**把"锁定技今天不会被失效"当判据（Q7④：用户已明说以后会有让锁定技
+      失效的效果），也不在这里重判一次。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "fuyin", "label": "父荫"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if skill_used_this_turn(state, seat, _FUYIN_SKILL_ID):
+        return None
+    return {"tag": "fuyin", "label": "父荫"}
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -896,6 +927,9 @@ BADGE_PROVIDERS: Mapping[
         "hero.jie_jushou_mobile.jianying": (BadgeScope.SELF, _jianying_badge),
         # 【博图】只有界吕蒙一版（spec §5 第 05 行）：读**全场级**的本回合弃牌花色。
         "hero.jie_lvmeng.botu": (BadgeScope.SELF, _botu_badge),
+        # 【父荫】"本回合未发动 ∧ 有效"（spec §5 第 06 行 / Q7④）：发动位在这里读，
+        # "有效"由 ``SELF`` 档的实例闸兜住（失效 / 失去 ⇒ 实例不在解析里 ⇒ 不调构造器）。
+        _FUYIN_SKILL_ID: (BadgeScope.SELF, _fuyin_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

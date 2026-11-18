@@ -20331,6 +20331,51 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` 对手 hidden=${emptyFoeTagsBox ? emptyFoeTagsBox.hidden : "无节点"}`
       + ` 子节点=${emptyFoeTagsBox ? emptyFoeTagsBox.children.length : "-"}`);
 
+  /* skill-display 票 06：诸葛瞻【父荫】的座位标签（服务端取值由
+   * `tests/test_web.py::test_the_fuyin_badge_disappears_once_the_skill_fires_this_turn` /
+   * `::test_the_fuyin_badge_needs_a_live_skill_instance` 从真投影钉住：本回合没发动过、
+   * 且实例真在解析中才下发；发动 / 失效 / 失去 ⇒ 整条不下发）。这里只钉界面读法：
+   * 布尔类标签**只写技能名**（Q7⑥）、不带 `parts`（Q14″A）⇒ 照旧一个纯文本 chip，
+   * 没有元素子节点、也不重复画 label。 */
+  const fuyinView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9417,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9417 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  fuyinView.snapshot.players[0].hero_tags = [{ tag: "fuyin", label: "父荫" }];
+  fuyinView.snapshot.players[1].hero_tags = [];
+  ui.state.view = fuyinView;
+  ui.resetSelection();
+  ui.renderTable();
+  const fuyinTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(fuyinView.snapshot.seat)) return $("t-self-hero-tags") || null;
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const fuyinChipIn = (seat) => {
+    const box = fuyinTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag") && node.getAttribute("data-tag") === "fuyin",
+      ) || null
+      : null;
+  };
+  const smokeFuyinChip = fuyinChipIn(0);
+  check("FUYIN-01a 「父荫」是纯文本节点（没有 parts / 没有元素子节点），只画在诸葛瞻自己的武将块上",
+    !!smokeFuyinChip && smokeFuyinChip.children.length === 0
+      && smokeFuyinChip.textContent === "父荫"
+      && smokeFuyinChip.className === "hero-tag"
+      && fuyinChipIn(1) === null,
+    smokeFuyinChip
+      ? `父荫 chip 元素子节点=${smokeFuyinChip.children.length}`
+        + ` 文本=${JSON.stringify(smokeFuyinChip.textContent)}`
+        + ` class=${JSON.stringify(smokeFuyinChip.className)}`
+        + ` seat1=${fuyinChipIn(1) ? "有" : "（无）"}`
+      : "没有 fuyin chip");
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。

@@ -76,6 +76,7 @@ from sgs.timing import Timing
 from .catalog import (
     MATCH_ACTOR_KEY,
     MATCH_OWNER_KEY,
+    BadgeKind,
     Hook,
     SkillDef,
     mark_skill_used_this_turn,
@@ -787,6 +788,10 @@ _FUYIN = SkillDef(
         "锁定技，当你每回合第一次成为【杀】或【决斗】的目标后，"
         "若你的手牌数不大于使用者，此牌对你无效"
     ),
+    # skill-display 票 06：座位常驻标签「父荫」——本回合还没发动过、且技能有效时画在
+    # 诸葛瞻自己的武将块上（Q7④）；发动位由投影读 ``skill_used_this_turn``，"有效"走
+    # ``BadgeScope.SELF`` 的实例闸（失去 / 失效 ⇒ 不再解析 ⇒ 自动不画）。
+    badge=BadgeKind.WINDOW,
 )
 """诸葛瞻【父荫】的完整声明（锁定技：不问发动，满足即生效）。"""
 
