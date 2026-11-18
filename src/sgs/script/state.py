@@ -44,7 +44,7 @@ from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from sgs.data import PveConfig
+from sgs.data import Identity, PveConfig
 
 __all__ = [
     "BACKPACK_SLOTS",
@@ -67,6 +67,8 @@ __all__ = [
     "ShopSpec",
     "ShopStock",
     "UnknownSpec",
+    "equipped_skills",
+    "held_skills",
     "progress_key",
 ]
 
@@ -160,6 +162,28 @@ class Backpack(_Frozen):
         return self
 
 
+def equipped_skills(backpack: Backpack) -> tuple[str, ...]:
+    """出战槽里**有内容**的那几条（按 ``equipped_slots`` 的次序，跳过空格）。
+
+    它是"这一场武将牌上多出来的技能"（票 02 §2：只有出战槽里的 4 条进战斗）与
+    ``PveConfig.grants`` 的**唯一**读法：编译（票 17）与 Boss 的"失去 4 条出战技能"
+    都经它读，免得两处各写一份"哪几格算出战"。
+    """
+    return tuple(
+        skill_id
+        for skill_id in (backpack.slots[index] for index in backpack.equipped_slots)
+        if skill_id is not None
+    )
+
+
+def held_skills(backpack: Backpack) -> tuple[str, ...]:
+    """整包里**有内容**的技能（含出战槽，按格子顺序）。
+
+    学习池的减法（票 02 §3 的"背包 ∪ 出战"）读它：出战槽本来就在包里，所以一处就够。
+    """
+    return tuple(skill_id for skill_id in backpack.slots if skill_id is not None)
+
+
 # ---------------------------------------------------------------------------
 # pending.spec：该节点全部随机结果的物化（票 04 §1 的表，五选一）
 # ---------------------------------------------------------------------------
@@ -181,6 +205,40 @@ class BattleSpec(_Frozen):
 
     rewards: tuple[Annotated[tuple[Id, ...], Field(max_length=REWARD_OPTION_COUNT)], ...] = ()
     """逐次三选一的候选项（``[[skill_id × ≤3], …]``）。"""
+
+    enemy_templates: tuple[Id, ...] = ()
+    """本场敌方座位各自的**模板 id**（按敌方座位序）。
+
+    它进 ``pending`` 而不是每次从房间重算：按档抽的敌人是**抽出来的**（``script.draw:<节点>``），
+    结算时的"全队模板奖励累加"（票 03 §4）要能读到同一批模板。固定敌人也照填——
+    两种敌人来源在结算侧只有一种读法。
+    """
+
+    boss_relic: Id | None = None
+    """Boss 房结算时**自动发**的那 1 件遗物（票 02 §8）。
+
+    ``None`` = 无货 ⇒ 结算折 :data:`sgs.data.RELIC_PRICE` 铜钱；非 Boss 房恒 ``None``。
+    它在进入节点时抽定（"进入节点 = 抽完"，票 04 §0 纪律 2），结算不再取随机。
+    """
+
+    @model_validator(mode="after")
+    def _enemy_templates_line_up_with_the_seats(self) -> "BattleSpec":
+        """填了就必须**逐座对齐**敌方座位（空 = 没填：非战斗来源的合成 spec）。
+
+        错位一格会把奖励算到别人头上，故长度必须自证；``pve`` 的座位表与阵营表由
+        ``PveConfig`` 自己保证等长，这里只补"模板数 = 敌方座位数"。
+        """
+        if not self.enemy_templates:
+            return self
+        expected = sum(
+            1 for identity in self.pve.identities if identity is Identity.ENEMY
+        )
+        if len(self.enemy_templates) != expected:
+            raise ValueError(
+                f"enemy_templates 的长度必须等于敌方座位数：实得 "
+                f"{len(self.enemy_templates)} vs {expected}"
+            )
+        return self
 
 
 class EventSpec(_Frozen):
