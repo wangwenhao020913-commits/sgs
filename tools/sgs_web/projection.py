@@ -876,7 +876,11 @@ def _botu_badge(state: Any, seat: int) -> dict[str, Any] | None:
     # ⚠️ 顺序 = 引擎存储序（首次出现序），**不要**在这里排序：见 docstring 的第四条。
     parts: list[dict[str, Any]] = [{"text": "博图 "}]
     for suit in suits:
-        face = SUIT_LABELS[suit]
+        face = SUIT_LABELS.get(suit)
+        if face is None:
+            # fail-closed（spec §2 第 4 条）：任一花色没有展示契约 ⇒ 整条标签不出现。
+            # 不许悄悄跳过那一色——``parts`` / ``label`` 就再也对不上引擎的存储序。
+            return None
         parts.append({"text": face["symbol"], "tone": face["color"]})
     return {
         "tag": "botu",
@@ -924,45 +928,53 @@ _XIONGLUAN_SKILL_ID = "hero.zhangxiu.xiongluan"
 """
 
 
+def _prohibition_badge(
+    state: Any, seat: int, skill_id: str, tag: str, label: str
+) -> dict[str, Any] | None:
+    """【雄乱】/【义绝】共用的判据：座位 ``seat`` 的禁令来源里有 ``skill_id`` 就画一块标签。
+
+    **唯一判据**（Q8/Q12a 用户裁定）：两条技能的"其不能使用或打出手牌"命中的是同一格
+    ``Player.hand_card_prohibition_sources``（票 00），故它们同时命中一个座位时两个标签
+    并列；那一格由 ``Engine.add_hand_card_prohibition`` 写入（雄乱的写点 =
+    ``_xiongluan_effect``、义绝 = ``_yijue_effect`` 的**黑色分支**）、由回合末
+    ``_clear_turn_effects`` 清空 ⇒ 标签随每次投影重算，"回合结束 ⇒ 消失"是**派生**出来的，
+    没有清除事件、没有新 delta（spec §2 第 2 条 / A12）。
+
+    ``ANY_SEAT`` 档**没有**实例闸：``seat`` 是"要画的座位"而不是"谁的技能"（两条技能的
+    持有者都是**别人**）⇒ 这里**不看** ``resolve_instances``、也不看技能是否失效（禁令是
+    引擎侧已经落下的公开事实，谁施加的不影响"这个座位不能用手牌"）。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": tag, "label": label}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if skill_id in state.player(seat).hand_card_prohibition_sources:
+        return {"tag": tag, "label": label}
+    return None
+
+
 def _xiongluan_badge(state: Any, seat: int) -> dict[str, Any] | None:
     """张绣【雄乱】的座位标签 = **目标**座位的「雄乱」（skill-display 票 07）。
 
-    一条判据，读引擎既有读口（spec §2 第 1 条：投影只取不判）：
-
-    - **生效中**：``Player.hand_card_prohibition_sources``（票 00）里有雄乱这条 id 就画。
-      那一格由 ``Engine.add_hand_card_prohibition`` 写入（雄乱自己的写点 =
-      ``_xiongluan_effect``）、由回合末 ``_clear_turn_effects`` 清空 ⇒ 标签随每次投影重算，
-      "回合结束 ⇒ 消失"是**派生**出来的，没有清除事件、没有新 delta（spec §2 第 2 条 / A12）。
+    判据见 :func:`_prohibition_badge`（读引擎既有读口，spec §2 第 1 条：投影只取不判）。
 
     两处**故意的读法**：
 
     - **绑禁令、不绑 ``xiongluan_target``**（Q8/Q12a 用户裁定）：【义绝】与【雄乱】走同一条
       判据（两条"其不能使用或打出手牌"本来就是同一格），故它们同时命中一个座位时两个标签
-      能并列；绑 ``xiongluan_target`` 会让两条技能各走一条判据。``ANY_SEAT`` 档**没有**实例
-      闸，故"生效中"必须由本构造器自己从读口判。
+      能并列；绑 ``xiongluan_target`` 会让两条技能各走一条判据。
     - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
-      ``seat`` 是"要画的座位"而不是"谁的技能"——雄乱的技能持有者是**别人**，故这里与
-      ``_fuyin_badge``（``SELF`` 档）不同：**不看** ``resolve_instances``、也不看技能是否
-      失效（禁令是引擎侧已经落下的公开事实，谁施加的不影响"这个座位不能用手牌"）。
+      ``seat`` 是"要画的座位"而不是"谁的技能"——雄乱的技能持有者是**别人**。
 
     载荷按 Q7⑥ **只写技能名**：``{"tag": "xiongluan", "label": "雄乱"}``，没有 ``parts``
     （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
     """
-    if _XIONGLUAN_SKILL_ID in state.player(seat).hand_card_prohibition_sources:
-        return {"tag": "xiongluan", "label": "雄乱"}
-    return None
+    return _prohibition_badge(state, seat, _XIONGLUAN_SKILL_ID, "xiongluan", "雄乱")
 
 
 def _yijue_badge(state: Any, seat: int) -> dict[str, Any] | None:
     """界关羽【义绝】的座位标签 = **目标**座位的「义绝」（skill-display 票 08）。
 
-    一条判据，读引擎既有读口（spec §2 第 1 条：投影只取不判）：
-
-    - **生效中**：``Player.hand_card_prohibition_sources``（票 00）里有义绝这条 id 就画。
-      那一格由 ``Engine.add_hand_card_prohibition`` 写入（义绝自己的写点 =
-      ``_yijue_effect`` 的**黑色分支**）、由回合末 ``_clear_turn_effects`` 清空 ⇒ 标签随每次
-      投影重算，"回合结束 ⇒ 消失"是**派生**出来的，没有清除事件、没有新 delta
-      （spec §2 第 2 条 / A12）。
+    判据见 :func:`_prohibition_badge`（读引擎既有读口，spec §2 第 1 条：投影只取不判）。
 
     三处**故意的读法**：
 
@@ -974,16 +986,12 @@ def _yijue_badge(state: Any, seat: int) -> dict[str, Any] | None:
     - **红色分支不画**：红分支没有本回合持续状态（"令其回复 1 点体力"是一次性结算）⇒ 禁令
       来源为空 ⇒ 本构造器返回 ``None``，自然不画（A6 的后半句）。
     - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
-      ``seat`` 是"要画的座位"而不是"谁的技能"——义绝的技能持有者是**别人**，故这里与
-      ``_fuyin_badge``（``SELF`` 档）不同：**不看** ``resolve_instances``、也不看技能是否
-      失效（禁令是引擎侧已经落下的公开事实，谁施加的不影响"这个座位不能用手牌"）。
+      ``seat`` 是"要画的座位"而不是"谁的技能"——义绝的技能持有者是**别人**。
 
     载荷按 Q7⑥ **只写技能名**：``{"tag": "yijue", "label": "义绝"}``，没有 ``parts``
     （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
     """
-    if YIJUE in state.player(seat).hand_card_prohibition_sources:
-        return {"tag": "yijue", "label": "义绝"}
-    return None
+    return _prohibition_badge(state, seat, YIJUE, "yijue", "义绝")
 
 
 def _jie_tieqi_badge(state: Any, seat: int) -> dict[str, Any] | None:

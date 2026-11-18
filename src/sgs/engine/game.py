@@ -5773,7 +5773,7 @@ class Engine:
                     frame_id=0,
                     depth=self.stack.depth,
                 )
-            player.hand_card_prohibition_sources = ()
+            self.clear_hand_card_prohibitions(player.seat)
             player.xiongluan_target = None
             player.heart_slash_bonus_against.clear()
             # 界【烈弓】② 的"本次使用"记账：正常由 RESOLVE_AFTER_END 清扫钩子清；这里兜底

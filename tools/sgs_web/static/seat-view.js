@@ -286,7 +286,7 @@ function miniSlotNode(options) {
     const suit = document.createElement("span");
     // 花色分红黑：与手牌大卡面 / 花色按钮同一份 `card.color`（`card-view.js:suitColorClass`，
     // 本文件不抄第二份花色 → 颜色表；槽里的牌载荷里已带 `color`）。
-    suit.className = "slot-suit " + suitColorClass(card);
+    suit.className = ["slot-suit", suitColorClass(card)].filter(Boolean).join(" ");
     suit.textContent = suitRank;
     node.appendChild(suit);
   }
@@ -441,7 +441,7 @@ function fillHeroTags(box, player) {
       for (const part of parts) {
         const span = document.createElement("span");
         // 没有 tone 的段（技能名 / 点数）是普通文本，继承 chip 的默认色。
-        span.className = `hero-tag-part ${part.tone || ""}`;
+        span.className = ["hero-tag-part", part.tone].filter(Boolean).join(" ");
         span.textContent = part.text || "";
         chip.appendChild(span);
       }
