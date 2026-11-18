@@ -949,6 +949,21 @@ class Player(BaseModel):
     ``DISTANCE`` 修饰器（主体侧）。清理点 = 回合末（:meth:`Engine._clear_turn_effects`）。
     **不发 delta**：与 ``liegong_bonus`` 同姿态。
     """
+    sidi_marks: dict[int, int] = Field(default_factory=dict)
+    """**界曹真【司敌】的预测表**（jie-yijiang-2014-wuyi-caozhen 票 03；用户 2026-11-18 签）。
+
+    键 = **被预测的角色**座位，值 = 曹真预测"他下一张使用的牌会指定的唯一目标"的座位。
+    字段住在**曹真自己**身上（与 ``hero.caozhen_mobile.sidi`` 的 :attr:`sidi_slash_penalty`
+    不同：那条是"谁被限"住在**被限者**身上），因为它是同一名角色的私有记账。
+
+    写入唯一入口 = :meth:`Engine.set_sidi_mark`（① 的两步座位流水线提交点）；清除唯一入口 =
+    :meth:`Engine.clear_sidi_mark`（② 判定那一刻**无论中没中**都清 + 阵亡 / 失去技能清）。
+    公开面只有"谁被司敌了"（``sgs_web.projection`` 的座位标签），**预测目标不进任何载荷**——
+    这是用户 2026-11-18 的 Q6 口径（「全场能看到谁被司敌了，但是不知道的是司敌预测目标为谁」）。
+
+    **不发 delta**：与 :attr:`sidi_slash_penalty` / ``liegong_bonus`` 同姿态（没有 JSON 读者；
+    回放按同一条技能动作重建）；不进 ``PlayerView`` / ``PlayerPublic``。
+    """
     sidi_slash_penalty: int = 0
     """本阶段该座位「使用【杀】的次数上限 −X」的 X（一将成名-2014·移动版 曹真【司敌】②）。
 

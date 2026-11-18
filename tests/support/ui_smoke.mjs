@@ -860,7 +860,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
   // bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里）⇒ 版本 111 → 112、
   // 真名分组 75 不变。
-  ui.state.heroCatalog.length === 75 && catalogVersions.length === 112,
+  ui.state.heroCatalog.length === 75 && catalogVersions.length === 113,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,

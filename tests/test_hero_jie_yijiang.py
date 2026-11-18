@@ -54,6 +54,7 @@ from sgs.state import (
     PlayCard,
     QueryKind,
     SelectCards,
+    SelectOption,
     SelectOptions,
     SubstituteJudgeCard,
     UseCard,
@@ -63,6 +64,8 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from support import (
+    PassPlayer,
+    declare_death,
     RecordingPlayer,
     SeatSpec,
     build_state,
@@ -3417,3 +3420,336 @@ def test_jianying_target_step_has_a_live_pool_with_many_cards():
     assert tuple(row.options) == expected and row.max == 1, (
         f"清单行的池与上限同源：{row.options} / max={row.max}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 票 03：界曹真移动版【司敌】（jie-yijiang-2014-wuyi-caozhen；用户 2026-11-18 签 Q1–Q6）
+#
+# 牌面（移动版 = 用户资产）：① 使用**非延时锦囊**结算完毕后，选一名其他角色 + 预测其下一张
+# （任意）牌的唯一目标；② 命中 ⇒ 目标是自己则摸一张，否则二选一：取消并对其 1 点伤害 / 摸两张；
+# 中与不中都当场清除。判据全走**外部缝**：`Player.sidi_marks`、座位标记、记录流、体力 / 手牌数。
+# ---------------------------------------------------------------------------
+
+CAOZHEN = "jie_caozhen_mobile"
+SIDI = "hero.jie_caozhen_mobile.sidi"
+SIDI_MARK = "司敌"
+SIDI_CANCEL = "sidi:cancel"
+SIDI_DRAW_TWO = "sidi:draw_two"
+
+
+def _pick_use(query, card_id: int, targets: tuple[int, ...], *, card_only: bool = False):
+    """从候选里取"这张牌 + 这组目标"的那条 ``UseCard``（不手拼 Action）。
+
+    ``card_only`` = 只按牌匹配（【无中生有】这类 ``self_only`` 的牌，目标恒是 (自己,)）。
+    """
+    for action in query.legal_actions:
+        if not isinstance(action, UseCard):
+            continue
+        if int(action.card.card_id) != int(card_id):
+            continue
+        if card_only:
+            return action
+        if tuple(int(seat) for seat in action.targets) == tuple(int(seat) for seat in targets):
+            return action
+    raise AssertionError(f"候选里没有 {card_id} → {targets} 的那一条")
+
+
+class _SidiTable:
+    """三名座位的脚本台：0 = 界曹真（用锦囊 + ① 两步选座 + ② 二选一），1 = 被预测者。
+
+    ``victim`` 座位 1 会在他自己的出牌阶段用一张牌（``user_card`` 打 ``user_target``）；
+    其余座位一律 :class:`PassPlayer`。没有期望的询问一出现就断言失败（不静默吞）。
+    """
+
+    def __init__(
+        self,
+        *,
+        card: int,
+        targets: tuple[int, ...] = (),
+        predicted: int | None = None,
+        predicted_target: int | None = None,
+        user_card: int | None = None,
+        user_target: int | None = None,
+        choice: str | None = None,
+    ) -> None:
+        self.card = card
+        self.targets = tuple(targets)
+        self.predicted = predicted
+        self.predicted_target = predicted_target
+        self.user_card = user_card
+        self.user_target = user_target
+        self.choice = choice
+        self.used = False
+        self.user_used = False
+        self.activation_queries = 0
+        self.seat_queries = 0
+        self.option_queries = 0
+        self._pass = PassPlayer()
+
+    # -- 两个座位各自的出牌阶段 ------------------------------------------------
+    def _play_phase(self, query):
+        if query.actor == 0 and not self.used:
+            self.used = True
+            return _pick_use(query, self.card, self.targets, card_only=True)
+        if query.actor == 1 and self.user_card is not None and not self.user_used:
+            self.user_used = True
+            return _pick_use(query, self.user_card, (int(self.user_target),))
+        return next(
+            action for action in query.legal_actions if isinstance(action, EndPhase)
+        )
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return self._play_phase(query)
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == SIDI:
+            self.activation_queries += 1
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        if query.kind == QueryKind.SELECT_OPTION and query.actor == 0:
+            choices = tuple(
+                action.choice
+                for action in query.legal_actions
+                if isinstance(action, SelectOption)
+            )
+            seats = tuple(choice for choice in choices if choice.startswith("seat:"))
+            if seats:
+                self.seat_queries += 1
+                wanted = (
+                    self.predicted if self.seat_queries == 1 else self.predicted_target
+                )
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectOption)
+                    and action.choice == f"seat:{wanted}"
+                )
+            self.option_queries += 1
+            assert self.choice is not None, "没期望 ② 出选项步"
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectOption) and action.choice == self.choice
+            )
+        return self._pass.respond(query)
+
+
+def _sidi_state(*, mine: int, user: int, victim_hand: tuple[int, ...] = ()) -> object:
+    """三座位局面：0 = 界曹真（手牌 = 那张锦囊）、1 = 被预测者（手牌 = 那张牌）、2 = 预测目标。"""
+    deck = deck_excluding(PACK, mine, user, *victim_hand)
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=CAOZHEN, hand=(mine,), hp=4, hp_max=4, identity=Identity.LORD),
+            SeatSpec(hand=(user, *victim_hand), hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+
+
+def _run_sidi(engine, table, stop, *, limit=4000):
+    players = [table for _ in engine.state.players]
+    return run_queries(engine, players, stop, limit=limit)
+
+
+def _markers(state, seat: int) -> tuple[str, ...]:
+    return tuple(marker.name for marker in state.player(seat).markers)
+
+
+def _non_delayed_trick(*, exclude=()) -> int:
+    return next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in exclude and PACK.deck.cards[card_id].type == "ex_nihilo"
+    )
+
+
+def _delayed_trick(*, exclude=()) -> int:
+    return next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in exclude and PACK.deck.cards[card_id].type == "indulgence"
+    )
+
+
+def test_sidi_records_the_prediction_and_marks_the_predicted_character():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=21)
+    table = _SidiTable(card=trick, predicted=1, predicted_target=2)
+    _run_sidi(
+        engine,
+        table,
+        lambda e: bool(e.state.player(0).sidi_marks),
+    )
+    assert engine.state.player(0).sidi_marks == {1: 2}, "预测表 = 被预测者 → 预测目标"
+    assert _markers(engine.state, 1) == (SIDI_MARK,), "被预测者身上挂公开标记「司敌」"
+    assert _markers(engine.state, 2) == (), "标记不在预测目标身上"
+    assert table.activation_queries == 1
+    assert table.seat_queries == 2
+
+
+def test_sidi_is_not_offered_after_a_delayed_trick():
+    delayed = _delayed_trick()
+    state = _sidi_state(mine=delayed, user=cards_of_type(PACK, "slash")[0])
+    engine = Engine.from_state(state, seed=22)
+    table = _SidiTable(card=delayed, targets=(1,))
+    _run_sidi(
+        engine,
+        table,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    assert table.activation_queries == 0, "延时锦囊不触发 ①"
+    assert engine.state.player(0).sidi_marks == {}
+
+
+def test_sidi_is_not_offered_when_every_other_character_is_already_predicted():
+    trick = _non_delayed_trick()
+    state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])
+    for other in (1, 2, 3):
+        state.player(0).sidi_marks[other] = 0
+    engine = Engine.from_state(state, seed=23)
+    table = _SidiTable(card=trick, predicted=1, predicted_target=2)
+    _run_sidi(
+        engine,
+        table,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    assert table.activation_queries == 0, "没有可指定的其他角色 ⇒ 连问都不问（G1）"
+
+
+def test_sidi_draws_one_when_the_predicted_target_is_the_owner():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=24)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=0,
+        user_card=slash,
+        user_target=0,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: not e.state.player(0).sidi_marks and table.user_used,
+    )
+    assert table.option_queries == 0, "预测目标是曹真自己 ⇒ 只摸一张，不问"
+    assert _markers(engine.state, 1) == (), "命中后标记清掉"
+
+
+def test_sidi_cancels_the_card_and_damages_the_user():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=25)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=slash,
+        user_target=2,
+        choice=SIDI_CANCEL,
+    )
+    _run_sidi(engine, table, lambda e: e.state.player(1).hp < 4)
+    assert table.option_queries == 1
+    assert engine.state.player(2).hp == 4, "取消之 ⇒ 那张【杀】不结算，目标不掉血"
+    assert engine.state.player(1).hp == 3, "1 点伤害落在**使用那张牌的角色**身上（Q2）"
+    assert engine.state.player(0).sidi_marks == {}
+
+
+def test_sidi_draws_two_and_spends_the_prediction():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=26)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=slash,
+        user_target=2,
+        choice=SIDI_DRAW_TWO,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: table.option_queries >= 1 and not e.state.player(0).sidi_marks,
+    )
+    assert engine.state.player(0).sidi_marks == {}
+    assert _markers(engine.state, 1) == ()
+    assert engine.state.player(2).hp == 4, "摸两张那一支不取消牌、也不造伤"
+    assert engine.state.player(1).hp == 4
+
+
+def test_sidi_prediction_fails_on_a_wrong_target_and_is_spent():
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _sidi_state(mine=trick, user=slash)
+    engine = Engine.from_state(state, seed=27)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=slash,
+        user_target=0,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: not e.state.player(0).sidi_marks and table.user_used,
+    )
+    assert table.option_queries == 0, "没猜中 ⇒ 不发询问"
+    assert _markers(engine.state, 1) == (), "失败也清除（Q4）"
+
+
+def test_sidi_mark_and_prediction_are_cleared_when_the_owner_dies():
+    trick = _non_delayed_trick()
+    state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])
+    engine = Engine.from_state(state, seed=28)
+    table = _SidiTable(card=trick, predicted=1, predicted_target=2)
+    _run_sidi(
+        engine,
+        table,
+        lambda e: bool(e.state.player(0).sidi_marks),
+    )
+    assert _markers(engine.state, 1) == (SIDI_MARK,)
+    declare_death(engine, 0)
+    for _ in range(200):
+        if engine.state.player(0).sidi_marks == {}:
+            break
+        if engine.pending is not None:
+            engine.submit(PassPlayer().respond(engine.pending))
+        else:
+            engine._step()
+    assert engine.state.player(0).sidi_marks == {}, "阵亡清预测表"
+    assert _markers(engine.state, 1) == (), "阵亡清标记（2018 死亡流程 Ⅰ.c 同一姿态）"
+
+
+def test_near_death_in_flight_reads_the_stack():
+    trick = _non_delayed_trick()
+    state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])
+    engine = Engine.from_state(state, seed=29)
+    assert engine.near_death_in_flight() is False
+    engine.push_frame(
+        FrameKind.NEAR_DEATH,
+        {"source": None, "targets": (), "card": None},
+        timing=Timing.NEAR_DEATH_AT,
+    )
+    try:
+        assert engine.near_death_in_flight() is True
+    finally:
+        engine.stack.pop()

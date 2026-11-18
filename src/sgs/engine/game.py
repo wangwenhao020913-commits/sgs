@@ -4733,6 +4733,32 @@ class Engine:
                 return True
         return False
 
+    def set_sidi_mark(self, seat: int, predicted: int, target: int) -> None:
+        """写一条【司敌】预测（界曹真移动版；jie-yijiang-2014-wuyi-caozhen 票 03）。
+
+        **写入唯一入口**：``seat`` = 曹真，``predicted`` = 被他预测的角色，``target`` = 他预测
+        "那个人下一张牌会指定的唯一目标"。同键覆盖（Q5 已把"重复指定同一人"挡在候选阶段）。
+        **不发 delta**：预测目标只在引擎侧（用户 Q6），公开面是那枚「司敌」标记。
+        """
+        self.state.player(seat).sidi_marks[int(predicted)] = int(target)
+
+    def clear_sidi_mark(self, seat: int, predicted: int) -> bool:
+        """清掉 ``seat`` 对 ``predicted`` 的那条预测（② 判定那一刻**中没中**都清）。
+
+        幂等：本来就没有 ⇒ 返回 ``False``。
+        """
+        return self.state.player(seat).sidi_marks.pop(int(predicted), None) is not None
+
+    def near_death_in_flight(self) -> bool:
+        """此刻场上**有没有濒死流程在飞**（栈上有没有 ``NEAR_DEATH`` 帧）。
+
+        只读助手（界曹真【司敌】② 的「若此时场上没有任何角色处于濒死状态」）：
+        「处于濒死状态」按规则 4.17（``详细规则`` L478–L498）= **正在走濒死流程**，而
+        L496–L497 明写同一时机不可能有两名以上角色同时处于濒死 ⇒ 判据就是"栈上有没有
+        那个帧"。纯新增读取口，不改任何既有路径。
+        """
+        return any(frame.kind is FrameKind.NEAR_DEATH for frame in self.stack.frames)
+
     def bar_dingpin_target(self, seat: int, target: int) -> bool:
         """把 ``target`` 记进"本回合不能再对其发动【定品】"的禁令（【定品】黑色判定分支）。
 
@@ -5135,6 +5161,24 @@ class Engine:
                     frame_id=frame.frame_id,
                     depth=self.stack.depth,
                 )
+        self._clear_sidi_marks_of(seat)
+
+    def _clear_sidi_marks_of(self, seat: int) -> None:
+        """座位离场 / 失去技能 ⇒ 与它有关的**预测表**条目一并作废（界曹真【司敌】）。
+
+        三档一起清：它自己做的预测（键 = 它）、它被预测（键 = 它）、它是别人预测的目标
+        （值 = 它）。**不发 delta**（预测表不进记录流；公开面只有那枚「司敌」标记，而标记
+        的清理由 :meth:`_clear_dead_markers` / :meth:`_drop_markers_of_lost_skill` 负责）。
+        依据 = `06`（§5「程序化约定与偏离一手」）的"失去技能的清理"纪律（L1265）与 2018
+        死亡流程 Ⅰ.c 的同一姿态。
+        """
+        for player in self.state.players:
+            marks = player.sidi_marks
+            if not marks:
+                continue
+            for predicted in tuple(marks):
+                if predicted == seat or marks[predicted] == seat or player.seat == seat:
+                    marks.pop(predicted, None)
 
     def set_wine_active(self, frame: Frame | None, seat: int, active: bool) -> bool:
         """写一个座位的【酒】加伤状态并落一条 ``wine_change``（M5-04 的唯一写入口）。
@@ -5449,6 +5493,10 @@ class Engine:
                         source_seat=marker.source_seat,
                         source_skill_id=marker.source_skill_id,
                     )
+        # 与标记同一时机的**座位级技能私有记录**（今天只有界曹真【司敌】的预测表）：
+        # 失去任意技能时保守地作废该座位的预测——预测表没有"来源技能"字段，而它只有一条
+        # 载体；宁可多清一次，也不让一个已不存在的技能继续留着预测（`06` §5.13 的纪律）。
+        self._clear_sidi_marks_of(seat)
 
     def _drop_hero_zones_of_lost_skill(
         self, frame: Frame | None, seat: int, skill_id: str
