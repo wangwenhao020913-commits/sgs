@@ -197,7 +197,7 @@ class SeamKind(str, Enum):
 
 
 class SkillSourceKind(str, Enum):
-    """技能实例的**来源**种类（票 07 §6 的带标签联合；M6 票 04 补第四种）。
+    """技能实例的**来源**种类（票 07 §6 的带标签联合；M6 票 04 补第四种，M7 票 09 补六七）。
 
     ``HERO_CARD``（票 01）是**武将牌**：它不是实体牌，故只为它记 ``skill_id``，
     **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。它是**唯一**受身份门控的来源
@@ -209,12 +209,23 @@ class SkillSourceKind(str, Enum):
     ``MARKER``（lei-shenganning 票 94）是**标记自身效果**：实例由 ``Player.markers`` 里
     ``effect`` 非空的那条标记产出，``skill_id`` 记**放置该标记的那条技能**（= 标记的
     ``source_skill_id``，便于在 ``instance_key`` 里分清"哪条技能放的这枚标记"）。
-    它是**唯一不受技能失效影响**的来源（用户 2026-11-07 裁定：标记本身有效果，技能失效也照常）。
 
     ``CARD_TAG``（feng-yujin 票 03）是**牌标签自身效果**：实例由 ``GameState.card_tags`` 里
     ``CardTagSpec.effect`` 非空的那条标签产出，``owner`` = 标签的来源实例持有者、
     ``card_id`` = 挂着这枚标签的实体牌（``instance_key`` 因此逐牌可分）。与 ``MARKER``
     同一姿态**不受技能失效 / 失去影响**——牌面写"直到进入弃牌堆"，效果只随标签消失而消失。
+
+    ``RELIC``（M7 票 09）是**遗物**：实例由 :func:`resolve_instances` 读 ``Player.relics``
+    产出（带 ``skill_id``、不造 ``card_id``：遗物不是牌）。遗物住**独立遗物栏**，
+    **不算武将牌上的技能** ⇒ 不受技能失效影响（用户裁定；票 02 §6）。
+
+    ``GLOBAL``（M7 票 09）是**副本全局技能**：实例由 ``Player.global_skills`` 产出，
+    同样不是牌、同样**不受技能失效影响**。v1 只做属性缩放（缩放数值由剧本层物化进
+    ``PveConfig.seats``，票 10 / 票 17），本来源先落"能解析、能登记"。
+
+    **不受技能失效影响的来源逐条登记在** :data:`_NEVER_SUPPRESSED_SOURCES`（``MARKER`` /
+    ``CARD_TAG`` / ``EQUIPMENT_CARD`` / ``RELIC`` / ``GLOBAL``）——那是这条规则的代码侧
+    真源，不是"唯一一种"的例外句。
     """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
@@ -223,6 +234,33 @@ class SkillSourceKind(str, Enum):
     GRANTED = "GRANTED"
     MARKER = "MARKER"
     CARD_TAG = "CARD_TAG"
+    RELIC = "RELIC"
+    GLOBAL = "GLOBAL"
+
+
+_NEVER_SUPPRESSED_SOURCES: frozenset[SkillSourceKind] = frozenset(
+    {
+        SkillSourceKind.EQUIPMENT_CARD,
+        SkillSourceKind.MARKER,
+        SkillSourceKind.CARD_TAG,
+        SkillSourceKind.RELIC,
+        SkillSourceKind.GLOBAL,
+    }
+)
+"""**显式登记**「永不受技能失效影响」的来源（M7 票 09；`GLOSSARY.md`「技能失效」）。
+
+一条一行的登记表，而不是散在 :func:`_skill_is_suppressed` 里的 if 分支：新增一种来源时
+要么进这张表（并写清理由），要么落到"按武将技能处理 / 未知来源 fail-closed"那两档。
+
+- ``EQUIPMENT_CARD``：装备牌带来的技能不是"武将技能"（用户裁定，M6 票 09）；
+- ``MARKER``：标记自身有效果（用户 2026-11-07 裁定）；
+- ``CARD_TAG``：牌面写"直到进入弃牌堆"，效果只随标签消失（feng-yujin 票 03）；
+- ``RELIC``：遗物住独立遗物栏、不算武将牌上的技能（票 02 §6）；
+- ``GLOBAL``：副本全局技能是副本规则，不随角色技能被锁（票 03 §10.3）。
+
+``VIRTUAL_GRANT`` **不在这里**：它可能授予虚拟装备（免疫）、也可能授予武将技能
+（照常失效），判据是**定义**而不是来源，故它留在 :func:`_skill_is_suppressed` 里单独成支。
+"""
 
 
 HookCondition: TypeAlias = Callable[[Any, Frame], bool]
@@ -631,6 +669,8 @@ class SkillSource:
     """技能实例的**来源**：实体装备牌 / 虚拟授予 / 武将牌（票 01 加 ``HERO_CARD``）。
 
     武将牌不是实体牌，故 ``HERO_CARD`` 只带 ``skill_id``（不带 ``card_id``）。
+    ``RELIC`` / ``GLOBAL``（M7 票 09）同一姿态：遗物与副本全局技能都不是牌，
+    只带 ``skill_id``、**绝不**造 ``card_id``。
     """
 
     kind: SkillSourceKind
@@ -850,20 +890,22 @@ def _skill_is_suppressed(player: Player, instance: SkillInstance) -> bool:
     （``EQUIPMENT_CARD``）与虚拟装备（``VIRTUAL_GRANT`` 且定义是装备技能）都免疫；
     武将牌（``HERO_CARD``）与运行时获得（``GRANTED``，含觉醒 ☆ 技）照常失效。
 
+    **逐条登记**：``EQUIPMENT_CARD`` / ``MARKER`` / ``CARD_TAG`` / ``RELIC`` / ``GLOBAL``
+    在 :data:`_NEVER_SUPPRESSED_SOURCES` 里各占一行，本函数只做一次集合查询——新增来源
+    要么登记进那张表，要么落到后面的"按武将技能处理 / 未知来源 fail-closed"两档。
+    ``RELIC`` / ``GLOBAL``（M7 票 09）：遗物住独立遗物栏、副本全局技能是副本规则，
+    两者都**不算武将牌上的技能** ⇒ 不失效（票 02 §6 / 票 03 §10.3）。
+
     ``VIRTUAL_GRANT`` **不是**只用于虚拟装备：既有测试构造也会用它授予武将技能，故这里
-    按**定义**是否为装备技能区分，不能把整个来源一刀切。``MARKER``（票 94）**永不受失效
-    影响**——用户 2026-11-07 裁定"这个标记本身具有效果，所以就算劫营这个技能失效了，依然
-    享受以上所说的3种加成"；这里写成显式分支，不靠"未知来源 fail-closed"的副作用。
-    ``CARD_TAG``（feng-yujin 票 03）同理**永不受失效**：牌面写"直到进入弃牌堆"，效果只随
-    标签消失（用户 2026-11-07 签的 E2 口径）。
+    按**定义**是否为装备技能区分，不能把整个来源一刀切。``MARKER``（票 94）的理由是
+    用户 2026-11-07 裁定"这个标记本身具有效果，所以就算劫营这个技能失效了，依然享受
+    以上所说的3种加成"；``CARD_TAG``（feng-yujin 票 03）是牌面写"直到进入弃牌堆"，效果
+    只随标签消失（用户 2026-11-07 签的 E2 口径）。两者都写成**显式登记**，不靠"未知
+    来源 fail-closed"的副作用。
     来源种类无法判断时 **fail-closed = 不失效**（不让未知实例被误锁）。
     """
     source = instance.source.kind
-    if source is SkillSourceKind.MARKER:
-        return False
-    if source is SkillSourceKind.CARD_TAG:
-        return False
-    if source is SkillSourceKind.EQUIPMENT_CARD:
+    if source in _NEVER_SUPPRESSED_SOURCES:
         return False
     if source is SkillSourceKind.VIRTUAL_GRANT:
         if (
@@ -891,6 +933,8 @@ _PLAYER_KEY_FIELDS = (
     "hero",
     "granted_skills",
     "lost_skills",
+    "relics",
+    "global_skills",
     "suppressed_skills",
     "markers",
 )
@@ -940,6 +984,8 @@ def _player_key_values(state: GameState, player: Player) -> tuple:
     查（spec §3.3），少一份就会把"换了牌面的同一张装备"当成同一个键。
     ``markers``（票 94）整条进键：标记带 ``effect`` ⇒ 解析产出标记载体实例，而标记实例是
     冻结模型（可哈希）且**没有**别的键位能表达"这一枚标记在不在"。
+    ``relics`` / ``global_skills``（M7 票 09）是 ``RELIC`` / ``GLOBAL`` 实例的**唯一**
+    载体：解析按这两个清单产出实例，故它们进键。
     """
     return (
         player.seat,
@@ -951,6 +997,8 @@ def _player_key_values(state: GameState, player: Player) -> tuple:
         player.hero,
         tuple(player.granted_skills),
         tuple(player.lost_skills),
+        tuple(player.relics),
+        tuple(player.global_skills),
         tuple(
             (record.skill_id, record.scope, record.predicate)
             for record in player.suppressed_skills
@@ -1042,9 +1090,12 @@ def _resolve_instances_uncached(
     载体 = 装备区里的实体牌（``source = EQUIPMENT_CARD``）∪ 座位的虚拟授予
     （``source = VIRTUAL_GRANT``，不占牌守恒）∪ **武将牌**（``source = HERO_CARD``，
     票 01：读 ``player.hero`` 经 ``sgs.data.hero_skill_ids`` 取该武将的技能清单）∪
-    **获得**（``source = GRANTED``，M6 票 04：读 ``player.granted_skills``）。
+    **获得**（``source = GRANTED``，M6 票 04：读 ``player.granted_skills``）∪
+    **遗物栏**（``source = RELIC``，M7 票 09：读 ``player.relics``）∪
+    **副本全局技能**（``source = GLOBAL``，M7 票 09：读 ``player.global_skills``）。
     同一 ``(owner, skill_id)`` 只留**最早出现的来源**（票 07 §6 的去重口径）；
-    两名角色各有同一技能时是**两个实例**。
+    两名角色各有同一技能时是**两个实例**。座位级载体按上面这个顺序并集，故"武将牌上本来
+    就有"的那一份优先于后来获得的同名技能，两者又都优先于遗物 / 全局技能带来的同名实例。
 
     **解析顺序钉死**（M6 票 04 / spec §Implementation Decisions「技能运行时」）：
     载体并集 → 去重 → **减失去** → **过失效谓词**。后两步是座位级的（`Player.lost_skills`
@@ -1113,6 +1164,29 @@ def _resolve_instances_uncached(
                     player.seat,
                     definition,
                     SkillSource(SkillSourceKind.GRANTED, skill_id=skill_id),
+                )
+        # **遗物栏**（M7 票 09）：遗物就是技能，但住独立遗物栏、不算武将牌上的技能。
+        # 排在"获得"之后：同 `(owner, skill_id)` 去重留最早来源，故武将牌 / 获得来的同名
+        # 技能优先于遗物带来的那一份（遗物 id 通常是独立的 `relic.*`，不会撞）。
+        for skill_id in player.relics:
+            definition = CATALOG.get(skill_id)
+            if definition is not None:
+                _add_instance(
+                    found,
+                    player.seat,
+                    definition,
+                    SkillSource(SkillSourceKind.RELIC, skill_id=skill_id),
+                )
+        # **副本全局技能**（M7 票 09）：同样是"不是牌的技能"，住座位级清单（v1 只做属性
+        # 缩放，缩放数值在 ``PveConfig.seats``，票 10 / 17）。
+        for skill_id in player.global_skills:
+            definition = CATALOG.get(skill_id)
+            if definition is not None:
+                _add_instance(
+                    found,
+                    player.seat,
+                    definition,
+                    SkillSource(SkillSourceKind.GLOBAL, skill_id=skill_id),
                 )
         # **标记自身效果**（lei-shenganning 票 94）：标记带 ``effect`` ⇒ 它就是一条效果实例。
         # 排在最后是刻意的：同 `(owner, skill_id)` 去重留**最早**来源，故"武将牌上 / 获得来的"

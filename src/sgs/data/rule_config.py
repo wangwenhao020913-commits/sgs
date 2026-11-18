@@ -65,6 +65,24 @@ _ROUND_BASED: frozenset[PveVictoryKind] = frozenset(
 _PVE_SIDES: frozenset[Identity] = frozenset({Identity.ALLY, Identity.ENEMY})
 """PvE 的阵营**值域**：身份局的四值在这里没有位置（票 01 §1「只许 ALLY / ENEMY」）。"""
 
+_MAX_GRANTS_PER_SEAT: Mapping[str, int] = {"skill": 4, "relic": 6}
+"""每座位的授予上限（M7 票 09；票 02 §10.5）：技能 = 4 条出战槽、遗物 = 6 件遗物栏。
+
+**逐座位**算，不是全场总量：两座各 4 条出战技能是合法的（8 条）。
+"""
+
+
+def _catalog_skill_ids() -> frozenset[str]:
+    """``CATALOG`` 的 id 集合（授予的 ``id`` 必须在这里）。
+
+    **延迟 import**：``sgs.skills`` 反向依赖 ``sgs.data``（技能表读武将 / 规则数据），
+    模块级 import 会成环。同一姿态见 ``sgs.data.values`` 里那两处 ``from sgs.skills import
+    CATALOG``。只有真带 ``grants`` 的配置才会付这次 import。
+    """
+    from sgs.skills import CATALOG
+
+    return frozenset(CATALOG)
+
 
 class PveVictory(BaseModel):
     """逐场胜负条件：条件本身 + 它的参数（``rounds``）。
@@ -84,8 +102,9 @@ class PveVictory(BaseModel):
 class SkillGrant(BaseModel):
     """战斗开局授予的一项技能 / 遗物（位置由票 01 §9 钉在 header 里）。
 
-    字段形状照票 03 §3 / 票 09：``{seat, kind, id}``。**校验矩阵归票 09**（每座技能 ≤4、
-    遗物 ≤6、``id`` 在 ``CATALOG`` 里、遗物只授主角）——本票只落骨架，不预设那些语义。
+    字段形状照票 03 §3 / 票 09：``{seat, kind, id}``。**校验矩阵已落地**（M7 票 09，
+    见 :meth:`PveConfig._grants_fit_the_growth_limits`）：每座技能 ≤4、遗物 ≤6、
+    ``id`` 在 ``CATALOG`` 里、无重复、遗物只授主角、座位在表内。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -152,7 +171,8 @@ class PveConfig(BaseModel):
     """Boss 座位：只属于 ``SLAY_BOSS``，且必须是 ``ENEMY``。"""
 
     grants: tuple[SkillGrant, ...] = ()
-    """战斗开局的技能 / 遗物授予（语义与校验归票 09）。"""
+    """战斗开局的技能 / 遗物授予（M7 票 09 落地：校验矩阵见
+    :meth:`_grants_fit_the_growth_limits`，开局写入见 ``engine.game._apply_opening_grants``）。"""
 
     seats: tuple[PveSeat, ...] = ()
     """逐座位合成武将与属性加成（语义与校验归票 10）。"""
@@ -225,6 +245,65 @@ class PveConfig(BaseModel):
                 raise ValueError("rounds 必须是正整数轮次")
         elif rounds is not None:
             raise ValueError(f"{self.victory.kind.value} 不接受 rounds")
+        return self
+
+    @model_validator(mode="after")
+    def _grants_fit_the_growth_limits(self) -> "PveConfig":
+        """开局授予的**整张校验矩阵**（M7 票 09；票 02 §10.5 / 票 03 §3）。
+
+        位置不变（票 01 已钉：``grants`` 必须在 header 里，否则录像重建不出同一局），
+        本校验器只往下填语义。逐条 fail-closed：
+
+        1. ``seat`` 落在 ``[0, len(identities))``——越界座位会在 ``build_initial`` 变成越界写；
+        2. ``id`` 在 ``CATALOG`` 里（**两档来源同一条判据**：``kind`` 只说这条 id 走哪根
+           载体，不改变"它必须是已登记的技能 / 遗物"这个要求）；
+        3. 每座位的技能 ≤ 4、遗物 ≤ 6（逐座位，不是全场总量）；
+        4. 同一座位的同一 ``id`` 只许出现一次（跨 ``kind`` 也算重复：同一条效果不能既算
+           出战技能又算遗物）；
+        5. 遗物**只授给主角座位**——遗物栏属于玩家本人，AI 队友 / 敌人不拿遗物。
+        """
+        if not self.grants:
+            return self
+        seats = len(self.identities)
+        catalog_ids = _catalog_skill_ids()
+        for index, grant in enumerate(self.grants):
+            if not 0 <= grant.seat < seats:
+                raise ValueError(
+                    f"grants[{index}].seat = {grant.seat} 越界：必须落在 "
+                    f"[0, {seats}) 内（identities 的长度就是座位数）"
+                )
+            if grant.id not in catalog_ids:
+                raise ValueError(
+                    f"grants[{index}].id = {grant.id!r} 不在 CATALOG 里："
+                    f"{grant.kind} 授予必须点名一个已登记的技能 / 遗物"
+                )
+        counts: dict[tuple[int, str], int] = {}
+        for grant in self.grants:
+            key = (grant.seat, grant.kind)
+            counts[key] = counts.get(key, 0) + 1
+            limit = _MAX_GRANTS_PER_SEAT[grant.kind]
+            if counts[key] > limit:
+                label = "技能" if grant.kind == "skill" else "遗物"
+                raise ValueError(
+                    f"座位 {grant.seat} 的{label}授予最多 {limit} "
+                    f"{'条' if grant.kind == 'skill' else '件'}（实得 {counts[key]}）："
+                    f"逐座位上限，不是全场总量"
+                )
+        seen: set[tuple[int, str]] = set()
+        for grant in self.grants:
+            key = (grant.seat, grant.id)
+            if key in seen:
+                raise ValueError(
+                    f"座位 {grant.seat} 重复授予了 {grant.id!r}："
+                    "同一座位的同一个 id 只许出现一次"
+                )
+            seen.add(key)
+        for grant in self.grants:
+            if grant.kind == "relic" and grant.seat != self.principal:
+                raise ValueError(
+                    f"遗物只能授给主角座位（principal = {self.principal}）："
+                    f"grants 里的遗物落在座位 {grant.seat}"
+                )
         return self
 
 

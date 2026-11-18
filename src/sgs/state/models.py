@@ -846,6 +846,27 @@ class Player(BaseModel):
     :meth:`Engine.lose_skill`（断肠 / 义起一类）；**可逆的失去**走
     :meth:`Engine.revoke_skill`，它不碰本表（shan-baozuoci 票 02）。
     """
+    relics: list[str] = Field(default_factory=list)
+    """**遗物栏**里的遗物 id（M7 票 09；`GLOSSARY.md`「遗物」）。
+
+    遗物**就是技能**，但住**独立遗物栏**——不进背包 / 出战槽、**不算武将牌上的技能**。
+    载体解析读它产出 ``SkillSourceKind.RELIC`` 实例（带 ``skill_id``、**不造**
+    ``card_id``：遗物不是牌）；`_skill_is_suppressed` 把它登记为**永不受技能失效影响**
+    的来源（用户裁定口径，与 ``MARKER`` / ``CARD_TAG`` 同一档）。
+
+    **写入时机 = 开局**：run 内的遗物实例由 ``PveConfig.grants`` 的 ``kind="relic"`` 那
+    一路在 ``build_initial`` **直接写状态、不落 delta**（同初始体力 / 武将发放；``seq=1``
+    仍是 ``deck_shuffle``），每场战斗开局自动生效。**战斗内不再变**——遗物的得 / 失是
+    run 级事件（票 02 §6 / 票 04），不进战斗记录流，故本表没有引擎写入口。
+    """
+    global_skills: list[str] = Field(default_factory=list)
+    """**副本全局技能**的 id（M7 票 09；第 8 种技能来源 ``GLOBAL``）。
+
+    对剧本里 ``side`` 指定的座位生效，载体解析读它产出 ``SkillSourceKind.GLOBAL`` 实例；
+    与 ``relics`` 一样登记为**永不受技能失效影响**的来源。**接口位**：v1 只做属性缩放，
+    缩放数值由剧本层物化进 ``PveConfig.seats``（票 10 / 票 17），故本表目前没有生产者
+    ——显示（标签）归票 23。不发 delta、不进记录流（同 ``virtual_equipment`` 的接口位姿态）。
+    """
     avatar_cards: list[str] = Field(default_factory=list)
     """**化身牌**：座位持有的**武将牌** id（shan-baozuoci 票 02；左慈【化身】/【新生】）。
 
@@ -865,7 +886,8 @@ class Player(BaseModel):
 
     载体解析的最后一道：实例仍在，但被谓词挡在解析之外（不产出候选、不进修饰器链、
     不触发钩子）；作用域到期后恢复。失效率是**座位级**的，一条记录覆盖该座位此后获得的
-    非锁定**武将**技能（装备牌 / 虚拟装备带来的技能不失效，用户裁定票 09）；锁定技不受
+    非锁定**武将**技能（装备牌 / 虚拟装备 / 遗物 / 副本全局技能带来的技能不失效，用户裁定
+    票 09；逐条登记见 ``catalog._NEVER_SUPPRESSED_SOURCES``）；锁定技不受
     ``ALL_NON_LOCKED`` 影响。写入唯一入口 :meth:`Engine.suppress_skills`，回合末由
     ``Engine._clear_turn_effects`` 清掉。
     """

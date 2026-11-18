@@ -31,12 +31,14 @@ from sgs.data import (
     PveVictory,
     PveVictoryKind,
     RuleConfig,
+    SkillGrant,
     Suit,
     load_content_pack,
 )
-from sgs.engine import Engine, ai_stream, solve_pve_outcome
+from sgs.engine import Engine, ai_stream, dump_journal, solve_pve_outcome
 from sgs.engine.steps import DEATH_STEPS, IDENTITY_DEATH_STEPS, build_steps
-from sgs.state import EndPhase, FrameKind, GameState, UseCard
+from sgs.skills import SkillSourceKind, resolve_instances
+from sgs.state import AskPolicy, EndPhase, FrameKind, GameState, UseCard
 from sgs.timing import Timing
 
 from support import PassPlayer, SeatSpec, build_state, cards_of_type, deck_excluding, run_until
@@ -54,6 +56,7 @@ def _rule(
     protected_ally: int | None = None,
     boss: int | None = None,
     first_seat: int = 0,
+    grants: tuple[SkillGrant, ...] = (),
 ) -> RuleConfig:
     """一局 PvE 的规则配置（阵营 / 主角 / 胜负条件都进 header，票 01 §2）。"""
     return RuleConfig(
@@ -66,6 +69,7 @@ def _rule(
             protected_ally=protected_ally,
             victory=victory,
             boss=boss,
+            grants=grants,
         ),
     )
 
@@ -506,3 +510,120 @@ def test_a_pve_seat_that_dies_on_its_own_turn_still_ends_that_turn():
         "终局死亡：只发 TURN_END（不再有 TURN_AFTER_END），终局记录紧接在后"
     )
     assert principal_engine.records[-1].kind == "game_end"
+
+
+# ---------------------------------------------------------------------------
+# 开局授予（M7 票 09）：`grants` 直接写状态、**不落 delta**；带 grants 的局回放自证
+#
+# 票 02 §10.4 / §11 的裁定：四条出战技能走 `GRANTED`（`Player.granted_skills`）、遗物走
+# `RELIC`（`Player.relics`），两者都由 `PveConfig.grants` 在 `build_initial` 里**直接写
+# 状态**——与初始体力 / 武将发放同一姿态，`seq=1` 仍是 `deck_shuffle`。故"带 grants 的局"
+# 与"同样的种子、去掉 grants 的局"必须产出**同一条记录流**（只有 header 那一行不同）。
+# ---------------------------------------------------------------------------
+
+WUSHENG = "hero.guanyu.wusheng"
+JIJIU = "hero.huatuo.jijiu"
+LONGDAN = "hero.zhaoyun.longdan"
+MASHU = "hero.machao.mashu"
+"""真实 catalog id：内容期之前没有 `relic.*` 条目，故遗物位也拿真实技能 id 当值。"""
+
+
+def _grant(seat: int, kind: str, grant_id: str) -> SkillGrant:
+    return SkillGrant(seat=seat, kind=kind, id=grant_id)
+
+
+def _granted_rule() -> RuleConfig:
+    """3 座（1 友 + 2 敌）：主角 2 条出战技能 + 2 件遗物，队友 1 条出战技能。"""
+    return _rule(
+        (ALLY, ENEMY, ENEMY),
+        victory=PveVictory(kind=PveVictoryKind.ROUT),
+        grants=(
+            _grant(0, "skill", WUSHENG),
+            _grant(0, "skill", LONGDAN),
+            _grant(0, "relic", MASHU),
+            _grant(0, "relic", JIJIU),
+            _grant(1, "skill", WUSHENG),
+        ),
+    )
+
+
+def test_opening_grants_land_on_the_seats_and_carry_the_right_source():
+    """授予在开局**直接进状态**：技能进 ``granted_skills``（`GRANTED`）、遗物进 ``relics``。
+
+    遗物**不算武将牌上的技能**：它不进 ``granted_skills``（那会变成"获得"），也不进
+    出战槽的语义里——两档载体各是各的。
+    """
+    engine = Engine.new_game(seed=20261119, rule_config=_granted_rule(), pack=PACK)
+
+    principal, ally = engine.state.player(0), engine.state.player(1)
+    assert principal.granted_skills == [WUSHENG, LONGDAN]
+    assert principal.relics == [MASHU, JIJIU]
+    assert ally.granted_skills == [WUSHENG]
+    assert not ally.relics, "遗物只授主角（构造期已拒非主角座位的 relic）"
+
+    sources = {
+        (instance.owner, instance.skill_id): instance.source.kind
+        for instance in resolve_instances(engine.state)
+    }
+    assert sources[(0, WUSHENG)] is SkillSourceKind.GRANTED
+    assert sources[(0, MASHU)] is SkillSourceKind.RELIC, "遗物是第七种来源"
+
+
+def test_opening_grants_add_no_delta_at_all():
+    """`seq=1` 仍是 `deck_shuffle`：整条记录流与"同种子、去掉 grants"的局**逐字节相同**。
+
+    只看"没有 `skill_gain`"不够——授予如果走了别的 delta 也会漂；这里直接把两条流的
+    尾部（header 之后）逐字节对比，并单独钉住首条是初次洗牌。
+    """
+    granted = Engine.new_game(seed=20261119, rule_config=_granted_rule(), pack=PACK)
+    plain_rule = _rule((ALLY, ENEMY, ENEMY), victory=PveVictory(kind=PveVictoryKind.ROUT))
+    plain = Engine.new_game(seed=20261119, rule_config=plain_rule, pack=PACK)
+
+    assert granted.records[1].delta_type == "deck_shuffle", "seq = 1 必是初次洗牌"
+    assert granted.records[1].seq == 1
+    assert dump_journal(granted.records[1:]) == dump_journal(plain.records[1:]), (
+        "授予不落 delta：header 之后两条记录流必须逐字节相同"
+    )
+    assert dump_journal(granted.records[:1]) != dump_journal(plain.records[:1]), (
+        "授予本身进 header（否则录像重建不出同一场）"
+    )
+
+
+def test_a_pve_game_with_grants_rebuilds_the_same_record_stream_from_its_header(tmp_path):
+    """header 自证：`grants` 在 header 里 ⇒ 读回 header 重开一局 + 磁带放完 = 同一条流。
+
+    这是票 01 §2 那条裁定（PvE 的构成必须在 header 里）对**成长层**的兑现：重建出来的局
+    里遗物 / 出战技能都在（不是"记录流碰巧一样"）。
+    """
+    from sgs.agents import TapePlayer, tape_from_journal
+    from sgs.engine import read_journal
+
+    engine = Engine.new_game(
+        seed=20261119,
+        rule_config=_granted_rule(),
+        pack=PACK,
+        ask_policy=AskPolicy(),
+    )
+    engine.run([PassPlayer() for _ in range(3)])
+    expected = dump_journal(engine.records)
+
+    path = tmp_path / "pve_grants.jsonl"
+    path.write_text(expected, encoding="utf-8")
+    header = read_journal(path)[0]
+    assert header.rule_config.pve.grants == _granted_rule().pve.grants, (
+        "授予必须经由 header 往返（写读对称）"
+    )
+
+    seed, tape = tape_from_journal(read_journal(path))
+    replay = Engine.new_game(
+        seed=seed,
+        rule_config=header.rule_config,
+        pack=load_content_pack(header.pack_id, deck_profile=header.deck_profile),
+        ask_policy=AskPolicy(),
+    )
+    assert replay.state.player(0).relics == [MASHU, JIJIU], (
+        "重建出来的局里遗物必须在（不是记录流碰巧一样）"
+    )
+    replay.run([TapePlayer(tape)] * header.rule_config.player_count)
+
+    assert dump_journal(replay.records) == expected

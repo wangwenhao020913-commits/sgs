@@ -317,3 +317,131 @@ def test_a_non_positive_round_limit_is_rejected(rounds):
 def test_extra_keys_inside_the_pve_section_are_rejected():
     with pytest.raises(DataLoadError):
         _config(unknown=True)
+
+
+# ---------------------------------------------------------------------------
+# `pve.grants`：开局授予的整张校验矩阵（M7 票 09；票 02 §10.5 / 票 03 §3）
+#
+# 形状 = `{seat, kind: "skill" | "relic", id}`，**位置不变**（票 01 已钉：必须在 header 里，
+# 否则录像重建不出同一局）。矩阵逐条 fail-closed：>4 技能 / >6 遗物 / 未知 id / 重复 /
+# 遗物授给非主角座位。授予越界座位同批拒掉——它会在 `build_initial` 里变成越界写。
+# ---------------------------------------------------------------------------
+
+WUSHENG = "hero.guanyu.wusheng"
+LONGDAN = "hero.zhaoyun.longdan"
+MASHU = "hero.machao.mashu"
+JIANXIONG = "hero.caocao.jianxiong"
+JIJIU = "hero.huatuo.jijiu"
+GUOSE = "hero.daqiao.guose"
+QIXI = "hero.ganning.qixi"
+"""七个真实存在的 catalog id（内容期之前没有 `relic.*`，故遗物位也拿真实技能 id 当值：
+判据是"id 在 CATALOG 里"，与 ``kind`` 是哪一档无关——见票 09 的裁定）。"""
+
+
+def _grant(seat=0, kind="skill", grant_id=WUSHENG):
+    return {"seat": seat, "kind": kind, "id": grant_id}
+
+
+def _grants(*grants):
+    return _config(grants=grants)
+
+
+def test_grants_of_both_kinds_are_accepted_and_land_in_the_dump():
+    """4 条出战技能 + 6 件遗物是**上限而不是总量**：整份配置原样进 header（dump 往返相等）。"""
+    config = _config(
+        grants=(
+            _grant(0, "skill", WUSHENG),
+            _grant(0, "skill", LONGDAN),
+            _grant(0, "skill", MASHU),
+            _grant(0, "skill", JIANXIONG),
+            _grant(0, "relic", JIJIU),
+            _grant(1, "skill", WUSHENG),
+        )
+    )
+
+    assert [grant.kind for grant in config.pve.grants] == [
+        "skill",
+        "skill",
+        "skill",
+        "skill",
+        "relic",
+        "skill",
+    ]
+    assert RuleConfig.model_validate(config.model_dump(mode="json")) == config, (
+        "授予必须 dump 往返逐字段相等，否则 header 自证不成立"
+    )
+
+
+def test_more_than_four_skill_grants_on_one_seat_are_rejected():
+    """每座**技能**授予 ≤ 4（4 条出战槽）：第 5 条拒。上限是逐座位的，不是全场的。"""
+    with pytest.raises(DataLoadError) as caught:
+        _grants(
+            _grant(0, "skill", WUSHENG),
+            _grant(0, "skill", LONGDAN),
+            _grant(0, "skill", MASHU),
+            _grant(0, "skill", JIANXIONG),
+            _grant(0, "skill", JIJIU),
+        )
+
+    assert "4" in str(caught.value), "拒绝必须点名「每座技能 ≤ 4」这条上限"
+
+
+def test_four_skill_grants_on_two_seats_are_each_under_the_cap():
+    """上限逐座位算：两座各 4 条＝8 条也合法（全场条数不是判据）。"""
+    config = _config(
+        grants=tuple(
+            _grant(seat, "skill", grant_id)
+            for seat in (0, 1)
+            for grant_id in (WUSHENG, LONGDAN, MASHU, JIANXIONG)
+        )
+    )
+
+    assert len(config.pve.grants) == 8
+
+
+def test_more_than_six_relic_grants_on_one_seat_are_rejected():
+    """每座**遗物**授予 ≤ 6（独立遗物栏上限）：第 7 件拒。"""
+    seven = (WUSHENG, LONGDAN, MASHU, JIANXIONG, JIJIU, GUOSE, QIXI)
+
+    with pytest.raises(DataLoadError) as caught:
+        _grants(*(_grant(0, "relic", grant_id) for grant_id in seven))
+
+    assert "遗物" in str(caught.value)
+
+    assert len(_config(grants=tuple(_grant(0, "relic", g) for g in seven[:6])).pve.grants) == 6
+
+
+def test_a_grant_id_that_is_not_in_the_catalog_is_rejected():
+    """``id`` 必须在 ``CATALOG`` 里（fail-closed）：两档来源都拒，不只在技能位上判。"""
+    for kind in ("skill", "relic"):
+        with pytest.raises(DataLoadError) as caught:
+            _grants(_grant(0, kind, "hero.nobody.nothing"))
+        assert "hero.nobody.nothing" in str(caught.value), "报错要点名那个不存在的 id"
+
+
+def test_the_same_grant_on_the_same_seat_twice_is_rejected():
+    """同一座位的同一 id 只许出现一次（重复授予不给第二次机会，也让 header 无歧义）。"""
+    with pytest.raises(DataLoadError) as caught:
+        _grants(_grant(0, "skill", WUSHENG), _grant(0, "skill", WUSHENG))
+
+    assert WUSHENG in str(caught.value)
+
+    with pytest.raises(DataLoadError):
+        _grants(_grant(0, "skill", WUSHENG), _grant(0, "relic", WUSHENG))
+
+
+def test_a_relic_granted_to_a_non_principal_seat_is_rejected():
+    """遗物**只授给主角座位**：遗物栏属于玩家本人，敌人不拿遗物（票 02 §10.5）。"""
+    with pytest.raises(DataLoadError) as caught:
+        _grants(_grant(1, "relic", WUSHENG))
+    assert "遗物" in str(caught.value)
+
+    # 座位 1 拿**技能**没问题（AI 队友同样吃出战技能），故上面拒的是 kind 而不是座位本身。
+    assert _config(grants=(_grant(1, "skill", WUSHENG),)).pve.grants[0].seat == 1
+
+
+def test_a_grant_on_a_seat_outside_the_table_is_rejected():
+    with pytest.raises(DataLoadError) as caught:
+        _grants(_grant(3, "skill", WUSHENG))
+
+    assert "seat" in str(caught.value)

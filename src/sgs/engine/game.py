@@ -7908,6 +7908,34 @@ def _initial_player(
     )
 
 
+def _apply_opening_grants(state: GameState, rule_config: RuleConfig) -> None:
+    """把 ``PveConfig.grants`` 在**开局**写进座位状态（M7 票 09；票 02 §10.4 / §11）。
+
+    - ``kind="skill"`` ⇒ :attr:`Player.granted_skills`（``GRANTED``：4 条出战技能**不新造
+      来源**，M6 票 04 的原语照用）；
+    - ``kind="relic"`` ⇒ :attr:`Player.relics`（``RELIC``：独立遗物栏，**不算**武将牌上的
+      技能，故不受技能失效影响）。
+
+    **直接写状态、不落 delta**（同初始体力 / 武将发放）：``seq = 1`` 仍是 ``deck_shuffle``，
+    带 grants 的局与"同种子、去掉 grants"的局在 header 之后**逐字节相同**。局内
+    :meth:`Engine.grant_skill` 的 ``skill_gain`` 语义不变——那是"运行时获得"，与开局的
+    "这一场带哪 4 条 / 哪几件"不是一回事。
+
+    标准局 ``rule_config.pve is None`` ⇒ 这里零动作（记录流因此逐字节不变）。
+    座位越界 / 未知 id / 重复 / 遗物授给非主角都在 ``PveConfig`` 构造期已拒（fail-closed），
+    故本函数只做写入。
+    """
+    pve = rule_config.pve
+    if pve is None:
+        return
+    for grant in pve.grants:
+        player = state.player(grant.seat)
+        if grant.kind == "skill":
+            player.granted_skills.append(grant.id)
+        else:
+            player.relics.append(grant.id)
+
+
 def build_initial(
     *,
     seed: int,
@@ -7938,6 +7966,10 @@ def build_initial(
     ``hero_config`` **不进记录流**（与 ``hero_assignments`` 同一条纪律）：禁将 / 手选是
     开局前做过的选择，不是局面事实；它由接入层冻结在会话配置里（票 13），这里只接受并
     遵守它。
+
+    **开局授予**（M7 票 09）走 :func:`_apply_opening_grants`：``rule_config.pve.grants``
+    的出战技能 / 遗物**直接写状态、不落 delta**（票 02 §10.4）。故标准局（``pve is
+    None``）与不带 grants 的 PvE 局在 header 之后的记录流逐字节不变。
     """
     dealt = deal_heroes(
         seat_count=rule_config.player_count,
@@ -7966,6 +7998,7 @@ def build_initial(
         players=players,
         deck=list(range(len(cards))),
     )
+    _apply_opening_grants(state, rule_config)
 
     rng = shuffle_source if shuffle_source is not None else RandomSource(seed).substream("shuffle")
     rng.shuffle(state.deck)
