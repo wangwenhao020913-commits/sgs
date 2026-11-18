@@ -74,6 +74,7 @@ from sgs.timing import Timing
 from .catalog import (
     MATCH_OWNER_KEY,
     SKILL_JUDGMENT_CARD_KEY,
+    BadgeKind,
     HeroSkillDecl,
     Hook,
     HookHandler,
@@ -708,6 +709,9 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=_REQUIREMENTS["tieqi"],
         ),
         # 界马超【铁骑】（M6 票 04）：非锁定、逐目标的多段手写钩子（判定 + 条件弃牌）。
+        # skill-display 票 09：座位常驻标签「铁骑」——生效期间画在**目标**身上（Q8″），
+        # 判据 = ``Player.suppressed_skills`` 含本技能的 id；只有界马超这一版声明它（Q11：
+        # 标准【铁骑】只写帧标签 ``UNRESPONSIVE``、不写座位级失效记录，故上面那条**不加**）。
         SkillDef(
             skill_id=JIE_TIEQI,
             locked=False,
@@ -716,6 +720,7 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             hooks=(Hook(Timing.USE_AFTER_DESIGNATE_TARGET, handler=_jie_tieqi),),
             requirement=_REQUIREMENTS["jie_tieqi"],
             step_requirements={"card": "弃置一张与判定结果花色相同的牌（由被指定者选择）"},
+            badge=BadgeKind.WINDOW,
         ),
         # 界吕布【无双】（M6 票 18）：与标准版逐字同义 ⇒ 同一个回调 / 同一条修饰器。
         SkillDef(

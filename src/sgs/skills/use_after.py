@@ -56,6 +56,7 @@ from .catalog import (
     MATCH_ACTOR_KEY,
     MATCH_OWNER_KEY,
     SKILL_JUDGMENT_CARD_KEY,
+    BadgeKind,
     Hook,
     SkillDef,
     mark_round_skill_used,
@@ -1187,6 +1188,9 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=(
                 "当你于你的出牌阶段内使用与上一张点数或花色相同的牌时，你可以摸一张牌"
             ),
+            # skill-display 票 04：座位常驻标签「渐营 + 本阶段上一张使用牌的点数 / 花色」。
+            # 界沮授移动版那一条（`_JIE_JIANYING`）挂**同一个**登记构造器 ⇒ 两条读法一份。
+            badge=BadgeKind.WINDOW,
         ),
         SkillDef(
             skill_id=JIE_JIZHI,
@@ -1261,5 +1265,8 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
                 "牌的张数），随机获得牌堆中一张对应的牌：3的倍数，【杀】或【闪】；"
                 "5的倍数，【桃】或【酒】；8的倍数，【无中生有】或【决斗】。"
             ),
+            # skill-display 票 03：座位卡上常驻「勤政 X」（X = 本局使用 / 打出张数）。
+            # 声明只带"哪一档组件"，数据由投影侧登记表直读 ``Player.used_or_played_ever``。
+            badge=BadgeKind.WINDOW,
         ),
     )

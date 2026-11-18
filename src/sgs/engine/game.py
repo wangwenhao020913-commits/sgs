@@ -5512,18 +5512,47 @@ class Engine:
         self._prune_card_tags()
         return True
 
-    def set_hand_card_prohibition(self, seat: int, prohibited: bool) -> bool:
-        """写一个座位的"**不能使用或打出手牌**"状态（M6 票 04 的【义绝】黑色分支）。
+    def add_hand_card_prohibition(self, seat: int, source: str) -> bool:
+        """给一个座位加一条"**不能使用或打出手牌**"的禁令，并记下**施加者**
+        （M6 票 04 的【义绝】黑色分支；来源由 skill-display 票 00 补）。
 
-        座位级、作用域 = 本回合（回合末清掉）；**不发 delta**（与 ``luoyi_active`` 同一
-        姿态：回放按同一条技能动作重跑即可重建，目前也没有 JSON 读者）。候选生成侧的唯一
-        读取方是 :func:`sgs.effects.legal_actions_for`，故"哪些动作算使用 / 打出手牌"
-        只有一处判据。返回值 = 状态真的变了吗。
+        ``source`` = 施加禁令的**技能 id**（【义绝】/【雄乱】），不是被禁的技能。
+        座位级、作用域 = 本回合（回合末清掉）；同一座位可同时被多条技能命中：
+        ``Player.hand_card_prohibition_sources`` 是**有序去重**（首次出现序）的元组，表现层
+        据此说出"是谁给的"。已经含该来源 ⇒ 幂等，返回 ``False``。候选生成侧的唯一读取方是
+        :func:`sgs.effects.legal_actions_for`（读派生属性 ``hand_card_prohibited``），故
+        "哪些动作算使用 / 打出手牌"只有一处判据。**不发 delta**（与 ``luoyi_active`` 同一
+        姿态：回放按同一条技能动作重跑即可重建，目前也没有 JSON 读者）。
         """
         player = self.state.player(seat)
-        if player.hand_card_prohibited == prohibited:
+        sources = player.hand_card_prohibition_sources
+        if source in sources:
             return False
-        player.hand_card_prohibited = prohibited
+        player.hand_card_prohibition_sources = (*sources, source)
+        return True
+
+    def clear_hand_card_prohibitions(
+        self, seat: int, source: str | None = None
+    ) -> bool:
+        """清掉一个座位的禁令**来源**；``source=None`` = 全清。
+
+        逐来源清（``source`` = 施加者的技能 id）只删那一条、保留其余来源，故两条技能同时
+        命中时"其中一条到期"不会顺手解掉另一条；``None`` 是"禁令整体到期"的口子（与
+        :meth:`_clear_turn_effects` 的回合末清理同一语义）。返回值 = 状态真的变了吗。
+        **不发 delta**（与 :meth:`add_hand_card_prohibition` 同一纪律）。
+        """
+        player = self.state.player(seat)
+        sources = player.hand_card_prohibition_sources
+        if not sources:
+            return False
+        if source is None:
+            player.hand_card_prohibition_sources = ()
+            return True
+        if source not in sources:
+            return False
+        player.hand_card_prohibition_sources = tuple(
+            kept for kept in sources if kept != source
+        )
         return True
 
     def add_heart_slash_bonus(self, seat: int, target: int) -> None:
@@ -5531,7 +5560,7 @@ class Engine:
 
         唯一写入方是【义绝】的效果；读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT``
         修饰器（查询期从**活着的实例**算，失去 / 失效即消失）。作用域 = 本回合，回合末
-        由 :meth:`_clear_turn_effects` 清空；**不发 delta**（同 ``set_hand_card_prohibition``）。
+        由 :meth:`_clear_turn_effects` 清空；**不发 delta**（同 ``add_hand_card_prohibition``）。
         """
         bonus = self.state.player(seat).heart_slash_bonus_against
         if target not in bonus:
@@ -5668,7 +5697,7 @@ class Engine:
         M6 只把 ``TURN_END`` 接到真实触发点（:meth:`_clear_turn_effects`）；``LEAVE_ZONE`` /
         ``USED_OR_PLAYED`` 这两类形状**无载体**，触发点随后续里程碑的载体一起接
         （形状由 ``tests/test_tags.py`` 的构造测试钉住）。**不发 delta**：与
-        ``set_hand_card_prohibition`` 同姿态——没有 JSON 读者，回放按同一条技能决策重建。
+        ``add_hand_card_prohibition`` 同姿态——没有 JSON 读者，回放按同一条技能决策重建。
 
         ``cards``（feng-yujin 票 03）：**只清这批牌**。``ENTER_DISCARD`` 走这一档——它逐张
         按"这张牌进入了弃牌堆"判，不能按 trigger 全局清（还有别的牌带着同类标签在手牌 /
@@ -5744,7 +5773,7 @@ class Engine:
                     frame_id=0,
                     depth=self.stack.depth,
                 )
-            player.hand_card_prohibited = False
+            self.clear_hand_card_prohibitions(player.seat)
             player.xiongluan_target = None
             player.heart_slash_bonus_against.clear()
             # 界【烈弓】② 的"本次使用"记账：正常由 RESOLVE_AFTER_END 清扫钩子清；这里兜底

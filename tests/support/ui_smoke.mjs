@@ -20087,6 +20087,512 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && foeHeroTagChips.map((node) => node.textContent).join(",") === "裸衣",
     `self=${selfHeroTagChips.map((n) => n.textContent).join(",")}`
       + ` foe=${foeHeroTagChips.map((n) => n.textContent).join(",")}`);
+
+  /* skill-display 票 02：`hero_tags` 的 `parts` 逐段上色（红 / 黑与卡面同一套 token），
+   * 没有 `parts` 的标签**显示一字不变**（裸衣仍然只有一个文本节点）。spec §4 的载荷例子：
+   * `{label: "渐营 ♥7", parts: [{text:"渐营 "}, {text:"♥", tone:"red"}, {text:"7"}]}`。
+   * 垫片没有真文本节点：元素的 `children` 只数**元素**子节点，`textContent` 是自身文本 +
+   * 子节点文本的拼接。故"只画一个文本节点" = 没有元素子节点且文本等于 label；
+   * "不重复画 label" = 子节点文本拼起来**等于** label（先写 label 再挂 parts 会翻倍）。 */
+  const badgeView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9410,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9410 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  badgeView.snapshot.players[0].hero_tags = [
+    { tag: "luoyi", label: "裸衣" },
+    { tag: "jianying", label: "渐营 ♥7", parts: [
+      { text: "渐营 " }, { text: "♥", tone: "red" }, { text: "7" },
+    ] },
+    { tag: "botu", label: "博图 ♠♥♣", parts: [
+      { text: "博图 " }, { text: "♠", tone: "black" },
+      { text: "♥", tone: "red" }, { text: "♣", tone: "black" },
+    ] },
+  ];
+  ui.state.view = badgeView;
+  ui.resetSelection();
+  ui.renderTable();
+  const badgeChip = (tag) => Array.from($("t-self-hero-tags").children).find(
+    (node) => hasClass(node, "hero-tag") && node.getAttribute("data-tag") === tag) || null;
+  // 只数带 `hero-tag-part` 的元素子节点：垫片的 children 里没有文本节点。
+  const tagParts = (chip) => Array.from((chip && chip.children) || []).filter(
+    (node) => hasClass(node, "hero-tag-part"));
+  const toneClassOf = (node) => (hasClass(node, "red") ? "red"
+    : hasClass(node, "black") ? "black" : "-");
+  const plainChip = badgeChip("luoyi");
+  const jianyingChip = badgeChip("jianying");
+  const botuChip = badgeChip("botu");
+  check("BADGE-01a 无 parts 的标签照旧只画一个文本节点（裸衣的显示一字不变）",
+    !!plainChip && plainChip.children.length === 0 && plainChip.textContent === "裸衣"
+      && plainChip.className === "hero-tag",
+    plainChip
+      ? `裸衣 chip 元素子节点=${plainChip.children.length}`
+        + ` 文本=${JSON.stringify(plainChip.textContent)} class=${JSON.stringify(plainChip.className)}`
+      : "没有 luoyi chip");
+  check("BADGE-01b 有 parts 的标签按段画 span、不重复画 label（渐营 ♥7）",
+    !!jianyingChip && jianyingChip.children.length === 3
+      && tagParts(jianyingChip).map((node) => node.textContent).join("") === "渐营 ♥7"
+      && jianyingChip.textContent === "渐营 ♥7",
+    jianyingChip
+      ? `渐营 chip 元素子节点=${jianyingChip.children.length}`
+        + ` 段=${JSON.stringify(tagParts(jianyingChip).map((n) => n.textContent))}`
+        + ` 文本=${JSON.stringify(jianyingChip.textContent)}`
+      : "没有 jianying chip");
+  check("BADGE-01c parts 的 red / black 各自带正确的上色类（♥ 红、♠♣ 黑）",
+    tagParts(jianyingChip).map(toneClassOf).join(",") === "-,red,-"
+      && tagParts(botuChip).map(toneClassOf).join(",") === "-,black,red,black",
+    `渐营=${tagParts(jianyingChip).map(toneClassOf).join(",")}`
+      + ` 博图=${tagParts(botuChip).map(toneClassOf).join(",")}`);
+
+  /* skill-display 票 03：【勤政】的 `勤政 X` 走**同一条** `hero_tags` 通道（本票零前端改动）。
+   * 服务端取值由 `tests/test_web.py::test_the_qinzheng_badge_shows_the_game_long_used_or_played_count`
+   * 从真投影钉住（X = 本局使用 / 打出张数、含 0、跨回合不复位）；这里只钉界面读法：
+   * 服务端把它放在**骆统自己的**座位 ⇒ 只有那块武将牌上有；`X = 0` 不是一个"空壳"，
+   * 它是玩家要看见的分母（spec §4 唯一的 fail-closed 例外），故照常画成一个 chip。 */
+  const qinzhengView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9412,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9412 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  qinzhengView.snapshot.players[0].hero_tags = [{ tag: "qinzheng", label: "勤政 0" }];
+  qinzhengView.snapshot.players[1].hero_tags = [{ tag: "luoyi", label: "裸衣" }];
+  qinzhengView.snapshot.players[2].hero_tags = [];
+  ui.state.view = qinzhengView;
+  ui.resetSelection();
+  ui.renderTable();
+  const heroTagChipsOf = (seat) => {
+    const box = Number(seat) === Number(qinzhengView.snapshot.seat)
+      ? $("t-self-hero-tags")
+      : (() => {
+        const seatNode = seatBox(seat);
+        return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+      })();
+    return box
+      ? Array.from(box.children).filter((node) => hasClass(node, "hero-tag"))
+      : [];
+  };
+  const qinzhengChipIn = (seat) => heroTagChipsOf(seat).find(
+    (node) => node.getAttribute("data-tag") === "qinzheng") || null;
+  const selfQinzhengChip = qinzhengChipIn(0);
+  check("QINZHENG-01a 「勤政 X」只画在骆统自己的武将块上（其它座位没有）",
+    !!selfQinzhengChip && selfQinzhengChip.textContent === "勤政 0"
+      && qinzhengChipIn(1) === null && qinzhengChipIn(2) === null,
+    `self=${selfQinzhengChip ? selfQinzhengChip.textContent : "none"}`
+      + ` seat1=${heroTagChipsOf(1).map((n) => n.textContent).join(",") || "（无）"}`
+      + ` seat2=${heroTagChipsOf(2).map((n) => n.textContent).join(",") || "（无）"}`);
+  check("QINZHENG-01b X = 0 时标签仍然在（勤政是 fail-closed 的唯一例外，照常一个纯文本 chip）",
+    !!selfQinzhengChip && selfQinzhengChip.textContent === "勤政 0"
+      && selfQinzhengChip.children.length === 0
+      && selfQinzhengChip.className === "hero-tag",
+    selfQinzhengChip
+      ? `文本=${JSON.stringify(selfQinzhengChip.textContent)}`
+        + ` 元素子节点=${selfQinzhengChip.children.length}`
+        + ` class=${JSON.stringify(selfQinzhengChip.className)}`
+      : "没有 qinzheng chip");
+
+  /* skill-display 票 04：沮授两版【渐营】的座位标签（服务端取值由
+   * `tests/test_web.py::test_the_jianying_badge_tracks_the_last_card_of_the_play_phase` /
+   * `::test_the_jianying_badge_omits_what_the_card_does_not_have` 从真投影钉住：读
+   * `play_phase_last_card`、只在**自己的**出牌阶段里画、缺哪项不写哪项）。这里只钉界面读法：
+   *
+   * - 有 `parts` ⇒ 按段画、花色段带上色类、**不重复**画 `label`（子节点文本拼起来 == label）；
+   * - 没有 `parts` ⇒ 照旧**只画一个文本节点**（`parts` 只在需要上色时出现，Q14″A）。
+   *
+   * 垫片没有真文本节点（元素的 `children` 只数元素子节点）⇒ "只画一个文本节点" =
+   * `children.length === 0` 且 `textContent === label`。 */
+  const jianyingView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9414,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9414 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  jianyingView.snapshot.players[0].hero_tags = [
+    { tag: "jianying", label: "渐营 ♥7", parts: [
+      { text: "渐营 " }, { text: "♥", tone: "red" }, { text: "7" },
+    ] },
+  ];
+  ui.state.view = jianyingView;
+  ui.resetSelection();
+  ui.renderTable();
+  const jianyingChipsIn = (seat) => {
+    const box = Number(seat) === Number(jianyingView.snapshot.seat)
+      ? $("t-self-hero-tags")
+      : (() => {
+        const seatNode = seatBox(seat);
+        return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+      })();
+    return box
+      ? Array.from(box.children).filter((node) => hasClass(node, "hero-tag"))
+      : [];
+  };
+  const numberedJianyingChip = jianyingChipsIn(0).find(
+    (node) => node.getAttribute("data-tag") === "jianying") || null;
+  check("JIANYING-01a 有 parts 的「渐营 ♥7」按段画、花色段带上色类、不重复画 label",
+    !!numberedJianyingChip && numberedJianyingChip.children.length === 3
+      && tagParts(numberedJianyingChip).map((node) => node.textContent).join("") === "渐营 ♥7"
+      && tagParts(numberedJianyingChip).map(toneClassOf).join(",") === "-,red,-"
+      && numberedJianyingChip.textContent === "渐营 ♥7",
+    numberedJianyingChip
+      ? `渐营 chip 元素子节点=${numberedJianyingChip.children.length}`
+        + ` 段=${JSON.stringify(tagParts(numberedJianyingChip).map((n) => n.textContent))}`
+        + ` 色=${tagParts(numberedJianyingChip).map(toneClassOf).join(",")}`
+        + ` 文本=${JSON.stringify(numberedJianyingChip.textContent)}`
+      : "没有 jianying chip");
+  // 两样都缺的牌（多源转化）⇒ 服务端只下发 `{"tag","label"}`，没有 `parts` 可画。
+  jianyingView.snapshot.players[0].hero_tags = [{ tag: "jianying", label: "渐营" }];
+  ui.state.view = jianyingView;
+  ui.resetSelection();
+  ui.renderTable();
+  const bareJianyingChip = jianyingChipsIn(0).find(
+    (node) => node.getAttribute("data-tag") === "jianying") || null;
+  check("JIANYING-01b 无 parts 的「渐营」照旧只画一个文本节点",
+    !!bareJianyingChip && bareJianyingChip.children.length === 0
+      && bareJianyingChip.textContent === "渐营"
+      && bareJianyingChip.className === "hero-tag",
+    bareJianyingChip
+      ? `文本=${JSON.stringify(bareJianyingChip.textContent)}`
+        + ` 元素子节点=${bareJianyingChip.children.length}`
+        + ` class=${JSON.stringify(bareJianyingChip.className)}`
+      : "没有 jianying chip");
+
+  /* skill-display 票 05：界吕蒙【博图】的座位标签（服务端取值由
+   * `tests/test_web.py::test_the_botu_badge_lists_the_discard_suits_of_this_turn` /
+   * `::test_the_botu_badge_paints_each_suit_by_the_shared_suit_table` 从真投影钉住：
+   * 读 `GameState.discard_suits_this_turn`、空集不画、顺序 = 引擎存储序）。这里只钉界面读法：
+   *
+   * - 有 `parts` ⇒ 每个花色段各自带上色类（♠ ♣ 黑、♥ 红），拼接 == `label`、不重复画；
+   * - 集合空 ⇒ 服务端**整条不下发** ⇒ 武将块上的 `hero-tags` 整块 `hidden`、一个
+   *   `hero-tag` 节点都没有（fail-closed：不画「博图」空壳）。 */
+  const botuView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9416,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9416 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  botuView.snapshot.players[0].hero_tags = [
+    { tag: "botu", label: "博图 ♠♥♣", parts: [
+      { text: "博图 " }, { text: "♠", tone: "black" },
+      { text: "♥", tone: "red" }, { text: "♣", tone: "black" },
+    ] },
+  ];
+  ui.state.view = botuView;
+  ui.resetSelection();
+  ui.renderTable();
+  const botuTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(botuView.snapshot.seat)) return $("t-self-hero-tags") || null;
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const botuChipIn = (seat) => {
+    const box = botuTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag") && node.getAttribute("data-tag") === "botu",
+      ) || null
+      : null;
+  };
+  const smokeBotuChip = botuChipIn(0);
+  check("BOTU-01a 「博图 ♠♥♣」的三个花色段各自带上色类（♠♣ 黑、♥ 红），按段画、不重复画 label",
+    !!smokeBotuChip && smokeBotuChip.children.length === 4
+      && tagParts(smokeBotuChip).map((node) => node.textContent).join("") === "博图 ♠♥♣"
+      && tagParts(smokeBotuChip).map(toneClassOf).join(",") === "-,black,red,black"
+      && smokeBotuChip.textContent === "博图 ♠♥♣",
+    smokeBotuChip
+      ? `博图 chip 元素子节点=${smokeBotuChip.children.length}`
+        + ` 段=${JSON.stringify(tagParts(smokeBotuChip).map((n) => n.textContent))}`
+        + ` 色=${tagParts(smokeBotuChip).map(toneClassOf).join(",")}`
+        + ` 文本=${JSON.stringify(smokeBotuChip.textContent)}`
+      : "没有 botu chip");
+  // 空集 ⇒ 服务端不画（fail-closed）：本人与对手的武将块都整块 hidden、没有节点。
+  botuView.snapshot.players[0].hero_tags = [];
+  botuView.snapshot.players[1].hero_tags = [];
+  ui.state.view = botuView;
+  ui.resetSelection();
+  ui.renderTable();
+  const emptySelfTagsBox = botuTagsBoxIn(0);
+  const emptyFoeTagsBox = botuTagsBoxIn(1);
+  check("BOTU-01b 本回合没有牌进过弃牌堆 ⇒ 没有 hero-tags 节点（整块 hidden，不画空壳）",
+    !!emptySelfTagsBox && emptySelfTagsBox.hidden === true
+      && emptySelfTagsBox.children.length === 0
+      && !!emptyFoeTagsBox && emptyFoeTagsBox.hidden === true
+      && emptyFoeTagsBox.children.length === 0,
+    `本人 hidden=${emptySelfTagsBox ? emptySelfTagsBox.hidden : "无节点"}`
+      + ` 子节点=${emptySelfTagsBox ? emptySelfTagsBox.children.length : "-"}`
+      + ` 对手 hidden=${emptyFoeTagsBox ? emptyFoeTagsBox.hidden : "无节点"}`
+      + ` 子节点=${emptyFoeTagsBox ? emptyFoeTagsBox.children.length : "-"}`);
+
+  /* skill-display 票 06：诸葛瞻【父荫】的座位标签（服务端取值由
+   * `tests/test_web.py::test_the_fuyin_badge_disappears_once_the_skill_fires_this_turn` /
+   * `::test_the_fuyin_badge_needs_a_live_skill_instance` 从真投影钉住：本回合没发动过、
+   * 且实例真在解析中才下发；发动 / 失效 / 失去 ⇒ 整条不下发）。这里只钉界面读法：
+   * 布尔类标签**只写技能名**（Q7⑥）、不带 `parts`（Q14″A）⇒ 照旧一个纯文本 chip，
+   * 没有元素子节点、也不重复画 label。 */
+  const fuyinView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9417,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9417 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  fuyinView.snapshot.players[0].hero_tags = [{ tag: "fuyin", label: "父荫" }];
+  fuyinView.snapshot.players[1].hero_tags = [];
+  ui.state.view = fuyinView;
+  ui.resetSelection();
+  ui.renderTable();
+  const fuyinTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(fuyinView.snapshot.seat)) return $("t-self-hero-tags") || null;
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const fuyinChipIn = (seat) => {
+    const box = fuyinTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag") && node.getAttribute("data-tag") === "fuyin",
+      ) || null
+      : null;
+  };
+  const smokeFuyinChip = fuyinChipIn(0);
+  check("FUYIN-01a 「父荫」是纯文本节点（没有 parts / 没有元素子节点），只画在诸葛瞻自己的武将块上",
+    !!smokeFuyinChip && smokeFuyinChip.children.length === 0
+      && smokeFuyinChip.textContent === "父荫"
+      && smokeFuyinChip.className === "hero-tag"
+      && fuyinChipIn(1) === null,
+    smokeFuyinChip
+      ? `父荫 chip 元素子节点=${smokeFuyinChip.children.length}`
+        + ` 文本=${JSON.stringify(smokeFuyinChip.textContent)}`
+        + ` class=${JSON.stringify(smokeFuyinChip.className)}`
+        + ` seat1=${fuyinChipIn(1) ? "有" : "（无）"}`
+      : "没有 fuyin chip");
+
+  /* skill-display 票 07：张绣【雄乱】的座位标签——**生效期间画在被指定的那名角色身上**，
+   * 张绣自己的那块没有它（服务端取值由
+   * `tests/test_hero_lei.py::test_xiongluan_marks_its_target_until_the_turn_ends` 从真投影
+   * 钉住：判据 = 禁令来源里有雄乱的 id、回合末派生消失；两条禁令并存那条由
+   * `tests/test_hero_jie.py::test_two_hand_card_prohibitions_coexist` 钉）。这里只钉界面读法：
+   * 标签跟着 `hero_tags` 的**座位**走（谁的数据落在哪块武将牌上就画在哪块），布尔类标签
+   * 照旧一个**纯文本** chip（只写技能名，没有 `parts` / 没有元素子节点；Q7⑥ / Q14″A）。 */
+  const xiongluanView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9418,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9418 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 座位 0 = 张绣（发动者）、座位 1 = 被指定的目标（雄乱画在他身上）。
+  xiongluanView.heroes = { 0: "zhangxiu", 1: "jie_guanyu", 2: "diaochan" };
+  xiongluanView.snapshot.players[0].hero_name = "张绣";
+  xiongluanView.snapshot.players[1].hero_name = "界关羽";
+  xiongluanView.snapshot.players[0].hero_tags = [];
+  xiongluanView.snapshot.players[1].hero_tags = [{ tag: "xiongluan", label: "雄乱" }];
+  xiongluanView.snapshot.players[2].hero_tags = [];
+  ui.state.view = xiongluanView;
+  ui.resetSelection();
+  ui.renderTable();
+  const xiongluanTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(xiongluanView.snapshot.seat)) {
+      return $("t-self-hero-tags") || null;
+    }
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const xiongluanChipIn = (seat) => {
+    const box = xiongluanTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag")
+          && node.getAttribute("data-tag") === "xiongluan",
+      ) || null
+      : null;
+  };
+  const targetXiongluanBox = xiongluanTagsBoxIn(1);
+  const targetXiongluanChip = xiongluanChipIn(1);
+  check("XIONGLUAN-01a 「雄乱」画在**别人**（目标座位 1）的武将块上：纯文本 chip、不带 parts",
+    !!targetXiongluanBox && targetXiongluanBox.hidden === false
+      && !!targetXiongluanChip && targetXiongluanChip.children.length === 0
+      && targetXiongluanChip.textContent === "雄乱"
+      && targetXiongluanChip.className === "hero-tag",
+    targetXiongluanChip
+      ? `雄乱 chip 元素子节点=${targetXiongluanChip.children.length}`
+        + ` 文本=${JSON.stringify(targetXiongluanChip.textContent)}`
+        + ` class=${JSON.stringify(targetXiongluanChip.className)}`
+      : "座位 1 没有 xiongluan chip");
+  const selfXiongluanBox = xiongluanTagsBoxIn(0);
+  check("XIONGLUAN-01b 张绣自己的武将块（座位 0）上没有「雄乱」（标签画在目标身上，不在发动者身上）",
+    !!selfXiongluanBox && selfXiongluanBox.hidden === true
+      && selfXiongluanBox.children.length === 0
+      && xiongluanChipIn(0) === null
+      && xiongluanChipIn(2) === null,
+    `本人 hidden=${selfXiongluanBox ? selfXiongluanBox.hidden : "无节点"}`
+      + ` 子节点=${selfXiongluanBox ? selfXiongluanBox.children.length : "-"}`
+      + ` 本人 chip=${xiongluanChipIn(0) ? "有" : "（无）"}`
+      + ` 座位 2 chip=${xiongluanChipIn(2) ? "有" : "（无）"}`);
+
+  /* skill-display 票 08：界关羽【义绝】的座位标签——**黑色分支生效期间画在目标身上**，
+   * 界关羽自己的那块没有它（服务端取值由
+   * `tests/test_hero_jie.py::test_yijue_marks_its_black_branch_target_until_turn_end` 从真投影
+   * 钉住：判据 = 禁令来源里有义绝的 id、回合末派生消失；红色分支不画那条由
+   * `test_yijue_red_branch_leaves_no_badge` 钉）。这里只钉界面读法：标签跟着 `hero_tags`
+   * 的**座位**走，布尔类标签照旧一个**纯文本** chip（只写技能名，没有 `parts` / 没有元素
+   * 子节点；Q7⑥ / Q14″A）。 */
+  const yijueView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9419,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9419 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 座位 0 = 界关羽（发动者）、座位 1 = 被指定的目标（义绝画在他身上）。
+  yijueView.heroes = { 0: "jie_guanyu", 1: "guanyu", 2: "diaochan" };
+  yijueView.snapshot.players[0].hero_name = "界关羽";
+  yijueView.snapshot.players[1].hero_name = "关羽";
+  yijueView.snapshot.players[0].hero_tags = [];
+  yijueView.snapshot.players[1].hero_tags = [{ tag: "yijue", label: "义绝" }];
+  yijueView.snapshot.players[2].hero_tags = [];
+  ui.state.view = yijueView;
+  ui.resetSelection();
+  ui.renderTable();
+  const yijueTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(yijueView.snapshot.seat)) {
+      return $("t-self-hero-tags") || null;
+    }
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const yijueChipIn = (seat) => {
+    const box = yijueTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag")
+          && node.getAttribute("data-tag") === "yijue",
+      ) || null
+      : null;
+  };
+  const targetYijueBox = yijueTagsBoxIn(1);
+  const targetYijueChip = yijueChipIn(1);
+  check("YIJUE-01a 「义绝」画在**目标**（座位 1）的武将块上：纯文本 chip、不带 parts",
+    !!targetYijueBox && targetYijueBox.hidden === false
+      && !!targetYijueChip && targetYijueChip.children.length === 0
+      && targetYijueChip.textContent === "义绝"
+      && targetYijueChip.className === "hero-tag"
+      && yijueChipIn(0) === null,
+    targetYijueChip
+      ? `义绝 chip 元素子节点=${targetYijueChip.children.length}`
+        + ` 文本=${JSON.stringify(targetYijueChip.textContent)}`
+        + ` class=${JSON.stringify(targetYijueChip.className)}`
+        + ` 座位 0=${yijueChipIn(0) ? "有" : "（无）"}`
+      : "座位 1 没有 yijue chip");
+
+  /* skill-display 票 09：界马超【铁骑】的座位标签——**生效期间画在目标身上**，界马超自己
+   * 那块没有它（服务端取值由
+   * `tests/test_web.py::test_the_jie_tieqi_badge_shows_while_the_target_is_suppressed`
+   * 从真投影钉住：判据 = 失效记录里**精确匹配铁骑的 id**、回合末派生消失；标准马超的
+   * 【铁骑】不画那条由 `test_the_standard_tieqi_leaves_no_badge` 钉）。这里只钉界面读法：
+   * 标签跟着 `hero_tags` 的**座位**走，布尔类标签照旧一个**纯文本** chip（只写技能名，
+   * 没有 `parts` / 没有元素子节点；Q7⑥ / Q14″A）。 */
+  const tieqiView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9420,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9420 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 座位 0 = 界马超（发动者）、座位 1 = 被指定的目标（铁骑画在他身上）。
+  tieqiView.heroes = { 0: "jie_machao", 1: "guanyu", 2: "diaochan" };
+  tieqiView.snapshot.players[0].hero_name = "界马超";
+  tieqiView.snapshot.players[1].hero_name = "关羽";
+  tieqiView.snapshot.players[0].hero_tags = [];
+  tieqiView.snapshot.players[1].hero_tags = [{ tag: "tieqi", label: "铁骑" }];
+  tieqiView.snapshot.players[2].hero_tags = [];
+  ui.state.view = tieqiView;
+  ui.resetSelection();
+  ui.renderTable();
+  const tieqiTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(tieqiView.snapshot.seat)) {
+      return $("t-self-hero-tags") || null;
+    }
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const tieqiChipIn = (seat) => {
+    const box = tieqiTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag")
+          && node.getAttribute("data-tag") === "tieqi",
+      ) || null
+      : null;
+  };
+  const targetTieqiBox = tieqiTagsBoxIn(1);
+  const targetTieqiChip = tieqiChipIn(1);
+  check("TIEQI-01a 「铁骑」画在**目标**（座位 1）的武将块上：纯文本 chip、不带 parts",
+    !!targetTieqiBox && targetTieqiBox.hidden === false
+      && !!targetTieqiChip && targetTieqiChip.children.length === 0
+      && targetTieqiChip.textContent === "铁骑"
+      && targetTieqiChip.className === "hero-tag"
+      && tieqiChipIn(0) === null,
+    targetTieqiChip
+      ? `铁骑 chip 元素子节点=${targetTieqiChip.children.length}`
+        + ` 文本=${JSON.stringify(targetTieqiChip.textContent)}`
+        + ` class=${JSON.stringify(targetTieqiChip.className)}`
+        + ` 座位 0=${tieqiChipIn(0) ? "有" : "（无）"}`
+      : "座位 1 没有 tieqi chip");
+
+  /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
+   * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
+   * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。
+   * 多源转化牌（`virtual_sources` 且无花色）没有 `slot-suit`——槽里本就不画花色点数。 */
+  badgeView.snapshot.players[0].equip = [
+    { ...synthCard(41, "八卦阵"), slot: "armor", suit: "heart", color: "red" },
+  ];
+  badgeView.snapshot.players[0].judge = [
+    { ...synthCard(42, "闪电"), suit: "spade", color: "black" },
+  ];
+  badgeView.snapshot.players[1].equip = [
+    { ...synthCard(43, "仁王盾"), slot: "armor", suit: "club", color: "black" },
+  ];
+  badgeView.snapshot.players[2].judge = [
+    { ...synthCard(44, "兵粮寸断"), kind: "transformed", suit: null, rank: null,
+      color: null, virtual_sources: [5, 6] },
+  ];
+  ui.state.view = badgeView;
+  ui.resetSelection();
+  ui.renderTable();
+  const zoneRowOf = (seat, zone) => {
+    const box = Number(seat) === Number(badgeView.snapshot.seat)
+      ? $("t-self-zones") : seatBox(seat);
+    return box ? rowOf(box, "data-zone", zone) : null;
+  };
+  const slotSuits = (row) => boxSkills(row).filter((node) => hasClass(node, "slot-suit"));
+  const suitTone = (row) => slotSuits(row).map(toneClassOf).join(",");
+  const selfEquipRow = zoneRowOf(0, "equip");
+  const selfJudgeRow = zoneRowOf(0, "judge");
+  const foeEquipRow = zoneRowOf(1, "equip");
+  const foeJudgeRow = zoneRowOf(2, "judge");
+  check("BADGE-02a 装备槽的花色带 card.color 的红 / 黑类（本人 ♥ 红、对手 ♣ 黑）",
+    suitTone(selfEquipRow) === "red" && suitTone(foeEquipRow) === "black",
+    `本人装备=${suitTone(selfEquipRow)} 对手装备=${suitTone(foeEquipRow)}`);
+  check("BADGE-02b 判定槽同理（闪电是黑桃 ⇒ black）",
+    suitTone(selfJudgeRow) === "black",
+    `本人判定=${suitTone(selfJudgeRow)}`);
+  check("BADGE-02c 多源转化牌（无花色）的槽里没有 slot-suit",
+    !!foeJudgeRow && slotSuits(foeJudgeRow).length === 0
+      && boxSkills(foeJudgeRow).some((node) => hasClass(node, "slot-trans")),
+    `对手判定 slot-suit=${slotSuits(foeJudgeRow).length}`);
   const noZoneView = synthView({
     kind: "PLAY_PHASE", actor: 0, seq: 9403,
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",

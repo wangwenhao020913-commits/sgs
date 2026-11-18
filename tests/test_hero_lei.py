@@ -20,7 +20,14 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
+
+_TOOLS = Path(__file__).resolve().parent.parent / "tools"
+if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同一条引导）
+    sys.path.insert(0, str(_TOOLS))
 
 from sgs.data import Suit, load_content_pack
 from sgs.effects import (
@@ -552,6 +559,120 @@ def test_xiongluan_seals_the_seven_slots_and_applies_its_two_effects():
         if engine.state.card(card_id).slot is SlotKind.ARMOR
     )
     assert check_targets(engine.state, 0, engine.state.card(spare)) == ()
+
+
+def test_xiongluan_marks_its_target_until_the_turn_ends():
+    """【雄乱】生效期间在**目标**座位画「雄乱」，张绣自己没有；回合末消失（skill-display 票 07）。
+
+    四条口径各一条断言（spec §5 第 07 行 / Q7⑥ / Q12a / A5 / A12）：
+
+    - **落座位 = 目标**：发动后座位 1（被指定的那名角色）的武将块上有
+      ``{"tag": "xiongluan", "label": "雄乱"}``，**发动者张绣自己（座位 0）没有**，旁观的
+      第三名角色也没有——它是**画在别人身上**的标签（``BadgeScope.ANY_SEAT``）。
+    - **只写技能名**：载荷恰好 ``tag`` / ``label`` 两键，**没有** ``parts``（Q7⑥：布尔类
+      标签不写效果；Q14″A：``parts`` 只在需要上色时出现）。
+    - **绑禁令、不绑 ``xiongluan_target``**（Q8/Q12a 的裁定）：标签的判据是
+      ``Player.hand_card_prohibition_sources`` 里有没有雄乱的 id。两条判据在回合末**一起**
+      被清（``_clear_turn_effects`` 清禁令、也把 ``xiongluan_target`` 置回 ``None``）⇒ 仅凭
+      "回合末消失"分不开它们，故本条另把 ``xiongluan_target`` **单独写回去**、禁令留空：
+      标签必须**不**回来（判据里不许出现 ``xiongluan_target``）。``test_hero_jie.py`` 的
+      ``test_two_hand_card_prohibitions_coexist`` 钉另一侧：两条来源并存时雄乱照画。
+    - **生命周期是派生式**（A12）：``_clear_turn_effects`` 清掉禁令来源 ⇒ **下一次投影**
+      里标签就没了；全程没有"清除事件"、没有新 delta。
+
+    驱动走**真引擎路径**（预发动提交 → 选人应答），读口走**真产出路径**
+    （``visible_snapshot`` → ``players[].hero_tags``）。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+
+    engine = Engine.from_state(_zhangxiu_state(), seed=7)
+    players = [Scripted(activate=False) for _ in range(3)]
+    query = _play_phase(engine, players)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=PACK)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert hero_tags(0) == [] and hero_tags(1) == [] and hero_tags(2) == [], (
+        "前置：还没发动 ⇒ 任何座位上都没有「雄乱」"
+    )
+
+    engine.submit(
+        ActivateSkill(
+            skill_id="hero.zhangxiu.xiongluan",
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    run_queries(engine, players, lambda e: bool(e.state.player(0).sealed_zones))
+    assert engine.state.player(1).hand_card_prohibition_sources == (
+        "hero.zhangxiu.xiongluan",
+    ), "前置：雄乱把自己的技能 id 记成禁令来源（票 00 的读口）"
+
+    assert hero_tags(1) == [{"tag": "xiongluan", "label": "雄乱"}], (
+        "雄乱生效期间，**目标座位**的武将块上常驻「雄乱」"
+    )
+    assert "parts" not in hero_tags(1)[0], (
+        "布尔类标签只写技能名（Q7⑥），不需要上色 ⇒ 不带 parts（Q14″A）"
+    )
+    assert hero_tags(0) == [], "发动者（张绣，座位 0）自己没有这条标签"
+    assert hero_tags(2) == [], "与这次发动无关的第三名角色也没有"
+
+    engine._clear_turn_effects()
+
+    assert engine.state.player(1).hand_card_prohibition_sources == (), (
+        "前置：回合末把禁令来源一起清掉"
+    )
+    assert engine.state.player(0).xiongluan_target is None, (
+        "前置：回合末也把 ``xiongluan_target`` 置回 None ⇒ 光看「回合末消失」分不开两条判据"
+    )
+    assert hero_tags(1) == [], (
+        "回合结束 ⇒ 目标座位上的「雄乱」消失（派生式：禁令一清，下一次投影就不画）"
+    )
+
+    # Q8/Q12a：判据是**禁令**，不是 ``xiongluan_target``。把目标字段单独写回去、禁令留空
+    # ⇒ 标签**不许**回来（若实现里读了 ``xiongluan_target``，这一条就红）。
+    engine.state.player(0).xiongluan_target = 1
+    assert hero_tags(1) == [], (
+        "只有 ``xiongluan_target``、没有禁令来源 ⇒ 不画（雄乱与义绝同判据，Q12a）"
+    )
+    assert engine.add_hand_card_prohibition(1, "hero.zhangxiu.xiongluan") is True
+    assert hero_tags(1) == [{"tag": "xiongluan", "label": "雄乱"}], (
+        "禁令来源回来 ⇒ 标签在**下一次投影**里自动回来（派生式，没有清除 / 恢复事件）"
+    )
+
+
+def test_turn_end_clears_every_prohibition_source():
+    """回合末清理口把禁令的**全部来源**一起清掉（不是只清最后一次写入的那一条）。"""
+    engine = Engine.from_state(_zhangxiu_state(), seed=7)
+    players = [Scripted(activate=False) for _ in range(3)]
+    query = _play_phase(engine, players)
+    engine.submit(
+        ActivateSkill(
+            skill_id="hero.zhangxiu.xiongluan",
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    run_queries(engine, players, lambda e: bool(e.state.player(0).sealed_zones))
+    target = engine.state.player(1)
+    assert target.hand_card_prohibition_sources == ("hero.zhangxiu.xiongluan",), (
+        "雄乱把自己的技能 id 记成来源"
+    )
+
+    # 同回合再来一条来源（义绝打同一座位）：两条并存，回合末**一起**清掉。
+    engine.add_hand_card_prohibition(1, "hero.jie_guanyu.yijue")
+    assert target.hand_card_prohibition_sources == (
+        "hero.zhangxiu.xiongluan",
+        "hero.jie_guanyu.yijue",
+    )
+
+    engine._clear_turn_effects()
+
+    assert target.hand_card_prohibition_sources == (), "一条来源都不留"
+    assert target.hand_card_prohibited is False
 
 
 def test_xiongluan_is_no_longer_offered_once_all_seven_slots_are_sealed():

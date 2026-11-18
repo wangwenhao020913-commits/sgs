@@ -107,6 +107,7 @@ from sgs.timing import Timing
 from .catalog import (
     SKILL_JUDGMENT_CARD_KEY,
     awakening_skill_awakened,
+    BadgeKind,
     HeroSkillDecl,
     Hook,
     ProviderWindows,
@@ -3041,7 +3042,8 @@ QIANGXI_FLOW = SkillFlow(
 # 二次决定在 ``effect`` 里（帧内游标续跑）。黑色分支的三条效果各有落点：
 #
 # - "所有非锁定技失效" ⇒ :meth:`Engine.suppress_skills`（票 04 的座位级失效记录）；
-# - "不能使用或打出手牌" ⇒ :meth:`Engine.set_hand_card_prohibition`，唯一读取方是
+# - "不能使用或打出手牌" ⇒ :meth:`Engine.add_hand_card_prohibition`（来源 = 义绝；skill-display
+#   票 00 起禁令记施加者），唯一读取方是
 #   :func:`sgs.effects.legal_actions_for`（被禁者**所有**使用 / 打出手牌的候选消失）；
 # - "红桃【杀】伤害 +1" ⇒ ``DAMAGE_DEAL_AMOUNT`` 修饰器 + 座位级目标记录。
 # ---------------------------------------------------------------------------
@@ -3186,7 +3188,7 @@ def _yijue_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     if "yijue_black" not in frame.data:
         frame.data["yijue_black"] = True
         host.suppress_skills(target, YIJUE, frame=frame)
-        host.set_hand_card_prohibition(target, True)
+        host.add_hand_card_prohibition(target, YIJUE)
         host.add_heart_slash_bonus(owner, target)
     return None
 
@@ -3574,6 +3576,18 @@ class ActiveSkill(HeroSkillDecl):
     而 Q16 / Q17 裁定"转化牌与真牌同为第 2 档" ⇒ 今天的两个消费者（【蛊惑】与界【渐营】②）
     在各自声明上写 ``2``。原样透传给 ``SkillDef.need_card_tier``，判据只在
     :func:`~sgs.effects.need_card_tier` 读它——派发逻辑里没有技能 id 名单。
+    """
+
+    badge: BadgeKind | None = None
+    """这条主动技有没有**座位常驻状态标签**（skill-display 票 04 的加法；缺省 ``None``）。
+
+    与 :attr:`~sgs.skills.phase_body.PhaseBodySkill.badge` **同形状**：A 族今天唯一的消费者
+    是界【渐营】——它的 ① 钩子与 ② 提供者住在**同一条**声明里，故标签位只能挂在这里。
+    原样透传给 ``SkillDef.badge``（声明面只有这一条真源），数据由投影侧登记表
+    :data:`sgs_web.projection.BADGE_PROVIDERS` 按 skill id 取——本字段不带数据、只带档位。
+
+    同一条声明同时是钩子的载体时，这个位也必须写在**这一条**上：同 id 的两条 ``SkillDef``
+    在 ``CATALOG`` 里后者静默覆盖前者，分家写等于丢一半。
     """
 
     def __post_init__(self) -> None:
@@ -5211,7 +5225,7 @@ def _xiongluan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     control = host.abolish_slots(frame, owner, _XIONGLUAN_SLOTS)
     if control == "stay":
         return "stay"
-    host.set_hand_card_prohibition(seat, True)
+    host.add_hand_card_prohibition(seat, XIONGLUAN)
     state.player(owner).xiongluan_target = seat
     return None
 
@@ -5291,6 +5305,11 @@ _XIONGLUAN = ActiveSkill(
         "然后本回合：你对其使用牌无距离与次数限制、其不能使用或打出手牌"
     ),
     step_requirements={"seat": "选择一名其他角色"},
+    # skill-display 票 07：座位常驻标签「雄乱」——**生效期间画在目标身上**
+    # （`BadgeScope.ANY_SEAT`；构造器是 `sgs_web.projection._xiongluan_badge`）。判据 = 票 00
+    # 的禁令来源里有这条 id（Q8/Q12a：与【义绝】同姿态绑**禁令**，不绑 `xiongluan_target`）；
+    # 结算三样（封印区域 / 目标 / 禁令）与两个修饰器一字不动。
+    badge=BadgeKind.WINDOW,
 )
 
 
@@ -7371,6 +7390,9 @@ _JIE_JIANYING = ActiveSkill(
     # 产物 = 转化牌）⇒ 与真牌同档。不写覆盖位时它按载体算成武将档 0，会在需要牌窗口里
     # 抢在装备档 / 真牌之前单独上脸。
     need_card_tier=2,
+    # skill-display 票 04：座位常驻标签「渐营 + 本阶段上一张使用牌的点数 / 花色」。与 OL
+    # 沮授那一条**同一个登记构造器**（读法逐字相同），声明面各自挂一次。
+    badge=BadgeKind.WINDOW,
 )
 """界沮授移动版【渐营】的完整声明（① 的钩子 + ② 的预发动清单，同一个技能 id）。"""
 
@@ -8883,6 +8905,11 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         extra_modifiers=(
             Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _yijue_heart_slash_bonus),
         ),
+        # skill-display 票 08：座位常驻标签「义绝」——**黑色分支生效期间画在目标身上**
+        # （`BadgeScope.ANY_SEAT`；构造器是 `sgs_web.projection._yijue_badge`）。判据 = 票 00
+        # 的禁令来源里有这条 id（Q8/Q12a：与【雄乱】同姿态只绑**禁令**，不绑失效 / 加伤两条
+        # 记录；红色分支没有本回合持续状态 ⇒ 不画）。结算三样与修饰器一字不动。
+        badge=BadgeKind.WINDOW,
     ),
     # 界徐庶 ☆【荐言】（M6 票 06）：觉醒后才有实例，故候选只在觉醒后的出牌阶段出现。
     ActiveSkill("jie_xushu", "jianyan", _jianyan_offers, flow=JIANYAN_FLOW),
@@ -9193,6 +9220,8 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
                 skill.step_requirements or _STEP_REQUIREMENTS.get(skill.short_id)
             ),
             preactivated=skill.preactivated,
+            # skill-display 票 04 的加法：座位常驻状态标签（缺省 None ⇒ 既有声明零改动）。
+            badge=skill.badge,
         )
         for skill in ACTIVE_SKILLS
     )

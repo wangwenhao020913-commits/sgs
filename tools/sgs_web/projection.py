@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import MappingProxyType
 from typing import Any
 
@@ -39,6 +39,7 @@ from sgs.effects import (
     behavior_for,
     distance_bonus,
     hand_limit,
+    is_own_play_phase,
     responder_role,
     response_count,
 )
@@ -48,11 +49,14 @@ from sgs.skills import (
     FREE_SPLIT,
     AppearanceKind,
     JIE_LUOSHEN,
+    JIE_TIEQI,
     LORD_SKILL_IDS,
     LUOSHEN,
     SEAT_PREFIX,
+    YIJUE,
     ModifierPoint,
     SkillSourceKind,
+    BadgeScope,
     avatar_skill_rows,
     conversion_offers_by_source,
     current_avatar_skill,
@@ -60,6 +64,7 @@ from sgs.skills import (
     is_forced_conversion,
     lord_skill_allowed,
     resolve_instances,
+    skill_used_this_turn,
 )
 from sgs.state import (
     CardRef,
@@ -77,6 +82,7 @@ from sgs.timing import Timing
 
 from .descriptions import skill_description
 from .display import (
+    SUIT_LABELS,
     card_lookup_from_query,
     card_payload,
     decorate_pending,
@@ -617,6 +623,9 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
     # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
     # 顶层带 `available` / `ui.convert_sources`，读的是**查看者当前询问与手牌**。
+    # skill-display 票 01：登记表标签**每帧算一次**（`resolve_instances` 只解析一次），
+    # 再逐座位下发——不在座位环里重复解析，也不让每条标签各读一遍存活实例。
+    badge_tags = _badge_tags(state)
     for player_payload, player in zip(payload["players"], view.players, strict=True):
         player_payload["skills"] = seat_skill_display(session, player.seat)
         # M6 票 19 / 用户口径：武将牌上的牌区——**标签全体可见、牌只给宿主**；
@@ -624,8 +633,10 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         player_payload["hero_zones"] = seat_hero_zones(
             session, player.seat, viewer=session.human_seat
         )
-        # B：武将块上的状态标签（手牌上限加式 / 裸衣）。纯网页显示字段，不进 PlayerView。
-        player_payload["hero_tags"] = seat_hero_tags(state.player(player.seat))
+        # B：武将块上的状态标签（手牌上限加式 + 登记表产物）。纯网页显示字段，不进 PlayerView。
+        player_payload["hero_tags"] = seat_hero_tags(
+            state, player.seat, badges=badge_tags.get(int(player.seat), ())
+        )
         # 票 09：手牌读数「手牌：张数/上限」。上限是**派生量**（体力值 → 替换链 → 加式），
         # 前端不自己算（那会是第二份真源）⇒ 与 `hero_tags` 同姿态只补进**网页载荷**：
         # 不进 `PlayerPublic` / `PlayerView`（AI 读面要登记读点表，记录流也不该多字节）。
@@ -751,23 +762,379 @@ def seat_hero_zones(
     return out
 
 
-def seat_hero_tags(player: Any) -> list[dict[str, Any]]:
-    """武将块上的**状态标签**（B；纯显示层，不进 ``PlayerView`` / 记录流）。
+def _luoyi_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """【裸衣】的座位标签（skill-display 票 01 的**迁移产物**；标准 / 界两版共用一份）。
 
-    读引擎座位上的公开状态字段，只给标签名，不把效果文案抄到每张牌上：
+    判据一字不改地取既有读口——``Player.luoyi_active``（标准版："本回合"，回合末清）或
+    ``Player.luoyi_until_next_turn``（界版："直到你的下个回合开始"）——两个作用域字段同一条
+    标签；不给【杀】/【决斗】逐张画"伤害+1"。
 
-    - ``Player.hand_limit_bonus`` 非 0 ⇒ 「手牌上限+N」；
-    - ``Player.luoyi_active`` / ``Player.luoyi_until_next_turn`` ⇒ 「裸衣」（标准 / 界两个
-      作用域字段同一条标签；不给【杀】/【决斗】逐张画“伤害+1”）。
+    **载荷一字不改**：``{"tag": "luoyi", "label": "裸衣"}``，没有 ``parts``（不需要逐段上色，
+    按 Q14″A 只在要上色时才带它）。
     """
+    player = state.player(seat)
+    if not (
+        getattr(player, "luoyi_active", False)
+        or getattr(player, "luoyi_until_next_turn", False)
+    ):
+        return None
+    return {"tag": "luoyi", "label": "裸衣"}
+
+
+def _qinzheng_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """骆统【勤政】的座位标签 = **本局**「使用 / 打出」张数（skill-display 票 03）。
+
+    判据一字不改地取既有读口 ``Player.used_or_played_ever``（框架票 03 的框架件：两个写点
+    :meth:`sgs.engine.Engine.start_use` / :meth:`sgs.engine.Engine.play_card` 互斥 ⇒ 一次
+    动作恰好 +1；作用域 = 整局、没有复位点）。投影**不数数**、不按技能 id 猜。
+
+    **X = 0 也返回**——spec §4 的 fail-closed **唯一例外**：它是玩家全程要看见的分母
+    （"还差几张"到下一个 3 / 5 / 8 档），故这里没有"值不存在"的判据。
+
+    **载荷只有 ``{"tag", "label"}``**：纯数字、没有逐段上色的需求 ⇒ 不带 ``parts``
+    （Q14″A：只有需要上色时才出现）。
+    """
+    return {
+        "tag": "qinzheng",
+        "label": f"勤政 {state.player(seat).used_or_played_ever}",
+    }
+
+
+def _jianying_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """【渐营】的座位标签 = **本阶段上一张使用牌**的点数 / 花色（skill-display 票 04）。
+
+    两版（OL 沮授 / 界沮授移动版）共用这一个构造器：读法逐字相同——都是"本阶段自己使用
+    的最后一张牌"（Q7① 的用户原话「当我每用一张牌，就立刻更新为这张牌的点数、花色」）。
+
+    三处判据，全部**取引擎既有读口**、投影只取不判：
+
+    - **读哪一格**：``Player.play_phase_last_card``，不是钩子比较用的
+      ``play_phase_previous_card``。玩家要看的是"下一次使用时的比较基准"，即最后一张；
+      技能的**比较**仍读"上一张"（那一半不归显示管）。
+    - **什么时候画**：只在**自己的出牌阶段**里（:func:`sgs.effects.is_own_play_phase`）——
+      与引擎写这一格的判据（:meth:`sgs.engine.Engine._note_play_phase_card`）**是同一个**。
+      故"出牌阶段结束 ⇒ 标签消失"是**派生**出来的：那一格在引擎侧活到下一次自己的出牌
+      阶段起点，这里**没有清除事件**（spec §2 第 2 条 / A12）。
+    - **缺项 fail-closed**（Q7①）：有花色无点数 ⇒ ``渐营 ♥``；有点数无花色 ⇒ ``渐营 7``；
+      两样都缺（多源转化 / 纯虚拟牌）⇒ 只有 ``渐营``。``parts`` **只在花色存在时**出现
+      ——花色要上色、点数从来不上色（Q14″A：只在需要上色时带）。符号与红黑取
+      :data:`sgs_web.display.SUIT_LABELS`（**唯一**映射），``parts`` 的拼接恒等于 ``label``
+      （前端有 ``parts`` 时只画 ``parts``，再画一遍 ``label`` 就会翻倍）。
+    """
+    if not is_own_play_phase(state, seat):
+        return None
+    card = state.player(seat).play_phase_last_card
+    if card is None:
+        return None
+    suit = SUIT_LABELS.get(card.suit) if card.suit is not None else None
+    face = ""
+    if suit is not None:
+        face += suit["symbol"]
+    if card.rank is not None:
+        face += str(card.rank)
+    payload: dict[str, Any] = {
+        "tag": "jianying",
+        "label": f"渐营 {face}" if face else "渐营",
+    }
+    if suit is not None:
+        parts: list[dict[str, Any]] = [
+            {"text": "渐营 "},
+            {"text": suit["symbol"], "tone": suit["color"]},
+        ]
+        if card.rank is not None:
+            parts.append({"text": str(card.rank)})
+        payload["parts"] = parts
+    return payload
+
+
+def _botu_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """界吕蒙【博图】的座位标签 = **本回合置入弃牌堆的牌出现过的花色**（skill-display 票 05）。
+
+    五条口径，全部**取引擎既有读口**、投影只取不判（spec §2 第 1 条 / A3）：
+
+    - **读哪一格**：``GameState.discard_suits_this_turn``——已经**去重、按首次出现序**，
+      写入点在搬牌原语（:func:`sgs.effects.move_card` 的 ``Zone.DISCARD`` 分支）、作用域 =
+      一个回合（``TURN_START`` 复位，**含额外回合**）。投影**不数数**、不按技能 id 猜。
+    - **全场级、不分座位**：牌面写的是"本回合置入弃牌堆的牌"，不限来源（对手丢弃、判定牌、
+      阵亡清区……都算，`06`（§5「程序化约定与偏离一手」）的裁定），故取值不看 ``seat``
+      ——它只决定"画在哪"。
+    - **空集不画**：fail-closed（spec §2 第 4 条），不画 ``博图`` 空壳。
+    - **顺序 = 引擎存储序（首次出现序）**：这里**不排序**（下一行就是那条注释）。排序会让
+      界面与服务端就"哪一色先出现"说两种话，并且会动到【博图】的判据
+      （:func:`sgs.skills.phase_body._botu_available` 的 ``len(...) < len(_SUITS)``）之外的
+      读取方——去重的纪律属于引擎写点，不属于投影。
+    - **上色**：每个花色一段 ``parts``，符号 / 红黑取
+      :data:`sgs_web.display.SUIT_LABELS`（**唯一**映射；``projection.py`` 里没有第二份
+      花色表），``tone`` 只可能是 ``red`` / ``black``。``parts`` 的拼接恒等于 ``label``
+      （前端有 ``parts`` 时只画 ``parts``，再画一遍 ``label`` 就会翻倍；Q14′）。
+    """
+    # ``seat`` 只决定"画在哪"（``BadgeScope.SELF`` 的持有人）：值是**全场级**事实。
+    del seat
+    suits = state.discard_suits_this_turn
+    if not suits:
+        return None
+    # ⚠️ 顺序 = 引擎存储序（首次出现序），**不要**在这里排序：见 docstring 的第四条。
+    parts: list[dict[str, Any]] = [{"text": "博图 "}]
+    for suit in suits:
+        face = SUIT_LABELS.get(suit)
+        if face is None:
+            # fail-closed（spec §2 第 4 条）：任一花色没有展示契约 ⇒ 整条标签不出现。
+            # 不许悄悄跳过那一色——``parts`` / ``label`` 就再也对不上引擎的存储序。
+            return None
+        parts.append({"text": face["symbol"], "tone": face["color"]})
+    return {
+        "tag": "botu",
+        "label": "".join(part["text"] for part in parts),
+        "parts": parts,
+    }
+
+
+_FUYIN_SKILL_ID = "hero.zhugezhan.fuyin"
+"""诸葛瞻【父荫】的 skill id（skill-display 票 06）：登记表的键与构造器的读口共用这一份。
+
+与 ``hero_lei.FUYIN`` 是同一个值，但接入层只许 import ``sgs.skills`` 这个公开子包入口
+（M4 第一纪律，不得深导入 ``sgs.skills.hero_lei``）⇒ 在这里写一次、只写一次。
+"""
+
+
+def _fuyin_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """诸葛瞻【父荫】的座位标签 = 本回合**还没发动过**时写「父荫」（skill-display 票 06）。
+
+    两条判据，一条在这里、一条在框架：
+
+    - **本回合没发动过**：读引擎既有读口 :func:`sgs.skills.skill_used_this_turn`（per-instance
+      的「本回合已用」位）。写点 = ``fuyin_effect`` 的 ``mark_skill_used_this_turn``
+      （触发即落位），清除点 = 回合末 ``_clear_turn_effects`` → ``reset_turn_skill_state``。
+      投影**只取不判**、不新增清除事件：标签随每次投影重算（spec §2 第 2 条 / A12）。
+    - **技能有效**：由 ``BadgeScope.SELF`` 的实例闸统一兜住（``_badge_tags`` 只在
+      ``resolve_instances`` 里真有 ``(seat, FUYIN)`` 时才调本构造器）⇒ 失效 / 失去时根本
+      走不到这里。**不**把"锁定技今天不会被失效"当判据（Q7④：用户已明说以后会有让锁定技
+      失效的效果），也不在这里重判一次。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "fuyin", "label": "父荫"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if skill_used_this_turn(state, seat, _FUYIN_SKILL_ID):
+        return None
+    return {"tag": "fuyin", "label": "父荫"}
+
+
+_XIONGLUAN_SKILL_ID = "hero.zhangxiu.xiongluan"
+"""张绣【雄乱】的 skill id（skill-display 票 07）：登记表的键与构造器的判据共用这一份。
+
+与 ``sgs.skills.active.XIONGLUAN`` 是同一个值，但接入层只许 import ``sgs.skills`` 这个公开
+子包入口（M4 第一纪律，不得深导入 ``sgs.skills.active``；那枚常量今天没有从包入口重导出）
+⇒ 与 :data:`_FUYIN_SKILL_ID` 同姿态：在这里写一次、只写一次。
+"""
+
+
+def _prohibition_badge(
+    state: Any, seat: int, skill_id: str, tag: str, label: str
+) -> dict[str, Any] | None:
+    """【雄乱】/【义绝】共用的判据：座位 ``seat`` 的禁令来源里有 ``skill_id`` 就画一块标签。
+
+    **唯一判据**（Q8/Q12a 用户裁定）：两条技能的"其不能使用或打出手牌"命中的是同一格
+    ``Player.hand_card_prohibition_sources``（票 00），故它们同时命中一个座位时两个标签
+    并列；那一格由 ``Engine.add_hand_card_prohibition`` 写入（雄乱的写点 =
+    ``_xiongluan_effect``、义绝 = ``_yijue_effect`` 的**黑色分支**）、由回合末
+    ``_clear_turn_effects`` 清空 ⇒ 标签随每次投影重算，"回合结束 ⇒ 消失"是**派生**出来的，
+    没有清除事件、没有新 delta（spec §2 第 2 条 / A12）。
+
+    ``ANY_SEAT`` 档**没有**实例闸：``seat`` 是"要画的座位"而不是"谁的技能"（两条技能的
+    持有者都是**别人**）⇒ 这里**不看** ``resolve_instances``、也不看技能是否失效（禁令是
+    引擎侧已经落下的公开事实，谁施加的不影响"这个座位不能用手牌"）。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": tag, "label": label}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if skill_id in state.player(seat).hand_card_prohibition_sources:
+        return {"tag": tag, "label": label}
+    return None
+
+
+def _xiongluan_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """张绣【雄乱】的座位标签 = **目标**座位的「雄乱」（skill-display 票 07）。
+
+    判据见 :func:`_prohibition_badge`（读引擎既有读口，spec §2 第 1 条：投影只取不判）。
+
+    两处**故意的读法**：
+
+    - **绑禁令、不绑 ``xiongluan_target``**（Q8/Q12a 用户裁定）：【义绝】与【雄乱】走同一条
+      判据（两条"其不能使用或打出手牌"本来就是同一格），故它们同时命中一个座位时两个标签
+      能并列；绑 ``xiongluan_target`` 会让两条技能各走一条判据。
+    - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
+      ``seat`` 是"要画的座位"而不是"谁的技能"——雄乱的技能持有者是**别人**。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "xiongluan", "label": "雄乱"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    return _prohibition_badge(state, seat, _XIONGLUAN_SKILL_ID, "xiongluan", "雄乱")
+
+
+def _yijue_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """界关羽【义绝】的座位标签 = **目标**座位的「义绝」（skill-display 票 08）。
+
+    判据见 :func:`_prohibition_badge`（读引擎既有读口，spec §2 第 1 条：投影只取不判）。
+
+    三处**故意的读法**：
+
+    - **只绑禁令、不绑另两条记录**（Q8/Q12a 用户裁定）：黑色分支一次落三条座位级记录
+      （``suppressed_skills`` / ``hand_card_prohibition_sources`` /
+      ``heart_slash_bonus_against``），显示**只认禁令**——三条各判一次会让一个座位堆三块，
+      而 Q7⑥ 要的是只写技能名的一行。与 :func:`_xiongluan_badge` 同判据（两条"其不能使用
+      或打出手牌"本来就是同一格）：同时命中一个座位时两个标签并列。
+    - **红色分支不画**：红分支没有本回合持续状态（"令其回复 1 点体力"是一次性结算）⇒ 禁令
+      来源为空 ⇒ 本构造器返回 ``None``，自然不画（A6 的后半句）。
+    - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
+      ``seat`` 是"要画的座位"而不是"谁的技能"——义绝的技能持有者是**别人**。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "yijue", "label": "义绝"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    return _prohibition_badge(state, seat, YIJUE, "yijue", "义绝")
+
+
+def _jie_tieqi_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """界马超【铁骑】的座位标签 = **目标**座位的「铁骑」（skill-display 票 09）。
+
+    一条判据，读引擎既有读口（spec §2 第 1 条：投影只取不判）：
+
+    - **生效中**：``Player.suppressed_skills`` 里有 ``skill_id == `` :data:`sgs.skills.JIE_TIEQI`
+      的那条记录就画。记录由 :meth:`sgs.engine.Engine.suppress_skills` 写入（铁骑自己的写点 =
+      ``_jie_tieqi`` 的"令其本回合所有非锁定技失效"那一段）、由回合末 ``_clear_turn_effects``
+      清空 ⇒ 标签随每次投影重算，"回合结束 ⇒ 消失"是**派生**出来的，没有清除事件、没有新
+      delta（spec §2 第 2 条 / A12）。
+
+    三处**故意的读法**：
+
+    - **精确匹配 ``skill_id``，不按谓词扫**（票面 §4 的 ⚠️ / spec §2 第 1 条）：义绝的黑色分支
+      也落一条**同形**记录（``scope=TURN`` / ``predicate=ALL_NON_LOCKED``）——若写成"任意
+      ``ALL_NON_LOCKED`` 记录都算"，义绝就会点亮「铁骑」，**将来**任何新的失效技能也会。
+      逐条记录比较 ``record.skill_id`` 是唯一能把两条技能分开的判据（记录里的 ``skill_id``
+      = **施加失效的那条技能**，见 :class:`sgs.state.SkillSuppression`）。
+    - **只挂界马超**（Q11 用户裁定）：标准马超【铁骑】只写帧标签
+      :data:`~sgs.resolution.Tag.UNRESPONSIVE`、不写座位级失效记录，故它没有本构造器
+      （`tests/test_web.py::test_the_standard_tieqi_leaves_no_badge` 钉住）。
+    - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
+      ``seat`` 是"要画的座位"而不是"谁的技能"——铁骑的技能持有者是**别人**，故这里与
+      ``_fuyin_badge``（``SELF`` 档）不同：**不看** ``resolve_instances``、也不看技能是否
+      失效（失效是引擎侧已经落下的公开事实，谁施加的不影响"这个座位被封印了"）。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "tieqi", "label": "铁骑"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if any(
+        record.skill_id == JIE_TIEQI
+        for record in state.player(seat).suppressed_skills
+    ):
+        return {"tag": "tieqi", "label": "铁骑"}
+    return None
+
+
+BADGE_PROVIDERS: Mapping[
+    str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
+] = MappingProxyType(
+    {
+        # 标准 / 界【裸衣】两版是**同一种事实的两种字段**（作用域不同）⇒ 同一个构造器。
+        "hero.xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
+        "hero.jie_xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
+        # 【勤政】恒显（含 X = 0）：读整局张数，没有"值不存在"的形态。
+        "hero.luotong.qinzheng": (BadgeScope.SELF, _qinzheng_badge),
+        # 【渐营】两版都挂（spec §5 第 04 行 / Q11）：同一个构造器、同一个座位字段。
+        "hero.jushou.jianying": (BadgeScope.SELF, _jianying_badge),
+        "hero.jie_jushou_mobile.jianying": (BadgeScope.SELF, _jianying_badge),
+        # 【博图】只有界吕蒙一版（spec §5 第 05 行）：读**全场级**的本回合弃牌花色。
+        "hero.jie_lvmeng.botu": (BadgeScope.SELF, _botu_badge),
+        # 【父荫】"本回合未发动 ∧ 有效"（spec §5 第 06 行 / Q7④）：发动位在这里读，
+        # "有效"由 ``SELF`` 档的实例闸兜住（失效 / 失去 ⇒ 实例不在解析里 ⇒ 不调构造器）。
+        _FUYIN_SKILL_ID: (BadgeScope.SELF, _fuyin_badge),
+        # 【雄乱】"生效期间画在**目标**身上"（spec §5 第 07 行 / Q8 / Q12a）⇒ ``ANY_SEAT``：
+        # 每个座位各问一次，"生效中"由构造器自己从禁令来源判（这一档没有实例闸）。
+        _XIONGLUAN_SKILL_ID: (BadgeScope.ANY_SEAT, _xiongluan_badge),
+        # 【义绝】同一条纪律（spec §5 第 08 行 / Q8 / Q12a）⇒ 与【雄乱】**同一个判据**（禁令
+        # 来源里有这条 id），故两条同时命中一个座位时两个标签并列；红色分支没有持续状态
+        # ⇒ 自然不画（A6 的后半句）。
+        YIJUE: (BadgeScope.ANY_SEAT, _yijue_badge),
+        # 【铁骑】同样画在**目标**身上（spec §5 第 09 行 / Q8″），但判据是另一格：失效记录
+        # （``Player.suppressed_skills``）里**精确匹配本技能的 id**——不按 ``ALL_NON_LOCKED``
+        # 扫（票面 §4 的 ⚠️：那会让义绝、以及将来任何失效技能点亮「铁骑」）。只有界马超这
+        # 一版登记（Q11：标准【铁骑】写帧标签、不写座位级失效记录）。
+        JIE_TIEQI: (BadgeScope.ANY_SEAT, _jie_tieqi_badge),
+    }
+)
+"""skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。
+
+与 :data:`APPEARANCE_BUILDERS` **同一姿态、不同的键**：外观组件按 **kind** 索引（一个
+kind 一条构造器），标签登记表按 **skill id** 索引（与 ``catalog.ACTIVATION_PLANS`` 同姿态：
+注册表按 skill id 索引允许，**派发逻辑里不许出现技能 id 名单**）——因为同一个 kind 下
+每条技能取数的读口各不相同，而"哪条技能带标签"是各技能自己的声明
+（:attr:`~sgs.skills.SkillDef.badge`）。
+
+构造器签名 ``(state, seat) -> dict | None``：``state`` = ``GameState``、``seat`` = 要画的
+**座位**。返回 ``{"tag", "label"}``（需要逐段上色时才带 ``parts``；``label`` 恒为纯文本），
+``None`` = 这条标签此刻不画（fail-closed：值不存在就整条不出现，不画空壳）。
+
+``BadgeScope`` 决定**问谁**（见 :func:`_badge_tags`）；``tests/test_web.py`` 按闭集核
+"键集 == 所有 ``SkillDef.badge is not None`` 的 skill id"——漏登与幽灵登记都判红。
+"""
+
+
+def _badge_tags(state: Any) -> dict[int, list[dict[str, Any]]]:
+    """**每个座位**该画的登记表标签（skill-display 票 01）；每帧调一次，不缓存。
+
+    ``BadgeScope`` 决定**问谁**：
+
+    - ``SELF``：只对 ``(seat, skill_id)`` 真在 :func:`sgs.skills.resolve_instances` 里的座位
+      调构造器（缺省 ``include_suppressed=False``）。这道**实例闸**是"技能失效 / 失去 ⇒
+      标签自动不画"的唯一判据，也是 06 票【父荫】要的"有效"判据——**不**按技能 id 猜。
+    - ``ANY_SEAT``：对每个座位各调一次（【雄乱】/【义绝】/【铁骑】画在目标身上），画不画由
+      构造器自己读引擎既有读口决定。
+
+    ``resolve_instances`` 每次快照只解析一次（调用方在座位环之前调本函数），不按座位重解。
+
+    值形状 = ``座位号 → [{"tag", "label", "parts"?}, …]``；顺序 = 登记表的迭代序（同一座位
+    有多条标签时次序稳定）。
+    """
+    held = {
+        (instance.owner, instance.skill_id) for instance in resolve_instances(state)
+    }
+    out: dict[int, list[dict[str, Any]]] = {}
+    for skill_id, (scope, builder) in BADGE_PROVIDERS.items():
+        for player in state.players:
+            seat = int(player.seat)
+            if scope is BadgeScope.SELF and (seat, skill_id) not in held:
+                continue
+            payload = builder(state, seat)
+            if payload is None:
+                continue
+            out.setdefault(seat, []).append(payload)
+    return out
+
+
+def seat_hero_tags(
+    state: Any, seat: int, *, badges: Iterable[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """一个座位武将块上的**状态标签**（B；纯显示层，不进 ``PlayerView`` / 记录流）。
+
+    两段，次序固定：
+
+    1. **通用派生量**先放：``Player.hand_limit_bonus`` 非 0 ⇒ 「手牌上限+N」。它不属于任何
+       一条技能（多种效果都能改上限）⇒ 留在原处，走在登记表产物之前；
+    2. 再接**登记表产物**（:data:`BADGE_PROVIDERS`）：每个座位的那几条由
+       :func:`_badge_tags` 统一算好、由调用方**逐座位**传进来（``badges``）——快照里只有
+       一次 ``resolve_instances``，不按座位重解。不传就现算一份（直接调用本函数的人得到
+       同样的结果，只是多解析一次）。
+
+    标签只带 ``tag`` / ``label``（需要逐段上色时另带 ``parts``），不把效果文案抄到每张牌上。
+    """
+    player = state.player(seat)
     tags: list[dict[str, Any]] = []
     bonus = int(getattr(player, "hand_limit_bonus", 0) or 0)
     if bonus:
         tags.append({"tag": "hand_limit_bonus", "label": f"手牌上限{bonus:+d}"})
-    if getattr(player, "luoyi_active", False) or getattr(
-        player, "luoyi_until_next_turn", False
-    ):
-        tags.append({"tag": "luoyi", "label": "裸衣"})
+    if badges is None:
+        badges = _badge_tags(state).get(int(seat), ())
+    tags.extend(badges)
     return tags
 
 

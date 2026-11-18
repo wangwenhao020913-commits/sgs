@@ -103,6 +103,7 @@ from support.positions import (  # noqa: E402
     build_state,
     cards_of_type,
     deck_excluding,
+    run_until,
 )
 from support.scripts import PassPlayer, ran_timing, run_queries  # noqa: E402
 
@@ -2733,6 +2734,9 @@ def test_the_409_bare_query_does_not_get_an_arrange_spec() -> None:
 # 唯一 opt-in——它复用 OL 沮授【渐营】的条件与零步流水线，而 ② 的预发动把同一个技能 id 的
 # `SkillDef.preactivated` 置真，界面因此曾把它画成"被动入口"：默认答案是「放弃」。
 # ---------------------------------------------------------------------------
+
+JIANYING = "hero.jushou.jianying"
+"""OL 沮授【渐营】的全限定技能 id（skill-display 票 04：两版都挂标签）。"""
 
 JIE_JIANYING = "hero.jie_jushou_mobile.jianying"
 
@@ -8427,7 +8431,14 @@ def test_a_game_start_max_hp_change_does_not_leak_into_the_opening_frame() -> No
 
 
 def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view() -> None:
-    """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。"""
+    """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。
+
+    三个座位各测一段：0 = 只有手牌上限加式（没有【裸衣】⇒ 不画它）、1 = 标准【裸衣】、
+    2 = 界【裸衣】。**第 1 座必须是【裸衣】的持有者**——skill-display 票 01 起标签走
+    ``BADGE_PROVIDERS`` 的 ``SELF`` 档，投影先看「(座位, 技能) 真在 resolve_instances 里」；
+    "座位字段为真但该座位没有这条技能 ⇒ 不画"由
+    ``test_a_self_badge_disappears_when_the_skill_stops_resolving`` 单独钉住。
+    """
     from types import SimpleNamespace
 
     from sgs.state import PlayerView
@@ -8438,8 +8449,8 @@ def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view
     state = build_state(
         pack=pack,
         seats=[
-            SeatSpec(hp=4, hero="xuchu"),
             SeatSpec(hp=4, hero="zhenji"),
+            SeatSpec(hp=4, hero="xuchu"),
             SeatSpec(hp=4, hero="jie_xuchu"),
         ],
         deck=tuple(range(40, 50)),
@@ -8463,6 +8474,1240 @@ def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view
     assert "hero_tags" not in PlayerView.model_fields, (
         "标签是网页显示字段，不能塞进 PlayerView（记录字节 / 金录像）"
     )
+
+
+def test_a_self_badge_disappears_when_the_skill_stops_resolving() -> None:
+    """``SELF`` 档的标签只在技能**真在解析中**时下发（skill-display 票 01 的实例闸）。
+
+    座位字段（``Player.luoyi_active``）仍是真的、一个字没清时，技能一旦**失去**
+    （``Player.lost_skills``）或**失效**（``Player.suppressed_skills``）⇒ 该实例不在
+    :func:`sgs.skills.resolve_instances` 里 ⇒ 标签自动不画、恢复后自动回来。这正是 06 票
+    【父荫】要的"有效"判据（Q7④：不许依赖"锁定技今天不会被失效"这种巧合），也是
+    **派生式**生命周期（spec §2 第 2 条 / A12：没有清除事件，每次投影重算）。
+
+    判据走**真实产出路径**（``visible_snapshot`` 的 ``players[].hero_tags``），不直调内部；
+    对照 = 同一局里**没有**这条技能的座位：它的作用域字段也置了位，但不该出现标签——
+    ``SELF`` 档只画在持有者自己的座位。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import SkillSuppression
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="xuchu"), SeatSpec(hp=4, hero="zhenji")],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(0).luoyi_active = True
+    # 对照：哪怕引擎字段为真，没有【裸衣】的座位也不画它（SELF 档的"落座位"）。
+    state.player(1).luoyi_active = True
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=1, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert hero_tags(0) == [{"tag": "luoyi", "label": "裸衣"}], (
+        "前置：持有【裸衣】且作用域字段为真 ⇒ 标签在"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在持有者自己的座位（甄姬没有【裸衣】）"
+
+    # 失去：实例不再产出 ⇒ 标签消失（座位字段仍是真的，消失是**派生**的）。
+    engine.state.player(0).lost_skills.append("hero.xuchu.luoyi")
+    assert engine.state.player(0).luoyi_active is True, (
+        "字段没被清——消失只由实例闸派生，不靠清除事件"
+    )
+    assert hero_tags(0) == [], "技能失去后标签必须自动不画"
+
+    # 失效：实例还在、但被座位级谓词挡在解析之外 ⇒ 同样不画；作用域到期 ⇒ 自动回来。
+    engine.state.player(0).lost_skills.clear()
+    engine.state.player(0).suppressed_skills.append(
+        SkillSuppression(skill_id="hero.jie_guanyu.yijue")
+    )
+    assert hero_tags(0) == [], "技能失效期间标签必须不画"
+    engine.state.player(0).suppressed_skills.clear()
+    assert hero_tags(0) == [{"tag": "luoyi", "label": "裸衣"}], (
+        "失效可恢复 ⇒ 下一次投影里标签自动回来"
+    )
+
+
+def test_the_qinzheng_badge_shows_the_game_long_used_or_played_count() -> None:
+    """【勤政】的座位标签 = **本局**使用 / 打出张数（skill-display 票 03；spec §5 第 03 行）。
+
+    三条口径各有一条判据：
+
+    - **X = 0 也画**（spec §4 唯一的 fail-closed 例外）：它是玩家要看见的分母
+      （"还差几张"），故开局一张都没用时标签就在；
+    - **只数使用 + 打出**（``Player.used_or_played_ever`` 的两个写点，含当前这一张）：
+      弃置 / 摸牌 / 判定走别的入口 ⇒ 纹丝不动；跨回合**不复位**（整局作用域）；
+    - **不进协议载荷**：值由投影直接读 ``state``，``PlayerView`` 里没有这个键名
+      （``tests/test_card_usage.py`` 那条断言仍绿，47 条金录像字节不变）。
+
+    驱动走**真引擎入口**（``start_use`` / ``play_card`` / ``move_in_frame``），读口走**真产出
+    路径**（``visible_snapshot`` → ``players[].hero_tags``），不在这里改字段装作发生过。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import MoveReason, PlayerView
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    # 装备牌当"用掉不触发响应窗口"的牌（与 tests/test_hero_shiji_zhi.py 同一手法）。
+    used = (
+        cards_of_type(pack, "renwang_shield")
+        + cards_of_type(pack, "chitu")
+        + cards_of_type(pack, "dawan")
+    )[:3]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=tuple(used), hero="luotong"),
+            SeatSpec(hp=4, hero="zhenji"),
+        ],
+        deck=deck_excluding(pack, *used),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=11)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 0"}], (
+        "开局一张都没用也要画（X = 0 是玩家要看见的分母——spec §4 唯一的 fail-closed 例外）"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在骆统自己的座位（甄姬没有【勤政】）"
+
+    def settle() -> None:
+        run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: not e.stack.frames)
+
+    engine.start_use(state.card(used[0]), source=0, targets=())
+    settle()
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 1"}], "使用一张 ⇒ X = 1"
+
+    engine.play_card(state.card(used[1]), source=0, timing=Timing.PLAY_DECLARE)
+    settle()
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 2"}], (
+        "打出是另一个写点、同样 +1（两端互斥 ⇒ 一次动作恰好 +1）"
+    )
+
+    # 弃置 / 摸牌 / 判定走别的入口：计数一个都不许涨（标签只取引擎读口、不自己数）。
+    engine.move_in_frame(
+        None,
+        state.refs((used[2],)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+    )
+    engine.move_in_frame(
+        None,
+        state.refs((state.deck[0],)),
+        to_zone=ZoneRef(Zone.HAND, 0),
+        reason=MoveReason.DRAW,
+        owner=0,
+        actor=0,
+    )
+    engine.move_in_frame(
+        None,
+        state.refs((state.deck[0],)),
+        to_zone=ZoneRef(Zone.PROCESSING),
+        reason=MoveReason.JUDGE,
+        owner=None,
+    )
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 2"}], (
+        "弃置 / 摸牌 / 判定都不是使用或打出：X 不动"
+    )
+
+    # 跨回合：推进到下一个座位的第一回合开始，X 仍不回零（整局作用域、没有复位点）。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: ran_timing(e, Timing.TURN_START) and e.state.turn_seat == 1,
+    )
+    assert engine.state.turn_seat == 1, "前置：回合确实换人了"
+    assert hero_tags(0) == [{"tag": "qinzheng", "label": "勤政 2"}], (
+        "跨回合不重置（作用域 = 整局；不在回合末的清除链里）"
+    )
+
+    # 载荷里没有键名：标签是投影直读 state 的派生显示，不是协议字段（A10）。
+    snapshot = visible_snapshot(session)
+    assert "used_or_played_ever" not in json.dumps(snapshot, ensure_ascii=False), (
+        "整局张数不进网页协议载荷的任何一层（值是派生量，键名也不许出现）"
+    )
+    assert "used_or_played_ever" not in PlayerView.model_fields, (
+        "PlayerView 那条断言仍绿：不进 AI 读面 / 记录流"
+    )
+
+
+def test_both_jianying_declarations_share_one_badge() -> None:
+    """两版【渐营】都挂 ``WINDOW``，且登记表里是**同一个**构造器（skill-display 票 04）。
+
+    spec §5 第 04 行「渐营两版都挂」的**声明面**判据：OL 沮授那一条是裸 ``SkillDef``、
+    界沮授移动版那一条是 ``ActiveSkill``（① 钩子 + ② 提供者住在同一条声明里），两族各写
+    一份 ``badge``；登记表里两个 skill id 指向**同一个函数对象**——两条的读法逐字相同
+    （同一个座位字段、同一个投影构造器），抄成两份就只会在改动时漂移。
+
+    行为面由 ``test_the_jianying_badge_tracks_the_last_card_of_the_play_phase`` 与
+    ``test_the_jianying_badge_omits_what_the_card_does_not_have`` 钉住；这一条只钉"两版
+    都挂、且挂的是同一份"。
+    """
+    from sgs.skills import CATALOG, BadgeKind, BadgeScope
+
+    from sgs_web.projection import BADGE_PROVIDERS
+
+    for skill_id in (JIANYING, JIE_JIANYING):
+        assert CATALOG[skill_id].badge is BadgeKind.WINDOW, (
+            f"{skill_id} 没有声明座位常驻标签（两版都要挂）"
+        )
+        assert BADGE_PROVIDERS[skill_id][0] is BadgeScope.SELF, (
+            f"{skill_id} 的标签画在**持有者自己的**座位上（不是目标座）"
+        )
+    assert BADGE_PROVIDERS[JIANYING][1] is BADGE_PROVIDERS[JIE_JIANYING][1], (
+        "两版必须共用同一个构造器（同一份读法，不许抄两份）"
+    )
+
+
+def test_the_jianying_badge_tracks_the_last_card_of_the_play_phase() -> None:
+    """【渐营】的座位标签 = **本阶段上一张使用牌**的点数与花色（skill-display 票 04）。
+
+    五条口径各一条断言（spec §5 第 04 行；Q7① 的用户原话「当我每用一张牌，就立刻更新为
+    这张牌的点数、花色」）：
+
+    - 出牌阶段一张都没用 ⇒ **整条不画**（fail-closed：记录为空不画空壳）；
+    - 用 ♥7 ⇒ 立刻是这张；再用 ♠2 ⇒ **立刻**换成 ♠2，不是 ``play_phase_previous_card``
+      的 ♥7——玩家要看的是"下一次使用时的比较基准" = ``play_phase_last_card``；
+    - 出牌阶段结束 ⇒ 标签消失。引擎侧**没有任何清除事件**（记录还在座位上），消失纯由
+      "本阶段"这个作用域派生（spec §2 第 2 条 / A12）；
+    - 别人的回合里自己使用【无懈可击】既不写这条记录、也不画标签（写点与读点是**同一个**
+      判据 ``is_own_play_phase``）；
+    - ``parts`` 的拼接恒等于 ``label``（前端契约：有 ``parts`` 时只画 ``parts``）。
+
+    驱动走**真引擎入口**（出牌阶段的 ``UseCard`` 候选 / 回合推进），读口走**真产出路径**
+    （``visible_snapshot`` → ``players[].hero_tags``），不在这里改字段装作发生过。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    # 花色 / 点数按**牌堆事实**挑：♥7 是无中生有（spec §4 载荷例子的那张）、♠2 是八卦阵
+    # （装备牌 ⇒ 使用目标是自己、不另开响应窗口，驱动最省）。
+    heart_seven = cards_of_type(pack, "ex_nihilo")[0]
+    spade_two = cards_of_type(pack, "eight_diagrams")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    other_trick = cards_of_type(pack, "ex_nihilo")[1]
+    assert (pack.deck.cards[heart_seven].suit, pack.deck.cards[heart_seven].rank) == (
+        Suit.HEART,
+        7,
+    )
+    assert (pack.deck.cards[spade_two].suit, pack.deck.cards[spade_two].rank) == (
+        Suit.SPADE,
+        2,
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hand=(heart_seven, spade_two, nullify)),
+            SeatSpec(hero="zhenji", hand=(other_trick,)),
+        ],
+        deck=deck_excluding(pack, heart_seven, spade_two, nullify, other_trick),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=11)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def play(card_id: int) -> None:
+        """出牌阶段使用指定的那一张，并结算到"出牌阶段又空闲"。"""
+        query = engine.pending
+        for _ in range(400):
+            if query is not None:
+                break
+            engine._step()
+            query = engine.pending
+        assert query is not None and query.kind == QueryKind.PLAY_PHASE, (
+            "前置：此刻该停在出牌阶段的空闲询问"
+        )
+        engine.submit(
+            next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, UseCard) and action.card.card_id == card_id
+            )
+        )
+        run_queries(
+            engine,
+            [PassPlayer(), PassPlayer()],
+            lambda e: not e.stack.frames
+            and e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE,
+        )
+
+    def assert_parts_add_up(tag: dict) -> None:
+        assert "".join(part["text"] for part in tag["parts"]) == tag["label"], (
+            "parts 的拼接必须等于 label（前端有 parts 时只画 parts，多一份就会翻倍）"
+        )
+
+    assert hero_tags() == [], (
+        "出牌阶段一张都没用 ⇒ 记录为空 ⇒ 整条标签不画（fail-closed，不画空壳）"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在持有者自己的座位（甄姬没有【渐营】）"
+
+    play(heart_seven)
+    tag = hero_tags()
+    assert tag == [
+        {
+            "tag": "jianying",
+            "label": "渐营 ♥7",
+            "parts": [
+                {"text": "渐营 "},
+                {"text": "♥", "tone": "red"},
+                {"text": "7"},
+            ],
+        }
+    ], "使用 ♥7 ⇒ 立刻显示这张的点数与花色（spec §4 的载荷例子）"
+    assert_parts_add_up(tag[0])
+
+    play(spade_two)
+    tag = hero_tags()
+    assert tag == [
+        {
+            "tag": "jianying",
+            "label": "渐营 ♠2",
+            "parts": [
+                {"text": "渐营 "},
+                {"text": "♠", "tone": "black"},
+                {"text": "2"},
+            ],
+        }
+    ], "再用 ♠2 ⇒ 立刻换成本阶段**最后**一张（不是 previous 的 ♥7）"
+    assert_parts_add_up(tag[0])
+
+    # 出牌阶段结束：记录**还在**引擎侧（没有清除事件），标签只由"本阶段"派生而消失。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: e.state.phase is Phase.DISCARD,
+    )
+    assert engine.state.player(0).play_phase_last_card is not None, (
+        "前置：引擎侧那条记录没有被清（派生式生命周期，不许新增清除事件）"
+    )
+    assert hero_tags() == [], "出牌阶段结束 ⇒ 标签消失（A12：下一次投影自动不画）"
+
+    class _DeclaresNullify:
+        """座位 0 在**别人的**回合里唯一一次无懈窗口中使用真【无懈可击】。"""
+
+        def __init__(self) -> None:
+            self.done = False
+
+        def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+            if (
+                not self.done
+                and query.kind == QueryKind.RESPOND
+                and query.cause is WindowCause.NULLIFY
+                and query.actor == 0
+            ):
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.card_id == nullify:
+                        self.done = True
+                        return action
+            return PassPlayer().respond(query)
+
+    declared = _DeclaresNullify()
+    run_queries(
+        engine,
+        [declared, _PlaysTheTrick("ex_nihilo")],
+        lambda e: declared.done and not e.stack.frames and e.pending is not None,
+    )
+    assert engine.state.turn_seat == 1, "前置：已经推进到**别人的**回合"
+    assert declared.done, "前置：【无懈可击】真的使用出去了（不是碰巧没有窗口）"
+    assert engine.state.player(0).play_phase_last_card.card_id == spade_two, (
+        "别人的回合里使用【无懈可击】不写这条记录（写点判据 = 自己的出牌阶段）"
+    )
+    assert hero_tags() == [], "别人的回合里，记录陈旧也不画（标签只在「本阶段」内出现）"
+
+
+def test_the_jianying_badge_omits_what_the_card_does_not_have() -> None:
+    """缺哪项不写哪项，两项都缺只写「渐营」且**没有** ``parts``（skill-display 票 04）。
+
+    Q7① 的逐字口径：「缺点数不写点数、缺花色不写花色；两项都缺只写『渐营』」，而 ``parts``
+    **只在花色存在时**出现——花色要上色、点数从来不上色（Q14″A：只在需要上色时带）。
+
+    主驱动是**引擎真会产出的**那一形态：【丈八蛇矛】两张手牌当【杀】是**多源转化**，规则
+    §16.3 把它的牌面钉成"花色恒无、点数恒无" ⇒ 标签只能是 ``渐营``。后面两段补 Q7① 的
+    另外两支（只缺一项）：它们**不由本引擎产出**（多源恒缺两样、单源恒继承两样），但读法
+    必须全函数，故用引擎自己的 :func:`~sgs.skills.transformed_card` / :class:`CardRef` 造
+    牌面、仍然走**真产出路径**（``visible_snapshot`` → ``players[].hero_tags``）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import transformed_card
+    from sgs.state import CardRef
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    spear = cards_of_type(pack, "serpent_spear")[0]
+    first, second = cards_of_type(pack, "peach")[:2]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_jushou_mobile", hand=(first, second), equip=(spear,), hp=4),
+            SeatSpec(hero="zhenji", hp=4),
+        ],
+        deck=deck_excluding(pack, spear, first, second),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=37)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags() -> list[dict]:
+        return visible_snapshot(session)["players"][0]["hero_tags"]
+
+    query = engine.pending
+    for _ in range(400):
+        if query is not None:
+            break
+        engine._step()
+        query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE, (
+        "前置：停在出牌阶段的空闲询问"
+    )
+    steps = query.transform_preactivations["equip.serpent_spear"]
+    engine.submit(
+        ActivateSkill(
+            skill_id="equip.serpent_spear",
+            picks=(first, second),
+            choices=(steps[1].pool[0].options[0],),
+            answers_seq=query.seq,
+        )
+    )
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: not e.stack.frames
+        and e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE,
+    )
+
+    converted = engine.state.player(0).play_phase_last_card
+    assert converted is not None, "前置：本阶段真的记下了这张转化牌"
+    assert converted.suit is None and converted.rank is None, (
+        "前置：多源转化牌的花色与点数都缺（规则 §16.3 的'多源恒无'）"
+    )
+    tags = hero_tags()
+    assert tags == [{"tag": "jianying", "label": "渐营"}], (
+        "两项都缺 ⇒ 只写技能名（fail-closed 的边界：不画'渐营 undefined'）"
+    )
+    assert "parts" not in tags[0], "没有花色就不带 parts（Q14″A：只在需要上色时出现）"
+
+    live = engine.state
+
+    def tags_for(card: CardRef) -> list[dict]:
+        live.player(0).play_phase_last_card = card
+        return hero_tags()
+
+    only_suit = transformed_card(live, (first, second), "slash", suit="heart")
+    assert (only_suit.suit, only_suit.rank) == ("heart", None), (
+        "前置：多源 + 指定花色 ⇒ 有花色、无点数"
+    )
+    assert tags_for(only_suit) == [
+        {
+            "tag": "jianying",
+            "label": "渐营 ♥",
+            "parts": [{"text": "渐营 "}, {"text": "♥", "tone": "red"}],
+        }
+    ], "缺点数 ⇒ 只写花色（花色段照旧上色，没有空点数段）"
+
+    only_rank = CardRef(card_id=-1, type="slash", name="杀", suit=None, rank=7)
+    assert tags_for(only_rank) == [{"tag": "jianying", "label": "渐营 7"}], (
+        "缺花色 ⇒ 只写点数，且没有 parts（点数从来不上色）"
+    )
+
+
+BOTU = "hero.jie_lvmeng.botu"
+"""界吕蒙【博图】的全限定技能 id（与 ``sgs.skills.phase_body.JIE_BOTU`` 同一个字符串）。"""
+
+
+def test_the_botu_badge_lists_the_discard_suits_of_this_turn() -> None:
+    """【博图】的座位标签 = **本回合置入弃牌堆的牌出现过的花色**（skill-display 票 05）。
+
+    spec §5 第 05 行 / A3 的几条口径各有一条断言：
+
+    - 本回合还没有牌进弃牌堆 ⇒ **整条不画**（fail-closed：集合空不画空壳）；
+    - 弃一张 ♥ ⇒ ``博图 ♥``。那张 ♥ 由**对手**丢出：弃牌堆是**全场级**事实
+      （``GameState.discard_suits_this_turn`` 不分座位、不分来源，牌面写的就是"本回合
+      置入弃牌堆的牌"），但标签只画在**持有【博图】的座位**（``BadgeScope.SELF``）；
+    - 同花色再来一张 ⇒ **不重复**（去重是引擎写点 ``note_discard_suits`` 的纪律，投影只取
+      不判）；再弃一张 ♠ ⇒ ``博图 ♥♠``，顺序 = **引擎存储序（首次出现序）**，投影不排序；
+    - 回合切换 ⇒ 标签消失：引擎在 ``TURN_START`` 清空这一格，投影下一次重算就自然不画
+      （spec §2 第 2 条 / A12：没有清除事件）；
+    - **额外回合**的回合起点同样清空（作用域 = 一个回合，不是一轮）：【博图】真的发动出
+      一个额外回合之后，标签照样在额外回合的起点消失。
+
+    驱动走**真引擎路径**（搬牌原语 ``Engine.move_in_frame`` 把牌置入弃牌堆、回合环推进、
+    回合末真发动【博图】），读口走**真产出路径**（``visible_snapshot`` →
+    ``players[].hero_tags``），不在这里改字段装作发生过。``parts`` 的上色口径由
+    ``test_the_botu_badge_paints_each_suit_by_the_shared_suit_table`` 钉住，本条只看文本。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import MoveReason
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    heart_seven = cards_of_type(pack, "ex_nihilo")[0]
+    assert (pack.deck.cards[heart_seven].suit, pack.deck.cards[heart_seven].rank) == (
+        Suit.HEART,
+        7,
+    ), "前置：第一张 ♥ 就是 spec §4 载荷例子的那张真【无中生有】♥7"
+    taken = {heart_seven}
+
+    def card_of(suit: Suit) -> int:
+        """牌堆里第一张该花色（牌面事实 ⇒ 断言的花色符号是数据决定的，不是写死的）。"""
+        card_id = next(
+            index
+            for index, card in enumerate(pack.deck.cards)
+            if card.suit is suit and index not in taken
+        )
+        taken.add(card_id)
+        return card_id
+
+    opponent_heart = card_of(Suit.HEART)
+    spade = card_of(Suit.SPADE)
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_lvmeng", hand=(heart_seven, spade)),
+            SeatSpec(hero="zhenji", hand=(opponent_heart,)),
+        ],
+        deck=deck_excluding(pack, heart_seven, spade, opponent_heart),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def labels(seat: int = 0) -> list[str]:
+        return [tag["label"] for tag in hero_tags(seat)]
+
+    def turn_starts(e) -> list:  # noqa: ANN001 - 只做记录流的判据读取
+        return [
+            record.actor
+            for record in e.records
+            if record.kind == "timing" and record.timing is Timing.TURN_START
+        ]
+
+    def discard_from_hand(card_id: int, by_seat: int) -> None:
+        engine.move_in_frame(
+            None,
+            engine.state.refs((card_id,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=by_seat,
+        )
+
+    query = engine.pending
+    for _ in range(400):
+        if query is not None:
+            break
+        engine._step()
+        query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE, (
+        "前置：停在出牌阶段的空闲询问（该回合已经真的开始）"
+    )
+
+    assert hero_tags() == [], "本回合还没有牌进弃牌堆 ⇒ 整条不画（fail-closed，不画空壳）"
+    assert engine.state.discard_suits_this_turn == [], "前置：引擎侧读口也是空集"
+
+    discard_from_hand(opponent_heart, 1)
+    assert [tag["tag"] for tag in hero_tags()] == ["botu"], "有花色 ⇒ 画一条 botu 标签"
+    assert labels() == ["博图 ♥"], (
+        "弃牌堆是**全场级**事实：对手丢的 ♥ 也画在【博图】的武将块上（牌面不限来源 / 座位）"
+    )
+    assert hero_tags(1) == [], "SELF 档只画在持有【博图】的座位（甄姬自己的武将块上没有）"
+
+    discard_from_hand(heart_seven, 0)
+    assert labels() == ["博图 ♥"], (
+        "同花色再来一张 ⇒ **不重复**显示（去重是引擎写点 note_discard_suits 的纪律）"
+    )
+    assert engine.state.discard_suits_this_turn == ["heart"], (
+        "前置：存储侧确实只有一份 ♥（投影不改写、不排序）"
+    )
+
+    discard_from_hand(spade, 0)
+    assert labels() == ["博图 ♥♠"], "按**首次出现序**：♥ 先出现、♠ 后出现"
+
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: len(turn_starts(e)) >= 2 and e.state.turn_seat == 1,
+    )
+    assert engine.state.discard_suits_this_turn == [], (
+        "回合切换 ⇒ 引擎在下一个回合的 TURN_START 清空「本回合置入弃牌堆的牌」"
+    )
+    assert labels() == [], "回合切换 ⇒ 标签消失（派生式：下一次投影自动不画，没有清除事件）"
+
+    # 座位 0 的第二个自然回合：重新凑齐四种花色，为「额外回合也复位」准备局面。
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: len(turn_starts(e)) >= 3 and e.state.turn_seat == 0,
+    )
+    assert engine.state.turn_extra is False, "前置：这是座位 0 的**自然**回合（不是额外回合）"
+    assert labels() == [], "新回合起点清空之后依旧不画（不继承上一个回合的花色）"
+
+    for suit in (Suit.HEART, Suit.SPADE, Suit.CLUB, Suit.DIAMOND):
+        from_deck = next(
+            card_id
+            for card_id in engine.state.deck
+            if engine.state.card(card_id).suit == suit
+        )
+        engine.move_in_frame(
+            None,
+            engine.state.refs((from_deck,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            # 来源 = 牌堆、不经手牌：牌面只写"本回合置入弃牌堆的牌"
+            # （`06`（§5「程序化约定与偏离一手」）的裁定）。
+            reason=MoveReason.LOSE,
+            owner=None,
+        )
+    assert engine.state.discard_suits_this_turn == [
+        "heart",
+        "spade",
+        "club",
+        "diamond",
+    ], "前置：四花色按置入顺序记下（引擎存储序）"
+    assert labels() == ["博图 ♥♠♣♦"], "四色齐 ⇒ 四段全画（按存储序，不按花色枚举序）"
+
+    class _ActivatesBotu:
+        """座位 0 在回合末见到【博图】就发动——只为把**额外回合**的回合边界走一遍。"""
+
+        def __init__(self) -> None:
+            self.activated = False
+            self.labels_at_query: list[str] = []
+
+        def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+            if (
+                not self.activated
+                and query.kind == QueryKind.SKILL_ACTIVATION
+                and query.actor == 0
+            ):
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == BOTU:
+                        self.activated = True
+                        self.labels_at_query = labels()
+                        return action
+            return PassPlayer().respond(query)
+
+    driver = _ActivatesBotu()
+    run_queries(
+        engine,
+        [driver, PassPlayer()],
+        lambda e: e.state.turn_extra and len(turn_starts(e)) >= 4,
+    )
+    assert driver.activated, "前置：【博图】真的发动了（四色齐 ∧ 本轮次数未满）"
+    assert driver.labels_at_query == ["博图 ♥♠♣♦"], (
+        "前置：回合末发起【博图】时标签仍在（判据满足的那一刻确实画着四色）"
+    )
+    assert engine.state.turn_extra is True, "前置：当前正是**额外回合**（同一座位连着第二个回合）"
+    assert engine.state.discard_suits_this_turn == [], (
+        "额外回合的 TURN_START 同样清空（作用域 = 一个回合，不是一轮）"
+    )
+    assert labels() == [], "额外回合切换 ⇒ 标签同样消失（A3 的「含额外回合」）"
+
+
+def test_the_botu_badge_paints_each_suit_by_the_shared_suit_table() -> None:
+    """【博图】的每一段花色都按 `display.SUIT_LABELS` 上色（skill-display 票 05 / A9）。
+
+    三条口径：
+
+    - **顺序 = 引擎存储序（首次出现序）**，**不**排序：四张牌按 ♠ → ♥ → ♦ → ♣ 置入
+      弃牌堆，故 ``parts`` 的符号序也是 ♠♥♦♣（与花色枚举序 ♥♦♠♣、字母序都不同——排序或
+      换成"花色枚举序"这条断言立刻变红）。票面明写"不要在本票里给
+      ``discard_suits_this_turn`` 排序"：那会动到【博图】自己的判据之外的读取方。
+    - **符号与红黑取唯一映射** ``sgs_web.display.SUIT_LABELS``（``projection.py`` 里没有
+      第二份花色表）：每段的 ``text`` / ``tone`` 逐色等于 ``SUIT_LABELS[花色]`` 的
+      ``symbol`` / ``color``；``tone`` 只可能是 ``red`` / ``black``（前端契约）。
+    - **拼接恒等于 ``label``**（前端有 ``parts`` 时只画 ``parts``，再画一遍就翻倍）。
+
+    独立于实现的红黑口径另给一条：♥ / ♦ 红、♠ / ♣ 黑（规则的花色颜色），断言字面序列
+    ``black,red,red,black``——不用 ``SUIT_LABELS`` 重算也能红。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import MoveReason
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="jie_lvmeng"), SeatSpec(hero="zhenji")],
+        deck=deck_excluding(pack),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    query = engine.pending
+    for _ in range(400):
+        if query is not None:
+            break
+        engine._step()
+        query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE, (
+        "前置：停在出牌阶段的空闲询问"
+    )
+
+    # 置入序 = ♠ → ♥ → ♦ → ♣（与 Suit 枚举序 ♥♦♠♣ 不同 ⇒ 排序会被抓到）。
+    for suit in (Suit.SPADE, Suit.HEART, Suit.DIAMOND, Suit.CLUB):
+        card_id = next(
+            card_id
+            for card_id in engine.state.deck
+            if engine.state.card(card_id).suit == suit
+        )
+        engine.move_in_frame(
+            None,
+            engine.state.refs((card_id,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.LOSE,
+            owner=None,
+        )
+
+    stored = engine.state.discard_suits_this_turn
+    assert stored == ["spade", "heart", "diamond", "club"], (
+        f"前置：存储序 = 置入序（首次出现序），不是花色枚举序：{stored}"
+    )
+
+    tags = visible_snapshot(session)["players"][0]["hero_tags"]
+    assert [tag["tag"] for tag in tags] == ["botu"], "前置：只画一条【博图】标签"
+    tag = tags[0]
+    assert tag["label"] == "博图 ♠♥♦♣", "label 是同一句话的纯文本"
+    assert [part["text"] for part in tag["parts"]][0] == "博图 ", (
+        "首段是技能名 + 一个尾空格（拼接才不会粘在一起）"
+    )
+
+    suit_parts = tag["parts"][1:]
+    assert len(suit_parts) == len(stored) == 4, "一色一段，不多不少"
+    assert [part["text"] for part in suit_parts] == [
+        SUIT_LABELS[suit]["symbol"] for suit in stored
+    ], "符号按存储序逐色取 SUIT_LABELS（唯一映射）"
+    assert [part["tone"] for part in suit_parts] == [
+        SUIT_LABELS[suit]["color"] for suit in stored
+    ], "红黑按存储序逐色取 SUIT_LABELS（唯一映射）"
+    assert [part["tone"] for part in suit_parts] == ["black", "red", "red", "black"], (
+        "独立口径：♠ / ♣ 黑、♥ / ♦ 红（规则的花色颜色，不是按枚举序）"
+    )
+    assert set(part["tone"] for part in suit_parts) <= {"red", "black"}, (
+        "tone 只取 red / black（前端 hero-tag-part 只认这两个类）"
+    )
+    assert "".join(part["text"] for part in tag["parts"]) == tag["label"], (
+        "parts 的拼接必须等于 label（有 parts 时只画 parts，多一份就会翻倍）"
+    )
+
+
+def test_the_fuyin_badge_disappears_once_the_skill_fires_this_turn() -> None:
+    """【父荫】的座位标签：本回合**没发动过**时画「父荫」，一发动就消失（skill-display 票 06）。
+
+    spec §5 第 06 行 / Q7④ / A4 的几条口径各有一条断言：
+
+    - **开局就画**：``skill_used_this_turn`` 为假 ⇒ ``{"tag": "fuyin", "label": "父荫"}``；
+    - **发动后立刻消失**：诸葛瞻成为一张【杀】的目标且条件成立（手牌数不大于使用者）⇒
+      ``fuyin_effect`` 落"本回合已用"位 ⇒ **同一次投影**里标签就不再下发。中间没有清除
+      事件，消失是每次投影重算出来的（spec §2 第 2 条 / A12）；
+    - **下一个回合重新出现**：``_clear_turn_effects`` 在回合末清掉这一位 ⇒ 下一回合的
+      ``TURN_START`` 起标签自动回来（作用域 = 一个回合）；
+    - **只写技能名**：载荷恰好 ``tag`` / ``label`` 两键，**没有** ``parts``（Q7⑥：布尔类
+      标签只写技能名、不写效果；Q14″A：``parts`` 只在需要上色时出现）。
+
+    驱动走**真引擎路径**（出牌阶段使用【杀】→ 目标派发 → 回合末清理），读口走**真产出路径**
+    （``visible_snapshot`` → ``players[].hero_tags``）。座位 0 = 诸葛瞻且**先手是攻击者**
+    （``first_seat=1``）：诸葛瞻手里 0 张、使用者出完【杀】还剩 2 张 ⇒ 条件「手牌数不大于
+    使用者」真的成立（0 ≤ 2），不是靠"掉血没发生"猜出来的。
+    """
+    from types import SimpleNamespace
+
+    from sgs.data import RuleConfig
+    from sgs.skills import skill_used_this_turn
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3),
+            SeatSpec(hand=(slash,)),
+        ],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id != slash),
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    class _PlaysFirstSlash:
+        """出牌阶段打第一张【杀】，然后结束阶段——只为把真目标派发走一遍。"""
+
+        def __init__(self) -> None:
+            self.played = False
+
+        def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+            # `PlayPhaseQuery.kind` 是裸字面量 ``"PLAY_PHASE"``（不是 ``QueryKind`` 成员）。
+            if query.kind == "PLAY_PHASE":
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == "slash":
+                        self.played = True
+                        return action
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, EndPhase)
+                )
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+
+    attacker = _PlaysFirstSlash()
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def turn_starts() -> list[int | None]:
+        return [
+            record.actor
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.TURN_START
+        ]
+
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}], (
+        "前置：本回合还没发动过 ⇒ 诸葛瞻的武将块上常驻「父荫」"
+    )
+    assert "parts" not in hero_tags()[0], (
+        "布尔类标签只写技能名（Q7⑥），不需要上色 ⇒ 不带 parts（Q14″A）"
+    )
+
+    run_queries(
+        engine,
+        [PassPlayer(), attacker],
+        lambda e: skill_used_this_turn(e.state, 0, "hero.zhugezhan.fuyin"),
+    )
+    assert attacker.played, "前置：攻击者真的在出牌阶段打出了【杀】"
+    assert engine.state.player(0).hp == 3, (
+        "前置：【父荫】真的生效了（这张【杀】被标成对你无效，没有掉体力）"
+    )
+    assert hero_tags() == [], "发动后**立刻**消失：同一次投影里就已经不画（没有清除事件）"
+
+    before = len(turn_starts())
+    run_queries(
+        engine,
+        [PassPlayer(), attacker],
+        lambda e: len(turn_starts()) > before,
+    )
+    assert engine.state.turn_seat == 0, "前置：确实进入了下一个回合（座位 0 的 TURN_START）"
+    assert not skill_used_this_turn(engine.state, 0, "hero.zhugezhan.fuyin"), (
+        "前置：回合末的 _clear_turn_effects 清掉了「本回合已用」位"
+    )
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}], (
+        "下一个回合起点 ⇒ 标签重新出现（作用域 = 一个回合）"
+    )
+
+
+def test_the_fuyin_badge_needs_a_live_skill_instance() -> None:
+    """Q7④ 的「有效」判据 = 实例是否真在解析中（skill-display 票 06）。
+
+    本票用**"把【父荫】从实例里移除"**（``Player.lost_skills``）这条手法，不用座位级失效
+    谓词：今天唯一的 ``SkillSuppressionPredicate.ALL_NON_LOCKED`` 只挡**非锁定技**
+    （``catalog.py``），而【父荫】是锁定技 ⇒ 它挡不住。票面（§3）把这条列为"以后会有锁定技
+    失效"的**预埋断言**：手段换了，判据仍是"实例不在 :func:`sgs.skills.resolve_instances`
+    里 ⇒ 标签必须消失"，与将来那种失效效果命中同一个闸。
+
+    两段：
+
+    - **失去 ⇒ 立刻不画**：``resolve_instances()`` 里没有 ``(0, FUYIN)`` ⇒ ``SELF`` 档根本
+      不调构造器。同时钉住"消失**不是**靠发动位"：``skill_used_this_turn`` 这时仍是假
+      （没有实例时它只能返回假），若把"有效"写进构造器，标签就会留着；
+    - **恢复 ⇒ 自动回来**：清掉 ``lost_skills`` 后下一次投影里标签就在（派生式，没有清除
+      事件：spec §2 第 2 条 / A12）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import resolve_instances, skill_used_this_turn
+
+    from sgs_web.projection import visible_snapshot
+
+    fuyin = "hero.zhugezhan.fuyin"
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3),
+            SeatSpec(hp=4, hero="zhenji"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int = 0) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    def resolved_ids(seat: int = 0) -> set[str]:
+        return {
+            instance.skill_id
+            for instance in resolve_instances(engine.state)
+            if instance.owner == seat
+        }
+
+    assert fuyin in resolved_ids(), "前置：【父荫】的实例真在解析中"
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}]
+
+    # 失去技能：实例不再产出 ⇒ 标签消失（座位字段 / 发动位一个字没动）。
+    engine.state.player(0).lost_skills.append(fuyin)
+    assert fuyin not in resolved_ids(), "前置：失去后实例真的不在 resolve_instances 里"
+    assert not skill_used_this_turn(engine.state, 0, fuyin), (
+        "前置：这条不是「发动过」导致的消失——发动位仍是假，消失只由实例闸派生"
+    )
+    assert hero_tags() == [], "技能失去 ⇒ 标签必须自动不画（Q7④：失去不显示）"
+
+    # 恢复：实例重新产出 ⇒ 下一次投影里标签自动回来（没有清除事件）。
+    engine.state.player(0).lost_skills.clear()
+    assert fuyin in resolved_ids(), "前置：恢复后实例回到解析中"
+    assert hero_tags() == [{"tag": "fuyin", "label": "父荫"}], (
+        "恢复后标签自动回来（派生式：下一次投影重算，不靠清除事件）"
+    )
+
+
+def test_the_fuyin_badge_is_only_on_zhugezhan() -> None:
+    """「父荫」只画在**持有【父荫】的那个座位**上（skill-display 票 06；spec §5 第 06 行）。
+
+    两段判据：
+
+    - **声明面**：【父荫】声明 ``WINDOW``、登记为 ``BadgeScope.SELF``（不是 ``ANY_SEAT``
+      ——它不是画在别人身上的技能）；
+    - **行为面**：诸葛瞻坐在**非本人座位**（座位 1）时，标签跟着他的武将块走（座位 1 有、
+      座位 0 没有）⇒ "只画在自己"是**持有人**的口径，与"哪个座位是玩家自己"无关。
+
+    值的生命周期由前两条用例钉住，本条只钉落座位。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG, BadgeKind, BadgeScope
+
+    from sgs_web.projection import BADGE_PROVIDERS, visible_snapshot
+
+    fuyin = "hero.zhugezhan.fuyin"
+    assert CATALOG[fuyin].badge is BadgeKind.WINDOW, (
+        "【父荫】没有声明座位常驻标签（声明面缺 ⇒ 登记表闭集审计也会红）"
+    )
+    assert BADGE_PROVIDERS[fuyin][0] is BadgeScope.SELF, (
+        "【父荫】画在**持有者自己的**座位上（不是目标座）"
+    )
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="zhenji"),
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+    snapshot = visible_snapshot(session)
+
+    assert snapshot["players"][1]["hero_tags"] == [{"tag": "fuyin", "label": "父荫"}], (
+        "诸葛瞻在座位 1 ⇒ 标签跟着他的武将块（与「哪个座位是玩家自己」无关）"
+    )
+    assert snapshot["players"][0]["hero_tags"] == [], (
+        "别的座位没有【父荫】⇒ 一条标签都不画"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 界马超【铁骑】的座位标签：生效期间画在**目标**身上，只有界马超有（skill-display 票 09）
+# ---------------------------------------------------------------------------
+
+
+class _TieqiDriver:
+    """把座位 0 推到「用【杀】指定座位 1 → 发动【铁骑】」，其余询问走最小应答。
+
+    与 :class:`_DoubleSwordDriver` 同一姿态：只驱动**真实引擎路径**，不测规则本身
+    （"令目标非锁定技失效 / 由目标决定弃牌"由 ``tests/test_hero_jie.py`` 的用例钉住）。
+    """
+
+    def __init__(self, slash: int, skill_id: str) -> None:
+        self.slash = slash
+        self.skill_id = skill_id
+
+    def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == self.slash:
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == self.skill_id:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == self.skill_id:
+                    return action
+        return PassPlayer().respond(query)
+
+
+def _tieqi_duel(pack, *, hero: str, skill_id: str, target_hand: tuple[int, ...] = ()):
+    """跑到一次【铁骑】结算完，返回 ``(engine, drivers)``。
+
+    构造与 ``tests/test_hero_jie.py::_tieqi_state`` 同一姿态：座位 0 = 该武将（手里一张
+    【杀】）、座位 1 = 关羽；牌堆第 3 张是**红色**判定牌（摸牌阶段取走前两张，判定取到它）
+    ⇒ 「红色 ⇒ 该目标不能使用【闪】」这条分支走得完整。判定牌取 ♥【桃】（标准牌堆一定有）。
+
+    驱动走**真实引擎路径**：出牌阶段对座位 1 使用【杀】→ 被问「是否发动【铁骑】」时发动；
+    其余询问由 :class:`PassPlayer` 取最小合法应答（目标的"弃不弃同花色牌"因此是 Pass）。
+    停止条件 = 这一次【杀】结算完且目标真的掉了 1 点体力。
+    """
+    slash = cards_of_type(pack, "slash")[0]
+    judge_card = next(
+        card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.type == "peach" and card.suit == Suit.HEART.value
+    )
+    fillers = [
+        card_id
+        for card_id in range(len(pack.deck.cards))
+        if card_id not in (slash, judge_card, *target_hand)
+    ]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(slash,), hero=hero),
+            SeatSpec(hand=target_hand, hero="guanyu"),
+        ],
+        deck=(fillers[0], fillers[1], judge_card, *fillers[2:]),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    drivers = [_TieqiDriver(slash, skill_id), PassPlayer()]
+    run_until(engine, drivers, lambda e: not e.stack and e.state.player(1).hp == 3)
+    return engine, drivers
+
+
+def test_the_jie_tieqi_badge_shows_while_the_target_is_suppressed() -> None:
+    """界马超【铁骑】生效期间，**目标**座位常驻「铁骑」；回合末消失（票 09 / A7）。
+
+    四条口径（spec §5 第 09 行 / Q8″ / Q11 / Q7⑥ / A12）：
+
+    - **落座位 = 目标**：铁骑命中座位 1 ⇒ 那块武将块上恰好 ``{"tag": "tieqi",
+      "label": "铁骑"}``；发动者界马超（座位 0）没有——它是画在**别人**身上的标签
+      （``BadgeScope.ANY_SEAT``）。
+    - **只写技能名**：载荷恰好 ``tag`` / ``label`` 两键、**没有** ``parts``（Q7⑥：布尔类
+      标签不写效果；Q14″A：``parts`` 只在需要上色时出现）。
+    - **判据 = 座位失效记录**（spec §5：``Player.suppressed_skills`` 含该 id）：驱动走
+      **真引擎路径**（界马超用【杀】指定目标 → 发动铁骑 → 判定 → 目标不弃牌），读口走
+      **真产出路径**（``visible_snapshot`` → ``players[].hero_tags``）。
+    - **生命周期是派生式**（A12）：回合末 ``suppressed=False`` 那条 delta 之后，下一次
+      投影里标签就没了；没有"清除事件"、没有新 delta。
+
+    声明面同时钉住：界马超的那条 ``SkillDef`` 声明 ``WINDOW``、登记为 ``ANY_SEAT``。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG, JIE_TIEQI, BadgeKind, BadgeScope
+
+    from sgs_web.projection import BADGE_PROVIDERS, visible_snapshot
+
+    assert CATALOG[JIE_TIEQI].badge is BadgeKind.WINDOW, (
+        "界马超【铁骑】没有声明座位常驻标签（声明面缺 ⇒ 登记表闭集审计也会红）"
+    )
+    assert BADGE_PROVIDERS[JIE_TIEQI][0] is BadgeScope.ANY_SEAT, (
+        "【铁骑】画在**目标**座位上，不是持有者自己（与【雄乱】/【义绝】同档）"
+    )
+
+    pack = load_content_pack(deck_profile="standard_108")
+    engine, drivers = _tieqi_duel(pack, hero="jie_machao", skill_id=JIE_TIEQI)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert [record.skill_id for record in engine.state.player(1).suppressed_skills] == [
+        JIE_TIEQI
+    ], "前置：铁骑把失效记录写在**目标**（座位 1）上（判据 = suppressed_skills 含该 id）"
+    assert hero_tags(1) == [{"tag": "tieqi", "label": "铁骑"}], (
+        "生效期间，**目标座位**的武将块上常驻「铁骑」"
+    )
+    assert "parts" not in hero_tags(1)[0], (
+        "布尔类标签只写技能名（Q7⑥），不需要上色 ⇒ 不带 parts（Q14″A）"
+    )
+    assert all(tag["tag"] != "tieqi" for tag in hero_tags(0)), (
+        "发动者（界马超，座位 0）自己没有这条标签"
+    )
+
+    # 回合末：失效记录被清、落一条 `suppressed=False` ⇒ 下一次投影里标签消失（派生式）。
+    run_until(
+        engine,
+        drivers,
+        lambda e: any(
+            getattr(record, "delta_type", None) == "skill_suppress"
+            and getattr(record, "suppressed", None) is False
+            for record in e.records
+        ),
+    )
+    clears = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "skill_suppress"
+        and record.suppressed is False
+    ]
+    assert [(record.seat, record.skill_id) for record in clears] == [(1, JIE_TIEQI)], (
+        "回合末落 `suppressed=False` 那条 delta（作用域 = 本回合）"
+    )
+    assert hero_tags(1) == [], "回合结束 ⇒ 目标座位上的「铁骑」消失"
+
+
+def test_the_standard_tieqi_leaves_no_badge() -> None:
+    """标准马超【铁骑】不画「铁骑」：它写**帧标签**、不写座位失效记录（票 09 / Q11）。
+
+    Q11 用户裁定「铁骑只挂界马超」：标准版【铁骑】只有判定 + 「不能使用【闪】响应此【杀】」
+    的帧标签 :data:`~sgs.resolution.Tag.UNRESPONSIVE`，牌面**没有**"令其本回合所有非锁定技
+    失效"那一段 ⇒ 目标座位上没有座位级失效记录，本票也不给它声明 ``badge``。
+
+    三段：
+
+    1. **声明面**：标准版没有 ``badge``、登记表里也没有它（漏给 = 标准马超也会亮「铁骑」）；
+    2. **行为面**：真引擎跑完一次标准【铁骑】（红色判定 ⇒ 目标手里有【闪】也**连窗口都没有**）
+       ⇒ 目标的 ``suppressed_skills`` 仍是空、武将块上一个「铁骑」都没有；
+    3. **对照**：目标真的掉了 1 点体力、且铁骑的发动询问真的出现过——排除"没跑起来所以没标签"。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG
+
+    from sgs_web.projection import BADGE_PROVIDERS, visible_snapshot
+
+    tieqi = "hero.machao.tieqi"
+    assert CATALOG[tieqi].badge is None, (
+        "Q11：标准马超的【铁骑】不声明 badge（只挂界马超）"
+    )
+    assert tieqi not in BADGE_PROVIDERS, "标准版不该有登记（幽灵登记会让它亮「铁骑」）"
+
+    pack = load_content_pack(deck_profile="standard_108")
+    dodge = cards_of_type(pack, "dodge")[0]
+    engine, _ = _tieqi_duel(
+        pack, hero="machao", skill_id=tieqi, target_hand=(dodge,)
+    )
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    assert engine.state.player(1).hp == 3, "对照：这一次【铁骑】真结算了（目标掉了 1 点体力）"
+    assert any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(record.query, "skill_id", None) == tieqi
+        for record in engine.records
+    ), "对照：标准【铁骑】确实被问过发动"
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.DODGE
+    ] == [], (
+        "红色判定 ⇒ 目标拿到的只是帧标签 UNRESPONSIVE（手里有【闪】也没有【闪】窗口）"
+    )
+    assert engine.state.player(1).suppressed_skills == [], (
+        "标准版【铁骑】不写座位级失效记录（它写的是帧标签）"
+    )
+    assert visible_snapshot(session)["players"][1]["hero_tags"] == [], (
+        "目标座位上一个「铁骑」都没有（判据不成立 ⇒ 整条标签不出现，fail-closed）"
+    )
+
+
+def test_the_tieqi_badge_is_shared_with_yijue_by_condition_only() -> None:
+    """「铁骑」与「义绝」各按**自己的 skill id** 判，不共用"任意失效记录"（票 09 §4 ⚠️）。
+
+    义绝的黑色分支一次落三条座位级记录，其中 ``suppressed_skills`` 那条与铁骑**同形**
+    （``scope=TURN`` / ``predicate=ALL_NON_LOCKED``）——唯一的区别是 ``skill_id``。若判据
+    写成"任意 ``ALL_NON_LOCKED`` 记录"，义绝就会点亮「铁骑」，**将来**任何新的失效技能也会
+    ——故本用例把这条纪律钉在行为面上：
+
+    1. **只有义绝的失效记录** ⇒ 不画「铁骑」（精确匹配 ``record.skill_id == JIE_TIEQI``）；
+    2. **义绝自己的标签**绑的是**禁令**（票 08 的裁定）：禁令来源落下 ⇒ 只出现「义绝」；
+    3. **两条技能命中同一座位** ⇒ 两个标签并列，各按自己的 skill_id；
+    4. **反向**：只摘掉铁骑那条失效记录 ⇒ 「铁骑」消失、「义绝」还在（两条判据独立）。
+
+    （``suppressed_skills`` 没有"逐来源清"的公开口子——唯一清点是回合末
+    ``_clear_turn_effects``——故第 4 段按既有测试的姿态直接清那个列表字段。）
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import JIE_TIEQI, YIJUE
+    from sgs.state import SkillSuppressionPredicate, SkillSuppressionScope
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="jie_machao"), SeatSpec(hero="jie_guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    tieqi_tag = {"tag": "tieqi", "label": "铁骑"}
+    yijue_tag = {"tag": "yijue", "label": "义绝"}
+
+    # 1. 义绝的失效记录与铁骑同形（scope / predicate 都相同）⇒ 判据只能按 skill_id。
+    assert engine.suppress_skills(1, YIJUE) is True
+    record = engine.state.player(1).suppressed_skills[0]
+    assert (record.scope, record.predicate) == (
+        SkillSuppressionScope.TURN,
+        SkillSuppressionPredicate.ALL_NON_LOCKED,
+    ), "前置：义绝的失效记录与铁骑同形（唯一区别是 skill_id）"
+    assert tieqi_tag not in hero_tags(1), (
+        "义绝的失效记录**不**点亮「铁骑」（判据按 skill_id 精确匹配，不是任意失效记录）"
+    )
+
+    # 2. 义绝自己的标签绑禁令来源（票 08）：禁令落下 ⇒ 只出现「义绝」。
+    assert engine.add_hand_card_prohibition(1, YIJUE) is True
+    assert hero_tags(1) == [yijue_tag], "禁令来源只点亮「义绝」，不点亮「铁骑」"
+
+    # 3. 铁骑也命中同一座位 ⇒ 两个标签并列，各按自己的 skill_id。
+    assert engine.suppress_skills(1, JIE_TIEQI) is True
+    both = hero_tags(1)
+    assert len(both) == 2, f"被两条技能命中 ⇒ 恰好两个标签（不重复、不并成一条）：{both}"
+    assert yijue_tag in both and tieqi_tag in both, (
+        "被义绝与铁骑同时命中 ⇒ 两个标签都在（各按自己的 skill_id）"
+    )
+
+    # 4. 反向：只摘掉铁骑的失效记录 ⇒ 「铁骑」消失、「义绝」还在（两条判据独立）。
+    engine.state.player(1).suppressed_skills = [
+        row for row in engine.state.player(1).suppressed_skills if row.skill_id != JIE_TIEQI
+    ]
+    assert hero_tags(1) == [yijue_tag], "铁骑记录摘掉后「铁骑」消失，「义绝」不受影响"
 
 
 def test_the_snapshot_carries_hand_limit_for_every_seat_without_touching_the_ai_projection() -> None:
@@ -14575,3 +15820,41 @@ def test_the_appearance_kind_is_a_closed_set_with_one_builder_per_member() -> No
         "每个外观组件种类都必须有投影构造器（漏登 = 界面上没有数据面）"
     )
     assert callable(APPEARANCE_BUILDERS[AppearanceKind.AVATAR])
+
+
+def test_the_badge_kind_is_a_closed_set_with_one_provider_per_declarer() -> None:
+    """小窗口类标签的**种类**是闭集（skill-display 票 01）：每条**声明**都必须有登记。
+
+    与外观组件那条同一姿态，判据换个方向：``APPEARANCE_BUILDERS`` 按 kind 索引，故核
+    "每个 kind 一条构造器"；标签登记表按 **skill id** 索引（与 ``catalog.ACTIVATION_PLANS``
+    同姿态：注册表按 skill id 索引允许，派发逻辑里不许出现技能 id 名单），故核
+    ``set(BADGE_PROVIDERS)`` **恰好等于**所有 ``SkillDef.badge is not None`` 的 skill id：
+    **漏登**（声明了却不画）与**幽灵登记**（画一条没人声明的）都即时变红。
+
+    本轮闭集只有 ``WINDOW``（座位常驻标签）；加成员必须同票交齐三件事（数据构造器 /
+    前端对 ``parts`` 的消费若需要 / 票面与 `06` 的登记），故这里写死成员集合——加第二个
+    kind 必须同时改这条断言（有意的摩擦）。**声明者名单**不写死：本票之后 03–09 票会各自
+    再加声明，而"声明 ⇔ 登记"的等式对每一次新增都同样有效。
+
+    本票只声明【裸衣】的两条定义（``hero.xuchu.luoyi`` / ``hero.jie_xuchu.luoyi``），两条
+    登记指向同一个构造器、都是 ``SELF`` 档。
+    """
+    from sgs.skills import CATALOG, BadgeKind, BadgeScope
+    from sgs_web.projection import BADGE_PROVIDERS
+
+    assert {kind.value for kind in BadgeKind} == {"window"}, (
+        "本轮只落座位常驻标签一个 kind（弹窗类仍走 AppearanceKind）"
+    )
+    declared = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.badge is not None
+    }
+    assert set(BADGE_PROVIDERS) == declared, (
+        "每条声明了 badge 的技能都必须有登记（漏登 = 标签永远不出现；"
+        f"幽灵登记 = 画一条没人声明的东西）：多 {sorted(set(BADGE_PROVIDERS) - declared)}、"
+        f"少 {sorted(declared - set(BADGE_PROVIDERS))}"
+    )
+    for scope, builder in BADGE_PROVIDERS.values():
+        assert isinstance(scope, BadgeScope), "登记表的值是 (落座位档, 构造器) 二元组"
+        assert callable(builder)

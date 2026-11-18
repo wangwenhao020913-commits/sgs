@@ -750,6 +750,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   color: #7d6f5c; letter-spacing: 0;
 }
 .mini-slot.judge-slot .slot-suit { font-size: calc(8 * var(--dsu)); }
+/* skill-display 票 02：槽里的花色分红黑，token 与卡面 / 花色按钮同一套
+   （红 `var(--accent)` / 黑 `var(--ink)`）；无 tone 时仍是上面那条的默认色 `#7d6f5c`。 */
+.mini-slot .slot-suit.red { color: var(--accent); }
+.mini-slot .slot-suit.black { color: var(--ink); }
 .mini-slot .slot-trans {
   position: absolute; right: calc(1 * var(--dsu)); top: calc(1 * var(--dsu));
   padding: 0 calc(1 * var(--dsu)); border-radius: 3px;
@@ -834,6 +838,10 @@ button.mini-slot { cursor: pointer; }
   font-size: calc(9 * var(--dsu)); font-weight: 600; white-space: nowrap;
 }
 .self .hero-tags .hero-tag { font-size: calc(11 * var(--dsu)); }
+/* skill-display 票 02：`parts` 里需要上色的段（花色）——与卡面同一套 token
+   （`.card.face .suit.red` / `.black`）；没有 tone 的段继承 chip 的默认色。 */
+.hero-tag-part.red { color: var(--accent); }
+.hero-tag-part.black { color: var(--ink); }
 
 /* 行高亮：金框行动中 / 加粗绿外圈可指定 / 绿内圈 + 填充已选 / 悬停浅绿。 */
 .seat.turn {
