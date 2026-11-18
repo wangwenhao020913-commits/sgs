@@ -4261,6 +4261,14 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.zhugeliang.guanxing": (_constant(3.0), "准备阶段观看牌堆顶并按任意顺序放回：改善摸牌"),
     "hero.huangyueying.jizhi": (_constant(3.0), "使用非延时锦囊时摸一张：净赚"),
     # yijiang-2014-round3 票 03：曹真移动版【司敌】——两个自动预发动入口（①②各一问）。
+    # jie-yijiang-2014-wuyi-caozhen 票 01：界吴懿移动版【奔袭】（用户 2026-11-18 签）。
+    # 代价 = 弃置任意张（≥1），收益 = 本阶段距离 −X + 下一张牌多指定 + 一次摸五张的机会；
+    # 收益通常远大于一张最便宜的牌 ⇒ 净正。
+    "hero.jie_wuyi_mobile.benxi": (
+        _constant(2.2),
+        "出牌阶段开始时弃任意张（≥1）：本阶段距离 −X、下一张基本牌/普通锦囊可额外指定至多 X 名"
+        "距离 1 的角色、那张牌造成过伤害再摸五张——有代价（弃置）但通常净赚",
+    ),
     # jie-yijiang-2014-wuyi-caozhen 票 03：界曹真【司敌】（预测型；用户 2026-11-18 签）。
     # 无代价、② 是**强制兑现**（中了一律有收益：摸一张 / 二选一），故给正分；"预测得准不准"
     # 打分器读不到（预测目标不在任何载荷里），只按"这条技能还能不能发动"定价。

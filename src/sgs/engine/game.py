@@ -4733,6 +4733,46 @@ class Engine:
                 return True
         return False
 
+    def arm_jie_benxi(self, seat: int, amount: int) -> None:
+        """界吴懿移动版【奔袭】的落位（jie-yijiang-2014-wuyi-caozhen 票 01）。
+
+        ``amount`` = 这一步弃置的牌数（X ≥ 1）。同时记下当下的 :attr:`GameState.phase_seq`
+        ——「本阶段」的有效性由它惰性判定（下一个出牌阶段序号一变，减距离与加成一起失效）。
+        **不发 delta**：与 ``fengpo_used`` / ``sidi_marks`` 同姿态。
+        """
+        player = self.state.player(seat)
+        player.jie_benxi_x = int(amount)
+        player.jie_benxi_seq = int(self.state.phase_seq)
+        player.jie_benxi_armed = True
+        player.jie_benxi_card = 0
+        player.jie_benxi_dealt = False
+
+    def consume_jie_benxi(self, seat: int, card_id: int) -> bool:
+        """【奔袭】的加成被**这张牌**消费掉（``USE_ON_USE``；用过即失效，不再等下一张）。
+
+        幂等：已经不是 armed ⇒ 返回 ``False``（同一次使用重入不重记）。
+        """
+        player = self.state.player(seat)
+        if not player.jie_benxi_armed:
+            return False
+        player.jie_benxi_armed = False
+        player.jie_benxi_card = int(card_id)
+        player.jie_benxi_dealt = False
+        return True
+
+    def clear_jie_benxi(self, seat: int) -> None:
+        """清掉【奔袭】的全部落位（**出牌阶段结束时**、与其它"本阶段"字段同一收尾点）。"""
+        player = self.state.player(seat)
+        player.jie_benxi_x = 0
+        player.jie_benxi_seq = -1
+        player.jie_benxi_armed = False
+        player.jie_benxi_card = 0
+        player.jie_benxi_dealt = False
+
+    def note_jie_benxi_dealt(self, seat: int) -> None:
+        """记"消费那张牌造成过伤害"（本次使用的一次事实，不逐点）。"""
+        self.state.player(seat).jie_benxi_dealt = True
+
     def set_sidi_mark(self, seat: int, predicted: int, target: int) -> None:
         """写一条【司敌】预测（界曹真移动版；jie-yijiang-2014-wuyi-caozhen 票 03）。
 
@@ -7490,6 +7530,9 @@ class Engine:
             self._clear_qimou_count(self.state.turn_seat)
             # lukang-mobile 票 01 陆抗移动版【决堰】·武器栏：牌面写「此阶段内」，同一收尾点。
             self._clear_duanyan_slash_bonus(self.state.turn_seat)
+            # jie-yijiang-2014-wuyi-caozhen 票 01 界吴懿移动版【奔袭】：同一个"本阶段"收尾点
+            # （牌 id 会被复用，留着会让下一阶段误判"这张牌造成过伤害"）。
+            self.clear_jie_benxi(self.state.turn_seat)
             # yijiang-2014-round3 票 03 曹真移动版【司敌】②：「令**其**本阶段使用【杀】的次数
             # 上限-1」的作用域 = 被限者的这个出牌阶段 ⇒ 同一收尾点清掉（字段在**被限者**身上，
             # 而"被限者"恒是当前回合角色）。

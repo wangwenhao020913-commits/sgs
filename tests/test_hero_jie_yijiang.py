@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+from sgs.effects import ModifierContext, distance
 from sgs.data import (
     Color,
     Identity,
@@ -3846,3 +3847,270 @@ def test_near_death_in_flight_reads_the_stack():
         assert engine.near_death_in_flight() is True
     finally:
         engine.stack.pop()
+
+
+# ---------------------------------------------------------------------------
+# 票 01：界吴懿移动版【奔袭】（jie-yijiang-2014-wuyi-caozhen；用户 2026-11-18 签 吴-A1 / 吴-C1）
+#
+# 牌面：出牌阶段开始时，弃置任意张牌 ⇒ 本阶段距离 −X、下一张基本牌 / 普通锦囊牌可额外指定
+# 至多 X 名**距离 1** 的角色、那张牌造成过伤害则摸五张。
+# ---------------------------------------------------------------------------
+
+WUYI = "jie_wuyi_mobile"
+JIE_BENXI = "hero.jie_wuyi_mobile.benxi"
+
+
+class _BenxiScript:
+    """座位 0 = 界吴懿：发动 → 弃 ``discard`` 张 → （可选）用一张牌 → 结束阶段。"""
+
+    def __init__(
+        self,
+        *,
+        discard: int = 1,
+        use_card: int | None = None,
+        use_targets: tuple[int, ...] = (),
+        activate: bool = True,
+    ) -> None:
+        self.discard = discard
+        self.use_card = use_card
+        self.use_targets = tuple(use_targets)
+        self.activate = activate
+        self.activations = 0
+        self.discards = 0
+        self.used = False
+        self._pass = PassPlayer()
+        self.dodged = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) == JIE_BENXI:
+            self.activations += 1
+            if not self.activate:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, Pass)
+                )
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        if query.kind == QueryKind.SELECT_CARDS and query.actor == 0:
+            self.discards += 1
+            total = len(query.slots)
+            picks = tuple(range(total - self.discard, total))
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectCards) and tuple(action.picks) == picks
+            )
+        if query.kind == QueryKind.DODGE and query.actor == 1 and not self.dodged:
+            action = next(
+                (
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, UseCard)
+                    and str(action.card.type) == "dodge"
+                ),
+                None,
+            )
+            if action is not None:
+                self.dodged = True
+                return action
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 0:
+            if self.use_card is not None and not self.used:
+                self.used = True
+                return _pick_use(query, self.use_card, self.use_targets, card_only=True)
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        return self._pass.respond(query)
+
+
+def _benxi_state(*, mine: tuple[int, ...], seats: int = 4, others: tuple[int, ...] = ()):
+    deck = deck_excluding(PACK, *mine, *others)
+    specs = [SeatSpec(hero=WUYI, hand=mine, hp=4, hp_max=4, identity=Identity.LORD)]
+    specs.append(SeatSpec(hand=others, hp=4, hp_max=4, identity=Identity.REBEL))
+    for _ in range(seats - 2):
+        specs.append(SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL))
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=seats if seats in (2, 4, 5, 6, 7, 8) else 4, first_seat=0),
+    )
+
+
+def _run_benxi(engine, script, stop, *, limit=4000):
+    players = [script for _ in engine.state.players]
+    return run_queries(engine, players, stop, limit=limit)
+
+
+def test_jie_benxi_arms_the_phase_and_reduces_distance():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _benxi_state(mine=mine)
+    engine = Engine.from_state(state, seed=41)
+    script = _BenxiScript(discard=1)
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    assert script.activations == 1
+    assert engine.state.player(0).jie_benxi_x == 1
+    assert engine.state.player(0).jie_benxi_seq == engine.state.phase_seq
+    # 座位 0 → 座位 2 的原始距离是 2，−1 之后是 1
+    assert distance(engine.state, 0, 2) == 1
+
+
+def test_jie_benxi_is_not_offered_without_a_card_to_discard():
+    """手牌 ∪ 装备区**皆空** ⇒ 连"是否发动"都不问（G1：不发没有候选的询问）。
+
+    直接断言条件回调（``from_state`` 从回合开头跑起、摸牌阶段总会摸两张 ⇒ 局面构造不出
+    "出牌阶段开始时空手"这一档）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills.catalog import MATCH_OWNER_KEY
+    from sgs.skills.target_change import _jie_benxi_condition
+
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=WUYI, hp=4, hp_max=4, identity=Identity.LORD),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    host = SimpleNamespace(state=state)
+    frame = SimpleNamespace(data={"source": 0, MATCH_OWNER_KEY: 0})
+    assert _jie_benxi_condition(host, frame) is False, "一张牌都没有 ⇒ 条件不成立"
+    state.player(0).hand.append(0)  # 随便一张牌
+    assert _jie_benxi_condition(host, frame) is True
+    frame.data[MATCH_OWNER_KEY] = 1
+    assert _jie_benxi_condition(host, frame) is False, "关于我：持有者换成别人 ⇒ 假"
+
+
+def test_jie_benxi_distance_and_bonus_expire_with_the_play_phase():
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _benxi_state(mine=mine)
+    engine = Engine.from_state(state, seed=43)
+    script = _BenxiScript(discard=1)
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    assert engine.state.player(0).jie_benxi_x == 1
+    # 直接跑过这个出牌阶段（结束阶段 + 弃牌阶段）⇒ 阶段末清理落位
+    _run_benxi(
+        engine,
+        script,
+        lambda e: e.state.player(0).jie_benxi_x == 0 and not e.state.player(0).jie_benxi_armed,
+    )
+    assert engine.state.player(0).jie_benxi_card == 0
+    assert distance(engine.state, 0, 2) == 2
+
+
+def test_jie_benxi_consumes_the_bonus_on_the_next_basic_or_trick():
+    slash = cards_of_type(PACK, "slash")[0]
+    mine = (slash,) + _hand_of(basic=1, trick=1, equipment=2, skip=(slash,))
+    state = _benxi_state(mine=mine, others=(cards_of_type(PACK, "dodge")[0],))
+    engine = Engine.from_state(state, seed=44)
+    script = _BenxiScript(discard=1, use_card=slash, use_targets=(1,))
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_card != 0)
+    assert engine.state.player(0).jie_benxi_armed is False, "用过即失效"
+    assert engine.state.player(0).jie_benxi_card == slash
+    assert engine.state.player(0).jie_benxi_x == 1, "距离那一半仍在本阶段有效"
+
+
+def test_jie_benxi_draws_five_when_the_card_dealt_damage():
+    slash = cards_of_type(PACK, "slash")[0]
+    mine = (slash,) + _hand_of(basic=1, trick=1, equipment=2, skip=(slash,))
+    state = _benxi_state(mine=mine)
+    engine = Engine.from_state(state, seed=45)
+    script = _BenxiScript(discard=1, use_card=slash, use_targets=(1,))
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    before = len(engine.state.player(0).hand)
+    # 【杀】离手 −1、结算后摸五张 ⇒ 净 +4
+    _run_benxi(
+        engine,
+        script,
+        lambda e: len(e.state.player(0).hand) >= before + 4,
+    )
+    assert engine.state.player(0).jie_benxi_dealt is True, "造成过伤害"
+    assert len(engine.state.player(0).hand) >= before + 4
+    assert engine.state.player(1).hp == 3
+
+
+def test_jie_benxi_draws_nothing_when_the_card_was_dodged():
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    mine = (slash,) + _hand_of(basic=1, trick=1, equipment=2, skip=(slash,))
+    state = _benxi_state(mine=mine, others=(dodge,))
+    engine = Engine.from_state(state, seed=46)
+    script = _BenxiScript(discard=1, use_card=slash, use_targets=(1,))
+    _run_benxi(engine, script, lambda e: e.state.player(0).jie_benxi_armed)
+    before = len(engine.state.player(0).hand)
+    _run_benxi(
+        engine,
+        script,
+        lambda e: e.state.player(0).jie_benxi_card != 0
+        and e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    assert script.dodged is True, "座位 1 打出了【闪】"
+    assert engine.state.player(0).jie_benxi_dealt is False, "被【闪】抵消 ⇒ 没造成过伤害"
+    assert engine.state.player(1).hp == 4
+    assert len(engine.state.player(0).hand) < before + 4, "没摸五张"
+
+
+def test_jie_benxi_extra_count_and_target_set_callbacks():
+    """两条"额外目标"修饰器的判据（直接调回调，8 人局的远座位才观察得到）。"""
+    from sgs.effects import distance as _distance
+    from sgs.skills.target_change import (
+        _jie_benxi_extra_count,
+        _jie_benxi_target_set,
+    )
+
+    duel = cards_of_type(PACK, "duel")[0]
+    mine = _hand_of(basic=1, trick=1, equipment=2)
+    state = _benxi_state(mine=mine, seats=8)
+    called = {
+        "ctx": ModifierContext(subject=0, card=state.card(duel)),
+    }
+    engine = Engine.from_state(state, seed=47)
+    engine.arm_jie_benxi(0, 1)
+    player = engine.state.player(0)
+    player.jie_benxi_seq = engine.state.phase_seq
+    ctx = ModifierContext(subject=0, owner=0, card=engine.state.card(duel))
+    assert _jie_benxi_extra_count(engine.state, ctx, 1) == 2, "目标数 = 额定 1 + X(1)"
+    # 距离 1 的座位可以当**额外**目标（组合里"远"的座位数不超过额定数）
+    assert _jie_benxi_target_set(
+        engine.state,
+        ModifierContext(subject=0, owner=0, card=ctx.card, use_targets=(1, 2)),
+        True,
+    )
+    far = [seat for seat in range(1, 8) if _distance(engine.state, 0, seat) > 1]
+    assert far, "8 人局里一定有距离 > 1 的座位"
+    assert not _jie_benxi_target_set(
+        engine.state,
+        ModifierContext(
+            subject=0, owner=0, card=ctx.card, use_targets=(far[0], far[-1])
+        ),
+        True,
+    ), "两个都远 ⇒ 超过额定目标数 ⇒ 这一组不合法"
+    # 没 armed / 不是基本牌或普通锦囊牌 ⇒ 原样放行（不参与）
+    assert not _jie_benxi_target_set(
+        engine.state,
+        ModifierContext(subject=0, owner=0, card=ctx.card, use_targets=(1, 2)),
+        False,
+    )
+
+
+def test_jie_benxi_and_wuyi_benxi_are_distinct_declarations():
+    from sgs.skills import CATALOG
+
+    jie = CATALOG[JIE_BENXI]
+    standard = CATALOG["hero.wuyi.benxi"]
+    assert jie.skill_id != standard.skill_id
+    assert jie.locked is False and standard.locked is True
+    assert jie.requirement != standard.requirement
