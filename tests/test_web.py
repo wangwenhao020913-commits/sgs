@@ -103,6 +103,7 @@ from support.positions import (  # noqa: E402
     build_state,
     cards_of_type,
     deck_excluding,
+    run_until,
 )
 from support.scripts import PassPlayer, ran_timing, run_queries  # noqa: E402
 
@@ -9442,6 +9443,271 @@ def test_the_fuyin_badge_is_only_on_zhugezhan() -> None:
     assert snapshot["players"][0]["hero_tags"] == [], (
         "别的座位没有【父荫】⇒ 一条标签都不画"
     )
+
+
+# ---------------------------------------------------------------------------
+# 界马超【铁骑】的座位标签：生效期间画在**目标**身上，只有界马超有（skill-display 票 09）
+# ---------------------------------------------------------------------------
+
+
+class _TieqiDriver:
+    """把座位 0 推到「用【杀】指定座位 1 → 发动【铁骑】」，其余询问走最小应答。
+
+    与 :class:`_DoubleSwordDriver` 同一姿态：只驱动**真实引擎路径**，不测规则本身
+    （"令目标非锁定技失效 / 由目标决定弃牌"由 ``tests/test_hero_jie.py`` 的用例钉住）。
+    """
+
+    def __init__(self, slash: int, skill_id: str) -> None:
+        self.slash = slash
+        self.skill_id = skill_id
+
+    def respond(self, query):  # noqa: ANN001 - 与 Participant 协议一致
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == self.slash:
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == self.skill_id:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill) and action.skill_id == self.skill_id:
+                    return action
+        return PassPlayer().respond(query)
+
+
+def _tieqi_duel(pack, *, hero: str, skill_id: str, target_hand: tuple[int, ...] = ()):
+    """跑到一次【铁骑】结算完，返回 ``(engine, drivers)``。
+
+    构造与 ``tests/test_hero_jie.py::_tieqi_state`` 同一姿态：座位 0 = 该武将（手里一张
+    【杀】）、座位 1 = 关羽；牌堆第 3 张是**红色**判定牌（摸牌阶段取走前两张，判定取到它）
+    ⇒ 「红色 ⇒ 该目标不能使用【闪】」这条分支走得完整。判定牌取 ♥【桃】（标准牌堆一定有）。
+
+    驱动走**真实引擎路径**：出牌阶段对座位 1 使用【杀】→ 被问「是否发动【铁骑】」时发动；
+    其余询问由 :class:`PassPlayer` 取最小合法应答（目标的"弃不弃同花色牌"因此是 Pass）。
+    停止条件 = 这一次【杀】结算完且目标真的掉了 1 点体力。
+    """
+    slash = cards_of_type(pack, "slash")[0]
+    judge_card = next(
+        card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.type == "peach" and card.suit == Suit.HEART.value
+    )
+    fillers = [
+        card_id
+        for card_id in range(len(pack.deck.cards))
+        if card_id not in (slash, judge_card, *target_hand)
+    ]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(slash,), hero=hero),
+            SeatSpec(hand=target_hand, hero="guanyu"),
+        ],
+        deck=(fillers[0], fillers[1], judge_card, *fillers[2:]),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    drivers = [_TieqiDriver(slash, skill_id), PassPlayer()]
+    run_until(engine, drivers, lambda e: not e.stack and e.state.player(1).hp == 3)
+    return engine, drivers
+
+
+def test_the_jie_tieqi_badge_shows_while_the_target_is_suppressed() -> None:
+    """界马超【铁骑】生效期间，**目标**座位常驻「铁骑」；回合末消失（票 09 / A7）。
+
+    四条口径（spec §5 第 09 行 / Q8″ / Q11 / Q7⑥ / A12）：
+
+    - **落座位 = 目标**：铁骑命中座位 1 ⇒ 那块武将块上恰好 ``{"tag": "tieqi",
+      "label": "铁骑"}``；发动者界马超（座位 0）没有——它是画在**别人**身上的标签
+      （``BadgeScope.ANY_SEAT``）。
+    - **只写技能名**：载荷恰好 ``tag`` / ``label`` 两键、**没有** ``parts``（Q7⑥：布尔类
+      标签不写效果；Q14″A：``parts`` 只在需要上色时出现）。
+    - **判据 = 座位失效记录**（spec §5：``Player.suppressed_skills`` 含该 id）：驱动走
+      **真引擎路径**（界马超用【杀】指定目标 → 发动铁骑 → 判定 → 目标不弃牌），读口走
+      **真产出路径**（``visible_snapshot`` → ``players[].hero_tags``）。
+    - **生命周期是派生式**（A12）：回合末 ``suppressed=False`` 那条 delta 之后，下一次
+      投影里标签就没了；没有"清除事件"、没有新 delta。
+
+    声明面同时钉住：界马超的那条 ``SkillDef`` 声明 ``WINDOW``、登记为 ``ANY_SEAT``。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG, JIE_TIEQI, BadgeKind, BadgeScope
+
+    from sgs_web.projection import BADGE_PROVIDERS, visible_snapshot
+
+    assert CATALOG[JIE_TIEQI].badge is BadgeKind.WINDOW, (
+        "界马超【铁骑】没有声明座位常驻标签（声明面缺 ⇒ 登记表闭集审计也会红）"
+    )
+    assert BADGE_PROVIDERS[JIE_TIEQI][0] is BadgeScope.ANY_SEAT, (
+        "【铁骑】画在**目标**座位上，不是持有者自己（与【雄乱】/【义绝】同档）"
+    )
+
+    pack = load_content_pack(deck_profile="standard_108")
+    engine, drivers = _tieqi_duel(pack, hero="jie_machao", skill_id=JIE_TIEQI)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    assert [record.skill_id for record in engine.state.player(1).suppressed_skills] == [
+        JIE_TIEQI
+    ], "前置：铁骑把失效记录写在**目标**（座位 1）上（判据 = suppressed_skills 含该 id）"
+    assert hero_tags(1) == [{"tag": "tieqi", "label": "铁骑"}], (
+        "生效期间，**目标座位**的武将块上常驻「铁骑」"
+    )
+    assert "parts" not in hero_tags(1)[0], (
+        "布尔类标签只写技能名（Q7⑥），不需要上色 ⇒ 不带 parts（Q14″A）"
+    )
+    assert all(tag["tag"] != "tieqi" for tag in hero_tags(0)), (
+        "发动者（界马超，座位 0）自己没有这条标签"
+    )
+
+    # 回合末：失效记录被清、落一条 `suppressed=False` ⇒ 下一次投影里标签消失（派生式）。
+    run_until(
+        engine,
+        drivers,
+        lambda e: any(
+            getattr(record, "delta_type", None) == "skill_suppress"
+            and getattr(record, "suppressed", None) is False
+            for record in e.records
+        ),
+    )
+    clears = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "skill_suppress"
+        and record.suppressed is False
+    ]
+    assert [(record.seat, record.skill_id) for record in clears] == [(1, JIE_TIEQI)], (
+        "回合末落 `suppressed=False` 那条 delta（作用域 = 本回合）"
+    )
+    assert hero_tags(1) == [], "回合结束 ⇒ 目标座位上的「铁骑」消失"
+
+
+def test_the_standard_tieqi_leaves_no_badge() -> None:
+    """标准马超【铁骑】不画「铁骑」：它写**帧标签**、不写座位失效记录（票 09 / Q11）。
+
+    Q11 用户裁定「铁骑只挂界马超」：标准版【铁骑】只有判定 + 「不能使用【闪】响应此【杀】」
+    的帧标签 :data:`~sgs.resolution.Tag.UNRESPONSIVE`，牌面**没有**"令其本回合所有非锁定技
+    失效"那一段 ⇒ 目标座位上没有座位级失效记录，本票也不给它声明 ``badge``。
+
+    三段：
+
+    1. **声明面**：标准版没有 ``badge``、登记表里也没有它（漏给 = 标准马超也会亮「铁骑」）；
+    2. **行为面**：真引擎跑完一次标准【铁骑】（红色判定 ⇒ 目标手里有【闪】也**连窗口都没有**）
+       ⇒ 目标的 ``suppressed_skills`` 仍是空、武将块上一个「铁骑」都没有；
+    3. **对照**：目标真的掉了 1 点体力、且铁骑的发动询问真的出现过——排除"没跑起来所以没标签"。
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG
+
+    from sgs_web.projection import BADGE_PROVIDERS, visible_snapshot
+
+    tieqi = "hero.machao.tieqi"
+    assert CATALOG[tieqi].badge is None, (
+        "Q11：标准马超的【铁骑】不声明 badge（只挂界马超）"
+    )
+    assert tieqi not in BADGE_PROVIDERS, "标准版不该有登记（幽灵登记会让它亮「铁骑」）"
+
+    pack = load_content_pack(deck_profile="standard_108")
+    dodge = cards_of_type(pack, "dodge")[0]
+    engine, _ = _tieqi_duel(
+        pack, hero="machao", skill_id=tieqi, target_hand=(dodge,)
+    )
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    assert engine.state.player(1).hp == 3, "对照：这一次【铁骑】真结算了（目标掉了 1 点体力）"
+    assert any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(record.query, "skill_id", None) == tieqi
+        for record in engine.records
+    ), "对照：标准【铁骑】确实被问过发动"
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.DODGE
+    ] == [], (
+        "红色判定 ⇒ 目标拿到的只是帧标签 UNRESPONSIVE（手里有【闪】也没有【闪】窗口）"
+    )
+    assert engine.state.player(1).suppressed_skills == [], (
+        "标准版【铁骑】不写座位级失效记录（它写的是帧标签）"
+    )
+    assert visible_snapshot(session)["players"][1]["hero_tags"] == [], (
+        "目标座位上一个「铁骑」都没有（判据不成立 ⇒ 整条标签不出现，fail-closed）"
+    )
+
+
+def test_the_tieqi_badge_is_shared_with_yijue_by_condition_only() -> None:
+    """「铁骑」与「义绝」各按**自己的 skill id** 判，不共用"任意失效记录"（票 09 §4 ⚠️）。
+
+    义绝的黑色分支一次落三条座位级记录，其中 ``suppressed_skills`` 那条与铁骑**同形**
+    （``scope=TURN`` / ``predicate=ALL_NON_LOCKED``）——唯一的区别是 ``skill_id``。若判据
+    写成"任意 ``ALL_NON_LOCKED`` 记录"，义绝就会点亮「铁骑」，**将来**任何新的失效技能也会
+    ——故本用例把这条纪律钉在行为面上：
+
+    1. **只有义绝的失效记录** ⇒ 不画「铁骑」（精确匹配 ``record.skill_id == JIE_TIEQI``）；
+    2. **义绝自己的标签**绑的是**禁令**（票 08 的裁定）：禁令来源落下 ⇒ 只出现「义绝」；
+    3. **两条技能命中同一座位** ⇒ 两个标签并列，各按自己的 skill_id；
+    4. **反向**：只摘掉铁骑那条失效记录 ⇒ 「铁骑」消失、「义绝」还在（两条判据独立）。
+
+    （``suppressed_skills`` 没有"逐来源清"的公开口子——唯一清点是回合末
+    ``_clear_turn_effects``——故第 4 段按既有测试的姿态直接清那个列表字段。）
+    """
+    from types import SimpleNamespace
+
+    from sgs.skills import JIE_TIEQI, YIJUE
+    from sgs.state import SkillSuppressionPredicate, SkillSuppressionScope
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="jie_machao"), SeatSpec(hero="jie_guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    def hero_tags(seat: int) -> list[dict]:
+        return visible_snapshot(session)["players"][seat]["hero_tags"]
+
+    tieqi_tag = {"tag": "tieqi", "label": "铁骑"}
+    yijue_tag = {"tag": "yijue", "label": "义绝"}
+
+    # 1. 义绝的失效记录与铁骑同形（scope / predicate 都相同）⇒ 判据只能按 skill_id。
+    assert engine.suppress_skills(1, YIJUE) is True
+    record = engine.state.player(1).suppressed_skills[0]
+    assert (record.scope, record.predicate) == (
+        SkillSuppressionScope.TURN,
+        SkillSuppressionPredicate.ALL_NON_LOCKED,
+    ), "前置：义绝的失效记录与铁骑同形（唯一区别是 skill_id）"
+    assert tieqi_tag not in hero_tags(1), (
+        "义绝的失效记录**不**点亮「铁骑」（判据按 skill_id 精确匹配，不是任意失效记录）"
+    )
+
+    # 2. 义绝自己的标签绑禁令来源（票 08）：禁令落下 ⇒ 只出现「义绝」。
+    assert engine.add_hand_card_prohibition(1, YIJUE) is True
+    assert hero_tags(1) == [yijue_tag], "禁令来源只点亮「义绝」，不点亮「铁骑」"
+
+    # 3. 铁骑也命中同一座位 ⇒ 两个标签并列，各按自己的 skill_id。
+    assert engine.suppress_skills(1, JIE_TIEQI) is True
+    both = hero_tags(1)
+    assert len(both) == 2, f"被两条技能命中 ⇒ 恰好两个标签（不重复、不并成一条）：{both}"
+    assert yijue_tag in both and tieqi_tag in both, (
+        "被义绝与铁骑同时命中 ⇒ 两个标签都在（各按自己的 skill_id）"
+    )
+
+    # 4. 反向：只摘掉铁骑的失效记录 ⇒ 「铁骑」消失、「义绝」还在（两条判据独立）。
+    engine.state.player(1).suppressed_skills = [
+        row for row in engine.state.player(1).suppressed_skills if row.skill_id != JIE_TIEQI
+    ]
+    assert hero_tags(1) == [yijue_tag], "铁骑记录摘掉后「铁骑」消失，「义绝」不受影响"
 
 
 def test_the_snapshot_carries_hand_limit_for_every_seat_without_touching_the_ai_projection() -> None:

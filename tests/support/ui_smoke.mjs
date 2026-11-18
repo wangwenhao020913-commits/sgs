@@ -20496,6 +20496,62 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         + ` 座位 0=${yijueChipIn(0) ? "有" : "（无）"}`
       : "座位 1 没有 yijue chip");
 
+  /* skill-display 票 09：界马超【铁骑】的座位标签——**生效期间画在目标身上**，界马超自己
+   * 那块没有它（服务端取值由
+   * `tests/test_web.py::test_the_jie_tieqi_badge_shows_while_the_target_is_suppressed`
+   * 从真投影钉住：判据 = 失效记录里**精确匹配铁骑的 id**、回合末派生消失；标准马超的
+   * 【铁骑】不画那条由 `test_the_standard_tieqi_leaves_no_badge` 钉）。这里只钉界面读法：
+   * 标签跟着 `hero_tags` 的**座位**走，布尔类标签照旧一个**纯文本** chip（只写技能名，
+   * 没有 `parts` / 没有元素子节点；Q7⑥ / Q14″A）。 */
+  const tieqiView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9420,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时会自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9420 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  // 座位 0 = 界马超（发动者）、座位 1 = 被指定的目标（铁骑画在他身上）。
+  tieqiView.heroes = { 0: "jie_machao", 1: "guanyu", 2: "diaochan" };
+  tieqiView.snapshot.players[0].hero_name = "界马超";
+  tieqiView.snapshot.players[1].hero_name = "关羽";
+  tieqiView.snapshot.players[0].hero_tags = [];
+  tieqiView.snapshot.players[1].hero_tags = [{ tag: "tieqi", label: "铁骑" }];
+  tieqiView.snapshot.players[2].hero_tags = [];
+  ui.state.view = tieqiView;
+  ui.resetSelection();
+  ui.renderTable();
+  const tieqiTagsBoxIn = (seat) => {
+    if (Number(seat) === Number(tieqiView.snapshot.seat)) {
+      return $("t-self-hero-tags") || null;
+    }
+    const seatNode = seatBox(seat);
+    return seatNode ? boxSkills(seatNode).find((node) => hasClass(node, "hero-tags")) : null;
+  };
+  const tieqiChipIn = (seat) => {
+    const box = tieqiTagsBoxIn(seat);
+    return box
+      ? Array.from(box.children).find(
+        (node) => hasClass(node, "hero-tag")
+          && node.getAttribute("data-tag") === "tieqi",
+      ) || null
+      : null;
+  };
+  const targetTieqiBox = tieqiTagsBoxIn(1);
+  const targetTieqiChip = tieqiChipIn(1);
+  check("TIEQI-01a 「铁骑」画在**目标**（座位 1）的武将块上：纯文本 chip、不带 parts",
+    !!targetTieqiBox && targetTieqiBox.hidden === false
+      && !!targetTieqiChip && targetTieqiChip.children.length === 0
+      && targetTieqiChip.textContent === "铁骑"
+      && targetTieqiChip.className === "hero-tag"
+      && tieqiChipIn(0) === null,
+    targetTieqiChip
+      ? `铁骑 chip 元素子节点=${targetTieqiChip.children.length}`
+        + ` 文本=${JSON.stringify(targetTieqiChip.textContent)}`
+        + ` class=${JSON.stringify(targetTieqiChip.className)}`
+        + ` 座位 0=${tieqiChipIn(0) ? "有" : "（无）"}`
+      : "座位 1 没有 tieqi chip");
+
   /* skill-display 票 02：装备区 / 判定区槽里的花色也要分红黑，且与手牌大卡面同一份
    * `card.color`（`card-view.js:suitColorClass`，不抄第二份花色表）。载荷侧
    * `decorate_snapshot` 对 `equip` / `judge` 也跑了 `card_display`，故槽里的牌已带 `color`。

@@ -49,6 +49,7 @@ from sgs.skills import (
     FREE_SPLIT,
     AppearanceKind,
     JIE_LUOSHEN,
+    JIE_TIEQI,
     LORD_SKILL_IDS,
     LUOSHEN,
     SEAT_PREFIX,
@@ -985,6 +986,43 @@ def _yijue_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return None
 
 
+def _jie_tieqi_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """界马超【铁骑】的座位标签 = **目标**座位的「铁骑」（skill-display 票 09）。
+
+    一条判据，读引擎既有读口（spec §2 第 1 条：投影只取不判）：
+
+    - **生效中**：``Player.suppressed_skills`` 里有 ``skill_id == `` :data:`sgs.skills.JIE_TIEQI`
+      的那条记录就画。记录由 :meth:`sgs.engine.Engine.suppress_skills` 写入（铁骑自己的写点 =
+      ``_jie_tieqi`` 的"令其本回合所有非锁定技失效"那一段）、由回合末 ``_clear_turn_effects``
+      清空 ⇒ 标签随每次投影重算，"回合结束 ⇒ 消失"是**派生**出来的，没有清除事件、没有新
+      delta（spec §2 第 2 条 / A12）。
+
+    三处**故意的读法**：
+
+    - **精确匹配 ``skill_id``，不按谓词扫**（票面 §4 的 ⚠️ / spec §2 第 1 条）：义绝的黑色分支
+      也落一条**同形**记录（``scope=TURN`` / ``predicate=ALL_NON_LOCKED``）——若写成"任意
+      ``ALL_NON_LOCKED`` 记录都算"，义绝就会点亮「铁骑」，**将来**任何新的失效技能也会。
+      逐条记录比较 ``record.skill_id`` 是唯一能把两条技能分开的判据（记录里的 ``skill_id``
+      = **施加失效的那条技能**，见 :class:`sgs.state.SkillSuppression`）。
+    - **只挂界马超**（Q11 用户裁定）：标准马超【铁骑】只写帧标签
+      :data:`~sgs.resolution.Tag.UNRESPONSIVE`、不写座位级失效记录，故它没有本构造器
+      （`tests/test_web.py::test_the_standard_tieqi_leaves_no_badge` 钉住）。
+    - **画在目标身上，不在持有者身上**：本票是 ``ANY_SEAT``（对**每个座位**各调一次），
+      ``seat`` 是"要画的座位"而不是"谁的技能"——铁骑的技能持有者是**别人**，故这里与
+      ``_fuyin_badge``（``SELF`` 档）不同：**不看** ``resolve_instances``、也不看技能是否
+      失效（失效是引擎侧已经落下的公开事实，谁施加的不影响"这个座位被封印了"）。
+
+    载荷按 Q7⑥ **只写技能名**：``{"tag": "tieqi", "label": "铁骑"}``，没有 ``parts``
+    （布尔类标签没有要上色的段；Q14″A：``parts`` 只在需要上色时出现）。
+    """
+    if any(
+        record.skill_id == JIE_TIEQI
+        for record in state.player(seat).suppressed_skills
+    ):
+        return {"tag": "tieqi", "label": "铁骑"}
+    return None
+
+
 BADGE_PROVIDERS: Mapping[
     str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
 ] = MappingProxyType(
@@ -1009,6 +1047,11 @@ BADGE_PROVIDERS: Mapping[
         # 来源里有这条 id），故两条同时命中一个座位时两个标签并列；红色分支没有持续状态
         # ⇒ 自然不画（A6 的后半句）。
         YIJUE: (BadgeScope.ANY_SEAT, _yijue_badge),
+        # 【铁骑】同样画在**目标**身上（spec §5 第 09 行 / Q8″），但判据是另一格：失效记录
+        # （``Player.suppressed_skills``）里**精确匹配本技能的 id**——不按 ``ALL_NON_LOCKED``
+        # 扫（票面 §4 的 ⚠️：那会让义绝、以及将来任何失效技能点亮「铁骑」）。只有界马超这
+        # 一版登记（Q11：标准【铁骑】写帧标签、不写座位级失效记录）。
+        JIE_TIEQI: (BadgeScope.ANY_SEAT, _jie_tieqi_badge),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。
