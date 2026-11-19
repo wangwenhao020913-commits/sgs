@@ -290,6 +290,53 @@ def test_hero_assignments_are_read_from_the_engine_state() -> None:
     assert session.hero_assignments == (None,) * 2, "hero_pool=None 是无武将模式"
 
 
+def test_a_session_can_take_a_ready_made_pve_rule_config() -> None:
+    """M7 票 19：``Session(rule_config=)`` 接管一份**现成的** PvE 配置（含座位表）。
+
+    「重打该场」要求同 ``PveConfig`` + 同 ``battle_seed`` 起同一局；``player_count`` 现算
+    配置那条路给不出座位表（票 04 §8.1），故会话层要有这条入口。座位表与武将发放入口互斥
+    （引擎同一判据），``player_count`` 被忽略。
+    """
+    from sgs.data import (
+        Identity,
+        Mode,
+        PveConfig,
+        PveSeat,
+        PveVictory,
+        PveVictoryKind,
+    )
+    from sgs_web.session import Session as WebSession
+
+    pve = PveConfig(
+        identities=(Identity.ALLY, Identity.ENEMY),
+        principal=0,
+        victory=PveVictory(kind=PveVictoryKind.ROUT),
+        seats=(
+            PveSeat(hero="jie_liubei", name="刘备", hp=4, hp_max=4),
+            PveSeat(hero=None, name="黄巾力士", hp=3, hp_max=3),
+        ),
+    )
+    rule = RuleConfig(player_count=2, mode=Mode.PVE, pve=pve)
+    session = WebSession(seed=4242, rule_config=rule, timeout_seconds=None)
+
+    assert session.rule_config is rule
+    assert session.rule_config.mode is Mode.PVE
+    assert session.rule_config.player_count == 2
+    assert session.human_seat == 0
+    assert session.hero_assignments == ("jie_liubei", None), "座位表定死谁坐哪"
+    assert session.heroes == () and session.hero_pool is None, "没有武将发放"
+    header = session.records()[0]
+    assert header.rule_config.pve == pve, "整份 PvE 配置进 header（同一场可自证）"
+
+    same = WebSession(seed=4242, rule_config=rule, player_count=8, timeout_seconds=None)
+    assert same.rule_config.player_count == 2, "player_count 不参与现算配置"
+
+    with pytest.raises(ValueError, match="互斥|座位表"):
+        WebSession(
+            seed=4242, rule_config=rule, my_hero="nengren", timeout_seconds=None
+        )
+
+
 def test_the_hero_pool_is_dealt_from_the_enabled_pool_by_default() -> None:
     session = Session(
         seed=29, ai="random", timeout_seconds=None, player_count=5, hero_pool=()

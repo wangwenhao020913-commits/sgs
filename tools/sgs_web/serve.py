@@ -18,7 +18,22 @@
 ``GET``          ``/api/decks``                      开局页牌堆档位列表（内容包 decks 的键 + 文案）
 ``GET``          ``/api/runs``                       录像列表
 ``GET``          ``/api/runs/<name>``                某局录像（meta + 记录流）
+``GET``          ``/api/script-save``                剧本存档三态摘要（M7 票 19）
+``POST``         ``/api/script-save/restore``        从 ``.bak`` 恢复主档（坏档修复）
+``DELETE``       ``/api/script-save``                放弃存档（删两份 + 解锁价值表）
+``POST``         ``/api/script-roster``              剧本清单 + 各自的 3 名初始角色候选
+``POST``         ``/api/script-runs``                建档 S₀（撞旧档要带 ``expected_revision``）
+``POST``         ``/api/script-runs/<id>/resume``    继续：读档回棋盘
+``GET``          ``/api/script-runs/<id>``           棋盘视图（节点 / 连线 / 可到达集）
+``POST``         ``/api/script-runs/<id>/nodes/<n>`` 进入节点（写 S_enter；战斗回 ``session_id``）
+``POST``         ``/api/script-runs/<id>/settle``    结算（写 S_done 或删档；胜负由服务端判）
+``PUT``          ``/api/script-runs/<id>/backpack``  背包交换 / 移动 / 丢弃（立即写）
+``POST``         ``/api/script-runs/<id>/suspend``   离开牌桌（作废战斗会话，不写档）
 ===============  ==================================  ==================================
+
+剧本模式那一段的语义、两次 rename 与「同一 ``runs/`` 只许一个 ``serve.py``」的进程级前提
+都住 :mod:`sgs_web.script_runs`。**所有写端点带 ``expected_revision``**（不匹配 ⇒ 409，body
+带当前 ``revision`` 与摘要）；剧本模式的三种错误语义见 :class:`sgs_web.script_runs.ScriptHttpError`。
 
 **一次请求最多推进到下一个暂停点或终局**（D16，由 :meth:`Session.drive` 保证）。
 票 19 起"五谷的每名目标取牌之后"也是一个暂停点（逐目标可见）：:meth:`Session.submit_answer`
@@ -48,8 +63,15 @@ from sgs_web import REPO_ROOT, ensure_engine_importable
 
 ensure_engine_importable()
 
-from sgs.data import DataLoadError, enabled_hero_ids, hero_by_id, load_content_pack  # noqa: E402
+from sgs.data import (  # noqa: E402
+    DataLoadError,
+    RuleConfig,
+    enabled_hero_ids,
+    hero_by_id,
+    load_content_pack,
+)
 from sgs.engine import IllegalActionError  # noqa: E402
+from sgs.script import ScriptError  # noqa: E402
 from sgs_web.narrative import NarrativeCursor  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
@@ -68,6 +90,11 @@ from sgs_web.projection import (  # noqa: E402
     visible_snapshot,
 )
 from sgs_web.replay import list_runs, load_run, save_run  # noqa: E402
+from sgs_web.script_runs import (  # noqa: E402
+    SaveConflict,
+    ScriptHttpError,
+    ScriptRuns,
+)
 from sgs_web.session import (  # noqa: E402
     DEFAULT_TIMEOUT_SECONDS,
     RecordWindow,
@@ -368,6 +395,10 @@ class GameRegistry:
         self.presets_path = self.runs_dir / HERO_PRESETS_FILENAME
         self._counter = 0
         self._finished_order: list[str] = []
+        # 剧本模式接入层（M7 票 19）：存档 I/O / 端点语义 / 战斗会话 / 进程内锁。
+        # 它**复用本注册表的会话表**（``sessions``）：剧本的战斗就是一局 PvE 会话，
+        # 录像与轮询走同一批既有入口，不另建第二套注册表。
+        self.script = ScriptRuns(runs_dir=self.runs_dir, sessions=self)
 
     # -- 将池存档（M6 票 13） ----------------------------------------------
 
@@ -424,8 +455,42 @@ class GameRegistry:
 
     def get(self, session_id: str) -> Session:
         session = self.sessions.get(session_id)
-        if session is None:
+        # 被放弃的会话（剧本模式的 ``suspend``）即使还留在表里也当不存在：``abandoned``
+        # 是"玩家不会再来"的句柄标记，迟到的 GET / answer 一律 404（票 04 §4）。
+        if session is None or session.abandoned:
             raise KeyError(session_id)
+        return session
+
+    def create_battle_session(
+        self,
+        *,
+        rule_config: RuleConfig,
+        seed: int,
+        timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
+    ) -> Session:
+        """剧本战斗节点的建局口（M7 票 19）：**接管一份现成的 ``RuleConfig``（含 ``pve``）**。
+
+        与 :meth:`create` 的差别只有"配置从哪来"：那边从 ``player_count`` 现算，这边是档内
+        冻结的 ``PveConfig`` + ``battle_seed``（票 04 §3.3）——重打该场因此是同一场。
+        其余口径一字不差：先加载内容包、登记会话、打访问戳、再回收中途放弃的局。
+        """
+        if not isinstance(rule_config, RuleConfig):  # pragma: no cover - 调用方恒传模型
+            raise ValueError(f"战斗会话要一份 RuleConfig：{rule_config!r}")
+        pack = load_content_pack()
+        self._counter += 1
+        session = create_session(
+            seed=seed,
+            rule_config=rule_config,
+            human_seat=0,
+            ai="heuristic",
+            timeout_seconds=timeout_seconds,
+            pack=pack,
+            session_id=f"s{self._counter}",
+            pause_after_game_start=True,
+        )
+        session.mark_pending(time.monotonic())
+        self.sessions[session.session_id] = session
+        self._prune_abandoned(time.monotonic())
         return session
 
     # -- 取增量（**超时判定的唯一触发点**） ---------------------------------
@@ -755,7 +820,9 @@ class GameRegistry:
         （测试就同时跑两个），而 ``session_id`` 是**每个注册表各自**从 ``s1`` 起编号的，
         用它当键会让两个服务互相顶掉对方的"已保存"标记。
         """
-        if not session.finished:
+        if not session.finished or session.abandoned:
+            # 被放弃的战斗**不留录像**（票 04 §4.3）：``suspend`` 之后这一局可能已经
+            # 打到了终局（另一个标签推进的），但它不是玩家打完的那一局。
             return None
         key = f"{self.runs_dir.resolve()}::{session.session_id}"
         if key in _SAVED:
@@ -863,6 +930,16 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/decks":
                 self._send_json(200, {"decks": deck_catalog()})
                 return
+            if parsed.path == "/api/script-save":
+                self._send_json(200, self.registry.script.save_payload())
+                return
+            if parsed.path.startswith("/api/script-runs/"):
+                rest = parsed.path[len("/api/script-runs/") :]
+                if rest and "/" not in rest:
+                    self._script(lambda: self.registry.script.view(rest))
+                    return
+                self._send_json(404, {"error": "未知路径"})
+                return
             if parsed.path.startswith("/api/runs/"):
                 name = parsed.path[len("/api/runs/") :]
                 self._send_json(200, load_run(self.registry.runs_dir, name))
@@ -895,6 +972,18 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/hero-presets":
                 self._send_json(200, {"presets": self.registry.save_hero_presets(body)})
+                return
+            if parsed.path == "/api/script-roster":
+                self._script(lambda: self.registry.script.roster(body))
+                return
+            if parsed.path == "/api/script-save/restore":
+                self._script(self.registry.script.restore)
+                return
+            if parsed.path == "/api/script-runs":
+                self._script(lambda: self.registry.script.create_run(body))
+                return
+            if parsed.path.startswith("/api/script-runs/"):
+                self._script_run_post(parsed.path, body)
                 return
             if parsed.path == "/api/sessions":
                 session = self.registry.create(body)
@@ -941,6 +1030,91 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(404, {"error": "未知路径"})
+
+    # -- 剧本模式（M7 票 19） ------------------------------------------------
+
+    def _script(self, work: Any) -> None:
+        """跑一个剧本模式的端点并把结果发出去：**三种错误语义在这里映射成状态码**。
+
+        400 = 结构非法 / 规则拒绝（带 ``rule_id`` + ``loc``）、404 = 寻址不到（没有存档 /
+        没有这一轮 / 没有这个会话）、409 = ``expected_revision`` 对不上或存档此刻读不动
+        （体里带当前 ``revision`` 与摘要，票 04 §4）。坏内容包 / 坏剧本库同样是 400。
+        """
+        try:
+            self._send_json(200, work())
+        except ScriptHttpError as error:
+            self._send_json(error.status, error.payload)
+        except SaveConflict as error:
+            self._send_json(409, error.payload)
+        except ScriptError as error:
+            self._send_json(
+                400,
+                {"error": str(error), "rule_id": error.rule_id, "loc": error.loc},
+            )
+        except DataLoadError as error:
+            self._send_json(400, {"error": str(error)})
+        except KeyError as error:
+            # 会话句柄不在表里（被回收 / 被作废 / id 打错）：与 ``/api/sessions`` 同一条 404。
+            self._send_json(404, {"error": f"未知会话：{error.args[0] if error.args else ''}"})
+        except (ValueError, OSError) as error:
+            self._send_json(400, {"error": str(error)})
+
+    def _script_run_post(self, path: str, body: dict[str, Any]) -> None:
+        """``POST /api/script-runs/<id>/{resume,settle,suspend}`` 与 ``…/nodes/<node_id>``。"""
+        segments = path[len("/api/script-runs/") :].split("/")
+        registry = self.registry
+        if len(segments) == 2 and segments[1] == "resume":
+            self._script(lambda: registry.script.resume(segments[0]))
+            return
+        if len(segments) == 2 and segments[1] == "settle":
+            self._script(lambda: registry.script.settle(segments[0], body))
+            return
+        if len(segments) == 2 and segments[1] == "suspend":
+            self._script(lambda: registry.script.suspend(segments[0]))
+            return
+        if len(segments) == 3 and segments[1] == "nodes":
+            self._script(
+                lambda: registry.script.enter(segments[0], segments[2], body)
+            )
+            return
+        self._send_json(404, {"error": "未知路径"})
+
+    def do_PUT(self) -> None:  # noqa: N802 - 基类签名
+        parsed = urlparse(self.path)
+        try:
+            body = self._read_body()
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        if parsed.path.startswith("/api/script-runs/"):
+            segments = parsed.path[len("/api/script-runs/") :].split("/")
+            if len(segments) == 2 and segments[1] == "backpack":
+                self._script(
+                    lambda: self.registry.script.backpack(segments[0], body)
+                )
+                return
+        self._send_json(404, {"error": "未知路径"})
+
+    def do_DELETE(self) -> None:  # noqa: N802 - 基类签名
+        """``DELETE /api/script-save?expected_revision=N``：放弃存档（票 04 §6）。
+
+        ``expected_revision`` 走查询串而不是请求体：DELETE 带体在 stdlib 与代理上都不算
+        干净；坏档没有 revision 可对，故它是**可选**的（只在 ``ok`` 一态校验）。
+        """
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        if parsed.path == "/api/script-save":
+            raw = query.get("expected_revision", [None])[0]
+            try:
+                expected = None if raw in (None, "") else int(raw)
+            except (TypeError, ValueError):
+                self._send_json(400, {"error": f"expected_revision 必须是整数：{raw!r}"})
+                return
+            self._script(
+                lambda: self.registry.script.discard(expected_revision=expected)
+            )
             return
         self._send_json(404, {"error": "未知路径"})
 
