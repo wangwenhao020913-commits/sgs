@@ -1,0 +1,224 @@
+{
+  "script_schema_version": 1,
+  "scripts": [
+    {
+      "id": "editorprobe",
+      "name": "编辑探针剧本",
+      "version": 1,
+      "comment": "M7 票 25 的编辑器进料：两个大节（好验「删被剧本挂着的大节」）、五类房间各一、两个 Boss、一条死路、一条带条件的边；敌人模板覆盖「固定对手」（count = [0, 0]）与「随机池」（count = [1, 2]）两档，问号池两项。节点 id 与行 / 列就是烟测断言的坐标。",
+      "roster": ["nengren", "jie_liubei", "jie_guanyu"],
+      "layers": [
+        {
+          "id": "L1",
+          "name": "大节一 · 五类房间",
+          "grid": {"rows": 3, "cols": 4},
+          "nodes": [
+            {"id": "a1", "row": 0, "col": 0, "room": "room.event"},
+            {"id": "a2", "row": 2, "col": 0, "room": "room.shop"},
+            {"id": "b1", "row": 0, "col": 1, "room": "room.story"},
+            {"id": "b2", "row": 1, "col": 1, "room": "room.shop"},
+            {"id": "b3", "row": 2, "col": 1, "room": "room.draw"},
+            {"id": "c1", "row": 0, "col": 2, "room": "room.unknown"},
+            {"id": "c2", "row": 1, "col": 2, "room": "room.draw"},
+            {"id": "e1", "row": 2, "col": 2, "room": "room.shop"},
+            {"id": "d1", "row": 0, "col": 3, "room": "room.boss"},
+            {"id": "d2", "row": 2, "col": 3, "room": "room.boss.plain"}
+          ],
+          "edges": [
+            {"from": "a1", "to": "b1"},
+            {"from": "a1", "to": "b2"},
+            {"from": "a1", "to": "b3"},
+            {"from": "a2", "to": "b1"},
+            {"from": "a2", "to": "b2"},
+            {"from": "a2", "to": "b3"},
+            {"from": "b1", "to": "c1"},
+            {"from": "b1", "to": "c2"},
+            {"from": "b2", "to": "c1"},
+            {"from": "b2", "to": "c2"},
+            {"from": "b2", "to": "e1"},
+            {"from": "b3", "to": "c1"},
+            {"from": "b3", "to": "c2"},
+            {"from": "c1", "to": "d1"},
+            {"from": "c1", "to": "d2"},
+            {"from": "c2", "to": "d1"},
+            {
+              "from": "c2",
+              "to": "d2",
+              "requires": {"flags": ["flag.boss_open"], "not_flags": ["flag.sealed"]}
+            }
+          ],
+          "default_scaling": []
+        },
+        {
+          "id": "L2",
+          "name": "大节二 · 短支线",
+          "grid": {"rows": 2, "cols": 2},
+          "nodes": [
+            {"id": "x1", "row": 0, "col": 0, "room": "room.story"},
+            {"id": "x2", "row": 0, "col": 1, "room": "room.event"},
+            {"id": "x3", "row": 1, "col": 1, "room": "room.shop"}
+          ],
+          "edges": [
+            {"from": "x1", "to": "x2"},
+            {"from": "x1", "to": "x3"}
+          ],
+          "default_scaling": []
+        }
+      ]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "room.event",
+      "name": "残破的村庄",
+      "kind": "event",
+      "text": "村民捧出铜钱，也求人帮忙修寨。",
+      "event_pool": "ep.village",
+      "on_clear": {"set_flags": ["flag.event_done"]}
+    },
+    {
+      "id": "room.shop",
+      "name": "行商篷车",
+      "kind": "shop",
+      "text": "售完不补货：库存进入节点时抽定。"
+    },
+    {
+      "id": "room.story",
+      "name": "颍川道上",
+      "kind": "story",
+      "text": "剧情战：一名受保护队友 + 两名固定敌人 + 一条副本全局技能。",
+      "battle": {
+        "allies": [{"role": "ally", "template": "tpl.ally", "protected": true}],
+        "enemies": [
+          {"role": "enemy", "template": "tpl.grunt"},
+          {"role": "enemy", "template": "tpl.brute"}
+        ],
+        "victory": {"kind": "rout"},
+        "global_skills": [{"skill": "gs.enemy"}],
+        "extra_reward": {"coins": 4, "pick2": 1}
+      }
+    },
+    {
+      "id": "room.draw",
+      "name": "道旁遭遇",
+      "kind": "battle",
+      "text": "按档抽敌人（进入节点时抽定）。",
+      "battle": {
+        "enemies": {"draw": {"band": "early", "count": [1, 2]}},
+        "victory": {"kind": "rout_within_rounds", "rounds": 3},
+        "extra_reward": {"coins": 1}
+      }
+    },
+    {
+      "id": "room.unknown",
+      "name": "路边的问号",
+      "kind": "unknown",
+      "text": "进入即揭晓（揭晓结果进存档，重进不重抽）。",
+      "pool": [{"room": "room.event", "weight": 3}, {"room": "room.shop", "weight": 1}]
+    },
+    {
+      "id": "room.boss",
+      "name": "广宗城下",
+      "kind": "story",
+      "is_boss": true,
+      "text": "Boss 战：先失去 4 条出战技能，再发奖。",
+      "battle": {
+        "enemies": [{"role": "enemy", "template": "tpl.boss", "boss": true}],
+        "victory": {"kind": "slay_boss"},
+        "extra_reward": {"coins": 6, "pick1": 1}
+      }
+    },
+    {
+      "id": "room.boss.plain",
+      "name": "地公将军",
+      "kind": "battle",
+      "is_boss": true,
+      "text": "第二个 Boss（多出口）：数据不给奖励，Boss 的固定奖励照发。",
+      "battle": {
+        "enemies": [{"role": "enemy", "template": "tpl.boss", "boss": true}],
+        "victory": {"kind": "rout"}
+      }
+    }
+  ],
+  "templates": [
+    {
+      "id": "tpl.ally",
+      "name": "义军什长",
+      "band": "ally",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": ["hero.liubei.jijiang"],
+      "random": {"pool": "pool.empty"},
+      "reward": {"coins": 9}
+    },
+    {
+      "id": "tpl.grunt",
+      "name": "黄巾力士",
+      "band": "early",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": [],
+      "random": {"pool": "pool.grunts", "count": [1, 2]},
+      "reward": {"coins": 2, "pick3": 1}
+    },
+    {
+      "id": "tpl.brute",
+      "name": "黄巾渠帅",
+      "band": "early",
+      "hp": 4,
+      "hp_max": 4,
+      "initial_skills": ["hero.zhangfei.paoxiao"],
+      "random": {"pool": "pool.empty"},
+      "reward": {"coins": 3}
+    },
+    {
+      "id": "tpl.boss",
+      "name": "张角",
+      "band": "late",
+      "hp": 8,
+      "hp_max": 8,
+      "initial_skills": ["hero.zhaoyun.longdan"],
+      "random": {"pool": "pool.empty"},
+      "reward": {"coins": 5}
+    }
+  ],
+  "skill_pools": [
+    {"id": "pool.empty", "name": "空池", "skills": []},
+    {
+      "id": "pool.grunts",
+      "name": "小怪技能",
+      "skills": [
+        "hero.liubei.rende",
+        "hero.guanyu.wusheng",
+        "hero.zhangfei.paoxiao",
+        "hero.zhaoyun.longdan"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "ev.village",
+      "name": "残破的村庄",
+      "text": "村民捧出铜钱。",
+      "options": [
+        {"text": "收下铜钱", "effects": [{"kind": "coins", "amount": 2}]},
+        {
+          "text": "帮他们修寨",
+          "requires": {"flags": ["flag.event_done"]},
+          "effects": [{"kind": "set_flags", "flags": ["flag.helped"]}]
+        }
+      ]
+    }
+  ],
+  "event_pools": [
+    {"id": "ep.village", "name": "村庄事件池", "events": ["ev.village"]}
+  ],
+  "global_skills": [
+    {
+      "id": "gs.enemy",
+      "name": "黄巾之众（敌）",
+      "side": "enemy",
+      "scale": {"hp": [1, 2], "draw": [0, 1], "slash": [1, 3]}
+    }
+  ]
+}

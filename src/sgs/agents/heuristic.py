@@ -22,8 +22,15 @@
 （本人 / 主公 / 已阵亡 / ``identity_visible``）从 :data:`_IDENTITY_ROSTER` 里减掉，存活
 未知座位按人头均分得到 ``(P(敌), P(友))``（:func:`_identity_relation`），替换约 8 个用点
 的 0/1（伤害目标、座位步、连环、火攻、无懈、濒死救援）。``P(敌)`` **只作权重**、不升格成
-"必须打谁"的硬判；内奸仍不把主公当优先敌人（主公留到最后）。算不出（人数不在 4~8 /
+"必须打谁"的硬判；内奸不把主公当优先敌人（主公留到最后）。算不出（人数不在 4~8 /
 配比对不上）⇒ 退回中性的 0/0，与 I1 之前的行为一致。
+
+**内奸行的局面函数（票 32）**：:data:`_HOSTILITY` 的其余五行仍是静态常量，内奸那一行改成
+按**存活力量均衡**现算的标量 ``H``（:func:`_renegade_hostility`）：``(E[主公侧] − E[反贼侧]) / D``
+再给主公加一道护主护栏（反贼侧还有人活着就不许把主公当敌人）。返回值仍是
+``(max(H, 0), max(−H, 0))`` ⇒ 14 个调用点一行不改；未知座位取该行对剩余多重集的期望
+（:func:`_renegade_unknown_relation`）。"只剩主公 ⇒ +1" 是 ``D = 1、E[反贼] = 0`` 算出来的，
+**没有**特例分支。
 
 **无懈目标化（D1，票 18）**：``RESPOND`` 不再"手里有牌就宣"——``cause = NULLIFY`` 时按
 :func:`_nullify_declares` 读处理区顶牌与 ``query.target``，只在"敌人拿到利 / 自己或已明
@@ -373,8 +380,11 @@ _HOSTILITY: Mapping[str, Mapping[str, str]] = MappingProxyType(
         ),
         _RENEGADE: MappingProxyType(
             {
-                # 内奸**不把主公当敌人**：内奸要最后一个人活着，主公早死反贼就赢（今天这张表
-                # 里是硬常量，对忠臣 / 反贼 = 敌。按存活力量均衡算局面函数是票 32 的账）。
+                # 内奸**不把主公当敌人**：内奸要最后一个人活着，主公早死反贼就赢。
+                # 票 32 起 :func:`_identity_relation` 在 ``mine == _RENEGADE`` 时**不查这一行**
+                # （走局面函数 :func:`_renegade_hostility`，按存活力量均衡 + 护主护栏）；
+                # 这一行留着是给 :func:`_enemy_identities` / :func:`_ally_identities` 的派生
+                # 视图（第二读取方：``_score_baonue`` 的 ``"lord" in _ally_identities``）。
                 _LORD: _NEUTRAL,
                 _LOYALIST: _ENEMY,
                 _REBEL: _ENEMY,
@@ -415,6 +425,10 @@ _HOSTILITY: Mapping[str, Mapping[str, str]] = MappingProxyType(
 身份局四行逐格等于票 21 的 if-chain（票 08 是**等价重构**，16 个身份对的输出逐对相同）：
 主公侧认忠臣为友、反贼 / 内奸为敌；反贼认主公侧为敌、反贼为友、内奸中立；内奸认忠臣 /
 反贼为敌、主公中立（**不把主公当优先敌人**）、且没有盟友。
+
+**内奸那一行是历史值，不是今天的取值**（票 32）：:func:`_identity_relation` 在
+``mine == _RENEGADE`` 时走 :func:`_renegade_hostility`（按存活力量均衡 + 护主护栏），
+本表这一行只服务 :func:`_enemy_identities` / :func:`_ally_identities` 的派生视图。
 
 PvE 两行（盟 → 盟 = 友、敌 → 敌 = 友、盟 → 敌 = 敌、敌 → 盟 = 敌）只是把
 ``PveConfig`` 的阵营名读成关系名：PvE 开局全部 ``identity_visible``（票 01 §3）⇒ 读到的是
@@ -2254,6 +2268,137 @@ def _unknown_identity_remainder(
     return tuple(remaining), unknown
 
 
+_LORD_SIDE = frozenset({_LORD, _LOYALIST})
+"""内奸眼里的**主公侧**（票 32）：均衡式子里的 ``E[主公侧]`` 数这一侧。"""
+
+_REBEL_SIDE = frozenset({_REBEL})
+"""内奸眼里的**反贼侧**：``E[反贼侧]`` 只数反贼（内奸自己两边都不算）。"""
+
+_LORD_ONLY = frozenset({_LORD})
+"""``_LORD_SIDE`` 里只数主公的那一格：护主护栏的判据（``theirs in _LORD_ONLY``）。
+
+与 :data:`_REBEL_SIDE` 同一种写法（单元素 frozenset + 成员判定）：内奸行里"是不是主公 /
+反贼"的两种问法只有一张表，不混用 ``==`` 与 ``in``——两处都读集合，改配比时一起看。
+"""
+
+
+def _renegade_balance(view: PlayerView) -> tuple[int, int, int] | None:
+    """内奸行的局面读数 ``(D, E[主公侧], E[反贼侧])``；算不出 ⇒ ``None``（票 32）。
+
+    - ``D = 存活座位数 − 1``：分母是**别的**存活座位数（内奸自己占一席、又不属于任何一侧）；
+    - ``E[侧] = 已亮明且存活的该侧人数 + :func:`_unknown_identity_remainder` 剩余多重集里
+      该侧的份数``。**两半都不能省**：主公是亮明的、他已被从剩余多重集里减掉，只数后半
+      （``count(lord in 剩余)``）会得 0 并把整条式子算歪。两半相加 = 该侧存活人数的**期望**
+      （配比固定 ⇒ 这条其实是确定值，逐座位的不确定性只影响"谁是哪一侧"）。
+
+    读的全是**公开面**：``view.players`` 的 ``identity`` / ``alive`` 与配比字面表。算不出
+    （人数不在配比表 / 亮明身份不在配比里 / 阵亡却不可见）⇒ ``None``，调用方按"中性"处理
+    ——与 :func:`_unknown_identity_remainder` 同一条 fail-closed 纪律，**不猜**。
+
+    这笔读数**与"对谁"无关**：一次询问里对多个身份求 ``H`` 时只该算一次
+    （:func:`_renegade_unknown_relation` 已把它提到循环外，票 35）。
+    """
+    remainder = _unknown_identity_remainder(view)
+    if remainder is None:
+        return None
+    remaining, _unknown = remainder
+    lord_side = sum(
+        1
+        for player in view.players
+        if player.alive and player.identity in _LORD_SIDE
+    )
+    rebel_side = sum(
+        1
+        for player in view.players
+        if player.alive and player.identity in _REBEL_SIDE
+    )
+    lord_side += sum(1 for identity in remaining if identity in _LORD_SIDE)
+    rebel_side += sum(1 for identity in remaining if identity in _REBEL_SIDE)
+    alive = sum(1 for player in view.players if player.alive)
+    return alive - 1, lord_side, rebel_side
+
+
+def _renegade_hostility_from_balance(
+    theirs: str, balance: tuple[int, int, int]
+) -> float:
+    """在**已算好**的 :func:`_renegade_balance` 上取 ``H(内奸 → theirs)``（票 35 的纯函数半边）。
+
+    ``_renegade_unknown_relation`` 要对剩余多重集里的每个身份各求一次 ``H``，而局面读数与
+    "对谁"无关 ⇒ 提出来只算一次，座位数不再平方级（原实现每个身份都重算一次 balance，
+    而 balance 自己又要遍历全座位并 ``list.remove``）。逐值等于逐身份调
+    :func:`_renegade_hostility`。
+    """
+    if theirs not in _LORD_SIDE and theirs not in _REBEL_SIDE:
+        return 0.0
+    divisor, lord_side, rebel_side = balance
+    if divisor <= 0:
+        return 0.0
+    spread = (lord_side - rebel_side) / divisor
+    if theirs in _REBEL_SIDE:
+        return -spread
+    if theirs in _LORD_ONLY and rebel_side > 0:
+        return min(spread, 0.0)
+    return spread
+
+
+def _renegade_hostility(view: PlayerView, theirs: str) -> float:
+    """``H(内奸 → theirs)``：按**存活力量均衡**现算的局面函数（M7 票 32）。
+
+    票 08 把敌对值表整张表化成常量；这是**唯一**一行不是常量的：内奸希望两阵营势均力敌，
+    于是以"主公侧 − 反贼侧"为轴——
+
+    - ``H(→主公) = min(spread, 0)`` **只要反贼侧还有人活着**（护主护栏：主公早死反贼就赢，
+      这一刀不能打）；反贼侧清空时才放开（只剩主公 ⇒ ``+1``，:func:`_identity_relation`
+      按 ``(max(H,0), max(−H,0))`` 给到 ``(1, 0)``）；
+    - ``H(→忠臣) = spread``：主公侧领先就压忠臣（4 人局 ``+1/3`` 是**正确行为**：反贼一死
+      内奸就要 1v2），落后就帮忠臣；
+    - ``H(→反贼) = −spread``（与忠臣互为反号）。``H(→内奸) = 0``；跨模式的友 / 敌两格
+      恒 0（表里也是中立——那两个身份永不与身份局共局）。
+
+    ``spread = (E[主公侧] − E[反贼侧]) / D``（见 :func:`_renegade_balance`），落在 ``[-1, 1]``。
+    **「只剩主公 ⇒ +1」不写特例**：那时 ``D = 1、E[反贼侧] = 0``，公式自己给出 ``+1``——
+    写特例就是给同一语义留两个真源。算不出（配比 / 亮明面对不上）⇒ ``0.0``（中性，不猜）。
+    """
+    if theirs not in _LORD_SIDE and theirs not in _REBEL_SIDE:
+        return 0.0
+    balance = _renegade_balance(view)
+    if balance is None:
+        return 0.0
+    return _renegade_hostility_from_balance(theirs, balance)
+
+
+def _renegade_unknown_relation(
+    view: PlayerView, remaining: tuple[str, ...]
+) -> tuple[float, float]:
+    """内奸面对**未知座位**的关系权重：``(P敌, P友)`` 对该行在剩余多重集上求期望（票 32）。
+
+    逐身份取 ``(max(H(c), 0), max(−H(c), 0))`` 再按份数平均——``H(座位) = P敌 − P友`` 因此
+    逐值等于 ``Σ H(c) / |剩余|``（票面那条式子），两侧各自保留"这份可能是敌人 / 是盟友"的
+    信息。与同一函数对另外五行未知座位的"敌人 / 盟友份数 ÷ 未知座位数"是同一条口径：
+    0/1 行在这个式子上恰好退化成"份数 ÷ 人数"。
+
+    ``|剩余| = 0`` ⇒ ``(0, 0)``：与 :func:`_identity_relation` 的"算不出就中性"同一条纪律，
+    也与 ``unknown <= 0`` 的防御分支一致。
+
+    **局面读数只算一次**（票 35）：:func:`_renegade_balance` 与"对谁"无关，而它自己又要
+    遍历全座位并 ``list.remove``——逐身份调 :func:`_renegade_hostility` 会让一次询问变成
+    座位数个平方级重算。这里算一次 ``balance`` 再逐身份走
+    :func:`_renegade_hostility_from_balance`（纯等价：逐值等于原写法）。
+    """
+    if not remaining:
+        return 0.0, 0.0
+    balance = _renegade_balance(view)
+    if balance is None:
+        return 0.0, 0.0
+    enemy = 0.0
+    ally = 0.0
+    for identity in remaining:
+        hostility = _renegade_hostility_from_balance(identity, balance)
+        enemy += max(hostility, 0.0)
+        ally += max(-hostility, 0.0)
+    return enemy / len(remaining), ally / len(remaining)
+
+
 def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
     """``seat`` 与我的关系权重 ``(P(敌), P(友))``——只读公开面（I1 身份保守档，票 21）。
 
@@ -2275,6 +2420,11 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
     ``identity_visible``（票 01 §3），且 ``PveConfig`` 的阵营就是关系本身（:data:`_HOSTILITY`
     的 ALLY / ENEMY 两行）：``ALLY → (0, 1)``、``ENEMY → (1, 0)``，两侧都读到硬 ``±1``。
     读点仍是同一个函数、同一个 ``PlayerPublic.identity`` 字段（不新增读点）。
+
+    **内奸行（M7 票 32）**：``mine == _RENEGADE`` 时**不查表**，走局面函数
+    :func:`_renegade_hostility`（按存活力量均衡 + 护主护栏）——敌对值表里唯一一行不是常量
+    的。返回值契约一字不变（``(max(H,0), max(−H,0))``、非负、和 ≤ 1），故 14 个调用点
+    一行不改；未知座位走 :func:`_renegade_unknown_relation`（该行对剩余多重集求期望）。
     """
     if seat == view.seat:
         return 0.0, 1.0
@@ -2285,20 +2435,27 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
         return 0.0, 0.0
     theirs = view.players[seat].identity
     if theirs is not None:
+        if mine == _RENEGADE:
+            # 内奸行（票 32）：局面函数，不查表。跨模式格子（友 / 敌）由它返回 0（中立）。
+            hostility = _renegade_hostility(view, theirs)
+            return max(hostility, 0.0), max(-hostility, 0.0)
         # 已亮明 ⇒ **查敌对值表**（表是"谁恨谁"的唯一真源，见 :data:`_HOSTILITY`）。
         relation = _hostility(mine, theirs)
         return (
             1.0 if relation == _ENEMY else 0.0,
             1.0 if relation == _ALLY else 0.0,
         )
-    enemies = _enemy_identities(mine)
-    allies = _ally_identities(mine)
     remainder = _unknown_identity_remainder(view)
     if remainder is None:
         return 0.0, 0.0
     remaining, unknown = remainder
+    if mine == _RENEGADE:
+        # 内奸行：该行对剩余多重集求期望（`|剩余| = 0` ⇒ (0, 0)，见函数本体）。
+        return _renegade_unknown_relation(view, remaining)
     if unknown <= 0:  # pragma: no cover - 未知座位自己就是其中一个，防御分支
         return 0.0, 0.0
+    enemies = _enemy_identities(mine)
+    allies = _ally_identities(mine)
     return (
         sum(1 for identity in remaining if identity in enemies) / unknown,
         sum(1 for identity in remaining if identity in allies) / unknown,

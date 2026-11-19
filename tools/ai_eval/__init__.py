@@ -18,7 +18,8 @@
 - **漏动作口径**：:class:`DecisionFact` / :func:`count_misses` / :func:`fact_from_query`
   （spec §2.11；票 15 的 ``live`` 同源复用）；
 - **三档评估命令**：:func:`run_quick` / :func:`run_promote` / :func:`run_seal` + :func:`main`
-  （spec §2.8 / §2.9）与版本加载器 :func:`load_version`（spec §2.6）；
+  （spec §2.8 / §2.9）与版本加载器 :func:`load_version`（spec §2.6；旧版本对未知
+  ``QueryKind`` 的 fail-closed 兼容层在 :mod:`ai_eval.compat`，票 36）；
 - **实机读数**：:func:`run_live` / :func:`render_live`（spec §5；一局 journal + meta，
   不判 verdict、不打胜率）。
 """

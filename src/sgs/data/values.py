@@ -14,7 +14,9 @@
   而**清单里写错 id 要拒**（语义门），否则"默认禁用"会把拼写错误藏起来。
   清单口径**不看武将的 ``enabled``**（那是发放门控，见 ``spec.md`` §5.9"剧本点名无视
   ``enabled``"）：把一名武将下架不该让整张表加载失败；只看"**已实现**"（id 在 ``CATALOG``）。
-  遗物段现在为空是**内容事实**（遗物技能的载体随票 09 / 26 落地；现在写进来会被语义门拒）。
+  遗物段按 **票 26 的六条**登记（``relic.*``，只有启用 / 禁用、没有稀有度）；写进来的 id
+  必须是**载体为 ``RELIC``** 的技能（``CarrierKind.RELIC``，票 26 落地的第五种载体），
+  冒充的装备 / 标记 / 武将技能由语义门拒。
 - **价与权重不落表**（:data:`RARITY_PRICES` / :data:`RELIC_PRICE` / :data:`RARITY_WEIGHTS`
   是代码里的纪律常数）：店里卖多少钱、满包折多少、抽取权重都是规则，不是内容；
   表里出现 ``price`` 一类的键由结构门（``extra="forbid"``）当场拒绝，堵死"第二份真相"。
@@ -119,12 +121,11 @@ RELIC_PRICE: Final = 10
 """遗物固定售价（票 02 §4）；遗物**不可折铜钱**——那条属于票 17 的发奖逻辑，不在这里。"""
 
 _RELIC_CARRIER: Final = "RELIC"
-"""遗物技能的**载体名**（``CarrierKind`` 的取值名）。
+"""遗物技能的**载体名**（``CarrierKind.RELIC`` 的取值名，票 26 落地）。
 
-载体枚举现在还**没有**这一档——它随"遗物 = 独立技能来源"落在票 09 / 26。在那之前
-``relics`` 段**必须为空**：写进来的任何 id（武将技 / 装备 / 标记 / 牌标签效果）都会被语义门
-按"不是遗物技能"拒。票 09 给 ``CarrierKind`` 加 ``RELIC`` 之后这里**不用改**（按名字比），
-同票补一条"遗物 id 合法"的通过用例。
+``relics`` 段只收**载体为 ``RELIC``** 的 id：六条 ``relic.*`` 之外（武将技 / 装备 / 标记 /
+牌标签效果）写进来都会被语义门按"不是遗物技能"拒。按**载体名**比而不是按 id 前缀比——
+前缀可以被任何表抄错，载体是技能定义上的字段（``CarrierKind``）。
 """
 
 RARITY_WEIGHTS: Mapping[Rarity, int] = MappingProxyType(
@@ -160,7 +161,7 @@ class SkillValueTable(BaseModel):
 
     ``skills`` 只收武将技能（``equip.*`` / 遗物技能 / NPC 技能都不在这里）；
     ``relics`` 只有启用与否（无稀有度、不进抽取池），id 必须是**载体为 ``RELIC`` 的遗物技能**
-    ——载体枚举还没有这一档（票 09 / 26），故遗物段现在只能为空（见 :data:`_RELIC_CARRIER`）。
+    （M7 票 26 的六条 ``relic.*``；判据见 :data:`_RELIC_CARRIER`）。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -251,10 +252,21 @@ def learning_pool(
     已拥有按 ``skill_id`` 去重：同一个技能同时躺在背包与出战槽里也只减一次。
     "只收武将技能"由**表**保证（``skills`` 段只装武将技能，加载器拒 ``equip.*`` /
     遗物 / 标记）；本函数不按前缀过滤，否则会造出第二份"什么算武将技能"的定义。
+
+    **入口排除**（M7 票 27）：载体为 ``NPC`` 的技能**永不进池**——四条 ``npc.*`` 只授敌方
+    座位，即便一张（绕过加载器构造的）价值表把它们点成 enabled，学习池 / 商店 / 三选一
+    也不产出它们。判据是**载体**（:func:`sgs.skills.npc_skill_ids` 从 ``CATALOG`` 派生），
+    不是稀有度、也不是 id 前缀；``CATALOG`` 里查不到的 id 原样放行（加载器的语义门已经挡掉
+    真表里的未知 id，合成测试表不因这条排除而改变行为）。
     """
+    from sgs.skills import npc_skill_ids
+
     owned = frozenset(backpack) | frozenset(equipped)
+    npc_ids = npc_skill_ids()
     return tuple(
-        skill_id for skill_id in table.enabled_skill_ids() if skill_id not in owned
+        skill_id
+        for skill_id in table.enabled_skill_ids()
+        if skill_id not in owned and skill_id not in npc_ids
     )
 
 
@@ -325,7 +337,7 @@ def _semantic_errors(file: str, table: SkillValueTable) -> list[LoadError]:
                 LoadError(
                     file=file,
                     loc=f"/relics/{relic_id}",
-                    expected=f"遗物技能 id（载体 ``{_RELIC_CARRIER}``；票 09 引入前遗物段必须为空）",
+                    expected=f"遗物技能 id（载体 ``{_RELIC_CARRIER}``，如 ``relic.*``）",
                     got=relic_id,
                     rule_id="skill_values.not_a_relic",
                 )

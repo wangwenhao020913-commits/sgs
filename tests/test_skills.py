@@ -1931,11 +1931,14 @@ def test_virtual_equipment_unions_with_physical_equipment_without_occupying_a_zo
 
 
 def test_every_equipment_card_has_a_skill_and_vice_versa():
-    """``CATALOG`` 的两半：装备技能 = 22 张装备牌名（M5-01a 起含军争 5 张），武将技能 = 票 03 起的 H 族。
+    """``CATALOG`` 按**载体**分区：装备 / 武将 / 标记效果 / 牌标签效果 / 遗物 / NPC。
 
     票 03 之前武将那半是空的，故这条断言当时写作"``CATALOG`` 恰等于装备集合"；
     现在改成按 ``carrier`` 分区（载体是技能定义上的字段），M3 的后续票再往武将那半
-    加技能时这条**不会**跟着改。
+    加技能时这条**不会**跟着改。M7 票 26 起多出**第五类**：遗物（``CarrierKind.RELIC``，
+    六条 ``relic.*``）——它住独立遗物栏、不是武将牌上的技能，故与其余四半不相交。
+    M7 票 27 起多出**第六类**：NPC 技能（``CarrierKind.NPC``，四条 ``npc.*``）——只授敌方
+    座位、不在任何武将牌上，故与其余五半都不相交。
     """
     from sgs.effects import CarrierKind
     from sgs.skills import EQUIPMENT_CARD_TYPE_IDS
@@ -1969,16 +1972,48 @@ def test_every_equipment_card_has_a_skill_and_vice_versa():
         if definition.carrier is CarrierKind.CARD_TAG
     }
 
+    # M7 票 26 起多出**第五类**：遗物（`carrier = CarrierKind.RELIC`，M7 票 26）。遗物住
+    # 独立遗物栏、**不算武将牌上的技能**，故同样不进技能两半；五分区仍然覆盖整张 `CATALOG`。
+    relics = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier is CarrierKind.RELIC
+    }
+
+    # M7 票 27 起多出**第六类**：NPC 技能（`carrier = CarrierKind.NPC`，只授敌方座位）。
+    # 它既不是任何武将牌上的技能、也不属于玩家成长面，故同样单列一档；六分区仍然覆盖
+    # 整张 `CATALOG`。
+    npc_skills = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier is CarrierKind.NPC
+    }
+
     assert equipment == {f"equip.{card_type}" for card_type in EQUIPMENT_CARD_TYPE_IDS}
     assert not equipment & heroes, "两类载体的技能 id 前缀各一套，不相交"
     assert not markers & (equipment | heroes), "标记效果定义与技能两半不相交"
     assert not card_tags & (equipment | heroes | markers), "牌标签效果定义与前三半不相交"
-    assert set(CATALOG) == equipment | heroes | markers | card_tags
+    assert not relics & (equipment | heroes | markers | card_tags), "遗物定义与其余四半不相交"
+    assert not npc_skills & (equipment | heroes | markers | card_tags | relics), (
+        "NPC 技能定义与其余五半不相交"
+    )
+    assert set(CATALOG) == equipment | heroes | markers | card_tags | relics | npc_skills
     assert markers == {"hero.shen_ganning.jieying_mark"}, (
         "唯一一条标记自身效果的定义（「营」）；新增一条要同时想清楚它在界面上的归属"
     )
     assert card_tags == {"hero.feng_yujin.dingluan_mark"}, (
         "唯一一条牌标签自身效果的定义（「【定乱】牌」）"
+    )
+    assert relics == {
+        "relic.damage_dealt",
+        "relic.distance",
+        "relic.extra_draw",
+        "relic.extra_start_hand",
+        "relic.hand_limit",
+        "relic.peach_heal",
+    }, "六条遗物（M7 票 26）：载体 RELIC、id 走 relic.* 前缀"
+    assert npc_skills == {"npc.fury", "npc.guard", "npc.swift", "npc.wrath"}, (
+        "四条 NPC 技能（M7 票 27）：载体 NPC、id 走 npc.* 前缀、只授敌方座位"
     )
     assert {
         "hero.guanyu.wusheng",

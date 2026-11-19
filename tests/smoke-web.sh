@@ -70,7 +70,9 @@ fi
 echo "服务已监听 127.0.0.1:$PORT（临时录像目录，退出即清理）"
 
 OUT="$TMP/smoke.out"
-if node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT" > "$OUT" 2>&1; then
+# 第三个参数 = 服务的 `--runs-dir`：M7 票 20 的坏档三态要**真的把主档写坏**才验得出来
+# （烟测直接把 `$RUNS/script-save.json` 换成坏字节，再走真 GET / 恢复 / 放弃）。
+if node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT" "$RUNS" > "$OUT" 2>&1; then
   if [ "$VERBOSE" -eq 1 ]; then cat "$OUT"; else grep -E "FAIL|全部通过|项失败" "$OUT" || true; fi
   echo "PASS: 前端渲染冒烟"
   exit 0

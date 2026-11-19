@@ -15,6 +15,15 @@
 
 ``.venv`` 是 editable 指向主树，``.pth`` 会让"以为在打旧版"静默成立（spec §2.6 的现场
 证据），故加载**只走副本**：同一 ref 只有一条路径，``import sgs.agents`` 从不参与。
+
+**兼容层（票 36）**：副本的选路表可能**不认识**它打 tag 之后才进仓的 ``QueryKind``
+（票 32 的 446 errors：``ai-v10`` / ``ai-v0`` 都没有 ``SELECT_OPTIONS`` 这一行）。三条硬
+断言一条不动——兼容层只在**加载侧**：:func:`~ai_eval.compat.capability_gap_kinds` 读出
+缺哪几类，:func:`~ai_eval.compat.fail_closed_player_class` 把这些类型的应答换成**合法
+放弃**（见 `ai_eval.compat` 的模块 docstring）。``LoadedVersion`` 因此另记两件事：
+``raw_player_class``（副本原样的类，红-绿对照的"红"侧）与 ``capability_gap_kinds``
+（版本级静态缺口，驱动侧据它数 ``capability_gaps``）。分发表完整的版本（当前 ``HEAD``）
+``player_class is raw_player_class``——零包装、行为逐值不变。
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .compat import capability_gap_kinds, fail_closed_player_class
 from .errors import AiVersionError
 
 __all__ = [
@@ -61,6 +71,15 @@ class LoadedVersion:
     heuristic_sha256: str
     path: Path
     player_class: type
+    raw_player_class: type | None = None
+    """副本**原样**的参与者类（未经兼容层包装）。
+
+    包装只在选路表不全时发生（票 36）：``player_class is raw_player_class`` = 这个版本
+    的选路表完整、兼容层没有插手。红-绿对照用它证明"红"是冻结副本自己的行为。
+    """
+
+    capability_gap_kinds: tuple[str, ...] = ()
+    """这个版本的选路表缺的 ``QueryKind``（版本级、静态；见 `ai_eval.compat`）。"""
 
     def to_dict(self) -> dict[str, str]:
         """§2.8 里 ``{ref, heuristic_sha256}`` 的写法（``ref`` 用解析后的提交）。"""
@@ -178,12 +197,15 @@ def load_version(
     player_class = getattr(module, "HeuristicPlayer", None)
     if player_class is None:
         raise AiVersionError(f"版本 {ref!r} 的 {HEURISTIC_PATH} 没有导出 HeuristicPlayer")
+    gap_kinds = capability_gap_kinds(module)
     loaded = LoadedVersion(
         ref=ref,
         commit=commit,
         heuristic_sha256=digest,
         path=path,
-        player_class=player_class,
+        player_class=fail_closed_player_class(player_class, gap_kinds, ref=ref),
+        raw_player_class=player_class,
+        capability_gap_kinds=gap_kinds,
     )
     _CACHE[key] = loaded
     return loaded

@@ -22,7 +22,13 @@
     # 机器可读（给审计测试与其它工具用）
     .venv/bin/python tools/dump_catalog.py --json
 
-**只读**：不建局、不模拟、不写文件。`--all` 连装备技能一起列（缺省只列 `carrier == HERO`）。
+**只读**：不建局、不模拟、不写文件。缺省列**全部非装备载体**（武将牌 / 遗物 / 标记效果 /
+牌标签效果）；`--all` 连 22 条装备技能一起列——装备是"牌带来的技能"，形状盘点默认不铺开它。
+
+M7 票 26 起多出**遗物**这一档（`carrier == RELIC`，六条 `relic.*`）：遗物也是技能，
+做遗物时必须能在本表里查到它的形状指纹（`similar_skills.py --like relic.x`）。
+M7 票 27 起多出 **NPC 技能**这一档（`carrier == NPC`，四条 `npc.*`，只授敌方座位）：
+它们同样是"作者要写的技能"，故同在这张缺省面里（`similar_skills.py --like npc.fury`）。
 """
 
 from __future__ import annotations
@@ -136,13 +142,19 @@ def _step_name(step: Any) -> str:
 
 
 def collect(*, include_equipment: bool = False) -> tuple[SkillShape, ...]:
-    """扫 :data:`sgs.skills.CATALOG`，返回每条技能的形状指纹（按 id 排序）。"""
+    """扫 :data:`sgs.skills.CATALOG`，返回每条技能的形状指纹（按 id 排序）。
+
+    缺省只滤掉 ``EQUIPMENT``（22 条装备技能）：它们是"牌带来的技能"，不是技能票的产出；
+    其余载体（``HERO`` / ``MARKER`` / ``CARD_TAG`` / ``RELIC``）都会列出来。M7 票 26 之后
+    这条判据是"非装备载体"而不是"== HERO"——遗物（``relic.*``）同样是作者要写的技能，
+    新加一条却查不到形状指纹与相似技能，正是这个工具要避免的事。
+    """
     from sgs.skills import CATALOG
 
     shapes: list[SkillShape] = []
     for skill_id, definition in sorted(CATALOG.items()):
         carrier = definition.carrier.name
-        if not include_equipment and carrier != "HERO":
+        if not include_equipment and carrier == "EQUIPMENT":
             continue
         flow = _flow_of(skill_id)
         shapes.append(

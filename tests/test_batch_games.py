@@ -16,7 +16,15 @@ from pathlib import Path
 import pytest
 
 from sgs.agents import RandomPlayer
-from sgs.data import Mode, RuleConfig, load_content_pack
+from sgs.data import (
+    Identity,
+    Mode,
+    PveConfig,
+    PveVictory,
+    PveVictoryKind,
+    RuleConfig,
+    load_content_pack,
+)
 from sgs.engine import Engine, ai_stream
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -303,6 +311,9 @@ def test_no_heroes_mode_is_recorded_in_the_config_and_the_seats() -> None:
         (2, Mode.IDENTITY),
         (3, Mode.IDENTITY),
         (5, "team"),
+        # 票 13：PvE 的 6..8 座超的是**房间编排上限**（2~5），不是 ``RuleConfig`` 的 2..8。
+        (6, Mode.PVE),
+        (8, Mode.PVE),
     ],
 )
 def test_unsupported_mode_combinations_fail_and_name_both_values(players, mode) -> None:
@@ -645,3 +656,83 @@ def test_the_thin_launcher_runs_as_a_script(tmp_path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert json.loads(out.read_text(encoding="utf-8"))["schema"] == "sgs.batch.v1"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ PvE 进批测（票 13；spec §Acceptance A4）：白名单 2..5 + 两个新侧别的汇总
+# ---------------------------------------------------------------------------
+
+
+def _pve_rule(players: int, *, allies: int = 1) -> RuleConfig:
+    """一局 PvE 的规则配置：``allies`` 个友方（座位 0..）＋其余敌方，``ROUT`` 全歼。
+
+    PvE 的座位数由 ``PveConfig.identities`` 的**长度**自证（票 07 的校验矩阵），故批量层
+    的白名单只判"房间编排容不容得下这个人数"，不另抄一张人数表。
+    """
+    identities = (Identity.ALLY,) * allies + (Identity.ENEMY,) * (players - allies)
+    return RuleConfig(
+        player_count=players,
+        mode=Mode.PVE,
+        pve=PveConfig(
+            identities=identities,
+            principal=0,
+            victory=PveVictory(kind=PveVictoryKind.ROUT),
+        ),
+    )
+
+
+@pytest.mark.parametrize("players", (2, 3, 4, 5))
+def test_a_pve_batch_is_supported_from_two_to_five_seats(players: int) -> None:
+    """``PVE × 2..5`` 合法（票 13；座位数由 ``PveConfig.identities`` 的长度定）。
+
+    白名单里的 5 是**房间编排上限**（``src/sgs/data/scripts.py`` 的"座位总数 2 ~ 5"
+    = 主角 1 + allies ≤ 2 + enemies 1..4），不是 ``RuleConfig`` 的 2..8。
+    """
+    batch = run_games(
+        seeds=(1,), mode=Mode.PVE, players=players, rule_config=_pve_rule(players)
+    )
+
+    assert batch.config["mode"] == "pve"
+    assert batch.config["players"] == players
+    assert batch.summary["errors"] == 0, [game.error for game in batch.games]
+    assert batch.summary["finished"] == 1
+
+
+def test_a_pve_batch_without_its_battle_config_is_a_spec_error() -> None:
+    """PvE 的阵营 / 主角 / 胜负条件必须由调用方给：批量层不替谁编一场战斗（fail-closed）。"""
+    with pytest.raises(BatchSpecError, match="pve"):
+        run_games(seeds=(1,), mode=Mode.PVE, players=3)
+
+
+def test_a_pve_summary_carries_the_two_campaign_sides() -> None:
+    """``wins_by_side`` 按模式登记：PvE 是 ``ally`` / ``enemy`` 两键（票 13）。"""
+    batch = run_games(
+        seeds=(1, 2), mode=Mode.PVE, players=5, rule_config=_pve_rule(5, allies=2)
+    )
+    summary = batch.summary
+
+    assert set(summary["wins_by_side"]) == {"ally", "enemy"}
+    expected = {"ally": 0, "enemy": 0}
+    for game in batch.games:
+        outcome = game.outcome
+        assert outcome is not None
+        if outcome["result"] == "draw":
+            continue
+        expected[outcome["side"]] += 1
+    assert summary["wins_by_side"] == expected
+    assert sum(summary["wins_by_side"].values()) + summary["draws"] == summary["finished"]
+    assert summary["draws"] == 0, "PvE 的终局由 solve_pve_outcome 判，本批不该出现平局"
+
+
+def test_a_pve_rule_config_cannot_be_used_for_another_mode() -> None:
+    """PvE 的战斗配置与显式模式互斥：同一份 ``rule_config`` 不许跨模式复用（票 13）。"""
+    with pytest.raises(UnsupportedMode, match="identity"):
+        run_games(seeds=(1,), mode=Mode.IDENTITY, players=5, rule_config=_pve_rule(5))
+
+
+def test_a_pve_batch_rejects_a_rule_config_that_is_not_pve() -> None:
+    """反向同理：``mode=pve`` 只收派生出 ``pve`` 的配置（否则会按身份局开一局）。"""
+    with pytest.raises(UnsupportedMode, match="pve"):
+        run_games(
+            seeds=(1,), mode=Mode.PVE, players=5, rule_config=RuleConfig(player_count=5)
+        )

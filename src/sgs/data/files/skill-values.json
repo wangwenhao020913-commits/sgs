@@ -850,5 +850,12 @@
       "rarity": "common"
     }
   },
-  "relics": {}
+  "relics": {
+    "relic.damage_dealt": true,
+    "relic.distance": true,
+    "relic.extra_draw": true,
+    "relic.extra_start_hand": true,
+    "relic.hand_limit": true,
+    "relic.peach_heal": true
+  }
 }

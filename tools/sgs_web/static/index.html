@@ -21,6 +21,54 @@
     </div>
   </div>
   <div class="page-body">
+  <!-- 剧本模式（M7 票 20 / spec §4「开局页增量叠加」）：这是**加的一个段落**，既有三块
+       （开一局表单 / 将池预设 / 已有录像）一个都没删，顺序也没动。
+       三态只由 `GET /api/script-save` 的回包决定（`missing` / `ok` / `broken`），渲染与请求
+       全在 `script-lobby.js`：「新剧本」= 选剧本 → 3 选 1 角色（这段**不落盘**）；
+       「继续剧本」= 一条 resume；「放弃剧本」= 删两份。`ok` 才有摘要行；
+       `broken` 有红字 `reason` 与两个修复按钮（`.bak` 也不可用时只剩「放弃存档」）。
+       位置纪律：**不插在牌桌视图与回放视图之间** —— 烟测有两处字符串切片以那两个
+       `main` 的 id 为锚点，故连注释里都不写它们的字面量；新节点也只用垫片认识的标签。 -->
+  <section id="script-panel" class="panel script-panel" aria-label="剧本模式">
+    <h2>剧本</h2>
+    <div class="row">
+      <button id="btn-script-new" type="button" class="primary">新剧本</button>
+      <button id="btn-script-continue" type="button" disabled>继续剧本</button>
+      <button id="btn-script-abandon" type="button" class="ghost" hidden>放弃剧本</button>
+      <span id="script-hint" class="dim"></span>
+    </div>
+    <!-- M7 票 25：剧本编辑器的入口（新视图在回放页之后；本键只切页，读库由编辑器自己发）。
+         入口放在剧本面板里而不是导航三键里：编辑器是作者面，不是第四种玩家页面。 -->
+    <div class="row">
+      <button id="btn-script-editor" type="button" class="ghost">剧本编辑器</button>
+      <span class="dim">编辑剧本库（新建 / 改库 / 校验；与棋盘共用同一份节点图渲染器）</span>
+    </div>
+    <!-- 摘要行（`ok` 才有）：剧本名 · 大节 `layer_index+1`/总数 · 已结算节点数 · 铜钱 · saved_at。
+         五个数原样来自服务端的 `summary`（票 04 §6），前端不派生。 -->
+    <p id="script-summary" class="script-summary" hidden></p>
+    <!-- 坏档（`broken`）：一行**红字** = 服务端那行 `reason`（票 04 §5：坏档不静默、不重写、
+         不丢坏字段），旁边两个修复按钮；`.bak` 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句。
+         **绝不**把坏档当空档：摘要行收起、`.bak` 不可用时连「恢复」都不画。 -->
+    <div id="script-broken" class="script-broken" hidden>
+      <p id="script-broken-reason" class="script-reason"></p>
+      <div class="row">
+        <button id="btn-script-restore" type="button">从我上一份恢复</button>
+        <button id="btn-script-discard" type="button" class="ghost">放弃存档</button>
+      </div>
+      <p id="script-broken-backup" class="dim" hidden>备份也不可用（只能放弃存档）</p>
+    </div>
+    <!-- 「新剧本」的两步：① 选剧本 → ② 3 选 1 角色。`POST /api/script-roster` 是**只读**的
+         （候选是作者编排的数据、不消耗随机数），故这段点多久都不落盘：关页面 = 没建过。
+         「开档」= 唯一的那一次 `POST /api/script-runs`；有旧档时它带旧 `revision`。 -->
+    <div id="script-picker" class="script-picker" hidden>
+      <p id="script-picker-hint" class="dim"></p>
+      <div id="script-choices" class="script-choices"></div>
+      <div class="row">
+        <button id="btn-script-picker-go" type="button" class="primary" disabled>开档</button>
+        <button id="btn-script-picker-cancel" type="button" class="ghost">取消</button>
+      </div>
+    </div>
+  </section>
   <form id="lobby-form" class="panel">
     <h2>开一局</h2>
     <div class="grid">
@@ -212,6 +260,20 @@
           <div id="t-self-hero-zones" class="hero-zones" hidden></div>
           <!-- B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 -->
           <div id="t-self-hero-tags" class="hero-tags" hidden></div>
+          <!-- M7 票 23：剧本战斗（PvE）的三处显示里属于自己的那两处 + 只读遗物栏。
+               **数据决定显示**：身份局 / 不带座位表的局这些键全是空值，节点常驻只切
+               `hidden`（`table.js:renderSelfSeat`），牌桌 DOM 与引入前逐字同形。 -->
+          <div id="t-self-global" class="pve-global" hidden></div>
+          <div id="t-self-relics" class="pve-relics" hidden>
+            <span class="pve-relic-label">遗物</span><span id="t-self-relic-list" class="pve-relic-list">无</span>
+          </div>
+          <!-- 一场剧本战斗打完的出口：回棋盘走既有的结算流程（票 22 的三选一 / 遗物弹窗）。
+               只在"从棋盘进来的那一场"且服务端说终局时出现（`table.js:renderSelfSeat`）。 -->
+          <button id="btn-t-pve-return" type="button" class="ghost pve-return" hidden>回棋盘结算</button>
+          <!-- 战斗中退出（spec 用户故事 17 / "随时可退出"）：只调 `suspend`（这一场作废、
+               棋盘进度已保存），确认框复用票 20 的同一个模态壳与那句文案。判据同样是服务端
+               事实（`state.script.battle` 是"从棋盘进来的那一场"），身份局不出现。 -->
+          <button id="btn-t-pve-exit" type="button" class="ghost pve-return" hidden>退出战斗</button>
           <div class="seat-foot">
             <span>手牌：<b id="t-self-hand">0/0</b></span>
             <span>座位 <b id="t-self-seatno">0</b></span>
@@ -448,6 +510,202 @@
   </div>
 </main>
 
+<!-- 剧本棋盘（M7 票 21 / spec §4「棋盘新视图」、票 05 UI-1）：卡格 + 固定 64×64 只放图标的
+     节点 + 上方标题 + SVG 连线 + 悬停关卡信息卡。节点图由 `script-board.js:scriptGraphRender`
+     画——**唯一一份画法**，编辑器（票 25）也调它（D26）。
+     位置纪律：本视图在回放视图**之后**；绝不插在牌桌视图与回放视图之间（烟测有两处字符串
+     切片以那两个 `main` 的 id 为锚点，故这里连注释都不写它们的字面量）。
+     状态色只属于玩家视角：同一份节点在编辑器语境下由渲染器按 `mode` 不画。 -->
+<main id="view-script-board" class="view page-view" hidden>
+  <div id="script-board-topbar" class="topbar page-topbar">
+    <div class="topbar-left">
+      <span id="script-board-script" class="tag"></span>
+      <span id="script-board-layer" class="dim"></span>
+    </div>
+    <div class="topbar-center"></div>
+    <div class="topbar-right">
+      <button id="script-board-nav-lobby" class="tab" type="button">开局</button>
+      <button id="script-board-nav-table" class="tab" type="button" disabled>牌桌</button>
+      <button id="script-board-nav-replay" class="tab" type="button">回放</button>
+      <button id="btn-script-board-exit" type="button" class="ghost">离开棋局</button>
+    </div>
+  </div>
+  <div class="page-body">
+    <section class="panel script-board-panel">
+      <div class="row space">
+        <h2>棋盘</h2>
+        <div class="row">
+          <span id="script-board-hint" class="dim"></span>
+          <button id="btn-script-board-refresh" type="button" class="ghost">刷新</button>
+        </div>
+      </div>
+      <!-- 死路 / 400 的**服务端原话**（`board_error.reason`）：红字与坏档那行同一条规则。 -->
+      <p id="script-board-error" class="script-reason" hidden></p>
+      <div id="script-board-stage" class="script-board-stage">
+        <div id="script-board-graph" class="script-board-graph" data-graph-mode="board"></div>
+        <!-- 悬浮关卡信息卡：战斗房给座位布局与敌人信息，非战斗房给房间类型与已抽出的结果。 -->
+        <div id="script-node-card" class="script-node-card" hidden>
+          <h3 id="script-node-card-title"></h3>
+          <p id="script-node-card-meta" class="dim"></p>
+          <p id="script-node-card-text" class="dim" hidden></p>
+          <div id="script-node-card-seats" class="script-card-seats" hidden></div>
+          <div id="script-node-card-enemies" class="script-card-enemies" hidden></div>
+          <p id="script-node-card-victory" class="script-card-line" hidden></p>
+          <p id="script-node-card-globals" class="script-card-line" hidden></p>
+          <p id="script-node-card-reward" class="script-card-line" hidden></p>
+          <div id="script-node-card-options" class="script-card-options" hidden></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 整备面（M7 票 22 / spec §4「整备面」、票 05 UI-3）：24 格 = **3×8**，其中出战槽
+         （`run.backpack.equipped_slots`，缺省前 4 格）标「出战」；遗物栏（≤6）；铜钱 HUD。
+         交换 / 移动 / 永久丢弃（**不返还铜钱**）由 `script-loadout.js` 现铺；编辑**只在
+         节点之间**——`pending` 非空时这个面板不接任何编辑入口（不是"点了无效"），
+         判据读服务端棋盘体，前端不判断自己在不在节点里。 -->
+    <section id="script-loadout" class="panel script-loadout" aria-label="整备面">
+      <div class="row space">
+        <h2>整备</h2>
+        <div class="row">
+          <span id="script-loadout-coins" class="script-coins"></span>
+          <span id="script-loadout-backpack" class="dim"></span>
+          <span id="script-loadout-relic-count" class="dim"></span>
+          <button id="btn-script-loadout-discard" type="button" class="ghost" disabled>丢弃选中</button>
+        </div>
+      </div>
+      <p id="script-loadout-hint" class="dim"></p>
+      <p id="script-loadout-lock" class="dim" hidden></p>
+      <div id="script-loadout-grid" class="script-loadout-grid" data-rows="3" data-cols="8"
+           aria-label="技能背包（3×8 格，出战槽在左起前 4 格标「出战」）"></div>
+      <div class="row">
+        <h3>遗物栏（≤6）</h3>
+        <span id="script-loadout-relic-hint" class="dim"></span>
+      </div>
+      <div id="script-loadout-relics" class="script-loadout-relics" aria-label="遗物栏"></div>
+    </section>
+
+    <!-- 当前节点的面（M7 票 22）：结算弹窗之外的三面——**事件**（文本 + 选项）、
+         **商店**（6 技能 + 2 遗物，售完不补货）、**问号揭晓**（进入即揭晓，重进不重抽）。
+         三选一 / 遗物 / 结算结果一律走弹窗（`#script-confirm` 那一个壳），不沉在页面底部；
+         这里只画"这个节点本身长什么样"。判据全在 `state.script.board.pending.spec`。 -->
+    <section id="script-face" class="panel script-face" hidden aria-label="当前节点">
+      <div class="row space">
+        <h2 id="script-face-title"></h2>
+        <span id="script-face-meta" class="dim"></span>
+      </div>
+      <p id="script-face-text" class="dim" hidden></p>
+      <div id="script-face-list" class="script-face-list"></div>
+      <div id="script-face-actions" class="row"></div>
+    </section>
+  </div>
+</main>
+
+<!-- 剧本编辑器（M7 票 25 / spec §4「编辑器新视图」、票 05 UI-5）：实体列表 + 新建 / 编辑 /
+     另存为副本 / 重命名 / 删除 + 引用选择器；大节页 = 网格拖放 + 画边 + 解除连线 + 设条件；
+     校验面板与加载器**同一份**校验函数（票 24 的 `errors` 原样显示）。
+     节点图**不在这里画第二份**：`script-editor.js` 调 `script-board.js:scriptGraphRender` 的
+     `mode: "editor"` 分支（D26）——作者视角因此没有玩家状态色。
+     位置纪律：本视图在回放视图**之后**（棋盘之后），绝不插在牌桌与回放之间；注释里也不写
+     那两个 `main` 的 id 字面量。所有动态行 / 表单都由脚本现铺，静态壳只给挂载点。 -->
+<main id="view-script-editor" class="view page-view" hidden>
+  <div id="script-editor-topbar" class="topbar page-topbar">
+    <div class="topbar-left">
+      <span id="script-editor-crumb" class="tag"></span>
+      <span id="script-editor-source" class="dim"></span>
+    </div>
+    <div class="topbar-center"></div>
+    <div class="topbar-right">
+      <button id="script-editor-nav-lobby" class="tab" type="button">开局</button>
+      <button id="script-editor-nav-table" class="tab" type="button" disabled>牌桌</button>
+      <button id="script-editor-nav-replay" class="tab" type="button">回放</button>
+      <button id="btn-script-editor-reload" type="button" class="ghost">重读库</button>
+    </div>
+  </div>
+  <div class="page-body script-editor-body">
+    <section class="panel script-editor-side">
+      <h2>实体</h2>
+      <!-- 九类实体（剧本 / 大节 / 节点 / 房间 / 敌人模板 / 技能池 / 事件 / 事件池 / 全局技能）；
+           大节 / 节点 / 边是剧本**归属**的，故左栏先选剧本、再选大节。 -->
+      <div id="script-editor-kinds" class="script-editor-kinds"></div>
+      <h3 id="script-editor-scope" class="dim"></h3>
+      <div id="script-editor-list" class="script-editor-list"></div>
+      <p id="script-editor-side-hint" class="dim"></p>
+    </section>
+    <section class="panel script-editor-main">
+      <div class="row space">
+        <h2 id="script-editor-title">剧本库</h2>
+        <div class="row">
+          <button id="btn-script-editor-new" type="button" class="primary">新建</button>
+          <button id="btn-script-editor-edit" type="button" disabled>编辑</button>
+          <button id="btn-script-editor-clone" type="button" class="ghost" disabled>另存为副本</button>
+          <button id="btn-script-editor-rename" type="button" class="ghost" disabled>重命名</button>
+          <button id="btn-script-editor-delete" type="button" class="ghost" disabled>删除</button>
+        </div>
+      </div>
+      <p id="script-editor-hint" class="dim"></p>
+      <!-- 服务端 400 / 409 的原话（与坏档那行同一条红字规则）。 -->
+      <p id="script-editor-error" class="script-reason" hidden></p>
+      <!-- 点校验条目之后的「已定位」回执（字段位置 = 加载器的 `loc`）。 -->
+      <p id="script-editor-focus" class="dim" hidden></p>
+      <div id="script-editor-form" class="script-editor-form"></div>
+      <div id="script-editor-tree" class="script-editor-tree" hidden></div>
+
+      <!-- 大节页：网格（长宽可设）+ 拖放节点 + 画边 + 边列表（条件 / 解除）。 -->
+      <div id="script-editor-layer" class="script-editor-layer" hidden>
+        <div class="row space">
+          <h3 id="script-editor-layer-title"></h3>
+          <span id="script-editor-layer-hint" class="dim"></span>
+        </div>
+        <div class="row">
+          <span>网格行</span>
+          <input id="script-editor-grid-rows" type="number" min="1" value="3">
+          <span>列</span>
+          <input id="script-editor-grid-cols" type="number" min="1" value="4">
+          <button id="btn-script-editor-grid-save" type="button" class="ghost">改网格</button>
+        </div>
+        <div id="script-editor-graph" class="script-editor-graph" data-graph-mode="editor"></div>
+        <h3>连线（from → to · 条件 · 解除）</h3>
+        <div class="row">
+          <select id="script-editor-edge-from" aria-label="连线起点"></select>
+          <span>→</span>
+          <select id="script-editor-edge-to" aria-label="连线终点"></select>
+          <button id="btn-script-editor-edge-draw" type="button">画边</button>
+        </div>
+        <div id="script-editor-edges" class="script-editor-edges"></div>
+      </div>
+
+      <!-- 校验面板：票 24 的 `GET/PUT` 回包里的 `errors` 逐条落字段（红字 + `loc`），
+           点条目跳到对应该字段（引用方实体）。 -->
+      <div id="script-editor-validation" class="script-editor-validation">
+        <div class="row space">
+          <h3>校验面板</h3>
+          <span id="script-editor-validation-count" class="dim"></span>
+        </div>
+        <div id="script-editor-errors" class="script-editor-errors"></div>
+        <p id="script-editor-clean" class="dim" hidden>没有校验错误（与加载器同一份校验函数）。</p>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- 剧本层的**唯一**模态壳（M7 票 20 起）：撞旧档三选一 / 退出确认 / 票 22 的三选一 /
+ 遗物 / 结算结果 / 票 25 的删除确认都填这一个壳。它住在五个页面**之外**（五个 `main` 之后），
+ 因为票 20 的确认框原先住在开局页里，而棋盘的「离开棋局」、结算面与编辑器的删除面在别的
+ 页面 —— 那样弹窗会被 `display: none` 的祖先一起藏掉。位置纪律：仍在回放视图之后，不落进
+ 牌桌与回放之间。
+ 「取消」一律**什么都不发生**（撞旧档 = 不删档；退出 = 不发请求）。
+ 正文槽 `#script-confirm-body` 是票 22 加的：票 20 只有 标题 + 一句话 + 按钮三块。 -->
+<div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
+<div id="script-confirm" class="script-confirm" role="dialog" aria-modal="true"
+     aria-labelledby="script-confirm-title" hidden>
+  <div class="script-confirm-window">
+    <h2 id="script-confirm-title" class="script-confirm-title"></h2>
+    <p id="script-confirm-text" class="script-confirm-text"></p>
+    <div id="script-confirm-body" class="script-confirm-body" hidden></div>
+    <div id="script-confirm-actions" class="row"></div>
+  </div>
+</div>
+
 <!-- U1-00：前端按职责拆成普通脚本，**这里的顺序就是运行顺序**；页面与
      tests/support/ui_smoke.mjs 共用这一份清单（不引入 npm / 打包 / ES module）。 -->
 <script src="core.js"></script>
@@ -455,6 +713,24 @@
      页面启动即异步载入；缺键逐级回退到服务端 wording → 前端通用文案）。 -->
 <script src="prompts.js"></script>
 <script src="lobby.js"></script>
+<!-- M7 票 20：剧本模式的开局页（三态入口 + 摘要行 + 坏档修复 + 两个确认框）。
+     与 `lobby.js` 同属开局页，故紧挨它；只读 core.js 的 `$` / `api` / `post` / `state`，
+     由 `main.js:wire()` 末尾的 `wireScriptLobby()` 接线（首屏就取一次三态）。
+     走的是 `GET /api/script-save` / `POST /api/script-roster` / `POST /api/script-runs` /
+     `…/resume` / `…/suspend` / `POST /api/script-save/restore` / `DELETE /api/script-save`。 -->
+<script src="script-lobby.js"></script>
+<!-- M7 票 21：棋盘 + **共用**节点图渲染器（棋盘与编辑器同一份画法，D26）。紧挨开局页
+     （棋盘由「新剧本」的开档 / 「继续剧本」接上）；`wireScriptBoard()` 在 main.js 里接线。 -->
+<script src="script-board.js"></script>
+<!-- M7 票 22：整备面（24 格 / 出战槽 / 遗物栏 / 铜钱）+ 结算与选择弹窗（三选一 / 遗物 /
+     Boss 自动失去 4 条 / 结果）+ 事件 / 商店 / 问号揭晓三面。紧挨棋盘：它读棋盘体
+     （`state.script.board`）的 `run` / `catalog` / `pending.spec`，由 `wireScriptLoadout()`
+     接线；价格 / 铜钱 / 折价数字一律印服务端给的数（票 22 的备注），前端不乘价。 -->
+<script src="script-loadout.js"></script>
+<!-- M7 票 25：剧本编辑器（实体列表 / 新建改删 / 网格拖放 / 画边 / 解除连线 / 设条件 /
+     校验面板）。节点图调 `script-board.js` 那一份共用渲染器（`mode: "editor"`，不画状态色）；
+     删除确认复用 `script-lobby.js` 的唯一模态壳。`wireScriptEditor()` 在 main.js 里接线。 -->
+<script src="script-editor.js"></script>
 <script src="session.js"></script>
 <script src="candidates.js"></script>
 <script src="card-view.js"></script>

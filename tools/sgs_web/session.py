@@ -200,6 +200,7 @@ class Session:
         *,
         seed: int | None = None,
         player_count: int = DEFAULT_PLAYER_COUNT,
+        rule_config: RuleConfig | None = None,
         ai: str = DEFAULT_AI,
         human_seat: int = DEFAULT_HUMAN_SEAT,
         hero_pool: Sequence[str] | None | Literal["enabled"] = "enabled",
@@ -212,7 +213,17 @@ class Session:
         ask_policy: AskPolicy = DEFAULT_WEB_ASK_POLICY,
         pause_after_game_start: bool = False,
     ) -> None:
-        """``pause_after_game_start``（table-ux-overhaul 票 14）＝**建局就停在 L0 边界**。
+        """``rule_config``（M7 票 19）＝**接管一份现成的规则配置**（含 ``pve``）。
+
+        剧本的战斗节点用档内冻结的 ``PveConfig`` + ``battle_seed`` 起局（票 04 §3）：
+        ``player_count`` 现算配置那条路因此不够——PvE 的座位表 / 阵营 / 胜负条件必须
+        原样进 header，重打该场才是同一场。带 ``rule_config`` 时 ``player_count`` 只被忽略。
+
+        座位表非空（``pve.seats``）时 ``heroes`` / ``hero_pool`` / ``my_hero`` /
+        ``banned_heroes`` 一律不许给：谁坐哪个座位已由 header 里的座位表定死（引擎同一
+        判据），两条入口同时生效会让"这一场是谁"取决于调用方怎么传。
+
+        ``pause_after_game_start``（table-ux-overhaul 票 14）＝**建局就停在 L0 边界**。
 
         打开时（接入层 ``GameRegistry.create`` 的建局口径）这一次 ``drive()`` 只跑到
         "游戏开始时"派发完，人类第一问留给下一次取增量——建局响应因此止于 ``GAME_START``。
@@ -231,7 +242,18 @@ class Session:
         for hero_id in banned_heroes:
             if not isinstance(hero_id, str) or not hero_id:
                 raise ValueError(f"禁将的武将 id 必须是非空字符串：{hero_id!r}")
-        rule_config: RuleConfig = validate_rule_config({"player_count": player_count})
+        if rule_config is None:
+            rule_config = validate_rule_config({"player_count": player_count})
+        elif not isinstance(rule_config, RuleConfig):
+            raise ValueError(f"规则配置必须是 RuleConfig：{rule_config!r}")
+        seats = () if rule_config.pve is None else rule_config.pve.seats
+        if seats and (
+            heroes or hero_pool != "enabled" or my_hero is not None or banned_heroes
+        ):
+            raise ValueError(
+                "PvE 座位表已经点名了谁坐哪（rule_config.pve.seats）："
+                "heroes / hero_pool / my_hero / banned_heroes 都不许再给"
+            )
         if not 0 <= human_seat < rule_config.player_count:
             raise ValueError(f"人类座位非法：{human_seat}（本局座位 0..{rule_config.player_count - 1}）")
         if timeout_seconds is not None and timeout_seconds <= 0:
@@ -254,6 +276,13 @@ class Session:
         self.pending_since: float | None = None
         self._pending_seq: int | None = None
         self.timeouts = 0
+        self.abandoned = False
+        """**被接入层放弃**的会话（M7 票 19 的 ``suspend``）：剧本模式的「离开牌桌」。
+
+        置真 = 这一局玩家不会再来：``GameRegistry`` 把它从会话表里摘掉（后续取 ⇒ 404），
+        ``save_if_finished`` 对它是**零动作**（被放弃的战斗不留录像，票 04 §4.3）。
+        它不是引擎状态（不进记录流 / 不进侧车），只是会话句柄的生死标记。
+        """
         # 接入层的**最后访问时刻**（票 01 的会话回收判据）：由 :meth:`mark_pending` /
         # :meth:`touch` 打戳，时钟一律由调用方传进来（本模块不 import time）。
         # ``0.0`` = 还没有任何接入层访问（直接构造的会话），回收时按"不知道"跳过。
@@ -270,15 +299,22 @@ class Session:
 
         content = pack if pack is not None else load_content_pack()
         self.pack = content
-        self.heroes: tuple[str, ...] = tuple(heroes)
+        # 座位表入口（M7 票 19）：谁坐哪个座位由 header 里的 ``pve.seats`` 定死，
+        # 引擎在那一档**不许**再收武将发放参数（见 ``sgs.engine.build_initial``）。
+        # 三态照旧记在 ``hero_pool`` 上，但这里必须是"引擎看得懂的缺省"：None = 不发放。
+        self.heroes: tuple[str, ...] = () if seats else tuple(heroes)
         # 三态**必须**分得开（否则侧车元数据会把标准局重放成无武将局）：
         #   "enabled"（缺省）= 从**启用池**随机发放，对应引擎的 ``hero_pool=()``；
         #   ``None``        = **无武将模式**，对应引擎的 ``hero_pool=None``；
         #   序列            = 指定池。
         self.hero_pool: tuple[str, ...] | None = (
-            ()
-            if hero_pool == "enabled"
-            else (None if hero_pool is None else tuple(hero_pool))
+            None
+            if seats
+            else (
+                ()
+                if hero_pool == "enabled"
+                else (None if hero_pool is None else tuple(hero_pool))
+            )
         )
         # 点将（票 19）+ 禁将（M6 票 13）：两者都是**会话配置**（引擎的 ``HeroDealConfig``），
         # 与种子一起冻结、不进记录流。点将是单座位手选；禁将是版本粒度、只作用于随机配将，
@@ -290,7 +326,9 @@ class Session:
         picks: tuple[HeroPick, ...] = (
             () if my_hero is None else (HeroPick(seat=human_seat, hero=my_hero),)
         )
-        self.hero_config = HeroDealConfig(banned_heroes=self.banned_heroes, picks=picks)
+        self.hero_config: HeroDealConfig | None = (
+            None if seats else HeroDealConfig(banned_heroes=self.banned_heroes, picks=picks)
+        )
         self.engine = Engine.new_game(
             seed=self.seed,
             rule_config=rule_config,

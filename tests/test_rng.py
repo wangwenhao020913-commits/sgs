@@ -135,3 +135,44 @@ def test_consuming_the_ai_stream_does_not_move_the_shuffle_stream():
     RandomSource(SEED).substream("shuffle").shuffle(fresh)
 
     assert shuffled == fresh
+
+
+def test_the_nine_script_substreams_do_not_disturb_any_existing_stream():
+    """M7 票 17：「新增子流名不扰动既有序列」——剧本模式那九条流消耗多少都不动老名字。
+
+    派生是名字的纯函数（``sha256("sgs/rng/v1:<seed>:<name>")``），故这条在今天的实现下
+    恒真；它守的是"哪天 substream 改成按创建顺序 / 消耗根状态"时的回归——那时先切九条
+    剧本流再取 ``shuffle`` / ``hero`` / ``ai:0``，逐位都会变（票 03 §5 的自证三条之一）。
+    """
+    import sgs.script as script_mode
+
+    node_key = "l1/n3"
+    factories = (
+        lambda: script_mode.roster_stream(SEED),
+        lambda: script_mode.bonus_stream(SEED, 0),
+        lambda: script_mode.battle_stream(SEED, node_key),
+        lambda: script_mode.enemy_stream(SEED, node_key, 2),
+        lambda: script_mode.draw_stream(SEED, node_key),
+        lambda: script_mode.event_stream(SEED, node_key),
+        lambda: script_mode.reward_stream(SEED, node_key, 1),
+        lambda: script_mode.unknown_stream(SEED, node_key),
+        lambda: script_mode.shop_stream(SEED, node_key),
+    )
+
+    def engine_draws() -> list[list[int]]:
+        """老名字的抽查：洗牌 / 发武将 / 身份 / 每座 AI。"""
+        return [
+            [RandomSource(SEED).substream("shuffle").randbelow(1000) for _ in range(3)],
+            [RandomSource(SEED).substream("hero").randbelow(1000) for _ in range(3)],
+            [RandomSource(SEED).substream("identity").randbelow(1000) for _ in range(3)],
+            [RandomSource(SEED).substream("ai:0").randbelow(1000) for _ in range(3)],
+        ]
+
+    baseline = engine_draws()
+    for factory in factories:
+        stream = factory()
+        for _ in range(50):
+            stream.randbelow(1000)
+
+    assert engine_draws() == baseline, "九条剧本流消耗了随机数，老名字的序列逐位不变"
+    assert len(factories) == len(script_mode.SCRIPT_SUBSTREAMS) == 9

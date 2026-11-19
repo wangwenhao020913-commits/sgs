@@ -9449,3 +9449,792 @@ def test_the_avatar_appearance_script_is_listed_right_after_the_dialog_shell() -
     at = srcs.index("avatar-appearance.js")
     assert srcs[at - 1] == "modal.js", "外观组件紧跟 modal.js（询问弹窗的选面点在这里）"
     assert srcs[at + 1] == "hero-detail.js", "外观组件排在 hero-detail.js 之前（检视窗族相邻）"
+
+
+# ---------------------------------------------------------------------------
+# M7 票 20：剧本开局页三态是**增量**一段，坏档那行是**红字**
+# ---------------------------------------------------------------------------
+
+
+def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
+    """spec §4「开局页增量叠加」：既有三块一个都不删，剧本面板是加在开局页里的一段。
+
+    位置判据与烟测同源：`#script-panel` 在 `view-lobby` 与牌桌视图之间，既有三块
+    （`#lobby-form` / `#hero-pool-panel` / `#run-list`）仍在它之后；剧本面板的两个确认框
+    也不落进牌桌视图与回放视图之间那一段（烟测有两处字符串切片拿那两个 `main` 的 id 当锚点）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    lobby_start = html.index('id="view-lobby"')
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    panel = html.index('id="script-panel"')
+    form = html.index('id="lobby-form"')
+    pool = html.index('id="hero-pool-panel"')
+    runs = html.index('id="run-list"')
+
+    assert lobby_start < panel < form < pool < runs, (
+        "剧本面板要住在开局页里、排在既有三块之前（一个都不许删）："
+        f"panel={panel} form={form} pool={pool} runs={runs}"
+    )
+    assert panel < table_start, "剧本面板属于开局页，不许落进牌桌视图"
+
+    between = html[table_start:replay_start]
+    assert "script-panel" not in between and "script-confirm" not in between, (
+        "剧本的节点不许插在牌桌视图与回放视图之间（烟测有两处字符串切片以那两个 id 为锚点）"
+    )
+    for needle in ('id="script-confirm"', 'id="script-confirm-backdrop"',
+                   'id="script-broken-reason"', 'id="btn-script-restore"',
+                   'id="btn-script-discard"'):
+        assert needle in html, f"坏档 / 撞旧档的修复面缺挂载点：{needle}"
+
+    srcs = _script_srcs()
+    assert "script-lobby.js" in srcs, f"剧本开局页的脚本不在清单里：{srcs}"
+    at = srcs.index("script-lobby.js")
+    assert srcs[at - 1] == "lobby.js", "剧本开局页与 lobby.js 同属开局页，紧挨它加载"
+    assert srcs[-1] == "main.js", "wireScriptLobby() 在 main.js 末尾调，故清单仍是 main.js 最后"
+
+
+def test_the_broken_save_reason_is_red_text_not_a_dim_note() -> None:
+    """票 04 §5 / 票 20：「坏档 ⇒ 一行**红字** `reason`」——红是判据，不是形容词。
+
+    坏档那行必须自己有一条规则、颜色是红系，而不是复用灰色的 `.dim` 或强调色
+    `--accent`（强调色是按钮的色，红字是"这一屏出了事"）。
+    """
+    reason = _css_rule(".script-reason")
+    color = re.search(r"color:\s*#([0-9a-fA-F]{6})", reason)
+    assert color is not None, f"坏档那行要自己写死颜色（不靠继承）：{reason}"
+    red, green, blue = (int(color.group(1)[at : at + 2], 16) for at in (0, 2, 4))
+    assert red > 120 and red > green + 40 and red > blue + 40, (
+        f"坏档那行必须是红字（实得 #{color.group(1)}）"
+    )
+    assert re.search(r"font-weight:\s*(?:600|700|bold)", reason), (
+        f"红字要够重（坏档不静默）：{reason}"
+    )
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert '<p id="script-broken-reason" class="script-reason">' in html, (
+        "坏档那行的节点必须挂 `.script-reason`（红字规则的唯一消费者）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M7 票 21：棋盘视图 + **共用**节点图渲染器（D26：节点图只有一份画法）
+# ---------------------------------------------------------------------------
+
+_BOARD_JS = STATIC_DIR / "script-board.js"
+"""棋盘与编辑器共用的节点图渲染器（唯一一份）。"""
+
+_BOARD_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-board-library.json"
+)
+"""烟测棋盘进料：五类房间 + 两个入口 / 两个出口 + 两个 Boss + 一条死路。"""
+
+
+def test_the_script_board_view_sits_after_the_replay_view() -> None:
+    """spec §4「位置纪律」：棋盘视图在回放视图**之后**，绝不插在牌桌与回放之间。
+
+    烟测有两处字符串切片以牌桌视图 / 回放视图那两个 `main` 的 id 为锚点，故连注释里都不
+    写它们的字面量——这里断言的是**结构**位置，与烟测的 `M7-21a` / `M7-21b` 同源。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    board_start = html.index('id="view-script-board"')
+
+    assert replay_start < board_start, "棋盘视图必须排在回放视图之后（位置纪律）"
+    between = html[table_start:replay_start]
+    assert "script-board" not in between, (
+        "棋盘的节点不许插在牌桌视图与回放视图之间（两处字符串切片断言的锚点在那里）"
+    )
+
+    for needle in (
+        'id="script-board-graph"',
+        'id="script-node-card"',
+        'id="script-node-card-seats"',
+        'id="script-node-card-enemies"',
+        'id="script-board-error"',
+        'id="btn-script-board-refresh"',
+        'id="btn-script-board-exit"',
+        'id="script-board-nav-lobby"',
+    ):
+        assert needle in html, f"棋盘视图缺挂载点：{needle}"
+
+    srcs = _script_srcs()
+    assert "script-board.js" in srcs, f"节点图渲染器不在脚本清单里：{srcs}"
+    at = srcs.index("script-board.js")
+    assert srcs[at - 1] == "script-lobby.js", (
+        "棋盘脚本紧挨剧本开局页（同一张票族、同为 M7 前端；棋盘的入口由开局页的开档 / 继续接上）"
+    )
+    assert srcs[-1] == "main.js", "wireScriptBoard() 在 main.js 的 wire() 里调，清单仍是 main.js 最后"
+
+
+def test_the_node_graph_renderer_has_exactly_one_implementation() -> None:
+    """D26：节点图（图标 + 标题 + SVG 连线 + 边条件标签）**只有一份实现**。
+
+    三条机械判据（实现者选的是「唯一导出名 + 唯一画法」这一种可核写法）：
+
+    1. `scriptGraphRender` 在整个 `static/*.js` 里只**定义**一次，且定义在
+       `script-board.js`——票 25 的编辑器只能调同一个全局名；
+    2. **节点图的**连线画法只有一处：连线元素带 `class="script-edge"`（座位卡上那些 16×16
+       的禁止角标也画 `<line>`，不属于节点图，故判据认的是这个类名，不是 `<line>` 字面量），
+       它在整个目录里恰好出现一次、且就住在这份渲染器里；
+    3. 棋盘自己的渲染口调用这个入口（定义之外至少还有一处调用），不是"长得像"。
+    """
+    assert _BOARD_JS.exists(), f"缺少共用渲染器脚本：{_BOARD_JS}"
+
+    definitions: dict[str, int] = {}
+    graph_line_owners: list[str] = []
+    svg_root_owners: list[str] = []
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        count = text.count("function scriptGraphRender(")
+        if count:
+            definitions[path.name] = count
+        if '<line class="script-edge"' in text:
+            graph_line_owners.append(path.name)
+        if "script-graph-svg" in text:
+            svg_root_owners.append(path.name)
+
+    assert definitions == {"script-board.js": 1}, (
+        "节点图渲染入口必须只有一处定义、且在 script-board.js 里："
+        f"{definitions}"
+    )
+    assert graph_line_owners == ["script-board.js"], (
+        "节点图的连线只能有一份画法（`class=\"script-edge\"` 的连线元素）："
+        f"{graph_line_owners}"
+    )
+    assert svg_root_owners == ["script-board.js"], (
+        f"节点图的 SVG 根也只能由这份渲染器出：{svg_root_owners}"
+    )
+    renderer = _BOARD_JS.read_text(encoding="utf-8")
+    assert renderer.count('<line class="script-edge"') == 1, (
+        "连线绘制在 script-board.js 里也应只有一处（实得 "
+        f"{renderer.count('<line class=\"script-edge\"')} 处）"
+    )
+    assert renderer.count("function scriptGraphEdgeMarkup(") == 1, (
+        "连线 + 条件标签只有一个画法函数（`scriptGraphEdgeMarkup`）"
+    )
+    assert renderer.count("scriptGraphEdgeMarkup(") == 2, (
+        "`scriptGraphEdgeMarkup` 只该在定义处与 `scriptGraphRender` 的调用处各出现一次"
+    )
+    assert renderer.count("scriptGraphRender(") >= 2, (
+        "棋盘渲染口必须调用共用入口（定义之外还要有调用点）——否则它可能是第二份画法"
+    )
+    assert '"use strict";' in renderer, "新脚本必须是经典严格脚本（首条语句由清单用例钉）"
+    assert not re.search(r"^\s*(?:import|export)\b", renderer, re.M), (
+        "不得使用 ESM：本仓只允许按 index.html 顺序加载的普通脚本"
+    )
+
+
+def test_the_board_nodes_are_64px_icons_and_status_colors_belong_to_the_board() -> None:
+    """票 05 UI-1：节点**统一 64×64、只放图标**；状态色只属于玩家视角的棋盘。
+
+    - 图标按钮自己的一条 CSS 规则钉死 64×64，标题在它上方、自己一条规则；
+      （票面写的"65,536 px²"与 64×64 在算术上不自洽——64×64 = 4,096 px²。硬判据取
+      **尺寸**：spec §4 与票 05 UI-1 都写"统一 64×64"，面积按 64×64 算，见票 21 的
+      `## Answer` 的明说读法。）
+    - Boss 图标是**红色**感叹号（红是判据，不是形容词）；
+    - 五个状态各有一条规则（分数色），且这些类名只出现在 `script-board.js`——编辑器语境
+      由渲染器按 `mode` 决定不写它们（烟测 `M7-21m` 钉"同一节点在编辑器语境下零 st-* 类"）；
+    - 不新增图片资源：图标是内联 SVG，不是 `<img>` / `background-image`。
+    """
+    button = _css_rule(".script-node-button")
+    width = re.search(r"width:\s*(\d+)px", button)
+    height = re.search(r"height:\s*(\d+)px", button)
+    assert width is not None and height is not None, f"节点按钮要有明确的 64×64：{button}"
+    assert int(width.group(1)) == int(height.group(1)) == 64, (
+        f"节点统一 64×64（65,536 px²），实得 {width.group(1)}×{height.group(1)}"
+    )
+    assert int(width.group(1)) ** 2 == 4096, "64×64 = 4,096 px²（票面的 65,536 是算错的面积）"
+
+    title = _css_rule(".script-node-title")
+    assert re.search(r"position:\s*absolute", title), f"标题要能定位在节点上方：{title}"
+
+    boss = _css_rule(".script-icon-boss")
+    color = re.search(r"color:\s*#([0-9a-fA-F]{6})", boss)
+    assert color is not None, f"Boss 图标要自己写死颜色：{boss}"
+    red, green, blue = (int(color.group(1)[at : at + 2], 16) for at in (0, 2, 4))
+    assert red > 140 and red > green + 60 and red > blue + 60, (
+        f"Boss = 红色感叹号（实得 #{color.group(1)}）"
+    )
+
+    renderer = _BOARD_JS.read_text(encoding="utf-8")
+    for status in ("current", "available", "completed", "closed", "blocked"):
+        assert _css_rule(f".script-node-button.st-{status}"), (
+            f"状态色缺规则：.script-node-button.st-{status}"
+        )
+        assert f'key: "{status}"' in renderer, (
+            f"状态 {status} 必须由棋盘渲染器的状态派生给出（唯一的类名来源）"
+        )
+    # 状态类只有一个出口：渲染器里那一处模板串。别的脚本再拼一个 `st-` 就会在这里变红。
+    emitters = [
+        path.name
+        for path in sorted(STATIC_DIR.glob("*.js"))
+        if re.search(r"[`\"']st-", path.read_text(encoding="utf-8"))
+    ]
+    assert emitters == ["script-board.js"], (
+        f"状态类只该由棋盘渲染器拼（实得 {emitters}）"
+    )
+    assert renderer.count("`st-${state.key}`") == 1, (
+        "状态类的唯一出口是 `st-${state.key}`（一处）"
+    )
+    assert 'mode === "editor"' in renderer, (
+        "渲染器必须按 mode 决定画不画状态色（编辑器语境不画）"
+    )
+    assert "<svg" in renderer and "<img" not in renderer, (
+        "六种图标用内联 SVG，不新增图片资源（无 <img>）"
+    )
+    assert "createElementNS" not in renderer, (
+        "图标走 innerHTML 的内联 SVG（经典脚本 + 垫片可跑），不手写命名空间"
+    )
+
+
+def test_the_board_smoke_library_is_a_valid_script_library() -> None:
+    """烟测的棋盘进料必须过**真**库校验器：否则烟测红在 400 上，看不出是布局还是进料坏了。
+
+    同时钉住烟测要的那几个结构事实：五类房间各至少一次、两个入口、两个出口、两个 Boss、
+    一条死路（col 2 的 e1 没有出边 ⇒ 结算它之后服务端给 `board_error`）、一条带标签条件的边。
+    """
+    from sgs.data import RoomKind, load_script_library
+    from sgs.script.board import exit_nodes
+
+    library = load_script_library(
+        _BOARD_LIBRARY_FIXTURE.read_bytes(), file=str(_BOARD_LIBRARY_FIXTURE)
+    )
+    script = library.scripts[0]
+    layer = script.layers[0]
+
+    kinds = {library_room.kind for library_room in library.rooms}
+    assert kinds == {
+        RoomKind.STORY,
+        RoomKind.BATTLE,
+        RoomKind.EVENT,
+        RoomKind.SHOP,
+        RoomKind.UNKNOWN,
+    }, f"烟测要五类房间各至少一次：{kinds}"
+    entries = [node for node in layer.nodes if node.col == 0]
+    assert len(entries) == 2, f"烟测要两个入口（多入口的棋盘）：{entries}"
+    assert len(exit_nodes(layer)) == 2, "烟测要多出口"
+    bosses = [room for room in library.rooms if room.is_boss]
+    assert len(bosses) == 2, "烟测要多 Boss"
+
+    dead_ends = [
+        node
+        for node in layer.nodes
+        if node.col != layer.grid.cols - 1
+        and not any(edge.from_ == node.id for edge in layer.edges)
+    ]
+    assert [node.id for node in dead_ends] == ["e1"], (
+        f"死路位必须是唯一的 e1（结算它之后 board_error 才有得看）：{dead_ends}"
+    )
+    conditional = [
+        edge for edge in layer.edges if edge.requires.flags or edge.requires.not_flags
+    ]
+    assert [edge.to for edge in conditional] == ["d2"], (
+        "边条件标签要有一条可断言的边（c2 → d2）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M7 票 22：整备面（3×8 / 出战槽 / 遗物栏 / 铜钱）+ 结算弹窗 + 事件 / 商店 / 问号揭晓
+# ---------------------------------------------------------------------------
+
+_LOADOUT_JS = STATIC_DIR / "script-loadout.js"
+"""整备面 + 结算 / 选择弹窗 + 三个节点面（票 22 的唯一实现文件）。"""
+
+
+def _loadout_source() -> str:
+    assert _LOADOUT_JS.exists(), "票 22 的脚本必须是单独一份（spec §4 的脚本表）"
+    return _LOADOUT_JS.read_text(encoding="utf-8")
+
+
+def _function_source(source: str, name: str) -> str:
+    """截出 `function <name>(…) { … }` 的那一段（缩进 / 行尾按源码原样）。"""
+    start = source.index(f"function {name}(")
+    end = source.index("\n}", start)
+    return source[start:end]
+
+
+def test_the_script_loadout_script_is_listed_right_after_the_board_renderer() -> None:
+    """脚本清单的唯一真源仍是 `index.html`：整备面紧挨棋盘（它读棋盘体的 `run` / `catalog`）。"""
+    srcs = _script_srcs()
+    assert "script-loadout.js" in srcs, f"整备面的脚本不在清单里：{srcs}"
+    at = srcs.index("script-loadout.js")
+    assert srcs[at - 1] == "script-board.js", "整备面紧跟棋盘（同一份棋盘体、同一张票族）"
+    assert srcs[-1] == "main.js", "wireScriptLoadout() 在 main.js 末尾调，故清单仍是 main.js 最后"
+
+
+def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() -> None:
+    """整备面是棋盘视图里的一段（spec §4 的落点表）：24 格 = **3×8**、遗物栏 ≤6、铜钱 HUD。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    board_start = html.index('id="view-script-board"')
+    script_start = html.index("<script", board_start)
+    section = html[board_start:script_start]
+    for needle in (
+        'id="script-loadout"',
+        'id="script-loadout-grid"',
+        'id="script-loadout-relics"',
+        'id="script-loadout-coins"',
+        'id="btn-script-loadout-discard"',
+        'id="script-face"',
+        'data-rows="3"',
+        'data-cols="8"',
+    ):
+        assert needle in section, f"整备 / 节点面的挂载点缺件：{needle}"
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    grid = _css_rule(".script-loadout-grid")
+    assert "repeat(8" in grid, f"24 格是 8 列 × 3 行（判据在 CSS 的这一行）：{grid}"
+
+    source = _loadout_source()
+    for needle in (
+        "const SCRIPT_BACKPACK_SLOTS = 24;",
+        "const SCRIPT_LOADOUT_COLS = 8;",
+        "const SCRIPT_LOADOUT_ROWS = 3;",
+        "const SCRIPT_RELIC_SLOTS = 6;",
+        'scriptNode("span", "script-slot-badge", equipped ? "出战" : "")',
+    ):
+        assert needle in source, f"整备面的机械常量 / 出战徽标写法变了：{needle}"
+
+
+def test_the_backpack_edit_entry_points_do_not_exist_inside_a_node() -> None:
+    """编辑窗口 = **节点之间**：`pending` 非空时连监听都不挂、丢弃键收起（不是"点了无效"）。"""
+    source = _loadout_source()
+    editable = _function_source(source, "scriptLoadoutEditable")
+    assert "scriptLoadoutPending()" in editable and "!" in editable, (
+        f"可编辑判据必须读服务端的 `pending`：{editable}"
+    )
+    slot = _function_source(source, "scriptLoadoutSlotNode")
+    # 三个编辑入口（点选 / 拖动起点 / 落下）都只挂在 `if (editable)` 里面。
+    guard = slot.index("if (editable) {")
+    for needle in ('addEventListener("click"', 'addEventListener("dragstart"', 'addEventListener("drop"'):
+        assert slot.index(needle) > guard, f"编辑监听必须在 `if (editable)` 里：{needle}"
+    render = _function_source(source, "scriptLoadoutRender")
+    assert "discard.hidden = !editable" in render, "节点内「丢弃」整键收起（入口不存在）"
+
+
+def test_the_settle_dialogs_share_the_ticket_20_modal_shell() -> None:
+    """结算 / 选择一律弹窗，且只有**一个**模态壳（票 22 备注：不新造一套模态）。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert html.count('id="script-confirm"') == 1, "模态壳只有一份（票 20 交出来的那个）"
+    assert html.count('id="script-confirm-backdrop"') == 1, "遮罩也只有一份"
+    assert 'id="script-confirm-body"' in html, "票 22 的正文槽要在同一个壳里"
+    lobby = (STATIC_DIR / "script-lobby.js").read_text(encoding="utf-8")
+    confirm = _function_source(lobby, "scriptConfirm")
+    assert "script-confirm-body" in confirm, "正文槽由同一个 `scriptConfirm` 填（票 22 只加槽）"
+    source = _loadout_source()
+    assert "scriptConfirm({" in source, "三选一 / 遗物 / 结果都走 `scriptConfirm`"
+    for name in ("scriptSettlePickDialog", "scriptSettleRelicDialog", "scriptSettleShowResult"):
+        assert "scriptConfirm({" in _function_source(source, name), (
+            f"{name} 必须复用票 20 的那个模态壳"
+        )
+    assert "script-confirm-backdrop" not in source, "整备面不许再造一层遮罩"
+    assert "createElement(\"dialog\")" not in source, "不开原生 <dialog>（无构建、经典脚本）"
+
+
+def test_the_boss_lose_four_is_automatic_and_has_no_confirmation() -> None:
+    """Boss「失去 4 条出战技能」是规则效果：只读块 + 无按钮 + 结算体里没有确认字段。"""
+    source = _loadout_source()
+    block = _function_source(source, "scriptLoseBlock")
+    assert 'data-auto' in block and '"1"' in block, f"自动段要能机械读出来：{block}"
+    assert "无需确认" in block, "界面上要明说「无需确认」"
+    assert "addEventListener" not in block, "自动段不接任何点击（不是选项）"
+    assert "scriptDataButton" not in block, "自动段没有按钮"
+    submit = _function_source(source, "scriptSettleSubmit")
+    assert '"confirm' not in submit and "'confirm'" not in submit, (
+        "结算请求里不许有确认字段（失去 4 条不可确认、不可关掉）"
+    )
+    pick = _function_source(source, "scriptSettlePickDialog")
+    assert "flow.boss && flow.round === 0" in pick, "Boss 的第一轮弹窗顶格写自动失去那一段"
+
+
+def test_the_prices_and_coins_are_only_printed_from_the_server_payload() -> None:
+    """票 22 的备注：铜钱 / 价格 / 折价数字**一律服务端下发**，前端不重算（避免第二份真相）。
+
+    机械判据：价格表的名字（`RARITY_PRICES`）与四个价（3 / 6 / 15 / 30）都不在脚本里；
+    前端对 `price` 只有赋值与比较，没有乘除；铜钱只读 `run.coins` / 结算事件里的数。
+    """
+    source = _loadout_source()
+    assert "RARITY_PRICES" not in source, "价格表只有一份真源（`sgs.data`），前端不许再抄"
+    assert not re.search(r"\bprice\s*[*/]", source), "前端不许按稀有度乘价"
+    assert not re.search(r"[*/]\s*\bprice\b", source), "前端不许按稀有度乘价"
+    assert not re.search(r"\bcoins\s*[-+*/]=", source), "铜钱记账在服务端（前端只印数）"
+    # 价的读取口只有服务端下发的 `catalog[id].price` 与结算事件里的 `coins`。
+    assert "raw.price" in source and "Number.isInteger(raw.price)" in source
+    assert "event.coins" in source and "run.coins" in source
+    # 三个价常量的字面量不许出现在脚本里（`15 铜钱` / `折 10` 之类也是第二份真相）。
+    for literal in ("折 10 ", "折 3 ", "15 铜钱", "30 铜钱"):
+        assert literal not in source, f"价格字面量不许写进前端：{literal!r}"
+
+
+_LOADOUT_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-loadout-library.json"
+)
+"""烟测整备 / 结算面的进料（票 22）：入口事件房 → 商店 / 战斗 / 问号房 → 出口。"""
+
+
+def test_the_loadout_smoke_library_is_a_valid_script_library() -> None:
+    """票 22 的进料先过**真**库校验器：烟测不再自己判断"这份库能不能跑"。
+
+    判据是烟测那几条断言的**前置**：入口事件房（+9 铜钱 / 一个被标签锁住的选项 / 一个
+    给技能的选项）、一个商店、一个问号房（揭晓事件房 = 内层玩家流程）、一个出口商店。
+    """
+    from sgs.data import RoomKind, load_script_library
+
+    library = load_script_library(
+        _LOADOUT_LIBRARY_FIXTURE.read_bytes(), file=str(_LOADOUT_LIBRARY_FIXTURE)
+    )
+    script = library.scripts[0]
+    layer = script.layers[0]
+    nodes = {node.id: node for node in layer.nodes}
+
+    assert [node.id for node in layer.nodes if node.col == 0] == ["e1", "b1"], (
+        "两个入口：事件（拿钱 / 折价）与战斗（满包三选一）各一条路"
+    )
+    assert nodes["e1"].room == "room.event.coins"
+    assert nodes["o1"].col == layer.grid.cols - 1, "出口商店落在最后一列（结算即通关）"
+
+    rooms = {room.id: room for room in library.rooms}
+    assert rooms["room.event.coins"].kind is RoomKind.EVENT
+    assert rooms["room.shop"].kind is RoomKind.SHOP
+    assert rooms["room.unknown.event"].kind is RoomKind.UNKNOWN
+    assert rooms["room.unknown.event"].pool[0].room == "room.reveal.event", (
+        "问号房要揭晓一个事件房（烟测据此断「按内层房间的流程走」）"
+    )
+    assert rooms["room.reveal.event"].kind is RoomKind.EVENT
+    assert rooms["room.battle"].battle.victory.kind.value == "survive_rounds", (
+        "战斗房的胜负条件要能两轮内收口（烟测只摆 pending，不打这一场）"
+    )
+
+    event = next(item for item in library.events if item.id == "ev.coins")
+    assert [option.text for option in event.options] == ["收下铜钱", "帮他们修寨", "领一本技能书"]
+    assert event.options[1].requires.flags == ("flag.never",), "锁住的选项（服务端判）"
+    assert [(effect.kind, effect.skill) for effect in event.options[2].effects] == [
+        ("grant_skill", "hero.zhangfei.paoxiao")
+    ], "满包时这条会被服务端折成铜钱（烟测读那个数）"
+
+
+# ---------------------------------------------------------------------------
+# M7 票 23：战斗侧三处显示（友 / 敌 + 敌人模板名 + 副本全局技能标签）+ 只读遗物栏
+#
+# 战斗界面**零新增**：剧本局的战斗就是现有身份局牌桌（D27）。这一节钉的是静态面——
+# 显示位住在那张牌桌里、换场只有一份实现、烟测进料先过真库校验器；行为归
+# `ui_smoke.mjs` 的 M7-23a–m，载荷 / 投影归 `tests/test_web.py`。
+# ---------------------------------------------------------------------------
+
+_BATTLE_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-battle-library.json"
+)
+"""烟测战斗显示的进料（票 23）：入口事件房（给遗物）+ 入口 2v3 战斗房（敌方全局技能）+ 出口。"""
+
+
+def test_the_battle_smoke_library_is_a_valid_script_library() -> None:
+    """票 23 的进料先过**真**库校验器：烟测不再自己判断"这份库能不能跑"。
+
+    判据是烟测那几条断言的**前置**：一个给遗物的事件房、一场 2v3（主角 + 1 名 AI 队友 vs
+    3 名模板敌人，敌方带一条副本全局技能）、一个出口。
+    """
+    from sgs.data import GlobalSkillSide, RoomKind, load_script_library
+
+    library = load_script_library(
+        _BATTLE_LIBRARY_FIXTURE.read_bytes(), file=str(_BATTLE_LIBRARY_FIXTURE)
+    )
+    script = library.scripts[0]
+    layer = script.layers[0]
+    nodes = {node.id: node for node in layer.nodes}
+    rooms = {room.id: room for room in library.rooms}
+
+    assert [node.id for node in layer.nodes if node.col == 0] == ["g1"], (
+        "一个入口（事件房拿遗物）；战斗房在它之后（列 = 进度轴）"
+    )
+    assert nodes["g1"].room == "room.gift"
+    assert nodes["o1"].col == layer.grid.cols - 1, "出口落在最后一列"
+    assert rooms["room.gift"].kind is RoomKind.EVENT
+    assert rooms["room.exit"].kind is RoomKind.SHOP
+
+    battle = rooms["room.battle"].battle
+    assert rooms["room.battle"].kind is RoomKind.STORY
+    assert len(battle.allies) == 1 and len(battle.enemies) == 3, "2v3：主角 + 1 名 AI 队友 vs 3 名敌人"
+    assert battle.victory.kind.value == "survive_rounds", (
+        "胜负条件要能在两轮内收口（烟测用真端点把这一场打到终局）"
+    )
+    assert [reference.skill for reference in battle.global_skills] == ["gs.enemy"]
+    assert battle.global_skills[0].scale is None, "房间级引用只点名技能（区间取库内定义）"
+
+    global_skill = next(item for item in library.global_skills if item.id == "gs.enemy")
+    assert global_skill.side is GlobalSkillSide.ENEMY, "只对敌方生效（烟测断友方座位没有标签）"
+    assert (global_skill.scale.hp, global_skill.scale.draw, global_skill.scale.slash) == (
+        (1, 1),
+        (0, 0),
+        (1, 1),
+    ), "三档区间要**定值**：物化进 header 的数值是烟测断言的唯一真源"
+
+    event = next(item for item in library.events if item.id == "ev.relic")
+    assert [(effect.kind, effect.relic) for effect in event.options[0].effects] == [
+        ("grant_relic", "equip.crossbow"),
+        # 票 34：第二件是 `relic.*`（不是 `equip.*`）——烟测据此断"遗物栏印中文、不印 id"。
+        ("grant_relic", "relic.extra_draw"),
+    ], "入口事件房给的两件遗物就是战斗 grants 的来源（烟测断遗物栏）"
+
+
+def test_the_pve_display_slots_live_inside_the_identity_table() -> None:
+    """三处显示 + 遗物栏 + 战斗中的退出入口是**牌桌表面**的增量，不是第四个战斗 view。
+
+    本用例只断言**静态结构**（票 35：不在这里假装断言运行时行为）：
+
+    - 结构：新节点全部住在 `#view-table` 与 `#view-replay` 之间那一段里（牌桌页内部），
+      `VIEW_NAMES` 仍是四页、没有第二个战斗页；
+    - 缺省收起：四个节点都带 `hidden`（只是**初始态**，不是"运行期由谁决定"）；
+    - 文案只住一处：副本全局技能标签的拼法只有 `seat-view.js:pveGlobalText` 一份。
+
+    **"显隐只由服务端载荷决定"不在这里判**（静态 HTML 读不出运行时行为）——它由已有的
+    `tests/support/ui_smoke.mjs` 钉住：**M7-23g**（遗物栏按载荷里的遗物打开、全局技能标签
+    在载荷没有时收起）、**M7-23i**（「回棋盘结算」只在服务端 `finished` 后出现）、
+    **M7-29a**（战斗退出键缺省收起）。"退出确认框 / `suspend` 只有票 20 那一份"由
+    `test_the_board_to_table_jump_has_exactly_one_implementation` 的入口唯一性断言兜住。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    inside = html[table_start:replay_start]
+
+    for needle, label in (
+        ('id="t-self-global"', "副本全局技能标签"),
+        ('id="t-self-relics"', "只读遗物栏"),
+        ('id="btn-t-pve-return"', "回棋盘结算的出口"),
+        ('id="btn-t-pve-exit"', "战斗中的退出入口"),
+    ):
+        assert needle in inside, f"牌桌视图里缺少{label}的挂载点：{needle}"
+        tag = inside[inside.index(needle) - 120 : inside.index(needle) + 200]
+        assert re.search(r"\bhidden\b", tag), f"{label}缺省必须收起（数据决定显示）：{tag}"
+
+    core = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    view_names = re.search(r"const VIEW_NAMES = \[(.*?)\]", core, re.S)
+    assert view_names is not None, "找不到 VIEW_NAMES"
+    assert [name.strip().strip('"') for name in view_names.group(1).split(",") if name.strip()] == [
+        "lobby",
+        "table",
+        "replay",
+        "script-board",
+        "script-editor",
+    ], "三视图 + 棋盘 + 编辑器（票 25），**没有**第二个战斗页（D27：不新增战斗 view）"
+
+    seat_view = (STATIC_DIR / "seat-view.js").read_text(encoding="utf-8")
+    assert seat_view.count("function pveGlobalText(") == 1, "标签文案只许有一份实现"
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        if path.name == "seat-view.js":
+            continue
+        assert "副本全局技能（" not in text, f"标签文案在 {path.name} 里又拼了一份"
+
+
+def test_the_board_to_table_jump_has_exactly_one_implementation() -> None:
+    """棋盘 ↔ 牌桌只有一条换场实现（不复制 `table.js`、不把会话重置抄第二遍）。
+
+    - 一份新会话的首屏：`session.js:startSessionView` 定义一次，两个调用点
+      （开局页建局 / 剧本战斗进牌桌）都调它；`applyView(body)` + `show("table")` 那一对
+      只许出现在它里面；
+    - 换场：`script-loadout.js:scriptBattleEnter` 定义一次，`script-board.js` 的
+      `scriptBoardEnterNode` 在拿到 `session_id` 时调它一次（进节点 = 换到牌桌）。
+    """
+    session_js = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    loadout_js = (STATIC_DIR / "script-loadout.js").read_text(encoding="utf-8")
+    board_js = (STATIC_DIR / "script-board.js").read_text(encoding="utf-8")
+
+    assert session_js.count("function startSessionView(") == 1
+    entry = _js_function(session_js, "startSessionView")
+    assert 'show("table")' in entry and "applyView(body)" in entry, (
+        "换会话的入口必须在 startSessionView 里（切页与回放只有这一条路）"
+    )
+    assert 'show("table")' not in lobby_js, "开局页不许再抄一份切页"
+    assert "startSessionView(body)" in lobby_js, "开局页建局成功之后走同一个入口"
+    assert "startSessionView(view)" in loadout_js, "剧本战斗进牌桌走同一个入口"
+
+    assert loadout_js.count("async function scriptBattleEnter(") == 1
+    board_entry = _js_function(board_js, "scriptBoardEnterNode")
+    assert board_entry.count("scriptBattleEnter(body)") == 1, (
+        "进战斗节点之后必须换到牌桌（写在 scriptBoardEnterNode 里）"
+    )
+    assert "session_id" in board_entry, "判据是服务端棋盘体的 session_id（不前端造会话）"
+    # 牌桌脚本本身不许被复制一份（剧本层的显示位是"调用时解析"的钩子，不是第二份牌桌）。
+    assert "function renderTable(" not in loadout_js and "function renderTable(" not in board_js
+    assert loadout_js.count("function scriptBattleTableSync(") == 1
+    table_js = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+    assert table_js.count("scriptBattleTableSync(view)") == 1, (
+        "自己的武将块渲染之后要调剧本层的显示位同步（调用时解析）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M7 票 25：剧本编辑器视图（实体列表 / 网格拖放 / 画边 / 解除连线 / 校验面板）
+# ---------------------------------------------------------------------------
+
+_EDITOR_JS = STATIC_DIR / "script-editor.js"
+"""编辑器的唯一实现文件（spec §4 的脚本表：`script-editor.js`）。
+
+节点图**不在这里画**：它调 `script-board.js:scriptGraphRender` 的 `mode: "editor"` 分支
+（D26 / 票 21 的唯一性断言继续盯着 `class="script-edge"` 与 `scriptGraphRender` 的定义处）。
+"""
+
+_EDITOR_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-editor-library.json"
+)
+"""烟测编辑器进料：两个大节、五类房间、七张表都非空、一条带条件的边、一条死路。"""
+
+
+def test_the_script_editor_view_sits_after_the_replay_view() -> None:
+    """spec §4「位置纪律」：编辑器视图在两个新视图的**最后**（回放视图之后）。
+
+    与 M7-21a / M7-25a 同源：烟测有两处字符串切片以牌桌视图 / 回放视图那两个 `main` 的
+    id 为锚点，故连注释里都不写它们的字面量——这里断言的是**结构**位置。
+
+    另钉两件事：
+    - `core.js:VIEW_NAMES` 是 `show()` 的遍历面，新页必须进它，否则 `show("view-script-editor")`
+      会把编辑器页显示出来却**不收起**上一页（叠页）；
+    - 编辑器脚本必须**复用** `script-board.js` 的渲染入口（`scriptGraphRender`），
+      自己不再写一份连线 / SVG（`script-edge` / `script-graph-svg` 只许出现在渲染器里）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    board_start = html.index('id="view-script-board"')
+    editor_start = html.index('id="view-script-editor"')
+
+    assert replay_start < board_start < editor_start, (
+        "两个新视图都排在回放视图之后，且编辑器在棋盘之后（位置纪律）"
+    )
+    between = html[table_start:replay_start]
+    assert "script-editor" not in between, (
+        "编辑器的节点不许插在牌桌视图与回放视图之间（两处字符串切片断言的锚点在那里）"
+    )
+
+    for needle in (
+        'id="script-editor-kinds"',
+        'id="script-editor-list"',
+        'id="script-editor-form"',
+        'id="script-editor-tree"',
+        'id="script-editor-layer"',
+        'id="script-editor-graph"',
+        'id="script-editor-grid-rows"',
+        'id="script-editor-grid-cols"',
+        'id="btn-script-editor-grid-save"',
+        'id="script-editor-edge-from"',
+        'id="script-editor-edge-to"',
+        'id="btn-script-editor-edge-draw"',
+        'id="script-editor-edges"',
+        'id="script-editor-errors"',
+        'id="btn-script-editor-new"',
+        'id="btn-script-editor-edit"',
+        'id="btn-script-editor-clone"',
+        'id="btn-script-editor-rename"',
+        'id="btn-script-editor-delete"',
+        'id="btn-script-editor"',
+        'id="btn-script-editor-reload"',
+        'id="script-editor-nav-lobby"',
+    ):
+        assert needle in html, f"编辑器视图缺挂载点：{needle}"
+
+    core = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    view_names = re.search(r"const VIEW_NAMES = \[(.*?)\]", core, re.S)
+    assert view_names is not None, "找不到 VIEW_NAMES"
+    names = [name.strip().strip('"') for name in view_names.group(1).split(",") if name.strip()]
+    assert names == ["lobby", "table", "replay", "script-board", "script-editor"], (
+        "五页：三视图 + 棋盘 + 编辑器（`show()` 的遍历面必须与 index.html 的视图次序一致）"
+    )
+    nav = re.search(r"const NAV_BUTTONS = \{(.*?)\n\};", core, re.S)
+    assert nav is not None, "找不到 NAV_BUTTONS"
+    assert '"script-editor": [' in nav.group(0), "编辑器页要有自己的导航三键（顶栏同一组）"
+
+    srcs = _script_srcs()
+    assert "script-editor.js" in srcs, f"编辑器的脚本不在清单里：{srcs}"
+    at = srcs.index("script-editor.js")
+    assert srcs[at - 1] == "script-loadout.js", (
+        "编辑器脚本接在剧本族脚本的最后（棋盘渲染器已在它之前加载）"
+    )
+    assert srcs[-1] == "main.js", "wireScriptEditor() 在 main.js 的 wire() 里调，清单仍是 main.js 最后"
+
+    assert _EDITOR_JS.exists(), "票 25 的编辑器必须是单独一份脚本（spec §4 的脚本表）"
+    editor = _EDITOR_JS.read_text(encoding="utf-8")
+    assert editor.count("scriptGraphRender(") >= 1, "编辑器必须调棋盘那一份共用渲染器（D26）"
+    assert 'mode: "editor"' in editor, '编辑器语境必须显式走 `mode: "editor"`（不画状态色）'
+    assert "function scriptGraphRender(" not in editor, "渲染入口只许有一处定义（在 script-board.js）"
+    assert "script-edge" not in editor and "script-graph-svg" not in editor, (
+        "编辑器不许另画一份连线 / SVG（第二份画法会在唯一性断言上红）"
+    )
+    assert not re.search(r"[`\"']st-", editor), (
+        "编辑器不画玩家状态色（`st-*` 类只由 script-board.js 的状态派生拼出）"
+    )
+    assert "function scriptConfirm(" not in editor, "确认框只许有票 20 那一个壳（script-lobby.js）"
+    assert "scriptConfirm(" in editor, "编辑器的删除确认要复用剧本层唯一的模态壳"
+    assert '"use strict";' in editor, "新脚本必须是经典严格脚本（清单用例钉首条语句）"
+    assert not re.search(r"^\s*(?:import|export)\b", editor, re.M), (
+        "不得使用 ESM：本仓只允许按 index.html 顺序加载的普通脚本"
+    )
+
+
+def test_the_editor_validation_panel_is_red_and_the_shared_delete_has_a_second_button() -> None:
+    """票 25 / D30 的三条硬判据：
+
+    1. 校验面板逐条红字（`.script-editor-error` 自己一条规则、颜色是红系），条目带 `loc`；
+    2. 删**共享被引用**实体的确认框有引用点列表 + 那句悬空警告 + 「取消」/「仍然删除」
+       ——第二个按钮必须存在（不许只有「知道了」）；
+    3. 删**归属**项（大节 / 节点）不出现"还被引用所以不能删"：节点提示连带删几条连线，
+       大节直接从剧本的 `layers` 里摘掉。
+    """
+    error_rule = _css_rule(".script-editor-error")
+    color = re.search(r"color:\s*#([0-9a-fA-F]{6})", error_rule)
+    assert color is not None, f"校验面板的条目要自己写死颜色（红字不静默）：{error_rule}"
+    red, green, blue = (int(color.group(1)[at : at + 2], 16) for at in (0, 2, 4))
+    assert red > 120 and red > green + 40 and red > blue + 40, (
+        f"校验面板必须是红字（实得 #{color.group(1)}）"
+    )
+    assert re.search(r"font-weight:\s*(?:600|700|bold)", error_rule), (
+        f"红字要够重（坏库不静默）：{error_rule}"
+    )
+
+    editor = _EDITOR_JS.read_text(encoding="utf-8")
+    for needle, label in (
+        ("仍然删除", "共享引用删除的第二个按钮"),
+        ("取消", "共享引用删除的取消按钮"),
+        ("继续删除会让它们悬空（校验面板标红）", "D30 的悬空警告原话"),
+        ("连带删掉", "删节点的连线提示"),
+        ("script_library", "校验面板的 LoadError 规则 id 原样显示"),
+        ("loc", "校验条目的字段位置（loc）"),
+    ):
+        assert needle in editor, f"{label}缺字：{needle}"
+    for forbidden in ("还被引用所以不能删", "不能删除"):
+        assert forbidden not in editor, (
+            "归属项删除不许出现「拒绝」（D30 推翻了票 03 §9 的旧口径）"
+        )
+
+
+def test_the_editor_smoke_library_is_a_valid_script_library() -> None:
+    """烟测的编辑器进料先过**真**库校验器：红要在断言上，不在 400 上。
+
+    同时钉住烟测要用的结构事实：两个大节（验「删被剧本挂着的大节」）、`b2` 有入边也有出边
+    （验「删节点连带删连线」）、`tpl.grunt` 被 `room.story` 引用（验共享引用的删除确认框）、
+    `room.unknown` 的问号池两项（验加权池编辑）。
+    """
+    from sgs.data import load_script_library
+
+    library = load_script_library(
+        _EDITOR_LIBRARY_FIXTURE.read_bytes(), file=str(_EDITOR_LIBRARY_FIXTURE)
+    )
+    assert len(library.scripts) == 1
+    script = library.scripts[0]
+    assert [layer.id for layer in script.layers] == ["L1", "L2"], "两个大节"
+    layer = script.layers[0]
+    assert len(layer.nodes) == 10 and len(layer.edges) == 17, "第一层：10 个节点 / 17 条边"
+    nodes = {node.id: node for node in layer.nodes}
+    assert nodes["b2"].row == 1 and nodes["b2"].col == 1
+    incident = [edge for edge in layer.edges if "b2" in (edge.from_, edge.to)]
+    assert len(incident) == 5, "b2 有入边也有出边（删它要连带删 5 条）"
+    rooms = {room.id: room for room in library.rooms}
+    assert rooms["room.unknown"].pool and len(rooms["room.unknown"].pool) == 2
+    templates = {template.id: template for template in library.templates}
+    assert templates["tpl.grunt"].random.count == (1, 2), "随机池那一路（与固定对手并列展示）"
+    assert templates["tpl.brute"].random.count == (0, 0), "固定对手那一路（count = [0, 0]）"
+    story = rooms["room.story"].battle
+    assert story is not None
+    assert [seat.template for seat in story.enemies] == ["tpl.grunt", "tpl.brute"], (
+        "tpl.grunt 被共享引用：删它之后校验面板必须立刻出现悬空条目"
+    )

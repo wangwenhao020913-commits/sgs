@@ -24,7 +24,16 @@ from pathlib import Path
 import pytest
 
 from sgs.data import RuleConfig, load_content_pack
-from sgs.engine import Engine
+from sgs.effects import legal_actions_for
+from sgs.engine import Engine, ai_stream
+from sgs.state import (
+    QueryKind,
+    SelectOptionsContext,
+    SelectOptionsQuery,
+    parse_action,
+    project,
+)
+from support import SeatSpec, build_state
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -489,6 +498,100 @@ def test_the_ai_v0_tag_loads_and_only_touches_the_public_engine_surface() -> Non
     assert _engine_surface_offenders(source) == []
 
 
+SELECT_OPTIONS_DEAL_SEED = 14777593171243393873
+"""`derive_sealed_batch("sealed-test", 2)` 的第二副：**ai-v0 在这副上撞到 `SELECT_OPTIONS`**
+（界夏侯渊【神速】的多选面）。字面值照 `BROKEN_SEEDS` 的先例写死——本组用例判"旧版本 +
+打 tag 之后才新增的询问类型"，与当前 HEAD 漂不漂无关。兼容层之前这副是
+`KeyError: <QueryKind.SELECT_OPTIONS: 'SELECT_OPTIONS'>`（票 32 的 446 errors 的单副样本）。
+"""
+
+
+def _select_options_query() -> SelectOptionsQuery:
+    """真询问：三选项、区间 0..3 ⇒ 空集是**第一条**合法候选（引擎自己的枚举）。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="caocao"), SeatSpec(hero="liubei")],
+    )
+    context = SelectOptionsContext(
+        skill_id="hero.jie_xiahouyuan_mobile.shensu",
+        options=("a", "b", "c"),
+        min_selected=0,
+    )
+    actions = legal_actions_for(
+        state, 0, QueryKind.SELECT_OPTIONS, answers_seq=7, payload=context
+    )
+    return SelectOptionsQuery(
+        seq=7,
+        actor=0,
+        timing="TURN_START",
+        prompt="请选择若干项（可多选）。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id="hero.jie_xiahouyuan_mobile.shensu",
+        options=("a", "b", "c"),
+        min_selected=0,
+    )
+
+
+def test_an_unknown_query_kind_is_a_legal_decline_not_a_keyerror() -> None:
+    """票 36 的红-绿：冻结副本自己答不了（红），加载器交出的类回一条合法放弃（绿）。
+
+    "红"读的是 ``raw_player_class``（副本原样的类）——兼容层在**加载侧**，副本字节仍是
+    ``git show`` 那一份；"绿"读的是 ``player_class``，答案必须**在这一问的候选里**、
+    且能过 :func:`sgs.state.parse_action`（合法性由引擎的枚举兜底，不靠兼容层猜）。
+    """
+    loaded = load_version("ai-v0", repo_root=ROOT)
+    query = _select_options_query()
+
+    assert loaded.raw_player_class is not None
+    raw = loaded.raw_player_class(ai_stream(1, 0))
+    with pytest.raises(KeyError):
+        raw.respond(query)
+
+    wrapped = loaded.player_class(ai_stream(1, 0))
+    answer = wrapped.respond(query)
+    assert answer in query.legal_actions, "放弃答案必须就是引擎枚举出的候选之一"
+    assert parse_action(answer) == answer, "放弃答案必须过 parse_action"
+    assert (answer.kind, answer.choices) == ("SelectOptions", ())
+    # 版本级静态缺口：这两个类型是 ai-v0 打 tag 之后才进仓的（另一个是 DISTRIBUTE）。
+    assert {"SELECT_OPTIONS", "DISTRIBUTE"} <= set(loaded.capability_gap_kinds)
+
+
+def test_the_current_version_is_never_wrapped() -> None:
+    """当前版本选路表完整 ⇒ 兼容层不插手（``player_class`` 就是副本原样的类）。"""
+    loaded = load_version("HEAD", repo_root=ROOT)
+
+    assert loaded.capability_gap_kinds == ()
+    assert loaded.player_class is loaded.raw_player_class
+
+
+def test_the_old_baseline_finishes_the_deal_that_used_to_crash(tmp_path: Path) -> None:
+    """票 36 的验收判据：旧版本 + 未知询问类型 ⇒ ``errors == 0`` 且 ``capability_gaps > 0``。
+
+    批是 ``derive_sealed_batch("sealed-test", 2)``（写死两支），第二支就是
+    :data:`SELECT_OPTIONS_DEAL_SEED`；兼容层之前它整副报错，现在跑完、放弃次数只记进
+    ``capability_gaps``。
+    """
+    assert SELECT_OPTIONS_DEAL_SEED in derive_sealed_batch("sealed-test", 2).seeds
+    result = run_seal(
+        batch="sealed-test",
+        versions=["ai-v0"],
+        deals=2,
+        versions_dir=tmp_path / "ai-versions",
+    )
+
+    assert result["errors"] == 0, "旧版本的未知询问类型不该再计入 errors"
+    gaps = result["capability_gaps"]
+    assert gaps["policy"] == "legal_decline+drop_incompatible"
+    assert gaps["total"] >= 1
+    assert gaps["by_version"]["ai-v0"]["queries"]["SELECT_OPTIONS"] >= 1
+    assert {"SELECT_OPTIONS", "DISTRIBUTE"} <= set(gaps["by_version"]["ai-v0"]["kinds"])
+    assert isinstance(gaps["incompatible_deals"], dict)
+    assert all(isinstance(count, int) and count >= 0 for count in gaps["incompatible_deals"].values())
+    assert result["versions"][0]["deals"] == 2
+
+
 def test_the_ledger_records_the_origin_row_and_the_seed_bands() -> None:
     """spec §2.6 / §7.1：台账首行 = ai-v0，且四类种子带都有登记。"""
     loaded = load_version("ai-v0", repo_root=ROOT)
@@ -657,6 +760,7 @@ RESULT_KEYS = {
     "miss_rate",
     "verdict",
     "errors",
+    "capability_gaps",
 }
 """§2.8 的顶层字段 + 本实现追加的 ``tier`` / ``errors``（均见 `docs/agents/ai-versions.md`）。"""
 
@@ -877,6 +981,7 @@ def test_the_seal_command_is_fixed_at_1024(
             "tier": "seal",
             "seed_batch": {"sha256": "0" * 64, "deals": run.SEAL_DEALS, "batch": "sealed-1"},
             "errors": 0,
+            "capability_gaps": {"policy": "legal_decline", "total": 0, "by_version": {}},
             "versions": [],
         }
 
@@ -929,6 +1034,7 @@ def test_a_batch_with_game_errors_exits_one(
         "candidate": {"ref": "0" * 40},
         "baseline": {"ref": "HEAD"},
         "miss_rate": {"pass_with_options": None},
+        "capability_gaps": {"policy": "legal_decline", "total": 0, "by_version": {}},
     }
     monkeypatch.setattr(cli, "run_quick", lambda **kwargs: fake)
 
@@ -1082,6 +1188,56 @@ def test_promote_with_no_finished_deal_reports_unmeasured_verdict(
     assert result["verdict"]["diff_attributed"] is None
     assert result["decision_diff"]["deals_differing"] == 0
     assert result["errors"] == 0
+
+
+def test_an_old_versions_illegal_action_is_a_capability_gap_not_an_error() -> None:
+    """票 36 的第二种缺口：旧版返回的动作形状落后于引擎（``IllegalActionError``）。
+
+    这类失败只发生在**旧版本臂**：记 ``incompatible_deals``，从两臂配对里退出，
+    但**不进** ``errors`` —— ``errors`` 只数真正的崩溃。
+    """
+    import ai_eval.run as run
+
+    stale = run.ArmGame(
+        seed=11,
+        identity=None,
+        won=None,
+        finished=False,
+        # 批量侧的错误串带 seed 前缀（真实形状），兼容层按"含 IllegalActionError"判。
+        error="seed=11: IllegalActionError: [IllegalAction] 步骤 seat 的目标 1 不在可选范围内",
+    )
+    arm = run.ArmRun(
+        label="candidate_vs_baseline",
+        games=(stale,),
+        miss=run.MissCounts(0, 0, 0, 0),
+        version_gaps=True,
+    )
+
+    assert run._errors([arm]) == 0
+    gaps = run._capability_gaps([arm], {})
+    assert gaps["incompatible_deals"] == {"candidate_vs_baseline": 1}
+
+
+def test_a_current_versions_illegal_action_is_still_an_error() -> None:
+    """候选臂（版本完整）的非法应答仍是真错误——兼容层不许把真 bug 藏起来。"""
+    import ai_eval.run as run
+
+    broken = run.ArmGame(
+        seed=12,
+        identity=None,
+        won=None,
+        finished=False,
+        error="IllegalActionError: [IllegalAction] 候选臂自己答错了",
+    )
+    arm = run.ArmRun(
+        label="candidate_vs_baseline",
+        games=(broken,),
+        miss=run.MissCounts(0, 0, 0, 0),
+        version_gaps=False,
+    )
+
+    assert run._errors([arm]) == 1
+    assert run._capability_gaps([arm], {})["incompatible_deals"] == {}
 
 
 def test_a_case_runner_timeout_is_a_run_error(

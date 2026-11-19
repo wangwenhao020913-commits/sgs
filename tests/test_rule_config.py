@@ -317,3 +317,363 @@ def test_a_non_positive_round_limit_is_rejected(rounds):
 def test_extra_keys_inside_the_pve_section_are_rejected():
     with pytest.raises(DataLoadError):
         _config(unknown=True)
+
+
+# ---------------------------------------------------------------------------
+# `pve.grants`：开局授予的整张校验矩阵（M7 票 09；票 02 §10.5 / 票 03 §3）
+#
+# 形状 = `{seat, kind: "skill" | "relic", id}`，**位置不变**（票 01 已钉：必须在 header 里，
+# 否则录像重建不出同一局）。矩阵逐条 fail-closed：>4 技能 / >6 遗物 / 未知 id / 重复 /
+# 遗物授给非主角座位。授予越界座位同批拒掉——它会在 `build_initial` 里变成越界写。
+# ---------------------------------------------------------------------------
+
+WUSHENG = "hero.guanyu.wusheng"
+LONGDAN = "hero.zhaoyun.longdan"
+MASHU = "hero.machao.mashu"
+JIANXIONG = "hero.caocao.jianxiong"
+JIJIU = "hero.huatuo.jijiu"
+GUOSE = "hero.daqiao.guose"
+QIXI = "hero.ganning.qixi"
+"""七个真实存在的 catalog id（内容期之前没有 `relic.*`，故遗物位也拿真实技能 id 当值：
+判据是"id 在 CATALOG 里"，与 ``kind`` 是哪一档无关——见票 09 的裁定）。"""
+
+
+def _grant(seat=0, kind="skill", grant_id=WUSHENG):
+    return {"seat": seat, "kind": kind, "id": grant_id}
+
+
+def _grants(*grants):
+    return _config(grants=grants)
+
+
+def test_grants_of_both_kinds_are_accepted_and_land_in_the_dump():
+    """4 条出战技能 + 6 件遗物是**上限而不是总量**：整份配置原样进 header（dump 往返相等）。"""
+    config = _config(
+        grants=(
+            _grant(0, "skill", WUSHENG),
+            _grant(0, "skill", LONGDAN),
+            _grant(0, "skill", MASHU),
+            _grant(0, "skill", JIANXIONG),
+            _grant(0, "relic", JIJIU),
+            _grant(1, "skill", WUSHENG),
+        )
+    )
+
+    assert [grant.kind for grant in config.pve.grants] == [
+        "skill",
+        "skill",
+        "skill",
+        "skill",
+        "relic",
+        "skill",
+    ]
+    assert RuleConfig.model_validate(config.model_dump(mode="json")) == config, (
+        "授予必须 dump 往返逐字段相等，否则 header 自证不成立"
+    )
+
+
+def test_more_than_four_skill_grants_on_one_seat_are_rejected():
+    """每座**技能**授予 ≤ 4（4 条出战槽）：第 5 条拒。上限是逐座位的，不是全场的。"""
+    with pytest.raises(DataLoadError) as caught:
+        _grants(
+            _grant(0, "skill", WUSHENG),
+            _grant(0, "skill", LONGDAN),
+            _grant(0, "skill", MASHU),
+            _grant(0, "skill", JIANXIONG),
+            _grant(0, "skill", JIJIU),
+        )
+
+    assert "4" in str(caught.value), "拒绝必须点名「每座技能 ≤ 4」这条上限"
+
+
+def test_four_skill_grants_on_two_seats_are_each_under_the_cap():
+    """上限逐座位算：两座各 4 条＝8 条也合法（全场条数不是判据）。"""
+    config = _config(
+        grants=tuple(
+            _grant(seat, "skill", grant_id)
+            for seat in (0, 1)
+            for grant_id in (WUSHENG, LONGDAN, MASHU, JIANXIONG)
+        )
+    )
+
+    assert len(config.pve.grants) == 8
+
+
+def test_more_than_six_relic_grants_on_one_seat_are_rejected():
+    """每座**遗物**授予 ≤ 6（独立遗物栏上限）：第 7 件拒。"""
+    seven = (WUSHENG, LONGDAN, MASHU, JIANXIONG, JIJIU, GUOSE, QIXI)
+
+    with pytest.raises(DataLoadError) as caught:
+        _grants(*(_grant(0, "relic", grant_id) for grant_id in seven))
+
+    assert "遗物" in str(caught.value)
+
+    assert len(_config(grants=tuple(_grant(0, "relic", g) for g in seven[:6])).pve.grants) == 6
+
+
+def test_a_grant_id_that_is_not_in_the_catalog_is_rejected():
+    """``id`` 必须在 ``CATALOG`` 里（fail-closed）：两档来源都拒，不只在技能位上判。"""
+    for kind in ("skill", "relic"):
+        with pytest.raises(DataLoadError) as caught:
+            _grants(_grant(0, kind, "hero.nobody.nothing"))
+        assert "hero.nobody.nothing" in str(caught.value), "报错要点名那个不存在的 id"
+
+
+def test_the_same_grant_on_the_same_seat_twice_is_rejected():
+    """同一座位的同一 id 只许出现一次（重复授予不给第二次机会，也让 header 无歧义）。"""
+    with pytest.raises(DataLoadError) as caught:
+        _grants(_grant(0, "skill", WUSHENG), _grant(0, "skill", WUSHENG))
+
+    assert WUSHENG in str(caught.value)
+
+    with pytest.raises(DataLoadError):
+        _grants(_grant(0, "skill", WUSHENG), _grant(0, "relic", WUSHENG))
+
+
+def test_a_relic_granted_to_a_non_principal_seat_is_rejected():
+    """遗物**只授给主角座位**：遗物栏属于玩家本人，敌人不拿遗物（票 02 §10.5）。"""
+    with pytest.raises(DataLoadError) as caught:
+        _grants(_grant(1, "relic", WUSHENG))
+    assert "遗物" in str(caught.value)
+
+    # 座位 1 拿**技能**没问题（AI 队友同样吃出战技能），故上面拒的是 kind 而不是座位本身。
+    assert _config(grants=(_grant(1, "skill", WUSHENG),)).pve.grants[0].seat == 1
+
+
+def test_a_grant_on_a_seat_outside_the_table_is_rejected():
+    with pytest.raises(DataLoadError) as caught:
+        _grants(_grant(3, "skill", WUSHENG))
+
+    assert "seat" in str(caught.value)
+
+
+# M7 票 27：NPC 技能**只授敌方座位**（票 02 §7）。判据是技能定义上的**载体**
+# （`CarrierKind.NPC`），不是 id 前缀——故这里点名四条真实 id，而不是造一个假字符串。
+NPC_FURY = "npc.fury"
+NPC_IDS = ("npc.fury", "npc.guard", "npc.swift", "npc.wrath")
+
+
+def test_an_npc_skill_granted_to_an_ally_seat_is_rejected():
+    """NPC 技能只许落在 ``ENEMY`` 座位：授给主角 / AI 队友 ⇒ 构造期 fail-closed。
+
+    这是"只授敌方"的**唯一**兑现处（``PveConfig.grants`` 的座位角色门）：header 里出现
+    "主角带着 NPC 技能"的局会连录像自证都过不去，故在构造期就拒。座位表刻意排成
+    友 / 友 / 敌，让两个 ``ALLY`` 座位（主角 + AI 队友）都过一遍。
+    """
+    allies = ("ally", "ally", "enemy")
+    for seat in (0, 1):
+        with pytest.raises(DataLoadError) as caught:
+            _config(
+                identities=list(allies),
+                grants=(_grant(seat, "skill", NPC_FURY),),
+            )
+        message = str(caught.value)
+        assert "NPC" in message, "拒绝必须点名「NPC 技能」"
+        assert f"座位 {seat}" in message, "拒绝必须点名落错的座位"
+
+    # 反例的另一半：**敌方**座位（座位 2）照收——拒的是座位角色，不是 id 本身。
+    accepted = _config(
+        identities=list(allies), grants=(_grant(2, "skill", NPC_FURY),)
+    )
+    assert [grant.id for grant in accepted.pve.grants] == [NPC_FURY]
+
+
+def test_the_npc_seat_rule_is_about_the_carrier_not_the_kind():
+    """``kind`` 不改变座位角色门：把 NPC id 塞进**遗物位**补主角同样是拒。
+
+    （座位 0 是主角，故"遗物只授主角"那一条会放行；拒它的是本票的 NPC 座位角色门。）
+    四条 NPC id 一条不落：门按**载体**判，不按某一条 id 判。
+    """
+    for npc_id in NPC_IDS:
+        with pytest.raises(DataLoadError) as caught:
+            _grants(_grant(0, "relic", npc_id))
+        assert "NPC" in str(caught.value), npc_id
+
+
+def test_npc_skills_on_enemy_seats_do_not_trip_the_growth_limits():
+    """四条 NPC 技能同时授给**敌方**座位是合法的（每座技能授予 ≤ 4 的边界整好）。"""
+    config = _config(grants=tuple(_grant(2, "skill", npc_id) for npc_id in NPC_IDS))
+
+    assert [grant.id for grant in config.pve.grants] == list(NPC_IDS)
+
+
+# ---------------------------------------------------------------------------
+# `pve.seats`：逐座位合成武将 + 三档常驻加成（M7 票 10；票 03 §3 / §10.1–§10.2）
+#
+# 敌人不是武将表记录，而是「模板 + 抽到的技能 + 属性加成」⇒ 逐座位的事实必须进 header
+# （否则录像重建不出同一场）。校验矩阵：长度 == player_count / 与 identities 对位一致 /
+# `hero` 为空时必须有 `name` / 数值区间合法。
+# ---------------------------------------------------------------------------
+
+
+def _seat(
+    *,
+    hero=None,
+    name="",
+    hp=4,
+    hp_max=4,
+    hp_max_bonus=0,
+    draw_bonus=0,
+    slash_damage_bonus=0,
+    **extras,
+):
+    """一份座位载荷；``hero=None`` 时必须给 ``name``（合成武将）。"""
+    payload = {
+        "hp": hp,
+        "hp_max": hp_max,
+        "hp_max_bonus": hp_max_bonus,
+        "draw_bonus": draw_bonus,
+        "slash_damage_bonus": slash_damage_bonus,
+    }
+    if hero is not None:
+        payload["hero"] = hero
+    if name:
+        payload["name"] = name
+    payload.update(extras)
+    return payload
+
+
+def _seats(*seats):
+    return _config(seats=tuple(seats))
+
+
+def test_a_seats_table_that_does_not_cover_every_seat_is_rejected():
+    """长度 != ``identities`` 的长度 ⇒ 拒：座位表与阵营表必须逐座位对齐。"""
+    with pytest.raises(DataLoadError) as caught:
+        _seats(_seat(name="黄巾力士"))
+
+    assert "seats" in str(caught.value)
+
+
+@pytest.mark.parametrize("count", [2, 4, 5])
+def test_a_seats_table_is_sized_by_the_player_count(count):
+    """座位表必须逐座位齐全（长度 == player_count，经 identities 对位那一关兑现）。"""
+    layout = ["ally", *(("enemy",) * (count - 1))]
+    seats = tuple(_seat(name=f"黄巾力士{i}") for i in range(count))
+
+    config = validate_rule_config(
+        {"mode": "pve", "player_count": count, "pve": _pve(identities=layout, seats=seats)}
+    )
+    assert len(config.pve.seats) == count
+
+    with pytest.raises(DataLoadError) as caught:
+        validate_rule_config(
+            {
+                "mode": "pve",
+                "player_count": count,
+                "pve": _pve(identities=layout, seats=seats[:-1]),
+            }
+        )
+    assert "seats" in str(caught.value)
+
+
+def test_a_composite_seat_without_a_name_is_rejected():
+    """``hero`` 为空 = 合成武将，此时 ``name`` 是它**唯一**的身份事实（模板名）。"""
+    with pytest.raises(DataLoadError) as caught:
+        _seats(_seat(), _seat(name="黄巾力士"), _seat(name="黄巾力士"))
+
+    assert "name" in str(caught.value)
+
+    assert _seats(
+        _seat(hero="caocao"), _seat(name="黄巾力士"), _seat(name="黄巾力士")
+    ).pve.seats[0].hero == "caocao", "有武将的座位不需要 name"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"hp": 0},
+        {"hp": -1},
+        {"hp_max": 0},
+        {"hp_max": -3},
+        {"hp_max_bonus": -1},
+        {"draw_bonus": -1},
+        {"slash_damage_bonus": -1},
+        {"draw_bonus": 1000},
+        {"slash_damage_bonus": 1000},
+        {"hp_max": 1000},
+    ],
+    ids=[
+        "hp_zero",
+        "hp_negative",
+        "hp_max_zero",
+        "hp_max_negative",
+        "hp_max_bonus_negative",
+        "draw_bonus_negative",
+        "slash_damage_bonus_negative",
+        "draw_bonus_too_big",
+        "slash_damage_bonus_too_big",
+        "hp_max_too_big",
+    ],
+)
+def test_out_of_range_seat_numbers_are_rejected(overrides):
+    """数值区间逐条 fail-closed：体力 / 上限 / 三档加成都在合法区间内。"""
+    seat = {**_seat(name="黄巾力士"), **overrides}
+
+    with pytest.raises(DataLoadError):
+        _seats(_seat(name="黄巾力士"), seat, _seat(name="黄巾力士"))
+
+
+def test_the_initial_hp_cannot_exceed_the_effective_maximum():
+    """``hp``（初始体力）**分开传**是为了"3/4"这种不满体力开局，不是为了让初始值越上限。
+
+    ``hp_max_bonus`` 算进有效上限：``hp_max=4`` + 加成 2 ⇒ 6，故 6 合法、7 拒。
+    """
+    assert _seats(
+        _seat(name="黄巾力士", hp=3, hp_max=4),
+        _seat(name="黄巾力士"),
+        _seat(name="黄巾力士"),
+    ).pve.seats[0].hp == 3
+
+    assert _seats(
+        _seat(name="黄巾力士", hp=6, hp_max=4, hp_max_bonus=2),
+        _seat(name="黄巾力士"),
+        _seat(name="黄巾力士"),
+    ).pve.seats[0].hp == 6
+
+    with pytest.raises(DataLoadError) as caught:
+        _seats(
+            _seat(name="黄巾力士", hp=7, hp_max=4, hp_max_bonus=2),
+            _seat(name="黄巾力士"),
+            _seat(name="黄巾力士"),
+        )
+    assert "hp" in str(caught.value)
+
+
+def test_seats_are_accepted_and_survive_a_dump_round_trip():
+    """带 seats 的配置 dump 往返**逐字段相等**（= header 自证的前置）。"""
+    config = _config(
+        seats=(
+            _seat(hero="caocao", hp=3, hp_max=4, hp_max_bonus=1, draw_bonus=1),
+            _seat(
+                name="黄巾力士",
+                hp=2,
+                hp_max=3,
+                slash_damage_bonus=2,
+                kingdom="qun",
+                gender="male",
+            ),
+            _seat(name="黄巾渠帅", hp=5, hp_max=5),
+        )
+    )
+
+    seats = config.pve.seats
+    assert [seat.hero for seat in seats] == ["caocao", None, None]
+    assert [seat.name for seat in seats] == ["", "黄巾力士", "黄巾渠帅"]
+    assert [(seat.hp, seat.hp_max, seat.hp_max_bonus) for seat in seats] == [
+        (3, 4, 1),
+        (2, 3, 0),
+        (5, 5, 0),
+    ]
+    assert (seats[0].draw_bonus, seats[1].slash_damage_bonus) == (1, 2)
+    assert (seats[1].kingdom.value, seats[1].gender.value) == ("qun", "male")
+
+    assert RuleConfig.model_validate(config.model_dump(mode="json")) == config, (
+        "seats 必须 dump 往返逐字段相等，否则录像重建不出同一场"
+    )
+
+
+def test_an_empty_seats_table_keeps_the_pve_section_legal():
+    """没有座位表 = 老 PvE 局（票 07/08/09 的形态），不强制升级。"""
+    assert _config().pve.seats == ()
+    assert _config().model_dump(mode="json")["pve"]["seats"] == []

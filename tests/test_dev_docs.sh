@@ -466,7 +466,9 @@ check "$DOC06" '拼点 / 翻面 / 横置 / 标记零载体' "M3 账本：拼点 
 # 同样各带变更块；编号按落地顺序续编。ADR-025 由 vital-fx 票 05 新增（体力演出与伤害演出的
 # 三条分界：独立排播层 / 时停按家族 / 两条事件源）——它正是 `vital-fx` 与 `m7-script-mode`
 # 计划里写的 ADR-022 顺延后的号码（见 ADR-022 变更说明首段）。
-ADR_SYNC_ADRS="001 003 004 006 007 008 009 010 011 012 013 014 015 020 021 022 023 024 025"
+# ADR-026 / ADR-027 / ADR-028 由 m7-script-mode 票 30 新增（模式账 / 剧本路线与编辑器 / 剧本
+# 存档），各带一条变更说明与一条连带同步；spec 暂记的 020–022 同样顺延（见本节编号说明）。
+ADR_SYNC_ADRS="001 003 004 006 007 008 009 010 011 012 013 014 015 020 021 022 023 024 025 026 027 028"
 adr_sync_block_count() {
   local n expected=0 adr
   n="$(grep -c '连带同步（本节「必须同步」要求，逐条记录）' "$DOC_DIR/$DOC06" || true)"
@@ -853,6 +855,112 @@ check "$DOC06" '放置类技能必须在数据里显式声明**可见性 / 归�
 check "$GLOSSARY" '留作界限突破' "M6 术语：旧『手牌上限留作界限突破』已退役" absent
 
 # ===========================================================================
+# M7 票 32（内奸行从常量换成局面函数）：AI 适配契约 §3.2 的**第四类先例**。
+# 口径同 M5 / M6 块：只钉"那句口径还在"（删掉前半句、或把它改回"读法变了"就判红）；
+# 公式 / 数值表 / 代码落点分别由 tests/test_heuristic_ai.py 的票 32 那一节核。
+# 文件路径走 `../docs/...`（同 GLOSSARY 的写法，`check` 的相对根是 开发文档/）。
+# ===========================================================================
+check "../docs/agents/ai-adaptation.md" '**第四类先例：档不变、取值从常量变成局面函数**' \
+  "票 32：§3.2 的第四类先例（内奸行 = 局面函数）"
+check "../docs/agents/ai-adaptation.md" '_identity_relation` 的 `mine == _RENEGADE` 分支**不查表**' \
+  "票 32：§3.2 点名读它的那一处（_identity_relation 的内奸分支）"
+
+# ===========================================================================
+# M7 票 30（文档写回）：里程碑段 / 三条 ADR / GLOSSARY 新节 / `docs/agents` 两处登记，
+# 以及票 25 交回的 `frontend-map` 四行。口径同 M5 / M6 块：只钉"那句口径还在"（改回旧说法、
+# 删掉结论句就判红）；断言 / 数值 / 代码落点由 spec §Acceptance 的 A1–A9 与各自的测试函数核。
+# `MILESTONE_WHITELIST` 的 06:M7 条消费者 = 下面那条 ai-adaptation 的里程碑交叉引用
+# （覆盖元断言防死条目：白名单加一条就必须真的有人引用它）。
+# 文件路径走 `../docs/...`（同 GLOSSARY 的写法，`check` 的相对根是 开发文档/）。
+# ===========================================================================
+check "$DOC06" '### M7 剧本模式' "M7：里程碑节标题"
+check "$DOC06" '**剧本模式 = PvE 肉鸽闯关 + 剧本编辑器**' "M7：范围"
+check "$DOC06" '**P0 PvE 引擎账（票 07–13 / 票 32）**' "M7：分期 P0"
+check "$DOC06" '**P1 剧本数据层（票 14–15）**' "M7：分期 P1"
+check "$DOC06" '**P2 运行状态机与存档（票 16–19）**' "M7：分期 P2"
+check "$DOC06" '**P3 前端（票 20–25）**' "M7：分期 P3"
+check "$DOC06" '**P4 技能与内容（票 26–28）**' "M7：分期 P4"
+check "$DOC06" '**P5 收口（票 29–31）**' "M7：分期 P5"
+check "$DOC06" '**A1 端到端一局（真 HTTP，含退出 → 继续）+ 不泄露**' "M7：A1 判据"
+check "$DOC06" '**A2 可复现与确定性 + AI 批测**' "M7：A2 判据"
+check "$DOC06" '**A3 金录像重基线与体积账 + 成长层 / 编辑器 / 存档三组构造断言**' "M7：A3 判据"
+check "$DOC06" '**随机地图作废**' "M7：已裁定细化（随机地图作废）"
+check "$DOC06" '**编辑器进范围**' "M7：已裁定细化（编辑器进范围）"
+check "$DOC06" '**战斗界面零新增**' "M7：已裁定细化（战斗零新增）"
+check "$DOC06" '**header v3 + 一次授权重基线**' "M7：注意项（header v3 与一次授权重基线）"
+check "$DOC06" '**座位数不再是模式判据——人数由规则决定**' "M7：注意项（人数不是模式判据）"
+check "$DOC06" 'M5 / M6 / M7 已完成' "M7：『后续（非 MVP）』那句已改齐"
+check "$DOC06" '| 剧本模式 | ⏳ M7 | **PvE 肉鸽闯关 + 剧本编辑器**' "M7：§2 MVP 裁剪表登记剧本模式"
+check "$DOC06" '| ADR-026 |' "M7：ADR-026 行（PvE 模式账）"
+check "$DOC06" '| ADR-027 |' "M7：ADR-027 行（剧本路线与编辑器范围）"
+check "$DOC06" '| ADR-028 |' "M7：ADR-028 行（剧本存档）"
+check "$DOC06" '**`Mode.PVE` 成为第三种模式**' "M7/ADR-026：第三种模式"
+check "$DOC06" '**`mode` 显式化**' "M7/ADR-026：mode 显式化"
+check "$DOC06" '**60 条金录像一次授权重基线**' "M7/ADR-026：重基线一次授权"
+check "$DOC06" '**身份全公开**' "M7/ADR-026：PvE 身份全公开"
+check "$DOC06" '**人数不是模式判据，规则才是**' "M7/ADR-026：人数不是模式判据"
+check "$DOC06" '**推翻地图 D2 的「每层随机生成地图」**' "M7/ADR-027：推翻随机地图"
+check "$DOC06" '**边只许 `col` 增大**' "M7/ADR-027：边只许 col 增大"
+check "$DOC06" '**固定对手 = 随机池为空的模板**' "M7/ADR-027：固定对手 = 空池模板"
+check "$DOC06" '**编辑器与棋盘共用同一份节点图渲染器**' "M7/ADR-027：共用渲染器"
+check "$DOC06" '**节点 = 一个事务**' "M7/ADR-028：节点 = 一个事务"
+check "$DOC06" '**两次 rename + `.bak`**' "M7/ADR-028：两次 rename + .bak"
+check "$DOC06" '**坏档不静默**' "M7/ADR-028：坏档不静默"
+check "$DOC06" '`run_id` + `revision` **乐观锁**' "M7/ADR-028：run_id + revision 乐观锁"
+check "$DOC06" '**纯函数住 `src/sgs/script/`**' "M7/ADR-028：规则纯函数落点"
+check "$DOC06" '分层随机生成地图' "M7：旧说法『分层随机生成地图』已退役" absent
+check "$DOC06" '剧本编辑器不在 v1 范围' "M7：旧说法『剧本编辑器不在 v1 范围』已退役" absent
+check "$GLOSSARY" '## 剧本模式' "M7 术语：新节『剧本模式』"
+check "$GLOSSARY" '**剧本**：' "M7 术语：剧本"
+check "$GLOSSARY" '**大节**：' "M7 术语：大节"
+check "$GLOSSARY" '**问号房**：' "M7 术语：问号房"
+check "$GLOSSARY" '**剧本标签**：' "M7 术语：剧本标签（与牌上的『标签』区分）"
+check "$GLOSSARY" '**敌人模板**：' "M7 术语：敌人模板"
+check "$GLOSSARY" '**全局副本技能**：' "M7 术语：全局副本技能"
+check "$GLOSSARY" '**技能背包**：' "M7 术语：技能背包"
+check "$GLOSSARY" '**出战槽**：' "M7 术语：出战槽"
+check "$GLOSSARY" '**价值表**：' "M7 术语：价值表"
+check "$GLOSSARY" '**剧本存档**：' "M7 术语：剧本存档"
+check "$GLOSSARY" '**坏档**：' "M7 术语：坏档"
+check "$GLOSSARY" '**节点事务**：' "M7 术语：节点事务"
+check "$GLOSSARY" '**「大层」统一为「大节」**' "M7 术语纪律：大层 → 大节"
+check "$GLOSSARY" '**剧本存档**与**录像**互指' "M7 术语：剧本存档 ↔ 录像 互指"
+check "$GLOSSARY" '_Avoid_: 录像、存档文件' "M7 术语：剧本存档的 _Avoid_ 列了录像"
+check "$GLOSSARY" '**大层**：' "M7 术语：『大层』不立词条" absent
+check "$GLOSSARY" '**小节**：' "M7 术语：『小节』这一层不存在" absent
+check "../docs/agents/ai-adaptation.md" '| `PVE` |' "M7：§3.3 Mode 表的 PvE 行"
+check "../docs/agents/ai-adaptation.md" '**PvE 开局全部身份公开**' "M7：§3.3 PvE 行的关系格理由"
+check "../docs/agents/ai-adaptation.md" '`06` §M7' "M7：里程碑白名单 06:M7 的真实交叉引用"
+check "../docs/agents/ai-versions.md" '| PvE 批测带 | `9000..9031`（32 局） |' "M7：§3 种子台账登记 9000–9031"
+check "../docs/agents/ai-versions.md" '判决 / 趋势 / 实机派生批**主动跳过**这条带' "M7：PvE 带与其它带互斥的纪律句"
+check "../docs/agents/frontend-map.md" '| `script-lobby.js` |' "M7/票 25：frontend-map 登记 script-lobby.js"
+check "../docs/agents/frontend-map.md" '| `script-board.js` |' "M7/票 25：frontend-map 登记 script-board.js"
+check "../docs/agents/frontend-map.md" '| `script-loadout.js` |' "M7/票 25：frontend-map 登记 script-loadout.js"
+check "../docs/agents/frontend-map.md" '| `script-editor.js` |' "M7/票 25：frontend-map 登记 script-editor.js"
+
+# 位置判据（spec 明文「在 M6 与『后续（非 MVP）』之间」「放『身份与模式』之后」）：
+# 纯存在性 grep 挡不住"加到文件末尾"，故比一次标题行号。
+section_line() { grep -n "$2" "$1" 2>/dev/null | head -1 | cut -d: -f1 || true; }
+m6_at="$(section_line "$DOC_DIR/$DOC06" '^### M6 界限突破$')"
+m7_at="$(section_line "$DOC_DIR/$DOC06" '^### M7 剧本模式$')"
+tail_at="$(section_line "$DOC_DIR/$DOC06" '^### 后续（非 MVP）$')"
+id_at="$(section_line "$DOC_DIR/$GLOSSARY" '^## 身份与模式$')"
+script_at="$(section_line "$DOC_DIR/$GLOSSARY" '^## 剧本模式$')"
+if [ -n "$m6_at" ] && [ -n "$m7_at" ] && [ -n "$tail_at" ] \
+   && [ "$m6_at" -lt "$m7_at" ] && [ "$m7_at" -lt "$tail_at" ]; then
+  echo "PASS: 06 的『M7 剧本模式』段在 M6 与『后续（非 MVP）』之间"
+else
+  echo "FAIL: 06 的『M7 剧本模式』段不在 M6 与『后续（非 MVP）』之间（M6=$m6_at M7=$m7_at 后续=$tail_at）"
+  fail=1
+fi
+if [ -n "$id_at" ] && [ -n "$script_at" ] && [ "$id_at" -lt "$script_at" ]; then
+  echo "PASS: GLOSSARY 的『剧本模式』节在『身份与模式』之后"
+else
+  echo "FAIL: GLOSSARY 的『剧本模式』节不在『身份与模式』之后（身份与模式=$id_at 剧本模式=$script_at）"
+  fail=1
+fi
+
+# ===========================================================================
 # 回写纪律（票 11）：两头钉 —— 每条回写同时断言「新串出现」与「退役旧串不出现」。
 # 黑名单来自 spec 的「机械断言的形态」节；旧串在**开发文档/ 全六份**里都不得出现。
 # 覆盖元断言 + 合成反例照 tests/test_timing.py 的「术语表计数纪律」姿态：
@@ -999,8 +1107,10 @@ doc_file_for_num() {
 # shan-baozuoci 票 01：`readings.md` 的「版本权威」段把「失去技能的清理」（§5.13）立成
 # 2018 校订先例 ⇒ 登记该子节号。子节标题带「」与全角标点，锚定形态读不动，故走白名单。
 # shiji-zhi-luotong-chenzhen 票 01：【勤政】的实现注释引用账本 §5.20（骆统那节）⇒ 登记。
+# m7-script-mode 票 30：M7 的里程碑段第一次被**跨文件**引用（`ai-adaptation.md` §3.3 的 PvE
+# 行点名"模式账见里程碑段"）⇒ 登记 06:M7；该条由本文件的 M7 票 30 块消费（防死条目）。
 SUBSECTION_WHITELIST="|01:1.2|02:2.2|02:2.5|02:3.3|02:3.5|04:3.2|06:5.1|06:5.2|06:5.13|06:5.20|"
-MILESTONE_WHITELIST="|06:M1|06:M2|06:M3|06:M4|06:M5|06:M6|"
+MILESTONE_WHITELIST="|06:M1|06:M2|06:M3|06:M4|06:M5|06:M6|06:M7|"
 
 # 绊线（tripwire）：锚定引用数塌到阈值以下即判红——它防的是「扫描失效 ⇒ 空转通过」，
 # 不是覆盖目标；引用真的退役时随盘点下调。

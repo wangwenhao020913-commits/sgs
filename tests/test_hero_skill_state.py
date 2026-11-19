@@ -386,6 +386,102 @@ def test_an_unrecognized_source_is_not_suppressed_fail_closed():
     assert _skill_is_suppressed(player, instance) is False
 
 
+def test_a_relic_instance_comes_from_the_seat_relic_shelf_and_is_never_suppressed():
+    """遗物 = 第 7 种来源 ``RELIC``（M7 票 09）：住**独立遗物栏**，不算武将牌上的技能。
+
+    两条事实一次钉住：
+
+    - ``Player.relics`` 是遗物实例的唯一载体（``source.kind is RELIC``、带 ``skill_id``、
+      **不造** ``card_id``——遗物不是牌）；
+    - 它**不受**「该角色所有非锁定技失效」影响。判据样本刻意选一条**非锁定**技能：
+      锁定技本来就不在 ``ALL_NON_LOCKED`` 的覆盖面里，拿它当样本证不出"来源免疫"。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guanyu"), SeatSpec()],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    # 遗物 id 用一条**不在关羽武将牌上**的真实技能 id（内容期之前没有 `relic.*` 条目；
+    # 同 id 落在武将牌上时去重会留下 HERO_CARD 那一份，证不出 RELIC 这一路）。
+    state.player(0).relics = [LONGDAN]
+    engine = Engine.from_state(state, seed=7)
+    engine.suppress_skills(0, YIJUE)
+
+    assert WUSHENG not in _instances(state, 0), "前提：武将牌上的非锁定技确实被挡"
+    assert LONGDAN in _instances(state, 0), "遗物不受技能失效影响"
+
+    relic = next(
+        instance
+        for instance in resolve_instances(state)
+        if instance.owner == 0 and instance.skill_id == LONGDAN
+    )
+    assert relic.source.kind is SkillSourceKind.RELIC
+    assert relic.source.skill_id == LONGDAN
+    assert relic.source.card_id is None, "遗物不是一张牌（与虚拟装备同一姿态）"
+
+
+def test_a_global_skill_instance_comes_from_the_seat_shelf_and_is_never_suppressed():
+    """副本全局技能 = 第 8 种来源 ``GLOBAL``（M7 票 09；v1 只做属性缩放）。
+
+    ``Player.global_skills`` 是它的载体（本票只落接口位：v1 的缩放数值由剧本层物化进
+    ``PveConfig.seats``，票 10 / 17）。同样**不受**技能失效影响——判据样本仍是非锁定技。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guanyu"), SeatSpec()],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    state.player(0).global_skills = [LONGDAN]
+    engine = Engine.from_state(state, seed=7)
+    engine.suppress_skills(0, YIJUE)
+
+    assert WUSHENG not in _instances(state, 0), "前提：武将牌上的非锁定技确实被挡"
+    assert LONGDAN in _instances(state, 0), "副本全局技能不受技能失效影响"
+
+    global_skill = next(
+        instance
+        for instance in resolve_instances(state)
+        if instance.owner == 0 and instance.skill_id == LONGDAN
+    )
+    assert global_skill.source.kind is SkillSourceKind.GLOBAL
+
+
+def test_the_never_suppressed_sources_are_registered_one_by_one():
+    """「失效谓词逐条登记」的代码侧真源：一张显式集合，不是散落的 if 分支。
+
+    票 09 新增的 ``RELIC`` / ``GLOBAL`` 必须**逐条**登记进来（未知来源 fail-closed 的
+    副作用不能当作登记——那是"判断不了"这条兜底，不是"这一种来源免疫"的声明）。
+    """
+    from sgs.skills.catalog import _NEVER_SUPPRESSED_SOURCES
+
+    assert _NEVER_SUPPRESSED_SOURCES == frozenset(
+        {
+            SkillSourceKind.EQUIPMENT_CARD,
+            SkillSourceKind.MARKER,
+            SkillSourceKind.CARD_TAG,
+            SkillSourceKind.RELIC,
+            SkillSourceKind.GLOBAL,
+        }
+    )
+
+
+def test_the_source_kind_docstring_lists_every_never_suppressed_source():
+    """文档与登记名单同步：`MARKER` 曾被写成"**唯一**不受技能失效影响的来源"，票 09 改口。"""
+    import inspect
+
+    from sgs.skills.catalog import _NEVER_SUPPRESSED_SOURCES
+
+    doc = inspect.getdoc(SkillSourceKind) or ""
+
+    assert "唯一不受技能失效影响" not in doc, "旧句子必须改掉（RELIC / GLOBAL 同样不受）"
+    for kind in _NEVER_SUPPRESSED_SOURCES:
+        assert kind.name in doc, f"登记为免疫的来源 {kind.name} 必须在来源说明里写出来"
+
+
 def test_suppressing_the_same_seat_twice_does_not_stack_a_second_record():
     engine = _engine()
     assert engine.suppress_skills(1, YIJUE) is True

@@ -20,12 +20,17 @@
   第一个不同步之前逐条相同，所以"第一个不同步"必定落在焦点座位上；
 - 漏动作率需要**全部座位**的决策，故每块立刻折算成计数（分询问类型的明细一并合并），
   不保留明细。
+
+**未知询问类型（票 36）**：旧版本的分发表可能缺它打 tag 之后才新增的 ``QueryKind``；
+兼容层（:mod:`ai_eval.compat`）把这些询问换成**合法放弃**，驱动侧从决策侧车数
+``capability_gaps``（``{ref: {kind: n}}``，跨进程不丢）。它**不进** ``errors``——
+``errors`` 只数真正的崩溃。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +112,12 @@ class ArmSpec:
     table: str
     label: str
     capture: bool = True
-    """要不要记录决明明细（漏动作率与决策 diff 都需要；对原点的两臂不需要）。"""
+    """要不要记录决策侧车（漏动作率 / 决策 diff / 票 36 的 ``capability_gaps`` 都要）。
+
+    三个档位现在都开着：``capability_gaps`` 从侧车的 ``kind`` 数（跨进程不丢），关掉它
+    就没有第二个读数来源；``keep_decisions=False`` 只丢"焦点座位那几副"的明细，侧车
+    仍然逐条折掉。
+    """
 
     keep_decisions: bool = True
     """要不要留**焦点座位**的决策（``seal`` 只要聚合，故关掉）。"""
@@ -121,6 +131,8 @@ class ArmGame:
     identity: str | None
     won: bool | None
     finished: bool
+    error: str | None = None
+    """没打完时的错误串（``GameResult.error``）：驱动侧据此分"旧版本答不了"与真崩溃。"""
     decisions: tuple[dict[str, Any], ...] = ()
 
 
@@ -131,6 +143,15 @@ class ArmRun:
     label: str
     games: tuple[ArmGame, ...]
     miss: MissCounts
+    capability_gaps: dict[str, dict[str, int]] = field(default_factory=dict)
+    """``{ref: {kind: n}}``：这个臂里由**兼容层**放弃应答的次数（票 36）。
+
+    只数"这个座位用的那个版本选路表里没有的类型"：分发表完整的版本（HEAD）不产生条目。
+    驱动侧从这里汇总结果 JSON 的 ``capability_gaps``——它**不是** ``errors``。
+    """
+
+    version_gaps: bool = False
+    """本臂的版本里至少有一个选路表不完整（旧版本）⇒ ``IllegalActionError`` 记"答不了"。"""
 
 
 @dataclass(frozen=True)
@@ -165,6 +186,43 @@ def _focus_decisions(decisions: Sequence[dict[str, Any]]) -> tuple[dict[str, Any
     )
 
 
+def _merge_capability_gaps(
+    left: dict[str, dict[str, int]], right: dict[str, dict[str, int]]
+) -> dict[str, dict[str, int]]:
+    """合并两块（批量分块跑时每块折一次）；``{ref: {kind: n}}`` 逐格相加。"""
+    merged = {ref: dict(kinds) for ref, kinds in left.items()}
+    for ref, kinds in right.items():
+        bucket = merged.setdefault(ref, {})
+        for kind, count in kinds.items():
+            bucket[kind] = bucket.get(kind, 0) + count
+    return merged
+
+
+def _decision_capability_gaps(
+    decisions: Iterable[dict[str, Any]],
+    *,
+    arm: ArmSpec,
+    focus_gaps: frozenset[str],
+    table_gaps: frozenset[str],
+) -> dict[str, dict[str, int]]:
+    """数"兼容层替旧版本放弃了哪几类询问"（票 36）：座位 → 它用的那个版本。
+
+    决策侧车（``kind`` / ``actor``）不随进程丢，故 ``--workers 1..8`` 同口径；只计
+    **选路表缺那一类的座位**——当前版本（HEAD）永远不进这个计数。
+    """
+    counts: dict[str, dict[str, int]] = {}
+    for decision in decisions:
+        if decision.get("actor") == FOCUS_SEAT:
+            ref, gaps = arm.focus, focus_gaps
+        else:
+            ref, gaps = arm.table, table_gaps
+        kind = decision.get("kind")
+        if kind in gaps:
+            bucket = counts.setdefault(ref, {})
+            bucket[kind] = bucket.get(kind, 0) + 1
+    return counts
+
+
 def _arm_game(game: Any, *, keep_decisions: bool) -> ArmGame:
     """``GameResult`` → :class:`ArmGame`（未终局 / 报错的局 ``won=None``、退出分母）。"""
     decisions = _focus_decisions(game.actions) if keep_decisions else ()
@@ -174,6 +232,7 @@ def _arm_game(game: Any, *, keep_decisions: bool) -> ArmGame:
             identity=None,
             won=None,
             finished=False,
+            error=game.error,
             decisions=decisions,
         )
     focus = game.seats[FOCUS_SEAT]
@@ -200,8 +259,18 @@ def _run_arm(
         repo_root=str(env.root),
         versions_dir=str(env.versions),
     )
+    focus_version = load_version(arm.focus, repo_root=env.root, versions_dir=env.versions)
+    table_version = load_version(arm.table, repo_root=env.root, versions_dir=env.versions)
+    focus_gaps = frozenset(focus_version.capability_gap_kinds)
+    table_gaps = frozenset(table_version.capability_gap_kinds)
+    if not arm.capture and (focus_gaps or table_gaps):
+        raise AiEvalSpecError(
+            f"{arm.label}：{arm.focus} / {arm.table} 有选路缺口但本臂不记决策明细 ⇒ 数不了"
+            " capability_gaps（兼容层只换应答；要数缺口就打开 capture）"
+        )
     games: list[ArmGame] = []
     miss = MissCounts(0, 0, 0, 0)
+    gaps: dict[str, dict[str, int]] = {}
     ordered = list(seeds)
     for start in range(0, len(ordered), CHUNK_SIZE):
         chunk = ordered[start : start + CHUNK_SIZE]
@@ -222,16 +291,60 @@ def _run_arm(
                     for decision in game.actions
                 ),
             )
+            gaps = _merge_capability_gaps(
+                gaps,
+                _decision_capability_gaps(
+                    (
+                        decision
+                        for game in batch.games
+                        for decision in game.actions
+                    ),
+                    arm=arm,
+                    focus_gaps=focus_gaps,
+                    table_gaps=table_gaps,
+                ),
+            )
         games.extend(
             _arm_game(game, keep_decisions=arm.keep_decisions) for game in batch.games
         )
         if progress is not None:
             progress(arm.label, len(games), len(ordered))
-    return ArmRun(label=arm.label, games=tuple(games), miss=miss)
+    return ArmRun(
+        label=arm.label,
+        games=tuple(games),
+        miss=miss,
+        capability_gaps=gaps,
+        version_gaps=bool(focus_gaps or table_gaps),
+    )
+
+
+def _incompatible(arm: ArmRun, game: ArmGame) -> bool:
+    """这一副是不是"旧版本答不了当前引擎"（票 36 的第二种缺口）。
+
+    旧版本不只是**未知询问类型**：它返回的动作形状也可能落后于引擎（实测：预发动清单的
+    复合动作，旧版回一个 ``ActivateSkill`` ⇒ ``IllegalActionError``）。这类失败发生在
+    **旧版本臂**里、且错误串点名 ``IllegalActionError`` ⇒ 记"答不了"，从两臂配对里退出
+    （:func:`_finished_pairs` 本来就不配未终局的副），但**不进** ``errors``。
+    候选臂（HEAD）版本完整 ⇒ 它的非法应答仍是真错误。
+    """
+    return (
+        arm.version_gaps
+        and not game.finished
+        # 批量的 ``error`` 串带 ``seed=<n>: `` 前缀，故按"含"判而不是"以…开头"。
+        and "IllegalActionError" in (game.error or "")
+    )
 
 
 def _errors(arms: Sequence[ArmRun]) -> int:
-    return sum(1 for arm in arms for game in arm.games if not game.finished)
+    """``errors``：**没打完**的局数（崩溃 / 未终局），减去旧版本答不了的那些副。
+
+    兼容层的合法放弃发生在 ``errors`` 之前（旧版本仍把这一副打完），票 36 起它记
+    ``capability_gaps``；旧版本**动作形状**落后的那些副记 ``incompatible_deals``——
+    两者都**不进** ``errors``，``errors`` 只数真正的崩溃（候选臂的任何失败仍算）。
+    """
+    return sum(
+        1 for arm in arms for game in arm.games if not game.finished and not _incompatible(arm, game)
+    )
 
 
 def _finished_pairs(
@@ -351,6 +464,39 @@ def _side(loaded: LoadedVersion | None, *, by_commit: bool) -> dict[str, str] | 
     }
 
 
+def _capability_gaps(
+    arms: Sequence[ArmRun], versions: dict[str, LoadedVersion]
+) -> dict[str, Any]:
+    """§2.8 的 ``capability_gaps``（票 36）：按版本列的静态缺口 + 本次实际放弃次数。
+
+    ``queries`` 跨臂累加（同一版本在不同臂里既可能是焦点座位、也可能是对手四席）；
+    ``total`` = 全部版本的全部放弃次数。它**不进** ``errors``、也不影响退出码——
+    它说明的是"基线们这次被兼容层替答了几次"，读 diff / 胜率时必须知道。
+    """
+    by_version: dict[str, dict[str, Any]] = {
+        ref: {"kinds": list(version.capability_gap_kinds), "queries": {}}
+        for ref, version in versions.items()
+    }
+    for arm in arms:
+        for ref, kinds in arm.capability_gaps.items():
+            entry = by_version.setdefault(ref, {"kinds": [], "queries": {}})
+            bucket = entry["queries"]
+            for kind, count in kinds.items():
+                bucket[kind] = bucket.get(kind, 0) + count
+    total = sum(sum(entry["queries"].values()) for entry in by_version.values())
+    incompatible = {
+        arm.label: sum(1 for game in arm.games if _incompatible(arm, game))
+        for arm in arms
+        if arm.version_gaps
+    }
+    return {
+        "policy": "legal_decline+drop_incompatible",
+        "total": total,
+        "incompatible_deals": incompatible,
+        "by_version": by_version,
+    }
+
+
 def _result(
     *,
     tier: str,
@@ -368,6 +514,7 @@ def _result(
     miss_rate: dict[str, float | None],
     verdict: dict[str, bool | None],
     errors: int,
+    capability_gaps: dict[str, Any],
     versions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """§2.8 的结果对象（键齐备；该档测不到的字段写 ``null``）。"""
@@ -390,6 +537,7 @@ def _result(
         "miss_rate": dict(miss_rate),
         "verdict": dict(verdict),
         "errors": errors,
+        "capability_gaps": capability_gaps,
     }
     if versions is not None:
         payload["versions"] = versions
@@ -466,6 +614,10 @@ def run_quick(
             predicted_kinds=predicted_kinds,
         ),
         errors=_errors([arm_a, arm_b]),
+        capability_gaps=_capability_gaps(
+            [arm_a, arm_b],
+            {candidate_ref: candidate, baseline: baseline_version},
+        ),
     )
 
 
@@ -511,7 +663,8 @@ def run_promote(
         ),
         progress=progress,
     )
-    # 对原点的两臂不保留决策（不需要 diff），只出胜负与分身份。
+    # 对原点的两臂不**留**决策明细（不需要 diff），但照常**采集**侧车：票 36 的
+    # capability_gaps 从决策侧车数（旧版本被兼容层替答了几次），不采集就数不出来。
     candidate_vs_anchor = _run_arm(
         seeds,
         env=env,
@@ -519,7 +672,6 @@ def run_promote(
             focus=candidate_ref,
             table=anchor,
             label="promote/vs-anchor/candidate",
-            capture=False,
             keep_decisions=False,
         ),
         progress=progress,
@@ -531,7 +683,6 @@ def run_promote(
             focus=anchor,
             table=anchor,
             label="promote/vs-anchor/anchor",
-            capture=False,
             keep_decisions=False,
         ),
         progress=progress,
@@ -577,6 +728,19 @@ def run_promote(
                 candidate_vs_anchor,
                 anchor_vs_anchor,
             ]
+        ),
+        capability_gaps=_capability_gaps(
+            [
+                candidate_vs_baseline,
+                baseline_vs_baseline,
+                candidate_vs_anchor,
+                anchor_vs_anchor,
+            ],
+            {
+                candidate_ref: candidate,
+                baseline: baseline_version,
+                anchor: anchor_version,
+            },
         ),
     )
 
@@ -646,5 +810,8 @@ def run_seal(
             predicted_kinds=(),
         ),
         errors=_errors(arms),
+        capability_gaps=_capability_gaps(
+            arms, {ref: version for ref, version in zip(versions, loaded)}
+        ),
         versions=entries,
     )

@@ -249,12 +249,21 @@ def engine_from_meta(meta: dict[str, Any]) -> Engine:
     靠跑出来的记录流反推，而策略本身恰恰不进记录流。
     """
     pack = load_content_pack(meta["pack_id"], deck_profile=meta["deck_profile"])
+    config = validate_rule_config(meta["rule_config"])
+    # 剧本模式的 PvE 局（M7 票 19）：谁坐哪个座位写在 header 的 ``pve.seats`` 里，
+    # 引擎那两条武将发放入口对它是**互斥**的。而侧车的 ``heroes`` 里 AI 座位恒为 ``None``
+    # （合成武将不是武将表记录），照原样喂回去会撞上互斥判据。故座位表非空时不传武将参数。
+    seats = () if config.pve is None else config.pve.seats
     return Engine.new_game(
         seed=meta["seed"],
-        rule_config=validate_rule_config(meta["rule_config"]),
+        rule_config=config,
         pack=pack,
-        heroes=tuple(meta.get("heroes") or ()),
-        hero_pool=None if meta.get("hero_pool") is None else tuple(meta["hero_pool"]),
+        heroes=() if seats else tuple(meta.get("heroes") or ()),
+        hero_pool=(
+            None
+            if seats or meta.get("hero_pool") is None
+            else tuple(meta["hero_pool"])
+        ),
         ask_policy=parse_ask_policy(meta.get("ask_policy"), default=AskPolicy()),
     )
 

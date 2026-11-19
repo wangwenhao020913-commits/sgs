@@ -9,12 +9,27 @@
  *   ③ 提交的 Action **原样取自** `legal_actions`（前端不自己拼 Action——`04` §4.1 的纪律）；
  *   ④ 对手不出现牌面（不泄露）。
  *
- * 用法：`node tests/support/ui_smoke.mjs <base-url>`（由 `tests/test_web.sh` 在起好服务后调用）。
+ * 用法：`node tests/support/ui_smoke.mjs <base-url> <runs-dir>`
+ * （由 `tests/test_web.sh` / `tests/smoke-web.sh` 在起好服务后调用）。
+ *
+ * 第三个参数 = 服务的 `--runs-dir`：M7 票 20 的坏档三态要**真的把主档写坏**才验得出来
+ * （票 04 §5 的 `broken` 不是一个能从 HTTP 造出来的响应对手），故烟测要能直接改那个目录里的
+ * `script-save.json` / `script-save.json.bak` 两个文件。
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import vm from "node:vm";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8100";
+const RUNS_DIR = process.argv[3] || "";
+if (!RUNS_DIR) {
+  console.error("用法：node tests/support/ui_smoke.mjs <base-url> <runs-dir>"
+    + "（M7 票 20 的坏档三态要直接改 runs 目录里的存档文件）");
+  process.exit(2);
+}
+/* M7 票 20：剧本存档的两个文件（名字由 `tools/sgs_web/script_runs.py` 的
+ * `save_path` / `backup_path` 决定，两次 rename 的轮换把主档写成 `.bak`）。 */
+const SCRIPT_SAVE_FILE = `${RUNS_DIR}/script-save.json`;
+const SCRIPT_BAK_FILE = `${RUNS_DIR}/script-save.json.bak`;
 
 const postRaw = async (p, body) => {
   const response = await fetch(`${BASE}${p}`, {
@@ -482,7 +497,13 @@ globalThis.fetch = async (path, options) => {
     return { ok: true, status: 200, text: async () => text, json: async () => ({}) };
   }
   if (typeof path === "string" && path.startsWith("/api/")) {
-    calls.push({ path, body: options && options.body ? JSON.parse(options.body) : null });
+    calls.push({
+      path,
+      body: options && options.body ? JSON.parse(options.body) : null,
+      // M7 票 20：删档（`DELETE /api/script-save`）与建 / 续档（`POST`）走同一个路径族，
+      // 断言"只调了一个端点"必须分得清方法，故 `options.method` 也记下来（缺省 = GET）。
+      method: (options && options.method) || "GET",
+    });
     if (failNextGets > 0 && !(options && options.method) && path.startsWith("/api/sessions/")) {
       failNextGets -= 1;
       throw new Error("注入的取增量失败");
@@ -1104,6 +1125,761 @@ await ui.loadHeroPools();
 ui.heroPools().slots[ui.heroPools().selected].splice(0);
 await clickAndWait($("btn-pool-save"));
 $("in-players").value = "8";
+
+/* ============ M7 票 20：剧本开局页三态（新 / 继续 / 放弃 + 摘要行 + 坏档修复）============
+ *
+ * spec §4「开局页增量叠加」+ 票 04 §6 的入口语义。判据分三半：
+ *  ① **既有三块一个没少**（开一局表单 / 将池预设 / 已有录像都在，剧本面板是**加**的一段）；
+ *  ② 三态按 `GET /api/script-save` 的**真回包**切换——`ok` / `missing` 由真的建 / 删档造出来，
+ *     `broken` 由烟测把 `runs/script-save.json` 写成坏字节造出来（票 04 §5：坏档**不由前端猜**，
+ *     红字就是服务端那一行 `reason`）；
+ *  ③ 3 选 1 期间**不落盘**、撞旧档的「取消」**什么都不发生**、退出只调 suspend 一个端点。
+ *
+ * 全部走真的点击路径（三个入口 / 3 选 1 / 确认框都是 `#script-*` 上的 click），请求体从
+ * `calls` 拦截器里读——"关页面 = 没建过"这类判据是**线上事实**，不读内部 state。
+ */
+/** 三态回包（`GET /api/script-save` 的原样载荷）；还没拉到时是空对象，读字段一律 undefined。 */
+const scriptSave = () => (ui.state.script || {}).save || {};
+const scriptStatus = () => scriptSave().status || null;
+/** 红期容错：节点 / 桥入口还没实现时不做动作（让**断言**红，而不是抛 ReferenceError）。 */
+const scriptClick = async (node) => {
+  if (!node) return false;
+  await clickAndWait(node);
+  return true;
+};
+const scriptCall = (name, ...args) => {
+  const fn = ui[name];
+  return typeof fn === "function" ? fn(...args) : undefined;
+};
+const scriptCreatesSince = (from) =>
+  calls.slice(from).filter((call) => call.method === "POST" && call.path === "/api/script-runs");
+const scriptRunPostsSince = (from, suffix) =>
+  calls.slice(from).filter((call) => call.method === "POST" && call.path.endsWith(suffix));
+const scriptChoice = (attr, value) => Array.from($("script-choices").children)
+  .find((node) => node.getAttribute(attr) === value) || null;
+const scriptConfirmAction = (label) => Array.from($("script-confirm-actions").children)
+  .find((node) => String(node.textContent).trim() === label) || null;
+/** 点「新剧本」并（有旧档时）走过「覆盖新开」，再选剧本 / 选角色——各步都可能还不存在。 */
+const openScriptPicker = async (scriptId, heroId) => {
+  await scriptClick($("btn-script-new"));
+  if ($("script-confirm").hidden === false && scriptConfirmAction("覆盖新开")) {
+    await scriptClick(scriptConfirmAction("覆盖新开"));
+  }
+  if (scriptId) await scriptClick(scriptChoice("data-script-id", scriptId));
+  if (heroId) await scriptClick(scriptChoice("data-hero-id", heroId));
+};
+
+// ---- ① 三态之一：missing（本票的 runs 目录里还没有档，走真 GET） ----
+await scriptCall("scriptLoadSave");
+check("M7-20a 无档 ⇒ GET /api/script-save 回 missing（唯一允许的静默）",
+  scriptStatus() === "missing"
+  && calls.some((call) => call.method === "GET" && call.path === "/api/script-save"),
+  `status=${scriptStatus()}`);
+check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放弃」不出现、摘要行与坏档面板都收起",
+  $("btn-script-new").disabled === false
+  && $("btn-script-continue").disabled === true
+  && $("btn-script-abandon").hidden === true
+  && $("script-summary").hidden === true
+  && $("script-broken").hidden === true,
+  `new=${$("btn-script-new").disabled} continue=${$("btn-script-continue").disabled}`
+    + ` abandonHidden=${$("btn-script-abandon").hidden}`);
+
+// ---- ② 既有三块一个没少（UI-2：增量叠加）+ 位置纪律 + 标签白名单 ----
+{
+  const lobbyText = html.slice(html.indexOf('id="view-lobby"'), html.indexOf('id="view-table"'));
+  const at = (needle) => lobbyText.indexOf(needle);
+  check("M7-20c 既有开局表单 / 将池预设 / 已有录像一个都没删（剧本面板 → 开一局 → 将池 → 录像）",
+    at('id="script-panel"') >= 0 && at('id="lobby-form"') > at('id="script-panel"')
+    && at('id="in-players"') > 0 && at('id="btn-start"') > 0
+    && at('id="hero-pool-panel"') > at('id="lobby-form"')
+    && at('id="run-list"') > at('id="hero-pool-panel"'),
+    `script=${at('id="script-panel"')} form=${at('id="lobby-form"')}`
+      + ` pool=${at('id="hero-pool-panel"')} runs=${at('id="run-list"')}`);
+
+  const between = html.slice(html.indexOf('id="view-table"'), html.indexOf('id="view-replay"'));
+  check("M7-20d 剧本开局页的面不插在 view-table 与 view-replay 之间（两处字符串切片断言的锚点）",
+    between.indexOf("script-panel") < 0 && between.indexOf("script-confirm") < 0
+    && html.indexOf('id="script-panel"') > 0 && html.indexOf('id="script-confirm"') > 0,
+    `中间出现 script-panel=${between.indexOf("script-panel")}`);
+
+  // 垫片只解析 16 种标签（本文件 `:254` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+  const scriptSection = lobbyText.slice(at('id="script-panel"'), at('id="lobby-form"'))
+    + lobbyText.slice(at('id="script-confirm-backdrop"'));
+  const tags = [...scriptSection.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
+    .map((match) => match[1].toLowerCase());
+  check("M7-20e 新加节点的标签只用垫片认识的那些（不引入新标签）",
+    tags.length > 0 && tags.every((tag) => allowedTags.has(tag)),
+    `标签=${[...new Set(tags)].join(",")}`);
+}
+
+// ---- ③ 新剧本 → 选剧本 → 3 选 1（这段时间**不落盘**） ----
+let scriptMark = calls.length;
+await scriptClick($("btn-script-new"));
+const rosterCalls = scriptRunPostsSince(scriptMark, "/api/script-roster");
+check("M7-20f 「新剧本」只读一次剧本清单（POST /api/script-roster；不写档）",
+  rosterCalls.length === 1 && scriptCreatesSince(scriptMark).length === 0,
+  `roster=${rosterCalls.length} runs=${scriptCreatesSince(scriptMark).length}`);
+const scriptList = (ui.state.script && ui.state.script.scripts) || [];
+const chosenScript = scriptList[0] || null;
+check("M7-20g 选剧本这一步铺出库里每一部剧本（讨伐黄巾军）",
+  !!chosenScript && $("script-picker").hidden === false
+  && $("script-choices").children.length === scriptList.length
+  && !!scriptChoice("data-script-id", chosenScript.id)
+  && $("script-picker-hint").textContent.includes("第 1 步"),
+  `清单 ${scriptList.map((item) => item.id).join(",")} / 格 ${$("script-choices").children.length}`);
+
+await scriptClick(scriptChoice("data-script-id", chosenScript && chosenScript.id));
+const rosterHeroes = (chosenScript && chosenScript.roster_candidates) || [];
+check("M7-20h 选完剧本 ⇒ 3 选 1：候选恰好是剧本编排的那三名（名字走武将目录）",
+  rosterHeroes.length === 3
+  && $("script-choices").children.length === 3
+  && setEquals(
+    Array.from($("script-choices").children).map((node) => node.getAttribute("data-hero-id")),
+    rosterHeroes,
+  )
+  && scriptChoice("data-hero-id", "jie_liubei")
+  && scriptChoice("data-hero-id", "jie_liubei").textContent === "界刘备",
+  JSON.stringify(rosterHeroes));
+
+const chosenHero = rosterHeroes[0];
+await scriptClick(scriptChoice("data-hero-id", chosenHero));
+check("M7-20i 3 选 1 期间不落盘：一次建档请求都没发、档不在、状态仍是 missing",
+  scriptCreatesSince(scriptMark).length === 0
+  && !existsSync(SCRIPT_SAVE_FILE)
+  && scriptStatus() === "missing",
+  `runs=${scriptCreatesSince(scriptMark).length} 档在=${existsSync(SCRIPT_SAVE_FILE)}`);
+
+scriptMark = calls.length;
+await scriptClick($("btn-script-picker-go"));
+const createCalls = scriptCreatesSince(scriptMark);
+check("M7-20j 开档：一条 POST /api/script-runs（script_id + chosen_hero；无旧档 ⇒ 不带 expected_revision）",
+  createCalls.length === 1
+  && createCalls[0].body.script_id === chosenScript.id
+  && createCalls[0].body.chosen_hero === chosenHero
+  && !("expected_revision" in createCalls[0].body),
+  JSON.stringify(createCalls[0] && createCalls[0].body));
+
+const openSummary = scriptSave().summary || {};
+const summaryText = $("script-summary").textContent;
+check("M7-20k 有档 ⇒ 摘要行写全（剧本名 · 大节 layer_index+1/总数 · 已结算节点数 · 铜钱 · saved_at）",
+  scriptStatus() === "ok" && $("script-summary").hidden === false
+  && summaryText.startsWith(`${openSummary.script_name} · 大节 1/${openSummary.layer_count}`
+    + ` · 已结算 0 个节点 · 铜钱 0 · `)
+  && summaryText.endsWith(scriptSave().saved_at),
+  `摘要「${summaryText}」`);
+check("M7-20l 有档 ⇒ 「继续」可点、「放弃」出现、坏档面板收起",
+  $("btn-script-continue").disabled === false
+  && $("btn-script-abandon").hidden === false
+  && $("script-broken").hidden === true
+  && $("btn-script-new").disabled === false,
+  `continue=${$("btn-script-continue").disabled} abandonHidden=${$("btn-script-abandon").hidden}`);
+
+// ---- ④ 继续剧本 = 一条 resume（棋盘体交给票 21 渲染） ----
+scriptMark = calls.length;
+await scriptClick($("btn-script-continue"));
+const resumeCalls = scriptRunPostsSince(scriptMark, "/resume");
+const board = (ui.state.script || {}).board || null;
+check("M7-20m 「继续剧本」= 一条 POST …/resume，棋盘体落进 state.script.board（票 21 的输入）",
+  resumeCalls.length === 1
+  && resumeCalls[0].path === `/api/script-runs/${scriptSave().run_id}/resume`
+  && !!board && board.run_id === scriptSave().run_id
+  && board.revision === scriptSave().revision
+  && scriptCreatesSince(scriptMark).length === 0,
+  `resume=${resumeCalls.length} board=${board && board.run_id}`);
+
+// ---- ⑤ 退出确认框（战斗中）：「退出后这场战斗要重打；棋盘进度已保存。」 ----
+scriptCall("scriptExitConfirm");
+check("M7-20n 退出确认框：一句「退出后这场战斗要重打；棋盘进度已保存。」+ 确认 / 取消",
+  $("script-confirm").hidden === false
+  && $("script-confirm-text").textContent === "退出后这场战斗要重打；棋盘进度已保存。"
+  && !!scriptConfirmAction("确认") && !!scriptConfirmAction("取消"),
+  `text=${$("script-confirm-text").textContent}`);
+scriptMark = calls.length;
+await scriptClick(scriptConfirmAction("取消"));
+check("M7-20o 退出确认「取消」= 什么都不发生（零请求、框收起）",
+  calls.length === scriptMark && $("script-confirm").hidden === true,
+  `${calls.length - scriptMark} 个请求`);
+
+scriptMark = calls.length;
+scriptCall("scriptExitConfirm");
+await scriptClick(scriptConfirmAction("确认"));
+const suspendCalls = scriptRunPostsSince(scriptMark, "/suspend");
+check("M7-20p 退出确认「确认」= 只调 suspend 一个端点（body 空；前端不判断自己在不在战斗里）",
+  suspendCalls.length === 1
+  && suspendCalls[0].path === `/api/script-runs/${scriptSave().run_id}/suspend`
+  && !("expected_revision" in (suspendCalls[0].body || {}))
+  && calls.length - scriptMark === 1,
+  `suspend=${suspendCalls.length} 全部=${JSON.stringify(calls.slice(scriptMark).map((call) => call.path))}`);
+
+// ---- ⑥ 放弃剧本（删两份） ----
+const abandonRevision = scriptSave().revision;
+scriptMark = calls.length;
+await scriptClick($("btn-script-abandon"));
+const deleteCalls = calls.slice(scriptMark).filter((call) => call.method === "DELETE");
+check("M7-20q 「放弃剧本」= 一条 DELETE /api/script-save?expected_revision=N ⇒ 回 missing",
+  deleteCalls.length === 1
+  && deleteCalls[0].path === `/api/script-save?expected_revision=${abandonRevision}`
+  && scriptStatus() === "missing"
+  && $("btn-script-abandon").hidden === true
+  && !existsSync(SCRIPT_SAVE_FILE),
+  `DELETE=${JSON.stringify(deleteCalls.map((call) => call.path))} status=${scriptStatus()}`);
+
+// ---- ⑦ 新剧本撞旧档：三选一（继续旧档 / 覆盖新开 / 取消） ----
+await openScriptPicker(chosenScript && chosenScript.id, chosenHero);
+await scriptClick($("btn-script-picker-go"));
+const existing = scriptSave();
+check("M7-20r 第二次开档仍是一条建档请求（撞档确认的前置：现在有旧档）",
+  existing.status === "ok" && existing.revision === 0 && existsSync(SCRIPT_SAVE_FILE),
+  `status=${existing.status} revision=${existing.revision}`);
+
+await scriptClick($("btn-script-new"));
+check("M7-20s 撞旧档：确认框「当前进度会被覆盖（不可恢复）」+ 三选一（继续旧档 / 覆盖新开 / 取消）",
+  $("script-confirm").hidden === false
+  && $("script-confirm-text").textContent.includes("当前进度会被覆盖（不可恢复）")
+  && ["继续旧档", "覆盖新开", "取消"].every((label) => !!scriptConfirmAction(label)),
+  `text=${$("script-confirm-text").textContent}`
+    + ` 按钮=${Array.from($("script-confirm-actions").children).map((n) => n.textContent).join("/")}`);
+
+scriptMark = calls.length;
+await scriptClick(scriptConfirmAction("取消"));
+const cancelWasQuiet = calls.length === scriptMark && $("script-confirm").hidden === true;
+await scriptCall("scriptLoadSave");
+check("M7-20t 撞旧档「取消」= 什么都不发生（零请求、不删档、revision 不变）",
+  cancelWasQuiet && scriptStatus() === "ok"
+  && scriptSave().revision === existing.revision
+  && existsSync(SCRIPT_SAVE_FILE),
+  `零请求=${cancelWasQuiet} revision=${scriptSave().revision}`);
+
+// 「覆盖新开」⇒ 进 3 选 1，建档带 expected_revision（覆盖旧档的唯一凭据）。
+scriptMark = calls.length;
+await scriptClick($("btn-script-new"));
+await scriptClick(scriptConfirmAction("覆盖新开"));
+check("M7-20u 「覆盖新开」⇒ 进 3 选 1（只读一次剧本清单，此刻仍没写档）",
+  scriptRunPostsSince(scriptMark, "/api/script-roster").length === 1
+  && scriptCreatesSince(scriptMark).length === 0
+  && $("script-picker").hidden === false,
+  `roster=${scriptRunPostsSince(scriptMark, "/api/script-roster").length}`);
+await scriptClick(scriptChoice("data-script-id", chosenScript && chosenScript.id));
+await scriptClick(scriptChoice("data-hero-id", rosterHeroes[1]));
+scriptMark = calls.length;
+await scriptClick($("btn-script-picker-go"));
+const overwriteCalls = scriptCreatesSince(scriptMark);
+check("M7-20v 「覆盖新开」的建档带 expected_revision（旧档 revision），新档换 run_id",
+  overwriteCalls.length === 1
+  && overwriteCalls[0].body.expected_revision === existing.revision
+  && overwriteCalls[0].body.chosen_hero === rosterHeroes[1]
+  && scriptSave().status === "ok" && scriptSave().run_id !== existing.run_id,
+  JSON.stringify(overwriteCalls[0] && overwriteCalls[0].body));
+
+// 「继续旧档」⇒ 直接续，不建档、不删档。
+scriptMark = calls.length;
+await scriptClick($("btn-script-new"));
+await scriptClick(scriptConfirmAction("继续旧档"));
+check("M7-20w 「继续旧档」= 一条 resume（不建档、不删档）",
+  scriptRunPostsSince(scriptMark, "/resume").length === 1
+  && scriptCreatesSince(scriptMark).length === 0
+  && calls.slice(scriptMark).every((call) => call.method !== "DELETE"),
+  JSON.stringify(calls.slice(scriptMark).map((call) => `${call.method} ${call.path}`)));
+
+// ---- ⑧ 坏档（真把主档写坏）：红字 + 两个修复按钮，且绝不把坏档当空档 ----
+// 先走一条**真的** S_enter 写一次档：`.bak` 因此是上一份（建档案），恢复才有东西可回。
+const liveBoard = (ui.state.script || {}).board || {};
+if (liveBoard.run_id && (liveBoard.available_next || []).length) {
+  await fetch(`${BASE}/api/script-runs/${liveBoard.run_id}/nodes/${liveBoard.available_next[0]}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_revision: liveBoard.revision }),
+  });
+}
+await scriptCall("scriptLoadSave");
+const healthy = scriptSave();
+const revisionBeforeEnter = liveBoard.revision;
+check("M7-20x 进过节点后主档与 .bak 都在（坏档恢复的前置），主档 revision 已前进",
+  healthy.status === "ok" && healthy.bak_available === true
+  && healthy.revision === revisionBeforeEnter + 1
+  && existsSync(SCRIPT_SAVE_FILE) && existsSync(SCRIPT_BAK_FILE),
+  `status=${healthy.status} revision=${healthy.revision} bak=${healthy.bak_available}`);
+
+writeFileSync(SCRIPT_SAVE_FILE, "{ 这不是一份存档");
+await scriptCall("scriptLoadSave");
+const brokenSave = scriptSave();
+check("M7-20y 坏档：status=broken（不是 missing）、「继续」置灰、摘要行收起、红字 = 服务端那行 reason",
+  brokenSave.status === "broken" && String(brokenSave.reason || "").length > 0
+  && $("btn-script-continue").disabled === true
+  && $("script-summary").hidden === true
+  && $("script-broken").hidden === false
+  && $("script-broken-reason").textContent === brokenSave.reason
+  // 垫片不解析静态节点的 `class` 属性（只有动态节点经 `classList` 写），故红字那条类名
+  // 按**源串**钉（颜色由 `tests/test_web_static.py` 对 `style.css` 钉）。
+  && /<p id="script-broken-reason" class="script-reason">/.test(html),
+  `status=${brokenSave.status} reason=${brokenSave.reason}`);
+check("M7-20z 坏档 ≠ 空档：「放弃」仍在（有档才出现），两个修复按钮都在，备份可用那句不显示",
+  $("btn-script-abandon").hidden === false
+  && $("btn-script-restore").hidden === false
+  && $("btn-script-discard").hidden === false
+  && $("script-broken-backup").hidden === true,
+  `abandon=${$("btn-script-abandon").hidden} restore=${$("btn-script-restore").hidden}`);
+
+scriptMark = calls.length;
+await scriptClick($("btn-script-restore"));
+const restoreCalls = scriptRunPostsSince(scriptMark, "/api/script-save/restore");
+check("M7-20aa 「从我上一份恢复」= 一条 POST /api/script-save/restore，写回上一份（revision 回到备份那份）",
+  restoreCalls.length === 1
+  && scriptSave().status === "ok"
+  && scriptSave().revision === revisionBeforeEnter
+  && $("script-broken").hidden === true
+  && $("script-summary").hidden === false,
+  `revision=${scriptSave().revision}（进节点前 ${revisionBeforeEnter}）`);
+
+// `.bak` 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句「备份也不可用」。
+writeFileSync(SCRIPT_SAVE_FILE, "{ 还是坏的");
+unlinkSync(SCRIPT_BAK_FILE);
+await scriptCall("scriptLoadSave");
+check("M7-20ab .bak 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句「备份也不可用」",
+  scriptStatus() === "broken" && scriptSave().bak_available === false
+  && $("btn-script-restore").hidden === true
+  && $("btn-script-discard").hidden === false
+  && $("btn-script-abandon").hidden === false
+  && $("script-broken-backup").hidden === false
+  && $("script-broken-backup").textContent.includes("备份也不可用"),
+  `bak=${scriptSave().bak_available} restoreHidden=${$("btn-script-restore").hidden}`);
+
+scriptMark = calls.length;
+await scriptClick($("btn-script-discard"));
+const brokenDeletes = calls.slice(scriptMark).filter((call) => call.method === "DELETE");
+check("M7-20ac 坏档「放弃存档」= 一条**不带** revision 的 DELETE ⇒ 回 missing（状态复原，后续用例干净）",
+  brokenDeletes.length === 1 && brokenDeletes[0].path === "/api/script-save"
+  && scriptStatus() === "missing" && $("script-broken").hidden === true
+  && !existsSync(SCRIPT_SAVE_FILE),
+  `DELETE=${JSON.stringify(brokenDeletes.map((call) => call.path))} status=${scriptStatus()}`);
+
+/* ============ M7 票 21：剧本棋盘（五类房间 + 悬浮卡 + 共用节点图渲染器）============
+ *
+ * 判据分四半：
+ *  ① **棋盘一屏**：五类房间各一次、两个入口 / 两个出口 / 两个 Boss；节点是 **64×64 只放
+ *     图标**、标题在图标**上方**、连线与边条件标签走 SVG；
+ *  ② **状态色只属于玩家视角**：棋盘语境画已走 / 当前 / 可走 / 高亮，**同一份节点**在编辑器
+ *     语境（`mode: "editor"`）零 `st-*` 类——两处调的是**同一个**渲染入口（`scriptGraphDrawCount`）；
+ *  ③ **悬浮卡**：战斗房有座位布局与敌人信息（模板名 / 档位 / 血量 / 初始技能 / 随机技能 /
+ *     胜负 / 全局副本技能 / 奖励），非战斗房给房间类型与已抽出的结果；
+ *  ④ **真路径**：点节点 = 一条 `POST …/nodes/<id>`（`expected_revision` 来自棋盘体）、
+ *     结算后刷新回到棋盘、不可到达 / 死路的**服务端原话**落到红字错误行。
+ *
+ * 进料是 `tests/support/fixtures/script-board-library.json`（**真**库校验器先过一道，见
+ * `tests/test_web_static.py::test_the_board_smoke_library_is_a_valid_script_library`）：
+ * 五类房间 + 两个入口 + 两个出口 + 两个 Boss + 一条死路（col 2 的 e1 没有出边）+ 一条带标签
+ * 条件的边。棋盘体全部来自真端点（建 / 进入 / 结算 / 刷新都是线上事实）。
+ */
+const SCRIPT_BOARD_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_BOARD_LIBRARY,
+  readFileSync("tests/support/fixtures/script-board-library.json", "utf8"),
+);
+
+// 位置纪律 + 标签白名单（与票 20 同一条判据：两处字符串切片以牌桌视图 / 回放视图的 id 为锚点）。
+{
+  const tableStart = html.indexOf('id="view-table"');
+  const replayStart = html.indexOf('id="view-replay"');
+  const boardStart = html.indexOf('id="view-script-board"');
+  const between = html.slice(tableStart, replayStart);
+  check("M7-21a 棋盘视图排在回放视图之后，不插在牌桌视图与回放视图之间（切片的锚点在那里）",
+    boardStart > replayStart && between.indexOf("script-board") < 0
+    && between.indexOf("script-node-card") < 0,
+    `board=${boardStart} replay=${replayStart} 中间出现 script-board=${between.indexOf("script-board")}`);
+  const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+  const section = html.slice(boardStart, html.indexOf("<script", boardStart));
+  const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
+    .map((match) => match[1].toLowerCase());
+  check("M7-21b 棋盘的静态节点只用垫片认识的标签（不引入新标签、不新增图片资源）",
+    tags.length > 0 && tags.every((tag) => allowedTags.has(tag)) && !section.includes("<img"),
+    `标签=${[...new Set(tags)].join(",")}`);
+}
+
+/** 棋盘视图的节点图容器（渲染器的唯一落点）。 */
+const boardGraph = () => $("script-board-graph");
+/** 子树里带某个 class 的全部后代（垫片没有 querySelectorAll；children 是活集合）。 */
+const walkTree = (node, out = []) => {
+  for (const child of (node && node.children) || []) {
+    out.push(child);
+    walkTree(child, out);
+  }
+  return out;
+};
+const byClass = (node, name) => walkTree(node).filter((child) => child.classList.contains(name));
+const graphCells = (root) => byClass(root || boardGraph(), "script-node");
+const cellOf = (id) => graphCells().find((cell) => cell.getAttribute("data-node-id") === id) || null;
+const cellButton = (cell) => (cell ? byClass(cell, "script-node-button")[0] || null : null);
+const cellIcon = (cell) => (cell ? byClass(cell, "script-node-icon")[0] || null : null);
+const cellTitle = (cell) => (cell ? byClass(cell, "script-node-title")[0] || null : null);
+const hoverCell = (cell) => (cell.listeners.mouseenter || []).forEach((fn) => fn({ target: cell }));
+const leaveCell = (cell) => (cell.listeners.mouseleave || []).forEach((fn) => fn({ target: cell }));
+const styleRect = (node) => ({
+  left: parseFloat(node.style.left || "0"),
+  top: parseFloat(node.style.top || "0"),
+  width: parseFloat(node.style.width || "0"),
+  height: parseFloat(node.style.height || "0"),
+});
+/** 节点在**图容器**里的绝对矩形：格矩形 + 格内相对矩形（内联样式就是布局的唯一来源）。 */
+const absoluteRect = (cell, node) => {
+  const cellRect = styleRect(cell);
+  const rect = styleRect(node);
+  return {
+    left: cellRect.left + rect.left,
+    top: cellRect.top + rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+};
+const rectsOverlap = (a, b) => a.left < b.left + b.width && b.left < a.left + a.width
+  && a.top < b.top + b.height && b.top < a.top + a.height;
+/** 一档宽度下的几何不变量：图标恒 64×64、标题在图标上方、图标两两不叠、全部不越界。 */
+const graphGeometryProblems = (root, width) => {
+  const problems = [];
+  const cells = graphCells(root);
+  const icons = cells.map(cellButton);
+  const titles = cells.map(cellTitle);
+  cells.forEach((cell, index) => {
+    const icon = icons[index];
+    const title = titles[index];
+    if (!icon || !title) {
+      problems.push(`第 ${index} 格缺图标或标题`);
+      return;
+    }
+    const iconRect = absoluteRect(cell, cellButton(cell));
+    const titleRect = absoluteRect(cell, title);
+    if (iconRect.width !== 64 || iconRect.height !== 64) {
+      problems.push(`图标不是 64×64：${iconRect.width}×${iconRect.height}`);
+    }
+    if (titleRect.top + titleRect.height > iconRect.top) {
+      problems.push(`标题压住了图标：标题底 ${titleRect.top + titleRect.height} > 图标顶 ${iconRect.top}`);
+    }
+    if (iconRect.left < 0 || iconRect.top < 0 || iconRect.left + iconRect.width > width) {
+      problems.push(`图标越界：left=${iconRect.left} width=${iconRect.width} 宽度档=${width}`);
+    }
+  });
+  for (let a = 0; a < icons.length; a += 1) {
+    for (let b = a + 1; b < icons.length; b += 1) {
+      if (!icons[a] || !icons[b]) continue;
+      if (rectsOverlap(absoluteRect(cells[a], icons[a]), absoluteRect(cells[b], icons[b]))) {
+        problems.push(`图标 ${cells[a].getAttribute("data-node-id")}/${cells[b].getAttribute("data-node-id")} 重叠`);
+      }
+    }
+  }
+  return problems;
+};
+/** SVG 连线层里每条线的端点（内联 SVG 字符串；垫片不建节点树，故读 innerHTML）。 */
+const edgePoints = (root) => {
+  const layer = byClass(root || boardGraph(), "script-graph-edges")[0];
+  if (!layer) return [];
+  return [...String(layer.innerHTML).matchAll(/<line\b[^>]*x1="([\d.]+)"[^>]*y1="([\d.]+)"[^>]*x2="([\d.]+)"[^>]*y2="([\d.]+)"/g)]
+    .map((match) => match.slice(1).map(Number));
+};
+
+// ---- ① 建局直接进棋盘：一屏五类房间 + 多入口 / 多出口 / 多 Boss ----
+await scriptCall("scriptLoadSave");
+check("M7-21c 进棋盘前没有存档（本段用真端点建新档）", scriptStatus() === "missing", scriptStatus());
+await scriptClick($("btn-script-new"));
+await scriptClick(scriptChoice("data-script-id", "boardprobe"));
+await scriptClick(scriptChoice("data-hero-id", "jie_liubei"));
+await scriptClick($("btn-script-picker-go"));
+const board0 = (ui.state.script || {}).board || null;
+check("M7-21d 开档成功 ⇒ 直接进棋盘视图（`show(\"view-script-board\")` + 渲染 state.script.board）",
+  !!board0 && $("view-script-board").hidden === false
+  && $("script-board-graph").hidden === false
+  && graphCells().length === 10,
+  `board=${board0 && board0.run_id} 格=${graphCells().length} view=${$("view-script-board").hidden}`);
+
+const kinds = new Set(graphCells().map((cell) => cell.getAttribute("data-room-kind")));
+const bosses = graphCells().filter((cell) => cell.getAttribute("data-boss") === "1");
+const exits = graphCells().filter((cell) => cell.getAttribute("data-exit") === "1");
+check("M7-21e 棋盘一屏：五类房间各至少一次、两个出口、两个 Boss（多出口 / 多 Boss 的库）",
+  setEquals([...kinds], ["story", "battle", "event", "shop", "unknown"])
+  && exits.length === 2 && bosses.length === 2,
+  `类=${[...kinds].join(",")} 出口=${exits.length} Boss=${bosses.length}`);
+
+const icons = graphCells().map((cell) => cellIcon(cell).getAttribute("data-icon"));
+check("M7-21f 六种图标按房间类型分派（旗帜 / 交叉双剑 / 书 / 钱袋 / ？ / 红色感叹号；Boss 盖过类型图标）",
+  icons.filter((name) => name === "flag").length === 1
+  && icons.filter((name) => name === "swords").length === 2
+  && icons.filter((name) => name === "book").length === 1
+  && icons.filter((name) => name === "purse").length === 3
+  && icons.filter((name) => name === "question").length === 1
+  && icons.filter((name) => name === "boss").length === 2
+  && bosses.every((cell) => cellIcon(cell).getAttribute("data-icon") === "boss"),
+  `图标=${JSON.stringify(icons)}`);
+check("M7-21g 节点统一 64×64、只放图标；标题在图标上方（内联几何 + 常量）",
+  ui.SCRIPT_GRAPH_ICON_PX === 64 && ui.SCRIPT_GRAPH_ICON_PX ** 2 === 4096
+  && graphCells().every((cell) => {
+    const button = styleRect(cellButton(cell));
+    return button.width === 64 && button.height === 64
+      // 按钮里没有任何文字：图标之外不塞字（房间名在按钮**上方**的标题里）。
+      && String(cellButton(cell).textContent).trim() === "";
+  })
+  && graphCells().every((cell) => {
+    const title = styleRect(cellTitle(cell));
+    const icon = styleRect(cellButton(cell));
+    return title.top + title.height <= icon.top;
+  })
+  && graphGeometryProblems(boardGraph(), 1280).length === 0,
+  `图标宽=${JSON.stringify(graphCells().map((cell) => styleRect(cellButton(cell)).width))}`
+    + ` 几何=${graphGeometryProblems(boardGraph(), 1280).join("；")}`);
+check("M7-21h 标题写房间名（不是节点 id）：事件房 = 残破的村庄、Boss 房 = 广宗城下",
+  cellTitle(cellOf("a1")).textContent === "残破的村庄"
+  && cellTitle(cellOf("d1")).textContent === "广宗城下"
+  && cellTitle(cellOf("c1")).textContent === "路边的问号",
+  `${cellTitle(cellOf("a1")).textContent}/${cellTitle(cellOf("d1")).textContent}`);
+
+const points = edgePoints();
+const edgesHtml = String(byClass(boardGraph(), "script-graph-edges")[0].innerHTML);
+check("M7-21i 连线 = 一条边一条 SVG line（17 条），端点都在图内、两档宽度都不越界",
+  points.length === 17
+  && points.every(([x1, y1, x2, y2]) => x1 >= 0 && x2 >= 0 && y1 >= 0 && y2 >= 0
+    && x1 <= 1280 && x2 <= 1280)
+  && byClass(boardGraph(), "script-graph-edges")[0].innerHTML.includes("<svg"),
+  `线=${points.length}`);
+check("M7-21j 边条件标签只画在带 requires 的边上（c2 → d2）",
+  (edgesHtml.match(/class="script-edge-label"/g) || []).length === 1
+  && edgesHtml.includes("需要 flag.boss_open")
+  && edgesHtml.includes("不要 flag.sealed"),
+  `标签数=${(edgesHtml.match(/class="script-edge-label"/g) || []).length}`);
+
+// 两档宽度：同一份 spec、同一个渲染器，显式喂 1280 / 1920（烟测不读布局引擎）。
+const widthBoxes = {};
+for (const width of [1280, 1920]) {
+  const box = documentShim.createElement("div");
+  ui.scriptGraphRender(box, { ...ui.state.script.board, width });
+  widthBoxes[width] = box;
+}
+check("M7-21k 1280 / 1920 两档宽度下：图标 + 标题 + 连线都不重叠、不越界（尺寸断言，不引像素比对）",
+  graphGeometryProblems(widthBoxes[1280], 1280).length === 0
+  && graphGeometryProblems(widthBoxes[1920], 1920).length === 0
+  && edgePoints(widthBoxes[1280]).length === 17
+  && edgePoints(widthBoxes[1920]).length === 17
+  && edgePoints(widthBoxes[1920]).every(([x1, y1, x2, y2]) => x1 <= 1920 && x2 <= 1920 && y1 >= 0 && y2 >= 0),
+  `1280=${graphGeometryProblems(widthBoxes[1280], 1280).join("；")}`
+    + ` 1920=${graphGeometryProblems(widthBoxes[1920], 1920).join("；")}`);
+
+// ---- ② 状态色只属于玩家视角：同一份节点在编辑器语境零 st-* 类 ----
+const statusCells = graphCells();
+const availableCells = statusCells.filter((cell) => cellButton(cell).classList.contains("st-available"));
+check("M7-21l 棋盘语境的状态色读服务端字段：两个入口 = 可走，其余 = 去不了，此刻没有「当前」",
+  availableCells.length === 2
+  && setEquals(availableCells.map((cell) => cell.getAttribute("data-node-id")), ["a1", "a2"])
+  && statusCells.every((cell) => !cellButton(cell).classList.contains("st-current"))
+  && statusCells.filter((cell) => cellButton(cell).classList.contains("st-blocked")).length === 8,
+  `可走=${availableCells.map((cell) => cell.getAttribute("data-node-id")).join(",")}`);
+
+const drawsBeforeEditor = ui.scriptGraphDrawCount();
+const editorBox = documentShim.createElement("div");
+ui.scriptGraphRender(editorBox, { ...ui.state.script.board, mode: "editor", width: 1280 });
+const editorStatusClasses = walkTree(editorBox)
+  .flatMap((node) => [...node.classList.set])
+  .filter((name) => name.startsWith("st-"));
+check("M7-21m 编辑器语境（同一个渲染器、同一份节点）不画任何状态色——不是「另画一套」",
+  editorStatusClasses.length === 0
+  && graphCells(editorBox).length === 10
+  && edgePoints(editorBox).length === 17
+  && ui.scriptGraphDrawCount() === drawsBeforeEditor + 1
+  && editorBox.getAttribute("data-graph-mode") === "editor",
+  `st-*=${JSON.stringify(editorStatusClasses)} 画次=${ui.scriptGraphDrawCount() - drawsBeforeEditor}`);
+const drawsBeforeBoardRender = ui.scriptGraphDrawCount();
+await scriptCall("scriptBoardRender");
+check("M7-21n 渲染器唯一性（机械读数）：棋盘的渲染口也走 `scriptGraphRender`，重画一次只 +1",
+  typeof ui.scriptGraphRender === "function"
+  && typeof ui.scriptGraphLayout === "function"
+  && ui.scriptGraphDrawCount() === drawsBeforeBoardRender + 1,
+  `画次=${ui.scriptGraphDrawCount() - drawsBeforeBoardRender}`);
+
+// ---- ③ 悬浮卡：战斗房座位布局 + 敌人信息；非战斗房类型 + 结果 ----
+hoverCell(cellOf("b1"));
+const card = $("script-node-card");
+const seatRows = byClass($("script-node-card-seats"), "script-card-seat");
+const enemyRows = byClass($("script-node-card-enemies"), "script-card-enemy");
+const gruntRow = enemyRows.find((row) => row.getAttribute("data-template") === "tpl.grunt");
+const bruteRow = enemyRows.find((row) => row.getAttribute("data-template") === "tpl.brute");
+check("M7-21o 战斗房悬浮卡：座位布局（1 友受保护 + 2 敌）+ 敌人信息（名 / 档位 / 血量 / 初始技能 / 随机技能 / 奖励）",
+  card.hidden === false
+  && $("script-node-card-title").textContent === "颍川道上"
+  && $("script-node-card-meta").textContent === "房间：剧情战斗"
+  && seatRows.length === 3
+  && seatRows[0].getAttribute("data-side") === "ally"
+  && seatRows[0].getAttribute("data-template") === "tpl.ally"
+  && seatRows[0].textContent.includes("受保护")
+  && seatRows[1].textContent.includes("黄巾力士")
+  && seatRows[2].textContent.includes("黄巾渠帅")
+  && enemyRows.length === 2
+  && gruntRow.textContent.includes("档位 early")
+  && gruntRow.textContent.includes("血量 3/3")
+  && gruntRow.textContent.includes("初始技能：无")
+  && gruntRow.textContent.includes("随机技能：进入时抽定（固定对手则无）")
+  && gruntRow.textContent.includes("奖励：铜钱 2 · 3 选 1×1")
+  && bruteRow.textContent.includes("初始技能：hero.zhangfei.paoxiao"),
+  `座位=${seatRows.length} 敌人=${enemyRows.map((row) => row.textContent).join(" | ")}`);
+check("M7-21p 战斗房悬浮卡：胜负 / 全局副本技能 / 房间奖励",
+  $("script-node-card-victory").textContent === "胜利条件：全歼敌人"
+  && $("script-node-card-globals").textContent.includes("副本全局技能：gs.enemy")
+  && $("script-node-card-reward").textContent.includes("房间额外奖励：铜钱 4 · 2 选 1×1"),
+  `${$("script-node-card-victory").textContent} / ${$("script-node-card-globals").textContent}`);
+
+hoverCell(cellOf("a1"));
+const eventOptions = byClass($("script-node-card-options"), "script-card-option").map((row) => row.textContent);
+check("M7-21q 事件房悬浮卡：房间类型 + 事件与选项（非战斗房 = 已抽出的结果那一面）",
+  $("script-node-card-meta").textContent === "房间：事件"
+  && eventOptions.some((text) => text.includes("残破的村庄"))
+  && eventOptions.some((text) => text.includes("收下铜钱") && text.includes("帮他们修寨")),
+  eventOptions.join(" | "));
+
+hoverCell(cellOf("a2"));
+check("M7-21r 商店房悬浮卡：房间类型 + 库存抽法（售完不补货）",
+  $("script-node-card-meta").textContent === "房间：商店"
+  && byClass($("script-node-card-options"), "script-card-option")
+    .some((row) => row.textContent.includes("6 技能 + 2 遗物")),
+  $("script-node-card-options").textContent);
+
+hoverCell(cellOf("c1"));
+const poolRows = byClass($("script-node-card-options"), "script-card-option").map((row) => row.textContent);
+check("M7-21s 问号房悬浮卡：加权池（两份候选各带权重）",
+  $("script-node-card-meta").textContent === "房间：问号房"
+  && poolRows.some((text) => text.includes("残破的村庄（权重 3）"))
+  && poolRows.some((text) => text.includes("行商篷车（权重 1）")),
+  poolRows.join(" | "));
+
+hoverCell(cellOf("d1"));
+check("M7-21t Boss 房悬浮卡：Boss 标记 + Boss 座位 + 击杀胜负 + Boss 模板",
+  $("script-node-card-meta").textContent === "房间：剧情战斗 · Boss"
+  && byClass($("script-node-card-seats"), "script-card-seat")
+    .some((row) => row.textContent.includes("张角") && row.textContent.includes("Boss"))
+  && $("script-node-card-victory").textContent === "胜利条件：击败 Boss 座位"
+  && byClass($("script-node-card-enemies"), "script-card-enemy")
+    .some((row) => row.getAttribute("data-template") === "tpl.boss"),
+  $("script-node-card-meta").textContent);
+
+leaveCell(cellOf("d1"));
+check("M7-21u 移开鼠标 ⇒ 悬浮卡收起（不留一张常驻卡）", $("script-node-card").hidden === true);
+
+// ---- ④ 点节点 = 一条真请求；不可到达 / 死路的原话落到红字错误行 ----
+const boardRunId = ui.state.script.board.run_id;
+const boardRevision = ui.state.script.board.revision;
+scriptMark = calls.length;
+await scriptClick(cellButton(cellOf("a1")));
+const enterCalls = calls.slice(scriptMark).filter(
+  (call) => call.method === "POST" && call.path === `/api/script-runs/${boardRunId}/nodes/a1`,
+);
+check("M7-21v 点可到达节点 = 一条 POST …/nodes/a1（expected_revision 来自棋盘体），棋盘体收下并重画",
+  enterCalls.length === 1
+  && enterCalls[0].body.expected_revision === boardRevision
+  && ui.state.script.board.pending
+  && ui.state.script.board.pending.node_id === "b1/a1"
+  && cellButton(cellOf("a1")).classList.contains("st-current")
+  && $("script-board-hint").textContent.includes("已进入「残破的村庄」"),
+  `calls=${enterCalls.length} pending=${ui.state.script.board.pending && ui.state.script.board.pending.node_id}`);
+
+scriptMark = calls.length;
+await scriptClick(cellButton(cellOf("d1")));
+const blockedCalls = calls.slice(scriptMark).filter(
+  (call) => call.method === "POST" && call.path === `/api/script-runs/${boardRunId}/nodes/d1`,
+);
+check("M7-21w 去不了的节点照样发请求（可到达集来自服务端，前端不重算）：400 的原话落到红字错误行",
+  blockedCalls.length === 1
+  && $("script-board-error").hidden === false
+  && $("script-board-error").getAttribute("data-rule-id") === "script.enter.node_in_progress"
+  && ui.state.script.board.pending.node_id === "b1/a1",
+  `错误「${$("script-board-error").textContent}」 rule=${$("script-board-error").getAttribute("data-rule-id")}`);
+
+// 结算（票 22 的面；这里直接打端点把棋盘推到「已走 + 下一批」）再刷新：状态色逐格换。
+const settleBody = await postRaw(`/api/script-runs/${boardRunId}/settle`, {
+  expected_revision: ui.state.script.board.revision,
+  option: 0,
+});
+check("M7-21x 结算事件节点 = 真端点返回 `board`（当前节点清空、进度前进）",
+  !!settleBody.board && settleBody.board.pending === null
+  && settleBody.board.revision === ui.state.script.board.revision + 1,
+  `revision=${settleBody.board && settleBody.board.revision}`);
+await scriptCall("scriptBoardRefresh");
+const advancedCells = { a1: cellOf("a1"), b1: cellOf("b1") };
+check("M7-21y 刷新回棋盘：a1 = 当前（服务端说玩家在这里）、b1 / b2 / b3 = 可走；红字收起（错误不残留）",
+  cellButton(advancedCells.a1).classList.contains("st-current")
+  && ["b1", "b2", "b3"].every((id) => cellButton(cellOf(id)).classList.contains("st-available"))
+  && $("script-board-error").hidden === true
+  && ui.state.script.board.revision === settleBody.board.revision,
+  `a1=${cellButton(advancedCells.a1).className} b1=${cellButton(cellOf("b1")).className}`);
+
+// 战斗节点：点下去服务端起会话（棋盘体带 session_id；战场面归票 23），已抽到的技能进悬浮卡。
+scriptMark = calls.length;
+await scriptClick(cellButton(cellOf("b1")));
+const battleBoard = ui.state.script.board;
+check("M7-21z 点战斗节点：棋盘体带 session_id（战斗界面归票 23），当前节点 = 颍川道上，a1 退成「已走」",
+  battleBoard && battleBoard.pending && battleBoard.pending.spec.kind === "battle"
+  && typeof battleBoard.session_id === "string" && battleBoard.session_id.length > 0
+  && $("script-board-hint").textContent.includes("牌桌上打")
+  && cellButton(cellOf("a1")).classList.contains("st-completed"),
+  `session=${battleBoard && battleBoard.session_id} a1=${cellButton(cellOf("a1")).className}`);
+hoverCell(cellOf("b1"));
+const drawnGrunt = byClass($("script-node-card-enemies"), "script-card-enemy")
+  .find((row) => row.getAttribute("data-template") === "tpl.grunt");
+const drawnBrute = byClass($("script-node-card-enemies"), "script-card-enemy")
+  .find((row) => row.getAttribute("data-template") === "tpl.brute");
+check("M7-21aa 已进入的战斗：悬浮卡的「随机抽到的技能」读 pending.spec.pve.grants（抽到才写，固定对手写无）",
+  drawnGrunt.textContent.includes("随机技能：hero.")
+  && !drawnGrunt.textContent.includes("抽定")
+  && drawnBrute.textContent.includes("随机技能：无（固定对手）")
+  && byClass($("script-node-card-seats"), "script-card-seat")
+    .some((row) => row.textContent.includes("义军什长")),
+  `${drawnGrunt.textContent} | ${drawnBrute.textContent}`);
+leaveCell(cellOf("b1"));
+
+// 收掉这一轮：suspend 作废战斗会话，再删档（下一段要重开一轮走死路）。
+await scriptCall("scriptSuspend", boardRunId);
+await fetch(`${BASE}/api/script-save?expected_revision=${(ui.state.script.save || {}).revision}`, {
+  method: "DELETE",
+});
+await scriptCall("scriptLoadSave");
+check("M7-21ab 存档被删 ⇒ 状态回 missing，棋盘体不再沿用上一轮的底稿",
+  scriptStatus() === "missing" && ui.state.script.board === null,
+  `status=${scriptStatus()} board=${ui.state.script.board}`);
+
+// 死路：a2(商店) → 结算 → b2(商店) → 结算 → e1(商店，col 2 且没有出边) → 结算 ⇒ board_error。
+const deadRun = await postRaw("/api/script-runs", {
+  script_id: "boardprobe", chosen_hero: "jie_liubei",
+});
+ui.scriptBoardShow(deadRun);
+let deadBoard = deadRun;
+for (const [nodeId, body] of [["a2", {}], ["b2", {}], ["e1", {}]]) {
+  deadBoard = await postRaw(`/api/script-runs/${deadRun.run_id}/nodes/${nodeId}`, {
+    expected_revision: deadBoard.revision,
+  });
+  const settled = await postRaw(`/api/script-runs/${deadRun.run_id}/settle`, {
+    expected_revision: deadBoard.revision,
+    ...body,
+  });
+  deadBoard = settled.board;
+}
+check("M7-21ac 死路：结算 e1 之后服务端的 board_error 是 dead_end.no_outgoing_edges",
+  !!deadBoard && !!deadBoard.board_error
+  && deadBoard.board_error.rule_id === "script.board.dead_end.no_outgoing_edges"
+  && deadBoard.board_error.reason.includes("没有出边"),
+  JSON.stringify(deadBoard && deadBoard.board_error));
+ui.scriptBoardShow(deadBoard);
+check("M7-21ad 死路错误提示 = 服务端那行原话（红字行显示 + rule_id 可核 + 提示行改口）",
+  $("script-board-error").hidden === false
+  && $("script-board-error").textContent === deadBoard.board_error.reason
+  && $("script-board-error").getAttribute("data-rule-id") === "script.board.dead_end.no_outgoing_edges"
+  && $("script-board-hint").textContent.includes("走不下去")
+  && cellButton(cellOf("e1")).classList.contains("st-current")
+  && graphCells().filter((cell) => cellButton(cell).classList.contains("st-available")).length === 0,
+  `错误「${$("script-board-error").textContent}」`);
+
+// 收尾：删档 + 撤掉这份用户库（后续用例仍走内置库）。
+await fetch(`${BASE}/api/script-save?expected_revision=${deadBoard.revision}`, { method: "DELETE" });
+await scriptCall("scriptLoadSave");
+unlinkSync(SCRIPT_BOARD_LIBRARY);
+check("M7-21ae 收尾干净：无档、用户库撤掉、棋盘体清空",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_BOARD_LIBRARY)
+  && ui.state.script.board === null,
+  `status=${scriptStatus()} 库在=${existsSync(SCRIPT_BOARD_LIBRARY)}`);
 
 /** 推进一条对局到一个干净局面。
  *
@@ -30041,5 +30817,1434 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.closeAvatarAppearance();
   ui.resetSelection();
 }
+
+
+/* ============ M7 票 22：整备面 + 结算弹窗 + 事件 / 商店 / 问号揭晓 ============
+ *
+ * 判据分六半（[票 22 验收]、[票 05 UI-3 / UI-4]、spec §4）：
+ *  ① **整备面**：24 格 = 3×8、前 4 格标「出战」、遗物栏 ≤6、铜钱 HUD；交换 / 移动 / 永久
+ *     丢弃各是一条 `PUT …/backpack`（丢弃不返还铜钱）；**编辑只在节点之间**（节点内连
+ *     监听都不挂、「丢弃」整键收起）。
+ *  ② **满包折价**：满包时选一个"给技能"的事件选项 ⇒ 服务端折成铜钱，结果弹窗印的就是
+ *     服务端那个数（前端不算价——机械判据见 `test_the_prices_and_coins_are_only_printed…`）。
+ *  ③ **商店**：6 技能 + 2 遗物（这次没有遗物就明说）、价格读 `catalog`、已拥有不出现、
+ *     满包置灰；购买 = 一条 `settle {purchases}`，结果里货架标「已售出（不补货）」。
+ *  ④ **三选一 / 遗物 / Boss**：多轮 `pick k` 连续弹、满包每张标「折 N 铜钱」、遗物那段也走
+ *     弹窗；Boss「失去 4 条出战技能」是**只读的自动段**（`data-auto="1"`、零按钮、打开流程
+ *     本身零请求）——没有确认框。
+ *  ⑤ **事件**：全文 + 选项（条件与后果）；锁住的选项由**服务端**拒（400 原话进红字行）。
+ *  ⑥ **问号揭晓**：进入即揭晓（`room.revealed` 由服务端下发），揭晓后按内层房间的流程走。
+ *
+ * 进料是 `tests/support/fixtures/script-loadout-library.json`（**真**库校验器先过一道，见
+ * `tests/test_web_static.py::test_the_loadout_smoke_library_is_a_valid_script_library`）。
+ * 事件 / 商店 / 出口 / 问号房的结算都打到**真端点**；三选一与 Boss 那两段用**同一份真棋盘体
+ * 的克隆**摆出 pending（这里没有能自然打到终局的 Boss 战斗；Boss 结算顺序的机械断言归票 17，
+ * 悬空 pending 的 settle 会拿到服务端 400 —— 那正是"前端不预判"的读数）。
+ */
+const SCRIPT_LOADOUT_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_LOADOUT_LIBRARY,
+  readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+);
+
+/* 整备面 / 节点面的读法：与产品 DOM 同一份 `data-*`（不按文案找节点）。 */
+const loadoutSlots = () => byClass($("script-loadout-grid"), "script-slot");
+const slotOf = (index) => loadoutSlots()
+  .find((node) => node.getAttribute("data-slot") === String(index)) || null;
+const loadoutRelics = () => byClass($("script-loadout-relics"), "script-relic");
+const slotName = (index) => {
+  const node = slotOf(index);
+  const names = node ? byClass(node, "script-slot-name") : [];
+  return names.length ? names[0].textContent : "";
+};
+const slotBadge = (index) => {
+  const node = slotOf(index);
+  const badges = node ? byClass(node, "script-slot-badge") : [];
+  return badges.length ? badges[0].textContent : "";
+};
+const faceRows = () => byClass($("script-face-list"), "script-face-row");
+const faceOption = (index) => faceRows()
+  .find((row) => row.getAttribute("data-option") === String(index)) || null;
+const faceStock = (itemId) => faceRows()
+  .find((row) => row.getAttribute("data-item-id") === itemId) || null;
+const faceActions = () => Array.from($("script-face-actions").children);
+const faceGo = () => faceActions()[0] || null;
+const pickRows = () => byClass($("script-confirm-body"), "script-pick");
+const resultRows = () => byClass($("script-confirm-body"), "script-event-row");
+const resultRow = (kind) => resultRows()
+  .find((row) => row.getAttribute("data-event") === kind) || null;
+const dialog = () => $("script-confirm");
+const confirmButtons = () => Array.from($("script-confirm-actions").children);
+const settleCalls = (from) => calls.slice(from).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/settle"));
+
+const loadoutRun = async (seed) => {
+  const body = await postRaw("/api/script-runs", {
+    script_id: "loadoutprobe", chosen_hero: "jie_liubei", seed,
+  });
+  ui.scriptBoardShow(body);
+  return body;
+};
+const putBackpack = async (slots, equipped) => {
+  const board = ui.state.script.board;
+  const payload = { expected_revision: board.revision, slots };
+  if (equipped) payload.equipped_slots = equipped;
+  const response = await fetch(`${BASE}/api/script-runs/${board.run_id}/backpack`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  ui.scriptBoardShow(body);
+  return body;
+};
+const discardScriptSave = async () => {
+  // revision 以**服务端**为准：棋盘体可能是克隆 / 已清空，`state.script.save` 也可能过期。
+  await ui.scriptLoadSave();
+  const save = ui.state.script.save || {};
+  if (save.status === "ok" && Number.isInteger(save.revision)) {
+    await fetch(`${BASE}/api/script-save?expected_revision=${save.revision}`, { method: "DELETE" });
+  }
+  ui.state.script.board = null;
+  await ui.scriptLoadSave();
+};
+const startDrag = (index) => {
+  const handlers = (slotOf(index) && slotOf(index).listeners.dragstart) || [];
+  const event = { preventDefault() {}, dataTransfer: { setData() {} } };
+  for (const fn of handlers) fn(event);
+  return handlers.length;
+};
+const dropOn = async (index) => {
+  const handlers = (slotOf(index) && slotOf(index).listeners.drop) || [];
+  const event = { preventDefault() {} };
+  for (const fn of handlers) await fn(event);
+  return handlers.length;
+};
+const enterNode = async (runId, nodeId) => {
+  const body = await postRaw(`/api/script-runs/${runId}/nodes/${nodeId}`, {
+    expected_revision: ui.state.script.board.revision,
+  });
+  ui.scriptBoardShow(body);
+  return body;
+};
+/** 一份"待结算"的克隆棋盘（真棋盘体 + 手摆的 pending）：三选一 / Boss 的面读的就是它。 */
+const pendingClone = (spec, { nodeId = "b1", boss = false, room = {} } = {}) => {
+  const clone = JSON.parse(JSON.stringify(ui.state.script.board));
+  const target = clone.nodes.find((node) => node.id === nodeId);
+  target.room = Object.assign({}, target.room, room, { is_boss: boss });
+  clone.pending = { node_id: `L1/${nodeId}`, spec };
+  clone.session_id = "s-probe";
+  ui.scriptBoardShow(clone);
+  return clone;
+};
+
+// ---- ① 整备面一屏 ----
+const runA = await loadoutRun(2201);
+check("M7-22a 整备面一屏：24 格（3×8）、前 4 格标「出战」、遗物栏 6 格、铜钱 HUD 读服务端",
+  loadoutSlots().length === 24
+  && ui.SCRIPT_BACKPACK_SLOTS === 24 && ui.SCRIPT_LOADOUT_ROWS === 3
+  && ui.SCRIPT_LOADOUT_COLS === 8 && ui.SCRIPT_RELIC_SLOTS === 6
+  && loadoutRelics().length === 6
+  && [0, 1, 2, 3].every((i) => slotOf(i).getAttribute("data-equipped") === "1"
+    && slotBadge(i) === "出战")
+  && [4, 5, 23].every((i) => slotOf(i).getAttribute("data-equipped") === "0" && slotBadge(i) === "")
+  && $("script-loadout-coins").textContent === `铜钱 ${runA.run.coins}`
+  && $("script-loadout-backpack").textContent.includes("背包 0/24"),
+  `格=${loadoutSlots().length} 遗物=${loadoutRelics().length} 铜钱="${$("script-loadout-coins").textContent}"`);
+
+const twoSkills = new Array(24).fill(null);
+twoSkills[0] = "hero.liubei.rende";
+twoSkills[1] = "hero.zhangfei.paoxiao";
+const named = await putBackpack(twoSkills);
+check("M7-22b 24 格里的名字读服务端目录（「仁德」不是 id）；单价也是服务端算的（默认表全普通 ⇒ 3）",
+  slotOf(0).getAttribute("data-skill-id") === "hero.liubei.rende"
+  && slotName(0) === "仁德"
+  && slotName(1) === "咆哮"
+  && named.catalog["hero.liubei.rende"].price === 3
+  && named.catalog["hero.liubei.rende"].name === "仁德"
+  && $("script-loadout-backpack").textContent.includes("背包 2/24"),
+  `slot0="${slotName(0)}" price=${named.catalog["hero.liubei.rende"].price}`);
+
+// ---- ② 交换 / 移动 / 丢弃（各一条 PUT）----
+const revisionBefore = ui.state.script.board.revision;
+scriptMark = calls.length;
+const dragHandlers = startDrag(0);
+await dropOn(5);
+let puts = calls.slice(scriptMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/backpack"));
+check("M7-22c 拖放两格 = 交换（一条 PUT；`slots` 换位、`equipped_slots` 不动、revision +1）",
+  dragHandlers === 1 && puts.length === 1
+  && puts[0].body.slots[0] === null && puts[0].body.slots[5] === "hero.liubei.rende"
+  && puts[0].body.expected_revision === revisionBefore
+  && ui.state.script.board.revision === revisionBefore + 1
+  && slotOf(0).getAttribute("data-empty") === "1"
+  && slotOf(5).getAttribute("data-skill-id") === "hero.liubei.rende",
+  `handlers=${dragHandlers} puts=${puts.length} slots[5]=${puts.length && puts[0].body.slots[5]}`);
+
+scriptMark = calls.length;
+await clickAndWait(slotOf(5));
+const selected = slotOf(5).classList.contains("on");
+await clickAndWait(slotOf(0));
+puts = calls.slice(scriptMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/backpack"));
+check("M7-22d 点两格 = 移动到空格（一条 PUT；选中态 `.on`，落格后清空）",
+  selected && puts.length === 1
+  && puts[0].body.slots[0] === "hero.liubei.rende" && puts[0].body.slots[5] === null
+  && slotOf(0).getAttribute("data-skill-id") === "hero.liubei.rende"
+  && !slotOf(0).classList.contains("on") && !slotOf(5).classList.contains("on"),
+  `selected=${selected} puts=${puts.length}`);
+
+const coinsBeforeDiscard = ui.state.script.board.run.coins;
+await clickAndWait(slotOf(0));
+scriptMark = calls.length;
+await clickAndWait($("btn-script-loadout-discard"));
+puts = calls.slice(scriptMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/backpack"));
+check("M7-22e 「丢弃选中」= 一条 PUT 清掉那一格；**不返还铜钱**（请求里没有铜钱字段、run.coins 不变）",
+  puts.length === 1
+  && puts[0].body.slots[0] === null
+  && !("coins" in puts[0].body)
+  && ui.state.script.board.run.coins === coinsBeforeDiscard
+  && $("script-loadout-coins").textContent === `铜钱 ${coinsBeforeDiscard}`
+  && slotOf(0).getAttribute("data-empty") === "1",
+  `coins=${ui.state.script.board.run.coins} hints="${$("script-loadout-hint").textContent}"`);
+
+// ---- ③ 满包标注 + 节点内编辑入口不存在 ----
+const fullSlots = Array.from({ length: 24 }, (_, index) => (
+  index < 4
+    ? ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao", "hero.zhaoyun.longdan"][index]
+    : `probe.fill.${index}`
+));
+await putBackpack(fullSlots);
+check("M7-22f 满包标注：24/24 + 「已满」（三选一的选择会折成铜钱）",
+  $("script-loadout-backpack").textContent.includes("背包 24/24")
+  && $("script-loadout-backpack").textContent.includes("已满")
+  && ui.state.script.board.run.backpack.slots.every((slot) => Boolean(slot)),
+  `"${$("script-loadout-backpack").textContent}"`);
+
+const enteredEvent = await enterNode(runA.run_id, "e1");
+scriptMark = calls.length;
+await clickAndWait(slotOf(0));
+const nodeEdit = {
+  dragstart: (slotOf(0).listeners.dragstart || []).length,
+  click: (slotOf(0).listeners.click || []).length,
+  discardHidden: $("btn-script-loadout-discard").hidden,
+  lock: $("script-loadout-lock").hidden === false,
+  puts: calls.slice(scriptMark).filter(
+    (call) => call.method === "PUT" && call.path.endsWith("/backpack")).length,
+};
+check("M7-22g 节点内**编辑入口不存在**：格子不挂 click / dragstart、「丢弃」整键收起、点它零请求",
+  nodeEdit.dragstart === 0 && nodeEdit.click === 0
+  && nodeEdit.discardHidden === true && nodeEdit.lock === true
+  && nodeEdit.puts === 0
+  && $("script-loadout-lock").textContent.includes("不可编辑"),
+  JSON.stringify(nodeEdit));
+
+// ---- ④ 事件面 + 满包折价（服务端给的钱）----
+check("M7-22h 事件面：事件全文 + 三个选项（条件与后果逐条写出来，不置灰——判据在服务端）",
+  $("script-face").hidden === false
+  && $("script-face").getAttribute("data-face") === "event"
+  && $("script-face-title").textContent === "村口铜钱"
+  && $("script-face-text").textContent.includes("村民捧出铜钱")
+  && faceRows().length === 3
+  && faceOption(0).textContent.includes("收下铜钱")
+  && faceOption(0).textContent.includes("铜钱 +9")
+  && faceOption(1).textContent.includes("需要 flag.never")
+  && faceOption(1).disabled === false
+  && faceOption(2).textContent.includes("获得技能：咆哮"),
+  `face=${$("script-face").getAttribute("data-face")} 行=${faceRows().map((row) => row.textContent).join(" | ")}`);
+
+scriptMark = calls.length;
+await clickAndWait(faceOption(1));
+let settles = settleCalls(scriptMark);
+check("M7-22i 锁住的选项由**服务端**拒：一条 settle {option:1} ⇒ 400 原话进红字行、棋盘不动、不开弹窗",
+  settles.length === 1 && settles[0].body.option === 1
+  && $("script-board-error").hidden === false
+  && $("script-board-error").getAttribute("data-rule-id") === "script.settle.event_option_locked"
+  && ui.state.script.board.pending !== null
+  && dialog().hidden === true,
+  `rule=${$("script-board-error").getAttribute("data-rule-id")} 错误="${$("script-board-error").textContent}"`);
+
+scriptMark = calls.length;
+await clickAndWait(faceOption(2));
+settles = settleCalls(scriptMark);
+const foldedRow = resultRow("coins");
+const foldPrice = enteredEvent.catalog["hero.zhangfei.paoxiao"].price;
+check("M7-22j 满包选「给技能」的选项 ⇒ 服务端折成铜钱，结果弹窗印的**就是这个数**（前端不算价）",
+  settles.length === 1
+  && JSON.stringify(Object.keys(settles[0].body).sort()) === JSON.stringify(["expected_revision", "option"])
+  && dialog().hidden === false && dialog().getAttribute("data-dialog") === "result"
+  && foldedRow !== null && foldedRow.getAttribute("data-coins") === String(foldPrice)
+  && foldedRow.textContent.includes("折价")
+  && $("script-confirm-text").textContent.includes(`铜钱 ${foldPrice}`)
+  && ui.state.script.board.run.backpack.slots.filter((slot) => Boolean(slot)).length === 24,
+  `dialog=${dialog().getAttribute("data-dialog")} 行="${foldedRow && foldedRow.textContent}" price=${foldPrice}`);
+await clickAndWait(confirmButtons()[0]);
+check("M7-22k 结果弹窗「回棋盘」：弹窗收起、棋盘重画（pending 清空、e1 = 当前、铜钱 +3 落进 HUD）",
+  dialog().hidden === true
+  && ui.state.script.board.pending === null
+  && cellButton(cellOf("e1")).classList.contains("st-current")
+  && $("script-loadout-coins").textContent === "铜钱 3"
+  && $("script-board-error").hidden === true,
+  `pending=${ui.state.script.board.pending} 铜钱="${$("script-loadout-coins").textContent}"`);
+
+// ---- ⑤ 商店面：库存 + 价格（服务端目录）+ 买到手 ----
+// 满包时货架会置灰（那是另一条断言）——先腾一格再进店，才买得动。
+fullSlots[23] = null;
+await putBackpack(fullSlots);
+const enteredShop = await enterNode(runA.run_id, "s1");
+const stockIds = enteredShop.pending.spec.stock.skills;
+const stockRows = stockIds.map((id) => faceStock(id)).filter(Boolean);
+// m7-script-mode 票 26 起价值表有六条遗物 ⇒ 商店按票 02 §5 的「6 技能 + 2 遗物」照常上货；
+// 早先"遗物段还是空的"那两半（提示行 + 库存为空）是内容事实，随六条遗物落地一并退役。
+const relicIds = enteredShop.pending.spec.stock.relics;
+const relicRows = relicIds.map((id) => faceStock(id)).filter(Boolean);
+check("M7-22l 商店面：6 件技能 + 2 件遗物，每件写服务端给的价格（价只读档内价值表）",
+  $("script-face").getAttribute("data-face") === "shop"
+  && stockIds.length === 6 && stockRows.length === 6
+  && stockRows.every((row, index) => row.getAttribute("data-price")
+    === String(enteredShop.catalog[stockIds[index]].price))
+  && stockRows[0].textContent.includes("3 铜钱")
+  && relicIds.length === 2 && relicRows.length === 2
+  && relicRows.every((row, index) => row.getAttribute("data-price")
+    === String(enteredShop.catalog[relicIds[index]].price))
+  && relicRows[0].textContent.includes("10 铜钱")
+  && !$("script-face-list").textContent.includes("这次没有遗物可卖"),
+  `库存=${stockIds.length} 行=${stockRows.length} 遗物=${relicIds.length}/${relicRows.length}`);
+
+// 已拥有不出现：把一件库存塞进背包 ⇒ 货架上少一件（不是置灰）。
+const ownedShop = JSON.parse(JSON.stringify(enteredShop));
+ownedShop.run.backpack.slots[0] = stockIds[1];
+ui.scriptBoardShow(ownedShop);
+check("M7-22m 已拥有的技能**不出现**在货架上（不是置灰：少了那一行）",
+  faceStock(stockIds[1]) === null
+  && stockIds.filter((id) => faceStock(id) !== null).length === stockIds.length - 1,
+  `货架=${stockIds.map((id) => (faceStock(id) ? id : `${id}:缺`)).join(",")}`);
+
+// 满包时技能置灰（`data-full` + 真 disabled + 写原因）；判据仍是服务端的背包事实。
+const fullShop = JSON.parse(JSON.stringify(enteredShop));
+fullShop.run.backpack.slots = fullShop.run.backpack.slots.map(
+  (slot, index) => slot || `probe.full.${index}`);
+ui.scriptBoardShow(fullShop);
+const greyed = stockIds.map((id) => faceStock(id)).filter(Boolean);
+check("M7-22n 满包时商店技能**置灰**（`data-full=1`、disabled、写着「背包已满（买不了）」）",
+  greyed.length === stockIds.length
+  && greyed.every((row) => row.getAttribute("data-full") === "1" && row.disabled === true)
+  && greyed[0].textContent.includes("背包已满（买不了）"),
+  `灰了=${greyed.filter((row) => row.disabled).length}/${stockIds.length}`);
+ui.scriptBoardShow(enteredShop);
+
+const buyId = stockIds[0];
+const coinsBeforeBuy = ui.state.script.board.run.coins;
+await clickAndWait(faceStock(buyId));
+const carted = faceStock(buyId) !== null
+  && faceStock(buyId).getAttribute("aria-pressed") === "true"
+  && faceGo().textContent.includes("买 1 件");
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+settles = settleCalls(scriptMark);
+const lostRow = resultRow("coins_lost");
+const soldRow = byClass($("script-confirm-body"), "script-face-row")
+  .find((row) => row.getAttribute("data-item-id") === buyId) || null;
+check("M7-22o 商店购买 = 一条 settle {purchases:[id]}；扣钱是服务端的数，货架标「已售出（不补货）」",
+  carted && settles.length === 1
+  && JSON.stringify(settles[0].body.purchases) === JSON.stringify([buyId])
+  && dialog().getAttribute("data-dialog") === "result"
+  && lostRow !== null
+  && lostRow.getAttribute("data-coins") === String(enteredShop.catalog[buyId].price)
+  && soldRow !== null && soldRow.getAttribute("data-sold") === "1"
+  && soldRow.textContent.includes("已售出（不补货）"),
+  `carted=${carted} 扣钱="${lostRow && lostRow.textContent}"`);
+await clickAndWait(confirmButtons()[0]);
+check("M7-22p 商店买完回棋盘：铜钱 = 服务端扣完后的数（前端只读 `run.coins`）",
+  ui.state.script.board.run.coins === coinsBeforeBuy - enteredShop.catalog[buyId].price
+  && $("script-loadout-coins").textContent === `铜钱 ${coinsBeforeBuy - enteredShop.catalog[buyId].price}`,
+  `铜钱=${ui.state.script.board.run.coins}`);
+
+// ---- ⑥ 出口：结算即通关（board null ⇒ 回开局页 + 存档 missing）----
+const enteredExit = await enterNode(runA.run_id, "o1");
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+settles = settleCalls(scriptMark);
+const endedRow = resultRow("run_ended");
+check("M7-22q 走进出口 = 通关：结算回 `board:null`，结果页写「通关」，一条跑完的 settle（purchases 空）",
+  settles.length === 1
+  && JSON.stringify(settles[0].body.purchases) === JSON.stringify([])
+  && dialog().getAttribute("data-dialog") === "result"
+  && $("script-confirm-title").textContent === "通关"
+  && endedRow !== null && endedRow.textContent.includes("通关")
+  && ui.state.script.board === null,
+  `title="${$("script-confirm-title").textContent}" row="${endedRow && endedRow.textContent}"`);
+await clickAndWait(confirmButtons()[0]);
+check("M7-22r 通关后回开局页：存档 missing、「继续」置灰、摘要行收起（结束即删档）",
+  $("view-lobby").hidden === false
+  && scriptStatus() === "missing"
+  && $("btn-script-continue").disabled === true
+  && $("script-summary").hidden === true,
+  `status=${scriptStatus()}`);
+
+// ---- ⑦ 三选一：多轮连续弹（满包每张标服务端给的折价）----
+const runB = await loadoutRun(2202);
+const battleSlots = Array.from({ length: 24 }, (_, index) => (
+  index < 4
+    ? ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao", "hero.zhaoyun.longdan"][index]
+    : `probe.battle.${index}`
+));
+const battleRestore = await putBackpack(battleSlots);
+const battleSpec = {
+  kind: "battle",
+  battle_seed: 11,
+  pve: { identities: [], principal: 0, protected_ally: null, victory: { kind: "rout" }, boss: null, grants: [], seats: [] },
+  rewards: [
+    ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao"],
+    ["hero.zhaoyun.longdan", "hero.liubei.rende"],
+  ],
+  boss_relic: null,
+};
+pendingClone(battleSpec, { nodeId: "b1", room: { name: "麦田" } });
+check("M7-22s 战斗节点面：写着「在牌桌上打」（session_id 在棋盘体里）与一个「结算（三选一）」入口",
+  $("script-face").getAttribute("data-face") === "battle"
+  && $("script-face").hidden === false
+  && $("script-face-text").textContent.includes("牌桌上")
+  && faceGo() !== null && faceGo().textContent.includes("结算"),
+  `face=${$("script-face").getAttribute("data-face")} action="${faceGo() && faceGo().textContent}"`);
+
+// 续档 / 刷新之后棋盘体没有会话 id：先给"重开这一场"（重进同一节点不重抽，票 19）。
+const resumedBoard = JSON.parse(JSON.stringify(ui.state.script.board));
+resumedBoard.session_id = null;
+ui.scriptBoardShow(resumedBoard);
+check("M7-22t 续档 / 刷新后的待结算战斗（棋盘体没有 session_id）⇒ 面给「重开这一场」（不预判、零请求）",
+  $("script-face").getAttribute("data-face") === "battle"
+  && faceGo() !== null && faceGo().textContent.includes("重开这一场")
+  && $("script-face-text").textContent.includes("还没开到牌桌上"),
+  `action="${faceGo() && faceGo().textContent}"`);
+
+// 单轮：同一份克隆、只给一轮候选（弹窗写「第 1/1 轮」）；不选就关掉 ⇒ 零请求。
+pendingClone(
+  Object.assign({}, battleSpec, { rewards: [battleSpec.rewards[0]] }),
+  { nodeId: "b1", room: { name: "麦田" } },
+);
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+check("M7-22u 单轮三选一：弹窗写「第 1/1 轮」、候选数 = `spec.rewards[0]` 的张数（不选也能关，零请求）",
+  dialog().getAttribute("data-dialog") === "pick"
+  && dialog().getAttribute("data-rounds") === "1"
+  && pickRows().length === 3
+  && settleCalls(scriptMark).length === 0,
+  `rounds=${dialog().getAttribute("data-rounds")} 候选=${pickRows().length}`);
+ui.scriptCloseConfirm();
+
+// 多轮：两轮候选，选完第一轮**连续弹**第二轮。
+pendingClone(battleSpec, { nodeId: "b1", room: { name: "麦田" } });
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+const round1Picks = pickRows();
+check("M7-22v 三选一弹窗（第 1/2 轮）：满包时每张标「折 3 铜钱」（价是服务端目录里的数），可放弃，零请求",
+  dialog().getAttribute("data-dialog") === "pick"
+  && dialog().getAttribute("data-round") === "0"
+  && dialog().getAttribute("data-rounds") === "2"
+  && round1Picks.length === 3
+  && round1Picks.every((row) => {
+    const notes = byClass(row, "script-pick-price");
+    return notes.length === 1 && notes[0].textContent.includes("折 3 铜钱");
+  })
+  && confirmButtons()[0].textContent.includes("放弃")
+  && settleCalls(scriptMark).length === 0,
+  `dialog=${dialog().getAttribute("data-dialog")} round=${dialog().getAttribute("data-round")} 候选=${round1Picks.length}`);
+
+await clickAndWait(pickRows()[0]);
+check("M7-22w 多轮 pick k **连续弹**：第 1 轮选完立刻弹第 2 轮（同一条模态壳，`data-round` 前进）",
+  dialog().hidden === false && dialog().getAttribute("data-dialog") === "pick"
+  && dialog().getAttribute("data-round") === "1"
+  && pickRows().length === 2,
+  `round=${dialog().getAttribute("data-round")} 候选=${pickRows().length}`);
+scriptMark = calls.length;
+await clickAndWait(pickRows()[0]);
+settles = settleCalls(scriptMark);
+check("M7-22x 三选一落到一条 settle {session_id, picks:[…]}（悬空 pending ⇒ 服务端 400 原话；前端不预判）",
+  settles.length === 1
+  && JSON.stringify(Object.keys(settles[0].body).sort())
+    === JSON.stringify(["expected_revision", "picks", "session_id"])
+  && settles[0].body.session_id === "s-probe"
+  && JSON.stringify(settles[0].body.picks)
+    === JSON.stringify([battleSpec.rewards[0][0], battleSpec.rewards[1][0]])
+  && dialog().hidden === true
+  && $("script-board-error").hidden === false
+  && $("script-loadout-hint").textContent.includes("结算没落地"),
+  `picks=${JSON.stringify(settles.length && settles[0].body.picks)} 错误="${$("script-board-error").textContent}"`);
+ui.scriptBoardShow(battleRestore);
+
+// ---- ⑧ Boss：自动失去 4 条、没有确认框（同一份真棋盘体的克隆；Boss 顺序归票 17）----
+pendingClone(
+  {
+    kind: "battle",
+    battle_seed: 7,
+    pve: { identities: [], principal: 0, protected_ally: null, victory: { kind: "slay_boss" }, boss: null, grants: [], seats: [] },
+    rewards: [
+      ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao"],
+      ["hero.zhaoyun.longdan", "hero.liubei.rende"],
+    ],
+    boss_relic: null,
+  },
+  { nodeId: "b1", boss: true, room: { name: "广宗城下" } },
+);
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+const loseBlocks = byClass($("script-confirm-body"), "script-lose");
+const loseButtons = loseBlocks.length
+  ? walkTree(loseBlocks[0]).filter((node) => node.tagName === "BUTTON")
+  : [];
+check("M7-22y Boss「失去 4 条」自动落、**没有确认框**：第一轮弹窗顶格只读块（零按钮、零请求）",
+  dialog().getAttribute("data-dialog") === "pick"
+  && loseBlocks.length === 1
+  && loseBlocks[0].getAttribute("data-auto") === "1"
+  && loseBlocks[0].textContent.includes("已自动失去本场 4 条出战技能（规则效果，无需确认）")
+  && loseBlocks[0].textContent.includes("仁德") && loseBlocks[0].textContent.includes("武圣")
+  && loseButtons.length === 0
+  && calls.slice(scriptMark).filter((call) => call.method === "POST").length === 0,
+  `块=${loseBlocks.length} 按钮=${loseButtons.length} 文案="${loseBlocks.length && loseBlocks[0].textContent}"`);
+
+await clickAndWait(pickRows()[0]);
+await clickAndWait(pickRows()[0]);
+check("M7-22z Boss 结算的遗物那一段也走**弹窗**（无货 = 按服务端规则折铜钱，前端不写 10）",
+  dialog().getAttribute("data-dialog") === "relic"
+  && $("script-confirm-text").textContent.includes("无货")
+  && !$("script-confirm-body").textContent.includes("10 铜钱")
+  && confirmButtons()[0].textContent.includes("按规则折铜钱"),
+  `dialog=${dialog().getAttribute("data-dialog")} 正文="${$("script-confirm-text").textContent}"`);
+ui.scriptCloseConfirm();
+ui.state.script.board = null;
+ui.scriptBoardSync();
+
+// ---- ⑨ 问号揭晓：进入即揭晓，按内层房间的流程走 ----
+await discardScriptSave();
+const runC = await loadoutRun(2203);
+await enterNode(runC.run_id, "e1");
+await clickAndWait(faceOption(0));
+await clickAndWait(confirmButtons()[0]);
+const enteredUnknown = await enterNode(runC.run_id, "x1");
+const revealedId = enteredUnknown.pending.spec.revealed.room;
+const revealedNode = enteredUnknown.nodes.find((node) => node.id === "x1");
+check("M7-22aa 问号房进入即揭晓：面写「揭晓：…「揭晓的村庄」」+ 内层房间（`room.revealed` 由服务端下发）",
+  $("script-face").hidden === false
+  && $("script-face").getAttribute("data-face") === "reveal"
+  && enteredUnknown.pending.spec.kind === "unknown"
+  && revealedNode.room.revealed !== undefined
+  && revealedNode.room.revealed.id === revealedId
+  && $("script-face-text").textContent.includes("揭晓")
+  && $("script-face-text").textContent.includes("揭晓的村庄")
+  && $("script-face-meta").textContent.includes("重进不重抽")
+  && faceRows().some((row) => row.getAttribute("data-reveal") === "1"),
+  `face=${$("script-face").getAttribute("data-face")} 文案="${$("script-face-text").textContent}"`);
+
+await clickAndWait(faceGo());
+check("M7-22ab 揭晓后按内层房间的流程走：内层面 = 内层事件房（抽出的事件与选项都在），不是外层问号房",
+  $("script-face").getAttribute("data-face") === "event"
+  && $("script-face-title").textContent === "揭晓的礼物"
+  && $("script-face-text").textContent.includes("内层房间给三枚铜钱")
+  && faceOption(0) !== null && faceOption(0).textContent.includes("领三枚")
+  && faceOption(0).textContent.includes("获得技能：武圣"),
+  `face=${$("script-face").getAttribute("data-face")} title="${$("script-face-title").textContent}"`);
+
+scriptMark = calls.length;
+await clickAndWait(faceOption(0));
+settles = settleCalls(scriptMark);
+const innerCoins = resultRow("coins");
+const innerSkills = resultRow("skills");
+check("M7-22ac 揭晓出来的内层房间用**它自己的**指令形状结算（事件 ⇒ {option}）：结果里钱与技能都是服务端事件",
+  settles.length === 1 && settles[0].body.option === 0
+  && dialog().getAttribute("data-dialog") === "result"
+  && innerCoins !== null && innerCoins.getAttribute("data-coins") === "3"
+  && innerSkills !== null && innerSkills.textContent.includes("获得技能：武圣"),
+  `option=${settles.length && settles[0].body.option} 行="${innerCoins && innerCoins.textContent}" 技能="${innerSkills && innerSkills.textContent}"`);
+await clickAndWait(confirmButtons()[0]);
+
+// ---- 收尾：删档 + 撤掉用户库（后续用例仍走内置库）----
+await discardScriptSave();
+unlinkSync(SCRIPT_LOADOUT_LIBRARY);
+check("M7-22ad 收尾干净：无档、用户库撤掉、整备面与节点面都清空",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_LOADOUT_LIBRARY)
+  && ui.state.script.board === null && loadoutSlots().length === 0
+  && $("script-face").hidden === true,
+  `status=${scriptStatus()} 格=${loadoutSlots().length}`);
+
+
+/* ==================================================================== M7 票 23
+ * 剧本战斗 = **现有身份局牌桌**（零新增 view）。这一节只验三件事：
+ *   ① 牌桌表面多出来的三处显示（友 / 敌标签、敌人模板名、副本全局技能标签）+ 只读遗物栏；
+ *   ② 棋盘 → 牌桌：进战斗节点之后**自动换到牌桌**（`scriptBoardEnterNode` 的真路径）；
+ *   ③ 牌桌 → 棋盘：打完点「回棋盘结算」回棋盘，结算仍走票 22 的既有流程（服务端判胜负）。
+ *
+ * 进料是一份 2v3 的剧本库（入口事件房先给一件遗物，战斗房带一条**只对敌方**生效的副本
+ * 全局技能）；对局用**真端点**驱动到终局（兜底优先级与超时代答同一条：Pass → EndPhase →
+ * 第一个候选），所以三处显示与结算都不是合成载荷。
+ */
+const SCRIPT_BATTLE_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_BATTLE_LIBRARY,
+  readFileSync("tests/support/fixtures/script-battle-library.json", "utf8"),
+);
+
+/* 座位节点：环上的对手按 `data-seat` 找；**自己**是 index.html 的静态节点，垫片不建父子
+ * 关系，故按 id 直接读（与既有 U1-01m / 身份徽标那几条同一读法）。 */
+const isSelfSeat = (seat) => Number(seat) === Number(ui.state.view.snapshot.seat);
+const seatBoxAt = (seat) => (isSelfSeat(seat) ? $("t-self-seat") : seatBox(seat));
+const seatNameAt = (seat) => {
+  if (isSelfSeat(seat)) return $("t-hero").textContent;
+  const box = seatBox(seat);
+  const names = box ? byClass(box, "hero-name") : [];
+  return names.length ? names[0].textContent : "";
+};
+const seatSideAt = (seat) => {
+  if (isSelfSeat(seat)) return $("t-self-identity").textContent;
+  const box = seatBox(seat);
+  const badges = box ? byClass(box, "identity-badge") : [];
+  return badges.length ? badges[0].textContent : "";
+};
+const seatGlobalsAt = (seat) => {
+  if (isSelfSeat(seat)) return $("t-self-global").hidden ? [] : [$("t-self-global").textContent];
+  const box = seatBox(seat);
+  return box ? byClass(box, "pve-global").map((node) => node.textContent) : [];
+};
+
+const pveBattleBoard = await postRaw("/api/script-runs", {
+  script_id: "battleprobe", chosen_hero: "jie_liubei", seed: 2311,
+});
+ui.scriptBoardShow(pveBattleBoard);
+
+// ---- ① 入口事件房：拿一件遗物（战斗的 grants 从 run.relics 来）----
+await ui.scriptBoardEnterNode(pveBattleBoard.nodes.find((node) => node.id === "g1"));
+check("M7-23a 入口事件房先给一件遗物（真端点）：服务端的结算事件里就有它",
+  $("script-face").getAttribute("data-face") === "event"
+  && faceOption(0) !== null && faceOption(0).textContent.includes("诸葛连弩"),
+  `face=${$("script-face").getAttribute("data-face")} 行="${faceOption(0) && faceOption(0).textContent}"`);
+await clickAndWait(faceOption(0));
+const relicSettled = dialog().getAttribute("data-dialog") === "result";
+await clickAndWait(confirmButtons()[0]);
+check("M7-23b 遗物进了这一轮（`run.relics`）：结果弹窗写的是服务端事件，回棋盘后那一轮就带着它",
+  relicSettled
+  && ui.state.script.board.run.relics.includes("equip.crossbow")
+  && ui.state.script.board.run.relics.includes("relic.extra_draw")
+  && ui.state.script.board.run.coins >= 0,
+  `relics=${JSON.stringify(ui.state.script.board.run.relics)}`);
+
+// 票 34：整备面遗物栏读**服务端目录行**的名字（`relic.*` 不许原样印 id）。
+const loadoutRelicCells = loadoutRelics();
+const drawRelicCell = loadoutRelicCells.find(
+  (cell) => cell.getAttribute("data-relic-id") === "relic.extra_draw",
+) || null;
+check("M7-23b2 整备面遗物栏印 `relic.*` 的中文显示文本（服务端目录行反查，不是 id 原文）",
+  drawRelicCell !== null
+  && drawRelicCell.textContent === "每回合摸牌阶段 +1"
+  && !loadoutRelicCells.some((cell) => cell.textContent.includes("relic.")),
+  `遗物栏=${JSON.stringify(loadoutRelicCells.map((cell) => cell.textContent))}`);
+
+// ---- ② 棋盘 → 牌桌：进战斗节点 = 换到**现有**牌桌（零新增 view）----
+const sessionCalls = calls.length;
+const battleEntered = await ui.scriptBoardEnterNode(
+  ui.state.script.board.nodes.find((node) => node.id === "b1"),
+);
+ui.flushPlayback();
+const pveBattleSessionId = battleEntered && battleEntered.session_id;
+check("M7-23c 进战斗节点自动换到牌桌：`state.sessionId` = 棋盘体的 session_id、取一次首屏增量、牌桌页可见（不新造 view）",
+  Boolean(pveBattleSessionId)
+  && ui.state.sessionId === pveBattleSessionId
+  && ui.state.script.battle && ui.state.script.battle.sessionId === pveBattleSessionId
+  && $("view-table").hidden === false && $("view-script-board").hidden === true
+  && calls.slice(sessionCalls).some(
+    (call) => call.method === "GET"
+      && call.path === `/api/sessions/${pveBattleSessionId}?after=-1&logs=0`,
+  )
+  && $("view-lobby").hidden === true && $("view-replay").hidden === true,
+  `session=${ui.state.sessionId} table=${$("view-table").hidden} board=${$("view-script-board").hidden}`);
+
+// 三处显示之一 + 之二：座位名牌（模板名 / 主角名）+ 友 / 敌标签；之三：副本全局技能标签。
+const enemyGlobals = [2, 3, 4].map((seat) => seatGlobalsAt(seat));
+check("M7-23d 友 / 敌标签：2v3 里两名友方写「友」、三名敌人写「敌」（身份全公开，不做猜身份 UI）",
+  [0, 1, 2, 3, 4].map((seat) => seatSideAt(seat)).join(",") === "友,友,敌,敌,敌",
+  `标签=${[0, 1, 2, 3, 4].map((seat) => `座位${seat}:${seatSideAt(seat)}`).join(" ")}`);
+check("M7-23e 敌人显示**模板名**（「黄巾力士」而不是武将名），主角与队友显示自己的名字",
+  seatNameAt(0) === "界刘备" && seatNameAt(1) === "义勇弓手"
+  && [2, 3, 4].map((seat) => seatNameAt(seat)).join(",") === "黄巾力士,黄巾力士,黄巾渠帅",
+  `名字=${[0, 1, 2, 3, 4].map((seat) => seatNameAt(seat)).join(" / ")}`);
+check("M7-23f 副本全局技能标签挂在**受影响的座位**上：来源 + 生效侧 + 三档物化数值（友方没有标签）",
+  enemyGlobals.every(
+    (labels) => labels.length === 1
+      && labels[0].includes("副本全局技能（敌）")
+      && labels[0].includes("体力上限 +1") && labels[0].includes("摸牌 +0")
+      && labels[0].includes("杀伤 +1"),
+  )
+  && seatGlobalsAt(0).length === 0 && seatGlobalsAt(1).length === 0,
+  `敌=${JSON.stringify(enemyGlobals)} 友=${JSON.stringify([seatGlobalsAt(0), seatGlobalsAt(1)])}`);
+check("M7-23g 只读遗物栏：自己的武将块里列出这一轮的遗物（名字是服务端反查的，不是 id）",
+  $("t-self-relics").hidden === false
+  && $("t-self-relic-list").textContent === "诸葛连弩、每回合摸牌阶段 +1"
+  && !$("t-self-relic-list").textContent.includes("relic.")
+  && $("t-self-global").hidden === true,
+  `遗物="${$("t-self-relic-list").textContent}" 全局隐藏=${$("t-self-global").hidden}`);
+check("M7-23h 不泄露（PvE 也要守）：对手座位只有手牌**张数**、牌堆只有数量",
+  [2, 3, 4].every((seat) => {
+    const box = seatBoxAt(seat);
+    const cards = box ? byClass(box, "card") : [];
+    return cards.length === 0 && (box.text().match(/手牌：\d+/) || [""])[0].length > 0;
+  })
+  && /^\d+$/.test($("t-deck").textContent)
+  && ui.state.view.snapshot.deck === undefined,
+  `牌=${[2, 3, 4].map((seat) => (seatBoxAt(seat) ? byClass(seatBoxAt(seat), "card").length : -1))} 牌堆="${$("t-deck").textContent}"`);
+
+// ---- ③ 打完 → 回棋盘结算（表盘的出口只在终局后出现）----
+const pveReturn = () => $("btn-t-pve-return");
+check("M7-23i 打到终局之前没有「回棋盘结算」的出口（出口只由服务端 finished 决定）",
+  ui.state.view.finished === false && pveReturn().hidden === true,
+  `finished=${ui.state.view.finished} hidden=${pveReturn().hidden}`);
+
+const fallbackActionOf = (pending) => pending.legal_actions.find(
+  (action) => action.kind === "pass" || action.kind === "end_phase",
+) || pending.legal_actions[0];
+let battleSteps = 0;
+while (!ui.state.view.finished && battleSteps < 200) {
+  const pending = ui.state.view.pending;
+  if (!pending) {
+    // 没有挂起询问是合法态（逐目标暂停 / 还没轮到人类）：与真客户端一样再取一次增量。
+    ui.applyView(await get(
+      `/api/sessions/${ui.state.sessionId}?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+    ));
+    battleSteps += 1;
+    continue;
+  }
+  const action = JSON.parse(JSON.stringify(fallbackActionOf(pending)));
+  ui.applyView(await postRaw(
+    `/api/sessions/${ui.state.sessionId}/answer?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+    { action },
+  ));
+  battleSteps += 1;
+}
+check("M7-23j 这一场走到了终局（真会话）：终局之后出口出现、牌桌页仍是同一张牌桌",
+  ui.state.view.finished === true && pveReturn().hidden === false
+  && $("view-table").hidden === false,
+  `finished=${ui.state.view.finished} 出口隐藏=${pveReturn().hidden} 步=${battleSteps}`);
+
+// ---- ④ 牌桌 → 棋盘：点出口回棋盘，结算走票 22 的既有流程（此刻零请求）----
+const settleMark = calls.length;
+await clickAndWait(pveReturn());
+const beforeSettle = settleCalls(settleMark);
+check("M7-23k 点「回棋盘结算」：回棋盘页、牌桌会话摘掉（顶栏「牌桌」置灰）、打开**既有**的结算弹窗且零请求",
+  $("view-script-board").hidden === false && $("view-table").hidden === true
+  && ui.state.sessionId === null && ui.state.script.battle === null
+  && dialog().hidden === false && dialog().getAttribute("data-dialog") === "pick"
+  && beforeSettle.length === 0,
+  `board=${$("view-script-board").hidden} session=${ui.state.sessionId} dialog=${dialog().getAttribute("data-dialog")} settle=${beforeSettle.length}`);
+
+// 全部放弃（0 次选技）⇒ 最后一步落一条真 settle（`session_id` = 那一场的会话，服务端判胜负）。
+let abandonRounds = 0;
+while (dialog().getAttribute("data-dialog") === "pick" && abandonRounds < 8) {
+  await clickAndWait(confirmButtons()[0]);
+  abandonRounds += 1;
+}
+const battleSettles = settleCalls(settleMark);
+const battleOutcome = ui.state.script.board
+  ? null
+  : (dialog().hidden === false ? "ended" : null);
+check("M7-23l 三选一放弃到底 ⇒ 一条真 settle（带战斗会话 id）；结果弹窗写服务端判的结局（不传 won）",
+  battleSettles.length === 1
+  && battleSettles[0].body.session_id === pveBattleSessionId
+  && Array.isArray(battleSettles[0].body.picks)
+  && battleSettles[0].body.won === undefined
+  && dialog().hidden === false && dialog().getAttribute("data-dialog") === "result"
+  && ["结算", "通关", "整轮失败", "剧情战败"].some(
+    (title) => $("script-confirm-title").textContent.includes(title),
+  ),
+  `settle=${battleSettles.length} outcome-title="${$("script-confirm-title").textContent}" 放弃轮=${abandonRounds} ${battleOutcome || ""}`);
+await clickAndWait(confirmButtons()[0]);
+
+// ---- 收尾：删档 + 撤掉用户库（后续用例仍走内置库）----
+await discardScriptSave();
+unlinkSync(SCRIPT_BATTLE_LIBRARY);
+check("M7-23m 收尾干净：无档、用户库撤掉、牌桌会话与棋盘体都清空",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_BATTLE_LIBRARY)
+  && ui.state.sessionId === null && ui.state.script.board === null
+  && ui.state.script.battle === null,
+  `status=${scriptStatus()} session=${ui.state.sessionId} board=${ui.state.script.board}`);
+
+/* ============ M7 票 25：编辑器（实体列表 / 拖放 / 画边 / 校验面板）============
+ *
+ * 判据分五半：
+ *  ① **一屏 + 实体列表**：九类实体都在左栏、数量与真库逐表相等；剧本页组装
+ *     大节 → 节点 → 房间；
+ *  ② **大节页**：网格长宽可设、拖放节点落 `(row, col)`、画边 / 改条件 / 解除连线
+ *     与边列表**同时**同步（画的是渲染器那一份，不是第二份画法）；
+ *  ③ **每类实体的操作**：新建 / 编辑 / 另存为副本 / 重命名 / 删除；
+ *  ④ **D30 删除交互**：归属项（节点连带删连线 / 大节从剧本摘掉）**成功**；共享引用
+ *     删除列引用点 + 「仍然删除」，删完校验面板**立刻**红（红字带 `loc`）；
+ *  ⑤ **共用渲染器**：编辑器画的那一屏也走 `scriptGraphRender`（画次 +1），
+ *     且同一批节点**零状态类**（作者视角不画玩家状态色）。
+ *
+ * 进料是 `tests/support/fixtures/script-editor-library.json`（**真**库校验器先过一道，见
+ * `tests/test_web_static.py::test_the_editor_smoke_library_is_a_valid_script_library`）。
+ * 所有写操作都打到**真端点**；界面只从 `state.script.editor.library`（服务端落盘后的整库）
+ * 读数——断言不看前端另算的镜像。
+ */
+const SCRIPT_EDITOR_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_EDITOR_LIBRARY,
+  readFileSync("tests/support/fixtures/script-editor-library.json", "utf8"),
+);
+
+const ed = () => (ui.state.script || {}).editor || {};
+const edLibrary = () => ed().library || {};
+const edScript = () => (edLibrary().scripts || [])[0] || {};
+const edLayerOf = (id) => (edScript().layers || []).find((layer) => layer.id === id) || null;
+const edKinds = () => byClass($("script-editor-kinds"), "script-editor-kind");
+const edKind = (kind) => edKinds()
+  .find((node) => node.getAttribute("data-kind") === kind) || null;
+const edRows = () => byClass($("script-editor-list"), "script-editor-row");
+const edRow = (id) => edRows()
+  .find((node) => node.getAttribute("data-id") === id) || null;
+const edSet = (id, value) => {
+  const node = $(id);
+  if (node) node.value = String(value);
+  return node;
+};
+const edGraph = () => $("script-editor-graph");
+const edNodeCell = (id) => graphCells(edGraph())
+  .find((cell) => cell.getAttribute("data-node-id") === id) || null;
+const edDropCells = () => byClass(edGraph(), "script-editor-cell");
+const edDropCell = (row, col) => edDropCells().find(
+  (node) => node.getAttribute("data-row") === String(row)
+    && node.getAttribute("data-col") === String(col)) || null;
+const edEdgeRows = () => byClass($("script-editor-edges"), "script-editor-edge");
+const edEdgeRow = (from, to) => edEdgeRows().find(
+  (node) => node.getAttribute("data-from") === from && node.getAttribute("data-to") === to) || null;
+const edErrorRows = () => byClass($("script-editor-errors"), "script-editor-error");
+const edReferenceRows = () => byClass($("script-confirm-body"), "script-editor-reference");
+const edConfirmLabels = () => Array.from($("script-confirm-actions").children)
+  .map((node) => String(node.textContent).trim());
+const edClick = async (id) => scriptClick($(id));
+const edOpenKind = async (kind) => scriptClick(edKind(kind));
+/** 拖一个节点到 `(row, col)` 格：dragstart 在节点按钮上、drop 在网格命中格上。 */
+const edDragNode = async (nodeId, row, col) => {
+  const button = cellButton(edNodeCell(nodeId));
+  const started = button ? (button.listeners.dragstart || []).length : 0;
+  for (const fn of (button ? button.listeners.dragstart || [] : [])) {
+    fn({ preventDefault() {}, dataTransfer: { setData() {} } });
+  }
+  const target = edDropCell(row, col);
+  const dropped = target ? (target.listeners.drop || []).length : 0;
+  for (const fn of (target ? target.listeners.drop || [] : [])) {
+    await fn({ preventDefault() {} });
+  }
+  return started + dropped;
+};
+const edCall = (from, method, suffix) => calls.slice(from).filter(
+  (call) => call.method === method && call.path.includes(suffix));
+
+// ---- ① 进编辑器：一次读库、一屏、九类实体 ----
+const edShowOk = typeof ui.scriptEditorShow === "function";
+await scriptCall("scriptEditorShow");
+const edLoadCalls = edCall(0, "GET", "/api/script-library");
+check("M7-25a 进编辑器 = 一次 GET /api/script-library：整库 / revision / 校验面板都收下、视图可见",
+  edShowOk && !!ed().library && ed().source === "user" && !!ed().revision
+  && $("view-script-editor").hidden === false
+  && Array.isArray(ed().errors) && !!$("script-editor-errors")
+  && edLoadCalls.length === 1 && edLoadCalls[0].path === "/api/script-library",
+  `show=${edShowOk} source=${ed().source} revision=${String(ed().revision).slice(0, 12)}`
+    + ` GET=${JSON.stringify(edLoadCalls.map((call) => call.path))}`);
+
+// 位置纪律 + 标签白名单（与票 20 / 票 21 同一条判据）。
+{
+  const tableStart = html.indexOf('id="view-table"');
+  const replayStart = html.indexOf('id="view-replay"');
+  const boardStart = html.indexOf('id="view-script-board"');
+  const editorStart = html.indexOf('id="view-script-editor"');
+  const between = html.slice(tableStart, replayStart);
+  const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+  const section = html.slice(editorStart, html.indexOf("<script", editorStart));
+  const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
+    .map((match) => match[1].toLowerCase());
+  check("M7-25b 编辑器在棋盘之后（两处字符串切片锚点之外）、静态节点只用垫片认识的标签",
+    editorStart > boardStart && between.indexOf("script-editor") < 0
+    && tags.length > 0 && tags.every((tag) => allowedTags.has(tag))
+    && !section.includes("<img"),
+    `editor=${editorStart} board=${boardStart} 中间出现 script-editor=${between.indexOf("script-editor")}`);
+}
+check("M7-25c 左栏九类实体（剧本 / 大节 / 节点 / 房间 / 敌人模板 / 技能池 / 事件 / 事件池 / 全局技能）",
+  setEquals(edKinds().map((node) => node.getAttribute("data-kind")),
+    ["scripts", "layers", "nodes", "rooms", "templates", "skill_pools", "events",
+      "event_pools", "global_skills"])
+  && edKinds().length === 9,
+  `类=${JSON.stringify(edKinds().map((node) => node.getAttribute("data-kind")))}`);
+
+// 每类实体的列表条数 = 真库那张表（大节 / 节点按当前剧本 / 大节；这里先选 L1）。
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+const edCounts = {};
+for (const kind of ["scripts", "layers", "nodes", "rooms", "templates", "skill_pools",
+  "events", "event_pools", "global_skills"]) {
+  await edOpenKind(kind);
+  edCounts[kind] = edRows().length;
+}
+check("M7-25d 九类实体的列表条数 = 服务端那张表（不是前端另算的）",
+  edCounts.scripts === 1 && edCounts.layers === 2 && edCounts.nodes === 10
+  && edCounts.rooms === 7 && edCounts.templates === 4 && edCounts.skill_pools === 2
+  && edCounts.events === 1 && edCounts.event_pools === 1 && edCounts.global_skills === 1,
+  JSON.stringify(edCounts));
+
+// 剧本页：组装 大节 → 节点 → 房间（房间名走引用解析，不是 id 原样）。
+await edOpenKind("scripts");
+await scriptClick(edRow("editorprobe"));
+const treeLayers = byClass($("script-editor-tree"), "script-editor-tree-layer");
+const treeNodes = byClass($("script-editor-tree"), "script-editor-tree-node");
+const treeNodeText = treeNodes.map((node) => String(node.textContent)).join(" | ");
+check("M7-25e 剧本页组装 大节 → 节点 → 房间（2 个大节 / 13 个节点，房间写名字）",
+  $("script-editor-tree").hidden === false && treeLayers.length === 2 && treeNodes.length === 13
+  && treeNodeText.includes("残破的村庄") && treeNodeText.includes("广宗城下")
+  && !treeNodeText.includes("room.event"),
+  `大节=${treeLayers.length} 节点=${treeNodes.length}`);
+
+// ---- ② 大节页：网格拖放 + 画边 + 条件 + 解除（画面与边列表同步）----
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+const edDraw0 = ui.scriptGraphDrawCount();
+check("M7-25f 大节页一屏：网格 10 个节点 / 17 条连线，同一批节点**零状态类**（作者视角不画状态色）",
+  $("script-editor-layer").hidden === false && graphCells(edGraph()).length === 10
+  && edgePoints(edGraph()).length === 17
+  && graphCells(edGraph()).every((cell) => {
+    const button = cellButton(cell);
+    return button && [...button.classList.set].every((name) => !name.startsWith("st-"));
+  })
+  && edDraw0 > 0,
+  `格=${graphCells(edGraph()).length} 线=${edgePoints(edGraph()).length}`);
+
+const edDragMark = calls.length;
+const edDragDraw = ui.scriptGraphDrawCount();
+// a2 是入口（列 0），拖到空格 (1, 0) 仍满足「边只许往右」——拖完校验面板必须还是空的
+// （拖一个会造出回边的地方当然也能存，但那会让后面的「面板干净」断言误报）。
+const edDragHandlers = await edDragNode("a2", 1, 0);
+const edDragPuts = calls.slice(edDragMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/nodes/a2"));
+const edA2 = (edLayerOf("L1").nodes || []).find((node) => node.id === "a2") || {};
+check("M7-25g 拖放节点：坐标换算落在前端（dragstart + drop 两个处理器）、一条 PUT 改 (row, col)",
+  edDragHandlers === 2 && edDragPuts.length === 1
+  && edA2.row === 1 && edA2.col === 0
+  && (edDragPuts[0].body.entity || {}).row === 1
+  && (edDragPuts[0].body.entity || {}).col === 0
+  && ui.scriptGraphDrawCount() > edDragDraw,
+  `处理器=${edDragHandlers} PUT=${JSON.stringify(edDragPuts.map((call) => call.body.entity))}`);
+
+const edGridMark = calls.length;
+edSet("script-editor-grid-rows", 4);
+edSet("script-editor-grid-cols", 5);
+await edClick("btn-script-editor-grid-save");
+const edGridPuts = calls.slice(edGridMark).filter(
+  (call) => call.method === "PUT" && call.path.includes("/layers/L1"));
+check("M7-25h 网格长宽可设：一条 PUT 改 layer.grid，画面按新网格重画",
+  edGridPuts.length === 1
+  && JSON.stringify((edGridPuts[0].body.entity || {}).grid) === JSON.stringify({ rows: 4, cols: 5 })
+  && !!edLayerOf("L1") && edLayerOf("L1").grid.rows === 4 && edLayerOf("L1").grid.cols === 5
+  && graphCells(edGraph()).length === 10,
+  `PUT=${JSON.stringify(edGridPuts.map((call) => call.body.entity && call.body.entity.grid))}`);
+
+const edEdgeMark = calls.length;
+setSelect("script-editor-edge-from", "a1");
+setSelect("script-editor-edge-to", "d1");
+await edClick("btn-script-editor-edge-draw");
+const edEdgePost = calls.slice(edEdgeMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/layers/L1/edges"));
+check("M7-25i 画边 = 一条 POST（from / to 走两个引用选择器），边列表与画面同时多一条",
+  edEdgePost.length === 1 && edEdgeRow("a1", "d1") !== null
+  && edgePoints(edGraph()).length === 18
+  && edEdgeRows().length === 18
+  && (edLayerOf("L1").edges || []).some((edge) => edge.from === "a1" && edge.to === "d1"),
+  `POST=${edEdgePost.length} 线=${edgePoints(edGraph()).length} 边列表=${edEdgeRows().length}`);
+
+const edRequireRow = edEdgeRow("a1", "d1");
+if (edRequireRow) {
+  const flags = byClass(edRequireRow, "script-editor-edge-flags")[0];
+  const notFlags = byClass(edRequireRow, "script-editor-edge-not-flags")[0];
+  if (flags) flags.value = "flag.boss_open";
+  if (notFlags) notFlags.value = "flag.sealed";
+}
+const edCondMark = calls.length;
+await scriptClick(byClass(edEdgeRow("a1", "d1") || $("script-editor-edges"),
+  "script-editor-edge-apply")[0]);
+const edCondPuts = calls.slice(edCondMark).filter(
+  (call) => call.method === "PUT" && call.path.includes("/edges/a1/d1"));
+const edCondEdge = (edLayerOf("L1").edges || []).find(
+  (edge) => edge.from === "a1" && edge.to === "d1") || {};
+check("M7-25j 设边条件（requires.flags / not_flags）：一条 PUT，边列表与 SVG 条件标签同步",
+  edCondPuts.length === 1
+  && JSON.stringify((edCondPuts[0].body.entity || {}).requires)
+    === JSON.stringify({ flags: ["flag.boss_open"], not_flags: ["flag.sealed"] })
+  && JSON.stringify(edCondEdge.requires) === JSON.stringify(
+    { flags: ["flag.boss_open"], not_flags: ["flag.sealed"] })
+  && String(edEdgeRow("a1", "d1").textContent).includes("flag.boss_open")
+  && String(byClass(edGraph(), "script-graph-edges")[0].innerHTML).includes("需要 flag.boss_open"),
+  `PUT=${edCondPuts.length} requires=${JSON.stringify(edCondEdge.requires)}`);
+
+const edUnlinkMark = calls.length;
+await scriptClick(byClass(edEdgeRow("a1", "d1") || $("script-editor-edges"),
+  "script-editor-edge-unlink")[0]);
+const edUnlinkDeletes = calls.slice(edUnlinkMark).filter(
+  (call) => call.method === "DELETE" && call.path.includes("/edges/a1/d1"));
+check("M7-25k 解除连线 = 一条 DELETE（只摘这一条）：边列表与画面同时少一条，别的边一条不动",
+  edUnlinkDeletes.length === 1
+  && edUnlinkDeletes[0].path.includes("expected_revision=")
+  && edEdgeRow("a1", "d1") === null && edgePoints(edGraph()).length === 17
+  && edEdgeRows().length === 17
+  && !(edLayerOf("L1").edges || []).some((edge) => edge.from === "a1" && edge.to === "d1"),
+  `DELETE=${edUnlinkDeletes.length} 线=${edgePoints(edGraph()).length}`);
+
+// ---- ③ 问号池（引用的房间选择器，禁选 unknown）----
+await edOpenKind("rooms");
+await scriptClick(edRow("room.unknown"));
+await edClick("btn-script-editor-edit");
+const edPoolRows = () => byClass($("script-editor-form"), "script-editor-pool-row");
+const edPoolSelect = (row) => byClass(row, "script-editor-pool-room")[0] || null;
+const edPoolOptions = edPoolRows().every((row) => {
+  const select = edPoolSelect(row);
+  return select && Array.from(select.children)
+    .map((option) => option.value).every((value) => value !== "room.unknown");
+});
+check("M7-25l 问号房的加权池：两项可编辑，房间选择器**禁选 unknown**（别把自己抽进去）",
+  edPoolRows().length === 2 && edPoolOptions
+  && Array.from(edPoolSelect(edPoolRows()[0]).children)
+    .some((option) => option.value === "room.story"),
+  `池项=${edPoolRows().length}`);
+
+const edPoolMark = calls.length;
+await edClick("btn-script-editor-pool-add");
+const edPoolRows2 = edPoolRows();
+const edNewPoolRow = edPoolRows2[edPoolRows2.length - 1];
+if (edNewPoolRow) {
+  const select = edPoolSelect(edNewPoolRow);
+  if (select) select.value = "room.story";
+  const weight = byClass(edNewPoolRow, "script-editor-pool-weight")[0];
+  if (weight) weight.value = "2";
+}
+await edClick("btn-script-editor-save");
+const edPoolPuts = calls.slice(edPoolMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/rooms/room.unknown"));
+const edUnknownRoom = (edLibrary().rooms || []).find((room) => room.id === "room.unknown") || {};
+check("M7-25m 加权池编辑落库：一条 PUT rooms/room.unknown（pool 三项，权重是界面上填的数）",
+  edPoolPuts.length === 1 && (edUnknownRoom.pool || []).length === 3
+  && (edUnknownRoom.pool || []).some((entry) => entry.room === "room.story" && entry.weight === 2),
+  `PUT=${edPoolPuts.length} pool=${JSON.stringify(edUnknownRoom.pool)}`);
+
+// ---- ③ 敌人模板：initial_skills 增删 + random{pool,count} 并列 + 固定对手提示 ----
+await edOpenKind("templates");
+await scriptClick(edRow("tpl.grunt"));
+await edClick("btn-script-editor-edit");
+const edSkillRows = () => byClass($("script-editor-form"), "script-editor-skill-row");
+check("M7-25n 模板编辑：initial_skills（增删）与 random{pool,count} 并列展示；随机池那一路写池名与区间",
+  edSkillRows().length === 0 && $("script-editor-field-random-pool").value === "pool.grunts"
+  && $("script-editor-field-random-min").value === "1"
+  && $("script-editor-field-random-max").value === "2"
+  && String($("script-editor-random-hint").textContent).includes("随机"),
+  `skills=${edSkillRows().length} pool=${$("script-editor-field-random-pool").value}`);
+
+const edSkillMark = calls.length;
+edSet("script-editor-field-skill", "hero.liubei.rende");
+await edClick("btn-script-editor-skill-add");
+check("M7-25o initial_skills 可增：添加按钮把技能 id 放进清单（此刻零请求）",
+  edSkillRows().length === 1 && calls.slice(edSkillMark).length === 0
+  && edSkillRows()[0].getAttribute("data-skill") === "hero.liubei.rende",
+  `行=${edSkillRows().length}`);
+await edClick("btn-script-editor-save");
+const edSkillPuts = calls.slice(edSkillMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/templates/tpl.grunt"));
+const edGrunt = (edLibrary().templates || []).find((item) => item.id === "tpl.grunt") || {};
+check("M7-25p initial_skills 增删落库：一条 PUT，服务端库里出现这条技能",
+  edSkillPuts.length === 1
+  && JSON.stringify((edSkillPuts[0].body.entity || {}).initial_skills)
+    === JSON.stringify(["hero.liubei.rende"])
+  && JSON.stringify(edGrunt.initial_skills) === JSON.stringify(["hero.liubei.rende"]),
+  `PUT=${edSkillPuts.length} skills=${JSON.stringify(edGrunt.initial_skills)}`);
+
+await scriptClick(byClass($("script-editor-form"), "script-editor-skill-remove")[0]);
+await edClick("btn-script-editor-save");
+check("M7-25q initial_skills 可删：删掉那一行再保存，服务端库里回到空清单",
+  edSkillRows().length === 0
+  && JSON.stringify(((edLibrary().templates || []).find((item) => item.id === "tpl.grunt") || {}).initial_skills)
+    === JSON.stringify([]),
+  `skills=${JSON.stringify(((edLibrary().templates || []).find((item) => item.id === "tpl.grunt") || {}).initial_skills)}`);
+
+await scriptClick(edRow("tpl.brute"));
+await edClick("btn-script-editor-edit");
+check("M7-25r 「固定对手 = count [0, 0]」在界面上说得出来（提示语含 count = [0, 0]）",
+  String($("script-editor-random-hint").textContent).includes("固定对手")
+  && String($("script-editor-random-hint").textContent).includes("count = [0, 0]")
+  && String($("script-editor-random-hint").textContent).includes("随机池"),
+  `提示="${$("script-editor-random-hint").textContent}"`);
+
+// ---- ③ 新建 / 另存为副本 / 重命名 / 删除 ----
+await edOpenKind("templates");
+await edClick("btn-script-editor-new");
+const edNewMark = calls.length;
+edSet("script-editor-field-id", "tpl.brand");
+edSet("script-editor-field-name", "新模板");
+edSet("script-editor-field-band", "early");
+edSet("script-editor-field-hp", "5");
+edSet("script-editor-field-hp_max", "5");
+setSelect("script-editor-field-random-pool", "pool.empty");
+await edClick("btn-script-editor-save");
+const edNewPosts = calls.slice(edNewMark).filter(
+  (call) => call.method === "POST" && call.path === "/api/script-library/templates");
+check("M7-25s 新建实体 = 一条 POST（id / 名称 / 档位 / 体力 / 随机池都按表单），列表随即多一行",
+  edNewPosts.length === 1 && (edNewPosts[0].body.entity || {}).id === "tpl.brand"
+  && (edNewPosts[0].body.entity || {}).hp === 5
+  && ((edLibrary().templates || []).some((item) => item.id === "tpl.brand"))
+  && edRow("tpl.brand") !== null,
+  `POST=${JSON.stringify(edNewPosts.map((call) => call.body.entity && call.body.entity.id))}`);
+
+await scriptClick(edRow("tpl.brand"));
+const edDelCancelMark = calls.length;
+await edClick("btn-script-editor-delete");
+const edCancelRefs = calls.slice(edDelCancelMark).filter(
+  (call) => call.method === "GET" && call.path.endsWith("/references"));
+check("M7-25t 删共享实体先查引用点（GET references）；无引用也走确认框，按钮是「取消」/「仍然删除」",
+  edCancelRefs.length === 1 && $("script-confirm").hidden === false
+  && $("script-confirm").getAttribute("data-dialog") === "editor-delete"
+  && setEquals(edConfirmLabels(), ["取消", "仍然删除"]),
+  `refs=${edCancelRefs.length} 按钮=${JSON.stringify(edConfirmLabels())}`);
+await scriptClick(scriptConfirmAction("取消"));
+check("M7-25u 确认框「取消」= 什么都不发生（零 DELETE、实体还在）",
+  $("script-confirm").hidden === true
+  && calls.slice(edDelCancelMark).every((call) => call.method !== "DELETE")
+  && (edLibrary().templates || []).some((item) => item.id === "tpl.brand"),
+  `DELETE=${calls.slice(edDelCancelMark).filter((call) => call.method === "DELETE").length}`);
+
+await edClick("btn-script-editor-delete");
+await scriptClick(scriptConfirmAction("仍然删除"));
+check("M7-25v 确认「仍然删除」= 一条 DELETE，实体真的从库里消失（不是只警告不删）",
+  calls.slice(edDelCancelMark).filter(
+    (call) => call.method === "DELETE" && call.path.includes("/templates/tpl.brand")).length === 1
+  && !(edLibrary().templates || []).some((item) => item.id === "tpl.brand")
+  && edRow("tpl.brand") === null,
+  `模板=${(edLibrary().templates || []).map((item) => item.id).join(",")}`);
+
+await scriptClick(edRow("tpl.ally"));
+const edCloneMark = calls.length;
+await edClick("btn-script-editor-clone");
+const edClonePosts = calls.slice(edCloneMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/templates/tpl.ally/clone"));
+const edAllyCopy = (edLibrary().templates || []).find((item) => item.id === "tpl.ally-copy") || null;
+check("M7-25w 另存为副本 = 一条 POST clone（服务端重写 id / 名称），原件与引用都不动",
+  edClonePosts.length === 1 && !!edAllyCopy && edAllyCopy.name === "义军什长（副本）"
+  && (((edLibrary().rooms || []).find((room) => room.id === "room.story") || {}).battle || {})
+    .allies[0].template === "tpl.ally",
+  `副本=${JSON.stringify(edAllyCopy && edAllyCopy.id)}`);
+
+await scriptClick(edRow("tpl.ally-copy"));
+await edClick("btn-script-editor-rename");
+edSet("script-editor-rename-id", "tpl.ally-copy2");
+edSet("script-editor-rename-name", "义军什长·改");
+const edRenameMark = calls.length;
+await edClick("btn-script-editor-rename-confirm");
+const edRenamePosts = calls.slice(edRenameMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/templates/tpl.ally-copy/rename"));
+check("M7-25x 重命名 = 一条 POST rename（new_id + name），旧 id 消失、新 id 出现",
+  edRenamePosts.length === 1
+  && (edRenamePosts[0].body || {}).new_id === "tpl.ally-copy2"
+  && (edRenamePosts[0].body || {}).name === "义军什长·改"
+  && (edLibrary().templates || []).some((item) => item.id === "tpl.ally-copy2"
+    && item.name === "义军什长·改")
+  && !(edLibrary().templates || []).some((item) => item.id === "tpl.ally-copy"),
+  `POST=${edRenamePosts.length}`);
+
+// 重命名**保引用**：改名被战斗座位引用的模板，引用点一起改写、校验面板仍为空。
+await scriptClick(edRow("tpl.ally"));
+await edClick("btn-script-editor-rename");
+edSet("script-editor-rename-id", "tpl.ally2");
+edSet("script-editor-rename-name", "义军什长");
+await edClick("btn-script-editor-rename-confirm");
+const edAlly2 = (edLibrary().templates || []).find((item) => item.id === "tpl.ally2") || null;
+const edStoryRoom = (edLibrary().rooms || []).find((room) => room.id === "room.story") || {};
+check("M7-25y 重命名保引用：被战斗座位引用的模板改名后，座位的 template 跟着改写、校验面板仍空",
+  !!edAlly2 && (((edStoryRoom.battle || {}).allies || [])[0] || {}).template === "tpl.ally2"
+  && (ed().errors || []).length === 0 && edErrorRows().length === 0,
+  `allies=${JSON.stringify(((edStoryRoom.battle || {}).allies || []).map((seat) => seat.template))}`);
+
+// ---- ④ D30 删除交互 ----
+// ② 删一个有入边 / 出边的节点：确认框提示连带删几条，确认后节点与入 / 出边一起消失。
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+await edOpenKind("nodes");
+await scriptClick(edRow("b2"));
+await edClick("btn-script-editor-delete");
+check("M7-25z 删有入边 / 出边的节点：确认框提示「连带删掉 5 条连线」，没有「还被引用所以不能删」",
+  $("script-confirm").hidden === false
+  && String($("script-confirm-text").textContent).includes("连带删掉 5 条连线")
+  && String($("script-confirm-text").textContent).includes("节点")
+  && !String($("script-confirm-text").textContent).includes("不能删"),
+  `正文="${$("script-confirm-text").textContent}"`);
+await scriptClick(scriptConfirmAction("删除"));
+const edNodeDeletes = calls.filter(
+  (call) => call.method === "DELETE" && call.path.includes("/nodes/b2"));
+const edL1 = edLayerOf("L1") || {};
+check("M7-25aa 删节点成功（以前是死路）：节点消失、它的 5 条入 / 出边同时消失、别的边不动",
+  edNodeDeletes.length === 1
+  && !(edL1.nodes || []).some((node) => node.id === "b2")
+  && (edL1.nodes || []).length === 9
+  && (edL1.edges || []).length === 12
+  && !(edL1.edges || []).some((edge) => edge.from === "b2" || edge.to === "b2")
+  && graphCells(edGraph()).length === 9,
+  `节点=${(edL1.nodes || []).length} 边=${(edL1.edges || []).length}`);
+
+// ② 删被剧本挂着的大节：从剧本的 layers 里摘掉，不是「先删整个剧本」。
+await edOpenKind("layers");
+await scriptClick(edRow("L2"));
+await edClick("btn-script-editor-delete");
+check("M7-25ab 删被剧本挂着的大节：确认框只说从剧本摘掉它（不提「还被引用」）",
+  $("script-confirm").hidden === false
+  && String($("script-confirm-text").textContent).includes("摘掉")
+  && !String($("script-confirm-text").textContent).includes("还被引用")
+  && !String($("script-confirm-text").textContent).includes("不能删除"),
+  `正文="${$("script-confirm-text").textContent}"`);
+await scriptClick(scriptConfirmAction("删除"));
+check("M7-25ac 删大节成功：服务端只摘 L2（剧本还在、L1 原样），校验面板仍为空",
+  (edScript().layers || []).length === 1
+  && (edScript().layers || [])[0].id === "L1"
+  && (ed().errors || []).length === 0,
+  `layers=${(edScript().layers || []).map((layer) => layer.id).join(",")}`);
+
+// ③ 删被共享引用的实体：确认框列出引用点 + 「仍然删除」；删完校验面板立刻红（带 loc）。
+await edOpenKind("templates");
+await scriptClick(edRow("tpl.grunt"));
+const edDangleMark = calls.length;
+await edClick("btn-script-editor-delete");
+const edDangleRefs = calls.slice(edDangleMark).filter(
+  (call) => call.method === "GET" && call.path.endsWith("/templates/tpl.grunt/references"));
+const edRefRows = edReferenceRows();
+check("M7-25ad 删被共享引用的实体：确认框列出引用点（loc 指引用方）+ 一句悬空警告 + 「仍然删除」",
+  edDangleRefs.length === 1 && $("script-confirm").hidden === false
+  && $("script-confirm").getAttribute("data-dialog") === "editor-delete"
+  && edRefRows.length > 0
+  && String(edRefRows[0].getAttribute("data-loc") || "").startsWith("/rooms/")
+  && String(edRefRows[0].getAttribute("data-loc") || "").includes("/template")
+  && String($("script-confirm-text").textContent)
+    .includes("继续删除会让它们悬空（校验面板标红）")
+  && edConfirmLabels().includes("仍然删除"),
+  `引用点=${JSON.stringify(edRefRows.map((row) => row.getAttribute("data-loc")))}`);
+
+await scriptClick(scriptConfirmAction("仍然删除"));
+const edDangleDeletes = calls.slice(edDangleMark).filter(
+  (call) => call.method === "DELETE" && call.path.includes("/templates/tpl.grunt"));
+const edDangleErrors = ed().errors || [];
+check("M7-25ae 删完立刻红：删除 200（实体真的没了），校验面板出现悬空条目（红字 + loc + rule_id）",
+  edDangleDeletes.length === 1
+  && !(edLibrary().templates || []).some((item) => item.id === "tpl.grunt")
+  && edDangleErrors.length > 0
+  && edErrorRows().length === edDangleErrors.length
+  && edDangleErrors.every((error) => Boolean(error.loc) && Boolean(error.rule_id))
+  && edDangleErrors.some((error) => error.rule_id === "script_library.unknown_template"
+    && String(error.loc).includes("/template") && error.got === "tpl.grunt")
+  && edErrorRows()[0].classList.contains("script-editor-error")
+  && String(edErrorRows()[0].textContent).includes(edDangleErrors[0].loc)
+  && $("script-editor-clean").hidden === true
+  && String($("script-editor-hint").textContent).includes("悬空"),
+  `错误=${JSON.stringify(edDangleErrors.map((error) => [error.loc, error.rule_id]))}`);
+
+// 校验面板条目可点击跳字段（字段位置 → 表单）。
+const edJumpLoc = edDangleErrors[0] ? String(edDangleErrors[0].loc) : "";
+await scriptClick(edErrorRows()[0]);
+const edFocusFields = byClass($("script-editor-form"), "on");
+check("M7-25af 点校验条目跳到对应字段：选中引用方实体、打开编辑态、字段位置写进「已定位」",
+  ed().kind === "rooms" && ed().selected === "room.story"
+  && $("script-editor-focus").hidden === false
+  && String($("script-editor-focus").textContent).includes(edJumpLoc)
+  && edFocusFields.length > 0,
+  `kind=${ed().kind} selected=${ed().selected} 定位="${$("script-editor-focus").textContent}"`);
+
+// ---- 收尾：坏库仍是可打开的库（D30），撤掉用户库后回到内置库 ----
+const edReloadMark = calls.length;
+await edClick("btn-script-editor-reload");
+check("M7-25ag 「重读库」= 一条 GET：坏库照开（D30 编辑器宽松档），面板仍红",
+  calls.slice(edReloadMark).filter(
+    (call) => call.method === "GET" && call.path === "/api/script-library").length === 1
+  && (ed().errors || []).length > 0 && edErrorRows().length > 0,
+  `errors=${(ed().errors || []).length}`);
+
+unlinkSync(SCRIPT_EDITOR_LIBRARY);
+await edClick("btn-script-editor-reload");
+check("M7-25ah 收尾：用户库撤掉后编辑器回到内置库（source = builtin、面板清空）",
+  ed().source === "builtin" && (ed().errors || []).length === 0
+  && edErrorRows().length === 0 && $("script-editor-clean").hidden === false,
+  `source=${ed().source} 库在=${existsSync(SCRIPT_EDITOR_LIBRARY)}`);
+
+
+/* ============ M7 票 29：内置剧本的整条流转（开局 → 棋盘 → 牌桌 → 退出 → 继续 → 编辑器）============
+ *
+ * 票 20–25 各自只核自己那一面，且棋盘 / 整备 / 战斗 / 编辑器的进料都是**探针库**。这一节把
+ * **内置剧本「讨伐黄巾军」（票 28）**放进真实的流转里走一遍：
+ *
+ *  ① 开局页三态 → 「新剧本」→ 只有内置剧本；3 选 1 = 作者编排的那三名；
+ *  ② 棋盘 = 内置第 1 大节（10 节点 / 17 条边 / 五类房间 / 2 入口 / 标签门写在边上）；
+ *  ③ 棋盘 → 牌桌：进剧情战节点自动换到**现有牌桌**，三座（主角 + 汉军义从 + 程远志）的
+ *     友 / 敌标签与模板名来自**真** PvE 载荷；对手只有手牌张数、牌堆只有数量；
+ *  ④ 战斗中退出（棋盘「离开棋局」→ 确认）⇒ suspend ⇒ 开局页「继续剧本」⇒ **同一份棋盘**、
+ *     同一 revision、待结算战斗靠档里的 spec 重新给「重开这一场」；
+ *  ⑤ 编辑器：同一份内置库（source = builtin）能打开第 1 大节，10 个节点用的是同一个渲染器。
+ *
+ * 战斗**不判胜负**：这一节在中途就退出（要验「战斗中退出」那条路径），"真打到终局"与三处
+ * 显示已由 M7-23 的 fixture 战斗覆盖，而**内置数值的可胜**由票 33 在
+ * `tests/test_script_content.py::test_every_battle_on_the_authored_route_is_winnable_by_the_heuristic_ai`
+ * 与 `tests/test_script_e2e.py` 里钉住（票 29 当时内置战斗 0/28 可胜，本票之后不再是理由）。
+ */
+await ui.scriptLoadSave();
+check("M7-29a 起手干净：无用户库、无存档（进料 = 内置「讨伐黄巾军」）",
+  scriptStatus() === "missing" && !existsSync(`${RUNS_DIR}/script-library.json`)
+  && !existsSync(SCRIPT_SAVE_FILE) && $("btn-t-pve-exit").hidden === true,
+  `status=${scriptStatus()} 用户库=${existsSync(`${RUNS_DIR}/script-library.json`)}`
+    + ` 退出键收起=${$("btn-t-pve-exit").hidden}`);
+
+// ---- ① 开局页：新剧本 → 清单 → 3 选 1 ----
+const builtinRosterMark = calls.length;
+await scriptClick($("btn-script-new"));
+const builtinRosterPosts = calls.slice(builtinRosterMark).filter(
+  (call) => call.method === "POST" && call.path === "/api/script-roster");
+const builtinScriptChoices = Array.from($("script-choices").children)
+  .filter((node) => node.getAttribute("data-script-id"));
+check("M7-29b 「新剧本」= 一条剧本清单（不写档）：内置剧本可选、此刻仍无档",
+  builtinRosterPosts.length === 1
+  && setEquals(builtinScriptChoices.map((node) => node.getAttribute("data-script-id")),
+    ["huangjin"])
+  && !existsSync(SCRIPT_SAVE_FILE),
+  `roster=${builtinRosterPosts.length} 剧本=${builtinScriptChoices.map((node) => node.getAttribute("data-script-id")).join(",")}`);
+
+await scriptClick(scriptChoice("data-script-id", "huangjin"));
+const builtinHeroChoices = Array.from($("script-choices").children)
+  .filter((node) => node.getAttribute("data-hero-id"))
+  .map((node) => node.getAttribute("data-hero-id"));
+check("M7-29c 3 选 1 = 剧本编排的三名（能人志士 / 界刘备 / 界关羽），选人期间不落盘",
+  setEquals(builtinHeroChoices, ["nengren", "jie_liubei", "jie_guanyu"])
+  && !existsSync(SCRIPT_SAVE_FILE),
+  `候选=${builtinHeroChoices.join(",")} 档在=${existsSync(SCRIPT_SAVE_FILE)}`);
+
+await scriptClick(scriptChoice("data-hero-id", "jie_liubei"));
+await scriptClick($("btn-script-picker-go"));
+const builtinBoard = (ui.state.script || {}).board;
+check("M7-29d 开档直接进棋盘（真端点）：内置第 1 大节 = 10 节点 / 17 条边 / 五类房间 / 2 入口",
+  !!builtinBoard && $("view-script-board").hidden === false
+  && graphCells().length === 10 && edgePoints().length === 17
+  && setEquals(graphCells().map((cell) => cell.getAttribute("data-room-kind")),
+    ["story", "battle", "event", "shop", "unknown"])
+  && builtinScriptChoices.length > 0
+  && builtinBoard.layer.id === "l1" && builtinBoard.layer.count === 2
+  && cellOf("entry") !== null && cellButton(cellOf("entry")).classList.contains("st-available")
+  && cellButton(cellOf("shop_entry")).classList.contains("st-available")
+  && cellButton(cellOf("market")).classList.contains("st-blocked"),
+  `board=${builtinBoard && builtinBoard.run_id} 格=${graphCells().length} 线=${edgePoints().length}`);
+
+const builtinGateEdge = (builtinBoard.edges || []).find(
+  (edge) => edge.from === "village" && edge.to === "market");
+const builtinEdgesHtml = (byClass(boardGraph(), "script-graph-edges")[0] || {}).innerHTML || "";
+check("M7-29e 标签门写在边上：village → market 需要 flag.village_helped（此刻去不了）",
+  !!builtinGateEdge
+  && setEquals(builtinGateEdge.requires.flags || [], ["flag.village_helped"])
+  && (builtinEdgesHtml.match(/class="script-edge-label"/g) || []).length === 1
+  && builtinEdgesHtml.includes("flag.village_helped")
+  && cellButton(cellOf("market")).classList.contains("st-blocked"),
+  `requires=${JSON.stringify(builtinGateEdge && builtinGateEdge.requires)}`);
+
+// ---- ② 棋盘 → 牌桌：内置剧情战的三座 + 三处显示 + 不泄露 ----
+const builtinEntered = await ui.scriptBoardEnterNode(
+  (ui.state.script.board.nodes || []).find((node) => node.id === "entry"),
+);
+ui.flushPlayback();
+check("M7-29f 进内置剧情战节点 = 一条真建局（session_id）+ 切到现有牌桌（不新造 view）",
+  !!builtinEntered && !!builtinEntered.session_id
+  && ui.state.sessionId === builtinEntered.session_id
+  && $("view-table").hidden === false && $("view-script-board").hidden === true,
+  `session=${builtinEntered && builtinEntered.session_id} table=${$("view-table").hidden}`);
+
+check("M7-29g 内置剧情战的三座：主角 + AI 义从 + 程远志（友 / 敌标签与模板名来自真 PvE 载荷）",
+  [0, 1, 2].map((seat) => seatSideAt(seat)).join(",") === "友,友,敌"
+  && seatNameAt(0) === "界刘备"
+  && [1, 2].map((seat) => seatNameAt(seat)).join(",") === "汉军义从,程远志",
+  `标签=${[0, 1, 2].map((seat) => seatSideAt(seat)).join(",")} 名字=${[0, 1, 2].map((seat) => seatNameAt(seat)).join("/")}`);
+
+check("M7-29h 内置剧情战里对手不泄露：座位只有「手牌：N」、顶栏牌堆只有数量",
+  [2].every((seat) => {
+    const box = seatBoxAt(seat);
+    return box && byClass(box, "card").length === 0
+      && (box.text().match(/手牌：\d+/) || [""])[0].length > 0;
+  })
+  && /^\d+$/.test($("t-deck").textContent)
+  && ui.state.view.snapshot.deck === undefined,
+  `敌牌=${[2].map((seat) => byClass(seatBoxAt(seat), "card").length)} 牌堆="${$("t-deck").textContent}"`);
+
+// ---- ③ 战斗中退出 → 继续剧本 → 同一份棋盘 + 待结算战斗不重抽 ----
+const builtinRevision = ui.state.script.board.revision;
+// 战斗中的退出入口在**牌桌自己**那一面上（棋盘页此时不可见）：牌桌「退出战斗」→ 票 20 的
+// 同一个确认框 → 一条 suspend。这正是用户故事 17（战斗中退出后这一场要重打）的实机路径。
+const battleExit = $("btn-t-pve-exit");
+const battleExitVisible = $("view-table").hidden === false && battleExit.hidden === false;
+await scriptClick(battleExit);
+const battleExitDialog = $("script-confirm").hidden === false
+  && $("script-confirm-text").textContent === "退出后这场战斗要重打；棋盘进度已保存。"
+  && !!scriptConfirmAction("确认");
+const builtinExitMark = calls.length;
+await scriptClick(scriptConfirmAction("确认"));
+const suspendAfterBattle = calls.slice(builtinExitMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/suspend"));
+check("M7-29i 战斗中退出：牌桌「退出战斗」→ 同一确认框 → 一条 suspend（这一场作废、进度已保存）",
+  battleExitVisible && battleExitDialog
+  && suspendAfterBattle.length === 1
+  && suspendAfterBattle[0].path === `/api/script-runs/${builtinBoard.run_id}/suspend`
+  && $("btn-script-continue").disabled === false
+  && ui.state.sessionId === null && ui.state.script.battle === null,
+  `可见=${battleExitVisible} 框=${battleExitDialog} suspend=${suspendAfterBattle.length}`
+    + ` session=${ui.state.sessionId} battle=${JSON.stringify(ui.state.script.battle)}`
+    + ` continue.disabled=${$("btn-script-continue").disabled}`);
+
+await scriptClick($("btn-script-continue"));
+const builtinResumed = (ui.state.script || {}).board;
+check("M7-29j 「继续剧本」= 一条 resume：回到同一份棋盘（同 revision / 同节点状态），战斗仍待结算",
+  !!builtinResumed
+  && builtinResumed.run_id === builtinBoard.run_id
+  && builtinResumed.revision === builtinRevision
+  && builtinResumed.pending && builtinResumed.pending.node_id === "l1/entry"
+  && builtinResumed.pending.spec.kind === "battle"
+  && builtinResumed.session_id === null && cellOf("entry") !== null
+  && cellButton(cellOf("entry")).classList.contains("st-current"),
+  `revision=${builtinResumed && builtinResumed.revision}/${builtinRevision} pending=${builtinResumed && builtinResumed.pending && builtinResumed.pending.node_id}`);
+
+const builtinFaceText = [$("script-face-text").textContent,
+  ...Array.from($("script-face-actions").children).map((node) => node.textContent)].join(" ");
+const builtinSpecSame = JSON.stringify(builtinResumed.pending.spec)
+  === JSON.stringify(builtinEntered.pending.spec);
+check("M7-29k 续档后的待结算战斗：面给「重开这一场」（会话 id 不进档，spec 没重抽）",
+  $("script-face").getAttribute("data-face") === "battle"
+  && builtinFaceText.includes("重开这一场")
+  && builtinSpecSame,
+  `face=${$("script-face").getAttribute("data-face")} 重开=${builtinFaceText.includes("重开这一场")} specSame=${builtinSpecSame} text="${builtinFaceText.slice(0, 60)}"`);
+
+// ---- ④ 编辑器：同一份内置库、同一个节点图渲染器 ----
+await discardScriptSave();
+await scriptCall("scriptEditorShow");
+check("M7-29l 整轮结束后编辑器打开的是**内置库**（source = builtin）：2 大节 / 19 节点都在",
+  ed().source === "builtin" && edScript().id === "huangjin"
+  && (edScript().layers || []).length === 2
+  && (edScript().layers || []).reduce((sum, layer) => sum + (layer.nodes || []).length, 0) === 19
+  && $("view-script-editor").hidden === false,
+  `source=${ed().source} layers=${(edScript().layers || []).length}`);
+
+await edOpenKind("layers");
+await scriptClick(edRow("l1"));
+check("M7-29m 编辑器的大节页走同一个渲染器（第 1 大节 10 格 / 17 条线，作者视角零状态色）",
+  graphCells(edGraph()).length === 10 && edgePoints(edGraph()).length === 17
+  && walkTree(edGraph()).flatMap((node) => [...node.classList.set])
+    .filter((name) => name.startsWith("st-")).length === 0,
+  `格=${graphCells(edGraph()).length} 线=${edgePoints(edGraph()).length}`);
+
+// ---- 收尾：无档、无用户库 ----
+await discardScriptSave();
+ui.state.script.board = null;
+check("M7-29n 收尾干净：无档、无用户库（后续/重复运行仍从内置库开始）",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_SAVE_FILE)
+  && !existsSync(`${RUNS_DIR}/script-library.json`)
+  && ui.state.script.board === null,
+  `status=${scriptStatus()} 档在=${existsSync(SCRIPT_SAVE_FILE)}`);
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

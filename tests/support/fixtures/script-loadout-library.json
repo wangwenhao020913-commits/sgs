@@ -1,0 +1,306 @@
+{
+  "script_schema_version": 1,
+  "scripts": [
+    {
+      "id": "loadoutprobe",
+      "name": "整备探针剧本",
+      "version": 1,
+      "comment": "M7 票 22 的进料：入口事件房（+9 铜钱 + 一个被标签锁住的选项）→ 商店 / 战斗 / 问号房（揭晓事件房）→ 出口商店（结算即通关）。节点 id 与行列就是烟测断言的坐标。",
+      "roster": [
+        "nengren",
+        "jie_liubei",
+        "jie_guanyu"
+      ],
+      "layers": [
+        {
+          "id": "L1",
+          "name": "大节一 · 整备与结算",
+          "grid": {
+            "rows": 2,
+            "cols": 3
+          },
+          "nodes": [
+            {
+              "id": "e1",
+              "row": 0,
+              "col": 0,
+              "room": "room.event.coins"
+            },
+            {
+              "id": "b1",
+              "row": 1,
+              "col": 0,
+              "room": "room.battle"
+            },
+            {
+              "id": "s1",
+              "row": 0,
+              "col": 1,
+              "room": "room.shop"
+            },
+            {
+              "id": "x1",
+              "row": 1,
+              "col": 1,
+              "room": "room.unknown.event"
+            },
+            {
+              "id": "o1",
+              "row": 0,
+              "col": 2,
+              "room": "room.exit"
+            }
+          ],
+          "edges": [
+            {
+              "from": "e1",
+              "to": "s1"
+            },
+            {
+              "from": "e1",
+              "to": "x1"
+            },
+            {
+              "from": "b1",
+              "to": "o1"
+            },
+            {
+              "from": "s1",
+              "to": "o1"
+            },
+            {
+              "from": "x1",
+              "to": "o1"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "room.event.coins",
+      "name": "村口",
+      "kind": "event",
+      "text": "村民捧出铜钱，也求人帮忙修寨。",
+      "event_pool": "ep.coins",
+      "on_clear": {
+        "set_flags": [
+          "flag.village_done"
+        ]
+      }
+    },
+    {
+      "id": "room.battle",
+      "name": "麦田",
+      "kind": "story",
+      "text": "剧情战：一名受保护队友 + 两名敌人（存活一轮即胜）。",
+      "battle": {
+        "allies": [
+          {
+            "role": "ally",
+            "template": "tpl.ally",
+            "protected": true
+          }
+        ],
+        "enemies": [
+          {
+            "role": "enemy",
+            "template": "tpl.grunt"
+          },
+          {
+            "role": "enemy",
+            "template": "tpl.brute"
+          }
+        ],
+        "victory": {
+          "kind": "survive_rounds",
+          "rounds": 1
+        },
+        "extra_reward": {
+          "coins": 4,
+          "pick2": 1
+        }
+      }
+    },
+    {
+      "id": "room.shop",
+      "name": "行商篷车",
+      "kind": "shop",
+      "text": "售完不补货：库存进入节点时抽定。"
+    },
+    {
+      "id": "room.unknown.event",
+      "name": "路边的问号",
+      "kind": "unknown",
+      "text": "进入即揭晓（揭晓结果进存档，重进不重抽）。",
+      "pool": [
+        {
+          "room": "room.reveal.event",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "id": "room.reveal.event",
+      "name": "揭晓的村庄",
+      "kind": "event",
+      "text": "问号房揭晓出来的内层事件房。",
+      "event_pool": "ep.gift"
+    },
+    {
+      "id": "room.exit",
+      "name": "关隘",
+      "kind": "shop",
+      "text": "出口：结算它就通关（删档）。"
+    }
+  ],
+  "templates": [
+    {
+      "id": "tpl.ally",
+      "name": "义军什长",
+      "band": "ally",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": [
+        "hero.liubei.jijiang"
+      ],
+      "random": {
+        "pool": "pool.empty"
+      },
+      "reward": {
+        "coins": 9
+      }
+    },
+    {
+      "id": "tpl.grunt",
+      "name": "黄巾力士",
+      "band": "early",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": [],
+      "random": {
+        "pool": "pool.grunts",
+        "count": [
+          1,
+          2
+        ]
+      },
+      "reward": {
+        "coins": 2,
+        "pick3": 1
+      }
+    },
+    {
+      "id": "tpl.brute",
+      "name": "黄巾渠帅",
+      "band": "early",
+      "hp": 4,
+      "hp_max": 4,
+      "initial_skills": [
+        "hero.zhangfei.paoxiao"
+      ],
+      "random": {
+        "pool": "pool.empty"
+      },
+      "reward": {
+        "coins": 3
+      }
+    }
+  ],
+  "skill_pools": [
+    {
+      "id": "pool.empty",
+      "name": "空池",
+      "skills": []
+    },
+    {
+      "id": "pool.grunts",
+      "name": "小怪技能",
+      "skills": [
+        "hero.liubei.rende",
+        "hero.guanyu.wusheng",
+        "hero.zhangfei.paoxiao",
+        "hero.zhaoyun.longdan"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "ev.coins",
+      "name": "村口铜钱",
+      "text": "村民捧出铜钱，也求人帮忙修寨。",
+      "options": [
+        {
+          "text": "收下铜钱",
+          "effects": [
+            {
+              "kind": "coins",
+              "amount": 9
+            }
+          ]
+        },
+        {
+          "text": "帮他们修寨",
+          "requires": {
+            "flags": [
+              "flag.never"
+            ]
+          },
+          "effects": [
+            {
+              "kind": "grant_skill",
+              "skill": "hero.guanyu.wusheng"
+            }
+          ]
+        },
+        {
+          "text": "领一本技能书",
+          "effects": [
+            {
+              "kind": "grant_skill",
+              "skill": "hero.zhangfei.paoxiao"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ev.gift",
+      "name": "揭晓的礼物",
+      "text": "内层房间给三枚铜钱，还塞了一本技能书。",
+      "options": [
+        {
+          "text": "领三枚 + 技能书",
+          "effects": [
+            {
+              "kind": "coins",
+              "amount": 3
+            },
+            {
+              "kind": "grant_skill",
+              "skill": "hero.guanyu.wusheng"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event_pools": [
+    {
+      "id": "ep.coins",
+      "name": "村口事件池",
+      "events": [
+        "ev.coins"
+      ]
+    },
+    {
+      "id": "ep.gift",
+      "name": "礼物池",
+      "events": [
+        "ev.gift"
+      ]
+    }
+  ],
+  "global_skills": []
+}

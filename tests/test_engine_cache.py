@@ -159,6 +159,16 @@ def _lost_added(state):
     return _with_player(state, 1, lost_skills=["hero.guanyu.wusheng"])
 
 
+def _relic_added(state):
+    """座位 1 的遗物栏多一件遗物（M7 票 09：``RELIC`` 实例的唯一载体 ⇒ 进内容键）。"""
+    return _with_player(state, 1, relics=["hero.zhaoyun.longdan"])
+
+
+def _global_skill_added(state):
+    """座位 1 多一条副本全局技能（M7 票 09：``GLOBAL`` 实例的唯一载体 ⇒ 进内容键）。"""
+    return _with_player(state, 1, global_skills=["hero.zhaoyun.longdan"])
+
+
 def _marker_added(state):
     """加一枚带**自身效果**的标记（票 94：标记进内容键，故键必变）。"""
     from sgs.state import Marker
@@ -270,6 +280,8 @@ _KEY_CASES = (
     ("hero_cleared", _base_state, _hero_cleared, False),
     ("granted_skill_added", _base_state, _granted_added, False),
     ("lost_skill_added", _base_state, _lost_added, False),
+    ("relic_added", _base_state, _relic_added, False),
+    ("global_skill_added", _base_state, _global_skill_added, False),
     ("marker_added", _base_state, _marker_added, False),
     ("suppression_added", _base_state, _suppression_added, False),
     (
@@ -331,6 +343,8 @@ _FIELD_CASE_LABELS = {
     "hero": ("hero_changed", "hero_cleared"),
     "granted_skills": ("granted_skill_added",),
     "lost_skills": ("lost_skill_added",),
+    "relics": ("relic_added",),
+    "global_skills": ("global_skill_added",),
     "suppressed_skills": (
         "suppression_added",
         "suppression_skill_id_changed",

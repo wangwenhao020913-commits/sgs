@@ -18,7 +18,37 @@
 ``GET``          ``/api/decks``                      开局页牌堆档位列表（内容包 decks 的键 + 文案）
 ``GET``          ``/api/runs``                       录像列表
 ``GET``          ``/api/runs/<name>``                某局录像（meta + 记录流）
+``GET``          ``/api/script-save``                剧本存档三态摘要（M7 票 19）
+``POST``         ``/api/script-save/restore``        从 ``.bak`` 恢复主档（坏档修复）
+``DELETE``       ``/api/script-save``                放弃存档（删两份 + 解锁价值表）
+``POST``         ``/api/script-roster``              剧本清单 + 各自的 3 名初始角色候选
+``POST``         ``/api/script-runs``                建档 S₀（撞旧档要带 ``expected_revision``）
+``POST``         ``/api/script-runs/<id>/resume``    继续：读档回棋盘
+``GET``          ``/api/script-runs/<id>``           棋盘视图（节点 / 连线 / 可到达集）
+``POST``         ``/api/script-runs/<id>/nodes/<n>`` 进入节点（写 S_enter；战斗回 ``session_id``）
+``POST``         ``/api/script-runs/<id>/settle``    结算（写 S_done 或删档；胜负由服务端判）
+``PUT``          ``/api/script-runs/<id>/backpack``  背包交换 / 移动 / 丢弃（立即写）
+``POST``         ``/api/script-runs/<id>/suspend``   离开牌桌（作废战斗会话，不写档）
 ===============  ==================================  ==================================
+
+剧本模式那一段的语义、两次 rename 与「同一 ``runs/`` 只许一个 ``serve.py``」的进程级前提
+都住 :mod:`sgs_web.script_runs`。**所有写端点带 ``expected_revision``**（不匹配 ⇒ 409，body
+带当前 ``revision`` 与摘要）；剧本模式的三种错误语义见 :class:`sgs_web.script_runs.ScriptHttpError`。
+
+**剧本编辑器（M7 票 24）**的库端点与上面同一套 400 / 404 / 409（写端点一律带
+``expected_revision``）：
+
+- ``GET|PUT /api/script-library``：整库 + ``revision`` + 校验面板 / 整库写回（允许语义坏）；
+- ``POST /api/script-library/{validate,import-builtin}``：候选库错误清单 / 导入只读内置库；
+- ``<表>`` ∈ ``scripts`` / ``rooms`` / ``templates`` / ``skill_pools`` / ``events`` /
+  ``event_pools`` / ``global_skills``：``[/<id>[/{clone,rename,references}]]`` 的 CRUD、
+  另存为副本、改名保引用、**删之前看引用点**（D30 的确认框）；
+- ``scripts/<s>/layers[/<l>[/nodes/<n>|/edges/<from>/<to>]]``：大节 / 节点 / 边（含解除连线）；
+- ``rooms/<r>/battle[/{allies,enemies}[/<index>]]``：战斗与两侧座位（房间的**归属**物）。
+
+它的数据面住 :mod:`sgs_web.script_library`（同一个用户库文件、D30 删除规则、校验面板与加载器
+**同一个函数**）。``revision`` 是 :func:`sgs.data.library_digest`（库文件里没有、也不能有
+``revision`` 字段——根是 ``extra="forbid"`` 而票面要求"一个文件装整个库"）。
 
 **一次请求最多推进到下一个暂停点或终局**（D16，由 :meth:`Session.drive` 保证）。
 票 19 起"五谷的每名目标取牌之后"也是一个暂停点（逐目标可见）：:meth:`Session.submit_answer`
@@ -48,8 +78,15 @@ from sgs_web import REPO_ROOT, ensure_engine_importable
 
 ensure_engine_importable()
 
-from sgs.data import DataLoadError, enabled_hero_ids, hero_by_id, load_content_pack  # noqa: E402
+from sgs.data import (  # noqa: E402
+    DataLoadError,
+    RuleConfig,
+    enabled_hero_ids,
+    hero_by_id,
+    load_content_pack,
+)
 from sgs.engine import IllegalActionError  # noqa: E402
+from sgs.script import ScriptError  # noqa: E402
 from sgs_web.narrative import NarrativeCursor  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
@@ -68,6 +105,12 @@ from sgs_web.projection import (  # noqa: E402
     visible_snapshot,
 )
 from sgs_web.replay import list_runs, load_run, save_run  # noqa: E402
+from sgs_web.script_library import LIBRARY_TABLES, ScriptLibraryStore  # noqa: E402
+from sgs_web.script_runs import (  # noqa: E402
+    SaveConflict,
+    ScriptHttpError,
+    ScriptRuns,
+)
 from sgs_web.session import (  # noqa: E402
     DEFAULT_TIMEOUT_SECONDS,
     RecordWindow,
@@ -368,6 +411,14 @@ class GameRegistry:
         self.presets_path = self.runs_dir / HERO_PRESETS_FILENAME
         self._counter = 0
         self._finished_order: list[str] = []
+        # 剧本模式接入层（M7 票 19）：存档 I/O / 端点语义 / 战斗会话 / 进程内锁。
+        # 它**复用本注册表的会话表**（``sessions``）：剧本的战斗就是一局 PvE 会话，
+        # 录像与轮询走同一批既有入口，不另建第二套注册表。
+        self.script = ScriptRuns(runs_dir=self.runs_dir, sessions=self)
+        # 剧本编辑器的库数据面（M7 票 24）：用户库 ``runs/script-library.json`` 的读写 /
+        # 校验面板 / D30 删除规则。与 ``script`` 分住两个模块：一个是运行期存档，
+        # 一个是编辑器库文件，只是都落在同一个 ``runs/``。
+        self.editor = ScriptLibraryStore(runs_dir=self.runs_dir)
 
     # -- 将池存档（M6 票 13） ----------------------------------------------
 
@@ -424,8 +475,42 @@ class GameRegistry:
 
     def get(self, session_id: str) -> Session:
         session = self.sessions.get(session_id)
-        if session is None:
+        # 被放弃的会话（剧本模式的 ``suspend``）即使还留在表里也当不存在：``abandoned``
+        # 是"玩家不会再来"的句柄标记，迟到的 GET / answer 一律 404（票 04 §4）。
+        if session is None or session.abandoned:
             raise KeyError(session_id)
+        return session
+
+    def create_battle_session(
+        self,
+        *,
+        rule_config: RuleConfig,
+        seed: int,
+        timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
+    ) -> Session:
+        """剧本战斗节点的建局口（M7 票 19）：**接管一份现成的 ``RuleConfig``（含 ``pve``）**。
+
+        与 :meth:`create` 的差别只有"配置从哪来"：那边从 ``player_count`` 现算，这边是档内
+        冻结的 ``PveConfig`` + ``battle_seed``（票 04 §3.3）——重打该场因此是同一场。
+        其余口径一字不差：先加载内容包、登记会话、打访问戳、再回收中途放弃的局。
+        """
+        if not isinstance(rule_config, RuleConfig):  # pragma: no cover - 调用方恒传模型
+            raise ValueError(f"战斗会话要一份 RuleConfig：{rule_config!r}")
+        pack = load_content_pack()
+        self._counter += 1
+        session = create_session(
+            seed=seed,
+            rule_config=rule_config,
+            human_seat=0,
+            ai="heuristic",
+            timeout_seconds=timeout_seconds,
+            pack=pack,
+            session_id=f"s{self._counter}",
+            pause_after_game_start=True,
+        )
+        session.mark_pending(time.monotonic())
+        self.sessions[session.session_id] = session
+        self._prune_abandoned(time.monotonic())
         return session
 
     # -- 取增量（**超时判定的唯一触发点**） ---------------------------------
@@ -755,7 +840,9 @@ class GameRegistry:
         （测试就同时跑两个），而 ``session_id`` 是**每个注册表各自**从 ``s1`` 起编号的，
         用它当键会让两个服务互相顶掉对方的"已保存"标记。
         """
-        if not session.finished:
+        if not session.finished or session.abandoned:
+            # 被放弃的战斗**不留录像**（票 04 §4.3）：``suspend`` 之后这一局可能已经
+            # 打到了终局（另一个标签推进的），但它不是玩家打完的那一局。
             return None
         key = f"{self.runs_dir.resolve()}::{session.session_id}"
         if key in _SAVED:
@@ -863,6 +950,21 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/decks":
                 self._send_json(200, {"decks": deck_catalog()})
                 return
+            if parsed.path == "/api/script-save":
+                self._send_json(200, self.registry.script.save_payload())
+                return
+            if parsed.path == "/api/script-library" or parsed.path.startswith(
+                "/api/script-library/"
+            ):
+                self._library_route("GET", parsed.path, query, {})
+                return
+            if parsed.path.startswith("/api/script-runs/"):
+                rest = parsed.path[len("/api/script-runs/") :]
+                if rest and "/" not in rest:
+                    self._script(lambda: self.registry.script.view(rest))
+                    return
+                self._send_json(404, {"error": "未知路径"})
+                return
             if parsed.path.startswith("/api/runs/"):
                 name = parsed.path[len("/api/runs/") :]
                 self._send_json(200, load_run(self.registry.runs_dir, name))
@@ -895,6 +997,23 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/hero-presets":
                 self._send_json(200, {"presets": self.registry.save_hero_presets(body)})
+                return
+            if parsed.path == "/api/script-roster":
+                self._script(lambda: self.registry.script.roster(body))
+                return
+            if parsed.path == "/api/script-library" or parsed.path.startswith(
+                "/api/script-library/"
+            ):
+                self._library_route("POST", parsed.path, query, body)
+                return
+            if parsed.path == "/api/script-save/restore":
+                self._script(self.registry.script.restore)
+                return
+            if parsed.path == "/api/script-runs":
+                self._script(lambda: self.registry.script.create_run(body))
+                return
+            if parsed.path.startswith("/api/script-runs/"):
+                self._script_run_post(parsed.path, body)
                 return
             if parsed.path == "/api/sessions":
                 session = self.registry.create(body)
@@ -941,6 +1060,329 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(404, {"error": "未知路径"})
+
+    # -- 剧本模式（M7 票 19） ------------------------------------------------
+
+    def _script(self, work: Any) -> None:
+        """跑一个剧本模式的端点并把结果发出去：**三种错误语义在这里映射成状态码**。
+
+        400 = 结构非法 / 规则拒绝（带 ``rule_id`` + ``loc``）、404 = 寻址不到（没有存档 /
+        没有这一轮 / 没有这个会话）、409 = ``expected_revision`` 对不上或存档此刻读不动
+        （体里带当前 ``revision`` 与摘要，票 04 §4）。坏内容包 / 坏剧本库同样是 400。
+        """
+        try:
+            self._send_json(200, work())
+        except ScriptHttpError as error:
+            self._send_json(error.status, error.payload)
+        except SaveConflict as error:
+            self._send_json(409, error.payload)
+        except ScriptError as error:
+            self._send_json(
+                400,
+                {"error": str(error), "rule_id": error.rule_id, "loc": error.loc},
+            )
+        except DataLoadError as error:
+            self._send_json(400, {"error": str(error)})
+        except KeyError as error:
+            # 会话句柄不在表里（被回收 / 被作废 / id 打错）：与 ``/api/sessions`` 同一条 404。
+            self._send_json(404, {"error": f"未知会话：{error.args[0] if error.args else ''}"})
+        except (ValueError, OSError) as error:
+            self._send_json(400, {"error": str(error)})
+
+    def _script_run_post(self, path: str, body: dict[str, Any]) -> None:
+        """``POST /api/script-runs/<id>/{resume,settle,suspend}`` 与 ``…/nodes/<node_id>``。"""
+        segments = path[len("/api/script-runs/") :].split("/")
+        registry = self.registry
+        if len(segments) == 2 and segments[1] == "resume":
+            self._script(lambda: registry.script.resume(segments[0]))
+            return
+        if len(segments) == 2 and segments[1] == "settle":
+            self._script(lambda: registry.script.settle(segments[0], body))
+            return
+        if len(segments) == 2 and segments[1] == "suspend":
+            self._script(lambda: registry.script.suspend(segments[0]))
+            return
+        if len(segments) == 3 and segments[1] == "nodes":
+            self._script(
+                lambda: registry.script.enter(segments[0], segments[2], body)
+            )
+            return
+        self._send_json(404, {"error": "未知路径"})
+
+    # -- 剧本编辑器（M7 票 24） ----------------------------------------------
+
+    def _library_route(
+        self, method: str, path: str, query: dict[str, list[str]], body: dict[str, Any]
+    ) -> None:
+        """``/api/script-library…`` 的路径解析：资源 → 库的哪一张表 / 哪一层归属。
+
+        路径形状（票 24 的端点清单；票 25 直接按它调）：
+
+        - ``/api/script-library``：GET 整库（含 ``revision`` 与面板）+ PUT 整库写回；
+        - ``/api/script-library/validate``：POST 候选库的错误清单（缺省 = 当前库）；
+        - ``/api/script-library/import-builtin``：POST 把内置库克隆进用户库（id 重写）；
+        - ``/api/script-library/<表>[/<id>[/{clone,rename,references}]]``：六个共享表 + ``scripts``；
+        - ``/api/script-library/scripts/<sid>/layers[/<lid>[/nodes/<nid>|/edges/<from>/<to>]]``：
+          剧本**归属**的大节 / 节点 / 边（``clone`` / ``rename`` / 解除连线都在这条路上）；
+        - ``/api/script-library/rooms/<rid>/battle[/{allies,enemies}[/<index>]]``：战斗与座位。
+
+        写端点的 ``expected_revision`` 走请求体（DELETE 走查询串），语义与
+        ``/api/script-save`` 同一套：400 结构非法、404 寻址不到、409 revision 过期 / id 已存在。
+        """
+        editor = self.registry.editor
+        rest = [part for part in path[len("/api/script-library") :].split("/") if part]
+        if not rest:
+            if method == "GET":
+                self._script(editor.catalog)
+            elif method == "PUT":
+                self._script(lambda: editor.replace(body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        if rest == ["validate"] and method == "POST":
+            self._script(lambda: editor.validate(body))
+            return
+        if rest == ["import-builtin"] and method == "POST":
+            self._script(lambda: editor.import_builtin(body))
+            return
+        if len(rest) >= 3 and rest[0] == "scripts" and rest[2] == "layers":
+            self._library_layers(method, rest[1], rest[3:], body)
+            return
+        if len(rest) >= 3 and rest[0] == "rooms" and rest[2] == "battle":
+            self._library_battle(method, rest[1], rest[3:], body)
+            return
+        self._library_entities(method, rest, body)
+
+    def _library_entities(
+        self, method: str, rest: list[str], body: dict[str, Any]
+    ) -> None:
+        """``/<表>[/<id>[/{clone,rename,references}]]``：CRUD / 另存为副本 / 重命名 / 查引用点。"""
+        editor = self.registry.editor
+        kind = rest[0]
+        if kind not in LIBRARY_TABLES:
+            self._send_json(404, {"error": f"未知资源：{kind}"})
+            return
+        if len(rest) == 1:
+            if method == "GET":
+                self._script(lambda: editor.list_entities(kind))
+            elif method == "POST":
+                self._script(lambda: editor.create_entity(kind, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        ident = rest[1]
+        if len(rest) == 2:
+            if method == "GET":
+                self._script(lambda: editor.get_entity(kind, ident))
+            elif method == "PUT":
+                self._script(lambda: editor.update_entity(kind, ident, body))
+            elif method == "DELETE":
+                self._script(lambda: editor.delete_entity(kind, ident, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        if len(rest) == 3 and method == "GET" and rest[2] == "references":
+            self._script(lambda: editor.references(kind, ident))
+            return
+        if len(rest) == 3 and method == "POST":
+            if rest[2] == "clone":
+                self._script(lambda: editor.clone_entity(kind, ident, body))
+                return
+            if rest[2] == "rename":
+                self._script(lambda: editor.rename_entity(kind, ident, body))
+                return
+        self._send_json(404, {"error": "未知路径"})
+
+    def _library_layers(
+        self, method: str, script_id: str, tail: list[str], body: dict[str, Any]
+    ) -> None:
+        """``scripts/<sid>/layers…``：大节 / 节点 / 边（都是剧本**归属**的）。"""
+        editor = self.registry.editor
+        if not tail:
+            if method == "GET":
+                self._script(lambda: editor.list_layers(script_id))
+            elif method == "POST":
+                self._script(lambda: editor.create_layer(script_id, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        layer_id = tail[0]
+        if len(tail) == 1:
+            if method == "GET":
+                self._script(lambda: editor.get_layer(script_id, layer_id))
+            elif method == "PUT":
+                self._script(lambda: editor.update_layer(script_id, layer_id, body))
+            elif method == "DELETE":
+                self._script(lambda: editor.delete_layer(script_id, layer_id, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        if len(tail) == 2 and method == "POST":
+            if tail[1] == "clone":
+                self._script(lambda: editor.clone_layer(script_id, layer_id, body))
+                return
+            if tail[1] == "rename":
+                self._script(lambda: editor.rename_layer(script_id, layer_id, body))
+                return
+        if tail[1] == "nodes":
+            self._library_nodes(method, script_id, layer_id, tail[2:], body)
+            return
+        if tail[1] == "edges":
+            self._library_edges(method, script_id, layer_id, tail[2:], body)
+            return
+        self._send_json(404, {"error": "未知路径"})
+
+    def _library_nodes(
+        self, method: str, script_id: str, layer_id: str, tail: list[str], body: dict[str, Any]
+    ) -> None:
+        editor = self.registry.editor
+        if not tail:
+            if method == "GET":
+                self._script(lambda: editor.list_nodes(script_id, layer_id))
+            elif method == "POST":
+                self._script(lambda: editor.create_node(script_id, layer_id, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        node_id = tail[0]
+        if len(tail) == 1:
+            if method == "GET":
+                self._script(lambda: editor.get_node(script_id, layer_id, node_id))
+            elif method == "PUT":
+                self._script(lambda: editor.update_node(script_id, layer_id, node_id, body))
+            elif method == "DELETE":
+                self._script(lambda: editor.delete_node(script_id, layer_id, node_id, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        if len(tail) == 2 and method == "POST":
+            if tail[1] == "clone":
+                self._script(lambda: editor.clone_node(script_id, layer_id, node_id, body))
+                return
+            if tail[1] == "rename":
+                self._script(lambda: editor.rename_node(script_id, layer_id, node_id, body))
+                return
+        self._send_json(404, {"error": "未知路径"})
+
+    def _library_edges(
+        self, method: str, script_id: str, layer_id: str, tail: list[str], body: dict[str, Any]
+    ) -> None:
+        """边的身份是 ``(from, to)``：删一条 = 解除连线（票 24 的「连线可单独解除」）。"""
+        editor = self.registry.editor
+        if not tail:
+            if method == "GET":
+                self._script(lambda: editor.list_edges(script_id, layer_id))
+            elif method == "POST":
+                self._script(lambda: editor.create_edge(script_id, layer_id, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        if len(tail) == 2:
+            source, target = tail
+            if method == "GET":
+                self._script(lambda: editor.get_edge(script_id, layer_id, source, target))
+            elif method == "PUT":
+                self._script(
+                    lambda: editor.update_edge(script_id, layer_id, source, target, body)
+                )
+            elif method == "DELETE":
+                self._script(
+                    lambda: editor.delete_edge(script_id, layer_id, source, target, body)
+                )
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        self._send_json(404, {"error": "未知路径"})
+
+    def _library_battle(
+        self, method: str, room_id: str, tail: list[str], body: dict[str, Any]
+    ) -> None:
+        """``rooms/<rid>/battle…``：战斗与两侧座位（战斗是房间的**归属**物）。"""
+        editor = self.registry.editor
+        if not tail:
+            if method == "GET":
+                self._script(lambda: editor.get_battle(room_id))
+            elif method == "PUT":
+                self._script(lambda: editor.set_battle(room_id, body))
+            elif method == "DELETE":
+                self._script(lambda: editor.delete_battle(room_id, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        side = tail[0]
+        if side not in ("allies", "enemies"):
+            self._send_json(404, {"error": f"未知座位侧：{side}"})
+            return
+        if len(tail) == 1:
+            if method == "GET":
+                self._script(lambda: editor.list_seats(room_id, side))
+            elif method == "POST":
+                self._script(lambda: editor.create_seat(room_id, side, body))
+            else:
+                self._send_json(404, {"error": "未知路径"})
+            return
+        if len(tail) == 2:
+            try:
+                index = int(tail[1])
+            except ValueError as error:
+                self._send_json(400, {"error": f"座位下标必须是整数：{tail[1]!r}"})
+                return
+            if method == "PUT":
+                self._script(lambda: editor.update_seat(room_id, side, index, body))
+                return
+            if method == "DELETE":
+                self._script(lambda: editor.delete_seat(room_id, side, index, body))
+                return
+        self._send_json(404, {"error": "未知路径"})
+
+    def do_PUT(self) -> None:  # noqa: N802 - 基类签名
+        parsed = urlparse(self.path)
+        try:
+            body = self._read_body()
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        if parsed.path == "/api/script-library" or parsed.path.startswith(
+            "/api/script-library/"
+        ):
+            self._library_route("PUT", parsed.path, {}, body)
+            return
+        if parsed.path.startswith("/api/script-runs/"):
+            segments = parsed.path[len("/api/script-runs/") :].split("/")
+            if len(segments) == 2 and segments[1] == "backpack":
+                self._script(
+                    lambda: self.registry.script.backpack(segments[0], body)
+                )
+                return
+        self._send_json(404, {"error": "未知路径"})
+
+    def do_DELETE(self) -> None:  # noqa: N802 - 基类签名
+        """``DELETE /api/script-save?expected_revision=N``：放弃存档（票 04 §6）。
+
+        ``expected_revision`` 走查询串而不是请求体：DELETE 带体在 stdlib 与代理上都不算
+        干净；坏档没有 revision 可对，故它是**可选**的（只在 ``ok`` 一态校验）。
+        """
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        if parsed.path.startswith("/api/script-library"):
+            # DELETE 的 expected_revision 走查询串（与 DELETE /api/script-save 同一姿态：
+            # stdlib 与代理对带体的 DELETE 都不算干净）。
+            revision = query.get("expected_revision", [None])[0]
+            body = {} if revision is None else {"expected_revision": revision}
+            self._library_route("DELETE", parsed.path, query, body)
+            return
+        if parsed.path == "/api/script-save":
+            raw = query.get("expected_revision", [None])[0]
+            try:
+                expected = None if raw in (None, "") else int(raw)
+            except (TypeError, ValueError):
+                self._send_json(400, {"error": f"expected_revision 必须是整数：{raw!r}"})
+                return
+            self._script(
+                lambda: self.registry.script.discard(expected_revision=expected)
+            )
             return
         self._send_json(404, {"error": "未知路径"})
 

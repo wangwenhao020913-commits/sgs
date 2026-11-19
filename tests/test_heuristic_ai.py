@@ -1151,18 +1151,32 @@ def test_the_lethal_bonus_is_priced_by_the_targets_rescue_probability():
 # ---------------------------------------------------------------------------
 
 
-def _identity_view(identities, *, viewer: int, visible: tuple[int, ...] = ()):
+def _identity_view(
+    identities,
+    *,
+    viewer: int,
+    visible: tuple[int, ...] = (),
+    dead: tuple[int, ...] = (),
+):
     """坐在 ``viewer`` 的身份局视角（座位数 = ``len(identities)``，不跑引擎）。
 
     ``visible``（U1-04 的亮明入口）= 这些座位额外置 ``identity_visible=True``，投影因此对
     所有观察者露出它们的身份——测"已亮明的忠臣 / 反贼"这一档才需要它。
+
+    ``dead``（票 32）= 这些座位开局即阵亡（0 体力、``alive=False``）；投影对**已阵亡**者
+    无条件露出身份（``_visible_identity``），故"反贼阵亡 ⇒ 配比里少一个反贼"这类局面用它构造。
     """
     state = build_state(
         pack=PACK,
         rule_config=RuleConfig(player_count=len(identities)),
         seats=[
-            SeatSpec(hp=4, hp_max=4, identity=identity)
-            for identity in identities
+            SeatSpec(
+                hp=0 if seat in dead else 4,
+                hp_max=4,
+                alive=seat not in dead,
+                identity=identity,
+            )
+            for seat, identity in enumerate(identities)
         ],
         deck=_deck_excluding(),
     )
@@ -1198,9 +1212,12 @@ def test_the_identity_posterior_is_a_uniform_split_of_the_remaining_roster():
     | 主公 | 忠 / 反 / 反 / 内 | 3/4 | 1/4 |
     | 忠臣 | 反 / 反 / 内 | 1 | 0 |
     | 反贼 | 忠 / 反 / 内 | 1/3（忠臣） | 1/3（反贼） |
-    | 内奸 | 忠 / 反 / 反 | 1 | 0（没有盟友） |
+    | 内奸 | 忠 / 反 / 反 | 0 | 0 |
 
-    内奸那一行同时钉住"主公不在内奸的敌人里"：主公是**已亮明**的另一席，不参与均分。
+    **内奸那一行不是均分**（M7 票 32）：那一行是局面函数，未知座位读"该行对剩余多重集的
+    期望"。5 人局是 **2 : 2**（本表的第一条读数）⇒ ``spread = 0`` ⇒ 三个 H 都是 0 ⇒
+    未知座位 ``(0, 0)``（旧表的 1.0 是"忠臣 / 反贼都是敌人"那个硬常量，票 32 起不再这么读）。
+    主公是**已亮明**的另一席，不进均分。
 
     四个局面都用**合法配比**（1 主 / 1 忠 / 2 反 / 1 内）：后验只依赖配比与**亮明**的身份，
     未知座位的真实身份不影响读数——但用不可能出现的配比会让"实现偷读真实身份"也通过。
@@ -1227,7 +1244,7 @@ def test_the_identity_posterior_is_a_uniform_split_of_the_remaining_roster():
         (
             Identity.RENEGADE,
             (Identity.RENEGADE, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL),
-            1.0,
+            0.0,
             0.0,
         ),
     )
@@ -1335,7 +1352,9 @@ _IDENTITY_MODE_SETS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = Map
     }
 )
 
-# 16 个身份对（我, 对方）→ ``_identity_relation`` 的输出，逐对等于 HEAD 的 if-chain 版。
+# 12 个身份对（我, 对方）→ ``_identity_relation`` 的输出，逐对等于 HEAD 的 if-chain 版。
+# 票 32 起**内奸当观察者的 4 对**不在本表：那一行是随局面现算的函数（见
+# ``_RENEGADE_RELATION_PAIRS``）。剩下这 12 对与局面无关——表是硬常量。
 _IDENTITY_RELATION_PAIRS: Mapping[tuple[str, str], tuple[float, float]] = MappingProxyType(
     {
         ("lord", "lord"): (0.0, 1.0),
@@ -1350,9 +1369,21 @@ _IDENTITY_RELATION_PAIRS: Mapping[tuple[str, str], tuple[float, float]] = Mappin
         ("rebel", "loyalist"): (1.0, 0.0),
         ("rebel", "rebel"): (0.0, 1.0),
         ("rebel", "renegade"): (0.0, 0.0),
+    }
+)
+
+# 内奸当观察者的 4 对（票 32）：4 人**合法配比**、全员亮明、观察者坐 0 号。
+# 4 人配比 = 主公 / 忠臣 / 反贼 / 内奸 ⇒ 主公侧 2 : 反贼 1、D = 3 ⇒ spread = +1/3：
+#   主公  → H = min(+1/3, 0) = 0（护主护栏）        ⇒ (0, 0)
+#   忠臣  → H = +1/3（4 人局压主公侧是正确行为）    ⇒ (1/3, 0)
+#   反贼  → H = −1/3                                ⇒ (0, 1/3)
+#   内奸  → H = 0
+# 「内奸 × 内奸」这一对配不出合法配比（每档只有一个内奸）⇒ 局面函数算不出 ⇒ 中性（fail-closed）。
+_RENEGADE_RELATION_PAIRS: Mapping[tuple[str, str], tuple[float, float]] = MappingProxyType(
+    {
         ("renegade", "lord"): (0.0, 0.0),
-        ("renegade", "loyalist"): (1.0, 0.0),
-        ("renegade", "rebel"): (1.0, 0.0),
+        ("renegade", "loyalist"): (1 / 3, 0.0),
+        ("renegade", "rebel"): (0.0, 1 / 3),
         ("renegade", "renegade"): (0.0, 0.0),
     }
 )
@@ -1400,21 +1431,36 @@ def test_the_identity_mode_rows_still_match_the_old_if_chain():
         assert heuristic_scoring._ally_identities(mine) == frozenset(allies), mine
 
 
-@pytest.mark.parametrize(("mine", "theirs"), sorted(_IDENTITY_RELATION_PAIRS))
+@pytest.mark.parametrize(
+    ("mine", "theirs"),
+    sorted({*_IDENTITY_RELATION_PAIRS, *_RENEGADE_RELATION_PAIRS}),
+)
 def test_the_sixteen_identity_pairs_read_the_same_relation_as_before(mine, theirs):
-    """16 个身份对的 ``_identity_relation`` 输出与重构前逐对相同（"真的是重构"的判据）。"""
-    identities = (
-        Identity(mine),
-        Identity(theirs),
-        Identity.REBEL,
-        Identity.LOYALIST,
-    )
+    """16 个身份对的 ``_identity_relation`` 输出：12 对逐对等于票 08，内奸那 4 对按票 32 重算。
+
+    票 08 的表化是**等价重构**，故 12 对（主公 / 忠臣 / 反贼当观察者的 3×4）逐对等于重构前
+    的 if-chain 输出；**内奸当观察者的 4 对**是票 32 的**行为变更**（那一行换成随局面现算的
+    函数，见 ``_RENEGADE_RELATION_PAIRS``）。
+
+    局面取**合法 4 人配比**：前两席是这一对、其余用配比表里没被占掉的身份补齐。票 08 原来
+    固定补 ``(REBEL, LOYALIST)``，对内奸那 4 对会造出"两个忠臣 / 两个反贼"的不可能配比 ⇒
+    局面函数算不出、退回中性，那 4 对就退化成了 fail-closed 的断言（测不到新语义）。
+    """
+    rest = [
+        identity
+        for identity in IDENTITY_ROSTERS[4]
+        if identity.value not in {mine, theirs}
+    ]
+    identities = (Identity(mine), Identity(theirs), *rest)
     view = _all_sides_revealed_view(identities)
 
     assert view.players[0].identity is Identity(mine)
-    assert heuristic_scoring._identity_relation(view, 1) == _IDENTITY_RELATION_PAIRS[
-        (mine, theirs)
-    ]
+    expected = (
+        _RENEGADE_RELATION_PAIRS[(mine, theirs)]
+        if mine == Identity.RENEGADE.value
+        else _IDENTITY_RELATION_PAIRS[(mine, theirs)]
+    )
+    assert heuristic_scoring._identity_relation(view, 1) == expected
 
 
 def test_the_second_reader_of_the_ally_set_follows_the_same_table():
@@ -1457,6 +1503,346 @@ def test_the_second_reader_of_the_ally_set_follows_the_same_table():
     assert heuristic_scoring._huangtian_lord_seat(pve_view) is None, "PvE 没有主公座位"
     assert heuristic_scoring._score_baonue(None, None, pve_view) == 0.0, (
         "PvE 局里【暴虐】不表态（0.0）——不是拿身份局的关系表去凑 -1.0"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 内奸行的局面函数（M7 票 32）：敌对值表里**唯一**一行不是常量
+#
+# 票 08 把六行都表化成常量；票 32 只把**内奸**那一行换成按"存活力量均衡"现算的局面函数：
+#   D = 存活座位数 − 1（内奸自己占一席、又不属于任何一侧）
+#   E[侧] = 已亮明且存活的该侧人数 + 剩余多重集里该侧的份数
+#   H(内奸→主公) = min((E[主公侧] − E[反贼侧]) / D, 0)  if E[反贼侧] > 0   ← 护主护栏
+#                = (E[主公侧] − E[反贼侧]) / D         if E[反贼侧] == 0
+#   H(内奸→忠臣) = (E[主公侧] − E[反贼侧]) / D      H(内奸→反贼) = −H(内奸→忠臣)
+#   H(内奸→内奸) = 0
+# 返回值仍是 ``(P敌, P友) = (max(H, 0), max(−H, 0))``（非负、和 ≤ 1），14 个调用点不变。
+# 下面每条都用**手写字面值**核（不 import 实现的中间量）：数字来自票面的五行表与要求。
+# ---------------------------------------------------------------------------
+#
+# 5 种开局（配比见 ``IDENTITY_ROSTERS``）：人数 / 主公侧 / 反贼 / D / 三个 H。逐值与票面对齐。
+_RENEGADE_OPENING_ROWS = (
+    (4, 2, 1, 3, 0.0, 1 / 3, -1 / 3),
+    (5, 2, 2, 4, 0.0, 0.0, 0.0),
+    (6, 2, 3, 5, -0.2, -0.2, 0.2),
+    (7, 3, 3, 6, 0.0, 0.0, 0.0),
+    (8, 3, 4, 7, -1 / 7, -1 / 7, 1 / 7),
+)
+
+
+def _renegade_view(count: int, *, dead: tuple[int, ...] = (), visible: bool = False):
+    """``count`` 人身份局的视角，观察者坐在配比表里**内奸**那一席。
+
+    ``visible=True`` 把全部座位置 ``identity_visible``（全员亮明）；缺省只有本人与主公亮明
+    ——两种视角的配比相同，故局面读数（D / E[侧] / 三个 H）必须**逐值相同**。
+    """
+    identities = tuple(IDENTITY_ROSTERS[count])
+    viewer = identities.index(Identity.RENEGADE)
+    return _identity_view(
+        identities,
+        viewer=viewer,
+        visible=tuple(range(count)) if visible else (),
+        dead=dead,
+    )
+
+
+def _seat_of(view, identity: Identity) -> int:
+    """视角里某个身份所在的座位（只看**已亮明**的那一面；内奸看自己的视角用它定位）。"""
+    return next(
+        player.seat for player in view.players if player.identity is identity
+    )
+
+
+@pytest.mark.parametrize(
+    ("count", "lord_side", "rebels", "divisor", "to_lord", "to_loyalist", "to_rebel"),
+    _RENEGADE_OPENING_ROWS,
+)
+def test_the_renegade_row_is_the_living_strength_balance(
+    count, lord_side, rebels, divisor, to_lord, to_loyalist, to_rebel
+):
+    """5 种开局的数值表：D / E[侧] 与三个 H 逐值等于票面那张表。
+
+    ``E[主公侧] : E[反贼]`` 与 D 也逐个核（它们是 H 的两个输入——只核 H 的话，"刚好抵消"
+    的实现（如 D 少 1、E 多 1）能蒙混过关）。两种亮明面（本人 + 主公 / 全员亮明）各读一遍：
+    主公是**亮明**的、不在剩余多重集里，两种口径必须给出同一个 E。
+    """
+    for visible in (False, True):
+        view = _renegade_view(count, visible=visible)
+
+        assert heuristic_scoring._renegade_balance(view) == (divisor, lord_side, rebels), (
+            f"{count} 人局（visible={visible}）：D / E[主公侧] / E[反贼] 与票面不符"
+        )
+        assert heuristic_scoring._renegade_hostility(view, "lord") == pytest.approx(
+            to_lord
+        ), f"{count} 人局的 H(→主公)"
+        assert heuristic_scoring._renegade_hostility(
+            view, "loyalist"
+        ) == pytest.approx(to_loyalist), f"{count} 人局的 H(→忠臣)"
+        assert heuristic_scoring._renegade_hostility(view, "rebel") == pytest.approx(
+            to_rebel
+        ), f"{count} 人局的 H(→反贼) = −H(→忠臣)"
+        assert heuristic_scoring._renegade_hostility(view, "renegade") == 0.0, (
+            f"{count} 人局：内奸对自己恒 0"
+        )
+
+
+def test_the_renegade_row_keeps_the_relation_pair_contract():
+    """``(P敌, P友) = (max(H, 0), max(−H, 0))``：非负、和 ≤ 1、与 ``H = P敌 − P友`` 一致。
+
+    这是"14 个调用点一行不改"的前提（票面：返回值契约不变）。逐座位核到**每个身份**上：
+    亮明档走局面函数、未知档走期望，两条都必须是合法的 ``(P敌, P友)``。
+    """
+    for count in (4, 5, 6, 7, 8):
+        view = _renegade_view(count, visible=True)
+        for identity in (Identity.LORD, Identity.LOYALIST, Identity.REBEL):
+            seat = _seat_of(view, identity)
+            enemy, ally = heuristic_scoring._identity_relation(view, seat)
+            hostility = heuristic_scoring._renegade_hostility(view, identity.value)
+            assert enemy == pytest.approx(max(hostility, 0.0)), f"{count} 人局：{identity} 的 P(敌)"
+            assert ally == pytest.approx(max(-hostility, 0.0)), f"{count} 人局：{identity} 的 P(友)"
+            assert enemy >= 0.0 and ally >= 0.0, "非负"
+            assert enemy + ally == pytest.approx(abs(hostility)), "和 = |H| ≤ 1"
+            assert enemy + ally <= 1.0, "和 ≤ 1"
+
+
+def test_the_renegade_row_counts_the_revealed_lord_plus_the_remaining_roster():
+    """E[侧] 的两半都不能省：主公**亮明且存活**、不在剩余多重集里。
+
+    反面例子就是票面点名的那条错法：只写 ``count(lord in 剩余)`` 会得 0（主公已被减掉）。
+    5 人局：剩余多重集 = 忠臣 / 反贼 / 反贼（没有主公）⇒ E[主公侧] = 1（主公）+ 1（忠臣）= 2。
+    """
+    view = _renegade_view(5)
+    remaining, unknown = heuristic_scoring._unknown_identity_remainder(view)
+    assert "lord" not in remaining, "前提：主公亮明、已被从剩余多重集里减掉"
+    assert unknown == 3, "前提：3 个存活未知座位"
+    assert remaining.count("loyalist") == 1 and remaining.count("rebel") == 2, (
+        f"前提：剩余多重集是忠臣 + 反贼 ×2，实得 {remaining}"
+    )
+
+    divisor, lord_side, rebels = heuristic_scoring._renegade_balance(view)
+    assert (divisor, lord_side, rebels) == (4, 2, 2), (
+        "E[主公侧] = 亮明的 1（主公）+ 剩余里的 1（忠臣）；只数后半会得 1"
+    )
+
+
+def test_a_dead_rebel_raises_the_hostility_toward_the_lord():
+    """单调性①：反贼阵亡 ⇒ H(→主公) **上升**（6 人局 2:3 的 −0.20 → 剩 2:2 的 0）。"""
+    identities = tuple(IDENTITY_ROSTERS[6])
+    rebel_seat = identities.index(Identity.REBEL)
+    before = _renegade_view(6, visible=True)
+    after = _renegade_view(6, visible=True, dead=(rebel_seat,))
+    assert heuristic_scoring._renegade_balance(after) == (4, 2, 2), "反贼少一个 ⇒ 2:2"
+
+    hostility_before = heuristic_scoring._renegade_hostility(before, "lord")
+    hostility_after = heuristic_scoring._renegade_hostility(after, "lord")
+    assert hostility_before == pytest.approx(-0.2)
+    assert hostility_after == pytest.approx(0.0)
+    assert hostility_after > hostility_before, "反贼阵亡 ⇒ 主公侧的威胁下降 ⇒ H(→主公) 上升"
+
+
+def test_a_dead_loyalist_lowers_the_hostility_toward_the_lord():
+    """单调性②：忠臣阵亡 ⇒ H(→主公) **下降**（5 人局 2:2 的 0 → 1:2 的 −1/3）。"""
+    identities = tuple(IDENTITY_ROSTERS[5])
+    loyalist_seat = identities.index(Identity.LOYALIST)
+    before = _renegade_view(5, visible=True)
+    after = _renegade_view(5, visible=True, dead=(loyalist_seat,))
+    assert heuristic_scoring._renegade_balance(after) == (3, 1, 2), "忠臣少一个 ⇒ 1:2"
+
+    hostility_before = heuristic_scoring._renegade_hostility(before, "lord")
+    hostility_after = heuristic_scoring._renegade_hostility(after, "lord")
+    assert hostility_before == pytest.approx(0.0)
+    assert hostility_after == pytest.approx(-1 / 3)
+    assert hostility_after < hostility_before, "忠臣阵亡 ⇒ 主公侧被削弱 ⇒ H(→主公) 下降"
+
+
+@pytest.mark.parametrize(
+    ("count", "dead"),
+    [
+        (4, (1, 2)),  # 忠臣 + 反贼 阵亡 ⇒ 只剩主公与内奸
+        (5, (1, 2, 3)),  # 忠臣 + 反贼 ×2 阵亡 ⇒ 同上（另一种人数）
+    ],
+)
+def test_the_last_lord_standing_is_a_plus_one_from_the_formula(count, dead):
+    """单调性③：只剩主公 ⇒ H(→主公) = **+1**，由 ``D = 1、E[反贼] = 0`` 自然得出。
+
+    两种人数叠出同一个 +1 ⇒ 它跟的是 D 与 E[反贼]，**没有**"只剩主公"的特例分支
+    （写特例就是给同一语义留两个真源）。护栏此时不生效（``E[反贼侧] == 0``）。
+    """
+    view = _renegade_view(count, visible=True, dead=dead)
+
+    assert heuristic_scoring._renegade_balance(view) == (1, 1, 0), (
+        "D = 存活 2 − 1；E[主公侧] = 1（亮明的主公）；E[反贼] = 0"
+    )
+    assert heuristic_scoring._renegade_hostility(view, "lord") == 1.0
+    lord_seat = _seat_of(view, Identity.LORD)
+    assert heuristic_scoring._identity_relation(view, lord_seat) == (1.0, 0.0), (
+        "H = +1 ⇒ 配对是 (P敌, P友) = (1, 0)：内奸最后必须弑主"
+    )
+
+
+def _renegade_play_query(*, lord_hp: int = 4):
+    """4 人局、内奸坐 0 号出牌阶段且手里有【杀】；座位 1 = 主公、2 = 反贼、3 = 忠臣。
+
+    4 人配比 = 主公 / 忠臣 / 反贼 / 内奸 ⇒ 内奸眼里 主公侧 2 : 反贼 1（``H(→忠臣) = +1/3``）。
+    座位环上 0 号够得着 1 与 3（距离 1）⇒ 主公与忠臣都是真实候选目标，反贼（座位 2）在
+    距离 2 之外、只作"仍存活"的护栏条件。**全员亮明** ⇒ 三个 H 走亮明档、不掺未知座位的
+    期望（那样忠臣会变成 (1/6, 1/6)，测的就不是护栏了）。
+    """
+    seats = [
+        SeatSpec(identity=Identity.RENEGADE, hand=(_ids("slash")[0],)),
+        SeatSpec(hp=lord_hp, hp_max=4, identity=Identity.LORD),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.LOYALIST),
+    ]
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=4),
+        seats=seats,
+        deck=_deck_excluding(_ids("slash")[0]),
+        turn_seat=0,
+    )
+    for player in state.players:
+        player.identity_visible = True
+    return _play_phase_query(state)
+
+
+_RENEGADE_FIXTURE_SEATS = (
+    Identity.RENEGADE,
+    Identity.LORD,
+    Identity.REBEL,
+    Identity.LOYALIST,
+)
+"""``_renegade_play_query`` 的逐座位身份（地面真相，仅供用例定位座位）。"""
+
+
+def test_the_guard_takes_the_lord_off_the_enemy_side_while_a_rebel_lives():
+    """护主护栏：主公 1 体力、反贼仍存活 ⇒ ``H(→主公) ≤ 0``（票面"这一刀不打"）。
+
+    4 人局 2:1 ⇒ 未加护栏的式子给 ``+1/3``（就等于 ``H(→忠臣)``）：内奸会为了"压主公侧"
+    去打主公。护栏把它削成 0（票面 4 人局那格的 ``0``），**忠臣**仍是 ``+1/3``——被压的是
+    主公侧的力量、不是主公本人。
+
+    决策面：主公与忠臣同体力 / 同手牌时，两个候选只差敌友权重 ⇒ 忠臣严格高
+    ``_ENEMY_FOCUS / 3``。斩杀项（D2，票 19）是另一笔账、本票不动它，故这里让两个目标同体力。
+    """
+    question = _renegade_play_query()
+    view = question.view
+    lord = _RENEGADE_FIXTURE_SEATS.index(Identity.LORD)
+    loyalist = _RENEGADE_FIXTURE_SEATS.index(Identity.LOYALIST)
+
+    assert heuristic_scoring._renegade_balance(view) == (3, 2, 1), "4 人局 2:1"
+    assert heuristic_scoring._renegade_hostility(view, "lord") == 0.0, (
+        "护栏把 +1/3 削成 0：反贼还活着就不许自己把主公打死"
+    )
+    assert heuristic_scoring._identity_relation(view, lord) == (0.0, 0.0)
+    assert heuristic_scoring._renegade_hostility(view, "loyalist") == pytest.approx(1 / 3), (
+        "同一局面里忠臣仍是 +1/3——4 人局压主公侧是**正确行为**（票面备注），别改成护忠臣"
+    )
+
+    def _slash_at(seat: int):
+        return next(
+            action
+            for action in question.legal_actions
+            if isinstance(action, UseCard)
+            and action.card.type == "slash"
+            and action.targets == (seat,)
+        )
+
+    lord_score = heuristic_scoring._score_attack(_slash_at(lord), view)
+    loyalist_score = heuristic_scoring._score_attack(_slash_at(loyalist), view)
+    assert loyalist_score - lord_score == pytest.approx(
+        heuristic_scoring._ENEMY_FOCUS / 3
+    ), f"两个目标只差敌友权重（主公 {lord_score} vs 忠臣 {loyalist_score}）"
+
+    # 票面的"主公 1 体力"那一档：体力不进关系判定 ⇒ H 仍是 0（斩杀项另算，见 docstring）。
+    one_hp = _renegade_play_query(lord_hp=1).view
+    assert heuristic_scoring._renegade_hostility(one_hp, "lord") == 0.0, (
+        "主公 1 体力且反贼存活时，H(→主公) 仍是 0"
+    )
+
+
+def test_an_unknown_seat_is_the_rows_expectation_over_the_remaining_roster():
+    """未知座位 = 该行对剩余多重集的期望；``H(座位) = P敌 − P友 = Σ H(c) / |剩余|``。
+
+    6 人局（2 : 3 ⇒ ``H(忠臣) = −0.2、H(反贼) = +0.2``）：剩余多重集 = 忠臣 + 反贼 ×3 ⇒
+    ``ΣH/4 = 0.1``。两侧各自按份数分摊（``P敌 = 3×0.2/4 = 0.15``、``P友 = 0.2/4 = 0.05``），
+    与同一函数对另外五行未知座位的"敌人 / 盟友份数 ÷ 未知座位数"是同一条口径。
+    """
+    view = _renegade_view(6)
+    remaining, unknown = heuristic_scoring._unknown_identity_remainder(view)
+    assert sorted(remaining) == ["loyalist", "rebel", "rebel", "rebel"] and unknown == 4
+
+    target = next(
+        player.seat
+        for player in view.players
+        if player.alive and player.identity is None
+    )
+    enemy, ally = heuristic_scoring._identity_relation(view, target)
+
+    hostilities = [
+        heuristic_scoring._renegade_hostility(view, identity) for identity in remaining
+    ]
+    assert enemy - ally == pytest.approx(sum(hostilities) / len(hostilities)), (
+        "H(座位) = P敌 − P友 必须等于该行对剩余多重集的均值"
+    )
+    assert enemy == pytest.approx(
+        sum(max(hostility, 0.0) for hostility in hostilities) / len(hostilities)
+    )
+    assert ally == pytest.approx(
+        sum(max(-hostility, 0.0) for hostility in hostilities) / len(hostilities)
+    )
+    assert (enemy, ally) == (pytest.approx(0.15), pytest.approx(0.05)), (
+        "反贼多一个 ⇒ 未知座位在反贼那一侧更可能（偏敌）"
+    )
+    assert heuristic_scoring._renegade_unknown_relation(view, ()) == (0.0, 0.0), (
+        "剩余为空 ⇒ (0, 0)（与`算不出就中性`同一条纪律）"
+    )
+
+
+def test_the_other_five_rows_do_not_follow_the_position():
+    """回归护栏：主公 / 忠臣 / 反贼 / 友 / 敌五行逐格仍是票 08 的常量。
+
+    票 08 的 16 对里**只有内奸当观察者的 4 对**随局面变；另外 12 对在三副几何完全不同的
+    局面上逐个再读一遍（换人数、换阵亡、换亮明面都不许动）。友 / 敌两行由 PvE 四格那条
+    （``test_the_ai_reads_a_pve_ally_and_a_pve_enemy``）钉住。
+    """
+    geometries = (
+        ((Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.RENEGADE), ()),
+        (
+            (Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL, Identity.RENEGADE),
+            (1,),
+        ),
+        (
+            (
+                Identity.LORD,
+                Identity.LOYALIST,
+                Identity.LOYALIST,
+                Identity.REBEL,
+                Identity.REBEL,
+                Identity.REBEL,
+                Identity.RENEGADE,
+            ),
+            (2, 3),
+        ),
+    )
+    checked = 0
+    for identities, dead in geometries:
+        for (mine, theirs), expected in _IDENTITY_RELATION_PAIRS.items():
+            if mine == "renegade" or theirs == "renegade":
+                continue
+            view = _identity_view(
+                identities,
+                viewer=identities.index(Identity(mine)),
+                visible=tuple(range(len(identities))),
+                dead=dead,
+            )
+            seat = identities.index(Identity(theirs))
+            assert heuristic_scoring._identity_relation(view, seat) == expected, (
+                f"{mine} → {theirs} 在 {len(identities)} 人局（死 {dead}）上漂了"
+            )
+            checked += 1
+    assert checked == 9 * len(geometries), (
+        "身份局三行（主公 / 忠臣 / 反贼）两两组合 = 9 对 × 3 副局面；友 / 敌两行另有 PvE 断言"
     )
 
 
@@ -2301,6 +2687,12 @@ def test_the_heuristic_beats_random_on_the_same_seeds():
     # 批内判据同步按实测重钉（W4-fix-2 起为 24/32 vs 15/32；上一批 104..135 因"随机档
     # 盲选面变小、质量上升"掉到 17/32 vs 14/32，按本仓纪律**重新选种**而不是放宽阈值）。
     # 票 12 切每座位子流后为 22/32 vs 16/32（优势 6），阈值仍是 len//8 = 4。
+    # M7 票 32（内奸行换成局面函数）第三次重选：老批 136..167 上实测 17/32 vs 12/32
+    # （优势 5，本就贴阈值）；新行在 5 人局开局把三个 H 全给 0 ⇒ 座位 0 是内奸的 5 局里
+    # 3 局由胜转负、批内掉到 14/32 vs 12/32（优势 2 < 4）。判据不放宽——M5 / M6 绑死的
+    # 12 个种子（136–143 与 145/146/148/164）一个不动，只换其余 20 个，理由与读数见
+    # ``support.ACCEPTANCE_SEEDS``。合批上为 21/32 vs 15/32（优势 6 ≥ 4），
+    # 128 局整批的相对优势 0.219。
     assert hero - baseline >= len(seeds) // 8, (
         f"启发式 {hero}/32 vs 随机 {baseline}/32："
         f"优势不足（票 13 §验收 6 的宽松判据）"

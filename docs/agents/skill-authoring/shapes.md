@@ -178,6 +178,7 @@
 | `EFFECTIVENESS` | 效果生效性（仁王盾 / 青釭剑一类） |
 | `RESPONSE_COUNT` | 本次响应的张数（无双） |
 | `RECOVER_AMOUNT` | 回复量加式（标准救援） |
+| `DRAW_COUNT` | **摸牌阶段的额定张数**（M7 票 10 的加法）：`current` 从额定 `DRAW_COUNT`（或阶段体改写后的基础值）起，回调返回新张数。**座位常驻项**（`PveConfig.seats[seat].draw_bonus`，由 `src/sgs/skills/catalog.py:_seat_draw_count_bonus` 声明）是链尾的一项，与遗物实例的修饰器同一次 `apply_modifiers` 派发；遗物的「每回合摸牌 +1」（票 26）声明同一个挂点。唯一读点 = `Engine._phase_draw`（消费那一刻），故没有消费者的局面逐字节不变 |
 | `DAMAGE_DEAL_AMOUNT` | 造成伤害量（裸衣、义绝、咆哮②） |
 | `DAMAGE_TAKE_AMOUNT` | 受到伤害量（藤甲） |
 | `DAMAGE_CAP` | 伤害上限（白银狮子一类） |

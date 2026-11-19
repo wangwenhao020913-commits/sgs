@@ -43,7 +43,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .goals import PREACTIVATION_CANCEL_SKILL, goal_for
-from . import m5, m6
+from . import m5, m6, pve
 
 __all__ = [
     "M1_DECK_PROFILE",
@@ -51,6 +51,7 @@ __all__ = [
     "M5_SCENARIOS",
     "M6_SCENARIOS",
     "PREACTIVATION_CANCEL_SCENARIO",
+    "PVE_SCENARIOS",
     "SCENARIOS",
     "Scenario",
     "engine_for",
@@ -569,6 +570,68 @@ M6_SCENARIOS: dict[str, Scenario] = {
 回放侧用同一份构造（:func:`engine_for`）重开。"""
 
 
+PVE_SCENARIOS: dict[str, Scenario] = {
+    # M7 票 12：6 条 **PvE 基准**（票 01 §7）。局面 / 手牌 / 牌堆顶全部写死在
+    # ``replays/pve.py``，``pve`` 一节（阵营 / 主角 / 保护对象 / 逐场胜负 / Boss / 座位表）
+    # 在各自的 header 首行里，回放只凭 header + 同一份构造重开。
+    # 种子 6101–6106 只是 header 里的记录（**避开** ``docs/agents/ai-versions.md`` §3 登记的
+    # 趋势带 / 实机带 / 判决带，以及票 13 的 9000–9031 PvE 批测带），构造局面不靠它决策。
+    "61-pve-rout-win": Scenario(
+        slug="61-pve-rout-win",
+        seed=6101,
+        max_turns=20,
+        player_count=3,
+        deck_profile=pve.PVE_DECK_PROFILE,
+        driver="pve",
+    ),
+    "62-pve-survive-rounds-win": Scenario(
+        slug="62-pve-survive-rounds-win",
+        seed=6102,
+        max_turns=20,
+        player_count=3,
+        deck_profile=pve.PVE_DECK_PROFILE,
+        driver="pve",
+    ),
+    "63-pve-rout-within-rounds-win": Scenario(
+        slug="63-pve-rout-within-rounds-win",
+        seed=6103,
+        max_turns=20,
+        player_count=3,
+        deck_profile=pve.PVE_DECK_PROFILE,
+        driver="pve",
+    ),
+    "64-pve-slay-boss-win": Scenario(
+        slug="64-pve-slay-boss-win",
+        seed=6104,
+        max_turns=20,
+        player_count=2,
+        deck_profile=pve.PVE_DECK_PROFILE,
+        driver="pve",
+    ),
+    "65-pve-ally-team-rout": Scenario(
+        slug="65-pve-ally-team-rout",
+        seed=6105,
+        max_turns=20,
+        player_count=5,
+        deck_profile=pve.PVE_DECK_PROFILE,
+        driver="pve",
+    ),
+    "66-pve-protected-ally-death": Scenario(
+        slug="66-pve-protected-ally-death",
+        seed=6106,
+        max_turns=20,
+        player_count=4,
+        deck_profile=pve.PVE_DECK_PROFILE,
+        driver="pve",
+    ),
+}
+"""6 条 M7 PvE 基准（票 12）：票 01 §4 的四类逐场终局各一条 + 队友局 + 保护队友阵亡。
+
+驱动是 ``"pve"``：从构造局面起跑（``Engine.from_state`` + :mod:`replays.pve` 的脚本计划），
+回放侧用同一份构造（:func:`engine_for`）重开；**座位表来自 header 的 ``pve.seats``**
+（本模块只声明人数 / 档位 / 种子），故"这一场是谁"只有一个真源。"""
+
+
 SCENARIOS: dict[str, Scenario] = {
     **M1_SCENARIOS,
     **M2_SCENARIOS,
@@ -576,6 +639,7 @@ SCENARIOS: dict[str, Scenario] = {
     **SCRIPTED_SCENARIOS,
     **M5_SCENARIOS,
     **M6_SCENARIOS,
+    **PVE_SCENARIOS,
 }
 
 
@@ -1257,6 +1321,12 @@ def engine_for(
         return m5.build_engine(scenario.slug, seed=seed, pack=pack)
     if scenario.slug in m6.M6_SETUPS:
         return m6.build_engine(scenario.slug, seed=seed, pack=pack)
+    if scenario.slug in pve.PVE_SETUPS:
+        # PvE 的座位表住在 header 的 ``pve`` 一节（录制期取计划里的那份，回放期取 header
+        # 的那份）——两者必须同一份，故这里把 ``rule_config`` 原样透传。
+        return pve.build_engine(
+            scenario.slug, seed=seed, pack=pack, rule_config=rule_config
+        )
     return Engine.new_game(
         seed=seed,
         rule_config=rule_config or RuleConfig(player_count=scenario.player_count),
@@ -1294,6 +1364,15 @@ def _run_scripted(
         assert enter is None, "M6 构造基准没有取消 / 不发动两条路径"
         pack = load_content_pack(deck_profile=scenario.deck_profile)
         players = m6.build_players(
+            slug,
+            pack=pack,
+            player_count=scenario.player_count,
+            recording=recording,
+        )
+    elif scenario.driver == "pve":
+        assert enter is None, "PvE 构造基准没有取消 / 不发动两条路径"
+        pack = load_content_pack(deck_profile=scenario.deck_profile)
+        players = pve.build_players(
             slug,
             pack=pack,
             player_count=scenario.player_count,
@@ -1356,7 +1435,7 @@ def _record_scripted(slug: str, scenario: Scenario) -> Engine:
     else:
         engine, recording = _run_scripted(scenario, slug)
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
-    if scenario.driver in ("m5", "m6"):
+    if scenario.driver in ("m5", "m6", "pve"):
         # 脚本宣布命中 ≠ 记录流里有那回事：构造基准**再独立复读一遍**事后判据。
         assert goal_for(slug)(engine), (
             f"{slug}：构造局面的计划走完了，但记录流没有命中 goals 里的判据"

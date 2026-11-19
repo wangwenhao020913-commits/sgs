@@ -16,6 +16,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from sgs.data import Mode, RuleConfig
@@ -25,7 +26,25 @@ ACTIONS_SCHEMA = "sgs.batch.actions.v1"
 
 IDENTITY_SIDES: tuple[str, ...] = ("lord", "rebel", "renegade")
 NO_IDENTITY_SIDE = "no_identity"
-"""``wins_by_side`` 的键：身份局三侧；无身份局只有这一项（胜负没有阵营概念）。"""
+PVE_SIDES: tuple[str, ...] = ("ally", "enemy")
+"""``wins_by_side`` 的键：身份局三侧、无身份局 ``no_identity``、PvE 友 / 敌两侧。
+
+PvE 的 ``Outcome.side`` 只有 ``ally`` / ``enemy`` 两值（票 07 的纯求解器只产出这两侧），
+故它单列一行而不是塞进身份局那三键。
+"""
+
+SIDES_BY_MODE: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        Mode.NO_IDENTITY.value: (NO_IDENTITY_SIDE,),
+        Mode.IDENTITY.value: IDENTITY_SIDES,
+        Mode.PVE.value: PVE_SIDES,
+    }
+)
+"""模式 → ``wins_by_side`` 的键集合（票 13 把它从 if 表达式收成**按模式登记的表**）。
+
+新增模式忘了登记就在 :func:`summarize` 里直接 ``KeyError``，不会静默复用别的模式的
+侧别（与 ``engine.steps._DEATH_STEPS_BY_MODE`` 同一条 fail-closed 纪律）。
+"""
 
 
 @dataclass(frozen=True)
@@ -191,16 +210,15 @@ def summarize(
     """按 spec §1.4 汇总一批结果（只统计已完成且无错的对局）。
 
     - ``wins_by_seat`` 按座位计"是否在 ``outcome.winners`` 里"（身份局含已阵亡的同侧座位）；
-    - ``wins_by_side`` 身份局三侧、无身份局记 :data:`NO_IDENTITY_SIDE`；平局进 ``draws``；
+    - ``wins_by_side`` 的键由 :data:`SIDES_BY_MODE` 按模式登记：身份局三侧、无身份局
+      ``no_identity``、PvE ``ally`` / ``enemy``；平局进 ``draws``；
     - ``elapsed_ms`` = 各局耗时**之和**（它是唯一不要求跨 worker 相等的字段）。
     """
     completed = [
         game for game in games if game.finished and game.error is None and game.outcome is not None
     ]
     wins_by_seat = [0] * players
-    wins_by_side = {
-        side: 0 for side in (IDENTITY_SIDES if mode == Mode.IDENTITY.value else (NO_IDENTITY_SIDE,))
-    }
+    wins_by_side = {side: 0 for side in SIDES_BY_MODE[mode]}
     draws = 0
     for game in completed:
         outcome = game.outcome
@@ -211,7 +229,7 @@ def summarize(
         for seat in outcome["winners"]:
             wins_by_seat[seat] += 1
         side = outcome["side"] or NO_IDENTITY_SIDE
-        wins_by_side[side] = wins_by_side.get(side, 0) + 1
+        wins_by_side[side] += 1
 
     def _mean(values: list[int]) -> float:
         return round(sum(values) / len(values), 3) if values else 0.0

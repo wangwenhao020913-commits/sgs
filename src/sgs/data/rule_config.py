@@ -65,6 +65,38 @@ _ROUND_BASED: frozenset[PveVictoryKind] = frozenset(
 _PVE_SIDES: frozenset[Identity] = frozenset({Identity.ALLY, Identity.ENEMY})
 """PvE 的阵营**值域**：身份局的四值在这里没有位置（票 01 §1「只许 ALLY / ENEMY」）。"""
 
+_MAX_GRANTS_PER_SEAT: Mapping[str, int] = {"skill": 4, "relic": 6}
+"""每座位的授予上限（M7 票 09；票 02 §10.5）：技能 = 4 条出战槽、遗物 = 6 件遗物栏。
+
+**逐座位**算，不是全场总量：两座各 4 条出战技能是合法的（8 条）。
+"""
+
+_MAX_SEAT_HP = 99
+"""座位体力 / 上限的宽上界（M7 票 10）：远大于任何武将（≤8）或 Boss 模板的体力。
+
+引擎对 ``hp`` 本身没有上界，故这里给一个"显然不是笔误"的宽区间，只拒负数 / 零 / 荒谬值
+（``hp_max`` 必须是正的，否则开局即死）；它**不是**一条玩法规则。
+"""
+
+_MAX_SEAT_BONUS = 9
+"""三档常驻加成的上界（M7 票 10）：内容期没有任何档位接近它。
+
+加成只许非负（"造成伤害 +N" 是增益通道，减益留给技能），上界存在的唯一理由是让
+header 里出现荒谬值时在构造期就拒，而不是打出一局看不出问题的怪局。
+"""
+
+
+def _catalog_skill_ids() -> frozenset[str]:
+    """``CATALOG`` 的 id 集合（授予的 ``id`` 必须在这里）。
+
+    **延迟 import**：``sgs.skills`` 反向依赖 ``sgs.data``（技能表读武将 / 规则数据），
+    模块级 import 会成环。同一姿态见 ``sgs.data.values`` 里那两处 ``from sgs.skills import
+    CATALOG``。只有真带 ``grants`` 的配置才会付这次 import。
+    """
+    from sgs.skills import CATALOG
+
+    return frozenset(CATALOG)
+
 
 class PveVictory(BaseModel):
     """逐场胜负条件：条件本身 + 它的参数（``rounds``）。
@@ -84,8 +116,9 @@ class PveVictory(BaseModel):
 class SkillGrant(BaseModel):
     """战斗开局授予的一项技能 / 遗物（位置由票 01 §9 钉在 header 里）。
 
-    字段形状照票 03 §3 / 票 09：``{seat, kind, id}``。**校验矩阵归票 09**（每座技能 ≤4、
-    遗物 ≤6、``id`` 在 ``CATALOG`` 里、遗物只授主角）——本票只落骨架，不预设那些语义。
+    字段形状照票 03 §3 / 票 09：``{seat, kind, id}``。**校验矩阵已落地**（M7 票 09，
+    见 :meth:`PveConfig._grants_fit_the_growth_limits`）：每座技能 ≤4、遗物 ≤6、
+    ``id`` 在 ``CATALOG`` 里、无重复、遗物只授主角、座位在表内。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -104,8 +137,12 @@ class PveSeat(BaseModel):
     """PvE 的**逐座位合成武将**与属性加成（票 03 §3 / 票 10：那里叫 ``SeatSpec``）。
 
     敌人不是武将表里的武将而是「模板 + 抽到的技能 + 属性加成」，故这些事实必须逐座
-    进 header。**校验矩阵（长度 / 数值区间 / 与 ``identities`` 对位）归票 10**——本票只落
-    骨架，不预设合成武将的取值规则。
+    进 header（否则录像重建不出同一场）。**校验矩阵见下面的几个校验器**（M7 票 10）：
+    合成武将必须有名字、数值区间合法、初始体力不得越过有效上限；长度与
+    ``identities`` 的对位由 :meth:`PveConfig._seats_line_up_with_the_identities` 管。
+
+    三档加成是**座位常驻修饰**（票 03 §10.2）：开局写定、查询期现算、**不落 delta**，
+    与遗物共用同一条修正链（读口见 ``sgs.skills.seat_persistent_bonus``）。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -116,13 +153,48 @@ class PveSeat(BaseModel):
     name: str = ""
     """模板名 / 显示名；有武将时可留空（显示取自武将表）。"""
 
-    hp: int
-    hp_max: int
-    hp_max_bonus: int = 0
-    draw_bonus: int = 0
-    slash_damage_bonus: int = 0
+    hp: int = Field(ge=1, le=_MAX_SEAT_HP)
+    """**初始体力值**：与 ``hp_max`` 分开传，模板可以给"3/4"这种不满体力开局。"""
+
+    hp_max: int = Field(ge=1, le=_MAX_SEAT_HP)
+    """模板的**体力上限**；有效上限 = 它 + ``hp_max_bonus``。"""
+
+    hp_max_bonus: int = Field(default=0, ge=0, le=_MAX_SEAT_BONUS)
+    """常驻**体力上限 +N**（开局写定、局内不变：不发 ``hp_max_change``）。"""
+
+    draw_bonus: int = Field(default=0, ge=0, le=_MAX_SEAT_BONUS)
+    """常驻**摸牌阶段 +N**（``DRAW_COUNT`` 挂点上的座位项）。"""
+
+    slash_damage_bonus: int = Field(default=0, ge=0, le=_MAX_SEAT_BONUS)
+    """常驻**造成伤害 +N**（``DAMAGE_DEAL_AMOUNT`` 挂点上的座位项；【杀】等牌的伤害同样吃）。"""
+
     kingdom: Kingdom | None = None
     gender: Gender | None = None
+
+    @model_validator(mode="after")
+    def _a_composite_seat_carries_its_template_name(self) -> "PveSeat":
+        """``hero`` 为空 = 合成武将：``name`` 是它**唯一**的身份事实（模板名）。
+
+        有武将的座位可以留空名字（显示取自武将表），故这一条只在没有武将时成立。
+        """
+        if self.hero is None and not self.name.strip():
+            raise ValueError(
+                "合成武将必须有 name（hero 为空时它就是模板名）："
+                "敌人不是武将表记录，名字没有别处可取"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_initial_hp_fits_under_the_effective_maximum(self) -> "PveSeat":
+        """``hp`` 可以低于但**不得高于**有效上限（``hp_max + hp_max_bonus``）。"""
+        ceiling = self.hp_max + self.hp_max_bonus
+        if self.hp > ceiling:
+            raise ValueError(
+                f"hp = {self.hp} 越过了有效体力上限 {ceiling}"
+                f"（hp_max {self.hp_max} + hp_max_bonus {self.hp_max_bonus}）："
+                "初始体力可以不满，但不能超过上限"
+            )
+        return self
 
 
 class PveConfig(BaseModel):
@@ -152,10 +224,11 @@ class PveConfig(BaseModel):
     """Boss 座位：只属于 ``SLAY_BOSS``，且必须是 ``ENEMY``。"""
 
     grants: tuple[SkillGrant, ...] = ()
-    """战斗开局的技能 / 遗物授予（语义与校验归票 09）。"""
+    """战斗开局的技能 / 遗物授予（M7 票 09 落地：校验矩阵见
+    :meth:`_grants_fit_the_growth_limits`，开局写入见 ``engine.game._apply_opening_grants``）。"""
 
     seats: tuple[PveSeat, ...] = ()
-    """逐座位合成武将与属性加成（语义与校验归票 10）。"""
+    """逐座位合成武将与属性加成（M7 票 10；语义与校验见 :meth:`_seats_line_up_with_the_identities`）。"""
 
     def seats_of(self, side: Identity) -> tuple[int, ...]:
         """属于 ``side`` 的座位（座位升序，**含已阵亡者**）。
@@ -163,6 +236,25 @@ class PveConfig(BaseModel):
         胜负的 ``winners`` 要列出全侧座位（与身份局同口径），故这里不筛存活。
         """
         return tuple(seat for seat, identity in enumerate(self.identities) if identity is side)
+
+    @model_validator(mode="after")
+    def _seats_line_up_with_the_identities(self) -> "PveConfig":
+        """座位表要么**整份缺席**，要么**逐座位齐全**（M7 票 10）。
+
+        - 空 = 老 PvE 局的形态（票 07/08/09），不强制升级；
+        - 非空 ⇒ 长度必须等于 ``identities`` 的长度：两张表是**同一批座位**的两面
+          （谁友谁敌 / 每座是谁），错位一格就会把敌人的属性装到友军身上。
+
+        与 ``player_count`` 的对位由 :meth:`RuleConfig._pve_section_matches_the_mode`
+        经 ``identities`` 那一关兑现——**座位数的唯一真源仍是 ``player_count``**。
+        """
+        if self.seats and len(self.seats) != len(self.identities):
+            raise ValueError(
+                f"seats 的长度必须等于 identities 的长度："
+                f"实得 {len(self.seats)} vs {len(self.identities)}"
+                "（座位表与阵营表是同一批座位的两面）"
+            )
+        return self
 
     @model_validator(mode="after")
     def _only_the_two_campaign_sides(self) -> "PveConfig":
@@ -225,6 +317,79 @@ class PveConfig(BaseModel):
                 raise ValueError("rounds 必须是正整数轮次")
         elif rounds is not None:
             raise ValueError(f"{self.victory.kind.value} 不接受 rounds")
+        return self
+
+    @model_validator(mode="after")
+    def _grants_fit_the_growth_limits(self) -> "PveConfig":
+        """开局授予的**整张校验矩阵**（M7 票 09；票 02 §10.5 / 票 03 §3）。
+
+        位置不变（票 01 已钉：``grants`` 必须在 header 里，否则录像重建不出同一局），
+        本校验器只往下填语义。逐条 fail-closed：
+
+        1. ``seat`` 落在 ``[0, len(identities))``——越界座位会在 ``build_initial`` 变成越界写；
+        2. ``id`` 在 ``CATALOG`` 里（**两档来源同一条判据**：``kind`` 只说这条 id 走哪根
+           载体，不改变"它必须是已登记的技能 / 遗物"这个要求）；
+        3. 每座位的技能 ≤ 4、遗物 ≤ 6（逐座位，不是全场总量）；
+        4. 同一座位的同一 ``id`` 只许出现一次（跨 ``kind`` 也算重复：同一条效果不能既算
+           出战技能又算遗物）；
+        5. 遗物**只授给主角座位**——遗物栏属于玩家本人，AI 队友 / 敌人不拿遗物；
+        6. **NPC 技能只授敌方座位**（M7 票 27；票 02 §7）——载体为 ``NPC`` 的 id（四条
+           ``npc.*``）落在 ``ALLY`` 座位上 ⇒ 拒。判据是**载体**而不是 ``kind``：把一条
+           NPC id 塞进遗物位送给主角同样拒（座位 0 是主角，"遗物只授主角"那条会放行，
+           拦住它的是这一条）。
+        """
+        if not self.grants:
+            return self
+        from sgs.skills import npc_skill_ids
+
+        seats = len(self.identities)
+        catalog_ids = _catalog_skill_ids()
+        npc_ids = npc_skill_ids()
+        for index, grant in enumerate(self.grants):
+            if not 0 <= grant.seat < seats:
+                raise ValueError(
+                    f"grants[{index}].seat = {grant.seat} 越界：必须落在 "
+                    f"[0, {seats}) 内（identities 的长度就是座位数）"
+                )
+            if grant.id not in catalog_ids:
+                raise ValueError(
+                    f"grants[{index}].id = {grant.id!r} 不在 CATALOG 里："
+                    f"{grant.kind} 授予必须点名一个已登记的技能 / 遗物"
+                )
+        counts: dict[tuple[int, str], int] = {}
+        for grant in self.grants:
+            key = (grant.seat, grant.kind)
+            counts[key] = counts.get(key, 0) + 1
+            limit = _MAX_GRANTS_PER_SEAT[grant.kind]
+            if counts[key] > limit:
+                label = "技能" if grant.kind == "skill" else "遗物"
+                raise ValueError(
+                    f"座位 {grant.seat} 的{label}授予最多 {limit} "
+                    f"{'条' if grant.kind == 'skill' else '件'}（实得 {counts[key]}）："
+                    f"逐座位上限，不是全场总量"
+                )
+        seen: set[tuple[int, str]] = set()
+        for grant in self.grants:
+            key = (grant.seat, grant.id)
+            if key in seen:
+                raise ValueError(
+                    f"座位 {grant.seat} 重复授予了 {grant.id!r}："
+                    "同一座位的同一个 id 只许出现一次"
+                )
+            seen.add(key)
+        for grant in self.grants:
+            if grant.kind == "relic" and grant.seat != self.principal:
+                raise ValueError(
+                    f"遗物只能授给主角座位（principal = {self.principal}）："
+                    f"grants 里的遗物落在座位 {grant.seat}"
+                )
+        for grant in self.grants:
+            if grant.id in npc_ids and self.identities[grant.seat] is not Identity.ENEMY:
+                raise ValueError(
+                    f"NPC 技能只能授给敌方座位（enemy）：座位 {grant.seat} 是 "
+                    f"{self.identities[grant.seat].value}，却拿到 {grant.id!r}"
+                    "（票 02 §7：npc.* 只进敌人模板 / 敌方座位的 grants）"
+                )
         return self
 
 

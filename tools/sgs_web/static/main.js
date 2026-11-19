@@ -86,6 +86,17 @@ function wire() {
   loadHeroCatalog();
   loadHeroPools();
   loadDeckCatalog();
+  // M7 票 20：剧本模式的开局页（三态入口 + 摘要行 + 坏档修复 + 两个确认框）。首屏就取一次
+  // `GET /api/script-save`——三态是服务端事实，开局页一进来就要画对（不是点开才查）。
+  wireScriptLobby();
+  // M7 票 21：棋盘视图（刷新 / 离开棋局两个键；节点图的悬停与点击由渲染器逐节点挂）。
+  wireScriptBoard();
+  // M7 票 22：整备面 + 结算 / 选择弹窗 + 事件 / 商店 / 问号揭晓（「丢弃」是唯一的静态键；
+  // 24 格、货架、候选、结果行都由 `script-loadout.js` 按棋盘体现铺）。
+  wireScriptLoadout();
+  // M7 票 25：剧本编辑器（实体列表 / 网格拖放 / 画边 / 校验面板）。首屏**不**读库
+  // （作者面按「剧本编辑器」入口现读）；这里只挂静态键与三个导航键。
+  wireScriptEditor();
   $("lobby-form").addEventListener("submit", startGame);
   $("btn-pool-save").addEventListener("click", saveHeroPool);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；

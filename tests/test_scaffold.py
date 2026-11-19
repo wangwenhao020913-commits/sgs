@@ -1,4 +1,4 @@
-"""脚手架：包可导入、八个子包齐备、子包边界纪律成立。"""
+"""脚手架：包可导入、九个规则层子包齐备、子包边界纪律成立。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ SUBPACKAGES = (
     "skills",
     "engine",
     "agents",
+    "script",
 )
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "sgs"
@@ -81,6 +82,56 @@ def _owner_subpackage(path: Path) -> str | None:
     if len(parts) >= 2 and parts[0] in SUBPACKAGES:
         return parts[0]
     return None
+
+
+def test_no_source_file_imports_the_tools_tree():
+    """规则层只住在 ``src/sgs/``：``tools/`` 是接入层（HTTP / I/O / 时钟），不得反向依赖。
+
+    跨子包深导扫描只看 ``sgs.*`` 这一个方向；这一条补上"往上爬"的反向（票 16 的验收：
+    新子包只在 ``src/sgs/`` 内依赖既有子包，不反向依赖 ``tools/``）。
+    """
+    offenders: list[str] = []
+    scanned = 0
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        scanned += 1
+        for module, lineno in _imported_top_level_modules(path):
+            if module == "tools":
+                offenders.append(f"{path.relative_to(SOURCE_ROOT)}:{lineno} 导入了 {module}")
+
+    assert not offenders, "规则层 import 了接入层（tools/）：" + "；".join(offenders)
+    assert scanned >= 10, f"只扫到 {scanned} 个源文件；SOURCE_ROOT 可能指错了"
+
+
+def test_the_tools_scan_goes_red_on_a_tools_import():
+    """合成反例：扫描必须真的认出 ``tools`` 导入（防"永远为空 ⇒ 空转也算通过"）。"""
+    offenders = [
+        module
+        for module, _ in _imported_top_level_modules_from_source("from tools.sgs_web import serve")
+        if module == "tools"
+    ]
+
+    assert offenders == ["tools"]
+
+
+def _imported_top_level_modules(path: Path) -> Iterator[tuple[str, int]]:
+    """文件里出现的**顶层**模块名（``import a.b`` 与 ``from a.b import c`` 都算 ``a``）。"""
+    yield from _imported_top_level_modules_from_source(
+        path.read_text(encoding="utf-8"), filename=str(path)
+    )
+
+
+def _imported_top_level_modules_from_source(
+    source: str, *, filename: str = "<memory>"
+) -> Iterator[tuple[str, int]]:
+    for node in ast.walk(ast.parse(source, filename=filename)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name.split(".")[0], node.lineno
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # 相对导入天然留在同一子包内
+                continue
+            if node.module:
+                yield node.module.split(".")[0], node.lineno
 
 
 def test_the_leaf_primitives_never_reach_for_the_resolution_stack():

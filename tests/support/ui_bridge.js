@@ -96,6 +96,44 @@
     "poolBlockReason", "syncPoolHint",
     // M5-01b：开局页牌堆档位——列表拉取（选项/文案全来自服务端 GET /api/decks）
     "loadDeckCatalog", "fillDeckOptions",
+    // M7 票 20：剧本模式的开局页——三态回包 / 摘要行文案 / 三态纯派生 + 五个动作与两个确认框。
+    // 烟测走真 DOM 点击与真端点（建 / 续 / 删 / 恢复档都打到服务端）；只从桥上调**没有可见
+    // 按钮**的那几个口：退出确认框（入口归票 21 的牌桌）与纯函数（摘要 / 三态派生）。
+    "scriptLoadSave", "scriptApplySave", "scriptSummaryText", "scriptLobbyView",
+    "scriptNewScript", "scriptOpenPicker", "scriptChooseScript", "scriptChooseHero",
+    "scriptCreateRun", "scriptContinueRun", "scriptAbandonSave", "scriptRestoreBackup",
+    "scriptExitConfirm", "scriptSuspend", "scriptClosePicker", "scriptCloseConfirm",
+    "wireScriptLobby",
+    // M7 票 21：棋盘 + **共用**节点图渲染器（棋盘与编辑器同一个入口，D26）。
+    // 烟测要断"两处调的是同一个函数"（`scriptGraphDrawCount()` 的读数）、两档宽度下的几何
+    // 不重叠（`scriptGraphLayout` 的纯函数面）、以及点节点 / 刷新 / 死路错误行的真路径。
+    "scriptGraphRender", "scriptGraphLayout", "scriptGraphDrawCount", "SCRIPT_GRAPH_ICON_PX",
+    "SCRIPT_GRAPH_CELL_W", "SCRIPT_GRAPH_CELL_H", "SCRIPT_GRAPH_TITLE_H",
+    "scriptGraphNodeState", "scriptGraphIconMarkup", "scriptGraphEdgeLabel",
+    "scriptBoardShow", "scriptBoardRender", "scriptBoardRefresh", "scriptBoardEnterNode",
+    "scriptBoardSync", "wireScriptBoard",
+    // M7 票 22：整备面 / 结算与选择弹窗 / 事件 · 商店 · 问号揭晓三面。烟测读的只有形状常量
+    // （24 格 = 8 列 × 3 行 / 遗物 ≤6）与"进节点后不可编辑"的判据；DOM 走真点击。
+    "SCRIPT_BACKPACK_SLOTS", "SCRIPT_LOADOUT_COLS", "SCRIPT_LOADOUT_ROWS",
+    "SCRIPT_RELIC_SLOTS", "SCRIPT_ITEM_KIND_LABELS",
+    "scriptLoadoutState", "scriptLoadoutEditable", "scriptLoadoutSync", "scriptLoadoutRender",
+    "scriptBackpackFull", "scriptRelicFull", "scriptItemRow",
+    "scriptLoadoutSwap", "scriptLoadoutDiscard", "scriptLoadoutPut",
+    "scriptFaceRender", "scriptFaceRevealInner", "scriptSettleOpenBattle", "scriptSettleSubmit",
+    "scriptLoadoutAfterEnter", "wireScriptLoadout",
+    // M7 票 23：棋盘 ↔ 牌桌的换场（战斗就是现有牌桌）+ 牌桌侧的三处显示 / 只读遗物栏。
+    // 烟测走真端点：`scriptBoardEnterNode` 之后自动进牌桌，打完点「回棋盘结算」走既有结算流程。
+    "startSessionView", "scriptBattleEnter", "scriptBattleReturnToBoard",
+    "scriptBattleTableSync", "scriptBattleFinished",
+    "pveGlobalText", "pveGlobalNode", "heroNameOf",
+    // M7 票 25：编辑器（实体列表 / 网格拖放 / 画边 / 校验面板）。烟测走真 DOM 点击与真端点；
+    // 桥只额外挂**没有可见按钮**的纯入口（选择 / 编辑 / 拖放 / 画边 / 解除 / 跳字段 / 重读）。
+    "scriptEditorShow", "scriptEditorLoad", "scriptEditorRender", "scriptEditorReload",
+    "scriptEditorChoose", "scriptEditorEdit", "scriptEditorNew", "scriptEditorSave",
+    "scriptEditorCancel", "scriptEditorClone", "scriptEditorRename", "scriptEditorDelete",
+    "scriptEditorSaveGrid", "scriptEditorDrawEdge", "scriptEditorUnlinkEdge",
+    "scriptEditorSetEdgeRequires", "scriptEditorJump", "wireScriptEditor",
+    "SCRIPT_EDITOR_KINDS",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

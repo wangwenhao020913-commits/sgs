@@ -85,6 +85,7 @@ from .display import (
     SUIT_LABELS,
     card_lookup_from_query,
     card_payload,
+    catalog_skill_name,
     decorate_pending,
     decorate_snapshot,
     hero_card_display,
@@ -619,6 +620,9 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         concealed=concealed_guohuo_cards(session.engine),
         # 票 26：座位卡的全局距离增减（现算、只读；0 时前端不画节点）。
         distance_bonuses=_seat_distance_bonuses(state),
+        # M7 票 23：剧本战斗的三处显示（友 / 敌、模板名、副本全局技能标签）由 header 里的
+        # `PveConfig` 派生；身份局传 None，座位载荷与引入前逐字同形。
+        pve=_session_pve(session),
     )
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
     # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
@@ -652,7 +656,37 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     # （票 11 已核）。故与技能清单同姿态：只在本函数里补进**网页载荷**，记录流不动。
     payload["round"] = int(state.round)
     payload["turn_extra"] = bool(state.turn_extra)
+    # M7 票 23：**只读遗物列表**（本票唯一的投影增量）。`Player.relics` 是公开事实但
+    # `PlayerView` 里没有它（AI 读面不许长行、记录流也不该多字节），故与 `round` 同姿态
+    # 只补进网页载荷；名字走既有的 `_skill_display_name`（查不到原样印 id，不编名字）。
+    payload["relics"] = _relic_display(state, session.human_seat)
     return payload
+
+
+def _session_pve(session: Any) -> PveConfig | None:
+    """会话的 PvE 配置（header 里的 ``RuleConfig.pve``）；没有会话配置 ⇒ ``None``。
+
+    合成会话（单测里的 ``SimpleNamespace(engine=..., human_seat=..., pack=...)``）没有
+    ``rule_config``：与身份局同形——三处显示全空。这是 fail-closed 的缺省，不是按模式猜。
+    """
+    return getattr(getattr(session, "rule_config", None), "pve", None)
+
+
+def _relic_display(state: Any, seat: int) -> list[dict[str, Any]]:
+    """人类座位的**遗物栏**（M7 票 23）：只读显示行 ``[{id, name}]``。
+
+    ``Player.relics`` 是开局由 ``PveConfig.grants`` 写进座位的**公开事实**（票 09；遗物就是
+    技能，但住独立遗物栏），引擎状态里一直有它、网页载荷此前没有通道。这里只读、不派发
+    任何写入；标准局 / 没有遗物的座位给空表（不是 ``None``——"没有遗物"是一个显示事实）。
+
+    名字复用 :func:`_skill_display_name`（``equip.<牌名 id>`` 取牌名、武将技能取中文名），
+    它查不到时返回 ``None`` ⇒ 原样印 id（弹窗 / 棋盘那一侧同一条兜底）。
+    """
+    player = state.player(seat)
+    return [
+        {"id": relic, "name": _skill_display_name(state, relic) or relic}
+        for relic in player.relics
+    ]
 
 
 _SETUP_EMPTY_ZONES: tuple[str, ...] = ("equip", "judge", "hero_zones")
@@ -1654,10 +1688,17 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
     **合成定义**（「标签自身效果」这类不在武将表技能清单里的定义，命名 ``<来源>_mark``）
     按**来源技能**的中文名取：``hero.feng_yujin.dingluan_mark`` ⇒ 「定乱」、
     ``hero.shen_ganning.jieying_mark`` ⇒ 「劫营」（用户 2026-11-07 报障：原先退回整串 id）。
+
+    **统一兜底**（M7 票 34）：上面几条路都查不到的 id（遗物 ``relic.*``、NPC ``npc.*``，
+    以及将来任何新来源）按 ``CATALOG`` 那条定义的显示文本取名（
+    :func:`~sgs_web.display.catalog_skill_name`）——判据只是 "id 在 ``CATALOG`` 里"，
+    **不按前缀特判**；查不到定义 / 定义没有文案仍返回 ``None``（调用方原样印 id，既有
+    fail-soft 不变）。标准局里这些 id 不会出现 ⇒ 身份局载荷逐字节不变。
     """
     head = skill_id.split(":", 1)[0]
     if head.startswith("equip."):
-        return _card_type_name(state, head[len("equip.") :])
+        card_name = _card_type_name(state, head[len("equip.") :])
+        return card_name if card_name is not None else catalog_skill_name(head)
     parts = head.split(".")
     short = parts[-1]
     heroes = load_hero_tables(state.pack_id)
@@ -1679,7 +1720,7 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
     name = lookup(short)
     if name is None and short.endswith("_mark"):
         name = lookup(short[: -len("_mark")])
-    return name
+    return name if name is not None else catalog_skill_name(head)
 
 
 def _frame_targets(data: dict[str, Any]) -> list[int]:
@@ -3478,6 +3519,8 @@ def pending_payload(
             if isinstance(session, Session)
             else None
         ),
+        # M7 票 23：嵌在询问里的座位卡同样要画友 / 敌与模板名（裸 Query 没有 header ⇒ None）。
+        pve=_session_pve(session) if isinstance(session, Session) else None,
     )
     if isinstance(session, Session) and same_viewer:
         # 只给**自己的**询问载荷补标签；foreign（409 里附带的别人的现状）连标签也不带。

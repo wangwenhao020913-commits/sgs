@@ -832,6 +832,37 @@ button.mini-slot { cursor: pointer; }
 /* B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 */
 .hero-tags { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0; }
 .hero-tags[hidden] { display: none; }
+
+/* ---------- 剧本战斗（PvE）的显示位（M7 票 23）----------
+ * 三处显示里挂到座位上的两处（副本全局技能标签 / 模板名由 `.hero-name` 承担）+ 只读遗物栏
+ * + 打完之后的出口。**身份局这三个节点都收起**（`hidden`），故既有牌桌版式逐字节不变：
+ * 尺寸走设计单位、颜色只借既有的 `--dim` / `--ink` / `--line`，不新造配色变量。 */
+.pve-global {
+  margin-top: 2px; padding: 0 calc(4 * var(--dsu));
+  border: 1px solid #e3d3b4; border-radius: 4px;
+  background: #fbf4e6; color: #7a5a20;
+  font-size: calc(9 * var(--dsu)); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pve-global:empty { display: none; }
+.pve-relics {
+  display: flex; align-items: baseline; gap: calc(4 * var(--dsu));
+  margin-top: 2px; font-size: calc(9 * var(--dsu)); color: var(--dim);
+  overflow: hidden; white-space: nowrap;
+}
+.pve-relics[hidden] { display: none; }
+.pve-relic-label { flex: 0 0 auto; color: var(--dim); }
+.pve-relic-list {
+  flex: 1 1 auto; min-width: 0; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pve-return {
+  margin-top: 3px; padding: 1px calc(6 * var(--dsu));
+  font: inherit; font-size: calc(10 * var(--dsu));
+  border: 1px solid var(--line); border-radius: 4px;
+  background: #fffdf8; color: var(--ink); cursor: pointer;
+}
+.pve-return[hidden] { display: none; }
 .hero-tag {
   padding: 0 4px; border: 1px solid #c9b48f; border-radius: 999px;
   background: #f7efdf; color: #7d6b52;
@@ -1931,3 +1962,243 @@ button.avatar-skill:hover { border-color: var(--accent); }
 @media (max-height: 560px) {
   .table-hint { display: block; }
 }
+
+/* ---------------------------------------------------------------------------
+ * 剧本模式的开局页（M7 票 20 / spec §4「开局页增量叠加」）
+ *
+ * 既有三块（开一局 / 将池预设 / 已有录像）的样式**一个字没动**——这一节全是新类名。
+ * 三态的可见性由 `script-lobby.js:scriptRender` 显式写 `hidden`（不靠 CSS 猜状态）。
+ * ------------------------------------------------------------------------- */
+.script-panel .row { margin-top: 8px; }
+/* 摘要行（`ok` 才有）：剧本名 · 大节 k/m · 已结算节点数 · 铜钱 · saved_at。一行读得完。 */
+.script-summary { margin: 8px 0 0; font-size: 14px; }
+/* 坏档的那一行**红字**（票 04 §5：坏档不静默）。颜色与强调色 `--accent` 分开带走——红字
+ * 是"这一屏出了事"，与按钮的强调色不是一回事。 */
+.script-reason { margin: 8px 0 0; color: #b3261e; font-weight: 600; }
+.script-broken .row { margin-top: 6px; }
+.script-broken .row button { padding: 4px 11px; font-size: 14px; }
+/* 3 选 1 那一段：标签用胶囊，与将池的版本格同姿态（选中态用浅强调色，不改变布局）。 */
+.script-picker { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.script-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.script-choice { border-radius: 999px; padding: 3px 12px; font-size: 14px; }
+.script-choice.on { background: var(--accent-soft); border-color: var(--accent); }
+/* 确认框（撞旧档三选一 / 退出战斗）：自己的遮罩 + 居中窗口。开局页没有牌桌那套
+ * `#t-modal-*`，故这是开局页自己的模态，`z-index` 与牌桌的弹窗同档。 */
+.script-confirm-backdrop {
+  position: fixed; inset: 0; background: rgba(28, 26, 23, .38); z-index: 60;
+}
+.script-confirm {
+  position: fixed; inset: 0; z-index: 61;
+  display: flex; align-items: center; justify-content: center; pointer-events: none;
+}
+/* `display: flex` 会盖掉 `[hidden]` 的 `display: none`，故显式补一条。 */
+.script-confirm[hidden] { display: none; }
+.script-confirm-window {
+  pointer-events: auto; background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 16px 18px; max-width: 460px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .18);
+}
+.script-confirm-title { font-size: 15px; margin: 0 0 8px; }
+.script-confirm-text { margin: 0; }
+.script-confirm .row { justify-content: flex-end; }
+
+/* ---------------------------------------------------------------------------
+ * M7 票 21：剧本棋盘（卡格 + 固定 64×64 只放图标的节点 + 上方标题 + SVG 连线 + 悬浮卡）
+ *
+ * 几何（格宽 / 图标 64×64 / 标题在图标上方）由 `script-board.js:scriptGraphLayout` 现算并
+ * 写成内联样式；这里只钉**尺寸的机械判据**（64×64 = 65,536 px²）、颜色与层级。
+ * 状态色只属于玩家视角的棋盘：五个状态各一条规则，编辑器语境由渲染器按 `mode` 不写类。
+ * ------------------------------------------------------------------------- */
+.script-board-panel { position: relative; }
+.script-board-stage { position: relative; }
+.script-board-graph { position: relative; width: 100%; min-height: 120px; }
+.script-graph-edges, .script-graph-nodes { position: absolute; inset: 0; }
+/* 连线层不吃指针：悬停 / 点击都落在节点按钮上。 */
+.script-graph-edges { pointer-events: none; }
+.script-graph-svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.script-edge { stroke: #cbbfae; stroke-width: 2; }
+.script-edge-label {
+  fill: #7b7266; font-size: 11px; paint-order: stroke;
+  stroke: var(--card); stroke-width: 3px;
+}
+.script-node { position: absolute; }
+/* 标题写在节点**上方**（渲染器给的 top 恒在图标上方）；单行、居中、超长省略。 */
+.script-node-title {
+  position: absolute; display: block; line-height: 20px; height: 20px;
+  font-size: 12px; text-align: center; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 节点统一 64×64、只放图标（票 05 UI-1）；65,536 px² 是判据，不是估计。 */
+.script-node-button {
+  position: absolute; display: flex; align-items: center; justify-content: center;
+  width: 64px; height: 64px; padding: 0; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line); cursor: pointer;
+  color: var(--ink);
+}
+.script-node-icon { display: block; width: 64px; height: 64px; }
+.script-node-icon svg { display: block; width: 64px; height: 64px; }
+/* Boss = 红色感叹号：红是图标（房间语义）的颜色，不是玩家状态色。 */
+.script-icon-boss { color: #c62828; }
+/* 五个状态：已走 / 当前 / 可走 / 关闭 / 去不了（只读服务端字段，由渲染器挂类）。 */
+.script-node-button.st-current { background: #f6e7c8; border-color: #b58b2a; box-shadow: 0 0 0 3px rgba(181, 139, 42, .25); }
+.script-node-button.st-available { background: #eaf4ea; border-color: #4b8b4b; }
+.script-node-button.st-completed { background: #efe9dd; border-color: #a99a86; opacity: .72; }
+.script-node-button.st-closed { background: #f3dede; border-color: #9d4a4a; opacity: .72; }
+.script-node-button.st-blocked { background: #efeee9; border-color: #d5cfc4; color: #9a9188; }
+.script-node-button[disabled] { cursor: default; }
+/* 悬浮关卡信息卡：贴在被悬停节点的侧边（渲染器给 left / top），层级在节点之上。 */
+.script-node-card {
+  position: absolute; z-index: 5; width: 360px; max-height: 380px; overflow: auto;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .16);
+}
+.script-node-card h3 { margin: 0 0 4px; font-size: 15px; }
+.script-node-card p { margin: 4px 0; }
+.script-card-seats, .script-card-enemies, .script-card-options { margin: 6px 0; }
+.script-card-seat { font-size: 12px; padding: 1px 0; }
+.script-card-seat[data-side="ally"] { color: #2f6b2f; }
+.script-card-seat[data-side="enemy"] { color: #8d3a3a; }
+.script-card-enemy { font-size: 12px; padding: 3px 0; border-top: 1px dashed var(--line); }
+.script-card-line { font-size: 12px; }
+.script-card-option { font-size: 12px; padding: 1px 0; }
+
+/* ---------------------------------------------------------------------------
+ * M7 票 22：整备面（24 格 = 3×8 / 出战槽 / 遗物栏 / 铜钱）+ 当前节点的面（事件 / 商店 /
+ * 问号揭晓）+ 结算弹窗的正文槽
+ *
+ * 整备面的几何判据是 `3 行 × 8 列`（`repeat(8` 这一行就是判据）：`#script-loadout-grid`
+ * 的 24 个格子按格序铺进去，前 4 格（= `equipped_slots` 缺省值）带「出战」徽标。
+ * 数字（铜钱 / 价格 / 折价）一律印服务端下发的值，这一节只有版式，没有任何价格的影子。
+ * ------------------------------------------------------------------------- */
+.script-loadout .row { margin-top: 6px; }
+.script-coins { font-weight: 600; color: #8a6a1f; }
+/* 24 格 = 8 列 × 3 行；出战槽常亮强调色边框是"上哪几格"的静态标记。 */
+.script-loadout-grid {
+  display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px; margin-top: 8px;
+}
+.script-slot {
+  display: flex; flex-direction: column; gap: 3px; align-items: flex-start;
+  min-height: 62px; padding: 6px 8px; border-radius: 10px; text-align: left;
+  border: 1px solid var(--line); background: var(--card); font-size: 12px; cursor: pointer;
+}
+.script-slot[data-equipped="1"] { border-color: var(--accent); }
+.script-slot[data-empty="1"] { border-style: dashed; color: #9a9188; cursor: default; }
+.script-slot.on { box-shadow: 0 0 0 2px var(--accent-soft); }
+.script-slot-badge { font-size: 10px; font-weight: 600; color: var(--accent); }
+.script-slot-name { font-size: 12px; line-height: 1.25; word-break: break-word; }
+.script-loadout-relics { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.script-relic {
+  min-width: 120px; padding: 6px 10px; border-radius: 10px; font-size: 12px;
+  border: 1px solid var(--line); background: var(--card);
+}
+.script-relic[data-empty="1"] { border-style: dashed; color: #9a9188; }
+
+/* 当前节点的面：事件选项 / 商店货架 / 问号揭晓共用一套行式版式。 */
+.script-face-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.script-face-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); font-size: 13px; text-align: left;
+}
+.script-face-row[data-owned="1"], .script-face-row[data-full="1"],
+.script-face-row[data-sold="1"] { opacity: .55; }
+.script-face-row .script-face-item { font-weight: 600; }
+.script-face-note { font-size: 12px; color: #7b7266; }
+.script-face-price { font-size: 12px; color: #8a6a1f; font-weight: 600; }
+.script-face-req { font-size: 12px; color: #9d4a4a; }
+
+/* 结算弹窗的正文槽（票 20 的壳只有一个正文段落；三选一 / 遗物 / 结果需要一个列表槽）。 */
+.script-confirm-body { margin-top: 10px; max-height: 46vh; overflow: auto; }
+.script-confirm-body[hidden] { display: none !important; }
+.script-pick {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; margin-top: 6px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); font-size: 13px; text-align: left; cursor: pointer;
+}
+.script-pick[disabled] { cursor: default; opacity: .55; }
+.script-pick-price { font-size: 12px; color: #8a6a1f; }
+/* Boss「失去 4 条出战技能」= **自动落**，不是选项：这块没有按钮、不接点击。 */
+.script-lose {
+  margin-top: 6px; padding: 8px 10px; border-radius: 10px; font-size: 12px;
+  border: 1px dashed #b58b2a; background: #f6e7c8;
+}
+.script-event-row {
+  font-size: 13px; padding: 3px 0; border-top: 1px dashed var(--line);
+}
+.script-event-row:first-child { border-top: none; }
+
+/* ---------------------------------------------------------------------------
+ * M7 票 25：剧本编辑器（实体列表 / 大节页网格拖放 / 画边 / 解除连线 / 校验面板）
+ *
+ * 版式：左栏实体 + 右栏详情 / 大节页 / 校验面板。节点图仍是 `script-board.js` 那一份
+ * （编辑器只在图上叠一层**网格命中格**给拖放用，不画第二条线）。
+ * 校验面板的红字**自己一条规则**（与坏档那行同姿态：颜色写死、不靠继承）。
+ * ------------------------------------------------------------------------- */
+.script-editor-body {
+  display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; align-items: start;
+}
+.script-editor-side, .script-editor-main { min-width: 0; }
+.script-editor-kinds { display: flex; flex-wrap: wrap; gap: 6px; }
+.script-editor-kind {
+  padding: 3px 10px; border-radius: 999px; font-size: 13px;
+  border: 1px solid var(--line); background: var(--card); cursor: pointer;
+}
+.script-editor-kind.on { background: var(--accent-soft); border-color: var(--accent); }
+.script-editor-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 42vh; overflow: auto; }
+.script-editor-row {
+  text-align: left; font-size: 13px; padding: 5px 9px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer;
+}
+.script-editor-row.on { border-color: var(--accent); background: var(--accent-soft); }
+.script-editor-form { margin-top: 10px; }
+.script-editor-form-body { display: flex; flex-direction: column; gap: 6px; }
+.script-editor-field { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.script-editor-field > span { min-width: 150px; }
+.script-editor-field input, .script-editor-field select,
+.script-editor-edge input, .script-editor-edge select,
+.script-editor-pool-row input, .script-editor-pool-row select {
+  font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card);
+}
+.script-editor-field input.on, .script-editor-field select.on {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+.script-editor-summary h3 { margin: 0 0 4px; }
+.script-editor-summary p { margin: 4px 0; }
+/* 校验面板：逐条 `loc · rule_id：期望 …，实得 …`（票 24 的 LoadError 原样），红字是判据。 */
+.script-editor-validation { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.script-editor-errors { display: flex; flex-direction: column; gap: 4px; }
+.script-editor-error {
+  text-align: left; font-size: 12px; padding: 4px 8px; border-radius: 6px;
+  border: 1px solid #e2b6b1; background: #fbeeec; cursor: pointer;
+  color: #b3261e; font-weight: 600;
+}
+/* 大节页：网格命中格在节点图下面（节点 / 连线仍由共用渲染器画）。 */
+.script-editor-layer { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.script-editor-graph { position: relative; width: 100%; min-height: 120px; margin-top: 8px; }
+.script-editor-graph .script-graph-edges { z-index: 1; }
+.script-editor-graph .script-graph-nodes { z-index: 2; }
+.script-editor-cells { position: absolute; inset: 0; z-index: 0; }
+.script-editor-cell { border: 1px dashed rgba(0, 0, 0, .06); border-radius: 10px; }
+.script-editor-edge, .script-editor-pool-row, .script-editor-skill-row,
+.script-editor-ally-row, .script-editor-enemy-row, .script-editor-global-row,
+.script-editor-option-row, .script-editor-ref-row {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); font-size: 12px;
+}
+.script-editor-edges, .script-editor-pools, .script-editor-skills,
+.script-editor-seats, .script-editor-globals, .script-editor-options,
+.script-editor-refs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.script-editor-edge-label { font-weight: 600; }
+.script-editor-edge-cond { color: #7b7266; }
+.script-editor-tree { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.script-editor-tree-layer {
+  text-align: left; font-size: 13px; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--accent-soft); cursor: pointer;
+}
+.script-editor-tree-node { font-size: 12px; padding: 1px 0 1px 18px; color: #5b544b; }
+.script-editor-reference { font-size: 12px; padding: 3px 0; border-top: 1px dashed var(--line); color: #8d3a3a; }
+.script-editor-reference:first-child { border-top: none; }
+.script-editor-random-hint { font-size: 12px; color: #8a6a1f; }
