@@ -2582,3 +2582,62 @@ def test_a_pass_on_a_mixed_face_declines_the_optional_and_keeps_the_forced(monke
     assert _face_has_pass(_activation_queries(engine)[0]), (
         "面里有可放弃的段 ⇒ 有 Pass，它只放弃那一段"
     )
+
+
+def test_a_marker_effect_can_declare_the_hero_tier_for_the_order_face(monkeypatch):
+    """``SkillDef.dispatch_tier``：标记载体的段可以**声明**参与武将档，与武将技同面上脸。
+
+    判据来自界徐盛【破军】的归还段（yijiang-2011-xusheng-chunhua 票 91）：标记自身效果
+    整体排在最后一档（连续型加成本来最后叠加），但**一次性强制段**按牌面要与所在座位
+    自己的同时机技能并列。本用例合成两条 ``GAME_START`` 强制段——一条武将档、一条
+    ``carrier=MARKER``——先按缺省档跑（两档 ⇒ 各自单独跑、**不上脸**），再给标记那条写
+    ``dispatch_tier=HERO``（同档 ⇒ 出一张"选先后"的面）。这就是本字段的能红回归。
+    """
+    from sgs.effects import CarrierKind, PriorityClass
+    from sgs.skills import Hook, SkillDef
+
+    order: list[str] = []
+    hero_id = "hero.fake.tier_hero"
+    mark_id = "hero.fake.tier_marker"
+
+    def _definition(skill_id: str, *, tier: PriorityClass | None) -> SkillDef:
+        def handler(host, frame, skill_id=skill_id):
+            del host, frame
+            order.append(skill_id)
+            return None
+
+        return SkillDef(
+            skill_id=skill_id,
+            locked=False,
+            carrier=CarrierKind.HERO if skill_id == hero_id else CarrierKind.MARKER,
+            dispatch_tier=tier,
+            hooks=(Hook(Timing.GAME_START, handler=handler, forced=True),),
+        )
+
+    # ① 缺省档：标记段排在最后一档 ⇒ 与武将段不同档 ⇒ 各自单独跑，不上脸。
+    _install_fake_skills(
+        monkeypatch, _definition(hero_id, tier=None), _definition(mark_id, tier=None)
+    )
+    engine = _activation_engine(hero_id, mark_id)
+    script = _FaceScript()
+    _drive(engine, script, lambda e: len(order) == 2)
+    assert script.faces == [], "两档的段不拼面（各自单独跑）"
+    assert not _activation_queries(engine), "两档就绪时不该有 SKILL_ACTIVATION 询问"
+
+    # ② 声明成武将档 ⇒ 同一张面，没有 Pass（两条都不可放弃）。
+    order.clear()
+    _install_fake_skills(
+        monkeypatch,
+        _definition(hero_id, tier=None),
+        _definition(mark_id, tier=PriorityClass.HERO),
+    )
+    engine = _activation_engine(hero_id, mark_id)
+    script = _FaceScript(mark_id)
+    _drive(engine, script, lambda e: len(order) == 2)
+
+    assert len(script.faces) == 1, "同档的两段强制效果 ⇒ 出一张「先结哪一条」的面"
+    assert set(script.faces[0]) == {hero_id, mark_id}
+    assert order[0] == mark_id, "先选标记段 ⇒ 先跑它（次序归玩家）"
+    assert not _face_has_pass(_activation_queries(engine)[0]), (
+        "两条都是不可放弃的强制段 ⇒ 面里没有 Pass"
+    )

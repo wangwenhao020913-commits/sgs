@@ -84,6 +84,8 @@ from support import (
 PACK = load_content_pack(deck_profile="standard_108")
 
 JIE_LUXUN = "jie_luxun"
+XUSHENG_POJUN = "hero.xusheng_mobile.pojun"
+"""徐盛移动版【破军】（yijiang-2011-xusheng-chunhua 票 01）：跨座位放置区 + 回合末归还。"""
 JIE_QIANXUN = "hero.jie_luxun.qianxun"
 SIDI = "hero.caozhen_mobile.sidi"
 """yijiang-2014-round3 票 03：曹真移动版【司敌】——第三个放置类技能（`return_timing = never`：
@@ -272,7 +274,14 @@ def _jie_errors(raw: dict[str, Any]) -> tuple:
 def test_every_placement_skill_declares_the_three_facts():
     """登记表 ⇔ 代码标记：每个放置类技能恰有一条数据声明，且三项都在。"""
     declared = hero_placement_decls()
-    assert set(declared) == set(PLACEMENT_SKILL_IDS) == {JIE_QIANXUN, QIXING, SIDI}
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（区域挂在**目标**武将牌上、
+    # 归还收件人 = 目标本人）。
+    assert set(declared) == set(PLACEMENT_SKILL_IDS) == {
+        JIE_QIANXUN,
+        QIXING,
+        SIDI,
+        XUSHENG_POJUN,
+    }
     for skill_id, decl in declared.items():
         definition = CATALOG[skill_id]
         assert definition.places_on_hero_card is True, skill_id
@@ -1087,6 +1096,40 @@ def test_the_placement_primitive_is_cross_seat_and_returns_to_the_skill_owner() 
 
     assert engine.state.hero_zone(0, cross) == ()
     assert engine.state.player(1).hand == [0, 1], "归还给放置技能的持有者（不是武将牌主人）"
+
+
+def test_the_return_can_be_scoped_to_one_holder_and_one_skill() -> None:
+    """归还原语的两个过滤器（yijiang-2011-xusheng-chunhua 票 91）：这一趟**只还我的那个区**。
+
+    为什么需要：放置区可以挂在**别人**的武将牌上（界徐盛【破军】把目标的牌放在目标身上，
+    归还段由**目标**座位上的标记效果触发）。一次同时机的段若顺手把别人的区也还了，
+    "先结哪一条"的顺序面就没有意义。过滤器缺省 ``None`` ⇒ 与既有的整批归还逐字相同。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3), SeatSpec(hand=(0, 1))],
+        deck=deck_excluding(PACK, 0, 1),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=7)
+    zone = hero_card_zone_key(1, JIE_QIANXUN)  # 座位 1 的技能实例，扣在座位 1 自己身上
+    assert (
+        engine.place_on_hero_card(
+            None, owner=1, skill_id=JIE_QIANXUN, holder=1, cards=state.refs((0, 1))
+        )
+        is None
+    )
+
+    engine.return_hero_card_zones(holder=0)  # 另一个宿主：不匹配
+    assert engine.state.hero_zone(1, zone) == (0, 1), "宿主不匹配 ⇒ 一个区都不还"
+
+    engine.return_hero_card_zones(skill_id="hero.nobody.else")  # 另一条技能：不匹配
+    assert engine.state.hero_zone(1, zone) == (0, 1), "技能不匹配 ⇒ 一个区都不还"
+
+    engine.return_hero_card_zones(holder=1, skill_id=JIE_QIANXUN)
+    assert engine.state.hero_zone(1, zone) == ()
+    assert engine.state.player(1).hand == [0, 1], "匹配两个过滤器 ⇒ 照常还给持有者"
 
 
 def test_placing_no_cards_is_a_no_op_and_does_not_create_a_zone() -> None:

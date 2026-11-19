@@ -133,6 +133,11 @@ SHAN_HEROES = load_heroes("shan")
 """**神话再临·山包**那一份（shan-baozuoci 票 04 起）：独立系列包，版本字段 ``shan``、
 显示名**不加**版本后缀（左慈 / 化身 / 新生）。"""
 
+YIJIANG_2011_MOBILE_HEROES = load_heroes("yijiang_2011_mobile")
+"""**一将成名-2011·移动版** 那一份（yijiang-2011-xusheng-chunhua 票 01 起）：与
+``yijiang_2014_mobile`` 同一姿态（独立移动版表、版本字段 ``yijiang-2011-mobile``、显示名加
+「移动版」后缀）；首个载体 = 徐盛移动版【破军】（用户 2026-11-20 签 = 移动版文本）。"""
+
 BINGSHI_JIE_HEROES = load_heroes("bingshi_jie")
 """**兵势篇-节包**那一份（bingshi-jie 票 01 起）：独立系列包，版本字段 ``bingshi-jie``、
 显示名用系列前缀「势赵云」（真名赵云，与标准 / 界赵云版本并存）。"""
@@ -222,6 +227,10 @@ SHIJI_ZHI_ENABLED = tuple(
 
 BINGSHI_JIE_ENABLED = tuple(
     hero.id for hero in BINGSHI_JIE_HEROES.heroes if hero.enabled
+)
+
+YIJIANG_2011_MOBILE_ENABLED = tuple(
+    hero.id for hero in YIJIANG_2011_MOBILE_HEROES.heroes if hero.enabled
 )
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
@@ -332,9 +341,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 212 不变（遗物不在武将那半），装备 22 不变。
     # m7-script-mode 票 27：**NPC 技能** 4 条（`carrier = NPC`，`npc.*`）⇒ 242 → 246；
     # 武将技 212 / 装备 22 都不变（NPC 技能只授敌方座位，不在武将那半）。
-    assert len(CATALOG) == 246
+    assert len(CATALOG) == 248
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 212
+    assert len(heroes) == 213
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -363,6 +372,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             SHAN_HEROES,
             SHIJI_ZHI_HEROES,
             BINGSHI_JIE_HEROES,
+            YIJIANG_2011_MOBILE_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -386,7 +396,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
     # bingshi-jie 票 01：势赵云两条 ⇒ 208 → 210。
-    assert len(expected) == 212
+    assert len(expected) == 213
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -412,6 +422,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(SHAN_ENABLED)
         | set(SHIJI_ZHI_ENABLED)
         | set(BINGSHI_JIE_ENABLED)
+        | set(YIJIANG_2011_MOBILE_ENABLED)
     )
     for definition in CATALOG.values():
         if definition.carrier.value != "HERO":
@@ -446,6 +457,7 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
         *YIJIANG_2014_HEROES.heroes,
         *YIJIANG_2014_MOBILE_HEROES.heroes,
         *JIE_YIJIANG_2014_MOBILE_HEROES.heroes,
+        *YIJIANG_2011_MOBILE_HEROES.heroes,
     ):
         if hero.id not in (
             set(ENABLED)
@@ -1458,6 +1470,33 @@ def _probe_state() -> GameState:
     return state
 
 
+def _pojun_probe_state() -> GameState:
+    """【破军】两条带条件钩子的正面对照局面（yijiang-2011-xusheng-chunhua 票 01）。
+
+    - 本体（``USE_AFTER_DESIGNATE_TARGET``）：**我的出牌阶段**（``phase = PLAY`` ∧
+      ``turn_seat = ME``）+ 帧上带一张【杀】+ 目标座位 0 有牌 ⇒ 成立；持有者换成座位 2 后
+      ``turn_seat`` / ``source`` 都对不上 ⇒ 假；
+    - 归还段（``TURN_END``）：**我**武将牌上有这条技能的待还牌 ⇒ 成立；换成座位 2 后他的区
+      是空的 ⇒ 假。帧里显式带 ``running_skill``（真派发时由派发环写）。
+    """
+    from sgs.skills.catalog import hero_card_zone_key
+    from sgs.state import HeroCardZone
+
+    pojun = "hero.xusheng_mobile.pojun"
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(_PROBE_SOURCE_CARD,)), SeatSpec(), SeatSpec()],
+        processing=(_PROBE_PROCESSING_SLASH,),
+        turn_seat=ME,
+        phase=Phase.PLAY,
+    )
+    zone = hero_card_zone_key(ME, pojun)
+    state.player(ME).hero_cards[zone] = HeroCardZone(
+        skill_id=pojun, owner=ME, cards=[_PROBE_PROCESSING_SLASH]
+    )
+    return state
+
+
 def _wuyi_probe_state() -> GameState:
     """【武翊】④ 的正面对照：四个牌名都解锁（X = 4）∧ 手牌数不是 4。
 
@@ -1863,6 +1902,8 @@ def _yingyuan_probe_state() -> GameState:
 
 def _probe_state_for(skill_id: str) -> GameState:
     """逐技能的正面对照局面（默认同一份；条件里有额外状态前提的单独给）。"""
+    if skill_id in ("hero.xusheng_mobile.pojun", "hero.xusheng_mobile.pojun_return"):
+        return _pojun_probe_state()
     if skill_id == "hero.shi_zhaoyun.wuyi":
         return _wuyi_probe_state()
     if skill_id == "hero.caozhen_mobile.sidi":
@@ -2460,6 +2501,19 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         ),
         # 「营」的**标记自身效果**：只有持有者自己的摸牌阶段才多摸一张。
         "hero.shen_ganning.jieying_mark": (_HookFrame(source=ME),),
+        # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】的钩子自校"这次【杀】是我用的"
+        # （``source == 持有者``）+ 出牌阶段归属；归还段自校"待还的区在我身上"（``owner`` 读
+        # 标记持有者）。两帧的正面对照局面见 :func:`_pojun_probe_state`。
+        "hero.xusheng_mobile.pojun": (
+            _HookFrame(
+                source=ME,
+                card=state.card(_PROBE_CHANNEL_SLASH),
+                targets=(0,),
+            ),
+        ),
+        "hero.xusheng_mobile.pojun_return": (
+            _HookFrame(source=ME, running_skill="hero.xusheng_mobile.pojun"),
+        ),
         # feng-yujin 票 07：【定乱】从共享技改成**非共享**（B2）⇒ 条件自校持有者
         # （`MATCH_OWNER_KEY` 必须真是定乱实例的持有者）。ROUND_START 帧没有"这一次问谁"
         # 这个事实（非共享技不写 `ASK_SEAT_KEY`），故探针帧只靠检查本身改写的
@@ -2996,6 +3050,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.shen_ganning.poxi": "主动技能",
     "hero.shen_ganning.jieying": "触发技能",
     "hero.shen_ganning.jieying_mark": "多轮技能",
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】= 使用并指定目标后的钩子 +
+    # **零步**流水线（选牌住在效果里：上限 = 目标体力值 ∧ 它的牌数，``PickCards.hi`` 是
+    # 常量表达不了）⇒ 零步技能格；它的**归还段**（`carrier = MARKER`、手写 TURN_END 强制钩子、
+    # 无流水线）⇒ 多轮技能格（与「营」同一姿态）。
+    "hero.xusheng_mobile.pojun": "零步技能",
+    "hero.xusheng_mobile.pojun_return": "多轮技能",
     # feng-yujin 票 01：自制包·锋·于禁【节钺】= A 族主动技（两步流水线 + 手写二选一）；
     # 【定乱】= 帧外时机（ROUND_START）上的可选技（票 07 起**非共享**：只问持有者）、
     # 手写主体（无 SkillFlow）⇒ 多轮格；
@@ -3217,7 +3277,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # sp1-sunshangxiang-maliang 票 02：SP孙尚香 ☆【枭姬】（零步流水线，第三条同形声明）
     # ⇒ 48 → 49。
     # bingshi-jie 票 01：势赵云【摧锋】（四条钩子 + 零步流水线）⇒ 49 → 50。
-    "零步技能": 50,
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（钩子 + 零步流水线）⇒ 50 → 51。
+    "零步技能": 51,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -3232,7 +3293,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # 24 → 25。
     # lin-batch2 票 02：董卓移动版【暴虐】（零步流水线）⇒ 零步技能 32 → 33；【肉林】/
     # 【崩坏】（锁定技）⇒ 锁定技 38 → 40；【酒池】（单源转化）⇒ 转化技 19 → 20。
-    "多轮技能": 20,
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛【破军】的**归还段**（标记载体的手写
+    # TURN_END 强制钩子、无流水线）⇒ 20 → 21。
+    "多轮技能": 21,
     # lin-batch2 票 03：贾诩移动版【完杀】/【帷幕】（两条纯修饰器）⇒ 锁定技 40 → 42。
     # jushou-lusu 票 01：沮授【矢北】（锁定技 + 受伤后钩子、无流水线）⇒ 锁定技 42 → 43。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【矢北】（锁定技 + 开局护甲 / 受伤后
@@ -3468,7 +3531,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（锁定技格）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（全部锁定、无流水线 ⇒ 锁定技格）⇒ 242 → 246。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 246
+    assert len(SKILL_SHAPE) == len(CATALOG) == 248
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3564,7 +3627,8 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     }
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 20
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛【破军】的归还段（标记载体、手写钩子）⇒ 21。
+    assert len(multi_round) == 21
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -3697,8 +3761,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # ⇒ 步骤语言外 98 → 104（内 138 不变）。
     # m7-script-mode 票 27：NPC 技能四条同样没有流水线（三条纯修饰器 + 一条造伤后钩子）
     # ⇒ 步骤语言外 104 → 108（内 138 不变）。
-    assert len(inside) == 138
-    assert len(outside) == 108
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（零步流水线）⇒ 内 138 → 139；
+    # 它的归还段（标记载体、手写钩子、无流水线）⇒ 外 108 → 109。
+    assert len(inside) == 139
+    assert len(outside) == 109
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

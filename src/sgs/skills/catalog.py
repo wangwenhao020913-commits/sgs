@@ -695,6 +695,25 @@ class SkillDef:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
         return priority_class_of(self.carrier)
 
+    dispatch_tier: PriorityClass | None = None
+    """这条技能**同一时机激活结算**的档（缺省 ``None`` = 由载体派生，见 :attr:`activation_tier`）。
+
+    只在"载体与它那些段该排哪一档**不是**一回事"时写。今天的唯一形态是**标记自身效果**
+    （``CarrierKind.MARKER``）：整条标记效果按载体排在最后一档（连续型加成"最后叠加"），
+    但标记也可能携带**一次性强制段**——界徐盛【破军】的「当前回合结束时其获得武将牌上的
+    牌」就是一段：牌面把它写在这个座位自己的回合末，故它与该座位的武将技能段**并列**，
+    由玩家选先后（同一时机裁定 + 框架票 95）。声明成 ``PriorityClass.HERO`` 后，它进
+    **同一张"先结哪一条"的面**。
+
+    它**不**改修饰器链序（那条读 :attr:`priority_class`，仍由载体派生）也不改解析序：
+    本字段只服务 :func:`_activation_candidates` 的闸门与 :attr:`ActivationCandidate.tier`。
+    """
+
+    @property
+    def activation_tier(self) -> PriorityClass:
+        """**同一时机激活结算**读的那一档：``dispatch_tier`` 覆盖，否则 = 载体档。"""
+        return self.priority_class if self.dispatch_tier is None else self.dispatch_tier
+
     need_card_tier: int | None = None
     """这条技能作为**"需要（使用 / 打出）牌"窗口的提供者**时的优先级档覆盖位（票 04 §3）。
 
@@ -705,7 +724,7 @@ class SkillDef:
     **没有技能 id 名单**。
 
     它**只**作用于四扇需要牌窗口的候选面；同一时机的激活结算（SKILL_ACTIVATION 的
-    ``ActivationCandidate.tier``）仍读 :attr:`priority_class`——那里问的是"谁先发动"
+    ``ActivationCandidate.tier``）读 :attr:`activation_tier`——那里问的是"谁先发动"
     （武将技 > 装备技），与"这一步要的是哪一档的牌"是两个问题。
     """
 
@@ -851,8 +870,11 @@ class ActivationCandidate:
 
     @property
     def tier(self) -> int:
-        """优先级档（``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``，**越小越先**）。"""
-        return int(self.instance.definition.priority_class)
+        """优先级档（``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``，**越小越先**）。
+
+        读 :attr:`SkillDef.activation_tier`（= 载体档，除非该技能显式声明了 ``dispatch_tier``）。
+        """
+        return int(self.instance.definition.activation_tier)
 
     @property
     def actor(self) -> int:
@@ -2013,7 +2035,9 @@ def _chain_order(
     角色；**同一角色内部**若有多个技能 / 效果，再按「武将技能 > 装备技能 > 使用牌」选一条
     结算。两级**不可互换**：不是"先按优先级把不同角色的技能排成一队"。
 
-    故键 = ``(座位环名次, priority_class, skill_id, owner)``：座位环名次读
+    故键 = ``(座位环名次, activation_tier, skill_id, owner)``（档读 :attr:`SkillDef.activation_tier`
+    ——载体档，或被 ``dispatch_tier`` 显式覆盖；今天唯一覆盖者 = 界徐盛【破军】的标记载体
+    归还段）：座位环名次读
     :func:`~sgs.state.seats_from`（座位环的唯一真源，与 :func:`~sgs.state.order_targets`
     同一读法），后三段是**同一角色内部**的原全序——第一段只在跨角色时起作用，后三段只在
     角色内部起作用，互不越权。不在存活环上的座位（死亡时技能窗口里的死者）排在环上座位
@@ -2032,7 +2056,7 @@ def _chain_order(
             instances,
             key=lambda item: (
                 rank.get(item.owner, len(rank)),
-                int(item.definition.priority_class),
+                int(item.definition.activation_tier),
                 item.skill_id,
                 item.owner,
             ),
@@ -2234,7 +2258,7 @@ def _activation_candidates(
             continue
         if not activation_allowed(
             instance.skill_id,
-            int(instance.definition.priority_class),
+            int(instance.definition.activation_tier),
             floor=floor,
             used=used,
         ):
@@ -5065,6 +5089,9 @@ from .hero_sp1 import (  # noqa: E402  （末尾 import 是刻意的）
 from .zuoci import (  # noqa: E402  （末尾 import 是刻意的）
     zuoci_skill_definitions,
 )
+from .hero_yijiang_2011 import (  # noqa: E402  （末尾 import 是刻意的）
+    yijiang_2011_skill_definitions,
+)
 from .hero_bingshi import (  # noqa: E402  （末尾 import 是刻意的）
     bingshi_jie_skill_definitions,
 )
@@ -5152,6 +5179,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *sidi_skill_definitions(),
             *relic_skill_definitions(),
             *npc_skill_definitions(),
+            *yijiang_2011_skill_definitions(),
         )
     }
 )

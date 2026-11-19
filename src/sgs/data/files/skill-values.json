@@ -761,6 +761,10 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.xusheng_mobile.pojun": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.yanliang_wenchou.shuangxiong": {
       "enabled": true,
       "rarity": "common"

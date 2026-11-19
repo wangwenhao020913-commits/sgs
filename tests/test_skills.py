@@ -1998,8 +1998,13 @@ def test_every_equipment_card_has_a_skill_and_vice_versa():
         "NPC 技能定义与其余五半不相交"
     )
     assert set(CATALOG) == equipment | heroes | markers | card_tags | relics | npc_skills
-    assert markers == {"hero.shen_ganning.jieying_mark"}, (
-        "唯一一条标记自身效果的定义（「营」）；新增一条要同时想清楚它在界面上的归属"
+    assert markers == {
+        "hero.shen_ganning.jieying_mark",
+        # yijiang-2011-xusheng-chunhua 票 01：徐盛 / 界徐盛【破军】的**归还段**——当前回合
+        # 结束时把扣在目标武将牌上的牌还给它，并与该座位自己的回合末技能同面选先后。
+        "hero.xusheng_mobile.pojun_return",
+    }, (
+        "标记自身效果的定义（「营」/【破军】的归还段）；新增一条要同时想清楚它在界面上的归属"
     )
     assert card_tags == {"hero.feng_yujin.dingluan_mark"}, (
         "唯一一条牌标签自身效果的定义（「【定乱】牌」）"

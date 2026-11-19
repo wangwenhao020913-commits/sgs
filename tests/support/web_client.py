@@ -466,6 +466,9 @@ _FIRE_TAPE_BANNED_HEROES = (
     "jie_caozhen_mobile",
     # jie-yijiang-2014-wuyi-caozhen 票 01：界吴懿移动版进默认池（113 → 114）。
     "jie_wuyi_mobile",
+    # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版进默认池（114 → 115）。按本表规矩
+    # **只追加禁将、不重扫 seed**（tape 钉的是火攻的界面与记录流，不是将池）。
+    "xusheng_mobile",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 

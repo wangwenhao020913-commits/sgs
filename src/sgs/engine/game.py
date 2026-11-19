@@ -2744,7 +2744,12 @@ class Engine:
             actor=owner,
         )
 
-    def return_hero_card_zones(self) -> Control:
+    def return_hero_card_zones(
+        self,
+        *,
+        holder: int | None = None,
+        skill_id: str | None = None,
+    ) -> Control:
         """把**归还时机 = 当前回合结束时**的放置区整批还给放置技能的持有者（M6 票 10）。
 
         逐区一条 ``card_move``（一次移动只能有一个来源区），与死亡清区 / 弃牌阶段同姿态：
@@ -2759,11 +2764,21 @@ class Engine:
 
         持有者已阵亡（跨座位区、宿主还活着）时改为置入弃牌堆：不给死者手里塞牌，也不
         破坏"阵亡者区域为空"的不变量。
+
+        **两个可选过滤器**（yijiang-2011-xusheng-chunhua 票 91）服务"这一趟只还**我的**
+        那一个区"：放置区可能挂在**别人**的武将牌上（例：界徐盛【破军】把目标的牌放在
+        目标身上，归还段由**目标**座位上的标记效果触发），故一次同时机的段不能顺手把
+        别人的区也还了——那会让"先结哪一条"的顺序面失去意义。缺省两者皆 ``None`` ⇒
+        行为与既有 `_turn_after_end` 的整批归还逐字相同（唯一调用点仍是它）。
         """
         for player in self.state.players:
             for key in tuple(player.hero_cards):
                 zone = player.hero_cards[key]
                 if not zone.cards:
+                    continue
+                if holder is not None and player.seat != int(holder):
+                    continue
+                if skill_id is not None and zone.skill_id != skill_id:
                     continue
                 decl = hero_placement_decl(zone.skill_id, pack_id=self.state.pack_id)
                 if (
