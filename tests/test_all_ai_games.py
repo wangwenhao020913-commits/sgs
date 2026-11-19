@@ -17,6 +17,10 @@
 
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
 import pytest
 
 from sgs.agents import (
@@ -29,15 +33,24 @@ from sgs.agents import (
 )
 from sgs.data import (
     Identity,
+    Mode,
+    PveConfig,
+    PveVictory,
+    PveVictoryKind,
     RuleConfig,
     enabled_hero_ids,
     hero_by_id,
     load_content_pack,
 )
-from sgs.engine import Engine, ai_stream
-from sgs.state import Pass
+from sgs.engine import Engine, ai_stream, read_journal, solve_pve_outcome
+from sgs.state import Action, Pass, Query, UseCard
 
 from support import ACCEPTANCE_SEEDS
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+
+from sgs_batch import BatchResult, run_games  # noqa: E402 - 测试在 import 前把 tools/ 放上 sys.path
 
 PACK = load_content_pack(deck_profile="standard_108")
 PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
@@ -932,3 +945,306 @@ def test_wuming_tiancheng_fires_through_a_full_ai_game_and_replays():
     replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# M7 票 13：PvE 专属种子带 9000–9031（32 局）走 AI 批测入口（四判据 + 关系用例）
+# ---------------------------------------------------------------------------
+
+PVE_SEEDS: tuple[int, ...] = tuple(range(9000, 9032))
+"""PvE 批测的固定种子带（M7 票 13；spec §Acceptance A4）：**9000–9031，32 局**。
+
+这条带是 PvE 的**机械判据**专用批：只判"跑完 / 终局与 ``solve_pve_outcome`` 一致 / 零非法
+应答 / 可回放"，**不判 verdict、不打胜率**（``ai_eval`` 的口径）。``docs/agents/ai-versions.md``
+§3 的种子台账行由票 30 写回，本常量是那一行的机械锚点——下面
+:func:`test_the_pve_seed_band_is_thirty_two_seeds_that_miss_every_registered_band` 钉住
+"32 颗、互异、与已登记的带都不重叠"（趋势带 / 实机带 / 票 12 的 PvE 基准种子 6101–6106）。
+
+**别把这条带挪作判决批**：判决批由 commit 派生（``tools/ai_eval/seeds.py``），混用即失去
+判决力（``docs/agents/ai-versions.md`` §3 的纪律）。
+"""
+
+PVE_PLAYERS = 5
+"""2 友 × 3 敌 = 5 座：PvE 上限（房间编排的座位总数 2~5）那一档，且座位 1 是 AI 队友。"""
+
+PVE_IDENTITIES: tuple[Identity, ...] = (
+    Identity.ALLY,
+    Identity.ALLY,
+    Identity.ENEMY,
+    Identity.ENEMY,
+    Identity.ENEMY,
+)
+"""逐座位阵营（座位 0 = 主角）。队友座位 1 与主角同桌，故这一批真有"友军"可误伤。"""
+
+PVE_RULE = RuleConfig(
+    player_count=PVE_PLAYERS,
+    mode=Mode.PVE,
+    pve=PveConfig(
+        identities=PVE_IDENTITIES,
+        principal=0,
+        victory=PveVictory(kind=PveVictoryKind.ROUT),
+    ),
+)
+"""这一批的逐场条件 = ``ROUT``：两条收局路径（敌人全灭 ⇒ 胜 / 主角阵亡 ⇒ 败）都只读配置
+与存活集合，故 32 颗种子在胜败两侧都能收局（实测 8 胜 / 24 败），``wins_by_side`` 的两个
+侧别都被坐到。四类逐场条件各自的整局判据归票 08 / 票 12，不在这条批测里重复证。"""
+
+
+class _PveAnswerScan(_IllegalAnswerScan):
+    """判据③的扫描器（与 108 基准组同一个 ``_IllegalAnswerScan``），另留 ``(query, action)``。
+
+    ``pairs`` 只喂关系用例：关系判据要看到"这个询问里有哪些候选"，而不只是"答得合不合法"。
+    """
+
+    def __init__(self, inner) -> None:
+        super().__init__(inner)
+        self.pairs: list[tuple[Query, Action]] = []
+
+    def respond(self, query: Query) -> Action:
+        action = super().respond(query)
+        self.pairs.append((query, action))
+        return action
+
+
+@dataclass(frozen=True)
+class _PveBand:
+    """整条 PvE 种子带的**一次**运行（四判据 + 关系用例共用，不重跑 32 局）。"""
+
+    batch: BatchResult
+    scans: dict[int, tuple[_PveAnswerScan, ...]]
+    journal_paths: dict[int, Path]
+
+
+@pytest.fixture(scope="module")
+def pve_band(tmp_path_factory) -> _PveBand:
+    """跑一次 9000–9031：入口 = 产品同源的 ``run_games``（不是另写一个开局循环）。
+
+    ``keep_journal=True`` 是判据④的输入（批测写出的 journal 就是回放源）；
+    ``participants_factory`` 让判据③与关系用例看到每座位**真询问 / 真应答**，而 AI 决策
+    本身仍走产品同源的 :class:`~sgs.agents.HeuristicPlayer` + ``ai:<seat>`` 子流。
+    """
+    scans: dict[int, tuple[_PveAnswerScan, ...]] = {}
+
+    def factory(spec):
+        built = tuple(
+            _PveAnswerScan(HeuristicPlayer(ai_stream(spec.seed, seat)))
+            for seat in range(spec.players)
+        )
+        scans[spec.seed] = built
+        return built
+
+    batch = run_games(
+        seeds=PVE_SEEDS,
+        mode=Mode.PVE,
+        players=PVE_PLAYERS,
+        rule_config=PVE_RULE,
+        participants_factory=factory,
+        keep_journal=True,
+    )
+    directory = tmp_path_factory.mktemp("pve-band")
+    journal_paths: dict[int, Path] = {}
+    for game in batch.games:
+        path = directory / f"pve-{game.seed}.jsonl"
+        path.write_text(game.journal or "", encoding="utf-8", newline="")
+        journal_paths[game.seed] = path
+    return _PveBand(batch=batch, scans=scans, journal_paths=journal_paths)
+
+
+def test_the_pve_seed_band_is_thirty_two_seeds_that_miss_every_registered_band() -> None:
+    """种子带本身是验收内容（票 13）：32 颗、互异、逐带避让（台账 §3 的登记口径）。"""
+    assert PVE_SEEDS == tuple(range(9000, 9032))
+    assert len(set(PVE_SEEDS)) == 32
+    registered = {
+        "趋势带 104..231": range(104, 232),
+        "趋势带 1000..1511": range(1000, 1512),
+        "趋势带 2000..2319": range(2000, 2320),
+        "趋势带 3000..3211": range(3000, 3212),
+        "趋势带 4000..4127": range(4000, 4128),
+        "趋势带 5000..5127": range(5000, 5128),
+        "实机带 7001..7099": range(7001, 7100),
+        "PvE 基准种子 6101..6106": range(6101, 6107),
+    }
+    for label, band in registered.items():
+        assert set(PVE_SEEDS).isdisjoint(band), f"PvE 批测带与{label}重叠"
+
+
+def test_the_pve_seed_band_runs_every_game_to_a_final_outcome(pve_band: _PveBand) -> None:
+    """判据①**跑完**：32 颗一颗不少、逐局到终局、整批零 error（票 13 / spec A4）。"""
+    batch = pve_band.batch
+
+    assert batch.config["mode"] == "pve", "这批必须以 pve 模式入口跑"
+    assert [game.seed for game in batch.games] == list(PVE_SEEDS), "整批不缩水（逐颗点名）"
+    assert batch.summary["games"] == len(PVE_SEEDS) == 32
+    assert batch.summary["errors"] == 0, [game.error for game in batch.games]
+    assert batch.summary["finished"] == len(PVE_SEEDS)
+    for game in batch.games:
+        assert game.error is None, game.error
+        assert game.finished and game.outcome is not None, f"seed={game.seed} 没跑到终局"
+        assert game.outcome["result"] == "winner", (
+            f"seed={game.seed} 以平局收场：PvE 的终局由 solve_pve_outcome 判，平局不在它的值域里"
+        )
+        assert len(game.seats) == PVE_PLAYERS
+
+
+def test_every_pve_game_ends_where_the_pure_solver_says(pve_band: _PveBand) -> None:
+    """判据②**终局与 ``solve_pve_outcome`` 一致**（票 13 / spec A4）。
+
+    读法：用**终局**的存活集合与 ``GameState.round`` 重算一次纯求解器，逐字段比对
+    ``side`` / ``winners`` / ``reason``——"跑完了就算了"不算过，终局必须是那个函数说
+    的那个终局。``game.rounds`` 就是 ``GameState.round``（唯一计数源），故轮次类条件
+    的"N 轮内"也走同一条重算，不另建计数。
+    """
+    config = PVE_RULE.pve
+    assert config is not None
+    for game in pve_band.batch.games:
+        alive = frozenset(seat.seat for seat in game.seats if seat.alive)
+        expected = solve_pve_outcome(config=config, alive=alive, round_no=game.rounds)
+        assert expected is not None, f"seed={game.seed}：solver 说这局还没终局"
+        assert game.outcome is not None
+        actual = (game.outcome["side"], tuple(game.outcome["winners"]), game.outcome["reason"])
+        assert actual == (expected.side, expected.winners, expected.reason), (
+            f"seed={game.seed}：终局 {actual} ≠ solver 的答案 "
+            f"{(expected.side, expected.winners, expected.reason)}"
+            f"（存活 {sorted(alive)}，轮次 {game.rounds}）"
+        )
+
+
+def test_the_pve_seed_band_has_zero_illegal_answers(pve_band: _PveBand) -> None:
+    """判据③**零非法应答**：每次应答都在候选集合 / 清单 / 附带指定池里（票 13 / spec A4）。
+
+    与 108 基准组**同一个** :class:`_IllegalAnswerScan`（同一根尺），故 PvE 新增的询问面
+    （友 / 敌公开、逐场胜负）没有把"答得出来"降成"恰好没炸"。
+    """
+    scans = pve_band.scans
+
+    assert set(scans) == set(PVE_SEEDS), "每颗种子都要有逐座位扫描器（否则判据会空转）"
+    assert all(len(group) == PVE_PLAYERS for group in scans.values())
+    assert sum(scan.answers for group in scans.values() for scan in group) > 0, (
+        "整批没有任何应答（断言不空转）"
+    )
+    offenders = {
+        seed: [scan.illegal for scan in group]
+        for seed, group in scans.items()
+        if any(scan.illegal for scan in group)
+    }
+    assert not offenders, f"出现了候选集合之外的应答（seed → 逐座位次数）：{offenders}"
+
+
+def test_the_pve_seed_band_replays_from_its_own_journal(pve_band: _PveBand) -> None:
+    """判据④**可回放**：批测写出的 journal 读回来 → 磁带 → 重放，记录流逐字节相等。
+
+    回放源走**唯一反序列化器** :func:`~sgs.engine.read_journal`（产品读录像的同一条路），
+    不拿库对象里的记录流抄近道：这条判据要证的是"批测产物本身可回放"。
+    """
+    for game in pve_band.batch.games:
+        path = pve_band.journal_paths[game.seed]
+        replayed_seed, tape = tape_from_journal(read_journal(path))
+        assert replayed_seed == game.seed and tape, (
+            f"seed={game.seed} 的磁带必须带上种子与行动序列"
+        )
+        replay = Engine.new_game(
+            seed=replayed_seed, rule_config=PVE_RULE, pack=PACK, hero_pool=()
+        )
+        replay.run([TapePlayer(tape)] * PVE_PLAYERS)
+
+        assert replay.journal() == game.journal, (
+            f"seed={game.seed} 重放的记录流必须逐字节相等"
+        )
+
+
+def _equal_geometry_slash_choices(
+    query: Query,
+) -> list[tuple[int, tuple[int, ...], tuple[int, ...]]]:
+    """询问里「同一张牌、只差敌友权重」的【杀】单目标候选 → ``(card_id, 友方座位, 敌方座位)``。
+
+    几何 = **同一张物理牌** + 两个目标的**体力与手牌数都相同**：``_score_attack`` 里除
+    ``_ENEMY_FOCUS * P(敌)``（敌友权重）之外的每一项（伤害、手牌贴现、斩杀）在两张候选上
+    相等，故"选哪一边"只可能是关系那一项的分差。多目标候选（方天画戟加目标那类）不进
+    判据：多选一个是"额外目标"语义，不是"在一对一的对子里选谁"。
+    """
+    view = query.view
+    seats_by_card: dict[int, set[int]] = {}
+    for candidate in query.legal_actions:
+        if (
+            isinstance(candidate, UseCard)
+            and candidate.card.type == "slash"
+            and len(candidate.targets) == 1
+        ):
+            seats_by_card.setdefault(candidate.card.card_id, set()).add(candidate.targets[0])
+
+    choices: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
+    for card_id, seats in seats_by_card.items():
+        ally = tuple(seat for seat in sorted(seats) if view.players[seat].identity is Identity.ALLY)
+        enemy = tuple(
+            seat for seat in sorted(seats) if view.players[seat].identity is Identity.ENEMY
+        )
+        pairs = [
+            (ally_seat, enemy_seat)
+            for ally_seat in ally
+            for enemy_seat in enemy
+            if view.players[ally_seat].hp == view.players[enemy_seat].hp
+            and view.players[ally_seat].hand_count == view.players[enemy_seat].hand_count
+        ]
+        if pairs:
+            choices.append(
+                (
+                    card_id,
+                    tuple(sorted({ally_seat for ally_seat, _ in pairs})),
+                    tuple(sorted({enemy_seat for _, enemy_seat in pairs})),
+                )
+            )
+    return choices
+
+
+def test_the_ai_teammate_does_not_target_the_ally_in_the_pve_band(
+    pve_band: _PveBand,
+) -> None:
+    """「AI 队友不把友军当目标」的**批测级关系用例**（票 13；spec A4）。
+
+    票 08 的构造局面在**单询问**层钉同一件事（``_score_attack`` 上敌人严格高
+    ``_ENEMY_FOCUS``、真应答跟着阵营翻座位）；这里把它放到整条 32 局种子上量一遍：
+    **同一张牌、相同几何**（目标体力 / 手牌数都相同）时，AI 队友只要在这个询问里用了
+    那张牌，就必须打敌人——只差关系这一项的候选里一次都不许打友军。
+
+    刻意**不**断言"整批一刀都不砍友军"：斩杀分（``_LETHAL_STRIKE_VALUE``）与关系权重是
+    两笔独立的价，一张能当场打死友军的【杀】仍可能被选中（票 08 的 I1 口径是"不给
+    P(友) 扣分、只让敌人排前面"）；多目标【杀】额外加一个友军也同理。这两类都不是本票
+    的改动面（``src/sgs/agents/heuristic.py`` 不在本票 ``Touches`` 里），故判据把变量收在
+    "只差敌友权重这一项"的几何上——与票 08 那条构造用例同一条尺。
+
+    反空转：本批至少要有一次真的在这种选边点里选了敌人，否则这条用例只是"没数据"。
+    实测这条带上：**43 个"只差敌友权重"的选边点、19 次选敌、0 次选友**（其余 24 次在这
+    个询问里用了别的牌 / 别的行动——那不是"选边"，不进判据）。
+    """
+    choice_points = 0
+    enemy_picks = 0
+    ally_picks: list[tuple[int, int, tuple[int, ...]]] = []
+    for seed, group in pve_band.scans.items():
+        for scan in group:
+            for query, action in scan.pairs:
+                if query.kind != "PLAY_PHASE":
+                    continue
+                view = query.view
+                if view.players[query.actor].identity is not Identity.ALLY:
+                    continue
+                for card_id, ally_seats, enemy_seats in _equal_geometry_slash_choices(query):
+                    choice_points += 1
+                    if not (
+                        isinstance(action, UseCard)
+                        and action.card.card_id == card_id
+                        and len(action.targets) == 1
+                    ):
+                        continue  # 这个询问里它用了别的牌 / 别的行动：不构成一次"选边"
+                    target = action.targets[0]
+                    if target in enemy_seats:
+                        enemy_picks += 1
+                    elif target in ally_seats:
+                        ally_picks.append((seed, query.actor, action.targets))
+
+    assert not ally_picks, (
+        f"AI 队友在只差敌友权重的候选里打了友军（seed, actor, targets）：{ally_picks}"
+    )
+    assert choice_points > 0 and enemy_picks > 0, (
+        f"本批没有任何「只差敌友权重」的选边点（选边点 {choice_points}、选敌 {enemy_picks}）"
+        "——关系用例会空转"
+    )

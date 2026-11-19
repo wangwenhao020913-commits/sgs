@@ -45,6 +45,15 @@ MIN_WORKERS = 1
 MAX_WORKERS = 8
 """``workers`` 的闭区间（spec §1.5）：默认 1、**不做 auto**。"""
 
+PVE_MIN_PLAYERS = 2
+PVE_MAX_PLAYERS = 5
+"""PvE 的座位数区间 = **房间编排上限**（票 13；spec A4 / A8 的「座位数 2~5」）。
+
+``src/sgs/data/scripts.py`` 把一场战斗的座位总数钉在 2~5（主角 1 + allies ≤ 2 + enemies
+1..4），故 ``PVE × 8`` 被拒的理由是"这一场编排不下"，**不是** ``RuleConfig`` 收不下 8
+（``player_count`` 的值域仍是 2..8）。人数不是模式判据（用户 2026-11-19 裁定）。
+"""
+
 
 # ---------------------------------------------------------------------------
 # 开跑前校验：模式组合 / 座位档位 / 种子 / workers / 武将配置
@@ -69,19 +78,28 @@ def _validate_mode(
 ) -> tuple[Mode, RuleConfig]:
     """开跑前的一致性校验（spec §1.3 的 fail-closed 边界）。
 
-    当前引擎的 ``RuleConfig.mode`` 仍是 ``player_count`` 的**派生属性**（2 → 无身份、
-    4–8 → 身份），故这里显式拒绝"没有引擎实现"的组合，而不是用人数硬套模式。
+    白名单是**模式 × 人数**的显式登记（票 13 收进 PvE）：无身份局只有 2 人档、身份局
+    4~8、PvE 2~5（房间编排上限，见 :data:`PVE_MAX_PLAYERS`）。PvE 的战斗配置
+    （``rule_config.pve``：阵营 / 主角 / 胜负条件）**不由批量层编**——它要进 header 自证，
+    故缺它直接是规格错（退出码 2），而不是拿一个默认阵型开跑。
     """
     resolved = _coerce_mode(mode, players)
-    supported = (resolved is Mode.NO_IDENTITY and players == 2) or (
-        resolved is Mode.IDENTITY and 4 <= players <= 8
+    supported = (
+        (resolved is Mode.NO_IDENTITY and players == 2)
+        or (resolved is Mode.IDENTITY and 4 <= players <= 8)
+        or (resolved is Mode.PVE and PVE_MIN_PLAYERS <= players <= PVE_MAX_PLAYERS)
     )
     if not supported:
         raise UnsupportedMode(
             f"不支持的模式组合：players={players}、mode={resolved.value}"
-            "（可跑：2 + no_identity、4..8 + identity）"
+            "（可跑：2 + no_identity、4..8 + identity、2..5 + pve）"
         )
     if rule_config is None:
+        if resolved is Mode.PVE:
+            raise BatchSpecError(
+                f"mode=pve 必须带 rule_config.pve（players={players}）："
+                "阵营 / 主角 / 胜负条件要进 header 自证，批量层不替调用方编一场战斗"
+            )
         return resolved, RuleConfig(player_count=players)
     if rule_config.player_count != players:
         raise UnsupportedMode(
