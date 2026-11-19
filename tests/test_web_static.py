@@ -9732,3 +9732,181 @@ def test_the_board_smoke_library_is_a_valid_script_library() -> None:
     assert [edge.to for edge in conditional] == ["d2"], (
         "边条件标签要有一条可断言的边（c2 → d2）"
     )
+
+
+# ---------------------------------------------------------------------------
+# M7 票 22：整备面（3×8 / 出战槽 / 遗物栏 / 铜钱）+ 结算弹窗 + 事件 / 商店 / 问号揭晓
+# ---------------------------------------------------------------------------
+
+_LOADOUT_JS = STATIC_DIR / "script-loadout.js"
+"""整备面 + 结算 / 选择弹窗 + 三个节点面（票 22 的唯一实现文件）。"""
+
+
+def _loadout_source() -> str:
+    assert _LOADOUT_JS.exists(), "票 22 的脚本必须是单独一份（spec §4 的脚本表）"
+    return _LOADOUT_JS.read_text(encoding="utf-8")
+
+
+def _function_source(source: str, name: str) -> str:
+    """截出 `function <name>(…) { … }` 的那一段（缩进 / 行尾按源码原样）。"""
+    start = source.index(f"function {name}(")
+    end = source.index("\n}", start)
+    return source[start:end]
+
+
+def test_the_script_loadout_script_is_listed_right_after_the_board_renderer() -> None:
+    """脚本清单的唯一真源仍是 `index.html`：整备面紧挨棋盘（它读棋盘体的 `run` / `catalog`）。"""
+    srcs = _script_srcs()
+    assert "script-loadout.js" in srcs, f"整备面的脚本不在清单里：{srcs}"
+    at = srcs.index("script-loadout.js")
+    assert srcs[at - 1] == "script-board.js", "整备面紧跟棋盘（同一份棋盘体、同一张票族）"
+    assert srcs[-1] == "main.js", "wireScriptLoadout() 在 main.js 末尾调，故清单仍是 main.js 最后"
+
+
+def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() -> None:
+    """整备面是棋盘视图里的一段（spec §4 的落点表）：24 格 = **3×8**、遗物栏 ≤6、铜钱 HUD。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    board_start = html.index('id="view-script-board"')
+    script_start = html.index("<script", board_start)
+    section = html[board_start:script_start]
+    for needle in (
+        'id="script-loadout"',
+        'id="script-loadout-grid"',
+        'id="script-loadout-relics"',
+        'id="script-loadout-coins"',
+        'id="btn-script-loadout-discard"',
+        'id="script-face"',
+        'data-rows="3"',
+        'data-cols="8"',
+    ):
+        assert needle in section, f"整备 / 节点面的挂载点缺件：{needle}"
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    grid = _css_rule(".script-loadout-grid")
+    assert "repeat(8" in grid, f"24 格是 8 列 × 3 行（判据在 CSS 的这一行）：{grid}"
+
+    source = _loadout_source()
+    for needle in (
+        "const SCRIPT_BACKPACK_SLOTS = 24;",
+        "const SCRIPT_LOADOUT_COLS = 8;",
+        "const SCRIPT_LOADOUT_ROWS = 3;",
+        "const SCRIPT_RELIC_SLOTS = 6;",
+        'scriptNode("span", "script-slot-badge", equipped ? "出战" : "")',
+    ):
+        assert needle in source, f"整备面的机械常量 / 出战徽标写法变了：{needle}"
+
+
+def test_the_backpack_edit_entry_points_do_not_exist_inside_a_node() -> None:
+    """编辑窗口 = **节点之间**：`pending` 非空时连监听都不挂、丢弃键收起（不是"点了无效"）。"""
+    source = _loadout_source()
+    editable = _function_source(source, "scriptLoadoutEditable")
+    assert "scriptLoadoutPending()" in editable and "!" in editable, (
+        f"可编辑判据必须读服务端的 `pending`：{editable}"
+    )
+    slot = _function_source(source, "scriptLoadoutSlotNode")
+    # 三个编辑入口（点选 / 拖动起点 / 落下）都只挂在 `if (editable)` 里面。
+    guard = slot.index("if (editable) {")
+    for needle in ('addEventListener("click"', 'addEventListener("dragstart"', 'addEventListener("drop"'):
+        assert slot.index(needle) > guard, f"编辑监听必须在 `if (editable)` 里：{needle}"
+    render = _function_source(source, "scriptLoadoutRender")
+    assert "discard.hidden = !editable" in render, "节点内「丢弃」整键收起（入口不存在）"
+
+
+def test_the_settle_dialogs_share_the_ticket_20_modal_shell() -> None:
+    """结算 / 选择一律弹窗，且只有**一个**模态壳（票 22 备注：不新造一套模态）。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert html.count('id="script-confirm"') == 1, "模态壳只有一份（票 20 交出来的那个）"
+    assert html.count('id="script-confirm-backdrop"') == 1, "遮罩也只有一份"
+    assert 'id="script-confirm-body"' in html, "票 22 的正文槽要在同一个壳里"
+    lobby = (STATIC_DIR / "script-lobby.js").read_text(encoding="utf-8")
+    confirm = _function_source(lobby, "scriptConfirm")
+    assert "script-confirm-body" in confirm, "正文槽由同一个 `scriptConfirm` 填（票 22 只加槽）"
+    source = _loadout_source()
+    assert "scriptConfirm({" in source, "三选一 / 遗物 / 结果都走 `scriptConfirm`"
+    for name in ("scriptSettlePickDialog", "scriptSettleRelicDialog", "scriptSettleShowResult"):
+        assert "scriptConfirm({" in _function_source(source, name), (
+            f"{name} 必须复用票 20 的那个模态壳"
+        )
+    assert "script-confirm-backdrop" not in source, "整备面不许再造一层遮罩"
+    assert "createElement(\"dialog\")" not in source, "不开原生 <dialog>（无构建、经典脚本）"
+
+
+def test_the_boss_lose_four_is_automatic_and_has_no_confirmation() -> None:
+    """Boss「失去 4 条出战技能」是规则效果：只读块 + 无按钮 + 结算体里没有确认字段。"""
+    source = _loadout_source()
+    block = _function_source(source, "scriptLoseBlock")
+    assert 'data-auto' in block and '"1"' in block, f"自动段要能机械读出来：{block}"
+    assert "无需确认" in block, "界面上要明说「无需确认」"
+    assert "addEventListener" not in block, "自动段不接任何点击（不是选项）"
+    assert "scriptDataButton" not in block, "自动段没有按钮"
+    submit = _function_source(source, "scriptSettleSubmit")
+    assert '"confirm' not in submit and "'confirm'" not in submit, (
+        "结算请求里不许有确认字段（失去 4 条不可确认、不可关掉）"
+    )
+    pick = _function_source(source, "scriptSettlePickDialog")
+    assert "flow.boss && flow.round === 0" in pick, "Boss 的第一轮弹窗顶格写自动失去那一段"
+
+
+def test_the_prices_and_coins_are_only_printed_from_the_server_payload() -> None:
+    """票 22 的备注：铜钱 / 价格 / 折价数字**一律服务端下发**，前端不重算（避免第二份真相）。
+
+    机械判据：价格表的名字（`RARITY_PRICES`）与四个价（3 / 6 / 15 / 30）都不在脚本里；
+    前端对 `price` 只有赋值与比较，没有乘除；铜钱只读 `run.coins` / 结算事件里的数。
+    """
+    source = _loadout_source()
+    assert "RARITY_PRICES" not in source, "价格表只有一份真源（`sgs.data`），前端不许再抄"
+    assert not re.search(r"\bprice\s*[*/]", source), "前端不许按稀有度乘价"
+    assert not re.search(r"[*/]\s*\bprice\b", source), "前端不许按稀有度乘价"
+    assert not re.search(r"\bcoins\s*[-+*/]=", source), "铜钱记账在服务端（前端只印数）"
+    # 价的读取口只有服务端下发的 `catalog[id].price` 与结算事件里的 `coins`。
+    assert "raw.price" in source and "Number.isInteger(raw.price)" in source
+    assert "event.coins" in source and "run.coins" in source
+    # 三个价常量的字面量不许出现在脚本里（`15 铜钱` / `折 10` 之类也是第二份真相）。
+    for literal in ("折 10 ", "折 3 ", "15 铜钱", "30 铜钱"):
+        assert literal not in source, f"价格字面量不许写进前端：{literal!r}"
+
+
+_LOADOUT_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-loadout-library.json"
+)
+"""烟测整备 / 结算面的进料（票 22）：入口事件房 → 商店 / 战斗 / 问号房 → 出口。"""
+
+
+def test_the_loadout_smoke_library_is_a_valid_script_library() -> None:
+    """票 22 的进料先过**真**库校验器：烟测不再自己判断"这份库能不能跑"。
+
+    判据是烟测那几条断言的**前置**：入口事件房（+9 铜钱 / 一个被标签锁住的选项 / 一个
+    给技能的选项）、一个商店、一个问号房（揭晓事件房 = 内层玩家流程）、一个出口商店。
+    """
+    from sgs.data import RoomKind, load_script_library
+
+    library = load_script_library(
+        _LOADOUT_LIBRARY_FIXTURE.read_bytes(), file=str(_LOADOUT_LIBRARY_FIXTURE)
+    )
+    script = library.scripts[0]
+    layer = script.layers[0]
+    nodes = {node.id: node for node in layer.nodes}
+
+    assert [node.id for node in layer.nodes if node.col == 0] == ["e1", "b1"], (
+        "两个入口：事件（拿钱 / 折价）与战斗（满包三选一）各一条路"
+    )
+    assert nodes["e1"].room == "room.event.coins"
+    assert nodes["o1"].col == layer.grid.cols - 1, "出口商店落在最后一列（结算即通关）"
+
+    rooms = {room.id: room for room in library.rooms}
+    assert rooms["room.event.coins"].kind is RoomKind.EVENT
+    assert rooms["room.shop"].kind is RoomKind.SHOP
+    assert rooms["room.unknown.event"].kind is RoomKind.UNKNOWN
+    assert rooms["room.unknown.event"].pool[0].room == "room.reveal.event", (
+        "问号房要揭晓一个事件房（烟测据此断「按内层房间的流程走」）"
+    )
+    assert rooms["room.reveal.event"].kind is RoomKind.EVENT
+    assert rooms["room.battle"].battle.victory.kind.value == "survive_rounds", (
+        "战斗房的胜负条件要能两轮内收口（烟测只摆 pending，不打这一场）"
+    )
+
+    event = next(item for item in library.events if item.id == "ev.coins")
+    assert [option.text for option in event.options] == ["收下铜钱", "帮他们修寨", "领一本技能书"]
+    assert event.options[1].requires.flags == ("flag.never",), "锁住的选项（服务端判）"
+    assert [(effect.kind, effect.skill) for effect in event.options[2].effects] == [
+        ("grant_skill", "hero.zhangfei.paoxiao")
+    ], "满包时这条会被服务端折成铜钱（烟测读那个数）"

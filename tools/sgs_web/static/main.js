@@ -91,6 +91,9 @@ function wire() {
   wireScriptLobby();
   // M7 票 21：棋盘视图（刷新 / 离开棋局两个键；节点图的悬停与点击由渲染器逐节点挂）。
   wireScriptBoard();
+  // M7 票 22：整备面 + 结算 / 选择弹窗 + 事件 / 商店 / 问号揭晓（「丢弃」是唯一的静态键；
+  // 24 格、货架、候选、结果行都由 `script-loadout.js` 按棋盘体现铺）。
+  wireScriptLoadout();
   $("lobby-form").addEventListener("submit", startGame);
   $("btn-pool-save").addEventListener("click", saveHeroPool);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；

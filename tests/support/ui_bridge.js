@@ -112,6 +112,15 @@
     "scriptGraphNodeState", "scriptGraphIconMarkup", "scriptGraphEdgeLabel",
     "scriptBoardShow", "scriptBoardRender", "scriptBoardRefresh", "scriptBoardEnterNode",
     "scriptBoardSync", "wireScriptBoard",
+    // M7 票 22：整备面 / 结算与选择弹窗 / 事件 · 商店 · 问号揭晓三面。烟测读的只有形状常量
+    // （24 格 = 8 列 × 3 行 / 遗物 ≤6）与"进节点后不可编辑"的判据；DOM 走真点击。
+    "SCRIPT_BACKPACK_SLOTS", "SCRIPT_LOADOUT_COLS", "SCRIPT_LOADOUT_ROWS",
+    "SCRIPT_RELIC_SLOTS", "SCRIPT_ITEM_KIND_LABELS",
+    "scriptLoadoutState", "scriptLoadoutEditable", "scriptLoadoutSync", "scriptLoadoutRender",
+    "scriptBackpackFull", "scriptRelicFull", "scriptItemRow",
+    "scriptLoadoutSwap", "scriptLoadoutDiscard", "scriptLoadoutPut",
+    "scriptFaceRender", "scriptFaceRevealInner", "scriptSettleOpenBattle", "scriptSettleSubmit",
+    "scriptLoadoutAfterEnter", "wireScriptLoadout",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

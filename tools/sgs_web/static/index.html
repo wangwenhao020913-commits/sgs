@@ -122,19 +122,6 @@
     <div id="run-list" class="runs"></div>
   </section>
   </div>
-  <!-- 确认框（M7 票 20）：撞旧档的三选一（继续旧档 / 覆盖新开 / 取消）与退出战斗的
-       确认 / 取消**共用**这一个壳——两处的按钮个数与文案都不同，故按钮由
-       `script-lobby.js:scriptConfirm` 按场景现铺，这里只留骨架与自己的遮罩。
-       「取消」一律**什么都不发生**（撞旧档 = 不删档；退出 = 不发请求）。 -->
-  <div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
-  <div id="script-confirm" class="script-confirm" role="dialog" aria-modal="true"
-       aria-labelledby="script-confirm-title" hidden>
-    <div class="script-confirm-window">
-      <h2 id="script-confirm-title" class="script-confirm-title"></h2>
-      <p id="script-confirm-text" class="script-confirm-text"></p>
-      <div id="script-confirm-actions" class="row"></div>
-    </div>
-  </div>
 </main>
 
 <!-- 牌桌页（U1-01 布局壳）
@@ -550,8 +537,65 @@
         </div>
       </div>
     </section>
+
+    <!-- 整备面（M7 票 22 / spec §4「整备面」、票 05 UI-3）：24 格 = **3×8**，其中出战槽
+         （`run.backpack.equipped_slots`，缺省前 4 格）标「出战」；遗物栏（≤6）；铜钱 HUD。
+         交换 / 移动 / 永久丢弃（**不返还铜钱**）由 `script-loadout.js` 现铺；编辑**只在
+         节点之间**——`pending` 非空时这个面板不接任何编辑入口（不是"点了无效"），
+         判据读服务端棋盘体，前端不判断自己在不在节点里。 -->
+    <section id="script-loadout" class="panel script-loadout" aria-label="整备面">
+      <div class="row space">
+        <h2>整备</h2>
+        <div class="row">
+          <span id="script-loadout-coins" class="script-coins"></span>
+          <span id="script-loadout-backpack" class="dim"></span>
+          <span id="script-loadout-relic-count" class="dim"></span>
+          <button id="btn-script-loadout-discard" type="button" class="ghost" disabled>丢弃选中</button>
+        </div>
+      </div>
+      <p id="script-loadout-hint" class="dim"></p>
+      <p id="script-loadout-lock" class="dim" hidden></p>
+      <div id="script-loadout-grid" class="script-loadout-grid" data-rows="3" data-cols="8"
+           aria-label="技能背包（3×8 格，出战槽在左起前 4 格标「出战」）"></div>
+      <div class="row">
+        <h3>遗物栏（≤6）</h3>
+        <span id="script-loadout-relic-hint" class="dim"></span>
+      </div>
+      <div id="script-loadout-relics" class="script-loadout-relics" aria-label="遗物栏"></div>
+    </section>
+
+    <!-- 当前节点的面（M7 票 22）：结算弹窗之外的三面——**事件**（文本 + 选项）、
+         **商店**（6 技能 + 2 遗物，售完不补货）、**问号揭晓**（进入即揭晓，重进不重抽）。
+         三选一 / 遗物 / 结算结果一律走弹窗（`#script-confirm` 那一个壳），不沉在页面底部；
+         这里只画"这个节点本身长什么样"。判据全在 `state.script.board.pending.spec`。 -->
+    <section id="script-face" class="panel script-face" hidden aria-label="当前节点">
+      <div class="row space">
+        <h2 id="script-face-title"></h2>
+        <span id="script-face-meta" class="dim"></span>
+      </div>
+      <p id="script-face-text" class="dim" hidden></p>
+      <div id="script-face-list" class="script-face-list"></div>
+      <div id="script-face-actions" class="row"></div>
+    </section>
   </div>
 </main>
+
+<!-- 剧本层的**唯一**模态壳（M7 票 20 起）：撞旧档三选一 / 退出确认 / 票 22 的三选一 /
+ 遗物 / 结算结果都填这一个壳。它住在四个页面**之外**（四个 `main` 之后），因为票 20 的
+ 确认框原先住在开局页里，而棋盘的「离开棋局」与结算面在别的页面 —— 那样弹窗会被
+ `display: none` 的祖先一起藏掉。位置纪律：仍在回放视图之后，不落进牌桌与回放之间。
+ 「取消」一律**什么都不发生**（撞旧档 = 不删档；退出 = 不发请求）。
+ 正文槽 `#script-confirm-body` 是票 22 加的：票 20 只有 标题 + 一句话 + 按钮三块。 -->
+<div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
+<div id="script-confirm" class="script-confirm" role="dialog" aria-modal="true"
+     aria-labelledby="script-confirm-title" hidden>
+  <div class="script-confirm-window">
+    <h2 id="script-confirm-title" class="script-confirm-title"></h2>
+    <p id="script-confirm-text" class="script-confirm-text"></p>
+    <div id="script-confirm-body" class="script-confirm-body" hidden></div>
+    <div id="script-confirm-actions" class="row"></div>
+  </div>
+</div>
 
 <!-- U1-00：前端按职责拆成普通脚本，**这里的顺序就是运行顺序**；页面与
      tests/support/ui_smoke.mjs 共用这一份清单（不引入 npm / 打包 / ES module）。 -->
@@ -569,6 +613,11 @@
 <!-- M7 票 21：棋盘 + **共用**节点图渲染器（棋盘与编辑器同一份画法，D26）。紧挨开局页
      （棋盘由「新剧本」的开档 / 「继续剧本」接上）；`wireScriptBoard()` 在 main.js 里接线。 -->
 <script src="script-board.js"></script>
+<!-- M7 票 22：整备面（24 格 / 出战槽 / 遗物栏 / 铜钱）+ 结算与选择弹窗（三选一 / 遗物 /
+     Boss 自动失去 4 条 / 结果）+ 事件 / 商店 / 问号揭晓三面。紧挨棋盘：它读棋盘体
+     （`state.script.board`）的 `run` / `catalog` / `pending.spec`，由 `wireScriptLoadout()`
+     接线；价格 / 铜钱 / 折价数字一律印服务端给的数（票 22 的备注），前端不乘价。 -->
+<script src="script-loadout.js"></script>
 <script src="session.js"></script>
 <script src="candidates.js"></script>
 <script src="card-view.js"></script>

@@ -2030,3 +2030,69 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-card-enemy { font-size: 12px; padding: 3px 0; border-top: 1px dashed var(--line); }
 .script-card-line { font-size: 12px; }
 .script-card-option { font-size: 12px; padding: 1px 0; }
+
+/* ---------------------------------------------------------------------------
+ * M7 票 22：整备面（24 格 = 3×8 / 出战槽 / 遗物栏 / 铜钱）+ 当前节点的面（事件 / 商店 /
+ * 问号揭晓）+ 结算弹窗的正文槽
+ *
+ * 整备面的几何判据是 `3 行 × 8 列`（`repeat(8` 这一行就是判据）：`#script-loadout-grid`
+ * 的 24 个格子按格序铺进去，前 4 格（= `equipped_slots` 缺省值）带「出战」徽标。
+ * 数字（铜钱 / 价格 / 折价）一律印服务端下发的值，这一节只有版式，没有任何价格的影子。
+ * ------------------------------------------------------------------------- */
+.script-loadout .row { margin-top: 6px; }
+.script-coins { font-weight: 600; color: #8a6a1f; }
+/* 24 格 = 8 列 × 3 行；出战槽常亮强调色边框是"上哪几格"的静态标记。 */
+.script-loadout-grid {
+  display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px; margin-top: 8px;
+}
+.script-slot {
+  display: flex; flex-direction: column; gap: 3px; align-items: flex-start;
+  min-height: 62px; padding: 6px 8px; border-radius: 10px; text-align: left;
+  border: 1px solid var(--line); background: var(--card); font-size: 12px; cursor: pointer;
+}
+.script-slot[data-equipped="1"] { border-color: var(--accent); }
+.script-slot[data-empty="1"] { border-style: dashed; color: #9a9188; cursor: default; }
+.script-slot.on { box-shadow: 0 0 0 2px var(--accent-soft); }
+.script-slot-badge { font-size: 10px; font-weight: 600; color: var(--accent); }
+.script-slot-name { font-size: 12px; line-height: 1.25; word-break: break-word; }
+.script-loadout-relics { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.script-relic {
+  min-width: 120px; padding: 6px 10px; border-radius: 10px; font-size: 12px;
+  border: 1px solid var(--line); background: var(--card);
+}
+.script-relic[data-empty="1"] { border-style: dashed; color: #9a9188; }
+
+/* 当前节点的面：事件选项 / 商店货架 / 问号揭晓共用一套行式版式。 */
+.script-face-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.script-face-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); font-size: 13px; text-align: left;
+}
+.script-face-row[data-owned="1"], .script-face-row[data-full="1"],
+.script-face-row[data-sold="1"] { opacity: .55; }
+.script-face-row .script-face-item { font-weight: 600; }
+.script-face-note { font-size: 12px; color: #7b7266; }
+.script-face-price { font-size: 12px; color: #8a6a1f; font-weight: 600; }
+.script-face-req { font-size: 12px; color: #9d4a4a; }
+
+/* 结算弹窗的正文槽（票 20 的壳只有一个正文段落；三选一 / 遗物 / 结果需要一个列表槽）。 */
+.script-confirm-body { margin-top: 10px; max-height: 46vh; overflow: auto; }
+.script-confirm-body[hidden] { display: none !important; }
+.script-pick {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; margin-top: 6px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); font-size: 13px; text-align: left; cursor: pointer;
+}
+.script-pick[disabled] { cursor: default; opacity: .55; }
+.script-pick-price { font-size: 12px; color: #8a6a1f; }
+/* Boss「失去 4 条出战技能」= **自动落**，不是选项：这块没有按钮、不接点击。 */
+.script-lose {
+  margin-top: 6px; padding: 8px 10px; border-radius: 10px; font-size: 12px;
+  border: 1px dashed #b58b2a; background: #f6e7c8;
+}
+.script-event-row {
+  font-size: 13px; padding: 3px 0; border-top: 1px dashed var(--line);
+}
+.script-event-row:first-child { border-top: none; }

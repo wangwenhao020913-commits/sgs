@@ -480,6 +480,8 @@ function scriptBoardShow(body) {
   if (!state.script.board) return null;
   show("view-script-board");
   scriptBoardRender();
+  // 票 22：整备面 / 当前节点的面读同一份棋盘体（`script-loadout.js`；调用时解析）。
+  if (typeof scriptLoadoutSync === "function") scriptLoadoutSync();
   return state.script.board;
 }
 
@@ -495,6 +497,7 @@ function scriptBoardSync() {
   if (card) card.hidden = true;
   scriptBoardShowError(null);
   scriptBoardHint("");
+  if (typeof scriptLoadoutSync === "function") scriptLoadoutSync();
   return null;
 }
 
@@ -558,6 +561,9 @@ async function scriptBoardEnterNode(node) {
   scriptBoardHint(body.session_id
     ? `已进入「${scriptBoardNodeName(node)}」：这一场在牌桌上打，打完回棋盘结算。`
     : `已进入「${scriptBoardNodeName(node)}」：结算之后回到棋盘。`);
+  // 票 22：进节点后节点内的三个面（事件 / 商店 / 问号揭晓）由整备面那份脚本接手；
+  // 战斗房的跳转归票 23（这里不切会话、不 show 牌桌）。
+  if (typeof scriptLoadoutAfterEnter === "function") scriptLoadoutAfterEnter(body);
   return body;
 }
 

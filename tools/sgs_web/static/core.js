@@ -313,7 +313,10 @@ const state = {
     overwrite: false,
     pickerOpen: false,
     busy: false,
-    confirm: null,     // 打开中的确认框种类：null / "overwrite" / "exit"
+    confirm: null,     // 打开中的确认框种类：null / "overwrite" / "exit" / "pick" / "relic" / "result"
+    // M7 票 22（`script-loadout.js` 是唯一读写方）：整备面的选中格 / 拖拽起点 / 商店购物车
+    // 与打开中的结算流程（都是**显示态**，没有一格是规则判据）。
+    loadout: null,
   },
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）

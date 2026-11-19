@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Final, NoReturn
 
 from sgs.data import (
+    RELIC_PRICE,
     EnemyDraw,
     Event,
     Mode,
@@ -44,12 +45,15 @@ from sgs.data import (
     Script,
     ScriptLibrary,
     SkillValueTable,
+    hero_by_id,
+    hero_skill_name,
     load_builtin_script_library,
     load_script_library,
     load_skill_value_presets,
     load_skill_values,
     merge_skill_values,
     script_digest,
+    skill_value,
 )
 from sgs.engine import new_seed, solve_pve_outcome
 from sgs.script import (
@@ -60,9 +64,11 @@ from sgs.script import (
     RunState,
     SaveStatus,
     SaveView,
-    ScriptSave,
     ScriptError,
+    ScriptSave,
     SettleOrder,
+    ShopSpec,
+    UnknownSpec,
     available_next,
     current_node,
     dump_save,
@@ -71,6 +77,7 @@ from sgs.script import (
     layer_of,
     progress_key,
     settle_node,
+    skill_price,
     stage_save,
 )
 
@@ -148,6 +155,79 @@ def _dump_requirement(requirement: Requirement) -> dict[str, Any]:
         "flags": list(requirement.flags),
         "not_flags": list(requirement.not_flags),
     }
+
+
+# ---------------------------------------------------------------------------
+# 目录行（票 22）：整备面 / 三选一 / 商店显示一件东西要的三个数
+# ---------------------------------------------------------------------------
+
+
+def _skill_label(skill_id: str) -> str:
+    """技能 id → 中文名（武将表反查；查不到就**原样印 id**，不编名字）。
+
+    合成键（``yiji:give:0:0``）只看冒号前那一段——与 ``sgs_web.projection`` 的
+    ``_skill_display_name`` 同一个读法；遗物技能的载体随票 26 落地，在那之前遗物 id
+    没有名字可查，也走这条兜底。
+    """
+    head = skill_id.split(":", 1)[0]
+    pieces = head.split(".")
+    if len(pieces) >= 3 and pieces[0] == "hero":
+        hero = hero_by_id(pieces[1])
+        if hero is not None:
+            return hero_skill_name(hero, head)
+    return skill_id
+
+
+def _catalog_item(table: SkillValueTable, item_id: str) -> dict[str, Any] | None:
+    """一件东西的目录行：``{name, kind, rarity, price}``；表外（不许卖也不许抽）⇒ ``None``。
+
+    **价只读表**：技能价由 :func:`sgs.script.skill_price` 从**稀有度**现算（票 02 §4
+    「一张表两用」），遗物固定 :data:`sgs.data.RELIC_PRICE`。前端不按稀有度自己乘价
+    ——``RARITY_PRICES`` 在本仓只有一份真源（票 22 的备注）。
+    """
+    if item_id in table.skills:
+        value = skill_value(table, item_id)
+        return {
+            "name": _skill_label(item_id),
+            "kind": "skill",
+            "rarity": value.rarity.value,
+            "price": skill_price(table, item_id),
+        }
+    if item_id in table.relics:
+        return {
+            "name": _skill_label(item_id),
+            "kind": "relic",
+            "rarity": None,
+            "price": RELIC_PRICE,
+        }
+    return None
+
+
+def _spec_item_ids(spec: Any) -> list[str]:
+    """``pending.spec`` 里会显示成"一件东西"的 id（战斗候选 / Boss 遗物 / 商店库存）。"""
+    if isinstance(spec, BattleSpec):
+        ids = [skill for round_ in spec.rewards for skill in round_]
+        if spec.boss_relic is not None:
+            ids.append(spec.boss_relic)
+        return ids
+    if isinstance(spec, ShopSpec):
+        return [*spec.stock.skills, *spec.stock.relics]
+    if isinstance(spec, UnknownSpec):
+        return _spec_item_ids(spec.revealed.spec)
+    return []
+
+
+def _effect_item_ids(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """事件选项的 ``grant_skill`` / ``grant_relic`` 后果（事件页要显示"给什么"）。"""
+    ids: list[str] = []
+    for event in events:
+        for option in event.get("options") or ():
+            for effect in option.get("effects") or ():
+                kind = effect.get("kind")
+                item = effect.get("skill") if kind == "grant_skill" else effect.get("relic")
+                if kind in ("grant_skill", "grant_relic") and item:
+                    ids.append(str(item))
+    return ids
 
 
 def _int_field(body: Mapping[str, Any], name: str) -> int:
@@ -502,6 +582,14 @@ class ScriptRuns:
             }
             for node in layer.nodes
         ]
+        # 票 22「问号揭晓」：揭晓后要**按内层房间的流程走**，可 `pending.spec.revealed`
+        # 只有 room id + 内层 spec——名字 / 文案 / 事件选项都在房间面上（票 16 的明说读法）。
+        # 故待结算的那个问号节点在自己的 `room` 上多一个 `revealed`（与 `_room` 同形）。
+        if run.pending is not None and isinstance(run.pending.spec, UnknownSpec):
+            revealed_id = run.pending.spec.revealed.room
+            for item in nodes:
+                if item["id"] == current_id:
+                    item["room"]["revealed"] = self._room(library, revealed_id)
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "revision": run.revision,
@@ -530,6 +618,20 @@ class ScriptRuns:
             ],
             "available_next": available_ids,
             "board_error": board_error,
+            # 整备面 / 三选一 / 商店显示"一件东西"要的三个数（票 22 的备注：价格一律
+            # 服务端下发）。行只覆盖**这一屏真的会显示的那些 id**，不下发整张价值表。
+            "catalog": self._catalog(
+                save.value_table,
+                run=run,
+                room=(
+                    None
+                    if current_id is None
+                    else next(
+                        (item["room"] for item in nodes if item["id"] == current_id),
+                        None,
+                    )
+                ),
+            ),
             "pending": (
                 None
                 if run.pending is None
@@ -562,6 +664,37 @@ class ScriptRuns:
     def _status_of(statuses: Mapping[str, Any], key: str) -> str | None:
         value = statuses.get(key)
         return None if value is None else str(getattr(value, "value", value))
+
+    # -- 目录行（票 22：整备面 / 三选一 / 商店显示的"一件东西"） -------------
+
+    def _catalog(
+        self,
+        table: SkillValueTable,
+        *,
+        run: RunState,
+        room: Mapping[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        """本屏"一件东西"的目录行：``{name, kind, rarity, price}``。
+
+        只收**这一屏真的会显示的那些 id**（不下发整张价值表）：背包 24 格、遗物栏、
+        ``pending.spec``（三选一候选 / Boss 遗物 / 商店库存 / 揭晓内层）、待结算房间的
+        事件后果。价读**档内**冻结价值表（票 04 §6 的锁表口径在这一层生效），表外 id
+        不造行（前端退回原样 id，不编造价格）。
+        """
+        ids: list[str] = [slot for slot in run.backpack.slots if slot is not None]
+        ids.extend(run.relics)
+        if run.pending is not None:
+            ids.extend(_spec_item_ids(run.pending.spec))
+        if room is not None:
+            ids.extend(_effect_item_ids(room.get("events") or ()))
+            # 问号房揭晓出来的内层房间也是这一屏（揭晓后按它的流程走）：它的事件后果同样要名字。
+            ids.extend(_effect_item_ids((room.get("revealed") or {}).get("events") or ()))
+        rows: dict[str, dict[str, Any]] = {}
+        for item_id in dict.fromkeys(ids):
+            row = _catalog_item(table, item_id)
+            if row is not None:
+                rows[item_id] = row
+        return rows
 
     # -- 房间（悬停卡的进料：够画座位布局与敌人信息，票 21） -----------------
 

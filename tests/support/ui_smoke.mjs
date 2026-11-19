@@ -30818,4 +30818,547 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+
+/* ============ M7 票 22：整备面 + 结算弹窗 + 事件 / 商店 / 问号揭晓 ============
+ *
+ * 判据分六半（[票 22 验收]、[票 05 UI-3 / UI-4]、spec §4）：
+ *  ① **整备面**：24 格 = 3×8、前 4 格标「出战」、遗物栏 ≤6、铜钱 HUD；交换 / 移动 / 永久
+ *     丢弃各是一条 `PUT …/backpack`（丢弃不返还铜钱）；**编辑只在节点之间**（节点内连
+ *     监听都不挂、「丢弃」整键收起）。
+ *  ② **满包折价**：满包时选一个"给技能"的事件选项 ⇒ 服务端折成铜钱，结果弹窗印的就是
+ *     服务端那个数（前端不算价——机械判据见 `test_the_prices_and_coins_are_only_printed…`）。
+ *  ③ **商店**：6 技能 + 2 遗物（这次没有遗物就明说）、价格读 `catalog`、已拥有不出现、
+ *     满包置灰；购买 = 一条 `settle {purchases}`，结果里货架标「已售出（不补货）」。
+ *  ④ **三选一 / 遗物 / Boss**：多轮 `pick k` 连续弹、满包每张标「折 N 铜钱」、遗物那段也走
+ *     弹窗；Boss「失去 4 条出战技能」是**只读的自动段**（`data-auto="1"`、零按钮、打开流程
+ *     本身零请求）——没有确认框。
+ *  ⑤ **事件**：全文 + 选项（条件与后果）；锁住的选项由**服务端**拒（400 原话进红字行）。
+ *  ⑥ **问号揭晓**：进入即揭晓（`room.revealed` 由服务端下发），揭晓后按内层房间的流程走。
+ *
+ * 进料是 `tests/support/fixtures/script-loadout-library.json`（**真**库校验器先过一道，见
+ * `tests/test_web_static.py::test_the_loadout_smoke_library_is_a_valid_script_library`）。
+ * 事件 / 商店 / 出口 / 问号房的结算都打到**真端点**；三选一与 Boss 那两段用**同一份真棋盘体
+ * 的克隆**摆出 pending（这里没有能自然打到终局的 Boss 战斗；Boss 结算顺序的机械断言归票 17，
+ * 悬空 pending 的 settle 会拿到服务端 400 —— 那正是"前端不预判"的读数）。
+ */
+const SCRIPT_LOADOUT_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_LOADOUT_LIBRARY,
+  readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+);
+
+/* 整备面 / 节点面的读法：与产品 DOM 同一份 `data-*`（不按文案找节点）。 */
+const loadoutSlots = () => byClass($("script-loadout-grid"), "script-slot");
+const slotOf = (index) => loadoutSlots()
+  .find((node) => node.getAttribute("data-slot") === String(index)) || null;
+const loadoutRelics = () => byClass($("script-loadout-relics"), "script-relic");
+const slotName = (index) => {
+  const node = slotOf(index);
+  const names = node ? byClass(node, "script-slot-name") : [];
+  return names.length ? names[0].textContent : "";
+};
+const slotBadge = (index) => {
+  const node = slotOf(index);
+  const badges = node ? byClass(node, "script-slot-badge") : [];
+  return badges.length ? badges[0].textContent : "";
+};
+const faceRows = () => byClass($("script-face-list"), "script-face-row");
+const faceOption = (index) => faceRows()
+  .find((row) => row.getAttribute("data-option") === String(index)) || null;
+const faceStock = (itemId) => faceRows()
+  .find((row) => row.getAttribute("data-item-id") === itemId) || null;
+const faceActions = () => Array.from($("script-face-actions").children);
+const faceGo = () => faceActions()[0] || null;
+const pickRows = () => byClass($("script-confirm-body"), "script-pick");
+const resultRows = () => byClass($("script-confirm-body"), "script-event-row");
+const resultRow = (kind) => resultRows()
+  .find((row) => row.getAttribute("data-event") === kind) || null;
+const dialog = () => $("script-confirm");
+const confirmButtons = () => Array.from($("script-confirm-actions").children);
+const settleCalls = (from) => calls.slice(from).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/settle"));
+
+const loadoutRun = async (seed) => {
+  const body = await postRaw("/api/script-runs", {
+    script_id: "loadoutprobe", chosen_hero: "jie_liubei", seed,
+  });
+  ui.scriptBoardShow(body);
+  return body;
+};
+const putBackpack = async (slots, equipped) => {
+  const board = ui.state.script.board;
+  const payload = { expected_revision: board.revision, slots };
+  if (equipped) payload.equipped_slots = equipped;
+  const response = await fetch(`${BASE}/api/script-runs/${board.run_id}/backpack`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  ui.scriptBoardShow(body);
+  return body;
+};
+const discardScriptSave = async () => {
+  // revision 以**服务端**为准：棋盘体可能是克隆 / 已清空，`state.script.save` 也可能过期。
+  await ui.scriptLoadSave();
+  const save = ui.state.script.save || {};
+  if (save.status === "ok" && Number.isInteger(save.revision)) {
+    await fetch(`${BASE}/api/script-save?expected_revision=${save.revision}`, { method: "DELETE" });
+  }
+  ui.state.script.board = null;
+  await ui.scriptLoadSave();
+};
+const startDrag = (index) => {
+  const handlers = (slotOf(index) && slotOf(index).listeners.dragstart) || [];
+  const event = { preventDefault() {}, dataTransfer: { setData() {} } };
+  for (const fn of handlers) fn(event);
+  return handlers.length;
+};
+const dropOn = async (index) => {
+  const handlers = (slotOf(index) && slotOf(index).listeners.drop) || [];
+  const event = { preventDefault() {} };
+  for (const fn of handlers) await fn(event);
+  return handlers.length;
+};
+const enterNode = async (runId, nodeId) => {
+  const body = await postRaw(`/api/script-runs/${runId}/nodes/${nodeId}`, {
+    expected_revision: ui.state.script.board.revision,
+  });
+  ui.scriptBoardShow(body);
+  return body;
+};
+/** 一份"待结算"的克隆棋盘（真棋盘体 + 手摆的 pending）：三选一 / Boss 的面读的就是它。 */
+const pendingClone = (spec, { nodeId = "b1", boss = false, room = {} } = {}) => {
+  const clone = JSON.parse(JSON.stringify(ui.state.script.board));
+  const target = clone.nodes.find((node) => node.id === nodeId);
+  target.room = Object.assign({}, target.room, room, { is_boss: boss });
+  clone.pending = { node_id: `L1/${nodeId}`, spec };
+  clone.session_id = "s-probe";
+  ui.scriptBoardShow(clone);
+  return clone;
+};
+
+// ---- ① 整备面一屏 ----
+const runA = await loadoutRun(2201);
+check("M7-22a 整备面一屏：24 格（3×8）、前 4 格标「出战」、遗物栏 6 格、铜钱 HUD 读服务端",
+  loadoutSlots().length === 24
+  && ui.SCRIPT_BACKPACK_SLOTS === 24 && ui.SCRIPT_LOADOUT_ROWS === 3
+  && ui.SCRIPT_LOADOUT_COLS === 8 && ui.SCRIPT_RELIC_SLOTS === 6
+  && loadoutRelics().length === 6
+  && [0, 1, 2, 3].every((i) => slotOf(i).getAttribute("data-equipped") === "1"
+    && slotBadge(i) === "出战")
+  && [4, 5, 23].every((i) => slotOf(i).getAttribute("data-equipped") === "0" && slotBadge(i) === "")
+  && $("script-loadout-coins").textContent === `铜钱 ${runA.run.coins}`
+  && $("script-loadout-backpack").textContent.includes("背包 0/24"),
+  `格=${loadoutSlots().length} 遗物=${loadoutRelics().length} 铜钱="${$("script-loadout-coins").textContent}"`);
+
+const twoSkills = new Array(24).fill(null);
+twoSkills[0] = "hero.liubei.rende";
+twoSkills[1] = "hero.zhangfei.paoxiao";
+const named = await putBackpack(twoSkills);
+check("M7-22b 24 格里的名字读服务端目录（「仁德」不是 id）；单价也是服务端算的（默认表全普通 ⇒ 3）",
+  slotOf(0).getAttribute("data-skill-id") === "hero.liubei.rende"
+  && slotName(0) === "仁德"
+  && slotName(1) === "咆哮"
+  && named.catalog["hero.liubei.rende"].price === 3
+  && named.catalog["hero.liubei.rende"].name === "仁德"
+  && $("script-loadout-backpack").textContent.includes("背包 2/24"),
+  `slot0="${slotName(0)}" price=${named.catalog["hero.liubei.rende"].price}`);
+
+// ---- ② 交换 / 移动 / 丢弃（各一条 PUT）----
+const revisionBefore = ui.state.script.board.revision;
+scriptMark = calls.length;
+const dragHandlers = startDrag(0);
+await dropOn(5);
+let puts = calls.slice(scriptMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/backpack"));
+check("M7-22c 拖放两格 = 交换（一条 PUT；`slots` 换位、`equipped_slots` 不动、revision +1）",
+  dragHandlers === 1 && puts.length === 1
+  && puts[0].body.slots[0] === null && puts[0].body.slots[5] === "hero.liubei.rende"
+  && puts[0].body.expected_revision === revisionBefore
+  && ui.state.script.board.revision === revisionBefore + 1
+  && slotOf(0).getAttribute("data-empty") === "1"
+  && slotOf(5).getAttribute("data-skill-id") === "hero.liubei.rende",
+  `handlers=${dragHandlers} puts=${puts.length} slots[5]=${puts.length && puts[0].body.slots[5]}`);
+
+scriptMark = calls.length;
+await clickAndWait(slotOf(5));
+const selected = slotOf(5).classList.contains("on");
+await clickAndWait(slotOf(0));
+puts = calls.slice(scriptMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/backpack"));
+check("M7-22d 点两格 = 移动到空格（一条 PUT；选中态 `.on`，落格后清空）",
+  selected && puts.length === 1
+  && puts[0].body.slots[0] === "hero.liubei.rende" && puts[0].body.slots[5] === null
+  && slotOf(0).getAttribute("data-skill-id") === "hero.liubei.rende"
+  && !slotOf(0).classList.contains("on") && !slotOf(5).classList.contains("on"),
+  `selected=${selected} puts=${puts.length}`);
+
+const coinsBeforeDiscard = ui.state.script.board.run.coins;
+await clickAndWait(slotOf(0));
+scriptMark = calls.length;
+await clickAndWait($("btn-script-loadout-discard"));
+puts = calls.slice(scriptMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/backpack"));
+check("M7-22e 「丢弃选中」= 一条 PUT 清掉那一格；**不返还铜钱**（请求里没有铜钱字段、run.coins 不变）",
+  puts.length === 1
+  && puts[0].body.slots[0] === null
+  && !("coins" in puts[0].body)
+  && ui.state.script.board.run.coins === coinsBeforeDiscard
+  && $("script-loadout-coins").textContent === `铜钱 ${coinsBeforeDiscard}`
+  && slotOf(0).getAttribute("data-empty") === "1",
+  `coins=${ui.state.script.board.run.coins} hints="${$("script-loadout-hint").textContent}"`);
+
+// ---- ③ 满包标注 + 节点内编辑入口不存在 ----
+const fullSlots = Array.from({ length: 24 }, (_, index) => (
+  index < 4
+    ? ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao", "hero.zhaoyun.longdan"][index]
+    : `probe.fill.${index}`
+));
+await putBackpack(fullSlots);
+check("M7-22f 满包标注：24/24 + 「已满」（三选一的选择会折成铜钱）",
+  $("script-loadout-backpack").textContent.includes("背包 24/24")
+  && $("script-loadout-backpack").textContent.includes("已满")
+  && ui.state.script.board.run.backpack.slots.every((slot) => Boolean(slot)),
+  `"${$("script-loadout-backpack").textContent}"`);
+
+const enteredEvent = await enterNode(runA.run_id, "e1");
+scriptMark = calls.length;
+await clickAndWait(slotOf(0));
+const nodeEdit = {
+  dragstart: (slotOf(0).listeners.dragstart || []).length,
+  click: (slotOf(0).listeners.click || []).length,
+  discardHidden: $("btn-script-loadout-discard").hidden,
+  lock: $("script-loadout-lock").hidden === false,
+  puts: calls.slice(scriptMark).filter(
+    (call) => call.method === "PUT" && call.path.endsWith("/backpack")).length,
+};
+check("M7-22g 节点内**编辑入口不存在**：格子不挂 click / dragstart、「丢弃」整键收起、点它零请求",
+  nodeEdit.dragstart === 0 && nodeEdit.click === 0
+  && nodeEdit.discardHidden === true && nodeEdit.lock === true
+  && nodeEdit.puts === 0
+  && $("script-loadout-lock").textContent.includes("不可编辑"),
+  JSON.stringify(nodeEdit));
+
+// ---- ④ 事件面 + 满包折价（服务端给的钱）----
+check("M7-22h 事件面：事件全文 + 三个选项（条件与后果逐条写出来，不置灰——判据在服务端）",
+  $("script-face").hidden === false
+  && $("script-face").getAttribute("data-face") === "event"
+  && $("script-face-title").textContent === "村口铜钱"
+  && $("script-face-text").textContent.includes("村民捧出铜钱")
+  && faceRows().length === 3
+  && faceOption(0).textContent.includes("收下铜钱")
+  && faceOption(0).textContent.includes("铜钱 +9")
+  && faceOption(1).textContent.includes("需要 flag.never")
+  && faceOption(1).disabled === false
+  && faceOption(2).textContent.includes("获得技能：咆哮"),
+  `face=${$("script-face").getAttribute("data-face")} 行=${faceRows().map((row) => row.textContent).join(" | ")}`);
+
+scriptMark = calls.length;
+await clickAndWait(faceOption(1));
+let settles = settleCalls(scriptMark);
+check("M7-22i 锁住的选项由**服务端**拒：一条 settle {option:1} ⇒ 400 原话进红字行、棋盘不动、不开弹窗",
+  settles.length === 1 && settles[0].body.option === 1
+  && $("script-board-error").hidden === false
+  && $("script-board-error").getAttribute("data-rule-id") === "script.settle.event_option_locked"
+  && ui.state.script.board.pending !== null
+  && dialog().hidden === true,
+  `rule=${$("script-board-error").getAttribute("data-rule-id")} 错误="${$("script-board-error").textContent}"`);
+
+scriptMark = calls.length;
+await clickAndWait(faceOption(2));
+settles = settleCalls(scriptMark);
+const foldedRow = resultRow("coins");
+const foldPrice = enteredEvent.catalog["hero.zhangfei.paoxiao"].price;
+check("M7-22j 满包选「给技能」的选项 ⇒ 服务端折成铜钱，结果弹窗印的**就是这个数**（前端不算价）",
+  settles.length === 1
+  && JSON.stringify(Object.keys(settles[0].body).sort()) === JSON.stringify(["expected_revision", "option"])
+  && dialog().hidden === false && dialog().getAttribute("data-dialog") === "result"
+  && foldedRow !== null && foldedRow.getAttribute("data-coins") === String(foldPrice)
+  && foldedRow.textContent.includes("折价")
+  && $("script-confirm-text").textContent.includes(`铜钱 ${foldPrice}`)
+  && ui.state.script.board.run.backpack.slots.filter((slot) => Boolean(slot)).length === 24,
+  `dialog=${dialog().getAttribute("data-dialog")} 行="${foldedRow && foldedRow.textContent}" price=${foldPrice}`);
+await clickAndWait(confirmButtons()[0]);
+check("M7-22k 结果弹窗「回棋盘」：弹窗收起、棋盘重画（pending 清空、e1 = 当前、铜钱 +3 落进 HUD）",
+  dialog().hidden === true
+  && ui.state.script.board.pending === null
+  && cellButton(cellOf("e1")).classList.contains("st-current")
+  && $("script-loadout-coins").textContent === "铜钱 3"
+  && $("script-board-error").hidden === true,
+  `pending=${ui.state.script.board.pending} 铜钱="${$("script-loadout-coins").textContent}"`);
+
+// ---- ⑤ 商店面：库存 + 价格（服务端目录）+ 买到手 ----
+// 满包时货架会置灰（那是另一条断言）——先腾一格再进店，才买得动。
+fullSlots[23] = null;
+await putBackpack(fullSlots);
+const enteredShop = await enterNode(runA.run_id, "s1");
+const stockIds = enteredShop.pending.spec.stock.skills;
+const stockRows = stockIds.map((id) => faceStock(id)).filter(Boolean);
+check("M7-22l 商店面：6 件技能、每件写服务端给的价格；这次没有遗物就明说（有几张给几张）",
+  $("script-face").getAttribute("data-face") === "shop"
+  && stockIds.length === 6 && stockRows.length === 6
+  && stockRows.every((row, index) => row.getAttribute("data-price")
+    === String(enteredShop.catalog[stockIds[index]].price))
+  && stockRows[0].textContent.includes("3 铜钱")
+  && $("script-face-list").textContent.includes("这次没有遗物可卖")
+  && enteredShop.pending.spec.stock.relics.length === 0,
+  `库存=${stockIds.length} 行=${stockRows.length}`);
+
+// 已拥有不出现：把一件库存塞进背包 ⇒ 货架上少一件（不是置灰）。
+const ownedShop = JSON.parse(JSON.stringify(enteredShop));
+ownedShop.run.backpack.slots[0] = stockIds[1];
+ui.scriptBoardShow(ownedShop);
+check("M7-22m 已拥有的技能**不出现**在货架上（不是置灰：少了那一行）",
+  faceStock(stockIds[1]) === null
+  && stockIds.filter((id) => faceStock(id) !== null).length === stockIds.length - 1,
+  `货架=${stockIds.map((id) => (faceStock(id) ? id : `${id}:缺`)).join(",")}`);
+
+// 满包时技能置灰（`data-full` + 真 disabled + 写原因）；判据仍是服务端的背包事实。
+const fullShop = JSON.parse(JSON.stringify(enteredShop));
+fullShop.run.backpack.slots = fullShop.run.backpack.slots.map(
+  (slot, index) => slot || `probe.full.${index}`);
+ui.scriptBoardShow(fullShop);
+const greyed = stockIds.map((id) => faceStock(id)).filter(Boolean);
+check("M7-22n 满包时商店技能**置灰**（`data-full=1`、disabled、写着「背包已满（买不了）」）",
+  greyed.length === stockIds.length
+  && greyed.every((row) => row.getAttribute("data-full") === "1" && row.disabled === true)
+  && greyed[0].textContent.includes("背包已满（买不了）"),
+  `灰了=${greyed.filter((row) => row.disabled).length}/${stockIds.length}`);
+ui.scriptBoardShow(enteredShop);
+
+const buyId = stockIds[0];
+const coinsBeforeBuy = ui.state.script.board.run.coins;
+await clickAndWait(faceStock(buyId));
+const carted = faceStock(buyId) !== null
+  && faceStock(buyId).getAttribute("aria-pressed") === "true"
+  && faceGo().textContent.includes("买 1 件");
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+settles = settleCalls(scriptMark);
+const lostRow = resultRow("coins_lost");
+const soldRow = byClass($("script-confirm-body"), "script-face-row")
+  .find((row) => row.getAttribute("data-item-id") === buyId) || null;
+check("M7-22o 商店购买 = 一条 settle {purchases:[id]}；扣钱是服务端的数，货架标「已售出（不补货）」",
+  carted && settles.length === 1
+  && JSON.stringify(settles[0].body.purchases) === JSON.stringify([buyId])
+  && dialog().getAttribute("data-dialog") === "result"
+  && lostRow !== null
+  && lostRow.getAttribute("data-coins") === String(enteredShop.catalog[buyId].price)
+  && soldRow !== null && soldRow.getAttribute("data-sold") === "1"
+  && soldRow.textContent.includes("已售出（不补货）"),
+  `carted=${carted} 扣钱="${lostRow && lostRow.textContent}"`);
+await clickAndWait(confirmButtons()[0]);
+check("M7-22p 商店买完回棋盘：铜钱 = 服务端扣完后的数（前端只读 `run.coins`）",
+  ui.state.script.board.run.coins === coinsBeforeBuy - enteredShop.catalog[buyId].price
+  && $("script-loadout-coins").textContent === `铜钱 ${coinsBeforeBuy - enteredShop.catalog[buyId].price}`,
+  `铜钱=${ui.state.script.board.run.coins}`);
+
+// ---- ⑥ 出口：结算即通关（board null ⇒ 回开局页 + 存档 missing）----
+const enteredExit = await enterNode(runA.run_id, "o1");
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+settles = settleCalls(scriptMark);
+const endedRow = resultRow("run_ended");
+check("M7-22q 走进出口 = 通关：结算回 `board:null`，结果页写「通关」，一条跑完的 settle（purchases 空）",
+  settles.length === 1
+  && JSON.stringify(settles[0].body.purchases) === JSON.stringify([])
+  && dialog().getAttribute("data-dialog") === "result"
+  && $("script-confirm-title").textContent === "通关"
+  && endedRow !== null && endedRow.textContent.includes("通关")
+  && ui.state.script.board === null,
+  `title="${$("script-confirm-title").textContent}" row="${endedRow && endedRow.textContent}"`);
+await clickAndWait(confirmButtons()[0]);
+check("M7-22r 通关后回开局页：存档 missing、「继续」置灰、摘要行收起（结束即删档）",
+  $("view-lobby").hidden === false
+  && scriptStatus() === "missing"
+  && $("btn-script-continue").disabled === true
+  && $("script-summary").hidden === true,
+  `status=${scriptStatus()}`);
+
+// ---- ⑦ 三选一：多轮连续弹（满包每张标服务端给的折价）----
+const runB = await loadoutRun(2202);
+const battleSlots = Array.from({ length: 24 }, (_, index) => (
+  index < 4
+    ? ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao", "hero.zhaoyun.longdan"][index]
+    : `probe.battle.${index}`
+));
+const battleRestore = await putBackpack(battleSlots);
+const battleSpec = {
+  kind: "battle",
+  battle_seed: 11,
+  pve: { identities: [], principal: 0, protected_ally: null, victory: { kind: "rout" }, boss: null, grants: [], seats: [] },
+  rewards: [
+    ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao"],
+    ["hero.zhaoyun.longdan", "hero.liubei.rende"],
+  ],
+  boss_relic: null,
+};
+pendingClone(battleSpec, { nodeId: "b1", room: { name: "麦田" } });
+check("M7-22s 战斗节点面：写着「在牌桌上打」（session_id 在棋盘体里）与一个「结算（三选一）」入口",
+  $("script-face").getAttribute("data-face") === "battle"
+  && $("script-face").hidden === false
+  && $("script-face-text").textContent.includes("牌桌上")
+  && faceGo() !== null && faceGo().textContent.includes("结算"),
+  `face=${$("script-face").getAttribute("data-face")} action="${faceGo() && faceGo().textContent}"`);
+
+// 续档 / 刷新之后棋盘体没有会话 id：先给"重开这一场"（重进同一节点不重抽，票 19）。
+const resumedBoard = JSON.parse(JSON.stringify(ui.state.script.board));
+resumedBoard.session_id = null;
+ui.scriptBoardShow(resumedBoard);
+check("M7-22t 续档 / 刷新后的待结算战斗（棋盘体没有 session_id）⇒ 面给「重开这一场」（不预判、零请求）",
+  $("script-face").getAttribute("data-face") === "battle"
+  && faceGo() !== null && faceGo().textContent.includes("重开这一场")
+  && $("script-face-text").textContent.includes("还没开到牌桌上"),
+  `action="${faceGo() && faceGo().textContent}"`);
+
+// 单轮：同一份克隆、只给一轮候选（弹窗写「第 1/1 轮」）；不选就关掉 ⇒ 零请求。
+pendingClone(
+  Object.assign({}, battleSpec, { rewards: [battleSpec.rewards[0]] }),
+  { nodeId: "b1", room: { name: "麦田" } },
+);
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+check("M7-22u 单轮三选一：弹窗写「第 1/1 轮」、候选数 = `spec.rewards[0]` 的张数（不选也能关，零请求）",
+  dialog().getAttribute("data-dialog") === "pick"
+  && dialog().getAttribute("data-rounds") === "1"
+  && pickRows().length === 3
+  && settleCalls(scriptMark).length === 0,
+  `rounds=${dialog().getAttribute("data-rounds")} 候选=${pickRows().length}`);
+ui.scriptCloseConfirm();
+
+// 多轮：两轮候选，选完第一轮**连续弹**第二轮。
+pendingClone(battleSpec, { nodeId: "b1", room: { name: "麦田" } });
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+const round1Picks = pickRows();
+check("M7-22v 三选一弹窗（第 1/2 轮）：满包时每张标「折 3 铜钱」（价是服务端目录里的数），可放弃，零请求",
+  dialog().getAttribute("data-dialog") === "pick"
+  && dialog().getAttribute("data-round") === "0"
+  && dialog().getAttribute("data-rounds") === "2"
+  && round1Picks.length === 3
+  && round1Picks.every((row) => {
+    const notes = byClass(row, "script-pick-price");
+    return notes.length === 1 && notes[0].textContent.includes("折 3 铜钱");
+  })
+  && confirmButtons()[0].textContent.includes("放弃")
+  && settleCalls(scriptMark).length === 0,
+  `dialog=${dialog().getAttribute("data-dialog")} round=${dialog().getAttribute("data-round")} 候选=${round1Picks.length}`);
+
+await clickAndWait(pickRows()[0]);
+check("M7-22w 多轮 pick k **连续弹**：第 1 轮选完立刻弹第 2 轮（同一条模态壳，`data-round` 前进）",
+  dialog().hidden === false && dialog().getAttribute("data-dialog") === "pick"
+  && dialog().getAttribute("data-round") === "1"
+  && pickRows().length === 2,
+  `round=${dialog().getAttribute("data-round")} 候选=${pickRows().length}`);
+scriptMark = calls.length;
+await clickAndWait(pickRows()[0]);
+settles = settleCalls(scriptMark);
+check("M7-22x 三选一落到一条 settle {session_id, picks:[…]}（悬空 pending ⇒ 服务端 400 原话；前端不预判）",
+  settles.length === 1
+  && JSON.stringify(Object.keys(settles[0].body).sort())
+    === JSON.stringify(["expected_revision", "picks", "session_id"])
+  && settles[0].body.session_id === "s-probe"
+  && JSON.stringify(settles[0].body.picks)
+    === JSON.stringify([battleSpec.rewards[0][0], battleSpec.rewards[1][0]])
+  && dialog().hidden === true
+  && $("script-board-error").hidden === false
+  && $("script-loadout-hint").textContent.includes("结算没落地"),
+  `picks=${JSON.stringify(settles.length && settles[0].body.picks)} 错误="${$("script-board-error").textContent}"`);
+ui.scriptBoardShow(battleRestore);
+
+// ---- ⑧ Boss：自动失去 4 条、没有确认框（同一份真棋盘体的克隆；Boss 顺序归票 17）----
+pendingClone(
+  {
+    kind: "battle",
+    battle_seed: 7,
+    pve: { identities: [], principal: 0, protected_ally: null, victory: { kind: "slay_boss" }, boss: null, grants: [], seats: [] },
+    rewards: [
+      ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao"],
+      ["hero.zhaoyun.longdan", "hero.liubei.rende"],
+    ],
+    boss_relic: null,
+  },
+  { nodeId: "b1", boss: true, room: { name: "广宗城下" } },
+);
+scriptMark = calls.length;
+await clickAndWait(faceGo());
+const loseBlocks = byClass($("script-confirm-body"), "script-lose");
+const loseButtons = loseBlocks.length
+  ? walkTree(loseBlocks[0]).filter((node) => node.tagName === "BUTTON")
+  : [];
+check("M7-22y Boss「失去 4 条」自动落、**没有确认框**：第一轮弹窗顶格只读块（零按钮、零请求）",
+  dialog().getAttribute("data-dialog") === "pick"
+  && loseBlocks.length === 1
+  && loseBlocks[0].getAttribute("data-auto") === "1"
+  && loseBlocks[0].textContent.includes("已自动失去本场 4 条出战技能（规则效果，无需确认）")
+  && loseBlocks[0].textContent.includes("仁德") && loseBlocks[0].textContent.includes("武圣")
+  && loseButtons.length === 0
+  && calls.slice(scriptMark).filter((call) => call.method === "POST").length === 0,
+  `块=${loseBlocks.length} 按钮=${loseButtons.length} 文案="${loseBlocks.length && loseBlocks[0].textContent}"`);
+
+await clickAndWait(pickRows()[0]);
+await clickAndWait(pickRows()[0]);
+check("M7-22z Boss 结算的遗物那一段也走**弹窗**（无货 = 按服务端规则折铜钱，前端不写 10）",
+  dialog().getAttribute("data-dialog") === "relic"
+  && $("script-confirm-text").textContent.includes("无货")
+  && !$("script-confirm-body").textContent.includes("10 铜钱")
+  && confirmButtons()[0].textContent.includes("按规则折铜钱"),
+  `dialog=${dialog().getAttribute("data-dialog")} 正文="${$("script-confirm-text").textContent}"`);
+ui.scriptCloseConfirm();
+ui.state.script.board = null;
+ui.scriptBoardSync();
+
+// ---- ⑨ 问号揭晓：进入即揭晓，按内层房间的流程走 ----
+await discardScriptSave();
+const runC = await loadoutRun(2203);
+await enterNode(runC.run_id, "e1");
+await clickAndWait(faceOption(0));
+await clickAndWait(confirmButtons()[0]);
+const enteredUnknown = await enterNode(runC.run_id, "x1");
+const revealedId = enteredUnknown.pending.spec.revealed.room;
+const revealedNode = enteredUnknown.nodes.find((node) => node.id === "x1");
+check("M7-22aa 问号房进入即揭晓：面写「揭晓：…「揭晓的村庄」」+ 内层房间（`room.revealed` 由服务端下发）",
+  $("script-face").hidden === false
+  && $("script-face").getAttribute("data-face") === "reveal"
+  && enteredUnknown.pending.spec.kind === "unknown"
+  && revealedNode.room.revealed !== undefined
+  && revealedNode.room.revealed.id === revealedId
+  && $("script-face-text").textContent.includes("揭晓")
+  && $("script-face-text").textContent.includes("揭晓的村庄")
+  && $("script-face-meta").textContent.includes("重进不重抽")
+  && faceRows().some((row) => row.getAttribute("data-reveal") === "1"),
+  `face=${$("script-face").getAttribute("data-face")} 文案="${$("script-face-text").textContent}"`);
+
+await clickAndWait(faceGo());
+check("M7-22ab 揭晓后按内层房间的流程走：内层面 = 内层事件房（抽出的事件与选项都在），不是外层问号房",
+  $("script-face").getAttribute("data-face") === "event"
+  && $("script-face-title").textContent === "揭晓的礼物"
+  && $("script-face-text").textContent.includes("内层房间给三枚铜钱")
+  && faceOption(0) !== null && faceOption(0).textContent.includes("领三枚")
+  && faceOption(0).textContent.includes("获得技能：武圣"),
+  `face=${$("script-face").getAttribute("data-face")} title="${$("script-face-title").textContent}"`);
+
+scriptMark = calls.length;
+await clickAndWait(faceOption(0));
+settles = settleCalls(scriptMark);
+const innerCoins = resultRow("coins");
+const innerSkills = resultRow("skills");
+check("M7-22ac 揭晓出来的内层房间用**它自己的**指令形状结算（事件 ⇒ {option}）：结果里钱与技能都是服务端事件",
+  settles.length === 1 && settles[0].body.option === 0
+  && dialog().getAttribute("data-dialog") === "result"
+  && innerCoins !== null && innerCoins.getAttribute("data-coins") === "3"
+  && innerSkills !== null && innerSkills.textContent.includes("获得技能：武圣"),
+  `option=${settles.length && settles[0].body.option} 行="${innerCoins && innerCoins.textContent}" 技能="${innerSkills && innerSkills.textContent}"`);
+await clickAndWait(confirmButtons()[0]);
+
+// ---- 收尾：删档 + 撤掉用户库（后续用例仍走内置库）----
+await discardScriptSave();
+unlinkSync(SCRIPT_LOADOUT_LIBRARY);
+check("M7-22ad 收尾干净：无档、用户库撤掉、整备面与节点面都清空",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_LOADOUT_LIBRARY)
+  && ui.state.script.board === null && loadoutSlots().length === 0
+  && $("script-face").hidden === true,
+  `status=${scriptStatus()} 格=${loadoutSlots().length}`);
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

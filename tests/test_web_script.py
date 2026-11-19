@@ -39,6 +39,7 @@ from sgs.data import (  # noqa: E402
     Node,
     PveVictory,
     PveVictoryKind,
+    Rarity,
     Room,
     RoomKind,
     Script,
@@ -47,9 +48,12 @@ from sgs.data import (  # noqa: E402
     SeatRole,
     SkillValueOverride,
     SkillValuePreset,
+    hero_by_id,
+    hero_skill_name,
     load_skill_values,
     save_skill_value_preset,
 )
+from sgs.script import skill_price  # noqa: E402
 from sgs_web.session import Session  # noqa: E402
 from sgs_web.timeout import fallback_action  # noqa: E402
 
@@ -116,6 +120,24 @@ def _layer_clearable() -> Layer:
     )
 
 
+def _layer_reveal() -> Layer:
+    """问号房揭晓：入口（商店）→ 问号房（揭晓事件房）→ 出口，一条直线。"""
+    return Layer(
+        id="v1",
+        name="揭晓",
+        grid=Grid(rows=1, cols=3),
+        nodes=(
+            Node(id="entry", row=0, col=0, room="room.shop"),
+            Node(id="unknown", row=0, col=1, room="room.unknown"),
+            Node(id="exit", row=0, col=2, room="room.shop"),
+        ),
+        edges=(
+            script_mode.edge("entry", "unknown"),
+            script_mode.edge("unknown", "exit"),
+        ),
+    )
+
+
 ROSTER = ("nengren", "jie_liubei", "jie_guanyu")
 
 
@@ -131,6 +153,10 @@ def library() -> ScriptLibrary:
             Script(
                 id="clearable", name="一格商店", version=1, roster=ROSTER,
                 layers=(_layer_clearable(),),
+            ),
+            Script(
+                id="reveal", name="揭晓剧本", version=1, roster=ROSTER,
+                layers=(_layer_reveal(),),
             ),
         ),
         rooms=(
@@ -415,7 +441,7 @@ def test_the_roster_endpoint_lists_the_authored_candidates(registry, runs_dir: P
     status, body = call(registry, "POST", "/api/script-roster", {})
 
     assert status == 200
-    assert [entry["id"] for entry in body["scripts"]] == ["probe", "clearable"]
+    assert [entry["id"] for entry in body["scripts"]] == ["probe", "clearable", "reveal"]
     for entry in body["scripts"]:
         assert entry["roster_candidates"] == list(ROSTER)
     assert body["script_id"] is None and body["roster_candidates"] == []
@@ -517,6 +543,139 @@ def test_the_board_carries_enough_room_detail_for_the_hover_card(registry) -> No
     assert [item["id"] for item in battle["templates"]] == ["tpl.grunt"]
     assert battle["templates"][0]["name"] == "黄巾力士"
     assert battle["templates"][0]["hp"] == 3
+
+
+# ---------------------------------------------------------------------------
+# 票 22：整备面 / 三选一 / 商店要用的**目录行**（名字 + 单价，服务端下发）
+# ---------------------------------------------------------------------------
+
+
+def _catalog_board(
+    registry, *, script_id: str = "probe", slots: list[str | None] | None = None
+) -> dict:
+    """建一轮（无 pending）并把背包摆成 ``slots``；回棋盘体。"""
+    created = _from_create(registry, script_id=script_id)
+    if slots is None:
+        return call(registry, "GET", f"/api/script-runs/{created['run_id']}")[1]
+    status, board = call(
+        registry,
+        "PUT",
+        f"/api/script-runs/{created['run_id']}/backpack",
+        {"expected_revision": created["revision"], "slots": slots},
+    )
+    assert status == 200, board
+    return board
+
+
+def test_the_board_carries_a_name_and_a_server_price_for_every_row_it_shows(
+    registry,
+) -> None:
+    """票 22 的备注「铜钱 / 价格 / 折价数字一律服务端下发」：棋盘体带一份**目录行**。
+
+    判据是**独立真源**：单价由 :func:`sgs.script.skill_price` 读**档内价值表**现算（默认表
+    全普通 ⇒ 3），名字由 :func:`sgs.data.hero_skill_name` 给出。前端不按稀有度自己乘价。
+    """
+    slots: list[str | None] = [None] * 24
+    slots[0] = script_mode.SKILL_A
+    slots[1] = script_mode.SKILL_B
+    board = _catalog_board(registry, script_id="clearable", slots=slots)
+    base = load_skill_values()
+    row = board["catalog"][script_mode.SKILL_A]
+    hero = hero_by_id(script_mode.SKILL_A.split(".")[1])
+    assert hero is not None
+    assert row == {
+        "name": hero_skill_name(hero, script_mode.SKILL_A),
+        "kind": "skill",
+        "rarity": "common",
+        "price": 3,
+    }, "整备面的 24 格读这一份：名字 + 稀有度 + 单价都来自服务端"
+    assert board["catalog"][script_mode.SKILL_B]["price"] == skill_price(
+        base, script_mode.SKILL_B
+    )
+    assert "hero.zhangfei.paoxiao" not in board["catalog"], "这一屏没显示的行不下发"
+
+    # 商店：库存里的每一件都要有行（价格 / 名字由服务端算），前端只显示。
+    shop = entered(registry, board["run_id"], "shop", board["revision"])[1]
+    stock = shop["pending"]["spec"]["stock"]["skills"]
+    assert len(stock) == 6, "默认表全启用 ⇒ 商店 6 技能"
+    for skill_id in stock:
+        assert shop["catalog"][skill_id]["price"] == skill_price(base, skill_id)
+        assert shop["catalog"][skill_id]["kind"] == "skill"
+        assert shop["catalog"][skill_id]["name"], "名字不许留空"
+
+
+def test_an_entered_question_room_carries_the_revealed_inner_room(registry) -> None:
+    """票 22「问号揭晓：揭晓后按内层房间的流程走」——内层房间的面必须下发给前端。
+
+    ``pending.spec.revealed`` 只有 ``room``（id）+ 内层 spec（票 16），**认不出**房间的
+    名字 / 文案 / 事件选项；故待结算的问号节点在自己的 ``room`` 上多一个 ``revealed``
+    （与 ``_room`` 同形的整份房间面）。揭晓本身由服务端在进入时写档，重进不重抽。
+    """
+    created = _from_create(registry, script_id="reveal")
+    first = entered(registry, created["run_id"], "entry", created["revision"])[1]
+    assert settled(registry, first["run_id"], first["revision"], purchases=[])[0] == 200
+    board = entered(registry, first["run_id"], "unknown", first["revision"] + 1)[1]
+    spec = board["pending"]["spec"]
+    assert spec["kind"] == "unknown"
+    node = next(item for item in board["nodes"] if item["id"] == "unknown")
+    revealed = node["room"]["revealed"]
+    assert revealed["id"] == spec["revealed"]["room"]
+    assert revealed["kind"] == "event"
+    assert [event["id"] for event in revealed["events"]] == ["ev.village", "ev.ambush"], (
+        "内层事件房的事件与选项要能画出来（前端不猜文案）"
+    )
+    assert (revealed["events"][0]["options"][0]["text"]) == "收下"
+    assert "revealed" not in next(
+        item for item in board["nodes"] if item["id"] == "exit"
+    )["room"], "只有待结算的那个问号节点带内层面"
+    # 内层房间的事件后果也要能显示名字（揭晓后按它的流程走 ⇒ 同一份目录）。
+    grant = next(
+        effect["skill"]
+        for effect in revealed["events"][0]["options"][1]["effects"]
+        if effect["kind"] == "grant_skill"
+    )
+    assert board["catalog"][grant]["kind"] == "skill"
+    assert board["catalog"][grant]["price"] == skill_price(load_skill_values(), grant)
+
+
+def test_the_catalog_price_reads_the_frozen_table_not_the_local_preset(
+    registry, runs_dir: Path
+) -> None:
+    """价读**档内**冻结表：建完档再改本地预设（把那条抬成传说）⇒ 本轮价格不动。
+
+    新的一轮（按本地预设建）价格才是 30——两半都要断，否则"一直发 3"也能绿。
+    """
+    base = load_skill_values()
+    slots: list[str | None] = [None] * 24
+    slots[0] = script_mode.SKILL_A
+    frozen = _catalog_board(registry, slots=slots)
+    assert frozen["catalog"][script_mode.SKILL_A]["price"] == 3
+
+    save_skill_value_preset(
+        slot=0,
+        preset=SkillValuePreset(
+            skills={script_mode.SKILL_A: SkillValueOverride(rarity=Rarity.LEGENDARY)}
+        ),
+        path=runs_dir / "skill-value-presets.json",
+        base=base,
+    )
+    still = call(
+        registry, "GET", f"/api/script-runs/{frozen['run_id']}"
+    )[1]
+    assert still["catalog"][script_mode.SKILL_A]["price"] == 3, (
+        "档内价值表冻结（票 04 §6）：本地预设只影响新的一轮"
+    )
+    assert still["catalog"][script_mode.SKILL_A]["rarity"] == "common"
+
+    # 删档（解锁）后新开一轮 ⇒ 按本地预设：传说 30。
+    assert call(
+        registry, "DELETE", f"/api/script-save?expected_revision={still['revision']}"
+    )[0] == 200
+    fresh_slots: list[str | None] = [None] * 24
+    fresh_slots[0] = script_mode.SKILL_A
+    fresh = _catalog_board(registry, slots=fresh_slots)
+    assert fresh["catalog"][script_mode.SKILL_A]["price"] == 30
+    assert fresh["catalog"][script_mode.SKILL_A]["rarity"] == "legendary"
 
 
 def test_the_run_keeps_its_own_snapshot_when_the_library_changes(registry, runs_dir: Path) -> None:

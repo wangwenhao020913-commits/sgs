@@ -481,14 +481,26 @@ async function scriptRestoreBackup() {
 
 /* ---------------------------------------------------------- 确认框 */
 
-/** 确认框（撞旧档三选一 / 退出战斗两选一共用）：标题 + 一句正文 + 场景现铺的按钮。 */
+/** 剧本层的**唯一**模态（撞旧档三选一 / 退出战斗 / 票 22 的三选一 / 遗物 / 结果共用）。
+ *
+ * 形状 = 标题 + 一句正文 + 可选的**正文槽**（`spec.body`：节点数组，票 22 的候选 / 结果行）
+ * + 场景现铺的按钮。`spec.dialog` 写进 `#script-confirm[data-dialog]`，烟测据此区分是哪一种面。
+ */
 function scriptConfirm(spec) {
   const dialog = $("script-confirm");
   const backdrop = $("script-confirm-backdrop");
   if (!dialog) return null;
   state.script.confirm = (spec && spec.kind) || "confirm";
+  dialog.setAttribute("data-dialog", (spec && spec.dialog) || state.script.confirm);
   $("script-confirm-title").textContent = (spec && spec.title) || "";
   $("script-confirm-text").textContent = (spec && spec.text) || "";
+  const bodyBox = $("script-confirm-body");
+  if (bodyBox) {
+    bodyBox.innerHTML = "";
+    const items = Array.isArray(spec && spec.body) ? spec.body : (spec && spec.body ? [spec.body] : []);
+    for (const item of items) if (item) bodyBox.appendChild(item);
+    bodyBox.hidden = items.length === 0;
+  }
   const box = $("script-confirm-actions");
   const buttons = [];
   if (box) {
