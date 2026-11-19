@@ -104,6 +104,14 @@
     "scriptCreateRun", "scriptContinueRun", "scriptAbandonSave", "scriptRestoreBackup",
     "scriptExitConfirm", "scriptSuspend", "scriptClosePicker", "scriptCloseConfirm",
     "wireScriptLobby",
+    // M7 票 21：棋盘 + **共用**节点图渲染器（棋盘与编辑器同一个入口，D26）。
+    // 烟测要断"两处调的是同一个函数"（`scriptGraphDrawCount()` 的读数）、两档宽度下的几何
+    // 不重叠（`scriptGraphLayout` 的纯函数面）、以及点节点 / 刷新 / 死路错误行的真路径。
+    "scriptGraphRender", "scriptGraphLayout", "scriptGraphDrawCount", "SCRIPT_GRAPH_ICON_PX",
+    "SCRIPT_GRAPH_CELL_W", "SCRIPT_GRAPH_CELL_H", "SCRIPT_GRAPH_TITLE_H",
+    "scriptGraphNodeState", "scriptGraphIconMarkup", "scriptGraphEdgeLabel",
+    "scriptBoardShow", "scriptBoardRender", "scriptBoardRefresh", "scriptBoardEnterNode",
+    "scriptBoardSync", "wireScriptBoard",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

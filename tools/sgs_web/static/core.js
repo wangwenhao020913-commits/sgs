@@ -360,21 +360,30 @@ const post = (path, payload) => api(path, {
 
 /* ------------------------------------------------------------------ 视图 */
 
-/** 三个页面各有一条顶栏、同一组导航三键（U2-01 / spec D7）。
+/** 页面各有一条顶栏、同一组导航三键（U2-01 / spec D7）。
  *
- * 同一页面里的 DOM id 必须唯一，故三套顶栏各用自己的前缀；**数组顺序就是顶栏里的
- * 显示顺序**（开局 / 牌桌 / 回放），三页必须共用这一张表，改导航只改这里。
- * 牌桌沿用原有的 `nav-*`（旧全局 header 的 id），开局 / 回放页用 `<page>-nav-*`。
+ * 同一页面里的 DOM id 必须唯一，故各页顶栏各用自己的前缀；**数组顺序就是顶栏里的
+ * 显示顺序**（开局 / 牌桌 / 回放），所有页必须共用这一张表，改导航只改这里。
+ * 牌桌沿用原有的 `nav-*`（旧全局 header 的 id），开局 / 回放 / 剧本棋盘页用
+ * `<page>-nav-*`。M7 票 21 的棋盘是**第四个页面**（`view-script-board`，排在回放页之后）。
  */
 const NAV_BUTTONS = {
-  lobby: ["nav-lobby", "lobby-nav-lobby", "replay-nav-lobby"],
-  table: ["nav-table", "lobby-nav-table", "replay-nav-table"],
-  replay: ["nav-replay", "lobby-nav-replay", "replay-nav-replay"],
+  lobby: ["nav-lobby", "lobby-nav-lobby", "replay-nav-lobby", "script-board-nav-lobby"],
+  table: ["nav-table", "lobby-nav-table", "replay-nav-table", "script-board-nav-table"],
+  replay: ["nav-replay", "lobby-nav-replay", "replay-nav-replay", "script-board-nav-replay"],
+  "script-board": [
+    "script-board-nav-lobby",
+    "script-board-nav-table",
+    "script-board-nav-replay",
+  ],
 };
+
+/** 全部页面名（`show()` 的遍历次序 = 视图在 `index.html` 里的次序）。 */
+const VIEW_NAMES = ["lobby", "table", "replay", "script-board"];
 
 /** 「牌桌」能否点：只认有没有会话（建局成功后 `state.sessionId` 非空；刷新即丢，不落盘）。
  *
- * 三处顶栏的禁用态因此只有一个来源；`show()` 与建局成功都经这条函数同步。
+ * 各处顶栏的禁用态因此只有一个来源；`show()` 与建局成功都经这条函数同步。
  */
 function syncNavState() {
   const enabled = state.sessionId !== null && state.sessionId !== undefined;
@@ -385,14 +394,16 @@ function syncNavState() {
 }
 
 /** 页面级提示：全局 header 的 `#status` 随 U2-01 删除，提示就近写到**当前页面**已有的
- * 文本位（开局页 = 建局提示，牌桌 = 提示条右下的选择说明，回放页 = 空壳引导）。
+ * 文本位（开局页 = 建局提示，牌桌 = 提示条右下的选择说明，回放页 = 空壳引导，
+ * 剧本棋盘 = 棋盘提示行）。
  *
  * 只用于跨页可见的错误 / 终局提示；各页面自己的局部提示仍走各自的节点。
  */
 function showPageNotice(text) {
   const target = $("view-replay").hidden === false ? $("r-empty-guide")
     : $("view-table").hidden === false ? $("t-choice")
-      : $("lobby-hint");
+      : $("view-script-board").hidden === false ? $("script-board-hint")
+        : $("lobby-hint");
   if (!target) return;
   // 票 07：牌桌那一格是**有寿命**的页脚（唯一写入口在 `pending.js:setAskChoice`），
   // 逾期自己消失——否则一次跨页错误会一直挂在询问条右端，直到下一次重绘。
@@ -403,14 +414,20 @@ function showPageNotice(text) {
   target.textContent = text;
 }
 
+/** 切页：`show("lobby")` 与 `show("view-script-board")` 两种写法都认（`view-` 前缀可带可不带）。
+ *
+ * 页面名 → `view-<name>` 的 DOM、导航高亮、禁用态、墨底起停都只在这一处同步。
+ */
 function show(view) {
-  for (const name of ["lobby", "table", "replay"]) {
-    $(`view-${name}`).hidden = name !== view;
-    // 当前页的导航键在三处顶栏里同步高亮；其它两页的同一位置保持普通态。
-    for (const id of NAV_BUTTONS[name]) {
+  const name = String(view || "").replace(/^view-/, "");
+  for (const page of VIEW_NAMES) {
+    const target = $(`view-${page}`);
+    if (target) target.hidden = page !== name;
+    // 当前页的导航键在每处顶栏里同步高亮；其它页的同一位置保持普通态。
+    for (const id of NAV_BUTTONS[page] || []) {
       const button = $(id);
       if (!button) continue;
-      const current = name === view;
+      const current = page === name;
       button.classList.toggle("on", current);
       if (current) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
@@ -418,17 +435,17 @@ function show(view) {
   }
   syncNavState();
   // 离开回放页就停掉播放：定时器不该在看不见的页面上继续跑。
-  if (view !== "replay") stopReplayPlay();
+  if (name !== "replay") stopReplayPlay();
   // ink-table-skin 票 01：水墨底的帧循环跟着牌桌页走。看不见的页面上壳是 `[hidden]`
   // （`display: none`），画布尺寸归零——接着画只是白烧合成器，故切走即 pause。
   // 读 `window.SgsInkBg` 而不是裸名字：烟测垫片里 `window` 是个独立对象，模块挂在它上面。
   if (window.SgsInkBg) {
-    if (view === "table") window.SgsInkBg.resume();
+    if (name === "table") window.SgsInkBg.resume();
     else window.SgsInkBg.pause();
   }
   // U1-03 / U2-06：牌桌的三段布局不在屏幕上时，询问弹窗与武将详情都收起（不在别的页面上
   // 留一层遮罩）；回到牌桌时按当前询问重新挂上（预发动 / 排列的本地态不因切页丢失）。
-  if (view === "table") {
+  if (name === "table") {
     if (state.view) {
       syncDialog();
       syncHeroModal();

@@ -1970,3 +1970,63 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-confirm-title { font-size: 15px; margin: 0 0 8px; }
 .script-confirm-text { margin: 0; }
 .script-confirm .row { justify-content: flex-end; }
+
+/* ---------------------------------------------------------------------------
+ * M7 票 21：剧本棋盘（卡格 + 固定 64×64 只放图标的节点 + 上方标题 + SVG 连线 + 悬浮卡）
+ *
+ * 几何（格宽 / 图标 64×64 / 标题在图标上方）由 `script-board.js:scriptGraphLayout` 现算并
+ * 写成内联样式；这里只钉**尺寸的机械判据**（64×64 = 65,536 px²）、颜色与层级。
+ * 状态色只属于玩家视角的棋盘：五个状态各一条规则，编辑器语境由渲染器按 `mode` 不写类。
+ * ------------------------------------------------------------------------- */
+.script-board-panel { position: relative; }
+.script-board-stage { position: relative; }
+.script-board-graph { position: relative; width: 100%; min-height: 120px; }
+.script-graph-edges, .script-graph-nodes { position: absolute; inset: 0; }
+/* 连线层不吃指针：悬停 / 点击都落在节点按钮上。 */
+.script-graph-edges { pointer-events: none; }
+.script-graph-svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.script-edge { stroke: #cbbfae; stroke-width: 2; }
+.script-edge-label {
+  fill: #7b7266; font-size: 11px; paint-order: stroke;
+  stroke: var(--card); stroke-width: 3px;
+}
+.script-node { position: absolute; }
+/* 标题写在节点**上方**（渲染器给的 top 恒在图标上方）；单行、居中、超长省略。 */
+.script-node-title {
+  position: absolute; display: block; line-height: 20px; height: 20px;
+  font-size: 12px; text-align: center; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 节点统一 64×64、只放图标（票 05 UI-1）；65,536 px² 是判据，不是估计。 */
+.script-node-button {
+  position: absolute; display: flex; align-items: center; justify-content: center;
+  width: 64px; height: 64px; padding: 0; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line); cursor: pointer;
+  color: var(--ink);
+}
+.script-node-icon { display: block; width: 64px; height: 64px; }
+.script-node-icon svg { display: block; width: 64px; height: 64px; }
+/* Boss = 红色感叹号：红是图标（房间语义）的颜色，不是玩家状态色。 */
+.script-icon-boss { color: #c62828; }
+/* 五个状态：已走 / 当前 / 可走 / 关闭 / 去不了（只读服务端字段，由渲染器挂类）。 */
+.script-node-button.st-current { background: #f6e7c8; border-color: #b58b2a; box-shadow: 0 0 0 3px rgba(181, 139, 42, .25); }
+.script-node-button.st-available { background: #eaf4ea; border-color: #4b8b4b; }
+.script-node-button.st-completed { background: #efe9dd; border-color: #a99a86; opacity: .72; }
+.script-node-button.st-closed { background: #f3dede; border-color: #9d4a4a; opacity: .72; }
+.script-node-button.st-blocked { background: #efeee9; border-color: #d5cfc4; color: #9a9188; }
+.script-node-button[disabled] { cursor: default; }
+/* 悬浮关卡信息卡：贴在被悬停节点的侧边（渲染器给 left / top），层级在节点之上。 */
+.script-node-card {
+  position: absolute; z-index: 5; width: 360px; max-height: 380px; overflow: auto;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .16);
+}
+.script-node-card h3 { margin: 0 0 4px; font-size: 15px; }
+.script-node-card p { margin: 4px 0; }
+.script-card-seats, .script-card-enemies, .script-card-options { margin: 6px 0; }
+.script-card-seat { font-size: 12px; padding: 1px 0; }
+.script-card-seat[data-side="ally"] { color: #2f6b2f; }
+.script-card-seat[data-side="enemy"] { color: #8d3a3a; }
+.script-card-enemy { font-size: 12px; padding: 3px 0; border-top: 1px dashed var(--line); }
+.script-card-line { font-size: 12px; }
+.script-card-option { font-size: 12px; padding: 1px 0; }

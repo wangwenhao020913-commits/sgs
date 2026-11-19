@@ -9514,3 +9514,221 @@ def test_the_broken_save_reason_is_red_text_not_a_dim_note() -> None:
     assert '<p id="script-broken-reason" class="script-reason">' in html, (
         "坏档那行的节点必须挂 `.script-reason`（红字规则的唯一消费者）"
     )
+
+
+# ---------------------------------------------------------------------------
+# M7 票 21：棋盘视图 + **共用**节点图渲染器（D26：节点图只有一份画法）
+# ---------------------------------------------------------------------------
+
+_BOARD_JS = STATIC_DIR / "script-board.js"
+"""棋盘与编辑器共用的节点图渲染器（唯一一份）。"""
+
+_BOARD_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-board-library.json"
+)
+"""烟测棋盘进料：五类房间 + 两个入口 / 两个出口 + 两个 Boss + 一条死路。"""
+
+
+def test_the_script_board_view_sits_after_the_replay_view() -> None:
+    """spec §4「位置纪律」：棋盘视图在回放视图**之后**，绝不插在牌桌与回放之间。
+
+    烟测有两处字符串切片以牌桌视图 / 回放视图那两个 `main` 的 id 为锚点，故连注释里都不
+    写它们的字面量——这里断言的是**结构**位置，与烟测的 `M7-21a` / `M7-21b` 同源。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    board_start = html.index('id="view-script-board"')
+
+    assert replay_start < board_start, "棋盘视图必须排在回放视图之后（位置纪律）"
+    between = html[table_start:replay_start]
+    assert "script-board" not in between, (
+        "棋盘的节点不许插在牌桌视图与回放视图之间（两处字符串切片断言的锚点在那里）"
+    )
+
+    for needle in (
+        'id="script-board-graph"',
+        'id="script-node-card"',
+        'id="script-node-card-seats"',
+        'id="script-node-card-enemies"',
+        'id="script-board-error"',
+        'id="btn-script-board-refresh"',
+        'id="btn-script-board-exit"',
+        'id="script-board-nav-lobby"',
+    ):
+        assert needle in html, f"棋盘视图缺挂载点：{needle}"
+
+    srcs = _script_srcs()
+    assert "script-board.js" in srcs, f"节点图渲染器不在脚本清单里：{srcs}"
+    at = srcs.index("script-board.js")
+    assert srcs[at - 1] == "script-lobby.js", (
+        "棋盘脚本紧挨剧本开局页（同一张票族、同为 M7 前端；棋盘的入口由开局页的开档 / 继续接上）"
+    )
+    assert srcs[-1] == "main.js", "wireScriptBoard() 在 main.js 的 wire() 里调，清单仍是 main.js 最后"
+
+
+def test_the_node_graph_renderer_has_exactly_one_implementation() -> None:
+    """D26：节点图（图标 + 标题 + SVG 连线 + 边条件标签）**只有一份实现**。
+
+    三条机械判据（实现者选的是「唯一导出名 + 唯一画法」这一种可核写法）：
+
+    1. `scriptGraphRender` 在整个 `static/*.js` 里只**定义**一次，且定义在
+       `script-board.js`——票 25 的编辑器只能调同一个全局名；
+    2. **节点图的**连线画法只有一处：连线元素带 `class="script-edge"`（座位卡上那些 16×16
+       的禁止角标也画 `<line>`，不属于节点图，故判据认的是这个类名，不是 `<line>` 字面量），
+       它在整个目录里恰好出现一次、且就住在这份渲染器里；
+    3. 棋盘自己的渲染口调用这个入口（定义之外至少还有一处调用），不是"长得像"。
+    """
+    assert _BOARD_JS.exists(), f"缺少共用渲染器脚本：{_BOARD_JS}"
+
+    definitions: dict[str, int] = {}
+    graph_line_owners: list[str] = []
+    svg_root_owners: list[str] = []
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        count = text.count("function scriptGraphRender(")
+        if count:
+            definitions[path.name] = count
+        if '<line class="script-edge"' in text:
+            graph_line_owners.append(path.name)
+        if "script-graph-svg" in text:
+            svg_root_owners.append(path.name)
+
+    assert definitions == {"script-board.js": 1}, (
+        "节点图渲染入口必须只有一处定义、且在 script-board.js 里："
+        f"{definitions}"
+    )
+    assert graph_line_owners == ["script-board.js"], (
+        "节点图的连线只能有一份画法（`class=\"script-edge\"` 的连线元素）："
+        f"{graph_line_owners}"
+    )
+    assert svg_root_owners == ["script-board.js"], (
+        f"节点图的 SVG 根也只能由这份渲染器出：{svg_root_owners}"
+    )
+    renderer = _BOARD_JS.read_text(encoding="utf-8")
+    assert renderer.count('<line class="script-edge"') == 1, (
+        "连线绘制在 script-board.js 里也应只有一处（实得 "
+        f"{renderer.count('<line class=\"script-edge\"')} 处）"
+    )
+    assert renderer.count("function scriptGraphEdgeMarkup(") == 1, (
+        "连线 + 条件标签只有一个画法函数（`scriptGraphEdgeMarkup`）"
+    )
+    assert renderer.count("scriptGraphEdgeMarkup(") == 2, (
+        "`scriptGraphEdgeMarkup` 只该在定义处与 `scriptGraphRender` 的调用处各出现一次"
+    )
+    assert renderer.count("scriptGraphRender(") >= 2, (
+        "棋盘渲染口必须调用共用入口（定义之外还要有调用点）——否则它可能是第二份画法"
+    )
+    assert '"use strict";' in renderer, "新脚本必须是经典严格脚本（首条语句由清单用例钉）"
+    assert not re.search(r"^\s*(?:import|export)\b", renderer, re.M), (
+        "不得使用 ESM：本仓只允许按 index.html 顺序加载的普通脚本"
+    )
+
+
+def test_the_board_nodes_are_64px_icons_and_status_colors_belong_to_the_board() -> None:
+    """票 05 UI-1：节点**统一 64×64、只放图标**；状态色只属于玩家视角的棋盘。
+
+    - 图标按钮自己的一条 CSS 规则钉死 64×64，标题在它上方、自己一条规则；
+      （票面写的"65,536 px²"与 64×64 在算术上不自洽——64×64 = 4,096 px²。硬判据取
+      **尺寸**：spec §4 与票 05 UI-1 都写"统一 64×64"，面积按 64×64 算，见票 21 的
+      `## Answer` 的明说读法。）
+    - Boss 图标是**红色**感叹号（红是判据，不是形容词）；
+    - 五个状态各有一条规则（分数色），且这些类名只出现在 `script-board.js`——编辑器语境
+      由渲染器按 `mode` 决定不写它们（烟测 `M7-21m` 钉"同一节点在编辑器语境下零 st-* 类"）；
+    - 不新增图片资源：图标是内联 SVG，不是 `<img>` / `background-image`。
+    """
+    button = _css_rule(".script-node-button")
+    width = re.search(r"width:\s*(\d+)px", button)
+    height = re.search(r"height:\s*(\d+)px", button)
+    assert width is not None and height is not None, f"节点按钮要有明确的 64×64：{button}"
+    assert int(width.group(1)) == int(height.group(1)) == 64, (
+        f"节点统一 64×64（65,536 px²），实得 {width.group(1)}×{height.group(1)}"
+    )
+    assert int(width.group(1)) ** 2 == 4096, "64×64 = 4,096 px²（票面的 65,536 是算错的面积）"
+
+    title = _css_rule(".script-node-title")
+    assert re.search(r"position:\s*absolute", title), f"标题要能定位在节点上方：{title}"
+
+    boss = _css_rule(".script-icon-boss")
+    color = re.search(r"color:\s*#([0-9a-fA-F]{6})", boss)
+    assert color is not None, f"Boss 图标要自己写死颜色：{boss}"
+    red, green, blue = (int(color.group(1)[at : at + 2], 16) for at in (0, 2, 4))
+    assert red > 140 and red > green + 60 and red > blue + 60, (
+        f"Boss = 红色感叹号（实得 #{color.group(1)}）"
+    )
+
+    renderer = _BOARD_JS.read_text(encoding="utf-8")
+    for status in ("current", "available", "completed", "closed", "blocked"):
+        assert _css_rule(f".script-node-button.st-{status}"), (
+            f"状态色缺规则：.script-node-button.st-{status}"
+        )
+        assert f'key: "{status}"' in renderer, (
+            f"状态 {status} 必须由棋盘渲染器的状态派生给出（唯一的类名来源）"
+        )
+    # 状态类只有一个出口：渲染器里那一处模板串。别的脚本再拼一个 `st-` 就会在这里变红。
+    emitters = [
+        path.name
+        for path in sorted(STATIC_DIR.glob("*.js"))
+        if re.search(r"[`\"']st-", path.read_text(encoding="utf-8"))
+    ]
+    assert emitters == ["script-board.js"], (
+        f"状态类只该由棋盘渲染器拼（实得 {emitters}）"
+    )
+    assert renderer.count("`st-${state.key}`") == 1, (
+        "状态类的唯一出口是 `st-${state.key}`（一处）"
+    )
+    assert 'mode === "editor"' in renderer, (
+        "渲染器必须按 mode 决定画不画状态色（编辑器语境不画）"
+    )
+    assert "<svg" in renderer and "<img" not in renderer, (
+        "六种图标用内联 SVG，不新增图片资源（无 <img>）"
+    )
+    assert "createElementNS" not in renderer, (
+        "图标走 innerHTML 的内联 SVG（经典脚本 + 垫片可跑），不手写命名空间"
+    )
+
+
+def test_the_board_smoke_library_is_a_valid_script_library() -> None:
+    """烟测的棋盘进料必须过**真**库校验器：否则烟测红在 400 上，看不出是布局还是进料坏了。
+
+    同时钉住烟测要的那几个结构事实：五类房间各至少一次、两个入口、两个出口、两个 Boss、
+    一条死路（col 2 的 e1 没有出边 ⇒ 结算它之后服务端给 `board_error`）、一条带标签条件的边。
+    """
+    from sgs.data import RoomKind, load_script_library
+    from sgs.script.board import exit_nodes
+
+    library = load_script_library(
+        _BOARD_LIBRARY_FIXTURE.read_bytes(), file=str(_BOARD_LIBRARY_FIXTURE)
+    )
+    script = library.scripts[0]
+    layer = script.layers[0]
+
+    kinds = {library_room.kind for library_room in library.rooms}
+    assert kinds == {
+        RoomKind.STORY,
+        RoomKind.BATTLE,
+        RoomKind.EVENT,
+        RoomKind.SHOP,
+        RoomKind.UNKNOWN,
+    }, f"烟测要五类房间各至少一次：{kinds}"
+    entries = [node for node in layer.nodes if node.col == 0]
+    assert len(entries) == 2, f"烟测要两个入口（多入口的棋盘）：{entries}"
+    assert len(exit_nodes(layer)) == 2, "烟测要多出口"
+    bosses = [room for room in library.rooms if room.is_boss]
+    assert len(bosses) == 2, "烟测要多 Boss"
+
+    dead_ends = [
+        node
+        for node in layer.nodes
+        if node.col != layer.grid.cols - 1
+        and not any(edge.from_ == node.id for edge in layer.edges)
+    ]
+    assert [node.id for node in dead_ends] == ["e1"], (
+        f"死路位必须是唯一的 e1（结算它之后 board_error 才有得看）：{dead_ends}"
+    )
+    conditional = [
+        edge for edge in layer.edges if edge.requires.flags or edge.requires.not_flags
+    ]
+    assert [edge.to for edge in conditional] == ["d2"], (
+        "边条件标签要有一条可断言的边（c2 → d2）"
+    )

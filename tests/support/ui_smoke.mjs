@@ -1455,6 +1455,432 @@ check("M7-20ac 坏档「放弃存档」= 一条**不带** revision 的 DELETE �
   && !existsSync(SCRIPT_SAVE_FILE),
   `DELETE=${JSON.stringify(brokenDeletes.map((call) => call.path))} status=${scriptStatus()}`);
 
+/* ============ M7 票 21：剧本棋盘（五类房间 + 悬浮卡 + 共用节点图渲染器）============
+ *
+ * 判据分四半：
+ *  ① **棋盘一屏**：五类房间各一次、两个入口 / 两个出口 / 两个 Boss；节点是 **64×64 只放
+ *     图标**、标题在图标**上方**、连线与边条件标签走 SVG；
+ *  ② **状态色只属于玩家视角**：棋盘语境画已走 / 当前 / 可走 / 高亮，**同一份节点**在编辑器
+ *     语境（`mode: "editor"`）零 `st-*` 类——两处调的是**同一个**渲染入口（`scriptGraphDrawCount`）；
+ *  ③ **悬浮卡**：战斗房有座位布局与敌人信息（模板名 / 档位 / 血量 / 初始技能 / 随机技能 /
+ *     胜负 / 全局副本技能 / 奖励），非战斗房给房间类型与已抽出的结果；
+ *  ④ **真路径**：点节点 = 一条 `POST …/nodes/<id>`（`expected_revision` 来自棋盘体）、
+ *     结算后刷新回到棋盘、不可到达 / 死路的**服务端原话**落到红字错误行。
+ *
+ * 进料是 `tests/support/fixtures/script-board-library.json`（**真**库校验器先过一道，见
+ * `tests/test_web_static.py::test_the_board_smoke_library_is_a_valid_script_library`）：
+ * 五类房间 + 两个入口 + 两个出口 + 两个 Boss + 一条死路（col 2 的 e1 没有出边）+ 一条带标签
+ * 条件的边。棋盘体全部来自真端点（建 / 进入 / 结算 / 刷新都是线上事实）。
+ */
+const SCRIPT_BOARD_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_BOARD_LIBRARY,
+  readFileSync("tests/support/fixtures/script-board-library.json", "utf8"),
+);
+
+// 位置纪律 + 标签白名单（与票 20 同一条判据：两处字符串切片以牌桌视图 / 回放视图的 id 为锚点）。
+{
+  const tableStart = html.indexOf('id="view-table"');
+  const replayStart = html.indexOf('id="view-replay"');
+  const boardStart = html.indexOf('id="view-script-board"');
+  const between = html.slice(tableStart, replayStart);
+  check("M7-21a 棋盘视图排在回放视图之后，不插在牌桌视图与回放视图之间（切片的锚点在那里）",
+    boardStart > replayStart && between.indexOf("script-board") < 0
+    && between.indexOf("script-node-card") < 0,
+    `board=${boardStart} replay=${replayStart} 中间出现 script-board=${between.indexOf("script-board")}`);
+  const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+  const section = html.slice(boardStart, html.indexOf("<script", boardStart));
+  const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
+    .map((match) => match[1].toLowerCase());
+  check("M7-21b 棋盘的静态节点只用垫片认识的标签（不引入新标签、不新增图片资源）",
+    tags.length > 0 && tags.every((tag) => allowedTags.has(tag)) && !section.includes("<img"),
+    `标签=${[...new Set(tags)].join(",")}`);
+}
+
+/** 棋盘视图的节点图容器（渲染器的唯一落点）。 */
+const boardGraph = () => $("script-board-graph");
+/** 子树里带某个 class 的全部后代（垫片没有 querySelectorAll；children 是活集合）。 */
+const walkTree = (node, out = []) => {
+  for (const child of (node && node.children) || []) {
+    out.push(child);
+    walkTree(child, out);
+  }
+  return out;
+};
+const byClass = (node, name) => walkTree(node).filter((child) => child.classList.contains(name));
+const graphCells = (root) => byClass(root || boardGraph(), "script-node");
+const cellOf = (id) => graphCells().find((cell) => cell.getAttribute("data-node-id") === id) || null;
+const cellButton = (cell) => (cell ? byClass(cell, "script-node-button")[0] || null : null);
+const cellIcon = (cell) => (cell ? byClass(cell, "script-node-icon")[0] || null : null);
+const cellTitle = (cell) => (cell ? byClass(cell, "script-node-title")[0] || null : null);
+const hoverCell = (cell) => (cell.listeners.mouseenter || []).forEach((fn) => fn({ target: cell }));
+const leaveCell = (cell) => (cell.listeners.mouseleave || []).forEach((fn) => fn({ target: cell }));
+const styleRect = (node) => ({
+  left: parseFloat(node.style.left || "0"),
+  top: parseFloat(node.style.top || "0"),
+  width: parseFloat(node.style.width || "0"),
+  height: parseFloat(node.style.height || "0"),
+});
+/** 节点在**图容器**里的绝对矩形：格矩形 + 格内相对矩形（内联样式就是布局的唯一来源）。 */
+const absoluteRect = (cell, node) => {
+  const cellRect = styleRect(cell);
+  const rect = styleRect(node);
+  return {
+    left: cellRect.left + rect.left,
+    top: cellRect.top + rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+};
+const rectsOverlap = (a, b) => a.left < b.left + b.width && b.left < a.left + a.width
+  && a.top < b.top + b.height && b.top < a.top + a.height;
+/** 一档宽度下的几何不变量：图标恒 64×64、标题在图标上方、图标两两不叠、全部不越界。 */
+const graphGeometryProblems = (root, width) => {
+  const problems = [];
+  const cells = graphCells(root);
+  const icons = cells.map(cellButton);
+  const titles = cells.map(cellTitle);
+  cells.forEach((cell, index) => {
+    const icon = icons[index];
+    const title = titles[index];
+    if (!icon || !title) {
+      problems.push(`第 ${index} 格缺图标或标题`);
+      return;
+    }
+    const iconRect = absoluteRect(cell, cellButton(cell));
+    const titleRect = absoluteRect(cell, title);
+    if (iconRect.width !== 64 || iconRect.height !== 64) {
+      problems.push(`图标不是 64×64：${iconRect.width}×${iconRect.height}`);
+    }
+    if (titleRect.top + titleRect.height > iconRect.top) {
+      problems.push(`标题压住了图标：标题底 ${titleRect.top + titleRect.height} > 图标顶 ${iconRect.top}`);
+    }
+    if (iconRect.left < 0 || iconRect.top < 0 || iconRect.left + iconRect.width > width) {
+      problems.push(`图标越界：left=${iconRect.left} width=${iconRect.width} 宽度档=${width}`);
+    }
+  });
+  for (let a = 0; a < icons.length; a += 1) {
+    for (let b = a + 1; b < icons.length; b += 1) {
+      if (!icons[a] || !icons[b]) continue;
+      if (rectsOverlap(absoluteRect(cells[a], icons[a]), absoluteRect(cells[b], icons[b]))) {
+        problems.push(`图标 ${cells[a].getAttribute("data-node-id")}/${cells[b].getAttribute("data-node-id")} 重叠`);
+      }
+    }
+  }
+  return problems;
+};
+/** SVG 连线层里每条线的端点（内联 SVG 字符串；垫片不建节点树，故读 innerHTML）。 */
+const edgePoints = (root) => {
+  const layer = byClass(root || boardGraph(), "script-graph-edges")[0];
+  if (!layer) return [];
+  return [...String(layer.innerHTML).matchAll(/<line\b[^>]*x1="([\d.]+)"[^>]*y1="([\d.]+)"[^>]*x2="([\d.]+)"[^>]*y2="([\d.]+)"/g)]
+    .map((match) => match.slice(1).map(Number));
+};
+
+// ---- ① 建局直接进棋盘：一屏五类房间 + 多入口 / 多出口 / 多 Boss ----
+await scriptCall("scriptLoadSave");
+check("M7-21c 进棋盘前没有存档（本段用真端点建新档）", scriptStatus() === "missing", scriptStatus());
+await scriptClick($("btn-script-new"));
+await scriptClick(scriptChoice("data-script-id", "boardprobe"));
+await scriptClick(scriptChoice("data-hero-id", "jie_liubei"));
+await scriptClick($("btn-script-picker-go"));
+const board0 = (ui.state.script || {}).board || null;
+check("M7-21d 开档成功 ⇒ 直接进棋盘视图（`show(\"view-script-board\")` + 渲染 state.script.board）",
+  !!board0 && $("view-script-board").hidden === false
+  && $("script-board-graph").hidden === false
+  && graphCells().length === 10,
+  `board=${board0 && board0.run_id} 格=${graphCells().length} view=${$("view-script-board").hidden}`);
+
+const kinds = new Set(graphCells().map((cell) => cell.getAttribute("data-room-kind")));
+const bosses = graphCells().filter((cell) => cell.getAttribute("data-boss") === "1");
+const exits = graphCells().filter((cell) => cell.getAttribute("data-exit") === "1");
+check("M7-21e 棋盘一屏：五类房间各至少一次、两个出口、两个 Boss（多出口 / 多 Boss 的库）",
+  setEquals([...kinds], ["story", "battle", "event", "shop", "unknown"])
+  && exits.length === 2 && bosses.length === 2,
+  `类=${[...kinds].join(",")} 出口=${exits.length} Boss=${bosses.length}`);
+
+const icons = graphCells().map((cell) => cellIcon(cell).getAttribute("data-icon"));
+check("M7-21f 六种图标按房间类型分派（旗帜 / 交叉双剑 / 书 / 钱袋 / ？ / 红色感叹号；Boss 盖过类型图标）",
+  icons.filter((name) => name === "flag").length === 1
+  && icons.filter((name) => name === "swords").length === 2
+  && icons.filter((name) => name === "book").length === 1
+  && icons.filter((name) => name === "purse").length === 3
+  && icons.filter((name) => name === "question").length === 1
+  && icons.filter((name) => name === "boss").length === 2
+  && bosses.every((cell) => cellIcon(cell).getAttribute("data-icon") === "boss"),
+  `图标=${JSON.stringify(icons)}`);
+check("M7-21g 节点统一 64×64、只放图标；标题在图标上方（内联几何 + 常量）",
+  ui.SCRIPT_GRAPH_ICON_PX === 64 && ui.SCRIPT_GRAPH_ICON_PX ** 2 === 4096
+  && graphCells().every((cell) => {
+    const button = styleRect(cellButton(cell));
+    return button.width === 64 && button.height === 64
+      // 按钮里没有任何文字：图标之外不塞字（房间名在按钮**上方**的标题里）。
+      && String(cellButton(cell).textContent).trim() === "";
+  })
+  && graphCells().every((cell) => {
+    const title = styleRect(cellTitle(cell));
+    const icon = styleRect(cellButton(cell));
+    return title.top + title.height <= icon.top;
+  })
+  && graphGeometryProblems(boardGraph(), 1280).length === 0,
+  `图标宽=${JSON.stringify(graphCells().map((cell) => styleRect(cellButton(cell)).width))}`
+    + ` 几何=${graphGeometryProblems(boardGraph(), 1280).join("；")}`);
+check("M7-21h 标题写房间名（不是节点 id）：事件房 = 残破的村庄、Boss 房 = 广宗城下",
+  cellTitle(cellOf("a1")).textContent === "残破的村庄"
+  && cellTitle(cellOf("d1")).textContent === "广宗城下"
+  && cellTitle(cellOf("c1")).textContent === "路边的问号",
+  `${cellTitle(cellOf("a1")).textContent}/${cellTitle(cellOf("d1")).textContent}`);
+
+const points = edgePoints();
+const edgesHtml = String(byClass(boardGraph(), "script-graph-edges")[0].innerHTML);
+check("M7-21i 连线 = 一条边一条 SVG line（17 条），端点都在图内、两档宽度都不越界",
+  points.length === 17
+  && points.every(([x1, y1, x2, y2]) => x1 >= 0 && x2 >= 0 && y1 >= 0 && y2 >= 0
+    && x1 <= 1280 && x2 <= 1280)
+  && byClass(boardGraph(), "script-graph-edges")[0].innerHTML.includes("<svg"),
+  `线=${points.length}`);
+check("M7-21j 边条件标签只画在带 requires 的边上（c2 → d2）",
+  (edgesHtml.match(/class="script-edge-label"/g) || []).length === 1
+  && edgesHtml.includes("需要 flag.boss_open")
+  && edgesHtml.includes("不要 flag.sealed"),
+  `标签数=${(edgesHtml.match(/class="script-edge-label"/g) || []).length}`);
+
+// 两档宽度：同一份 spec、同一个渲染器，显式喂 1280 / 1920（烟测不读布局引擎）。
+const widthBoxes = {};
+for (const width of [1280, 1920]) {
+  const box = documentShim.createElement("div");
+  ui.scriptGraphRender(box, { ...ui.state.script.board, width });
+  widthBoxes[width] = box;
+}
+check("M7-21k 1280 / 1920 两档宽度下：图标 + 标题 + 连线都不重叠、不越界（尺寸断言，不引像素比对）",
+  graphGeometryProblems(widthBoxes[1280], 1280).length === 0
+  && graphGeometryProblems(widthBoxes[1920], 1920).length === 0
+  && edgePoints(widthBoxes[1280]).length === 17
+  && edgePoints(widthBoxes[1920]).length === 17
+  && edgePoints(widthBoxes[1920]).every(([x1, y1, x2, y2]) => x1 <= 1920 && x2 <= 1920 && y1 >= 0 && y2 >= 0),
+  `1280=${graphGeometryProblems(widthBoxes[1280], 1280).join("；")}`
+    + ` 1920=${graphGeometryProblems(widthBoxes[1920], 1920).join("；")}`);
+
+// ---- ② 状态色只属于玩家视角：同一份节点在编辑器语境零 st-* 类 ----
+const statusCells = graphCells();
+const availableCells = statusCells.filter((cell) => cellButton(cell).classList.contains("st-available"));
+check("M7-21l 棋盘语境的状态色读服务端字段：两个入口 = 可走，其余 = 去不了，此刻没有「当前」",
+  availableCells.length === 2
+  && setEquals(availableCells.map((cell) => cell.getAttribute("data-node-id")), ["a1", "a2"])
+  && statusCells.every((cell) => !cellButton(cell).classList.contains("st-current"))
+  && statusCells.filter((cell) => cellButton(cell).classList.contains("st-blocked")).length === 8,
+  `可走=${availableCells.map((cell) => cell.getAttribute("data-node-id")).join(",")}`);
+
+const drawsBeforeEditor = ui.scriptGraphDrawCount();
+const editorBox = documentShim.createElement("div");
+ui.scriptGraphRender(editorBox, { ...ui.state.script.board, mode: "editor", width: 1280 });
+const editorStatusClasses = walkTree(editorBox)
+  .flatMap((node) => [...node.classList.set])
+  .filter((name) => name.startsWith("st-"));
+check("M7-21m 编辑器语境（同一个渲染器、同一份节点）不画任何状态色——不是「另画一套」",
+  editorStatusClasses.length === 0
+  && graphCells(editorBox).length === 10
+  && edgePoints(editorBox).length === 17
+  && ui.scriptGraphDrawCount() === drawsBeforeEditor + 1
+  && editorBox.getAttribute("data-graph-mode") === "editor",
+  `st-*=${JSON.stringify(editorStatusClasses)} 画次=${ui.scriptGraphDrawCount() - drawsBeforeEditor}`);
+const drawsBeforeBoardRender = ui.scriptGraphDrawCount();
+await scriptCall("scriptBoardRender");
+check("M7-21n 渲染器唯一性（机械读数）：棋盘的渲染口也走 `scriptGraphRender`，重画一次只 +1",
+  typeof ui.scriptGraphRender === "function"
+  && typeof ui.scriptGraphLayout === "function"
+  && ui.scriptGraphDrawCount() === drawsBeforeBoardRender + 1,
+  `画次=${ui.scriptGraphDrawCount() - drawsBeforeBoardRender}`);
+
+// ---- ③ 悬浮卡：战斗房座位布局 + 敌人信息；非战斗房类型 + 结果 ----
+hoverCell(cellOf("b1"));
+const card = $("script-node-card");
+const seatRows = byClass($("script-node-card-seats"), "script-card-seat");
+const enemyRows = byClass($("script-node-card-enemies"), "script-card-enemy");
+const gruntRow = enemyRows.find((row) => row.getAttribute("data-template") === "tpl.grunt");
+const bruteRow = enemyRows.find((row) => row.getAttribute("data-template") === "tpl.brute");
+check("M7-21o 战斗房悬浮卡：座位布局（1 友受保护 + 2 敌）+ 敌人信息（名 / 档位 / 血量 / 初始技能 / 随机技能 / 奖励）",
+  card.hidden === false
+  && $("script-node-card-title").textContent === "颍川道上"
+  && $("script-node-card-meta").textContent === "房间：剧情战斗"
+  && seatRows.length === 3
+  && seatRows[0].getAttribute("data-side") === "ally"
+  && seatRows[0].getAttribute("data-template") === "tpl.ally"
+  && seatRows[0].textContent.includes("受保护")
+  && seatRows[1].textContent.includes("黄巾力士")
+  && seatRows[2].textContent.includes("黄巾渠帅")
+  && enemyRows.length === 2
+  && gruntRow.textContent.includes("档位 early")
+  && gruntRow.textContent.includes("血量 3/3")
+  && gruntRow.textContent.includes("初始技能：无")
+  && gruntRow.textContent.includes("随机技能：进入时抽定（固定对手则无）")
+  && gruntRow.textContent.includes("奖励：铜钱 2 · 3 选 1×1")
+  && bruteRow.textContent.includes("初始技能：hero.zhangfei.paoxiao"),
+  `座位=${seatRows.length} 敌人=${enemyRows.map((row) => row.textContent).join(" | ")}`);
+check("M7-21p 战斗房悬浮卡：胜负 / 全局副本技能 / 房间奖励",
+  $("script-node-card-victory").textContent === "胜利条件：全歼敌人"
+  && $("script-node-card-globals").textContent.includes("副本全局技能：gs.enemy")
+  && $("script-node-card-reward").textContent.includes("房间额外奖励：铜钱 4 · 2 选 1×1"),
+  `${$("script-node-card-victory").textContent} / ${$("script-node-card-globals").textContent}`);
+
+hoverCell(cellOf("a1"));
+const eventOptions = byClass($("script-node-card-options"), "script-card-option").map((row) => row.textContent);
+check("M7-21q 事件房悬浮卡：房间类型 + 事件与选项（非战斗房 = 已抽出的结果那一面）",
+  $("script-node-card-meta").textContent === "房间：事件"
+  && eventOptions.some((text) => text.includes("残破的村庄"))
+  && eventOptions.some((text) => text.includes("收下铜钱") && text.includes("帮他们修寨")),
+  eventOptions.join(" | "));
+
+hoverCell(cellOf("a2"));
+check("M7-21r 商店房悬浮卡：房间类型 + 库存抽法（售完不补货）",
+  $("script-node-card-meta").textContent === "房间：商店"
+  && byClass($("script-node-card-options"), "script-card-option")
+    .some((row) => row.textContent.includes("6 技能 + 2 遗物")),
+  $("script-node-card-options").textContent);
+
+hoverCell(cellOf("c1"));
+const poolRows = byClass($("script-node-card-options"), "script-card-option").map((row) => row.textContent);
+check("M7-21s 问号房悬浮卡：加权池（两份候选各带权重）",
+  $("script-node-card-meta").textContent === "房间：问号房"
+  && poolRows.some((text) => text.includes("残破的村庄（权重 3）"))
+  && poolRows.some((text) => text.includes("行商篷车（权重 1）")),
+  poolRows.join(" | "));
+
+hoverCell(cellOf("d1"));
+check("M7-21t Boss 房悬浮卡：Boss 标记 + Boss 座位 + 击杀胜负 + Boss 模板",
+  $("script-node-card-meta").textContent === "房间：剧情战斗 · Boss"
+  && byClass($("script-node-card-seats"), "script-card-seat")
+    .some((row) => row.textContent.includes("张角") && row.textContent.includes("Boss"))
+  && $("script-node-card-victory").textContent === "胜利条件：击败 Boss 座位"
+  && byClass($("script-node-card-enemies"), "script-card-enemy")
+    .some((row) => row.getAttribute("data-template") === "tpl.boss"),
+  $("script-node-card-meta").textContent);
+
+leaveCell(cellOf("d1"));
+check("M7-21u 移开鼠标 ⇒ 悬浮卡收起（不留一张常驻卡）", $("script-node-card").hidden === true);
+
+// ---- ④ 点节点 = 一条真请求；不可到达 / 死路的原话落到红字错误行 ----
+const boardRunId = ui.state.script.board.run_id;
+const boardRevision = ui.state.script.board.revision;
+scriptMark = calls.length;
+await scriptClick(cellButton(cellOf("a1")));
+const enterCalls = calls.slice(scriptMark).filter(
+  (call) => call.method === "POST" && call.path === `/api/script-runs/${boardRunId}/nodes/a1`,
+);
+check("M7-21v 点可到达节点 = 一条 POST …/nodes/a1（expected_revision 来自棋盘体），棋盘体收下并重画",
+  enterCalls.length === 1
+  && enterCalls[0].body.expected_revision === boardRevision
+  && ui.state.script.board.pending
+  && ui.state.script.board.pending.node_id === "b1/a1"
+  && cellButton(cellOf("a1")).classList.contains("st-current")
+  && $("script-board-hint").textContent.includes("已进入「残破的村庄」"),
+  `calls=${enterCalls.length} pending=${ui.state.script.board.pending && ui.state.script.board.pending.node_id}`);
+
+scriptMark = calls.length;
+await scriptClick(cellButton(cellOf("d1")));
+const blockedCalls = calls.slice(scriptMark).filter(
+  (call) => call.method === "POST" && call.path === `/api/script-runs/${boardRunId}/nodes/d1`,
+);
+check("M7-21w 去不了的节点照样发请求（可到达集来自服务端，前端不重算）：400 的原话落到红字错误行",
+  blockedCalls.length === 1
+  && $("script-board-error").hidden === false
+  && $("script-board-error").getAttribute("data-rule-id") === "script.enter.node_in_progress"
+  && ui.state.script.board.pending.node_id === "b1/a1",
+  `错误「${$("script-board-error").textContent}」 rule=${$("script-board-error").getAttribute("data-rule-id")}`);
+
+// 结算（票 22 的面；这里直接打端点把棋盘推到「已走 + 下一批」）再刷新：状态色逐格换。
+const settleBody = await postRaw(`/api/script-runs/${boardRunId}/settle`, {
+  expected_revision: ui.state.script.board.revision,
+  option: 0,
+});
+check("M7-21x 结算事件节点 = 真端点返回 `board`（当前节点清空、进度前进）",
+  !!settleBody.board && settleBody.board.pending === null
+  && settleBody.board.revision === ui.state.script.board.revision + 1,
+  `revision=${settleBody.board && settleBody.board.revision}`);
+await scriptCall("scriptBoardRefresh");
+const advancedCells = { a1: cellOf("a1"), b1: cellOf("b1") };
+check("M7-21y 刷新回棋盘：a1 = 当前（服务端说玩家在这里）、b1 / b2 / b3 = 可走；红字收起（错误不残留）",
+  cellButton(advancedCells.a1).classList.contains("st-current")
+  && ["b1", "b2", "b3"].every((id) => cellButton(cellOf(id)).classList.contains("st-available"))
+  && $("script-board-error").hidden === true
+  && ui.state.script.board.revision === settleBody.board.revision,
+  `a1=${cellButton(advancedCells.a1).className} b1=${cellButton(cellOf("b1")).className}`);
+
+// 战斗节点：点下去服务端起会话（棋盘体带 session_id；战场面归票 23），已抽到的技能进悬浮卡。
+scriptMark = calls.length;
+await scriptClick(cellButton(cellOf("b1")));
+const battleBoard = ui.state.script.board;
+check("M7-21z 点战斗节点：棋盘体带 session_id（战斗界面归票 23），当前节点 = 颍川道上，a1 退成「已走」",
+  battleBoard && battleBoard.pending && battleBoard.pending.spec.kind === "battle"
+  && typeof battleBoard.session_id === "string" && battleBoard.session_id.length > 0
+  && $("script-board-hint").textContent.includes("牌桌上打")
+  && cellButton(cellOf("a1")).classList.contains("st-completed"),
+  `session=${battleBoard && battleBoard.session_id} a1=${cellButton(cellOf("a1")).className}`);
+hoverCell(cellOf("b1"));
+const drawnGrunt = byClass($("script-node-card-enemies"), "script-card-enemy")
+  .find((row) => row.getAttribute("data-template") === "tpl.grunt");
+const drawnBrute = byClass($("script-node-card-enemies"), "script-card-enemy")
+  .find((row) => row.getAttribute("data-template") === "tpl.brute");
+check("M7-21aa 已进入的战斗：悬浮卡的「随机抽到的技能」读 pending.spec.pve.grants（抽到才写，固定对手写无）",
+  drawnGrunt.textContent.includes("随机技能：hero.")
+  && !drawnGrunt.textContent.includes("抽定")
+  && drawnBrute.textContent.includes("随机技能：无（固定对手）")
+  && byClass($("script-node-card-seats"), "script-card-seat")
+    .some((row) => row.textContent.includes("义军什长")),
+  `${drawnGrunt.textContent} | ${drawnBrute.textContent}`);
+leaveCell(cellOf("b1"));
+
+// 收掉这一轮：suspend 作废战斗会话，再删档（下一段要重开一轮走死路）。
+await scriptCall("scriptSuspend", boardRunId);
+await fetch(`${BASE}/api/script-save?expected_revision=${(ui.state.script.save || {}).revision}`, {
+  method: "DELETE",
+});
+await scriptCall("scriptLoadSave");
+check("M7-21ab 存档被删 ⇒ 状态回 missing，棋盘体不再沿用上一轮的底稿",
+  scriptStatus() === "missing" && ui.state.script.board === null,
+  `status=${scriptStatus()} board=${ui.state.script.board}`);
+
+// 死路：a2(商店) → 结算 → b2(商店) → 结算 → e1(商店，col 2 且没有出边) → 结算 ⇒ board_error。
+const deadRun = await postRaw("/api/script-runs", {
+  script_id: "boardprobe", chosen_hero: "jie_liubei",
+});
+ui.scriptBoardShow(deadRun);
+let deadBoard = deadRun;
+for (const [nodeId, body] of [["a2", {}], ["b2", {}], ["e1", {}]]) {
+  deadBoard = await postRaw(`/api/script-runs/${deadRun.run_id}/nodes/${nodeId}`, {
+    expected_revision: deadBoard.revision,
+  });
+  const settled = await postRaw(`/api/script-runs/${deadRun.run_id}/settle`, {
+    expected_revision: deadBoard.revision,
+    ...body,
+  });
+  deadBoard = settled.board;
+}
+check("M7-21ac 死路：结算 e1 之后服务端的 board_error 是 dead_end.no_outgoing_edges",
+  !!deadBoard && !!deadBoard.board_error
+  && deadBoard.board_error.rule_id === "script.board.dead_end.no_outgoing_edges"
+  && deadBoard.board_error.reason.includes("没有出边"),
+  JSON.stringify(deadBoard && deadBoard.board_error));
+ui.scriptBoardShow(deadBoard);
+check("M7-21ad 死路错误提示 = 服务端那行原话（红字行显示 + rule_id 可核 + 提示行改口）",
+  $("script-board-error").hidden === false
+  && $("script-board-error").textContent === deadBoard.board_error.reason
+  && $("script-board-error").getAttribute("data-rule-id") === "script.board.dead_end.no_outgoing_edges"
+  && $("script-board-hint").textContent.includes("走不下去")
+  && cellButton(cellOf("e1")).classList.contains("st-current")
+  && graphCells().filter((cell) => cellButton(cell).classList.contains("st-available")).length === 0,
+  `错误「${$("script-board-error").textContent}」`);
+
+// 收尾：删档 + 撤掉这份用户库（后续用例仍走内置库）。
+await fetch(`${BASE}/api/script-save?expected_revision=${deadBoard.revision}`, { method: "DELETE" });
+await scriptCall("scriptLoadSave");
+unlinkSync(SCRIPT_BOARD_LIBRARY);
+check("M7-21ae 收尾干净：无档、用户库撤掉、棋盘体清空",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_BOARD_LIBRARY)
+  && ui.state.script.board === null,
+  `status=${scriptStatus()} 库在=${existsSync(SCRIPT_BOARD_LIBRARY)}`);
+
 /** 推进一条对局到一个干净局面。
  *
  * 取**第一条候选**（`legal_actions[0]`）：这是"与引擎扫描路径一致"的那条路——

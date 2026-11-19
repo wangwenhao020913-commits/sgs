@@ -58,6 +58,9 @@ function scriptApplySave(body) {
     }
   }
   scriptRender();
+  // 票 21：棋盘体跟着存档走——存档没了（放弃 / 通关删档）就把棋盘收干净，
+  // 有棋盘体时这里不动它（重画由 `script-board.js:scriptBoardRender` 负责）。
+  if (typeof scriptBoardSync === "function") scriptBoardSync();
   return state.script.save;
 }
 
@@ -378,7 +381,8 @@ async function scriptCreateRun() {
     state.script.overwrite = false;
     scriptAdoptBoard(board);
     scriptRender();
-    scriptHint(`已建好剧本档（run ${board.run_id}）：下一步由「继续剧本」回到棋盘。`);
+    // 票 21：建局成功后直接进棋盘（棋盘体的唯一渲染口在 `script-board.js`）。
+    scriptBoardShow(board);
   } else {
     scriptRender();
     scriptHint(failure);
@@ -406,7 +410,8 @@ async function scriptContinueRun() {
   if (board) {
     scriptAdoptBoard(board);
     scriptRender();
-    scriptHint(`已载入棋盘进度（run ${board.run_id}）`);
+    // 票 21：「继续剧本」= 读档回棋盘（不重建引擎）。
+    scriptBoardShow(board);
   } else {
     scriptRender();
     scriptHint(failure);
@@ -520,7 +525,7 @@ function scriptCloseConfirm() {
  * 入口归牌桌（票 21 / 23 的「离开棋局」）。**这里不判断是不是在战斗里**：确认后的动作就是
  * 那一条 `suspend`，服务端回 `suspended` 说它到底作废了一个会话没有。
  */
-function scriptExitConfirm() {
+function scriptExitConfirm(after) {
   const runId = state.script.runId || (state.script.save && state.script.save.run_id) || null;
   return scriptConfirm({
     kind: "exit",
@@ -530,7 +535,14 @@ function scriptExitConfirm() {
       {
         label: "确认",
         primary: true,
-        run: () => { scriptCloseConfirm(); return scriptSuspend(runId); },
+        run: () => {
+          scriptCloseConfirm();
+          // `after` = 调用方的收尾（票 21 的「离开棋局」用它回开局页；入口归棋盘）。
+          return scriptSuspend(runId).then((body) => {
+            if (body && typeof after === "function") after(body);
+            return body;
+          });
+        },
       },
       {
         label: "取消",
