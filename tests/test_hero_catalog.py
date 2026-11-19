@@ -330,7 +330,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 208 → 210（装备 22 不变）。
     # m7-script-mode 票 26：**遗物** 6 条（`carrier = RELIC`，`relic.*`）⇒ 236 → 242；
     # 武将技 212 不变（遗物不在武将那半），装备 22 不变。
-    assert len(CATALOG) == 242
+    # m7-script-mode 票 27：**NPC 技能** 4 条（`carrier = NPC`，`npc.*`）⇒ 242 → 246；
+    # 武将技 212 / 装备 22 都不变（NPC 技能只授敌方座位，不在武将那半）。
+    assert len(CATALOG) == 246
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
     assert len(heroes) == 212
 
@@ -2387,6 +2389,10 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=ME, target=0),
             _HookFrame(source=ME, target=0, kuanggu_distance=1),
         ),
+        # m7-script-mode 票 27：NPC 技能里唯一的条件钩子（Boss 的「造成伤害后回复 1 点」）。
+        # 判据与【狂骨】② 的"这次伤害由我造成"同形（source == 持有者 ∧ 有受伤者），故探针
+        # 帧同形：把持有者换成别人 ⇒ 条件翻假（不加条件就会"任何人造成伤害、Boss 都回血"）。
+        "npc.wrath": (_HookFrame(source=ME, target=0),),
         # jie-feng-batch 票 01：界黄忠移动版【烈弓】的两条条件钩子——
         # ① 使用【杀】指定目标后（我 = 使用者）；② RESOLVE_AFTER_END 清扫（我 = 记账的座位）。
         "hero.jie_huangzhong_mobile.liegong": (
@@ -3131,6 +3137,13 @@ SKILL_SHAPE: dict[str, str] = {
     "relic.extra_start_hand": "锁定技",
     "relic.hand_limit": "锁定技",
     "relic.peach_heal": "锁定技",
+    # m7-script-mode 票 27：**NPC 技能**四条（`carrier = NPC`，只授敌方座位）。四条都
+    # `locked=True`、无流水线：三条纯修饰器（加伤 / 减伤 / 距离）+ 一条造伤后钩子
+    # （`DAMAGE_AFTER_DEAL` + RECOVER 子帧）⇒ 机械谓词全落「锁定技」格（与遗物同一条判据）。
+    "npc.fury": "锁定技",
+    "npc.guard": "锁定技",
+    "npc.swift": "锁定技",
+    "npc.wrath": "锁定技",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -3233,7 +3246,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # sp1-sunshangxiang-maliang 票 01：马良【自书】（锁定技 + 钩子、无流水线）⇒ 49 → 50。
     # m7-script-mode 票 26：遗物六条（全部锁定：一条 GAME_START 钩子 + 五条纯修饰器）
     # ⇒ 50 → 56。
-    "锁定技": 56,
+    # m7-script-mode 票 27：NPC 技能四条（全部锁定：三条纯修饰器 + 一条造伤后钩子）
+    # ⇒ 56 → 60。
+    "锁定技": 60,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -3452,7 +3467,8 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 222 → 223（锁定技 47 → 48）。
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（锁定技格）⇒ 236 → 242。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 242
+    # m7-script-mode 票 27：NPC 技能四条（全部锁定、无流水线 ⇒ 锁定技格）⇒ 242 → 246。
+    assert len(SKILL_SHAPE) == len(CATALOG) == 246
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3679,8 +3695,10 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # bingshi-jie 票 01：势赵云【武翊】（触发技能）/【摧锋】（零步技能）⇒ 内 134 → 136。
     # m7-script-mode 票 26：遗物六条都没有流水线（一条 GAME_START 钩子 + 五条纯修饰器）
     # ⇒ 步骤语言外 98 → 104（内 138 不变）。
+    # m7-script-mode 票 27：NPC 技能四条同样没有流水线（三条纯修饰器 + 一条造伤后钩子）
+    # ⇒ 步骤语言外 104 → 108（内 138 不变）。
     assert len(inside) == 138
-    assert len(outside) == 104
+    assert len(outside) == 108
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

@@ -932,6 +932,26 @@ def placement_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozen
     )
 
 
+def npc_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozenset[str]:
+    """``catalog`` 里全部**NPC 技能**的 id（载体 ``CarrierKind.NPC``，M7 票 27）。
+
+    与 :func:`rejudge_skill_ids` / :func:`placement_skill_ids` 同构：唯一真源是
+    :attr:`SkillDef.carrier`，两处机械判据都读本函数、不各抄一份名单——
+
+    - 学习池的**入口排除**（``sgs.data.values.learning_pool``：NPC 技能永不进池）；
+    - ``PveConfig.grants`` 的**座位角色门**（``sgs.data.rule_config``：只授 ``ENEMY`` 座位）。
+
+    两处都延迟 import 本函数（``data ↔ skills`` 不能有模块级环）。判据是**载体**，不是 id
+    前缀：前缀可以被任何表抄错。传 ``catalog`` 让"派生"这条判据能对一份注入的表单独验证。
+    """
+    source = CATALOG if catalog is None else catalog
+    return frozenset(
+        definition.skill_id
+        for definition in source.values()
+        if definition.carrier is CarrierKind.NPC
+    )
+
+
 def _identity_gates_out(
     definition: SkillDef, identity: Identity | None, source: SkillSource
 ) -> bool:
@@ -5052,6 +5072,7 @@ from .sidi import (  # noqa: E402  （末尾 import 是刻意的）
     sidi_skill_definitions,
 )
 from .relics import relic_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .npcs import npc_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -5130,6 +5151,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *bingshi_jie_skill_definitions(),
             *sidi_skill_definitions(),
             *relic_skill_definitions(),
+            *npc_skill_definitions(),
         )
     }
 )

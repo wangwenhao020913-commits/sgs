@@ -89,6 +89,14 @@ class CarrierKind(str, Enum):
     ``MARKER`` / ``CARD_TAG`` 同一姿态单列一档——它既不在武将面上、也不在装备区里；
     它真正被"谁拥有"是座位级事实（``Player.relics``），不是武将牌上的技能清单。
     这一档同时是价值表语义门的判据名（``sgs.data.values._RELIC_CARRIER`` 按名字比）。
+
+    ``NPC``（M7 票 27）= **只授敌方座位的技能**：四条 ``npc.*`` 是敌人模板的"武将牌技能"
+    （模板 ``initial_skills`` / ``random{pool,count}`` 经 ``PveConfig.grants`` 写进 enemy 座位
+    的 ``Player.granted_skills``，``SkillSourceKind.GRANTED``）。它**不属于任何武将牌、也不
+    属于玩家成长面**，故与 ``MARKER`` / ``CARD_TAG`` / ``RELIC`` 同一姿态单列一档。这一档是
+    两处机械判据的锚，两处都经同一个派生函数 :func:`~sgs.skills.catalog.npc_skill_ids` 读它：
+    学习池的**入口排除**（``sgs.data.values.learning_pool``）与 ``PveConfig.grants`` 的
+    **座位角色门**（``sgs.data.rule_config``）。
     """
 
     EQUIPMENT = "EQUIPMENT"
@@ -96,6 +104,7 @@ class CarrierKind(str, Enum):
     MARKER = "MARKER"
     CARD_TAG = "CARD_TAG"
     RELIC = "RELIC"
+    NPC = "NPC"
 
 
 class PriorityClass(IntEnum):
@@ -144,6 +153,10 @@ _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
     CarrierKind.MARKER: PriorityClass.MARKER,
     CarrierKind.CARD_TAG: PriorityClass.CARD_TAG,
     CarrierKind.RELIC: PriorityClass.RELIC,
+    # M7 票 27：NPC 技能**复用武将档**——它们是敌人的"自己那套技能"（模板技能与武将牌技能
+    # 在敌方座位上是同一件事），行为上不该与武将技分先后。载体只标记"不属于玩家成长面"，
+    # 不是一条新的排序档；单开一档会让"敌人的两条锁定段"莫名分进两个子队列。
+    CarrierKind.NPC: PriorityClass.HERO,
 }
 
 

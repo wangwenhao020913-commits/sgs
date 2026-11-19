@@ -332,12 +332,19 @@ class PveConfig(BaseModel):
         3. 每座位的技能 ≤ 4、遗物 ≤ 6（逐座位，不是全场总量）；
         4. 同一座位的同一 ``id`` 只许出现一次（跨 ``kind`` 也算重复：同一条效果不能既算
            出战技能又算遗物）；
-        5. 遗物**只授给主角座位**——遗物栏属于玩家本人，AI 队友 / 敌人不拿遗物。
+        5. 遗物**只授给主角座位**——遗物栏属于玩家本人，AI 队友 / 敌人不拿遗物；
+        6. **NPC 技能只授敌方座位**（M7 票 27；票 02 §7）——载体为 ``NPC`` 的 id（四条
+           ``npc.*``）落在 ``ALLY`` 座位上 ⇒ 拒。判据是**载体**而不是 ``kind``：把一条
+           NPC id 塞进遗物位送给主角同样拒（座位 0 是主角，"遗物只授主角"那条会放行，
+           拦住它的是这一条）。
         """
         if not self.grants:
             return self
+        from sgs.skills import npc_skill_ids
+
         seats = len(self.identities)
         catalog_ids = _catalog_skill_ids()
+        npc_ids = npc_skill_ids()
         for index, grant in enumerate(self.grants):
             if not 0 <= grant.seat < seats:
                 raise ValueError(
@@ -375,6 +382,13 @@ class PveConfig(BaseModel):
                 raise ValueError(
                     f"遗物只能授给主角座位（principal = {self.principal}）："
                     f"grants 里的遗物落在座位 {grant.seat}"
+                )
+        for grant in self.grants:
+            if grant.id in npc_ids and self.identities[grant.seat] is not Identity.ENEMY:
+                raise ValueError(
+                    f"NPC 技能只能授给敌方座位（enemy）：座位 {grant.seat} 是 "
+                    f"{self.identities[grant.seat].value}，却拿到 {grant.id!r}"
+                    "（票 02 §7：npc.* 只进敌人模板 / 敌方座位的 grants）"
                 )
         return self
 

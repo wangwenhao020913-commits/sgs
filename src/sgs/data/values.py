@@ -252,10 +252,21 @@ def learning_pool(
     已拥有按 ``skill_id`` 去重：同一个技能同时躺在背包与出战槽里也只减一次。
     "只收武将技能"由**表**保证（``skills`` 段只装武将技能，加载器拒 ``equip.*`` /
     遗物 / 标记）；本函数不按前缀过滤，否则会造出第二份"什么算武将技能"的定义。
+
+    **入口排除**（M7 票 27）：载体为 ``NPC`` 的技能**永不进池**——四条 ``npc.*`` 只授敌方
+    座位，即便一张（绕过加载器构造的）价值表把它们点成 enabled，学习池 / 商店 / 三选一
+    也不产出它们。判据是**载体**（:func:`sgs.skills.npc_skill_ids` 从 ``CATALOG`` 派生），
+    不是稀有度、也不是 id 前缀；``CATALOG`` 里查不到的 id 原样放行（加载器的语义门已经挡掉
+    真表里的未知 id，合成测试表不因这条排除而改变行为）。
     """
+    from sgs.skills import npc_skill_ids
+
     owned = frozenset(backpack) | frozenset(equipped)
+    npc_ids = npc_skill_ids()
     return tuple(
-        skill_id for skill_id in table.enabled_skill_ids() if skill_id not in owned
+        skill_id
+        for skill_id in table.enabled_skill_ids()
+        if skill_id not in owned and skill_id not in npc_ids
     )
 
 

@@ -447,6 +447,56 @@ def test_a_grant_on_a_seat_outside_the_table_is_rejected():
     assert "seat" in str(caught.value)
 
 
+# M7 票 27：NPC 技能**只授敌方座位**（票 02 §7）。判据是技能定义上的**载体**
+# （`CarrierKind.NPC`），不是 id 前缀——故这里点名四条真实 id，而不是造一个假字符串。
+NPC_FURY = "npc.fury"
+NPC_IDS = ("npc.fury", "npc.guard", "npc.swift", "npc.wrath")
+
+
+def test_an_npc_skill_granted_to_an_ally_seat_is_rejected():
+    """NPC 技能只许落在 ``ENEMY`` 座位：授给主角 / AI 队友 ⇒ 构造期 fail-closed。
+
+    这是"只授敌方"的**唯一**兑现处（``PveConfig.grants`` 的座位角色门）：header 里出现
+    "主角带着 NPC 技能"的局会连录像自证都过不去，故在构造期就拒。座位表刻意排成
+    友 / 友 / 敌，让两个 ``ALLY`` 座位（主角 + AI 队友）都过一遍。
+    """
+    allies = ("ally", "ally", "enemy")
+    for seat in (0, 1):
+        with pytest.raises(DataLoadError) as caught:
+            _config(
+                identities=list(allies),
+                grants=(_grant(seat, "skill", NPC_FURY),),
+            )
+        message = str(caught.value)
+        assert "NPC" in message, "拒绝必须点名「NPC 技能」"
+        assert f"座位 {seat}" in message, "拒绝必须点名落错的座位"
+
+    # 反例的另一半：**敌方**座位（座位 2）照收——拒的是座位角色，不是 id 本身。
+    accepted = _config(
+        identities=list(allies), grants=(_grant(2, "skill", NPC_FURY),)
+    )
+    assert [grant.id for grant in accepted.pve.grants] == [NPC_FURY]
+
+
+def test_the_npc_seat_rule_is_about_the_carrier_not_the_kind():
+    """``kind`` 不改变座位角色门：把 NPC id 塞进**遗物位**补主角同样是拒。
+
+    （座位 0 是主角，故"遗物只授主角"那一条会放行；拒它的是本票的 NPC 座位角色门。）
+    四条 NPC id 一条不落：门按**载体**判，不按某一条 id 判。
+    """
+    for npc_id in NPC_IDS:
+        with pytest.raises(DataLoadError) as caught:
+            _grants(_grant(0, "relic", npc_id))
+        assert "NPC" in str(caught.value), npc_id
+
+
+def test_npc_skills_on_enemy_seats_do_not_trip_the_growth_limits():
+    """四条 NPC 技能同时授给**敌方**座位是合法的（每座技能授予 ≤ 4 的边界整好）。"""
+    config = _config(grants=tuple(_grant(2, "skill", npc_id) for npc_id in NPC_IDS))
+
+    assert [grant.id for grant in config.pve.grants] == list(NPC_IDS)
+
+
 # ---------------------------------------------------------------------------
 # `pve.seats`：逐座位合成武将 + 三档常驻加成（M7 票 10；票 03 §3 / §10.1–§10.2）
 #

@@ -26,7 +26,9 @@
 牌标签效果）；`--all` 连 22 条装备技能一起列——装备是"牌带来的技能"，形状盘点默认不铺开它。
 
 M7 票 26 起多出**遗物**这一档（`carrier == RELIC`，六条 `relic.*`）：遗物也是技能，
-做遗物 / NPC 技能时必须能在本表里查到它的形状指纹（`similar_skills.py --like relic.x`）。
+做遗物时必须能在本表里查到它的形状指纹（`similar_skills.py --like relic.x`）。
+M7 票 27 起多出 **NPC 技能**这一档（`carrier == NPC`，四条 `npc.*`，只授敌方座位）：
+它们同样是"作者要写的技能"，故同在这张缺省面里（`similar_skills.py --like npc.fury`）。
 """
 
 from __future__ import annotations

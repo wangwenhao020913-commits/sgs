@@ -10841,7 +10841,8 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # sp1-sunshangxiang-maliang 票 01：马良【自书】【应援】⇒ 225。
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（`relic.*`）⇒ 236 → 242。
-    assert len(expected_skills) == 242, f"CATALOG 技能数变了：{len(expected_skills)}"
+    # m7-script-mode 票 27：NPC 技能四条（`npc.*`）⇒ 242 → 246。
+    assert len(expected_skills) == 246, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
