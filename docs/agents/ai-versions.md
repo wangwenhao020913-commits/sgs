@@ -56,7 +56,8 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
 
 顶层键：`schema` / `tier` / `candidate` / `baseline` / `anchor` / `engine_ref` /
 `deck_profile` / `players` / `mode` / `seed_batch` / `design` / `vs_baseline` / `vs_anchor` /
-`decision_diff` / `cases` / `miss_rate` / `verdict` / `errors`；`seal` 另加 `versions`。
+`decision_diff` / `cases` / `miss_rate` / `verdict` / `errors` / `capability_gaps`；
+`seal` 另加 `versions`。
 
 - `candidate` / `baseline` / `anchor` = `{ref, heuristic_sha256}`；`candidate.ref` 是**解析后的
   提交 sha**（种子批的派生输入就是它），基线 / 原点用 tag 名。
@@ -81,6 +82,15 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
   批量档只有决策侧车投影（`kind` / `legal_count` / `action`）⇒ `unfilled_composite` 写
   `null`（"未测"）；分母为 0 的口径也写 `null`，不写 0.0。
 - `errors` = 对局报错数（聚合；封印批不点名）。`errors > 0` ⇒ CLI 退出码 1。
+  **只数真正的崩溃**：旧版本对"它打 tag 之后才新增的 `QueryKind`"由加载侧兼容层回一个
+  合法放弃（票 36），不进 `errors`。
+- `capability_gaps` = `{policy, total, by_version}`（票 36）：`policy` 恒为 `legal_decline`；
+  `by_version[ref]` = `{kinds, queries}`——`kinds` 是这个版本的选路表**缺**的询问类型
+  （版本级、静态，按 `QueryKind` 枚举序），`queries` 是本次各臂里兼容层**实际替它放弃**的
+  次数（跨臂累加；从决策侧车的 `kind` 数，`--workers 1..8` 同口径）；`total` = 全部版本
+  的放弃次数之和。选路表完整的版本（当前 HEAD）`kinds` / `queries` 都是空。它**不改**
+  退出码，但读 diff / 胜率时必须知道基线被替答过几次。CLI 摘要行以 `gaps=<total>` 标出，
+  非 0 时另起一行按版本 / 类型展开。
 - `quick` 也出 `decision_diff`；给了 `--predicted-kind` 时同样填 `diff_attributed`，但不测
   胜负（`vs_baseline` / `vs_anchor` / `non_inferior` / `anchor_non_inferior` 恒 `null`）。
 - `seal` 的逐版本读数在 `versions[]`（`ref` / `commit` / `heuristic_sha256` / `deals` /
@@ -126,6 +136,14 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
    让"以为在打旧版"静默成立）。
 
 冻结基线必须**仍可加载**：`sgs.effects` / `sgs.state` 的公开面若改，旧版加载失败即契约违约。
+
+**未知询问类型（票 36）**：副本的选路表是**它那个提交的** `_SCORERS`；引擎后来新增的
+`QueryKind` 它没有那一行。三条硬断言一条不动——兼容层只在**加载侧**
+（`tools/ai_eval/compat.py`）：`capability_gap_kinds(module)` 读出缺哪几类，
+`fail_closed_player_class` 把这些类型的应答换成**该询问下合法**的"放弃 / 空选择"（答案
+只从引擎枚举的 `query.legal_actions` 里挑、过 `parse_action`，不自己拼）。选路表完整的
+版本零包装（`player_class is raw_player_class`）；这类回答记 `capability_gaps`、**不**进
+`errors`。副本字节 / 副本路径 / `__file__` 三条契约与包装无关。
 
 ## 6 · 台账
 

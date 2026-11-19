@@ -7,6 +7,10 @@
   但结论不可用）；
 - **2**：参数、规格、版本加载错误（缺 tag 是这一类——**没有**"静默打回 HEAD"）。
 
+``errors`` 只数**真正的崩溃**（票 36）：旧版本对"它打 tag 之后才新增的 ``QueryKind``"
+走兼容层的**合法放弃**，记进 ``capability_gaps``，既不进 ``errors``、也不改退出码；
+摘要行用 ``gaps=N`` 标出，非 0 时另起一行按版本 / 类型展开（见 `ai_eval.compat`）。
+
 摘要恒走 stderr（JSON 走 ``--out``，省略时走 stdout）：``seal`` 的摘要同样只有聚合
 （批名 / 摘要 / 逐版本胜率），**不打印逐种子**（spec §2.4 B）。
 
@@ -143,13 +147,28 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
+def _capability_gap_lines(result: dict[str, Any]) -> list[str]:
+    """``gaps > 0`` 时补一行按版本 / 类型展开（票 36；不进 ``errors`` 的那本账）。"""
+    gaps = result["capability_gaps"]
+    if not gaps["total"]:
+        return []
+    parts = []
+    for ref, entry in gaps["by_version"].items():
+        if not entry["queries"]:
+            continue
+        detail = " ".join(f"{kind}={count}" for kind, count in sorted(entry["queries"].items()))
+        parts.append(f"{ref}[{detail}]")
+    return ["capability gaps（兼容层合法放弃，不计入 errors）：" + " ".join(parts)]
+
+
 def _summary(result: dict[str, Any]) -> list[str]:
     """摘要行（恒走 stderr）；封印批也只有聚合，逐种子一律不出现。"""
     tier = result["tier"]
     seed_batch = result["seed_batch"]
+    gaps = result["capability_gaps"]
     head = (
         f"{tier} batch={seed_batch['sha256'][:12]} deals={seed_batch['deals']} "
-        f"errors={result['errors']}"
+        f"errors={result['errors']} gaps={gaps['total']}"
     )
     if tier == "quick":
         diff = result["decision_diff"]
@@ -157,6 +176,7 @@ def _summary(result: dict[str, Any]) -> list[str]:
         return [
             f"{head} differing={diff['deals_differing']}/{seed_batch['deals']} "
             f"kinds={diff['first_divergence_by_kind']}",
+            *_capability_gap_lines(result),
             f"candidate={result['candidate']['ref'][:12]} "
             f"baseline={result['baseline']['ref']} "
             f"cases={cases['passed']}/{cases['total']} "
@@ -170,6 +190,7 @@ def _summary(result: dict[str, Any]) -> list[str]:
         return [
             f"{head} differing={diff['deals_differing']}/{seed_batch['deals']} "
             f"kinds={diff['first_divergence_by_kind']}",
+            *_capability_gap_lines(result),
             f"vs_baseline candidate={baseline['win_rate_candidate']} "
             f"baseline={baseline['win_rate_baseline']} diff={baseline['diff']} "
             f"ci95={baseline['ci95']}",
@@ -181,8 +202,9 @@ def _summary(result: dict[str, Any]) -> list[str]:
         ]
     lines = [
         f"seal batch={seed_batch.get('batch')} sha256={seed_batch['sha256'][:12]} "
-        f"deals={seed_batch['deals']} errors={result['errors']}"
+        f"deals={seed_batch['deals']} errors={result['errors']} gaps={gaps['total']}"
     ]
+    lines.extend(_capability_gap_lines(result))
     for entry in result["versions"]:
         lines.append(
             f"version={entry['ref']} commit={entry['commit'][:12]} "
