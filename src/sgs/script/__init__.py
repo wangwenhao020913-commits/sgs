@@ -4,7 +4,7 @@
 ``time/datetime/uuid/threading/...``，见 ``tests/test_source_discipline.py``）。
 文件的读写与 HTTP 端点住 ``tools/sgs_web/``（票 19），存档序列化住票 18。
 
-八个模块：
+九个模块：
 
 - :mod:`sgs.script.state` —— :class:`RunState` 与 ``pending.spec`` 的五种形状（纯数据）；
 - :mod:`sgs.script.board` —— 棋盘纯函数：入口 / 出口 / ``available_next`` / 大节推进，
@@ -14,7 +14,8 @@
 - :mod:`sgs.script.lookup` —— 剧本快照的只读查找（缺项 ⇒ ``ScriptError``）；
 - :mod:`sgs.script.rewards` —— 奖励的算术：累加 / 轮次 / 候选 / 价格；
 - :mod:`sgs.script.compile` —— ``Room → PveConfig`` 编译 + **进入节点 = 一次抽完**；
-- :mod:`sgs.script.settle` —— 结算：奖励发落 / Boss 的固定顺序 / 失败三态。
+- :mod:`sgs.script.settle` —— 结算：奖励发落 / Boss 的固定顺序 / 失败三态；
+- :mod:`sgs.script.save` —— 存档：``RunState`` ↔ JSON 文本、三段门、``.bak`` 恢复语义。
 
 公开接缝只在此再导出：外部只经 ``sgs.script`` 取名字，不 import 本子包的深层路径
 （``tests/test_scaffold.py`` 的跨子包深导扫描兜底）。
@@ -99,6 +100,19 @@ from .rng import (
     unknown_stream,
     weighted_sample,
 )
+from .save import (
+    KNOWN_SCRIPT_MODE_VERSIONS,
+    SCRIPT_MODE_VERSION,
+    SaveStatus,
+    SaveView,
+    ScriptSave,
+    dump_save,
+    inspect_save,
+    load_save,
+    revision_for_write,
+    stage_save,
+    validate_save,
+)
 from .settle import (
     CoinsGained,
     CoinsLost,
@@ -148,9 +162,11 @@ __all__ = (
     "BOSS_PICK_SIZE",
     "EMPTY_POOL_COINS",
     "EQUIPPED_SLOT_COUNT",
+    "KNOWN_SCRIPT_MODE_VERSIONS",
     "MAX_RELICS",
     "MAX_ROSTER_CANDIDATES",
     "REWARD_OPTION_COUNT",
+    "SCRIPT_MODE_VERSION",
     "SCRIPT_SUBSTREAMS",
     "SEED_LIMIT",
     "SHOP_RELIC_OFFERS",
@@ -177,7 +193,10 @@ __all__ = (
     "RevealedSpec",
     "RunEnded",
     "RunState",
+    "SaveStatus",
+    "SaveView",
     "ScriptError",
+    "ScriptSave",
     "SettleEvent",
     "SettleOrder",
     "SettleResult",
@@ -196,6 +215,7 @@ __all__ = (
     "draw_boss_relic",
     "draw_candidates",
     "draw_stream",
+    "dump_save",
     "enemy_reward",
     "enemy_stream",
     "enter_node",
@@ -208,8 +228,10 @@ __all__ = (
     "global_skill_of",
     "held_skills",
     "hero_seat",
+    "inspect_save",
     "layer_cleared",
     "layer_of",
+    "load_save",
     "next_candidates",
     "next_layer_index",
     "node_of",
@@ -218,6 +240,7 @@ __all__ = (
     "progress_key",
     "requirement_met",
     "resolve_scaling",
+    "revision_for_write",
     "reward_stream",
     "room_of",
     "roster_stream",
@@ -227,9 +250,11 @@ __all__ = (
     "shop_stock",
     "shop_stream",
     "skill_pool_of",
+    "stage_save",
     "skill_price",
     "template_of",
     "uniform_sample",
     "unknown_stream",
+    "validate_save",
     "weighted_sample",
 )

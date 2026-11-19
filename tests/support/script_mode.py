@@ -96,6 +96,12 @@ HERO = "jie_liubei"
 LAYER_ID = "l1"
 """主线大节的 id（进度键的前缀）。"""
 
+SAVE_SCRIPT_ID = "save"
+"""存档票用的剧本 id（与 :func:`save_library` 的快照逐字对齐）。"""
+
+SAVE_LAYER_ID = "s1"
+"""存档票用的大节 id（进度键的前缀）。"""
+
 
 def edge(source: str, target: str, requires: Requirement | None = None) -> Edge:
     """一条边（``from`` 是 Python 关键字，故走别名）。"""
@@ -470,6 +476,67 @@ def plainboss_layer() -> Layer:
             Node(id="boss", row=0, col=1, room="room.boss.plain"),
         ),
         edges=(edge("entry", "boss"),),
+    )
+
+
+def save_layer() -> Layer:
+    """**存档票（票 18）用的大节**：一个入口、三种可进房间、一个出口。
+
+    ``probe_layer`` 有一条同列的边（``late -> boss``），过不了票 14 的库校验器的
+    ``script_library.edge_not_forward``；存档快照必须**整份**过那道门（票 18 的语义段复用
+    库校验器），故这里另立一条合法的层：四类房间都能从入口一步进去，方便把
+    ``pending.spec`` 的四种形状各摆一次。
+
+    ::
+
+        entry(0,0) ─┬─> event(0,1) ─┐
+                    ├─> shop(1,1) ─┼─> exit(0,2)
+                    └─> unknown(2,1)┘
+    """
+    return Layer(
+        id=SAVE_LAYER_ID,
+        name="存档大节",
+        grid=Grid(rows=3, cols=3),
+        nodes=(
+            Node(id="entry", row=0, col=0, room="room.story"),
+            Node(id="event", row=0, col=1, room="room.event"),
+            Node(id="shop", row=1, col=1, room="room.shop"),
+            Node(id="unknown", row=2, col=1, room="room.unknown.battle"),
+            Node(id="exit", row=0, col=2, room="room.draw"),
+        ),
+        edges=(
+            edge("entry", "event"),
+            edge("entry", "shop"),
+            edge("entry", "unknown"),
+            edge("event", "exit"),
+            edge("shop", "exit"),
+            edge("unknown", "exit"),
+        ),
+    )
+
+
+def save_script() -> Script:
+    """存档票用的剧本（一条合法大节；``id`` 与 :func:`run_state` 的 ``script_id`` 分开）。"""
+    return Script(
+        id=SAVE_SCRIPT_ID,
+        name="存档剧本",
+        version=1,
+        roster=("nengren", "jie_liubei", "jie_guanyu"),
+        layers=(save_layer(),),
+    )
+
+
+def save_library() -> ScriptLibrary:
+    """**过得了**票 14 整份校验器的快照（共享表复用主线那一批，只换剧本）。"""
+    return ScriptLibrary(
+        script_schema_version=1,
+        scripts=(save_script(),),
+        rooms=rooms(),
+        templates=templates(),
+        skill_pools=skill_pools(),
+        events=events(),
+        event_pools=event_pools(),
+        global_skills=global_skills(),
     )
 
 
