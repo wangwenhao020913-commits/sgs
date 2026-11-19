@@ -1267,6 +1267,17 @@ function scriptBattleTableSync(view) {
   }
   const back = $("btn-t-pve-return");
   if (back) back.hidden = !scriptBattleFinished(view);
+  // 战斗中退出（用户故事 17）：只有"从棋盘进来的那一场"且还没终局时出现——终局之后
+  // 出口是「回棋盘结算」，两个键不同时占版面。
+  const exit = $("btn-t-pve-exit");
+  if (exit) {
+    const inBattle = Boolean(
+      state.script.battle
+      && state.script.battle.sessionId
+      && state.script.battle.sessionId === state.sessionId,
+    );
+    exit.hidden = !inBattle || scriptBattleFinished(view);
+  }
   return null;
 }
 
@@ -1279,6 +1290,9 @@ function wireScriptLoadout() {
   on("btn-script-loadout-discard", () => scriptLoadoutDiscard());
   // M7 票 23：牌桌上那个"回棋盘结算"的出口（显示态由 `scriptBattleTableSync` 维护）。
   on("btn-t-pve-return", () => scriptBattleReturnToBoard());
+  // 「退出战斗」与棋盘的「离开棋局」是**同一条**退出路径（票 20 的确认框 + 一条 suspend）：
+  // 入口在牌桌上（战斗中唯一可见的那一个），收尾动作（回开局页 / 摘会话）住在同一个函数里。
+  on("btn-t-pve-exit", () => (typeof scriptBoardExit === "function" ? scriptBoardExit() : null));
   scriptLoadoutSync();
   return null;
 }

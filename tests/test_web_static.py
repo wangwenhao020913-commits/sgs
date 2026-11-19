@@ -9974,13 +9974,14 @@ def test_the_battle_smoke_library_is_a_valid_script_library() -> None:
 
 
 def test_the_pve_display_slots_live_inside_the_identity_table() -> None:
-    """三处显示 + 遗物栏是**牌桌表面**的增量，不是第四个战斗 view。
+    """三处显示 + 遗物栏 + 战斗中的退出入口是**牌桌表面**的增量，不是第四个战斗 view。
 
     - 结构：新节点全部住在 `#view-table` 与 `#view-replay` 之间那一段里（牌桌页内部），
       `VIEW_NAMES` 仍是四页、没有第二个战斗页；
-    - 缺省收起：三个节点都带 `hidden`，显隐只由服务端载荷决定（`table.js:renderSelfSeat`
+    - 缺省收起：四个节点都带 `hidden`，显隐只由服务端载荷决定（`table.js:renderSelfSeat`
       的调用点 + `script-loadout.js:scriptBattleTableSync`），不做前端模式判断；
-    - 文案只住一处：副本全局技能标签的拼法只有 `seat-view.js:pveGlobalText` 一份。
+    - 文案只住一处：副本全局技能标签的拼法只有 `seat-view.js:pveGlobalText` 一份；
+      退出确认框与 `suspend` 只有票 20 那一份（「退出战斗」与「离开棋局」调同一个入口）。
     """
     html = INDEX_HTML.read_text(encoding="utf-8")
     table_start = html.index('id="view-table"')
@@ -9991,6 +9992,7 @@ def test_the_pve_display_slots_live_inside_the_identity_table() -> None:
         ('id="t-self-global"', "副本全局技能标签"),
         ('id="t-self-relics"', "只读遗物栏"),
         ('id="btn-t-pve-return"', "回棋盘结算的出口"),
+        ('id="btn-t-pve-exit"', "战斗中的退出入口"),
     ):
         assert needle in inside, f"牌桌视图里缺少{label}的挂载点：{needle}"
         tag = inside[inside.index(needle) - 120 : inside.index(needle) + 200]

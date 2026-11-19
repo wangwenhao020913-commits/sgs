@@ -32079,8 +32079,9 @@ check("M7-25ah 收尾：用户库撤掉后编辑器回到内置库（source = bu
 await ui.scriptLoadSave();
 check("M7-29a 起手干净：无用户库、无存档（进料 = 内置「讨伐黄巾军」）",
   scriptStatus() === "missing" && !existsSync(`${RUNS_DIR}/script-library.json`)
-  && !existsSync(SCRIPT_SAVE_FILE),
-  `status=${scriptStatus()} 用户库=${existsSync(`${RUNS_DIR}/script-library.json`)}`);
+  && !existsSync(SCRIPT_SAVE_FILE) && $("btn-t-pve-exit").hidden === true,
+  `status=${scriptStatus()} 用户库=${existsSync(`${RUNS_DIR}/script-library.json`)}`
+    + ` 退出键收起=${$("btn-t-pve-exit").hidden}`);
 
 // ---- ① 开局页：新剧本 → 清单 → 3 选 1 ----
 const builtinRosterMark = calls.length;
@@ -32160,17 +32161,27 @@ check("M7-29h 内置剧情战里对手不泄露：座位只有「手牌：N」�
 
 // ---- ③ 战斗中退出 → 继续剧本 → 同一份棋盘 + 待结算战斗不重抽 ----
 const builtinRevision = ui.state.script.board.revision;
-ui.show("view-script-board");
+// 战斗中的退出入口在**牌桌自己**那一面上（棋盘页此时不可见）：牌桌「退出战斗」→ 票 20 的
+// 同一个确认框 → 一条 suspend。这正是用户故事 17（战斗中退出后这一场要重打）的实机路径。
+const battleExit = $("btn-t-pve-exit");
+const battleExitVisible = $("view-table").hidden === false && battleExit.hidden === false;
+await scriptClick(battleExit);
+const battleExitDialog = $("script-confirm").hidden === false
+  && $("script-confirm-text").textContent === "退出后这场战斗要重打；棋盘进度已保存。"
+  && !!scriptConfirmAction("确认");
 const builtinExitMark = calls.length;
-await scriptClick($("btn-script-board-exit"));
 await scriptClick(scriptConfirmAction("确认"));
 const suspendAfterBattle = calls.slice(builtinExitMark).filter(
   (call) => call.method === "POST" && call.path.endsWith("/suspend"));
-check("M7-29i 棋盘「离开棋局」→ 确认 = 一条 suspend（战斗中退出 ⇒ 这一场作废、进度已保存）",
-  suspendAfterBattle.length === 1
+check("M7-29i 战斗中退出：牌桌「退出战斗」→ 同一确认框 → 一条 suspend（这一场作废、进度已保存）",
+  battleExitVisible && battleExitDialog
+  && suspendAfterBattle.length === 1
   && suspendAfterBattle[0].path === `/api/script-runs/${builtinBoard.run_id}/suspend`
-  && $("btn-script-continue").disabled === false,
-  `suspend=${suspendAfterBattle.length} continue.disabled=${$("btn-script-continue").disabled}`);
+  && $("btn-script-continue").disabled === false
+  && ui.state.sessionId === null && ui.state.script.battle === null,
+  `可见=${battleExitVisible} 框=${battleExitDialog} suspend=${suspendAfterBattle.length}`
+    + ` session=${ui.state.sessionId} battle=${JSON.stringify(ui.state.script.battle)}`
+    + ` continue.disabled=${$("btn-script-continue").disabled}`);
 
 await scriptClick($("btn-script-continue"));
 const builtinResumed = (ui.state.script || {}).board;

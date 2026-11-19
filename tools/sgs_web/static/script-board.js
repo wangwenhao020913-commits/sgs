@@ -863,9 +863,15 @@ function scriptBoardUnhover() {
 
 /* ------------------------------------------------------------ 离开棋局 */
 
-/** 「离开棋局」：走票 20 的退出确认框，确认后 suspend 并回开局页（进度已保存）。 */
+/** 「离开棋局」/ 牌桌「退出战斗」：走票 20 的退出确认框，确认后 suspend 并回开局页（进度已保存）。
+ *
+ * 两个入口共用这一份收尾：`suspend` 会**作废**那场战斗会话（票 04 §4），故内存里的牌桌
+ * 会话也要一起摘掉——否则顶栏「牌桌」仍可点进一个已 404 的会话。
+ */
 function scriptBoardExit() {
   return scriptExitConfirm(() => {
+    state.sessionId = null;
+    state.script.battle = null;
     show("lobby");
     scriptLoadSave();
   });

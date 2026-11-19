@@ -270,6 +270,10 @@
           <!-- 一场剧本战斗打完的出口：回棋盘走既有的结算流程（票 22 的三选一 / 遗物弹窗）。
                只在"从棋盘进来的那一场"且服务端说终局时出现（`table.js:renderSelfSeat`）。 -->
           <button id="btn-t-pve-return" type="button" class="ghost pve-return" hidden>回棋盘结算</button>
+          <!-- 战斗中退出（spec 用户故事 17 / "随时可退出"）：只调 `suspend`（这一场作废、
+               棋盘进度已保存），确认框复用票 20 的同一个模态壳与那句文案。判据同样是服务端
+               事实（`state.script.battle` 是"从棋盘进来的那一场"），身份局不出现。 -->
+          <button id="btn-t-pve-exit" type="button" class="ghost pve-return" hidden>退出战斗</button>
           <div class="seat-foot">
             <span>手牌：<b id="t-self-hand">0/0</b></span>
             <span>座位 <b id="t-self-seatno">0</b></span>
