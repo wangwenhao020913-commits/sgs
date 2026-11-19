@@ -31546,4 +31546,510 @@ check("M7-23m 收尾干净：无档、用户库撤掉、牌桌会话与棋盘体
   && ui.state.script.battle === null,
   `status=${scriptStatus()} session=${ui.state.sessionId} board=${ui.state.script.board}`);
 
+/* ============ M7 票 25：编辑器（实体列表 / 拖放 / 画边 / 校验面板）============
+ *
+ * 判据分五半：
+ *  ① **一屏 + 实体列表**：九类实体都在左栏、数量与真库逐表相等；剧本页组装
+ *     大节 → 节点 → 房间；
+ *  ② **大节页**：网格长宽可设、拖放节点落 `(row, col)`、画边 / 改条件 / 解除连线
+ *     与边列表**同时**同步（画的是渲染器那一份，不是第二份画法）；
+ *  ③ **每类实体的操作**：新建 / 编辑 / 另存为副本 / 重命名 / 删除；
+ *  ④ **D30 删除交互**：归属项（节点连带删连线 / 大节从剧本摘掉）**成功**；共享引用
+ *     删除列引用点 + 「仍然删除」，删完校验面板**立刻**红（红字带 `loc`）；
+ *  ⑤ **共用渲染器**：编辑器画的那一屏也走 `scriptGraphRender`（画次 +1），
+ *     且同一批节点**零状态类**（作者视角不画玩家状态色）。
+ *
+ * 进料是 `tests/support/fixtures/script-editor-library.json`（**真**库校验器先过一道，见
+ * `tests/test_web_static.py::test_the_editor_smoke_library_is_a_valid_script_library`）。
+ * 所有写操作都打到**真端点**；界面只从 `state.script.editor.library`（服务端落盘后的整库）
+ * 读数——断言不看前端另算的镜像。
+ */
+const SCRIPT_EDITOR_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_EDITOR_LIBRARY,
+  readFileSync("tests/support/fixtures/script-editor-library.json", "utf8"),
+);
+
+const ed = () => (ui.state.script || {}).editor || {};
+const edLibrary = () => ed().library || {};
+const edScript = () => (edLibrary().scripts || [])[0] || {};
+const edLayerOf = (id) => (edScript().layers || []).find((layer) => layer.id === id) || null;
+const edKinds = () => byClass($("script-editor-kinds"), "script-editor-kind");
+const edKind = (kind) => edKinds()
+  .find((node) => node.getAttribute("data-kind") === kind) || null;
+const edRows = () => byClass($("script-editor-list"), "script-editor-row");
+const edRow = (id) => edRows()
+  .find((node) => node.getAttribute("data-id") === id) || null;
+const edSet = (id, value) => {
+  const node = $(id);
+  if (node) node.value = String(value);
+  return node;
+};
+const edGraph = () => $("script-editor-graph");
+const edNodeCell = (id) => graphCells(edGraph())
+  .find((cell) => cell.getAttribute("data-node-id") === id) || null;
+const edDropCells = () => byClass(edGraph(), "script-editor-cell");
+const edDropCell = (row, col) => edDropCells().find(
+  (node) => node.getAttribute("data-row") === String(row)
+    && node.getAttribute("data-col") === String(col)) || null;
+const edEdgeRows = () => byClass($("script-editor-edges"), "script-editor-edge");
+const edEdgeRow = (from, to) => edEdgeRows().find(
+  (node) => node.getAttribute("data-from") === from && node.getAttribute("data-to") === to) || null;
+const edErrorRows = () => byClass($("script-editor-errors"), "script-editor-error");
+const edReferenceRows = () => byClass($("script-confirm-body"), "script-editor-reference");
+const edConfirmLabels = () => Array.from($("script-confirm-actions").children)
+  .map((node) => String(node.textContent).trim());
+const edClick = async (id) => scriptClick($(id));
+const edOpenKind = async (kind) => scriptClick(edKind(kind));
+/** 拖一个节点到 `(row, col)` 格：dragstart 在节点按钮上、drop 在网格命中格上。 */
+const edDragNode = async (nodeId, row, col) => {
+  const button = cellButton(edNodeCell(nodeId));
+  const started = button ? (button.listeners.dragstart || []).length : 0;
+  for (const fn of (button ? button.listeners.dragstart || [] : [])) {
+    fn({ preventDefault() {}, dataTransfer: { setData() {} } });
+  }
+  const target = edDropCell(row, col);
+  const dropped = target ? (target.listeners.drop || []).length : 0;
+  for (const fn of (target ? target.listeners.drop || [] : [])) {
+    await fn({ preventDefault() {} });
+  }
+  return started + dropped;
+};
+const edCall = (from, method, suffix) => calls.slice(from).filter(
+  (call) => call.method === method && call.path.includes(suffix));
+
+// ---- ① 进编辑器：一次读库、一屏、九类实体 ----
+const edShowOk = typeof ui.scriptEditorShow === "function";
+await scriptCall("scriptEditorShow");
+const edLoadCalls = edCall(0, "GET", "/api/script-library");
+check("M7-25a 进编辑器 = 一次 GET /api/script-library：整库 / revision / 校验面板都收下、视图可见",
+  edShowOk && !!ed().library && ed().source === "user" && !!ed().revision
+  && $("view-script-editor").hidden === false
+  && Array.isArray(ed().errors) && !!$("script-editor-errors")
+  && edLoadCalls.length === 1 && edLoadCalls[0].path === "/api/script-library",
+  `show=${edShowOk} source=${ed().source} revision=${String(ed().revision).slice(0, 12)}`
+    + ` GET=${JSON.stringify(edLoadCalls.map((call) => call.path))}`);
+
+// 位置纪律 + 标签白名单（与票 20 / 票 21 同一条判据）。
+{
+  const tableStart = html.indexOf('id="view-table"');
+  const replayStart = html.indexOf('id="view-replay"');
+  const boardStart = html.indexOf('id="view-script-board"');
+  const editorStart = html.indexOf('id="view-script-editor"');
+  const between = html.slice(tableStart, replayStart);
+  const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+  const section = html.slice(editorStart, html.indexOf("<script", editorStart));
+  const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
+    .map((match) => match[1].toLowerCase());
+  check("M7-25b 编辑器在棋盘之后（两处字符串切片锚点之外）、静态节点只用垫片认识的标签",
+    editorStart > boardStart && between.indexOf("script-editor") < 0
+    && tags.length > 0 && tags.every((tag) => allowedTags.has(tag))
+    && !section.includes("<img"),
+    `editor=${editorStart} board=${boardStart} 中间出现 script-editor=${between.indexOf("script-editor")}`);
+}
+check("M7-25c 左栏九类实体（剧本 / 大节 / 节点 / 房间 / 敌人模板 / 技能池 / 事件 / 事件池 / 全局技能）",
+  setEquals(edKinds().map((node) => node.getAttribute("data-kind")),
+    ["scripts", "layers", "nodes", "rooms", "templates", "skill_pools", "events",
+      "event_pools", "global_skills"])
+  && edKinds().length === 9,
+  `类=${JSON.stringify(edKinds().map((node) => node.getAttribute("data-kind")))}`);
+
+// 每类实体的列表条数 = 真库那张表（大节 / 节点按当前剧本 / 大节；这里先选 L1）。
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+const edCounts = {};
+for (const kind of ["scripts", "layers", "nodes", "rooms", "templates", "skill_pools",
+  "events", "event_pools", "global_skills"]) {
+  await edOpenKind(kind);
+  edCounts[kind] = edRows().length;
+}
+check("M7-25d 九类实体的列表条数 = 服务端那张表（不是前端另算的）",
+  edCounts.scripts === 1 && edCounts.layers === 2 && edCounts.nodes === 10
+  && edCounts.rooms === 7 && edCounts.templates === 4 && edCounts.skill_pools === 2
+  && edCounts.events === 1 && edCounts.event_pools === 1 && edCounts.global_skills === 1,
+  JSON.stringify(edCounts));
+
+// 剧本页：组装 大节 → 节点 → 房间（房间名走引用解析，不是 id 原样）。
+await edOpenKind("scripts");
+await scriptClick(edRow("editorprobe"));
+const treeLayers = byClass($("script-editor-tree"), "script-editor-tree-layer");
+const treeNodes = byClass($("script-editor-tree"), "script-editor-tree-node");
+const treeNodeText = treeNodes.map((node) => String(node.textContent)).join(" | ");
+check("M7-25e 剧本页组装 大节 → 节点 → 房间（2 个大节 / 13 个节点，房间写名字）",
+  $("script-editor-tree").hidden === false && treeLayers.length === 2 && treeNodes.length === 13
+  && treeNodeText.includes("残破的村庄") && treeNodeText.includes("广宗城下")
+  && !treeNodeText.includes("room.event"),
+  `大节=${treeLayers.length} 节点=${treeNodes.length}`);
+
+// ---- ② 大节页：网格拖放 + 画边 + 条件 + 解除（画面与边列表同步）----
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+const edDraw0 = ui.scriptGraphDrawCount();
+check("M7-25f 大节页一屏：网格 10 个节点 / 17 条连线，同一批节点**零状态类**（作者视角不画状态色）",
+  $("script-editor-layer").hidden === false && graphCells(edGraph()).length === 10
+  && edgePoints(edGraph()).length === 17
+  && graphCells(edGraph()).every((cell) => {
+    const button = cellButton(cell);
+    return button && [...button.classList.set].every((name) => !name.startsWith("st-"));
+  })
+  && edDraw0 > 0,
+  `格=${graphCells(edGraph()).length} 线=${edgePoints(edGraph()).length}`);
+
+const edDragMark = calls.length;
+const edDragDraw = ui.scriptGraphDrawCount();
+// a2 是入口（列 0），拖到空格 (1, 0) 仍满足「边只许往右」——拖完校验面板必须还是空的
+// （拖一个会造出回边的地方当然也能存，但那会让后面的「面板干净」断言误报）。
+const edDragHandlers = await edDragNode("a2", 1, 0);
+const edDragPuts = calls.slice(edDragMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/nodes/a2"));
+const edA2 = (edLayerOf("L1").nodes || []).find((node) => node.id === "a2") || {};
+check("M7-25g 拖放节点：坐标换算落在前端（dragstart + drop 两个处理器）、一条 PUT 改 (row, col)",
+  edDragHandlers === 2 && edDragPuts.length === 1
+  && edA2.row === 1 && edA2.col === 0
+  && (edDragPuts[0].body.entity || {}).row === 1
+  && (edDragPuts[0].body.entity || {}).col === 0
+  && ui.scriptGraphDrawCount() > edDragDraw,
+  `处理器=${edDragHandlers} PUT=${JSON.stringify(edDragPuts.map((call) => call.body.entity))}`);
+
+const edGridMark = calls.length;
+edSet("script-editor-grid-rows", 4);
+edSet("script-editor-grid-cols", 5);
+await edClick("btn-script-editor-grid-save");
+const edGridPuts = calls.slice(edGridMark).filter(
+  (call) => call.method === "PUT" && call.path.includes("/layers/L1"));
+check("M7-25h 网格长宽可设：一条 PUT 改 layer.grid，画面按新网格重画",
+  edGridPuts.length === 1
+  && JSON.stringify((edGridPuts[0].body.entity || {}).grid) === JSON.stringify({ rows: 4, cols: 5 })
+  && !!edLayerOf("L1") && edLayerOf("L1").grid.rows === 4 && edLayerOf("L1").grid.cols === 5
+  && graphCells(edGraph()).length === 10,
+  `PUT=${JSON.stringify(edGridPuts.map((call) => call.body.entity && call.body.entity.grid))}`);
+
+const edEdgeMark = calls.length;
+setSelect("script-editor-edge-from", "a1");
+setSelect("script-editor-edge-to", "d1");
+await edClick("btn-script-editor-edge-draw");
+const edEdgePost = calls.slice(edEdgeMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/layers/L1/edges"));
+check("M7-25i 画边 = 一条 POST（from / to 走两个引用选择器），边列表与画面同时多一条",
+  edEdgePost.length === 1 && edEdgeRow("a1", "d1") !== null
+  && edgePoints(edGraph()).length === 18
+  && edEdgeRows().length === 18
+  && (edLayerOf("L1").edges || []).some((edge) => edge.from === "a1" && edge.to === "d1"),
+  `POST=${edEdgePost.length} 线=${edgePoints(edGraph()).length} 边列表=${edEdgeRows().length}`);
+
+const edRequireRow = edEdgeRow("a1", "d1");
+if (edRequireRow) {
+  const flags = byClass(edRequireRow, "script-editor-edge-flags")[0];
+  const notFlags = byClass(edRequireRow, "script-editor-edge-not-flags")[0];
+  if (flags) flags.value = "flag.boss_open";
+  if (notFlags) notFlags.value = "flag.sealed";
+}
+const edCondMark = calls.length;
+await scriptClick(byClass(edEdgeRow("a1", "d1") || $("script-editor-edges"),
+  "script-editor-edge-apply")[0]);
+const edCondPuts = calls.slice(edCondMark).filter(
+  (call) => call.method === "PUT" && call.path.includes("/edges/a1/d1"));
+const edCondEdge = (edLayerOf("L1").edges || []).find(
+  (edge) => edge.from === "a1" && edge.to === "d1") || {};
+check("M7-25j 设边条件（requires.flags / not_flags）：一条 PUT，边列表与 SVG 条件标签同步",
+  edCondPuts.length === 1
+  && JSON.stringify((edCondPuts[0].body.entity || {}).requires)
+    === JSON.stringify({ flags: ["flag.boss_open"], not_flags: ["flag.sealed"] })
+  && JSON.stringify(edCondEdge.requires) === JSON.stringify(
+    { flags: ["flag.boss_open"], not_flags: ["flag.sealed"] })
+  && String(edEdgeRow("a1", "d1").textContent).includes("flag.boss_open")
+  && String(byClass(edGraph(), "script-graph-edges")[0].innerHTML).includes("需要 flag.boss_open"),
+  `PUT=${edCondPuts.length} requires=${JSON.stringify(edCondEdge.requires)}`);
+
+const edUnlinkMark = calls.length;
+await scriptClick(byClass(edEdgeRow("a1", "d1") || $("script-editor-edges"),
+  "script-editor-edge-unlink")[0]);
+const edUnlinkDeletes = calls.slice(edUnlinkMark).filter(
+  (call) => call.method === "DELETE" && call.path.includes("/edges/a1/d1"));
+check("M7-25k 解除连线 = 一条 DELETE（只摘这一条）：边列表与画面同时少一条，别的边一条不动",
+  edUnlinkDeletes.length === 1
+  && edUnlinkDeletes[0].path.includes("expected_revision=")
+  && edEdgeRow("a1", "d1") === null && edgePoints(edGraph()).length === 17
+  && edEdgeRows().length === 17
+  && !(edLayerOf("L1").edges || []).some((edge) => edge.from === "a1" && edge.to === "d1"),
+  `DELETE=${edUnlinkDeletes.length} 线=${edgePoints(edGraph()).length}`);
+
+// ---- ③ 问号池（引用的房间选择器，禁选 unknown）----
+await edOpenKind("rooms");
+await scriptClick(edRow("room.unknown"));
+await edClick("btn-script-editor-edit");
+const edPoolRows = () => byClass($("script-editor-form"), "script-editor-pool-row");
+const edPoolSelect = (row) => byClass(row, "script-editor-pool-room")[0] || null;
+const edPoolOptions = edPoolRows().every((row) => {
+  const select = edPoolSelect(row);
+  return select && Array.from(select.children)
+    .map((option) => option.value).every((value) => value !== "room.unknown");
+});
+check("M7-25l 问号房的加权池：两项可编辑，房间选择器**禁选 unknown**（别把自己抽进去）",
+  edPoolRows().length === 2 && edPoolOptions
+  && Array.from(edPoolSelect(edPoolRows()[0]).children)
+    .some((option) => option.value === "room.story"),
+  `池项=${edPoolRows().length}`);
+
+const edPoolMark = calls.length;
+await edClick("btn-script-editor-pool-add");
+const edPoolRows2 = edPoolRows();
+const edNewPoolRow = edPoolRows2[edPoolRows2.length - 1];
+if (edNewPoolRow) {
+  const select = edPoolSelect(edNewPoolRow);
+  if (select) select.value = "room.story";
+  const weight = byClass(edNewPoolRow, "script-editor-pool-weight")[0];
+  if (weight) weight.value = "2";
+}
+await edClick("btn-script-editor-save");
+const edPoolPuts = calls.slice(edPoolMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/rooms/room.unknown"));
+const edUnknownRoom = (edLibrary().rooms || []).find((room) => room.id === "room.unknown") || {};
+check("M7-25m 加权池编辑落库：一条 PUT rooms/room.unknown（pool 三项，权重是界面上填的数）",
+  edPoolPuts.length === 1 && (edUnknownRoom.pool || []).length === 3
+  && (edUnknownRoom.pool || []).some((entry) => entry.room === "room.story" && entry.weight === 2),
+  `PUT=${edPoolPuts.length} pool=${JSON.stringify(edUnknownRoom.pool)}`);
+
+// ---- ③ 敌人模板：initial_skills 增删 + random{pool,count} 并列 + 固定对手提示 ----
+await edOpenKind("templates");
+await scriptClick(edRow("tpl.grunt"));
+await edClick("btn-script-editor-edit");
+const edSkillRows = () => byClass($("script-editor-form"), "script-editor-skill-row");
+check("M7-25n 模板编辑：initial_skills（增删）与 random{pool,count} 并列展示；随机池那一路写池名与区间",
+  edSkillRows().length === 0 && $("script-editor-field-random-pool").value === "pool.grunts"
+  && $("script-editor-field-random-min").value === "1"
+  && $("script-editor-field-random-max").value === "2"
+  && String($("script-editor-random-hint").textContent).includes("随机"),
+  `skills=${edSkillRows().length} pool=${$("script-editor-field-random-pool").value}`);
+
+const edSkillMark = calls.length;
+edSet("script-editor-field-skill", "hero.liubei.rende");
+await edClick("btn-script-editor-skill-add");
+check("M7-25o initial_skills 可增：添加按钮把技能 id 放进清单（此刻零请求）",
+  edSkillRows().length === 1 && calls.slice(edSkillMark).length === 0
+  && edSkillRows()[0].getAttribute("data-skill") === "hero.liubei.rende",
+  `行=${edSkillRows().length}`);
+await edClick("btn-script-editor-save");
+const edSkillPuts = calls.slice(edSkillMark).filter(
+  (call) => call.method === "PUT" && call.path.endsWith("/templates/tpl.grunt"));
+const edGrunt = (edLibrary().templates || []).find((item) => item.id === "tpl.grunt") || {};
+check("M7-25p initial_skills 增删落库：一条 PUT，服务端库里出现这条技能",
+  edSkillPuts.length === 1
+  && JSON.stringify((edSkillPuts[0].body.entity || {}).initial_skills)
+    === JSON.stringify(["hero.liubei.rende"])
+  && JSON.stringify(edGrunt.initial_skills) === JSON.stringify(["hero.liubei.rende"]),
+  `PUT=${edSkillPuts.length} skills=${JSON.stringify(edGrunt.initial_skills)}`);
+
+await scriptClick(byClass($("script-editor-form"), "script-editor-skill-remove")[0]);
+await edClick("btn-script-editor-save");
+check("M7-25q initial_skills 可删：删掉那一行再保存，服务端库里回到空清单",
+  edSkillRows().length === 0
+  && JSON.stringify(((edLibrary().templates || []).find((item) => item.id === "tpl.grunt") || {}).initial_skills)
+    === JSON.stringify([]),
+  `skills=${JSON.stringify(((edLibrary().templates || []).find((item) => item.id === "tpl.grunt") || {}).initial_skills)}`);
+
+await scriptClick(edRow("tpl.brute"));
+await edClick("btn-script-editor-edit");
+check("M7-25r 「固定对手 = count [0, 0]」在界面上说得出来（提示语含 count = [0, 0]）",
+  String($("script-editor-random-hint").textContent).includes("固定对手")
+  && String($("script-editor-random-hint").textContent).includes("count = [0, 0]")
+  && String($("script-editor-random-hint").textContent).includes("随机池"),
+  `提示="${$("script-editor-random-hint").textContent}"`);
+
+// ---- ③ 新建 / 另存为副本 / 重命名 / 删除 ----
+await edOpenKind("templates");
+await edClick("btn-script-editor-new");
+const edNewMark = calls.length;
+edSet("script-editor-field-id", "tpl.brand");
+edSet("script-editor-field-name", "新模板");
+edSet("script-editor-field-band", "early");
+edSet("script-editor-field-hp", "5");
+edSet("script-editor-field-hp_max", "5");
+setSelect("script-editor-field-random-pool", "pool.empty");
+await edClick("btn-script-editor-save");
+const edNewPosts = calls.slice(edNewMark).filter(
+  (call) => call.method === "POST" && call.path === "/api/script-library/templates");
+check("M7-25s 新建实体 = 一条 POST（id / 名称 / 档位 / 体力 / 随机池都按表单），列表随即多一行",
+  edNewPosts.length === 1 && (edNewPosts[0].body.entity || {}).id === "tpl.brand"
+  && (edNewPosts[0].body.entity || {}).hp === 5
+  && ((edLibrary().templates || []).some((item) => item.id === "tpl.brand"))
+  && edRow("tpl.brand") !== null,
+  `POST=${JSON.stringify(edNewPosts.map((call) => call.body.entity && call.body.entity.id))}`);
+
+await scriptClick(edRow("tpl.brand"));
+const edDelCancelMark = calls.length;
+await edClick("btn-script-editor-delete");
+const edCancelRefs = calls.slice(edDelCancelMark).filter(
+  (call) => call.method === "GET" && call.path.endsWith("/references"));
+check("M7-25t 删共享实体先查引用点（GET references）；无引用也走确认框，按钮是「取消」/「仍然删除」",
+  edCancelRefs.length === 1 && $("script-confirm").hidden === false
+  && $("script-confirm").getAttribute("data-dialog") === "editor-delete"
+  && setEquals(edConfirmLabels(), ["取消", "仍然删除"]),
+  `refs=${edCancelRefs.length} 按钮=${JSON.stringify(edConfirmLabels())}`);
+await scriptClick(scriptConfirmAction("取消"));
+check("M7-25u 确认框「取消」= 什么都不发生（零 DELETE、实体还在）",
+  $("script-confirm").hidden === true
+  && calls.slice(edDelCancelMark).every((call) => call.method !== "DELETE")
+  && (edLibrary().templates || []).some((item) => item.id === "tpl.brand"),
+  `DELETE=${calls.slice(edDelCancelMark).filter((call) => call.method === "DELETE").length}`);
+
+await edClick("btn-script-editor-delete");
+await scriptClick(scriptConfirmAction("仍然删除"));
+check("M7-25v 确认「仍然删除」= 一条 DELETE，实体真的从库里消失（不是只警告不删）",
+  calls.slice(edDelCancelMark).filter(
+    (call) => call.method === "DELETE" && call.path.includes("/templates/tpl.brand")).length === 1
+  && !(edLibrary().templates || []).some((item) => item.id === "tpl.brand")
+  && edRow("tpl.brand") === null,
+  `模板=${(edLibrary().templates || []).map((item) => item.id).join(",")}`);
+
+await scriptClick(edRow("tpl.ally"));
+const edCloneMark = calls.length;
+await edClick("btn-script-editor-clone");
+const edClonePosts = calls.slice(edCloneMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/templates/tpl.ally/clone"));
+const edAllyCopy = (edLibrary().templates || []).find((item) => item.id === "tpl.ally-copy") || null;
+check("M7-25w 另存为副本 = 一条 POST clone（服务端重写 id / 名称），原件与引用都不动",
+  edClonePosts.length === 1 && !!edAllyCopy && edAllyCopy.name === "义军什长（副本）"
+  && (((edLibrary().rooms || []).find((room) => room.id === "room.story") || {}).battle || {})
+    .allies[0].template === "tpl.ally",
+  `副本=${JSON.stringify(edAllyCopy && edAllyCopy.id)}`);
+
+await scriptClick(edRow("tpl.ally-copy"));
+await edClick("btn-script-editor-rename");
+edSet("script-editor-rename-id", "tpl.ally-copy2");
+edSet("script-editor-rename-name", "义军什长·改");
+const edRenameMark = calls.length;
+await edClick("btn-script-editor-rename-confirm");
+const edRenamePosts = calls.slice(edRenameMark).filter(
+  (call) => call.method === "POST" && call.path.endsWith("/templates/tpl.ally-copy/rename"));
+check("M7-25x 重命名 = 一条 POST rename（new_id + name），旧 id 消失、新 id 出现",
+  edRenamePosts.length === 1
+  && (edRenamePosts[0].body || {}).new_id === "tpl.ally-copy2"
+  && (edRenamePosts[0].body || {}).name === "义军什长·改"
+  && (edLibrary().templates || []).some((item) => item.id === "tpl.ally-copy2"
+    && item.name === "义军什长·改")
+  && !(edLibrary().templates || []).some((item) => item.id === "tpl.ally-copy"),
+  `POST=${edRenamePosts.length}`);
+
+// 重命名**保引用**：改名被战斗座位引用的模板，引用点一起改写、校验面板仍为空。
+await scriptClick(edRow("tpl.ally"));
+await edClick("btn-script-editor-rename");
+edSet("script-editor-rename-id", "tpl.ally2");
+edSet("script-editor-rename-name", "义军什长");
+await edClick("btn-script-editor-rename-confirm");
+const edAlly2 = (edLibrary().templates || []).find((item) => item.id === "tpl.ally2") || null;
+const edStoryRoom = (edLibrary().rooms || []).find((room) => room.id === "room.story") || {};
+check("M7-25y 重命名保引用：被战斗座位引用的模板改名后，座位的 template 跟着改写、校验面板仍空",
+  !!edAlly2 && (((edStoryRoom.battle || {}).allies || [])[0] || {}).template === "tpl.ally2"
+  && (ed().errors || []).length === 0 && edErrorRows().length === 0,
+  `allies=${JSON.stringify(((edStoryRoom.battle || {}).allies || []).map((seat) => seat.template))}`);
+
+// ---- ④ D30 删除交互 ----
+// ② 删一个有入边 / 出边的节点：确认框提示连带删几条，确认后节点与入 / 出边一起消失。
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+await edOpenKind("nodes");
+await scriptClick(edRow("b2"));
+await edClick("btn-script-editor-delete");
+check("M7-25z 删有入边 / 出边的节点：确认框提示「连带删掉 5 条连线」，没有「还被引用所以不能删」",
+  $("script-confirm").hidden === false
+  && String($("script-confirm-text").textContent).includes("连带删掉 5 条连线")
+  && String($("script-confirm-text").textContent).includes("节点")
+  && !String($("script-confirm-text").textContent).includes("不能删"),
+  `正文="${$("script-confirm-text").textContent}"`);
+await scriptClick(scriptConfirmAction("删除"));
+const edNodeDeletes = calls.filter(
+  (call) => call.method === "DELETE" && call.path.includes("/nodes/b2"));
+const edL1 = edLayerOf("L1") || {};
+check("M7-25aa 删节点成功（以前是死路）：节点消失、它的 5 条入 / 出边同时消失、别的边不动",
+  edNodeDeletes.length === 1
+  && !(edL1.nodes || []).some((node) => node.id === "b2")
+  && (edL1.nodes || []).length === 9
+  && (edL1.edges || []).length === 12
+  && !(edL1.edges || []).some((edge) => edge.from === "b2" || edge.to === "b2")
+  && graphCells(edGraph()).length === 9,
+  `节点=${(edL1.nodes || []).length} 边=${(edL1.edges || []).length}`);
+
+// ② 删被剧本挂着的大节：从剧本的 layers 里摘掉，不是「先删整个剧本」。
+await edOpenKind("layers");
+await scriptClick(edRow("L2"));
+await edClick("btn-script-editor-delete");
+check("M7-25ab 删被剧本挂着的大节：确认框只说从剧本摘掉它（不提「还被引用」）",
+  $("script-confirm").hidden === false
+  && String($("script-confirm-text").textContent).includes("摘掉")
+  && !String($("script-confirm-text").textContent).includes("还被引用")
+  && !String($("script-confirm-text").textContent).includes("不能删除"),
+  `正文="${$("script-confirm-text").textContent}"`);
+await scriptClick(scriptConfirmAction("删除"));
+check("M7-25ac 删大节成功：服务端只摘 L2（剧本还在、L1 原样），校验面板仍为空",
+  (edScript().layers || []).length === 1
+  && (edScript().layers || [])[0].id === "L1"
+  && (ed().errors || []).length === 0,
+  `layers=${(edScript().layers || []).map((layer) => layer.id).join(",")}`);
+
+// ③ 删被共享引用的实体：确认框列出引用点 + 「仍然删除」；删完校验面板立刻红（带 loc）。
+await edOpenKind("templates");
+await scriptClick(edRow("tpl.grunt"));
+const edDangleMark = calls.length;
+await edClick("btn-script-editor-delete");
+const edDangleRefs = calls.slice(edDangleMark).filter(
+  (call) => call.method === "GET" && call.path.endsWith("/templates/tpl.grunt/references"));
+const edRefRows = edReferenceRows();
+check("M7-25ad 删被共享引用的实体：确认框列出引用点（loc 指引用方）+ 一句悬空警告 + 「仍然删除」",
+  edDangleRefs.length === 1 && $("script-confirm").hidden === false
+  && $("script-confirm").getAttribute("data-dialog") === "editor-delete"
+  && edRefRows.length > 0
+  && String(edRefRows[0].getAttribute("data-loc") || "").startsWith("/rooms/")
+  && String(edRefRows[0].getAttribute("data-loc") || "").includes("/template")
+  && String($("script-confirm-text").textContent)
+    .includes("继续删除会让它们悬空（校验面板标红）")
+  && edConfirmLabels().includes("仍然删除"),
+  `引用点=${JSON.stringify(edRefRows.map((row) => row.getAttribute("data-loc")))}`);
+
+await scriptClick(scriptConfirmAction("仍然删除"));
+const edDangleDeletes = calls.slice(edDangleMark).filter(
+  (call) => call.method === "DELETE" && call.path.includes("/templates/tpl.grunt"));
+const edDangleErrors = ed().errors || [];
+check("M7-25ae 删完立刻红：删除 200（实体真的没了），校验面板出现悬空条目（红字 + loc + rule_id）",
+  edDangleDeletes.length === 1
+  && !(edLibrary().templates || []).some((item) => item.id === "tpl.grunt")
+  && edDangleErrors.length > 0
+  && edErrorRows().length === edDangleErrors.length
+  && edDangleErrors.every((error) => Boolean(error.loc) && Boolean(error.rule_id))
+  && edDangleErrors.some((error) => error.rule_id === "script_library.unknown_template"
+    && String(error.loc).includes("/template") && error.got === "tpl.grunt")
+  && edErrorRows()[0].classList.contains("script-editor-error")
+  && String(edErrorRows()[0].textContent).includes(edDangleErrors[0].loc)
+  && $("script-editor-clean").hidden === true
+  && String($("script-editor-hint").textContent).includes("悬空"),
+  `错误=${JSON.stringify(edDangleErrors.map((error) => [error.loc, error.rule_id]))}`);
+
+// 校验面板条目可点击跳字段（字段位置 → 表单）。
+const edJumpLoc = edDangleErrors[0] ? String(edDangleErrors[0].loc) : "";
+await scriptClick(edErrorRows()[0]);
+const edFocusFields = byClass($("script-editor-form"), "on");
+check("M7-25af 点校验条目跳到对应字段：选中引用方实体、打开编辑态、字段位置写进「已定位」",
+  ed().kind === "rooms" && ed().selected === "room.story"
+  && $("script-editor-focus").hidden === false
+  && String($("script-editor-focus").textContent).includes(edJumpLoc)
+  && edFocusFields.length > 0,
+  `kind=${ed().kind} selected=${ed().selected} 定位="${$("script-editor-focus").textContent}"`);
+
+// ---- 收尾：坏库仍是可打开的库（D30），撤掉用户库后回到内置库 ----
+const edReloadMark = calls.length;
+await edClick("btn-script-editor-reload");
+check("M7-25ag 「重读库」= 一条 GET：坏库照开（D30 编辑器宽松档），面板仍红",
+  calls.slice(edReloadMark).filter(
+    (call) => call.method === "GET" && call.path === "/api/script-library").length === 1
+  && (ed().errors || []).length > 0 && edErrorRows().length > 0,
+  `errors=${(ed().errors || []).length}`);
+
+unlinkSync(SCRIPT_EDITOR_LIBRARY);
+await edClick("btn-script-editor-reload");
+check("M7-25ah 收尾：用户库撤掉后编辑器回到内置库（source = builtin、面板清空）",
+  ed().source === "builtin" && (ed().errors || []).length === 0
+  && edErrorRows().length === 0 && $("script-editor-clean").hidden === false,
+  `source=${ed().source} 库在=${existsSync(SCRIPT_EDITOR_LIBRARY)}`);
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

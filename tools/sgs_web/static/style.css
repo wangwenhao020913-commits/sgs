@@ -2127,3 +2127,78 @@ button.avatar-skill:hover { border-color: var(--accent); }
   font-size: 13px; padding: 3px 0; border-top: 1px dashed var(--line);
 }
 .script-event-row:first-child { border-top: none; }
+
+/* ---------------------------------------------------------------------------
+ * M7 票 25：剧本编辑器（实体列表 / 大节页网格拖放 / 画边 / 解除连线 / 校验面板）
+ *
+ * 版式：左栏实体 + 右栏详情 / 大节页 / 校验面板。节点图仍是 `script-board.js` 那一份
+ * （编辑器只在图上叠一层**网格命中格**给拖放用，不画第二条线）。
+ * 校验面板的红字**自己一条规则**（与坏档那行同姿态：颜色写死、不靠继承）。
+ * ------------------------------------------------------------------------- */
+.script-editor-body {
+  display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; align-items: start;
+}
+.script-editor-side, .script-editor-main { min-width: 0; }
+.script-editor-kinds { display: flex; flex-wrap: wrap; gap: 6px; }
+.script-editor-kind {
+  padding: 3px 10px; border-radius: 999px; font-size: 13px;
+  border: 1px solid var(--line); background: var(--card); cursor: pointer;
+}
+.script-editor-kind.on { background: var(--accent-soft); border-color: var(--accent); }
+.script-editor-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 42vh; overflow: auto; }
+.script-editor-row {
+  text-align: left; font-size: 13px; padding: 5px 9px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer;
+}
+.script-editor-row.on { border-color: var(--accent); background: var(--accent-soft); }
+.script-editor-form { margin-top: 10px; }
+.script-editor-form-body { display: flex; flex-direction: column; gap: 6px; }
+.script-editor-field { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.script-editor-field > span { min-width: 150px; }
+.script-editor-field input, .script-editor-field select,
+.script-editor-edge input, .script-editor-edge select,
+.script-editor-pool-row input, .script-editor-pool-row select {
+  font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card);
+}
+.script-editor-field input.on, .script-editor-field select.on {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+.script-editor-summary h3 { margin: 0 0 4px; }
+.script-editor-summary p { margin: 4px 0; }
+/* 校验面板：逐条 `loc · rule_id：期望 …，实得 …`（票 24 的 LoadError 原样），红字是判据。 */
+.script-editor-validation { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.script-editor-errors { display: flex; flex-direction: column; gap: 4px; }
+.script-editor-error {
+  text-align: left; font-size: 12px; padding: 4px 8px; border-radius: 6px;
+  border: 1px solid #e2b6b1; background: #fbeeec; cursor: pointer;
+  color: #b3261e; font-weight: 600;
+}
+/* 大节页：网格命中格在节点图下面（节点 / 连线仍由共用渲染器画）。 */
+.script-editor-layer { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.script-editor-graph { position: relative; width: 100%; min-height: 120px; margin-top: 8px; }
+.script-editor-graph .script-graph-edges { z-index: 1; }
+.script-editor-graph .script-graph-nodes { z-index: 2; }
+.script-editor-cells { position: absolute; inset: 0; z-index: 0; }
+.script-editor-cell { border: 1px dashed rgba(0, 0, 0, .06); border-radius: 10px; }
+.script-editor-edge, .script-editor-pool-row, .script-editor-skill-row,
+.script-editor-ally-row, .script-editor-enemy-row, .script-editor-global-row,
+.script-editor-option-row, .script-editor-ref-row {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); font-size: 12px;
+}
+.script-editor-edges, .script-editor-pools, .script-editor-skills,
+.script-editor-seats, .script-editor-globals, .script-editor-options,
+.script-editor-refs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.script-editor-edge-label { font-weight: 600; }
+.script-editor-edge-cond { color: #7b7266; }
+.script-editor-tree { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.script-editor-tree-layer {
+  text-align: left; font-size: 13px; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--accent-soft); cursor: pointer;
+}
+.script-editor-tree-node { font-size: 12px; padding: 1px 0 1px 18px; color: #5b544b; }
+.script-editor-reference { font-size: 12px; padding: 3px 0; border-top: 1px dashed var(--line); color: #8d3a3a; }
+.script-editor-reference:first-child { border-top: none; }
+.script-editor-random-hint { font-size: 12px; color: #8a6a1f; }

@@ -320,6 +320,10 @@ const state = {
     // M7 票 23：从棋盘进来的那场战斗（`{sessionId, runId, nodeId}`；null = 不在剧本战斗里）。
     // 牌桌上"回棋盘结算"的出口只读它，**不是**规则判据——胜负由服务端从记录流判。
     battle: null,
+    // M7 票 25（`script-editor.js` 是唯一读写方）：编辑器本地态——整库（服务端落盘后的
+    // dump）/ revision / 校验面板的 `errors` / 当前表与选中项 / 表单草稿 / 拖拽起点。
+    // 全部是**显示态**，没有一格是规则判据；`library` 只来自服务端回包，前端不镜像第二份。
+    editor: null,
   },
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）
@@ -374,18 +378,27 @@ const post = (path, payload) => api(path, {
  * `<page>-nav-*`。M7 票 21 的棋盘是**第四个页面**（`view-script-board`，排在回放页之后）。
  */
 const NAV_BUTTONS = {
-  lobby: ["nav-lobby", "lobby-nav-lobby", "replay-nav-lobby", "script-board-nav-lobby"],
-  table: ["nav-table", "lobby-nav-table", "replay-nav-table", "script-board-nav-table"],
-  replay: ["nav-replay", "lobby-nav-replay", "replay-nav-replay", "script-board-nav-replay"],
+  lobby: ["nav-lobby", "lobby-nav-lobby", "replay-nav-lobby", "script-board-nav-lobby",
+    "script-editor-nav-lobby"],
+  table: ["nav-table", "lobby-nav-table", "replay-nav-table", "script-board-nav-table",
+    "script-editor-nav-table"],
+  replay: ["nav-replay", "lobby-nav-replay", "replay-nav-replay", "script-board-nav-replay",
+    "script-editor-nav-replay"],
   "script-board": [
     "script-board-nav-lobby",
     "script-board-nav-table",
     "script-board-nav-replay",
   ],
+  // M7 票 25：编辑器页的顶栏三键（作者面也是同一页壳，只是不挂玩家状态）。
+  "script-editor": [
+    "script-editor-nav-lobby",
+    "script-editor-nav-table",
+    "script-editor-nav-replay",
+  ],
 };
 
 /** 全部页面名（`show()` 的遍历次序 = 视图在 `index.html` 里的次序）。 */
-const VIEW_NAMES = ["lobby", "table", "replay", "script-board"];
+const VIEW_NAMES = ["lobby", "table", "replay", "script-board", "script-editor"];
 
 /** 「牌桌」能否点：只认有没有会话（建局成功后 `state.sessionId` 非空；刷新即丢，不落盘）。
  *

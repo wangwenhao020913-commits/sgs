@@ -126,6 +126,14 @@
     "startSessionView", "scriptBattleEnter", "scriptBattleReturnToBoard",
     "scriptBattleTableSync", "scriptBattleFinished",
     "pveGlobalText", "pveGlobalNode", "heroNameOf",
+    // M7 票 25：编辑器（实体列表 / 网格拖放 / 画边 / 校验面板）。烟测走真 DOM 点击与真端点；
+    // 桥只额外挂**没有可见按钮**的纯入口（选择 / 编辑 / 拖放 / 画边 / 解除 / 跳字段 / 重读）。
+    "scriptEditorShow", "scriptEditorLoad", "scriptEditorRender", "scriptEditorReload",
+    "scriptEditorChoose", "scriptEditorEdit", "scriptEditorNew", "scriptEditorSave",
+    "scriptEditorCancel", "scriptEditorClone", "scriptEditorRename", "scriptEditorDelete",
+    "scriptEditorSaveGrid", "scriptEditorDrawEdge", "scriptEditorUnlinkEdge",
+    "scriptEditorSetEdgeRequires", "scriptEditorJump", "wireScriptEditor",
+    "SCRIPT_EDITOR_KINDS",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

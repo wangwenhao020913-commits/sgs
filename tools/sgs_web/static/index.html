@@ -37,6 +37,12 @@
       <button id="btn-script-abandon" type="button" class="ghost" hidden>放弃剧本</button>
       <span id="script-hint" class="dim"></span>
     </div>
+    <!-- M7 票 25：剧本编辑器的入口（新视图在回放页之后；本键只切页，读库由编辑器自己发）。
+         入口放在剧本面板里而不是导航三键里：编辑器是作者面，不是第四种玩家页面。 -->
+    <div class="row">
+      <button id="btn-script-editor" type="button" class="ghost">剧本编辑器</button>
+      <span class="dim">编辑剧本库（新建 / 改库 / 校验；与棋盘共用同一份节点图渲染器）</span>
+    </div>
     <!-- 摘要行（`ok` 才有）：剧本名 · 大节 `layer_index+1`/总数 · 已结算节点数 · 铜钱 · saved_at。
          五个数原样来自服务端的 `summary`（票 04 §6），前端不派生。 -->
     <p id="script-summary" class="script-summary" hidden></p>
@@ -590,10 +596,99 @@
   </div>
 </main>
 
+<!-- 剧本编辑器（M7 票 25 / spec §4「编辑器新视图」、票 05 UI-5）：实体列表 + 新建 / 编辑 /
+     另存为副本 / 重命名 / 删除 + 引用选择器；大节页 = 网格拖放 + 画边 + 解除连线 + 设条件；
+     校验面板与加载器**同一份**校验函数（票 24 的 `errors` 原样显示）。
+     节点图**不在这里画第二份**：`script-editor.js` 调 `script-board.js:scriptGraphRender` 的
+     `mode: "editor"` 分支（D26）——作者视角因此没有玩家状态色。
+     位置纪律：本视图在回放视图**之后**（棋盘之后），绝不插在牌桌与回放之间；注释里也不写
+     那两个 `main` 的 id 字面量。所有动态行 / 表单都由脚本现铺，静态壳只给挂载点。 -->
+<main id="view-script-editor" class="view page-view" hidden>
+  <div id="script-editor-topbar" class="topbar page-topbar">
+    <div class="topbar-left">
+      <span id="script-editor-crumb" class="tag"></span>
+      <span id="script-editor-source" class="dim"></span>
+    </div>
+    <div class="topbar-center"></div>
+    <div class="topbar-right">
+      <button id="script-editor-nav-lobby" class="tab" type="button">开局</button>
+      <button id="script-editor-nav-table" class="tab" type="button" disabled>牌桌</button>
+      <button id="script-editor-nav-replay" class="tab" type="button">回放</button>
+      <button id="btn-script-editor-reload" type="button" class="ghost">重读库</button>
+    </div>
+  </div>
+  <div class="page-body script-editor-body">
+    <section class="panel script-editor-side">
+      <h2>实体</h2>
+      <!-- 九类实体（剧本 / 大节 / 节点 / 房间 / 敌人模板 / 技能池 / 事件 / 事件池 / 全局技能）；
+           大节 / 节点 / 边是剧本**归属**的，故左栏先选剧本、再选大节。 -->
+      <div id="script-editor-kinds" class="script-editor-kinds"></div>
+      <h3 id="script-editor-scope" class="dim"></h3>
+      <div id="script-editor-list" class="script-editor-list"></div>
+      <p id="script-editor-side-hint" class="dim"></p>
+    </section>
+    <section class="panel script-editor-main">
+      <div class="row space">
+        <h2 id="script-editor-title">剧本库</h2>
+        <div class="row">
+          <button id="btn-script-editor-new" type="button" class="primary">新建</button>
+          <button id="btn-script-editor-edit" type="button" disabled>编辑</button>
+          <button id="btn-script-editor-clone" type="button" class="ghost" disabled>另存为副本</button>
+          <button id="btn-script-editor-rename" type="button" class="ghost" disabled>重命名</button>
+          <button id="btn-script-editor-delete" type="button" class="ghost" disabled>删除</button>
+        </div>
+      </div>
+      <p id="script-editor-hint" class="dim"></p>
+      <!-- 服务端 400 / 409 的原话（与坏档那行同一条红字规则）。 -->
+      <p id="script-editor-error" class="script-reason" hidden></p>
+      <!-- 点校验条目之后的「已定位」回执（字段位置 = 加载器的 `loc`）。 -->
+      <p id="script-editor-focus" class="dim" hidden></p>
+      <div id="script-editor-form" class="script-editor-form"></div>
+      <div id="script-editor-tree" class="script-editor-tree" hidden></div>
+
+      <!-- 大节页：网格（长宽可设）+ 拖放节点 + 画边 + 边列表（条件 / 解除）。 -->
+      <div id="script-editor-layer" class="script-editor-layer" hidden>
+        <div class="row space">
+          <h3 id="script-editor-layer-title"></h3>
+          <span id="script-editor-layer-hint" class="dim"></span>
+        </div>
+        <div class="row">
+          <span>网格行</span>
+          <input id="script-editor-grid-rows" type="number" min="1" value="3">
+          <span>列</span>
+          <input id="script-editor-grid-cols" type="number" min="1" value="4">
+          <button id="btn-script-editor-grid-save" type="button" class="ghost">改网格</button>
+        </div>
+        <div id="script-editor-graph" class="script-editor-graph" data-graph-mode="editor"></div>
+        <h3>连线（from → to · 条件 · 解除）</h3>
+        <div class="row">
+          <select id="script-editor-edge-from" aria-label="连线起点"></select>
+          <span>→</span>
+          <select id="script-editor-edge-to" aria-label="连线终点"></select>
+          <button id="btn-script-editor-edge-draw" type="button">画边</button>
+        </div>
+        <div id="script-editor-edges" class="script-editor-edges"></div>
+      </div>
+
+      <!-- 校验面板：票 24 的 `GET/PUT` 回包里的 `errors` 逐条落字段（红字 + `loc`），
+           点条目跳到对应该字段（引用方实体）。 -->
+      <div id="script-editor-validation" class="script-editor-validation">
+        <div class="row space">
+          <h3>校验面板</h3>
+          <span id="script-editor-validation-count" class="dim"></span>
+        </div>
+        <div id="script-editor-errors" class="script-editor-errors"></div>
+        <p id="script-editor-clean" class="dim" hidden>没有校验错误（与加载器同一份校验函数）。</p>
+      </div>
+    </section>
+  </div>
+</main>
+
 <!-- 剧本层的**唯一**模态壳（M7 票 20 起）：撞旧档三选一 / 退出确认 / 票 22 的三选一 /
- 遗物 / 结算结果都填这一个壳。它住在四个页面**之外**（四个 `main` 之后），因为票 20 的
- 确认框原先住在开局页里，而棋盘的「离开棋局」与结算面在别的页面 —— 那样弹窗会被
- `display: none` 的祖先一起藏掉。位置纪律：仍在回放视图之后，不落进牌桌与回放之间。
+ 遗物 / 结算结果 / 票 25 的删除确认都填这一个壳。它住在五个页面**之外**（五个 `main` 之后），
+ 因为票 20 的确认框原先住在开局页里，而棋盘的「离开棋局」、结算面与编辑器的删除面在别的
+ 页面 —— 那样弹窗会被 `display: none` 的祖先一起藏掉。位置纪律：仍在回放视图之后，不落进
+ 牌桌与回放之间。
  「取消」一律**什么都不发生**（撞旧档 = 不删档；退出 = 不发请求）。
  正文槽 `#script-confirm-body` 是票 22 加的：票 20 只有 标题 + 一句话 + 按钮三块。 -->
 <div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
@@ -628,6 +723,10 @@
      （`state.script.board`）的 `run` / `catalog` / `pending.spec`，由 `wireScriptLoadout()`
      接线；价格 / 铜钱 / 折价数字一律印服务端给的数（票 22 的备注），前端不乘价。 -->
 <script src="script-loadout.js"></script>
+<!-- M7 票 25：剧本编辑器（实体列表 / 新建改删 / 网格拖放 / 画边 / 解除连线 / 设条件 /
+     校验面板）。节点图调 `script-board.js` 那一份共用渲染器（`mode: "editor"`，不画状态色）；
+     删除确认复用 `script-lobby.js` 的唯一模态壳。`wireScriptEditor()` 在 main.js 里接线。 -->
+<script src="script-editor.js"></script>
 <script src="session.js"></script>
 <script src="candidates.js"></script>
 <script src="card-view.js"></script>
