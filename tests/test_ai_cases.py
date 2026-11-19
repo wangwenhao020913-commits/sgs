@@ -22,7 +22,7 @@ import pytest
 
 from sgs.agents import HeuristicPlayer
 from sgs.agents import heuristic as heuristic_scoring
-from sgs.data import Identity, RuleConfig, load_content_pack
+from sgs.data import Identity, RuleConfig, Suit, load_content_pack
 from sgs.engine import Engine, ai_stream
 from sgs.effects import behavior_for, is_slash
 from sgs.skills import hero_card_zone_key
@@ -1382,7 +1382,7 @@ I1_REBEL_HAND = tuple(cards_of_type(PACK, "peach")[:2])
 """
 
 I1_AI_SEAT = 3
-"""D2 的内奸座位：5 人身份局的先手是主公（座位 2），故到座位 3 时主公已摸过牌。"""
+"""D2 的内奸座位：6 人身份局的先手是主公（座位 2），故到座位 3 时主公已摸过牌。"""
 
 
 def _dead_loyalist_ex_nihilo_query():
@@ -1412,9 +1412,13 @@ def _dead_loyalist_ex_nihilo_query():
 def _renegade_lord_vs_unknown_query():
     """AI = 内奸（座位 3）；已亮明主公（座位 2）与未知身份座位 4，两者 4 体力 / 2 手。
 
-    座位 2 是主公（先手）⇒ 摸牌阶段拿到 2 张；座位 4 构造 2 张 ⇒ 两个目标的分数在修复前
-    **严格同分**。两者都在【杀】的距离内（5 人局相邻）。修复后座位 4 的 P(敌) = 1
-    （配比减掉主公与内奸后只剩忠臣 / 反贼 / 反贼，全是内奸的对手），主公仍是 0。
+    座位 2 是主公（先手）⇒ 摸牌阶段拿到 2 张；座位 4 构造 2 张 ⇒ 两个目标的体面**完全
+    相同**，分数只差敌友权重那一项。两者都在【杀】的距离内（6 人局的相邻两席）。
+
+    **票 32 起内奸行是局面函数**（按存活力量均衡）：6 人配比 主公侧 2 : 反贼 3 ⇒
+    ``H(→主公) = min(−0.2, 0) < 0``（护主护栏 + 反贼领先 ⇒ 主公是**盟友**）、未知座位
+    ``(0.15, 0.05)``（剩余是忠臣 + 反贼 ×3）。旧表（票 21/08 的硬常量）里主公是中立、
+    未知座位是 1.0 敌人——结论一样（先打未知席位），读数换了来源。
     """
     return _lethal_play_query(
         seats=[
@@ -1428,6 +1432,7 @@ def _renegade_lord_vs_unknown_query():
                 hand=(SLASH_ID,),
             ),
             SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL, hand=I1_REBEL_HAND),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
         ],
         ai_seat=I1_AI_SEAT,
         inert=4,
@@ -1511,13 +1516,18 @@ def test_i1_a_dead_loyalist_leaves_the_lord_facing_an_all_enemy_field():
 
 
 def test_i1_the_renegade_keeps_the_lord_off_the_priority_list():
-    """I1：内奸语义保留——**不把主公当优先敌人**（先清场、最后弑主）。
+    """内奸语义保留——**不把主公当敌人**（先清场、最后弑主）；票 32 起改由局面函数给出。
 
-    已亮明主公（座位 2）与未知身份（座位 4）同体力 / 同手牌数、都在【杀】的距离内：
-    修复前两者都是 0 加权 ⇒ 8 个平分子流种子两边都出现；修复后未知那一席的 P(敌) = 1
-    而主公是 0（内奸的敌人是忠臣 / 反贼，主公要留到最后）⇒ **恒打未知那一席**。
+    已亮明主公（座位 2）与未知身份（座位 4）同体力 / 同手牌数、都在【杀】的距离内，故
+    分数只差敌友权重那一项：
 
-    日后的回归若把主公也塞进"内奸的敌人"：这条第一段（``(0.0, 0.0)``）先红。
+    - 票 21 的硬常量表：主公 0（表里中立）、未知座位 1.0（配比减掉主公与内奸后全是敌人）
+      ⇒ 恒打未知那一席；
+    - 票 32 的局面函数（6 人配比 2:3 ⇒ ``spread = −0.2``）：主公 ``H = min(−0.2, 0)`` ⇒
+      **P(敌) 仍是 0**（护主护栏；反贼领先时连盟友权重都给了主公），未知座位
+      ``(0.15, 0.05)``（剩余 = 忠臣 + 反贼 ×3 的期望）⇒ 结论不变、恒打未知那一席。
+
+    日后的回归若把主公塞进"内奸的敌人"：这条第一段（``P(敌) == 0``）先红。
     """
     query = _renegade_lord_vs_unknown_query()
     view = query.view
@@ -1526,10 +1536,13 @@ def test_i1_the_renegade_keeps_the_lord_off_the_priority_list():
         for seat, player in enumerate(view.players)
         if seat != view.seat and player.identity is Identity.LORD
     )
-    assert _relation(view, lord) == (0.0, 0.0), "内奸不得把主公算成敌人 / 盟友"
+    assert _relation(view, lord) == (0.0, 0.2), (
+        "内奸不得把主公算成敌人；6 人局 2:3 时主公是盟友（H = −0.2）"
+    )
     (other,) = _slash_targets(query) - {lord}
-    assert _relation(view, other) == (1.0, 0.0), (
-        f"座位 {other} 的 P(敌) 不是 1：主公与内奸之外全是内奸的对手"
+    enemy, ally = _relation(view, other)
+    assert (enemy, ally) == (pytest.approx(0.15), pytest.approx(0.05)), (
+        f"座位 {other} 的关系不是局面函数对剩余多重集的期望（忠臣 + 反贼 ×3）"
     )
 
     for seed in TIE_SEEDS:
@@ -1538,6 +1551,84 @@ def test_i1_the_renegade_keeps_the_lord_off_the_priority_list():
         assert action.targets == (other,), (
             f"内奸该先清场（座位 {other}），不该把主公当优先敌人，实得 {action.targets}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 内奸不看着主公死（M7 票 32）：护主护栏的**产品面**读法
+#
+# 票 32 把内奸那一行换成"按存活力量均衡 + 护主护栏"的局面函数。护栏的判据是
+# ``H(→主公) = min(spread, 0)``：**反贼侧还有人活着**时主公永远不是敌人 ⇒ 求桃窗口里
+# ``_SAVE_VALUE × (1 − 2·P(敌))`` = 满值 +6，内奸不会看着主公死。
+# ---------------------------------------------------------------------------
+
+
+def _dying_lord_peach_query():
+    """4 人身份局：主公（座位 0）判定区的【闪电】开局即劈死自己 ⇒ 求桃问到内奸（座位 1）。
+
+    座位 0 = 主公（1 体力 + 判定区【闪电】，牌堆顶一张黑桃 2–9 ⇒ 必劈）、座位 1 = 内奸
+    （手里只有一张【桃】）、座位 2 = 忠臣、座位 3 = 反贼。求桃窗口的应答者区间从**当前回合
+    角色**（= 主公）起逆时针 ⇒ 先问主公自己（空手 ⇒ 放弃）、再问座位 1 的内奸。
+    """
+    lightning = cards_of_type(PACK, "lightning")[0]
+    judge_card = next(
+        card_id
+        for card_id, card in enumerate(PACK.deck.cards)
+        if card.suit is Suit.SPADE and 2 <= card.rank <= 9
+    )
+    peach = cards_of_type(PACK, "peach")[0]
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=4),
+        seats=[
+            SeatSpec(
+                hp=1, hp_max=4, identity=Identity.LORD, judge=(lightning,)
+            ),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.RENEGADE, hand=(peach,)),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        deck=(judge_card,) + deck_excluding(PACK, lightning, judge_card, peach),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in range(4)],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PEACH"
+        and current.pending.actor == 1,
+    )
+    query = engine.pending
+    assert query is not None and query.dying == 0, (
+        "推进器没有停在「内奸被问要不要救主公」那一问上"
+    )
+    return query
+
+
+def test_the_renegade_does_not_watch_the_lord_die():
+    """内奸救主公（护主护栏的产品面）：主公濒死、内奸手里有【桃】⇒ 出【桃】。
+
+    4 人局 主公侧 2 : 反贼 1（``spread = +1/3``）——**未加护栏**时 ``H = +1/3`` ⇒
+    ``P(敌) = 1/3`` ⇒ 救人的值只有 ``6 × (1 − 2/3) = +2``（低于 "救盟友" 的 +6，内奸会
+    犹豫）。护栏把它削成 0 ⇒ 值回到满的 ``_SAVE_VALUE``，这一问恒出【桃】。
+
+    本票**之前已绿**（票 21 的硬常量里主公对内奸也是中立 ⇒ 同样 +6）⇒ 这条是护栏，不是
+    先红后绿；它挡的是"日后把主公塞进内奸敌人列表"或"护栏方向写反"。
+    """
+    query = _dying_lord_peach_query()
+
+    assert _relation(query.view, 0) == (0.0, 0.0), (
+        "反贼还活着 ⇒ 护栏把主公摘出内奸的敌人列表（H = min(+1/3, 0) = 0）"
+    )
+    assert heuristic_scoring._peach_save_value(query) == heuristic_scoring._SAVE_VALUE, (
+        "P(敌) = 0 ⇒ 救人价值是满的 +6（若护栏方向写反会是 +2）"
+    )
+
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"内奸该出【桃】救主公，实得 {action!r}"
+        assert action.card.type == "peach"
+        assert action.targets == (0,), "【桃】必须落在濒死的主公身上"
 
 
 # ---------------------------------------------------------------------------
