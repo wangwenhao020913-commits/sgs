@@ -583,10 +583,12 @@ def test_the_old_baseline_finishes_the_deal_that_used_to_crash(tmp_path: Path) -
 
     assert result["errors"] == 0, "旧版本的未知询问类型不该再计入 errors"
     gaps = result["capability_gaps"]
-    assert gaps["policy"] == "legal_decline"
+    assert gaps["policy"] == "legal_decline+drop_incompatible"
     assert gaps["total"] >= 1
     assert gaps["by_version"]["ai-v0"]["queries"]["SELECT_OPTIONS"] >= 1
     assert {"SELECT_OPTIONS", "DISTRIBUTE"} <= set(gaps["by_version"]["ai-v0"]["kinds"])
+    assert isinstance(gaps["incompatible_deals"], dict)
+    assert all(isinstance(count, int) and count >= 0 for count in gaps["incompatible_deals"].values())
     assert result["versions"][0]["deals"] == 2
 
 
@@ -1186,6 +1188,55 @@ def test_promote_with_no_finished_deal_reports_unmeasured_verdict(
     assert result["verdict"]["diff_attributed"] is None
     assert result["decision_diff"]["deals_differing"] == 0
     assert result["errors"] == 0
+
+
+def test_an_old_versions_illegal_action_is_a_capability_gap_not_an_error() -> None:
+    """票 36 的第二种缺口：旧版返回的动作形状落后于引擎（``IllegalActionError``）。
+
+    这类失败只发生在**旧版本臂**：记 ``incompatible_deals``，从两臂配对里退出，
+    但**不进** ``errors`` —— ``errors`` 只数真正的崩溃。
+    """
+    import ai_eval.run as run
+
+    stale = run.ArmGame(
+        seed=11,
+        identity=None,
+        won=None,
+        finished=False,
+        error="IllegalActionError: [IllegalAction] 步骤 seat 的目标 1 不在可选范围内",
+    )
+    arm = run.ArmRun(
+        label="candidate_vs_baseline",
+        games=(stale,),
+        miss=run.MissCounts(0, 0, 0, 0),
+        version_gaps=True,
+    )
+
+    assert run._errors([arm]) == 0
+    gaps = run._capability_gaps([arm], {})
+    assert gaps["incompatible_deals"] == {"candidate_vs_baseline": 1}
+
+
+def test_a_current_versions_illegal_action_is_still_an_error() -> None:
+    """候选臂（版本完整）的非法应答仍是真错误——兼容层不许把真 bug 藏起来。"""
+    import ai_eval.run as run
+
+    broken = run.ArmGame(
+        seed=12,
+        identity=None,
+        won=None,
+        finished=False,
+        error="IllegalActionError: [IllegalAction] 候选臂自己答错了",
+    )
+    arm = run.ArmRun(
+        label="candidate_vs_baseline",
+        games=(broken,),
+        miss=run.MissCounts(0, 0, 0, 0),
+        version_gaps=False,
+    )
+
+    assert run._errors([arm]) == 1
+    assert run._capability_gaps([arm], {})["incompatible_deals"] == {}
 
 
 def test_a_case_runner_timeout_is_a_run_error(

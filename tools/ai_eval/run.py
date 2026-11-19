@@ -131,6 +131,8 @@ class ArmGame:
     identity: str | None
     won: bool | None
     finished: bool
+    error: str | None = None
+    """没打完时的错误串（``GameResult.error``）：驱动侧据此分"旧版本答不了"与真崩溃。"""
     decisions: tuple[dict[str, Any], ...] = ()
 
 
@@ -147,6 +149,9 @@ class ArmRun:
     只数"这个座位用的那个版本选路表里没有的类型"：分发表完整的版本（HEAD）不产生条目。
     驱动侧从这里汇总结果 JSON 的 ``capability_gaps``——它**不是** ``errors``。
     """
+
+    version_gaps: bool = False
+    """本臂的版本里至少有一个选路表不完整（旧版本）⇒ ``IllegalActionError`` 记"答不了"。"""
 
 
 @dataclass(frozen=True)
@@ -227,6 +232,7 @@ def _arm_game(game: Any, *, keep_decisions: bool) -> ArmGame:
             identity=None,
             won=None,
             finished=False,
+            error=game.error,
             decisions=decisions,
         )
     focus = game.seats[FOCUS_SEAT]
@@ -303,16 +309,39 @@ def _run_arm(
         )
         if progress is not None:
             progress(arm.label, len(games), len(ordered))
-    return ArmRun(label=arm.label, games=tuple(games), miss=miss, capability_gaps=gaps)
+    return ArmRun(
+        label=arm.label,
+        games=tuple(games),
+        miss=miss,
+        capability_gaps=gaps,
+        version_gaps=bool(focus_gaps or table_gaps),
+    )
+
+
+def _incompatible(arm: ArmRun, game: ArmGame) -> bool:
+    """这一副是不是"旧版本答不了当前引擎"（票 36 的第二种缺口）。
+
+    旧版本不只是**未知询问类型**：它返回的动作形状也可能落后于引擎（实测：预发动清单的
+    复合动作，旧版回一个 ``ActivateSkill`` ⇒ ``IllegalActionError``）。这类失败发生在
+    **旧版本臂**里、且错误串点名 ``IllegalActionError`` ⇒ 记"答不了"，从两臂配对里退出
+    （:func:`_finished_pairs` 本来就不配未终局的副），但**不进** ``errors``。
+    候选臂（HEAD）版本完整 ⇒ 它的非法应答仍是真错误。
+    """
+    return arm.version_gaps and not game.finished and (game.error or "").startswith(
+        "IllegalActionError"
+    )
 
 
 def _errors(arms: Sequence[ArmRun]) -> int:
-    """``errors``：**没打完**的局数（崩溃 / 未终局）。
+    """``errors``：**没打完**的局数（崩溃 / 未终局），减去旧版本答不了的那些副。
 
     兼容层的合法放弃发生在 ``errors`` 之前（旧版本仍把这一副打完），票 36 起它记
-    ``capability_gaps``、不进这里——``errors`` 只数真正的崩溃。
+    ``capability_gaps``；旧版本**动作形状**落后的那些副记 ``incompatible_deals``——
+    两者都**不进** ``errors``，``errors`` 只数真正的崩溃（候选臂的任何失败仍算）。
     """
-    return sum(1 for arm in arms for game in arm.games if not game.finished)
+    return sum(
+        1 for arm in arms for game in arm.games if not game.finished and not _incompatible(arm, game)
+    )
 
 
 def _finished_pairs(
@@ -452,7 +481,17 @@ def _capability_gaps(
             for kind, count in kinds.items():
                 bucket[kind] = bucket.get(kind, 0) + count
     total = sum(sum(entry["queries"].values()) for entry in by_version.values())
-    return {"policy": "legal_decline", "total": total, "by_version": by_version}
+    incompatible = {
+        arm.label: sum(1 for game in arm.games if _incompatible(arm, game))
+        for arm in arms
+        if arm.version_gaps
+    }
+    return {
+        "policy": "legal_decline+drop_incompatible",
+        "total": total,
+        "incompatible_deals": incompatible,
+        "by_version": by_version,
+    }
 
 
 def _result(
