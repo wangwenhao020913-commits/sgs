@@ -145,6 +145,7 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 | `ai-v8` | `0c20bdf78148e73f5a84deb6931196390f37e8b1` | `0c20bdf78148e73f5a84deb6931196390f37e8b1` | `d23255e393adb1e716f9d458c7a345a0068b4c549142b397de240c16030c89e2` | `df73659e6eafa8ce95485e8200161dfa90f4c693373248b56c8d345f814ae1ad` | 768（commit 派生） | `runs/ai-eval-0c20bdf.json` | D3 遗计收牌人（票 24）：`yiji:give` 座位步把"给自己"从帮助类的 `+2` 改成 **no-op（0 分）**——这批牌是从牌堆顶亮出来、直接交出去的，交给自己等于没有交出；其余座位仍按 `2·(P(友) − P(敌))`（盟友正、敌人负），已亮明的主公因此严格高于自己 / 敌人（I1 的后验只做幅度）。选牌步不动：收牌人下一步才选，仍按最坏情形只交 1 张。`quick` 3/128、`promote` diff **11/768 全落 `SELECT_OPTION`**（探针逐条核 `skill_id ∈ yiji:give:*`，0 条越界；examples 全是"基线给自己 `seat:0` → 候选给队友 `seat:N`"），对父版本 **0.0**、CI `[-0.0052, 0.0052]`，对 `ai-v0` **+0.0286**、CI `[-0.0026, 0.0612]`，`errors=0`；四个身份 `diff` 全 0.0；`cases` **38/38**（票 14 的 D3 strict xfail 转绿并摘标记）。**实机 seed=7796**（2026-10-31 用户驱动，5p / 160：四必验全过；3 次【遗计】6 次交牌全给已亮明主公 `seat:3`；读数 `询问=502 / pass=21/189(11.1%) / composite=30/33(90.9%) / 超时 0`；批末标准带实机待票 25 后补，见下第 5 条） | **人类裁定通过（2026-10-31）**：四必验全过 + 7 条口径全部签认（用户原话「四必验全通过，所有需要签认的全部通过，没有问题，收口本票」）；D3 语义在真局被覆盖（详见 `.scratch/ai-light/acceptance.md` §十二） |
 | `ai-v9` | `8fcd35d0b14cf3801c30fa6f5f8c139747c47dbf` | `8fcd35d0b14cf3801c30fa6f5f8c139747c47dbf` | `9c0ec5aecd036b9ba4939f1fabcee493593f9039e2a3924a9f3542ec5d71db57` | `a2376daf477166fc582ed3d04e2eb2771bff800119da83a954af65262e023781` | 768（commit 派生） | `runs/ai-eval-8fcd35d.json` | D4 装备先手窄版（票 25）：装备分不再恒为 `_EQUIP_PLAY_VALUE`——先问「装上之后手里某张【杀】是不是**才**打得死」：是 ⇒ 抬到那条【杀】现在分 + 0.1（`max(2.5, …)`，只买「先后」这一格，不给装备加估值），不是 ⇒ 逐值不变。判据读公开面 + 真实候选：`_lethal_to` 的现视角与「假如装上」的局面副本各问一次，两次是「不斩杀 → 斩杀」才算数；副本走 `_view_wearing`，伤害仍由**同一份** `_damage_to` 算（含**同槽位替换**：古锭刀替下青釭剑后普通【杀】打藤甲重新是 0 点）。**108 档三件相关装备都不在**（古锭刀 / 藤甲 / 白银狮子），故 `quick` **0/128**、`promote` **0/768**（对父版本 **0.0**、CI `[0.0, 0.0]`；对 `ai-v0` **+0.0234**、CI `[-0.0052, 0.0521]`；四个身份 diff 全 0.0；`errors=0`；`cases` **42/42**）；**160 档**（本项判据只在这一档可见）：spec §6.9 的 32 副 **0/32**，诊断扩到 **512 副 = 1/512**（`PLAY_PHASE`，候选=古锭刀、基线=雷杀，`outside_predicted=0`）；频率读数：512 副里 9580 个出牌阶段窗口 / 2969 个含装备候选 / 判据命中 **1** 次且那一次就是最高分。**未实机**（批末一局待用户驱动，见下第 5 条） | **被 superseded（`ai-v10`）**：两轴评审在它上面抓到 ① **B2**——换更短射程的武器会白装一手（已装【麒麟弓】射程 5 换成【古锭刀】射程 2，距离 3 的目标装完掉出候选面）；② **B1**——`spec §6.7 ④` 的判空面（160 档 32 副）是 **0/32**，事后扩到 512 副的 1/512 属事后扩样、不作预注册证据。本行只作历史留存，不作候选 |
 | `ai-v10` | `11ac9433be0801ec442d20f47ec912bf03e14f8c` | `11ac9433be0801ec442d20f47ec912bf03e14f8c` | `e1ac64b0cc658fd7d9b733bf7d56b36136d48d9c147b3c806310537686db8336` | `2fae6dbc076c8f35d7fcfc8902ddaf4308b0b1d14859e669de62d57c1b338bd8` | 768（commit 派生） | `runs/ai-eval-11ac943.json` | D4 装备先手窄版（票 25，第 2 轮）：装备分不再恒为 `_EQUIP_PLAY_VALUE`——先问「装上之后**候选面里**那张【杀】是不是**才**打得死」：是 ⇒ 抬到那条【杀】现在分 + 0.1（`max(2.5, …)`，只买「先后」这一格）。三条窄面闸门：① **同槽位替换**走 `_view_wearing` + 同一份 `_damage_to`（古锭刀替下青釭剑后普通【杀】打藤甲重新是 0）；② **够得着才算**（`_keeps_reach`：新射程更短 ⇒ 不追加分，堵掉「白装一手」）；③ 装上不改斩杀 / 非武器 / 已经装着同一件 ⇒ 逐值不变。**108 档结构性为空**（古锭刀 / 藤甲 / 白银狮子都不在），`quick` **0/128**、`promote` **0/768**（对父版本 **0.0**、CI `[0.0, 0.0]`；对 `ai-v0` **+0.0964**、CI `[0.0638, 0.1276]`；四个身份 diff 全 0.0；`errors=0`；`cases` **43/43**）。**160 档预注册判空批**（跑之前写死 N 与批，见 `.scratch/ai-light/t25-preregistration.md`）：`standard_ex_160` / **N=2048** / 批 `875cf60787b7cc6bb33ed8a5e97e7754a07fce23ecc715e83d2ca8a1e4b9c80d` ⇒ **3/2048**，全部 `PLAY_PHASE`、候选=古锭刀、基线=杀，`outside_predicted=0`、`errors=0`（只跑这一次、不因结果加 N）；同批预注册的 §6.9 诊断 32 副 **0/32**。**实机 seed=7007**（2026-10-31 用户驱动，5p / 160：四必验全过；**D4 局面未遇上**——整局 AI 只把【古锭刀】用出去 1 次且当时没有合法【杀】目标，纯装备投放；读数 `询问=407 / pass=13/193(6.7%) / composite=18/23(78.3%) / 超时 0`，终局内奸胜 `winners=[4]`，见 `.scratch/ai-light/acceptance.md` §13.1） | **人类裁定通过（2026-10-31）**：四必验全过 + 口径 1–7 全部签认（用户原话「四必验全通过，所有需要签认的全部通过，没有问题，收口本票」）；两条保留判断项（青釭剑用例保留 / `ai-v9` 留库标 superseded）一并签认 |
+| `ai-v11` | `da702ec3212246eaa11f97a861659856b0807d36` | `da702ec3212246eaa11f97a861659856b0807d36` | `16a0c0f10f52df90efa88d8b9cd84fe584b670331884d47c6e68a39e1dd4fbc3` | `eb915ac6af676085368505e1c0260bcd745faee44d8b5a1688812170f8b5b502` | 768（commit 派生） | `runs/ai-eval-da702ec.json` | **内奸行的局面函数**（票 32）：`_identity_relation` 在 `mine == _RENEGADE` 时**不查** `_HOSTILITY`，走 `H(→主公/忠臣/反贼) = (E[主公侧] − E[反贼侧]) / D`（`D = 存活座位数 − 1`；主公那格加护主护栏 `min(H, 0)`、反贼取反号、内奸 0），未知座位取该行对剩余多重集的期望；返回值仍是 `(max(H,0), max(−H,0))`（**14 个调用点 / 读点 / header 零改**）。**本票自己的 diff**（`quick` 对**父提交** `c58bde5` 跑，把本票与 `ai-v10` 之间的 20 个提交隔离开）：`errors=0`、diff **18/128**、kinds `{PEACH: 6, PLAY_PHASE: 8, RESPOND: 2, SELECT_OPTION: 1, SKILL_ACTIVATION: 1}`——18 副**全部**是座位 0 = 内奸的局面（探针逐副核过），5 类全是 `_identity_relation` 的**直接**读取面（座位步 `SELECT_OPTION` 与复合发动的座位填写 `SKILL_ACTIVATION` 也是它），不是下游漂移。**票面指定的 `promote --baseline ai-v10`**：`errors=446`、`cases=68/68`、`deals_differing=378/768`、kinds `{PEACH: 14, PLAY_PHASE: 147, RESPOND: 28, SELECT_CARDS: 1, SELECT_OPTION: 23, SKILL_ACTIVATION: 165}`；对父版本 `−0.0124`、CI `[−0.045, 0.0186]`（`non_inferior=false`），对 `ai-v0` `+0.0527`、CI `[0.0155, 0.0868]`（`anchor_non_inferior=true`），`diff_attributed=false`；分身份：主公 +0.0312 / 忠臣 0.0 / 反贼 −0.0117 / **内奸 −0.0744（17/121 → 8/121）**。**两条读数都不能全算在本票头上**（见下第 1 / 2 条）：① `ai-v10` 之后 HEAD 已累计 20 个提交 / 1813 行启发式改动（含 08 的敌对值表化与各技能打分同步）⇒ promote 的 diff / kinds / 胜率混着那段漂移；② 446 个 errors 是**冻结基线不兼容**：`--workers 8` 与 `--workers 1` 两次 promote 逐字段相同（确定性），归因 = 基线 `ai-v10` / `ai-v0` **不认识 `QueryKind.SELECT_OPTIONS`**（`e9e0db7` 在本 tag 之后才加的多选选项询问面）⇒ `KeyError`（+1 颗同源的 `IllegalActionError`），**候选臂 0 错**（逐臂 32 副实测 6/6/0；同批 768 副 5×heuristic 也是 0 errors）。`quick` JSON `runs/quick-da702ec-vs-parent.json`。**实机：本轮未跑**（批末一局待用户驱动） | **待用户裁定**（agent 只记读数：基线老化 / `errors=446` 的归因 / 预注册 3 类缺了 2 个直接读取面 / 均势局内奸变保守与验收批重选种，四条见下） |
 
 - `ai-v0` 是**原点基线**（spec §2.6）：`promote --anchor ai-v0` 用它防梯子漂移。
 - 上表的**种子批**列 = **该版评估所用的批**：`ai-v0` 行是 `derive_batch(ai-v0 commit, 128)`
@@ -153,6 +154,42 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
   读数来自哪一批"。
 - 后续版本在跑完 `quick` → `promote` → 实机（可选）后追加一行；被接受的 tag 必须能被版本
   加载器加载。实机结论只放指针：`.scratch/ai-light/acceptance.md`。
+- **`ai-v11` 的四条口径说明**（读那一行之前先看这四条；`人类裁定` 栏据实留**待用户裁定**）：
+  1. **基线老化，promote 不是本票的净读数**：`ai-v10` tag（2026-10-31）之后 HEAD 已累计
+     **20 个提交 / 1813 行**启发式改动（`git log ai-v10..HEAD -- src/sgs/agents/heuristic.py`：
+     含票 08 的敌对值表化与一批技能打分同步），而票面按惯例指定 `--baseline ai-v10`。
+     故那一行的 diff / kinds / 胜率是"**票 32 + 这段漂移**"的合计。本票**自己的**贡献另用
+     `quick --baseline c58bde5`（父提交）隔离测过：`errors=0`、diff **18/128**、kinds
+     `{PEACH: 6, PLAY_PHASE: 8, RESPOND: 2, SELECT_OPTION: 1, SKILL_ACTIVATION: 1}`，
+     且 18 副**全部**是座位 0 = 内奸的局面（探针逐副核，非漂移）。下次给本票建 tag 时应以
+     `da702ec` 为 `engine_ref`；若要"父版本 = 上一版"的严格读数，需要一个介于两者之间的
+     留存 tag（今天没有）。
+  2. **`errors=446` 不是候选崩的，是冻结基线不兼容**：`--workers 8` 与 `--workers 1` 两次
+     promote 的 `errors` / `deals_differing` / kinds / diff / CI / 分身份**逐字段相同**
+     （446 / 378 / −0.0124 / `[-0.045, 0.0186]`）⇒ 不是并发或负载的偶发，是**确定性**的。
+     归因：候选臂之外的四个臂都在跑冻结的 `ai-v10` / `ai-v0`（候选臂的另外 4 席也是
+     `ai-v10`），而**基线不认识 `QueryKind.SELECT_OPTIONS`**（多选选项询问面由 `e9e0db7`
+     在本 tag **之后**才加，`_SCORERS[QueryKind(...)]` 直接 `KeyError`），另有 1 颗种子的
+     `IllegalActionError` 同源。逐臂实测（32 副、`workers=1`、干净版本目录）：`ai-v10`
+     6/32、`ai-v0` 6/32（全是上面两类），**候选 0/32**；同一批 **768 副**用当前版本
+     （`sgs_batch`、5×heuristic）跑也是 **0 errors**。因此 `errors > 0` 卡在基线、不卡在本票。
+     按 `tools/ai_eval` 的口径 `errors > 0` ⇒ 退出码 1、五条件读数作废——这一条**要人类
+     裁定**：接受"基线不兼容"的归因重读 `non_inferior`，还是先补一张"旧版本对未知
+     `QueryKind` fail-closed（Pass，而不是 KeyError）"的票再重跑。附注：版本副本校验在
+     `--workers>1` 下另有一条**偶发**写读竞态（`AiVersionError: 副本与 git show 字节不一致`），
+     它只出现在探针里、没有进入这两次 promote 的计数。
+  3. **预注册的 3 类少了 2 个直接读取面**：票面写 `first_divergence_by_kind ⊆ {PEACH,
+     RESPOND, PLAY_PHASE}`，隔离测里另有 `SELECT_OPTION` 1 条与 `SKILL_ACTIVATION` 1 条。
+     它们不是下游平分漂移——**座位步**（`_score_seat_option`，`SELECT_OPTION`）与**复合发动
+     的座位填写**（`SKILL_ACTIVATION`，如英魂 / 好施 / 从谏）读的是**同一个**
+     `_identity_relation`，是内奸行换了取值来源的直接后果。工具口径因此
+     `diff_attributed=false`；把这两类补进预注册属于**事后扩样**，agent 不代签。
+  4. **均势局内奸变保守**（票面数值表的 5 人局那一行 = 三个 H 全 0）：内奸在 5 人局开局
+     对所有座位**没有敌人权重**，比旧常量表（忠臣 / 反贼 = 1.0）更保守。读数是分身份
+     **内奸 −0.0744**（对 `ai-v0` 的整梯子仍 `+0.0527`、CI `[0.0155, 0.0868]`）。验收的 32
+     种子批因此按仓纪律**重新选种**（判据不放宽；M5 / M6 DoD 绑死的 12 个种子一个不动，其余
+     20 个换成 `168..187`）——理由与两次读数写在 `tests/support/__init__.py` 的
+     `ACCEPTANCE_SEEDS`。这条行为变更是否接受，由用户裁定。
 - **`ai-v1` 的两条口径说明**（读 JSON 前先看这两条；它们也是 §2.3 五条件里两条的**待裁定项**）：
   1. `cases` = **8/9**：工具口径要求"模块里无 failed、无 strict xfail"（§2.3 ① / §2.8），
      而 `tests/test_ai_cases.py` 里仍有 D3【遗计】的 `xfail(strict=True)`（票 24，本票未
