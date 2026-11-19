@@ -337,6 +337,164 @@ def test_a_session_can_take_a_ready_made_pve_rule_config() -> None:
         )
 
 
+def _pve_battle_rule_config():
+    """一份 2v3 的剧本战斗配置（主角 + 1 名 AI 队友 vs 3 名模板敌人）。"""
+    from sgs.data import (
+        Identity,
+        Mode,
+        PveConfig,
+        PveSeat,
+        PveVictory,
+        PveVictoryKind,
+        SkillGrant,
+    )
+
+    pve = PveConfig(
+        identities=(
+            Identity.ALLY,
+            Identity.ALLY,
+            Identity.ENEMY,
+            Identity.ENEMY,
+            Identity.ENEMY,
+        ),
+        principal=0,
+        protected_ally=1,
+        victory=PveVictory(kind=PveVictoryKind.ROUT),
+        seats=(
+            PveSeat(hero="jie_liubei", hp=4, hp_max=4),
+            PveSeat(hero=None, name="义勇弓手", hp=3, hp_max=3),
+            PveSeat(hero=None, name="黄巾力士", hp=3, hp_max=3),
+            PveSeat(
+                hero=None,
+                name="黄巾力士",
+                hp=3,
+                hp_max=3,
+                hp_max_bonus=1,
+                draw_bonus=1,
+                slash_damage_bonus=2,
+            ),
+            PveSeat(
+                hero=None,
+                name="黄巾渠帅",
+                hp=4,
+                hp_max=4,
+                hp_max_bonus=2,
+                draw_bonus=0,
+                slash_damage_bonus=1,
+            ),
+        ),
+        grants=(
+            SkillGrant(seat=0, kind="skill", id="hero.liubei.rende"),
+            SkillGrant(seat=0, kind="relic", id="equip.crossbow"),
+            SkillGrant(seat=1, kind="skill", id="hero.guanyu.wusheng"),
+        ),
+    )
+    return RuleConfig(player_count=5, mode=Mode.PVE, pve=pve)
+
+
+def test_a_pve_battle_payload_carries_the_three_displays_and_the_relic_list() -> None:
+    """M7 票 23：剧本战斗就是现有身份局牌桌，**载荷**里多三处显示 + 一条只读遗物列表。
+
+    三处显示都是展示层的**派生字段**（不进记录流、不是 delta、AI 读点不加行）：
+
+    - 友 / 敌：``side`` + ``side_label``（PvE 开局身份即公开，票 01 §3）；
+    - 敌人模板名：``template_name``——合成武将没有武将牌，名字只有 ``PveSeat.name``；
+      ``hero_name`` 仍留空（"这张座位上没有武将牌"是引擎事实，界面按模板名兜底）；
+    - 全局副本技能标签：``global_skill`` = 来源（``GLOBAL`` / 副本全局技能）+ ``side``
+      （对谁生效）+ 三档**物化**数值（``hp_max`` / ``draw`` / ``slash``）。
+
+    遗物列表住快照顶层的只读 ``relics``（本票唯一的投影增量）。
+
+    **不泄露**（A2，PvE 也要守）：对手只给 ``hand_count``、牌堆只给 ``deck_count``。
+    """
+    session = Session(
+        seed=0x5EED, rule_config=_pve_battle_rule_config(), timeout_seconds=None
+    )
+    snapshot = visible_snapshot(session)
+    players = snapshot["players"]
+
+    # 友 / 敌标签：主角与队友是「友」，三名模板敌人是「敌」。
+    assert [(player["side"], player["side_label"]) for player in players] == [
+        ("ally", "友"),
+        ("ally", "友"),
+        ("enemy", "敌"),
+        ("enemy", "敌"),
+        ("enemy", "敌"),
+    ]
+
+    # 模板名：合成武将没有武将牌（`hero_name` 留空），界面读 `template_name`。
+    assert players[0]["hero_name"] == "界刘备", "主角读自己的武将名"
+    assert players[0]["template_name"] is None, "有武将牌的座位没有模板名"
+    assert [player["hero_name"] for player in players[1:]] == [None] * 4, (
+        "合成武将没有武将牌：hero_name 不许被模板名顶替（那是引擎事实）"
+    )
+    assert [player["template_name"] for player in players] == [
+        None,
+        "义勇弓手",
+        "黄巾力士",
+        "黄巾力士",
+        "黄巾渠帅",
+    ], "敌人显示模板名，主角与队友显示自己的名字"
+
+    # 全局副本技能标签：来源 + 生效侧 + 三档物化数值（没有加成的座位不带标签）。
+    assert players[0]["global_skill"] is None, "没有三档加成的座位不挂标签"
+    assert players[2]["global_skill"] is None
+    tags = {player["seat"]: player["global_skill"] for player in players}
+    assert tags[3] == {
+        "source": "global",
+        "source_label": "副本全局技能",
+        "side": "enemy",
+        "side_label": "敌",
+        "scale": {"hp_max": 1, "draw": 1, "slash": 2},
+    }
+    assert tags[4]["scale"] == {"hp_max": 2, "draw": 0, "slash": 1}
+    assert tags[4]["side_label"] == "敌"
+
+    # 遗物列表：只读显示行，名字走既有的技能 / 牌名反查（查不到原样印 id）。
+    assert snapshot["relics"] == [{"id": "equip.crossbow", "name": "诸葛连弩"}]
+
+    # 不泄露：除了自己的手牌，载荷里没有任何隐藏牌面；牌堆只有张数。
+    state = session.engine.state
+    other_hand_ids = {
+        card_id
+        for player in state.players
+        if player.seat != session.human_seat
+        for card_id in player.hand
+    }
+    visible_ids = {
+        card["card_id"]
+        for card in (
+            snapshot["self_hand"]
+            + snapshot["discard"]
+            + snapshot["processing"]
+            + [card for player in players for card in player["equip"] + player["judge"]]
+        )
+    }
+    assert visible_ids <= set(state.player(session.human_seat).hand)
+    assert not (visible_ids & other_hand_ids), "PvE 也不许把对手手牌的牌面放进载荷"
+    assert all(
+        isinstance(player["hand_count"], int) and "hand" not in player
+        for player in players
+    ), "对手只有手牌**张数**"
+    assert isinstance(snapshot["deck_count"], int) and "deck" not in snapshot, (
+        "牌堆只有数量、没有顺序"
+    )
+
+
+def test_an_identity_game_payload_has_no_pve_display_fields() -> None:
+    """数据决定显示：身份局没有 ``pve`` 段 ⇒ 三处显示字段全为空、遗物列表为空表。
+
+    同一份派生不在前端写"是不是剧本局"的分支——载荷里有就有、没有就没有。
+    """
+    session = Session(seed=17, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    snapshot = visible_snapshot(session)
+
+    assert all(player["side"] is None and player["side_label"] is None for player in snapshot["players"])
+    assert all(player["template_name"] is None for player in snapshot["players"])
+    assert all(player["global_skill"] is None for player in snapshot["players"])
+    assert snapshot["relics"] == []
+
+
 def test_the_hero_pool_is_dealt_from_the_enabled_pool_by_default() -> None:
     session = Session(
         seed=29, ai="random", timeout_seconds=None, player_count=5, hero_pool=()

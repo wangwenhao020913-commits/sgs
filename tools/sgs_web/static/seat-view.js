@@ -71,14 +71,52 @@ function heroIdAt(view, seat) {
 
 /** 武将块的名称：优先服务端 `hero_name`（U1-02）。
  *
+ * **剧本战斗的合成武将**（M7 票 23）没有武将牌（`hero_name` 为空），名字读服务端下发的
+ * 模板名 `player.template_name`（= `PveSeat.name`，如「黄巾力士」）。它**不是**武将名，
+ * 所以没写进 `hero_name`；这里只是座位卡 / 事件流 / 详情标题的兜底读法（数据没有就不猜）。
+ *
  * 旧载荷 / 合成视图没有 `hero_name`（M6 票 19 前只对标准版武将翻得出名字）⇒ 按
  * **目录**把 id 翻成中文名（`core.js:heroDisplayName`）。混合池下"刘备 / 界刘备"
  * 因此在环上与自己的面板上都分得清，不会退回 `jie_liubei` 这种引擎 id。
  */
 function heroNameOf(player, view) {
   if (player && player.hero_name) return player.hero_name;
+  if (player && player.template_name) return String(player.template_name);
   const assigned = heroIdAt(view, player ? player.seat : null);
   return assigned ? heroDisplayName(assigned) : "（无武将）";
+}
+
+/** 剧本战斗的**副本全局技能标签**文案（M7 票 23）：来源 + 生效侧 + 三档数值。
+ *
+ * 三档全是服务端从 header 物化好的座位常驻加成（`hp_max` / `draw` / `slash`），前端
+ * **不换算、不乘价、不推断**；没有标签（没有加成 / 不是 PvE 座位）⇒ 空串，调用方不画节点。
+ */
+function pveGlobalText(player) {
+  const tag = player && player.global_skill;
+  if (!tag) return "";
+  const scale = tag.scale || {};
+  const plus = (value) => {
+    const number = Number(value) || 0;
+    return `${number >= 0 ? "+" : ""}${number}`;
+  };
+  return `${tag.source_label || "副本全局技能"}（${tag.side_label || "全体"}）`
+    + `：体力上限 ${plus(scale.hp_max)} · 摸牌 ${plus(scale.draw)} · 杀伤 ${plus(scale.slash)}`;
+}
+
+/** 座位卡的副本全局技能标签节点（没有标签 ⇒ `null`，调用方不 append）。
+ *
+ * `data-side` 是 `ally` / `enemy`：样式与烟测都读它，不按文案找节点。
+ */
+function pveGlobalNode(player) {
+  const text = pveGlobalText(player);
+  if (!text) return null;
+  const tag = player.global_skill || {};
+  const node = document.createElement("div");
+  node.className = "pve-global";
+  node.setAttribute("data-side", String(tag.side || ""));
+  node.setAttribute("title", "副本全局技能：开局对指定侧各座位物化的三档常驻加成");
+  node.textContent = text;
+  return node;
 }
 
 /** 视角快照里的座位（详情标题 / 详情头 / 右键入口共用这一处查找）。 */
@@ -611,6 +649,9 @@ function heroBlockNode(player, view, ctx, flags) {
   heroTags.className = "hero-tags";
   fillHeroTags(heroTags, player);
   block.appendChild(heroTags);
+  // M7 票 23 的第三处显示：副本全局技能标签（挂到**受影响的座位**上；没有就不画节点）。
+  const pve = pveGlobalNode(player);
+  if (pve) block.appendChild(pve);
   const foot = document.createElement("div");
   foot.className = "seat-foot";
   const hand = document.createElement("span");

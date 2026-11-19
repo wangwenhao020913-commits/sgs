@@ -31361,4 +31361,189 @@ check("M7-22ad 收尾干净：无档、用户库撤掉、整备面与节点面�
   && $("script-face").hidden === true,
   `status=${scriptStatus()} 格=${loadoutSlots().length}`);
 
+
+/* ==================================================================== M7 票 23
+ * 剧本战斗 = **现有身份局牌桌**（零新增 view）。这一节只验三件事：
+ *   ① 牌桌表面多出来的三处显示（友 / 敌标签、敌人模板名、副本全局技能标签）+ 只读遗物栏；
+ *   ② 棋盘 → 牌桌：进战斗节点之后**自动换到牌桌**（`scriptBoardEnterNode` 的真路径）；
+ *   ③ 牌桌 → 棋盘：打完点「回棋盘结算」回棋盘，结算仍走票 22 的既有流程（服务端判胜负）。
+ *
+ * 进料是一份 2v3 的剧本库（入口事件房先给一件遗物，战斗房带一条**只对敌方**生效的副本
+ * 全局技能）；对局用**真端点**驱动到终局（兜底优先级与超时代答同一条：Pass → EndPhase →
+ * 第一个候选），所以三处显示与结算都不是合成载荷。
+ */
+const SCRIPT_BATTLE_LIBRARY = `${RUNS_DIR}/script-library.json`;
+writeFileSync(
+  SCRIPT_BATTLE_LIBRARY,
+  readFileSync("tests/support/fixtures/script-battle-library.json", "utf8"),
+);
+
+/* 座位节点：环上的对手按 `data-seat` 找；**自己**是 index.html 的静态节点，垫片不建父子
+ * 关系，故按 id 直接读（与既有 U1-01m / 身份徽标那几条同一读法）。 */
+const isSelfSeat = (seat) => Number(seat) === Number(ui.state.view.snapshot.seat);
+const seatBoxAt = (seat) => (isSelfSeat(seat) ? $("t-self-seat") : seatBox(seat));
+const seatNameAt = (seat) => {
+  if (isSelfSeat(seat)) return $("t-hero").textContent;
+  const box = seatBox(seat);
+  const names = box ? byClass(box, "hero-name") : [];
+  return names.length ? names[0].textContent : "";
+};
+const seatSideAt = (seat) => {
+  if (isSelfSeat(seat)) return $("t-self-identity").textContent;
+  const box = seatBox(seat);
+  const badges = box ? byClass(box, "identity-badge") : [];
+  return badges.length ? badges[0].textContent : "";
+};
+const seatGlobalsAt = (seat) => {
+  if (isSelfSeat(seat)) return $("t-self-global").hidden ? [] : [$("t-self-global").textContent];
+  const box = seatBox(seat);
+  return box ? byClass(box, "pve-global").map((node) => node.textContent) : [];
+};
+
+const pveBattleBoard = await postRaw("/api/script-runs", {
+  script_id: "battleprobe", chosen_hero: "jie_liubei", seed: 2311,
+});
+ui.scriptBoardShow(pveBattleBoard);
+
+// ---- ① 入口事件房：拿一件遗物（战斗的 grants 从 run.relics 来）----
+await ui.scriptBoardEnterNode(pveBattleBoard.nodes.find((node) => node.id === "g1"));
+check("M7-23a 入口事件房先给一件遗物（真端点）：服务端的结算事件里就有它",
+  $("script-face").getAttribute("data-face") === "event"
+  && faceOption(0) !== null && faceOption(0).textContent.includes("诸葛连弩"),
+  `face=${$("script-face").getAttribute("data-face")} 行="${faceOption(0) && faceOption(0).textContent}"`);
+await clickAndWait(faceOption(0));
+const relicSettled = dialog().getAttribute("data-dialog") === "result";
+await clickAndWait(confirmButtons()[0]);
+check("M7-23b 遗物进了这一轮（`run.relics`）：结果弹窗写的是服务端事件，回棋盘后那一轮就带着它",
+  relicSettled
+  && ui.state.script.board.run.relics.includes("equip.crossbow")
+  && ui.state.script.board.run.coins >= 0,
+  `relics=${JSON.stringify(ui.state.script.board.run.relics)}`);
+
+// ---- ② 棋盘 → 牌桌：进战斗节点 = 换到**现有**牌桌（零新增 view）----
+const sessionCalls = calls.length;
+const battleEntered = await ui.scriptBoardEnterNode(
+  ui.state.script.board.nodes.find((node) => node.id === "b1"),
+);
+ui.flushPlayback();
+const pveBattleSessionId = battleEntered && battleEntered.session_id;
+check("M7-23c 进战斗节点自动换到牌桌：`state.sessionId` = 棋盘体的 session_id、取一次首屏增量、牌桌页可见（不新造 view）",
+  Boolean(pveBattleSessionId)
+  && ui.state.sessionId === pveBattleSessionId
+  && ui.state.script.battle && ui.state.script.battle.sessionId === pveBattleSessionId
+  && $("view-table").hidden === false && $("view-script-board").hidden === true
+  && calls.slice(sessionCalls).some(
+    (call) => call.method === "GET"
+      && call.path === `/api/sessions/${pveBattleSessionId}?after=-1&logs=0`,
+  )
+  && $("view-lobby").hidden === true && $("view-replay").hidden === true,
+  `session=${ui.state.sessionId} table=${$("view-table").hidden} board=${$("view-script-board").hidden}`);
+
+// 三处显示之一 + 之二：座位名牌（模板名 / 主角名）+ 友 / 敌标签；之三：副本全局技能标签。
+const enemyGlobals = [2, 3, 4].map((seat) => seatGlobalsAt(seat));
+check("M7-23d 友 / 敌标签：2v3 里两名友方写「友」、三名敌人写「敌」（身份全公开，不做猜身份 UI）",
+  [0, 1, 2, 3, 4].map((seat) => seatSideAt(seat)).join(",") === "友,友,敌,敌,敌",
+  `标签=${[0, 1, 2, 3, 4].map((seat) => `座位${seat}:${seatSideAt(seat)}`).join(" ")}`);
+check("M7-23e 敌人显示**模板名**（「黄巾力士」而不是武将名），主角与队友显示自己的名字",
+  seatNameAt(0) === "界刘备" && seatNameAt(1) === "义勇弓手"
+  && [2, 3, 4].map((seat) => seatNameAt(seat)).join(",") === "黄巾力士,黄巾力士,黄巾渠帅",
+  `名字=${[0, 1, 2, 3, 4].map((seat) => seatNameAt(seat)).join(" / ")}`);
+check("M7-23f 副本全局技能标签挂在**受影响的座位**上：来源 + 生效侧 + 三档物化数值（友方没有标签）",
+  enemyGlobals.every(
+    (labels) => labels.length === 1
+      && labels[0].includes("副本全局技能（敌）")
+      && labels[0].includes("体力上限 +1") && labels[0].includes("摸牌 +0")
+      && labels[0].includes("杀伤 +1"),
+  )
+  && seatGlobalsAt(0).length === 0 && seatGlobalsAt(1).length === 0,
+  `敌=${JSON.stringify(enemyGlobals)} 友=${JSON.stringify([seatGlobalsAt(0), seatGlobalsAt(1)])}`);
+check("M7-23g 只读遗物栏：自己的武将块里列出这一轮的遗物（名字是服务端反查的，不是 id）",
+  $("t-self-relics").hidden === false
+  && $("t-self-relic-list").textContent === "诸葛连弩"
+  && $("t-self-global").hidden === true,
+  `遗物="${$("t-self-relic-list").textContent}" 全局隐藏=${$("t-self-global").hidden}`);
+check("M7-23h 不泄露（PvE 也要守）：对手座位只有手牌**张数**、牌堆只有数量",
+  [2, 3, 4].every((seat) => {
+    const box = seatBoxAt(seat);
+    const cards = box ? byClass(box, "card") : [];
+    return cards.length === 0 && (box.text().match(/手牌：\d+/) || [""])[0].length > 0;
+  })
+  && /^\d+$/.test($("t-deck").textContent)
+  && ui.state.view.snapshot.deck === undefined,
+  `牌=${[2, 3, 4].map((seat) => (seatBoxAt(seat) ? byClass(seatBoxAt(seat), "card").length : -1))} 牌堆="${$("t-deck").textContent}"`);
+
+// ---- ③ 打完 → 回棋盘结算（表盘的出口只在终局后出现）----
+const pveReturn = () => $("btn-t-pve-return");
+check("M7-23i 打到终局之前没有「回棋盘结算」的出口（出口只由服务端 finished 决定）",
+  ui.state.view.finished === false && pveReturn().hidden === true,
+  `finished=${ui.state.view.finished} hidden=${pveReturn().hidden}`);
+
+const fallbackActionOf = (pending) => pending.legal_actions.find(
+  (action) => action.kind === "pass" || action.kind === "end_phase",
+) || pending.legal_actions[0];
+let battleSteps = 0;
+while (!ui.state.view.finished && battleSteps < 200) {
+  const pending = ui.state.view.pending;
+  if (!pending) {
+    // 没有挂起询问是合法态（逐目标暂停 / 还没轮到人类）：与真客户端一样再取一次增量。
+    ui.applyView(await get(
+      `/api/sessions/${ui.state.sessionId}?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+    ));
+    battleSteps += 1;
+    continue;
+  }
+  const action = JSON.parse(JSON.stringify(fallbackActionOf(pending)));
+  ui.applyView(await postRaw(
+    `/api/sessions/${ui.state.sessionId}/answer?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+    { action },
+  ));
+  battleSteps += 1;
+}
+check("M7-23j 这一场走到了终局（真会话）：终局之后出口出现、牌桌页仍是同一张牌桌",
+  ui.state.view.finished === true && pveReturn().hidden === false
+  && $("view-table").hidden === false,
+  `finished=${ui.state.view.finished} 出口隐藏=${pveReturn().hidden} 步=${battleSteps}`);
+
+// ---- ④ 牌桌 → 棋盘：点出口回棋盘，结算走票 22 的既有流程（此刻零请求）----
+const settleMark = calls.length;
+await clickAndWait(pveReturn());
+const beforeSettle = settleCalls(settleMark);
+check("M7-23k 点「回棋盘结算」：回棋盘页、牌桌会话摘掉（顶栏「牌桌」置灰）、打开**既有**的结算弹窗且零请求",
+  $("view-script-board").hidden === false && $("view-table").hidden === true
+  && ui.state.sessionId === null && ui.state.script.battle === null
+  && dialog().hidden === false && dialog().getAttribute("data-dialog") === "pick"
+  && beforeSettle.length === 0,
+  `board=${$("view-script-board").hidden} session=${ui.state.sessionId} dialog=${dialog().getAttribute("data-dialog")} settle=${beforeSettle.length}`);
+
+// 全部放弃（0 次选技）⇒ 最后一步落一条真 settle（`session_id` = 那一场的会话，服务端判胜负）。
+let abandonRounds = 0;
+while (dialog().getAttribute("data-dialog") === "pick" && abandonRounds < 8) {
+  await clickAndWait(confirmButtons()[0]);
+  abandonRounds += 1;
+}
+const battleSettles = settleCalls(settleMark);
+const battleOutcome = ui.state.script.board
+  ? null
+  : (dialog().hidden === false ? "ended" : null);
+check("M7-23l 三选一放弃到底 ⇒ 一条真 settle（带战斗会话 id）；结果弹窗写服务端判的结局（不传 won）",
+  battleSettles.length === 1
+  && battleSettles[0].body.session_id === pveBattleSessionId
+  && Array.isArray(battleSettles[0].body.picks)
+  && battleSettles[0].body.won === undefined
+  && dialog().hidden === false && dialog().getAttribute("data-dialog") === "result"
+  && ["结算", "通关", "整轮失败", "剧情战败"].some(
+    (title) => $("script-confirm-title").textContent.includes(title),
+  ),
+  `settle=${battleSettles.length} outcome-title="${$("script-confirm-title").textContent}" 放弃轮=${abandonRounds} ${battleOutcome || ""}`);
+await clickAndWait(confirmButtons()[0]);
+
+// ---- 收尾：删档 + 撤掉用户库（后续用例仍走内置库）----
+await discardScriptSave();
+unlinkSync(SCRIPT_BATTLE_LIBRARY);
+check("M7-23m 收尾干净：无档、用户库撤掉、牌桌会话与棋盘体都清空",
+  scriptStatus() === "missing" && !existsSync(SCRIPT_BATTLE_LIBRARY)
+  && ui.state.sessionId === null && ui.state.script.board === null
+  && ui.state.script.battle === null,
+  `status=${scriptStatus()} session=${ui.state.sessionId} board=${ui.state.script.board}`);
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

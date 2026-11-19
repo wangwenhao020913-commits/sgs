@@ -121,6 +121,11 @@
     "scriptLoadoutSwap", "scriptLoadoutDiscard", "scriptLoadoutPut",
     "scriptFaceRender", "scriptFaceRevealInner", "scriptSettleOpenBattle", "scriptSettleSubmit",
     "scriptLoadoutAfterEnter", "wireScriptLoadout",
+    // M7 票 23：棋盘 ↔ 牌桌的换场（战斗就是现有牌桌）+ 牌桌侧的三处显示 / 只读遗物栏。
+    // 烟测走真端点：`scriptBoardEnterNode` 之后自动进牌桌，打完点「回棋盘结算」走既有结算流程。
+    "startSessionView", "scriptBattleEnter", "scriptBattleReturnToBoard",
+    "scriptBattleTableSync", "scriptBattleFinished",
+    "pveGlobalText", "pveGlobalNode", "heroNameOf",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

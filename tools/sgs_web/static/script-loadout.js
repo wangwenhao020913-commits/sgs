@@ -1178,6 +1178,98 @@ function scriptLoadoutAfterEnter(board) {
   return null;
 }
 
+/* ------------------------------------------------------ 棋盘 ↔ 牌桌（票 23） */
+
+/** 进战斗节点之后**换到牌桌**（M7 票 23）：剧本局的战斗就是现有身份局牌桌，零新增 view。
+ *
+ * 棋盘体上的 `session_id` 就是既有 `/api/sessions/<id>` 的会话（票 19）；这里只做三件事：
+ * 记住"这一场是从棋盘进来的"（表盘出口的显隐判据），按开局页建局之后**同一条路**把首屏
+ * 视图换进来（`session.js:startSessionView`），再切到牌桌页。不复制 `table.js`、不新造 DOM。
+ */
+async function scriptBattleEnter(board) {
+  const sessionId = board && board.session_id;
+  if (!sessionId) return null;
+  const runId = board.run_id || state.script.runId;
+  const pending = (board && board.pending) || null;
+  const view = await api(
+    `/api/sessions/${encodeURIComponent(sessionId)}?after=-1&logs=0`,
+  );
+  state.script.battle = {
+    sessionId,
+    runId,
+    nodeId: (pending && pending.node_id) || null,
+  };
+  startSessionView(view);
+  return view;
+}
+
+/** 这一场是不是"从棋盘进来的、且服务端说终局了"（出口按钮的唯一判据，只读）。 */
+function scriptBattleFinished(view) {
+  const battle = state.script.battle;
+  return Boolean(
+    battle
+    && battle.sessionId
+    && state.sessionId
+    && battle.sessionId === state.sessionId
+    && view
+    && view.finished === true,
+  );
+}
+
+/** 牌桌 → 棋盘（M7 票 23）：一场打完就回棋盘，结算仍走票 22 的既有流程（三选一 / 遗物弹窗）。
+ *
+ * 结算端点的 `session_id` 从**内存里的棋盘体**读（会话 id 不进档，票 04 §4）；先把牌桌会话
+ * 摘掉（`state.sessionId` 归空 ⇒ 顶栏「牌桌」随之置灰），再从棋盘开结算——服务端判胜负。
+ */
+function scriptBattleReturnToBoard() {
+  if (!state.script.battle) return null;
+  const board = state.script.board;
+  state.sessionId = null;
+  state.script.battle = null;
+  if (board) scriptBoardShow(board);
+  return scriptSettleOpenBattle();
+}
+
+/** 自己的 PvE 显示位（`table.js:renderSelfSeat` 末尾调用）：全局技能标签 + 只读遗物栏 + 出口。
+ *
+ * 判据全是**载荷事实**：`player.side` 有值 = 这是一场剧本战斗（票 01 §3 的友 / 敌）；遗物
+ * 列表读快照顶层的只读 `relics`（票 23 的投影增量）；出口另要"这一场是从棋盘进来的"。
+ * 身份局的这三个键都不存在 / 为空 ⇒ 节点一律收起，牌桌 DOM 与引入前同形。
+ */
+function scriptBattleTableSync(view) {
+  const player = view && view.snapshot
+    ? (view.snapshot.players || []).find(
+      (item) => Number(item.seat) === Number(view.snapshot.seat),
+    )
+    : null;
+  const globalBox = $("t-self-global");
+  if (globalBox) {
+    const text = typeof pveGlobalText === "function" ? pveGlobalText(player) : "";
+    globalBox.hidden = text === "";
+    globalBox.textContent = text;
+    if (text) {
+      globalBox.setAttribute("data-side", String((player.global_skill || {}).side || ""));
+    }
+  }
+  const relicBox = $("t-self-relics");
+  if (relicBox) {
+    const pve = Boolean(player && player.side);
+    relicBox.hidden = !pve;
+    if (pve) {
+      const relics = (view && view.snapshot && view.snapshot.relics) || [];
+      const list = $("t-self-relic-list");
+      if (list) {
+        list.textContent = relics.length
+          ? relics.map((row) => String((row && (row.name || row.id)) || "")).join("、")
+          : "无";
+      }
+    }
+  }
+  const back = $("btn-t-pve-return");
+  if (back) back.hidden = !scriptBattleFinished(view);
+  return null;
+}
+
 /** 接线（`main.js:wire()` 里调一次）：整备面只有「丢弃」是静态键，其余全是现铺的行。 */
 function wireScriptLoadout() {
   const on = (id, handler) => {
@@ -1185,6 +1277,8 @@ function wireScriptLoadout() {
     if (node) node.addEventListener("click", handler);
   };
   on("btn-script-loadout-discard", () => scriptLoadoutDiscard());
+  // M7 票 23：牌桌上那个"回棋盘结算"的出口（显示态由 `scriptBattleTableSync` 维护）。
+  on("btn-t-pve-return", () => scriptBattleReturnToBoard());
   scriptLoadoutSync();
   return null;
 }

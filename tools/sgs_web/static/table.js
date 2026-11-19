@@ -223,6 +223,9 @@ function renderSelfSeat(view, ctx) {
   // M6 票 19：武将牌上的牌区画在**武将块**里（与对手块同一个渲染口）。
   fillHeroZones($("t-self-hero-zones"), player);
   fillHeroTags($("t-self-hero-tags"), player);
+  // M7 票 23：剧本战斗（PvE）的显示位（副本全局技能标签 / 只读遗物栏 / 回棋盘结算的出口）。
+  // 调用时解析脚本层（与 `skillInkFxClear` 一类钩子同姿态）：整备面那份脚本缺件时不报错。
+  if (typeof scriptBattleTableSync === "function") scriptBattleTableSync(view);
 }
 
 /** 顶栏那块公开身份配比：2 人局（无身份局）整块隐藏。 */

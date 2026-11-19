@@ -798,6 +798,27 @@ function applyLiveDelta(record, view = state.liveView) {
   return view;
 }
 
+/** 换到一份**新会话**的首屏视图：重置本地态 → 回放／提交 → 切到牌桌（M7 票 23）。
+ *
+ * 两个入口共用这一条路：开局页建局成功（`lobby.js:startGame`）与剧本战斗节点进牌桌
+ * （`script-loadout.js:scriptBattleEnter`）。会话 id / 游标 / 日志先换掉，上一局还在播的
+ * 事件先收尾——否则旧记录会漏进新一局的轮次计数与事件流。
+ */
+function startSessionView(body) {
+  state.sessionId = body.session_id;
+  state.cursor = -1;
+  state.logSeq = 0;
+  if (state.playback) flushPlayback();
+  state.logRecords = [];
+  state.narrative = [];
+  state.narrativeShown = 0;
+  state.lastQuerySeat = null;
+  $("t-log").innerHTML = "";
+  applyView(body);
+  show("table");
+  return body;
+}
+
 /** 收到一份新视图：**有事件就先回放**，播完再提交快照与询问（报障 3 的严格顺序）。
  *
  * 回放期间 ``state.view`` 仍是**上一条**视图、提交按钮是灰的——用户看到的是事件一条条

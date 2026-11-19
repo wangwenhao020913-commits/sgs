@@ -832,6 +832,37 @@ button.mini-slot { cursor: pointer; }
 /* B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 */
 .hero-tags { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0; }
 .hero-tags[hidden] { display: none; }
+
+/* ---------- 剧本战斗（PvE）的显示位（M7 票 23）----------
+ * 三处显示里挂到座位上的两处（副本全局技能标签 / 模板名由 `.hero-name` 承担）+ 只读遗物栏
+ * + 打完之后的出口。**身份局这三个节点都收起**（`hidden`），故既有牌桌版式逐字节不变：
+ * 尺寸走设计单位、颜色只借既有的 `--dim` / `--ink` / `--line`，不新造配色变量。 */
+.pve-global {
+  margin-top: 2px; padding: 0 calc(4 * var(--dsu));
+  border: 1px solid #e3d3b4; border-radius: 4px;
+  background: #fbf4e6; color: #7a5a20;
+  font-size: calc(9 * var(--dsu)); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pve-global:empty { display: none; }
+.pve-relics {
+  display: flex; align-items: baseline; gap: calc(4 * var(--dsu));
+  margin-top: 2px; font-size: calc(9 * var(--dsu)); color: var(--dim);
+  overflow: hidden; white-space: nowrap;
+}
+.pve-relics[hidden] { display: none; }
+.pve-relic-label { flex: 0 0 auto; color: var(--dim); }
+.pve-relic-list {
+  flex: 1 1 auto; min-width: 0; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pve-return {
+  margin-top: 3px; padding: 1px calc(6 * var(--dsu));
+  font: inherit; font-size: calc(10 * var(--dsu));
+  border: 1px solid var(--line); border-radius: 4px;
+  background: #fffdf8; color: var(--ink); cursor: pointer;
+}
+.pve-return[hidden] { display: none; }
 .hero-tag {
   padding: 0 4px; border: 1px solid #c9b48f; border-radius: 999px;
   background: #f7efdf; color: #7d6b52;

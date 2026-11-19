@@ -317,6 +317,9 @@ const state = {
     // M7 票 22（`script-loadout.js` 是唯一读写方）：整备面的选中格 / 拖拽起点 / 商店购物车
     // 与打开中的结算流程（都是**显示态**，没有一格是规则判据）。
     loadout: null,
+    // M7 票 23：从棋盘进来的那场战斗（`{sessionId, runId, nodeId}`；null = 不在剧本战斗里）。
+    // 牌桌上"回棋盘结算"的出口只读它，**不是**规则判据——胜负由服务端从记录流判。
+    battle: null,
   },
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）

@@ -350,19 +350,8 @@ async function startGame(event) {
       // 服务端按内容包默认档（standard_108）建局——与改动前那条路一字不差。
       deck_profile: $("in-deck-profile").value || null,
     });
-    state.sessionId = body.session_id;
-    state.cursor = -1;
-    state.logSeq = 0;
-    // 先把上一局还在播的事件收尾，再清空；否则旧记录会漏进新一局的轮次计数。
-    if (state.playback) flushPlayback();
-    // 新的一局：事件流与轮次计数都从零开始（顶栏轮次按 TURN_START 累计）。
-    state.logRecords = [];
-    state.narrative = [];
-    state.narrativeShown = 0;
-    state.lastQuerySeat = null;
-    $("t-log").innerHTML = "";
-    applyView(body);
-    show("table");   // 同时放开三处顶栏的「牌桌」（state.sessionId 已非空）
+    // 换会话 + 回放 + 切页只有一份实现（M7 票 23 起剧本战斗也从这条路口进牌桌）。
+    startSessionView(body);
     $("lobby-hint").textContent = "";
   } catch (error) {
     $("lobby-hint").textContent = `建局失败：${error.message}`;

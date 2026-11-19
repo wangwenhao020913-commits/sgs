@@ -1,0 +1,240 @@
+{
+  "script_schema_version": 1,
+  "scripts": [
+    {
+      "id": "battleprobe",
+      "name": "战斗显示探针剧本",
+      "version": 1,
+      "comment": "M7 票 23 的进料：入口事件房（给一件遗物）+ 入口 2v3 战斗房（主角 + 1 名 AI 队友 vs 3 名模板敌人；敌方带一条副本全局技能）+ 出口。节点 id 与行列就是烟测断言的坐标。",
+      "roster": [
+        "nengren",
+        "jie_liubei",
+        "jie_guanyu"
+      ],
+      "layers": [
+        {
+          "id": "L1",
+          "name": "大节一 · 战斗显示",
+          "grid": {
+            "rows": 2,
+            "cols": 3
+          },
+          "nodes": [
+            {
+              "id": "g1",
+              "row": 0,
+              "col": 0,
+              "room": "room.gift"
+            },
+            {
+              "id": "b1",
+              "row": 0,
+              "col": 1,
+              "room": "room.battle"
+            },
+            {
+              "id": "o1",
+              "row": 0,
+              "col": 2,
+              "room": "room.exit"
+            }
+          ],
+          "edges": [
+            {
+              "from": "g1",
+              "to": "b1"
+            },
+            {
+              "from": "g1",
+              "to": "o1"
+            },
+            {
+              "from": "b1",
+              "to": "o1"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "room.gift",
+      "name": "道旁的包袱",
+      "kind": "event",
+      "text": "草丛里有一个包袱：有人跑丢了它。",
+      "event_pool": "ep.relic",
+      "on_clear": {
+        "set_flags": [
+          "flag.gift"
+        ]
+      }
+    },
+    {
+      "id": "room.battle",
+      "name": "麦田伏击",
+      "kind": "story",
+      "text": "剧情战：一名受保护队友 + 三名模板敌人（存活一轮即胜）。",
+      "battle": {
+        "allies": [
+          {
+            "role": "ally",
+            "template": "tpl.ally",
+            "protected": true
+          }
+        ],
+        "enemies": [
+          {
+            "role": "enemy",
+            "template": "tpl.grunt"
+          },
+          {
+            "role": "enemy",
+            "template": "tpl.grunt"
+          },
+          {
+            "role": "enemy",
+            "template": "tpl.chief"
+          }
+        ],
+        "victory": {
+          "kind": "survive_rounds",
+          "rounds": 1
+        },
+        "global_skills": [
+          {
+            "skill": "gs.enemy"
+          }
+        ],
+        "extra_reward": {
+          "coins": 5,
+          "pick2": 1
+        }
+      }
+    },
+    {
+      "id": "room.exit",
+      "name": "关隘",
+      "kind": "shop",
+      "text": "出口：结算它就通关（删档）。"
+    }
+  ],
+  "templates": [
+    {
+      "id": "tpl.ally",
+      "name": "义勇弓手",
+      "band": "ally",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": [
+        "hero.liubei.jijiang"
+      ],
+      "random": {
+        "pool": "pool.empty"
+      },
+      "reward": {
+        "coins": 9
+      }
+    },
+    {
+      "id": "tpl.grunt",
+      "name": "黄巾力士",
+      "band": "early",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": [],
+      "random": {
+        "pool": "pool.grunts",
+        "count": [
+          1,
+          1
+        ]
+      },
+      "reward": {
+        "coins": 2,
+        "pick3": 1
+      }
+    },
+    {
+      "id": "tpl.chief",
+      "name": "黄巾渠帅",
+      "band": "early",
+      "hp": 4,
+      "hp_max": 4,
+      "initial_skills": [
+        "hero.zhangfei.paoxiao"
+      ],
+      "random": {
+        "pool": "pool.empty"
+      },
+      "reward": {
+        "coins": 3
+      }
+    }
+  ],
+  "skill_pools": [
+    {
+      "id": "pool.empty",
+      "name": "空池",
+      "skills": []
+    },
+    {
+      "id": "pool.grunts",
+      "name": "小怪技能",
+      "skills": [
+        "hero.liubei.rende",
+        "hero.guanyu.wusheng",
+        "hero.zhangfei.paoxiao",
+        "hero.zhaoyun.longdan"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "ev.relic",
+      "name": "捡到的东西",
+      "text": "包袱里是这个人的兵器。",
+      "options": [
+        {
+          "text": "捡起诸葛连弩（遗物）",
+          "effects": [
+            {
+              "kind": "grant_relic",
+              "relic": "equip.crossbow"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event_pools": [
+    {
+      "id": "ep.relic",
+      "name": "包袱事件池",
+      "events": [
+        "ev.relic"
+      ]
+    }
+  ],
+  "global_skills": [
+    {
+      "id": "gs.enemy",
+      "name": "黄巾妖术",
+      "side": "enemy",
+      "scale": {
+        "hp": [
+          1,
+          1
+        ],
+        "draw": [
+          0,
+          0
+        ],
+        "slash": [
+          1,
+          1
+        ]
+      }
+    }
+  ]
+}

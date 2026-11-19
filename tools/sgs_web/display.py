@@ -38,6 +38,8 @@ from sgs.data import (
     IDENTITY_LABELS,
     Hero,
     HeroTable,
+    Identity,
+    PveConfig,
     Suit,
     color_of_suit,
     hero_skill_name,
@@ -63,6 +65,7 @@ __all__ = [
     "hero_in_tables",
     "hidden_guohuo_payload",
     "option_details",
+    "pve_seat_display",
     "prompt_display",
     "seat_display",
     "suit_labels",
@@ -290,12 +293,67 @@ def _processing_display(
     return out
 
 
+def pve_seat_display(
+    player: PlayerPublic, pve: PveConfig | None = None
+) -> dict[str, Any]:
+    """**剧本战斗（PvE）**的座位显示字段（M7 票 23）：友 / 敌 + 模板名 + 副本全局技能标签。
+
+    三处显示全部由**数据**决定（没有 ``pve`` / 座位表为空 / 座位越界 ⇒ 空值），不在这里
+    写"是不是剧本局"的模式分支——同一份派生对身份局照样跑，只是拿不到东西：
+
+    - ``side`` / ``side_label``：PvE 开局身份即公开（票 01 §3），所以座位卡可以直接写
+      「友」/「敌」；身份局四值落在这两格之外 ⇒ ``None``（座位卡仍走 ``identity_label``）。
+    - ``template_name``：**合成武将**（``PveSeat.hero is None``）的名字只有 ``PveSeat.name``
+      （模板名，票 10）。它不进 ``hero_name``——"这张座位上没有武将牌"是引擎事实；界面读
+      不到 ``hero_name`` 时按这个键兜底（`static/seat-view.js: heroNameOf`）。
+    - ``global_skill``：副本全局技能标签 = **来源**（``GLOBAL``：剧本层对指定侧的三档属性
+      缩放，票 03 §3）+ ``side``（对谁生效）+ **三档物化数值**（``hp_max`` / ``draw`` /
+      ``slash``）。数值原样读 ``PveSeat`` 的三个常驻加成分量（``sgs.skills.``
+      ``seat_persistent_bonus`` 的同一批字段），三档全 0 的座位**不挂标签**（没有效果可写）。
+      技能**显示名**不在 header 里（票 17 的编译只把区间物化成数值，不保留引用 id）⇒
+      标签给来源类别，不编技能名。
+
+    本票的面只加显示：不发 delta、不改任何选择面、不进记录流（票面「零新增 view」）。
+    """
+    identity = player.identity
+    side = identity.value if identity in (Identity.ALLY, Identity.ENEMY) else None
+    side_label = IDENTITY_LABELS.get(identity) if side is not None else None
+    spec = None
+    if pve is not None and 0 <= player.seat < len(pve.seats):
+        spec = pve.seats[player.seat]
+    template_name = (
+        spec.name if spec is not None and spec.hero is None and spec.name else None
+    )
+    global_skill = None
+    if spec is not None:
+        scale = {
+            "hp_max": spec.hp_max_bonus,
+            "draw": spec.draw_bonus,
+            "slash": spec.slash_damage_bonus,
+        }
+        if any(scale.values()):
+            global_skill = {
+                "source": "global",
+                "source_label": "副本全局技能",
+                "side": side,
+                "side_label": side_label,
+                "scale": scale,
+            }
+    return {
+        "side": side,
+        "side_label": side_label,
+        "template_name": template_name,
+        "global_skill": global_skill,
+    }
+
+
 def seat_display(
     player: PlayerPublic,
     *,
     heroes: HeroTable | Sequence[HeroTable] | None = None,
     players: Sequence[PlayerPublic] | None = None,
     distance_bonus: DistanceBonus | None = None,
+    pve: PveConfig | None = None,
 ) -> dict[str, Any]:
     """座位卡的展示字段：横置 / 酒 / **护甲** / **全局距离增减** + 身份标签 + 武将名称 / 势力。
 
@@ -338,6 +396,9 @@ def seat_display(
             _marker_payload(marker, players=players, heroes=heroes)
             for marker in tuple(player.markers)
         ],
+        # M7 票 23：剧本战斗的三处显示（友 / 敌、模板名、副本全局技能标签）。身份局 /
+        # 不带座位表的老 PvE 局拿到四个空值——数据决定显示，不在这里判模式。
+        **pve_seat_display(player, pve),
     }
 
 
@@ -568,6 +629,7 @@ def decorate_snapshot(
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
     distance_bonuses: Mapping[int, DistanceBonus] | None = None,
+    pve: PveConfig | None = None,
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
@@ -581,6 +643,8 @@ def decorate_snapshot(
     ``processing`` 里那几张改画"声明的牌名"（对谁都不给源牌牌面）。
     ``distance_bonuses``（票 26）是**按座位现算**的双向距离增减（缺省/缺座 = 两侧 0）：
     由投影层调 :func:`sgs.effects.distance_bonus` 后传进来，展示层不自己读引擎状态。
+    ``pve``（M7 票 23）是 header 里的 PvE 配置：有它才派生出剧本战斗的三处显示
+    （:func:`pve_seat_display`）；身份局传 ``None``，座位载荷与引入前逐字同形。
     """
     for key in ("self_hand", "discard"):
         payload[key] = _extend_card_list(payload.get(key), lookup=lookup)
@@ -606,6 +670,7 @@ def decorate_snapshot(
                     distance_bonus=(distance_bonuses or {}).get(
                         player.seat, DistanceBonus()
                     ),
+                    pve=pve,
                 )
             )
     return payload
@@ -620,11 +685,13 @@ def decorate_pending(
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
     distance_bonuses: Mapping[int, DistanceBonus] | None = None,
+    pve: PveConfig | None = None,
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。
 
     ``distance_bonuses`` 与 :func:`decorate_snapshot` 同义（票 26）：内嵌视角里的座位卡
-    用同一份现算读数，不因"这扇询问嵌在别处"退回 0。
+    用同一份现算读数，不因"这扇询问嵌在别处"退回 0。``pve`` 同理（M7 票 23）：嵌在询问
+    里的那份视角也要画得出友 / 敌与模板名。
     """
     for entry in (payload.get("candidate_index") or {}).values():
         if isinstance(entry, dict):
@@ -647,6 +714,7 @@ def decorate_pending(
             virtual_cards=virtual_cards,
             concealed=concealed,
             distance_bonuses=distance_bonuses,
+            pve=pve,
         )
     # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
     payload["prompt_display"] = prompt_display(query) if query.legal_actions else None

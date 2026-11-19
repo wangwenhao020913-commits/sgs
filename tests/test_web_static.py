@@ -9910,3 +9910,144 @@ def test_the_loadout_smoke_library_is_a_valid_script_library() -> None:
     assert [(effect.kind, effect.skill) for effect in event.options[2].effects] == [
         ("grant_skill", "hero.zhangfei.paoxiao")
     ], "满包时这条会被服务端折成铜钱（烟测读那个数）"
+
+
+# ---------------------------------------------------------------------------
+# M7 票 23：战斗侧三处显示（友 / 敌 + 敌人模板名 + 副本全局技能标签）+ 只读遗物栏
+#
+# 战斗界面**零新增**：剧本局的战斗就是现有身份局牌桌（D27）。这一节钉的是静态面——
+# 显示位住在那张牌桌里、换场只有一份实现、烟测进料先过真库校验器；行为归
+# `ui_smoke.mjs` 的 M7-23a–m，载荷 / 投影归 `tests/test_web.py`。
+# ---------------------------------------------------------------------------
+
+_BATTLE_LIBRARY_FIXTURE = (
+    REPO_ROOT / "tests" / "support" / "fixtures" / "script-battle-library.json"
+)
+"""烟测战斗显示的进料（票 23）：入口事件房（给遗物）+ 入口 2v3 战斗房（敌方全局技能）+ 出口。"""
+
+
+def test_the_battle_smoke_library_is_a_valid_script_library() -> None:
+    """票 23 的进料先过**真**库校验器：烟测不再自己判断"这份库能不能跑"。
+
+    判据是烟测那几条断言的**前置**：一个给遗物的事件房、一场 2v3（主角 + 1 名 AI 队友 vs
+    3 名模板敌人，敌方带一条副本全局技能）、一个出口。
+    """
+    from sgs.data import GlobalSkillSide, RoomKind, load_script_library
+
+    library = load_script_library(
+        _BATTLE_LIBRARY_FIXTURE.read_bytes(), file=str(_BATTLE_LIBRARY_FIXTURE)
+    )
+    script = library.scripts[0]
+    layer = script.layers[0]
+    nodes = {node.id: node for node in layer.nodes}
+    rooms = {room.id: room for room in library.rooms}
+
+    assert [node.id for node in layer.nodes if node.col == 0] == ["g1"], (
+        "一个入口（事件房拿遗物）；战斗房在它之后（列 = 进度轴）"
+    )
+    assert nodes["g1"].room == "room.gift"
+    assert nodes["o1"].col == layer.grid.cols - 1, "出口落在最后一列"
+    assert rooms["room.gift"].kind is RoomKind.EVENT
+    assert rooms["room.exit"].kind is RoomKind.SHOP
+
+    battle = rooms["room.battle"].battle
+    assert rooms["room.battle"].kind is RoomKind.STORY
+    assert len(battle.allies) == 1 and len(battle.enemies) == 3, "2v3：主角 + 1 名 AI 队友 vs 3 名敌人"
+    assert battle.victory.kind.value == "survive_rounds", (
+        "胜负条件要能在两轮内收口（烟测用真端点把这一场打到终局）"
+    )
+    assert [reference.skill for reference in battle.global_skills] == ["gs.enemy"]
+    assert battle.global_skills[0].scale is None, "房间级引用只点名技能（区间取库内定义）"
+
+    global_skill = next(item for item in library.global_skills if item.id == "gs.enemy")
+    assert global_skill.side is GlobalSkillSide.ENEMY, "只对敌方生效（烟测断友方座位没有标签）"
+    assert (global_skill.scale.hp, global_skill.scale.draw, global_skill.scale.slash) == (
+        (1, 1),
+        (0, 0),
+        (1, 1),
+    ), "三档区间要**定值**：物化进 header 的数值是烟测断言的唯一真源"
+
+    event = next(item for item in library.events if item.id == "ev.relic")
+    assert [(effect.kind, effect.relic) for effect in event.options[0].effects] == [
+        ("grant_relic", "equip.crossbow")
+    ], "入口事件房给的那件遗物就是战斗 grants 的来源（烟测断遗物栏）"
+
+
+def test_the_pve_display_slots_live_inside_the_identity_table() -> None:
+    """三处显示 + 遗物栏是**牌桌表面**的增量，不是第四个战斗 view。
+
+    - 结构：新节点全部住在 `#view-table` 与 `#view-replay` 之间那一段里（牌桌页内部），
+      `VIEW_NAMES` 仍是四页、没有第二个战斗页；
+    - 缺省收起：三个节点都带 `hidden`，显隐只由服务端载荷决定（`table.js:renderSelfSeat`
+      的调用点 + `script-loadout.js:scriptBattleTableSync`），不做前端模式判断；
+    - 文案只住一处：副本全局技能标签的拼法只有 `seat-view.js:pveGlobalText` 一份。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    inside = html[table_start:replay_start]
+
+    for needle, label in (
+        ('id="t-self-global"', "副本全局技能标签"),
+        ('id="t-self-relics"', "只读遗物栏"),
+        ('id="btn-t-pve-return"', "回棋盘结算的出口"),
+    ):
+        assert needle in inside, f"牌桌视图里缺少{label}的挂载点：{needle}"
+        tag = inside[inside.index(needle) - 120 : inside.index(needle) + 200]
+        assert re.search(r"\bhidden\b", tag), f"{label}缺省必须收起（数据决定显示）：{tag}"
+
+    core = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    view_names = re.search(r"const VIEW_NAMES = \[(.*?)\]", core, re.S)
+    assert view_names is not None, "找不到 VIEW_NAMES"
+    assert [name.strip().strip('"') for name in view_names.group(1).split(",") if name.strip()] == [
+        "lobby",
+        "table",
+        "replay",
+        "script-board",
+    ], "三视图 + 棋盘，**没有**第四个战斗页（D27：不新增 view）"
+
+    seat_view = (STATIC_DIR / "seat-view.js").read_text(encoding="utf-8")
+    assert seat_view.count("function pveGlobalText(") == 1, "标签文案只许有一份实现"
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        if path.name == "seat-view.js":
+            continue
+        assert "副本全局技能（" not in text, f"标签文案在 {path.name} 里又拼了一份"
+
+
+def test_the_board_to_table_jump_has_exactly_one_implementation() -> None:
+    """棋盘 ↔ 牌桌只有一条换场实现（不复制 `table.js`、不把会话重置抄第二遍）。
+
+    - 一份新会话的首屏：`session.js:startSessionView` 定义一次，两个调用点
+      （开局页建局 / 剧本战斗进牌桌）都调它；`applyView(body)` + `show("table")` 那一对
+      只许出现在它里面；
+    - 换场：`script-loadout.js:scriptBattleEnter` 定义一次，`script-board.js` 的
+      `scriptBoardEnterNode` 在拿到 `session_id` 时调它一次（进节点 = 换到牌桌）。
+    """
+    session_js = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    loadout_js = (STATIC_DIR / "script-loadout.js").read_text(encoding="utf-8")
+    board_js = (STATIC_DIR / "script-board.js").read_text(encoding="utf-8")
+
+    assert session_js.count("function startSessionView(") == 1
+    entry = _js_function(session_js, "startSessionView")
+    assert 'show("table")' in entry and "applyView(body)" in entry, (
+        "换会话的入口必须在 startSessionView 里（切页与回放只有这一条路）"
+    )
+    assert 'show("table")' not in lobby_js, "开局页不许再抄一份切页"
+    assert "startSessionView(body)" in lobby_js, "开局页建局成功之后走同一个入口"
+    assert "startSessionView(view)" in loadout_js, "剧本战斗进牌桌走同一个入口"
+
+    assert loadout_js.count("async function scriptBattleEnter(") == 1
+    board_entry = _js_function(board_js, "scriptBoardEnterNode")
+    assert board_entry.count("scriptBattleEnter(body)") == 1, (
+        "进战斗节点之后必须换到牌桌（写在 scriptBoardEnterNode 里）"
+    )
+    assert "session_id" in board_entry, "判据是服务端棋盘体的 session_id（不前端造会话）"
+    # 牌桌脚本本身不许被复制一份（剧本层的显示位是"调用时解析"的钩子，不是第二份牌桌）。
+    assert "function renderTable(" not in loadout_js and "function renderTable(" not in board_js
+    assert loadout_js.count("function scriptBattleTableSync(") == 1
+    table_js = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+    assert table_js.count("scriptBattleTableSync(view)") == 1, (
+        "自己的武将块渲染之后要调剧本层的显示位同步（调用时解析）"
+    )

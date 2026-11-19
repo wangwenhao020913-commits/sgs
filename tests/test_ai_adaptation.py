@@ -380,6 +380,114 @@ def test_the_card_request_windows_are_registered_without_touching_the_query_face
 
 
 # ---------------------------------------------------------------------------
+# 断言 2‴：纯显示票**不加** AI 读点（M7 票 23）
+# ---------------------------------------------------------------------------
+
+
+def test_the_battle_display_fields_added_no_ai_read_point() -> None:
+    """M7 票 23（战斗三处显示 + 只读遗物列表）是**纯显示**：读点表一行都没加。
+
+    判据是**正向**的（不是"没有漏登记"）：逐桶键集与总行数钉死。三处显示与遗物列表都是
+    **网页载荷**字段（``display.pve_seat_display`` / ``projection.visible_snapshot`` 补的
+    派生），不进 ``PlayerView`` / ``PlayerPublic`` / 九类询问——AI 看得见的输入一位没变。
+    要动这张表（读新字段 / 新询问字段）请另开票：改表就要重评 AI 读法，别在显示票里顺手加。
+    """
+    table = heuristic._AI_READ_POINTS
+    shape = {bucket: tuple(sorted(entries)) for bucket, entries in table.items()}
+
+    assert shape == {
+        "PlayerView": (
+            "deck_count",
+            "discard",
+            "hero_zone_cards",
+            "phase",
+            "players",
+            "processing",
+            "seat",
+            "self_hand",
+            "turn_seat",
+        ),
+        "PlayerPublic": (
+            "alive",
+            "armor",
+            "chained",
+            "equip",
+            "flipped",
+            "hand_count",
+            "hero",
+            "hero_zone_count",
+            "hp",
+            "hp_max",
+            "identity",
+            "judge",
+            "kingdom",
+            "markers",
+            "sealed_zones",
+            "seat",
+            "wine_active",
+        ),
+        "Query": (
+            "actor",
+            "kind",
+            "legal_actions",
+            "prompt",
+            "revealed",
+            "seq",
+            "timing",
+            "transform_actions",
+            "transform_preactivations",
+            "view",
+        ),
+        "ArrangeQuery": ("structural",),
+        "DistributeQuery": ("max_total", "per_seat_max", "seats", "skill_id"),
+        "PlayPhaseQuery": (
+            "card_preactivations",
+            "designation_actions",
+            "preactivations",
+        ),
+        "PeachQuery": ("dying",),
+        "DiscardQuery": ("count",),
+        "RespondQuery": ("cause", "required", "target", "window_frame"),
+        "SelectCardsQuery": ("provide_type", "skill_id", "slots", "spec"),
+        "SkillActivationQuery": (
+            "activation_preactivations",
+            "max_picks",
+            "min_picks",
+            "optional",
+            "preactivation",
+            "skill_id",
+            "skill_ids",
+            "slots",
+        ),
+        "SelectOptionQuery": (
+            "disabled",
+            "hero_card",
+            "option_texts",
+            "options",
+            "skill_id",
+        ),
+        "SelectOptionsQuery": (
+            "disabled",
+            "max_selected",
+            "min_selected",
+            "option_texts",
+            "options",
+            "skill_id",
+            "structural",
+        ),
+    }
+    assert sum(len(entries) for entries in table.values()) == 74, (
+        "读点总行数变了：M7 票 23 的三处显示 / 遗物列表是网页载荷字段，不许进 AI 读点表"
+    )
+
+    # 合成反例：真把显示字段（如 `template_name`）登记进来就必须红——它是网页载荷键，
+    # 不是协议字段；"没漏登记"与"不许长行"两条机械面同时咬住。
+    gaps = _read_point_gaps(_doctored(PlayerPublic={"template_name": (True, "显示字段")}))
+
+    assert any("PlayerPublic.template_name" in gap for gap in gaps), gaps
+
+
+# ---------------------------------------------------------------------------
 # 断言 3：Mode 表（每个模式四个格子，站点可解析）
 # ---------------------------------------------------------------------------
 

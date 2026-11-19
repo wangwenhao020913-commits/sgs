@@ -561,9 +561,21 @@ async function scriptBoardEnterNode(node) {
   scriptBoardHint(body.session_id
     ? `已进入「${scriptBoardNodeName(node)}」：这一场在牌桌上打，打完回棋盘结算。`
     : `已进入「${scriptBoardNodeName(node)}」：结算之后回到棋盘。`);
-  // 票 22：进节点后节点内的三个面（事件 / 商店 / 问号揭晓）由整备面那份脚本接手；
-  // 战斗房的跳转归票 23（这里不切会话、不 show 牌桌）。
+  // 票 22：进节点后节点内的三个面（事件 / 商店 / 问号揭晓）由整备面那份脚本接手。
   if (typeof scriptLoadoutAfterEnter === "function") scriptLoadoutAfterEnter(body);
+  // 票 23：战斗房**直接换到牌桌**——`session_id` 就是既有身份局牌桌的会话（零新增 view）。
+  // 放在收尾钩子之后：棋盘体与节点内的显示态先落定，再切页；打不开就留在棋盘上说明原因。
+  if (body.session_id && typeof scriptBattleEnter === "function") {
+    try {
+      await scriptBattleEnter(body);
+    } catch (error) {
+      const failure = error.body && (error.body.reason || error.body.error)
+        ? error.body
+        : { reason: error.message };
+      scriptBoardShowError(failure);
+      scriptBoardHint("牌桌没能打开：上面那行是服务端给的原因；回棋盘后可「重开这一场」。");
+    }
+  }
   return body;
 }
 
