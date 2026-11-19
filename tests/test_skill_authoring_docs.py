@@ -329,15 +329,29 @@ def test_the_spec_gate_survives_in_both_the_process_doc_and_the_ticket():
 
 
 def test_the_inventory_tool_reports_every_hero_skill():
-    """`tools/dump_catalog.py` 能导入，且每条武将技能都有形状指纹。"""
+    """`tools/dump_catalog.py` 能导入，且每条**非装备**技能都有形状指纹。
+
+    缺省面 = 装备之外的全部载体（武将牌 / 遗物 / 标记效果 / 牌标签效果）：M7 票 26 起多了
+    ``carrier == RELIC`` 的六条 ``relic.*``，它们同样是"作者要写的技能"⇒ 也必须列进来
+    （`similar_skills.py --like relic.x` 就靠这一面）。装备技能仍只在 ``--all`` 里出现。
+    """
     _import_tools()
     import dump_catalog
 
+    from sgs.skills import CATALOG
+
     shapes = dump_catalog.collect()
-    assert len(shapes) >= 90, f"只盘点到 {len(shapes)} 条武将技能"
+    assert len(shapes) >= 90, f"只盘点到 {len(shapes)} 条非装备技能"
     for shape in shapes:
         assert shape.fingerprint(), f"{shape.skill_id} 没有形状指纹"
-        assert shape.skill_id.startswith("hero.")
+    expected = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier.value != "EQUIPMENT"
+    }
+    assert {shape.skill_id for shape in shapes} == expected, (
+        "缺省面必须覆盖全部非装备载体（含遗物）；装备技能归 --all"
+    )
 
 
 def test_the_similarity_tool_ranks_candidates_and_skips_itself():

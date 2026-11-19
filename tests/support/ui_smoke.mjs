@@ -31095,15 +31095,22 @@ await putBackpack(fullSlots);
 const enteredShop = await enterNode(runA.run_id, "s1");
 const stockIds = enteredShop.pending.spec.stock.skills;
 const stockRows = stockIds.map((id) => faceStock(id)).filter(Boolean);
-check("M7-22l 商店面：6 件技能、每件写服务端给的价格；这次没有遗物就明说（有几张给几张）",
+// m7-script-mode 票 26 起价值表有六条遗物 ⇒ 商店按票 02 §5 的「6 技能 + 2 遗物」照常上货；
+// 早先"遗物段还是空的"那两半（提示行 + 库存为空）是内容事实，随六条遗物落地一并退役。
+const relicIds = enteredShop.pending.spec.stock.relics;
+const relicRows = relicIds.map((id) => faceStock(id)).filter(Boolean);
+check("M7-22l 商店面：6 件技能 + 2 件遗物，每件写服务端给的价格（价只读档内价值表）",
   $("script-face").getAttribute("data-face") === "shop"
   && stockIds.length === 6 && stockRows.length === 6
   && stockRows.every((row, index) => row.getAttribute("data-price")
     === String(enteredShop.catalog[stockIds[index]].price))
   && stockRows[0].textContent.includes("3 铜钱")
-  && $("script-face-list").textContent.includes("这次没有遗物可卖")
-  && enteredShop.pending.spec.stock.relics.length === 0,
-  `库存=${stockIds.length} 行=${stockRows.length}`);
+  && relicIds.length === 2 && relicRows.length === 2
+  && relicRows.every((row, index) => row.getAttribute("data-price")
+    === String(enteredShop.catalog[relicIds[index]].price))
+  && relicRows[0].textContent.includes("10 铜钱")
+  && !$("script-face-list").textContent.includes("这次没有遗物可卖"),
+  `库存=${stockIds.length} 行=${stockRows.length} 遗物=${relicIds.length}/${relicRows.length}`);
 
 // 已拥有不出现：把一件库存塞进背包 ⇒ 货架上少一件（不是置灰）。
 const ownedShop = JSON.parse(JSON.stringify(enteredShop));

@@ -83,12 +83,19 @@ class CarrierKind(str, Enum):
     效果声明）：同样不是任何角色"拥有"的技能，实例由 ``resolve_instances`` 按
     ``GameState.card_tags`` 产出（``SkillSourceKind.CARD_TAG``）。与 ``MARKER`` 同一姿态单列
     一档——它的"宿主"是**牌**，可能在任何区（含共享区），故连座位都不固定。
+
+    ``RELIC``（M7 票 26）= **遗物**：实例由 ``resolve_instances`` 读 ``Player.relics`` 产出
+    （``SkillSourceKind.RELIC``）。遗物住独立遗物栏、**不算武将牌上的技能**，故与
+    ``MARKER`` / ``CARD_TAG`` 同一姿态单列一档——它既不在武将面上、也不在装备区里；
+    它真正被"谁拥有"是座位级事实（``Player.relics``），不是武将牌上的技能清单。
+    这一档同时是价值表语义门的判据名（``sgs.data.values._RELIC_CARRIER`` 按名字比）。
     """
 
     EQUIPMENT = "EQUIPMENT"
     HERO = "HERO"
     MARKER = "MARKER"
     CARD_TAG = "CARD_TAG"
+    RELIC = "RELIC"
 
 
 class PriorityClass(IntEnum):
@@ -116,6 +123,16 @@ class PriorityClass(IntEnum):
     理由（不是牌候选、不参与"先结英姿还是先结营"的面），只是宿主从"座位"换成"牌"。
     """
 
+    RELIC = 5
+    """**遗物**（``CarrierKind.RELIC``，M7 票 26）：排在 ``CARD_TAG`` 之后，是**最后**一档。
+
+    理由与 ``MARKER`` / ``CARD_TAG`` 同一族：遗物住独立遗物栏、**不算武将牌上的技能**，
+    加成本来就最后叠加；而六条遗物只有加法（摸牌 / 手牌上限 / 加伤 / 回复）与减法
+    （距离），与别的档交换次序不改变结果。唯一需要次序的地方是 ``HAND_LIMIT_REPLACE``：
+    遗物排在武将档之后 ⇒ 与界【英姿】②「手牌上限 = 体力上限」同时在场时，遗物的 +2
+    加在**替换之后**（不会被替换式吃掉）。
+    """
+
 
 WINE_DAMAGE_BONUS = 1
 """【酒】的加伤值（spec §5.1 酒）：出牌阶段使用后，本回合**下一张【杀】**的来源侧 +1。"""
@@ -126,6 +143,7 @@ _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
     CarrierKind.HERO: PriorityClass.HERO,
     CarrierKind.MARKER: PriorityClass.MARKER,
     CarrierKind.CARD_TAG: PriorityClass.CARD_TAG,
+    CarrierKind.RELIC: PriorityClass.RELIC,
 }
 
 
