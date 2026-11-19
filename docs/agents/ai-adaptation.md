@@ -183,6 +183,21 @@ S1 起【据守】要判"这一次翻面是翻回正面（不跳回合、三张�
   求解器。新模式别再照抄这个形状——落成 `victory.py` 的纯函数，`tests/test_ai_adaptation.py`
   的解析断言就核得住。
 
+**现状三行**（每格一句理由；`refs` 的字符串真源在 `src/sgs/data/identities.py`）：
+
+| 模式 | `relation` | `victory` | `steps` | `projection` |
+|---|---|---|---|---|
+| `NO_IDENTITY` | 不适用：不发放身份 ⇒ 没有队伍可认 | `Engine.check_game_end` 的 else 支（存活数 ≤ 1，没有独立求解器） | `DEATH_STEPS`（不亮身份、不求身份胜负） | 不适用：没有身份，投影无需派生 |
+| `IDENTITY` | `_identity_relation`：已明身份从配比表减掉，存活未知座位按人头均分得 `(P敌, P友)`（I1 保守档，只作权重） | `solve_identity_outcome`（纯函数） | `IDENTITY_DEATH_STEPS`（亮身份 → 记死亡事实 → 检测终局） | `_visible_identity`：投影期抹成 `None` |
+| `PVE` | `_identity_relation`：**PvE 开局全部身份公开** ⇒ 读到的是**确定**的友 / 敌（`ALLY → (0, 1)` / `ENEMY → (1, 0)`），**不走概率档**；读点仍是同一个字段，不新增读点 | `solve_pve_outcome`：四类逐场条件（全歼 / 存活 N 轮 / N 轮内全歼 / 击败 Boss）× 胜 / 败，两侧只判 `ally` / `enemy` | `DEATH_STEPS`：与无身份局同表（PvE 不亮身份、不奖惩、没有主公死亡锚点） | 不适用新实现：开局全部 `identity_visible`，现有投影已认这个字段 ⇒ 投影层零改动 |
+
+- **PvE 那两格的「不适用」是裁过的**：`relation` 不是"没有关系"，而是**关系已公开**——读的
+  仍是身份局那条 `_identity_relation`，只是永远命中"已亮明 ⇒ 0 / 1"那一档，概率档在 PvE
+  结构上不可达；`projection` 不是"不用投影"，而是**不需要新的抹除规则**（全公开 ⇒
+  `_visible_identity` 原样放行）。
+- **模式账见 `06` §M7**（`Mode.PVE` 成为第三种模式 / `mode` 显式化 / header v3 / 人数不是模式
+  判据四条裁定的里程碑记录）；四格的实现站点与理由和 `tests/test_ai_adaptation.py` 同源。
+
 ## 4 · 维护责任表
 
 | 变化 | 谁改 | 怎么逼出来 |

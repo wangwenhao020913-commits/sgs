@@ -96,6 +96,7 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
 | 实机带 | `7001–7099`（轮换：首版 7001，下一版 7002…） | 人机对局验收专用；派生批**主动跳过**。配方见 `docs/agents/acceptance-ai.md`，读数用 `ai_eval live`，结论写 `.scratch/ai-light/acceptance.md` |
 | 判决批 | commit 派生，任意 64 位，批内间距 ≥ 97 | `quick` / `promote`；同一轮所有参战版本跑同一批 |
 | 封印批 | 名字派生（`sealed-1`…），1024 副写死 | `seal`；只出聚合、用一次退役 |
+| PvE 批测带 | `9000..9031`（32 局） | 剧本模式（PvE）的**机械判据**专用：跑完 ∧ 终局与 `solve_pve_outcome` 一致 ∧ 零非法应答 ∧ 可回放；**不判 verdict、不打胜率**。入口 = `run_games(mode="pve")`（`tools/sgs_batch`），断言在 `tests/test_all_ai_games.py`（`PVE_SEEDS` 与 `test_the_pve_seed_band_*`）；判决 / 趋势 / 实机派生批**主动跳过**这条带 |
 
 判决批由 `sha256(candidate_commit)` 经 §2.7 的 LCG 派生，再按座位 0 的身份凑 **1:1:2:1**
 （最大余数法：768 副 ⇒ 154 / 154 / 307 / 153）。派生规则在
