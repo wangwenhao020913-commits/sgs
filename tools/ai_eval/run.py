@@ -327,8 +327,11 @@ def _incompatible(arm: ArmRun, game: ArmGame) -> bool:
     （:func:`_finished_pairs` 本来就不配未终局的副），但**不进** ``errors``。
     候选臂（HEAD）版本完整 ⇒ 它的非法应答仍是真错误。
     """
-    return arm.version_gaps and not game.finished and (game.error or "").startswith(
-        "IllegalActionError"
+    return (
+        arm.version_gaps
+        and not game.finished
+        # 批量的 ``error`` 串带 ``seed=<n>: `` 前缀，故按"含"判而不是"以…开头"。
+        and "IllegalActionError" in (game.error or "")
     )
 
 

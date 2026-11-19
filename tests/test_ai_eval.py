@@ -1203,7 +1203,8 @@ def test_an_old_versions_illegal_action_is_a_capability_gap_not_an_error() -> No
         identity=None,
         won=None,
         finished=False,
-        error="IllegalActionError: [IllegalAction] 步骤 seat 的目标 1 不在可选范围内",
+        # 批量侧的错误串带 seed 前缀（真实形状），兼容层按"含 IllegalActionError"判。
+        error="seed=11: IllegalActionError: [IllegalAction] 步骤 seat 的目标 1 不在可选范围内",
     )
     arm = run.ArmRun(
         label="candidate_vs_baseline",
