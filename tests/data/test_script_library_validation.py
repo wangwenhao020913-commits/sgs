@@ -681,6 +681,34 @@ def test_skill_and_event_pools_only_name_registered_things_once() -> None:
     ]
 
 
+def test_each_bad_pool_reference_reports_exactly_one_error_on_both_tables() -> None:
+    """两张池表**同一口径**：每个引用点恰好一条 ``LoadError``（票 35 的漂移修复）。
+
+    写坏形状 = 池里写两次同一个**未知** id。逐条的判据是"引用点越界（引用了不存在的东西）"：
+    ``duplicate_reference`` 只在目标存在时才有意义，故第二个引用点也只报 ``unknown_*``。
+    修复前 ``_event_pool_errors`` 用两个独立 ``if``，第二处会同时报 unknown + duplicate
+    （2 条），而 ``_skill_pool_errors`` 的 if/elif/else 只报 1 条——同一份坏数据两张表
+    条数不同。现在两边都是 if/elif/else：逐条对齐、``loc`` 各自指向自己的引用方。
+    """
+    library = _base()
+    library["skill_pools"][0]["skills"] = ["hero.nobody.skill", "hero.nobody.skill"]
+    library["event_pools"][0]["events"] = ["ev.nowhere", "ev.nowhere"]
+
+    errors = _errors(library)
+    skill_errors = [(e.loc, e.rule_id) for e in errors if e.loc.startswith("/skill_pools/")]
+    event_errors = [(e.loc, e.rule_id) for e in errors if e.loc.startswith("/event_pools/")]
+
+    assert skill_errors == [
+        ("/skill_pools/0/skills/0", "script_library.unknown_skill"),
+        ("/skill_pools/0/skills/1", "script_library.unknown_skill"),
+    ]
+    assert event_errors == [
+        ("/event_pools/0/events/0", "script_library.unknown_event"),
+        ("/event_pools/0/events/1", "script_library.unknown_event"),
+    ], "同一个未知事件引用两次也只各报一条（不再额外报 duplicate_reference）"
+    assert len(skill_errors) == len(event_errors), "同一份坏形状在两张表上条数一致"
+
+
 def test_an_event_effect_may_grant_a_registered_skill_or_relic() -> None:
     """事件效果的技能 / 遗物 id 也是跨表引用（``CATALOG`` 里必须有）。"""
     broken_skill = _base()

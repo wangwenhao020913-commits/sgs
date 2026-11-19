@@ -1278,7 +1278,11 @@ def _template_errors(
 def _skill_pool_errors(
     file: str, position: int, pool: SkillPool, entities: _Entities
 ) -> list[LoadError]:
-    """技能池：``skills`` 都要在 ``CATALOG`` 里，且同池不重复（无放回抽的前提）。"""
+    """技能池：``skills`` 都要在 ``CATALOG`` 里，且同池不重复（无放回抽的前提）。
+
+    每个引用点**恰好一条** ``LoadError``，未知 id 优先（票 35 与 :func:`_event_pool_errors`
+    统一成这一口径：两张池表对同一份坏数据条数相同）。
+    """
     base = f"/skill_pools/{position}"
     errors: list[LoadError] = []
     seen: dict[str, int] = {}
@@ -1343,7 +1347,12 @@ def _event_errors(
 def _event_pool_errors(
     file: str, position: int, pool: EventPool, entities: _Entities
 ) -> list[LoadError]:
-    """事件池：``events`` 都要存在，且同池不重复。"""
+    """事件池：``events`` 都要存在，且同池不重复（与 :func:`_skill_pool_errors` 同一口径）。
+
+    每个引用点**恰好一条** ``LoadError``（票 35）：未知 id 优先报"引用不存在的东西"，
+    不再同时报 ``duplicate_reference``——目标都不存在时"重复"没有独立语义。两张池表
+    （技能池 / 事件池）因此对同一份坏数据报同样的条数，``loc`` 各自指向自己的引用方。
+    """
     base = f"/event_pools/{position}"
     errors: list[LoadError] = []
     seen: dict[str, int] = {}
@@ -1358,7 +1367,7 @@ def _event_pool_errors(
                     rule_id="script_library.unknown_event",
                 )
             )
-        if event_id in seen:
+        elif event_id in seen:
             errors.append(
                 LoadError(
                     file=file,

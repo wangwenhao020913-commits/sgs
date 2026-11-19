@@ -19,7 +19,7 @@
 ``layer_index``               ``int``                                    节点结算 / 棋盘
 ``flags``                     ``[str]``                                  节点结算 / 边 ``requires``
 ``coins``                     ``int``                                    结算 / 商店、HUD
-``backpack``                  ``{slots[24], equipped_slots[0..3]}``      结算 / 背包端点
+``backpack``                  ``{slots[24], equipped_slots = 前 4 格}``    结算 / 背包端点
 ``relics``                    ``[skill_id × ≤6]``                        结算 / 每场开局
 ``node_status``               ``{"<layer_id>/<node_id>": 状态}``          结算 / 可到达集
 ``pending``                   ``null`` 或 ``{node_id, spec}``            进入节点 / 恢复点
@@ -145,19 +145,20 @@ class Backpack(_Frozen):
         tuple[int, ...],
         Field(min_length=EQUIPPED_SLOT_COUNT, max_length=EQUIPPED_SLOT_COUNT),
     ] = (0, 1, 2, 3)
-    """4 个出战槽的**格号**：缺省就是前 4 格（票 02 §3）。"""
+    """4 个出战槽的**格号**：恒为前 4 格（票 02 §3、票 35 收紧）。"""
 
     @model_validator(mode="after")
-    def _equipped_slots_point_inside_the_backpack(self) -> "Backpack":
-        """出战槽必须是包内的 4 个**不同**格号（越界或重复 ⇒ 装配面读不到确定内容）。"""
-        for slot in self.equipped_slots:
-            if not 0 <= slot < BACKPACK_SLOTS:
-                raise ValueError(
-                    f"出战槽 {slot} 越界：必须在 [0, {BACKPACK_SLOTS}) 内"
-                )
-        if len(set(self.equipped_slots)) != EQUIPPED_SLOT_COUNT:
+    def _the_equipped_slots_are_the_front_four(self) -> "Backpack":
+        """出战槽恒为**前 4 格** ``(0, 1, 2, 3)``（票 02 §3；spec「前 4 格是出战槽」）。
+
+        UI 从不移动出战槽（票 22 M7-22c：交换 / 移动只动 ``slots``，``equipped_slots`` 不动），
+        而 :func:`equipped_skills` 按 ``equipped_slots`` 的**次序**读出战技能——放行别的四格
+        或换序，等于让一次写请求悄悄改掉技能的出战顺序。越界 / 重复也因此一并被这条判据拒掉。
+        """
+        if self.equipped_slots != (0, 1, 2, 3):
             raise ValueError(
-                f"出战槽必须互不相同：实得 {list(self.equipped_slots)}"
+                "出战槽恒为前 4 格 (0, 1, 2, 3)："
+                f"实得 {list(self.equipped_slots)}"
             )
         return self
 

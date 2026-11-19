@@ -990,6 +990,49 @@ def test_the_backpack_endpoint_refuses_duplicates_and_edits_inside_a_node(regist
     assert status == 400 and "节点" in body["error"], body
 
 
+def test_the_backpack_endpoint_refuses_equipped_slots_that_are_not_the_front_four(
+    registry,
+) -> None:
+    """出战槽恒为**前 4 格**（spec「24 格、其中前 4 格是出战槽」；票 35 收紧）。
+
+    UI 从不移动出战槽（票 22 M7-22c），故服务端直接拒掉别的四格 / 换序：``equipped_skills``
+    按 ``equipped_slots`` 的次序读出战技能，放行任意四格等于让写请求悄悄改技能的出战顺序。
+    """
+    created = _from_create(registry)
+    slots = list(created["run"]["backpack"]["slots"])
+    slots[0] = "hero.liubei.rende"
+
+    for equipped in ([1, 2, 3, 4], [3, 2, 1, 0]):
+        status, body = call(
+            registry,
+            "PUT",
+            f"/api/script-runs/{created['run_id']}/backpack",
+            {"expected_revision": 0, "slots": slots, "equipped_slots": equipped},
+        )
+        assert status == 400 and "出战槽" in body["error"], (equipped, status, body)
+        assert json.loads(save_path(registry.runs_dir).read_text(encoding="utf-8"))[
+            "run"
+        ]["revision"] == 0, "被拒的写请求不改档"
+
+    # 格子数不对（3 格）仍按模型既有的形状门拒（这里只判状态码，判据归 test_script_state）。
+    status, body = call(
+        registry,
+        "PUT",
+        f"/api/script-runs/{created['run_id']}/backpack",
+        {"expected_revision": 0, "slots": slots, "equipped_slots": [0, 1, 2]},
+    )
+    assert status == 400, body
+
+    status, body = call(
+        registry,
+        "PUT",
+        f"/api/script-runs/{created['run_id']}/backpack",
+        {"expected_revision": 0, "slots": slots, "equipped_slots": [0, 1, 2, 3]},
+    )
+    assert status == 200, body
+    assert body["revision"] == 1 and body["run"]["backpack"]["equipped_slots"] == [0, 1, 2, 3]
+
+
 # ---------------------------------------------------------------------------
 # F. 退出即作废（suspend / 僵尸会话）
 # ---------------------------------------------------------------------------

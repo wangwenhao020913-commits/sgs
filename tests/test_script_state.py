@@ -179,6 +179,25 @@ def test_an_equipped_slot_may_not_point_outside_the_backpack_nor_repeat() -> Non
         Backpack(slots=SLOTS, equipped_slots=(0, 0, 2, 3))
 
 
+def test_the_equipped_slots_are_fixed_to_the_front_four() -> None:
+    """出战槽 = **前 4 格**（票 02 §3；spec「24 格、其中前 4 格是出战槽」）。
+
+    UI 从不移动出战槽（票 22 M7-22c：交换 / 移动只动 ``slots``，``equipped_slots`` 不动），
+    所以模型只接受 ``(0, 1, 2, 3)`` 这一种写法：换成别的四格或换序都不再是"前 4 格"，
+    而 ``equipped_skills`` 按 ``equipped_slots`` 次序读出战技能，换序会悄悄改顺序。
+    """
+    assert Backpack(slots=SLOTS).equipped_slots == (0, 1, 2, 3)
+    assert Backpack(slots=SLOTS, equipped_slots=(0, 1, 2, 3)).equipped_slots == (0, 1, 2, 3)
+
+    for slots in (
+        (1, 2, 3, 4),  # 平移四格：不在前 4 格里
+        (3, 2, 1, 0),  # 同一组四格但换了序
+        (0, 1, 2, 5),  # 只有三格在前 4 格
+    ):
+        with pytest.raises(ValidationError):
+            Backpack(slots=SLOTS, equipped_slots=slots)
+
+
 def test_at_most_six_relics() -> None:
     relics = tuple(f"relic.{index}" for index in range(MAX_RELICS))
     assert _run_state(relics=relics).relics == relics

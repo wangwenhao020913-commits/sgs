@@ -9978,12 +9978,18 @@ def test_the_battle_smoke_library_is_a_valid_script_library() -> None:
 def test_the_pve_display_slots_live_inside_the_identity_table() -> None:
     """三处显示 + 遗物栏 + 战斗中的退出入口是**牌桌表面**的增量，不是第四个战斗 view。
 
+    本用例只断言**静态结构**（票 35：不在这里假装断言运行时行为）：
+
     - 结构：新节点全部住在 `#view-table` 与 `#view-replay` 之间那一段里（牌桌页内部），
       `VIEW_NAMES` 仍是四页、没有第二个战斗页；
-    - 缺省收起：四个节点都带 `hidden`，显隐只由服务端载荷决定（`table.js:renderSelfSeat`
-      的调用点 + `script-loadout.js:scriptBattleTableSync`），不做前端模式判断；
-    - 文案只住一处：副本全局技能标签的拼法只有 `seat-view.js:pveGlobalText` 一份；
-      退出确认框与 `suspend` 只有票 20 那一份（「退出战斗」与「离开棋局」调同一个入口）。
+    - 缺省收起：四个节点都带 `hidden`（只是**初始态**，不是"运行期由谁决定"）；
+    - 文案只住一处：副本全局技能标签的拼法只有 `seat-view.js:pveGlobalText` 一份。
+
+    **"显隐只由服务端载荷决定"不在这里判**（静态 HTML 读不出运行时行为）——它由已有的
+    `tests/support/ui_smoke.mjs` 钉住：**M7-23g**（遗物栏按载荷里的遗物打开、全局技能标签
+    在载荷没有时收起）、**M7-23i**（「回棋盘结算」只在服务端 `finished` 后出现）、
+    **M7-29a**（战斗退出键缺省收起）。"退出确认框 / `suspend` 只有票 20 那一份"由
+    `test_the_board_to_table_jump_has_exactly_one_implementation` 的入口唯一性断言兜住。
     """
     html = INDEX_HTML.read_text(encoding="utf-8")
     table_start = html.index('id="view-table"')

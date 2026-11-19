@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from sgs.data import (
@@ -180,6 +182,36 @@ def test_the_nine_resolved_names_are_pairwise_different() -> None:
     resolved = list(RESOLVED.values())
 
     assert len(set(resolved)) == 9
+
+
+def test_the_roster_and_bonus_substreams_are_reserved_names_with_no_consumer() -> None:
+    """``script.roster`` / ``script.bonus:<n>`` 是**预留名**（票 35 的裁定，不是待补的实现）。
+
+    - ``script.roster``：内置剧本的 roster **恒为 3 名**（``_script_errors`` 钉 3 名、
+      ``RunState.roster_candidates`` 恒 3），3 选 1 由玩家拍板——抽取这一层没有随机，
+      所以今天没有消费者；名字先冻在票 03 §5 的九条表里，留给"从更大池里抽 3"那种
+      内容扩展（要另开票，不是本票的欠账）。
+    - ``script.bonus:<n>``：「能人义士」的**赠送选技机制没有落地**（需要用户裁定），
+      本仓不凭空实现。名字是预留位，定义在 :mod:`sgs.script.rng` 里已由
+      :func:`test_each_factory_derives_from_its_own_name` 钉住。
+
+    这条断言把"零消费者"从"忘了接线"变成**声明**：将来谁给它们接上消费者，就必须在
+    这里改掉预留名清单（并说明新机制），不会悄悄长出一套没人裁过的选技随机。
+    """
+    reserved = ("roster_stream", "bonus_stream")
+    src = Path(__file__).resolve().parent.parent / "src" / "sgs"
+    call_sites = [
+        f"{path.relative_to(src.parent.parent)}::{name}"
+        for path in sorted(src.rglob("*.py"))
+        if not (path.parent.name == "script" and path.name == "rng.py")
+        for name in reserved
+        if f"{name}(" in path.read_text(encoding="utf-8")
+    ]
+
+    assert call_sites == [], (
+        "script.roster / script.bonus 是预留名（票 35）：生产代码里不该有消费者，"
+        f"实得 {call_sites}"
+    )
 
 
 def test_the_same_seed_draws_the_same_sequence_from_every_script_stream() -> None:

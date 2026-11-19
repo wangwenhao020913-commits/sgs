@@ -396,6 +396,37 @@ def test_every_battle_room_keeps_two_to_five_seats_and_a_legal_victory() -> None
     assert seen_boss == 2, f"2 个 Boss 房：实得 {seen_boss}"
 
 
+def test_most_battles_are_solo_and_at_most_two_bring_an_ai_ally() -> None:
+    """内容形状（``map.md`` D3；票 35 修正票 33 的过度编排）。
+
+    D3：「多数 1 打 1~4，**少数**带 1 名 AI 队友（最多 2v3）」。票 33 为了把内置剧本从
+    "0/28 可胜"救到可胜，把 **9/9 场**都改成「1 敌 + 1 义从」——那是可胜性下限的过度修正。
+    本断言把形状钉回来：**单人占多数**（≥5 场无 AI 队友、1 打 1~2），带 AI 义从的**至多 2 场**，
+    并且**至少一场是 Boss**。数值仍是占位值（D20），可胜性另由
+    :func:`test_every_battle_on_the_authored_route_is_winnable_by_the_heuristic_ai` 钉住。
+    """
+    library = _library()
+    battles = [room for room in library.rooms if room.battle is not None]
+    solo = [room for room in battles if not room.battle.allies]
+    with_ally = [room for room in battles if room.battle.allies]
+
+    assert len(solo) >= 5, f"单人战斗要占多数（至少 5 场）：实得 {len(solo)} / {len(battles)}"
+    assert len(solo) > len(with_ally), "单人战斗必须是多数（不是五五开）"
+    assert len(with_ally) <= 2, f"带 AI 义从的至多 2 场：实得 {[room.id for room in with_ally]}"
+    assert any(room.is_boss for room in with_ally), "带 AI 义从的少数里至少有一场是 Boss"
+
+    for room in solo:
+        assert not room.battle.allies, f"{room.id!r} 应是无 AI 队友的单人战"
+        low, high = _seat_total(room.battle)
+        assert low == 2, f"{room.id!r} 是 1 打 1~2（主角恒 1 座）：实得 {low}~{high} 座"
+        assert high <= 3, f"{room.id!r} 单人战最多 1 打 2：实得 {low}~{high} 座"
+
+    for room in with_ally:
+        assert len(room.battle.allies) == 1, (
+            f"{room.id!r} 的 AI 义从只带 1 名（D3：最多 2v3）"
+        )
+
+
 def test_every_band_has_two_templates_and_both_enemy_sources_are_used() -> None:
     """每个 band 至少 2 条模板；固定与按档抽两种敌人来源都有；固定对手的池为空。"""
     library = _library()
