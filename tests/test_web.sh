@@ -185,7 +185,8 @@ while IFS= read -r src; do
 done <<< "$SCRIPT_SRCS"
 echo "PASS: $(printf '%s\n' "$SCRIPT_SRCS" | wc -l | tr -d ' ') 份脚本各自 node --check 通过"
 echo "=== 前端渲染冒烟（真前端脚本 + 最小 DOM 垫片）==="
-if ! node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT"; then
+# 第三个参数 = 服务的 `--runs-dir`：M7 票 20 的坏档三态要**真的把主档写坏**才验得出来。
+if ! node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT" "$RUNS"; then
   echo "FAIL: 前端渲染冒烟未通过"
   exit 1
 fi

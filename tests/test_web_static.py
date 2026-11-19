@@ -9449,3 +9449,68 @@ def test_the_avatar_appearance_script_is_listed_right_after_the_dialog_shell() -
     at = srcs.index("avatar-appearance.js")
     assert srcs[at - 1] == "modal.js", "外观组件紧跟 modal.js（询问弹窗的选面点在这里）"
     assert srcs[at + 1] == "hero-detail.js", "外观组件排在 hero-detail.js 之前（检视窗族相邻）"
+
+
+# ---------------------------------------------------------------------------
+# M7 票 20：剧本开局页三态是**增量**一段，坏档那行是**红字**
+# ---------------------------------------------------------------------------
+
+
+def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
+    """spec §4「开局页增量叠加」：既有三块一个都不删，剧本面板是加在开局页里的一段。
+
+    位置判据与烟测同源：`#script-panel` 在 `view-lobby` 与牌桌视图之间，既有三块
+    （`#lobby-form` / `#hero-pool-panel` / `#run-list`）仍在它之后；剧本面板的两个确认框
+    也不落进牌桌视图与回放视图之间那一段（烟测有两处字符串切片拿那两个 `main` 的 id 当锚点）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    lobby_start = html.index('id="view-lobby"')
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    panel = html.index('id="script-panel"')
+    form = html.index('id="lobby-form"')
+    pool = html.index('id="hero-pool-panel"')
+    runs = html.index('id="run-list"')
+
+    assert lobby_start < panel < form < pool < runs, (
+        "剧本面板要住在开局页里、排在既有三块之前（一个都不许删）："
+        f"panel={panel} form={form} pool={pool} runs={runs}"
+    )
+    assert panel < table_start, "剧本面板属于开局页，不许落进牌桌视图"
+
+    between = html[table_start:replay_start]
+    assert "script-panel" not in between and "script-confirm" not in between, (
+        "剧本的节点不许插在牌桌视图与回放视图之间（烟测有两处字符串切片以那两个 id 为锚点）"
+    )
+    for needle in ('id="script-confirm"', 'id="script-confirm-backdrop"',
+                   'id="script-broken-reason"', 'id="btn-script-restore"',
+                   'id="btn-script-discard"'):
+        assert needle in html, f"坏档 / 撞旧档的修复面缺挂载点：{needle}"
+
+    srcs = _script_srcs()
+    assert "script-lobby.js" in srcs, f"剧本开局页的脚本不在清单里：{srcs}"
+    at = srcs.index("script-lobby.js")
+    assert srcs[at - 1] == "lobby.js", "剧本开局页与 lobby.js 同属开局页，紧挨它加载"
+    assert srcs[-1] == "main.js", "wireScriptLobby() 在 main.js 末尾调，故清单仍是 main.js 最后"
+
+
+def test_the_broken_save_reason_is_red_text_not_a_dim_note() -> None:
+    """票 04 §5 / 票 20：「坏档 ⇒ 一行**红字** `reason`」——红是判据，不是形容词。
+
+    坏档那行必须自己有一条规则、颜色是红系，而不是复用灰色的 `.dim` 或强调色
+    `--accent`（强调色是按钮的色，红字是"这一屏出了事"）。
+    """
+    reason = _css_rule(".script-reason")
+    color = re.search(r"color:\s*#([0-9a-fA-F]{6})", reason)
+    assert color is not None, f"坏档那行要自己写死颜色（不靠继承）：{reason}"
+    red, green, blue = (int(color.group(1)[at : at + 2], 16) for at in (0, 2, 4))
+    assert red > 120 and red > green + 40 and red > blue + 40, (
+        f"坏档那行必须是红字（实得 #{color.group(1)}）"
+    )
+    assert re.search(r"font-weight:\s*(?:600|700|bold)", reason), (
+        f"红字要够重（坏档不静默）：{reason}"
+    )
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert '<p id="script-broken-reason" class="script-reason">' in html, (
+        "坏档那行的节点必须挂 `.script-reason`（红字规则的唯一消费者）"
+    )

@@ -86,6 +86,9 @@ function wire() {
   loadHeroCatalog();
   loadHeroPools();
   loadDeckCatalog();
+  // M7 票 20：剧本模式的开局页（三态入口 + 摘要行 + 坏档修复 + 两个确认框）。首屏就取一次
+  // `GET /api/script-save`——三态是服务端事实，开局页一进来就要画对（不是点开才查）。
+  wireScriptLobby();
   $("lobby-form").addEventListener("submit", startGame);
   $("btn-pool-save").addEventListener("click", saveHeroPool);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；

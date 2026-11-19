@@ -1931,3 +1931,42 @@ button.avatar-skill:hover { border-color: var(--accent); }
 @media (max-height: 560px) {
   .table-hint { display: block; }
 }
+
+/* ---------------------------------------------------------------------------
+ * 剧本模式的开局页（M7 票 20 / spec §4「开局页增量叠加」）
+ *
+ * 既有三块（开一局 / 将池预设 / 已有录像）的样式**一个字没动**——这一节全是新类名。
+ * 三态的可见性由 `script-lobby.js:scriptRender` 显式写 `hidden`（不靠 CSS 猜状态）。
+ * ------------------------------------------------------------------------- */
+.script-panel .row { margin-top: 8px; }
+/* 摘要行（`ok` 才有）：剧本名 · 大节 k/m · 已结算节点数 · 铜钱 · saved_at。一行读得完。 */
+.script-summary { margin: 8px 0 0; font-size: 14px; }
+/* 坏档的那一行**红字**（票 04 §5：坏档不静默）。颜色与强调色 `--accent` 分开带走——红字
+ * 是"这一屏出了事"，与按钮的强调色不是一回事。 */
+.script-reason { margin: 8px 0 0; color: #b3261e; font-weight: 600; }
+.script-broken .row { margin-top: 6px; }
+.script-broken .row button { padding: 4px 11px; font-size: 14px; }
+/* 3 选 1 那一段：标签用胶囊，与将池的版本格同姿态（选中态用浅强调色，不改变布局）。 */
+.script-picker { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.script-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.script-choice { border-radius: 999px; padding: 3px 12px; font-size: 14px; }
+.script-choice.on { background: var(--accent-soft); border-color: var(--accent); }
+/* 确认框（撞旧档三选一 / 退出战斗）：自己的遮罩 + 居中窗口。开局页没有牌桌那套
+ * `#t-modal-*`，故这是开局页自己的模态，`z-index` 与牌桌的弹窗同档。 */
+.script-confirm-backdrop {
+  position: fixed; inset: 0; background: rgba(28, 26, 23, .38); z-index: 60;
+}
+.script-confirm {
+  position: fixed; inset: 0; z-index: 61;
+  display: flex; align-items: center; justify-content: center; pointer-events: none;
+}
+/* `display: flex` 会盖掉 `[hidden]` 的 `display: none`，故显式补一条。 */
+.script-confirm[hidden] { display: none; }
+.script-confirm-window {
+  pointer-events: auto; background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 16px 18px; max-width: 460px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .18);
+}
+.script-confirm-title { font-size: 15px; margin: 0 0 8px; }
+.script-confirm-text { margin: 0; }
+.script-confirm .row { justify-content: flex-end; }

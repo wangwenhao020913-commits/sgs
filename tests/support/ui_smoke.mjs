@@ -9,12 +9,27 @@
  *   ③ 提交的 Action **原样取自** `legal_actions`（前端不自己拼 Action——`04` §4.1 的纪律）；
  *   ④ 对手不出现牌面（不泄露）。
  *
- * 用法：`node tests/support/ui_smoke.mjs <base-url>`（由 `tests/test_web.sh` 在起好服务后调用）。
+ * 用法：`node tests/support/ui_smoke.mjs <base-url> <runs-dir>`
+ * （由 `tests/test_web.sh` / `tests/smoke-web.sh` 在起好服务后调用）。
+ *
+ * 第三个参数 = 服务的 `--runs-dir`：M7 票 20 的坏档三态要**真的把主档写坏**才验得出来
+ * （票 04 §5 的 `broken` 不是一个能从 HTTP 造出来的响应对手），故烟测要能直接改那个目录里的
+ * `script-save.json` / `script-save.json.bak` 两个文件。
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import vm from "node:vm";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8100";
+const RUNS_DIR = process.argv[3] || "";
+if (!RUNS_DIR) {
+  console.error("用法：node tests/support/ui_smoke.mjs <base-url> <runs-dir>"
+    + "（M7 票 20 的坏档三态要直接改 runs 目录里的存档文件）");
+  process.exit(2);
+}
+/* M7 票 20：剧本存档的两个文件（名字由 `tools/sgs_web/script_runs.py` 的
+ * `save_path` / `backup_path` 决定，两次 rename 的轮换把主档写成 `.bak`）。 */
+const SCRIPT_SAVE_FILE = `${RUNS_DIR}/script-save.json`;
+const SCRIPT_BAK_FILE = `${RUNS_DIR}/script-save.json.bak`;
 
 const postRaw = async (p, body) => {
   const response = await fetch(`${BASE}${p}`, {
@@ -482,7 +497,13 @@ globalThis.fetch = async (path, options) => {
     return { ok: true, status: 200, text: async () => text, json: async () => ({}) };
   }
   if (typeof path === "string" && path.startsWith("/api/")) {
-    calls.push({ path, body: options && options.body ? JSON.parse(options.body) : null });
+    calls.push({
+      path,
+      body: options && options.body ? JSON.parse(options.body) : null,
+      // M7 票 20：删档（`DELETE /api/script-save`）与建 / 续档（`POST`）走同一个路径族，
+      // 断言"只调了一个端点"必须分得清方法，故 `options.method` 也记下来（缺省 = GET）。
+      method: (options && options.method) || "GET",
+    });
     if (failNextGets > 0 && !(options && options.method) && path.startsWith("/api/sessions/")) {
       failNextGets -= 1;
       throw new Error("注入的取增量失败");
@@ -1104,6 +1125,335 @@ await ui.loadHeroPools();
 ui.heroPools().slots[ui.heroPools().selected].splice(0);
 await clickAndWait($("btn-pool-save"));
 $("in-players").value = "8";
+
+/* ============ M7 票 20：剧本开局页三态（新 / 继续 / 放弃 + 摘要行 + 坏档修复）============
+ *
+ * spec §4「开局页增量叠加」+ 票 04 §6 的入口语义。判据分三半：
+ *  ① **既有三块一个没少**（开一局表单 / 将池预设 / 已有录像都在，剧本面板是**加**的一段）；
+ *  ② 三态按 `GET /api/script-save` 的**真回包**切换——`ok` / `missing` 由真的建 / 删档造出来，
+ *     `broken` 由烟测把 `runs/script-save.json` 写成坏字节造出来（票 04 §5：坏档**不由前端猜**，
+ *     红字就是服务端那一行 `reason`）；
+ *  ③ 3 选 1 期间**不落盘**、撞旧档的「取消」**什么都不发生**、退出只调 suspend 一个端点。
+ *
+ * 全部走真的点击路径（三个入口 / 3 选 1 / 确认框都是 `#script-*` 上的 click），请求体从
+ * `calls` 拦截器里读——"关页面 = 没建过"这类判据是**线上事实**，不读内部 state。
+ */
+/** 三态回包（`GET /api/script-save` 的原样载荷）；还没拉到时是空对象，读字段一律 undefined。 */
+const scriptSave = () => (ui.state.script || {}).save || {};
+const scriptStatus = () => scriptSave().status || null;
+/** 红期容错：节点 / 桥入口还没实现时不做动作（让**断言**红，而不是抛 ReferenceError）。 */
+const scriptClick = async (node) => {
+  if (!node) return false;
+  await clickAndWait(node);
+  return true;
+};
+const scriptCall = (name, ...args) => {
+  const fn = ui[name];
+  return typeof fn === "function" ? fn(...args) : undefined;
+};
+const scriptCreatesSince = (from) =>
+  calls.slice(from).filter((call) => call.method === "POST" && call.path === "/api/script-runs");
+const scriptRunPostsSince = (from, suffix) =>
+  calls.slice(from).filter((call) => call.method === "POST" && call.path.endsWith(suffix));
+const scriptChoice = (attr, value) => Array.from($("script-choices").children)
+  .find((node) => node.getAttribute(attr) === value) || null;
+const scriptConfirmAction = (label) => Array.from($("script-confirm-actions").children)
+  .find((node) => String(node.textContent).trim() === label) || null;
+/** 点「新剧本」并（有旧档时）走过「覆盖新开」，再选剧本 / 选角色——各步都可能还不存在。 */
+const openScriptPicker = async (scriptId, heroId) => {
+  await scriptClick($("btn-script-new"));
+  if ($("script-confirm").hidden === false && scriptConfirmAction("覆盖新开")) {
+    await scriptClick(scriptConfirmAction("覆盖新开"));
+  }
+  if (scriptId) await scriptClick(scriptChoice("data-script-id", scriptId));
+  if (heroId) await scriptClick(scriptChoice("data-hero-id", heroId));
+};
+
+// ---- ① 三态之一：missing（本票的 runs 目录里还没有档，走真 GET） ----
+await scriptCall("scriptLoadSave");
+check("M7-20a 无档 ⇒ GET /api/script-save 回 missing（唯一允许的静默）",
+  scriptStatus() === "missing"
+  && calls.some((call) => call.method === "GET" && call.path === "/api/script-save"),
+  `status=${scriptStatus()}`);
+check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放弃」不出现、摘要行与坏档面板都收起",
+  $("btn-script-new").disabled === false
+  && $("btn-script-continue").disabled === true
+  && $("btn-script-abandon").hidden === true
+  && $("script-summary").hidden === true
+  && $("script-broken").hidden === true,
+  `new=${$("btn-script-new").disabled} continue=${$("btn-script-continue").disabled}`
+    + ` abandonHidden=${$("btn-script-abandon").hidden}`);
+
+// ---- ② 既有三块一个没少（UI-2：增量叠加）+ 位置纪律 + 标签白名单 ----
+{
+  const lobbyText = html.slice(html.indexOf('id="view-lobby"'), html.indexOf('id="view-table"'));
+  const at = (needle) => lobbyText.indexOf(needle);
+  check("M7-20c 既有开局表单 / 将池预设 / 已有录像一个都没删（剧本面板 → 开一局 → 将池 → 录像）",
+    at('id="script-panel"') >= 0 && at('id="lobby-form"') > at('id="script-panel"')
+    && at('id="in-players"') > 0 && at('id="btn-start"') > 0
+    && at('id="hero-pool-panel"') > at('id="lobby-form"')
+    && at('id="run-list"') > at('id="hero-pool-panel"'),
+    `script=${at('id="script-panel"')} form=${at('id="lobby-form"')}`
+      + ` pool=${at('id="hero-pool-panel"')} runs=${at('id="run-list"')}`);
+
+  const between = html.slice(html.indexOf('id="view-table"'), html.indexOf('id="view-replay"'));
+  check("M7-20d 剧本开局页的面不插在 view-table 与 view-replay 之间（两处字符串切片断言的锚点）",
+    between.indexOf("script-panel") < 0 && between.indexOf("script-confirm") < 0
+    && html.indexOf('id="script-panel"') > 0 && html.indexOf('id="script-confirm"') > 0,
+    `中间出现 script-panel=${between.indexOf("script-panel")}`);
+
+  // 垫片只解析 16 种标签（本文件 `:254` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+  const scriptSection = lobbyText.slice(at('id="script-panel"'), at('id="lobby-form"'))
+    + lobbyText.slice(at('id="script-confirm-backdrop"'));
+  const tags = [...scriptSection.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
+    .map((match) => match[1].toLowerCase());
+  check("M7-20e 新加节点的标签只用垫片认识的那些（不引入新标签）",
+    tags.length > 0 && tags.every((tag) => allowedTags.has(tag)),
+    `标签=${[...new Set(tags)].join(",")}`);
+}
+
+// ---- ③ 新剧本 → 选剧本 → 3 选 1（这段时间**不落盘**） ----
+let scriptMark = calls.length;
+await scriptClick($("btn-script-new"));
+const rosterCalls = scriptRunPostsSince(scriptMark, "/api/script-roster");
+check("M7-20f 「新剧本」只读一次剧本清单（POST /api/script-roster；不写档）",
+  rosterCalls.length === 1 && scriptCreatesSince(scriptMark).length === 0,
+  `roster=${rosterCalls.length} runs=${scriptCreatesSince(scriptMark).length}`);
+const scriptList = (ui.state.script && ui.state.script.scripts) || [];
+const chosenScript = scriptList[0] || null;
+check("M7-20g 选剧本这一步铺出库里每一部剧本（讨伐黄巾军）",
+  !!chosenScript && $("script-picker").hidden === false
+  && $("script-choices").children.length === scriptList.length
+  && !!scriptChoice("data-script-id", chosenScript.id)
+  && $("script-picker-hint").textContent.includes("第 1 步"),
+  `清单 ${scriptList.map((item) => item.id).join(",")} / 格 ${$("script-choices").children.length}`);
+
+await scriptClick(scriptChoice("data-script-id", chosenScript && chosenScript.id));
+const rosterHeroes = (chosenScript && chosenScript.roster_candidates) || [];
+check("M7-20h 选完剧本 ⇒ 3 选 1：候选恰好是剧本编排的那三名（名字走武将目录）",
+  rosterHeroes.length === 3
+  && $("script-choices").children.length === 3
+  && setEquals(
+    Array.from($("script-choices").children).map((node) => node.getAttribute("data-hero-id")),
+    rosterHeroes,
+  )
+  && scriptChoice("data-hero-id", "jie_liubei")
+  && scriptChoice("data-hero-id", "jie_liubei").textContent === "界刘备",
+  JSON.stringify(rosterHeroes));
+
+const chosenHero = rosterHeroes[0];
+await scriptClick(scriptChoice("data-hero-id", chosenHero));
+check("M7-20i 3 选 1 期间不落盘：一次建档请求都没发、档不在、状态仍是 missing",
+  scriptCreatesSince(scriptMark).length === 0
+  && !existsSync(SCRIPT_SAVE_FILE)
+  && scriptStatus() === "missing",
+  `runs=${scriptCreatesSince(scriptMark).length} 档在=${existsSync(SCRIPT_SAVE_FILE)}`);
+
+scriptMark = calls.length;
+await scriptClick($("btn-script-picker-go"));
+const createCalls = scriptCreatesSince(scriptMark);
+check("M7-20j 开档：一条 POST /api/script-runs（script_id + chosen_hero；无旧档 ⇒ 不带 expected_revision）",
+  createCalls.length === 1
+  && createCalls[0].body.script_id === chosenScript.id
+  && createCalls[0].body.chosen_hero === chosenHero
+  && !("expected_revision" in createCalls[0].body),
+  JSON.stringify(createCalls[0] && createCalls[0].body));
+
+const openSummary = scriptSave().summary || {};
+const summaryText = $("script-summary").textContent;
+check("M7-20k 有档 ⇒ 摘要行写全（剧本名 · 大节 layer_index+1/总数 · 已结算节点数 · 铜钱 · saved_at）",
+  scriptStatus() === "ok" && $("script-summary").hidden === false
+  && summaryText.startsWith(`${openSummary.script_name} · 大节 1/${openSummary.layer_count}`
+    + ` · 已结算 0 个节点 · 铜钱 0 · `)
+  && summaryText.endsWith(scriptSave().saved_at),
+  `摘要「${summaryText}」`);
+check("M7-20l 有档 ⇒ 「继续」可点、「放弃」出现、坏档面板收起",
+  $("btn-script-continue").disabled === false
+  && $("btn-script-abandon").hidden === false
+  && $("script-broken").hidden === true
+  && $("btn-script-new").disabled === false,
+  `continue=${$("btn-script-continue").disabled} abandonHidden=${$("btn-script-abandon").hidden}`);
+
+// ---- ④ 继续剧本 = 一条 resume（棋盘体交给票 21 渲染） ----
+scriptMark = calls.length;
+await scriptClick($("btn-script-continue"));
+const resumeCalls = scriptRunPostsSince(scriptMark, "/resume");
+const board = (ui.state.script || {}).board || null;
+check("M7-20m 「继续剧本」= 一条 POST …/resume，棋盘体落进 state.script.board（票 21 的输入）",
+  resumeCalls.length === 1
+  && resumeCalls[0].path === `/api/script-runs/${scriptSave().run_id}/resume`
+  && !!board && board.run_id === scriptSave().run_id
+  && board.revision === scriptSave().revision
+  && scriptCreatesSince(scriptMark).length === 0,
+  `resume=${resumeCalls.length} board=${board && board.run_id}`);
+
+// ---- ⑤ 退出确认框（战斗中）：「退出后这场战斗要重打；棋盘进度已保存。」 ----
+scriptCall("scriptExitConfirm");
+check("M7-20n 退出确认框：一句「退出后这场战斗要重打；棋盘进度已保存。」+ 确认 / 取消",
+  $("script-confirm").hidden === false
+  && $("script-confirm-text").textContent === "退出后这场战斗要重打；棋盘进度已保存。"
+  && !!scriptConfirmAction("确认") && !!scriptConfirmAction("取消"),
+  `text=${$("script-confirm-text").textContent}`);
+scriptMark = calls.length;
+await scriptClick(scriptConfirmAction("取消"));
+check("M7-20o 退出确认「取消」= 什么都不发生（零请求、框收起）",
+  calls.length === scriptMark && $("script-confirm").hidden === true,
+  `${calls.length - scriptMark} 个请求`);
+
+scriptMark = calls.length;
+scriptCall("scriptExitConfirm");
+await scriptClick(scriptConfirmAction("确认"));
+const suspendCalls = scriptRunPostsSince(scriptMark, "/suspend");
+check("M7-20p 退出确认「确认」= 只调 suspend 一个端点（body 空；前端不判断自己在不在战斗里）",
+  suspendCalls.length === 1
+  && suspendCalls[0].path === `/api/script-runs/${scriptSave().run_id}/suspend`
+  && !("expected_revision" in (suspendCalls[0].body || {}))
+  && calls.length - scriptMark === 1,
+  `suspend=${suspendCalls.length} 全部=${JSON.stringify(calls.slice(scriptMark).map((call) => call.path))}`);
+
+// ---- ⑥ 放弃剧本（删两份） ----
+const abandonRevision = scriptSave().revision;
+scriptMark = calls.length;
+await scriptClick($("btn-script-abandon"));
+const deleteCalls = calls.slice(scriptMark).filter((call) => call.method === "DELETE");
+check("M7-20q 「放弃剧本」= 一条 DELETE /api/script-save?expected_revision=N ⇒ 回 missing",
+  deleteCalls.length === 1
+  && deleteCalls[0].path === `/api/script-save?expected_revision=${abandonRevision}`
+  && scriptStatus() === "missing"
+  && $("btn-script-abandon").hidden === true
+  && !existsSync(SCRIPT_SAVE_FILE),
+  `DELETE=${JSON.stringify(deleteCalls.map((call) => call.path))} status=${scriptStatus()}`);
+
+// ---- ⑦ 新剧本撞旧档：三选一（继续旧档 / 覆盖新开 / 取消） ----
+await openScriptPicker(chosenScript && chosenScript.id, chosenHero);
+await scriptClick($("btn-script-picker-go"));
+const existing = scriptSave();
+check("M7-20r 第二次开档仍是一条建档请求（撞档确认的前置：现在有旧档）",
+  existing.status === "ok" && existing.revision === 0 && existsSync(SCRIPT_SAVE_FILE),
+  `status=${existing.status} revision=${existing.revision}`);
+
+await scriptClick($("btn-script-new"));
+check("M7-20s 撞旧档：确认框「当前进度会被覆盖（不可恢复）」+ 三选一（继续旧档 / 覆盖新开 / 取消）",
+  $("script-confirm").hidden === false
+  && $("script-confirm-text").textContent.includes("当前进度会被覆盖（不可恢复）")
+  && ["继续旧档", "覆盖新开", "取消"].every((label) => !!scriptConfirmAction(label)),
+  `text=${$("script-confirm-text").textContent}`
+    + ` 按钮=${Array.from($("script-confirm-actions").children).map((n) => n.textContent).join("/")}`);
+
+scriptMark = calls.length;
+await scriptClick(scriptConfirmAction("取消"));
+const cancelWasQuiet = calls.length === scriptMark && $("script-confirm").hidden === true;
+await scriptCall("scriptLoadSave");
+check("M7-20t 撞旧档「取消」= 什么都不发生（零请求、不删档、revision 不变）",
+  cancelWasQuiet && scriptStatus() === "ok"
+  && scriptSave().revision === existing.revision
+  && existsSync(SCRIPT_SAVE_FILE),
+  `零请求=${cancelWasQuiet} revision=${scriptSave().revision}`);
+
+// 「覆盖新开」⇒ 进 3 选 1，建档带 expected_revision（覆盖旧档的唯一凭据）。
+scriptMark = calls.length;
+await scriptClick($("btn-script-new"));
+await scriptClick(scriptConfirmAction("覆盖新开"));
+check("M7-20u 「覆盖新开」⇒ 进 3 选 1（只读一次剧本清单，此刻仍没写档）",
+  scriptRunPostsSince(scriptMark, "/api/script-roster").length === 1
+  && scriptCreatesSince(scriptMark).length === 0
+  && $("script-picker").hidden === false,
+  `roster=${scriptRunPostsSince(scriptMark, "/api/script-roster").length}`);
+await scriptClick(scriptChoice("data-script-id", chosenScript && chosenScript.id));
+await scriptClick(scriptChoice("data-hero-id", rosterHeroes[1]));
+scriptMark = calls.length;
+await scriptClick($("btn-script-picker-go"));
+const overwriteCalls = scriptCreatesSince(scriptMark);
+check("M7-20v 「覆盖新开」的建档带 expected_revision（旧档 revision），新档换 run_id",
+  overwriteCalls.length === 1
+  && overwriteCalls[0].body.expected_revision === existing.revision
+  && overwriteCalls[0].body.chosen_hero === rosterHeroes[1]
+  && scriptSave().status === "ok" && scriptSave().run_id !== existing.run_id,
+  JSON.stringify(overwriteCalls[0] && overwriteCalls[0].body));
+
+// 「继续旧档」⇒ 直接续，不建档、不删档。
+scriptMark = calls.length;
+await scriptClick($("btn-script-new"));
+await scriptClick(scriptConfirmAction("继续旧档"));
+check("M7-20w 「继续旧档」= 一条 resume（不建档、不删档）",
+  scriptRunPostsSince(scriptMark, "/resume").length === 1
+  && scriptCreatesSince(scriptMark).length === 0
+  && calls.slice(scriptMark).every((call) => call.method !== "DELETE"),
+  JSON.stringify(calls.slice(scriptMark).map((call) => `${call.method} ${call.path}`)));
+
+// ---- ⑧ 坏档（真把主档写坏）：红字 + 两个修复按钮，且绝不把坏档当空档 ----
+// 先走一条**真的** S_enter 写一次档：`.bak` 因此是上一份（建档案），恢复才有东西可回。
+const liveBoard = (ui.state.script || {}).board || {};
+if (liveBoard.run_id && (liveBoard.available_next || []).length) {
+  await fetch(`${BASE}/api/script-runs/${liveBoard.run_id}/nodes/${liveBoard.available_next[0]}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_revision: liveBoard.revision }),
+  });
+}
+await scriptCall("scriptLoadSave");
+const healthy = scriptSave();
+const revisionBeforeEnter = liveBoard.revision;
+check("M7-20x 进过节点后主档与 .bak 都在（坏档恢复的前置），主档 revision 已前进",
+  healthy.status === "ok" && healthy.bak_available === true
+  && healthy.revision === revisionBeforeEnter + 1
+  && existsSync(SCRIPT_SAVE_FILE) && existsSync(SCRIPT_BAK_FILE),
+  `status=${healthy.status} revision=${healthy.revision} bak=${healthy.bak_available}`);
+
+writeFileSync(SCRIPT_SAVE_FILE, "{ 这不是一份存档");
+await scriptCall("scriptLoadSave");
+const brokenSave = scriptSave();
+check("M7-20y 坏档：status=broken（不是 missing）、「继续」置灰、摘要行收起、红字 = 服务端那行 reason",
+  brokenSave.status === "broken" && String(brokenSave.reason || "").length > 0
+  && $("btn-script-continue").disabled === true
+  && $("script-summary").hidden === true
+  && $("script-broken").hidden === false
+  && $("script-broken-reason").textContent === brokenSave.reason
+  // 垫片不解析静态节点的 `class` 属性（只有动态节点经 `classList` 写），故红字那条类名
+  // 按**源串**钉（颜色由 `tests/test_web_static.py` 对 `style.css` 钉）。
+  && /<p id="script-broken-reason" class="script-reason">/.test(html),
+  `status=${brokenSave.status} reason=${brokenSave.reason}`);
+check("M7-20z 坏档 ≠ 空档：「放弃」仍在（有档才出现），两个修复按钮都在，备份可用那句不显示",
+  $("btn-script-abandon").hidden === false
+  && $("btn-script-restore").hidden === false
+  && $("btn-script-discard").hidden === false
+  && $("script-broken-backup").hidden === true,
+  `abandon=${$("btn-script-abandon").hidden} restore=${$("btn-script-restore").hidden}`);
+
+scriptMark = calls.length;
+await scriptClick($("btn-script-restore"));
+const restoreCalls = scriptRunPostsSince(scriptMark, "/api/script-save/restore");
+check("M7-20aa 「从我上一份恢复」= 一条 POST /api/script-save/restore，写回上一份（revision 回到备份那份）",
+  restoreCalls.length === 1
+  && scriptSave().status === "ok"
+  && scriptSave().revision === revisionBeforeEnter
+  && $("script-broken").hidden === true
+  && $("script-summary").hidden === false,
+  `revision=${scriptSave().revision}（进节点前 ${revisionBeforeEnter}）`);
+
+// `.bak` 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句「备份也不可用」。
+writeFileSync(SCRIPT_SAVE_FILE, "{ 还是坏的");
+unlinkSync(SCRIPT_BAK_FILE);
+await scriptCall("scriptLoadSave");
+check("M7-20ab .bak 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句「备份也不可用」",
+  scriptStatus() === "broken" && scriptSave().bak_available === false
+  && $("btn-script-restore").hidden === true
+  && $("btn-script-discard").hidden === false
+  && $("btn-script-abandon").hidden === false
+  && $("script-broken-backup").hidden === false
+  && $("script-broken-backup").textContent.includes("备份也不可用"),
+  `bak=${scriptSave().bak_available} restoreHidden=${$("btn-script-restore").hidden}`);
+
+scriptMark = calls.length;
+await scriptClick($("btn-script-discard"));
+const brokenDeletes = calls.slice(scriptMark).filter((call) => call.method === "DELETE");
+check("M7-20ac 坏档「放弃存档」= 一条**不带** revision 的 DELETE ⇒ 回 missing（状态复原，后续用例干净）",
+  brokenDeletes.length === 1 && brokenDeletes[0].path === "/api/script-save"
+  && scriptStatus() === "missing" && $("script-broken").hidden === true
+  && !existsSync(SCRIPT_SAVE_FILE),
+  `DELETE=${JSON.stringify(brokenDeletes.map((call) => call.path))} status=${scriptStatus()}`);
 
 /** 推进一条对局到一个干净局面。
  *

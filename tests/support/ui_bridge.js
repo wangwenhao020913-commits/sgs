@@ -96,6 +96,14 @@
     "poolBlockReason", "syncPoolHint",
     // M5-01b：开局页牌堆档位——列表拉取（选项/文案全来自服务端 GET /api/decks）
     "loadDeckCatalog", "fillDeckOptions",
+    // M7 票 20：剧本模式的开局页——三态回包 / 摘要行文案 / 三态纯派生 + 五个动作与两个确认框。
+    // 烟测走真 DOM 点击与真端点（建 / 续 / 删 / 恢复档都打到服务端）；只从桥上调**没有可见
+    // 按钮**的那几个口：退出确认框（入口归票 21 的牌桌）与纯函数（摘要 / 三态派生）。
+    "scriptLoadSave", "scriptApplySave", "scriptSummaryText", "scriptLobbyView",
+    "scriptNewScript", "scriptOpenPicker", "scriptChooseScript", "scriptChooseHero",
+    "scriptCreateRun", "scriptContinueRun", "scriptAbandonSave", "scriptRestoreBackup",
+    "scriptExitConfirm", "scriptSuspend", "scriptClosePicker", "scriptCloseConfirm",
+    "wireScriptLobby",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

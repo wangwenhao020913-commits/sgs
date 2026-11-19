@@ -297,6 +297,24 @@ const state = {
   heroCatalog: [],     // 将池目录：按真名分组的启用版本（`GET /api/heroes`；票 13 起分组）
   heroPools: null,     // 将池预设的本地编辑态 `{slots, active, selected}`（票 13；服务端存档在 runs/）
   deckCatalog: [],     // 牌堆档位列表（`GET /api/decks`）；标签 / 说明也由服务端下发
+  // M7 票 20：剧本模式开局页的本地态（`script-lobby.js` 是唯一读写方；票 21 / 22 接着读
+  // `board` / `runId`）。`save` = `GET /api/script-save` 的原样回包（三态 + 摘要 + revision），
+  // 前端不派生第二份状态；`scripts` = `POST /api/script-roster` 的剧本清单（每项自带
+  // 3 名初始角色候选）。`overwrite` 只记住"这次「新剧本」是在覆盖旧档"（建档要带旧 revision）。
+  script: {
+    save: null,
+    scripts: [],
+    scriptId: null,
+    roster: [],
+    hero: null,
+    board: null,
+    runId: null,
+    revision: null,
+    overwrite: false,
+    pickerOpen: false,
+    busy: false,
+    confirm: null,     // 打开中的确认框种类：null / "overwrite" / "exit"
+  },
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）
   narrative: [],       // U1-05：服务端下发的叙事条目（简易事件流；按 seq 升序）

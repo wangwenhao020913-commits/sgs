@@ -21,6 +21,48 @@
     </div>
   </div>
   <div class="page-body">
+  <!-- 剧本模式（M7 票 20 / spec §4「开局页增量叠加」）：这是**加的一个段落**，既有三块
+       （开一局表单 / 将池预设 / 已有录像）一个都没删，顺序也没动。
+       三态只由 `GET /api/script-save` 的回包决定（`missing` / `ok` / `broken`），渲染与请求
+       全在 `script-lobby.js`：「新剧本」= 选剧本 → 3 选 1 角色（这段**不落盘**）；
+       「继续剧本」= 一条 resume；「放弃剧本」= 删两份。`ok` 才有摘要行；
+       `broken` 有红字 `reason` 与两个修复按钮（`.bak` 也不可用时只剩「放弃存档」）。
+       位置纪律：**不插在牌桌视图与回放视图之间** —— 烟测有两处字符串切片以那两个
+       `main` 的 id 为锚点，故连注释里都不写它们的字面量；新节点也只用垫片认识的标签。 -->
+  <section id="script-panel" class="panel script-panel" aria-label="剧本模式">
+    <h2>剧本</h2>
+    <div class="row">
+      <button id="btn-script-new" type="button" class="primary">新剧本</button>
+      <button id="btn-script-continue" type="button" disabled>继续剧本</button>
+      <button id="btn-script-abandon" type="button" class="ghost" hidden>放弃剧本</button>
+      <span id="script-hint" class="dim"></span>
+    </div>
+    <!-- 摘要行（`ok` 才有）：剧本名 · 大节 `layer_index+1`/总数 · 已结算节点数 · 铜钱 · saved_at。
+         五个数原样来自服务端的 `summary`（票 04 §6），前端不派生。 -->
+    <p id="script-summary" class="script-summary" hidden></p>
+    <!-- 坏档（`broken`）：一行**红字** = 服务端那行 `reason`（票 04 §5：坏档不静默、不重写、
+         不丢坏字段），旁边两个修复按钮；`.bak` 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句。
+         **绝不**把坏档当空档：摘要行收起、`.bak` 不可用时连「恢复」都不画。 -->
+    <div id="script-broken" class="script-broken" hidden>
+      <p id="script-broken-reason" class="script-reason"></p>
+      <div class="row">
+        <button id="btn-script-restore" type="button">从我上一份恢复</button>
+        <button id="btn-script-discard" type="button" class="ghost">放弃存档</button>
+      </div>
+      <p id="script-broken-backup" class="dim" hidden>备份也不可用（只能放弃存档）</p>
+    </div>
+    <!-- 「新剧本」的两步：① 选剧本 → ② 3 选 1 角色。`POST /api/script-roster` 是**只读**的
+         （候选是作者编排的数据、不消耗随机数），故这段点多久都不落盘：关页面 = 没建过。
+         「开档」= 唯一的那一次 `POST /api/script-runs`；有旧档时它带旧 `revision`。 -->
+    <div id="script-picker" class="script-picker" hidden>
+      <p id="script-picker-hint" class="dim"></p>
+      <div id="script-choices" class="script-choices"></div>
+      <div class="row">
+        <button id="btn-script-picker-go" type="button" class="primary" disabled>开档</button>
+        <button id="btn-script-picker-cancel" type="button" class="ghost">取消</button>
+      </div>
+    </div>
+  </section>
   <form id="lobby-form" class="panel">
     <h2>开一局</h2>
     <div class="grid">
@@ -79,6 +121,19 @@
     <h2>已有录像</h2>
     <div id="run-list" class="runs"></div>
   </section>
+  </div>
+  <!-- 确认框（M7 票 20）：撞旧档的三选一（继续旧档 / 覆盖新开 / 取消）与退出战斗的
+       确认 / 取消**共用**这一个壳——两处的按钮个数与文案都不同，故按钮由
+       `script-lobby.js:scriptConfirm` 按场景现铺，这里只留骨架与自己的遮罩。
+       「取消」一律**什么都不发生**（撞旧档 = 不删档；退出 = 不发请求）。 -->
+  <div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
+  <div id="script-confirm" class="script-confirm" role="dialog" aria-modal="true"
+       aria-labelledby="script-confirm-title" hidden>
+    <div class="script-confirm-window">
+      <h2 id="script-confirm-title" class="script-confirm-title"></h2>
+      <p id="script-confirm-text" class="script-confirm-text"></p>
+      <div id="script-confirm-actions" class="row"></div>
+    </div>
   </div>
 </main>
 
@@ -455,6 +510,12 @@
      页面启动即异步载入；缺键逐级回退到服务端 wording → 前端通用文案）。 -->
 <script src="prompts.js"></script>
 <script src="lobby.js"></script>
+<!-- M7 票 20：剧本模式的开局页（三态入口 + 摘要行 + 坏档修复 + 两个确认框）。
+     与 `lobby.js` 同属开局页，故紧挨它；只读 core.js 的 `$` / `api` / `post` / `state`，
+     由 `main.js:wire()` 末尾的 `wireScriptLobby()` 接线（首屏就取一次三态）。
+     走的是 `GET /api/script-save` / `POST /api/script-roster` / `POST /api/script-runs` /
+     `…/resume` / `…/suspend` / `POST /api/script-save/restore` / `DELETE /api/script-save`。 -->
+<script src="script-lobby.js"></script>
 <script src="session.js"></script>
 <script src="candidates.js"></script>
 <script src="card-view.js"></script>
