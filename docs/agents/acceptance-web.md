@@ -45,6 +45,10 @@ log 在 `runs/serve-8080.log`。需要 effort 专属录像目录时再用原始�
   `runs/`，`serve-dev.sh status|stop` 管不到它。
 - 静态脚本是**每请求从磁盘读**的：改 `static/*.js` 后浏览器强刷即可，不必重启；只有改了
   `serve.py` / `projection.py` / `visibility.py` 等接入层 Python 才重启服务。
+- **同一个 `runs/` 只许一个 `serve.py`**（M7 票 19 的隐含前提 / 票 29 落成文字）：剧本存档
+  走「两次 rename + `.bak`」与进程内一把锁，`run_id` + `revision` 的乐观锁只兜并发写，**不兜
+  两个进程各持一份内存态**。换端口调试前先 `bash tools/serve-dev.sh status`（或确认旧进程已
+  停），别让两个服务同时对着一份 `runs/script-save.json` 写。
 
 ## 3 · 浏览器操作（browser-skill）
 

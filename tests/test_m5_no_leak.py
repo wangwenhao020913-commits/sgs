@@ -1185,3 +1185,161 @@ def test_the_avatar_appearance_payload_has_a_no_leak_case() -> None:
 
     # 抹载荷不是"把数据藏起来"：持有者那条路照旧有全文（判据没有误伤自见面）。
     assert any(row["text"] for card in cards for row in card["skills"])
+
+
+# ---------------------------------------------------------------------------
+# M7 票 29：PvE（剧本战斗）的载荷同样不泄露，且没有新增 delta 类型
+# ---------------------------------------------------------------------------
+
+PVE_SEED = 0x5EED29
+
+
+def _pve_rule_config():
+    """一份 1v2 的剧本战斗配置：主角 + 两名模板敌人（座位表与授予都进 header）。"""
+    from sgs.data import (
+        Mode,
+        PveConfig,
+        PveSeat,
+        PveVictory,
+        PveVictoryKind,
+        SkillGrant,
+    )
+
+    pve = PveConfig(
+        identities=(Identity.ALLY, Identity.ENEMY, Identity.ENEMY),
+        principal=0,
+        victory=PveVictory(kind=PveVictoryKind.ROUT),
+        seats=(
+            PveSeat(hero="jie_liubei", hp=4, hp_max=4),
+            PveSeat(hero=None, name="黄巾力士", hp=3, hp_max=3),
+            PveSeat(
+                hero=None,
+                name="黄巾渠帅",
+                hp=4,
+                hp_max=4,
+                hp_max_bonus=1,
+                slash_damage_bonus=1,
+            ),
+        ),
+        grants=(
+            SkillGrant(seat=0, kind="skill", id="hero.liubei.rende"),
+            SkillGrant(seat=0, kind="relic", id="equip.crossbow"),
+        ),
+    )
+    return RuleConfig(player_count=3, mode=Mode.PVE, pve=pve)
+
+
+def _payload_card_ids(payload) -> set[int]:
+    """载荷里出现过的全部牌面 ``card_id``（递归；不按字段名猜一层）。"""
+    found: set[int] = set()
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            if isinstance(value.get("card_id"), int):
+                found.add(value["card_id"])
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return found
+
+
+def _payload_keys(payload) -> set[str]:
+    keys: set[str] = set()
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            keys.update(value)
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return keys
+
+
+def test_a_pve_script_battle_leaks_neither_hands_nor_deck_and_registers_no_new_delta() -> None:
+    """A2（票 29 的兜总面）：PvE 局同样只有**张数**，席位表与授予只进 header。
+
+    三条判据：
+
+    1. **载荷**（逐次询问查快照 + 挂起）：对手只有 ``hand_count``、牌堆只有 ``deck_count``；
+       载荷里出现过的牌面 id 与本局任一对手的手牌 id 不相交（不靠字段名猜一层）。
+    2. **header**（公开事实）：``PveConfig.seats`` 与 ``grants`` 在记录流首行的
+       ``rule_config.pve`` 里——玩家本来就看得见关卡编排；但它们**不进**玩家视角载荷
+       （``seats`` / ``grants`` / ``global_skills`` 这几个配置键一个都不下发）。
+    3. **delta-generic**：这一局产出的每一种 ``delta_type`` 都已在
+       :func:`_delta_records` 里登记（PvE 没有引入新的 delta 类型）。
+    """
+    session = Session(
+        seed=PVE_SEED, rule_config=_pve_rule_config(), timeout_seconds=None
+    )
+    header = session.records()[0]
+    assert header.rule_config.pve is not None, "PvE 座位表必须进 header"
+    assert len(header.rule_config.pve.seats) == 3
+    assert {grant.kind for grant in header.rule_config.pve.grants} == {"skill", "relic"}
+    dumped_header = json.dumps(record_json(header), ensure_ascii=False)
+    assert "seats" in dumped_header and "grants" in dumped_header, (
+        "header 里本该有座位表与授予（公开的关卡编排）"
+    )
+
+    checks = 0
+    while not session.finished:
+        snapshot = visible_snapshot(session)
+        # 身份在 PvE 里是**公开事实**（友 / 敌，票 01 §3 / 票 23），故不套身份局那套
+        # 可见性判据——这里只判手牌与牌堆这两个隐藏面。
+        assert snapshot["seat"] == session.human_seat
+        assert isinstance(snapshot.get("self_hand"), list), "本人手牌必须可见"
+        for player in snapshot["players"]:
+            if player["seat"] == session.human_seat:
+                continue
+            assert "self_hand" not in player and "hand" not in player
+            assert "hand_cards" not in player, f"对手手牌牌面泄露：{player}"
+            assert isinstance(player["hand_count"], int), "对手手牌只给数量"
+            assert "known" not in player and "revealed_cards" not in player
+
+        other = [player for player in snapshot["players"] if player["seat"] != 0]
+        assert other and all(player["side"] for player in other), "对照：对手确实在载荷里"
+        assert isinstance(snapshot.get("deck_count"), int)
+        assert "deck" not in snapshot and "deck_cards" not in snapshot
+        assert not ({"pve", "seats", "grants", "global_skills"} & _payload_keys(snapshot)), (
+            "配置面只进 header，不进玩家视角载荷"
+        )
+        hidden_ids = {
+            card_id
+            for player in session.engine.state.players
+            if player.seat != session.human_seat
+            for card_id in player.hand
+        }
+        assert hidden_ids, "对照：对手手里确实有牌（否则交集判据是空转）"
+        assert _payload_card_ids(snapshot).isdisjoint(hidden_ids), (
+            "快照里出现了对手手牌的牌面 id"
+        )
+
+        pending = pending_payload(session)
+        if pending is not None:
+            checks += 1
+            assert not ({"pve", "seats", "grants", "global_skills"} & _payload_keys(pending))
+            assert _payload_card_ids(pending).isdisjoint(hidden_ids), (
+                "挂起载荷里出现了对手手牌的牌面 id"
+            )
+        if session.pending is not None:
+            session.submit_answer(_human_action(session.pending))
+        else:
+            session.drive()
+        assert checks < 10_000, "驱动没有推进（活锁）"
+
+    assert checks >= 1, "这一局至少要有一条真询问的载荷被查过"
+    delta_types = {
+        record.delta_type
+        for record in session.records()
+        if getattr(record, "kind", None) == "delta"
+    }
+    assert delta_types, "对照：这一局至少产出一类 delta（判据不是空转）"
+    missing = sorted(delta_types - set(_delta_records()))
+    assert not missing, f"PvE 局出现了未登记不泄露判据的 delta 类型：{missing}"
