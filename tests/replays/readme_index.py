@@ -102,6 +102,13 @@ NAMES: dict[str, tuple[str, str]] = {
     "58-jie-luxun-hero-zone": ("【谦逊】武将牌上的牌区 · 放置与归还", "一张延时 / 普通锦囊唯一指向界陆逊 ⇒ 【谦逊】把**全部手牌**置于 `Zone.HERO`（区键 `0:hero.jie_luxun.qianxun`，`card_move` 的 `to_zone.skill_instance` 非空）并触发【连营】——「令至多 X 名角色各摸一张」是**一次**座位多选（`SELECT_OPTIONS` + 不枚举档，`lianying:seat`，一次点齐座位 0 / 1）；当前回合结束时整批归还（`HERO → HAND`）。同一帧里【连营】第二次触发**重新发问**（答案缓存按派发范围分桶）"),
     "59-jie-lvmeng-extra-turn": ("【博图】额外回合 + 轮次变化", "弃牌阶段弃出四花色 ⇒ 回合结束时【博图】给一个额外回合：`TURN_START` 序列出现同座位连着的两个回合，`turn_change` 先落 `extra=true`（轮次不变）；额外回合不推进自然指针、也不刷新「每轮限 X 次」，回到座位 0 的自然回合时落 `extra=false` 且 `round=2`"),
     "60-jie-zhenji-luoshen-tags": ("【洛神】牌标签 · 增与删", "界甄姬【洛神】判定为黑色 ⇒ 获得此牌并挂「本回合不计入」标签：`tag_add` 带牌面 + 标签类型 + 来源实例；回合末清除落同形的 `tag_remove`。标签与所在区域无关、也不改变公开的「手牌数」（手牌计数是另一个查询）"),
+    # ---- 11. PvE 终局（M7 票 12：四类逐场条件各一条 + 队友局 + 保护队友阵亡） ----
+    "61-pve-rout-win": ("PvE · 全歼敌人（胜）", "`pve.victory.kind = rout`（票 01 §4 的表）：【万箭齐发】同一批打死两名敌人 ⇒ `game_end` 的 `side = ally` / `reason = enemies_routed` / `winners` = 全侧友方座位；身份局的奖惩与主公锚点在 PvE 全不生效（没有 `identity_reveal`、杀敌不摸 3）"),
+    "62-pve-survive-rounds-win": ("PvE · 存活 N 轮（胜）", "`survive_rounds`（N = 1）：谁都不进攻，`GameState.round` 推进到 2（`round > N`）那一刻判胜 ⇒ `side = ally` / `reason = rounds_survived`；判点在**轮次 +1 之后**，轮次只有唯一计数源（不另建计数器）"),
+    "63-pve-rout-within-rounds-win": ("PvE · N 轮内全歼（胜）", "`rout_within_rounds`（N = 1）：第 1 轮内全歼 ⇒ `side = ally` / `reason = enemies_routed_in_time`；硬边界 = **先判轮次、后判全歼**（跨过 N 之后即使敌人全灭也不记这一场的胜）"),
+    "64-pve-slay-boss-win": ("PvE · 击败 Boss（胜）", "`slay_boss`（`pve.boss = 1`）：Boss 座位阵亡（死亡检测点，与主公锚点同层）⇒ `side = ally` / `reason = boss_slain`；1v1 里 Boss 是合成武将「黄巾渠帅」，不是武将表记录"),
+    "65-pve-ally-team-rout": ("PvE · 队友局 2v3（胜）", "2 友 × 3 敌：身份由 `pve.identities` 直接给出且**全部 `identity_visible`**（开局公开，不洗身份、不消耗 `identity` 子流）；AI 队友座位（3）真的行动并用【万箭齐发】收局，`winners = (0, 3)` = 全侧友方座位（含队友）"),
+    "66-pve-protected-ally-death": ("PvE · 保护队友阵亡（败）", "`pve.protected_ally = 1`：受保护队友阵亡 ⇒ `side = enemy` / `reason = protected_ally_dead`，而**主角还活着**（败因不是主角阵亡）；败优先于胜（与任何胜利条件同批发生也判败）"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
 

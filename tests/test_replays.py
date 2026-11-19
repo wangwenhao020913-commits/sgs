@@ -16,16 +16,18 @@ import pytest
 
 from replays import distribution, goals, scenarios
 from sgs.agents import TapeError, TapePlayer, tape_from_journal
-from sgs.data import RuleConfig, load_content_pack
+from sgs.data import Identity, Mode, PveVictoryKind, RuleConfig, load_content_pack
 from sgs.engine import (
     EVENT_SCHEMA_VERSION,
     Engine,
     JournalVersionError,
     dump_journal,
     read_journal,
+    solve_pve_outcome,
 )
 from sgs.skills import blocked_true_names
 from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause, Zone
+from sgs.timing import Timing
 
 from support import play_standard
 
@@ -148,6 +150,14 @@ dd029e5..HEAD -- 'tests/replays/*.jsonl'`` 为空即证（README / 生成器按�
 短 3 字节），合计 +1,809 字节；
 ``goals.py`` 判据与种子一个都没动；47 条冻结表的 sha256 因此一次重算（票 01 §2 授权的
 **唯一一次** re-freeze）。票 12 的 6 条 PvE 基准是**新增**，不碰这 60 条。
+
+**M7 票 12（6 条 PvE 基准）后的实测**：66 条合计 **50,989,205 字节 ≈ 48.63 MiB**，最大单文件
+**3,334,072 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——新增的 6 条只占
+**197,892 字节 ≈ 193 KiB**（构造局面、短局：2–5 座、1–2 轮），仍在 52 MiB 总预算与 4 MiB
+单文件上限之内，故**不动预算**（"优先吃现有余量"；总余量仍有 ≈3.37 MiB）。这是**纯新增**：
+``git status --porcelain tests/replays/`` 只报 6 个新 ``*.jsonl`` + ``pve.py``，既有 60 条
+逐字节不变（47 条冻结表的 ``(字节数, sha256)`` 一条未改，``tools/check_goldens.sh`` 同批 PASS）。
+六条的种子 / 终局类 / 座位见 :data:`PVE_OUTCOME_CLASSES`。
 """
 
 
@@ -443,6 +453,7 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         or slug in goals.M2_GOALS
         or slug in goals.M3_GOALS
         or slug in goals.M5_GOALS
+        or slug in goals.PVE_GOALS
     ):
         # 门禁期**真的**验证这条基准在证它声称的机制（票 32 §1；M2 用"随机驱动 + 事后判据"
         # 替代 M1 的录制期脚本，故判据必须在这里也生效，而不是只在 --update-golden 时；
@@ -572,6 +583,9 @@ M5_BASELINES = tuple(scenarios.M5_SCENARIOS)
 M6_BASELINES = tuple(scenarios.M6_SCENARIOS)
 """M6 的 5 条**界局构造**基准（票 20）：覆盖 spec §投影与记录流 的新原语。"""
 
+PVE_BASELINES = tuple(scenarios.PVE_SCENARIOS)
+"""M7 票 12 的 6 条 **PvE 基准**：四类逐场终局各一条 + 队友局（2v3）+ 保护队友阵亡（2v2）。"""
+
 M2_BASELINES = tuple(
     name
     for name in distribution.SLUG_CLASSES
@@ -580,18 +594,186 @@ M2_BASELINES = tuple(
     and name not in set(SCRIPTED_BASELINES)
     and name not in set(M5_BASELINES)
     and name not in set(M6_BASELINES)
+    and name not in set(PVE_BASELINES)
 )
-"""M2 的 27 条基准：分布表里除 M1 六条、M3 八条、脚本专项与 M5 八条以外的全部 slug
-（票 32 §1）。
+"""M2 的 27 条基准：分布表里除 M1 六条、M3 八条、脚本专项、M5 八条、M6 五条与 PvE 六条
+以外的全部 slug（票 32 §1）。
 
 W5-02b：``33-borrowed-sword-use-slash`` 随借刀入口的翻转移入脚本专项（随机驱动产不出借刀
 动作），故 M2 由 28 条变为 27 条。W7-01 的 ``47-halberd-borrowed-sword`` 同属脚本专项
-（新增），M2 仍是 27 条。
+（新增），M2 仍是 27 条。M7 票 12 的 6 条 PvE 基准**不挤占** M2 的 27 条（各自的表）。
 """
+
+PVE_OUTCOME_CLASSES: dict[str, tuple[PveVictoryKind, str, str]] = {
+    "61-pve-rout-win": (PveVictoryKind.ROUT, "ally", "enemies_routed"),
+    "62-pve-survive-rounds-win": (
+        PveVictoryKind.SURVIVE_ROUNDS,
+        "ally",
+        "rounds_survived",
+    ),
+    "63-pve-rout-within-rounds-win": (
+        PveVictoryKind.ROUT_WITHIN_ROUNDS,
+        "ally",
+        "enemies_routed_in_time",
+    ),
+    "64-pve-slay-boss-win": (PveVictoryKind.SLAY_BOSS, "ally", "boss_slain"),
+    "65-pve-ally-team-rout": (PveVictoryKind.ROUT, "ally", "enemies_routed"),
+    "66-pve-protected-ally-death": (PveVictoryKind.ROUT, "enemy", "protected_ally_dead"),
+}
+"""**故意写死、不从 header 派生**：每条 PvE 基准的（逐场条件 / 获胜侧 / 胜因）。
+
+写死 = 一次显式决定：改这六个数意味着改票 01 §4 的覆盖表。四类条件各有一条
+（:data:`PveVictoryKind` 四个值全到齐）、两侧都有（``66`` 是败局：受保护队友阵亡，
+主角还活着）。"""
+
+
+def _replay_baseline(slug: str):
+    """按 header 重开一局并回放磁带；返回 ``(engine, header)``。
+
+    与 ``test_golden_replay_matches_byte_for_byte`` 走**同一条**开局入口
+    （``scenarios.engine_for`` + header 里的 ``rule_config``），只是不在这里再比一次字节
+    （字节比对已由参数化的那条用例逐条做过）。
+    """
+    records = read_journal(REPLAYS_DIR / f"{slug}.jsonl")
+    header = records[0]
+    pack = load_content_pack(header.pack_id, deck_profile=header.deck_profile)
+    seed, tape = tape_from_journal(records)
+    engine = scenarios.engine_for(
+        scenarios.SCENARIOS[slug], seed=seed, pack=pack, rule_config=header.rule_config
+    )
+    engine.run([TapePlayer(tape)] * header.rule_config.player_count)
+    return engine, header
+
+
+def test_every_pve_baseline_has_an_after_the_fact_goal() -> None:
+    """6 条 PvE 基准各有一条事后判据（场景表 / 判据表 / 冻结表三方相等）。"""
+    assert set(PVE_BASELINES) == set(scenarios.PVE_SCENARIOS) == set(goals.PVE_GOALS)
+    assert set(PVE_OUTCOME_CLASSES) == set(PVE_BASELINES), (
+        "冻结的终局表必须逐条覆盖 6 条 PvE 基准（新增第七条时先改票 12，再改这里）"
+    )
+
+
+def test_every_pve_baseline_carries_its_pve_section_in_the_header() -> None:
+    """票 12 备注：``rule_config`` 里必须**含 ``pve``**，否则它只是碰巧带敌人的身份局。
+
+    同时钉住"header 自证"：``pve.seats`` 的体力上限 / 阵营与重开出来的座位一致
+    （座位数 ≤ 5 是票 01 §7 的硬上限）。
+    """
+    for slug in PVE_BASELINES:
+        engine, header = _replay_baseline(slug)
+        config = header.rule_config
+        pve = config.pve
+        assert config.mode is Mode.PVE, f"{slug}：header 的 mode 必须是 pve"
+        assert pve is not None, f"{slug}：header 里没有 pve 一节"
+        assert len(pve.identities) == config.player_count == len(pve.seats), (
+            f"{slug}：identities / seats / player_count 三方同长"
+        )
+        assert config.player_count <= 5, f"{slug}：票 01 §7 的座位上限是 5"
+        assert {Identity.ALLY, Identity.ENEMY} <= set(pve.identities), (
+            f"{slug}：PvE 只许 ally / enemy 两档身份"
+        )
+        assert [
+            (player.seat, player.hp_max, player.identity) for player in engine.state.players
+        ] == [
+            (index, seat.hp_max + seat.hp_max_bonus, identity)
+            for index, (seat, identity) in enumerate(zip(pve.seats, pve.identities, strict=True))
+        ], f"{slug}：header 的座位表必须与重开出来的座位逐座相等（体力上限 / 阵营）"
+
+
+def test_every_pve_baseline_ends_where_the_pure_solver_says() -> None:
+    """票 12 的验收：**每条** PvE 基准的终局 = 拿终局存活集合与轮次重算的 ``solve_pve_outcome``。
+
+    判据不是"跑完了就算"：终局记录（``side`` / ``winners`` / ``reason``）必须与纯函数
+    逐字段相等，且 ``game_end`` 是记录流最后一条（PvE 不另造平局、不写第二个轮次计数源）。
+    """
+    for slug in PVE_BASELINES:
+        engine, header = _replay_baseline(slug)
+        pve = header.rule_config.pve
+        assert pve is not None
+        alive = frozenset(player.seat for player in engine.state.players if player.alive)
+        expected = solve_pve_outcome(
+            config=pve, alive=alive, round_no=engine.state.round
+        )
+        assert expected is not None, f"{slug}：终局存活集合重算不出胜负"
+        tail = engine.records[-1]
+        assert engine.finished, f"{slug}：局必须真的收掉"
+        assert tail.kind == "game_end", f"{slug}：终局记录必须是最后一条，实得 {tail.kind}"
+        assert (tail.side, tail.winners, tail.reason) == (
+            expected.side,
+            expected.winners,
+            expected.reason,
+        ), f"{slug}：宣布的终局与 solve_pve_outcome 不一致"
+        assert engine.state.round <= 5, f"{slug}：票 01 §7 的短局上限是 5 轮"
+        assert goals.goal_for(slug)(engine), (
+            f"{slug}：回放后的记录流没有命中它在 goals.py 里声称的那件事"
+        )
+
+
+def test_every_pve_baseline_keeps_its_declared_outcome_class() -> None:
+    """四类逐场条件各一条、两侧都有：冻结表 = 每条基准真的打出来的终局类。"""
+    assert {kind for kind, _, _ in PVE_OUTCOME_CLASSES.values()} == set(PveVictoryKind), (
+        "票 01 §4 的四类逐场条件（ROUT / SURVIVE_ROUNDS / ROUT_WITHIN_ROUNDS / "
+        "SLAY_BOSS）必须各有一条基准"
+    )
+    assert {side for _, side, _ in PVE_OUTCOME_CLASSES.values()} == {"ally", "enemy"}, (
+        "胜与败两侧都要出现（保护队友阵亡那条是败局）"
+    )
+
+    for slug, (kind, side, reason) in PVE_OUTCOME_CLASSES.items():
+        engine, header = _replay_baseline(slug)
+        pve = header.rule_config.pve
+        assert pve is not None
+        assert pve.victory.kind is kind, f"{slug}：header 的逐场条件不是 {kind.value}"
+        tail = engine.records[-1]
+        assert (tail.side, tail.reason) == (side, reason), (
+            f"{slug}：终局不是冻结表写的（{side} / {reason}）"
+        )
+
+
+def test_the_ally_game_baseline_has_two_allies_and_the_teammate_acts() -> None:
+    """队友局（2v3）：两名友方座位里有一名 AI 队友，它**真的行动过**且算在胜方里。"""
+    slug = "65-pve-ally-team-rout"
+    engine, header = _replay_baseline(slug)
+    pve = header.rule_config.pve
+    assert pve is not None
+    allies = pve.seats_of(Identity.ALLY)
+    enemies = pve.seats_of(Identity.ENEMY)
+    assert (len(allies), len(enemies)) == (2, 3), "队友局是 2 友 × 3 敌"
+    teammate = next(seat for seat in allies if seat != pve.principal)
+
+    turns = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_START
+    ]
+    assert pve.principal in turns and teammate in turns, (
+        f"主角与队友都要真的行动过（回合序：{turns}）"
+    )
+    assert any(
+        record.kind == "query"
+        and record.query.actor == teammate
+        and record.query.kind == QueryKind.PLAY_PHASE
+        for record in engine.records
+    ), "队友的出牌阶段必须真的被问过（不是只坐在座位上）"
+    assert engine.records[-1].winners == allies, "胜方含 AI 队友座位（不是只有主角）"
+
+
+def test_the_protected_ally_baseline_loses_although_the_principal_lives() -> None:
+    """保护队友阵亡：主角还活着，这一场仍然判败（``protected_ally_dead``）。"""
+    slug = "66-pve-protected-ally-death"
+    engine, header = _replay_baseline(slug)
+    pve = header.rule_config.pve
+    assert pve is not None
+    assert pve.protected_ally is not None, "这条基准必须有受保护队友"
+    assert pve.protected_ally != pve.principal, "受保护队友不是主角自己"
+    tail = engine.records[-1]
+    assert (tail.side, tail.reason) == ("enemy", "protected_ally_dead")
+    assert engine.state.player(pve.principal).alive is True, "主角必须还活着（败因不是主角阵亡）"
+    assert engine.state.player(pve.protected_ally).alive is False, "受保护队友真的死了"
 
 
 def test_the_baseline_distribution_meets_every_category_minimum() -> None:
-    """每类达标：八类必需表逐类计数 ≥ 最少条数（票 17 §1 的机械载体）。"""
+    """每类达标：十一类必需表逐类计数 ≥ 最少条数（票 17 §1 的机械载体）。"""
     slugs = {path.stem for path in _golden_files()}
     counts = Counter(
         category
@@ -608,6 +790,7 @@ def test_the_baseline_distribution_meets_every_category_minimum() -> None:
     assert counts[distribution.M1_CLASS] == len(FROZEN_BASELINES)
     assert counts[distribution.M5_CLASS] == len(M5_BASELINES), "M5 军争机制类必须恰 8 条"
     assert counts[distribution.M6_CLASS] == len(M6_BASELINES), "M6 界局机制类必须恰 5 条"
+    assert counts[distribution.PVE_CLASS] == len(PVE_BASELINES), "PvE 类必须恰 6 条"
 
 
 def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
@@ -620,7 +803,9 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ) - set(M5_BASELINES) - set(M6_BASELINES), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
+    ) - set(M5_BASELINES) - set(M6_BASELINES) - set(PVE_BASELINES), (
+        "M2 恰为 66 − 6 − 8 − 6 − 8 − 5 − 6 = 27 条"
+    )
     assert set(M5_BASELINES) == set(scenarios.M5_SCENARIOS) == set(goals.M5_GOALS), (
         "M5 的 8 条构造基准必须与场景表、判据表三方相等"
     )
@@ -632,6 +817,9 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     )
     assert set(M6_BASELINES) == set(scenarios.M6_SCENARIOS) == set(goals.M6_GOALS), (
         "M6 的 5 条界局构造基准必须与场景表、判据表三方相等"
+    )
+    assert set(PVE_BASELINES) == set(scenarios.PVE_SCENARIOS) == set(goals.PVE_GOALS), (
+        "M7 的 6 条 PvE 基准必须与场景表、判据表三方相等"
     )
 
 

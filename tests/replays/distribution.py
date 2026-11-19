@@ -8,12 +8,22 @@
 - M2 主题的 28 条按七类必需表各就各位（一条 slug 可同属多类，本表里没有重叠；
   W5-02b 起 ``33`` 由随机驱动改为脚本驱动，但类与条数不变）；
 - M3 的 8 条武将技能专项基准标 ``武将技能``（票 14 §8）；
-- M5 的 8 条军争构造基准标 ``军争机制``（M5-09a / spec §6 A3）。
+- M5 的 8 条军争构造基准标 ``军争机制``（M5-09a / spec §6 A3）；
+- M6 的 5 条界局构造基准标 ``界局机制``（票 20）；
+- M7 的 6 条 PvE 基准标 ``PvE 终局``（票 12）：票 01 §4 的四类逐场终局各一条 + 队友局
+  + 保护队友阵亡。它们**新增**、不挤占上面任何一类，也不在 47 条冻结表里。
 """
 
 from __future__ import annotations
 
-__all__ = ["CATEGORY_MINIMUMS", "M1_CLASS", "M5_CLASS", "M6_CLASS", "SLUG_CLASSES"]
+__all__ = [
+    "CATEGORY_MINIMUMS",
+    "M1_CLASS",
+    "M5_CLASS",
+    "M6_CLASS",
+    "PVE_CLASS",
+    "SLUG_CLASSES",
+]
 
 M1_CLASS = "m1-regression"
 """M1 六条回归基线的类标签：它们是回归网，不是身份局路径。"""
@@ -23,6 +33,9 @@ M5_CLASS = "军争机制"
 
 M6_CLASS = "界局机制"
 """M6 的 5 条界局构造基准：spec §投影与记录流 的每类新原语至少落一条（票 20）。"""
+
+PVE_CLASS = "PvE 终局"
+"""M7 的 6 条 PvE 构造基准：票 01 §4 的四类逐场终局 + 队友局 + 保护队友阵亡（票 12）。"""
 
 
 CATEGORY_MINIMUMS: dict[str, int] = {
@@ -36,9 +49,10 @@ CATEGORY_MINIMUMS: dict[str, int] = {
     "武将技能": 8,
     M5_CLASS: 8,
     M6_CLASS: 5,
+    PVE_CLASS: 6,
 }
-"""十类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条
-+ 8 条 M5 军争构造基准 + 5 条 M6 界局构造基准 = 55 条。"""
+"""十一类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条
++ 8 条 M5 军争构造基准 + 5 条 M6 界局构造基准 + 6 条 M7 PvE 基准 = 61 条。"""
 
 
 SLUG_CLASSES: dict[str, tuple[str, ...]] = {
@@ -119,5 +133,14 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     "58-jie-luxun-hero-zone": (M6_CLASS,),
     "59-jie-lvmeng-extra-turn": (M6_CLASS,),
     "60-jie-zhenji-luoshen-tags": (M6_CLASS,),
+    # ---- 11. PvE 终局（M7 票 12 / 票 01 §4：四类逐场条件各一条 + 队友局 + 保护队友阵亡） ----
+    # 61 = ROUT（胜，1v2）；62 = SURVIVE_ROUNDS（胜，1v2）；63 = ROUT_WITHIN_ROUNDS（胜，1v2）；
+    # 64 = SLAY_BOSS（胜，1v1）；65 = 队友局（2v3，ROUT 胜）；66 = 保护队友阵亡（2v2，ROUT 败）。
+    "61-pve-rout-win": (PVE_CLASS,),
+    "62-pve-survive-rounds-win": (PVE_CLASS,),
+    "63-pve-rout-within-rounds-win": (PVE_CLASS,),
+    "64-pve-slay-boss-win": (PVE_CLASS,),
+    "65-pve-ally-team-rout": (PVE_CLASS,),
+    "66-pve-protected-ally-death": (PVE_CLASS,),
 }
 """slug → 类（**每个 slug 至少一类**；新增基准必须在这里登记）。"""

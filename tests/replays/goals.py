@@ -33,6 +33,7 @@ __all__ = [
     "M5_GOALS",
     "M6_GOALS",
     "PREACTIVATION_CANCEL_SKILL",
+    "PVE_GOALS",
     "goal_for",
 ]
 
@@ -1173,6 +1174,145 @@ M6_GOALS = {
 """5 条 M6 界局构造基准的 slug → 事后判据（spec §投影与记录流 的新原语）。"""
 
 
+# ---------------------------------------------------------------------------
+# PvE 基准的判据（M7 票 12 / 票 01 §4）
+#
+# 6 条基准从**构造局面**起跑（``replays/pve.py``）。判据只读**配置 + 记录流 + 终局态**，
+# 与 M5 / M6 同一口径：脚本宣布"计划走完了"不等于记录流里有那回事。
+# "终局类与 ``solve_pve_outcome`` 逐字段一致"另由 ``tests/test_replays.py`` 重算一遍
+# （那是**唯一真源**的复核；这里读的是"这条基准要证的那件事真的发生过"）。
+# ---------------------------------------------------------------------------
+
+
+def _pve_config(engine: Engine):
+    """PvE 基准的 ``PveConfig``（header 里的那一份；缺失即判据脱节）。"""
+    config = engine.state.rule_config.pve
+    assert config is not None, "PvE 基准的 rule_config 必须带 pve 一节"
+    return config
+
+
+def _pve_alive(engine: Engine) -> frozenset[int]:
+    return frozenset(player.seat for player in engine.state.players if player.alive)
+
+
+def _pve_turn_seats(engine: Engine) -> list[int]:
+    return [
+        record.actor
+        for record in _timings(engine)
+        if record.timing is Timing.TURN_START
+    ]
+
+
+def _pve_rout_win(engine: Engine) -> bool:
+    """61：敌人**全灭** ⇒ ally 胜（主角还活着，且不是靠身份局奖惩读出来的）。"""
+    config = _pve_config(engine)
+    tail = engine.records[-1]
+    alive = _pve_alive(engine)
+    return (
+        tail.kind == "game_end"
+        and tail.side == "ally"
+        and tail.reason == "enemies_routed"
+        and alive.isdisjoint(config.seats_of(Identity.ENEMY))
+        and config.principal in alive
+    )
+
+
+def _pve_survive_rounds_win(engine: Engine) -> bool:
+    """62：轮次推进过 N ⇒ ally 胜（判点是**轮次 +1 之后**，不另建计数器）。"""
+    config = _pve_config(engine)
+    tail = engine.records[-1]
+    rounds = config.victory.rounds
+    return (
+        tail.kind == "game_end"
+        and tail.side == "ally"
+        and tail.reason == "rounds_survived"
+        and rounds is not None
+        and engine.state.round > rounds
+        and all(player.alive for player in engine.state.players)
+    )
+
+
+def _pve_rout_within_rounds_win(engine: Engine) -> bool:
+    """63：**N 轮内**全歼 ⇒ ally 胜（硬边界：跨过 N 之后全歼也不算胜）。"""
+    config = _pve_config(engine)
+    tail = engine.records[-1]
+    rounds = config.victory.rounds
+    alive = _pve_alive(engine)
+    return (
+        tail.kind == "game_end"
+        and tail.side == "ally"
+        and tail.reason == "enemies_routed_in_time"
+        and rounds is not None
+        and engine.state.round <= rounds
+        and alive.isdisjoint(config.seats_of(Identity.ENEMY))
+    )
+
+
+def _pve_slay_boss_win(engine: Engine) -> bool:
+    """64：Boss **座位**阵亡 ⇒ ally 胜（不是"配置里写了 boss 就算"）。"""
+    config = _pve_config(engine)
+    tail = engine.records[-1]
+    return (
+        tail.kind == "game_end"
+        and tail.side == "ally"
+        and tail.reason == "boss_slain"
+        and config.boss is not None
+        and engine.state.player(config.boss).alive is False
+    )
+
+
+def _pve_ally_team(engine: Engine) -> bool:
+    """65：队友局（2v3）——队友座位**真的行动过**，且胜方含它（``winners`` = 全侧友方座位）。"""
+    config = _pve_config(engine)
+    tail = engine.records[-1]
+    allies = config.seats_of(Identity.ALLY)
+    enemies = config.seats_of(Identity.ENEMY)
+    if (len(allies), len(enemies)) != (2, 3):
+        return False
+    teammate = next(seat for seat in allies if seat != config.principal)
+    turns = _pve_turn_seats(engine)
+    acted = any(
+        record.query.actor == teammate and record.query.kind == QueryKind.PLAY_PHASE
+        for record in _queries(engine)
+    )
+    return (
+        tail.kind == "game_end"
+        and tail.side == "ally"
+        and tail.winners == allies
+        and config.principal in turns
+        and teammate in turns
+        and acted
+    )
+
+
+def _pve_protected_ally_death(engine: Engine) -> bool:
+    """66：受保护队友阵亡 ⇒ 败（**主角还活着**，故败因不是主角阵亡）。"""
+    config = _pve_config(engine)
+    tail = engine.records[-1]
+    protected = config.protected_ally
+    return (
+        tail.kind == "game_end"
+        and tail.side == "enemy"
+        and tail.reason == "protected_ally_dead"
+        and protected is not None
+        and protected != config.principal
+        and engine.state.player(config.principal).alive is True
+        and engine.state.player(protected).alive is False
+        and tail.winners == config.seats_of(Identity.ENEMY)
+    )
+
+
+PVE_GOALS = {
+    "61-pve-rout-win": _pve_rout_win,
+    "62-pve-survive-rounds-win": _pve_survive_rounds_win,
+    "63-pve-rout-within-rounds-win": _pve_rout_within_rounds_win,
+    "64-pve-slay-boss-win": _pve_slay_boss_win,
+    "65-pve-ally-team-rout": _pve_ally_team,
+    "66-pve-protected-ally-death": _pve_protected_ally_death,
+}
+"""6 条 PvE 基准的 slug → 事后判据（票 12 / 票 01 §4 的四类逐场条件 + 两个特殊座位）。"""
+
+
 M1_GOALS = {
     "33-borrowed-sword-use-slash": _borrowed_sword,
     "43-double-sword-opposite-gender": _double_sword_chain,
@@ -1191,7 +1331,7 @@ M1_GOALS = {
 
 def goal_for(slug: str):
     """取一条基准的判据；未登记即抛（录制期护栏）。"""
-    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS, **M5_GOALS, **M6_GOALS}
+    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS, **M5_GOALS, **M6_GOALS, **PVE_GOALS}
     try:
         return table[slug]
     except KeyError:  # pragma: no cover - 开发期护栏
