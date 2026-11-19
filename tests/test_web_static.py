@@ -9969,8 +9969,10 @@ def test_the_battle_smoke_library_is_a_valid_script_library() -> None:
 
     event = next(item for item in library.events if item.id == "ev.relic")
     assert [(effect.kind, effect.relic) for effect in event.options[0].effects] == [
-        ("grant_relic", "equip.crossbow")
-    ], "入口事件房给的那件遗物就是战斗 grants 的来源（烟测断遗物栏）"
+        ("grant_relic", "equip.crossbow"),
+        # 票 34：第二件是 `relic.*`（不是 `equip.*`）——烟测据此断"遗物栏印中文、不印 id"。
+        ("grant_relic", "relic.extra_draw"),
+    ], "入口事件房给的两件遗物就是战斗 grants 的来源（烟测断遗物栏）"
 
 
 def test_the_pve_display_slots_live_inside_the_identity_table() -> None:

@@ -31424,8 +31424,20 @@ await clickAndWait(confirmButtons()[0]);
 check("M7-23b 遗物进了这一轮（`run.relics`）：结果弹窗写的是服务端事件，回棋盘后那一轮就带着它",
   relicSettled
   && ui.state.script.board.run.relics.includes("equip.crossbow")
+  && ui.state.script.board.run.relics.includes("relic.extra_draw")
   && ui.state.script.board.run.coins >= 0,
   `relics=${JSON.stringify(ui.state.script.board.run.relics)}`);
+
+// 票 34：整备面遗物栏读**服务端目录行**的名字（`relic.*` 不许原样印 id）。
+const loadoutRelicCells = loadoutRelics();
+const drawRelicCell = loadoutRelicCells.find(
+  (cell) => cell.getAttribute("data-relic-id") === "relic.extra_draw",
+) || null;
+check("M7-23b2 整备面遗物栏印 `relic.*` 的中文显示文本（服务端目录行反查，不是 id 原文）",
+  drawRelicCell !== null
+  && drawRelicCell.textContent === "每回合摸牌阶段 +1"
+  && !loadoutRelicCells.some((cell) => cell.textContent.includes("relic.")),
+  `遗物栏=${JSON.stringify(loadoutRelicCells.map((cell) => cell.textContent))}`);
 
 // ---- ② 棋盘 → 牌桌：进战斗节点 = 换到**现有**牌桌（零新增 view）----
 const sessionCalls = calls.length;
@@ -31466,7 +31478,8 @@ check("M7-23f 副本全局技能标签挂在**受影响的座位**上：来源 +
   `敌=${JSON.stringify(enemyGlobals)} 友=${JSON.stringify([seatGlobalsAt(0), seatGlobalsAt(1)])}`);
 check("M7-23g 只读遗物栏：自己的武将块里列出这一轮的遗物（名字是服务端反查的，不是 id）",
   $("t-self-relics").hidden === false
-  && $("t-self-relic-list").textContent === "诸葛连弩"
+  && $("t-self-relic-list").textContent === "诸葛连弩、每回合摸牌阶段 +1"
+  && !$("t-self-relic-list").textContent.includes("relic.")
   && $("t-self-global").hidden === true,
   `遗物="${$("t-self-relic-list").textContent}" 全局隐藏=${$("t-self-global").hidden}`);
 check("M7-23h 不泄露（PvE 也要守）：对手座位只有手牌**张数**、牌堆只有数量",

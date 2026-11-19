@@ -81,6 +81,7 @@ from sgs.script import (
     stage_save,
 )
 
+from .display import catalog_skill_name
 from .session import Session
 
 __all__ = [
@@ -163,11 +164,12 @@ def _dump_requirement(requirement: Requirement) -> dict[str, Any]:
 
 
 def _skill_label(skill_id: str) -> str:
-    """技能 id → 中文名（武将表反查；查不到就**原样印 id**，不编名字）。
+    """技能 / 遗物 id → 中文显示名（武将表反查；查不到就**原样印 id**，不编名字）。
 
     合成键（``yiji:give:0:0``）只看冒号前那一段——与 ``sgs_web.projection`` 的
-    ``_skill_display_name`` 同一个读法；遗物技能的载体随票 26 落地，在那之前遗物 id
-    没有名字可查，也走这条兜底。
+    ``_skill_display_name`` 同一个读法。不在武将表里的 id（遗物 ``relic.*``、NPC ``npc.*``、
+    将来任何新来源）走同一条 :func:`sgs_web.display.catalog_skill_name` 兜底（M7 票 34）：
+    名字只有 ``CATALOG`` 那处定义一个来源，前端不抄第二份映射、这里也不按前缀特判。
     """
     head = skill_id.split(":", 1)[0]
     pieces = head.split(".")
@@ -175,7 +177,7 @@ def _skill_label(skill_id: str) -> str:
         hero = hero_by_id(pieces[1])
         if hero is not None:
             return hero_skill_name(hero, head)
-    return skill_id
+    return catalog_skill_name(head) or skill_id
 
 
 def _catalog_item(table: SkillValueTable, item_id: str) -> dict[str, Any] | None:

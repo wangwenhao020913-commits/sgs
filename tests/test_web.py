@@ -386,6 +386,7 @@ def _pve_battle_rule_config():
         grants=(
             SkillGrant(seat=0, kind="skill", id="hero.liubei.rende"),
             SkillGrant(seat=0, kind="relic", id="equip.crossbow"),
+            SkillGrant(seat=0, kind="relic", id="relic.extra_draw"),
             SkillGrant(seat=1, kind="skill", id="hero.guanyu.wusheng"),
         ),
     )
@@ -451,7 +452,12 @@ def test_a_pve_battle_payload_carries_the_three_displays_and_the_relic_list() ->
     assert tags[4]["side_label"] == "敌"
 
     # 遗物列表：只读显示行，名字走既有的技能 / 牌名反查（查不到原样印 id）。
-    assert snapshot["relics"] == [{"id": "equip.crossbow", "name": "诸葛连弩"}]
+    # 票 34：`relic.*` 不在武将表 / 牌名里，名字由 `CATALOG` 那条定义的显示文本兜底
+    # ⇒ 载荷里是中文，不是 `relic.extra_draw` 这串 id。
+    assert snapshot["relics"] == [
+        {"id": "equip.crossbow", "name": "诸葛连弩"},
+        {"id": "relic.extra_draw", "name": "每回合摸牌阶段 +1"},
+    ]
 
     # 不泄露：除了自己的手牌，载荷里没有任何隐藏牌面；牌堆只有张数。
     state = session.engine.state
@@ -493,6 +499,38 @@ def test_an_identity_game_payload_has_no_pve_display_fields() -> None:
     assert all(player["template_name"] is None for player in snapshot["players"])
     assert all(player["global_skill"] is None for player in snapshot["players"])
     assert snapshot["relics"] == []
+
+
+def test_the_catalog_fallback_names_relics_and_npcs_but_not_unknown_ids() -> None:
+    """票 34：武将表 / 牌名 / 合成定义都查不到时，按 ``CATALOG`` 那条定义的**显示文本**取名。
+
+    ``SkillDef`` 的形状是冻结的（本票不许加字段 ⇒ 也没有独立 ``name``）：它上面唯一的
+    人话字段是 ``requirement``——遗物 / NPC 技能的牌面文案（`relics.py` / `npcs.py` 的
+    定义处）。兜底**不认前缀**：判据只是 "这个 id 在不在 ``CATALOG`` 里"，故将来的第五种
+    来源（标记 / 副本全局 / …）也走同一条，不用再改 projection。
+
+    未知 id 仍返回 ``None``——既有 fail-soft 不变（调用方原样印 id，不编名字）。
+    """
+    from sgs_web.projection import _skill_display_name
+
+    session = Session(
+        seed=0x5EED, rule_config=_pve_battle_rule_config(), timeout_seconds=None
+    )
+    state = session.engine.state
+
+    assert _skill_display_name(state, "relic.extra_draw") == "每回合摸牌阶段 +1", (
+        "遗物 id 要给中文显示文本，不是 `relic.extra_draw`"
+    )
+    assert _skill_display_name(state, "npc.swift") == "锁定技：你与其他角色的距离 -1", (
+        "NPC 技能同理（形状与遗物同一个兜底，不按前缀分两支）"
+    )
+    # 合成键（冒号拼接）沿用既有读法：拿冒号前那段去查。
+    assert _skill_display_name(state, "relic.extra_start_hand:drawn") == (
+        "起始手牌 +1（游戏开始时摸一张牌）"
+    )
+    # 未知 id / 不在 CATALOG 里的假前缀 ⇒ None（不是 id 原文、也不是空串）。
+    assert _skill_display_name(state, "relic.no_such_relic") is None
+    assert _skill_display_name(state, "npc.no_such_npc") is None
 
 
 def test_the_hero_pool_is_dealt_from_the_enabled_pool_by_default() -> None:

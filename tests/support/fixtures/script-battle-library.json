@@ -193,14 +193,18 @@
     {
       "id": "ev.relic",
       "name": "捡到的东西",
-      "text": "包袱里是这个人的兵器。",
+      "text": "包袱里是这个人的兵器，还有一枚行军符。",
       "options": [
         {
-          "text": "捡起诸葛连弩（遗物）",
+          "text": "捡起诸葛连弩与行军符（遗物）",
           "effects": [
             {
               "kind": "grant_relic",
               "relic": "equip.crossbow"
+            },
+            {
+              "kind": "grant_relic",
+              "relic": "relic.extra_draw"
             }
           ]
         }

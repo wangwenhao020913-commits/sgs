@@ -85,6 +85,7 @@ from .display import (
     SUIT_LABELS,
     card_lookup_from_query,
     card_payload,
+    catalog_skill_name,
     decorate_pending,
     decorate_snapshot,
     hero_card_display,
@@ -1687,10 +1688,17 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
     **合成定义**（「标签自身效果」这类不在武将表技能清单里的定义，命名 ``<来源>_mark``）
     按**来源技能**的中文名取：``hero.feng_yujin.dingluan_mark`` ⇒ 「定乱」、
     ``hero.shen_ganning.jieying_mark`` ⇒ 「劫营」（用户 2026-11-07 报障：原先退回整串 id）。
+
+    **统一兜底**（M7 票 34）：上面几条路都查不到的 id（遗物 ``relic.*``、NPC ``npc.*``，
+    以及将来任何新来源）按 ``CATALOG`` 那条定义的显示文本取名（
+    :func:`~sgs_web.display.catalog_skill_name`）——判据只是 "id 在 ``CATALOG`` 里"，
+    **不按前缀特判**；查不到定义 / 定义没有文案仍返回 ``None``（调用方原样印 id，既有
+    fail-soft 不变）。标准局里这些 id 不会出现 ⇒ 身份局载荷逐字节不变。
     """
     head = skill_id.split(":", 1)[0]
     if head.startswith("equip."):
-        return _card_type_name(state, head[len("equip.") :])
+        card_name = _card_type_name(state, head[len("equip.") :])
+        return card_name if card_name is not None else catalog_skill_name(head)
     parts = head.split(".")
     short = parts[-1]
     heroes = load_hero_tables(state.pack_id)
@@ -1712,7 +1720,7 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
     name = lookup(short)
     if name is None and short.endswith("_mark"):
         name = lookup(short[: -len("_mark")])
-    return name
+    return name if name is not None else catalog_skill_name(head)
 
 
 def _frame_targets(data: dict[str, Any]) -> list[int]:

@@ -46,6 +46,7 @@ from sgs.data import (
     hero_skill_names,
 )
 from sgs.effects import DistanceBonus
+from sgs.skills import CATALOG
 from sgs.state import CardRef, EndPhase, HeroCardRef, Pass, PlayerPublic, Query, SelectCards
 
 from .descriptions import card_description, skill_description
@@ -59,6 +60,7 @@ __all__ = [
     "card_display",
     "card_lookup_from_query",
     "card_payload",
+    "catalog_skill_name",
     "decorate_pending",
     "decorate_snapshot",
     "hero_card_display",
@@ -454,6 +456,26 @@ def hero_in_tables(
         if hero is not None:
             return hero
     return None
+
+
+def catalog_skill_name(skill_id: str) -> str | None:
+    """技能 id → ``CATALOG`` 那条定义上的**显示文本**（名称的统一兜底；未知 id ⇒ ``None``）。
+
+    M7 票 34：武将表 / 装备牌名 / 合成定义都查不到的 id——遗物 ``relic.*``、NPC ``npc.*``，
+    以及**将来任何新来源**——一律走这一条。判据只是 "id 在 ``CATALOG`` 里"，**不认前缀**
+    （前缀是命名约定，不是唯一真源）。
+
+    ``SkillDef`` 的形状是冻结的（本票不许加字段 ⇒ 它没有独立的 ``name``），它上面唯一的
+    人话字段是 :attr:`~sgs.skills.catalog.SkillDef.requirement`（与技能定义同处写的牌面
+    文案）；遗物 / NPC 技能的中文显示名就从这里取，**不另抄一份映射表**（抄了会随文案漂移）。
+    查不到定义、或定义没有文案 ⇒ ``None``：调用方退回 id 原文，既有 fail-soft 不变。
+
+    合成键（``relic.extra_start_hand:drawn``）的冒号分段由调用方先剥好——本函数只认完整 id。
+    """
+    definition = CATALOG.get(skill_id)
+    if definition is None:
+        return None
+    return definition.requirement or None
 
 
 def hero_card_display(

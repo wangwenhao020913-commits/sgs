@@ -604,6 +604,26 @@ def test_the_board_carries_a_name_and_a_server_price_for_every_row_it_shows(
         assert shop["catalog"][skill_id]["name"], "名字不许留空"
 
 
+def test_a_relic_catalog_row_names_the_relic_from_its_skill_definition() -> None:
+    """票 34：``relic.*`` 在棋盘体目录行里的名字 = ``CATALOG`` 那条定义的显示文本（不是 id）。
+
+    整备面遗物栏 / 三选一 / 商店 / 事件后果都读这一份目录行（`script-loadout.js:scriptItemRow`）；
+    遗物的中文名只有 ``SkillDef`` 一处来源（`relics.py` 的六条定义），前端不抄第二份映射，
+    服务端也不按 ``relic.`` 前缀特判——判据只是 "id 在 ``CATALOG`` 里"。
+    """
+    from sgs.data import RELIC_PRICE, load_skill_values
+    from sgs_web.script_runs import _catalog_item
+
+    table = load_skill_values()
+    assert _catalog_item(table, "relic.extra_draw") == {
+        "name": "每回合摸牌阶段 +1",
+        "kind": "relic",
+        "rarity": None,
+        "price": RELIC_PRICE,
+    }
+    assert _catalog_item(table, "relic.hand_limit")["name"] == "手牌上限 +2"
+
+
 def test_an_entered_question_room_carries_the_revealed_inner_room(registry) -> None:
     """票 22「问号揭晓：揭晓后按内层房间的流程走」——内层房间的面必须下发给前端。
 
