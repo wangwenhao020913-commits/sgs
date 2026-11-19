@@ -13,14 +13,14 @@
   序列两遍逐字段相同（除 ``revision``）；单场战斗的记录流与回放器重建一致；同一档读两次
   不重抽（商店库存 / 事件 / 问号揭晓 / ``rewards`` 全同）。
 
-**进料 = 内置剧本的路线 + 测试内替换的战斗编排**（见 :func:`e2e_library`）：节点 / 边 /
-房间 / 事件 / 商店 / 标签门 / 两节结构全部读 ``scripts.huangjin.json``（票 28 的路线），只把
-每个战斗房的敌人换成一个 1 体力、无技能、无随机池的模板。原因**不是**跳过战斗（每场都真打、
-每次询问都真往返），而是当前占位数值里的 ``npc.guard``（受到伤害 -1）让 1 伤【杀】永远打不
-出伤害：票 28 的 8 体力「程远志」对 4 体力主角是**不可胜**的（实测 0/28 个种子，见票 29
-``## Answer`` 与 ``## 复现配方``）。数值是 D20 的内容期（HITL）欠账，不在本票重写范围；本测试
-保留**路线与结算语义**（``rout`` / ``slay_boss`` / Boss 结算顺序 / 标签门），把战斗难度留给
-内容期，同时保证门禁里有一条真的、可重复走完的端到端。
+**进料 = 内置剧本原样**（票 33 之后它自己就打得赢）：节点 / 边 / 房间 / 事件 / 商店 /
+标签门 / 两节结构 / 敌人模板与数值**全部**读 ``scripts.huangjin.json``，测试里**不再**替换
+任何战斗编排。票 29 当时只能把每个战斗房的敌人换成一个 1 体力模板，因为票 28 的占位数值
+一局也赢不了（``npc.guard`` 受到伤害 -1 把每次 1 点【杀】吃成 0；实测 0/28 个种子，见票 29
+``## Answer``）。票 33 把内容修到"主线战斗可胜"（每场 1 名敌人 + 1 名 AI 义从、低血量、
+只保留不碰伤害的 ``npc.*``），这条 e2e 因此恢复成**真·内置内容**的端到端；"可胜"本身另有
+``tests/test_script_content.py::test_every_battle_on_the_authored_route_is_winnable_by_the_heuristic_ai``
+在固定小样本上钉住。
 
 ``runs/`` 用 pytest 的临时目录（与票 19 的端点专测同一条纪律）：绝不碰仓里的真存档；写进
 该目录的 ``script-library.json`` 走的是**用户库优先于内置库**那条真实路径（票 19 §4）。
@@ -49,13 +49,7 @@ _bootstrap()
 
 from sgs.agents.heuristic import HeuristicPlayer  # noqa: E402
 from sgs.data import (  # noqa: E402
-    RandomSkills,
-    Reward,
-    Room,
-    Seat,
-    SeatRole,
     ScriptLibrary,
-    Template,
     load_builtin_script_library,
 )
 from sgs.engine.rng import ai_stream  # noqa: E402
@@ -77,54 +71,20 @@ ROUTE: tuple[tuple[str, str], ...] = (
     ("l1", "exit"),  # 出口商店 ⇒ 进第 2 大节
     ("l2", "entry"),  # 第 2 大节剧情战
     ("l2", "question"),  # 问号房（进入即揭晓）
-    ("l2", "vanguard"),  # 遭遇战（按档抽的编排被替换成同一个弱模板）
+    ("l2", "vanguard"),  # 遭遇战（按档抽的编排原样进这一场）
     ("l2", "boss"),  # 剧情 Boss（slay_boss）
     ("l2", "exit"),  # 最后一个出口 ⇒ 通关、删档
 )
 """票 28 §「交给票 29 的 e2e 走法」逐节点照抄（入口 / 事件 / 商店 / Boss / 出口）。"""
 
-WEAK_TEMPLATE = "tpl.e2e.weak"
-"""测试内替换用的 1 体力敌人模板：**只**改战斗难度，不改路线与结算语义。"""
-
-
 # ---------------------------------------------------------------------------
-# 进料：内置路线 + 可打的战斗编排
+# 进料：内置剧本原样（票 33）
 # ---------------------------------------------------------------------------
-
-
-def _weak_battle(room: Room) -> Room:
-    """把一个战斗房换成"1 名 1 体力敌人"的同一场：房间 id / 类型 / 胜负 / Boss 标记不动。"""
-    battle = room.battle
-    assert battle is not None, "只有战斗房才走这里"
-    # 两种敌人来源都要认（固定编排 / 按档抽）；Boss 标记只在固定编排里。
-    boss = isinstance(battle.enemies, tuple) and any(
-        seat.boss for seat in battle.enemies
-    )
-    weak = Seat(role=SeatRole.ENEMY, template=WEAK_TEMPLATE, boss=boss)
-    return room.model_copy(
-        update={"battle": battle.model_copy(update={"enemies": (weak,)})}
-    )
 
 
 def e2e_library() -> ScriptLibrary:
-    """内置剧本库 + 一个弱战斗模板；节点 / 边 / 房间 / 事件 / 商店 / 标签门全部原样。"""
-    builtin = load_builtin_script_library()
-    weak = Template(
-        id=WEAK_TEMPLATE,
-        name="试炼黄巾",
-        band="band1",
-        hp=1,
-        hp_max=1,
-        random=RandomSkills(pool="pool.grunts", count=(0, 0)),
-        reward=Reward(coins=2),
-    )
-    battles = {room.id: _weak_battle(room) for room in builtin.rooms if room.battle}
-    return builtin.model_copy(
-        update={
-            "rooms": tuple(battles.get(room.id, room) for room in builtin.rooms),
-            "templates": builtin.templates + (weak,),
-        }
-    )
+    """内置剧本库**原样**：路线 / 战斗 / 事件 / 模板数值全部不动（票 33 起它自己打得赢）。"""
+    return load_builtin_script_library()
 
 
 # ---------------------------------------------------------------------------

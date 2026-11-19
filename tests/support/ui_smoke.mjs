@@ -32067,14 +32067,16 @@ check("M7-25ah 收尾：用户库撤掉后编辑器回到内置库（source = bu
  *
  *  ① 开局页三态 → 「新剧本」→ 只有内置剧本；3 选 1 = 作者编排的那三名；
  *  ② 棋盘 = 内置第 1 大节（10 节点 / 17 条边 / 五类房间 / 2 入口 / 标签门写在边上）；
- *  ③ 棋盘 → 牌桌：进剧情战节点自动换到**现有牌桌**，三座（主角 + 程远志 + 黄巾力士）的
+ *  ③ 棋盘 → 牌桌：进剧情战节点自动换到**现有牌桌**，三座（主角 + 汉军义从 + 程远志）的
  *     友 / 敌标签与模板名来自**真** PvE 载荷；对手只有手牌张数、牌堆只有数量；
  *  ④ 战斗中退出（棋盘「离开棋局」→ 确认）⇒ suspend ⇒ 开局页「继续剧本」⇒ **同一份棋盘**、
  *     同一 revision、待结算战斗靠档里的 spec 重新给「重开这一场」；
  *  ⑤ 编辑器：同一份内置库（source = builtin）能打开第 1 大节，10 个节点用的是同一个渲染器。
  *
- * 战斗**不判胜负**：内置剧本的占位数值今天打不赢（见票 29 的 `## Answer`），而"真打到终局"
- * 与三处显示已由 M7-23 的 fixture 战斗覆盖。这里要核的是**内置内容与视图流转**，不是难度。
+ * 战斗**不判胜负**：这一节在中途就退出（要验「战斗中退出」那条路径），"真打到终局"与三处
+ * 显示已由 M7-23 的 fixture 战斗覆盖，而**内置数值的可胜**由票 33 在
+ * `tests/test_script_content.py::test_every_battle_on_the_authored_route_is_winnable_by_the_heuristic_ai`
+ * 与 `tests/test_script_e2e.py` 里钉住（票 29 当时内置战斗 0/28 可胜，本票之后不再是理由）。
  */
 await ui.scriptLoadSave();
 check("M7-29a 起手干净：无用户库、无存档（进料 = 内置「讨伐黄巾军」）",
@@ -32143,21 +32145,21 @@ check("M7-29f 进内置剧情战节点 = 一条真建局（session_id）+ 切到
   && $("view-table").hidden === false && $("view-script-board").hidden === true,
   `session=${builtinEntered && builtinEntered.session_id} table=${$("view-table").hidden}`);
 
-check("M7-29g 内置剧情战的三座：友 / 敌标签与模板名（程远志 / 黄巾力士）来自真 PvE 载荷",
-  [0, 1, 2].map((seat) => seatSideAt(seat)).join(",") === "友,敌,敌"
+check("M7-29g 内置剧情战的三座：主角 + AI 义从 + 程远志（友 / 敌标签与模板名来自真 PvE 载荷）",
+  [0, 1, 2].map((seat) => seatSideAt(seat)).join(",") === "友,友,敌"
   && seatNameAt(0) === "界刘备"
-  && [1, 2].map((seat) => seatNameAt(seat)).join(",") === "程远志,黄巾力士",
+  && [1, 2].map((seat) => seatNameAt(seat)).join(",") === "汉军义从,程远志",
   `标签=${[0, 1, 2].map((seat) => seatSideAt(seat)).join(",")} 名字=${[0, 1, 2].map((seat) => seatNameAt(seat)).join("/")}`);
 
 check("M7-29h 内置剧情战里对手不泄露：座位只有「手牌：N」、顶栏牌堆只有数量",
-  [1, 2].every((seat) => {
+  [2].every((seat) => {
     const box = seatBoxAt(seat);
     return box && byClass(box, "card").length === 0
       && (box.text().match(/手牌：\d+/) || [""])[0].length > 0;
   })
   && /^\d+$/.test($("t-deck").textContent)
   && ui.state.view.snapshot.deck === undefined,
-  `敌牌=${[1, 2].map((seat) => byClass(seatBoxAt(seat), "card").length)} 牌堆="${$("t-deck").textContent}"`);
+  `敌牌=${[2].map((seat) => byClass(seatBoxAt(seat), "card").length)} 牌堆="${$("t-deck").textContent}"`);
 
 // ---- ③ 战斗中退出 → 继续剧本 → 同一份棋盘 + 待结算战斗不重抽 ----
 const builtinRevision = ui.state.script.board.revision;

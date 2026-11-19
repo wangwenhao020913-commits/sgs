@@ -5,7 +5,7 @@
       "id": "huangjin",
       "name": "讨伐黄巾军",
       "version": 1,
-      "comment": "数值全部占位（票 28）：血量 / 伤害加成 / 奖励铜钱 / 权重都只是能跑通的占位值，不是平衡过的基线。真实内容归内容期（HITL，用户在编辑器里替换，只改本文件、不动代码）。",
+      "comment": "数值全部占位（票 28）：血量 / 伤害加成 / 奖励铜钱 / 权重都只是能跑通的占位值，不是平衡过的基线。真实内容归内容期（HITL，用户在编辑器里替换，只改本文件、不动代码）。票 33 只把「不可胜」修到「可胜」这条下限：每场 1 名敌人 + 1 名 AI 义从、敌方血量压到个位数以下、NPC 技能只留不碰伤害的疾行（凶暴只落在黄巾渠帅身上）——三档加成的伤害 / 摸牌放大一律归零，因为 4 体力主角每轮 2 张的输出对不上「伤害 -1 / 伤害 +1」的敌将。真实难度仍归内容期。",
       "roster": ["nengren", "jie_liubei", "jie_guanyu"],
       "layers": [
         {
@@ -45,7 +45,7 @@
           ],
           "default_scaling": [
             {"from_col": 0, "hp": [0, 0], "draw": [0, 0], "slash": [0, 0]},
-            {"from_col": 2, "hp": [1, 1], "draw": [0, 0], "slash": [0, 1]}
+            {"from_col": 2, "hp": [1, 1], "draw": [0, 0], "slash": [0, 0]}
           ]
         },
         {
@@ -81,8 +81,8 @@
           ],
           "default_scaling": [
             {"from_col": 0, "hp": [0, 0], "draw": [0, 0], "slash": [0, 0]},
-            {"from_col": 2, "hp": [1, 1], "draw": [0, 1], "slash": [0, 1]},
-            {"from_col": 3, "hp": [2, 2], "draw": [0, 1], "slash": [1, 1]}
+            {"from_col": 2, "hp": [1, 1], "draw": [0, 1], "slash": [0, 0]},
+            {"from_col": 3, "hp": [2, 2], "draw": [0, 1], "slash": [0, 0]}
           ]
         }
       ]
@@ -93,11 +93,13 @@
       "id": "room.story.taiping",
       "name": "颍川道上 · 黄巾前哨",
       "kind": "story",
-      "text": "黄巾前哨拦在官道上。剧情战：失败则整轮结束。",
+      "text": "黄巾前哨拦在官道上。剧情战：失败则整轮结束；汉军义从随行。",
       "battle": {
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
         "enemies": [
-          {"role": "enemy", "template": "tpl.story.cheng_yuanzhi"},
-          {"role": "enemy", "template": "tpl.grunt.one"}
+          {"role": "enemy", "template": "tpl.story.cheng_yuanzhi"}
         ],
         "victory": {"kind": "rout"},
         "extra_reward": {"coins": 4, "pick3": 1}
@@ -110,9 +112,11 @@
       "kind": "story",
       "text": "张梁亲率本阵。剧情战：失败则整轮结束；汉室气运让友方越战越勇。",
       "battle": {
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
         "enemies": [
-          {"role": "enemy", "template": "tpl.story.zhang_liang"},
-          {"role": "enemy", "template": "tpl.grunt.two"}
+          {"role": "enemy", "template": "tpl.story.zhang_liang"}
         ],
         "victory": {"kind": "rout"},
         "global_skills": [{"skill": "gs.han_morale"}],
@@ -126,7 +130,10 @@
       "kind": "battle",
       "text": "遭遇战：按档抽黄巾力士。失败只关掉这个节点，整轮继续。",
       "battle": {
-        "enemies": {"draw": {"band": "band1", "count": [1, 2]}},
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
+        "enemies": {"draw": {"band": "band1", "count": [1, 1]}},
         "victory": {"kind": "rout"},
         "extra_reward": {"coins": 2}
       }
@@ -135,11 +142,13 @@
       "id": "room.battle.patrol",
       "name": "黄巾巡队",
       "kind": "battle",
-      "text": "遭遇战：固定的两名黄巾力士。失败只关掉这个节点，整轮继续。",
+      "text": "遭遇战：固定的一名黄巾力士。失败只关掉这个节点，整轮继续。",
       "battle": {
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
         "enemies": [
-          {"role": "enemy", "template": "tpl.grunt.one"},
-          {"role": "enemy", "template": "tpl.grunt.two"}
+          {"role": "enemy", "template": "tpl.grunt.one"}
         ],
         "victory": {"kind": "rout"},
         "extra_reward": {"coins": 3, "pick3": 1}
@@ -151,7 +160,10 @@
       "kind": "battle",
       "text": "遭遇战：按档抽黄巾渠帅。失败只关掉这个节点，整轮继续。",
       "battle": {
-        "enemies": {"draw": {"band": "band2", "count": [1, 2]}},
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
+        "enemies": {"draw": {"band": "band2", "count": [1, 1]}},
         "victory": {"kind": "rout"},
         "extra_reward": {"coins": 4, "pick3": 1}
       }
@@ -160,11 +172,13 @@
       "id": "room.battle.elite",
       "name": "黄巾精锐",
       "kind": "battle",
-      "text": "遭遇战：两名固定的黄巾渠帅。失败只关掉这个节点，整轮继续。",
+      "text": "遭遇战：固定的一名黄巾渠帅。失败只关掉这个节点，整轮继续。",
       "battle": {
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
         "enemies": [
-          {"role": "enemy", "template": "tpl.captain.one"},
-          {"role": "enemy", "template": "tpl.captain.two"}
+          {"role": "enemy", "template": "tpl.captain.one"}
         ],
         "victory": {"kind": "rout"},
         "extra_reward": {"coins": 5, "pick3": 1}
@@ -176,7 +190,10 @@
       "kind": "battle",
       "text": "遭遇战：按档抽黄巾精兵。失败只关掉这个节点，整轮继续。",
       "battle": {
-        "enemies": {"draw": {"band": "band3", "count": [1, 2]}},
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
+        "enemies": {"draw": {"band": "band3", "count": [1, 1]}},
         "victory": {"kind": "rout"},
         "extra_reward": {"coins": 6, "pick3": 1}
       }
@@ -186,11 +203,13 @@
       "name": "颍川 · 波才",
       "kind": "story",
       "is_boss": true,
-      "text": "Boss 战：击败波才即可破阵。剧情战：失败则整轮结束。",
+      "text": "Boss 战：击败波才即可破阵。剧情战：失败则整轮结束；汉军义从随行。",
       "battle": {
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
         "enemies": [
-          {"role": "enemy", "template": "tpl.boss.bo_cai", "boss": true},
-          {"role": "enemy", "template": "tpl.grunt.two"}
+          {"role": "enemy", "template": "tpl.boss.bo_cai", "boss": true}
         ],
         "victory": {"kind": "slay_boss"},
         "extra_reward": {"coins": 8, "pick3": 1}
@@ -204,12 +223,14 @@
       "is_boss": true,
       "text": "Boss 战：击败张角即可平定黄巾。剧情战：失败则整轮结束；黄巾之众让敌方更硬。",
       "battle": {
+        "allies": [
+          {"role": "ally", "template": "tpl.ally.han"}
+        ],
         "enemies": [
-          {"role": "enemy", "template": "tpl.boss.zhang_jiao", "boss": true},
-          {"role": "enemy", "template": "tpl.captain.two"}
+          {"role": "enemy", "template": "tpl.boss.zhang_jiao", "boss": true}
         ],
         "victory": {"kind": "slay_boss"},
-        "global_skills": [{"skill": "gs.yellow_turban", "scale": {"hp": [1, 2]}}],
+        "global_skills": [{"skill": "gs.yellow_turban"}],
         "extra_reward": {"coins": 10, "pick3": 1}
       },
       "on_clear": {"set_flags": ["flag.zhang_jiao_slain"]}
@@ -283,69 +304,69 @@
       "id": "tpl.grunt.one",
       "name": "黄巾力士",
       "band": "band1",
-      "hp": 3,
-      "hp_max": 3,
-      "initial_skills": [],
-      "random": {"pool": "pool.grunts", "count": [0, 1]},
+      "hp": 1,
+      "hp_max": 1,
+      "initial_skills": ["npc.swift"],
+      "random": {"pool": "pool.grunts", "count": [0, 0]},
       "reward": {"coins": 2}
     },
     {
       "id": "tpl.grunt.two",
       "name": "黄巾力士（悍）",
       "band": "band1",
-      "hp": 4,
-      "hp_max": 4,
-      "initial_skills": [],
-      "random": {"pool": "pool.grunts", "count": [1, 2]},
+      "hp": 2,
+      "hp_max": 2,
+      "initial_skills": ["npc.swift"],
+      "random": {"pool": "pool.grunts", "count": [0, 0]},
       "reward": {"coins": 2}
     },
     {
       "id": "tpl.captain.one",
       "name": "黄巾渠帅",
       "band": "band2",
-      "hp": 5,
-      "hp_max": 5,
-      "initial_skills": [],
-      "random": {"pool": "pool.elites", "count": [0, 1]},
+      "hp": 2,
+      "hp_max": 2,
+      "initial_skills": ["npc.fury"],
+      "random": {"pool": "pool.elites", "count": [0, 0]},
       "reward": {"coins": 4, "pick3": 1}
     },
     {
       "id": "tpl.captain.two",
       "name": "黄巾渠帅（悍）",
       "band": "band2",
-      "hp": 6,
-      "hp_max": 6,
+      "hp": 2,
+      "hp_max": 2,
       "initial_skills": [],
-      "random": {"pool": "pool.elites", "count": [1, 2]},
+      "random": {"pool": "pool.elites", "count": [1, 1]},
       "reward": {"coins": 4, "pick3": 1}
     },
     {
       "id": "tpl.elite.one",
       "name": "黄巾精兵",
       "band": "band3",
-      "hp": 6,
-      "hp_max": 6,
-      "initial_skills": [],
-      "random": {"pool": "pool.elites", "count": [0, 1]},
+      "hp": 1,
+      "hp_max": 1,
+      "initial_skills": ["npc.swift"],
+      "random": {"pool": "pool.elites", "count": [0, 0]},
       "reward": {"coins": 5, "pick3": 1}
     },
     {
       "id": "tpl.elite.two",
       "name": "黄巾精兵（悍）",
       "band": "band3",
-      "hp": 7,
-      "hp_max": 7,
-      "initial_skills": [],
-      "random": {"pool": "pool.elites", "count": [1, 1]},
+      "hp": 2,
+      "hp_max": 2,
+      "initial_skills": ["npc.swift"],
+      "random": {"pool": "pool.elites", "count": [0, 0]},
       "reward": {"coins": 5, "pick3": 1}
     },
     {
       "id": "tpl.story.cheng_yuanzhi",
       "name": "程远志",
       "band": "story",
-      "hp": 8,
-      "hp_max": 8,
-      "initial_skills": ["npc.fury", "npc.guard"],
+      "hp": 2,
+      "hp_max": 2,
+      "initial_skills": ["npc.swift"],
       "random": {"pool": "pool.elites", "count": [0, 0]},
       "reward": {"coins": 8, "pick3": 1}
     },
@@ -353,9 +374,9 @@
       "id": "tpl.story.zhang_liang",
       "name": "张梁",
       "band": "story",
-      "hp": 10,
-      "hp_max": 10,
-      "initial_skills": ["npc.fury", "npc.guard"],
+      "hp": 2,
+      "hp_max": 2,
+      "initial_skills": ["npc.swift"],
       "random": {"pool": "pool.elites", "count": [0, 0]},
       "reward": {"coins": 8, "pick3": 1}
     },
@@ -363,9 +384,9 @@
       "id": "tpl.boss.bo_cai",
       "name": "波才",
       "band": "boss",
-      "hp": 12,
-      "hp_max": 12,
-      "initial_skills": ["npc.wrath", "npc.fury"],
+      "hp": 2,
+      "hp_max": 2,
+      "initial_skills": ["npc.swift"],
       "random": {"pool": "pool.boss", "count": [0, 0]},
       "reward": {"coins": 0}
     },
@@ -373,10 +394,20 @@
       "id": "tpl.boss.zhang_jiao",
       "name": "张角",
       "band": "boss",
-      "hp": 15,
-      "hp_max": 15,
-      "initial_skills": ["npc.wrath", "npc.guard"],
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": ["npc.swift"],
       "random": {"pool": "pool.boss", "count": [0, 0]},
+      "reward": {"coins": 0}
+    },
+    {
+      "id": "tpl.ally.han",
+      "name": "汉军义从",
+      "band": "story",
+      "hp": 4,
+      "hp_max": 4,
+      "initial_skills": ["hero.jie_liubei.jijiang"],
+      "random": {"pool": "pool.grunts", "count": [0, 0]},
       "reward": {"coins": 0}
     }
   ],
@@ -384,17 +415,17 @@
     {
       "id": "pool.grunts",
       "name": "小怪技能池",
-      "skills": ["npc.fury", "npc.guard", "npc.swift"]
+      "skills": ["npc.swift"]
     },
     {
       "id": "pool.elites",
       "name": "渠帅技能池",
-      "skills": ["npc.fury", "npc.guard", "npc.swift"]
+      "skills": ["npc.swift"]
     },
     {
       "id": "pool.boss",
       "name": "Boss 技能池",
-      "skills": ["npc.wrath", "npc.fury", "npc.guard"]
+      "skills": ["npc.swift"]
     }
   ],
   "events": [
@@ -502,13 +533,13 @@
       "id": "gs.yellow_turban",
       "name": "黄巾之众",
       "side": "enemy",
-      "scale": {"hp": [0, 1], "draw": [0, 1], "slash": [0, 1]}
+      "scale": {"hp": [0, 1], "draw": [0, 0], "slash": [0, 0]}
     },
     {
       "id": "gs.han_morale",
       "name": "汉室气运",
       "side": "ally",
-      "scale": {"hp": [0, 1], "draw": [0, 0], "slash": [0, 1]}
+      "scale": {"hp": [1, 1], "draw": [0, 0], "slash": [0, 0]}
     }
   ]
 }

@@ -14,20 +14,29 @@
 4. **通关路**：用纯函数（``available_next`` + ``enter_node`` + ``settle_node``）在固定 seed
    下从第一层入口走到最后一层出口并通关，路上覆盖全部五类房间与两个 Boss——票 29 的 e2e
    照这条路线走。
+5. **可胜**（票 33）：同一条通关路上的**每一场战斗**（含问号房揭晓出来的战斗）在固定种子 +
+   启发式 AI 下真的打得赢（``solve_pve_outcome`` 判 ``ally`` 侧）。票 29 实测票 28 的占位数值
+   一局也赢不了（``npc.guard`` 把每次 1 点【杀】吃成 0，而 4 体力主角每轮只摸 2 张），这条
+   断言把"数值占位可以，不可胜不行"钉成机械判据；真实平衡仍归内容期（D20）。
 
-内容里的**数值全部是占位**（``Script.comment`` 里写明了）：本文件不判平衡，也不判文案。
+内容里的**数值是占位值**（``Script.comment`` 里写明了）：本文件只判"可胜"这条下限，不判平衡，
+也不判文案。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from sgs.agents import HeuristicPlayer
 from sgs.data import (
     SCRIPT_LIBRARY_FILENAME,
     EnemyDraw,
     Identity,
+    Mode,
     PveVictoryKind,
     RoomKind,
+    RuleConfig,
+    load_content_pack,
     load_script_library,
     load_skill_values,
     load_builtin_script_library,
@@ -35,8 +44,10 @@ from sgs.data import (
     validate_script_library,
     hero_by_id,
 )
+from sgs.engine import Engine, ai_stream, solve_pve_outcome
 from sgs.script import (
     Backpack,
+    BattleSpec,
     EventSpec,
     RunState,
     SettleOrder,
@@ -78,6 +89,17 @@ ROUTE: tuple[tuple[str, tuple[str, ...]], ...] = (
 """通关路（大节 id → 节点 id）：第一层走剧情战 → 事件 → 商店 → Boss → 出口，
 第二层走剧情战 → 问号房 → 遭遇战 → Boss → 出口。两层合起来覆盖五类房间与两个 Boss。"""
 
+WIN_SEEDS: tuple[int, ...] = (20261129, 20261130, 20261131)
+"""可胜断言的**固定小样本**（票 33；3 个 run 种子，不是 28 个种子的全扫）。
+
+``20261129`` 就是票 29 的 e2e 用的那一个（``tests/test_script_e2e.py::SEED``），另外两颗
+只是让"赢"不依赖单一种子的摸牌顺序。战斗种子由 run 种子 + 节点键派生，故这颗种子遍历的就是
+e2e 真要打的那几场。
+"""
+
+PACK = load_content_pack(deck_profile="standard_108")
+"""起 PvE 局用的牌堆档（与网页 / 票 29 的 e2e 同一条缺省档）。"""
+
 
 # ---------------------------------------------------------------------------
 # 小工具：从内置库取实体索引 / BFS / 一局 S₀
@@ -103,12 +125,15 @@ def _index(entities):
     return {entity.id: entity for entity in entities}
 
 
-def _run(library, *, layer_index: int) -> RunState:
-    """一份合法的 S₀（背包 24 格全空、0 铜钱）：编译与推进都只读它。"""
+def _run(library, *, layer_index: int, seed: int = SEED) -> RunState:
+    """一份合法的 S₀（背包 24 格全空、0 铜钱）：编译与推进都只读它。
+
+    ``seed`` 只有在走多条样本路线时才换（票 33 的固定小样本）；缺省仍是本文件的 ``SEED``。
+    """
     script = _script(library)
     return RunState(
-        run_id=f"{SEED}-1",
-        seed=SEED,
+        run_id=f"{seed}-1",
+        seed=seed,
         script_id=script.id,
         script_version=script.version,
         script_digest=script_digest(script),
@@ -633,3 +658,112 @@ def test_the_authored_route_walks_both_layers_and_wins() -> None:
         f"这条通关路要覆盖全部五类房间：实得 {sorted(set(kinds_seen))}"
     )
     assert bosses_seen == 2, f"这条通关路要打两个 Boss：实得 {bosses_seen}"
+
+
+# ---------------------------------------------------------------------------
+# 6. 可胜（票 33）：通关路上的每一场战斗都真的打得赢
+# ---------------------------------------------------------------------------
+
+
+def _battle_specs_along_the_route(library, *, seed: int) -> list[tuple[str, BattleSpec]]:
+    """按 :data:`ROUTE` 走一遍（**假设每场都赢**），收集路上每个战斗节点冻结的 ``BattleSpec``。
+
+    与票 29 的 e2e 同一条数据流：``enter_node`` 已经把这一场的 ``pve`` / ``battle_seed`` /
+    ``rewards`` 抽完并冻进 ``pending.spec``；问号房取揭晓后的内层。结算按 e2e 的口径
+    （战斗每轮取 0 号候选且按"赢"推进、事件选 0 号、商店空购买），故后一场拿到的
+    ``RunState`` 就是"前面都赢了"时玩家真会带着的背包。
+    """
+    script = _script(library)
+    value_table = load_skill_values()
+    run = _run(library, layer_index=0, seed=seed)
+    specs: list[tuple[str, BattleSpec]] = []
+    for layer_index, (layer_id, node_ids) in enumerate(ROUTE):
+        layer = script.layers[layer_index]
+        candidates = available_next(layer, flags=run.flags, node_status=run.node_status)
+        for node_id in node_ids:
+            node = next(
+                (candidate for candidate in candidates if candidate.id == node_id), None
+            )
+            assert node is not None, f"节点 {node_id!r} 不在可到达集里"
+            run = enter_node(
+                run=run, library=library, node_id=node.id, value_table=value_table
+            )
+            outer = run.pending.spec
+            inner = outer.revealed.spec if isinstance(outer, UnknownSpec) else outer
+            label = f"{layer_id}/{node_id}"
+            if isinstance(inner, BattleSpec):
+                specs.append((label, inner))
+                picks = tuple(options[0] for options in inner.rewards if options)
+                order = SettleOrder(won=True, picks=picks)
+            elif isinstance(inner, EventSpec):
+                order = SettleOrder(option=0)
+            else:
+                order = SettleOrder()
+            result = settle_node(
+                run=run, library=library, value_table=value_table, order=order
+            )
+            assert result.outcome in ("continue", "cleared"), (
+                f"{label}: 假设全胜的走法不该被打断（实得 {result.outcome}）"
+            )
+            if result.run is None:
+                assert layer_index == len(ROUTE) - 1
+                return specs
+            run = result.run
+            if node_id != node_ids[-1]:
+                candidates = available_next(
+                    layer, flags=run.flags, node_status=run.node_status
+                )
+    return specs
+
+
+def _heuristic_battle_side(spec: BattleSpec) -> str:
+    """按冻结的 ``BattleSpec`` 起一局、全座位启发式 AI 打到终局，返回纯求解器的侧别。
+
+    与票 29 的 e2e 同一条判据（服务端 ``script_runs._battle_won``）：胜负只读终局事实 +
+    ``solve_pve_outcome``，并要求 ``game_end`` 的侧别与重算一致。人类座位也一样由启发式
+    操作——这条断言判的是**内容**能不能被现有 AI 打赢。
+    """
+    seats = len(spec.pve.identities)
+    rule = RuleConfig(player_count=seats, mode=Mode.PVE, pve=spec.pve)
+    engine = Engine.new_game(seed=spec.battle_seed, rule_config=rule, pack=PACK)
+    engine.run(
+        [HeuristicPlayer(ai_stream(spec.battle_seed, seat)) for seat in range(seats)]
+    )
+    assert engine.finished, "启发式 AI 的每一场都该跑到终局"
+    alive = frozenset(player.seat for player in engine.state.players if player.alive)
+    outcome = solve_pve_outcome(config=spec.pve, alive=alive, round_no=engine.state.round)
+    assert outcome is not None, "终局了却算不出这一场的胜负"
+    end = next(
+        record
+        for record in reversed(engine.records)
+        if getattr(record, "kind", None) == "game_end"
+    )
+    assert end.side == outcome.side, "记录流的胜负与重算的胜负必须一致"
+    return outcome.side
+
+
+def test_every_battle_on_the_authored_route_is_winnable_by_the_heuristic_ai() -> None:
+    """票 33：通关路上的每场战斗在 :data:`WIN_SEEDS` 下都赢（固定种子 + 启发式 AI）。
+
+    为什么要有这一条：票 28 的数值是"可以不平衡、但不许不可胜"的占位值，而票 29 实测到
+    **28 个种子 0 胜**（``npc.guard`` 每次吃掉 1 点伤害 + 4 体力主角每轮 2 张对 8 体力主将），
+    只能把 e2e 的敌人换成 1 体力模板才跑得通。本断言把"不可胜"钉成红：真打每一场（不是把
+    胜负写进档里），任何一个种子下任何一场没赢就指出是哪一场。
+    """
+    library = _library()
+    played: list[str] = []
+    losses: list[str] = []
+    for seed in WIN_SEEDS:
+        for label, spec in _battle_specs_along_the_route(library, seed=seed):
+            played.append(f"{seed}:{label}")
+            if _heuristic_battle_side(spec) != "ally":
+                losses.append(f"{seed}:{label}")
+
+    assert len(played) >= len(WIN_SEEDS) * 5, (
+        "这条通关路每颗种子至少 5 场战斗（票 28 的主线：剧情战 ×2 + 遭遇战 + Boss ×2）："
+        f"实得 {played}"
+    )
+    assert not losses, (
+        "内置剧本的战斗在固定种子 + 启发式 AI 下必须可胜（票 33）；打不赢的有："
+        f"{losses}"
+    )
