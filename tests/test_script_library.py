@@ -1,10 +1,10 @@
-"""剧本库的加载接缝、内置空壳与内容指纹（M7 票 14；spec §2 / §7，票 03 §1、§6、§7）。
+"""剧本库的加载接缝、内置库与内容指纹（M7 票 14；spec §2 / §7，票 03 §1、§6、§7）。
 
 三段门的**逐条判据**落在 ``tests/data/test_script_library_validation.py``；本文件只钉
 "数据面能经 ``sgs.data`` 公开接缝进来"这一层：
 
-- 内置空壳 ``scripts.huangjin.json`` 走**同一份** ``validate_script_library`` 加载通过
-  （空壳是 schema 合法的，真实内容归票 28）；
+- 内置库 ``scripts.huangjin.json`` 走**同一份** ``validate_script_library`` 加载通过
+  （票 14 落的是 schema 合法的空壳，票 28 起换成了最小可玩内容；这里的接缝断言不变）；
 - ``script_digest`` 是**规范化 dump 的 sha256**：键序 / 空白不同 ⇒ 同一指纹，内容变了 ⇒ 变；
 - 新增的公开名进 ``sgs.data.__all__``（深导扫描由 ``tests/test_scaffold.py`` 兜）。
 """
@@ -50,18 +50,22 @@ def _reversed_keys(value: Any) -> Any:
 
 
 def test_the_builtin_shell_loads_through_the_same_validator() -> None:
-    """内置空壳：1 剧本 / 2 大节 / 网格 + 节点边；过整份校验器，清单为空。"""
+    """内置库：1 剧本 / 2 大节 / 网格 + 节点边；过整份校验器，清单为空。
+
+    票 14 落的是空壳，票 28 起是**最小可玩内容**——本断言只核接缝与库头，不核内容
+    （内容契约在 ``tests/test_script_content.py``）；函数名保留票 14 的引用名。
+    """
     library = load_builtin_script_library()
 
     assert isinstance(library, ScriptLibrary)
     assert library.script_schema_version == SCRIPT_SCHEMA_VERSION
     assert [script.id for script in library.scripts] == ["huangjin"]
     script = library.scripts[0]
-    assert len(script.layers) == 2, "票 14 只落空壳：1 剧本 / 2 大节"
+    assert len(script.layers) == 2, "1 剧本 / 2 大节（票 14 的空壳形状沿用）"
     assert all(layer.nodes and layer.edges for layer in script.layers), (
-        "每个大节都要有网格与少量节点边（真实内容归票 28）"
+        "每个大节都要有网格与节点边（票 28 的内容契约另核数量与可达性）"
     )
-    # 同一份文件走同一个校验函数：空壳是 schema 合法的。
+    # 同一份文件走同一个校验函数：内置库是 schema 合法的。
     assert validate_script_library(BUILTIN_FILE.read_text(encoding="utf-8"),
                                    file="files/scripts.huangjin.json") == ()
     # 两条加载路（打包文件 / 给定 JSON）得到同一份库。

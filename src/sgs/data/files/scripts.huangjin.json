@@ -5,49 +5,510 @@
       "id": "huangjin",
       "name": "讨伐黄巾军",
       "version": 1,
-      "comment": "空壳（票 14）：结构合法、内容是占位；结构完整的最小可玩内容在票 28。",
+      "comment": "数值全部占位（票 28）：血量 / 伤害加成 / 奖励铜钱 / 权重都只是能跑通的占位值，不是平衡过的基线。真实内容归内容期（HITL，用户在编辑器里替换，只改本文件、不动代码）。",
       "roster": ["nengren", "jie_liubei", "jie_guanyu"],
       "layers": [
         {
           "id": "l1",
           "name": "大节一 · 颍川道上",
-          "grid": {"rows": 2, "cols": 3},
+          "grid": {"rows": 3, "cols": 5},
           "nodes": [
-            {"id": "n1", "row": 0, "col": 0, "room": "room.placeholder.shop"},
-            {"id": "n2", "row": 1, "col": 0, "room": "room.placeholder.shop"},
-            {"id": "n3", "row": 1, "col": 2, "room": "room.placeholder.shop"}
+            {"id": "entry", "row": 0, "col": 0, "room": "room.story.taiping"},
+            {"id": "shop_entry", "row": 1, "col": 0, "room": "room.shop.peddler"},
+            {"id": "patrol", "row": 0, "col": 1, "room": "room.battle.ambush"},
+            {"id": "village", "row": 1, "col": 1, "room": "room.event.village"},
+            {"id": "skirmish", "row": 2, "col": 1, "room": "room.battle.patrol"},
+            {"id": "question", "row": 0, "col": 2, "room": "room.unknown.yingchuan"},
+            {"id": "market", "row": 1, "col": 2, "room": "room.shop.peddler"},
+            {"id": "boss", "row": 0, "col": 3, "room": "room.boss.bo_cai"},
+            {"id": "elite", "row": 1, "col": 3, "room": "room.battle.elite"},
+            {"id": "exit", "row": 0, "col": 4, "room": "room.exit.yingchuan"}
           ],
           "edges": [
-            {"from": "n1", "to": "n3"},
-            {"from": "n2", "to": "n3"}
+            {"from": "entry", "to": "patrol"},
+            {"from": "entry", "to": "village"},
+            {"from": "entry", "to": "skirmish"},
+            {"from": "shop_entry", "to": "village"},
+            {"from": "shop_entry", "to": "skirmish"},
+            {"from": "patrol", "to": "question"},
+            {"from": "patrol", "to": "market"},
+            {"from": "village", "to": "question"},
+            {"from": "village", "to": "market", "requires": {"flags": ["flag.village_helped"]}},
+            {"from": "skirmish", "to": "question"},
+            {"from": "skirmish", "to": "market"},
+            {"from": "question", "to": "boss"},
+            {"from": "question", "to": "elite"},
+            {"from": "market", "to": "boss"},
+            {"from": "market", "to": "elite"},
+            {"from": "boss", "to": "exit"},
+            {"from": "elite", "to": "exit"}
           ],
-          "default_scaling": []
+          "default_scaling": [
+            {"from_col": 0, "hp": [0, 0], "draw": [0, 0], "slash": [0, 0]},
+            {"from_col": 2, "hp": [1, 1], "draw": [0, 0], "slash": [0, 1]}
+          ]
         },
         {
           "id": "l2",
           "name": "大节二 · 广宗城下",
-          "grid": {"rows": 2, "cols": 2},
+          "grid": {"rows": 2, "cols": 5},
           "nodes": [
-            {"id": "n1", "row": 0, "col": 0, "room": "room.placeholder.shop"},
-            {"id": "n2", "row": 1, "col": 1, "room": "room.placeholder.shop"}
+            {"id": "entry", "row": 0, "col": 0, "room": "room.story.guangzong"},
+            {"id": "patrol", "row": 1, "col": 0, "room": "room.battle.patrol"},
+            {"id": "shrine", "row": 0, "col": 1, "room": "room.event.shrine"},
+            {"id": "question", "row": 1, "col": 1, "room": "room.unknown.guangzong"},
+            {"id": "vanguard", "row": 0, "col": 2, "room": "room.battle.vanguard"},
+            {"id": "market", "row": 1, "col": 2, "room": "room.shop.peddler"},
+            {"id": "boss", "row": 0, "col": 3, "room": "room.boss.zhang_jiao"},
+            {"id": "rearguard", "row": 1, "col": 3, "room": "room.battle.rearguard"},
+            {"id": "exit", "row": 0, "col": 4, "room": "room.exit.guangzong"}
           ],
-          "edges": [{"from": "n1", "to": "n2"}],
-          "default_scaling": []
+          "edges": [
+            {"from": "entry", "to": "shrine"},
+            {"from": "entry", "to": "question"},
+            {"from": "patrol", "to": "shrine"},
+            {"from": "patrol", "to": "question"},
+            {"from": "shrine", "to": "vanguard"},
+            {"from": "shrine", "to": "market", "requires": {"flags": ["flag.road_known"]}},
+            {"from": "question", "to": "vanguard"},
+            {"from": "question", "to": "market"},
+            {"from": "vanguard", "to": "boss"},
+            {"from": "vanguard", "to": "rearguard"},
+            {"from": "market", "to": "boss"},
+            {"from": "market", "to": "rearguard"},
+            {"from": "boss", "to": "exit"},
+            {"from": "rearguard", "to": "exit"}
+          ],
+          "default_scaling": [
+            {"from_col": 0, "hp": [0, 0], "draw": [0, 0], "slash": [0, 0]},
+            {"from_col": 2, "hp": [1, 1], "draw": [0, 1], "slash": [0, 1]},
+            {"from_col": 3, "hp": [2, 2], "draw": [0, 1], "slash": [1, 1]}
+          ]
         }
       ]
     }
   ],
   "rooms": [
     {
-      "id": "room.placeholder.shop",
-      "name": "行商篷车（占位）",
+      "id": "room.story.taiping",
+      "name": "颍川道上 · 黄巾前哨",
+      "kind": "story",
+      "text": "黄巾前哨拦在官道上。剧情战：失败则整轮结束。",
+      "battle": {
+        "enemies": [
+          {"role": "enemy", "template": "tpl.story.cheng_yuanzhi"},
+          {"role": "enemy", "template": "tpl.grunt.one"}
+        ],
+        "victory": {"kind": "rout"},
+        "extra_reward": {"coins": 4, "pick3": 1}
+      },
+      "on_clear": {"set_flags": ["flag.taiping_cleared"]}
+    },
+    {
+      "id": "room.story.guangzong",
+      "name": "广宗城下 · 黄巾本阵",
+      "kind": "story",
+      "text": "张梁亲率本阵。剧情战：失败则整轮结束；汉室气运让友方越战越勇。",
+      "battle": {
+        "enemies": [
+          {"role": "enemy", "template": "tpl.story.zhang_liang"},
+          {"role": "enemy", "template": "tpl.grunt.two"}
+        ],
+        "victory": {"kind": "rout"},
+        "global_skills": [{"skill": "gs.han_morale"}],
+        "extra_reward": {"coins": 5, "pick3": 1}
+      },
+      "on_clear": {"set_flags": ["flag.guangzong_siege"]}
+    },
+    {
+      "id": "room.battle.ambush",
+      "name": "道旁伏兵",
+      "kind": "battle",
+      "text": "遭遇战：按档抽黄巾力士。失败只关掉这个节点，整轮继续。",
+      "battle": {
+        "enemies": {"draw": {"band": "band1", "count": [1, 2]}},
+        "victory": {"kind": "rout"},
+        "extra_reward": {"coins": 2}
+      }
+    },
+    {
+      "id": "room.battle.patrol",
+      "name": "黄巾巡队",
+      "kind": "battle",
+      "text": "遭遇战：固定的两名黄巾力士。失败只关掉这个节点，整轮继续。",
+      "battle": {
+        "enemies": [
+          {"role": "enemy", "template": "tpl.grunt.one"},
+          {"role": "enemy", "template": "tpl.grunt.two"}
+        ],
+        "victory": {"kind": "rout"},
+        "extra_reward": {"coins": 3, "pick3": 1}
+      }
+    },
+    {
+      "id": "room.battle.vanguard",
+      "name": "渠帅先锋",
+      "kind": "battle",
+      "text": "遭遇战：按档抽黄巾渠帅。失败只关掉这个节点，整轮继续。",
+      "battle": {
+        "enemies": {"draw": {"band": "band2", "count": [1, 2]}},
+        "victory": {"kind": "rout"},
+        "extra_reward": {"coins": 4, "pick3": 1}
+      }
+    },
+    {
+      "id": "room.battle.elite",
+      "name": "黄巾精锐",
+      "kind": "battle",
+      "text": "遭遇战：两名固定的黄巾渠帅。失败只关掉这个节点，整轮继续。",
+      "battle": {
+        "enemies": [
+          {"role": "enemy", "template": "tpl.captain.one"},
+          {"role": "enemy", "template": "tpl.captain.two"}
+        ],
+        "victory": {"kind": "rout"},
+        "extra_reward": {"coins": 5, "pick3": 1}
+      }
+    },
+    {
+      "id": "room.battle.rearguard",
+      "name": "城下后卫",
+      "kind": "battle",
+      "text": "遭遇战：按档抽黄巾精兵。失败只关掉这个节点，整轮继续。",
+      "battle": {
+        "enemies": {"draw": {"band": "band3", "count": [1, 2]}},
+        "victory": {"kind": "rout"},
+        "extra_reward": {"coins": 6, "pick3": 1}
+      }
+    },
+    {
+      "id": "room.boss.bo_cai",
+      "name": "颍川 · 波才",
+      "kind": "story",
+      "is_boss": true,
+      "text": "Boss 战：击败波才即可破阵。剧情战：失败则整轮结束。",
+      "battle": {
+        "enemies": [
+          {"role": "enemy", "template": "tpl.boss.bo_cai", "boss": true},
+          {"role": "enemy", "template": "tpl.grunt.two"}
+        ],
+        "victory": {"kind": "slay_boss"},
+        "extra_reward": {"coins": 8, "pick3": 1}
+      },
+      "on_clear": {"set_flags": ["flag.bo_cai_slain"]}
+    },
+    {
+      "id": "room.boss.zhang_jiao",
+      "name": "广宗 · 张角",
+      "kind": "story",
+      "is_boss": true,
+      "text": "Boss 战：击败张角即可平定黄巾。剧情战：失败则整轮结束；黄巾之众让敌方更硬。",
+      "battle": {
+        "enemies": [
+          {"role": "enemy", "template": "tpl.boss.zhang_jiao", "boss": true},
+          {"role": "enemy", "template": "tpl.captain.two"}
+        ],
+        "victory": {"kind": "slay_boss"},
+        "global_skills": [{"skill": "gs.yellow_turban", "scale": {"hp": [1, 2]}}],
+        "extra_reward": {"coins": 10, "pick3": 1}
+      },
+      "on_clear": {"set_flags": ["flag.zhang_jiao_slain"]}
+    },
+    {
+      "id": "room.event.village",
+      "name": "残破的村庄",
+      "kind": "event",
+      "text": "村口只剩半堵土墙。",
+      "event_pool": "ep.village",
+      "on_clear": {"set_flags": ["flag.village_helped"]}
+    },
+    {
+      "id": "room.event.roadside",
+      "name": "道旁见闻",
+      "kind": "event",
+      "text": "官道旁有些动静。",
+      "event_pool": "ep.road"
+    },
+    {
+      "id": "room.event.shrine",
+      "name": "荒废的神祠",
+      "kind": "event",
+      "text": "神祠里还留着一点香火。",
+      "event_pool": "ep.road",
+      "on_clear": {"set_flags": ["flag.road_known"]}
+    },
+    {
+      "id": "room.shop.peddler",
+      "name": "行商篷车",
       "kind": "shop",
-      "text": "票 14 的空壳房间：真实房间、模板与事件在票 28 落。"
+      "text": "行商在路边支起篷车：6 条技能 + 2 件遗物，售完不补货。"
+    },
+    {
+      "id": "room.exit.yingchuan",
+      "name": "颍川营地",
+      "kind": "shop",
+      "text": "颍川一战已毕：离开本大节前可以在营地里最后补给。"
+    },
+    {
+      "id": "room.exit.guangzong",
+      "name": "广宗凯旋",
+      "kind": "shop",
+      "text": "黄巾已平：本大节结束，本轮通关。"
+    },
+    {
+      "id": "room.unknown.yingchuan",
+      "name": "颍川道上的问号",
+      "kind": "unknown",
+      "text": "不知道前面等着的是什么。",
+      "pool": [
+        {"room": "room.battle.ambush", "weight": 2},
+        {"room": "room.event.roadside", "weight": 1},
+        {"room": "room.shop.peddler", "weight": 1}
+      ]
+    },
+    {
+      "id": "room.unknown.guangzong",
+      "name": "广宗城下的问号",
+      "kind": "unknown",
+      "text": "城下的雾气里看不清前路。",
+      "pool": [
+        {"room": "room.battle.rearguard", "weight": 1},
+        {"room": "room.event.roadside", "weight": 2},
+        {"room": "room.shop.peddler", "weight": 1}
+      ]
     }
   ],
-  "templates": [],
-  "skill_pools": [],
-  "events": [],
-  "event_pools": [],
-  "global_skills": []
+  "templates": [
+    {
+      "id": "tpl.grunt.one",
+      "name": "黄巾力士",
+      "band": "band1",
+      "hp": 3,
+      "hp_max": 3,
+      "initial_skills": [],
+      "random": {"pool": "pool.grunts", "count": [0, 1]},
+      "reward": {"coins": 2}
+    },
+    {
+      "id": "tpl.grunt.two",
+      "name": "黄巾力士（悍）",
+      "band": "band1",
+      "hp": 4,
+      "hp_max": 4,
+      "initial_skills": [],
+      "random": {"pool": "pool.grunts", "count": [1, 2]},
+      "reward": {"coins": 2}
+    },
+    {
+      "id": "tpl.captain.one",
+      "name": "黄巾渠帅",
+      "band": "band2",
+      "hp": 5,
+      "hp_max": 5,
+      "initial_skills": [],
+      "random": {"pool": "pool.elites", "count": [0, 1]},
+      "reward": {"coins": 4, "pick3": 1}
+    },
+    {
+      "id": "tpl.captain.two",
+      "name": "黄巾渠帅（悍）",
+      "band": "band2",
+      "hp": 6,
+      "hp_max": 6,
+      "initial_skills": [],
+      "random": {"pool": "pool.elites", "count": [1, 2]},
+      "reward": {"coins": 4, "pick3": 1}
+    },
+    {
+      "id": "tpl.elite.one",
+      "name": "黄巾精兵",
+      "band": "band3",
+      "hp": 6,
+      "hp_max": 6,
+      "initial_skills": [],
+      "random": {"pool": "pool.elites", "count": [0, 1]},
+      "reward": {"coins": 5, "pick3": 1}
+    },
+    {
+      "id": "tpl.elite.two",
+      "name": "黄巾精兵（悍）",
+      "band": "band3",
+      "hp": 7,
+      "hp_max": 7,
+      "initial_skills": [],
+      "random": {"pool": "pool.elites", "count": [1, 1]},
+      "reward": {"coins": 5, "pick3": 1}
+    },
+    {
+      "id": "tpl.story.cheng_yuanzhi",
+      "name": "程远志",
+      "band": "story",
+      "hp": 8,
+      "hp_max": 8,
+      "initial_skills": ["npc.fury", "npc.guard"],
+      "random": {"pool": "pool.elites", "count": [0, 0]},
+      "reward": {"coins": 8, "pick3": 1}
+    },
+    {
+      "id": "tpl.story.zhang_liang",
+      "name": "张梁",
+      "band": "story",
+      "hp": 10,
+      "hp_max": 10,
+      "initial_skills": ["npc.fury", "npc.guard"],
+      "random": {"pool": "pool.elites", "count": [0, 0]},
+      "reward": {"coins": 8, "pick3": 1}
+    },
+    {
+      "id": "tpl.boss.bo_cai",
+      "name": "波才",
+      "band": "boss",
+      "hp": 12,
+      "hp_max": 12,
+      "initial_skills": ["npc.wrath", "npc.fury"],
+      "random": {"pool": "pool.boss", "count": [0, 0]},
+      "reward": {"coins": 0}
+    },
+    {
+      "id": "tpl.boss.zhang_jiao",
+      "name": "张角",
+      "band": "boss",
+      "hp": 15,
+      "hp_max": 15,
+      "initial_skills": ["npc.wrath", "npc.guard"],
+      "random": {"pool": "pool.boss", "count": [0, 0]},
+      "reward": {"coins": 0}
+    }
+  ],
+  "skill_pools": [
+    {
+      "id": "pool.grunts",
+      "name": "小怪技能池",
+      "skills": ["npc.fury", "npc.guard", "npc.swift"]
+    },
+    {
+      "id": "pool.elites",
+      "name": "渠帅技能池",
+      "skills": ["npc.fury", "npc.guard", "npc.swift"]
+    },
+    {
+      "id": "pool.boss",
+      "name": "Boss 技能池",
+      "skills": ["npc.wrath", "npc.fury", "npc.guard"]
+    }
+  ],
+  "events": [
+    {
+      "id": "ev.village",
+      "name": "残破的村庄",
+      "text": "村民捧着最后一点干粮站在土墙后面。",
+      "options": [
+        {"text": "收下干粮", "effects": [{"kind": "coins", "amount": 2}]},
+        {
+          "text": "帮他们修寨",
+          "effects": [
+            {"kind": "coins", "amount": -1},
+            {"kind": "set_flags", "flags": ["flag.village_helped"]}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ev.refugees",
+      "name": "流民队伍",
+      "text": "一群流民堵在官道上，拖家带口。",
+      "options": [
+        {"text": "让开道路"},
+        {
+          "text": "接济难民",
+          "effects": [
+            {"kind": "coins", "amount": -2},
+            {"kind": "set_flags", "flags": ["flag.village_helped"]}
+          ]
+        },
+        {
+          "text": "招募流民中的猎户",
+          "requires": {"flags": ["flag.village_helped"]},
+          "effects": [{"kind": "grant_skill", "skill": "hero.liubei.jijiang"}]
+        }
+      ]
+    },
+    {
+      "id": "ev.taoist",
+      "name": "游方道人",
+      "text": "一个游方道人拦住去路，说要看看你的根骨。",
+      "options": [
+        {"text": "推开他", "effects": [{"kind": "coins", "amount": 1}]},
+        {
+          "text": "听他讲道",
+          "effects": [{"kind": "grant_skill", "skill": "hero.zhaoyun.longdan"}]
+        }
+      ]
+    },
+    {
+      "id": "ev.ambush",
+      "name": "道旁伏兵",
+      "text": "树丛里有人影一闪而过，地上散落着几枚铜钱。",
+      "options": [
+        {"text": "绕道而行"},
+        {"text": "捡起铜钱", "effects": [{"kind": "coins", "amount": 1}]}
+      ]
+    },
+    {
+      "id": "ev.old_soldier",
+      "name": "老卒",
+      "text": "一名退役老卒坐在界碑旁，絮絮叨叨讲着官军的旧事。",
+      "options": [
+        {"text": "听他说完", "effects": [{"kind": "coins", "amount": 1}]},
+        {
+          "text": "替他守夜",
+          "effects": [
+            {"kind": "coins", "amount": -1},
+            {"kind": "set_flags", "flags": ["flag.road_known"]}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ev.broken_cart",
+      "name": "倾覆的粮车",
+      "text": "一辆粮车翻在路边，车辕上挂着一只旧木匣。",
+      "options": [
+        {"text": "搜一搜", "effects": [{"kind": "coins", "amount": 3}]},
+        {
+          "text": "修好它",
+          "effects": [
+            {"kind": "coins", "amount": -2},
+            {"kind": "grant_relic", "relic": "relic.hand_limit"}
+          ]
+        }
+      ]
+    }
+  ],
+  "event_pools": [
+    {
+      "id": "ep.village",
+      "name": "村庄见闻",
+      "events": ["ev.village", "ev.refugees", "ev.taoist"]
+    },
+    {
+      "id": "ep.road",
+      "name": "官道见闻",
+      "events": ["ev.ambush", "ev.old_soldier", "ev.broken_cart"]
+    }
+  ],
+  "global_skills": [
+    {
+      "id": "gs.yellow_turban",
+      "name": "黄巾之众",
+      "side": "enemy",
+      "scale": {"hp": [0, 1], "draw": [0, 1], "slash": [0, 1]}
+    },
+    {
+      "id": "gs.han_morale",
+      "name": "汉室气运",
+      "side": "ally",
+      "scale": {"hp": [0, 1], "draw": [0, 0], "slash": [0, 1]}
+    }
+  ]
 }
