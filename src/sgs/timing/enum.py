@@ -235,7 +235,9 @@ IMPLEMENTED: tuple[Timing, ...] = (
     # L6：打出（票 19 的独立构造子；无目标、不占使用次数）
     Timing.PLAY_DECLARE,
     Timing.PLAY_ON_PLAY,
-    # L7：伤害骨架五时机
+    # L7：伤害骨架五时机（yijiang-2011-xusheng-chunhua 票 90 解封帧首两步，见本元组 docstring）
+    Timing.DAMAGE_BEFORE_START,
+    Timing.DAMAGE_START,
     Timing.DAMAGE_DEAL,
     Timing.DAMAGE_TAKE,
     Timing.DAMAGE_AFTER_DEAL,
@@ -279,12 +281,21 @@ IMPLEMENTED: tuple[Timing, ...] = (
     Timing.STATE_CHAINED,
 )
 """已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 + huo-taishici-xunyu 票 03 解封 2
-+ tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1 + chenqun-guyong 票 03 解封 2 = 73）：
++ tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1 + chenqun-guyong 票 03 解封 2
++ yijiang-2011-xusheng-chunhua 票 90 解封 2 = 75）：
 流程真的会走到（允许空实现 / 空日志）。
 
 M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对称解封）：它在
 :meth:`~sgs.engine.game.Engine.move_in_frame` 这个**唯一移动入口**里内联派发，且只在
 当前局面有注册在该时机上的实例时派发（惰性守卫）——无武将模式因此零派发、M2 基准一行不变。
+
+yijiang-2011-xusheng-chunhua 票 90 的增量是 L7 的**帧首两步**（``DAMAGE_BEFORE_START`` /
+``DAMAGE_START``）：派发点 = ``steps.DAMAGE_STEPS`` 的前两步，同样是**惰性**的
+（``timing_hooks_present`` 为假时连时机记录都不落 ⇒ 47 条标准金录像逐字节不变）。
+它把规则 §4.14 的时机 0)「伤害结算开始前」变成可挂点，并给"伤害事件整段改写为失去体力"
+（【绝情】）一个承载位：钩子写 ``damage_rewritten`` + ``damage_replacement_amount``，
+``steps.damage_before_start`` 据此跳过本帧其余步骤、另压一条 ``LIFE_DECREASE`` 帧。
+L7 的 ``DAMAGE_AFTER_END`` 仍留枚举位（今天没有载体）。
 
 wuming 票 04 的增量是 L11 的**加体力上限**二时机（``MAXLIFE_INCREASE_BEFORE/AFTER``）：
 由 ``FrameKind.MAXLIFE`` 事件帧的步骤表派发（唯一入口 ``Engine.raise_hp_max``，首个调用者 =
@@ -309,14 +320,16 @@ ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
 """只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 − huo-taishici-xunyu 票 03
-解封 2 − tao-caocao 票 03 解封 1 + 该票新增 1 个 − chenqun-guyong 票 03 解封 2 = 12）：
+解封 2 − tao-caocao 票 03 解封 1 + 该票新增 1 个 − chenqun-guyong 票 03 解封 2
+− yijiang-2011-xusheng-chunhua 票 90 解封 2 = 10）：
 不 dispatch（遍历 ``Timing`` 保证顺序确定）。
 
 M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；wuming 票 04 再移走
 ``MAXLIFE_INCREASE_BEFORE/AFTER`` 两个（"加"侧真的 dispatch，"减"侧仍无载体）；huo-taishici-xunyu
 票 03 再移走 L15 的 ``RANK_COMPARE_ON`` / ``RANK_COMPARE_RESULT_AFTER``（``RANK_COMPARE`` 帧的
 步骤表 dispatch）；chenqun-guyong 票 03 再移走 ``STATE_FLIPPED`` / ``STATE_CHAINED``（状态位
-写入口的惰性事件，见 :data:`IMPLEMENTED` 的 docstring）。其余 12 个仍无载体。
+写入口的惰性事件，见 :data:`IMPLEMENTED` 的 docstring）；yijiang-2011-xusheng-chunhua 票 90
+再移走 L7 帧首的 ``DAMAGE_BEFORE_START`` / ``DAMAGE_START``。其余 10 个仍无载体。
 """
 
 EMPTY_LOG: tuple[Timing, ...] = (
@@ -356,9 +369,10 @@ DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
 )
 """**dispatch 白名单**（M2 定格 53 + M3 解封 1 + wuming 票 04 解封 2
 + huo-taishici-xunyu 票 03 解封 2 + tao-caocao 票 03 解封 1 + feng-yujin 票 02 新增 1
-+ chenqun-guyong 票 03 解封 2 = 62）：真的会 dispatch、可在记录流里观测的节点。
++ chenqun-guyong 票 03 解封 2 + yijiang-2011-xusheng-chunhua 票 90 解封 2 = 64）：真的会
+dispatch、可在记录流里观测的节点。
 
-= 73 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
+= 75 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
 它声明的基准 / 用例产出的记录流里实测出现。
 """

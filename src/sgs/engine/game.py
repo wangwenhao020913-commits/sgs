@@ -5692,7 +5692,7 @@ class Engine:
     def add_heart_slash_bonus(self, seat: int, target: int) -> None:
         """记下"本回合 ``seat`` 使用红桃【杀】对 ``target`` 的伤害 +1"（【义绝】黑色分支）。
 
-        唯一写入方是【义绝】的效果；读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT``
+        唯一写入方是【义绝】的效果；读取方是同一条技能定义上的 ``DAMAGE_BASE_AMOUNT``
         修饰器（查询期从**活着的实例**算，失去 / 失效即消失）。作用域 = 本回合，回合末
         由 :meth:`_clear_turn_effects` 清空；**不发 delta**（同 ``add_hand_card_prohibition``）。
         """
@@ -5704,7 +5704,7 @@ class Engine:
         """记下"**本次使用** ``seat`` 用这张牌对 ``target`` 的伤害 +1"（界黄忠移动版【烈弓】②）。
 
         唯一写入方是【烈弓】② 的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子（只记满足「你的体力值
-        不大于其体力值」的目标）；读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器，
+        不大于其体力值」的目标）；读取方是同一条技能定义上的 ``DAMAGE_BASE_AMOUNT`` 修饰器，
         按 ``(牌 id, 目标)`` 精确命中。作用域 = **本次使用**（不是本回合）：清理点 = 本次使用
         结束时（``RESOLVE_AFTER_END`` 清扫钩子）与回合末兜底（:meth:`_clear_turn_effects`）。
         同一次使用里反复写入是幂等的。**不发 delta**（同 ``add_heart_slash_bonus``）。
@@ -5725,7 +5725,7 @@ class Engine:
         """记下"**本次使用**的这张牌基础伤害 +amount"（马云騄【凤魄】②）。
 
         唯一写入方是【凤魄】的 ``USE_AFTER_DESIGNATE_TARGET`` 钩子（选到选项 2 时）；读取方
-        是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器。**卡牌级**：按 ``card_id`` 命中，
+        是同一条技能定义上的 ``DAMAGE_BASE_AMOUNT`` 修饰器。**卡牌级**：按 ``card_id`` 命中，
         不要求来源是持有者（输掉自己使用的【决斗】时对方造成的伤害同样 +X，用户 2026-11 签）。
         作用域 = 本次使用：清理点 = ``RESOLVE_AFTER_END`` 清扫钩子 + 回合末兜底。**不发
         delta**：与 :meth:`add_liegong_bonus` 同姿态。

@@ -574,7 +574,7 @@ class Player(BaseModel):
     """【裸衣】的"本回合【杀】/【决斗】伤害 +1"是否生效（M6 票 01）。
 
     写入唯一入口 ``Engine.set_luoyi_active``（许褚的摸牌阶段写入、回合末清空）；读点是
-    :func:`sgs.skills.phase_body._luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT`` 回调。
+    :func:`sgs.skills.phase_body._luoyi_damage_bonus` 的 ``DAMAGE_BASE_AMOUNT`` 回调。
     **不发 delta**：与 ``wine_active`` 不同，目前没有任何 JSON 读者（网页座位卡不读它、
     记录流不写它），回放按同一条 ``SKILL_ACTIVATION`` 动作重跑即可重建；等出现 UI 读取方
     时再补 ``luoyi_change`` delta（同时要登记 no-leak 判据）。
@@ -586,7 +586,7 @@ class Player(BaseModel):
     界版到**你的下个回合开始**（§十九 L2051–L2055），故不能共用"回合末清空"的清理点。
     写入唯一入口 ``Engine.set_luoyi_until_next_turn``（界许褚的摸牌阶段写入）；清理点 =
     该座位自己的 ``TURN_START``（:meth:`Engine._turn_start`）——那正是"你的下个回合开始"。
-    读点是 :func:`sgs.skills.phase_body._jie_luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT``
+    读点是 :func:`sgs.skills.phase_body._jie_luoyi_damage_bonus` 的 ``DAMAGE_BASE_AMOUNT``
     回调。**不发 delta**：与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一条
     ``SKILL_ACTIVATION`` 动作重跑即可重建）。
     """
@@ -739,7 +739,7 @@ class Player(BaseModel):
     """【摧锋】**本次使用**的渠道牌 id：那张"伤害值 +X"的纯虚拟【决斗】（bingshi-jie 票 01）。
 
     写入 = 摧锋的提交点（``start_use`` 之前落位）；读取方 = 同一条声明的
-    ``DAMAGE_DEAL_AMOUNT`` 修饰器——**卡牌级**：只认 ``ctx.card.card_id`` 与记录一致，
+    ``DAMAGE_BASE_AMOUNT`` 修饰器——**卡牌级**：只认 ``ctx.card.card_id`` 与记录一致，
     **不**要求 ``ctx.owner == ctx.subject``（用户注意 2：决斗双方都吃 +X，赵云输掉时对方
     造成的那点同样加；样板 = 马云騄【凤魄】② 的 ``fengpo_bonus``）。
     清理 = ``RESOLVE_AFTER_END`` 清扫钩子（被【无懈可击】抵消 / 伤害被防止也要清）。
@@ -927,7 +927,7 @@ class Player(BaseModel):
     """本回合"**你使用红桃【杀】对其造成的伤害 +1**"的目标座位（【义绝】黑色分支）。
 
     由 :meth:`Engine.add_heart_slash_bonus` 追加、回合末清空；读取方是【义绝】技能定义上的
-    ``DAMAGE_DEAL_AMOUNT`` 修饰器（查询期从活着的实例算，失去 / 失效即消失）。**不发
+    ``DAMAGE_BASE_AMOUNT`` 修饰器（查询期从活着的实例算，失去 / 失效即消失）。**不发
     delta**：与 ``hand_card_prohibited`` 同一条理由。
     """
     liegong_bonus: tuple[int, tuple[int, ...]] | None = None
@@ -935,7 +935,7 @@ class Player(BaseModel):
 
     写入唯一入口 :meth:`Engine.add_liegong_bonus`（界黄忠移动版【烈弓】② 的
     ``USE_AFTER_DESIGNATE_TARGET`` 钩子，只记满足「你的体力值不大于其体力值」的目标）；
-    读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT`` 修饰器（按 ``(牌 id, 目标)`` 精确
+    读取方是同一条技能定义上的 ``DAMAGE_BASE_AMOUNT`` 修饰器（按 ``(牌 id, 目标)`` 精确
     命中，**不**串到本回合后续的【杀】）。清理 = 本次使用结束时（``RESOLVE_AFTER_END``
     清扫钩子）与回合末（:meth:`Engine._clear_turn_effects` 兜底）。
 
@@ -948,7 +948,7 @@ class Player(BaseModel):
 
     写入唯一入口 :meth:`Engine.set_fengpo_bonus`（【凤魄】的
     ``USE_AFTER_DESIGNATE_TARGET`` 钩子选到选项 2 时）；读取方是同一条技能定义上的
-    ``DAMAGE_DEAL_AMOUNT`` 修饰器——**卡牌级**：只认 ``ctx.card.card_id`` 与记录一致，
+    ``DAMAGE_BASE_AMOUNT`` 修饰器——**卡牌级**：只认 ``ctx.card.card_id`` 与记录一致，
     **不**要求 ``ctx.owner == ctx.subject``（用户 2026-11 签：牌面写的是「此牌」，没有
     「你为伤害来源」；马云騄输掉自己使用的【决斗】时，对方造成的伤害同样 +X）。
     清理 = 本次使用结束时（``RESOLVE_AFTER_END`` 清扫钩子）与回合末

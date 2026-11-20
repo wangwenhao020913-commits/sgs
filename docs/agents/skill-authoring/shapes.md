@@ -120,6 +120,7 @@
 | `PHASE_PLAY_END` | **出牌阶段结束时**（韬·曹操【倡义】= 首个载体，tao-caocao 票 02）：`_phase_play_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。**"本阶段"作用域的清理排在本步之后**；被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发（与【兵粮寸断】跳摸牌阶段的 `PHASE_DRAW_END` 同一口径） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
+| `DAMAGE_BEFORE_START` / `DAMAGE_START` | **伤害结算开始前 / 开始时**（L7 的 0) / 1) 两步；yijiang-2011-xusheng-chunhua 票 90 解封，首个载体 = 张春华【绝情】。派发点 = `src/sgs/engine/steps.py:damage_before_start` / `damage_start`（`DAMAGE_STEPS` 的前两步），**惰性**：没有注册实例时连一条记录都不落。**这是唯一能"整段改写伤害事件"的挂点**——钩子写 `damage_rewritten` + `damage_replacement_amount`（两个帧私有槽，见 `src/sgs/engine/steps.py:DAMAGE_REWRITTEN_KEY`），引擎会跳过本帧其余步骤、另压一条 `LIFE_DECREASE` 帧（无来源、不碰护甲、不 `note_damage_*`、不传导）。它**不是** `Tag.PREVENTED`：防止是"数值减为 0、事件仍在"（规则 §4.14 L396–L401）。金额取 `src/sgs/effects/modifiers.py:damage_base_amount`（`伤害值基数`，不含"造成伤害时 / 受到伤害时 +N"） |
 | `DAMAGE_AFTER_TAKE` | 受到伤害后（奸雄、反馈、遗计、刚烈、忘隙、耀武）——**注意 `per_point`** |
 | `DAMAGE_AFTER_DEAL` | 造成伤害后（忘隙、潜心、狂骨）——**注意 `per_point`** |
 | `LIFE_DECREASE_AFTER` | 失去体力后（诈降） |
@@ -179,7 +180,8 @@
 | `RESPONSE_COUNT` | 本次响应的张数（无双） |
 | `RECOVER_AMOUNT` | 回复量加式（标准救援） |
 | `DRAW_COUNT` | **摸牌阶段的额定张数**（M7 票 10 的加法）：`current` 从额定 `DRAW_COUNT`（或阶段体改写后的基础值）起，回调返回新张数。**座位常驻项**（`PveConfig.seats[seat].draw_bonus`，由 `src/sgs/skills/catalog.py:_seat_draw_count_bonus` 声明）是链尾的一项，与遗物实例的修饰器同一次 `apply_modifiers` 派发；遗物的「每回合摸牌 +1」（票 26）声明同一个挂点。唯一读点 = `Engine._phase_draw`（消费那一刻），故没有消费者的局面逐字节不变 |
-| `DAMAGE_DEAL_AMOUNT` | 造成伤害量（裸衣、义绝、咆哮②） |
+| `DAMAGE_BASE_AMOUNT` | **伤害值基数**（yijiang-2011-xusheng-chunhua 票 90 的加法）：`current` 从"牌面基数 + 【酒】的 `deal_bonus`"起，回调返回新基数 ⇒ 「**基础伤害值** +N」这一档的落点（【凤魄】② / 界【烈弓】② / 界【裸衣】/ 界【义绝】/ 界【咆哮】②；用户的 2026-11-20 口径把【裸衣】/【烈弓】这类"直接增加卡牌数值"的算进基数）。独立读者只有 `src/sgs/effects/modifiers.py:damage_base_amount`（【绝情】改写伤害事件时取它）；它与 `DAMAGE_DEAL_AMOUNT` **同属来源侧**、同一条 `chain=False` 门槛、加数可交换 ⇒ 只读最终值的既有技能逐字节不变 |
+| `DAMAGE_DEAL_AMOUNT` | **造成伤害时 +N**（来源侧；【古锭刀】、界徐盛【破军】②、座位常驻的"造成伤害 +N"与遗物 `relic.damage_dealt`）。它**排在** `DAMAGE_BASE_AMOUNT` 之后：`伤害值基数` 不含这一档 |
 | `DAMAGE_TAKE_AMOUNT` | 受到伤害量（藤甲） |
 | `DAMAGE_CAP` | 伤害上限（白银狮子一类） |
 | `FORBIDDEN` | 这张牌不能按**原用途**使用 / 打出（神关羽移动版【武神】①的红桃手牌；`05`，`check_forbidden` 走链） |

@@ -74,6 +74,7 @@ from sgs.skills import (
     rejudge_capable_seats,
     rejudge_offers,
     target_is_ineffective,
+    timing_hooks_present,
     virtual_dodge,
 )
 from sgs.state import (
@@ -1104,6 +1105,96 @@ def _emit_damage(
     )
 
 
+DAMAGE_REWRITTEN_KEY = "damage_rewritten"
+"""帧私有槽名：这一帧的伤害事件已被**整段改写**成"失去体力"（yijiang-2011-xusheng-chunhua
+票 90 解封的原语；首个 / 今天唯一的载体 = 张一将成名-2011·移动版 张春华【绝情】）。
+
+写在 ``DAMAGE`` 帧上，由**伤害结算开始前**的钩子置真，:func:`damage_before_start` 读它。
+它**不是** :class:`~sgs.resolution.Tag` 的 ``PREVENTED``（票 90 §8 的判据）：防止是"把伤害值
+减为 0、事件仍在"（规则 `三国杀详细规则.txt:396–401`），后来的"造成 / 受到伤害"类时机照旧
+派发；改写是"事件不在"——本帧其余步骤两步全跳过、也不参与连环传导，只在原地压一条
+``LIFE_DECREASE`` 帧。帧私有数据不进记录流。
+"""
+
+DAMAGE_REPLACEMENT_AMOUNT_KEY = "damage_replacement_amount"
+"""帧私有槽名：改写后要失去的**体力点数**（= :func:`~sgs.effects.damage_base_amount` 的答案）。
+
+由置真 :data:`DAMAGE_REWRITTEN_KEY` 的那条钩子一并写入（【绝情】写"伤害值基数"）；
+:func:`damage_before_start` 读它压 ``LIFE_DECREASE`` 帧。缺省 / ≤ 0 ⇒ 连那条帧都不压
+（"失去 0 点体力"不是一个事件）。
+"""
+
+_DAMAGE_BEFORE_START_DONE = "damage_before_start_done"
+"""帧私有槽名：本帧的"伤害结算开始前"已派发完（钩子挂起后重入不重派）。
+
+:func:`~sgs.engine.game.Engine.emit_frame_timing` 的 ``_pending_timing`` 只管**记录**
+幂等，不管钩子本身要不要重跑；本步自己用这一位挡重入。
+"""
+
+_DAMAGE_REPLACEMENT_PUSHED = "damage_replacement_pushed"
+"""帧私有槽名：改写后的 ``LIFE_DECREASE`` 子帧已压过（重入不重压）。"""
+
+
+def damage_before_start(host: FrameHost, frame: Frame) -> Control:
+    """**伤害结算开始前**（L7.1 = 规则 §4.14 的时机 0)）：帧里最靠前的派发点。
+
+    两个职责：
+
+    1. **派发** ``DAMAGE_BEFORE_START``——**惰性**：当前局面没有注册在这个时机上的实例时
+       连一条时机记录都不落（``timing_hooks_present``），47 条标准金录像因此逐字节不变
+       （与 ``MOVE_AFTER`` / 状态位写入口的惰性同一条纪律）。钩子可以提问并挂起：
+       ``"stay"`` 原样上抛，重入由 :data:`_DAMAGE_BEFORE_START_DONE` 挡掉重复派发。
+    2. **收口"事件改写"**：钩子若置真 :data:`DAMAGE_REWRITTEN_KEY`（【绝情】"你即将造成的
+       伤害均视为失去体力"），本帧剩下的步骤**全部跳过**（``Goto`` 到步骤表末尾 ⇒ 下一步
+       出栈），另压一条 ``LIFE_DECREASE`` 帧承担"失去体力"的结算：
+
+       - ``source=None`` ——改写后的这件事**没有来源**（"受到伤害"的记账 / 传导 / 濒死来源
+         都不该认张春华这笔账）；
+       - **不带** :data:`~sgs.state.LIFE_DECREASE_DAMAGE_KEY` ——它是真正的"失去体力"
+         （护甲一点不碰、``note_life_loss`` 照记、挂在 ``LIFE_DECREASE_AFTER`` 且要排除
+         伤害帧的技能照常触发）；
+       - ``amount`` = 钩子写进 :data:`DAMAGE_REPLACEMENT_AMOUNT_KEY` 的基数；≤ 0 时连帧
+         都不压（零事件）。
+
+    所以"伤害 → 失去体力"的**整段替换**不需要按技能名特判：引擎只认这两个帧私有槽，
+    谁来写它们它都不认识（`skill-authoring.md` §4 的 C2）。
+    """
+    if timing_hooks_present(host.state, Timing.DAMAGE_BEFORE_START):
+        if not frame.data.get(_DAMAGE_BEFORE_START_DONE):
+            control = _emit_damage(
+                host, frame, Timing.DAMAGE_BEFORE_START, frame.data["source"]
+            )
+            if control is not None:
+                # 钩子提问让出控制权：这一位还没置，重入时同一趟派发继续。
+                return control
+            frame.data[_DAMAGE_BEFORE_START_DONE] = True
+    if not frame.data.get(DAMAGE_REWRITTEN_KEY):
+        return None
+    if not frame.data.get(_DAMAGE_REPLACEMENT_PUSHED):
+        frame.data[_DAMAGE_REPLACEMENT_PUSHED] = True
+        amount = int(frame.data.get(DAMAGE_REPLACEMENT_AMOUNT_KEY, 0))
+        if amount > 0:
+            host.push_frame(
+                FrameKind.LIFE_DECREASE,
+                {"target": frame.data["target"], "source": None, "amount": amount},
+                timing=Timing.LIFE_DECREASE_BEFORE,
+            )
+    return Goto(DAMAGE_AFTER_REWRITE_PC)
+
+
+def damage_start(host: FrameHost, frame: Frame) -> Control:
+    """**伤害结算开始时**（L7.2）：帧里的第二个派发点（票 90 解封）。
+
+    与 :func:`damage_before_start` 同一条惰性纪律：没有注册实例时零记录。它排在"改写"的
+    收口**之后** ⇒ 被改写的帧不会走到这里（事件整段不存在，连"伤害结算开始"都没有）。
+    今天没有载体，解封它的理由是把 L7 的层补齐（`shapes.md` §3.1 的时机表 / `02` 的八时机
+    表要求枚举里的每个已实现时机都真的会被 dispatch）。
+    """
+    if not timing_hooks_present(host.state, Timing.DAMAGE_START):
+        return None
+    return _emit_damage(host, frame, Timing.DAMAGE_START, frame.data["source"])
+
+
 def damage_deal(host: FrameHost, frame: Frame) -> Control:
     """**造成伤害时**：本帧逐点触发的四个帧私有键在这里重置（票 05 / M6 票 15）。
 
@@ -1319,6 +1410,10 @@ def damage_end(host: FrameHost, frame: Frame) -> Control:
 
 
 DAMAGE_STEPS = (
+    # L7.1 / L7.2：帧里最靠前的两步（票 90 解封）。两条都是**惰性**的（没有注册实例时
+    # 零记录，47 条标准金录像逐字节不变）；"伤害 → 失去体力"的整段改写也在第一步收口。
+    Step(damage_before_start, Timing.DAMAGE_BEFORE_START),
+    Step(damage_start, Timing.DAMAGE_START),
     Step(damage_deal, Timing.DAMAGE_DEAL),
     Step(damage_take, Timing.DAMAGE_TAKE),
     # 数值定稿：非 dispatch（不对应任何时机枚举位）；横置重置 / 传导触发的判据在这里算。
@@ -1330,6 +1425,14 @@ DAMAGE_STEPS = (
     Step(damage_after_take, Timing.DAMAGE_AFTER_TAKE),
     Step(damage_end, Timing.DAMAGE_END),
 )
+
+DAMAGE_AFTER_REWRITE_PC = len(DAMAGE_STEPS)
+"""被改写的 ``DAMAGE`` 帧跳到哪儿：**步骤表末尾**（``pc >= len(table)`` ⇒ 下一步直接出栈）。
+
+用 ``len(DAMAGE_STEPS)`` 而不是某个下标的 +1：重排步骤表不会让这个落点错位
+（与 :data:`~sgs.engine.steps.RESOLVE_END_PC` 那类"按时机定位"同一条纪律，
+只是这里的落点是"表外"）。
+"""
 
 
 # ---- LIFE_DECREASE 帧：L8 三个时机 + 在"扣减体力时"插入濒死 ------------------

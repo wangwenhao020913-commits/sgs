@@ -3056,7 +3056,7 @@ QIANGXI_FLOW = SkillFlow(
 # - "不能使用或打出手牌" ⇒ :meth:`Engine.add_hand_card_prohibition`（来源 = 义绝；skill-display
 #   票 00 起禁令记施加者），唯一读取方是
 #   :func:`sgs.effects.legal_actions_for`（被禁者**所有**使用 / 打出手牌的候选消失）；
-# - "红桃【杀】伤害 +1" ⇒ ``DAMAGE_DEAL_AMOUNT`` 修饰器 + 座位级目标记录。
+# - "红桃【杀】伤害 +1" ⇒ ``DAMAGE_BASE_AMOUNT`` 修饰器 + 座位级目标记录。
 # ---------------------------------------------------------------------------
 
 YIJUE = hero_skill_id("jie_guanyu", "yijue")
@@ -3118,7 +3118,7 @@ def _yijue_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
 def _yijue_heart_slash_bonus(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
-    """【义绝】黑色分支的"你使用**红桃**【杀】对其造成的伤害 +1"（``DAMAGE_DEAL_AMOUNT``）。
+    """【义绝】黑色分支的"你使用**红桃**【杀】对其造成的伤害 +1"（``DAMAGE_BASE_AMOUNT``）。
 
     连续型效果从**活着的实例**算（D9）：本回调挂在【义绝】的 ``SkillDef`` 上，失去 / 失效
     【义绝】后它自然不再被派发。作用域目标记在 ``Player.heart_slash_bonus_against``（回合末
@@ -9367,7 +9367,7 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         _yijue_offers,
         flow=YIJUE_FLOW,
         extra_modifiers=(
-            Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _yijue_heart_slash_bonus),
+            Modifier(ModifierPoint.DAMAGE_BASE_AMOUNT, _yijue_heart_slash_bonus),
         ),
         # skill-display 票 08：座位常驻标签「义绝」——**黑色分支生效期间画在目标身上**
         # （`BadgeScope.ANY_SEAT`；构造器是 `sgs_web.projection._yijue_badge`）。判据 = 票 00

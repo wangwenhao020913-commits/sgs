@@ -514,7 +514,8 @@ LIEGONG_FLOW = SkillFlow(name="liegong", steps=(), effect=zero_step_effect(LIEGO
 #
 # 用户 2026-11-06 签字轮：①=**并集语义**（把够得着的座位加进豁免集，不是把距离改 0）——
 # 票 03 起落点迁到 `TARGET_RANGE_EXEMPT`；无点数【杀】⇒ ① 不生效（`01a` 裁定 A）；②的「基础伤害
-# +1」与 OL「伤害值 +1」同落 `DAMAGE_DEAL_AMOUNT`（账本 L788）。口径 = **移动版**，故武将
+# +1」与 OL「伤害值 +1」同落 `DAMAGE_BASE_AMOUNT`（账本 L788；票 90 把它与「造成伤害时 +1」
+# 拆成两档）。口径 = **移动版**，故武将
 # 显示名带「移动版」后缀、技能 id 走 `jie_huangzhong_mobile`（与 `jie_caoren_mobile` 同形）。
 # ---------------------------------------------------------------------------
 
@@ -610,7 +611,7 @@ def _jie_liegong_mobile_no_distance(
 def _jie_liegong_mobile_damage_bonus(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
-    """``DAMAGE_DEAL_AMOUNT``：本次使用里对**满足条件 2 的目标** +1（来源侧）。
+    """``DAMAGE_BASE_AMOUNT``：本次使用里对**满足条件 2 的目标** +1（来源侧）。
 
     作用域 = **本次使用 + 该目标**：只认 ``(渠道牌 id, 目标)`` 与座位记录一致的那一条，
     因此不会像【义绝】那样让本回合后续的【杀】白拿 +1。``chain=True`` 的传导帧不派发
@@ -781,7 +782,7 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
                     ModifierPoint.TARGET_RANGE_EXEMPT, _jie_liegong_mobile_no_distance
                 ),
                 Modifier(
-                    ModifierPoint.DAMAGE_DEAL_AMOUNT,
+                    ModifierPoint.DAMAGE_BASE_AMOUNT,
                     _jie_liegong_mobile_damage_bonus,
                 ),
             ),

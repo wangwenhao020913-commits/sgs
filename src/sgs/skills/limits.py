@@ -9,7 +9,7 @@ r"""P 族：限制豁免与【咆哮】②（M6 票 02 / 票 05）——【咆�
 张飞【咆哮】           ``COUNT_LIMIT``           你于出牌阶段内使用【杀】无次数限制
 界张飞【咆哮】①        ``COUNT_LIMIT``           同上（共用同一条回调）
 界张飞【咆哮】②        ``SLASH_CANCELED``（接缝） 自己被【闪】抵消后挂上"下一次 +1"
-                       ``DAMAGE_DEAL_AMOUNT``    本回合第一个【杀】伤害 +1
+                       ``DAMAGE_BASE_AMOUNT``    本回合第一个【杀】伤害 +1
                        ``DAMAGE_AFTER_TAKE``     造成伤害之后消费该标记
 黄月英【奇才】          ``DISTANCE_LIMIT``        你使用锦囊牌无距离限制
 =====================  ========================  ============================
@@ -119,7 +119,7 @@ def _paoxiao_mark_bonus(host: Any, frame: Frame) -> Any:
 
 
 def _paoxiao_bonus_damage(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``DAMAGE_DEAL_AMOUNT`` 回调：待消费标记在场且本次是**自己使用的【杀】** ⇒ +1。
+    """``DAMAGE_BASE_AMOUNT`` 回调：待消费标记在场且本次是**自己使用的【杀】** ⇒ +1。
 
     只读不写（"造成伤害时 +1"）：消费发生在这次伤害结算之后的
     :func:`_paoxiao_consume_bonus`，故同一张多目标【杀】只有第一个目标的本次伤害吃到 +1，
@@ -350,7 +350,7 @@ def limits_skill_definitions() -> tuple[SkillDef, ...]:
             seams=(Seam(SeamKind.SLASH_CANCELED, handler=_paoxiao_mark_bonus),),
             modifiers=(
                 Modifier(ModifierPoint.COUNT_LIMIT, _paoxiao_count_limit),
-                Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _paoxiao_bonus_damage),
+                Modifier(ModifierPoint.DAMAGE_BASE_AMOUNT, _paoxiao_bonus_damage),
             ),
             requirement=(
                 "你使用【杀】无次数限制；当你使用的【杀】被【闪】抵消后，"

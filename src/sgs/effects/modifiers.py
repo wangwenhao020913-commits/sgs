@@ -38,6 +38,7 @@ __all__ = [
     "WINE_DAMAGE_BONUS",
     "apply_modifiers",
     "damage_amount",
+    "damage_base_amount",
     "priority_class_of",
     "recover_amount",
     "response_count",
@@ -220,8 +221,15 @@ class ModifierPoint(str, Enum):
       **座位常驻项**的落点：「每回合摸牌 +1」这类遗物与 ``PveSeat.draw_bonus`` 走同一条链
       （见 ``skills/catalog.py`` 的 ``_SEAT_PERSISTENT_MODIFIERS``）；唯一读点是
       ``Engine._phase_draw``，故没有消费者的局（本期除座位表外没有）加入前的记录流逐字节不变；
+    - ``DAMAGE_BASE_AMOUNT``：本次伤害的**伤害值基数**（来源侧；yijiang-2011-xusheng-chunhua
+      票 90 的加法）。``current`` 从**牌面基数 + 使用级加伤**（【酒】的 ``deal_bonus``）起，
+      回调返回新的基数。它是"基础伤害值 +N"那一档的落点——【凤魄】② 的「此牌的**基础伤害
+      值** +X」、界【烈弓】②、界【裸衣】、界【义绝】、界【咆哮】②（用户的 2026-11-20 口径
+      把【裸衣】/【烈弓】这一类"直接增加卡牌数值"的算进基数，见 :func:`damage_base_amount`）；
     - ``DAMAGE_DEAL_AMOUNT`` / ``DAMAGE_TAKE_AMOUNT``：本次伤害的**来源侧 / 目标侧**数值
-      （M5-03 的加法；【酒】/【古锭刀】与【藤甲】/【白银狮子】的落点）；
+      （M5-03 的加法；【古锭刀】与【藤甲】/【白银狮子】的落点）。来源侧这一档收的是
+      「**造成伤害时**，此伤害 +N」——它排在 ``DAMAGE_BASE_AMOUNT`` 之后（票 90 把两个语义
+      拆开的原因：`伤害值基数` 只到基数那一档为止，见下）；
     - ``DAMAGE_CAP``：本次伤害的**目标侧上限**（M5-05a 的加法；【白银狮子】"最多 1 点"）。
       它**排在** ``DAMAGE_TAKE_AMOUNT`` 之后（见 :func:`damage_amount`）：先让所有加法落地，
       再封顶——把 cap 写进来源侧链会让"加一点"永远先于"最多一点"，次序就反了。
@@ -249,6 +257,15 @@ class ModifierPoint(str, Enum):
     **结构事实**：:func:`damage_amount` 只在 ``chain=False`` 的源头伤害帧上派发
     ``DAMAGE_DEAL_AMOUNT``，而 ``DAMAGE_TAKE_AMOUNT`` 每一帧都派发——传导帧因此不可能
     重算来源侧加成，不需要任何回调自己判"这次是不是传导"。
+
+    **来源侧为什么又拆成两档**（yijiang-2011-xusheng-chunhua 票 90）：规则 §4.14 的
+    时机 0) 说的是"本该受到伤害的角色改为失去**等同于伤害值基数**的体力"（【绝情】），
+    而来源侧的加伤在牌面上分两种写法：
+    "**基础伤害值** +N"（【凤魄】②/界【烈弓】②/界【裸衣】）算进基数，
+    "**造成伤害时**，此伤害 +N"（【古锭刀】/界徐盛【破军】②）不算。两档都在
+    ``chain=False`` 的源头帧上派发，故传导侧的合同一字不变；**两档的加数可交换**，
+    既有技能（只读最终值）的总和因此逐字节不变——这一拆只为让
+    :func:`damage_base_amount` 能单独取"基数"。
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
@@ -266,6 +283,7 @@ class ModifierPoint(str, Enum):
     RESPONSE_COUNT = "RESPONSE_COUNT"
     RECOVER_AMOUNT = "RECOVER_AMOUNT"
     DRAW_COUNT = "DRAW_COUNT"
+    DAMAGE_BASE_AMOUNT = "DAMAGE_BASE_AMOUNT"
     DAMAGE_DEAL_AMOUNT = "DAMAGE_DEAL_AMOUNT"
     DAMAGE_TAKE_AMOUNT = "DAMAGE_TAKE_AMOUNT"
     DAMAGE_CAP = "DAMAGE_CAP"
@@ -453,6 +471,48 @@ def recover_amount(
     return apply_modifiers(ModifierPoint.RECOVER_AMOUNT, state, ctx, base)
 
 
+def damage_base_amount(
+    state: GameState,
+    *,
+    source: int | None,
+    target: int,
+    card: CardRef | None,
+    base: int,
+    chain: bool,
+    deal_bonus: int = 0,
+) -> int:
+    """本次伤害的**伤害值基数**（yijiang-2011-xusheng-chunhua 票 90）——只走基数那一档。
+
+    规则 `三国杀详细规则.txt:381`（§4.14 时机 0) 伤害结算开始前）写的是"本该受到伤害的
+    角色改为失去等同于**伤害值基数**的体力"（【绝情】），而 :func:`damage_amount` 的尾链
+    里混着"**造成伤害时** +N"（【古锭刀】/界徐盛【破军】②）与"受到伤害时 +N"（【藤甲】）
+    ——它们按用户的 2026-11-20 口径（读法 A）**不算进基数**。故基数单独有一个读者：
+
+    1. ``base + deal_bonus``：牌面基数 + **使用级**的来源侧加伤（【酒】的"伤害基数 +1"）；
+    2. ``DAMAGE_BASE_AMOUNT`` 链（**来源侧**）："**基础伤害值** +N"那一档
+       （【凤魄】② / 界【烈弓】② / 界【裸衣】/ 界【义绝】/ 界【咆哮】②）。
+
+    ``chain=True`` 时来源侧两段都不派发（与 :func:`damage_amount` 同一条合同：传导帧的
+    基数是初始目标实际受到的伤害值，来源侧加成已经烘进那个数里）；今天这个组合不可达
+    （伤害被【绝情】改写 ⇒ 事件整段不发生 ⇒ 不会触发连环传导），保留门槛只为与主链同形。
+
+    唯一调用点 = 【绝情】的改写回调（``src/sgs/skills/hero_yijiang_2011.py``）：它把这个数
+    写进 `DAMAGE` 帧的帧私有槽，由 ``steps.damage_before_start`` 压成一条
+    ``LIFE_DECREASE`` 帧。**没有第三段 / 封顶**——那是伤害事件自己的修正，事件不存在时
+    它们也不存在。
+    """
+    ctx = ModifierContext(
+        subject=source if source is not None else -1,
+        target=target,
+        role=ModifierRole.SUBJECT,
+        card=card,
+    )
+    value = base + deal_bonus
+    if chain:
+        return value
+    return apply_modifiers(ModifierPoint.DAMAGE_BASE_AMOUNT, state, ctx, value)
+
+
 def damage_amount(
     state: GameState,
     *,
@@ -466,23 +526,28 @@ def damage_amount(
 ) -> int:
     """本次伤害的**最终数值**（M5-03；M5-05a 补封顶段与属性透传）。
 
-    三段链、一个读者，`DAMAGE` 帧的"受到伤害时"之后（``steps.damage_finalize_amount``）
+    四段链、一个读者，`DAMAGE` 帧的"受到伤害时"之后（``steps.damage_finalize_amount``）
     是唯一调用点：
 
-    1. ``DAMAGE_DEAL_AMOUNT``（**来源侧**：酒 / 古锭刀）——只有 ``chain=False`` 的源头伤害
-       才派发。传导帧的基数是初始目标**实际受到**的伤害值，来源侧加成已经烘进那个数里，
-       重算就会翻倍（spec §5.1.1 第 6 条）。派发时 ``ctx.role = SUBJECT``（主体 = 来源）。
-    2. ``DAMAGE_TAKE_AMOUNT``（**目标侧**：藤甲 / 白银）——**每一帧**都派发，包括传导帧；
+    1. ``DAMAGE_BASE_AMOUNT``（**来源侧**："基础伤害值 +N"那一档，票 90）——只有
+       ``chain=False`` 的源头伤害才派发，``current`` 从 ``base + deal_bonus`` 起
+       （【酒】的"伤害基数 +1"就在这里烘进去）。这一档的**唯一独立读者**是
+       :func:`damage_base_amount`（【绝情】）；本函数里它与第 2 段同属"来源侧"，两者
+       **加数可交换**，故既有技能读到的总和与拆档前逐字相同。
+    2. ``DAMAGE_DEAL_AMOUNT``（**来源侧**："造成伤害时 +N"那一档：古锭刀 / 界徐盛【破军】②）
+       ——同样只有 ``chain=False`` 的源头伤害才派发。传导帧的基数是初始目标**实际受到**的
+       伤害值，来源侧加成已经烘进那个数里，重算就会翻倍（spec §5.1.1 第 6 条）。
+       两段派发时 ``ctx.role = SUBJECT``（主体 = 来源）。
+    3. ``DAMAGE_TAKE_AMOUNT``（**目标侧**：藤甲 / 白银）——**每一帧**都派发，包括传导帧；
        回调按 ``ctx.target == ctx.owner`` 认自己。``ctx.role = TARGET``。
-    3. ``DAMAGE_CAP``（**目标侧上限**：白银狮子"最多 1 点"）——在**所有加法之后**、对
+    4. ``DAMAGE_CAP``（**目标侧上限**：白银狮子"最多 1 点"）——在**所有加法之后**、对
        **每一帧**派发（M5-05a）。放这里而不是来源侧链，是"先加后封"的顺序事实：
        ``DAMAGE_TAKE_AMOUNT`` 的 +1 与封顶同属目标侧，封顶读到的必须是加完的数。
 
     ``deal_bonus``（M5-04）是**使用级**的来源侧加伤（【酒】兑现给本回合下一张【杀】的 +1，
-    由 ``Engine.start_use`` 消费 ``wine_active`` 时写进使用帧、随帧传到伤害帧）。它和
-    ``DAMAGE_DEAL_AMOUNT`` 链上的技能修正一样只在源头帧生效：先烘进 ``base`` 再交给链，
-    加法可交换，故与古锭刀等来源侧 +1 的先后次序不影响总和；``chain=True`` 的门槛把它与
-    链一起挡在外面（传导不重算来源侧）。
+    由 ``Engine.start_use`` 消费 ``wine_active`` 时写进使用帧、随帧传到伤害帧）。它烘进
+    ``base`` 之后**先进基数那一档**（票 90：酒的原文就是"伤害基数 +1"）；``chain=True``
+    的门槛把它与两段来源侧链一起挡在外面（传导不重算来源侧）。
 
     ``nature``（M5-05a）是 DAMAGE 帧的属性（由 ``steps.damage_finalize_amount`` 原样传入），
     只进 ``ctx.nature`` 供目标侧回调读（藤甲火焰 +1）；属性本身不落到牌上。
@@ -497,13 +562,21 @@ def damage_amount(
         card=card,
         nature=nature,
     )
-    value = base
+    value = damage_base_amount(
+        state,
+        source=source,
+        target=target,
+        card=card,
+        base=base,
+        chain=chain,
+        deal_bonus=deal_bonus,
+    )
     if not chain:
         value = apply_modifiers(
             ModifierPoint.DAMAGE_DEAL_AMOUNT,
             state,
             replace(ctx, role=ModifierRole.SUBJECT),
-            value + deal_bonus,
+            value,
         )
     value = apply_modifiers(ModifierPoint.DAMAGE_TAKE_AMOUNT, state, ctx, value)
     return apply_modifiers(ModifierPoint.DAMAGE_CAP, state, ctx, value)

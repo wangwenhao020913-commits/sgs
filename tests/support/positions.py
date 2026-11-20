@@ -33,10 +33,12 @@ __all__ = [
     "RecordingPlayer",
     "SeatSpec",
     "SequenceHalt",
+    "DAMAGE_WINDOW_SCENE_SKILL",
     "STATE_SCENE_SKILL",
     "build_state",
     "cards_of_type",
     "deck_excluding",
+    "damage_window_engine",
     "declare_death",
     "move_after_engine",
     "pindian_engine",
@@ -587,6 +589,89 @@ def state_engine(seed: int = 7):
                 break
             assert engine.pending is None, "合成锁定技不问发动：场景不该有询问"
             engine._step()
+    finally:
+        catalog_module.CATALOG = saved
+    return engine
+
+
+DAMAGE_WINDOW_SCENE_SKILL = "hero.fake.damage_window"
+"""场景 13 用的合成技能 id（只活在 ``CATALOG`` 的**临时**注入里，随场景结束恢复）。"""
+
+
+def damage_window_engine(seed: int = 7):
+    """场景 13（yijiang-2011-xusheng-chunhua 票 90）：L7 帧首两步的**惰性派发**实测来源。
+
+    ``DAMAGE_BEFORE_START`` / ``DAMAGE_START`` 解封的机械判据是"``DAMAGE`` 帧真的会 dispatch
+    它们"，而派发是**惰性**的（没有注册实例时一条记录都不落 ⇒ 47 条标准金录像逐字节不变）
+    ⇒ 这个来源必须临时注入一条同时挂在两个时机上的合成技能。做法与
+    :func:`state_engine` 逐字同形（不 monkeypatch：本函数被
+    ``tests/support/timing_coverage.py`` 的 ``lru_cache`` 直接调用，故用 ``try/finally``
+    临时替换 ``CATALOG``，替换即让 :func:`~sgs.skills.resolve_instances` 的内容键缓存作废）。
+
+    脚本：座位 0 拿到合成技能，然后**压一条最小 DAMAGE 帧**（来源 0、目标 1、1 点、非传导），
+    跑到栈空。记录流因此含 ``DAMAGE_BEFORE_START`` / ``DAMAGE_START`` 各一条——
+    两者都是 :data:`~sgs.timing.DISPATCH_WHITELIST` 里那两个节点的实测来源。
+
+    合成技能是**锁定技**（``locked=True``）⇒ 不问"是否发动"，场景不会出现询问；
+    它的回调只读一次帧（证明被解封的是"钩子真的能被叫醒"，不只是记录）。
+    """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+
+    def handler(host, frame):
+        del host
+        # 读一次帧私有：这条钩子真的拿到了"这一次伤害"的上下文。
+        frame.data.get("target")
+        return None
+
+    definition = SkillDef(
+        skill_id=DAMAGE_WINDOW_SCENE_SKILL,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(
+            Hook(Timing.DAMAGE_BEFORE_START, handler=handler),
+            Hook(Timing.DAMAGE_START, handler=handler),
+        ),
+    )
+    saved = catalog_module.CATALOG
+    catalog_module.CATALOG = MappingProxyType({**saved, DAMAGE_WINDOW_SCENE_SKILL: definition})
+    try:
+        state = build_state(
+            pack=load_content_pack(deck_profile=M1_DECK_PROFILE),
+            seats=[SeatSpec(), SeatSpec()],
+            deck=tuple(range(10)),
+            turn_seat=0,
+            phase=Phase.PREPARE,
+        )
+        engine = Engine.from_state(state, seed=seed)
+        engine.grant_skill(0, DAMAGE_WINDOW_SCENE_SKILL)
+        engine._step()  # L0 派发（GAME_START）：先让开局那一步过去
+        engine.push_frame(
+            FrameKind.DAMAGE,
+            {
+                "source": 0,
+                "targets": (1,),
+                "target": 1,
+                "card": None,
+                "channel": None,
+                "nature": None,
+                "chain": False,
+                "amount": 1,
+            },
+            timing=Timing.DAMAGE_DEAL,
+        )
+        for _ in range(50):
+            if not engine.stack:
+                break
+            assert engine.pending is None, "合成锁定技不问发动：场景不该有询问"
+            engine._step()
+        assert any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_START
+            for record in engine.records
+        ), "场景没跑完 DAMAGE 帧：伤害结算开始时的时机必须真的落进记录流"
     finally:
         catalog_module.CATALOG = saved
     return engine

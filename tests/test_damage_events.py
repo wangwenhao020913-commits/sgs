@@ -319,3 +319,105 @@ def test_damage_taken_ever_survives_turn_end():
 
     assert state.player(1).damage_taken_ever is True, "回合末不得清整局事实"
     assert state.player(1).damage_taken_this_turn == 0, "本回合事实照旧被清"
+
+
+# ---------------------------------------------------------------------------
+# "伤害 → 失去体力"的整段改写（yijiang-2011-xusheng-chunhua 票 90 的框架件）
+# ---------------------------------------------------------------------------
+
+REWRITE_SKILL = "hero.fake.damage_rewrite"
+"""改写协议（``damage_rewritten`` + ``damage_replacement_amount``）用的合成技能 id。
+
+只活在 ``CATALOG`` 的**临时**注入里（与 ``tests/support/positions.py`` 的
+``state_engine`` / ``damage_window_engine`` 同一姿态）：改写是**引擎的通用协议**，不是按
+技能名特判，故这里用一条假技能证明"谁来写这两个帧私有槽都行"；首个真实载体 = 票 02 的
+张春华移动版【绝情】。
+"""
+
+
+def _rewrite_engine(*, amount: int = 2, replacement: int = 2, armor: tuple[int, int] = (0, 0)):
+    """座位 0 = 持合成技能的来源、座位 1 = 目标；压一条 ``amount`` 点的 ``DAMAGE`` 子帧。
+
+    返回 ``(engine, restore)``：``CATALOG`` 的临时替换必须由调用方在断言后恢复
+    （``try/finally`` 写在用例里，读起来比藏进 helper 清楚）。
+    """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+    from sgs.engine import steps as steps_module
+
+    def handler(host, frame):
+        del host
+        frame.data[steps_module.DAMAGE_REWRITTEN_KEY] = True
+        frame.data[steps_module.DAMAGE_REPLACEMENT_AMOUNT_KEY] = replacement
+        return None
+
+    definition = SkillDef(
+        skill_id=REWRITE_SKILL,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.DAMAGE_BEFORE_START, handler=handler),),
+    )
+    saved = catalog_module.CATALOG
+    catalog_module.CATALOG = MappingProxyType({**saved, REWRITE_SKILL: definition})
+
+    def restore() -> None:
+        catalog_module.CATALOG = saved
+
+    specs = [SeatSpec(hp=4, hp_max=4), SeatSpec(hp=4, hp_max=4)]
+    state = build_state(pack=PACK, seats=specs, deck=deck_excluding(PACK))
+    for seat, value in enumerate(armor):
+        state.players[seat].armor = value
+    engine = Engine.from_state(state, seed=7)
+    engine.grant_skill(0, REWRITE_SKILL)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(amount=amount, nature=DamageNature.FIRE),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    return engine, restore
+
+
+def test_a_rewritten_damage_event_becomes_a_life_decrease():
+    """**事件不在**：没有伤害事实、没有"造成 / 受到伤害后"，只有一条失去体力。
+
+    `三国杀详细规则.txt:378–383`（§4.14 时机 0)）："触发后不再进行伤害结算，本该受到伤害的
+    角色改为失去等同于伤害值基数的体力"。
+    """
+    engine, restore = _rewrite_engine(amount=2, replacement=2)
+    try:
+        run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.LIFE_DECREASE_AFTER))
+    finally:
+        restore()
+
+    assert engine.state.player(1).hp == 2, "改写后按**基数**扣体力（2 点）"
+    assert tuple(engine.damage_events) == (), "伤害事件整段不发生 ⇒ 一条伤害事实都不许记"
+    assert not ran_timing(engine, Timing.DAMAGE_AFTER_TAKE), "受到伤害后不再派发"
+    assert not ran_timing(engine, Timing.DAMAGE_AFTER_DEAL), "造成伤害后不再派发"
+    assert ran_timing(engine, Timing.DAMAGE_BEFORE_START), "改写发生在时机 0)，记录照落一条"
+
+
+def test_a_rewritten_damage_event_does_not_touch_armor():
+    """失去体力**不碰护甲**（账本「护甲值 = 独立第二轴」）：目标有 2 点护甲，也照扣 2 点体力。"""
+    engine, restore = _rewrite_engine(amount=2, replacement=2, armor=(0, 2))
+    try:
+        run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.LIFE_DECREASE_AFTER))
+    finally:
+        restore()
+
+    assert engine.state.player(1).armor == 2, "护甲一点不动（这不是伤害）"
+    assert engine.state.player(1).hp == 2, "体力照扣基数"
+    assert _deltas(engine, "armor_change") == [], "连一条 ``armor_change`` delta 都不该有"
+
+
+def test_the_rewrite_amount_is_independent_of_the_damage_amount():
+    """"失去多少"读**改写槽**，不读伤害帧的 ``amount``（两者可以不同）。"""
+    engine, restore = _rewrite_engine(amount=3, replacement=1)
+    try:
+        run_queries(engine, [PassPlayer(), PassPlayer()], lambda e: ran_timing(e, Timing.LIFE_DECREASE_AFTER))
+    finally:
+        restore()
+
+    assert engine.state.player(1).hp == 3, "只失去改写槽写的 1 点，不是伤害帧的 3 点"

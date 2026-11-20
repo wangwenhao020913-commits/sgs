@@ -53,6 +53,7 @@ from sgs.engine import read_journal
 from sgs.timing import Timing
 
 from .positions import (
+    damage_window_engine,
     maxlife_engine,
     move_after_engine,
     pindian_engine,
@@ -72,6 +73,9 @@ MOVE_AFTER_SCENE = "position:move-after"
 MAXLIFE_SCENE = "position:maxlife"
 PINDIAN_SCENE = "position:pindian"
 ROUND_START_SCENE = "position:round-start"
+DAMAGE_WINDOW_SCENE = "position:damage-window"
+"""yijiang-2011-xusheng-chunhua 票 90：L7 帧首两步（``DAMAGE_BEFORE_START`` /
+``DAMAGE_START``）的惰性派发（合成技能 + 一条最小 DAMAGE 帧）。"""
 STATE_SCENE = "position:state"
 """chenqun-guyong 票 03（W2）：状态位写入口的惰性派发（合成技能 + 三个真实写入）。"""
 
@@ -128,6 +132,9 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.RESOLVE_END: (B01,),
     Timing.RESOLVE_AFTER_END: (B01,),
     # ---- L7 伤害 / L8 扣减体力：基准 02 的一次命中伤害 ----
+    # ---- L7 帧首两步：票 90 解封（惰性 ⇒ 标准基准里一条都不落，来源只能是构造局面） ----
+    Timing.DAMAGE_BEFORE_START: (DAMAGE_WINDOW_SCENE,),
+    Timing.DAMAGE_START: (DAMAGE_WINDOW_SCENE,),
     Timing.DAMAGE_DEAL: (B02,),
     Timing.DAMAGE_TAKE: (B02,),
     Timing.DAMAGE_AFTER_DEAL: (B02,),
@@ -167,7 +174,7 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.STATE_FLIPPED: (STATE_SCENE,),
     Timing.STATE_CHAINED: (STATE_SCENE,),
 }
-"""62 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+"""64 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
 
 
 @lru_cache(maxsize=None)
@@ -190,6 +197,8 @@ def stream_records(source_id: str):
         return round_start_engine().records
     if source_id == STATE_SCENE:
         return state_engine().records
+    if source_id == DAMAGE_WINDOW_SCENE:
+        return damage_window_engine().records
     raise KeyError(f"未知的覆盖来源：{source_id!r}")
 
 

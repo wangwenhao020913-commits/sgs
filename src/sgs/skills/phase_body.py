@@ -800,7 +800,7 @@ LUOYI_FLOW = SkillFlow(name="luoyi", steps=(), effect=_luoyi_effect)
 
 
 def _luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``DAMAGE_DEAL_AMOUNT`` 回调：本回合内许褚的【杀】/【决斗】伤害 +1。
+    """``DAMAGE_BASE_AMOUNT`` 回调：本回合内许褚的【杀】/【决斗】基础伤害 +1。
 
     只认**来源侧**（``ctx.owner == ctx.subject``：许褚是造成伤害的人）与**渠道牌**
     （【杀】家族按行为表判 — 普通 / 火 / 雷 / 转化 / 虚拟同族；【决斗】按牌名 id）；
@@ -817,7 +817,7 @@ def _luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) ->
 def _luoyi_bonus(
     state: GameState, ctx: ModifierContext, current: Any, *, active: bool
 ) -> Any:
-    """``DAMAGE_DEAL_AMOUNT`` 的**共用判据**：来源侧 + 【杀】/【决斗】+ 座位状态已置位。
+    """``DAMAGE_BASE_AMOUNT`` 的**共用判据**：来源侧 + 【杀】/【决斗】+ 座位状态已置位。
 
     标准 / 界两版【裸衣】的差别只有"哪个座位状态字段"（作用域不同），故判据只此一份；
     ``active`` 由各自的回调从自己的字段读出来（调用方已保证 ``ctx.owner`` 是合法座位）。
@@ -839,7 +839,7 @@ _LUOYI = PhaseBodySkill(
     short_id="luoyi",
     timing=Timing.PHASE_DRAW,
     flow=LUOYI_FLOW,
-    modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _luoyi_damage_bonus),),
+    modifiers=(Modifier(ModifierPoint.DAMAGE_BASE_AMOUNT, _luoyi_damage_bonus),),
     # skill-display 票 01：座位卡上的「裸衣」迁到声明 + 登记表（载荷一字不改）。
     badge=BadgeKind.WINDOW,
 )
@@ -997,7 +997,7 @@ JIE_LUOYI_FLOW = SkillFlow(name="jie_luoyi", steps=(), effect=_jie_luoyi_effect)
 
 
 def _jie_luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """界【裸衣】的 ``DAMAGE_DEAL_AMOUNT`` 回调：读**跨回合**的座位状态。
+    """界【裸衣】的 ``DAMAGE_BASE_AMOUNT`` 回调：读**跨回合**的座位状态。
 
     判据与标准版共用 :func:`_luoyi_bonus`；只有"作用域字段"不同——界版的作用域是
     "直到你的下个回合开始"，住 ``Player.luoyi_until_next_turn``（见那里的注释）。
@@ -1016,7 +1016,7 @@ _JIE_LUOYI = PhaseBodySkill(
     short_id="luoyi",
     timing=Timing.PHASE_DRAW,
     flow=JIE_LUOYI_FLOW,
-    modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _jie_luoyi_damage_bonus),),
+    modifiers=(Modifier(ModifierPoint.DAMAGE_BASE_AMOUNT, _jie_luoyi_damage_bonus),),
     # skill-display 票 01：与标准版同一个登记项（同一种作用域事实的另一种字段）。
     badge=BadgeKind.WINDOW,
     requirement=(

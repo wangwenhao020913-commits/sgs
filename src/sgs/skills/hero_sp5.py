@@ -8,7 +8,7 @@ r"""SP武将组5 的武将技能：马云騄【凤魄】、潘濬【观微】【
 
 - 马云騄【马术】= 纯修饰器，住 :mod:`sgs.skills.target_change`（与马超 / 界马超 /
   庞德移动版**逐字同文**，同一份 ``DISTANCE`` 回调，第四条同形声明）；
-- 马云騄【凤魄】= 本模块（``USE_AFTER_DESIGNATE_TARGET`` 钩子 + 一步选项 + ``DAMAGE_DEAL_AMOUNT``
+- 马云騄【凤魄】= 本模块（``USE_AFTER_DESIGNATE_TARGET`` 钩子 + 一步选项 + ``DAMAGE_BASE_AMOUNT``
   修饰器 + ``RESOLVE_AFTER_END`` 清账）；
 - 潘濬【观微】= 本模块（``PHASE_PLAY_END`` 阶段体钩子 + 一步选牌 + 摸两张 + 阶段级调度
   ``Engine.schedule_extra_play_phase``）；
@@ -100,7 +100,7 @@ __all__ = [
 #   每个阶段起点逐个清字段）。
 # - **选项 1 摸 X** = ``draw_for_hand``（X 在首次执行时定格进帧私有，重入不重算）。
 # - **选项 2 加伤** = ``Engine.set_fengpo_bonus`` 记 ``(牌 id, X)``，由同一条声明的
-#   ``DAMAGE_DEAL_AMOUNT`` 修饰器在伤害帧读。**卡牌级**：只认 ``ctx.card.card_id``，不要求
+#   ``DAMAGE_BASE_AMOUNT`` 修饰器在伤害帧读。**卡牌级**：只认 ``ctx.card.card_id``，不要求
 #   来源是持有者——牌面写的是「此牌」，没有「你为伤害来源」（对照账本 L978：界【裸衣】写
 #   了「你为伤害来源」，所以它输掉自己使用的【决斗】时**不**加）。清理 = ``RESOLVE_AFTER_END``
 #   清扫钩子（被【闪】抵消 / 伤害被防止时也要清）+ 回合末兜底。
@@ -251,11 +251,11 @@ FENGPO_FLOW = SkillFlow(
 def _fengpo_damage_bonus(
     state: GameState, ctx: Any, current: Any
 ) -> Any:
-    """``DAMAGE_DEAL_AMOUNT``：本次使用记过账的那张牌，伤害 +X（**卡牌级**）。
+    """``DAMAGE_BASE_AMOUNT``：本次使用记过账的那张牌，**基础伤害** +X（**卡牌级**）。
 
     只认 ``(持有者的记账, ctx.card.card_id)`` 这一对：不要求 ``ctx.owner == ctx.subject``
     （牌面写「此牌的基础伤害值」，没有「你为伤害来源」）。传导帧（``chain=True``）不派发
-    ``DAMAGE_DEAL_AMOUNT``（``damage_amount`` 的既有口径），故不会重复加。
+    ``DAMAGE_BASE_AMOUNT``（``damage_amount`` 的既有口径），故不会重复加。
     """
     if ctx.card is None:
         return current
@@ -879,7 +879,7 @@ _FENGPO_DEF = SkillDef(
             condition=_fengpo_cleanup_condition,
         ),
     ),
-    modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _fengpo_damage_bonus),),
+    modifiers=(Modifier(ModifierPoint.DAMAGE_BASE_AMOUNT, _fengpo_damage_bonus),),
     requirement=_REQUIREMENT_FENGPO,
     step_requirements={"option": "选择一项"},
 )

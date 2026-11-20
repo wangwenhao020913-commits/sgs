@@ -3,10 +3,10 @@
 覆盖清单 = 「时机节点 → 覆盖它的基准或用例」的映射，定义在
 ``tests/support/timing_coverage.py``。本文件把它变成判决，断言四件事：
 
-1. 清单的键集**恰等于** dispatch 白名单（62 个可从记录流观测的节点）；
+1. 清单的键集**恰等于** dispatch 白名单（64 个可从记录流观测的节点）；
 2. 清单里声明的**每一个**来源都真的 dispatch 它声称覆盖的节点（实测，不靠声明）；
 3. 所有来源的记录流并集**恰等于**白名单（既 ⊇ 也不多）；
-4. 12 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
+4. 10 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
 
 **"⊇ 64" 的重述**（票 18 已登记、票 25 落地、票 32 定格）：64 个已实现类里有 11 个 L2
 边界 / 阶段间节点结构性地不 dispatch、记录流不可见，故机械判据是
@@ -27,7 +27,7 @@ from support.timing_coverage import (
 )
 
 WHITELIST = frozenset(timing.value for timing in DISPATCH_WHITELIST)
-"""62 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
+"""64 个节点按**字符串取值**比较：与记录流里的 ``Timing`` 无关，不受 import 路径影响。"""
 
 
 def _collected() -> frozenset[str]:
@@ -86,6 +86,16 @@ STATE_UNSEALED: frozenset[str] = frozenset(
 ``CARD_SHOWN`` 仍留枚举位——它们今天没有写入口。
 """
 
+YIJIANG2011_UNSEALED: frozenset[str] = frozenset(
+    {Timing.DAMAGE_BEFORE_START.value, Timing.DAMAGE_START.value}
+)
+"""yijiang-2011-xusheng-chunhua 票 90 的增量：L7 帧首两步（伤害结算开始前 / 开始时）。
+
+派发点 = ``steps.DAMAGE_STEPS`` 的前两步，**惰性**（``timing_hooks_present`` 为假时连记录都
+不落 ⇒ 47 条标准金录像逐字节不变）；首个真实载体 = 票 02 的张春华【绝情】。Coverage 来源 =
+构造局面 ``position:damage-window``（合成技能 + 一条最小 DAMAGE 帧）。
+"""
+
 M2_DISPATCH_WHITELIST = frozenset(
     timing.value
     for timing in DISPATCH_WHITELIST
@@ -93,9 +103,10 @@ M2_DISPATCH_WHITELIST = frozenset(
     not in M3_UNSEALED | WUMING_UNSEALED | PINDIAN_UNSEALED | TAOCAOCAO_UNSEALED
     | FENGYUJIN_UNSEALED
     | STATE_UNSEALED
+    | YIJIANG2011_UNSEALED
 )
-"""M2 的 53 个：今天的白名单减去六批解封（M3 一个 + wuming 两个 + 拼点两个 +
-拼点扣置一个 + 轮边界一个 + 状态位两个）。"""
+"""M2 的 53 个：今天的白名单减去七批解封（M3 一个 + wuming 两个 + 拼点两个 +
+拼点扣置一个 + 轮边界一个 + 状态位两个 + 票 90 的伤害帧首两个）。"""
 
 
 def test_the_unsealed_set_is_exactly_the_move_after_node():
@@ -114,6 +125,7 @@ def test_the_unsealed_set_is_exactly_the_move_after_node():
         - TAOCAOCAO_UNSEALED
         - FENGYUJIN_UNSEALED
         - STATE_UNSEALED
+        - YIJIANG2011_UNSEALED
     )
 
     assert m3_unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
@@ -138,6 +150,7 @@ def test_the_wuming_unseal_adds_exactly_the_two_maxlife_increase_nodes():
         - TAOCAOCAO_UNSEALED
         - FENGYUJIN_UNSEALED
         - STATE_UNSEALED
+        - YIJIANG2011_UNSEALED
     )
 
     assert wuming_unsealed == WUMING_UNSEALED
@@ -165,6 +178,7 @@ def test_the_taocaocao_unseal_is_exactly_the_pindian_placed_node():
         - PINDIAN_UNSEALED
         - FENGYUJIN_UNSEALED
         - STATE_UNSEALED
+        - YIJIANG2011_UNSEALED
     )
 
     assert taocaocao_unsealed == TAOCAOCAO_UNSEALED
@@ -231,6 +245,7 @@ def test_the_state_unseal_adds_exactly_the_two_l17_write_entry_nodes():
         - PINDIAN_UNSEALED
         - TAOCAOCAO_UNSEALED
         - FENGYUJIN_UNSEALED
+        - YIJIANG2011_UNSEALED
     )
 
     assert state_unsealed == STATE_UNSEALED
@@ -245,11 +260,12 @@ def test_the_state_unseal_adds_exactly_the_two_l17_write_entry_nodes():
 
 
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
-    assert len(WHITELIST) == 62, (
+    assert len(WHITELIST) == 64, (
         "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
         " + huo-taishici-xunyu 票 03 的拼点二时机 + tao-caocao 票 03 的拼点扣置时机"
         " + feng-yujin 票 02 新增的 `ROUND_START`（轮边界）"
         " + chenqun-guyong 票 03 解封的 `STATE_FLIPPED` / `STATE_CHAINED`"
+        " + yijiang-2011-xusheng-chunhua 票 90 解封的 `DAMAGE_BEFORE_START` / `DAMAGE_START`"
     )
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
@@ -267,7 +283,7 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     collected = _collected()
 
     assert collected.isdisjoint({timing.value for timing in ENUM_ONLY}), (
-        "12 个枚举位只留位（含减体力上限二时机与 L17 的其余三个成员），一次都不 dispatch"
+        "10 个枚举位只留位（含减体力上限二时机与 L17 的其余三个成员），一次都不 dispatch"
     )
     assert collected.isdisjoint({timing.value for timing in EMPTY_LOG}), (
         "11 个空日志节点结构性存在，但记录流里不出现"

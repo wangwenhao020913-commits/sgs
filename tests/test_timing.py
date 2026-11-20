@@ -15,7 +15,9 @@ M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
 此后逐批解封：M3 的 ``MOVE_AFTER``（票 07）、wuming 票 04 的
 ``MAXLIFE_INCREASE_BEFORE`` / ``MAXLIFE_INCREASE_AFTER``（只解封"加体力上限"一侧；
 减侧继续留枚举位）、拼点三时机，以及 chenqun-guyong 票 03 的
-``STATE_FLIPPED`` / ``STATE_CHAINED``。今天实测 = 白名单 **62** / 空日志 **11** / 枚举位 **12**。
+``STATE_FLIPPED`` / ``STATE_CHAINED``、以及 yijiang-2011-xusheng-chunhua 票 90 的
+``DAMAGE_BEFORE_START`` / ``DAMAGE_START``（L7 帧首两步）。
+今天实测 = 白名单 **64** / 空日志 **11** / 枚举位 **10**。
 
 末尾几节分别是 **``MAXLIFE`` 事件帧的行为**（wuming 票 04：合成技能调
 ``Engine.raise_hp_max`` 的三条用例）、**L17 状态位写入口的派发**（chenqun-guyong 票 03：
@@ -109,18 +111,20 @@ def test_implemented_and_enum_only_partition_the_whole_table():
     implemented = set(IMPLEMENTED)
     enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 73, (
+    assert len(implemented) == 75, (
         "M2 已实现类 64 + M3 解封的 1 个（票 07）+ wuming 票 04 解封的 2 个"
         " + huo-taishici-xunyu 票 03 解封的拼点二时机"
         " + tao-caocao 票 03 解封的 `RANK_COMPARE_PLACED`"
         " + feng-yujin 票 02 新增的 `ROUND_START`"
         " + chenqun-guyong 票 03 解封的 `STATE_FLIPPED` / `STATE_CHAINED`"
+        " + yijiang-2011-xusheng-chunhua 票 90 解封的 `DAMAGE_BEFORE_START` / `DAMAGE_START`"
     )
-    assert len(enum_only) == 12, (
+    assert len(enum_only) == 10, (
         "枚举位 19 − M3 的 `MOVE_AFTER` − wuming 票 04 的加体力上限二时机"
         " − 票 03 的拼点二时机 − tao-caocao 的拼点三时机 + 该票新增的 1 个"
         "（feng-yujin 票 02 的 `ROUND_START` 是新成员、直接进已实现类）"
         " − chenqun-guyong 票 03 的状态位二时机"
+        " − yijiang-2011-xusheng-chunhua 票 90 的 L7 帧首二时机"
     )
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
@@ -130,15 +134,16 @@ def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_se
     dispatch = set(DISPATCH_WHITELIST)
     empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 62, (
+    assert len(dispatch) == 64, (
         "M2 dispatch 白名单 53 + M3 的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
         " + 票 03 的拼点二时机 + tao-caocao 票 03 的 `RANK_COMPARE_PLACED`"
         " + feng-yujin 票 02 的 `ROUND_START`"
         " + chenqun-guyong 票 03 的 `STATE_FLIPPED` / `STATE_CHAINED`"
+        " + yijiang-2011-xusheng-chunhua 票 90 的 `DAMAGE_BEFORE_START` / `DAMAGE_START`"
     )
     assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)
-    assert dispatch | empty_log == set(IMPLEMENTED), "62 + 11 复原 73 个已实现类"
+    assert dispatch | empty_log == set(IMPLEMENTED), "64 + 11 复原 75 个已实现类"
     assert dispatch | empty_log | set(ENUM_ONLY) == set(Timing)
 
 
