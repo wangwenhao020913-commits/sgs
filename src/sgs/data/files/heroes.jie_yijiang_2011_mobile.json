@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "jie_yijiang_2011_mobile",
+  "heroes": [
+    {
+      "id": "jie_xusheng_mobile",
+      "name": "界徐盛移动版",
+      "true_name": "徐盛",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-yijiang-2011-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "pojun",
+          "name": "破军",
+          "skill_type": "NORMAL",
+          "placement": {
+            "visibility": "public",
+            "return_timing": "turn_end",
+            "extra_effect": false
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -86,6 +86,9 @@ PACK = load_content_pack(deck_profile="standard_108")
 JIE_LUXUN = "jie_luxun"
 XUSHENG_POJUN = "hero.xusheng_mobile.pojun"
 """徐盛移动版【破军】（yijiang-2011-xusheng-chunhua 票 01）：跨座位放置区 + 回合末归还。"""
+
+JIE_XUSHENG_POJUN = "hero.jie_xusheng_mobile.pojun"
+"""界徐盛移动版【破军】（票 03）：同一套放置 / 归还，只是没有「出牌阶段」限定。"""
 JIE_QIANXUN = "hero.jie_luxun.qianxun"
 SIDI = "hero.caozhen_mobile.sidi"
 """yijiang-2014-round3 票 03：曹真移动版【司敌】——第三个放置类技能（`return_timing = never`：
@@ -281,6 +284,7 @@ def test_every_placement_skill_declares_the_three_facts():
         QIXING,
         SIDI,
         XUSHENG_POJUN,
+        JIE_XUSHENG_POJUN,
     }
     for skill_id, decl in declared.items():
         definition = CATALOG[skill_id]

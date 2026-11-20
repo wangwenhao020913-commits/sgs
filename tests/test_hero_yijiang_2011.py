@@ -353,3 +353,99 @@ def test_pojun_return_segment_reads_the_zone_not_the_marker() -> None:
 
     assert _pojun_return_condition_for(XUSHENG_POJUN)(host, frame) is True, "区里有牌 ⇒ 该还"
     assert not state.player(TARGET).markers, "条件不看标记"
+
+
+# ---------------------------------------------------------------------------
+# 票 03：界徐盛移动版【破军】①②（同一份代码的另一个版本）
+# ---------------------------------------------------------------------------
+
+JIE_XUSHENG = "jie_xusheng_mobile"
+JIE_POJUN = "hero.jie_xusheng_mobile.pojun"
+
+
+def test_jie_xusheng_mobile_is_in_its_own_mobile_table() -> None:
+    hero = load_heroes("jie_yijiang_2011_mobile").by_id(JIE_XUSHENG)
+    assert hero is not None, "界徐盛移动版必须落在 heroes.jie_yijiang_2011_mobile.json"
+    assert hero.name == "界徐盛移动版"
+    assert hero.true_name == "徐盛", "真名与徐盛共用 ⇒ 同一局只出一个"
+    assert hero.kingdom.value == "wu" and hero.gender.value == "male"
+    assert hero.hp_max == 4
+    assert hero.version == "jie-yijiang-2011-mobile"
+    assert hero.enabled is True
+    assert [skill.id for skill in hero.skills] == ["pojun"]
+
+    decl = hero_placement_decl(JIE_POJUN, pack_id=PACK.pack_id)
+    assert decl is not None
+    assert decl.return_timing.value == "turn_end" and decl.extra_effect is False
+
+
+def test_jie_pojun_declares_the_second_clause_on_the_same_skill() -> None:
+    """② 挂**本体**（不是归还段）：一个技能 id、两半效果（① 的钩子 + ② 的修饰器）。"""
+    definition = CATALOG[JIE_POJUN]
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.USE_AFTER_DESIGNATE_TARGET
+    ]
+    assert [modifier.point.value for modifier in definition.modifiers] == [
+        "DAMAGE_DEAL_AMOUNT"
+    ], "② = 造成伤害时 +1（来源侧数值；与界【烈弓】② / 古锭刀同一挂点）"
+    back = CATALOG[f"{JIE_POJUN}_return"]
+    assert back.carrier.value == "MARKER" and int(back.dispatch_tier) == 0
+    assert back.modifiers == (), "归还段不带 ② 的修饰器"
+
+
+def test_jie_pojun_bonus_reads_both_counts_at_damage_time() -> None:
+    """②：目标的手牌数与装备区张数**均不大于我** ⇒ +1；任一更大 ⇒ 不加。"""
+    from sgs.effects import ModifierContext, ModifierRole
+    from sgs.skills.hero_yijiang_2011 import _jie_pojun_bonus
+
+    state = _state(
+        SeatSpec(hand=(SLASH[0], DODGE[0], DODGE[1])),
+        SeatSpec(hand=(DODGE[2], DODGE[3])),
+    )
+    slash = state.card(SLASH[0])
+
+    def bonus() -> int:
+        ctx = ModifierContext(
+            subject=ME,
+            target=TARGET,
+            role=ModifierRole.SUBJECT,
+            card=slash,
+            owner=ME,
+        )
+        return _jie_pojun_bonus(state, ctx, 1)
+
+    assert bonus() == 2, "1 + 1（目标 2 张手牌 ≤ 我 3 张、装备都空）"
+
+    state.player(TARGET).hand = [DODGE[2]] * 4  # 目标手牌比我多
+    assert bonus() == 1, "目标手牌更多 ⇒ 不加"
+
+    state.player(TARGET).hand = []
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    state.player(TARGET).equip = [armor]
+    assert bonus() == 1, "目标装备比我多 ⇒ 不加"
+
+
+def test_jie_pojun_condition_has_no_play_phase_restriction() -> None:
+    """A4：界徐盛没有「出牌阶段，」前缀 ⇒ 别人的回合里被【借刀杀人】逼出的【杀】也触发。"""
+    from sgs.resolution import Frame
+    from sgs.skills.hero_yijiang_2011 import _jie_pojun_condition, _pojun_condition
+
+    state = _state(
+        SeatSpec(hand=(SLASH[0], DODGE[0])),
+        SeatSpec(hand=(DODGE[1],)),
+        turn_seat=TARGET,
+    )
+
+    class _Host:
+        def __init__(self, state):
+            self.state = state
+
+    frame = Frame(kind=Timing.USE_AFTER_DESIGNATE_TARGET, data={})
+    frame.data["source"] = ME
+    frame.data["card"] = state.card(SLASH[0])
+    frame.data["targets"] = (TARGET,)
+    frame.data["hook_owner"] = ME
+    host = _Host(state)
+
+    assert _pojun_condition(host, frame) is False, "徐盛版：回合角色不是我 ⇒ 不触发"
+    assert _jie_pojun_condition(host, frame) is True, "界徐盛版：没有阶段限定 ⇒ 触发"

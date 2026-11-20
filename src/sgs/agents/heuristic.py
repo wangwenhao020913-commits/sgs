@@ -5203,6 +5203,14 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "当前回合结束时再还给它：**没有代价**，条件已由引擎在候选阶段判过 ⇒ 常量即正；"
         "`_constant` 不读任何字段",
     ),
+    # yijiang-2011-xusheng-chunhua 票 03：界徐盛移动版【破军】（① 扣牌 + ② 造成伤害 +1）：
+    # 没有自己的代价，① 的条件由引擎在候选阶段判过、② 是自动的数值加成 ⇒ 常量即正，
+    # 比徐盛版略高（多一段无条件的 +1）。
+    "hero.jie_xusheng_mobile.pojun": (
+        _constant(2.4),
+        "使用【杀】指定目标后可扣其至多 X 张牌（X = 其体力值）到它自己武将牌上、当前回合末"
+        "再还；② 对张数均不大于我的目标造成伤害 +1：**没有代价** ⇒ 常量即正",
+    ),
     "hero.liuyan.tushe": (
         _constant(2.4),
         "使用非装备牌指定目标后摸 X 张（X = 本次使用的座位目标数，含自己）：**没有代价**，"

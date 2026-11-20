@@ -2003,6 +2003,8 @@ def test_every_equipment_card_has_a_skill_and_vice_versa():
         # yijiang-2011-xusheng-chunhua 票 01：徐盛 / 界徐盛【破军】的**归还段**——当前回合
         # 结束时把扣在目标武将牌上的牌还给它，并与该座位自己的回合末技能同面选先后。
         "hero.xusheng_mobile.pojun_return",
+        # 票 03：界徐盛【破军】的归还段（同一套「当前回合结束时还给目标」）。
+        "hero.jie_xusheng_mobile.pojun_return",
     }, (
         "标记自身效果的定义（「营」/【破军】的归还段）；新增一条要同时想清楚它在界面上的归属"
     )

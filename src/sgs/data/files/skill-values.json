@@ -377,6 +377,10 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.jie_xusheng_mobile.pojun": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.jie_xushu.jianyan": {
       "enabled": true,
       "rarity": "common"

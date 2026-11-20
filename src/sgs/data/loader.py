@@ -114,6 +114,8 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     # yijiang-2011-xusheng-chunhua 票 01：一将成名-2011 的**移动版**独立表（徐盛移动版）。
     # 追加在既有包之后 ⇒ 既有包的并集位置不变、固定种子配将结果不动。
     "yijiang_2011_mobile",
+    # yijiang-2011-xusheng-chunhua 票 03：界一将成名-2011 的**移动版**独立表（界徐盛移动版）。
+    "jie_yijiang_2011_mobile",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 

@@ -37,7 +37,15 @@ from dataclasses import replace
 from typing import Any
 
 from sgs.data import SkillType, hero_skill_id
-from sgs.effects import CarrierKind, PriorityClass, behavior_for, is_slash, locate
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierPoint,
+    PriorityClass,
+    behavior_for,
+    is_slash,
+    locate,
+)
 from sgs.resolution import Control, Frame
 from sgs.state import GameState, Phase, SelectionSpec, Zone
 from sgs.timing import Timing
@@ -351,7 +359,7 @@ _XUSHENG_POJUN_DEFS: tuple[SkillDef, ...] = _pojun_definitions(
 """徐盛【破军】+ 它的归还段（票 01）。"""
 
 XUSHENG_SKILL_DEFS: tuple[SkillDef, ...] = _XUSHENG_POJUN_DEFS
-"""一将成名-2011·移动版 的武将技能（逐票追加；票 01 只有徐盛【破军】）。"""
+"""一将成名-2011·移动版 的武将技能（票 01 = 徐盛【破军】）。"""
 
 
 def xusheng_skill_definitions() -> tuple[SkillDef, ...]:
@@ -359,8 +367,78 @@ def xusheng_skill_definitions() -> tuple[SkillDef, ...]:
     return XUSHENG_SKILL_DEFS
 
 
-YIJIANG_2011_SKILL_DEFS: tuple[SkillDef, ...] = _XUSHENG_POJUN_DEFS
-"""一将成名-2011·移动版 的全部技能定义（徐盛【破军】；张春华由票 02 追加）。"""
+# ---------------------------------------------------------------------------
+# 界徐盛移动版【破军】（票 03；同一份代码、两个版本）
+#
+# 移动版原文（`D:\SGS_HEROS\界一将成名-2011\界徐盛\技能.txt` 逐字）：
+#
+#     ①当你使用【杀】指定一名角色为目标后，你可以将该角色的至多X张牌置于其武将牌上
+#       （X为该角色的体力值），然后当前回合结束时，其获得武将牌上的牌；
+#     ②当你使用【杀】对手牌数与装备区里的牌数均不大于你的目标角色造成伤害时，此伤害+1。
+#
+# 与徐盛版的两处差异（**A4 的显式区分**，两条短 id 相同、文本不同）：
+# - **没有「出牌阶段，」前缀** ⇒ 回合外被【借刀杀人】逼出的【杀】也触发（`_jie_pojun_condition`）；
+# - **多出 ②** ⇒ 来源侧 ``DAMAGE_DEAL_AMOUNT`` 修饰器（"造成伤害时 +1"，账本 L788 与
+#   界【烈弓】② 同一挂点；按用户 2026-11-20 的口径，它**不计入**【绝情】的金额）。
+# ---------------------------------------------------------------------------
+
+JIE_XUSHENG = "jie_xusheng_mobile"
+"""界徐盛的武将 id（界一将成名-2011·移动版）。"""
+
+JIE_XUSHENG_POJUN = hero_skill_id(JIE_XUSHENG, "pojun")
+"""界徐盛【破军】的全限定技能 id。"""
+
+
+def _jie_pojun_bonus(state: GameState, ctx: Any, current: Any) -> Any:
+    """② ``DAMAGE_DEAL_AMOUNT``：**我**用【杀】造成伤害时，若目标"手牌数与装备区里的牌数
+    均不大于我"，此伤害 +1。
+
+    来源侧（``ctx.owner == ctx.subject``）+ 渠道牌是【杀】族（转化 / 虚拟同族，判据 =
+    :func:`~sgs.effects.is_slash`）+ 两个张数比较**在伤害结算时现算**（不是选目标时定格）。
+    传导帧不派发本挂点（``damage_amount`` 只对 ``chain=False`` 的源头帧派发）⇒ 连环传导
+    不会重复 +1。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None or ctx.target is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    mine, them = state.player(ctx.owner), state.player(int(ctx.target))
+    if len(mine.hand) < len(them.hand) or len(mine.equip) < len(them.equip):
+        return current
+    return current + 1
+
+
+_JIE_POJUN_BODY, _JIE_POJUN_BACK = _pojun_definitions(
+    JIE_XUSHENG_POJUN, _jie_pojun_condition, _JIE_XUSHENG_REQUIREMENT
+)
+"""界徐盛【破军】① 的两份定义（本体 + 归还段；与徐盛版同一份代码）。"""
+
+_JIE_XUSHENG_POJUN_DEFS: tuple[SkillDef, ...] = (
+    # ② 挂在**本体**上（不是归还段）：它是"造成伤害时"的来源侧数值，与「扣牌」无关。
+    # 声明仍是同一条技能：一个 id、两半效果（① 的钩子 + ② 的修饰器）。
+    replace(
+        _JIE_POJUN_BODY,
+        modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _jie_pojun_bonus),),
+    ),
+    _JIE_POJUN_BACK,
+)
+"""界徐盛【破军】①②（票 03）。"""
+
+JIE_XUSHENG_SKILL_DEFS: tuple[SkillDef, ...] = _JIE_XUSHENG_POJUN_DEFS
+"""界一将成名-2011·移动版 的武将技能（票 03 = 界徐盛【破军】①②）。"""
+
+
+def jie_xusheng_skill_definitions() -> tuple[SkillDef, ...]:
+    """界徐盛的技能定义（由 :data:`sgs.skills.CATALOG` 末尾并入）。"""
+    return JIE_XUSHENG_SKILL_DEFS
+
+
+YIJIANG_2011_SKILL_DEFS: tuple[SkillDef, ...] = (
+    *_XUSHENG_POJUN_DEFS,
+    *_JIE_XUSHENG_POJUN_DEFS,
+)
+"""一将成名-2011·移动版（徐盛【破军】，票 01）+ 界一将成名-2011·移动版（界徐盛【破军】①②，
+票 03）；张春华由票 02 追加。"""
 
 
 def yijiang_2011_skill_definitions() -> tuple[SkillDef, ...]:
