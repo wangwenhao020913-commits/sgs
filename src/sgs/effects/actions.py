@@ -85,6 +85,7 @@ from .modifiers import (
     PriorityClass,
     apply_modifiers,
 )
+from .supply import demand_for, supply_is_legal, supply_of_action
 
 __all__ = [
     "DISTANCE_NO_TARGET",
@@ -1050,16 +1051,20 @@ def all_actions_for(
     dying: int | None = None,
     payload: Any = None,
 ) -> tuple[Action, ...]:
-    """**全档**候选（:func:`legal_actions_for` 的"分面之前"那一份）= 公开读取口。
+    """**全档供给池**（= 分面前、**未过供需闸门**的候选）= 公开读取口。
 
-    唯一生成口是 :func:`_actions_for`；本函数只把它暴露给"要看到每一档"的读取方
-    （need-card-supply 票 01 的展示层：供给**从现有候选反推**，不另写枚举）。交到玩家
-    手上的那一份仍由 :func:`legal_actions_for` 按档分面，本函数不改任何语义。
+    唯一生成口的主体是 :func:`_candidate_pool_for`；本函数只把它暴露给"要看到每一档"的
+    读取方（need-card-supply 票 01 / 02 的展示层：供给**从现有候选反推**，不另写枚举）。
+    交到玩家手上的那一份仍由 :func:`legal_actions_for` 经 :func:`_actions_for` 过供需
+    闸门再分面，本函数不改任何语义。
+
+    与 :func:`_actions_for` 的**唯一**区别就是不过那道闸门：被需求拒掉的档与牌仍在这份池
+    里——那是灰行的唯一来源（票 02 §1b："这一档试过了、不满足"要画得出来，不能凭空消失）。
 
     ``payload`` 与 :func:`legal_actions_for` 逐字同形：四扇需要牌窗口各给自己的类型化
     载荷（``DodgeContext`` / ``RespondContext`` / ``PeachContext``），其余询问不看它。
     """
-    return _actions_for(
+    return _candidate_pool_for(
         state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
     )
 
@@ -1091,11 +1096,80 @@ def _actions_for(
     | DistributeContext
     | None = None,
 ) -> tuple[Action, ...]:
-    """**全部档**的候选（唯一生成口）：过"能不能用"与禁令，但**不分面**。
+    """**全部档**的候选（唯一生成口）：过"能不能用"与禁令，再过**供需闸门**，但**不分面**。
 
     :func:`legal_actions_for`（分面后交给玩家）与 :func:`next_need_card_tier`（``Pass``
     之后现算下一档）读**同一份**生成——分面只在一处发生，两处不可能对"还有没有下一档"
     给出相反的回答。
+
+    **供需闸门必须在这里**（而不是在 ``_dodge`` / ``_respond`` 的候选生成里）：供给行要看见
+    被拒的档（票 02 §1b），而交给玩家的面不能看见它们。展示层读的**供给池**是
+    :func:`_candidate_pool_for`（= 本函数去掉闸门的那一步）。
+    """
+    return _supply_gate(
+        _candidate_pool_for(
+            state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
+        ),
+        seat=seat,
+        kind=kind,
+        payload=payload,
+        dying=dying,
+    )
+
+
+def _supply_gate(
+    actions: tuple[Action, ...],
+    *,
+    seat: int,
+    kind: QueryKind,
+    payload: Any,
+    dying: int | None,
+) -> tuple[Action, ...]:
+    """**供需合法性闸门**（need-card-supply 票 02）：全档池 → "这一问的需求能接受"的那些。
+
+    三件事，全是接线（判据**不在**这里）：
+
+    1. 认出这一问的需求 —— :func:`~sgs.effects.supply.demand_for`（不是需要牌窗口 ⇒ ``None``
+       ⇒ 一个都不删）；
+    2. 把候选动作翻成供给 —— :func:`~sgs.effects.supply.supply_of_action`（提供者读
+       ``SkillDef.supply`` 的声明，逐张牌读 ``CardRef``）；
+    3. 问合法性 —— :func:`~sgs.effects.supply.supply_is_legal`（匹配器 + ``unknown`` 的失败
+       关闭；**不许**在这里另写"哪些花色算满足"）。
+
+    ``Pass`` 等**非供给动作**原样放行；只删不改，故排序不动。
+    """
+    demand = demand_for(kind, payload, dying=dying, asker=seat)
+    if demand is None:
+        return actions
+    return tuple(
+        action
+        for action in actions
+        if not isinstance(action, (UseCard, PlayCard, ActivateSkill))
+        or supply_is_legal(demand, supply_of_action(action))
+    )
+
+
+def _candidate_pool_for(
+    state: GameState,
+    seat: int,
+    kind: QueryKind,
+    *,
+    answers_seq: int,
+    dying: int | None = None,
+    payload: RespondContext
+    | SelectContext
+    | DodgeContext
+    | PeachContext
+    | SkillActivationContext
+    | SelectOptionContext
+    | SelectOptionsContext
+    | DistributeContext
+    | None = None,
+) -> tuple[Action, ...]:
+    """**全档候选池**（唯一生成口的主体）：过"能不能用"与禁令，**不过供需闸门、不分面**。
+
+    供需闸门是**需求侧**的过滤（票 02）：同一份池子在展示层要原样保留（灰行的来源），在
+    玩家那一面要被它收窄。两步拆开的判据见 :func:`_actions_for`。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
@@ -1109,7 +1183,6 @@ def _actions_for(
             answers_seq,
             ctx.providers_used,
             armor_ignored=ctx.armor_ignored,
-            response_suits=ctx.response_suits,
         )
     elif kind is QueryKind.PEACH:
         if dying is None:
@@ -1314,20 +1387,6 @@ def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     ]
 
 
-def _response_suit_allowed(
-    card: CardRef, response_suits: tuple[str, ...] | None
-) -> bool:
-    """这一张能不能响应"只许某花色"的那次使用（feng-guanyu 票 04；``None`` = 不限）。
-
-    ``card.suit is None``（多源转化 / 纯虚拟牌）**永远匹配不上**白名单——用户 2026-11-20
-    裁定"无花色的牌不算与义云记录的花色相同，所以也无法响应"。空白名单 ``()`` 因此
-    什么都不放行（"记录为空 ⇒ 无法响应"）。
-    """
-    if response_suits is None:
-        return True
-    return card.suit is not None and card.suit in response_suits
-
-
 def _dodge(
     state: GameState,
     seat: int,
@@ -1335,7 +1394,6 @@ def _dodge(
     providers_used: tuple[str, ...] = (),
     *,
     armor_ignored: bool = False,
-    response_suits: tuple[str, ...] | None = None,
 ) -> list[Action]:
     """【闪】的响应窗口：真【闪】候选 + "需要牌"提供者序列（票 10 §5 / 票 30）+ 放弃。
 
@@ -1352,16 +1410,15 @@ def _dodge(
     与伤害链同一个键名写进 ``ModifierContext.flags["ignore_armor"]``，两条防具提供者
     （【八卦阵】/【八阵】）据此闭嘴；真【闪】与放弃不受影响。
 
-    ``response_suits``（feng-guanyu 票 04）= 这一次使用只许哪些花色的牌响应。真牌按
-    :func:`_response_suit_allowed` 过滤，转化候选由 ``virtual_candidates`` 读同一个
-    ``ModifierContext.response_suits`` 过滤；**提供者候选在此期间失败关闭**（它们的产物
-    在候选期还看不到花色：可能无花色、也可能是任意花色 ⇒ 一律不提供）。``None`` = 不限，
-    既有窗口逐字节不变。
+    **"这一次只许某花色的牌响应"不在这一层过滤**（need-card-supply 票 02）：真牌 / 转化 /
+    提供者**一律先造出来**，再由 :func:`_actions_for` 的**供需闸门**按
+    :func:`~sgs.effects.supply.supply_is_legal` 收窄——被拒的档与牌必须留在供给池里
+    （:func:`all_actions_for`），否则"八卦阵不满足花色限制"这条灰行在真窗口里画不出来
+    （票 02 §1b）。于是本函数是**同一份候选**的池子生成，不读需求。
     """
     actions: list[Action] = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
         for card in _required_hand(state, seat, DODGE_RESPONSE_CARD)
-        if _response_suit_allowed(card, response_suits)
     ]
     generated = apply_modifiers(
         ModifierPoint.CANDIDATES,
@@ -1375,15 +1432,15 @@ def _dodge(
             respond_required=DODGE_RESPONSE_CARD,
             # 只在这一问上为真：flag 是本次候选生成的临时便签（与伤害链同一键名）。
             flags={"ignore_armor": True} if armor_ignored else {},
-            response_suits=response_suits,
         ),
         tuple(actions),
     )
+    # 只删"已经问过"的提供者（每个提供者只问一次）：这是**窗口状态**过滤，不是需求判据
+    # ——需求那一层在供需闸门（:func:`_actions_for`），两者不同层。
     actions = [
         action
         for action in generated
         if not (isinstance(action, ActivateSkill) and action.skill_id in providers_used)
-        and not (isinstance(action, ActivateSkill) and response_suits is not None)
     ]
     actions.append(Pass(answers_seq=answers_seq))
     return actions
@@ -1530,6 +1587,11 @@ def _respond(
       ⇒ 这张牌没有候选。
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
+
+    **"这一次只许某花色的牌响应"不在这一层过滤**（need-card-supply 票 02）：真牌 / 转化 /
+    提供者一律先造出来，再由 :func:`_actions_for` 的**供需闸门**按
+    :func:`~sgs.effects.supply.supply_is_legal` 收窄——被拒的档与牌必须留在供给池里
+    （:func:`all_actions_for`），否则灰行画不出来（票 02 §1b）。
     """
     if ctx.mode is RespondMode.REJUDGE:
         # 改判窗口（feng-zhangjiao 票 02）：**逐技能**枚举，一条技能一种构造子。
@@ -1549,9 +1611,6 @@ def _respond(
         return rejudge
     actions: list[Action] = []
     for card in _required_cards(state, seat, ctx.required, ctx.zones):
-        if not _response_suit_allowed(card, ctx.response_suits):
-            # feng-guanyu 票 04：这一次使用只许某花色的牌响应（真牌按牌面判）。
-            continue
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
@@ -1613,20 +1672,16 @@ def _respond(
                 respond_mode=ctx.mode,
                 respond_targets=tuple(ctx.use_targets),
                 respond_declared=ctx.declared,
-                # feng-guanyu 票 04：转化候选按产物花色收窄（virtual_candidates 读它）；
-                # 提供者在期间失败关闭（见下面那条过滤）。
-                response_suits=ctx.response_suits,
             ),
             tuple(actions),
         )
+        # 只删"已经问过"的提供者（每个提供者只问一次）：这是**窗口状态**过滤，不是需求判据
+        # ——需求那一层在供需闸门（:func:`_actions_for`），两者不同层。
         actions = [
             action
             for action in generated
             if not (
                 isinstance(action, ActivateSkill) and action.skill_id in ctx.providers_used
-            )
-            and not (
-                isinstance(action, ActivateSkill) and ctx.response_suits is not None
             )
         ]
     actions.append(Pass(answers_seq=answers_seq))

@@ -367,10 +367,15 @@ class ModifierContext:
     response_suits: tuple[str, ...] | None = None
     """**这一次使用**只许哪些花色的牌响应（feng-guanyu 票 04；缺省 ``None`` = 不限）。
 
-    与 :attr:`~sgs.state.RespondContext.response_suits` 同一个事实：候选生成口在响应窗口
-    里把它原样带进来，``CANDIDATES`` 链上的转化构造器据此剔除产物花色不在白名单里的候选
-    （多源转化 / 纯虚拟牌花色为 ``None`` ⇒ 永远匹配不上）。提供者（``ActivateSkill``）的
-    候选由窗口自行失败关闭——见 ``effects.actions._dodge`` / ``_respond``。
+    与 :attr:`~sgs.state.RespondContext.response_suits` 同一个事实：带上它的
+    ``CANDIDATES`` 回调（今天的唯一读者 = ``skills.virtual.virtual_candidates``）据此剔除
+    产物花色不在白名单里的候选（多源转化 / 纯虚拟牌花色为 ``None`` ⇒ 永远匹配不上）。
+
+    need-card-supply 票 02 起**两个需要牌窗口不再填这个字段**（``effects.actions._dodge`` /
+    ``_respond``）：那两条路径要的是**未过滤的供给池**（被拒的转化也要留下画灰行），合法性
+    由 ``effects.actions._supply_gate`` 用匹配器统一算。字段因此只剩"直接调用
+    ``virtual_candidates`` 的读取方"这一档消费者（其契约由 ``tests/test_response_suits.py``
+    钉住）；窗口层的判据不在本字段上。
     """
     nature: DamageNature | None = None
     """本次伤害的**属性**（M5-05a 的加法；``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP`` 用）。

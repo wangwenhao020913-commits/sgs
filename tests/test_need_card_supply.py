@@ -12,7 +12,11 @@
    提供者的供给来自 ``SkillDef.supply`` 的声明。
 3. 牌面事实（真牌 / 单源转化 / 多源转化）与「一句话需求」的可读性。
 
-**纯展示**：本文件不碰 ``legal_actions``、不改任何合法性判据（那是票 02/03/04）。
+**票 01 = 纯展示**：那一半不碰 ``legal_actions``。
+
+**票 02 = 合法性层**（§4 的 1b / 1c / 3）：供需闸门只删**交给玩家的面**，不删**供给行**——
+被需求拒掉的档与牌仍留在供给池里（灰行的唯一来源），已知且满足的供给照常进面，候选期
+不可知（``unknown``）的供给在限制生效时失败关闭（放开它们是票 03 / 04 的活）。
 """
 
 from __future__ import annotations
@@ -26,21 +30,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "src") not in sys.path:  # 与多数测试同一条引导（单独跑时也能 import）
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from sgs.data import RuleConfig, color_of_suit, load_content_pack  # noqa: E402
+from sgs.data import Identity, RuleConfig, color_of_suit, load_content_pack  # noqa: E402
 from sgs.effects import (  # noqa: E402
     Demand,
     Supply,
+    all_actions_for,
     demand_for,
+    legal_actions_for,
     supplies_for,
     supply_mismatch,
     supply_satisfies,
 )
+from sgs.skills import CATALOG  # noqa: E402
 from sgs.state import (  # noqa: E402
+    ActivateSkill,
     DodgeContext,
     PeachContext,
     QueryKind,
     RespondContext,
     RespondMode,
+    UseCard,
     WindowCause,
 )
 
@@ -58,13 +67,18 @@ def _state_with(
     *,
     equip: tuple[int, ...] = (),
     hero: str | None = None,
+    identity: Identity | None = None,
     pack=PACK,
 ):
-    """座位 0 = 给定手牌 / 装备（供给样本都在它身上），座位 1 = 空手牌。"""
+    """座位 0 = 给定手牌 / 装备 / 武将 / 身份（供给样本都在它身上），座位 1 = 空手牌。
+
+    ``identity`` 只服务**主公技**那一族（【护驾】/【激将】只在身份为主公时解析出实例，
+    ``_identity_gates_out`` 那条既有门控）。
+    """
     used = set(hand) | set(equip)
     return build_state(
         pack=pack,
-        seats=[SeatSpec(hand=hand, equip=equip, hero=hero), SeatSpec()],
+        seats=[SeatSpec(hand=hand, equip=equip, hero=hero, identity=identity), SeatSpec()],
         deck=deck_excluding(pack, *used),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2, first_seat=0),
@@ -490,3 +504,239 @@ def test_the_self_rescue_wine_is_a_legal_supply_only_for_the_dying_seat():
     assert wine_supply, f"求桃候选里没有【酒】：{supplies}"
     assert supply_satisfies(own, wine_supply[0]) is True
     assert supply_satisfies(other, wine_supply[0]) is False, "别人濒死时【酒】不能自救"
+
+
+# ---------------------------------------------------------------------------
+# 4. 合法性层（need-card-supply 票 02）：供需闸门只删"面"，不删"供给行"
+# ---------------------------------------------------------------------------
+
+
+def _providers(actions) -> list[str]:
+    """一组候选里的提供者 id（``ActivateSkill`` 的 ``skill_id``，保序）。"""
+    return [
+        action.skill_id for action in actions if isinstance(action, ActivateSkill)
+    ]
+
+
+def _dodge_face(state, *, response_suits):
+    """座位 0 在【闪】窗口里**交给玩家的那一面**（分面 + 供需闸门之后）。"""
+    return legal_actions_for(
+        state,
+        0,
+        QueryKind.DODGE,
+        answers_seq=0,
+        payload=DodgeContext(response_suits=response_suits),
+    )
+
+
+def _redeclare_supply(monkeypatch, skill_id: str, supply: Supply) -> None:
+    """把 ``skill_id`` 的**声明供给**临时换一条（测试内的最小声明，不新造技能）。
+
+    ``CATALOG`` 是只读映射（``MappingProxyType``）⇒ 整体换掉模块上那一份。两个读取口
+    （``effects.supply._declared_supply`` 的 ``from sgs.skills import CATALOG`` 与
+    ``effects.actions.need_card_tier`` 的 ``catalog_module.CATALOG``）读的都是**模块属性**，
+    故换一份即同时生效；``resolve_instances`` 的缓存以 ``CATALOG`` **身份**为键，整体替换
+    时自动作废（该函数 docstring 的既有保证），不会吃到旧声明。monkeypatch 负责还原。
+    """
+    from dataclasses import replace
+
+    from sgs.skills import catalog as catalog_module
+
+    declared = {
+        **catalog_module.CATALOG,
+        skill_id: replace(catalog_module.CATALOG[skill_id], supply=supply),
+    }
+    monkeypatch.setattr(catalog_module, "CATALOG", declared)
+    monkeypatch.setattr("sgs.skills.CATALOG", declared)
+
+
+def test_a_known_supply_that_satisfies_the_demand_is_what_lets_the_provider_into_the_face(
+    monkeypatch,
+):
+    """§3-2 后半：**已知且满足**的供给要能进面——把【八卦阵】的声明临时改成 ♥ 虚拟【闪】。
+
+    这条钉的是"**算**出来的"：同一个局面、同一个提供者，只改声明里的花色，进不进面就跟着
+    翻面。若候选仍按"限制生效 ⇒ 提供者一律禁"处理，两次都是空——那不是匹配出来的。
+    """
+    bagua = cards_of_type(PACK, "eight_diagrams")[0]
+    state = _state_with((_DODGES[0],), equip=(bagua,))
+
+    # 原声明（无色）⇒ 花色需求下确定地不满足（spec §3 第 3 条）。
+    assert _providers(_dodge_face(state, response_suits=("heart",))) == []
+
+    _redeclare_supply(
+        monkeypatch,
+        "equip.eight_diagrams",
+        Supply(product="dodge", suit="heart", kind="virtual"),
+    )
+
+    assert _providers(_dodge_face(state, response_suits=("heart",))) == [
+        "equip.eight_diagrams"
+    ], "供给花色落在白名单里 ⇒ 这一档进面"
+    assert _providers(_dodge_face(state, response_suits=("diamond",))) == [], (
+        "同一份局面换白名单就不进面 ⇒ 判据来自供给 × 需求的匹配"
+    )
+
+
+def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_supply_row():
+    """§3-3 + §1b：八卦阵在花色限制下不进面，理由是**匹配器**；供给行里仍有它。
+
+    断言的是**关系**（``supply_satisfies(需求, 八卦阵的声明) is False``）而不是"它被禁了"：
+    放开 `unknown` 的票 03 / 04 不会让这条关系变假（无花色**确定地**不满足花色需求）。
+    """
+    bagua = cards_of_type(PACK, "eight_diagrams")[0]
+    state = _state_with((_DODGES[0],), equip=(bagua,))
+    payload = DodgeContext(response_suits=("heart",))
+    demand = demand_for(QueryKind.DODGE, payload)
+    declared = CATALOG["equip.eight_diagrams"].supply
+
+    assert demand is not None and declared is not None
+    assert supply_satisfies(demand, declared) is False, (
+        "八卦阵的供给 = 无色虚拟【闪】⇒ 花色需求下不满足（关系层，不是禁令层）"
+    )
+    assert "equip.eight_diagrams" not in _providers(_dodge_face(state, response_suits=("heart",)))
+
+    # §1b 的另一半：同一问的**供给池**里它还在（灰行的唯一来源），面里没有它。
+    pool = all_actions_for(state, 0, QueryKind.DODGE, answers_seq=0, payload=payload)
+    assert "equip.eight_diagrams" in _providers(pool)
+    rows = [
+        group
+        for group in supplies_for(QueryKind.DODGE, state=state, seat=0, payload=payload)
+        if group.provider == "equip.eight_diagrams"
+    ]
+    assert [group.supplies for group in rows] == [(declared,)]
+
+
+def test_an_unknown_provider_stays_out_of_the_face_while_a_restriction_is_active():
+    """§3-2 前半：候选期不可知（蛊惑 / 护驾 / 激将）⇒ 限制生效时**仍不进面**。
+
+    ``unknown`` 的失败关闭住在**合法性闸门**（``effects.supply.supply_is_legal``）里，不在
+    匹配器里（匹配器对它"不判死"是票 01 的展示口径）。三张声明、三扇窗口各一条：
+    【护驾】（曹操 / 【闪】）、【激将】（刘备 / 【杀】族）、【蛊惑】（于吉 / 【闪】）。
+    """
+    hujia = "hero.caocao.hujia"
+    jijiang = "hero.liubei.jijiang"
+    guohuo = "hero.yuji_mobile.guohuo"
+    hujia_state = _state_with((_DODGES[0],), hero="caocao", identity=Identity.LORD)
+    jijiang_state = _state_with((_SLASHES[0],), hero="liubei", identity=Identity.LORD)
+    guohuo_state = _state_with((_DODGES[0],), hero="yuji_mobile")
+    slash_window = RespondContext(
+        cause=WindowCause.DUEL, required="slash", mode=RespondMode.PLAY
+    )
+    cases = (
+        (
+            hujia,
+            hujia_state,
+            QueryKind.DODGE,
+            DodgeContext(response_suits=("heart",)),
+            DodgeContext(),
+        ),
+        (
+            jijiang,
+            jijiang_state,
+            QueryKind.RESPOND,
+            RespondContext(
+                cause=WindowCause.DUEL,
+                required="slash",
+                mode=RespondMode.PLAY,
+                response_suits=("heart",),
+            ),
+            slash_window,
+        ),
+        (
+            guohuo,
+            guohuo_state,
+            QueryKind.DODGE,
+            DodgeContext(response_suits=("heart",)),
+            DodgeContext(),
+        ),
+    )
+
+    for skill_id, state, kind, restricted, unrestricted in cases:
+        declared = CATALOG[skill_id].supply
+        assert declared is not None and declared.unknown is True, skill_id
+        face = legal_actions_for(state, 0, kind, answers_seq=0, payload=restricted)
+        assert _providers(face) == [], f"{skill_id}：限制生效时仍进了面"
+        # 不限花色的窗口里它照常进面（票 01 之前的行为逐条不变）。
+        assert skill_id in _providers(
+            legal_actions_for(state, 0, kind, answers_seq=0, payload=unrestricted)
+        ), f"{skill_id}：不限花色时应当照常提供"
+        # §1b：它仍在供给池里 ⇒ 供给行照报（灰行的来源），只是不进面。
+        assert skill_id in _providers(
+            all_actions_for(state, 0, kind, answers_seq=0, payload=restricted)
+        ), f"{skill_id}：供给池里应当保留（灰行来源）"
+
+
+def test_a_rejected_real_card_and_conversion_keep_their_supply_rows_but_not_the_face():
+    """§1c-7 + §1b：真牌 / 转化被需求拒掉时，供给行照报、面里没有。
+
+    【赵云】的【龙胆】把 ♦【杀】转成 ♦【闪】；花色需求是 ♥ ⇒ 真【闪】与转化【闪】都不进面，
+    但两者的供给都还在池子里。行里的 ``ok`` 与这里断的 ``supply_satisfies`` 是**同一个**
+    判据（``need_card_supply_rows`` 读它）。
+    """
+    diamond_dodge = _card_of_suit("dodge", "diamond")
+    diamond_slash = _card_of_suit("slash", "diamond")
+    state = _state_with((diamond_dodge, diamond_slash), hero="zhaoyun")
+    payload = DodgeContext(response_suits=("heart",))
+    demand = demand_for(QueryKind.DODGE, payload)
+    assert demand is not None
+
+    pool = all_actions_for(state, 0, QueryKind.DODGE, answers_seq=0, payload=payload)
+    face = _dodge_face(state, response_suits=("heart",))
+    supplies = [
+        supply
+        for group in supplies_for(
+            QueryKind.DODGE, state=state, seat=0, payload=payload
+        )
+        for supply in group.supplies
+    ]
+
+    assert sorted(supply.kind for supply in supplies) == ["real", "transformed"], (
+        f"供给行要同时看得到真牌与被拒的转化：{supplies}"
+    )
+    assert all(supply.suit == "diamond" for supply in supplies)
+    assert all(supply_satisfies(demand, supply) is False for supply in supplies), (
+        "♦ 的供给在 ♥ 白名单下都不满足 ⇒ 两行都是 ok=False（含理由）"
+    )
+    assert any(isinstance(action, UseCard) for action in pool), "池里仍有两张候选（真牌 + 转化）"
+    assert not any(isinstance(action, UseCard) for action in face), (
+        "面里一张都不该有：被需求拒掉的真牌与转化都不进面"
+    )
+
+
+def _card_of_suit(type_id: str, suit: str) -> int:
+    """标准 108 档里某牌名某花色的第一张 ``card_id``（构造被拒样本用）。"""
+    return next(
+        card_id
+        for card_id in cards_of_type(PACK, type_id)
+        if PACK.deck.cards[card_id].suit == suit
+    )
+
+
+def test_the_respond_demand_carries_the_same_suit_restriction_as_the_dodge_one():
+    """票 02 的接线：``RESPOND`` 与 ``DODGE`` 同读承载帧的 ``response_suits``（三态不塌）。
+
+    票 01 只把这一维接进了 ``DODGE``；合法性闸门在 ``RESPOND`` 窗口上必须与今天
+    ``_response_suit_allowed`` 的结论逐条相同，故它得先看得见这份事实。
+    """
+    restricted = RespondContext(
+        cause=WindowCause.DUEL,
+        required="slash",
+        mode=RespondMode.PLAY,
+        response_suits=("heart",),
+    )
+    plain = RespondContext(
+        cause=WindowCause.DUEL, required="slash", mode=RespondMode.PLAY
+    )
+    empty = RespondContext(
+        cause=WindowCause.DUEL,
+        required="slash",
+        mode=RespondMode.PLAY,
+        response_suits=(),
+    )
+
+    assert demand_for(QueryKind.RESPOND, restricted) == Demand(
+        names=("slash",), suits=("heart",)
+    )
+    assert demand_for(QueryKind.RESPOND, plain) == Demand(names=("slash",))
+    assert demand_for(QueryKind.RESPOND, empty) == Demand(names=("slash",), suits=())

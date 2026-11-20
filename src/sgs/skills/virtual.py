@@ -944,6 +944,12 @@ def virtual_candidates(
             # feng-guanyu 票 04：这一次使用只许某些花色的牌响应 ⇒ 产物花色不在白名单的
             # 转化候选不进面。多源转化 / 纯虚拟牌的花色是 ``None`` ⇒ 永远匹配不上
             # （用户 2026-11-20 裁定："无花色的牌不算同花色，也无法响应"）。
+            #
+            # need-card-supply 票 02 起**窗口路径不再给这个字段**（``_dodge`` / ``_respond``
+            # 收掉了它）：候选生成要先造出**供给池**，"被需求拒掉的转化"必须留在池里当灰行
+            # （票 02 §1b），合法性改由 ``effects.actions._supply_gate`` 用
+            # ``supply_satisfies`` 那一份判据算。这里保留的是**本构造器的直接调用契约**
+            # （调用方自己带白名单时仍得到已筛过的那一份），判据本身只此一处。
             continue
         if ctx.scope is CandidateScope.RESPOND and (
             ctx.respond_required is None

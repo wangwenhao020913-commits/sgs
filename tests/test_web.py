@@ -16243,10 +16243,12 @@ def test_the_feng_guanyu_option_labels_are_chinese_on_both_sides() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 需要（使用 / 打出）牌的「需求 × 供给」（need-card-supply 票 01）
+# 需要（使用 / 打出）牌的「需求 × 供给」（need-card-supply 票 01 / 02）
 #
-# 票面 §4 的验收 3 / 4 / 5 / 6：一句需求的人话、灰行 + 理由、投影的两个键（且不进
+# 票 01 §4 的验收 3 / 4 / 5 / 6：一句需求的人话、灰行 + 理由、投影的两个键（且不进
 # legal_actions）、以及一条**真 HTTP** 的载荷断言。
+# 票 02 §1c 的验收 6 / 7：**真窗口**里被需求拒掉的档与牌仍画得出灰行（``ok=False`` +
+# 理由），同时它们的行动**不在** ``legal_actions`` 里（置灰可见 + 行为不变）。
 # ---------------------------------------------------------------------------
 
 _NEED_CARD_PACK = load_content_pack(deck_profile="standard_108")
@@ -16365,6 +16367,87 @@ def test_the_pending_payload_carries_the_need_card_keys_only_for_need_card_windo
     assert bare["need_card_demand"] is None and bare["need_card_supplies"] is None
     foreign = pending_payload(session.pending, human_seat=1)
     assert foreign["need_card_demand"] is None and foreign["need_card_supplies"] is None
+
+
+def _need_card_restricted_dodge_session():
+    """推到一个**花色需求生效**的【闪】询问：座位 1 用【杀】，且只许 ♥ 的牌响应。
+
+    ``response_suits`` 是【单骑】第三段那个事实（``Engine.start_use(..., response_suits=...)``
+    写进 USE 帧、随结算帧继承到本问）；这里直接按同一入口摆出来，不必真翻一张【单骑】。
+
+    座位 0 = 目标带【八卦阵】（装备档 1，无色虚拟【闪】）+ 手牌 ♦【闪】与 ♦【杀】
+    （武将【龙胆】⇒ ♦【杀】转化出 ♦【闪】）。三档供给因此**全都被 ♥ 白名单拒掉**：真牌、
+    转化、提供者各一条——正是票 02 §1c-6 / 7 要的"灰行可见、面里没有"。
+    """
+    pack = _NEED_CARD_PACK
+    slash = cards_of_type(pack, "slash")[0]
+    diamond_slash = next(
+        card_id
+        for card_id in cards_of_type(pack, "slash")
+        if pack.deck.cards[card_id].suit == "diamond"
+    )
+    diamond_dodge = next(
+        card_id
+        for card_id in cards_of_type(pack, "dodge")
+        if pack.deck.cards[card_id].suit == "diamond"
+    )
+    bagua = cards_of_type(pack, "eight_diagrams")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(diamond_dodge, diamond_slash), equip=(bagua,), hero="zhaoyun"),
+            SeatSpec(hand=(slash,)),
+        ],
+        deck=deck_excluding(pack, slash, diamond_slash, diamond_dodge, bagua),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=11)
+    engine.start_use(
+        state.card(slash), source=1, targets=(0,), response_suits=("heart",)
+    )
+    run_queries(
+        engine, [PassPlayer(), PassPlayer()], lambda e: e.pending is not None
+    )
+    assert engine.pending is not None and engine.pending.kind == QueryKind.DODGE, (
+        "构造局面没到带花色需求的【闪】窗口"
+    )
+    session = Session(
+        seed=11, ai="heuristic", timeout_seconds=None, player_count=2, human_seat=0
+    )
+    session.engine = engine
+    return session
+
+
+def test_the_real_window_keeps_rejected_tiers_as_grey_rows_and_out_of_the_face() -> None:
+    """票 02 §1c-6 / 7：**真窗口**里灰行可见（``ok=False`` + 理由）**且**行为不变（不进面）。
+
+    两条一起断言是本条的全部要点（票面 §1b）：只删供给行 = 灰行凭空消失（票 01 实测的
+    缺口）；只删面 = 供给行还在但玩家仍能选（不合法）。故这里同时钉住：
+    ① 八卦阵那一行 ``ok=False`` + 非空 ``reason``；② 真牌 / 转化那两档同样 ``ok=False``；
+    ③ 它们的 ``ActivateSkill`` / ``UseCard`` **不在** ``legal_actions`` 里（只剩 ``Pass``）。
+    """
+    session = _need_card_restricted_dodge_session()
+    payload = pending_payload(session)
+
+    assert payload["need_card_demand"] == "本次要求：【闪】，且花色必须是 ♥"
+    rows = {row["label"]: row for row in payload["need_card_supplies"]}
+    assert set(rows) == {"装备档·八卦阵", "使用牌档·手牌"}, rows
+
+    bagua = rows["装备档·八卦阵"]
+    assert bagua["ok"] is False, "无花色供给确定地不满足花色需求（spec §3 第 3 条）"
+    assert bagua["reason"] == "八卦阵：无色虚拟【闪】 → 不满足花色限制"
+    hand = rows["使用牌档·手牌"]
+    assert "♦" in hand["supply_text"], "真牌与转化两档都要照报（灰行的来源）"
+    assert hand["ok"] is False and hand["reason"], "真牌 / 转化被拒时同样灰行 + 理由"
+
+    kinds = [action["kind"] for action in payload["legal_actions"]]
+    assert kinds == ["Pass"], f"被需求拒掉的档与牌都不进面：{payload['legal_actions']}"
+    assert not any(
+        action["kind"] == "ActivateSkill"
+        and action.get("skill_id") == "equip.eight_diagrams"
+        for action in payload["legal_actions"]
+    ), "八卦阵的 ActivateSkill 不在这张面里（行为与限制生效时逐条不变）"
 
 
 def test_the_need_card_keys_reach_a_real_http_payload() -> None:

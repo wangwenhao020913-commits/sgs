@@ -105,7 +105,9 @@ from .supply import (
     TierSupplies,
     demand_for,
     supplies_for,
+    supply_is_legal,
     supply_mismatch,
+    supply_of_action,
     supply_satisfies,
 )
 from .ops import OPS
@@ -214,7 +216,9 @@ __all__ = (
     "seat_distance",
     "substitute_judge_card",
     "supplies_for",
+    "supply_is_legal",
     "supply_mismatch",
+    "supply_of_action",
     "supply_satisfies",
     "swap_judge_card",
     "target_combos",

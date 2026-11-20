@@ -1,16 +1,19 @@
 """**需求（Demand）× 供给（Supply）**——需要（使用 / 打出）牌时的两个值对象与匹配器。
 
 用户 2026-11-20 的提案（`spec.md` §1 逐字）把"每一档能提供什么"与"这一问要什么"变成
-可比较的两件事；本模块只放**值对象 + 匹配**，不产生候选、不改任何合法性判据
-（那是 need-card-supply 票 02 / 03 / 04）。三个消费点：
+可比较的两件事；本模块只放**值对象 + 匹配 + 合法性谓词**，不产生候选
+（候选生成在 ``effects/actions.py``）。四个消费点：
 
-- :func:`supplies_for`：从 :func:`sgs.effects.actions._actions_for` 的**全档候选**反推
+- :func:`supplies_for`：从 :func:`sgs.effects.actions.all_actions_for` 的**全档供给池**反推
   逐条供给（手牌真牌 / 转化牌由牌面事实得到；提供者读 ``SkillDef.supply`` 的声明），
   **不新增真源**——不另写枚举、不复制"哪些牌能用"的判据（spec §0.1-2）；
 - :func:`demand_for`：把窗口的 ``required`` + ``response_suits`` 打包成维度可加的
   :class:`Demand`；
 - :func:`supply_satisfies` / :func:`supply_mismatch`：投影（``pending_payload``）用它算
-  高亮 / 置灰与理由（用户 Q4：置灰**后端实时算**，前端只读 ``ok``）。
+  高亮 / 置灰与理由（用户 Q4：置灰**后端实时算**，前端只读 ``ok``）；
+- :func:`supply_is_legal`：**合法性闸门**（票 02）——交到玩家手上的那一面按它过滤。与展示层
+  的 ``ok`` **不是**同一句话：候选期不可知的供给在展示层不判死，在合法性上失败关闭
+  （见该函数的 docstring）。
 
 **维度可加**（用户 Q3 的落地口径）：牌名 / 花色 / 颜色 / 点数 / 虚拟·转化 / 转化源张数。
 今天只有前两维有生产者（牌名 = ``required``、花色 = ``response_suits``，单骑第三段），
@@ -20,11 +23,14 @@
 **无花色 / 无点数的供给确定地不满足对应维度的限制**（不是"未知"，spec §3 第 3 条）：
 【八卦阵】/【八阵】的纯虚拟【闪】与多源转化（【丈八蛇矛】/ 单骑）都没有花色 ⇒ 花色
 需求下必然不满足。"候选期不知道"由 :attr:`Supply.unknown` 单独表达（【蛊惑】/【护驾】/
-【激将】）：本票只标出来、**不判死**——匹配结果按"不挡"处理，真正的合法性在票 02 / 03 / 04。
+【激将】）：**展示层**（:func:`supply_mismatch`）只标出来、不判死；**合法性**（票 02 的
+:func:`supply_is_legal`）在需求带收窄维度时失败关闭。放开它们是票 03 / 04 的活。
 
 循环 import（票面 §5 的纪律）：``effects/actions.py`` 与本模块互相看得见（``actions`` 的
-窗口闸门与候选生成是本模块的读取方），故 ``.actions`` 与 ``sgs.skills.catalog`` 一律
-**函数内惰性 import**（仓里既有姿态，见 ``actions.py:_transformed_peaches``）。
+供需闸门读本模块，本模块的供给反推读 ``actions.all_actions_for``），故本模块对 ``.actions``
+与 ``sgs.skills.catalog`` 一律**函数内惰性 import**（仓里既有姿态，见
+``actions.py:_transformed_peaches``）；反方向（``actions`` 模块级 import 本模块）安全——
+本模块的模块级依赖只有 ``sgs.state`` 与 ``.behaviors``。
 """
 
 from __future__ import annotations
@@ -52,7 +58,9 @@ __all__ = [
     "TierSupplies",
     "demand_for",
     "supplies_for",
+    "supply_is_legal",
     "supply_mismatch",
+    "supply_of_action",
     "supply_satisfies",
 ]
 
@@ -184,6 +192,48 @@ def supply_satisfies(demand: Demand | None, supply: Supply | None) -> bool:
     return supply_mismatch(demand, supply) is None
 
 
+_NARROWED_DIMENSIONS: tuple[str, ...] = (
+    "suits",
+    "colors",
+    "ranks",
+    "kinds",
+    "source_counts",
+)
+"""**收窄**维度（牌名之外的五个，spec §3 / Q3）：候选期看不到就判不了的限制。
+
+牌名不在里面：它是每一扇需要牌窗口的**基础要求**（窗口登记行 / 候选生成口已经按它收窄过），
+而候选期不可知的提供者历来按它放行（产物牌名是它们的声明事实）。这五个维度才是票 02
+"限制生效 ⇒ 失败关闭"的触发条件。
+"""
+
+
+def _narrowed(demand: Demand) -> bool:
+    """这份需求带不带一条**收窄**（任一非牌名维度非 ``None``；``()`` 也算收窄）。"""
+    return any(getattr(demand, dimension) is not None for dimension in _NARROWED_DIMENSIONS)
+
+
+def supply_is_legal(demand: Demand | None, supply: Supply | None) -> bool:
+    """**合法性闸门**（need-card-supply 票 02）：这一次需求放不放行这条供给。
+
+    它回答的是"该不该进 ``legal_actions`` 的那一面"，与 :func:`supply_satisfies`（展示层
+    的 ``ok``）**故意不同**一处：
+
+    - 供给**可判**（``supply`` 有声明且 ``unknown=False``）⇒ 与展示层同源：按维度匹配；
+    - 供给**不可判**（``supply is None`` = 提供者没声明；``supply.unknown`` = 候选期不可知
+      【蛊惑】/【护驾】/【激将】）⇒ **只要需求带一条收窄维度就失败关闭**（= 票 01 之前那
+      道"多禁"的同一结论，票面 §1：放开它们是票 03 / 04 的活）；没有收窄维度时照常放行
+      （今天的窗口里它们本来就是候选）。
+
+    `unknown` 的失败关闭**只住在这里**（票面 §1 的判据只有一处）：匹配器 :func:`supply_satisfies`
+    对 ``unknown`` 返回 ``None``（"不判死"）是票 01 的**展示**口径，不是合法性的口径。
+    """
+    if demand is None:
+        return True
+    if supply is None or supply.unknown:
+        return not _narrowed(demand)
+    return supply_satisfies(demand, supply)
+
+
 def demand_for(
     kind: QueryKind,
     payload: Any = None,
@@ -197,7 +247,9 @@ def demand_for(
 
     - **牌名** = 窗口的 ``required``（【闪】窗口恒为 ``dodge``；响应窗口取自身载荷）；
     - **花色** = ``response_suits``（单骑第三段；``None`` 不限 / ``()`` 记录为空 /
-      非空白名单三态原样进需求，不在这里塌成两态）。
+      非空白名单三态原样进需求，不在这里塌成两态）。两扇带类型化载荷的窗口（``DODGE`` /
+      ``RESPOND``）各读自己那一份：两扇的 ``response_suits`` 是**同一个事实**（承载帧的
+      ``RESPONSE_SUITS_KEY``），票 02 起 ``RESPOND`` 这一扇也接上（合法性闸门要用它）。
 
     ``asker`` / ``dying`` 只服务求桃窗口的自救读法（见 :data:`SELF_RESCUE_CARD`）。
     窗口判据走 :func:`sgs.effects.actions.is_need_card_window`（``_window_floor`` 那一族），
@@ -218,7 +270,13 @@ def demand_for(
     if kind is QueryKind.RESPOND:
         if not isinstance(payload, RespondContext):
             raise ValueError("RESPOND 询问必须给出 RespondContext")
-        return Demand(names=None if payload.required is None else (payload.required,))
+        return Demand(
+            names=None if payload.required is None else (payload.required,),
+            # 票 02 补上这一维：``RESPOND`` 的载荷与 ``DODGE`` 同形地带着"这一次使用只许哪些
+            # 花色的牌响应"（票 01 只接了 DODGE 那一扇）。合法性闸门在 ``RESPOND`` 窗口上
+            # 必须与今天 ``_response_suit_allowed`` 的结论逐条相同，故它得先看得见这份事实。
+            suits=payload.response_suits,
+        )
     return None
 
 
@@ -244,7 +302,11 @@ def supplies_for(
     dying: int | None = None,
     answers_seq: int = 0,
 ) -> tuple[TierSupplies, ...]:
-    """这一问的**按档供给**：从 :func:`~sgs.effects.actions.all_actions_for` 的全档候选反推。
+    """这一问的**按档供给**：从 :func:`~sgs.effects.actions.all_actions_for` 的**全档供给池**反推。
+
+    读的是供给池而**不是**合法面（票 02 §1b）：被需求拒掉的档与牌**仍在这份池里** —— 灰行的
+    唯一来源就是它们（"这一档试过了、不满足"必须画得出来，不能凭空消失）。合法性过滤只从
+    ``legal_actions_for`` 返回的那一面里删。
 
     **不新增真源**（spec §0.1-2）：
 
@@ -265,22 +327,31 @@ def supplies_for(
     )
     groups: dict[tuple[int, str | None], list[Supply]] = {}
     for action in actions:
-        if isinstance(action, ActivateSkill):
-            supply = _declared_supply(action.skill_id)
-            if supply is None:
-                # 没有声明的提供者不报供给（展示层不知道它能提供什么，不猜）。
-                continue
-            groups.setdefault((need_card_tier(action), action.skill_id), []).append(supply)
-        elif isinstance(action, (UseCard, PlayCard)):
-            groups.setdefault((need_card_tier(action), None), []).append(
-                _supply_of_card(action.card)
-            )
+        supply = supply_of_action(action)
+        if supply is None:
+            # ``Pass`` 不是供给；没有声明的提供者也不报（展示层不知道它能提供什么，不猜）。
+            continue
+        provider = action.skill_id if isinstance(action, ActivateSkill) else None
+        groups.setdefault((need_card_tier(action), provider), []).append(supply)
     return tuple(
         TierSupplies(tier=tier, provider=provider, supplies=tuple(dict.fromkeys(supplies)))
         for (tier, provider), supplies in sorted(
             groups.items(), key=lambda item: (item[0][0], item[0][1] or "")
         )
     )
+
+
+def supply_of_action(action: Any) -> Supply | None:
+    """一条候选动作的**供给描述**；``None`` = 它不是供给（``Pass``）或提供者没声明。
+
+    与 :func:`supplies_for` **同一份**动作 → 供给映射（票 02 的合法性闸门也读它）：两处若各
+    写一份，展示行与合法面就可能对"这一条到底能提供什么"给出两个答案。
+    """
+    if isinstance(action, ActivateSkill):
+        return _declared_supply(action.skill_id)
+    if isinstance(action, (UseCard, PlayCard)):
+        return _supply_of_card(action.card)
+    return None
 
 
 def _supply_of_card(card: CardRef) -> Supply:
