@@ -461,6 +461,9 @@ def jie_xusheng_skill_definitions() -> tuple[SkillDef, ...]:
 # - **伤逝** = 多时机零步流水线（样板 ``hero.sunshangxiang.xiaoji``）：一条 ``SkillDef`` 挂
 #   **四条** ``Hook``（失去手牌后 / 扣减体力后 / 回复体力后 / 加体力上限后），四条共用同一份
 #   条件与同一份效果。可选（「可以」⇒ 有放弃）、X = 已损失体力值现算、效果是"摸至 X 张"。
+#   **受致命伤害时先问伤逝、再进濒死**：官方规则集的【伤逝】例逐字写"在扣減3點體力後能發動
+#   〖傷逝〗摸兩張牌，**然後進入瀕死狀態**" ⇒ `steps.LIFE_DECREASE_STEPS` 把濒死压帧排在
+#   「扣减体力后」之后（票 02 的修正；"濒死优先"只管"造成 / 受到伤害后"那三条）。
 # ---------------------------------------------------------------------------
 
 ZHANGCHUNHUA = "zhangchunhua_mobile"
@@ -529,9 +532,21 @@ def _jueqing_rewrite(host: Any, frame: Frame) -> None:
 
 
 def _shangshi_x(state: GameState, seat: int) -> int:
-    """X = **已损失的体力值** = 体力上限 − 体力值（牌面括注；每次取值按当下重算）。"""
+    """X = **已损失的体力值** = 体力上限 − 体力值（牌面括注；每次取值按当下重算）。
+
+    **体力值可能小于 0**（`apply_hp` 的下限不夹：官方明说"角色的体力有可能小于 0"），
+    而 X 最多是**体力上限**——《三國殺官方規則集 2018.3-16》的【伤逝】例逐字写着：
+
+        體力為2手牌數為1的張春華受到管道為【閃電】的3點雷電傷害，在扣減3點體力後能發動
+        〖傷逝〗**摸兩張牌**，然後進入瀕死狀態……
+
+    −1 体力若按"上限 − 体力"算就是 4（⇒ 摸 3 张），与例文的"摸两张"对不上；按这里
+    的读法 X = 3 − max(−1, 0) = 3、手牌 1 ⇒ 摸 2 张，逐字吻合。用户 2026-11-20 的报障
+    （"此时已损失体力为自身体力上限（3）"）也是这条。
+    """
     player = state.player(seat)
-    return max(0, int(player.hp_max) - int(player.hp))
+    lost = int(player.hp_max) - max(0, int(player.hp))
+    return max(0, lost)
 
 
 def _shangshi_needs_cards(state: GameState, seat: int) -> bool:

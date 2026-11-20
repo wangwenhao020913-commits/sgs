@@ -1504,12 +1504,26 @@ def life_decrease_reset_chain(host: FrameHost, frame: Frame) -> None:
 def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
     """体力 ≤ 0 ⇒ 插入濒死结算（官方 4.17 第 1 条）。
 
-    插入点选在"扣减体力时"整步做完之后：时机本身的记录形态因此仍是
-    ``BEFORE → ON → AFTER``，濒死帧压在这三条之上——官方"濒死结算优先于
-    造成伤害后 / 受到伤害后类技能"（4.17）于是由栈结构直接表达。
+    **插入点在「扣减体力后」之后**（yijiang-2011-xusheng-chunhua 票 02 的修正）：
+    官方规则集 2018 的【伤逝】例逐字写着"在扣減3點體力後能發動〖傷逝〗摸兩張牌，
+    **然後進入瀕死狀態**，進行瀕死結算"（转载见 `docs/agents/domain.md` 的 URL）——
+    "扣减体力后"的技能先结算，濒死帧再压上去。`三国杀详细规则.txt` §4.15 的整理稿
+    把插入点写在"扣减体力时"那一条下，是**整理稿的省略**，以 2018 规则集的例子为准
+    （`readings.md` §4：结算规则以 2018 规则集为权威）。
+
+    "濒死优先"仍然管**另一类**：`DAMAGE_AFTER_TAKE` / `DAMAGE_AFTER_DEAL` / `DAMAGE_END`
+    是 ``DAMAGE`` 帧里排在 ``LIFE_DECREASE`` 子帧**之后**的步骤 ⇒ 结构上仍在濒死之后
+    （4.17 的原文只点名"造成伤害后 / 受到伤害后"）。
+
+    记录形态因此是 ``BEFORE → ON → AFTER``（LIFE_DECREASE 帧的三条连在一起），之后才是
+    ``NEAR_DEATH_*``；47 条标准金录像逐字节不变（票 02 实测）。
     """
     target = frame.data["target"]
     if not frame.data["dying"]:
+        return
+    if host.state.player(target).hp > 0:
+        # 「扣减体力后」的技能把这个座位的体力拉回了 1 点以上（今天没有这样的载体，
+        # 这一句是次序修正后的防御）：濒死是"**此刻**体力 ≤ 0"的状态，不认旧判据。
         return
     host.push_frame(
         FrameKind.NEAR_DEATH,
@@ -1565,10 +1579,11 @@ LIFE_DECREASE_STEPS = (
     Step(life_decrease_on, Timing.LIFE_DECREASE_ON),
     # 横置重置：非 dispatch（不对应任何时机枚举位），在濒死 / after-take 之前（M5-03）。
     Step(life_decrease_reset_chain, None),
-    # 压栈步骤的 `timing` 只作子帧 `return_to` 的可读标签：NEAR_DEATH_ENTER
-    # 由 NEAR_DEATH 帧自己 dispatch。
-    Step(life_decrease_trigger_near_death, Timing.NEAR_DEATH_ENTER),
     Step(life_decrease_after, Timing.LIFE_DECREASE_AFTER),
+    # 压栈步骤的 `timing` 只作子帧 `return_to` 的可读标签：NEAR_DEATH_ENTER
+    # 由 NEAR_DEATH 帧自己 dispatch。**排在「扣减体力后」之后**（票 02 的修正：
+    # 官方规则集的【伤逝】例 = 先伤逝、然后进入濒死状态）。
+    Step(life_decrease_trigger_near_death, Timing.NEAR_DEATH_ENTER),
 )
 
 

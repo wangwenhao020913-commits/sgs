@@ -230,9 +230,16 @@ def test_near_death_takes_priority_over_the_damage_aftermath_timings():
         assert timing not in emitted, (
             f"官方 4.17：濒死结算优先于'造成伤害后 / 受到伤害后'，{timing} 不该出现"
         )
-    assert Timing.LIFE_DECREASE_AFTER.value not in emitted, (
-        "无人救时整条伤害链（含扣减体力尾巴）留给终局清栈，不再继续 dispatch"
+    # **「扣减体力后」排在濒死之前**（yijiang-2011-xusheng-chunhua 票 02 的修正）：
+    # 《三國殺官方規則集 2018.3-16》的【伤逝】例逐字写着"在扣減3點體力後能發動〖傷逝〗…
+    # **然後進入瀕死狀態**"（转载见 `docs/agents/domain.md` 的 URL）。故这一条**出现**、
+    # 且排在濒死三时机之前——"濒死优先"只管"造成 / 受到伤害后"那三条（4.17）。
+    assert Timing.LIFE_DECREASE_AFTER.value in emitted, (
+        "「扣减体力后」在濒死插入之前结算（官方规则集的【伤逝】例）"
     )
+    assert emitted.index(Timing.LIFE_DECREASE_AFTER.value) < emitted.index(
+        Timing.NEAR_DEATH_ENTER.value
+    ), "扣减体力后先于进入濒死状态"
 
 
 # ---------------------------------------------------------------------------
@@ -522,12 +529,16 @@ def test_after_a_rescue_the_interrupted_resolution_continues():
     emitted = _timings(engine.records)
 
     assert Timing.NEAR_DEATH_AFTER.value in emitted
-    assert Timing.LIFE_DECREASE_AFTER.value in emitted, "濒死帧出栈后回到被中断的扣减体力结算"
+    assert Timing.LIFE_DECREASE_AFTER.value in emitted, "扣减体力后照常派发"
     for timing in DAMAGE_AFTERMATH_TIMINGS:
         assert timing in emitted, f"救回后伤害结算照常走完：{timing}"
+    # 「扣减体力后」在濒死**之前**；"造成 / 受到伤害后"那三条仍在濒死之后（4.17）。
+    assert emitted.index(Timing.LIFE_DECREASE_AFTER.value) < emitted.index(
+        Timing.NEAR_DEATH_ENTER.value
+    ), "扣减体力后先于进入濒死状态（官方规则集的【伤逝】例）"
     assert emitted.index(Timing.NEAR_DEATH_AFTER.value) < emitted.index(
-        Timing.LIFE_DECREASE_AFTER.value
-    )
+        Timing.DAMAGE_AFTER_TAKE.value
+    ), "濒死结算优先于「受到伤害后」（4.17 不变）"
 
 
 def test_recovery_never_goes_above_the_hp_max():

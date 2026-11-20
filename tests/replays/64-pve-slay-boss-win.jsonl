@@ -34,24 +34,25 @@
 {"actor":1,"cards":[],"depth":4,"frame_id":4,"kind":"timing","seq":33,"source":0,"targets":[],"timing":"LIFE_DECREASE_BEFORE"}
 {"actor":1,"cards":[],"depth":4,"frame_id":4,"kind":"timing","seq":34,"source":0,"targets":[],"timing":"LIFE_DECREASE_ON"}
 {"after":0,"amount":-1,"before":1,"delta_type":"hp_change","depth":4,"frame_id":4,"kind":"delta","seat":1,"seq":35}
-{"depth":5,"frame_id":5,"frame_kind":"NEAR_DEATH","kind":"frame","op":"push","return_to":["LIFE_DECREASE","NEAR_DEATH_ENTER"],"seq":36}
-{"actor":1,"cards":[],"depth":5,"frame_id":5,"kind":"timing","seq":37,"source":null,"targets":[],"timing":"NEAR_DEATH_ENTER"}
-{"actor":1,"cards":[],"depth":5,"frame_id":5,"kind":"timing","seq":38,"source":null,"targets":[],"timing":"NEAR_DEATH_AT"}
-{"kind":"query","query":{"actor":0,"dying":1,"kind":"PEACH","legal_actions":[{"answers_seq":39,"kind":"Pass"}],"prompt":"座位 1 处于濒死状态：是否对其使用【桃】？","seq":39,"timing":"NEAR_DEATH_AT","view":{"deck_count":105,"discard":[],"phase":"play","players":[{"alive":true,"equip":[],"hand_count":2,"hp":4,"hp_max":4,"identity":"ally","judge":[],"seat":0},{"alive":true,"equip":[],"hand_count":0,"hp":0,"hp_max":5,"identity":"enemy","judge":[],"seat":1}],"processing":[{"attack_range":null,"card_id":18,"color":"red","name":"杀","rank":10,"slot":null,"suit":"heart","type":"slash","virtual_sources":[]}],"seat":0,"self_hand":[{"attack_range":null,"card_id":0,"color":"red","name":"桃园结义","rank":1,"slot":null,"suit":"heart","type":"peach_garden","virtual_sources":[]},{"attack_range":null,"card_id":1,"color":"red","name":"万箭齐发","rank":1,"slot":null,"suit":"heart","type":"arrow_barrage","virtual_sources":[]}],"turn_seat":0}},"seq":39}
-{"accepted":true,"action":{"answers_seq":39,"kind":"Pass"},"answers_seq":39,"kind":"action","reason":null,"seq":40}
-{"kind":"query","query":{"actor":1,"dying":1,"kind":"PEACH","legal_actions":[{"answers_seq":41,"kind":"Pass"}],"prompt":"座位 1 处于濒死状态：是否对其使用【桃】？","seq":41,"timing":"NEAR_DEATH_AT","view":{"deck_count":105,"discard":[],"phase":"play","players":[{"alive":true,"equip":[],"hand_count":2,"hp":4,"hp_max":4,"identity":"ally","judge":[],"seat":0},{"alive":true,"equip":[],"hand_count":0,"hp":0,"hp_max":5,"identity":"enemy","judge":[],"seat":1}],"processing":[{"attack_range":null,"card_id":18,"color":"red","name":"杀","rank":10,"slot":null,"suit":"heart","type":"slash","virtual_sources":[]}],"seat":1,"self_hand":[],"turn_seat":0}},"seq":41}
-{"accepted":true,"action":{"answers_seq":41,"kind":"Pass"},"answers_seq":41,"kind":"action","reason":null,"seq":42}
-{"actor":1,"cards":[],"depth":5,"frame_id":5,"kind":"timing","seq":43,"source":null,"targets":[],"timing":"NEAR_DEATH_AFTER"}
-{"depth":6,"frame_id":6,"frame_kind":"DEATH","kind":"frame","op":"push","return_to":["NEAR_DEATH","DEATH_BEFORE_START"],"seq":44}
-{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":45,"source":null,"targets":[1],"timing":"DEATH_BEFORE_START"}
-{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":46,"source":null,"targets":[1],"timing":"DEATH_REVEAL_IDENTITY_AFTER"}
-{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":47,"source":null,"targets":[1],"timing":"DEATH_ON"}
-{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":48,"source":null,"targets":[1],"timing":"DEATH_AFTER"}
-{"depth":5,"frame_id":6,"frame_kind":"DEATH","kind":"frame","op":"pop","return_to":["NEAR_DEATH","DEATH_BEFORE_START"],"seq":49}
-{"depth":4,"frame_id":5,"frame_kind":"NEAR_DEATH","kind":"frame","op":"discard","return_to":["LIFE_DECREASE","NEAR_DEATH_ENTER"],"seq":50}
-{"depth":3,"frame_id":4,"frame_kind":"LIFE_DECREASE","kind":"frame","op":"discard","return_to":["DAMAGE","LIFE_DECREASE_BEFORE"],"seq":51}
-{"depth":2,"frame_id":3,"frame_kind":"DAMAGE","kind":"frame","op":"discard","return_to":["RESOLVE","RESOLVE_AFTER_EFFECT"],"seq":52}
-{"depth":1,"frame_id":2,"frame_kind":"RESOLVE","kind":"frame","op":"discard","return_to":["USE","RESOLVE_START"],"seq":53}
-{"depth":0,"frame_id":1,"frame_kind":"USE","kind":"frame","op":"discard","return_to":null,"seq":54}
-{"cards":[{"attack_range":null,"card_id":18,"color":"red","name":"杀","rank":10,"slot":null,"suit":"heart","type":"slash","virtual_sources":[]}],"delta_type":"card_move","depth":0,"frame_id":0,"from_zone":{"seat":null,"zone":"processing"},"kind":"delta","owner":null,"reason":"USE","seq":55,"to_zone":{"seat":null,"zone":"discard"}}
-{"check_seq":46,"kind":"game_end","reason":"boss_slain","result":"winner","seq":56,"side":"ally","winner":null,"winners":[0]}
+{"actor":1,"cards":[],"depth":4,"frame_id":4,"kind":"timing","seq":36,"source":0,"targets":[],"timing":"LIFE_DECREASE_AFTER"}
+{"depth":5,"frame_id":5,"frame_kind":"NEAR_DEATH","kind":"frame","op":"push","return_to":["LIFE_DECREASE","NEAR_DEATH_ENTER"],"seq":37}
+{"actor":1,"cards":[],"depth":5,"frame_id":5,"kind":"timing","seq":38,"source":null,"targets":[],"timing":"NEAR_DEATH_ENTER"}
+{"actor":1,"cards":[],"depth":5,"frame_id":5,"kind":"timing","seq":39,"source":null,"targets":[],"timing":"NEAR_DEATH_AT"}
+{"kind":"query","query":{"actor":0,"dying":1,"kind":"PEACH","legal_actions":[{"answers_seq":40,"kind":"Pass"}],"prompt":"座位 1 处于濒死状态：是否对其使用【桃】？","seq":40,"timing":"NEAR_DEATH_AT","view":{"deck_count":105,"discard":[],"phase":"play","players":[{"alive":true,"equip":[],"hand_count":2,"hp":4,"hp_max":4,"identity":"ally","judge":[],"seat":0},{"alive":true,"equip":[],"hand_count":0,"hp":0,"hp_max":5,"identity":"enemy","judge":[],"seat":1}],"processing":[{"attack_range":null,"card_id":18,"color":"red","name":"杀","rank":10,"slot":null,"suit":"heart","type":"slash","virtual_sources":[]}],"seat":0,"self_hand":[{"attack_range":null,"card_id":0,"color":"red","name":"桃园结义","rank":1,"slot":null,"suit":"heart","type":"peach_garden","virtual_sources":[]},{"attack_range":null,"card_id":1,"color":"red","name":"万箭齐发","rank":1,"slot":null,"suit":"heart","type":"arrow_barrage","virtual_sources":[]}],"turn_seat":0}},"seq":40}
+{"accepted":true,"action":{"answers_seq":40,"kind":"Pass"},"answers_seq":40,"kind":"action","reason":null,"seq":41}
+{"kind":"query","query":{"actor":1,"dying":1,"kind":"PEACH","legal_actions":[{"answers_seq":42,"kind":"Pass"}],"prompt":"座位 1 处于濒死状态：是否对其使用【桃】？","seq":42,"timing":"NEAR_DEATH_AT","view":{"deck_count":105,"discard":[],"phase":"play","players":[{"alive":true,"equip":[],"hand_count":2,"hp":4,"hp_max":4,"identity":"ally","judge":[],"seat":0},{"alive":true,"equip":[],"hand_count":0,"hp":0,"hp_max":5,"identity":"enemy","judge":[],"seat":1}],"processing":[{"attack_range":null,"card_id":18,"color":"red","name":"杀","rank":10,"slot":null,"suit":"heart","type":"slash","virtual_sources":[]}],"seat":1,"self_hand":[],"turn_seat":0}},"seq":42}
+{"accepted":true,"action":{"answers_seq":42,"kind":"Pass"},"answers_seq":42,"kind":"action","reason":null,"seq":43}
+{"actor":1,"cards":[],"depth":5,"frame_id":5,"kind":"timing","seq":44,"source":null,"targets":[],"timing":"NEAR_DEATH_AFTER"}
+{"depth":6,"frame_id":6,"frame_kind":"DEATH","kind":"frame","op":"push","return_to":["NEAR_DEATH","DEATH_BEFORE_START"],"seq":45}
+{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":46,"source":null,"targets":[1],"timing":"DEATH_BEFORE_START"}
+{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":47,"source":null,"targets":[1],"timing":"DEATH_REVEAL_IDENTITY_AFTER"}
+{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":48,"source":null,"targets":[1],"timing":"DEATH_ON"}
+{"actor":1,"cards":[],"depth":6,"frame_id":6,"kind":"timing","seq":49,"source":null,"targets":[1],"timing":"DEATH_AFTER"}
+{"depth":5,"frame_id":6,"frame_kind":"DEATH","kind":"frame","op":"pop","return_to":["NEAR_DEATH","DEATH_BEFORE_START"],"seq":50}
+{"depth":4,"frame_id":5,"frame_kind":"NEAR_DEATH","kind":"frame","op":"discard","return_to":["LIFE_DECREASE","NEAR_DEATH_ENTER"],"seq":51}
+{"depth":3,"frame_id":4,"frame_kind":"LIFE_DECREASE","kind":"frame","op":"discard","return_to":["DAMAGE","LIFE_DECREASE_BEFORE"],"seq":52}
+{"depth":2,"frame_id":3,"frame_kind":"DAMAGE","kind":"frame","op":"discard","return_to":["RESOLVE","RESOLVE_AFTER_EFFECT"],"seq":53}
+{"depth":1,"frame_id":2,"frame_kind":"RESOLVE","kind":"frame","op":"discard","return_to":["USE","RESOLVE_START"],"seq":54}
+{"depth":0,"frame_id":1,"frame_kind":"USE","kind":"frame","op":"discard","return_to":null,"seq":55}
+{"cards":[{"attack_range":null,"card_id":18,"color":"red","name":"杀","rank":10,"slot":null,"suit":"heart","type":"slash","virtual_sources":[]}],"delta_type":"card_move","depth":0,"frame_id":0,"from_zone":{"seat":null,"zone":"processing"},"kind":"delta","owner":null,"reason":"USE","seq":56,"to_zone":{"seat":null,"zone":"discard"}}
+{"check_seq":47,"kind":"game_end","reason":"boss_slain","result":"winner","seq":57,"side":"ally","winner":null,"winners":[0]}

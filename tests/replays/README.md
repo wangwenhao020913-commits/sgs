@@ -318,3 +318,25 @@ re-freeze：票 09 / 10 往 `pve` 里填语义时，标准局仍是 `pve: null`�
 ≈ 193 KiB），最大单文件仍是 **3,334,072 字节 ≈ 3.18 MiB**（`10-identity-7p-lord-win.jsonl`）
 ——**优先吃余量**：仍在 52 MiB 总预算与 4 MiB 单文件上限之内，故**不动预算**（余量 ≈3.37 MiB）。
 录制入口仍是 `pytest --update-golden`（`-k pve` 只跑这 6 条；产品 CLI 没有新参数）。
+
+## 重录登记：扣减体力后 → 濒死（yijiang-2011-xusheng-chunhua 票 93）
+
+**行为有意改变**（用户 2026-11-20 报障 + 签「允许重录 65 条金录像」）：伤害 / 失去体力把
+体力扣到 0 或更低时，**「扣减体力后」（`LIFE_DECREASE_AFTER`）先结算、濒死帧再压上去**。
+一手 = 《三國殺官方規則集 2018.3-16》的【伤逝】例："體力為2手牌數為1的張春華…在扣減3點體力後
+能發動〖傷逝〗摸兩張牌，**然後進入瀕死狀態**"（`三国杀详细规则.txt` §4.15 的整理稿把插入点
+写在"扣减体力时"下，与这条例子冲突；按 `readings.md` §4 以 2018 规则集为准）。
+
+差异**只有两件事**（逐文件核过）：① `NEAR_DEATH` 帧的 push 与三条 `NEAR_DEATH_*` 记录整体
+后移（`LIFE_DECREASE_AFTER` 排到它们前面）；② 受致命伤**死亡**的局里多出那一条
+`LIFE_DECREASE_AFTER`（旧行为是整帧清栈、这次派发被丢掉）。**没有** delta / 决策 / 随机流
+变化：`goals.py` 一字未改，六条 M1 基准的动作序列（去掉 `answers_seq` 后）逐条相同。
+
+| 基准 | 变了什么 |
+|---|---|
+| 01–66 里字节真的变了的 **65 条**（`62-pve-survive-rounds-win` 不含濒死路径，逐字节不变） | 同种子重录（`pytest --update-golden`）：记录排布变化 + 受致命伤死亡局各多一条记录 |
+
+`STANDARD_108_REPLAY_BYTES`（47 条）与 `M1_FROZEN_TRAJECTORIES`（6 条）同批重算——
+后者摘要的是**带 `answers_seq` 的动作序列**，记录一换排布锚点就变，但决策序列未变。
+`tools/check_goldens.sh` 与 `tests/test_replays.py` 同批 PASS。免费的重录入口仍是
+`pytest tests/test_replays.py --update-golden`。

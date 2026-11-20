@@ -489,8 +489,11 @@ class _Zhangchunhua:
         self.answer = answer
         self.skill = skill
         self.offers: list[tuple[str, ...]] = []
+        self.kinds: list[str] = []
+        """每一条询问的 ``kind``，按出现顺序（`test_shangshi_asks_...` 用它钉先后）。"""
 
     def respond(self, query):
+        self.kinds.append(query.kind)
         if query.kind == "SKILL_ACTIVATION":
             picks = tuple(
                 action.skill_id
@@ -806,3 +809,60 @@ def test_shangshi_deck_out_draw() -> None:
 
     assert engine.finished, "两堆皆空 + 摸不够 ⇒ 平局"
     assert len(state.player(ME).hand) == 0, "一张都摸不到"
+
+
+def test_shangshi_asks_before_near_death_and_caps_x_at_the_hp_max() -> None:
+    """受**致命**伤害时：先问【伤逝】、再进濒死；X 封顶在体力上限（不是"上限 − 负体力"）。
+
+    一口气钉两件事，取证都是《三國殺官方規則集 2018.3-16》的【伤逝】例（转载见
+    `docs/agents/domain.md` 的 URL）：
+
+        體力為2手牌數為1的張春華受到管道為【閃電】的3點雷電傷害，在扣減3點體力後能發動
+        〖傷逝〗摸兩張牌，然後進入瀕死狀態，進行瀕死結算……
+
+    - **先后**：`steps.LIFE_DECREASE_STEPS` 把濒死压帧排在「扣减体力后」之后 ⇒ 询问顺序
+      是 `SKILL_ACTIVATION`（伤逝）→ `PEACH`（求桃）。旧顺序（濒死先问）会把这条钉红；
+    - **X**：−1 体力时 X = 3（体力上限）而不是 4 ⇒ 手牌 1 摸到 3 张（摸 **2** 张）。
+    """
+    state = _zc_state(SeatSpec(hp=2, hp_max=3, hand=(SLASH[0],)), SeatSpec())
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(source=TARGET, target=ME, amount=3),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    # 跑到**求桃窗口**出现为止（她已 −1 体力、伤逝那一问在它前面）。
+    for _ in range(400):
+        if engine.pending is not None:
+            if engine.pending.kind == "PEACH":
+                # 求桃窗口**不答**（没人救）——只记下它的出现顺序。
+                player.kinds.append("PEACH")
+                break
+            engine.submit(player.respond(engine.pending))
+            continue
+        engine._step()
+        if engine.finished:
+            break
+    else:
+        raise AssertionError("没有进入求桃窗口：致命伤害必须进濒死")
+
+    assert player.kinds[:2] == ["SKILL_ACTIVATION", "PEACH"], (
+        "官方规则集的【伤逝】例：先伤逝、然后进入濒死状态（求桃窗口在它之后）"
+    )
+    assert any(SHANGSHI in offer for offer in player.offers), "伤逝必须先问"
+    assert state.player(ME).hp == -1, "3 点伤害打在 2 体力上 ⇒ −1"
+    assert len(state.player(ME).hand) == 3, "X = 体力上限 3 ⇒ 手牌 1 摸到 3 张（摸 2 张）"
+
+
+def test_shangshi_caps_x_at_the_hp_max_after_excess_damage() -> None:
+    """同一条算式的单元面：体力 −2（4 点伤害打在 2 体力上）时 X 仍是体力上限。"""
+    from sgs.skills.hero_yijiang_2011 import _shangshi_x
+
+    state = _zc_state(SeatSpec(hp=2, hp_max=3), SeatSpec())
+    assert _shangshi_x(state, ME) == 1, "2 / 3 ⇒ 已损失 1"
+    state.player(ME).hp = 0
+    assert _shangshi_x(state, ME) == 3, "0 体力 ⇒ 已损失 3"
+    state.player(ME).hp = -2
+    assert _shangshi_x(state, ME) == 3, "负体力不把 X 抬高到超过体力上限"
