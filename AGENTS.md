@@ -28,7 +28,11 @@
    档，门禁判据不变。**放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；
    用后台任务起它，再取输出。迭代期要快就用**单文件子集**：**`.venv/bin/pytest <file>`** ——
    `python` 不在 PATH，门禁也只认 `$ROOT/.venv/bin/pytest`、不回退系统 pytest —— 或
-   `bash tests/smoke-web.sh`（实测 60–70 s）。**全量失败先 `grep -nE 'FAIL|失败' <log>`**
+   `bash tests/smoke-web.sh`（实测 60–70 s）。**提交前 screen**：`bash tools/precommit-screen.sh`
+   （快档 ≈47 s；`--full` 加 `test_fuzz` ≈2 min，动 AI 随机流 / 共享原语时必跑）——它是门禁的
+   **子集**，只挑历史上真红过的家族（金录像与 PvE 基线 / 剧本内容与出货表 / 文档漂移 / 武将总表 /
+   池计数）。**绿了不代表能提交（它只跑 ≈190/4924），红了一定不能提交。**
+   **全量失败先 `grep -nE 'FAIL|失败' <log>`**
    看完全部失败，不要只 `tail`。
    **新机器 / 换机器**：先跑 **`bash tools/setup-dev.sh`**（幂等：关换行转换、装 hook、建
    `.venv`、环境预检——这三样都不随 clone 走，缺一样就是"门禁静默不跑"或"金录像因 CRLF
