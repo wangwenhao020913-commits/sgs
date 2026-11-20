@@ -83,10 +83,12 @@ from sgs.data import (  # noqa: E402
     RuleConfig,
     enabled_hero_ids,
     hero_by_id,
+    hero_skill_names,
     load_content_pack,
 )
 from sgs.engine import IllegalActionError  # noqa: E402
 from sgs.script import ScriptError  # noqa: E402
+from sgs_web.descriptions import display_skill_description  # noqa: E402
 from sgs_web.narrative import NarrativeCursor  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
@@ -178,13 +180,33 @@ def hero_catalog() -> list[dict[str, object]]:
     组的顺序 = 真名在启用池里首次出现的顺序；组内版本顺序 = 数据文件顺序（标准表在前、
     界版包在后）。``versions`` 里带 ``id`` / 显示名 / 版本标记：禁将是**版本粒度**
     （票 12 D5），界面按 ``id`` 划掉一格、按 ``true_name`` 判断这一行还有没有可用版本。
+
+    每个版本另带**只读展示面**（ui-one-screen 票 01 / spec §8 R1）：技能清单（解析后的
+    全限定 id、中文显示名、**裁过的**描述）与势力 / 体力，供开局页右栏「我的武将 + 技能
+    全文」与技能浮层直接画——它们只进视图载荷，不进记录流与录像。
     """
-    groups: dict[str, list[dict[str, str]]] = {}
+    groups: dict[str, list[dict[str, object]]] = {}
     for hero_id in enabled_hero_ids():
         hero = hero_by_id(hero_id)
         assert hero is not None  # enabled_hero_ids 只从武将表里挑，找不到就是上游违约
         groups.setdefault(hero.true_name, []).append(
-            {"id": hero.id, "name": hero.name, "version": hero.version}
+            {
+                "id": hero.id,
+                "name": hero.name,
+                "version": hero.version,
+                "kingdom": hero.kingdom.value,
+                "hp_max": hero.hp_max,
+                # 初始体力（神甘宁 3/6）：``None`` = 满体力，界面拿到的一律是**具体数**。
+                "hp": hero.hp if hero.hp is not None else hero.hp_max,
+                "skills": [
+                    {
+                        "id": skill_id,
+                        "name": name,
+                        "description": display_skill_description(skill_id),
+                    }
+                    for skill_id, name in hero_skill_names(hero).items()
+                ],
+            }
         )
     return [
         {"true_name": true_name, "versions": versions}
