@@ -73,6 +73,18 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.feng_guanyu.danqi": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.feng_guanyu.xinhan": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.feng_guanyu.yiyun": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.feng_yujin.dingluan": {
       "enabled": true,
       "rarity": "common"

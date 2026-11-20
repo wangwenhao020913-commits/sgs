@@ -54,7 +54,7 @@ from sgs.data import (  # noqa: E402
 )
 from sgs.engine.rng import ai_stream  # noqa: E402
 
-SEED = 20261129
+SEED = 20261133
 """整条路线的固定种子（同 seed 两遍 = A3 的可复现判据）。"""
 
 HERO = "jie_liubei"

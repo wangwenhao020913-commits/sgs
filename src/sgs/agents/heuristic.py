@@ -2093,6 +2093,18 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # +X 伤害通常比摸 X 张更值（摸牌还要再转化），但 X 小时两者接近。
         "fengpo:draw": 1.0,
         "fengpo:damage": 1.6,
+        # feng-guanyu 票 01：锋·关羽【单骑】的颜色二选一（两项都是"把整手同色牌压成一张牌"）。
+        # 火【杀】带属性、还可能逼掉【闪】；【决斗】逼的是【杀】且双方轮流出——都略低于
+        # 一张真牌（1.5）的"立刻兑现"档，按 1.8 / 2.0 估。
+        "danqi:black": 1.8,
+        "danqi:red": 2.0,
+        # feng-guanyu 票 01：锋·关羽【义云】/【心汉】的甲乙丙丁（两条技能共用同一组 id）。
+        # 甲摸两张 ≈ 两张牌（1.6）；乙回复 1 点（≈2.0）；丙压低对手（失效到黑牌入弃牌堆）
+        # 价值最高（2.4）；丁 1 点伤害（2.2）。
+        "yiyun:draw_two": 1.6,
+        "yiyun:recover_one": 2.0,
+        "yiyun:suppress": 2.4,
+        "yiyun:damage_one": 2.2,
         # 【雌雄双股剑】目标侧的两种损失：弃一张手牌 vs 令使用者摸一张。
         "discard_one": -1.0,
         "draw_one": -1.5,
@@ -4921,6 +4933,23 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "每轮开始时（非共享：只问于禁）：展示一名角色的至多 X 张牌并标记"
         "【定乱】——不搬牌、不弃牌，没有代价；标记让那些牌不能当【杀】、进弃牌堆时其拥有者"
         "摸一张。候选出现即说明 X>0 且还有没被定乱过的角色 ⇒ 恒发动为正",
+    ),
+    # feng-guanyu 票 01：锋·关羽【单骑】——别人的准备阶段把**整手同色牌**压成一张【决斗】/ 火【杀】
+    # 打向当前回合角色。牌越打越多，但每张都是"本来未必用得上"的牌；估值按"一张可用牌 + 一次
+    # 消耗对手响应"给 1.5（颜色二选一的分值见 `_OPTION_VALUES` 的 `danqi:*`）。
+    "hero.feng_guanyu.danqi": (
+        _constant(1.5),
+        "别人的准备阶段：把该色全部手牌当一张【决斗】/ 无距离限制的火【杀】对其使用；"
+        "转化来源是整手同色牌，等于一次性兑现 ⇒ 恒为正（1.5）；颜色二选一的分值见"
+        "`_OPTION_VALUES` 的 `danqi:black` / `danqi:red`",
+    ),
+    # feng-guanyu 票 01：锋·关羽【心汉】——觉醒技（**强制发动，不问**），这一条只是机械登记；
+    # 第二段的甲乙丙丁 / 选座步各由 `_OPTION_VALUES` 与 `_SEAT_TARGET_VALUE` 打分。
+    "hero.feng_guanyu.xinhan": (
+        _constant(3.0),
+        "觉醒技：累计造伤 + 回复 ≥ 6 时强制发动，改势力为蜀并可依次对不同角色执行四项"
+        "（每项一次）。『是否发动』永远不问（`SkillType.AWAKENING`）⇒ 本条目只做机械登记；"
+        "四项的分值见 `_OPTION_VALUES` 的 `yiyun:*`",
     ),
     "hero.feng_yujin.jieyue": (
         _constant(2.0),

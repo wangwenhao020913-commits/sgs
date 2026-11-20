@@ -310,6 +310,10 @@ from .hero_zone import (
     QIANXUN_PLACED_KEY,
     hero_zone_skill_definitions,
 )
+from .hero_guanyu import (  # noqa: E402  （接入层的公开读口：义云的记录）
+    YIYUN,
+    yiyun_recorded_suits,
+)
 from .awakening import (
     LVMENG_GONGXIN,
     LVMENG_QINXUE,
@@ -616,6 +620,8 @@ __all__ = (
     "virtual_dodge",
     "option_seat",
     "seat_choice",
+    "yiyun_recorded_suits",
+    "YIYUN",
 )
 
 

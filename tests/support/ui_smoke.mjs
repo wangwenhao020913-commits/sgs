@@ -881,7 +881,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
   // bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里）⇒ 版本 111 → 112、
   // 真名分组 75 不变。
-  ui.state.heroCatalog.length === 77 && catalogVersions.length === 117,
+  ui.state.heroCatalog.length === 77 && catalogVersions.length === 118,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -1004,16 +1004,17 @@ check("⓪21 启动时选中上次保存的 active（新档 = 槽位 0）",
   && slotButtons()[ui.heroPools().active].classList.contains("on")
   && slotButtons()[ui.heroPools().active].classList.contains("active"),
   `selected=${ui.heroPools().selected} active=${ui.heroPools().active}`);
-check("⓪22 将池按真名分组渲染（一行一个真名、行内 1–2 个版本格）",
+check("⓪22 将池按真名分组渲染（一行一个真名、行内 1–3 个版本格）",
   $("hero-pool").children.length === ui.state.heroCatalog.length
   && ui.state.heroCatalog.every((group, at) =>
     $("hero-pool").children[at].getAttribute("data-true-name") === group.true_name
     && $("hero-pool").children[at].children.length === group.versions.length + 1),
   `行 ${$("hero-pool").children.length} / 真名 ${ui.state.heroCatalog.length}`);
-check("⓪23 同一真名的两个版本在同一行（关羽 / 界关羽）",
-  poolCells("关羽").length === 2
+check("⓪23 同一真名的各版本在同一行（关羽 / 界关羽 / 锋·关羽）",
+  poolCells("关羽").length === 3
   && poolCells("关羽")[0].getAttribute("data-hero-id") === "guanyu"
-  && poolCells("关羽")[1].getAttribute("data-hero-id") === "jie_guanyu",
+  && poolCells("关羽")[1].getAttribute("data-hero-id") === "jie_guanyu"
+  && poolCells("关羽")[2].getAttribute("data-hero-id") === "feng_guanyu",
   poolCells("关羽").map((cell) => cell.getAttribute("data-hero-id")).join(","));
 
 // 点一格 = 禁掉这一版（灰 + aria-pressed=false）；同真名的另一版仍是可用（粒度是版本）。

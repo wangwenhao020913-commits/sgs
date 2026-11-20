@@ -78,6 +78,7 @@ __all__ = [
     "ZHUHAI_FLOW",
     "awakening_activation_plans",
     "awakening_skill_definitions",
+    "awakening_skill_verdict",
 ]
 
 XUSHU_QIANXUE = hero_skill_id("jie_xushu", "qianxue")
@@ -146,6 +147,17 @@ def _awakening_verdict(host: Any, frame: Any, skill_id: str) -> bool | None:
     if awakening_condition_satisfied(host.state, int(owner), skill_id):
         return True  # 辉逝：条件视为满足，等的是**时机**
     return None
+
+
+def awakening_skill_verdict(host: Any, frame: Any, skill_id: str) -> bool | None:
+    """觉醒技两段判定的**公开面**（feng-guanyu 票 01；首个族外消费者 = 锋·关羽【心汉】）。
+
+    与 :func:`_awakening_verdict` 同一份判据（这一层只是名字）：族外模块的觉醒技也要
+    "时机恒判 + 条件可被辉逝旁路 + 在飞不重算"，不该各自抄一遍。返回值同：
+    ``False`` = 时机不符；``True`` = 条件已成立（在飞 / 视为满足）；``None`` = 由调用方
+    按状态现算条件。
+    """
+    return _awakening_verdict(host, frame, skill_id)
 
 
 # ---------------------------------------------------------------------------

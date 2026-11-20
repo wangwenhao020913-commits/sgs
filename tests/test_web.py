@@ -781,7 +781,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 106 / 71。
     # bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里：与标准 / 界赵云同真名，
     # 一局只出一个）⇒ 版本 111 → 112、真名分组 75 **不变**。
-    assert len(flat) == 117 and len(catalog) == 77, (
+    assert len(flat) == 118 and len(catalog) == 77, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -820,8 +820,12 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
             assert version["name"] == hero.name and version["version"] == hero.version
 
     by_name = {group["true_name"]: group["versions"] for group in catalog}
-    assert [version["id"] for version in by_name["关羽"]] == ["guanyu", "jie_guanyu"], (
-        "标准版在前、界版在后（数据文件顺序）"
+    assert [version["id"] for version in by_name["关羽"]] == [
+        "guanyu",
+        "jie_guanyu",
+        "feng_guanyu",
+    ], (
+        "标准版在前、界版在后、自制包最后（数据文件顺序）；feng-guanyu 票 01 起关羽是三版真名"
     )
     assert len(by_name["徐庶"]) == 1, "只有界版的真名也自成一行"
 
@@ -8909,10 +8913,12 @@ def test_both_jianying_declarations_share_one_badge() -> None:
         assert CATALOG[skill_id].badge is BadgeKind.WINDOW, (
             f"{skill_id} 没有声明座位常驻标签（两版都要挂）"
         )
-        assert BADGE_PROVIDERS[skill_id][0] is BadgeScope.SELF, (
+        assert BADGE_PROVIDERS[skill_id][0][0] is BadgeScope.SELF, (
             f"{skill_id} 的标签画在**持有者自己的**座位上（不是目标座）"
         )
-    assert BADGE_PROVIDERS[JIANYING][1] is BADGE_PROVIDERS[JIE_JIANYING][1], (
+    assert (
+        BADGE_PROVIDERS[JIANYING][0][1] is BADGE_PROVIDERS[JIE_JIANYING][0][1]
+    ), (
         "两版必须共用同一个构造器（同一份读法，不许抄两份）"
     )
 
@@ -9665,7 +9671,7 @@ def test_the_fuyin_badge_is_only_on_zhugezhan() -> None:
     assert CATALOG[fuyin].badge is BadgeKind.WINDOW, (
         "【父荫】没有声明座位常驻标签（声明面缺 ⇒ 登记表闭集审计也会红）"
     )
-    assert BADGE_PROVIDERS[fuyin][0] is BadgeScope.SELF, (
+    assert BADGE_PROVIDERS[fuyin][0][0] is BadgeScope.SELF, (
         "【父荫】画在**持有者自己的**座位上（不是目标座）"
     )
 
@@ -9786,7 +9792,7 @@ def test_the_jie_tieqi_badge_shows_while_the_target_is_suppressed() -> None:
     assert CATALOG[JIE_TIEQI].badge is BadgeKind.WINDOW, (
         "界马超【铁骑】没有声明座位常驻标签（声明面缺 ⇒ 登记表闭集审计也会红）"
     )
-    assert BADGE_PROVIDERS[JIE_TIEQI][0] is BadgeScope.ANY_SEAT, (
+    assert BADGE_PROVIDERS[JIE_TIEQI][0][0] is BadgeScope.ANY_SEAT, (
         "【铁骑】画在**目标**座位上，不是持有者自己（与【雄乱】/【义绝】同档）"
     )
 
@@ -10880,7 +10886,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（`relic.*`）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（`npc.*`）⇒ 242 → 246。
-    assert len(expected_skills) == 252, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 255, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -16103,6 +16109,133 @@ def test_the_badge_kind_is_a_closed_set_with_one_provider_per_declarer() -> None
         f"幽灵登记 = 画一条没人声明的东西）：多 {sorted(set(BADGE_PROVIDERS) - declared)}、"
         f"少 {sorted(declared - set(BADGE_PROVIDERS))}"
     )
-    for scope, builder in BADGE_PROVIDERS.values():
-        assert isinstance(scope, BadgeScope), "登记表的值是 (落座位档, 构造器) 二元组"
-        assert callable(builder)
+    for specs in BADGE_PROVIDERS.values():
+        assert specs, "每条声明至少一条标签 spec"
+        for scope, builder in specs:
+            assert isinstance(scope, BadgeScope), (
+                "登记表的值是**一组** (落座位档, 构造器) 二元组（一条技能可以画多条）"
+            )
+            assert callable(builder)
+
+
+# ---------------------------------------------------------------------------
+# feng-guanyu 票 07：锋·关羽【义云】的两条座位标签（记录花色 / 被丙失效的目标）
+# ---------------------------------------------------------------------------
+
+
+def _guanyu_badge_state():
+    """一个只有关羽 + 甄姬的人为局面（``hero_tags`` 的读取只依赖状态）。"""
+    from types import SimpleNamespace
+
+    from sgs.data import load_content_pack as _load
+
+    pack = _load(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="feng_guanyu"), SeatSpec(hp=4, hero="zhenji")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=1, pack=pack)
+    return session, state
+
+
+def _record_suits(state, seat: int, suits: tuple[str, ...]) -> None:
+    """把义云的记录位段直接写进技能实例状态（写点的行为面住 ``test_hero_feng_guanyu``）。"""
+    from sgs.skills import instance_key, resolve_instances
+
+    yiyun = "hero.feng_guanyu.yiyun"
+    instance = next(
+        item
+        for item in resolve_instances(state, include_suppressed=True)
+        if item.skill_id == yiyun and item.owner == seat
+    )
+    flags = int(state.skill_state.get(instance_key(instance), 0))
+    for index, suit in enumerate(("heart", "diamond", "spade", "club")):
+        if suit in suits:
+            flags |= 1 << (44 + index)
+    state.skill_state[instance_key(instance)] = flags
+
+
+def test_yiyun_badge_shows_recorded_suits_with_tones() -> None:
+    """记录的花色逐段上色；``parts`` 拼接 == ``label``；空记录不画（fail-closed）。"""
+    session, state = _guanyu_badge_state()
+
+    assert visible_snapshot(session)["players"][0]["hero_tags"] == [], (
+        "空记录不画（用户 2026-11-20 裁）"
+    )
+
+    _record_suits(state, 0, ("heart", "spade"))
+    tags = visible_snapshot(session)["players"][0]["hero_tags"]
+    assert tags == [
+        {
+            "tag": "yiyun",
+            "label": "义云 ♥♠",
+            "parts": [
+                {"text": "义云 "},
+                {"text": "♥", "tone": "red"},
+                {"text": "♠", "tone": "black"},
+            ],
+        }
+    ], "记录 = 集合（规范花色序），符号 / 红黑取 SUIT_LABELS"
+    assert "".join(part["text"] for part in tags[0]["parts"]) == tags[0]["label"]
+    assert visible_snapshot(session)["players"][1]["hero_tags"] == [], (
+        "SELF 档只画在关羽自己的座位"
+    )
+
+    # 失去义云 ⇒ 实例闸把它摘掉（记录位仍在，但标签派生式消失）。
+    state.player(0).lost_skills.append("hero.feng_guanyu.yiyun")
+    assert visible_snapshot(session)["players"][0]["hero_tags"] == []
+
+
+def test_yiyun_suppression_badge_lands_on_the_target() -> None:
+    """被【丙】失效的目标座位画「义云」；解除后下一次投影自然消失。"""
+    from sgs.state import SkillSuppression, SkillSuppressionScope
+
+    session, state = _guanyu_badge_state()
+
+    state.player(1).suppressed_skills.append(
+        SkillSuppression(
+            skill_id="hero.feng_guanyu.yiyun",
+            scope=SkillSuppressionScope.UNTIL_BLACK_DISCARD,
+        )
+    )
+    tags = visible_snapshot(session)["players"][1]["hero_tags"]
+    assert tags == [{"tag": "yiyun_suppress", "label": "义云"}], (
+        "ANY_SEAT 档：判据 = 失效记录里精确匹配义云的 id"
+    )
+    assert visible_snapshot(session)["players"][0]["hero_tags"] == [], (
+        "关羽自己座位不因这条多画"
+    )
+
+    # 别的技能的失效记录不点亮它（不按 ALL_NON_LOCKED 扫）。
+    state.player(1).suppressed_skills.clear()
+    state.player(1).suppressed_skills.append(
+        SkillSuppression(skill_id="hero.jie_guanyu.yijue")
+    )
+    assert visible_snapshot(session)["players"][1]["hero_tags"] == []
+    state.player(1).suppressed_skills.clear()
+
+
+def test_the_feng_guanyu_option_labels_are_chinese_on_both_sides() -> None:
+    """【义云】/【心汉】四个选项的**按钮文案**：前端 `OPTION_LABELS` 与引擎同文。
+
+    用户 2026-11-20 实机点名「把义云甲乙丙丁四个选项都改为中文的」——此前按钮上显示的是
+    选项 id 原文（`options.js:optionText` 的 fallback = `choice` 本身，即 `yiyun:draw_two`）。
+
+    本仓的既有纪律是"中文只住 `options.js:OPTION_LABELS`"，故引擎侧的 `option_texts`
+    再全也不够：**两份必须都在、且逐字一致**。这里把前端那一份读出来与
+    `hero_guanyu.OPTION_TEXTS` 逐条对齐（改一边漏另一边 ⇒ 红），并顺手钉住"按钮上不是 id"。
+    """
+    from sgs.skills import hero_guanyu as feng
+
+    source = (
+        REPO_ROOT / "tools" / "sgs_web" / "static" / "options.js"
+    ).read_text(encoding="utf-8")
+    labels = dict(re.findall(r'"([A-Za-z0-9_:]+)":\s*"([^"]+)"', source))
+
+    assert set(feng.OPTION_TEXTS) == set(feng.ALL_OPTIONS), "文案表 = 四个选项的闭集"
+    for option, text in feng.OPTION_TEXTS.items():
+        assert option in labels, f"前端 OPTION_LABELS 缺 {option}（按钮会回落成 id 原文）"
+        assert labels[option] == text, "前端与引擎的四个选项文案必须逐字一致"
+        assert text != option and re.search(r"[\u4e00-\u9fff]", text), "按钮上应是中文"

@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import Any
 
 from sgs.data import (
+    Color,
     Gender,
     Kingdom,
     SkillType,
@@ -350,9 +351,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 212 不变（遗物不在武将那半），装备 22 不变。
     # m7-script-mode 票 27：**NPC 技能** 4 条（`carrier = NPC`，`npc.*`）⇒ 242 → 246；
     # 武将技 212 / 装备 22 都不变（NPC 技能只授敌方座位，不在武将那半）。
-    assert len(CATALOG) == 252
+    assert len(CATALOG) == 255
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 216
+    assert len(heroes) == 219
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -406,7 +407,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
     # bingshi-jie 票 01：势赵云两条 ⇒ 208 → 210。
-    assert len(expected) == 216
+    assert len(expected) == 219
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1913,8 +1914,41 @@ def _yingyuan_probe_state() -> GameState:
     )
 
 
+def _danqi_probe_state() -> GameState:
+    """【单骑】的正面对照：ME（座位 1）手里**至少一张有色手牌**、目标（座位 0）合法。"""
+    black = next(card.card_id for card in _probe_state().cards if card.color is Color.BLACK)
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hand=(black,)), SeatSpec()],
+    )
+
+
+def _yiyun_probe_state() -> GameState:
+    """【义云】的正面对照：ME（座位 1）持有义云（锁定技实例在解析里）。"""
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="feng_guanyu"), SeatSpec()],
+    )
+
+
+def _xinhan_probe_state() -> GameState:
+    """【心汉】的正面对照：ME 持有心汉，且累计计数已达 6（觉醒条件成立）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="feng_guanyu"), SeatSpec()],
+    )
+    state.player(ME).xinhan_damage_points = 6
+    return state
+
+
 def _probe_state_for(skill_id: str) -> GameState:
     """逐技能的正面对照局面（默认同一份；条件里有额外状态前提的单独给）。"""
+    if skill_id == "hero.feng_guanyu.danqi":
+        return _danqi_probe_state()
+    if skill_id == "hero.feng_guanyu.yiyun":
+        return _yiyun_probe_state()
+    if skill_id == "hero.feng_guanyu.xinhan":
+        return _xinhan_probe_state()
     if skill_id in (
         "hero.xusheng_mobile.pojun",
         "hero.xusheng_mobile.pojun_return",
@@ -2637,6 +2671,17 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
                 }
             ),
         ),
+        # feng-guanyu 票 01：锋·关羽的三条技能、五条带条件钩子。
+        #  - 【单骑】PHASE_PREPARE：frame.source = 目标（别人）、ME 手里有有色手牌、目标合法；
+        #  - 【义云】DAMAGE_DEAL：frame.source = 造成伤害的我（每回合限一次由 skill_state 位判）；
+        #  - 【心汉】三条：觉醒（我的准备阶段 + 累计 ≥ 6）、造伤簿记、回复簿记。
+        "hero.feng_guanyu.danqi": (_HookFrame(source=0),),
+        "hero.feng_guanyu.yiyun": (_HookFrame(source=ME),),
+        "hero.feng_guanyu.xinhan": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME, amount=1),
+            _HookFrame(targets=(ME,), recovered_amount=1),
+        ),
     }
 
 
@@ -3270,6 +3315,11 @@ SKILL_SHAPE: dict[str, str] = {
     "npc.guard": "锁定技",
     "npc.swift": "锁定技",
     "npc.wrath": "锁定技",
+    # feng-guanyu 票 01：锋·关羽三条——【单骑】是别人的准备阶段的钩子 + 选项步（触发技能）；
+    # 【义云】锁定技 + 零步流水线（按类型归锁定技格）；【心汉】觉醒技 + 零步流水线（觉醒技格）。
+    "hero.feng_guanyu.danqi": "触发技能",
+    "hero.feng_guanyu.yiyun": "锁定技",
+    "hero.feng_guanyu.xinhan": "觉醒技",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -3318,7 +3368,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # jie-yijiang-2014-wuyi-caozhen 票 03：界曹真【司敌】①（`RESOLVE_AFTER_END` 钩子 +
     # 两步座位流水线）⇒ 36 → 37；票 01 界吴懿【奔袭】（`PHASE_PLAY_START` 钩子 + 单步选牌）
     # ⇒ 37 → 38。
-    "触发技能": 38,
+    # feng-guanyu 票 01：锋·关羽【单骑】（别人的准备阶段钩子 + 选项步）⇒ 38 → 39。
+    "触发技能": 39,
     # lin-batch2 票 02：董卓移动版【暴虐】（`DAMAGE_AFTER_DEAL` 零步流水线）⇒ 32 → 33。
     # lin-batch2 票 03：贾诩移动版【乱武】（A 族限定技 + 零步流水线，与【业炎】同格）
     # ⇒ 33 → 34。
@@ -3381,14 +3432,16 @@ SHAPE_COUNTS: dict[str, int] = {
     # ⇒ 56 → 60。
     # yijiang-2011-xusheng-chunhua 票 02：张春华移动版【绝情】（锁定 + 「伤害结算开始前」
     # 的整段改写段、无流水线）⇒ 60 → 61。
-    "锁定技": 61,
+    # feng-guanyu 票 01：锋·关羽【义云】（锁定技 + 零步流水线）⇒ 61 → 62。
+    "锁定技": 62,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
     "候选提供者": 3,
     # shiji-zhi 票 01：神郭嘉【天翊】（觉醒技 + 零步流水线）⇒ 3 → 4。
     # sp1-sunshangxiang-maliang 票 02：SP孙尚香【返乡】⇒ 4 → 5。
-    "觉醒技": 5,
+    # feng-guanyu 票 01：锋·关羽【心汉】（觉醒技 + 零步流水线）⇒ 5 → 6。
+    "觉醒技": 6,
 }
 """每格的条数（spec §4.4；M6 票 18 后
 17 + 13 + 26 + 3 + 13 + 30 + 13 + 2 + 1 + 5 + 2 = 125）。
@@ -3601,7 +3654,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（锁定技格）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（全部锁定、无流水线 ⇒ 锁定技格）⇒ 242 → 246。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 252
+    assert len(SKILL_SHAPE) == len(CATALOG) == 255
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3834,8 +3887,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（零步流水线）⇒ 内 138 → 139；
     # 它的归还段（标记载体、手写钩子、无流水线）⇒ 外 108 → 109。票 03：界徐盛版同形一对
     # ⇒ 内 139 → 140、外 109 → 110。
-    assert len(inside) == 141
-    assert len(outside) == 111
+    assert len(inside) == 143
+    assert len(outside) == 112
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

@@ -725,7 +725,7 @@ def test_the_wuyi_badge_shows_the_unlocked_name_count() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
     from sgs_web.projection import BADGE_PROVIDERS  # noqa: E402
 
-    builder = BADGE_PROVIDERS[WUYI][1]
+    builder = BADGE_PROVIDERS[WUYI][0][1]
     state = _wuyi_state(names=())
     assert builder(state, 0) == {"tag": "wuyi", "label": "武翊 0"}
     state.player(0).wuyi_names = ("slash", "dodge")

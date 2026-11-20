@@ -2647,6 +2647,11 @@ def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> dict[int
     return wins
 
 
+# 墙钟上限单列放宽（feng-guanyu 票 01）：``pyproject.toml`` 的 240 s 是"活锁就地判红"的
+# 全局值，本测试独占实测 ~205 s（128 + 32 局 × 2 臂），分片并行（`tests/run_all.sh` 缺省
+# 2 片）下会与别的重文件争用 CPU 而越过 240 s——那是**争用**，不是活锁。加武将把池子撑大
+# 之后这条最先撞线，故按"单条合法的慢测试"给它 480 s（全局值不动，其它测试照旧 240 s）。
+@pytest.mark.timeout(480)
 def test_the_heuristic_beats_random_on_the_same_seeds():
     """票 13 §验收 6 / W4-4 重新标定：同一批种子上启发式胜率显著更高。
 

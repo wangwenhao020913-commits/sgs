@@ -66,6 +66,9 @@ SEAT_CALLERS = (
     "skills/phase_body.py",  # 界顾雍【秉壹】（本模板的首个载体）
     # shiji-zhi 票 01：神郭嘉☆【佐幸】——所选普通锦囊是【铁索连环】时按 1~2 名目标多选。
     "skills/active.py",
+    # feng-guanyu 票 01：锋·关羽【义云】的"令一名 / 另一名角色"与【心汉】的"对不同角色"，
+    # 都是"一次问一个座位"的单选（lo=hi=1）——仍走同一个 helper，不另拼座位询问。
+    "skills/hero_guanyu.py",
 )
 """``ask_seats`` 的**全部**出现处（定义 + 六个调用点）。多一处 / 少一处都要改这张表。"""
 

@@ -382,6 +382,14 @@ const OPTION_LABELS = Object.freeze({
   // `ask_option` 的缺省承担），故永不置灰。
   "sidi:cancel": "取消之（若无濒死，对其造成1点伤害）",
   "sidi:draw_two": "摸两张牌",
+  // 自制包·锋·关羽【义云】甲乙丙丁（feng-guanyu 票 01 §2.5；用户 2026-11-20 实机点名
+  // 「四个选项都改为中文的」——此前按钮上显示的是选项 id 原文）。四条**必须**与引擎侧
+  // `src/sgs/skills/hero_guanyu.py:OPTION_TEXTS` 逐字一致（`test_web.py` 逐条对齐）；
+  // 心汉第二段的四选一用的是同一批选项 id，故一改两处一起生效。
+  "yiyun:draw_two": "甲：摸两张牌",
+  "yiyun:recover_one": "乙：回复1点体力",
+  "yiyun:suppress": "丙：本回合非锁定技能失效",
+  "yiyun:damage_one": "丁：受到你造成的1点伤害",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

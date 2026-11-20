@@ -2360,9 +2360,16 @@ def _run_candidate(
     if control is not None:
         return control
     definition = candidate.instance.definition
-    if definition.skill_type is SkillType.LIMITED:
+    # **簿记段不是一次发动**（feng-guanyu 票 08）：限定 / 觉醒的"已用 / 已觉醒"位服务的是
+    # **那条技能的效果本身**跑过一次；`Hook.bookkeeping` 段是纯计数的内部段（进伤害 / 回复
+    # / 标记到期一类的账），它跟着觉醒技挂着，却**不是**觉醒 —— 少了这个排除，觉醒技上挂
+    # 的第一条簿记钩子一跑就把"已觉醒"落下，同一条觉醒技其余的钩子（含真正的觉醒流程）
+    # 全部被 :func:`_activation_candidates` 的"已觉醒 ⇒ 不再派发"挡掉。既有技能里没有
+    # "限定 / 觉醒 + 簿记段"的组合，故这条排除对它们是空操作。
+    bookkeeping = candidate.bookkeeping
+    if definition.skill_type is SkillType.LIMITED and not bookkeeping:
         _mark_used_once(host.state, candidate.instance)
-    if definition.skill_type is SkillType.AWAKENING:
+    if definition.skill_type is SkillType.AWAKENING and not bookkeeping:
         _mark_awakened(host.state, candidate.instance)
     return None
 
@@ -5071,6 +5078,9 @@ from .hero_caocao import (  # noqa: E402  （末尾 import 是刻意的）
 from .hero_yujin import (  # noqa: E402  （末尾 import 是刻意的）
     yujin_skill_definitions,
 )
+from .hero_guanyu import (  # noqa: E402  （末尾 import 是刻意的）
+    guanyu_skill_definitions,
+)
 from .hero_lin import (  # noqa: E402  （末尾 import 是刻意的）
     lin_skill_definitions,
 )
@@ -5169,6 +5179,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *lei_skill_definitions(),
             *caocao_skill_definitions(),
             *yujin_skill_definitions(),
+            *guanyu_skill_definitions(),
             *lin_skill_definitions(),
             *state_after_skill_definitions(),
             *sp5_skill_definitions(),

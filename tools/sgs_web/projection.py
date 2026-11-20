@@ -54,9 +54,11 @@ from sgs.skills import (
     LUOSHEN,
     SEAT_PREFIX,
     YIJUE,
+    YIYUN,
     ModifierPoint,
     SkillSourceKind,
     BadgeScope,
+    yiyun_recorded_suits,
     avatar_skill_rows,
     conversion_offers_by_source,
     current_avatar_skill,
@@ -1084,38 +1086,92 @@ def _jie_tieqi_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return None
 
 
+def _yiyun_suits_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """锋·关羽【义云】的座位标签 = **记录的花色**（feng-guanyu 票 07；用户点名"需要组件"）。
+
+    判据取引擎侧公开读口 :func:`sgs.skills.yiyun_recorded_suits`（技能实例私有的 4 位
+    花色位段；投影**只取不判**，不按技能 id 现算）。三条口径：
+
+    - **公开**：记录来自公开的"展示所有手牌"，``hero_tags`` 对每个观战者一致；
+    - **空记录不画**：用户 2026-11-20 裁（fail-closed，照【博图】的"空集不画"）；
+    - **逐段上色**：每个花色一段 ``parts``，符号 / 红黑取 :data:`sgs_web.display.SUIT_LABELS`
+      （唯一映射），``parts`` 的拼接恒等于 ``label``（前端有 ``parts`` 时只画 ``parts``）。
+
+    顺序 = 引擎读口的**规范花色序**（位图没有"首次出现序"；规则只读"哪些花色"，不读次序）。
+    与【博图】/【渐营】同一形状，只是值住在技能实例里（获得 / 失去义云时清空）。
+    """
+    suits = yiyun_recorded_suits(state, seat)
+    if not suits:
+        return None
+    parts: list[dict[str, Any]] = [{"text": "义云 "}]
+    for suit in suits:
+        face = SUIT_LABELS.get(suit)
+        if face is None:  # pragma: no cover - 四色都有展示契约
+            return None
+        parts.append({"text": face["symbol"], "tone": face["color"]})
+    return {
+        "tag": "yiyun",
+        "label": "".join(part["text"] for part in parts),
+        "parts": parts,
+    }
+
+
+def _yiyun_suppress_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """锋·关羽【义云】的**第二条**标签 = 被【丙】失效的**目标**座位的「义云」。
+
+    用户 2026-11-20 追加口径：「被“义云”影响时，也要像“义绝”那样显示」。判据与
+    :func:`_jie_tieqi_badge` 同一格：``Player.suppressed_skills`` 里**精确匹配义云的 id**
+    （不按 ``ALL_NON_LOCKED`` 扫——那会把【义绝】也点亮）。生效期 = 丙的作用域
+    （到黑牌入弃牌堆或回合末），失效记录一解，下一次投影自然不画（派生式，无清除事件）。
+    载荷只有技能名：``{"tag": "yiyun_suppress", "label": "义云"}``（布尔类没有 ``parts``）。
+    """
+    if any(
+        record.skill_id == YIYUN
+        for record in state.player(seat).suppressed_skills
+    ):
+        return {"tag": "yiyun_suppress", "label": "义云"}
+    return None
+
+
 BADGE_PROVIDERS: Mapping[
-    str, tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]]
+    str, tuple[tuple[BadgeScope, Callable[[Any, int], dict[str, Any] | None]], ...]
 ] = MappingProxyType(
     {
         # 标准 / 界【裸衣】两版是**同一种事实的两种字段**（作用域不同）⇒ 同一个构造器。
-        "hero.xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
-        "hero.jie_xuchu.luoyi": (BadgeScope.SELF, _luoyi_badge),
+        "hero.xuchu.luoyi": ((BadgeScope.SELF, _luoyi_badge),),
+        "hero.jie_xuchu.luoyi": ((BadgeScope.SELF, _luoyi_badge),),
         # 【勤政】恒显（含 X = 0）：读整局张数，没有"值不存在"的形态。
-        "hero.luotong.qinzheng": (BadgeScope.SELF, _qinzheng_badge),
+        "hero.luotong.qinzheng": ((BadgeScope.SELF, _qinzheng_badge),),
         # 势赵云【武翊】（bingshi-jie 票 01）：读 ``Player.wuyi_names`` 的去重牌名数，
         # 同样恒显（含 X = 0）——它是"还差几个牌名"的进度分母。
-        "hero.shi_zhaoyun.wuyi": (BadgeScope.SELF, _wuyi_badge),
+        "hero.shi_zhaoyun.wuyi": ((BadgeScope.SELF, _wuyi_badge),),
         # 【渐营】两版都挂（spec §5 第 04 行 / Q11）：同一个构造器、同一个座位字段。
-        "hero.jushou.jianying": (BadgeScope.SELF, _jianying_badge),
-        "hero.jie_jushou_mobile.jianying": (BadgeScope.SELF, _jianying_badge),
+        "hero.jushou.jianying": ((BadgeScope.SELF, _jianying_badge),),
+        "hero.jie_jushou_mobile.jianying": ((BadgeScope.SELF, _jianying_badge),),
         # 【博图】只有界吕蒙一版（spec §5 第 05 行）：读**全场级**的本回合弃牌花色。
-        "hero.jie_lvmeng.botu": (BadgeScope.SELF, _botu_badge),
+        "hero.jie_lvmeng.botu": ((BadgeScope.SELF, _botu_badge),),
         # 【父荫】"本回合未发动 ∧ 有效"（spec §5 第 06 行 / Q7④）：发动位在这里读，
         # "有效"由 ``SELF`` 档的实例闸兜住（失效 / 失去 ⇒ 实例不在解析里 ⇒ 不调构造器）。
-        _FUYIN_SKILL_ID: (BadgeScope.SELF, _fuyin_badge),
+        _FUYIN_SKILL_ID: ((BadgeScope.SELF, _fuyin_badge),),
         # 【雄乱】"生效期间画在**目标**身上"（spec §5 第 07 行 / Q8 / Q12a）⇒ ``ANY_SEAT``：
         # 每个座位各问一次，"生效中"由构造器自己从禁令来源判（这一档没有实例闸）。
-        _XIONGLUAN_SKILL_ID: (BadgeScope.ANY_SEAT, _xiongluan_badge),
+        _XIONGLUAN_SKILL_ID: ((BadgeScope.ANY_SEAT, _xiongluan_badge),),
         # 【义绝】同一条纪律（spec §5 第 08 行 / Q8 / Q12a）⇒ 与【雄乱】**同一个判据**（禁令
         # 来源里有这条 id），故两条同时命中一个座位时两个标签并列；红色分支没有持续状态
         # ⇒ 自然不画（A6 的后半句）。
-        YIJUE: (BadgeScope.ANY_SEAT, _yijue_badge),
+        YIJUE: ((BadgeScope.ANY_SEAT, _yijue_badge),),
         # 【铁骑】同样画在**目标**身上（spec §5 第 09 行 / Q8″），但判据是另一格：失效记录
         # （``Player.suppressed_skills``）里**精确匹配本技能的 id**——不按 ``ALL_NON_LOCKED``
         # 扫（票面 §4 的 ⚠️：那会让义绝、以及将来任何失效技能点亮「铁骑」）。只有界马超这
         # 一版登记（Q11：标准【铁骑】写帧标签、不写座位级失效记录）。
-        JIE_TIEQI: (BadgeScope.ANY_SEAT, _jie_tieqi_badge),
+        JIE_TIEQI: ((BadgeScope.ANY_SEAT, _jie_tieqi_badge),),
+        # 锋·关羽【义云】（feng-guanyu 票 07）：**一条技能两个显示面**——自己座位画记录的花色
+        # （``SELF``，实例闸 = 失去义云即不画），被【丙】失效的目标座位画「义云」（``ANY_SEAT``，
+        # 判据 = 失效记录里**精确匹配义云 id**，照【铁骑】；不按 ``ALL_NON_LOCKED`` 扫）。
+        "hero.feng_guanyu.yiyun": (
+            (BadgeScope.SELF, _yiyun_suits_badge),
+            (BadgeScope.ANY_SEAT, _yiyun_suppress_badge),
+        ),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。
@@ -1125,6 +1181,9 @@ kind 一条构造器），标签登记表按 **skill id** 索引（与 ``catalog
 注册表按 skill id 索引允许，**派发逻辑里不许出现技能 id 名单**）——因为同一个 kind 下
 每条技能取数的读口各不相同，而"哪条技能带标签"是各技能自己的声明
 （:attr:`~sgs.skills.SkillDef.badge`）。
+
+值是**一组** ``(落座位档, 数据构造器)``——一条技能可以画**多条**标签（锋·关羽【义云】
+首次用到：自己座位画记录的花色、目标座位画失效标记）；只有一条时写 1 元组。
 
 构造器签名 ``(state, seat) -> dict | None``：``state`` = ``GameState``、``seat`` = 要画的
 **座位**。返回 ``{"tag", "label"}``（需要逐段上色时才带 ``parts``；``label`` 恒为纯文本），
@@ -1155,15 +1214,16 @@ def _badge_tags(state: Any) -> dict[int, list[dict[str, Any]]]:
         (instance.owner, instance.skill_id) for instance in resolve_instances(state)
     }
     out: dict[int, list[dict[str, Any]]] = {}
-    for skill_id, (scope, builder) in BADGE_PROVIDERS.items():
-        for player in state.players:
-            seat = int(player.seat)
-            if scope is BadgeScope.SELF and (seat, skill_id) not in held:
-                continue
-            payload = builder(state, seat)
-            if payload is None:
-                continue
-            out.setdefault(seat, []).append(payload)
+    for skill_id, specs in BADGE_PROVIDERS.items():
+        for scope, builder in specs:
+            for player in state.players:
+                seat = int(player.seat)
+                if scope is BadgeScope.SELF and (seat, skill_id) not in held:
+                    continue
+                payload = builder(state, seat)
+                if payload is None:
+                    continue
+                out.setdefault(seat, []).append(payload)
     return out
 
 

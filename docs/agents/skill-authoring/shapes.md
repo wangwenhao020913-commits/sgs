@@ -78,6 +78,7 @@
 | **计数式分配**（新询问形态） | 「对这些角色造成共计至多3点伤害」——一张弹窗里逐座位点计数 | `hero.shen_zhouyu_mobile.yeyan`（huo-shenzhouyu-mobile 票 05；`QueryKind.DISTRIBUTE` + `Action.Distribute`） |
 | 帧外时机 + 单步选项（**弃牌阶段结束时**） | 「弃牌阶段结束时，若你于此阶段内弃置过…你可以选择一项」 | `hero.shen_zhouyu_mobile.qinyin`（huo-shenzhouyu-mobile 票 01/03） |
 | **L0（游戏开始时）锁定技 + 手写展示循环**：帧外钩子（不问发动）+ 变长循环逐张弹选择型弹窗，每次的正文段是**武将牌**（武将块 / 技能行带描述 / 置灰 / 具体 X） | 「游戏开始时，依次展示3张真名不在场上的随机武将牌，且每次展示你须选择：1.获得该武将牌上的1个技能；2.增加一点体力上限，回复一点体力，摸X张牌」 | `hero.wuming.tiancheng`（wuming 票 01；`GAME_START` + `Engine.draw_hero_cards` + `ask_option(disabled=/option_texts=/hero_card=)`；循环游标住**帧私有**，加 / 减上限走 `MAXLIFE` 帧） |
+| **全集转化**（全部同色手牌 / 所有手牌 → 一张牌） | 「你可以将所有**黑/红**色手牌当作一张【决斗】/火【杀】对其使用」 | `hero.feng_guanyu.danqi`（feng-guanyu 票 01/03）：来源 = "满足条件的**全部**手牌"（张数不定、**无上界**）⇒ 候选恒 **1** 组、**零组合枚举**，走 `src/sgs/skills/virtual.py:collective_transformed_card` + `allocate_virtual_id`（按局 id）；**不**声明 `ConversionSkill`（那是"先枚举再提交"的候选面，与全集互斥） |
 | 状态位 + 触发器 | 「横置 / 翻面 / 标记」 | 横置 = `Player.chained` + `Engine.set_chained`；翻面 = `Player.flipped` + `Engine.set_flipped`（首个载体：移动版界曹仁【据守】）。**监听**「翻面 / 横置**后**」用 `STATE_FLIPPED` / `STATE_CHAINED` 上的钩子（chenqun-guyong 票 03 解封；见 §3.1 那一行的惰性派发口径），效果本身通常是第 1 行「零步流水线」 |
 
 > **第 1 行的锁定技变体**：牌面写「锁定技」时形状不变、但那一问**不发**（`locked=True`，派发环的
@@ -97,6 +98,11 @@
 > 结算）同样是"纯 handler"，而那张"两条都得跑、先跑哪个由你定"的面必须照旧出现，故
 > "是不是簿记"只能是声明。样板 = `hero.shen_zhugeliang.kuangfeng` / `hero.shen_zhugeliang.dawu`
 > 的 `TURN_START` 到期清扫（玩家此前会在准备阶段被问"是否发动"）。
+>
+> **簿记段不算一次发动**（feng-guanyu 票 08）：`限定技` / `觉醒技` 上也可以挂簿记段（例 =
+> 锋·关羽【心汉】的两条纯计数钩子：造成伤害点数 / 实际回复量），但簿记段跑完**不落**
+> 「整局已用」/「已觉醒」位 —— 落位只属于"那条技能的效果本身跑过一次"。写反了就是
+> "计数钩子一跑，同一条技能的其余钩子与觉醒流程全被挡掉"（实机表现 = 觉醒技永不发动）。
 
 > 表里没有的形状，就是 C1：**停手开架构缺口票**，不许在技能代码里绕。
 
@@ -376,7 +382,7 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 
 | 类别 | 落点 | 通道 | 可见性 | 今天谁在用 | 加一档要落齐哪几处 |
 |---|---|---|---|---|---|
-| **小窗口类** | 武将块上的常驻状态标签（`seat-view.js:fillHeroTags` → `.hero-tag` chip；没有标签整块隐藏） | `players[].hero_tags`，每项 `{tag, label[, parts]}`：`label` 恒为纯文本，`parts` 只在需要**逐段上色**时出现（每段 `{text, tone?}`，`tone` ∈ `red` / `black`，取 `tools/sgs_web/display.py:SUIT_LABELS` 这唯一一份花色→颜色表），`parts` 的文本拼起来恒等于 `label`；**不进** `PlayerView` / `PlayerPublic` / 记录流 | 公开 | 手牌上限+N（通用派生量，不属于任何一条技能）、裸衣两版、勤政、渐营两版、博图、父荫、雄乱、义绝、铁骑、武翊 | ① `BadgeKind` 加成员（闭集，`tests/test_web.py` 的审计用例写死成员集合，加成员必须同票改它）；② 声明面：A 族写 `ActiveSkill.badge`、L 族写 `PhaseBodySkill.badge`，其余声明直接写 `SkillDef.badge`；③ `sgs_web.projection.BADGE_PROVIDERS` 按 **skill id** 登记构造器（键集与"声明了 `badge` 的 skill id 集"**强制相等**——漏登 = 标签永远不出现，幽灵登记 = 画一条没人声明的东西）；④ 需要上色时前端消费 `parts`；⑤ 票面 + `06`（§5「程序化约定与偏离一手」）登记 + 本表 |
+| **小窗口类** | 武将块上的常驻状态标签（`seat-view.js:fillHeroTags` → `.hero-tag` chip；没有标签整块隐藏） | `players[].hero_tags`，每项 `{tag, label[, parts]}`：`label` 恒为纯文本，`parts` 只在需要**逐段上色**时出现（每段 `{text, tone?}`，`tone` ∈ `red` / `black`，取 `tools/sgs_web/display.py:SUIT_LABELS` 这唯一一份花色→颜色表），`parts` 的文本拼起来恒等于 `label`；**不进** `PlayerView` / `PlayerPublic` / 记录流 | 公开 | 手牌上限+N（通用派生量，不属于任何一条技能）、裸衣两版、勤政、渐营两版、博图、父荫、雄乱、义绝、铁骑、武翊、**义云（一条技能两条 spec：自己座位画记录的花色 / 目标座位画失效标记；`BADGE_PROVIDERS` 的值是一**组** spec）** | ① `BadgeKind` 加成员（闭集，`tests/test_web.py` 的审计用例写死成员集合，加成员必须同票改它）；② 声明面：A 族写 `ActiveSkill.badge`、L 族写 `PhaseBodySkill.badge`，其余声明直接写 `SkillDef.badge`；③ `sgs_web.projection.BADGE_PROVIDERS` 按 **skill id** 登记构造器（键集与"声明了 `badge` 的 skill id 集"**强制相等**——漏登 = 标签永远不出现，幽灵登记 = 画一条没人声明的东西）；④ 需要上色时前端消费 `parts`；⑤ 票面 + `06`（§5「程序化约定与偏离一手」）登记 + 本表 |
 | **弹窗类** | 技能按钮 / 询问面打开的弹窗 | `SkillDef.appearance: AppearanceKind \| None` + `sgs_web.projection.APPEARANCE_BUILDERS`（按 **kind** 索引）：数据由技能自己写、组件只负责显示，接入层按它在"只读面 / 发动面"两条面上派生同一份**自见载荷** | 自见 | 化身（`AVATAR`，今天唯一成员；载荷里含别人的化身牌，故只发给持有者） | ① `AppearanceKind` 加成员（闭集审计按"一个成员恰一条构造器"核）；② 登记一条构造器 + 新增前端组件与对应弹窗模板（`modal.js:DIALOG_KINDS`）/ 技能按钮入口；③ 自见载荷是**新信息通道** ⇒ 过 `ai-adaptation.md` 的 checklist 与不泄露分类（非持有者的载荷要抹）；④ 票面 + 账本登记 + 本表 |
 
 两类**互不替代**：小窗口类只画"一句话 / 一个小值"，无交互、公开，还可以画在**别人的座位**上

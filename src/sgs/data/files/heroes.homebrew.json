@@ -86,6 +86,33 @@
       ]
     },
     {
+      "id": "feng_guanyu",
+      "name": "锋·关羽",
+      "true_name": "关羽",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "homebrew",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "danqi",
+          "name": "单骑",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yiyun",
+          "name": "义云",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "xinhan",
+          "name": "心汉",
+          "skill_type": "AWAKENING"
+        }
+      ]
+    },
+    {
       "id": "nengren",
       "name": "能人志士",
       "true_name": "能人志士",
