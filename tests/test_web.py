@@ -36,6 +36,7 @@ from sgs.data import (  # noqa: E402
     validate_rule_config,
 )
 from sgs.data import color_of_suit, enabled_hero_ids, hero_by_id  # noqa: E402
+from sgs.effects import Demand, Supply, TierSupplies  # noqa: E402
 from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT, RUNNING_SKILL_KEY, hero_card_zone_key  # noqa: E402
@@ -16239,3 +16240,147 @@ def test_the_feng_guanyu_option_labels_are_chinese_on_both_sides() -> None:
         assert option in labels, f"前端 OPTION_LABELS 缺 {option}（按钮会回落成 id 原文）"
         assert labels[option] == text, "前端与引擎的四个选项文案必须逐字一致"
         assert text != option and re.search(r"[\u4e00-\u9fff]", text), "按钮上应是中文"
+
+
+# ---------------------------------------------------------------------------
+# 需要（使用 / 打出）牌的「需求 × 供给」（need-card-supply 票 01）
+#
+# 票面 §4 的验收 3 / 4 / 5 / 6：一句需求的人话、灰行 + 理由、投影的两个键（且不进
+# legal_actions）、以及一条**真 HTTP** 的载荷断言。
+# ---------------------------------------------------------------------------
+
+_NEED_CARD_PACK = load_content_pack(deck_profile="standard_108")
+"""标准 108 张档（票 32：模块级加载必须写死档位）。"""
+
+
+def _need_card_dodge_session(*, equip: tuple[int, ...] = ()):
+    """推到一个**需要【闪】**的询问：座位 1 的 AI 用【杀】指定人类座位，人类手上有【闪】。
+
+    ``equip`` 用来摆【八卦阵】——它在候选里占**装备档**，于是"按档列行"有两行可看。
+    """
+    pack = _NEED_CARD_PACK
+    slash = cards_of_type(pack, "slash")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), equip=equip), SeatSpec(hand=(slash,))],
+        deck=deck_excluding(pack, slash, dodge, *equip),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    session = Session(
+        seed=11, ai="heuristic", timeout_seconds=None, player_count=2, human_seat=0
+    )
+    session.engine = Engine.from_state(state, seed=11)
+    session.drive()
+    assert session.pending is not None and session.pending.kind == QueryKind.DODGE, (
+        "构造局面没到【闪】窗口"
+    )
+    return session
+
+
+def test_the_need_card_demand_reads_like_one_sentence():
+    """§4-4：一句人话（牌名 + 花色两维各一例；``None`` = 不限的读法；``()`` = 记录为空）。"""
+    state = build_state(pack=_NEED_CARD_PACK, seats=[SeatSpec(), SeatSpec()])
+
+    assert (
+        _projection.need_card_demand_text(
+            state, Demand(names=("dodge",), suits=("diamond", "club"))
+        )
+        == "本次要求：【闪】，且花色必须是 ♦ 或 ♣"
+    )
+    assert (
+        _projection.need_card_demand_text(state, Demand(names=("slash",)))
+        == "本次要求：【杀】"
+    ), "花色维度是 None ⇒ 不写这一维（不限）"
+    assert "任意一张牌" in _projection.need_card_demand_text(state, Demand())
+    assert "记录为空" in _projection.need_card_demand_text(state, Demand(suits=()))
+
+
+def test_a_suitless_supply_row_is_greyed_with_its_reason():
+    """§4-3：无花色供给（【八卦阵】的虚拟【闪】）在花色需求下灰行 + 理由非空。
+
+    行的 ``ok`` / ``reason`` 都在后端现算（用户 Q4）——判据与匹配器同源，前端只读 ``ok``。
+    """
+    state = build_state(pack=_NEED_CARD_PACK, seats=[SeatSpec(), SeatSpec()])
+    tiers = (
+        TierSupplies(
+            tier=1,
+            provider="equip.eight_diagrams",
+            supplies=(Supply(product="dodge", kind="virtual"),),
+        ),
+        TierSupplies(
+            tier=2,
+            provider=None,
+            supplies=(Supply(product="dodge", suit="heart", rank=2, color="red"),),
+        ),
+    )
+    demand = Demand(names=("dodge",), suits=("diamond", "club"))
+
+    rows = _projection.need_card_supply_rows(state, demand, tiers)
+
+    assert [row["tier"] for row in rows] == [1, 2]
+    assert rows[0]["label"] == "装备档·八卦阵"
+    assert rows[0]["ok"] is False
+    assert rows[0]["supply_text"] == "无色虚拟【闪】"
+    assert rows[0]["reason"] == "八卦阵：无色虚拟【闪】 → 不满足花色限制"
+    assert rows[1]["label"] == "使用牌档·手牌"
+    assert rows[1]["supply_text"] == "♥2【闪】"
+    assert rows[1]["ok"] is False, "真牌花色不白名单里 ⇒ 同样灰"
+
+    # 白名单换成 ♥ ⇒ 手牌档高亮、八卦阵那档仍是灰的（无花色确定不满足，spec §3-3）。
+    satisfied = _projection.need_card_supply_rows(
+        state, Demand(names=("dodge",), suits=("heart",)), tiers
+    )
+    assert satisfied[0]["ok"] is False and satisfied[0]["reason"]
+    assert satisfied[1]["ok"] is True and satisfied[1]["reason"] is None
+
+
+def test_the_pending_payload_carries_the_need_card_keys_only_for_need_card_windows():
+    """§4-5：需要牌窗口带两个键、非需要牌窗口为 ``None``；``legal_actions`` 里没有它们的影子。
+
+    另外钉住信息卫生：别人的询问（``human_seat`` 不是询问者）与 409 的裸 ``Query`` 都拿不到
+    ——供给里带着**手牌档的牌面**（私密事实）。
+    """
+    session = _need_card_dodge_session()
+    payload = pending_payload(session)
+
+    assert payload["need_card_demand"] == "本次要求：【闪】"
+    supplies = payload["need_card_supplies"]
+    assert supplies and all(
+        set(row) == {"tier", "label", "supply_text", "ok", "reason"} for row in supplies
+    ), supplies
+    assert all(row["ok"] is True for row in supplies), "今天的候选天然满足需求（票 02 才放宽）"
+    assert not any("need_card" in action for action in payload["legal_actions"]), (
+        "两个键是投影派生的展示数据，不许混进候选"
+    )
+
+    # 非需要牌窗口（出牌阶段）⇒ 两个键都是 None（键恒在，读取方不必先判存在）。
+    play_phase = Session(seed=83, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    other = pending_payload(play_phase)
+    assert other["need_card_demand"] is None and other["need_card_supplies"] is None
+
+    # 409 里附带的裸 Query（拿不到引擎）⇒ None；别人的询问 ⇒ None。
+    bare = pending_payload(session.pending, human_seat=0)
+    assert bare["need_card_demand"] is None and bare["need_card_supplies"] is None
+    foreign = pending_payload(session.pending, human_seat=1)
+    assert foreign["need_card_demand"] is None and foreign["need_card_supplies"] is None
+
+
+def test_the_need_card_keys_reach_a_real_http_payload() -> None:
+    """§4-6：起会话、推进到一次需要牌询问、经**真 handler** 读挂起载荷，两键在。"""
+    from sgs_web.serve import GameRegistry
+
+    session = _need_card_dodge_session()
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry.sessions[session.session_id] = session
+    status, body = _get_with_the_real_handler(
+        registry, f"/api/sessions/{session.session_id}?after=-1&logs=0"
+    )
+
+    assert status == 200
+    pending = body["pending"]
+    assert pending["kind"] == "DODGE"
+    assert pending["need_card_demand"] == "本次要求：【闪】"
+    assert [row["label"] for row in pending["need_card_supplies"]] == ["使用牌档·手牌"]

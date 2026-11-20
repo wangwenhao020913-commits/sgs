@@ -56,6 +56,7 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    Supply,
     check_targets,
     check_usable,
     satisfies_required,
@@ -1534,6 +1535,10 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
             {"seat": f"选择【{card}】的目标"} if skill.activation_flow is not None else None
         ),
         preactivated=skill.activation_flow is not None,
+        # need-card-supply 票 01：**需求传递**（relay）——发动时不验合法性，真正做的是把
+        # "需要一张【required】"这个需求依次传给同势力角色；产物由别人给 ⇒ 候选期不可知
+        # （`unknown=True`，语义是票 03 的活）。牌名照声明给（是**声明事实**，不是判据）。
+        supply=Supply(product=skill.required, kind="relay", unknown=True),
     )
 
 

@@ -125,6 +125,10 @@ function resetAskSurface({ keepOptions = false } = {}) {
     const options = $("t-options");
     if (options) options.innerHTML = "";
   }
+  // 需要牌窗口的「需求 × 供给」行（need-card-supply 票 01）：与选项格同一条寿命——
+  // 没有 `need_card_supplies` 的询问一个像素都不多画（容器空着，CSS `:empty` 不占位）。
+  const supplies = $("t-need-card-supplies");
+  if (supplies) supplies.innerHTML = "";
   // 弹窗标题条的**镜像**（`modal.js:syncDialogHint` 把 `#t-target-hint` 抄过去）：窗口不关时
   // 没人重算它 ⇒ 上一问的步骤提示会留在标题条上（`keepDialog` 分支的残留）。
   resetDialogHint();
@@ -165,6 +169,75 @@ function blankAskSurface() {
     closeDialogDom();
   }
   resetAskSurface({ keepOptions: keepDialog && bodyOwnsOptions });
+}
+
+/* ---------------------------------------- 需要牌的「需求 × 供给」行（票 01）
+
+ * 用户 2026-11-20 的提案：每一档报出"它能提供什么"，再用这一问的**需求**去匹配——
+ * 满足的档高亮、不满足的档置灰并写出理由。判据**全在服务端**（用户 Q4"置灰后端实时算"）：
+ * 前端只读 `ok` / `reason`，不自己猜合法性、也不按静态表画。
+ *
+ * 两个载荷键都是投影派生的展示数据（`pending.need_card_demand` / `pending.need_card_supplies`）；
+ * 没有它们的询问（其余全部 kind、别人的询问、409 的裸 Query）⇒ 一行都不画。
+ */
+
+const NEED_CARD_SUPPLIES_ID = "t-need-card-supplies";
+
+/** 行表容器：挂在询问条左栏 `#t-options-home` 里（= 提示行 / 选项**下方**），建一次复用。
+ *
+ *  动态建节点（index.html 不动）与其它运行期图层同一姿态；`#t-options` 被搬进弹窗正文时
+ *  它仍留在提示区，故行表始终跟着询问条。 */
+function needCardSuppliesHost() {
+  const home = $("t-options-home");
+  if (!home) return null;
+  let node = $(NEED_CARD_SUPPLIES_ID);
+  if (node && node.parentNode) return node;
+  node = document.createElement("div");
+  node.id = NEED_CARD_SUPPLIES_ID;
+  node.className = "need-card-supplies";
+  node.setAttribute("aria-label", "每一档能提供什么");
+  home.appendChild(node);
+  return node;
+}
+
+/** 把这一问的「需求 × 供给」画成**一档一行**：标签 + 供给描述（+ 置灰行的理由）。
+ *
+ *  `ok === false` 的行加 `dis`（与选项面同一套 `.opt.dis` 置灰语言），并显示后端给的
+ *  `reason`——前端不拼理由、也不判断合法性。 */
+function renderNeedCardSupplies(pending) {
+  const host = needCardSuppliesHost();
+  if (!host) return;
+  host.innerHTML = "";
+  const rows = pending && Array.isArray(pending.need_card_supplies)
+    ? pending.need_card_supplies
+    : [];
+  if (rows.length === 0) return;
+  const demand = pending.need_card_demand;
+  if (demand) {
+    const line = document.createElement("p");
+    line.className = "need-card-demand";
+    line.textContent = String(demand);
+    host.appendChild(line);
+  }
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = row.ok ? "opt need-card-row static" : "opt need-card-row static dis";
+    const label = document.createElement("span");
+    label.className = "need-card-tier";
+    label.textContent = String(row.label || "");
+    const text = document.createElement("span");
+    text.className = "need-card-text";
+    text.textContent = String(row.supply_text || "");
+    item.appendChild(label);
+    item.appendChild(text);
+    if (!row.ok && row.reason) {
+      const reason = document.createElement("span");
+      reason.className = "need-card-reason";
+      reason.textContent = String(row.reason);
+      item.appendChild(reason);
+    }
+    host.appendChild(item);
+  }
 }
 
 /* ------------------------------------------------------------ 询问渲染 */
@@ -249,6 +322,8 @@ function renderPending(view) {
     syncDialog();
     return;
   }
+  // 需要牌的「需求 × 供给」行（票 01）：只读服务端下发的 `ok` / `reason`，不自己算合法性。
+  renderNeedCardSupplies(pending);
   // 其他座位的询问（U1-03）：提示条只写"等待"，可点控件一律不铺；该座位的武将块下方
   // 由 `renderRingSeats` 显示“正在响应…”。倒计时也不显示（AI 即时回答 / 他人窗口）。
   if (!isOwnPending(pending)) {

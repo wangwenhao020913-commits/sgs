@@ -62,6 +62,7 @@ from sgs.effects import (
 from sgs.state import GameState, RejudgeOffer, Zone
 from .catalog import (
     ACTIVATION_PLANS,
+    CARD_REQUEST_WINDOWS,
     CATALOG,
     DAMAGE_DEAL_POINT_KEY,
     DAMAGE_DEAL_RECORDED_KEY,
@@ -80,6 +81,7 @@ from .catalog import (
     SUSPENDED_SKILL_KEY,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
+    REQUEST_WINDOW,
     RejudgeOriginal,
     Seam,
     SeamKind,
@@ -391,6 +393,7 @@ __all__ = (
     "ACTIVATION_PLANS",
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
+    "CARD_REQUEST_WINDOWS",
     "CATALOG",
     "DAMAGE_AFTER_SKILLS",
     "DAMAGE_POINT_KEY",
@@ -454,6 +457,7 @@ __all__ = (
     "REJUDGE_SKILL_IDS",
     "RejudgeOriginal",
     "SUSPENDED_SKILL_KEY",
+    "REQUEST_WINDOW",
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
     "SEAT_PREFIX",

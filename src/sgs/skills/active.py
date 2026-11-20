@@ -77,6 +77,7 @@ from sgs.effects import (
     locate,
     needs_designation,
     satisfies_required,
+    Supply,
     targets_within_attack_range,
     UseContext,
 )
@@ -3578,6 +3579,14 @@ class ActiveSkill(HeroSkillDecl):
     同 id 的两条声明**后者静默覆盖前者**（于是 A 族入口或钩子整条消失，且现有断言全绿）。
     这里留一个声明口，由 :func:`active_skill_definitions` 原样透传；钩子自己若带 ``flow``，
     由 :data:`~sgs.skills.preactivation.FLOWS` 的派生照常登记（与被动技同一条派生）。
+    """
+
+    supply: Supply | None = None
+    """作为**"需要牌"窗口的提供者**时，候选期能提供什么（need-card-supply 票 01）。
+
+    与 :attr:`need_card_tier` 同一姿态的**声明**字段：原样透传给 ``SkillDef.supply``，
+    判据只在展示层读它。今天的唯一消费者 = 【蛊惑】（``kind="preconversion"``、
+    ``unknown=True``：预转化的产物在候选期不可知，票 04 才逐张报花色 / 点数）。
     """
 
     need_card_tier: int | None = None
@@ -9434,6 +9443,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         # 作为提供者的档 = **第 2 档**（票 04 §3 / Q16 / Q17）：载体是武将牌、产物却是
         # 转化牌（"扣置一张手牌当它"）⇒ 与真牌同档。写覆盖位，不在派发里认技能名。
         need_card_tier=2,
+        # need-card-supply 票 01：**预转化**——产物是"扣置的那张手牌转化出来的牌"，
+        # 候选期不可知（逐张手牌的花色 / 点数由票 04 报）。本票只声明它，不判它合不合法。
+        supply=Supply(kind="preconversion", unknown=True),
         extra_modifiers=(
             Modifier(ModifierPoint.CANDIDATES, _guohuo_provider_offers),
         ),
@@ -9678,6 +9690,8 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             hooks=skill.hooks,
             # 票 04 的加法：作为"需要牌"提供者时的档覆盖位（缺省 None ⇒ 按载体派生）。
             need_card_tier=skill.need_card_tier,
+            # need-card-supply 票 01 的加法：作为"需要牌"提供者时能提供什么（缺省 None）。
+            supply=skill.supply,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             # 声明级覆盖优先（标准 / 界同短 id 但步骤次序 / 角色不同，M6 票 14）。
             step_requirements=(

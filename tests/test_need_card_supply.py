@@ -1,0 +1,492 @@
+"""**需要（使用 / 打出）牌**时的「需求 × 供给」展示层（need-card-supply 票 01）。
+
+三件事在这里钉住（票面 §4 的验收 1–4）：
+
+1. 两个对象：:class:`~sgs.effects.Demand`（维度可加的精确需求）与
+   :class:`~sgs.effects.Supply`（候选期的供给描述），以及匹配器
+   :func:`~sgs.effects.supply_satisfies`。**无花色 / 无点数**的供给**确定地不满足**
+   对应维度的限制（用户 2026-11-20 裁定，spec §3 第 3 条）；``unknown=True`` 的供给
+   （【蛊惑】/【护驾】/【激将】）在候选期不可知，本票**不判死**。
+2. 每个需要牌窗口（``CARD_REQUEST_WINDOWS`` 里 ``providers=True`` 的 8 行）都产出一句
+   需求 + 非空的按档供给行——供给从现有候选反推（``_actions_for`` 全档生成口），
+   提供者的供给来自 ``SkillDef.supply`` 的声明。
+3. 牌面事实（真牌 / 单源转化 / 多源转化）与「一句话需求」的可读性。
+
+**纯展示**：本文件不碰 ``legal_actions``、不改任何合法性判据（那是票 02/03/04）。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT / "src") not in sys.path:  # 与多数测试同一条引导（单独跑时也能 import）
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from sgs.data import RuleConfig, color_of_suit, load_content_pack  # noqa: E402
+from sgs.effects import (  # noqa: E402
+    Demand,
+    Supply,
+    demand_for,
+    supplies_for,
+    supply_mismatch,
+    supply_satisfies,
+)
+from sgs.state import (  # noqa: E402
+    DodgeContext,
+    PeachContext,
+    QueryKind,
+    RespondContext,
+    RespondMode,
+    WindowCause,
+)
+
+from support import SeatSpec, build_state, cards_of_type, deck_excluding  # noqa: E402
+
+PACK = load_content_pack(deck_profile="standard_108")
+"""标准 108 张档（显式选档：模块级加载必须写死档位，票 32）。"""
+
+PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""军争 160 张档：**求桃自救的【酒】**只在军争档里（标准 108 没有这张牌）。"""
+
+
+def _state_with(
+    hand: tuple[int, ...],
+    *,
+    equip: tuple[int, ...] = (),
+    hero: str | None = None,
+    pack=PACK,
+):
+    """座位 0 = 给定手牌 / 装备（供给样本都在它身上），座位 1 = 空手牌。"""
+    used = set(hand) | set(equip)
+    return build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=hand, equip=equip, hero=hero), SeatSpec()],
+        deck=deck_excluding(pack, *used),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. 两个对象 + 匹配器
+# ---------------------------------------------------------------------------
+
+
+def test_a_supply_without_a_suit_never_satisfies_a_suit_demand():
+    """§4-3：无花色供给**确定地不满足**花色需求（不是"未知"）——【八卦阵】的虚拟【闪】。
+
+    判据来源 = spec §3 第 3 条（用户 2026-11-20 裁定）：``None`` 是"恒无"，不是"不知道"；
+    "不知道"由 ``unknown=True`` 单独表达。
+    """
+    demand = Demand(suits=("diamond", "club"))
+    bagua = Supply(product="dodge", kind="virtual")
+
+    assert supply_satisfies(demand, bagua) is False
+    assert supply_mismatch(demand, bagua), "不满足时要给得出理由（行里的 reason）"
+
+
+def test_a_real_card_supply_satisfies_a_suit_demand_only_when_its_suit_is_listed():
+    """真牌供给按牌面花色判：白名单里的花色满足，别的不满足。"""
+    demand = Demand(suits=("diamond", "club"))
+
+    assert supply_satisfies(demand, Supply(product="dodge", suit="diamond", rank=8))
+    assert supply_satisfies(demand, Supply(product="dodge", suit="club", rank=2))
+    assert not supply_satisfies(demand, Supply(product="dodge", suit="heart", rank=3))
+
+
+def test_none_means_unrestricted_and_an_empty_whitelist_satisfies_nothing():
+    """值的三态：``None`` = 不限；``()`` = 记录为空 ⇒ 无法响应（连有花色的供给也不行）。"""
+    real = Supply(product="dodge", suit="diamond", rank=8)
+
+    assert supply_satisfies(Demand(), real), "全维度 None = 不限"
+    assert supply_satisfies(Demand(suits=None), real)
+    assert not supply_satisfies(Demand(suits=()), real)
+    assert not supply_satisfies(Demand(suits=()), Supply(product="dodge", kind="virtual"))
+
+
+def test_an_unknown_supply_is_not_judged_dead_in_this_ticket():
+    """``unknown=True`` = 候选期不可知（【蛊惑】/【护驾】/【激将】）⇒ 本票只标出来、不判死。"""
+    demand = Demand(suits=("diamond",))
+
+    relay = Supply(product="dodge", kind="relay", unknown=True)
+    preconversion = Supply(product="dodge", kind="preconversion", unknown=True)
+
+    assert supply_satisfies(demand, relay) is True
+    assert supply_satisfies(demand, preconversion) is True
+    assert supply_mismatch(demand, relay) is None
+
+
+def test_the_card_name_dimension_reuses_the_slash_family_key():
+    """牌名维度读**既有**的族判据（``CardBehavior.count_key``），不另抄一张名单。
+
+    【南蛮】/【决斗】要的是【杀】族：火【杀】/ 雷【杀】与普通【杀】同族（``is_slash``
+    与 :func:`sgs.effects.satisfies_required` 读的是同一个 ``count_key``）。
+    """
+    demand = Demand(names=("slash",))
+
+    assert supply_satisfies(demand, Supply(product="slash", suit="spade", rank=7))
+    assert supply_satisfies(demand, Supply(product="fire_slash", kind="transformed"))
+    assert supply_satisfies(demand, Supply(product="thunder_slash", suit="club", rank=9))
+    assert not supply_satisfies(demand, Supply(product="dodge", suit="spade", rank=7))
+    assert not supply_satisfies(demand, Supply(product="dodge", kind="virtual"))
+
+
+def test_the_four_dimensions_without_a_producer_today_are_written_the_same_shape():
+    """颜色 / 点数 / 虚拟·转化 / 转化源张数：同形上线、暂时无生产者——匹配器现在就写全。"""
+    assert not supply_satisfies(
+        Demand(colors=("red",)), Supply(product="dodge", suit="spade", color="black")
+    )
+    assert supply_satisfies(
+        Demand(colors=("red",)), Supply(product="dodge", suit="heart", color="red")
+    )
+    assert not supply_satisfies(Demand(ranks=(7,)), Supply(product="dodge", rank=8))
+    assert supply_satisfies(Demand(ranks=(7, 8)), Supply(product="dodge", rank=8))
+    assert not supply_satisfies(Demand(kinds=("transformed",)), Supply(product="slash"))
+    assert supply_satisfies(
+        Demand(kinds=("transformed",)), Supply(product="slash", kind="transformed")
+    )
+    assert not supply_satisfies(
+        Demand(source_counts=(2,)), Supply(product="slash", kind="transformed", source_count=1)
+    )
+    assert supply_satisfies(
+        Demand(source_counts=(2,)), Supply(product="slash", kind="transformed", source_count=2)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. 需求生产者：窗口的 required + response_suits 打包成 Demand
+# ---------------------------------------------------------------------------
+
+
+def test_the_dodge_window_demands_the_dodge_card_and_the_recorded_suits():
+    """【闪】窗口 = 牌名【闪】+ 单骑第三段收窄的花色白名单（票面 §1 的两个生产者）。"""
+    demand = demand_for(
+        QueryKind.DODGE, DodgeContext(response_suits=("diamond", "club"))
+    )
+
+    assert demand == Demand(names=("dodge",), suits=("diamond", "club"))
+
+
+def test_the_respond_window_demands_the_declared_card_name():
+    """打出 / 使用响应窗口要的牌名 = 窗口自己的 ``required``（南蛮 / 决斗 = 【杀】族）。"""
+    demand = demand_for(
+        QueryKind.RESPOND,
+        RespondContext(cause=WindowCause.DUEL, required="slash", mode=RespondMode.PLAY),
+    )
+
+    assert demand == Demand(names=("slash",))
+
+
+def test_the_peach_window_demands_a_peach_and_a_wine_only_for_the_dying_seat():
+    """求桃窗口：【桃】；**濒死者自己**被问时【酒】同档（与真牌 / 提供者两条既有路径同读）。
+
+    这是本票的一处**刻意的读法**：窗口自己的登记行已写明「（濒死自救时含【酒】）」，
+    真牌路径由 ``TargetRule.near_death_self_only``、提供者路径由
+    ``_GUOHUO_SELF_RESCUE_NAMES`` 各表达一次；需求若只说【桃】，自救的那张【酒】
+    就会被展示层错误地置灰。
+    """
+    assert demand_for(QueryKind.PEACH, PeachContext(), dying=1, asker=1) == Demand(
+        names=("peach", "wine")
+    )
+    assert demand_for(QueryKind.PEACH, PeachContext(), dying=1, asker=0) == Demand(
+        names=("peach",)
+    )
+
+
+def test_a_window_that_is_not_a_need_card_window_has_no_demand():
+    """四扇需要牌窗口之外（含改判）⇒ 没有需求（投影的两个键因此是 ``None``）。
+
+    判据复用 ``actions._window_floor`` 那一族（票面 §2），不在这里另判一遍窗口。
+    """
+    assert demand_for(QueryKind.PLAY_PHASE) is None
+    assert demand_for(QueryKind.DISCARD) is None
+    assert demand_for(QueryKind.SELECT_OPTION) is None
+    assert demand_for(
+        QueryKind.RESPOND, RespondContext(cause=WindowCause.REJUDGE, mode=RespondMode.REJUDGE)
+    ) is None
+
+
+def test_an_empty_recorded_suit_list_stays_an_empty_whitelist():
+    """``response_suits=()``（记录为空）原样进需求 ⇒ 什么也满足不了（三态不塌成 ``None``）。"""
+    demand = demand_for(QueryKind.DODGE, DodgeContext(response_suits=()))
+
+    assert demand is not None
+    assert demand.suits == ()
+    assert not supply_satisfies(demand, Supply(product="dodge", suit="diamond", rank=8))
+
+
+# ---------------------------------------------------------------------------
+# 3. 按档供给：从全档候选反推（票面 §4-1 / §4-2）
+# ---------------------------------------------------------------------------
+
+_DODGES = cards_of_type(PACK, "dodge")
+_SLASHES = cards_of_type(PACK, "slash")
+_PEACHES = cards_of_type(PACK, "peach")
+_NULLIFIES = cards_of_type(PACK, "nullify")
+
+
+def _window_setup(key: str):
+    """8 扇登记窗口各一份**最小局面 + 候选载荷**（测试样例，不是第二份窗口清单）。
+
+    ``key`` 取自 :data:`sgs.skills.CARD_REQUEST_WINDOWS`（票面 §0.1-1：``providers=True``
+    的全部 8 行），下面这张表只回答"这扇窗口在测试里怎么摆一张能响应的牌"。
+    """
+    if key == "dodge":
+        return (
+            _state_with((_DODGES[0],)),
+            QueryKind.DODGE,
+            DodgeContext(),
+            {},
+        )
+    if key == "arrow_barrage":
+        return (
+            _state_with((_DODGES[0],)),
+            QueryKind.RESPOND,
+            RespondContext(
+                cause=WindowCause.ARROW_BARRAGE,
+                required="dodge",
+                mode=RespondMode.PLAY,
+            ),
+            {},
+        )
+    if key == "peach":
+        return (
+            _state_with((_PEACHES[0],)),
+            QueryKind.PEACH,
+            PeachContext(),
+            {"dying": 0, "asker": 0},
+        )
+    if key in {"barbarian_invasion", "duel"}:
+        cause = (
+            WindowCause.BARBARIAN_INVASION if key == "barbarian_invasion" else WindowCause.DUEL
+        )
+        return (
+            _state_with((_SLASHES[0],)),
+            QueryKind.RESPOND,
+            RespondContext(cause=cause, required="slash", mode=RespondMode.PLAY),
+            {},
+        )
+    if key in {"borrowed_sword", "luanwu"}:
+        cause = WindowCause.BORROWED_SWORD if key == "borrowed_sword" else WindowCause.LUANWU
+        return (
+            _state_with((_SLASHES[0],)),
+            QueryKind.RESPOND,
+            RespondContext(
+                cause=cause,
+                required="slash",
+                mode=RespondMode.USE,
+                use_targets=(1,),
+            ),
+            {},
+        )
+    if key == "nullify":
+        return (
+            _state_with((_NULLIFIES[0],)),
+            QueryKind.RESPOND,
+            RespondContext(
+                cause=WindowCause.NULLIFY,
+                required="nullify",
+                mode=RespondMode.USE,
+            ),
+            {},
+        )
+    raise AssertionError(f"登记表里没有测试样例的窗口：{key}")
+
+
+def _registered_need_card_keys() -> tuple[str, ...]:
+    """``providers=True`` 的登记行（票面 §0.1-1 的 8 行；判据来自登记表本身）。"""
+    from sgs.skills.catalog import CARD_REQUEST_WINDOWS
+
+    return tuple(row.key for row in CARD_REQUEST_WINDOWS if row.providers)
+
+
+def test_the_registry_has_the_eight_provider_windows_the_ticket_names():
+    """§0.1-1：``providers=True`` 恰有 8 行（票面点名的 dodge / … / nullify 全在里面）。"""
+    keys = _registered_need_card_keys()
+
+    assert len(keys) == 8, keys
+    assert {
+        "dodge",
+        "arrow_barrage",
+        "peach",
+        "barbarian_invasion",
+        "duel",
+        "borrowed_sword",
+        "luanwu",
+        "nullify",
+    } == set(keys)
+
+
+@pytest.mark.parametrize("key", _registered_need_card_keys())
+def test_every_provider_window_yields_a_demand_and_non_empty_tier_supplies(key):
+    """§4-1：**每个**需要牌窗口都产出一句需求 + 非空的按档供给（逐行一条断言）。"""
+    state, kind, payload, extra = _window_setup(key)
+
+    demand = demand_for(kind, payload, **extra)
+    # 供给只读候选生成需要的入参（``asker`` 只服务需求里"濒死者自救"那一格）。
+    tiers = supplies_for(
+        kind, state=state, seat=0, payload=payload, dying=extra.get("dying")
+    )
+
+    assert demand is not None, f"{key} 没有产出一句需求"
+    assert tiers, f"{key} 没有产出任何供给档"
+    assert all(group.supplies for group in tiers), f"{key} 有空档"
+    assert any(
+        supply_satisfies(demand, supply)
+        for group in tiers
+        for supply in group.supplies
+    ), f"{key} 的供给一条都不满足自己的需求"
+
+
+def _tier_supplies(kind, state, *, payload=None, dying=None, asker=None):
+    return supplies_for(
+        kind, state=state, seat=0, payload=payload, dying=dying, answers_seq=7
+    )
+
+
+def _flatten(tiers) -> list[Supply]:
+    return [supply for group in tiers for supply in group.supplies]
+
+
+def test_a_hand_card_supply_carries_the_card_face_facts():
+    """§4-2（真牌）：``kind="real"`` + 花色 / 点数 / 颜色——全部读候选的 ``CardRef``，
+    展示层不另算一遍牌面。"""
+    card_id = _DODGES[0]
+    card = PACK.deck.cards[card_id]
+    state = _state_with((card_id,))
+
+    tiers = _tier_supplies(QueryKind.DODGE, state, payload=DodgeContext())
+    supplies = _flatten(tiers)
+
+    assert supplies == [
+        Supply(
+            product="dodge",
+            suit=card.suit,
+            rank=card.rank,
+            color=color_of_suit(card.suit),
+            kind="real",
+            source_count=1,
+        )
+    ]
+    assert tiers[0].tier == 2, "逐张牌是使用牌档（PriorityClass.CARD_USE）"
+    assert tiers[0].provider is None, "逐张牌档没有提供者"
+
+
+def test_a_single_source_conversion_inherits_the_product_face_and_counts_one_source():
+    """§4-2（单源转化）：【龙胆】的【杀】当【闪】⇒ ``kind="transformed"``、继承产物
+    花色 / 点数、``source_count=1``（``CardRef`` 的既有事实，不重算）。"""
+    red_slash = next(
+        cid for cid in _SLASHES if color_of_suit(PACK.deck.cards[cid].suit) == "red"
+    )
+    card = PACK.deck.cards[red_slash]
+    state = _state_with((red_slash,), hero="zhaoyun")
+
+    supplies = _flatten(_tier_supplies(QueryKind.DODGE, state, payload=DodgeContext()))
+    transformed = [supply for supply in supplies if supply.kind == "transformed"]
+
+    assert transformed == [
+        Supply(
+            product="dodge",
+            suit=card.suit,
+            rank=card.rank,
+            color=color_of_suit(card.suit),
+            kind="transformed",
+            source_count=1,
+        )
+    ]
+
+
+def test_a_multi_source_conversion_has_no_face_and_counts_its_sources():
+    """§4-2（多源转化）：【丈八蛇矛】两张手牌当【杀】⇒ 花色 / 点数恒 ``None``、
+    ``source_count >= 2``（spec §3 第 3 条：这类供给确定地不满足花色 / 点数限制）。"""
+    serpent = cards_of_type(PACK, "serpent_spear")[0]
+    first, second = _PEACHES[:2]
+    state = _state_with((first, second), equip=(serpent,))
+    payload = RespondContext(
+        cause=WindowCause.DUEL, required="slash", mode=RespondMode.PLAY
+    )
+
+    supplies = _flatten(_tier_supplies(QueryKind.RESPOND, state, payload=payload))
+    multi = [supply for supply in supplies if supply.kind == "transformed" and supply.source_count >= 2]
+
+    assert multi, f"没有多源转化供给：{supplies}"
+    assert multi[0].product == "slash"
+    assert multi[0].suit is None and multi[0].rank is None, (
+        "多源转化的产物**花色 / 点数恒无**（票面 §4-2）；颜色按多源同色规则另行派生，"
+        "不在本票射程"
+    )
+
+
+def test_the_provider_tier_reports_the_declared_supply_not_a_second_enumeration():
+    """提供者的供给**来自声明**（``SkillDef.supply``）：【八卦阵】= 无色无点数的虚拟【闪】。
+
+    与逐张牌档并列（武将 / 装备档 1 vs 使用牌档 2）：两档都要出现，投影才画得出"每一档
+    能提供什么"。
+    """
+    bagua = cards_of_type(PACK, "eight_diagrams")[0]
+    state = _state_with((_DODGES[0],), equip=(bagua,))
+
+    tiers = _tier_supplies(QueryKind.DODGE, state, payload=DodgeContext())
+
+    assert [group.tier for group in tiers] == [1, 2], "两档：装备档（八卦阵）+ 使用牌档"
+    assert tiers[0].provider == "equip.eight_diagrams"
+    assert tiers[0].supplies == (Supply(product="dodge", kind="virtual"),)
+    assert [supply.kind for supply in tiers[1].supplies] == ["real"]
+
+
+def test_the_five_provider_declarations_land_on_the_skill_definitions():
+    """§1：今天落四条（八个技能定义）——【八卦阵】/【八阵】、 【蛊惑】、【护驾】/【激将】。
+
+    ``Supply`` 是**定义**的属性（与 ``need_card_tier`` 同一姿态），不是局面属性。
+    """
+    from sgs.skills import CATALOG
+
+    virtual_dodge = Supply(product="dodge", kind="virtual")
+    for skill_id in ("equip.eight_diagrams", "hero.wolong_zhugeliang.bazhen"):
+        assert CATALOG[skill_id].supply == virtual_dodge, skill_id
+
+    guohuo = CATALOG["hero.yuji_mobile.guohuo"].supply
+    assert guohuo is not None
+    assert (guohuo.kind, guohuo.unknown) == ("preconversion", True)
+
+    for skill_id in (
+        "hero.caocao.hujia",
+        "hero.jie_caocao.hujia",
+        "hero.liubei.jijiang",
+        "hero.jie_liubei.jijiang",
+    ):
+        relay = CATALOG[skill_id].supply
+        assert relay is not None, skill_id
+        assert (relay.kind, relay.unknown) == ("relay", True), skill_id
+
+
+def test_an_unknown_provider_supply_is_reported_but_never_greyed():
+    """【蛊惑】/【护驾】/【激将】的供给行照报（``unknown=True``），匹配器**不判死**。"""
+    demand = Demand(names=("dodge",), suits=("diamond",))
+
+    guohuo = Supply(product="dodge", kind="preconversion", unknown=True)
+    relay = Supply(product="dodge", kind="relay", unknown=True)
+
+    assert supply_satisfies(demand, guohuo) is True
+    assert supply_satisfies(demand, relay) is True
+    assert supply_mismatch(demand, guohuo) is None
+
+
+def test_the_self_rescue_wine_is_a_legal_supply_only_for_the_dying_seat():
+    """求桃窗口的两份需求：【桃】与（濒死者自己）【桃】/【酒】——自救的那张【酒】不能置灰。"""
+    wine = cards_of_type(PACK_160, "wine")[0]
+    peach = cards_of_type(PACK_160, "peach")[0]
+    state = _state_with((peach, wine), pack=PACK_160)
+
+    own = demand_for(QueryKind.PEACH, PeachContext(), dying=0, asker=0)
+    other = demand_for(QueryKind.PEACH, PeachContext(), dying=1, asker=0)
+    supplies = _flatten(_tier_supplies(QueryKind.PEACH, state, dying=0, asker=0))
+
+    wine_supply = [supply for supply in supplies if supply.product == "wine"]
+    assert wine_supply, f"求桃候选里没有【酒】：{supplies}"
+    assert supply_satisfies(own, wine_supply[0]) is True
+    assert supply_satisfies(other, wine_supply[0]) is False, "别人濒死时【酒】不能自救"

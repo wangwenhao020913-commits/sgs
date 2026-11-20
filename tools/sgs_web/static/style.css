@@ -347,6 +347,29 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   border-style: dashed;
 }
 .opt.dis:hover { color: var(--dim); }
+/* 需要（使用 / 打出）牌时的「需求 × 供给」行（need-card-supply 票 01）：一档一行，画在
+ * 询问条左栏的**选项下方**。样式复用选项面那一套（`.opt` / `.opt.dis`），不新造一套灰行：
+ * 合法档用 `.opt.sel` 同一条高亮口径（描边 + 淡底），不合法档直接带 `dis`。行不可点
+ * （`static`），故没有 hover 反馈。 */
+.need-card-supplies {
+  display: flex; flex-direction: column; gap: calc(3 * var(--dsu));
+  margin-top: calc(4 * var(--dsu));
+}
+/* 空容器不占位：没有供给行的询问（其余全部 kind）因此逐像素不变。 */
+.need-card-supplies:empty { display: none; }
+.need-card-demand {
+  margin: 0; font-size: calc(11 * var(--dsu)); color: var(--dim);
+}
+.need-card-row {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: calc(6 * var(--dsu));
+  cursor: default;
+}
+.need-card-row:not(.dis) {
+  border-color: var(--accent); background: var(--accent-soft);
+}
+.need-card-row .need-card-tier { font-weight: 600; }
+.need-card-row .need-card-reason { font-size: calc(11 * var(--dsu)); color: var(--accent); }
 /* 长选项清单（预发动里十几个牌名）：**紧凑多列**铺开，不必滚动就能一眼找完。
  * 判据在 `preactivation.js`（候选个数 > OPTION_COMPACT_MIN 才加这个类）；子节点形状不变
  * —— 选项按钮仍是 `#t-options` 的直接子节点，只有布局换成分行等宽的格子。 */

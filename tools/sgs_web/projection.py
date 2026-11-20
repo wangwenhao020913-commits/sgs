@@ -36,16 +36,25 @@ from sgs.data import (
 )
 from sgs.effects import (
     DistanceBonus,
+    Demand,
+    Supply,
+    TierSupplies,
     behavior_for,
+    demand_for,
     distance_bonus,
     hand_limit,
     is_own_play_phase,
     responder_role,
     response_count,
+    supplies_for,
+    supply_mismatch,
+    supply_satisfies,
 )
 from sgs.engine import record_json
 from sgs.skills import (
+    CARD_REQUEST_WINDOWS,
     CATALOG,
+    REQUEST_WINDOW,
     FREE_SPLIT,
     AppearanceKind,
     JIE_LUOSHEN,
@@ -68,14 +77,22 @@ from sgs.skills import (
     resolve_instances,
     skill_used_this_turn,
 )
+from sgs.resolution import Tag, has_tag
 from sgs.state import (
+    RESPONSE_SUITS_KEY,
     CardRef,
+    DodgeContext,
     FrameKind,
     MoveReason,
+    PeachContext,
+    PlayCard,
     Query,
     QueryKind,
     Reforge,
+    RespondContext,
+    RespondMode,
     SelectOptionQuery,
+    UseCard,
     WindowCause,
     Zone,
     project,
@@ -116,6 +133,9 @@ __all__ = [
     "harvest_state",
     "issued_manifest",
     "live_tag_deltas_after",
+    "need_card_demand_text",
+    "need_card_supply_rows",
+    "need_card_supply_text",
     "option_seats",
     "option_source",
     "pending_payload",
@@ -3288,6 +3308,339 @@ def _two_row_watch_face(query: Query) -> bool:
     return int(query.actor) in seats
 
 
+# ---------------------------------------------------------------------------
+# 需要（使用 / 打出）牌的「需求 × 供给」（need-card-supply 票 01）
+#
+# 纯展示：两个载荷键**不进** ``legal_actions``、**不进**询问模型 / 记录流（47 条金录像逐字节
+# 不变）。置灰由**后端实时算**（用户 2026-11-20 Q4：`ok` 由 `supply_satisfies` 现算，前端
+# 只读 `ok`、不自己猜合法性）。派生形状与 ``context`` / ``arrange`` / ``distribution`` 同姿态：
+# 取不到引擎（409 里附带的裸 ``Query``）⇒ 两个键都是 ``None``。
+#
+# **只在询问者就是查看者时下发**：供给带着「手牌档能提供 ♦8 的【闪】」这种私密牌面事实，
+# 别人的询问载荷里不能有它（与 `_mask_watched_faces` 同一条信息卫生纪律）。
+# ---------------------------------------------------------------------------
+
+TIER_LABELS: dict[int, str] = {0: "武将档", 1: "装备档", 2: "使用牌档"}
+"""需要牌窗口的三档人话名（``PriorityClass`` 的 HERO / EQUIPMENT / CARD_USE）。"""
+
+_CARD_TIER_CARRIER = "手牌"
+"""逐张牌档的载体名：四扇需要牌窗口的候选牌都取自应答者手牌（``ctx.zones`` 缺省 HAND；
+唯一放宽到装备区的改判窗口**不是**需要牌窗口，故不在这里）。"""
+
+_SUPPLY_KIND_TEXT: dict[str, str] = {
+    "real": "",
+    "virtual": "虚拟",
+    "transformed": "转化",
+}
+"""已知供给的修饰词（真牌不加词：牌面本身就说明了它是实体牌）。"""
+
+_UNKNOWN_SUPPLY_TEXT: dict[str, str] = {
+    "relay": "需求传递",
+    "preconversion": "预转化",
+}
+"""候选期不可知的三条供给**只写标签**（票面 §1：本票不写它们的匹配行为）。"""
+
+_COLOR_TEXT: dict[str, str] = {"red": "红色", "black": "黑色"}
+"""颜色的中文展示值（匹配只看 ``red`` / ``black``；中文只出现在渲染层）。"""
+
+
+def need_card_demand_text(state: Any, demand: Demand) -> str:
+    """一句话需求（票面 §1 的 ``Demand.text()`` 的**等价渲染处**）：牌名 / 花色 / 颜色 /
+    点数 / 虚拟·转化 / 转化源张数逐维写，``None`` = 不限（不写这一维）、``()`` = 记录为空。
+
+    渲染住在接入层而不是值对象上：中文牌名（``_card_type_name``）与花色符号
+    （:data:`~sgs_web.display.SUIT_LABELS`，仓里的唯一映射表）都在这一层，核心层不为了
+    一句人话反向依赖展示词汇。
+    """
+    clauses: list[str] = []
+    if demand.names is not None:
+        clauses.append(
+            "牌名记录为空 ⇒ 无法响应"
+            if not demand.names
+            else "、".join(f"【{_need_card_name(state, name)}】" for name in demand.names)
+        )
+    if demand.suits is not None:
+        clauses.append(
+            "花色记录为空 ⇒ 无法响应"
+            if not demand.suits
+            else "花色必须是 " + " 或 ".join(_suit_symbol(suit) for suit in demand.suits)
+        )
+    if demand.colors is not None:
+        clauses.append(
+            "颜色记录为空 ⇒ 无法响应"
+            if not demand.colors
+            else "颜色必须是 " + " 或 ".join(_COLOR_TEXT.get(str(color), str(color)) for color in demand.colors)
+        )
+    if demand.ranks is not None:
+        clauses.append(
+            "点数记录为空 ⇒ 无法响应"
+            if not demand.ranks
+            else "点数必须是 " + " 或 ".join(str(rank) for rank in demand.ranks)
+        )
+    if demand.kinds is not None:
+        clauses.append(
+            "转化种类记录为空 ⇒ 无法响应"
+            if not demand.kinds
+            else "只接受 " + " / ".join(str(kind) for kind in demand.kinds) + " 的牌"
+        )
+    if demand.source_counts is not None:
+        clauses.append(
+            "转化源张数记录为空 ⇒ 无法响应"
+            if not demand.source_counts
+            else "转化源必须是 " + " 或 ".join(str(count) for count in demand.source_counts) + " 张"
+        )
+    if not clauses:
+        return "本次要求：任意一张牌（不限牌名 / 花色）"
+    return "本次要求：" + "，且".join(clauses)
+
+
+def need_card_supply_text(state: Any, supply: Supply) -> str:
+    """一条供给的人话（行里的 ``supply_text``；多条时由调用方用「、」拼）：
+
+    例：【八卦阵】的 ``无色虚拟【闪】``；手牌里的方块 8【闪】= ``♦8【闪】``。
+    """
+    if supply.unknown:
+        label = _UNKNOWN_SUPPLY_TEXT.get(supply.kind, "候选期不可知")
+        return f"{label}（候选期不可知）"
+    name = "【?】" if supply.product is None else f"【{_need_card_name(state, supply.product)}】"
+    face = _supply_face(supply)
+    text = f"{face}{_SUPPLY_KIND_TEXT.get(supply.kind, '')}{name}"
+    if supply.kind == "transformed" and supply.source_count > 1:
+        text += f"（{supply.source_count} 张来源）"
+    return text
+
+
+def need_card_supply_rows(
+    state: Any, demand: Demand, tiers: Iterable[TierSupplies]
+) -> list[dict[str, Any]]:
+    """把按档供给渲染成**一行一档**的载荷（票面 §2 的 ``{tier, label, supply_text, ok, reason}``）。
+
+    - ``ok`` / ``reason`` 在这里**现算**（用户 Q4），判据只有 :func:`supply_satisfies` /
+      :func:`supply_mismatch` 那一条；
+    - 一档里只要有一条供给满足需求，这一行就高亮（同一档的多张【闪】不会各占一行）；
+    - 不满足时 ``reason`` 取**第一条**不满足的供给：``载体：供给 → 为什么不满足``
+      （例：``八卦阵：无色虚拟【闪】→ 不满足花色限制``）。
+    """
+    grouped: dict[int, list[TierSupplies]] = {}
+    for group in tiers:
+        grouped.setdefault(group.tier, []).append(group)
+
+    rows: list[dict[str, Any]] = []
+    for tier in sorted(grouped):
+        groups = grouped[tier]
+        supplies = [supply for group in groups for supply in group.supplies]
+        carriers = [
+            _need_card_skill_name(state, group.provider)
+            if group.provider is not None
+            else _CARD_TIER_CARRIER
+            for group in groups
+        ]
+        carrier = " / ".join(dict.fromkeys(carriers))
+        ok = any(supply_satisfies(demand, supply) for supply in supplies)
+        reason: str | None = None
+        if not ok:
+            unsatisfied = next(
+                supply for supply in supplies if not supply_satisfies(demand, supply)
+            )
+            reason = (
+                f"{carrier}：{need_card_supply_text(state, unsatisfied)}"
+                f" → {supply_mismatch(demand, unsatisfied)}"
+            )
+        rows.append(
+            {
+                "tier": int(tier),
+                "label": f"{TIER_LABELS.get(int(tier), '其他档')}·{carrier}",
+                "supply_text": "、".join(
+                    need_card_supply_text(state, supply) for supply in supplies
+                ),
+                "ok": ok,
+                "reason": reason,
+            }
+        )
+    return rows
+
+
+def _suit_symbol(suit: Any) -> str:
+    """花色值 → 符号（:data:`~sgs_web.display.SUIT_LABELS` 是唯一映射表；查不到就回落原值）。"""
+    label = SUIT_LABELS.get(suit)
+    return str(suit) if label is None else label["symbol"]
+
+
+def _supply_face(supply: Supply) -> str:
+    """供给的牌面前缀：``♦8`` / ``♦`` / ``8`` / ``无色``（花色与点数各是独立事实）。"""
+    suit = None if supply.suit is None else _suit_symbol(supply.suit)
+    rank = None if supply.rank is None else str(supply.rank)
+    if suit is not None and rank is not None:
+        return f"{suit}{rank}"
+    if suit is not None:
+        return suit
+    if rank is not None:
+        return rank
+    return "无色"
+
+
+def _need_card_name(state: Any, type_id: str) -> str:
+    name = _card_type_name(state, type_id)
+    return type_id if name is None else name
+
+
+def _need_card_skill_name(state: Any, skill_id: str | None) -> str:
+    """提供者档的载体名（既有技能名表；查不到就是 ``?``，不把技能 id 漏到玩家眼前）。"""
+    name = None if skill_id is None else _skill_display_name(state, skill_id)
+    return name or "?"
+
+
+_CARD_REQUEST_MODES_BY_CAUSE: dict[WindowCause, tuple[RespondMode, ...]] = {
+    cause: row.modes
+    for row in CARD_REQUEST_WINDOWS
+    if row.kind == REQUEST_WINDOW
+    for cause in row.causes
+}
+"""响应窗口的成因 → 这一问是**使用**还是**打出**（读登记表本身，不另抄一份窗口表）。
+
+多个登记行共用一个成因时（势力求助的【护驾】/【激将】两句）两行的 ``modes`` 相同，
+故字典推导不会丢信息。
+"""
+
+
+def _pending_frame(engine: Any, query: Query) -> Any:
+    """这一问的**承载帧**：``RespondQuery.window_frame`` 指名的那一帧，其余取栈顶。
+
+    与 ``query_context`` 读窗口事实的口径一致（那里也用栈顶 ``data``）：询问发出时引擎就
+    挂在承载帧的步骤里，故栈顶通常就是它；``RESPOND`` 额外带帧 id，嵌套（无懈回应无懈）
+    因此不会串层。
+    """
+    frames = tuple(getattr(getattr(engine, "stack", None), "frames", ()) or ())
+    if not frames:
+        return None
+    frame_id = int(getattr(query, "window_frame", 0) or 0)
+    if frame_id:
+        for frame in reversed(frames):
+            if int(getattr(frame, "frame_id", -1)) == frame_id:
+                return frame
+    return frames[-1]
+
+
+def _frame_providers_used(frame: Any) -> tuple[str, ...]:
+    return () if frame is None else tuple(frame.data.get("providers_used", ()))
+
+
+def _frame_response_suits(frame: Any) -> tuple[str, ...] | None:
+    """承载帧上的「本次使用收窄响应牌面」（``RESPONSE_SUITS_KEY``；缺键 ⇒ ``None`` 不限）。
+
+    与 ``Engine.respond_context`` 读同一个键、同一个三态（``None`` / ``()`` / 白名单）。
+    """
+    if frame is None:
+        return None
+    suits = frame.data.get(RESPONSE_SUITS_KEY)
+    return None if suits is None else tuple(suits)
+
+
+def _respond_mode(query: Query) -> RespondMode:
+    """这一问是**打出**还是**使用**：先看候选的构造子（最贴近事实），看不到时读登记表。
+
+    候选面只剩 ``Pass``（一张都没有可用）时构造子给不出答案，此时按成因取登记行的
+    ``modes``（唯一真源 = ``CARD_REQUEST_WINDOWS``）。
+    """
+    actions = tuple(getattr(query, "legal_actions", ()) or ())
+    if any(isinstance(action, PlayCard) for action in actions):
+        return RespondMode.PLAY
+    if any(isinstance(action, UseCard) for action in actions):
+        return RespondMode.USE
+    modes = _CARD_REQUEST_MODES_BY_CAUSE.get(getattr(query, "cause", None), ())
+    return modes[0] if modes else RespondMode.PLAY
+
+
+def _respond_use_targets(query: Query, frame: Any) -> tuple[int, ...]:
+    """窗口**固定**的使用目标（借刀杀的 Bn / 乱武的"最近者"）：候选里读得到就直接用。
+
+    这两扇窗口的候选恒含那一个目标（``UseCard.targets``），故取候选里的目标集合即可；
+    候选面为空时退回结算帧的 ``designations``（借刀）：展示层只决定"这一档能提供什么"，
+    不重算窗口的目标规则。
+    """
+    targets = sorted(
+        {
+            int(target)
+            for action in tuple(getattr(query, "legal_actions", ()) or ())
+            if isinstance(action, UseCard)
+            for target in (action.targets or ())
+        }
+    )
+    if len(targets) == 1:
+        return (targets[0],)
+    designations = () if frame is None else tuple(frame.data.get("designations") or ())
+    return tuple(int(seat) for seat in designations)
+
+
+def _need_card_window_context(engine: Any, query: Query) -> Any:
+    """重建这一问的**候选生成载荷**（展示层读取口；不改任何合法性判据）。
+
+    候选生成口（``all_actions_for`` → ``_actions_for``）要的是窗口自己的类型化载荷，而那份
+    载荷住引擎的帧 / 调用点里、不进询问模型。这里按**同一个构造器**（``DodgeContext`` /
+    ``PeachContext`` / ``Engine.respond_context``）重建，事实全部取既有读取口：
+
+    - 承载帧上的 ``providers_used`` / ``response_declared`` / ``RESPONSE_SUITS_KEY`` /
+      ``designations``；
+    - 询问自己的 ``cause`` / ``required`` / ``target``；
+    - 成因 → 模式的登记表（``CARD_REQUEST_WINDOWS``）。
+
+    ``floor`` 一律写 ``0``：``_actions_for`` **不读**它（分面只在 ``legal_actions_for`` 里发生），
+    展示层要的是**全档**。
+    """
+    kind = QueryKind(str(getattr(query, "kind", "")))
+    frame = _pending_frame(engine, query)
+    if kind is QueryKind.DODGE:
+        return DodgeContext(
+            providers_used=_frame_providers_used(frame),
+            armor_ignored=frame is not None
+            and has_tag(frame, Tag.ARMOR_IGNORED, target=int(query.actor)),
+            response_suits=_frame_response_suits(frame),
+        )
+    if kind is QueryKind.PEACH:
+        return PeachContext()
+    return RespondContext(
+        cause=getattr(query, "cause", WindowCause.NULLIFY),
+        required=getattr(query, "required", None),
+        target=getattr(query, "target", None),
+        window_frame=int(getattr(query, "window_frame", 0) or 0),
+        mode=_respond_mode(query),
+        use_targets=_respond_use_targets(query, frame),
+        providers_used=_frame_providers_used(frame),
+        declared=bool(frame is not None and frame.data.get("response_declared")),
+        response_suits=_frame_response_suits(frame),
+    )
+
+
+def _need_card_payload(
+    session: Any, query: Query, *, foreign: bool
+) -> tuple[str | None, list[dict[str, Any]] | None]:
+    """两个展示键：(一句需求, 按档的行)；**不是**需要牌窗口 / 别人的询问 / 取不到引擎 ⇒ 全 None。"""
+    if foreign or not isinstance(session, Session):
+        return None, None
+    kind = QueryKind(str(getattr(query, "kind", "")))
+    if kind not in (QueryKind.DODGE, QueryKind.PEACH, QueryKind.RESPOND):
+        return None, None
+    engine = session.engine
+    state = engine.state
+    context = _need_card_window_context(engine, query)
+    demand = demand_for(
+        kind,
+        context,
+        dying=getattr(query, "dying", None),
+        asker=int(query.actor),
+    )
+    if demand is None:  # 改判等"带 RespondContext 但不是使用 / 打出"的询问
+        return None, None
+    tiers = supplies_for(
+        kind,
+        state=state,
+        seat=int(query.actor),
+        payload=context,
+        dying=getattr(query, "dying", None),
+        answers_seq=int(query.seq),
+    )
+    return need_card_demand_text(state, demand), need_card_supply_rows(state, demand, tiers)
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -3387,6 +3740,12 @@ def pending_payload(
     # 只有拿得到 ``Session``（= 拿得到引擎）时才算；409 里附带的那份现状（裸 ``Query``）为 None。
     payload["context"] = (
         query_context(session.engine, query) if isinstance(session, Session) else None
+    )
+    # 需要（使用 / 打出）牌的「需求 × 供给」（need-card-supply 票 01）：两个**派生**键。
+    # 不进 ``legal_actions``、不进询问模型 / 记录流（47 条金录像逐字节不变）；别人的询问
+    # 与 409 里附带的裸 ``Query`` ⇒ 两个键都是 ``None``（fail-closed 的信息卫生）。
+    payload["need_card_demand"], payload["need_card_supplies"] = _need_card_payload(
+        session, query, foreign=foreign
     )
     # 排列规格（W6-03 / S2）：``ARRANGE`` 询问只带牌面，张数 / 切分由投影读
     # ``SkillDef.deck_arrange``（与 ``Arrange`` 步同一对象）。只有收 ``Session`` 才拿得到

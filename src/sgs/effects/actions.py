@@ -1041,6 +1041,39 @@ def legal_actions_for(
     return _need_card_face(actions, floor=floor)
 
 
+def all_actions_for(
+    state: GameState,
+    seat: int,
+    kind: QueryKind,
+    *,
+    answers_seq: int,
+    dying: int | None = None,
+    payload: Any = None,
+) -> tuple[Action, ...]:
+    """**全档**候选（:func:`legal_actions_for` 的"分面之前"那一份）= 公开读取口。
+
+    唯一生成口是 :func:`_actions_for`；本函数只把它暴露给"要看到每一档"的读取方
+    （need-card-supply 票 01 的展示层：供给**从现有候选反推**，不另写枚举）。交到玩家
+    手上的那一份仍由 :func:`legal_actions_for` 按档分面，本函数不改任何语义。
+
+    ``payload`` 与 :func:`legal_actions_for` 逐字同形：四扇需要牌窗口各给自己的类型化
+    载荷（``DodgeContext`` / ``RespondContext`` / ``PeachContext``），其余询问不看它。
+    """
+    return _actions_for(
+        state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
+    )
+
+
+def is_need_card_window(kind: QueryKind, payload: Any = None) -> bool:
+    """这次询问是不是**需要（使用 / 打出）牌**窗口：判据 = 分面闸门 :func:`_window_floor`。
+
+    写在**一处**（票面 §2 的"判据复用 `_window_floor` 那一族，别另判一遍"）：展示层据此
+    决定要不要下发一句需求，引擎据此决定要不要分面——两边不可能对"这一问算不算需要牌
+    窗口"给出相反的回答。
+    """
+    return _window_floor(kind, payload) is not None
+
+
 def _actions_for(
     state: GameState,
     seat: int,
