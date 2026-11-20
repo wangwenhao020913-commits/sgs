@@ -35,6 +35,7 @@ __all__ = [
     "MoveReason",
     "Phase",
     "Player",
+    "RESPONSE_SUITS_KEY",
     "SEALED_ZONE_EQUIP",
     "SEALED_ZONE_IDS",
     "SEALED_ZONE_JUDGE",
@@ -441,6 +442,23 @@ DAMAGE_REPLACEMENT_AMOUNT_KEY = "damage_replacement_amount"
 由置真 :data:`DAMAGE_REWRITTEN_KEY` 的那条钩子一并写入（【绝情】写"伤害值基数"）；
 `steps.damage_before_start` 读它压 ``LIFE_DECREASE`` 帧。缺省 / ≤ 0 ⇒ 连那条帧都不压
 （"失去 0 点体力"不是一个事件）。
+"""
+
+RESPONSE_SUITS_KEY = "response_suits"
+"""帧私有槽名：**这一次使用**的响应牌面收窄（feng-guanyu 票 04；首个载体 = 锋·关羽【单骑】）。
+
+写在 **USE** 帧上（``Engine.start_use(..., response_suits=…)``），随
+``steps.use_push_resolve`` 的 ``dict(frame.data)`` 继承进 RESOLVE 帧 ⇒ 响应窗口只需读
+**承载帧**上的同一个键，不必沿栈找 USE 帧。三种取值：
+
+- 缺键 / ``None`` = 不限（所有既有使用都是这一档，帧载荷逐键不变）；
+- ``()`` = **空集**：没有任何牌合法（义云记录为空时的"无法响应"）；
+- 非空元组 = 白名单：响应牌的花色必须落在这里（``card.suit is None`` 的牌——多源转化 /
+  纯虚拟牌——永远匹配不上）。
+
+读者 = 三扇响应窗口的候选生成（``RespondContext`` / ``DodgeContext`` →
+``effects.actions._dodge`` / ``_respond``，以及转化候选的唯一构造子
+:func:`sgs.skills.virtual.virtual_candidates`）。帧私有载荷不进记录流。
 """
 
 LIFE_DECREASE_HP_LOSS_KEY = "life_decrease_hp_loss"

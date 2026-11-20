@@ -277,6 +277,13 @@
 "新加一个改判类窗口"仍然走过登记表：`WindowCause` 的闭集断言会逼它在这里加一行、当场裁定
 参与面（票 17 的 §2 表已按这一行排除【渐营】②）。
 
+**"这一次使用只许某些花色的牌响应"不是新窗口**（feng-guanyu 票 04；首个载体 = 锋·关羽【单骑】）：
+它在 USE 帧上写 `src/sgs/state/models.py:RESPONSE_SUITS_KEY`（缺键 = 不限 ⇒ 既有帧载荷逐键不变），
+随 `use_push_resolve` 继承进 RESOLVE 帧，由三扇窗口（【闪】/ 打出·使用响应 / 无懈）的候选生成
+读同一个键：真牌在 `src/sgs/effects/actions.py:_dodge` / `_respond` 过滤，转化候选在
+`src/sgs/skills/virtual.py:virtual_candidates` 按**产物花色**过滤（多源 / 纯虚拟牌花色为 `None`
+⇒ 永远匹配不上）。**提供者在限制生效期间失败关闭**（候选期看不到产物花色）。
+
 **势力求助（护驾 / 激将）为什么 `providers` 是 `False`**：`_run_lord_request` 的子窗口只收
 `PlayCard`，没有 `UseCard` / `ActivateSkill` 分支 ⇒ 转化与提供者的候选即便由底层
 `DODGE` / `RESPOND` 派发顺带产生，也没有人消费。要把它们接进来，先给求助窗口补受理面

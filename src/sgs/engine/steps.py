@@ -82,6 +82,7 @@ from sgs.state import (
     DAMAGE_REWRITTEN_KEY,
     LIFE_DECREASE_DAMAGE_KEY,
     LIFE_DECREASE_HP_LOSS_KEY,
+    RESPONSE_SUITS_KEY,
     ActivateSkill,
     CardRef,
     PindianDelta,
@@ -327,6 +328,7 @@ class FrameHost(StepHost, Protocol):
         targets: tuple[int, ...],
         use_timing: Timing | None = None,
         cancel_target: tuple[int, int] | None = None,
+        response_suits: tuple[str, ...] | None = None,
     ) -> Frame: ...
 
     def recover_from_peach(
@@ -794,6 +796,13 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         # RESOLVE 帧上；候选生成口据此收掉【八卦阵】/【八阵】的提供者（伤害链上的旁路标志
         # 到不了这一问——它早于任何伤害链）。
         armor_ignored=has_tag(frame, Tag.ARMOR_IGNORED, target=target),
+        # feng-guanyu 票 04：这一次使用收窄响应牌面（USE 帧的键随 use_push_resolve 继承到
+        # 本帧；缺键 ⇒ None = 不限）。随载荷进候选生成口，真牌 / 转化 / 提供者三条路同读。
+        response_suits=(
+            None
+            if frame.data.get(RESPONSE_SUITS_KEY) is None
+            else tuple(frame.data[RESPONSE_SUITS_KEY])
+        ),
     )
     if not host.should_ask_query(
         QueryKind.DODGE,

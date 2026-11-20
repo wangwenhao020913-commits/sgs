@@ -364,6 +364,14 @@ class ModifierContext:
     手牌**换来的，赢家已定时再发候选就是白扣一张牌。真牌候选不受影响（真牌声明不耗牌）。
     """
     flags: dict[str, Any] = field(default_factory=dict)
+    response_suits: tuple[str, ...] | None = None
+    """**这一次使用**只许哪些花色的牌响应（feng-guanyu 票 04；缺省 ``None`` = 不限）。
+
+    与 :attr:`~sgs.state.RespondContext.response_suits` 同一个事实：候选生成口在响应窗口
+    里把它原样带进来，``CANDIDATES`` 链上的转化构造器据此剔除产物花色不在白名单里的候选
+    （多源转化 / 纯虚拟牌花色为 ``None`` ⇒ 永远匹配不上）。提供者（``ActivateSkill``）的
+    候选由窗口自行失败关闭——见 ``effects.actions._dodge`` / ``_respond``。
+    """
     nature: DamageNature | None = None
     """本次伤害的**属性**（M5-05a 的加法；``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP`` 用）。
 

@@ -937,6 +937,14 @@ def virtual_candidates(
             for card_id in group
         ):
             continue
+        response_suits = getattr(ctx, "response_suits", None)
+        if response_suits is not None and (
+            card.suit is None or card.suit not in response_suits
+        ):
+            # feng-guanyu 票 04：这一次使用只许某些花色的牌响应 ⇒ 产物花色不在白名单的
+            # 转化候选不进面。多源转化 / 纯虚拟牌的花色是 ``None`` ⇒ 永远匹配不上
+            # （用户 2026-11-20 裁定："无花色的牌不算同花色，也无法响应"）。
+            continue
         if ctx.scope is CandidateScope.RESPOND and (
             ctx.respond_required is None
             or not satisfies_required(card, ctx.respond_required)

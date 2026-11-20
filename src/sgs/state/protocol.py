@@ -413,6 +413,14 @@ class RespondContext:
     rejudge_offers: tuple[RejudgeOffer, ...] = ()
     floor: int = 0
     skip_if_empty: bool = False
+    response_suits: tuple[str, ...] | None = None
+    """**这一次使用**只许哪些花色的牌响应（feng-guanyu 票 04；缺省 ``None`` = 不限）。
+
+    取自承载帧上的 :data:`sgs.state.RESPONSE_SUITS_KEY`（USE 帧 → RESOLVE 帧继承），
+    由 :meth:`~sgs.engine.Engine.respond_context` 填写。三种取值：``None`` = 不限；
+    ``()`` = 空集（没有任何牌合法）；非空元组 = 白名单。候选生成与"有没有候选"的预筛
+    读**同一份**载荷，故它不影响记录流与既有格局。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +470,13 @@ class DodgeContext:
     providers_used: tuple[str, ...] = ()
     floor: int = 0
     armor_ignored: bool = False
+    response_suits: tuple[str, ...] | None = None
+    """**这一次使用**只许哪些花色的牌响应（feng-guanyu 票 04；缺省 ``None`` = 不限）。
+
+    与 :attr:`RespondContext.response_suits` 同一个事实、同一个取值三态（``None`` 不限 /
+    ``()`` 空集 / 非空白名单）；``_dodge_window`` 从承载帧的
+    :data:`sgs.state.RESPONSE_SUITS_KEY` 读出来放进本载荷。**不进记录流**。
+    """
 
 
 @dataclass(frozen=True, slots=True)

@@ -1071,7 +1071,12 @@ def _actions_for(
     elif kind is QueryKind.DODGE:
         ctx = payload if isinstance(payload, DodgeContext) else DodgeContext()
         candidates = _dodge(
-            state, seat, answers_seq, ctx.providers_used, armor_ignored=ctx.armor_ignored
+            state,
+            seat,
+            answers_seq,
+            ctx.providers_used,
+            armor_ignored=ctx.armor_ignored,
+            response_suits=ctx.response_suits,
         )
     elif kind is QueryKind.PEACH:
         if dying is None:
@@ -1276,6 +1281,20 @@ def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     ]
 
 
+def _response_suit_allowed(
+    card: CardRef, response_suits: tuple[str, ...] | None
+) -> bool:
+    """这一张能不能响应"只许某花色"的那次使用（feng-guanyu 票 04；``None`` = 不限）。
+
+    ``card.suit is None``（多源转化 / 纯虚拟牌）**永远匹配不上**白名单——用户 2026-11-20
+    裁定"无花色的牌不算与义云记录的花色相同，所以也无法响应"。空白名单 ``()`` 因此
+    什么都不放行（"记录为空 ⇒ 无法响应"）。
+    """
+    if response_suits is None:
+        return True
+    return card.suit is not None and card.suit in response_suits
+
+
 def _dodge(
     state: GameState,
     seat: int,
@@ -1283,6 +1302,7 @@ def _dodge(
     providers_used: tuple[str, ...] = (),
     *,
     armor_ignored: bool = False,
+    response_suits: tuple[str, ...] | None = None,
 ) -> list[Action]:
     """【闪】的响应窗口：真【闪】候选 + "需要牌"提供者序列（票 10 §5 / 票 30）+ 放弃。
 
@@ -1298,10 +1318,17 @@ def _dodge(
     ``armor_ignored``（票 25）= 目标防具的**效果无效**（【青釭剑】/ 吴懿【奔袭】②）：
     与伤害链同一个键名写进 ``ModifierContext.flags["ignore_armor"]``，两条防具提供者
     （【八卦阵】/【八阵】）据此闭嘴；真【闪】与放弃不受影响。
+
+    ``response_suits``（feng-guanyu 票 04）= 这一次使用只许哪些花色的牌响应。真牌按
+    :func:`_response_suit_allowed` 过滤，转化候选由 ``virtual_candidates`` 读同一个
+    ``ModifierContext.response_suits`` 过滤；**提供者候选在此期间失败关闭**（它们的产物
+    在候选期还看不到花色：可能无花色、也可能是任意花色 ⇒ 一律不提供）。``None`` = 不限，
+    既有窗口逐字节不变。
     """
     actions: list[Action] = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
         for card in _required_hand(state, seat, DODGE_RESPONSE_CARD)
+        if _response_suit_allowed(card, response_suits)
     ]
     generated = apply_modifiers(
         ModifierPoint.CANDIDATES,
@@ -1315,6 +1342,7 @@ def _dodge(
             respond_required=DODGE_RESPONSE_CARD,
             # 只在这一问上为真：flag 是本次候选生成的临时便签（与伤害链同一键名）。
             flags={"ignore_armor": True} if armor_ignored else {},
+            response_suits=response_suits,
         ),
         tuple(actions),
     )
@@ -1322,6 +1350,7 @@ def _dodge(
         action
         for action in generated
         if not (isinstance(action, ActivateSkill) and action.skill_id in providers_used)
+        and not (isinstance(action, ActivateSkill) and response_suits is not None)
     ]
     actions.append(Pass(answers_seq=answers_seq))
     return actions
@@ -1487,6 +1516,9 @@ def _respond(
         return rejudge
     actions: list[Action] = []
     for card in _required_cards(state, seat, ctx.required, ctx.zones):
+        if not _response_suit_allowed(card, ctx.response_suits):
+            # feng-guanyu 票 04：这一次使用只许某花色的牌响应（真牌按牌面判）。
+            continue
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
@@ -1548,6 +1580,9 @@ def _respond(
                 respond_mode=ctx.mode,
                 respond_targets=tuple(ctx.use_targets),
                 respond_declared=ctx.declared,
+                # feng-guanyu 票 04：转化候选按产物花色收窄（virtual_candidates 读它）；
+                # 提供者在期间失败关闭（见下面那条过滤）。
+                response_suits=ctx.response_suits,
             ),
             tuple(actions),
         )
@@ -1556,6 +1591,9 @@ def _respond(
             for action in generated
             if not (
                 isinstance(action, ActivateSkill) and action.skill_id in ctx.providers_used
+            )
+            and not (
+                isinstance(action, ActivateSkill) and ctx.response_suits is not None
             )
         ]
     actions.append(Pass(answers_seq=answers_seq))

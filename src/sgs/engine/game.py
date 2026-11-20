@@ -173,6 +173,7 @@ from sgs.state import (
     QueryKind,
     Reforge,
     RejudgeOffer,
+    RESPONSE_SUITS_KEY,
     RespondContext,
     RespondMode,
     RespondQuery,
@@ -691,6 +692,19 @@ def _card_from_hand(state: GameState, source: int, card: CardRef) -> bool:
         hand = state.player(source).hand
         return any(card_id in hand for card_id in card.virtual_sources)
     return card.card_id in state.player(source).hand
+
+
+def _response_suits_of(frame: Frame | None) -> tuple[str, ...] | None:
+    """承载帧上的"本次使用响应牌面收窄"（feng-guanyu 票 04；缺键 ⇒ ``None`` = 不限）。
+
+    USE 帧上的 :data:`~sgs.state.RESPONSE_SUITS_KEY` 随 ``steps.use_push_resolve`` 的
+    ``dict(frame.data)`` 继承进 RESOLVE 帧，故响应窗口只要读**承载帧**这一个对象，
+    不必沿结算栈找 USE 帧；嵌套（无懈回应无懈）各自读自己那一层，互不串味。
+    """
+    if frame is None:
+        return None
+    suits = frame.data.get(RESPONSE_SUITS_KEY)
+    return None if suits is None else tuple(suits)
 
 
 def _child_payload(
@@ -2118,6 +2132,7 @@ class Engine:
         cancel_target: tuple[int, int] | None = None,
         counts: bool = True,
         designations: tuple[int, ...] = (),
+        response_suits: tuple[str, ...] | None = None,
     ) -> Frame:
         """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。
 
@@ -2199,6 +2214,11 @@ class Engine:
             data["designations"] = tuple(designations)
         if cancel_target is not None:
             data["cancel_target"] = cancel_target
+        if response_suits is not None:
+            # feng-guanyu 票 04：这一次使用的响应牌面收窄（缺省不落键 ⇒ 既有帧载荷逐键不变）。
+            # 随 ``steps.use_push_resolve`` 的 ``dict(frame.data)`` 继承进 RESOLVE 帧，
+            # 响应窗口因此只读承载帧、不必沿栈找 USE 帧。
+            data[RESPONSE_SUITS_KEY] = tuple(response_suits)
         frame = self.push_frame(
             FrameKind.USE,
             data,
@@ -2944,6 +2964,9 @@ class Engine:
                 else need_card_floor(frame, actor)
             ),
             skip_if_empty=skip_if_empty,
+            # feng-guanyu 票 04：承载帧上的"本次使用响应牌面收窄"（USE → RESOLVE 继承；
+            # 缺键 ⇒ None = 不限）。改判窗口不读它（不是使用 / 打出）。
+            response_suits=_response_suits_of(frame),
         )
 
     def ask_respond(
