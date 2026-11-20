@@ -37,6 +37,7 @@ from sgs.skills import CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import (
+    LIFE_DECREASE_HP_LOSS_KEY,
     HeroCardZone,
     CardRef,
     EndPhase,
@@ -349,9 +350,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 212 不变（遗物不在武将那半），装备 22 不变。
     # m7-script-mode 票 27：**NPC 技能** 4 条（`carrier = NPC`，`npc.*`）⇒ 242 → 246；
     # 武将技 212 / 装备 22 都不变（NPC 技能只授敌方座位，不在武将那半）。
-    assert len(CATALOG) == 250
+    assert len(CATALOG) == 252
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 214
+    assert len(heroes) == 216
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -405,7 +406,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
     # bingshi-jie 票 01：势赵云两条 ⇒ 208 → 210。
-    assert len(expected) == 214
+    assert len(expected) == 216
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -2092,6 +2093,19 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         after_holder=None,
         actor=ME,
     )
+    # yijiang-2011-xusheng-chunhua 票 02：张春华【伤逝】① 的正面载荷 = **我的手牌**离开
+    # （去向弃牌堆）。与【连营】的载荷同形，但判据不同：伤逝只认手牌区（装备区不算）。
+    move_shangshi = MoveEvent(
+        cards=(
+            CardRef(card_id=0, type="peach", name="桃", suit="heart", rank=7),
+        ),
+        from_zone=ZoneRef(Zone.HAND, ME),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=ME,
+        after_holder=None,
+        actor=ME,
+    )
     return {
         # shan-baozuoci 票 04：左慈的两条条件钩子。
         #  - 化身② 两条（TURN_START / TURN_END）：正面对照 = 帧的 ``source`` 是持有者；
@@ -2542,6 +2556,20 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         ),
         "hero.jie_xusheng_mobile.pojun_return": (
             _HookFrame(source=ME, running_skill="hero.jie_xusheng_mobile.pojun"),
+        ),
+        # yijiang-2011-xusheng-chunhua 票 02：张春华移动版的两条技能。
+        # - 【绝情】只有一个判据："这次伤害**我**即将造成"（帧的 ``source`` 是我）；
+        # - 【伤逝】四条时机的"关于我"各不相同，故四帧分开写：① 我的手牌离开（连带**移动
+        #   之后**手牌数 < X，合成局面里 ME 已受伤 1 点、手牌为空 ⇒ 0 < 1）；② 扣的是我的
+        #   体力**且帧私有 ``hp_loss`` > 0**（护甲全吸收的帧不算）；③ 回复体力后；④ 加体力
+        #   上限后。持有者换成 OTHER 时四条读到的都是"不是我的"⇒ 假（不是"没满足 X"造成的
+        #   假绿：改用 OTHER 时 X 与手牌数都没变）。
+        "hero.zhangchunhua_mobile.jueqing": (_HookFrame(source=ME),),
+        "hero.zhangchunhua_mobile.shangshi": (
+            _HookFrame(**{MOVE_EVENT_KEY: move_shangshi}),
+            _HookFrame(target=ME, **{LIFE_DECREASE_HP_LOSS_KEY: 1}),
+            _HookFrame(target=ME),
+            _HookFrame(target=ME),
         ),
         # feng-yujin 票 07：【定乱】从共享技改成**非共享**（B2）⇒ 条件自校持有者
         # （`MATCH_OWNER_KEY` 必须真是定乱实例的持有者）。ROUND_START 帧没有"这一次问谁"
@@ -3089,6 +3117,11 @@ SKILL_SHAPE: dict[str, str] = {
     # 零步流水线、② 是 `DAMAGE_DEAL_AMOUNT` 修饰器）⇒ 零步技能格；归还段与徐盛版同形 ⇒ 多轮格。
     "hero.jie_xusheng_mobile.pojun": "零步技能",
     "hero.jie_xusheng_mobile.pojun_return": "多轮技能",
+    # yijiang-2011-xusheng-chunhua 票 02：张春华移动版【绝情】= 锁定技（``locked=True``，
+    # 挂「伤害结算开始前」的强制段、无流水线）⇒ 锁定技格；【伤逝】= 四个时机各一条钩子、
+    # 共用**同一条零步流水线**（「是否发动」→ 摸至 X 张）⇒ 零步技能格（同【枭姬】）。
+    "hero.zhangchunhua_mobile.jueqing": "锁定技",
+    "hero.zhangchunhua_mobile.shangshi": "零步技能",
     # feng-yujin 票 01：自制包·锋·于禁【节钺】= A 族主动技（两步流水线 + 手写二选一）；
     # 【定乱】= 帧外时机（ROUND_START）上的可选技（票 07 起**非共享**：只问持有者）、
     # 手写主体（无 SkillFlow）⇒ 多轮格；
@@ -3312,7 +3345,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # bingshi-jie 票 01：势赵云【摧锋】（四条钩子 + 零步流水线）⇒ 49 → 50。
     # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（钩子 + 零步流水线）⇒ 50 → 51；
     # 票 03：界徐盛移动版【破军】（同形）⇒ 51 → 52。
-    "零步技能": 52,
+    # 票 02：张春华移动版【伤逝】（四条时机钩子共用一条零步流水线）⇒ 52 → 53。
+    "零步技能": 53,
     "排列技能": 5,
     # tao-caocao 票 01：韬·曹操【鸿志】⇒ 锁定技 35 → 36；【倡义】（无流水线的钩子段机）
     # ⇒ 多轮技能 14 → 15。
@@ -3345,7 +3379,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # ⇒ 50 → 56。
     # m7-script-mode 票 27：NPC 技能四条（全部锁定：三条纯修饰器 + 一条造伤后钩子）
     # ⇒ 56 → 60。
-    "锁定技": 60,
+    # yijiang-2011-xusheng-chunhua 票 02：张春华移动版【绝情】（锁定 + 「伤害结算开始前」
+    # 的整段改写段、无流水线）⇒ 60 → 61。
+    "锁定技": 61,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -3565,7 +3601,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（锁定技格）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（全部锁定、无流水线 ⇒ 锁定技格）⇒ 242 → 246。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 250
+    assert len(SKILL_SHAPE) == len(CATALOG) == 252
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3798,8 +3834,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（零步流水线）⇒ 内 138 → 139；
     # 它的归还段（标记载体、手写钩子、无流水线）⇒ 外 108 → 109。票 03：界徐盛版同形一对
     # ⇒ 内 139 → 140、外 109 → 110。
-    assert len(inside) == 140
-    assert len(outside) == 110
+    assert len(inside) == 141
+    assert len(outside) == 111
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

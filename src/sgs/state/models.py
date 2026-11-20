@@ -23,11 +23,14 @@ from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 __all__ = [
     "ARMOR_CAP",
     "CardRef",
+    "DAMAGE_REPLACEMENT_AMOUNT_KEY",
+    "DAMAGE_REWRITTEN_KEY",
     "CardTag",
     "FrameKind",
     "GameState",
     "HeroCardZone",
     "LIFE_DECREASE_DAMAGE_KEY",
+    "LIFE_DECREASE_HP_LOSS_KEY",
     "Marker",
     "MoveReason",
     "Phase",
@@ -419,6 +422,41 @@ LIFE_DECREASE_DAMAGE_KEY = "life_decrease_from_damage"
 
 缺省（没有这个键）= 真正意义上的「失去体力」：【苦肉】/【反间】这类技能自己压的帧。
 帧私有载荷不进记录流，故这条判据不改变任何金录像的字节。
+"""
+
+DAMAGE_REWRITTEN_KEY = "damage_rewritten"
+"""帧私有槽名：这一帧的伤害事件已被**整段改写**成"失去体力"（yijiang-2011-xusheng-chunhua
+票 90 解封的原语；首个 / 今天唯一的载体 = 张一将成名-2011·移动版 张春华【绝情】）。
+
+写在 ``DAMAGE`` 帧上，由**伤害结算开始前**的钩子置真，`steps.damage_before_start` 读它。
+它**不是** :class:`~sgs.resolution.Tag` 的 ``PREVENTED``（票 90 §8 的判据）：防止是"把伤害值
+减为 0、事件仍在"（规则 `三国杀详细规则.txt:396–401`），后来的"造成 / 受到伤害"类时机照旧
+派发；改写是"事件不在"——本帧其余步骤两步全跳过、也不参与连环传导，只在原地压一条
+``LIFE_DECREASE`` 帧。帧私有数据不进记录流。
+"""
+
+DAMAGE_REPLACEMENT_AMOUNT_KEY = "damage_replacement_amount"
+"""帧私有槽名：改写后要失去的**体力点数**（= `sgs.effects.damage_base_amount` 的答案）。
+
+由置真 :data:`DAMAGE_REWRITTEN_KEY` 的那条钩子一并写入（【绝情】写"伤害值基数"）；
+`steps.damage_before_start` 读它压 ``LIFE_DECREASE`` 帧。缺省 / ≤ 0 ⇒ 连那条帧都不压
+（"失去 0 点体力"不是一个事件）。
+"""
+
+LIFE_DECREASE_HP_LOSS_KEY = "life_decrease_hp_loss"
+"""``FrameKind.LIFE_DECREASE`` 帧的**体力真的降了几点**（yijiang-2011-xusheng-chunhua 票 02）。
+
+由 :func:`~sgs.engine.steps.life_decrease_on` 在扣减那一刻写进帧私有
+（``hp_loss = amount − absorbed``，与"要不要发 ``hp_change``"读的是同一个数）：
+
+- 失去体力帧 / 没有护甲的伤害帧：``hp_loss == amount``；
+- **护甲全吸收**的伤害帧：``hp_loss == 0`` —— 这一帧的 L8 三个时机照常派发（钩子要能读到
+  "时机在、delta 可能没有"），但**体力一点没降**。用户 2026-11-20 对【伤逝】的口径
+  「受到伤害导致体力降低（**仅失去护甲时无影响**）」就落在这一个键上；
+- 帧私有载荷不进记录流，故既有的读者与 47 条金录像都不受影响。
+
+读它的是张春华移动版【伤逝】（``src/sgs/skills/hero_yijiang_2011.py``）：它按"体力真的降了"
+决定要不要问"是否发动"。
 """
 
 ARMOR_CAP = 5

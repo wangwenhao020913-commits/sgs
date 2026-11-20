@@ -785,6 +785,14 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.zhangchunhua_mobile.jueqing": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.zhangchunhua_mobile.shangshi": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.zhangfei.paoxiao": {
       "enabled": true,
       "rarity": "common"

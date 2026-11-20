@@ -23,6 +23,28 @@
           }
         }
       ]
+    },
+    {
+      "id": "zhangchunhua_mobile",
+      "name": "张春华移动版",
+      "true_name": "张春华",
+      "kingdom": "wei",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "yijiang-2011-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jueqing",
+          "name": "绝情",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "shangshi",
+          "name": "伤逝",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

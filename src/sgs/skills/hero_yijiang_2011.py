@@ -43,11 +43,20 @@ from sgs.effects import (
     ModifierPoint,
     PriorityClass,
     behavior_for,
+    damage_base_amount,
     is_slash,
     locate,
 )
 from sgs.resolution import Control, Frame
-from sgs.state import GameState, Phase, SelectionSpec, Zone
+from sgs.state import (
+    DAMAGE_REPLACEMENT_AMOUNT_KEY,
+    DAMAGE_REWRITTEN_KEY,
+    LIFE_DECREASE_HP_LOSS_KEY,
+    GameState,
+    Phase,
+    SelectionSpec,
+    Zone,
+)
 from sgs.timing import Timing
 
 from .catalog import (
@@ -58,6 +67,7 @@ from .catalog import (
     hero_card_zone_key,
 )
 from .flow import SkillFlow, zero_step_effect
+from .move_after import move_event
 
 __all__ = [
     "POJUN_FLOW",
@@ -433,12 +443,297 @@ def jie_xusheng_skill_definitions() -> tuple[SkillDef, ...]:
     return JIE_XUSHENG_SKILL_DEFS
 
 
+# ---------------------------------------------------------------------------
+# 张春华移动版【绝情】【伤逝】（票 02；用户 2026-11-20 逐条裁定，见票面 §0 Q1–Q5）
+#
+# 移动版原文（`D:\SGS_HEROS\一将成名-2011\张春华\技能.txt` 逐字）：
+#
+#     绝情／锁定技，你即将造成的伤害均视为失去体力。
+#     伤逝／当你的手牌数小于X时，你可以将手牌摸至X张（X为你已损失的体力值）。
+#
+# 两条技能的落点：
+#
+# - **绝情** = 锁定段，挂 ``DAMAGE_BEFORE_START``（规则 §4.14 的时机 0)，票 90 解封的派发点）。
+#   改写走引擎的**通用协议**（帧私有 ``damage_rewritten`` + ``damage_replacement_amount``），
+#   本模块只负责把"金额"算出来并写进去 —— 引擎不认识技能名（C2）。
+#   金额 = **伤害值基数**（票 90 的 ``damage_base_amount``：牌面 + 【酒】+ 「基础伤害值 +N」
+#   那一档），**不含**"造成伤害时 +N"（【古锭刀】/界徐盛【破军】②）与"受到伤害时 +N"（【藤甲】）。
+# - **伤逝** = 多时机零步流水线（样板 ``hero.sunshangxiang.xiaoji``）：一条 ``SkillDef`` 挂
+#   **四条** ``Hook``（失去手牌后 / 扣减体力后 / 回复体力后 / 加体力上限后），四条共用同一份
+#   条件与同一份效果。可选（「可以」⇒ 有放弃）、X = 已损失体力值现算、效果是"摸至 X 张"。
+# ---------------------------------------------------------------------------
+
+ZHANGCHUNHUA = "zhangchunhua_mobile"
+"""张春华的武将 id（一将成名-2011·移动版）。"""
+
+ZHANGCHUNHUA_JUEQING = hero_skill_id(ZHANGCHUNHUA, "jueqing")
+"""张春华【绝情】的全限定技能 id。"""
+
+ZHANGCHUNHUA_SHANGSHI = hero_skill_id(ZHANGCHUNHUA, "shangshi")
+"""张春华【伤逝】的全限定技能 id。"""
+
+JUEQING_REQUIREMENT = "锁定技，你即将造成的伤害均视为失去体力。"
+"""【绝情】的牌面逐字（移动版；``requirement`` 槽位）。"""
+
+SHANGSHI_REQUIREMENT = (
+    "当你的手牌数小于X时，你可以将手牌摸至X张（X为你已损失的体力值）。"
+)
+"""[伤逝] 的牌面逐字（移动版；``requirement`` 槽位）。
+
+单选项确认态读不到 `OPTION_LABELS`，提示条 / 预发动清单读的就是这一句
+（`docs/agents/skill-authoring/shapes.md` §4 的「一句话文案」行 + `edge-cases.md` O4）。
+"""
+
+
+def _jueqing_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**这次伤害是我（张春华）即将造成的**。
+
+    钩子的"关于我"自校读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环
+    写），再看帧上的 ``source`` ——伤害事件在派发时**还没有"造成伤害时"那一步**，``source``
+    就是伤害来源（票 03 的传导帧也只在这里写着原始来源）。
+
+    无来源的伤害（【闪电】一类）``source is None`` ⇒ 不成立；别人造成的伤害 ⇒ 不成立
+    （`edge-cases.md` H2：不自校 = 谁挨打都改写）。
+    """
+    del host
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    return frame.data.get("source") == int(owner)
+
+
+def _jueqing_rewrite(host: Any, frame: Frame) -> None:
+    """把这一帧的伤害事件**整段改写成"失去体力"**，金额取伤害值基数。
+
+    写入的两个帧私有槽由 :func:`~sgs.engine.steps.damage_before_start` 收口：它跳过本帧
+    其余步骤（不派发"造成 / 受到伤害"的后置时机、不 `note_damage_*`、不参与连环传导），
+    再压一条**无来源**的 ``LIFE_DECREASE`` 帧。事件不存在 ⇒ 它**不是**"防止伤害"
+    （用户 Q1；规则 §4.14 L396–L401 的判据）。
+
+    金额 = :func:`~sgs.effects.damage_base_amount`：牌面基数 + 使用级加伤（【酒】）+
+    ``DAMAGE_BASE_AMOUNT`` 链（"基础伤害值 +N"那一档）。用户 Q2 的四个举例都落在这条式子上：
+    火杀穿藤甲 → 1；普通杀穿藤甲 → 无事（藤甲先令普通【杀】无效，事件都没发生）；酒杀 → 2；
+    【古锭刀】不参与（"造成伤害时 +N"在后面的那一档）。
+    """
+    frame.data[DAMAGE_REWRITTEN_KEY] = True
+    frame.data[DAMAGE_REPLACEMENT_AMOUNT_KEY] = damage_base_amount(
+        host.state,
+        source=frame.data.get("source"),
+        target=int(frame.data["target"]),
+        card=frame.data.get("channel"),
+        base=int(frame.data.get("amount", 0)),
+        chain=bool(frame.data.get("chain")),
+        deal_bonus=int(frame.data.get("deal_bonus", 0)),
+    )
+    return None
+
+
+def _shangshi_x(state: GameState, seat: int) -> int:
+    """X = **已损失的体力值** = 体力上限 − 体力值（牌面括注；每次取值按当下重算）。"""
+    player = state.player(seat)
+    return max(0, int(player.hp_max) - int(player.hp))
+
+
+def _shangshi_needs_cards(state: GameState, seat: int) -> bool:
+    """「手牌数小于 X」——四条时机共用的**候选判据**（不成立就连"是否发动"都不问）。
+
+    `edge-cases.md` G1 / 总纪律 1：付得起才产出候选。成立时 ``X − 手牌数 ≥ 1``，
+    故"摸 0 张"不可能（G2）。
+    """
+    return len(state.player(seat).hand) < _shangshi_x(state, seat)
+
+
+def _lost_hand_cards(frame: Frame, seat: int) -> bool:
+    """这次移动让 ``seat`` 的**手牌**变少了吗（装备区 / 判定区不算）。
+
+    与 :func:`~sgs.skills.move_after.loses_card` 的分工：那一条把"离开装备区"也算失去
+    （【枭姬】要的语义），而【伤逝】的判据是**手牌数**——X 一直是"已损失体力值"，装备区
+    那张牌离开了也不改变手牌数。故本函数只认 ``from_zone == (HAND, seat)`` 且去向**不是**
+    自己的手牌区（重排 / 整理一类没有离开，账本「交给别人的手牌也算失去」）。
+    """
+    move = move_event(frame)
+    if move is None:
+        return False
+    if move.from_zone.zone is not Zone.HAND or move.from_zone.seat != seat:
+        return False
+    return not (move.to_zone.zone is Zone.HAND and move.to_zone.seat == seat)
+
+
+def _shangshi_move_condition(host: Any, frame: Frame) -> bool:
+    """时机 ①（``MOVE_AFTER``）：**失去手牌后**且手牌数小于 X。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    seat = int(owner)
+    return _lost_hand_cards(frame, seat) and _shangshi_needs_cards(host.state, seat)
+
+
+def _shangshi_hp_condition(host: Any, frame: Frame) -> bool:
+    """时机 ②（``LIFE_DECREASE_AFTER``）：**体力真的降低了**之后，且手牌数小于 X。
+
+    两个判据各管一件事：
+
+    - ``target == 我``：这一帧扣的是**我的**体力（伤害与"失去体力"都走这条，用户 Q3）；
+    - 帧私有 :data:`~sgs.state.LIFE_DECREASE_HP_LOSS_KEY` > 0：**体力真的降了**。
+      护甲全吸收的伤害帧 ``hp_loss == 0`` ⇒ **不触发**（用户 Q1 口径"仅失去护甲时无影响"）。
+      不能只看 ``amount``：那一帧的 ``amount`` 是全额伤害，体力一点没动。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    seat = int(owner)
+    if int(frame.data.get("target", -1)) != seat:
+        return False
+    if int(frame.data.get(LIFE_DECREASE_HP_LOSS_KEY, 0)) <= 0:
+        return False
+    return _shangshi_needs_cards(host.state, seat)
+
+
+def _shangshi_recover_condition(host: Any, frame: Frame) -> bool:
+    """时机 ③（``RECOVER_AFTER``）：**回复体力后**，且手牌数小于 X。
+
+    回复让 X 变小，故"回复后仍小于"是常态（低血、少牌的座位）；满体力一帧的
+    ``X == 0`` ⇒ 天然不成立（``__shangshi_needs_cards`` 是同一道门，不另写一份判据）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    seat = int(owner)
+    if int(frame.data.get("target", -1)) != seat:
+        return False
+    return _shangshi_needs_cards(host.state, seat)
+
+
+def _shangshi_maxlife_condition(host: Any, frame: Frame) -> bool:
+    """时机 ④（``MAXLIFE_INCREASE_AFTER``）：**加体力上限后**，且手牌数小于 X。
+
+    钩子只挂在"加"侧（`MAXLIFE_INCREASE_AFTER`）；"减上限后"引擎不派发且**不可观测**
+    （X 只会变小，见用户 Q3 的括注）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    seat = int(owner)
+    if int(frame.data.get("target", -1)) != seat:
+        return False
+    return _shangshi_needs_cards(host.state, seat)
+
+
+_SHANGSHI_DONE = "shangshi:done:"
+"""帧私有前缀：这一次触发**已经摸过**（摸牌可能内联派发"获得牌后"并挂起）。
+
+按"这次触发是谁"分桶（``edge-cases.md`` G7）：``MOVE_AFTER`` 同一帧可以有两次独立移动，
+故键里带**这批牌**的 id；其余三个时机在帧内只出现一次，键退化成常量。
+"""
+
+
+def _shangshi_trigger_key(frame: Frame) -> str:
+    """这一次触发的帧内游标键（同一帧的两次"失去手牌"互不干扰）。"""
+    move = move_event(frame)
+    cards = (
+        ",".join(str(int(card.card_id)) for card in move.cards) if move is not None else ""
+    )
+    return f"{_SHANGSHI_DONE}{cards}"
+
+
+def _shangshi_draw(host: Any, frame: Frame) -> Control:
+    """效果：**摸至 X 张** = 摸 ``X − 手牌数`` 张（不铺面：``draw_for_hand``）。
+
+    「可以」的放弃口由派发环给（非锁定技、不问 ``locked``）：玩家答放弃就到此为止，
+    ``edge-cases.md`` 总纪律 2 的"可以不选 ⇒ 给 Pass"由引擎统一给。短摸 ⇒ 平局
+    （既有 ``draw_for_hand`` 语义，G10）。
+
+    **游标在摸牌之前前进**：摸牌会内联派发"获得牌后"（【清俭】一类）并挂起，续跑据它
+    既不重摸、也不漏摸——与 :func:`~sgs.skills.move_after.MoveAfterSkill.handle` 同一姿态。
+    """
+    owner = frame.data.get("skill_owner") or frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return None
+    seat = int(owner)
+    key = _shangshi_trigger_key(frame)
+    if frame.data.get(key):
+        return None
+    player = host.state.player(seat)
+    need = _shangshi_x(host.state, seat) - len(player.hand)
+    if need <= 0:
+        return None
+    frame.data[key] = True
+    if host.draw_for_hand(frame, seat, need) == "stay":
+        return "stay"
+    return None
+
+
+SHANGSHI_FLOW = SkillFlow(name="shangshi", steps=(), effect=zero_step_effect(_shangshi_draw))
+"""【伤逝】的零步流水线：「是否发动」→ 摸至 X 张（无步骤；样板 = 【枭姬】）。
+
+必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例。
+"""
+
+_JUEQING_DEF = SkillDef(
+    # 锁定技（牌面写"锁定技"）⇒ ``locked=True``：不问"是否发动"，派发环直接跑回调。
+    skill_id=ZHANGCHUNHUA_JUEQING,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(
+            Timing.DAMAGE_BEFORE_START,
+            handler=_jueqing_rewrite,
+            condition=_jueqing_condition,
+        ),
+    ),
+    requirement=JUEQING_REQUIREMENT,
+)
+
+_SHANGSHI_DEF = SkillDef(
+    # 非锁定（牌面写"可以"）⇒ 每个时机各问一次"是否发动"（`SKILL_ACTIVATION`）。
+    skill_id=ZHANGCHUNHUA_SHANGSHI,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(
+            Timing.MOVE_AFTER,
+            condition=_shangshi_move_condition,
+            flow=SHANGSHI_FLOW,
+        ),
+        # 逐事件（不是逐点）：``per_point`` 保持缺省 False——一次失去 2 点 / 一次扣 2 点伤害
+        # 都只问一次（账本默认读法（三）：牌面没有「1 点」这个限定词）。
+        Hook(
+            Timing.LIFE_DECREASE_AFTER,
+            condition=_shangshi_hp_condition,
+            flow=SHANGSHI_FLOW,
+        ),
+        Hook(
+            Timing.RECOVER_AFTER,
+            condition=_shangshi_recover_condition,
+            flow=SHANGSHI_FLOW,
+        ),
+        Hook(
+            Timing.MAXLIFE_INCREASE_AFTER,
+            condition=_shangshi_maxlife_condition,
+            flow=SHANGSHI_FLOW,
+        ),
+    ),
+    requirement=SHANGSHI_REQUIREMENT,
+)
+
+ZHANGCHUNHUA_SKILL_DEFS: tuple[SkillDef, ...] = (_JUEQING_DEF, _SHANGSHI_DEF)
+"""张春华【绝情】【伤逝】（票 02）。"""
+
+
+def zhangchunhua_skill_definitions() -> tuple[SkillDef, ...]:
+    """张春华的技能定义（由 :data:`sgs.skills.CATALOG` 末尾并入）。"""
+    return ZHANGCHUNHUA_SKILL_DEFS
+
+
 YIJIANG_2011_SKILL_DEFS: tuple[SkillDef, ...] = (
     *_XUSHENG_POJUN_DEFS,
     *_JIE_XUSHENG_POJUN_DEFS,
+    *ZHANGCHUNHUA_SKILL_DEFS,
 )
 """一将成名-2011·移动版（徐盛【破军】，票 01）+ 界一将成名-2011·移动版（界徐盛【破军】①②，
-票 03）；张春华由票 02 追加。"""
+票 03）+ 张春华【绝情】【伤逝】（票 02）。"""
 
 
 def yijiang_2011_skill_definitions() -> tuple[SkillDef, ...]:

@@ -120,7 +120,7 @@
 | `PHASE_PLAY_END` | **出牌阶段结束时**（韬·曹操【倡义】= 首个载体，tao-caocao 票 02）：`_phase_play_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。**"本阶段"作用域的清理排在本步之后**；被【乐不思蜀】跳过的出牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发（与【兵粮寸断】跳摸牌阶段的 `PHASE_DRAW_END` 同一口径） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
-| `DAMAGE_BEFORE_START` / `DAMAGE_START` | **伤害结算开始前 / 开始时**（L7 的 0) / 1) 两步；yijiang-2011-xusheng-chunhua 票 90 解封，首个载体 = 张春华【绝情】。派发点 = `src/sgs/engine/steps.py:damage_before_start` / `damage_start`（`DAMAGE_STEPS` 的前两步），**惰性**：没有注册实例时连一条记录都不落。**这是唯一能"整段改写伤害事件"的挂点**——钩子写 `damage_rewritten` + `damage_replacement_amount`（两个帧私有槽，见 `src/sgs/engine/steps.py:DAMAGE_REWRITTEN_KEY`），引擎会跳过本帧其余步骤、另压一条 `LIFE_DECREASE` 帧（无来源、不碰护甲、不 `note_damage_*`、不传导）。它**不是** `Tag.PREVENTED`：防止是"数值减为 0、事件仍在"（规则 §4.14 L396–L401）。金额取 `src/sgs/effects/modifiers.py:damage_base_amount`（`伤害值基数`，不含"造成伤害时 / 受到伤害时 +N"） |
+| `DAMAGE_BEFORE_START` / `DAMAGE_START` | **伤害结算开始前 / 开始时**（L7 的 0) / 1) 两步；yijiang-2011-xusheng-chunhua 票 90 解封，首个载体 = 张春华【绝情】。派发点 = `src/sgs/engine/steps.py:damage_before_start` / `damage_start`（`DAMAGE_STEPS` 的前两步），**惰性**：没有注册实例时连一条记录都不落。**这是唯一能"整段改写伤害事件"的挂点**——钩子写 `damage_rewritten` + `damage_replacement_amount`（两个帧私有槽，见 `src/sgs/state/models.py:DAMAGE_REWRITTEN_KEY`），引擎会跳过本帧其余步骤、另压一条 `LIFE_DECREASE` 帧（无来源、不碰护甲、不 `note_damage_*`、不传导）。它**不是** `Tag.PREVENTED`：防止是"数值减为 0、事件仍在"（规则 §4.14 L396–L401）。金额取 `src/sgs/effects/modifiers.py:damage_base_amount`（`伤害值基数`，不含"造成伤害时 / 受到伤害时 +N"） |
 | `DAMAGE_AFTER_TAKE` | 受到伤害后（奸雄、反馈、遗计、刚烈、忘隙、耀武）——**注意 `per_point`** |
 | `DAMAGE_AFTER_DEAL` | 造成伤害后（忘隙、潜心、狂骨）——**注意 `per_point`** |
 | `LIFE_DECREASE_AFTER` | 失去体力后（诈降） |

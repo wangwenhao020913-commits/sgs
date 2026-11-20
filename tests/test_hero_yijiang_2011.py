@@ -22,18 +22,22 @@ from dataclasses import replace
 from typing import Any
 
 from sgs.data import RuleConfig, hero_placement_decl, load_content_pack, load_heroes
+from sgs.effects import damage_amount, damage_base_amount
 from sgs.engine import Engine
 from sgs.skills import CATALOG
 from sgs.skills.catalog import hero_card_zone_key
 from sgs.skills.hero_yijiang_2011 import (
     POJUN_MARK,
     XUSHENG_POJUN,
+    ZHANGCHUNHUA_JUEQING,
+    ZHANGCHUNHUA_SHANGSHI,
     _pojun_condition,
     _pojun_return_condition_for,
 )
 from sgs.state import (
     ActivateSkill,
     EndPhase,
+    FrameKind,
     Pass,
     Phase,
     PlayCard,
@@ -42,7 +46,13 @@ from sgs.state import (
     ZoneRef,
 )
 from sgs.timing import Timing
-from support import SeatSpec, build_state, cards_of_type, deck_excluding
+from support import (
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    ran_timing,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 HERO = "xusheng_mobile"
@@ -449,3 +459,350 @@ def test_jie_pojun_condition_has_no_play_phase_restriction() -> None:
 
     assert _pojun_condition(host, frame) is False, "徐盛版：回合角色不是我 ⇒ 不触发"
     assert _jie_pojun_condition(host, frame) is True, "界徐盛版：没有阶段限定 ⇒ 触发"
+
+
+# ---------------------------------------------------------------------------
+# 张春华移动版【绝情】【伤逝】（票 02）
+#
+# 移动版原文（`D:\SGS_HEROS\一将成名-2011\张春华\技能.txt` 逐字）：
+#
+#     绝情／锁定技，你即将造成的伤害均视为失去体力。
+#     伤逝／当你的手牌数小于X时，你可以将手牌摸至X张（X为你已损失的体力值）。
+#
+# 口径 = 用户 2026-11-20 的逐条裁定（票面 §0 Q1–Q5）：
+# - 绝情 = 伤害事件**整段不发生**，改为"失去等同于伤害值基数"（无来源 / 不碰护甲 /
+#   不触发任何"造成 / 受到伤害"类技能 / 不传导）；
+# - 金额 = 基数（含【酒】与"基础伤害值 +N"那一档，**不含**"造成伤害时 +N"）；
+# - 伤逝的触发面 = 手牌数小于 X 的每一次状态变化后（失去手牌 / 体力真的降了 / 回复体力 /
+#   加体力上限），可选、X 现算、摸至 X 张。
+# ---------------------------------------------------------------------------
+
+ZHANGCHUNHUA = "zhangchunhua_mobile"
+JUEQING = ZHANGCHUNHUA_JUEQING
+SHANGSHI = ZHANGCHUNHUA_SHANGSHI
+
+
+class _Zhangchunhua:
+    """应答器：可发动的技能一律按 ``answer`` 决定，其余询问走最小应答。"""
+
+    def __init__(self, *, answer: bool = True, skill: str = SHANGSHI) -> None:
+        self.answer = answer
+        self.skill = skill
+        self.offers: list[tuple[str, ...]] = []
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION":
+            picks = tuple(
+                action.skill_id
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+            self.offers.append(picks)
+            if self.answer and self.skill in picks:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill) and action.skill_id == self.skill
+                )
+        for action in query.legal_actions:
+            if isinstance(action, EndPhase):
+                return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _zc_state(*specs: SeatSpec, turn_seat: int = ME, phase: Phase = Phase.PLAY):
+    """两座局面：座位 0 = 张春华移动版（**手牌写在这里**），其余顺延。"""
+    seats = [replace(specs[0], hero=ZHANGCHUNHUA) if specs else SeatSpec(hero=ZHANGCHUNHUA)]
+    seats.extend(specs[1:])
+    while len(seats) < 2:
+        seats.append(SeatSpec())
+    used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *used),
+        turn_seat=turn_seat,
+        phase=phase,
+        rule_config=RuleConfig(first_seat=0),
+    )
+
+
+def _damage_frame(*, source, target, amount, nature=None, channel=None):
+    """与引擎在【杀】命中时压的 ``DAMAGE`` 子帧同形（渠道 / 属性按需给）。"""
+    return {
+        "source": source,
+        "targets": (target,),
+        "target": target,
+        "card": None,
+        "use_timing": Timing.PHASE_PLAY_IDLE,
+        "channel": channel,
+        "nature": nature,
+        "chain": False,
+        "amount": amount,
+    }
+
+
+def _run_until_idle(engine: Engine, player: _Zhangchunhua, *, limit: int = 900) -> Engine:
+    """把引擎推到"没有结算栈且没有待答询问"（伤害帧 / 回复帧这类构造帧用）。"""
+    for _ in range(limit):
+        if not engine.stack and engine.pending is None:
+            return engine
+        if engine.pending is not None:
+            engine.submit(player.respond(engine.pending))
+            continue
+        engine._step()
+        if engine.finished:
+            return engine
+    raise AssertionError("步数上限内没有跑完构造帧")
+
+
+# ---- 数据面 / 声明面 -------------------------------------------------------
+
+
+def test_zhangchunhua_mobile_is_in_the_mobile_table_with_both_skills() -> None:
+    hero = load_heroes("yijiang_2011_mobile").by_id(ZHANGCHUNHUA)
+    assert hero is not None, "张春华移动版必须落在 heroes.yijiang_2011_mobile.json"
+    assert hero.name == "张春华移动版"
+    assert hero.true_name == "张春华"
+    assert hero.kingdom.value == "wei" and hero.gender.value == "female"
+    assert hero.hp_max == 3
+    assert hero.version == "yijiang-2011-mobile"
+    assert hero.enabled is True
+    assert [skill.id for skill in hero.skills] == ["jueqing", "shangshi"]
+
+
+def test_jueqing_is_locked_and_hooks_the_damage_window() -> None:
+    """【绝情】= 锁定段，挂在「伤害结算开始前」（票 90 解封的派发点），不问「是否发动」。"""
+    definition = CATALOG[JUEQING]
+    assert definition.locked is True, "牌面写「锁定技」⇒ 不问"
+    assert [hook.timing for hook in definition.hooks] == [Timing.DAMAGE_BEFORE_START]
+    assert definition.hooks[0].forced is False, "锁定技由 ``locked`` 表达，不重复标 forced"
+    assert definition.requirement == "锁定技，你即将造成的伤害均视为失去体力。"
+    assert definition.preactivated is False
+
+
+def test_shangshi_hooks_the_four_state_changes_with_one_zero_step_flow() -> None:
+    """【伤逝】= 四条时机钩子共用**同一条**零步流水线（票面 §2 的形状）。"""
+    definition = CATALOG[SHANGSHI]
+    assert definition.locked is False, "「可以」⇒ 每次问一次是否发动"
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.MOVE_AFTER,
+        Timing.LIFE_DECREASE_AFTER,
+        Timing.RECOVER_AFTER,
+        Timing.MAXLIFE_INCREASE_AFTER,
+    ]
+    assert all(hook.per_point is False for hook in definition.hooks), "逐事件，不逐点"
+    assert len({id(hook.flow) for hook in definition.hooks}) == 1, "四条共用同一条流水线"
+    assert definition.hooks[0].flow.steps == (), "零步：只有「是否发动」那一问"
+    assert "摸至X张" in definition.requirement
+
+
+# ---- 绝情 -----------------------------------------------------------------
+
+
+def test_jueqing_rewrites_a_real_slash_hit_into_a_life_decrease() -> None:
+    """真实使用链：【杀】命中 ⇒ **不是伤害**，是"失去 1 点体力"。
+
+    `三国杀详细规则.txt:378–383`（§4.14 时机 0)）："触发后不再进行伤害结算，本该受到伤害的
+    角色改为失去等同于伤害值基数的体力"。
+    """
+    state = _zc_state(SeatSpec(hand=(SLASH[0],)), SeatSpec(hp=4))
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.start_use(state.card(SLASH[0]), source=ME, targets=(TARGET,))
+
+    _run_until_idle(engine, player)
+
+    assert state.player(TARGET).hp == 3, "按基数 1 点扣体力"
+    assert tuple(engine.damage_events) == (), "伤害事件整段不发生 ⇒ 一条伤害事实都不许记"
+    assert not ran_timing(engine, Timing.DAMAGE_AFTER_TAKE), "受到伤害后不派发"
+    assert not ran_timing(engine, Timing.DAMAGE_AFTER_DEAL), "造成伤害后不派发"
+    assert ran_timing(engine, Timing.DAMAGE_BEFORE_START), "改写落在时机 0)"
+    assert ran_timing(engine, Timing.LIFE_DECREASE_AFTER), "换成失去体力的事件"
+
+
+def test_jueqing_does_not_touch_armor() -> None:
+    """失去体力**不碰护甲**（账本「护甲值 = 独立第二轴」）：2 点护甲、2 点伤害 ⇒ 掉 2 点体力。"""
+    state = _zc_state(SeatSpec(hp=4, hp_max=4))
+    state.player(TARGET).armor = 2
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(source=ME, target=TARGET, amount=2),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    _run_until_idle(engine, player)
+
+    assert state.player(TARGET).armor == 2, "护甲一点不动（这不是伤害）"
+    assert state.player(TARGET).hp == 2, "体力照扣基数 2 点"
+    assert tuple(engine.damage_events) == ()
+
+
+def test_jueqing_ignores_the_deal_amount_tier() -> None:
+    """「造成伤害时 +1」（``DAMAGE_DEAL_AMOUNT``）**不算进基数**（用户 Q2）。
+
+    载体用界徐盛移动版【破军】②（``hero.jie_xusheng_mobile.pojun`` 的第二个修饰器，
+    与【古锭刀】同一个挂点）：给它一个 ``grant_skill``，目标的手牌数 / 装备数都不大于我
+    ⇒ 那一段 +1 落在 ``DAMAGE_DEAL_AMOUNT`` 上；【绝情】只读基数，故目标只失去 1 点。
+    112 张的标准档里没有【古锭刀】这张牌（它在军争档），而这一条判据要的只是"同一个挂点
+    上有一个 +1"，用哪张牌不影响结论。
+    """
+    state = _zc_state(SeatSpec(hand=(SLASH[0], SLASH[1])), SeatSpec(hp=4))
+    engine = Engine(state, seed=7)
+    engine.grant_skill(ME, "hero.jie_xusheng_mobile.pojun")
+    card = state.card(SLASH[0])
+    # 先钉住"这一段 +1 真的挂在 ``DAMAGE_DEAL_AMOUNT`` 上"：否则下面的绿是假绿。
+    assert damage_amount(
+        state, source=ME, target=TARGET, card=card, base=1, chain=False
+    ) == 2
+    assert damage_base_amount(
+        state, source=ME, target=TARGET, card=card, base=1, chain=False
+    ) == 1
+    player = _Zhangchunhua()
+    engine.start_use(card, source=ME, targets=(TARGET,))
+
+    _run_until_idle(engine, player)
+
+    assert state.player(TARGET).hp == 3, "只失去 1 点（破军② 的那 +1 不在基数里）"
+
+
+def test_jueqing_counts_the_base_amount_tier() -> None:
+    """「基础伤害值 +N」**算进基数**（用户 Q2 点名的【裸衣】那一档）。"""
+    state = _zc_state(SeatSpec(hand=(SLASH[0],)), SeatSpec(hp=4))
+    engine = Engine(state, seed=7)
+    engine.grant_skill(ME, "hero.xuchu.luoyi")
+    state.player(ME).luoyi_active = True
+    card = state.card(SLASH[0])
+    # 反向对照：这一档进的是**基数**（``DAMAGE_BASE_AMOUNT``），不是"造成伤害时"。
+    assert damage_base_amount(
+        state, source=ME, target=TARGET, card=card, base=1, chain=False
+    ) == 2
+    player = _Zhangchunhua()
+    engine.start_use(card, source=ME, targets=(TARGET,))
+
+    _run_until_idle(engine, player)
+
+    assert state.player(TARGET).hp == 2, "1 + 裸衣 1 = 基数 2 ⇒ 失去 2 点体力"
+
+
+def test_jueqing_leaves_other_seats_damage_alone() -> None:
+    """别人造成的伤害照旧是伤害（条件自校"这次伤害**我**即将造成"）。"""
+    state = _zc_state(SeatSpec(hp=3, hp_max=3, hand=(SLASH[0], SLASH[1])), SeatSpec())
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(source=TARGET, target=ME, amount=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    _run_until_idle(engine, player)
+
+    assert state.player(ME).hp == 2, "照常扣 1 点体力"
+    assert len(engine.damage_events) == 1, "这是一次真伤害（绝情不改写别人的伤害）"
+
+
+# ---- 伤逝 -----------------------------------------------------------------
+
+
+def test_shangshi_draws_up_to_the_lost_hp_after_losing_a_hand_card() -> None:
+    """时机 ①：失去手牌后、手牌数 0 < X = 1 ⇒ 摸至 1 张。"""
+    state = _zc_state(SeatSpec(hp=2, hp_max=3, hand=(SLASH[0],)), SeatSpec(hp=4))
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.start_use(state.card(SLASH[0]), source=ME, targets=(TARGET,))
+
+    _run_until_idle(engine, player)
+
+    assert any(SHANGSHI in offer for offer in player.offers), "条件成立时必须问一次"
+    assert len(state.player(ME).hand) == 1, "摸至 X = 1 张"
+
+
+def test_shangshi_no_offer_when_hand_reaches_x() -> None:
+    """G1：失去一张后手牌数仍 ≥ X ⇒ **候选阶段就不问**（`edge-cases.md` 总纪律 1）。"""
+    state = _zc_state(
+        SeatSpec(hp=2, hp_max=3, hand=(SLASH[0], SLASH[1])), SeatSpec(hp=4)
+    )
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.start_use(state.card(SLASH[0]), source=ME, targets=(TARGET,))
+
+    _run_until_idle(engine, player)
+
+    assert player.offers == [], "手牌数 1 ≥ X = 1 ⇒ 一条询问都不该有"
+    assert len(state.player(ME).hand) == 1, "没有摸牌"
+
+
+def test_shangshi_triggers_after_losing_hp() -> None:
+    """时机 ②：**体力真的降了**之后、手牌数 < X ⇒ 摸至 X 张。"""
+    state = _zc_state(SeatSpec(hp=3, hp_max=3), SeatSpec())
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(source=TARGET, target=ME, amount=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    _run_until_idle(engine, player)
+
+    assert state.player(ME).hp == 2, "先掉 1 点体力"
+    assert len(state.player(ME).hand) == 1, "X 从 0 变 1 ⇒ 摸 1 张"
+
+
+def test_shangshi_ignores_a_damage_frame_absorbed_by_armor() -> None:
+    """用户 Q1 的口径「仅失去护甲时无影响」：护甲全吸收 ⇒ 体力没降 ⇒ **不问**。"""
+    state = _zc_state(SeatSpec(hp=3, hp_max=3), SeatSpec())
+    state.player(ME).armor = 1
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(source=TARGET, target=ME, amount=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    _run_until_idle(engine, player)
+
+    assert state.player(ME).hp == 3, "体力一点没动（全被护甲吸收）"
+    assert state.player(ME).armor == 0
+    assert not any(SHANGSHI in offer for offer in player.offers), "这一帧不该问伤逝"
+
+
+def test_shangshi_triggers_after_maxlife_increase() -> None:
+    """时机 ④：加体力上限后 ⇒ X 变大 ⇒ 手牌数 < X 时摸至 X 张。"""
+    state = _zc_state(SeatSpec(hp=3, hp_max=3), SeatSpec())
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine._step()  # L0 派发（GAME_START）：先让开局那一步过去
+    engine.raise_hp_max(ME, 1)
+
+    _run_until_idle(engine, player)
+
+    assert state.player(ME).hp_max == 4, "上限 +1（不同步体力）"
+    assert len(state.player(ME).hand) == 1, "X = 1 ⇒ 摸 1 张"
+
+
+def test_shangshi_deck_out_draw() -> None:
+    """G10：牌堆见底 ⇒ 摸牌短摸即平局（既有 ``draw_for_hand`` 语义，不另造判据）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=2, hp_max=3, hand=(SLASH[0],), hero=ZHANGCHUNHUA), SeatSpec()],
+        deck=(),
+        turn_seat=ME,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    engine = Engine(state, seed=7)
+    player = _Zhangchunhua()
+    engine.start_use(state.card(SLASH[0]), source=ME, targets=(TARGET,))
+
+    _run_until_idle(engine, player)
+
+    assert engine.finished, "两堆皆空 + 摸不够 ⇒ 平局"
+    assert len(state.player(ME).hand) == 0, "一张都摸不到"

@@ -78,7 +78,10 @@ from sgs.skills import (
     virtual_dodge,
 )
 from sgs.state import (
+    DAMAGE_REPLACEMENT_AMOUNT_KEY,
+    DAMAGE_REWRITTEN_KEY,
     LIFE_DECREASE_DAMAGE_KEY,
+    LIFE_DECREASE_HP_LOSS_KEY,
     ActivateSkill,
     CardRef,
     PindianDelta,
@@ -1105,25 +1108,6 @@ def _emit_damage(
     )
 
 
-DAMAGE_REWRITTEN_KEY = "damage_rewritten"
-"""帧私有槽名：这一帧的伤害事件已被**整段改写**成"失去体力"（yijiang-2011-xusheng-chunhua
-票 90 解封的原语；首个 / 今天唯一的载体 = 张一将成名-2011·移动版 张春华【绝情】）。
-
-写在 ``DAMAGE`` 帧上，由**伤害结算开始前**的钩子置真，:func:`damage_before_start` 读它。
-它**不是** :class:`~sgs.resolution.Tag` 的 ``PREVENTED``（票 90 §8 的判据）：防止是"把伤害值
-减为 0、事件仍在"（规则 `三国杀详细规则.txt:396–401`），后来的"造成 / 受到伤害"类时机照旧
-派发；改写是"事件不在"——本帧其余步骤两步全跳过、也不参与连环传导，只在原地压一条
-``LIFE_DECREASE`` 帧。帧私有数据不进记录流。
-"""
-
-DAMAGE_REPLACEMENT_AMOUNT_KEY = "damage_replacement_amount"
-"""帧私有槽名：改写后要失去的**体力点数**（= :func:`~sgs.effects.damage_base_amount` 的答案）。
-
-由置真 :data:`DAMAGE_REWRITTEN_KEY` 的那条钩子一并写入（【绝情】写"伤害值基数"）；
-:func:`damage_before_start` 读它压 ``LIFE_DECREASE`` 帧。缺省 / ≤ 0 ⇒ 连那条帧都不压
-（"失去 0 点体力"不是一个事件）。
-"""
-
 _DAMAGE_BEFORE_START_DONE = "damage_before_start_done"
 """帧私有槽名：本帧的"伤害结算开始前"已派发完（钩子挂起后重入不重派）。
 
@@ -1461,6 +1445,10 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     - 护甲全吸收 ⇒ 这一帧**只有** ``armor_change``，一条 ``hp_change`` 都不发；L8 三个
       时机照常派发（挂 ``LIFE_DECREASE_AFTER`` 的技能要能读到"时机在、delta 可能没有"）；
     - ``frame.data["dying"]`` 仍只看 ``hp <= 0``：护甲扣光**不**濒死（Q-A4）；
+    - 帧私有 :data:`~sgs.state.LIFE_DECREASE_HP_LOSS_KEY` = **体力真的降了几点**
+      （= ``amount − absorbed``，与"要不要发 ``hp_change``"同一个数；票 02 的加法）——
+      挂在 ``LIFE_DECREASE_AFTER`` 的技能据此区分"时机在、体力没动"（【伤逝】的
+      「仅失去护甲时无影响」）；
     - **惰性**：护甲为 0 时 ``absorbed = 0`` ⇒ 逐字走原路径（47 条金录像逐字节不变）。
     """
     target = frame.data["target"]
@@ -1476,6 +1464,10 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
         host.apply_armor_change(frame, target, player.armor - absorbed)
     # 护甲全吸收 ⇒ 体力一点没动（``hp_loss == 0``）且护甲确实动过 ⇒ **一条 hp_change 都不发**。
     hp_loss = amount - absorbed
+    # 帧私有：「这一帧体力**真的**降了几点」（yijiang-2011-xusheng-chunhua 票 02 的加法）。
+    # 与下面"要不要发 hp_change"读同一个数，故"护甲全吸收 ⇒ 0"是结构事实；挂在
+    # ``LIFE_DECREASE_AFTER`` 的技能（【伤逝】）按它区分"时机在但体力没动"。
+    frame.data[LIFE_DECREASE_HP_LOSS_KEY] = hp_loss
     # 失去体力**真的掉了多少** = ``before - after``（不是帧上的 ``amount``）：失去体力没有伤害
     # 修正链，今天两者相等；取差值才是定义（vital-fx 票 01 §做法 2）。
     hp_before = player.hp

@@ -5211,6 +5211,15 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "使用【杀】指定目标后可扣其至多 X 张牌（X = 其体力值）到它自己武将牌上、当前回合末"
         "再还；② 对张数均不大于我的目标造成伤害 +1：**没有代价** ⇒ 常量即正",
     ),
+    # yijiang-2011-xusheng-chunhua 票 02：张春华移动版【伤逝】（手牌数小于已损失体力值时
+    # 补牌）。**没有代价**、条件由引擎在候选阶段判过（`_shangshi_needs_cards`），收益随
+    # "缺口"变化但恒为正 ⇒ 常量即正。同批的【绝情】是锁定技（不问"是否发动"、没有候选），
+    # 故不在本表（本表只收**非锁定**技能）。
+    "hero.zhangchunhua_mobile.shangshi": (
+        _constant(2.2),
+        "手牌数小于已损失体力值时摸至该值：**没有代价**，条件已由引擎在候选阶段判过 ⇒ "
+        "常量即正；`_constant` 不读任何字段",
+    ),
     "hero.liuyan.tushe": (
         _constant(2.4),
         "使用非装备牌指定目标后摸 X 张（X = 本次使用的座位目标数，含自己）：**没有代价**，"
