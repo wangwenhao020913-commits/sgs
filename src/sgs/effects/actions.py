@@ -1846,9 +1846,23 @@ def need_card_tier(action: Action) -> int:
     """
     if not isinstance(action, ActivateSkill):
         return int(PriorityClass.CARD_USE)
+    return provider_tier(action.skill_id)
+
+
+def provider_tier(skill_id: str) -> int:
+    """**提供者**在"需要（使用 / 打出）牌"窗口里的优先级档（= :func:`need_card_tier` 的
+    提供者那一支，判据只有一处）。
+
+    逐条读 **定义**：``SkillDef.need_card_tier`` 覆盖位优先，否则由载体派生
+    （:attr:`~sgs.skills.SkillDef.priority_class`）。档不读局面 ⇒ 没有候选时也答得出来。
+
+    没有候选的读取方 = :func:`~sgs.effects.supply.supplies_for` 的"供给为 none 的档"
+    （need-card-supply 票 03）：那一档的候选被提供者自己的谓词挡在生成之前（持有者被
+    【义绝】封住手牌），供给行却仍要标在同一档上——否则灰行会落到别的档里。
+    """
     from sgs.skills import catalog as catalog_module
 
-    definition = catalog_module.CATALOG[action.skill_id]
+    definition = catalog_module.CATALOG[skill_id]
     if definition.need_card_tier is not None:
         return int(definition.need_card_tier)
     return int(definition.priority_class)

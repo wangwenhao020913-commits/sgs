@@ -773,6 +773,37 @@ class LordSkill(HeroSkillDecl):
     respond_modes: tuple[RespondMode, ...] | None = None
     activation_flow: SkillFlow | None = None
 
+    def supply_none_reason(self, state: GameState, seat: int) -> str | None:
+        """**需求传递的供给真值**：持有者自己还能不能使用 / 打出手牌（票 03 §1 / S9）。
+
+        【护驾】/【激将】**不是**直接产出转化 / 虚拟牌的技能：它们把「需要一张
+        【``required``】」这个需求依次传给同势力角色（用户 2026-11-20 Q2：「护驾的发动无须
+        交验合法性……护驾真正做的是把自己'需求方块闪'这个需求依次传递」）。故供给能成立的
+        前提只有一个：**持有者自己没被挡**——被 "不能使用或打出手牌" 的座位禁令封住时，这个
+        需求本身就没有意义，供给直接为 ``none``（Q2 逐字：「则曹操的【护驾】的 supply 直接为
+        none，就不会再依次逐座位传递'需求'了」）。
+
+        判据**复用**既有谓词，不另写白名单（票面 §1 / spec §4 的"上游禁令复用"）：
+
+        - **手牌禁令** = :attr:`~sgs.state.Player.hand_card_prohibited`（唯一存储是
+          ``hand_card_prohibition_sources``；【义绝】黑色分支 / 【雄乱】写的是同一格）；
+        - **技能失效 / 未生效** = :func:`~sgs.skills.catalog.resolve_instances` 的既有口径：
+          失效 / 失去 / 身份门控挡住的实例**根本产不出候选**，故本谓词看不到它们——那一档连
+          "给不出来"的行都不报（见 ``effects.supply.supplies_for`` 的 `_declared_none_tiers`）。
+
+        **已知缺口**（票面 §1）：【共损】一类"不能出【闪】"的座位禁令**尚未进仓**（仓里没有
+        这个技能），本票不造它；将来进仓时在这里再加一条判据来源即可，框架不改。
+
+        返回值同时服务两个读取方（候选生成与展示行）：``None`` = 给得出，一句话 = 给不出。
+        """
+        sources = state.player(seat).hand_card_prohibition_sources
+        if not sources:
+            return None
+        return (
+            "持有者本回合不能使用或打出手牌（【义绝】/【雄乱】一类的座位禁令）"
+            "⇒ 需求传不出去"
+        )
+
     def offer(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
         """``CANDIDATES`` 回调：需要者**自己**的这条实例给它追加"视为发动"候选。
 
@@ -786,6 +817,12 @@ class LordSkill(HeroSkillDecl):
         ``respond_modes`` 筛。票 22 起【激将】声明的 mode 集合含 ``USE`` ⇒【借刀杀人】
         （与【乱武】）的「被迫使用【杀】」窗口里也进候选；产物由窗口消费（求助窗口走
         :data:`LORD_REQUEST_DELIVER_KEY` 把牌交回去，窗口自己 ``start_use``）。
+
+        **需求传递的供给真值**（票 03 §1 / S9）：这两档的供给是"把需求传给同势力角色"，
+        故再加一道自己的谓词——:meth:`supply_none_reason` 非空（持有者被座位禁令封住手牌）
+        ⇒ **不追加**候选。于是"供给 none"在候选层就成立：不产候选 ⇒ 询问链不开 ⇒ 也不会
+        有"高亮却点不到"的灰档（spec §7 S16）。同一份判据喂给展示层
+        （``SkillDef.supply_none_reason``）画那一行 ``ok=False`` + 理由。
 
         **PLAY 那一条**（票 20）：``activation_flow`` 有值 ⇒ 出牌阶段像一条"使用【这张牌】的
         入口"那样出候选（这张牌 = ``self.required``，措辞与闸门都从它派生），闸门 =
@@ -809,6 +846,13 @@ class LordSkill(HeroSkillDecl):
                 return current
             if self.respond_modes is not None and ctx.respond_mode not in self.respond_modes:
                 return current
+        if self.supply_none_reason(state, ctx.owner) is not None:
+            # **需求传递的供给真值**（票 03 §1 / S9）：持有者自己被挡住 ⇒ 供给 ``none``
+            # ⇒ **不追加** ActivateSkill（连询问链都不开——不逐座位传递）。放在被动分支
+            # （`DODGE` / `RESPOND`）而不是最上面：``PLAY`` 那一档是票 20 的"主动使用入口"，
+            # 不是需求传递，判据在 `_play_activation_legal` 里。
+            # 展示层那一半（`ok=False` 的行 + 理由）走同一份声明：`SkillDef.supply_none_reason`。
+            return current
         return (*current, ActivateSkill(skill_id=self.skill_id, answers_seq=ctx.answers_seq))
 
     def provide(self, host: Any, frame: Frame, actor: int, timing: Timing) -> Control:
@@ -1535,10 +1579,14 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
             {"seat": f"选择【{card}】的目标"} if skill.activation_flow is not None else None
         ),
         preactivated=skill.activation_flow is not None,
-        # need-card-supply 票 01：**需求传递**（relay）——发动时不验合法性，真正做的是把
-        # "需要一张【required】"这个需求依次传给同势力角色；产物由别人给 ⇒ 候选期不可知
-        # （`unknown=True`，语义是票 03 的活）。牌名照声明给（是**声明事实**，不是判据）。
-        supply=Supply(product=skill.required, kind="relay", unknown=True),
+        # need-card-supply 票 03：**需求传递**（relay）——发动时不验合法性，真正做的是把
+        # "需要一张【required】"这个需求依次传给同势力角色。故供给是**可判**的
+        # （`unknown=False`）：牌名照声明给（是**声明事实**，不是判据），收窄维度在传到的
+        # 那一问里展开（`effects.supply._dimension_failure` 的 relay 分支）。
+        supply=Supply(product=skill.required, kind="relay", unknown=False),
+        # 同一份谓词的展示面：持有者自己被挡住 ⇒ 这一档**没有候选**，但仍要一行
+        # `ok=False` + 理由（票 03 §1 / §2c；S16）。
+        supply_none_reason=skill.supply_none_reason,
     )
 
 

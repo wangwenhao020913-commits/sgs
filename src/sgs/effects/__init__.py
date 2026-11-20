@@ -99,6 +99,7 @@ from .modifiers import (
     response_count,
 )
 from .supply import (
+    RELAY_SUPPLY_KIND,
     SUPPLY_KINDS,
     Demand,
     Supply,
@@ -153,6 +154,7 @@ __all__ = (
     "PriorityClass",
     "PushFrame",
     "Randomness",
+    "RELAY_SUPPLY_KIND",
     "SLASH_FAMILY_KEY",
     "SUPPLY_KINDS",
     "ResponseWindow",

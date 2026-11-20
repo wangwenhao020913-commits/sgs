@@ -456,6 +456,11 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
     """§1：今天落四条（八个技能定义）——【八卦阵】/【八阵】、 【蛊惑】、【护驾】/【激将】。
 
     ``Supply`` 是**定义**的属性（与 ``need_card_tier`` 同一姿态），不是局面属性。
+
+    票 03 改了 relay 那一族的**可判性**（在正确的方向：从"候选期不可知"变成"可判"，
+    见 :func:`~sgs.effects.supply._dimension_failure` 的 relay 分支 + `LordSkill.offer`
+    的供给真值）：四条声明从此是 ``unknown=False`` 的**需求传递**；预转化（票 04）今天
+    仍是 ``unknown=True``。
     """
     from sgs.skills import CATALOG
 
@@ -475,18 +480,23 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
     ):
         relay = CATALOG[skill_id].supply
         assert relay is not None, skill_id
-        assert (relay.kind, relay.unknown) == ("relay", True), skill_id
+        assert (relay.kind, relay.unknown) == ("relay", False), skill_id
+        assert CATALOG[skill_id].supply_none_reason is not None, (
+            f"{skill_id}：需求传递的供给真值要有一个读取口（票 03 的'供给为 none 的理由'）"
+        )
 
 
 def test_an_unknown_provider_supply_is_reported_but_never_greyed():
-    """【蛊惑】/【护驾】/【激将】的供给行照报（``unknown=True``），匹配器**不判死**。"""
+    """候选期不可知的供给照报（``unknown=True``），匹配器**不判死**。
+
+    票 03 起只剩【蛊惑】的**预转化**走这一档：【护驾】/【激将】的 relay 变成了可判的
+    供给（``tests/test_need_card_relay.py` 钉住它），故这里的分母缩到一条。
+    """
     demand = Demand(names=("dodge",), suits=("diamond",))
 
     guohuo = Supply(product="dodge", kind="preconversion", unknown=True)
-    relay = Supply(product="dodge", kind="relay", unknown=True)
 
     assert supply_satisfies(demand, guohuo) is True
-    assert supply_satisfies(demand, relay) is True
     assert supply_mismatch(demand, guohuo) is None
 
 
@@ -608,63 +618,38 @@ def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_su
 
 
 def test_an_unknown_provider_stays_out_of_the_face_while_a_restriction_is_active():
-    """§3-2 前半：候选期不可知（蛊惑 / 护驾 / 激将）⇒ 限制生效时**仍不进面**。
+    """§3-2 前半：候选期不可知（【蛊惑】的预转化）⇒ 限制生效时**仍不进面**。
 
     ``unknown`` 的失败关闭住在**合法性闸门**（``effects.supply.supply_is_legal``）里，不在
-    匹配器里（匹配器对它"不判死"是票 01 的展示口径）。三张声明、三扇窗口各一条：
-    【护驾】（曹操 / 【闪】）、【激将】（刘备 / 【杀】族）、【蛊惑】（于吉 / 【闪】）。
-    """
-    hujia = "hero.caocao.hujia"
-    jijiang = "hero.liubei.jijiang"
-    guohuo = "hero.yuji_mobile.guohuo"
-    hujia_state = _state_with((_DODGES[0],), hero="caocao", identity=Identity.LORD)
-    jijiang_state = _state_with((_SLASHES[0],), hero="liubei", identity=Identity.LORD)
-    guohuo_state = _state_with((_DODGES[0],), hero="yuji_mobile")
-    slash_window = RespondContext(
-        cause=WindowCause.DUEL, required="slash", mode=RespondMode.PLAY
-    )
-    cases = (
-        (
-            hujia,
-            hujia_state,
-            QueryKind.DODGE,
-            DodgeContext(response_suits=("heart",)),
-            DodgeContext(),
-        ),
-        (
-            jijiang,
-            jijiang_state,
-            QueryKind.RESPOND,
-            RespondContext(
-                cause=WindowCause.DUEL,
-                required="slash",
-                mode=RespondMode.PLAY,
-                response_suits=("heart",),
-            ),
-            slash_window,
-        ),
-        (
-            guohuo,
-            guohuo_state,
-            QueryKind.DODGE,
-            DodgeContext(response_suits=("heart",)),
-            DodgeContext(),
-        ),
-    )
+    匹配器里（匹配器对它"不判死"是票 01 的展示口径）。
 
-    for skill_id, state, kind, restricted, unrestricted in cases:
-        declared = CATALOG[skill_id].supply
-        assert declared is not None and declared.unknown is True, skill_id
-        face = legal_actions_for(state, 0, kind, answers_seq=0, payload=restricted)
-        assert _providers(face) == [], f"{skill_id}：限制生效时仍进了面"
-        # 不限花色的窗口里它照常进面（票 01 之前的行为逐条不变）。
-        assert skill_id in _providers(
-            legal_actions_for(state, 0, kind, answers_seq=0, payload=unrestricted)
-        ), f"{skill_id}：不限花色时应当照常提供"
-        # §1b：它仍在供给池里 ⇒ 供给行照报（灰行的来源），只是不进面。
-        assert skill_id in _providers(
-            all_actions_for(state, 0, kind, answers_seq=0, payload=restricted)
-        ), f"{skill_id}：供给池里应当保留（灰行来源）"
+    **票 03 之后这一条的分母只剩【蛊惑】的预转化**：【护驾】/【激将】的 relay 已变成**可判**
+    的供给（持有者没被挡住时它在花色需求下**进面**，用户 Q2「护驾的发动无须交验合法性」），
+    那条"多禁被放开"的断言住在 `tests/test_need_card_relay.py`——本文件不再替 03 冻结旧口径。
+    """
+    guohuo = "hero.yuji_mobile.guohuo"
+    guohuo_state = _state_with((_DODGES[0],), hero="yuji_mobile")
+
+    declared = CATALOG[guohuo].supply
+    assert declared is not None and declared.unknown is True, guohuo
+    face = legal_actions_for(
+        guohuo_state, 0, QueryKind.DODGE, answers_seq=0,
+        payload=DodgeContext(response_suits=("heart",)),
+    )
+    assert _providers(face) == [], f"{guohuo}：限制生效时仍进了面"
+    # 不限花色的窗口里它照常进面（票 01 之前的行为逐条不变）。
+    assert guohuo in _providers(
+        legal_actions_for(
+            guohuo_state, 0, QueryKind.DODGE, answers_seq=0, payload=DodgeContext()
+        )
+    ), f"{guohuo}：不限花色时应当照常提供"
+    # §1b：它仍在供给池里 ⇒ 供给行照报（灰行的来源），只是不进面。
+    assert guohuo in _providers(
+        all_actions_for(
+            guohuo_state, 0, QueryKind.DODGE, answers_seq=0,
+            payload=DodgeContext(response_suits=("heart",)),
+        )
+    ), f"{guohuo}：供给池里应当保留（灰行来源）"
 
 
 def test_a_rejected_real_card_and_conversion_keep_their_supply_rows_but_not_the_face():

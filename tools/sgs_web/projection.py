@@ -3332,13 +3332,24 @@ _SUPPLY_KIND_TEXT: dict[str, str] = {
     "virtual": "虚拟",
     "transformed": "转化",
 }
-"""已知供给的修饰词（真牌不加词：牌面本身就说明了它是实体牌）。"""
+"""已知供给的修饰词（真牌不加词：牌面本身就说明了它是实体牌）。
+
+需求传递不在这张表里：它没有"牌面"可拼（无色无点数），文案由
+:func:`need_card_supply_text` 单独给一整句。"""
 
 _UNKNOWN_SUPPLY_TEXT: dict[str, str] = {
     "relay": "需求传递",
     "preconversion": "预转化",
 }
-"""候选期不可知的三条供给**只写标签**（票面 §1：本票不写它们的匹配行为）。"""
+"""候选期不可知的供给**只写标签**（票 01 的展示口径；票 03 起只剩【蛊惑】的预转化仍走这一
+档——【护驾】/【激将】的 relay 已变成可判的供给，见 :func:`need_card_supply_text`）。"""
+
+_NONE_SUPPLY_TEXT = "供给为 none"
+"""**这一档给不出来**时的行文案（票 03 的"供给为 none 的理由"口子）。
+
+它不是"没有这一档"：那一档仍是这一问的提供者（【护驾】在【闪】窗口里），只是持有者自己被
+座位禁令挡住 ⇒ 这一问没有候选。行照画（``ok=False`` + 理由），玩家才知道"为什么没有"。
+"""
 
 _COLOR_TEXT: dict[str, str] = {"red": "红色", "black": "黑色"}
 """颜色的中文展示值（匹配只看 ``red`` / ``black``；中文只出现在渲染层）。"""
@@ -3397,12 +3408,17 @@ def need_card_demand_text(state: Any, demand: Demand) -> str:
 def need_card_supply_text(state: Any, supply: Supply) -> str:
     """一条供给的人话（行里的 ``supply_text``；多条时由调用方用「、」拼）：
 
-    例：【八卦阵】的 ``无色虚拟【闪】``；手牌里的方块 8【闪】= ``♦8【闪】``。
+    例：【八卦阵】的 ``无色虚拟【闪】``；手牌里的方块 8【闪】= ``♦8【闪】``；
+    【护驾】的 ``需求传递【闪】``（票 03：需求传递**没有牌面**可拼，不写"无色"）。
     """
     if supply.unknown:
         label = _UNKNOWN_SUPPLY_TEXT.get(supply.kind, "候选期不可知")
         return f"{label}（候选期不可知）"
     name = "【?】" if supply.product is None else f"【{_need_card_name(state, supply.product)}】"
+    if supply.kind == "relay":
+        # 需求传递（票 03）：它不是一张牌，花色 / 点数 / 颜色都是空的 ⇒ 不套 ``_supply_face``
+        # 的"无色"前缀（那会读成"一张无色的牌"）。
+        return f"{_UNKNOWN_SUPPLY_TEXT['relay']}{name}"
     face = _supply_face(supply)
     text = f"{face}{_SUPPLY_KIND_TEXT.get(supply.kind, '')}{name}"
     if supply.kind == "transformed" and supply.source_count > 1:
@@ -3419,7 +3435,11 @@ def need_card_supply_rows(
       :func:`supply_mismatch` 那一条；
     - 一档里只要有一条供给满足需求，这一行就高亮（同一档的多张【闪】不会各占一行）；
     - 不满足时 ``reason`` 取**第一条**不满足的供给：``载体：供给 → 为什么不满足``
-      （例：``八卦阵：无色虚拟【闪】→ 不满足花色限制``）。
+      （例：``八卦阵：无色虚拟【闪】→ 不满足花色限制``）；
+    - **供给为 none 的档**（票 03）：``supplies`` 为空、理由在 ``TierSupplies.reason`` 上
+      ⇒ 这一行 ``ok=False``、``supply_text = 供给为 none``、``reason`` 取那句
+      ``载体：供给为 none → 为什么给不出来``。行仍要画：那一档**是**这一问的提供者
+      （【护驾】在【闪】窗口里），消失会让玩家以为技能没了。
     """
     grouped: dict[int, list[TierSupplies]] = {}
     for group in tiers:
@@ -3440,19 +3460,30 @@ def need_card_supply_rows(
         reason: str | None = None
         if not ok:
             unsatisfied = next(
-                supply for supply in supplies if not supply_satisfies(demand, supply)
+                (supply for supply in supplies if not supply_satisfies(demand, supply)),
+                None,
             )
-            reason = (
-                f"{carrier}：{need_card_supply_text(state, unsatisfied)}"
-                f" → {supply_mismatch(demand, unsatisfied)}"
-            )
+            if unsatisfied is not None:
+                reason = (
+                    f"{carrier}：{need_card_supply_text(state, unsatisfied)}"
+                    f" → {supply_mismatch(demand, unsatisfied)}"
+                )
+            else:
+                # 声明了供给、此刻给不出来（票 03）：理由来自提供者的声明（
+                # `SkillDef.supply_none_reason`），投影只拼句子、不判。
+                none_reason = next(
+                    (group.reason for group in groups if group.reason), None
+                )
+                if none_reason is not None:
+                    reason = f"{carrier}：{_NONE_SUPPLY_TEXT} → {none_reason}"
         rows.append(
             {
                 "tier": int(tier),
                 "label": f"{TIER_LABELS.get(int(tier), '其他档')}·{carrier}",
                 "supply_text": "、".join(
                     need_card_supply_text(state, supply) for supply in supplies
-                ),
+                )
+                or _NONE_SUPPLY_TEXT,
                 "ok": ok,
                 "reason": reason,
             }

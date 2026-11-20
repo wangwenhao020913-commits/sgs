@@ -22,9 +22,17 @@
 
 **无花色 / 无点数的供给确定地不满足对应维度的限制**（不是"未知"，spec §3 第 3 条）：
 【八卦阵】/【八阵】的纯虚拟【闪】与多源转化（【丈八蛇矛】/ 单骑）都没有花色 ⇒ 花色
-需求下必然不满足。"候选期不知道"由 :attr:`Supply.unknown` 单独表达（【蛊惑】/【护驾】/
-【激将】）：**展示层**（:func:`supply_mismatch`）只标出来、不判死；**合法性**（票 02 的
-:func:`supply_is_legal`）在需求带收窄维度时失败关闭。放开它们是票 03 / 04 的活。
+需求下必然不满足。"候选期不知道"由 :attr:`Supply.unknown` 单独表达（【蛊惑】的预转化）：
+**展示层**（:func:`supply_mismatch`）只标出来、不判死；**合法性**（票 02 的
+:func:`supply_is_legal`）在需求带收窄维度时失败关闭（放开它是票 04 的活）。
+
+**需求传递**（``kind="relay"``，票 03）是第三条路：它不是"不知道"，而是"不在这一档判"——
+【护驾】/【激将】不产出转化 / 虚拟牌，真正做的是把**同一份** :class:`Demand` 依次传给
+同势力角色（用户 Q2），收窄维度在**传到的那个座位的询问**里才展开。故供给是**具体**的
+（``unknown=False``：牌名就是声明事实），匹配时**过牌名维度之后就不判死**——见
+:func:`_dimension_failure` 里那条分支。持有者自己被挡住（【义绝】封手牌）时**连候选都不
+产出**，于是"供给 none"这件事由 :func:`supplies_for` 的"声明了却给不出来"那一趟报成
+``ok=False`` 的行（:attr:`TierSupplies.reason`），匹配器见不到它——判据不读 ``GameState``。
 
 循环 import（票面 §5 的纪律）：``effects/actions.py`` 与本模块互相看得见（``actions`` 的
 供需闸门读本模块，本模块的供给反推读 ``actions.all_actions_for``），故本模块对 ``.actions``
@@ -53,6 +61,7 @@ from .behaviors import CARD_BEHAVIORS, DODGE_RESPONSE_CARD, PEACH_RESPONSE_CARD
 
 __all__ = [
     "Demand",
+    "RELAY_SUPPLY_KIND",
     "SUPPLY_KINDS",
     "Supply",
     "TierSupplies",
@@ -82,6 +91,15 @@ SUPPLY_KINDS: frozenset[str] = frozenset(
 种类会让渲染层静默退化成牌名 —— 与 ``sgs.effects`` 的"声明错误应当可见"同一姿态。
 """
 
+RELAY_SUPPLY_KIND = "relay"
+"""**需求传递**那一档（``Supply.kind`` 的闭集成员；票 03 起唯一载体 =【护驾】/【激将】）。
+
+本模块的读者 = 匹配器 :func:`_dimension_failure`（牌名之后不判死）。"声明了却给不出来"的
+那一趟（:func:`supplies_for` / ``SkillDef.supply_none_reason``）**不按 kind 分支**：它读
+提供者自己的声明，预转化将来接同一套口子时不该被误认成 relay。写成一个常量而不是散落的
+字符串：改名时不能只改一半。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Supply:
@@ -92,7 +110,9 @@ class Supply:
       不是"不知道"——那由 :attr:`unknown` 表达（spec §3 第 3 条）；
     - ``kind``：:data:`SUPPLY_KINDS` 之一；
     - ``source_count``：转化源张数（真牌 / 纯虚拟恒 1）；
-    - ``unknown``：候选期不可知（【蛊惑】的预转化 / 【护驾】/【激将】的需求传递）。
+    - ``unknown``：候选期不可知（只剩【蛊惑】的预转化）。需求传递（【护驾】/【激将】，
+      票 03）**不是**这一档：它的牌名是声明事实，匹配规则由 ``kind`` 一族给定（见
+      :func:`_dimension_failure`），故它是**可判**的供给。
     """
 
     product: str | None = None
@@ -148,11 +168,25 @@ def _listed(allowed: tuple[Any, ...] | None, value: Any) -> bool:
 
 
 def _dimension_failure(demand: Demand, supply: Supply) -> str | None:
-    """第一个不满足的维度，返回它的人话短语（投影拼进行的 ``reason``）；全满足 ⇒ ``None``。"""
+    """第一个不满足的维度，返回它的人话短语（投影拼进行的 ``reason``）；全满足 ⇒ ``None``。
+
+    **需求传递不判死**（``kind="relay"``，need-card-supply 票 03）：牌名维度之后直接
+    ``None``。牌名仍是**声明事实**（产物牌名不落在这一问的牌名维度里 ⇒ 这一档压根不是这一问
+    的提供者，与真牌 / 转化同一条判据），而花色 / 颜色 / 点数 / 虚拟·转化 / 转化源张数
+    五个收窄维度**原样交给下游**——【护驾】把「需要方块闪」这个需求传给盟友，答案在那个座位
+    的询问里（用户 2026-11-20 Q2：「护驾的发动无须交验合法性，因为不是直接提供转化 / 虚拟
+    牌，而是全场逐一询问魏势力角色」）。
+
+    这条判据住在**匹配器**而不是合法性闸门：两边必须给同一个答案（spec §7 S16 的高亮 /
+    可点一致），而闸门对可判的供给就是委托本函数。它**不读** ``GameState``（票 02 的纪律：
+    纯函数），"持有者自己被挡住"在候选生成之前就已经把这一档删掉了。
+    """
     if demand.names is not None and not any(
         _name_allowed(name, supply.product) for name in demand.names
     ):
         return "不满足牌名要求"
+    if supply.kind == RELAY_SUPPLY_KIND:
+        return None
     if not _listed(demand.suits, supply.suit):
         return "不满足花色限制"
     if not _listed(demand.colors, supply.color):
@@ -170,8 +204,9 @@ def supply_mismatch(demand: Demand | None, supply: Supply | None) -> str | None:
     """供给**为什么不满足**需求：``None`` = 满足（或本票不判死）。
 
     - 没有供给 / 没有需求：``None``（没有"不满足"可言；需求为空 = 不限）；
-    - ``supply.unknown``：候选期不可知 ⇒ 本票**不判死**（返回 ``None``，由票 02/03/04
+    - ``supply.unknown``：候选期不可知 ⇒ 本票**不判死**（返回 ``None``，由票 02/04
       决定它的合法性）；
+    - ``kind="relay"``：需求传递 ⇒ 牌名之后**不在这一档判**（见 :func:`_dimension_failure`）；
     - 否则按维度顺序给出第一条不满足的人话短语。
     """
     if demand is None or supply is None:
@@ -218,14 +253,18 @@ def supply_is_legal(demand: Demand | None, supply: Supply | None) -> bool:
     它回答的是"该不该进 ``legal_actions`` 的那一面"，与 :func:`supply_satisfies`（展示层
     的 ``ok``）**故意不同**一处：
 
-    - 供给**可判**（``supply`` 有声明且 ``unknown=False``）⇒ 与展示层同源：按维度匹配；
+    - 供给**可判**（``supply`` 有声明且 ``unknown=False``）⇒ 与展示层同源：按维度匹配
+      （需求传递那一种在牌名之后不判死，见 :func:`_dimension_failure`）；
     - 供给**不可判**（``supply is None`` = 提供者没声明；``supply.unknown`` = 候选期不可知
-      【蛊惑】/【护驾】/【激将】）⇒ **只要需求带一条收窄维度就失败关闭**（= 票 01 之前那
-      道"多禁"的同一结论，票面 §1：放开它们是票 03 / 04 的活）；没有收窄维度时照常放行
-      （今天的窗口里它们本来就是候选）。
+      【蛊惑】）⇒ **只要需求带一条收窄维度就失败关闭**（= 票 01 之前那道"多禁"的同一结论，
+      票面 §1：放开它是票 04 的活）；没有收窄维度时照常放行（今天的窗口里它们本来就是候选）。
 
     `unknown` 的失败关闭**只住在这里**（票面 §1 的判据只有一处）：匹配器 :func:`supply_satisfies`
     对 ``unknown`` 返回 ``None``（"不判死"）是票 01 的**展示**口径，不是合法性的口径。
+
+    需求传递（票 03）**不走这条分支**：它是可判的供给，条件成立与否写在候选生成之前（持有者
+    自己被 【义绝】 一类禁令封住时**连候选都不产出**）⇒ 这里见不到"该挡的 relay"，
+    也**不**按技能名白名单放行任何一档。
     """
     if demand is None:
         return True
@@ -286,11 +325,20 @@ class TierSupplies:
 
     ``provider`` 是提供者的技能 id（【八卦阵】/【护驾】/… 那一档），逐张牌档（手牌 /
     装备区里的真牌与转化）为 ``None``——载体名由投影用既有技能名表渲染（本层不写文案）。
+
+    ``reason`` = **供给为 none 的理由**（need-card-supply 票 03；只在这种行上非 ``None``）：
+    提供者**声明了**供给、此刻却给不出来（【护驾】/【激将】的持有者被 【义绝】 一类禁令封住
+    手牌），于是这一档**没有候选**。行仍要画（``ok=False`` + 这句话），否则玩家只会看到
+    "高亮的东西不见了"而不知道原因——这正是票面 §1 要的那个口子，也是 spec §7 S16 的
+    另一半（行 ``ok=True`` ⇔ 那一档有合法候选）。
+
+    这种行的 ``supplies`` 恒空：没有供给可描述，理由住在 ``reason`` 上。
     """
 
     tier: int
     provider: str | None
     supplies: tuple[Supply, ...]
+    reason: str | None = None
 
 
 def supplies_for(
@@ -319,6 +367,11 @@ def supplies_for(
 
     返回按 ``(tier, provider)`` 分组（升序）；同一档的不同载体各成一组（【八卦阵】与
     【八阵】同档），投影再把它们合成一行。
+
+    **声明了却给不出来**的那一档（票 03）：供给池里没有它的候选（提供者自己的谓词在生成
+    之前就把候选挡掉了，见 ``SkillDef.supply_none_reason``），但玩家仍要看见"为什么没有这一
+    档"⇒ 再走一趟 :func:`_declared_none_tiers`，把那一档报成 ``supplies=()`` + ``reason``
+    的行。它不是第二份供给枚举：判据仍只有提供者的声明（档 / 牌名 / 理由都是定义属性）。
     """
     from .actions import all_actions_for, need_card_tier
 
@@ -333,12 +386,77 @@ def supplies_for(
             continue
         provider = action.skill_id if isinstance(action, ActivateSkill) else None
         groups.setdefault((need_card_tier(action), provider), []).append(supply)
-    return tuple(
+    tiers = [
         TierSupplies(tier=tier, provider=provider, supplies=tuple(dict.fromkeys(supplies)))
-        for (tier, provider), supplies in sorted(
-            groups.items(), key=lambda item: (item[0][0], item[0][1] or "")
+        for (tier, provider), supplies in groups.items()
+    ]
+    tiers.extend(
+        _declared_none_tiers(
+            kind,
+            state=state,
+            seat=seat,
+            payload=payload,
+            dying=dying,
+            present={provider for (_tier, provider) in groups if provider is not None},
         )
     )
+    return tuple(sorted(tiers, key=lambda group: (group.tier, group.provider or "")))
+
+
+def _declared_none_tiers(
+    kind: QueryKind,
+    *,
+    state: Any,
+    seat: int,
+    payload: Any,
+    dying: int | None,
+    present: set[str],
+) -> list[TierSupplies]:
+    """**声明了供给、此刻却给不出来**的提供者档（票 03 的"供给为 none 的理由"口子）。
+
+    三条判据，全部读**声明**（不读技能名白名单）：
+
+    1. **这一档是这一问的提供者**：声明产物的牌名落在这一问的牌名维度里
+       （:func:`_name_allowed` 与匹配器同一个族判据）。否则每扇窗口都会多出别的技能的灰行
+       ——【护驾】不该出现在【杀】窗口里。
+    2. **它是应答者的技能**：走 :func:`~sgs.skills.resolve_instances` 的既有口径（失去 /
+       失效 / 身份门控一连串都在那里兑现），故"刘备不是主公"这类座位根本报不出行——与候选
+       生成看不见它**是同一件事**（那一档连候选都没有，也就没有"给不出来"可言）。
+    3. **提供者自己说给不出来**：``SkillDef.supply_none_reason`` 返回一句人话
+       （``None`` = 给得出 / 这一问不归它管）。
+
+    ``present`` = 供给池里已经有候选的那些提供者：它们在池里的行照旧，不重复报。
+    """
+    from .actions import provider_tier
+    from sgs.skills import resolve_instances
+
+    demand = demand_for(kind, payload, dying=dying, asker=seat)
+    if demand is None or demand.names is None:
+        return ()
+
+    rows: list[TierSupplies] = []
+    for instance in resolve_instances(state):
+        if int(instance.owner) != int(seat) or instance.skill_id in present:
+            continue
+        declared = instance.definition.supply
+        if declared is None or instance.definition.supply_none_reason is None:
+            # 没有声明 = 展示层不报（与 ``supply_of_action`` 同一条纪律）；
+            # 声明了却没有"给不出来的理由"口子 = 本票不替它猜。
+            continue
+        if not any(_name_allowed(name, declared.product) for name in demand.names):
+            continue
+        reason = instance.definition.supply_none_reason(state, int(seat))
+        if reason is None:
+            continue
+        rows.append(
+            TierSupplies(
+                tier=provider_tier(instance.skill_id),
+                provider=instance.skill_id,
+                supplies=(),
+                reason=str(reason),
+            )
+        )
+    return rows
 
 
 def supply_of_action(action: Any) -> Supply | None:

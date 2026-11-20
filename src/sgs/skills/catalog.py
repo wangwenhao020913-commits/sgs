@@ -138,6 +138,7 @@ __all__ = [
     "SkillSource",
     "SkillSourceKind",
     "StateChange",
+    "SupplyNoneReason",
     "activation_plan",
     "awakening_skill_awakened",
     "damage_point_index",
@@ -180,6 +181,14 @@ SeamHandler: TypeAlias = Callable[[Any, Frame], Control]
 
 FixedHandCount: TypeAlias = Callable[[Any, int], "int | None"]
 """``SkillDef.fixed_hand_count`` 的回调：``(state, seat) -> 固定到几 / None``（查询期现算）。"""
+
+SupplyNoneReason: TypeAlias = Callable[[Any, int], "str | None"]
+"""``SkillDef.supply_none_reason`` 的回调：``(state, seat) -> 一句理由 / None``。
+
+``None`` = 供给给得出；一句人话 = **声明了供给、此刻却给不出来**。它是 need-card-supply
+票 03 的"供给为 none 的理由"口子：那一段的判据只有技能自己知道（【护驾】/【激将】的持有者
+还能不能使用 / 打出手牌），展示层只该知道"有 / 没有"与"为什么没有"。见
+:attr:`SkillDef.supply_none_reason`。"""
 
 
 class SeamKind(str, Enum):
@@ -724,13 +733,33 @@ class SkillDef:
 
     - 【八卦阵】/【八阵】⇒ ``Supply(product="dodge", kind="virtual")``（无色无点数的
       虚拟【闪】——花色 / 点数恒无，故**确定地**不满足任何花色 / 点数需求，spec §3-3）；
-    - 【蛊惑】⇒ ``Supply(kind="preconversion", unknown=True)``（预转化，候选期不可知）；
-    - 【护驾】/【激将】⇒ ``Supply(product="dodge" | "slash", kind="relay", unknown=True)``
-      （需求传递，候选期不可知）。
+    - 【蛊惑】⇒ ``Supply(kind="preconversion", unknown=True)``（预转化，候选期不可知；
+      票 04 的活）；
+    - 【护驾】/【激将】⇒ ``Supply(product="dodge" | "slash", kind="relay")``
+      （**需求传递**，票 03：``unknown=False``——牌名是声明事实，匹配规则由
+      ``kind="relay"`` 一族给定，见 :func:`~sgs.effects.supply._dimension_failure`；
+      持有者自己被挡住时用 :attr:`supply_none_reason` 报"为什么没有这一档"）。
 
-    ``unknown=True`` 的三条本票**只标出来、不判死**——它们的匹配语义是票 03 / 04 的活。
     没有声明的提供者（【武翊】/ 界【渐营】②）因此不报供给：接入新提供者时补声明，
     与档位同一条纪律。**不进记录流**（``SkillDef`` 不被序列化）。
+    """
+
+    supply_none_reason: SupplyNoneReason | None = None
+    """这条技能**声明了供给、此刻却给不出来**时的那一句理由（need-card-supply 票 03）。
+
+    缺省 ``None`` = 不报。回调 ``(state, seat) -> str | None``：``None`` = 给得出，
+    一句人话 = 这一档此刻没有供给（【护驾】/【激将】的持有者被 【义绝】/【雄乱】 一类
+    "不能使用或打出手牌"的座位禁令封住 ⇒ 需求传不出去，用户 2026-11-20 Q2）。
+
+    **两个读取方读同一份声明**（不新增真源）：
+
+    - 候选生成：``sgs.skills.lord_request.LordSkill.offer`` 用**同一个回调**决定"要不要
+      ``ActivateSkill``"（被挡 ⇒ 连询问链都不开，票 03 §1 / S9）；
+    - 展示层：:func:`~sgs.effects.supply.supplies_for` 用它给**没有候选的档**补一行
+      ``ok=False`` + 这句话（票 03 §2c：行 ``ok=True`` ⇔ 那一档有合法候选，spec §7 S16）。
+
+    它只在"这一档本来就是这一问的提供者"时被问（产物牌名落在需求里，由 ``supplies_for``
+    判）；**不进记录流**（``SkillDef`` 不被序列化）。
     """
 
     need_card_tier: int | None = None
@@ -4701,6 +4730,10 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
             "（求助子窗口的 `PLAY`）与 `dodge` / `arrow_barrage` 两行的 `USE` / `PLAY`；"
             "`DODGE` 语境的派发**不带 mode 事实**（`actions._dodge` 只给 `respond_required`），"
             "故那两档是**声明性**的，行为与票 09 逐字相同。"
+            "**需求传递**（need-card-supply 票 03）：这一问带的是**同一份**需求——"
+            "`respond_context` 从承载帧继承 `RESPONSE_SUITS_KEY`（花色白名单），候选收窄"
+            "因此在这一问里照样生效。**受理面一字未变**（仍只收 `PlayCard`），故上面"
+            "「不参与」的结论不变。"
         ),
     ),
     CardRequestWindow(
@@ -4750,6 +4783,8 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
             "调用方的 `start_use`）——所以这里多一处 `accept` 站点（票 20 的出牌阶段那条；"
             "票 22 的两扇效果窗口住在 `effects/ops.py` / `skills/active.py` 的受理面），而 "
             "asking 面一字未变。"
+            "**需求传递**（need-card-supply 票 03）：同【护驾】那一行——这一问带的是**同一份**"
+            "需求（`respond_context` 从承载帧继承 `RESPONSE_SUITS_KEY`），受理面未变。"
         ),
     ),
     CardRequestWindow(
