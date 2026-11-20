@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from enum import IntEnum
+from functools import lru_cache
 from itertools import combinations
 
 from sgs.data import Color, color_of_suit
@@ -62,11 +63,16 @@ from sgs.state import (
 
 __all__ = [
     "MAX_VIRTUAL_SOURCES",
+    "UNBOUNDED_ID_BAND",
     "WIRE_INT_LIMIT",
     "SourceFilter",
     "VirtualKind",
     "VirtualSourceError",
+    "allocate_virtual_id",
     "card_ids",
+    "collective_sources",
+    "collective_transformed_card",
+    "derived_id_ceiling",
     "grouped_candidates",
     "kind_source_ceiling",
     "pure_virtual_card",
@@ -187,6 +193,20 @@ WIRE_INT_LIMIT = 2**53
 （``2**53 - 1``）；超过即变浮点、回传被 pydantic 拒绝（手动验收实测 ``-7.006...e+183``）。
 这是**唯一**的真源：构造期的进制检查 :func:`_source_ceiling_for_base` 与
 ``tests/test_virtual_ids.py`` 都从它取，不再各写一份 ``2**53`` 字面量（W4-fix-5）。
+"""
+
+UNBOUNDED_ID_BAND = 1 << 20
+"""**按局分配**的虚拟牌 id 保留带容量（feng-guanyu 票 03；【单骑】的全集转化）。
+
+"把所有同色手牌当一张牌"这类转化的来源张数**没有上界**，塞不进派生命名空间（7 张的上界
+是 id 线格式的数学界）；这类 id 改由 :func:`allocate_virtual_id` 按局发出，落在一个
+**不与任何派生 id 相交**的保留带里：``|id| ∈ [WIRE_INT_LIMIT - UNBOUNDED_ID_BAND,
+WIRE_INT_LIMIT - 1]``。
+
+一局不可能造一百万张虚拟牌，故取 ``2**20``；保留带的下界
+（``WIRE_INT_LIMIT - UNBOUNDED_ID_BAND``）必须**大于**本副牌堆下全部派生 id 的最大绝对值
+——:func:`allocate_virtual_id` 每次分配前用 :func:`derived_id_ceiling` 复核，越界即抛
+（将来新增 kind 把派生段推上来时，红在构造期，而不是静默撞号）。
 """
 
 MAX_VIRTUAL_SOURCES = 7
@@ -347,6 +367,70 @@ def virtual_card_id(
     return -(1 + kind * block + mixed)
 
 
+def derived_id_ceiling(card_count: int) -> int:
+    """本副牌堆下**派生 id 的最大绝对值**（保留带的护栏；feng-guanyu 票 03）。
+
+    遍历全部 :class:`VirtualKind`，各取该段撑得住的最多来源与**最大的那几张牌**
+    （``_fold`` / ``_fold_legacy`` 对来源 id 单调，故最大编码取段内最大组合），返回最大
+    绝对值。结果按牌堆张数缓存（只依赖 ``card_count``）。
+
+    它的唯一读者是 :func:`allocate_virtual_id` 的护栏：按局分配的保留带必须整体落在
+    这个值之上，否则新 id 会与某条派生的虚拟牌撞号。新增 kind 把派生段推高时，
+    这里会先撞上保留带——**红在构造期**，而不是让一张撞 id 的牌流进对局。
+    """
+    return _derived_id_ceiling_cached(int(card_count))
+
+
+@lru_cache(maxsize=4)
+def _derived_id_ceiling_cached(card_count: int) -> int:
+    """``derived_id_ceiling`` 的按牌堆缓存（同一副牌堆只算一次）。"""
+    largest = 0
+    for kind in VirtualKind:
+        ceiling = kind_source_ceiling(int(kind), card_count)
+        # 段内最大编码 = 最大的那 ceiling 张牌（`_fold` 对来源 id 单调递增）。
+        sources = tuple(range(card_count - ceiling, card_count))
+        largest = max(
+            largest,
+            abs(
+                virtual_card_id(
+                    kind=int(kind), sources=sources, card_count=card_count
+                )
+            ),
+        )
+    return largest
+
+
+def allocate_virtual_id(state: GameState) -> int:
+    """按局分配一个**不派生**的虚拟牌 id（来源张数无上界的转化专用）。
+
+    ``id = -(WIRE_INT_LIMIT - 1 - n)``（``n`` = :attr:`~sgs.state.GameState.virtual_id_seq`
+    分配前的值），即从最负端往下**按绝对值递减**，整段落进
+    :data:`UNBOUNDED_ID_BAND` 的保留带。分配前用 :func:`derived_id_ceiling` 复核"派生段
+    没有挤进保留带"，越界抛 :class:`VirtualSourceError`（构造期可定位错误，不静默撞号）。
+
+    **确定性**：分配序 = 引擎执行序（回放按同一串动作重跑即可重建同一条 id 序列）；
+    同一组来源**不再**恒得同一个 id——这是"来源无上界"的代价，故它只服务
+    "技能自己在 effect 里造一张牌并按机器键传给引擎"的那一档（全集转化），
+    不服务"先枚举候选、再由玩家 / AI 提交来源集合"的转化候选面。
+    """
+    seq = int(state.virtual_id_seq)
+    width = int(WIRE_INT_LIMIT) - 1
+    floor = width - UNBOUNDED_ID_BAND
+    if seq < 0 or seq >= UNBOUNDED_ID_BAND:
+        raise VirtualSourceError(
+            f"allocate_virtual_id: 本局已发出 {seq} 个无界虚拟牌 id，超过保留带容量 "
+            f"{UNBOUNDED_ID_BAND}"
+        )
+    if derived_id_ceiling(len(state.cards)) >= floor:
+        raise VirtualSourceError(
+            "allocate_virtual_id: 派生 id 的最大绝对值已经挤进按局分配的保留带"
+            f"（派生 {derived_id_ceiling(len(state.cards))} >= 保留带下界 {floor}）；"
+            "请先挪保留带或收窄新增 kind 的来源上界"
+        )
+    state.virtual_id_seq = seq + 1
+    return -(width - seq)
+
+
 def _generalized_block(*, base: int, source_ceiling: int | None = None) -> int:
     """泛化命名空间的一段容量：``(m + 1) * base**m``（``m`` = 本副牌堆的来源张数上界）。
 
@@ -485,6 +569,7 @@ def transformed_card(
     *,
     suit: str | None = None,
     color: Color | None = None,
+    allocate: bool = False,
 ) -> CardRef:
     """**共享构造器**：把 ``sources`` 这几张实体牌转化成 ``target_type_id`` 牌名的牌。
 
@@ -513,12 +598,23 @@ def transformed_card(
     ``DISMANTLEMENT`` 段 ⇒ 6；160 张档 ⇒ 6，见 :func:`kind_source_ceiling`）时抛
     :class:`VirtualSourceError`——"不产生撞 id 的虚拟牌"这条靠**构造期**兜住，
     而不是靠调用方自律。
+
+    ``allocate=True``（feng-guanyu 票 03）：跳过来源张数上界，改由
+    :func:`allocate_virtual_id` **按局分配** id——只给"来源张数无上界"的**全集转化**
+    （把所有同色手牌 / 所有手牌当一张牌）用，**不**给"先枚举候选、再由玩家 / AI 提交来源
+    集合"的转化候选面（那一面需要 id 能由来源集合反推）。来源仍必须 ≥ 1 张。
     """
     _require_sources(sources, target=transformed_card.__name__)
     kind = _kind_of(target_type_id)
-    ceiling = kind_source_ceiling(int(kind), len(state.cards))
-    _validate_source_count(sources, max_sources=ceiling, target=transformed_card.__name__)
     ids = tuple(sorted(sources))
+    if allocate:
+        card_id = allocate_virtual_id(state)
+    else:
+        ceiling = kind_source_ceiling(int(kind), len(state.cards))
+        _validate_source_count(
+            sources, max_sources=ceiling, target=transformed_card.__name__
+        )
+        card_id = virtual_card_id(kind=kind, sources=ids, card_count=len(state.cards))
     first = state.card(ids[0])
     single = len(ids) == 1
     if suit is None:
@@ -529,13 +625,58 @@ def transformed_card(
         face_suit = suit
         face_color = color_of_suit(suit) if color is None else color
     return CardRef(
-        card_id=virtual_card_id(kind=kind, sources=ids, card_count=len(state.cards)),
+        card_id=card_id,
         type=target_type_id,
         name=_card_name(state, target_type_id),
         suit=face_suit,
         rank=first.rank if single else None,
         color=face_color,
         virtual_sources=ids,
+    )
+
+
+def collective_sources(
+    state: GameState,
+    owner: int,
+    predicate: Callable[[GameState, int], bool],
+) -> tuple[int, ...]:
+    """``owner`` 手牌里**满足 predicate 的所有牌**（手牌序；空集返回 ``()``）。
+
+    "全集转化"（把所有同色手牌 / 所有手牌当一张牌）的取牌语义：候选**恒为一组**
+    ——"满足条件的全部牌"是唯一可能的来源集合，故这类转化**不需要**组合枚举
+    （与 :func:`grouped_candidates` 的"枚举每一种组合"互斥）。空集不在这里抛错：
+    "此刻没有可转化的牌"由调用方在**候选阶段**挡掉（不产出入口 = 零副作用）；
+    直接构造时才由 :func:`collective_transformed_card` 抛 :class:`VirtualSourceError`。
+    """
+    return tuple(
+        card_id for card_id in state.player(owner).hand if predicate(state, card_id)
+    )
+
+
+def collective_transformed_card(
+    state: GameState,
+    owner: int,
+    predicate: Callable[[GameState, int], bool],
+    target_type_id: str,
+    *,
+    suit: str | None = None,
+    color: Color | None = None,
+) -> CardRef:
+    """**全集转化**的构造器：``owner`` 手牌里满足 predicate 的**全部**牌 → 一张牌。
+
+    与 :func:`transformed_card` 的唯一差别是 ``allocate=True``（来源张数无上界，id 按局
+    分配）。首个消费者 = 自制包·锋·关羽【单骑】（"所有黑 / 红色手牌"）；同一个件也服务
+    荀攸【奇策】那类"所有手牌当一张牌"（票面 §落地设计 的理由：全集转化只有一种可能，
+    不产生组合枚举）。来源为空 ⇒ 抛 :class:`VirtualSourceError`（构造期错误）。
+    """
+    sources = collective_sources(state, owner, predicate)
+    if not sources:
+        raise VirtualSourceError(
+            f"{collective_transformed_card.__name__}: 没有满足条件的来源牌"
+            f"（owner={owner}）"
+        )
+    return transformed_card(
+        state, sources, target_type_id, suit=suit, color=color, allocate=True
     )
 
 

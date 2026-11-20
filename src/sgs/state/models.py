@@ -1312,6 +1312,20 @@ class GameState(BaseModel):
             if suit is not None and suit not in self.discard_suits_this_turn:
                 self.discard_suits_this_turn.append(suit)
 
+    virtual_id_seq: int = 0
+    """**按局**的虚拟牌 id 计数器（feng-guanyu 票 03；【单骑】的"全集转化"来源无上界）。
+
+    派生 id 的编码把来源集合折进 53 位整数（108 张档最多 7 张来源，见
+    :data:`sgs.skills.virtual.MAX_VIRTUAL_SOURCES`）；"把所有同色手牌 / 所有手牌当一张牌"
+    这类**来源张数无上界**的转化因此改走 :func:`sgs.skills.virtual.allocate_virtual_id`
+    的**按局分配**：本字段是已发出的个数，真实 id = ``-(WIRE_INT_LIMIT - 1 - n)``，
+    落在一个与派生命名空间不相交的保留带里（护栏见同函数）。
+
+    **不发 delta、不进投影**：与 :attr:`damage_taken_ever` 同一条既有惯例——id 是机器键，
+    回放按同一串动作重跑引擎即可重建（分配序 = 引擎执行序，确定性）；整局单调递增、
+    没有复位点。
+    """
+
     skill_state: dict[str, int] = Field(default_factory=dict)
     """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 位图（"已用次数"等）。
 

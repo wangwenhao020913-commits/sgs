@@ -30,7 +30,12 @@ from sgs.skills.virtual import (
     BLOCK_KIND_COUNT,
     LEGACY_KIND_COUNT,
     TAIL_KIND_START,
+    UNBOUNDED_ID_BAND,
     WIRE_INT_LIMIT,
+    allocate_virtual_id,
+    collective_sources,
+    collective_transformed_card,
+    derived_id_ceiling,
     virtual_candidates,
 )
 
@@ -53,6 +58,9 @@ DISMANTLEMENT_KIND = int(VirtualKind.DISMANTLEMENT)
 
 WINE_KIND = int(VirtualKind.WINE)
 """M6 票 16【龙胆】新增的【酒】命名空间：追加段的段起点已越过线上上限，故走尾部紧凑段。"""
+
+DUEL_KIND = int(VirtualKind.DUEL)
+"""【决斗】命名空间（feng-guanyu 票 03 的全集转化测试用来核对"派生 id 不被分配器改动"）。"""
 
 STANDARD_108_BLOCK = 8 * 109**7
 """108 张 / 7 张来源的泛化段容量（W4 冻结值；追加 kind 后一字不改）。
@@ -634,3 +642,127 @@ def test_a_face_override_does_not_move_the_virtual_id():
     multi_plain = transformed_card(state, (0, 1), "slash")
     multi_overridden = transformed_card(state, (0, 1), "slash", color=Color.BLACK)
     assert multi_overridden.card_id == multi_plain.card_id, "多源的纯颜色覆盖同样不改 id"
+
+
+# ---------------------------------------------------------------------------
+# feng-guanyu 票 03：来源张数无上界的"全集转化"（按局分配 + 保留带）
+# ---------------------------------------------------------------------------
+
+
+def _hand_of_color(color: Color, count: int) -> tuple[int, ...]:
+    """某颜色的 ``count`` 张牌 id（按牌堆序；只用来铺手牌）。"""
+    probe = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    return tuple(card.card_id for card in probe.cards if card.color is color)[:count]
+
+
+def _is_color(color: Color):
+    """``collective_sources`` 的 predicate：这张牌是不是该颜色。"""
+
+    def predicate(state, card_id):
+        return state.card(card_id).color is color
+
+    return predicate
+
+
+def test_the_unbounded_band_sits_above_every_derived_id():
+    """保留带整体落在**全部派生 id** 之上（两种牌堆档都要成立）——护栏的判据。
+
+    ``derived_id_ceiling`` 是"派生段最大绝对值"，保留带的下界是
+    ``WIRE_INT_LIMIT - 1 - UNBOUNDED_ID_BAND``；前者必须严格更小，否则按局分配的 id
+    会与某条派生的虚拟牌撞号（``allocate_virtual_id`` 每次分配前复核这一条）。
+    """
+    floor = WIRE_INT_LIMIT - 1 - UNBOUNDED_ID_BAND
+    assert derived_id_ceiling(108) < floor
+    assert derived_id_ceiling(160) < floor
+    # 派生段的最大值确实来自"最大的那几张来源"（而不是某个固定段号）。
+    assert derived_id_ceiling(108) >= abs(
+        virtual_card_id(
+            kind=FIRE_KIND,
+            sources=(101, 102, 103, 104, 105, 106, 107),
+            card_count=108,
+        )
+    )
+
+
+def test_a_collective_conversion_accepts_more_sources_than_the_derived_ceiling():
+    """8 张同色来源（> 7 张的派生上界）能构造：id 落保留带，来源全记，多源花色恒无。"""
+    black = _hand_of_color(Color.BLACK, 8)
+    state = build_state(
+        pack=PACK, seats=[SeatSpec(hand=black), SeatSpec()], turn_seat=0
+    )
+
+    product = collective_transformed_card(state, 0, _is_color(Color.BLACK), "duel")
+
+    assert product.is_virtual
+    assert len(product.virtual_sources) == 8, "全部同色手牌都是来源"
+    assert product.suit is None and product.rank is None, "多源转化花色 / 点数恒无"
+    assert product.color is Color.BLACK, "多源同色 ⇒ 有该颜色"
+    assert abs(product.card_id) > WIRE_INT_LIMIT - 1 - UNBOUNDED_ID_BAND, (
+        "按局分配的 id 落保留带（不再是派生段）"
+    )
+    assert abs(product.card_id) < WIRE_INT_LIMIT, "仍在线上安全整数内"
+
+
+def test_allocated_ids_are_unique_and_replay_deterministic():
+    """按局分配：同一局内两两不等；同一串动作重跑 ⇒ 同一串 id（回放确定性）。"""
+    black = _hand_of_color(Color.BLACK, 8)
+    predicate = _is_color(Color.BLACK)
+
+    def run() -> list[int]:
+        state = build_state(
+            pack=PACK, seats=[SeatSpec(hand=black), SeatSpec()], turn_seat=0
+        )
+        first = collective_transformed_card(state, 0, predicate, "duel")
+        second = collective_transformed_card(state, 0, predicate, "duel")
+        # 第二轮：手牌被"打掉"两张后再构造，来源集合变了、id 仍来自计数器
+        state.player(0).hand = list(black[2:])
+        third = collective_transformed_card(state, 0, predicate, "fire_slash")
+        return [first.card_id, second.card_id, third.card_id]
+
+    ids = run()
+    assert len(set(ids)) == 3, "每次分配一个新 id（来源集合相同也不复用）"
+    assert run() == ids, "同一串动作重跑得到同一串 id"
+
+
+def test_collective_sources_keeps_hand_order_and_can_be_empty():
+    """取牌语义 = 手牌序的全部匹配牌；空集返回 ``()``（由调用方在候选阶段挡掉）。"""
+    black = _hand_of_color(Color.BLACK, 3)
+    red = _hand_of_color(Color.RED, 2)
+    hand = (black[0], red[0], black[1], red[1], black[2])
+    state = build_state(
+        pack=PACK, seats=[SeatSpec(hand=hand), SeatSpec()], turn_seat=0
+    )
+
+    assert collective_sources(state, 0, _is_color(Color.BLACK)) == (
+        black[0],
+        black[1],
+        black[2],
+    ), "按手牌序、只取匹配的牌"
+    assert collective_sources(state, 0, _is_color(Color.BLACK)) == tuple(
+        card_id for card_id in hand if card_id in set(black)
+    )
+    assert collective_sources(state, 1, _is_color(Color.BLACK)) == (), "手牌为空 ⇒ 空集"
+
+    with pytest.raises(VirtualSourceError):
+        collective_transformed_card(state, 1, _is_color(Color.BLACK), "duel")
+
+
+def test_the_allocator_rejects_a_full_band_and_keeps_derived_ids_untouched():
+    """保留带用满即抛；且分配器不改派生 id（既有调用点逐字节不变）。"""
+    black = _hand_of_color(Color.BLACK, 8)
+    state = build_state(
+        pack=PACK, seats=[SeatSpec(hand=black), SeatSpec()], turn_seat=0
+    )
+
+    before = virtual_card_id(kind=DUEL_KIND, sources=black[:7], card_count=108)
+    state.virtual_id_seq = UNBOUNDED_ID_BAND
+    with pytest.raises(VirtualSourceError):
+        allocate_virtual_id(state)
+    assert virtual_card_id(kind=DUEL_KIND, sources=black[:7], card_count=108) == before
+
+    state.virtual_id_seq = 0
+    first = allocate_virtual_id(state)
+    second = allocate_virtual_id(state)
+    assert first == -(WIRE_INT_LIMIT - 1)
+    assert second == first + 1, "按绝对值递减"
+    assert state.virtual_id_seq == 2
