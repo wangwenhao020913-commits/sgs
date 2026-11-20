@@ -7684,19 +7684,18 @@ class Engine:
             self.emit_timing(Timing.PHASE_DISCARD, actor=seat)
             self._turn_data["discard_emitted"] = True
         player = self.state.player(seat)
-        # 弃到**计数**回落为止（票 09 的排除计数标签）：玩家可以弃掉"不计数"的那张
-        # （它仍是手牌），但那不会让 ``hand_count`` 下降 ⇒ 必须再问一次，直到计数 ≤ 上限。
-        # 只问一次会让"弃掉带标签的牌"留下计数仍超上限的非法边界（M6 票 12 的混合局
-        # 由 fuzz 抓到）。
+        # **弃牌阶段只问一次、且弃完不重检验**（用户 2026-11-20 裁定，yijiang-2011-xusheng-chunhua
+        # 票 92 逐字：「弃牌阶段弃牌只弃置1次，并且不检验（例如4手牌3手牌上限时，弃牌阶段只发
+        # 一次把手牌弃至3张，无论后续发生什么（例如弃了一张定乱牌导致立刻摸了一张），都不会
+        # 再次弃牌）」）。要求 = 阶段开始时的「计数 − 上限」，玩家**一次**交齐；之后无论
+        # 触发什么（弃掉"不计数"牌后摸牌、【伤逝】一类摸至 X）都**不**再发第二次询问。
         #
-        # **但"手牌数被固定住"的座位只做一次**（bingshi-jie 票 01；用户 2026-11-18 逐字：
-        # 「只进行一次'弃置手牌至手牌上限'，不重复，不补发……此时弃牌阶段结束，不再让我
-        # 弃一张牌」）：【武翊】④ 会在每次手牌数变化后回填到 4，按"计数仍 > 上限"一轮轮
-        # 问下去就是死循环。判据读声明（:func:`~sgs.effects.fixed_hand_count`）而不是猜
-        # "谁在半路补牌"——别的一摸一张的钩子（锋·于禁【节制】一类）仍按原规则补问，
-        # 否则会留下"计数仍超上限"的非法边界（fuzz 立刻抓到）。
-        pinned = fixed_hand_count(self.state, seat)
-        while discard_count(self.state, player) > 0:
+        # 旧口径是"弃到计数回落为止"（M6 票 12 的混合局由 fuzz 抓到"弃掉不计数的那张计数没降"
+        # ⇒ 补问），并给"手牌数被固定住"的座位（【武翊】④）单独加了 `pinned` 的出口。新口径把
+        # 两件事一起解决：**候选池只给计入上限的牌**（见 :func:`~sgs.effects._discard`，
+        # 「不计入手牌上限的牌不能在弃牌阶段被弃置」）⇒ 一次交齐就一定落在计数上，
+        # 既不会留下超额边界，也不需要 `pinned` 这个特例。
+        if discard_count(self.state, player) > 0:
             action = self.ask(
                 lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq),
                 identity=self._ask_identity(QueryKind.DISCARD, seat, None),
@@ -7723,10 +7722,6 @@ class Engine:
                 int(self._turn_data.get("discard_phase_hand_discards", 0))
                 + len(action.cards)
             )
-            if pinned is not None:
-                # 手牌数被固定住（【武翊】④）：这一次弃置就是本阶段的全部——回填之后
-                # 不再追问（用户 2026-11-18 的口径）。
-                break
         return None
 
     def _phase_discard_end(self) -> Control:

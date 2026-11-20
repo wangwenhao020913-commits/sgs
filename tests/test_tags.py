@@ -253,23 +253,23 @@ def test_the_hand_count_excludes_tagged_cards_and_the_discard_query_follows() ->
     assert discard_count(state, player) == 0, "4 − 4 = 0 ⇒ 弃牌阶段不发询问"
 
 
-def test_discarding_the_tagged_card_does_not_end_the_discard_phase_early() -> None:
-    """弃牌阶段按**计数**收敛：把不计数的那张弃掉不会让计数下降，必须再问一次。
+def test_the_discard_phase_never_offers_a_card_that_does_not_count() -> None:
+    """弃牌阶段**只**问一次，且候选池里没有"不计数"的那张（用户 2026-11-20 裁定）。
 
-    规则上洛神牌"不计入本回合的手牌上限"，但它仍是手牌、**可以被弃**；弃掉它只是让
-    ``len(hand)`` 降 1，``hand_count`` 不变。旧实现只问一次就进 ``PHASE_DISCARD_END``，
-    于是出现"计数仍 > 上限"的非法边界（M6 票 12 的混合局由 fuzz 抓到）。判据 = 询问
-    次数与最终边界：第一次弃掉带标签的牌之后还要再问，直到计数回落到上限。
+    牌面口径（`06`（§5「程序化约定与偏离一手」）yijiang-2011-xusheng-chunhua 票 92 逐字）：
+    「不计入手牌上限的牌不能在（弃牌阶段）被弃置……『不计入手牌上限』只影响弃牌阶段弃牌」，
+    「弃牌阶段弃牌只弃置 1 次，并且不检验」。
+
+    旧口径（"弃到计数回落为止"、弃掉带标签的牌之后要再问一次）已被这条裁定取代：
+    带标签的牌进不了候选 ⇒ 一次交齐的必然全是计数牌 ⇒ 不需要第二次询问。
     """
-    # 座位 0 给界甄姬：【洛神】是标签的来源实例，真实存在 ⇒ `prune_card_tags` 不会清它
-    # （sp5-pangtong-liuqi 报障修复后，摸牌阶段的摸牌也经移动入口 ⇒ 每次移动都会 prune）
     state = _count_state(hand=(0, 1, 2, 3, 4, 5), hero="jie_zhenji")
     state.card_tags[TAGGED] = (_tag(CardTagType.LUOSHEN_HAND),)
     engine = Engine.from_state(state, seed=7)
     queries = []
 
     class _Discarder:
-        """按 ``picks`` 逐次弃牌（每个询问一组牌 id）；其它询问走最小应答。"""
+        """只弃给定的那一组；其它询问走最小应答。"""
 
         def __init__(self, picks) -> None:
             self._picks = list(picks)
@@ -293,16 +293,23 @@ def test_discarding_the_tagged_card_does_not_end_the_discard_phase_early() -> No
                     return action
             return query.legal_actions[0]
 
-    # 初始 6 张 + 摸牌阶段 2 张 = 8；其中一张带标签 ⇒ 计数 7、上限 4 ⇒ 弃 3。
-    # 第一次弃掉"带标签的 2 号 + 两张计数牌" ⇒ 计数只降 2（7 → 5）⇒ 还要再弃 1 张。
-    run_turns(engine, [_Discarder([{2, 0, 1}, {3}]), PassPlayer()], turns=1)
+    # 初始 6 张 + 摸牌阶段 2 张 = 8；一张带标签 ⇒ 计数 7、上限 4 ⇒ 要求弃 3 张。
+    # 候选池只剩 7 张计数牌：任何合法答案里都不含带标签的那张，且**只问一次**。
+    run_turns(engine, [_Discarder([{0, 1, 3}]), PassPlayer()], turns=1)
 
     player = state.player(0)
-    assert [query.count for query in queries] == [3, 1], (
-        "弃掉带标签的牌之后计数没有降到上限，弃牌阶段必须继续问"
-    )
-    assert TAGGED not in player.hand
-    assert hand_count(state, player) == hand_limit(state, player) == 4, "边界：计数回落到上限"
+    assert [query.count for query in queries] == [3], "弃牌阶段只发一次弃牌询问"
+    assert TAGGED in player.hand, "带标签的牌不能被弃牌阶段弃置（它仍在手里）"
+    # 8 张里弃 3 张 ⇒ 手里 5 张（其中那张带标签的是"不计数"的）。
+    # 不再断言 `hand_count == hand_limit`：本局的标签是**本回合**形状，回合末已按标签自己的
+    # 清除触发删掉（清理后计数就是 5）——"只影响弃牌阶段"由"那张牌还在手里"这一条钉住。
+    assert len(player.hand) == 5
+    for query in queries:
+        for action in query.legal_actions:
+            if isinstance(action, DiscardCards):
+                assert TAGGED not in {card.card_id for card in action.cards}, (
+                    "候选池不得包含『不计入手牌上限』的牌"
+                )
 
 
 def test_the_tag_never_changes_the_public_hand_count_or_enters_a_payload() -> None:

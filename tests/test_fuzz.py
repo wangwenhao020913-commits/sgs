@@ -304,15 +304,19 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
     # 体力 → 替换链 → 加式，如【英姿】的"上限 = 体力上限"、【清俭】/【集智】的 +X），
     # 计数也换成 `hand_count`（M6 票 09：排除计数标签）——不再写死 `len(hand) > hp`。
     # 这里读的就是弃牌阶段同一个查询，故"能留下来"与"不被判红"是同一份判据。
+    # **弃牌阶段只问一次、弃完不重检验**（用户 2026-11-20 裁定，yijiang-2011-xusheng-chunhua
+    # 票 92）⇒ 回合边界**允许**"计数 > 上限"：一次弃到上限之后又被摸牌（【伤逝】一类、
+    # 或弃掉不计数牌的连带效果）时，规则明确不再弃第二次。故这一条只保留"计数口径自洽"
+    # 的那一半（不变量从这里**收窄**），不再把超额判红。
     if _is_hand_limit_point(record) and state.turn_seat is not None:
         player = state.player(state.turn_seat)
-        if player.alive and hand_count(state, player) > hand_limit(state, player):
+        if hand_count(state, player) > len(player.hand):
             _fail(
                 seed,
                 n,
                 record,
-                f"回合边界座位 {player.seat} 手牌计数 {hand_count(state, player)}"
-                f" 超过上限 {hand_limit(state, player)}",
+                f"座位 {player.seat} 的手牌计数 {hand_count(state, player)}"
+                f" 超过手牌张数 {len(player.hand)}（计数口径不一致）",
             )
 
     _check_candidate_cap(record, seed, n)
@@ -1091,10 +1095,16 @@ def test_the_live_checker_allows_the_paired_clamp_after_a_hp_max_reduction():
         _check_live_invariants(engine, engine.records[-1])
 
 
-def test_the_live_checker_catches_a_hand_over_the_limit_at_the_discard_phase_end():
+def test_the_live_checker_catches_an_inconsistent_hand_count_at_the_discard_boundary():
+    """检查器在弃牌边界读**计数口径自洽**（用户 2026-11-20 裁定后收窄的那一条）。
+
+    旧口径检查"回合边界计数 ≤ 上限"；票 92 把弃牌阶段改成"只问一次、弃完不重检验"之后，
+    超额是**规则允许**的（一次弃到上限又被摸牌 ⇒ 结束时高于上限），故那条不再成立。
+    留下的是"计数不能超过手牌张数"——把 `hand_count` 改坏时必须被抓到。
+    """
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=0, hp_max=4, hand=(0,)), SeatSpec(hp=4)],
+        seats=[SeatSpec(hp=4, hp_max=4, hand=(0,)), SeatSpec(hp=4)],
         deck=tuple(range(1, CARD_COUNT)),
         turn_seat=0,
     )
@@ -1103,8 +1113,25 @@ def test_the_live_checker_catches_a_hand_over_the_limit_at_the_discard_phase_end
     engine.game_players = 2
     boundary = TimingRecord(seq=999, timing=Timing.PHASE_DISCARD_END, frame_id=0, depth=0)
 
-    with pytest.raises(FuzzInvariantError, match="手牌"):
-        _check_live_invariants(engine, boundary)
+    # 计数口径自洽 ⇒ 边界处不报红（新口径下"超额"不再判红）。
+    _check_live_invariants(engine, boundary)
+
+    # 把计数查询的输入弄坏（往手里塞一张**不存在的**牌号不影响计数；真正的坏态是
+    # 「计数 > 张数」，这里用伪造的 player.hand 与计数探针做不到，故直接验证判据本身）。
+    import test_fuzz as fuzz_module
+
+    original = fuzz_module.hand_count
+
+    def _bogus(state_, player_):
+        del state_, player_
+        return 99
+
+    fuzz_module.hand_count = _bogus
+    try:
+        with pytest.raises(FuzzInvariantError, match="计数"):
+            _check_live_invariants(engine, boundary)
+    finally:
+        fuzz_module.hand_count = original
 
 
 def test_the_live_checker_catches_a_dead_player_holding_cards():

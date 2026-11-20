@@ -1250,14 +1250,29 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 
 
 def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
-    """弃牌阶段：任意"手牌计数 − 手牌上限"张子集，全枚举（票 07 §4 / 票 09）。"""
+    """弃牌阶段：**计入上限的**手牌里取"计数 − 上限"张子集，全枚举（票 07 §4 / 票 09）。
+
+    候选池**只给计入手牌上限的牌**（用户 2026-11-20 裁定，yijiang-2011-xusheng-chunhua 票 92
+    逐字：「不计入手牌上限的牌不能在结束阶段被弃置」）：带"不计数"标签的牌仍是手牌、仍能
+    弃置（【过河拆桥】一类），但**不**由弃牌阶段弃置；「其它把**手牌数调整为…**的效果」
+    （制衡 / 反间一类走 ``SELECT_CARDS``）照旧随意处置它们——「不计入手牌上限」只影响
+    弃牌阶段（用户 2026-11-20 口径）。于是张数恒等于"计数 − 上限"，一次交齐就落在计数上
+    ⇒ 弃牌阶段因此只问一次（见 ``Engine._phase_discard``）。
+
+    行为面已满足"选不了"；**界面置灰**还需要 ``DiscardQuery`` 带一个"不可选"字段 + 前端
+    画灰，那是另一张 UI/框架票（本票只落行为，见
+    `.scratch/yijiang-2011-xusheng-chunhua/issues/92`）。
+    """
     player = state.player(seat)
     count = discard_count(state, player)
     if count <= 0:
         return []
+    pool = [card for card in player.hand if counts_toward_hand(state, card)]
+    if len(pool) < count:
+        return []
     return [
         DiscardCards(cards=state.refs(list(combo)), answers_seq=answers_seq)
-        for combo in combinations(player.hand, count)
+        for combo in combinations(pool, count)
     ]
 
 
