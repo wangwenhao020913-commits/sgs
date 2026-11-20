@@ -5644,6 +5644,7 @@ class Engine:
         skill_id: str,
         *,
         frame: Frame | None = None,
+        scope: SkillSuppressionScope = SkillSuppressionScope.TURN,
     ) -> bool:
         """给一个座位加一条**失效**记录并落一条 ``skill_suppress``（M6 票 04 的唯一写入口）。
 
@@ -5652,15 +5653,22 @@ class Engine:
         技能；装备牌 / 虚拟装备带来的技能不失效（用户裁定，票 09）。锁定技不受影响。
         ``skill_id`` 是**施加者**（【义绝】/【铁骑】），不是被挡的技能。
         作用域 ``TURN`` = 本回合，回合末由 :meth:`_clear_turn_effects` 清掉并落一条
-        ``suppressed=False``。返回值 = 状态真的变了吗。
+        ``suppressed=False``；``UNTIL_BLACK_DISCARD``（feng-guanyu 票 05）= 本回合内，
+        另有"有黑色牌进入弃牌堆即解除"的**提前**到期（:meth:`_flush_expired_suppressions`）。
+        返回值 = 状态真的变了吗。
         """
         player = self.state.player(seat)
-        if any(record.skill_id == skill_id for record in player.suppressed_skills):
+        if any(
+            record.skill_id == skill_id and record.scope is scope
+            for record in player.suppressed_skills
+        ):
             return False
-        player.suppressed_skills.append(SkillSuppression(skill_id=skill_id))
+        player.suppressed_skills.append(
+            SkillSuppression(skill_id=skill_id, scope=scope)
+        )
         self.emit_delta(
             SkillSuppressDelta(
-                seat=seat, skill_id=skill_id, suppressed=True
+                seat=seat, skill_id=skill_id, suppressed=True, scope=scope
             ),
             frame_id=(frame.frame_id if frame is not None else 0),
             depth=self.stack.depth,
@@ -5668,6 +5676,57 @@ class Engine:
         # 失效也算"来源实例不再解析"：随来源消失的牌标签立刻清掉（票 09 验收）。
         self._prune_card_tags()
         return True
+
+    def clear_suppression(
+        self,
+        seat: int,
+        skill_id: str,
+        *,
+        frame: Frame | None = None,
+    ) -> bool:
+        """解除 ``seat`` 上由 ``skill_id`` 施加的失效记录（feng-guanyu 票 05 的唯一解除入口）。
+
+        与 :meth:`suppress_skills` 对称：移除记录、落一条
+        ``SkillSuppressDelta(suppressed=False, scope=…, predicate=…)``——记录流里"可恢复"
+        照旧看得见（与回合末清理同一形状）；没有这条记录 ⇒ ``False``、零副作用。
+        到期口径由调用方决定：回合末 = :meth:`_clear_turn_effects`；
+        "直到有黑色牌进入弃牌堆" = :meth:`_flush_expired_suppressions`。
+        """
+        player = self.state.player(seat)
+        for record in tuple(player.suppressed_skills):
+            if record.skill_id != skill_id:
+                continue
+            player.suppressed_skills.remove(record)
+            self.emit_delta(
+                SkillSuppressDelta(
+                    seat=seat,
+                    skill_id=record.skill_id,
+                    suppressed=False,
+                    scope=record.scope,
+                    predicate=record.predicate,
+                ),
+                frame_id=(frame.frame_id if frame is not None else 0),
+                depth=self.stack.depth,
+            )
+            return True
+        return False
+
+    def _flush_expired_suppressions(self) -> None:
+        """黑牌进入弃牌堆 ⇒ 解除 ``UNTIL_BLACK_DISCARD`` 的记录（feng-guanyu 票 05）。
+
+        到期监听走"搬牌原语置标记、引擎在**下一条** ``_step`` 的开头收口"，与
+        :meth:`_flush_pending_state` 的惰性形状同一条纪律：``GameState.note_discard_suits``
+        在 ``move_card`` 的 ``Zone.DISCARD`` 分支里被调，那里拿不到引擎；本方法是引擎侧
+        唯一的收口点，且不提问、不压帧（纯簿记 + 记录流），故没有 ``"stay"`` 分支。
+        """
+        if not self.state.black_card_discarded:
+            return
+        self.state.black_card_discarded = False
+        for player in self.state.players:
+            for record in tuple(player.suppressed_skills):
+                if record.scope is not SkillSuppressionScope.UNTIL_BLACK_DISCARD:
+                    continue
+                self.clear_suppression(int(player.seat), record.skill_id)
 
     def add_hand_card_prohibition(self, seat: int, source: str) -> bool:
         """给一个座位加一条"**不能使用或打出手牌**"的禁令，并记下**施加者**
@@ -5916,7 +5975,10 @@ class Engine:
         """
         for player in self.state.players:
             for record in tuple(player.suppressed_skills):
-                if record.scope is not SkillSuppressionScope.TURN:
+                if record.scope not in (
+                    SkillSuppressionScope.TURN,
+                    SkillSuppressionScope.UNTIL_BLACK_DISCARD,
+                ):
                     continue
                 player.suppressed_skills.remove(record)
                 self.emit_delta(
@@ -6904,6 +6966,9 @@ class Engine:
     def _step(self) -> None:
         if self.finished:
             return
+        # feng-guanyu 票 05：黑牌进弃牌堆的**提前**到期在这里收口（上一步的搬牌已置标记）。
+        # 排在所有派发之前 ⇒ 之后新产生的解析立刻看不到那些失效实例；不提问、不压帧。
+        self._flush_expired_suppressions()
         self._flush_pending_move()
         if self.pending is not None:
             # 续跑的 ``MOVE_AFTER`` 派发自己又发问了（M6 票 08【清俭】/ 票 10【连营】

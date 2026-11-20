@@ -60,9 +60,16 @@ class SkillSuppressionScope(str, Enum):
     M6 只有一档：``TURN`` = 本回合（回合末由 ``Engine._clear_turn_effects`` 清掉）。
     记录带作用域而不是裸布尔，是因为"失效可恢复"的那一半取决于**何时**恢复——条件撤销
     可能是回合末、也可能是某张牌离场；把作用域放进记录，清理点就不必逐技能特判。
+
+    feng-guanyu 票 05 补上那个"某张牌离场"的档：``UNTIL_BLACK_DISCARD`` = 本回合内，
+    **直到有黑色牌进入弃牌堆**（先到者）。到期监听走搬牌原语的标记
+    （``GameState.note_discard_suits``）+ 引擎在 :meth:`~sgs.engine.Engine._step` 开头的
+    惰性收口（:meth:`~sgs.engine.Engine._flush_expired_suppressions`）；回合末兜底清理由
+    ``_clear_turn_effects`` 一并覆盖。
     """
 
     TURN = "turn"
+    UNTIL_BLACK_DISCARD = "until_black_discard"
 
 
 class SkillSuppressionPredicate(str, Enum):
@@ -1324,11 +1331,26 @@ class GameState(BaseModel):
 
         按首次出现序去重（本项目禁无序容器参与顺序，源码纪律 §3）；花色为空（纯虚拟牌）
         的牌不占位——它们从不进弃牌堆。
+
+        同一写点顺手置 :attr:`black_card_discarded`（feng-guanyu 票 05 的到期监听）：
+        "有黑色牌进入弃牌堆"与【博图】的花色记账读**同一批牌**、同一个搬牌原语，故它
+        覆盖弃置 / 使用后 / 判定 / 阵亡清区等一切来源（`05` R3 的裁定）。
         """
         for card in cards:
             suit = card.suit
             if suit is not None and suit not in self.discard_suits_this_turn:
                 self.discard_suits_this_turn.append(suit)
+            if card.color is Color.BLACK:
+                self.black_card_discarded = True
+
+    black_card_discarded: bool = False
+    """**待处理**：有黑色牌刚进入弃牌堆（feng-guanyu 票 05；``UNTIL_BLACK_DISCARD`` 的到期信号）。
+
+    只由 :meth:`note_discard_suits` 置真（搬牌原语的 ``Zone.DISCARD`` 分支），由引擎在
+    :meth:`~sgs.engine.Engine._flush_expired_suppressions` 里清掉并解除对应失效记录。
+    布尔而非计数：一次 ``_step`` 里多批黑牌入弃牌堆只解除一轮（到期与批数无关）。
+    **不发 delta、不进投影**：它只是"下一步该做一次到期检查"的便签。
+    """
 
     virtual_id_seq: int = 0
     """**按局**的虚拟牌 id 计数器（feng-guanyu 票 03；【单骑】的"全集转化"来源无上界）。

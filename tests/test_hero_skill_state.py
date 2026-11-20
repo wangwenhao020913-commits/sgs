@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import Gender, Kingdom, RuleConfig, hero_by_id, load_content_pack
+from sgs.data import Color, Gender, Kingdom, RuleConfig, hero_by_id, load_content_pack
 from sgs.effects import distance
 from sgs.engine import Engine
 from sgs.skills import SkillSourceKind, hero_card_zone_key, resolve_instances
+from sgs.state import SkillSuppressionScope
 from sgs.state.projection import project
 from sgs.timing import Timing
 
@@ -510,6 +511,88 @@ def test_suppression_expires_at_the_end_of_the_turn():
     ]
     assert [(record.seat, record.skill_id) for record in clears] == [(1, YIJUE)]
     assert not engine.state.player(1).suppressed_skills, "作用域 = 本回合，回合末清空"
+
+
+# ---------------------------------------------------------------------------
+# feng-guanyu 票 05：失效的**提前**到期——"本回合内，直到有黑色牌进入弃牌堆"
+# ---------------------------------------------------------------------------
+
+
+def _a_card_of(state, color: Color) -> int:
+    """某颜色的一张实体牌 id（只用来喂"进弃牌堆"的写点）。"""
+    return next(card.card_id for card in state.cards if card.color is color)
+
+
+def test_suppression_can_expire_when_a_black_card_hits_discard():
+    """``UNTIL_BLACK_DISCARD``：黑牌进弃牌堆 ⇒ 下一条 ``_step`` 开头提前解除。
+
+    监听的唯一写点是搬牌原语的 ``Zone.DISCARD`` 分支（``GameState.note_discard_suits``），
+    本用例直接调它——与 ``move_card`` 走的是同一个方法，不另造一条路径。
+    """
+    engine = _engine(("guanyu",), seats=2)
+    state = engine.state
+    assert (
+        engine.suppress_skills(0, YIJUE, scope=SkillSuppressionScope.UNTIL_BLACK_DISCARD)
+        is True
+    )
+    assert WUSHENG not in _instances(state, 0), "前置：失效已生效"
+
+    state.note_discard_suits([state.card(_a_card_of(state, Color.BLACK))])
+    engine.run(
+        [PassPlayer() for _ in state.players], stop_when=lambda: True
+    )  # 只推进一条 _step（开头就是到期收口）
+
+    assert not state.player(0).suppressed_skills, "黑牌入弃牌堆 ⇒ 提前解除"
+    clears = [
+        record
+        for record in _deltas(engine, "skill_suppress")
+        if record.suppressed is False
+    ]
+    assert [
+        (record.seat, record.skill_id, record.scope.value) for record in clears
+    ] == [(0, YIJUE, "until_black_discard")], "解除在记录流里看得见，且带作用域"
+    assert WUSHENG in _instances(state, 0), "解除后实例重新解析"
+
+
+def test_white_cards_do_not_expire_the_until_black_discard_suppression():
+    """只有**黑色**牌入弃牌堆才算到期信号。"""
+    engine = _engine(("guanyu",), seats=2)
+    state = engine.state
+    engine.suppress_skills(0, YIJUE, scope=SkillSuppressionScope.UNTIL_BLACK_DISCARD)
+
+    state.note_discard_suits([state.card(_a_card_of(state, Color.RED))])
+    engine.run([PassPlayer() for _ in state.players], stop_when=lambda: True)
+
+    assert state.player(0).suppressed_skills, "红牌不解除"
+
+
+def test_until_black_discard_suppression_still_ends_at_turn_end():
+    """没有黑牌入弃牌堆时，回合末照常兜底清（"本回合"是上限）。"""
+    engine = _engine(("guanyu",), seats=2)
+    engine.suppress_skills(0, YIJUE, scope=SkillSuppressionScope.UNTIL_BLACK_DISCARD)
+
+    run_until(
+        engine,
+        [PassPlayer() for _ in engine.state.players],
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+            for record in e.records
+        ),
+    )
+
+    assert not engine.state.player(0).suppressed_skills, "回合末兜底清空"
+
+
+def test_existing_turn_scope_suppression_is_unchanged():
+    """``scope=TURN`` 的既有载体（【义绝】/【铁骑】）不受新档影响：红 / 黑牌都不提前解除。"""
+    engine = _engine(("guanyu",), seats=2)
+    state = engine.state
+    engine.suppress_skills(0, YIJUE)  # 缺省 = TURN
+
+    state.note_discard_suits([state.card(_a_card_of(state, Color.BLACK))])
+    engine.run([PassPlayer() for _ in state.players], stop_when=lambda: True)
+
+    assert state.player(0).suppressed_skills, "TURN 档只认回合末"
 
 
 # ---------------------------------------------------------------------------
