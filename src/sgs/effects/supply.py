@@ -13,7 +13,10 @@
   高亮 / 置灰与理由（用户 Q4：置灰**后端实时算**，前端只读 ``ok``）；
 - :func:`supply_is_legal`：**合法性闸门**（票 02）——交到玩家手上的那一面按它过滤。与展示层
   的 ``ok`` **不是**同一句话：候选期不可知的供给在展示层不判死，在合法性上失败关闭
-  （见该函数的 docstring）。
+  （见该函数的 docstring）；
+- :func:`supplies_of_action`：**一条动作的全部供给**（票 04 的"一动作多供给"口子）——闸门与
+  供给行都读它，故"这一档进不进面"与"这一张牌高不高亮"不可能由两份判据给出（spec §7 S16）。
+  除预转化外它恒等于 :func:`supply_of_action` 的一元组。
 
 **维度可加**（用户 Q3 的落地口径）：牌名 / 花色 / 颜色 / 点数 / 虚拟·转化 / 转化源张数。
 今天只有前两维有生产者（牌名 = ``required``、花色 = ``response_suits``，单骑第三段），
@@ -22,9 +25,11 @@
 
 **无花色 / 无点数的供给确定地不满足对应维度的限制**（不是"未知"，spec §3 第 3 条）：
 【八卦阵】/【八阵】的纯虚拟【闪】与多源转化（【丈八蛇矛】/ 单骑）都没有花色 ⇒ 花色
-需求下必然不满足。"候选期不知道"由 :attr:`Supply.unknown` 单独表达（【蛊惑】的预转化）：
-**展示层**（:func:`supply_mismatch`）只标出来、不判死；**合法性**（票 02 的
-:func:`supply_is_legal`）在需求带收窄维度时失败关闭（放开它是票 04 的活）。
+需求下必然不满足。"候选期不知道"由 :attr:`Supply.unknown` 单独表达：**展示层**
+（:func:`supply_mismatch`）只标出来、不判死；**合法性**（票 02 的
+:func:`supply_is_legal`）在需求带收窄维度时失败关闭。票 04 起**没有真实声明**走这一档
+（【蛊惑】的预转化改成逐张可判，见 :data:`PRECONVERSION_SUPPLY_KIND`）：失败关闭那条
+分支仍留在闸门里（那是"以后再有隐形供给"的兜底），只是今天没有生产者为它作证。
 
 **需求传递**（``kind="relay"``，票 03）是第三条路：它不是"不知道"，而是"不在这一档判"——
 【护驾】/【激将】不产出转化 / 虚拟牌，真正做的是把**同一份** :class:`Demand` 依次传给
@@ -33,6 +38,11 @@
 :func:`_dimension_failure` 里那条分支。持有者自己被挡住（【义绝】封手牌）时**连候选都不
 产出**，于是"供给 none"这件事由 :func:`supplies_for` 的"声明了却给不出来"那一趟报成
 ``ok=False`` 的行（:attr:`TierSupplies.reason`），匹配器见不到它——判据不读 ``GameState``。
+
+**预转化**（``kind="preconversion"``，票 04）是第四条路，但它**没有自己的判据**：来源牌
+就是那张手牌，牌面事实照搬 ``CardRef``，故匹配与 ``kind="transformed"`` 的单源转化逐字
+相同（用户 Q1：预转化与转化同形）。它的特殊性只在**供给的粒度**：一个提供者候选对应
+**每一张手牌**一条供给——见 :func:`supplies_of_action` 与 :func:`_preconversion_supplies`。
 
 循环 import（票面 §5 的纪律）：``effects/actions.py`` 与本模块互相看得见（``actions`` 的
 供需闸门读本模块，本模块的供给反推读 ``actions.all_actions_for``），故本模块对 ``.actions``
@@ -57,16 +67,23 @@ from sgs.state import (
     UseCard,
 )
 
-from .behaviors import CARD_BEHAVIORS, DODGE_RESPONSE_CARD, PEACH_RESPONSE_CARD
+from .behaviors import (
+    CARD_BEHAVIORS,
+    DODGE_RESPONSE_CARD,
+    PEACH_RESPONSE_CARD,
+    SLASH_FAMILY_KEY,
+)
 
 __all__ = [
     "Demand",
+    "PRECONVERSION_SUPPLY_KIND",
     "RELAY_SUPPLY_KIND",
     "SUPPLY_KINDS",
     "Supply",
     "TierSupplies",
     "demand_for",
     "supplies_for",
+    "supplies_of_action",
     "supply_is_legal",
     "supply_mismatch",
     "supply_of_action",
@@ -100,6 +117,20 @@ RELAY_SUPPLY_KIND = "relay"
 字符串：改名时不能只改一半。
 """
 
+PRECONVERSION_SUPPLY_KIND = "preconversion"
+"""**预转化**那一档（``Supply.kind``；need-card-supply 票 04 起唯一载体 =【蛊惑】）。
+
+用户 2026-11-20 Q1 的口径（spec §6 Q1 逐字）：蛊惑把任意一张手牌转化为另一张手牌，在通过
+"质疑校验"之前是**预转化**状态。故供给与转化档**同形**——一条 ``Supply`` 的来源牌面就是
+那一张被扣置的手牌（§16.3：转化牌的花色 / 点数 / 颜色**继承来源牌**），匹配因此与
+``kind="transformed"`` 的单源转化**逐字相同**（本模块不给它第二套比对）。
+
+与 relay 的区别：relay 是"这一档不在我这儿判"（牌名之后不判死），预转化是**逐张可判**
+（``unknown=False``）——故它是 :func:`supplies_of_action` 里那个"一动作多供给"的承载：
+一个 ``ActivateSkill`` 对应**每一张手牌**一条 ``Supply``（档的进面与否 = 这些供给里有
+没有一条合法，与行表读同一个判据）。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Supply:
@@ -110,7 +141,9 @@ class Supply:
       不是"不知道"——那由 :attr:`unknown` 表达（spec §3 第 3 条）；
     - ``kind``：:data:`SUPPLY_KINDS` 之一；
     - ``source_count``：转化源张数（真牌 / 纯虚拟恒 1）；
-    - ``unknown``：候选期不可知（只剩【蛊惑】的预转化）。需求传递（【护驾】/【激将】，
+    - ``unknown``：候选期不可知。**票 04 起没有真实声明走这一档**（【蛊惑】的预转化改成
+      逐张可判）：字段与它对展示层的口径都保留（票 01 冻结的行为），闸门里的失败关闭也保留
+      ——那是"将来再有隐形供给"的兜底，不是今天某条技能的名字。需求传递（【护驾】/【激将】，
       票 03）**不是**这一档：它的牌名是声明事实，匹配规则由 ``kind`` 一族给定（见
       :func:`_dimension_failure`），故它是**可判**的供给。
     """
@@ -255,16 +288,18 @@ def supply_is_legal(demand: Demand | None, supply: Supply | None) -> bool:
 
     - 供给**可判**（``supply`` 有声明且 ``unknown=False``）⇒ 与展示层同源：按维度匹配
       （需求传递那一种在牌名之后不判死，见 :func:`_dimension_failure`）；
-    - 供给**不可判**（``supply is None`` = 提供者没声明；``supply.unknown`` = 候选期不可知
-      【蛊惑】）⇒ **只要需求带一条收窄维度就失败关闭**（= 票 01 之前那道"多禁"的同一结论，
-      票面 §1：放开它是票 04 的活）；没有收窄维度时照常放行（今天的窗口里它们本来就是候选）。
+    - 供给**不可判**（``supply is None`` = 提供者没声明；``supply.unknown`` = 候选期不可知）
+      ⇒ **只要需求带一条收窄维度就失败关闭**（= 票 01 之前那道"多禁"的同一结论）；没有收窄
+      维度时照常放行（今天的窗口里它们本来就是候选）。票 04 起**没有真实声明**落在
+      ``unknown`` 上（【蛊惑】改成逐张可判），这条失败关闭因此是兜底而不是某条技能的判据。
 
     `unknown` 的失败关闭**只住在这里**（票面 §1 的判据只有一处）：匹配器 :func:`supply_satisfies`
     对 ``unknown`` 返回 ``None``（"不判死"）是票 01 的**展示**口径，不是合法性的口径。
 
     需求传递（票 03）**不走这条分支**：它是可判的供给，条件成立与否写在候选生成之前（持有者
     自己被 【义绝】 一类禁令封住时**连候选都不产出**）⇒ 这里见不到"该挡的 relay"，
-    也**不**按技能名白名单放行任何一档。
+    也**不**按技能名白名单放行任何一档。预转化（票 04）同理：闸门读到的是**逐张来源牌**的
+    具体供给（:func:`supplies_of_action`），不是一条 ``unknown`` 的声明。
     """
     if demand is None:
         return True
@@ -372,6 +407,12 @@ def supplies_for(
     之前就把候选挡掉了，见 ``SkillDef.supply_none_reason``），但玩家仍要看见"为什么没有这一
     档"⇒ 再走一趟 :func:`_declared_none_tiers`，把那一档报成 ``supplies=()`` + ``reason``
     的行。它不是第二份供给枚举：判据仍只有提供者的声明（档 / 牌名 / 理由都是定义属性）。
+
+    **逐张预转化**（票 04）：【蛊惑】那一档的供给**从供给池的候选反推不出来**——池里只有
+    一条 ``ActivateSkill``（"扣置任意一张手牌"），逐张来源牌的事实要展开才知道。故
+    ``supplies_of_action`` 在票 01 的生成口上长出"一动作多供给"：一个动作 → 每一张手牌一条
+    ``Supply``。展开后一张也给不出来（被【义绝】封住手牌）⇒ 走同一个"供给为 none"口子
+    （``SkillDef.supply_none_reason`` 的那句话），而不是悄悄少一行。
     """
     from .actions import all_actions_for, need_card_tier
 
@@ -379,17 +420,36 @@ def supplies_for(
         state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
     )
     groups: dict[tuple[int, str | None], list[Supply]] = {}
+    none_rows: list[TierSupplies] = []
     for action in actions:
-        supply = supply_of_action(action)
-        if supply is None:
+        supplies = supplies_of_action(
+            action, state=state, seat=seat, kind=kind, payload=payload, dying=dying
+        )
+        if supplies is None:
             # ``Pass`` 不是供给；没有声明的提供者也不报（展示层不知道它能提供什么，不猜）。
             continue
         provider = action.skill_id if isinstance(action, ActivateSkill) else None
-        groups.setdefault((need_card_tier(action), provider), []).append(supply)
+        if not supplies:
+            # 声明了供给、逐张来源牌却一张也给不出来（票 04 的"整档供给 none"）：这一档
+            # **没有候选**，但仍要一行 `ok=False` + 理由——灰行的意义是"这一档试过了、
+            # 给不出来"（票 03 §1；S16 的另一半）。
+            reason = _declared_supply_none_reason(action, state, seat)
+            if reason is not None:
+                none_rows.append(
+                    TierSupplies(
+                        tier=need_card_tier(action),
+                        provider=provider,
+                        supplies=(),
+                        reason=reason,
+                    )
+                )
+            continue
+        groups.setdefault((need_card_tier(action), provider), []).extend(supplies)
     tiers = [
         TierSupplies(tier=tier, provider=provider, supplies=tuple(dict.fromkeys(supplies)))
         for (tier, provider), supplies in groups.items()
     ]
+    tiers.extend(none_rows)
     tiers.extend(
         _declared_none_tiers(
             kind,
@@ -401,6 +461,24 @@ def supplies_for(
         )
     )
     return tuple(sorted(tiers, key=lambda group: (group.tier, group.provider or "")))
+
+
+def _declared_supply_none_reason(action: Any, state: Any, seat: int) -> str | None:
+    """这一档**声明了供给、此刻却给不出来**的那句理由；没有回调 ⇒ ``None``。
+
+    读 :attr:`~sgs.skills.SkillDef.supply_none_reason`（与 :func:`_declared_none_tiers`
+    同一个声明口；本函数只是把"候选在池里、展开后为空"这另一种形态接上去）。不自造文案：
+    理由永远来自提供者自己的声明。
+    """
+    if not isinstance(action, ActivateSkill):
+        return None
+    from sgs.skills import CATALOG
+
+    definition = CATALOG.get(action.skill_id)
+    if definition is None or definition.supply_none_reason is None:
+        return None
+    reason = definition.supply_none_reason(state, int(seat))
+    return None if reason is None else str(reason)
 
 
 def _declared_none_tiers(
@@ -460,15 +538,148 @@ def _declared_none_tiers(
 
 
 def supply_of_action(action: Any) -> Supply | None:
-    """一条候选动作的**供给描述**；``None`` = 它不是供给（``Pass``）或提供者没声明。
+    """一条候选动作的**供给描述**（**单条**）；``None`` = 它不是供给或提供者没声明。
 
-    与 :func:`supplies_for` **同一份**动作 → 供给映射（票 02 的合法性闸门也读它）：两处若各
-    写一份，展示行与合法面就可能对"这一条到底能提供什么"给出两个答案。
+    这是"动作 → 供给"的**唯一映射**（票 02 建立；闸门与供给行都读它，两处若各写一份，
+    展示行与合法面就可能对"这一条到底能提供什么"给出两个答案）。
+
+    预转化的那一档是**一动作多供给**：``ActivateSkill`` 的声明只说"我是预转化"，逐张来源牌
+    的具体供给要展开（票 04）。那个口子开在 :func:`supplies_of_action` 上——本函数保持
+    **一元**语义，故读"这一条动作的全部供给"请用后者。
     """
     if isinstance(action, ActivateSkill):
         return _declared_supply(action.skill_id)
     if isinstance(action, (UseCard, PlayCard)):
         return _supply_of_card(action.card)
+    return None
+
+
+def supplies_of_action(
+    action: Any,
+    *,
+    state: Any,
+    seat: int,
+    kind: QueryKind,
+    payload: Any = None,
+    dying: int | None = None,
+) -> tuple[Supply, ...] | None:
+    """一条候选动作的**全部**供给（票 04 的"一动作多供给"口子）。
+
+    返回值的三态与读取方：
+
+    - ``None``：不是供给（``Pass``）或提供者**没声明**供给 ⇒ 闸门**不筛它**（与票 02 之前
+      逐条不变：没声明的提供者不因需求被禁）；
+    - ``()``：声明了、此刻却**一张也给不出来**（【蛊惑】被【义绝】封住手牌）⇒ 闸门把它删掉
+      （"供给 none ⇒ 不进面"），展示层报一行"供给为 none" + 理由；
+    - 否则：这一条动作的全部供给。除预转化外恒为 :func:`supply_of_action` 的一元组。
+
+    **闸门与行表读同一个函数**（spec §7 S16 的高亮 / 可点一致）：`ok` 与"进不进面"因此
+    不可能对同一张来源牌给出两个答案——一个走 :func:`supply_satisfies`、一个走
+    :func:`supply_is_legal`，而两者对可判供给本来就是同一条 :func:`_dimension_failure`。
+
+    展开只发生在 ``kind == PRECONVERSION_SUPPLY_KIND`` 的**声明**上，不看技能名 / 技能 id：
+    将来第二个预转化提供者只要声明同一个 kind 就自动接上（与 relay 一族同姿态）。
+    """
+    declared = supply_of_action(action)
+    if declared is None:
+        return None
+    if declared.kind != PRECONVERSION_SUPPLY_KIND:
+        return (declared,)
+    return _preconversion_supplies(
+        state, seat=int(seat), kind=kind, payload=payload, dying=dying
+    )
+
+
+def _preconversion_supplies(
+    state: Any,
+    *,
+    seat: int,
+    kind: QueryKind,
+    payload: Any,
+    dying: int | None,
+) -> tuple[Supply, ...]:
+    """**预转化**的逐张供给（票 04 §1）：每一张手牌一条 ``Supply``。
+
+    "能预转化成的牌名"读 :func:`sgs.skills.guohuo_preconversion_products`（它包着
+    ``skills/active.py:_guohuo_response_names`` 的**同一份表**，也是提供者候选 / 声明范围的
+    判据）——本层不另写一份"哪些牌名能当这一问的牌"。走 ``sgs.skills`` 的公开面而不是深层
+    导入 ``sgs.skills.active``：子包纪律由 ``tests/test_scaffold.py`` 挡着（票 04 的门禁撞过）。
+    牌面事实取**来源牌**（§16.3：转化牌继承来源牌的花色 / 点数 / 颜色），故匹配器不需要
+    预转化的第二套比对（用户 Q1：与 `kind="transformed"` 的单源转化逐字相同）。
+
+    **上游禁令复用既有谓词**（票面 §2 / 用户 Q1 点名）：
+
+    - :attr:`~sgs.state.Player.hand_card_prohibited`（【义绝】/【雄乱】的座位禁令）⇒ 一张牌
+      都扣置不出去 ⇒ **整档无供给**；
+    - :func:`~sgs.effects.forbidden_as_slash`（【定乱】"不能当作【杀】使用 / 打出"）⇒ 这一张
+      来源牌不能出现在**杀族产物**的那一条供给里（别的产物不受影响）；
+    - 牌名闸门由上面那份表本身兑现（``satisfies_required`` + 求桃窗口对濒死者的【酒】放宽）；
+    - 目标 / 距离 / 次数**不在这里重判**：那是**产物**的事实，提供者自己的谓词
+      （``_guohuo_provider_payable`` 的 ``forced_use_targets``）在候选生成之前已经挡过——
+      来源牌的花色 / 点数不改"这张【杀】够不够得着 Bn"。
+
+    不满足上游禁令的那张牌：**不出现在供给行里**（票面 §2 允许的两种读法之一；行里只留
+    能预转化的那几张，不把"上游禁令"混成"产物牌名不匹配"的理由）。
+    """
+    from sgs.skills import guohuo_preconversion_products
+
+    if state.player(int(seat)).hand_card_prohibited:
+        return ()
+    demand = demand_for(kind, payload, dying=dying, asker=seat)
+    required = None if demand is None or not demand.names else demand.names[0]
+    if required is None:
+        return ()
+    products = guohuo_preconversion_products(
+        state, required, asker=seat, dying=dying
+    )
+    if not products:
+        return ()
+    supplies: list[Supply] = []
+    for card_id in state.player(int(seat)).hand:
+        card = state.card(int(card_id))
+        product = _preconversion_product(state, card, required, products)
+        if product is None:
+            continue
+        supplies.append(
+            Supply(
+                product=product,
+                suit=card.suit,
+                rank=card.rank,
+                color=card.color,
+                kind=PRECONVERSION_SUPPLY_KIND,
+                source_count=1,
+            )
+        )
+    return tuple(supplies)
+
+
+def _preconversion_product(
+    state: Any, card: CardRef, required: str, products: tuple[str, ...]
+) -> str | None:
+    """这张来源牌能预转化成的**那一个**产物牌名；一个都不行 ⇒ ``None``（这张牌不报行）。
+
+    次序是刻意写死的：先要**窗口要的那个牌名**（``required``），再按表序（牌堆顺序）取第一
+    个可用的。选哪个都落入同一族（牌名维度是族判据），但展示必须确定——同一局面两次算出
+    同一行，"这一次要求"与"这一档能提供什么"才读得一致。
+
+    【定乱】只挡**杀族产物**：标签说的是"不能当作【杀】使用 / 打出"，而这张牌仍能被扣置来
+    当【闪】/【桃】/【无懈可击】（§16.3：预转化继承的是来源牌的花色 / 点数，牌名由声明决定）。
+    """
+    from .actions import forbidden_as_slash
+
+    ordered = (required, *(product for product in products if product != required))
+    for product in ordered:
+        if product not in products:
+            # ``required`` 不在这一问的牌名表里（本牌堆没有那种牌）⇒ 跳过它。
+            continue
+        behavior = CARD_BEHAVIORS.get(product)
+        if (
+            behavior is not None
+            and behavior.count_key == SLASH_FAMILY_KEY
+            and forbidden_as_slash(state, card)
+        ):
+            continue
+        return product
     return None
 
 

@@ -99,6 +99,7 @@ from .modifiers import (
     response_count,
 )
 from .supply import (
+    PRECONVERSION_SUPPLY_KIND,
     RELAY_SUPPLY_KIND,
     SUPPLY_KINDS,
     Demand,
@@ -106,6 +107,7 @@ from .supply import (
     TierSupplies,
     demand_for,
     supplies_for,
+    supplies_of_action,
     supply_is_legal,
     supply_mismatch,
     supply_of_action,
@@ -151,6 +153,7 @@ __all__ = (
     "ModifierPoint",
     "ModifierRole",
     "NEED_CARD_FLOOR_KEY",
+    "PRECONVERSION_SUPPLY_KIND",
     "PriorityClass",
     "PushFrame",
     "Randomness",
@@ -218,6 +221,7 @@ __all__ = (
     "seat_distance",
     "substitute_judge_card",
     "supplies_for",
+    "supplies_of_action",
     "supply_is_legal",
     "supply_mismatch",
     "supply_of_action",

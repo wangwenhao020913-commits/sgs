@@ -188,6 +188,7 @@ from .active import (
     PickSeats,
     SkillFlow,
     activate_skill,
+    guohuo_preconversion_products,
     register_activation,
     run_flow,
 )
@@ -555,6 +556,7 @@ __all__ = (
     "dispatch_timing",
     "equipment_skill_ids",
     "flow_for",
+    "guohuo_preconversion_products",
     "hero_card_zone_key",
     "hero_zone_skill_definitions",
     "instance_key",

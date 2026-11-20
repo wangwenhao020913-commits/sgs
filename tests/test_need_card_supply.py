@@ -38,6 +38,7 @@ from sgs.effects import (  # noqa: E402
     demand_for,
     legal_actions_for,
     supplies_for,
+    supply_is_legal,
     supply_mismatch,
     supply_satisfies,
 )
@@ -459,8 +460,11 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
 
     票 03 改了 relay 那一族的**可判性**（在正确的方向：从"候选期不可知"变成"可判"，
     见 :func:`~sgs.effects.supply._dimension_failure` 的 relay 分支 + `LordSkill.offer`
-    的供给真值）：四条声明从此是 ``unknown=False`` 的**需求传递**；预转化（票 04）今天
-    仍是 ``unknown=True``。
+    的供给真值）：四条声明是 ``unknown=False`` 的**需求传递**。票 04 再把最后一条
+    ——【蛊惑】的**预转化**——改成可判：声明只说"我是预转化"（``product=None``：能声明什么
+    由牌堆 + 窗口要的牌名现算），逐张来源牌的供给由
+    :func:`~sgs.effects.supply.supplies_of_action` 展开；"整档给不出来"接同一个
+    ``supply_none_reason`` 口子（票 03 建立）。于是**今天没有真实声明落在 ``unknown`` 上**。
     """
     from sgs.skills import CATALOG
 
@@ -470,7 +474,12 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
 
     guohuo = CATALOG["hero.yuji_mobile.guohuo"].supply
     assert guohuo is not None
-    assert (guohuo.kind, guohuo.unknown) == ("preconversion", True)
+    assert (guohuo.kind, guohuo.unknown, guohuo.product) == ("preconversion", False, None), (
+        "预转化是**可判**的供给；产物牌名不写进声明（展开时按牌堆 + 窗口现算）"
+    )
+    assert CATALOG["hero.yuji_mobile.guohuo"].supply_none_reason is not None, (
+        "整档给不出来时要有理由口子（票 04：被【义绝】封手牌）"
+    )
 
     for skill_id in (
         "hero.caocao.hujia",
@@ -489,8 +498,11 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
 def test_an_unknown_provider_supply_is_reported_but_never_greyed():
     """候选期不可知的供给照报（``unknown=True``），匹配器**不判死**。
 
-    票 03 起只剩【蛊惑】的**预转化**走这一档：【护驾】/【激将】的 relay 变成了可判的
-    供给（``tests/test_need_card_relay.py` 钉住它），故这里的分母缩到一条。
+    票 04 之后**没有真实声明**走这一档（票 03 把 relay 变成可判、票 04 把【蛊惑】的预转化
+    变成逐张可判）⇒ 本条拿**构造**的 ``Supply(unknown=True)`` 钉住匹配器对它的展示口径
+    （票 01 冻结的行为：展示层不判死，合法性由闸门另行回答——见
+    ``tests/test_need_card_relay.py::test_the_relay_branch_is_scoped_to_relay_and_leaves_the_other_kinds_alone``）。
+    声明清空**不改**这条口径：它是"以后再有候选期不可知的供给"的显示契约。
     """
     demand = Demand(names=("dodge",), suits=("diamond",))
 
@@ -618,35 +630,58 @@ def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_su
 
 
 def test_an_unknown_provider_stays_out_of_the_face_while_a_restriction_is_active():
-    """§3-2 前半：候选期不可知（【蛊惑】的预转化）⇒ 限制生效时**仍不进面**。
+    """§3-2 前半 / 票 04 §2b-3：限制生效时"算出来一张都不行" ⇒ **仍不进面**（失败关闭不变）。
 
     ``unknown`` 的失败关闭住在**合法性闸门**（``effects.supply.supply_is_legal``）里，不在
-    匹配器里（匹配器对它"不判死"是票 01 的展示口径）。
+    匹配器里（匹配器对它"不判死"是票 01 的展示口径）——票 02 建立、票 03 / 04 都**没改**
+    闸门一个字。
 
-    **票 03 之后这一条的分母只剩【蛊惑】的预转化**：【护驾】/【激将】的 relay 已变成**可判**
-    的供给（持有者没被挡住时它在花色需求下**进面**，用户 Q2「护驾的发动无须交验合法性」），
-    那条"多禁被放开"的断言住在 `tests/test_need_card_relay.py`——本文件不再替 03 冻结旧口径。
+    **票 04 之后这一条的分母又变了一次**（票 03 把它缩到只剩【蛊惑】，票 04 把【蛊惑】的
+    预转化也变成**逐张可判**了）⇒ 今天的真实声明里**一条 ``unknown`` 都不剩**，故本条拆成
+    两层读：
+
+    ①**闸门层**：``unknown`` 的失败关闭仍在（合成供给样本照旧关掉）——它不再替某条技能
+      作证，但仍是"以后再有候选期不可知的供给"的兜底；
+    ②**真窗口层**：真断言的落点从"unknown 一刀切"变成**逐张匹配的结论**——于吉手里没有一张
+      能预转化出可响应【闪】的牌时【蛊惑】不进面（票面 §2："判据从'有需求就全禁'变成
+      '算出来一张都不行'"），有一张匹配的牌时才进面。
+
+    名字沿用票 02 的那一个（``unknown_provider_...``）：它仍是这条判据的历史入口；逐张的
+    完整收口（三行置灰 / 上游禁令 / 信息卫生 / S16）在
+    `tests/test_need_card_preconversion.py`。
     """
     guohuo = "hero.yuji_mobile.guohuo"
-    guohuo_state = _state_with((_DODGES[0],), hero="yuji_mobile")
-
     declared = CATALOG[guohuo].supply
-    assert declared is not None and declared.unknown is True, guohuo
-    face = legal_actions_for(
-        guohuo_state, 0, QueryKind.DODGE, answers_seq=0,
-        payload=DodgeContext(response_suits=("heart",)),
+    assert declared is not None and declared.unknown is False, (
+        f"{guohuo}：票 04 起预转化是**可判**的供给（不再是 unknown）"
     )
-    assert _providers(face) == [], f"{guohuo}：限制生效时仍进了面"
-    # 不限花色的窗口里它照常进面（票 01 之前的行为逐条不变）。
-    assert guohuo in _providers(
-        legal_actions_for(
-            guohuo_state, 0, QueryKind.DODGE, answers_seq=0, payload=DodgeContext()
+    # ① 闸门层：unknown 的失败关闭仍在（票 02 的判据一字未改；今天已无真实载体）。
+    assert (
+        supply_is_legal(
+            Demand(names=("dodge",), suits=("heart",)),
+            Supply(product="dodge", kind="preconversion", unknown=True),
         )
-    ), f"{guohuo}：不限花色时应当照常提供"
-    # §1b：它仍在供给池里 ⇒ 供给行照报（灰行的来源），只是不进面。
+        is False
+    ), "unknown + 收窄需求 ⇒ 闸门仍失败关闭"
+
+    # ② 真窗口层：♣ 的【杀】预转化不出 ♥ / ♦ 的【闪】⇒ 限制生效时不进面。
+    club_slash = _card_of_suit("slash", "club")
+    diamond_slash = _card_of_suit("slash", "diamond")
+    no_match = _state_with((club_slash,), hero="yuji_mobile")
+    assert guohuo not in _providers(_dodge_face(no_match, response_suits=("heart",))), (
+        f"{guohuo}：手里没有一张 ♥ 的牌 ⇒ 算出来一张也不行 ⇒ 不进面"
+    )
+    # 有一张 ♦ 的牌时，同一个限制照样可以"算出来"⇒ 进面（票 02 之前它被一刀切禁掉）。
+    matches = _state_with((diamond_slash,), hero="yuji_mobile")
+    assert guohuo in _providers(_dodge_face(matches, response_suits=("diamond",))), (
+        f"{guohuo}：有一张 ♦ 的牌 ⇒ 预转化供给满足需求 ⇒ 进面"
+    )
+    # 不限花色的窗口里它照常进面（票 01 之前的行为逐条不变）。
+    assert guohuo in _providers(_dodge_face(no_match, response_suits=None))
+    # §1b：它仍在供给池里 ⇒ 逐张灰行照报（灰行的来源），只是不进面。
     assert guohuo in _providers(
         all_actions_for(
-            guohuo_state, 0, QueryKind.DODGE, answers_seq=0,
+            no_match, 0, QueryKind.DODGE, answers_seq=0,
             payload=DodgeContext(response_suits=("heart",)),
         )
     ), f"{guohuo}：供给池里应当保留（灰行来源）"

@@ -85,7 +85,7 @@ from .modifiers import (
     PriorityClass,
     apply_modifiers,
 )
-from .supply import demand_for, supply_is_legal, supply_of_action
+from .supply import demand_for, supply_is_legal, supplies_of_action
 
 __all__ = [
     "DISTANCE_NO_TARGET",
@@ -1110,6 +1110,7 @@ def _actions_for(
         _candidate_pool_for(
             state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
         ),
+        state=state,
         seat=seat,
         kind=kind,
         payload=payload,
@@ -1120,6 +1121,7 @@ def _actions_for(
 def _supply_gate(
     actions: tuple[Action, ...],
     *,
+    state: GameState,
     seat: int,
     kind: QueryKind,
     payload: Any,
@@ -1131,22 +1133,34 @@ def _supply_gate(
 
     1. 认出这一问的需求 —— :func:`~sgs.effects.supply.demand_for`（不是需要牌窗口 ⇒ ``None``
        ⇒ 一个都不删）；
-    2. 把候选动作翻成供给 —— :func:`~sgs.effects.supply.supply_of_action`（提供者读
-       ``SkillDef.supply`` 的声明，逐张牌读 ``CardRef``）；
+    2. 把候选动作翻成供给 —— :func:`~sgs.effects.supply.supplies_of_action`（提供者读
+       ``SkillDef.supply`` 的声明，逐张牌读 ``CardRef``，预转化展开成**逐张来源牌**的多条）；
     3. 问合法性 —— :func:`~sgs.effects.supply.supply_is_legal`（匹配器 + ``unknown`` 的失败
        关闭；**不许**在这里另写"哪些花色算满足"）。
 
-    ``Pass`` 等**非供给动作**原样放行；只删不改，故排序不动。
+    一条动作有**多条**供给时（票 04 的预转化：一个 ``ActivateSkill`` ↔ 每一张手牌），只要
+    有一条合法这条动作就进面——"算出来一张都不行"才失败关闭（票面 §2）。这与行表里
+    "任意一张来源牌高亮 ⇒ 这一档有合法候选"是同一个判据（spec §7 S16）。
+
+    ``Pass`` 等**非供给动作**原样放行；没声明供给的提供者也原样放行（``supplies_of_action``
+    返回 ``None``：票 02 之前就不筛它）。只删不改，故排序不动。
     """
     demand = demand_for(kind, payload, dying=dying, asker=seat)
     if demand is None:
         return actions
-    return tuple(
-        action
-        for action in actions
-        if not isinstance(action, (UseCard, PlayCard, ActivateSkill))
-        or supply_is_legal(demand, supply_of_action(action))
-    )
+    kept: list[Action] = []
+    for action in actions:
+        if not isinstance(action, (UseCard, PlayCard, ActivateSkill)):
+            kept.append(action)
+            continue
+        supplies = supplies_of_action(
+            action, state=state, seat=seat, kind=kind, payload=payload, dying=dying
+        )
+        if supplies is None or any(
+            supply_is_legal(demand, supply) for supply in supplies
+        ):
+            kept.append(action)
+    return tuple(kept)
 
 
 def _candidate_pool_for(

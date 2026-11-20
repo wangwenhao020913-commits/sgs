@@ -187,7 +187,8 @@ SupplyNoneReason: TypeAlias = Callable[[Any, int], "str | None"]
 
 ``None`` = 供给给得出；一句人话 = **声明了供给、此刻却给不出来**。它是 need-card-supply
 票 03 的"供给为 none 的理由"口子：那一段的判据只有技能自己知道（【护驾】/【激将】的持有者
-还能不能使用 / 打出手牌），展示层只该知道"有 / 没有"与"为什么没有"。见
+还能不能使用 / 打出手牌），展示层只该知道"有 / 没有"与"为什么没有"。票 04 起【蛊惑】的
+逐张预转化接同一个口子（被【义绝】封手牌 ⇒ 一张也扣置不出去）。见
 :attr:`SkillDef.supply_none_reason`。"""
 
 
@@ -733,8 +734,10 @@ class SkillDef:
 
     - 【八卦阵】/【八阵】⇒ ``Supply(product="dodge", kind="virtual")``（无色无点数的
       虚拟【闪】——花色 / 点数恒无，故**确定地**不满足任何花色 / 点数需求，spec §3-3）；
-    - 【蛊惑】⇒ ``Supply(kind="preconversion", unknown=True)``（预转化，候选期不可知；
-      票 04 的活）；
+    - 【蛊惑】⇒ ``Supply(kind="preconversion", unknown=False)``（**预转化**，票 04：用户 Q1
+      "蛊惑 = 特殊的转化牌"）。声明里**不写产物牌名**：一个 ``ActivateSkill`` 对应"每一张
+      手牌一条供给"，逐张展开住 :func:`~sgs.effects.supply.supplies_of_action`（能声明什么由
+      牌堆 + 窗口要的牌名现算，``_guohuo_response_names`` 是唯一判据）；
     - 【护驾】/【激将】⇒ ``Supply(product="dodge" | "slash", kind="relay")``
       （**需求传递**，票 03：``unknown=False``——牌名是声明事实，匹配规则由
       ``kind="relay"`` 一族给定，见 :func:`~sgs.effects.supply._dimension_failure`；
@@ -757,6 +760,8 @@ class SkillDef:
       ``ActivateSkill``"（被挡 ⇒ 连询问链都不开，票 03 §1 / S9）；
     - 展示层：:func:`~sgs.effects.supply.supplies_for` 用它给**没有候选的档**补一行
       ``ok=False`` + 这句话（票 03 §2c：行 ``ok=True`` ⇔ 那一档有合法候选，spec §7 S16）。
+      票 04 起还有第二种形态：候选**在池里**、逐张展开却为空（【蛊惑】被【义绝】封手牌）
+      ——同样报一行"供给为 none" + 这句话（``effects/supply.py::_declared_supply_none_reason``）。
 
     它只在"这一档本来就是这一问的提供者"时被问（产物牌名落在需求里，由 ``supplies_for``
     判）；**不进记录流**（``SkillDef`` 不被序列化）。

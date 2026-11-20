@@ -35,6 +35,7 @@ from sgs.data import (
     load_hero_tables,
 )
 from sgs.effects import (
+    PRECONVERSION_SUPPLY_KIND,
     DistanceBonus,
     Demand,
     Supply,
@@ -3331,8 +3332,12 @@ _SUPPLY_KIND_TEXT: dict[str, str] = {
     "real": "",
     "virtual": "虚拟",
     "transformed": "转化",
+    "preconversion": "预转化",
 }
 """已知供给的修饰词（真牌不加词：牌面本身就说明了它是实体牌）。
+
+"预转化"（票 04）是**可判**的供给（``unknown=False``）：来源牌的花色 / 点数照常拼进牌面，
+只是牌名由"扣置它、声明要当什么"决定 ⇒ 例：``♦2预转化【闪】``。
 
 需求传递不在这张表里：它没有"牌面"可拼（无色无点数），文案由
 :func:`need_card_supply_text` 单独给一整句。"""
@@ -3341,8 +3346,10 @@ _UNKNOWN_SUPPLY_TEXT: dict[str, str] = {
     "relay": "需求传递",
     "preconversion": "预转化",
 }
-"""候选期不可知的供给**只写标签**（票 01 的展示口径；票 03 起只剩【蛊惑】的预转化仍走这一
-档——【护驾】/【激将】的 relay 已变成可判的供给，见 :func:`need_card_supply_text`）。"""
+"""候选期不可知的供给**只写标签**（票 01 的展示口径）。
+
+票 04 起**没有真实声明**走这一档（【蛊惑】的预转化改成逐张可判）：本表与那条渲染分支
+留给"以后再有候选期不可知的供给"与合成载荷，不是今天某条技能的名字。"""
 
 _NONE_SUPPLY_TEXT = "供给为 none"
 """**这一档给不出来**时的行文案（票 03 的"供给为 none 的理由"口子）。
@@ -3429,17 +3436,26 @@ def need_card_supply_text(state: Any, supply: Supply) -> str:
 def need_card_supply_rows(
     state: Any, demand: Demand, tiers: Iterable[TierSupplies]
 ) -> list[dict[str, Any]]:
-    """把按档供给渲染成**一行一档**的载荷（票面 §2 的 ``{tier, label, supply_text, ok, reason}``）。
+    """把按档供给渲染成载荷行（票面 §2 的 ``{tier, label, supply_text, ok, reason}``）。
 
-    - ``ok`` / ``reason`` 在这里**现算**（用户 Q4），判据只有 :func:`supply_satisfies` /
-      :func:`supply_mismatch` 那一条；
-    - 一档里只要有一条供给满足需求，这一行就高亮（同一档的多张【闪】不会各占一行）；
-    - 不满足时 ``reason`` 取**第一条**不满足的供给：``载体：供给 → 为什么不满足``
-      （例：``八卦阵：无色虚拟【闪】→ 不满足花色限制``）；
-    - **供给为 none 的档**（票 03）：``supplies`` 为空、理由在 ``TierSupplies.reason`` 上
-      ⇒ 这一行 ``ok=False``、``supply_text = 供给为 none``、``reason`` 取那句
-      ``载体：供给为 none → 为什么给不出来``。行仍要画：那一档**是**这一问的提供者
-      （【护驾】在【闪】窗口里），消失会让玩家以为技能没了。
+    行粒度有**两种**，按供给种类分：
+
+    - **按档一行**（票 01 的既有口径）：一档里只要有一条供给满足需求，这一行就高亮
+      （同一档的多张【闪】 / 【八卦阵】与【八阵】不会各占一行）；不满足时 ``reason`` 取
+      **第一条**不满足的供给：``载体：供给 → 为什么不满足``（例：
+      ``八卦阵：无色虚拟【闪】→ 不满足花色限制``）。
+    - **按来源牌一行**（票 04 的**预转化**）：【蛊惑】的每一张手牌各一行——"♦2 能预转化出
+      可响应的【闪】、♣8 不能"是**逐张**置灰，合成一行就只画得出"这一档能不能用"。
+      一行恰好一条供给（展开点 = ``effects/supply.py::supplies_of_action``），``ok`` /
+      ``reason`` 与按档行用**同一对**判据去算。
+
+    ``ok`` / ``reason`` 都在这里**现算**（用户 Q4），判据只有 :func:`supply_satisfies` /
+    :func:`supply_mismatch` 那一条——前端只读 ``ok``。
+
+    **供给为 none 的档**（票 03/04）：``supplies`` 为空、理由在 ``TierSupplies.reason`` 上
+    ⇒ 这一行 ``ok=False``、``supply_text = 供给为 none``、``reason`` 取那句
+    ``载体：供给为 none → 为什么给不出来``。行仍要画：那一档**是**这一问的提供者
+    （【护驾】在【闪】窗口里 / 【蛊惑】被义绝封手牌），消失会让玩家以为技能没了。
     """
     grouped: dict[int, list[TierSupplies]] = {}
     for group in tiers:
@@ -3447,45 +3463,87 @@ def need_card_supply_rows(
 
     rows: list[dict[str, Any]] = []
     for tier in sorted(grouped):
-        groups = grouped[tier]
-        supplies = [supply for group in groups for supply in group.supplies]
-        carriers = [
-            _need_card_skill_name(state, group.provider)
-            if group.provider is not None
-            else _CARD_TIER_CARRIER
-            for group in groups
-        ]
-        carrier = " / ".join(dict.fromkeys(carriers))
-        ok = any(supply_satisfies(demand, supply) for supply in supplies)
-        reason: str | None = None
-        if not ok:
-            unsatisfied = next(
-                (supply for supply in supplies if not supply_satisfies(demand, supply)),
-                None,
-            )
-            if unsatisfied is not None:
-                reason = (
-                    f"{carrier}：{need_card_supply_text(state, unsatisfied)}"
-                    f" → {supply_mismatch(demand, unsatisfied)}"
-                )
+        per_card: list[TierSupplies] = []
+        aggregate: list[TierSupplies] = []
+        for group in grouped[tier]:
+            if any(
+                supply.kind == PRECONVERSION_SUPPLY_KIND for supply in group.supplies
+            ):
+                per_card.append(group)
             else:
-                # 声明了供给、此刻给不出来（票 03）：理由来自提供者的声明（
-                # `SkillDef.supply_none_reason`），投影只拼句子、不判。
-                none_reason = next(
-                    (group.reason for group in groups if group.reason), None
-                )
-                if none_reason is not None:
-                    reason = f"{carrier}：{_NONE_SUPPLY_TEXT} → {none_reason}"
+                aggregate.append(group)
+        if aggregate:
+            rows.append(_tier_supply_row(state, demand, tier, aggregate))
+        for group in per_card:
+            rows.extend(_preconversion_supply_rows(state, demand, tier, group))
+    return rows
+
+
+def _tier_supply_row(
+    state: Any, demand: Demand, tier: int, groups: list[TierSupplies]
+) -> dict[str, Any]:
+    """**按档**那一行（同一档的多条供给合成一行；载体用既有技能名表渲染）。"""
+    supplies = [supply for group in groups for supply in group.supplies]
+    carriers = [
+        _need_card_skill_name(state, group.provider)
+        if group.provider is not None
+        else _CARD_TIER_CARRIER
+        for group in groups
+    ]
+    carrier = " / ".join(dict.fromkeys(carriers))
+    ok = any(supply_satisfies(demand, supply) for supply in supplies)
+    reason: str | None = None
+    if not ok:
+        unsatisfied = next(
+            (supply for supply in supplies if not supply_satisfies(demand, supply)),
+            None,
+        )
+        if unsatisfied is not None:
+            reason = (
+                f"{carrier}：{need_card_supply_text(state, unsatisfied)}"
+                f" → {supply_mismatch(demand, unsatisfied)}"
+            )
+        else:
+            # 声明了供给、此刻给不出来（票 03）：理由来自提供者的声明（
+            # `SkillDef.supply_none_reason`），投影只拼句子、不判。
+            none_reason = next((group.reason for group in groups if group.reason), None)
+            if none_reason is not None:
+                reason = f"{carrier}：{_NONE_SUPPLY_TEXT} → {none_reason}"
+    return {
+        "tier": int(tier),
+        "label": f"{TIER_LABELS.get(int(tier), '其他档')}·{carrier}",
+        "supply_text": "、".join(
+            need_card_supply_text(state, supply) for supply in supplies
+        )
+        or _NONE_SUPPLY_TEXT,
+        "ok": ok,
+        "reason": reason,
+    }
+
+
+def _preconversion_supply_rows(
+    state: Any, demand: Demand, tier: int, group: TierSupplies
+) -> list[dict[str, Any]]:
+    """**按来源牌**的预转化行（票 04）：一条 :class:`Supply` 一行，各判各的 ``ok``。
+
+    载体名只取**这一组**的提供者（【蛊惑】），不掺同档别的载体——玩家看到的是"这一张牌
+    能不能预转化出这一问要的牌名"，不是"这一档能不能用"。
+    """
+    carrier = _need_card_skill_name(state, group.provider)
+    label = f"{TIER_LABELS.get(int(tier), '其他档')}·{carrier}"
+    rows: list[dict[str, Any]] = []
+    for supply in group.supplies:
+        text = need_card_supply_text(state, supply)
+        ok = supply_satisfies(demand, supply)
         rows.append(
             {
                 "tier": int(tier),
-                "label": f"{TIER_LABELS.get(int(tier), '其他档')}·{carrier}",
-                "supply_text": "、".join(
-                    need_card_supply_text(state, supply) for supply in supplies
-                )
-                or _NONE_SUPPLY_TEXT,
+                "label": label,
+                "supply_text": text,
                 "ok": ok,
-                "reason": reason,
+                "reason": None
+                if ok
+                else f"{carrier}：{text} → {supply_mismatch(demand, supply)}",
             }
         )
     return rows
