@@ -77,6 +77,7 @@ from sgs.effects import (
     locate,
     needs_designation,
     satisfies_required,
+    Supply,
     targets_within_attack_range,
     UseContext,
 )
@@ -3580,6 +3581,16 @@ class ActiveSkill(HeroSkillDecl):
     由 :data:`~sgs.skills.preactivation.FLOWS` 的派生照常登记（与被动技同一条派生）。
     """
 
+    supply: Supply | None = None
+    """作为**"需要牌"窗口的提供者**时，候选期能提供什么（need-card-supply 票 01）。
+
+    与 ``need_card_tier`` 同一姿态的**声明**字段：原样透传给 ``SkillDef.supply``，
+    判据只在供需闸门读它（``effects/actions.py::_supply_gate``）。票 04 起唯一的真实载体是
+    【蛊惑】的 ``kind="preconversion"``——逐张手牌按来源牌的花色 / 点数报供给（展开点 =
+    ``effects/supply.py::supplies_of_action``，本声明只说"我是预转化"）；票 01 立在这里的
+    ``unknown`` 已按票 07 删除（票 03 / 04 之后没有生产者）。
+    """
+
     need_card_tier: int | None = None
     """作为**"需要牌"窗口的提供者**时的优先级档覆盖位（票 04 §3；缺省 ``None`` = 按载体派生）。
 
@@ -4083,6 +4094,26 @@ def _guohuo_response_names(
         for name, type_id in _guohuo_declaration_table(state).items()
         if type_id in extra or satisfies_required(pure_virtual_card(state, type_id), required)
     }
+
+
+def guohuo_preconversion_products(
+    state: GameState,
+    required: str,
+    *,
+    asker: int | None = None,
+    dying: int | None = None,
+) -> tuple[str, ...]:
+    """【蛊惑】这一问**能声明的产物牌名**（去重、保持牌堆序；票 04 的逐张供给读它）。
+
+    包装 :func:`_guohuo_response_names` 的**同一份表**——票面 §1 要求"能预转化成的牌名"读
+    同一个判据，故这里只做去重与顺序，不新增任何筛选。它是**跨子包的读取口**
+    （``effects/supply.py`` 的逐张展开）：``tests/test_scaffold.py`` 不许 ``sgs.effects``
+    深层导入 ``sgs.skills.active``，故经 ``sgs.skills`` 的公开面走（票 04 的门禁真撞过）。
+
+    ``asker`` / ``dying`` 与 :func:`_guohuo_response_names` 同义（求桃窗口对濒死者放宽【酒】）。
+    """
+    table = _guohuo_response_names(state, required, asker=asker, dying=dying)
+    return tuple(dict.fromkeys(table.values()))
 
 
 def _guohuo_truth(state: GameState, frame: Any) -> bool:
@@ -9434,6 +9465,12 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         # 作为提供者的档 = **第 2 档**（票 04 §3 / Q16 / Q17）：载体是武将牌、产物却是
         # 转化牌（"扣置一张手牌当它"）⇒ 与真牌同档。写覆盖位，不在派发里认技能名。
         need_card_tier=2,
+        # need-card-supply 票 04（用户 Q1：蛊惑 = **特殊的转化牌** / "预转化"）：供给**可判**——
+        # 产物是"扣置的那张手牌转化出来的牌"，牌面继承来源牌（§16.3），故逐张手牌报一条
+        # `Supply`（`effects/supply.py::_preconversion_supplies` 展开，本声明只说"我是预转化"）。
+        # 声明里**不写产物牌名**：能声明什么由牌堆 + 窗口要的牌名现算
+        # （`_guohuo_response_names` 是唯一判据），写死一个牌名就是第二份判据。
+        supply=Supply(kind="preconversion"),
         extra_modifiers=(
             Modifier(ModifierPoint.CANDIDATES, _guohuo_provider_offers),
         ),
@@ -9678,6 +9715,8 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             hooks=skill.hooks,
             # 票 04 的加法：作为"需要牌"提供者时的档覆盖位（缺省 None ⇒ 按载体派生）。
             need_card_tier=skill.need_card_tier,
+            # need-card-supply 票 01 的加法：作为"需要牌"提供者时能提供什么（缺省 None）。
+            supply=skill.supply,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             # 声明级覆盖优先（标准 / 界同短 id 但步骤次序 / 角色不同，M6 票 14）。
             step_requirements=(

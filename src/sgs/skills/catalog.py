@@ -52,6 +52,7 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     PriorityClass,
+    Supply,
     activation_allowed,
     behavior_for,
     check_targets,
@@ -179,7 +180,6 @@ SeamHandler: TypeAlias = Callable[[Any, Frame], Control]
 
 FixedHandCount: TypeAlias = Callable[[Any, int], "int | None"]
 """``SkillDef.fixed_hand_count`` 的回调：``(state, seat) -> 固定到几 / None``（查询期现算）。"""
-
 
 class SeamKind(str, Enum):
     """**帧内接缝**的键（票 12 §Q12 / 票 30）。
@@ -713,6 +713,31 @@ class SkillDef:
     def activation_tier(self) -> PriorityClass:
         """**同一时机激活结算**读的那一档：``dispatch_tier`` 覆盖，否则 = 载体档。"""
         return self.priority_class if self.dispatch_tier is None else self.dispatch_tier
+
+    supply: Supply | None = None
+    """这条技能作为**"需要（使用 / 打出）牌"窗口的提供者**时，候选期能提供什么
+    （need-card-supply 票 01；:class:`~sgs.effects.Supply`，缺省 ``None`` = 不报供给）。
+
+    它是**定义**的属性、不是局面属性（与 :attr:`need_card_tier` 同一姿态）：档与供给都写在
+    技能声明上，候选期不重新枚举"哪些牌能用"。今天落四条：
+
+    - 【八卦阵】/【八阵】⇒ ``Supply(product="dodge", kind="virtual")``（无色无点数的
+      虚拟【闪】——花色 / 点数恒无，故**确定地**不满足任何花色 / 点数需求，spec §3-3）；
+    - 【蛊惑】⇒ ``Supply(kind="preconversion")``（**预转化**，票 04：用户 Q1
+      "蛊惑 = 特殊的转化牌"）。声明里**不写产物牌名**：一个 ``ActivateSkill`` 对应"每一张
+      手牌一条供给"，逐张展开住 :func:`~sgs.effects.supply.supplies_of_action`（能声明什么由
+      牌堆 + 窗口要的牌名现算，``_guohuo_response_names`` 是唯一判据）；
+    - 【护驾】/【激将】⇒ ``Supply(product="dodge" | "slash", kind="relay")``
+      （**需求传递**，票 03：牌名是声明事实，匹配规则由 ``kind="relay"`` 一族给定，见
+      :func:`~sgs.effects.supply._mismatch`；持有者自己被挡住时**连候选都不产出**，见
+      ``LordSkill.offer``）。
+
+    没有声明的提供者（【武翊】/ 界【渐营】②）因此不报供给：闸门把它读成"没声明"
+    （:func:`~sgs.effects.supply.supply_is_legal` 的 ``supply is None`` 分支——需求带收窄
+    维度时**失败关闭**，票 07），接入新提供者时补声明，与档位同一条纪律。票 07 还删掉了
+    票 01 立在这里的 ``unknown`` 字段：票 03 / 04 之后没有生产者。**不进记录流**
+    （``SkillDef`` 不被序列化）。
+    """
 
     need_card_tier: int | None = None
     """这条技能作为**"需要（使用 / 打出）牌"窗口的提供者**时的优先级档覆盖位（票 04 §3）。
@@ -3983,6 +4008,7 @@ def _equip(
     step_requirements: Mapping[str, str] | None = None,
     preactivated: bool = False,
     virtual_slot: SlotKind | None = None,
+    supply: Supply | None = None,
 ) -> SkillDef:
     """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。
 
@@ -3993,6 +4019,8 @@ def _equip(
     复合动作一次提交（骨架候选是"是否发动"那一问，保留）。
     ``virtual_source_count``（W4-3）：虚拟牌候选每次消耗几张来源牌——【丈八蛇矛】是 2，
     其余（含一切非转化技）恒 1；清单归属据此区分"两张来源的【杀】是谁转出来的"。
+    ``supply``（need-card-supply 票 01）：这张装备作为"需要牌"提供者时能提供什么
+    （【八卦阵】= 无色无点数的虚拟【闪】；其余装备没有这一面 ⇒ 缺省 ``None``）。
     ``virtual_slot``（huo-wolong-yanliang 票 01）：这张装备**被"视为装备"时占哪个槽位**
     （"视为装备着【八卦阵】"类技能的读侧）。缺省 ``None`` = 既有 22 条定义一字不改；今天
     唯一声明者是【八卦阵】（防具）。它只被 :func:`is_equipped` 的虚拟授予那一半读到。
@@ -4010,6 +4038,7 @@ def _equip(
         virtual_source_count=virtual_source_count,
         preactivated=preactivated,
         virtual_slot=virtual_slot,
+        supply=supply,
     )
 
 
@@ -4107,6 +4136,9 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=False,
         requirement="判定为红则视为使用【闪】",
         modifiers=(Modifier(ModifierPoint.CANDIDATES, _eight_diagrams_candidate),),
+        # need-card-supply 票 01：候选期能提供什么 = **无色无点数**的虚拟【闪】。花色 / 点数
+        # 恒无 ⇒ 确定地不满足任何花色 / 点数需求（spec §3-3）；它不因"候选期看不到"而置灰。
+        supply=Supply(product="dodge", kind="virtual"),
         # 被"视为装备"时占**防具**槽（huo-wolong-yanliang 票 01；读侧 = is_equipped）：
         # 卧龙诸葛【八阵】的牌面就是"视为装备着【八卦阵】"，故这条装备技能必须回答
         # "它算哪个槽位的防具"。本批**不**产出虚拟授予（八阵走候选模型），这一位只让
@@ -4675,6 +4707,10 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
             "（求助子窗口的 `PLAY`）与 `dodge` / `arrow_barrage` 两行的 `USE` / `PLAY`；"
             "`DODGE` 语境的派发**不带 mode 事实**（`actions._dodge` 只给 `respond_required`），"
             "故那两档是**声明性**的，行为与票 09 逐字相同。"
+            "**需求传递**（need-card-supply 票 03）：这一问带的是**同一份**需求——"
+            "`respond_context` 从承载帧继承 `RESPONSE_SUITS_KEY`（花色白名单），候选收窄"
+            "因此在这一问里照样生效。**受理面一字未变**（仍只收 `PlayCard`），故上面"
+            "「不参与」的结论不变。"
         ),
     ),
     CardRequestWindow(
@@ -4724,6 +4760,8 @@ CARD_REQUEST_WINDOWS: tuple[CardRequestWindow, ...] = (
             "调用方的 `start_use`）——所以这里多一处 `accept` 站点（票 20 的出牌阶段那条；"
             "票 22 的两扇效果窗口住在 `effects/ops.py` / `skills/active.py` 的受理面），而 "
             "asking 面一字未变。"
+            "**需求传递**（need-card-supply 票 03）：同【护驾】那一行——这一问带的是**同一份**"
+            "需求（`respond_context` 从承载帧继承 `RESPONSE_SUITS_KEY`），受理面未变。"
         ),
     ),
     CardRequestWindow(

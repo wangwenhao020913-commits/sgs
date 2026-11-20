@@ -53,11 +53,12 @@ from sgs.data import (
     hero_skill_id,
 )
 from sgs.effects import (
+    CARD_BEHAVIORS,
     CandidateScope,
     CarrierKind,
     Modifier,
     ModifierPoint,
-    CARD_BEHAVIORS,
+    Supply,
     TargetCount,
     TargetRule,
     UseContext,
@@ -893,6 +894,9 @@ def wolong_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.CANDIDATES, _bazhen_candidate),),
             requirement="判定为红则视为使用【闪】",
+            # need-card-supply 票 01：与真正的【八卦阵】**同一条声明形状**（候选读同一个
+            # `_bazhen_candidate`）⇒ 供给也是无色无点数的虚拟【闪】，不写第二份读法。
+            supply=Supply(product="dodge", kind="virtual"),
         ),
     )
 

@@ -16239,3 +16239,61 @@ def test_the_feng_guanyu_option_labels_are_chinese_on_both_sides() -> None:
         assert option in labels, f"前端 OPTION_LABELS 缺 {option}（按钮会回落成 id 原文）"
         assert labels[option] == text, "前端与引擎的四个选项文案必须逐字一致"
         assert text != option and re.search(r"[\u4e00-\u9fff]", text), "按钮上应是中文"
+
+
+# ---------------------------------------------------------------------------
+# 需要（使用 / 打出）牌的「需求 × 供给」：展示面已删（need-card-supply 票 05）
+#
+# 用户 2026-11-21 裁（spec §0.1b）：提示区的 supply 枚举不显示 ⇒ 票 01 的渲染与两个投影
+# 键一起删（不留下没人读的字段）。展示侧已无读取方，这里只钉**缺席**：真 handler 的载荷里
+# 两键不在——删掉即通过的空测试不算数，所以这条断言必须落在真·需要牌窗口上。
+# ---------------------------------------------------------------------------
+
+_NEED_CARD_PACK = load_content_pack(deck_profile="standard_108")
+"""标准 108 张档（票 32：模块级加载必须写死档位）。"""
+
+
+def _need_card_dodge_session():
+    """推到一个**需要【闪】**的询问：座位 1 的 AI 用【杀】指定人类座位，人类手上有【闪】。"""
+    pack = _NEED_CARD_PACK
+    slash = cards_of_type(pack, "slash")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,)), SeatSpec(hand=(slash,))],
+        deck=deck_excluding(pack, slash, dodge),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    session = Session(
+        seed=11, ai="heuristic", timeout_seconds=None, player_count=2, human_seat=0
+    )
+    session.engine = Engine.from_state(state, seed=11)
+    session.drive()
+    assert session.pending is not None and session.pending.kind == QueryKind.DODGE, (
+        "构造局面没到【闪】窗口"
+    )
+    return session
+
+
+def test_the_need_card_keys_are_gone_from_a_real_http_payload() -> None:
+    """票 05 验收 1：起会话、推进到一次需要牌询问、经**真 handler** 读挂起载荷，两键**不在**。
+
+    真 HTTP 是这条断言的要点：投影改坏了（比如又退回"键恒在、值为 ``None``"）在纯函数层
+    看不出来，只有真 handler 交出的那份载荷能证明"没人读的键没有被留下"。
+    """
+    from sgs_web.serve import GameRegistry
+
+    session = _need_card_dodge_session()
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    registry.sessions[session.session_id] = session
+    status, body = _get_with_the_real_handler(
+        registry, f"/api/sessions/{session.session_id}?after=-1&logs=0"
+    )
+
+    assert status == 200
+    pending = body["pending"]
+    assert pending["kind"] == "DODGE", "这条断言必须落在真·需要牌窗口上（否则'没有键'不算证据）"
+    assert "need_card_demand" not in pending, "票 05 删的是整键，不是置 None"
+    assert "need_card_supplies" not in pending, "供给行表（渲染 + 载荷）按用户裁定一并删除"
