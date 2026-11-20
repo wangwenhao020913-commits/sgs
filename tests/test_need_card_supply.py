@@ -5,12 +5,12 @@
 1. 两个对象：:class:`~sgs.effects.Demand`（维度可加的精确需求）与
    :class:`~sgs.effects.Supply`（候选期的供给描述），以及匹配器
    :func:`~sgs.effects.supply_satisfies`。**无花色 / 无点数**的供给**确定地不满足**
-   对应维度的限制（用户 2026-11-20 裁定，spec §3 第 3 条）；``unknown=True`` 的供给在
-   候选期不可知，匹配器**不判死**。
+   对应维度的限制（用户 2026-11-20 裁定，spec §3 第 3 条）。
 2. 需求生产者：每个需要牌窗口（``CARD_REQUEST_WINDOWS`` 里 ``providers=True`` 的 8 行）
    都产出一句需求，且这一问**留在面上的候选**至少有一条满足它（闸门不误删）。
-3. 合法性层（票 02）：供需闸门只删**交给玩家的面**——已知且满足的供给照常进面，无花色
-   供给在花色需求下不进面，候选期不可知（``unknown``）的供给在限制生效时失败关闭。
+3. 合法性层（票 02）：供需闸门只删**交给玩家的面**——有声明且满足的供给照常进面，无花色
+   供给在花色需求下不进面，**没声明供给**的提供者在需求带收窄维度时失败关闭（票 07 修回：
+   票 01 立的 ``unknown`` 已删，判据只剩「没声明」这一档）。
 
 **票 05 / 06**（spec §0.1b）：提示区的供给行表、投影字段与"按档分组 / 行理由 / 灰行池"
 那一层已随用户 2026-11-21 的裁定删除；本文件只钉**值对象 + 匹配 + 闸门**。
@@ -42,6 +42,7 @@ from sgs.state import (  # noqa: E402
     ActivateSkill,
     DodgeContext,
     PeachContext,
+    Phase,
     QueryKind,
     RespondContext,
     RespondMode,
@@ -65,11 +66,13 @@ def _state_with(
     hero: str | None = None,
     identity: Identity | None = None,
     pack=PACK,
+    phase: Phase | None = None,
 ):
     """座位 0 = 给定手牌 / 装备 / 武将 / 身份（供给样本都在它身上），座位 1 = 空手牌。
 
     ``identity`` 只服务**主公技**那一族（【护驾】/【激将】只在身份为主公时解析出实例，
-    ``_identity_gates_out`` 那条既有门控）。
+    ``_identity_gates_out`` 那条既有门控）。``phase`` 只服务"自己的出牌阶段"这一类提供者
+    （界【渐营】② 的 ``is_own_play_phase`` 判据，票 24 / Q1）。
     """
     used = set(hand) | set(equip)
     return build_state(
@@ -77,6 +80,7 @@ def _state_with(
         seats=[SeatSpec(hand=hand, equip=equip, hero=hero, identity=identity), SeatSpec()],
         deck=deck_excluding(pack, *used),
         turn_seat=0,
+        phase=phase,
         rule_config=RuleConfig(player_count=2, first_seat=0),
     )
 
@@ -89,8 +93,9 @@ def _state_with(
 def test_a_supply_without_a_suit_never_satisfies_a_suit_demand():
     """§4-3：无花色供给**确定地不满足**花色需求（不是"未知"）——【八卦阵】的虚拟【闪】。
 
-    判据来源 = spec §3 第 3 条（用户 2026-11-20 裁定）：``None`` 是"恒无"，不是"不知道"；
-    "不知道"由 ``unknown=True`` 单独表达。
+    判据来源 = spec §3 第 3 条（用户 2026-11-20 裁定）：``None`` 是"恒无"，不是"不知道"。
+    票 07 之后"不知道"不再是供给的一种取值：提供者**没声明**供给时**根本不产生** ``Supply``
+    （``None`` 由 :func:`~sgs.effects.supply.supply_is_legal` 的失败关闭回答）。
     """
     demand = Demand(suits=("diamond", "club"))
     bagua = Supply(product="dodge", kind="virtual")
@@ -115,17 +120,6 @@ def test_none_means_unrestricted_and_an_empty_whitelist_satisfies_nothing():
     assert supply_satisfies(Demand(suits=None), real)
     assert not supply_satisfies(Demand(suits=()), real)
     assert not supply_satisfies(Demand(suits=()), Supply(product="dodge", kind="virtual"))
-
-
-def test_an_unknown_supply_is_not_judged_dead_in_this_ticket():
-    """``unknown=True`` = 候选期不可知（【蛊惑】/【护驾】/【激将】）⇒ 本票只标出来、不判死。"""
-    demand = Demand(suits=("diamond",))
-
-    relay = Supply(product="dodge", kind="relay", unknown=True)
-    preconversion = Supply(product="dodge", kind="preconversion", unknown=True)
-
-    assert supply_satisfies(demand, relay) is True
-    assert supply_satisfies(demand, preconversion) is True
 
 
 def test_the_card_name_dimension_reuses_the_slash_family_key():
@@ -462,12 +456,13 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
     """§1：今天落四条（八个技能定义）——【八卦阵】/【八阵】、 【蛊惑】、【护驾】/【激将】。
 
     ``Supply`` 是**定义**的属性（与 ``need_card_tier`` 同一姿态），不是局面属性；闸门读
-    的就是这一份声明。票 03 让 relay 一族**可判**（``unknown=False`` 的**需求传递**，见
+    的就是这一份声明。票 03 让 relay 一族**可判**（**需求传递**，见
     :func:`~sgs.effects.supply._mismatch` 的 relay 分支）：四条声明是 relay。票 04 再把最后
     一条——【蛊惑】的**预转化**——改成可判：声明只说"我是预转化"（``product=None``：能声明
     什么由牌堆 + 窗口要的牌名现算），逐张来源牌的供给由
-    :func:`~sgs.effects.supply.supplies_of_action` 展开。于是**今天没有真实声明落在
-    ``unknown`` 上**。
+    :func:`~sgs.effects.supply.supplies_of_action` 展开。**票 07** 删掉了票 01 立的
+    ``unknown`` 字段（票 03 / 04 之后没有生产者）——"候选期判不了"只剩**没声明**这一档
+    （【武翊】/ 界【渐营】②），判据在 :func:`~sgs.effects.supply.supply_is_legal`。
     """
     from sgs.skills import CATALOG
 
@@ -477,7 +472,7 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
 
     guohuo = CATALOG["hero.yuji_mobile.guohuo"].supply
     assert guohuo is not None
-    assert (guohuo.kind, guohuo.unknown, guohuo.product) == ("preconversion", False, None), (
+    assert (guohuo.kind, guohuo.product) == ("preconversion", None), (
         "预转化是**可判**的供给；产物牌名不写进声明（展开时按牌堆 + 窗口现算）"
     )
 
@@ -489,23 +484,11 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
     ):
         relay = CATALOG[skill_id].supply
         assert relay is not None, skill_id
-        assert (relay.kind, relay.unknown) == ("relay", False), skill_id
+        assert relay.kind == "relay", skill_id
 
-
-def test_an_unknown_provider_supply_is_reported_but_never_greyed():
-    """候选期不可知的供给照报（``unknown=True``），匹配器**不判死**。
-
-    票 04 之后**没有真实声明**走这一档（票 03 把 relay 变成可判、票 04 把【蛊惑】的预转化
-    变成逐张可判）⇒ 本条拿**构造**的 ``Supply(unknown=True)`` 钉住匹配器对它的口径
-    （票 01 冻结的行为：匹配器不判死，合法性由闸门另行回答——见
-    ``tests/test_need_card_relay.py::test_the_relay_branch_is_scoped_to_relay_and_leaves_the_other_kinds_alone``）。
-    声明清空**不改**这条口径：它是"以后再有候选期不可知的供给"的兜底。
-    """
-    demand = Demand(names=("dodge",), suits=("diamond",))
-
-    guohuo = Supply(product="dodge", kind="preconversion", unknown=True)
-
-    assert supply_satisfies(demand, guohuo) is True
+    # 没声明的两个载体：闸门走 ``supply is None`` 的失败关闭（票 07 §1 / §4-3）。
+    for skill_id in ("hero.shi_zhaoyun.wuyi", "hero.jie_jushou_mobile.jianying"):
+        assert CATALOG[skill_id].supply is None, skill_id
 
 
 def test_the_self_rescue_wine_is_a_legal_supply_only_for_the_dying_seat():
@@ -608,14 +591,15 @@ def test_a_known_supply_that_satisfies_the_demand_is_what_lets_the_provider_into
     )
 
 
-def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_supply_row():
+def test_the_eight_diagrams_provider_is_kept_out_of_the_face_by_the_matcher():
     """§3-3：八卦阵在花色限制下不进面，理由是**匹配器**。
 
     断言的是**关系**（``supply_satisfies(需求, 八卦阵的声明) is False``）而不是"它被禁了"：
-    放开 `unknown` 的票 03 / 04 不会让这条关系变假（无花色**确定地**不满足花色需求）。
+    票 03 / 04 放开 relay / 预转化不会让这条关系变假（无花色**确定地**不满足花色需求）。
 
-    名字里的 "keeps its supply row" 是票 06 之前的历史面：供给行随展示层一起删除
-    （spec §0.1b），名字作为既有落点（票 02 / `开发文档/06` 账本）的锚保留。
+    票 06 之前名字里的 "keeps its supply row" 是当时的展示面（供给行随展示层一起删除，
+    spec §0.1b）；票 07 按"名字必须说清它钉住什么"把它改掉——本票只钉「匹配器把它挡在面外」
+    这一件事。
     """
     bagua = cards_of_type(PACK, "eight_diagrams")[0]
     state = _state_with((_DODGES[0],), equip=(bagua,))
@@ -630,42 +614,22 @@ def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_su
     assert "equip.eight_diagrams" not in _providers(_dodge_face(state, response_suits=("heart",)))
 
 
-def test_an_unknown_provider_stays_out_of_the_face_while_a_restriction_is_active():
-    """§3-2 前半 / 票 04 §2b-3：限制生效时"算出来一张都不行" ⇒ **仍不进面**（失败关闭不变）。
+def test_the_preconversion_provider_enters_the_face_only_when_a_hand_card_satisfies_the_demand():
+    """票 04 §2b-3：限制生效时"算出来一张都不行" ⇒ 不进面；有一张满足 ⇒ 进面。
 
-    ``unknown`` 的失败关闭住在**合法性闸门**（``effects.supply.supply_is_legal``）里，不在
-    匹配器里（匹配器对它"不判死"是票 01 的口径）——票 02 建立、票 03 / 04 都**没改**
-    闸门一个字。
+    票 02 建立这条断言时，它的分母是"候选期不可知的提供者一刀切失败关闭"（``unknown``）；
+    票 04 把【蛊惑】的预转化改成**逐张可判**之后，这一格变成了**逐张匹配的结论**（票面 §2：
+    "判据从'有需求就全禁'变成'算出来一张都不行'"）——票 07 删掉 ``Supply.unknown`` 之后，
+    名字也按"它实际钉住什么"改掉（旧名 ``test_an_unknown_provider_...`` 已不再成立）。
 
-    **票 04 之后这一条的分母又变了一次**（票 03 把它缩到只剩【蛊惑】，票 04 把【蛊惑】的
-    预转化也变成**逐张可判**了）⇒ 今天的真实声明里**一条 ``unknown`` 都不剩**，故本条拆成
-    两层读：
-
-    ①**闸门层**：``unknown`` 的失败关闭仍在（合成供给样本照旧关掉）——它不再替某条技能
-      作证，但仍是"以后再有候选期不可知的供给"的兜底；
-    ②**真窗口层**：真断言的落点从"unknown 一刀切"变成**逐张匹配的结论**——于吉手里没有一张
-      能预转化出可响应【闪】的牌时【蛊惑】不进面（票面 §2："判据从'有需求就全禁'变成
-      '算出来一张都不行'"），有一张匹配的牌时才进面。
-
-    名字沿用票 02 的那一个（``unknown_provider_...``）：它仍是这条判据的历史入口；逐张的
-    完整收口（三行置灰 / 上游禁令 / 信息卫生 / S16）在
-    `tests/test_need_card_preconversion.py`。
+    逐张的完整收口（上游禁令 / 信息卫生 / S16）在 `tests/test_need_card_preconversion.py`。
     """
     guohuo = "hero.yuji_mobile.guohuo"
-    declared = CATALOG[guohuo].supply
-    assert declared is not None and declared.unknown is False, (
-        f"{guohuo}：票 04 起预转化是**可判**的供给（不再是 unknown）"
+    assert CATALOG[guohuo].supply is not None, (
+        f"{guohuo}：票 04 起预转化是**有声明**的供给（声明只说「我是预转化」）"
     )
-    # ① 闸门层：unknown 的失败关闭仍在（票 02 的判据一字未改；今天已无真实载体）。
-    assert (
-        supply_is_legal(
-            Demand(names=("dodge",), suits=("heart",)),
-            Supply(product="dodge", kind="preconversion", unknown=True),
-        )
-        is False
-    ), "unknown + 收窄需求 ⇒ 闸门仍失败关闭"
 
-    # ② 真窗口层：♣ 的【杀】预转化不出 ♥ / ♦ 的【闪】⇒ 限制生效时不进面。
+    # ♣ 的【杀】预转化不出 ♥ / ♦ 的【闪】⇒ 限制生效时不进面。
     club_slash = _card_of_suit("slash", "club")
     diamond_slash = _card_of_suit("slash", "diamond")
     no_match = _state_with((club_slash,), hero="yuji_mobile")
@@ -754,3 +718,84 @@ def test_the_respond_demand_carries_the_same_suit_restriction_as_the_dodge_one()
     )
     assert demand_for(QueryKind.RESPOND, plain) == Demand(names=("slash",))
     assert demand_for(QueryKind.RESPOND, empty) == Demand(names=("slash",), suits=())
+
+
+# ---------------------------------------------------------------------------
+# 5. 未声明供给的提供者：收窄需求下失败关闭（need-card-supply 票 07）
+# ---------------------------------------------------------------------------
+
+
+def _gate(actions, *, state, kind, payload, seat: int = 0, dying: int | None = None):
+    """把一组候选动作过**供需闸门**（``_actions_for`` 里的那一层；候选生成不经过）。
+
+    第二条新断言（界【渐营】②）拿它当载体：② 只声明 ``peach``（票 24 / Q1「只参加使用
+    窗口」），而求桃的需求只带牌名维度 ⇒「收窄需求 + 渐营②」这一格在**真面**上走不到，
+    判据只能钉在本票修的那一层（``_supply_gate``）。
+    """
+    from sgs.effects.actions import _supply_gate
+
+    return _supply_gate(
+        tuple(actions), state=state, seat=seat, kind=kind, payload=payload, dying=dying
+    )
+
+
+def test_an_undeclared_provider_leaves_the_face_under_a_narrowing_demand():
+    """本票 §1 的行为面：提供者**没声明**供给 ⇒ 需求带收窄维度时不进面（失败关闭）。
+
+    载体 = 势赵云【武翊】①（``ProviderWindows(keys=("dodge",))``，``SkillDef.supply`` 为
+    ``None``）。票 02 的闸门把「没声明」读成「不筛它」，于是它在 ``response_suits=("heart",)``
+    与 ``()`` 下都进面——而票 02 之前（候选生成口的多禁）它在这两种需求下都被挡住；spec
+    §3-3 / 票 B 验收 2 / `06` 账本都说「供给未知 ⇒ 仍失败关闭」。
+
+    本票把判据交回 :func:`~sgs.effects.supply.supply_is_legal` 那一条既有分支
+    （``supply is None`` ⇒ 带收窄维度即失败关闭），闸门里**不**再写一份「哪些维度算收窄」；
+    需求不带收窄维度时照常进面（今天的窗口里它本来就是候选）。
+    """
+    wuyi = "hero.shi_zhaoyun.wuyi"
+    assert CATALOG[wuyi].supply is None, "武翊是「没声明」的载体（判据在闸门，不在声明）"
+    state = _state_with((_DODGES[0],), hero="shi_zhaoyun")
+    state.player(0).wuyi_names = ("slash",)  # 解锁第 1 档（武翊① 的门槛）
+
+    assert wuyi in _providers(_dodge_face(state, response_suits=None)), "无收窄 ⇒ 照常进面"
+    assert wuyi not in _providers(_dodge_face(state, response_suits=("heart",))), (
+        "未声明供给 + 花色白名单 ⇒ 失败关闭（票 02 之前的行为）"
+    )
+    assert wuyi not in _providers(_dodge_face(state, response_suits=())), (
+        "空白名单也是收窄维度（值的三态：() = 什么也满足不了）"
+    )
+
+
+def test_an_undeclared_preconversion_provider_also_leaves_a_narrowed_gate():
+    """界【渐营】② 同类（同一张票，按载体各一条）：未声明供给 ⇒ 收窄需求下失败关闭。
+
+    ② 的提供者声明收窄成 ``peach`` 一档（票 24 / Q1：牌面的动词是「使用」），而求桃的需求
+    只带牌名维度 ⇒「收窄需求 + 渐营②」这一格在**真面**上走不到。故本条钉两层：
+
+    ① 真窗口的对照：自己的出牌阶段里求桃面**有**这条 ``ActivateSkill``（载体是真的）；
+    ② 闸门层：同一个候选配一份带花色收窄的需求 ⇒ 失败关闭；配只有牌名的需求 ⇒ 照常进面。
+       两份需求都经 :func:`~sgs.effects.supply.demand_for` 现造（``DodgeContext``），
+       不用手搓的 ``Demand``——闸门里读的正是它。
+    """
+    jianying = "hero.jie_jushou_mobile.jianying"
+    assert CATALOG[jianying].supply is None
+    state = _state_with((_PEACHES[0],), hero="jie_jushou_mobile", phase=Phase.PLAY)
+    face = legal_actions_for(
+        state, 0, QueryKind.PEACH, answers_seq=0, dying=0, payload=PeachContext()
+    )
+    assert jianying in _providers(face), "① 自己的出牌阶段 + 求桃窗口 ⇒ 渐营②真会被问到"
+
+    candidate = (ActivateSkill(answers_seq=0, skill_id=jianying),)
+    narrowed = DodgeContext(response_suits=("heart",))
+    assert _gate(candidate, state=state, kind=QueryKind.DODGE, payload=narrowed) == (), (
+        "② 未声明供给 + 花色需求 ⇒ 不进面（本票修的那一格）"
+    )
+    plain = DodgeContext()
+    assert (
+        _gate(candidate, state=state, kind=QueryKind.DODGE, payload=plain) == candidate
+    ), "② 只有牌名的需求 ⇒ 照常进面"
+
+    # 判据的落点：闸门对 ``None`` 就是委托这一条既有分支（票 07 的"判据只有一处"）。
+    narrowed_demand = demand_for(QueryKind.DODGE, narrowed)
+    assert narrowed_demand is not None
+    assert supply_is_legal(narrowed_demand, None) is False
+    assert supply_is_legal(demand_for(QueryKind.DODGE, plain), None) is True

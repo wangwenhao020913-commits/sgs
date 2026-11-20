@@ -10,8 +10,9 @@
   除预转化外恒等于 :func:`supply_of_action` 的一元组）。闸门读它，故"这一条动作能提供
   什么"只有一份判据；
 - :func:`supply_satisfies` / :func:`supply_is_legal`：匹配核心与**合法性闸门**（票 02）——
-  ``effects/actions.py::_supply_gate`` 按后者收窄交到玩家手上的那一面。候选期不可知的供给
-  在匹配器里不判死、在合法性上失败关闭（见该函数的 docstring）。
+  ``effects/actions.py::_supply_gate`` 按后者收窄交到玩家手上的那一面。**候选期判不了**的
+  供给只有一种形态——提供者**没声明**（``supply is None``，票 07 起判据的唯一载体），合法性对
+  它失败关闭（见该函数的 docstring）。
 
 **维度可加**（用户 Q3 的落地口径）：牌名 / 花色 / 颜色 / 点数 / 虚拟·转化 / 转化源张数。
 今天只有前两维有生产者（牌名 = ``required``、花色 = ``response_suits``，单骑第三段），
@@ -20,16 +21,15 @@
 
 **无花色 / 无点数的供给确定地不满足对应维度的限制**（不是"未知"，spec §3 第 3 条）：
 【八卦阵】/【八阵】的纯虚拟【闪】与多源转化（【丈八蛇矛】/ 单骑）都没有花色 ⇒ 花色
-需求下必然不满足。"候选期不知道"由 :attr:`Supply.unknown` 单独表达：**匹配器**
-（:func:`supply_satisfies`）不判死；**合法性**（票 02 的 :func:`supply_is_legal`）
-在需求带收窄维度时失败关闭。票 04 起**没有真实声明**走这一档
-（【蛊惑】的预转化改成逐张可判，见 :data:`PRECONVERSION_SUPPLY_KIND`）：失败关闭那条
-分支仍留在闸门里（那是"以后再有隐形供给"的兜底），只是今天没有生产者为它作证。
+需求下必然不满足。"候选期不知道"由**没声明**（提供者不报供给）单独表达：匹配器不收这种
+输入，合法性（票 02 的 :func:`supply_is_legal`）在需求带收窄维度时失败关闭。票 07 删掉了
+票 01 立的 ``Supply.unknown`` 字段（"候选期不可知"）：票 03 的 relay 与票 04 的预转化都改成
+**可判**之后它没有生产者了（W6-06a 的"死字段"教训），失败关闭因此只剩"没声明"这一档。
 
 **需求传递**（``kind="relay"``，票 03）是第三条路：它不是"不知道"，而是"不在这一档判"——
 【护驾】/【激将】不产出转化 / 虚拟牌，真正做的是把**同一份** :class:`Demand` 依次传给
 同势力角色（用户 Q2），收窄维度在**传到的那个座位的询问**里才展开。故供给是**具体**的
-（``unknown=False``：牌名就是声明事实），匹配时**过牌名维度之后就不判死**——见
+（牌名就是声明事实），匹配时**过牌名维度之后就不判死**——见
 :func:`_mismatch` 里那条分支。持有者自己被挡住（【义绝】封手牌）时**连候选都不产出**
 （``skills/lord_request.py::LordSkill.offer`` 在候选生成前就撤掉这条 ``ActivateSkill``），
 故闸门见不到它——判据不读 ``GameState``。
@@ -117,7 +117,7 @@ PRECONVERSION_SUPPLY_KIND = "preconversion"
 ``kind="transformed"`` 的单源转化**逐字相同**（本模块不给它第二套比对）。
 
 与 relay 的区别：relay 是"这一档不在我这儿判"（牌名之后不判死），预转化是**逐张可判**
-（``unknown=False``）——故它是 :func:`supplies_of_action` 里那个"一动作多供给"的承载：
+——故它是 :func:`supplies_of_action` 里那个"一动作多供给"的承载：
 一个 ``ActivateSkill`` 对应**每一张手牌**一条 ``Supply``（档的进面与否 = 这些供给里有
 没有一条合法）。
 """
@@ -129,14 +129,14 @@ class Supply:
 
     - ``product``：产物牌名 id（如 ``"dodge"`` / ``"slash"`` / ``"fire_slash"``）；
     - ``suit`` / ``rank`` / ``color``：牌面事实；``None`` = **恒无**（纯虚拟 / 多源转化），
-      不是"不知道"——那由 :attr:`unknown` 表达（spec §3 第 3 条）；
+      **不是**"不知道"（spec §3 第 3 条）——候选期判不了的提供者**不报供给**（``None``），
+      由合法性闸门失败关闭，见 :func:`supply_is_legal`；
     - ``kind``：:data:`SUPPLY_KINDS` 之一；
-    - ``source_count``：转化源张数（真牌 / 纯虚拟恒 1）；
-    - ``unknown``：候选期不可知。**票 04 起没有真实声明走这一档**（【蛊惑】的预转化改成
-      逐张可判）：字段与匹配器对它的口径都保留（票 01 冻结的行为；去留是后续判据），
-      闸门里的失败关闭也保留——那是"将来再有隐形供给"的兜底，不是今天某条技能的名字。
-      需求传递（【护驾】/【激将】，票 03）**不是**这一档：它的牌名是声明事实，匹配规则由
-      ``kind`` 一族给定（见 :func:`_mismatch`），故它是**可判**的供给。
+    - ``source_count``：转化源张数（真牌 / 纯虚拟恒 1）。
+
+    票 07 删掉了票 01 立的 ``unknown`` 字段（"候选期不可知"）：票 03 / 04 之后没有真实声明
+    会置它，而"判不了"的唯一形态变成"提供者没声明"（``Supply`` 根本不产生），失败关闭落在
+    :func:`supply_is_legal` 的 ``supply is None`` 分支上。
     """
 
     product: str | None = None
@@ -145,7 +145,6 @@ class Supply:
     color: str | None = None
     kind: str = "real"
     source_count: int = 1
-    unknown: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in SUPPLY_KINDS:
@@ -228,13 +227,15 @@ def supply_satisfies(demand: Demand | None, supply: Supply | None) -> bool:
     """这条供给满不满足这份需求（= 闸门 :func:`supply_is_legal` 的匹配核心）。
 
     - 没有供给 ⇒ ``False``；没有需求 ⇒ ``True``（不限）；
-    - ``supply.unknown``（候选期不可知）⇒ ``True``：**匹配器不判死**，合法性由
-      :func:`supply_is_legal` 另行回答（票 01 冻结的单条口径）；
     - 否则按维度序列判（:func:`_mismatch`；需求传递在牌名之后不判死）。
+
+    它只看**具体的**供给（每个 ``Supply`` 的牌面事实都是已知的）："提供者没声明"（``None``）
+    与票 07 删掉的"候选期不可知"（``unknown``）都不是它的输入——那一格由
+    :func:`supply_is_legal` 回答（票 02 起）。
     """
     if supply is None:
         return False
-    if demand is None or supply.unknown:
+    if demand is None:
         return True
     return not _mismatch(demand, supply)
 
@@ -249,8 +250,8 @@ _NARROWED_DIMENSIONS: tuple[str, ...] = (
 """**收窄**维度（牌名之外的五个，spec §3 / Q3）：候选期看不到就判不了的限制。
 
 牌名不在里面：它是每一扇需要牌窗口的**基础要求**（窗口登记行 / 候选生成口已经按它收窄过），
-而候选期不可知的提供者历来按它放行（产物牌名是它们的声明事实）。这五个维度才是票 02
-"限制生效 ⇒ 失败关闭"的触发条件。
+而**没声明**供给的提供者按它放行——它们只登记在"产物就是这一问要的牌名"的窗口上
+（``ProviderWindows.keys``）。这五个维度才是"限制生效 ⇒ 失败关闭"的触发条件。
 """
 
 
@@ -264,25 +265,25 @@ def supply_is_legal(demand: Demand | None, supply: Supply | None) -> bool:
 
     它回答的是"该不该进 ``legal_actions`` 的那一面"：
 
-    - 供给**可判**（``supply`` 有声明且 ``unknown=False``）⇒ 按维度匹配
-      （需求传递那一种在牌名之后不判死，见 :func:`_mismatch`）；
-    - 供给**不可判**（``supply is None`` = 提供者没声明；``supply.unknown`` = 候选期不可知）
-      ⇒ **只要需求带一条收窄维度就失败关闭**（= 票 01 之前那道"多禁"的同一结论）；没有收窄
-      维度时照常放行（今天的窗口里它们本来就是候选）。票 04 起**没有真实声明**落在
-      ``unknown`` 上（【蛊惑】改成逐张可判），这条失败关闭因此是兜底而不是某条技能的判据。
+    - 供给**有声明**（``supply`` 不是 ``None``）⇒ 按维度匹配（需求传递那一种在牌名之后
+      不判死，见 :func:`_mismatch`）；
+    - 提供者**没声明**供给（``supply is None``）⇒ **只要需求带一条收窄维度就失败关闭**
+      （= 票 01 之前那道"多禁"的同一结论）；没有收窄维度时照常放行（今天的窗口里它们本来
+      就是候选）。票 02 的闸门起初把这一档读成"不筛它"（失败开放），票 07 修回失败关闭：
+      这条分支因此**有生产读者**——``_supply_gate`` 对 ``supplies_of_action(...) is None``
+      的动作正是传 ``None`` 进来。判据仍只有这一处：闸门里不另写"哪些维度算收窄"。
 
-    `unknown` 的失败关闭**只住在这里**（票面 §1 的判据只有一处）：匹配器
-    :func:`supply_satisfies` 对 ``unknown`` 返回 ``True``（"不判死"）是票 01 冻结的单条
-    口径，不是合法性的口径。
+    **失败关闭只住在这里**（票面 §1 的判据只有一处）：匹配器 :func:`supply_satisfies` 只看
+    具体的供给（票 07 删掉了 ``Supply.unknown``），故两边对同一条供给不可能给出相反回答。
 
     需求传递（票 03）**不走这条分支**：它是可判的供给，条件成立与否写在候选生成之前（持有者
     自己被 【义绝】 一类禁令封住时**连候选都不产出**）⇒ 这里见不到"该挡的 relay"，
     也**不**按技能名白名单放行任何一档。预转化（票 04）同理：闸门读到的是**逐张来源牌**的
-    具体供给（:func:`supplies_of_action`），不是一条 ``unknown`` 的声明。
+    具体供给（:func:`supplies_of_action`），不是一条"没声明"的提供者。
     """
     if demand is None:
         return True
-    if supply is None or supply.unknown:
+    if supply is None:
         return not _narrowed(demand)
     return supply_satisfies(demand, supply)
 
@@ -363,8 +364,9 @@ def supplies_of_action(
 
     返回值的三态与读取方：
 
-    - ``None``：不是供给（``Pass``）或提供者**没声明**供给 ⇒ 闸门**不筛它**（与票 02 之前
-      逐条不变：没声明的提供者不因需求被禁）；
+    - ``None``：不是供给（``Pass``）或提供者**没声明**供给 ⇒ 闸门把 ``None`` 交给
+      :func:`supply_is_legal`（票 07 §1：需求带收窄维度 ⇒ 失败关闭；只有牌名 ⇒ 照常进面）——
+      闸门自己不另判一次；
     - ``()``：声明了、此刻却**一张也给不出来**（【蛊惑】被【义绝】封住手牌）⇒ 闸门把它删掉
       （"供给 none ⇒ 不进面"）；
     - 否则：这一条动作的全部供给。除预转化外恒为 :func:`supply_of_action` 的一元组。

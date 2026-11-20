@@ -1108,16 +1108,18 @@ def _supply_gate(
        ⇒ 一个都不删）；
     2. 把候选动作翻成供给 —— :func:`~sgs.effects.supply.supplies_of_action`（提供者读
        ``SkillDef.supply`` 的声明，逐张牌读 ``CardRef``，预转化展开成**逐张来源牌**的多条）；
-    3. 问合法性 —— :func:`~sgs.effects.supply.supply_is_legal`（匹配器 + ``unknown`` 的失败
-       关闭；**不许**在这里另写"哪些花色算满足"）。
+    3. 问合法性 —— :func:`~sgs.effects.supply.supply_is_legal`（匹配器 + "没声明"的失败
+       关闭；**不许**在这里另写"哪些花色算满足"、也不许另写"哪些维度算收窄"）。
 
     一条动作有**多条**供给时（票 04 的预转化：一个 ``ActivateSkill`` ↔ 每一张手牌），只要
     有一条合法这条动作就进面——"算出来一张都不行"才失败关闭（票面 §2）。预转化因此不需要
     第二份"这张来源牌能不能当这一问的牌"的枚举：逐张供给与"进不进面"读同一个
     :func:`~sgs.effects.supply.supplies_of_action`。
 
-    ``Pass`` 等**非供给动作**原样放行；没声明供给的提供者也原样放行（``supplies_of_action``
-    返回 ``None``：票 02 之前就不筛它）。只删不改，故排序不动。
+    ``Pass`` 等**非供给动作**原样放行；提供者**没声明**供给（``supplies_of_action`` 返回
+    ``None``）时判据交给 ``supply_is_legal(demand, None)`` 那一条既有分支（票 07 §1）：
+    需求带收窄维度 ⇒ 不进面，只有牌名 / 没有需求 ⇒ 照常进面。闸门里**不**再写第二份
+    "哪些维度算收窄"——``supply_is_legal`` 已经把这件事写死了。只删不改，故排序不动。
     """
     demand = demand_for(kind, payload, dying=dying, asker=seat)
     if demand is None:
@@ -1130,9 +1132,12 @@ def _supply_gate(
         supplies = supplies_of_action(
             action, state=state, seat=seat, kind=kind, payload=payload, dying=dying
         )
-        if supplies is None or any(
-            supply_is_legal(demand, supply) for supply in supplies
-        ):
+        if supplies is None:
+            # 提供者没声明供给：**失败关闭**归 supply_is_legal 管（票 07 修回的那一格）。
+            if supply_is_legal(demand, None):
+                kept.append(action)
+            continue
+        if any(supply_is_legal(demand, supply) for supply in supplies):
             kept.append(action)
     return tuple(kept)
 

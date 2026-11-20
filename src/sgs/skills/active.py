@@ -3585,10 +3585,10 @@ class ActiveSkill(HeroSkillDecl):
     """作为**"需要牌"窗口的提供者**时，候选期能提供什么（need-card-supply 票 01）。
 
     与 ``need_card_tier`` 同一姿态的**声明**字段：原样透传给 ``SkillDef.supply``，
-    判据只在供需闸门读它（``effects/actions.py::_supply_gate``）。**票 04 起没有
-    ``unknown=True`` 的真实声明**：唯一的消费者【蛊惑】
-    改成 ``kind="preconversion"``、``unknown=False``——逐张手牌按来源牌的花色 / 点数报供给
-    （展开点 = ``effects/supply.py::supplies_of_action``，本声明只说"我是预转化"）。
+    判据只在供需闸门读它（``effects/actions.py::_supply_gate``）。票 04 起唯一的真实载体是
+    【蛊惑】的 ``kind="preconversion"``——逐张手牌按来源牌的花色 / 点数报供给（展开点 =
+    ``effects/supply.py::supplies_of_action``，本声明只说"我是预转化"）；票 01 立在这里的
+    ``unknown`` 已按票 07 删除（票 03 / 04 之后没有生产者）。
     """
 
     need_card_tier: int | None = None
@@ -9470,7 +9470,7 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         # `Supply`（`effects/supply.py::_preconversion_supplies` 展开，本声明只说"我是预转化"）。
         # 声明里**不写产物牌名**：能声明什么由牌堆 + 窗口要的牌名现算
         # （`_guohuo_response_names` 是唯一判据），写死一个牌名就是第二份判据。
-        supply=Supply(kind="preconversion", unknown=False),
+        supply=Supply(kind="preconversion"),
         extra_modifiers=(
             Modifier(ModifierPoint.CANDIDATES, _guohuo_provider_offers),
         ),

@@ -723,17 +723,20 @@ class SkillDef:
 
     - 【八卦阵】/【八阵】⇒ ``Supply(product="dodge", kind="virtual")``（无色无点数的
       虚拟【闪】——花色 / 点数恒无，故**确定地**不满足任何花色 / 点数需求，spec §3-3）；
-    - 【蛊惑】⇒ ``Supply(kind="preconversion", unknown=False)``（**预转化**，票 04：用户 Q1
+    - 【蛊惑】⇒ ``Supply(kind="preconversion")``（**预转化**，票 04：用户 Q1
       "蛊惑 = 特殊的转化牌"）。声明里**不写产物牌名**：一个 ``ActivateSkill`` 对应"每一张
       手牌一条供给"，逐张展开住 :func:`~sgs.effects.supply.supplies_of_action`（能声明什么由
       牌堆 + 窗口要的牌名现算，``_guohuo_response_names`` 是唯一判据）；
     - 【护驾】/【激将】⇒ ``Supply(product="dodge" | "slash", kind="relay")``
-      （**需求传递**，票 03：``unknown=False``——牌名是声明事实，匹配规则由
-      ``kind="relay"`` 一族给定，见 :func:`~sgs.effects.supply._mismatch`；
-      持有者自己被挡住时**连候选都不产出**，见 ``LordSkill.offer``）。
+      （**需求传递**，票 03：牌名是声明事实，匹配规则由 ``kind="relay"`` 一族给定，见
+      :func:`~sgs.effects.supply._mismatch`；持有者自己被挡住时**连候选都不产出**，见
+      ``LordSkill.offer``）。
 
-    没有声明的提供者（【武翊】/ 界【渐营】②）因此不报供给：接入新提供者时补声明，
-    与档位同一条纪律。**不进记录流**（``SkillDef`` 不被序列化）。
+    没有声明的提供者（【武翊】/ 界【渐营】②）因此不报供给：闸门把它读成"没声明"
+    （:func:`~sgs.effects.supply.supply_is_legal` 的 ``supply is None`` 分支——需求带收窄
+    维度时**失败关闭**，票 07），接入新提供者时补声明，与档位同一条纪律。票 07 还删掉了
+    票 01 立在这里的 ``unknown`` 字段：票 03 / 04 之后没有生产者。**不进记录流**
+    （``SkillDef`` 不被序列化）。
     """
 
     need_card_tier: int | None = None

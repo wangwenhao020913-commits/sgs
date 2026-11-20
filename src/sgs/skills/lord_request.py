@@ -1577,10 +1577,10 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
         ),
         preactivated=skill.activation_flow is not None,
         # need-card-supply 票 03：**需求传递**（relay）——发动时不验合法性，真正做的是把
-        # "需要一张【required】"这个需求依次传给同势力角色。故供给是**可判**的
-        # （`unknown=False`）：牌名照声明给（是**声明事实**，不是判据），收窄维度在传到的
-        # 那一问里展开（`effects.supply._mismatch` 的 relay 分支）。
-        supply=Supply(product=skill.required, kind="relay", unknown=False),
+        # "需要一张【required】"这个需求依次传给同势力角色。故供给是**可判**的：牌名照
+        # 声明给（是**声明事实**，不是判据），收窄维度在传到的那一问里展开
+        # （`effects.supply._mismatch` 的 relay 分支）。
+        supply=Supply(product=skill.required, kind="relay"),
     )
 
 

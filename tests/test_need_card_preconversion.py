@@ -170,19 +170,16 @@ def _face(state, kind: QueryKind, payload) -> tuple:
 
 
 def test_the_preconversion_declaration_is_judgeable_and_expands_per_hand_card():
-    """§1 / §2b-1：声明是**可判**的（``unknown=False``），逐张供给由同一个生成口展开。
+    """§1 / §2b-1：声明是**有声明且可判**的，逐张供给由同一个生成口展开。
 
     ``SkillDef.supply`` 只说"我是预转化"（``product=None``：产物牌名由牌堆 + 窗口现算）；
     展开点是 :func:`~sgs.effects.supplies_of_action`——**闸门读同一个函数**（§2b-3），故
-    这里直接断"一个动作 ↔ 每一张手牌一条供给"与牌面事实。
+    这里直接断"一个动作 ↔ 每一张手牌一条供给"与牌面事实。票 07 删掉了 ``unknown`` 字段
+    （票 04 起预转化逐张可判，它就没有生产者了）。
     """
     declared = CATALOG[GUOHUO].supply
     assert declared is not None
-    assert (declared.kind, declared.unknown, declared.product) == (
-        "preconversion",
-        False,
-        None,
-    )
+    assert (declared.kind, declared.product) == ("preconversion", None)
 
     hand = (DIAMOND_SLASH, CLUB_SLASH, HEART_PEACH)
     state = _state(hand)

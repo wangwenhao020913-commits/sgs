@@ -252,28 +252,30 @@ def _providers(actions) -> list[str]:
 
 
 def test_a_relay_supply_is_concrete_and_forwarded_not_judged_dead():
-    """relay = 具体供给（``unknown=False``）+ 牌名之后**不判死** + 合法性与匹配器同源。
+    """relay = 具体供给 + 牌名之后**不判死** + 合法性与匹配器同源。
 
-    三条一起读才是"需求传递"：①它不再是"候选期不可知"；②花色需求下**不判死**（需求要传给
-    同势力角色，答案在那一问里）；③合法性闸门因此不再失败关闭它——这正是票 02 的
-    ``unknown`` 分支"放开"的落点（票面 §2b-1：不在闸门里加技能名白名单）。
+    三条一起读才是"需求传递"：①它是**具体的**供给（牌名是声明事实，票 07 起连
+    ``Supply.unknown`` 这个字段都没有了）；②花色需求下**不判死**（需求要传给同势力角色，
+    答案在那一问里）；③合法性闸门因此不失败关闭它（票面 §2b-1：不在闸门里加技能名白名单）。
     """
     relay = CATALOG[HUJIA].supply
     assert relay is not None
-    assert (relay.kind, relay.unknown) == ("relay", False)
+    assert relay.kind == "relay"
 
     demand = Demand(names=("dodge",), suits=("diamond",))
     assert supply_satisfies(demand, relay) is True, "花色需求下 relay 不判死（需求传递）"
-    assert supply_is_legal(demand, relay) is True, "可判 ⇒ 闸门与匹配器同源"
+    assert supply_is_legal(demand, relay) is True, "有声明 ⇒ 闸门与匹配器同源"
 
     # 牌名维度**仍然判**（它是声明事实）：relay 不是"哪一问都能进"。
     assert supply_satisfies(Demand(names=("slash",)), relay) is False
 
 
 def test_the_relay_branch_is_scoped_to_relay_and_leaves_the_other_kinds_alone():
-    """同一条收窄需求下：八卦阵（已知、无花色）**仍**不满足；预转化（unknown）**仍**失败关闭。
+    """同一条收窄需求下：八卦阵与转化（都是**具体**供给）**仍**不满足花色需求。
 
     反例断言的作用：证明上面那条 ``True`` 是 relay 一族的判据，而不是"需求被放宽了"。
+    票 07 删掉 ``Supply.unknown`` 之后，第二例从"候选期不可知"的兜底样本换成
+    **无花色的具体供给**（多源转化：花色恒 ``None`` ⇒ 确定地不满足，spec §3 第 3 条）。
     """
     demand = Demand(names=("dodge",), suits=("diamond",))
 
@@ -281,9 +283,9 @@ def test_the_relay_branch_is_scoped_to_relay_and_leaves_the_other_kinds_alone():
     assert supply_satisfies(demand, bagua) is False, "无花色**确定地**不满足花色需求"
     assert supply_is_legal(demand, bagua) is False
 
-    guohuo = Supply(product="dodge", kind="preconversion", unknown=True)
-    assert supply_satisfies(demand, guohuo) is True, "unknown 不判死（票 01 的展示口径）"
-    assert supply_is_legal(demand, guohuo) is False, "unknown + 收窄需求 ⇒ 仍失败关闭（票 04）"
+    multi = Supply(product="dodge", kind="transformed", source_count=2)
+    assert supply_satisfies(demand, multi) is False, "多源转化的花色 / 点数恒无"
+    assert supply_is_legal(demand, multi) is False
 
 
 def test_a_suit_demand_lets_the_relay_provider_into_the_face():
@@ -461,7 +463,7 @@ def test_the_relay_chain_reuses_the_upstream_prohibition():
     from sgs.effects import forbidden_as_slash
 
     free = _run_jijiang_chain(tag=None)
-    assert sorted(_relay_playable(free)) == sorted((SLASH, SLASH_TWO)), (
+    assert set(_relay_playable(free)) == {SLASH, SLASH_TWO}, (
         "对照：没有标签时两张【杀】都能替主公打出"
     )
 

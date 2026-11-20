@@ -285,10 +285,14 @@
 
 **"这一次使用只许某些花色的牌响应"不是新窗口**（feng-guanyu 票 04；首个载体 = 锋·关羽【单骑】）：
 它在 USE 帧上写 `src/sgs/state/models.py:RESPONSE_SUITS_KEY`（缺键 = 不限 ⇒ 既有帧载荷逐键不变），
-随 `use_push_resolve` 继承进 RESOLVE 帧，由三扇窗口（【闪】/ 打出·使用响应 / 无懈）的候选生成
-读同一个键：真牌在 `src/sgs/effects/actions.py:_dodge` / `_respond` 过滤，转化候选在
-`src/sgs/skills/virtual.py:virtual_candidates` 按**产物花色**过滤（多源 / 纯虚拟牌花色为 `None`
-⇒ 永远匹配不上）。**提供者在限制生效期间失败关闭**（候选期看不到产物花色）。
+随 `use_push_resolve` 继承进 RESOLVE 帧，由三扇窗口（【闪】/ 打出·使用响应 / 无懈）读同一个键。
+三条路（真牌 / 转化候选 / 提供者）都过**供需闸门**：需求由 `demand_for` 从同一份键造出，
+判据只有 `src/sgs/effects/supply.py:supply_is_legal` 一份，过滤点在 `legal_actions_for`
+那一层（`src/sgs/effects/actions.py:_supply_gate`），候选生成口不再各自过滤——否则同一份
+需求会在几条路径上各判一遍。供给**已知且满足** ⇒ 进面（【护驾】/【激将】的 relay 与【蛊惑】的
+预转化都已可判，need-card-supply 票 03 / 04）；转化候选按**产物花色**判，多源 / 纯虚拟牌
+花色为 `None` ⇒ 确定地不满足花色需求（spec §3-3）；提供者**没声明**供给（如【武翊】）⇒ 需求
+带收窄维度时失败关闭（`supply_is_legal(demand, None)`，need-card-supply 票 07）。
 
 **势力求助（护驾 / 激将）为什么 `providers` 是 `False`**：`_run_lord_request` 的子窗口只收
 `PlayCard`，没有 `UseCard` / `ActivateSkill` 分支 ⇒ 转化与提供者的候选即便由底层
