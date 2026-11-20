@@ -36,7 +36,6 @@ from sgs.data import (  # noqa: E402
     validate_rule_config,
 )
 from sgs.data import color_of_suit, enabled_hero_ids, hero_by_id  # noqa: E402
-from sgs.effects import Demand, Supply, TierSupplies  # noqa: E402
 from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT, RUNNING_SKILL_KEY, hero_card_zone_key  # noqa: E402
@@ -16243,30 +16242,26 @@ def test_the_feng_guanyu_option_labels_are_chinese_on_both_sides() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 需要（使用 / 打出）牌的「需求 × 供给」（need-card-supply 票 01 / 02）
+# 需要（使用 / 打出）牌的「需求 × 供给」：展示面已删（need-card-supply 票 05）
 #
-# 票 01 §4 的验收 3 / 4 / 5 / 6：一句需求的人话、灰行 + 理由、投影的两个键（且不进
-# legal_actions）、以及一条**真 HTTP** 的载荷断言。
-# 票 02 §1c 的验收 6 / 7：**真窗口**里被需求拒掉的档与牌仍画得出灰行（``ok=False`` +
-# 理由），同时它们的行动**不在** ``legal_actions`` 里（置灰可见 + 行为不变）。
+# 用户 2026-11-21 裁（spec §0.1b）：提示区的 supply 枚举不显示 ⇒ 票 01 的渲染与两个投影
+# 键一起删（不留下没人读的字段）。展示侧已无读取方，这里只钉**缺席**：真 handler 的载荷里
+# 两键不在——删掉即通过的空测试不算数，所以这条断言必须落在真·需要牌窗口上。
 # ---------------------------------------------------------------------------
 
 _NEED_CARD_PACK = load_content_pack(deck_profile="standard_108")
 """标准 108 张档（票 32：模块级加载必须写死档位）。"""
 
 
-def _need_card_dodge_session(*, equip: tuple[int, ...] = ()):
-    """推到一个**需要【闪】**的询问：座位 1 的 AI 用【杀】指定人类座位，人类手上有【闪】。
-
-    ``equip`` 用来摆【八卦阵】——它在候选里占**装备档**，于是"按档列行"有两行可看。
-    """
+def _need_card_dodge_session():
+    """推到一个**需要【闪】**的询问：座位 1 的 AI 用【杀】指定人类座位，人类手上有【闪】。"""
     pack = _NEED_CARD_PACK
     slash = cards_of_type(pack, "slash")[0]
     dodge = cards_of_type(pack, "dodge")[0]
     state = build_state(
         pack=pack,
-        seats=[SeatSpec(hand=(dodge,), equip=equip), SeatSpec(hand=(slash,))],
-        deck=deck_excluding(pack, slash, dodge, *equip),
+        seats=[SeatSpec(hand=(dodge,)), SeatSpec(hand=(slash,))],
+        deck=deck_excluding(pack, slash, dodge),
         turn_seat=1,
         rule_config=RuleConfig(player_count=2, first_seat=1),
     )
@@ -16281,177 +16276,12 @@ def _need_card_dodge_session(*, equip: tuple[int, ...] = ()):
     return session
 
 
-def test_the_need_card_demand_reads_like_one_sentence():
-    """§4-4：一句人话（牌名 + 花色两维各一例；``None`` = 不限的读法；``()`` = 记录为空）。"""
-    state = build_state(pack=_NEED_CARD_PACK, seats=[SeatSpec(), SeatSpec()])
+def test_the_need_card_keys_are_gone_from_a_real_http_payload() -> None:
+    """票 05 验收 1：起会话、推进到一次需要牌询问、经**真 handler** 读挂起载荷，两键**不在**。
 
-    assert (
-        _projection.need_card_demand_text(
-            state, Demand(names=("dodge",), suits=("diamond", "club"))
-        )
-        == "本次要求：【闪】，且花色必须是 ♦ 或 ♣"
-    )
-    assert (
-        _projection.need_card_demand_text(state, Demand(names=("slash",)))
-        == "本次要求：【杀】"
-    ), "花色维度是 None ⇒ 不写这一维（不限）"
-    assert "任意一张牌" in _projection.need_card_demand_text(state, Demand())
-    assert "记录为空" in _projection.need_card_demand_text(state, Demand(suits=()))
-
-
-def test_a_suitless_supply_row_is_greyed_with_its_reason():
-    """§4-3：无花色供给（【八卦阵】的虚拟【闪】）在花色需求下灰行 + 理由非空。
-
-    行的 ``ok`` / ``reason`` 都在后端现算（用户 Q4）——判据与匹配器同源，前端只读 ``ok``。
+    真 HTTP 是这条断言的要点：投影改坏了（比如又退回"键恒在、值为 ``None``"）在纯函数层
+    看不出来，只有真 handler 交出的那份载荷能证明"没人读的键没有被留下"。
     """
-    state = build_state(pack=_NEED_CARD_PACK, seats=[SeatSpec(), SeatSpec()])
-    tiers = (
-        TierSupplies(
-            tier=1,
-            provider="equip.eight_diagrams",
-            supplies=(Supply(product="dodge", kind="virtual"),),
-        ),
-        TierSupplies(
-            tier=2,
-            provider=None,
-            supplies=(Supply(product="dodge", suit="heart", rank=2, color="red"),),
-        ),
-    )
-    demand = Demand(names=("dodge",), suits=("diamond", "club"))
-
-    rows = _projection.need_card_supply_rows(state, demand, tiers)
-
-    assert [row["tier"] for row in rows] == [1, 2]
-    assert rows[0]["label"] == "装备档·八卦阵"
-    assert rows[0]["ok"] is False
-    assert rows[0]["supply_text"] == "无色虚拟【闪】"
-    assert rows[0]["reason"] == "八卦阵：无色虚拟【闪】 → 不满足花色限制"
-    assert rows[1]["label"] == "使用牌档·手牌"
-    assert rows[1]["supply_text"] == "♥2【闪】"
-    assert rows[1]["ok"] is False, "真牌花色不白名单里 ⇒ 同样灰"
-
-    # 白名单换成 ♥ ⇒ 手牌档高亮、八卦阵那档仍是灰的（无花色确定不满足，spec §3-3）。
-    satisfied = _projection.need_card_supply_rows(
-        state, Demand(names=("dodge",), suits=("heart",)), tiers
-    )
-    assert satisfied[0]["ok"] is False and satisfied[0]["reason"]
-    assert satisfied[1]["ok"] is True and satisfied[1]["reason"] is None
-
-
-def test_the_pending_payload_carries_the_need_card_keys_only_for_need_card_windows():
-    """§4-5：需要牌窗口带两个键、非需要牌窗口为 ``None``；``legal_actions`` 里没有它们的影子。
-
-    另外钉住信息卫生：别人的询问（``human_seat`` 不是询问者）与 409 的裸 ``Query`` 都拿不到
-    ——供给里带着**手牌档的牌面**（私密事实）。
-    """
-    session = _need_card_dodge_session()
-    payload = pending_payload(session)
-
-    assert payload["need_card_demand"] == "本次要求：【闪】"
-    supplies = payload["need_card_supplies"]
-    assert supplies and all(
-        set(row) == {"tier", "label", "supply_text", "ok", "reason"} for row in supplies
-    ), supplies
-    assert all(row["ok"] is True for row in supplies), "今天的候选天然满足需求（票 02 才放宽）"
-    assert not any("need_card" in action for action in payload["legal_actions"]), (
-        "两个键是投影派生的展示数据，不许混进候选"
-    )
-
-    # 非需要牌窗口（出牌阶段）⇒ 两个键都是 None（键恒在，读取方不必先判存在）。
-    play_phase = Session(seed=83, ai="random", timeout_seconds=None, **TWO_PLAYERS)
-    other = pending_payload(play_phase)
-    assert other["need_card_demand"] is None and other["need_card_supplies"] is None
-
-    # 409 里附带的裸 Query（拿不到引擎）⇒ None；别人的询问 ⇒ None。
-    bare = pending_payload(session.pending, human_seat=0)
-    assert bare["need_card_demand"] is None and bare["need_card_supplies"] is None
-    foreign = pending_payload(session.pending, human_seat=1)
-    assert foreign["need_card_demand"] is None and foreign["need_card_supplies"] is None
-
-
-def _need_card_restricted_dodge_session():
-    """推到一个**花色需求生效**的【闪】询问：座位 1 用【杀】，且只许 ♥ 的牌响应。
-
-    ``response_suits`` 是【单骑】第三段那个事实（``Engine.start_use(..., response_suits=...)``
-    写进 USE 帧、随结算帧继承到本问）；这里直接按同一入口摆出来，不必真翻一张【单骑】。
-
-    座位 0 = 目标带【八卦阵】（装备档 1，无色虚拟【闪】）+ 手牌 ♦【闪】与 ♦【杀】
-    （武将【龙胆】⇒ ♦【杀】转化出 ♦【闪】）。三档供给因此**全都被 ♥ 白名单拒掉**：真牌、
-    转化、提供者各一条——正是票 02 §1c-6 / 7 要的"灰行可见、面里没有"。
-    """
-    pack = _NEED_CARD_PACK
-    slash = cards_of_type(pack, "slash")[0]
-    diamond_slash = next(
-        card_id
-        for card_id in cards_of_type(pack, "slash")
-        if pack.deck.cards[card_id].suit == "diamond"
-    )
-    diamond_dodge = next(
-        card_id
-        for card_id in cards_of_type(pack, "dodge")
-        if pack.deck.cards[card_id].suit == "diamond"
-    )
-    bagua = cards_of_type(pack, "eight_diagrams")[0]
-    state = build_state(
-        pack=pack,
-        seats=[
-            SeatSpec(hand=(diamond_dodge, diamond_slash), equip=(bagua,), hero="zhaoyun"),
-            SeatSpec(hand=(slash,)),
-        ],
-        deck=deck_excluding(pack, slash, diamond_slash, diamond_dodge, bagua),
-        turn_seat=1,
-        rule_config=RuleConfig(player_count=2, first_seat=1),
-    )
-    engine = Engine.from_state(state, seed=11)
-    engine.start_use(
-        state.card(slash), source=1, targets=(0,), response_suits=("heart",)
-    )
-    run_queries(
-        engine, [PassPlayer(), PassPlayer()], lambda e: e.pending is not None
-    )
-    assert engine.pending is not None and engine.pending.kind == QueryKind.DODGE, (
-        "构造局面没到带花色需求的【闪】窗口"
-    )
-    session = Session(
-        seed=11, ai="heuristic", timeout_seconds=None, player_count=2, human_seat=0
-    )
-    session.engine = engine
-    return session
-
-
-def test_the_real_window_keeps_rejected_tiers_as_grey_rows_and_out_of_the_face() -> None:
-    """票 02 §1c-6 / 7：**真窗口**里灰行可见（``ok=False`` + 理由）**且**行为不变（不进面）。
-
-    两条一起断言是本条的全部要点（票面 §1b）：只删供给行 = 灰行凭空消失（票 01 实测的
-    缺口）；只删面 = 供给行还在但玩家仍能选（不合法）。故这里同时钉住：
-    ① 八卦阵那一行 ``ok=False`` + 非空 ``reason``；② 真牌 / 转化那两档同样 ``ok=False``；
-    ③ 它们的 ``ActivateSkill`` / ``UseCard`` **不在** ``legal_actions`` 里（只剩 ``Pass``）。
-    """
-    session = _need_card_restricted_dodge_session()
-    payload = pending_payload(session)
-
-    assert payload["need_card_demand"] == "本次要求：【闪】，且花色必须是 ♥"
-    rows = {row["label"]: row for row in payload["need_card_supplies"]}
-    assert set(rows) == {"装备档·八卦阵", "使用牌档·手牌"}, rows
-
-    bagua = rows["装备档·八卦阵"]
-    assert bagua["ok"] is False, "无花色供给确定地不满足花色需求（spec §3 第 3 条）"
-    assert bagua["reason"] == "八卦阵：无色虚拟【闪】 → 不满足花色限制"
-    hand = rows["使用牌档·手牌"]
-    assert "♦" in hand["supply_text"], "真牌与转化两档都要照报（灰行的来源）"
-    assert hand["ok"] is False and hand["reason"], "真牌 / 转化被拒时同样灰行 + 理由"
-
-    kinds = [action["kind"] for action in payload["legal_actions"]]
-    assert kinds == ["Pass"], f"被需求拒掉的档与牌都不进面：{payload['legal_actions']}"
-    assert not any(
-        action["kind"] == "ActivateSkill"
-        and action.get("skill_id") == "equip.eight_diagrams"
-        for action in payload["legal_actions"]
-    ), "八卦阵的 ActivateSkill 不在这张面里（行为与限制生效时逐条不变）"
-
-
-def test_the_need_card_keys_reach_a_real_http_payload() -> None:
-    """§4-6：起会话、推进到一次需要牌询问、经**真 handler** 读挂起载荷，两键在。"""
     from sgs_web.serve import GameRegistry
 
     session = _need_card_dodge_session()
@@ -16464,6 +16294,6 @@ def test_the_need_card_keys_reach_a_real_http_payload() -> None:
 
     assert status == 200
     pending = body["pending"]
-    assert pending["kind"] == "DODGE"
-    assert pending["need_card_demand"] == "本次要求：【闪】"
-    assert [row["label"] for row in pending["need_card_supplies"]] == ["使用牌档·手牌"]
+    assert pending["kind"] == "DODGE", "这条断言必须落在真·需要牌窗口上（否则'没有键'不算证据）"
+    assert "need_card_demand" not in pending, "票 05 删的是整键，不是置 None"
+    assert "need_card_supplies" not in pending, "供给行表（渲染 + 载荷）按用户裁定一并删除"

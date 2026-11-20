@@ -51,7 +51,6 @@ from sgs.effects import (  # noqa: E402
     Supply,
     demand_for,
     legal_actions_for,
-    need_card_tier,
     supplies_for,
     supply_is_legal,
     supply_mismatch,
@@ -71,7 +70,6 @@ from sgs.state import (  # noqa: E402
     RespondMode,
     WindowCause,
 )
-from sgs_web import projection as _projection  # noqa: E402
 
 from support import (  # noqa: E402
     PassPlayer,
@@ -379,29 +377,22 @@ def test_a_suppressed_relay_skill_is_not_offered_and_reports_no_row():
     )
 
 
-def test_a_blocked_holder_keeps_a_none_row_with_a_reason():
-    """票面 §1 的另一半：被挡的档**仍要一行** ``ok=False`` + 理由（灰行不是凭空消失）。
+def test_a_blocked_holder_keeps_a_none_tier_with_a_reason():
+    """票面 §1 的另一半：被挡的档仍要有**一组**供给、理由非空（组不出牌，但不是"这一档没了"）。
 
-    供给行读的是声明（``SkillDef.supply`` + ``supply_none_reason``），与候选生成读同一份
-    谓词；故"候选没了"与"行还在（灰的）"是同一个事实的两个面。
+    供给读的是声明（``SkillDef.supply`` + ``supply_none_reason``），与候选生成读同一份谓词；
+    故"候选没了"与"这一档还在（给不出来）"是同一个事实的两个面。展示行已按用户 2026-11-21
+    的裁定删除（need-card-supply 票 05），本断言只到供给模型为止。
     """
     state = _hujia_state(blocked=True)
     payload = DodgeContext(response_suits=("diamond",))
-    demand = demand_for(QueryKind.DODGE, payload)
-    assert demand is not None
     tiers = supplies_for(
         QueryKind.DODGE, state=state, seat=LORD_SEAT, payload=payload, answers_seq=0
     )
     relay = [group for group in tiers if group.provider == HUJIA]
-    assert len(relay) == 1, f"被挡的【护驾】应当恰好一行：{tiers}"
+    assert len(relay) == 1, f"被挡的【护驾】应当恰好一组：{tiers}"
     assert relay[0].supplies == ()
     assert relay[0].reason and "不能使用或打出手牌" in relay[0].reason
-
-    rows = _projection.need_card_supply_rows(state, demand, tiers)
-    row = next(row for row in rows if "护驾" in str(row["label"]))
-    assert row["ok"] is False
-    assert row["supply_text"] == "供给为 none"
-    assert row["reason"], "被挡的档要给出理由（灰行不是消失）"
 
 
 # ---------------------------------------------------------------------------
@@ -507,105 +498,3 @@ def test_the_relay_chain_reuses_the_upstream_prohibition():
     assert _relay_playable(tagged) == [
         SLASH_TWO
     ], "【定乱】那张被既判据挡在求助链之外（不是被新白名单挡的）"
-
-
-# ---------------------------------------------------------------------------
-# 5. 高亮 / 可点一致（票面 §2c / §3-6；spec §7 S16 的首条验收）
-# ---------------------------------------------------------------------------
-
-
-def _rows(state, kind: QueryKind, payload, *, seat: int = LORD_SEAT):
-    demand = demand_for(kind, payload)
-    assert demand is not None
-    tiers = supplies_for(
-        kind, state=state, seat=seat, payload=payload, answers_seq=0
-    )
-    return _projection.need_card_supply_rows(state, demand, tiers)
-
-
-def _face_tiers(state, kind: QueryKind, payload, tier: int, *, seat: int = LORD_SEAT) -> set[int]:
-    """**这一档自己的那张面**里出现过的档（``floor = tier`` ⇒ 引擎在这一档问时看到的面）。"""
-    if isinstance(payload, DodgeContext):
-        at_tier = DodgeContext(floor=tier, response_suits=payload.response_suits)
-    else:
-        at_tier = RespondContext(
-            cause=payload.cause,
-            required=payload.required,
-            mode=payload.mode,
-            use_targets=payload.use_targets,
-            response_suits=payload.response_suits,
-            floor=tier,
-        )
-    face = legal_actions_for(state, seat, kind, answers_seq=0, payload=at_tier)
-    return {need_card_tier(action) for action in face if not isinstance(action, Pass)}
-
-
-def test_a_relay_row_is_highlighted_exactly_when_the_provider_is_in_the_face():
-    """票面 §2c / §3-6（spec §7 **S16**）：行 ``ok=True`` ⇔ 那一档有合法候选。
-
-    两个方向都断，两个窗口都断（【护驾】/【激将】= 两条 relay 声明）：
-
-    - **未挡**：relay 那一档在面里 ⇒ 行 ``ok=True``（用户看到的是"高亮且点得到"）；
-    - **被挡**：档不在面里 ⇒ 行 ``ok=False`` + **非空理由**（灰行的意义是"这一档试过了、
-      给不出来"，不是凭空消失）。
-
-    逐行那一半是 S16 的通用不变量（不只钉 relay）：同一问里每个 ``ok=True`` 的行，其档在
-    **自己那一档的面**里都必须至少有一条合法候选——票 02 交付时 ``unknown`` 档违反它，
-    票 03 把 relay 收口，本断言是那道缝的回归网。
-    """
-    dodge_payload = DodgeContext(response_suits=("heart",))
-    slash_payload = RespondContext(
-        cause=WindowCause.DUEL,
-        required="slash",
-        mode=RespondMode.PLAY,
-        response_suits=("heart",),
-    )
-    holder_dodges = (DIAMOND_DODGE, HEART_DODGE)
-    cases = (
-        ("护驾", _hujia_state(blocked=False, hand=holder_dodges), QueryKind.DODGE, dodge_payload),
-        ("护驾", _hujia_state(blocked=True, hand=holder_dodges), QueryKind.DODGE, dodge_payload),
-        (
-            "激将",
-            _jijiang_state(blocked=False, ally_hand=(SLASH,), hand=(HEART_SLASH,)),
-            QueryKind.RESPOND,
-            slash_payload,
-        ),
-        (
-            "激将",
-            _jijiang_state(blocked=True, ally_hand=(SLASH,), hand=(HEART_SLASH,)),
-            QueryKind.RESPOND,
-            slash_payload,
-        ),
-    )
-
-    for label, state, kind, payload in cases:
-        rows = _rows(state, kind, payload)
-        relay_rows = [row for row in rows if label in str(row["label"])]
-        assert len(relay_rows) == 1, f"{label}：这一档必须恰好一行：{rows}"
-        row = relay_rows[0]
-        assert row["tier"] == 0, "两条 relay 都是武将档（载体 = 武将牌）"
-
-        present = _face_tiers(state, kind, payload, row["tier"])
-        blocked = state.player(LORD_SEAT).hand_card_prohibited
-        assert row["ok"] is not blocked, f"{label}：行的高亮要与持有者是否被挡一致"
-        assert row["ok"] == (row["tier"] in present), (
-            f"{label}：行 ok 与'那一档在面里'必须同进同退（真实窗口里不许高亮却点不到）"
-        )
-        if blocked:
-            assert row["reason"], f"{label}：被挡的档要给出理由（灰行不是消失）"
-
-        # S16 的通用不变量（逐行、每行问它自己那一档）：`ok=True` ⇒ 那一档点得到；
-        # `ok=False` ⇒ 那一档点不到（"灰的"与"没得点"同一件事）。
-        for candidate_row in rows:
-            tier = int(candidate_row["tier"])
-            face = _face_tiers(state, kind, payload, tier)
-            if candidate_row["ok"]:
-                assert tier in face, (
-                    f"{label}：行 ok=True 但 {tier} 档没有任何合法候选"
-                    f"（S16 的那道缝）：{candidate_row}"
-                )
-            else:
-                assert tier not in face, (
-                    f"{label}：行 ok=False 但 {tier} 档仍有合法候选（点得到却画成灰的）："
-                    f"{candidate_row}"
-                )
