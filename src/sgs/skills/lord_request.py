@@ -788,13 +788,13 @@ class LordSkill(HeroSkillDecl):
         - **手牌禁令** = :attr:`~sgs.state.Player.hand_card_prohibited`（唯一存储是
           ``hand_card_prohibition_sources``；【义绝】黑色分支 / 【雄乱】写的是同一格）；
         - **技能失效 / 未生效** = :func:`~sgs.skills.catalog.resolve_instances` 的既有口径：
-          失效 / 失去 / 身份门控挡住的实例**根本产不出候选**，故本谓词看不到它们——那一档连
-          "给不出来"的行都不报（见 ``effects.supply.supplies_for`` 的 `_declared_none_tiers`）。
+          失效 / 失去 / 身份门控挡住的实例**根本产不出候选**，故本谓词看不到它们。
 
         **已知缺口**（票面 §1）：【共损】一类"不能出【闪】"的座位禁令**尚未进仓**（仓里没有
         这个技能），本票不造它；将来进仓时在这里再加一条判据来源即可，框架不改。
 
-        返回值同时服务两个读取方（候选生成与展示行）：``None`` = 给得出，一句话 = 给不出。
+        唯一读取方是候选生成 :meth:`offer`：``None`` = 给得出（追加候选），一句话 = 给不出
+        （不追加 ⇒ 连询问链都不开）。
         """
         sources = state.player(seat).hand_card_prohibition_sources
         if not sources:
@@ -820,9 +820,7 @@ class LordSkill(HeroSkillDecl):
 
         **需求传递的供给真值**（票 03 §1 / S9）：这两档的供给是"把需求传给同势力角色"，
         故再加一道自己的谓词——:meth:`supply_none_reason` 非空（持有者被座位禁令封住手牌）
-        ⇒ **不追加**候选。于是"供给 none"在候选层就成立：不产候选 ⇒ 询问链不开 ⇒ 也不会
-        有"高亮却点不到"的灰档（spec §7 S16）。同一份判据喂给展示层
-        （``SkillDef.supply_none_reason``）画那一行 ``ok=False`` + 理由。
+        ⇒ **不追加**候选。于是"供给 none"在候选层就成立：不产候选 ⇒ 询问链不开。
 
         **PLAY 那一条**（票 20）：``activation_flow`` 有值 ⇒ 出牌阶段像一条"使用【这张牌】的
         入口"那样出候选（这张牌 = ``self.required``，措辞与闸门都从它派生），闸门 =
@@ -851,7 +849,6 @@ class LordSkill(HeroSkillDecl):
             # ⇒ **不追加** ActivateSkill（连询问链都不开——不逐座位传递）。放在被动分支
             # （`DODGE` / `RESPOND`）而不是最上面：``PLAY`` 那一档是票 20 的"主动使用入口"，
             # 不是需求传递，判据在 `_play_activation_legal` 里。
-            # 展示层那一半（`ok=False` 的行 + 理由）走同一份声明：`SkillDef.supply_none_reason`。
             return current
         return (*current, ActivateSkill(skill_id=self.skill_id, answers_seq=ctx.answers_seq))
 
@@ -1582,11 +1579,8 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
         # need-card-supply 票 03：**需求传递**（relay）——发动时不验合法性，真正做的是把
         # "需要一张【required】"这个需求依次传给同势力角色。故供给是**可判**的
         # （`unknown=False`）：牌名照声明给（是**声明事实**，不是判据），收窄维度在传到的
-        # 那一问里展开（`effects.supply._dimension_failure` 的 relay 分支）。
+        # 那一问里展开（`effects.supply._mismatch` 的 relay 分支）。
         supply=Supply(product=skill.required, kind="relay", unknown=False),
-        # 同一份谓词的展示面：持有者自己被挡住 ⇒ 这一档**没有候选**，但仍要一行
-        # `ok=False` + 理由（票 03 §1 / §2c；S16）。
-        supply_none_reason=skill.supply_none_reason,
     )
 
 

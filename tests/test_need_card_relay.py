@@ -23,10 +23,8 @@
    这条既判据在求助链里照样成立，不另写白名单
    （``test_the_relay_chain_reuses_the_upstream_prohibition``）。
 
-外加票面 §2c 的首条验收（spec §7 **S16**）：真窗口里**不存在**『行 ``ok=True``、那一档却没有
-任何合法候选』的供给行（``test_a_relay_row_is_highlighted_exactly_when_the_provider_is_in_the_face``）。
-
-**本票不做的**（票 04 的活）：【蛊惑】的预转化、逐张手牌的供给行、持有者独享的载荷。
+**本票不做的**（票 04 的活）：【蛊惑】的预转化、逐张手牌的供给（票 06 起只剩供给模型）、
+持有者独享的载荷。
 **本票也不碰**子窗口的受理面（``_run_lord_request`` 仍只收 ``PlayCard``，见 ``## Answer``）。
 """
 
@@ -51,9 +49,7 @@ from sgs.effects import (  # noqa: E402
     Supply,
     demand_for,
     legal_actions_for,
-    supplies_for,
     supply_is_legal,
-    supply_mismatch,
     supply_satisfies,
 )
 from sgs.engine import Engine  # noqa: E402
@@ -268,7 +264,6 @@ def test_a_relay_supply_is_concrete_and_forwarded_not_judged_dead():
 
     demand = Demand(names=("dodge",), suits=("diamond",))
     assert supply_satisfies(demand, relay) is True, "花色需求下 relay 不判死（需求传递）"
-    assert supply_mismatch(demand, relay) is None
     assert supply_is_legal(demand, relay) is True, "可判 ⇒ 闸门与匹配器同源"
 
     # 牌名维度**仍然判**（它是声明事实）：relay 不是"哪一问都能进"。
@@ -354,12 +349,13 @@ def test_a_blocked_holder_offers_no_relay_and_never_opens_the_chain():
     assert free.state.player(LORD_SEAT).hp == 4, "盟友打出的【闪】真的抵消了这张【杀】"
 
 
-def test_a_suppressed_relay_skill_is_not_offered_and_reports_no_row():
-    """技能失效走 ``resolve_instances`` 的既有口径：连实例都不产出 ⇒ 无候选、也无"给不出来"的行。
+def test_a_suppressed_relay_skill_is_not_offered():
+    """技能失效走 ``resolve_instances`` 的既有口径：连实例都不产出 ⇒ 无候选。
 
     这是票面 §1 里"技能失效 / 未生效"那一格的读法——它**不是**本票新造的判据，而是既有的
-    解析口径自然给出的结论；反过来，若"供给为 none 的行"绕过实例解析去扫目录，这一档就会
-    画出一行玩家点不到的灰条（S16 的反面）。
+    解析口径自然给出的结论（"这一档还在、只是给不出来"的展示行已随票 05 / 06 删除，
+    spec §0.1b）。反过来，若候选生成绕过实例解析去扫目录，这一档就会多出一条玩家点不到的
+    候选。
     """
     state = _hujia_state(blocked=False)
     engine = Engine.from_state(state, seed=3)
@@ -369,30 +365,6 @@ def test_a_suppressed_relay_skill_is_not_offered_and_reports_no_row():
     assert _providers(
         legal_actions_for(state, LORD_SEAT, QueryKind.DODGE, answers_seq=0, payload=payload)
     ) == [], "失效的【护驾】不产出候选"
-    tiers = supplies_for(
-        QueryKind.DODGE, state=state, seat=LORD_SEAT, payload=payload, answers_seq=0
-    )
-    assert not [group for group in tiers if group.provider == HUJIA], (
-        f"失效的技能不该有供给行（连'给不出来'也不该报）：{tiers}"
-    )
-
-
-def test_a_blocked_holder_keeps_a_none_tier_with_a_reason():
-    """票面 §1 的另一半：被挡的档仍要有**一组**供给、理由非空（组不出牌，但不是"这一档没了"）。
-
-    供给读的是声明（``SkillDef.supply`` + ``supply_none_reason``），与候选生成读同一份谓词；
-    故"候选没了"与"这一档还在（给不出来）"是同一个事实的两个面。展示行已按用户 2026-11-21
-    的裁定删除（need-card-supply 票 05），本断言只到供给模型为止。
-    """
-    state = _hujia_state(blocked=True)
-    payload = DodgeContext(response_suits=("diamond",))
-    tiers = supplies_for(
-        QueryKind.DODGE, state=state, seat=LORD_SEAT, payload=payload, answers_seq=0
-    )
-    relay = [group for group in tiers if group.provider == HUJIA]
-    assert len(relay) == 1, f"被挡的【护驾】应当恰好一组：{tiers}"
-    assert relay[0].supplies == ()
-    assert relay[0].reason and "不能使用或打出手牌" in relay[0].reason
 
 
 # ---------------------------------------------------------------------------

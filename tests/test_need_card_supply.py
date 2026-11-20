@@ -1,22 +1,19 @@
-"""**需要（使用 / 打出）牌**时的「需求 × 供给」展示层（need-card-supply 票 01）。
+"""**需要（使用 / 打出）牌**时的「需求 × 供给」：两个值对象 + 匹配器 + 供需闸门。
 
-三件事在这里钉住（票面 §4 的验收 1–4）：
+三件事在这里钉住：
 
 1. 两个对象：:class:`~sgs.effects.Demand`（维度可加的精确需求）与
    :class:`~sgs.effects.Supply`（候选期的供给描述），以及匹配器
    :func:`~sgs.effects.supply_satisfies`。**无花色 / 无点数**的供给**确定地不满足**
-   对应维度的限制（用户 2026-11-20 裁定，spec §3 第 3 条）；``unknown=True`` 的供给
-   （【蛊惑】/【护驾】/【激将】）在候选期不可知，本票**不判死**。
-2. 每个需要牌窗口（``CARD_REQUEST_WINDOWS`` 里 ``providers=True`` 的 8 行）都产出一句
-   需求 + 非空的按档供给行——供给从现有候选反推（``_actions_for`` 全档生成口），
-   提供者的供给来自 ``SkillDef.supply`` 的声明。
-3. 牌面事实（真牌 / 单源转化 / 多源转化）与「一句话需求」的可读性。
+   对应维度的限制（用户 2026-11-20 裁定，spec §3 第 3 条）；``unknown=True`` 的供给在
+   候选期不可知，匹配器**不判死**。
+2. 需求生产者：每个需要牌窗口（``CARD_REQUEST_WINDOWS`` 里 ``providers=True`` 的 8 行）
+   都产出一句需求，且这一问**留在面上的候选**至少有一条满足它（闸门不误删）。
+3. 合法性层（票 02）：供需闸门只删**交给玩家的面**——已知且满足的供给照常进面，无花色
+   供给在花色需求下不进面，候选期不可知（``unknown``）的供给在限制生效时失败关闭。
 
-**票 01 = 纯展示**：那一半不碰 ``legal_actions``。
-
-**票 02 = 合法性层**（§4 的 1b / 1c / 3）：供需闸门只删**交给玩家的面**，不删**供给行**——
-被需求拒掉的档与牌仍留在供给池里（灰行的唯一来源），已知且满足的供给照常进面，候选期
-不可知（``unknown``）的供给在限制生效时失败关闭（放开它们是票 03 / 04 的活）。
+**票 05 / 06**（spec §0.1b）：提示区的供给行表、投影字段与"按档分组 / 行理由 / 灰行池"
+那一层已随用户 2026-11-21 的裁定删除；本文件只钉**值对象 + 匹配 + 闸门**。
 """
 
 from __future__ import annotations
@@ -34,12 +31,10 @@ from sgs.data import Identity, RuleConfig, color_of_suit, load_content_pack  # n
 from sgs.effects import (  # noqa: E402
     Demand,
     Supply,
-    all_actions_for,
     demand_for,
     legal_actions_for,
-    supplies_for,
+    supplies_of_action,
     supply_is_legal,
-    supply_mismatch,
     supply_satisfies,
 )
 from sgs.skills import CATALOG  # noqa: E402
@@ -101,7 +96,6 @@ def test_a_supply_without_a_suit_never_satisfies_a_suit_demand():
     bagua = Supply(product="dodge", kind="virtual")
 
     assert supply_satisfies(demand, bagua) is False
-    assert supply_mismatch(demand, bagua), "不满足时要给得出理由（行里的 reason）"
 
 
 def test_a_real_card_supply_satisfies_a_suit_demand_only_when_its_suit_is_listed():
@@ -132,7 +126,6 @@ def test_an_unknown_supply_is_not_judged_dead_in_this_ticket():
 
     assert supply_satisfies(demand, relay) is True
     assert supply_satisfies(demand, preconversion) is True
-    assert supply_mismatch(demand, relay) is None
 
 
 def test_the_card_name_dimension_reuses_the_slash_family_key():
@@ -337,45 +330,61 @@ def test_the_registry_has_the_eight_provider_windows_the_ticket_names():
 
 
 @pytest.mark.parametrize("key", _registered_need_card_keys())
-def test_every_provider_window_yields_a_demand_and_non_empty_tier_supplies(key):
-    """§4-1：**每个**需要牌窗口都产出一句需求 + 非空的按档供给（逐行一条断言）。"""
+def test_every_provider_window_yields_a_demand_a_kept_candidate_satisfies(key):
+    """§4-1：**每个**需要牌窗口都产出一句需求，且面上的候选至少有一条满足它（逐行一条）。
+
+    这一条是"8 扇窗口都接上了需求生产者、且闸门没有把这一问的唯一候选误删"的端到端钉子：
+    面上的供给都从**真实候选**反推（``supplies_of_action``），不是另摆一份样例。
+    """
     state, kind, payload, extra = _window_setup(key)
+    dying = extra.get("dying")
 
     demand = demand_for(kind, payload, **extra)
-    # 供给只读候选生成需要的入参（``asker`` 只服务需求里"濒死者自救"那一格）。
-    tiers = supplies_for(
-        kind, state=state, seat=0, payload=payload, dying=extra.get("dying")
+    face = legal_actions_for(
+        state, 0, kind, answers_seq=0, dying=dying, payload=payload
     )
+    supplies = _supplies(face, state=state, kind=kind, payload=payload, dying=dying)
 
     assert demand is not None, f"{key} 没有产出一句需求"
-    assert tiers, f"{key} 没有产出任何供给档"
-    assert all(group.supplies for group in tiers), f"{key} 有空档"
-    assert any(
-        supply_satisfies(demand, supply)
-        for group in tiers
-        for supply in group.supplies
-    ), f"{key} 的供给一条都不满足自己的需求"
-
-
-def _tier_supplies(kind, state, *, payload=None, dying=None, asker=None):
-    return supplies_for(
-        kind, state=state, seat=0, payload=payload, dying=dying, answers_seq=7
+    assert supplies, f"{key} 的面上没有任何供给"
+    assert any(supply_satisfies(demand, supply) for supply in supplies), (
+        f"{key} 的面上没有一条供给满足自己的需求"
     )
 
 
-def _flatten(tiers) -> list[Supply]:
-    return [supply for group in tiers for supply in group.supplies]
+def _supplies(actions, *, state, kind, payload=None, dying=None, seat: int = 0) -> list[Supply]:
+    """一组候选动作的**全部**供给（闸门读的同一个展开点 ``supplies_of_action``）。"""
+    return [
+        supply
+        for action in actions
+        for supply in (
+            supplies_of_action(
+                action,
+                state=state,
+                seat=seat,
+                kind=kind,
+                payload=payload,
+                dying=dying,
+            )
+            or ()
+        )
+    ]
 
 
 def test_a_hand_card_supply_carries_the_card_face_facts():
     """§4-2（真牌）：``kind="real"`` + 花色 / 点数 / 颜色——全部读候选的 ``CardRef``，
-    展示层不另算一遍牌面。"""
+    供给层不另算一遍牌面。"""
     card_id = _DODGES[0]
     card = PACK.deck.cards[card_id]
     state = _state_with((card_id,))
+    payload = DodgeContext()
 
-    tiers = _tier_supplies(QueryKind.DODGE, state, payload=DodgeContext())
-    supplies = _flatten(tiers)
+    supplies = _supplies(
+        legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=0, payload=payload),
+        state=state,
+        kind=QueryKind.DODGE,
+        payload=payload,
+    )
 
     assert supplies == [
         Supply(
@@ -387,8 +396,6 @@ def test_a_hand_card_supply_carries_the_card_face_facts():
             source_count=1,
         )
     ]
-    assert tiers[0].tier == 2, "逐张牌是使用牌档（PriorityClass.CARD_USE）"
-    assert tiers[0].provider is None, "逐张牌档没有提供者"
 
 
 def test_a_single_source_conversion_inherits_the_product_face_and_counts_one_source():
@@ -399,8 +406,14 @@ def test_a_single_source_conversion_inherits_the_product_face_and_counts_one_sou
     )
     card = PACK.deck.cards[red_slash]
     state = _state_with((red_slash,), hero="zhaoyun")
+    payload = DodgeContext()
 
-    supplies = _flatten(_tier_supplies(QueryKind.DODGE, state, payload=DodgeContext()))
+    supplies = _supplies(
+        legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=0, payload=payload),
+        state=state,
+        kind=QueryKind.DODGE,
+        payload=payload,
+    )
     transformed = [supply for supply in supplies if supply.kind == "transformed"]
 
     assert transformed == [
@@ -425,8 +438,17 @@ def test_a_multi_source_conversion_has_no_face_and_counts_its_sources():
         cause=WindowCause.DUEL, required="slash", mode=RespondMode.PLAY
     )
 
-    supplies = _flatten(_tier_supplies(QueryKind.RESPOND, state, payload=payload))
-    multi = [supply for supply in supplies if supply.kind == "transformed" and supply.source_count >= 2]
+    supplies = _supplies(
+        legal_actions_for(state, 0, QueryKind.RESPOND, answers_seq=0, payload=payload),
+        state=state,
+        kind=QueryKind.RESPOND,
+        payload=payload,
+    )
+    multi = [
+        supply
+        for supply in supplies
+        if supply.kind == "transformed" and supply.source_count >= 2
+    ]
 
     assert multi, f"没有多源转化供给：{supplies}"
     assert multi[0].product == "slash"
@@ -436,35 +458,16 @@ def test_a_multi_source_conversion_has_no_face_and_counts_its_sources():
     )
 
 
-def test_the_provider_tier_reports_the_declared_supply_not_a_second_enumeration():
-    """提供者的供给**来自声明**（``SkillDef.supply``）：【八卦阵】= 无色无点数的虚拟【闪】。
-
-    与逐张牌档并列（武将 / 装备档 1 vs 使用牌档 2）：两档都要出现，投影才画得出"每一档
-    能提供什么"。
-    """
-    bagua = cards_of_type(PACK, "eight_diagrams")[0]
-    state = _state_with((_DODGES[0],), equip=(bagua,))
-
-    tiers = _tier_supplies(QueryKind.DODGE, state, payload=DodgeContext())
-
-    assert [group.tier for group in tiers] == [1, 2], "两档：装备档（八卦阵）+ 使用牌档"
-    assert tiers[0].provider == "equip.eight_diagrams"
-    assert tiers[0].supplies == (Supply(product="dodge", kind="virtual"),)
-    assert [supply.kind for supply in tiers[1].supplies] == ["real"]
-
-
 def test_the_five_provider_declarations_land_on_the_skill_definitions():
     """§1：今天落四条（八个技能定义）——【八卦阵】/【八阵】、 【蛊惑】、【护驾】/【激将】。
 
-    ``Supply`` 是**定义**的属性（与 ``need_card_tier`` 同一姿态），不是局面属性。
-
-    票 03 改了 relay 那一族的**可判性**（在正确的方向：从"候选期不可知"变成"可判"，
-    见 :func:`~sgs.effects.supply._dimension_failure` 的 relay 分支 + `LordSkill.offer`
-    的供给真值）：四条声明是 ``unknown=False`` 的**需求传递**。票 04 再把最后一条
-    ——【蛊惑】的**预转化**——改成可判：声明只说"我是预转化"（``product=None``：能声明什么
-    由牌堆 + 窗口要的牌名现算），逐张来源牌的供给由
-    :func:`~sgs.effects.supply.supplies_of_action` 展开；"整档给不出来"接同一个
-    ``supply_none_reason`` 口子（票 03 建立）。于是**今天没有真实声明落在 ``unknown`` 上**。
+    ``Supply`` 是**定义**的属性（与 ``need_card_tier`` 同一姿态），不是局面属性；闸门读
+    的就是这一份声明。票 03 让 relay 一族**可判**（``unknown=False`` 的**需求传递**，见
+    :func:`~sgs.effects.supply._mismatch` 的 relay 分支）：四条声明是 relay。票 04 再把最后
+    一条——【蛊惑】的**预转化**——改成可判：声明只说"我是预转化"（``product=None``：能声明
+    什么由牌堆 + 窗口要的牌名现算），逐张来源牌的供给由
+    :func:`~sgs.effects.supply.supplies_of_action` 展开。于是**今天没有真实声明落在
+    ``unknown`` 上**。
     """
     from sgs.skills import CATALOG
 
@@ -477,9 +480,6 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
     assert (guohuo.kind, guohuo.unknown, guohuo.product) == ("preconversion", False, None), (
         "预转化是**可判**的供给；产物牌名不写进声明（展开时按牌堆 + 窗口现算）"
     )
-    assert CATALOG["hero.yuji_mobile.guohuo"].supply_none_reason is not None, (
-        "整档给不出来时要有理由口子（票 04：被【义绝】封手牌）"
-    )
 
     for skill_id in (
         "hero.caocao.hujia",
@@ -490,38 +490,46 @@ def test_the_five_provider_declarations_land_on_the_skill_definitions():
         relay = CATALOG[skill_id].supply
         assert relay is not None, skill_id
         assert (relay.kind, relay.unknown) == ("relay", False), skill_id
-        assert CATALOG[skill_id].supply_none_reason is not None, (
-            f"{skill_id}：需求传递的供给真值要有一个读取口（票 03 的'供给为 none 的理由'）"
-        )
 
 
 def test_an_unknown_provider_supply_is_reported_but_never_greyed():
     """候选期不可知的供给照报（``unknown=True``），匹配器**不判死**。
 
     票 04 之后**没有真实声明**走这一档（票 03 把 relay 变成可判、票 04 把【蛊惑】的预转化
-    变成逐张可判）⇒ 本条拿**构造**的 ``Supply(unknown=True)`` 钉住匹配器对它的展示口径
-    （票 01 冻结的行为：展示层不判死，合法性由闸门另行回答——见
+    变成逐张可判）⇒ 本条拿**构造**的 ``Supply(unknown=True)`` 钉住匹配器对它的口径
+    （票 01 冻结的行为：匹配器不判死，合法性由闸门另行回答——见
     ``tests/test_need_card_relay.py::test_the_relay_branch_is_scoped_to_relay_and_leaves_the_other_kinds_alone``）。
-    声明清空**不改**这条口径：它是"以后再有候选期不可知的供给"的显示契约。
+    声明清空**不改**这条口径：它是"以后再有候选期不可知的供给"的兜底。
     """
     demand = Demand(names=("dodge",), suits=("diamond",))
 
     guohuo = Supply(product="dodge", kind="preconversion", unknown=True)
 
     assert supply_satisfies(demand, guohuo) is True
-    assert supply_mismatch(demand, guohuo) is None
 
 
 def test_the_self_rescue_wine_is_a_legal_supply_only_for_the_dying_seat():
-    """求桃窗口的两份需求：【桃】与（濒死者自己）【桃】/【酒】——自救的那张【酒】不能置灰。"""
+    """求桃窗口的两份需求：【桃】与（濒死者自己）【桃】/【酒】——自救的那张【酒】不能判死。
+
+    供给从**真实候选**反推（``supplies_of_action``）：【酒】确实是这一问面上的候选，而它只
+    在"自己濒死"那份需求下满足——故它不会被闸门误删。
+    """
     wine = cards_of_type(PACK_160, "wine")[0]
     peach = cards_of_type(PACK_160, "peach")[0]
     state = _state_with((peach, wine), pack=PACK_160)
+    payload = PeachContext()
 
-    own = demand_for(QueryKind.PEACH, PeachContext(), dying=0, asker=0)
-    other = demand_for(QueryKind.PEACH, PeachContext(), dying=1, asker=0)
-    supplies = _flatten(_tier_supplies(QueryKind.PEACH, state, dying=0, asker=0))
-
+    own = demand_for(QueryKind.PEACH, payload, dying=0, asker=0)
+    other = demand_for(QueryKind.PEACH, payload, dying=1, asker=0)
+    supplies = _supplies(
+        legal_actions_for(
+            state, 0, QueryKind.PEACH, answers_seq=0, dying=0, payload=payload
+        ),
+        state=state,
+        kind=QueryKind.PEACH,
+        payload=payload,
+        dying=0,
+    )
     wine_supply = [supply for supply in supplies if supply.product == "wine"]
     assert wine_supply, f"求桃候选里没有【酒】：{supplies}"
     assert supply_satisfies(own, wine_supply[0]) is True
@@ -529,7 +537,7 @@ def test_the_self_rescue_wine_is_a_legal_supply_only_for_the_dying_seat():
 
 
 # ---------------------------------------------------------------------------
-# 4. 合法性层（need-card-supply 票 02）：供需闸门只删"面"，不删"供给行"
+# 4. 合法性层（need-card-supply 票 02）：供需闸门只删交给玩家的面
 # ---------------------------------------------------------------------------
 
 
@@ -601,10 +609,13 @@ def test_a_known_supply_that_satisfies_the_demand_is_what_lets_the_provider_into
 
 
 def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_supply_row():
-    """§3-3 + §1b：八卦阵在花色限制下不进面，理由是**匹配器**；供给行里仍有它。
+    """§3-3：八卦阵在花色限制下不进面，理由是**匹配器**。
 
     断言的是**关系**（``supply_satisfies(需求, 八卦阵的声明) is False``）而不是"它被禁了"：
     放开 `unknown` 的票 03 / 04 不会让这条关系变假（无花色**确定地**不满足花色需求）。
+
+    名字里的 "keeps its supply row" 是票 06 之前的历史面：供给行随展示层一起删除
+    （spec §0.1b），名字作为既有落点（票 02 / `开发文档/06` 账本）的锚保留。
     """
     bagua = cards_of_type(PACK, "eight_diagrams")[0]
     state = _state_with((_DODGES[0],), equip=(bagua,))
@@ -618,22 +629,12 @@ def test_the_eight_diagrams_provider_is_rejected_by_the_matcher_and_keeps_its_su
     )
     assert "equip.eight_diagrams" not in _providers(_dodge_face(state, response_suits=("heart",)))
 
-    # §1b 的另一半：同一问的**供给池**里它还在（灰行的唯一来源），面里没有它。
-    pool = all_actions_for(state, 0, QueryKind.DODGE, answers_seq=0, payload=payload)
-    assert "equip.eight_diagrams" in _providers(pool)
-    rows = [
-        group
-        for group in supplies_for(QueryKind.DODGE, state=state, seat=0, payload=payload)
-        if group.provider == "equip.eight_diagrams"
-    ]
-    assert [group.supplies for group in rows] == [(declared,)]
-
 
 def test_an_unknown_provider_stays_out_of_the_face_while_a_restriction_is_active():
     """§3-2 前半 / 票 04 §2b-3：限制生效时"算出来一张都不行" ⇒ **仍不进面**（失败关闭不变）。
 
     ``unknown`` 的失败关闭住在**合法性闸门**（``effects.supply.supply_is_legal``）里，不在
-    匹配器里（匹配器对它"不判死"是票 01 的展示口径）——票 02 建立、票 03 / 04 都**没改**
+    匹配器里（匹配器对它"不判死"是票 01 的口径）——票 02 建立、票 03 / 04 都**没改**
     闸门一个字。
 
     **票 04 之后这一条的分母又变了一次**（票 03 把它缩到只剩【蛊惑】，票 04 把【蛊惑】的
@@ -678,21 +679,14 @@ def test_an_unknown_provider_stays_out_of_the_face_while_a_restriction_is_active
     )
     # 不限花色的窗口里它照常进面（票 01 之前的行为逐条不变）。
     assert guohuo in _providers(_dodge_face(no_match, response_suits=None))
-    # §1b：它仍在供给池里 ⇒ 逐张灰行照报（灰行的来源），只是不进面。
-    assert guohuo in _providers(
-        all_actions_for(
-            no_match, 0, QueryKind.DODGE, answers_seq=0,
-            payload=DodgeContext(response_suits=("heart",)),
-        )
-    ), f"{guohuo}：供给池里应当保留（灰行来源）"
 
 
-def test_a_rejected_real_card_and_conversion_keep_their_supply_rows_but_not_the_face():
-    """§1c-7 + §1b：真牌 / 转化被需求拒掉时，供给行照报、面里没有。
+def test_a_rejected_real_card_and_conversion_are_both_kept_off_the_face():
+    """§1c-7：真牌 / 转化被需求拒掉时**都不进面**（同一份匹配判据）。
 
-    【赵云】的【龙胆】把 ♦【杀】转成 ♦【闪】；花色需求是 ♥ ⇒ 真【闪】与转化【闪】都不进面，
-    但两者的供给都还在池子里。行里的 ``ok`` 与这里断的 ``supply_satisfies`` 是**同一个**
-    判据（``need_card_supply_rows`` 读它）。
+    【赵云】的【龙胆】把 ♦【杀】转成 ♦【闪】；花色需求是 ♥ ⇒ 真【闪】与转化【闪】都不进面。
+    对照（同一局面、不限花色）两张候选都在面上——故这里删掉的是"被需求拒掉的"，不是
+    "本来就没有的"。
     """
     diamond_dodge = _card_of_suit("dodge", "diamond")
     diamond_slash = _card_of_suit("slash", "diamond")
@@ -701,24 +695,24 @@ def test_a_rejected_real_card_and_conversion_keep_their_supply_rows_but_not_the_
     demand = demand_for(QueryKind.DODGE, payload)
     assert demand is not None
 
-    pool = all_actions_for(state, 0, QueryKind.DODGE, answers_seq=0, payload=payload)
-    face = _dodge_face(state, response_suits=("heart",))
-    supplies = [
-        supply
-        for group in supplies_for(
-            QueryKind.DODGE, state=state, seat=0, payload=payload
-        )
-        for supply in group.supplies
-    ]
+    unrestricted = legal_actions_for(
+        state, 0, QueryKind.DODGE, answers_seq=0, payload=DodgeContext()
+    )
+    supplies = _supplies(
+        unrestricted, state=state, kind=QueryKind.DODGE, payload=DodgeContext()
+    )
 
-    assert sorted(supply.kind for supply in supplies) == ["real", "transformed"], (
-        f"供给行要同时看得到真牌与被拒的转化：{supplies}"
+    assert len([action for action in unrestricted if isinstance(action, UseCard)]) == 2, (
+        "对照：不限花色时真【闪】与【龙胆】转化【闪】都在面上"
+    )
+    assert {supply.kind for supply in supplies} == {"real", "transformed"}, (
+        f"真牌与转化各有一条供给：{supplies}"
     )
     assert all(supply.suit == "diamond" for supply in supplies)
     assert all(supply_satisfies(demand, supply) is False for supply in supplies), (
-        "♦ 的供给在 ♥ 白名单下都不满足 ⇒ 两行都是 ok=False（含理由）"
+        "♦ 的供给在 ♥ 白名单下都不满足"
     )
-    assert any(isinstance(action, UseCard) for action in pool), "池里仍有两张候选（真牌 + 转化）"
+    face = _dodge_face(state, response_suits=("heart",))
     assert not any(isinstance(action, UseCard) for action in face), (
         "面里一张都不该有：被需求拒掉的真牌与转化都不进面"
     )

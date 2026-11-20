@@ -3585,18 +3585,10 @@ class ActiveSkill(HeroSkillDecl):
     """作为**"需要牌"窗口的提供者**时，候选期能提供什么（need-card-supply 票 01）。
 
     与 ``need_card_tier`` 同一姿态的**声明**字段：原样透传给 ``SkillDef.supply``，
-    判据只在展示层读它。**票 04 起没有 ``unknown=True`` 的真实声明**：唯一的消费者【蛊惑】
+    判据只在供需闸门读它（``effects/actions.py::_supply_gate``）。**票 04 起没有
+    ``unknown=True`` 的真实声明**：唯一的消费者【蛊惑】
     改成 ``kind="preconversion"``、``unknown=False``——逐张手牌按来源牌的花色 / 点数报供给
     （展开点 = ``effects/supply.py::supplies_of_action``，本声明只说"我是预转化"）。
-    """
-
-    supply_none_reason: Any = None
-    """这条技能的供给**声明了、此刻却给不出来**时的那一句理由（need-card-supply 票 04 的
-    加法；回调 ``(state, seat) -> str | None``，缺省 ``None`` = 不报）。
-
-    与 :attr:`~sgs.skills.catalog.SkillDef.supply_none_reason` 同一个位：原样透传，判据只在
-    展示层读它。首个载体 = 【蛊惑】——被 【义绝】 / 【雄乱】 封住手牌时一张也扣置不出去，
-    那一档报一行"供给为 none" + 这句话（票 03 建立的口子，票 04 接上预转化）。
     """
 
     need_card_tier: int | None = None
@@ -4102,30 +4094,6 @@ def _guohuo_response_names(
         for name, type_id in _guohuo_declaration_table(state).items()
         if type_id in extra or satisfies_required(pure_virtual_card(state, type_id), required)
     }
-
-
-def _guohuo_supply_none_reason(state: GameState, seat: int) -> str | None:
-    """【蛊惑】的**供给真值**：此刻能不能扣置出一张手牌来预转化（票 04 的展示口）。
-
-    用户 2026-11-20 Q1 点名要把上游禁令算进供给："被关羽义绝后无法使用 / 打出手牌等其它
-    限制情况"。判据**复用既有谓词**、不另写白名单：座位被 "不能使用或打出手牌" 的禁令封住
-    （:attr:`~sgs.state.Player.hand_card_prohibited`——【义绝】黑色分支 / 【雄乱】写的是同一格）
-    ⇒ 每一张手牌都扣置不出去 ⇒ 整档供给 ``none``。
-
-    与逐张供给的分工（票 04 §2b-3）：**逐张**的供给 / 置灰仍从
-    ``effects/supply.py::_preconversion_supplies`` 反推（花色 / 点数 / 【定乱】都是逐张事实），
-    本回调只回答"**整档**给不给得出来"——这正是 ``SkillDef.supply_none_reason`` 那个口子的
-    用途（行 ``ok=False`` + 这句话）。两条读的是同一个座位事实，不分叉。
-
-    **已知缺口**（与票 03 的 relay 同一处登记）：【共损】一类"不能出【闪】"的座位禁令**尚未
-    进仓**；进仓时在这里再加一条判据来源即可，框架不改。
-    """
-    if not state.player(int(seat)).hand_card_prohibited:
-        return None
-    return (
-        "持有者本回合不能使用或打出手牌（【义绝】/【雄乱】一类的座位禁令）"
-        "⇒ 没有一张牌能扣置出去预转化"
-    )
 
 
 def guohuo_preconversion_products(
@@ -9503,9 +9471,6 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         # 声明里**不写产物牌名**：能声明什么由牌堆 + 窗口要的牌名现算
         # （`_guohuo_response_names` 是唯一判据），写死一个牌名就是第二份判据。
         supply=Supply(kind="preconversion", unknown=False),
-        # 同一份"给不出来"的展示口（票 03 建立；票 04 起第一个消费者 = 本技能被义绝封手牌）：
-        # 逐张来源牌一张都扣置不出去 ⇒ 整档供给 none，行 `ok=False` + 理由。
-        supply_none_reason=_guohuo_supply_none_reason,
         extra_modifiers=(
             Modifier(ModifierPoint.CANDIDATES, _guohuo_provider_offers),
         ),
@@ -9752,9 +9717,6 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             need_card_tier=skill.need_card_tier,
             # need-card-supply 票 01 的加法：作为"需要牌"提供者时能提供什么（缺省 None）。
             supply=skill.supply,
-            # need-card-supply 票 04 的加法：声明了供给、此刻却给不出来时的那句话
-            # （缺省 None ⇒ 既有声明零改动；唯一消费者 = 【蛊惑】被座位禁令封手牌）。
-            supply_none_reason=skill.supply_none_reason,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             # 声明级覆盖优先（标准 / 界同短 id 但步骤次序 / 角色不同，M6 票 14）。
             step_requirements=(

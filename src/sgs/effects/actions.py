@@ -1042,39 +1042,12 @@ def legal_actions_for(
     return _need_card_face(actions, floor=floor)
 
 
-def all_actions_for(
-    state: GameState,
-    seat: int,
-    kind: QueryKind,
-    *,
-    answers_seq: int,
-    dying: int | None = None,
-    payload: Any = None,
-) -> tuple[Action, ...]:
-    """**全档供给池**（= 分面前、**未过供需闸门**的候选）= 公开读取口。
-
-    唯一生成口的主体是 :func:`_candidate_pool_for`；本函数只把它暴露给"要看到每一档"的
-    读取方（need-card-supply 票 01 / 02 的展示层：供给**从现有候选反推**，不另写枚举）。
-    交到玩家手上的那一份仍由 :func:`legal_actions_for` 经 :func:`_actions_for` 过供需
-    闸门再分面，本函数不改任何语义。
-
-    与 :func:`_actions_for` 的**唯一**区别就是不过那道闸门：被需求拒掉的档与牌仍在这份池
-    里——那是灰行的唯一来源（票 02 §1b："这一档试过了、不满足"要画得出来，不能凭空消失）。
-
-    ``payload`` 与 :func:`legal_actions_for` 逐字同形：四扇需要牌窗口各给自己的类型化
-    载荷（``DodgeContext`` / ``RespondContext`` / ``PeachContext``），其余询问不看它。
-    """
-    return _candidate_pool_for(
-        state, seat, kind, answers_seq=answers_seq, dying=dying, payload=payload
-    )
-
-
 def is_need_card_window(kind: QueryKind, payload: Any = None) -> bool:
     """这次询问是不是**需要（使用 / 打出）牌**窗口：判据 = 分面闸门 :func:`_window_floor`。
 
-    写在**一处**（票面 §2 的"判据复用 `_window_floor` 那一族，别另判一遍"）：展示层据此
-    决定要不要下发一句需求，引擎据此决定要不要分面——两边不可能对"这一问算不算需要牌
-    窗口"给出相反的回答。
+    写在**一处**（票面 §2 的"判据复用 `_window_floor` 那一族，别另判一遍"）：供需闸门的
+    需求生产者据此决定要不要造一份需求（:func:`~sgs.effects.supply.demand_for`），引擎据此
+    决定要不要分面——两边不可能对"这一问算不算需要牌窗口"给出相反的回答。
     """
     return _window_floor(kind, payload) is not None
 
@@ -1102,9 +1075,9 @@ def _actions_for(
     之后现算下一档）读**同一份**生成——分面只在一处发生，两处不可能对"还有没有下一档"
     给出相反的回答。
 
-    **供需闸门必须在这里**（而不是在 ``_dodge`` / ``_respond`` 的候选生成里）：供给行要看见
-    被拒的档（票 02 §1b），而交给玩家的面不能看见它们。展示层读的**供给池**是
-    :func:`_candidate_pool_for`（= 本函数去掉闸门的那一步）。
+    **供需闸门必须在这里**（而不是在 ``_dodge`` / ``_respond`` 的候选生成里）：全档候选
+    只有一份生成口（:func:`_candidate_pool_for`），需求侧过滤只在这里发生一次——否则
+    同一份需求会在几条路径上各判一遍。
     """
     return _supply_gate(
         _candidate_pool_for(
@@ -1139,8 +1112,9 @@ def _supply_gate(
        关闭；**不许**在这里另写"哪些花色算满足"）。
 
     一条动作有**多条**供给时（票 04 的预转化：一个 ``ActivateSkill`` ↔ 每一张手牌），只要
-    有一条合法这条动作就进面——"算出来一张都不行"才失败关闭（票面 §2）。这与行表里
-    "任意一张来源牌高亮 ⇒ 这一档有合法候选"是同一个判据（spec §7 S16）。
+    有一条合法这条动作就进面——"算出来一张都不行"才失败关闭（票面 §2）。预转化因此不需要
+    第二份"这张来源牌能不能当这一问的牌"的枚举：逐张供给与"进不进面"读同一个
+    :func:`~sgs.effects.supply.supplies_of_action`。
 
     ``Pass`` 等**非供给动作**原样放行；没声明供给的提供者也原样放行（``supplies_of_action``
     返回 ``None``：票 02 之前就不筛它）。只删不改，故排序不动。
@@ -1182,8 +1156,8 @@ def _candidate_pool_for(
 ) -> tuple[Action, ...]:
     """**全档候选池**（唯一生成口的主体）：过"能不能用"与禁令，**不过供需闸门、不分面**。
 
-    供需闸门是**需求侧**的过滤（票 02）：同一份池子在展示层要原样保留（灰行的来源），在
-    玩家那一面要被它收窄。两步拆开的判据见 :func:`_actions_for`。
+    供需闸门是**需求侧**的过滤（票 02）：同一份候选要被它收窄后才能交给玩家，两步拆开的
+    判据见 :func:`_actions_for`。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
@@ -1426,9 +1400,8 @@ def _dodge(
 
     **"这一次只许某花色的牌响应"不在这一层过滤**（need-card-supply 票 02）：真牌 / 转化 /
     提供者**一律先造出来**，再由 :func:`_actions_for` 的**供需闸门**按
-    :func:`~sgs.effects.supply.supply_is_legal` 收窄——被拒的档与牌必须留在供给池里
-    （:func:`all_actions_for`），否则"八卦阵不满足花色限制"这条灰行在真窗口里画不出来
-    （票 02 §1b）。于是本函数是**同一份候选**的池子生成，不读需求。
+    :func:`~sgs.effects.supply.supply_is_legal` 收窄（票 02 §1b）。
+    于是本函数是**同一份候选**的池子生成，不读需求。
     """
     actions: list[Action] = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
@@ -1604,8 +1577,7 @@ def _respond(
 
     **"这一次只许某花色的牌响应"不在这一层过滤**（need-card-supply 票 02）：真牌 / 转化 /
     提供者一律先造出来，再由 :func:`_actions_for` 的**供需闸门**按
-    :func:`~sgs.effects.supply.supply_is_legal` 收窄——被拒的档与牌必须留在供给池里
-    （:func:`all_actions_for`），否则灰行画不出来（票 02 §1b）。
+    :func:`~sgs.effects.supply.supply_is_legal` 收窄（票 02 §1b）。
     """
     if ctx.mode is RespondMode.REJUDGE:
         # 改判窗口（feng-zhangjiao 票 02）：**逐技能**枚举，一条技能一种构造子。
@@ -1869,10 +1841,6 @@ def provider_tier(skill_id: str) -> int:
 
     逐条读 **定义**：``SkillDef.need_card_tier`` 覆盖位优先，否则由载体派生
     （:attr:`~sgs.skills.SkillDef.priority_class`）。档不读局面 ⇒ 没有候选时也答得出来。
-
-    没有候选的读取方 = :func:`~sgs.effects.supply.supplies_for` 的"供给为 none 的档"
-    （need-card-supply 票 03）：那一档的候选被提供者自己的谓词挡在生成之前（持有者被
-    【义绝】封住手牌），供给行却仍要标在同一档上——否则灰行会落到别的档里。
     """
     from sgs.skills import catalog as catalog_module
 

@@ -43,14 +43,11 @@ from sgs.data import CardTagType, RuleConfig, load_content_pack  # noqa: E402
 from sgs.effects import (  # noqa: E402
     Demand,
     Supply,
-    all_actions_for,
     demand_for,
     forbidden_as_slash,
     legal_actions_for,
-    supplies_for,
     supplies_of_action,
     supply_is_legal,
-    supply_mismatch,
     supply_satisfies,
 )
 from sgs.engine import Engine  # noqa: E402
@@ -142,19 +139,21 @@ def _slash_payload(*suits: str) -> RespondContext:
     )
 
 
-def _tiers(state, kind: QueryKind, payload):
-    return supplies_for(kind, state=state, seat=HOLDER, payload=payload, answers_seq=0)
+def _preconversion_supplies(state, kind: QueryKind, payload) -> tuple[Supply, ...]:
+    """【蛊惑】这一档的**逐张供给**（闸门读的同一个展开点，按手牌序）。
 
-
-def _preconversion(tiers) -> list[Supply]:
-    """【蛊惑】这一档的逐张供给（只取 ``kind="preconversion"``，按手牌序）。"""
-    return [
-        supply
-        for group in tiers
-        if group.provider == GUOHUO
-        for supply in group.supplies
-        if supply.kind == "preconversion"
-    ]
+    ``supplies_of_action`` 是"一动作多供给"的唯一口子：一个 ``ActivateSkill`` ↔ 每一张手牌
+    一条 ``Supply``；被【义绝】封住手牌时返回 ``()``（闸门据此把整档删掉）。
+    """
+    expanded = supplies_of_action(
+        ActivateSkill(skill_id=GUOHUO, answers_seq=0),
+        state=state,
+        seat=HOLDER,
+        kind=kind,
+        payload=payload,
+    )
+    assert expanded is not None, "【蛊惑】声明了供给，不该返回 None"
+    return expanded
 
 
 def _providers(actions) -> list[str]:
@@ -174,8 +173,8 @@ def test_the_preconversion_declaration_is_judgeable_and_expands_per_hand_card():
     """§1 / §2b-1：声明是**可判**的（``unknown=False``），逐张供给由同一个生成口展开。
 
     ``SkillDef.supply`` 只说"我是预转化"（``product=None``：产物牌名由牌堆 + 窗口现算）；
-    展开点是 :func:`~sgs.effects.supplies_of_action`——**闸门与行表读同一个函数**（§2b-3），
-    故这里直接断"``supplies_for`` 的那几条 == ``supplies_of_action`` 的返回值"。
+    展开点是 :func:`~sgs.effects.supplies_of_action`——**闸门读同一个函数**（§2b-3），故
+    这里直接断"一个动作 ↔ 每一张手牌一条供给"与牌面事实。
     """
     declared = CATALOG[GUOHUO].supply
     assert declared is not None
@@ -188,17 +187,8 @@ def test_the_preconversion_declaration_is_judgeable_and_expands_per_hand_card():
     hand = (DIAMOND_SLASH, CLUB_SLASH, HEART_PEACH)
     state = _state(hand)
     payload = _dodge_payload("diamond")
-    expanded = supplies_of_action(
-        ActivateSkill(skill_id=GUOHUO, answers_seq=0),
-        state=state,
-        seat=HOLDER,
-        kind=QueryKind.DODGE,
-        payload=payload,
-    )
-    assert expanded is not None and len(expanded) == len(hand), (
-        f"每一张手牌各一条供给：{expanded}"
-    )
-    assert expanded == tuple(_preconversion(_tiers(state, QueryKind.DODGE, payload)))
+    expanded = _preconversion_supplies(state, QueryKind.DODGE, payload)
+    assert len(expanded) == len(hand), f"每一张手牌各一条供给：{expanded}"
 
     faces = [
         (supply.product, supply.suit, supply.rank, supply.color, supply.kind, supply.source_count)
@@ -269,9 +259,6 @@ def test_the_matcher_judges_preconversion_exactly_like_a_single_source_conversio
         assert supply_satisfies(demand, preconversion) == supply_satisfies(
             demand, transformed
         ), demand
-        assert supply_mismatch(demand, preconversion) == supply_mismatch(
-            demand, transformed
-        ), demand
 
     # ``kinds`` 是**种类判据本身**：预转化不是转化（这一维上它们必须不同）。
     assert supply_satisfies(Demand(kinds=("transformed",)), transformed) is True
@@ -287,22 +274,17 @@ def test_the_matcher_judges_preconversion_exactly_like_a_single_source_conversio
 def test_the_tier_stays_out_of_the_face_when_no_hand_card_matches():
     """§4-3：手里没有一张能预转化出满足需求的牌 ⇒ **整档不进面**（失败关闭不变）。
 
-    这是"判据从'有需求就全禁'变成'算出来一张都不行'"的两半（票面 §2）：
-    ① 面里没有【蛊惑】；② 供给池里仍在、只是逐张都不过匹配器（展示行已按票 05 删除，
-    灰行那一半作废）。
+    这是"判据从'有需求就全禁'变成'算出来一张都不行'"的两半（票面 §2）：① 面里没有
+    【蛊惑】；② 逐张供给都在匹配器上落空（故闸门一张也不放行）。
     """
     state = _state((CLUB_SLASH, HEART_PEACH))
     payload = _dodge_payload("diamond")
+    demand = demand_for(QueryKind.DODGE, payload)
 
+    assert demand is not None
     assert GUOHUO not in _providers(_face(state, QueryKind.DODGE, payload))
-
-    # 供给池里仍在（票 02 §1b：灰行的唯一来源），只是不进面。
-    pool = all_actions_for(
-        state, HOLDER, QueryKind.DODGE, answers_seq=0, payload=payload
-    )
-    assert GUOHUO in _providers(pool), "供给池里应当保留"
-    for supply in _preconversion(_tiers(state, QueryKind.DODGE, payload)):
-        assert supply_satisfies(demand_for(QueryKind.DODGE, payload), supply) is False
+    for supply in _preconversion_supplies(state, QueryKind.DODGE, payload):
+        assert supply_satisfies(demand, supply) is False
 
 
 # ---------------------------------------------------------------------------
@@ -314,46 +296,43 @@ def test_a_dingluan_tagged_source_card_is_not_a_preconversion_source_for_slash()
     """§4-4 前半：带【定乱】标记的牌不能作为【杀】响应时的**预转化源**。
 
     判据**复用** :func:`~sgs.effects.forbidden_as_slash`（标签读点只有一处），不在这里另写
-    白名单；对照 = 同一个局面**不挂标签** ⇒ 两张来源牌都在。不满足上游禁令的那张牌**不出现
-    在供给行里**（票面 §2 允许的两种读法之一：与"产物牌名不匹配"的理由分开，不混成一条）。
+    白名单；对照 = 同一个局面**不挂标签** ⇒ 两张来源牌都在。不满足上游禁令的那张牌**不报
+    这一条供给**（与"产物牌名不匹配"分开：上游禁令不是牌名理由）。
     """
     hand = (CLUB_NULLIFY, HEART_PEACH)
     payload = _slash_payload()
     plain = _state(hand)
     tagged = _state(hand, tag=CLUB_NULLIFY)
 
-    plain_supplies = _preconversion(_tiers(plain, QueryKind.RESPOND, payload))
+    plain_supplies = _preconversion_supplies(plain, QueryKind.RESPOND, payload)
     assert [supply.suit for supply in plain_supplies] == ["club", "heart"], (
         "对照：不挂【定乱】时两张来源牌都报"
     )
 
     assert forbidden_as_slash(tagged, tagged.card(CLUB_NULLIFY)) is True
-    supplies = _preconversion(_tiers(tagged, QueryKind.RESPOND, payload))
+    supplies = _preconversion_supplies(tagged, QueryKind.RESPOND, payload)
     assert [supply.suit for supply in supplies] == ["heart"], (
-        f"【定乱】那张不出现在供给行里：{supplies}"
+        f"【定乱】那张不报供给：{supplies}"
     )
     # 面里只剩【蛊惑】（另一张牌仍能预转化）——不是"整档消失"。
     assert GUOHUO in _providers(_face(tagged, QueryKind.RESPOND, payload))
 
 
 def test_a_blocked_holder_reports_the_whole_tier_as_none():
-    """§4-4 后半：被【义绝】封住手牌的于吉 ⇒ **整档供给 none**，不进面，但这一组仍在 + 理由。
+    """§4-4 后半：被【义绝】封住手牌的于吉 ⇒ **整档供给 none**，不进面。
 
     判据复用座位禁令（``Player.hand_card_prohibited``，唯一存储是
-    ``hand_card_prohibition_sources``）；理由是**提供者自己的声明**
-    （``SkillDef.supply_none_reason``）。展示行已按票 05 删除（spec §0.1b），本断言只到
-    供给模型为止。
+    ``hand_card_prohibition_sources``）：一张也扣置不出去 ⇒ 展开为空 ⇒ 闸门整档删掉。
+    展示行已按票 05 / 06 删除（spec §0.1b），本断言只到供给模型与面为止。
     """
     state = _state((DIAMOND_SLASH, CLUB_SLASH, HEART_PEACH))
     _prohibit(state)
     assert state.player(HOLDER).hand_card_prohibited is True
     payload = _dodge_payload("diamond")
 
-    tiers = _tiers(state, QueryKind.DODGE, payload)
-    guohuo = [group for group in tiers if group.provider == GUOHUO]
-    assert len(guohuo) == 1, f"这一档只该有一组：{tiers}"
-    assert guohuo[0].supplies == (), "一张牌也扣置不出去 ⇒ 整档无供给"
-    assert guohuo[0].reason, "整档给不出来要有理由（票 03 建立的口子）"
+    assert _preconversion_supplies(state, QueryKind.DODGE, payload) == (), (
+        "一张牌也扣置不出去 ⇒ 整档无供给"
+    )
     assert GUOHUO not in _providers(_face(state, QueryKind.DODGE, payload))
 
 
@@ -395,7 +374,7 @@ def test_the_matcher_and_the_gate_agree_on_every_source_card():
     for label, state, kind, payload in cases:
         demand = demand_for(kind, payload)
         assert demand is not None
-        supplies = _preconversion(_tiers(state, kind, payload))
+        supplies = _preconversion_supplies(state, kind, payload)
         face = _face(state, kind, payload)
         for supply in supplies:
             assert supply_satisfies(demand, supply) == supply_is_legal(demand, supply), (

@@ -138,7 +138,6 @@ __all__ = [
     "SkillSource",
     "SkillSourceKind",
     "StateChange",
-    "SupplyNoneReason",
     "activation_plan",
     "awakening_skill_awakened",
     "damage_point_index",
@@ -181,16 +180,6 @@ SeamHandler: TypeAlias = Callable[[Any, Frame], Control]
 
 FixedHandCount: TypeAlias = Callable[[Any, int], "int | None"]
 """``SkillDef.fixed_hand_count`` 的回调：``(state, seat) -> 固定到几 / None``（查询期现算）。"""
-
-SupplyNoneReason: TypeAlias = Callable[[Any, int], "str | None"]
-"""``SkillDef.supply_none_reason`` 的回调：``(state, seat) -> 一句理由 / None``。
-
-``None`` = 供给给得出；一句人话 = **声明了供给、此刻却给不出来**。它是 need-card-supply
-票 03 的"供给为 none 的理由"口子：那一段的判据只有技能自己知道（【护驾】/【激将】的持有者
-还能不能使用 / 打出手牌），展示层只该知道"有 / 没有"与"为什么没有"。票 04 起【蛊惑】的
-逐张预转化接同一个口子（被【义绝】封手牌 ⇒ 一张也扣置不出去）。见
-:attr:`SkillDef.supply_none_reason`。"""
-
 
 class SeamKind(str, Enum):
     """**帧内接缝**的键（票 12 §Q12 / 票 30）。
@@ -727,7 +716,7 @@ class SkillDef:
 
     supply: Supply | None = None
     """这条技能作为**"需要（使用 / 打出）牌"窗口的提供者**时，候选期能提供什么
-    （need-card-supply 票 01；:class:`~sgs.effects.Supply`，缺省 ``None`` = 展示层不报）。
+    （need-card-supply 票 01；:class:`~sgs.effects.Supply`，缺省 ``None`` = 不报供给）。
 
     它是**定义**的属性、不是局面属性（与 :attr:`need_card_tier` 同一姿态）：档与供给都写在
     技能声明上，候选期不重新枚举"哪些牌能用"。今天落四条：
@@ -740,31 +729,11 @@ class SkillDef:
       牌堆 + 窗口要的牌名现算，``_guohuo_response_names`` 是唯一判据）；
     - 【护驾】/【激将】⇒ ``Supply(product="dodge" | "slash", kind="relay")``
       （**需求传递**，票 03：``unknown=False``——牌名是声明事实，匹配规则由
-      ``kind="relay"`` 一族给定，见 :func:`~sgs.effects.supply._dimension_failure`；
-      持有者自己被挡住时用 :attr:`supply_none_reason` 报"为什么没有这一档"）。
+      ``kind="relay"`` 一族给定，见 :func:`~sgs.effects.supply._mismatch`；
+      持有者自己被挡住时**连候选都不产出**，见 ``LordSkill.offer``）。
 
     没有声明的提供者（【武翊】/ 界【渐营】②）因此不报供给：接入新提供者时补声明，
     与档位同一条纪律。**不进记录流**（``SkillDef`` 不被序列化）。
-    """
-
-    supply_none_reason: SupplyNoneReason | None = None
-    """这条技能**声明了供给、此刻却给不出来**时的那一句理由（need-card-supply 票 03）。
-
-    缺省 ``None`` = 不报。回调 ``(state, seat) -> str | None``：``None`` = 给得出，
-    一句人话 = 这一档此刻没有供给（【护驾】/【激将】的持有者被 【义绝】/【雄乱】 一类
-    "不能使用或打出手牌"的座位禁令封住 ⇒ 需求传不出去，用户 2026-11-20 Q2）。
-
-    **两个读取方读同一份声明**（不新增真源）：
-
-    - 候选生成：``sgs.skills.lord_request.LordSkill.offer`` 用**同一个回调**决定"要不要
-      ``ActivateSkill``"（被挡 ⇒ 连询问链都不开，票 03 §1 / S9）；
-    - 展示层：:func:`~sgs.effects.supply.supplies_for` 用它给**没有候选的档**补一行
-      ``ok=False`` + 这句话（票 03 §2c：行 ``ok=True`` ⇔ 那一档有合法候选，spec §7 S16）。
-      票 04 起还有第二种形态：候选**在池里**、逐张展开却为空（【蛊惑】被【义绝】封手牌）
-      ——同样报一行"供给为 none" + 这句话（``effects/supply.py::_declared_supply_none_reason``）。
-
-    它只在"这一档本来就是这一问的提供者"时被问（产物牌名落在需求里，由 ``supplies_for``
-    判）；**不进记录流**（``SkillDef`` 不被序列化）。
     """
 
     need_card_tier: int | None = None
