@@ -81,10 +81,10 @@
 | 事项 | 纪律 |
 |---|---|
 | 票的单位 | **一个武将 = 一批 = 一张票**（该武将的全部技能一起做） |
-| 迭代期 | 只跑相关单文件（`tests/test_hero_<包>.py`）+ `bash tests/smoke-web.sh`（实测 60–70 s）+ `bash tools/check_goldens.sh`（秒级）。**不提交** |
-| 收口 | 批次全部技能落地后**提交**：全量门禁由 pre-commit hook 跑（本机实测 ≈8 分钟），失败拒绝提交、工作树不动。手工跑全量只在"不提交、先看红/绿"时 |
-| 提交 | **一次** commit。`wip:` 分档（用户 2026-11-12 裁定）：预计 **≤30 分钟**的票不做 `wip:`；预计 **>30 分钟**或机器中断风险高时，过半落一个 `wip:`（交付前 squash / amend 掉）——但每个 `wip:` 也要付一次全量 hook（≈8 分钟），别把它当免费检查点 |
-| 实机验收 | 只有"新增询问形态 / 改了 DOM 形状"才走真实浏览器（`docs/agents/acceptance-web.md`）；其余用 `tests/support/ui_smoke.mjs` 的合成载荷覆盖 |
+| 迭代期 | 只跑相关单文件（`tests/test_hero_<包>.py`）+ `bash tests/smoke-web.sh`（实测 60–70 s）+ `bash tools/precommit-screen.sh`（≈47 s：47 条金录像冻结 / 出货表 / 池计数 / 文档漂移）。**不提交** |
+| 实机验收 | **每个武将做完就开一个窗口**（用户 2026-11-20 裁定 Q11 A）：agent 起服务 + 发交付卡（URL / 快照指纹 / 要看的面 / 已知红项），用户**自由玩**；窗口内 agent 冻结被跟踪文件。协议见 `docs/agents/acceptance-web.md` §0。需要具体局面时用户点名，用 `tools/serve-position.py` 注入 |
+| 收口 | 用户一次给的那批（可跨包）**合成一次提交**（2026-11-20 裁定 Q4 C / Q7 B / Q10 B）：全量门禁由 pre-commit hook 跑，失败拒绝提交、工作树不动。手工跑全量只在"不提交、先看红/绿"时 |
+| 提交 | **一次**（一批一次）。`wip:` 分档（用户 2026-11-12 裁定）不变；**改共享原语的框架票单独提交**——那才是 E1 金录像变红时归因价值最高的一类 |
 | DoD | 批内每条技能二选一：**已实现**（带能红的回归）或**已摘出**（附裁定票链接）。不许"做了一半" |
 
 ## 3.1 多将一批（用户 2026-11-02 裁定：一次给 N 个武将时走这条）
@@ -96,7 +96,7 @@
 | 分析（**并行**） | 每个武将起一个**只读**子代理：读 `readings.md` / `shapes.md` / `edge-cases.md`，跑 `similar_skills.py --like` + `dump_catalog.py --hook`，产出**自己那张票**的六问 + `### 询问剧本`；只写 `.scratch/<effort>/issues/NN-<slug>.md`，**不碰** `src/` / `tests/`，不交码 |
 | 签字（**一轮**） | N 张询问剧本表一次交给用户；一句「同意」= N 票同时过门，各票票头分别写 `规范确认: 已签（日期；多将一批一次签）` |
 | 实现（**串行**） | 两将的 `Touches:` 必然重叠（`src/sgs/agents/heuristic.py`、`tools/sgs_web/descriptions.json`、`tools/sgs_web/static/options.js`、`test_hero_catalog.py`、`test_hero_dealing.py`、`test_web.py`、`test_heuristic_ai.py`、`test_ai_cases.py`、`tests/test_all_ai_games.py`、`tests/support/ui_smoke.mjs`、`开发文档/06`）⇒ **不并行实现**；按票顺序做，默认池计数**逐票 +1**（每改完一票跑一次 `tools/pool_census.py --check`，别一次 +N） |
-| 门禁 | 迭代期逐票三件（单文件 + `smoke-web` + `check_goldens`）；提交时 hook 的全量**照旧每票一次** |
+| 门禁 | 迭代期逐票三件（单文件 + `smoke-web` + `precommit-screen`）；提交时 hook 的全量**每批一次**（不是每票一次） |
 
 两条前置，缺一条就别起并行分析：
 
@@ -107,7 +107,8 @@
 
 另外两条（同一次裁定）：
 
-- **不做多将一提交**：那会把 `E1` 金录像变红变成无法归因。
+- **不做多将一次验收**：一张验收窗口盖两张票，红在谁身上说不清。提交现在按"用户一次给的那批"
+  合批（上表），前提是**每将各自绿过单文件 + 金录像**——否则红在批里同样归因不了。
 - 分析子代理只交表：读不到的形态照样标出来（§2.1 第 1 条），不许猜；各表里的硬停项各自开裁定票。
 
 ## 4. 硬停判据（命中任一条，立即停）

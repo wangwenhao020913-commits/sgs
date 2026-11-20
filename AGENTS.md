@@ -53,12 +53,20 @@
    `core.bare=false` 与身份 `dsh-agent <dsh-agent@localhost>`。
 4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（实测 60–70 s：起临时服务 +
    跑 `ui_smoke.mjs` + 收尾）。它在门禁之外，跑完整门禁才用 `tests/run_all.sh`。
-   **实机验收**：改动 DOM API 的 UI 票（`children` 形状、节点结构、模板、选择面等）在置
-   `resolved` 前必须走一遍**真实浏览器**（`bsk`）；最小覆盖 = **进入处理区 / 舞台卡更新 /
-   弃牌**。`bsk` 可用时由 **agent 自己驱动**（`browser_session` / `browser_page` /
-   `browser_inspect` / `browser_interact`）；**只有 `bsk` 缺失时**才准备服务器 + 复现配方，
-   然后**结束 turn**（不要用 `ask_user_question` 阻塞等结果），由用户手动验收。
-   验收前先跑 **`bash tools/check_env.sh`**（现在含共享 `.git/config` 护栏）；起服务用
+   **实机验收**（2026-11-20 用户裁定 Q5 B / Q6 B / Q11 A）：**每做完一个武将**开一个验收窗口，
+   由**用户自由玩**——新技能的新问题只能靠他玩出来，这是流程里刻意分工的一半，不派脚本让他照着点。
+   需要构造局面时用户点名，agent 用 `tools/serve-position.py --position <json>`（示例在
+   `tools/positions/`）起一张"从那个局面开始"的牌桌。窗口协议（正文见
+   `docs/agents/acceptance-web.md` §0）：
+   ① agent 用**受管后台任务**起服务、打印 URL；
+   ② 交付卡四字段：URL / 快照指纹 / 这票要看的面 / 已知红项；
+   ③ 窗口期间**冻结**所有被跟踪文件（只许写 `.scratch/`）：不提交、不重录、不重启；
+   ④ **结束 turn**（不要用 `ask_user_question` 阻塞），用户回「过 / 不过 + 现象」；
+   ⑤ 用户中途要修 bug ⇒ 本窗口结束，出新的快照。
+   改动 DOM API 的 UI 票在置 `resolved` 前，`bsk` 可用时仍由 **agent 自己先走一遍真实浏览器**
+   （`browser_session` / `browser_page` / `browser_inspect` / `browser_interact`）；
+   最小覆盖 = **进入处理区 / 舞台卡更新 / 弃牌**。验收前先跑
+   **`bash tools/check_env.sh`**（现在含共享 `.git/config` 护栏）；起服务用
    **`bash tools/serve-dev.sh start|stop|status|restart [port]`**（缺省 8100；pid / log 在
    gitignored 的 `runs/serve-<port>.*`，起来后打印实际 URL；底层
    `.venv/bin/python tools/sgs_web/serve.py --host 0.0.0.0 --port <port> --quiet`）。

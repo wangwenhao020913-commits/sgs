@@ -1,9 +1,38 @@
 # Web 实机验收配方（Acceptance: Web）
 
-**何时用**：改动 DOM API 的 UI 票（`children` 形状、节点结构、模板、选择面等）在置
-`resolved` 前，用真实浏览器按本配方走一遍。最小覆盖 = **进入处理区 / 舞台卡更新 / 弃牌**。
+**何时用**：**每做完一个武将技能票**就开一个窗口（§0）；改动 DOM API 的 UI 票
+（`children` 形状、节点结构、模板、选择面等）在置 `resolved` 前也必须走一遍真实浏览器。
+最小覆盖 = **进入处理区 / 舞台卡更新 / 弃牌**；需要某个具体局面时用 §6 注入。
 这是**配方**，不是规格：验收判据住各 effort 的 spec，结论住 `.scratch/<effort>/acceptance.md`
-（见 `docs/agents/domain.md`），票面写 `## 复现配方` 与 `## Answer`。
+（见 `docs/agents/domain.md`），票面写 `## 验收窗口` 与 `## Answer`（旧票的 `## 复现配方` 保留）。
+
+## 0 · 验收窗口协议（2026-11-20 用户裁定 Q5 B / Q6 B / Q11 A）
+
+**每个武将做完就开一个窗口**，由用户**自由玩**；不派"照着点"的脚本——新技能的新问题只能靠
+他玩出来，这是流程里刻意分工的一半。窗口是**提交前**的、跑在**工作树**上的一次验收。
+
+| 步骤 | agent 做 | 用户做 |
+|---|---|---|
+| 开窗口 | ① 起服务（**受管后台任务**，见 §2）；② 发**交付卡**（下四字段）；③ 结束 turn | 打开 URL 玩 |
+| 窗口内 | **冻结**：不改任何被跟踪文件（只许写 `.scratch/`），不提交、不重录、不重启 | 玩；发现问题就描述现象 |
+| 关窗口 | 收服务；结论写进票面 `## 验收窗口` 与 `.scratch/<effort>/acceptance.md` | 回「过 / 不过 + 现象」 |
+
+**交付卡四字段**（缺一不算交付）：
+
+1. **URL**：实际打印的 `http://127.0.0.1:<port>/`；
+2. **快照指纹**：`git status --short` 与 `git diff | sha256sum` 的读数（窗口期间不许变）；
+3. **这票要看的面**：3–5 条，例如「技能按钮在出牌阶段出现 / 询问面文案逐字 / 触发时机在伤害后」；
+4. **已知红项**：`tools/precommit-screen.sh` 此刻的状态；有红必须写明红在哪条判据、为什么现在
+   就能给用户看（例如"金录像 71 红 = 待你签重录的那批"）。
+
+**用户回什么**：「过」= 本窗口关；「不过」+ 现象（座位 / 第几轮 / 期望 vs 实际）。不转述，
+agent 自己把现象落成票面的断言与 `## Answer`。
+
+**为什么窗口内要冻结**：静态脚本是**每请求从磁盘读**的（§2），agent 一边改、用户一边刷，看到的
+就是一个正在变的版本；Python 改动要重启才生效，会让"用户看的那版"与"agent 心里的那版"分叉。
+要修 bug ⇒ 本窗口结束，出新快照（新指纹、新交付卡）。
+
+---
 
 ## 1 · 环境预检
 
@@ -70,7 +99,11 @@ browser_interact click|fill|press # 点座位 / 手牌 / 按钮，填输入框
   `data-skill-ink-seat`。
 - 截图证据放 `.scratch/<effort>/screenshots/`，文件名带票号与场景。
 
-## 4 · 种子 12 配方
+## 4 · 示例：种子 12 配方（范式，按票替换）
+
+下表是 U3 那次为周瑜【英姿】/【反间】写的一条完整配方——**它就是"一条好验收"的样子**：
+种子固定、武将点名、起始手牌实测一致、每一步点哪里、看什么。新武将按同样的密度写自己那条
+（种子用 `tools/acceptance_seed.py` 扫），写进票面 `## 验收窗口` 的"要看的面"。
 
 | 项 | 值 |
 |---|---|
@@ -112,5 +145,28 @@ browser_interact click|fill|press # 点座位 / 手牌 / 按钮，填输入框
 - `.scratch/u3-stage-and-pacing/screenshots/07-wuxie-processing.png`
   （无懈可击入处理中组 + 底行）
 
-把复现结果写进票的 `## Answer`（配方留在 `## 复现配方`），结论按 `docs/agents/domain.md`
-汇总到 `.scratch/<effort>/acceptance.md`；不要在 spec / 设计稿里复制结论。
+把复现结果写进票的 `## Answer`（配方留在 `## 验收窗口` / `## 复现配方`），结论按
+`docs/agents/domain.md` 汇总到 `.scratch/<effort>/acceptance.md`；不要在 spec / 设计稿里复制结论。
+
+## 6 · 构造局面注入（需要某个具体局面时）
+
+用户说过「必要构造场景注入服务时我会和你说的」——**他说了才用，不要主动起**。
+`tools/serve-position.py` 把一份 JSON 变成"从那个局面开始"的牌桌：局面构造复用测试侧的
+`SeatSpec` / `build_state`（同一份真源），只把建局那一处换成"按这份局面建局"；每步询问仍走
+产品 HTTP 路径（`POST /api/sessions/<id>/answer`）。
+
+```bash
+.venv/bin/python tools/serve-position.py --position tools/positions/one-hp-two-cards.json --port 0
+# 打印：局面 / 座位一行（`0:zhangchunhua_mobile 1/3 [dodge+peach] | …`）/
+#       `sgs-position listening on http://127.0.0.1:<port>/`
+.venv/bin/python tools/serve-position.py --position <file>.json --check   # 只解析，不起服务
+```
+
+- 局面文件字段：`seats[].{hero, hp, hp_max, hand, equip, judge, identity, kingdom, chained}`、
+  `deck` / `discard`（牌名数组）、`turn_seat` / `phase` / `human_seat` / `seed` / `deck_profile`。
+  `hp` / `hp_max` **必填**（不替你猜武将上限）。
+- 牌名用数据表 `type_id`（`slash` / `dodge` / `peach` / `crossbow`…），不是中文名；军争牌
+  （如 `fire_attack`）只在 `standard_ex_160` 档里——写错档位会当场报"牌堆里没有牌名"。
+- 示例两份：`tools/positions/one-hp-two-cards.json`（1 血 2 手牌、轮到敌方出手）、
+  `tools/positions/play-phase-armed.json`（4 人身份局、出牌阶段、手里有【杀】+ 武器）。
+- 它不动产品路径：与 §2 的正常服务并行，各用各的端口与 `--runs-dir`；窗口结束时一起收掉。

@@ -1,0 +1,23 @@
+{
+  "deck_profile": "standard_108",
+  "seed": 4909,
+  "human_seat": 0,
+  "turn_seat": 1,
+  "seats": [
+    {
+      "hero": "zhangchunhua_mobile",
+      "hp": 1,
+      "hp_max": 3,
+      "hand": ["dodge", "peach"],
+      "kingdom": "wei"
+    },
+    {
+      "hero": "xusheng_mobile",
+      "hp": 4,
+      "hp_max": 4,
+      "hand": ["slash", "slash"],
+      "equip": ["crossbow"],
+      "kingdom": "wu"
+    }
+  ]
+}
