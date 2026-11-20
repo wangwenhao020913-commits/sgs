@@ -87,6 +87,148 @@ body {
   margin: 0;
   padding: calc(16 * var(--dsu)) calc(24 * var(--dsu));
 }
+
+/* ==========================================================================
+ * ui-one-screen 票 03：开局页**一屏**（spec A5 / 原型 `data-screen="lobby-a"`）
+ *
+ * 顶栏（56 dsu）→ 常驻工具行（52 dsu）→ 正文两栏：左 760 dsu 固定（开一局 + 将池摘要）、
+ * 右弹性（我的武将 + 技能全文）。判据是「内容长短不改按钮位置」（原型 `geometry-tables.md`
+ * 表 C）：每个会长高的东西都关进自己的滚动区（`.skilllist` / `.pool-chips`），版式只吃
+ * dsu 与壳宽。工具行那三颗键在 `#view-lobby` 里，位置永不改变。
+ * ========================================================================== */
+.design-canvas .lobby-body { display: flex; gap: calc(24 * var(--dsu)); align-items: stretch; }
+.design-canvas .lobby-left {
+  flex: 0 0 calc(760 * var(--dsu));
+  display: flex; flex-direction: column; gap: calc(14 * var(--dsu));
+  min-height: 0;
+}
+.design-canvas .lobby-right {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: calc(14 * var(--dsu));
+  min-height: 0;
+}
+/* 两栏里的面板不再吃 `.panel` 的流式外边距：高度由栏分配（内容只改滚动区里的内容）。 */
+.design-canvas .lobby-left > .panel, .design-canvas .lobby-right > .panel { margin: 0; }
+.design-canvas .lobby-formpanel { flex: 0 0 auto; }
+.design-canvas .lobby-poolpanel {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+}
+.design-canvas .lobby-poolpanel h2 { margin: 0; }
+.design-canvas .lobby-panel-head { margin: 0 0 calc(8 * var(--dsu)); }
+.design-canvas .lobby-herohead { flex: 0 0 auto; }
+.design-canvas .lobby-heroskills {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+
+/* 开一局面板：两列固定栅格（`1fr 1fr` + 78 dsu 行高，原型 `.formgrid`）。字段顺序与既有
+ * `name` / `id` 全不变——只是排版换成两列。开始键与提示那条是 56 dsu 的固定行；乘法的常量
+ * 写在 `var(--dsu)` 右边：烟测 U1-02c3 有一条**全文** absence 判据，扫的是「常量在左边」
+ * 的写法（同值不同物，别让两条判据互相踩）。 */
+.design-canvas .formgrid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  grid-auto-rows: calc(78 * var(--dsu));
+  column-gap: calc(18 * var(--dsu)); row-gap: 0;
+  align-content: start;
+}
+.design-canvas .formgrid label {
+  display: flex; flex-direction: column; justify-content: flex-start;
+  gap: calc(4 * var(--dsu)); min-width: 0;
+  font-size: var(--f12);
+}
+.design-canvas .formgrid select,
+.design-canvas .formgrid input[type="text"],
+.design-canvas .formgrid input[type="number"] {
+  font: inherit; font-size: var(--f13); height: calc(34 * var(--dsu));
+  padding: 0 calc(9 * var(--dsu));
+}
+.design-canvas .formgrid input[type="checkbox"] {
+  width: calc(18 * var(--dsu)); height: calc(18 * var(--dsu));
+}
+.design-canvas .startrow {
+  flex: 0 0 calc(var(--dsu) * 56);
+  display: flex; align-items: center; gap: calc(12 * var(--dsu));
+  margin-top: calc(10 * var(--dsu)); flex-wrap: nowrap;
+}
+.design-canvas .startrow .primary {
+  flex: 0 0 auto; font-size: var(--f15);
+  padding: calc(8 * var(--dsu)) calc(26 * var(--dsu));
+}
+.design-canvas .startrow #lobby-hint {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 将池摘要：槽位 / 统计 / 按势力分组的名字块。名字块区自己滚（名字再多也不改变两栏版式）。 */
+.design-canvas .lobby-poolpanel .pool-slots { flex: 0 0 auto; }
+.design-canvas .pool-stats { flex: 0 0 auto; margin: calc(6 * var(--dsu)) 0 0; font-size: var(--f11); }
+.design-canvas .pool-chips {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: calc(5 * var(--dsu));
+  padding-top: calc(8 * var(--dsu)); margin-top: calc(8 * var(--dsu));
+  border-top: 1px solid var(--line);
+}
+.design-canvas .pool-chips .chipline {
+  flex: 0 0 auto; align-self: center; padding-right: calc(4 * var(--dsu));
+  font-size: var(--f11); font-weight: 700; color: var(--accent);
+}
+.design-canvas .pool-chips .chiphero {
+  flex: 0 0 auto; padding: calc(1 * var(--dsu)) calc(8 * var(--dsu));
+  border: 1px solid var(--line); border-radius: calc(6 * var(--dsu));
+  background: var(--card); font-size: var(--f11);
+}
+/* 已禁版本的名字仍列出、但划掉变灰——与将池窗的版本格同一套语义（不新增颜色）。 */
+.design-canvas .pool-chips .chiphero.banned { color: var(--dim); text-decoration: line-through; }
+
+/* 我的武将（右栏上半）：势力徽记 / 名字 / 体力点。徽记复用既有 `.kingdom`（R8：不新增颜色）。 */
+.design-canvas .herocard-head {
+  display: flex; align-items: baseline; gap: calc(10 * var(--dsu));
+  padding-bottom: calc(8 * var(--dsu)); border-bottom: 1px solid var(--line);
+}
+.design-canvas .herocard-head .kingdom {
+  width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu));
+  border-radius: 50%; font-size: var(--f12);
+}
+.design-canvas .lobby-hero-name { font-size: var(--f22); font-weight: 700; }
+.design-canvas .lobby-hp {
+  display: flex; gap: calc(3 * var(--dsu)); margin-left: auto; align-self: center;
+}
+.design-canvas .lobby-hp .pip {
+  width: calc(11 * var(--dsu)); height: calc(16 * var(--dsu));
+  border-radius: calc(3 * var(--dsu)); background: var(--accent);
+}
+.design-canvas .lobby-hp .pip.off { background: var(--line); }
+.design-canvas .herocard-sub { margin: calc(6 * var(--dsu)) 0 0; font-size: var(--f12); }
+
+/* 技能全文：定高 + 内滚（表 C 的判据——描述再长也只改这块的内容，下面什么都动不了）。 */
+.design-canvas .skilllist {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: calc(12 * var(--dsu));
+  padding-right: calc(4 * var(--dsu));
+}
+.design-canvas .skillblock {
+  border-left: calc(3 * var(--dsu)) solid var(--accent-soft);
+  padding-left: calc(10 * var(--dsu));
+}
+.design-canvas .skillblock .sn { margin: 0; font-size: var(--f15); font-weight: 700; }
+.design-canvas .skillblock .sd { margin: calc(4 * var(--dsu)) 0 0; font-size: var(--f13); }
+.design-canvas .herocard-foot {
+  flex: 0 0 calc(34 * var(--dsu));
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: calc(8 * var(--dsu)); border-top: 1px solid var(--line);
+  font-size: var(--f12); color: var(--dim);
+}
+
+/* 工具行右端两句摘要只是显示：单行省略，长文本不撑高那 52 dsu。 */
+.design-canvas .toolrow .spacer { flex: 1 1 auto; }
+.design-canvas .toolrow button {
+  flex: 0 0 auto; font-size: var(--f13);
+  padding: calc(3 * var(--dsu)) calc(13 * var(--dsu));
+}
+.design-canvas .toolrow .dim {
+  flex: 0 1 auto; min-width: 0; font-size: var(--f11);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* 字号下限（原型 `--f11`…`--f22`）：只给字号加 floor，盒子尺寸仍全走 dsu。
  * 画布与面板窗各自声明 `--dsu`，故两者各拿各的口径（`var()` 在**声明处**求值，
  * 提到 `:root` 会让画布拿到视口口径——这正是本票要消灭的那个偏差）。 */
@@ -141,14 +283,17 @@ button.ghost { background: transparent; }
 button:disabled { opacity: .4; cursor: not-allowed; }
 
 /* 将池预设（M6 票 13 / spec D6）：5 个常驻槽位 + 按真名分组的版本格。
- * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。 */
+ * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。
+ * ui-one-screen 票 03 起它在 L 窗里：身高由 `.pw-body[data-layout="split"]` 分配，版本格多时
+ * 只有这一条列表滚（旧的 `max-height: 46vh` 是流式文档时代的视口高度，已删）。 */
 .pool-slots { display: flex; flex-wrap: wrap; gap: 8px; }
 .pool-slot.active { box-shadow: 0 0 0 3px var(--accent-soft); }
 .pool-slot.active::after { content: " ★"; color: var(--accent); }
 .pool-slots .pool-slot.on.active::after { color: #fff; }
 .hero-pool {
   display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
-  max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 6px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  border-top: 1px solid var(--line); padding-top: 6px;
 }
 .pool-row {
   display: flex; align-items: center; gap: 8px; padding: 2px 0;
@@ -2083,10 +2228,18 @@ button.avatar-skill:hover { border-color: var(--accent); }
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   padding: calc(14 * var(--dsu)) calc(16 * var(--dsu));
 }
+/* 搬进窗的三块（剧本 / 将池 / 录像，票 03）：窗壳本身就是卡片，正文里不再画一层 `.panel`
+ * 的边框 / 内外边距；标题由窗头给（`.pw-head` 的 h2），面板自带的那行不再重复。 */
+.pw-body > .panel { margin: 0; padding: 0; border: 0; background: transparent; }
+.pw-body > .panel > h2 { display: none; }
 /* 固定区与滚动区分层（spec §3.2 / 原型缺陷 1）：正文**不滚**，固定筛选区留在顶上、
  * 只有列表滚。少了这一条，列表的 `flex: 1` 是死的，整块正文一起滚、筛选行被顶走。 */
 .pw-body[data-layout="split"] {
   display: flex; flex-direction: column; overflow: hidden;
+}
+/* 带列表的窗（将池 L）：面板自己吃掉窗高，列表（`.hero-pool`）才是滚动区。 */
+.pw-body[data-layout="split"] > .panel {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
 }
 .pw-foot {
   flex: 0 0 calc(52 * var(--dsu)); display: flex; align-items: center;
@@ -2101,7 +2254,10 @@ button.avatar-skill:hover { border-color: var(--accent); }
   flex: 0 0 auto; padding: calc(2 * var(--dsu)) calc(9 * var(--dsu));
   font-size: var(--f12);
 }
+/* 动作行在脚注里靠右（询问弹窗的老口径）；正文槽里是**搬运来的面板**，行照常靠左
+ * （ui-one-screen 票 03：剧本 / 将池两块的按钮行不该跟着脚注走）。 */
 .script-confirm .row { justify-content: flex-end; }
+.pw-body .row { justify-content: flex-start; }
 
 /* ---------------------------------------------------------------------------
  * M7 票 21：剧本棋盘（卡格 + 固定 64×64 只放图标的节点 + 上方标题 + SVG 连线 + 悬浮卡）

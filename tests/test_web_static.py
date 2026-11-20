@@ -9462,36 +9462,261 @@ def test_the_avatar_appearance_script_is_listed_right_after_the_dialog_shell() -
 # ---------------------------------------------------------------------------
 
 
-def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
-    """spec §4「开局页增量叠加」：既有三块一个都不删，剧本面板是加在开局页里的一段。
+_LOBBY_TOOL_KEYS = ("btn-lobby-script", "btn-lobby-pool", "btn-lobby-runs")
+"""开局页常驻工具行的三颗入口键（剧本 / 将池预设 / 录像；位置永不变）。"""
 
-    位置判据与烟测同源：`#script-panel` 在 `view-lobby` 与牌桌视图之间，既有三块
-    （`#lobby-form` / `#hero-pool-panel` / `#run-list`）仍在它之后；剧本面板的两个确认框
-    也不落进牌桌视图与回放视图之间那一段（烟测有两处字符串切片拿那两个 `main` 的 id 当锚点）。
+_LOBBY_WINDOW_PANELS = {
+    "script": "script-panel",
+    "pool": "hero-pool-panel",
+    "runs": "run-list",
+}
+"""三颗工具键各自搬进窗口的那块面板（id 一个都不许改名：票 20 的判据与烟测以它们为锚点）。"""
+
+_LOBBY_WINDOW_SIZES = {"script": "S", "pool": "L", "runs": "M"}
+"""三扇窗的档位（spec A2 的三档字面尺寸；确认框仍是默认 S）。"""
+
+
+def _lobby_toolrow_html(html: str) -> str:
+    """工具行那一段（`#lobby-toolrow` → 正文两栏 `#lobby-body` 之前）。"""
+    return html[html.index('id="lobby-toolrow"'):html.index('id="lobby-body"')]
+
+
+def test_the_lobby_page_is_a_one_screen_layout() -> None:
+    """开局页一屏（spec §5 A5 / 票 03）：常驻工具行 + 左表单/将池摘要 + 右武将技能全文。
+
+    判据分五段（不量几何，量的是"谁管高度"——内容长短只能改滚动区里的内容）：
+
+    1. **工具行**：三颗常驻入口键在 `#view-lobby` 里、在正文两栏**之前**，行高 52 dsu，
+       右端两句只读摘要（将池 / 剧本存档）；
+    2. **两栏**：左 / 右栏在**同一个 flex 行**里，左栏 760 dsu 写死、右栏弹性；
+    3. **开一局面板**：两列固定栅格（`1fr 1fr` + 78 dsu 固定行高），字段顺序（既有 id）
+       一个不变，开始键与提示同一行；
+    4. **技能全文区**：自己滚（`overflow-y: auto` 且**已登记**），不撑开两侧；
+    5. 工具行与开一局面板里**没有** `vh` / `%` 高度（旧位置那三段流式内容已让位）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    lobby_start = html.index('id="view-lobby"')
+    table_start = html.index('id="view-table"')
+
+    # 1. 工具行：位置 / 三键顺序 / 行高 / 两句摘要
+    toolrow = _lobby_toolrow_html(html)
+    assert lobby_start < html.index('id="lobby-toolrow"') < html.index('id="lobby-body"') < table_start, (
+        "工具行必须在开局页里、顶栏之后、正文两栏之前"
+    )
+    key_positions = [toolrow.index(f'id="{key}"') for key in _LOBBY_TOOL_KEYS]
+    assert key_positions == sorted(key_positions), (
+        f"工具行三键的顺序必须是 剧本 → 将池预设 → 录像：{key_positions}"
+    )
+    for summary_id in ("lobby-pool-summary", "lobby-script-summary"):
+        assert f'id="{summary_id}"' in toolrow, (
+            f"工具行右端缺一句只读摘要：#{summary_id}（摘要只是显示，不带动作）"
+        )
+    toolrow_rule = _css_rule(".design-canvas .toolrow")
+    assert re.search(r"height:\s*calc\(52 \* var\(--dsu\)\)", toolrow_rule), (
+        f"工具行 = 52 dsu 的常驻行（原型 `.toolrow`）：{toolrow_rule}"
+    )
+    assert re.search(r"display:\s*flex", toolrow_rule), f"工具行是三键一行：{toolrow_rule}"
+
+    # 2. 两栏：同一个 flex 行；左 760 dsu 固定、右弹性
+    body_rule = _css_rule(".design-canvas .lobby-body")
+    assert re.search(r"display:\s*flex", body_rule), f"正文两栏必须是 flex 行：{body_rule}"
+    left_rule = _css_rule(".design-canvas .lobby-left")
+    assert re.search(r"flex:\s*0 0 calc\(760 \* var\(--dsu\)\)", left_rule), (
+        f"左栏 = 760 dsu 固定（原型 `.lobby-left`）：{left_rule}"
+    )
+    right_rule = _css_rule(".design-canvas .lobby-right")
+    assert re.search(r"flex:\s*1 1 auto", right_rule), f"右栏必须弹性：{right_rule}"
+    assert re.search(r"min-width:\s*0", right_rule), (
+        f"右栏要能缩（`min-width: 0`，否则技能全文把两栏一起撑宽）：{right_rule}"
+    )
+    left_html = html[html.index('id="lobby-left"'):html.index('id="lobby-right"')]
+    right_end = html.index("</main>", html.index('id="lobby-right"'))
+    right_html = html[html.index('id="lobby-right"'):right_end]
+    for needle in ('id="lobby-form"', 'id="pool-summary"'):
+        assert needle in left_html, f"左栏 = 开一局面板 + 将池摘要，缺 {needle}"
+    for needle in ('id="lobby-hero"', 'id="lobby-heroskills"'):
+        assert needle in right_html, f"右栏 = 我的武将 + 技能全文，缺 {needle}"
+
+    # 3. 开一局面板：两列固定栅格 + 字段顺序不变 + 开始键与提示同一行
+    form_end = html.index("</form>", html.index('id="lobby-form"'))
+    form = html[html.index('id="lobby-form"'):form_end]
+    assert "formgrid" in form, "开一局面板必须是两列固定栅格（`.formgrid`，原型 `.formgrid`）"
+    grid_rule = _css_rule(".design-canvas .formgrid")
+    assert re.search(r"grid-template-columns:\s*1fr 1fr", grid_rule), (
+        f"表单是两列固定栅格：{grid_rule}"
+    )
+    row_height = re.search(r"grid-auto-rows:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", grid_rule)
+    assert row_height is not None and float(row_height.group(1)) == 78.0, (
+        f"表单行高是字面 78 dsu（不许按内容伸缩）：{grid_rule}"
+    )
+    order = ["in-players", "in-ai", "in-deck-profile", "in-seat", "in-timeout",
+             "in-seed", "in-pointjiang", "in-my-hero"]
+    positions = [form.index(f'id="{field}"') for field in order]
+    assert positions == sorted(positions), (
+        "字段顺序与既有 id 全不变（只是排版换成两列）：" + str(list(zip(order, positions)))
+    )
+    assert 'class="row startrow"' in form, "开始键与提示那条必须挂 `.startrow`（固定行高）"
+    startrow_at = form.index('class="row startrow"')
+    start_at = form.index('id="btn-start"')
+    hint_at = form.index('id="lobby-hint"')
+    assert startrow_at < start_at < hint_at, (
+        "「开始对局」与 `#lobby-hint` 必须在同一条 `.startrow` 里、顺序不变"
+    )
+    assert "</div>" not in form[startrow_at:hint_at], (
+        "开始键与提示之间不许夹着闭合标签（它们要在同一行）"
+    )
+
+    # 4. 技能全文区：自己滚 + 已登记；两侧面板不动
+    skills_rule = _css_rule(".design-canvas .skilllist")
+    assert re.search(r"overflow-y:\s*auto", skills_rule), (
+        f"技能全文区必须自己滚（表 C：描述再长也不挤下面任何东西）：{skills_rule}"
+    )
+    assert re.search(r"flex:\s*1 1 auto", skills_rule) and re.search(r"min-height:\s*0", skills_rule), (
+        f"技能全文区吃掉右栏剩下的高度并允许收缩：{skills_rule}"
+    )
+    assert "max-height" not in skills_rule, (
+        f"技能全文区的身高由布局给（不是 max-height）——描述翻倍只改滚动内容：{skills_rule}"
+    )
+    assert ".design-canvas .skilllist" in _SCROLL_CONTAINERS, (
+        "技能全文区是新的滚动区，必须在 `_SCROLL_CONTAINERS` 里登记（spec A4）"
+    )
+    hero_panel = html[html.index('id="lobby-heroskills"'):html.index('id="lobby-hero-seat"')]
+    assert 'id="lobby-skill-list"' in hero_panel, "技能全文那块要有自己的列表槽"
+
+    # 5. 工具行 / 表单里没有视口单位或百分比高度（旧的三段流式内容已让位）
+    for selector in (".design-canvas .toolrow", ".design-canvas .lobby-body",
+                     ".design-canvas .lobby-left", ".design-canvas .lobby-right",
+                     ".design-canvas .formgrid", ".design-canvas .startrow"):
+        body = _css_rule(selector)
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop, value = declaration.split(":", 1)
+            if prop.strip() not in {"width", "height", "min-width", "min-height",
+                                    "max-width", "max-height", "flex", "flex-basis"}:
+                continue
+            assert not re.search(r"\b(?:vh|vw)\b|%", value), (
+                f"{selector} 的 `{prop.strip()}` 不许读视口单位 / 百分比（版式不随内容/视口变）：{value}"
+            )
+    lobby_view = html[lobby_start:table_start]
+    for moved in ('id="script-panel"', 'id="hero-pool-panel"', 'id="run-list"'):
+        assert moved not in lobby_view, (
+            f"旧位置必须清干净：{moved} 已搬进窗口，不许还留在 `#view-lobby` 正文里"
+        )
+
+
+def test_the_lobby_panels_open_in_the_shared_window_shell() -> None:
+    """三颗工具键各自以 S / L / M 打开**同一扇**面板窗（spec A2 / 票 03 §2）。
+
+    判据分三段：
+
+    1. 三个面板 id 都还在，且都在**所有 `<main>` 之外**（窗壳的姿势：不随哪个 view 的显隐
+       被一起藏掉）；也**不**落进牌桌视图与回放视图之间（烟测两处字符串切片的锚点）；
+    2. 三颗键挂**同一份档位表**：`LOBBY_WINDOWS` 里三条尺寸是字面 `"S"` / `"L"` / `"M"`，
+       `lobby.js` 里只有**一个** `panelOpen(` 调用点（不新造第二套模态）；
+    3. `#script-confirm` 仍是**唯一**那扇窗（`id="script-confirm"` 与 `role="dialog"` 各只有
+       一份），三块由工具行三键打开（每颗键各开自己那一扇）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    last_main = html.rindex("</main>")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    between = html[table_start:replay_start]
+
+    for kind, panel_id in _LOBBY_WINDOW_PANELS.items():
+        at = html.index(f'id="{panel_id}"')
+        assert at > last_main, (
+            f"`#{panel_id}` 必须住在所有 `<main>` 之外（{kind} 窗的内容是搬过去的）"
+        )
+        assert f'id="{panel_id}"' not in between, (
+            f"`#{panel_id}` 不许落进牌桌视图与回放视图之间（烟测切片的锚点在那里）"
+        )
+    assert html.count('id="script-confirm"') == 1, "全局面板窗只有一份壳（`#script-confirm`）"
+    assert html.count('id="script-confirm-window"') == 1, "只有一扇 `.pw`"
+    stash_html = re.sub(
+        r"<!--.*?-->", "",
+        html[html.index('id="lobby-window-stash"'):html.index('id="script-confirm-backdrop"')],
+        flags=re.S,
+    )
+    assert 'role="dialog"' not in stash_html and "aria-modal" not in stash_html, (
+        "三块只是窗的**内容**：不许自己再声明一扇模态（R2：沿用既有壳，不新造第二套）"
+    )
+
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    table = re.search(r"const LOBBY_WINDOWS = \{(?P<body>.*?)\n\};", lobby_js, re.S)
+    assert table is not None, "lobby.js 里找不到三扇窗的档位表 `LOBBY_WINDOWS`"
+    for kind, size in _LOBBY_WINDOW_SIZES.items():
+        entry = re.search(rf"\b{kind}:\s*\{{(?P<entry>[^}}]*)\}}", table.group("body"))
+        assert entry is not None, f"档位表里缺 {kind} 那一扇：{table.group('body')}"
+        assert re.search(rf'size:\s*"{size}"', entry.group("entry")), (
+            f"{kind} 窗的档位必须是字面 \"{size}\"：{entry.group('entry')}"
+        )
+        assert re.search(rf'panel:\s*"{_LOBBY_WINDOW_PANELS[kind]}"',
+                         entry.group("entry")), (
+            f"{kind} 窗搬的是 `#{_LOBBY_WINDOW_PANELS[kind]}`：{entry.group('entry')}"
+        )
+    assert lobby_js.count("panelOpen(") == 1, (
+        "三扇窗共用同一个 `panelOpen` 调用点（单槽位不叠；不新造第二套模态）"
+    )
+    for kind in _LOBBY_WINDOW_SIZES:
+        assert re.search(
+            rf'on\("btn-lobby-{kind}",\s*\(\)\s*=>\s*openLobbyWindow\("{kind}"\)\)', lobby_js
+        ), f"工具行的「{kind}」键必须打开自己那一扇窗"
+    assert re.search(r'on\("btn-pool-open",\s*\(\)\s*=>\s*openLobbyWindow\("pool"\)\)', lobby_js), (
+        "将池摘要面板里要有「打开将池预设」的第二个入口（同一扇窗）"
+    )
+    stash = html.index('id="lobby-window-stash"')
+    assert last_main < stash < html.index('id="script-confirm"'), (
+        "三块窗内容住在寄存格里：所有 `<main>` 之后、窗壳之前"
+    )
+    assert stash < html.index('id="script-panel"') < html.index('id="hero-pool-panel"'), (
+        "寄存格里按 剧本 / 将池 / 录像 的顺序放三块"
+    )
+
+
+def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
+    """spec §4「开局页增量叠加」——票 03 推翻了它的**前提**：三块不再排在开局页正文里。
+
+    保留的 judgement 一条都不放宽：既有三块一个都没删（三个 id 都在）、`#script-panel`
+    不在牌桌视图与回放视图之间、坏档 / 撞旧档的五个挂载点都还在、`script-lobby.js` 仍在
+    脚本清单里且 `main.js` 最后。新的判据：三块由**工具行三键**打开，窗壳住在
+    `#view-lobby` 之后（`#lobby-window-stash` 在所有 `<main>` 之外）。
     """
     html = INDEX_HTML.read_text(encoding="utf-8")
     lobby_start = html.index('id="view-lobby"')
     table_start = html.index('id="view-table"')
     replay_start = html.index('id="view-replay"')
-    panel = html.index('id="script-panel"')
-    form = html.index('id="lobby-form"')
-    pool = html.index('id="hero-pool-panel"')
-    runs = html.index('id="run-list"')
+    last_main = html.rindex("</main>")
 
-    assert lobby_start < panel < form < pool < runs, (
-        "剧本面板要住在开局页里、排在既有三块之前（一个都不许删）："
-        f"panel={panel} form={form} pool={pool} runs={runs}"
+    # 既有三块一个都没删：三个 id 都还在，且都搬到了所有 `<main>` 之外。
+    panel_positions = {}
+    for kind, panel_id in _LOBBY_WINDOW_PANELS.items():
+        panel_positions[kind] = html.index(f'id="{panel_id}"')
+        assert panel_positions[kind] > last_main, (
+            f"`#{panel_id}` 属于窗壳区（所有 `<main>` 之外），不许留在页面视图里"
+        )
+    assert panel_positions["script"] < panel_positions["pool"] < panel_positions["runs"], (
+        f"寄存格里三块的顺序：{panel_positions}"
     )
-    assert panel < table_start, "剧本面板属于开局页，不许落进牌桌视图"
+    assert last_main > lobby_start, "窗壳区在 `#view-lobby` 之后"
 
+    # 位置纪律：不插在牌桌视图与回放视图之间（烟测有两处字符串切片以那两个 id 为锚点）。
     between = html[table_start:replay_start]
-    assert "script-panel" not in between and "script-confirm" not in between, (
-        "剧本的节点不许插在牌桌视图与回放视图之间（烟测有两处字符串切片以那两个 id 为锚点）"
-    )
+    assert "script-panel" not in between and "script-confirm" not in between
     for needle in ('id="script-confirm"', 'id="script-confirm-backdrop"',
                    'id="script-broken-reason"', 'id="btn-script-restore"',
                    'id="btn-script-discard"'):
         assert needle in html, f"坏档 / 撞旧档的修复面缺挂载点：{needle}"
+
+    # 三块由工具行三键打开：键在开局页的工具行里，每颗各开自己那一扇。
+    toolrow = _lobby_toolrow_html(html)
+    for key in _LOBBY_TOOL_KEYS:
+        assert f'id="{key}"' in toolrow, f"工具行缺入口键 `#{key}`"
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    for kind in _LOBBY_WINDOW_PANELS:
+        assert re.search(
+            rf'on\("btn-lobby-{kind}",\s*\(\)\s*=>\s*openLobbyWindow\("{kind}"\)\)', lobby_js
+        ), f"`#btn-lobby-{kind}` 必须把 `#{_LOBBY_WINDOW_PANELS[kind]}` 搬进窗"
 
     srcs = _script_srcs()
     assert "script-lobby.js" in srcs, f"剧本开局页的脚本不在清单里：{srcs}"
@@ -9894,7 +10119,10 @@ def test_the_panel_window_sizes_are_literal_design_units() -> None:
 
 
 _SCROLL_CONTAINERS = {
-    ".hero-pool": "将池面板：46vh 定高（今天的口径），列表超出就自己滚——票 04 会把它变成窗里的列表区",
+    ".hero-pool": (
+        "将池窗的版本格列表：窗高按 `.pw[data-size=\"L\"]` 写死，版本格多时只有列表滚"
+        "（票 03 把它从开局页正文搬进 L 窗，46vh 随之删掉）"
+    ),
     ".stage-center .processing": "舞台中央处理区：限两行卡面（253dsu），超出的行自己滚、不折叠",
     "#t-skills": "牌桌技能栏：给定高度比例，技能多了在这条竖条里滚，不撑高牌桌",
     ".modal-body": "武将详情检视窗正文槽：标题 / 底栏固定，只有正文滚",
@@ -9902,6 +10130,8 @@ _SCROLL_CONTAINERS = {
     ".avatar-skills": "武将牌面技能栏：牌面高度固定，技能多时在栏内滚",
     ".dialog-reveal": "五谷整段结算的持久展示：询问正文收起，亮牌内容在它自己的槽里滚",
     ".pw-body": "面板窗正文槽：窗高按 data-size 档位写死，正文超出由它自己滚（split 布局时改由列表滚）",
+    ".design-canvas .skilllist": "开局页右栏技能全文区：描述原样印、再长也只在这块里滚（表 C 的判据）",
+    ".design-canvas .pool-chips": "开局页左栏将池摘要的武将名块：名字多时在这块里滚，不改变两栏版式",
 }
 """滚动区登记表（spec A4）：`style.css` 里每个 `overflow-y: auto` 都必须在这里登记。
 

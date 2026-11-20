@@ -20,113 +20,104 @@
       <button id="lobby-nav-replay" class="tab" type="button">回放</button>
     </div>
   </div>
-  <div class="page-body">
-  <!-- 剧本模式（M7 票 20 / spec §4「开局页增量叠加」）：这是**加的一个段落**，既有三块
-       （开一局表单 / 将池预设 / 已有录像）一个都没删，顺序也没动。
-       三态只由 `GET /api/script-save` 的回包决定（`missing` / `ok` / `broken`），渲染与请求
-       全在 `script-lobby.js`：「新剧本」= 选剧本 → 3 选 1 角色（这段**不落盘**）；
-       「继续剧本」= 一条 resume；「放弃剧本」= 删两份。`ok` 才有摘要行；
-       `broken` 有红字 `reason` 与两个修复按钮（`.bak` 也不可用时只剩「放弃存档」）。
-       位置纪律：**不插在牌桌视图与回放视图之间** —— 烟测有两处字符串切片以那两个
-       `main` 的 id 为锚点，故连注释里都不写它们的字面量；新节点也只用垫片认识的标签。 -->
-  <section id="script-panel" class="panel script-panel" aria-label="剧本模式">
-    <h2>剧本</h2>
-    <div class="row">
-      <button id="btn-script-new" type="button" class="primary">新剧本</button>
-      <button id="btn-script-continue" type="button" disabled>继续剧本</button>
-      <button id="btn-script-abandon" type="button" class="ghost" hidden>放弃剧本</button>
-      <span id="script-hint" class="dim"></span>
+  <!-- 常驻工具行（ui-one-screen 票 03 / spec A5）：三颗入口键的位置**永不改变**——剧本（S 窗）/
+       将池预设（L 窗）/ 录像（M 窗）。窗未开时三块内容住在下面的寄存格里（所有 `<main>` 之外），
+       点一下就把对应的那块搬进全局面板窗（`panel-window.js`，单槽位不叠）。
+       右端两句是**只读摘要**：将池（槽位 / 可用真名与版本 / 已禁版本 / 点将）与剧本存档
+       （既有 `state.script.save` 的五个数；没有档就不显示）。 -->
+  <div id="lobby-toolrow" class="toolrow">
+    <button id="btn-lobby-script" type="button" class="ghost">剧本</button>
+    <button id="btn-lobby-pool" type="button" class="ghost">将池预设</button>
+    <button id="btn-lobby-runs" type="button" class="ghost">录像</button>
+    <span id="lobby-pool-summary" class="dim"></span>
+    <span class="spacer"></span>
+    <span id="lobby-script-summary" class="dim" hidden></span>
+  </div>
+  <!-- 正文两栏（票 03）：左 760 dsu 固定（开一局 + 将池摘要）、右弹性（我的武将 + 技能全文）。
+       内容长短只改各自滚动区里的内容——按钮位置不随内容变（原型 `geometry-tables.md` 表 C）。 -->
+  <div id="lobby-body" class="page-body lobby-body">
+    <div id="lobby-left" class="lobby-left">
+      <form id="lobby-form" class="panel lobby-formpanel">
+        <h2>开一局</h2>
+        <div class="formgrid">
+          <label>人数
+            <select id="in-players">
+              <option value="8" selected>8（标准身份局）</option>
+              <option value="7">7</option>
+              <option value="6">6</option>
+              <option value="5">5</option>
+              <option value="4">4</option>
+              <option value="2">2（无身份局）</option>
+            </select>
+          </label>
+          <label>AI 档位
+            <select id="in-ai">
+              <option value="heuristic" selected>启发式（会打牌）</option>
+              <option value="random">随机（基线）</option>
+            </select>
+          </label>
+          <label>牌堆档位
+            <select id="in-deck-profile"></select>
+          </label>
+          <label>我的座位
+            <select id="in-seat"></select>
+          </label>
+          <label>思考时限（秒，0 = 关）
+            <input id="in-timeout" type="number" min="0" step="5" value="60">
+          </label>
+          <label>种子（留空 = 现生成）
+            <input id="in-seed" type="text" inputmode="numeric" placeholder="例如 20261012">
+          </label>
+          <label>开局点将（关了 = 随机发将）
+            <input id="in-pointjiang" type="checkbox">
+          </label>
+          <label>我的武将（点将开着才可选）
+            <select id="in-my-hero" disabled></select>
+          </label>
+        </div>
+        <div class="row startrow">
+          <button id="btn-start" type="submit" class="primary">开始对局</button>
+          <span id="lobby-hint" class="dim"></span>
+        </div>
+      </form>
+      <!-- 将池摘要（票 03 / spec A5）：槽位按钮（既有 `renderPoolSlots` 渲染）+ 统计行 +
+           按势力分组的武将名块（数据 = 票 01 的 `kingdom` + `state.heroCatalog`；已禁版本的名字
+           仍列出但标成禁用态）。名字多时**名块区自己滚**，不改变两栏版式。
+           这里**不**画版本格——那是将池窗（L）的事，票 04 重建它。 -->
+      <section id="pool-summary" class="panel lobby-poolpanel" aria-label="将池摘要">
+        <div class="row space lobby-panel-head">
+          <h2>将池摘要</h2>
+          <button id="btn-pool-open" type="button" class="ghost">打开将池预设</button>
+        </div>
+        <div id="pool-slots" class="pool-slots" aria-label="将池槽位"></div>
+        <p id="pool-stats" class="pool-stats dim"></p>
+        <div id="pool-chips" class="pool-chips" aria-label="将池武将"></div>
+      </section>
     </div>
-    <!-- M7 票 25：剧本编辑器的入口（新视图在回放页之后；本键只切页，读库由编辑器自己发）。
-         入口放在剧本面板里而不是导航三键里：编辑器是作者面，不是第四种玩家页面。 -->
-    <div class="row">
-      <button id="btn-script-editor" type="button" class="ghost">剧本编辑器</button>
-      <span class="dim">编辑剧本库（新建 / 改库 / 校验；与棋盘共用同一份节点图渲染器）</span>
+    <div id="lobby-right" class="lobby-right">
+      <!-- 我的武将（票 03）：`#in-my-hero` 当前值对应的版本，数据全来自**票 01 的展示面**
+           （`kingdom` / `name` / `hp` / `hp_max` / `skills[]`）。点将关着 = 「随机发将」空态
+           （空态不编数据：没有版本就没有势力 / 体力 / 技能）。 -->
+      <section id="lobby-hero" class="panel lobby-herohead" aria-label="我的武将">
+        <div class="herocard-head">
+          <span id="lobby-hero-kingdom" class="kingdom"></span>
+          <span id="lobby-hero-name" class="lobby-hero-name">—</span>
+          <span id="lobby-hero-hp-label" class="tag"></span>
+          <span id="lobby-hero-hp" class="lobby-hp" aria-label="体力点"></span>
+        </div>
+        <p id="lobby-hero-hint" class="herocard-sub dim"></p>
+      </section>
+      <!-- 技能全文（票 03 / 表 C）：描述**原样印服务端给的文本**（零正则、零截断），再长也只在这块
+           自己滚——两侧面板与左侧表单不动。脚注 = 座位 / 手牌上限（手牌上限 = 当前体力，规则恒定）。 -->
+      <section id="lobby-heroskills" class="panel lobby-heroskills" aria-label="技能全文">
+        <h2>技能全文</h2>
+        <div id="lobby-skill-list" class="skilllist"></div>
+        <div class="herocard-foot">
+          <span id="lobby-hero-seat"></span>
+          <span id="lobby-hero-handlimit"></span>
+        </div>
+      </section>
     </div>
-    <!-- 摘要行（`ok` 才有）：剧本名 · 大节 `layer_index+1`/总数 · 已结算节点数 · 铜钱 · saved_at。
-         五个数原样来自服务端的 `summary`（票 04 §6），前端不派生。 -->
-    <p id="script-summary" class="script-summary" hidden></p>
-    <!-- 坏档（`broken`）：一行**红字** = 服务端那行 `reason`（票 04 §5：坏档不静默、不重写、
-         不丢坏字段），旁边两个修复按钮；`.bak` 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句。
-         **绝不**把坏档当空档：摘要行收起、`.bak` 不可用时连「恢复」都不画。 -->
-    <div id="script-broken" class="script-broken" hidden>
-      <p id="script-broken-reason" class="script-reason"></p>
-      <div class="row">
-        <button id="btn-script-restore" type="button">从我上一份恢复</button>
-        <button id="btn-script-discard" type="button" class="ghost">放弃存档</button>
-      </div>
-      <p id="script-broken-backup" class="dim" hidden>备份也不可用（只能放弃存档）</p>
-    </div>
-    <!-- 「新剧本」的两步：① 选剧本 → ② 3 选 1 角色。`POST /api/script-roster` 是**只读**的
-         （候选是作者编排的数据、不消耗随机数），故这段点多久都不落盘：关页面 = 没建过。
-         「开档」= 唯一的那一次 `POST /api/script-runs`；有旧档时它带旧 `revision`。 -->
-    <div id="script-picker" class="script-picker" hidden>
-      <p id="script-picker-hint" class="dim"></p>
-      <div id="script-choices" class="script-choices"></div>
-      <div class="row">
-        <button id="btn-script-picker-go" type="button" class="primary" disabled>开档</button>
-        <button id="btn-script-picker-cancel" type="button" class="ghost">取消</button>
-      </div>
-    </div>
-  </section>
-  <form id="lobby-form" class="panel">
-    <h2>开一局</h2>
-    <div class="grid">
-      <label>人数
-        <select id="in-players">
-          <option value="8" selected>8（标准身份局）</option>
-          <option value="7">7</option>
-          <option value="6">6</option>
-          <option value="5">5</option>
-          <option value="4">4</option>
-          <option value="2">2（无身份局）</option>
-        </select>
-      </label>
-      <label>AI 档位
-        <select id="in-ai">
-          <option value="heuristic" selected>启发式（会打牌）</option>
-          <option value="random">随机（基线）</option>
-        </select>
-      </label>
-      <label>牌堆档位
-        <select id="in-deck-profile"></select>
-      </label>
-      <label>我的座位
-        <select id="in-seat"></select>
-      </label>
-      <label>思考时限（秒，0 = 关）
-        <input id="in-timeout" type="number" min="0" step="5" value="60">
-      </label>
-      <label>种子（留空 = 现生成）
-        <input id="in-seed" type="text" inputmode="numeric" placeholder="例如 20261012">
-      </label>
-      <label>开局点将（关了 = 随机发将）
-        <input id="in-pointjiang" type="checkbox">
-      </label>
-      <label>我的武将（点将开着才可选）
-        <select id="in-my-hero" disabled></select>
-      </label>
-    </div>
-    <div class="row">
-      <button id="btn-start" type="submit" class="primary">开始对局</button>
-      <span id="lobby-hint" class="dim"></span>
-    </div>
-  </form>
-  <!-- 将池（M6 票 13 / spec D6）：5 个常驻预设槽位 + 按真名分组的版本格。
-       槽位按钮与版本格都由 lobby.js 按服务端下发的目录 / 存档渲染；这里只留挂载点。 -->
-  <section id="hero-pool-panel" class="panel">
-    <h2>将池预设</h2>
-    <div id="pool-slots" class="pool-slots" aria-label="将池槽位"></div>
-    <div class="row">
-      <button id="btn-pool-save" type="button">保存到槽位 1</button>
-      <span id="pool-hint" class="dim"></span>
-    </div>
-    <div id="hero-pool" class="hero-pool" aria-label="将池"></div>
-  </section>
-  <section class="panel">
-    <h2>已有录像</h2>
-    <div id="run-list" class="runs"></div>
-  </section>
   </div>
 </main>
 
@@ -687,6 +678,74 @@
     </section>
   </div>
 </main>
+
+<!-- 开局页三块面板的**寄存格**（ui-one-screen 票 03 / spec A5）：窗**没开**时它们住在这里，
+     工具行三键一点就把对应的那一块搬进下面那扇唯一的窗（`lobby.js:openLobbyWindow`）。
+     位置纪律：仍在**所有 `<main>` 之外**（与窗壳同一个姿势，不会随哪个 view 的显隐被藏掉），
+     也不落进牌桌视图与回放视图之间；新节点只用垫片认识的标签（div / section / h2 / p / span / button）。
+     **id 与内部结构原样**：`script-lobby.js` 照旧往 `#script-panel` 里铺；`#run-list` 的渲染口
+     仍在 `replay.js:loadRuns`；`#hero-pool-panel` 本票不动它的内容（票 04 才重建将池窗）。
+     `hidden` 只靠全局 `[hidden]{display:none!important}`——不另写第二条 display 补丁。 -->
+<div id="lobby-window-stash" hidden>
+  <!-- 剧本模式（M7 票 20 / spec §4「开局页增量叠加」；票 03 起住进 S 窗）：
+       三态只由 `GET /api/script-save` 的回包决定（`missing` / `ok` / `broken`），渲染与请求
+       全在 `script-lobby.js`：「新剧本」= 选剧本 → 3 选 1 角色（这段**不落盘**）；
+       「继续剧本」= 一条 resume；「放弃剧本」= 删两份。`ok` 才有摘要行；
+       `broken` 有红字 `reason` 与两个修复按钮（`.bak` 也不可用时只剩「放弃存档」）。 -->
+  <section id="script-panel" class="panel script-panel" aria-label="剧本模式">
+    <h2>剧本</h2>
+    <div class="row">
+      <button id="btn-script-new" type="button" class="primary">新剧本</button>
+      <button id="btn-script-continue" type="button" disabled>继续剧本</button>
+      <button id="btn-script-abandon" type="button" class="ghost" hidden>放弃剧本</button>
+      <span id="script-hint" class="dim"></span>
+    </div>
+    <!-- M7 票 25：剧本编辑器的入口（新视图在回放页之后；本键只切页，读库由编辑器自己发）。
+         入口放在剧本面板里而不是导航三键里：编辑器是作者面，不是第四种玩家页面。 -->
+    <div class="row">
+      <button id="btn-script-editor" type="button" class="ghost">剧本编辑器</button>
+      <span class="dim">编辑剧本库（新建 / 改库 / 校验；与棋盘共用同一份节点图渲染器）</span>
+    </div>
+    <!-- 摘要行（`ok` 才有）：剧本名 · 大节 `layer_index+1`/总数 · 已结算节点数 · 铜钱 · saved_at。
+         五个数原样来自服务端的 `summary`（票 04 §6），前端不派生。 -->
+    <p id="script-summary" class="script-summary" hidden></p>
+    <!-- 坏档（`broken`）：一行**红字** = 服务端那行 `reason`（票 04 §5：坏档不静默、不重写、
+         不丢坏字段），旁边两个修复按钮；`.bak` 也坏 / 没有 ⇒ 只剩「放弃存档」并补一句。
+         **绝不**把坏档当空档：摘要行收起、`.bak` 不可用时连「恢复」都不画。 -->
+    <div id="script-broken" class="script-broken" hidden>
+      <p id="script-broken-reason" class="script-reason"></p>
+      <div class="row">
+        <button id="btn-script-restore" type="button">从我上一份恢复</button>
+        <button id="btn-script-discard" type="button" class="ghost">放弃存档</button>
+      </div>
+      <p id="script-broken-backup" class="dim" hidden>备份也不可用（只能放弃存档）</p>
+    </div>
+    <!-- 「新剧本」的两步：① 选剧本 → ② 3 选 1 角色。`POST /api/script-roster` 是**只读**的
+         （候选是作者编排的数据、不消耗随机数），故这段点多久都不落盘：关页面 = 没建过。
+         「开档」= 唯一的那一次 `POST /api/script-runs`；有旧档时它带旧 `revision`。 -->
+    <div id="script-picker" class="script-picker" hidden>
+      <p id="script-picker-hint" class="dim"></p>
+      <div id="script-choices" class="script-choices"></div>
+      <div class="row">
+        <button id="btn-script-picker-go" type="button" class="primary" disabled>开档</button>
+        <button id="btn-script-picker-cancel" type="button" class="ghost">取消</button>
+      </div>
+    </div>
+  </section>
+  <!-- 将池预设（M6 票 13 / spec D6；票 03 起住进 L 窗）：保存当前槽位 + 按真名分组的版本格。
+       槽位按钮已搬到开局页左栏的「将池摘要」里（`#pool-slots`，同一个 `renderPoolSlots` 渲染）；
+       版本格仍由 `lobby.js:renderHeroPool` 铺 —— 票 04 才重建这一扇窗（搜索 / 五势力复选 / 右键点将）。 -->
+  <section id="hero-pool-panel" class="panel">
+    <h2>将池预设</h2>
+    <div class="row">
+      <button id="btn-pool-save" type="button">保存到槽位 1</button>
+      <span id="pool-hint" class="dim"></span>
+    </div>
+    <div id="hero-pool" class="hero-pool" aria-label="将池"></div>
+  </section>
+  <!-- 已有录像（M 窗）：列表由 `replay.js:renderRunList` 铺；窗标题就是「已有录像」。 -->
+  <div id="run-list" class="runs"></div>
+</div>
 
 <!-- 剧本层的**唯一**模态壳（M7 票 20 起；ui-one-screen 票 02 升级成**全局面板窗**）：
  撞旧档三选一 / 退出确认 / 票 22 的三选一 / 遗物 / 结算结果 / 票 25 的删除确认都填这一个壳。

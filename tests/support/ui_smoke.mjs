@@ -1186,33 +1186,53 @@ check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放
     + ` abandonHidden=${$("btn-script-abandon").hidden}`);
 
 // ---- ② 既有三块一个没少（UI-2：增量叠加）+ 位置纪律 + 标签白名单 ----
+//
+// ui-one-screen 票 03 推翻了「三块都排在开局页正文里」这个**前提**：剧本 / 将池 / 录像
+// 搬进了同一扇面板窗（窗没开时住在 `#lobby-window-stash`，所有 `<main>` 之外），工具行三键
+// 各开一扇。判据本身不放宽：三个 id 一个都没删、不插在牌桌与回放视图之间、标签仍是垫片
+// 认识的那 16 种。
 {
   const lobbyText = html.slice(html.indexOf('id="view-lobby"'), html.indexOf('id="view-table"'));
   const at = (needle) => lobbyText.indexOf(needle);
-  check("M7-20c 既有开局表单 / 将池预设 / 已有录像一个都没删（剧本面板 → 开一局 → 将池 → 录像）",
-    at('id="script-panel"') >= 0 && at('id="lobby-form"') > at('id="script-panel"')
-    && at('id="in-players"') > 0 && at('id="btn-start"') > 0
-    && at('id="hero-pool-panel"') > at('id="lobby-form"')
-    && at('id="run-list"') > at('id="hero-pool-panel"'),
-    `script=${at('id="script-panel"')} form=${at('id="lobby-form"')}`
-      + ` pool=${at('id="hero-pool-panel"')} runs=${at('id="run-list"')}`);
+  const lastMain = html.lastIndexOf("</main>");
+  const toolrow = html.slice(html.indexOf('id="lobby-toolrow"'), html.indexOf('id="lobby-body"'));
+  const panelIds = ["script-panel", "hero-pool-panel", "run-list"];
+  const panelAt = (id) => html.indexOf(`id="${id}"`);
+  const toolKeys = ["btn-lobby-script", "btn-lobby-pool", "btn-lobby-runs"];
+  check("M7-20c 既有三块一个都没删（三个 id 都在，且都搬进所有 <main> 之外的窗区）+ 工具行三键",
+    at('id="lobby-form"') > 0 && at('id="in-players"') > 0 && at('id="btn-start"') > 0
+    && panelIds.every((id) => panelAt(id) > lastMain)
+    && toolKeys.every((id) => toolrow.indexOf(`id="${id}"`) >= 0)
+    && toolrow.indexOf('id="btn-lobby-script"') < toolrow.indexOf('id="btn-lobby-pool"')
+    && toolrow.indexOf('id="btn-lobby-pool"') < toolrow.indexOf('id="btn-lobby-runs"'),
+    `form=${at('id="lobby-form"')} 三块=${panelIds.map(panelAt).join(",")}`
+      + ` lastMain=${lastMain} 三键=${toolKeys.map((id) => toolrow.indexOf(`id="${id}"`)).join(",")}`);
 
   const between = html.slice(html.indexOf('id="view-table"'), html.indexOf('id="view-replay"'));
-  check("M7-20d 剧本开局页的面不插在 view-table 与 view-replay 之间（两处字符串切片断言的锚点）",
+  check("M7-20d 三块内容与窗壳都不插在 view-table 与 view-replay 之间（两处字符串切片断言的锚点）",
     between.indexOf("script-panel") < 0 && between.indexOf("script-confirm") < 0
+    && between.indexOf("lobby-window-stash") < 0
     && html.indexOf('id="script-panel"') > 0 && html.indexOf('id="script-confirm"') > 0,
-    `中间出现 script-panel=${between.indexOf("script-panel")}`);
+    `中间出现 script-panel=${between.indexOf("script-panel")}`
+      + ` stash=${between.indexOf("lobby-window-stash")}`);
 
-  // 垫片只解析 16 种标签（本文件 `:254` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  // 垫片只解析 16 种标签（本文件 `:373` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  // 切片改到**窗壳区间**（寄存格 + 窗），另加工具行与两栏里新增的两段（左边表单里有 <option>，
+  // 故从将池摘要面板起切，避开下拉选项）。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
     "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
-  const scriptSection = lobbyText.slice(at('id="script-panel"'), at('id="lobby-form"'))
-    + lobbyText.slice(at('id="script-confirm-backdrop"'));
-  const tags = [...scriptSection.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
-    .map((match) => match[1].toLowerCase());
-  check("M7-20e 新加节点的标签只用垫片认识的那些（不引入新标签）",
-    tags.length > 0 && tags.every((tag) => allowedTags.has(tag)),
-    `标签=${[...new Set(tags)].join(",")}`);
+  const shellAt = html.indexOf('id="lobby-window-stash"');
+  const slices = [
+    toolrow,
+    html.slice(html.indexOf('id="pool-summary"'), html.indexOf('id="view-table"')),
+    html.slice(shellAt, html.indexOf("<script", shellAt)),
+  ];
+  const tags = slices.join("").replace(/<!--[\s\S]*?-->/g, "")
+    .matchAll(/<([a-zA-Z][\w-]*)/g);
+  const seenTags = [...tags].map((match) => match[1].toLowerCase());
+  check("M7-20e 工具行 / 两栏 / 窗壳区新加节点的标签只用垫片认识的那些（不引入新标签）",
+    seenTags.length > 0 && seenTags.every((tag) => allowedTags.has(tag)),
+    `标签=${[...new Set(seenTags)].join(",")}`);
 }
 
 // ---- ③ 新剧本 → 选剧本 → 3 选 1（这段时间**不落盘**） ----
@@ -32247,5 +32267,110 @@ check("M7-29n 收尾干净：无档、无用户库（后续/重复运行仍从�
   && !existsSync(`${RUNS_DIR}/script-library.json`)
   && ui.state.script.board === null,
   `status=${scriptStatus()} 档在=${existsSync(SCRIPT_SAVE_FILE)}`);
+
+/* ============ ui-one-screen 票 03：开局页一屏（工具行三键 / 两栏 / 三扇窗）============
+ *
+ * 三条判据：
+ *   UI1-01 工具行三键各开一扇窗（S / L / M 且**同一壳**、单槽位不叠）；
+ *   UI1-02 右栏「我的武将 + 技能全文」逐字读服务端 `/api/heroes` 的 version 展示面
+ *          （势力 / 名字 / hp 与 hp_max / 点名一个技能的描述与载荷**逐字相同**）；
+ *   UI1-03 描述翻倍不改按钮位置——垫片没有真几何，故只钉**结构**：技能全文区有独立滚动区、
+ *          开始键不在那个滚动区里（真几何读数写进票面 `## Answer`，由 bsk 那一遍量）。
+ */
+const lobbyWindowPanels = { script: "script-panel", pool: "hero-pool-panel", runs: "run-list" };
+const lobbyWindowSizes = { script: "S", pool: "L", runs: "M" };
+const lobbyToolKeys = { script: "btn-lobby-script", pool: "btn-lobby-pool", runs: "btn-lobby-runs" };
+const windowBody = () => $("script-confirm-body");
+const windowNode = () => $("script-confirm-window");
+const stashNode = () => $("lobby-window-stash");
+
+// 从「窗没开」这个真状态开始（垫片不解析静态节点的 `hidden` 属性，故显式置一次）。
+$("script-confirm").hidden = true;
+$("script-confirm-backdrop").hidden = true;
+
+{
+  const shell = windowNode();
+  const detail = [];
+  let ok = true;
+  for (const kind of ["script", "pool", "runs"]) {
+    await clickAndWait($(lobbyToolKeys[kind]));
+    const panel = $(lobbyWindowPanels[kind]);
+    const opened = $("script-confirm").hidden === false
+      && windowNode() === shell
+      && windowNode().getAttribute("data-size") === lobbyWindowSizes[kind]
+      && $("script-confirm").getAttribute("data-dialog") === kind
+      && panel.parentNode === windowBody()
+      && windowBody().children.length === 1;
+    // 另外两块回到寄存格：三块任何时刻都只出现一次（窗里一块 + 寄存格两块）。
+    const others = Object.keys(lobbyToolKeys).filter((other) => other !== kind)
+      .every((other) => $(lobbyWindowPanels[other]).parentNode === stashNode());
+    const single = (html.match(/id="script-confirm-window"/g) || []).length === 1
+      && (html.match(/id="script-confirm"/g) || []).length === 1;
+    if (!(opened && others && single)) ok = false;
+    detail.push(`${kind}=${opened ? "ok" : "bad"}`
+      + `${others ? "" : "/others"}${single ? "" : "/shell"}`);
+    // 关窗（关闭键 = 面板窗自己的收窗口；顺带把三块送回寄存格）。
+    for (const fn of $("script-confirm-close").listeners.click || []) {
+      await fn({ target: $("script-confirm-close") });
+    }
+  }
+  check("UI1-01 开局页工具行三键各开一扇窗（S / L / M 且同一壳、单槽位不叠）",
+    ok && $("script-confirm").hidden === true,
+    detail.join(" "));
+}
+
+// ---- UI1-02：右栏逐字读 `/api/heroes` 的 version 展示面 ----
+{
+  const fresh = await get("/api/heroes");
+  const versionsNow = fresh.heroes.flatMap((group) => group.versions);
+  const shown = versionsNow.find((version) => (version.skills || [])
+    .some((skill) => typeof skill.description === "string" && skill.description.length > 0))
+    || versionsNow.find((version) => (version.skills || []).length > 0)
+    || versionsNow[0];
+  const picked = (shown.skills || []).find((skill) => skill.description)
+    || (shown.skills || [])[0] || {};
+  const kingdomZh = { wei: "魏", shu: "蜀", wu: "吴", qun: "群", shen: "神" };
+  $("in-pointjiang").checked = true;
+  $("in-my-hero").value = shown.id;
+  ui.fillHeroOptions();   // 换人 → 右栏重画（页面里是 change 事件，走同一条渲染路）
+  const pips = Array.from($("lobby-hero-hp").children);
+  const lit = pips.filter((pip) => !pip.classList.contains("off"));
+  const blocks = byClass($("lobby-skill-list"), "skillblock");
+  const block = blocks.find((item) => {
+    const name = byClass(item, "sn")[0];
+    return name && name.textContent === picked.name;
+  }) || null;
+  const desc = block ? byClass(block, "sd")[0] || null : null;
+  const sameDesc = !!desc && desc.textContent === picked.description;
+  check("UI1-02 我的武将 + 技能全文读服务端 version 展示面（点名一个技能，描述与载荷逐字相同）",
+    $("lobby-hero-name").textContent === shown.name
+    && $("lobby-hero-kingdom").textContent === kingdomZh[shown.kingdom]
+    && $("lobby-hero-kingdom").getAttribute("data-kingdom") === shown.kingdom
+    && String($("lobby-hero-hp-label").textContent).includes(String(shown.hp))
+    && String($("lobby-hero-hp-label").textContent).includes(String(shown.hp_max))
+    && pips.length === shown.hp_max && lit.length === shown.hp
+    && blocks.length === (shown.skills || []).length
+    && !!block && sameDesc,
+    `hero=${$("lobby-hero-name").textContent} hp=${$("lobby-hero-hp-label").textContent}`
+      + ` pips=${lit.length}/${pips.length} skills=${blocks.length} 描述逐字=${sameDesc}`);
+}
+
+// ---- UI1-03：结构判据（垫片没有真几何，量几何是 bsk 那一遍的事） ----
+{
+  const cssNow = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const skillRule = (cssNow.match(/\.design-canvas \.skilllist\s*\{[^}]*\}/) || [""])[0];
+  const scrolls = /overflow-y:\s*auto/.test(skillRule);
+  const leftAt = html.indexOf('id="lobby-left"');
+  const rightAt = html.indexOf('id="lobby-right"');
+  const startAt = html.indexOf('id="btn-start"');
+  const skillAt = html.indexOf('id="lobby-skill-list"');
+  const heroSkillsAt = html.indexOf('id="lobby-heroskills"');
+  check("UI1-03 描述翻倍不改按钮位置：技能全文区是**独立滚动区**，开始键不在其中",
+    scrolls
+    && !/max-height/.test(skillRule)
+    && leftAt > 0 && startAt > leftAt && startAt < rightAt
+    && skillAt > rightAt && skillAt > heroSkillsAt,
+    `scroll=${scrolls} left=${leftAt} start=${startAt} right=${rightAt} skill=${skillAt}`);
+}
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

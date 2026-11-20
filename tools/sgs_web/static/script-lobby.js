@@ -137,6 +137,13 @@ function scriptRender() {
     node.hidden = !view.summary;
     node.textContent = view.summary;
   });
+  // 工具行右端那句**只读**存档摘要（ui-one-screen 票 03）：五个数就是 `scriptSummaryText`
+  // 印的那五个（剧本名 · 大节 · 已结算 · 铜钱 · saved_at），没有档 / 坏档 ⇒ 整句不显示。
+  set("lobby-script-summary", (node) => {
+    const summary = view.summary ? `剧本存档：${view.summary}` : "";
+    node.textContent = summary;
+    node.hidden = !summary;
+  });
   // 坏档面：红字 = 服务端的 `reason`；`.bak` 不可用 ⇒ 「恢复」不画、补一句明话。
   set("script-broken", (node) => { node.hidden = !view.broken; });
   set("script-broken-reason", (node) => {
@@ -509,7 +516,12 @@ function scriptConfirm(spec) {
 /** 收起确认框（两个场景的「取消」与每个动作开头都走这里）。 */
 function scriptCloseConfirm() {
   state.script.confirm = null;
-  return panelClose();
+  const closed = panelClose();
+  // ui-one-screen 票 03：开局页三块内容住在窗的正文槽里（`lobby.js:LOBBY_WINDOWS`）。确认框
+  // 借的是同一扇窗（`panelOpen` 会清空正文槽），故收起后把三块送回寄存格——不让 `#script-panel`
+  // 停在已被清空的槽里（游离节点上的 `document.getElementById` 查不到 id）。
+  if (typeof restashLobbyWindows === "function") restashLobbyWindows();
+  return closed;
 }
 
 /** 退出确认框（战斗中）：「退出后这场战斗要重打；棋盘进度已保存。」确认 / 取消。

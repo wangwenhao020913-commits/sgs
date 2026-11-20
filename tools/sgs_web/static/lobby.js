@@ -41,6 +41,12 @@ function fillHeroOptions() {
   }
   const known = versions.some((hero) => hero.id === previous);
   select.value = known ? previous : (versions[0] || {}).id || "";
+  // ui-one-screen 票 03：右栏「我的武将 + 技能全文」跟着这个下拉走。换人 / 换座位 / 开关
+  // 点将都要重画，而 `main.js:wire()` 只给 `in-my-hero` 挂了 `syncPoolHint`，故这里补挂
+  // 一次（幂等；`fillHeroOptions` 是目录到货时的那一次，早于点将开关的第一次重画）。
+  wireLobbyHeroPanel();
+  renderLobbyHeroPanel();
+  syncLobbyToolrow();
 }
 
 /** 拉一次点将列表；失败只提示、不挡住开局（列表空 ⇒ 开关自然点不出东西）。 */
@@ -58,12 +64,16 @@ async function loadHeroCatalog() {
   renderHeroPool();
 }
 
-/** 开关的**唯一**落点：关了 = 置灰选将列表 + 建局不带 `my_hero`（纯随机）。 */
+/** 开关的**唯一**落点：关了 = 置灰选将列表 + 建局不带 `my_hero`（纯随机）＋ 右栏换成空态。 */
 function syncPointjiang() {
   const on = !!($("in-pointjiang") || {}).checked;
   const select = $("in-my-hero");
   if (select) select.disabled = !on;
   syncPoolHint();  // 手选也占一个真名，可用真名数要跟着重算
+  // ui-one-screen 票 03：点将关着 ⇒ 右栏是「随机发将」空态（空态不编数据）；
+  // 工具行「点将 W」那句也在这里跟着开关 / 人选走。
+  renderLobbyHeroPanel();
+  syncLobbyToolrow();
   return on;
 }
 
@@ -201,41 +211,49 @@ function togglePoolBan(heroId) {
   renderHeroPool();
 }
 
-/** 按真名分组的将池面板：一行一个真名、行内 1–2 个版本格，禁用的格子灰掉。 */
+/** 按真名分组的将池面板：一行一个真名、行内 1–2 个版本格，禁用的格子灰掉。
+ *
+ * 版本格那一块住在 L 窗里（票 03 搬的；票 04 会重建它）——**窗没开时也可能被调**，故
+ * `#hero-pool` 找不到也要把左栏的摘要（统计行 / 名字块 / 工具行那句）重画完。
+ */
 function renderHeroPool() {
   const box = $("hero-pool");
-  if (!box) return;
-  const banned = new Set(currentBans());
-  box.innerHTML = "";
-  for (const group of state.heroCatalog) {
-    const row = document.createElement("div");
-    row.classList.add("pool-row");
-    row.setAttribute("data-true-name", group.true_name);
-    const label = document.createElement("span");
-    label.classList.add("pool-name");
-    label.textContent = group.true_name;
-    row.appendChild(label);
-    let available = 0;
-    for (const version of group.versions) {
-      const isBanned = banned.has(version.id);
-      if (!isBanned) available += 1;
-      const cell = document.createElement("button");
-      cell.type = "button";
-      cell.classList.add("pool-version");
-      if (isBanned) cell.classList.add("banned");
-      cell.textContent = version.name;
-      cell.setAttribute("data-hero-id", version.id);
-      cell.setAttribute("aria-pressed", isBanned ? "false" : "true");
-      cell.title = isBanned
-        ? `已禁用：${version.name}（再点一下恢复）`
-        : `可被随机抽到：${version.name}（点一下禁用）`;
-      cell.addEventListener("click", () => togglePoolBan(version.id));
-      row.appendChild(cell);
+  if (box) {
+    const banned = new Set(currentBans());
+    box.innerHTML = "";
+    for (const group of state.heroCatalog) {
+      const row = document.createElement("div");
+      row.classList.add("pool-row");
+      row.setAttribute("data-true-name", group.true_name);
+      const label = document.createElement("span");
+      label.classList.add("pool-name");
+      label.textContent = group.true_name;
+      row.appendChild(label);
+      let available = 0;
+      for (const version of group.versions) {
+        const isBanned = banned.has(version.id);
+        if (!isBanned) available += 1;
+        const cell = document.createElement("button");
+        cell.type = "button";
+        cell.classList.add("pool-version");
+        if (isBanned) cell.classList.add("banned");
+        cell.textContent = version.name;
+        cell.setAttribute("data-hero-id", version.id);
+        cell.setAttribute("aria-pressed", isBanned ? "false" : "true");
+        cell.title = isBanned
+          ? `已禁用：${version.name}（再点一下恢复）`
+          : `可被随机抽到：${version.name}（点一下禁用）`;
+        cell.addEventListener("click", () => togglePoolBan(version.id));
+        row.appendChild(cell);
+      }
+      if (available === 0) row.classList.add("all-banned");
+      box.appendChild(row);
     }
-    if (available === 0) row.classList.add("all-banned");
-    box.appendChild(row);
   }
+  renderPoolSummary();
+  syncLobbyToolrow();
   syncPoolHint();
+  return null;
 }
 
 /** 手选的那个版本（开关关着 = null）；容量判据要它的**真名**（手选先占真名）。 */
@@ -357,3 +375,318 @@ async function startGame(event) {
     $("lobby-hint").textContent = `建局失败：${error.message}`;
   }
 }
+
+/* ------------------------------------- 开局页一屏（ui-one-screen 票 03 / spec A5）
+ *
+ * 版式：常驻工具行（三颗入口键，位置永不变）→ 左栏「开一局」+「将池摘要」/ 右栏
+ * 「我的武将 + 技能全文」。数据全来自票 01 的 `/api/heroes` version 展示面（`kingdom` /
+ * `hp` / `hp_max` / `skills[]`）与既有 `state.heroCatalog` / `state.heroPools`——前端不查表、
+ * 不派生第二份数据。判据是「内容长短不改按钮位置」（原型 `geometry-tables.md` 表 C）：
+ * 名字块与技能全文各有自己的滚动区，两侧面板与左侧表单不动。
+ */
+
+/** 势力枚举值 → 中文标签（**全仓唯一一份**：票 04 的将池窗、票 06 的技能浮层复用这张表）。
+ *
+ * 键顺序 = 界面上的分组顺序（魏 / 蜀 / 吴 / 群 / 神）：将池摘要的武将名块按它分桶。
+ * 服务端给的是 `kingdom.value`（`wei` / `shu` / `wu` / `qun` / `shen`）；未知值不编标签
+ * （落到「其他」桶——枚举变了宁可显示得难看，也不猜成某个势力）。
+ */
+const KINGDOM_LABELS = { wei: "魏", shu: "蜀", wu: "吴", qun: "群", shen: "神" };
+
+/** 势力枚举值 → 中文标签；未知 / 缺字段 ⇒ 空串（不编名字）。 */
+function kingdomLabel(kingdom) {
+  return KINGDOM_LABELS[kingdom] || "";
+}
+
+/** 版本 id → 目录里那条 version（带票 01 的展示面）；未知 id ⇒ null。 */
+function heroVersionById(heroId) {
+  if (!heroId) return null;
+  for (const group of state.heroCatalog) {
+    for (const version of group.versions) {
+      if (version.id === heroId) return version;
+    }
+  }
+  return null;
+}
+
+/** 右栏要画的那个版本：`#in-my-hero` 的当前值；点将关着 ⇒ null（随机发将，空态）。 */
+function lobbyHeroPick() {
+  if (!($("in-pointjiang") || {}).checked) return null;
+  return heroVersionById(($("in-my-hero") || {}).value);
+}
+
+/** 换人 / 换座位 / 换点将开关都要重画右栏。`main.js:wire()` 只给下拉挂了 `syncPoolHint`，
+ *  故这条补挂在本文件里（目录到货时挂一次，幂等；下拉节点本身不会被重建）。 */
+let lobbyHeroPanelWired = false;
+
+function wireLobbyHeroPanel() {
+  if (lobbyHeroPanelWired) return null;
+  lobbyHeroPanelWired = true;
+  for (const id of ["in-my-hero", "in-seat", "in-players"]) {
+    const node = $(id);
+    if (node) node.addEventListener("change", () => renderLobbyHeroPanel());
+  }
+  return null;
+}
+
+/** 座位下拉的当前值（0 基下标，与表单选项文案同源）；空 ⇒ 「—」。 */
+function seatChoice() {
+  const select = $("in-seat");
+  const value = select ? String(select.value) : "";
+  return value === "" ? "—" : value;
+}
+
+/** 右栏上半：势力徽记 / 名字 / 体力点（`hp / hp_max`，pips 按上限画、按当前体力点亮）/ 一句说明。 */
+function renderLobbyHeroPanel() {
+  const version = lobbyHeroPick();
+  const kingdom = $("lobby-hero-kingdom");
+  const name = $("lobby-hero-name");
+  const hpLabel = $("lobby-hero-hp-label");
+  const pips = $("lobby-hero-hp");
+  const hint = $("lobby-hero-hint");
+  const seat = $("lobby-hero-seat");
+  const hand = $("lobby-hero-handlimit");
+  const hp = version ? Number(version.hp) || 0 : 0;
+  const hpMax = version ? Number(version.hp_max) || 0 : 0;
+  if (kingdom) {
+    // 徽记复用既有 `.kingdom`（势力底色是表里既有那套，不新增颜色变量）；标签只有
+    // `KINGDOM_LABELS` 一份。`data-kingdom` 留枚举值原样，便于对着载荷核对。
+    kingdom.className = version && kingdomLabel(version.kingdom)
+      ? `kingdom ${version.kingdom}` : "kingdom";
+    kingdom.textContent = version ? kingdomLabel(version.kingdom) : "";
+    if (version && version.kingdom) kingdom.setAttribute("data-kingdom", version.kingdom);
+    else kingdom.removeAttribute("data-kingdom");
+  }
+  if (name) name.textContent = version ? version.name : "随机发将";
+  // 体力一律印 `hp / hp_max` 两个数：神甘宁那种 3/6 的初始体力和上限不是一回事。
+  if (hpLabel) hpLabel.textContent = version ? `${hp} / ${hpMax} 体力` : "";
+  if (pips) {
+    pips.innerHTML = "";
+    for (let at = 0; at < hpMax; at += 1) {
+      const pip = document.createElement("span");
+      pip.className = at < hp ? "pip" : "pip off";
+      pips.appendChild(pip);
+    }
+  }
+  if (hint) {
+    hint.textContent = version
+      ? "点将已开：这一栏跟着「我的武将」走，切下拉即可换人。"
+      : "点将关着：本局随机发将，技能全文要等点将开了才看得到。";
+  }
+  if (seat) seat.textContent = `座位 ${seatChoice()}`;
+  // 手牌上限 = 当前体力（规则恒定，不是第二份数据）。
+  if (hand) hand.textContent = version ? `手牌上限 ${hp}` : "手牌上限 —";
+  renderLobbySkills(version);
+  return null;
+}
+
+/** 右栏下半：技能全文。描述**原样印服务端的文本**（spec §8 R7：前端零正则、零截断）。 */
+function renderLobbySkills(version) {
+  const box = $("lobby-skill-list");
+  if (!box) return null;
+  box.innerHTML = "";
+  if (!version) {
+    box.appendChild(lobbyNote("点将关着（随机发将）：技能全文要等点将开了才看得到。"));
+    return null;
+  }
+  const skills = Array.isArray(version.skills) ? version.skills : [];
+  if (!skills.length) {
+    box.appendChild(lobbyNote("这个武将在数据表里没有技能。"));
+    return null;
+  }
+  for (const skill of skills) {
+    const block = document.createElement("div");
+    block.className = "skillblock";
+    const head = document.createElement("p");
+    head.className = "sn";
+    head.textContent = skill.name || skill.id || "";
+    const desc = document.createElement("p");
+    desc.className = "sd";
+    desc.textContent = skill.description || "";
+    block.appendChild(head);
+    block.appendChild(desc);
+    box.appendChild(block);
+  }
+  return null;
+}
+
+/** 空态 / 说明的一行（同一处造节点，省得各处手搓）。 */
+function lobbyNote(text) {
+  const note = document.createElement("p");
+  note.className = "dim";
+  note.textContent = text;
+  return note;
+}
+
+/* ------------------------------------------------------------- 将池摘要 */
+
+/** 将池摘要的四个数：**唯一**的计算口（工具行那句与左栏统计行同源，不各算一份）。
+ *
+ * 口径：`names` = 至少一版可用的**真名**数、`versions` = 可被随机抽到的**版本**数、
+ * `banned` = 当前槽位禁掉的版本数、`slot` = 正在编辑的槽位（1 基，与按钮文案同源）。
+ * 禁将只作用于随机配将，故"可用"就是"没被禁"；手选无视禁将，不在这个口径里。
+ */
+function poolSummaryStats() {
+  const banned = new Set(currentBans());
+  let names = 0;
+  let versions = 0;
+  let bannedCount = 0;
+  for (const group of state.heroCatalog) {
+    let available = 0;
+    for (const version of group.versions) {
+      if (banned.has(version.id)) {
+        bannedCount += 1;
+      } else {
+        available += 1;
+        versions += 1;
+      }
+    }
+    if (available > 0) names += 1;
+  }
+  return { slot: heroPools().selected + 1, names, versions, banned: bannedCount };
+}
+
+/** 摘要的公共半句（两句都从这一处拼，数字口径不会漂）。 */
+function poolSummaryCore() {
+  const stats = poolSummaryStats();
+  return `槽位 ${stats.slot} · ${stats.names} 真名 / ${stats.versions} 版本`
+    + ` · 已禁 ${stats.banned} 个版本`;
+}
+
+/** 「点将 W」那一格：关着 = 随机发将；开着 = 下拉里的版本显示名。 */
+function poolPickLabel() {
+  if (!($("in-pointjiang") || {}).checked) return "随机";
+  const version = heroVersionById(($("in-my-hero") || {}).value);
+  return (version && version.name) || "—";
+}
+
+/** 工具行右端那句将池摘要（**只是显示**，不带动作）。槽位 / 禁将 / 点将一变就重算。 */
+function syncLobbyToolrow() {
+  const node = $("lobby-pool-summary");
+  if (node) node.textContent = `将池：${poolSummaryCore()} · 点将 ${poolPickLabel()}`;
+  return null;
+}
+
+/** 左栏下半：槽位按钮（`renderPoolSlots` 画的）下面是统计行 + 按势力分组的名字块。
+ *
+ * 名字块只是**摘要**：已禁版本仍列出、划掉变灰；**不**在这里画版本格（那是将池窗的事，
+ * 票 04 重建）。名字再多也只让 `.pool-chips` 自己滚，两栏版式不动。
+ */
+function renderPoolSummary() {
+  const stats = $("pool-stats");
+  if (stats) stats.textContent = `当前槽位：${poolSummaryCore()}`;
+  const box = $("pool-chips");
+  if (!box) return null;
+  box.innerHTML = "";
+  const banned = new Set(currentBans());
+  const buckets = new Map();
+  for (const group of state.heroCatalog) {
+    for (const version of group.versions) {
+      const key = KINGDOM_LABELS[version.kingdom] ? version.kingdom : "other";
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(version);
+    }
+  }
+  for (const key of [...Object.keys(KINGDOM_LABELS), "other"]) {
+    const list = buckets.get(key);
+    if (!list || !list.length) continue;
+    const line = document.createElement("span");
+    line.className = "chipline";
+    line.textContent = key === "other" ? "其他" : KINGDOM_LABELS[key];
+    box.appendChild(line);
+    for (const version of list) {
+      const isBanned = banned.has(version.id);
+      const chip = document.createElement("span");
+      chip.className = isBanned ? "chiphero banned" : "chiphero";
+      chip.textContent = version.name;
+      chip.title = isBanned
+        ? `已禁用：${version.name}（到将池窗里恢复）`
+        : `可被随机抽到：${version.name}`;
+      box.appendChild(chip);
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------- 开局页的三扇面板窗（spec A2 / A5）
+ *
+ * 三块内容（剧本 S / 将池预设 L / 录像 M）窗没开时住在 `#lobby-window-stash` 里；工具行
+ * 三键一点就把对应的那一块搬进**同一扇**全局面板窗（`panel-window.js:panelOpen`，单槽位
+ * 不叠）。搬的是**节点本身**（id 与内部结构原样）：`script-lobby.js` 照旧往 `#script-panel`
+ * 里铺、`replay.js` 照旧往 `#run-list` 里铺——本文件只负责"搬到谁家"。
+ *
+ * 为什么开窗前先把三块都收回寄存格：`panelOpen` 会清空正文槽（再开一扇 = 覆盖），上一扇
+ * 窗的内容会被摘掉。三块由这里统一持有引用，开窗前收回寄存格 ⇒ 任何一块都不会变成游离
+ * 节点（游离节点上的 `document.getElementById` 找不到 id，`scriptRender` / `renderHeroPool`
+ * 就会静默失效）。关窗键也走这里，收窗后三块回到寄存格。
+ */
+const LOBBY_WINDOWS = {
+  script: {
+    size: "S", title: "剧本", dialog: "script", panel: "script-panel",
+    render: () => { if (typeof scriptRender === "function") scriptRender(); },
+  },
+  pool: {
+    size: "L", title: "将池预设", dialog: "pool", panel: "hero-pool-panel", layout: "split",
+    render: () => { renderPoolSlots(); renderHeroPool(); },
+  },
+  runs: {
+    size: "M", title: "已有录像", dialog: "runs", panel: "run-list",
+    render: () => { if (typeof loadRuns === "function") loadRuns(); },
+  },
+};
+
+/** 三块节点的引用（首次开窗时按 id 抓一次；之后即使被搬进窗里也还认得）。 */
+let lobbyWindowNodeCache = null;
+
+function lobbyWindowNodes() {
+  if (!lobbyWindowNodeCache) lobbyWindowNodeCache = {};
+  for (const kind of Object.keys(LOBBY_WINDOWS)) {
+    if (!lobbyWindowNodeCache[kind]) {
+      lobbyWindowNodeCache[kind] = $(LOBBY_WINDOWS[kind].panel);
+    }
+  }
+  return lobbyWindowNodeCache;
+}
+
+/** 把三块全部收回寄存格（窗没开时它们都该住在这里）。 */
+function restashLobbyWindows() {
+  const stash = $("lobby-window-stash");
+  if (!stash) return null;
+  for (const node of Object.values(lobbyWindowNodes())) {
+    if (node && node.parentNode !== stash) stash.appendChild(node);
+  }
+  return null;
+}
+
+/** 打开（或覆盖）三扇窗里的那一扇：S / L / M 同一个壳，单槽位不叠。
+ *
+ * 开窗前先重画那一块：它可能刚从寄存格回来（上一次开窗被覆盖时被摘掉过），
+ * 重画一次保证窗里看到的是**当前**状态，而不是上次关窗时的残留。
+ */
+function openLobbyWindow(kind) {
+  const spec = LOBBY_WINDOWS[kind] || LOBBY_WINDOWS.script;
+  restashLobbyWindows();
+  if (typeof spec.render === "function") spec.render();
+  const node = lobbyWindowNodes()[kind];
+  return panelOpen({
+    size: spec.size,
+    title: spec.title,
+    body: node ? [node] : [],
+    layout: spec.layout,
+    dialog: spec.dialog,
+  });
+}
+
+(function wireLobbyWindows() {
+  const on = (id, handler) => {
+    const node = $(id);
+    if (node) node.addEventListener("click", handler);
+  };
+  on("btn-lobby-script", () => openLobbyWindow("script"));
+  on("btn-lobby-pool", () => openLobbyWindow("pool"));
+  on("btn-lobby-runs", () => openLobbyWindow("runs"));
+  // 将池摘要面板里的第二个入口（同一扇 L 窗）。
+  on("btn-pool-open", () => openLobbyWindow("pool"));
+  // 窗的关闭键：面板收起后把三块送回寄存格（否则它们会停在不可见的正文槽里）。
+  on("script-confirm-close", restashLobbyWindows);
+})();
