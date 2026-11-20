@@ -151,6 +151,12 @@ def _css_rule(selector: str) -> str:
     return match.group("body")
 
 
+def _css_rules() -> list[tuple[str, str]]:
+    """按出现顺序取**全部**规则（先剥注释；选择器原样，含逗号分组）。"""
+    text = re.sub(r"/\*.*?\*/", "", _CSS_TEXT, flags=re.S)
+    return [(m.group(1).strip(), m.group(2)) for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", text)]
+
+
 def test_stage_panel_uses_the_u3_design_units() -> None:
     """舞台 40% / 上限 360 / 中心 64.47% / 两行 253，几何上不压顶座。
 
@@ -9811,15 +9817,27 @@ def test_the_backpack_edit_entry_points_do_not_exist_inside_a_node() -> None:
     assert "discard.hidden = !editable" in render, "节点内「丢弃」整键收起（入口不存在）"
 
 
+_PANEL_WINDOW_SIZES = {"S": (480, 300), "M": (800, 560), "L": (1180, 700)}
+"""面板窗三档的字面尺寸（dsu）：S 480×300 / M 800×560 / L 1180×700（spec §2.2 / A2）。"""
+
+
 def test_the_settle_dialogs_share_the_ticket_20_modal_shell() -> None:
-    """结算 / 选择一律弹窗，且只有**一个**模态壳（票 22 备注：不新造一套模态）。"""
+    """结算 / 选择一律弹窗，且只有**一个**模态壳（票 22 备注：不新造一套模态）。
+
+    ui-one-screen 票 02 加两条判据：(a) 窗上有 `data-size`、三档都由 CSS 定义；
+    (b) 壳住在所有 `<main>` 之外。另钉 (c) `[hidden]` 的唯一真源：全局 `!important`
+    一条，面板窗家族不再写 `display` 补丁（spec A3）。原有判据一条没删：唯一壳 / 正文槽 /
+    三个结算弹窗都走 `scriptConfirm` / 整备面不造第二层遮罩 / 不开原生 `<dialog>`。
+    """
     html = INDEX_HTML.read_text(encoding="utf-8")
     assert html.count('id="script-confirm"') == 1, "模态壳只有一份（票 20 交出来的那个）"
     assert html.count('id="script-confirm-backdrop"') == 1, "遮罩也只有一份"
     assert 'id="script-confirm-body"' in html, "票 22 的正文槽要在同一个壳里"
     lobby = (STATIC_DIR / "script-lobby.js").read_text(encoding="utf-8")
     confirm = _function_source(lobby, "scriptConfirm")
-    assert "script-confirm-body" in confirm, "正文槽由同一个 `scriptConfirm` 填（票 22 只加槽）"
+    assert "panelOpen(" in confirm, "`scriptConfirm` 是面板窗的薄封装（票 02 §3：不另造第二套壳）"
+    panel = (STATIC_DIR / "panel-window.js").read_text(encoding="utf-8")
+    assert "script-confirm-body" in panel, "正文槽由同一个面板窗填（票 22 只加槽）"
     source = _loadout_source()
     assert "scriptConfirm({" in source, "三选一 / 遗物 / 结果都走 `scriptConfirm`"
     for name in ("scriptSettlePickDialog", "scriptSettleRelicDialog", "scriptSettleShowResult"):
@@ -9828,6 +9846,178 @@ def test_the_settle_dialogs_share_the_ticket_20_modal_shell() -> None:
         )
     assert "script-confirm-backdrop" not in source, "整备面不许再造一层遮罩"
     assert "createElement(\"dialog\")" not in source, "不开原生 <dialog>（无构建、经典脚本）"
+
+    # (a) 窗上有 `data-size`（默认 S），三档都是 CSS 定义的 `.pw[data-size]`。
+    window_at = html.index('id="script-confirm-window"')
+    window_tag = html[window_at:html.index(">", window_at)]
+    assert 'data-size="S"' in window_tag, (
+        f"面板窗默认 S 档（spec R2：确认框就是 S 档的一扇窗）：{window_tag}"
+    )
+    for size in _PANEL_WINDOW_SIZES:
+        assert re.search(r"width:\s*calc\(", _css_rule(f'.pw[data-size="{size}"]')), (
+            f".pw[data-size=\"{size}\"] 必须由 CSS 定义固定尺寸"
+        )
+    # (b) 壳住在所有 `<main>` **之外**（它在页面级，不随哪个 view 的显隐一起被藏掉）。
+    last_main = html.rindex("</main>")
+    assert html.index('id="script-confirm-backdrop"') > last_main, "遮罩必须在所有 <main> 之后"
+    assert html.index('id="script-confirm"') > last_main, "面板窗必须在所有 <main> 之后"
+    # (c) `[hidden]` 的唯一真源是全局那条 `!important`；面板窗家族不另写 display 补丁。
+    assert re.search(r"(?m)^\[hidden\]\s*\{[^}]*display:\s*none\s*!important", _CSS_TEXT), (
+        "style.css:429 的全局 `[hidden] { display: none !important; }` 是唯一真源"
+    )
+    assert not re.search(r"\.script-confirm[\w-]*\[hidden\]", _CSS_TEXT), (
+        "面板窗家族不许再写 `[hidden]` 的 display 补丁（原型缺陷 3：被 display 盖掉）"
+    )
+
+
+def test_the_panel_window_sizes_are_literal_design_units() -> None:
+    """面板窗三档是**字面常量**：宽高写死、不随内容变（spec A2 / 票 02 §2）。
+
+    验收口径是「同档多扇窗尺寸相同」——所以判据必须落在 CSS 规则体里的两条字面算式上，
+    不能靠"某个类存在"或全文搜索。`#script-confirm` 仍是**一份**壳（升级而不是新造）。
+    """
+    for size, (width, height) in _PANEL_WINDOW_SIZES.items():
+        body = _css_rule(f'.pw[data-size="{size}"]')
+        assert re.search(rf"width:\s*calc\({width} \* var\(--dsu\)\)", body), (
+            f"`.pw[data-size=\"{size}\"]` 的宽必须是字面 {width} dsu，实际：{body}"
+        )
+        assert re.search(rf"height:\s*calc\({height} \* var\(--dsu\)\)", body), (
+            f"`.pw[data-size=\"{size}\"]` 的高必须是字面 {height} dsu，实际：{body}"
+        )
+        assert "max-width" not in body and "max-height" not in body, (
+            f"窗的尺寸不许随内容伸缩（不许 max-*）：{body}"
+        )
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert html.count('id="script-confirm"') == 1, (
+        "整个面板窗家族只有一份壳（`#script-confirm`）；三档是同一个壳上的 `data-size`"
+    )
+
+
+_SCROLL_CONTAINERS = {
+    ".hero-pool": "将池面板：46vh 定高（今天的口径），列表超出就自己滚——票 04 会把它变成窗里的列表区",
+    ".stage-center .processing": "舞台中央处理区：限两行卡面（253dsu），超出的行自己滚、不折叠",
+    "#t-skills": "牌桌技能栏：给定高度比例，技能多了在这条竖条里滚，不撑高牌桌",
+    ".modal-body": "武将详情检视窗正文槽：标题 / 底栏固定，只有正文滚",
+    ".dialog-body": "询问弹窗正文槽：标题 / 提示条固定，只有正文滚",
+    ".avatar-skills": "武将牌面技能栏：牌面高度固定，技能多时在栏内滚",
+    ".dialog-reveal": "五谷整段结算的持久展示：询问正文收起，亮牌内容在它自己的槽里滚",
+    ".pw-body": "面板窗正文槽：窗高按 data-size 档位写死，正文超出由它自己滚（split 布局时改由列表滚）",
+}
+"""滚动区登记表（spec A4）：`style.css` 里每个 `overflow-y: auto` 都必须在这里登记。
+
+值是一句「为什么它可以滚 / 谁管它的高度」——允许随内容变的只有登记过的这几只盒子，
+这就是「版式不因内容变」的机械判据。**新增滚动区必须显式登记**（未登记即红）。
+"""
+
+
+def test_the_scroll_containers_are_registered() -> None:
+    """`style.css` 里每一条 `overflow-y: auto` 都在登记表里；登记表里也不留幽灵条目。"""
+    actual: set[str] = set()
+    for selector, body in _css_rules():
+        if not re.search(r"overflow-y:\s*auto", body):
+            continue
+        actual.update(one.strip() for one in selector.split(","))
+    registered = set(_SCROLL_CONTAINERS)
+    assert actual == registered, (
+        "滚动容器登记表与 style.css 漂移："
+        f"未登记 {sorted(actual - registered)}；登记了但已不是滚动区 {sorted(registered - actual)}"
+    )
+    for selector, why in _SCROLL_CONTAINERS.items():
+        assert isinstance(why, str) and len(why.strip()) >= 12, (
+            f"滚动区登记要写清「为什么它可以滚 / 谁管它的高度」：{selector}"
+        )
+
+
+_CANVAS_VIEW_IDS = ("view-lobby", "view-script-board", "view-script-editor")
+"""三个 page view 吃设计画布（spec A1）；牌桌页与回放页不在其中（R8）。"""
+
+_VH_VW_GEOMETRY = re.compile(r"\b(?:vh|vw)\b")
+"""几何属性里不许出现的视口单位（`line-height` 不在此列）。"""
+
+
+def test_the_design_canvas_views_avoid_viewport_heights() -> None:
+    """三个 page view 是 16:9 设计画布，画布内的几何只读 dsu / cqw / 壳内百分比（spec A1 / A4）。
+
+    今天的三个 view 是流式文档（`.page-topbar: 6.2vh`、`.page-body` 居中 1180），窗口一换比例
+    就重排版。判据分三段：
+
+    1. 壳本身交出 16:9（`aspect-ratio`）、按**壳宽**算的 `--dsu`（`container-type: inline-size`
+       + `100cqw`）与 `overflow: hidden`；壳的宽度公式是整个判据里**唯一允许**读视口宽高的地方
+       （与 `.table-shell` 同姿态：16:9 壳本质就是视口的一个函数）；
+    2. 只有开局 / 棋盘 / 编辑器挂这个类；回放页与牌桌页不挂（回放页整体不动，R8）；
+    3. 画布作用域内的几何规则（宽 / 高 / min-max / inset / top-right-bottom-left / flex）
+       一律不许出现 `vh` / `vw`，正文区必须是弹性区（`flex:1 1 auto; min-height:0; max-width:none`）。
+    """
+    shell = _css_rule(".design-canvas")
+    assert re.search(r"width:\s*min\(100vw, calc\(100vh \* 16 / 9\)\)", shell), (
+        f"设计画布必须是吃满视口的 16:9 壳（与牌桌壳同一条宽度公式）：{shell}"
+    )
+    for needle in (
+        "aspect-ratio: 16 / 9",
+        "container-type: inline-size",
+        "--dsu: calc(100cqw / 1600)",
+        "overflow: hidden",
+        "display: flex",
+        "flex-direction: column",
+    ):
+        assert needle in shell, f"设计画布规则体缺件 `{needle}`：{shell}"
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    for view in _CANVAS_VIEW_IDS:
+        tag = re.search(rf'<main[^>]*\bid="{view}"[^>]*>', html)
+        assert tag is not None, f"index.html 里找不到 <main id=\"{view}\">"
+        assert "design-canvas" in tag.group(0), (
+            f"`#{view}` 必须挂设计画布类（opt-in 的类，不能挂在 `.page-view` 上）：{tag.group(0)}"
+        )
+    for view in ("view-table", "view-replay"):
+        tag = re.search(rf'<main[^>]*\bid="{view}"[^>]*>', html)
+        assert tag is not None, f"index.html 里找不到 <main id=\"{view}\">"
+        assert "design-canvas" not in tag.group(0), (
+            f"`#{view}` 不吃设计画布（牌桌页有自己 16:9 的壳、回放页继续吃流式口径，R8）"
+        )
+
+    # 顶栏从 6.2vh 改成 dsu；`min-height` 必须一并覆盖，否则 6.2vh 会在高视口下偷偷赢。
+    # 乘法顺序是 `var(--dsu) * 56`：`calc(56 * var(--dsu))` 这个字面量归烟测 U1-02c3 的
+    # 「0.63 版 56×79 卡面覆盖已删」全文判据所有（同值不同物，别让两条判据互相踩）。
+    topbar = _css_rule(".design-canvas .page-topbar")
+    assert re.search(r"height:\s*calc\(var\(--dsu\) \* 56\)", topbar), (
+        f"画布内顶栏 = 56 dsu（原型 `.topbar`）：{topbar}"
+    )
+    assert re.search(r"min-height:\s*0(?![.\d])", topbar), (
+        f"画布内顶栏的 min-height 必须被 dsu 口径覆盖（原来是 6.2vh）：{topbar}"
+    )
+    body_rule = _css_rule(".design-canvas .page-body")
+    for needle in ("flex: 1 1 auto", "min-height: 0", "max-width: none"):
+        assert needle in body_rule, (
+            f"`.page-body` 在画布里是弹性正文区（不再居中 1180px）：缺 `{needle}`：{body_rule}"
+        )
+
+    scanned = 0
+    for selector, body in _css_rules():
+        if selector == ".design-canvas":
+            continue  # 壳的宽度公式要读视口（见 docstring 第 1 条），只此一处豁免。
+        if ".design-canvas" not in selector and not any(
+            view in selector for view in _CANVAS_VIEW_IDS
+        ):
+            continue
+        scanned += 1
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop, value = declaration.split(":", 1)
+            if prop.strip() not in {
+                "width", "height", "min-width", "min-height", "max-width", "max-height",
+                "inset", "top", "bottom", "left", "right", "flex", "flex-basis",
+            }:
+                continue
+            assert not _VH_VW_GEOMETRY.search(value), (
+                f"画布内的几何规则不许读视口单位（`{prop.strip()}:{value}`）——"
+                f"版式要相对壳宽，选择器：{selector}"
+            )
+    assert scanned >= 2, (
+        "画布作用域里至少要能看到顶栏与正文两条几何规则（否则这条判据形同虚设）"
+    )
+
 
 
 def test_the_boss_lose_four_is_automatic_and_has_no_confirmation() -> None:

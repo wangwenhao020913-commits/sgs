@@ -483,53 +483,33 @@ async function scriptRestoreBackup() {
 
 /** 剧本层的**唯一**模态（撞旧档三选一 / 退出战斗 / 票 22 的三选一 / 遗物 / 结果共用）。
  *
- * 形状 = 标题 + 一句正文 + 可选的**正文槽**（`spec.body`：节点数组，票 22 的候选 / 结果行）
- * + 场景现铺的按钮。`spec.dialog` 写进 `#script-confirm[data-dialog]`，烟测据此区分是哪一种面。
+ * ui-one-screen 票 02 起它是 `panel-window.js:panelOpen` 的**薄封装**（壳升级成面板窗家族，
+ * 不是新造第二套）：这里只保留剧本层的三件私有约定——
+ *  - `spec.kind` / `spec.dialog` → `state.script.confirm` 与 `data-dialog` 的判据；
+ *  - `spec.text` 是窗头那句提示、`spec.body` 是正文槽（`#script-confirm-body`）；
+ *  - **返回按钮数组**（`clickAndWait` 靠它返回的 promise 等这一拍跑完）。
+ * 隐藏翻转与「同一时刻只有一扇」都在面板窗里（`hidden` 的 `display` 由全局
+ * `[hidden]{display:none!important}` 兜住，不在这里补第二份）。
  */
 function scriptConfirm(spec) {
-  const dialog = $("script-confirm");
-  const backdrop = $("script-confirm-backdrop");
-  if (!dialog) return null;
-  state.script.confirm = (spec && spec.kind) || "confirm";
-  dialog.setAttribute("data-dialog", (spec && spec.dialog) || state.script.confirm);
-  $("script-confirm-title").textContent = (spec && spec.title) || "";
-  $("script-confirm-text").textContent = (spec && spec.text) || "";
-  const bodyBox = $("script-confirm-body");
-  if (bodyBox) {
-    bodyBox.innerHTML = "";
-    const items = Array.isArray(spec && spec.body) ? spec.body : (spec && spec.body ? [spec.body] : []);
-    for (const item of items) if (item) bodyBox.appendChild(item);
-    bodyBox.hidden = items.length === 0;
-  }
-  const box = $("script-confirm-actions");
-  const buttons = [];
-  if (box) {
-    box.innerHTML = "";
-    for (const action of (spec && spec.actions) || []) {
-      const button = document.createElement("button");
-      button.type = "button";
-      if (action.primary) button.classList.add("primary");
-      if (action.ghost) button.classList.add("ghost");
-      button.textContent = action.label;
-      // 箭头**返回** `run()` 的 promise：烟测的 `clickAndWait` 会等它跑完再进下一块。
-      button.addEventListener("click", () => action.run());
-      box.appendChild(button);
-      buttons.push(button);
-    }
-  }
-  dialog.hidden = false;
-  if (backdrop) backdrop.hidden = false;
-  return buttons;
+  const options = spec || {};
+  state.script.confirm = options.kind || "confirm";
+  return panelOpen({
+    size: options.size || "S",
+    title: options.title || "",
+    hint: options.text || "",
+    body: options.body || [],
+    footNote: options.footNote || "",
+    actions: options.actions || [],
+    layout: options.layout,
+    dialog: options.dialog || state.script.confirm,
+  });
 }
 
 /** 收起确认框（两个场景的「取消」与每个动作开头都走这里）。 */
 function scriptCloseConfirm() {
   state.script.confirm = null;
-  const dialog = $("script-confirm");
-  if (dialog) dialog.hidden = true;
-  const backdrop = $("script-confirm-backdrop");
-  if (backdrop) backdrop.hidden = true;
-  return null;
+  return panelClose();
 }
 
 /** 退出确认框（战斗中）：「退出后这场战斗要重打；棋盘进度已保存。」确认 / 取消。

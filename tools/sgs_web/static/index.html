@@ -10,7 +10,7 @@
 
 <!-- 开局页（U2-01 / spec D7）：全局 header 已删，导航三键住在页面自己的顶栏里；
      三页（开局 / 牌桌 / 回放）使用同一顺序、同一套样式，当前页高亮。 -->
-<main id="view-lobby" class="view page-view">
+<main id="view-lobby" class="view page-view design-canvas">
   <div id="lobby-topbar" class="topbar page-topbar">
     <div class="topbar-left"></div>
     <div class="topbar-center"></div>
@@ -516,7 +516,7 @@
      位置纪律：本视图在回放视图**之后**；绝不插在牌桌视图与回放视图之间（烟测有两处字符串
      切片以那两个 `main` 的 id 为锚点，故这里连注释都不写它们的字面量）。
      状态色只属于玩家视角：同一份节点在编辑器语境下由渲染器按 `mode` 不画。 -->
-<main id="view-script-board" class="view page-view" hidden>
+<main id="view-script-board" class="view page-view design-canvas" hidden>
   <div id="script-board-topbar" class="topbar page-topbar">
     <div class="topbar-left">
       <span id="script-board-script" class="tag"></span>
@@ -607,7 +607,7 @@
      `mode: "editor"` 分支（D26）——作者视角因此没有玩家状态色。
      位置纪律：本视图在回放视图**之后**（棋盘之后），绝不插在牌桌与回放之间；注释里也不写
      那两个 `main` 的 id 字面量。所有动态行 / 表单都由脚本现铺，静态壳只给挂载点。 -->
-<main id="view-script-editor" class="view page-view" hidden>
+<main id="view-script-editor" class="view page-view design-canvas" hidden>
   <div id="script-editor-topbar" class="topbar page-topbar">
     <div class="topbar-left">
       <span id="script-editor-crumb" class="tag"></span>
@@ -688,27 +688,42 @@
   </div>
 </main>
 
-<!-- 剧本层的**唯一**模态壳（M7 票 20 起）：撞旧档三选一 / 退出确认 / 票 22 的三选一 /
- 遗物 / 结算结果 / 票 25 的删除确认都填这一个壳。它住在五个页面**之外**（五个 `main` 之后），
- 因为票 20 的确认框原先住在开局页里，而棋盘的「离开棋局」、结算面与编辑器的删除面在别的
- 页面 —— 那样弹窗会被 `display: none` 的祖先一起藏掉。位置纪律：仍在回放视图之后，不落进
- 牌桌与回放之间。
+<!-- 剧本层的**唯一**模态壳（M7 票 20 起；ui-one-screen 票 02 升级成**全局面板窗**）：
+ 撞旧档三选一 / 退出确认 / 票 22 的三选一 / 遗物 / 结算结果 / 票 25 的删除确认都填这一个壳。
+ 它住在五个页面**之外**（五个 `main` 之后），因为票 20 的确认框原先住在开局页里，而棋盘的
+ 「离开棋局」、结算面与编辑器的删除面在别的页面 —— 那样弹窗会被 `display: none` 的祖先一起
+ 藏掉。位置纪律：仍在回放视图之后，不落进牌桌与回放之间；也**不许**把窗搬进任何 `#view-*`。
  「取消」一律**什么都不发生**（撞旧档 = 不删档；退出 = 不发请求）。
- 正文槽 `#script-confirm-body` 是票 22 加的：票 20 只有 标题 + 一句话 + 按钮三块。 -->
+ 结构 = 遮罩 + 一扇窗（`role="dialog"` `aria-modal="true"`）：`#script-confirm` 只是**定位器**
+ （`position: fixed; inset: 0` 的 flex 居中层），`.pw` 才是那扇窗；窗内三段 = `.pw-head`
+ （标题 / 一句提示 / 关闭键）+ `.pw-body`（票 22 的正文槽）+ `.pw-foot`（脚注 + 动作区）。
+ 三档固定尺寸由 `.pw[data-size]` 的字面 dsu 常量给出（S 480×300 / M 800×560 / L 1180×700），
+ 默认 S —— 确认框就是 S 档的一扇窗（spec R2）。`hidden` 只靠全局
+ `[hidden]{display:none!important}`，这里**不写**第二条 display 补丁。
+ 新静态节点只用垫片认识的标签（div / h2 / span / button）：M7-21b / M7-25b 会把这段扫进去。 -->
 <div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
-<div id="script-confirm" class="script-confirm" role="dialog" aria-modal="true"
-     aria-labelledby="script-confirm-title" hidden>
-  <div class="script-confirm-window">
-    <h2 id="script-confirm-title" class="script-confirm-title"></h2>
-    <p id="script-confirm-text" class="script-confirm-text"></p>
-    <div id="script-confirm-body" class="script-confirm-body" hidden></div>
-    <div id="script-confirm-actions" class="row"></div>
+<div id="script-confirm" class="script-confirm" hidden>
+  <div id="script-confirm-window" class="script-confirm-window pw" data-size="S"
+       role="dialog" aria-modal="true" aria-labelledby="script-confirm-title">
+    <div class="pw-head">
+      <h2 id="script-confirm-title" class="script-confirm-title"></h2>
+      <span id="script-confirm-text" class="script-confirm-text dim"></span>
+      <button id="script-confirm-close" class="pw-close ghost" type="button">关闭</button>
+    </div>
+    <div id="script-confirm-body" class="script-confirm-body pw-body" hidden></div>
+    <div class="pw-foot">
+      <span id="script-confirm-note" class="pw-note dim"></span>
+      <div id="script-confirm-actions" class="row"></div>
+    </div>
   </div>
 </div>
 
 <!-- U1-00：前端按职责拆成普通脚本，**这里的顺序就是运行顺序**；页面与
      tests/support/ui_smoke.mjs 共用这一份清单（不引入 npm / 打包 / ES module）。 -->
 <script src="core.js"></script>
+<!-- ui-one-screen 票 02：全局面板窗（`#script-confirm` 壳的通用口 `panelOpen` / `panelClose`）。
+     只读 core.js 的 `$`；放在页面脚本之前，后面每一票都往这**一扇**窗里填内容（不新造壳）。 -->
+<script src="panel-window.js"></script>
 <!-- table-ux-overhaul 票 07：提示区文案模板（`prompts.json` 与 `anim.ini` 同姿态，
      页面启动即异步载入；缺键逐级回退到服务端 wording → 前端通用文案）。 -->
 <script src="prompts.js"></script>

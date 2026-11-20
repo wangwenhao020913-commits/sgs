@@ -38,6 +38,67 @@ body {
 /* 开局 / 回放页：顶栏贴视口顶，内容沿用旧的 1180 居中栏（.view 的 padding 由 .page-body 承担）。 */
 .view.page-view { max-width: none; padding: 0; }
 .page-body { max-width: 1180px; margin: 0 auto; padding: 18px 20px 60px; }
+
+/* ==========================================================================
+ * ui-one-screen 票 02：page view 的**设计画布**（spec A1）
+ *
+ * 开局 / 棋盘 / 编辑器三个 page view 各是一块 16:9 壳：1 dsu = 1600×900 设计稿的 1px，
+ * `--dsu` 相对**壳宽**（`100cqw / 1600`）而不是视口宽，于是版式不随窗口比例变、长内容
+ * 只改变各自滚动区里的内容。opt-in 的类（不挂在 `.page-view` 上）：回放页整体不动，
+ * 继续吃 `.page-view` / `.page-body` 的流式口径；牌桌页有自己的 `.table-shell`。
+ * 画布宽度公式是整个文件里**唯一允许**读视口宽高的地方（16:9 壳本质就是视口的函数，
+ * 与 `.table-shell` 同姿态）；画布内的几何一律走 dsu / cqw / 壳内百分比。
+ * ========================================================================== */
+.design-canvas {
+  width: min(100vw, calc(100vh * 16 / 9));
+  aspect-ratio: 16 / 9;
+  margin: 0 auto;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  --dsu: calc(100cqw / 1600);
+}
+/* 画布内的顶栏 = 56 dsu（原型 `.topbar`）。`min-height` 必须一起覆盖：旧的
+ * `.page-topbar` 是 6.2vh，视口比 16:9 **高**时它会偷偷赢过 dsu 口径。
+ * 写法把数字放在 `var(--dsu)` 右边：烟测 U1-02c3 有一条**全文** absence 判据，扫的是
+ * 「0.63 版 56×79 卡面覆盖」那种字面算式；顶栏 56dsu 与那张卡面覆盖无关（同值不同物），
+ * 换个乘法顺序即可两不相干。 */
+.design-canvas .page-topbar {
+  flex: 0 0 calc(var(--dsu) * 56);
+  height: calc(var(--dsu) * 56);
+  min-height: 0;
+  padding: 0 calc(14 * var(--dsu));
+}
+/* 工具行（票 03 起用）：52 dsu（原型 `.toolrow`）。 */
+.design-canvas .toolrow {
+  flex: 0 0 calc(52 * var(--dsu));
+  height: calc(52 * var(--dsu));
+  display: flex; align-items: center; gap: calc(10 * var(--dsu));
+  padding: 0 calc(24 * var(--dsu));
+}
+/* 正文 = 画布的弹性区（不再居中 1180px）。内容超出由画布的 `overflow: hidden` 裁掉；
+ * 各票自己的滚动区必须在 tests/test_web_static.py 的登记表里登记（spec A4）。 */
+.design-canvas .page-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: none;
+  margin: 0;
+  padding: calc(16 * var(--dsu)) calc(24 * var(--dsu));
+}
+/* 字号下限（原型 `--f11`…`--f22`）：只给字号加 floor，盒子尺寸仍全走 dsu。
+ * 画布与面板窗各自声明 `--dsu`，故两者各拿各的口径（`var()` 在**声明处**求值，
+ * 提到 `:root` 会让画布拿到视口口径——这正是本票要消灭的那个偏差）。 */
+.design-canvas, .script-confirm {
+  --f11: max(10px, calc(11 * var(--dsu)));
+  --f12: max(10px, calc(12 * var(--dsu)));
+  --f13: max(11px, calc(13 * var(--dsu)));
+  --f15: max(12px, calc(15 * var(--dsu)));
+  --f17: max(13px, calc(17 * var(--dsu)));
+  --f22: max(16px, calc(22 * var(--dsu)));
+}
+
 .tag {
   display: inline-block; margin-left: 10px; padding: 1px 7px; border: 1px solid var(--line);
   border-radius: 99px; font-size: 12px; color: var(--dim);
@@ -1982,24 +2043,64 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .script-choice { border-radius: 999px; padding: 3px 12px; font-size: 14px; }
 .script-choice.on { background: var(--accent-soft); border-color: var(--accent); }
-/* 确认框（撞旧档三选一 / 退出战斗）：自己的遮罩 + 居中窗口。开局页没有牌桌那套
- * `#t-modal-*`，故这是开局页自己的模态，`z-index` 与牌桌的弹窗同档。 */
+/* 全局面板窗（ui-one-screen 票 02 / spec A2 / A3）：一套壳、三档**字面**尺寸、单槽位不叠。
+ * `#script-confirm` 只是**定位器**（全视口 flex 居中、不吃指针）；`.pw` 才是那扇窗。
+ * 遮罩与窗的 `z-index` 与牌桌的弹窗同档（表里的模态是既有那套，不新造第二套）。
+ *
+ * `--dsu` 必须在这里**自给自足**：窗住在所有 `<main>` 之外，继承不到画布上的 `--dsu`；
+ * 若让它回落到 `:root` 的 `calc(100vw / 1600)`，视口比 16:9 **更宽**时画布是高度受限的、
+ * 比视口窄，窗就会比画布大一圈（票 02 §2 的实测坑：vw=1258 时画布只有 963.55）。
+ * 下面这条宽度公式与 `.design-canvas` 同值，故 1 窗 dsu 恒等于 1 画布 dsu。 */
 .script-confirm-backdrop {
   position: fixed; inset: 0; background: rgba(28, 26, 23, .38); z-index: 60;
 }
 .script-confirm {
   position: fixed; inset: 0; z-index: 61;
   display: flex; align-items: center; justify-content: center; pointer-events: none;
+  --dsu: calc(min(100vw, 100vh * 16 / 9) / 1600);
 }
-/* `display: flex` 会盖掉 `[hidden]` 的 `display: none`，故显式补一条。 */
-.script-confirm[hidden] { display: none; }
-.script-confirm-window {
-  pointer-events: auto; background: var(--card); border: 1px solid var(--line);
-  border-radius: 12px; padding: 16px 18px; max-width: 460px;
+/* 真正的窗：三档宽高**写死**（不随内容变）、单槽位（再开一扇 = 覆盖这一扇）。 */
+.pw {
+  pointer-events: auto; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: calc(14 * var(--dsu));
   box-shadow: 0 18px 48px rgba(0, 0, 0, .18);
 }
-.script-confirm-title { font-size: 15px; margin: 0 0 8px; }
-.script-confirm-text { margin: 0; }
+.pw[data-size="S"] { width: calc(480 * var(--dsu)); height: calc(300 * var(--dsu)); }
+.pw[data-size="M"] { width: calc(800 * var(--dsu)); height: calc(560 * var(--dsu)); }
+.pw[data-size="L"] { width: calc(1180 * var(--dsu)); height: calc(700 * var(--dsu)); }
+.pw-head {
+  flex: 0 0 calc(48 * var(--dsu)); display: flex; align-items: center;
+  gap: calc(10 * var(--dsu)); padding: 0 calc(16 * var(--dsu));
+  border-bottom: 1px solid var(--line);
+}
+.pw-head h2 { margin: 0; font-size: var(--f15); white-space: nowrap; }
+.pw-head .dim {
+  min-width: 0; flex: 1 1 auto; font-size: var(--f12);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pw-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: calc(14 * var(--dsu)) calc(16 * var(--dsu));
+}
+/* 固定区与滚动区分层（spec §3.2 / 原型缺陷 1）：正文**不滚**，固定筛选区留在顶上、
+ * 只有列表滚。少了这一条，列表的 `flex: 1` 是死的，整块正文一起滚、筛选行被顶走。 */
+.pw-body[data-layout="split"] {
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.pw-foot {
+  flex: 0 0 calc(52 * var(--dsu)); display: flex; align-items: center;
+  justify-content: flex-end; gap: calc(8 * var(--dsu));
+  padding: 0 calc(16 * var(--dsu));
+  border-top: 1px solid var(--line);
+  background: rgba(var(--paper-rgb), .35);
+}
+.pw-foot .dim { margin-right: auto; }
+.pw-foot .row { margin-top: 0; }
+.pw-close {
+  flex: 0 0 auto; padding: calc(2 * var(--dsu)) calc(9 * var(--dsu));
+  font-size: var(--f12);
+}
 .script-confirm .row { justify-content: flex-end; }
 
 /* ---------------------------------------------------------------------------
@@ -2108,9 +2209,9 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-face-price { font-size: 12px; color: #8a6a1f; font-weight: 600; }
 .script-face-req { font-size: 12px; color: #9d4a4a; }
 
-/* 结算弹窗的正文槽（票 20 的壳只有一个正文段落；三选一 / 遗物 / 结果需要一个列表槽）。 */
-.script-confirm-body { margin-top: 10px; max-height: 46vh; overflow: auto; }
-.script-confirm-body[hidden] { display: none !important; }
+/* 结算弹窗的正文槽（票 20 的壳只有一个正文段落；三选一 / 遗物 / 结果需要一个列表槽）。
+ * ui-one-screen 票 02 起它就是面板窗的 `.pw-body`：高度由窗的 `data-size` 档位管，
+ * 超出由它自己滚（不再写一条 46vh / `[hidden]` 的补丁——全局 `[hidden]` 是唯一真源）。 */
 .script-pick {
   display: flex; gap: 8px; align-items: baseline; width: 100%; margin-top: 6px;
   padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
