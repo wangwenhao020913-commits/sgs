@@ -293,19 +293,25 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .pool-slot.active::after { content: " ★"; color: var(--accent); }
 .pool-slots .pool-slot.on.active::after { color: #fff; }
 /* 固定筛选区（票 04 / spec §3.2）：**不参与伸缩、不许自己滚**——筛选行永不被列表顶走。
- * 少了 `flex: 0 0 auto`，`.hero-pool` 的 `flex: 1` 会把固定区一起压扁（原型缺陷 1）。 */
+ * 少了 `flex: 0 0 auto`，`.hero-pool` 的 `flex: 1` 会把固定区一起压扁（原型缺陷 1）。
+ * 票 10（review 修复 C）：§3.2 的另一半是固定区**不许顶出窗**——`min-width: 0` 让这一列能缩到
+ * 窗宽以内（否则窄视口下整行按内容最小宽度撑开，被 `.pw{overflow:hidden}` 裁掉全开关键或读数）。 */
 .pool-panel .pool-fixed {
-  flex: 0 0 auto; display: flex; flex-direction: column; gap: calc(8 * var(--dsu));
+  flex: 0 0 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: calc(8 * var(--dsu));
   padding-bottom: calc(8 * var(--dsu)); border-bottom: 1px solid var(--line);
 }
+/* 筛选行：单行（`nowrap` = 行高不变，窗 rect 不随筛出数变）+ 能缩（`min-width: 0`）。 */
 .pool-panel .pool-line {
   display: flex; align-items: center; gap: calc(8 * var(--dsu));
   flex-wrap: nowrap; min-width: 0; margin-top: 0;
 }
-/* 搜索框 300 dsu（原型 `.pool-search`）：它是**静态节点**，`input` 事件只重绘它之外的列表。 */
+/* 搜索框基准 300 dsu（原型 `.pool-search`），但**可缩**（`0 1`，票 10）：它是**静态节点**，
+ * `input` 事件只重绘它之外的列表。`min-width: 0` 放开 input 的自动最小宽度，否则缩不动；
+ * 高度是字面 30dsu，缩的只是宽度——换行会改行高，故整行不换行。 */
 .pool-panel .pool-search {
   font: inherit; font-size: var(--f12); height: calc(30 * var(--dsu));
-  width: calc(300 * var(--dsu)); flex: 0 0 auto;
+  width: calc(300 * var(--dsu)); flex: 0 1 calc(300 * var(--dsu)); min-width: 0;
   border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
   padding: 0 calc(10 * var(--dsu)); background: #fff;
 }
@@ -321,8 +327,12 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .pool-panel .kbtn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
 /* 全开/关：一颗**单一动作键**（`margin-left: auto` 靠右），不参与上面的复选状态。 */
 .pool-panel .allbtn { margin-left: auto; flex: 0 0 auto; }
+/* 读数：字号有 10px 下限（`--f11`），窄视口下它比 dsu 缩得慢 ⇒ **允许省略**（票 10：
+ * 可缩 + 单行 + 省略号）。三者缺一，读数就会把全开关键挤到窗外的裁剪区里。 */
 .pool-panel .pool-count {
-  font-size: var(--f11); color: var(--dim); white-space: nowrap; flex: 0 0 auto;
+  font-size: var(--f11); color: var(--dim);
+  flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
 }
 /* 窗脚（保存键 + 提示）：同样不参与伸缩，列表吃剩下的高度。 */
 .pool-panel .pool-foot {

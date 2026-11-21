@@ -838,6 +838,10 @@
  三档固定尺寸由 `.pw[data-size]` 的字面 dsu 常量给出（S 480×300 / M 800×560 / L 1180×700），
  默认 S —— 确认框就是 S 档的一扇窗（spec R2）。`hidden` 只靠全局
  `[hidden]{display:none!important}`，这里**不写**第二条 display 补丁。
+ **关闭键的静态缺省也是 `hidden`**（票 10 / review 修复 C）：只有显式 `dismissible` 的窗才画它，
+ 由 `panel-window.js:panelOpen` 每次开窗**现写**（同一扇壳被所有面共用，上一次是哪种面不算数）。
+ 三选一 / 遗物 / 结算结果是**强制选择面**——关掉只是清 DOM、`state.script.confirm` 仍是旧值，
+ 没有任何路径会重开 ⇒ 卡死到刷新，故它们不许有关闭键；开局页三扇窗与棋盘那两块面允许关。
  新静态节点只用垫片认识的标签（div / h2 / span / button）：M7-21b / M7-25b 会把这段扫进去。 -->
 <div id="script-confirm-backdrop" class="script-confirm-backdrop" hidden></div>
 <div id="script-confirm" class="script-confirm" hidden>
@@ -846,7 +850,7 @@
     <div class="pw-head">
       <h2 id="script-confirm-title" class="script-confirm-title"></h2>
       <span id="script-confirm-text" class="script-confirm-text dim"></span>
-      <button id="script-confirm-close" class="pw-close ghost" type="button">关闭</button>
+      <button id="script-confirm-close" class="pw-close ghost" type="button" hidden>关闭</button>
     </div>
     <div id="script-confirm-body" class="script-confirm-body pw-body" hidden></div>
     <div class="pw-foot">

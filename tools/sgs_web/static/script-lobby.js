@@ -325,6 +325,8 @@ async function scriptNewScript() {
   if (view.ok) {
     scriptConfirm({
       kind: "overwrite",
+      // 撞旧档本来就有「取消」语义（= 旧档原样保留、零请求）：这扇窗可以关。
+      dismissible: true,
       title: "已有剧本进度",
       text: "当前进度会被覆盖（不可恢复）",
       actions: [
@@ -497,6 +499,10 @@ async function scriptRestoreBackup() {
  *  - **返回按钮数组**（`clickAndWait` 靠它返回的 promise 等这一拍跑完）。
  * 隐藏翻转与「同一时刻只有一扇」都在面板窗里（`hidden` 的 `display` 由全局
  * `[hidden]{display:none!important}` 兜住，不在这里补第二份）。
+ *
+ * 票 10（review 修复 C）：关闭键**缺省不画**——这一族的多数面是强制选择（三选一 / 遗物 /
+ * 结算结果），关掉只是清 DOM，`state.script.confirm` 仍是旧值，没有任何路径会重新打开 ⇒
+ * 流程卡死到刷新。本来就有「取消」语义的窗（撞旧档 / 退出确认）显式传 `dismissible: true`。
  */
 function scriptConfirm(spec) {
   const options = spec || {};
@@ -510,6 +516,8 @@ function scriptConfirm(spec) {
     actions: options.actions || [],
     layout: options.layout,
     dialog: options.dialog || state.script.confirm,
+    // 显式入参，不按 `dialog` / `kind` 字符串猜（见上面那段）。
+    dismissible: options.dismissible === true,
   });
 }
 
@@ -533,6 +541,8 @@ function scriptExitConfirm(after) {
   const runId = state.script.runId || (state.script.save && state.script.save.run_id) || null;
   return scriptConfirm({
     kind: "exit",
+    // 退出确认本来就有「取消」（= 什么都不发生、零请求）：这扇窗可以关。
+    dismissible: true,
     title: "退出战斗",
     text: "退出后这场战斗要重打；棋盘进度已保存。",
     actions: [

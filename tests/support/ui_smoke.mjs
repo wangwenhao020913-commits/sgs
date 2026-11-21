@@ -31323,14 +31323,15 @@ check("M7-22t 续档 / 刷新后的待结算战斗（棋盘体没有 session_id�
   && $("script-face-text").textContent.includes("还没开到牌桌上"),
   `action="${faceGo() && faceGo().textContent}"`);
 
-// 单轮：同一份克隆、只给一轮候选（弹窗写「第 1/1 轮」）；不选就关掉 ⇒ 零请求。
+// 单轮：同一份克隆、只给一轮候选（弹窗写「第 1/1 轮」）。票 10 起这是**强制选择面**（窗上
+// 没有关闭键），脚本直接走 `scriptCloseConfirm` 收窗 ⇒ 此刻零请求。
 pendingClone(
   Object.assign({}, battleSpec, { rewards: [battleSpec.rewards[0]] }),
   { nodeId: "b1", room: { name: "麦田" } },
 );
 scriptMark = calls.length;
 await clickAndWait(faceGo());
-check("M7-22u 单轮三选一：弹窗写「第 1/1 轮」、候选数 = `spec.rewards[0]` 的张数（不选也能关，零请求）",
+check("M7-22u 单轮三选一：弹窗写「第 1/1 轮」、候选数 = `spec.rewards[0]` 的张数（收窗零请求）",
   dialog().getAttribute("data-dialog") === "pick"
   && dialog().getAttribute("data-rounds") === "1"
   && pickRows().length === 3
@@ -33288,8 +33289,16 @@ await clickAndWait($("btn-lobby-pool"));
   // ---- UI1-32：收起（离开宿主 / 关窗）----
   leaveSkill(tipPickHost);
   const tipClosedByLeave = tipHidden();
-  // 关窗：浮层跟着收（它是一层全局 DOM，不能指望窗的 display:none 帮它藏）。
-  hoverSkill(tipPickHost);
+  /* 关窗：浮层跟着收（它是一层全局 DOM，不能指望窗的 display:none 帮它藏）。
+   * 票 10 起三选一是**强制选择面**、窗上没有关闭键（关掉就卡死），故这一条改在**可关**的窗上量：
+   * 棋盘页的「背包」窗直连 `panelOpen`（缺省可关），正文槽里的背包格同样是宿主。 */
+  ui.scriptCloseConfirm();
+  const tipNoPending = JSON.parse(JSON.stringify(ui.state.script.board));
+  tipNoPending.pending = null;
+  ui.scriptBoardShow(tipNoPending);
+  await clickAndWait(byClass($("script-hud-actions"), "hud-bag")[0]);
+  const tipWindowHost = slotOf(0);
+  hoverSkill(tipWindowHost);
   const tipShownInWindow = tipShown();
   const tipListenersAtClose = tipListenerCounts();
   const tipHostsAtClose = tipHostCount($("script-confirm-body"));
@@ -33298,9 +33307,103 @@ await clickAndWait($("btn-lobby-pool"));
   check("UI1-32 收起：离开宿主 / 关窗之后浮层回到 hidden，宿主数与监听数都不涨",
     tipClosedByLeave && tipShownInWindow && tipClosedByWindow
     && tipListenerCounts().join(",") === tipListenersAtClose.join(",")
-    && tipHostCount($("script-confirm-body")) === tipHostsAtClose,
+    // 关的是一扇「内容回寄存格」的窗：宿主跟着搬走（`script-confirm-body` 里只会更少，不会更多）。
+    && tipHostCount($("script-confirm-body")) <= tipHostsAtClose,
     `离开=${tipClosedByLeave} 窗内=${tipShownInWindow} 关窗=${tipClosedByWindow}`
       + ` 监听=${tipListenersAtClose.join("/")} 窗口宿主=${tipHostsAtClose}`);
+
+  await discardScriptSave();
+  unlinkSync(SCRIPT_LOADOUT_LIBRARY);
+  ui.state.script.board = null;
+}
+
+/* ============ ui-one-screen 票 10（review 修复 C）：关闭键只给可关的窗 + 固定筛选行可缩 ============
+ *
+ *   UI1-34 关闭键只画在**允许关**的窗上：三选一 / 遗物 / 结算结果这些强制选择面**没有**；
+ *          开局页三扇窗（剧本 / 将池 / 录像）有——它们直连 `panelOpen`，吃的就是缺省。
+ *          顺带钉住"逐扇现写"：结算面关掉之后紧接着开开局页的窗，关闭键必须回来。
+ *   UI1-35 窄视口结构判据（垫片没有布局引擎，真几何由 bsk 那一遍量）：固定筛选区与筛选行都能缩
+ *          （`min-width: 0` / 不换行），搜索框让宽（`flex: 0 1 300dsu`），读数允许省略号且
+ *          **单行**——行高仍是搜索框那条字面 30dsu，窗 rect 不随筛出数变。
+ */
+{
+  writeFileSync(
+    SCRIPT_LOADOUT_LIBRARY,
+    readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+  );
+  await discardScriptSave();
+  const closeKey = () => $("script-confirm-close");
+  const closeMe = async () => {
+    for (const fn of closeKey().listeners.click || []) await fn({ target: closeKey() });
+  };
+
+  // ① 强制选择面：三选一 / 遗物 / 结算结果 —— 窗上没有关闭键（有的话关掉就卡死）。
+  const gateRun = await loadoutRun(2710);
+  pendingClone(Object.assign({}, battleSpec, { rewards: [battleSpec.rewards[0]] }), {
+    nodeId: "b1", room: { name: "麦田" },
+  });
+  await clickAndWait(faceGo());
+  const pickSealed = dialog().getAttribute("data-dialog") === "pick"
+    && dialog().hidden === false && closeKey().hidden === true;
+  ui.scriptCloseConfirm();
+
+  pendingClone(Object.assign({}, battleSpec, { boss_relic: null }), {
+    nodeId: "b1", boss: true, room: { name: "广宗城下" },
+  });
+  await clickAndWait(faceGo());
+  await clickAndWait(pickRows()[0]);
+  await clickAndWait(pickRows()[0]);
+  const relicSealed = dialog().getAttribute("data-dialog") === "relic"
+    && dialog().hidden === false && closeKey().hidden === true;
+  ui.scriptCloseConfirm();
+
+  // 结算结果：真渲染口 `scriptSettleShowResult` + 真棋盘体的克隆（票 06 的 ⑤b 用过同一条口）。
+  const gateResultBoard = JSON.parse(JSON.stringify(ui.state.script.board));
+  vm.runInContext(
+    `scriptSettleShowResult(${JSON.stringify({
+      events: [], board: gateResultBoard, outcome: "continue",
+    })}, ${JSON.stringify({ kind: "event", catalog: gateResultBoard.catalog })})`,
+    context,
+  );
+  const resultSealed = dialog().getAttribute("data-dialog") === "result"
+    && dialog().hidden === false && closeKey().hidden === true;
+  // 合法出口只有一个动作键（「回棋盘」）：收窗 + 回棋盘，流程不卡。
+  await clickAndWait(confirmButtons()[0]);
+
+  // ② 可关的窗：开局页三扇 —— 关闭键在（`panelOpen` 的缺省 = 可关）。
+  const closable = [];
+  for (const kind of ["script", "pool", "runs"]) {
+    await clickAndWait($(lobbyToolKeys[kind]));
+    closable.push($("script-confirm").hidden === false && closeKey().hidden === false);
+    await closeMe();
+  }
+  check("UI1-34 关闭键只给可关的窗：三选一 / 遗物 / 结算结果**没有**（强制选择面），开局页三扇窗**有**",
+    pickSealed && relicSealed && resultSealed && closable.every(Boolean)
+    && $("script-confirm").hidden === true,
+    `三选一=${pickSealed} 遗物=${relicSealed} 结算=${resultSealed}`
+      + ` 开局页三扇=${closable.map((ok) => (ok ? "ok" : "bad")).join("/")}`);
+
+  // ③ 窄视口的结构判据（票 04 / spec §3.2 的另一半：固定区不许把行顶出窗）。
+  const cssNow = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const poolRule = (selector) => (cssNow.match(new RegExp(`${selector}\\s*\\{[^}]*\\}`)) || [""])[0];
+  const fixedRule = poolRule("\\.pool-panel \\.pool-fixed");
+  const lineRule = poolRule("\\.pool-panel \\.pool-line");
+  const searchRule = poolRule("\\.pool-panel \\.pool-search");
+  const countRule = poolRule("\\.pool-panel \\.pool-count");
+  const narrow = {
+    fixed: /min-width:\s*0/.test(fixedRule),
+    line: /min-width:\s*0/.test(lineRule) && /flex-wrap:\s*nowrap/.test(lineRule),
+    search: /flex:\s*0 1 calc\(300 \* var\(--dsu\)\)/.test(searchRule)
+      && /min-width:\s*0/.test(searchRule)
+      && /height:\s*calc\(30 \* var\(--dsu\)\)/.test(searchRule),
+    count: /flex:\s*0 1 auto/.test(countRule) && /min-width:\s*0/.test(countRule)
+      && /overflow:\s*hidden/.test(countRule)
+      && /text-overflow:\s*ellipsis/.test(countRule)
+      && /white-space:\s*nowrap/.test(countRule),
+  };
+  check("UI1-35 窄视口：固定筛选行可缩（min-width:0 / 不换行 / 搜索框 0 1 300dsu）+ 读数允许省略（单行、行高仍 30dsu）",
+    narrow.fixed && narrow.line && narrow.search && narrow.count,
+    Object.entries(narrow).map(([name, ok]) => `${name}=${ok ? "ok" : "bad"}`).join(" "));
 
   await discardScriptSave();
   unlinkSync(SCRIPT_LOADOUT_LIBRARY);

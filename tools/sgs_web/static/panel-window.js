@@ -11,6 +11,9 @@
  *  - **单槽位**：同一时刻只有一扇；再开一扇 = 覆盖内容并改 `data-size`，不是叠第二层。
  *  - **不新增 ESC 行为**：询问弹窗的 ESC 归 `modal.js`；两套壳争同一个键就会互相收窗。
  *
+ * 第三条（票 10 / review 修复 C）：**关闭键只画在允许关的窗上**（`dismissible`，缺省可关）。
+ * 强制选择面（三选一 / 遗物 / 结算结果）关掉只是清 DOM、没有路径重开 ⇒ 卡死到刷新。
+ *
  * `--dsu` 由定位器**自给自足**（style.css 里 `.script-confirm` 那条）：窗住在 `<main>` 之外，
  * 拿不到画布上的 `--dsu`；若回落到 `:root` 的视口口径，视口比 16:9 宽时窗会比画布大一圈。
  */
@@ -28,10 +31,15 @@ const PANEL_WINDOW_SIZES = ["S", "M", "L"];
  * - `body` 是节点数组或文本（文本落成一个 `<p>`）；
  * - `actions` 是 `{label, primary, ghost, run}[]`；
  * - `layout: "split"` 写进 `.pw-body` 的 `data-layout`（固定区 + 只有列表滚，spec §3.2）；
- * - `dialog` 写进定位器的 `data-dialog`（烟测据此区分是哪一种面）。
+ * - `dialog` 写进定位器的 `data-dialog`（烟测据此区分是哪一种面）；
+ * - `dismissible` 决定**画不画关闭键**（票 10 / review 修复 C）：缺省 = 可关（开局页三扇窗、
+ *   棋盘那两块面都直连本口、不传参）。**强制选择面**（三选一 / 遗物 / 结算结果）必须显式传
+ *   `false`——判据只有这一个显式入参，**不许**按 `data-dialog` 字符串猜：猜法会把新面默认
+ *   变成"可关"，而关掉那类面只是清 DOM（`state.script.confirm` 不重开、只能刷新）。
  */
 function panelOpen(spec) {
   const options = spec || {};
+  const dismissible = options.dismissible !== false;
   const dialog = $("script-confirm");
   const backdrop = $("script-confirm-backdrop");
   const win = $("script-confirm-window");
@@ -74,6 +82,10 @@ function panelOpen(spec) {
       buttons.push(button);
     }
   }
+  // 关闭键：**逐扇现写**（同一扇壳被所有面共用，上一次开的是哪种面不算数）。`hidden` 的
+  // display 归全局那条 `!important`，这里不补第二条 display 补丁（spec A3）。
+  const close = $("script-confirm-close");
+  if (close) close.hidden = !dismissible;
   dialog.setAttribute("data-dialog", options.dialog || "confirm");
   dialog.hidden = false;
   if (backdrop) backdrop.hidden = false;

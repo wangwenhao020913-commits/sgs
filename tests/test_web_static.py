@@ -9798,6 +9798,33 @@ def test_the_pool_window_keeps_the_row_shape_and_has_the_filters() -> None:
     )
     assert "overflow-y" not in fixed, f"固定筛选区不许自己滚：{fixed}"
 
+    # 3b. 固定区**不许顶出窗**（spec §3.2 的另一半，票 10 / review 修复 C）：固定行的每一段
+    #     都必须能缩到窗宽以内——否则 `.pw{overflow:hidden}` 会直接裁掉全开关键或读数。
+    #     行高不许变（读数不换行）：窗 rect 只由 data-size 与内容行数决定，不随筛出数变。
+    assert re.search(r"min-width:\s*0", fixed), (
+        f"固定筛选区要能收缩（min-width: 0），否则窄视口整块把行顶出窗：{fixed}"
+    )
+    line = _css_rule(".pool-panel .pool-line")
+    for declaration in (r"min-width:\s*0", r"flex-wrap:\s*nowrap"):
+        assert re.search(declaration, line), (
+            f"筛选行要能收缩且**不换行**（换行会让行高变、窗 rect 跟着变）：缺 {declaration}：{line}"
+        )
+    search_rule = _css_rule(".pool-panel .pool-search")
+    assert re.search(r"flex:\s*0 1 calc\(300 \* var\(--dsu\)\)", search_rule), (
+        "搜索框基准 300dsu 但**可缩**（`flex: 0 1`）：`0 0` 时窄视口它自己就把全开关键顶出窗："
+        f"{search_rule}"
+    )
+    assert re.search(r"min-width:\s*0", search_rule), (
+        f"搜索框的最小尺寸要放开（`min-width: 0`）：input 的自动最小宽度会挡住收缩：{search_rule}"
+    )
+    count_rule = _css_rule(".pool-panel .pool-count")
+    for declaration in (r"flex:\s*0 1 auto", r"min-width:\s*0",
+                        r"overflow:\s*hidden", r"text-overflow:\s*ellipsis",
+                        r"white-space:\s*nowrap"):
+        assert re.search(declaration, count_rule), (
+            f"读数要允许**省略号**（可缩、单行、不顶出窗）：缺 {declaration}：{count_rule}"
+        )
+
     # 4. 行形状：只在行上 append 名 + 版本格；事件挂列表容器（委托）
     render = _lobby_js_function("renderHeroPool")
     assert render.count("row.appendChild(") == 2, (
@@ -10510,6 +10537,81 @@ def test_the_panel_window_sizes_are_literal_design_units() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     assert html.count('id="script-confirm"') == 1, (
         "整个面板窗家族只有一份壳（`#script-confirm`）；三档是同一个壳上的 `data-size`"
+    )
+
+
+def test_the_panel_window_close_key_is_only_for_dismissible_windows() -> None:
+    """关闭键只画在**允许关**的窗上（票 10 / review 修复 C）。
+
+    背景：票 02 顺手给面板窗加了 `#script-confirm-close`，但票 04 / R2 没要——三选一 /
+    遗物 / 结算结果这些面**必须选一个**才能继续。关掉它们只是清 DOM：`panelClose()` 不动
+    `state.script.confirm`，也没有任何路径会重新打开那一面 ⇒ 流程卡死到刷新。
+    判据因此必须落在「谁显式说自己可以关」上，**不许**靠 `data-dialog` 字符串猜（新面一进来
+    猜法就默认把它变成可关，缺陷会以同一形状回来）。
+
+    三段：
+    1. `panelOpen` 有显式的 `dismissible`，关闭键的显隐由它写；缺省 = **可关**（开局页三扇窗
+       与棋盘那两块面直连 `panelOpen`、不传参，屏幕上的关窗键不许因为这一票消失）；
+    2. `scriptConfirm` 是剧本层确认框的**唯一**出口，它缺省 = **不可关**：要关必须显式传
+       `dismissible: true`（撞旧档 / 退出确认这类本来就有「取消」语义的窗）；
+    3. 三处强制选择面（三选一 / 遗物 / 结算结果）的调用**不带**这个标记；静态 markup 的缺省
+       也不画关闭键（`hidden`），JS 没跑起来时窗壳也不会露出一颗能关掉流程的键。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    close_at = html.index('id="script-confirm-close"')
+    close_tag = html[html.rindex("<button", 0, close_at):html.index(">", close_at)]
+    assert re.search(r"\bhidden\b", close_tag), (
+        f"关闭键的静态缺省是**不画**（每扇窗开的时候由 panelOpen 按 dismissible 写）：{close_tag}"
+    )
+
+    panel = (STATIC_DIR / "panel-window.js").read_text(encoding="utf-8")
+    open_source = _function_source(panel, "panelOpen")
+    assert "dismissible" in open_source, (
+        "`panelOpen` 要有显式的 `dismissible` 参数（判据别靠 `data-dialog` 字符串猜）；"
+        f"实际：{open_source}"
+    )
+    assert re.search(r"options\.dismissible !== false", open_source), (
+        "缺省 = 可关：开局页三扇窗与棋盘那两块面直连 `panelOpen`、不传参，关窗键不能没了："
+        f"{open_source}"
+    )
+    assert re.search(r"close\.hidden\s*=\s*!dismissible", open_source), (
+        f"关闭键的显隐要由 `dismissible` 一处写死（不另写第二条 display 补丁）：{open_source}"
+    )
+
+    lobby = (STATIC_DIR / "script-lobby.js").read_text(encoding="utf-8")
+    confirm = _function_source(lobby, "scriptConfirm")
+    assert "dismissible" in confirm, (
+        f"`scriptConfirm` 要把 `dismissible` 转给面板窗（屏幕上的判据只有这一处）：{confirm}"
+    )
+    assert re.search(r"options\.dismissible === true", confirm), (
+        "剧本层的确认框缺省**不可关**（强制选择面是多数）；要关必须显式传 "
+        f"`dismissible: true`：{confirm}"
+    )
+
+    # 3a. 三处强制选择面：不传标记 ⇒ 不画关闭键。
+    loadout = _loadout_source()
+    for name in ("scriptSettlePickDialog", "scriptSettleRelicDialog", "scriptSettleShowResult"):
+        body = _function_source(loadout, name)
+        assert "scriptConfirm({" in body, f"{name} 必须复用剧本层唯一的模态壳"
+        assert "dismissible" not in body, (
+            f"`{name}` 是**强制选择面**（必须选一个才能继续）：不许带可关闭标记，"
+            "否则关掉窗就卡死（`state.script.confirm` 不重开、只能刷新）"
+        )
+
+    # 3b. 本来就有「取消」语义的确认框：显式可关。
+    for name in ("scriptNewScript", "scriptExitConfirm"):
+        body = _function_source(lobby, name)
+        assert re.search(r"dismissible:\s*true", body), (
+            f"`{name}` 本来就有「取消」语义：显式传 `dismissible: true` 保留关窗键"
+        )
+
+    # 3c. 开局页三扇窗（剧本 / 将池 / 录像）：直连 `panelOpen`、不传参 ⇒ 吃上面的缺省（可关）。
+    lobby_page = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    open_lobby = _function_source(lobby_page, "openLobbyWindow")
+    assert "panelOpen(" in open_lobby, "开局页三扇窗共用一个 `panelOpen` 调用点"
+    assert "dismissible" not in open_lobby, (
+        "开局页三扇窗是**可关**的，走 `panelOpen` 的缺省（不传 = 可关）；"
+        f"别在这里和缺省反向：{open_lobby}"
     )
 
 
