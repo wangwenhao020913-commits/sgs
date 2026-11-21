@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "mou_gong_tong",
+  "heroes": [
+    {
+      "id": "mou_liucheng",
+      "name": "谋刘赪",
+      "true_name": "刘赪",
+      "kingdom": "qun",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "mou-gong-tong",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "lveying",
+          "name": "掠影",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yingwu",
+          "name": "莺舞",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

@@ -557,6 +557,14 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.mou_liucheng.lveying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.mou_liucheng.yingwu": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.pangde_mobile.mashu": {
       "enabled": true,
       "rarity": "common"

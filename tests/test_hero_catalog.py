@@ -148,6 +148,10 @@ BINGSHI_JIE_HEROES = load_heroes("bingshi_jie")
 """**兵势篇-节包**那一份（bingshi-jie 票 01 起）：独立系列包，版本字段 ``bingshi-jie``、
 显示名用系列前缀「势赵云」（真名赵云，与标准 / 界赵云版本并存）。"""
 
+MOU_GONG_TONG_HEROES = load_heroes("mou_gong_tong")
+"""**谋攻篇-同包**那一份（mou-gong-tong 票 01 起）：独立系列包，版本字段 ``mou-gong-tong``、
+显示名用系列前缀「谋刘赪」（真名刘赪，本仓首条刘赪）。"""
+
 SHIJI_ZHI_HEROES = load_heroes("shiji_zhi")
 """**始计篇-智包**那一份（shiji-zhi 票 01 起）：独立系列包，版本字段 ``shiji-zhi``、
 显示名**不加**版本后缀（神郭嘉 / 慧识 / 辉逝 / 天翊 / 佐幸）。"""
@@ -241,6 +245,10 @@ YIJIANG_2011_MOBILE_ENABLED = tuple(
 
 JIE_YIJIANG_2011_MOBILE_ENABLED = tuple(
     hero.id for hero in JIE_YIJIANG_2011_MOBILE_HEROES.heroes if hero.enabled
+)
+
+MOU_GONG_TONG_ENABLED = tuple(
+    hero.id for hero in MOU_GONG_TONG_HEROES.heroes if hero.enabled
 )
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
@@ -351,9 +359,11 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 212 不变（遗物不在武将那半），装备 22 不变。
     # m7-script-mode 票 27：**NPC 技能** 4 条（`carrier = NPC`，`npc.*`）⇒ 242 → 246；
     # 武将技 212 / 装备 22 都不变（NPC 技能只授敌方座位，不在武将那半）。
-    assert len(CATALOG) == 255
+    # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪两条（掠影 / 莺舞）⇒ 255 → 257、
+    # 武将技 219 → 221（装备 22 不变）。
+    assert len(CATALOG) == 257
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 219
+    assert len(heroes) == 221
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -384,6 +394,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             BINGSHI_JIE_HEROES,
             YIJIANG_2011_MOBILE_HEROES,
             JIE_YIJIANG_2011_MOBILE_HEROES,
+            MOU_GONG_TONG_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -407,7 +418,8 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # shiji-zhi-luotong-chenzhen 票 01：骆统【勤政】⇒ 198 → 199。
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
     # bingshi-jie 票 01：势赵云两条 ⇒ 208 → 210。
-    assert len(expected) == 219
+    # mou-gong-tong 票 01：谋刘赪两条 ⇒ 219 → 221。
+    assert len(expected) == 221
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -433,6 +445,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(SHAN_ENABLED)
         | set(SHIJI_ZHI_ENABLED)
         | set(BINGSHI_JIE_ENABLED)
+        | set(MOU_GONG_TONG_ENABLED)
         | set(YIJIANG_2011_MOBILE_ENABLED)
         | set(JIE_YIJIANG_2011_MOBILE_ENABLED)
     )
@@ -1356,6 +1369,9 @@ SKILL_FILES: dict[str, str] = {
     "hero.wolong_zhugeliang.huoji": "test_hero_huo.py",
     "hero.wolong_zhugeliang.kanpo": "test_hero_huo.py",
     "hero.yanliang_wenchou.shuangxiong": "test_hero_huo.py",
+    # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪【掠影】【莺舞】（新包 → 新测试文件）。
+    "hero.mou_liucheng.lveying": "test_hero_mou_gong_tong.py",
+    "hero.mou_liucheng.yingwu": "test_hero_mou_gong_tong.py",
 }
 """启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
@@ -1378,6 +1394,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
             HUO_MOBILE_HEROES,
             HUO_HEROES,
             JIE_FENG_MOBILE_HEROES,
+            MOU_GONG_TONG_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -1480,6 +1497,30 @@ def _probe_state() -> GameState:
     )
     # 【诛害】的判据是座位级"本回合造成过伤害"事实（合成局面直接置位）。
     state.player(OTHER).damage_dealt_this_turn = True
+    return state
+
+
+def _mou_gong_tong_probe_state() -> GameState:
+    """谋刘赪【掠影】【莺舞】的正面探针局面（mou-gong-tong 票 01）。
+
+    - **我**（座位 ME）是谋刘赪 ⇒ 两条技能实例都在（「拥有技能『掠影』」那一半成立）；
+    - **我的**出牌阶段 ⇒ ② 的阶段闸门成立；
+    - 我身上有 **2 个「椎」** ⇒ ① 的"不小于 2"成立。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="mou_liucheng"), SeatSpec()],
+        turn_seat=ME,
+        phase=Phase.PLAY,
+    )
+    state.player(ME).markers = (
+        Marker(
+            name="椎",
+            source_seat=ME,
+            source_skill_id="hero.mou_liucheng.lveying",
+            count=2,
+        ),
+    )
     return state
 
 
@@ -1963,6 +2004,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _sidi_probe_state()
     if skill_id == "hero.jie_caozhen_mobile.sidi":
         return _jie_sidi_probe_state()
+    if skill_id in ("hero.mou_liucheng.lveying", "hero.mou_liucheng.yingwu"):
+        return _mou_gong_tong_probe_state()
     if skill_id == "hero.jie_wuyi_mobile.benxi":
         return _jie_benxi_probe_state()
     if skill_id == "hero.jie_liubei.jijiang":
@@ -2166,6 +2209,16 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.jie_caozhen_mobile.sidi": (
             _HookFrame(source=ME, card=state.card(_PROBE_TRICK_CARD)),
             _HookFrame(source=0),
+        ),
+        # mou-gong-tong 票 01：谋刘赪两条（② 指定目标时 / ① 结算结束后）。两帧都是
+        # "我使用的牌 + 目标在别人身上"；持有者换成座位 2 后 `source`（= 我）对不上 ⇒ 假。
+        "hero.mou_liucheng.lveying": (
+            _HookFrame(source=ME, card=state.card(_PROBE_PROCESSING_SLASH), targets=(OTHER,)),
+            _HookFrame(source=ME, card=state.card(_PROBE_PROCESSING_SLASH), targets=(OTHER,)),
+        ),
+        "hero.mou_liucheng.yingwu": (
+            _HookFrame(source=ME, card=state.card(_PROBE_TRICK_CARD), targets=(OTHER,)),
+            _HookFrame(source=ME, card=state.card(_PROBE_TRICK_CARD), targets=(OTHER,)),
         ),
         # 每条技能一个**元组**：本技能的每条带条件钩子各一帧（【勤学】两个时机两条）。
         "hero.jie_luxun.qianxun": (
@@ -3320,6 +3373,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.feng_guanyu.danqi": "触发技能",
     "hero.feng_guanyu.yiyun": "锁定技",
     "hero.feng_guanyu.xinhan": "觉醒技",
+    # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪两条（掠影 / 莺舞）= 各两个**强制**钩子 +
+    # **没有流水线**（段机住 handler：① 要"移去 → 摸牌 → 再问一句"，而流水线的步骤只能
+    # 在效果**之前**问）⇒ 机械谓词 `flow_for is None` + 钩子带 handler，落「多轮技能」格
+    # （与【镇骨】【从讨】同一条判据：手写段机、无流水线）。
+    "hero.mou_liucheng.lveying": "多轮技能",
+    "hero.mou_liucheng.yingwu": "多轮技能",
 }
 """173 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -3414,7 +3473,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # 【崩坏】（锁定技）⇒ 锁定技 38 → 40；【酒池】（单源转化）⇒ 转化技 19 → 20。
     # yijiang-2011-xusheng-chunhua 票 01：徐盛【破军】的**归还段**（标记载体的手写
     # TURN_END 强制钩子、无流水线）⇒ 20 → 21；票 03：界徐盛版的归还段 ⇒ 21 → 22。
-    "多轮技能": 22,
+    # mou-gong-tong 票 01：谋刘赪【掠影】【莺舞】（手写段机、无流水线）⇒ 22 → 24。
+    "多轮技能": 24,
     # lin-batch2 票 03：贾诩移动版【完杀】/【帷幕】（两条纯修饰器）⇒ 锁定技 40 → 42。
     # jushou-lusu 票 01：沮授【矢北】（锁定技 + 受伤后钩子、无流水线）⇒ 锁定技 42 → 43。
     # yijiang-2014-round2 票 01（W3）：界沮授移动版【矢北】（锁定技 + 开局护甲 / 受伤后
@@ -3654,7 +3714,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（锁定技格）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（全部锁定、无流水线 ⇒ 锁定技格）⇒ 242 → 246。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 255
+    assert len(SKILL_SHAPE) == len(CATALOG) == 257
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3751,7 +3811,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
 
     multi_round = _shape_members("多轮技能")
     # yijiang-2011-xusheng-chunhua 票 01：徐盛【破军】的归还段（标记载体、手写钩子）⇒ 21。
-    assert len(multi_round) == 22
+    assert len(multi_round) == 24
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -3887,8 +3947,9 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版【破军】（零步流水线）⇒ 内 138 → 139；
     # 它的归还段（标记载体、手写钩子、无流水线）⇒ 外 108 → 109。票 03：界徐盛版同形一对
     # ⇒ 内 139 → 140、外 109 → 110。
+    # mou-gong-tong 票 01：谋刘赪【掠影】【莺舞】（手写段机、无流水线）⇒ 外 112 → 114。
     assert len(inside) == 143
-    assert len(outside) == 112
+    assert len(outside) == 114
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

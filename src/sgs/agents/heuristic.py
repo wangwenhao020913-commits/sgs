@@ -2212,6 +2212,11 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # （要按"当前体力"细算得另开 AI 票），故这里把现状钉住、不假装它是对的。
         "bengkuai_lose_hp": -1.2,
         "bengkuai_reduce_max": -1.6,
+        # 谋攻篇-同包·谋刘赪（mou-gong-tong 票 01）：「然后可以视为使用一张牌」的放弃出口。
+        # 两个产物都不耗手牌、没有代价（【过河拆桥】拆对手一张 / 无次数限制的【杀】打一刀）
+        # ⇒ 正分、高于"放弃"（0）；座位步另由 `_HOSTILE_SEAT_STEPS` 登记。
+        "lveying:use": 1.2,
+        "yingwu:use": 1.4,
     }
 )
 
@@ -2498,6 +2503,11 @@ _HOSTILE_SEAT_STEPS = (
     # 神甘宁【劫营】②（同票）：座位是**接下"营"的人**——他的回合末我要拿走其整副手牌，
     # 故这是"被指向的对手"那一档；落进帮助类会让 AI 把营送给盟友、回合末去抢盟友。
     "jieying:",
+    # 谋攻篇-同包·谋刘赪（mou-gong-tong 票 01）：① 的两问都指向**对手**——虚拟【过河拆桥】
+    # 拆敌方一张牌、虚拟【杀】砍敌方一刀；手写询问用全限定 skill_id
+    # （``hero.mou_liucheng.lveying:target`` / ``...yingwu:target``），不登记会落进"帮盟友"。
+    "hero.mou_liucheng.lveying:",
+    "hero.mou_liucheng.yingwu:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
     # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3；票 18 迁进流水线）：产物是
@@ -5313,6 +5323,21 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.shi_zhaoyun.cuifeng": (
         _constant(1.0),
         "每回合末无代价的虚拟【决斗】（伤害 1+X）：X 高时是收割手段，X 低时略亏（反伤）"
+        "⇒ 温和正分；`_constant` 不读任何字段",
+    ),
+    # 谋攻篇-同包·谋刘赪（mou-gong-tong 票 01）。两条技能的**触发段都是强制段**
+    # （牌面无「可以」⇒ `Hook.forced`，从不进 `SKILL_ACTIVATION` 的面）⇒ 本表这两条只是
+    # 同步纪律要求的登记，打分器不会被问到。AI 真正要答的是 ① 末尾那两问：
+    # 「是否视为使用」的选项值登记在 `_OPTION_VALUES`（`lveying:use` / `yingwu:use`），
+    # 座位步登记在 `_HOSTILE_SEAT_STEPS`（全限定前缀）。
+    "hero.mou_liucheng.lveying": (
+        _constant(1.0),
+        "强制触发（不问「是否发动」）：攒「椎」换成摸一张 + 虚拟【过河拆桥】，没有代价 ⇒ "
+        "温和正分；`_constant` 不读任何字段",
+    ),
+    "hero.mou_liucheng.yingwu": (
+        _constant(1.0),
+        "强制触发（不问「是否发动」）：攒「椎」换成摸一张 + 无次数限制的虚拟【杀】，没有代价 "
         "⇒ 温和正分；`_constant` 不读任何字段",
     ),
 }

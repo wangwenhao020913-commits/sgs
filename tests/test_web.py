@@ -781,7 +781,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 106 / 71。
     # bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里：与标准 / 界赵云同真名，
     # 一局只出一个）⇒ 版本 111 → 112、真名分组 75 **不变**。
-    assert len(flat) == 118 and len(catalog) == 77, (
+    assert len(flat) == 119 and len(catalog) == 78, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -11431,7 +11431,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（`relic.*`）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（`npc.*`）⇒ 242 → 246。
-    assert len(expected_skills) == 255, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 257, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

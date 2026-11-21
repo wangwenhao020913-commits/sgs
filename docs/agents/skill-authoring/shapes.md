@@ -132,6 +132,7 @@
 | `LIFE_DECREASE_AFTER` | 失去体力后（诈降） |
 | `MOVE_AFTER` | 失去牌后（连营、枭姬、清俭） |
 | `USE_ON_USE` | 使用牌时（集智） |
+| `USE_DESIGNATE_TARGET` | **指定目标时**（规则 §17.4 的 ①，在「成为目标时」之前）。该时机**一次使用只派发一次**（`targets` 是整表，不像「成为目标时」那样逐目标循环）⇒ 需要逐目标效果的技能在 handler 里按目标数 / 游标自己推进。首个载体 = 谋攻篇-同包·谋刘赪【掠影】② / 【莺舞】②（`mou-gong-tong` 票 01） |
 | `USE_AFTER_DESIGNATE_TARGET` | 使用并指定目标后（铁骑、奋威、无双类） |
 | `USE_BECOME_TARGET` | 成为目标时（流离） |
 | `USE_AFTER_BECOME_TARGET` | **成为目标后**（B6；目标已定、不会再被转移）：诸葛瞻【父荫】是首个载体（「此牌对你无效」= 目标级无效，逐目标派发、`MATCH_ACTOR_KEY` = 这一次的目标） |

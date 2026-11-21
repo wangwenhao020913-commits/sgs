@@ -5148,6 +5148,9 @@ from .sidi import (  # noqa: E402  （末尾 import 是刻意的）
 )
 from .relics import relic_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .npcs import npc_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .hero_mou_gong import (  # noqa: E402  （末尾 import 是刻意的）
+    mou_gong_tong_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -5229,6 +5232,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *relic_skill_definitions(),
             *npc_skill_definitions(),
             *yijiang_2011_skill_definitions(),
+            *mou_gong_tong_skill_definitions(),
         )
     }
 )

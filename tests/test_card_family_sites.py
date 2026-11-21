@@ -315,6 +315,12 @@ ALLOWLIST: dict[Site, Rule] = {
         "_JIE_RENDE_BASIC_TYPES",
         'JIE_RENDE_BASIC_SLASH: "slash",',
     ): Rule(NORMAL, 1, "界【仁德】视为使用的【杀】**产物**是普通杀牌型——有意 normal-only"),
+    # mou-gong-tong 票 01：谋刘赪【莺舞】① 的**产物**牌名（`pure_virtual_card(state, "slash")`）。
+    (
+        "src/sgs/skills/hero_mou_gong.py",
+        "SLASH",
+        'SLASH = "slash"',
+    ): Rule(NORMAL, 1, "【莺舞】① 视为使用一张**普通**【杀】——这是**产物**牌名（牌面逐字「一张无次数限制的【杀】」），有意 normal-only；族判据走产物行为表（is_slash），不在这里判"),
     (
         "src/sgs/skills/active.py",
         "_jie_rende_effect",

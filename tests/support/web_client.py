@@ -473,6 +473,9 @@ _FIRE_TAPE_BANNED_HEROES = (
     "jie_xusheng_mobile",
     # 票 02：张春华移动版进默认池（116 → 117）。
     "zhangchunhua_mobile",
+    # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪进默认池（118 → 119）。按本表规矩**只追加禁将、
+    # 不重扫 seed**（tape 钉的是火攻的界面与记录流，不是将池）。
+    "mou_liucheng",
 )
 """火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
 
