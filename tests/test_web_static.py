@@ -1971,7 +1971,7 @@ def test_discard_panel_uses_the_shared_modal_shell_with_its_own_clickable_backdr
 # 四字牌名 @10 = 40 ⇒ 必须允许折行（两行 = 22 设计单位）；判定槽内容宽 ≈ 21（侧栏三等分），
 # 四字牌名折两行 @9 + 8 的「判定」标记 = ~34。hero-portraits 票 03 把 7 格改成 3 + 2 + 2
 # 三行铺满之后，槽高不再写死（36 / 42、自己的 52 / 60 都删了），改由行的 flex 均分：
-# 对手每行 ≈ (150 − 10 − 8) / 3 = 44、自己 ≈ (210 − 16 − 12) / 3 ≈ 60，都比旧预算宽。
+# 对手每行 ≈ (188 − 10 − 8) / 3 ≈ 56.7、自己 ≈ (238 − 16 − 12) / 3 = 70，都比旧预算宽。
 # 槽名与牌名都在 DOM 里（`tests/support/ui_smoke.mjs` 的 U4-06e），这里钉不靠 tooltip 的机械条件。
 
 
@@ -2691,14 +2691,14 @@ def test_the_judge_and_equip_slots_fill_their_area_in_three_rows() -> None:
         for selector, body in _css_rules()
         if ".mini-slot" in selector and ".slot-v" not in selector
     ), "判定槽 / 装备槽都不许定高（高度由所在行给）"
-    # 行的预算还是从侧栏几何推出来的：对手 150 − 上下 5×2 − 行距 4×2 = 132，三行 ⇒ 44/行。
+    # 行的预算还是从侧栏几何推出来的：对手 188 − 上下 5×2 − 行距 4×2 = 170，三行 ⇒ 56.7/行。
     side = _css_rule(".seat .side-block")
     assert re.search(r"padding:\s*5px", side) and re.search(r"gap:\s*4px", side), (
         f"对手侧栏的内边距 / 行距是行高预算的来源：{side}"
     )
     self_side = _css_rule(".self .side-block")
     assert re.search(r"padding:\s*8px", self_side) and re.search(r"gap:\s*6px", self_side), (
-        f"自己的侧栏同理（210 − 16 − 12 = 182，三行 ⇒ 60/行）：{self_side}"
+        f"自己的侧栏同理（238 − 16 − 12 = 210，三行 ⇒ 70/行）：{self_side}"
     )
 
 
@@ -12957,7 +12957,9 @@ def test_the_ring_seats_never_overlap_from_two_to_eight_players(ring_geometry_pr
             )
 
 
-def test_the_ring_seat_size_lives_in_one_module_and_the_bottom_bar_grew_with_the_blocks() -> None:
+def test_the_ring_seat_size_lives_in_one_module_and_the_bottom_bar_grew_with_the_blocks(
+    ring_geometry_probe: dict,
+) -> None:
     """票 04 的另外三件：一个数只许一处、自己的座位、底栏与底部面板次序。
 
     - **单一真源**：`.ring .seat` 里不许再写 width / aspect-ratio。旧版 CSS 的 `13.125%`
@@ -12995,8 +12997,18 @@ def test_the_ring_seat_size_lives_in_one_module_and_the_bottom_bar_grew_with_the
         f"底栏 = 265 dsu（裁决 Q18；≈29.4%），实得：{bottom}"
     )
     assert not re.search(r"flex:\s*0 0 27\.5%", bottom), f"旧的 27.5% 底栏已替换：{bottom}"
-    # 三个数必须闭合：环区高 = 900 − 顶栏 − 底栏。
-    assert 579 + 265 + 56 == 900, "环区 579 + 顶栏 56 + 底栏 265 = 设计画布 900"
+    # 三个数必须闭合：环区高 = 900 − 顶栏 − 底栏。环区高**读产品常量**（`table.js:RING_STAGE`，
+    # 探针现跑真源码），不是把 579 再抄一遍——抄一遍就是同义反复。顶栏 CSS 是
+    # `.table-topbar { flex: 0 0 6.2% }`（壳高 6.2% ⇒ **55.8** dsu），闭合算式按整数 **56** 折算：
+    # 0.2 dsu 看不出来，票 04 的「环区高取 579，不取 579.2」就是这么定的。
+    topbar = _css_rule(".table-topbar")
+    assert re.search(r"flex:\s*0 0 6\.2%", topbar), (
+        f"牌桌顶栏必须是壳高的 6.2%（≈56 dsu，闭合算式的另一项）：{topbar}"
+    )
+    stage_height = ring_geometry_probe["stage"]["height"]
+    assert stage_height + 265 + 56 == 900, (
+        f"环区 {stage_height} + 顶栏 56 + 底栏 265 = 设计画布 900"
+    )
 
     html = INDEX_HTML.read_text(encoding="utf-8")
     builder = _TreeBuilder()

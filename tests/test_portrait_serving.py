@@ -319,6 +319,37 @@ def test_art_returns_404_when_the_art_tree_does_not_exist(
     assert b"<html" not in body.lower()
 
 
+def test_art_returns_404_when_the_portrait_file_cannot_be_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """文件存在但读不动（权限 / 素材盘掉线）⇒ 仍是既有 JSON 404，不是把连接丢掉。
+
+    ``resolve_portrait`` 只保证"存在"，真正的读取在 handler 里；不接住 ``OSError`` 会让
+    异常冒到 ``http.server`` 之外、浏览器拿到半截 / 空响应——``<img>`` 那边比 404 更难查。
+    """
+    root = tmp_path / "portraits"
+    directory = _portrait_dir(root)
+    (directory / "关羽.jpg").write_bytes(JPEG_BYTES)
+    monkeypatch.setenv("SGS_ART_DIR", str(root))
+    original = Path.read_bytes
+
+    def _unreadable(self: Path) -> bytes:
+        if self.name == "关羽.jpg":
+            raise OSError("素材盘掉线")
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _unreadable)
+
+    status, headers, body = _raw_get(
+        _art_path("关羽", "关羽", "关羽.jpg"), tmp_path / "runs"
+    )
+
+    assert status == 404
+    assert headers["content-type"].startswith("application/json")
+    assert b"<html" not in body.lower()
+    assert "立绘不存在" in body.decode("utf-8")
+
+
 def test_art_refuses_traversal_outside_the_portrait_root(
     tmp_path: Path, monkeypatch
 ) -> None:

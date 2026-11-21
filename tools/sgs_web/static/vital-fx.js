@@ -266,13 +266,10 @@ function vitalFxBoxKey(box) {
     .join(",");
 }
 
-/** 目标武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
- *
- * 判据照 `damage-fx.js:damageFxNumberKeepOut`：自己的体力条是 `index.html` 的常驻节点
- * `#t-self-hp`（烟测垫片不建静态父子树，只能按 id 取），对手的由 `seat-view.js:hpBarNode`
- * 建 `.hp-bar`；量不到 ⇒ `null`，交给画面模块的兜底比例。
- */
-function vitalFxNumberKeepOut(block, seat) {
+/** 目标武将块里的**体力条节点**：自己的座位取 `index.html` 的常驻节点 `#t-self-hp`
+ *  （烟测垫片不建静态父子树，只能按 id 取），对手的由 `seat-view.js:hpBarNode` 建
+ *  `.hp-bar`；都量不到 ⇒ `null`。回退次序只在这里写一次——两个 keep-out 判据共用它。 */
+function vitalFxHpBar(block, seat) {
   if (!block) return null;
   const selfSeat = state.view && state.view.snapshot ? state.view.snapshot.seat : null;
   let bar = null;
@@ -280,6 +277,16 @@ function vitalFxNumberKeepOut(block, seat) {
     bar = $("t-self-hp");
   }
   if (!bar) bar = descendantWithClass(block, "hp-bar");
+  return bar || null;
+}
+
+/** 目标武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
+ *
+ * 判据照 `damage-fx.js:damageFxNumberKeepOut`：体力条节点取 :func:`vitalFxHpBar`；
+ * 量不到 ⇒ `null`，交给画面模块的兜底比例。
+ */
+function vitalFxNumberKeepOut(block, seat) {
+  const bar = vitalFxHpBar(block, seat);
   if (!bar) return null;
   const barRect = rectOf(bar);
   const blockRect = rectOf(block);
@@ -299,17 +306,12 @@ function vitalFxNumberKeepOut(block, seat) {
  *  这条旧口径在带里不再成立：画面模块改用**带的上沿**当"上方放置"的边界
  *  （`numberKeepOutTop`），把盒子放在带上方。
  *
- *  判据与 `vitalFxNumberKeepOut` 同源（同一个体力条节点），只是多走一步 `parentNode` 找带；
- *  体力条直接挂在块里（票 03 之前的版式）⇒ `null`，画面模块保持原口径（逐字节不变）。
+ *  判据与 `vitalFxNumberKeepOut` 同源（同一个体力条节点，取法在 :func:`vitalFxHpBar`），
+ *  只是多走一步 `parentNode` 找带；体力条直接挂在块里（票 03 之前的版式）⇒ `null`，
+ *  画面模块保持原口径（逐字节不变）。
  */
 function vitalFxNumberKeepOutTop(block, seat) {
-  if (!block) return null;
-  const selfSeat = state.view && state.view.snapshot ? state.view.snapshot.seat : null;
-  let bar = null;
-  if (selfSeat !== null && selfSeat !== undefined && Number(seat) === Number(selfSeat)) {
-    bar = $("t-self-hp");
-  }
-  if (!bar) bar = descendantWithClass(block, "hp-bar");
+  const bar = vitalFxHpBar(block, seat);
   if (!bar) return null;
   let band = bar.parentNode;
   while (band && band !== block && !nodeHasClass(band, "hb-bottom")) band = band.parentNode;

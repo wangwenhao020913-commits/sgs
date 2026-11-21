@@ -32,11 +32,10 @@ OUT = ROOT / "pic" / "portraits"
 
 sys.path.insert(0, str(ROOT / "tools"))
 from sgs_web import descriptions as desc_mod  # noqa: E402  （描述文案的唯一来源）
+from sgs_web.portraits import AUTHOR_FILENAME  # noqa: E402  （作者文件名的唯一来源）
 
 KINGDOM_LABELS = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群", "shen": "神"}
 SUFFIXES = ("移动版", "标准版", "自制版", "OL版", "版")
-AUTHOR_FILENAME = "作者.txt"
-"""用户手编的作者文件（与 ``sgs_web.portraits`` 同一个文件名）。"""
 
 
 def noise(text: str) -> str:

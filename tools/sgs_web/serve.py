@@ -968,6 +968,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_body(self, body: bytes, content_type: str, cache_control: str) -> None:
+        """一条命中响应的公共形状（`/art/` 与静态资源共用）：类型 / 长度 / 缓存口径。"""
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache_control)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _read_body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
@@ -1494,13 +1503,15 @@ class _Handler(BaseHTTPRequestHandler):
         if target is None:
             self._send_json(404, {"error": "立绘不存在"})
             return
-        body = target.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", image_mime(body))
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "public, max-age=86400")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = target.read_bytes()
+        except OSError:
+            # `resolve_portrait` 只保证"存在"：扫描与读取之间文件被删 / 没权限 / 素材盘
+            # 掉线 ⇒ 仍按缺文件回**同一个** JSON 404，别让异常把连接丢掉（`<img>` 拿到
+            # 空响应比 404 更难查）。
+            self._send_json(404, {"error": "立绘不存在"})
+            return
+        self._send_body(body, image_mime(body), "public, max-age=86400")
 
     def _serve_static(self, path: str) -> None:
         relative = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -1514,13 +1525,18 @@ class _Handler(BaseHTTPRequestHandler):
             if not target.is_file():
                 self._send_json(404, {"error": f"静态资源缺失：{relative}"})
                 return
-        body = target.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", _CONTENT_TYPES.get(target.suffix, "application/octet-stream"))
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = target.read_bytes()
+        except OSError:
+            # 与 `_serve_art` 同姿态：`is_file()` 之后仍可能读不动（权限 / 并发删除），
+            # 回既有 JSON 404，而不是让异常把连接丢掉。
+            self._send_json(404, {"error": f"静态资源缺失：{relative}"})
+            return
+        self._send_body(
+            body,
+            _CONTENT_TYPES.get(target.suffix, "application/octet-stream"),
+            "no-store",
+        )
 
 
 DEFAULT_HOST = "127.0.0.1"
