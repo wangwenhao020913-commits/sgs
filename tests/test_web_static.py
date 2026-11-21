@@ -9674,6 +9674,158 @@ def test_the_lobby_panels_open_in_the_shared_window_shell() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）
+# ---------------------------------------------------------------------------
+
+_POOL_KINGDOM_KEYS = ("wei", "shu", "wu", "qun", "shen")
+"""势力枚举值的界面顺序（= `KINGDOM_LABELS` 的键序；中文标签全仓只有那一张表）。"""
+
+_POOL_KINGDOM_LABELS = ("魏", "蜀", "吴", "群", "神")
+"""那五个汉字：**不许**出现在窗口的静态 markup 里（标签由 `lobby.js` 按表填）。"""
+
+def _pool_panel_html(html: str) -> str:
+    """将池窗那一块（`#hero-pool-panel` → 下一块 `#run-list` 之前，注释也留着判）。"""
+    start = html.index('id="hero-pool-panel"')
+    return html[start:html.index('id="run-list"', start)]
+
+
+def _lobby_js_function(name: str) -> str:
+    """按名字取 `lobby.js` 里一个函数的正文（含函数头；大括号配平后闭合）。"""
+    text = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    start = text.index(f"function {name}(")
+    depth = 0
+    for at in range(text.index("{", start), len(text)):
+        if text[at] == "{":
+            depth += 1
+        elif text[at] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:at + 1]
+    raise AssertionError(f"lobby.js 里 {name} 的函数体没有闭合")
+
+
+def test_the_pool_window_keeps_the_row_shape_and_has_the_filters() -> None:
+    """票 04 / spec A6：L 窗里 = 固定筛选区 + **唯一内滚**的列表，行形状仍是 `versions + 1`。
+
+    判据分四段（几何由 bsk 那一遍量，这里钉的是"谁在哪"与"谁重绘谁"）：
+
+    1. **固定筛选区**：搜索框 / 五颗势力复选（顺序 = 枚举顺序、带 `aria-pressed`）/ 一颗
+       全开关键（**不**带 `aria-pressed`：它是单一动作键，不参与复选）/ 读数，全在
+       `#hero-pool` **之前**；`#hero-pool` 仍是那个列表容器；
+    2. **标签只有一份**：那五个汉字不许出现在窗口 markup 里——标签由 `lobby.js` 按
+       `KINGDOM_LABELS` 填，抄第二份表就红；
+    3. **固定区与滚动区分层**（spec §3.2）：`LOBBY_WINDOWS` 的 pool 条目带
+       `layout: "split"`，`.pw-body[data-layout="split"]` 是 flex 竖列 + `overflow: hidden`；
+       `.hero-pool` 是**唯一**内滚区（已登记）；固定区不许自己滚；
+    4. **行形状**：`renderHeroPool` 只在行上 `appendChild` **名 + 版本格**（两处，不靠包装
+       节点凑 `versions + 1`），行里的事件挂**列表容器**（委托），重绘不丢处理器。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    panel = _pool_panel_html(html)
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+
+    # 1. 固定筛选区：位置 / 顺序 / 复选语义
+    for needle in ('id="pool-search"', 'id="btn-pool-all"', 'id="pool-count"',
+                   'id="hero-pool"'):
+        assert needle in panel, f"将池窗缺固定区节点：{needle}"
+    assert panel.index('id="pool-search"') < panel.index('id="hero-pool"'), (
+        "搜索框在固定区（列表之前）：输入事件不许重建它"
+    )
+    assert panel.index('id="btn-pool-all"') < panel.index('id="hero-pool"'), (
+        "全开/关键在固定区（列表之前）"
+    )
+    assert panel.index('id="pool-count"') < panel.index('id="hero-pool"'), "读数在固定区"
+    kingdom_positions = []
+    for kingdom, label in zip(_POOL_KINGDOM_KEYS, _POOL_KINGDOM_LABELS):
+        needle = f'data-kingdom="{kingdom}"'
+        assert needle in panel, f"将池窗缺 {label} 势力的复选键（{needle}）"
+        kingdom_positions.append(panel.index(needle))
+        button = panel[panel.rindex("<button", 0, panel.index(needle)):panel.index(">", panel.index(needle))]
+        assert 'aria-pressed="false"' in button, (
+            f"{label} 键是**复选**：静态缺省要带 aria-pressed=\"false\"：{button}"
+        )
+    assert kingdom_positions == sorted(kingdom_positions), (
+        f"五颗势力键的顺序必须是 魏 / 蜀 / 吴 / 群 / 神：{kingdom_positions}"
+    )
+    assert panel.index('id="pool-search"') < kingdom_positions[0], (
+        "势力键跟在搜索框后面（原型 `.pool-line` 的行序）"
+    )
+    all_button = panel[panel.rindex("<button", 0, panel.index('id="btn-pool-all"')):
+                       panel.index(">", panel.index('id="btn-pool-all"'))]
+    assert "aria-pressed" not in all_button, (
+        f"全开/关是**一颗单一动作键**，不参与上面的复选（不许带 aria-pressed）：{all_button}"
+    )
+
+    # 2. 五颗势力键的中文标签只有一份（`KINGDOM_LABELS`）：markup 里一个汉字都不许有
+    for label in _POOL_KINGDOM_LABELS:
+        assert label not in panel, (
+            f"窗口 markup 里出现了「{label}」：中文标签表全仓只有 `lobby.js:KINGDOM_LABELS`"
+            " 一份（票 03 那张），按表填、别抄第二份"
+        )
+    tables = {path.name: path.read_text(encoding="utf-8").count("KINGDOM_LABELS = {")
+              for path in sorted(STATIC_DIR.glob("*.js"))}
+    assert {name: count for name, count in tables.items() if count} == {"lobby.js": 1}, (
+        f"势力中文标签表必须只有一份、且在 lobby.js：{tables}"
+    )
+    wire = _lobby_js_function("wirePoolWindow")
+    assert "kingdomLabel(" in wire, (
+        "五颗势力键的文字要按 `KINGDOM_LABELS` 填（`kingdomLabel()`），不另写一份标签"
+    )
+
+    # 3. 固定区与滚动区分层（spec §3.2 / 原型缺陷 1）
+    table = re.search(r"const LOBBY_WINDOWS = \{(?P<body>.*?)\n\};", lobby_js, re.S)
+    assert table is not None, "lobby.js 里找不到三扇窗的档位表 `LOBBY_WINDOWS`"
+    pool_entry = re.search(r"\bpool:\s*\{(?P<entry>[^}]*)\}", table.group("body"))
+    assert pool_entry is not None, f"档位表里缺将池那一扇：{table.group('body')}"
+    assert re.search(r'layout:\s*"split"', pool_entry.group("entry")), (
+        "将池窗打开时正文槽必须带 data-layout=\"split\""
+        f"（否则 `.pool-list` 的 flex 是死的、筛选行被顶走）：{pool_entry.group('entry')}"
+    )
+    split = _css_rule('.pw-body[data-layout="split"]')
+    for declaration in ("display: flex", "flex-direction: column", "overflow: hidden"):
+        assert re.search(rf"{declaration}", split), (
+            f"`.pw-body[data-layout=\"split\"]` 必须带 `{declaration}`：{split}"
+        )
+    list_rule = _css_rule(".hero-pool")
+    assert re.search(r"overflow-y:\s*auto", list_rule), (
+        f"列表区自己滚（唯一内滚区）：{list_rule}"
+    )
+    assert ".hero-pool" in _SCROLL_CONTAINERS, "`.hero-pool` 是滚动区，必须在登记表里"
+    fixed = _css_rule(".pool-panel .pool-fixed")
+    assert re.search(r"flex:\s*0 0 auto", fixed), (
+        f"固定筛选区不参与伸缩（flex: 0 0 auto）：{fixed}"
+    )
+    assert "overflow-y" not in fixed, f"固定筛选区不许自己滚：{fixed}"
+
+    # 4. 行形状：只在行上 append 名 + 版本格；事件挂列表容器（委托）
+    render = _lobby_js_function("renderHeroPool")
+    assert render.count("row.appendChild(") == 2, (
+        "每行只 append 两个东西：真名 + 版本格循环（行 children = versions + 1，靠的是"
+        f"不包包装节点）：{render}"
+    )
+    assert "label" in render and "cell" in render, f"两处 append 是名与版本格：{render}"
+    assert "box.appendChild(row)" in render, "行挂在列表容器 `#hero-pool` 上"
+    assert "addEventListener" not in render, (
+        "行的事件走**委托**（挂在 `#hero-pool` 上）：渲染口里不许给格子挂处理器，"
+        f"否则每次重绘都要重挂（重绘就丢）：{render}"
+    )
+    assert "pool-search" not in render, (
+        f"列表重绘口不许碰搜索框节点（spec §3.1：input 事件只重绘它自己之外的部分）：{render}"
+    )
+    assert lobby_js.count('addEventListener("contextmenu"') == 1, (
+        "右键点将只有一处（委托在列表容器上）"
+    )
+    wire = _lobby_js_function("wirePoolWindow")
+    for event in ("input", "compositionstart", "compositionend"):
+        assert re.search(rf'addEventListener\("{event}"', wire), (
+            f"搜索框要接 `{event}`（中文合成期不筛）：{wire}"
+        )
+    assert re.search(r'list\.addEventListener\("click"', wire), (
+        f"列表行的左键（禁 / 恢复）走容器上的委托：{wire}"
+    )
+
+
 def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
     """spec §4「开局页增量叠加」——票 03 推翻了它的**前提**：三块不再排在开局页正文里。
 

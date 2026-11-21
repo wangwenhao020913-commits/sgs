@@ -74,6 +74,9 @@ function syncPointjiang() {
   // 工具行「点将 W」那句也在这里跟着开关 / 人选走。
   renderLobbyHeroPanel();
   syncLobbyToolrow();
+  // ui-one-screen 票 04：绿框 = 「我的武将」当前值（spec §8 R5）⇒ 开关一变列表要重画
+  // （关了 = 没有当前值 = 绿框消失；开了 = 那一格带绿框）。
+  renderHeroPool();
   return on;
 }
 
@@ -211,48 +214,249 @@ function togglePoolBan(heroId) {
   renderHeroPool();
 }
 
-/** 按真名分组的将池面板：一行一个真名、行内 1–2 个版本格，禁用的格子灰掉。
+/* ------------------------------------------------------ 将池窗的筛选（票 04 / spec A6）
  *
- * 版本格那一块住在 L 窗里（票 03 搬的；票 04 会重建它）——**窗没开时也可能被调**，故
- * `#hero-pool` 找不到也要把左栏的摘要（统计行 / 名字块 / 工具行那句）重画完。
+ * 筛选态只住页面（不落盘）：`search` 是搜索串、`kings` 是勾中的势力集合（空 = 全部）、
+ * `composing` 是输入法合成期闸门。判据全部落在 `state.heroCatalog`（`/api/heroes`）的
+ * `versions[].name` / `versions[].kingdom` 上——**不查真名、不查 id**（spec §8 R3）。
+ */
+function poolFilter() {
+  if (!state.poolFilter) state.poolFilter = { search: "", kings: new Set(), composing: false };
+  return state.poolFilter;
+}
+
+/** 当前筛选出来的行：每行 = 真名组 + 命中筛选的版本子集（原型 `visibleRows`）。
+ *
+ * 两条筛选都只认版本口径：
+ *  - 搜索 = **版本显示名**子串、大小写不敏感、输一个字即可（「马」命中「司马懿」，这是要的；
+ *    「界」命中界版）——不查真名、不查 id；
+ *  - 势力 = 复选取**并集**，一颗都不选 = 不筛。
+ * 一行的版本全被筛掉 ⇒ 这一行不出现。
+ */
+function poolVisibleRows() {
+  const filter = poolFilter();
+  const query = String(filter.search || "").trim().toLowerCase();
+  const rows = [];
+  for (const group of state.heroCatalog) {
+    let versions = group.versions;
+    if (filter.kings.size) {
+      versions = versions.filter((version) => filter.kings.has(version.kingdom));
+    }
+    if (query) {
+      versions = versions.filter(
+        (version) => String(version.name || "").toLowerCase().includes(query));
+    }
+    if (versions.length) rows.push({ group, versions });
+  }
+  return rows;
+}
+
+/** 「我的武将」**生效中**的当前值（版本 id）：点将关着 = 没有当前值（随机发将）。
+ *
+ * 绿框跟它走（spec §8 R5）：所以被禁的版本也可以带绿框，而关掉点将开关时绿框一起消失
+ * ——绿框是"当前值"，不是粘在格子上的装饰，也不是"未禁"的对立物。
+ */
+function poolPickedId() {
+  if (!($("in-pointjiang") || {}).checked) return null;
+  return ($("in-my-hero") || {}).value || null;
+}
+
+/** 读数 + 全开关键面：**只改这两个节点的文字**，不重建固定区（搜索框 / 势力键都不碰）。
+ *
+ * 全开/关是**一颗单一动作键**（不参与上面的复选）：文案跟着当前动作走——筛出来的版本
+ * 全被禁 ⇒ 下一击是「全开」，否则「全关」；作用范围明写进括号（spec §8 R4）。
+ */
+function syncPoolReadout(rows, banned) {
+  const ids = rows.flatMap((entry) => entry.versions.map((version) => version.id));
+  const allBanned = ids.length > 0 && ids.every((id) => banned.has(id));
+  const all = $("btn-pool-all");
+  if (all) {
+    all.textContent = `${allBanned ? "全开" : "全关"}（这次筛出的 ${ids.length} 个版本）`;
+    all.disabled = ids.length === 0;
+  }
+  const count = $("pool-count");
+  if (count) {
+    const stats = poolSummaryStats();
+    count.textContent = `槽位 ${stats.slot} · 显示 ${rows.length} 真名 / ${ids.length} 版本`
+      + ` · 池内可用 ${stats.versions} · 已禁 ${stats.banned}`;
+  }
+  return null;
+}
+
+/** 按真名分组的将池列表 + 读数：**列表 + 读数的唯一重绘口**（原型 `poolListRender`）。
+ *
+ * 画面分两层（spec §3.1 / A6b 的硬纪律，别改成"整块 innerHTML 重铺"）：
+ *  - 固定区（搜索框 / 五颗势力键 / 全开关键 / 读数）是**静态节点**：本函数只改全开关键
+ *    与读数的文字，**从不碰搜索框**。输入事件也只调本函数 ⇒ 中文输入法的合成会话不会被打断；
+ *  - 列表 `#hero-pool` 整块重铺，行里的事件全挂在这个容器上（委托）⇒ 重绘不丢处理器。
+ *
+ * 行形状不变（票 20 的烟测 ⓪22 / ⓪23 钉着）：一行 = 真名 + 每个（筛出来的）版本一格，
+ * 行 `children.length === versions.length + 1` —— **不靠包装节点凑**。
+ * 版本格：左键 = 禁 / 恢复，右键 = 点将（绿框 = 「我的武将」当前值）。
  */
 function renderHeroPool() {
   const box = $("hero-pool");
+  const rows = poolVisibleRows();
+  const banned = new Set(currentBans());
+  const picked = poolPickedId();
   if (box) {
-    const banned = new Set(currentBans());
     box.innerHTML = "";
-    for (const group of state.heroCatalog) {
+    for (const entry of rows) {
       const row = document.createElement("div");
       row.classList.add("pool-row");
-      row.setAttribute("data-true-name", group.true_name);
+      row.setAttribute("data-true-name", entry.group.true_name);
       const label = document.createElement("span");
       label.classList.add("pool-name");
-      label.textContent = group.true_name;
+      label.textContent = entry.group.true_name;
       row.appendChild(label);
       let available = 0;
-      for (const version of group.versions) {
+      for (const version of entry.versions) {
         const isBanned = banned.has(version.id);
         if (!isBanned) available += 1;
         const cell = document.createElement("button");
         cell.type = "button";
         cell.classList.add("pool-version");
         if (isBanned) cell.classList.add("banned");
+        if (picked && picked === version.id) cell.classList.add("picked");
         cell.textContent = version.name;
         cell.setAttribute("data-hero-id", version.id);
         cell.setAttribute("aria-pressed", isBanned ? "false" : "true");
         cell.title = isBanned
-          ? `已禁用：${version.name}（再点一下恢复）`
-          : `可被随机抽到：${version.name}（点一下禁用）`;
-        cell.addEventListener("click", () => togglePoolBan(version.id));
+          ? `已禁用：${version.name}（左键恢复、右键点将这一版）`
+          : `可被随机抽到：${version.name}（左键禁用、右键点将这一版）`;
         row.appendChild(cell);
       }
       if (available === 0) row.classList.add("all-banned");
       box.appendChild(row);
     }
   }
+  syncPoolReadout(rows, banned);
   renderPoolSummary();
   syncLobbyToolrow();
   syncPoolHint();
+  return null;
+}
+
+/** 全开 / 全关：**一颗单一动作键**，只作用于**当前筛出来的版本**（spec §8 R4）。
+ *
+ * 若它们全被禁 ⇒ 全开，否则全禁（原型 `pool-all` 的语义）；别的势力 / 别的真名的禁将
+ * 状态一个都不动。落盘仍是唯一一条 `saveHeroPool()`（用户点保存键），这里**不自动保存**。
+ */
+function poolToggleAll() {
+  const ids = poolVisibleRows()
+    .flatMap((entry) => entry.versions.map((version) => version.id));
+  if (!ids.length) return null;
+  const bans = currentBans();
+  const banned = new Set(bans);
+  const allBanned = ids.every((id) => banned.has(id));
+  for (const id of ids) {
+    const at = bans.indexOf(id);
+    if (allBanned) {
+      if (at >= 0) bans.splice(at, 1);
+    } else if (at < 0) {
+      bans.push(id);
+    }
+  }
+  renderHeroPool();
+  return null;
+}
+
+/** 右键点将（spec §8 R5）：把该版本写进 `#in-my-hero` 的当前值，右栏跟着换。
+ *
+ * 三件事按顺序做：① 点将开关先打开（否则下拉是置灰的、看着像没反应——原型 `pickHero` 的
+ * 修法）；② 下拉切到这一版（`syncPointjiang` 是开关的唯一落点，它顺带重画右栏与工具行）；
+ * ③ 重绘列表，让**绿框**落到这一格。点将**无视禁将**（`heroPick()` 的既有判据不动）：
+ * 被禁的版本格照样能点将、照样带绿框。
+ */
+function poolPickHero(heroId) {
+  const version = heroVersionById(heroId);
+  if (!version) return null;
+  const toggle = $("in-pointjiang");
+  if (toggle) toggle.checked = true;
+  const select = $("in-my-hero");
+  if (select) {
+    select.disabled = false;
+    select.value = heroId;
+  }
+  syncPointjiang();   // 开关的唯一落点：右栏 / 工具行 / 提示跟着重画
+  renderHeroPool();   // 绿框 = 「我的武将」当前值（重绘时读出来）
+  const hint = $("pool-hint");
+  if (hint) hint.textContent = `已点将：${version.name}（右键换人；保存键才落盘）`;
+  return null;
+}
+
+/** 列表行的**委托点**：从事件目标向上找到那一格版本（带 `data-hero-id` 的那个节点）。
+ *
+ * 真名行（`span.pool-name`）与行本身没有这个属性 ⇒ 左键 / 右键都**不响应**（右键不许
+ * "点空"）。不用 `closest`：这条判据真正的语义是"事件从格子冒泡到列表容器"。
+ */
+function poolCellFrom(target, list) {
+  for (let node = target; node && node !== list; node = node.parentNode) {
+    if (node.getAttribute && node.getAttribute("data-hero-id")) return node;
+  }
+  return null;
+}
+
+/** 将池窗的一次性接线（搜索框 / 五颗势力键 / 全开关键 / 列表容器）。
+ *
+ * 为什么在加载期只挂一次：这几颗节点写死在 `index.html` 里、**永不重建**——中文输入
+ * （spec §3.1）要的就是这个：`input` 只重绘列表与读数，搜索框还是同一个节点、焦点不丢。
+ * 列表行反过来**每次重绘都换新节点**，所以行里的事件只能挂容器（委托）。
+ */
+let poolWindowWired = false;
+
+function wirePoolWindow() {
+  if (poolWindowWired) return null;
+  poolWindowWired = true;
+  const search = $("pool-search");
+  if (search) {
+    // 合成期闸门（原型 `poolOpen` 的修法）：拼音还没选字时重排列表会打断候选会话，
+    // 故合成中**不筛**，等 `compositionend` 再筛一次。
+    search.addEventListener("compositionstart", () => { poolFilter().composing = true; });
+    search.addEventListener("compositionend", () => {
+      poolFilter().composing = false;
+      poolFilter().search = search.value;
+      renderHeroPool();
+    });
+    search.addEventListener("input", () => {
+      if (poolFilter().composing) return;
+      poolFilter().search = search.value;
+      renderHeroPool();
+    });
+  }
+  for (const kingdom of Object.keys(KINGDOM_LABELS)) {
+    const button = $(`pool-kingdom-${kingdom}`);
+    if (!button) continue;
+    // 中文标签只有 `KINGDOM_LABELS` 一份（票 03 那张）：静态 markup 里留空，这里按表填。
+    button.textContent = kingdomLabel(kingdom);
+    button.addEventListener("click", () => {
+      const filter = poolFilter();
+      if (filter.kings.has(kingdom)) filter.kings.delete(kingdom);
+      else filter.kings.add(kingdom);
+      // 复选：只改这一颗自己的 aria-pressed（列表另画），不重铺固定区。
+      button.setAttribute("aria-pressed", filter.kings.has(kingdom) ? "true" : "false");
+      renderHeroPool();
+    });
+  }
+  const all = $("btn-pool-all");
+  if (all) all.addEventListener("click", () => poolToggleAll());
+  const list = $("hero-pool");
+  if (list) {
+    // 左键 = 禁 / 恢复（版本粒度）；右键 = 点将。两条都走**容器上的委托**。
+    list.addEventListener("click", (event) => {
+      const cell = poolCellFrom(event && event.target, list);
+      if (!cell) return null;
+      togglePoolBan(cell.getAttribute("data-hero-id"));
+      return null;
+    });
+    list.addEventListener("contextmenu", (event) => {
+      const cell = poolCellFrom(event && event.target, list);
+      if (!cell) return null;   // 真名行右键不响应（也不拦默认菜单）
+      if (event.preventDefault) event.preventDefault();
+      poolPickHero(cell.getAttribute("data-hero-id"));
+      return null;
+    });
+  }
   return null;
 }
 
@@ -424,7 +628,11 @@ function wireLobbyHeroPanel() {
   lobbyHeroPanelWired = true;
   for (const id of ["in-my-hero", "in-seat", "in-players"]) {
     const node = $(id);
-    if (node) node.addEventListener("change", () => renderLobbyHeroPanel());
+    if (node) node.addEventListener("change", () => {
+      renderLobbyHeroPanel();
+      // 票 04：绿框 = 「我的武将」的当前值，下拉一变列表里那一格就要跟着换。
+      if (id === "in-my-hero") renderHeroPool();
+    });
   }
   return null;
 }
@@ -627,6 +835,8 @@ const LOBBY_WINDOWS = {
   },
   pool: {
     size: "L", title: "将池预设", dialog: "pool", panel: "hero-pool-panel", layout: "split",
+    // 窗头的槽位读数（与 `#btn-pool-save` 的文案同源；槽位按钮仍在开局页左栏，票 03 的裁定）。
+    hint: () => `槽位 ${heroPools().selected + 1}`,
     render: () => { renderPoolSlots(); renderHeroPool(); },
   },
   runs: {
@@ -671,6 +881,8 @@ function openLobbyWindow(kind) {
   return panelOpen({
     size: spec.size,
     title: spec.title,
+    // 窗头的读数可以是函数（例：将池窗的「槽位 N」每次开窗按当前选中槽算）。
+    hint: typeof spec.hint === "function" ? spec.hint() : spec.hint,
     body: node ? [node] : [],
     layout: spec.layout,
     dialog: spec.dialog,
@@ -682,6 +894,8 @@ function openLobbyWindow(kind) {
     const node = $(id);
     if (node) node.addEventListener("click", handler);
   };
+  // 票 04：将池窗的固定筛选区 / 列表容器各挂一次（静态节点，永不重建）。
+  wirePoolWindow();
   on("btn-lobby-script", () => openLobbyWindow("script"));
   on("btn-lobby-pool", () => openLobbyWindow("pool"));
   on("btn-lobby-runs", () => openLobbyWindow("runs"));

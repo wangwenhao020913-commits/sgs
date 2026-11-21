@@ -732,16 +732,39 @@
       </div>
     </div>
   </section>
-  <!-- 将池预设（M6 票 13 / spec D6；票 03 起住进 L 窗）：保存当前槽位 + 按真名分组的版本格。
-       槽位按钮已搬到开局页左栏的「将池摘要」里（`#pool-slots`，同一个 `renderPoolSlots` 渲染）；
-       版本格仍由 `lobby.js:renderHeroPool` 铺 —— 票 04 才重建这一扇窗（搜索 / 五势力复选 / 右键点将）。 -->
-  <section id="hero-pool-panel" class="panel">
+  <!-- 将池预设（M6 票 13 / spec D6；票 03 起住进 L 窗，票 04 重建成「固定筛选区 + 内滚列表」）：
+       · 固定区（不滚）= 搜索框（按**版本显示名**子串，输一个字即可）+ 五颗势力复选
+         （`aria-pressed`，取并集，一颗都不选 = 全部；中文标签由 `lobby.js` 按
+         `KINGDOM_LABELS` 填——**不在这里抄第二份**）+ 一颗全开关键（单一动作键，作用于
+         当前筛出来的版本，不参与复选）+ 读数（显示 / 可用 / 已禁）；
+       · 列表 = `#hero-pool`（唯一内滚区；行形状仍是 `versions + 1`：真名 + 每版一格。
+         左键禁 / 恢复、右键点将，事件都**委托**在这个容器上，重绘不丢处理器）；
+       · 窗脚 = 保存键 + 提示（保存仍是唯一落盘动作，不自动保存）。
+       中文输入的硬纪律（spec §3.1 / A6b）：`input` 事件只重绘列表与读数 ⇒ 搜索框 / 势力键 /
+       全开关键这几个节点写死在这里、**永不重建**，`lobby.js` 只接线不重铺。
+       槽位按钮仍在开局页左栏的「将池摘要」里（票 03 的裁定；本窗只在窗头与读数里显示槽位号）。 -->
+  <section id="hero-pool-panel" class="panel pool-panel">
     <h2>将池预设</h2>
-    <div class="row">
+    <div class="pool-fixed">
+      <div class="row pool-line">
+        <input id="pool-search" class="pool-search" type="search" autocomplete="off"
+               spellcheck="false" placeholder="搜索版本名（输入一个字即可，如「马」）">
+        <div id="pool-kings" class="pool-kings" role="group" aria-label="势力筛选">
+          <button id="pool-kingdom-wei" type="button" class="kbtn" data-kingdom="wei" aria-pressed="false"></button>
+          <button id="pool-kingdom-shu" type="button" class="kbtn" data-kingdom="shu" aria-pressed="false"></button>
+          <button id="pool-kingdom-wu" type="button" class="kbtn" data-kingdom="wu" aria-pressed="false"></button>
+          <button id="pool-kingdom-qun" type="button" class="kbtn" data-kingdom="qun" aria-pressed="false"></button>
+          <button id="pool-kingdom-shen" type="button" class="kbtn" data-kingdom="shen" aria-pressed="false"></button>
+        </div>
+        <button id="btn-pool-all" type="button" class="allbtn">全关</button>
+        <span id="pool-count" class="pool-count dim"></span>
+      </div>
+    </div>
+    <div id="hero-pool" class="hero-pool" aria-label="将池"></div>
+    <div class="row pool-foot">
       <button id="btn-pool-save" type="button">保存到槽位 1</button>
       <span id="pool-hint" class="dim"></span>
     </div>
-    <div id="hero-pool" class="hero-pool" aria-label="将池"></div>
   </section>
   <!-- 已有录像（M 窗）：列表由 `replay.js:renderRunList` 铺；窗标题就是「已有录像」。 -->
   <div id="run-list" class="runs"></div>

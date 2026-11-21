@@ -90,6 +90,16 @@ const htmlCollectionView = (children) => new Proxy(children, {
   set() { return false; },
 });
 
+/* ui-one-screen 票 04：`node` 是否还在 `root` 的子树里。
+ * 判据的用途：**重铺检测**。真 DOM 里 `innerHTML = …` 会销毁旧子树，旧节点不再挂在容器
+ * 下面（`document.getElementById` 也找不到它）——于是「输入之后搜索框仍是同一个节点」
+ * 这条断言在"整块重铺"的实现上必须红。垫片照同一语义判（`_detachChildren` 会摘掉）。 */
+function subtreeContains(root, node) {
+  if (!root || !node) return false;
+  if (root === node) return true;
+  return (root._children || []).some((child) => subtreeContains(child, node));
+}
+
 /* U4-01：飞行层要读**起 / 落点矩形**，并在飞行节点上起 Web Animations 动画。
  * 垫片不排版，故给每一步一个**确定性**矩形：固定 id 有显式表，其余按 data-* / 构造序
  * 派生（同一步里同一节点重复读 = 同一个值）。动画只登记参数、不自动跑——也就不会触发
@@ -229,7 +239,14 @@ class El {
   // "元素累积"这种假 bug —— 第一版垫片在这里骗过我一次）。
   set innerHTML(v) { this._html = String(v); this._detachChildren(); this._text = ""; }
   _detachChildren() {
-    for (const child of this._children) child.parentNode = null;
+    for (const child of this._children) {
+      // ui-one-screen 票 04：真 DOM 里被移除的那棵子树若含焦点元素，焦点随它一起消失
+      // （`document.activeElement` 回到 body）。**整块重铺的判据之一**：重铺 = 焦点丢。
+      if (documentShim.activeElement && subtreeContains(child, documentShim.activeElement)) {
+        documentShim.activeElement = null;
+      }
+      child.parentNode = null;
+    }
     // 原地清空：children 是活集合，视图不能换目标。
     this._children.length = 0;
   }
@@ -284,6 +301,12 @@ class El {
   setAttribute(name, value) { (this.attrs ||= {})[name] = String(value); }
   getAttribute(name) { return (this.attrs || {})[name]; }
   removeAttribute(name) { if (this.attrs) delete this.attrs[name]; }
+  /* ui-one-screen 票 04：真浏览器的每个元素都有 `focus()` / `blur()`，`document.activeElement`
+   * 指向获得焦点的那一个。垫片此前两个都没有 ⇒「搜索框收到 input 之后仍持有焦点」根本无从
+   * 断言（UI1-15 的全部意义就在这一半）。补上与真 DOM 同义的实现——与 `window.addEventListener`
+   * 那条同一个理由：真浏览器一定有、垫片没理由缺。 */
+  focus() { documentShim.activeElement = this; }
+  blur() { if (documentShim.activeElement === this) documentShim.activeElement = null; }
   querySelector(selector) {
     const tag = String(selector).toLowerCase();
     return this._children.find((c) => c.tagName.toLowerCase() === tag) || null;
@@ -419,6 +442,9 @@ const documentShim = {
   },
   // `?audiotest=1` 的电平写在 `<html data-audio>` 上（真页面里就是 documentElement）。
   documentElement: el("html", ""),
+  /* ui-one-screen 票 04：真 DOM 的焦点查询口。初值 `null`（没有元素被聚焦），
+   * `El.focus()` 写它、子树被摘掉 / `blur()` 由它清空——见 `El` 里那两条注释。 */
+  activeElement: null,
 };
 const fireDocument = (name, event) => (documentListeners[name] || []).slice().forEach((fn) => fn(event));
 const fireWindow = (name, event) => (windowListeners[name] || []).slice().forEach((fn) => fn(event));
@@ -693,10 +719,38 @@ const setEquals = (actual, expected) => {
   const right = new Set((expected || []).map(String));
   return left.size === right.size && [...right].every((value) => left.has(value));
 };
+/** 事件**派发点**：节点自己没有这个事件的处理器时，沿 `parentNode` 向上找最近的挂点。
+ *
+ *  为什么补这一条（ui-one-screen 票 04）：真浏览器里事件**冒泡** ⇒ 委托式处理器（挂在列表
+ *  容器上的那种）能收到来自格子的点击。垫片此前只派发给节点自己，于是"事件走委托"的实现
+ *  在垫片里永远收不到点击 —— 那是垫片的缺件，不是实现的错。口径与垫片既有纪律一致：
+ *  有处理器的那个节点就是派发点（最近的祖先；找到了就停，不继续向上）。`target` 仍指向
+ *  真正被点 / 被右键的那个节点（真 DOM 语义）。 */
+const handlerNode = (node, name) => {
+  for (let at = node; at; at = at.parentNode) {
+    if (at.listeners && (at.listeners[name] || []).length) return at;
+  }
+  return node;
+};
+/** 派发一次事件并**同步**跑完处理器（返回同一个 payload，供断言 `prevented` / `target`）。 */
+const fireOn = (node, name, extra = {}) => {
+  const payload = {
+    target: node, prevented: false,
+    stopPropagation() {},
+    preventDefault() { payload.prevented = true; },
+    ...extra,
+  };
+  const owner = handlerNode(node, name);
+  for (const fn of (owner.listeners && owner.listeners[name]) || []) fn(payload);
+  return payload;
+};
 /** 触发一次 click 并**等它跑完**：右上动作 / 取消里发请求的处理器是 async 的，
- *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。 */
+ *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。
+ *  派发点由 :func:`handlerNode` 给（自己没处理器时向上冒泡到最近的挂点）。 */
 const clickAndWait = async (node, event = null) => {
-  for (const fn of node.listeners.click || []) await fn(event || { target: node });
+  const payload = event || { target: node };
+  const owner = handlerNode(node, "click");
+  for (const fn of (owner.listeners && owner.listeners.click) || []) await fn(payload);
 };
 /** table-ux-overhaul 票 11：跑掉**这一步**的预览去抖计时器，再等一次往返。
  *
@@ -32371,6 +32425,318 @@ $("script-confirm-backdrop").hidden = true;
     && leftAt > 0 && startAt > leftAt && startAt < rightAt
     && skillAt > rightAt && skillAt > heroSkillsAt,
     `scroll=${scrolls} left=${leftAt} start=${startAt} right=${rightAt} skill=${skillAt}`);
+}
+
+/* ============ ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）============
+ *
+ * 判据全部走**真 DOM**：固定的筛选区（搜索框 / 五颗势力复选 / 全开关键 / 读数）+ 委托的
+ * 列表行。窗口按用户的路径打开（点工具行的「将池预设」键），筛选 / 全开关 / 右键点将都打在
+ * 真节点上；期望值从 `state.heroCatalog`（= `/api/heroes` 的载荷）**独立**算出来，不读前端
+ * 的筛选实现。
+ *
+ * 这一票的重点是**中文输入**（spec §3.1 / A6b）：`input` 事件只许重绘搜索框**之外**的部分。
+ * UI1-15 断「输入后搜索框仍是同一个节点、仍持有焦点」，UI1-15b 是它的**反证**——同一组读法
+ * 套到"整块重铺"的病态树上必须红，否则这条断言只是自我安慰。UI1-16 断合成期不筛。
+ */
+
+/** 将池窗里那几口（每次现查：重绘换的是列表的子节点，容器与搜索框不变）。 */
+const poolSearchNode = () => $("pool-search");
+const poolAllNode = () => $("btn-pool-all");
+const poolCountNode = () => $("pool-count");
+const poolKingdomNode = (kingdom) => $(`pool-kingdom-${kingdom}`);
+const POOL_KINGDOMS = ["wei", "shu", "wu", "qun", "shen"];
+const POOL_KINGDOM_LABELS = { wei: "魏", shu: "蜀", wu: "吴", qun: "群", shen: "神" };
+/** 列表当前画出来的真名（顺序即渲染顺序）。 */
+const poolVisibleNames = () => Array.from($("hero-pool").children)
+  .map((row) => row.getAttribute("data-true-name"));
+/** 目录里「某个版本显示名含 q」的真名——搜索判据的**独立**来源（R3：只查版本名）。 */
+const poolNamesMatching = (query) => ui.state.heroCatalog
+  .filter((group) => group.versions.some(
+    (version) => String(version.name).toLowerCase().includes(String(query).toLowerCase())))
+  .map((group) => group.true_name);
+/** 目录里「至少一版落在选中势力里」的真名；空集合 = 全部（复选取并集）。 */
+const poolNamesForKingdoms = (kingdoms) => ui.state.heroCatalog
+  .filter((group) => !kingdoms.length
+    || group.versions.some((version) => kingdoms.includes(version.kingdom)))
+  .map((group) => group.true_name);
+const poolCatalogVersions = () => ui.state.heroCatalog.flatMap((group) => group.versions);
+/* 垫片的两个已知边界（读断言时别踩）：
+ *  ① 静态节点只按 `id` 造、**不解析静态 HTML 的父子结构** ⇒「搜索框在面板里」「五颗键带
+ *    `data-kingdom` / 初始 `aria-pressed="false"`」这类**静态形状**由
+ *    `tests/test_web_static.py::test_the_pool_window_keeps_the_row_shape_and_has_the_filters`
+ *    钉；这里能读的是**运行时**才出现的那层结构（面板搬进窗的正文槽）与节点同一性。
+ *  ② 静态属性同理：只有 `setAttribute` 过的才读得到（未点过的键读到 `undefined`）。 */
+
+// 从「窗没开」这个真状态开始，按用户的路径打开将池窗（工具行的「将池预设」键）。
+await ui.loadHeroPools();
+await clickAndWait($("btn-lobby-pool"));
+
+{
+  const body = $("script-confirm-body");
+  const panel = $("hero-pool-panel");
+  const kingdoms = POOL_KINGDOMS.map((kingdom) => poolKingdomNode(kingdom));
+  const checks = {
+    open: $("script-confirm").hidden === false,
+    dialog: $("script-confirm").getAttribute("data-dialog") === "pool",
+    size: $("script-confirm-window").getAttribute("data-size") === "L",
+    split: body.getAttribute("data-layout") === "split",
+    moved: panel.parentNode === body && body.children.length === 1,
+    input: poolSearchNode().tagName === "INPUT",
+    // 中文标签只有 `KINGDOM_LABELS` 一份（票 03 那张）：markup 里留空、由接线按表填；
+    // 顺序 = 枚举顺序（魏 / 蜀 / 吴 / 群 / 神）。
+    kings: kingdoms.every((button, at) => button
+      && button.textContent === POOL_KINGDOM_LABELS[POOL_KINGDOMS[at]]),
+    rows: poolVisibleNames().length === ui.state.heroCatalog.length,
+  };
+  check("UI1-09 将池窗 = L 档 split 正文 + 固定筛选区（搜索 / 五势力复选 / 全开关 / 读数）+ 列表容器",
+    Object.values(checks).every(Boolean),
+    Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => `坏:${name}`).join(" ")
+      || `行=${poolVisibleNames().length}/${ui.state.heroCatalog.length}`);
+}
+
+// ---- UI1-10：搜索按**版本显示名**子串（一个字的「马」命中「司马懿」；「界」命中界版）----
+{
+  const search = poolSearchNode();
+  search.value = "马";
+  fireOn(search, "input");
+  const expectMa = poolNamesMatching("马");
+  const shownMa = poolVisibleNames();
+  const simaCells = poolCells("司马懿");
+  const shapeOk = Array.from($("hero-pool").children).every((row) => {
+    const trueName = row.getAttribute("data-true-name");
+    const matched = (ui.state.heroCatalog.find((group) => group.true_name === trueName) || {})
+      .versions.filter((version) => String(version.name).includes("马"));
+    return row.children.length === matched.length + 1;
+  });
+  check("UI1-10 搜索按版本显示名子串筛（搜「马」命中「司马懿」，搜「界」命中界版）",
+    setEquals(shownMa, expectMa)
+    && expectMa.includes("司马懿")
+    && simaCells.length > 0
+    && simaCells.every((cell) => String(cell.textContent).includes("马"))
+    && shapeOk,
+    `「马」行=${shownMa.join(",")} 司马懿格=${simaCells.map((c) => c.textContent).join(",")}`);
+
+  search.value = "界";
+  fireOn(search, "input");
+  const expectJie = poolNamesMatching("界");
+  const guanyuCells = poolCells("关羽");
+  check("UI1-10b 搜「界」只留界版（同真名的标准版那一格不再画出来）",
+    setEquals(poolVisibleNames(), expectJie)
+    && guanyuCells.length === 1
+    && String(guanyuCells[0].textContent).startsWith("界")
+    && expectJie.length > 0,
+    `「界」行=${poolVisibleNames().length} 关羽行格=${guanyuCells.map((c) => c.textContent).join(",")}`);
+
+  // 清空搜索：回到全部行（空串 = 不筛）。
+  search.value = "";
+  fireOn(search, "input");
+}
+
+// ---- UI1-11：五势力复选取并集；一颗都不选 = 全部 ----
+{
+  await clickAndWait(poolKingdomNode("qun"));
+  const qunPressed = poolKingdomNode("qun").getAttribute("aria-pressed") === "true";
+  const qunRows = poolVisibleNames();
+  await clickAndWait(poolKingdomNode("shu"));
+  const unionRows = poolVisibleNames();
+  const bothPressed = ["qun", "shu"].every(
+    (kingdom) => poolKingdomNode(kingdom).getAttribute("aria-pressed") === "true");
+  await clickAndWait(poolKingdomNode("qun"));
+  await clickAndWait(poolKingdomNode("shu"));
+  const noneRows = poolVisibleNames();
+  check("UI1-11 五势力复选取并集、一颗都不选 = 全部",
+    qunPressed
+    && setEquals(qunRows, poolNamesForKingdoms(["qun"]))
+    && bothPressed
+    && setEquals(unionRows, poolNamesForKingdoms(["qun", "shu"]))
+    && unionRows.length > qunRows.length
+    && noneRows.length === ui.state.heroCatalog.length
+    // 撤完之后两颗被点过的键回到未选；未点过的键读不到初值（静态属性垫片不解析），
+    // 只要**没有一颗呈选中态**；全开关键自始至终没有 aria-pressed（单一动作键）。
+    && ["qun", "shu"].every(
+      (kingdom) => poolKingdomNode(kingdom).getAttribute("aria-pressed") === "false")
+    && POOL_KINGDOMS.every(
+      (kingdom) => poolKingdomNode(kingdom).getAttribute("aria-pressed") !== "true")
+    && poolAllNode().getAttribute("aria-pressed") === undefined,
+    `群=${qunRows.length}/${poolNamesForKingdoms(["qun"]).length}`
+      + ` 群+蜀=${unionRows.length}/${poolNamesForKingdoms(["qun", "shu"]).length}`
+      + ` 全不选=${noneRows.length}/${ui.state.heroCatalog.length}`
+      + ` qunPressed=${qunPressed} both=${bothPressed}`
+      + ` 缺=${poolNamesForKingdoms(["qun", "shu"]).filter((n) => !unionRows.includes(n)).join(",")}`
+      + ` 多=${unionRows.filter((n) => !poolNamesForKingdoms(["qun", "shu"]).includes(n)).join(",")}`);
+}
+
+// ---- UI1-12：全开/关只作用于**当前筛选**（别的势力的禁将状态不变、不落盘）----
+{
+  // 干净的起点：清空当前槽位的禁将，再单独禁掉一个**群之外**的版本（关羽 · 标准版）。
+  ui.heroPools().slots[ui.heroPools().selected].splice(0);
+  ui.renderHeroPool();
+  const outsideId = "guanyu";
+  await clickAndWait(poolCells("关羽").find(
+    (cell) => cell.getAttribute("data-hero-id") === outsideId));
+  await clickAndWait(poolKingdomNode("qun"));
+  const qunIds = poolCatalogVersions()
+    .filter((version) => version.kingdom === "qun").map((version) => version.id);
+  const markAll = calls.length;
+  const labelBefore = poolAllNode().textContent;
+  await clickAndWait(poolAllNode());
+  const bannedAfter = new Set(ui.currentBans());
+  const allOn = qunIds.every((id) => bannedAfter.has(id))
+    && bannedAfter.size === qunIds.length + 1
+    && bannedAfter.has(outsideId);
+  const labelAfter = poolAllNode().textContent;
+  const savesSince = calls.slice(markAll).filter((call) => call.path === "/api/hero-presets");
+  await clickAndWait(poolAllNode());
+  const bannedBack = new Set(ui.currentBans());
+  check("UI1-12 全开/关只作用于当前筛选（别的势力的禁将状态不变、不落盘）",
+    allOn
+    && String(labelBefore).startsWith("全关")
+    && String(labelAfter).startsWith("全开")
+    && String(labelBefore).includes(String(qunIds.length))
+    && String(labelAfter).includes(String(qunIds.length))
+    && bannedBack.has(outsideId)
+    && bannedBack.size === 1
+    && savesSince.length === 0,
+    `群版本=${qunIds.length} label=${labelBefore}→${labelAfter}`
+      + ` 禁=${[...bannedAfter].length} 回滚后=${[...bannedBack].join(",")} 保存请求=${savesSince.length}`);
+  // 收尾：先撤掉「群」筛选（否则群之外的格子根本不在列表里），再解掉那颗禁将。
+  await clickAndWait(poolKingdomNode("qun"));
+  await clickAndWait(poolCells("关羽").find(
+    (cell) => cell.getAttribute("data-hero-id") === outsideId));
+}
+
+// ---- UI1-13：右键版本格 = 点将（绿框 + #in-my-hero + 右栏）；真名行右键零效果 ----
+{
+  /** 当前带绿框的版本 id（绿框 = 「我的武将」当前值，不是"未禁"的代名词）。 */
+  const pickedIds = () => byClass($("hero-pool"), "picked")
+    .map((cell) => cell.getAttribute("data-hero-id"));
+  // ① 绿框跟着「我的武将」的当前值走：开关开着 + 下拉换人 ⇒ 那一格带绿框。
+  const target = poolCatalogVersions()[3];
+  tickPointjiang(true);
+  setSelect("in-my-hero", target.id);
+  const followsValue = pickedIds().length === 1 && pickedIds()[0] === target.id;
+  // ② 关了开关 ⇒ 没有「我的武将」⇒ 绿框消失（R5：绿框不是粘在格子上的装饰）。
+  tickPointjiang(false);
+  const clearedWhenOff = pickedIds().length === 0;
+  // ③ 右键一格 = 点将：开关被打开、下拉 / 右栏 / 绿框一起跟到那一版。
+  const cell = poolCells("关羽")[0];
+  const picked = cell.getAttribute("data-hero-id");
+  const event = fireOn(cell, "contextmenu");
+  const pickedCell = pickedIds().length === 1 && pickedIds()[0] === picked;
+  const synced = $("in-pointjiang").checked === true
+    && $("in-my-hero").value === picked
+    && $("lobby-hero-name").textContent === cell.textContent;
+  check("UI1-13 右键版本格 = 点将（绿框 + #in-my-hero 同步 + 右栏跟着换）；真名行右键零效果",
+    event.prevented === true && followsValue && clearedWhenOff && pickedCell && synced,
+    `prevented=${event.prevented} 跟随=${followsValue} 关掉消失=${clearedWhenOff}`
+      + ` 绿框=${pickedIds().join(",")} 右栏=${$("lobby-hero-name").textContent}`);
+  // ④ 被禁的版本也能点将（R5：点将无视禁将，绿框与禁用态并存）。
+  const bannedId = poolCells("关羽")[1].getAttribute("data-hero-id");
+  await clickAndWait(poolCells("关羽")[1]);                 // 左键 = 禁掉这一版
+  const bannedNow = poolCells("关羽").find(
+    (item) => item.getAttribute("data-hero-id") === bannedId);
+  const bannedPicked = bannedNow.classList.contains("banned");
+  const pickBannedEvent = fireOn(bannedNow, "contextmenu");  // 右键 = 点将（重绘后要重查）
+  const afterBannedPick = poolCells("关羽").find(
+    (item) => item.getAttribute("data-hero-id") === bannedId);
+  check("UI1-13b 被禁的版本也能点将（绿框 + 禁用态并存，点将无视禁将）",
+    bannedPicked
+    && pickBannedEvent.prevented === true
+    && afterBannedPick.classList.contains("banned")
+    && afterBannedPick.classList.contains("picked")
+    && $("in-my-hero").value === bannedId
+    && $("lobby-hero-name").textContent === afterBannedPick.textContent,
+    `banned=${bannedPicked} picked=${afterBannedPick.classList.contains("picked")}`
+      + ` 禁用点=${bannedId}`);
+  // ⑤ 真名行右键零效果：不 preventDefault、不换人、不动开关。
+  tickPointjiang(false);
+  const rowName = (poolRow("张飞") || { children: [] }).children[0] || $("hero-pool");
+  const beforePick = $("in-my-hero").value;
+  const rowEvent = fireOn(rowName, "contextmenu");
+  check("UI1-13c 真名行右键不响应（不 preventDefault、不点将）",
+    rowEvent.prevented === false
+    && $("in-pointjiang").checked === false
+    && $("in-my-hero").value === beforePick
+    && pickedIds().length === 0,
+    `prevented=${rowEvent.prevented} 开关=${$("in-pointjiang").checked}`
+      + ` 绿框=${pickedIds().join(",")}`);
+  // 收尾：解掉 ④ 里禁掉的那一格（重绘换过节点，按 id 现查）。
+  if (bannedPicked) {
+    await clickAndWait(poolCells("关羽").find(
+      (item) => item.getAttribute("data-hero-id") === bannedId));
+  }
+}
+
+// ---- UI1-14：筛出 0 行时窗不塌（列表区仍在、读数写 0）----
+{
+  const search = poolSearchNode();
+  search.value = "zzz-没有这个版本";
+  fireOn(search, "input");
+  check("UI1-14 筛出 0 行时窗不塌（列表区仍在、读数写 0）",
+    $("script-confirm").hidden === false
+    && subtreeContains($("script-confirm-body"), $("hero-pool-panel"))
+    && poolVisibleNames().length === 0
+    && String(poolCountNode().textContent).includes("0 真名")
+    && String(poolCountNode().textContent).includes("0 版本")
+    && poolSearchNode().value === "zzz-没有这个版本",
+    `行=${poolVisibleNames().length} 读数=${poolCountNode().textContent}`);
+  search.value = "";
+  fireOn(search, "input");
+}
+
+// ---- UI1-15：中文输入回归（input 之后搜索框是**同一个节点** + 仍持有焦点）----
+{
+  const search = poolSearchNode();
+  search.focus();
+  search.value = "马";
+  fireOn(search, "input");
+  const same = poolSearchNode() === search
+    // 窗的正文槽里仍是**同一块**面板：整块重铺会把面板摘掉（与 UI1-15b 的反证同一组读法）。
+    && subtreeContains($("script-confirm-body"), $("hero-pool-panel"));
+  const focused = documentShim.activeElement === search;
+  check("UI1-15 中文输入回归：搜索框收到 input 后仍是同一个节点（sameNode）且仍持有焦点（focused）",
+    same && focused && setEquals(poolVisibleNames(), poolNamesMatching("马")),
+    `sameNode=${same} focused=${focused} 行=${poolVisibleNames().length}`);
+}
+
+// ---- UI1-15b：反证——同一组读法套到"整块重铺"的病态树上必须红 ----
+{
+  const victim = new El("div");
+  const victimInput = new El("input");
+  victim.appendChild(victimInput);
+  victimInput.focus();
+  const before = subtreeContains(victim, victimInput) && documentShim.activeElement === victimInput;
+  victim.innerHTML = "";  // ← 病态实现：每次输入都整块重铺
+  const lost = !subtreeContains(victim, victimInput) && documentShim.activeElement === null;
+  check("UI1-15b 反证：整块重铺会同时丢掉节点同一性与焦点（UI1-15 的两条判据在病态树上必红）",
+    before && lost, `重铺前=${before} 重铺后两条都丢=${lost}`);
+  victimInput.blur();
+}
+
+// ---- UI1-16：composition 期间不筛（compositionend 才筛）----
+{
+  const search = poolSearchNode();
+  const before = poolVisibleNames();          // 当前是「马」筛出来的 4 行
+  fireOn(search, "compositionstart");
+  search.value = "界";                         // 合成中：拼音还没选字
+  fireOn(search, "input");
+  const during = poolVisibleNames();
+  fireOn(search, "compositionend");
+  check("UI1-16 composition 期间不筛（compositionstart 后输入不触发筛选，compositionend 才筛）",
+    JSON.stringify(during) === JSON.stringify(before)
+    && setEquals(poolVisibleNames(), poolNamesMatching("界")),
+    `合成前=${before.length} 合成中=${during.length} 合成后=${poolVisibleNames().length}`);
+}
+
+// 收尾：清筛选、关点将、关窗——后面的用例从"无筛选 / 无点将 / 窗关着"继续。
+{
+  const search = poolSearchNode();
+  search.value = "";
+  fireOn(search, "input");
+  tickPointjiang(false);
+  await clickAndWait($("script-confirm-close"));
+  ui.heroPools().slots[ui.heroPools().selected].splice(0);
+  ui.renderHeroPool();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

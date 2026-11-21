@@ -285,15 +285,55 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 /* 将池预设（M6 票 13 / spec D6）：5 个常驻槽位 + 按真名分组的版本格。
  * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。
  * ui-one-screen 票 03 起它在 L 窗里：身高由 `.pw-body[data-layout="split"]` 分配，版本格多时
- * 只有这一条列表滚（旧的 `max-height: 46vh` 是流式文档时代的视口高度，已删）。 */
+ * 只有这一条列表滚（旧的 `max-height: 46vh` 是流式文档时代的视口高度，已删）。
+ * ui-one-screen 票 04：窗里是「固定筛选区 + 唯一内滚的列表 + 窗脚」，行形状不变。 */
 .pool-slots { display: flex; flex-wrap: wrap; gap: 8px; }
 .pool-slot.active { box-shadow: 0 0 0 3px var(--accent-soft); }
 .pool-slot.active::after { content: " ★"; color: var(--accent); }
 .pool-slots .pool-slot.on.active::after { color: #fff; }
+/* 固定筛选区（票 04 / spec §3.2）：**不参与伸缩、不许自己滚**——筛选行永不被列表顶走。
+ * 少了 `flex: 0 0 auto`，`.hero-pool` 的 `flex: 1` 会把固定区一起压扁（原型缺陷 1）。 */
+.pool-panel .pool-fixed {
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: calc(8 * var(--dsu));
+  padding-bottom: calc(8 * var(--dsu)); border-bottom: 1px solid var(--line);
+}
+.pool-panel .pool-line {
+  display: flex; align-items: center; gap: calc(8 * var(--dsu));
+  flex-wrap: nowrap; min-width: 0; margin-top: 0;
+}
+/* 搜索框 300 dsu（原型 `.pool-search`）：它是**静态节点**，`input` 事件只重绘它之外的列表。 */
+.pool-panel .pool-search {
+  font: inherit; font-size: var(--f12); height: calc(30 * var(--dsu));
+  width: calc(300 * var(--dsu)); flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
+  padding: 0 calc(10 * var(--dsu)); background: #fff;
+}
+.pool-panel .pool-kings {
+  display: flex; align-items: center; gap: calc(6 * var(--dsu)); flex: 0 0 auto;
+}
+/* 势力筛选：**复选**（可同时选多个，取并集；一个都不选 = 全部）。选中态用既有墨色，不新增颜色。 */
+.pool-panel .kbtn {
+  font: inherit; font-size: var(--f12); padding: calc(2 * var(--dsu)) calc(12 * var(--dsu));
+  border: 1px solid var(--line); border-radius: calc(7 * var(--dsu));
+  background: #fff; color: var(--dim); cursor: pointer;
+}
+.pool-panel .kbtn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+/* 全开/关：一颗**单一动作键**（`margin-left: auto` 靠右），不参与上面的复选状态。 */
+.pool-panel .allbtn { margin-left: auto; flex: 0 0 auto; }
+.pool-panel .pool-count {
+  font-size: var(--f11); color: var(--dim); white-space: nowrap; flex: 0 0 auto;
+}
+/* 窗脚（保存键 + 提示）：同样不参与伸缩，列表吃剩下的高度。 */
+.pool-panel .pool-foot {
+  flex: 0 0 auto; margin-top: calc(8 * var(--dsu)); padding-top: calc(8 * var(--dsu));
+  border-top: 1px solid var(--line);
+}
+/* 列表：**唯一内滚区**。`flex: 1 1 auto` + `min-height: 0` 才让它在 flex 列里真的缩到
+ * 剩下的高度（否则内容一多就把固定区顶上去、整块正文一起滚）。 */
 .hero-pool {
-  display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
+  display: flex; flex-direction: column; gap: 2px; margin-top: 0;
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
-  border-top: 1px solid var(--line); padding-top: 6px;
+  padding-top: 6px;
 }
 .pool-row {
   display: flex; align-items: center; gap: 8px; padding: 2px 0;
@@ -306,6 +346,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .pool-version.banned:hover:not(:disabled) { color: var(--dim); border-color: var(--line); }
 .pool-row.all-banned .pool-name { opacity: .45; }
+/* 右键点中的版本 = 「我的武将」的当前值：**绿框**（2 dsu 边框、既有 `--ok`，不新增颜色）。
+ * 绿框不是"未禁"的对立物：被禁的格子也能带它（spec §8 R5：点将无视禁将）。 */
+.pool-version.picked {
+  border: calc(2 * var(--dsu)) solid var(--ok); color: var(--ok); font-weight: 700;
+}
+.pool-version.picked.banned {
+  background: #fff; text-decoration: none; opacity: 1;
+}
 #pool-hint.warn { color: #a15c00; font-weight: 600; }
 
 .seats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
