@@ -12557,20 +12557,156 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       })(),
     `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
   const ownDetail = $("t-modal-body").children[0];
-  const ownSections = ownDetail ? Array.from(ownDetail.children).map((node) => node.className) : [];
-  check("U1-06k 详情结构：武将技能在上 → 分割线 → 装备技能在下",
-    ownSections.includes("detail-section hero-skills")
+  const ownColumns = ownDetail ? byClass(ownDetail, "detail-columns")[0] || null : null;
+  const ownText = ownColumns ? byClass(ownColumns, "detail-text")[0] || null : null;
+  const ownPortrait = ownColumns ? byClass(ownColumns, "detail-portrait")[0] || null : null;
+  const ownColumnsKids = ownColumns ? Array.from(ownColumns.children) : [];
+  const ownSections = ownText ? Array.from(ownText.children).map((node) => node.className) : [];
+  check("U1-06k 详情结构：两栏（左文右图），技能清单在文字栏里（武将技 → 分割线 → 装备技）",
+    !!ownColumns && !!ownText && !!ownPortrait
+      && ownColumnsKids[0] === ownText && ownColumnsKids[1] === ownPortrait
+      && Array.from(ownDetail.children)[0] === ownColumns
+      && ownSections.includes("detail-section hero-skills")
       && ownSections.includes("detail-divider")
       && ownSections.includes("detail-section equip-skills")
       && ownSections.indexOf("detail-section hero-skills") < ownSections.indexOf("detail-divider")
       && ownSections.indexOf("detail-divider") < ownSections.indexOf("detail-section equip-skills"),
-    ownSections.join(","));
+    `columns=[${ownColumnsKids.map((node) => node.className).join(",")}] sections=${ownSections.join(",")}`);
   check("U1-06l 详情读到该座位的技能与描述（武将技 + 装备技）",
     $("t-modal-body").text().includes("己方技")
       && $("t-modal-body").text().includes("己方技的描述。")
       && $("t-modal-body").text().includes("己方装备")
       && !$("t-modal-body").text().includes("敌方技"),
     $("t-modal-body").text().replace(/\s+/g, " ").slice(0, 120));
+
+  /* ---- hero-portraits 票 05：右栏立绘 / 作者页脚 / 描述同源（两栏的另外三条判据） ----
+   *
+   * 立绘与作者都按座位的**显示名称**（`player.hero_name`）查 `state.portraits`（票 02 的缓存，
+   * 与 `/api/portraits` 同源）；垫片不加载图片，读数走 `SGS_SMOKE_IMG`（三档：无 img / 有 img
+   * 无 src / src 指向 /art/）。几何那半边（`aspect-ratio` / `flex: 0 0 auto` / 文字栏是唯一
+   * 滚动容器）由 `test_web_static.py` 从 `style.css` 读——垫片没有排版引擎，这里只钉结构。
+   */
+  {
+    const root = () => $("t-modal-body").children[0];
+    const textColumn = () => byClass(root() || $("t-modal-body"), "detail-text")[0] || null;
+    const portraitOf = () => byClass(root() || $("t-modal-body"), "detail-portrait")[0] || null;
+    const footNodes = () => byClass(root() || $("t-modal-body"), "author-foot");
+    const versionByName = (name) => ui.state.heroCatalog
+      .flatMap((group) => group.versions)
+      .find((version) => version.name === name) || null;
+    const portraitPath = "关羽/关羽/关羽.jpg";
+    const authorText = "  张三 · 李四　（画） ";
+    const portraitsBefore = ui.state.portraits;   // 端点那份真索引：读完要原样还回去（HP2-01 会核）
+    ui.state.portraits = { "关羽": { portrait: portraitPath, author: authorText } };
+    detailView.snapshot.players[0].hero_name = "关羽";
+    ui.renderPending(detailView);
+
+    // ① 有图 ⇒ 右栏一张 `<img>`，src 指向 `/art/`、路径逐字取自索引。
+    const filled = SGS_SMOKE_IMG.read(portraitOf());
+    check("HP5-01 有图武将 ⇒ 右栏里一张 src 指向 /art/ 的 img（路径取自 /api/portraits 索引）",
+      !!portraitOf() && filled.found && filled.art && filled.hasSrc
+        && decodeURI(filled.src.slice("/art/".length)) === portraitPath,
+      `${SGS_SMOKE_IMG.line(portraitOf())} 索引=${portraitPath}`);
+
+    // ② 立绘不在文字栏里 ⇒ 文字栏自己滚、立绘不动（结构判据；垫片量不了矩形）。
+    check("HP5-02 立绘不在文字栏里（文字栏是唯一滚动容器，立绘不跟着滚）",
+      !!textColumn() && SGS_SMOKE_IMG.find(textColumn()) === null
+        && !!portraitOf() && portraitOf().parentNode === root().children[0]
+        && textColumn() !== portraitOf(),
+      `文字栏里有 img=${SGS_SMOKE_IMG.find(textColumn()) !== null}`
+        + ` 立绘父节点=${portraitOf() && portraitOf().parentNode && portraitOf().parentNode.className}`);
+
+    // ③ 无图（界关羽）⇒ 没有 img、空位节点在、`data-empty="1"`、class 与有图时相同。
+    const filledClass = String(portraitOf().className);
+    detailView.snapshot.players[0].hero_name = "界关羽";
+    ui.renderPending(detailView);
+    const empty = SGS_SMOKE_IMG.read(portraitOf());
+    check("HP5-03 无图（界关羽）⇒ 右栏没有 img、空位节点在、data-empty=\"1\"（同一个盒子）",
+      !!portraitOf() && !empty.found
+        && String(portraitOf().className) === filledClass
+        && portraitOf().getAttribute("data-empty") === "1",
+      `img=${empty.found} class="${portraitOf() && portraitOf().className}"`
+        + ` data-empty=${portraitOf() && portraitOf().getAttribute("data-empty")}`);
+
+    // ④ 描述同源：详情逐字等于首页右栏（同一份 `/api/heroes` 裁切文本），不含实现注记。
+    //    取样「界关羽」= 技能里带「本仓实现」注记的那一版（票 02 的裁切口径第一次有读数）。
+    const version = versionByName("界关羽");
+    const ownSkillsBefore = detailView.snapshot.players[0].skills;
+    detailView.snapshot.players[0].skills = (version ? version.skills : []).map((skill) => ({
+      skill_id: skill.id, name: skill.name, skill_type: "NORMAL", locked: false,
+      carrier: "HERO", description: skill.description, ui: { passive: false },
+    }));
+    ui.renderPending(detailView);
+    const detailTexts = byClass(textColumn(), "detail-skill")
+      .map((row) => (row.children[1] ? row.children[1].textContent : ""));
+    const pointjiangBefore = $("in-pointjiang").checked;
+    $("in-pointjiang").checked = true;
+    $("in-my-hero").value = version ? version.id : "";
+    ui.fillHeroOptions();
+    const lobbyTexts = byClass($("lobby-skill-list"), "sd").map((node) => node.textContent);
+    $("in-pointjiang").checked = pointjiangBefore;
+    check("HP5-04 两处同源：详情描述逐字等于首页右栏（同一份服务端裁切版），不含「本仓实现 / 本仓裁定」",
+      !!version && detailTexts.length > 0 && detailTexts.length === lobbyTexts.length
+        && detailTexts.every((text, at) => text === lobbyTexts[at])
+        && detailTexts.every((text) => !text.includes("本仓实现") && !text.includes("本仓裁定")),
+      `详情 ${detailTexts.length} 条 / 右栏 ${lobbyTexts.length} 条 / 带注记 `
+        + `${detailTexts.filter((text) => text.includes("本仓")).length} 条`);
+    detailView.snapshot.players[0].skills = ownSkillsBefore;
+
+    // ⑤ 作者页脚：非空 ⇒ `.hero-detail` 的最后一个节点、文本逐字；空 ⇒ 一个节点都没有。
+    detailView.snapshot.players[0].hero_name = "关羽";
+    ui.renderPending(detailView);
+    const feet = footNodes();
+    check("HP5-05 author 非空 ⇒ 页脚是 `.hero-detail` 的最后一个节点、文本与索引值逐字相同",
+      feet.length === 1 && feet[0].textContent === authorText
+        && root().lastChild === feet[0],
+      `页脚 ${feet.length} 个 / last=${root().lastChild === feet[0]}`
+        + ` / 文本逐字=${feet.length === 1 && feet[0].textContent === authorText}`);
+    ui.state.portraits = {};
+    ui.renderPending(detailView);
+    check("HP5-06 author 空 ⇒ 一个页脚节点都没有（不是渲染空 div；换人后旧页脚也摘掉）",
+      footNodes().length === 0, `页脚 ${footNodes().length} 个`);
+
+    // 复位：后续用例回到原来的合成载荷（hero_name / 索引都还原；skills 上面已还原）。
+    delete detailView.snapshot.players[0].hero_name;
+    ui.state.portraits = portraitsBefore;
+    ui.renderPending(detailView);
+  }
+
+  // ⑥ 真载荷读数（两处同源的**线上**半边）：开一局真会话，人类座位详情里的每一行描述
+  //    必须逐字等于 `/api/heroes` 里同一个 skill id 的描述——两处都读服务端那一个裁切口。
+  {
+    const liveView = await newSession(31, { player_count: 5 });
+    const humanSeat = Number(liveView.snapshot.seat);
+    fireContext(heroBlockOf(humanSeat));
+    const human = liveView.snapshot.players
+      .find((item) => Number(item.seat) === humanSeat) || null;
+    const version = ui.state.heroCatalog.flatMap((group) => group.versions)
+      .find((item) => item.name === (human && human.hero_name)) || null;
+    const catalog = new Map(((version && version.skills) || [])
+      .map((skill) => [skill.id, skill.description]));
+    const rows = byClass($("t-modal-body"), "detail-skill")
+      .map((row) => ({
+        id: row.getAttribute("data-skill-id"),
+        text: row.children[1] ? row.children[1].textContent : "",
+      }));
+    const shared = rows.filter((row) => catalog.has(row.id));
+    check("HP5-07 真会话：详情每一行描述逐字等于 /api/heroes 同一条（两处同源，线上读数）",
+      !!version && shared.length > 0
+        && shared.every((row) => row.text === catalog.get(row.id))
+        && shared.every((row) => !row.text.includes("本仓实现") && !row.text.includes("本仓裁定")),
+      `武将=${human && human.hero_name} 同源行=${shared.length}/${rows.length}`
+        + ` 带注记=${shared.filter((row) => row.text.includes("本仓")).length} 条`);
+    // 回到"详情开着"的状态：后面的 U1-06m…p 仍在这个合成载荷上读。
+    fireDocument("keydown", { key: "Escape" });
+    ui.state.sessionId = null;
+    ui.state.view = detailView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(detailView);
+    fireContext(heroBlockOf(0));
+  }
+
   const detailRegions = ["table-topbar", "table-stage", "table-bottom", "t-modal"];
   check("U1-06m 详情是检视窗：没有任何区域 inert / aria-hidden；开合不改变只读态（无弹窗 ⇒ 选择仍可用）",
     detailRegions.every((id) => $(id).getAttribute("inert") === undefined
@@ -12589,12 +12725,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     })(),
     `hidden=${$("t-countdown").hidden} phase=${$("t-countdown").getAttribute("data-phase")}`);
 
-  // 正文可滚轮翻阅：同一询问里重画（轮询 / 刷新）不把用户读到的位置拉回顶部。
-  $("t-modal-body").scrollTop = 77;
+  // 文字栏可滚轮翻阅（票 05 起滚动容器 = 左栏；立绘不在里面）：同一询问里重画
+  // （轮询 / 刷新）不把读到的位置拉回顶部，也不许从正文槽里"借"位置。
+  const scrollColumn = () => byClass($("t-modal-body"), "detail-text")[0] || null;
+  scrollColumn().scrollTop = 77;
+  $("t-modal-body").scrollTop = 5;
   ui.renderPending(detailView);
-  check("U1-06n2 详情重画保留滚动位置（可滚轮翻阅不被打断）",
-    $("t-modal").hidden === false && $("t-modal-body").scrollTop === 77,
-    `hidden=${$("t-modal").hidden} scrollTop=${$("t-modal-body").scrollTop}`);
+  check("U1-06n2 详情重画保留**文字栏**的滚动位置（正文槽不再是滚动容器）",
+    $("t-modal").hidden === false && scrollColumn().scrollTop === 77
+      && $("t-modal-body").scrollTop === 5,
+    `hidden=${$("t-modal").hidden} text=${scrollColumn().scrollTop}`
+      + ` body=${$("t-modal-body").scrollTop}`);
 
   const beforeDetailEsc = calls.length;
   fireDocument("keydown", { key: "Escape" });
@@ -12627,7 +12768,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 
   // 换座位：滚动位置不沿用（上一个详情的 offset 不该带到另一个武将身上）。
-  $("t-modal-body").scrollTop = 77;
+  // 上一步 ESC 已把详情关掉 ⇒ 先在同一座位上重新打开，滚动位置才有"上一份"可继承。
+  fireContext(heroBlockOf(0));
+  scrollColumn().scrollTop = 77;
+  const scrollAtOwn = scrollColumn().scrollTop;
   fireContext(heroBlockOf(1));
   const enemyText = $("t-modal-body").text();
   check("U1-06p 右键对手武将块 = 对手详情（读到对手的技能，不串到自己的）",
@@ -12636,8 +12780,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && enemyText.includes("敌方武器")
       && enemyText.includes("八卦阵")
       && !enemyText.includes("己方技")
-      && $("t-modal-body").scrollTop === 0,
-    `${enemyText.replace(/\s+/g, " ").slice(0, 140)} scrollTop=${$("t-modal-body").scrollTop}`);
+      && scrollAtOwn === 77 && scrollColumn().scrollTop === 0,
+    `${enemyText.replace(/\s+/g, " ").slice(0, 140)}`
+      + ` scrollTop=${scrollAtOwn}→${scrollColumn().scrollTop}`);
   const beforeBackdrop = calls.length;
   const detailBackdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
   ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));

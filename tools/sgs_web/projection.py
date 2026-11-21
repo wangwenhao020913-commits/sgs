@@ -83,7 +83,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .descriptions import skill_description
+from .descriptions import display_skill_description, skill_description
 from .display import (
     SUIT_LABELS,
     card_lookup_from_query,
@@ -390,6 +390,11 @@ def _skill_entry(
     ``star``（M6 票 06 / 票 19）：这条技能是 **☆ 技能**（觉醒后由某条觉醒技获得）；
     ``state``：见 :data:`SKILL_STATES`。两个键都是**公开事实**（武将牌上的技能是明置的），
     不含当前询问 / 手牌，故可对任意座位下发。
+
+    ``description``（hero-portraits 票 05）：**给人看的裁切版**（``display_skill_description``，
+    「本仓实现 / 本仓裁定…」及其后全部在服务端截掉）。详情清单与可操作清单共用这一条
+    ——首页右栏（``serve.hero_catalog``）早就读同一个函数，"首页裁切 / 详情全文"的历史差异
+    到此为止；前端零正则、零第二份裁切规则。
     """
     if state not in SKILL_STATES:  # pragma: no cover - 闭集，防御性守卫
         raise ValueError(f"未知的技能状态 {state!r}（可选 {SKILL_STATES}）")
@@ -402,7 +407,7 @@ def _skill_entry(
         "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
         "star": bool(star),
         "state": state,
-        "description": skill_description(definition.skill_id),
+        "description": display_skill_description(definition.skill_id),
     }
 
 

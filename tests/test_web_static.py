@@ -11057,6 +11057,231 @@ def test_the_panel_window_close_key_is_only_for_dismissible_windows() -> None:
     )
 
 
+def test_the_hero_detail_window_is_the_only_widened_modal() -> None:
+    """hero-portraits 票 05（spec §2 目标 3 / §3 硬约束 9 / 裁决 §7③）：
+
+    「右键详情」= **1100×570 dsu** 的窗，而且**只有这一扇**加宽。判据分四段：
+
+    1. `#t-modal .modal-window` 写死字面 dsu 宽高 + `max-height: none`——570 的窗装不进
+       `.modal` 的百分比舞台区（`.modal` 是 `top: 6.2% / bottom: 27.5%`、`padding: 2% 4%`
+       ⇒ 内容盒只有 532.7 dsu 高，`max-height: 96%` 再把它夹到 511）；
+    2. **这扇窗**的底沿钉在底栏高（265 dsu）上：`27.5%` 是底栏 27.5% 时期的数（= 247.5 dsu），
+       照它居中会把 570 高的窗压进底栏。询问弹窗 / 弃牌堆 / 化身窗**不吃**这条覆盖；
+    3. `.modal-window` 的基础规则仍是 `min(680px, 66%)` + `max-height: 96%`（其余窗一个数不动）；
+    4. `.pw` 三档 = `_PANEL_WINDOW_SIZES` 的三个字面数，一个字不动（本票**不许**动那个常量）。
+    """
+    window = _css_rule("#t-modal .modal-window")
+    assert re.search(r"width:\s*calc\(1100 \* var\(--dsu\)\)", window), (
+        f"详情窗宽必须是字面 1100 dsu（裁决 §7③ 的 D3 版式），实际：{window}"
+    )
+    assert re.search(r"height:\s*calc\(570 \* var\(--dsu\)\)", window), (
+        f"详情窗高必须是字面 570 dsu（立绘满高的预算），实际：{window}"
+    )
+    assert re.search(r"max-height:\s*none", window), (
+        f"`max-height: 96%` 会把 570 的窗夹到 511（.modal 的内容盒只有 532.7 dsu）：{window}"
+    )
+
+    # 2. 锚定：底沿 = 底栏高，两个数同源（`.table-bottom` 的 flex 基准）。
+    modal = _css_rule("#t-modal")
+    anchor = re.search(r"bottom:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", modal)
+    bar = re.search(r"flex:\s*0 0 calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", _css_rule(".table-bottom"))
+    assert anchor is not None and bar is not None, (
+        f"详情窗的底沿与底栏高都要写成 dsu 算式：modal={modal} bar={bar and bar.group(0)}"
+    )
+    assert anchor.group(1) == bar.group(1) == "265", (
+        f"详情窗的底沿必须正好落在底栏上沿（{bar.group(1)} dsu），实际：{modal}"
+    )
+    assert "27.5%" not in modal, (
+        f"27.5% 是底栏 27.5% 时期的数（= 247.5 dsu，比 265 少 17.5）：这扇窗不许再吃它：{modal}"
+    )
+    assert re.search(r"padding:\s*0", modal), (
+        f"`.modal` 的 `padding: 2% 4%` 是按百分比算的（上下各 32 dsu）——570 的窗要整块可用：{modal}"
+    )
+
+    # 3. 其余窗一个数不动（询问弹窗 / 弃牌堆 / 化身窗都吃基础 `.modal-window`）。
+    base = _css_rule(".modal-window")
+    assert re.search(r"width:\s*min\(680px, 66%\)", base), (
+        f"基础窗宽仍是 min(680px, 66%)（只有 #t-modal 加宽）：{base}"
+    )
+    assert re.search(r"max-height:\s*96%", base), f"基础窗高上限仍是 96%：{base}"
+    dialog = _css_rule(".dialog-window")
+    assert re.search(r"width:\s*min\(680px, 66%\)", dialog), (
+        f"询问弹窗不吃详情窗的加宽（票面：不动询问弹窗 / 弃牌堆 / 化身）：{dialog}"
+    )
+    for other in (".discard-backdrop", ".pindian-popup"):
+        assert not re.search(r"#t-modal", _css_rule(other)), (
+            f"{other} 不许被本票的详情窗几何污染：{_css_rule(other)}"
+        )
+
+    # 4. 面板窗三档一个字不动。
+    assert _PANEL_WINDOW_SIZES == {"S": (480, 300), "M": (800, 560), "L": (1180, 700)}, (
+        "`_PANEL_WINDOW_SIZES` 是本票的**禁改项**（票面判据）：详情窗不走这三档"
+    )
+    for size in _PANEL_WINDOW_SIZES:
+        body = _css_rule(f'.pw[data-size="{size}"]')
+        assert "1100" not in body and "570" not in body, (
+            f".pw[data-size=\"{size}\"] 不许跟着详情窗改：{body}"
+        )
+
+
+def test_the_hero_detail_body_is_a_text_column_beside_a_full_height_portrait() -> None:
+    """hero-portraits 票 05（裁决 §7③ D3「左文右图」/ spec §3.9）：
+
+    正文两栏，**文字在左、立绘在右**，立绘满高不滚：
+
+    1. `.hero-detail` 是列（两栏在上、作者页脚在下），`.detail-columns` 是行（文左图右）；
+    2. `.detail-text` 是**唯一**滚动容器（`overflow-y: auto` + `scrollbar-gutter: stable` +
+       `min-width/min-height: 0`），且立绘**不在**它里面——"文字栏自己滚、立绘不动"是结构判据；
+    3. `.detail-portrait` `flex: 0 0 auto` + `height: 100%` + `aspect-ratio: 530 / 750`
+       （宽由高反推，不写死像素宽）；图 `object-fit: cover` 在 0.707 的框里等于不裁；
+    4. 空位只换底纹（`[data-empty="1"]` 禁声明几何属性）——有图 / 无图两局版式不跳；
+    5. `#t-modal .modal-body` 不再自己滚（`overflow: hidden` + `padding: 0`），但 `.modal-body`
+       的登记项**保留**（弃牌堆正文仍靠它滚），新的滚动区 `.detail-text` 进 `_SCROLL_CONTAINERS`。
+    """
+    root = _css_rule(".hero-detail")
+    assert re.search(r"display:\s*flex", root) and re.search(r"flex-direction:\s*column", root), (
+        f"`.hero-detail` 是列：两栏一行在上、作者页脚在下：{root}"
+    )
+    assert re.search(r"height:\s*100%", root), f"两栏要吃掉正文槽的整个高度：{root}"
+
+    columns = _css_rule(".hero-detail .detail-columns")
+    assert re.search(r"display:\s*flex", columns) and re.search(r"flex-direction:\s*row", columns), (
+        f"两栏是行：左文右图（DOM 次序 = 视觉次序）：{columns}"
+    )
+    assert re.search(r"flex:\s*1 1 auto", columns) and re.search(r"min-height:\s*0", columns), (
+        f"两栏吃正文槽剩余高度，且能缩到比内容矮（否则文字栏永远不滚）：{columns}"
+    )
+    assert re.search(r"flex-direction:\s*row(?!-reverse)", columns), (
+        f"不许用 `row-reverse` 把视觉次序藏进 CSS：判据要读得到「文左图右」：{columns}"
+    )
+
+    text = _css_rule(".hero-detail .detail-text")
+    assert re.search(r"overflow-y:\s*auto", text), f"文字栏是滚动容器：{text}"
+    assert re.search(r"scrollbar-gutter:\s*stable", text), (
+        f"滚动条常驻留位（裁决 §7③：滚动条出现在右栏内缘、立绘不动）：{text}"
+    )
+    for declaration in (r"flex:\s*1 1 auto", r"min-width:\s*0", r"min-height:\s*0"):
+        assert re.search(declaration, text), (
+            f"文字栏必须能缩（否则长描述把立绘挤出窗）：缺 {declaration}：{text}"
+        )
+
+    portrait = _css_rule(".hero-detail .detail-portrait")
+    assert re.search(r"flex:\s*0 0 auto", portrait), (
+        f"立绘不参与伸缩（裁决 §7③ / 票面：`flex: 0 0 auto`）：{portrait}"
+    )
+    assert re.search(r"height:\s*100%", portrait), f"立绘满高（570 的正文槽）：{portrait}"
+    assert re.search(r"aspect-ratio:\s*530\s*/\s*750", portrait), (
+        f"宽由高 × 530/750 反推（`aspect-ratio`），不写死像素宽：{portrait}"
+    )
+    assert not re.search(r"(?<![-\w])width:", portrait), (
+        f"立绘盒不许写死宽（宽只能由 aspect-ratio 反推）：{portrait}"
+    )
+    assert not re.search(r"overflow-y", portrait), "立绘不滚（滚的是文字栏）"
+    img = _css_rule(".hero-detail .detail-portrait img")
+    for declaration in (r"object-fit:\s*cover", r"position:\s*absolute", r"inset:\s*0",
+                        r"width:\s*100%", r"height:\s*100%"):
+        assert re.search(declaration, img), (
+            f"立绘铺满盒子（0.707 的框里 cover 等于不裁）：缺 {declaration}：{img}"
+        )
+    empty = _css_rule('.hero-detail .detail-portrait[data-empty="1"]')
+    for prop in ("width", "height", "aspect-ratio", "flex", "min-width", "min-height"):
+        assert not re.search(rf"(?<![-\w]){prop}\s*:", empty), (
+            f"空位只换底纹、禁声明几何属性（有图 / 无图两局版式不跳）：{prop} 出现在 {empty}"
+        )
+
+    # 4. 正文槽不再自己滚（文字栏才是），但 `.modal-body` 的登记项保留（弃牌堆正文仍靠它）。
+    body = _css_rule("#t-modal .modal-body")
+    assert re.search(r"overflow:\s*hidden", body), (
+        f"详情窗的正文槽不滚（否则两层滚动、立绘那张也跟着动）：{body}"
+    )
+    assert re.search(r"padding:\s*0", body), f"正文槽的内边距交给两栏自己给：{body}"
+    assert ".modal-body" in _SCROLL_CONTAINERS, (
+        "`.modal-body` 仍是登记项（弃牌堆正文槽用它滚）——本票只让详情窗覆盖 overflow"
+    )
+    assert ".hero-detail .detail-text" in _SCROLL_CONTAINERS, (
+        "新增滚动区必须登记（spec §3.9：未登记即红）"
+    )
+
+    # 5. 作者页脚：`.hero-detail` 的最下方（两栏之后），与首页同一条 `.author-foot`。
+    foot = _css_rule(".hero-detail .author-foot")
+    assert re.search(r"flex:\s*0 0 auto", foot), f"页脚不参与伸缩：{foot}"
+    assert re.search(r"border-top", foot), f"页脚上方一条虚线（与首页同一外观）：{foot}"
+
+    # 6. JS 结构：两栏由 hero-detail.js 造，立绘走**唯一**的立绘渲染口（不另造 img）。
+    detail_js = (STATIC_DIR / "hero-detail.js").read_text(encoding="utf-8")
+    render = _function_source(detail_js, "renderHeroDetailBody")
+    assert "detail-columns" in render and "detail-text" in render and "detail-portrait" in render, (
+        f"正文两栏由 `renderHeroDetailBody` 一处落：{render}"
+    )
+    assert 'fillPortraitBox(' in render, (
+        "立绘复用 `core.js:fillPortraitBox`（有图 / 空位同一份实现，票 03 立的唯一口）"
+    )
+    assert 'createElement("img")' not in detail_js, "详情不另造 img（空位就没请求）"
+    order = [
+        render.index("detail-text"),
+        render.index("detail-portrait"),
+        render.index("author-foot"),
+    ]
+    assert order == sorted(order), (
+        f"DOM 次序 = 文字栏 → 立绘 → 作者页脚（页脚是 `.hero-detail` 的最后一个节点）：{order}"
+    )
+    assert 'portraitEntryFor(' in render, (
+        "作者页脚按座位的显示名称查 `state.portraits`（不另建索引、不改投影层）"
+    )
+
+
+def test_the_detail_and_the_lobby_show_the_same_trimmed_skill_description() -> None:
+    """hero-portraits 票 05：**消灭**「描述文本两处不同源」（首页裁切 / 详情全文）。
+
+    三段判据，任一段都独立可核：
+
+    1. **服务端只有一个裁切口**：`projection._skill_entry`（详情清单与可操作清单的共同条目）
+       的 `description` 就是 `display_skill_description`——不是原文、也不是前端第二次裁；
+    2. 取样技能（界关羽【武圣】）的原文带「本仓实现」注记，裁完的文本**不含注记**且是原文前缀；
+    3. **前端零正则**：`hero-detail.js` 只用 `skillDescription(skill)` 读载荷，文件里没有
+       「本仓」、没有 `slice` / `replace` / 正则——裁切规则不入前端第二份。
+    """
+    for entry in (REPO_ROOT / "tools", REPO_ROOT / "src"):
+        if str(entry) not in sys.path:
+            sys.path.insert(0, str(entry))
+    from sgs_web.descriptions import (
+        display_skill_description,
+        skill_description,
+        trimmed_description,
+    )
+    from sgs_web.projection import CATALOG, _skill_entry
+
+    skill_id = "hero.jie_guanyu.wusheng"
+    raw = skill_description(skill_id)
+    trimmed = display_skill_description(skill_id)
+    assert "本仓" in raw, f"取样技能 `{skill_id}` 的原文应当带实现注记（裁切口才有读数）"
+    assert trimmed == trimmed_description(raw) and "本仓" not in trimmed, (
+        f"服务端裁切后不许带注记：{trimmed!r}"
+    )
+
+    definition = CATALOG[skill_id]
+    entry = _skill_entry(definition, "武圣")
+    assert entry["description"] == trimmed, (
+        "详情 / 可操作清单共用的 `_skill_entry` 必须下发**裁切版**（这就是「两处同源」的实现）："
+        f"实际 {entry['description']!r}"
+    )
+    assert entry["description"] != raw, "不许再下发全文（首页右栏与详情会再差一次）"
+    assert entry["description"].endswith("你使用方块【杀】无距离限制。"), (
+        f"裁到第一个「本仓」注记处、前文逐字保留：{entry['description']!r}"
+    )
+
+    detail_js = (STATIC_DIR / "hero-detail.js").read_text(encoding="utf-8")
+    assert detail_js.count("skillDescription(skill)") == 1, (
+        "两条技能清单（武将 / 装备）共用同一句 `skillDescription(skill)`（一份实现）"
+    )
+    for banned in ("本仓", ".slice(", ".replace(", ".match("):
+        assert banned not in detail_js, (
+            f"前端不裁技能描述（裁切口只有 `descriptions.py` 一处）：出现 {banned!r}"
+        )
+    core_js = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    assert "function skillDescription(skill)" in core_js, "`skillDescription` 仍是唯一读法"
+
+
 _SCROLL_CONTAINERS = {
     ".hero-pool": (
         "将池窗的版本格列表：窗高按 `.pw[data-size=\"L\"]` 写死，版本格多时只有列表滚"
@@ -11064,7 +11289,14 @@ _SCROLL_CONTAINERS = {
     ),
     ".stage-center .processing": "舞台中央处理区：限两行卡面（253dsu），超出的行自己滚、不折叠",
     "#t-skills": "牌桌技能栏：给定高度比例，技能多了在这条竖条里滚，不撑高牌桌",
-    ".modal-body": "武将详情检视窗正文槽：标题 / 底栏固定，只有正文滚",
+    ".modal-body": (
+        "共享模态正文槽：标题 / 底栏固定，只有正文滚（弃牌堆仍靠它；武将详情窗覆盖成 "
+        "`overflow: hidden`，改由 `.hero-detail .detail-text` 滚——票 05）"
+    ),
+    ".hero-detail .detail-text": (
+        "武将详情正文的**文字栏**：立绘满高不滚，技能多 / 描述长时只有这一栏滚（票 05 起，"
+        "登记项 `.modal-body` 保留给弃牌堆）"
+    ),
     ".dialog-body": "询问弹窗正文槽：标题 / 提示条固定，只有正文滚",
     ".avatar-skills": "武将牌面技能栏：牌面高度固定，技能多时在栏内滚",
     ".dialog-reveal": "五谷整段结算的持久展示：询问正文收起，亮牌内容在它自己的槽里滚",

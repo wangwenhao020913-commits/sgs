@@ -2,9 +2,10 @@
  *
  * 加载顺序见 index.html（U1-00 拆分）；本文件不需要构建步骤。
  *
- * 票面（spec §3.1–3.2）：
+ * 票面（spec §3.1–3.2 / hero-portraits 票 05）：
  *  - 右键**武将块** = 详情；右键装备 / 判定 / 手牌不动作，牌桌整体屏蔽浏览器右键菜单；
- *  - 详情里武将技能在上、分割线、装备技能在下；技能多 / 描述长时滚轮翻阅；
+ *  - 详情是**左文右图**（裁决 §7③ D3）：左栏武将技能在上、分割线、装备技能在下，
+ *    技能多 / 描述长时**只有左栏**滚（立绘满高不动）；右栏一张立绘（无图 = 等大空位）；
  *  - 关闭按钮 / ESC 只关它自己（U2-06 起它是**唯一**可叠加的检视窗：盖在询问弹窗上，
  *    关掉后底下的询问弹窗原样恢复）；倒计时不暂停、窗口内不显示；
  *  - **任何时候**都能开：询问态、牌桌事件回放（`state.playback`）、无 pending 的快照态；
@@ -14,7 +15,7 @@
  * 纪律：
  *  - 技能清单读服务端为**每个座位**下发的 `player.skills`（`projection.seat_skill_display`）；
  *    它是只读展示清单（武将牌 + 装备区 + 虚拟装备），不带可用性 / 当前询问 / 本人手牌；
- *  - 详情**不裁决规则**：只画名字、类别、服务端下发的描述全文；
+ *  - 详情**不裁决规则**：只画名字、类别、服务端下发的描述（**裁切版**，与首页右栏同一份）；
  *  - 打开详情不改任何询问 / 选择态，关闭也不提交 action——它是纯本地一层窗口。
  */
 "use strict";
@@ -117,7 +118,35 @@ function detailSection(className, title, skills, emptyText) {
   return section;
 }
 
-/** 详情正文：座位头（势力 / 名称 / 身份 / 座位 · 存活 / 手牌 / 体力）+ 两段技能。 */
+/** 详情正文里那一栏文字（`.detail-text`）：**滚动位置的家**。
+ *
+ * 票 05 起正文是两栏（左文右图），滚动容器从 `.modal-body` 换成了文字栏——立绘不在里面，
+ * 所以文字滚到哪儿立绘都不动（裁决 §7③）。旧的 `#t-modal-body.scrollTop` 不再是读者。
+ */
+function detailTextColumnOf(root) {
+  if (!root || !root.children) return null;
+  for (const column of Array.from(root.children)) {
+    if (!column.classList || !column.classList.contains("detail-columns")) continue;
+    for (const child of Array.from(column.children || [])) {
+      if (child.classList && child.classList.contains("detail-text")) return child;
+    }
+  }
+  return null;
+}
+
+/** 详情正文（hero-portraits 票 05 / 裁决 §7③ D3）：**左文右图** + 作者页脚。
+ *
+ * 结构 = `.hero-detail`（列）→ `.detail-columns`（行：文字栏 / 立绘）+ `.author-foot`（最下方）。
+ *
+ * - 立绘走 `core.js:fillPortraitBox`（票 03 立的**唯一**实现）：有图 ⇒ 一张 `<img src="/art/…">`；
+ *   无图 ⇒ 同一个盒子的空位态（`data-empty="1"`，**在造 img 之前返回** ⇒ 空位不发请求）。
+ *   宽由 CSS 的 `aspect-ratio: 530 / 750` 从高度反推，这里一个像素都不算；
+ * - 作者页脚按座位的**显示名称**（`player.hero_name`，`display.py:394` 下发的展示名）查
+ *   `state.portraits`（票 02 的缓存，与 `/api/portraits` 同源）：`author` 空 ⇒ **一个节点都不建**，
+ *   非空 ⇒ 逐字进 `textContent`（零正则、零拼接）；
+ * - 技能描述读服务端下发的 `description`（票 05 起它已经是 `display_skill_description` 的
+ *   裁切版，与首页右栏同一份）——前端不认得那条实现注记的标记、也不做第二次裁切。
+ */
 function renderHeroDetailBody() {
   const body = $("t-modal-body");
   if (!body) return;
@@ -127,7 +156,8 @@ function renderHeroDetailBody() {
   const previousSeat = first && first.getAttribute ? first.getAttribute("data-seat") : null;
   const sameSeat = previousSeat !== null
     && String(state.modal.heroSeat) === previousSeat;
-  const scrollTop = sameSeat ? (Number(body.scrollTop) || 0) : 0;
+  const previousText = sameSeat ? detailTextColumnOf(first) : null;
+  const scrollTop = previousText ? (Number(previousText.scrollTop) || 0) : 0;
   body.innerHTML = "";
   // 与 renderTable 同一份视图：牌桌事件回放期间读 live view（pending 收起、快照已派生），
   // 不读旧的 state.view，否则详情会停在上一问的画面。
@@ -140,6 +170,10 @@ function renderHeroDetailBody() {
   const root = document.createElement("div");
   root.className = "hero-detail";
   root.setAttribute("data-seat", String(player.seat));
+  const columns = document.createElement("div");
+  columns.className = "detail-columns";
+  const text = document.createElement("div");
+  text.className = "detail-text";
   const head = document.createElement("div");
   head.className = "detail-head";
   if (player.kingdom_label) {
@@ -167,20 +201,39 @@ function renderHeroDetailBody() {
     + ` · 手牌：${handReading(player)}`
     + ` · 体力 ${Math.max(0, Number(player.hp) || 0)}/${Math.max(0, Number(player.hp_max) || 0)}`;
   head.appendChild(meta);
-  root.appendChild(head);
+  text.appendChild(head);
 
   const skills = detailSkillsFor(player, view);
   const heroSkills = skills.filter((skill) => skill.carrier !== "EQUIPMENT");
   const equipSkills = skills.filter((skill) => skill.carrier === "EQUIPMENT");
-  root.appendChild(detailSection("hero-skills", "武将技能", heroSkills, "（无武将技能）"));
+  text.appendChild(detailSection("hero-skills", "武将技能", heroSkills, "（无武将技能）"));
   const divider = document.createElement("div");
   divider.className = "detail-divider";
   divider.setAttribute("role", "separator");
-  root.appendChild(divider);
-  root.appendChild(detailSection("equip-skills", "装备技能", equipSkills, "当前没有装备技能。"));
+  text.appendChild(divider);
+  text.appendChild(detailSection("equip-skills", "装备技能", equipSkills, "当前没有装备技能。"));
+  columns.appendChild(text);
+
+  // 右栏：立绘（满高、不滚）。有图 / 空位两态由 `fillPortraitBox` 一手落。
+  const portrait = document.createElement("div");
+  fillPortraitBox(portrait, heroNameOf(player, view), "detail-portrait");
+  columns.appendChild(portrait);
+  root.appendChild(columns);
+
+  // 作者页脚：`.hero-detail` 的**最后一个**节点；作者为空 ⇒ 一个节点都不建（版式回到
+  // 没有页脚的样子，不是渲染一个空 div）。文本只来自索引，逐字写进 textContent。
+  const entry = portraitEntryFor(heroNameOf(player, view));
+  const author = entry && typeof entry.author === "string" ? entry.author : "";
+  if (author) {
+    const foot = document.createElement("div");
+    foot.className = "author-foot";
+    foot.textContent = author;
+    root.appendChild(foot);
+  }
+
   body.appendChild(root);
   // 同一座位保留滚动位置；换座位显式回顶部（清空正文在真 DOM 里会归零，垫片不会）。
-  body.scrollTop = scrollTop;
+  text.scrollTop = scrollTop;
 }
 
 /** 打开一个座位的详情：只记本地座位号并交给 `syncHeroModal` 开窗。

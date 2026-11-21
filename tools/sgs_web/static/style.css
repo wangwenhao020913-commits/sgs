@@ -1994,6 +1994,30 @@ button.mini-slot { cursor: pointer; }
 .modal-body .options { margin: 0; }
 .modal-body .arrange-row + .arrange-row { margin-top: 10px; }
 
+/* ---------- 武将详情窗的**自有**几何（hero-portraits 票 05 / 裁决 §7③ D3）----------
+ * 只有这一扇窗加宽到 1100×570 dsu（裁决的"1100×570 + 立绘 403×570 满高 + 左侧文字栏"）；
+ * 询问弹窗 / 弃牌堆 / 化身窗仍吃上面 `.modal-window` 的 `min(680px, 66%)` / `max-height: 96%`。
+ *
+ * 为什么这扇窗要**自己锚定**（`.modal` 的 `top: 6.2%; bottom: 27.5%` 不够）：
+ * `27.5%` 是底栏 `27.5%` 时期的数（900 × 27.5% = 247.5 dsu），票 04 把底栏改成 **265 dsu**
+ * 之后它就是一条过期值（比底栏上沿低 17.5 dsu）。`.modal` 的内容盒 = 900 − 55.8 − 247.5 −
+ * 2×32（`padding: 2% 4%` 的上下各是**壳宽**的 2% = 32 dsu）= 532.7 dsu，而 570 的窗装不进去。
+ * 故这扇窗把底沿钉在底栏高（265 dsu，与 `.table-bottom` 的 flex 基准同一个数）、去掉百分比
+ * 内边距，让 579.2 dsu 的舞台区整块可用（570 居中 ⇒ 上下各 4.6 dsu，不盖底栏 / 手牌）。
+ * 其余五条 `bottom: 27.5%` 的浮层是**别的票**的事：它们的窗远矮于舞台区，居中时碰不到底栏。 */
+#t-modal {
+  bottom: calc(265 * var(--dsu));
+  padding: 0;
+}
+#t-modal .modal-window {
+  width: calc(1100 * var(--dsu));
+  height: calc(570 * var(--dsu));
+  max-height: none;
+}
+/* 详情窗的正文槽不再自己滚：两栏里只有**文字栏**滚（登记表里的 `.hero-detail .detail-text`）。
+ * `.modal-body` 的通用规则不动——弃牌堆正文仍靠它滚（登记项因此保留）。 */
+#t-modal .modal-body { overflow: hidden; padding: 0; }
+
 /* ---------- 弃牌堆面板（U4-05 / D11）：只读检视窗，自己的遮罩可点关闭 ----------
  * 几何沿用 `.modal` 的舞台区；层级在询问 / 详情窗之上（它是用户主动翻出来的
  * 顶层检视窗）。**不复用 `#t-modal-backdrop`**：那一层是 `pointer-events: none` 的
@@ -2262,9 +2286,59 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .reveal-target.is-current { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
 .reveal-target.is-invalid { color: #fff; background: #b3261e; border-color: #b3261e; }
 
-/* ---------- 武将详情（U1-06）：武将技能在上、分割线、装备技能在下 ---------- */
+/* ---------- 武将详情（U1-06 / hero-portraits 票 05）：左文右图、文字栏自己滚 ----------
+ * 结构（`hero-detail.js:renderHeroDetailBody` 一处落）：
+ *   `.hero-detail`      列：两栏一行 + 作者页脚（作者为空 ⇒ 页脚节点**不存在**）
+ *     `.detail-columns` 行：文字栏（可滚）+ 立绘（满高、不滚）
+ *     `.author-foot`    最下方（与首页同一条外观）
+ *
+ * 立绘 `flex: 0 0 auto` + `height: 100%` + `aspect-ratio: 530 / 750`：宽由**两栏**的高反推
+ * （不写死像素）。两栏高 = 570 − 标题条（≈78 dsu）− 页脚（有作者时 ≈34 dsu）⇒ 实测约
+ * 323×456 dsu（真浏览器读数，见票 05 `## Answer`）；0.707 的框里 `object-fit: cover` 等于不裁。
+ * 页脚是 `.hero-detail` 的最后一行（与首页把页脚挂在技能面板最下方同形）：有作者时两栏矮一截，
+ * 立绘**等比**跟着缩（比例不变、仍不裁），作者空 ⇒ 节点不存在 ⇒ 恢复满高。 */
 
-.hero-detail { display: flex; flex-direction: column; gap: 4px; }
+.hero-detail { height: 100%; display: flex; flex-direction: column; }
+.hero-detail .detail-columns {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: row;
+}
+.hero-detail .detail-text {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  /* **唯一**滚动容器：文字多时只有它滚，立绘不动（登记表里的 `.hero-detail .detail-text`）。 */
+  overflow-y: auto; scrollbar-gutter: stable;
+  padding: calc(14 * var(--dsu)) calc(18 * var(--dsu)) calc(16 * var(--dsu));
+  scrollbar-width: thin; scrollbar-color: #cbb99a transparent;
+}
+.hero-detail .detail-text::-webkit-scrollbar { width: calc(10 * var(--dsu)); }
+.hero-detail .detail-text::-webkit-scrollbar-thumb {
+  background: #cbb99a; border-radius: calc(6 * var(--dsu));
+}
+.hero-detail .detail-text::-webkit-scrollbar-track { background: rgba(0, 0, 0, .04); }
+.hero-detail .detail-portrait {
+  flex: 0 0 auto;
+  position: relative; overflow: hidden;
+  height: 100%; aspect-ratio: 530 / 750;
+  background: #efe7d6;
+  border-left: 1px solid var(--line);
+}
+.hero-detail .detail-portrait img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+/* 空位只换底纹（票 02 立的全局判据：`[data-empty="1"]` 禁声明几何属性 ⇒ 版式不跳）。 */
+.hero-detail .detail-portrait[data-empty="1"] {
+  background: repeating-linear-gradient(
+    45deg, #efe7d6 0 calc(8 * var(--dsu)), #e9dfcb calc(8 * var(--dsu)) calc(16 * var(--dsu)));
+}
+/* 作者页脚（spec §3.8 / 裁决 §7①）：`.hero-detail` 的最后一个节点，外观与首页那条同源。 */
+.hero-detail .author-foot {
+  flex: 0 0 auto;
+  padding: calc(6 * var(--dsu)) calc(18 * var(--dsu)) calc(10 * var(--dsu));
+  border-top: 1px dashed var(--line);
+  font-size: calc(11 * var(--dsu)); color: var(--dim);
+}
 .hero-detail .detail-head {
   display: flex; align-items: center; flex-wrap: wrap; gap: calc(5 * var(--dsu));
   padding-bottom: 7px; border-bottom: 1px solid var(--line);
