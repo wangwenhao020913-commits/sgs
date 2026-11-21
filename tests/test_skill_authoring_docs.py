@@ -309,6 +309,18 @@ def test_the_batch_ticket_template_keeps_its_required_fields():
         assert leg in text, f"批次票面模板缺少 DoD 的一条腿：{leg}"
 
 
+def test_the_ticket_template_carries_the_acceptance_window():
+    """验收窗口是流程的一半（用户 2026-11-20 裁定 Q5 B / Q6 B / Q11 A），票面必须有它。
+
+    为什么钉在**模板**上：`feng-guanyu` 那次 4 个 turn / 393 次 bash，提交前 screen 跑了 7 次，
+    却一次都没起服务——「做完就停、开窗口」这种流程约束，长回合里靠记是记不住的，
+    只有把它变成票面的格子、再让测试盯住格子，才有机会被填。
+    """
+    text = (DOCS_DIR / "skill-authoring" / "batch-ticket.md").read_text(encoding="utf-8")
+    for must in ("## 验收窗口", "快照指纹", "要看的面", "已知红项", "结论"):
+        assert must in text, f"批次票面模板缺少验收窗口的 `{must}`"
+
+
 def test_the_spec_gate_survives_in_both_the_process_doc_and_the_ticket():
     """规范确认门（用户加的四条）不许悄悄消失：过程文档有规矩，票面模板有落地的格子。
 
@@ -433,6 +445,9 @@ def test_the_entry_skill_lives_in_the_repo():
         f"{_display(ENTRY_SKILL)} 没有指向总入口 `docs/agents/skill-authoring.md`："
         "入口只该指路，不该自包含"
     )
+    # 验收窗口是**入口级**的不可省项：入口不写，照入口执行的 agent 可以完全合规地跳过它。
+    for must in ("验收窗口", "precommit-screen"):
+        assert must in text, f"{_display(ENTRY_SKILL)} 缺少验收窗口的 `{must}`"
 
 
 def test_the_entry_skill_points_at_sections_that_exist():
