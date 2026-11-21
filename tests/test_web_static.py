@@ -10137,6 +10137,13 @@ def _function_source(source: str, name: str) -> str:
     return source[start:end]
 
 
+def _const_array_source(source: str, name: str) -> str:
+    """截出 `const <name> = [ … ];` 的那一段（逐条登记的映射表要靠它读条目）。"""
+    start = source.index(f"const {name} = [")
+    end = source.index("\n];", start) + 3
+    return source[start:end]
+
+
 def test_the_script_loadout_script_is_listed_right_after_the_board_renderer() -> None:
     """脚本清单的唯一真源仍是 `index.html`：整备面紧挨棋盘（它读棋盘体的 `run` / `catalog`）。"""
     srcs = _script_srcs()
@@ -11655,19 +11662,24 @@ def test_the_editor_right_column_is_three_tabs() -> None:
 
 
 def test_the_editor_validation_jump_switches_the_tab() -> None:
-    """票面第 3 条（本票核心）：校验条目跳转**同时**切页签与定位——一个函数干两件事。
+    """票 09（review 修复 B 的第 1 条）：页签由**字段所在的 pane** 决定，命中的落点必须在那块里。
 
     静态判据（`script-editor.js`）：
 
     - `.script-editor-error` 的点击处理器只调 `scriptEditorJump(error.loc)`，且全文里
       `scriptEditorJump(` 只出现**两次**（定义 + 这一个调用点）——跳转口只有一个；
-    - `scriptEditorJump` 的**同一个函数体**里既有页签赋值（`ed.tab =` / 由 `loc` 派生页签），
-      又有字段定位（`scriptEditorFindField(` + `scrollIntoView(`），且切页签在前——
-      "定位成功但页签还停在原处"在这个形状里不可能发生；
-    - 页签的派生是纯映射 `scriptEditorTabForLoc(loc)`：`/scripts/<i>/layers/…`（大节 / 节点 /
-      连线）⇒ `layer`，其余（剧本级 / 共享表）⇒ `detail`；
-    - 页签落到 DOM 的唯一落点是 `scriptEditorSyncTabs()`：它把 `ed.tab` 写成三块 pane 的
-      `hidden` 与页签键的 `.on`（一次只显示一块）；`scriptEditorRender()` 每帧都调它；
+    - `scriptEditorJump` 的**同一个函数体**里：先重绘（目标实体的字段 / 节点才会在 DOM 里）
+      → 再 `ed.tab = scriptEditorTabForLoc(...)` → 落 DOM（`scriptEditorSyncTabs`）→ 才
+      `scriptEditorFindField(` + `.on` + `scrollIntoView(`；
+    - **命中的落点还要过 pane 判据**：`scriptEditorPaneOf(落点) !== ed.tab` 就不标 / 不滚——
+      藏着的 pane 里标 `.on` / 滚字段是票 09 的原缺陷，形状上要堵死；
+    - 页签的派生**不再读 `loc` 字符串前缀**：`scriptEditorTabForLoc` 问的是"这个字段 / 节点
+      住哪块 pane"（`scriptEditorFindLocAnchor` 的 `pane`；没有字段但有图上的节点 ⇒ `layer`）；
+    - 字段挂载根 → pane 是逐条登记的映射 `SCRIPT_EDITOR_PANE_ROOTS`，且与 `index.html` 里
+      三块 `.ed-pane[data-pane]` 的真实归属一致（`#script-editor-form` ⇒ 详情、
+      `#script-editor-graph` / `#script-editor-edges` ⇒ 大节、`#script-editor-errors` ⇒ 校验）；
+    - 页签落到 DOM 的唯一落点仍是 `scriptEditorSyncTabs()`（`ed.tab` → 三块 pane 的 `hidden`
+      与页签键的 `.on`），`scriptEditorRender()` 每帧都调它；
     - `state.script.editor.tab` 的初值是 `detail`（首屏就是「详情」）。
     """
     source = _EDITOR_JS.read_text(encoding="utf-8")
@@ -11683,23 +11695,63 @@ def test_the_editor_validation_jump_switches_the_tab() -> None:
     assert re.search(r"ed\.tab\s*=", jump), (
         f"跳转函数体里必须真的切页签（`ed.tab = …`）：{jump}"
     )
-    assert "scriptEditorTabForLoc(" in jump, "跳转到哪个页签由 `loc` 机械派生（不猜语义）"
+    assert "scriptEditorTabForLoc(" in jump, "跳转到哪个页签由字段 / 节点的家机械派生（不猜语义）"
     assert "scriptEditorFindField(" in jump and "scrollIntoView(" in jump, (
         f"同一个函数体里还要定位 / 高亮字段：{jump}"
+    )
+    assert jump.index("scriptEditorRender(") < jump.index("ed.tab"), (
+        "次序判据：先重绘把目标实体的字段 / 节点铺进各自的 pane，再判页签"
+        "（反了就是拿上一帧的旧字段判 —— 正是票 09 的原缺陷）"
     )
     assert jump.index("ed.tab") < jump.index("scriptEditorFindField("), (
         "次序判据：先切页签、再定位（切页签在前，定位才在看得见的那一块里）"
     )
-    assert jump.index("ed.tab") < jump.index("scrollIntoView("), (
-        "次序判据：字段滚动同样发生在切页签之后"
+    assert jump.index("scriptEditorSyncTabs(") < jump.index("scrollIntoView("), (
+        "次序判据：页签先落 DOM（那一块才真的可见），再滚字段"
+    )
+    assert re.search(r"scriptEditorPaneOf\([^)]*\)\s*!==\s*ed\.tab", jump), (
+        f"命中的落点必须在**当前页签那一块**里（藏着的 pane 里不标 `.on` / 不滚）：{jump}"
     )
 
     tab_for_loc = _function_source(source, "scriptEditorTabForLoc")
-    assert 'segments[0] === "scripts"' in tab_for_loc and 'segments[2] === "layers"' in tab_for_loc, (
-        f"`loc` 的页签映射只认 `/scripts/<i>/layers/…` 这一段前缀：{tab_for_loc}"
+    assert "segments" not in tab_for_loc and "startsWith" not in tab_for_loc, (
+        f"页签不许再按 `loc` 字符串前缀猜（review 修复 B 的原缺陷）：{tab_for_loc}"
     )
-    assert 'return "layer"' in tab_for_loc and 'return "detail"' in tab_for_loc, (
-        "大节 / 节点 / 连线 ⇒ 大节页签；剧本级与共享表字段 ⇒ 详情页签"
+    assert "scriptEditorFindLocAnchor(" in tab_for_loc, (
+        f"页签由字段所在的 pane 决定（先找到字段，再问它的家）：{tab_for_loc}"
+    )
+    assert "scriptEditorFindNode(" in tab_for_loc and 'return "layer"' in tab_for_loc, (
+        f"没有字段可锚、但有图上的节点 ⇒ 节点住「大节」：{tab_for_loc}"
+    )
+
+    roots = re.findall(
+        r'\[\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\]',
+        _const_array_source(source, "SCRIPT_EDITOR_PANE_ROOTS"),
+    )
+    assert roots, "字段挂载根 → pane 必须逐条写出来（一条映射，别在代码里零散地判）"
+    owned = dict(roots)
+    assert owned.get("script-editor-form") == "detail", (
+        f"表单里的字段住「详情」：{owned}"
+    )
+    assert "layer" in owned.values(), f"大节的网格 / 连线控件住「大节」：{owned}"
+    assert owned.get("script-editor-errors") == "valid", f"校验条目住「校验」：{owned}"
+    assert all(pane in _EDITOR_TABS for _, pane in roots), (
+        f"映射的落点只能是三个页签键之一：{roots}"
+    )
+    view = _editor_view()
+    pane_ids = {
+        pane["attrs"]["data-pane"]: _subtree_ids(pane)
+        for pane in _by_class(view, "ed-pane")
+    }
+    for root_id, pane in roots:
+        assert root_id in pane_ids.get(pane, set()), (
+            f"字段挂载根 `#{root_id}` 必须真的住在 `data-pane=\"{pane}\"` 那一块 pane 里："
+            f"{sorted(pane_ids.get(pane, set()))}"
+        )
+
+    find = _function_source(source, "scriptEditorFindField")
+    assert "scriptEditorFindLocAnchor(" in find, (
+        f"定位口在**所有**字段挂载根里找 `loc`，不再只认表单：{find}"
     )
 
     sync = _function_source(source, "scriptEditorSyncTabs")
@@ -11714,3 +11766,37 @@ def test_the_editor_validation_jump_switches_the_tab() -> None:
     )
     state = _function_source(source, "scriptEditorState")
     assert re.search(r'tab:\s*"detail"', state), "`state.script.editor.tab` 的初值是详情"
+
+
+def test_switching_editor_tabs_keeps_the_unsaved_draft() -> None:
+    """票 09（review 修复 B 的第 2 条）：切页签会整屏重绘，重绘用 `ed.draft` 铺表单；
+    文本框的值只在保存时（`scriptEditorCollect`）才回写 draft ⇒ **切页签前**必须先把当前
+    pane 的输入收进 draft（一个不落盘的收集口），否则「详情里改了字再点大节」会静默丢失。
+
+    静态判据（`script-editor.js`）：
+
+    - `scriptEditorShowTab`（点页签键的唯一入口）在落 `ed.tab` / 重绘**之前**调收集口；
+    - 收集口 = `scriptEditorStashDraft`：它在有草稿（`edit` / `new`）时才 `scriptEditorCollect`，
+      而且**不落盘**（保存仍是 `scriptEditorSave` 的事）。
+    """
+    source = _EDITOR_JS.read_text(encoding="utf-8")
+
+    show_tab = _function_source(source, "scriptEditorShowTab")
+    assert "scriptEditorStashDraft(" in show_tab, (
+        f"切页签前必须先收下当前 pane 的输入（否则重绘把它们丢了）：{show_tab}"
+    )
+    assert show_tab.index("scriptEditorStashDraft(") < show_tab.index("ed.tab"), (
+        f"次序判据：先收输入、再切页签 / 重绘：{show_tab}"
+    )
+
+    stash = _function_source(source, "scriptEditorStashDraft")
+    assert "scriptEditorCollect(" in stash, (
+        f"不落盘的收集口 = 把 DOM 收回草稿（与保存同一个 `scriptEditorCollect`）：{stash}"
+    )
+    assert "ed.mode" in stash and "ed.draft" in stash, (
+        f"只在编辑 / 新建（有草稿）时收：别的态读出空值会把实体冲掉：{stash}"
+    )
+    for forbidden in ("scriptEditorSend(", "scriptEditorSave(", "fetch(", "api("):
+        assert forbidden not in stash, (
+            f"收集口不许落盘（半吊子的「记住草稿但保存时再读」不解决问题）：{stash}"
+        )

@@ -31734,6 +31734,36 @@ const edActiveTab = () => edTabKeys
   .find((key) => edTabKey(key).classList.contains("on")) || null;
 const edVisiblePanes = () => edTabKeys.filter((key) => edPane(key).hidden !== true);
 const edShowTab = async (key) => scriptClick(edTabKey(key));
+/* ui-one-screen 票 09：**字段住哪块 pane**。垫片里静态节点不建父子关系，但动态化出来的
+ * 字段仍挂在它们的**字段挂载根**下（表单 / 图 / 边列表 / 校验条目），故沿 `parentNode`
+ * 找到根，再按 index.html 里三块 `.ed-pane` 的切片问那个根在第几块（不另抄一份映射）。 */
+const edPaneById = (() => {
+  const keys = edTabKeys;
+  const marks = keys.map((key) => html.indexOf(`id="script-editor-pane-${key}"`));
+  const stop = html.indexOf('id="lobby-window-stash"');
+  const map = new Map();
+  keys.forEach((key, index) => {
+    const from = marks[index];
+    const to = index + 1 < marks.length ? marks[index + 1] : stop;
+    if (from < 0 || to <= from) return;
+    for (const match of html.slice(from, to).matchAll(/\bid="([^"]+)"/g)) map.set(match[1], key);
+  });
+  return map;
+})();
+const edPaneOf = (node) => {
+  for (let cursor = node; cursor; cursor = cursor.parentNode) {
+    if (cursor.id && edPaneById.has(cursor.id)) return edPaneById.get(cursor.id);
+  }
+  return null;
+};
+/** 跳转落点（`scriptEditorJump` 标 `.on` 的那一个）：表单字段 / 图上的节点 / 边行。 */
+const edJumpLandmarks = () => ["script-editor-form", "script-editor-graph", "script-editor-edges"]
+  .flatMap((id) => byClass($(id), "on"));
+/** 断言形状：落点非空，且**每一个**都住在当前可见的 pane 里（藏着的 pane 里标点 = 原缺陷）。 */
+const edLandmarksVisible = (nodes) => nodes.length > 0 && nodes.every((node) => {
+  const pane = edPaneOf(node);
+  return pane !== null && edVisiblePanes().includes(pane) && edPane(pane).hidden !== true;
+});
 /** 拖一个节点到 `(row, col)` 格：dragstart 在节点按钮上、drop 在网格命中格上。 */
 const edDragNode = async (nodeId, row, col) => {
   const button = cellButton(edNodeCell(nodeId));
@@ -32237,13 +32267,16 @@ await edClick("btn-script-editor-reload");
 }
 
 // ---- UI1-40：删一个被节点 + 问号池共同引用的房间，点两类 loc 的条目各一次 ----
+// 票 09（review 修复 B）：页签由**字段所在的 pane** 决定，不按 `loc` 前缀猜；命中的落点
+// 必须在可见的那一块 pane 里（旧缺陷：节点字段被判成「大节」，`.on` / 滚动全作用在藏着的
+// `#script-editor-form` 上，提示却说「已定位到字段」）。
 await edOpenKind("rooms");
 await scriptClick(edRow("room.event"));
 await edClick("btn-script-editor-delete");
 const edEventRefs = edReferenceRows();
 await scriptClick(scriptConfirmAction("仍然删除"));
 const edRoomErrors = ed().errors || [];
-const edLayerLoc = String(
+const edNodeLoc = String(
   (edRoomErrors.find((error) => String(error.loc || "").startsWith("/scripts/")) || {}).loc || "",
 );
 const edDetailLoc = String(
@@ -32252,27 +32285,69 @@ const edDetailLoc = String(
 await edShowTab("valid");
 const edRowByLoc = (loc) => edErrorRows()
   .find((row) => row.getAttribute("data-loc") === loc) || null;
-const edJumpLayerRow = edRowByLoc(edLayerLoc);
-await scriptClick(edJumpLayerRow);
-const edLayerJump = edActiveTab() === "layer"
-  && edVisiblePanes().join(",") === "layer"
-  && ed().tab === "layer" && ed().kind === "nodes"
-  && String($("script-editor-focus").textContent).includes(edLayerLoc)
-  && byClass(edGraph(), "on").length === 1
-  && byClass(edGraph(), "on")[0].getAttribute("data-node-id") === ed().selected;
+const edNodeRow = edRowByLoc(edNodeLoc);
+const edDetailRow = edRowByLoc(edDetailLoc);
+const edJumpSeen = [];
+
+// ① 节点字段 loc（`…/nodes/<i>/room`）：row/col/room 三个输入框住**详情**的
+//    `#script-editor-form` 里 ⇒ 页签切「详情」，`.on` 的落点（房间下拉）在可见 pane 里。
+await scriptClick(edNodeRow);
+const edNodeMarks = edJumpLandmarks();
+const edNodeJump = edActiveTab() === "detail"
+  && edVisiblePanes().join(",") === "detail"
+  && ed().tab === "detail" && ed().kind === "nodes"
+  && String($("script-editor-focus").textContent).includes(edNodeLoc)
+  && edNodeMarks.some((node) => node.id === "script-editor-field-room")
+  && edLandmarksVisible(edNodeMarks);
+edJumpSeen.push(`节点:${edActiveTab()}/${edNodeMarks.map((node) => node.id || "?").join("+") || "无"}`);
+
+// ② 共享表字段 loc（`/rooms/…`）：同样住详情表单 ⇒ 「详情」+ 可见落点。
 await edShowTab("valid");
-const edJumpDetailRow = edRowByLoc(edDetailLoc);
-await scriptClick(edJumpDetailRow);
+await scriptClick(edDetailRow);
+const edDetailMarks = edJumpLandmarks();
 const edDetailJump = edActiveTab() === "detail"
   && edVisiblePanes().join(",") === "detail"
   && ed().tab === "detail" && ed().kind === "rooms"
   && String($("script-editor-focus").textContent).includes(edDetailLoc)
-  && byClass($("script-editor-form"), "on").length > 0;
-check("UI1-40 校验条目跳转让页签跟着切（大节字段 ⇒ 「大节」页签激活；剧本字段 ⇒ 「详情」）",
-  edEventRefs.length > 0 && Boolean(edLayerLoc) && Boolean(edDetailLoc)
-  && edJumpLayerRow !== null && edJumpDetailRow !== null && edLayerJump && edDetailJump,
-  `引用点=${edEventRefs.length} 大节=${edLayerLoc || "缺"} 详情=${edDetailLoc || "缺"}`
-    + ` 页签=${edActiveTab()}`);
+  && edLandmarksVisible(edDetailMarks);
+edJumpSeen.push(`共享:${edActiveTab()}/${edDetailMarks.map((node) => node.id || "?").join("+") || "无"}`);
+
+// ③ 大节控件 loc（边的 `from`）：边行住「大节」的 `#script-editor-edges` ⇒ 页签切「大节」、
+//    被标记的边行在可见 pane 里。同一条"按字段的家判页签"的反方向（loc 前缀恰好也指大节）。
+await scriptCall("scriptEditorJump", "/scripts/0/layers/0/edges/0/from");
+const edEdgeMarks = edJumpLandmarks();
+const edEdgeJump = edActiveTab() === "layer"
+  && edVisiblePanes().join(",") === "layer"
+  && ed().tab === "layer"
+  && edEdgeMarks.some((node) => node.getAttribute("data-from") === "a1")
+  && edLandmarksVisible(edEdgeMarks);
+edJumpSeen.push(`边:${edActiveTab()}/${edEdgeMarks.map((node) => node.getAttribute("data-from") || "?").join("+") || "无"}`);
+
+check("UI1-40 校验跳转按字段所在的 pane 切页签（节点 / 共享表字段 ⇒ 「详情」、边控件 ⇒ 「大节」；落点都在可见 pane 里）",
+  edEventRefs.length > 0 && Boolean(edNodeLoc) && Boolean(edDetailLoc)
+  && edNodeRow !== null && edDetailRow !== null && edNodeJump && edDetailJump && edEdgeJump,
+  `引用点=${edEventRefs.length} 节点=${edNodeLoc || "缺"} 详情=${edDetailLoc || "缺"}`
+    + ` 落点=${edJumpSeen.join(" ")}`);
+
+// ---- UI1-42：切页签不许丢未保存的输入（票 09 第 2 条）----
+// 在「详情」的表单里改一个文本框 → 切「大节」→ 切回「详情」：render 之后值仍是改过的
+// （切页签会整屏重绘，重绘用 `ed.draft` 铺表单；旧缺陷是只在保存时才把 DOM 收回草稿）。
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+await edClick("btn-script-editor-edit");
+await edShowTab("detail");
+const edTypedName = "被改过的层名";
+const edNameBefore = String($("script-editor-field-name").value);
+edSet("script-editor-field-name", edTypedName);
+const edSwitchMark = calls.length;
+await edShowTab("layer");
+await edShowTab("detail");
+const edNameAfter = String($("script-editor-field-name").value);
+check("UI1-42 切页签不丢未保存的输入：详情改文本框 → 大节 → 详情，render 后仍是改过的值（未落盘）",
+  edNameBefore !== edTypedName && edNameAfter === edTypedName
+  && ed().mode === "edit" && !!ed().draft && ed().draft.name === edTypedName
+  && calls.slice(edSwitchMark).filter((call) => call.method !== "GET").length === 0,
+  `改前=${edNameBefore} 改后=${edNameAfter} 页签=${edActiveTab()}`);
 
 // 收尾：撤掉探针库回到内置库（后续 M7-29 从「无用户库」起手）。
 unlinkSync(SCRIPT_EDITOR_LIBRARY);

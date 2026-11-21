@@ -55,6 +55,20 @@ const SCRIPT_EDITOR_DELETE_WARNING = "继续删除会让它们悬空（校验面
 /** 右栏三页签（ui-one-screen 票 07 / spec A10）：`ed.tab` 只许取这三个值之一。 */
 const SCRIPT_EDITOR_TABS = ["detail", "layer", "valid"];
 
+/** 字段挂载根 → 页签（ui-one-screen 票 09 / review 修复 B）：`loc` 指向的字段 / 控件挂在
+ * 哪个根下，它就住哪块 pane —— 跳转的页签按这个切，**不按 `loc` 字符串前缀猜**。
+ *
+ * 与 `index.html` 三块 `.ed-pane[data-pane]` 的归属同一条口径（`test_web_static` 逐条核）：
+ * 节点的 row/col/room 等输入框住 `#script-editor-form` ⇒「详情」；网格 / 边列表住「大节」；
+ * 校验条目住「校验」。图上的节点没有字段，但它在 `#script-editor-graph` 里 ⇒「大节」。
+ */
+const SCRIPT_EDITOR_PANE_ROOTS = [
+  ["script-editor-form", "detail"],
+  ["script-editor-graph", "layer"],
+  ["script-editor-edges", "layer"],
+  ["script-editor-errors", "valid"],
+];
+
 /** 归属表（删除级联、永不拒绝）：剧本归库、大节 / 节点归剧本。 */
 const SCRIPT_EDITOR_OWNED_KINDS = ["scripts", "layers", "nodes"];
 
@@ -446,12 +460,29 @@ function scriptEditorSyncTabs() {
   return tab;
 }
 
-/** 点页签键：落 `ed.tab` 再整屏重绘（互斥与几何都由同一条渲染路保证）。 */
+/** 点页签键：**先把当前 pane 的输入收进草稿**（不落盘），再落 `ed.tab` 重绘（票 09）。
+ *
+ * 重绘用 `ed.draft` 铺表单，而文本框的值只在保存时才经 `scriptEditorCollect` 回写；
+ * 不收就切页签 = 「详情里改了字再点大节」静默丢掉改动。
+ */
 function scriptEditorShowTab(key) {
   const ed = scriptEditorState();
+  scriptEditorStashDraft();
   ed.tab = SCRIPT_EDITOR_TABS.includes(key) ? key : "detail";
   scriptEditorRender();
   return ed.tab;
+}
+
+/** 把当前 pane 的输入收进草稿，**不落盘**（保存仍是 `scriptEditorSave` 的事）。
+ *
+ * 只在真有草稿（编辑 / 新建）时收：别的态表单里没有可读的输入，读出来是空值，
+ * 会把选中实体冲成一条空实体。
+ */
+function scriptEditorStashDraft() {
+  const ed = scriptEditorState();
+  if (!ed.draft || (ed.mode !== "edit" && ed.mode !== "new")) return ed.draft;
+  ed.draft = scriptEditorCollect(ed.kind, ed.draft);
+  return ed.draft;
 }
 
 function scriptEditorRenderKinds() {
@@ -1713,11 +1744,15 @@ function scriptEditorRenderEdgeControls(layer) {
   const box = $("script-editor-edges");
   if (!box) return null;
   box.innerHTML = "";
-  for (const edge of layer.edges || []) {
+  for (const [edgeIndex, edge] of (layer.edges || []).entries()) {
     const requires = edge.requires || {};
     const row = scriptEditorEl("div", "script-editor-edge");
     row.setAttribute("data-from", edge.from);
     row.setAttribute("data-to", edge.to);
+    // 边行的 `loc` 锚点（票 09）：`/scripts/<i>/layers/<j>/edges/<k>/…` 的校验条目跳到这一行，
+    // 它住「大节」页签 ⇒ 页签按所在 pane 切（不按 loc 前缀猜）。
+    row.setAttribute("data-field-path",
+      scriptEditorFieldPath("layers", layer.id, `edges/${edgeIndex}`));
     const label = scriptEditorEl("span", "script-editor-edge-label", `${edge.from} → ${edge.to}`);
     row.appendChild(label);
     const condition = scriptEditorEl("span", "script-editor-edge-cond",
@@ -2028,15 +2063,14 @@ function scriptEditorPath(kind, id) {
  * 再把字段 / 节点标出来并滚到可见处。
  *
  * `loc` 是加载器的 JSON 指针（票 14 / 票 24 原样下发）；前端**不猜**它在服务端模型里的
- * 语义，只做"指针前缀 → 当前表 / 实体 / 页签"的机械映射。页签切换与定位在**同一个函数体**
- * 里（先 `ed.tab`，重绘之后才定位）——所以"定位成功但页签还停在原处"这个状态不存在；
- * 这是本票的核心判据（加页签的代价，票面第 3 条）。
+ * 语义，只做"指针前缀 → 当前表 / 实体 / 控件"的机械映射。页签切换与定位在**同一个函数体**
+ * 里，且落点必须过 pane 判据（票 09）：只有当前页签那一块里的字段 / 节点才标 `.on`、才滚 ——
+ * "标记落在看不见的 pane 里、提示却说已定位"这个状态不在这个形状里。
  */
 function scriptEditorJump(loc) {
   const ed = scriptEditorState();
   const pointer = String(loc || "");
   ed.focusLoc = pointer;
-  ed.tab = scriptEditorTabForLoc(pointer);
   const target = scriptEditorLocTarget(pointer);
   if (target) {
     ed.kind = target.kind;
@@ -2053,25 +2087,62 @@ function scriptEditorJump(loc) {
     }
   }
   ed.hint = `已定位到字段 ${pointer}。`;
+  // ① 先把目标实体的字段 / 节点铺进各自的 pane：页签要问"这个字段住哪一块"，字段得先在 DOM 里。
   scriptEditorRender();
-  const field = scriptEditorFindField(pointer);
-  if (field) {
-    field.classList.add("on");
-    field.scrollIntoView({ block: "center" });
-  }
-  const node = scriptEditorFindNode(pointer);
-  if (node) {
-    node.classList.add("on");
-    node.scrollIntoView({ block: "center" });
+  // ② 字段 / 节点住哪块 pane，页签就落哪块（票 09：不按 loc 前缀猜）。
+  ed.tab = scriptEditorTabForLoc(pointer);
+  // ③ 页签落到 DOM（`scriptEditorSyncTabs` 是唯一落点），那一块才真的可见。
+  scriptEditorSyncTabs();
+  // ④ 只标 / 只滚**当前那一块**里的落点：字段与节点常常不在同一块 pane 里。
+  for (const landing of [scriptEditorFindField(pointer), scriptEditorFindNode(pointer)]) {
+    if (!landing || scriptEditorPaneOf(landing) !== ed.tab) continue;
+    landing.classList.add("on");
+    landing.scrollIntoView({ block: "center" });
   }
   return pointer;
 }
 
-/** JSON 指针 → 右栏页签：`/scripts/<i>/layers/…` 下的字段（大节 / 节点 / 连线）归「大节」，
- * 其余（剧本级字段与共享表字段）归「详情」——「校验」只是入口，不是任何字段的家。 */
+/** 一个控件住在哪块 pane：它在哪个**字段挂载根**（`SCRIPT_EDITOR_PANE_ROOTS`）的子树里。
+ * 找不到 ⇒ `null`（不在编辑器右栏里）。 */
+function scriptEditorPaneOf(node) {
+  if (!node) return null;
+  for (const [rootId, pane] of SCRIPT_EDITOR_PANE_ROOTS) {
+    const root = $(rootId);
+    if (root && (root === node || scriptEditorWalk(root, []).includes(node))) return pane;
+  }
+  return null;
+}
+
+/** 在右栏的字段挂载根里找 `loc` 指的那个字段 / 控件：先精确 `data-field-path`，再退最长前缀。
+ * 返回 `{field, pane}`；`null` = 这个 `loc` 在前端没有可编辑的控件（例如整条大节的 loc）。
+ */
+function scriptEditorFindLocAnchor(loc) {
+  const pointer = String(loc || "");
+  const pathOf = (node) => node.getAttribute("data-field-path");
+  for (const [rootId, pane] of SCRIPT_EDITOR_PANE_ROOTS) {
+    const root = $(rootId);
+    if (!root) continue;
+    const fields = scriptEditorWalk(root, []).filter(
+      (node) => node.getAttribute && node.getAttribute("data-field-path"));
+    const exact = fields.find((node) => pathOf(node) === pointer);
+    if (exact) return { field: exact, pane };
+    const prefix = fields
+      .filter((node) => pointer.startsWith(`${pathOf(node)}/`))
+      .sort((left, right) => pathOf(right).length - pathOf(left).length)[0];
+    if (prefix) return { field: prefix, pane };
+  }
+  return null;
+}
+
+/** JSON 指针 → 右栏页签：**问字段自己的家**（`scriptEditorFindLocAnchor` 的 pane），不猜前缀。
+ *
+ * 节点的 row/col/room 住详情表单 ⇒「详情」；边的 `from` / 条件住大节页签的边列表 ⇒「大节」；
+ * 没有可编辑字段但有图上的节点（整条节点的 loc）⇒ 节点在「大节」。
+ */
 function scriptEditorTabForLoc(loc) {
-  const segments = String(loc || "").split("/").filter(Boolean);
-  if (segments[0] === "scripts" && segments[2] === "layers") return "layer";
+  const anchor = scriptEditorFindLocAnchor(loc);
+  if (anchor) return anchor.pane;
+  if (scriptEditorFindNode(loc)) return "layer";
   return "detail";
 }
 
@@ -2104,20 +2175,11 @@ function scriptEditorLocTarget(loc) {
   return entity ? { kind, id: entity.id } : null;
 }
 
-/** 在表单里找 `data-field-path` 与 `loc` 相同的字段；没有精确匹配就退最长前缀的容器。 */
+/** 跳转要标 / 滚的那一个元素：`loc` 有可锚的字段 / 控件就用它，没有就退表单本身
+ * （整块表单留在「详情」里，提示说的是"字段"而高亮的是它所在的块）。 */
 function scriptEditorFindField(loc) {
-  const form = $("script-editor-form");
-  if (!form) return null;
-  const pointer = String(loc || "");
-  const fields = scriptEditorWalk(form, []).filter(
-    (node) => node.getAttribute && node.getAttribute("data-field-path"));
-  const exact = fields.find((node) => node.getAttribute("data-field-path") === pointer);
-  if (exact) return exact;
-  const prefix = fields
-    .filter((node) => pointer.startsWith(`${node.getAttribute("data-field-path")}/`))
-    .sort((left, right) => right.getAttribute("data-field-path").length
-      - left.getAttribute("data-field-path").length)[0];
-  return prefix || form;
+  const anchor = scriptEditorFindLocAnchor(loc);
+  return anchor ? anchor.field : ($("script-editor-form") || null);
 }
 
 /** 在「大节」页签的节点图里找 `loc` 指的那个节点（`data-node-id` 由共用渲染器挂上）。
