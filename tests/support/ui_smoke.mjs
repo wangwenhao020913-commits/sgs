@@ -31725,6 +31725,15 @@ const edConfirmLabels = () => Array.from($("script-confirm-actions").children)
   .map((node) => String(node.textContent).trim());
 const edClick = async (id) => scriptClick($(id));
 const edOpenKind = async (kind) => scriptClick(edKind(kind));
+/* ui-one-screen 票 07：右栏三页签（详情 / 大节 / 校验）。垫片不解析静态 `hidden` 属性，
+ * 故页签态只读 `script-editor.js` 写进 DOM 的那一份：键的 `.on` 与三块 pane 的 `hidden`。 */
+const edTabKeys = ["detail", "layer", "valid"];
+const edTabKey = (key) => $(`script-editor-tab-${key}`);
+const edPane = (key) => $(`script-editor-pane-${key}`);
+const edActiveTab = () => edTabKeys
+  .find((key) => edTabKey(key).classList.contains("on")) || null;
+const edVisiblePanes = () => edTabKeys.filter((key) => edPane(key).hidden !== true);
+const edShowTab = async (key) => scriptClick(edTabKey(key));
 /** 拖一个节点到 `(row, col)` 格：dragstart 在节点按钮上、drop 在网格命中格上。 */
 const edDragNode = async (nodeId, row, col) => {
   const button = cellButton(edNodeCell(nodeId));
@@ -31795,6 +31804,8 @@ check("M7-25d 九类实体的列表条数 = 服务端那张表（不是前端另
   JSON.stringify(edCounts));
 
 // 剧本页：组装 大节 → 节点 → 房间（房间名走引用解析，不是 id 原样）。
+// 票 07 起表单与组装树住「详情」页签：先切页签再操作（票面「前置改成先切到对应页签」）。
+await edShowTab("detail");
 await edOpenKind("scripts");
 await scriptClick(edRow("editorprobe"));
 const treeLayers = byClass($("script-editor-tree"), "script-editor-tree-layer");
@@ -31807,6 +31818,8 @@ check("M7-25e 剧本页组装 大节 → 节点 → 房间（2 个大节 / 13 �
   `大节=${treeLayers.length} 节点=${treeNodes.length}`);
 
 // ---- ② 大节页：网格拖放 + 画边 + 条件 + 解除（画面与边列表同步）----
+// 大节页住「大节」页签（票 07）：先切页签，网格 / 连线才在可见的那一块里。
+await edShowTab("layer");
 await edOpenKind("layers");
 await scriptClick(edRow("L1"));
 const edDraw0 = ui.scriptGraphDrawCount();
@@ -31900,6 +31913,8 @@ check("M7-25k 解除连线 = 一条 DELETE（只摘这一条）：边列表与�
   `DELETE=${edUnlinkDeletes.length} 线=${edgePoints(edGraph()).length}`);
 
 // ---- ③ 问号池（引用的房间选择器，禁选 unknown）----
+// 问号池 / 模板 / 副本 / 重命名都改的是实体表单：住「详情」页签（票 07）。
+await edShowTab("detail");
 await edOpenKind("rooms");
 await scriptClick(edRow("room.unknown"));
 await edClick("btn-script-editor-edit");
@@ -32071,6 +32086,8 @@ check("M7-25y 重命名保引用：被战斗座位引用的模板改名后，座
 
 // ---- ④ D30 删除交互 ----
 // ② 删一个有入边 / 出边的节点：确认框提示连带删几条，确认后节点与入 / 出边一起消失。
+// 节点在图上（「大节」页签），删除键在页签头（票 07）。
+await edShowTab("layer");
 await edOpenKind("layers");
 await scriptClick(edRow("L1"));
 await edOpenKind("nodes");
@@ -32132,6 +32149,8 @@ check("M7-25ad 删被共享引用的实体：确认框列出引用点（loc 指�
   `引用点=${JSON.stringify(edRefRows.map((row) => row.getAttribute("data-loc")))}`);
 
 await scriptClick(scriptConfirmAction("仍然删除"));
+// 校验面板住「校验」页签（票 07）：先切过去，逐条红字才在可见的那一块里。
+await edShowTab("valid");
 const edDangleDeletes = calls.slice(edDangleMark).filter(
   (call) => call.method === "DELETE" && call.path.includes("/templates/tpl.grunt"));
 const edDangleErrors = ed().errors || [];
@@ -32149,7 +32168,8 @@ check("M7-25ae 删完立刻红：删除 200（实体真的没了），校验面�
   && String($("script-editor-hint").textContent).includes("悬空"),
   `错误=${JSON.stringify(edDangleErrors.map((error) => [error.loc, error.rule_id]))}`);
 
-// 校验面板条目可点击跳字段（字段位置 → 表单）。
+// 校验面板条目可点击跳字段（字段位置 → 表单）。票 07 起跳转还要**同时切页签**：
+// 这条 loc 指共享表（`/rooms/…`）⇒ 跳转后停在「详情」。
 const edJumpLoc = edDangleErrors[0] ? String(edDangleErrors[0].loc) : "";
 await scriptClick(edErrorRows()[0]);
 const edFocusFields = byClass($("script-editor-form"), "on");
@@ -32157,8 +32177,10 @@ check("M7-25af 点校验条目跳到对应字段：选中引用方实体、打�
   ed().kind === "rooms" && ed().selected === "room.story"
   && $("script-editor-focus").hidden === false
   && String($("script-editor-focus").textContent).includes(edJumpLoc)
-  && edFocusFields.length > 0,
-  `kind=${ed().kind} selected=${ed().selected} 定位="${$("script-editor-focus").textContent}"`);
+  && edFocusFields.length > 0
+  && edActiveTab() === "detail" && edVisiblePanes().join(",") === "detail",
+  `kind=${ed().kind} selected=${ed().selected} 页签=${edActiveTab()}`
+    + ` 定位="${$("script-editor-focus").textContent}"`);
 
 // ---- 收尾：坏库仍是可打开的库（D30），撤掉用户库后回到内置库 ----
 const edReloadMark = calls.length;
@@ -32175,6 +32197,86 @@ check("M7-25ah 收尾：用户库撤掉后编辑器回到内置库（source = bu
   ed().source === "builtin" && (ed().errors || []).length === 0
   && edErrorRows().length === 0 && $("script-editor-clean").hidden === false,
   `source=${ed().source} 库在=${existsSync(SCRIPT_EDITOR_LIBRARY)}`);
+
+
+/* ============ ui-one-screen 票 07：编辑器右栏三页签（spec A10）============
+ *
+ * 两条判据（票面「新增」）：
+ *   UI1-41 三块页签互斥显示：点一个，另两个 hidden（一次只显示一块）；
+ *   UI1-40 校验条目跳转让页签跟着切：`loc` 指大节 / 节点字段 ⇒「大节」页签激活；
+ *          指剧本级 / 共享表字段 ⇒「详情」页签激活。两种 loc 由**真**删除制造：
+ *          删掉被节点与问号池共同引用的 `room.event`（一条 DELETE，服务端立刻回 errors，
+ *          一类 loc 在 `/scripts/…/layers/…/nodes/…`、一类在 `/rooms/…/pool/…`）。
+ *
+ * 页签态只读 `script-editor.js` 写进 DOM 的那一份（垫片不解析静态 `hidden` 属性）；
+ * 互斥与跳转都是一次重绘的结果，断言不看前端另算的镜像。
+ */
+writeFileSync(
+  SCRIPT_EDITOR_LIBRARY,
+  readFileSync("tests/support/fixtures/script-editor-library.json", "utf8"),
+);
+await edClick("btn-script-editor-reload");
+
+// ---- UI1-41：三个页签点一遍，每次只有那一块 pane 可见 ----
+{
+  let ok = true;
+  const seen = [];
+  for (const key of edTabKeys) {
+    await edShowTab(key);
+    const visible = edVisiblePanes();
+    const on = edActiveTab();
+    const right = visible.length === 1 && visible[0] === key && on === key
+      && ed().tab === key
+      && edTabKeys.filter((other) => other !== key)
+        .every((other) => edPane(other).hidden === true);
+    if (!right) ok = false;
+    seen.push(`${key}:${visible.join("/") || "无"}/${on || "无"}`);
+  }
+  check("UI1-41 三块页签互斥显示：点一个页签，只有那一块 pane 可见（另两块 hidden）",
+    ok && edTabKeys.every((key) => typeof edPane(key) === "object"), seen.join(" "));
+}
+
+// ---- UI1-40：删一个被节点 + 问号池共同引用的房间，点两类 loc 的条目各一次 ----
+await edOpenKind("rooms");
+await scriptClick(edRow("room.event"));
+await edClick("btn-script-editor-delete");
+const edEventRefs = edReferenceRows();
+await scriptClick(scriptConfirmAction("仍然删除"));
+const edRoomErrors = ed().errors || [];
+const edLayerLoc = String(
+  (edRoomErrors.find((error) => String(error.loc || "").startsWith("/scripts/")) || {}).loc || "",
+);
+const edDetailLoc = String(
+  (edRoomErrors.find((error) => String(error.loc || "").startsWith("/rooms/")) || {}).loc || "",
+);
+await edShowTab("valid");
+const edRowByLoc = (loc) => edErrorRows()
+  .find((row) => row.getAttribute("data-loc") === loc) || null;
+const edJumpLayerRow = edRowByLoc(edLayerLoc);
+await scriptClick(edJumpLayerRow);
+const edLayerJump = edActiveTab() === "layer"
+  && edVisiblePanes().join(",") === "layer"
+  && ed().tab === "layer" && ed().kind === "nodes"
+  && String($("script-editor-focus").textContent).includes(edLayerLoc)
+  && byClass(edGraph(), "on").length === 1
+  && byClass(edGraph(), "on")[0].getAttribute("data-node-id") === ed().selected;
+await edShowTab("valid");
+const edJumpDetailRow = edRowByLoc(edDetailLoc);
+await scriptClick(edJumpDetailRow);
+const edDetailJump = edActiveTab() === "detail"
+  && edVisiblePanes().join(",") === "detail"
+  && ed().tab === "detail" && ed().kind === "rooms"
+  && String($("script-editor-focus").textContent).includes(edDetailLoc)
+  && byClass($("script-editor-form"), "on").length > 0;
+check("UI1-40 校验条目跳转让页签跟着切（大节字段 ⇒ 「大节」页签激活；剧本字段 ⇒ 「详情」）",
+  edEventRefs.length > 0 && Boolean(edLayerLoc) && Boolean(edDetailLoc)
+  && edJumpLayerRow !== null && edJumpDetailRow !== null && edLayerJump && edDetailJump,
+  `引用点=${edEventRefs.length} 大节=${edLayerLoc || "缺"} 详情=${edDetailLoc || "缺"}`
+    + ` 页签=${edActiveTab()}`);
+
+// 收尾：撤掉探针库回到内置库（后续 M7-29 从「无用户库」起手）。
+unlinkSync(SCRIPT_EDITOR_LIBRARY);
+await edClick("btn-script-editor-reload");
 
 
 /* ============ M7 票 29：内置剧本的整条流转（开局 → 棋盘 → 牌桌 → 退出 → 继续 → 编辑器）============
@@ -32334,6 +32436,7 @@ check("M7-29l 整轮结束后编辑器打开的是**内置库**（source = built
   && $("view-script-editor").hidden === false,
   `source=${ed().source} layers=${(edScript().layers || []).length}`);
 
+await edShowTab("layer");
 await edOpenKind("layers");
 await scriptClick(edRow("l1"));
 check("M7-29m 编辑器的大节页走同一个渲染器（第 1 大节 10 格 / 17 条线，作者视角零状态色）",

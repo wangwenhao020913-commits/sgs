@@ -10524,6 +10524,13 @@ _SCROLL_CONTAINERS = {
         "棋盘页的棋盘区：stage 高 = 行数 × 格高 + 内边距（自伸缩），层数多到装不下时"
         "只有这块滚，HUD 与顶栏不动（票 05 spec A7）"
     ),
+    ".script-editor-list": (
+        "编辑器左栏实体列表：左栏是字面 260dsu，列表吃剩余高度自己滚（票 07 把旧的 42vh 删掉）"
+    ),
+    ".ed-pane": (
+        "编辑器右栏的页签正文：三块 pane 一次只显示一块，各自吃右栏剩余高度并内滚；"
+        "页签头与五个动作键不动（票 07 / spec A10）"
+    ),
 }
 """滚动区登记表（spec A4）：`style.css` 里每个 `overflow-y: auto` 都必须在这里登记。
 
@@ -11323,3 +11330,238 @@ def test_the_skill_tip_flips_at_the_shell_and_the_window_edge() -> None:
     assert probe["window"]["x"] != probe["sameInShell"]["x"], (
         "同一光标在窗里翻、在壳里不翻——两条 bounds 必须真的分开"
     )
+
+
+# ---------------------------------------------------------------------------
+# ui-one-screen 票 07：编辑器两栏定幅 + 右栏三页签（spec §5 A10）
+#
+# 判据分两层：
+# 1. **结构**（`index.html`）：左 `.ed-left` / 右 `.ed-right` 是同一个 flex 行里的**直接**
+#    兄弟；右栏 = 标题 + 五键 + 三个页签键 + 三块 `.ed-pane`（`data-pane` = detail / layer /
+#    valid），初始**只有一块** pane 不带 `hidden`；三块 pane 各自装着今天的挂载点 id
+#    （`#script-editor-form` / `#script-editor-layer` / `#script-editor-errors` 一个都不改名）。
+# 2. **样式**（`style.css`）：左栏字面 260dsu、右栏弹性；页签头固定高度；三块 pane 各自内滚，
+#    并与左栏实体列表一起登记进票 02 的滚动区表（`_SCROLL_CONTAINERS`，spec A4）。
+#
+# 页签互斥的**行为**归烟测 `UI1-41`；"跳转同时切页签"的行为归 `UI1-40`，其静态判据在本节
+# 的第二条测试（同一个函数体里既有页签切换又有字段定位）。
+# ---------------------------------------------------------------------------
+
+_EDITOR_TABS = ("detail", "layer", "valid")
+"""右栏三页签的键（票面：详情 / 大节 / 校验）。"""
+
+
+def _editor_view() -> dict:
+    """`index.html` 里 `#view-script-editor` 的浅树（结构判据走树，不走字符串切片）。"""
+    builder = _TreeBuilder()
+    builder.feed(INDEX_HTML.read_text(encoding="utf-8"))
+    builder.close()
+    view = _element(builder.root, element_id="view-script-editor")
+    assert view is not None, "index.html 里找不到编辑器视图 `#view-script-editor`"
+    return view
+
+
+def _descendants(node: dict) -> list[dict]:
+    found = [node]
+    for child in node["children"]:
+        found.extend(_descendants(child))
+    return found
+
+
+def _by_class(node: dict, name: str) -> list[dict]:
+    return [one for one in _descendants(node) if name in (one["attrs"].get("class") or "").split()]
+
+
+def test_the_editor_right_column_is_three_tabs() -> None:
+    """spec §5 A10 / 票面「目标形状」：两栏定幅 + 右栏三页签（一次只显示一块、各自内滚）。
+
+    结构判据（`index.html`）：
+
+    - `.ed-left` / `.ed-right` 是 `.script-editor-body` 的**直接**子节点（同一个 flex 行），
+      左栏在前、右栏在后；
+    - 右栏里三个页签键的 `data-tab` 恰好是 detail / layer / valid（文案 详情 / 大节 / 校验），
+      三块 `.ed-pane` 的 `data-pane` 与之一一对应、都是页签头的**直接**后继；
+    - 初始只有一块 pane 不带 `hidden`（详情）——另外两块静态就是藏着的（互斥不靠脚本首帧）；
+    - 三块 pane 各自装着今天的挂载点：详情 = `#script-editor-form` + `#script-editor-tree`；
+      大节 = `#script-editor-layer`（网格 / 图 / 边列表都在里面）；校验 = `#script-editor-validation`
+      （`#script-editor-errors` 的逐条红字 + `loc`）。**校验确实住在页签里**——这是票面
+      「校验从表单下方搬进页签」的静态判据，原红字 / 双按钮 / loc 三条判据一条不动。
+
+    样式判据（`style.css` + 登记表）：
+
+    - `.ed-left` 的宽是字面 `flex: 0 0 calc(260 * var(--dsu))`（不随内容变），右栏 `1 1 auto`
+      且两侧 `min-height: 0`（内滚的高度前提）；
+    - 页签头固定（`flex: 0 0 calc(40 * var(--dsu))`），三块 pane 是 `flex: 1 1 auto` +
+      `min-height: 0` + `overflow-y: auto`；左栏实体列表同样是 `overflow-y: auto`；
+    - `.ed-pane` 与 `.script-editor-list` 都在票 02 的登记表里（未登记即红）；
+    - 旧的整页流式版式（`grid-template-columns: 260px` / 列表 `max-height: 42vh`）已清掉。
+    """
+    view = _editor_view()
+
+    # ---- 1. 两栏：同一条 flex 行里的直接兄弟 ----
+    body = _element(view, class_name="script-editor-body")
+    assert body is not None, "编辑器正文要有 `.script-editor-body` 这个两栏容器"
+    body_rule = _css_rule(".script-editor-body")
+    assert re.search(r"display:\s*flex", body_rule), (
+        f"两栏必须是 flex 行（不再是 grid 260px 的流式两栏）：{body_rule}"
+    )
+    assert "grid-template-columns" not in body_rule, f"旧的网格列定义要清掉：{body_rule}"
+    left = _by_class(view, "ed-left")
+    right = _by_class(view, "ed-right")
+    assert len(left) == 1 and len(right) == 1, (
+        f"左 / 右栏各只有一个：`.ed-left`={len(left)} `.ed-right`={len(right)}"
+    )
+    assert left[0]["tag"] == "section" and right[0]["tag"] == "section", (
+        "两栏沿用 `.panel` 的 section（票 25 的形状）"
+    )
+    direct = body["children"]
+    assert left[0] in direct and right[0] in direct, (
+        "`.ed-left` / `.ed-right` 必须是 `.script-editor-body` 的直接子节点（同一行两栏）"
+    )
+    assert direct.index(left[0]) < direct.index(right[0]), "左栏在前、右栏在后"
+
+    # ---- 2. 右栏三页签：键 /  pane / 初始互斥 ----
+    direct = right[0]["children"]
+    tabs = _by_class(right[0], "ed-tab")
+    assert [tab["attrs"].get("data-tab") for tab in tabs] == list(_EDITOR_TABS), (
+        f"三个页签键依次是详情 / 大节 / 校验：{[tab['attrs'] for tab in tabs]}"
+    )
+    assert all(tab["tag"] == "button" for tab in tabs), "页签键是按钮（键盘也能切）"
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tabs_html = html[
+        html.index('class="ed-tabs"') : html.index('id="script-editor-pane-detail"')
+    ]
+    for label in ("详情", "大节", "校验"):
+        assert f">{label}</button>" in tabs_html, (
+            f"页签键的文案要是「{label}」（票面三页签）：{tabs_html}"
+        )
+    panes = _by_class(right[0], "ed-pane")
+    assert [pane["attrs"].get("data-pane") for pane in panes] == list(_EDITOR_TABS), (
+        f"三块 pane 与页签一一对应：{[pane['attrs'] for pane in panes]}"
+    )
+    assert all(pane in direct for pane in panes), (
+        "三块 pane 是右栏的直接子节点：页签头固定、只有 pane 吃剩余高度并内滚"
+    )
+    assert [direct.index(pane) for pane in panes] == list(
+        range(direct.index(panes[0]), direct.index(panes[0]) + 3)
+    ), "三块 pane 紧挨着排在页签头之后"
+    tabs_at = next(at for at, node in enumerate(direct) if "ed-tabs" in (
+        node["attrs"].get("class") or "").split())
+    assert tabs_at < direct.index(panes[0]), "页签头在三块 pane 之前（表头固定不滚）"
+
+    hidden = [pane["attrs"].get("data-pane") for pane in panes if "hidden" in pane["attrs"]]
+    assert hidden == ["layer", "valid"], (
+        f"初始只有「详情」一块可见（另两块静态带 hidden）：实得隐藏 {hidden}"
+    )
+
+    pane_ids = {
+        pane["attrs"]["data-pane"]: _subtree_ids(pane) for pane in panes
+    }
+    assert {"script-editor-form", "script-editor-tree"} <= pane_ids["detail"], (
+        f"「详情」页签 = 今天的表单 + 剧本组装树：{sorted(pane_ids['detail'])}"
+    )
+    assert {"script-editor-layer", "script-editor-graph", "script-editor-edges"} <= (
+        pane_ids["layer"]
+    ), f"「大节」页签 = 今天的网格 / 图 / 边列表：{sorted(pane_ids['layer'])}"
+    assert {"script-editor-validation", "script-editor-errors"} <= pane_ids["valid"], (
+        "「校验」页签 = 今天的校验面板（红字 + loc 原样住在里面）："
+        f"{sorted(pane_ids['valid'])}"
+    )
+    assert "script-editor-form" not in pane_ids["layer"] | pane_ids["valid"], (
+        "表单只在「详情」里（旧位置——右栏把正文竖着排成一列——已清干净）"
+    )
+    assert "script-editor-errors" not in pane_ids["detail"], "校验面板搬出了表单下方"
+
+    # ---- 3. 样式：定幅 / 固定页签头 / 内滚 ----
+    left_rule = _css_rule(".ed-left")
+    assert re.search(r"flex:\s*0 0 calc\(260 \* var\(--dsu\)\)", left_rule), (
+        f"左栏是字面 260 设计单位（不随内容变）：{left_rule}"
+    )
+    for needle in ("display: flex", "flex-direction: column", "min-height: 0"):
+        assert needle in left_rule, f"左栏是定宽列且列表能内滚：缺 `{needle}`：{left_rule}"
+    right_rule = _css_rule(".ed-right")
+    for needle in ("flex: 1 1 auto", "min-width: 0", "min-height: 0"):
+        assert needle in right_rule, f"右栏弹性且不许撑破画布：缺 `{needle}`：{right_rule}"
+    tabs_rule = _css_rule(".ed-tabs")
+    assert re.search(r"flex:\s*0 0 calc\(40 \* var\(--dsu\)\)", tabs_rule), (
+        f"页签头是固定高度（40 dsu，与原型 `.ed-tabs` 同值）：{tabs_rule}"
+    )
+    assert not re.search(r"overflow(?:-y)?:\s*auto", tabs_rule), "页签头不滚（滚的是 pane）"
+    pane_rule = _css_rule(".ed-pane")
+    for needle in ("flex: 1 1 auto", "min-height: 0", "overflow-y: auto"):
+        assert needle in pane_rule, f"三块 pane 各自吃剩余高度并内滚：缺 `{needle}`：{pane_rule}"
+    list_rule = _css_rule(".script-editor-list")
+    assert re.search(r"overflow-y:\s*auto", list_rule), (
+        f"左栏实体列表是唯一内滚的列表：{list_rule}"
+    )
+    assert not re.search(r"(?:max-)?height:\s*[^;]*vh", list_rule), (
+        f"列表高度不许读视口（设计画布内只吃 dsu / flex）：{list_rule}"
+    )
+    assert ".ed-pane" in _SCROLL_CONTAINERS, (
+        "三块 pane 是新的滚动区，必须在票 02 的 `_SCROLL_CONTAINERS` 里登记（spec A4）"
+    )
+    assert ".script-editor-list" in _SCROLL_CONTAINERS, (
+        "左栏实体列表是新的滚动区，必须在票 02 的登记表里"
+    )
+
+
+def test_the_editor_validation_jump_switches_the_tab() -> None:
+    """票面第 3 条（本票核心）：校验条目跳转**同时**切页签与定位——一个函数干两件事。
+
+    静态判据（`script-editor.js`）：
+
+    - `.script-editor-error` 的点击处理器只调 `scriptEditorJump(error.loc)`，且全文里
+      `scriptEditorJump(` 只出现**两次**（定义 + 这一个调用点）——跳转口只有一个；
+    - `scriptEditorJump` 的**同一个函数体**里既有页签赋值（`ed.tab =` / 由 `loc` 派生页签），
+      又有字段定位（`scriptEditorFindField(` + `scrollIntoView(`），且切页签在前——
+      "定位成功但页签还停在原处"在这个形状里不可能发生；
+    - 页签的派生是纯映射 `scriptEditorTabForLoc(loc)`：`/scripts/<i>/layers/…`（大节 / 节点 /
+      连线）⇒ `layer`，其余（剧本级 / 共享表）⇒ `detail`；
+    - 页签落到 DOM 的唯一落点是 `scriptEditorSyncTabs()`：它把 `ed.tab` 写成三块 pane 的
+      `hidden` 与页签键的 `.on`（一次只显示一块）；`scriptEditorRender()` 每帧都调它；
+    - `state.script.editor.tab` 的初值是 `detail`（首屏就是「详情」）。
+    """
+    source = _EDITOR_JS.read_text(encoding="utf-8")
+
+    assert source.count("scriptEditorJump(") == 2, (
+        "跳转口只有一个：定义 + 校验条目处理器那一处调用（别处再写一个就是两处各写一半）"
+    )
+    assert 'row.addEventListener("click", () => scriptEditorJump(error.loc));' in source, (
+        "校验条目（读它的 `loc`）走的就是这一个跳转口"
+    )
+
+    jump = _function_source(source, "scriptEditorJump")
+    assert re.search(r"ed\.tab\s*=", jump), (
+        f"跳转函数体里必须真的切页签（`ed.tab = …`）：{jump}"
+    )
+    assert "scriptEditorTabForLoc(" in jump, "跳转到哪个页签由 `loc` 机械派生（不猜语义）"
+    assert "scriptEditorFindField(" in jump and "scrollIntoView(" in jump, (
+        f"同一个函数体里还要定位 / 高亮字段：{jump}"
+    )
+    assert jump.index("ed.tab") < jump.index("scriptEditorFindField("), (
+        "次序判据：先切页签、再定位（切页签在前，定位才在看得见的那一块里）"
+    )
+    assert jump.index("ed.tab") < jump.index("scrollIntoView("), (
+        "次序判据：字段滚动同样发生在切页签之后"
+    )
+
+    tab_for_loc = _function_source(source, "scriptEditorTabForLoc")
+    assert 'segments[0] === "scripts"' in tab_for_loc and 'segments[2] === "layers"' in tab_for_loc, (
+        f"`loc` 的页签映射只认 `/scripts/<i>/layers/…` 这一段前缀：{tab_for_loc}"
+    )
+    assert 'return "layer"' in tab_for_loc and 'return "detail"' in tab_for_loc, (
+        "大节 / 节点 / 连线 ⇒ 大节页签；剧本级与共享表字段 ⇒ 详情页签"
+    )
+
+    sync = _function_source(source, "scriptEditorSyncTabs")
+    assert "SCRIPT_EDITOR_TABS" in sync and "ed.tab" in sync and "hidden" in sync, (
+        f"页签落到 DOM 的唯一落点：`ed.tab` → 三块 pane 的 `hidden`：{sync}"
+    )
+    render = _function_source(source, "scriptEditorRender")
+    assert "scriptEditorSyncTabs(" in render, "整屏重绘时页签状态与 pane 显隐必须一起重算"
+    show_tab = _function_source(source, "scriptEditorShowTab")
+    assert re.search(r"ed\.tab\s*=", show_tab) and "scriptEditorRender(" in show_tab, (
+        f"点页签键 = 落 `ed.tab` 再重绘（互斥由同一条渲染路保证）：{show_tab}"
+    )
+    state = _function_source(source, "scriptEditorState")
+    assert re.search(r'tab:\s*"detail"', state), "`state.script.editor.tab` 的初值是详情"

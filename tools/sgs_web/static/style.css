@@ -2536,22 +2536,58 @@ button.avatar-skill:hover { border-color: var(--accent); }
 
 /* ---------------------------------------------------------------------------
  * M7 票 25：剧本编辑器（实体列表 / 大节页网格拖放 / 画边 / 解除连线 / 校验面板）
+ * ui-one-screen 票 07：两栏定幅（左 260dsu）+ 右栏三页签（详情 / 大节 / 校验）
  *
- * 版式：左栏实体 + 右栏详情 / 大节页 / 校验面板。节点图仍是 `script-board.js` 那一份
- * （编辑器只在图上叠一层**网格命中格**给拖放用，不画第二条线）。
+ * 版式：左栏实体列表（唯一内滚的列表）+ 右栏标题 / 五键 / 三页签 / 页签正文。三块 pane
+ * **一次只显示一块**（`script-editor.js:scriptEditorSyncTabs` 落 `hidden`），各自 `overflow-y:
+ * auto`：内容长短只改滚动区里的内容，页签头与动作键不动。页签头固定 40dsu（原型 `.ed-tabs`）。
+ * 节点图仍是 `script-board.js` 那一份（编辑器只在图上叠一层**网格命中格**给拖放用，不画第二条线）。
  * 校验面板的红字**自己一条规则**（与坏档那行同姿态：颜色写死、不靠继承）。
+ * 滚动区登记：`.script-editor-list` 与 `.ed-pane`（`tests/test_web_static.py:_SCROLL_CONTAINERS`）。
  * ------------------------------------------------------------------------- */
 .script-editor-body {
-  display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; align-items: start;
+  display: flex; gap: calc(14 * var(--dsu)); align-items: stretch; min-height: 0;
 }
 .script-editor-side, .script-editor-main { min-width: 0; }
-.script-editor-kinds { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 左栏：定宽 260dsu（字面常量，不随内容变），列表吃剩余高度自己滚。 */
+.ed-left {
+  flex: 0 0 calc(260 * var(--dsu));
+  display: flex; flex-direction: column; min-height: 0;
+}
+/* 右栏：弹性；标题 / 五键 / 页签头固定，只有 pane 吃剩余高度。 */
+.ed-right {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0;
+}
+.script-editor-head { flex: 0 0 auto; margin: 0; }
+.script-editor-head h2 { margin: 0; }
+.script-editor-kinds { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; }
 .script-editor-kind {
   padding: 3px 10px; border-radius: 999px; font-size: 13px;
   border: 1px solid var(--line); background: var(--card); cursor: pointer;
 }
 .script-editor-kind.on { background: var(--accent-soft); border-color: var(--accent); }
-.script-editor-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 42vh; overflow: auto; }
+.script-editor-list {
+  display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+}
+/* 页签头：固定高度（40dsu），自己**不滚**。 */
+.ed-tabs {
+  flex: 0 0 calc(40 * var(--dsu));
+  display: flex; gap: calc(6 * var(--dsu)); border-bottom: 1px solid var(--line);
+}
+.ed-tab {
+  font: inherit; font-size: 13px; padding: 0 calc(14 * var(--dsu));
+  height: calc(34 * var(--dsu)); background: transparent; border: 1px solid transparent;
+  border-bottom: none; border-radius: calc(8 * var(--dsu)) calc(8 * var(--dsu)) 0 0;
+  color: var(--dim); cursor: pointer;
+}
+.ed-tab.on {
+  background: var(--card); border-color: var(--line); color: var(--ink); font-weight: 700;
+}
+/* 页签正文：一次只显示一块；块自己滚（高度由右栏给，绝不随内容长高）。 */
+.ed-pane {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-top: calc(10 * var(--dsu));
+}
 .script-editor-row {
   text-align: left; font-size: 13px; padding: 5px 9px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer;
@@ -2573,7 +2609,6 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-editor-summary h3 { margin: 0 0 4px; }
 .script-editor-summary p { margin: 4px 0; }
 /* 校验面板：逐条 `loc · rule_id：期望 …，实得 …`（票 24 的 LoadError 原样），红字是判据。 */
-.script-editor-validation { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .script-editor-errors { display: flex; flex-direction: column; gap: 4px; }
 .script-editor-error {
   text-align: left; font-size: 12px; padding: 4px 8px; border-radius: 6px;
@@ -2581,10 +2616,13 @@ button.avatar-skill:hover { border-color: var(--accent); }
   color: #b3261e; font-weight: 600;
 }
 /* 大节页：网格命中格在节点图下面（节点 / 连线仍由共用渲染器画）。 */
-.script-editor-layer { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .script-editor-graph { position: relative; width: 100%; min-height: 120px; margin-top: 8px; }
 .script-editor-graph .script-graph-edges { z-index: 1; }
 .script-editor-graph .script-graph-nodes { z-index: 2; }
+/* 校验跳转定位到的节点：复用强调色的描边（不新增颜色变量）。 */
+.script-editor-graph .script-node-button.on {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .script-editor-cells { position: absolute; inset: 0; z-index: 0; }
 .script-editor-cell { border: 1px dashed rgba(0, 0, 0, .06); border-radius: 10px; }
 .script-editor-edge, .script-editor-pool-row, .script-editor-skill-row,

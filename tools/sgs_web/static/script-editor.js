@@ -52,6 +52,9 @@ const SCRIPT_EDITOR_KIND_LABELS = {
 /** D30 那句原话（共享引用删除确认框里必须出现；烟测逐字断）。 */
 const SCRIPT_EDITOR_DELETE_WARNING = "继续删除会让它们悬空（校验面板标红）";
 
+/** 右栏三页签（ui-one-screen 票 07 / spec A10）：`ed.tab` 只许取这三个值之一。 */
+const SCRIPT_EDITOR_TABS = ["detail", "layer", "valid"];
+
 /** 归属表（删除级联、永不拒绝）：剧本归库、大节 / 节点归剧本。 */
 const SCRIPT_EDITOR_OWNED_KINDS = ["scripts", "layers", "nodes"];
 
@@ -95,6 +98,8 @@ function scriptEditorState() {
       draft: null,     // 正在编辑 / 新建的那一条（整条实体的深拷贝）
       drag: null,      // 拖拽中的节点 id
       focusLoc: "",    // 点校验条目之后定位到的字段位置
+      // ui-one-screen 票 07：右栏页签（详情 / 大节 / 校验）——一次只显示一块 pane。
+      tab: "detail",
       hint: "",
       error: "",
     };
@@ -415,7 +420,38 @@ function scriptEditorRender() {
   scriptEditorRenderTree();
   scriptEditorRenderLayerPage();
   scriptEditorRenderValidation();
+  scriptEditorSyncTabs();
   return null;
+}
+
+/** 页签落到 DOM 的唯一落点：`ed.tab` → 三个键的 `.on` / `aria-selected` + 三块 pane 的
+ * `hidden`（一次只显示一块）。
+ *
+ * 整屏重绘每帧都调它，故"页签状态"没有第二份：首帧、点页签键、校验跳转都走这一条。
+ */
+function scriptEditorSyncTabs() {
+  const ed = scriptEditorState();
+  const tab = SCRIPT_EDITOR_TABS.includes(ed.tab) ? ed.tab : "detail";
+  ed.tab = tab;
+  for (const key of SCRIPT_EDITOR_TABS) {
+    const button = $(`script-editor-tab-${key}`);
+    if (button) {
+      const on = key === tab;
+      button.classList.toggle("on", on);
+      button.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    const pane = $(`script-editor-pane-${key}`);
+    if (pane) pane.hidden = key !== tab;
+  }
+  return tab;
+}
+
+/** 点页签键：落 `ed.tab` 再整屏重绘（互斥与几何都由同一条渲染路保证）。 */
+function scriptEditorShowTab(key) {
+  const ed = scriptEditorState();
+  ed.tab = SCRIPT_EDITOR_TABS.includes(key) ? key : "detail";
+  scriptEditorRender();
+  return ed.tab;
 }
 
 function scriptEditorRenderKinds() {
@@ -1203,6 +1239,8 @@ function scriptEditorEdit() {
   if (!entity) return null;
   ed.draft = scriptEditorCopy(entity);
   ed.mode = "edit";
+  // 表单住「详情」页签（票 07）：点「编辑」就把人带过去，页签不许把表单挡在看不见的地方。
+  ed.tab = "detail";
   ed.hint = "";
   scriptEditorRender();
   return ed.draft;
@@ -1219,6 +1257,8 @@ function scriptEditorNew() {
   ed.mode = "new";
   ed.selected = null;
   ed.draft = scriptEditorDefaultDraft(ed.kind);
+  // 新建表单也住「详情」页签（票 07）：从「大节」/「校验」点新建也看得见输入框。
+  ed.tab = "detail";
   ed.hint = "";
   scriptEditorRender();
   return ed.draft;
@@ -1497,7 +1537,9 @@ function scriptEditorRenderLayerPage() {
   if (!panel) return null;
   const ed = scriptEditorState();
   const layer = scriptEditorLayer();
-  const visible = Boolean(layer) && (ed.kind === "layers" || ed.kind === "nodes");
+  // 「大节」页签拥有网格 / 节点 / 连线：页签开着就画（不受左栏选中哪类实体影响）。
+  const visible = Boolean(layer)
+    && (ed.tab === "layer" || ed.kind === "layers" || ed.kind === "nodes");
   panel.hidden = !visible;
   if (!visible) {
     const graph = $("script-editor-graph");
@@ -1982,15 +2024,19 @@ function scriptEditorPath(kind, id) {
 
 /* ------------------------------------------------------------ 校验跳字段 */
 
-/** 点校验条目：按 `loc` 选中引用方实体、打开它的编辑态，并把字段标出来。
+/** 点校验条目：按 `loc` 选中引用方实体、**切到拥有该字段的页签**、打开它的编辑态，
+ * 再把字段 / 节点标出来并滚到可见处。
  *
  * `loc` 是加载器的 JSON 指针（票 14 / 票 24 原样下发）；前端**不猜**它在服务端模型里的
- * 语义，只做"指针前缀 → 当前表 / 实体"的机械映射。
+ * 语义，只做"指针前缀 → 当前表 / 实体 / 页签"的机械映射。页签切换与定位在**同一个函数体**
+ * 里（先 `ed.tab`，重绘之后才定位）——所以"定位成功但页签还停在原处"这个状态不存在；
+ * 这是本票的核心判据（加页签的代价，票面第 3 条）。
  */
 function scriptEditorJump(loc) {
   const ed = scriptEditorState();
   const pointer = String(loc || "");
   ed.focusLoc = pointer;
+  ed.tab = scriptEditorTabForLoc(pointer);
   const target = scriptEditorLocTarget(pointer);
   if (target) {
     ed.kind = target.kind;
@@ -2009,8 +2055,24 @@ function scriptEditorJump(loc) {
   ed.hint = `已定位到字段 ${pointer}。`;
   scriptEditorRender();
   const field = scriptEditorFindField(pointer);
-  if (field) field.classList.add("on");
+  if (field) {
+    field.classList.add("on");
+    field.scrollIntoView({ block: "center" });
+  }
+  const node = scriptEditorFindNode(pointer);
+  if (node) {
+    node.classList.add("on");
+    node.scrollIntoView({ block: "center" });
+  }
   return pointer;
+}
+
+/** JSON 指针 → 右栏页签：`/scripts/<i>/layers/…` 下的字段（大节 / 节点 / 连线）归「大节」，
+ * 其余（剧本级字段与共享表字段）归「详情」——「校验」只是入口，不是任何字段的家。 */
+function scriptEditorTabForLoc(loc) {
+  const segments = String(loc || "").split("/").filter(Boolean);
+  if (segments[0] === "scripts" && segments[2] === "layers") return "layer";
+  return "detail";
 }
 
 /** JSON 指针 → `{kind, id, scriptId?, layerId?}`（只认票 14 那几种前缀）。 */
@@ -2058,6 +2120,19 @@ function scriptEditorFindField(loc) {
   return prefix || form;
 }
 
+/** 在「大节」页签的节点图里找 `loc` 指的那个节点（`data-node-id` 由共用渲染器挂上）。
+ * 节点 / 连线的字段住 `layers` 下，但它们在**图**上；跳转后高亮那个节点才是"定位到它"。 */
+function scriptEditorFindNode(loc) {
+  const graph = $("script-editor-graph");
+  if (!graph) return null;
+  const target = scriptEditorLocTarget(loc);
+  if (!target || target.kind !== "nodes") return null;
+  return scriptEditorWalk(graph, []).find(
+    (node) => node.classList && node.classList.contains("script-node-button")
+      && node.getAttribute("data-node-id") === target.id,
+  ) || null;
+}
+
 /* -------------------------------------------------------------- 接线 */
 
 /** 编辑器入口（开局页剧本面板）→ 读库 / 切页；本函数不自动读库（首屏仍是开局页）。 */
@@ -2084,6 +2159,9 @@ function wireScriptEditor() {
   on("btn-script-editor-delete", () => scriptEditorDelete());
   on("btn-script-editor-grid-save", () => scriptEditorSaveGrid());
   on("btn-script-editor-edge-draw", () => scriptEditorDrawEdge());
+  for (const tab of SCRIPT_EDITOR_TABS) {
+    on(`script-editor-tab-${tab}`, () => scriptEditorShowTab(tab));
+  }
   on("script-editor-nav-lobby", () => { show("lobby"); loadRuns(); });
   on("script-editor-nav-table", () => show("table"));
   on("script-editor-nav-replay", () => {
