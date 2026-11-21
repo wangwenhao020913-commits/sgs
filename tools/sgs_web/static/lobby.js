@@ -276,9 +276,10 @@ function syncPoolReadout(rows, banned) {
   }
   const count = $("pool-count");
   if (count) {
+    // 读数只放「这次筛出来多少」+ 禁了多少（槽位号在窗头那句里，别重复挤占固定行）。
+    // 「已禁」口径来自 `poolSummaryStats()`（左栏摘要那一份，不另算一份）。
     const stats = poolSummaryStats();
-    count.textContent = `槽位 ${stats.slot} · 显示 ${rows.length} 真名 / ${ids.length} 版本`
-      + ` · 池内可用 ${stats.versions} · 已禁 ${stats.banned}`;
+    count.textContent = `显示 ${rows.length} 真名 / ${ids.length} 版本 · 已禁 ${stats.banned}`;
   }
   return null;
 }
