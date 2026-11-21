@@ -11957,3 +11957,79 @@ def test_the_display_component_checklist_names_the_refresh_channel() -> None:
     assert "**派生显示字段**：" in glossary, (
         "GLOSSARY 要有「派生显示字段」词条——它是这条路线的领域词（没有 delta、靠事实通道刷新）"
     )
+
+
+# ---------------------------------------------------------------------------
+# hero-portraits 票 06：测试垫片认得 `<img>`（立绘断言的先决条件）
+# ---------------------------------------------------------------------------
+
+_UI_SMOKE = REPO_ROOT / "tests" / "support" / "ui_smoke.mjs"
+"""烟测的 DOM 垫片（`El` / 静态节点 / 读数口都在这一份里；行为面归 `bash tests/smoke-web.sh`）。"""
+
+_SHIM_STATIC_TAGS = re.compile(r"const STATIC_NODE_PATTERN = /<\((?P<tags>[^)]+)\)")
+"""垫片建静态节点的那条正则的标签交替（`STATIC_NODE_PATTERN` 第一组）。"""
+
+
+def _shim_static_tags() -> set[str]:
+    """垫片的静态节点正则认得的标签集合（`index.html` 里带 id 的标签按它建节点）。"""
+    match = _SHIM_STATIC_TAGS.search(_UI_SMOKE.read_text(encoding="utf-8"))
+    assert match is not None, (
+        "ui_smoke.mjs 里找不到 `const STATIC_NODE_PATTERN = /<(input|…)/`——"
+        "垫片的正则被改名 / 改写时，这条登记测试要一起改"
+    )
+    return {tag.strip() for tag in match.group("tags").split("|") if tag.strip()}
+
+
+def test_the_ui_smoke_shim_knows_the_image_tag() -> None:
+    """`<img>` 是仓里首例图片资源（hero-portraits 票 06，spec §3 硬约束 7）：四件登记一个不能少。
+
+    缺陷的形状是**静默失明**，不是报错：垫片不认 `img` 时，静态 `<img id=...>` 根本不会被建，
+    `$()` 命中垫片"缺 id 就造一个空 div"的兜底 ⇒ 立绘断言读到空串、照样报绿。四件登记缺任何
+    一件，同一形状都会从另一条缝里回来：
+
+    1. 静态节点正则认 `img`（`index.html` 的 `<img id=...>` 才会被建出来）；
+    2. `El` 有 `src`（可写）/ `alt` / `complete` / `naturalWidth` / `naturalHeight` 读数件；
+    3. 三处标签白名单（M7-20e / M7-21b / M7-25b）与正则一致——白名单是「新加的静态节点只用
+       垫片认识的标签」的登记。M7-21b / M7-25b 各自还有 `!section.includes("<img")`：棋盘 /
+       编辑器**不许用图**是它们自己的判据，白名单只说明垫片认不认得；
+    4. `SGS_SMOKE_IMG` 读数按 `/art/` 前缀判「这是不是立绘」。
+
+    行为面（`createElement("img")` 的读数三档、静态节点的 `$()` 可达性）由烟测自检
+    `U-IMG-00a..c` 跑**真垫片**钉；这里只钉登记，不重跑 DOM。
+    """
+    text = _UI_SMOKE.read_text(encoding="utf-8")
+    tags = _shim_static_tags()
+    assert "img" in tags, f"垫片的静态节点正则不认 `img`：{sorted(tags)}"
+
+    for member in (
+        "get src()",
+        "set src(",
+        "get alt()",
+        "get complete()",
+        "get naturalWidth()",
+        "get naturalHeight()",
+    ):
+        assert member in text, (
+            f"垫片的 `El` 缺立绘读数件 `{member}`（`src` 必须可写 ⇒ 必须有 getter / setter 一对）"
+        )
+
+    whitelists = re.findall(r"const allowedTags = new Set\(\[(.*?)\]\)", text, re.S)
+    assert len(whitelists) == 3, (
+        f"标签白名单应为 3 处（M7-20e / M7-21b / M7-25b），实际 {len(whitelists)} 处"
+    )
+    for index, body in enumerate(whitelists, start=1):
+        declared = {name.strip().strip('"') for name in body.split(",") if name.strip()}
+        assert declared <= tags, (
+            f"第 {index} 处标签白名单放行了垫片建不出节点的标签：{sorted(declared - tags)}"
+        )
+        assert "img" in declared, (
+            f"第 {index} 处标签白名单没有 `img`（垫片已认得它；白名单是「只用垫片认识的标签」"
+            f"的登记）：{sorted(declared)}"
+        )
+
+    assert "const SGS_SMOKE_IMG = {" in text, (
+        "垫片缺 `SGS_SMOKE_IMG` 读数口（票 06 的可核读数：区分「建出来了没 src」与「src 指向 /art/」）"
+    )
+    assert 'const SMOKE_IMG_ART = "/art/"' in text, (
+        "读数要按 `/art/` 前缀判「这是不是立绘」，否则断言只能读到空串（读数就没意义了）"
+    )

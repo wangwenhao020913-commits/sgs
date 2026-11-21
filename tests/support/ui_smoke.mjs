@@ -207,6 +207,12 @@ const shimRect = (node) => {
   return rectOfBox(40 + (rectSeq % 12) * 100, 40 + Math.floor(rectSeq / 12) * 90, 100, 40);
 };
 
+/* hero-portraits 票 06：`<img>` 是本仓首例图片资源。垫片不加载图片，"已加载"与"固有尺寸"
+ * 只能用常量表达：有 `src` ⇒ `complete === true` 且 `naturalWidth/naturalHeight` 非零
+ * （只承诺非零，**不承诺真像素**——断言该读"有没有 / 指向哪"，不该读分辨率）。 */
+const SHIM_IMG_NATURAL_WIDTH = 750;
+const SHIM_IMG_NATURAL_HEIGHT = 1000;
+
 class El {
   constructor(tag = "div", id = "") {
     this.tagName = tag.toUpperCase(); this.id = id;
@@ -236,6 +242,24 @@ class El {
    * `$("btn-prompt-edit")` 会再造一个**不同**的空节点，点它什么都不会发生。 */
   get id() { return this._id || ""; }
   set id(v) { this._id = String(v || ""); if (this._id) registerElementId(this); }
+  /* hero-portraits 票 06：`<img>` 的读数件（挂在 `El` 上是垫片"一个类到底"的既有形状；
+   * 只有 `tagName === "IMG"` 的节点会被 `SGS_SMOKE_IMG` 认作立绘）。`src` / `alt` 与
+   * `data-*` 一样住 `attrs`——真 DOM 的属性反射：`img.src = "…"` 之后 `getAttribute("src")`
+   * 读得到同一串。`complete` 恒 true（垫片不加载图片，没有"加载中"这一态）；
+   * `naturalWidth/Height` 有 src 时给非零常量、没有时 0（与真 DOM 的"没 src ⇒ 0"同形）。 */
+  get src() { return this.getAttribute("src") ?? ""; }
+  set src(value) {
+    const text = String(value ?? "");
+    if (text) this.setAttribute("src", text); else this.removeAttribute("src");
+  }
+  get alt() { return this.getAttribute("alt") ?? ""; }
+  set alt(value) {
+    if (value === undefined || value === null) this.removeAttribute("alt");
+    else this.setAttribute("alt", String(value));
+  }
+  get complete() { return true; }
+  get naturalWidth() { return this.src ? SHIM_IMG_NATURAL_WIDTH : 0; }
+  get naturalHeight() { return this.src ? SHIM_IMG_NATURAL_HEIGHT : 0; }
   /** 活的 HTMLCollection 形状视图（真 DOM 的 `element.children`）。 */
   get children() { return this._childrenView; }
   get textContent() { return this._text + this._children.map((c) => c.textContent || c.text()).join(""); }
@@ -414,15 +438,44 @@ function registerElementId(node) {
   if (node && node.id) byId.set(String(node.id), node);
 }
 const el = (tag, id) => { const n = new El(tag, id); if (id) byId.set(id, n); return n; };
-const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
-for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a|canvas)\b[^>]*\bid="([^"]+)"/g)) {
+/* 静态节点 = `index.html` 里带 id 的标签；垫片只按这一条正则建它们（**唯一清单**），
+ * 于是"页面里有哪些静态节点"与"`$()` 能不能取到它"是同一个事实。
+ * hero-portraits 票 06：`img` 入册（本仓首例图片资源，此前静态 `<img>` 根本不会被建，
+ * `$()` 落到下面 `getElementById` 的空 div 兜底 ⇒ 立绘断言静默失明）。 */
+const STATIC_NODE_PATTERN = /<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a|canvas|img)\b([^>]*)>/g;
+const STATIC_ID_ATTR = /\bid="([^"]+)"/;
+/** 造一个静态节点并登记 id。`img` 的属性照真 DOM 反射（`src` / `alt` / `class` / `data-*` /
+ *  `hidden`）；其余标签的初始化仍按标签写在下面的循环里（既有口径一个字不动）。 */
+function buildStaticNode(tag, id, attrsText = "") {
   // chain-death-voices 票 01：`#t-self-chain` 从 `<div class="chain-line">` 换成了常驻的
   // `<canvas class="chain-mark">`——静态节点也要拿到 2D 上下文，否则常态贴图画不进去
   // （垫片的 `getElementById` 兜底只会造一个普通 div）。
-  const node = m[1] === "canvas" ? new CanvasEl() : el(m[1], m[2]);
-  if (m[1] === "canvas") { node.id = m[2]; byId.set(m[2], node); }
-  if (m[1] === "input") node.value = "0";
-  if (m[1] === "main") node.hidden = m[2] !== "view-lobby";
+  const node = tag === "canvas" ? new CanvasEl() : el(tag, id);
+  if (tag === "canvas") { node.id = id; byId.set(id, node); }
+  if (tag === "img") {
+    for (const m of attrsText.matchAll(/([A-Za-z_:][-\w:.]*)(?:="([^"]*)")?/g)) {
+      const name = m[1].toLowerCase();   // HTML 属性名大小写不敏感（真 DOM 同义）
+      if (name === "id") continue;
+      const value = m[2] ?? "";
+      node.setAttribute(name, value);
+      if (name === "class") node.className = value;
+      if (name === "hidden") node.hidden = true;
+    }
+  }
+  return node;
+}
+/** 一段 HTML 里的全部静态节点（`index.html` 与票 06 的垫片自检走**同一条**路径）。 */
+function* staticNodes(source) {
+  for (const m of source.matchAll(STATIC_NODE_PATTERN)) {
+    const idMatch = STATIC_ID_ATTR.exec(m[2]);
+    if (!idMatch) continue;
+    yield buildStaticNode(m[1].toLowerCase(), idMatch[1], m[2]);
+  }
+}
+const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
+for (const node of staticNodes(html)) {
+  if (node.tagName === "INPUT") node.value = "0";
+  if (node.tagName === "MAIN") node.hidden = node.id !== "view-lobby";
 }
 for (const id of ["in-players", "in-ai", "in-seat", "in-timeout", "in-seed"]) if (!byId.has(id)) el("input", id);
 // `<select>` 的初值 = 带 `selected` 的那个 option（真 DOM 语义）；垫片不解析 option 结构，
@@ -434,6 +487,67 @@ Object.assign(byId.get("in-ai"), { value: "heuristic" });
 Object.assign(byId.get("in-seat"), { value: "0" });
 Object.assign(byId.get("in-timeout"), { value: "0" });
 Object.assign(byId.get("in-seed"), { value: "20261012" });
+
+/* ------------- hero-portraits 票 06：`<img>` 的可核读数（`SGS_SMOKE_IMG`） -------------
+ * 立绘是本仓首例图片资源；垫片不加载图片，"有没有图 / 图对不对"只能靠这只读数。它把一次
+ * 立绘断言拆成**三档互不混淆**的答案（02 / 03 / 05 直接把它写进失败消息）：
+ *
+ *   `found: false`                 —— 连 `<img>` 都没有：空位，或 `$()` 落到了兜底的空 div
+ *                                     （那正是"静默失明"的形状，所以**必须**按 tagName 认，
+ *                                     不能只看 `.src` 在不在）；
+ *   `found: true, hasSrc: false`   —— 节点建出来了但**没 src**（"有图"那一档没接上数据）；
+ *   `src: "/art/x.jpg", art: true` —— 真的指向立绘路由。
+ *
+ * `root` 可以是节点（含自身子树）或**垫片已登记的 id**；字符串只查 `byId`，不走
+ * `getElementById` 的"缺 id 就造一个"兜底——读数不生产节点。只读，不改 DOM。
+ *
+ * 选型（票面 bullet 3）：不做"计数口"，做**逐节点读数 + 一行摘要**——立绘的判据是
+ * "这张图指向哪 / 有没有图"，不是一个总数；计数口说不清"哪一个块没图"，也分不开
+ * "没 src" 与 "div 冒充 img" 这两档。 */
+const SMOKE_IMG_ART = "/art/";
+/** 子树里第一个 `<img>`（含自身）；没有 ⇒ `null`。 */
+const smokeImgOf = (root) => {
+  const node = typeof root === "string" ? byId.get(root) || null : root || null;
+  if (!node) return null;
+  if (String(node.tagName || "").toUpperCase() === "IMG") return node;
+  for (const child of node.children || []) {
+    const found = smokeImgOf(child);
+    if (found) return found;
+  }
+  return null;
+};
+/** 一张立绘的可核读数（三档见上）。没有 `<img>` 时给一份"空读数"，断言不用先判空。 */
+const smokeImgRead = (root) => {
+  const node = smokeImgOf(root);
+  if (!node) {
+    return {
+      found: false, id: "", cls: "", src: "", hasSrc: false, art: false, alt: "",
+      complete: false, naturalWidth: 0, naturalHeight: 0,
+    };
+  }
+  const src = String(node.src || "");
+  return {
+    found: true,
+    id: String(node.id || ""),
+    cls: String(node.className || ""),
+    src,
+    hasSrc: src !== "",
+    art: src.startsWith(SMOKE_IMG_ART),
+    alt: String(node.alt || ""),
+    complete: node.complete === true,
+    naturalWidth: Number(node.naturalWidth) || 0,
+    naturalHeight: Number(node.naturalHeight) || 0,
+  };
+};
+/** 一行摘要（失败消息里直接贴）：`无 img` / `img 无 src` / `img src=/art/x.jpg art complete 750x1000 #id`。 */
+const smokeImgLine = (root) => {
+  const read = smokeImgRead(root);
+  if (!read.found) return "无 img";
+  return `img ${read.hasSrc ? `src=${read.src}` : "无 src"}${read.art ? " art" : ""}`
+    + `${read.complete ? " complete" : ""} ${read.naturalWidth}x${read.naturalHeight}`
+    + `${read.id ? ` #${read.id}` : ""}`;
+};
+const SGS_SMOKE_IMG = { find: smokeImgOf, read: smokeImgRead, line: smokeImgLine };
 
 /* damage-fx 票 06：音效开关进 `localStorage['sgs.sfx']`。node 的 vm 里没有 Storage，垫一个
  * 最简实现（初始为空 = 缺省静音）；断言直接读 `storage`（= 浏览器里真存了什么），
@@ -741,6 +855,61 @@ const setEquals = (actual, expected) => {
   const right = new Set((expected || []).map(String));
   return left.size === right.size && [...right].every((value) => left.has(value));
 };
+
+/* ------------- hero-portraits 票 06：`<img>` 的垫片自检（立绘断言的前置条件） -------------
+ * 立绘是本仓首例图片资源。这三条先证明垫片**真认得**它：02 / 03 / 05 之后每一条"有图 ⇒
+ * `img.src` 命中 `/art/`"的断言都长在这份读法上，垫片缺件时它们会静默读空串、报假绿。
+ * ① 动态节点（脚本 `createElement` 造出来的那种）；② 读数口的三档；③ 静态节点——`index.html`
+ * 里现在还没有 `<img>`，故喂一段合成 HTML 给**同一条正则 + 同一个 builder**：02 之后加进去的
+ * 静态立绘走的就是这条路径。 */
+{
+  const made = documentShim.createElement("img");
+  made.src = "/art/caocao.jpg";
+  made.alt = "曹操";
+  made.setAttribute("data-portrait", "caocao");
+  check("U-IMG-00a `createElement(\"img\")` 的 src / alt / complete / naturalWidth 都读得到（不是 undefined）",
+    made.tagName === "IMG" && made.src === "/art/caocao.jpg" && made.alt === "曹操"
+    && made.complete === true && made.naturalWidth > 0 && made.naturalHeight > 0
+    && made.getAttribute("src") === "/art/caocao.jpg"
+    && made.getAttribute("data-portrait") === "caocao",
+    `tag=${made.tagName} src=${made.src} alt=${made.alt} complete=${made.complete}`
+      + ` ${made.naturalWidth}x${made.naturalHeight}`);
+}
+{
+  const blank = documentShim.createElement("img");
+  const other = documentShim.createElement("img");
+  other.src = "data:image/png;base64,AAAA";
+  const art = documentShim.createElement("img");
+  art.src = "/art/guanyu.jpg";
+  const blankRead = SGS_SMOKE_IMG.read(blank);
+  const otherRead = SGS_SMOKE_IMG.read(other);
+  const artRead = SGS_SMOKE_IMG.read(art);
+  const divRead = SGS_SMOKE_IMG.read(documentShim.createElement("div"));
+  check("U-IMG-00b 读数口 `SGS_SMOKE_IMG` 分得开「建出来了没 src」/「src 不在 /art/」/「根本没有 img」",
+    blankRead.found === true && blankRead.hasSrc === false && blankRead.art === false
+    && blankRead.complete === true && blankRead.naturalWidth === 0
+    && otherRead.found === true && otherRead.hasSrc === true && otherRead.art === false
+    && artRead.found === true && artRead.art === true && artRead.src === "/art/guanyu.jpg"
+    && divRead.found === false,
+    `${SGS_SMOKE_IMG.line(blank)} | ${SGS_SMOKE_IMG.line(other)} | ${SGS_SMOKE_IMG.line(art)}`
+      + ` | ${SGS_SMOKE_IMG.line(documentShim.createElement("div"))}`);
+}
+{
+  // 与 `index.html` 同一条路径：同一个 `staticNodes()`、同一张 id 表（`$()` 才取得到同一个节点）。
+  const [probe] = [...staticNodes(
+    '<img id="smoke-img-probe" src="/art/__probe__.jpg" alt="探针" data-portrait="probe">',
+  )];
+  const viaDollar = $("smoke-img-probe");   // `$()` = getElementById（缺 id 时兜底造一个空 div）
+  const read = SGS_SMOKE_IMG.read(viaDollar);
+  check("U-IMG-00c 静态 `<img id=... src=...>` 被同一条静态建节点路径建出来：`$()` 取到同一个节点、src 读得到",
+    viaDollar === probe && read.found === true && read.art === true
+    && read.src === "/art/__probe__.jpg" && read.alt === "探针"
+    && !!probe && probe.getAttribute("data-portrait") === "probe",
+    `same=${viaDollar === probe} ${SGS_SMOKE_IMG.line(viaDollar)}`
+      + ` data-portrait=${probe ? probe.getAttribute("data-portrait") : "?"}`);
+  byId.delete("smoke-img-probe");           // 探针不留在垫片的 id 表里
+}
+
 /** 事件**派发点**：节点自己没有这个事件的处理器时，沿 `parentNode` 向上找最近的挂点。
  *
  *  为什么补这一条（ui-one-screen 票 04）：真浏览器里事件**冒泡** ⇒ 委托式处理器（挂在列表
@@ -1266,7 +1435,7 @@ check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放
 // ui-one-screen 票 03 推翻了「三块都排在开局页正文里」这个**前提**：剧本 / 将池 / 录像
 // 搬进了同一扇面板窗（窗没开时住在 `#lobby-window-stash`，所有 `<main>` 之外），工具行三键
 // 各开一扇。判据本身不放宽：三个 id 一个都没删、不插在牌桌与回放视图之间、标签仍是垫片
-// 认识的那 16 种。
+// 认识的那 18 种（`img` 由 hero-portraits 票 06 入册）。
 {
   const lobbyText = html.slice(html.indexOf('id="view-lobby"'), html.indexOf('id="view-table"'));
   const at = (needle) => lobbyText.indexOf(needle);
@@ -1292,11 +1461,12 @@ check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放
     `中间出现 script-panel=${between.indexOf("script-panel")}`
       + ` stash=${between.indexOf("lobby-window-stash")}`);
 
-  // 垫片只解析 16 种标签（本文件 `:373` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  // 垫片只解析 18 种标签（本文件 `STATIC_NODE_PATTERN` 那条正则）：新加的静态节点必须落在
+  // 同一个白名单。`img` 由 hero-portraits 票 06 入册——02 的首页立绘就落在下面第二段切片里。
   // 切片改到**窗壳区间**（寄存格 + 窗），另加工具行与两栏里新增的两段（左边表单里有 <option>，
   // 故从将池摘要面板起切，避开下拉选项）。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
-    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas", "img"]);
   const shellAt = html.indexOf('id="lobby-window-stash"');
   const slices = [
     toolrow,
@@ -1585,8 +1755,10 @@ writeFileSync(
     boardStart > replayStart && between.indexOf("script-board") < 0
     && between.indexOf("script-node-card") < 0,
     `board=${boardStart} replay=${replayStart} 中间出现 script-board=${between.indexOf("script-board")}`);
+  // hero-portraits 票 06：`img` 进白名单（垫片认得它了），但棋盘这一段**不许用图**由下一条
+  // `!section.includes("<img")` 自己钉——两条判据分开，失败消息才指得准（"垫片不认"≠"这段不许画图"）。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
-    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas", "img"]);
   const section = html.slice(boardStart, html.indexOf("<script", boardStart));
   const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
     .map((match) => match[1].toLowerCase());
@@ -31801,8 +31973,10 @@ check("M7-25a 进编辑器 = 一次 GET /api/script-library：整库 / revision 
   const boardStart = html.indexOf('id="view-script-board"');
   const editorStart = html.indexOf('id="view-script-editor"');
   const between = html.slice(tableStart, replayStart);
+  // hero-portraits 票 06：同 M7-21b——`img` 进白名单（垫片认得它了），编辑器这一段**不许用图**
+  // 仍由下面那条 `!section.includes("<img")` 自己钉。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
-    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas", "img"]);
   const section = html.slice(editorStart, html.indexOf("<script", editorStart));
   const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
     .map((match) => match[1].toLowerCase());
