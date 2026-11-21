@@ -158,13 +158,17 @@ def _css_rules() -> list[tuple[str, str]]:
 
 
 def test_stage_panel_uses_the_u3_design_units() -> None:
-    """舞台 40% / 上限 360 / 中心 64.47% / 两行 253，几何上不压顶座。
+    """舞台 40% / 上限 360 / 中心 67.6% / 两行 253，几何上不压顶座。
 
-    设计舞台 1600×608、环桌圆心 y=370、ry=235、对手卡高 150（`table.js:RING_STAGE`）：
-    顶座（90°）下沿 = 370 − 235 + 150/2 = 210。舞台中心 64.47% × 608 = 392，上限 360
-    ⇒ 顶边 392 − 180 = 212 > 210（D3）。40% 宽 = 640 设计单位，横跨 480–1120，
-    左右座位中心 212 / 1388、卡宽 210，故不压侧座。舞台行限两行卡面（124×2 + 5 = 253），
+    环区 = 1600×579（`table.js:RING_STAGE`；牌桌壳里舞台实际 900 − 55.8 − 265 = 579.2 设计单位，
+    顶栏是 `.table-topbar` 的 6.2%），座位外矩形 263×188、马蹄内边距 16（票 04）：
+    顶排座位中心 y=110 ⇒ **下沿 = 16 + 188 = 204**。舞台中心 67.6% × 579.2 = 391.5，上限 360
+    ⇒ 顶边 391.5 − 180 = 211.5 > 204（D3 的"不压顶座"）。40% 宽 = 640 设计单位，横跨 480–1120，
+    两臂座位占 16…279 / 1321…1584，故不压侧座。舞台行限两行卡面（124×2 + 5 = 253），
     超出纵向滚动。
+
+    64.47%（U3-01 当年按 608 高环区算的数）在新环区上给出 193.3 —— 会压进顶排 10.7 设计单位，
+    票 04 因此把中心下移 2.53 个百分点（不变式不动，动的是那个数）。
     """
     stage = _css_rule(".stage-center")
     assert re.search(r"width:\s*40%", stage), "舞台宽必须是 40%（640 设计单位）"
@@ -173,18 +177,22 @@ def test_stage_panel_uses_the_u3_design_units() -> None:
         f"舞台 max-height 必须是 360 设计单位，实际：{stage}"
     )
     top = re.search(r"top:\s*(\d+(?:\.\d+)?)%", stage)
-    assert top is not None and abs(float(top.group(1)) - 64.47) < 1e-6, (
-        f"舞台中心必须下移到 64.47%，实际：{stage}"
+    assert top is not None and abs(float(top.group(1)) - 67.6) < 1e-6, (
+        f"舞台中心必须下移到 67.6%，实际：{stage}"
     )
     assert re.search(r"overflow:\s*hidden", stage), "舞台面板必须裁掉超出的行"
 
-    center_y = float(top.group(1)) / 100 * 608
-    top_seat_bottom = 370 - 235 + 150 / 2
+    stage_height = 900 - 6.2 / 100 * 900 - 265          # 579.2：900 − 顶栏 6.2% − 底栏 265
+    center_y = float(top.group(1)) / 100 * stage_height
+    top_seat_bottom = 16 + 188                          # 环区内边距 + 座位高（票 04）
     panel_top = center_y - float(width.group(1)) / 2
     assert panel_top > top_seat_bottom, (
-        f"舞台顶边 {panel_top} 压住了顶座下沿 {top_seat_bottom}（D3 的几何判据）"
+        f"舞台顶边 {panel_top:.1f} 压住了顶排座位下沿 {top_seat_bottom}（D3 的几何判据）"
     )
-    assert abs(center_y - 392) < 0.5, f"64.47% × 608 应 ≈ 392，实际 {center_y}"
+    assert center_y + float(width.group(1)) / 2 <= stage_height, (
+        f"舞台底边 {center_y + 180:.1f} 越出环区 {stage_height}（不压底部面板）"
+    )
+    assert abs(center_y - 391.5) < 0.5, f"67.6% × 579.2 应 ≈ 391.5，实际 {center_y:.1f}"
 
     row = _css_rule(".stage-center .processing")
     assert re.search(r"max-height:\s*calc\(253 \* var\(--dsu\)\)", row), (
@@ -357,8 +365,15 @@ def test_ink_table_skin_layers_and_paper_are_wired() -> None:
     assert not re.search(r"background:\s*linear-gradient", bottom), (
         f"底栏的底色已经让给水墨底，不该再留 linear-gradient 底色（注释里提到它不算）：{bottom}"
     )
-    assert re.search(r"flex:\s*0\s+0\s+27\.5%", bottom), (
-        f"底栏高度是 U1-01 的判据，换底色不许动它：{bottom}"
+    # 底栏高度：U1-01 当年钉的是 `flex: 0 0 27.5%`，hero-portraits 票 04 换成 `265 dsu`
+    # （≈29.4%）。换的理由**不是**"内容长了"，是**块长了**：自己的座位 +25% 之后 238 dsu 高，
+    # 27.5% × 900 = 247.5 减掉上下内边距装不下。这条判据仍然钉"底栏高度不许被顺手动"
+    # （换底色 / 换皮肤时高度口径要原样留着），只是数字换成新的那一份。
+    assert re.search(r"flex:\s*0\s+0\s+calc\(265 \* var\(--dsu\)\)", bottom), (
+        f"底栏高度是票 04 的判据（265 dsu / ≈29.4%），换底色不许动它：{bottom}"
+    )
+    assert not re.search(r"flex:\s*0\s+0\s+27\.5%", bottom), (
+        f"旧的 27.5% 已由票 04 替换成 265 dsu：{bottom}"
     )
 
     stage = _CSS_TEXT
@@ -1981,7 +1996,8 @@ def test_slot_labels_leave_room_for_four_character_card_names() -> None:
     )
 
     # 行高预算（hero-portraits 票 03 起由 flex 均分，不再定宽定高）：侧栏 = 座位高 − 上下
-    # 内边距 ×2 − 行距 ×2，三行均分。数字从 CSS 里现读，改座位高 / 内边距时这条会跟着红。
+    # 内边距 ×2 − 行距 ×2，三行均分。座位高是票 04 的 188 / 238（对手 150 → 188、自己 210 → 238，
+    # +25% 那一档）；数字从 CSS 内边距现读，改座位高 / 内边距时这条会跟着红。
     def _row_budget(seat_height: int, side_selector: str) -> float:
         side = _css_rule(side_selector)
         pad = re.search(r"padding:\s*(\d+)px", side)
@@ -1989,10 +2005,10 @@ def test_slot_labels_leave_room_for_four_character_card_names() -> None:
         assert pad is not None and gap is not None, side
         return (seat_height - int(pad.group(1)) * 2 - int(gap.group(1)) * 2) / 3
 
-    assert _row_budget(150, ".seat .side-block") >= 36, (
+    assert _row_budget(188, ".seat .side-block") >= 36, (
         "对手每行 ≥ 36 设计单位（四字牌名折两行 + 槽名 + 内边距的旧预算）"
     )
-    assert _row_budget(210, ".self .side-block") >= 52, (
+    assert _row_budget(238, ".self .side-block") >= 52, (
         "自己每行 ≥ 52 设计单位（字 13 的两行 + 12 的槽名）"
     )
     judge_label = _css_rule(".mini-slot.judge-slot.filled .slot-k")
@@ -12451,3 +12467,231 @@ def test_the_ui_smoke_shim_knows_the_image_tag() -> None:
     assert 'const SMOKE_IMG_ART = "/art/"' in text, (
         "读数要按 `/art/` 前缀判「这是不是立绘」，否则断言只能读到空串（读数就没意义了）"
     )
+
+
+# ---------------------------------------------------------------------------
+# hero-portraits 票 04：环桌几何（贴边马蹄 + 块放大 + 底栏）
+#
+# 环区 = 1600 × (900 − 顶栏 − 底栏 265) = **1600×579** 设计单位；座位外矩形 = **263×188**
+# （210×150 的 +25%，裁决 Q16），马蹄内边距 16。这三样数字**只住 `table.js`**：
+# `ringSeatPositions(n)` 用它们算座位中心，`seat-view.js` 用同一份常量把座位盒写成百分比——
+# CSS 里不再有座位尺寸（旧的 `.ring .seat { width: 13.125%; aspect-ratio: 210 / 150 }` 已删）。
+#
+# 探针跑真 `table.js`（node vm，**不建 DOM**）并调用纯函数；缺函数 / 缺常量**不抛**，
+# 让红落在下面的断言上。跑法沿用 damage-fx / thunder / fire 那几支探针的同一套
+# （`shutil.which("node")` + 临时目录 + `json.loads`），没有第二套 runner。
+# ---------------------------------------------------------------------------
+
+_RING_GEOMETRY_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+/* 只载真 `table.js`：环桌排法是纯函数，**没有任何 DOM 依赖**（票面的「不读 DOM」）。
+ * 这个 context 里连 `$` 都没有——函数体若偷偷摸 DOM，探针会当场炸。 */
+const context = vm.createContext({ console });
+context.globalThis = context;
+vm.runInContext(readFileSync("tools/sgs_web/static/table.js", "utf8"), context, {
+  filename: "table.js",
+});
+
+const report = vm.runInContext(`(() => {
+  const defined = (name) => { try { return typeof eval(name) !== "undefined"; } catch { return false; } };
+  const missing = ["ringSeatPositions", "RING_STAGE", "RING_SEAT"].filter((name) => !defined(name));
+  if (missing.length) return JSON.stringify({ missing });
+  const counts = {};
+  for (let count = 2; count <= 8; count += 1) counts[count] = ringSeatPositions(count);
+  return JSON.stringify({
+    missing: [],
+    stage: RING_STAGE,
+    seat: RING_SEAT,
+    counts,
+    degenerate: [0, 1].map((count) => ringSeatPositions(count)),
+  });
+})()`, context);
+process.stdout.write(report);
+"""
+
+
+def _ring_geometry_probe() -> dict:
+    """跑真 `table.js`（node vm，无 DOM），拿回 2~8 人局的座位中心 + 两个几何常量。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "ring_geometry_probe.mjs"
+        probe.write_text(_RING_GEOMETRY_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"环桌几何探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def ring_geometry_probe() -> dict:
+    """2~8 人局一次跑完（node 启动约 100ms，不必逐个人数各跑一遍）。"""
+    return _ring_geometry_probe()
+
+
+def test_the_ring_seats_never_overlap_from_two_to_eight_players(ring_geometry_probe: dict) -> None:
+    """票 04 的判据：2~8 人局逐个人数，任意两席不重叠、每席都在环区内、沿周长等距。
+
+    断的是**几何性质**，不是把期望坐标抄一遍（抄一遍就是同义反复）：
+
+    - 不重叠 = 轴对齐盒的票面原式 `|dx| >= w 或 |dy| >= h`；
+    - 在环区内 = 盒子的四条边都落在 `[内边距, 环区 − 内边距]` 里；
+    - 等距 = 沿周长相邻两席的位移相等（`周长 / 对手数`），第一席在半个档距处；
+    - 8 人局额外钉「横向吃满」：最左 / 最右的盒子边正好压在内边距上（裁决 §4 的 x 16…1584）。
+
+    期望值一律从独立算式（周长、档距）现算，不从被测函数的结果反推。
+    """
+    assert not ring_geometry_probe["missing"], (
+        f"table.js 缺环桌几何的公开口：{ring_geometry_probe['missing']}"
+        "（排法必须是纯函数 ringSeatPositions(n)；尺寸只在 RING_STAGE / RING_SEAT 一处）"
+    )
+    stage = ring_geometry_probe["stage"]
+    seat = ring_geometry_probe["seat"]
+    assert stage == {"width": 1600, "height": 579}, (
+        f"环区 = 1600 × (900 − 顶栏 − 底栏 265) = 1600×579（裁决 §4），实得 {stage}"
+    )
+    assert (seat["width"], seat["height"], seat["margin"]) == (263, 188, 16), (
+        f"座位外矩形 = 263×188（210×150 的 +25%，裁决 Q16）+ 马蹄内边距 16，实得 {seat}"
+    )
+    assert ring_geometry_probe["degenerate"] == [[], []], (
+        f"少于 2 人不排（自己不在环上），实得 {ring_geometry_probe['degenerate']}"
+    )
+
+    w, h, margin = seat["width"], seat["height"], seat["margin"]
+    vertical = stage["height"] - h - margin * 2
+    horizontal = stage["width"] - w - margin * 2
+    perimeter = vertical * 2 + horizontal
+
+    for count in range(2, 9):
+        positions = ring_geometry_probe["counts"][str(count)]
+        opponents = count - 1
+        assert len(positions) == opponents, (
+            f"{count} 人局：环上应有 {opponents} 个对手席，实得 {len(positions)}"
+        )
+        assert [p["seatOffset"] for p in positions] == list(range(1, opponents + 1)), (
+            f"{count} 人局：座号必须是自己 +1、+2 …（实得 {[p['seatOffset'] for p in positions]}）"
+        )
+        for index, first in enumerate(positions):
+            for second in positions[index + 1:]:
+                dx = abs(first["x"] - second["x"])
+                dy = abs(first["y"] - second["y"])
+                assert dx >= w or dy >= h, (
+                    f"{count} 人局：座位 {first['seatOffset']} 与 {second['seatOffset']} 重叠"
+                    f"（dx={dx:.2f} < {w} 且 dy={dy:.2f} < {h}）"
+                )
+        for seat_position in positions:
+            label = f"{count} 人局座位 {seat_position['seatOffset']}"
+            assert seat_position["x"] - w / 2 >= margin - 1e-6, f"{label} 越出环区左沿"
+            assert seat_position["x"] + w / 2 <= stage["width"] - margin + 1e-6, f"{label} 越出右沿"
+            assert seat_position["y"] - h / 2 >= margin - 1e-6, f"{label} 越出上沿"
+            assert seat_position["y"] + h / 2 <= stage["height"] - margin + 1e-6, f"{label} 越出下沿"
+        step = perimeter / opponents
+        gaps = [positions[i + 1]["t"] - positions[i]["t"] for i in range(opponents - 1)]
+        assert all(abs(gap - step) < 1e-6 for gap in gaps), (
+            f"{count} 人局：沿周长必须等距（档距 {step:.3f}，实得 {[round(g, 3) for g in gaps]}）"
+        )
+        assert abs(positions[0]["t"] - step / 2) < 1e-6, (
+            f"{count} 人局：第一席应在半个档距处（{step / 2:.3f}），实得 {positions[0]['t']:.3f}"
+        )
+        # 拐角净空（票 04 对原型算法唯一的一处补丁）：**只有 6 人局**会触发——原型的等距走法
+        # 在 5 个对手时把臂上那一席放在 y=266.7，与顶排最近那席差 dx=247.9 / dy=156.7（都小于
+        # 263×188 ⇒ 重叠，原型自己的 maxScaleFor 在 6 人局也只给 1.18×）。修法是把它往下让到
+        # 顶排 + 一整块高（留 8 dsu 空气），`t` 仍是等距值。其余人数原样照原型走法排。
+        clamped = [p for p in positions if p.get("clamped")]
+        if count == 6:
+            assert len(clamped) == 2, (
+                f"6 人局应有对称的一对被拐角净空推下去，实得 {[(c['x'], c['y']) for c in clamped]}"
+            )
+            assert abs(clamped[0]["x"] + clamped[1]["x"] - stage["width"]) < 1e-6, (
+                "拐角净空只许推 `y`，左右两席必须仍对称"
+            )
+            top_y = min(p["y"] for p in positions if not p.get("clamped"))
+            assert all(c["y"] - top_y > h for c in clamped), (
+                f"被推下去的座位要真的让开顶排一整块高（顶排 y={top_y}，实得 "
+                f"{[c['y'] for c in clamped]}）"
+            )
+        else:
+            assert not clamped, (
+                f"{count} 人局不该触发拐角净空（原型读数在这一档是不重叠的），"
+                f"实得 {[(c['x'], c['y']) for c in clamped]}"
+            )
+        if count == 8:
+            left = min(p["x"] for p in positions) - w / 2
+            right = max(p["x"] for p in positions) + w / 2
+            assert abs(left - margin) < 1e-6 and abs(right - (stage["width"] - margin)) < 1e-6, (
+                f"8 人局：马蹄要横向吃满（x {margin}…{stage['width'] - margin}），"
+                f"实得 x {left:.2f}…{right:.2f}"
+            )
+
+
+def test_the_ring_seat_size_lives_in_one_module_and_the_bottom_bar_grew_with_the_blocks() -> None:
+    """票 04 的另外三件：一个数只许一处、自己的座位、底栏与底部面板次序。
+
+    - **单一真源**：`.ring .seat` 里不许再写 width / aspect-ratio。旧版 CSS 的 `13.125%`
+      与 JS 的 `210` 是同一个数的两处重复（210/1600），本票把它收进 `table.js:RING_SEAT`。
+    - **自己的座位** 330×238（`264×190` 的 +25%，裁决 Q18）：底栏只有 265 dsu，238 装得下。
+    - **底栏** 27.5%（≈247.5 dsu）→ `calc(265 * var(--dsu))`（≈29.4%）。不是内容长了，
+      是块长了（+25% 之后 238 高的自己块装不进 247 的内容高）。
+    - **底部面板次序 = DOM 次序**（`记录` → 提示 / 手牌 → 技能 → **自己的块在最右**，
+      裁决 §7②）：CSS 里没有 `order:` / `row-reverse` 反着排。
+    """
+    # 注释里可以写"旧版这里是 width: 13.125%"，判据只看**声明**（先剥注释，与 `_css_rules()` 同一口径）。
+    css = re.sub(r"/\*.*?\*/", "", _CSS_TEXT, flags=re.S)
+    ring_seat = re.sub(r"/\*.*?\*/", "", _css_rule(".ring .seat"), flags=re.S)
+    assert not re.search(r"(?:^|;)\s*width\s*:", ring_seat), (
+        f"座位尺寸不许在 CSS 里再写一份（真源是 table.js:RING_SEAT）：{ring_seat}"
+    )
+    assert "aspect-ratio" not in ring_seat, (
+        f"座位尺寸不许在 CSS 里再写一份（真源是 table.js:RING_SEAT）：{ring_seat}"
+    )
+    assert "13.125" not in css, (
+        "13.125%（= 210/1600）是旧座位宽的第二份副本，已随 RING_SEAT 收进 table.js"
+    )
+
+    self_seat = _css_rule(".seat.self")
+    assert re.search(r"flex:\s*0 0 calc\(330 \* var\(--dsu\)\)", self_seat), (
+        f"自己的座位宽 = 330 dsu（264×190 的 +25%），实得：{self_seat}"
+    )
+    assert re.search(r"aspect-ratio:\s*330 / 238", self_seat), (
+        f"自己的座位高 238 dsu（同一份 +25%），实得：{self_seat}"
+    )
+    assert not re.search(r"aspect-ratio:\s*292 / 210", _CSS_TEXT), "旧的 292×210 自己座位已替换"
+
+    bottom = _css_rule(".table-bottom")
+    assert re.search(r"flex:\s*0 0 calc\(265 \* var\(--dsu\)\)", bottom), (
+        f"底栏 = 265 dsu（裁决 Q18；≈29.4%），实得：{bottom}"
+    )
+    assert not re.search(r"flex:\s*0 0 27\.5%", bottom), f"旧的 27.5% 底栏已替换：{bottom}"
+    # 三个数必须闭合：环区高 = 900 − 顶栏 − 底栏。
+    assert 579 + 265 + 56 == 900, "环区 579 + 顶栏 56 + 底栏 265 = 设计画布 900"
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+    bar = _element(builder.root, element_id="table-bottom")
+    assert bar is not None, 'index.html 里找不到 <div id="table-bottom">'
+    order = [
+        child["attrs"].get("id") or (child["attrs"].get("class") or "").split()[0]
+        for child in bar["children"]
+        if child["tag"] in {"button", "div"}
+    ]
+    assert order == ["t-log-toggle", "hand-area", "t-skills", "t-self-seat"], (
+        f"底部面板的次序 = DOM 次序（记录 → 提示 / 手牌 → 技能 → 自己的块在最右），实得 {order}"
+    )
+    assert not re.search(r"(?:^|[;{\s])order\s*:", _CSS_TEXT), (
+        "底部面板的次序不许靠 CSS `order:` 反着排（次序的真源只有 DOM 一处："
+        "`记录` → 提示 / 手牌 → 技能 → 自己的块在最右，裁决 §7②）"
+    )
+    assert "row-reverse" not in _CSS_TEXT, "底部面板不许用 row-reverse 反着排"

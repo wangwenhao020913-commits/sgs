@@ -850,14 +850,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .seats.ring { position: absolute; inset: 0; display: block; }
 
 /* ---------- 座位卡（U1-02）：左武将块 + 右判定 / 装备区 ----------
- * 对手 210×150（左 110 / 右 100）；自己 292×210（左 162 / 右 130）。
- * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。
- * U2-02 / D6：对手的 +8%（228×163）在 8 人环上与相邻座位重叠（40° 相邻角的 |dy| ≈ 158.3 < 163），
- * 故对手**外形保持 210×150、只放大内容**（判定 36 / 装备 42 / 槽位字 10 / 标签 9）。 */
+ * **外矩形不在这条规则里**（hero-portraits 票 04）：对手 263×188（210×150 的 +25%，裁决 Q16）
+ * 与马蹄位置一起住 `table.js:RING_SEAT` / `RING_STAGE`，由 `seat-view.js:seatCardNode()` 按环区
+ * 百分比写进 inline style。旧版这里是 `width: 13.125%; aspect-ratio: 210 / 150` —— 与 JS 的 210
+ * 是同一个数的两处重复，本票删掉 CSS 这一份（票 04 的单测钉住"这里不再有 width / aspect-ratio"）。
+ * 内部分隔比例没变：武将块 137.76 / 判定装备 125.24 = 52.38% / 47.62%（票 04 前是 110 / 100）。
+ * 壳随视口缩放，故宽度用环区百分比、槽高用设计像素。 */
 .ring .seat {
   position: absolute;
-  width: 13.125%;                 /* 210 / 1600 设计舞台 */
-  aspect-ratio: 210 / 150;
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: row;
@@ -1092,7 +1092,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
  * 52 / 60）装不满放大后的块，故删掉——行高由 flex 均分：判定行 1 份、装备区 2 份，
  * 装备区里两行各 1 份。槽宽仍由同一行里的 `flex: 1 1 0` 均分（牌名折行预算不变）。 */
 .seat .side-block {
-  flex: 0 0 47.62%;              /* 100 / 210 */
+  flex: 0 0 47.62%;              /* 125.24 / 263：比例未变，盒子长大了 +25%（票 04） */
   display: flex; flex-direction: column; gap: 4px;
   padding: 5px; background: #fbf6ea; overflow: hidden;
 }
@@ -1302,11 +1302,14 @@ button.mini-slot { cursor: pointer; }
 .seat.req { outline: 2px dashed #b8860b; outline-offset: 2px; }
 
 .stage-center {
-  position: absolute; left: 50%; top: 64.47%;
+  position: absolute; left: 50%; top: 67.6%;
   transform: translate(-50%, -50%);
-  /* U3-01 / D3：宽 40%（= 640 设计单位，一行约 6 张）；中心从 370 下移到 392（64.47%
-   * × 608），面板上限 360 ⇒ 顶边 392 − 180 = 212 > 顶座（90°）下沿 210，不压顶座；
-   * 40% 宽横跨 480–1120，左右座位中心 212 / 1388、卡宽 210 ⇒ 也不压侧座。 */
+  /* U3-01 / D3：宽 40%（= 640 设计单位，一行约 6 张）、面板上限 360，**不压顶座**。
+   * hero-portraits 票 04 把中心从 392（64.47% × 608）下移到 **391.5（67.6% × 579.2）**：
+   * 贴边马蹄把顶排座位抬到了环区上沿（中心 110、下沿 16 + 188 = 204），椭圆时代的顶座下沿
+   * 是 210。上限 360 ⇒ 顶边 391.5 − 180 = **211.5 > 204**，这条不压顶座的不变式仍然成立
+   * （64.47% 在新环区上会给出 193.3，压进顶排 10.7 设计单位）。
+   * 40% 宽横跨 480–1120，左右两臂的座位在 16…279 / 1321…1584 ⇒ 不压侧座。 */
   width: 40%; min-height: 22%;
   max-height: calc(360 * var(--dsu));
   overflow: hidden;
@@ -1650,14 +1653,20 @@ button.mini-slot { cursor: pointer; }
 /* ---------- 底部面板：事件流按钮 | 手牌区 | 技能 | 自己的武将块 | 自己的判定 / 装备 ---------- */
 
 .table-bottom {
-  flex: 0 0 27.5%;
+  /* hero-portraits 票 04：底栏 **27.5% → 265 dsu**（≈29.4%，裁决 Q18）。
+   * 换的理由不是"内容长了"，是**块长了**：自己的座位 +25% 之后 238 dsu 高，
+   * 底栏内容高（265 − 上下内边距 8.8 / 10.4）只有 ~246，旧的 27.5% × 900 = 247.5 再减
+   * 内边距就装不下。环区高 = 900 − 顶栏 − 265 = 579，与 `table.js:RING_STAGE` 闭合。
+   * 走 dsu 而不是百分比：底栏跟的是设计画布，不是视口比例。 */
+  flex: 0 0 calc(265 * var(--dsu));
   min-height: 130px;
   display: flex;
   align-items: stretch;
   gap: 0.6%;
   padding: 0.55% 0.9% 0.65%;
-  /* ink-table-skin 票 02：同顶栏，半透宣纸。`flex: 0 0 27.5%` 与 `z-index: 10` 被
-   * 烟测 / 静态形状检查钉着，一个字不动；只换底与上边线。 */
+  /* ink-table-skin 票 02：同顶栏，半透宣纸。`z-index: 10` 被烟测 / 静态形状检查钉着，
+   * 一个字不动；只换底与上边线。`flex` 的高度口径由 hero-portraits 票 04 改成 265 dsu
+   * （票 02 当年写的"27.5% 一个字不动"正是被这一票替换的那条，理由见上）。 */
   background: rgba(var(--paper-rgb), .55);
   border-top: 1px solid rgba(58, 51, 43, .18);
   position: relative;
@@ -1759,7 +1768,7 @@ button.mini-slot { cursor: pointer; }
 @keyframes countdown-blink { 50% { opacity: .3; } }
 
 /* 其他座位的询问：只在**其武将块下方**显示文本，不给按钮、不给倒计时。
- * 座位卡是固定的 210×150，故这条文本压在卡片底部（不挤压武将块 / 判定装备区）。 */
+ * 座位卡是固定的 263×188（票 04），故这条文本压在卡片底部（不挤压武将块 / 判定装备区）。 */
 .seat-prompt {
   margin-top: 2px; padding-top: 4px;
   border-top: 1px dashed var(--line);
@@ -1826,10 +1835,13 @@ button.mini-slot { cursor: pointer; }
   width: calc(11 * var(--dsu)); height: calc(11 * var(--dsu));
 }
 
-/* 自己的座位块（U1-02）：292×210 设计尺寸，左武将块 + 右判定 / 装备区（右块 130）。 */
+/* 自己的座位块（U1-02；hero-portraits 票 04 放大）：**330×238** dsu = 264×190 的 +25%
+ * （裁决 Q18），左武将块 + 右判定 / 装备区。底栏 265 dsu ⇒ 238 装得进（内容高 ~246）；
+ * 旁边那个 +50% 档会撑破底栏，这是 +25% 的另一个理由。
+ * 宽写 dsu 而不是百分比：它是底栏（flex 行）里的一项，百分比会按底栏**内容宽**结算。 */
 .seat.self {
-  flex: 0 0 18.25%;               /* 292 / 1600 设计舞台 */
-  aspect-ratio: 292 / 210;
+  flex: 0 0 calc(330 * var(--dsu));   /* 330 dsu = 264 × 1.25 */
+  aspect-ratio: 330 / 238;
   align-self: flex-end;
   display: flex;
   flex-direction: row;
@@ -1871,13 +1883,13 @@ button.mini-slot { cursor: pointer; }
 .self .chain-mark { left: 0; width: 100%; }
 .self .dead-text { font-size: calc(36 * var(--dsu)); }
 .self .side-block {
-  flex: 0 0 44.52%;              /* 130 / 292 */
+  flex: 0 0 44.52%;              /* 146.9 / 330：分隔比例未变，盒子 +13%（292→330，票 04） */
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px; background: #fbf6ea;
   overflow: hidden;
 }
 /* 自己的侧栏同样是三行铺满（票 03）：判定行 1 份、装备区 2 份、区里两行各 1 份。
-   行高预算 = 210 − 上下 8×2 − 行距 6×2 = 182，三行 ⇒ ≈ 60/行（旧口径的定高 52 / 60 删掉）。
+   行高预算 = 238 − 上下 8×2 − 行距 6×2 = 210，三行 ⇒ ≈ 70/行（票 04 放大后；旧口径的定高 52 / 60 已删）。
    U4-06 / D13：槽内可用宽 ≈ 47 设计单位（装备两列）/ ≈ 28（判定三等分）——牌名折两行
    （balance），四字 / 五字全名放得下；槽名（标签 12 / 判定 12）保留。 */
 .self .judge-row { gap: 4px; }

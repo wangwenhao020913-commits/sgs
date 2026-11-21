@@ -9431,24 +9431,22 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 }
 
 
-/* ============ U1-01 布局壳：2 / 4 / 6 / 8 人环桌几何 ============
+/* ============ U1-01 布局壳：2 / 4 / 6 / 8 人环桌几何（hero-portraits 票 04 改贴边马蹄）============
  *
- * 判据落在 **renderTable 写出的 `data-ring-*` 设计坐标**上（不是另算一份布局）：
- * 座位数 = 总人数 − 1（自己不在环上）、座号 +1 在最右、角度沿上半弧递增、
- * 8 人局 7 个对手在 210×150 下**无正面积重叠**、2 人局只有正上方一个对手。
- * U2-02 / D6：+8% 的 228×163 只在 8 人局破功（U1-01d2 钉住），故实际外形保持 210×150。
+ * 判据落在 **renderTable 写出的 `data-ring-*` 与 inline style** 上（不是另算一份布局）：
+ * 座位数 = 总人数 − 1（自己不在环上）、座号 +1 在最右、`data-ring-t`（沿马蹄周长走过的距离）
+ * 相邻差恒等、8 人局 7 个对手在 263×188 下**无正面积重叠**、2 人局只有正上方一个对手。
+ * 椭圆那套 `data-ring-angle` 已随票 04 删除（这里顺带钉住它没被重新加回来）。
  * 设计坐标无重叠 ⇔ 1920×1080 与 1280×720 都无重叠：座位宽 / 高随壳宽与设计单位同比例缩放。
  */
 {
   const savedView = ui.state.view;
   const savedLog = ui.state.logRecords;
-  const designStage = { width: 1600, height: 608 };
-  // U2-02 / D6：对手「+8%」的 228×163 在 8 人环上会重叠（见 U1-01d2），故取票面允许的回退——
-  // 座位卡**外形保持 210×150**、只放大内容；矩形判据因此按实际外形算。
-  const seatW = 210;
-  const seatH = 150;
-  const grownSeatW = 228;
-  const grownSeatH = 163;
+  const designStage = { width: 1600, height: 579 };   // 900 − 顶栏 55.8 − 底栏 265（票 04）
+  // 座位外矩形 263×188（210×150 的 +25%，裁决 Q16）；尺寸的真源是 `table.js:RING_SEAT`，
+  // 下面 U1-01e3 断的就是它写进 inline style 的那两个百分比。
+  const seatW = 263;
+  const seatH = 188;
   const ringView = (count, selfSeat = 0) => ({
     seed: 1, player_count: count, human_seat: selfSeat, finished: false, timeout_seconds: null,
     // `serve.py` 的响应里 `heroes` 是 list（按座位下标取）；合成视图同形，别用对象冒充。
@@ -9478,7 +9476,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   };
   const ringSeats = () => Array.from($("t-seats").children).map((node) => ({
     seat: Number(node.getAttribute("data-seat")),
-    angle: Number(node.getAttribute("data-ring-angle")),
+    t: Number(node.getAttribute("data-ring-t")),
+    angle: node.getAttribute("data-ring-angle"),
     x: Number(node.getAttribute("data-ring-x")),
     y: Number(node.getAttribute("data-ring-y")),
   }));
@@ -9505,33 +9504,48 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         && $("t-self-seat").getAttribute("data-seat") === "0"
         && $("t-self-seat").classList.contains("me"),
       `环上 ${$("t-seats").children.length} / 座号 ${seats.map((item) => item.seat).join(",")}`);
-    check(`U1-01b ${count} 人：座位号 +1 在自己的右手边（−30° 的右下邻座）`,
+    check(`U1-01b ${count} 人：座位号 +1 在自己的右手边（环上最右那一席）`,
       count === 2
         ? seats[0] && Math.abs(seats[0].x - designStage.width / 2) < 0.01
-        : Math.abs(seats[0].angle + 30) < 0.01
-          && seats[0].x > designStage.width / 2
-          && Math.abs(seats[0].y - Math.max(...seats.map((item) => item.y))) < 0.01
+          && Math.abs(seats[0].y - seatH / 2 - 16) < 0.02   // 2 人局那一席在上横边正中
+        : seats[0].x > designStage.width / 2
+          && Math.abs(seats[0].x - Math.max(...seats.map((item) => item.x))) < 0.01
           && seats[seats.length - 1].x < designStage.width / 2,
-      seats.map((item) => `${item.seat}:${item.angle}° x=${item.x.toFixed(1)}`).join(" "));
-    // "均布"不能只断单调：相邻角差必须相等（票面「按 N 边形均布」）。
-    const gaps = seats.slice(1).map((item, index) => item.angle - seats[index].angle);
-    check(`U1-01c ${count} 人：对手沿上半弧按座号逆时针均布`,
-      seats.every((item, index) => (index === 0 ? true : item.angle > seats[index - 1].angle))
-        && seats.every((item) => item.angle >= -30.01 && item.angle <= 210.01)
-        && (count === 2
-          ? seats[0].angle === 90
-          : Math.abs((seats[seats.length - 1].angle - seats[0].angle) - 240) < 0.01)
-        && (gaps.length === 0 || gaps.every((gap) => Math.abs(gap - gaps[0]) < 0.01)),
-      `${seats.map((item) => `${item.seat}:${item.angle}`).join(" ")} / 间距 ${gaps.map((gap) => gap.toFixed(2)).join(",")}`);
-    check(`U1-01d ${count} 人：对手座位无正面积重叠（210×150 回退外形 / 设计尺寸）`,
+      seats.map((item) => `${item.seat}:x=${item.x.toFixed(1)} t=${item.t.toFixed(1)}`).join(" "));
+    // 椭圆那套角度读数已删（票 04）：环上不许再挂 `data-ring-angle`，否则是两套几何并存。
+    check(`U1-01b2 ${count} 人：` + "`data-ring-angle` 已随椭圆删除，改读沿周长的 `data-ring-t`",
+      seats.every((item) => item.angle === undefined && Number.isFinite(item.t)),
+      seats.map((item) => `${item.seat}:angle=${item.angle} t=${item.t}`).join(" "));
+    // "均布"不能只断相邻差：沿马蹄周长（右竖边 → 上横边 → 左竖边）的位移必须**逐段相等**，
+    // 且第一席在半个档距处。这是纯几何读数，与 `test_web_static.py` 的纯函数单测同一口径。
+    const vertical = designStage.height - seatH - 32;
+    const horizontal = designStage.width - seatW - 32;
+    const perimeter = vertical * 2 + horizontal;
+    const step = perimeter / (count - 1);
+    const gaps = seats.slice(1).map((item, index) => item.t - seats[index].t);
+    check(`U1-01c ${count} 人：对手沿马蹄周长等距（档距 = 周长 ${perimeter} / ${count - 1}）`,
+      gaps.length === 0 || gaps.every((gap) => Math.abs(gap - step) < 0.01),
+      `t=${seats.map((item) => item.t.toFixed(1)).join(",")} / 间距 ${gaps.map((gap) => gap.toFixed(2)).join(",")} 档距=${step.toFixed(2)}`);
+    check(`U1-01d ${count} 人：对手座位无正面积重叠（263×188，裁决 Q16）`,
       overlaps(seats).length === 0, overlaps(seats).join("、") || "无重叠");
     if (count === 8) {
-      // 把票面 D6 的原尺寸跑同一套矩形判据：相邻角 40° ⇒ |dx| = 680·(cos(-30°) − cos 10°) ≈ 80.8、
-      // |dy| = 235·(sin 10° + sin 30°) ≈ 158.3，两者都小于 228×163 → 外形不变的回退有据可依。
-      const grown = overlaps(seats, grownSeatW, grownSeatH);
-      check("U1-01d2 8 人：D6 的 228×163 会与两组相邻座位重叠 → 回退为外形不变的依据",
-        grown.join("、") === "1/2、6/7",
-        grown.join("、") || "（228×163 也不重叠——回退就无从谈起）");
+      // 裁决 §4 的读数是"最近一对中心距 227 dsu"（原型现算）。这里从**真渲染**的坐标现算同一
+      // 读数：它同时是"再放大就顶死"（椭圆 1.00× / 马蹄 1.34×）的余量凭证。
+      let nearest = Infinity;
+      for (let i = 0; i < seats.length; i += 1) {
+        for (let j = i + 1; j < seats.length; j += 1) {
+          nearest = Math.min(nearest, Math.hypot(seats[i].x - seats[j].x, seats[i].y - seats[j].y));
+        }
+      }
+      check("U1-01d2 8 人：最近一对中心距 = 227 dsu（裁决 §4 的读数；7 席在 263×188 下不重叠）",
+        Math.abs(nearest - 227) < 1,
+        `最近一对 ${nearest.toFixed(2)} dsu`);
+      // 横向吃满：最左 / 最右的盒子边正好压在马蹄内边距上（16…1584）。
+      const left = Math.min(...seats.map((item) => item.x)) - seatW / 2;
+      const right = Math.max(...seats.map((item) => item.x)) + seatW / 2;
+      check("U1-01d3 8 人：马蹄横向吃满（座位占用 x 16…1584）",
+        Math.abs(left - 16) < 0.01 && Math.abs(right - (designStage.width - 16)) < 0.01,
+        `x ${left.toFixed(1)}…${right.toFixed(1)}`);
     }
     if (count > 2) {
       const first = seats[0];
@@ -9540,8 +9554,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         Math.abs(first.x + last.x - designStage.width) < 0.01 && Math.abs(first.y - last.y) < 0.01,
         `${first.x.toFixed(1)}+${last.x.toFixed(1)} / y ${first.y.toFixed(1)}、${last.y.toFixed(1)}`);
     }
-    // 渲染路径：`left/top` 百分比必须就是设计坐标 / 1600×608（CSS 的尺寸 / 位移由
-    // 真浏览器截图核，DOM 垫片没有布局引擎）。
+    // 渲染路径：`left/top` 百分比必须就是设计坐标 / 1600×579（CSS 的位移由真浏览器截图核，
+    // DOM 垫片没有布局引擎）。
     const placed = Array.from($("t-seats").children).map((node) => ({
       left: parseFloat(node.style.left),
       top: parseFloat(node.style.top),
@@ -9550,6 +9564,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       placed.every((item, index) => Math.abs(item.left - (seats[index].x / designStage.width) * 100) < 0.01
         && Math.abs(item.top - (seats[index].y / designStage.height) * 100) < 0.01),
       placed.map((item) => `${item.left}%/${item.top}%`).join(" "));
+    // 外矩形也从 `table.js:RING_SEAT` 写进 inline style（CSS 里一个数都不留，票 04 的单一真源）。
+    const boxes = Array.from($("t-seats").children).map((node) => ({
+      width: node.style.width,
+      height: node.style.height,
+    }));
+    check(`U1-01e3 ${count} 人：座位盒 = 263×188 的环区百分比（16.4375% × 32.4698%）`,
+      boxes.every((item) => item.width === "16.4375%" && item.height === "32.4698%"),
+      boxes.map((item) => `${item.width}/${item.height}`).join(" "));
   }
 
   // 自己不是 0 号位时，环从「自己 + 1」开始编号（座位 +1 仍在右手边）。
@@ -9634,11 +9656,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
 /* ============ U1-02 座位卡 / 武将块 / 卡面 ============
  *
- * 票面判据（`issues/02`；U2-02 按 D6 放大）：
- * - 对手**外形** 210×150（D6 的 228×163 在 8 人环上重叠，回退为外形不变、只放大内容）、
- *   自己 292×210；左武将块收窄 30%（右块 100 / 130）；判定行 33 / 48、装备行 42 / 60；
+ * 票面判据（`issues/02`；U2-02 按 D6 放大；hero-portraits 票 04 再放大到 263×188 并改贴边马蹄）：
+ * - 对手**外形** 210×150 → **263×188**（+25%，裁决 Q16；尺寸真源搬进 `table.js:RING_SEAT`，
+ *   CSS 只留外观）、自己 292×210 → **330×238**；分隔比例不变（右块 125.24/263 与 146.9/330 =
+ *   47.62% / 44.52%）；判定行 33 / 48、装备行 42 / 60 已由票 03 的 flex 均分取代；
  * - 处理区 / 舞台卡面与手牌**同一套** 88×124 + 字号 14/11/20/9（不再有第二套小牌面规则）；
- *   舞台面板封顶 300（顶边 220 > 顶座下沿 210）、处理区一行 124 纵向滚动，不盖住环桌顶座；
+ *   舞台面板封顶 360、中心 67.6% × 579.2 = 391.5（顶边 211.5 > 顶排下沿 204）、处理区一行 124
+ *   纵向滚动，不盖住环桌顶排座位；
  * - 体力分段 + current/max，上限 ≥6 只显 x/x；判定 3 槽、装备四槽；手牌数 / 座位号在 footer；
  * - 身份：主公明置、其余暗置 `?`、自己恒可见、阵亡亮明；无身份局不画 `?`；
  * - 横置「-------」虚线 / 酒泛红（无「酒」字）/ 大号「阵亡」叠加不互挡；
@@ -9748,12 +9772,18 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   };
 
   /* ---- CSS：设计尺寸 / 收窄 / 槽高 / 高亮环 ---- */
-  check("U1-02a CSS：对手外形 210×150（D6 的 228×163 回退为外形不变）、自己 292×210（设计比例 + 设计舞台）",
-    /\.ring \.seat\s*\{[^}]*width:\s*13\.125%[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)
-      && !/aspect-ratio:\s*228\s*\/\s*163/.test(css)
-      && /\.seat\.self\s*\{[^}]*flex:\s*0 0 18\.25%[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css),
-    `ring=${/\.ring \.seat\s*\{[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)} grown=${/aspect-ratio:\s*228\s*\/\s*163/.test(css)} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css)}`);
-  check("U1-02b CSS：左武将块收窄 30%（右块 100 / 130 = 47.62% / 44.52%；对手外形回退不变）",
+  // hero-portraits 票 04：对手的外矩形**不在 CSS 里**（真源 `table.js:RING_SEAT`，渲染时写成
+  // inline 百分比，U1-01e3 钉住）。CSS 这条只留外观，并且不许再长出 width / aspect-ratio；
+  // 自己的座位是底栏里的静态节点，仍是 CSS 的 330×238（264×190 的 +25%，裁决 Q18）。
+  check("U1-02a CSS：对手外形不在 CSS（真源 table.js:RING_SEAT）、自己 330×238（+25%）",
+    !/width:/.test((css.match(/\.ring \.seat\s*\{[^}]*\}/s) || [""])[0])
+      && !/aspect-ratio:/.test((css.match(/\.ring \.seat\s*\{[^}]*\}/s) || [""])[0])
+      && !/13\.125%/.test(css.replace(/\/\*[\s\S]*?\*\//g, ""))
+      && /\.seat\.self\s*\{[^}]*flex:\s*0 0 calc\(330 \* var\(--dsu\)\)[^}]*aspect-ratio:\s*330\s*\/\s*238/s.test(css),
+    `ring=${JSON.stringify((css.match(/\.ring \.seat\s*\{[^}]*\}/s) || [""])[0])} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*330\s*\/\s*238/s.test(css)}`);
+  // 分隔比例**没动**：对手 125.24 / 263 = 47.62%（票 04 前是 100 / 210，同一个比例），
+  // 自己 146.9 / 330 = 44.52%（票 04 前是 130 / 292）。盒子长大了，比例照旧。
+  check("U1-02b CSS：左武将块收窄 30%（右块 125.24 / 263 与 146.9 / 330 = 47.62% / 44.52%）",
     /\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)
       && /\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css),
     `ring=${/\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)} self=${/\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css)}`);
@@ -9784,26 +9814,31 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !/calc\(56 \* var\(--dsu\)\)/.test(css)
       && !/calc\(79 \* var\(--dsu\)\)/.test(css)
       && /\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)
-      && /\.table-bottom\s*\{[^}]*flex:\s*0 0 27\.5%/s.test(css),
-    `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*27\.5%/s.test(css)}`);
-  // U3-01：舞台面板下移 + 加宽 + 封顶 360（spec D3）：
-  // 圆心 64.47% × 608 = 392；360 上限 ⇒ 顶边 392 − 180 = 212 > 顶座下沿 210；
-  // 40% 宽 = 640 设计单位，横跨 480–1120，不压左右座位（中心 212 / 1388、卡宽 210）；
+      && /\.table-bottom\s*\{[^}]*flex:\s*0 0 calc\(265 \* var\(--dsu\)\)/s.test(css),
+    `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*265/s.test(css)}`);
+  // U3-01：舞台面板下移 + 加宽 + 封顶 360（spec D3）。hero-portraits 票 04 换了环区：
+  // 舞台实际高 900 − 55.8（顶栏 6.2%）− 265（底栏）= 579.2，中心 67.6% × 579.2 = 391.5；
+  // 360 上限 ⇒ 顶边 391.5 − 180 = 211.5 > 顶排座位下沿 204（= 马蹄内边距 16 + 座位高 188）；
+  // 底边 571.5 ≤ 579.2。64.47%（按 608 算的老数）在新环区上给出 193.3，会压进顶排 10.7 dsu。
+  // 40% 宽 = 640 设计单位，横跨 480–1120，两臂座位占 16…279 / 1321…1584，不压侧座；
   // 舞台行限两行卡面（253 = 124×2 + 5）纵向滚动、说明最多 2 行。
   const stageRule = css.match(/\.stage-center\s*\{[^}]*\}/s);
   const stageMax = stageRule && /max-height:\s*calc\((\d+) \* var\(--dsu\)\)/.exec(stageRule[0]);
   const stageTop = stageRule && /top:\s*(\d+(?:\.\d+)?)%/.exec(stageRule[0]);
-  const ringCenterY = (Number(stageTop ? stageTop[1] : 0) / 100) * 608;
-  const topSeatBottom = 370 - 235 + 150 / 2;
+  const stageHeight = 900 - 6.2 / 100 * 900 - 265;      // 579.2
+  const ringCenterY = (Number(stageTop ? stageTop[1] : 0) / 100) * stageHeight;
+  const topSeatBottom = 16 + 188;                        // 顶排座位下沿（票 04 的环区坐标）
   const panelTop = ringCenterY - Number(stageMax ? stageMax[1] : 0) / 2;
-  check("U1-02c4 CSS：舞台宽 40%、面板封顶 360、中心下移到 64.47%（顶边 212 > 顶座下沿 210），舞台行两行卡面（253）纵向滚动、说明最多 2 行",
-    !!stageMax && Math.abs(ringCenterY - 392) < 0.5 && panelTop > topSeatBottom
+  const panelBottom = ringCenterY + Number(stageMax ? stageMax[1] : 0) / 2;
+  check("U1-02c4 CSS：舞台宽 40%、面板封顶 360、中心在 67.6%（顶边 211.5 > 顶排下沿 204、底边 571.5 ≤ 579.2），舞台行两行卡面（253）纵向滚动、说明最多 2 行",
+    !!stageMax && Math.abs(ringCenterY - 391.5) < 0.5 && panelTop > topSeatBottom
+      && panelBottom <= stageHeight + 1e-6
       && /\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)
       && /\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)
       && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(253 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
       && /\.stage-center \.processing\s*\{[^}]*align-content:\s*flex-start/s.test(css)
       && /\.stage-center \.context\s*\{[^}]*-webkit-line-clamp:\s*2/s.test(css),
-    `centerY=${ringCenterY} panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} width=${/\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)} row=${/max-height:\s*calc\(253 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
+    `centerY=${ringCenterY.toFixed(1)} panelTop=${panelTop.toFixed(1)} panelBottom=${panelBottom.toFixed(1)} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} width=${/\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)} row=${/max-height:\s*calc\(253 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
   check("U1-02d CSS：可指定 = 5px 绿外圈、已选 = 4px 绿内圈、悬停浅绿、行动中 = 金框，当前 + 合法有绿角点",
     /\.seat\.targetable:not\(\.tsel\)\s*\{[^}]*0 0 0 5px var\(--ok\)/s.test(css)
       && /\.seat\.tsel::before\s*\{[^}]*inset 0 0 0 4px var\(--ok\)/s.test(css)

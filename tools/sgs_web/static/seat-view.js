@@ -2,8 +2,12 @@
  *
  * 加载顺序见 index.html（U1-00 拆分）；本文件不需要构建步骤。
  *
- * 形状（spec §2.2）：对手 210×150、自己 292×210；左武将块收窄 30%（右块 100 / 130）。
- * U2-02 / D6：对手 +8%（228×163）在 8 人环上会重叠，回退为外形不变、内容放大（见 style.css）。
+ * 形状（spec §2.2；hero-portraits 票 04 起放大 +25%）：对手 **263×188**、自己 **330×238**；
+ * 左武将块与右判定 / 装备区仍是同一套比例（对手 137.76 / 125.24 = 52.38% / 47.62%，
+ * 自己 183.1 / 146.9 = 55.48% / 44.52%）——盒子长大，分隔比例没动。
+ * 尺寸真源是 `table.js:RING_SEAT`（对手）/ `style.css` 的 `.seat.self`（自己）：本文件只把
+ * 常量换算成百分比写进 inline style，不再在 CSS 里抄第二份（旧 `.ring .seat { width: 13.125% }`
+ * 与 JS 的 210 曾是同一个数的两处重复）。
  *   |势力-名称-身份| |判定槽 ×3|
  *   |----体力条----| |-武器-| |-防具-|
  *   |手牌：N/上限--座位号| |-攻马-| |-防马-|
@@ -742,7 +746,9 @@ function deadTagNode() {
   return tag;
 }
 
-/** 一个对手座位卡：环桌几何（U1-01 的 `data-ring-*`）照旧落在节点上。 */
+/** 一个对手座位卡：环桌几何（`table.js:RING_STAGE` / `RING_SEAT`）落在节点的 `data-ring-*`
+ *  与 inline style 上。**没有角度了**（椭圆已换成贴边马蹄）：`data-ring-t` 是沿周长走过的
+ *  距离（设计单位），沿周长等距在这条读数上就是相邻差恒等（烟测 U1-01c 按它断）。 */
 function seatCardNode(player, position, view, ctx) {
   const box = document.createElement("div");
   box.className = "seat opponent";
@@ -750,11 +756,15 @@ function seatCardNode(player, position, view, ctx) {
   const flags = ctx.flagsFor(player, classes);
   applySeatState(box, flags);
   box.setAttribute("data-seat", String(player.seat));
-  box.setAttribute("data-ring-angle", position.angle.toFixed(2));
+  box.setAttribute("data-ring-t", position.t.toFixed(2));
   box.setAttribute("data-ring-x", position.x.toFixed(2));
   box.setAttribute("data-ring-y", position.y.toFixed(2));
   box.style.left = `${(position.x / RING_STAGE.width) * 100}%`;
   box.style.top = `${(position.y / RING_STAGE.height) * 100}%`;
+  // 外矩形也按环区百分比写：尺寸的真源只有 `table.js:RING_SEAT`（CSS 里一个数都不留）。
+  const cardSize = ringSeatBoxCss();
+  box.style.width = cardSize.width;
+  box.style.height = cardSize.height;
   box.appendChild(heroBlockNode(player, view, ctx, flags));
   box.appendChild(sideBlockNode(player, ctx));
   // 其他座位的询问（U1-03）：紧贴武将信息下方显示文本，不给按钮 / 倒计时。
