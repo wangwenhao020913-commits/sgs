@@ -3,7 +3,8 @@
 标准库 ``http.server``：**不引任何依赖**。传输取**轮询**而不是 WebSocket——
 记录流本来就带单调 ``seq``，"按序号取增量"天然成立，而单机单人类场景下延迟可忽略。
 
-路由（``/api/`` 前缀之外一律当静态资源，从包内 ``static/`` 读）：
+路由（``/api/`` 前缀之外是静态资源：``/art/`` 读立绘根——``pic/portraits/``，
+``SGS_ART_DIR`` 可覆盖——**缺文件 404，不回落** ``index.html``；其余从包内 ``static/`` 读）：
 
 ===============  ==================================  ==================================
 方法              路径                                 作用
@@ -13,6 +14,7 @@
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
 ``POST``         ``/api/sessions/<id>/preview``      预发动清单一步的**只读**预览（票 11）
 ``GET``          ``/api/heroes``                     开局页将池（启用并集、按真名分组的版本）
+``GET``          ``/api/portraits``                  武将立绘索引：显示名称 → 立绘相对路径 + 作者
 ``GET``          ``/api/hero-presets``               将池存档（5 个常驻槽位 + 活动槽位）
 ``POST``         ``/api/hero-presets``               保存某个槽位并置为活动（覆盖该槽位）
 ``GET``          ``/api/decks``                      开局页牌堆档位列表（内容包 decks 的键 + 文案）
@@ -67,7 +69,7 @@ from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 if __package__ in (None, ""):  # pragma: no cover - 直接 `python tools/sgs_web/serve.py` 时
     # 脚本直跑：把 ``tools/`` 放进 ``sys.path``，让 ``sgs_web`` 成为一个可导入的顶层包。
@@ -90,6 +92,11 @@ from sgs.engine import IllegalActionError  # noqa: E402
 from sgs.script import ScriptError  # noqa: E402
 from sgs_web.descriptions import display_skill_description  # noqa: E402
 from sgs_web.narrative import NarrativeCursor  # noqa: E402
+from sgs_web.portraits import (  # noqa: E402
+    image_mime,
+    portrait_index,
+    resolve_portrait,
+)
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     card_events_after,
@@ -157,6 +164,11 @@ _CONTENT_TYPES = {
     # chain-death-voices 票 03：卡牌语音是**用户素材**（`static/voices/*.mp3`）。缺了这一行
     # 浏览器拿到的是 `application/octet-stream`，`<audio>` / `Audio` 仍能放，但类型是错的。
     ".mp3": "audio/mpeg",
+    # hero-portraits 票 01：立绘本身走 `/art/`（MIME 按**魔数**判，见 `_serve_art`），这张表
+    # 补图片类型是"别处迟早要用"的兜底；`.jpeg` 也收，因为用户素材盘的命名不归我们管。
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
 }
 
 
@@ -1001,6 +1013,11 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/heroes":
                 self._send_json(200, {"heroes": hero_catalog()})
                 return
+            if parsed.path == "/api/portraits":
+                # hero-portraits 票 01：**不缓存**（`portrait_index` 每次现扫）——用户手编
+                # `作者.txt` 后刷新即生效。立绘本体的长缓存走 `/art/` 的 max-age。
+                self._send_json(200, {"heroes": portrait_index()})
+                return
             if parsed.path == "/api/hero-presets":
                 self._send_json(200, {"presets": self.registry.hero_presets()})
                 return
@@ -1045,6 +1062,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except (ValueError, OSError) as error:
             self._send_json(400, {"error": str(error)})
+            return
+        if parsed.path.startswith("/art/"):
+            # 立绘**不**走 `_serve_static`：那条路的缺文件会回落 index.html（见 `_serve_art`）。
+            self._serve_art(parsed.path)
             return
         self._serve_static(parsed.path)
 
@@ -1453,6 +1474,33 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "未知路径"})
 
     # -- 静态资源 -----------------------------------------------------------
+
+    def _serve_art(self, path: str) -> None:
+        """``GET /art/<相对路径>``：立绘根（``pic/portraits/``）里的原图（hero-portraits 票 01）。
+
+        与 :meth:`_serve_static` 的**三处故意不同**：
+
+        1. 缺文件 / 越界 ⇒ **404 + 非 HTML body**，**不回落** ``index.html``——
+           SPA 回落会让 ``<img>`` 拿到一份 HTML，静默坏图（本票唯一的行为改判）；
+        2. 命中发 ``Cache-Control: public, max-age=86400``（其余静态资源仍是 ``no-store``）：
+           牌桌每次记录回放都重绘 DOM，不可缓存等于每重绘一次就重下立绘；
+        3. MIME 按**魔数**判（:func:`sgs_web.portraits.image_mime`），不看扩展名——资源包
+           里有 5 个 ``.jpg`` 实为 PNG 容器。
+
+        越界判据住 :func:`sgs_web.portraits.resolve_portrait`（``unquote`` 之后才判，故
+        ``%2e%2e%2f`` 也逃不掉）；立绘根不存在时它同样返回 ``None`` ⇒ 全部 404。
+        """
+        target = resolve_portrait(unquote(path[len("/art/") :]))
+        if target is None:
+            self._send_json(404, {"error": "立绘不存在"})
+            return
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", image_mime(body))
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_static(self, path: str) -> None:
         relative = "index.html" if path in ("", "/") else path.lstrip("/")
