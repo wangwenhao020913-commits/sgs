@@ -32809,6 +32809,151 @@ $("script-confirm-backdrop").hidden = true;
     `scroll=${scrolls} left=${leftAt} start=${startAt} right=${rightAt} skill=${skillAt}`);
 }
 
+/* ============ hero-portraits 票 02：首页右栏点将（立绘 + 作者页脚）============
+ *
+ * 判据（票面 `## 判据`）：
+ *   ① 有图武将 ⇒ `#lobby-portrait` 里一张 `<img>`，`src` 指向 `/art/`；
+ *   ② 无图武将（界关羽）⇒ **没有 img**、空位节点在、`data-empty="1"`；
+ *   ③ 有图 / 无图两局的外框同口径——垫片**没有排版引擎**，量不了矩形，故这条不假装量几何，
+ *      钉的是"版式不跳"的机械半边：**同一个节点**、**同一套 class**、两次渲染**只差
+ *      `data-empty` 一个属性**；另外半边（声明盒 `aspect-ratio: 530 / 750` + `height: 100%`
+ *      无固定宽）由 `test_web_static.py` 从 `style.css` 的同一条规则读；
+ *   ④ 右栏描述是**裁切版**：`#lobby-skill-list .sd` 不含「本仓实现 / 本仓裁定」，
+ *      且逐条等于 `/api/heroes` 下发的 `description`（服务端 `display_skill_description`）；
+ *   ⑤ 作者页脚：`author` 空 ⇒ `#lobby-author` 一个节点都没有（不是空 div）；非空 ⇒ 文本与
+ *      索引里的值**逐字相同**（不裁不拼）、是 `#lobby-heroskills` 的最后一个子节点；
+ *   ⑥ 启动时真的拉过一次 `GET /api/portraits`（`state.portraits` 与端点回包同键）；
+ *   ⑦ 端点失败 ⇒ fail-open 到全空位：不抛、不写提示、不发图片请求；
+ *   ⑧ 将池列表一行都不铺图（首页同一时刻最多一张图）。
+ *
+ * 资源来源：本机 `pic/portraits/` 有 87 张图，但 `pic/` 是 gitignored——公开仓 / CI 没有它。
+ * 故除 ⑥（真端点）与 ⑦（真断网）外，喂的是**与 `/api/portraits` 同形的索引**（有图一条、
+ * 界关羽删掉、作者一条），渲染走 `lobby.js` 的生产路径，不另写一份实现。
+ */
+{
+  const portraitBox = () => $("lobby-portrait");
+  const portraitRead = () => SGS_SMOKE_IMG.read(portraitBox());
+  const authorNodes = () => Array.from($("lobby-heroskills").children)
+    .filter((child) => child.id === "lobby-author");
+  const versionByName = (name) => ui.state.heroCatalog
+    .flatMap((group) => group.versions)
+    .find((version) => version.name === name) || null;
+  const guanyu = versionByName("关羽");
+  const jieGuanyu = versionByName("界关羽");
+  const skillsPanel = $("lobby-heroskills");
+
+  check("HP2-00 取样齐了：将池目录里有「关羽」与「界关羽」两版（判据的两侧）",
+    !!guanyu && !!jieGuanyu, `关羽=${!!guanyu} 界关羽=${!!jieGuanyu}`);
+
+  // ⑥ main.js:wire() 里与 loadHeroCatalog() 一起拉的那一次（真端点、真回包）。
+  const api = await get("/api/portraits");
+  check("HP2-01 首页启动时拉过一次 /api/portraits，state.portraits 与端点回包同键",
+    !!api.heroes && typeof api.heroes === "object"
+      && setEquals(Object.keys(ui.state.portraits || {}), Object.keys(api.heroes)),
+    `端点 ${Object.keys(api.heroes || {}).length} 条 / 缓存 `
+      + `${Object.keys(ui.state.portraits || {}).length} 条`);
+
+  // 同形索引：有图（本地有真路径就用真的）+ 无图（界关羽 = 33 个空位之一）+ 作者。
+  const apiEntry = (api.heroes || {})["关羽"] || {};
+  const portraitPath = apiEntry.portrait || "关羽/关羽/关羽.jpg";
+  const authorText = "  张三 · 李四　（画） ";
+  const index = Object.assign({}, api.heroes || {}, {
+    "关羽": { portrait: portraitPath, author: authorText },
+  });
+  delete index["界关羽"];
+  ui.state.portraits = index;
+  $("in-pointjiang").checked = true;
+  $("in-my-hero").value = guanyu ? guanyu.id : "";
+  ui.fillHeroOptions();   // 换人 ⇒ 右栏按生产路径重画
+
+  const box = portraitBox();
+  const filled = portraitRead();
+  const filledClass = String(box.className);
+  const filledAttrKeys = Object.keys(box.attrs || {}).sort();
+  const filledFoot = authorNodes();
+  check("HP2-02 有图武将 ⇒ #lobby-portrait 里一张 src 指向 /art/ 的 img（路径取自索引）",
+    !!guanyu && filled.found && filled.art && filled.hasSrc && filled.complete
+      && decodeURI(filled.src.slice("/art/".length)) === portraitPath,
+    `${SGS_SMOKE_IMG.line(box)} 索引=${portraitPath}`);
+
+  check("HP2-03 author 非空 ⇒ #lobby-author 是技能的最后一个子节点、文本与索引值逐字相同",
+    filledFoot.length === 1 && filledFoot[0].classList.contains("author-foot")
+      && skillsPanel.lastChild === filledFoot[0]
+      && filledFoot[0].textContent === authorText,
+    `页脚 ${filledFoot.length} 个 / last=${skillsPanel.lastChild === filledFoot[0]}`
+      + ` / 文本逐字=${filledFoot.length === 1 && filledFoot[0].textContent === authorText}`);
+
+  // ② 无图：同一个节点、同一套 class、只差 data-empty。
+  $("in-my-hero").value = jieGuanyu ? jieGuanyu.id : "";
+  ui.fillHeroOptions();
+  const emptyBox = portraitBox();
+  const empty = portraitRead();
+  const emptyAttrKeys = Object.keys(emptyBox.attrs || {}).sort();
+  const onlyEmptyAttr = emptyAttrKeys.length === filledAttrKeys.length + 1
+    && emptyAttrKeys.filter((key) => key !== "data-empty").join(",") === filledAttrKeys.join(",");
+  check("HP2-04 无图（界关羽）⇒ 没有 img、空位节点在、data-empty=\"1\"",
+    !!jieGuanyu && !empty.found && String(emptyBox.className).trim().length > 0
+      && emptyBox.getAttribute("data-empty") === "1",
+    `img=${empty.found} class="${emptyBox.className}"`
+      + ` data-empty=${emptyBox.getAttribute("data-empty")}`);
+
+  check("HP2-05 有图 / 无图两局的外框同口径：同一个节点、同一套 class、只差 data-empty",
+    emptyBox === box && String(emptyBox.className) === filledClass
+      && filledClass.split(/\s+/).filter(Boolean).join(",") === "portrait-box"
+      && onlyEmptyAttr && emptyBox.getAttribute("data-empty") === "1",
+    `节点相同=${emptyBox === box} class="${filledClass}"→"${emptyBox.className}"`
+      + ` 属性 ${filledAttrKeys.join(",") || "（无）"} / ${emptyAttrKeys.join(",") || "（无）"}`);
+
+  check("HP2-06 author 空 ⇒ #lobby-author 一个节点都没有（换人之后旧页脚也被摘掉）",
+    authorNodes().length === 0, `页脚 ${authorNodes().length} 个`);
+
+  // ④ 描述裁切：挑一个技能最多的版本，逐条对 `/api/heroes` 的 desc。
+  const skillVersion = ui.state.heroCatalog
+    .flatMap((group) => group.versions)
+    .filter((version) => (version.skills || []).length >= 2)
+    .sort((a, b) => b.skills.length - a.skills.length)[0] || guanyu;
+  $("in-my-hero").value = skillVersion ? skillVersion.id : "";
+  ui.fillHeroOptions();
+  const descriptions = byClass($("lobby-skill-list"), "sd").map((node) => node.textContent);
+  const dataDescriptions = ((skillVersion || {}).skills || [])
+    .map((skill) => skill.description);
+  check("HP2-07 右栏描述用裁切版：.sd 不含「本仓实现 / 本仓裁定」，逐条等于 /api/heroes 的 desc",
+    descriptions.length === dataDescriptions.length && descriptions.length > 0
+      && descriptions.every((text) => !text.includes("本仓实现") && !text.includes("本仓裁定"))
+      && descriptions.every((text, at) => text === dataDescriptions[at]),
+    `技能 ${descriptions.length} 条 / 带注记 `
+      + `${descriptions.filter((text) => text.includes("本仓")).length} 条`);
+
+  // ⑧ 将池列表一行都不铺图（首页同一时刻最多一张图）。
+  check("HP2-08 将池列表不铺立绘（renderHeroPool 没长立绘）",
+    SGS_SMOKE_IMG.find($("hero-pool")) === null
+      && SGS_SMOKE_IMG.find($("lobby-skill-list")) === null,
+    `列表=${SGS_SMOKE_IMG.line($("hero-pool"))}`
+      + ` 技能区=${SGS_SMOKE_IMG.line($("lobby-skill-list"))}`);
+
+  // ⑦ 断网 ⇒ fail-open 到全空位（不抛、不写提示）。fetch 临时换成永远 reject 的假实现。
+  const hintBefore = $("lobby-hint").textContent;
+  let loadError = null;
+  vm.runInContext(`
+    globalThis.__hp02Fetch = fetch;
+    fetch = () => Promise.reject(new Error("offline"));
+  `, context);
+  try {
+    await vm.runInContext("loadPortraitIndex()", context);
+  } catch (error) {
+    loadError = error;
+  }
+  vm.runInContext("fetch = globalThis.__hp02Fetch; delete globalThis.__hp02Fetch;", context);
+  const afterFail = portraitRead();
+  check("HP2-09 /api/portraits 失败 ⇒ fail-open 到全空位：不抛、不写提示、不发图片请求",
+    loadError === null && Object.keys(ui.state.portraits || {}).length === 0
+      && !afterFail.found && portraitBox().getAttribute("data-empty") === "1"
+      && authorNodes().length === 0 && $("lobby-hint").textContent === hintBefore,
+    `抛=${loadError ? loadError.message : "无"}`
+      + ` 索引=${Object.keys(ui.state.portraits || {}).length} 条 img=${afterFail.found}`
+      + ` hint 不变=${$("lobby-hint").textContent === hintBefore}`);
+}
+
 /* ============ ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）============
  *
  * 判据全部走**真 DOM**：固定的筛选区（搜索框 / 五颗势力复选 / 全开关键 / 读数）+ 委托的

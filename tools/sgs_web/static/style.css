@@ -120,6 +120,45 @@ body {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
 }
 
+/* hero-portraits 票 02（裁决 §7①）：上格 `#lobby-hero` 一个字不动，右栏下格 =
+ * 「立绘（左）+ 技能全文（右）」。立绘高度跟技能面板齐平、宽度由 530:750 反推 —— 原图比例、
+ * 不裁。原型 `.lobby-row`（`.scratch/hero-portraits/prototype/style.css`）的 dsu 版。 */
+.design-canvas .lobby-row {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; gap: calc(14 * var(--dsu));
+}
+/* 技能面板不再是 `#lobby-right` 的直接子节点：`.panel` 的流式外边距（12px）要在这里一并
+ * 归零，否则它比立绘矮 24px（`height: 100%` 的立绘就会比技能面板高），"齐平"就没了。 */
+.design-canvas .lobby-row > .panel { margin: 0; }
+.design-canvas .lobby-row > .lobby-heroskills { flex: 1 1 auto; min-width: 0; }
+
+/* 立绘盒子。**有图 / 无图共用这一条**：空位只多一个 `data-empty="1"` 属性，盒子一个字不改
+ * （有图 / 无图两局版式不跳的声明盒那半边；节点 / class / 属性那半边由烟测钉）。
+ * 宽不是字段：`aspect-ratio` + `height: 100%` 反推出宽。 */
+.design-canvas .portrait-box {
+  position: relative; overflow: hidden; flex: 0 0 auto;
+  background: #efe7d6;
+}
+.design-canvas .lobby-row > .portrait-box {
+  flex: 0 0 auto;
+  height: 100%; aspect-ratio: 530 / 750;
+  border-radius: calc(10 * var(--dsu));
+  border: 1px solid var(--line);
+  box-shadow: 0 calc(3 * var(--dsu)) calc(10 * var(--dsu)) rgba(43, 36, 28, .12);
+}
+.design-canvas .portrait-box img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+/* 空位：同尺寸纸色斜纹（不写字、不发请求）。**只换底纹 / 描线样式**——宽高 / flex /
+ * aspect-ratio 一概不许出现在这里，否则有图 / 无图两局会跳。 */
+.design-canvas .lobby-row > .portrait-box[data-empty="1"] {
+  background:
+    repeating-linear-gradient(45deg, #efe7d6 0 calc(6 * var(--dsu)),
+      #e9dfcb calc(6 * var(--dsu)) calc(12 * var(--dsu)));
+  border-style: dashed;
+}
+
 /* 开一局面板：两列固定栅格（`1fr 1fr` + 78 dsu 行高，原型 `.formgrid`）。字段顺序与既有
  * `name` / `id` 全不变——只是排版换成两列。开始键与提示那条是 56 dsu 的固定行；乘法的常量
  * 写在 `var(--dsu)` 右边：烟测 U1-02c3 有一条**全文** absence 判据，扫的是「常量在左边」
@@ -216,6 +255,14 @@ body {
   display: flex; align-items: center; justify-content: space-between;
   margin-top: calc(8 * var(--dsu)); border-top: 1px solid var(--line);
   font-size: var(--f12); color: var(--dim);
+}
+/* 作者页脚（spec §3.8 / 裁决 §7①）：小字 `--dim` + 上方一条虚线，是技能框的**最后一个
+ * 子节点**。作者为空时前端**一个节点都不建**（不是空 div），所以空作者时这条样式无从生效。 */
+.design-canvas .author-foot {
+  flex: 0 0 auto;
+  margin-top: calc(8 * var(--dsu)); padding-top: calc(6 * var(--dsu));
+  border-top: 1px dashed var(--line);
+  font-size: var(--f11); color: var(--dim);
 }
 
 /* 工具行右端两句摘要只是显示：单行省略，长文本不撑高那 52 dsu。 */

@@ -107,16 +107,24 @@
         </div>
         <p id="lobby-hero-hint" class="herocard-sub dim"></p>
       </section>
-      <!-- 技能全文（票 03 / 表 C）：描述**原样印服务端给的文本**（零正则、零截断），再长也只在这块
-           自己滚——两侧面板与左侧表单不动。脚注 = 座位 / 手牌上限（手牌上限 = 当前体力，规则恒定）。 -->
-      <section id="lobby-heroskills" class="panel lobby-heroskills" aria-label="技能全文">
-        <h2>技能全文</h2>
-        <div id="lobby-skill-list" class="skilllist"></div>
-        <div class="herocard-foot">
-          <span id="lobby-hero-seat"></span>
-          <span id="lobby-hero-handlimit"></span>
-        </div>
-      </section>
+      <!-- hero-portraits 票 02（裁决 §7①）：上格 `#lobby-hero` **一个字不动**，布局全在下格里做。
+           下格 = 「立绘（左） + 技能全文（右）」：立绘高度跟技能面板齐平、宽度由 530:750 反推
+           （原图比例、不裁）。空位与有图是**同一个盒子**（同 class，`data-empty="1"` 有无之差），
+           只是空位没有 `<img>`、不发请求。`#lobby-author` 是技能面板的最后一个子节点，作者为空时
+           **一个节点都不建**——所以它由 `lobby.js` 按需建 / 摘，这里没有静态占位。 -->
+      <div class="lobby-row">
+        <div id="lobby-portrait" class="portrait-box" data-empty="1"></div>
+        <!-- 技能全文（票 03 / 表 C）：描述**原样印服务端给的文本**（零正则、零截断），再长也只在这块
+             自己滚——两侧面板与左侧表单不动。脚注 = 座位 / 手牌上限（手牌上限 = 当前体力，规则恒定）。 -->
+        <section id="lobby-heroskills" class="panel lobby-heroskills" aria-label="技能全文">
+          <h2>技能全文</h2>
+          <div id="lobby-skill-list" class="skilllist"></div>
+          <div class="herocard-foot">
+            <span id="lobby-hero-seat"></span>
+            <span id="lobby-hero-handlimit"></span>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </main>

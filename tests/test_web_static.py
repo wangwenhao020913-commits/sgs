@@ -9536,6 +9536,16 @@ def test_the_lobby_page_is_a_one_screen_layout() -> None:
         assert needle in left_html, f"左栏 = 开一局面板 + 将池摘要，缺 {needle}"
     for needle in ('id="lobby-hero"', 'id="lobby-heroskills"'):
         assert needle in right_html, f"右栏 = 我的武将 + 技能全文，缺 {needle}"
+    # hero-portraits 票 02（裁决 §7①）：立绘挂在 `#lobby-heroskills` 的**左边**，下格那两件
+    # 住在 `.lobby-row` 里；上格 `#lobby-hero` 仍在行**之前**（它一个字不动）。
+    hero_at = right_html.index('id="lobby-hero"')
+    row_at = right_html.index('<div class="lobby-row">')
+    portrait_at = right_html.index('id="lobby-portrait"')
+    skills_at = right_html.index('id="lobby-heroskills"')
+    assert hero_at < row_at < portrait_at < skills_at, (
+        "右栏结构必须是「#lobby-hero」→「.lobby-row{ #lobby-portrait → #lobby-heroskills }」："
+        f"hero={hero_at} row={row_at} portrait={portrait_at} skills={skills_at}"
+    )
 
     # 3. 开一局面板：两列固定栅格 + 字段顺序不变 + 开始键与提示同一行
     form_end = html.index("</form>", html.index('id="lobby-form"'))
@@ -9603,6 +9613,233 @@ def test_the_lobby_page_is_a_one_screen_layout() -> None:
         assert moved not in lobby_view, (
             f"旧位置必须清干净：{moved} 已搬进窗口，不许还留在 `#view-lobby` 正文里"
         )
+
+
+_LOBBY_HERO_HTML = """\
+<section id="lobby-hero" class="panel lobby-herohead" aria-label="我的武将">
+        <div class="herocard-head">
+          <span id="lobby-hero-kingdom" class="kingdom"></span>
+          <span id="lobby-hero-name" class="lobby-hero-name">—</span>
+          <span id="lobby-hero-hp-label" class="tag"></span>
+          <span id="lobby-hero-hp" class="lobby-hp" aria-label="体力点"></span>
+        </div>
+        <p id="lobby-hero-hint" class="herocard-sub dim"></p>
+      </section>"""
+"""`#lobby-hero` 的冻结 markup（hero-portraits 票 02 的硬约束：**用户明令一个字不动**）。
+
+它不是"又一个快照"：上格与下格的分工（spec §3.1 / 裁决 §7①）就是「上格原样、布局只在下格
+做」。冻结成字面量之后，谁再顺手重排上格都会红——要改先改这条约束本身。
+"""
+
+
+def _lobby_row_bounds(html: str) -> tuple[int, int]:
+    """`index.html` 里 `<div class="lobby-row">` 的 [start, end) 区间（按 div / section 配平）。"""
+    start = html.index('<div class="lobby-row">')
+    depth = 0
+    for match in re.finditer(r"<(/?)(div|section)\b[^>]*>", html[start:]):
+        depth += -1 if match.group(1) else 1
+        if depth == 0:
+            return start, start + match.end()
+    raise AssertionError("index.html 里的 `.lobby-row` 没有闭合")
+
+
+def test_the_lobby_right_column_shows_a_portrait_and_an_author_footer() -> None:
+    """hero-portraits 票 02（spec §2 目标 3 / §3 硬约束 1·5·6·8·9 / 裁决 §7①）：
+
+    「首页右侧点将」= 上格 `#lobby-hero` **一个字不动**，下格变成
+    「立绘（左）+ 技能全文（右）」。判据分五段：
+
+    1. **上格不动**：`#lobby-hero` 的 markup 与冻结字面量逐字相同（用户明令）；
+    2. **下格结构**：`.lobby-row` 在 `#lobby-right` 里、在 `#lobby-hero` 之后，行内顺序是
+       `#lobby-portrait` → `#lobby-heroskills`；`#lobby-skill-list` 仍在技能面板里、
+       `#lobby-hero-seat` 之前（既有票 03 的判据不挪）；
+    3. **盒子只有一条**：`.design-canvas .lobby-row > .portrait-box` 是
+       `aspect-ratio: 530 / 750` + `height: 100%`，**不设固定宽**；`[data-empty]` 变体只换
+       底纹、**不许改几何**——这是"有图 / 无图两局版式不跳"的声明盒那半边（节点 / class /
+       属性那半边由烟测 `HP2-04` / `HP2-05` 钉，垫片量不了矩形，故这里不假装量几何）；
+    4. **作者页脚**：`.author-foot` 是小字 `--dim` + 上方一条虚线；`index.html` 里**没有**
+       静态占位（空作者时是零节点，不是空 div）；
+    5. **JS 行为口**：全仓只有**一处** `createElement("img")`（在立绘渲染口里）、空位分支在
+       造 `img` **之前**返回；作者只在非空时建节点、`textContent = author` 逐字；
+       `loadPortraitIndex()` 在 `core.js` 里 fail-open、`main.js:wire()` 与
+       `loadHeroCatalog()` 一起调；`renderHeroPool()` 没有长立绘。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    core_js = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    main_js = (STATIC_DIR / "main.js").read_text(encoding="utf-8")
+
+    # 1. 上格一个字不动（用户明令）：从 `<section id="lobby-hero"` 到它的 `</section>`。
+    hero_at = html.index('<section id="lobby-hero"')
+    hero_end = html.index("</section>", hero_at) + len("</section>")
+    assert html[hero_at:hero_end] == _LOBBY_HERO_HTML, (
+        "`#lobby-hero` 是用户明令「一个字不动」的上格，实得：\n"
+        f"{html[hero_at:hero_end]}"
+    )
+
+    # 2. 下格结构：`.lobby-row` 在 `#lobby-right` 里、`#lobby-hero` 之后；行内先立绘后技能。
+    right_at = html.index('id="lobby-right"')
+    right_end = html.index("</main>", right_at)
+    row_start, row_end = _lobby_row_bounds(html)
+    assert right_at < row_start < row_end < right_end, (
+        "`.lobby-row` 必须是 `#lobby-right` 里的那一段（右栏的下格）"
+    )
+    assert hero_end < row_start, "`.lobby-row` 在 `#lobby-hero` 之后（上格不进这一行）"
+    portrait_at = html.index('id="lobby-portrait"')
+    skills_at = html.index('id="lobby-heroskills"')
+    assert row_start < portrait_at < skills_at < row_end, (
+        "行内顺序 = 立绘（左）→ 技能全文（右）："
+        f"row={row_start} portrait={portrait_at} skills={skills_at} row_end={row_end}"
+    )
+    in_row = html[row_start:row_end]
+    assert in_row.count('id="lobby-portrait"') == 1 and in_row.count('id="lobby-heroskills"') == 1, (
+        "下格只有这两件：一个立绘盒子 + 技能面板（不是第二份结构）"
+    )
+    hero_panel = html[skills_at:html.index('id="lobby-hero-seat"')]
+    assert 'id="lobby-skill-list"' in hero_panel, "技能列表槽仍住在技能面板里（`#lobby-hero-seat` 之前）"
+
+    # 3. 盒子：一条规则声明盒子，空位变体只换底纹。
+    row_rule = _css_rule(".design-canvas .lobby-row")
+    assert re.search(r"display:\s*flex", row_rule), f"下格是横向一行：{row_rule}"
+    assert not re.search(r"flex-direction:\s*column", row_rule), f"下格不是上下堆：{row_rule}"
+    assert re.search(r"flex:\s*1 1 auto", row_rule) and re.search(r"min-height:\s*0", row_rule), (
+        f"下格吃掉右栏剩下的高度并允许收缩：{row_rule}"
+    )
+    # 技能面板搬进下格之后不再是右栏的直接子节点：`.panel` 的 12px 流式外边距必须归零，
+    # 否则它比 `height: 100%` 的立绘矮 24px（"齐平"就没了）。
+    assert re.search(r"margin:\s*0", _css_rule(".design-canvas .lobby-row > .panel")), (
+        "下格里的技能面板要把 `.panel` 的流式外边距归零（与立绘齐平）"
+    )
+    box_rule = _css_rule(".design-canvas .lobby-row > .portrait-box")
+    assert re.search(r"aspect-ratio:\s*530\s*/\s*750", box_rule), (
+        f"立绘盒子的宽由 530:750 原图比例反推（不裁）：{box_rule}"
+    )
+    assert re.search(r"height:\s*100%", box_rule), (
+        f"立绘高度跟技能面板齐平（`height: 100%`）：{box_rule}"
+    )
+    assert re.search(r"flex:\s*0 0 auto", box_rule), f"立绘列不参与伸缩：{box_rule}"
+    assert not re.search(r"(?:^|;)\s*width\s*:", box_rule), (
+        f"立绘盒子**不设固定宽**（宽只能由高 × 530/750 得出）：{box_rule}"
+    )
+    base_rule = _css_rule(".design-canvas .portrait-box")
+    assert re.search(r"position:\s*relative", base_rule), f"立绘盒子是图片的定位父级：{base_rule}"
+    assert re.search(r"overflow:\s*hidden", base_rule), f"圆角要裁住图片：{base_rule}"
+    img_rule = _css_rule(".design-canvas .portrait-box img")
+    for declaration in (r"position:\s*absolute", r"inset:\s*0", r"object-fit:\s*cover"):
+        assert re.search(declaration, img_rule), (
+            f"图片铺满盒子、原图比例不裁：缺 {declaration}：{img_rule}"
+        )
+    empty_selectors = [
+        one.strip()
+        for selector, _ in _css_rules()
+        for one in selector.split(",")
+        if "data-empty" in one
+    ]
+    assert any(".portrait-box" in one for one in empty_selectors), (
+        "空位态要有可核的样式（纸色斜纹），否则它与有图态的差别只剩 JS 属性"
+    )
+    geometry = {"width", "height", "min-width", "min-height", "max-width", "max-height",
+                "flex", "flex-basis", "aspect-ratio", "position", "inset",
+                "top", "bottom", "left", "right"}
+    for selector, body in _css_rules():
+        if "data-empty" not in selector:
+            continue
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop = declaration.split(":", 1)[0].strip()
+            assert prop not in geometry, (
+                f"`[data-empty]` 变体不许改盒子的几何（改了有图 / 无图就会跳）："
+                f"{selector} 的 `{declaration.strip()}`"
+            )
+
+    # 4. 作者页脚：小字 --dim + 上方虚线；index.html 里没有静态占位。
+    author_rule = _css_rule(".design-canvas .author-foot")
+    assert re.search(r"color:\s*var\(--dim\)", author_rule), f"作者是小字 `--dim`：{author_rule}"
+    assert re.search(r"border-top:\s*1px dashed var\(--line\)", author_rule), (
+        f"作者页脚上方一条虚线：{author_rule}"
+    )
+    assert re.search(r"font-size:\s*var\(--f11\)", author_rule), f"作者是更小的一档字：{author_rule}"
+    assert re.search(r"flex:\s*0 0 auto", author_rule), f"作者页脚不参与伸缩：{author_rule}"
+    assert 'id="lobby-author"' not in html, (
+        "作者页脚**不许**静态占位：作者为空时它必须一个节点都不存在（不是空 div）"
+    )
+
+    # 5. JS 行为口。
+    render_portrait = _function_source(lobby_js, "renderLobbyPortrait")
+    assert render_portrait.count('createElement("img")') == 1, (
+        f"有图分支只造一张 `<img>`：{render_portrait}"
+    )
+    assert "/art/" in render_portrait and "encodeURI(" in render_portrait, (
+        f"src = `/art/` + 索引里的相对路径：{render_portrait}"
+    )
+    assert 'setAttribute("data-empty", "1")' in render_portrait, (
+        f"空位节点带 `data-empty=\"1\"`：{render_portrait}"
+    )
+    assert render_portrait.index('setAttribute("data-empty", "1")') < (
+        render_portrait.index('createElement("img")')
+    ), (
+        f"空位分支必须在造 img **之前**返回（空位不发图片请求）：{render_portrait}"
+    )
+    entry = _function_source(lobby_js, "lobbyPortraitEntry")
+    assert "state.portraits" in entry and "version.name" in entry, (
+        f"索引键 = 显示名称（与 `/api/heroes` 的 `version.name` 同源）：{entry}"
+    )
+    render_author = _function_source(lobby_js, "renderLobbyAuthor")
+    assert 'foot.id = "lobby-author"' in render_author and "author-foot" in render_author, (
+        f"页脚的 id / class 只在 JS 里挂：{render_author}"
+    )
+    assert "panel.appendChild(foot)" in render_author, (
+        f"页脚 append 到 `#lobby-heroskills` 末尾（它就是最后一个子节点）：{render_author}"
+    )
+    assert "textContent = author" in render_author, (
+        f"作者文本逐字进节点（零正则、零拼接）：{render_author}"
+    )
+    for forbidden in ("replace(", "slice(", "trim("):
+        assert forbidden not in render_author, (
+            f"作者文本不许裁 / 拼（前端零正则、零截断）：`{forbidden}` 出现在 {render_author}"
+        )
+    assert "if (!author) return null;" in render_author, (
+        f"作者为空 ⇒ 一个节点都不建：{render_author}"
+    )
+    assert render_author.index("if (!author) return null;") < render_author.index(
+        'createElement("div")'
+    ), f"空作者的返回要在造节点之前：{render_author}"
+    assert "removeChild(previous)" in render_author, (
+        f"换人时旧页脚要摘掉（否则空作者仍留着上一位的页脚）：{render_author}"
+    )
+    hero_panel_fn = _function_source(lobby_js, "renderLobbyHeroPanel")
+    assert "renderLobbyPortrait(version)" in hero_panel_fn, "右栏重画口要一起换立绘"
+    assert "renderLobbyAuthor(version)" in hero_panel_fn, "右栏重画口要一起换作者页脚"
+    pool_fn = _function_source(lobby_js, "renderHeroPool")
+    assert "img" not in pool_fn and "portrait" not in pool_fn, (
+        f"将池列表**一行都不铺立绘**（一次 119 张 ≈ 28 MB）：{pool_fn}"
+    )
+    img_creations = sum(
+        path.read_text(encoding="utf-8").count('createElement("img")')
+        for path in sorted(STATIC_DIR.glob("*.js"))
+    )
+    assert img_creations == 1 and lobby_js.count('createElement("img")') == 1, (
+        f"全前端只有立绘渲染口造图（首页同一时刻最多一张）：{img_creations} 处"
+    )
+    load_index = _function_source(core_js, "loadPortraitIndex")
+    assert 'api("/api/portraits")' in load_index, f"拉的是立绘索引端点：{load_index}"
+    assert "catch (error)" in load_index and "heroes = {}" in load_index, (
+        f"拉失败 ⇒ 空表（fail-open，不抛）：{load_index}"
+    )
+    assert "state.portraits = heroes" in load_index and "renderLobbyHeroPanel()" in load_index, (
+        f"缓存到 `state.portraits` 之后重画右栏（谁后到都重画一次）：{load_index}"
+    )
+    assert "lobby-hint" not in load_index, (
+        f"立绘拉取失败**不写提示**（缺图不是错误态）：{load_index}"
+    )
+    assert re.search(r"portraits:\s*\{\}", core_js), (
+        "`state.portraits` 的初值是空表（出厂无立绘 = 全空位，不报错）"
+    )
+    wire_fn = _function_source(main_js, "wire")
+    assert "loadHeroCatalog()" in wire_fn and "loadPortraitIndex()" in wire_fn, (
+        f"启动时与 `loadHeroCatalog()` 一起拉立绘索引：{wire_fn}"
+    )
 
 
 def test_the_lobby_panels_open_in_the_shared_window_shell() -> None:

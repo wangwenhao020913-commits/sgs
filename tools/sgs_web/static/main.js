@@ -84,6 +84,9 @@ function wire() {
   $("in-my-hero").addEventListener("change", syncPoolHint);
   syncPointjiang();
   loadHeroCatalog();
+  // hero-portraits 票 02：立绘索引与将池目录**一起**在启动时拉（两个请求并行，谁后到都
+  // 各自重画一次右栏；失败不挡开局——`loadPortraitIndex()` fail-open 到全空位）。
+  loadPortraitIndex();
   loadHeroPools();
   loadDeckCatalog();
   // M7 票 20：剧本模式的开局页（三态入口 + 摘要行 + 坏档修复 + 两个确认框）。首屏就取一次
