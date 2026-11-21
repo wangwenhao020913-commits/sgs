@@ -81,6 +81,7 @@ from sgs.script import (
     stage_save,
 )
 
+from .descriptions import display_skill_description
 from .display import catalog_skill_name
 from .session import Session
 
@@ -181,11 +182,16 @@ def _skill_label(skill_id: str) -> str:
 
 
 def _catalog_item(table: SkillValueTable, item_id: str) -> dict[str, Any] | None:
-    """一件东西的目录行：``{name, kind, rarity, price}``；表外（不许卖也不许抽）⇒ ``None``。
+    """一件东西的目录行：``{name, kind, rarity, price, desc}``；表外（不许卖也不许抽）⇒ ``None``。
 
     **价只读表**：技能价由 :func:`sgs.script.skill_price` 从**稀有度**现算（票 02 §4
     「一张表两用」），遗物固定 :data:`sgs.data.RELIC_PRICE`。前端不按稀有度自己乘价
     ——``RARITY_PRICES`` 在本仓只有一份真源（票 22 的备注）。
+
+    ``desc`` 是**给人看的**展示文案（ui-one-screen 票 01）：全文取自
+    ``descriptions.json``，按注记裁切的那一步只住在
+    :func:`sgs_web.descriptions.display_skill_description`——技能与遗物走同一个口，
+    不按 ``relic.`` / 合成键前缀特判；查不到条目时是显式「暂无描述」。
     """
     if item_id in table.skills:
         value = skill_value(table, item_id)
@@ -194,6 +200,7 @@ def _catalog_item(table: SkillValueTable, item_id: str) -> dict[str, Any] | None
             "kind": "skill",
             "rarity": value.rarity.value,
             "price": skill_price(table, item_id),
+            "desc": display_skill_description(item_id),
         }
     if item_id in table.relics:
         return {
@@ -201,6 +208,7 @@ def _catalog_item(table: SkillValueTable, item_id: str) -> dict[str, Any] | None
             "kind": "relic",
             "rarity": None,
             "price": RELIC_PRICE,
+            "desc": display_skill_description(item_id),
         }
     return None
 

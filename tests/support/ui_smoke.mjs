@@ -90,6 +90,16 @@ const htmlCollectionView = (children) => new Proxy(children, {
   set() { return false; },
 });
 
+/* ui-one-screen 票 04：`node` 是否还在 `root` 的子树里。
+ * 判据的用途：**重铺检测**。真 DOM 里 `innerHTML = …` 会销毁旧子树，旧节点不再挂在容器
+ * 下面（`document.getElementById` 也找不到它）——于是「输入之后搜索框仍是同一个节点」
+ * 这条断言在"整块重铺"的实现上必须红。垫片照同一语义判（`_detachChildren` 会摘掉）。 */
+function subtreeContains(root, node) {
+  if (!root || !node) return false;
+  if (root === node) return true;
+  return (root._children || []).some((child) => subtreeContains(child, node));
+}
+
 /* U4-01：飞行层要读**起 / 落点矩形**，并在飞行节点上起 Web Animations 动画。
  * 垫片不排版，故给每一步一个**确定性**矩形：固定 id 有显式表，其余按 data-* / 构造序
  * 派生（同一步里同一节点重复读 = 同一个值）。动画只登记参数、不自动跑——也就不会触发
@@ -116,6 +126,12 @@ const RECT_TABLE = new Map(Object.entries({
   "t-death-fx": { left: 0, top: 0, width: 1440, height: 810 },
   // vital-fx 票 02：体力演出层也是整壳覆盖层——目标武将块的矩形按它换算成覆盖层坐标。
   "t-vital-fx": { left: 0, top: 0, width: 1440, height: 810 },
+  // ui-one-screen 票 06：技能浮层的"跟着鼠标走"要看落点变不变，就得有**能算的几何**——
+  // 画布壳按 1600×900 设计单位给（于是垫片里 1 dsu = 1px，与真画布同口径），浮层给它
+  // CSS 里的 340dsu 宽 + 一个确定的内容高。缺这两条时壳只有 100px 宽、浮层在 dsu 里比壳
+  // 还宽 ⇒ 每次都贴左内缩，`left` 恒等，判据会假绿。
+  "view-script-board": { left: 0, top: 0, width: 1600, height: 900 },
+  skilltip: { left: 0, top: 0, width: 340, height: 130 },
 }));
 let rectSeq = 0;
 /* damage-fx 票 05：武将块的垫片矩形默认按座位固定派生（跨重绘稳定）；用例改这个数就能
@@ -229,7 +245,14 @@ class El {
   // "元素累积"这种假 bug —— 第一版垫片在这里骗过我一次）。
   set innerHTML(v) { this._html = String(v); this._detachChildren(); this._text = ""; }
   _detachChildren() {
-    for (const child of this._children) child.parentNode = null;
+    for (const child of this._children) {
+      // ui-one-screen 票 04：真 DOM 里被移除的那棵子树若含焦点元素，焦点随它一起消失
+      // （`document.activeElement` 回到 body）。**整块重铺的判据之一**：重铺 = 焦点丢。
+      if (documentShim.activeElement && subtreeContains(child, documentShim.activeElement)) {
+        documentShim.activeElement = null;
+      }
+      child.parentNode = null;
+    }
     // 原地清空：children 是活集合，视图不能换目标。
     this._children.length = 0;
   }
@@ -284,6 +307,12 @@ class El {
   setAttribute(name, value) { (this.attrs ||= {})[name] = String(value); }
   getAttribute(name) { return (this.attrs || {})[name]; }
   removeAttribute(name) { if (this.attrs) delete this.attrs[name]; }
+  /* ui-one-screen 票 04：真浏览器的每个元素都有 `focus()` / `blur()`，`document.activeElement`
+   * 指向获得焦点的那一个。垫片此前两个都没有 ⇒「搜索框收到 input 之后仍持有焦点」根本无从
+   * 断言（UI1-15 的全部意义就在这一半）。补上与真 DOM 同义的实现——与 `window.addEventListener`
+   * 那条同一个理由：真浏览器一定有、垫片没理由缺。 */
+  focus() { documentShim.activeElement = this; }
+  blur() { if (documentShim.activeElement === this) documentShim.activeElement = null; }
   querySelector(selector) {
     const tag = String(selector).toLowerCase();
     return this._children.find((c) => c.tagName.toLowerCase() === tag) || null;
@@ -308,6 +337,22 @@ class El {
   }
   get lastChild() { return this._children[this._children.length - 1] || null; }
   text() { return (this._html || this._text).replace(/<[^>]*>/g, "") + this._children.map((c) => c.text()).join(""); }
+  /* ui-one-screen 票 06：技能浮层的**委托**靠 `event.target.closest("[data-skill]")` 找宿主，
+   * 贴窗边翻转靠 `closest(".pw")` 认那扇窗。垫片此前没有这一口 ⇒ 委托式实现在烟测里直接
+   * `TypeError`（那是垫片的缺件，不是实现的错——与 `focus()` / `window.addEventListener`
+   * 那两条同一个理由）。与真 DOM 同义的语义：**命中自己也算**，沿 `parentNode` 上溯，
+   * 走到 `null` 返回 `null`。选择器只支持本票用到的两种：`[attr]` 与 `.class`。 */
+  closest(selector) {
+    const text = String(selector || "").trim();
+    for (let node = this; node; node = node.parentNode) {
+      if (text.startsWith("[") && text.endsWith("]")) {
+        if (node.getAttribute && node.getAttribute(text.slice(1, -1)) !== undefined) return node;
+      } else if (text.startsWith(".")) {
+        if (node.classList && node.classList.contains(text.slice(1))) return node;
+      }
+    }
+    return null;
+  }
 }
 
 /* damage-fx 票 05：`SgsDamageFX.create()` 要一张真 canvas + 2D 上下文。垫片给一个
@@ -419,6 +464,9 @@ const documentShim = {
   },
   // `?audiotest=1` 的电平写在 `<html data-audio>` 上（真页面里就是 documentElement）。
   documentElement: el("html", ""),
+  /* ui-one-screen 票 04：真 DOM 的焦点查询口。初值 `null`（没有元素被聚焦），
+   * `El.focus()` 写它、子树被摘掉 / `blur()` 由它清空——见 `El` 里那两条注释。 */
+  activeElement: null,
 };
 const fireDocument = (name, event) => (documentListeners[name] || []).slice().forEach((fn) => fn(event));
 const fireWindow = (name, event) => (windowListeners[name] || []).slice().forEach((fn) => fn(event));
@@ -693,10 +741,38 @@ const setEquals = (actual, expected) => {
   const right = new Set((expected || []).map(String));
   return left.size === right.size && [...right].every((value) => left.has(value));
 };
+/** 事件**派发点**：节点自己没有这个事件的处理器时，沿 `parentNode` 向上找最近的挂点。
+ *
+ *  为什么补这一条（ui-one-screen 票 04）：真浏览器里事件**冒泡** ⇒ 委托式处理器（挂在列表
+ *  容器上的那种）能收到来自格子的点击。垫片此前只派发给节点自己，于是"事件走委托"的实现
+ *  在垫片里永远收不到点击 —— 那是垫片的缺件，不是实现的错。口径与垫片既有纪律一致：
+ *  有处理器的那个节点就是派发点（最近的祖先；找到了就停，不继续向上）。`target` 仍指向
+ *  真正被点 / 被右键的那个节点（真 DOM 语义）。 */
+const handlerNode = (node, name) => {
+  for (let at = node; at; at = at.parentNode) {
+    if (at.listeners && (at.listeners[name] || []).length) return at;
+  }
+  return node;
+};
+/** 派发一次事件并**同步**跑完处理器（返回同一个 payload，供断言 `prevented` / `target`）。 */
+const fireOn = (node, name, extra = {}) => {
+  const payload = {
+    target: node, prevented: false,
+    stopPropagation() {},
+    preventDefault() { payload.prevented = true; },
+    ...extra,
+  };
+  const owner = handlerNode(node, name);
+  for (const fn of (owner.listeners && owner.listeners[name]) || []) fn(payload);
+  return payload;
+};
 /** 触发一次 click 并**等它跑完**：右上动作 / 取消里发请求的处理器是 async 的，
- *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。 */
+ *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。
+ *  派发点由 :func:`handlerNode` 给（自己没处理器时向上冒泡到最近的挂点）。 */
 const clickAndWait = async (node, event = null) => {
-  for (const fn of node.listeners.click || []) await fn(event || { target: node });
+  const payload = event || { target: node };
+  const owner = handlerNode(node, "click");
+  for (const fn of (owner.listeners && owner.listeners.click) || []) await fn(payload);
 };
 /** table-ux-overhaul 票 11：跑掉**这一步**的预览去抖计时器，再等一次往返。
  *
@@ -1186,33 +1262,53 @@ check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放
     + ` abandonHidden=${$("btn-script-abandon").hidden}`);
 
 // ---- ② 既有三块一个没少（UI-2：增量叠加）+ 位置纪律 + 标签白名单 ----
+//
+// ui-one-screen 票 03 推翻了「三块都排在开局页正文里」这个**前提**：剧本 / 将池 / 录像
+// 搬进了同一扇面板窗（窗没开时住在 `#lobby-window-stash`，所有 `<main>` 之外），工具行三键
+// 各开一扇。判据本身不放宽：三个 id 一个都没删、不插在牌桌与回放视图之间、标签仍是垫片
+// 认识的那 16 种。
 {
   const lobbyText = html.slice(html.indexOf('id="view-lobby"'), html.indexOf('id="view-table"'));
   const at = (needle) => lobbyText.indexOf(needle);
-  check("M7-20c 既有开局表单 / 将池预设 / 已有录像一个都没删（剧本面板 → 开一局 → 将池 → 录像）",
-    at('id="script-panel"') >= 0 && at('id="lobby-form"') > at('id="script-panel"')
-    && at('id="in-players"') > 0 && at('id="btn-start"') > 0
-    && at('id="hero-pool-panel"') > at('id="lobby-form"')
-    && at('id="run-list"') > at('id="hero-pool-panel"'),
-    `script=${at('id="script-panel"')} form=${at('id="lobby-form"')}`
-      + ` pool=${at('id="hero-pool-panel"')} runs=${at('id="run-list"')}`);
+  const lastMain = html.lastIndexOf("</main>");
+  const toolrow = html.slice(html.indexOf('id="lobby-toolrow"'), html.indexOf('id="lobby-body"'));
+  const panelIds = ["script-panel", "hero-pool-panel", "run-list"];
+  const panelAt = (id) => html.indexOf(`id="${id}"`);
+  const toolKeys = ["btn-lobby-script", "btn-lobby-pool", "btn-lobby-runs"];
+  check("M7-20c 既有三块一个都没删（三个 id 都在，且都搬进所有 <main> 之外的窗区）+ 工具行三键",
+    at('id="lobby-form"') > 0 && at('id="in-players"') > 0 && at('id="btn-start"') > 0
+    && panelIds.every((id) => panelAt(id) > lastMain)
+    && toolKeys.every((id) => toolrow.indexOf(`id="${id}"`) >= 0)
+    && toolrow.indexOf('id="btn-lobby-script"') < toolrow.indexOf('id="btn-lobby-pool"')
+    && toolrow.indexOf('id="btn-lobby-pool"') < toolrow.indexOf('id="btn-lobby-runs"'),
+    `form=${at('id="lobby-form"')} 三块=${panelIds.map(panelAt).join(",")}`
+      + ` lastMain=${lastMain} 三键=${toolKeys.map((id) => toolrow.indexOf(`id="${id}"`)).join(",")}`);
 
   const between = html.slice(html.indexOf('id="view-table"'), html.indexOf('id="view-replay"'));
-  check("M7-20d 剧本开局页的面不插在 view-table 与 view-replay 之间（两处字符串切片断言的锚点）",
+  check("M7-20d 三块内容与窗壳都不插在 view-table 与 view-replay 之间（两处字符串切片断言的锚点）",
     between.indexOf("script-panel") < 0 && between.indexOf("script-confirm") < 0
+    && between.indexOf("lobby-window-stash") < 0
     && html.indexOf('id="script-panel"') > 0 && html.indexOf('id="script-confirm"') > 0,
-    `中间出现 script-panel=${between.indexOf("script-panel")}`);
+    `中间出现 script-panel=${between.indexOf("script-panel")}`
+      + ` stash=${between.indexOf("lobby-window-stash")}`);
 
-  // 垫片只解析 16 种标签（本文件 `:254` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  // 垫片只解析 16 种标签（本文件 `:373` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  // 切片改到**窗壳区间**（寄存格 + 窗），另加工具行与两栏里新增的两段（左边表单里有 <option>，
+  // 故从将池摘要面板起切，避开下拉选项）。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
     "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
-  const scriptSection = lobbyText.slice(at('id="script-panel"'), at('id="lobby-form"'))
-    + lobbyText.slice(at('id="script-confirm-backdrop"'));
-  const tags = [...scriptSection.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
-    .map((match) => match[1].toLowerCase());
-  check("M7-20e 新加节点的标签只用垫片认识的那些（不引入新标签）",
-    tags.length > 0 && tags.every((tag) => allowedTags.has(tag)),
-    `标签=${[...new Set(tags)].join(",")}`);
+  const shellAt = html.indexOf('id="lobby-window-stash"');
+  const slices = [
+    toolrow,
+    html.slice(html.indexOf('id="pool-summary"'), html.indexOf('id="view-table"')),
+    html.slice(shellAt, html.indexOf("<script", shellAt)),
+  ];
+  const tags = slices.join("").replace(/<!--[\s\S]*?-->/g, "")
+    .matchAll(/<([a-zA-Z][\w-]*)/g);
+  const seenTags = [...tags].map((match) => match[1].toLowerCase());
+  check("M7-20e 工具行 / 两栏 / 窗壳区新加节点的标签只用垫片认识的那些（不引入新标签）",
+    seenTags.length > 0 && seenTags.every((tag) => allowedTags.has(tag)),
+    `标签=${[...new Set(seenTags)].join(",")}`);
 }
 
 // ---- ③ 新剧本 → 选剧本 → 3 选 1（这段时间**不落盘**） ----
@@ -31010,7 +31106,7 @@ check("M7-22e 「丢弃选中」= 一条 PUT 清掉那一格；**不返还铜钱
   && slotOf(0).getAttribute("data-empty") === "1",
   `coins=${ui.state.script.board.run.coins} hints="${$("script-loadout-hint").textContent}"`);
 
-// ---- ③ 满包标注 + 节点内编辑入口不存在 ----
+// ---- ③ 满包标注 + 节点内**背包键不存在** + 格子编辑入口不存在（票 05 改的判据）----
 const fullSlots = Array.from({ length: 24 }, (_, index) => (
   index < 4
     ? ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao", "hero.zhaoyun.longdan"][index]
@@ -31023,10 +31119,16 @@ check("M7-22f 满包标注：24/24 + 「已满」（三选一的选择会折成�
   && ui.state.script.board.run.backpack.slots.every((slot) => Boolean(slot)),
   `"${$("script-loadout-backpack").textContent}"`);
 
+/** HUD 动作区里的「背包」键（按类名找：节点进行中它**根本不存在**——票 05 / spec R6）。 */
+const hudBagRows = () => byClass($("script-hud-actions"), "hud-bag");
+const hudBagCount = () => hudBagRows().length;
+const bagBeforeNode = hudBagCount();
 const enteredEvent = await enterNode(runA.run_id, "e1");
 scriptMark = calls.length;
 await clickAndWait(slotOf(0));
 const nodeEdit = {
+  bagBefore: bagBeforeNode,
+  bagDuring: hudBagCount(),
   dragstart: (slotOf(0).listeners.dragstart || []).length,
   click: (slotOf(0).listeners.click || []).length,
   discardHidden: $("btn-script-loadout-discard").hidden,
@@ -31034,8 +31136,9 @@ const nodeEdit = {
   puts: calls.slice(scriptMark).filter(
     (call) => call.method === "PUT" && call.path.endsWith("/backpack")).length,
 };
-check("M7-22g 节点内**编辑入口不存在**：格子不挂 click / dragstart、「丢弃」整键收起、点它零请求",
-  nodeEdit.dragstart === 0 && nodeEdit.click === 0
+check("M7-22g 节点内**背包键不存在**（不是置灰 / 不是隐藏）：HUD 动作区少一个节点 + 格子仍不挂 click / dragstart + 「丢弃」仍收起",
+  bagBeforeNode === 1 && nodeEdit.bagDuring === 0
+  && nodeEdit.dragstart === 0 && nodeEdit.click === 0
   && nodeEdit.discardHidden === true && nodeEdit.lock === true
   && nodeEdit.puts === 0
   && $("script-loadout-lock").textContent.includes("不可编辑"),
@@ -31220,14 +31323,15 @@ check("M7-22t 续档 / 刷新后的待结算战斗（棋盘体没有 session_id�
   && $("script-face-text").textContent.includes("还没开到牌桌上"),
   `action="${faceGo() && faceGo().textContent}"`);
 
-// 单轮：同一份克隆、只给一轮候选（弹窗写「第 1/1 轮」）；不选就关掉 ⇒ 零请求。
+// 单轮：同一份克隆、只给一轮候选（弹窗写「第 1/1 轮」）。票 10 起这是**强制选择面**（窗上
+// 没有关闭键），脚本直接走 `scriptCloseConfirm` 收窗 ⇒ 此刻零请求。
 pendingClone(
   Object.assign({}, battleSpec, { rewards: [battleSpec.rewards[0]] }),
   { nodeId: "b1", room: { name: "麦田" } },
 );
 scriptMark = calls.length;
 await clickAndWait(faceGo());
-check("M7-22u 单轮三选一：弹窗写「第 1/1 轮」、候选数 = `spec.rewards[0]` 的张数（不选也能关，零请求）",
+check("M7-22u 单轮三选一：弹窗写「第 1/1 轮」、候选数 = `spec.rewards[0]` 的张数（收窗零请求）",
   dialog().getAttribute("data-dialog") === "pick"
   && dialog().getAttribute("data-rounds") === "1"
   && pickRows().length === 3
@@ -31622,6 +31726,45 @@ const edConfirmLabels = () => Array.from($("script-confirm-actions").children)
   .map((node) => String(node.textContent).trim());
 const edClick = async (id) => scriptClick($(id));
 const edOpenKind = async (kind) => scriptClick(edKind(kind));
+/* ui-one-screen 票 07：右栏三页签（详情 / 大节 / 校验）。垫片不解析静态 `hidden` 属性，
+ * 故页签态只读 `script-editor.js` 写进 DOM 的那一份：键的 `.on` 与三块 pane 的 `hidden`。 */
+const edTabKeys = ["detail", "layer", "valid"];
+const edTabKey = (key) => $(`script-editor-tab-${key}`);
+const edPane = (key) => $(`script-editor-pane-${key}`);
+const edActiveTab = () => edTabKeys
+  .find((key) => edTabKey(key).classList.contains("on")) || null;
+const edVisiblePanes = () => edTabKeys.filter((key) => edPane(key).hidden !== true);
+const edShowTab = async (key) => scriptClick(edTabKey(key));
+/* ui-one-screen 票 09：**字段住哪块 pane**。垫片里静态节点不建父子关系，但动态化出来的
+ * 字段仍挂在它们的**字段挂载根**下（表单 / 图 / 边列表 / 校验条目），故沿 `parentNode`
+ * 找到根，再按 index.html 里三块 `.ed-pane` 的切片问那个根在第几块（不另抄一份映射）。 */
+const edPaneById = (() => {
+  const keys = edTabKeys;
+  const marks = keys.map((key) => html.indexOf(`id="script-editor-pane-${key}"`));
+  const stop = html.indexOf('id="lobby-window-stash"');
+  const map = new Map();
+  keys.forEach((key, index) => {
+    const from = marks[index];
+    const to = index + 1 < marks.length ? marks[index + 1] : stop;
+    if (from < 0 || to <= from) return;
+    for (const match of html.slice(from, to).matchAll(/\bid="([^"]+)"/g)) map.set(match[1], key);
+  });
+  return map;
+})();
+const edPaneOf = (node) => {
+  for (let cursor = node; cursor; cursor = cursor.parentNode) {
+    if (cursor.id && edPaneById.has(cursor.id)) return edPaneById.get(cursor.id);
+  }
+  return null;
+};
+/** 跳转落点（`scriptEditorJump` 标 `.on` 的那一个）：表单字段 / 图上的节点 / 边行。 */
+const edJumpLandmarks = () => ["script-editor-form", "script-editor-graph", "script-editor-edges"]
+  .flatMap((id) => byClass($(id), "on"));
+/** 断言形状：落点非空，且**每一个**都住在当前可见的 pane 里（藏着的 pane 里标点 = 原缺陷）。 */
+const edLandmarksVisible = (nodes) => nodes.length > 0 && nodes.every((node) => {
+  const pane = edPaneOf(node);
+  return pane !== null && edVisiblePanes().includes(pane) && edPane(pane).hidden !== true;
+});
 /** 拖一个节点到 `(row, col)` 格：dragstart 在节点按钮上、drop 在网格命中格上。 */
 const edDragNode = async (nodeId, row, col) => {
   const button = cellButton(edNodeCell(nodeId));
@@ -31692,6 +31835,8 @@ check("M7-25d 九类实体的列表条数 = 服务端那张表（不是前端另
   JSON.stringify(edCounts));
 
 // 剧本页：组装 大节 → 节点 → 房间（房间名走引用解析，不是 id 原样）。
+// 票 07 起表单与组装树住「详情」页签：先切页签再操作（票面「前置改成先切到对应页签」）。
+await edShowTab("detail");
 await edOpenKind("scripts");
 await scriptClick(edRow("editorprobe"));
 const treeLayers = byClass($("script-editor-tree"), "script-editor-tree-layer");
@@ -31704,6 +31849,8 @@ check("M7-25e 剧本页组装 大节 → 节点 → 房间（2 个大节 / 13 �
   `大节=${treeLayers.length} 节点=${treeNodes.length}`);
 
 // ---- ② 大节页：网格拖放 + 画边 + 条件 + 解除（画面与边列表同步）----
+// 大节页住「大节」页签（票 07）：先切页签，网格 / 连线才在可见的那一块里。
+await edShowTab("layer");
 await edOpenKind("layers");
 await scriptClick(edRow("L1"));
 const edDraw0 = ui.scriptGraphDrawCount();
@@ -31797,6 +31944,8 @@ check("M7-25k 解除连线 = 一条 DELETE（只摘这一条）：边列表与�
   `DELETE=${edUnlinkDeletes.length} 线=${edgePoints(edGraph()).length}`);
 
 // ---- ③ 问号池（引用的房间选择器，禁选 unknown）----
+// 问号池 / 模板 / 副本 / 重命名都改的是实体表单：住「详情」页签（票 07）。
+await edShowTab("detail");
 await edOpenKind("rooms");
 await scriptClick(edRow("room.unknown"));
 await edClick("btn-script-editor-edit");
@@ -31968,6 +32117,8 @@ check("M7-25y 重命名保引用：被战斗座位引用的模板改名后，座
 
 // ---- ④ D30 删除交互 ----
 // ② 删一个有入边 / 出边的节点：确认框提示连带删几条，确认后节点与入 / 出边一起消失。
+// 节点在图上（「大节」页签），删除键在页签头（票 07）。
+await edShowTab("layer");
 await edOpenKind("layers");
 await scriptClick(edRow("L1"));
 await edOpenKind("nodes");
@@ -32029,6 +32180,8 @@ check("M7-25ad 删被共享引用的实体：确认框列出引用点（loc 指�
   `引用点=${JSON.stringify(edRefRows.map((row) => row.getAttribute("data-loc")))}`);
 
 await scriptClick(scriptConfirmAction("仍然删除"));
+// 校验面板住「校验」页签（票 07）：先切过去，逐条红字才在可见的那一块里。
+await edShowTab("valid");
 const edDangleDeletes = calls.slice(edDangleMark).filter(
   (call) => call.method === "DELETE" && call.path.includes("/templates/tpl.grunt"));
 const edDangleErrors = ed().errors || [];
@@ -32046,7 +32199,8 @@ check("M7-25ae 删完立刻红：删除 200（实体真的没了），校验面�
   && String($("script-editor-hint").textContent).includes("悬空"),
   `错误=${JSON.stringify(edDangleErrors.map((error) => [error.loc, error.rule_id]))}`);
 
-// 校验面板条目可点击跳字段（字段位置 → 表单）。
+// 校验面板条目可点击跳字段（字段位置 → 表单）。票 07 起跳转还要**同时切页签**：
+// 这条 loc 指共享表（`/rooms/…`）⇒ 跳转后停在「详情」。
 const edJumpLoc = edDangleErrors[0] ? String(edDangleErrors[0].loc) : "";
 await scriptClick(edErrorRows()[0]);
 const edFocusFields = byClass($("script-editor-form"), "on");
@@ -32054,8 +32208,10 @@ check("M7-25af 点校验条目跳到对应字段：选中引用方实体、打�
   ed().kind === "rooms" && ed().selected === "room.story"
   && $("script-editor-focus").hidden === false
   && String($("script-editor-focus").textContent).includes(edJumpLoc)
-  && edFocusFields.length > 0,
-  `kind=${ed().kind} selected=${ed().selected} 定位="${$("script-editor-focus").textContent}"`);
+  && edFocusFields.length > 0
+  && edActiveTab() === "detail" && edVisiblePanes().join(",") === "detail",
+  `kind=${ed().kind} selected=${ed().selected} 页签=${edActiveTab()}`
+    + ` 定位="${$("script-editor-focus").textContent}"`);
 
 // ---- 收尾：坏库仍是可打开的库（D30），撤掉用户库后回到内置库 ----
 const edReloadMark = calls.length;
@@ -32072,6 +32228,131 @@ check("M7-25ah 收尾：用户库撤掉后编辑器回到内置库（source = bu
   ed().source === "builtin" && (ed().errors || []).length === 0
   && edErrorRows().length === 0 && $("script-editor-clean").hidden === false,
   `source=${ed().source} 库在=${existsSync(SCRIPT_EDITOR_LIBRARY)}`);
+
+
+/* ============ ui-one-screen 票 07：编辑器右栏三页签（spec A10）============
+ *
+ * 两条判据（票面「新增」）：
+ *   UI1-41 三块页签互斥显示：点一个，另两个 hidden（一次只显示一块）；
+ *   UI1-40 校验条目跳转让页签跟着切：`loc` 指大节 / 节点字段 ⇒「大节」页签激活；
+ *          指剧本级 / 共享表字段 ⇒「详情」页签激活。两种 loc 由**真**删除制造：
+ *          删掉被节点与问号池共同引用的 `room.event`（一条 DELETE，服务端立刻回 errors，
+ *          一类 loc 在 `/scripts/…/layers/…/nodes/…`、一类在 `/rooms/…/pool/…`）。
+ *
+ * 页签态只读 `script-editor.js` 写进 DOM 的那一份（垫片不解析静态 `hidden` 属性）；
+ * 互斥与跳转都是一次重绘的结果，断言不看前端另算的镜像。
+ */
+writeFileSync(
+  SCRIPT_EDITOR_LIBRARY,
+  readFileSync("tests/support/fixtures/script-editor-library.json", "utf8"),
+);
+await edClick("btn-script-editor-reload");
+
+// ---- UI1-41：三个页签点一遍，每次只有那一块 pane 可见 ----
+{
+  let ok = true;
+  const seen = [];
+  for (const key of edTabKeys) {
+    await edShowTab(key);
+    const visible = edVisiblePanes();
+    const on = edActiveTab();
+    const right = visible.length === 1 && visible[0] === key && on === key
+      && ed().tab === key
+      && edTabKeys.filter((other) => other !== key)
+        .every((other) => edPane(other).hidden === true);
+    if (!right) ok = false;
+    seen.push(`${key}:${visible.join("/") || "无"}/${on || "无"}`);
+  }
+  check("UI1-41 三块页签互斥显示：点一个页签，只有那一块 pane 可见（另两块 hidden）",
+    ok && edTabKeys.every((key) => typeof edPane(key) === "object"), seen.join(" "));
+}
+
+// ---- UI1-40：删一个被节点 + 问号池共同引用的房间，点两类 loc 的条目各一次 ----
+// 票 09（review 修复 B）：页签由**字段所在的 pane** 决定，不按 `loc` 前缀猜；命中的落点
+// 必须在可见的那一块 pane 里（旧缺陷：节点字段被判成「大节」，`.on` / 滚动全作用在藏着的
+// `#script-editor-form` 上，提示却说「已定位到字段」）。
+await edOpenKind("rooms");
+await scriptClick(edRow("room.event"));
+await edClick("btn-script-editor-delete");
+const edEventRefs = edReferenceRows();
+await scriptClick(scriptConfirmAction("仍然删除"));
+const edRoomErrors = ed().errors || [];
+const edNodeLoc = String(
+  (edRoomErrors.find((error) => String(error.loc || "").startsWith("/scripts/")) || {}).loc || "",
+);
+const edDetailLoc = String(
+  (edRoomErrors.find((error) => String(error.loc || "").startsWith("/rooms/")) || {}).loc || "",
+);
+await edShowTab("valid");
+const edRowByLoc = (loc) => edErrorRows()
+  .find((row) => row.getAttribute("data-loc") === loc) || null;
+const edNodeRow = edRowByLoc(edNodeLoc);
+const edDetailRow = edRowByLoc(edDetailLoc);
+const edJumpSeen = [];
+
+// ① 节点字段 loc（`…/nodes/<i>/room`）：row/col/room 三个输入框住**详情**的
+//    `#script-editor-form` 里 ⇒ 页签切「详情」，`.on` 的落点（房间下拉）在可见 pane 里。
+await scriptClick(edNodeRow);
+const edNodeMarks = edJumpLandmarks();
+const edNodeJump = edActiveTab() === "detail"
+  && edVisiblePanes().join(",") === "detail"
+  && ed().tab === "detail" && ed().kind === "nodes"
+  && String($("script-editor-focus").textContent).includes(edNodeLoc)
+  && edNodeMarks.some((node) => node.id === "script-editor-field-room")
+  && edLandmarksVisible(edNodeMarks);
+edJumpSeen.push(`节点:${edActiveTab()}/${edNodeMarks.map((node) => node.id || "?").join("+") || "无"}`);
+
+// ② 共享表字段 loc（`/rooms/…`）：同样住详情表单 ⇒ 「详情」+ 可见落点。
+await edShowTab("valid");
+await scriptClick(edDetailRow);
+const edDetailMarks = edJumpLandmarks();
+const edDetailJump = edActiveTab() === "detail"
+  && edVisiblePanes().join(",") === "detail"
+  && ed().tab === "detail" && ed().kind === "rooms"
+  && String($("script-editor-focus").textContent).includes(edDetailLoc)
+  && edLandmarksVisible(edDetailMarks);
+edJumpSeen.push(`共享:${edActiveTab()}/${edDetailMarks.map((node) => node.id || "?").join("+") || "无"}`);
+
+// ③ 大节控件 loc（边的 `from`）：边行住「大节」的 `#script-editor-edges` ⇒ 页签切「大节」、
+//    被标记的边行在可见 pane 里。同一条"按字段的家判页签"的反方向（loc 前缀恰好也指大节）。
+await scriptCall("scriptEditorJump", "/scripts/0/layers/0/edges/0/from");
+const edEdgeMarks = edJumpLandmarks();
+const edEdgeJump = edActiveTab() === "layer"
+  && edVisiblePanes().join(",") === "layer"
+  && ed().tab === "layer"
+  && edEdgeMarks.some((node) => node.getAttribute("data-from") === "a1")
+  && edLandmarksVisible(edEdgeMarks);
+edJumpSeen.push(`边:${edActiveTab()}/${edEdgeMarks.map((node) => node.getAttribute("data-from") || "?").join("+") || "无"}`);
+
+check("UI1-40 校验跳转按字段所在的 pane 切页签（节点 / 共享表字段 ⇒ 「详情」、边控件 ⇒ 「大节」；落点都在可见 pane 里）",
+  edEventRefs.length > 0 && Boolean(edNodeLoc) && Boolean(edDetailLoc)
+  && edNodeRow !== null && edDetailRow !== null && edNodeJump && edDetailJump && edEdgeJump,
+  `引用点=${edEventRefs.length} 节点=${edNodeLoc || "缺"} 详情=${edDetailLoc || "缺"}`
+    + ` 落点=${edJumpSeen.join(" ")}`);
+
+// ---- UI1-42：切页签不许丢未保存的输入（票 09 第 2 条）----
+// 在「详情」的表单里改一个文本框 → 切「大节」→ 切回「详情」：render 之后值仍是改过的
+// （切页签会整屏重绘，重绘用 `ed.draft` 铺表单；旧缺陷是只在保存时才把 DOM 收回草稿）。
+await edOpenKind("layers");
+await scriptClick(edRow("L1"));
+await edClick("btn-script-editor-edit");
+await edShowTab("detail");
+const edTypedName = "被改过的层名";
+const edNameBefore = String($("script-editor-field-name").value);
+edSet("script-editor-field-name", edTypedName);
+const edSwitchMark = calls.length;
+await edShowTab("layer");
+await edShowTab("detail");
+const edNameAfter = String($("script-editor-field-name").value);
+check("UI1-42 切页签不丢未保存的输入：详情改文本框 → 大节 → 详情，render 后仍是改过的值（未落盘）",
+  edNameBefore !== edTypedName && edNameAfter === edTypedName
+  && ed().mode === "edit" && !!ed().draft && ed().draft.name === edTypedName
+  && calls.slice(edSwitchMark).filter((call) => call.method !== "GET").length === 0,
+  `改前=${edNameBefore} 改后=${edNameAfter} 页签=${edActiveTab()}`);
+
+// 收尾：撤掉探针库回到内置库（后续 M7-29 从「无用户库」起手）。
+unlinkSync(SCRIPT_EDITOR_LIBRARY);
+await edClick("btn-script-editor-reload");
 
 
 /* ============ M7 票 29：内置剧本的整条流转（开局 → 棋盘 → 牌桌 → 退出 → 继续 → 编辑器）============
@@ -32231,6 +32512,7 @@ check("M7-29l 整轮结束后编辑器打开的是**内置库**（source = built
   && $("view-script-editor").hidden === false,
   `source=${ed().source} layers=${(edScript().layers || []).length}`);
 
+await edShowTab("layer");
 await edOpenKind("layers");
 await scriptClick(edRow("l1"));
 check("M7-29m 编辑器的大节页走同一个渲染器（第 1 大节 10 格 / 17 条线，作者视角零状态色）",
@@ -32247,5 +32529,885 @@ check("M7-29n 收尾干净：无档、无用户库（后续/重复运行仍从�
   && !existsSync(`${RUNS_DIR}/script-library.json`)
   && ui.state.script.board === null,
   `status=${scriptStatus()} 档在=${existsSync(SCRIPT_SAVE_FILE)}`);
+
+/* ============ ui-one-screen 票 03：开局页一屏（工具行三键 / 两栏 / 三扇窗）============
+ *
+ * 三条判据：
+ *   UI1-01 工具行三键各开一扇窗（S / L / M 且**同一壳**、单槽位不叠）；
+ *   UI1-02 右栏「我的武将 + 技能全文」逐字读服务端 `/api/heroes` 的 version 展示面
+ *          （势力 / 名字 / hp 与 hp_max / 点名一个技能的描述与载荷**逐字相同**）；
+ *   UI1-03 描述翻倍不改按钮位置——垫片没有真几何，故只钉**结构**：技能全文区有独立滚动区、
+ *          开始键不在那个滚动区里（真几何读数写进票面 `## Answer`，由 bsk 那一遍量）。
+ */
+const lobbyWindowPanels = { script: "script-panel", pool: "hero-pool-panel", runs: "run-list" };
+const lobbyWindowSizes = { script: "S", pool: "L", runs: "M" };
+const lobbyToolKeys = { script: "btn-lobby-script", pool: "btn-lobby-pool", runs: "btn-lobby-runs" };
+const windowBody = () => $("script-confirm-body");
+const windowNode = () => $("script-confirm-window");
+const stashNode = () => $("lobby-window-stash");
+
+// 从「窗没开」这个真状态开始（垫片不解析静态节点的 `hidden` 属性，故显式置一次）。
+$("script-confirm").hidden = true;
+$("script-confirm-backdrop").hidden = true;
+
+{
+  const shell = windowNode();
+  const detail = [];
+  let ok = true;
+  for (const kind of ["script", "pool", "runs"]) {
+    await clickAndWait($(lobbyToolKeys[kind]));
+    const panel = $(lobbyWindowPanels[kind]);
+    const opened = $("script-confirm").hidden === false
+      && windowNode() === shell
+      && windowNode().getAttribute("data-size") === lobbyWindowSizes[kind]
+      && $("script-confirm").getAttribute("data-dialog") === kind
+      && panel.parentNode === windowBody()
+      && windowBody().children.length === 1;
+    // 另外两块回到寄存格：三块任何时刻都只出现一次（窗里一块 + 寄存格两块）。
+    const others = Object.keys(lobbyToolKeys).filter((other) => other !== kind)
+      .every((other) => $(lobbyWindowPanels[other]).parentNode === stashNode());
+    const single = (html.match(/id="script-confirm-window"/g) || []).length === 1
+      && (html.match(/id="script-confirm"/g) || []).length === 1;
+    if (!(opened && others && single)) ok = false;
+    detail.push(`${kind}=${opened ? "ok" : "bad"}`
+      + `${others ? "" : "/others"}${single ? "" : "/shell"}`);
+    // 关窗（关闭键 = 面板窗自己的收窗口；顺带把三块送回寄存格）。
+    for (const fn of $("script-confirm-close").listeners.click || []) {
+      await fn({ target: $("script-confirm-close") });
+    }
+  }
+  check("UI1-01 开局页工具行三键各开一扇窗（S / L / M 且同一壳、单槽位不叠）",
+    ok && $("script-confirm").hidden === true,
+    detail.join(" "));
+}
+
+// ---- UI1-02：右栏逐字读 `/api/heroes` 的 version 展示面 ----
+{
+  const fresh = await get("/api/heroes");
+  const versionsNow = fresh.heroes.flatMap((group) => group.versions);
+  const shown = versionsNow.find((version) => (version.skills || [])
+    .some((skill) => typeof skill.description === "string" && skill.description.length > 0))
+    || versionsNow.find((version) => (version.skills || []).length > 0)
+    || versionsNow[0];
+  const picked = (shown.skills || []).find((skill) => skill.description)
+    || (shown.skills || [])[0] || {};
+  const kingdomZh = { wei: "魏", shu: "蜀", wu: "吴", qun: "群", shen: "神" };
+  $("in-pointjiang").checked = true;
+  $("in-my-hero").value = shown.id;
+  ui.fillHeroOptions();   // 换人 → 右栏重画（页面里是 change 事件，走同一条渲染路）
+  const pips = Array.from($("lobby-hero-hp").children);
+  const lit = pips.filter((pip) => !pip.classList.contains("off"));
+  const blocks = byClass($("lobby-skill-list"), "skillblock");
+  const block = blocks.find((item) => {
+    const name = byClass(item, "sn")[0];
+    return name && name.textContent === picked.name;
+  }) || null;
+  const desc = block ? byClass(block, "sd")[0] || null : null;
+  const sameDesc = !!desc && desc.textContent === picked.description;
+  check("UI1-02 我的武将 + 技能全文读服务端 version 展示面（点名一个技能，描述与载荷逐字相同）",
+    $("lobby-hero-name").textContent === shown.name
+    && $("lobby-hero-kingdom").textContent === kingdomZh[shown.kingdom]
+    && $("lobby-hero-kingdom").getAttribute("data-kingdom") === shown.kingdom
+    && String($("lobby-hero-hp-label").textContent).includes(String(shown.hp))
+    && String($("lobby-hero-hp-label").textContent).includes(String(shown.hp_max))
+    && pips.length === shown.hp_max && lit.length === shown.hp
+    && blocks.length === (shown.skills || []).length
+    && !!block && sameDesc,
+    `hero=${$("lobby-hero-name").textContent} hp=${$("lobby-hero-hp-label").textContent}`
+      + ` pips=${lit.length}/${pips.length} skills=${blocks.length} 描述逐字=${sameDesc}`);
+}
+
+// ---- UI1-03：结构判据（垫片没有真几何，量几何是 bsk 那一遍的事） ----
+{
+  const cssNow = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const skillRule = (cssNow.match(/\.design-canvas \.skilllist\s*\{[^}]*\}/) || [""])[0];
+  const scrolls = /overflow-y:\s*auto/.test(skillRule);
+  const leftAt = html.indexOf('id="lobby-left"');
+  const rightAt = html.indexOf('id="lobby-right"');
+  const startAt = html.indexOf('id="btn-start"');
+  const skillAt = html.indexOf('id="lobby-skill-list"');
+  const heroSkillsAt = html.indexOf('id="lobby-heroskills"');
+  check("UI1-03 描述翻倍不改按钮位置：技能全文区是**独立滚动区**，开始键不在其中",
+    scrolls
+    && !/max-height/.test(skillRule)
+    && leftAt > 0 && startAt > leftAt && startAt < rightAt
+    && skillAt > rightAt && skillAt > heroSkillsAt,
+    `scroll=${scrolls} left=${leftAt} start=${startAt} right=${rightAt} skill=${skillAt}`);
+}
+
+/* ============ ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）============
+ *
+ * 判据全部走**真 DOM**：固定的筛选区（搜索框 / 五颗势力复选 / 全开关键 / 读数）+ 委托的
+ * 列表行。窗口按用户的路径打开（点工具行的「将池预设」键），筛选 / 全开关 / 右键点将都打在
+ * 真节点上；期望值从 `state.heroCatalog`（= `/api/heroes` 的载荷）**独立**算出来，不读前端
+ * 的筛选实现。
+ *
+ * 这一票的重点是**中文输入**（spec §3.1 / A6b）：`input` 事件只许重绘搜索框**之外**的部分。
+ * UI1-15 断「输入后搜索框仍是同一个节点、仍持有焦点」，UI1-15b 是它的**反证**——同一组读法
+ * 套到"整块重铺"的病态树上必须红，否则这条断言只是自我安慰。UI1-16 断合成期不筛。
+ */
+
+/** 将池窗里那几口（每次现查：重绘换的是列表的子节点，容器与搜索框不变）。 */
+const poolSearchNode = () => $("pool-search");
+const poolAllNode = () => $("btn-pool-all");
+const poolCountNode = () => $("pool-count");
+const poolKingdomNode = (kingdom) => $(`pool-kingdom-${kingdom}`);
+const POOL_KINGDOMS = ["wei", "shu", "wu", "qun", "shen"];
+const POOL_KINGDOM_LABELS = { wei: "魏", shu: "蜀", wu: "吴", qun: "群", shen: "神" };
+/** 列表当前画出来的真名（顺序即渲染顺序）。 */
+const poolVisibleNames = () => Array.from($("hero-pool").children)
+  .map((row) => row.getAttribute("data-true-name"));
+/** 目录里「某个版本显示名含 q」的真名——搜索判据的**独立**来源（R3：只查版本名）。 */
+const poolNamesMatching = (query) => ui.state.heroCatalog
+  .filter((group) => group.versions.some(
+    (version) => String(version.name).toLowerCase().includes(String(query).toLowerCase())))
+  .map((group) => group.true_name);
+/** 目录里「至少一版落在选中势力里」的真名；空集合 = 全部（复选取并集）。 */
+const poolNamesForKingdoms = (kingdoms) => ui.state.heroCatalog
+  .filter((group) => !kingdoms.length
+    || group.versions.some((version) => kingdoms.includes(version.kingdom)))
+  .map((group) => group.true_name);
+const poolCatalogVersions = () => ui.state.heroCatalog.flatMap((group) => group.versions);
+/* 垫片的两个已知边界（读断言时别踩）：
+ *  ① 静态节点只按 `id` 造、**不解析静态 HTML 的父子结构** ⇒「搜索框在面板里」「五颗键带
+ *    `data-kingdom` / 初始 `aria-pressed="false"`」这类**静态形状**由
+ *    `tests/test_web_static.py::test_the_pool_window_keeps_the_row_shape_and_has_the_filters`
+ *    钉；这里能读的是**运行时**才出现的那层结构（面板搬进窗的正文槽）与节点同一性。
+ *  ② 静态属性同理：只有 `setAttribute` 过的才读得到（未点过的键读到 `undefined`）。 */
+
+// 从「窗没开」这个真状态开始，按用户的路径打开将池窗（工具行的「将池预设」键）。
+await ui.loadHeroPools();
+await clickAndWait($("btn-lobby-pool"));
+
+{
+  const body = $("script-confirm-body");
+  const panel = $("hero-pool-panel");
+  const kingdoms = POOL_KINGDOMS.map((kingdom) => poolKingdomNode(kingdom));
+  const checks = {
+    open: $("script-confirm").hidden === false,
+    dialog: $("script-confirm").getAttribute("data-dialog") === "pool",
+    size: $("script-confirm-window").getAttribute("data-size") === "L",
+    split: body.getAttribute("data-layout") === "split",
+    moved: panel.parentNode === body && body.children.length === 1,
+    input: poolSearchNode().tagName === "INPUT",
+    // 中文标签只有 `KINGDOM_LABELS` 一份（票 03 那张）：markup 里留空、由接线按表填；
+    // 顺序 = 枚举顺序（魏 / 蜀 / 吴 / 群 / 神）。
+    kings: kingdoms.every((button, at) => button
+      && button.textContent === POOL_KINGDOM_LABELS[POOL_KINGDOMS[at]]),
+    rows: poolVisibleNames().length === ui.state.heroCatalog.length,
+  };
+  check("UI1-09 将池窗 = L 档 split 正文 + 固定筛选区（搜索 / 五势力复选 / 全开关 / 读数）+ 列表容器",
+    Object.values(checks).every(Boolean),
+    Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => `坏:${name}`).join(" ")
+      || `行=${poolVisibleNames().length}/${ui.state.heroCatalog.length}`);
+}
+
+// ---- UI1-10：搜索按**版本显示名**子串（一个字的「马」命中「司马懿」；「界」命中界版）----
+{
+  const search = poolSearchNode();
+  search.value = "马";
+  fireOn(search, "input");
+  const expectMa = poolNamesMatching("马");
+  const shownMa = poolVisibleNames();
+  const simaCells = poolCells("司马懿");
+  const shapeOk = Array.from($("hero-pool").children).every((row) => {
+    const trueName = row.getAttribute("data-true-name");
+    const matched = (ui.state.heroCatalog.find((group) => group.true_name === trueName) || {})
+      .versions.filter((version) => String(version.name).includes("马"));
+    return row.children.length === matched.length + 1;
+  });
+  check("UI1-10 搜索按版本显示名子串筛（搜「马」命中「司马懿」，搜「界」命中界版）",
+    setEquals(shownMa, expectMa)
+    && expectMa.includes("司马懿")
+    && simaCells.length > 0
+    && simaCells.every((cell) => String(cell.textContent).includes("马"))
+    && shapeOk,
+    `「马」行=${shownMa.join(",")} 司马懿格=${simaCells.map((c) => c.textContent).join(",")}`);
+
+  search.value = "界";
+  fireOn(search, "input");
+  const expectJie = poolNamesMatching("界");
+  const guanyuCells = poolCells("关羽");
+  check("UI1-10b 搜「界」只留界版（同真名的标准版那一格不再画出来）",
+    setEquals(poolVisibleNames(), expectJie)
+    && guanyuCells.length === 1
+    && String(guanyuCells[0].textContent).startsWith("界")
+    && expectJie.length > 0,
+    `「界」行=${poolVisibleNames().length} 关羽行格=${guanyuCells.map((c) => c.textContent).join(",")}`);
+
+  // 清空搜索：回到全部行（空串 = 不筛）。
+  search.value = "";
+  fireOn(search, "input");
+}
+
+// ---- UI1-11：五势力复选取并集；一颗都不选 = 全部 ----
+{
+  await clickAndWait(poolKingdomNode("qun"));
+  const qunPressed = poolKingdomNode("qun").getAttribute("aria-pressed") === "true";
+  const qunRows = poolVisibleNames();
+  await clickAndWait(poolKingdomNode("shu"));
+  const unionRows = poolVisibleNames();
+  const bothPressed = ["qun", "shu"].every(
+    (kingdom) => poolKingdomNode(kingdom).getAttribute("aria-pressed") === "true");
+  await clickAndWait(poolKingdomNode("qun"));
+  await clickAndWait(poolKingdomNode("shu"));
+  const noneRows = poolVisibleNames();
+  check("UI1-11 五势力复选取并集、一颗都不选 = 全部",
+    qunPressed
+    && setEquals(qunRows, poolNamesForKingdoms(["qun"]))
+    && bothPressed
+    && setEquals(unionRows, poolNamesForKingdoms(["qun", "shu"]))
+    && unionRows.length > qunRows.length
+    && noneRows.length === ui.state.heroCatalog.length
+    // 撤完之后两颗被点过的键回到未选；未点过的键读不到初值（静态属性垫片不解析），
+    // 只要**没有一颗呈选中态**；全开关键自始至终没有 aria-pressed（单一动作键）。
+    && ["qun", "shu"].every(
+      (kingdom) => poolKingdomNode(kingdom).getAttribute("aria-pressed") === "false")
+    && POOL_KINGDOMS.every(
+      (kingdom) => poolKingdomNode(kingdom).getAttribute("aria-pressed") !== "true")
+    && poolAllNode().getAttribute("aria-pressed") === undefined,
+    `群=${qunRows.length}/${poolNamesForKingdoms(["qun"]).length}`
+      + ` 群+蜀=${unionRows.length}/${poolNamesForKingdoms(["qun", "shu"]).length}`
+      + ` 全不选=${noneRows.length}/${ui.state.heroCatalog.length}`
+      + ` qunPressed=${qunPressed} both=${bothPressed}`
+      + ` 缺=${poolNamesForKingdoms(["qun", "shu"]).filter((n) => !unionRows.includes(n)).join(",")}`
+      + ` 多=${unionRows.filter((n) => !poolNamesForKingdoms(["qun", "shu"]).includes(n)).join(",")}`);
+}
+
+// ---- UI1-12：全开/关只作用于**当前筛选**（别的势力的禁将状态不变、不落盘）----
+{
+  // 干净的起点：清空当前槽位的禁将，再单独禁掉一个**群之外**的版本（关羽 · 标准版）。
+  ui.heroPools().slots[ui.heroPools().selected].splice(0);
+  ui.renderHeroPool();
+  const outsideId = "guanyu";
+  await clickAndWait(poolCells("关羽").find(
+    (cell) => cell.getAttribute("data-hero-id") === outsideId));
+  await clickAndWait(poolKingdomNode("qun"));
+  const qunIds = poolCatalogVersions()
+    .filter((version) => version.kingdom === "qun").map((version) => version.id);
+  const markAll = calls.length;
+  const labelBefore = poolAllNode().textContent;
+  await clickAndWait(poolAllNode());
+  const bannedAfter = new Set(ui.currentBans());
+  const allOn = qunIds.every((id) => bannedAfter.has(id))
+    && bannedAfter.size === qunIds.length + 1
+    && bannedAfter.has(outsideId);
+  const labelAfter = poolAllNode().textContent;
+  const savesSince = calls.slice(markAll).filter((call) => call.path === "/api/hero-presets");
+  await clickAndWait(poolAllNode());
+  const bannedBack = new Set(ui.currentBans());
+  check("UI1-12 全开/关只作用于当前筛选（别的势力的禁将状态不变、不落盘）",
+    allOn
+    && String(labelBefore).startsWith("全关")
+    && String(labelAfter).startsWith("全开")
+    && String(labelBefore).includes(String(qunIds.length))
+    && String(labelAfter).includes(String(qunIds.length))
+    && bannedBack.has(outsideId)
+    && bannedBack.size === 1
+    && savesSince.length === 0,
+    `群版本=${qunIds.length} label=${labelBefore}→${labelAfter}`
+      + ` 禁=${[...bannedAfter].length} 回滚后=${[...bannedBack].join(",")} 保存请求=${savesSince.length}`);
+  // 收尾：先撤掉「群」筛选（否则群之外的格子根本不在列表里），再解掉那颗禁将。
+  await clickAndWait(poolKingdomNode("qun"));
+  await clickAndWait(poolCells("关羽").find(
+    (cell) => cell.getAttribute("data-hero-id") === outsideId));
+}
+
+// ---- UI1-13：右键版本格 = 点将（绿框 + #in-my-hero + 右栏）；真名行右键零效果 ----
+{
+  /** 当前带绿框的版本 id（绿框 = 「我的武将」当前值，不是"未禁"的代名词）。 */
+  const pickedIds = () => byClass($("hero-pool"), "picked")
+    .map((cell) => cell.getAttribute("data-hero-id"));
+  // ① 绿框跟着「我的武将」的当前值走：开关开着 + 下拉换人 ⇒ 那一格带绿框。
+  const target = poolCatalogVersions()[3];
+  tickPointjiang(true);
+  setSelect("in-my-hero", target.id);
+  const followsValue = pickedIds().length === 1 && pickedIds()[0] === target.id;
+  // ② 关了开关 ⇒ 没有「我的武将」⇒ 绿框消失（R5：绿框不是粘在格子上的装饰）。
+  tickPointjiang(false);
+  const clearedWhenOff = pickedIds().length === 0;
+  // ③ 右键一格 = 点将：开关被打开、下拉 / 右栏 / 绿框一起跟到那一版。
+  const cell = poolCells("关羽")[0];
+  const picked = cell.getAttribute("data-hero-id");
+  const event = fireOn(cell, "contextmenu");
+  const pickedCell = pickedIds().length === 1 && pickedIds()[0] === picked;
+  const synced = $("in-pointjiang").checked === true
+    && $("in-my-hero").value === picked
+    && $("lobby-hero-name").textContent === cell.textContent;
+  check("UI1-13 右键版本格 = 点将（绿框 + #in-my-hero 同步 + 右栏跟着换）；真名行右键零效果",
+    event.prevented === true && followsValue && clearedWhenOff && pickedCell && synced,
+    `prevented=${event.prevented} 跟随=${followsValue} 关掉消失=${clearedWhenOff}`
+      + ` 绿框=${pickedIds().join(",")} 右栏=${$("lobby-hero-name").textContent}`);
+  // ④ 被禁的版本也能点将（R5：点将无视禁将，绿框与禁用态并存）。
+  const bannedId = poolCells("关羽")[1].getAttribute("data-hero-id");
+  await clickAndWait(poolCells("关羽")[1]);                 // 左键 = 禁掉这一版
+  const bannedNow = poolCells("关羽").find(
+    (item) => item.getAttribute("data-hero-id") === bannedId);
+  const bannedPicked = bannedNow.classList.contains("banned");
+  const pickBannedEvent = fireOn(bannedNow, "contextmenu");  // 右键 = 点将（重绘后要重查）
+  const afterBannedPick = poolCells("关羽").find(
+    (item) => item.getAttribute("data-hero-id") === bannedId);
+  check("UI1-13b 被禁的版本也能点将（绿框 + 禁用态并存，点将无视禁将）",
+    bannedPicked
+    && pickBannedEvent.prevented === true
+    && afterBannedPick.classList.contains("banned")
+    && afterBannedPick.classList.contains("picked")
+    && $("in-my-hero").value === bannedId
+    && $("lobby-hero-name").textContent === afterBannedPick.textContent,
+    `banned=${bannedPicked} picked=${afterBannedPick.classList.contains("picked")}`
+      + ` 禁用点=${bannedId}`);
+  // ⑤ 真名行右键零效果：不 preventDefault、不换人、不动开关。
+  tickPointjiang(false);
+  const rowName = (poolRow("张飞") || { children: [] }).children[0] || $("hero-pool");
+  const beforePick = $("in-my-hero").value;
+  const rowEvent = fireOn(rowName, "contextmenu");
+  check("UI1-13c 真名行右键不响应（不 preventDefault、不点将）",
+    rowEvent.prevented === false
+    && $("in-pointjiang").checked === false
+    && $("in-my-hero").value === beforePick
+    && pickedIds().length === 0,
+    `prevented=${rowEvent.prevented} 开关=${$("in-pointjiang").checked}`
+      + ` 绿框=${pickedIds().join(",")}`);
+  // 收尾：解掉 ④ 里禁掉的那一格（重绘换过节点，按 id 现查）。
+  if (bannedPicked) {
+    await clickAndWait(poolCells("关羽").find(
+      (item) => item.getAttribute("data-hero-id") === bannedId));
+  }
+}
+
+// ---- UI1-14：筛出 0 行时窗不塌（列表区仍在、读数写 0）----
+{
+  const search = poolSearchNode();
+  search.value = "zzz-没有这个版本";
+  fireOn(search, "input");
+  check("UI1-14 筛出 0 行时窗不塌（列表区仍在、读数写 0）",
+    $("script-confirm").hidden === false
+    && subtreeContains($("script-confirm-body"), $("hero-pool-panel"))
+    && poolVisibleNames().length === 0
+    && String(poolCountNode().textContent).includes("0 真名")
+    && String(poolCountNode().textContent).includes("0 版本")
+    && poolSearchNode().value === "zzz-没有这个版本",
+    `行=${poolVisibleNames().length} 读数=${poolCountNode().textContent}`);
+  search.value = "";
+  fireOn(search, "input");
+}
+
+// ---- UI1-15：中文输入回归（input 之后搜索框是**同一个节点** + 仍持有焦点）----
+{
+  const search = poolSearchNode();
+  search.focus();
+  search.value = "马";
+  fireOn(search, "input");
+  const same = poolSearchNode() === search
+    // 窗的正文槽里仍是**同一块**面板：整块重铺会把面板摘掉（与 UI1-15b 的反证同一组读法）。
+    && subtreeContains($("script-confirm-body"), $("hero-pool-panel"));
+  const focused = documentShim.activeElement === search;
+  check("UI1-15 中文输入回归：搜索框收到 input 后仍是同一个节点（sameNode）且仍持有焦点（focused）",
+    same && focused && setEquals(poolVisibleNames(), poolNamesMatching("马")),
+    `sameNode=${same} focused=${focused} 行=${poolVisibleNames().length}`);
+}
+
+// ---- UI1-15b：反证——同一组读法套到"整块重铺"的病态树上必须红 ----
+{
+  const victim = new El("div");
+  const victimInput = new El("input");
+  victim.appendChild(victimInput);
+  victimInput.focus();
+  const before = subtreeContains(victim, victimInput) && documentShim.activeElement === victimInput;
+  victim.innerHTML = "";  // ← 病态实现：每次输入都整块重铺
+  const lost = !subtreeContains(victim, victimInput) && documentShim.activeElement === null;
+  check("UI1-15b 反证：整块重铺会同时丢掉节点同一性与焦点（UI1-15 的两条判据在病态树上必红）",
+    before && lost, `重铺前=${before} 重铺后两条都丢=${lost}`);
+  victimInput.blur();
+}
+
+// ---- UI1-16：composition 期间不筛（compositionend 才筛）----
+{
+  const search = poolSearchNode();
+  const before = poolVisibleNames();          // 当前是「马」筛出来的 4 行
+  fireOn(search, "compositionstart");
+  search.value = "界";                         // 合成中：拼音还没选字
+  fireOn(search, "input");
+  const during = poolVisibleNames();
+  fireOn(search, "compositionend");
+  check("UI1-16 composition 期间不筛（compositionstart 后输入不触发筛选，compositionend 才筛）",
+    JSON.stringify(during) === JSON.stringify(before)
+    && setEquals(poolVisibleNames(), poolNamesMatching("界")),
+    `合成前=${before.length} 合成中=${during.length} 合成后=${poolVisibleNames().length}`);
+}
+
+// 收尾：清筛选、关点将、关窗——后面的用例从"无筛选 / 无点将 / 窗关着"继续。
+{
+  const search = poolSearchNode();
+  search.value = "";
+  fireOn(search, "input");
+  tickPointjiang(false);
+  await clickAndWait($("script-confirm-close"));
+  ui.heroPools().slots[ui.heroPools().selected].splice(0);
+  ui.renderHeroPool();
+}
+
+/* ============ ui-one-screen 票 05：棋盘页两栏 + 节点面进窗 ============
+ *
+ * 两条判据（真几何读数写进票面 `## Answer`，由 bsk 那一遍量；垫片没有布局引擎）：
+ *   UI1-20 两栏版式：左棋盘弹性 + 右 HUD **字面 300dsu**，棋盘 stage 的高度是**行数**的函数
+ *          （结构判据：两栏在同一个 flex 行、stage 不写视口高度、JS 的表达式读 rows）；
+ *   UI1-21 进入节点即开面板窗：节点的面住在 `#script-confirm-body` 里（M 档），
+ *          不在 `#view-script-board` 的正文里；关窗后两块回 `#board-window-stash`。
+ */
+{
+  const cssNow = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const boardRow = (cssNow.match(/\.design-canvas \.board-body\s*\{[^}]*\}/) || [""])[0];
+  const hudRule = (cssNow.match(/\.design-canvas \.board-hud\s*\{[^}]*\}/) || [""])[0];
+  const stageRule = (cssNow.match(/\.script-board-stage\s*\{[^}]*\}/) || [""])[0];
+  const boardJs = readFileSync("tools/sgs_web/static/script-board.js", "utf8");
+  const bodyAt = html.indexOf('class="page-body board-body"');
+  const mainAt = html.indexOf('id="script-board-main"');
+  const hudAt = html.indexOf('id="script-hud"');
+  const stageHeightOf = (rows) => ui.scriptGraphLayout({ rows, cols: 4, nodes: [], edges: [] }).height;
+  check("UI1-20 棋盘页两栏：HUD 宽 300dsu、棋盘 stage 高度随层数变（结构判据：同一 flex 行 + 行数的函数）",
+    /display:\s*flex/.test(boardRow) && !/flex-direction:\s*column/.test(boardRow)
+    && /flex:\s*0 0 calc\(300 \* var\(--dsu\)\)/.test(hudRule)
+    && !/height\s*:/.test(stageRule.slice(stageRule.indexOf("{") + 1))
+    && !/\bvh\b/.test(stageRule)
+    && stageHeightOf(2) !== stageHeightOf(3)
+    && /rows \* SCRIPT_GRAPH_CELL_H \+ SCRIPT_GRAPH_PAD \* 2/.test(boardJs)
+    && bodyAt >= 0 && bodyAt < mainAt && mainAt < hudAt,
+    `行=${boardRow.replace(/\s+/g, " ").slice(0, 40)} HUD=${hudRule.replace(/\s+/g, " ").slice(0, 40)}`
+      + ` 2行=${stageHeightOf(2)} 3行=${stageHeightOf(3)} 次序=${bodyAt}/${mainAt}/${hudAt}`);
+}
+
+// ---- UI1-21：进入节点即开面板窗（进料 = 整备面那份库的真端点）----
+{
+  writeFileSync(
+    `${RUNS_DIR}/script-library.json`,
+    readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+  );
+  const board05 = await postRaw("/api/script-runs", {
+    script_id: "loadoutprobe", chosen_hero: "jie_liubei", seed: 2505,
+  });
+  ui.scriptBoardShow(board05);
+  const equippedCells = byClass($("script-hud-equipped"), "hud-equip-cell");
+  const relicCells = byClass($("script-hud-relic-grid"), "hud-relic");
+  const hudReads = $("script-hud-coins").textContent === String(board05.run.coins)
+    && $("script-hud-backpack").textContent === "0/24"
+    && $("script-hud-relic-count").textContent === "0/6"
+    && equippedCells.length === 4 && relicCells.length === 6
+    && equippedCells.slice(0, 4).every((cell, index) => cell.getAttribute("data-slot") === String(index))
+    && byClass($("script-hud-actions"), "hud-bag").length === 1;
+  // 节点之外：点「背包」= 整备面搬进同一扇 M 窗（24 格一起进去）；关窗后回寄存格。
+  await clickAndWait(byClass($("script-hud-actions"), "hud-bag")[0]);
+  const bagWindow = $("script-confirm").hidden === false
+    && $("script-confirm").getAttribute("data-dialog") === "loadout"
+    && $("script-confirm-window").getAttribute("data-size") === "M"
+    && subtreeContains($("script-confirm-body"), $("script-loadout"))
+    && loadoutSlots().length === 24;
+  await clickAndWait($("script-confirm-close"));
+  const bagBack = $("script-loadout").parentNode === $("board-window-stash");
+  // 进节点（事件房：不跳牌桌）：窗口 M 档、正文槽里就是节点的面。
+  const eventEntry = board05.nodes.find(
+    (node) => node.available && node.room && node.room.kind === "event");
+  await ui.scriptBoardEnterNode(eventEntry);
+  const windowFace = subtreeContains($("script-confirm-body"), $("script-face"));
+  const windowShape = $("script-confirm").hidden === false
+    && $("script-confirm").getAttribute("data-dialog") === "script-face"
+    && $("script-confirm-window").getAttribute("data-size") === "M";
+  const bagDuringNode = byClass($("script-hud-actions"), "hud-bag").length;
+  const faceOutsideView = html.indexOf('id="script-face"') > html.lastIndexOf("</main>");
+  // 关窗（面板窗自己的收窗口）：两块回寄存格，窗里的正文槽清空。
+  await clickAndWait($("script-confirm-close"));
+  const backToStash = $("script-face").parentNode === $("board-window-stash")
+    && $("script-loadout").parentNode === $("board-window-stash");
+  check("UI1-21 进入节点即开面板窗（节点的面在窗里、不在 #view-script-board 正文里）",
+    hudReads && bagWindow && bagBack && windowFace && windowShape && bagDuringNode === 0
+    && faceOutsideView && backToStash,
+    `HUD=${hudReads} 背包窗=${bagWindow}/${bagBack} 窗里=${windowFace}`
+      + ` 档=${$("script-confirm-window").getAttribute("data-size")}`
+      + ` 节点内背包键=${bagDuringNode} 正文外=${faceOutsideView} 回寄存格=${backToStash}`);
+  await discardScriptSave();
+  unlinkSync(`${RUNS_DIR}/script-library.json`);
+  ui.state.script.board = null;
+}
+
+
+/* ============ ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）============
+ *
+ * 票面的验收是三条（真几何读数写进票面 `## Answer`，由 bsk 那一遍量；垫片没有布局引擎，
+ * 只断"存在 / 不同"，翻转的机械判据在 `tests/test_web_static.py` 的纯函数探针里）：
+ *   UI1-30 七处面：背包格 / 遗物格 / 三选一 / 商店行 / 事件后果 / HUD 出战槽 / 结算弹窗
+ *          的宿主都带 `data-skill`，浮层正文 = 同 id 的**载荷 `desc`**（逐字相同，
+ *          且已经过服务端裁切——原文里的注记标记一个字都不出现）；
+ *   UI1-31 一次委托：换一次列表重绘（真 PUT 回包的整份棋盘体）之后浮层仍工作，
+ *          document 上的三个监听数不涨、宿主节点上没有逐节点的 mouse* 监听；
+ *   UI1-32 收起：离开宿主 / 关窗之后 `#skilltip` 回到 hidden，宿主数与监听数都不涨。
+ *
+ * 进料 = 同一份真库（`script-loadout-library.json`）+ 真端点；遗物格与三选一那两处
+ * 用**真棋盘体的克隆**摆出状态（与票 22 的 `pendingClone` 同一姿态：服务端没有"平白
+ * 给一件遗物"的端点，而本票要断的只是"宿主带 id、浮层读载荷"）。
+ */
+{
+  writeFileSync(
+    SCRIPT_LOADOUT_LIBRARY,
+    readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+  );
+  await discardScriptSave();
+
+  const tipDescriptions = JSON.parse(
+    readFileSync("tools/sgs_web/descriptions.json", "utf8"),
+  );
+  const tipRawText = (id) => String((tipDescriptions.skills || {})[id] || "");
+
+  const tipNode = () => $("skilltip");
+  const tipPart = (className) => {
+    const nodes = byClass(tipNode(), className);
+    return nodes.length ? nodes[0].textContent : "";
+  };
+  const tipShown = () => tipNode().hidden === false;
+  const tipHidden = () => tipNode().hidden === true;
+  const skillIdOf = (host) => (host ? host.getAttribute("data-skill") : undefined);
+  const hoverSkill = (host, x = 620, y = 420) => {
+    fireDocument("mouseover", { target: host, clientX: x, clientY: y });
+    return host;
+  };
+  const leaveSkill = (host, relatedTarget = null) => fireDocument("mouseout", {
+    target: host, relatedTarget, clientX: 620, clientY: 420,
+  });
+  const moveSkill = (x, y) => fireDocument("mousemove", { target: tipNode(), clientX: x, clientY: y });
+  const tipRect = () => ({ left: tipNode().style.left, top: tipNode().style.top });
+  /** 监听读数：浮层只该在 document 上各有一个（票面「一次委托」）。 */
+  const tipListenerCounts = () => ["mouseover", "mousemove", "mouseout"]
+    .map((name) => (documentListeners[name] || []).length);
+  /** `root` 子树里的**浮层宿主**（带 `data-skill` 的节点；票 08：清单行里每个名字一个）。 */
+  const tipHostsIn = (root) => walkTree(root)
+    .filter((node) => node.getAttribute && node.getAttribute("data-skill") !== undefined);
+  /** 在 `root` 子树里数浮层宿主。 */
+  const tipHostCount = (root) => tipHostsIn(root).length;
+
+  /** 一处面：宿主带 id ⇒ 浮层显示，正文逐字等于**载荷**里那行的 `desc`。 */
+  const tipFace = (label, host, catalog) => {
+    const id = skillIdOf(host);
+    hoverSkill(host);
+    const want = String((catalog && id && catalog[id] && catalog[id].desc) || "");
+    const got = tipPart("tt-desc");
+    const face = {
+      label,
+      id,
+      shown: tipShown(),
+      name: tipPart("tt-name"),
+      want,
+      got,
+      // "已经裁过"的独立读数：原文有注记标记、浮层里一个字都没有。
+      rawMarked: tipRawText(id).includes("本仓"),
+      leaked: got.includes("本仓"),
+      pass: Boolean(id) && tipShown() && want.length > 0 && got === want
+        && tipPart("tt-name").length > 0 && !got.includes("本仓"),
+    };
+    return face;
+  };
+
+  const tipRun = await loadoutRun(2606);
+  const tipSlots = new Array(24).fill(null);
+  tipSlots[0] = "hero.liubei.rende";
+  tipSlots[1] = "hero.guanyu.wusheng";
+  let tipBoard = await putBackpack(tipSlots);
+
+  // ---- ① 背包格 + HUD 出战槽（同一份载荷行：目录里的 `desc`）----
+  const tipBagFace = tipFace("背包格", slotOf(0), tipBoard.catalog);
+  const tipHudHost = byClass($("script-hud-equipped"), "hud-equip-cell")[0];
+  const tipHudFace = tipFace("HUD 出战槽", tipHudHost, tipBoard.catalog);
+  // 跟随鼠标：再动一次鼠标，落点跟着变（内容不变）。
+  const tipRectBefore = tipRect();
+  moveSkill(980, 260);
+  const tipRectAfter = tipRect();
+
+  // ---- UI1-31：换一次列表重绘（真 PUT 回包）之后浮层仍工作，监听数不涨 ----
+  const tipListenersBefore = tipListenerCounts();
+  // 数宿主要从**装格子的容器**走：垫片的静态节点之间没有父子关系（M7-21 的注记），
+  // 从 `#script-loadout` 那一层走会数到 0——`#script-loadout-grid` 才是格子的落点。
+  const tipHostsBefore = tipHostCount($("script-loadout-grid"));
+  const tipSlotListenersBefore = ["mouseover", "mousemove", "mouseout", "mouseenter", "mouseleave"]
+    .map((name) => (slotOf(0).listeners[name] || []).length);
+  tipSlots[2] = "hero.zhaoyun.longdan";
+  tipBoard = await putBackpack(tipSlots);
+  const tipListenersAfter = tipListenerCounts();
+  const tipThirdFace = tipFace("重绘后的背包格", slotOf(2), tipBoard.catalog);
+  const tipHostsAfter = tipHostCount($("script-loadout-grid"));
+  const tipSlotListenersAfter = ["mouseover", "mousemove", "mouseout", "mouseenter", "mouseleave"]
+    .map((name) => (slotOf(2).listeners[name] || []).length);
+  check("UI1-31 一次委托：换一次列表重绘（真 PUT 回包）后浮层仍工作，宿主节点没有 mouse* 监听、document 监听数不涨",
+    tipThirdFace.pass
+    && tipListenersAfter.join(",") === tipListenersBefore.join(",")
+    && tipListenersAfter.every((count) => count === 1)
+    && tipHostsAfter === 3 && tipHostsBefore === 2
+    && tipSlotListenersBefore.every((count) => count === 0)
+    && tipSlotListenersAfter.every((count) => count === 0)
+    && tipRectBefore.left !== tipRectAfter.left,
+    `第三格=${JSON.stringify({ id: tipThirdFace.id, got: tipThirdFace.got.slice(0, 12) })}`
+      + ` 监听=${tipListenersBefore.join("/")}→${tipListenersAfter.join("/")}`
+      + ` 宿主=${tipHostsBefore}→${tipHostsAfter}`
+      + ` 宿主监听=${tipSlotListenersBefore.join("/")}→${tipSlotListenersAfter.join("/")}`
+      + ` 跟随=${tipRectBefore.left}→${tipRectAfter.left}`);
+
+  // ---- ② 事件后果行（进 e1：事件面的 grant_skill 那条后果就是宿主）----
+  const tipEvent = await enterNode(tipRun.run_id, "e1");
+  const tipEventRow = faceRows().find((row) => row.getAttribute("data-option") === "2");
+  const tipEventHost = tipEventRow
+    ? byClass(tipEventRow, "script-face-note").find((node) => node.getAttribute("data-skill"))
+    : null;
+  const tipEventFace = tipFace("事件后果行", tipEventHost, tipEvent.catalog);
+  // 结算这一问（收下铜钱）⇒ 回棋盘，后面才进得了商店。
+  await clickAndWait(faceOption(0));
+  await clickAndWait(confirmButtons()[0]);
+
+  // ---- ③ 商店行（进 s1：库存六技能 + 两遗物，目录行由服务端按 spec 下发）----
+  const tipShop = await enterNode(tipRun.run_id, "s1");
+  const tipStockId = tipShop.pending.spec.stock.skills[0];
+  const tipRelicId = tipShop.pending.spec.stock.relics[0];
+  const tipShopFace = tipFace("商店行", faceStock(tipStockId), tipShop.catalog);
+
+  // ---- ④ 遗物格（真棋盘体的克隆：没有"平白给一件遗物"的端点）----
+  const tipRelicClone = JSON.parse(JSON.stringify(tipShop));
+  tipRelicClone.run.relics = [tipRelicId];
+  ui.scriptBoardShow(tipRelicClone);
+  const tipRelicCell = loadoutRelics()
+    .find((cell) => cell.getAttribute("data-relic-slot") === "0");
+  const tipRelicFace = tipFace("遗物格", tipRelicCell, tipRelicClone.catalog);
+
+  // ---- ⑤ 结算弹窗（买一件 ⇒ 结果弹窗的货架行）----
+  await clickAndWait(faceStock(tipStockId));
+  await clickAndWait(faceGo());
+  const tipShelfRow = byClass($("script-confirm-body"), "script-face-row")
+    .find((row) => row.getAttribute("data-item-id") === tipStockId);
+  const tipResultFace = tipFace("结算弹窗", tipShelfRow, tipRelicClone.catalog);
+
+  /* ---- ⑤b 结算弹窗的**事件清单行**（票 08：`skills` / `relics` / `lose_equipped` 三类行
+   * 印着技能名，名字自己就得是宿主 —— 一行多个 id 装不进一个属性，故每个名字一个内联
+   * span 各带 `data-skill`；行结构 / 文案不变，也不挂监听）。
+   *
+   * 「获得技能」这一行是**真回包**（刚才买的这一件就是服务端的 `SkillsGained` 事件）；
+   * 另外两类在烟测里没有真路径：`relics` 要买遗物（10 铜钱，这局不够）、`lose_equipped`
+   * 只在 Boss 结算第 1 段出现（烟测不打 Boss 战）。故这两行由**真渲染口**
+   * `scriptSettleShowResult` + 与 `src/sgs/script/settle.py` 同形的事件渲染：断的是
+   * "行怎么画"这一口（引擎会不会发这两类事件由 settle.py 的模型管）。 */
+  const tipSettleSkillRow = resultRow("skills");
+  const tipSettleSkillHost = tipSettleSkillRow ? tipHostsIn(tipSettleSkillRow)[0] : null;
+  const tipSettleSkillFace = tipFace("结算清单·获得技能", tipSettleSkillHost, tipRelicClone.catalog);
+  const tipSettleBoard = JSON.parse(JSON.stringify(tipRelicClone));
+  vm.runInContext(
+    `scriptSettleShowResult(${JSON.stringify({
+      events: [
+        { kind: "relics", relics: [tipRelicId] },
+        { kind: "lose_equipped", skills: [tipStockId] },
+      ],
+      board: tipSettleBoard,
+      outcome: "continue",
+    })}, ${JSON.stringify({ kind: "event", catalog: tipRelicClone.catalog })})`,
+    context,
+  );
+  const tipSettleRelicRow = resultRow("relics");
+  const tipSettleLoseRow = resultRow("lose_equipped");
+  const tipSettleRelicHost = tipSettleRelicRow ? tipHostsIn(tipSettleRelicRow)[0] : null;
+  const tipSettleLoseHost = tipSettleLoseRow ? tipHostsIn(tipSettleLoseRow)[0] : null;
+  const tipSettleRelicFace = tipFace("结算清单·获得遗物", tipSettleRelicHost, tipRelicClone.catalog);
+  const tipSettleLoseFace = tipFace("结算清单·失去出战技能", tipSettleLoseHost, tipRelicClone.catalog);
+  // 行自己的文案一个都没变（拆名字只是把文本换成内联 span，`textContent` 逐字相同）。
+  const tipSettleText = [
+    tipSettleLoseRow,
+    tipSettleRelicRow,
+  ].map((row) => (row ? row.textContent : "缺"));
+  await clickAndWait(confirmButtons()[0]);
+
+  // ---- ⑥ 三选一（行是宿主；候选 id 在目录里 ⇒ 正文 = 载荷的 desc）----
+  const tipPickedSkill = ui.state.script.board.run.backpack.slots.filter(Boolean)[0];
+  pendingClone({
+    kind: "battle",
+    battle_seed: 2606,
+    pve: {
+      identities: [], principal: 0, protected_ally: null,
+      victory: { kind: "rout" }, boss: null, grants: [], seats: [],
+    },
+    rewards: [[tipPickedSkill, "hero.liubei.rende"]],
+    boss_relic: null,
+  }, { nodeId: "b1", room: { name: "麦田" } });
+  await clickAndWait(faceGo());
+  const tipPickHost = pickRows()[0];
+  const tipPickFace = tipFace("三选一", tipPickHost, ui.state.script.board.catalog);
+  // 窗内宿主：垫片的静态节点之间没有父子关系 ⇒ `closest(".pw")` 量不出来（那一条归纯函数
+  // 探针 + 真浏览器那一遍）。这里断"这一行确实在窗的正文槽里"。
+  const tipPickInWindow = Boolean(tipPickHost) && subtreeContains($("script-confirm-body"), tipPickHost);
+
+  const tipFaces = [tipBagFace, tipHudFace, tipEventFace, tipShopFace, tipRelicFace,
+    tipResultFace, tipPickFace];
+  /* 结算清单三行（票 08 补的那三处面）：每个名字自己的 span 都是宿主。 */
+  const tipSettleListFaces = [tipSettleSkillFace, tipSettleRelicFace, tipSettleLoseFace];
+  check("UI1-30 浮层覆盖七处面 + 结算清单三行：宿主都带 data-skill，正文逐字 = 同 id 的载荷 desc（原文里的注记一个字都不出现）",
+    tipFaces.length === 7
+    && tipFaces.every((face) => face.pass)
+    && tipFaces.some((face) => face.rawMarked)
+    && tipFaces.every((face) => !face.leaked)
+    && tipHudHost !== null && tipEventHost !== null && tipShopFace.id === tipStockId
+    && tipRelicFace.id === tipRelicId && tipPickInWindow
+    && tipSettleListFaces.length === 3
+    && tipSettleListFaces.every((face) => face.pass && !face.leaked)
+    && tipSettleRelicFace.id === tipRelicId && tipSettleLoseFace.id === tipStockId
+    && tipSettleText[0] === `失去出战技能：${tipSettleLoseFace.name}（自动，无需确认）`
+    && tipSettleText[1] === `获得遗物：${tipSettleRelicFace.name}`,
+    tipFaces.map((face) => `${face.label}:${face.id ? face.id.split(".").pop() : "缺"}/${face.pass ? "ok" : "红"}`)
+      .join(" ")
+      + " | " + tipSettleListFaces.map(
+        (face) => `${face.label}:${face.id ? face.id.split(".").pop() : "缺"}/${face.pass ? "ok" : "红"}`)
+        .join(" ")
+      + ` 行文案=${JSON.stringify(tipSettleText)}`);
+
+  // ---- UI1-33 没有目录行的宿主不弹浮层（票 08：编辑器页那种只有 `data-skill` 的行）----
+  const tipBareHost = slotOf(0);
+  const tipBareRealId = tipBareHost.getAttribute("data-skill");
+  tipBareHost.setAttribute("data-skill", "hero.nobody.nothere");
+  hoverSkill(tipBareHost);
+  const tipBareHidden = tipHidden() && tipPart("tt-name") === "" && tipPart("tt-desc") === "";
+  // 连棋盘体都没有（编辑器页：`data-skill` 在、目录不在）⇒ 同样不弹，且不抛错。
+  tipBareHost.setAttribute("data-skill", tipBareRealId);
+  const tipBoardBackup = ui.state.script.board;
+  ui.state.script.board = null;
+  const tipNoBoardLeak = (() => {
+    try {
+      hoverSkill(tipBareHost);
+      return tipHidden() && tipPart("tt-desc") === "";
+    } catch (error) {
+      return `抛错：${error && error.message}`;
+    }
+  })();
+  ui.state.script.board = tipBoardBackup;
+  hoverSkill(tipBareHost);
+  const tipBareControlShown = tipShown()
+    && tipPart("tt-desc") === String((tipBoardBackup.catalog[tipBareRealId] || {}).desc || "");
+  leaveSkill(tipBareHost);
+  check("UI1-33 没有目录行的宿主不弹浮层（id 不在目录 / 目录整个没有都一样），有目录行的照旧弹",
+    tipBareHidden && tipNoBoardLeak === true && tipBareControlShown,
+    `无目录行=${tipBareHidden} 无棋盘体=${tipNoBoardLeak} 有目录行=${tipBareControlShown}`);
+
+  // ---- UI1-32：收起（离开宿主 / 关窗）----
+  leaveSkill(tipPickHost);
+  const tipClosedByLeave = tipHidden();
+  /* 关窗：浮层跟着收（它是一层全局 DOM，不能指望窗的 display:none 帮它藏）。
+   * 票 10 起三选一是**强制选择面**、窗上没有关闭键（关掉就卡死），故这一条改在**可关**的窗上量：
+   * 棋盘页的「背包」窗直连 `panelOpen`（缺省可关），正文槽里的背包格同样是宿主。 */
+  ui.scriptCloseConfirm();
+  const tipNoPending = JSON.parse(JSON.stringify(ui.state.script.board));
+  tipNoPending.pending = null;
+  ui.scriptBoardShow(tipNoPending);
+  await clickAndWait(byClass($("script-hud-actions"), "hud-bag")[0]);
+  const tipWindowHost = slotOf(0);
+  hoverSkill(tipWindowHost);
+  const tipShownInWindow = tipShown();
+  const tipListenersAtClose = tipListenerCounts();
+  const tipHostsAtClose = tipHostCount($("script-confirm-body"));
+  await clickAndWait($("script-confirm-close"));
+  const tipClosedByWindow = tipHidden();
+  check("UI1-32 收起：离开宿主 / 关窗之后浮层回到 hidden，宿主数与监听数都不涨",
+    tipClosedByLeave && tipShownInWindow && tipClosedByWindow
+    && tipListenerCounts().join(",") === tipListenersAtClose.join(",")
+    // 关的是一扇「内容回寄存格」的窗：宿主跟着搬走（`script-confirm-body` 里只会更少，不会更多）。
+    && tipHostCount($("script-confirm-body")) <= tipHostsAtClose,
+    `离开=${tipClosedByLeave} 窗内=${tipShownInWindow} 关窗=${tipClosedByWindow}`
+      + ` 监听=${tipListenersAtClose.join("/")} 窗口宿主=${tipHostsAtClose}`);
+
+  await discardScriptSave();
+  unlinkSync(SCRIPT_LOADOUT_LIBRARY);
+  ui.state.script.board = null;
+}
+
+/* ============ ui-one-screen 票 10（review 修复 C）：关闭键只给可关的窗 + 固定筛选行可缩 ============
+ *
+ *   UI1-34 关闭键只画在**允许关**的窗上：三选一 / 遗物 / 结算结果这些强制选择面**没有**；
+ *          开局页三扇窗（剧本 / 将池 / 录像）有——它们直连 `panelOpen`，吃的就是缺省。
+ *          顺带钉住"逐扇现写"：结算面关掉之后紧接着开开局页的窗，关闭键必须回来。
+ *   UI1-35 窄视口结构判据（垫片没有布局引擎，真几何由 bsk 那一遍量）：固定筛选区与筛选行都能缩
+ *          （`min-width: 0` / 不换行），搜索框让宽（`flex: 0 1 300dsu`），读数允许省略号且
+ *          **单行**——行高仍是搜索框那条字面 30dsu，窗 rect 不随筛出数变。
+ */
+{
+  writeFileSync(
+    SCRIPT_LOADOUT_LIBRARY,
+    readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+  );
+  await discardScriptSave();
+  const closeKey = () => $("script-confirm-close");
+  const closeMe = async () => {
+    for (const fn of closeKey().listeners.click || []) await fn({ target: closeKey() });
+  };
+
+  // ① 强制选择面：三选一 / 遗物 / 结算结果 —— 窗上没有关闭键（有的话关掉就卡死）。
+  const gateRun = await loadoutRun(2710);
+  pendingClone(Object.assign({}, battleSpec, { rewards: [battleSpec.rewards[0]] }), {
+    nodeId: "b1", room: { name: "麦田" },
+  });
+  await clickAndWait(faceGo());
+  const pickSealed = dialog().getAttribute("data-dialog") === "pick"
+    && dialog().hidden === false && closeKey().hidden === true;
+  ui.scriptCloseConfirm();
+
+  pendingClone(Object.assign({}, battleSpec, { boss_relic: null }), {
+    nodeId: "b1", boss: true, room: { name: "广宗城下" },
+  });
+  await clickAndWait(faceGo());
+  await clickAndWait(pickRows()[0]);
+  await clickAndWait(pickRows()[0]);
+  const relicSealed = dialog().getAttribute("data-dialog") === "relic"
+    && dialog().hidden === false && closeKey().hidden === true;
+  ui.scriptCloseConfirm();
+
+  // 结算结果：真渲染口 `scriptSettleShowResult` + 真棋盘体的克隆（票 06 的 ⑤b 用过同一条口）。
+  const gateResultBoard = JSON.parse(JSON.stringify(ui.state.script.board));
+  vm.runInContext(
+    `scriptSettleShowResult(${JSON.stringify({
+      events: [], board: gateResultBoard, outcome: "continue",
+    })}, ${JSON.stringify({ kind: "event", catalog: gateResultBoard.catalog })})`,
+    context,
+  );
+  const resultSealed = dialog().getAttribute("data-dialog") === "result"
+    && dialog().hidden === false && closeKey().hidden === true;
+  // 合法出口只有一个动作键（「回棋盘」）：收窗 + 回棋盘，流程不卡。
+  await clickAndWait(confirmButtons()[0]);
+
+  // ② 可关的窗：开局页三扇 —— 关闭键在（`panelOpen` 的缺省 = 可关）。
+  const closable = [];
+  for (const kind of ["script", "pool", "runs"]) {
+    await clickAndWait($(lobbyToolKeys[kind]));
+    closable.push($("script-confirm").hidden === false && closeKey().hidden === false);
+    await closeMe();
+  }
+  check("UI1-34 关闭键只给可关的窗：三选一 / 遗物 / 结算结果**没有**（强制选择面），开局页三扇窗**有**",
+    pickSealed && relicSealed && resultSealed && closable.every(Boolean)
+    && $("script-confirm").hidden === true,
+    `三选一=${pickSealed} 遗物=${relicSealed} 结算=${resultSealed}`
+      + ` 开局页三扇=${closable.map((ok) => (ok ? "ok" : "bad")).join("/")}`);
+
+  // ③ 窄视口的结构判据（票 04 / spec §3.2 的另一半：固定区不许把行顶出窗）。
+  const cssNow = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const poolRule = (selector) => (cssNow.match(new RegExp(`${selector}\\s*\\{[^}]*\\}`)) || [""])[0];
+  const fixedRule = poolRule("\\.pool-panel \\.pool-fixed");
+  const lineRule = poolRule("\\.pool-panel \\.pool-line");
+  const searchRule = poolRule("\\.pool-panel \\.pool-search");
+  const countRule = poolRule("\\.pool-panel \\.pool-count");
+  const narrow = {
+    fixed: /min-width:\s*0/.test(fixedRule),
+    line: /min-width:\s*0/.test(lineRule) && /flex-wrap:\s*nowrap/.test(lineRule),
+    search: /flex:\s*0 1 calc\(300 \* var\(--dsu\)\)/.test(searchRule)
+      && /min-width:\s*0/.test(searchRule)
+      && /height:\s*calc\(30 \* var\(--dsu\)\)/.test(searchRule),
+    count: /flex:\s*0 1 auto/.test(countRule) && /min-width:\s*0/.test(countRule)
+      && /overflow:\s*hidden/.test(countRule)
+      && /text-overflow:\s*ellipsis/.test(countRule)
+      && /white-space:\s*nowrap/.test(countRule),
+  };
+  check("UI1-35 窄视口：固定筛选行可缩（min-width:0 / 不换行 / 搜索框 0 1 300dsu）+ 读数允许省略（单行、行高仍 30dsu）",
+    narrow.fixed && narrow.line && narrow.search && narrow.count,
+    Object.entries(narrow).map(([name, ok]) => `${name}=${ok ? "ok" : "bad"}`).join(" "));
+
+  await discardScriptSave();
+  unlinkSync(SCRIPT_LOADOUT_LIBRARY);
+  ui.state.script.board = null;
+}
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

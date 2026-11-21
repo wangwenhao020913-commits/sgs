@@ -259,6 +259,9 @@ function scriptLoadoutHint(text) {
  *
  * **可编辑时才接编辑入口**（click / dragstart / drop）：节点内连监听都不挂——票 22 要的是
  * "编辑入口不存在"，不是"点了无效"。
+ *
+ * 票 06：`data-skill` = 技能详情浮层的宿主挂点（**只加属性**，标签 / id 不动；浮层在
+ * `document` 上委托，不给这一格挂 `mouseenter` / `mouseleave`）。
  */
 function scriptLoadoutSlotNode(index, skillId, equipped, editable, selected) {
   const slot = document.createElement("button");
@@ -267,6 +270,7 @@ function scriptLoadoutSlotNode(index, skillId, equipped, editable, selected) {
   slot.setAttribute("data-slot", String(index));
   slot.setAttribute("data-equipped", equipped ? "1" : "0");
   if (skillId) slot.setAttribute("data-skill-id", String(skillId));
+  if (skillId) slot.setAttribute("data-skill", String(skillId));
   if (!skillId) slot.setAttribute("data-empty", "1");
   if (selected) slot.classList.add("on");
   const badge = scriptNode("span", "script-slot-badge", equipped ? "出战" : "");
@@ -287,6 +291,8 @@ function scriptLoadoutSlotNode(index, skillId, equipped, editable, selected) {
 
 /** 画整备面：铜钱 HUD / 背包 24 格（3×8，出战槽标「出战」）/ 遗物栏（≤6）/ 编辑提示。 */
 function scriptLoadoutRender() {
+  // 票 06：格子要重铺 ⇒ 浮层先收（否则它挂着一个已经不存在的宿主的内容）。
+  if (typeof skillTipHide === "function") skillTipHide();
   const run = scriptLoadoutRun();
   const grid = $("script-loadout-grid");
   const relicsBox = $("script-loadout-relics");
@@ -343,6 +349,8 @@ function scriptLoadoutRender() {
       const cell = scriptNode("div", "script-relic", relicId ? scriptItemRow(relicId).name : "空");
       cell.setAttribute("data-relic-slot", String(index));
       if (relicId) cell.setAttribute("data-relic-id", String(relicId));
+      // 票 06：遗物格也是浮层宿主（服务端目录行里遗物同样有裁过的 `desc`）。
+      if (relicId) cell.setAttribute("data-skill", String(relicId));
       else cell.setAttribute("data-empty", "1");
       relicsBox.appendChild(cell);
     }
@@ -585,7 +593,13 @@ function scriptFaceRenderEvent(spec) {
     // 条件只**写出来**，置不置灰不归前端判（服务端 `requirement_met` 说了算）。
     if (requires) row.appendChild(scriptNode("span", "script-face-req", requires));
     for (const effect of option.effects || []) {
-      row.appendChild(scriptNode("span", "script-face-note", scriptFaceEffectText(effect)));
+      const note = scriptNode("span", "script-face-note", scriptFaceEffectText(effect));
+      // 票 06：**给技能 / 给遗物**的那条后果是浮层宿主（"事件后果行"这一面）；
+      // 别的后果（铜钱 / 标签）没有 id，也就不带 `data-skill`。
+      const granted = effect.kind === "grant_skill" ? effect.skill
+        : effect.kind === "grant_relic" ? effect.relic : null;
+      if (granted) note.setAttribute("data-skill", String(granted));
+      row.appendChild(note);
     }
     row.addEventListener("click", () => scriptFaceChooseEvent(index));
     parts.list.appendChild(row);
@@ -621,6 +635,8 @@ function scriptFaceRenderShop(spec) {
     const inCart = loot.cart.indexOf(itemId) >= 0;
     const button = scriptDataButton("script-face-row", {
       "data-item-id": itemId,
+      // 票 06：货架行是浮层宿主（`data-skill` 只加属性，标签 / `data-item-id` 不动）。
+      "data-skill": itemId,
       "data-kind": row.kind,
       "data-price": row.price === null ? "" : row.price,
       "data-full": blocked ? "1" : "0",
@@ -729,15 +745,29 @@ function scriptFaceReopenBattle() {
   return scriptBoardEnterNode(node);
 }
 
-/** 画当前节点的面（判据是 `pending.spec`；问号房先揭晓再按内层走）。 */
+/** 画当前节点的面（判据是 `pending.spec`；问号房先揭晓再按内层走）。
+ *
+ * ui-one-screen 票 05 起它还管**窗的开关**：有 `pending.spec` ⇒ 这块面住在 M 窗里
+ * （`script-board.js:scriptBoardFaceWindowOpen`，进入节点就开）；`pending` 落了 ⇒ 收窗、
+ * 两块内容回寄存格。这里只是"谁该在窗里"的唯一裁决点——窗壳与单槽位归 `panel-window.js`。
+ */
 function scriptFaceRender() {
   const face = $("script-face");
   const spec = scriptLoadoutSpec();
   if (!face) return null;
+  // 先收回寄存格再画：窗里那块若被别的模态顶掉过，会变成游离节点（id 查不到 ⇒ 渲染静默失效）。
+  if (typeof restashBoardWindows === "function") restashBoardWindows();
+  // 票 06：面的行重铺之后浮层不能还挂着旧宿主的内容（`restashBoardWindows` 已经收过一次，
+  // 这里再收一次是为了"面的行被原地重画"那条路——收是幂等的）。
+  if (typeof skillTipHide === "function") skillTipHide();
   if (!spec) {
     face.hidden = true;
     face.removeAttribute("data-face");
     scriptFaceClear();
+    if (typeof scriptBoardWindowKind === "function" && scriptBoardWindowKind() === "script-face") {
+      panelClose();
+    }
+    if (typeof restashBoardWindows === "function") restashBoardWindows();
     return null;
   }
   const loot = scriptLoadoutState();
@@ -746,10 +776,12 @@ function scriptFaceRender() {
   face.setAttribute("data-face", spec.kind === "unknown" && !loot.revealOpen
     ? "reveal"
     : String(innerKind || spec.kind));
-  if (spec.kind === "unknown" && !loot.revealOpen) return scriptFaceRenderReveal(spec);
-  if (innerKind === "event") return scriptFaceRenderEvent(scriptFlowSpec(spec));
-  if (innerKind === "shop") return scriptFaceRenderShop(scriptFlowSpec(spec));
-  if (innerKind === "battle") return scriptFaceRenderBattle(scriptFlowSpec(spec));
+  if (spec.kind === "unknown" && !loot.revealOpen) scriptFaceRenderReveal(spec);
+  else if (innerKind === "event") scriptFaceRenderEvent(scriptFlowSpec(spec));
+  else if (innerKind === "shop") scriptFaceRenderShop(scriptFlowSpec(spec));
+  else if (innerKind === "battle") scriptFaceRenderBattle(scriptFlowSpec(spec));
+  // 内容画好之后再开窗（进节点即开；换成另一块面时窗里的内容已经是最新的）。
+  if (typeof scriptBoardFaceWindowOpen === "function") scriptBoardFaceWindowOpen();
   return null;
 }
 
@@ -861,6 +893,8 @@ function scriptSettlePickDialog(flow) {
     const row = scriptItemRow(skillId, flow.catalog);
     const button = scriptDataButton("script-pick", {
       "data-skill-id": skillId,
+      // 票 06：三选一的行也是浮层宿主。
+      "data-skill": skillId,
       "data-price": row.price === null ? "" : row.price,
     }, "");
     button.appendChild(scriptNode("span", "script-face-item", row.name));
@@ -890,6 +924,8 @@ function scriptSettlePickDialog(flow) {
       run: () => scriptSettleChoose(null),
     });
   }
+  // 借的是同一扇窗（单槽位）：先把棋盘那两块送回寄存格，别让它们被清槽变成游离节点。
+  restashBoardWindows(true);
   const buttons = scriptConfirm({
     kind: "pick",
     dialog: "pick",
@@ -927,6 +963,8 @@ function scriptSettleRelicDialog(flow) {
     const row = scriptItemRow(relic, flow.catalog);
     const item = scriptNode("div", "script-face-row", "");
     item.setAttribute("data-relic-id", String(relic));
+    // 票 06：结算弹窗里出现遗物名的地方也是浮层宿主。
+    item.setAttribute("data-skill", String(relic));
     item.appendChild(scriptNode("span", "script-face-item", row.name));
     item.appendChild(scriptNode("span", "script-face-note", "遗物"));
     body.push(item);
@@ -934,6 +972,7 @@ function scriptSettleRelicDialog(flow) {
     body.push(scriptNode("div", "script-face-note",
       "这一场没有遗物可发：服务端按规则折成铜钱（金额在结算结果里给出）。"));
   }
+  restashBoardWindows(true);
   return scriptConfirm({
     kind: "relic",
     dialog: "relic",
@@ -953,16 +992,44 @@ function scriptSettleRelicDialog(flow) {
   });
 }
 
-/** 结算结果里一条事件的中文（数字一律是服务端事件里的那个数）。 */
+/** 一行里的并列名字（「甲、乙、丙」）：每个名字一个内联 `span`，各自带 `data-skill`。
+ *
+ * 票 08：结算清单（`skills` / `relics` / `lose_equipped`）印着技能名，名字自己就该是浮层
+ * 宿主；一个 `data-skill` 装不下多个 id，故**每个名字一个宿主**。只加属性与内联 span——
+ * 行的标签 / `data-event` / 文案（`textContent`）逐字不变，也不加任何监听（浮层挂在
+ * document 上，宿主侧只认属性）。
+ */
+function scriptFaceNameList(names, catalog) {
+  const nodes = [];
+  (names || []).forEach((itemId, index) => {
+    if (index) nodes.push(scriptNode("span", "", "、"));
+    const node = scriptNode("span", "", scriptItemRow(itemId, catalog).name);
+    node.setAttribute("data-skill", String(itemId));
+    nodes.push(node);
+  });
+  return nodes;
+}
+
+/** 结算结果里一条事件的中文（数字一律是服务端事件里的那个数）。
+ *
+ * 票 06：**一行只有一个主语**的那几种（pick / relic）带 `data-skill`（浮层宿主）；
+ * 票 08：`skills` / `relics` / `lose_equipped` 这三条是"甲、乙、丙"的并列清单，一个属性
+ * 装不下多个 id ⇒ 名字拆进各自的内联 span，每个名字一个宿主（`scriptFaceNameList`）。
+ * 行结构 / 文案不变，也不加监听。
+ */
 function scriptSettleEventRow(event, catalog) {
   const kind = event && event.kind;
   const row = scriptNode("div", "script-event-row", "");
   row.setAttribute("data-event", String(kind || ""));
   if (kind === "lose_equipped") {
     const skills = event.skills || [];
-    row.textContent = `失去出战技能：${skills.length
-      ? skills.map((skillId) => scriptItemRow(skillId, catalog).name).join("、")
-      : "（没有可失去的）"}（自动，无需确认）`;
+    row.appendChild(scriptNode("span", "", "失去出战技能："));
+    if (skills.length) {
+      for (const node of scriptFaceNameList(skills, catalog)) row.appendChild(node);
+    } else {
+      row.appendChild(scriptNode("span", "", "（没有可失去的）"));
+    }
+    row.appendChild(scriptNode("span", "", "（自动，无需确认）"));
     row.setAttribute("data-auto", "1");
     return row;
   }
@@ -971,6 +1038,8 @@ function scriptSettleEventRow(event, catalog) {
     const coins = Number(event.coins) || 0;
     row.textContent = `三选一 第 ${Number(event.round) + 1} 轮：${chosen}`
       + (coins ? `（折 ${coins} 铜钱）` : "");
+    // 票 06：结算弹窗里出现技能名的地方 —— 这一行的主语就是那一张，故整行是宿主。
+    if (event.chosen) row.setAttribute("data-skill", String(event.chosen));
     if (coins) row.setAttribute("data-coins", String(coins));
     return row;
   }
@@ -979,15 +1048,18 @@ function scriptSettleEventRow(event, catalog) {
     row.textContent = event.relic
       ? `遗物：${scriptItemRow(event.relic, catalog).name}`
       : `遗物无货${coins ? `（折 ${coins} 铜钱）` : ""}`;
+    if (event.relic) row.setAttribute("data-skill", String(event.relic));
     if (coins) row.setAttribute("data-coins", String(coins));
     return row;
   }
   if (kind === "skills") {
-    row.textContent = `获得技能：${(event.skills || []).map((skillId) => scriptItemRow(skillId, catalog).name).join("、")}`;
+    row.appendChild(scriptNode("span", "", "获得技能："));
+    for (const node of scriptFaceNameList(event.skills, catalog)) row.appendChild(node);
     return row;
   }
   if (kind === "relics") {
-    row.textContent = `获得遗物：${(event.relics || []).map((relicId) => scriptItemRow(relicId, catalog).name).join("、")}`;
+    row.appendChild(scriptNode("span", "", "获得遗物："));
+    for (const node of scriptFaceNameList(event.relics, catalog)) row.appendChild(node);
     return row;
   }
   if (kind === "flags") {
@@ -1028,6 +1100,8 @@ function scriptSettleSoldShelf(flow) {
     const row = scriptItemRow(itemId, flow.catalog);
     const node = scriptNode("div", "script-face-row", "");
     node.setAttribute("data-item-id", itemId);
+    // 票 06：结果弹窗的货架行一件一行 ⇒ 也是浮层宿主。
+    node.setAttribute("data-skill", itemId);
     node.setAttribute("data-kind", row.kind);
     node.setAttribute("data-sold", sold ? "1" : "0");
     node.appendChild(scriptNode("span", "script-face-item", row.name));
@@ -1094,6 +1168,7 @@ function scriptSettleShowResult(body, flow) {
       },
     });
   }
+  restashBoardWindows(true);
   return scriptConfirm({
     kind: "result",
     dialog: "result",
@@ -1131,6 +1206,8 @@ async function scriptSettleSubmit(flow) {
   }
   if (!response) {
     scriptCloseConfirm();
+    // 结算没落地：收窗之后那两块要立刻回寄存格（否则它们停在已清空的正文槽里，id 查不到）。
+    restashBoardWindows(true);
     scriptLoadoutState().flow = null;
     const payload = (failure && failure.body) || { reason: failure && failure.message };
     scriptBoardShowError(payload);
@@ -1143,6 +1220,121 @@ async function scriptSettleSubmit(flow) {
   }
   if (response.save) scriptApplySave(response.save);
   return scriptSettleShowResult(response, target);
+}
+
+/* ---------------------------------------------------------------- HUD（票 05）
+ *
+ * 右栏 HUD 是**只读展示**（spec A7）：铜钱 / 背包 / 遗物三个数读服务端棋盘体的 `run`，
+ * 前端不记账、不重算；四格出战槽与六格遗物格用**固定格数**（空也画一格），于是背包 / 遗物
+ * 再多，HUD 的宽与每行高度都不变（判据在 `style.css` 的 `.design-canvas .hud-*` 那几条）。
+ * 动作区里「背包」这颗键只在**节点之外**存在：`pending` 非空 ⇒ 这个节点根本不进 DOM
+ * （spec R6：不是置灰、不是隐藏）。`data-skill` 是票 06 浮层的宿主挂点，本票只定形状与位置。
+ */
+
+/** 出战槽的格数（与缺省 `equipped_slots` 的 4 个格号同一份事实）。 */
+const SCRIPT_EQUIPPED_SLOTS = 4;
+
+/** HUD 的「背包」键：整页只创建一次，之后只挂 / 摘（`pending` 的判据在 `scriptHudActions`）。 */
+let SCRIPT_HUD_BAG = null;
+
+function scriptHudBagButton() {
+  if (SCRIPT_HUD_BAG) return SCRIPT_HUD_BAG;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "script-hud-bag";
+  button.className = "hud-bag";
+  button.textContent = "背包";
+  button.addEventListener("click", () => scriptBoardLoadoutWindowOpen());
+  SCRIPT_HUD_BAG = button;
+  return button;
+}
+
+/** 动作区：`pending` 为空才有「背包」（「离开棋局」是静态节点，永远在）。
+ *
+ * **不是置灰、不是隐藏**：节点进行中这颗键被 `removeChild` 掉，DOM 里少一个节点。
+ */
+function scriptHudActions() {
+  const box = $("script-hud-actions");
+  const bag = scriptHudBagButton();
+  if (!box) return null;
+  if (scriptLoadoutPending()) {
+    if (bag.parentNode === box) box.removeChild(bag);
+    return null;
+  }
+  if (bag.parentNode !== box) box.insertBefore(bag, box.children.length ? box.children[0] : null);
+  return bag;
+}
+
+/** HUD 的一格出战槽：`data-slot` = 第几格（0–3），`data-skill` = 票 06 浮层的宿主。 */
+function scriptHudEquipCell(index, skillId) {
+  const cell = scriptNode("div", "hud-equip-cell", "");
+  cell.setAttribute("data-slot", String(index));
+  cell.setAttribute("data-tag", `出战 ${index + 1}`);
+  if (skillId) {
+    cell.setAttribute("data-skill", String(skillId));
+    cell.setAttribute("data-skill-id", String(skillId));
+  } else {
+    cell.setAttribute("data-empty", "1");
+  }
+  cell.appendChild(scriptNode("span", "hud-etag", `出战 ${index + 1}`));
+  cell.appendChild(scriptNode("span", "hud-en", skillId ? scriptItemRow(skillId).name : "空"));
+  return cell;
+}
+
+/** HUD 的一格遗物：`data-relic-slot` = 第几格（0–5），`data-skill` = 票 06 浮层的宿主。 */
+function scriptHudRelicCell(index, relicId) {
+  const cell = scriptNode("div", "hud-relic", relicId ? scriptItemRow(relicId).name : "空");
+  cell.setAttribute("data-relic-slot", String(index));
+  if (relicId) {
+    cell.setAttribute("data-skill", String(relicId));
+    cell.setAttribute("data-relic-id", String(relicId));
+  } else {
+    cell.setAttribute("data-empty", "1");
+  }
+  return cell;
+}
+
+/** 画 HUD：三个读数 + 4 出战槽 + 6 遗物格 + 动作区。没有棋盘体时整块收干净。 */
+function scriptHudRender() {
+  // 票 06：出战 / 遗物格要重铺 ⇒ 浮层先收（与整备面同一条纪律）。
+  if (typeof skillTipHide === "function") skillTipHide();
+  const run = scriptLoadoutRun();
+  const coins = $("script-hud-coins");
+  const backpack = $("script-hud-backpack");
+  const relicCount = $("script-hud-relic-count");
+  const equippedBox = $("script-hud-equipped");
+  const relicsBox = $("script-hud-relic-grid");
+  if (!run) {
+    for (const node of [coins, backpack, relicCount]) {
+      if (node) node.textContent = "";
+    }
+    if (equippedBox) equippedBox.innerHTML = "";
+    if (relicsBox) relicsBox.innerHTML = "";
+    scriptHudActions();
+    return null;
+  }
+  const slots = scriptLoadoutSlots();
+  const equipped = scriptLoadoutEquipped();
+  const relics = scriptLoadoutRelics();
+  if (coins) coins.textContent = String(Number(run.coins) || 0);
+  if (backpack) backpack.textContent = `${slots.filter(Boolean).length}/${SCRIPT_BACKPACK_SLOTS}`;
+  if (relicCount) relicCount.textContent = `${relics.length}/${SCRIPT_RELIC_SLOTS}`;
+  if (equippedBox) {
+    equippedBox.innerHTML = "";
+    for (let index = 0; index < SCRIPT_EQUIPPED_SLOTS; index += 1) {
+      const slotIndex = Number(equipped[index]);
+      const skillId = Number.isInteger(slotIndex) ? slots[slotIndex] : null;
+      equippedBox.appendChild(scriptHudEquipCell(index, skillId || null));
+    }
+  }
+  if (relicsBox) {
+    relicsBox.innerHTML = "";
+    for (let index = 0; index < SCRIPT_RELIC_SLOTS; index += 1) {
+      relicsBox.appendChild(scriptHudRelicCell(index, relics[index] || null));
+    }
+  }
+  scriptHudActions();
+  return null;
 }
 
 /* -------------------------------------------------------------- 同步 / 接线 */
@@ -1159,10 +1351,14 @@ function scriptLoadoutSync() {
     loot.revealOpen = false;
     scriptLoadoutRender();
     scriptFaceRender();
+    scriptHudRender();
+    // 没有棋盘体了（删档 / 通关 / 放弃）：棋盘那扇窗也一并收起，别留一扇空窗。
+    if (typeof scriptBoardWindowClose === "function") scriptBoardWindowClose();
     return null;
   }
   scriptLoadoutRender();
   scriptFaceRender();
+  scriptHudRender();
   return null;
 }
 
@@ -1200,6 +1396,9 @@ async function scriptBattleEnter(board) {
     nodeId: (pending && pending.node_id) || null,
   };
   startSessionView(view);
+  // 票 05：节点面住在面板窗里（`所有 <main>` 之外），换到牌桌时必须**先收起那扇窗**，
+  // 否则它会浮在牌桌上（`show()` 只藏 `main`，藏不到窗壳）。
+  if (typeof scriptBoardWindowClose === "function") scriptBoardWindowClose();
   return view;
 }
 
@@ -1288,6 +1487,9 @@ function wireScriptLoadout() {
     if (node) node.addEventListener("click", handler);
   };
   on("btn-script-loadout-discard", () => scriptLoadoutDiscard());
+  // 票 05：窗的关闭键（面板窗自己的收窗口）要把棋盘那两块送回寄存格——否则它们会停在
+  // 不可见的正文槽里（下一次重画时再来一次也无害，`restashBoardWindows` 幂等）。
+  on("script-confirm-close", () => restashBoardWindows(true));
   // M7 票 23：牌桌上那个"回棋盘结算"的出口（显示态由 `scriptBattleTableSync` 维护）。
   on("btn-t-pve-return", () => scriptBattleReturnToBoard());
   // 「退出战斗」与棋盘的「离开棋局」是**同一条**退出路径（票 20 的确认框 + 一条 suspend）：

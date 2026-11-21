@@ -830,6 +830,89 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     assert len(by_name["徐庶"]) == 1, "只有界版的真名也自成一行"
 
 
+def test_the_hero_catalog_versions_carry_their_display_fields() -> None:
+    """ui-one-screen 票 01（spec §5 A9 / §8 R1）：``GET /api/heroes`` 的每个 version 带展示面。
+
+    判据是**独立真源**：势力 / 体力 / 显示名逐项对数据表（``hero_by_id``），技能名对
+    ``hero_skill_names`` 的**解析后**映射——``hero.jie_guanyu.wusheng`` 反查到的必须是
+    「武圣」，不是行键。分组形状（真名 + versions）保持不变；字段集就是票面那七个，
+    不加第三个展示字段。
+    """
+    from sgs.data import hero_by_id, hero_skill_names
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    status, payload = _get_with_the_real_handler(registry, "/api/heroes")
+    assert status == 200, payload
+    catalog = payload["heroes"]
+
+    versions = [version for group in catalog for version in group["versions"]]
+    assert versions, "将池不能是空的（这条测试要逐版本对数据表）"
+    for group in catalog:
+        assert set(group) == {"true_name", "versions"}, "分组形状不变（真名 + 版本格）"
+        assert group["versions"], "一行一个真名、行内至少一个版本格"
+    for version in versions:
+        assert set(version) == {
+            "id",
+            "name",
+            "version",
+            "kingdom",
+            "hp_max",
+            "hp",
+            "skills",
+        }, "版本格的字段集就是票面那七个（不加第三个展示字段）"
+        hero = hero_by_id(version["id"])
+        assert hero is not None
+        assert version["kingdom"] == hero.kingdom.value, "势力发枚举值（中文标签是前端的事）"
+        assert version["hp_max"] == hero.hp_max
+        assert version["hp"] == (hero.hp if hero.hp is not None else hero.hp_max)
+        names = hero_skill_names(hero)
+        assert version["skills"], "每个启用武将至少一条技能"
+        assert [skill["id"] for skill in version["skills"]] == list(names)
+        for skill in version["skills"]:
+            assert set(skill) == {"id", "name", "description"}
+            assert skill["name"] == names[skill["id"]], "技能名是解析后 id 对应的中文显示名"
+            assert skill["description"], "描述不许为空（缺条目也走「暂无描述」）"
+
+    by_id = {version["id"]: version for version in versions}
+    # 神甘宁的牌面是 3/6（初始体力低于上限）——这一条必须真的透出来，而不是被 hp_max 盖掉。
+    anning = by_id["shen_ganning"]
+    assert (anning["hp_max"], anning["hp"]) == (6, 3)
+    # 行键 ``hero.jie_guanyu.wusheng`` 不是显示名；中文名表只有 ``hero_skill_names`` 一处。
+    jie_guanyu = {skill["id"]: skill["name"] for skill in by_id["jie_guanyu"]["skills"]}
+    assert jie_guanyu["hero.jie_guanyu.wusheng"] == "武圣"
+
+
+def test_the_hero_skills_carry_the_trimmed_description() -> None:
+    """ui-one-screen 票 01（spec §8 R7）：将池版本的技能描述是**服务端裁过**的文本。
+
+    右栏「我的武将 + 技能全文」与技能浮层都读这一份（前端零正则、零第二份文案来源）。
+    判据是**独立真源**：裁切点 = ``descriptions.json`` 原文里第一个「本仓」注记的起点，
+    裁完之后逐字等于原文前缀；无注记的条目必须原样下发。
+    """
+    from sgs_web.descriptions import SKILL_DESCRIPTIONS
+    from sgs_web.serve import hero_catalog
+
+    shown = {
+        skill["id"]: skill["description"]
+        for group in hero_catalog()
+        for version in group["versions"]
+        for skill in version["skills"]
+    }
+
+    # 神甘宁【魄袭】的正文后面跟着「本仓实现：…」注记 ⇒ 必须被裁掉。
+    trimmed_id = "hero.shen_ganning.poxi"
+    raw = SKILL_DESCRIPTIONS[trimmed_id]
+    assert "本仓" not in shown[trimmed_id]
+    assert shown[trimmed_id] == raw[: raw.index("本仓")], "裁到第一个标记处，前文逐字保留"
+    assert shown[trimmed_id].endswith("你摸四张牌。"), "结尾是注记前那句"
+
+    # 马超【马术】没有注记 ⇒ 逐字节原样（裁切规则不许改动无标记的条目）。
+    kept_id = "hero.machao.mashu"
+    assert shown[kept_id] == SKILL_DESCRIPTIONS[kept_id]
+    assert "本仓" not in shown[kept_id]
+
+
 # ---------------------------------------------------------------------------
 # 3b. 牌堆档位：建局读 body / 未知档 400 / 开局页文案（M5-01b）
 # ---------------------------------------------------------------------------

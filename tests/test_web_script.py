@@ -583,12 +583,15 @@ def test_the_board_carries_a_name_and_a_server_price_for_every_row_it_shows(
     row = board["catalog"][script_mode.SKILL_A]
     hero = hero_by_id(script_mode.SKILL_A.split(".")[1])
     assert hero is not None
-    assert row == {
+    assert {key: row[key] for key in ("name", "kind", "rarity", "price")} == {
         "name": hero_skill_name(hero, script_mode.SKILL_A),
         "kind": "skill",
         "rarity": "common",
         "price": 3,
     }, "整备面的 24 格读这一份：名字 + 稀有度 + 单价都来自服务端"
+    assert row["desc"] and "本仓" not in row["desc"], (
+        "展示文案也是服务端给的（ui-one-screen 票 01：裁好的，前端零正则）"
+    )
     assert board["catalog"][script_mode.SKILL_B]["price"] == skill_price(
         base, script_mode.SKILL_B
     )
@@ -615,13 +618,93 @@ def test_a_relic_catalog_row_names_the_relic_from_its_skill_definition() -> None
     from sgs_web.script_runs import _catalog_item
 
     table = load_skill_values()
-    assert _catalog_item(table, "relic.extra_draw") == {
+    row = _catalog_item(table, "relic.extra_draw")
+    assert row is not None
+    assert {key: row[key] for key in ("name", "kind", "rarity", "price")} == {
         "name": "每回合摸牌阶段 +1",
         "kind": "relic",
         "rarity": None,
         "price": RELIC_PRICE,
     }
+    assert row["desc"], "遗物行同样带展示文案（ui-one-screen 票 01；文案不许留空）"
     assert _catalog_item(table, "relic.hand_limit")["name"] == "手牌上限 +2"
+
+
+def test_the_catalog_descriptions_are_trimmed_at_the_repo_note() -> None:
+    """ui-one-screen 票 01（spec §8 R7）：目录行的 ``desc`` = 原文按「本仓」注记裁过的文本。
+
+    浮层与技能全文读服务端这一份，前端零正则、零第二份文案来源。三半都要断：会被裁的、
+    原样保留的、以及描述表里查不到的兜底（**显式文案**，不是空串）。
+    """
+    from sgs.data import load_skill_values
+    from sgs_web.descriptions import DESCRIPTION_FALLBACK, display_skill_description
+    from sgs_web.script_runs import _catalog_item
+
+    table = load_skill_values()
+    raw = json.loads(
+        (REPO_ROOT / "tools" / "sgs_web" / "descriptions.json").read_text(encoding="utf-8")
+    )["skills"]
+
+    # 会被裁：刘备【仁德】的正文后跟「本仓实现：…」注记。
+    trimmed_id = "hero.liubei.rende"
+    trimmed = _catalog_item(table, trimmed_id)
+    assert trimmed is not None
+    assert "本仓" not in trimmed["desc"]
+    assert trimmed["desc"] == raw[trimmed_id][: raw[trimmed_id].index("本仓")]
+    assert trimmed["desc"].endswith("你回复 1 点体力。"), "裁到注记前那句，后面的注记不上屏"
+
+    # 原样保留：马超【马术】没有注记 ⇒ 与内容文件原文逐字节相同。
+    kept_id = "hero.machao.mashu"
+    kept = _catalog_item(table, kept_id)
+    assert kept is not None
+    assert kept["desc"] == raw[kept_id]
+
+    # 兜底：票面写「遗物没有条目」，但 HEAD 的六件真遗物都有文案；故兜底用一件
+    # **价值表里有、描述表里没有**的遗物钉住。
+    probe = table.model_copy(update={"relics": {"relic.probe_undescribed": True}})
+    fallback = _catalog_item(probe, "relic.probe_undescribed")
+    assert fallback is not None and fallback["kind"] == "relic"
+    assert fallback["desc"] == DESCRIPTION_FALLBACK, "查不到条目 ⇒ 显式「暂无描述」，不是空串"
+
+    # 真遗物行走同一条读取口：拿它自己的文案（不按 ``relic.`` 前缀特判）。
+    relic = _catalog_item(table, "relic.extra_draw")
+    assert relic is not None
+    assert relic["desc"] == raw["relic.extra_draw"]
+
+    # 合成键（技能帧拼出来的 ``yiji:give:0:0``）不做前缀猜测：查不到就是同一兜底。
+    assert display_skill_description("yiji:give:0:0") == DESCRIPTION_FALLBACK
+
+
+def test_the_description_trim_rule_is_implemented_once() -> None:
+    """ui-one-screen 票 01：裁切规则**只有一份** Python 实现，且只住在 ``descriptions.py``。
+
+    前端零正则（spec §8 R7）的前提是服务端也只有这一个口：视图层（``serve.py`` /
+    ``script_runs.py``）只调 :func:`sgs_web.descriptions.display_skill_description`，
+    不自己写标记正则，也不抄一份标记文本。
+    """
+    from sgs_web.descriptions import NOTE_TRIM_RE, trimmed_description
+
+    web_root = REPO_ROOT / "tools" / "sgs_web"
+    marker = r"本仓[^：]*："
+    owners = sorted(
+        path.name for path in web_root.glob("*.py") if marker in path.read_text(encoding="utf-8")
+    )
+    assert owners == ["descriptions.py"], (
+        f"裁切规则只能有一份实现（`descriptions.py`）；实际出现在：{owners}"
+    )
+    assert NOTE_TRIM_RE.pattern == marker
+    for name in ("serve.py", "script_runs.py"):
+        source = (web_root / name).read_text(encoding="utf-8")
+        assert marker not in source, f"{name} 不许自己写裁切规则（只调 descriptions 的口）"
+        assert "NOTE_TRIM_RE" not in source
+        assert "def trimmed_description" not in source
+        assert "display_skill_description" in source, (
+            f"{name} 要经 descriptions 的展示口取裁过的文本"
+        )
+    # 括号没闭合的那条标记（`本仓实现（口径 = **移动版**：`）是 `[^：]*` 的判据：
+    # 按括号配对写的正则会漏掉它，故这里用一条**未闭合**的样例钉住规则形状。
+    assert trimmed_description("正文。本仓实现（口径 = **移动版**：注记里还有：别的冒号") == "正文。"
+    assert trimmed_description("没有标记的正文。") == "没有标记的正文。"
 
 
 def test_an_entered_question_room_carries_the_revealed_inner_room(registry) -> None:

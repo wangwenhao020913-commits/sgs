@@ -137,6 +137,13 @@ function scriptRender() {
     node.hidden = !view.summary;
     node.textContent = view.summary;
   });
+  // 工具行右端那句**只读**存档摘要（ui-one-screen 票 03）：五个数就是 `scriptSummaryText`
+  // 印的那五个（剧本名 · 大节 · 已结算 · 铜钱 · saved_at），没有档 / 坏档 ⇒ 整句不显示。
+  set("lobby-script-summary", (node) => {
+    const summary = view.summary ? `剧本存档：${view.summary}` : "";
+    node.textContent = summary;
+    node.hidden = !summary;
+  });
   // 坏档面：红字 = 服务端的 `reason`；`.bak` 不可用 ⇒ 「恢复」不画、补一句明话。
   set("script-broken", (node) => { node.hidden = !view.broken; });
   set("script-broken-reason", (node) => {
@@ -318,6 +325,8 @@ async function scriptNewScript() {
   if (view.ok) {
     scriptConfirm({
       kind: "overwrite",
+      // 撞旧档本来就有「取消」语义（= 旧档原样保留、零请求）：这扇窗可以关。
+      dismissible: true,
       title: "已有剧本进度",
       text: "当前进度会被覆盖（不可恢复）",
       actions: [
@@ -483,53 +492,44 @@ async function scriptRestoreBackup() {
 
 /** 剧本层的**唯一**模态（撞旧档三选一 / 退出战斗 / 票 22 的三选一 / 遗物 / 结果共用）。
  *
- * 形状 = 标题 + 一句正文 + 可选的**正文槽**（`spec.body`：节点数组，票 22 的候选 / 结果行）
- * + 场景现铺的按钮。`spec.dialog` 写进 `#script-confirm[data-dialog]`，烟测据此区分是哪一种面。
+ * ui-one-screen 票 02 起它是 `panel-window.js:panelOpen` 的**薄封装**（壳升级成面板窗家族，
+ * 不是新造第二套）：这里只保留剧本层的三件私有约定——
+ *  - `spec.kind` / `spec.dialog` → `state.script.confirm` 与 `data-dialog` 的判据；
+ *  - `spec.text` 是窗头那句提示、`spec.body` 是正文槽（`#script-confirm-body`）；
+ *  - **返回按钮数组**（`clickAndWait` 靠它返回的 promise 等这一拍跑完）。
+ * 隐藏翻转与「同一时刻只有一扇」都在面板窗里（`hidden` 的 `display` 由全局
+ * `[hidden]{display:none!important}` 兜住，不在这里补第二份）。
+ *
+ * 票 10（review 修复 C）：关闭键**缺省不画**——这一族的多数面是强制选择（三选一 / 遗物 /
+ * 结算结果），关掉只是清 DOM，`state.script.confirm` 仍是旧值，没有任何路径会重新打开 ⇒
+ * 流程卡死到刷新。本来就有「取消」语义的窗（撞旧档 / 退出确认）显式传 `dismissible: true`。
  */
 function scriptConfirm(spec) {
-  const dialog = $("script-confirm");
-  const backdrop = $("script-confirm-backdrop");
-  if (!dialog) return null;
-  state.script.confirm = (spec && spec.kind) || "confirm";
-  dialog.setAttribute("data-dialog", (spec && spec.dialog) || state.script.confirm);
-  $("script-confirm-title").textContent = (spec && spec.title) || "";
-  $("script-confirm-text").textContent = (spec && spec.text) || "";
-  const bodyBox = $("script-confirm-body");
-  if (bodyBox) {
-    bodyBox.innerHTML = "";
-    const items = Array.isArray(spec && spec.body) ? spec.body : (spec && spec.body ? [spec.body] : []);
-    for (const item of items) if (item) bodyBox.appendChild(item);
-    bodyBox.hidden = items.length === 0;
-  }
-  const box = $("script-confirm-actions");
-  const buttons = [];
-  if (box) {
-    box.innerHTML = "";
-    for (const action of (spec && spec.actions) || []) {
-      const button = document.createElement("button");
-      button.type = "button";
-      if (action.primary) button.classList.add("primary");
-      if (action.ghost) button.classList.add("ghost");
-      button.textContent = action.label;
-      // 箭头**返回** `run()` 的 promise：烟测的 `clickAndWait` 会等它跑完再进下一块。
-      button.addEventListener("click", () => action.run());
-      box.appendChild(button);
-      buttons.push(button);
-    }
-  }
-  dialog.hidden = false;
-  if (backdrop) backdrop.hidden = false;
-  return buttons;
+  const options = spec || {};
+  state.script.confirm = options.kind || "confirm";
+  return panelOpen({
+    size: options.size || "S",
+    title: options.title || "",
+    hint: options.text || "",
+    body: options.body || [],
+    footNote: options.footNote || "",
+    actions: options.actions || [],
+    layout: options.layout,
+    dialog: options.dialog || state.script.confirm,
+    // 显式入参，不按 `dialog` / `kind` 字符串猜（见上面那段）。
+    dismissible: options.dismissible === true,
+  });
 }
 
 /** 收起确认框（两个场景的「取消」与每个动作开头都走这里）。 */
 function scriptCloseConfirm() {
   state.script.confirm = null;
-  const dialog = $("script-confirm");
-  if (dialog) dialog.hidden = true;
-  const backdrop = $("script-confirm-backdrop");
-  if (backdrop) backdrop.hidden = true;
-  return null;
+  const closed = panelClose();
+  // ui-one-screen 票 03：开局页三块内容住在窗的正文槽里（`lobby.js:LOBBY_WINDOWS`）。确认框
+  // 借的是同一扇窗（`panelOpen` 会清空正文槽），故收起后把三块送回寄存格——不让 `#script-panel`
+  // 停在已被清空的槽里（游离节点上的 `document.getElementById` 查不到 id）。
+  if (typeof restashLobbyWindows === "function") restashLobbyWindows();
+  return closed;
 }
 
 /** 退出确认框（战斗中）：「退出后这场战斗要重打；棋盘进度已保存。」确认 / 取消。
@@ -541,6 +541,8 @@ function scriptExitConfirm(after) {
   const runId = state.script.runId || (state.script.save && state.script.save.run_id) || null;
   return scriptConfirm({
     kind: "exit",
+    // 退出确认本来就有「取消」（= 什么都不发生、零请求）：这扇窗可以关。
+    dismissible: true,
     title: "退出战斗",
     text: "退出后这场战斗要重打；棋盘进度已保存。",
     actions: [

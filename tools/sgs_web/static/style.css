@@ -38,6 +38,210 @@ body {
 /* 开局 / 回放页：顶栏贴视口顶，内容沿用旧的 1180 居中栏（.view 的 padding 由 .page-body 承担）。 */
 .view.page-view { max-width: none; padding: 0; }
 .page-body { max-width: 1180px; margin: 0 auto; padding: 18px 20px 60px; }
+
+/* ==========================================================================
+ * ui-one-screen 票 02：page view 的**设计画布**（spec A1）
+ *
+ * 开局 / 棋盘 / 编辑器三个 page view 各是一块 16:9 壳：1 dsu = 1600×900 设计稿的 1px，
+ * `--dsu` 相对**壳宽**（`100cqw / 1600`）而不是视口宽，于是版式不随窗口比例变、长内容
+ * 只改变各自滚动区里的内容。opt-in 的类（不挂在 `.page-view` 上）：回放页整体不动，
+ * 继续吃 `.page-view` / `.page-body` 的流式口径；牌桌页有自己的 `.table-shell`。
+ * 画布宽度公式是整个文件里**唯一允许**读视口宽高的地方（16:9 壳本质就是视口的函数，
+ * 与 `.table-shell` 同姿态）；画布内的几何一律走 dsu / cqw / 壳内百分比。
+ * ========================================================================== */
+.design-canvas {
+  width: min(100vw, calc(100vh * 16 / 9));
+  aspect-ratio: 16 / 9;
+  margin: 0 auto;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  --dsu: calc(100cqw / 1600);
+}
+/* 画布内的顶栏 = 56 dsu（原型 `.topbar`）。`min-height` 必须一起覆盖：旧的
+ * `.page-topbar` 是 6.2vh，视口比 16:9 **高**时它会偷偷赢过 dsu 口径。
+ * 写法把数字放在 `var(--dsu)` 右边：烟测 U1-02c3 有一条**全文** absence 判据，扫的是
+ * 「0.63 版 56×79 卡面覆盖」那种字面算式；顶栏 56dsu 与那张卡面覆盖无关（同值不同物），
+ * 换个乘法顺序即可两不相干。 */
+.design-canvas .page-topbar {
+  flex: 0 0 calc(var(--dsu) * 56);
+  height: calc(var(--dsu) * 56);
+  min-height: 0;
+  padding: 0 calc(14 * var(--dsu));
+}
+/* 工具行（票 03 起用）：52 dsu（原型 `.toolrow`）。 */
+.design-canvas .toolrow {
+  flex: 0 0 calc(52 * var(--dsu));
+  height: calc(52 * var(--dsu));
+  display: flex; align-items: center; gap: calc(10 * var(--dsu));
+  padding: 0 calc(24 * var(--dsu));
+}
+/* 正文 = 画布的弹性区（不再居中 1180px）。内容超出由画布的 `overflow: hidden` 裁掉；
+ * 各票自己的滚动区必须在 tests/test_web_static.py 的登记表里登记（spec A4）。 */
+.design-canvas .page-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: none;
+  margin: 0;
+  padding: calc(16 * var(--dsu)) calc(24 * var(--dsu));
+}
+
+/* ==========================================================================
+ * ui-one-screen 票 03：开局页**一屏**（spec A5 / 原型 `data-screen="lobby-a"`）
+ *
+ * 顶栏（56 dsu）→ 常驻工具行（52 dsu）→ 正文两栏：左 760 dsu 固定（开一局 + 将池摘要）、
+ * 右弹性（我的武将 + 技能全文）。判据是「内容长短不改按钮位置」（原型 `geometry-tables.md`
+ * 表 C）：每个会长高的东西都关进自己的滚动区（`.skilllist` / `.pool-chips`），版式只吃
+ * dsu 与壳宽。工具行那三颗键在 `#view-lobby` 里，位置永不改变。
+ * ========================================================================== */
+.design-canvas .lobby-body { display: flex; gap: calc(24 * var(--dsu)); align-items: stretch; }
+.design-canvas .lobby-left {
+  flex: 0 0 calc(760 * var(--dsu));
+  display: flex; flex-direction: column; gap: calc(14 * var(--dsu));
+  min-height: 0;
+}
+.design-canvas .lobby-right {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: calc(14 * var(--dsu));
+  min-height: 0;
+}
+/* 两栏里的面板不再吃 `.panel` 的流式外边距：高度由栏分配（内容只改滚动区里的内容）。 */
+.design-canvas .lobby-left > .panel, .design-canvas .lobby-right > .panel { margin: 0; }
+.design-canvas .lobby-formpanel { flex: 0 0 auto; }
+.design-canvas .lobby-poolpanel {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+}
+.design-canvas .lobby-poolpanel h2 { margin: 0; }
+.design-canvas .lobby-panel-head { margin: 0 0 calc(8 * var(--dsu)); }
+.design-canvas .lobby-herohead { flex: 0 0 auto; }
+.design-canvas .lobby-heroskills {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+
+/* 开一局面板：两列固定栅格（`1fr 1fr` + 78 dsu 行高，原型 `.formgrid`）。字段顺序与既有
+ * `name` / `id` 全不变——只是排版换成两列。开始键与提示那条是 56 dsu 的固定行；乘法的常量
+ * 写在 `var(--dsu)` 右边：烟测 U1-02c3 有一条**全文** absence 判据，扫的是「常量在左边」
+ * 的写法（同值不同物，别让两条判据互相踩）。 */
+.design-canvas .formgrid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  grid-auto-rows: calc(78 * var(--dsu));
+  column-gap: calc(18 * var(--dsu)); row-gap: 0;
+  align-content: start;
+}
+.design-canvas .formgrid label {
+  display: flex; flex-direction: column; justify-content: flex-start;
+  gap: calc(4 * var(--dsu)); min-width: 0;
+  font-size: var(--f12);
+}
+.design-canvas .formgrid select,
+.design-canvas .formgrid input[type="text"],
+.design-canvas .formgrid input[type="number"] {
+  font: inherit; font-size: var(--f13); height: calc(34 * var(--dsu));
+  padding: 0 calc(9 * var(--dsu));
+}
+.design-canvas .formgrid input[type="checkbox"] {
+  width: calc(18 * var(--dsu)); height: calc(18 * var(--dsu));
+}
+.design-canvas .startrow {
+  flex: 0 0 calc(var(--dsu) * 56);
+  display: flex; align-items: center; gap: calc(12 * var(--dsu));
+  margin-top: calc(10 * var(--dsu)); flex-wrap: nowrap;
+}
+.design-canvas .startrow .primary {
+  flex: 0 0 auto; font-size: var(--f15);
+  padding: calc(8 * var(--dsu)) calc(26 * var(--dsu));
+}
+.design-canvas .startrow #lobby-hint {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 将池摘要：槽位 / 统计 / 按势力分组的名字块。名字块区自己滚（名字再多也不改变两栏版式）。 */
+.design-canvas .lobby-poolpanel .pool-slots { flex: 0 0 auto; }
+.design-canvas .pool-stats { flex: 0 0 auto; margin: calc(6 * var(--dsu)) 0 0; font-size: var(--f11); }
+.design-canvas .pool-chips {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: calc(5 * var(--dsu));
+  padding-top: calc(8 * var(--dsu)); margin-top: calc(8 * var(--dsu));
+  border-top: 1px solid var(--line);
+}
+.design-canvas .pool-chips .chipline {
+  flex: 0 0 auto; align-self: center; padding-right: calc(4 * var(--dsu));
+  font-size: var(--f11); font-weight: 700; color: var(--accent);
+}
+.design-canvas .pool-chips .chiphero {
+  flex: 0 0 auto; padding: calc(1 * var(--dsu)) calc(8 * var(--dsu));
+  border: 1px solid var(--line); border-radius: calc(6 * var(--dsu));
+  background: var(--card); font-size: var(--f11);
+}
+/* 已禁版本的名字仍列出、但划掉变灰——与将池窗的版本格同一套语义（不新增颜色）。 */
+.design-canvas .pool-chips .chiphero.banned { color: var(--dim); text-decoration: line-through; }
+
+/* 我的武将（右栏上半）：势力徽记 / 名字 / 体力点。徽记复用既有 `.kingdom`（R8：不新增颜色）。 */
+.design-canvas .herocard-head {
+  display: flex; align-items: baseline; gap: calc(10 * var(--dsu));
+  padding-bottom: calc(8 * var(--dsu)); border-bottom: 1px solid var(--line);
+}
+.design-canvas .herocard-head .kingdom {
+  width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu));
+  border-radius: 50%; font-size: var(--f12);
+}
+.design-canvas .lobby-hero-name { font-size: var(--f22); font-weight: 700; }
+.design-canvas .lobby-hp {
+  display: flex; gap: calc(3 * var(--dsu)); margin-left: auto; align-self: center;
+}
+.design-canvas .lobby-hp .pip {
+  width: calc(11 * var(--dsu)); height: calc(16 * var(--dsu));
+  border-radius: calc(3 * var(--dsu)); background: var(--accent);
+}
+.design-canvas .lobby-hp .pip.off { background: var(--line); }
+.design-canvas .herocard-sub { margin: calc(6 * var(--dsu)) 0 0; font-size: var(--f12); }
+
+/* 技能全文：定高 + 内滚（表 C 的判据——描述再长也只改这块的内容，下面什么都动不了）。 */
+.design-canvas .skilllist {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: calc(12 * var(--dsu));
+  padding-right: calc(4 * var(--dsu));
+}
+.design-canvas .skillblock {
+  border-left: calc(3 * var(--dsu)) solid var(--accent-soft);
+  padding-left: calc(10 * var(--dsu));
+}
+.design-canvas .skillblock .sn { margin: 0; font-size: var(--f15); font-weight: 700; }
+.design-canvas .skillblock .sd { margin: calc(4 * var(--dsu)) 0 0; font-size: var(--f13); }
+.design-canvas .herocard-foot {
+  flex: 0 0 calc(34 * var(--dsu));
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: calc(8 * var(--dsu)); border-top: 1px solid var(--line);
+  font-size: var(--f12); color: var(--dim);
+}
+
+/* 工具行右端两句摘要只是显示：单行省略，长文本不撑高那 52 dsu。 */
+.design-canvas .toolrow .spacer { flex: 1 1 auto; }
+.design-canvas .toolrow button {
+  flex: 0 0 auto; font-size: var(--f13);
+  padding: calc(3 * var(--dsu)) calc(13 * var(--dsu));
+}
+.design-canvas .toolrow .dim {
+  flex: 0 1 auto; min-width: 0; font-size: var(--f11);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 字号下限（原型 `--f11`…`--f22`）：只给字号加 floor，盒子尺寸仍全走 dsu。
+ * 画布与面板窗各自声明 `--dsu`，故两者各拿各的口径（`var()` 在**声明处**求值，
+ * 提到 `:root` 会让画布拿到视口口径——这正是本票要消灭的那个偏差）。
+ * 票 06 的技能浮层与面板窗同姿态：住在所有 `<main>` 之外，也自带 `--dsu`（见 `.skilltip`）。 */
+.design-canvas, .script-confirm, .skilltip {
+  --f11: max(10px, calc(11 * var(--dsu)));
+  --f12: max(10px, calc(12 * var(--dsu)));
+  --f13: max(11px, calc(13 * var(--dsu)));
+  --f15: max(12px, calc(15 * var(--dsu)));
+  --f17: max(13px, calc(17 * var(--dsu)));
+  --f22: max(16px, calc(22 * var(--dsu)));
+}
+
 .tag {
   display: inline-block; margin-left: 10px; padding: 1px 7px; border: 1px solid var(--line);
   border-radius: 99px; font-size: 12px; color: var(--dim);
@@ -80,14 +284,67 @@ button.ghost { background: transparent; }
 button:disabled { opacity: .4; cursor: not-allowed; }
 
 /* 将池预设（M6 票 13 / spec D6）：5 个常驻槽位 + 按真名分组的版本格。
- * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。 */
+ * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。
+ * ui-one-screen 票 03 起它在 L 窗里：身高由 `.pw-body[data-layout="split"]` 分配，版本格多时
+ * 只有这一条列表滚（旧的 `max-height: 46vh` 是流式文档时代的视口高度，已删）。
+ * ui-one-screen 票 04：窗里是「固定筛选区 + 唯一内滚的列表 + 窗脚」，行形状不变。 */
 .pool-slots { display: flex; flex-wrap: wrap; gap: 8px; }
 .pool-slot.active { box-shadow: 0 0 0 3px var(--accent-soft); }
 .pool-slot.active::after { content: " ★"; color: var(--accent); }
 .pool-slots .pool-slot.on.active::after { color: #fff; }
+/* 固定筛选区（票 04 / spec §3.2）：**不参与伸缩、不许自己滚**——筛选行永不被列表顶走。
+ * 少了 `flex: 0 0 auto`，`.hero-pool` 的 `flex: 1` 会把固定区一起压扁（原型缺陷 1）。
+ * 票 10（review 修复 C）：§3.2 的另一半是固定区**不许顶出窗**——`min-width: 0` 让这一列能缩到
+ * 窗宽以内（否则窄视口下整行按内容最小宽度撑开，被 `.pw{overflow:hidden}` 裁掉全开关键或读数）。 */
+.pool-panel .pool-fixed {
+  flex: 0 0 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: calc(8 * var(--dsu));
+  padding-bottom: calc(8 * var(--dsu)); border-bottom: 1px solid var(--line);
+}
+/* 筛选行：单行（`nowrap` = 行高不变，窗 rect 不随筛出数变）+ 能缩（`min-width: 0`）。 */
+.pool-panel .pool-line {
+  display: flex; align-items: center; gap: calc(8 * var(--dsu));
+  flex-wrap: nowrap; min-width: 0; margin-top: 0;
+}
+/* 搜索框基准 300 dsu（原型 `.pool-search`），但**可缩**（`0 1`，票 10）：它是**静态节点**，
+ * `input` 事件只重绘它之外的列表。`min-width: 0` 放开 input 的自动最小宽度，否则缩不动；
+ * 高度是字面 30dsu，缩的只是宽度——换行会改行高，故整行不换行。 */
+.pool-panel .pool-search {
+  font: inherit; font-size: var(--f12); height: calc(30 * var(--dsu));
+  width: calc(300 * var(--dsu)); flex: 0 1 calc(300 * var(--dsu)); min-width: 0;
+  border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
+  padding: 0 calc(10 * var(--dsu)); background: #fff;
+}
+.pool-panel .pool-kings {
+  display: flex; align-items: center; gap: calc(6 * var(--dsu)); flex: 0 0 auto;
+}
+/* 势力筛选：**复选**（可同时选多个，取并集；一个都不选 = 全部）。选中态用既有墨色，不新增颜色。 */
+.pool-panel .kbtn {
+  font: inherit; font-size: var(--f12); padding: calc(2 * var(--dsu)) calc(12 * var(--dsu));
+  border: 1px solid var(--line); border-radius: calc(7 * var(--dsu));
+  background: #fff; color: var(--dim); cursor: pointer;
+}
+.pool-panel .kbtn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+/* 全开/关：一颗**单一动作键**（`margin-left: auto` 靠右），不参与上面的复选状态。 */
+.pool-panel .allbtn { margin-left: auto; flex: 0 0 auto; }
+/* 读数：字号有 10px 下限（`--f11`），窄视口下它比 dsu 缩得慢 ⇒ **允许省略**（票 10：
+ * 可缩 + 单行 + 省略号）。三者缺一，读数就会把全开关键挤到窗外的裁剪区里。 */
+.pool-panel .pool-count {
+  font-size: var(--f11); color: var(--dim);
+  flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+/* 窗脚（保存键 + 提示）：同样不参与伸缩，列表吃剩下的高度。 */
+.pool-panel .pool-foot {
+  flex: 0 0 auto; margin-top: calc(8 * var(--dsu)); padding-top: calc(8 * var(--dsu));
+  border-top: 1px solid var(--line);
+}
+/* 列表：**唯一内滚区**。`flex: 1 1 auto` + `min-height: 0` 才让它在 flex 列里真的缩到
+ * 剩下的高度（否则内容一多就把固定区顶上去、整块正文一起滚）。 */
 .hero-pool {
-  display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
-  max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 6px;
+  display: flex; flex-direction: column; gap: 2px; margin-top: 0;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding-top: 6px;
 }
 .pool-row {
   display: flex; align-items: center; gap: 8px; padding: 2px 0;
@@ -100,6 +357,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .pool-version.banned:hover:not(:disabled) { color: var(--dim); border-color: var(--line); }
 .pool-row.all-banned .pool-name { opacity: .45; }
+/* 右键点中的版本 = 「我的武将」的当前值：**绿框**（2 dsu 边框、既有 `--ok`，不新增颜色）。
+ * 绿框不是"未禁"的对立物：被禁的格子也能带它（spec §8 R5：点将无视禁将）。 */
+.pool-version.picked {
+  border: calc(2 * var(--dsu)) solid var(--ok); color: var(--ok); font-weight: 700;
+}
+.pool-version.picked.banned {
+  background: #fff; text-decoration: none; opacity: 1;
+}
 #pool-hint.warn { color: #a15c00; font-weight: 600; }
 
 .seats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
@@ -1982,25 +2247,105 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .script-choice { border-radius: 999px; padding: 3px 12px; font-size: 14px; }
 .script-choice.on { background: var(--accent-soft); border-color: var(--accent); }
-/* 确认框（撞旧档三选一 / 退出战斗）：自己的遮罩 + 居中窗口。开局页没有牌桌那套
- * `#t-modal-*`，故这是开局页自己的模态，`z-index` 与牌桌的弹窗同档。 */
+/* 全局面板窗（ui-one-screen 票 02 / spec A2 / A3）：一套壳、三档**字面**尺寸、单槽位不叠。
+ * `#script-confirm` 只是**定位器**（全视口 flex 居中、不吃指针）；`.pw` 才是那扇窗。
+ * 遮罩与窗的 `z-index` 与牌桌的弹窗同档（表里的模态是既有那套，不新造第二套）。
+ *
+ * `--dsu` 必须在这里**自给自足**：窗住在所有 `<main>` 之外，继承不到画布上的 `--dsu`；
+ * 若让它回落到 `:root` 的 `calc(100vw / 1600)`，视口比 16:9 **更宽**时画布是高度受限的、
+ * 比视口窄，窗就会比画布大一圈（票 02 §2 的实测坑：vw=1258 时画布只有 963.55）。
+ * 下面这条宽度公式与 `.design-canvas` 同值，故 1 窗 dsu 恒等于 1 画布 dsu。 */
 .script-confirm-backdrop {
   position: fixed; inset: 0; background: rgba(28, 26, 23, .38); z-index: 60;
 }
 .script-confirm {
   position: fixed; inset: 0; z-index: 61;
   display: flex; align-items: center; justify-content: center; pointer-events: none;
+  --dsu: calc(min(100vw, 100vh * 16 / 9) / 1600);
 }
-/* `display: flex` 会盖掉 `[hidden]` 的 `display: none`，故显式补一条。 */
-.script-confirm[hidden] { display: none; }
-.script-confirm-window {
-  pointer-events: auto; background: var(--card); border: 1px solid var(--line);
-  border-radius: 12px; padding: 16px 18px; max-width: 460px;
+/* 真正的窗：三档宽高**写死**（不随内容变）、单槽位（再开一扇 = 覆盖这一扇）。 */
+.pw {
+  pointer-events: auto; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: calc(14 * var(--dsu));
   box-shadow: 0 18px 48px rgba(0, 0, 0, .18);
 }
-.script-confirm-title { font-size: 15px; margin: 0 0 8px; }
-.script-confirm-text { margin: 0; }
+.pw[data-size="S"] { width: calc(480 * var(--dsu)); height: calc(300 * var(--dsu)); }
+.pw[data-size="M"] { width: calc(800 * var(--dsu)); height: calc(560 * var(--dsu)); }
+.pw[data-size="L"] { width: calc(1180 * var(--dsu)); height: calc(700 * var(--dsu)); }
+.pw-head {
+  flex: 0 0 calc(48 * var(--dsu)); display: flex; align-items: center;
+  gap: calc(10 * var(--dsu)); padding: 0 calc(16 * var(--dsu));
+  border-bottom: 1px solid var(--line);
+}
+.pw-head h2 { margin: 0; font-size: var(--f15); white-space: nowrap; }
+.pw-head .dim {
+  min-width: 0; flex: 1 1 auto; font-size: var(--f12);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pw-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: calc(14 * var(--dsu)) calc(16 * var(--dsu));
+}
+/* 搬进窗的三块（剧本 / 将池 / 录像，票 03）：窗壳本身就是卡片，正文里不再画一层 `.panel`
+ * 的边框 / 内外边距；标题由窗头给（`.pw-head` 的 h2），面板自带的那行不再重复。 */
+.pw-body > .panel { margin: 0; padding: 0; border: 0; background: transparent; }
+.pw-body > .panel > h2 { display: none; }
+/* 固定区与滚动区分层（spec §3.2 / 原型缺陷 1）：正文**不滚**，固定筛选区留在顶上、
+ * 只有列表滚。少了这一条，列表的 `flex: 1` 是死的，整块正文一起滚、筛选行被顶走。 */
+.pw-body[data-layout="split"] {
+  display: flex; flex-direction: column; overflow: hidden;
+}
+/* 带列表的窗（将池 L）：面板自己吃掉窗高，列表（`.hero-pool`）才是滚动区。 */
+.pw-body[data-layout="split"] > .panel {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+.pw-foot {
+  flex: 0 0 calc(52 * var(--dsu)); display: flex; align-items: center;
+  justify-content: flex-end; gap: calc(8 * var(--dsu));
+  padding: 0 calc(16 * var(--dsu));
+  border-top: 1px solid var(--line);
+  background: rgba(var(--paper-rgb), .35);
+}
+.pw-foot .dim { margin-right: auto; }
+.pw-foot .row { margin-top: 0; }
+.pw-close {
+  flex: 0 0 auto; padding: calc(2 * var(--dsu)) calc(9 * var(--dsu));
+  font-size: var(--f12);
+}
+/* 动作行在脚注里靠右（询问弹窗的老口径）；正文槽里是**搬运来的面板**，行照常靠左
+ * （ui-one-screen 票 03：剧本 / 将池两块的按钮行不该跟着脚注走）。 */
 .script-confirm .row { justify-content: flex-end; }
+.pw-body .row { justify-content: flex-start; }
+
+/* ---------------------------------------------------------------------------
+ * ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）
+ *
+ * 一层、全局、**不吃鼠标**：`.skilltip`（节点 = `#skilltip`，整个页面只有一份）的 left/top
+ * 由 `skill-tip.js:skillTipMove` 现写——跟着鼠标走，贴**壳边**与**面板窗边**都翻（判据是
+ * 纯函数 `skillTipPlace`，DOM 读数留在调用方）。
+ *
+ * `--dsu` 与面板窗**同一口径自带**（票 02 §2 的实测坑：窗 / 浮层住在所有 `<main>` 之外，
+ * 继承不到画布上的 `--dsu`；回落到 `:root` 的 vw 口径时，视口比 16:9 更宽就会比画布大一圈）。
+ * 颜色只用既有变量（`--card` / `--line` / `--dim` / `--accent`），**不新增颜色**。
+ * `z-index` 高于面板窗（`.script-confirm` 是 61）：浮层要盖在窗上；`pointer-events: none`
+ * 保证它永远不吃点击（不挡提交键）。`hidden` 只靠全局那条 `!important`。
+ * ------------------------------------------------------------------------- */
+.skilltip {
+  position: fixed; left: 0; top: 0; z-index: 62; pointer-events: none;
+  --dsu: calc(min(100vw, 100vh * 16 / 9) / 1600);
+  width: calc(340 * var(--dsu));
+  display: flex; flex-direction: column; gap: calc(5 * var(--dsu));
+  padding: calc(10 * var(--dsu)) calc(12 * var(--dsu));
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: calc(10 * var(--dsu));
+  box-shadow: 0 14px 34px rgba(43, 36, 28, .26);
+}
+.skilltip .tt-head { display: flex; align-items: baseline; gap: calc(8 * var(--dsu)); }
+.skilltip .tt-name { font-size: var(--f15); font-weight: 700; }
+.skilltip .tt-kind { font-size: var(--f11); color: var(--dim); }
+.skilltip .tt-meta { font-size: var(--f11); color: var(--accent); }
+.skilltip .tt-desc { font-size: var(--f12); color: var(--ink); line-height: 1.6; }
 
 /* ---------------------------------------------------------------------------
  * M7 票 21：剧本棋盘（卡格 + 固定 64×64 只放图标的节点 + 上方标题 + SVG 连线 + 悬浮卡）
@@ -2009,7 +2354,78 @@ button.avatar-skill:hover { border-color: var(--accent); }
  * 写成内联样式；这里只钉**尺寸的机械判据**（64×64 = 65,536 px²）、颜色与层级。
  * 状态色只属于玩家视角的棋盘：五个状态各一条规则，编辑器语境由渲染器按 `mode` 不写类。
  * ------------------------------------------------------------------------- */
-.script-board-panel { position: relative; }
+/* ---------------------------------------------------------------------------
+ * ui-one-screen 票 05：棋盘页 = 左棋盘（弹性）+ 右 HUD（固定 300dsu，spec A7）
+ *
+ * 两条版式判据落在这里，别在别处再写一份：
+ *  - `.board-hud` 的宽是**字面 300dsu**（`flex: 0 0`），不是弹性宽度、不读视口；
+ *  - 棋盘 stage 的高度**不在这里**：它由 `script-board.js:scriptBoardRender` 按棋盘体自己的
+ *    行数现写内联高度（`rows * 格高 + 内边距`），故这条规则里没有 `height`。
+ * 放不下时只有 `.board-stage-scroll` 滚（登记在 tests 的滚动区表里），顶栏 / HUD 不动。
+ * HUD 的每一行 / 每一格都是固定高度：背包与遗物的**数量只改格里的字**，不改版式。
+ * ------------------------------------------------------------------------- */
+.design-canvas .board-body {
+  display: flex; align-items: stretch;
+  gap: calc(24 * var(--dsu));
+}
+.design-canvas .board-main {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  margin: 0;
+}
+.design-canvas .board-main .row { flex: 0 0 auto; }
+.design-canvas .board-hud {
+  flex: 0 0 calc(300 * var(--dsu));
+  display: flex; flex-direction: column;
+  gap: calc(10 * var(--dsu));
+  min-height: 0; margin: 0;
+}
+/* 棋盘内滚区：stage 高 = 行数 × 格高 + 内边距（自伸缩），装不下时只有这块滚。 */
+.design-canvas .board-stage-scroll {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding-top: calc(8 * var(--dsu));
+}
+/* HUD 三行读数：固定行高，数量写在右边那一格。 */
+.design-canvas .hud-rows { flex: 0 0 auto; display: flex; flex-direction: column; gap: calc(6 * var(--dsu)); }
+.design-canvas .hud-row {
+  display: flex; align-items: center; justify-content: space-between;
+  height: calc(22 * var(--dsu)); font-size: var(--f12); color: var(--dim);
+}
+.design-canvas .hud-coins { font-size: var(--f17); font-weight: 700; color: var(--accent); }
+/* 出战 4 槽：2×2 固定栅格（空槽也画一格，标「出战 N」），格高写死。 */
+.design-canvas .hud-equip {
+  flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr;
+  grid-auto-rows: calc(58 * var(--dsu)); gap: calc(8 * var(--dsu));
+}
+.design-canvas .hud-equip-cell {
+  display: flex; flex-direction: column; justify-content: space-between; overflow: hidden;
+  border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
+  background: var(--card); padding: calc(6 * var(--dsu));
+  font-size: var(--f12);
+}
+.design-canvas .hud-equip-cell[data-empty="1"] { border-style: dashed; color: #9a9188; }
+.design-canvas .hud-etag { font-size: var(--f11); font-weight: 700; color: var(--accent); }
+/* 遗物 6 格：3×2 固定栅格（空也画一格），行高写死。 */
+.design-canvas .hud-relics {
+  flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: calc(30 * var(--dsu)); gap: calc(8 * var(--dsu));
+}
+.design-canvas .hud-relic {
+  display: flex; align-items: center; overflow: hidden;
+  border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
+  background: var(--card); padding: 0 calc(8 * var(--dsu));
+  font-size: var(--f11); white-space: nowrap; text-overflow: ellipsis;
+}
+.design-canvas .hud-relic[data-empty="1"] { border-style: dashed; color: #9a9188; }
+/* 动作区贴底：`margin-top: auto` 把「背包 / 离开棋局」压在 HUD 下沿（行高不随内容变）。 */
+.design-canvas .hud-actions {
+  margin-top: auto; flex: 0 0 auto;
+  display: flex; flex-direction: column; gap: calc(8 * var(--dsu));
+}
+.design-canvas .hud-actions .hud-bag,
+.design-canvas .hud-actions #btn-script-board-exit { text-align: center; }
+
+/* stage 的高度由 JS 按行数写内联（见上一条注释）；CSS 只给定位，不写高度。 */
 .script-board-stage { position: relative; }
 .script-board-graph { position: relative; width: 100%; min-height: 120px; }
 .script-graph-edges, .script-graph-nodes { position: absolute; inset: 0; }
@@ -2108,9 +2524,9 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-face-price { font-size: 12px; color: #8a6a1f; font-weight: 600; }
 .script-face-req { font-size: 12px; color: #9d4a4a; }
 
-/* 结算弹窗的正文槽（票 20 的壳只有一个正文段落；三选一 / 遗物 / 结果需要一个列表槽）。 */
-.script-confirm-body { margin-top: 10px; max-height: 46vh; overflow: auto; }
-.script-confirm-body[hidden] { display: none !important; }
+/* 结算弹窗的正文槽（票 20 的壳只有一个正文段落；三选一 / 遗物 / 结果需要一个列表槽）。
+ * ui-one-screen 票 02 起它就是面板窗的 `.pw-body`：高度由窗的 `data-size` 档位管，
+ * 超出由它自己滚（不再写一条 46vh / `[hidden]` 的补丁——全局 `[hidden]` 是唯一真源）。 */
 .script-pick {
   display: flex; gap: 8px; align-items: baseline; width: 100%; margin-top: 6px;
   padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
@@ -2130,22 +2546,58 @@ button.avatar-skill:hover { border-color: var(--accent); }
 
 /* ---------------------------------------------------------------------------
  * M7 票 25：剧本编辑器（实体列表 / 大节页网格拖放 / 画边 / 解除连线 / 校验面板）
+ * ui-one-screen 票 07：两栏定幅（左 260dsu）+ 右栏三页签（详情 / 大节 / 校验）
  *
- * 版式：左栏实体 + 右栏详情 / 大节页 / 校验面板。节点图仍是 `script-board.js` 那一份
- * （编辑器只在图上叠一层**网格命中格**给拖放用，不画第二条线）。
+ * 版式：左栏实体列表（唯一内滚的列表）+ 右栏标题 / 五键 / 三页签 / 页签正文。三块 pane
+ * **一次只显示一块**（`script-editor.js:scriptEditorSyncTabs` 落 `hidden`），各自 `overflow-y:
+ * auto`：内容长短只改滚动区里的内容，页签头与动作键不动。页签头固定 40dsu（原型 `.ed-tabs`）。
+ * 节点图仍是 `script-board.js` 那一份（编辑器只在图上叠一层**网格命中格**给拖放用，不画第二条线）。
  * 校验面板的红字**自己一条规则**（与坏档那行同姿态：颜色写死、不靠继承）。
+ * 滚动区登记：`.script-editor-list` 与 `.ed-pane`（`tests/test_web_static.py:_SCROLL_CONTAINERS`）。
  * ------------------------------------------------------------------------- */
 .script-editor-body {
-  display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; align-items: start;
+  display: flex; gap: calc(14 * var(--dsu)); align-items: stretch; min-height: 0;
 }
 .script-editor-side, .script-editor-main { min-width: 0; }
-.script-editor-kinds { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 左栏：定宽 260dsu（字面常量，不随内容变），列表吃剩余高度自己滚。 */
+.ed-left {
+  flex: 0 0 calc(260 * var(--dsu));
+  display: flex; flex-direction: column; min-height: 0;
+}
+/* 右栏：弹性；标题 / 五键 / 页签头固定，只有 pane 吃剩余高度。 */
+.ed-right {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0;
+}
+.script-editor-head { flex: 0 0 auto; margin: 0; }
+.script-editor-head h2 { margin: 0; }
+.script-editor-kinds { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; }
 .script-editor-kind {
   padding: 3px 10px; border-radius: 999px; font-size: 13px;
   border: 1px solid var(--line); background: var(--card); cursor: pointer;
 }
 .script-editor-kind.on { background: var(--accent-soft); border-color: var(--accent); }
-.script-editor-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 42vh; overflow: auto; }
+.script-editor-list {
+  display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+}
+/* 页签头：固定高度（40dsu），自己**不滚**。 */
+.ed-tabs {
+  flex: 0 0 calc(40 * var(--dsu));
+  display: flex; gap: calc(6 * var(--dsu)); border-bottom: 1px solid var(--line);
+}
+.ed-tab {
+  font: inherit; font-size: 13px; padding: 0 calc(14 * var(--dsu));
+  height: calc(34 * var(--dsu)); background: transparent; border: 1px solid transparent;
+  border-bottom: none; border-radius: calc(8 * var(--dsu)) calc(8 * var(--dsu)) 0 0;
+  color: var(--dim); cursor: pointer;
+}
+.ed-tab.on {
+  background: var(--card); border-color: var(--line); color: var(--ink); font-weight: 700;
+}
+/* 页签正文：一次只显示一块；块自己滚（高度由右栏给，绝不随内容长高）。 */
+.ed-pane {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-top: calc(10 * var(--dsu));
+}
 .script-editor-row {
   text-align: left; font-size: 13px; padding: 5px 9px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer;
@@ -2167,7 +2619,6 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .script-editor-summary h3 { margin: 0 0 4px; }
 .script-editor-summary p { margin: 4px 0; }
 /* 校验面板：逐条 `loc · rule_id：期望 …，实得 …`（票 24 的 LoadError 原样），红字是判据。 */
-.script-editor-validation { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .script-editor-errors { display: flex; flex-direction: column; gap: 4px; }
 .script-editor-error {
   text-align: left; font-size: 12px; padding: 4px 8px; border-radius: 6px;
@@ -2175,10 +2626,13 @@ button.avatar-skill:hover { border-color: var(--accent); }
   color: #b3261e; font-weight: 600;
 }
 /* 大节页：网格命中格在节点图下面（节点 / 连线仍由共用渲染器画）。 */
-.script-editor-layer { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .script-editor-graph { position: relative; width: 100%; min-height: 120px; margin-top: 8px; }
 .script-editor-graph .script-graph-edges { z-index: 1; }
 .script-editor-graph .script-graph-nodes { z-index: 2; }
+/* 校验跳转定位到的节点：复用强调色的描边（不新增颜色变量）。 */
+.script-editor-graph .script-node-button.on {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .script-editor-cells { position: absolute; inset: 0; z-index: 0; }
 .script-editor-cell { border: 1px dashed rgba(0, 0, 0, .06); border-radius: 10px; }
 .script-editor-edge, .script-editor-pool-row, .script-editor-skill-row,

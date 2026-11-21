@@ -151,6 +151,12 @@ def _css_rule(selector: str) -> str:
     return match.group("body")
 
 
+def _css_rules() -> list[tuple[str, str]]:
+    """按出现顺序取**全部**规则（先剥注释；选择器原样，含逗号分组）。"""
+    text = re.sub(r"/\*.*?\*/", "", _CSS_TEXT, flags=re.S)
+    return [(m.group(1).strip(), m.group(2)) for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", text)]
+
+
 def test_stage_panel_uses_the_u3_design_units() -> None:
     """舞台 40% / 上限 360 / 中心 64.47% / 两行 253，几何上不压顶座。
 
@@ -9456,36 +9462,440 @@ def test_the_avatar_appearance_script_is_listed_right_after_the_dialog_shell() -
 # ---------------------------------------------------------------------------
 
 
-def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
-    """spec §4「开局页增量叠加」：既有三块一个都不删，剧本面板是加在开局页里的一段。
+_LOBBY_TOOL_KEYS = ("btn-lobby-script", "btn-lobby-pool", "btn-lobby-runs")
+"""开局页常驻工具行的三颗入口键（剧本 / 将池预设 / 录像；位置永不变）。"""
 
-    位置判据与烟测同源：`#script-panel` 在 `view-lobby` 与牌桌视图之间，既有三块
-    （`#lobby-form` / `#hero-pool-panel` / `#run-list`）仍在它之后；剧本面板的两个确认框
-    也不落进牌桌视图与回放视图之间那一段（烟测有两处字符串切片拿那两个 `main` 的 id 当锚点）。
+_LOBBY_WINDOW_PANELS = {
+    "script": "script-panel",
+    "pool": "hero-pool-panel",
+    "runs": "run-list",
+}
+"""三颗工具键各自搬进窗口的那块面板（id 一个都不许改名：票 20 的判据与烟测以它们为锚点）。"""
+
+_LOBBY_WINDOW_SIZES = {"script": "S", "pool": "L", "runs": "M"}
+"""三扇窗的档位（spec A2 的三档字面尺寸；确认框仍是默认 S）。"""
+
+
+def _lobby_toolrow_html(html: str) -> str:
+    """工具行那一段（`#lobby-toolrow` → 正文两栏 `#lobby-body` 之前）。"""
+    return html[html.index('id="lobby-toolrow"'):html.index('id="lobby-body"')]
+
+
+def test_the_lobby_page_is_a_one_screen_layout() -> None:
+    """开局页一屏（spec §5 A5 / 票 03）：常驻工具行 + 左表单/将池摘要 + 右武将技能全文。
+
+    判据分五段（不量几何，量的是"谁管高度"——内容长短只能改滚动区里的内容）：
+
+    1. **工具行**：三颗常驻入口键在 `#view-lobby` 里、在正文两栏**之前**，行高 52 dsu，
+       右端两句只读摘要（将池 / 剧本存档）；
+    2. **两栏**：左 / 右栏在**同一个 flex 行**里，左栏 760 dsu 写死、右栏弹性；
+    3. **开一局面板**：两列固定栅格（`1fr 1fr` + 78 dsu 固定行高），字段顺序（既有 id）
+       一个不变，开始键与提示同一行；
+    4. **技能全文区**：自己滚（`overflow-y: auto` 且**已登记**），不撑开两侧；
+    5. 工具行与开一局面板里**没有** `vh` / `%` 高度（旧位置那三段流式内容已让位）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    lobby_start = html.index('id="view-lobby"')
+    table_start = html.index('id="view-table"')
+
+    # 1. 工具行：位置 / 三键顺序 / 行高 / 两句摘要
+    toolrow = _lobby_toolrow_html(html)
+    assert lobby_start < html.index('id="lobby-toolrow"') < html.index('id="lobby-body"') < table_start, (
+        "工具行必须在开局页里、顶栏之后、正文两栏之前"
+    )
+    key_positions = [toolrow.index(f'id="{key}"') for key in _LOBBY_TOOL_KEYS]
+    assert key_positions == sorted(key_positions), (
+        f"工具行三键的顺序必须是 剧本 → 将池预设 → 录像：{key_positions}"
+    )
+    for summary_id in ("lobby-pool-summary", "lobby-script-summary"):
+        assert f'id="{summary_id}"' in toolrow, (
+            f"工具行右端缺一句只读摘要：#{summary_id}（摘要只是显示，不带动作）"
+        )
+    toolrow_rule = _css_rule(".design-canvas .toolrow")
+    assert re.search(r"height:\s*calc\(52 \* var\(--dsu\)\)", toolrow_rule), (
+        f"工具行 = 52 dsu 的常驻行（原型 `.toolrow`）：{toolrow_rule}"
+    )
+    assert re.search(r"display:\s*flex", toolrow_rule), f"工具行是三键一行：{toolrow_rule}"
+
+    # 2. 两栏：同一个 flex 行；左 760 dsu 固定、右弹性
+    body_rule = _css_rule(".design-canvas .lobby-body")
+    assert re.search(r"display:\s*flex", body_rule), f"正文两栏必须是 flex 行：{body_rule}"
+    left_rule = _css_rule(".design-canvas .lobby-left")
+    assert re.search(r"flex:\s*0 0 calc\(760 \* var\(--dsu\)\)", left_rule), (
+        f"左栏 = 760 dsu 固定（原型 `.lobby-left`）：{left_rule}"
+    )
+    right_rule = _css_rule(".design-canvas .lobby-right")
+    assert re.search(r"flex:\s*1 1 auto", right_rule), f"右栏必须弹性：{right_rule}"
+    assert re.search(r"min-width:\s*0", right_rule), (
+        f"右栏要能缩（`min-width: 0`，否则技能全文把两栏一起撑宽）：{right_rule}"
+    )
+    left_html = html[html.index('id="lobby-left"'):html.index('id="lobby-right"')]
+    right_end = html.index("</main>", html.index('id="lobby-right"'))
+    right_html = html[html.index('id="lobby-right"'):right_end]
+    for needle in ('id="lobby-form"', 'id="pool-summary"'):
+        assert needle in left_html, f"左栏 = 开一局面板 + 将池摘要，缺 {needle}"
+    for needle in ('id="lobby-hero"', 'id="lobby-heroskills"'):
+        assert needle in right_html, f"右栏 = 我的武将 + 技能全文，缺 {needle}"
+
+    # 3. 开一局面板：两列固定栅格 + 字段顺序不变 + 开始键与提示同一行
+    form_end = html.index("</form>", html.index('id="lobby-form"'))
+    form = html[html.index('id="lobby-form"'):form_end]
+    assert "formgrid" in form, "开一局面板必须是两列固定栅格（`.formgrid`，原型 `.formgrid`）"
+    grid_rule = _css_rule(".design-canvas .formgrid")
+    assert re.search(r"grid-template-columns:\s*1fr 1fr", grid_rule), (
+        f"表单是两列固定栅格：{grid_rule}"
+    )
+    row_height = re.search(r"grid-auto-rows:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", grid_rule)
+    assert row_height is not None and float(row_height.group(1)) == 78.0, (
+        f"表单行高是字面 78 dsu（不许按内容伸缩）：{grid_rule}"
+    )
+    order = ["in-players", "in-ai", "in-deck-profile", "in-seat", "in-timeout",
+             "in-seed", "in-pointjiang", "in-my-hero"]
+    positions = [form.index(f'id="{field}"') for field in order]
+    assert positions == sorted(positions), (
+        "字段顺序与既有 id 全不变（只是排版换成两列）：" + str(list(zip(order, positions)))
+    )
+    assert 'class="row startrow"' in form, "开始键与提示那条必须挂 `.startrow`（固定行高）"
+    startrow_at = form.index('class="row startrow"')
+    start_at = form.index('id="btn-start"')
+    hint_at = form.index('id="lobby-hint"')
+    assert startrow_at < start_at < hint_at, (
+        "「开始对局」与 `#lobby-hint` 必须在同一条 `.startrow` 里、顺序不变"
+    )
+    assert "</div>" not in form[startrow_at:hint_at], (
+        "开始键与提示之间不许夹着闭合标签（它们要在同一行）"
+    )
+
+    # 4. 技能全文区：自己滚 + 已登记；两侧面板不动
+    skills_rule = _css_rule(".design-canvas .skilllist")
+    assert re.search(r"overflow-y:\s*auto", skills_rule), (
+        f"技能全文区必须自己滚（表 C：描述再长也不挤下面任何东西）：{skills_rule}"
+    )
+    assert re.search(r"flex:\s*1 1 auto", skills_rule) and re.search(r"min-height:\s*0", skills_rule), (
+        f"技能全文区吃掉右栏剩下的高度并允许收缩：{skills_rule}"
+    )
+    assert "max-height" not in skills_rule, (
+        f"技能全文区的身高由布局给（不是 max-height）——描述翻倍只改滚动内容：{skills_rule}"
+    )
+    assert ".design-canvas .skilllist" in _SCROLL_CONTAINERS, (
+        "技能全文区是新的滚动区，必须在 `_SCROLL_CONTAINERS` 里登记（spec A4）"
+    )
+    hero_panel = html[html.index('id="lobby-heroskills"'):html.index('id="lobby-hero-seat"')]
+    assert 'id="lobby-skill-list"' in hero_panel, "技能全文那块要有自己的列表槽"
+
+    # 5. 工具行 / 表单里没有视口单位或百分比高度（旧的三段流式内容已让位）
+    for selector in (".design-canvas .toolrow", ".design-canvas .lobby-body",
+                     ".design-canvas .lobby-left", ".design-canvas .lobby-right",
+                     ".design-canvas .formgrid", ".design-canvas .startrow"):
+        body = _css_rule(selector)
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop, value = declaration.split(":", 1)
+            if prop.strip() not in {"width", "height", "min-width", "min-height",
+                                    "max-width", "max-height", "flex", "flex-basis"}:
+                continue
+            assert not re.search(r"\b(?:vh|vw)\b|%", value), (
+                f"{selector} 的 `{prop.strip()}` 不许读视口单位 / 百分比（版式不随内容/视口变）：{value}"
+            )
+    lobby_view = html[lobby_start:table_start]
+    for moved in ('id="script-panel"', 'id="hero-pool-panel"', 'id="run-list"'):
+        assert moved not in lobby_view, (
+            f"旧位置必须清干净：{moved} 已搬进窗口，不许还留在 `#view-lobby` 正文里"
+        )
+
+
+def test_the_lobby_panels_open_in_the_shared_window_shell() -> None:
+    """三颗工具键各自以 S / L / M 打开**同一扇**面板窗（spec A2 / 票 03 §2）。
+
+    判据分三段：
+
+    1. 三个面板 id 都还在，且都在**所有 `<main>` 之外**（窗壳的姿势：不随哪个 view 的显隐
+       被一起藏掉）；也**不**落进牌桌视图与回放视图之间（烟测两处字符串切片的锚点）；
+    2. 三颗键挂**同一份档位表**：`LOBBY_WINDOWS` 里三条尺寸是字面 `"S"` / `"L"` / `"M"`，
+       `lobby.js` 里只有**一个** `panelOpen(` 调用点（不新造第二套模态）；
+    3. `#script-confirm` 仍是**唯一**那扇窗（`id="script-confirm"` 与 `role="dialog"` 各只有
+       一份），三块由工具行三键打开（每颗键各开自己那一扇）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    last_main = html.rindex("</main>")
+    table_start = html.index('id="view-table"')
+    replay_start = html.index('id="view-replay"')
+    between = html[table_start:replay_start]
+
+    for kind, panel_id in _LOBBY_WINDOW_PANELS.items():
+        at = html.index(f'id="{panel_id}"')
+        assert at > last_main, (
+            f"`#{panel_id}` 必须住在所有 `<main>` 之外（{kind} 窗的内容是搬过去的）"
+        )
+        assert f'id="{panel_id}"' not in between, (
+            f"`#{panel_id}` 不许落进牌桌视图与回放视图之间（烟测切片的锚点在那里）"
+        )
+    assert html.count('id="script-confirm"') == 1, "全局面板窗只有一份壳（`#script-confirm`）"
+    assert html.count('id="script-confirm-window"') == 1, "只有一扇 `.pw`"
+    stash_html = re.sub(
+        r"<!--.*?-->", "",
+        html[html.index('id="lobby-window-stash"'):html.index('id="script-confirm-backdrop"')],
+        flags=re.S,
+    )
+    assert 'role="dialog"' not in stash_html and "aria-modal" not in stash_html, (
+        "三块只是窗的**内容**：不许自己再声明一扇模态（R2：沿用既有壳，不新造第二套）"
+    )
+
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    table = re.search(r"const LOBBY_WINDOWS = \{(?P<body>.*?)\n\};", lobby_js, re.S)
+    assert table is not None, "lobby.js 里找不到三扇窗的档位表 `LOBBY_WINDOWS`"
+    for kind, size in _LOBBY_WINDOW_SIZES.items():
+        entry = re.search(rf"\b{kind}:\s*\{{(?P<entry>[^}}]*)\}}", table.group("body"))
+        assert entry is not None, f"档位表里缺 {kind} 那一扇：{table.group('body')}"
+        assert re.search(rf'size:\s*"{size}"', entry.group("entry")), (
+            f"{kind} 窗的档位必须是字面 \"{size}\"：{entry.group('entry')}"
+        )
+        assert re.search(rf'panel:\s*"{_LOBBY_WINDOW_PANELS[kind]}"',
+                         entry.group("entry")), (
+            f"{kind} 窗搬的是 `#{_LOBBY_WINDOW_PANELS[kind]}`：{entry.group('entry')}"
+        )
+    assert lobby_js.count("panelOpen(") == 1, (
+        "三扇窗共用同一个 `panelOpen` 调用点（单槽位不叠；不新造第二套模态）"
+    )
+    for kind in _LOBBY_WINDOW_SIZES:
+        assert re.search(
+            rf'on\("btn-lobby-{kind}",\s*\(\)\s*=>\s*openLobbyWindow\("{kind}"\)\)', lobby_js
+        ), f"工具行的「{kind}」键必须打开自己那一扇窗"
+    assert re.search(r'on\("btn-pool-open",\s*\(\)\s*=>\s*openLobbyWindow\("pool"\)\)', lobby_js), (
+        "将池摘要面板里要有「打开将池预设」的第二个入口（同一扇窗）"
+    )
+    stash = html.index('id="lobby-window-stash"')
+    assert last_main < stash < html.index('id="script-confirm"'), (
+        "三块窗内容住在寄存格里：所有 `<main>` 之后、窗壳之前"
+    )
+    assert stash < html.index('id="script-panel"') < html.index('id="hero-pool-panel"'), (
+        "寄存格里按 剧本 / 将池 / 录像 的顺序放三块"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）
+# ---------------------------------------------------------------------------
+
+_POOL_KINGDOM_KEYS = ("wei", "shu", "wu", "qun", "shen")
+"""势力枚举值的界面顺序（= `KINGDOM_LABELS` 的键序；中文标签全仓只有那一张表）。"""
+
+_POOL_KINGDOM_LABELS = ("魏", "蜀", "吴", "群", "神")
+"""那五个汉字：**不许**出现在窗口的静态 markup 里（标签由 `lobby.js` 按表填）。"""
+
+def _pool_panel_html(html: str) -> str:
+    """将池窗那一块（`#hero-pool-panel` → 下一块 `#run-list` 之前，注释也留着判）。"""
+    start = html.index('id="hero-pool-panel"')
+    return html[start:html.index('id="run-list"', start)]
+
+
+def _lobby_js_function(name: str) -> str:
+    """按名字取 `lobby.js` 里一个函数的正文（含函数头；大括号配平后闭合）。"""
+    text = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    start = text.index(f"function {name}(")
+    depth = 0
+    for at in range(text.index("{", start), len(text)):
+        if text[at] == "{":
+            depth += 1
+        elif text[at] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:at + 1]
+    raise AssertionError(f"lobby.js 里 {name} 的函数体没有闭合")
+
+
+def test_the_pool_window_keeps_the_row_shape_and_has_the_filters() -> None:
+    """票 04 / spec A6：L 窗里 = 固定筛选区 + **唯一内滚**的列表，行形状仍是 `versions + 1`。
+
+    判据分四段（几何由 bsk 那一遍量，这里钉的是"谁在哪"与"谁重绘谁"）：
+
+    1. **固定筛选区**：搜索框 / 五颗势力复选（顺序 = 枚举顺序、带 `aria-pressed`）/ 一颗
+       全开关键（**不**带 `aria-pressed`：它是单一动作键，不参与复选）/ 读数，全在
+       `#hero-pool` **之前**；`#hero-pool` 仍是那个列表容器；
+    2. **标签只有一份**：那五个汉字不许出现在窗口 markup 里——标签由 `lobby.js` 按
+       `KINGDOM_LABELS` 填，抄第二份表就红；
+    3. **固定区与滚动区分层**（spec §3.2）：`LOBBY_WINDOWS` 的 pool 条目带
+       `layout: "split"`，`.pw-body[data-layout="split"]` 是 flex 竖列 + `overflow: hidden`；
+       `.hero-pool` 是**唯一**内滚区（已登记）；固定区不许自己滚；
+    4. **行形状**：`renderHeroPool` 只在行上 `appendChild` **名 + 版本格**（两处，不靠包装
+       节点凑 `versions + 1`），行里的事件挂**列表容器**（委托），重绘不丢处理器。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    panel = _pool_panel_html(html)
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+
+    # 1. 固定筛选区：位置 / 顺序 / 复选语义
+    for needle in ('id="pool-search"', 'id="btn-pool-all"', 'id="pool-count"',
+                   'id="hero-pool"'):
+        assert needle in panel, f"将池窗缺固定区节点：{needle}"
+    assert panel.index('id="pool-search"') < panel.index('id="hero-pool"'), (
+        "搜索框在固定区（列表之前）：输入事件不许重建它"
+    )
+    assert panel.index('id="btn-pool-all"') < panel.index('id="hero-pool"'), (
+        "全开/关键在固定区（列表之前）"
+    )
+    assert panel.index('id="pool-count"') < panel.index('id="hero-pool"'), "读数在固定区"
+    kingdom_positions = []
+    for kingdom, label in zip(_POOL_KINGDOM_KEYS, _POOL_KINGDOM_LABELS):
+        needle = f'data-kingdom="{kingdom}"'
+        assert needle in panel, f"将池窗缺 {label} 势力的复选键（{needle}）"
+        kingdom_positions.append(panel.index(needle))
+        button = panel[panel.rindex("<button", 0, panel.index(needle)):panel.index(">", panel.index(needle))]
+        assert 'aria-pressed="false"' in button, (
+            f"{label} 键是**复选**：静态缺省要带 aria-pressed=\"false\"：{button}"
+        )
+    assert kingdom_positions == sorted(kingdom_positions), (
+        f"五颗势力键的顺序必须是 魏 / 蜀 / 吴 / 群 / 神：{kingdom_positions}"
+    )
+    assert panel.index('id="pool-search"') < kingdom_positions[0], (
+        "势力键跟在搜索框后面（原型 `.pool-line` 的行序）"
+    )
+    all_button = panel[panel.rindex("<button", 0, panel.index('id="btn-pool-all"')):
+                       panel.index(">", panel.index('id="btn-pool-all"'))]
+    assert "aria-pressed" not in all_button, (
+        f"全开/关是**一颗单一动作键**，不参与上面的复选（不许带 aria-pressed）：{all_button}"
+    )
+
+    # 2. 五颗势力键的中文标签只有一份（`KINGDOM_LABELS`）：markup 里一个汉字都不许有
+    for label in _POOL_KINGDOM_LABELS:
+        assert label not in panel, (
+            f"窗口 markup 里出现了「{label}」：中文标签表全仓只有 `lobby.js:KINGDOM_LABELS`"
+            " 一份（票 03 那张），按表填、别抄第二份"
+        )
+    tables = {path.name: path.read_text(encoding="utf-8").count("KINGDOM_LABELS = {")
+              for path in sorted(STATIC_DIR.glob("*.js"))}
+    assert {name: count for name, count in tables.items() if count} == {"lobby.js": 1}, (
+        f"势力中文标签表必须只有一份、且在 lobby.js：{tables}"
+    )
+    wire = _lobby_js_function("wirePoolWindow")
+    assert "kingdomLabel(" in wire, (
+        "五颗势力键的文字要按 `KINGDOM_LABELS` 填（`kingdomLabel()`），不另写一份标签"
+    )
+
+    # 3. 固定区与滚动区分层（spec §3.2 / 原型缺陷 1）
+    table = re.search(r"const LOBBY_WINDOWS = \{(?P<body>.*?)\n\};", lobby_js, re.S)
+    assert table is not None, "lobby.js 里找不到三扇窗的档位表 `LOBBY_WINDOWS`"
+    pool_entry = re.search(r"\bpool:\s*\{(?P<entry>[^}]*)\}", table.group("body"))
+    assert pool_entry is not None, f"档位表里缺将池那一扇：{table.group('body')}"
+    assert re.search(r'layout:\s*"split"', pool_entry.group("entry")), (
+        "将池窗打开时正文槽必须带 data-layout=\"split\""
+        f"（否则 `.pool-list` 的 flex 是死的、筛选行被顶走）：{pool_entry.group('entry')}"
+    )
+    split = _css_rule('.pw-body[data-layout="split"]')
+    for declaration in ("display: flex", "flex-direction: column", "overflow: hidden"):
+        assert re.search(rf"{declaration}", split), (
+            f"`.pw-body[data-layout=\"split\"]` 必须带 `{declaration}`：{split}"
+        )
+    list_rule = _css_rule(".hero-pool")
+    assert re.search(r"overflow-y:\s*auto", list_rule), (
+        f"列表区自己滚（唯一内滚区）：{list_rule}"
+    )
+    assert ".hero-pool" in _SCROLL_CONTAINERS, "`.hero-pool` 是滚动区，必须在登记表里"
+    fixed = _css_rule(".pool-panel .pool-fixed")
+    assert re.search(r"flex:\s*0 0 auto", fixed), (
+        f"固定筛选区不参与伸缩（flex: 0 0 auto）：{fixed}"
+    )
+    assert "overflow-y" not in fixed, f"固定筛选区不许自己滚：{fixed}"
+
+    # 3b. 固定区**不许顶出窗**（spec §3.2 的另一半，票 10 / review 修复 C）：固定行的每一段
+    #     都必须能缩到窗宽以内——否则 `.pw{overflow:hidden}` 会直接裁掉全开关键或读数。
+    #     行高不许变（读数不换行）：窗 rect 只由 data-size 与内容行数决定，不随筛出数变。
+    assert re.search(r"min-width:\s*0", fixed), (
+        f"固定筛选区要能收缩（min-width: 0），否则窄视口整块把行顶出窗：{fixed}"
+    )
+    line = _css_rule(".pool-panel .pool-line")
+    for declaration in (r"min-width:\s*0", r"flex-wrap:\s*nowrap"):
+        assert re.search(declaration, line), (
+            f"筛选行要能收缩且**不换行**（换行会让行高变、窗 rect 跟着变）：缺 {declaration}：{line}"
+        )
+    search_rule = _css_rule(".pool-panel .pool-search")
+    assert re.search(r"flex:\s*0 1 calc\(300 \* var\(--dsu\)\)", search_rule), (
+        "搜索框基准 300dsu 但**可缩**（`flex: 0 1`）：`0 0` 时窄视口它自己就把全开关键顶出窗："
+        f"{search_rule}"
+    )
+    assert re.search(r"min-width:\s*0", search_rule), (
+        f"搜索框的最小尺寸要放开（`min-width: 0`）：input 的自动最小宽度会挡住收缩：{search_rule}"
+    )
+    count_rule = _css_rule(".pool-panel .pool-count")
+    for declaration in (r"flex:\s*0 1 auto", r"min-width:\s*0",
+                        r"overflow:\s*hidden", r"text-overflow:\s*ellipsis",
+                        r"white-space:\s*nowrap"):
+        assert re.search(declaration, count_rule), (
+            f"读数要允许**省略号**（可缩、单行、不顶出窗）：缺 {declaration}：{count_rule}"
+        )
+
+    # 4. 行形状：只在行上 append 名 + 版本格；事件挂列表容器（委托）
+    render = _lobby_js_function("renderHeroPool")
+    assert render.count("row.appendChild(") == 2, (
+        "每行只 append 两个东西：真名 + 版本格循环（行 children = versions + 1，靠的是"
+        f"不包包装节点）：{render}"
+    )
+    assert "label" in render and "cell" in render, f"两处 append 是名与版本格：{render}"
+    assert "box.appendChild(row)" in render, "行挂在列表容器 `#hero-pool` 上"
+    assert "addEventListener" not in render, (
+        "行的事件走**委托**（挂在 `#hero-pool` 上）：渲染口里不许给格子挂处理器，"
+        f"否则每次重绘都要重挂（重绘就丢）：{render}"
+    )
+    assert "pool-search" not in render, (
+        f"列表重绘口不许碰搜索框节点（spec §3.1：input 事件只重绘它自己之外的部分）：{render}"
+    )
+    assert lobby_js.count('addEventListener("contextmenu"') == 1, (
+        "右键点将只有一处（委托在列表容器上）"
+    )
+    wire = _lobby_js_function("wirePoolWindow")
+    for event in ("input", "compositionstart", "compositionend"):
+        assert re.search(rf'addEventListener\("{event}"', wire), (
+            f"搜索框要接 `{event}`（中文合成期不筛）：{wire}"
+        )
+    assert re.search(r'list\.addEventListener\("click"', wire), (
+        f"列表行的左键（禁 / 恢复）走容器上的委托：{wire}"
+    )
+
+
+def test_the_script_lobby_panel_is_an_increment_inside_the_lobby_page() -> None:
+    """spec §4「开局页增量叠加」——票 03 推翻了它的**前提**：三块不再排在开局页正文里。
+
+    保留的 judgement 一条都不放宽：既有三块一个都没删（三个 id 都在）、`#script-panel`
+    不在牌桌视图与回放视图之间、坏档 / 撞旧档的五个挂载点都还在、`script-lobby.js` 仍在
+    脚本清单里且 `main.js` 最后。新的判据：三块由**工具行三键**打开，窗壳住在
+    `#view-lobby` 之后（`#lobby-window-stash` 在所有 `<main>` 之外）。
     """
     html = INDEX_HTML.read_text(encoding="utf-8")
     lobby_start = html.index('id="view-lobby"')
     table_start = html.index('id="view-table"')
     replay_start = html.index('id="view-replay"')
-    panel = html.index('id="script-panel"')
-    form = html.index('id="lobby-form"')
-    pool = html.index('id="hero-pool-panel"')
-    runs = html.index('id="run-list"')
+    last_main = html.rindex("</main>")
 
-    assert lobby_start < panel < form < pool < runs, (
-        "剧本面板要住在开局页里、排在既有三块之前（一个都不许删）："
-        f"panel={panel} form={form} pool={pool} runs={runs}"
+    # 既有三块一个都没删：三个 id 都还在，且都搬到了所有 `<main>` 之外。
+    panel_positions = {}
+    for kind, panel_id in _LOBBY_WINDOW_PANELS.items():
+        panel_positions[kind] = html.index(f'id="{panel_id}"')
+        assert panel_positions[kind] > last_main, (
+            f"`#{panel_id}` 属于窗壳区（所有 `<main>` 之外），不许留在页面视图里"
+        )
+    assert panel_positions["script"] < panel_positions["pool"] < panel_positions["runs"], (
+        f"寄存格里三块的顺序：{panel_positions}"
     )
-    assert panel < table_start, "剧本面板属于开局页，不许落进牌桌视图"
+    assert last_main > lobby_start, "窗壳区在 `#view-lobby` 之后"
 
+    # 位置纪律：不插在牌桌视图与回放视图之间（烟测有两处字符串切片以那两个 id 为锚点）。
     between = html[table_start:replay_start]
-    assert "script-panel" not in between and "script-confirm" not in between, (
-        "剧本的节点不许插在牌桌视图与回放视图之间（烟测有两处字符串切片以那两个 id 为锚点）"
-    )
+    assert "script-panel" not in between and "script-confirm" not in between
     for needle in ('id="script-confirm"', 'id="script-confirm-backdrop"',
                    'id="script-broken-reason"', 'id="btn-script-restore"',
                    'id="btn-script-discard"'):
         assert needle in html, f"坏档 / 撞旧档的修复面缺挂载点：{needle}"
+
+    # 三块由工具行三键打开：键在开局页的工具行里，每颗各开自己那一扇。
+    toolrow = _lobby_toolrow_html(html)
+    for key in _LOBBY_TOOL_KEYS:
+        assert f'id="{key}"' in toolrow, f"工具行缺入口键 `#{key}`"
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    for kind in _LOBBY_WINDOW_PANELS:
+        assert re.search(
+            rf'on\("btn-lobby-{kind}",\s*\(\)\s*=>\s*openLobbyWindow\("{kind}"\)\)', lobby_js
+        ), f"`#btn-lobby-{kind}` 必须把 `#{_LOBBY_WINDOW_PANELS[kind]}` 搬进窗"
 
     srcs = _script_srcs()
     assert "script-lobby.js" in srcs, f"剧本开局页的脚本不在清单里：{srcs}"
@@ -9754,6 +10164,13 @@ def _function_source(source: str, name: str) -> str:
     return source[start:end]
 
 
+def _const_array_source(source: str, name: str) -> str:
+    """截出 `const <name> = [ … ];` 的那一段（逐条登记的映射表要靠它读条目）。"""
+    start = source.index(f"const {name} = [")
+    end = source.index("\n];", start) + 3
+    return source[start:end]
+
+
 def test_the_script_loadout_script_is_listed_right_after_the_board_renderer() -> None:
     """脚本清单的唯一真源仍是 `index.html`：整备面紧挨棋盘（它读棋盘体的 `run` / `catalog`）。"""
     srcs = _script_srcs()
@@ -9763,13 +10180,190 @@ def test_the_script_loadout_script_is_listed_right_after_the_board_renderer() ->
     assert srcs[-1] == "main.js", "wireScriptLoadout() 在 main.js 末尾调，故清单仍是 main.js 最后"
 
 
+class _TreeBuilder(HTMLParser):
+    """把 `index.html` 收成一棵**只含标签与属性**的浅树（测试只需要结构，不要文本）。
+
+    票 05 起棋盘页要判「两栏是不是同一个 flex 行里的兄弟」与「整备面是不是住在窗的挂载区」，
+    这两条都是**结构**判据；字符串切片会把注释与相邻段落一起扫进来，判不出父子关系。
+    """
+
+    _VOID = {"input", "img", "br", "hr", "meta", "link", "source"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.root: dict = {"tag": "#root", "attrs": {}, "children": []}
+        self.stack: list[dict] = [self.root]
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        node: dict = {"tag": tag, "attrs": dict(attrs), "children": []}
+        self.stack[-1]["children"].append(node)
+        if tag not in self._VOID:
+            self.stack.append(node)
+
+    def handle_endtag(self, tag: str) -> None:
+        # 自闭标签 / 未闭合段落不许把栈弄坏：向上找最近的同名开标签再截断。
+        for at in range(len(self.stack) - 1, 0, -1):
+            if self.stack[at]["tag"] == tag:
+                del self.stack[at:]
+                return
+
+
+def _element(
+    node: dict, *, element_id: str | None = None, class_name: str | None = None
+) -> dict | None:
+    """在树里按 id / 类名找**第一个**元素（深度优先，与 DOM 的查找口同序）。"""
+    if element_id is not None and node["attrs"].get("id") == element_id:
+        return node
+    if class_name is not None and class_name in (node["attrs"].get("class") or "").split():
+        return node
+    for child in node["children"]:
+        found = _element(child, element_id=element_id, class_name=class_name)
+        if found is not None:
+            return found
+    return None
+
+
+def _subtree_ids(node: dict) -> set[str]:
+    """子树里所有静态 id（含根）。"""
+    found = {node["attrs"]["id"]} if "id" in node["attrs"] else set()
+    for child in node["children"]:
+        found |= _subtree_ids(child)
+    return found
+
+
+_BOARD_HUD_IDS = (
+    "script-board-main",
+    "script-hud",
+    "script-hud-coins",
+    "script-hud-backpack",
+    "script-hud-relic-count",
+    "script-hud-equipped",
+    "script-hud-relic-grid",
+    "script-hud-actions",
+)
+"""棋盘页两栏与只读 HUD 的挂载点（票 05 的目标形状 / spec A7）。"""
+
+
+def test_the_board_page_is_a_board_and_a_fixed_hud() -> None:
+    """票 05 / spec A7：左棋盘**自伸缩** + 右 HUD **固定 300dsu**（不是弹性宽度、不读视口）。
+
+    四条机械判据：
+
+    1. 两栏是**同一个 flex 行**里的兄弟：`.board-body { display: flex }`（不是 column），
+       先 `#script-board-main`（弹性）后 `#script-hud`（定宽）；
+    2. HUD 的宽是字面 `flex: 0 0 calc(300 * var(--dsu))`——判据落在规则体上，不是"某个类存在"；
+       且 HUD 的各行 / 各格用固定高度，**没有随背包 / 遗物数量变的百分比高度**；
+    3. 棋盘 stage 的高由**棋盘体自己的行数**给出：JS 里是一条 `rows * 格高 + 内边距` 的表达式
+       （`script-board.js` 用 `scriptGraphLayout` 已经算出的行数），CSS 里 `.script-board-stage`
+       不写高度、不读 `vh` / `vw`；
+    4. 放不下时**只有棋盘区滚**：`.design-canvas .board-stage-scroll` 是 `overflow-y: auto`，
+       而且它登记在滚动区表里（spec A4：未登记即红）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+
+    board_view = _element(builder.root, element_id="view-script-board")
+    assert board_view is not None, 'index.html 里找不到 <main id="view-script-board">'
+    body = _element(board_view, class_name="board-body")
+    assert body is not None, "棋盘页正文必须是 `.board-body` 这一行（左棋盘 + 右 HUD）"
+    columns = [
+        child["attrs"].get("id") or ""
+        for child in body["children"]
+        if child["tag"] in {"section", "div"}
+    ]
+    assert columns == ["script-board-main", "script-hud"], (
+        "正文一行两栏的次序 = 左棋盘（弹性）+ 右 HUD（定宽），实得 "
+        f"{columns}"
+    )
+    for needle in _BOARD_HUD_IDS:
+        assert f'id="{needle}"' in html, f"棋盘 / HUD 少了挂载点：{needle}"
+    assert _element(body, element_id="script-hud-actions") is not None, (
+        "HUD 的动作区必须是两栏里的静态挂载点（背包键由它按 `pending` 挂 / 摘）"
+    )
+
+    body_rule = _css_rule(".design-canvas .board-body")
+    assert re.search(r"display:\s*flex", body_rule), (
+        f"两栏必须是同一 flex 行：{body_rule}"
+    )
+    assert not re.search(r"flex-direction:\s*column", body_rule), (
+        f"两栏不是上下堆：内容是行，不是列：{body_rule}"
+    )
+    main_rule = _css_rule(".design-canvas .board-main")
+    assert re.search(r"flex:\s*1 1 auto", main_rule), (
+        f"棋盘是弹性栏（HUD 定宽、棋盘吃剩下的宽）：{main_rule}"
+    )
+    hud_rule = _css_rule(".design-canvas .board-hud")
+    assert re.search(r"flex:\s*0 0 calc\(300 \* var\(--dsu\)\)", hud_rule), (
+        f"HUD 的宽必须是字面 300dsu（不是弹性宽度）：{hud_rule}"
+    )
+    assert not re.search(r"flex:\s*1", hud_rule), f"HUD 不许吃剩余宽度：{hud_rule}"
+    assert not _VH_VW_GEOMETRY.search(hud_rule), f"HUD 的几何不许读视口：{hud_rule}"
+
+    # HUD 的每一行 / 每一格都是固定高度：数量只改格里的字，不改版式。
+    for selector, rule_body in _css_rules():
+        if "hud" not in selector:
+            continue
+        for declaration in rule_body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop, value = declaration.split(":", 1)
+            if "height" not in prop.strip():
+                continue
+            assert "%" not in value, (
+                f"HUD 里不许有随数量变的百分比高度（`{prop.strip()}:{value.strip()}`，"
+                f"选择器：{selector}）"
+            )
+            assert value.strip() != "auto", (
+                f"HUD 的行高不许交给内容（`{prop.strip()}:auto`，选择器：{selector}）"
+            )
+    for selector in (".design-canvas .hud-equip", ".design-canvas .hud-relics"):
+        rule_body = _css_rule(selector)
+        assert re.search(r"grid-auto-rows:\s*calc\(", rule_body), (
+            f"固定格数的网格必须写死行高（`grid-auto-rows`）：{selector} → {rule_body}"
+        )
+
+    stage_rule = _css_rule(".script-board-stage")
+    assert not _VH_VW_GEOMETRY.search(stage_rule), (
+        f"stage 的高度不许读视口单位（不是 16:9 / 视口比例）：{stage_rule}"
+    )
+    assert not re.search(r"(?:^|;)\s*height\s*:", stage_rule), (
+        f"stage 的高度由 JS 按行数给，CSS 不写死：{stage_rule}"
+    )
+    board_js = _BOARD_JS.read_text(encoding="utf-8")
+    assert "script-board-stage" in board_js, "stage 的落点由棋盘脚本管（没有第二个宿主）"
+    assert re.search(r"style\.height = `\$\{[^`]*\brows\b\s*\*[^`]*\+[^`]*\}px`", board_js), (
+        "stage 的高度必须是一条行数表达式（`rows * … + …`），不是视口比例"
+    )
+
+    scroll_rule = _css_rule(".design-canvas .board-stage-scroll")
+    assert re.search(r"overflow-y:\s*auto", scroll_rule), (
+        f"棋盘放不下时只有这一条滚动区：{scroll_rule}"
+    )
+    assert ".design-canvas .board-stage-scroll" in _SCROLL_CONTAINERS, (
+        "棋盘内滚区必须登记进票 02 的滚动区表（spec A4：未登记即红）"
+    )
+
+
 def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() -> None:
-    """整备面是棋盘视图里的一段（spec §4 的落点表）：24 格 = **3×8**、遗物栏 ≤6、铜钱 HUD。"""
+    """整备面住在**面板窗的挂载区**（票 05 改的**唯一**前提）：24 格 = **3×8**、遗物栏 ≤6、铜钱 HUD。
+
+    票 22 写这条时整备面还是 `#view-script-board` 正文里的一段；票 05 把它搬进面板窗
+    （HUD 的「背包」键打开，M 档）。故这里**只换"住在哪"这个前提**——八个挂载点不再待在
+    棋盘视图的 `<main>` 里，而是与节点面一起住在窗的寄存格 `#board-window-stash` 里
+    （仍在**所有 `<main>` 之外**，与窗壳同一个姿势：不会随哪个 view 的显隐被藏掉）。
+    judged 项一条都不松：`data-rows="3"` / `data-cols="8"` / CSS `repeat(8` / 24 / 8 / 3 / 6
+    四个常量 / 出战徽标写法全部原样保留。
+    """
     html = INDEX_HTML.read_text(encoding="utf-8")
     board_start = html.index('id="view-script-board"')
-    script_start = html.index("<script", board_start)
-    section = html[board_start:script_start]
-    for needle in (
+    board_end = html.index("</main>", board_start)
+    view = html[board_start:board_end]
+
+    needles = (
         'id="script-loadout"',
         'id="script-loadout-grid"',
         'id="script-loadout-relics"',
@@ -9778,9 +10372,35 @@ def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() ->
         'id="script-face"',
         'data-rows="3"',
         'data-cols="8"',
+    )
+    for needle in needles:
+        assert needle not in view, (
+            f"票 05 起整备面 / 节点面不再住在棋盘视图正文里（改前提的唯一一条）：{needle}"
+        )
+
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+    stash = _element(builder.root, element_id="board-window-stash")
+    assert stash is not None, (
+        "整备面 / 节点面要住在窗的寄存格 `#board-window-stash`（窗没开时的家）"
+    )
+    stash_ids = _subtree_ids(stash)
+    for element_id in (
+        "script-loadout",
+        "script-loadout-grid",
+        "script-loadout-relics",
+        "script-loadout-coins",
+        "btn-script-loadout-discard",
+        "script-face",
     ):
-        assert needle in section, f"整备 / 节点面的挂载点缺件：{needle}"
-    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        assert element_id in stash_ids, f"整备 / 节点面的挂载点缺件：{element_id}"
+    for needle in ('data-rows="3"', 'data-cols="8"'):
+        assert needle in html, f"整备面 3×8 的静态标注缺件：{needle}"
+    assert html.index('id="board-window-stash"') > html.rindex("</main>"), (
+        "寄存格仍在**所有 <main> 之外**（与窗壳同一个姿势；否则会被 display:none 的祖先藏掉）"
+    )
+
     grid = _css_rule(".script-loadout-grid")
     assert "repeat(8" in grid, f"24 格是 8 列 × 3 行（判据在 CSS 的这一行）：{grid}"
 
@@ -9793,6 +10413,39 @@ def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() ->
         'scriptNode("span", "script-slot-badge", equipped ? "出战" : "")',
     ):
         assert needle in source, f"整备面的机械常量 / 出战徽标写法变了：{needle}"
+
+
+def test_the_bag_button_is_absent_while_a_node_is_in_progress() -> None:
+    """spec §8 R6：`pending` 非空（节点进行中）⇒ HUD 动作区里**没有**「背包」这颗键。
+
+    不是 `disabled`、不是 `hidden`——**DOM 里少一个节点**。三条机械判据：
+
+    1. 动作区的判据是服务端棋盘体的 `pending`（`scriptLoadoutPending()`），不是本地旗标；
+    2. `pending` 非空那条分支只**摘**键（`removeChild`），没有任何创建 / 插入语句
+       （"有创建语句 ⇒ 红"）；
+    3. 动作区自己的函数里不许出现 `disabled`（置灰 = 另一回事，票 22 的"入口不存在"同理）。
+    """
+    source = _loadout_source()
+    actions = _function_source(source, "scriptHudActions")
+    assert "scriptLoadoutPending()" in actions, (
+        f"动作区的判据必须是服务端棋盘体的 `pending`：{actions}"
+    )
+    assert "disabled" not in actions, (
+        "节点进行中不是「置灰」——这颗键根本不该存在（不许写 disabled）"
+    )
+    assert "createElement" not in actions and "appendChild" not in actions, (
+        "动作区自己不创建那颗键（创建只有一处、与 `pending` 无关），否则判据读不出来"
+    )
+    start = actions.index("if (scriptLoadoutPending()) {")
+    end = actions.index("\n  }", start)
+    blocked = actions[start:end]
+    assert "removeChild" in blocked, (
+        f"`pending` 非空时要把那颗键从动作区摘掉：{blocked}"
+    )
+    for banned in ("createElement", "appendChild", "insertBefore", "disabled", "hidden"):
+        assert banned not in blocked, (
+            f"`pending` 非空那条分支里不许出现 `{banned}`（不是置灰 / 不是隐藏 / 不是创建）"
+        )
 
 
 def test_the_backpack_edit_entry_points_do_not_exist_inside_a_node() -> None:
@@ -9811,15 +10464,27 @@ def test_the_backpack_edit_entry_points_do_not_exist_inside_a_node() -> None:
     assert "discard.hidden = !editable" in render, "节点内「丢弃」整键收起（入口不存在）"
 
 
+_PANEL_WINDOW_SIZES = {"S": (480, 300), "M": (800, 560), "L": (1180, 700)}
+"""面板窗三档的字面尺寸（dsu）：S 480×300 / M 800×560 / L 1180×700（spec §2.2 / A2）。"""
+
+
 def test_the_settle_dialogs_share_the_ticket_20_modal_shell() -> None:
-    """结算 / 选择一律弹窗，且只有**一个**模态壳（票 22 备注：不新造一套模态）。"""
+    """结算 / 选择一律弹窗，且只有**一个**模态壳（票 22 备注：不新造一套模态）。
+
+    ui-one-screen 票 02 加两条判据：(a) 窗上有 `data-size`、三档都由 CSS 定义；
+    (b) 壳住在所有 `<main>` 之外。另钉 (c) `[hidden]` 的唯一真源：全局 `!important`
+    一条，面板窗家族不再写 `display` 补丁（spec A3）。原有判据一条没删：唯一壳 / 正文槽 /
+    三个结算弹窗都走 `scriptConfirm` / 整备面不造第二层遮罩 / 不开原生 `<dialog>`。
+    """
     html = INDEX_HTML.read_text(encoding="utf-8")
     assert html.count('id="script-confirm"') == 1, "模态壳只有一份（票 20 交出来的那个）"
     assert html.count('id="script-confirm-backdrop"') == 1, "遮罩也只有一份"
     assert 'id="script-confirm-body"' in html, "票 22 的正文槽要在同一个壳里"
     lobby = (STATIC_DIR / "script-lobby.js").read_text(encoding="utf-8")
     confirm = _function_source(lobby, "scriptConfirm")
-    assert "script-confirm-body" in confirm, "正文槽由同一个 `scriptConfirm` 填（票 22 只加槽）"
+    assert "panelOpen(" in confirm, "`scriptConfirm` 是面板窗的薄封装（票 02 §3：不另造第二套壳）"
+    panel = (STATIC_DIR / "panel-window.js").read_text(encoding="utf-8")
+    assert "script-confirm-body" in panel, "正文槽由同一个面板窗填（票 22 只加槽）"
     source = _loadout_source()
     assert "scriptConfirm({" in source, "三选一 / 遗物 / 结果都走 `scriptConfirm`"
     for name in ("scriptSettlePickDialog", "scriptSettleRelicDialog", "scriptSettleShowResult"):
@@ -9828,6 +10493,277 @@ def test_the_settle_dialogs_share_the_ticket_20_modal_shell() -> None:
         )
     assert "script-confirm-backdrop" not in source, "整备面不许再造一层遮罩"
     assert "createElement(\"dialog\")" not in source, "不开原生 <dialog>（无构建、经典脚本）"
+
+    # (a) 窗上有 `data-size`（默认 S），三档都是 CSS 定义的 `.pw[data-size]`。
+    window_at = html.index('id="script-confirm-window"')
+    window_tag = html[window_at:html.index(">", window_at)]
+    assert 'data-size="S"' in window_tag, (
+        f"面板窗默认 S 档（spec R2：确认框就是 S 档的一扇窗）：{window_tag}"
+    )
+    for size in _PANEL_WINDOW_SIZES:
+        assert re.search(r"width:\s*calc\(", _css_rule(f'.pw[data-size="{size}"]')), (
+            f".pw[data-size=\"{size}\"] 必须由 CSS 定义固定尺寸"
+        )
+    # (b) 壳住在所有 `<main>` **之外**（它在页面级，不随哪个 view 的显隐一起被藏掉）。
+    last_main = html.rindex("</main>")
+    assert html.index('id="script-confirm-backdrop"') > last_main, "遮罩必须在所有 <main> 之后"
+    assert html.index('id="script-confirm"') > last_main, "面板窗必须在所有 <main> 之后"
+    # (c) `[hidden]` 的唯一真源是全局那条 `!important`；面板窗家族不另写 display 补丁。
+    assert re.search(r"(?m)^\[hidden\]\s*\{[^}]*display:\s*none\s*!important", _CSS_TEXT), (
+        "style.css:429 的全局 `[hidden] { display: none !important; }` 是唯一真源"
+    )
+    assert not re.search(r"\.script-confirm[\w-]*\[hidden\]", _CSS_TEXT), (
+        "面板窗家族不许再写 `[hidden]` 的 display 补丁（原型缺陷 3：被 display 盖掉）"
+    )
+
+
+def test_the_panel_window_sizes_are_literal_design_units() -> None:
+    """面板窗三档是**字面常量**：宽高写死、不随内容变（spec A2 / 票 02 §2）。
+
+    验收口径是「同档多扇窗尺寸相同」——所以判据必须落在 CSS 规则体里的两条字面算式上，
+    不能靠"某个类存在"或全文搜索。`#script-confirm` 仍是**一份**壳（升级而不是新造）。
+    """
+    for size, (width, height) in _PANEL_WINDOW_SIZES.items():
+        body = _css_rule(f'.pw[data-size="{size}"]')
+        assert re.search(rf"width:\s*calc\({width} \* var\(--dsu\)\)", body), (
+            f"`.pw[data-size=\"{size}\"]` 的宽必须是字面 {width} dsu，实际：{body}"
+        )
+        assert re.search(rf"height:\s*calc\({height} \* var\(--dsu\)\)", body), (
+            f"`.pw[data-size=\"{size}\"]` 的高必须是字面 {height} dsu，实际：{body}"
+        )
+        assert "max-width" not in body and "max-height" not in body, (
+            f"窗的尺寸不许随内容伸缩（不许 max-*）：{body}"
+        )
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert html.count('id="script-confirm"') == 1, (
+        "整个面板窗家族只有一份壳（`#script-confirm`）；三档是同一个壳上的 `data-size`"
+    )
+
+
+def test_the_panel_window_close_key_is_only_for_dismissible_windows() -> None:
+    """关闭键只画在**允许关**的窗上（票 10 / review 修复 C）。
+
+    背景：票 02 顺手给面板窗加了 `#script-confirm-close`，但票 04 / R2 没要——三选一 /
+    遗物 / 结算结果这些面**必须选一个**才能继续。关掉它们只是清 DOM：`panelClose()` 不动
+    `state.script.confirm`，也没有任何路径会重新打开那一面 ⇒ 流程卡死到刷新。
+    判据因此必须落在「谁显式说自己可以关」上，**不许**靠 `data-dialog` 字符串猜（新面一进来
+    猜法就默认把它变成可关，缺陷会以同一形状回来）。
+
+    三段：
+    1. `panelOpen` 有显式的 `dismissible`，关闭键的显隐由它写；缺省 = **可关**（开局页三扇窗
+       与棋盘那两块面直连 `panelOpen`、不传参，屏幕上的关窗键不许因为这一票消失）；
+    2. `scriptConfirm` 是剧本层确认框的**唯一**出口，它缺省 = **不可关**：要关必须显式传
+       `dismissible: true`（撞旧档 / 退出确认这类本来就有「取消」语义的窗）；
+    3. 三处强制选择面（三选一 / 遗物 / 结算结果）的调用**不带**这个标记；静态 markup 的缺省
+       也不画关闭键（`hidden`），JS 没跑起来时窗壳也不会露出一颗能关掉流程的键。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    close_at = html.index('id="script-confirm-close"')
+    close_tag = html[html.rindex("<button", 0, close_at):html.index(">", close_at)]
+    assert re.search(r"\bhidden\b", close_tag), (
+        f"关闭键的静态缺省是**不画**（每扇窗开的时候由 panelOpen 按 dismissible 写）：{close_tag}"
+    )
+
+    panel = (STATIC_DIR / "panel-window.js").read_text(encoding="utf-8")
+    open_source = _function_source(panel, "panelOpen")
+    assert "dismissible" in open_source, (
+        "`panelOpen` 要有显式的 `dismissible` 参数（判据别靠 `data-dialog` 字符串猜）；"
+        f"实际：{open_source}"
+    )
+    assert re.search(r"options\.dismissible !== false", open_source), (
+        "缺省 = 可关：开局页三扇窗与棋盘那两块面直连 `panelOpen`、不传参，关窗键不能没了："
+        f"{open_source}"
+    )
+    assert re.search(r"close\.hidden\s*=\s*!dismissible", open_source), (
+        f"关闭键的显隐要由 `dismissible` 一处写死（不另写第二条 display 补丁）：{open_source}"
+    )
+
+    lobby = (STATIC_DIR / "script-lobby.js").read_text(encoding="utf-8")
+    confirm = _function_source(lobby, "scriptConfirm")
+    assert "dismissible" in confirm, (
+        f"`scriptConfirm` 要把 `dismissible` 转给面板窗（屏幕上的判据只有这一处）：{confirm}"
+    )
+    assert re.search(r"options\.dismissible === true", confirm), (
+        "剧本层的确认框缺省**不可关**（强制选择面是多数）；要关必须显式传 "
+        f"`dismissible: true`：{confirm}"
+    )
+
+    # 3a. 三处强制选择面：不传标记 ⇒ 不画关闭键。
+    loadout = _loadout_source()
+    for name in ("scriptSettlePickDialog", "scriptSettleRelicDialog", "scriptSettleShowResult"):
+        body = _function_source(loadout, name)
+        assert "scriptConfirm({" in body, f"{name} 必须复用剧本层唯一的模态壳"
+        assert "dismissible" not in body, (
+            f"`{name}` 是**强制选择面**（必须选一个才能继续）：不许带可关闭标记，"
+            "否则关掉窗就卡死（`state.script.confirm` 不重开、只能刷新）"
+        )
+
+    # 3b. 本来就有「取消」语义的确认框：显式可关。判据是**统一的**——凡是自己画了「取消」的
+    #     确认框都保留关窗键；只有强制选择面没有（编辑器的删除确认也在这条规则里，不是例外）。
+    for name in ("scriptNewScript", "scriptExitConfirm"):
+        body = _function_source(lobby, name)
+        assert re.search(r"dismissible:\s*true", body), (
+            f"`{name}` 本来就有「取消」语义：显式传 `dismissible: true` 保留关窗键"
+        )
+    editor = (STATIC_DIR / "script-editor.js").read_text(encoding="utf-8")
+    editor_delete = _function_source(editor, "scriptEditorConfirmDelete")
+    assert "scriptConfirm({" in editor_delete, "编辑器的删除确认复用剧本层唯一的模态壳（票 25）"
+    assert re.search(r"dismissible:\s*true", editor_delete), (
+        "编辑器的删除确认也有「取消」（= 什么都不删）：它同样保留关窗键——"
+        "否则「有取消的确认框都能关」这条规则会多出一个说不清的例外"
+    )
+
+    # 3c. 开局页三扇窗（剧本 / 将池 / 录像）：直连 `panelOpen`、不传参 ⇒ 吃上面的缺省（可关）。
+    lobby_page = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    open_lobby = _function_source(lobby_page, "openLobbyWindow")
+    assert "panelOpen(" in open_lobby, "开局页三扇窗共用一个 `panelOpen` 调用点"
+    assert "dismissible" not in open_lobby, (
+        "开局页三扇窗是**可关**的，走 `panelOpen` 的缺省（不传 = 可关）；"
+        f"别在这里和缺省反向：{open_lobby}"
+    )
+
+
+_SCROLL_CONTAINERS = {
+    ".hero-pool": (
+        "将池窗的版本格列表：窗高按 `.pw[data-size=\"L\"]` 写死，版本格多时只有列表滚"
+        "（票 03 把它从开局页正文搬进 L 窗，46vh 随之删掉）"
+    ),
+    ".stage-center .processing": "舞台中央处理区：限两行卡面（253dsu），超出的行自己滚、不折叠",
+    "#t-skills": "牌桌技能栏：给定高度比例，技能多了在这条竖条里滚，不撑高牌桌",
+    ".modal-body": "武将详情检视窗正文槽：标题 / 底栏固定，只有正文滚",
+    ".dialog-body": "询问弹窗正文槽：标题 / 提示条固定，只有正文滚",
+    ".avatar-skills": "武将牌面技能栏：牌面高度固定，技能多时在栏内滚",
+    ".dialog-reveal": "五谷整段结算的持久展示：询问正文收起，亮牌内容在它自己的槽里滚",
+    ".pw-body": "面板窗正文槽：窗高按 data-size 档位写死，正文超出由它自己滚（split 布局时改由列表滚）",
+    ".design-canvas .skilllist": "开局页右栏技能全文区：描述原样印、再长也只在这块里滚（表 C 的判据）",
+    ".design-canvas .pool-chips": "开局页左栏将池摘要的武将名块：名字多时在这块里滚，不改变两栏版式",
+    ".design-canvas .board-stage-scroll": (
+        "棋盘页的棋盘区：stage 高 = 行数 × 格高 + 内边距（自伸缩），层数多到装不下时"
+        "只有这块滚，HUD 与顶栏不动（票 05 spec A7）"
+    ),
+    ".script-editor-list": (
+        "编辑器左栏实体列表：左栏是字面 260dsu，列表吃剩余高度自己滚（票 07 把旧的 42vh 删掉）"
+    ),
+    ".ed-pane": (
+        "编辑器右栏的页签正文：三块 pane 一次只显示一块，各自吃右栏剩余高度并内滚；"
+        "页签头与五个动作键不动（票 07 / spec A10）"
+    ),
+}
+"""滚动区登记表（spec A4）：`style.css` 里每个 `overflow-y: auto` 都必须在这里登记。
+
+值是一句「为什么它可以滚 / 谁管它的高度」——允许随内容变的只有登记过的这几只盒子，
+这就是「版式不因内容变」的机械判据。**新增滚动区必须显式登记**（未登记即红）。
+"""
+
+
+def test_the_scroll_containers_are_registered() -> None:
+    """`style.css` 里每一条 `overflow-y: auto` 都在登记表里；登记表里也不留幽灵条目。"""
+    actual: set[str] = set()
+    for selector, body in _css_rules():
+        if not re.search(r"overflow-y:\s*auto", body):
+            continue
+        actual.update(one.strip() for one in selector.split(","))
+    registered = set(_SCROLL_CONTAINERS)
+    assert actual == registered, (
+        "滚动容器登记表与 style.css 漂移："
+        f"未登记 {sorted(actual - registered)}；登记了但已不是滚动区 {sorted(registered - actual)}"
+    )
+    for selector, why in _SCROLL_CONTAINERS.items():
+        assert isinstance(why, str) and len(why.strip()) >= 12, (
+            f"滚动区登记要写清「为什么它可以滚 / 谁管它的高度」：{selector}"
+        )
+
+
+_CANVAS_VIEW_IDS = ("view-lobby", "view-script-board", "view-script-editor")
+"""三个 page view 吃设计画布（spec A1）；牌桌页与回放页不在其中（R8）。"""
+
+_VH_VW_GEOMETRY = re.compile(r"\b(?:vh|vw)\b")
+"""几何属性里不许出现的视口单位（`line-height` 不在此列）。"""
+
+
+def test_the_design_canvas_views_avoid_viewport_heights() -> None:
+    """三个 page view 是 16:9 设计画布，画布内的几何只读 dsu / cqw / 壳内百分比（spec A1 / A4）。
+
+    今天的三个 view 是流式文档（`.page-topbar: 6.2vh`、`.page-body` 居中 1180），窗口一换比例
+    就重排版。判据分三段：
+
+    1. 壳本身交出 16:9（`aspect-ratio`）、按**壳宽**算的 `--dsu`（`container-type: inline-size`
+       + `100cqw`）与 `overflow: hidden`；壳的宽度公式是整个判据里**唯一允许**读视口宽高的地方
+       （与 `.table-shell` 同姿态：16:9 壳本质就是视口的一个函数）；
+    2. 只有开局 / 棋盘 / 编辑器挂这个类；回放页与牌桌页不挂（回放页整体不动，R8）；
+    3. 画布作用域内的几何规则（宽 / 高 / min-max / inset / top-right-bottom-left / flex）
+       一律不许出现 `vh` / `vw`，正文区必须是弹性区（`flex:1 1 auto; min-height:0; max-width:none`）。
+    """
+    shell = _css_rule(".design-canvas")
+    assert re.search(r"width:\s*min\(100vw, calc\(100vh \* 16 / 9\)\)", shell), (
+        f"设计画布必须是吃满视口的 16:9 壳（与牌桌壳同一条宽度公式）：{shell}"
+    )
+    for needle in (
+        "aspect-ratio: 16 / 9",
+        "container-type: inline-size",
+        "--dsu: calc(100cqw / 1600)",
+        "overflow: hidden",
+        "display: flex",
+        "flex-direction: column",
+    ):
+        assert needle in shell, f"设计画布规则体缺件 `{needle}`：{shell}"
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    for view in _CANVAS_VIEW_IDS:
+        tag = re.search(rf'<main[^>]*\bid="{view}"[^>]*>', html)
+        assert tag is not None, f"index.html 里找不到 <main id=\"{view}\">"
+        assert "design-canvas" in tag.group(0), (
+            f"`#{view}` 必须挂设计画布类（opt-in 的类，不能挂在 `.page-view` 上）：{tag.group(0)}"
+        )
+    for view in ("view-table", "view-replay"):
+        tag = re.search(rf'<main[^>]*\bid="{view}"[^>]*>', html)
+        assert tag is not None, f"index.html 里找不到 <main id=\"{view}\">"
+        assert "design-canvas" not in tag.group(0), (
+            f"`#{view}` 不吃设计画布（牌桌页有自己 16:9 的壳、回放页继续吃流式口径，R8）"
+        )
+
+    # 顶栏从 6.2vh 改成 dsu；`min-height` 必须一并覆盖，否则 6.2vh 会在高视口下偷偷赢。
+    # 乘法顺序是 `var(--dsu) * 56`：`calc(56 * var(--dsu))` 这个字面量归烟测 U1-02c3 的
+    # 「0.63 版 56×79 卡面覆盖已删」全文判据所有（同值不同物，别让两条判据互相踩）。
+    topbar = _css_rule(".design-canvas .page-topbar")
+    assert re.search(r"height:\s*calc\(var\(--dsu\) \* 56\)", topbar), (
+        f"画布内顶栏 = 56 dsu（原型 `.topbar`）：{topbar}"
+    )
+    assert re.search(r"min-height:\s*0(?![.\d])", topbar), (
+        f"画布内顶栏的 min-height 必须被 dsu 口径覆盖（原来是 6.2vh）：{topbar}"
+    )
+    body_rule = _css_rule(".design-canvas .page-body")
+    for needle in ("flex: 1 1 auto", "min-height: 0", "max-width: none"):
+        assert needle in body_rule, (
+            f"`.page-body` 在画布里是弹性正文区（不再居中 1180px）：缺 `{needle}`：{body_rule}"
+        )
+
+    scanned = 0
+    for selector, body in _css_rules():
+        if selector == ".design-canvas":
+            continue  # 壳的宽度公式要读视口（见 docstring 第 1 条），只此一处豁免。
+        if ".design-canvas" not in selector and not any(
+            view in selector for view in _CANVAS_VIEW_IDS
+        ):
+            continue
+        scanned += 1
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop, value = declaration.split(":", 1)
+            if prop.strip() not in {
+                "width", "height", "min-width", "min-height", "max-width", "max-height",
+                "inset", "top", "bottom", "left", "right", "flex", "flex-basis",
+            }:
+                continue
+            assert not _VH_VW_GEOMETRY.search(value), (
+                f"画布内的几何规则不许读视口单位（`{prop.strip()}:{value}`）——"
+                f"版式要相对壳宽，选择器：{selector}"
+            )
+    assert scanned >= 2, (
+        "画布作用域里至少要能看到顶栏与正文两条几何规则（否则这条判据形同虚设）"
+    )
+
 
 
 def test_the_boss_lose_four_is_automatic_and_has_no_confirmation() -> None:
@@ -10238,3 +11174,739 @@ def test_the_editor_smoke_library_is_a_valid_script_library() -> None:
     assert [seat.template for seat in story.enemies] == ["tpl.grunt", "tpl.brute"], (
         "tpl.grunt 被共享引用：删它之后校验面板必须立刻出现悬空条目"
     )
+
+
+# ---------------------------------------------------------------------------
+# ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）
+#
+# 三层判据，各自落在唯一真源上：
+# 1. **一次委托**：`skill-tip.js` 里对浮层只挂一组 document 级监听（mouseover /
+#    mousemove / mouseout），宿主侧只靠 `data-skill` 属性——没有逐节点监听这回事。
+# 2. **正文只来自目录行的 `desc`**（spec §8 R7）：真目录行喂进 `skillTipShow`，逐字断言；
+#    没有目录行 ⇒ 这一层不弹（票 08 拍板的读法），前端零正则、零 `slice`、零第二份文案。
+# 3. **翻转判据是纯函数**：`skillTipPlace(...)` 吃数字（设计单位），喂四种情形到 node 里
+#    直接算——右上 / 左下 / 右下角 / **窗内宿主**（bounds = 那扇窗）。
+# 行为（覆盖七处面 / 重绘后仍工作 / 收起 / 无目录行不弹）归烟测 `UI1-30..33`。
+# ---------------------------------------------------------------------------
+
+_SKILL_TIP_JS = STATIC_DIR / "skill-tip.js"
+_SKILL_TIP_CSS_SELECTOR = ".skilltip"
+_DESCRIPTIONS_JSON = Path("tools") / "sgs_web" / "descriptions.json"
+
+
+def _skill_tip_rule() -> str:
+    """`.skilltip` **自己**那条规则（它的选择器也出现在共用 `--f*` 的分组里，别取错）。
+
+    取法：按逗号拆选择器，只要 `.skilltip` 单独出现在某一组里就算；再挑带 `position:`
+    的那条（浮层的位置 / 尺寸 / 层级住这一条）。找不到 / 多于一条都算红。
+    """
+    groups = [
+        body
+        for selector, body in _css_rules()
+        if _SKILL_TIP_CSS_SELECTOR in [one.strip() for one in selector.split(",")]
+    ]
+    assert groups, f"style.css 里找不到 `{_SKILL_TIP_CSS_SELECTOR}` 自己的规则"
+    positional = [body for body in groups if re.search(r"(?m)^\s*position:", body)]
+    assert len(positional) == 1, (
+        f"`{_SKILL_TIP_CSS_SELECTOR}` 的位置规则应当只有一条：{groups}"
+    )
+    return positional[0]
+
+
+def _skill_tip_source() -> str:
+    assert _SKILL_TIP_JS.exists(), (
+        "票 06 的浮层必须是单独一份脚本 `tools/sgs_web/static/skill-tip.js`（票面 Touches）"
+    )
+    return _SKILL_TIP_JS.read_text(encoding="utf-8")
+
+
+def test_the_skill_tip_is_one_delegated_overlay() -> None:
+    """一层全局浮层 + **一组** document 监听（票面「一次委托」）。
+
+    判据分五段，全部是可核的机械事实：
+
+    1. 脚本在清单里、且晚于整备面（它读目录行）/早于 `main.js`；
+    2. `index.html` 里浮层层**只有一个**节点（`id="skilltip"`），住在所有 `<main>` 之外、
+       `hidden` + `aria-hidden="true"`，里面没有静态子节点（内容全由 JS 按载荷填，避免
+       第二份静态文案）；
+    3. `skill-tip.js` 里 `addEventListener` **恰好三条**，都是 document 级
+       （mouseover / mousemove / mouseout）；没有 `mouseenter` / `mouseleave`（逐节点监听
+       那一套），宿主靠 `closest("[data-skill]")` 找；
+    4. 宿主侧两文件（整备面 / 棋盘）里没有浮层的 hover 入口——只有收起的 `skillTipHide`；
+    5. CSS：`pointer-events: none`（不吃鼠标）、`position: fixed`、`--dsu` 自带、
+       宽 340dsu、`z-index` 高于面板窗。
+    """
+    srcs = _script_srcs()
+    assert "skill-tip.js" in srcs, f"skill-tip.js 不在 index.html 的脚本清单里：{srcs}"
+    at = srcs.index("skill-tip.js")
+    assert srcs.index("script-loadout.js") < at < srcs.index("main.js"), (
+        "浮层要读目录行（`script-loadout.js` 之后），仍由 `main.js` 收尾"
+    )
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert html.count('id="skilltip"') == 1, "浮层层只有一个节点（一层，不每个宿主一份）"
+    tip_at = html.index('id="skilltip"')
+    assert tip_at > html.rindex("</main>"), "浮层住在所有 `<main>` 之外（与面板窗同一个姿势）"
+    tag_end = html.index(">", tip_at)
+    tag = html[tip_at:tag_end]
+    assert "hidden" in tag and 'aria-hidden="true"' in tag, f"浮层的静态属性：{tag}"
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+    tip_element = _element(builder.root, element_id="skilltip")
+    assert tip_element is not None, "index.html 里找不到浮层节点 `#skilltip`"
+    assert tip_element["children"] == [], (
+        "浮层里不放静态子节点：内容全部按载荷填（不许抄第二份文案）"
+    )
+    shell = html[tip_at:html.index("<script", tip_at)]
+    assert "<svg" not in shell and "<img" not in shell, (
+        "浮层不用 svg / img（静态标签白名单：M7-21b / M7-25b 会扫到这一段）"
+    )
+
+    source = _skill_tip_source()
+    listeners = re.findall(r'addEventListener\("([\w-]+)"', source)
+    assert sorted(listeners) == ["mousemove", "mouseout", "mouseover"], (
+        "浮层只挂**一组** document 级监听（mouseover / mousemove / mouseout）："
+        f"{listeners}"
+    )
+    assert source.count("addEventListener(") == 3, (
+        "多出来的监听就是逐节点那一套的苗头（票面：一次委托）"
+    )
+    assert source.count("document.addEventListener(") == 3, (
+        "三条都挂在 document 上（委托，不挂宿主）"
+    )
+    for per_host in ("mouseenter", "mouseleave"):
+        assert not re.search(rf'addEventListener\("{per_host}"', source), (
+            f"不许用 {per_host}（逐节点监听：行数一多就是 O(n) 个监听）"
+        )
+    assert 'closest("[data-skill]")' in source, "宿主靠 `closest(\"[data-skill]\")` 找"
+    assert 'closest(".pw")' in source, "窗内宿主靠 `closest(\".pw\")` 认那扇窗（贴窗边翻）"
+
+    for name in ("script-loadout.js", "script-board.js"):
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert "skillTipShow(" not in text and "skillTipMove(" not in text, (
+            f"{name} 不许调浮层的 hover 入口（入口只有委托那一组监听）"
+        )
+        for line in text.splitlines():
+            if "addEventListener(\"mouse" in line:
+                assert "skillTip" not in line, (
+                    f"{name} 里不许给宿主挂逐节点的浮层监听：{line.strip()}"
+                )
+
+    tip_rule = _skill_tip_rule()
+    assert re.search(r"pointer-events:\s*none", tip_rule), (
+        f"浮层不许吃鼠标事件（spec A8 / 票面「不许做」）：{tip_rule}"
+    )
+    assert re.search(r"position:\s*fixed", tip_rule), "浮层是全局一层（fixed，不随某个滚动区）"
+    assert re.search(r"width:\s*calc\(340 \* var\(--dsu\)\)", tip_rule), (
+        f"浮层宽 340dsu（原型 `.skilltip` 同值）：{tip_rule}"
+    )
+    assert re.search(r"(?m)^\s*--dsu:", tip_rule), (
+        "浮层住在所有 `<main>` 之外 ⇒ `--dsu` 必须自带（与 `.script-confirm` 同一条公式）"
+    )
+    tip_z = re.search(r"z-index:\s*(\d+)", tip_rule)
+    window_z = re.search(r"z-index:\s*(\d+)", _css_rule(".script-confirm"))
+    assert tip_z is not None and window_z is not None and int(tip_z.group(1)) > int(window_z.group(1)), (
+        "浮层的 z-index 必须高于面板窗（票面：z-index 高于面板窗）"
+    )
+
+
+def _run_skill_tip_probe(source: str, name: str) -> dict:
+    """跑一份 node 探针（`cwd` = 仓根，探针自己 `readFileSync` 真脚本），拿它的 JSON 读数。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / name
+        probe.write_text(source, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"{name} 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+_SKILL_TIP_PAYLOAD_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+/* 载荷 = 一份**真目录行**（形状与 `sgs_web/script_runs.py:_catalog_item` 下发的一致），
+ * 外加一份快照：同 id 的技能对象里放的是**未裁**全文（票 08 要断的就是浮层不读它）。 */
+const payload = __PAYLOAD__;
+
+/* 最小 DOM：浮层的形状口只有 `$("skilltip")` 与 `document.createElement`（见 `skillTipLine`）。 */
+const tip = {
+  hidden: true, className: "", textContent: "", children: [], style: {},
+  appendChild(child) { this.children.push(child); return child; },
+  set innerHTML(value) { if (value === "") this.children = []; },
+  get innerHTML() { return ""; },
+};
+const icon = (tag) => ({
+  tag, className: "", textContent: "", children: [], style: {},
+  appendChild(child) { this.children.push(child); return child; },
+});
+const document = { addEventListener() {}, createElement: icon };
+const context = vm.createContext({
+  console, JSON, Object, Array, Number, String, Math,
+  document,
+  $: (id) => (id === "skilltip" ? tip : null),
+  state: payload.state,
+  /* 名字 / 类别的读口是整备面那一份（`scriptItemRow` 真实现读的也是同一个 `catalog`）。 */
+  scriptItemRow: (id) => {
+    const raw = payload.catalog[id];
+    if (!raw) return { id: String(id), name: String(id), kind: "skill", rarity: null, price: null };
+    return {
+      id: String(id),
+      name: String(raw.name || id),
+      kind: raw.kind === "relic" ? "relic" : "skill",
+      rarity: raw.rarity || null,
+      price: Number.isInteger(raw.price) ? raw.price : null,
+    };
+  },
+  scriptPriceText: (row) => (row && row.price ? `${row.price} 铜钱` : ""),
+  SCRIPT_ITEM_KIND_LABELS: { skill: "技能", relic: "遗物" },
+});
+vm.runInContext(readFileSync("tools/sgs_web/static/skill-tip.js", "utf8"), context, {
+  filename: "skill-tip.js",
+});
+
+const flatten = (node, out = []) => {
+  for (const child of node.children) {
+    out.push([child.className, child.textContent]);
+    flatten(child, out);
+  }
+  return out;
+};
+const show = (skillId) => {
+  tip.children = [];
+  tip.hidden = true;
+  const returned = vm.runInContext(`skillTipShow(${JSON.stringify(skillId)}, {})`, context);
+  const parts = flatten(tip);
+  const desc = parts.filter(([className]) => className === "tt-desc");
+  return {
+    returned: returned === null ? null : returned.desc,
+    visible: tip.hidden !== true,
+    desc: desc.length ? desc[0][1] : null,
+    text: parts.map(([, text]) => text).join(" | "),
+  };
+};
+process.stdout.write(JSON.stringify({
+  withRow: show(payload.withRowId),
+  withoutRow: show(payload.withoutRowId),
+  rowWithoutDesc: show(payload.rowWithoutDescId),
+}));
+"""
+
+
+def _skill_tip_payload_probe(payload: dict) -> dict:
+    """把 `payload` 嵌进探针源码跑一遍（同一份脚本，换载荷 = 换读数）。"""
+    source = _SKILL_TIP_PAYLOAD_PROBE.replace(
+        "__PAYLOAD__", json.dumps(payload, ensure_ascii=False)
+    )
+    return _run_skill_tip_probe(source, "skill_tip_payload_probe.mjs")
+
+
+def test_the_skill_tip_reads_the_description_from_the_payload() -> None:
+    """正文只来自目录行的 `desc`（spec §8 R7）——判据走**真载荷路径**，不是 grep 源码。
+
+    喂给 `skillTipShow` 的是一份**真目录行**：`id / name / kind / rarity / price / desc`，
+    其中 `desc` 取自服务端同一条口（`display_skill_description`），同 id 的未裁全文
+    （`skill_description`，带「本仓…：」注记）同时放进快照。四条读数：
+
+    1. **有目录行** ⇒ 浮层显示，正文**逐字等于**那条 `desc`，注记一个字都不出现；
+    2. **没有目录行**（但有快照里的未裁全文）⇒ 这一层**不弹**：`skillTipShow` 返回 `null`，
+       `#skilltip` 仍是 hidden，正文一个字都不印（票 08 拍板的读法，见 `## Answer`）；
+    3. **有目录行但 `desc` 空** ⇒ 只印名字 / 类别，不印正文（也不编「暂无描述」）；
+    4. **反证**：只把目录行的 `desc` 换掉，浮层正文必须逐字跟着换——硬编码 / 从别处抄
+       都会让这条红。
+
+    源码侧的否定判据只留"不许裁 / 不许有第二份文案"那一半：没有 `本仓`、没有
+    `slice` / `replace` / 正则、没有「暂无描述」，也不读快照里那条未裁的描述。
+    """
+    for entry in (REPO_ROOT / "tools", REPO_ROOT / "src"):
+        if str(entry) not in sys.path:
+            sys.path.insert(0, str(entry))
+    from sgs_web.descriptions import display_skill_description, skill_description
+    from sgs_web.script_runs import _skill_label
+
+    skill_id = "hero.liubei.rende"
+    raw_text = skill_description(skill_id)
+    trimmed = display_skill_description(skill_id)
+    assert "本仓" in raw_text, f"取样技能 `{skill_id}` 的原文应当带实现注记（裁切口才有读数）"
+    assert trimmed and "本仓" not in trimmed, f"服务端裁过的 `desc` 不该带注记：{trimmed!r}"
+
+    row = {
+        "name": _skill_label(skill_id),
+        "kind": "skill",
+        "rarity": "rare",
+        "price": 12,
+        "desc": trimmed,
+    }
+    no_desc_id = "hero.sample.nodesc"
+    bare_id = "hero.sample.norow"
+    no_desc_row = {"name": "只有名字的技能", "kind": "skill", "rarity": "common",
+                   "price": 6, "desc": ""}
+    payload = {
+        "withRowId": skill_id,
+        "withoutRowId": bare_id,
+        "rowWithoutDescId": no_desc_id,
+        "catalog": {skill_id: dict(row), no_desc_id: dict(no_desc_row)},
+        "state": {
+            "script": {"board": {"catalog": {skill_id: dict(row),
+                                             no_desc_id: dict(no_desc_row)}}},
+            "view": {"skills": [
+                {"skill_id": skill_id, "name": row["name"],
+                 "description": raw_text},
+                {"skill_id": bare_id, "name": "没有目录行的技能",
+                 "description": "未裁全文（本仓注记：这一段只能由服务端裁）"},
+            ]},
+        },
+    }
+    first = _skill_tip_payload_probe(payload)
+    assert first["withRow"]["visible"] is True, "有目录行 ⇒ 浮层显示"
+    assert first["withRow"]["desc"] == trimmed, (
+        f"浮层正文必须逐字等于目录行的 `desc`：期望 {trimmed!r}，实得 {first['withRow']['desc']!r}"
+    )
+    assert "本仓" not in first["withRow"]["text"], "注记不许印上屏（裁切只在服务端）"
+
+    assert first["withoutRow"]["visible"] is False, (
+        "没有目录行 ⇒ 这一层不弹（票 08 的读法：绝不退回未裁的描述）"
+    )
+    assert first["withoutRow"]["returned"] is None, "`skillTipShow` 无目录行时返回 `null`"
+    assert first["withoutRow"]["desc"] is None, "无目录行时不许印正文"
+    assert "本仓" not in first["withoutRow"]["text"], "无目录行时也不许露出未裁全文"
+
+    assert first["rowWithoutDesc"]["visible"] is True, "目录行在（只是没有 desc）⇒ 名字照印"
+    assert first["rowWithoutDesc"]["desc"] is None, "没有 `desc` 就不印正文"
+
+    # 反证：只换目录行的 `desc`，浮层正文必须逐字跟着换（否则说明它没在读载荷）。
+    changed = "换过的正文，只可能来自载荷"
+    for holder in (payload["catalog"][skill_id], payload["state"]["script"]["board"]["catalog"][skill_id]):
+        holder["desc"] = changed
+    second = _skill_tip_payload_probe(payload)
+    assert second["withRow"]["desc"] == changed != first["withRow"]["desc"], (
+        f"换掉 `desc` 之后浮层正文必须跟着换：{second['withRow']['desc']!r}"
+    )
+
+    source = _skill_tip_source()
+    assert re.search(r"\bdesc\b", source), "目录行的 `desc` 是正文的唯一来源"
+    assert "本仓" not in source, (
+        "前端不许出现注记标记 `本仓`（裁切规则的唯一实现在 `descriptions.py`，浮层不抄）"
+    )
+    for banned in ("slice(", "substr", "substring(", "replace(", "match(", "RegExp", "trim("):
+        assert banned not in source, (
+            f"前端不许裁 / 拼描述：`{banned}` 出现在 skill-tip.js 里"
+        )
+    assert "state.view" not in source and ".description" not in source, (
+        "浮层不许读快照里那条未裁的描述（票 08 删掉的兜底）"
+    )
+
+    descriptions = json.loads(_DESCRIPTIONS_JSON.read_text(encoding="utf-8"))
+    texts = list((descriptions.get("skills") or {}).values())
+    long_texts = [text for text in texts if isinstance(text, str) and len(text) >= 20]
+    assert long_texts, "descriptions.json 里应当有技能全文（票 01 的数据源）"
+    copied = [text[:20] for text in long_texts if text[:20] in source]
+    assert not copied, f"浮层抄了描述文案：{copied[:2]}"
+
+    assert "SCRIPT_ITEM_KIND_LABELS" in source, (
+        "类别文案复用整备面那张表（不写第二份「技能 / 遗物」）"
+    )
+    assert "scriptPriceText(" in source, "价格文案复用整备面那个口（不写第二份「N 铜钱」）"
+    assert "暂无描述" not in source, (
+        "「暂无描述」是服务端 `descriptions.py` 的措辞，前端不自己编兜底"
+    )
+
+
+_SKILL_TIP_PLACE_PROBE = """
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+// 真浏览器里 `document` 一定有：模块顶层挂的就是那三条委托监听，桩一条就够。
+const added = [];
+const document = { addEventListener: (name, fn) => added.push([name, fn]) };
+const context = vm.createContext({ console, document });
+vm.runInContext(readFileSync("tools/sgs_web/static/skill-tip.js", "utf8"), context, {
+  filename: "skill-tip.js",
+});
+const cases = {
+  // 右上：越右边 ⇒ 翻到光标左侧（纵向照常落在光标下方）
+  right: [1500, 400, 340, 220, { width: 1600, height: 900 }],
+  // 左下：越下边 ⇒ 翻到光标上方（横向照常落在光标右侧）
+  bottom: [300, 860, 340, 220, { width: 1600, height: 900 }],
+  // 右下角：两边都越 ⇒ 两边都翻
+  corner: [1580, 880, 340, 220, { width: 1600, height: 900 }],
+  // 窗内宿主：bounds = 那扇窗（S 档 480×300 dsu）⇒ 同一光标在壳里不翻、在窗里必须翻
+  window: [420, 60, 340, 180, { width: 480, height: 300 }],
+  sameInShell: [420, 60, 340, 180, { width: 1600, height: 900 }],
+};
+const out = {};
+for (const [name, args] of Object.entries(cases)) {
+  out[name] = vm.runInContext(
+    `skillTipPlace(${args.map((arg) => JSON.stringify(arg)).join(", ")})`,
+    context,
+  );
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _skill_tip_place_probe() -> dict:
+    """跑真 `skill-tip.js`（node vm），拿 `skillTipPlace` 的四种情形读数。"""
+    return _run_skill_tip_probe(_SKILL_TIP_PLACE_PROBE, "skill_tip_place_probe.mjs")
+
+
+def test_the_skill_tip_flips_at_the_shell_and_the_window_edge() -> None:
+    """翻转判据是**纯函数**（吃数字，不量 DOM）：两种边各自翻、两边都越就两边翻。
+
+    期望值全部由票面的三条规则手算（光标偏移 14 / 18 dsu、内缩 8 dsu）：
+
+    - 右上（光标 x=1500, y=400，浮层 340×220，壳 1600×900）⇒ x 翻到左：
+      1500 − 14 − 340 = 1146；y = 400 + 18 = 418；
+    - 左下（光标 300, 860）⇒ y 翻到上：860 − 18 − 220 = 622；x = 300 + 14 = 314；
+    - 右下角（1580, 880）⇒ 两边都翻：1226 / 642；
+    - 窗内宿主（S 窗 480×300，光标相对窗 420, 60，浮层 340×180）⇒ 按**窗**翻：
+      420 − 14 − 340 = 66（壳 1600 宽时同一光标不翻，x 仍是 434）——这一对读数就是
+      "bounds 不是永远等于壳"的判据；
+    - 五种情形都不越出 bounds（含 8dsu 内缩）。
+    """
+    probe = _skill_tip_place_probe()
+    cases = {
+        "right": ((1500, 400, 340, 220, (1600, 900)), (1146, 418)),
+        "bottom": ((300, 860, 340, 220, (1600, 900)), (314, 622)),
+        "corner": ((1580, 880, 340, 220, (1600, 900)), (1226, 642)),
+        "window": ((420, 60, 340, 180, (480, 300)), (66, 78)),
+        "sameInShell": ((420, 60, 340, 180, (1600, 900)), (434, 78)),
+    }
+    for name, (args, expected) in cases.items():
+        parsed = probe[name]
+        assert (parsed["x"], parsed["y"]) == expected, (
+            f"{name} 的落点不对：期望 {expected}，实得 ({parsed['x']}, {parsed['y']})"
+        )
+        _, _, tip_w, tip_h, bounds = args
+        assert parsed["x"] >= 8 and parsed["y"] >= 8, f"{name} 越出 8dsu 内缩：{parsed}"
+        assert parsed["x"] + tip_w <= bounds[0] - 8, f"{name} 越出右边界：{parsed}"
+        assert parsed["y"] + tip_h <= bounds[1] - 8, f"{name} 越出下边界：{parsed}"
+    assert probe["window"]["x"] != probe["sameInShell"]["x"], (
+        "同一光标在窗里翻、在壳里不翻——两条 bounds 必须真的分开"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ui-one-screen 票 07：编辑器两栏定幅 + 右栏三页签（spec §5 A10）
+#
+# 判据分两层：
+# 1. **结构**（`index.html`）：左 `.ed-left` / 右 `.ed-right` 是同一个 flex 行里的**直接**
+#    兄弟；右栏 = 标题 + 五键 + 三个页签键 + 三块 `.ed-pane`（`data-pane` = detail / layer /
+#    valid），初始**只有一块** pane 不带 `hidden`；三块 pane 各自装着今天的挂载点 id
+#    （`#script-editor-form` / `#script-editor-layer` / `#script-editor-errors` 一个都不改名）。
+# 2. **样式**（`style.css`）：左栏字面 260dsu、右栏弹性；页签头固定高度；三块 pane 各自内滚，
+#    并与左栏实体列表一起登记进票 02 的滚动区表（`_SCROLL_CONTAINERS`，spec A4）。
+#
+# 页签互斥的**行为**归烟测 `UI1-41`；"跳转同时切页签"的行为归 `UI1-40`，其静态判据在本节
+# 的第二条测试（同一个函数体里既有页签切换又有字段定位）。
+# ---------------------------------------------------------------------------
+
+_EDITOR_TABS = ("detail", "layer", "valid")
+"""右栏三页签的键（票面：详情 / 大节 / 校验）。"""
+
+
+def _editor_view() -> dict:
+    """`index.html` 里 `#view-script-editor` 的浅树（结构判据走树，不走字符串切片）。"""
+    builder = _TreeBuilder()
+    builder.feed(INDEX_HTML.read_text(encoding="utf-8"))
+    builder.close()
+    view = _element(builder.root, element_id="view-script-editor")
+    assert view is not None, "index.html 里找不到编辑器视图 `#view-script-editor`"
+    return view
+
+
+def _descendants(node: dict) -> list[dict]:
+    found = [node]
+    for child in node["children"]:
+        found.extend(_descendants(child))
+    return found
+
+
+def _by_class(node: dict, name: str) -> list[dict]:
+    return [one for one in _descendants(node) if name in (one["attrs"].get("class") or "").split()]
+
+
+def test_the_editor_right_column_is_three_tabs() -> None:
+    """spec §5 A10 / 票面「目标形状」：两栏定幅 + 右栏三页签（一次只显示一块、各自内滚）。
+
+    结构判据（`index.html`）：
+
+    - `.ed-left` / `.ed-right` 是 `.script-editor-body` 的**直接**子节点（同一个 flex 行），
+      左栏在前、右栏在后；
+    - 右栏里三个页签键的 `data-tab` 恰好是 detail / layer / valid（文案 详情 / 大节 / 校验），
+      三块 `.ed-pane` 的 `data-pane` 与之一一对应、都是页签头的**直接**后继；
+    - 初始只有一块 pane 不带 `hidden`（详情）——另外两块静态就是藏着的（互斥不靠脚本首帧）；
+    - 三块 pane 各自装着今天的挂载点：详情 = `#script-editor-form` + `#script-editor-tree`；
+      大节 = `#script-editor-layer`（网格 / 图 / 边列表都在里面）；校验 = `#script-editor-validation`
+      （`#script-editor-errors` 的逐条红字 + `loc`）。**校验确实住在页签里**——这是票面
+      「校验从表单下方搬进页签」的静态判据，原红字 / 双按钮 / loc 三条判据一条不动。
+
+    样式判据（`style.css` + 登记表）：
+
+    - `.ed-left` 的宽是字面 `flex: 0 0 calc(260 * var(--dsu))`（不随内容变），右栏 `1 1 auto`
+      且两侧 `min-height: 0`（内滚的高度前提）；
+    - 页签头固定（`flex: 0 0 calc(40 * var(--dsu))`），三块 pane 是 `flex: 1 1 auto` +
+      `min-height: 0` + `overflow-y: auto`；左栏实体列表同样是 `overflow-y: auto`；
+    - `.ed-pane` 与 `.script-editor-list` 都在票 02 的登记表里（未登记即红）；
+    - 旧的整页流式版式（`grid-template-columns: 260px` / 列表 `max-height: 42vh`）已清掉。
+    """
+    view = _editor_view()
+
+    # ---- 1. 两栏：同一条 flex 行里的直接兄弟 ----
+    body = _element(view, class_name="script-editor-body")
+    assert body is not None, "编辑器正文要有 `.script-editor-body` 这个两栏容器"
+    body_rule = _css_rule(".script-editor-body")
+    assert re.search(r"display:\s*flex", body_rule), (
+        f"两栏必须是 flex 行（不再是 grid 260px 的流式两栏）：{body_rule}"
+    )
+    assert "grid-template-columns" not in body_rule, f"旧的网格列定义要清掉：{body_rule}"
+    left = _by_class(view, "ed-left")
+    right = _by_class(view, "ed-right")
+    assert len(left) == 1 and len(right) == 1, (
+        f"左 / 右栏各只有一个：`.ed-left`={len(left)} `.ed-right`={len(right)}"
+    )
+    assert left[0]["tag"] == "section" and right[0]["tag"] == "section", (
+        "两栏沿用 `.panel` 的 section（票 25 的形状）"
+    )
+    direct = body["children"]
+    assert left[0] in direct and right[0] in direct, (
+        "`.ed-left` / `.ed-right` 必须是 `.script-editor-body` 的直接子节点（同一行两栏）"
+    )
+    assert direct.index(left[0]) < direct.index(right[0]), "左栏在前、右栏在后"
+
+    # ---- 2. 右栏三页签：键 /  pane / 初始互斥 ----
+    direct = right[0]["children"]
+    tabs = _by_class(right[0], "ed-tab")
+    assert [tab["attrs"].get("data-tab") for tab in tabs] == list(_EDITOR_TABS), (
+        f"三个页签键依次是详情 / 大节 / 校验：{[tab['attrs'] for tab in tabs]}"
+    )
+    assert all(tab["tag"] == "button" for tab in tabs), "页签键是按钮（键盘也能切）"
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tabs_html = html[
+        html.index('class="ed-tabs"') : html.index('id="script-editor-pane-detail"')
+    ]
+    for label in ("详情", "大节", "校验"):
+        assert f">{label}</button>" in tabs_html, (
+            f"页签键的文案要是「{label}」（票面三页签）：{tabs_html}"
+        )
+    panes = _by_class(right[0], "ed-pane")
+    assert [pane["attrs"].get("data-pane") for pane in panes] == list(_EDITOR_TABS), (
+        f"三块 pane 与页签一一对应：{[pane['attrs'] for pane in panes]}"
+    )
+    assert all(pane in direct for pane in panes), (
+        "三块 pane 是右栏的直接子节点：页签头固定、只有 pane 吃剩余高度并内滚"
+    )
+    assert [direct.index(pane) for pane in panes] == list(
+        range(direct.index(panes[0]), direct.index(panes[0]) + 3)
+    ), "三块 pane 紧挨着排在页签头之后"
+    tabs_at = next(at for at, node in enumerate(direct) if "ed-tabs" in (
+        node["attrs"].get("class") or "").split())
+    assert tabs_at < direct.index(panes[0]), "页签头在三块 pane 之前（表头固定不滚）"
+
+    hidden = [pane["attrs"].get("data-pane") for pane in panes if "hidden" in pane["attrs"]]
+    assert hidden == ["layer", "valid"], (
+        f"初始只有「详情」一块可见（另两块静态带 hidden）：实得隐藏 {hidden}"
+    )
+
+    pane_ids = {
+        pane["attrs"]["data-pane"]: _subtree_ids(pane) for pane in panes
+    }
+    assert {"script-editor-form", "script-editor-tree"} <= pane_ids["detail"], (
+        f"「详情」页签 = 今天的表单 + 剧本组装树：{sorted(pane_ids['detail'])}"
+    )
+    assert {"script-editor-layer", "script-editor-graph", "script-editor-edges"} <= (
+        pane_ids["layer"]
+    ), f"「大节」页签 = 今天的网格 / 图 / 边列表：{sorted(pane_ids['layer'])}"
+    assert {"script-editor-validation", "script-editor-errors"} <= pane_ids["valid"], (
+        "「校验」页签 = 今天的校验面板（红字 + loc 原样住在里面）："
+        f"{sorted(pane_ids['valid'])}"
+    )
+    assert "script-editor-form" not in pane_ids["layer"] | pane_ids["valid"], (
+        "表单只在「详情」里（旧位置——右栏把正文竖着排成一列——已清干净）"
+    )
+    assert "script-editor-errors" not in pane_ids["detail"], "校验面板搬出了表单下方"
+
+    # ---- 3. 样式：定幅 / 固定页签头 / 内滚 ----
+    left_rule = _css_rule(".ed-left")
+    assert re.search(r"flex:\s*0 0 calc\(260 \* var\(--dsu\)\)", left_rule), (
+        f"左栏是字面 260 设计单位（不随内容变）：{left_rule}"
+    )
+    for needle in ("display: flex", "flex-direction: column", "min-height: 0"):
+        assert needle in left_rule, f"左栏是定宽列且列表能内滚：缺 `{needle}`：{left_rule}"
+    right_rule = _css_rule(".ed-right")
+    for needle in ("flex: 1 1 auto", "min-width: 0", "min-height: 0"):
+        assert needle in right_rule, f"右栏弹性且不许撑破画布：缺 `{needle}`：{right_rule}"
+    tabs_rule = _css_rule(".ed-tabs")
+    assert re.search(r"flex:\s*0 0 calc\(40 \* var\(--dsu\)\)", tabs_rule), (
+        f"页签头是固定高度（40 dsu，与原型 `.ed-tabs` 同值）：{tabs_rule}"
+    )
+    assert not re.search(r"overflow(?:-y)?:\s*auto", tabs_rule), "页签头不滚（滚的是 pane）"
+    pane_rule = _css_rule(".ed-pane")
+    for needle in ("flex: 1 1 auto", "min-height: 0", "overflow-y: auto"):
+        assert needle in pane_rule, f"三块 pane 各自吃剩余高度并内滚：缺 `{needle}`：{pane_rule}"
+    list_rule = _css_rule(".script-editor-list")
+    assert re.search(r"overflow-y:\s*auto", list_rule), (
+        f"左栏实体列表是唯一内滚的列表：{list_rule}"
+    )
+    assert not re.search(r"(?:max-)?height:\s*[^;]*vh", list_rule), (
+        f"列表高度不许读视口（设计画布内只吃 dsu / flex）：{list_rule}"
+    )
+    assert ".ed-pane" in _SCROLL_CONTAINERS, (
+        "三块 pane 是新的滚动区，必须在票 02 的 `_SCROLL_CONTAINERS` 里登记（spec A4）"
+    )
+    assert ".script-editor-list" in _SCROLL_CONTAINERS, (
+        "左栏实体列表是新的滚动区，必须在票 02 的登记表里"
+    )
+
+
+def test_the_editor_validation_jump_switches_the_tab() -> None:
+    """票 09（review 修复 B 的第 1 条）：页签由**字段所在的 pane** 决定，命中的落点必须在那块里。
+
+    静态判据（`script-editor.js`）：
+
+    - `.script-editor-error` 的点击处理器只调 `scriptEditorJump(error.loc)`，且全文里
+      `scriptEditorJump(` 只出现**两次**（定义 + 这一个调用点）——跳转口只有一个；
+    - `scriptEditorJump` 的**同一个函数体**里：先重绘（目标实体的字段 / 节点才会在 DOM 里）
+      → 再 `ed.tab = scriptEditorTabForLoc(...)` → 落 DOM（`scriptEditorSyncTabs`）→ 才
+      `scriptEditorFindField(` + `.on` + `scrollIntoView(`；
+    - **命中的落点还要过 pane 判据**：`scriptEditorPaneOf(落点) !== ed.tab` 就不标 / 不滚——
+      藏着的 pane 里标 `.on` / 滚字段是票 09 的原缺陷，形状上要堵死；
+    - 页签的派生**不再读 `loc` 字符串前缀**：`scriptEditorTabForLoc` 问的是"这个字段 / 节点
+      住哪块 pane"（`scriptEditorFindLocAnchor` 的 `pane`；没有字段但有图上的节点 ⇒ `layer`）；
+    - 字段挂载根 → pane 是逐条登记的映射 `SCRIPT_EDITOR_PANE_ROOTS`，且与 `index.html` 里
+      三块 `.ed-pane[data-pane]` 的真实归属一致（`#script-editor-form` ⇒ 详情、
+      `#script-editor-graph` / `#script-editor-edges` ⇒ 大节、`#script-editor-errors` ⇒ 校验）；
+    - 页签落到 DOM 的唯一落点仍是 `scriptEditorSyncTabs()`（`ed.tab` → 三块 pane 的 `hidden`
+      与页签键的 `.on`），`scriptEditorRender()` 每帧都调它；
+    - `state.script.editor.tab` 的初值是 `detail`（首屏就是「详情」）。
+    """
+    source = _EDITOR_JS.read_text(encoding="utf-8")
+
+    assert source.count("scriptEditorJump(") == 2, (
+        "跳转口只有一个：定义 + 校验条目处理器那一处调用（别处再写一个就是两处各写一半）"
+    )
+    assert 'row.addEventListener("click", () => scriptEditorJump(error.loc));' in source, (
+        "校验条目（读它的 `loc`）走的就是这一个跳转口"
+    )
+
+    jump = _function_source(source, "scriptEditorJump")
+    assert re.search(r"ed\.tab\s*=", jump), (
+        f"跳转函数体里必须真的切页签（`ed.tab = …`）：{jump}"
+    )
+    assert "scriptEditorTabForLoc(" in jump, "跳转到哪个页签由字段 / 节点的家机械派生（不猜语义）"
+    assert "scriptEditorFindField(" in jump and "scrollIntoView(" in jump, (
+        f"同一个函数体里还要定位 / 高亮字段：{jump}"
+    )
+    assert jump.index("scriptEditorRender(") < jump.index("ed.tab"), (
+        "次序判据：先重绘把目标实体的字段 / 节点铺进各自的 pane，再判页签"
+        "（反了就是拿上一帧的旧字段判 —— 正是票 09 的原缺陷）"
+    )
+    assert jump.index("ed.tab") < jump.index("scriptEditorFindField("), (
+        "次序判据：先切页签、再定位（切页签在前，定位才在看得见的那一块里）"
+    )
+    assert jump.index("scriptEditorSyncTabs(") < jump.index("scrollIntoView("), (
+        "次序判据：页签先落 DOM（那一块才真的可见），再滚字段"
+    )
+    assert re.search(r"scriptEditorPaneOf\([^)]*\)\s*!==\s*ed\.tab", jump), (
+        f"命中的落点必须在**当前页签那一块**里（藏着的 pane 里不标 `.on` / 不滚）：{jump}"
+    )
+
+    tab_for_loc = _function_source(source, "scriptEditorTabForLoc")
+    assert "segments" not in tab_for_loc and "startsWith" not in tab_for_loc, (
+        f"页签不许再按 `loc` 字符串前缀猜（review 修复 B 的原缺陷）：{tab_for_loc}"
+    )
+    assert "scriptEditorFindLocAnchor(" in tab_for_loc, (
+        f"页签由字段所在的 pane 决定（先找到字段，再问它的家）：{tab_for_loc}"
+    )
+    assert "scriptEditorFindNode(" in tab_for_loc and 'return "layer"' in tab_for_loc, (
+        f"没有字段可锚、但有图上的节点 ⇒ 节点住「大节」：{tab_for_loc}"
+    )
+
+    roots = re.findall(
+        r'\[\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\]',
+        _const_array_source(source, "SCRIPT_EDITOR_PANE_ROOTS"),
+    )
+    assert roots, "字段挂载根 → pane 必须逐条写出来（一条映射，别在代码里零散地判）"
+    owned = dict(roots)
+    assert owned.get("script-editor-form") == "detail", (
+        f"表单里的字段住「详情」：{owned}"
+    )
+    assert "layer" in owned.values(), f"大节的网格 / 连线控件住「大节」：{owned}"
+    assert owned.get("script-editor-errors") == "valid", f"校验条目住「校验」：{owned}"
+    assert all(pane in _EDITOR_TABS for _, pane in roots), (
+        f"映射的落点只能是三个页签键之一：{roots}"
+    )
+    view = _editor_view()
+    pane_ids = {
+        pane["attrs"]["data-pane"]: _subtree_ids(pane)
+        for pane in _by_class(view, "ed-pane")
+    }
+    for root_id, pane in roots:
+        assert root_id in pane_ids.get(pane, set()), (
+            f"字段挂载根 `#{root_id}` 必须真的住在 `data-pane=\"{pane}\"` 那一块 pane 里："
+            f"{sorted(pane_ids.get(pane, set()))}"
+        )
+
+    find = _function_source(source, "scriptEditorFindField")
+    assert "scriptEditorFindLocAnchor(" in find, (
+        f"定位口在**所有**字段挂载根里找 `loc`，不再只认表单：{find}"
+    )
+
+    sync = _function_source(source, "scriptEditorSyncTabs")
+    assert "SCRIPT_EDITOR_TABS" in sync and "ed.tab" in sync and "hidden" in sync, (
+        f"页签落到 DOM 的唯一落点：`ed.tab` → 三块 pane 的 `hidden`：{sync}"
+    )
+    render = _function_source(source, "scriptEditorRender")
+    assert "scriptEditorSyncTabs(" in render, "整屏重绘时页签状态与 pane 显隐必须一起重算"
+    show_tab = _function_source(source, "scriptEditorShowTab")
+    assert re.search(r"ed\.tab\s*=", show_tab) and "scriptEditorRender(" in show_tab, (
+        f"点页签键 = 落 `ed.tab` 再重绘（互斥由同一条渲染路保证）：{show_tab}"
+    )
+    state = _function_source(source, "scriptEditorState")
+    assert re.search(r'tab:\s*"detail"', state), "`state.script.editor.tab` 的初值是详情"
+
+
+def test_switching_editor_tabs_keeps_the_unsaved_draft() -> None:
+    """票 09（review 修复 B 的第 2 条）：切页签会整屏重绘，重绘用 `ed.draft` 铺表单；
+    文本框的值只在保存时（`scriptEditorCollect`）才回写 draft ⇒ **切页签前**必须先把当前
+    pane 的输入收进 draft（一个不落盘的收集口），否则「详情里改了字再点大节」会静默丢失。
+
+    静态判据（`script-editor.js`）：
+
+    - `scriptEditorShowTab`（点页签键的唯一入口）在落 `ed.tab` / 重绘**之前**调收集口；
+    - 收集口 = `scriptEditorStashDraft`：它在有草稿（`edit` / `new`）时才 `scriptEditorCollect`，
+      而且**不落盘**（保存仍是 `scriptEditorSave` 的事）。
+    """
+    source = _EDITOR_JS.read_text(encoding="utf-8")
+
+    show_tab = _function_source(source, "scriptEditorShowTab")
+    assert "scriptEditorStashDraft(" in show_tab, (
+        f"切页签前必须先收下当前 pane 的输入（否则重绘把它们丢了）：{show_tab}"
+    )
+    assert show_tab.index("scriptEditorStashDraft(") < show_tab.index("ed.tab"), (
+        f"次序判据：先收输入、再切页签 / 重绘：{show_tab}"
+    )
+
+    stash = _function_source(source, "scriptEditorStashDraft")
+    assert "scriptEditorCollect(" in stash, (
+        f"不落盘的收集口 = 把 DOM 收回草稿（与保存同一个 `scriptEditorCollect`）：{stash}"
+    )
+    assert "ed.mode" in stash and "ed.draft" in stash, (
+        f"只在编辑 / 新建（有草稿）时收：别的态读出空值会把实体冲掉：{stash}"
+    )
+    for forbidden in ("scriptEditorSend(", "scriptEditorSave(", "fetch(", "api("):
+        assert forbidden not in stash, (
+            f"收集口不许落盘（半吊子的「记住草稿但保存时再读」不解决问题）：{stash}"
+        )

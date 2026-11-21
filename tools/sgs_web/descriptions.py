@@ -18,11 +18,18 @@
 前端读取口是 ``static/core.js`` 的 ``cardDescription`` / ``skillDescription``，调用点
 在 ``static/interaction.js:cardChip``（牌面悬停）与 ``static/table.js:renderSkills``
 （技能悬停），文案不在 JS 里抄第二份。
+
+**裁切规则（ui-one-screen 票 01，spec §8 R7）**：内容文件里的正文后面常跟一段
+实现注记（以「本仓」起头、以全角冒号收尾），它是给协作者的，不是给玩家的。裁切口就住在本模块：
+:func:`trimmed_description` / :func:`display_skill_description` 是**唯一**实现——
+服务端视图层（``serve.py`` / ``script_runs.py``）只调这两个口，前端（``static/``）零正则、
+零第二份文案来源。
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -32,10 +39,13 @@ __all__ = [
     "CARD_DESCRIPTIONS",
     "DESCRIPTION_FALLBACK",
     "DESCRIPTIONS_PATH",
+    "NOTE_TRIM_RE",
     "SCHEMA_VERSION",
     "SKILL_DESCRIPTIONS",
     "card_description",
+    "display_skill_description",
     "skill_description",
+    "trimmed_description",
 ]
 
 DESCRIPTION_FALLBACK: Final[str] = "暂无描述"
@@ -89,6 +99,21 @@ CARD_DESCRIPTIONS: Mapping[str, str] = _load_table(_DOCUMENT, "cards")
 SKILL_DESCRIPTIONS: Mapping[str, str] = _load_table(_DOCUMENT, "skills")
 """``SkillDef.skill_id`` → 描述全文（99 条：装备 22 + 武将 77）。"""
 
+NOTE_TRIM_RE: Final = re.compile(r"本仓[^：]*：")
+"""实现注记的起始标记（**裁切规则的唯一真源**，前端与服务端视图层都不许再抄一份）。
+
+对 ``descriptions.json`` 的实测依据（``prototype/README.md``「裁切规则的实测依据」）：
+标记有三种家族与多种带限定语的变体，其中一条括号**没闭合**（``…（口径 = **移动版**：``）
+——按括号配对写的正则会漏掉它，故只能用 ``[^：]*``；没有任何条目含两个标记 ⇒「从第一个匹配
+处裁到末尾」无歧义。
+"""
+
+
+def trimmed_description(text: str) -> str:
+    """从**第一个** :data:`NOTE_TRIM_RE` 匹配处裁到字符串末尾；无匹配原样返回。"""
+    match = NOTE_TRIM_RE.search(text)
+    return text if match is None else text[: match.start()]
+
 
 def card_description(card_type: str | None) -> str:
     """牌名 id → 描述全文；未知 / 空 key 显式返回「暂无描述」。"""
@@ -107,3 +132,12 @@ def skill_description(skill_id: str | None) -> str:
     if not isinstance(skill_id, str) or not skill_id:
         return DESCRIPTION_FALLBACK
     return SKILL_DESCRIPTIONS.get(skill_id, DESCRIPTION_FALLBACK)
+
+
+def display_skill_description(skill_id: str | None) -> str:
+    """技能 id → **给人看的**描述（:func:`skill_description` 的全文按注记裁过）。
+
+    这是视图层（``serve.py`` / ``script_runs.py``）取展示文案的唯一口；未知 / 空 key 与
+    合成键（如 ``yiji:give:0:0``）走 :func:`skill_description` 的同一兜底口径，不猜前缀。
+    """
+    return trimmed_description(skill_description(skill_id))
