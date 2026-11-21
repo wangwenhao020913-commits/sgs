@@ -10146,13 +10146,190 @@ def test_the_script_loadout_script_is_listed_right_after_the_board_renderer() ->
     assert srcs[-1] == "main.js", "wireScriptLoadout() 在 main.js 末尾调，故清单仍是 main.js 最后"
 
 
+class _TreeBuilder(HTMLParser):
+    """把 `index.html` 收成一棵**只含标签与属性**的浅树（测试只需要结构，不要文本）。
+
+    票 05 起棋盘页要判「两栏是不是同一个 flex 行里的兄弟」与「整备面是不是住在窗的挂载区」，
+    这两条都是**结构**判据；字符串切片会把注释与相邻段落一起扫进来，判不出父子关系。
+    """
+
+    _VOID = {"input", "img", "br", "hr", "meta", "link", "source"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.root: dict = {"tag": "#root", "attrs": {}, "children": []}
+        self.stack: list[dict] = [self.root]
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        node: dict = {"tag": tag, "attrs": dict(attrs), "children": []}
+        self.stack[-1]["children"].append(node)
+        if tag not in self._VOID:
+            self.stack.append(node)
+
+    def handle_endtag(self, tag: str) -> None:
+        # 自闭标签 / 未闭合段落不许把栈弄坏：向上找最近的同名开标签再截断。
+        for at in range(len(self.stack) - 1, 0, -1):
+            if self.stack[at]["tag"] == tag:
+                del self.stack[at:]
+                return
+
+
+def _element(
+    node: dict, *, element_id: str | None = None, class_name: str | None = None
+) -> dict | None:
+    """在树里按 id / 类名找**第一个**元素（深度优先，与 DOM 的查找口同序）。"""
+    if element_id is not None and node["attrs"].get("id") == element_id:
+        return node
+    if class_name is not None and class_name in (node["attrs"].get("class") or "").split():
+        return node
+    for child in node["children"]:
+        found = _element(child, element_id=element_id, class_name=class_name)
+        if found is not None:
+            return found
+    return None
+
+
+def _subtree_ids(node: dict) -> set[str]:
+    """子树里所有静态 id（含根）。"""
+    found = {node["attrs"]["id"]} if "id" in node["attrs"] else set()
+    for child in node["children"]:
+        found |= _subtree_ids(child)
+    return found
+
+
+_BOARD_HUD_IDS = (
+    "script-board-main",
+    "script-hud",
+    "script-hud-coins",
+    "script-hud-backpack",
+    "script-hud-relic-count",
+    "script-hud-equipped",
+    "script-hud-relic-grid",
+    "script-hud-actions",
+)
+"""棋盘页两栏与只读 HUD 的挂载点（票 05 的目标形状 / spec A7）。"""
+
+
+def test_the_board_page_is_a_board_and_a_fixed_hud() -> None:
+    """票 05 / spec A7：左棋盘**自伸缩** + 右 HUD **固定 300dsu**（不是弹性宽度、不读视口）。
+
+    四条机械判据：
+
+    1. 两栏是**同一个 flex 行**里的兄弟：`.board-body { display: flex }`（不是 column），
+       先 `#script-board-main`（弹性）后 `#script-hud`（定宽）；
+    2. HUD 的宽是字面 `flex: 0 0 calc(300 * var(--dsu))`——判据落在规则体上，不是"某个类存在"；
+       且 HUD 的各行 / 各格用固定高度，**没有随背包 / 遗物数量变的百分比高度**；
+    3. 棋盘 stage 的高由**棋盘体自己的行数**给出：JS 里是一条 `rows * 格高 + 内边距` 的表达式
+       （`script-board.js` 用 `scriptGraphLayout` 已经算出的行数），CSS 里 `.script-board-stage`
+       不写高度、不读 `vh` / `vw`；
+    4. 放不下时**只有棋盘区滚**：`.design-canvas .board-stage-scroll` 是 `overflow-y: auto`，
+       而且它登记在滚动区表里（spec A4：未登记即红）。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+
+    board_view = _element(builder.root, element_id="view-script-board")
+    assert board_view is not None, 'index.html 里找不到 <main id="view-script-board">'
+    body = _element(board_view, class_name="board-body")
+    assert body is not None, "棋盘页正文必须是 `.board-body` 这一行（左棋盘 + 右 HUD）"
+    columns = [
+        child["attrs"].get("id") or ""
+        for child in body["children"]
+        if child["tag"] in {"section", "div"}
+    ]
+    assert columns == ["script-board-main", "script-hud"], (
+        "正文一行两栏的次序 = 左棋盘（弹性）+ 右 HUD（定宽），实得 "
+        f"{columns}"
+    )
+    for needle in _BOARD_HUD_IDS:
+        assert f'id="{needle}"' in html, f"棋盘 / HUD 少了挂载点：{needle}"
+    assert _element(body, element_id="script-hud-actions") is not None, (
+        "HUD 的动作区必须是两栏里的静态挂载点（背包键由它按 `pending` 挂 / 摘）"
+    )
+
+    body_rule = _css_rule(".design-canvas .board-body")
+    assert re.search(r"display:\s*flex", body_rule), (
+        f"两栏必须是同一 flex 行：{body_rule}"
+    )
+    assert not re.search(r"flex-direction:\s*column", body_rule), (
+        f"两栏不是上下堆：内容是行，不是列：{body_rule}"
+    )
+    main_rule = _css_rule(".design-canvas .board-main")
+    assert re.search(r"flex:\s*1 1 auto", main_rule), (
+        f"棋盘是弹性栏（HUD 定宽、棋盘吃剩下的宽）：{main_rule}"
+    )
+    hud_rule = _css_rule(".design-canvas .board-hud")
+    assert re.search(r"flex:\s*0 0 calc\(300 \* var\(--dsu\)\)", hud_rule), (
+        f"HUD 的宽必须是字面 300dsu（不是弹性宽度）：{hud_rule}"
+    )
+    assert not re.search(r"flex:\s*1", hud_rule), f"HUD 不许吃剩余宽度：{hud_rule}"
+    assert not _VH_VW_GEOMETRY.search(hud_rule), f"HUD 的几何不许读视口：{hud_rule}"
+
+    # HUD 的每一行 / 每一格都是固定高度：数量只改格里的字，不改版式。
+    for selector, rule_body in _css_rules():
+        if "hud" not in selector:
+            continue
+        for declaration in rule_body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop, value = declaration.split(":", 1)
+            if "height" not in prop.strip():
+                continue
+            assert "%" not in value, (
+                f"HUD 里不许有随数量变的百分比高度（`{prop.strip()}:{value.strip()}`，"
+                f"选择器：{selector}）"
+            )
+            assert value.strip() != "auto", (
+                f"HUD 的行高不许交给内容（`{prop.strip()}:auto`，选择器：{selector}）"
+            )
+    for selector in (".design-canvas .hud-equip", ".design-canvas .hud-relics"):
+        rule_body = _css_rule(selector)
+        assert re.search(r"grid-auto-rows:\s*calc\(", rule_body), (
+            f"固定格数的网格必须写死行高（`grid-auto-rows`）：{selector} → {rule_body}"
+        )
+
+    stage_rule = _css_rule(".script-board-stage")
+    assert not _VH_VW_GEOMETRY.search(stage_rule), (
+        f"stage 的高度不许读视口单位（不是 16:9 / 视口比例）：{stage_rule}"
+    )
+    assert not re.search(r"(?:^|;)\s*height\s*:", stage_rule), (
+        f"stage 的高度由 JS 按行数给，CSS 不写死：{stage_rule}"
+    )
+    board_js = _BOARD_JS.read_text(encoding="utf-8")
+    assert "script-board-stage" in board_js, "stage 的落点由棋盘脚本管（没有第二个宿主）"
+    assert re.search(r"style\.height = `\$\{[^`]*\brows\b\s*\*[^`]*\+[^`]*\}px`", board_js), (
+        "stage 的高度必须是一条行数表达式（`rows * … + …`），不是视口比例"
+    )
+
+    scroll_rule = _css_rule(".design-canvas .board-stage-scroll")
+    assert re.search(r"overflow-y:\s*auto", scroll_rule), (
+        f"棋盘放不下时只有这一条滚动区：{scroll_rule}"
+    )
+    assert ".design-canvas .board-stage-scroll" in _SCROLL_CONTAINERS, (
+        "棋盘内滚区必须登记进票 02 的滚动区表（spec A4：未登记即红）"
+    )
+
+
 def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() -> None:
-    """整备面是棋盘视图里的一段（spec §4 的落点表）：24 格 = **3×8**、遗物栏 ≤6、铜钱 HUD。"""
+    """整备面住在**面板窗的挂载区**（票 05 改的**唯一**前提）：24 格 = **3×8**、遗物栏 ≤6、铜钱 HUD。
+
+    票 22 写这条时整备面还是 `#view-script-board` 正文里的一段；票 05 把它搬进面板窗
+    （HUD 的「背包」键打开，M 档）。故这里**只换"住在哪"这个前提**——八个挂载点不再待在
+    棋盘视图的 `<main>` 里，而是与节点面一起住在窗的寄存格 `#board-window-stash` 里
+    （仍在**所有 `<main>` 之外**，与窗壳同一个姿势：不会随哪个 view 的显隐被藏掉）。
+    judged 项一条都不松：`data-rows="3"` / `data-cols="8"` / CSS `repeat(8` / 24 / 8 / 3 / 6
+    四个常量 / 出战徽标写法全部原样保留。
+    """
     html = INDEX_HTML.read_text(encoding="utf-8")
     board_start = html.index('id="view-script-board"')
-    script_start = html.index("<script", board_start)
-    section = html[board_start:script_start]
-    for needle in (
+    board_end = html.index("</main>", board_start)
+    view = html[board_start:board_end]
+
+    needles = (
         'id="script-loadout"',
         'id="script-loadout-grid"',
         'id="script-loadout-relics"',
@@ -10161,9 +10338,35 @@ def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() ->
         'id="script-face"',
         'data-rows="3"',
         'data-cols="8"',
+    )
+    for needle in needles:
+        assert needle not in view, (
+            f"票 05 起整备面 / 节点面不再住在棋盘视图正文里（改前提的唯一一条）：{needle}"
+        )
+
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+    stash = _element(builder.root, element_id="board-window-stash")
+    assert stash is not None, (
+        "整备面 / 节点面要住在窗的寄存格 `#board-window-stash`（窗没开时的家）"
+    )
+    stash_ids = _subtree_ids(stash)
+    for element_id in (
+        "script-loadout",
+        "script-loadout-grid",
+        "script-loadout-relics",
+        "script-loadout-coins",
+        "btn-script-loadout-discard",
+        "script-face",
     ):
-        assert needle in section, f"整备 / 节点面的挂载点缺件：{needle}"
-    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        assert element_id in stash_ids, f"整备 / 节点面的挂载点缺件：{element_id}"
+    for needle in ('data-rows="3"', 'data-cols="8"'):
+        assert needle in html, f"整备面 3×8 的静态标注缺件：{needle}"
+    assert html.index('id="board-window-stash"') > html.rindex("</main>"), (
+        "寄存格仍在**所有 <main> 之外**（与窗壳同一个姿势；否则会被 display:none 的祖先藏掉）"
+    )
+
     grid = _css_rule(".script-loadout-grid")
     assert "repeat(8" in grid, f"24 格是 8 列 × 3 行（判据在 CSS 的这一行）：{grid}"
 
@@ -10176,6 +10379,39 @@ def test_the_loadout_panel_lives_in_the_board_view_as_a_three_by_eight_grid() ->
         'scriptNode("span", "script-slot-badge", equipped ? "出战" : "")',
     ):
         assert needle in source, f"整备面的机械常量 / 出战徽标写法变了：{needle}"
+
+
+def test_the_bag_button_is_absent_while_a_node_is_in_progress() -> None:
+    """spec §8 R6：`pending` 非空（节点进行中）⇒ HUD 动作区里**没有**「背包」这颗键。
+
+    不是 `disabled`、不是 `hidden`——**DOM 里少一个节点**。三条机械判据：
+
+    1. 动作区的判据是服务端棋盘体的 `pending`（`scriptLoadoutPending()`），不是本地旗标；
+    2. `pending` 非空那条分支只**摘**键（`removeChild`），没有任何创建 / 插入语句
+       （"有创建语句 ⇒ 红"）；
+    3. 动作区自己的函数里不许出现 `disabled`（置灰 = 另一回事，票 22 的"入口不存在"同理）。
+    """
+    source = _loadout_source()
+    actions = _function_source(source, "scriptHudActions")
+    assert "scriptLoadoutPending()" in actions, (
+        f"动作区的判据必须是服务端棋盘体的 `pending`：{actions}"
+    )
+    assert "disabled" not in actions, (
+        "节点进行中不是「置灰」——这颗键根本不该存在（不许写 disabled）"
+    )
+    assert "createElement" not in actions and "appendChild" not in actions, (
+        "动作区自己不创建那颗键（创建只有一处、与 `pending` 无关），否则判据读不出来"
+    )
+    start = actions.index("if (scriptLoadoutPending()) {")
+    end = actions.index("\n  }", start)
+    blocked = actions[start:end]
+    assert "removeChild" in blocked, (
+        f"`pending` 非空时要把那颗键从动作区摘掉：{blocked}"
+    )
+    for banned in ("createElement", "appendChild", "insertBefore", "disabled", "hidden"):
+        assert banned not in blocked, (
+            f"`pending` 非空那条分支里不许出现 `{banned}`（不是置灰 / 不是隐藏 / 不是创建）"
+        )
 
 
 def test_the_backpack_edit_entry_points_do_not_exist_inside_a_node() -> None:
@@ -10284,6 +10520,10 @@ _SCROLL_CONTAINERS = {
     ".pw-body": "面板窗正文槽：窗高按 data-size 档位写死，正文超出由它自己滚（split 布局时改由列表滚）",
     ".design-canvas .skilllist": "开局页右栏技能全文区：描述原样印、再长也只在这块里滚（表 C 的判据）",
     ".design-canvas .pool-chips": "开局页左栏将池摘要的武将名块：名字多时在这块里滚，不改变两栏版式",
+    ".design-canvas .board-stage-scroll": (
+        "棋盘页的棋盘区：stage 高 = 行数 × 格高 + 内边距（自伸缩），层数多到装不下时"
+        "只有这块滚，HUD 与顶栏不动（票 05 spec A7）"
+    ),
 }
 """滚动区登记表（spec A4）：`style.css` 里每个 `overflow-y: auto` 都必须在这里登记。
 

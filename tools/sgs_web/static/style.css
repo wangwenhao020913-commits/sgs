@@ -2314,7 +2314,78 @@ button.avatar-skill:hover { border-color: var(--accent); }
  * 写成内联样式；这里只钉**尺寸的机械判据**（64×64 = 65,536 px²）、颜色与层级。
  * 状态色只属于玩家视角的棋盘：五个状态各一条规则，编辑器语境由渲染器按 `mode` 不写类。
  * ------------------------------------------------------------------------- */
-.script-board-panel { position: relative; }
+/* ---------------------------------------------------------------------------
+ * ui-one-screen 票 05：棋盘页 = 左棋盘（弹性）+ 右 HUD（固定 300dsu，spec A7）
+ *
+ * 两条版式判据落在这里，别在别处再写一份：
+ *  - `.board-hud` 的宽是**字面 300dsu**（`flex: 0 0`），不是弹性宽度、不读视口；
+ *  - 棋盘 stage 的高度**不在这里**：它由 `script-board.js:scriptBoardRender` 按棋盘体自己的
+ *    行数现写内联高度（`rows * 格高 + 内边距`），故这条规则里没有 `height`。
+ * 放不下时只有 `.board-stage-scroll` 滚（登记在 tests 的滚动区表里），顶栏 / HUD 不动。
+ * HUD 的每一行 / 每一格都是固定高度：背包与遗物的**数量只改格里的字**，不改版式。
+ * ------------------------------------------------------------------------- */
+.design-canvas .board-body {
+  display: flex; align-items: stretch;
+  gap: calc(24 * var(--dsu));
+}
+.design-canvas .board-main {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  margin: 0;
+}
+.design-canvas .board-main .row { flex: 0 0 auto; }
+.design-canvas .board-hud {
+  flex: 0 0 calc(300 * var(--dsu));
+  display: flex; flex-direction: column;
+  gap: calc(10 * var(--dsu));
+  min-height: 0; margin: 0;
+}
+/* 棋盘内滚区：stage 高 = 行数 × 格高 + 内边距（自伸缩），装不下时只有这块滚。 */
+.design-canvas .board-stage-scroll {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding-top: calc(8 * var(--dsu));
+}
+/* HUD 三行读数：固定行高，数量写在右边那一格。 */
+.design-canvas .hud-rows { flex: 0 0 auto; display: flex; flex-direction: column; gap: calc(6 * var(--dsu)); }
+.design-canvas .hud-row {
+  display: flex; align-items: center; justify-content: space-between;
+  height: calc(22 * var(--dsu)); font-size: var(--f12); color: var(--dim);
+}
+.design-canvas .hud-coins { font-size: var(--f17); font-weight: 700; color: var(--accent); }
+/* 出战 4 槽：2×2 固定栅格（空槽也画一格，标「出战 N」），格高写死。 */
+.design-canvas .hud-equip {
+  flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr;
+  grid-auto-rows: calc(58 * var(--dsu)); gap: calc(8 * var(--dsu));
+}
+.design-canvas .hud-equip-cell {
+  display: flex; flex-direction: column; justify-content: space-between; overflow: hidden;
+  border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
+  background: var(--card); padding: calc(6 * var(--dsu));
+  font-size: var(--f12);
+}
+.design-canvas .hud-equip-cell[data-empty="1"] { border-style: dashed; color: #9a9188; }
+.design-canvas .hud-etag { font-size: var(--f11); font-weight: 700; color: var(--accent); }
+/* 遗物 6 格：3×2 固定栅格（空也画一格），行高写死。 */
+.design-canvas .hud-relics {
+  flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: calc(30 * var(--dsu)); gap: calc(8 * var(--dsu));
+}
+.design-canvas .hud-relic {
+  display: flex; align-items: center; overflow: hidden;
+  border: 1px solid var(--line); border-radius: calc(8 * var(--dsu));
+  background: var(--card); padding: 0 calc(8 * var(--dsu));
+  font-size: var(--f11); white-space: nowrap; text-overflow: ellipsis;
+}
+.design-canvas .hud-relic[data-empty="1"] { border-style: dashed; color: #9a9188; }
+/* 动作区贴底：`margin-top: auto` 把「背包 / 离开棋局」压在 HUD 下沿（行高不随内容变）。 */
+.design-canvas .hud-actions {
+  margin-top: auto; flex: 0 0 auto;
+  display: flex; flex-direction: column; gap: calc(8 * var(--dsu));
+}
+.design-canvas .hud-actions .hud-bag,
+.design-canvas .hud-actions #btn-script-board-exit { text-align: center; }
+
+/* stage 的高度由 JS 按行数写内联（见上一条注释）；CSS 只给定位，不写高度。 */
 .script-board-stage { position: relative; }
 .script-board-graph { position: relative; width: 100%; min-height: 120px; }
 .script-graph-edges, .script-graph-nodes { position: absolute; inset: 0; }

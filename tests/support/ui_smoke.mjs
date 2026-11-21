@@ -31084,7 +31084,7 @@ check("M7-22e 「丢弃选中」= 一条 PUT 清掉那一格；**不返还铜钱
   && slotOf(0).getAttribute("data-empty") === "1",
   `coins=${ui.state.script.board.run.coins} hints="${$("script-loadout-hint").textContent}"`);
 
-// ---- ③ 满包标注 + 节点内编辑入口不存在 ----
+// ---- ③ 满包标注 + 节点内**背包键不存在** + 格子编辑入口不存在（票 05 改的判据）----
 const fullSlots = Array.from({ length: 24 }, (_, index) => (
   index < 4
     ? ["hero.liubei.rende", "hero.guanyu.wusheng", "hero.zhangfei.paoxiao", "hero.zhaoyun.longdan"][index]
@@ -31097,10 +31097,16 @@ check("M7-22f 满包标注：24/24 + 「已满」（三选一的选择会折成�
   && ui.state.script.board.run.backpack.slots.every((slot) => Boolean(slot)),
   `"${$("script-loadout-backpack").textContent}"`);
 
+/** HUD 动作区里的「背包」键（按类名找：节点进行中它**根本不存在**——票 05 / spec R6）。 */
+const hudBagRows = () => byClass($("script-hud-actions"), "hud-bag");
+const hudBagCount = () => hudBagRows().length;
+const bagBeforeNode = hudBagCount();
 const enteredEvent = await enterNode(runA.run_id, "e1");
 scriptMark = calls.length;
 await clickAndWait(slotOf(0));
 const nodeEdit = {
+  bagBefore: bagBeforeNode,
+  bagDuring: hudBagCount(),
   dragstart: (slotOf(0).listeners.dragstart || []).length,
   click: (slotOf(0).listeners.click || []).length,
   discardHidden: $("btn-script-loadout-discard").hidden,
@@ -31108,8 +31114,9 @@ const nodeEdit = {
   puts: calls.slice(scriptMark).filter(
     (call) => call.method === "PUT" && call.path.endsWith("/backpack")).length,
 };
-check("M7-22g 节点内**编辑入口不存在**：格子不挂 click / dragstart、「丢弃」整键收起、点它零请求",
-  nodeEdit.dragstart === 0 && nodeEdit.click === 0
+check("M7-22g 节点内**背包键不存在**（不是置灰 / 不是隐藏）：HUD 动作区少一个节点 + 格子仍不挂 click / dragstart + 「丢弃」仍收起",
+  bagBeforeNode === 1 && nodeEdit.bagDuring === 0
+  && nodeEdit.dragstart === 0 && nodeEdit.click === 0
   && nodeEdit.discardHidden === true && nodeEdit.lock === true
   && nodeEdit.puts === 0
   && $("script-loadout-lock").textContent.includes("不可编辑"),
@@ -32737,6 +32744,88 @@ await clickAndWait($("btn-lobby-pool"));
   await clickAndWait($("script-confirm-close"));
   ui.heroPools().slots[ui.heroPools().selected].splice(0);
   ui.renderHeroPool();
+}
+
+/* ============ ui-one-screen 票 05：棋盘页两栏 + 节点面进窗 ============
+ *
+ * 两条判据（真几何读数写进票面 `## Answer`，由 bsk 那一遍量；垫片没有布局引擎）：
+ *   UI1-20 两栏版式：左棋盘弹性 + 右 HUD **字面 300dsu**，棋盘 stage 的高度是**行数**的函数
+ *          （结构判据：两栏在同一个 flex 行、stage 不写视口高度、JS 的表达式读 rows）；
+ *   UI1-21 进入节点即开面板窗：节点的面住在 `#script-confirm-body` 里（M 档），
+ *          不在 `#view-script-board` 的正文里；关窗后两块回 `#board-window-stash`。
+ */
+{
+  const cssNow = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const boardRow = (cssNow.match(/\.design-canvas \.board-body\s*\{[^}]*\}/) || [""])[0];
+  const hudRule = (cssNow.match(/\.design-canvas \.board-hud\s*\{[^}]*\}/) || [""])[0];
+  const stageRule = (cssNow.match(/\.script-board-stage\s*\{[^}]*\}/) || [""])[0];
+  const boardJs = readFileSync("tools/sgs_web/static/script-board.js", "utf8");
+  const bodyAt = html.indexOf('class="page-body board-body"');
+  const mainAt = html.indexOf('id="script-board-main"');
+  const hudAt = html.indexOf('id="script-hud"');
+  const stageHeightOf = (rows) => ui.scriptGraphLayout({ rows, cols: 4, nodes: [], edges: [] }).height;
+  check("UI1-20 棋盘页两栏：HUD 宽 300dsu、棋盘 stage 高度随层数变（结构判据：同一 flex 行 + 行数的函数）",
+    /display:\s*flex/.test(boardRow) && !/flex-direction:\s*column/.test(boardRow)
+    && /flex:\s*0 0 calc\(300 \* var\(--dsu\)\)/.test(hudRule)
+    && !/height\s*:/.test(stageRule.slice(stageRule.indexOf("{") + 1))
+    && !/\bvh\b/.test(stageRule)
+    && stageHeightOf(2) !== stageHeightOf(3)
+    && /rows \* SCRIPT_GRAPH_CELL_H \+ SCRIPT_GRAPH_PAD \* 2/.test(boardJs)
+    && bodyAt >= 0 && bodyAt < mainAt && mainAt < hudAt,
+    `行=${boardRow.replace(/\s+/g, " ").slice(0, 40)} HUD=${hudRule.replace(/\s+/g, " ").slice(0, 40)}`
+      + ` 2行=${stageHeightOf(2)} 3行=${stageHeightOf(3)} 次序=${bodyAt}/${mainAt}/${hudAt}`);
+}
+
+// ---- UI1-21：进入节点即开面板窗（进料 = 整备面那份库的真端点）----
+{
+  writeFileSync(
+    `${RUNS_DIR}/script-library.json`,
+    readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+  );
+  const board05 = await postRaw("/api/script-runs", {
+    script_id: "loadoutprobe", chosen_hero: "jie_liubei", seed: 2505,
+  });
+  ui.scriptBoardShow(board05);
+  const equippedCells = byClass($("script-hud-equipped"), "hud-equip-cell");
+  const relicCells = byClass($("script-hud-relic-grid"), "hud-relic");
+  const hudReads = $("script-hud-coins").textContent === String(board05.run.coins)
+    && $("script-hud-backpack").textContent === "0/24"
+    && $("script-hud-relic-count").textContent === "0/6"
+    && equippedCells.length === 4 && relicCells.length === 6
+    && equippedCells.slice(0, 4).every((cell, index) => cell.getAttribute("data-slot") === String(index))
+    && byClass($("script-hud-actions"), "hud-bag").length === 1;
+  // 节点之外：点「背包」= 整备面搬进同一扇 M 窗（24 格一起进去）；关窗后回寄存格。
+  await clickAndWait(byClass($("script-hud-actions"), "hud-bag")[0]);
+  const bagWindow = $("script-confirm").hidden === false
+    && $("script-confirm").getAttribute("data-dialog") === "loadout"
+    && $("script-confirm-window").getAttribute("data-size") === "M"
+    && subtreeContains($("script-confirm-body"), $("script-loadout"))
+    && loadoutSlots().length === 24;
+  await clickAndWait($("script-confirm-close"));
+  const bagBack = $("script-loadout").parentNode === $("board-window-stash");
+  // 进节点（事件房：不跳牌桌）：窗口 M 档、正文槽里就是节点的面。
+  const eventEntry = board05.nodes.find(
+    (node) => node.available && node.room && node.room.kind === "event");
+  await ui.scriptBoardEnterNode(eventEntry);
+  const windowFace = subtreeContains($("script-confirm-body"), $("script-face"));
+  const windowShape = $("script-confirm").hidden === false
+    && $("script-confirm").getAttribute("data-dialog") === "script-face"
+    && $("script-confirm-window").getAttribute("data-size") === "M";
+  const bagDuringNode = byClass($("script-hud-actions"), "hud-bag").length;
+  const faceOutsideView = html.indexOf('id="script-face"') > html.lastIndexOf("</main>");
+  // 关窗（面板窗自己的收窗口）：两块回寄存格，窗里的正文槽清空。
+  await clickAndWait($("script-confirm-close"));
+  const backToStash = $("script-face").parentNode === $("board-window-stash")
+    && $("script-loadout").parentNode === $("board-window-stash");
+  check("UI1-21 进入节点即开面板窗（节点的面在窗里、不在 #view-script-board 正文里）",
+    hudReads && bagWindow && bagBack && windowFace && windowShape && bagDuringNode === 0
+    && faceOutsideView && backToStash,
+    `HUD=${hudReads} 背包窗=${bagWindow}/${bagBack} 窗里=${windowFace}`
+      + ` 档=${$("script-confirm-window").getAttribute("data-size")}`
+      + ` 节点内背包键=${bagDuringNode} 正文外=${faceOutsideView} 回寄存格=${backToStash}`);
+  await discardScriptSave();
+  unlinkSync(`${RUNS_DIR}/script-library.json`);
+  ui.state.script.board = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

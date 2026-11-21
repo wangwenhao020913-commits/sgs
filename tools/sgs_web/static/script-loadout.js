@@ -729,15 +729,26 @@ function scriptFaceReopenBattle() {
   return scriptBoardEnterNode(node);
 }
 
-/** 画当前节点的面（判据是 `pending.spec`；问号房先揭晓再按内层走）。 */
+/** 画当前节点的面（判据是 `pending.spec`；问号房先揭晓再按内层走）。
+ *
+ * ui-one-screen 票 05 起它还管**窗的开关**：有 `pending.spec` ⇒ 这块面住在 M 窗里
+ * （`script-board.js:scriptBoardFaceWindowOpen`，进入节点就开）；`pending` 落了 ⇒ 收窗、
+ * 两块内容回寄存格。这里只是"谁该在窗里"的唯一裁决点——窗壳与单槽位归 `panel-window.js`。
+ */
 function scriptFaceRender() {
   const face = $("script-face");
   const spec = scriptLoadoutSpec();
   if (!face) return null;
+  // 先收回寄存格再画：窗里那块若被别的模态顶掉过，会变成游离节点（id 查不到 ⇒ 渲染静默失效）。
+  if (typeof restashBoardWindows === "function") restashBoardWindows();
   if (!spec) {
     face.hidden = true;
     face.removeAttribute("data-face");
     scriptFaceClear();
+    if (typeof scriptBoardWindowKind === "function" && scriptBoardWindowKind() === "script-face") {
+      panelClose();
+    }
+    if (typeof restashBoardWindows === "function") restashBoardWindows();
     return null;
   }
   const loot = scriptLoadoutState();
@@ -746,10 +757,12 @@ function scriptFaceRender() {
   face.setAttribute("data-face", spec.kind === "unknown" && !loot.revealOpen
     ? "reveal"
     : String(innerKind || spec.kind));
-  if (spec.kind === "unknown" && !loot.revealOpen) return scriptFaceRenderReveal(spec);
-  if (innerKind === "event") return scriptFaceRenderEvent(scriptFlowSpec(spec));
-  if (innerKind === "shop") return scriptFaceRenderShop(scriptFlowSpec(spec));
-  if (innerKind === "battle") return scriptFaceRenderBattle(scriptFlowSpec(spec));
+  if (spec.kind === "unknown" && !loot.revealOpen) scriptFaceRenderReveal(spec);
+  else if (innerKind === "event") scriptFaceRenderEvent(scriptFlowSpec(spec));
+  else if (innerKind === "shop") scriptFaceRenderShop(scriptFlowSpec(spec));
+  else if (innerKind === "battle") scriptFaceRenderBattle(scriptFlowSpec(spec));
+  // 内容画好之后再开窗（进节点即开；换成另一块面时窗里的内容已经是最新的）。
+  if (typeof scriptBoardFaceWindowOpen === "function") scriptBoardFaceWindowOpen();
   return null;
 }
 
@@ -890,6 +903,8 @@ function scriptSettlePickDialog(flow) {
       run: () => scriptSettleChoose(null),
     });
   }
+  // 借的是同一扇窗（单槽位）：先把棋盘那两块送回寄存格，别让它们被清槽变成游离节点。
+  restashBoardWindows(true);
   const buttons = scriptConfirm({
     kind: "pick",
     dialog: "pick",
@@ -934,6 +949,7 @@ function scriptSettleRelicDialog(flow) {
     body.push(scriptNode("div", "script-face-note",
       "这一场没有遗物可发：服务端按规则折成铜钱（金额在结算结果里给出）。"));
   }
+  restashBoardWindows(true);
   return scriptConfirm({
     kind: "relic",
     dialog: "relic",
@@ -1094,6 +1110,7 @@ function scriptSettleShowResult(body, flow) {
       },
     });
   }
+  restashBoardWindows(true);
   return scriptConfirm({
     kind: "result",
     dialog: "result",
@@ -1131,6 +1148,8 @@ async function scriptSettleSubmit(flow) {
   }
   if (!response) {
     scriptCloseConfirm();
+    // 结算没落地：收窗之后那两块要立刻回寄存格（否则它们停在已清空的正文槽里，id 查不到）。
+    restashBoardWindows(true);
     scriptLoadoutState().flow = null;
     const payload = (failure && failure.body) || { reason: failure && failure.message };
     scriptBoardShowError(payload);
@@ -1143,6 +1162,119 @@ async function scriptSettleSubmit(flow) {
   }
   if (response.save) scriptApplySave(response.save);
   return scriptSettleShowResult(response, target);
+}
+
+/* ---------------------------------------------------------------- HUD（票 05）
+ *
+ * 右栏 HUD 是**只读展示**（spec A7）：铜钱 / 背包 / 遗物三个数读服务端棋盘体的 `run`，
+ * 前端不记账、不重算；四格出战槽与六格遗物格用**固定格数**（空也画一格），于是背包 / 遗物
+ * 再多，HUD 的宽与每行高度都不变（判据在 `style.css` 的 `.design-canvas .hud-*` 那几条）。
+ * 动作区里「背包」这颗键只在**节点之外**存在：`pending` 非空 ⇒ 这个节点根本不进 DOM
+ * （spec R6：不是置灰、不是隐藏）。`data-skill` 是票 06 浮层的宿主挂点，本票只定形状与位置。
+ */
+
+/** 出战槽的格数（与缺省 `equipped_slots` 的 4 个格号同一份事实）。 */
+const SCRIPT_EQUIPPED_SLOTS = 4;
+
+/** HUD 的「背包」键：整页只创建一次，之后只挂 / 摘（`pending` 的判据在 `scriptHudActions`）。 */
+let SCRIPT_HUD_BAG = null;
+
+function scriptHudBagButton() {
+  if (SCRIPT_HUD_BAG) return SCRIPT_HUD_BAG;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "script-hud-bag";
+  button.className = "hud-bag";
+  button.textContent = "背包";
+  button.addEventListener("click", () => scriptBoardLoadoutWindowOpen());
+  SCRIPT_HUD_BAG = button;
+  return button;
+}
+
+/** 动作区：`pending` 为空才有「背包」（「离开棋局」是静态节点，永远在）。
+ *
+ * **不是置灰、不是隐藏**：节点进行中这颗键被 `removeChild` 掉，DOM 里少一个节点。
+ */
+function scriptHudActions() {
+  const box = $("script-hud-actions");
+  const bag = scriptHudBagButton();
+  if (!box) return null;
+  if (scriptLoadoutPending()) {
+    if (bag.parentNode === box) box.removeChild(bag);
+    return null;
+  }
+  if (bag.parentNode !== box) box.insertBefore(bag, box.children.length ? box.children[0] : null);
+  return bag;
+}
+
+/** HUD 的一格出战槽：`data-slot` = 第几格（0–3），`data-skill` = 票 06 浮层的宿主。 */
+function scriptHudEquipCell(index, skillId) {
+  const cell = scriptNode("div", "hud-equip-cell", "");
+  cell.setAttribute("data-slot", String(index));
+  cell.setAttribute("data-tag", `出战 ${index + 1}`);
+  if (skillId) {
+    cell.setAttribute("data-skill", String(skillId));
+    cell.setAttribute("data-skill-id", String(skillId));
+  } else {
+    cell.setAttribute("data-empty", "1");
+  }
+  cell.appendChild(scriptNode("span", "hud-etag", `出战 ${index + 1}`));
+  cell.appendChild(scriptNode("span", "hud-en", skillId ? scriptItemRow(skillId).name : "空"));
+  return cell;
+}
+
+/** HUD 的一格遗物：`data-relic-slot` = 第几格（0–5），`data-skill` = 票 06 浮层的宿主。 */
+function scriptHudRelicCell(index, relicId) {
+  const cell = scriptNode("div", "hud-relic", relicId ? scriptItemRow(relicId).name : "空");
+  cell.setAttribute("data-relic-slot", String(index));
+  if (relicId) {
+    cell.setAttribute("data-skill", String(relicId));
+    cell.setAttribute("data-relic-id", String(relicId));
+  } else {
+    cell.setAttribute("data-empty", "1");
+  }
+  return cell;
+}
+
+/** 画 HUD：三个读数 + 4 出战槽 + 6 遗物格 + 动作区。没有棋盘体时整块收干净。 */
+function scriptHudRender() {
+  const run = scriptLoadoutRun();
+  const coins = $("script-hud-coins");
+  const backpack = $("script-hud-backpack");
+  const relicCount = $("script-hud-relic-count");
+  const equippedBox = $("script-hud-equipped");
+  const relicsBox = $("script-hud-relic-grid");
+  if (!run) {
+    for (const node of [coins, backpack, relicCount]) {
+      if (node) node.textContent = "";
+    }
+    if (equippedBox) equippedBox.innerHTML = "";
+    if (relicsBox) relicsBox.innerHTML = "";
+    scriptHudActions();
+    return null;
+  }
+  const slots = scriptLoadoutSlots();
+  const equipped = scriptLoadoutEquipped();
+  const relics = scriptLoadoutRelics();
+  if (coins) coins.textContent = String(Number(run.coins) || 0);
+  if (backpack) backpack.textContent = `${slots.filter(Boolean).length}/${SCRIPT_BACKPACK_SLOTS}`;
+  if (relicCount) relicCount.textContent = `${relics.length}/${SCRIPT_RELIC_SLOTS}`;
+  if (equippedBox) {
+    equippedBox.innerHTML = "";
+    for (let index = 0; index < SCRIPT_EQUIPPED_SLOTS; index += 1) {
+      const slotIndex = Number(equipped[index]);
+      const skillId = Number.isInteger(slotIndex) ? slots[slotIndex] : null;
+      equippedBox.appendChild(scriptHudEquipCell(index, skillId || null));
+    }
+  }
+  if (relicsBox) {
+    relicsBox.innerHTML = "";
+    for (let index = 0; index < SCRIPT_RELIC_SLOTS; index += 1) {
+      relicsBox.appendChild(scriptHudRelicCell(index, relics[index] || null));
+    }
+  }
+  scriptHudActions();
+  return null;
 }
 
 /* -------------------------------------------------------------- 同步 / 接线 */
@@ -1159,10 +1291,14 @@ function scriptLoadoutSync() {
     loot.revealOpen = false;
     scriptLoadoutRender();
     scriptFaceRender();
+    scriptHudRender();
+    // 没有棋盘体了（删档 / 通关 / 放弃）：棋盘那扇窗也一并收起，别留一扇空窗。
+    if (typeof scriptBoardWindowClose === "function") scriptBoardWindowClose();
     return null;
   }
   scriptLoadoutRender();
   scriptFaceRender();
+  scriptHudRender();
   return null;
 }
 
@@ -1200,6 +1336,9 @@ async function scriptBattleEnter(board) {
     nodeId: (pending && pending.node_id) || null,
   };
   startSessionView(view);
+  // 票 05：节点面住在面板窗里（`所有 <main>` 之外），换到牌桌时必须**先收起那扇窗**，
+  // 否则它会浮在牌桌上（`show()` 只藏 `main`，藏不到窗壳）。
+  if (typeof scriptBoardWindowClose === "function") scriptBoardWindowClose();
   return view;
 }
 
@@ -1288,6 +1427,9 @@ function wireScriptLoadout() {
     if (node) node.addEventListener("click", handler);
   };
   on("btn-script-loadout-discard", () => scriptLoadoutDiscard());
+  // 票 05：窗的关闭键（面板窗自己的收窗口）要把棋盘那两块送回寄存格——否则它们会停在
+  // 不可见的正文槽里（下一次重画时再来一次也无害，`restashBoardWindows` 幂等）。
+  on("script-confirm-close", () => restashBoardWindows(true));
   // M7 票 23：牌桌上那个"回棋盘结算"的出口（显示态由 `scriptBattleTableSync` 维护）。
   on("btn-t-pve-return", () => scriptBattleReturnToBoard());
   // 「退出战斗」与棋盘的「离开棋局」是**同一条**退出路径（票 20 的确认框 + 一条 suspend）：

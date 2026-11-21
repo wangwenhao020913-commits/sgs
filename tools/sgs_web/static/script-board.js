@@ -417,10 +417,15 @@ function scriptBoardPendingSpec(nodeId) {
  *
  * 判据全在 `state.script.board`：`script` / `layer` / `nodes` / `edges` / `pending` /
  * `board_error` 都是服务端字段；`state.script.board` 为空时把图收干净（不画上一次的底稿）。
+ *
+ * **自伸缩**（票 05 / spec A7）：stage 的高度 = 棋盘体自己的行数 × 格高 + 上下内边距——
+ * 行数取 `scriptGraphLayout` 已经算出的那个（`drawn.layout.rows`），**不是**视口比例 /
+ * 16:9。层数多到装不下时由 `.board-stage-scroll` 自己滚（登记在 tests 的滚动区表里）。
  */
 function scriptBoardRender() {
   const board = state.script.board;
   const graph = $("script-board-graph");
+  const stage = $("script-board-stage");
   const card = $("script-node-card");
   if (card) card.hidden = true;
   if (!board || !graph) {
@@ -428,6 +433,7 @@ function scriptBoardRender() {
       graph.innerHTML = "";
       graph.style.height = "0px";
     }
+    if (stage) stage.style.height = "0px";
     return null;
   }
   const script = board.script || {};
@@ -455,7 +461,7 @@ function scriptBoardRender() {
   } else {
     scriptBoardHint("点一个可走的节点推进（可到达集来自服务端，前端不重算）。");
   }
-  return scriptGraphRender(graph, {
+  const drawn = scriptGraphRender(graph, {
     mode: "board",
     layer,
     nodes: board.nodes || [],
@@ -465,6 +471,10 @@ function scriptBoardRender() {
     onNodeLeave: scriptBoardUnhover,
     onNodeClick: scriptBoardEnterNode,
   });
+  if (stage && drawn) {
+    stage.style.height = `${drawn.layout.rows * SCRIPT_GRAPH_CELL_H + SCRIPT_GRAPH_PAD * 2}px`;
+  }
+  return drawn;
 }
 
 /** 进棋盘：收下一份棋盘体（建局 / 继续 / 进入节点 / 刷新 / 结算的共同出口）并画出来。
@@ -493,6 +503,8 @@ function scriptBoardSync() {
     graph.innerHTML = "";
     graph.style.height = "0px";
   }
+  const stage = $("script-board-stage");
+  if (stage) stage.style.height = "0px";
   const card = $("script-node-card");
   if (card) card.hidden = true;
   scriptBoardShowError(null);
@@ -861,6 +873,116 @@ function scriptBoardUnhover() {
   return null;
 }
 
+/* ------------------------------------------------- 棋盘页的两扇内容窗（票 05） */
+
+/** 两块内容节点的引用（首次按 id 抓一次；之后即使被搬进窗里也还认得）。 */
+let SCRIPT_BOARD_WINDOW_NODES = null;
+
+/** 窗没开时这两块住在哪：`#board-window-stash`（仍在所有 `<main>` 之外）。 */
+function scriptBoardWindowNodes() {
+  if (!SCRIPT_BOARD_WINDOW_NODES) SCRIPT_BOARD_WINDOW_NODES = {};
+  const ids = { "script-face": "script-face", loadout: "script-loadout" };
+  for (const kind of Object.keys(ids)) {
+    if (!SCRIPT_BOARD_WINDOW_NODES[kind]) SCRIPT_BOARD_WINDOW_NODES[kind] = $(ids[kind]);
+  }
+  return SCRIPT_BOARD_WINDOW_NODES;
+}
+
+/** 窗里现在是哪一块（`data-dialog` 是唯一真源；不是棋盘自己的窗 ⇒ `null`）。 */
+function scriptBoardWindowKind() {
+  const dialog = $("script-confirm");
+  if (!dialog) return null;
+  const kind = dialog.getAttribute("data-dialog");
+  if (kind !== "script-face" && kind !== "loadout") return null;
+  return dialog.hidden === false ? kind : null;
+}
+
+/** 单槽位的窗是不是被**别的**模态占着（结算 / 三选一 / 退出确认…）。 */
+function scriptBoardOtherDialogOpen() {
+  const dialog = $("script-confirm");
+  if (!dialog) return false;
+  const kind = dialog.getAttribute("data-dialog");
+  return Boolean(kind) && kind !== "script-face" && kind !== "loadout";
+}
+
+/** 把两块送回寄存格（窗里那一块不动：搬走就等于关窗）。
+ *
+ * 为什么每次重画前都要收：`panelOpen` 会清空正文槽（单槽位：再开一扇 = 覆盖这一扇），
+ * 被清掉的那块会变成游离节点——游离节点上的 `document.getElementById` 找不到 id，
+ * `scriptFaceRender` / `scriptLoadoutRender` 就会静默失效（与票 03 的寄存格同一个理由）。
+ * `force` 只给「马上要开另一扇窗」的调用方用：连窗里那一块也收回。
+ */
+function restashBoardWindows(force) {
+  const stash = $("board-window-stash");
+  const body = $("script-confirm-body");
+  if (!stash) return null;
+  const open = scriptBoardWindowKind();
+  for (const node of Object.values(scriptBoardWindowNodes())) {
+    if (!node) continue;
+    if (!force && open && body && node.parentNode === body) continue;
+    if (node.parentNode !== stash) stash.appendChild(node);
+  }
+  return null;
+}
+
+/** 关掉棋盘自己的那扇窗（别人的确认框不动），顺带把两块送回寄存格。 */
+function scriptBoardWindowClose() {
+  if (scriptBoardWindowKind()) panelClose();
+  return restashBoardWindows(true);
+}
+
+/** 打开（或保证开着）棋盘自己的那扇窗：M 档、单槽位、正文就是那块面板本身。 */
+function scriptBoardWindowOpen(kind, spec) {
+  const node = scriptBoardWindowNodes()[kind];
+  if (!node) return null;
+  restashBoardWindows(true);
+  return panelOpen({
+    size: "M",
+    title: spec.title || "",
+    hint: spec.hint || "",
+    body: [node],
+    dialog: kind,
+  });
+}
+
+/** 进入节点就开窗（票 05 §3）：当前节点的面住在 M 窗里，**不在** `#view-script-board` 正文里。
+ *
+ * 三条纪律：
+ *  - 棋盘页看不见时不开（从牌桌 / 编辑器回来才会再画一次，别让窗浮在别的页上）；
+ *  - 窗被别的模态占着（结算 / 三选一 / 退出确认）时不抢：那些面同样是单槽位的；
+ *  - 已经开着同一块就不重开（重开 = 清空正文槽，节点会被摘掉再挂回去，白闪一次）。
+ */
+function scriptBoardFaceWindowOpen() {
+  const face = scriptBoardWindowNodes()["script-face"];
+  const view = $("view-script-board");
+  if (!face) return null;
+  if (view && view.hidden) return null;
+  if (scriptBoardOtherDialogOpen()) return null;
+  if (scriptBoardWindowKind() === "script-face" && face.parentNode === $("script-confirm-body")) {
+    return null;
+  }
+  const pending = state.script.board && state.script.board.pending;
+  const node = pending
+    ? scriptBoardNode(String(pending.node_id || "").split("/").pop())
+    : null;
+  return scriptBoardWindowOpen("script-face", {
+    title: "当前节点",
+    hint: node ? `${scriptBoardNodeName(node)}（结算之后回到棋盘）` : "结算之后回到棋盘",
+  });
+}
+
+/** HUD 的「背包」键：整备面进同一扇 M 窗（票 05 §4）。 */
+function scriptBoardLoadoutWindowOpen() {
+  const loadout = scriptBoardWindowNodes().loadout;
+  if (!loadout) return null;
+  // 开窗前重画一次：它可能刚从寄存格回来（上一次开窗被覆盖时被摘掉过）。
+  if (typeof scriptLoadoutRender === "function") scriptLoadoutRender();
+  return scriptBoardWindowOpen("loadout", {
+    title: "背包",
+    hint: "24 格（3×8）：拖动或点两格 = 交换 / 移动；丢弃不返还铜钱",
+  });
+}
+
 /* ------------------------------------------------------------ 离开棋局 */
 
 /** 「离开棋局」/ 牌桌「退出战斗」：走票 20 的退出确认框，确认后 suspend 并回开局页（进度已保存）。
@@ -869,6 +991,8 @@ function scriptBoardUnhover() {
  * 会话也要一起摘掉——否则顶栏「牌桌」仍可点进一个已 404 的会话。
  */
 function scriptBoardExit() {
+  // 退出确认借的是同一扇窗（单槽位）：先把两块内容送回寄存格，别让它们变成游离节点。
+  restashBoardWindows(true);
   return scriptExitConfirm(() => {
     state.sessionId = null;
     state.script.battle = null;
@@ -879,7 +1003,11 @@ function scriptBoardExit() {
 
 /* -------------------------------------------------------------- 接线 */
 
-/** 接线（`main.js:wire()` 里调一次）：刷新 / 离开棋局 / 三个导航键由 `NAV_BUTTONS` 统一挂。 */
+/** 接线（`main.js:wire()` 里调一次）：刷新 / 离开棋局 / 三个导航键由 `NAV_BUTTONS` 统一挂。
+ *
+ * 票 05 多挂三处：导航离开棋盘页（开局 / 回放）与「离开棋局」都要**先收起棋盘自己的窗**，
+ * 否则那扇窗住在所有 `<main>` 之外，会跟着浮到别的页面上。
+ */
 function wireScriptBoard() {
   const on = (id, handler) => {
     const node = $(id);
@@ -887,6 +1015,9 @@ function wireScriptBoard() {
   };
   on("btn-script-board-refresh", () => scriptBoardRefresh());
   on("btn-script-board-exit", () => scriptBoardExit());
+  for (const id of ["script-board-nav-lobby", "script-board-nav-replay"]) {
+    on(id, () => scriptBoardWindowClose());
+  }
   scriptBoardSync();
   return null;
 }
