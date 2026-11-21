@@ -10598,12 +10598,20 @@ def test_the_panel_window_close_key_is_only_for_dismissible_windows() -> None:
             "否则关掉窗就卡死（`state.script.confirm` 不重开、只能刷新）"
         )
 
-    # 3b. 本来就有「取消」语义的确认框：显式可关。
+    # 3b. 本来就有「取消」语义的确认框：显式可关。判据是**统一的**——凡是自己画了「取消」的
+    #     确认框都保留关窗键；只有强制选择面没有（编辑器的删除确认也在这条规则里，不是例外）。
     for name in ("scriptNewScript", "scriptExitConfirm"):
         body = _function_source(lobby, name)
         assert re.search(r"dismissible:\s*true", body), (
             f"`{name}` 本来就有「取消」语义：显式传 `dismissible: true` 保留关窗键"
         )
+    editor = (STATIC_DIR / "script-editor.js").read_text(encoding="utf-8")
+    editor_delete = _function_source(editor, "scriptEditorConfirmDelete")
+    assert "scriptConfirm({" in editor_delete, "编辑器的删除确认复用剧本层唯一的模态壳（票 25）"
+    assert re.search(r"dismissible:\s*true", editor_delete), (
+        "编辑器的删除确认也有「取消」（= 什么都不删）：它同样保留关窗键——"
+        "否则「有取消的确认框都能关」这条规则会多出一个说不清的例外"
+    )
 
     # 3c. 开局页三扇窗（剧本 / 将池 / 录像）：直连 `panelOpen`、不传参 ⇒ 吃上面的缺省（可关）。
     lobby_page = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")

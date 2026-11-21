@@ -1476,6 +1476,9 @@ function scriptEditorConfirmDelete(entity, references, owned) {
   return scriptConfirm({
     kind: "editor-delete",
     dialog: "editor-delete",
+    // 删除确认本来就有「取消」（= 什么都不删）：和撞旧档 / 退出确认同一条规则——保留关窗键
+    // （票 10 / review 修复 C。只有三选一 / 遗物 / 结算结果这类强制选择面才不画）。
+    dismissible: true,
     title: `删除${label}？`,
     text,
     body,
