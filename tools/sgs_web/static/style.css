@@ -231,8 +231,9 @@ body {
 
 /* 字号下限（原型 `--f11`…`--f22`）：只给字号加 floor，盒子尺寸仍全走 dsu。
  * 画布与面板窗各自声明 `--dsu`，故两者各拿各的口径（`var()` 在**声明处**求值，
- * 提到 `:root` 会让画布拿到视口口径——这正是本票要消灭的那个偏差）。 */
-.design-canvas, .script-confirm {
+ * 提到 `:root` 会让画布拿到视口口径——这正是本票要消灭的那个偏差）。
+ * 票 06 的技能浮层与面板窗同姿态：住在所有 `<main>` 之外，也自带 `--dsu`（见 `.skilltip`）。 */
+.design-canvas, .script-confirm, .skilltip {
   --f11: max(10px, calc(11 * var(--dsu)));
   --f12: max(10px, calc(12 * var(--dsu)));
   --f13: max(11px, calc(13 * var(--dsu)));
@@ -2306,6 +2307,35 @@ button.avatar-skill:hover { border-color: var(--accent); }
  * （ui-one-screen 票 03：剧本 / 将池两块的按钮行不该跟着脚注走）。 */
 .script-confirm .row { justify-content: flex-end; }
 .pw-body .row { justify-content: flex-start; }
+
+/* ---------------------------------------------------------------------------
+ * ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）
+ *
+ * 一层、全局、**不吃鼠标**：`.skilltip`（节点 = `#skilltip`，整个页面只有一份）的 left/top
+ * 由 `skill-tip.js:skillTipMove` 现写——跟着鼠标走，贴**壳边**与**面板窗边**都翻（判据是
+ * 纯函数 `skillTipPlace`，DOM 读数留在调用方）。
+ *
+ * `--dsu` 与面板窗**同一口径自带**（票 02 §2 的实测坑：窗 / 浮层住在所有 `<main>` 之外，
+ * 继承不到画布上的 `--dsu`；回落到 `:root` 的 vw 口径时，视口比 16:9 更宽就会比画布大一圈）。
+ * 颜色只用既有变量（`--card` / `--line` / `--dim` / `--accent`），**不新增颜色**。
+ * `z-index` 高于面板窗（`.script-confirm` 是 61）：浮层要盖在窗上；`pointer-events: none`
+ * 保证它永远不吃点击（不挡提交键）。`hidden` 只靠全局那条 `!important`。
+ * ------------------------------------------------------------------------- */
+.skilltip {
+  position: fixed; left: 0; top: 0; z-index: 62; pointer-events: none;
+  --dsu: calc(min(100vw, 100vh * 16 / 9) / 1600);
+  width: calc(340 * var(--dsu));
+  display: flex; flex-direction: column; gap: calc(5 * var(--dsu));
+  padding: calc(10 * var(--dsu)) calc(12 * var(--dsu));
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: calc(10 * var(--dsu));
+  box-shadow: 0 14px 34px rgba(43, 36, 28, .26);
+}
+.skilltip .tt-head { display: flex; align-items: baseline; gap: calc(8 * var(--dsu)); }
+.skilltip .tt-name { font-size: var(--f15); font-weight: 700; }
+.skilltip .tt-kind { font-size: var(--f11); color: var(--dim); }
+.skilltip .tt-meta { font-size: var(--f11); color: var(--accent); }
+.skilltip .tt-desc { font-size: var(--f12); color: var(--ink); line-height: 1.6; }
 
 /* ---------------------------------------------------------------------------
  * M7 票 21：剧本棋盘（卡格 + 固定 64×64 只放图标的节点 + 上方标题 + SVG 连线 + 悬浮卡）

@@ -126,6 +126,12 @@ const RECT_TABLE = new Map(Object.entries({
   "t-death-fx": { left: 0, top: 0, width: 1440, height: 810 },
   // vital-fx 票 02：体力演出层也是整壳覆盖层——目标武将块的矩形按它换算成覆盖层坐标。
   "t-vital-fx": { left: 0, top: 0, width: 1440, height: 810 },
+  // ui-one-screen 票 06：技能浮层的"跟着鼠标走"要看落点变不变，就得有**能算的几何**——
+  // 画布壳按 1600×900 设计单位给（于是垫片里 1 dsu = 1px，与真画布同口径），浮层给它
+  // CSS 里的 340dsu 宽 + 一个确定的内容高。缺这两条时壳只有 100px 宽、浮层在 dsu 里比壳
+  // 还宽 ⇒ 每次都贴左内缩，`left` 恒等，判据会假绿。
+  "view-script-board": { left: 0, top: 0, width: 1600, height: 900 },
+  skilltip: { left: 0, top: 0, width: 340, height: 130 },
 }));
 let rectSeq = 0;
 /* damage-fx 票 05：武将块的垫片矩形默认按座位固定派生（跨重绘稳定）；用例改这个数就能
@@ -331,6 +337,22 @@ class El {
   }
   get lastChild() { return this._children[this._children.length - 1] || null; }
   text() { return (this._html || this._text).replace(/<[^>]*>/g, "") + this._children.map((c) => c.text()).join(""); }
+  /* ui-one-screen 票 06：技能浮层的**委托**靠 `event.target.closest("[data-skill]")` 找宿主，
+   * 贴窗边翻转靠 `closest(".pw")` 认那扇窗。垫片此前没有这一口 ⇒ 委托式实现在烟测里直接
+   * `TypeError`（那是垫片的缺件，不是实现的错——与 `focus()` / `window.addEventListener`
+   * 那两条同一个理由）。与真 DOM 同义的语义：**命中自己也算**，沿 `parentNode` 上溯，
+   * 走到 `null` 返回 `null`。选择器只支持本票用到的两种：`[attr]` 与 `.class`。 */
+  closest(selector) {
+    const text = String(selector || "").trim();
+    for (let node = this; node; node = node.parentNode) {
+      if (text.startsWith("[") && text.endsWith("]")) {
+        if (node.getAttribute && node.getAttribute(text.slice(1, -1)) !== undefined) return node;
+      } else if (text.startsWith(".")) {
+        if (node.classList && node.classList.contains(text.slice(1))) return node;
+      }
+    }
+    return null;
+  }
 }
 
 /* damage-fx 票 05：`SgsDamageFX.create()` 要一张真 canvas + 2D 上下文。垫片给一个
@@ -32825,6 +32847,210 @@ await clickAndWait($("btn-lobby-pool"));
       + ` 节点内背包键=${bagDuringNode} 正文外=${faceOutsideView} 回寄存格=${backToStash}`);
   await discardScriptSave();
   unlinkSync(`${RUNS_DIR}/script-library.json`);
+  ui.state.script.board = null;
+}
+
+
+/* ============ ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）============
+ *
+ * 票面的验收是三条（真几何读数写进票面 `## Answer`，由 bsk 那一遍量；垫片没有布局引擎，
+ * 只断"存在 / 不同"，翻转的机械判据在 `tests/test_web_static.py` 的纯函数探针里）：
+ *   UI1-30 七处面：背包格 / 遗物格 / 三选一 / 商店行 / 事件后果 / HUD 出战槽 / 结算弹窗
+ *          的宿主都带 `data-skill`，浮层正文 = 同 id 的**载荷 `desc`**（逐字相同，
+ *          且已经过服务端裁切——原文里的注记标记一个字都不出现）；
+ *   UI1-31 一次委托：换一次列表重绘（真 PUT 回包的整份棋盘体）之后浮层仍工作，
+ *          document 上的三个监听数不涨、宿主节点上没有逐节点的 mouse* 监听；
+ *   UI1-32 收起：离开宿主 / 关窗之后 `#skilltip` 回到 hidden，宿主数与监听数都不涨。
+ *
+ * 进料 = 同一份真库（`script-loadout-library.json`）+ 真端点；遗物格与三选一那两处
+ * 用**真棋盘体的克隆**摆出状态（与票 22 的 `pendingClone` 同一姿态：服务端没有"平白
+ * 给一件遗物"的端点，而本票要断的只是"宿主带 id、浮层读载荷"）。
+ */
+{
+  writeFileSync(
+    SCRIPT_LOADOUT_LIBRARY,
+    readFileSync("tests/support/fixtures/script-loadout-library.json", "utf8"),
+  );
+  await discardScriptSave();
+
+  const tipDescriptions = JSON.parse(
+    readFileSync("tools/sgs_web/descriptions.json", "utf8"),
+  );
+  const tipRawText = (id) => String((tipDescriptions.skills || {})[id] || "");
+
+  const tipNode = () => $("skilltip");
+  const tipPart = (className) => {
+    const nodes = byClass(tipNode(), className);
+    return nodes.length ? nodes[0].textContent : "";
+  };
+  const tipShown = () => tipNode().hidden === false;
+  const tipHidden = () => tipNode().hidden === true;
+  const skillIdOf = (host) => (host ? host.getAttribute("data-skill") : undefined);
+  const hoverSkill = (host, x = 620, y = 420) => {
+    fireDocument("mouseover", { target: host, clientX: x, clientY: y });
+    return host;
+  };
+  const leaveSkill = (host, relatedTarget = null) => fireDocument("mouseout", {
+    target: host, relatedTarget, clientX: 620, clientY: 420,
+  });
+  const moveSkill = (x, y) => fireDocument("mousemove", { target: tipNode(), clientX: x, clientY: y });
+  const tipRect = () => ({ left: tipNode().style.left, top: tipNode().style.top });
+  /** 监听读数：浮层只该在 document 上各有一个（票面「一次委托」）。 */
+  const tipListenerCounts = () => ["mouseover", "mousemove", "mouseout"]
+    .map((name) => (documentListeners[name] || []).length);
+  /** 在 `root` 子树里数**浮层宿主**（带 `data-skill` 的节点）。 */
+  const tipHostCount = (root) => walkTree(root)
+    .filter((node) => node.getAttribute && node.getAttribute("data-skill") !== undefined)
+    .length;
+
+  /** 一处面：宿主带 id ⇒ 浮层显示，正文逐字等于**载荷**里那行的 `desc`。 */
+  const tipFace = (label, host, catalog) => {
+    const id = skillIdOf(host);
+    hoverSkill(host);
+    const want = String((catalog && id && catalog[id] && catalog[id].desc) || "");
+    const got = tipPart("tt-desc");
+    const face = {
+      label,
+      id,
+      shown: tipShown(),
+      name: tipPart("tt-name"),
+      want,
+      got,
+      // "已经裁过"的独立读数：原文有注记标记、浮层里一个字都没有。
+      rawMarked: tipRawText(id).includes("本仓"),
+      leaked: got.includes("本仓"),
+      pass: Boolean(id) && tipShown() && want.length > 0 && got === want
+        && tipPart("tt-name").length > 0 && !got.includes("本仓"),
+    };
+    return face;
+  };
+
+  const tipRun = await loadoutRun(2606);
+  const tipSlots = new Array(24).fill(null);
+  tipSlots[0] = "hero.liubei.rende";
+  tipSlots[1] = "hero.guanyu.wusheng";
+  let tipBoard = await putBackpack(tipSlots);
+
+  // ---- ① 背包格 + HUD 出战槽（同一份载荷行：目录里的 `desc`）----
+  const tipBagFace = tipFace("背包格", slotOf(0), tipBoard.catalog);
+  const tipHudHost = byClass($("script-hud-equipped"), "hud-equip-cell")[0];
+  const tipHudFace = tipFace("HUD 出战槽", tipHudHost, tipBoard.catalog);
+  // 跟随鼠标：再动一次鼠标，落点跟着变（内容不变）。
+  const tipRectBefore = tipRect();
+  moveSkill(980, 260);
+  const tipRectAfter = tipRect();
+
+  // ---- UI1-31：换一次列表重绘（真 PUT 回包）之后浮层仍工作，监听数不涨 ----
+  const tipListenersBefore = tipListenerCounts();
+  // 数宿主要从**装格子的容器**走：垫片的静态节点之间没有父子关系（M7-21 的注记），
+  // 从 `#script-loadout` 那一层走会数到 0——`#script-loadout-grid` 才是格子的落点。
+  const tipHostsBefore = tipHostCount($("script-loadout-grid"));
+  const tipSlotListenersBefore = ["mouseover", "mousemove", "mouseout", "mouseenter", "mouseleave"]
+    .map((name) => (slotOf(0).listeners[name] || []).length);
+  tipSlots[2] = "hero.zhaoyun.longdan";
+  tipBoard = await putBackpack(tipSlots);
+  const tipListenersAfter = tipListenerCounts();
+  const tipThirdFace = tipFace("重绘后的背包格", slotOf(2), tipBoard.catalog);
+  const tipHostsAfter = tipHostCount($("script-loadout-grid"));
+  const tipSlotListenersAfter = ["mouseover", "mousemove", "mouseout", "mouseenter", "mouseleave"]
+    .map((name) => (slotOf(2).listeners[name] || []).length);
+  check("UI1-31 一次委托：换一次列表重绘（真 PUT 回包）后浮层仍工作，宿主节点没有 mouse* 监听、document 监听数不涨",
+    tipThirdFace.pass
+    && tipListenersAfter.join(",") === tipListenersBefore.join(",")
+    && tipListenersAfter.every((count) => count === 1)
+    && tipHostsAfter === 3 && tipHostsBefore === 2
+    && tipSlotListenersBefore.every((count) => count === 0)
+    && tipSlotListenersAfter.every((count) => count === 0)
+    && tipRectBefore.left !== tipRectAfter.left,
+    `第三格=${JSON.stringify({ id: tipThirdFace.id, got: tipThirdFace.got.slice(0, 12) })}`
+      + ` 监听=${tipListenersBefore.join("/")}→${tipListenersAfter.join("/")}`
+      + ` 宿主=${tipHostsBefore}→${tipHostsAfter}`
+      + ` 宿主监听=${tipSlotListenersBefore.join("/")}→${tipSlotListenersAfter.join("/")}`
+      + ` 跟随=${tipRectBefore.left}→${tipRectAfter.left}`);
+
+  // ---- ② 事件后果行（进 e1：事件面的 grant_skill 那条后果就是宿主）----
+  const tipEvent = await enterNode(tipRun.run_id, "e1");
+  const tipEventRow = faceRows().find((row) => row.getAttribute("data-option") === "2");
+  const tipEventHost = tipEventRow
+    ? byClass(tipEventRow, "script-face-note").find((node) => node.getAttribute("data-skill"))
+    : null;
+  const tipEventFace = tipFace("事件后果行", tipEventHost, tipEvent.catalog);
+  // 结算这一问（收下铜钱）⇒ 回棋盘，后面才进得了商店。
+  await clickAndWait(faceOption(0));
+  await clickAndWait(confirmButtons()[0]);
+
+  // ---- ③ 商店行（进 s1：库存六技能 + 两遗物，目录行由服务端按 spec 下发）----
+  const tipShop = await enterNode(tipRun.run_id, "s1");
+  const tipStockId = tipShop.pending.spec.stock.skills[0];
+  const tipRelicId = tipShop.pending.spec.stock.relics[0];
+  const tipShopFace = tipFace("商店行", faceStock(tipStockId), tipShop.catalog);
+
+  // ---- ④ 遗物格（真棋盘体的克隆：没有"平白给一件遗物"的端点）----
+  const tipRelicClone = JSON.parse(JSON.stringify(tipShop));
+  tipRelicClone.run.relics = [tipRelicId];
+  ui.scriptBoardShow(tipRelicClone);
+  const tipRelicCell = loadoutRelics()
+    .find((cell) => cell.getAttribute("data-relic-slot") === "0");
+  const tipRelicFace = tipFace("遗物格", tipRelicCell, tipRelicClone.catalog);
+
+  // ---- ⑤ 结算弹窗（买一件 ⇒ 结果弹窗的货架行）----
+  await clickAndWait(faceStock(tipStockId));
+  await clickAndWait(faceGo());
+  const tipShelfRow = byClass($("script-confirm-body"), "script-face-row")
+    .find((row) => row.getAttribute("data-item-id") === tipStockId);
+  const tipResultFace = tipFace("结算弹窗", tipShelfRow, tipRelicClone.catalog);
+  await clickAndWait(confirmButtons()[0]);
+
+  // ---- ⑥ 三选一（行是宿主；候选 id 在目录里 ⇒ 正文 = 载荷的 desc）----
+  const tipPickedSkill = ui.state.script.board.run.backpack.slots.filter(Boolean)[0];
+  pendingClone({
+    kind: "battle",
+    battle_seed: 2606,
+    pve: {
+      identities: [], principal: 0, protected_ally: null,
+      victory: { kind: "rout" }, boss: null, grants: [], seats: [],
+    },
+    rewards: [[tipPickedSkill, "hero.liubei.rende"]],
+    boss_relic: null,
+  }, { nodeId: "b1", room: { name: "麦田" } });
+  await clickAndWait(faceGo());
+  const tipPickHost = pickRows()[0];
+  const tipPickFace = tipFace("三选一", tipPickHost, ui.state.script.board.catalog);
+  // 窗内宿主：垫片的静态节点之间没有父子关系 ⇒ `closest(".pw")` 量不出来（那一条归纯函数
+  // 探针 + 真浏览器那一遍）。这里断"这一行确实在窗的正文槽里"。
+  const tipPickInWindow = Boolean(tipPickHost) && subtreeContains($("script-confirm-body"), tipPickHost);
+
+  const tipFaces = [tipBagFace, tipHudFace, tipEventFace, tipShopFace, tipRelicFace,
+    tipResultFace, tipPickFace];
+  check("UI1-30 浮层覆盖七处面：宿主都带 data-skill，正文逐字 = 同 id 的载荷 desc（原文里的注记一个字都不出现）",
+    tipFaces.length === 7
+    && tipFaces.every((face) => face.pass)
+    && tipFaces.some((face) => face.rawMarked)
+    && tipFaces.every((face) => !face.leaked)
+    && tipHudHost !== null && tipEventHost !== null && tipShopFace.id === tipStockId
+    && tipRelicFace.id === tipRelicId && tipPickInWindow,
+    tipFaces.map((face) => `${face.label}:${face.id ? face.id.split(".").pop() : "缺"}/${face.pass ? "ok" : "红"}`)
+      .join(" "));
+
+  // ---- UI1-32：收起（离开宿主 / 关窗）----
+  leaveSkill(tipPickHost);
+  const tipClosedByLeave = tipHidden();
+  // 关窗：浮层跟着收（它是一层全局 DOM，不能指望窗的 display:none 帮它藏）。
+  hoverSkill(tipPickHost);
+  const tipShownInWindow = tipShown();
+  const tipListenersAtClose = tipListenerCounts();
+  const tipHostsAtClose = tipHostCount($("script-confirm-body"));
+  await clickAndWait($("script-confirm-close"));
+  const tipClosedByWindow = tipHidden();
+  check("UI1-32 收起：离开宿主 / 关窗之后浮层回到 hidden，宿主数与监听数都不涨",
+    tipClosedByLeave && tipShownInWindow && tipClosedByWindow
+    && tipListenerCounts().join(",") === tipListenersAtClose.join(",")
+    && tipHostCount($("script-confirm-body")) === tipHostsAtClose,
+    `离开=${tipClosedByLeave} 窗内=${tipShownInWindow} 关窗=${tipClosedByWindow}`
+      + ` 监听=${tipListenersAtClose.join("/")} 窗口宿主=${tipHostsAtClose}`);
+
+  await discardScriptSave();
+  unlinkSync(SCRIPT_LOADOUT_LIBRARY);
   ui.state.script.board = null;
 }
 

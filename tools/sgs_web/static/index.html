@@ -835,6 +835,16 @@
   </div>
 </div>
 
+<!-- ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）。
+  **一层**：整个页面只有这一个节点，内容全由 `skill-tip.js` 按载荷（目录行的 `desc`）填，
+ 所以这里没有静态子节点——也就不存在第二份描述文案。宿主只带 `data-skill` 属性，
+ 浮层的接线是 `document` 上那一组三条监听（一次委托，不给宿主挂 mouseenter/mouseleave）。
+ 位置纪律：住在所有 `<main>` 之外（与面板窗同一个姿势），否则会被 `display: none` 的祖先
+ 一起藏掉；`pointer-events: none`（不吃鼠标，不挡提交键）；`aria-hidden="true"`（纯视觉，
+ 屏幕阅读器不念一遍悬停内容）。`hidden` 只靠全局 `[hidden]{display:none!important}`。
+ 新静态节点只用垫片认识的标签（div）：M7-21b / M7-25b 会把这一段扫进去。 -->
+<div id="skilltip" class="skilltip" hidden aria-hidden="true"></div>
+
 <!-- U1-00：前端按职责拆成普通脚本，**这里的顺序就是运行顺序**；页面与
      tests/support/ui_smoke.mjs 共用这一份清单（不引入 npm / 打包 / ES module）。 -->
 <script src="core.js"></script>
@@ -863,6 +873,11 @@
      校验面板）。节点图调 `script-board.js` 那一份共用渲染器（`mode: "editor"`，不画状态色）；
      删除确认复用 `script-lobby.js` 的唯一模态壳。`wireScriptEditor()` 在 main.js 里接线。 -->
 <script src="script-editor.js"></script>
+<!-- ui-one-screen 票 06：技能详情浮层（一层全局 DOM + `document` 上那一组三条委托监听）。
+     排在整备面之后：它读同一份目录行（`catalog[id].desc`，票 01 的服务端裁切结果）与
+     整备面的类别 / 价格显示口（`SCRIPT_ITEM_KIND_LABELS` / `scriptPriceText`），不抄第二份。
+     浮层节点 `#skilltip` 是静态的（所有 `<main>` 之外），宿主只带 `data-skill` 属性。 -->
+<script src="skill-tip.js"></script>
 <script src="session.js"></script>
 <script src="candidates.js"></script>
 <script src="card-view.js"></script>

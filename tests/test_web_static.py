@@ -11050,3 +11050,276 @@ def test_the_editor_smoke_library_is_a_valid_script_library() -> None:
     assert [seat.template for seat in story.enemies] == ["tpl.grunt", "tpl.brute"], (
         "tpl.grunt 被共享引用：删它之后校验面板必须立刻出现悬空条目"
     )
+
+
+# ---------------------------------------------------------------------------
+# ui-one-screen 票 06：技能详情浮层（spec A8 / §8 R7）
+#
+# 三层判据，各自落在唯一真源上：
+# 1. **一次委托**：`skill-tip.js` 里对浮层只挂一组 document 级监听（mouseover /
+#    mousemove / mouseout），宿主侧只靠 `data-skill` 属性——没有逐节点监听这回事。
+# 2. **描述只来自载荷**：`desc`（目录行，服务端裁过）优先、`view.skills[].description`
+#    兜底；前端零正则、零 `slice`、零第二份文案。
+# 3. **翻转判据是纯函数**：`skillTipPlace(...)` 吃数字（设计单位），喂四种情形到 node 里
+#    直接算——右上 / 左下 / 右下角 / **窗内宿主**（bounds = 那扇窗）。
+# 行为（覆盖七处面 / 重绘后仍工作 / 收起）归烟测 `UI1-30..32`。
+# ---------------------------------------------------------------------------
+
+_SKILL_TIP_JS = STATIC_DIR / "skill-tip.js"
+_SKILL_TIP_CSS_SELECTOR = ".skilltip"
+_DESCRIPTIONS_JSON = Path("tools") / "sgs_web" / "descriptions.json"
+
+
+def _skill_tip_rule() -> str:
+    """`.skilltip` **自己**那条规则（它的选择器也出现在共用 `--f*` 的分组里，别取错）。
+
+    取法：按逗号拆选择器，只要 `.skilltip` 单独出现在某一组里就算；再挑带 `position:`
+    的那条（浮层的位置 / 尺寸 / 层级住这一条）。找不到 / 多于一条都算红。
+    """
+    groups = [
+        body
+        for selector, body in _css_rules()
+        if _SKILL_TIP_CSS_SELECTOR in [one.strip() for one in selector.split(",")]
+    ]
+    assert groups, f"style.css 里找不到 `{_SKILL_TIP_CSS_SELECTOR}` 自己的规则"
+    positional = [body for body in groups if re.search(r"(?m)^\s*position:", body)]
+    assert len(positional) == 1, (
+        f"`{_SKILL_TIP_CSS_SELECTOR}` 的位置规则应当只有一条：{groups}"
+    )
+    return positional[0]
+
+
+def _skill_tip_source() -> str:
+    assert _SKILL_TIP_JS.exists(), (
+        "票 06 的浮层必须是单独一份脚本 `tools/sgs_web/static/skill-tip.js`（票面 Touches）"
+    )
+    return _SKILL_TIP_JS.read_text(encoding="utf-8")
+
+
+def test_the_skill_tip_is_one_delegated_overlay() -> None:
+    """一层全局浮层 + **一组** document 监听（票面「一次委托」）。
+
+    判据分五段，全部是可核的机械事实：
+
+    1. 脚本在清单里、且晚于整备面（它读目录行）/早于 `main.js`；
+    2. `index.html` 里浮层层**只有一个**节点（`id="skilltip"`），住在所有 `<main>` 之外、
+       `hidden` + `aria-hidden="true"`，里面没有静态子节点（内容全由 JS 按载荷填，避免
+       第二份静态文案）；
+    3. `skill-tip.js` 里 `addEventListener` **恰好三条**，都是 document 级
+       （mouseover / mousemove / mouseout）；没有 `mouseenter` / `mouseleave`（逐节点监听
+       那一套），宿主靠 `closest("[data-skill]")` 找；
+    4. 宿主侧两文件（整备面 / 棋盘）里没有浮层的 hover 入口——只有收起的 `skillTipHide`；
+    5. CSS：`pointer-events: none`（不吃鼠标）、`position: fixed`、`--dsu` 自带、
+       宽 340dsu、`z-index` 高于面板窗。
+    """
+    srcs = _script_srcs()
+    assert "skill-tip.js" in srcs, f"skill-tip.js 不在 index.html 的脚本清单里：{srcs}"
+    at = srcs.index("skill-tip.js")
+    assert srcs.index("script-loadout.js") < at < srcs.index("main.js"), (
+        "浮层要读目录行（`script-loadout.js` 之后），仍由 `main.js` 收尾"
+    )
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert html.count('id="skilltip"') == 1, "浮层层只有一个节点（一层，不每个宿主一份）"
+    tip_at = html.index('id="skilltip"')
+    assert tip_at > html.rindex("</main>"), "浮层住在所有 `<main>` 之外（与面板窗同一个姿势）"
+    tag_end = html.index(">", tip_at)
+    tag = html[tip_at:tag_end]
+    assert "hidden" in tag and 'aria-hidden="true"' in tag, f"浮层的静态属性：{tag}"
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+    tip_element = _element(builder.root, element_id="skilltip")
+    assert tip_element is not None, "index.html 里找不到浮层节点 `#skilltip`"
+    assert tip_element["children"] == [], (
+        "浮层里不放静态子节点：内容全部按载荷填（不许抄第二份文案）"
+    )
+    shell = html[tip_at:html.index("<script", tip_at)]
+    assert "<svg" not in shell and "<img" not in shell, (
+        "浮层不用 svg / img（静态标签白名单：M7-21b / M7-25b 会扫到这一段）"
+    )
+
+    source = _skill_tip_source()
+    listeners = re.findall(r'addEventListener\("([\w-]+)"', source)
+    assert sorted(listeners) == ["mousemove", "mouseout", "mouseover"], (
+        "浮层只挂**一组** document 级监听（mouseover / mousemove / mouseout）："
+        f"{listeners}"
+    )
+    assert source.count("addEventListener(") == 3, (
+        "多出来的监听就是逐节点那一套的苗头（票面：一次委托）"
+    )
+    assert source.count("document.addEventListener(") == 3, (
+        "三条都挂在 document 上（委托，不挂宿主）"
+    )
+    for per_host in ("mouseenter", "mouseleave"):
+        assert not re.search(rf'addEventListener\("{per_host}"', source), (
+            f"不许用 {per_host}（逐节点监听：行数一多就是 O(n) 个监听）"
+        )
+    assert 'closest("[data-skill]")' in source, "宿主靠 `closest(\"[data-skill]\")` 找"
+    assert 'closest(".pw")' in source, "窗内宿主靠 `closest(\".pw\")` 认那扇窗（贴窗边翻）"
+
+    for name in ("script-loadout.js", "script-board.js"):
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert "skillTipShow(" not in text and "skillTipMove(" not in text, (
+            f"{name} 不许调浮层的 hover 入口（入口只有委托那一组监听）"
+        )
+        for line in text.splitlines():
+            if "addEventListener(\"mouse" in line:
+                assert "skillTip" not in line, (
+                    f"{name} 里不许给宿主挂逐节点的浮层监听：{line.strip()}"
+                )
+
+    tip_rule = _skill_tip_rule()
+    assert re.search(r"pointer-events:\s*none", tip_rule), (
+        f"浮层不许吃鼠标事件（spec A8 / 票面「不许做」）：{tip_rule}"
+    )
+    assert re.search(r"position:\s*fixed", tip_rule), "浮层是全局一层（fixed，不随某个滚动区）"
+    assert re.search(r"width:\s*calc\(340 \* var\(--dsu\)\)", tip_rule), (
+        f"浮层宽 340dsu（原型 `.skilltip` 同值）：{tip_rule}"
+    )
+    assert re.search(r"(?m)^\s*--dsu:", tip_rule), (
+        "浮层住在所有 `<main>` 之外 ⇒ `--dsu` 必须自带（与 `.script-confirm` 同一条公式）"
+    )
+    tip_z = re.search(r"z-index:\s*(\d+)", tip_rule)
+    window_z = re.search(r"z-index:\s*(\d+)", _css_rule(".script-confirm"))
+    assert tip_z is not None and window_z is not None and int(tip_z.group(1)) > int(window_z.group(1)), (
+        "浮层的 z-index 必须高于面板窗（票面：z-index 高于面板窗）"
+    )
+
+
+def test_the_skill_tip_reads_the_description_from_the_payload() -> None:
+    """描述只来自载荷（spec §8 R7）：目录行 `desc` 优先，`view.skills[].description` 兜底。
+
+    判据是**否定式的机械事实**——前端没有裁切、没有第二份文案：
+
+    - 源码里有 `desc`（目录行）与 `description`（快照技能对象）两个读口；
+    - 源码里没有 `本仓`（注记标记）、没有 `slice(` / `substr` / `substring(` / `replace(`
+      （裁 / 拼描述），没有正则字面量式的 `match(` / `RegExp`；
+    - `descriptions.json` 里的全文（≥ 20 字的那批）**一句**都不出现在源码里（不抄文案）；
+    - 类别 / 价格文案复用既有的单一真源（`SCRIPT_ITEM_KIND_LABELS` / `scriptPriceText`），
+      浮层里没有第二份中文类别表。
+    """
+    source = _skill_tip_source()
+    assert ".desc" in source or "desc" in source, "目录行的 `desc` 是描述的主来源"
+    assert re.search(r"\bdesc\b", source), "目录行的 `desc` 是描述的主来源"
+    assert ".description" in source, "拿不到目录行时的兜底是 `view.skills[].description`"
+    assert "state.script.board" in source and "catalog" in source, (
+        "目录行从棋盘体的 `catalog` 读（票 01 的那份载荷）"
+    )
+    assert "state.view" in source and "skills" in source, (
+        "兜底那条路读快照的技能清单（`view.skills`）"
+    )
+
+    assert "本仓" not in source, (
+        "前端不许出现注记标记 `本仓`（裁切规则的唯一实现在 `descriptions.py`，浮层不抄）"
+    )
+    for banned in ("slice(", "substr", "substring(", "replace(", "match(", "RegExp", "trim("):
+        assert banned not in source, (
+            f"前端不许裁 / 拼描述：`{banned}` 出现在 skill-tip.js 里"
+        )
+
+    payload = json.loads(_DESCRIPTIONS_JSON.read_text(encoding="utf-8"))
+    texts = list((payload.get("skills") or {}).values())
+    long_texts = [text for text in texts if isinstance(text, str) and len(text) >= 20]
+    assert long_texts, "descriptions.json 里应当有技能全文（票 01 的数据源）"
+    copied = [text[:20] for text in long_texts if text[:20] in source]
+    assert not copied, f"浮层抄了描述文案：{copied[:2]}"
+
+    assert "SCRIPT_ITEM_KIND_LABELS" in source, (
+        "类别文案复用整备面那张表（不写第二份「技能 / 遗物」）"
+    )
+    assert "scriptPriceText(" in source, "价格文案复用整备面那个口（不写第二份「N 铜钱」）"
+    assert "暂无描述" not in source, (
+        "「暂无描述」是服务端 `descriptions.py` 的措辞，前端不自己编兜底"
+    )
+
+
+_SKILL_TIP_PLACE_PROBE = """
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+// 真浏览器里 `document` 一定有：模块顶层挂的就是那三条委托监听，桩一条就够。
+const added = [];
+const document = { addEventListener: (name, fn) => added.push([name, fn]) };
+const context = vm.createContext({ console, document });
+vm.runInContext(readFileSync("tools/sgs_web/static/skill-tip.js", "utf8"), context, {
+  filename: "skill-tip.js",
+});
+const cases = {
+  // 右上：越右边 ⇒ 翻到光标左侧（纵向照常落在光标下方）
+  right: [1500, 400, 340, 220, { width: 1600, height: 900 }],
+  // 左下：越下边 ⇒ 翻到光标上方（横向照常落在光标右侧）
+  bottom: [300, 860, 340, 220, { width: 1600, height: 900 }],
+  // 右下角：两边都越 ⇒ 两边都翻
+  corner: [1580, 880, 340, 220, { width: 1600, height: 900 }],
+  // 窗内宿主：bounds = 那扇窗（S 档 480×300 dsu）⇒ 同一光标在壳里不翻、在窗里必须翻
+  window: [420, 60, 340, 180, { width: 480, height: 300 }],
+  sameInShell: [420, 60, 340, 180, { width: 1600, height: 900 }],
+};
+const out = {};
+for (const [name, args] of Object.entries(cases)) {
+  out[name] = vm.runInContext(
+    `skillTipPlace(${args.map((arg) => JSON.stringify(arg)).join(", ")})`,
+    context,
+  );
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _skill_tip_place_probe() -> dict:
+    """跑真 `skill-tip.js`（node vm），拿 `skillTipPlace` 的四种情形读数。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "skill_tip_place_probe.mjs"
+        probe.write_text(_SKILL_TIP_PLACE_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"skillTipPlace 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def test_the_skill_tip_flips_at_the_shell_and_the_window_edge() -> None:
+    """翻转判据是**纯函数**（吃数字，不量 DOM）：两种边各自翻、两边都越就两边翻。
+
+    期望值全部由票面的三条规则手算（光标偏移 14 / 18 dsu、内缩 8 dsu）：
+
+    - 右上（光标 x=1500, y=400，浮层 340×220，壳 1600×900）⇒ x 翻到左：
+      1500 − 14 − 340 = 1146；y = 400 + 18 = 418；
+    - 左下（光标 300, 860）⇒ y 翻到上：860 − 18 − 220 = 622；x = 300 + 14 = 314；
+    - 右下角（1580, 880）⇒ 两边都翻：1226 / 642；
+    - 窗内宿主（S 窗 480×300，光标相对窗 420, 60，浮层 340×180）⇒ 按**窗**翻：
+      420 − 14 − 340 = 66（壳 1600 宽时同一光标不翻，x 仍是 434）——这一对读数就是
+      "bounds 不是永远等于壳"的判据；
+    - 五种情形都不越出 bounds（含 8dsu 内缩）。
+    """
+    probe = _skill_tip_place_probe()
+    cases = {
+        "right": ((1500, 400, 340, 220, (1600, 900)), (1146, 418)),
+        "bottom": ((300, 860, 340, 220, (1600, 900)), (314, 622)),
+        "corner": ((1580, 880, 340, 220, (1600, 900)), (1226, 642)),
+        "window": ((420, 60, 340, 180, (480, 300)), (66, 78)),
+        "sameInShell": ((420, 60, 340, 180, (1600, 900)), (434, 78)),
+    }
+    for name, (args, expected) in cases.items():
+        parsed = probe[name]
+        assert (parsed["x"], parsed["y"]) == expected, (
+            f"{name} 的落点不对：期望 {expected}，实得 ({parsed['x']}, {parsed['y']})"
+        )
+        _, _, tip_w, tip_h, bounds = args
+        assert parsed["x"] >= 8 and parsed["y"] >= 8, f"{name} 越出 8dsu 内缩：{parsed}"
+        assert parsed["x"] + tip_w <= bounds[0] - 8, f"{name} 越出右边界：{parsed}"
+        assert parsed["y"] + tip_h <= bounds[1] - 8, f"{name} 越出下边界：{parsed}"
+    assert probe["window"]["x"] != probe["sameInShell"]["x"], (
+        "同一光标在窗里翻、在壳里不翻——两条 bounds 必须真的分开"
+    )

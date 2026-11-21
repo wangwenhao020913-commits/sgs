@@ -488,6 +488,8 @@ function scriptBoardShow(body) {
     if (Number.isInteger(body.revision)) state.script.revision = body.revision;
   }
   if (!state.script.board) return null;
+  // 票 06：换局 / 换面 ⇒ 技能浮层先收（旧宿主马上要被重铺，别挂着一层过期的浮层）。
+  if (typeof skillTipHide === "function") skillTipHide();
   show("view-script-board");
   scriptBoardRender();
   // 票 22：整备面 / 当前节点的面读同一份棋盘体（`script-loadout.js`；调用时解析）。
@@ -911,8 +913,12 @@ function scriptBoardOtherDialogOpen() {
  * 被清掉的那块会变成游离节点——游离节点上的 `document.getElementById` 找不到 id，
  * `scriptFaceRender` / `scriptLoadoutRender` 就会静默失效（与票 03 的寄存格同一个理由）。
  * `force` 只给「马上要开另一扇窗」的调用方用：连窗里那一块也收回。
+ *
+ * 票 06 追加一行：**收窗 / 换窗就收浮层**。浮层是一层全局 DOM（不在窗里），指望不上
+ * `[hidden]` 的祖先把它一起藏掉，故这里显式收（幂等：收着的时候再收什么也不发生）。
  */
 function restashBoardWindows(force) {
+  if (typeof skillTipHide === "function") skillTipHide();
   const stash = $("board-window-stash");
   const body = $("script-confirm-body");
   if (!stash) return null;
@@ -1007,6 +1013,10 @@ function scriptBoardExit() {
  *
  * 票 05 多挂三处：导航离开棋盘页（开局 / 回放）与「离开棋局」都要**先收起棋盘自己的窗**，
  * 否则那扇窗住在所有 `<main>` 之外，会跟着浮到别的页面上。
+ *
+ * 票 06 多挂一处：面板窗的「关闭」键同时收掉技能浮层。浮层是一层全局 DOM（不住在窗里），
+ * 光靠 `[hidden]` 的祖先藏不掉它；而「关闭」是 `panel-window.js` 自己的监听（面板窗那扇壳
+ * 不归本票改），故这里补一条**只收浮层**的监听——不接管关窗、不抢 ESC。
  */
 function wireScriptBoard() {
   const on = (id, handler) => {
@@ -1018,6 +1028,7 @@ function wireScriptBoard() {
   for (const id of ["script-board-nav-lobby", "script-board-nav-replay"]) {
     on(id, () => scriptBoardWindowClose());
   }
+  on("script-confirm-close", () => (typeof skillTipHide === "function" ? skillTipHide() : null));
   scriptBoardSync();
   return null;
 }
