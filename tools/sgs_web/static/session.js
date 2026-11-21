@@ -318,8 +318,14 @@ function openingLiveView(body) {
 
 /* ------------------------------------------------ 回放期逐事件全表更新（U3-05 / D11） */
 
-/** 技能增删的两条 delta（M6 票 04）：`skill_gain` / `skill_lose`。 */
-const SKILL_DELTA_TYPES = new Set(["skill_gain", "skill_lose"]);
+/** 技能状态的三条 delta（M6 票 04 的 `skill_gain` / `skill_lose`；ui-live-refresh 票 03
+ * 补上 `skill_suppress`）：这三条都只改"技能清单里的某一格"（有没有 / 是否失效），
+ * 前端拼不出来，故一律**批首装终态**（`adoptSkillLists`）。
+ *
+ * `skill_suppress` 是同一类漏登记：它进了 `REBUILD_ONLY_DELTAS`（要整桌重建），却没进
+ * 这张表 ⇒ 整批回放期间按钮区不认识"被封锁"，与 [谦逊] 牌区回手那一类报障同形。
+ */
+const SKILL_DELTA_TYPES = new Set(["skill_gain", "skill_lose", "skill_suppress"]);
 
 /** 这条可见记录是不是**技能增删**（`:func:`adoptSkillLists` 的触发判据）。 */
 function isSkillDeltaRecord(record) {
@@ -357,6 +363,12 @@ function adoptSkillLists(liveView, body) {
  */
 function cloneLiveView(body) {
   const view = { ...body };
+  // ui-live-refresh 票 02：顶层 `skills` 与快照里的 `relics` 也会被**显示事实**写
+  // （技能外观组件整份替换 / 遗物栏），故它们同样要深一层拷贝——否则回放期写的是
+  // `state.view`（权威提交视图）里的那一份，回退 / 重播都会看到被改过的"权威"。
+  view.skills = Array.isArray(body.skills)
+    ? body.skills.map((entry) => ({ ...entry }))
+    : body.skills;
   const snapshot = body && body.snapshot;
   if (!snapshot) return view;
   view.snapshot = {
@@ -373,6 +385,7 @@ function cloneLiveView(body) {
     self_hand: (snapshot.self_hand || []).slice(),
     discard: (snapshot.discard || []).slice(),
     processing: (snapshot.processing || []).slice(),
+    relics: Array.isArray(snapshot.relics) ? snapshot.relics.slice() : snapshot.relics,
   };
   return view;
 }
@@ -581,6 +594,123 @@ function liveUpdateCardTags(view, cardId, tag, adding) {
       else delete next.tags;
       list[index] = next;
     }
+  }
+}
+
+/* ------------------------------------------------ 显示事实（ui-live-refresh 票 02/修复 2） */
+
+/** 服务端的 `display_facts` → 规范化的事实行（缺 `seq` / 缺 `key` 的丢掉：fail-closed）。
+ *
+ * **事实不占回放步**（修复 2）：它们**挂到记录上**（`attachDisplayFacts`），在**那条记录之后**
+ * 应用、同一次 `renderTable` 里生效。此前每个事实自己是一条 `live_only` 记录 ⇒ 一个事实
+ * 白白多花一个回放步长（≈100 ms，一批几十条事实就是几秒的"操作变慢"），并且在同一条记录
+ * 前后各重建一次整桌（先刷新标签、再刷同心跳，看起来就是"闪一下"）。
+ */
+function displayFactRecords(body) {
+  const facts = body && Array.isArray(body.display_facts) ? body.display_facts : [];
+  const out = [];
+  for (const fact of facts) {
+    if (!fact || typeof fact.key !== "string" || !fact.key) continue;
+    if (!Number.isFinite(Number(fact.seq))) continue;
+    out.push({
+      seq: Number(fact.seq),
+      scope: String(fact.scope || ""),
+      seat: fact.seat === undefined || fact.seat === null ? null : Number(fact.seat),
+      key: fact.key,
+      value: fact.value,
+    });
+  }
+  out.sort((left, right) => left.seq - right.seq);
+  return out;
+}
+
+/** 把事实**挂到"最后一条 seq ≤ 事实 seq"的记录上**（事实采样于那一步之后，故应用在那条之后）。
+ *
+ * 服务端在每步结束采样，事实的 `seq` = 那一步记录流的末条；因此"事实属于这条记录之后"。
+ * 找不到更早的记录（事实早于这一批）就挂到第一条上——位置只会偏差一条，不会丢。
+ * 记录上没有对应事实的批次（绝大多数）一个字节都不变：`displayFacts` 是按需加的。
+ */
+function attachDisplayFacts(records, facts) {
+  if (!Array.isArray(records) || !records.length || !facts.length) return;
+  let index = 0;
+  for (const fact of facts) {
+    while (index + 1 < records.length && Number(records[index + 1].seq) <= fact.seq) {
+      index += 1;
+    }
+    if (!records[index]) continue;
+    // 浅拷贝再挂：`incoming` 里的对象就是响应体 `body.records` 的那几个（`mergeLiveDeltas`
+    // 原样返回），挂上去等于把展示事实写进 `state.view.records`（权威载荷）。拷贝一份，
+    // 让事实只活在回放流里。
+    if (!records[index].displayFacts) {
+      records[index] = { ...records[index], displayFacts: [] };
+    }
+    records[index].displayFacts.push(fact);
+  }
+}
+
+/** 一条显示事实 → 视图里那一格（**通用**写入口：没有任何逐字段分支）。
+ *
+ * 落点由服务端声明的 `scope` 决定（闭集，与 `projection.PAYLOAD_KEYS` 的 level 同名）：
+ *   - `player` → `snapshot.players[seat][key]`；
+ *   - `snapshot` → `snapshot[key]`；
+ *   - `view` → 视图顶层 `[key]`；
+ *   - `skill` → **技能外观组件**：`value` 是 `{skill_id: 外观载荷}`，整份替换——表里没有的
+ *     技能把 `appearance` 删掉（技能失去 / 化身库空了都是这个形状）。
+ * 未登记 scope / 找不到座位 = 零动作（fail-closed，不猜落点）。
+ */
+function applyDisplayFact(fact, view = state.liveView) {
+  if (!fact || !view || !view.snapshot) return false;
+  const key = typeof fact.key === "string" ? fact.key : "";
+  if (!key) return false;
+  if (fact.scope === "player") {
+    const players = view.snapshot.players || [];
+    const player = players.find((item) => Number(item.seat) === Number(fact.seat));
+    if (!player) return false;
+    if (sameFactValue(player[key], fact.value)) return false;
+    player[key] = fact.value;
+    return true;
+  }
+  if (fact.scope === "snapshot") {
+    if (sameFactValue(view.snapshot[key], fact.value)) return false;
+    view.snapshot[key] = fact.value;
+    return true;
+  }
+  if (fact.scope === "view") {
+    if (sameFactValue(view[key], fact.value)) return false;
+    view[key] = fact.value;
+    return true;
+  }
+  if (fact.scope === "skill") {
+    const wanted = fact.value && typeof fact.value === "object" ? fact.value : {};
+    let changed = false;
+    for (const entry of view.skills || []) {
+      if (!entry || !entry.skill_id) continue;
+      if (Object.prototype.hasOwnProperty.call(wanted, entry.skill_id)) {
+        if (!sameFactValue(entry.appearance, wanted[entry.skill_id])) {
+          entry.appearance = wanted[entry.skill_id];
+          changed = true;
+        }
+      } else if (entry.appearance !== undefined) {
+        delete entry.appearance;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  return false;
+}
+
+/** 显示事实的**同值判据**：值一样就不写、也就不必为它重建一次整桌（返回 `false`）。
+ *
+ * 走 JSON 文本比较：事实值都是服务端下发的 JSON（无环、无函数），一次 `JSON.stringify`
+ * 在几十字节到几 KB 之间，比一次 `renderTable` 便宜两个数量级。
+ */
+function sameFactValue(current, next) {
+  if (current === next) return true;
+  try {
+    return JSON.stringify(current) === JSON.stringify(next);
+  } catch (error) {
+    return false;
   }
 }
 
@@ -835,6 +965,12 @@ function applyView(body) {
   // `live_deltas` = 被人类记录流裁掉、但牌面已公开的标签增删（网页展示通道）。
   // 与可见记录按 seq 合并后走同一条逐事件回放；它们不写事件流 / 舞台。
   const incoming = mergeLiveDeltas(body.records || [], body.live_deltas || []);
+  // `display_facts`（ui-live-refresh 票 02 修复 2）= **没有 delta 的派生显示字段**的逐步骤
+  // 取值。它们**不占回放步**，而是挂到"它所属的那条记录"上（采样于那一步之后 ⇒ 应用在
+  // 那条记录之后），与那条记录共用同一次重绘。
+  attachDisplayFacts(incoming, displayFactRecords(body));
+  // 显示事实的**投递计数**游标：下一次取增量原样带回，服务端据此只发新事实。
+  state.displaySeq = Math.max(0, Number(body.display_seq) || 0);
   const newSession = viewStartsNewSession(body);
   // **开局批** = 换会话 + 带 `header`（无 seq 的那条只在 `after < 0` 的建局响应里下发）。
   // 用它认出"这一批从发牌前开始"，而不是看"这一页之前有没有打过一局"——两条路必须走
@@ -1134,9 +1270,16 @@ function stepPlayback(immediate) {
   // 回合与阶段都随事件走，不再等整批播完提交。标签 delta 只走这一条，不写事件流。
   if (playback.live && state.liveView) {
     applyLiveDelta(record, state.liveView);
+    // 显示事实（ui-live-refresh 修复 2）：挂在这条记录上的事实在**同一次重绘**里生效——
+    // 不再为每个事实排一个自己的回放步（那会多花一个步长、还多重建一次整桌）。
+    // 值没变的事实返回 false（同值判据），不触发重建。
+    let factChanged = false;
+    for (const fact of record.displayFacts || []) {
+      if (applyDisplayFact(fact, state.liveView)) factChanged = true;
+    }
     // renderTable 末尾就是舞台重绘（`renderProcessing`），播放期也走同一条口。
     // 票 01：改不了表体的记录（询问 / 应答 / 结算帧 / 大部分时机）只重画舞台，不整桌重建。
-    if (recordTouchesTableView(record)) renderTable();
+    if (factChanged || recordTouchesTableView(record)) renderTable();
     else renderProcessing();
   } else if (!liveOnly) {
     // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
@@ -1772,9 +1915,15 @@ const POLL_NOTICE_AFTER = 3;
 /** 连续失败次数：成功一次即归零，到第 3 次才在页面上说一句。 */
 let pollFailures = 0;
 
-/** 取一次增量（GET 的 URL / 游标口径只在这里一处；`refresh` 与 `poll` 共用）。 */
+/** 取一次增量（GET 的 URL / 游标口径只在这里一处；`refresh` 与 `poll` 共用）。
+ *
+ * 三个游标各管一条通道：`after` = 记录流、`logs` = 侧车日志、`display` = 显示事实的
+ * **投递计数**（ui-live-refresh 票 02；见 `state.displaySeq` 的注释）。
+ */
 async function fetchView() {
-  return api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`);
+  const display = Number(state.displaySeq) || 0;
+  return api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`
+    + `&display=${display}`);
 }
 
 /** 这份响应有没有**新事实**：游标与当前询问序号都没变 ⇒ 只回倒计时锚点（D12）。
@@ -1797,70 +1946,105 @@ function pollIsIdle(body) {
  */
 function applyIdlePoll(body) {
   if (!state.view) return;
+  // 显示事实的投递游标照样要推进：空转这一拍的**载荷已经是最新态**（commit 过的视图 +
+  // 这一次的快照），事实只用于批内落点，故这里只收下游标、不应用它们。
+  if (body && body.display_seq !== undefined) {
+    state.displaySeq = Math.max(0, Number(body.display_seq) || 0);
+  }
   state.view.pending_since = body.pending_since;
   syncPendingClock(state.view);
 }
 
-/** **快照指纹**（票 07 A 的第三条出口；与票 10 共用）：座位块会读的那些快照字段的一行摘要。
+/** **稳定序列化**：同一份内容恒得同一串（键名排序、递归），与对象键序无关。
+ *
+ * 只给指纹用：载荷是 JSON（没有环、没有 undefined 之外的怪值），故这里不处理 Date / Map。
+ * `undefined` 会变成 `undefined` 这个字面量（不是 `"null"`）——两份载荷同样的"没有这一格"
+ * 仍然同串，正是我们要的。
+ */
+function stableJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+}
+
+/** 视图指纹**跳过**的键：传输字段，或**自带刷新通道**的字段。
+ *
+ * 跳过的每一格都要有理由（它们的变化由别处负责，不能靠"空转重绘座位块"来兜）：
+ *  - `records` / `narrative` / `session_log` / `live_deltas` / `skill_events` /
+ *    `damage_events` / `card_events` / `life_loss_events`：增量通道，每次请求都变；
+ *  - `cursor` / `log_seq` / `pending_since` / `timeout_seconds` / `finished`：游标与时钟；
+ *  - `pending`：`pollIsIdle` 用询问序号单独判（它要的是"同一问"而不是"同一份"）；
+ *  - `harvest`：五谷的视图级状态有**自己的**重画口（`applyIdleHarvest`，票 18）——
+ *    在这里也认一遍会让空转每拍整桌重建，把亮牌窗的悬停 / 焦点抖掉。
+ *  - `display_facts`（ui-live-refresh 票 02）：逐事件事实通道，由回放流消费；
+ *  - `setup`：开局批一次性下发的"发牌前底稿"，只在 `after < 0` 那一份里有——它不随局内
+ *    状态变化，留在视图里也不会再被改；不跳过的话，开局之后的每一拍都会因为"这一份没有它"
+ *    被判成"变了"，变成每 2 秒无脑整桌重建。
+ */
+const VIEW_FINGERPRINT_SKIP = new Set([
+  "records",
+  "narrative",
+  "session_log",
+  "live_deltas",
+  "skill_events",
+  "damage_events",
+  "card_events",
+  "life_loss_events",
+  "display_facts",
+  "cursor",
+  "log_seq",
+  "pending_since",
+  "timeout_seconds",
+  "finished",
+  "pending",
+  "harvest",
+  "setup",
+]);
+
+/** **视图指纹**（票 07 A 的第三条出口；ui-live-refresh 票 01 改成整份摘要）。
  *
  * 为什么需要它：`pollIsIdle` 只看游标与询问序号，`applyIdlePoll` 只同步时钟 ⇒ 任何
- * **"无新记录的状态变化"永远不会重绘**（`live_deltas` 改的标记 / 武将牌上的牌就是这一类，
- * 票 10 的"标记不消失"住在这条缝里）。
+ * **"无新记录的状态变化"永远不会重绘**。
  *
- * 纯函数、不碰 DOM：只把 `players[]` 的可见字段与牌桌三组拼成一行。**字段表是显式的**——
- * 座位块多读一格，就在这里多登记一格。票 10 接进来的是**武将牌上的牌区**：按区键
- * （`owner:skill_id`，与记录里的 `skill_instance` 同形）+ 张数 + 宿主拿得到的牌面拼起来。
- * 只登记 `hero_zone_count`（`PlayerPublic` 的公开张数）不够——那个字段 `exclude=True`
- * 不进网页载荷，而且"同一座位一进一出、张数不变"的换牌它看不出来。
+ * 为什么是**整份摘要**而不是字段表：旧的实现手写列举"座位块会读的那些字段"，而载荷里
+ * 每一拍都可能长出新的显示字段（`hero_tags` / `hand_limit` / `distance_bonus` / 顶层
+ * `skills` 的化身组件 / `relics` / `round` / `turn_extra` 都是这么漏掉的），表里甚至还留着
+ * 一个死项（`player.hero`——网页载荷只有 `hero_name`）。手写表的正确性靠"记得登记"，
+ * 那正是这类 bug 的来源。摘要遍历**视图里除传输字段外的整份内容**：新增载荷键自动进摘要，
+ * 不需要谁再登记一次（票 02 的载荷键门禁盯另一头：新键必须声明刷新通道）。
+ *
+ * 纯函数、不碰 DOM；同一份内容恒同串（`stableJson` 按键名排序）。
  */
-function snapshotFingerprint(snapshot) {
-  if (!snapshot) return "";
-  const cardIds = (cards) => (cards || []).map((card) => String(card && card.card_id)).join(",");
-  const heroZones = (zones) => (zones || []).map((zone) => {
-    const count = Number(zone && zone.count);
-    return `${liveHeroZoneKey(zone)}×${Number.isFinite(count) ? count : (zone.cards || []).length}`
-      + `:${cardIds(zone && zone.cards)}`;
-  }).join("+");
-  const players = (snapshot.players || []).map((player) => [
-    player.seat,
-    player.hp,
-    player.hp_max,
-    player.armor,
-    player.hand_count,
-    player.alive ? 1 : 0,
-    player.hero || "",
-    player.identity || "",
-    player.chained ? 1 : 0,
-    player.flipped ? 1 : 0,
-    player.wine_active ? 1 : 0,
-    heroZones(player.hero_zones),
-    cardIds(player.equip),
-    cardIds(player.judge),
-    (player.sealed_zones || []).join("+"),
-    (player.markers || []).map((marker) => `${marker.name || marker.id || ""}×${marker.count}`).join("+"),
-  ].join(":")).join(";");
-  return [
-    snapshot.seat,
-    snapshot.turn_seat,
-    snapshot.phase,
-    snapshot.deck_count,
-    cardIds(snapshot.self_hand),
-    cardIds(snapshot.processing),
-    Array.isArray(snapshot.discard) ? cardIds(snapshot.discard) : String(snapshot.discard),
-    players,
-  ].join("|");
+function viewFingerprint(view) {
+  if (!view || typeof view !== "object") return "";
+  const parts = [];
+  for (const key of Object.keys(view).sort()) {
+    if (VIEW_FINGERPRINT_SKIP.has(key)) continue;
+    parts.push(`${key}=${stableJson(view[key])}`);
+  }
+  return parts.join("|");
 }
 
 /** 空转期快照**变了**吗（票 07）：变了 ⇒ 座位块要重绘，但**不清本地选择**（没有新事实）。
  *
  * 为什么不像"有新记录"那样走 `applyView` → `commitView`：那条路无条件 `resetSelection()`，
  * 会把玩家选到一半的牌清掉。这里只把快照换成服务端那份、重绘表体，询问面仍是当前这一问。
+ *
+ * 并入的格子与 :func:`viewFingerprint` **同一张名单**（非传输键）：新增载荷键既进摘要，
+ * 也自动被这一拍换上——否则摘要说"变了"、视图却没换，下一拍还会再判一次"变了"，
+ * 变成每 2 秒无脑整桌重建。
  */
 function applyIdleRepaint(body) {
   if (!state.view || !body) return false;
-  state.view.snapshot = body.snapshot;
-  if (Array.isArray(body.skills)) state.view.skills = body.skills;
+  for (const key of Object.keys(body)) {
+    if (VIEW_FINGERPRINT_SKIP.has(key)) continue;
+    state.view[key] = body[key];
+  }
   state.view.pending_since = body.pending_since;
+  if (body.display_seq !== undefined) {
+    state.displaySeq = Math.max(0, Number(body.display_seq) || 0);
+  }
   syncPendingClock(state.view);
   renderTable();
   return true;
@@ -1908,9 +2092,9 @@ async function poll() {
       // 票 18：空转期的**视图级五谷状态**（`view.harvest`）变了 ⇒ 重画亮牌节点（不清选择）。
       // 它与下面两条空转出口互不排斥，故不在这里 return。
       applyIdleHarvest(body);
-      // 票 07：空转**不等于**"什么都没变"——快照指纹变了就重绘座位块（不清选择）。
-      // 指纹没变才是纯时钟刷新（D12 的静默分支）。
-      if (snapshotFingerprint(body.snapshot) !== snapshotFingerprint(state.view.snapshot)) {
+      // 票 07：空转**不等于**"什么都没变"——视图摘要变了就重绘座位块（不清选择）。
+      // 摘要没变才是纯时钟刷新（D12 的静默分支）。
+      if (viewFingerprint(body) !== viewFingerprint(state.view)) {
         applyIdleRepaint(body);
         return;
       }

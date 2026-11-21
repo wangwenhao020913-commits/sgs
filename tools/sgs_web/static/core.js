@@ -236,6 +236,11 @@ const state = {
   sessionId: null,
   cursor: -1,
   logSeq: 0,
+  // ui-live-refresh 票 02：**显示事实**的投递游标（= 服务端 `display_facts` 的**条数**，
+  // 不是记录序号）。取增量时原样带回 `&display=`，服务端据此只发还没投递过的那几条。
+  // 为什么不用记录游标：一条显示事实可以**不伴随任何新记录**（例如回合末恢复区域），
+  // 用 `seq > after` 判会既重发又漏发。
+  displaySeq: 0,
   view: null,          // 服务端最近一次下发的会话视图（**权威**提交视图）
   liveView: null,      // U3-05：回放期间逐事件派生的视图副本（D11；提交时被权威快照覆盖）
   focusCardId: null,   // **焦点**：正在挑目标的那张候选牌（再点一次取消）

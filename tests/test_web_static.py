@@ -11910,3 +11910,50 @@ def test_switching_editor_tabs_keeps_the_unsaved_draft() -> None:
         assert forbidden not in stash, (
             f"收集口不许落盘（半吊子的「记住草稿但保存时再读」不解决问题）：{stash}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ui-live-refresh 票 04：新增显示组件的清单里必须有「刷新通道」这一步
+# ---------------------------------------------------------------------------
+
+
+def test_the_display_component_checklist_names_the_refresh_channel() -> None:
+    """「加一档显示组件」的清单必须包含刷新通道（ui-live-refresh 票 04）。
+
+    报障的**复发机制**就住在这份清单里：`shapes.md §3.11` 原来只写"闭集加成员 / 声明面 /
+    登记构造器 / 前端消费 / 账本 + 本表"，没有"刷新通道"这一格，而同一节又写死
+    "生命周期是派生式：没有清除事件、没有新 delta"——清单被逐字执行，装备区废除 / 状态标签 /
+    化身这三个显示面就都只能在 `commitView`（= 下一次询问）刷新。
+
+    判据只钉**文档与代码同名**：清单点名 `projection.PAYLOAD_KEYS`（唯一登记处）与
+    `display_facts`（通道），`frontend-map.md` 不再提退役的 `snapshotFingerprint`
+    （改了实现却不改文档，下一个人就会照着旧名字改错地方）。
+    """
+    shapes = (REPO_ROOT / "docs" / "agents" / "skill-authoring" / "shapes.md").read_text(
+        encoding="utf-8"
+    )
+    section = shapes.split("### 3.11 显示组件登记表", 1)[1].split("### 3.12", 1)[0]
+    assert "PAYLOAD_KEYS" in section, (
+        "§3.11 的「加一档要落齐哪几处」必须点名 `projection.PAYLOAD_KEYS`（刷新通道登记表）"
+    )
+    assert "display_facts" in section, (
+        "§3.11 必须说明显示组件走 `display_facts` 通道（不登记就只能在 commitView 刷新）"
+    )
+    for level_key in ('("player", "hero_tags")', '("skill", "appearance")'):
+        assert level_key in section, (
+            f"两类显示组件的登记格要在清单里点名（现有组件读的是哪一格）：缺 {level_key}"
+        )
+
+    frontend_map = (REPO_ROOT / "docs" / "agents" / "frontend-map.md").read_text(
+        encoding="utf-8"
+    )
+    assert "snapshotFingerprint" not in frontend_map, (
+        "`snapshotFingerprint` 已退役（票 01 改成 `viewFingerprint` 的整份视图摘要）："
+        "文档里留着旧名字会让下一个人去改一个不存在的函数"
+    )
+    assert "viewFingerprint" in frontend_map, "空转轮询的判据要在前端地图里写清新的名字"
+
+    glossary = (REPO_ROOT / "GLOSSARY.md").read_text(encoding="utf-8")
+    assert "**派生显示字段**：" in glossary, (
+        "GLOSSARY 要有「派生显示字段」词条——它是这条路线的领域词（没有 delta、靠事实通道刷新）"
+    )

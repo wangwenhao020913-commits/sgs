@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 
 from sgs.data import (
     SkillType,
@@ -106,6 +107,10 @@ from .visibility import (
 __all__ = [
     "APPEARANCE_BUILDERS",
     "HARVEST_REQUIREMENT",
+    "PAYLOAD_CHANNELS",
+    "PAYLOAD_KEYS",
+    "PayloadKey",
+    "display_fact_values",
     "build_skills",
     "candidate_index",
     "card_events_after",
@@ -4141,4 +4146,330 @@ def card_events_after(
         )
     # 同一批里多条按记录序号排：前端按回放游标逐条放，不攒播（语音可重叠）。
     out.sort(key=lambda event: event["seq"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 网页载荷的刷新通道登记表（ui-live-refresh 票 02）
+#
+# 背景（2026-11-21 用户报障）：网页载荷里有一部分字段是**服务端每帧现算的显示字段**
+# （`visible_snapshot` / `build_skills` 在投影之外补的那一批，以及 `sealed_zones` 这类
+# `exclude=True` 的公开事实）。它们**不进记录流、没有 delta**，所以：
+#
+#   - 回放期（`applyLiveDelta` 逐事件派生）拿不到新值；
+#   - 空转期（`viewFingerprint`）如果没有登记，也判不出"变了"；
+#
+# 结果就是"整批播完、`commitView` 换整份权威视图"之前它一直是旧值——一批 = 一整个 AI 回合，
+# 用户看到的是"要等到下一次询问才更新"。
+#
+# 这张表把**每一条载荷键**的刷新通道声明出来（一张表、一个闭集、零散落）：
+#
+#   - ``delta``：已经由记录流逐事件派生（`applyLiveDelta` / 批首 `adoptSkillLists`）；
+#   - ``fact``：**显示事实**——`display_fact_values` 逐步骤采样、随视图下发 `display_facts`，
+#     前端按 key 通用写入（本票新增的通道）；
+#   - ``static``：局内不随状态变化（座位号 / 武将名 / 势力 / PvE 座位表 / 开局底稿）；
+#   - ``own``：自带通道（五谷亮牌 `harvest`、询问 `pending`、传输字段）；
+#   - ``commit-only``：明确允许"只在 commit 刷新"，必须写理由（今天为空）。
+#
+# `tests/test_web.py::test_every_web_payload_key_declares_its_refresh_channel` 拿**真会话
+# 的真载荷**逐键核：多一个载荷键而这里没登记 ⇒ 红。新增显示组件的流程因此从"记得补四条
+# 手写清单"变成"往这张表加一行"，漏不掉。
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PayloadKey:
+    """一条网页载荷键的刷新通道声明（见本节标题的说明）。
+
+    ``channels`` 取值在 :data:`PAYLOAD_CHANNELS` 闭集里；声明了 ``fact`` 的键必须给
+    ``build``（签名 ``(session, seat) -> Any``，``seat`` 只对座位级键有意义）。
+    """
+
+    level: str
+    channels: tuple[str, ...]
+    why: str
+    build: Callable[..., Any] | None = None
+    cadence: str = "step"
+    """采样节奏（只对 ``fact`` 有意义的键）：
+
+    - ``step``：**每一步**采一次（`Session.drive` 的 `stop_when` 每 `_step` 一次）——批内就
+      更新，成本必须便宜；
+    - ``view``：只在**每次响应**（`view()` / 驱动收尾）采一次——给"算一次要几百微秒、
+      又不值得为它每步付钱"的键（今天只有 `distance_bonus`）。批内允许按批粒度刷新。
+    """
+
+
+PAYLOAD_CHANNELS: Final[frozenset[str]] = frozenset(
+    {"delta", "fact", "static", "own", "commit-only"}
+)
+"""刷新通道的闭集（写错一个词 = 门禁红，不是静默失效）。"""
+
+
+def _sealed_zones_fact(session: Session, seat: int, shared: dict[str, Any]) -> list[str]:
+    """被废除（封印）的槽：`Player.sealed_zones` 照搬，**原样**（不重算、不另造名单）。"""
+    del shared
+    return list(session.engine.state.player(seat).sealed_zones)
+
+
+def _hero_tags_fact(session: Session, seat: int, shared: dict[str, Any]) -> list[dict[str, Any]]:
+    """武将块上的状态标签（与 `visible_snapshot` 的 `seat_hero_tags` 同一个构造器）。
+
+    `badges` 由采样器**整桌算一次**再逐座位传进来（`_badge_tags` 里套着
+    `resolve_instances` 与全部登记构造函数，按座位重算一遍是纯浪费）。
+    """
+    badges = shared.get("badges") or {}
+    return seat_hero_tags(session.engine.state, seat, badges=badges.get(seat, ()))
+
+
+def _hand_limit_fact(session: Session, seat: int, shared: dict[str, Any]) -> int:
+    """手牌上限（派生量；`visible_snapshot` 由 `hand_limit` 补下）。"""
+    del shared
+    state = session.engine.state
+    return hand_limit(state, state.player(seat))
+
+
+def _distance_bonus_fact(session: Session, seat: int, shared: dict[str, Any]) -> dict[str, int]:
+    """坐骑槽的双向距离增减（与 `seat_display` 同一份派生，两侧不互相抵消）。
+
+    值取自采样器**整桌算一次**的那张表（单座位现算要 50 µs 量级）。
+    """
+    bonuses = shared.get("bonuses") or {}
+    bonus = bonuses.get(seat) or DistanceBonus()
+    return {"attack": int(bonus.attack), "defense": int(bonus.defense)}
+
+
+def _appearance_fact(session: Session, seat: int, shared: dict[str, Any]) -> dict[str, Any]:
+    """``seat`` 的技能外观组件，**逐技能现算**（键 = `skill_id`，值 = 外观载荷）。
+
+    只收带了组件的技能；前端按这张表**整份替换**外观面，故"技能失去 / 化身库空了"表现为
+    这张表里没它了 → 前端把那一条 `appearance` 删掉。构造器就是 `build_skills` 里那一份
+    （`_appearance_entry` → `APPEARANCE_BUILDERS`），不是第二份真源。
+
+    **不调 `build_skills`**（ui-live-refresh 修复 1）：它是"每次响应一次"的量级（实测中局
+    ≈3.3 ms/次——`_virtual_index`、牌名反查、技能全文都在里面），放进每步采样里直接把一次
+    操作拖成 3.9 ms/步、一个 300 步的批变成 1.2 s。这里只走 `resolve_instances`（内容键
+    缓存，≈10 µs）筛出**带 `appearance` 声明**的本人实例，再调同一个 `_appearance_entry`。
+    """
+    state = session.engine.state
+    if "appearance_instances" in shared:
+        instances, suppressed_ids = shared["appearance_instances"], shared["suppressed_ids"]
+    else:
+        instances = tuple(
+            instance
+            for instance in resolve_instances(state, include_suppressed=True)
+            if instance.owner == seat
+            and getattr(instance.definition, "appearance", None) is not None
+            # 标记 / 标签载体不是"学会的技能"（与 `build_skills` 同一条准入）。
+            and instance.source.kind
+            not in (SkillSourceKind.MARKER, SkillSourceKind.CARD_TAG)
+        )
+        suppressed_ids = {
+            instance.skill_id
+            for instance in resolve_instances(state)
+            if instance.owner == seat
+        }
+    out: dict[str, Any] = {}
+    for instance in instances:
+        appearance = _appearance_entry(
+            state,
+            seat,
+            instance.definition,
+            suppressed=instance.skill_id not in suppressed_ids,
+        )
+        if appearance is not None:
+            out[str(instance.skill_id)] = appearance
+    return out
+
+
+PAYLOAD_KEYS: Mapping[tuple[str, str], PayloadKey] = MappingProxyType(
+    {
+        # ---- 视图级（`view()` 的响应体）----
+        ("view", "session_id"): PayloadKey("view", ("own",), "传输：会话身份"),
+        ("view", "seed"): PayloadKey("view", ("own",), "传输：开局种子"),
+        ("view", "player_count"): PayloadKey("view", ("own",), "传输：人数"),
+        ("view", "human_seat"): PayloadKey("view", ("own",), "传输：本人座位"),
+        ("view", "heroes"): PayloadKey("view", ("own",), "传输：逐座位武将 id（开局冻结）"),
+        ("view", "deck_profile"): PayloadKey("view", ("own",), "传输：牌堆档位（开局冻结）"),
+        ("view", "timeout_seconds"): PayloadKey("view", ("own",), "传输：思考时限"),
+        ("view", "pending_since"): PayloadKey("view", ("own",), "传输：询问时刻（倒计时锚点）"),
+        ("view", "finished"): PayloadKey("view", ("own",), "传输：终局标记"),
+        ("view", "cursor"): PayloadKey("view", ("own",), "传输：记录游标"),
+        ("view", "log_seq"): PayloadKey("view", ("own",), "传输：侧车日志游标"),
+        ("view", "snapshot"): PayloadKey("view", ("own",), "容器：内容逐键登记在 snapshot 层"),
+        ("view", "skills"): PayloadKey(
+            "view",
+            ("delta",),
+            "技能清单：增删 / 可用性走 skill_gain / skill_lose 批首装终态；"
+            "外观组件是条目里的**另一格**（`skill` 层 appearance，走 fact）",
+        ),
+        ("view", "pending"): PayloadKey(
+            "view", ("own",), "自带通道：`pollIsIdle` 比询问序号，新询问走 commitView"
+        ),
+        ("view", "harvest"): PayloadKey(
+            "view", ("own",), "自带通道：`applyIdleHarvest` → `repaintRevealFromHarvest`"
+        ),
+        ("view", "records"): PayloadKey("view", ("own",), "传输：本批记录（回放流）"),
+        ("view", "live_deltas"): PayloadKey("view", ("own",), "传输：记录流外的标签增删"),
+        ("view", "narrative"): PayloadKey("view", ("own",), "传输：叙事增量"),
+        ("view", "skill_events"): PayloadKey("view", ("own",), "传输：技能演出事实"),
+        ("view", "damage_events"): PayloadKey("view", ("own",), "传输：伤害演出事实"),
+        ("view", "card_events"): PayloadKey("view", ("own",), "传输：卡牌语音事实"),
+        ("view", "life_loss_events"): PayloadKey("view", ("own",), "传输：失去体力演出事实"),
+        ("view", "display_facts"): PayloadKey("view", ("own",), "本票的显示事实通道（自身）"),
+        ("view", "display_seq"): PayloadKey("view", ("own",), "本票的显示事实游标（自身）"),
+        ("view", "session_log"): PayloadKey("view", ("own",), "传输：侧车日志增量"),
+        ("view", "setup"): PayloadKey(
+            "view", ("static",), "开局底稿：只在 after < 0 那一份里下发，局内不再变"
+        ),
+        # ---- 快照级（`snapshot` 内部）----
+        ("snapshot", "seat"): PayloadKey("snapshot", ("static",), "本人座位"),
+        ("snapshot", "turn_seat"): PayloadKey("snapshot", ("delta",), "`TURN_*` 时机"),
+        ("snapshot", "phase"): PayloadKey("snapshot", ("delta",), "`PHASE_*` 时机"),
+        ("snapshot", "deck_count"): PayloadKey(
+            "snapshot", ("delta",), "`card_move` / `deck_shuffle`"
+        ),
+        ("snapshot", "self_hand"): PayloadKey("snapshot", ("delta",), "`card_move` 的手牌面"),
+        ("snapshot", "discard"): PayloadKey("snapshot", ("delta",), "`card_move` 的弃牌堆"),
+        ("snapshot", "processing"): PayloadKey(
+            "snapshot", ("delta",), "舞台另由 `applyEffectDelta` 派生（表体不读它）"
+        ),
+        ("snapshot", "players"): PayloadKey(
+            "snapshot", ("own",), "容器：逐座位键登记在 player 层"
+        ),
+        ("snapshot", "round"): PayloadKey("snapshot", ("delta",), "`turn_change` 的轮次"),
+        ("snapshot", "turn_extra"): PayloadKey(
+            "snapshot", ("delta",), "`turn_change` 的额外回合"
+        ),
+        ("snapshot", "relics"): PayloadKey(
+            "snapshot",
+            ("fact",),
+            "遗物栏（开局冻结；显示事实通道统一兜住，不给它留例外）",
+            build=lambda session, seat, shared: _relic_display(session.engine.state, seat),
+        ),
+        # ---- 座位级（`players[*]`）----
+        ("player", "seat"): PayloadKey("player", ("static",), "座位号"),
+        ("player", "hp"): PayloadKey("player", ("delta",), "`hp_change`"),
+        ("player", "hp_max"): PayloadKey("player", ("delta",), "`hp_max_change`"),
+        ("player", "armor"): PayloadKey("player", ("delta",), "`armor_change`"),
+        ("player", "hand_count"): PayloadKey("player", ("delta",), "`card_move` 的张数"),
+        ("player", "alive"): PayloadKey("player", ("delta",), "`DEATH_BEFORE_START`"),
+        ("player", "equip"): PayloadKey("player", ("delta",), "`card_move` 的装备区"),
+        ("player", "judge"): PayloadKey("player", ("delta",), "`card_move` 的判定区"),
+        ("player", "chained"): PayloadKey("player", ("delta",), "`chained_change`"),
+        ("player", "flipped"): PayloadKey("player", ("delta",), "`flipped_change`"),
+        ("player", "wine_active"): PayloadKey("player", ("delta",), "`wine_change`"),
+        ("player", "identity"): PayloadKey(
+            "player", ("delta",), "`identity_deal` / `identity_reveal`"
+        ),
+        ("player", "identity_label"): PayloadKey(
+            "player", ("delta",), "与 `identity` 同一条 delta 一起翻"
+        ),
+        ("player", "markers"): PayloadKey(
+            "player",
+            ("delta",),
+            "`marker_change`（数量 / 增删）；来源与说明文案由下一次快照补齐",
+        ),
+        ("player", "hero_zones"): PayloadKey("player", ("delta",), "`card_move` 的 hero 一侧"),
+        ("player", "skills"): PayloadKey(
+            "player", ("delta",), "技能三态：`skill_gain` / `skill_lose` 批首装终态"
+        ),
+        ("player", "sealed_zones"): PayloadKey(
+            "player",
+            ("fact",),
+            "被废除（封印）的槽：`abolish_slots` / `restore_slots` 明确不发 delta",
+            build=_sealed_zones_fact,
+        ),
+        ("player", "hero_tags"): PayloadKey(
+            "player",
+            ("fact",),
+            "武将块上的状态标签：派生式（每帧现算、没有清除事件）",
+            build=_hero_tags_fact,
+        ),
+        ("player", "hand_limit"): PayloadKey(
+            "player",
+            ("fact",),
+            "手牌上限：体力值 → 替换链 → 加式的派生量",
+            build=_hand_limit_fact,
+        ),
+        ("player", "distance_bonus"): PayloadKey(
+            "player",
+            ("fact",),
+            "坐骑槽的双向距离增减：投影现算，不是 `PlayerPublic` 字段",
+            build=_distance_bonus_fact,
+            # 整桌现算 ≈0.3 ms：每步都付不值当，按**响应**节奏刷（批内允许按批粒度）。
+            cadence="view",
+        ),
+        ("player", "hero_name"): PayloadKey(
+            "player",
+            ("static",),
+            "武将中文名（`hero` 的翻译，局内不变；载荷里没有 `hero` 这一格）",
+        ),
+        ("player", "kingdom"): PayloadKey("player", ("static",), "势力（局内不变）"),
+        ("player", "kingdom_label"): PayloadKey("player", ("static",), "势力的中文标签"),
+        ("player", "side"): PayloadKey("player", ("static",), "PvE 友 / 敌（开局冻结）"),
+        ("player", "side_label"): PayloadKey("player", ("static",), "PvE 友 / 敌的中文标签"),
+        ("player", "template_name"): PayloadKey(
+            "player", ("static",), "PvE 敌人模板名（开局冻结）"
+        ),
+        ("player", "global_skill"): PayloadKey("player", ("static",), "PvE 副本全局技能标签"),
+        # ---- 技能条目级（`skills[*]`）----
+        ("skill", "appearance"): PayloadKey(
+            "skill",
+            ("fact",),
+            "技能外观组件（化身）：数据由技能自己写，`gain_avatar_cards` 不进记录流",
+            build=_appearance_fact,
+        ),
+    }
+)
+"""网页载荷**每一条键**的刷新通道（唯一登记处；ui-live-refresh 票 02）。
+
+改载荷先来这里：新键 → 加一行；显示字段（无 delta）→ ``channels=("fact",)`` 并给
+``build``；已有 delta 的 → ``("delta",)``；局内不变的 → ``("static",)``。
+门禁用**真载荷**逐键核（``tests/test_web.py``），漏登记直接红。"""
+
+
+def display_fact_values(
+    session: Session, *, cadence: str = "view"
+) -> list[tuple[str, int | None, str, Any]]:
+    """一次**显示事实**采样：``[(level, seat, key, value), …]``（ui-live-refresh 票 02）。
+
+    采样面 = :data:`PAYLOAD_KEYS` 里声明了 ``fact`` 的键；座位级逐座位给一份，其余用本人
+    座位。只读、不写状态、不进记录流。**与载荷同一个构造器**：``tests/test_web.py`` 核
+    "采样值 == 载荷值"，两张真源不许漂开。
+
+    ``cadence`` = 这一次采的是哪一档：``"step"`` 只采 ``cadence="step"`` 的键（驱动每步一次，
+    必须便宜）；``"view"`` 采全部（每次响应一次）。
+
+    **成本纪律（ui-live-refresh 修复 1）**：这一步在 `Engine.run` 的循环里，每 `_step` 一次
+    ——一笔 300 步的批会被它乘 300 倍。故本函数只做"共享中间量算一次、键逐个取"：
+
+    - `_badge_tags`（内含 `resolve_instances` + 全部标签构造函数）整桌一次；
+    - 距离表整桌一次，且**只在本档包含 `distance_bonus` 时**才算（它 ≈0.3 ms）；
+    - 外观组件走定向构造器（`resolve_instances` 是内容键缓存，≈10 µs），**不调**
+      `build_skills`（≈3.3 ms/次）。
+
+    实测（5 人局中局，单步）：修复前 3.94 ms → 修复后 ≈0.1–0.15 ms。
+    """
+    state = session.engine.state
+    seats = range(len(state.players))
+    wanted = [
+        (level, key, spec)
+        for (level, key), spec in PAYLOAD_KEYS.items()
+        if spec.build is not None
+        and "fact" in spec.channels
+        and (cadence == "view" or spec.cadence == "step")
+    ]
+    shared: dict[str, Any] = {}
+    keys = {key for _level, key, _spec in wanted}
+    if "hero_tags" in keys:
+        shared["badges"] = _badge_tags(state)
+    if "distance_bonus" in keys:
+        shared["bonuses"] = _seat_distance_bonuses(state)
+    out: list[tuple[str, int | None, str, Any]] = []
+    for level, key, spec in wanted:
+        if level == "player":
+            for seat in seats:
+                out.append((level, seat, key, spec.build(session, seat, shared)))
+        else:
+            out.append((level, None, key, spec.build(session, session.human_seat, shared)))
     return out

@@ -486,6 +486,10 @@ class GameRegistry:
             # 这是**接入层的建局口径**，故只在这一条生产路径上打开；库层（单测 / 构造
             # 局面夹具）缺省仍是一路驱动到人类第一问。
             pause_after_game_start=True,
+            # 显示事实（ui-live-refresh 票 02）：网页会话逐步骤采样派生显示字段
+            # （≈0.2 ms/步），让废除 / 状态标签 / 化身这些"没有 delta"的格子也在批内更新。
+            # 库层直接构造的会话缺省关——纯规则调用方不付这份钱。
+            track_display=True,
         )
         session.mark_pending(time.monotonic())
         self.sessions[session.session_id] = session
@@ -529,6 +533,7 @@ class GameRegistry:
             pack=pack,
             session_id=f"s{self._counter}",
             pause_after_game_start=True,
+            track_display=True,
         )
         session.mark_pending(time.monotonic())
         self.sessions[session.session_id] = session
@@ -560,7 +565,9 @@ class GameRegistry:
         while session.expire_if_due(time.monotonic(), fallback_action):
             pass
 
-    def view(self, session: Session, *, after: int, logs_after: int) -> dict[str, Any]:
+    def view(
+        self, session: Session, *, after: int, logs_after: int, display_after: int = 0
+    ) -> dict[str, Any]:
         """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。
 
         **记录流只扫一趟**（table-ux-overhaul 票 01）：`Session.window(after)` 一次给出
@@ -568,6 +575,9 @@ class GameRegistry:
         叙事走会话自己的增量缓存。此前这里对记录流扫了 7 趟，其中四条通道把整条流
         `model_dump + json.dumps + json.loads` 一遍（N=6612 时 2.38 s / 单次 view 2.7 s）。
         """
+        # 显示事实（ui-live-refresh 票 02）：进 view 前补采一次——驱动里每步已经采过，
+        # 这一次兜住"最后一步之后 / 批外"的变化（`restore_slots` 这类一条记录都不发的写入）。
+        session.sample_display()
         batch = session.window(after)
         window = batch.tail
         # U4-06 / D13：`action` 记录按查看者放行——只有人类座位自己的应答展开细节。
@@ -681,6 +691,17 @@ class GameRegistry:
                 state=session.engine.state,
                 events=session.engine.life_loss_events,
             ),
+            # 显示事实（ui-live-refresh 票 02）：派生显示字段的**逐步骤**取值，与
+            # `damage_events` 同姿态不进记录流。投递游标是**计数**（`display_seq`），
+            # 因为一条事实可以不伴随任何新记录——用记录序号当游标会既重发又漏发。
+            #
+            # **首屏（`after < 0`）一条都不发**：那一份视图就是基线，开局期间的采样值
+            # 全部已经在载荷里；发出去只会让客户端在回放流里重放一遍"本来就是现状"的
+            # 事实（表体白重建一次，`票01T3` 一类"这类记录不该重建"的判据因此翻红）。
+            "display_facts": (
+                session.display_facts_after(display_after) if after >= 0 else []
+            ),
+            "display_seq": session.display_cursor(),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }
         # 开局底稿（table-ux-overhaul 票 14）：**发牌前**那一帧的权威快照，只在
@@ -721,7 +742,15 @@ class GameRegistry:
 
     # -- 应答 ---------------------------------------------------------------
 
-    def answer(self, session: Session, body: dict[str, Any], *, after: int, logs_after: int) -> dict[str, Any]:
+    def answer(
+        self,
+        session: Session,
+        body: dict[str, Any],
+        *,
+        after: int,
+        logs_after: int,
+        display_after: int = 0,
+    ) -> dict[str, Any]:
         from sgs.state import parse_action
 
         raw = body.get("action")
@@ -731,7 +760,9 @@ class GameRegistry:
             raise ValueError(f"应答结构非法：{error}") from error
         paused = session.submit_answer(action)
         self.advance_clock(session, drive=not paused)
-        return self.view(session, after=after, logs_after=logs_after)
+        return self.view(
+            session, after=after, logs_after=logs_after, display_after=display_after
+        )
 
     # -- 步骤预览（票 11：只读） ---------------------------------------------
 
@@ -944,6 +975,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _logs_after(self, query: dict[str, list[str]]) -> int:
         return int(query.get("logs", ["0"])[0])
 
+    def _display_after(self, query: dict[str, list[str]]) -> int:
+        """显示事实的**投递计数**游标（`display_seq`；缺省 0 = 还没投递过任何一条）。"""
+        return int(query.get("display", ["0"])[0])
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - 基类签名
         """把访问日志压到一行（结构化侧车日志在会话里，不在这里）。
 
@@ -997,7 +1032,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.registry.save_if_finished(session)
                 self._send_json(
                     200,
-                    self.registry.view(session, after=self._after(query), logs_after=self._logs_after(query)),
+                    self.registry.view(
+                        session,
+                        after=self._after(query),
+                        logs_after=self._logs_after(query),
+                        display_after=self._display_after(query),
+                    ),
                 )
                 return
         except KeyError:
@@ -1049,7 +1089,11 @@ class _Handler(BaseHTTPRequestHandler):
                 session_id = parsed.path[len("/api/sessions/") : -len("/answer")]
                 session = self.registry.get(session_id)
                 payload = self.registry.answer(
-                    session, body, after=self._after(query), logs_after=self._logs_after(query)
+                    session,
+                    body,
+                    after=self._after(query),
+                    logs_after=self._logs_after(query),
+                    display_after=self._display_after(query),
                 )
                 self.registry.save_if_finished(session)
                 self._send_json(200, payload)

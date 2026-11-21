@@ -8518,6 +8518,468 @@ def test_the_idle_repaint_fingerprint_covers_hero_zone_rows() -> None:
     )
 
 
+def _idle_mutations() -> list[tuple[str, object]]:
+    """空转期**真会出现、以前看不出来**的那几格（ui-live-refresh 票 01 的报障面）。
+
+    每一格都是一条独立的"服务端只重算投影、不写记录"的变化：手写字段表漏掉谁，谁就
+    只能在 `commitView`（下一次询问）时才刷新。
+    """
+
+    def set_player(key: str, value: object):
+        def mutate(view: dict) -> None:
+            view["snapshot"]["players"][0][key] = value
+
+        return mutate
+
+    def set_snapshot(key: str, value: object):
+        def mutate(view: dict) -> None:
+            view["snapshot"][key] = value
+
+        return mutate
+
+    def add_skill(view: dict) -> None:
+        view["skills"] = [*view["skills"], {"skill_id": "probe.skill", "name": "探测"}]
+
+    return [
+        ("hero_tags", set_player("hero_tags", [{"tag": "probe", "label": "探测标签"}])),
+        ("hand_limit", set_player("hand_limit", 99)),
+        ("distance_bonus", set_player("distance_bonus", {"attack": -1, "defense": 2})),
+        ("sealed_zones", set_player("sealed_zones", ["weapon"])),
+        ("markers", set_player("markers", [{"name": "探针", "count": 2}])),
+        ("round", set_snapshot("round", 9)),
+        ("turn_extra", set_snapshot("turn_extra", True)),
+        ("relics", set_snapshot("relics", [{"id": "equip.crossbow", "name": "诸葛连弩"}])),
+        ("skills", add_skill),
+    ]
+
+
+def test_the_idle_fingerprint_is_a_digest_of_the_whole_view() -> None:
+    """空转指纹是**整份视图摘要**，不是一张手写字段表（ui-live-refresh 票 01）。
+
+    报障（2026-11-21）：装备 / 判定区废除、武将牌上的状态标签、化身查看界面"要等到下一次
+    询问才更新"。空转这条缝的成因之一是 `snapshotFingerprint` 的字段表漏登记——实测载荷里
+    12 个座位键 + 3 个顶层键不在表里，表里还有一个死项 `player.hero`（载荷只有 `hero_name`）。
+
+    判据造在**每一格**上：只改这一格 ⇒ 摘要必须变；同一份内容再回一次 ⇒ 必须不变。
+    新增载荷键因此**自动**进摘要，不需要谁再登记一次。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261121,
+            "timeout_seconds": None,
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+    assert payload["skills"] and payload["snapshot"]["players"], "前置：真载荷要有这两块"
+
+    for name, mutate in _idle_mutations():
+        idle = json.loads(json.dumps(payload))
+        mutate(idle)
+        out = _run_live_delta_probe({"base": payload, "records": [], "idleView": idle})
+        assert out["idle"]["isIdle"] is True, (
+            "前置：游标与询问序号都没变（否则走的是有新记录的那条路，测不到空转出口）"
+        )
+        assert out["fingerprint"]["changed"] is True, (
+            f"空转期只改了 `{name}` ⇒ 摘要必须变（否则座位块不重绘，要等下一次询问）："
+            f"{out['fingerprint']}"
+        )
+
+    same = _run_live_delta_probe({
+        "base": payload,
+        "records": [],
+        "idleView": json.loads(json.dumps(payload)),
+    })
+    assert same["fingerprint"]["changed"] is False, (
+        f"同一份内容再回一次 ⇒ 摘要不变（它是纯摘要，不是随机标记）：{same['fingerprint']}"
+    )
+
+
+def test_every_web_payload_key_declares_its_refresh_channel() -> None:
+    """网页载荷的**每一条键**都要声明刷新通道（ui-live-refresh 票 02）。
+
+    报障（2026-11-21）：装备 / 判定区废除、武将牌上的状态标签、化身查看界面"要等到下一次
+    询问才更新"。根因是载荷里有一批**服务端每帧现算的显示字段**（没有 delta、不进记录流），
+    而前端的四条刷新通道（`applyLiveDelta` / 视图摘要 / 批首装终态 / 重绘钩子）全是手写清单，
+    新字段一加就漏。
+
+    这张门禁拿**真会话的真载荷**逐键核 `projection.PAYLOAD_KEYS`：
+      - 每个载荷键必须登记（漏登记 ⇒ 红，报错里点名是哪个键）；
+      - 登记了却产不出来（幽灵登记 / 死项）⇒ 红——旧实现里 `snapshotFingerprint` 就留过
+        一个 `player.hero`（载荷只有 `hero_name`），这一条防它再发生；
+      - 通道值是闭集里的词；声明了 `fact` 的键必须给构造器。
+    """
+    from sgs_web import projection
+    from sgs_web.projection import visible_snapshot
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    identity = registry.view(
+        registry.create(
+            {"player_count": 4, "ai": "random", "seed": 20261121, "timeout_seconds": None}
+        ),
+        after=-1,
+        logs_after=0,
+    )
+    pve_session = Session(seed=20261121, rule_config=_pve_battle_rule_config(), timeout_seconds=None)
+    pve_snapshot = visible_snapshot(pve_session)
+
+    pairs: set[tuple[str, str]] = {("view", key) for key in identity}
+    pairs |= {("snapshot", key) for key in identity["snapshot"]}
+    for payload in (identity["snapshot"], pve_snapshot):
+        pairs |= {("player", key) for key in payload["players"][0]}
+        for player in payload["players"]:
+            pairs |= {("player", key) for key in player}
+    # 技能条目只核**登记表里声明过的那几格**（其余键由 `build_skills` 一处产出、随技能
+    # delta 走；逐格登记它们会把这张门禁变成噪音）。
+    declared_skill_keys = {
+        key for (level, key) in projection.PAYLOAD_KEYS if level == "skill"
+    }
+    # 左慈的第 0 席带【化身】：外观组件这一格只在它的载荷里出现。
+    zuoci = registry.view(
+        registry.create(
+            {
+                "player_count": 4,
+                "ai": "random",
+                "seed": 20261121,
+                "timeout_seconds": None,
+                "my_hero": "zuoci",
+            }
+        ),
+        after=-1,
+        logs_after=0,
+    )
+    entry_keys = {
+        key for entry in (*identity["skills"], *zuoci["skills"]) for key in entry
+    }
+    pairs |= {("skill", key) for key in declared_skill_keys & entry_keys}
+
+    declared = set(projection.PAYLOAD_KEYS)
+    missing = sorted(pairs - declared)
+    assert not missing, (
+        "这些网页载荷键没有在 `sgs_web.projection.PAYLOAD_KEYS` 里声明刷新通道"
+        f"（新加一条载荷就必须想清楚它怎么刷新到界面）：{missing}"
+    )
+    ghosts = sorted(declared - pairs)
+    assert not ghosts, (
+        f"登记表里有载荷产不出来的键（改名 / 删字段后忘了同步这张表）：{ghosts}"
+    )
+
+    for level, key in sorted(declared):
+        spec = projection.PAYLOAD_KEYS[(level, key)]
+        assert spec.channels, f"{level}.{key} 没有任何刷新通道"
+        unknown = set(spec.channels) - projection.PAYLOAD_CHANNELS
+        assert not unknown, f"{level}.{key} 的通道不在闭集里：{unknown}"
+        assert spec.why, f"{level}.{key} 要写一句为什么走这条通道"
+        if "fact" in spec.channels:
+            assert spec.build is not None, (
+                f"{level}.{key} 声明了显示事实通道却没给构造器：`display_fact_values` 采不到它"
+            )
+
+    assert ("skill", "appearance") in declared, "技能外观组件必须在登记表里（化身走这条通道）"
+
+
+def test_display_fact_values_agree_with_the_payload_they_decorate() -> None:
+    """采样值必须**逐值等于**载荷里那一格（ui-live-refresh 票 02）。
+
+    显示事实与载荷是两条读取时机（每步 vs 每次响应），但不是两张真源：构造器共用
+    （`seat_hero_tags` / `hand_limit` / `distance_bonus` / `relics` / `build_skills`）。
+    这里拿真会话逐值比，防止将来有人在采样侧另写一份。
+    """
+    from sgs_web import projection
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 4, "ai": "random", "seed": 20261121, "timeout_seconds": None, "my_hero": "zuoci"}
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+    players = payload["snapshot"]["players"]
+
+    appearance = None
+    for scope, seat, key, value in projection.display_fact_values(session):
+        if scope == "player":
+            assert value == players[seat][key], (
+                f"座位 {seat} 的 `{key}`：采样值与载荷不一致（两张真源漂开了）"
+            )
+        elif scope == "snapshot":
+            assert value == payload["snapshot"][key], f"快照的 `{key}` 采样值与载荷不一致"
+        elif scope == "skill":
+            assert key == "appearance"
+            appearance = value
+    assert appearance is not None, "三层 scope 都要被采到（skill 层缺了它，化身永远不刷新）"
+    for skill_id, entry in appearance.items():
+        shown = next(item for item in payload["skills"] if item["skill_id"] == skill_id)
+        assert shown["appearance"] == entry, (
+            f"技能 `{skill_id}` 的外观组件：采样值与载荷不一致"
+        )
+
+
+def test_a_zone_seal_reaches_the_batch_as_a_display_fact() -> None:
+    """废除槽位在**这一批**就以显示事实下发（ui-live-refresh 票 02 的通道）。
+
+    `Engine.abolish_slots` 是废除的**唯一写入口**，它的 docstring 明确"不发 delta"——
+    故这条事实只能由显示事实通道送出去。三件事一起断：事实落在这一批、值与载荷终态一致、
+    同一批再取一次不重复下发（投递游标是事实**计数**，不是记录序号）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 20261121, "timeout_seconds": None}
+    )
+    before = registry.view(session, after=-1, logs_after=0)
+    engine = session.engine
+    engine.abolish_slots(
+        engine.push_frame(FrameKind.SKILL, {"skill_owner": 0}, timing=Timing.PHASE_FINISH),
+        0,
+        ("weapon", "armor"),
+    )
+
+    after = registry.view(
+        session,
+        after=before["cursor"],
+        logs_after=before["log_seq"],
+        display_after=before["display_seq"],
+    )
+    facts = [
+        fact for fact in after["display_facts"]
+        if fact["key"] == "sealed_zones" and fact["seat"] == 0
+    ]
+    assert facts, f"废除槽位没有随这一批下发显示事实：{after['display_facts']}"
+    assert facts[-1]["value"] == ["weapon", "armor"], f"事实值 = 载荷终态：{facts[-1]}"
+    assert facts[-1]["scope"] == "player" and facts[-1]["key"] == "sealed_zones"
+    assert facts[-1]["seq"] >= before["cursor"], (
+        f"事实要落在这一批（seq 不小于上一批游标）：{facts[-1]} vs cursor={before['cursor']}"
+    )
+    assert after["snapshot"]["players"][0]["sealed_zones"] == ["weapon", "armor"]
+
+    again = registry.view(
+        session,
+        after=after["cursor"],
+        logs_after=after["log_seq"],
+        display_after=after["display_seq"],
+    )
+    assert not [fact for fact in again["display_facts"] if fact["key"] == "sealed_zones"], (
+        f"同一批不重复下发（投递游标按事实计数）：{again['display_facts']}"
+    )
+
+
+def _display_facts_payload(session) -> list[dict]:
+    """把会话的**显示事实采样**转成服务端 `display_facts` 的载荷形状。
+
+    采样点 = 调用这一刻（服务端在 `Session.drive` 的每一步采一次；这里直接模拟"废除刚发生、
+    后面还有记录"的那一拍）：``seq`` = 采样那一刻记录流的末条序号。
+    """
+    from sgs_web.projection import display_fact_values
+
+    records = session.engine.records
+    seq = int(getattr(records[-1], "seq", 0) or 0) if records else 0
+    return [
+        {"seq": seq, "scope": scope, "seat": seat, "key": key, "value": value}
+        for scope, seat, key, value in display_fact_values(session)
+    ]
+
+
+def test_a_zone_seal_shows_up_in_the_live_view_at_the_record_it_happens() -> None:
+    """装备区废除：**那一拍**就亮角标，不是等下一次询问（ui-live-refresh 票 03）。
+
+    报障（2026-11-21）：废除的红色禁止角标要等到下一次询问才出现。`Engine.abolish_slots`
+    是废除的唯一写入口，且明确"不发 delta" ⇒ 前端过去只能等 `commitView`。这里走真引擎 +
+    真 `session.js`：记录流（搬牌）+ `display_facts`（封印事实）一起喂进回放，断
+    **事实那一帧之后就变**、且底稿帧不许提前。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    weapon = cards_of_type(pack, "crossbow")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(0,), equip=(weapon,)), SeatSpec()],
+        deck=tuple(range(60, 108)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack, pending=None)
+    before = visible_snapshot(session)
+    assert before["players"][0]["sealed_zones"] == [], "底稿：还没废除"
+
+    mark = len(engine.records)
+    engine.abolish_slots(
+        engine.push_frame(FrameKind.SKILL, {"skill_owner": 0}, timing=Timing.PHASE_FINISH),
+        0,
+        ("weapon",),
+    )
+    # 采样点就放在这里（真实服务端是"废除这一步之后"）。之后再加一条记录 ⇒ 这一条事实
+    # 落在**批中段**：既不许提前，也不许等到 commit。
+    facts = _display_facts_payload(session)
+    engine.add_marker(None, 0, name="探针", source_seat=0, source_skill_id="hero.probe.marker")
+    records = [visible_record(record, viewer=0) for record in engine.records[mark:]]
+    assert len(records) >= 2, f"夹具失效：封印之后应还有记录（实际 {records}）"
+
+    payload = _run_live_delta_probe({
+        "base": {
+            "session_id": "ui-live-refresh-seal",
+            "human_seat": 0,
+            "cursor": mark,
+            "pending": None,
+            "skills": [],
+            "snapshot": before,
+        },
+        "records": records,
+        "displayFacts": facts,
+    })
+    frames = payload["frames"]
+    assert frames[0]["sealed"]["0"] == [], "底稿帧还不该有角标"
+    sealed = [
+        (frame["index"], frame["sealed"]["0"]) for frame in frames if frame["sealed"]["0"]
+    ]
+    assert sealed, (
+        "封印事实没有在回放期落地（前端没吃 `display_facts`）——"
+        '这正是"要等到下一次询问才更新"的报障形状：'
+        f"{frames}"
+    )
+    assert sealed[0][0] < len(frames) - 1, (
+        "事实必须落在**批中段**（后面还有记录才叫当场更新）："
+        f"first={sealed[0][0]} / frames={len(frames)}"
+    )
+    assert frames[-1]["sealed"]["0"] == ["weapon"], "整批播完仍是封印态"
+    # **事实不占回放步**（ui-live-refresh 修复 2）：帧数 = 底稿 + 记录数，事实不另起一帧。
+    # 以前每个事实自己是一条 `live_only` 记录 ⇒ 多一个步长（≈100 ms）+ 多一次整桌重建。
+    assert len(frames) == 1 + len(records), (
+        f"事实不许占回放步：frames={len(frames)} records={len(records)}"
+    )
+
+    # 反证（就是报障的形状）：**不给** `display_facts` 这一路时，整批回放里一帧都看不到封印。
+    without = _run_live_delta_probe({
+        "base": {
+            "session_id": "ui-live-refresh-seal",
+            "human_seat": 0,
+            "cursor": mark,
+            "pending": None,
+            "skills": [],
+            "snapshot": before,
+        },
+        "records": records,
+    })
+    assert all(
+        frame["sealed"]["0"] == [] for frame in without["frames"]
+    ), f"反证失效：没有显示事实时不该看到封印：{without['frames']}"
+
+
+def test_an_avatar_card_shows_up_in_the_live_view_on_the_record_after_it() -> None:
+    """化身查看界面：拿一张化身牌就在**那条记录之后**更新（ui-live-refresh 修复 2）。
+
+    `Engine.gain_avatar_cards` 的 docstring 写明"不发 delta、不进记录流" ⇒ 前端唯一的
+    来源是外观组件。事实**不占回放步**：它挂到"它所属的那条记录"上（服务端在某一步之后
+    采样），与那条记录共用一次重绘。这里用一条真记录（标记）当锚点，断三件事：
+    拿牌那一刻之后的那条记录一播完，live view 的 `skills[].appearance.cards` 就有它；
+    底稿帧没有；**帧数不因事实增加**。
+    """
+    session = Session(
+        seed=7, ai="random", timeout_seconds=None, player_count=2, my_hero="zuoci"
+    )
+    engine = session.engine
+    engine.clear_avatar_cards(session.human_seat)
+    base_skills = build_skills(session, session.human_seat)
+    assert not [
+        entry for entry in base_skills if (entry.get("appearance") or {}).get("cards")
+    ], "底稿：化身库是空的（没有可显示的外观组件）"
+
+    before_count = len(engine.records)
+    engine.gain_avatar_cards(session.human_seat, ("guanyu",))
+    assert len(engine.records) == before_count, (
+        "`gain_avatar_cards` 不是记录（前置复核：这一格没有 delta 可用）"
+    )
+    facts = _display_facts_payload(session)
+    # 事实挂到"这条之后"：再造一条真记录当锚点（事实的 seq 落在它上面）。
+    engine.add_marker(None, session.human_seat, name="探针", source_seat=session.human_seat,
+                      source_skill_id="hero.probe.marker")
+    records = [
+        visible_record(record, viewer=session.human_seat)
+        for record in engine.records[before_count:]
+    ]
+    facts = _display_facts_payload(session) if not facts else facts
+
+    payload = _run_live_delta_probe({
+        "base": {
+            "session_id": "ui-live-refresh-avatar",
+            "human_seat": session.human_seat,
+            "cursor": before_count,
+            "pending": None,
+            "skills": base_skills,
+            "snapshot": visible_snapshot(session),
+        },
+        "records": records,
+        "displayFacts": facts,
+    })
+    frames = payload["frames"]
+    assert frames[0]["appearance"].get("hero.zuoci.huashen") in (None, []), (
+        f"底稿：还没有化身牌：{frames[0]['appearance']}"
+    )
+    assert frames[-1]["appearance"].get("hero.zuoci.huashen") == ["guanyu"], (
+        "锚点记录之后 live view 的化身牌就该出现："
+        f"{frames[-1]['appearance']}"
+    )
+    assert len(frames) == 1 + len(records), (
+        f"事实不许占回放步：frames={len(frames)} records={len(records)}"
+    )
+
+    # 反证：不给显示事实时，化身牌在回放期永远不出现（报障的形状）。
+    without = _run_live_delta_probe({
+        "base": {
+            "session_id": "ui-live-refresh-avatar",
+            "human_seat": session.human_seat,
+            "cursor": before_count,
+            "pending": None,
+            "skills": base_skills,
+            "snapshot": visible_snapshot(session),
+        },
+        "records": records,
+    })
+    assert all(
+        frame["appearance"].get("hero.zuoci.huashen") in (None, [])
+        for frame in without["frames"]
+    ), f"反证失效：没有显示事实时化身牌不该出现：{without['frames']}"
+
+
+def test_the_step_cadence_keeps_the_expensive_display_facts_out() -> None:
+    """每步采样只采**便宜**的键（ui-live-refresh 修复 1 的成本纪律）。
+
+    `Session.drive` 的 `stop_when` 每 `_step` 采一次，所以这一档的成本是**乘批长度**的：
+    一个 300 步的批会把每次操作多花掉 300 倍。实测把 `build_skills`（≈3.3 ms/次）与
+    整桌距离表（≈0.3 ms/次）留在这一档，一次操作从 15 ms 变成 1.7 s。
+
+    判据：`cadence="step"` 不包含 `distance_bonus`（整桌现算）；`cadence="view"` 包含它。
+    新增一个"整桌现算"的显示字段时，把它声明成 `cadence="view"`，否则这条会红。
+    """
+    from sgs_web.projection import PAYLOAD_KEYS, display_fact_values
+
+    step_keys = {key for _level, _seat, key, _value in display_fact_values(
+        Session(seed=7, ai="random", timeout_seconds=None, rule_config=RuleConfig(player_count=4)),
+        cadence="step",
+    )}
+    view_keys = {key for _level, _seat, key, _value in display_fact_values(
+        Session(seed=7, ai="random", timeout_seconds=None, rule_config=RuleConfig(player_count=4)),
+        cadence="view",
+    )}
+    assert "distance_bonus" not in step_keys, (
+        "整桌现算的距离表不许进每步采样（乘批长度后会把一次操作拖成秒级）"
+    )
+    assert "distance_bonus" in view_keys, "按响应节奏的那一档仍要采它"
+    assert step_keys < view_keys or step_keys == view_keys, (
+        f"两档是包含关系：step={sorted(step_keys)} view={sorted(view_keys)}"
+    )
+    for (level, key), spec in PAYLOAD_KEYS.items():
+        if "fact" in spec.channels:
+            assert spec.cadence in ("step", "view"), f"{level}.{key} 的采样节奏非法"
+
+
 def test_a_hp_max_change_is_applied_to_the_live_view_ceiling() -> None:
     """票 10 第 3 条（与票 14 共用的那一半）：体力上限变化逐条派生进 live view。
 

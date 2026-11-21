@@ -105,7 +105,7 @@
 | `registerPlaybackHold(name, probe)` | `session.js` | **回放暂停的通用口**（票 07）：登记一条只读判据 `() => 原因串`（空串 = 不暂停），同名就地替换。伤害家族在 `damage-fx.js` 文件末尾登记一条（3 / 4 档在播）；**回复体力 3+ 档**（`vital-fx.js`）就是第二个登记者（`registerPlaybackHold("vital", vitalFxPlaybackHold)`，原因串 `"heal:3"`）——排播侧不认来源。 |
 | `applyLiveDelta(record, view)` | `session.js` | 把**可派生**的可见变化写进 live view（体力 / 体力上限 `hp_max_change` / 护甲 `armor_change` / 手牌数 / **武将牌上的牌区**（`card_move` 的 `hero` 那一侧：区键 = `zone_ref.skill_instance`，空区**整行删掉**；票 10）/ 装备 / 阶段 / 标记数量 `marker_change` …）。 |
 | `openingLiveView(body)` | `session.js` | **开局批的回放底稿**（table-ux-overhaul 票 14）：直接读服务端随 `after < 0` 下发的那份 `setup` 快照（发牌前：座位 / 武将 / 技能 / 满体力 / 护甲 / 标记 / 手牌上限 / 武将块标签，手牌 0、各区空、无阶段无回合），**不再从 post-init 快照倒推**。`applyView` 认"开局批"的判据仍是"换会话 + 批里带 `header`"。同一条票：建局响应止于 `GAME_START`（L0 边界）⇒ 开局批播完、`commitView` 之后若**还没有挂起询问**就立刻 `refresh()` 一次（不等 2 s 轮询），`refresh` 因此按发起时的 `state.sessionId` 丢弃"回包前又换了局"的旧响应。 |
-| `poll()` | `session.js` | 2s 静默轮询；idle 分三条：**视图级五谷状态变了**（`view.harvest`，票 18）⇒ `applyIdleHarvest` 用 `repaintRevealFromHarvest` 重画亮牌节点但**不清选择**（五谷整段结算里 AI 目标的取牌不产生 pending，只有这条通道能当场刷新）；**快照指纹变了**（`snapshotFingerprint`，`players[]` 可见字段 + 三组牌 + **武将牌上的牌区**（区键 × 张数 × 宿主拿得到的牌面；票 10 接进来的——`hero_zone_count` 不进网页载荷，也看不出同座位"一进一出、张数不变"））⇒ `applyIdleRepaint` 重绘座位块但**不清选择**（票 07 的第三条出口；票 10 在这条缝上接武将牌区派生），指纹没变才只更新时钟；失败静默。`state.playback` 非空时**本来就不发**——回放暂停期间服务端超时代答不会插进窗口（票 07 的已知取舍）。 |
+| `poll()` | `session.js` | 2s 静默轮询；idle 分三条：**视图级五谷状态变了**（`view.harvest`，票 18）⇒ `applyIdleHarvest` 用 `repaintRevealFromHarvest` 重画亮牌节点但**不清选择**（五谷整段结算里 AI 目标的取牌不产生 pending，只有这条通道能当场刷新）；**视图摘要变了**（`viewFingerprint`，**整份视图的稳定序列化**——ui-live-refresh 票 01 起不再手写字段表：旧表漏了 `hero_tags` / `hand_limit` / `distance_bonus` / 顶层 `skills` / `relics` / `round` / `turn_extra`，还留着一个死项 `player.hero`）⇒ `applyIdleRepaint` 把非传输键并进视图并重绘座位块，但**不清选择**（票 07 的第三条出口），摘要没变才只更新时钟；失败静默。`state.playback` 非空时**本来就不发**——回放暂停期间服务端超时代答不会插进窗口（票 07 的已知取舍）。 |
 | `drawTargetLines(actor, targets, now)` | `effects.js` | 每个目标一条金色 SVG 线（跳过自己 / 阵亡）；端点只读一次布局。 |
 | `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。**不判断"哪些技能该有特效"**：`event` 由服务端下发（见下一条），前端只画。 |
 | `fireSkillEventsThrough(seq)` | `effects.js` | 回放到某条记录时释放 `state.skillEvents` 队列。 |
@@ -145,7 +145,27 @@
 | `renderDiscardPanel()` | `table.js` | 弃牌堆面板（U4-05）正文：从 `tableViewForRender()` 的同一份视图按时间倒序画牌面，`renderTable` 末尾顺带刷新。 |
 | `applyPindianDelta(record)` | `pindian.js` | 拼点弹窗（票 04）：一条 `pindian` delta → 弹窗开 3 秒；只读、全场可见（AI 打 AI 也弹），不读 `state.dialog`。 |
 | `openDiscardPanel()` | `modal.js` | 顶栏「弃牌 N」的点击入口：开 `#t-discard-modal`（复用模态壳，点背景 / Esc 关）。 |
+| `displayFactRecords(body)` / `attachDisplayFacts(records, facts)` | `session.js` | 服务端**显示事实**通道（`display_facts`）→ **挂到记录上**（"最后一条 `seq ≤ 事实 seq` 的记录"），在那条记录之后与它共用**同一次**重绘。**事实不占回放步**（早期实现给每个事实发一条 `live_only` 记录：一个事实多花一个步长 ≈100 ms、还多重建一次整桌，一批几十条就是几秒的"操作变慢 + 闪一下"）。缺 `seq` / 缺 `key` 的条目丢掉（fail-closed）。 |
+| `applyDisplayFact(fact, view)` | `session.js` | 显示事实的**通用**写入口（ui-live-refresh 票 02/03）：按服务端声明的 `scope` 落到 `snapshot.players[seat][key]` / `snapshot[key]` / 顶层 `[key]` / 技能条的 `appearance`（整份替换）。**没有任何逐字段分支**——新增显示字段零前端代码。 |
+| `viewFingerprint(view)` | `session.js` | 空转轮询"变了没"的判据（票 01 起是整份摘要）：遍历视图里**除传输键外**的每一格做稳定序列化（`VIEW_FINGERPRINT_SKIP` 里逐条写了为什么跳过：增量通道 / 游标 / 自带通道的 `pending`·`harvest` / 一次性 `setup`）。新增载荷键自动进摘要。 |
+| `PAYLOAD_KEYS` | `projection.py` | 网页载荷**每一条键**的刷新通道登记表（ui-live-refresh 票 02）：`delta`（记录流逐事件派生）/ `fact`（显示事实）/ `static`（局内不变）/ `own`（自带通道）/ `commit-only`（今天为空，必须写理由）。`tests/test_web.py::test_every_web_payload_key_declares_its_refresh_channel` 拿**真会话的真载荷**逐键核，漏登记 ⇒ 红。 |
+| `display_fact_values(session, cadence=…)` / `Session.sample_display(cadence=…)` | `projection.py` / `session.py` | 显示事实的采样：`Engine.run` 的 `stop_when`（每 `_step` 一次，票 19 的既有钩子）里采**便宜那一档**（`cadence="step"`），每次响应再采全部（`cadence="view"`，含整桌现算的 `distance_bonus`）。变了才追加 `{seq, scope, seat, key, value}`（`seq` = 那一刻记录流末条）。投递游标是**事实计数**（`display_seq`）。**成本纪律**：这一档是**乘批长度**的——`build_skills`（≈3.3 ms/次）与整桌距离表（≈0.3 ms/次）留在每步一档时，一次操作从 15 ms 变成 1.7 s（实测），故外观组件走定向构造器、`distance_bonus` 声明 `cadence="view"`。只对网页会话采样（`track_display=True`）。 |
 | `openAvatarAppearance(skillId)` / `closeAvatarAppearance()` | `avatar-appearance.js` | **技能外观组件**的只读入口（票 05）：技能按钮的中键（`auxclick` 的 `button === 1`）与按钮区「只查看」（左键 / 中键）都调它——开 `#t-avatar-modal`（自己的遮罩 + 关闭按钮 + ESC 三个出口），**不发动任何东西**、不改选择态、不发请求、不进 `selectionEnabled()`。 |
+
+**派生显示字段 = 前端的第四条刷新通道**（ui-live-refresh；根因与取舍见 `.scratch/ui-live-refresh/spec.md`）：
+
+网页载荷里有一批字段是**服务端每帧现算的显示字段**（`sealed_zones` / `hero_tags` / `hand_limit` /
+`distance_bonus` / 顶层 `skills[].appearance` / `relics`），它们**不进记录流、没有 delta**
+（`abolish_slots` / `gain_avatar_cards` 都明确"不发 delta"）。于是它们只能靠三件事刷新：
+
+1. **显示事实**（`display_facts`）：回放期在**那一步**就生效——这是本票新增的通道；
+2. **视图摘要**（`viewFingerprint`）：没有新记录时的空转兜底；
+3. **`commitView`**：换局 / 批尾的权威覆盖（一直都在）。
+
+新增显示组件的落点因此只有两处：`projection.PAYLOAD_KEYS` 加一行（+ `build`）、前端画节点。
+**别再加第五条手写清单**——旧实现有四处（`applyLiveDelta` 的分支 / 指纹字段表 /
+`adoptSkillLists` / `renderTable` 尾巴的 surface 钩子），漏一处就是"要等到下一次询问才更新"。
+
 
 ## 表现层自由区（用户可调，门禁只验形状）
 

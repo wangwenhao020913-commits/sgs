@@ -386,11 +386,18 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 
 | 类别 | 落点 | 通道 | 可见性 | 今天谁在用 | 加一档要落齐哪几处 |
 |---|---|---|---|---|---|
-| **小窗口类** | 武将块上的常驻状态标签（`seat-view.js:fillHeroTags` → `.hero-tag` chip；没有标签整块隐藏） | `players[].hero_tags`，每项 `{tag, label[, parts]}`：`label` 恒为纯文本，`parts` 只在需要**逐段上色**时出现（每段 `{text, tone?}`，`tone` ∈ `red` / `black`，取 `tools/sgs_web/display.py:SUIT_LABELS` 这唯一一份花色→颜色表），`parts` 的文本拼起来恒等于 `label`；**不进** `PlayerView` / `PlayerPublic` / 记录流 | 公开 | 手牌上限+N（通用派生量，不属于任何一条技能）、裸衣两版、勤政、渐营两版、博图、父荫、雄乱、义绝、铁骑、武翊、**义云（一条技能两条 spec：自己座位画记录的花色 / 目标座位画失效标记；`BADGE_PROVIDERS` 的值是一**组** spec）** | ① `BadgeKind` 加成员（闭集，`tests/test_web.py` 的审计用例写死成员集合，加成员必须同票改它）；② 声明面：A 族写 `ActiveSkill.badge`、L 族写 `PhaseBodySkill.badge`，其余声明直接写 `SkillDef.badge`；③ `sgs_web.projection.BADGE_PROVIDERS` 按 **skill id** 登记构造器（键集与"声明了 `badge` 的 skill id 集"**强制相等**——漏登 = 标签永远不出现，幽灵登记 = 画一条没人声明的东西）；④ 需要上色时前端消费 `parts`；⑤ 票面 + `06`（§5「程序化约定与偏离一手」）登记 + 本表 |
-| **弹窗类** | 技能按钮 / 询问面打开的弹窗 | `SkillDef.appearance: AppearanceKind \| None` + `sgs_web.projection.APPEARANCE_BUILDERS`（按 **kind** 索引）：数据由技能自己写、组件只负责显示，接入层按它在"只读面 / 发动面"两条面上派生同一份**自见载荷** | 自见 | 化身（`AVATAR`，今天唯一成员；载荷里含别人的化身牌，故只发给持有者） | ① `AppearanceKind` 加成员（闭集审计按"一个成员恰一条构造器"核）；② 登记一条构造器 + 新增前端组件与对应弹窗模板（`modal.js:DIALOG_KINDS`）/ 技能按钮入口；③ 自见载荷是**新信息通道** ⇒ 过 `ai-adaptation.md` 的 checklist 与不泄露分类（非持有者的载荷要抹）；④ 票面 + 账本登记 + 本表 |
+| **小窗口类** | 武将块上的常驻状态标签（`seat-view.js:fillHeroTags` → `.hero-tag` chip；没有标签整块隐藏） | `players[].hero_tags`，每项 `{tag, label[, parts]}`：`label` 恒为纯文本，`parts` 只在需要**逐段上色**时出现（每段 `{text, tone?}`，`tone` ∈ `red` / `black`，取 `tools/sgs_web/display.py:SUIT_LABELS` 这唯一一份花色→颜色表），`parts` 的文本拼起来恒等于 `label`；**不进** `PlayerView` / `PlayerPublic` / 记录流 | 公开 | 手牌上限+N（通用派生量，不属于任何一条技能）、裸衣两版、勤政、渐营两版、博图、父荫、雄乱、义绝、铁骑、武翊、**义云（一条技能两条 spec：自己座位画记录的花色 / 目标座位画失效标记；`BADGE_PROVIDERS` 的值是一**组** spec）** | ① `BadgeKind` 加成员（闭集，`tests/test_web.py` 的审计用例写死成员集合，加成员必须同票改它）；② 声明面：A 族写 `ActiveSkill.badge`、L 族写 `PhaseBodySkill.badge`，其余声明直接写 `SkillDef.badge`；③ `sgs_web.projection.BADGE_PROVIDERS` 按 **skill id** 登记构造器（键集与"声明了 `badge` 的 skill id 集"**强制相等**——漏登 = 标签永远不出现，幽灵登记 = 画一条没人声明的东西）；④ 需要上色时前端消费 `parts`；⑤ 票面 + `06`（§5「程序化约定与偏离一手」）登记 + 本表；⑥ **刷新通道**：`projection.PAYLOAD_KEYS` 的 `("player", "hero_tags")` 是 `fact`（`display_fact_values` 逐步骤采样、随 `display_facts` 下发）——**漏了它，标签只能在 `commitView`（= 下一次询问）才刷新**（ui-live-refresh 票 02 的报障就是它） |
+| **弹窗类** | 技能按钮 / 询问面打开的弹窗 | `SkillDef.appearance: AppearanceKind \| None` + `sgs_web.projection.APPEARANCE_BUILDERS`（按 **kind** 索引）：数据由技能自己写、组件只负责显示，接入层按它在"只读面 / 发动面"两条面上派生同一份**自见载荷** | 自见 | 化身（`AVATAR`，今天唯一成员；载荷里含别人的化身牌，故只发给持有者） | ① `AppearanceKind` 加成员（闭集审计按"一个成员恰一条构造器"核）；② 登记一条构造器 + 新增前端组件与对应弹窗模板（`modal.js:DIALOG_KINDS`）/ 技能按钮入口；③ 自见载荷是**新信息通道** ⇒ 过 `ai-adaptation.md` 的 checklist 与不泄露分类（非持有者的载荷要抹）；④ 票面 + 账本登记 + 本表；⑤ **刷新通道**：`projection.PAYLOAD_KEYS` 的 `("skill", "appearance")` 是 `fact`（整份替换语义）——组件数据由技能自己写、**不进记录流**，不登记这一行就是"化身界面要等到下一次询问才更新"（ui-live-refresh 票 02 的报障） |
 
 两类**互不替代**：小窗口类只画"一句话 / 一个小值"，无交互、公开，还可以画在**别人的座位**上
 （雄乱 / 义绝 / 铁骑画在目标身上）；弹窗类要富数据与交互，且可以是自见信息。
+
+**两类共享同一条纪律：显示组件的数据一律"派生式"（每帧现算、没有清除事件、没有新 delta），
+所以它怎么刷新到界面必须在 `projection.PAYLOAD_KEYS` 里登记一格。** 这一格不是可选项：
+`tests/test_web.py::test_every_web_payload_key_declares_its_refresh_channel` 拿真会话的
+**真载荷**逐键核，新加一个载荷键而没登记刷新通道 ⇒ 红；登记成 `fact` 的键由
+`display_fact_values` 逐步骤采样、随 `display_facts` 通道下发，前端按 `scope` / `key`
+**通用**写入（零逐字段代码）。
 
 ### 3.12 同一时机的激活档 `SkillDef.dispatch_tier`（票 91）
 

@@ -55,6 +55,11 @@ vm.runInContext(
      cloneLiveView: typeof cloneLiveView === "function" ? cloneLiveView : null,
      openingLiveView: typeof openingLiveView === "function" ? openingLiveView : null,
      applyLiveDelta: typeof applyLiveDelta === "function" ? applyLiveDelta : null,
+     mergeLiveDeltas: typeof mergeLiveDeltas === "function" ? mergeLiveDeltas : null,
+     displayFactRecords: typeof displayFactRecords === "function" ? displayFactRecords : null,
+     attachDisplayFacts: typeof attachDisplayFacts === "function" ? attachDisplayFacts : null,
+     applyDisplayFact: typeof applyDisplayFact === "function" ? applyDisplayFact : null,
+     viewFingerprint: typeof viewFingerprint === "function" ? viewFingerprint : null,
      snapshotFingerprint: typeof snapshotFingerprint === "function" ? snapshotFingerprint : null,
      pollIsIdle: typeof pollIsIdle === "function" ? pollIsIdle : null,
    };`,
@@ -73,6 +78,9 @@ const frameOf = (view, index, seq) => {
       hp: player.hp,
       hp_max: player.hp_max,
       hand_count: player.hand_count,
+      sealed_zones: (player.sealed_zones || []).slice(),
+      hero_tags: (player.hero_tags || []).map((tag) => tag.tag || tag.label),
+      hand_limit: player.hand_limit,
       hero_zones: (player.hero_zones || []).map((zone) => ({
         key: `${Number(zone.owner)}:${String(zone.skill_id)}`,
         skill_id: zone.skill_id,
@@ -83,11 +91,30 @@ const frameOf = (view, index, seq) => {
       })),
     };
   }
+  /* ui-live-refresh 票 02：**派生显示字段**的逐帧读数（没有 delta 的那几格）。 */
+  const skills = {};
+  for (const entry of view.skills || []) {
+    if (!entry || !entry.appearance) continue;
+    const appearance = entry.appearance;
+    skills[entry.skill_id] = (appearance.cards || []).map((card) => card.hero_id);
+  }
+  const heroTags = {};
+  const handLimits = {};
+  for (const player of snapshot.players || []) {
+    heroTags[Number(player.seat)] = (player.hero_tags || []).map((tag) => tag.tag || tag.label);
+    handLimits[Number(player.seat)] = player.hand_limit;
+  }
   return {
     index,
     seq: seq === undefined ? null : seq,
     seat,
     players,
+    sealed: Object.fromEntries(
+      Object.entries(players).map(([key, player]) => [key, player.sealed_zones]),
+    ),
+    hero_tags: heroTags,
+    hand_limit: handLimits,
+    appearance: skills,
     self_hand: (snapshot.self_hand || []).map((card) => String(card && card.card_id)),
   };
 };
@@ -114,14 +141,34 @@ if (input.opening) {
 } else {
   state.liveView = probe.cloneLiveView(base);
 }
+/* 与 `applyView` + `stepPlayback` 同一条生产路径（ui-live-refresh 修复 2）：标签 delta 按
+ * `seq` 并进记录流；**显示事实挂到记录上**、在**那条记录之后**应用（不占回放步）。 */
+let stream = input.records || [];
+if (typeof probe.mergeLiveDeltas === "function") {
+  stream = probe.mergeLiveDeltas(stream, input.liveDeltas || []);
+}
+if (typeof probe.attachDisplayFacts === "function" && typeof probe.displayFactRecords === "function") {
+  probe.attachDisplayFacts(stream, probe.displayFactRecords({ display_facts: input.displayFacts || [] }));
+}
 const frames = [frameOf(state.liveView, -1, null)];
-for (const [index, record] of (input.records || []).entries()) {
+for (const [index, record] of stream.entries()) {
   probe.applyLiveDelta(record, state.liveView);
+  for (const fact of (record && record.displayFacts) || []) {
+    probe.applyDisplayFact(fact, state.liveView);
+  }
   frames.push(frameOf(state.liveView, index, record && record.seq));
 }
 
 const fingerprint = {};
-if (typeof probe.snapshotFingerprint === "function") {
+/* 空转指纹（ui-live-refresh 票 01）：摘要吃**整份视图**（`viewFingerprint`），不再只吃
+ * `snapshot`。老输入 `idleSnapshot` 仍支持——它等价于"只有快照变了"的那一份视图。 */
+if (typeof probe.viewFingerprint === "function") {
+  fingerprint.base = probe.viewFingerprint(base);
+  const idleView = input.idleView
+    || (input.idleSnapshot ? { ...base, snapshot: input.idleSnapshot } : null);
+  if (idleView) fingerprint.idle = probe.viewFingerprint(idleView);
+  fingerprint.changed = idleView ? fingerprint.base !== fingerprint.idle : false;
+} else if (typeof probe.snapshotFingerprint === "function") {
   fingerprint.base = probe.snapshotFingerprint(base.snapshot);
   if (input.idleSnapshot) {
     fingerprint.idle = probe.snapshotFingerprint(input.idleSnapshot);
@@ -132,13 +179,14 @@ if (typeof probe.snapshotFingerprint === "function") {
 }
 
 const idle = {};
-if (typeof probe.pollIsIdle === "function" && input.idleSnapshot) {
+if (typeof probe.pollIsIdle === "function" && (input.idleView || input.idleSnapshot)) {
   /* 空转判据只读 `state.view`（上一份提交视图）与响应里的 `cursor` / `pending`：
    * 与 `poll()` 一样把 base 当"当前视图"喂进去。 */
+  const incoming = input.idleView || { ...base, snapshot: input.idleSnapshot };
   idle.isIdle = Boolean(probe.pollIsIdle({
-    cursor: state.cursor,
-    pending: base.pending || null,
-    snapshot: input.idleSnapshot,
+    cursor: incoming.cursor === undefined ? state.cursor : incoming.cursor,
+    pending: incoming.pending || null,
+    snapshot: incoming.snapshot,
   }));
 }
 

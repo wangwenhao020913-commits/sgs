@@ -189,7 +189,7 @@
     "promptWindowAsk", "promptApplyWindowAsk", "promptEditTarget", "promptEditCurrent",
     "promptSaveOverride", "promptClearOverlay", "promptExportOverlay", "promptExportCurrent",
     "promptProblems", "promptFileTemplates", "PROMPT_SLOT_WHITELIST",
-    "snapshotFingerprint", "applyIdleRepaint",
+    "viewFingerprint", "applyIdleRepaint",
     // 票 18（服务端 D 方案）：**视图级**五谷状态（`view.harvest`）——空转期重画亮牌节点、
     // 内容指纹（同状态不重画）、以及"用视图级状态重画"这一个口。烟测喂合成 `view.harvest`。
     // 票 19：`harvestStateWithoutPending` = **没有询问**的空窗里还该不该显示亮牌窗（逐目标暂停）。

@@ -212,6 +212,7 @@ class Session:
         session_id: str = "",
         ask_policy: AskPolicy = DEFAULT_WEB_ASK_POLICY,
         pause_after_game_start: bool = False,
+        track_display: bool = False,
     ) -> None:
         """``rule_config``（M7 票 19）＝**接管一份现成的规则配置**（含 ``pve``）。
 
@@ -296,6 +297,17 @@ class Session:
         # 与 ``narrative_cursor`` 同姿态：一局一份、可丢的派生缓存，**不是会话事实**——
         # 不进记录流、不进侧车元数据、不进金录像。
         self.harvest_cache: dict[str, Any] = {}
+        # 显示事实的**采样开关**（ui-live-refresh 票 02）：= 这一局会不会被网页端取增量。
+        # 采样是每 `_step` 一次的现算（4 人局 ≈ 0.2 ms），对只跑规则的调用方（回放、单测、
+        # 批处理）纯属浪费；接入层建局时打开，库层直接构造的会话缺省关。
+        self.track_display = bool(track_display)
+        # **显示事实**（ui-live-refresh 票 02）：派生显示字段的逐步骤采样，只增不减。
+        # 它解决的是"没有 delta 的显示字段只能在 commitView 刷新"——一批 = 一个 AI 回合，
+        # 于是装备区废除 / 状态标签 / 化身库这些格子要等到下一次询问才更新。
+        # ``_display_state`` = 上次采样的值（按值比较，变了才追加一条）。与记录流同姿态：
+        # **不进记录流**、不进侧车，金录像逐字节不变。
+        self.display_facts: list[dict[str, Any]] = []
+        self._display_state: dict[tuple[str, int | None, str], Any] = {}
 
         content = pack if pack is not None else load_content_pack()
         self.pack = content
@@ -456,6 +468,65 @@ class Session:
 
     # -- 驱动 ---------------------------------------------------------------
 
+    def sample_display(self, *, cadence: str = "view") -> None:
+        """采一次**显示事实**（ui-live-refresh 票 02）：变了才追加一条，只增不减。
+
+        ``cadence`` 见 :func:`projection.display_fact_values`：驱动里每步用 ``"step"``
+        （只采便宜的键），每次响应用 ``"view"``（含 `distance_bonus` 这类整桌现算的）。
+
+        采样面 = ``projection.PAYLOAD_KEYS`` 里声明了 ``fact`` 的键（装备区废除 / 状态标签 /
+        手牌上限 / 距离增减 / 技能外观组件 / 遗物栏）。每条事实的形状是
+        ``{seq, scope, seat, key, value}``：
+
+        - ``seq`` = **采样那一刻记录流的末条序号**（前端按它把事实插进回放流——"这条记录
+          之后就该看见它"）；一批里没有新记录时它就是上一批的末条，前端在批尾应用（等价于
+          commit，不丢）；
+        - ``scope`` / ``seat`` / ``key`` = 落在视图的哪一格（前端**通用**写入，不认具体键）；
+        - ``value`` = 载荷里的那一格**原样的值**（与 :func:`projection.visible_snapshot` /
+          ``build_skills`` 同一批构造器）。
+
+        成本 ≈ 0.2 ms / 次（4 人局），每次 `_step` 一次；只读、不进记录流、不进侧车。
+        """
+        if not self.track_display:
+            return
+        # 延迟导入：`projection` 在模块级反向依赖本模块（`Session` 的类型注解）。
+        from sgs_web.projection import display_fact_values
+
+        records = self.engine.records
+        seq = int(getattr(records[-1], "seq", 0) or 0) if records else 0
+        try:
+            values = display_fact_values(self, cadence=cadence)
+        except Exception as error:  # noqa: BLE001 - 显示事实是**刷新优化**，不许毁掉一局
+            # 采样跑在 `Engine.run` 的 `stop_when` 里（每步一次）：这里抛出来会把驱动中断在
+            # 一步中间，结算栈随即被破坏（实机踩到过：一条状态标签的构造器抛错，之后每个
+            # 请求都在 `note_skill_judgment` 报"结算栈被破坏"）。故一次失败就**永久关掉**
+            # 本局采样、只留一行告警：牌桌照旧靠 `commitView` 刷新（回退到本票之前的行为）。
+            self.track_display = False
+            print(f"[display-facts] 采样失败，本局关闭显示事实：{error}", flush=True)
+            return
+        for scope, seat, key, value in values:
+            mark = (scope, seat, key)
+            if mark in self._display_state and self._display_state[mark] == value:
+                continue
+            self._display_state[mark] = value
+            self.display_facts.append(
+                {"seq": seq, "scope": scope, "seat": seat, "key": key, "value": value}
+            )
+
+    def display_facts_after(self, count: int) -> list[dict[str, Any]]:
+        """还没交给浏览器的显示事实（按**投递计数**切片，不按记录序号）。
+
+        为什么用计数而不是 ``seq > after``：显示事实可以**不伴随任何新记录**（例如回合末
+        恢复区域），用记录序号当游标会让"同一 seq 的新事实"既可能重发也可能漏发。前端把
+        上一次响应里的 ``display_seq``（= 当时的 ``len(display_facts)``）原样带回来即可。
+        """
+        start = max(0, int(count))
+        return self.display_facts[start:]
+
+    def display_cursor(self) -> int:
+        """当前显示事实的投递游标（= 已采样的事实条数）。"""
+        return len(self.display_facts)
+
     def drive(self) -> bool:
         """推进到**下一个暂停点或终局**并返回"这一趟是不是停在五谷逐目标暂停上"。
 
@@ -485,6 +556,11 @@ class Session:
         def stop_when() -> bool:
             nonlocal paused
             paused = self._harvest_pick_pause_due()
+            # **显示事实的采样点**（ui-live-refresh 票 02）：`Engine.run` 每跑完一个 `_step`
+            # 问一次这段判据，故这里顺手采一次（只读、不改引擎状态、不影响停点）。不采的话
+            # 没有 delta 的显示字段（装备区废除 / 状态标签 / 化身库）只能在 `commitView`
+            # 刷新——一批 = 一个 AI 回合，用户看到的就是"要等到下一次询问"。
+            self.sample_display(cadence="step")
             return paused
 
         try:
@@ -494,7 +570,11 @@ class Session:
                 stop_when=stop_when,
             )
         except Halt:
+            # 人类那一问挂起：状态是完整的，末态照样要采一次（`abolish_slots` 这类
+            # "搬完牌再落值"的变化发生在最后一条记录之后）。
+            self.sample_display(cadence="view")
             return False
+        self.sample_display(cadence="view")
         if paused:
             return True
         if not self.engine.finished:
