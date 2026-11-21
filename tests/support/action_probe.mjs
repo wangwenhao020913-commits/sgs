@@ -443,6 +443,48 @@ const blindSubmits = submitCalls;
 const blindPicked = ui.buildAction();
 ui.state.sessionId = null;
 
+/* qunying 票 03a：**跨座位公开区**的 `SELECT_CARDS`（槽位带**别人座位**的 ref）。
+ *
+ * 形状与 `Engine.selection_face(..., seats=(...))` 铺出来的一致：`spec.seats` 非空、
+ * 每个槽 `ref.zone ∈ {equip, judge}`、牌面可见（公开区）。前端 `isPublicZonePick` 只拿它
+ * 决定渲染路径；这里只喂形状、点第 2 槽，断 `buildAction()` 产出的仍是 `SelectCards{picks}`
+ * （面内位置，不手拼 Action），交给 Python 侧的 `parse_action` 收下。 */
+resetState();
+const publicPickSlots = [
+  { ref: { seat: 0, zone: "equip" }, card: { ...qinggangSword, card_id: 71 } },
+  {
+    ref: { seat: 1, zone: "judge" },
+    card: {
+      card_id: 72, type: "indulgence", name: "乐不思蜀", suit: "heart", rank: 6,
+      slot: null, attack_range: null, color: "red", virtual_sources: [],
+    },
+  },
+];
+const publicZonePickPending = {
+  kind: "SELECT_CARDS", actor: 0, seq: 102,
+  prompt: "请从选择面里选择一张牌。",
+  legal_actions: [
+    { kind: "SelectCards", picks: [0], answers_seq: 102 },
+    { kind: "SelectCards", picks: [1], answers_seq: 102 },
+  ],
+  candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  revealed: null, preactivations: {}, preactivation: [],
+  slots: publicPickSlots,
+  spec: { zones: ["equip", "judge"], total: [1, 1], seats: [0, 1] },
+};
+ui.state.sessionId = "probe";
+ui.state.playback = null;
+ui.state.view = { human_seat: 0, pending: publicZonePickPending };
+/* 真实点击入口（`pending.js:submitPublicZonePick`）在无会话时只留内部态（`picks` +
+ * 候选骨架的指向），正是本探针要的"点击 → 载荷"；查询与元素绑定在烟测里由真 DOM 垫片覆盖。 */
+if (typeof context.submitPublicZonePick !== "function") {
+  throw new Error("pending.js 没有桥出 submitPublicZonePick（跨座位公开区面的点击入口缺失）");
+}
+await context.submitPublicZonePick(publicZonePickPending, 1);
+const publicZonePick = ui.buildAction();
+if (!publicZonePick) throw new Error("buildAction 没拼出跨座位公开区面的 SelectCards（点击夹具失效）");
+ui.state.sessionId = null;
+
 /* W1：**座位多选面**（`.scratch/chenqun-guyong/issues/05-seat-multi-select.md`）——一次点选多个
  * 场上武将、一次提交。载荷形状取自服务端**真实**产出路径：`SelectOptionsQuery` 的
  * `model_dump` + `projection.option_seats`（`options` 全是 `seat:N` ⇒ 非空），区间 1..2 的候选
@@ -649,6 +691,15 @@ process.stdout.write(
         action: blindPicked,
         legal_actions: blindUnknownPending.legal_actions,
         submits: blindSubmits,
+      },
+      // qunying 票 03a：跨座位公开区面 —— 槽 `ref` 带**别人座位**，动作仍是 SelectCards{picks}。
+      {
+        name: "public_zone_pick",
+        action: publicZonePick,
+        legal_actions: publicZonePickPending.legal_actions,
+        slots: publicPickSlots,
+        actor: publicZonePickPending.actor,
+        seats: publicZonePickPending.spec.seats,
       },
       // W1：座位多选面 —— 连同**载荷**一起打印，Python 侧用真引擎的候选枚举 / 投影核它。
       {

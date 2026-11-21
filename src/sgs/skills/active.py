@@ -9289,11 +9289,8 @@ _QIANXUN_NAME = "qianxun_effect_name"
 _QIANXUN_GAIN = "qianxun_gain_type"
 """效果③ 选中的类型（``basic`` / ``trick`` / ``equipment``）。"""
 
-_QIANXUN_MOVE_FROM = "qianxun_move_from"
-"""效果② 选中的源座位。"""
-
 _QIANXUN_MOVE_CARD = "qianxun_move_card"
-"""效果② 选中的那张牌（实体牌 id）。"""
+"""效果② 选中的那张牌（实体牌 id；源座位由它反查，不再单独一问）。"""
 
 _QIANXUN_MOVE_TO = "qianxun_move_to"
 """效果② 选中的目的地座位。"""
@@ -9708,6 +9705,23 @@ def _qianxun_field_seats(state: GameState) -> tuple[int, ...]:
     )
 
 
+def _qianxun_card_seat(state: GameState, card_id: int) -> int | None:
+    """反查**这张场上的牌**现在归哪个存活座位（装备区 / 判定区都算）；找不到 ⇒ ``None``。
+
+    效果② 的跨座位面把"选谁的牌"和"选哪张牌"合并成一次询问，故源座位只能从**选中的
+    那张牌**反查：``ZoneRef.seat`` 是面里的公开槽位坐标，答案回来的是实体牌 id（面内位置
+    已由引擎解析），扫一遍存活座位的 ``equip + judge`` 即得。同一张牌只会在一个座位的一个
+    区里（搬牌原语维持的不变量）；构造局面里若人为把它同时塞进两个区，取**座位序在前**的
+    那个——确定性优先于猜。
+    """
+    for player in state.players:
+        if not player.alive:
+            continue
+        if card_id in player.equip or card_id in player.judge:
+            return int(player.seat)
+    return None
+
+
 def _qianxun_effective_card(state: GameState, card_id: int) -> CardRef:
     """这张牌**在判定区里代表的那张牌**：转化过的延时锦囊读 ``state.virtual_judge`` 的映射。
 
@@ -9752,30 +9766,31 @@ def _qianxun_move_destinations(state: GameState, source_seat: int, card_id: int)
 
 
 def _qianxun_move_effect(host: Any, frame: Any, owner: int) -> Any:
-    """效果②：选源座位 → 选牌 → 选目的地 → 搬牌（``MoveReason.LOSE``）。"""
+    """效果②：**一次**跨座位选牌 → 选目的地 → 搬牌（``MoveReason.LOSE``）。
+
+    用户 2026-11-21（第二轮）：「移动场上1张牌」要直接在场上点选那张牌，不要先问"移动谁的
+    牌"。故面 = **有牌的存活座位 × (装备区, 判定区)**（`spec.seats` 声明同一份座位池，
+    见 `SelectionSpec.seats`），源座位由**选中的那张牌**反查（:func:`_qianxun_card_seat`），
+    不再作为单独一问；选牌 / 目的地两个帧内游标的幂等义务不变（挂起重入复用同一答案）。
+    """
     state = host.state
-    source_seat = frame.data.get(_QIANXUN_MOVE_FROM)
-    if source_seat is None:
-        pool = _qianxun_field_seats(state)
-        if not pool:
-            return None
-        seat = _qianxun_ask_seat(host, frame, owner, f"{QIANXUN}:from", pool)
-        if seat is _ASKING:
-            return "stay"
-        if seat is None:
-            return None
-        frame.data[_QIANXUN_MOVE_FROM] = int(seat)
-        source_seat = int(seat)
     card_id = frame.data.get(_QIANXUN_MOVE_CARD)
     if card_id is None:
+        seats = _qianxun_field_seats(state)
+        if not seats:
+            return None
         picks = host.ask_selection(
             frame,
             owner=_ASK_QIANXUN_FIELD,
             key="card",
             actor=owner,
             timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1)),
-            build_face=lambda: host.selection_face(int(source_seat), (Zone.EQUIP, Zone.JUDGE)),
+            spec=SelectionSpec(
+                zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1), seats=seats
+            ),
+            build_face=lambda: host.selection_face(
+                owner, (Zone.EQUIP, Zone.JUDGE), seats=seats
+            ),
         )
         if host.suspended(picks):
             return "stay"
@@ -9784,6 +9799,9 @@ def _qianxun_move_effect(host: Any, frame: Any, owner: int) -> Any:
         card_id = int(picks[0])
         frame.data[_QIANXUN_MOVE_CARD] = card_id
     card_id = int(card_id)
+    source_seat = _qianxun_card_seat(state, card_id)
+    if source_seat is None:
+        return None
     dest = frame.data.get(_QIANXUN_MOVE_TO)
     if dest is None:
         pool = _qianxun_move_destinations(state, int(source_seat), card_id)

@@ -186,6 +186,13 @@ class SelectionSpec(_FrozenModel):
     组合），不是界面层的灰显——界面读同一个字段把"同花色的其余牌"置灰。缺省 ``None``
     **不进序列化**（与 ``StepPool.max`` 同姿态）：``SelectionSpec`` 随 ``SelectCardsQuery``
     落记录流，多一个 ``"max_per_suit": null`` 会让所有带选牌询问的金录像字节变化。
+
+    ``seats``（qunying 票 03a 的加法）：选择面铺**哪些座位**的区（``None`` = 老口径"应答者
+    本人"）。同一份面可以有多个座位（"从场上任何人的装备区 / 判定区选一张牌"）——槽位自己的
+    ``ref.seat`` 带真实座位，故这个字段只声明**面覆盖了谁**：引擎的铺面口
+    （``Engine.selection_face(..., seats=...)``）与前端"这是公开区直选面"
+    （``candidates.js:isPublicZonePick``）读同一格。与 ``max_per_suit`` 同一姿态，缺省
+    ``None`` **不进序列化**：既有载荷 / 金录像逐字节不变。
     """
 
     zones: tuple[Zone, ...]
@@ -194,12 +201,15 @@ class SelectionSpec(_FrozenModel):
     optional: bool = False
     sequential: bool = False
     max_per_suit: int | None = None
+    seats: tuple[int, ...] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)
         if data.get("max_per_suit") is None:
             data.pop("max_per_suit", None)
+        if data.get("seats") is None:
+            data.pop("seats", None)
         return data
 
 

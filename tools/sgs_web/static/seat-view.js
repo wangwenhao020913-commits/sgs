@@ -283,6 +283,25 @@ function equipSlotLayout(cards) {
   return slots;
 }
 
+/** 跨座位公开区面（qunying 票 03a）上这张槽位牌的派生：`{selectable, selected, picked, slotIndex}`。
+ *
+ * 判据只看载荷形状（`candidates.js:isPublicZonePick` 已经判过这一步是公开区面），
+ * 槽位序号 = 这张实体牌在 `pending.slots` 里的位置；点它 = 提交那一条 `SelectCards`。
+ * 不在这里裁决合法性（候选仍由 `legal_actions` 给）。
+ */
+function publicZonePickFace(pending, card) {
+  const slots = (pending && pending.slots) || [];
+  const slotIndex = slots.findIndex(
+    (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
+  );
+  return {
+    selectable: slotIndex >= 0,
+    selected: false,
+    picked: slotIndex >= 0 && state.picks.includes(slotIndex),
+    slotIndex,
+  };
+}
+
 /** 一个判定 / 装备槽：空槽画暗色占位；有牌画**简略牌面**（牌名 + 花色点数）+
  *  跟随鼠标的常规卡面预览（用户 2026-11-07）。
  *
@@ -295,8 +314,9 @@ function equipSlotLayout(cards) {
  *  - 悬停：`#t-card-preview` 里画 `cardFaceNode` 的**常规卡面**并跟随鼠标；原生的
  *    `title` 去掉（同一条信息只留一个读法）。
  *
- *  ``interactive`` 只在**本人**的"提供一张 B / 预发动"面里为真（票 14 / W4-1）：
- *  槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
+ *  ``interactive`` 在三种面里为真：**本人**的"提供一张 B / 预发动"（票 14 / W4-1）、
+ *  以及**跨座位公开区直选**（qunying 票 03a——任何座位的装备 / 判定槽都可点，点它 =
+ *  点那张牌）。判据全部读载荷形状 / 清单声明，其余窗口保持静态。
  */
 function miniSlotNode(options) {
   const { zone, slot, sealKey, card, interactive, ctx, distanceBonus = 0 } = options;
@@ -352,7 +372,12 @@ function miniSlotNode(options) {
   node.addEventListener("mousemove", (event) => moveCardPreview(event));
   node.addEventListener("mouseleave", () => hideCardPreview());
   if (interactive) {
-    const face = cardFace(ctx.pendingNow, card);
+    // 跨座位公开区的面不走 `cardFace`：那张分派表服务的是"自己区域 / 预发动 / 手选"，
+    // 公开区的槽位由面自己的 `slots`（面内位置）回答"点的是哪一张"。
+    const publicPick = isPublicZonePick(ctx.pendingNow);
+    const face = publicPick
+      ? publicZonePickFace(ctx.pendingNow, card)
+      : cardFace(ctx.pendingNow, card);
     if (face.selected) node.classList.add("sel");
     if (face.picked) node.classList.add("picked");
     if (!face.selectable) node.classList.add("dis");
@@ -361,6 +386,10 @@ function miniSlotNode(options) {
     if (face.note) node.setAttribute("title", face.note);
     node.onclick = (event) => {
       if (event && event.stopPropagation) event.stopPropagation();
+      if (publicPick) {
+        submitPublicZonePick(ctx.pendingNow, face.slotIndex);
+        return;
+      }
       activateCard(ctx.pendingNow, card, face);
     };
   }
@@ -534,8 +563,11 @@ function sideBlockRows(player, ctx) {
     && Boolean(isProvide(ctx.pendingNow) || state.preactivation);
   // 「自己区域内选牌」也把装备区接成可点（铁骑 / 结姻 / 贯石斧等）：手牌本来就是
   // 牌桌表面，装备槽此前只在"提供一张 B / 预发动"时才接点击。判据仍是载荷形状。
+  // qunying 票 03a：跨座位公开区面与 own-zone 面并列——那个面里**任何座位**的装备 / 判定
+  // 槽都要能点（见下面的 `publicPick`），这里的 ownSeat 闸只服务自己的区域。
+  const publicPick = isPublicZonePick(ctx.pendingNow);
   const equipPick = ownSeat
-    && isOwnZonePick(ctx.pendingNow)
+    && (isOwnZonePick(ctx.pendingNow) || publicPick)
     && ownPickHasEquip(ctx.pendingNow);
   // **改判窗口也接装备区**（2026-11-08 实机报障：鬼道 / 鬼才点不了装备区的牌）：
   // 改判窗口是 `RESPOND` 的**手选面**（`isHandPick`），候选区 = 手牌 ∪ 装备区
@@ -564,7 +596,9 @@ function sideBlockRows(player, ctx) {
     const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
-      interactive: baseInteractive || preactivationPick("judge", layout.card),
+      interactive: baseInteractive
+        || preactivationPick("judge", layout.card)
+        || publicPick,
       ctx,
     });
     // 逐槽一个角标（三个判定槽各画一个；判定行本身不再画）。
@@ -593,7 +627,8 @@ function sideBlockRows(player, ctx) {
       card: layout.card,
       interactive: baseInteractive || equipPick
         || equipCardPick(layout.card)
-        || preactivationPick("equip", layout.card),
+        || preactivationPick("equip", layout.card)
+        || publicPick,
       distanceBonus,
       ctx,
     });

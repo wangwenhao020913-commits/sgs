@@ -288,6 +288,8 @@ function renderPending(view) {
   else if (kind === "seat-multi") renderSeatMultiPick(pending);
   else if (kind === "own-hand-pick") renderOwnHandPick(pending);
   else if (kind === "own-zone-pick") renderOwnZonePick(pending);
+  // 跨座位公开区直选（qunying 票 03a）：面里的牌在任何座位的装备 / 判定区，点一张即提交。
+  else if (kind === "public-zone-pick") renderPublicZonePick(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
     // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
@@ -426,6 +428,8 @@ function isJudgmentRevealOption(pending) {
  * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标；
  * - `discard`：弃牌阶段 —— 点手牌收进待弃置集合；
  * - `slots`：`SELECT_CARDS` 的选择面（点槽位）；
+ * - `public-zone-pick`：跨座位公开区（装备 / 判定，任何座位）的牌桌直选（qunying 票 03a；
+ *   点一张即提交，不铺槽位块）；
  * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
  * - `preactivation` / `preactivation-entry`：清单驱动的本地态 / 被动入口；
  * - `seat` / `options`：`SELECT_OPTION` 的选座位形态 / 小选项按钮组；
@@ -445,6 +449,9 @@ function renderKind(pending, actions) {
   // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
   if (isOwnHandSinglePick(pending)) return "own-hand-pick";
   if (isOwnZonePick(pending)) return "own-zone-pick";
+  // 跨座位公开区直选（qunying 票 03a）：与 own-zone-pick 并联，排在 `SELECT_CARDS → slots`
+  // 之前——命中时牌桌的槽位就是选择面，不铺左下角的槽位块。
+  if (isPublicZonePick(pending)) return "public-zone-pick";
   // 空选择面 = 引擎仍要发的那条"只能放弃"询问（如【铁骑】没有同花色牌）：不铺空面板，
   // 只走唯一候选（Pass）的直提态；没有可选动作则 fail-closed。
   // 票 01：【攻心】的"观看"在没有红桃时也是空选择面——表面仍是亮牌弹窗，要画整副手牌
@@ -891,6 +898,53 @@ function renderSeatMultiPick(pending) {
   $("btn-cancel").disabled = seatMultiChosenSeats(pending).length === 0;
 }
 
+/** **跨座位公开区**的牌桌直选（qunying 票 03a）：点场上任意一张亮起的装备 / 判定牌即提交。
+ *
+ * 与 own-zone 的两档一样，不铺左下角槽位块；牌面由 `seat-view.js` 在**各自座位**的槽位上
+ * 就地渲染（`miniSlotNode` 的 `interactive` 读同一个判据）。这里只负责"这一步怎么点"的
+ * 文案与按钮态：单张面（`total=(1,1)`）一击即提交，故提交键恒灰；候选里的 `Pass`（若有）
+ * 留在右端。
+ */
+function renderPublicZonePick(pending) {
+  const index = (pending.legal_actions || []).findIndex(
+    (action) => action.kind === "SelectCards");
+  if (index >= 0) state.selectedOption = index;
+  const requirement = (pending.context && pending.context.requirement) || "选择一张牌";
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `${requirement}：点一张场上亮起的装备 / 判定牌即提交。`;
+  }
+  $("btn-submit").disabled = true;
+  $("btn-cancel").disabled = !cancelAction(pending);
+}
+
+/** 公开区直选面上点一张牌 = **恰一条** `SelectCards`（面内位置）。
+ *
+ * 送出的仍是 `legal_actions` 里的那条骨架（`buildAction` 补 `picks`），不手拼 Action；
+ * 与 own-hand-pick 的"一击即提交"同一姿态。合法槽位 / 上限由引擎的候选裁决（界面只把
+ * 点中的槽位序号填进去）；点空了（`slotIndex < 0`）不发请求。
+ */
+async function submitPublicZonePick(pending, slotIndex) {
+  if (state.playback || state.submitBusy) return;
+  if (!selectionEnabled() || !isPublicZonePick(pending)) return;
+  if (!Number.isInteger(slotIndex) || slotIndex < 0) return;
+  const actions = pending.legal_actions || [];
+  const at = actions.findIndex((action) => action.kind === "SelectCards");
+  if (at < 0) return;
+  const before = selectionSnapshot();
+  state.selectedOption = at;
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [slotIndex];
+  state.preactivation = null;
+  state.lastRejectReason = "";
+  if (!state.sessionId) {
+    renderPending(state.view);
+    return;
+  }
+  await submitAction(before);
+}
+
 /** 响应窗口里"非使用牌"候选的按钮文案（W5-02b）：借刀的 `Pass` = b（**交出武器**）。
  *
  * 只看窗口成因这一条公开事实，不改 `actionLabel` 的通用语义（同一个 `Pass` 在别的窗口
@@ -1124,6 +1178,14 @@ function refreshSubmit(pending) {
       || ownPickPreviewIssue(pending)
       || blocked
       || (ready ? "可以提交。" : `点选${where}（已选 ${state.picks.length} 张）。`));
+    return;
+  }
+  // 跨座位公开区直选（qunying 票 03a）：单张面点一张即提交，提交键恒灰；候选里的 Pass
+  // （若有）留在右端。页脚只说"点哪里"，不替玩家挑牌。
+  if (isPublicZonePick(pending)) {
+    $("btn-submit").disabled = true;
+    setAskChoice(state.lastRejectReason
+      || "点一张场上亮起的装备 / 判定牌即提交。");
     return;
   }
   if (state.lastRejectReason) { setAskChoice(state.lastRejectReason); return; }

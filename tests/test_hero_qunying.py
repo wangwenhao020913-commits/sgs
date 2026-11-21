@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from sgs.data import Category, load_content_pack
 from sgs.engine import Engine
 from sgs.skills import CATALOG
@@ -648,7 +650,7 @@ def test_qianxun_move_destination_lists_illegal_seats_greyed() -> None:
         (
             module.QIANXUN_COST_DAMAGE,
             module.QIANXUN_EFFECT_MOVE,
-            "seat:0",
+            # 票 03a 起源座位不再单独一问：选牌面的首槽 = 座 0 的武器 ⇒ 目的地池从座 1 起。
             "seat:1",
         )
     )
@@ -665,6 +667,219 @@ def test_qianxun_move_destination_lists_illegal_seats_greyed() -> None:
         "武器槽被废除 ⇒ 列出来但置灰"
     )
     assert "seat:1" in seen["legal"], "空槽 ⇒ 合法"
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 03a：效果② 的跨座位公开区选择面（一步直选，源座位由牌反查）
+# ---------------------------------------------------------------------------
+
+
+def _cross_seat_move_state() -> tuple[GameState, int]:
+    """效果② 的跨座位局面：座 0 装备区一把武器；座 1 判定区一张**转化过的**延时锦囊。
+
+    座 2 / 3 的空场把"哪些座位进 ``spec.seats``"钉成"有牌的存活座位"，而不是"全体存活
+    座位"；座 1 那张牌走 ``virtual_judge``（产物 = 乐不思蜀），用来钉住"判定区的转化牌也
+    在面里、搬完产物不丢"。
+    """
+    from sgs.skills.virtual import transformed_card
+
+    own_sword = cards_of_type(PACK_160, "qinggang_sword")[0]
+    converted = cards_of_type(PACK_160, "slash")[1]
+    product_source = cards_of_type(PACK_160, "dodge")[1]
+    hand = (cards_of_type(PACK_160, "dodge")[0],)
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=HERO, hand=hand, equip=(own_sword,)),
+            SeatSpec(judge=(converted,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK_160, own_sword, converted, product_source, hand[0]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    state.virtual_judge[converted] = transformed_card(state, (product_source,), "indulgence")
+    return state, converted
+
+
+class _CrossSeatMoveScript(_PlayScript):
+    """效果② 的脚本参与者：在跨座位面上点**别人判定区**的那张牌（不是首槽）。"""
+
+    def __init__(self, *, pick_seat: int, options: tuple[str, ...]) -> None:
+        super().__init__(options)
+        self.pick_seat = int(pick_seat)
+        self.queries: list[Any] = []
+
+    def respond(self, query: Any) -> Any:
+        self.queries.append(query)
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "SELECT_CARDS":
+            index = next(
+                position
+                for position, slot in enumerate(query.slots)
+                if int(slot.ref.seat) == self.pick_seat and slot.ref.zone is Zone.JUDGE
+            )
+            return next(
+                action
+                for action in query.legal_actions
+                if action.kind == "SelectCards" and tuple(action.picks) == (index,)
+            )
+        return super().respond(query)
+
+
+def test_selection_face_multi_seat_is_the_seat_major_product() -> None:
+    """票 03a §2：``selection_face(..., seats=...)`` = 座位优先的乘积；单座位输出逐字不变。
+
+    既有的单座位调用点必须看到**同一批槽位、同一顺序**（先装备再判定、隐藏槽的洗牌仍只
+    走一次）；多座位面则是"先座 0 的全部区，再座 1 的全部区"的拼接。
+    """
+    state, _converted = _cross_seat_move_state()
+    engine = Engine.from_state(state, seed=64)
+    zones = (Zone.EQUIP, Zone.JUDGE)
+    single = engine.selection_face(0, zones)
+    assert [(slot.ref.seat, slot.ref.zone) for slot in single[0]] == [
+        (0, Zone.EQUIP)
+    ], "单座位面与既有调用点同形（座 0 的装备区；本局面判定区为空）"
+
+    both = engine.selection_face(0, zones, seats=(0, 1))
+    first = engine.selection_face(0, zones)
+    second = engine.selection_face(1, zones)
+    assert both == (first[0] + second[0], first[1] + second[1]), (
+        "多座位 = 逐座位拼接（座位优先），每个槽的 ref 带自己那座的真实座位"
+    )
+    assert [int(slot.ref.seat) for slot in both[0]] == [0, 1]
+
+
+def test_qianxun_move_effect_asks_once_across_every_field_seat() -> None:
+    """票 03a §3：删掉"选源座位"那一问 ⇒ **一次**选牌面，槽位跨座位、含判定区。
+
+    断言走**真引擎**的效果②（不是直接调 `selection_face`）：询问里没有 ``:from`` 那一问，
+    ``spec.seats`` = 有牌的存活座位，槽位同时覆盖自己的装备区与**别人**的判定区；
+    源座位由**选中的那张牌**反查——点座 1 判定区那张牌，目的地池就不含座 1。
+    """
+    from sgs.skills import active as module
+
+    state, converted = _cross_seat_move_state()
+    engine = Engine.from_state(state, seed=61)
+    script = _CrossSeatMoveScript(
+        pick_seat=1,
+        options=(
+            module.QIANXUN_COST_DAMAGE,
+            module.QIANXUN_EFFECT_MOVE,
+            "seat:2",
+        ),
+    )
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none"),
+         _PlayScript((), skill_id="none")],
+        lambda e: bool(module._qianxun_used_effects(e.state, 0))
+        and e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
+    )
+
+    faces = [
+        query for query in script.queries
+        if str(getattr(query.kind, "value", query.kind)) == "SELECT_CARDS"
+    ]
+    assert len(faces) == 1, (
+        f"效果② 只发**一次**选牌询问（源座位那一问必须退场）：{len(faces)} 次"
+    )
+    face = faces[0]
+    assert face.spec.seats == (0, 1), (
+        f"seats = 有牌的存活座位（座 2 / 3 空场，不进面）：{face.spec.seats}"
+    )
+    assert face.spec.zones == (Zone.EQUIP, Zone.JUDGE)
+    assert {
+        (int(slot.ref.seat), slot.ref.zone) for slot in face.slots
+    } == {(0, Zone.EQUIP), (1, Zone.JUDGE)}, (
+        "槽位 = 全体有牌座位的装备区 + 判定区（混合座位）"
+    )
+    assert not any(
+        str(getattr(query, "skill_id", "") or "").endswith(":from")
+        for query in script.queries
+    ), "源座位不再作为单独一问"
+
+    # 源座位从选中的那张牌反查（座 1）⇒ 那块牌搬到座 2 的判定区。
+    moved = state.player(2)
+    assert list(moved.judge) == [converted], f"座 2 判定区应有那张牌：{moved.judge}"
+    assert converted not in state.player(1).judge, "座 1 判定区已空"
+    assert state.virtual_judge[converted].type == "indulgence", (
+        "移动判定区的转化牌保持产物（乐不思蜀还是乐不思蜀）"
+    )
+
+
+def test_qianxun_move_face_candidates_are_the_only_accepted_answers() -> None:
+    """票 03a §4 [C4]：候选面与 ``legal_actions`` 同源——非法槽位由**校验器**拒收。
+
+    面里每个槽位恰好一条候选；越界位置 / 两张（``total=(1,1)``）都不在候选集合里，引擎
+    必须先落拒绝记录再拒收，且挂起态不变。界面只负责渲染路径，合法性不靠它挡。
+    """
+    from sgs.engine import IllegalActionError
+    from sgs.skills import active as module
+    from sgs.state import SelectCards
+
+    state, _converted = _cross_seat_move_state()
+    engine = Engine.from_state(state, seed=62)
+    script = _CrossSeatMoveScript(
+        pick_seat=1,
+        options=(module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE),
+    )
+    for _ in range(400):
+        pending = engine.pending
+        if pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        if str(getattr(pending.kind, "value", pending.kind)) == "SELECT_CARDS":
+            break
+        engine.submit(script.respond(pending))
+    else:  # pragma: no cover - 没走到选牌面就是夹具坏了
+        raise AssertionError("没走到效果② 的跨座位选牌面")
+
+    assert {(int(slot.ref.seat), slot.ref.zone) for slot in pending.slots} == {
+        (0, Zone.EQUIP), (1, Zone.JUDGE)
+    }
+    assert {tuple(action.picks) for action in pending.legal_actions} == {
+        (position,) for position in range(len(pending.slots))
+    }, "面里每个槽位恰好一条候选（同源）"
+
+    for illegal in ((len(pending.slots),), (0, 1)):
+        with pytest.raises(IllegalActionError):
+            engine.submit(SelectCards(picks=illegal, answers_seq=pending.seq))
+        assert engine.pending is pending, f"被拒的提交不改变挂起态：{illegal}"
+    engine.submit(
+        next(action for action in pending.legal_actions if tuple(action.picks) == (1,))
+    )
+    assert engine.pending is not pending, "候选里那条必须被收下"
+
+
+def test_qianxun_move_effect_without_field_cards_asks_nothing() -> None:
+    """票 03a §4 [G2]：没有任何存活座位的装备 / 判定区有牌 ⇒ 不发询问（与旧"没有源座位"同形）。"""
+    from sgs.skills import active as module
+
+    state = _state(seats=3)
+    engine = Engine.from_state(state, seed=63)
+    script = _CrossSeatMoveScript(
+        pick_seat=0,
+        options=(module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE),
+    )
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
+        lambda e: bool(module._qianxun_used_effects(e.state, 0))
+        and e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
+    )
+    assert not [
+        query for query in script.queries
+        if str(getattr(query.kind, "value", query.kind)) == "SELECT_CARDS"
+    ], "空场时不发选牌询问"
+    assert module._qianxun_used_effects(state, 0) == {module.QIANXUN_EFFECT_MOVE}, (
+        "效果仍然算「本回合已选过」（与今天的空源座位同形）"
+    )
 
 
 def test_lianying_spends_the_flags_on_equipment_peach_and_wine() -> None:

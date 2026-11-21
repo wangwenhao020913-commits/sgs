@@ -12920,6 +12920,172 @@ def test_the_public_processing_slots_survive_foreign_masking_but_watched_faces_d
     assert masked["revealed"] == [], "观看授予照旧不下发"
 
 
+# ---------------------------------------------------------------------------
+# qunying 票 03a：SelectionSpec 的座位维 + 真会话的跨座位公开区面
+# ---------------------------------------------------------------------------
+
+
+def test_the_selection_spec_omits_seats_until_a_face_declares_them() -> None:
+    """票 03a §4 [G1]：``seats is None`` **不进序列化**（与 ``max_per_suit`` 同一姿态）。
+
+    ``SelectionSpec`` 随 ``SelectCardsQuery`` 落记录流；多一个 ``"seats": null`` 会让所有
+    带选牌询问的金录像字节变化。这里把缺省载荷的键集逐字钉住，并断声明了座位维时它才出现。
+    """
+    plain = SelectionSpec(zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1))
+    data = plain.model_dump(mode="json")
+    assert data == {
+        "zones": ["equip", "judge"],
+        "total": [1, 1],
+        "per_zone": [],
+        "optional": False,
+        "sequential": False,
+    }, f"缺省载荷逐字节不变（没有 seats / max_per_suit 这两个键）：{data}"
+
+    cross = SelectionSpec(zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1), seats=(0, 2))
+    assert cross.model_dump(mode="json")["seats"] == [0, 2], (
+        "声明了座位维才写它（前端 isPublicZonePick 读的就是这一格）"
+    )
+
+
+def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
+    """真会话：4 人局，人类座位 = 「锋势」陆逊，停在【谦逊】效果② 的**跨座位**选牌面。
+
+    局面：座 0 装备区一把武器（自己也在池里）；座 1 判定区一张**转化过的**延时锦囊
+    （产物 = 乐不思蜀）；座 2 / 3 空场。驱动走真会话（真引擎、真流水线、真
+    ``pending_payload``）：发动【谦逊】→ 代价②（1 点无来源火焰伤害）→ 效果②，
+    停在 ``SELECT_CARDS``。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+    from sgs.skills.virtual import transformed_card
+
+    pack = _context_pack()
+    sword = cards_of_type(pack, "qinggang_sword")[0]
+    converted = cards_of_type(pack, "slash")[0]
+    product_source = cards_of_type(pack, "dodge")[0]
+    hand = (cards_of_type(pack, "slash")[1],)
+    used = {sword, converted, product_source, hand[0]}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="qunying_luxun", hand=hand, equip=(sword,)),
+            SeatSpec(judge=(converted,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id not in used
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    state.virtual_judge[converted] = transformed_card(state, (product_source,), "indulgence")
+
+    session = Session(
+        pack=pack,
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE"
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if getattr(action, "skill_id", None) == QIANXUN
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_OPTION", pending
+    assert str(pending.skill_id).endswith(":cost")
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if action.choice == module.QIANXUN_COST_DAMAGE
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_OPTION", pending
+    assert str(pending.skill_id).endswith(":effect"), (
+        f"效果步之前只剩代价 / 效果两问（没有 :from）：{pending.skill_id}"
+    )
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if action.choice == module.QIANXUN_EFFECT_MOVE
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_CARDS", pending
+    return session, converted
+
+
+def test_a_real_session_reaches_the_cross_seat_qianxun_field_face() -> None:
+    """票 03a §5 的真会话读数：效果② 下发**一份**跨座位面（``spec.seats`` 非空、槽位跨两座）。
+
+    读取方逐格核：``spec.zones`` = 装备 + 判定、``spec.seats`` = 有牌的存活座位（含自己）、
+    每个槽位的 ``ref`` 带**真实座位**、牌面非空（公开区）；再把**别人座位**的那张牌交上去，
+    目的地池由服务端按反查出来的源座位算（源座位不在池里），搬完产物不丢。
+    """
+    session, converted = _session_at_the_qianxun_move_face()
+    pending = session.pending
+    payload = pending_payload(session)
+
+    assert payload["kind"] == "SELECT_CARDS"
+    spec = payload["spec"]
+    assert spec["zones"] == ["equip", "judge"], (
+        f"面 = 装备区 + 判定区（含被转化的延时锦囊）：{spec}"
+    )
+    assert spec["seats"] == [0, 1], (
+        f"seats = 有牌的存活座位（自己也在池里）：{spec.get('seats')}"
+    )
+    assert "max_per_suit" not in spec, "缺省字段照旧不进载荷"
+    slots = payload["slots"]
+    assert [
+        (slot["ref"]["seat"], slot["ref"]["zone"]) for slot in slots
+    ] == [(0, "equip"), (1, "judge")], (
+        f"槽位覆盖两个座位：{[slot['ref'] for slot in slots]}"
+    )
+    assert all(slot["card"] for slot in slots), (
+        "公开区：应答者的载荷里牌面可见（不是隐藏槽）"
+    )
+
+    # 交上**别人座位**的那张牌（面内位置 1）⇒ 下一个询问是目的地，池里没有座 1。
+    session.submit_answer(
+        next(action for action in pending.legal_actions if tuple(action.picks) == (1,))
+    )
+    destination = session.pending
+    assert destination is not None and str(destination.kind) == "SELECT_OPTION", destination
+    assert str(destination.skill_id).endswith(":to")
+    assert {str(item) for item in destination.options} == {"seat:0", "seat:2", "seat:3"}, (
+        "源座位（座 1）不列为目的地：它不是「另一名角色」"
+    )
+    assert {str(action.choice) for action in destination.legal_actions} == {"seat:0", "seat:2", "seat:3"}, (
+        "源座位由选中的那张牌反查（座 1）⇒ 它不是合法目的地"
+    )
+    session.submit_answer(
+        next(
+            action
+            for action in destination.legal_actions
+            if str(action.choice) == "seat:2"
+        )
+    )
+    state = session.engine.state
+    assert list(state.player(2).judge) == [converted], "牌搬到了座 2 的判定区"
+    assert converted not in state.player(1).judge, "源座位判定区已空"
+    assert state.virtual_judge[converted].type == "indulgence", (
+        "判定区 → 判定区的移动保持产物（乐不思蜀还是乐不思蜀）"
+    )
+
+
 def _two_row_watch_query(pack, *, actor: int = 0, target: int = 1):
     """构造一条**两行观看手牌**形状的 ``SELECT_CARDS`` 询问（票 93 的框架面；本票不带技能）。
 

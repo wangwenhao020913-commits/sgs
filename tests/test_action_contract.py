@@ -143,6 +143,7 @@ def test_the_client_builders_round_trip_through_the_server_action_parser() -> No
         "watch_two_rows",
         "unknown_zone_multipick",
         "unknown_zone_single_pick",
+        "public_zone_pick",
         "seat_multi_select",
         "seat_multi_select_structural",
         "default_activate",
@@ -316,6 +317,42 @@ def test_the_unknown_zone_multipick_builds_a_multi_card_select_cards() -> None:
     )
     assert single["action"] is not None and single["action"]["picks"] == [2]
     assert single["action"] in single["legal_actions"]
+
+
+def test_a_cross_seat_public_zone_pick_round_trips_through_the_server_parser() -> None:
+    """qunying 票 03a §4 [C5]：**槽位带别人座位**的 `SELECT_CARDS` 也走同一条回环。
+
+    探针加载真前端脚本，用 `pending.js:submitPublicZonePick`（真点击入口）点第 2 槽——
+    那一槽的 `ref.seat` 是 1、`actor` 是 0（跨座位公开区）。`buildAction()` 必须产出
+    `SelectCards{picks}`（面内位置），而 `parse_action` 必须收下它；槽位身份 / 座位是
+    **载荷**的事实，不是动作要带的东西（动作只带面内位置）。
+    """
+    case = {entry["name"]: entry for entry in _probe_payload()["cases"]}["public_zone_pick"]
+    action = case["action"]
+
+    assert case["seats"] == [0, 1], "面声明了座位维（前端 isPublicZonePick 的判据）"
+    assert {(slot["ref"]["seat"], slot["ref"]["zone"]) for slot in case["slots"]} == {
+        (0, "equip"),
+        (1, "judge"),
+    }, f"槽位跨座位：{case['slots']}"
+    assert case["slots"][1]["ref"]["seat"] != case["actor"], "点的那张在**别人**的座位"
+
+    assert action is not None, "真实点击入口没把跨座位公开区接上候选骨架"
+    assert action["kind"] == "SelectCards"
+    assert set(action) == {"kind", "picks", "answers_seq"}, (
+        f"公开区面仍是 SelectCards 的三格（不把座位 / 槽位身份带上行）：{sorted(action)}"
+    )
+    assert action["picks"] == [1], (
+        f"点第 2 槽 ⇒ picks = [1]（面内位置，不是实体牌 id）：{action['picks']}"
+    )
+    assert action in case["legal_actions"], (
+        f"造出的动作必须逐字段命中候选里那条：{action} / {case['legal_actions']}"
+    )
+
+    parsed = parse_action(action)
+    assert parsed.kind == "SelectCards"
+    assert parsed.picks == (1,)
+    assert parsed.answers_seq == 102
 
 
 def test_the_seat_multi_select_face_submits_every_chosen_seat_at_once() -> None:
@@ -618,7 +655,7 @@ def test_the_probe_prints_only_the_contract_payload() -> None:
     """探针 stdout 只有一份 JSON 对象（前端脚本加载期不得打印 / 泄漏上下文）。"""
     payload = _probe_payload()
     assert set(payload) == {"cases", "decorated"}, sorted(payload)
-    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 11
+    assert isinstance(payload["cases"], list) and len(payload["cases"]) == 12
 
 
 # ---------------------------------------------------------------------------

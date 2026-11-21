@@ -34350,4 +34350,122 @@ await clickAndWait($("btn-lobby-pool"));
   ui.resetSelection();
 }
 
+/* ============ qunying 票 03a：跨座位公开区选择面（public-zone-pick） ============
+ *
+ * 合成载荷与真会话同形（`Engine.selection_face(..., seats=...)` 的产物；服务端侧由
+ * `tests/test_web.py::test_a_real_session_reaches_the_cross_seat_qianxun_field_face` 钉）：
+ * `spec.seats` 非空、槽位 `ref` 属于**任何**座位的装备 / 判定区、牌面可见。界面要做的只有
+ * 三件事：走 `public-zone-pick` 渲染路径（不铺槽位块、不抢 own-zone）、把**每个座位**的
+ * 槽位接成可点、点一张即提交那一条 `SelectCards`（面内位置）。
+ */
+{
+  const pubSword = {
+    ...synthCard(4401, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal",
+  };
+  const pubArmor = {
+    ...synthCard(4402, "八卦阵"), type: "eight_diagram", slot: "armor",
+    attack_range: null, kind: "normal",
+  };
+  const pubJudge = {
+    ...synthCard(4403, "乐不思蜀"), type: "indulgence", kind: "normal",
+  };
+  const pubPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2401,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2401, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2401, picks: [1] },
+      { kind: "SelectCards", answers_seq: 2401, picks: [2] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "equip" }, card: pubSword },
+      { ref: { seat: 1, zone: "equip" }, card: pubArmor },
+      { ref: { seat: 1, zone: "judge" }, card: pubJudge },
+    ],
+    spec: { zones: ["equip", "judge"], total: [1, 1], seats: [0, 1] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "谦逊", targets: [0],
+      label: "0号位发动谦逊", requirement: "移动场上一张牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2401, picks: [0] },
+      default_label: "超时将自动选择第一张牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const pubSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261018,
+  });
+  const pubView = synthView(pubPending);
+  pubView.snapshot.players[0].equip = [pubSword];
+  pubView.snapshot.players[1].equip = [pubArmor];
+  pubView.snapshot.players[1].judge = [pubJudge];
+  ui.state.view = pubView;
+  ui.state.sessionId = pubSession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pubView);
+
+  const pubAttr = (node, name) => (node && node.getAttribute
+    ? node.getAttribute(name)
+    : undefined);
+  // 自己的座位块是常驻 `#t-self-zones`（`table.js` 搬过去的），其余座位在 `#t-seats` 里。
+  const pubSeatBox = (seat) => (Number(seat) === 0 ? $("t-self-zones") : seatBox(seat));
+  const pubSlotsOf = (seat) => byClass(pubSeatBox(seat), "mini-slot")
+    .filter((node) => pubAttr(node, "data-card-id"));
+  const pubClick = async (node) => {
+    for (const fn of node.listeners.click || []) {
+      await fn({ target: node, stopPropagation() {} });
+    }
+  };
+  const pubSettle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const pubAnswersSince = (mark) => calls.slice(mark)
+    .filter((call) => call.path.includes("/answer"));
+
+  check("U-PUB-01a 跨座位公开区面走 public-zone-pick：不铺槽位块、own-zone 不抢",
+    ui.renderKind(pubPending, pubPending.legal_actions) === "public-zone-pick"
+      && ui.isOwnZonePick(pubPending) === false
+      && $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("移动场上一张牌")
+      && $("btn-submit").disabled === true,
+    `kind=${ui.renderKind(pubPending, pubPending.legal_actions)}`
+      + ` own=${ui.isOwnZonePick(pubPending)} options=${$("t-options").children.length}`
+      + ` hint="${$("t-target-hint").textContent}"`);
+
+  const pubSeat0 = pubSlotsOf(0);
+  const pubSeat1 = pubSlotsOf(1);
+  check("U-PUB-01b 每个座位的槽位都接成可点（自己 + 别人的装备 / 判定区）",
+    pubSeat0.length === 1 && pubSeat1.length === 2
+      && pubSeat0.every((node) => node.tagName === "BUTTON" && !node.classList.contains("dis"))
+      && pubSeat1.every((node) => node.tagName === "BUTTON" && !node.classList.contains("dis")),
+    `seat0=${pubSeat0.map((n) => n.tagName)} seat1=${pubSeat1.map((n) => n.tagName)}`);
+
+  // 点**别人**判定区那张牌（面内位置 2）：恰好一条 SelectCards，原样命中候选。
+  const pubTarget = pubSeat1.find((node) => pubAttr(node, "data-zone") === "judge");
+  const beforePub = calls.length;
+  staleAnswerStatus = 400;
+  await pubClick(pubTarget);
+  await pubSettle();
+  staleAnswerStatus = null;
+  const pubAnswers = pubAnswersSince(beforePub);
+  check("U-PUB-01c 点别人判定区的一张牌 = 恰一条 SelectCards（面内位置 2）即提交",
+    pubAnswers.length === 1
+      && JSON.stringify(pubAnswers[0].body.action)
+        === JSON.stringify(pubPending.legal_actions[2]),
+    `answers=${pubAnswers.length}`
+      + ` action=${JSON.stringify(pubAnswers[0] && pubAnswers[0].body.action)}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
