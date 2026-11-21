@@ -335,6 +335,19 @@ const OPTION_LABELS = Object.freeze({
   // 风包·移动版于吉【蛊惑】：其他角色逐个表态（两选项，必答；"相信"就是放弃质疑）。
   guohuo_doubt: "质疑",
   guohuo_trust: "相信",
+  // 群英包·「锋势」陆逊【谦逊】（qunying 票 01）：三个代价各每个出牌阶段限一次，
+  // 付不起 / 已付过的那一项由引擎从候选里删掉（不是置灰——那几项这一阶段根本不存在）。
+  qianxun_cost_discard: "①弃置所有手牌",
+  qianxun_cost_damage: "②受到一点无来源的火焰伤害",
+  qianxun_cost_equip: "③将一张装备牌当作一张延时类锦囊牌对自己使用",
+  // 同一个技能的效果三选一（`ask_option` 的 id 是引擎侧的稳定键，中文在这张表里）。
+  qianxun_effect_card: "①视为使用一张基本牌或普通锦囊牌",
+  qianxun_effect_move: "②移动场上一张牌",
+  qianxun_effect_gain: "③从牌堆或弃牌堆中获得一张你指定类型的牌",
+  // 代价③ 的产物三选一（延时锦囊的牌型 id；乐 / 兵粮是既有 kind，闪电是本票新加的一段）。
+  indulgence: "乐不思蜀",
+  supply_shortage: "兵粮寸断",
+  lightning: "闪电",
   // 风包夏侯渊【神速】：一至两项（三档单选项；"两项都选"是【1】+【2】）。
   shensu_skip_judge_draw: "【1】跳过判定阶段和摸牌阶段",
   shensu_skip_play_equip: "【2】跳过出牌阶段并弃置一张装备牌",

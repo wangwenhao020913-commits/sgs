@@ -450,9 +450,21 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     assert phase_use_bits == 0b1111 << catalog_module._PHASE_USE_SHIFT
     assert catalog_module._PHASE_USE_SHIFT == 32, "24..31 是【定乱】的座位位段，23 放不下 4 位"
 
+    # qunying 票 01：群英包·「锋势」陆逊【谦逊】的三个代价位（作用域 = 一个出牌阶段）。
+    # 用户签票时逐字补：「额外出牌阶段刷新代价、但不刷新效果」⇒ 代价位并进阶段掩码、
+    # 效果位走 `_QIANXUN_EFFECT_MASK`（回合末清，**不**进这里）。
+    qianxun_cost_bits = catalog_module._QIANXUN_COST_MASK
+    assert qianxun_cost_bits == 0b111 << catalog_module._QIANXUN_COST_SHIFT
+    assert catalog_module._QIANXUN_COST_SHIFT == 48, (
+        "32..35 是【慎行】次数、36..43 是【良助】座位段、44..47 是【义云】花色段"
+    )
+    assert not (catalog_module._QIANXUN_EFFECT_MASK & catalog_module._PHASE_STATE_MASK), (
+        "效果位是本回合作用域 ⇒ 不许进阶段掩码"
+    )
+
     assert (
         catalog_module._PHASE_STATE_MASK
-        == phase_bits | given_bits | huangtian_bits | phase_use_bits
+        == phase_bits | given_bits | huangtian_bits | phase_use_bits | qianxun_cost_bits
     )
     assert catalog_module._USED_SECOND == active_module._USED_SECOND, (
         "位布局的唯一真源在 catalog；active 只是转发同一个常量"

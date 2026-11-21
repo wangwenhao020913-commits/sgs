@@ -695,7 +695,8 @@ function renderLobbyHeroPanel() {
 /** 右栏下格左侧：立绘。有图 ⇒ 一张 `<img>`；无图 / 缺索引 ⇒ **同一个盒子**的空位态。
  *
  * 盒子是 `index.html` 里那个静态的 `#lobby-portrait`（`class="portrait-box"`）；
- * 「有图 / 空位」的两种形状由 `core.js:fillPortraitBox` 一手落（牌桌武将块同源，票 03）：
+ * 「有图 / 空位」的两种形状由 `core.js:fillPortraitBox` 一手落（与详情窗同源；票 08 起
+ * 牌桌不出立绘，不在这条路上）：
  *  - 有图 ⇒ 一张 `<img>`，`src = /art/<索引里的相对路径>`（原样拼，不猜）；
  *  - 无图 ⇒ 清空子节点 + `data-empty="1"`——**没有 img 就没有网络请求**。
  *
@@ -711,7 +712,7 @@ function renderLobbyPortrait(version) {
 /** 立绘索引里该版本的那一条。键是**显示名称**（与 `/api/heroes` 的 `version.name` 同源）；
  *  没有版本 / 没有索引 / 索引形状不对 ⇒ `null`（调用方一律当"无图、无作者"）。
  *
- *  查表本体在 `core.js:portraitEntryFor`（牌桌武将块读同一份 `state.portraits`）；
+ *  查表本体在 `core.js:portraitEntryFor`（与详情窗读同一份 `state.portraits`）；
  *  这里只负责把"版本对象"翻成"显示名称"。 */
 function lobbyPortraitEntry(version) {
   if (!version || !version.name) return null;

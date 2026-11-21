@@ -457,9 +457,11 @@ def _battle(
     accept: bool = True,
     seed: int = 21,
     slash_count: int = 0,
+    hand_extra: tuple[str, ...] = (),
 ):
-    """两人局：座 0 = 谋刘赪（手里摆 `plays` 的牌），座 1 有两张手牌（可被拆）。"""
+    """两人局：座 0 = 谋刘赪（手里摆 `plays` 的牌，另可加 `hand_extra` 只握不打）。"""
     hand = tuple(cards_of_type(PACK, type_id)[0] for type_id in plays)
+    hand += tuple(cards_of_type(PACK, type_id)[0] for type_id in hand_extra)
     prey = cards_of_type(PACK, "dodge")[:2]
     state = build_state(
         pack=PACK,
@@ -508,15 +510,39 @@ def test_declining_the_virtual_dismantlement_keeps_the_spend_and_the_draw() -> N
     assert _phase_uses(state, 0, YINGWU) == 1, "只有【无中生有】那一次"
 
 
-def test_the_virtual_slash_does_not_consume_the_slash_count() -> None:
-    """Q8：莺舞① 的产物【杀】**不占**本回合次数（`counts=False`），且用完上限也能用。
+def test_the_virtual_slash_counts_toward_the_slash_limit() -> None:
+    """Q8（用户 2026-11-21 修订）：莺舞① 的「无次数限制」= 规则 §17.2 的 **② 档**——
+    **越过上限也能用，但照常计入次数**。
 
     局面：本阶段【杀】的次数已经用完（记账 1），两张非伤害类普通锦囊攒出两颗「椎」⇒
-    莺舞① 出虚拟【杀】。若产物计次，`card_use_counts` 会变成 2。
+    莺舞① 出虚拟【杀】：这一发照发（技能自己发起的使用不查 ``check_count``），而
+    `card_use_counts["slash"]` 由 1 变 2。
     """
     engine, script = _battle(plays=("ex_nihilo", "dismantlement"), slash_count=1)
     state = engine.state
     assert [item.split(":")[-1] for item in script.options] == ["use", "target"]
-    assert state.player(0).card_use_counts.get("slash") == 1, "产物【杀】不计次数"
+    assert state.player(0).card_use_counts.get("slash") == 2, "产物【杀】照常计入次数"
     assert _markers(state) == 1, "虚拟【杀】又触发掠影②（+1）"
     assert _phase_uses(state, 0, LVEYING) == 1
+
+
+def test_the_virtual_slash_first_blocks_a_physical_slash_afterwards() -> None:
+    """用户 2026-11-21 口径的实机形态：**先**出莺舞① 的「无次数限制」【杀】⇒ 计入 1 次
+    ⇒ 手里那张实体【杀】随后**不可用**（达到本阶段上限）。
+    """
+    engine, script = _battle(
+        plays=("ex_nihilo", "dismantlement"),
+        hand_extra=("slash",),
+    )
+    state = engine.state
+    assert [item.split(":")[-1] for item in script.options] == ["use", "target"]
+    assert state.player(0).card_use_counts.get("slash") == 1, "虚拟【杀】计入 1 次"
+    pending = engine.pending
+    assert pending is not None
+    assert str(getattr(pending.kind, "value", pending.kind)) == "PLAY_PHASE"
+    usable = {
+        str(action.card.type)
+        for action in pending.legal_actions
+        if isinstance(action, UseCard)
+    }
+    assert "slash" not in usable, "额度已满 ⇒ 实体【杀】不再出现在候选里"

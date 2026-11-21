@@ -405,8 +405,9 @@ async function loadPortraitIndex() {
 /** 立绘索引里某条记录：键 = **显示名称**（首页 `/api/heroes` 的 `version.name`、座位载荷的
  *  `player.hero_name` 同源）。缺表 / 名字为空 / 形状不对 ⇒ `null`（调用方一律当"无图"）。
  *
- * 首页与牌桌**共用这一份查表**（hero-portraits 票 02 立的 `.portraits` 是唯一索引；
- * 票 03 只加这一口按名字的读法，不建第二份表）。
+ * 首页与详情窗**共用这一份查表**（hero-portraits 票 02 立的 `.portraits` 是唯一索引；
+ * 票 03 只加这一口按名字的读法，不建第二份表）。票 08 起**牌桌不再读它**——裁决 §9
+ * 「牌桌不出立绘」，牌桌那边连立绘层都没有。
  */
 function portraitEntryFor(name) {
   if (!name) return null;
@@ -420,9 +421,11 @@ function portraitEntryFor(name) {
  *
  * 两态共用同一个盒子与同一套 class，只差 `data-empty` 一个属性 ⇒ 有图 / 无图两局版式不跳。
  * **空位分支在造 `img` 之前返回**：没有 `<img>` 就没有图片请求（行为判据，不是观感）。
- * 全前端只有这一处造 `<img>`——首页右栏（票 02）与对局武将块（票 03）同源。
+ * 全前端只有这一处造 `<img>`——首页右栏（票 02）与详情窗（票 05）两个落点同源；
+ * 票 08 起牌桌不调它（裁决 §9：牌桌不出立绘）。`boxClass` **由调用方显式给**：两个落点各写
+ * 自己的 class，删掉原来那个只为牌桌 `.portrait` 层存在的默认值。
  */
-function fillPortraitBox(box, name, boxClass = "portrait") {
+function fillPortraitBox(box, name, boxClass) {
   if (!box) return null;
   box.innerHTML = "";
   box.className = boxClass;

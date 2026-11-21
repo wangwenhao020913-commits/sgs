@@ -2444,30 +2444,30 @@ def test_the_self_panel_ships_the_flipped_layer_node() -> None:
     ), "翻面层应排在横置虚线之后、阵亡牌之前（三态 CSS 分层互不遮挡）"
 
 
-def test_the_self_hero_block_paints_name_and_hp_on_the_two_bands_over_the_portrait() -> None:
-    """hero-portraits 票 03（裁决 §7② / §8）：自己的武将块与环上座位一样是
-    「立绘铺满整块 + 名称 / 势力 / 身份画在上边框带 + 体力条画在下边框带」。
+def test_the_self_hero_block_paints_name_and_hp_on_the_two_bands() -> None:
+    """hero-portraits 票 03 / 票 08（裁决 §7② / §9）：自己的武将块 = 「名称 / 势力 / 身份画在
+    上边框带 + 体力条画在下边框带 + 读数药丸」，**没有立绘层**（票 08 按用户改判摘掉）。
 
-    静态节点是**稳定读取口**：五个 id 一个都不许变，只有父节点换了——
+    静态节点是**稳定读取口**：五个 id 一个都不许变，父节点 / 次序照票 03——
     `#t-self-kingdom` / `#t-hero` / `#t-self-identity` 进 `.hb-top`、`#t-self-hp` 进
-    `.hb-bottom`、手牌 / 标记读数进 `.hb-chips`（压在画上的浅色药丸）。立绘盒子是出厂空位态
-    （无 `pic/` 时脚本还没跑，先渲染成空位不会闪一帧有图）。
+    `.hb-bottom`、手牌 / 标记读数进 `.hb-chips`。
     """
     html = INDEX_HTML.read_text(encoding="utf-8")
     block = html[html.index('id="t-self-hero"'):html.index('id="t-self-zones"')]
-    portrait = block.index('id="t-self-portrait"')
     top = block.index('class="hb-frame hb-top"')
     bottom = block.index('class="hb-frame hb-bottom"')
     chips = block.index('class="hb-chips"')
-    assert portrait < top < bottom < chips, (
-        "块内次序 = 立绘（铺满）→ 上边框带 → 下边框带 → 压画药丸："
-        f"portrait={portrait} top={top} bottom={bottom} chips={chips}"
+    assert top < bottom < chips, (
+        "块内次序 = 上边框带 → 下边框带 → 读数药丸："
+        f"top={top} bottom={bottom} chips={chips}"
     )
-    box = re.search(r'<div\b[^>]*\bid="t-self-portrait"[^>]*>', block)
-    assert box is not None, "自己的武将块里缺立绘盒子 #t-self-portrait"
-    assert re.search(r'class="portrait"', box.group(0)), box.group(0)
-    assert re.search(r'data-empty="1"', box.group(0)), (
-        f"出厂态必须是空位（立绘索引还没到之前不闪一帧有图）：{box.group(0)}"
+    # 结构判据只看**标记**：注释里允许写"这一层已按 §9 删掉"的历史说明。
+    markup = re.sub(r"<!--.*?-->", "", block, flags=re.S)
+    assert 'id="t-self-portrait"' not in markup, (
+        "票 08：牌桌武将块**没有**立绘层（不是空位态——`#t-self-portrait` 整个摘掉）"
+    )
+    assert 'class="portrait"' not in markup, (
+        "票 08：块内不许再有 `.portrait` 盒子（立绘 / 空位两态都不在牌桌上出现）"
     )
     top_seg = block[top:bottom]
     bottom_seg = block[bottom:chips]
@@ -2491,22 +2491,22 @@ def test_the_self_hero_block_paints_name_and_hp_on_the_two_bands_over_the_portra
         )
 
 
-def test_the_hero_block_bands_are_opaque_and_the_portrait_starts_below_the_name_band() -> None:
-    """票 03 的 CSS 半边（裁决 §7② / §8）：边框带不透明 + 一像素描线、立绘上沿 = 名称框下边、
-    顶对齐（头不被压）、压在画上的药丸在立绘之上 / 边框带之下。高度变量走设计单位：
-    对手 22 / 18，自己 30 / 24（只大一档，不用第二套结构）。
+def test_the_hero_block_bands_are_opaque_and_the_chips_sit_above_the_bottom_band() -> None:
+    """票 03 的 CSS 半边（裁决 §7② / §9）：边框带不透明 + 一像素描线、压在块面上的药丸在
+    边框带之下。高度变量走设计单位：对手 22 / 18，自己 30 / 24（只大一档，不用第二套结构）。
 
-    外矩形（`.ring .seat` 的宽 / 比例）不在这里——那是票 04。这里只钉块**内部**的几何。
+    票 08 摘掉立绘层之后，这条里**不再有** `.portrait` / `.portrait img` 的几何断言；
+    外矩形（`.ring .seat` 的宽 / 比例）也不在这里——那是票 04。这里只钉块**内部**的几何。
     """
     seat_block = _css_rule(".seat .hero-block")
     assert re.search(r"position:\s*relative", seat_block), (
-        f"边框带与立绘是块的绝对定位子节点：{seat_block}"
+        f"边框带与药丸是块的绝对定位子节点：{seat_block}"
     )
     assert re.search(r"overflow:\s*hidden", seat_block), (
         f"白光 / 铁索的裁切依据（spec §3.4），本票只借不改：{seat_block}"
     )
     assert re.search(r"(?:^|;)\s*padding:\s*0(?:;|$)", seat_block), (
-        f"块自己不许留内边距——立绘要满铺（内边距会把 `inset: 0` 缩进一圈）：{seat_block}"
+        f"块自己不留内边距（带子要横贯整块）：{seat_block}"
     )
     for name, value in (("--hb-top-h", 22), ("--hb-bottom-h", 18)):
         assert re.search(rf"{name}:\s*calc\({value} \* var\(--dsu\)\)", seat_block), (
@@ -2538,31 +2538,121 @@ def test_the_hero_block_bands_are_opaque_and_the_portrait_starts_below_the_name_
     )
     assert re.search(r"border-top:\s*1px solid", bottom), f"下边框带上沿一像素描线：{bottom}"
 
-    portrait = _css_rule(".portrait")
-    assert re.search(r"position:\s*absolute", portrait), f"立绘盒子绝对定位：{portrait}"
-    assert re.search(r"top:\s*var\(--hb-top-h\)", portrait), (
-        f"立绘上沿 = 名称框下边（裁决 §8：不挡头）：{portrait}"
-    )
-    for declaration in (r"left:\s*0", r"right:\s*0", r"bottom:\s*0"):
-        assert re.search(declaration, portrait), f"立绘满铺余下的整块：缺 {declaration}：{portrait}"
-    img = _css_rule(".portrait img")
-    for declaration in (
-        r"position:\s*absolute", r"inset:\s*0", r"width:\s*100%", r"height:\s*100%",
-        r"object-fit:\s*cover", r"object-position:\s*50%\s+0%",
-    ):
-        assert re.search(declaration, img), f"立绘满铺 + 顶对齐：缺 {declaration}：{img}"
-
     chips = _css_rule(".hb-chips")
     assert re.search(r"position:\s*absolute", chips), (
-        f"读数药丸压在画上（不参与块的流式排版）：{chips}"
+        f"读数药丸压在块面上（不参与块的流式排版）：{chips}"
     )
     assert re.search(r"bottom:\s*calc\(var\(--hb-bottom-h\)", chips), (
         f"药丸列贴在下边框带**上方**：{chips}"
     )
-    # 分层：立绘（0）< 药丸（2）< 边框带（3）。带子在最上，文字永远不会被药丸盖住。
-    assert _layer_z_index(".portrait") < _layer_z_index(".hb-chips") < _layer_z_index(".hb-frame"), (
-        "z-index 次序必须是 立绘 < 药丸 < 边框带"
+    # 分层：药丸（2）< 边框带（3）。带子在最上，文字永远不会被药丸盖住。
+    assert _layer_z_index(".hb-chips") < _layer_z_index(".hb-frame"), (
+        "z-index 次序必须是 药丸 < 边框带"
     )
+
+
+def test_the_table_hero_blocks_have_no_portrait_layer() -> None:
+    """hero-portraits 票 08（裁决 §9：用户改判「牌桌不出立绘」）——**减法**。
+
+    判据三条，各自独立可核：
+
+    1. `index.html` 里自己的武将块没有 `#t-self-portrait`（不是空位态：这一层整个不存在）；
+    2. 全前端造图的唯一口 `core.js:fillPortraitBox` 只剩**两个**调用点，且都不是牌桌文件
+       （首页 `lobby.js` 的 `.portrait-box`、详情 `hero-detail.js` 的 `.detail-portrait`）；
+    3. `style.css` 里没有牌桌立绘的整套规则（`.portrait` / `.portrait img` /
+       `.portrait[data-empty="1"]` / `.portrait::after` / `.hero-block.hp-flash .portrait::after`），
+       也没有只为立绘存在的 `--portrait-tint`（首页 `.portrait-box` / 详情 `.detail-portrait`
+       不在这条选择器口径里，它们照旧）。
+
+    立绘索引（`state.portraits` / `/api/portraits`）不在减法范围：首页与详情还要用它。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    markup = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    assert 'id="t-self-portrait"' not in markup, (
+        "票 08：牌桌的立绘层整个摘掉（不是渲染成空位）——`index.html` 里不许再有 #t-self-portrait"
+    )
+    assert 'class="portrait"' not in markup, (
+        "票 08：没有盒子再挂裸 `.portrait` class（首页是 `portrait-box`、详情是 `detail-portrait`）"
+    )
+
+    call_sites: dict[str, int] = {}
+    call_re = re.compile(r"(?<!function )fillPortraitBox\s*\(")
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        count = len(call_re.findall(path.read_text(encoding="utf-8")))
+        if count:
+            call_sites[path.name] = count
+    assert call_sites == {"lobby.js": 1, "hero-detail.js": 1}, (
+        "牌桌不出立绘之后，造图的调用点必须**恰好两处**：首页右栏 + 详情窗："
+        f"{call_sites}"
+    )
+    for name in ("table.js", "seat-view.js"):
+        raw = (STATIC_DIR / name).read_text(encoding="utf-8")
+        # 只看**活代码**：注释里允许写"这一层已按 §9 删掉"的历史说明（含旧 id / 旧类名）。
+        source = re.sub(r"(?m)//.*$", "", re.sub(r"/\*.*?\*/", "", raw, flags=re.S))
+        assert "fillPortraitBox" not in source, f"牌桌文件不许再调立绘渲染口：{name}"
+        for dead in ('"portrait"', "t-self-portrait"):
+            assert dead not in source, (
+                f"牌桌文件不许再引用立绘层（票 08 是减法，不留死引用）：{name} 里的 {dead}"
+            )
+    lobby_source = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    assert (
+        'fillPortraitBox($("lobby-portrait"), version && version.name, "portrait-box")' in lobby_source
+    ), "首页的调用点仍显式给 `portrait-box`（不靠函数默认值）"
+    detail_source = (STATIC_DIR / "hero-detail.js").read_text(encoding="utf-8")
+    assert (
+        'fillPortraitBox(portrait, heroNameOf(player, view), "detail-portrait")' in detail_source
+    ), "详情的调用点仍显式给 `detail-portrait`（不靠函数默认值）"
+    fill_box = _function_source(
+        (STATIC_DIR / "core.js").read_text(encoding="utf-8"), "fillPortraitBox"
+    )
+    assert re.search(r"function\s+fillPortraitBox\s*\(box,\s*name,\s*boxClass\)", fill_box), (
+        f"共用渲染口不再有 `.portrait` 的默认 class（两个落点各自显式给）：{fill_box}"
+    )
+    assert '"portrait"' not in fill_box, (
+        f"共用的盒子渲染口不再硬编码被删掉的 `.portrait` class：{fill_box}"
+    )
+
+    for selector, _body in _css_rules():
+        assert re.search(r"\.portrait(?![\w-])", selector) is None, (
+            f"牌桌立绘的 CSS 规则必须删干净（票 08）：{selector}"
+        )
+    assert "--portrait-tint" not in re.sub(r"/\*.*?\*/", "", _CSS_TEXT, flags=re.S), (
+        "只为牌桌立绘镜像色 cue 存在的 `--portrait-tint` 必须删掉（cue 回到块自己身上）"
+    )
+
+
+def test_the_block_level_colour_cues_survive_the_portrait_removal() -> None:
+    """hero-portraits 票 08（裁决 §9）：两个「整块上色」的 cue 摘掉立绘后必须**仍在块自己身上**。
+
+    - 酒：`.seat.wine .hero-block` 的泛红底（票 03 曾把它复制到立绘上，因为立绘挡住了块底）；
+    - 掉血 / 回复：`.hero-block.hp-flash` 的 0.4s 键帧（`U3-03j/k`、`U-VITAL-21` 钉的是类名，
+      键帧与类名本票一个字不动）。
+
+    这条同时是「立绘上的那份镜像已经删掉」的另一半：镜像（`.portrait::after` /
+    `.hero-block.hp-flash .portrait::after`）由 `test_the_table_hero_blocks_have_no_portrait_layer`
+    按选择器口径判死。
+    """
+    wine = _css_rule(".seat.wine .hero-block")
+    assert re.search(r"background:\s*linear-gradient\(", wine), (
+        f"酒泛红必须画在**块自己**的 background 上（立绘盖不住它了）：{wine}"
+    )
+    assert "#fbe4de" in wine.lower() and "#f6d9d2" in wine.lower(), (
+        f"泛红的两个色档照票 03 不动：{wine}"
+    )
+    flash = _css_rule(".hero-block.hp-flash")
+    assert re.search(r"animation:\s*hp-flash\s+\.4s\s+ease-out\s+1", flash), (
+        f"掉血 / 回复闪仍是块级的 0.4s 键帧：{flash}"
+    )
+    frames = _keyframes("hp-flash")
+    assert re.search(r"background:\s*var\(--flash-bg\)", frames), (
+        f"键帧读的是块上的 `--flash-bg`（不是立绘上的叠色）：{frames}"
+    )
+    assert "--flash-edge" in frames, f"键帧仍读 `--flash-edge` 描边色：{frames}"
+    for selector, colour in ((".hero-block.hp-flash-down", "#b3261e"),
+                             (".hero-block.hp-flash-up", "#2e7d32")):
+        assert colour in _css_rule(selector).lower(), (
+            f"掉血红 / 回复绿两个修饰类只给颜色变量（票 08 不改类名）：{selector}"
+        )
 
 
 def test_the_judge_and_equip_slots_fill_their_area_in_three_rows() -> None:
@@ -9953,8 +10043,8 @@ def test_the_lobby_right_column_shows_a_portrait_and_an_author_footer() -> None:
         "作者页脚**不许**静态占位：作者为空时它必须一个节点都不存在（不是空 div）"
     )
 
-    # 5. JS 行为口。「有图 / 空位」两态与牌桌武将块**同一份实现**：`core.js:fillPortraitBox`
-    #    （hero-portraits 票 03 把首页与对局两个落点收成一处，故 img 的创建只在它里面）。
+    # 5. JS 行为口。「有图 / 空位」两态在首页与详情窗**同一份实现**：`core.js:fillPortraitBox`
+    #    （hero-portraits 票 03 把两个落点收成一处，故 img 的创建只在它里面；票 08 起牌桌不出立绘）。
     render_portrait = _function_source(lobby_js, "renderLobbyPortrait")
     assert 'fillPortraitBox($("lobby-portrait"), version && version.name, "portrait-box")' in (
         render_portrait

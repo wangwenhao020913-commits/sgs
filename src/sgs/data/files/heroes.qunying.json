@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "qunying",
+  "heroes": [
+    {
+      "id": "qunying_luxun",
+      "name": "「锋势」陆逊",
+      "true_name": "陆逊",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "qunying",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qianxun",
+          "name": "谦逊",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "lianying",
+          "name": "连营",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

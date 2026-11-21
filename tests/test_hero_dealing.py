@@ -226,6 +226,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     yijiang_2011_mobile = load_heroes("yijiang_2011_mobile")
     jie_yijiang_2011_mobile = load_heroes("jie_yijiang_2011_mobile")
     mou_gong_tong = load_heroes("mou_gong_tong")
+    qunying = load_heroes("qunying")
     expected = tuple(
         hero.id
         for table in (
@@ -264,6 +265,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
             # mou-gong-tong 票 01：谋攻篇-同包（谋刘赪）同样追加在**末尾**——真名「刘赪」
             # 是本仓首条 ⇒ 启用版本 +1、真名 +1。
             mou_gong_tong,
+            qunying,
         )
         for hero in table.heroes
         if hero.enabled
@@ -286,7 +288,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     # shiji-zhi-luotong-chenzhen 票 01：始计篇-智包·骆统（新真名）⇒ 105 → 106。
     # bingshi-jie 票 01：兵势篇-节包·势赵云（真名不变）⇒ 111 → 112。
     # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪（新真名「刘赪」）⇒ 118 → 119。
-    assert len(expected) == 119
+    assert len(expected) == 120
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -359,7 +361,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     # sp1-sunshangxiang-maliang 票 01：加马良 ⇒ 107。
     # bingshi-jie 票 01：加势赵云 ⇒ 112。
     ids = enabled_hero_ids()
-    assert len(ids) == 119
+    assert len(ids) == 120
 
     for hero_id in ids:
         heroes = _heroes_of(

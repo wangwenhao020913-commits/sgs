@@ -984,6 +984,34 @@ def _fuyin_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return {"tag": "fuyin", "label": "父荫"}
 
 
+_LIANYING_SKILL_ID = "hero.qunying_luxun.lianying"
+"""群英包·「锋势」陆逊【连营】的 skill id（qunying 票 01；用户 Q16 点名要座位标签）。
+
+与 ``sgs.skills.hero_qunying.LIANYING`` 是同一个值，但接入层只许 import ``sgs.skills``
+这个公开子包入口（M4 第一纪律）⇒ 与 ``_FUYIN_SKILL_ID`` 同姿态：在这里写一次、只写一次。
+"""
+
+
+def _lianying_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """【连营】的座位标签 = 「连营下一张牌：无限制 / 横置目标 / 无」（用户 2026-11-21 签 Q16）。
+
+    读两个座位态字段（``Player.lianying_unlimited_after`` / ``lianying_chain_after``；
+    ``-1`` = 没有待生效位），**只取不判**：投影每帧现算、没有清除事件，状态位一清标签就变。
+    **恒显**（含"无"）：牌面那两句是"下一张牌"的加成，玩家看不到它就不知道自己手上还有
+    一次"越过上限"的额度——用户点名要"都没有则显示「连营下一张牌：无」"。
+    """
+    player = state.player(seat)
+    parts: list[str] = []
+    if int(player.lianying_unlimited_after) >= 0:
+        parts.append("无限制")
+    if int(player.lianying_chain_after) >= 0:
+        parts.append("横置目标")
+    return {
+        "tag": "lianying",
+        "label": f"连营下一张牌：{'、'.join(parts) if parts else '无'}",
+    }
+
+
 _XIONGLUAN_SKILL_ID = "hero.zhangxiu.xiongluan"
 """张绣【雄乱】的 skill id（skill-display 票 07）：登记表的键与构造器的判据共用这一份。
 
@@ -1182,6 +1210,8 @@ BADGE_PROVIDERS: Mapping[
             (BadgeScope.SELF, _yiyun_suits_badge),
             (BadgeScope.ANY_SEAT, _yiyun_suppress_badge),
         ),
+        # 群英包·「锋势」陆逊【连营】（qunying 票 01 / Q16）：两条「下一张牌」待生效位。
+        _LIANYING_SKILL_ID: ((BadgeScope.SELF, _lianying_badge),),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

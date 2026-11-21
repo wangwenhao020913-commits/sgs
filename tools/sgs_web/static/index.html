@@ -248,12 +248,12 @@
              id 是稳定读取口（烟测 / 回放），故节点常驻、只改内容。
              U1-06：右键这块 = 武将详情（装备 / 判定槽与手牌不响应右键）。 -->
         <div id="t-self-hero" class="hero-block">
-          <!-- hero-portraits 票 03（裁决 §7② / §8）：立绘铺满整块，**名称 / 势力 / 身份画在
+          <!-- hero-portraits 票 03 / 票 08（裁决 §7② / §9）：**名称 / 势力 / 身份画在
                上边框带、体力条画在下边框带**（带子不透明，文字不压在画上）；手牌 / 标记等读数
-               仍是压在画上的浅色药丸（`.hb-chips`）。五个 id 是稳定读取口（烟测 / 回放 / 动效），
-               父节点换了、id 一个都不变。立绘盒子出厂就是**空位态**（没有 `pic/` 时脚本还没跑，
-               先渲染成空位不会闪一帧有图）。 -->
-          <div id="t-self-portrait" class="portrait" data-empty="1"></div>
+               仍是压在块面上的浅色药丸（`.hb-chips`）。五个 id 是稳定读取口（烟测 / 回放 / 动效），
+               父节点换了、id 一个都不变。
+               票 08 用户改判「牌桌不出立绘」：这块**没有立绘层**（连空位盒子都不建），块面是空白
+               纸色——`#t-self-portrait` 已按裁决 §9 整个删掉（首页 / 详情两个落点照旧）。 -->
           <div class="hb-frame hb-top">
             <span id="t-self-kingdom" class="kingdom"></span>
             <span id="t-hero" class="hero-name">（无武将）</span>

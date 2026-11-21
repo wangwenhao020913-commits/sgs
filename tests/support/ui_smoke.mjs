@@ -1131,7 +1131,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
   // bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里）⇒ 版本 111 → 112、
   // 真名分组 75 不变。
-  ui.state.heroCatalog.length === 78 && catalogVersions.length === 119,
+  ui.state.heroCatalog.length === 78 && catalogVersions.length === 120,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -33160,8 +33160,12 @@ $("script-confirm-backdrop").hidden = true;
 /* ============ hero-portraits 票 03：对局武将块（边框带 + 3/2/2 格子）============
  *
  * 判据全部是**结构**（父 / 子关系）与 `SGS_SMOKE_IMG` 的读数，**不读坐标**：垫片没有排版
- * 引擎，几何那半边由 `test_web_static.py` 的声明盒判据（边框带 / 立绘 / 药丸的 CSS）与上一条
+ * 引擎，几何那半边由 `test_web_static.py` 的声明盒判据（边框带 / 药丸的 CSS）与上一条
  * fx 夹具用例（`_rect` 钉真矩形）各钉一半。
+ *
+ * 票 08（裁决 §9：用户改判「牌桌不出立绘」）把本块的立绘断言**全部反过来**：
+ * `HP3-04` / `HP3-06` / `HP3-09` / `HP3-10` 现在断言"牌桌块里没有 img"（有图 / 无图两种武将都断言），
+ * `HP3-15` 用真计数（包一层 `document.createElement` 数造出来的 img）证明牌桌侧零 `/art/` 请求。
  *
  * 资源来源同 HP2：`pic/` 是 gitignored，公开仓 / CI 没有它 ⇒ 索引由本用例喂一份**与
  * `/api/portraits` 同形**的表（有图一条、无图一条），渲染走 `seat-view.js` / `table.js`
@@ -33216,14 +33220,14 @@ $("script-confirm-backdrop").hidden = true;
   const top = one(block, "hb-top");
   const bottom = one(block, "hb-bottom");
   const chips = one(block, "hb-chips");
-  const portrait = one(block, "portrait");
-  check("HP3-01 对手武将块 = 立绘 + 上边框带 + 下边框带 + 药丸列（四块各一个，次序固定）",
-    Boolean(block) && Boolean(portrait) && Boolean(top) && Boolean(bottom) && Boolean(chips)
-      && kidsOf(block).indexOf(portrait) < kidsOf(block).indexOf(top)
+  check("HP3-01 对手武将块 = 上边框带 + 下边框带 + 药丸列（三块各一个，次序固定；没有立绘层）",
+    Boolean(block) && Boolean(top) && Boolean(bottom) && Boolean(chips)
+      && one(block, "portrait") === null
       && kidsOf(block).indexOf(top) < kidsOf(block).indexOf(bottom)
       && kidsOf(block).indexOf(bottom) < kidsOf(block).indexOf(chips)
       && kidsOf(block).filter((node) => hasClass(node, "hero-zones")).length === 0,
-    `block=${!!block} portrait=${!!portrait} top=${!!top} bottom=${!!bottom} chips=${!!chips}`);
+    `block=${!!block} portrait=${one(block, "portrait") !== null} top=${!!top}`
+      + ` bottom=${!!bottom} chips=${!!chips}`);
 
   const topNames = walk(top).map((node) => String(node.className || ""));
   check("HP3-02 势力 / 名称 / 身份都在 .hb-top 里（势力 → 名称 → 身份的次序不变）",
@@ -33242,15 +33246,17 @@ $("script-confirm-backdrop").hidden = true;
       && (hpBar.textContent || "").includes("4/4"),
     `bar=${!!hpBar} 段=${kidsOf(hpBar).filter((node) => hasClass(node, "hp-seg")).length}`);
 
-  const img = SGS_SMOKE_IMG.read(block);
-  check("HP3-04 有图 ⇒ 块里的立绘盒子内一张 src 指向 /art/ 的 img（路径取自索引）",
-    Boolean(portrait) && img.found && img.art && img.hasSrc && img.complete
-      && decodeURI(img.src.slice("/art/".length)) === portraitPath
-      && walk(portrait).some((node) => String(node.tagName || "").toUpperCase() === "IMG"),
-    `${SGS_SMOKE_IMG.line(block)} 索引=${portraitPath}`);
+  // 票 08：有图武将（关羽在索引里）也不许在牌桌块里画图——索引有记录 = 证明"不是没数据"。
+  const filled = SGS_SMOKE_IMG.read(block);
+  const filledImgs = walk(block).filter((node) => String(node.tagName || "").toUpperCase() === "IMG");
+  check("HP3-04 有图武将（关羽，索引里有 /art/ 路径）⇒ 牌桌块里没有 img、也没有立绘层",
+    Boolean(block) && !filled.found && filledImgs.length === 0
+      && one(block, "portrait") === null
+      && Boolean((ui.state.portraits || {})["关羽"]),
+    `索引=${portraitPath} ⇒ 块里 ${SGS_SMOKE_IMG.line(block)} img=${filledImgs.length}`);
 
   const chipsText = chips ? chips.textContent || chips.text() : "";
-  check("HP3-05 手牌 / 座位读数与「标记行」都在 .hb-chips 里（浅色药丸压在画上）",
+  check("HP3-05 手牌 / 座位读数与「标记行」都在 .hb-chips 里（浅色药丸压在块面上）",
     Boolean(chips) && chipsText.includes("手牌：3/5")
       && chipsText.includes("座位 1") && chipsText.includes("护驾×2")
       && one(chips, "seat-foot") !== null
@@ -33259,20 +33265,14 @@ $("script-confirm-backdrop").hidden = true;
       && !walk(bottom).some((node) => hasClass(node, "seat-foot")),
     `chips="${String(chipsText).replace(/\s+/g, " ").trim().slice(0, 90)}"`);
 
-  // 无图：同一个盒子形状（同 class）、只差 data-empty，且**一个 img 都没有**（= 不发请求）。
-  const filledClass = String(portrait && portrait.className);
-  const filledKeys = Object.keys((portrait && portrait.attrs) || {}).sort();
+  // 无图：同样没有 img（不是"换成空位盒子"——牌桌上这一层整个不存在），边框带照旧。
   const emptyBlock = blockOf(2);
-  const emptyBox = one(emptyBlock, "portrait");
   const empty = SGS_SMOKE_IMG.read(emptyBlock);
-  const emptyKeys = Object.keys((emptyBox && emptyBox.attrs) || {}).sort();
-  check("HP3-06 无图（界关羽）⇒ 没有 img、空位盒子在、data-empty=\"1\"、class 与有图态同一套",
-    Boolean(emptyBox) && !empty.found && emptyBox.getAttribute("data-empty") === "1"
-      && String(emptyBox.className) === filledClass
-      && emptyKeys.length === filledKeys.length + 1
-      && emptyKeys.filter((key) => key !== "data-empty").join(",") === filledKeys.join(","),
-    `img=${empty.found} class="${emptyBox && emptyBox.className}"`
-      + ` 属性 ${filledKeys.join(",") || "（无）"} / ${emptyKeys.join(",") || "（无）"}`);
+  check("HP3-06 无图（界关羽）⇒ 同样没有 img、也没有空位盒子（两态都不在牌桌上出现）",
+    Boolean(emptyBlock) && !empty.found && one(emptyBlock, "portrait") === null
+      && Boolean(one(emptyBlock, "hb-top")) && Boolean(one(emptyBlock, "hb-bottom")),
+    `块里 ${SGS_SMOKE_IMG.line(emptyBlock)} portrait=${one(emptyBlock, "portrait") !== null}`
+      + ` 边框带=${Boolean(one(emptyBlock, "hb-top")) && Boolean(one(emptyBlock, "hb-bottom"))}`);
 
   // 判定 / 装备 7 格 = 3 + 2 + 2（判定行 1 份、装备区 2 份、区里两行各 1 份）。
   const sideShape = (side) => {
@@ -33304,21 +33304,49 @@ $("script-confirm-backdrop").hidden = true;
       && selfShape.equipSlots === 4,
     JSON.stringify(selfShape));
 
-  // 自己的座位：静态立绘盒子由 `renderSelfSeat` 用**同一个**渲染口填（不是第二套实现）。
-  const selfPortrait = $("t-self-portrait");
-  const selfFilled = SGS_SMOKE_IMG.read(selfPortrait);
-  check("HP3-09 自己的座位有立绘盒子 #t-self-portrait，有图时同样走 /art/（与首页 / 对手同源）",
-    Boolean(selfPortrait) && selfFilled.found && selfFilled.art
-      && decodeURI(selfFilled.src.slice("/art/".length)) === portraitPath
-      && String(selfPortrait.className) === "portrait"
-      && !selfPortrait.getAttribute("data-empty"),
-    `${SGS_SMOKE_IMG.line(selfPortrait)}`);
+  // 自己的座位：静态节点里**没有**立绘盒子（票 08 把 `#t-self-portrait` 整个摘掉），
+  // 有图武将也不会在牌桌上画出来——索引里仍留着关羽那一条。
+  const selfBlock = $("t-self-hero");
+  const selfFilled = SGS_SMOKE_IMG.read(selfBlock);
+  check("HP3-09 自己的座位：有图武将也不建立绘层（#t-self-portrait 静态节点已摘掉，块里没有 img）",
+    Boolean(selfBlock) && !byId.has("t-self-portrait") && !selfFilled.found
+      && one(selfBlock, "portrait") === null
+      && Boolean((ui.state.portraits || {})["关羽"]),
+    `#t-self-portrait=${byId.has("t-self-portrait")}`
+      + ` 块里 ${SGS_SMOKE_IMG.line(selfBlock)} 索引=${portraitPath}`);
   renderHeroes("界关羽", "界关羽");
-  const selfEmpty = SGS_SMOKE_IMG.read($("t-self-portrait"));
-  check("HP3-10 自己换到无图武将 ⇒ 同一个盒子回到空位态（无 img、data-empty=\"1\"）",
-    !selfEmpty.found && $("t-self-portrait").getAttribute("data-empty") === "1"
-      && String($("t-self-portrait").className) === "portrait",
-    `${SGS_SMOKE_IMG.line($("t-self-portrait"))}`);
+  const selfEmpty = SGS_SMOKE_IMG.read($("t-self-hero"));
+  check("HP3-10 自己换到无图武将 ⇒ 同一个块仍是空白纸色（无 img、无空位盒子）",
+    !selfEmpty.found && one($("t-self-hero"), "portrait") === null
+      && !byId.has("t-self-portrait"),
+    `块里 ${SGS_SMOKE_IMG.line($("t-self-hero"))}`
+      + ` 空位盒子=${one($("t-self-hero"), "portrait") !== null}`);
+
+  // 牌桌不向 /art/ 发请求：**真计数**，不是 tagName 抽查——把垫片的 `createElement` 包一层，
+  // 数整桌重绘期间造出来的 `<img>`（造出来就一定会发图片请求）。索引里塞**有图**记录
+  // （自己 / 对手都是关羽），空转不可能通过。
+  renderHeroes("关羽", "关羽");
+  const createdTags = [];
+  const realCreateElement = documentShim.createElement;
+  documentShim.createElement = (tag) => {
+    createdTags.push(String(tag).toLowerCase());
+    return realCreateElement(tag);
+  };
+  try {
+    ui.renderTable();
+  } finally {
+    documentShim.createElement = realCreateElement;
+  }
+  // `createdTags` 非空 = 这一层包装**真的**看着整桌重绘（否则"零 img"会是一条空转断言）。
+  const createdImgs = createdTags.filter((tag) => tag === "img");
+  const artOnTable = walk($("t-seats")).concat(walk($("t-self-hero")))
+    .filter((node) => String(node.tagName || "").toUpperCase() === "IMG"
+      && String(node.src || "").startsWith("/art/"));
+  check("HP3-15 牌桌整桌重绘期间一张 img 都没造 ⇒ 牌桌侧零 /art/ 请求（首页 / 详情仍会发，那是它们的）",
+    createdTags.length > 0 && createdImgs.length === 0 && artOnTable.length === 0
+      && Boolean((ui.state.portraits || {})["关羽"]),
+    `重绘期间造节点=${createdTags.length}（其中 img=${createdImgs.length}）`
+      + ` 桌面上指向 /art/ 的节点=${artOnTable.length} 索引=${portraitPath}`);
 
   ui.state.portraits = {};
   ui.state.view = null;

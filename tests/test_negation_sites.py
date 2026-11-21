@@ -506,6 +506,17 @@ SITES: dict[Site, Rule] = {
     ),
     (
         "src/sgs/engine/steps.py",
+        "_equipment_canceled",
+        TARGET_INVALID_READ_TOKEN,
+        "return target_is_ineffective(frame, int(targets[0]))",
+    ): Rule(
+        "target-level-invalid",
+        1,
+        "【司敌】的「取消之」对**装备牌**生效：装备牌没有 RESOLVE 帧（置入住在 USE 帧末步 "
+        "`use_after_end`），故同一个读取点要在那里补一次（qunying 票 01 / 用户 2026-11-21）",
+    ),
+    (
+        "src/sgs/engine/steps.py",
         "resolve_before_effect",
         UNRESPONSIVE_TOKEN,
         "if has_tag(frame, Tag.UNRESPONSIVE, target=target):",

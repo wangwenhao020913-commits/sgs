@@ -2705,6 +2705,46 @@ class Engine:
         )
         return card
 
+    def take_named_card_from_discard(
+        self,
+        frame: Frame | None,
+        *,
+        names: Collection[str],
+        to_seat: int,
+    ) -> CardRef | None:
+        """按**牌名集合**从**弃牌堆**取一张到 ``to_seat`` 的手牌（群英包【谦逊】③）。
+
+        与 :meth:`take_named_card_from_deck` **同形同纪律**（qunying 票 01；用户 Q15 = B
+        「牌堆优先随机、没有才从弃牌堆随机」）：
+
+        - 候选 = 弃牌堆里牌面名落在 ``names`` 里的那些牌，按**弃牌堆序**排定（先弃的在前）；
+        - 抽哪一张由**同一条** ``deck_search`` 子流决定（均匀随机）——「按牌名检索一个牌堆」
+          是同一个概念，不另立第二条随机子流；该子流懒取，不调这两个入口的对局一个随机数
+          都不从这里取（47 条金录像逐字节不变）；
+        - 搬牌只经 :meth:`move_in_frame`（``reason = PUT``，与牌堆侧一致："获得"的既有口径）；
+        - 无候选 ⇒ ``None``、不落记录、不消耗随机位；**不幂等**（每次调用抽一次签、搬一张牌），
+          调用方必须把"取到了哪张"存进帧私有数据。
+        """
+        discard = list(self.state.discard)
+        candidates = [
+            card_id for card_id in discard if self.state.card(card_id).name in names
+        ]
+        if not candidates:
+            return None
+        if self._deck_search is None:
+            self._deck_search = deck_search_stream(self._seed)
+        pick = candidates[self._deck_search.randbelow(len(candidates))]
+        card = self.state.card(pick)
+        self.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.HAND, to_seat),
+            reason=MoveReason.PUT,
+            owner=to_seat,
+            actor=to_seat,
+        )
+        return card
+
     def has_zone_cards(self, seat: int) -> bool:
         """``seat`` 的三区里是否至少有一张牌（拆 / 顺的第 0 层前提）。
 
@@ -6033,6 +6073,11 @@ class Engine:
             player.turn_card_entries.clear()
             player.dingpin_barred_targets.clear()
             player.hand_limit_bonus = 0
+            # 群英包·「锋势」陆逊【连营】的两条「下一张牌」待生效位（qunying 票 01）：
+            # 正常由它自己的 ``USE_DESIGNATE_TARGET`` 强制钩子在兑现时清；这里兜底复位
+            # （状态位一直在真没用上 / 使用流程被异常中断时，下一回合从干净状态起）。
+            player.lianying_unlimited_after = -1
+            player.lianying_chain_after = -1
             # 【双雄】本回合的转化许可（huo-wolong-yanliang 票 02）：作用域 = 一个回合。
             player.shuangxiong_judge_color = None
             self._clear_paoxiao_bonus(player.seat)

@@ -704,6 +704,28 @@ class Player(BaseModel):
     读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_RANGE_EXEMPT`` / ``COUNT_LIMIT`` /
     ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
     """
+    lianying_unlimited_after: int = -1
+    lianying_chain_after: int = -1
+    """群英包·「锋势」陆逊【连营】的两条「本回合使用的下一张牌」待生效位（qunying 票 01）。
+
+    取值 = **触发那一刻**的 :attr:`used_or_played_ever`；``-1`` = 没有待生效的位。
+    牌面：「你的手牌数变化后若与你体力值相同，你本回合使用的**下一张牌**无距离与次数限制 /
+    装备区的牌数量相同：你本回合使用的下一张牌**指定目标时**，令所有目标进入连环状态」。
+
+    **为什么存序号而不是布尔**：① 的触发常常发生在**某张牌自己的使用结算途中**（手牌 →
+    处理区 也是"手牌数变化"，那个移动就在 ``USE_CHOOSE_TARGET`` 步里）。若只存布尔，同一
+    张牌的「指定目标时」（``USE_DESIGNATE_TARGET`` 在 L4.3，晚于那次移动）会把它当场兑现
+    ——既把它的目标连环了，又让这次待生效位凭空消失。判据 = "这一次使用的序号**大于**置位
+    时记下的序号"，故触发它的那张牌自己不算"下一张"，且新增一次使用（``start_use`` 先把
+    :attr:`used_or_played_ever` +1）即可兑现。**打出不算使用**（``play_card`` 也 +1 序号，
+    但它没有 USE 帧、不会兑现，故"下一张**使用**的牌"这条读法与 Q6 一致）。
+
+    写入方 = 【连营】的两条 ``MOVE_AFTER`` 强制钩子；兑现 / 清理 = 它的
+    ``USE_DESIGNATE_TARGET`` 强制钩子（只清"序号已过"的那一条）；回合末由
+    :meth:`Engine._clear_turn_effects` 把两条都兜底复位。**不发 delta、不进投影**：
+    与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一次移动重建）；座位卡上的
+    「连营下一张牌：…」标签由 ``sgs_web.projection`` 读这两个字段现算。
+    """
     tianyi_won: bool = False
     tianyi_lost: bool = False
     """太史慈【天义】的"本阶段"拼点结果（huo-taishici-xunyu 票 01；两条互斥的座位布尔）。

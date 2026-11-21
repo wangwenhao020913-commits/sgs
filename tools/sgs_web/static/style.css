@@ -867,10 +867,11 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   z-index: 3;
 }
 
-/* 左武将块（hero-portraits 票 03；裁决 §7② / §8）：立绘铺满整块，名称 / 势力 / 身份画在
- * **上边框带**、体力条画在**下边框带**（带子不透明 + 一像素描线，文字不压在画上）；
- * 手牌 / 标记仍压画（浅色药丸）。块自己**不留内边距**——`inset: 0` 的立绘要贴到牌沿，
- * 内边距会把它缩进一圈。高度变量：对手 22 / 18（自己 30 / 24，同一套结构只大一档）。 */
+/* 左武将块（hero-portraits 票 03 / 票 08；裁决 §7② / §9）：块面是**空白纸色**（用户改判
+ * 「牌桌不出立绘」），名称 / 势力 / 身份画在**上边框带**、体力条画在**下边框带**
+ * （带子不透明 + 一像素描线，文字不压在画上）；手牌 / 标记仍是压在块面上的浅色药丸。
+ * 块自己**不留内边距**——带子要横贯整块，内边距会把它缩进一圈。
+ * 高度变量：对手 22 / 18（自己 30 / 24，同一套结构只大一档）。 */
 .seat .hero-block {
   position: relative;
   flex: 1 1 auto; min-width: 0;
@@ -883,7 +884,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   overflow: hidden;
 }
 /* 两条边框带：横贯整块的绝对定位条，**不透明**（纸色渐变）+ 一像素描线。z-index 3 = 压住
- * 立绘（0）与药丸（2），"文字不压在画上"因此是版面事实，不是巧合。 */
+ * 药丸（2），"文字不压在画上"因此是版面事实，不是巧合。 */
 .hb-frame {
   position: absolute; left: 0; right: 0; z-index: 3;
   display: flex; align-items: center; gap: calc(3 * var(--dsu));
@@ -901,25 +902,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   box-shadow: 0 calc(-1 * var(--dsu)) calc(3 * var(--dsu)) rgba(43, 36, 28, .18);
 }
 .hb-bottom .hp-bar { margin-top: 0; flex: 1 1 auto; min-width: 0; }
-/* 立绘：满铺整块，但**上沿 = 名称框下边**（`top: var(--hb-top-h)`，头不被压），下沿压在
- * 体力框下面（脚被框盖住是正常的）。顶对齐（`object-position: 50% 0%`）。
- * 空位态只换底纹，**不改几何**（有图 / 无图两局版式不跳）。 */
-.portrait {
-  position: absolute; left: 0; right: 0; bottom: 0;
-  top: var(--hb-top-h);
-  z-index: 0; overflow: hidden;
-  background: #efe7d6;
-}
-.portrait img {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  object-fit: cover; object-position: 50% 0%; display: block;
-}
-.portrait[data-empty="1"] {
-  background:
-    repeating-linear-gradient(45deg, #efe7d6 0 calc(5 * var(--dsu)),
-      #e9dfcb calc(5 * var(--dsu)) calc(10 * var(--dsu)));
-}
-/* 压在画上的浅色药丸列：贴在下边框带**上方**，从下往上长。容器不吃指针（点空处仍是
+/* 压在块面上的浅色药丸列：贴在下边框带**上方**，从下往上长。容器不吃指针（点空处仍是
  * "点这张座位卡"），真正的药丸各自可交互（悬停要出牌面预览 / 来源说明）。 */
 .hb-chips {
   position: absolute; left: calc(3 * var(--dsu));
@@ -987,7 +970,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #4a6b8a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
 }
 
-/* 读数药丸（手牌：张数/上限 + 座位号）：压在画上，浅色底保可读（裁决 §7② 明确"这些没关系"）。
+/* 读数药丸（手牌：张数/上限 + 座位号）：压在块面上，浅色底保可读（裁决 §7② 明确"这些没关系"）。
  * `.seat-foot` 仍是 `anim.js` 的手牌锚点（它取第一个子节点当落点），故两个读数各自一枚药丸、
  * 保持是它的直接子节点。 */
 .seat .seat-foot {
@@ -1034,19 +1017,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
  * 用户口径里"两端探出"是硬要求，这个组合态很罕见，取舍记在票 01 的 `## Answer`。
  * **自己的座位不放开**（原因见下面 `.self .chain-mark` 那条）。 */
 .seat.opponent.chained .hero-block { overflow: visible; }
-/* 立绘铺满之后，"整块上色"的两个 cue（酒泛红 / 掉血绿闪）不能只画在块自己的
- * `background` 上——那块底被立绘盖住了。它们在立绘上开同一层叠色：`.portrait::after`
- * 只读块继承下来的 `--portrait-tint` / `.hp-flash` 的键帧（颜色变量一个都不新造），
- * 于是类名判据（`U3-03j/k`、`U-VITAL-21`）与观感同时成立。 */
-.portrait::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: var(--portrait-tint, transparent);
-}
+/* 「整块上色」的两个 cue（酒泛红 / 掉血闪）画在**块自己**身上。票 03 曾把它们镜像到立绘的
+ * 叠色层（`.portrait::after` + `--portrait-tint`），因为立绘盖住了块底；票 08 按裁决 §9 摘掉
+ * 牌桌立绘后块底重新露出来，镜像层随立绘一起删除。
+ * 掉血闪的键帧仍在下面 D13 那一段（`.hero-block.hp-flash`；类名判据 `U3-03j/k`、`U-VITAL-21`
+ * 钉的是类名，本票不改）。 */
 .seat.wine .hero-block {
   background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%);
-  --portrait-tint: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%);
 }
-.hero-block.hp-flash .portrait::after { animation: hp-flash .4s ease-out 1; }
 /* 阵亡与翻面**共用同一档置灰**（用户裁定：翻面的置灰程度与阵亡完全一致）。
  * 两者写在同一条规则里，配比因此不会漂：翻面唯一的差别是**没有文字**。
  * 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
@@ -1850,8 +1828,8 @@ button.mini-slot { cursor: pointer; }
   background: #fffdf8;
   border-color: #c8a96b;
 }
-/* 自己的武将块（hero-portraits 票 03）：**沿用对手那一套**（立绘满铺 + 上下边框带 +
- * 压画药丸），只是高度变量大一档（30 / 24）、带内字号大一号。块内不再有流式排版。 */
+/* 自己的武将块（hero-portraits 票 03 / 票 08）：**沿用对手那一套**（空白纸色 + 上下边框带 +
+ * 压块面药丸），只是高度变量大一档（30 / 24）、带内字号大一号。块内不再有流式排版。 */
 .self .hero-block {
   flex: 1 1 auto; min-width: 0;
   --hb-top-h: calc(30 * var(--dsu));

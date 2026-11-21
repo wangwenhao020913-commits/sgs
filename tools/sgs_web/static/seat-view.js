@@ -620,15 +620,15 @@ function sideBlockNode(player, ctx) {
   return block;
 }
 
-/** 左武将块：**立绘铺满整块 + 上下两条不透明边框带 + 压在画上的读数药丸**
- *  （hero-portraits 票 03；裁决 §7② / §8）。
+/** 左武将块：**上下两条不透明边框带 + 压在块面上的读数药丸**（hero-portraits 票 03 / 票 08）。
  *
- * 块内次序 = 立绘 → 上边框带（势力 / 名称 / 身份）→ 下边框带（体力条）→ `.hb-chips`
+ * 块内次序 = 上边框带（势力 / 名称 / 身份）→ 下边框带（体力条）→ `.hb-chips`
  * （手牌 / 座位读数、高亮文字、武将牌上的牌区与标记、状态标签）→ 横置 / 翻面 / 阵亡叠加。
- * 带子不透明、立绘上沿 = 名称框下边（`--hb-top-h`），文字不压在画上、头也不被压。
+ * 带子不透明，文字不压在块面上。
  *
- * 立绘的上图 / 空位两态与首页右栏**同一份实现**（`core.js:fillPortraitBox`）：
- * 无图 ⇒ 同一个盒子 + `data-empty="1"`，没有 `<img>` 也就没有图片请求。
+ * **没有立绘层**（票 08，裁决 §9：用户改判「牌桌不出立绘」）：块面就是空白纸色，
+ * 不建 `.portrait` 盒子、不调 `fillPortraitBox`，于是整桌重绘一张 `<img>` 都不造（不发 `/art/`）。
+ * 首页右栏与详情窗的立绘不受影响，它们各自还有自己的调用点。
  *
  * ``flags`` 是**这一轮**的完整状态类（含 seatInteraction 给的 targetable / tsel）；
  * 高亮文字必须与座位节点的类同源，不能各自再算一遍。
@@ -636,11 +636,6 @@ function sideBlockNode(player, ctx) {
 function heroBlockNode(player, view, ctx, flags) {
   const block = document.createElement("div");
   block.className = "hero-block";
-  // 立绘铺满整块（上沿由 CSS 的 `top: var(--hb-top-h)` 让给名称带，故不挡头）。
-  const portrait = document.createElement("div");
-  portrait.className = "portrait";
-  fillPortraitBox(portrait, heroNameOf(player, view));
-  block.appendChild(portrait);
   // 上边框带：势力印 + 显示名 + 身份徽标（画在带上，不压在画上）。
   const top = document.createElement("div");
   top.className = "hb-frame hb-top";
@@ -670,7 +665,7 @@ function heroBlockNode(player, view, ctx, flags) {
   bottom.className = "hb-frame hb-bottom";
   bottom.appendChild(hpBarNode(player));
   block.appendChild(bottom);
-  // 压画的药丸（浅色底，保可读）：裁决明确"手牌 N / 标记 N 这些没关系"。
+  // 压块面的药丸（浅色底，保可读）：裁决明确"手牌 N / 标记 N 这些没关系"。
   const chips = document.createElement("div");
   chips.className = "hb-chips";
   const tags = document.createElement("div");

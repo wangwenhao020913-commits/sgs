@@ -2217,6 +2217,15 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # ⇒ 正分、高于"放弃"（0）；座位步另由 `_HOSTILE_SEAT_STEPS` 登记。
         "lveying:use": 1.2,
         "yingwu:use": 1.4,
+        # 群英包·「锋势」陆逊【谦逊】（qunying 票 01）：三个代价与三个效果各自的估值。
+        # 代价：② 掉 1 点无来源火焰伤害最便宜、③ 把一张装备牌当【闪电】放自己判定区是负收益、
+        # ① 弃光手牌最贵。效果：① 免费使用一张牌最强、③ 按类型检索稳、② 换位置次之。
+        "qianxun_cost_damage": 0.6,
+        "qianxun_cost_equip": -0.4,
+        "qianxun_cost_discard": -1.0,
+        "qianxun_effect_card": 1.2,
+        "qianxun_effect_gain": 0.9,
+        "qianxun_effect_move": 0.7,
     }
 )
 
@@ -2508,6 +2517,10 @@ _HOSTILE_SEAT_STEPS = (
     # （``hero.mou_liucheng.lveying:target`` / ``...yingwu:target``），不登记会落进"帮盟友"。
     "hero.mou_liucheng.lveying:",
     "hero.mou_liucheng.yingwu:",
+    # 群英包·「锋势」陆逊【谦逊】（qunying 票 01）：手写询问的三个座位步都指向**别人**——
+    # 「②移动场上一张牌」要挑对手的装备 / 判定牌（源座位）、再放到另一名角色那里（目的
+    # 座位）；「①视为使用」的目标同样是敌人。不登记会落进"帮盟友"的缺省分支。
+    "hero.qunying_luxun.qianxun:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
     # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3；票 18 迁进流水线）：产物是
@@ -5339,6 +5352,14 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(1.0),
         "强制触发（不问「是否发动」）：攒「椎」换成摸一张 + 无次数限制的虚拟【杀】，没有代价 "
         "⇒ 温和正分；`_constant` 不读任何字段",
+    ),
+    # 群英包·「锋势」陆逊（qunying 票 01）【谦逊】：A 族主动技（一步选代价 + 手写段机）。
+    # 代价轻重由 `_OPTION_VALUES` 分档（弃光手牌最贵、掉 1 点血最便宜）；这里只回答
+    # "要不要点这个技能"——有代价但换一张免费的牌 / 一次检索，温和正分。
+    "hero.qunying_luxun.qianxun": (
+        _constant(1.0),
+        "代价换一次免费效果（视为使用一张非装备牌 / 移动场上一张牌 / 检索一张牌）；"
+        "代价的贵贱在 `_OPTION_VALUES` 里分档 ⇒ 温和正分",
     ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。

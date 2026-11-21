@@ -1514,8 +1514,40 @@ _PHASE_USE_SHIFT = 32
 _PHASE_USE_MASK = 0b1111 << _PHASE_USE_SHIFT
 """「本阶段发动次数」的计数位段（值 = ``(flags & mask) >> _PHASE_USE_SHIFT``）。"""
 
+_QIANXUN_COST_SHIFT = 48
+"""群英包·「锋势」陆逊【谦逊】的"本出牌阶段已付过的代价"位段起始位（qunying 票 01）。
+
+位 36..38 = 代价 ①②③ 各一位（**本出牌阶段**付过就置位，出牌阶段起点复位）。为什么是
+48：0..5 是 A 族阶段位 + 整局位，6..13 仁德、14 势斩、15..22 黄天、23 觉醒条件、
+24..31 定乱、32..35 慎行的每阶段次数、**36..43 良助（`hero_sp1._LIANGZHU_SHIFT`）**、
+**44..47 义云（`hero_guanyu._YIYUN_SHIFT`）**——48 起的三位才是空段（早先误取 36，撞了良助）。
+
+用户在签票时逐字补了一条：**额外出牌阶段刷新代价、但不刷新效果**（代价的作用域是
+"出牌阶段"，效果的作用域是"本回合"）⇒ 代价位必须并进 :data:`_PHASE_STATE_MASK`，
+而效果位走 :data:`_QIANXUN_EFFECT_MASK` 的另一条复位路（回合末）。
+"""
+
+_QIANXUN_COST_MASK = 0b111 << _QIANXUN_COST_SHIFT
+"""【谦逊】三个代价的"本出牌阶段已付"位（见上）。"""
+
+_QIANXUN_EFFECT_SHIFT = 52
+"""群英包·「锋势」陆逊【谦逊】的"本回合已选过的效果"位段起始位（qunying 票 01）。
+
+位 52..54 = 效果 ①②③ 各一位，作用域 = **一个游戏回合**（牌面写"本回合未被选择过的一项"）
+⇒ 不进 `_PHASE_STATE_MASK`，由 :func:`reset_turn_skill_state` 清（与 `_TURN_USED` 同一
+复位点）。52 起：48..50 是代价位，51 留一位余量。
+"""
+
+_QIANXUN_EFFECT_MASK = 0b111 << _QIANXUN_EFFECT_SHIFT
+"""【谦逊】三个效果的"本回合已选过"位（见上）。"""
+
 _PHASE_STATE_MASK = (
-    0b111 | _GIVEN_TO_MASK | _USED_SECOND | _HUANGTIAN_MASK | _PHASE_USE_MASK
+    0b111
+    | _GIVEN_TO_MASK
+    | _USED_SECOND
+    | _HUANGTIAN_MASK
+    | _PHASE_USE_MASK
+    | _QIANXUN_COST_MASK
 )
 """``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
 ``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段 + 界华雄【势斩】的"第二次已用"位 +
@@ -1618,7 +1650,7 @@ def reset_turn_skill_state(state: GameState) -> None:
     同一牌名时，位图只认**第一次**——见 :func:`skill_used_this_turn`。
     """
     for key in list(state.skill_state):
-        remaining = state.skill_state[key] & ~_TURN_USED
+        remaining = state.skill_state[key] & ~(_TURN_USED | _QIANXUN_EFFECT_MASK)
         if remaining:
             state.skill_state[key] = remaining
         else:
@@ -5151,6 +5183,9 @@ from .npcs import npc_skill_definitions  # noqa: E402  （末尾 import 是刻�
 from .hero_mou_gong import (  # noqa: E402  （末尾 import 是刻意的）
     mou_gong_tong_skill_definitions,
 )
+from .hero_qunying import (  # noqa: E402  （末尾 import 是刻意的）
+    qunying_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -5233,6 +5268,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *npc_skill_definitions(),
             *yijiang_2011_skill_definitions(),
             *mou_gong_tong_skill_definitions(),
+            *qunying_skill_definitions(),
         )
     }
 )
