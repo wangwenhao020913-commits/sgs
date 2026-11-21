@@ -12667,6 +12667,22 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     check("HP5-06 author 空 ⇒ 一个页脚节点都没有（不是渲染空 div；换人后旧页脚也摘掉）",
       footNodes().length === 0, `页脚 ${footNodes().length} 个`);
 
+    // ⑥ spec §3.8：作者文件缺 **或空白** 都算没有作者。上一条只钉了"条目缺失"，
+    //    这里给同一个显示名称一条**存在但 author 是空串**的索引记录（`作者.txt` 只有空白
+    //    时服务端就是这样下发的），走真渲染入口 `renderHeroDetailBody()`：页脚仍是零节点，
+    //    正文（头部 / 技能栏 / 立绘）照旧渲染。
+    ui.state.portraits["关羽"] = { portrait: portraitPath, author: "" };
+    vm.runInContext("renderHeroDetailBody()", context);
+    const blankFoots = footNodes();
+    const blankFilled = SGS_SMOKE_IMG.read(portraitOf());
+    check("HP5-06b author 是空串但条目存在 ⇒ 仍一个页脚节点都没有（零节点，不是空 div），正文照旧",
+      blankFoots.length === 0
+        && !!root() && !!textColumn() && !!portraitOf()
+        && blankFilled.found && blankFilled.art
+        && String(root().textContent || "").includes("关羽"),
+      `页脚 ${blankFoots.length} 个 / 正文=${!!root()} 文字栏=${!!textColumn()}`
+        + ` 立绘=${blankFilled.found} ${SGS_SMOKE_IMG.line(portraitOf())}`);
+
     // 复位：后续用例回到原来的合成载荷（hero_name / 索引都还原；skills 上面已还原）。
     delete detailView.snapshot.players[0].hero_name;
     ui.state.portraits = portraitsBefore;
@@ -34249,6 +34265,7 @@ await clickAndWait($("btn-lobby-pool"));
   vm.runInContext("fireDamageEventsThrough(Infinity)", context);
   const damageMetrics = damageRuns[0] ? damageRuns[0].fx.metrics : null;
   const damageBox = damageMetrics ? damageMetrics.numberBox : null;
+  const damageStartBox = damageMetrics ? damageMetrics.numberStartBox : null;
   const damageRead = readNumber("t-damage-fx");
   check("HP3-12 伤害飘字：包围盒整个在块内、在边框带上方、落在下半张（读数三层同源）",
     Boolean(damageBox) && insideAndAbove(damageBox)
@@ -34259,6 +34276,15 @@ await clickAndWait($("btn-lobby-pool"));
     damageBox
       ? `box=${Number(damageBox.top).toFixed(1)}..${Number(damageBox.bottom).toFixed(1)}`
         + ` 带=${BAND_TOP} 块=${BLOCK.height} 层读数=${JSON.stringify(damageRead)}`
+      : "没有开演");
+  // 票 03 复核：硬线（条下沿 = 184）压在带里，**起飘那一帧**（rise = 0）的盒子也必须整个在
+  // 带上方——把带的上沿交给画面模块（`numberKeepOutTop`），由它反推起飘点。
+  check("HP3-12b 伤害飘字的起飘盒（rise=0，metrics.numberStartBox）也在边框带上方：带上沿已传进画面模块",
+    Boolean(damageStartBox) && insideAndAbove(damageStartBox)
+      && damageRuns[0].options.numberKeepOutTop === BAND_TOP,
+    damageStartBox
+      ? `start=${Number(damageStartBox.top).toFixed(1)}..${Number(damageStartBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} keepOutTop=${damageRuns[0].options.numberKeepOutTop}`
       : "没有开演");
   windowShim.SgsDamageFX.create = realDamage;
   runTimers();

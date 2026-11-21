@@ -287,6 +287,45 @@ def test_art_mime_follows_the_magic_bytes_not_the_extension(
     assert body == PNG_BYTES
 
 
+def test_art_serves_image_bytes_only(tmp_path: Path, monkeypatch) -> None:
+    """``/art/`` 是**图片**路由：立绘树里的非图片文件（``作者.txt`` / ``index.json``）⇒ 404。
+
+    ``作者.txt`` 与生成期快照 ``index.json`` 和立绘住在同一棵树里；按静态路径猜中它们就会
+    拿到 200 + ``application/octet-stream`` + 一天的缓存。判据按**魔数**（``image_mime``）：
+    不认识 ⇒ 与缺文件同一个 JSON 404、``no-store``；真图片仍 200 + 正确 MIME。
+    """
+    root = tmp_path / "portraits"
+    directory = _portrait_dir(root)
+    (directory / "关羽.jpg").write_bytes(JPEG_BYTES)
+    (directory / "关羽.png").write_bytes(PNG_BYTES)
+    (directory / "作者.txt").write_text("画师：甲", encoding="utf-8")
+    (root / "index.json").write_text('{"关羽": {}}', encoding="utf-8")
+    monkeypatch.setenv("SGS_ART_DIR", str(root))
+
+    for path in (
+        _art_path("关羽", "关羽", "作者.txt"),
+        "/art/index.json",
+    ):
+        status, headers, body = _raw_get(path, tmp_path / "runs")
+        assert status == 404, path
+        assert headers["content-type"].startswith("application/json"), path
+        assert headers["cache-control"] == "no-store", path
+        assert b"<html" not in body.lower(), path
+        assert "立绘不存在" in body.decode("utf-8"), path
+
+    for name, payload, mime in (
+        ("关羽.jpg", JPEG_BYTES, "image/jpeg"),
+        ("关羽.png", PNG_BYTES, "image/png"),
+    ):
+        status, headers, body = _raw_get(
+            _art_path("关羽", "关羽", name), tmp_path / "runs"
+        )
+        assert status == 200, name
+        assert headers["content-type"] == mime, name
+        assert headers["cache-control"] == "public, max-age=86400", name
+        assert body == payload, name
+
+
 def test_art_returns_404_with_a_non_html_body_for_an_empty_slot(
     tmp_path: Path, monkeypatch
 ) -> None:

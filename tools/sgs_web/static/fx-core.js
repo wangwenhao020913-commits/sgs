@@ -1083,7 +1083,18 @@
         ? keepOut / cardH
         : NUMBER_KEEP_OUT_FALLBACK;
       keepOutPx = keepOutRatio * cardH;
-      var boxTopRatio = Math.min(0.9, keepOutRatio + NUMBER_GAP_RATIO);
+      /* 票 05 R4 的口径：包围盒顶边 = 体力条下沿 + `NUMBER_GAP_RATIO` 牌高。
+       * hero-portraits 票 03 复核：体力条搬进**不透明下边框带**之后，"硬线下方"在带里放不下
+       * 包围盒——起飘（rise = 0）那一刻盒子会压进带子、盖住体力读数（上浮只能让它更深）。
+       * 带的上沿（`opts.numberKeepOutTop`，相对牌顶、量不到是 null）在时改按"起飘盒子的底边
+       * 落在带上沿 − `NUMBER_GAP_RATIO` 牌高"反推盒顶比例：
+       *   起飘盒底 = 盒顶 + 字高 + 上浮距离
+       *   ⇒ 盒顶比例 = 带上沿比例 − 余量 − 字高比例 − 上浮比例。
+       * 量不到带（旧版式 / `?still` / `?export` 不传）⇒ 仍是"硬线 + 余量"，逐字节不变。 */
+      var bandTop = Number(opts.numberKeepOutTop);
+      var boxTopRatio = isFinite(bandTop) && bandTop > 0 && bandTop < cardH
+        ? bandTop / cardH - NUMBER_GAP_RATIO - numberGlyph / cardH - NUMBER_RISE_RATIO
+        : Math.min(0.9, keepOutRatio + NUMBER_GAP_RATIO);
       // 包围盒顶边落在 boxTopRatio ⇒ 反推起飘点（`dy` 为"牌心上方为正"的旧口径，故取负）。
       var belowCenter = boxTopRatio + numberGlyph / (2 * cardH) - 0.5 + NUMBER_RISE_RATIO;
       // 起飘点至少压在牌心下方一点；整盒也不许越出牌底（硬线极低时这条先兜住）。
@@ -1097,6 +1108,13 @@
     var numberBox = {
       top: numberCenterY - numberGlyph / 2 - cardTop,
       bottom: numberCenterY + numberGlyph / 2 - cardTop,
+      height: numberGlyph,
+    };
+    // 起飘（rise = 0）那一帧的包围盒（相对中剑牌左上角，CSS px）：`numberBox` 是上浮到顶的
+    // 最坏情形，这一项是开演瞬间的位置——"刚出现时压不压得住下边框带"读它。
+    var numberStartBox = {
+      top: numberBox.top + S.dst.h * numberOffset.rise,
+      bottom: numberBox.bottom + S.dst.h * numberOffset.rise,
       height: numberGlyph,
     };
     var seed = 1700 + vId * 977;
@@ -1401,6 +1419,8 @@
         // R4 的验收判据直接读这三个，不再换算百分比。
         card: { w: S.dst.w, h: S.dst.h },
         numberBox: numberBox,
+        // 起飘（rise = 0）盒子：牌桌档按带上沿反推之后，验收要能直接读到"开演那一帧"。
+        numberStartBox: numberStartBox,
         keepOut: keepOutPx,
       },
       numberOffset: numberOffset

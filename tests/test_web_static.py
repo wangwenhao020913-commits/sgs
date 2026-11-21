@@ -3755,7 +3755,9 @@ _DAMAGE_FX_FUNCTIONS = (
     "damageFxDpr",
     "damageFxView",
     "damageFxBoxOf",
+    "damageFxHpBar",
     "damageFxNumberKeepOut",
+    "damageFxNumberKeepOutTop",
     "damageFxBoxKey",
     "damageFxPlanFor",
     "damageFxStageFor",
@@ -11317,6 +11319,18 @@ def test_the_hero_detail_body_is_a_text_column_beside_a_full_height_portrait() -
     )
     assert 'portraitEntryFor(' in render, (
         "作者页脚按座位的显示名称查 `state.portraits`（不另建索引、不改投影层）"
+    )
+    # 7. spec §3.8：作者文件缺**或空白** ⇒ 零节点。静态半边由 `if (author)` 这条守卫钉住
+    #    （缺条目 / 空串两条运行时判据在烟测 HP5-06 / HP5-06b）；`.author-foot` 只许在守卫里造。
+    guard = re.search(r"if \(author\) \{(?P<body>.*?)\n  \}", render, re.S)
+    assert guard is not None, (
+        f"页脚必须由 `if (author)` 守住（空串 ⇒ 一个节点都不建）：{render[-500:]}"
+    )
+    assert 'className = "author-foot"' in guard.group("body"), (
+        f"`.author-foot` 只能建在 `if (author)` 里面：{guard.group('body')}"
+    )
+    assert render.count("author-foot") == 1, (
+        "`author-foot` 全函数只出现一次（守卫外不许另建页脚）"
     )
 
 

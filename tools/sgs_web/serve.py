@@ -1494,7 +1494,9 @@ class _Handler(BaseHTTPRequestHandler):
         2. 命中发 ``Cache-Control: public, max-age=86400``（其余静态资源仍是 ``no-store``）：
            牌桌每次记录回放都重绘 DOM，不可缓存等于每重绘一次就重下立绘；
         3. MIME 按**魔数**判（:func:`sgs_web.portraits.image_mime`），不看扩展名——资源包
-           里有 5 个 ``.jpg`` 实为 PNG 容器。
+           里有 5 个 ``.jpg`` 实为 PNG 容器；**只发图片字节**：``作者.txt`` / ``index.json``
+           这些与立绘同树的手编 / 生成期文件也按缺文件回同一个 JSON 404（否则 ``<img>`` 之外
+           谁按路径猜中就会拿到 200 + 一天的缓存）。
 
         越界判据住 :func:`sgs_web.portraits.resolve_portrait`（``unquote`` 之后才判，故
         ``%2e%2e%2f`` 也逃不掉）；立绘根不存在时它同样返回 ``None`` ⇒ 全部 404。
@@ -1511,7 +1513,13 @@ class _Handler(BaseHTTPRequestHandler):
             # 空响应比 404 更难查）。
             self._send_json(404, {"error": "立绘不存在"})
             return
-        self._send_body(body, image_mime(body), "public, max-age=86400")
+        mime = image_mime(body)
+        if mime == "application/octet-stream":
+            # 魔数不认识 ⇒ 不是图片（``作者.txt`` / ``index.json``）：/art/ 是图片路由，
+            # 回与缺文件同一个 JSON 404，绝不把文本当图片缓存一天。
+            self._send_json(404, {"error": "立绘不存在"})
+            return
+        self._send_body(body, mime, "public, max-age=86400")
 
     def _serve_static(self, path: str) -> None:
         relative = "index.html" if path in ("", "/") else path.lstrip("/")

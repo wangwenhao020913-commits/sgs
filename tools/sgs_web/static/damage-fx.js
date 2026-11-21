@@ -287,15 +287,10 @@ function damageFxBoxOf(node, layerRect) {
   };
 }
 
-/** 中剑方武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
- *
- * 票 05 R4：判据不走"牌高百分之几"——真机上武将块的头部带（势力印 + 将名 + 内奸徽）本身
- * 就占 25%，体力条在**它下面**（实测下沿 34.7%~42.3% 牌高），百分比判据会落在头部带中间。
- * 自己的体力条是 `index.html` 的常驻节点 `#t-self-hp`（烟测垫片不建静态父子树，只能按 id 取），
- * 对手的武将块里由 `seat-view.js:hpBarNode` 建 `.hp-bar`。
- * 量不到（没有体力条 / 垫片没有布局）⇒ 返回 `null`，交给 fx-core 的兜底比例。
- */
-function damageFxNumberKeepOut(block, seat) {
+/** 中剑方武将块里的**体力条节点**：自己的座位取 `index.html` 的常驻节点 `#t-self-hp`
+ *  （烟测垫片不建静态父子树，只能按 id 取），对手的由 `seat-view.js:hpBarNode` 建
+ *  `.hp-bar`；都量不到 ⇒ `null`。回退次序只在这里写一次——两个 keep-out 判据共用它。 */
+function damageFxHpBar(block, seat) {
   if (!block) return null;
   const selfSeat = state.view && state.view.snapshot ? state.view.snapshot.seat : null;
   let bar = null;
@@ -303,6 +298,18 @@ function damageFxNumberKeepOut(block, seat) {
     bar = $("t-self-hp");
   }
   if (!bar) bar = descendantWithClass(block, "hp-bar");
+  return bar || null;
+}
+
+/** 中剑方武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
+ *
+ * 票 05 R4：判据不走"牌高百分之几"——真机上武将块的头部带（势力印 + 将名 + 内奸徽）本身
+ * 就占 25%，体力条在**它下面**（实测下沿 34.7%~42.3% 牌高），百分比判据会落在头部带中间。
+ * 体力条节点取 :func:`damageFxHpBar`；量不到（没有体力条 / 垫片没有布局）⇒ 返回 `null`，
+ * 交给 fx-core 的兜底比例。
+ */
+function damageFxNumberKeepOut(block, seat) {
+  const bar = damageFxHpBar(block, seat);
   if (!bar) return null;
   const barRect = rectOf(bar);
   const blockRect = rectOf(block);
@@ -311,6 +318,35 @@ function damageFxNumberKeepOut(block, seat) {
   if (!(blockHeight > 0) || !(barHeight > 0)) return null;
   const bottom = (Number(barRect.bottom) || 0) - (Number(blockRect.top) || 0);
   return Number.isFinite(bottom) ? bottom : null;
+}
+
+/** 中剑方武将块里**体力条所在的不透明带**的上沿（相对块左上角，CSS px）；体力条不在带里
+ *  ⇒ `null`（旧版式 / 量不到）。
+ *
+ *  hero-portraits 票 03 把体力条搬进**下边框带**（`.hb-bottom`，不透明纸色 + 一像素描线）。
+ *  带子不透明，而演出层画在牌桌**之上**——压进带里的飘字不是被盖住，而是**盖住体力读数**；
+ *  硬线再往下的那点余量（条下沿 → 块底）也放不下一个包围盒。所以「飘字放在体力区下方」
+ *  这条旧口径在带里不再成立：画面模块改用**带的上沿**当"上方放置"的边界
+ *  （`numberKeepOutTop`），起飘那一刻的包围盒也不许压进带里。
+ *
+ *  判据与 :func:`damageFxNumberKeepOut` 同源（同一个体力条节点，取法在
+ *  :func:`damageFxHpBar`），只是多走一步 `parentNode` 找带；体力条直接挂在块里
+ *  （票 03 之前的版式）⇒ `null`，fx-core 保持原口径（逐字节不变）。
+ */
+function damageFxNumberKeepOutTop(block, seat) {
+  const bar = damageFxHpBar(block, seat);
+  if (!bar) return null;
+  let band = bar.parentNode;
+  while (band && band !== block && !nodeHasClass(band, "hb-bottom")) band = band.parentNode;
+  if (!band || band === block) return null;
+  const bandRect = rectOf(band);
+  const blockRect = rectOf(block);
+  const blockHeight = Number(blockRect.height) || 0;
+  const bandHeight = Number(bandRect.height) || 0;
+  if (!(blockHeight > 0) || !(bandHeight > 0)) return null;
+  const top = (Number(bandRect.top) || 0) - (Number(blockRect.top) || 0);
+  if (!(top > 0) || top >= blockHeight) return null;
+  return Number.isFinite(top) ? top : null;
 }
 
 /** 座位矩形的可比较读法：版式是否变过（演出还锚得准不准）由它判。 */
@@ -374,6 +410,8 @@ function damageFxPlanFor(event) {
     hasSource,
     // 飘字的硬线：中剑方体力条的下沿（相对武将块左上角；量不到是 null）。
     keepOut: damageFxNumberKeepOut(dstBlock, target),
+    // 硬线上方那一条**不透明带**的上沿（票 03：体力条在下边框带里时，起飘盒子也在带上方）。
+    keepOutTop: damageFxNumberKeepOutTop(dstBlock, target),
     targetSeat: target,
   };
 }
@@ -589,6 +627,8 @@ function startDamagePlay(event) {
     stage: damageFxStageFor(nature, plan),
     // 飘字不许压到中剑方的体力条：硬线 = `.hp-bar` 的下沿（票 05 R4，DOM 真值）。
     numberKeepOut: plan.keepOut,
+    // 票 03 复核：体力条在下边框带里时（`keepOutTop` 非空），起飘盒子改放到**带的上方**。
+    numberKeepOutTop: plan.keepOutTop,
     // 画布按覆盖层的实际尺寸建、内部 1:1 合成（票 05 R2：不再整块缩小）。
     view,
     dpr: damageFxDpr(),
