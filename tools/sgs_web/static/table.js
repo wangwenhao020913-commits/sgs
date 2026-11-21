@@ -6,37 +6,99 @@
 
 /* ------------------------------------------------------------------ 牌桌布局 */
 
-/** 环桌几何（U1-01）：1600×608 的设计舞台 + 椭圆 rx 680 / ry 235、圆心 (800, 370)。
+/** 环桌几何（hero-portraits 票 04）——**唯一真源**，单位 = 设计画布（1600×900 的 1px）。
  *
- * 数字来自原型 verdict（`.scratch/u1-table-foundation/prototype-notes.md`）：
- * 8 人局 7 个对手沿**上半弧**均布、卡面 210×150 时无正面积重叠。上半弧 = −30° → 210°，
- * **座位号 +1 在自己的右手边**（−30° 在屏幕右下），因此对手按「自己 + 1、+2 …」逆时针排。
- * U2-02 / D6 的 +8%（228×163）会与相邻座位重叠：40° 相邻角的 |dx| ≈ 80.8 < 228、
- * |dy| ≈ 158.3 < 163，故座位卡取「外形不变、只放大内容」的回退（见 style.css）。
- * 2 人局只有一个对手：正上方（90°）。
+ * 环区 1600×579 = 900 − 顶栏 − 底栏 265。顶栏**不是**页面那 56 dsu：牌桌顶栏是
+ * `.table-topbar { flex: 0 0 6.2% }`（壳高的 6.2% ⇒ 55.8 dsu），故环区实际 579.2；
+ * 取 579 与原型读数（`.scratch/hero-portraits/prototype/app.js` 的 `RING`）同一个数——
+ * 原型也按 56 折算，0.2 dsu 看不出来，但读数别再各写一份。整组数字在票 04 的测试里闭合：
+ * `579 + 265 + 56 = 900`。
  *
- * 只算**设计坐标**（相对 1600×608 舞台的像素）；渲染时再换算成百分比，
- * 于是 16:9 壳整体缩放时座位比例不变（`data-ring-x` / `data-ring-y` 落的就是这个坐标，
- * 烟测用它算矩形、断言无重叠）。
+ * 座位外矩形 263×188 = 210×150 的 +25%（裁决 Q16 / spec §2 目标 5）。椭圆在 8 人局只允许
+ * 放大 1.00×（当场重叠 4 对）；贴边马蹄给到 1.34×，故 +25% 在 2~8 人局不重叠——**6 人局那条
+ * 要靠下面的「拐角净空」兜住**（原型原样照排会叠一对，见 `ringSeatPositions()`）。
+ * 内边距 16 = 马蹄到环区沿的留白。
+ *
+ * **CSS 不再抄一份座位尺寸**：旧版 `.ring .seat { width: 13.125%; aspect-ratio: 210 / 150 }`
+ * 与这里的 210 是同一个数的两处重复（210 / 1600）。现在这份常量由 `ringSeatBoxCss()` 换算成
+ * 环区百分比、`seat-view.js:seatCardNode()` 写进座位 inline style——与 left / top 同一套机制。
+ * 自己的座位不住这里：它是底栏里的静态节点（`.seat.self`，330×238），没有 JS 消费方。
  */
-const RING_STAGE = { width: 1600, height: 608, cx: 800, cy: 370, rx: 680, ry: 235 };
+const RING_STAGE = { width: 1600, height: 579 };
+const RING_SEAT = { width: 263, height: 188, margin: 16 };
+/** 拐角净空之后留的空气（设计单位）：两张纸边不贴边。只在 6 人局真的用到（见下）。 */
+const RING_SEAT_AIR = 8;
 
-function ringLayout(playerCount) {
+/** 贴边马蹄（票 04）：沿「右竖边 → 上横边 → 左竖边」的周长**等距**摆座位。
+ *
+ * **纯函数**：不读 DOM、不读 CSS（`tests/test_web_static.py` 的 node 探针加载本文件直接调它）。
+ * 起点在右竖边的下端 ⇒ 座位号 +1 在自己的**右手边**（与原椭圆的 −30° 同一侧），
+ * 对手按「自己 + 1、+2 …」逆时针排到左竖边下端；自己占底边，故对手数 = 人数 − 1，
+ * 少于 2 人时环是空的。
+ *
+ * 每个座位给 `{ seatOffset, t, x, y, clamped }`：`t` 是沿周长走过的距离（设计单位，从右竖边
+ * 下端算），`x/y` 是**座位中心**的设计坐标。等距 = 相邻两席的 `t` 差恒为 `周长 / 对手数`；
+ * 半档距起步保证 2 人局的那一席也能坐在上横边正中，不骑在拐角上。
+ *
+ * **拐角净空**（原型 `layoutHorseshoe()` 的实测缺口，票 04 补的那一条）：原型 2~7 个对手的
+ * 读数全部复现（8 人局最近一对中心距 227、5 人局 414），**只有 6 人局破功**——等距把右竖边
+ * 那一席放在 y=266.7，与顶排最近那席（x=1204.6）只差 dx=247.9 / dy=156.7，两块都小于
+ * 263×188 ⇒ 那一对叠在一起（原型自己的 `maxScaleFor()` 在 6 人局也只给 1.18×，是原型读数
+ * 从来没按人数逐个算过）。几何上没有一支「等距 + 固定竖边长」能同时满足 7 个对手的 263 宽与
+ * 8 人局的长度，所以这里只修那一对：**臂上的座位与顶排的水平距离不足一块宽时，必须让开一整块
+ * 高**（再留 8 dsu 空气，免得两张纸边贴边）。它改的是 `y`，`t` 仍是等距值。
+ */
+function ringSeatPositions(playerCount) {
   const count = Number(playerCount) || 0;
   if (count < 2) return [];
   const opponents = count - 1;
+  const halfWidth = RING_SEAT.width / 2;
+  const halfHeight = RING_SEAT.height / 2;
+  const margin = RING_SEAT.margin;
+  const left = halfWidth + margin;                       // 左竖边：座位中心线
+  const right = RING_STAGE.width - halfWidth - margin;    // 右竖边
+  const top = halfHeight + margin;                       // 上横边
+  const bottom = RING_STAGE.height - halfHeight - margin; // 两条竖边的下端
+  const vertical = Math.max(1, bottom - top);
+  const horizontal = Math.max(1, right - left);
+  const perimeter = vertical * 2 + horizontal;
+  // 拐角净空线：比顶排低一整块高，再留 8 dsu 空气。
+  const clearOfTop = top + RING_SEAT.height + RING_SEAT_AIR;
   const out = [];
   for (let index = 0; index < opponents; index += 1) {
-    const angle = opponents === 1 ? 90 : -30 + (240 * index) / (opponents - 1);
-    const rad = (angle * Math.PI) / 180;
-    out.push({
-      seatOffset: index + 1,
-      angle,
-      x: RING_STAGE.cx + RING_STAGE.rx * Math.cos(rad),
-      y: RING_STAGE.cy - RING_STAGE.ry * Math.sin(rad),
-    });
+    const t = ((index + 0.5) * perimeter) / opponents;
+    const seatOffset = index + 1;
+    if (t < vertical) {
+      // 右竖边：从下端往上走
+      out.push({ seatOffset, t, x: right, y: bottom - t, onArm: true });
+    } else if (t < vertical + horizontal) {
+      // 上横边：从右往左走
+      out.push({ seatOffset, t, x: right - (t - vertical), y: top, onArm: false });
+    } else {
+      // 左竖边：从上端往下走
+      out.push({ seatOffset, t, x: left, y: top + (t - vertical - horizontal), onArm: true });
+    }
   }
-  return out;
+  // 净空：只动**臂上**那一席，且只在它真的会被顶排压住时（水平不足一块宽 + 垂直不足一块高）。
+  for (const seat of out) {
+    if (!seat.onArm) continue;
+    const pressed = out.some((other) => !other.onArm
+      && Math.abs(seat.x - other.x) < RING_SEAT.width
+      && Math.abs(seat.y - other.y) < RING_SEAT.height);
+    if (pressed) seat.y = clearOfTop;
+    seat.clamped = pressed;
+  }
+  return out.map(({ onArm, ...seat }) => seat);
+}
+
+/** 座位盒的 **CSS 尺寸**（环区百分比）：`RING_SEAT` 的唯一换算口，别在座位渲染里再算一遍。
+ *  宽 = 263/1600、高 = 188/579；两个百分比乘上环区的实际像素就是 263×188（比例 1.3989…），
+ *  所以不必再写一条 `aspect-ratio`（它会是同一个数的第三份副本）。 */
+function ringSeatBoxCss() {
+  return {
+    width: `${((RING_SEAT.width / RING_STAGE.width) * 100).toFixed(4)}%`,
+    height: `${((RING_SEAT.height / RING_STAGE.height) * 100).toFixed(4)}%`,
+  };
 }
 
 /** 公开身份配比（4~8 人身份局）。**显示副本**：真源住 `src/sgs/data/identities.py`，
@@ -159,12 +221,13 @@ function seatInteraction(player, ctx) {
   return { classes, handler };
 }
 
-/** 环上座位：只画**对手**（自己 = 底部独立面板，不占环上座位）。 */
+/** 环上座位：只画**对手**（自己 = 底部独立面板，不占环上座位）。
+ *  位置与盒子尺寸都来自 `table.js`（`ringSeatPositions` / `RING_SEAT`），CSS 只管外观。 */
 function renderRingSeats(view, ctx) {
   const snapshot = view.snapshot;
   const ring = $("t-seats");
   ring.innerHTML = "";
-  const layout = ringLayout(snapshot.players.length);
+  const layout = ringSeatPositions(snapshot.players.length);
   const bySeat = new Map(snapshot.players.map((player) => [player.seat, player]));
   for (let offset = 1; offset < snapshot.players.length; offset += 1) {
     const player = bySeat.get((snapshot.seat + offset) % snapshot.players.length);
@@ -195,6 +258,8 @@ function renderSelfSeat(view, ctx) {
   }
   // 武将名读服务端展示契约（U1-02），旧载荷退回武将 id。
   $("t-hero").textContent = heroNameOf(player, view);
+  // hero-portraits 票 08（裁决 §9）：牌桌武将块**不出立绘**，故这里不再填立绘盒子
+  // （`#t-self-portrait` 已整个摘掉；首页 / 详情两个落点各自还有调用点）。
   const badge = identityBadgeView(player, ctx.identityMode);
   const identity = $("t-self-identity");
   identity.textContent = badge.label;

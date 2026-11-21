@@ -83,7 +83,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .descriptions import skill_description
+from .descriptions import display_skill_description, skill_description
 from .display import (
     SUIT_LABELS,
     card_lookup_from_query,
@@ -390,6 +390,11 @@ def _skill_entry(
     ``star``（M6 票 06 / 票 19）：这条技能是 **☆ 技能**（觉醒后由某条觉醒技获得）；
     ``state``：见 :data:`SKILL_STATES`。两个键都是**公开事实**（武将牌上的技能是明置的），
     不含当前询问 / 手牌，故可对任意座位下发。
+
+    ``description``（hero-portraits 票 05）：**给人看的裁切版**（``display_skill_description``，
+    「本仓实现 / 本仓裁定…」及其后全部在服务端截掉）。详情清单与可操作清单共用这一条
+    ——首页右栏（``serve.hero_catalog``）早就读同一个函数，"首页裁切 / 详情全文"的历史差异
+    到此为止；前端零正则、零第二份裁切规则。
     """
     if state not in SKILL_STATES:  # pragma: no cover - 闭集，防御性守卫
         raise ValueError(f"未知的技能状态 {state!r}（可选 {SKILL_STATES}）")
@@ -402,7 +407,7 @@ def _skill_entry(
         "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
         "star": bool(star),
         "state": state,
-        "description": skill_description(definition.skill_id),
+        "description": display_skill_description(definition.skill_id),
     }
 
 
@@ -979,6 +984,34 @@ def _fuyin_badge(state: Any, seat: int) -> dict[str, Any] | None:
     return {"tag": "fuyin", "label": "父荫"}
 
 
+_LIANYING_SKILL_ID = "hero.qunying_luxun.lianying"
+"""群英包·「锋势」陆逊【连营】的 skill id（qunying 票 01；用户 Q16 点名要座位标签）。
+
+与 ``sgs.skills.hero_qunying.LIANYING`` 是同一个值，但接入层只许 import ``sgs.skills``
+这个公开子包入口（M4 第一纪律）⇒ 与 ``_FUYIN_SKILL_ID`` 同姿态：在这里写一次、只写一次。
+"""
+
+
+def _lianying_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """【连营】的座位标签 = 「连营下一张牌：无限制 / 横置目标 / 无」（用户 2026-11-21 签 Q16）。
+
+    读两个座位态字段（``Player.lianying_unlimited_after`` / ``lianying_chain_after``；
+    ``-1`` = 没有待生效位），**只取不判**：投影每帧现算、没有清除事件，状态位一清标签就变。
+    **恒显**（含"无"）：牌面那两句是"下一张牌"的加成，玩家看不到它就不知道自己手上还有
+    一次"越过上限"的额度——用户点名要"都没有则显示「连营下一张牌：无」"。
+    """
+    player = state.player(seat)
+    parts: list[str] = []
+    if int(player.lianying_unlimited_after) >= 0:
+        parts.append("无限制")
+    if int(player.lianying_chain_after) >= 0:
+        parts.append("横置目标")
+    return {
+        "tag": "lianying",
+        "label": f"连营下一张牌：{'、'.join(parts) if parts else '无'}",
+    }
+
+
 _XIONGLUAN_SKILL_ID = "hero.zhangxiu.xiongluan"
 """张绣【雄乱】的 skill id（skill-display 票 07）：登记表的键与构造器的判据共用这一份。
 
@@ -1177,6 +1210,8 @@ BADGE_PROVIDERS: Mapping[
             (BadgeScope.SELF, _yiyun_suits_badge),
             (BadgeScope.ANY_SEAT, _yiyun_suppress_badge),
         ),
+        # 群英包·「锋势」陆逊【连营】（qunying 票 01 / Q16）：两条「下一张牌」待生效位。
+        _LIANYING_SKILL_ID: ((BadgeScope.SELF, _lianying_badge),),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

@@ -3765,6 +3765,62 @@ def test_sidi_cancels_the_card_and_damages_the_user():
     assert engine.state.player(0).sidi_marks == {}
 
 
+def test_sidi_cancel_keeps_a_canceled_equipment_out_of_the_equip_zone():
+    """「取消之」对**装备牌**也要生效：目标级无效 ⇒ 实体牌不置入装备区、落弃牌堆。
+
+    用户 2026-11-21 报障：预测"目标为自己"时，被预测者使用**装备牌**（装备牌的唯一目标就是
+    使用者自己）应当判中，且曹真「取消之」应该让这张装备**不生效**。旧实现里目标级无效只在
+    RESOLVE 帧的 ``resolve_start`` 读一次，而装备牌**没有 RESOLVE 帧**（置入在 USE 帧末步）
+    ⇒ 牌照样进了装备区（只落了那 1 点伤害）。
+    """
+    trick = _non_delayed_trick()
+    sword = cards_of_type(PACK, "qinggang_sword")[0]
+    state = _sidi_state(mine=trick, user=sword)
+    engine = Engine.from_state(state, seed=28)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=1,  # 预测"他下一张牌的唯一目标是他自己"
+        user_card=sword,
+        user_target=1,
+        choice=SIDI_CANCEL,
+    )
+    _run_sidi(
+        engine,
+        table,
+        lambda e: e.state.player(1).hp < 4 and sword not in e.state.processing,
+    )
+    assert table.option_queries == 1, "装备牌指定自己 ⇒ 判中、问一次"
+    assert sword in engine.state.discard, "被取消的装备牌落弃牌堆"
+    assert sword not in engine.state.player(1).equip, "不能置入装备区"
+    assert engine.state.player(1).hp == 3, "取消之的 1 点伤害照常落在使用者身上"
+
+
+def test_sidi_is_not_spent_by_a_delayed_trick_of_the_predicted_character():
+    """锚点 = 「其使用的第一张**除延时锦囊以外的牌**」 ⇒ 延时锦囊既不判中、也不清预测。
+
+    官方现行文本（移动版官网 界·曹真 页，2026-11 抓取）逐字：「其使用的第一张除延时锦囊
+    以外的牌仅指定"司敌"目标为唯一目标时（否则清除你为其指定的"司敌"目标角色。）」。
+    旧实现让**任何**牌都当锚点：被预测者先贴一张【乐不思蜀】就把预测白清了（用户
+    2026-11-21 报障「司敌偶尔不触发」）。
+    """
+    trick = _non_delayed_trick()
+    indulgence = _delayed_trick()
+    state = _sidi_state(mine=trick, user=indulgence)
+    engine = Engine.from_state(state, seed=29)
+    table = _SidiTable(
+        card=trick,
+        predicted=1,
+        predicted_target=2,
+        user_card=indulgence,
+        user_target=2,
+    )
+    _run_sidi(engine, table, lambda e: bool(e.state.player(2).judge))
+    assert engine.state.player(2).judge, "那张延时锦囊确实已经用了"
+    assert engine.state.player(0).sidi_marks == {1: 2}, "延时锦囊不是锚点 ⇒ 预测保留"
+    assert table.option_queries == 0, "延时锦囊不判中"
+
+
 def test_sidi_draws_two_and_spends_the_prediction():
     trick = _non_delayed_trick()
     slash = cards_of_type(PACK, "slash")[0]

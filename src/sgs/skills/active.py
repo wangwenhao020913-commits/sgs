@@ -79,6 +79,7 @@ from sgs.effects import (
     satisfies_required,
     Supply,
     targets_within_attack_range,
+    TargetCount,
     UseContext,
 )
 from sgs.resolution import Control, Tag, add_tag
@@ -120,6 +121,10 @@ from .catalog import (
     _HUANGTIAN_SHIFT,
     _PHASE_USE_MASK,
     _PHASE_USE_SHIFT,
+    _QIANXUN_COST_MASK,
+    _QIANXUN_COST_SHIFT,
+    _QIANXUN_EFFECT_MASK,
+    _QIANXUN_EFFECT_SHIFT,
     _USED_SECOND,
     _move_by_source,
     instance_key,
@@ -8212,21 +8217,15 @@ def _zuoxing_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
                     return "stay"
                 targets = (_option_seat(answer),)
             else:
-                sorted_seats = host.ask_seats(
-                    frame,
-                    holder,
-                    Timing.PHASE_PLAY_IDLE,
-                    skill_id=f"{ZUOXING}:target",
-                    pool=pool,
-                    lo=low,
-                    hi=high,
+                chosen_seats = _ask_multi_target_seats(
+                    host, frame, holder, skill_id=f"{ZUOXING}:target", pool=pool, lo=low, hi=high
                 )
-                if host.suspended(sorted_seats):
+                if chosen_seats is _ASKING:
                     return "stay"
-                if isinstance(sorted_seats, Pass) or not sorted_seats:
+                if not chosen_seats:
                     frame.data[_ZUOXING_STAGE] = "done"
                     return None
-                targets = tuple(sorted_seats)
+                targets = tuple(chosen_seats)
             frame.data[_ZUOXING_TARGETS] = tuple(targets)
         frame.data[_ZUOXING_STAGE] = (
             "designation" if needs_designation(card) else "use"
@@ -9162,7 +9161,793 @@ _WUYI = ActiveSkill(
 """势赵云【武翊】的完整声明（四档 + 两个窗口 + 计数与回填钩子，同一个技能 id）。"""
 
 
+# ---------------------------------------------------------------------------
+# 群英包·「锋势」陆逊【谦逊】（qunying 票 01；用户 2026-11-21 一次签 Q1–Q16）
+#
+# 牌面（用户 `技能.txt`，逐字）：
+#   【谦逊】：出牌阶段各限一次，你可【①弃置所有手牌；②受到一点无来源的火焰伤害；③将一张
+#   装备牌当作一张延时类锦囊牌对自己使用】，并执行本回合未被选择过的一项：【①视为使用
+#   一张非装备牌；②移动场上一张牌；③从牌堆或弃牌堆中获得一张你指定类型的牌】
+#
+# 读法（票 01 §3.1 / §4；逐条都有用户裁定或账本行）：
+#
+# - 三个**代价**各"出牌阶段限一次"（Q10 = A）⇒ 每个出牌阶段至多 3 次发动；三个**效果**
+#   "本回合未被选择过"（用户签票时逐字补：**额外出牌阶段刷新代价、但不刷新效果**）⇒ 效果
+#   每游戏回合各一次。落点 = `catalog._QIANXUN_COST_MASK`（并入 `_PHASE_STATE_MASK`，
+#   出牌阶段起点复位）+ `catalog._QIANXUN_EFFECT_MASK`（`reset_turn_skill_state` 清）。
+# - **先付代价、再选效果**（Q11 = A）：问法 = 代价选项 → 付清 → 效果选项 → 执行效果。
+# - 代价③ 的产物由**玩家在【乐不思蜀】/【兵粮寸断】/【闪电】里选**（Q13 = A：用户裁定
+#   "此处武将规则大于游戏规则"——本仓按规则 §6.11 L672 / §6.13 L689 把乐 / 兵粮的目标读成
+#   "一名**其他**角色"，本技能按牌面放行"对自己"），合法产物集只由**判定区的系统规则**收窄
+#   （判定区被废除 / 已有同名牌 ⇒ 那一样不可选）。产物是**转化牌**（继承那张装备牌的花色 /
+#   点数，规则 §16.3），用完后随使用链进判定区。
+# - 效果① 的产物是**纯虚拟牌**（无来源实体牌 ⇒ 花色 / 点数 / 颜色皆无），牌名池 = 本牌堆
+#   真有的**基本牌 + 锦囊牌（含延时类；Q12 = A）**；此刻没有合法目标的名字**列出来但置灰**
+#   （同【蛊惑】Q1A 的牌名弹窗）。**花色点数不影响判定**：延时锦囊的判定看的是判定阶段
+#   亮出的那张牌，不是这张牌自己（用户纠错）。
+# - 效果② = 移动场上一张牌（Q14 = A）：一名角色**装备区 / 判定区**的一张牌 → **另一名**
+#   角色的**对应区域**；装备牌 ⇒ 目标同槽必须为空（且该槽未废除）；判定牌 ⇒ 目标判定区
+#   不得已有同名牌；源与目的地**不能是同一名角色**；不能进手牌 / 弃牌堆（`MoveReason.LOSE`）。
+# - 效果③ = 问「类型」（基本 / 锦囊 / 装备 三大类）→ **牌堆优先随机、没有才从弃牌堆随机**
+#   （Q15 = B）：两个入口都按**牌名集合**候选取均匀随机（`Engine.take_named_card_from_deck` /
+#   `take_named_card_from_discard`，同一条 `deck_search` 子流）。
+# ---------------------------------------------------------------------------
+
+QIANXUN = hero_skill_id("qunying_luxun", "qianxun")
+"""群英包·「锋势」陆逊【谦逊】的全限定技能 id（【连营】住 `sgs.skills.hero_qunying`）。"""
+
+QIANXUN_COST_DISCARD = "qianxun_cost_discard"
+QIANXUN_COST_DAMAGE = "qianxun_cost_damage"
+QIANXUN_COST_EQUIP = "qianxun_cost_equip"
+QIANXUN_COSTS: tuple[str, ...] = (
+    QIANXUN_COST_DISCARD,
+    QIANXUN_COST_DAMAGE,
+    QIANXUN_COST_EQUIP,
+)
+"""三个代价的选项 id（`options.js:OPTION_LABELS` 各一条；顺序 = 牌面 ①②③）。"""
+
+QIANXUN_EFFECT_CARD = "qianxun_effect_card"
+QIANXUN_EFFECT_MOVE = "qianxun_effect_move"
+QIANXUN_EFFECT_GAIN = "qianxun_effect_gain"
+QIANXUN_EFFECTS: tuple[str, ...] = (
+    QIANXUN_EFFECT_CARD,
+    QIANXUN_EFFECT_MOVE,
+    QIANXUN_EFFECT_GAIN,
+)
+"""三个效果的选项 id（手写 `ask_option` 的 `option_texts` 给中文，见下）。"""
+
+_QIANXUN_COST_INDEX: dict[str, int] = dict(
+    {name: index for index, name in enumerate(QIANXUN_COSTS)}
+)
+_QIANXUN_EFFECT_INDEX: dict[str, int] = dict(
+    {name: index for index, name in enumerate(QIANXUN_EFFECTS)}
+)
+
+QIANXUN_COST_TEXTS: dict[str, str] = dict(
+    {
+        QIANXUN_COST_DISCARD: "①弃置所有手牌",
+        QIANXUN_COST_DAMAGE: "②受到一点无来源的火焰伤害",
+        QIANXUN_COST_EQUIP: "③将一张装备牌当作一张延时类锦囊牌对自己使用",
+    }
+)
+"""代价选项的中文（`ask_option(option_texts=…)`；**不给** `options.js:OPTION_LABELS`
+加名字——那张表是全局键表，键要跨技能唯一，长句放引擎侧更省事）。"""
+
+QIANXUN_EFFECT_TEXTS: dict[str, str] = dict(
+    {
+        QIANXUN_EFFECT_CARD: "①视为使用一张基本牌或普通锦囊牌",
+        QIANXUN_EFFECT_MOVE: "②移动场上一张牌",
+        QIANXUN_EFFECT_GAIN: "③从牌堆或弃牌堆中获得一张你指定类型的牌",
+    }
+)
+"""效果选项的中文（同上）。"""
+
+_QIANXUN_GAIN_TYPES: tuple[tuple[str, str], ...] = (
+    ("basic", "基本牌"),
+    ("trick", "锦囊牌"),
+    ("equipment", "装备牌"),
+)
+"""效果③ 的「类型」三档（`sgs.data.Category` 的三大类；牌面写"你指定类型"）。"""
+
+_QIANXUN_DELAYED: tuple[str, ...] = ("indulgence", "supply_shortage", "lightning")
+"""代价③ 可选的三个延时锦囊牌型 id（Q13 = A：乐不思蜀 / 兵粮寸断 / 闪电）。"""
+
+# 帧私有游标（每个"已付 / 已问 / 已发起"一个）：挂起续跑时不重做、也不漏做。
+_QIANXUN_MARKED = "qianxun_cost_marked"
+"""这次发动已经落过"本出牌阶段付过这个代价"的位。"""
+
+_QIANXUN_PAID = "qianxun_cost_paid"
+"""代价的**搬牌 / 伤害段**已经付清。"""
+
+_QIANXUN_SOURCE = "qianxun_cost_source"
+"""代价③ 选中的那张装备牌（实体牌 id；重入不重问）。"""
+
+_QIANXUN_PRODUCT = "qianxun_cost_product"
+"""代价③ 选中的牌名（延时锦囊的牌型 id）。"""
+
+_QIANXUN_EFFECT = "qianxun_effect_choice"
+"""效果步的答案（``""`` = 没有可执行项，整条收尾）。"""
+
+_ASKING = object()
+"""手写段机的第三个返回值：**这一次询问挂起了**（与引擎的 `SUSPEND` 同义）。
+
+不 import 引擎的 `SUSPEND`（技能层不深导 `sgs.engine`），本模块只用它做"取回的是不是
+答案"的判别，语义与 `Engine.suspended(...)` 完全一致。
+"""
+
+_ASK_QIANXUN_EQUIP = "qianxun.equip"
+_ASK_QIANXUN_FIELD = "qianxun.field"
+_QIANXUN_NAME_ASK = "qianxun.name"
+_QIANXUN_TYPE_ASK = "qianxun.type"
+_QIANXUN_TARGET_ASK = "qianxun.target"
+_QIANXUN_MOVE_FROM_ASK = "qianxun.move_from"
+_QIANXUN_MOVE_CARD_ASK = "qianxun.move_card"
+_QIANXUN_MOVE_TO_ASK = "qianxun.move_to"
+_QIANXUN_NAME = "qianxun_effect_name"
+"""效果① 选中的牌名（显示名；重入不重问）。"""
+
+_QIANXUN_GAIN = "qianxun_gain_type"
+"""效果③ 选中的类型（``basic`` / ``trick`` / ``equipment``）。"""
+
+_QIANXUN_MOVE_FROM = "qianxun_move_from"
+"""效果② 选中的源座位。"""
+
+_QIANXUN_MOVE_CARD = "qianxun_move_card"
+"""效果② 选中的那张牌（实体牌 id）。"""
+
+_QIANXUN_MOVE_TO = "qianxun_move_to"
+"""效果② 选中的目的地座位。"""
+
+_QIANXUN_GAINED = "qianxun_gained"
+"""效果③ 已经取到的那张牌（``-2`` = 两堆都没有 ⇒ 该段不发生；**不幂等**的入口靠它兜住）。"""
+
+
+def _qianxun_flags(state: GameState, seat: int) -> int:
+    """``seat`` 的【谦逊】实例位（位段见 `catalog._QIANXUN_COST_MASK` / `_QIANXUN_EFFECT_MASK`）。
+
+    实例不在 ⇒ ``0``（没有这条技能 ⇒ 一个位都没有；调用方据此自然"什么都不做"）。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == QIANXUN:
+            return int(state.skill_state.get(instance_key(instance), 0))
+    return 0
+
+
+def _qianxun_write(state: GameState, seat: int, mask: int) -> None:
+    """按位或写 ``mask``（实例不在 ⇒ 零动作）。"""
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == QIANXUN:
+            key = instance_key(instance)
+            state.skill_state[key] = int(state.skill_state.get(key, 0)) | mask
+            return
+
+
+def _qianxun_cost_bits(state: GameState, seat: int) -> int:
+    return _qianxun_flags(state, seat) & _QIANXUN_COST_MASK
+
+
+def _qianxun_effect_bits(state: GameState, seat: int) -> int:
+    return _qianxun_flags(state, seat) & _QIANXUN_EFFECT_MASK
+
+
+def _qianxun_used_costs(state: GameState, seat: int) -> frozenset[str]:
+    """本出牌阶段**已经付过**的代价（选项 id 集合）。"""
+    bits = _qianxun_cost_bits(state, seat)
+    return frozenset(
+        name
+        for name, index in _QIANXUN_COST_INDEX.items()
+        if bits & (1 << (_QIANXUN_COST_SHIFT + index))
+    )
+
+
+def _qianxun_used_effects(state: GameState, seat: int) -> frozenset[str]:
+    """**本回合**已经选过的效果（选项 id 集合）。"""
+    bits = _qianxun_effect_bits(state, seat)
+    return frozenset(
+        name
+        for name, index in _QIANXUN_EFFECT_INDEX.items()
+        if bits & (1 << (_QIANXUN_EFFECT_SHIFT + index))
+    )
+
+
+def _qianxun_equipment_cards(state: GameState, seat: int) -> tuple[int, ...]:
+    """「一张装备牌」= **手牌 + 装备区**里的装备牌（默认读法（一）③ 的"特殊，含手牌"）。"""
+    player = state.player(seat)
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if state.card(card_id).slot is not None
+    )
+
+
+def _qianxun_judge_free(state: GameState, seat: int, type_id: str) -> bool:
+    """这张延时锦囊此刻能不能进 ``seat`` 的判定区（系统规则两查：封印 + 同名牌已有）。"""
+    player = state.player(seat)
+    if zone_sealed(player, SEALED_ZONE_JUDGE):
+        return False
+    return not any(state.card(card_id).type == type_id for card_id in player.judge)
+
+
+def _qianxun_products(state: GameState, seat: int) -> tuple[str, ...]:
+    """代价③ 此刻合法的产物牌名（判定区系统规则收窄后的那几项）。"""
+    return tuple(
+        type_id for type_id in _QIANXUN_DELAYED if _qianxun_judge_free(state, seat, type_id)
+    )
+
+
+def _qianxun_available_costs(state: GameState, seat: int) -> frozenset[str]:
+    """此刻付得起的代价：①恒可（0 张也付得清，Q8 = A）；②恒可；③有装备牌 ∧ 有合法产物。"""
+    can_pay: set[str] = {QIANXUN_COST_DISCARD, QIANXUN_COST_DAMAGE}
+    if _qianxun_equipment_cards(state, seat) and _qianxun_products(state, seat):
+        can_pay.add(QIANXUN_COST_EQUIP)
+    return frozenset(can_pay)
+
+
+def _qianxun_cost_options(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """代价步的全量闭集：此刻付得起、且本出牌阶段还没付过的那几项。"""
+    del frame, answers
+    available = _qianxun_available_costs(state, owner)
+    used = _qianxun_used_costs(state, owner)
+    return tuple(item for item in QIANXUN_COSTS if item in available and item not in used)
+
+
+def _qianxun_declaration_table(state: GameState) -> dict[str, str]:
+    """效果① 的牌名闭集：``显示名 → 牌型 id``，范围 = 本牌堆真有的**基本牌 + 普通锦囊**。
+
+    **用户 2026-11-21 实机报障后改口（Q12′）**：牌面从"视为使用一张非装备牌"改成"视为使用
+    一张**基本牌或普通锦囊牌**"——**不产生虚拟的延时类锦囊**（虚拟延时锦囊在判定 / 移动 /
+    展示三处都会出 bug；代价③ 那条路是**转化牌**、有来源实体牌，不受这条限制）。
+
+    与【蛊惑】的 `_guohuo_declaration_table` 因此**逐字相同**（基本牌 + 非延时锦囊、且本牌堆
+    真有）——直接复用它，不另写第二份（同一条"牌堆里没有【酒】就不列出"的判据）。
+    """
+    return _guohuo_declaration_table(state)
+
+
+def _qianxun_unusable_names(state: GameState, seat: int) -> frozenset[str]:
+    """此刻**没有合法目标**的牌名（界面置灰；校验器读同一份裁决）。
+
+    产物是**纯虚拟牌**（没有来源实体牌），故"能不能用"完全由 ``check_targets`` 现算：
+    【闪】/【无懈可击】在出牌阶段没有目标池、满体力的【桃】、攻击范围外的【杀】…
+    """
+    return frozenset(
+        name
+        for name, type_id in _qianxun_declaration_table(state).items()
+        if not check_targets(state, seat, pure_virtual_card(state, type_id))
+    )
+
+
+def _qianxun_type_name(state: GameState, type_id: str) -> str:
+    """牌型 id → 显示名（牌面数据的**唯一**来源：``state.cards`` 里的 ``CardRef.name``）。"""
+    for card in state.cards:
+        if card.type == type_id:
+            return card.name
+    return type_id
+
+
+def _qianxun_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """出牌阶段入口：付得起的代价 ∧ 还没用完的效果 ⇒ 给一条 ``ActivateSkill``。
+
+    ``once_per_phase=False``（次数由三个代价位自己数，见 `QIANXUN_COSTS` 的说明）；
+    两个"全空"的情形都**不产出候选**——没有代价可付 / 三个效果都用过。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    seat = ctx.subject
+    if not set(_qianxun_available_costs(state, seat)) - _qianxun_used_costs(state, seat):
+        return current
+    if len(_qianxun_used_effects(state, seat)) >= len(QIANXUN_EFFECTS):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _qianxun_equipment_face(host: Any, seat: int) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """代价③ 的选择面：``seat`` 的手牌 + 装备区里**装备牌**的那些槽（其余槽不进面）。"""
+    # ``reveal_hand=True``：**自己**的手牌对挑牌者本来就可见（同【贯石斧】的成本面），
+    # 缺了它手牌槽是隐藏槽（``slot.card is None``）、装备牌会被过滤成空面。
+    slots, card_ids = host.selection_face(seat, (Zone.HAND, Zone.EQUIP), reveal_hand=True)
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids)
+        if slot.card is not None and slot.card.slot is not None
+    ]
+    return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
+
+
+def _qianxun_pick_equipment(host: Any, frame: Any, owner: int) -> Any:
+    """代价③ 的选牌步（**牌面直选**：自己的手牌 / 装备区，不铺左下角面板）。"""
+    source = frame.data.get(_QIANXUN_SOURCE)
+    if source is not None:
+        return int(source)
+    picks = host.ask_selection(
+        frame,
+        owner=_ASK_QIANXUN_EQUIP,
+        key="card",
+        actor=owner,
+        timing=Timing.PHASE_PLAY_IDLE,
+        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
+        build_face=lambda: _qianxun_equipment_face(host, owner),
+    )
+    if host.suspended(picks):
+        return _ASKING
+    if not picks:
+        return None
+    frame.data[_QIANXUN_SOURCE] = int(picks[0])
+    return int(picks[0])
+
+
+def _qianxun_pay(host: Any, frame: Any, owner: int, cost: str) -> Any:
+    """付代价（返回 ``"stay"`` = 等子帧 / 挂起；``None`` = 已付清）。"""
+    state = host.state
+    if frame.data.get(_QIANXUN_PAID):
+        return None
+    if cost == QIANXUN_COST_DISCARD:
+        cards = tuple(state.refs(tuple(state.player(owner).hand)))
+        if cards:
+            control = host.move_in_frame(
+                frame,
+                cards,
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=owner,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+        frame.data[_QIANXUN_PAID] = True
+        return None
+    if cost == QIANXUN_COST_DAMAGE:
+        frame.data[_QIANXUN_PAID] = True
+        _push_damage(host, frame, source=None, target=owner, amount=1, nature=DamageNature.FIRE)
+        return "stay"
+    source = _qianxun_pick_equipment(host, frame, owner)
+    if source is _ASKING:
+        return "stay"
+    if source is None:  # 付不起（防御分支：候选判定之后牌被拿走）⇒ 只作废这次代价
+        frame.data[_QIANXUN_PAID] = True
+        return None
+    products = _qianxun_products(state, owner)
+    product = frame.data.get(_QIANXUN_PRODUCT)
+    if product is None:
+        if not products:
+            frame.data[_QIANXUN_PAID] = True
+            return None
+        if len(products) == 1:
+            product = products[0]
+        else:
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id=f"{QIANXUN}:product",
+                options=products,
+                optional=False,
+                option_texts={
+                    type_id: _qianxun_type_name(state, type_id) for type_id in products
+                },
+            )
+            if host.suspended(answer):
+                return "stay"
+            product = str(answer.choice)
+        frame.data[_QIANXUN_PRODUCT] = product
+    frame.data[_QIANXUN_PAID] = True
+    card = transformed_card(state, (int(source),), str(product))
+    # 目标恒为**自己**：Q13 = A（武将规则大于游戏规则）⇒ 不经 ``check_targets`` 的
+    # "一名其他角色"那道闸，合法性由 `_qianxun_judge_free` 在候选期先判过。
+    host.start_use(
+        card,
+        source=owner,
+        targets=(owner,),
+        use_timing=Timing.PHASE_PLAY_IDLE,
+    )
+    return "stay"
+
+
+def _qianxun_effect_choice(host: Any, frame: Any, owner: int) -> Any:
+    """效果步：本回合还没选过的那几项（只剩一项 ⇒ 直提态，不问）。"""
+    state = host.state
+    chosen = frame.data.get(_QIANXUN_EFFECT)
+    if chosen is not None:
+        return str(chosen)
+    options = tuple(item for item in QIANXUN_EFFECTS if item not in _qianxun_used_effects(state, owner))
+    if not options:
+        frame.data[_QIANXUN_EFFECT] = ""
+        return ""
+    if len(options) == 1:
+        frame.data[_QIANXUN_EFFECT] = options[0]
+        return options[0]
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id=f"{QIANXUN}:effect",
+        options=options,
+        optional=False,
+        option_texts={item: QIANXUN_EFFECT_TEXTS[item] for item in options},
+    )
+    if host.suspended(answer):
+        return _ASKING
+    chosen = str(answer.choice)
+    frame.data[_QIANXUN_EFFECT] = chosen
+    return chosen
+
+
+def _qianxun_pick_name(host: Any, frame: Any, owner: int) -> Any:
+    """效果① 的牌名步：列全 + 置灰（与【蛊惑】同一张弹窗形状）。"""
+    chosen = frame.data.get(_QIANXUN_NAME)
+    if chosen is not None:
+        return str(chosen)
+    state = host.state
+    table = _qianxun_declaration_table(state)
+    options = tuple(table)
+    if not options:
+        return None
+    disabled = tuple(name for name in options if name in _qianxun_unusable_names(state, owner))
+    usable = tuple(name for name in options if name not in disabled)
+    if not usable:
+        return None
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id=f"{QIANXUN}:name",
+        options=options,
+        optional=False,
+        disabled=disabled,
+        option_texts={name: name for name in options},
+    )
+    if host.suspended(answer):
+        return _ASKING
+    chosen = str(answer.choice)
+    frame.data[_QIANXUN_NAME] = chosen
+    return chosen
+
+
+def _qianxun_use_virtual(host: Any, frame: Any, owner: int) -> Any:
+    """效果① 的提交点：选目标 → ``start_use`` 一张**纯虚拟**的该牌名。"""
+    state = host.state
+    name = frame.data.get(_QIANXUN_NAME)
+    if not name:
+        return None
+    type_id = _qianxun_declaration_table(state)[str(name)]
+    card = pure_virtual_card(state, type_id)
+    rule = behavior_for(card).target_rule
+    pool = check_targets(state, owner, card)
+    if not pool:
+        return None
+    targets: tuple[int, ...]
+    if rule.count is not TargetCount.RATED:
+        targets = pool
+    elif rule.is_range:
+        targets = _qianxun_multi_seats(
+            host,
+            frame,
+            owner,
+            f"{QIANXUN}:targets",
+            pool,
+            lo=int(rule.min_targets or 1),
+            hi=int(rule.max_targets or len(pool)),
+        )
+        if targets is _ASKING:
+            return "stay"
+    elif len(pool) == 1:
+        targets = pool
+    else:
+        seat = _qianxun_ask_seat(host, frame, owner, f"{QIANXUN}:target", pool)
+        if seat is _ASKING:
+            return "stay"
+        if seat is None:
+            return None
+        targets = (int(seat),)
+    host.start_use(card, source=owner, targets=targets, use_timing=Timing.PHASE_PLAY_IDLE)
+    return None
+
+
+def _qianxun_ask_seat(
+    host: Any, frame: Any, owner: int, skill_id: str, pool: tuple[int, ...]
+) -> Any:
+    """问一个座位（``seat:N`` 的选项面；空池 ⇒ ``None``）。"""
+    if not pool:
+        return None
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id=skill_id,
+        options=tuple(_seat_choice(seat) for seat in pool),
+        optional=False,
+    )
+    if host.suspended(answer):
+        return _ASKING
+    return int(str(answer.choice).split(":", 1)[1])
+
+
+def _ask_multi_target_seats(
+    host: Any,
+    frame: Any,
+    actor: int,
+    *,
+    skill_id: str,
+    pool: tuple[int, ...],
+    lo: int,
+    hi: int,
+) -> Any:
+    """「一次选多名角色」在 skills 侧的**唯一调用点**（`Engine.ask_seats` 只在这里被调）。
+
+    区间由调用方按行为表（`TargetRule.target_range`）给；返回 ``_ASKING`` = 挂起、
+    ``()`` = 一个都没选中（调用方按自己的"这一步不存在"处理）。
+    `tests/test_seat_multi_select.py` 钉住"全仓只有这一处调用"。
+    """
+    answer = host.ask_seats(
+        frame, actor, Timing.PHASE_PLAY_IDLE, skill_id=skill_id, pool=pool, lo=lo, hi=hi
+    )
+    if host.suspended(answer):
+        return _ASKING
+    if isinstance(answer, Pass) or not answer:
+        return ()
+    return tuple(int(seat) for seat in answer)
+
+
+def _qianxun_multi_seats(
+    host: Any, frame: Any, owner: int, skill_id: str, pool: tuple[int, ...], *, lo: int, hi: int
+) -> Any:
+    """【谦逊】效果① 的多目标步（复用全仓唯一的座位多选入口）。"""
+    return _ask_multi_target_seats(
+        host, frame, owner, skill_id=skill_id, pool=pool, lo=lo, hi=hi
+    )
+
+
+def _qianxun_field_seats(state: GameState) -> tuple[int, ...]:
+    """效果② 的"源座位"池：装备区或判定区里有牌的存活角色（含自己）。"""
+    return tuple(
+        int(player.seat)
+        for player in state.players
+        if player.alive and (player.equip or player.judge)
+    )
+
+
+def _qianxun_effective_card(state: GameState, card_id: int) -> CardRef:
+    """这张牌**在判定区里代表的那张牌**：转化过的延时锦囊读 ``state.virtual_judge`` 的映射。
+
+    用户 2026-11-21 报障（第 5 条）：场上被转化的延时类锦囊被**移动**时，要保持其**产物**
+    （例：一张装备牌当【乐不思蜀】放进判定区，再被移动时它仍然"是"【乐不思蜀】）。
+    故"同名牌"这条合法性与牌名展示都读这个函数，而不是读实体牌的牌面。
+    """
+    return state.virtual_judge.get(card_id) or state.card(card_id)
+
+
+def _qianxun_move_destinations(state: GameState, source_seat: int, card_id: int) -> tuple[int, ...]:
+    """效果② 的"目的地座位"池（Q14 = A 的三条合法性）。
+
+    **区由"牌此刻在哪儿"判**，不由牌面槽位判：被转化过的延时锦囊，其实体牌可能是**装备牌**
+    （代价③ 那条路），却正躺在判定区里。判定区的"同名"也按**产物**判（`_qianxun_effective_card`）。
+    """
+    card = state.card(card_id)
+    player = state.player(source_seat)
+    in_judge = card_id in player.judge
+    effective = _qianxun_effective_card(state, card_id)
+    destinations: list[int] = []
+    for other in state.players:
+        if not other.alive or int(other.seat) == source_seat:
+            continue
+        if not in_judge:
+            if card.slot is None:
+                continue
+            if zone_sealed(other, card.slot.value):
+                continue
+            if any(state.card(item).slot is card.slot for item in other.equip):
+                continue
+        else:
+            if zone_sealed(other, SEALED_ZONE_JUDGE):
+                continue
+            if any(
+                _qianxun_effective_card(state, item).type == effective.type
+                for item in other.judge
+            ):
+                continue
+        destinations.append(int(other.seat))
+    return tuple(destinations)
+
+
+def _qianxun_move_effect(host: Any, frame: Any, owner: int) -> Any:
+    """效果②：选源座位 → 选牌 → 选目的地 → 搬牌（``MoveReason.LOSE``）。"""
+    state = host.state
+    source_seat = frame.data.get(_QIANXUN_MOVE_FROM)
+    if source_seat is None:
+        pool = _qianxun_field_seats(state)
+        if not pool:
+            return None
+        seat = _qianxun_ask_seat(host, frame, owner, f"{QIANXUN}:from", pool)
+        if seat is _ASKING:
+            return "stay"
+        if seat is None:
+            return None
+        frame.data[_QIANXUN_MOVE_FROM] = int(seat)
+        source_seat = int(seat)
+    card_id = frame.data.get(_QIANXUN_MOVE_CARD)
+    if card_id is None:
+        picks = host.ask_selection(
+            frame,
+            owner=_ASK_QIANXUN_FIELD,
+            key="card",
+            actor=owner,
+            timing=Timing.PHASE_PLAY_IDLE,
+            spec=SelectionSpec(zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1)),
+            build_face=lambda: host.selection_face(int(source_seat), (Zone.EQUIP, Zone.JUDGE)),
+        )
+        if host.suspended(picks):
+            return "stay"
+        if not picks:
+            return None
+        card_id = int(picks[0])
+        frame.data[_QIANXUN_MOVE_CARD] = card_id
+    card_id = int(card_id)
+    dest = frame.data.get(_QIANXUN_MOVE_TO)
+    if dest is None:
+        pool = _qianxun_move_destinations(state, int(source_seat), card_id)
+        if not pool:
+            return None
+        # 用户 2026-11-21（第二轮）：**不合法的目的地要列出来并置灰**，不是静默从候选里消失
+        # （"若目标该区域已被废除或已有牌，则不能指定为合法目标，直接置灰"）。置灰项留在
+        # `options` 里、只从 `legal_actions` 剔除，校验器同样拒收（`ask_option(disabled=)`）。
+        others = tuple(
+            int(player.seat)
+            for player in state.players
+            if player.alive and int(player.seat) != int(source_seat)
+        )
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=f"{QIANXUN}:to",
+            options=tuple(_seat_choice(seat) for seat in others),
+            optional=False,
+            disabled=tuple(
+                _seat_choice(seat) for seat in others if seat not in pool
+            ),
+        )
+        if host.suspended(answer):
+            return "stay"
+        dest = int(str(answer.choice).split(":", 1)[1])
+        frame.data[_QIANXUN_MOVE_TO] = dest
+    card = state.card(card_id)
+    in_judge = card_id in state.player(int(source_seat)).judge
+    product = state.virtual_judge.get(card_id)
+    control = host.move_in_frame(
+        frame,
+        (card,),
+        to_zone=ZoneRef(Zone.JUDGE if in_judge else Zone.EQUIP, int(dest)),
+        reason=MoveReason.LOSE,
+        owner=int(source_seat),
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    if in_judge and product is not None:
+        # 搬牌原语"离开判定区即清映射"（那是给"判定牌进弃牌堆"用的）。判定区 → 判定区的
+        # **移动**要保持产物（用户 2026-11-21 报障第 5 条）⇒ 搬完把它按同一张实体牌记回去。
+        state.virtual_judge[int(card_id)] = product
+    return None
+
+
+def _qianxun_gain_names(state: GameState, category: str) -> tuple[str, ...]:
+    """效果③ 的**牌名集合**：本牌堆里属于该**大类**的所有牌面的 ``CardRef.name``（按牌序去重）。
+
+    ⚠️ 这里要的是**显示名**（"杀" / "闪" / "乐不思蜀"），不是牌型 id：两个取牌入口
+    （`Engine.take_named_card_from_deck` / `take_named_card_from_discard`）的 `names` 判据
+    是 ``CardRef.name in names``（同【勤政】的 `("桃", "酒")`）。实机报障"获得不了牌"就是
+    这里传了 type id（`"slash"`）——一张都匹配不上。
+    """
+    names: list[str] = []
+    for card in state.cards:
+        if card_category(state.pack_id, card.type) is Category(category):
+            if card.name not in names:
+                names.append(card.name)
+    return tuple(names)
+
+
+def _qianxun_gain_effect(host: Any, frame: Any, owner: int) -> Any:
+    """效果③：问类型 → **牌堆优先随机、没有才从弃牌堆随机**（Q15 = B）。"""
+    state = host.state
+    if _QIANXUN_GAINED in frame.data:
+        return None
+    category = frame.data.get(_QIANXUN_GAIN)
+    if category is None:
+        options = tuple(key for key, _ in _QIANXUN_GAIN_TYPES)
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=f"{QIANXUN}:type",
+            options=options,
+            optional=False,
+            option_texts=dict(_QIANXUN_GAIN_TYPES),
+        )
+        if host.suspended(answer):
+            return "stay"
+        category = str(answer.choice)
+        frame.data[_QIANXUN_GAIN] = category
+    names = _qianxun_gain_names(state, str(category))
+    card = host.take_named_card_from_deck(frame, names=names, to_seat=owner)
+    if card is None:
+        card = host.take_named_card_from_discard(frame, names=names, to_seat=owner)
+    frame.data[_QIANXUN_GAINED] = -2 if card is None else int(card.card_id)
+    return None
+
+
+def _qianxun_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：付代价 → 选效果 → 执行效果（每段都有帧内游标）。"""
+    state = host.state
+    # A 族的 SKILL 帧上"发动者"是 ``source``（``skill_owner`` 是**钩子**帧的键）。
+    owner = int(frame.data["source"])
+    cost = str(answers["cost"])
+    if frame.data.get(_QIANXUN_MARKED) is None:
+        frame.data[_QIANXUN_MARKED] = cost
+        _qianxun_write(
+            state,
+            owner,
+            1 << (_QIANXUN_COST_SHIFT + _QIANXUN_COST_INDEX[cost]),
+        )
+    control = _qianxun_pay(host, frame, owner, cost)
+    if control == "stay":
+        return "stay"
+    if not state.player(owner).alive:
+        return None
+    chosen = _qianxun_effect_choice(host, frame, owner)
+    if chosen == _ASKING:
+        return "stay"
+    if not chosen:
+        return None
+    _qianxun_write(
+        state, owner, 1 << (_QIANXUN_EFFECT_SHIFT + _QIANXUN_EFFECT_INDEX[str(chosen)])
+    )
+    if chosen == QIANXUN_EFFECT_CARD:
+        name = _qianxun_pick_name(host, frame, owner)
+        if name == _ASKING:
+            return "stay"
+        if not name:
+            return None
+        return _qianxun_use_virtual(host, frame, owner)
+    if chosen == QIANXUN_EFFECT_MOVE:
+        return _qianxun_move_effect(host, frame, owner)
+    return _qianxun_gain_effect(host, frame, owner)
+
+
+QIANXUN_FLOW = SkillFlow(
+    # 名字**不能**叫 "qianxun"：界陆逊【谦逊】（`hero_zone.QIANXUN_FLOW`）已经占了这个
+    # 流水线名（`tests/test_ask_points.py` 要求两条流水线的 name 两两不同）。
+    name="qunying_qianxun",
+    steps=(
+        # 步 1：选代价（三项闭集，付不起 / 本阶段已付过的不列出）。
+        PickOption(options=_qianxun_cost_options, optional=False, key="cost"),
+    ),
+    effect=_qianxun_effect,
+    # 次数由三个代价位自己数（每阶段各一项）⇒ 执行器**不**落 A 族的"本阶段已用"位。
+    once_per_phase=False,
+)
+"""【谦逊】的一步流水线：选代价 → 段机付代价 / 选效果 / 执行效果。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
+    # 群英包·「锋势」陆逊【谦逊】（qunying 票 01；用户 2026-11-21 一次签 Q1–Q16）：
+    # 一步流水线（选代价）+ 手写段机（付代价 → 选效果 → 执行效果），见本文件末尾的块注释。
+    ActiveSkill(
+        "qunying_luxun",
+        "qianxun",
+        _qianxun_offers,
+        flow=QIANXUN_FLOW,
+        requirement=(
+            "出牌阶段各限一次，你可【①弃置所有手牌；②受到一点无来源的火焰伤害；③将一张"
+            "装备牌当作一张延时类锦囊牌对自己使用】，并执行本回合未被选择过的一项："
+            "【①视为使用一张基本牌或普通锦囊牌；②移动场上一张牌；③从牌堆或弃牌堆中获得"
+            "一张你指定类型的牌】"
+        ),
+        step_requirements={
+            "cost": "选择一项代价（每项每个出牌阶段限一次；三个效果每回合各一次）",
+        },
+    ),
     # 兵势篇-节包·势赵云【武翊】（bingshi-jie 票 01）：四档一张脸（A 族 + 提供者 +
     # 两个修饰器 + 三条钩子 + 座位标签），见 `_WUYI` 的注释。
     _WUYI,

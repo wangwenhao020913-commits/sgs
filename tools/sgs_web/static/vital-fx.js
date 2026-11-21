@@ -266,13 +266,10 @@ function vitalFxBoxKey(box) {
     .join(",");
 }
 
-/** 目标武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
- *
- * 判据照 `damage-fx.js:damageFxNumberKeepOut`：自己的体力条是 `index.html` 的常驻节点
- * `#t-self-hp`（烟测垫片不建静态父子树，只能按 id 取），对手的由 `seat-view.js:hpBarNode`
- * 建 `.hp-bar`；量不到 ⇒ `null`，交给画面模块的兜底比例。
- */
-function vitalFxNumberKeepOut(block, seat) {
+/** 目标武将块里的**体力条节点**：自己的座位取 `index.html` 的常驻节点 `#t-self-hp`
+ *  （烟测垫片不建静态父子树，只能按 id 取），对手的由 `seat-view.js:hpBarNode` 建
+ *  `.hp-bar`；都量不到 ⇒ `null`。回退次序只在这里写一次——两个 keep-out 判据共用它。 */
+function vitalFxHpBar(block, seat) {
   if (!block) return null;
   const selfSeat = state.view && state.view.snapshot ? state.view.snapshot.seat : null;
   let bar = null;
@@ -280,6 +277,16 @@ function vitalFxNumberKeepOut(block, seat) {
     bar = $("t-self-hp");
   }
   if (!bar) bar = descendantWithClass(block, "hp-bar");
+  return bar || null;
+}
+
+/** 目标武将块里**体力条**的下沿（相对武将块左上角的 CSS px）：飘字不许压到它。
+ *
+ * 判据照 `damage-fx.js:damageFxNumberKeepOut`：体力条节点取 :func:`vitalFxHpBar`；
+ * 量不到 ⇒ `null`，交给画面模块的兜底比例。
+ */
+function vitalFxNumberKeepOut(block, seat) {
+  const bar = vitalFxHpBar(block, seat);
   if (!bar) return null;
   const barRect = rectOf(bar);
   const blockRect = rectOf(block);
@@ -288,6 +295,35 @@ function vitalFxNumberKeepOut(block, seat) {
   if (!(blockHeight > 0) || !(barHeight > 0)) return null;
   const bottom = (Number(barRect.bottom) || 0) - (Number(blockRect.top) || 0);
   return Number.isFinite(bottom) ? bottom : null;
+}
+
+/** 目标武将块里**体力条所在的不透明带**的上沿（相对块左上角，CSS px）；体力条不在带里
+ *  ⇒ `null`（旧版式 / 量不到）。
+ *
+ *  hero-portraits 票 03 把体力条搬进**下边框带**（`.hb-bottom`，不透明纸色 + 一像素描线）。
+ *  带子不透明，而演出层画在牌桌**之上**——压进带里的飘字不是被盖住，而是**盖住体力读数**；
+ *  硬线再往下的那点余量（条下沿 → 块底）也放不下一个包围盒。所以「飘字放在体力区下方」
+ *  这条旧口径在带里不再成立：画面模块改用**带的上沿**当"上方放置"的边界
+ *  （`numberKeepOutTop`），把盒子放在带上方。
+ *
+ *  判据与 `vitalFxNumberKeepOut` 同源（同一个体力条节点，取法在 :func:`vitalFxHpBar`），
+ *  只是多走一步 `parentNode` 找带；体力条直接挂在块里（票 03 之前的版式）⇒ `null`，
+ *  画面模块保持原口径（逐字节不变）。
+ */
+function vitalFxNumberKeepOutTop(block, seat) {
+  const bar = vitalFxHpBar(block, seat);
+  if (!bar) return null;
+  let band = bar.parentNode;
+  while (band && band !== block && !nodeHasClass(band, "hb-bottom")) band = band.parentNode;
+  if (!band || band === block) return null;
+  const bandRect = rectOf(band);
+  const blockRect = rectOf(block);
+  const blockHeight = Number(blockRect.height) || 0;
+  const bandHeight = Number(bandRect.height) || 0;
+  if (!(blockHeight > 0) || !(bandHeight > 0)) return null;
+  const top = (Number(bandRect.top) || 0) - (Number(blockRect.top) || 0);
+  if (!(top > 0) || top >= blockHeight) return null;
+  return Number.isFinite(top) ? top : null;
 }
 
 /** 一条体力事实 → 开演要用的几样：目标座位矩形（覆盖层坐标）、档位、真实点数。
@@ -321,6 +357,8 @@ function vitalFxPlanFor(event) {
     keys: { dst: vitalFxBoxKey(dst) },
     // 飘字的硬线：目标武将块的体力条下沿（相对块左上角；量不到是 null）。
     keepOut: vitalFxNumberKeepOut(block, seat),
+    // 硬线上方那一条**不透明带**的上沿（票 03：体力条在下边框带里时，飘字改放到带上方）。
+    keepOutTop: vitalFxNumberKeepOutTop(block, seat),
   };
 }
 
@@ -443,6 +481,8 @@ function startVitalPlay(event) {
     stage: { src: null, dst: plan.dst },
     // 飘字不许压到体力条：硬线 = `.hp-bar` 的下沿（DOM 真值，量不到是 null）。
     numberKeepOut: plan.keepOut,
+    // 票 03：体力条在下边框带里时（`keepOutTop` 非空），飘字放到**带的上方**。
+    numberKeepOutTop: plan.keepOutTop,
     view,
     dpr: vitalFxDpr(),
     // 牌桌档**只出特效**：宣纸底 + 样例武将牌一概不画（否则覆盖层不透明、牌桌被盖住）。

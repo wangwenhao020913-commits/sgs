@@ -130,6 +130,14 @@ class VirtualKind(IntEnum):
     追加段只增不改：这是**新的一段**，旧的 0–18 段一字不动（尾部段按
     :func:`_tail_segment_start` 依次排开，段起点随 kind 走，不与任何旧 id 相交）。
     """
+    LIGHTNING = 20
+    """【闪电】（qunying 票 01 的群英包·「锋势」陆逊【谦逊】）：尾部紧凑段的第三个消费者。
+
+    两个生产者都是本技能：效果①「视为使用一张**非装备牌**」的牌名池含延时类锦囊（用户
+    Q12 = A），代价③「将一张装备牌当作一张延时类锦囊牌对自己使用」的产物也含它。乐 /
+    兵粮两段是既有 kind（``INDULGENCE`` / ``SUPPLY_SHORTAGE``），本段只补【闪电】。
+    追加段只增不改（同上）：旧的 0–19 段一字不动。
+    """
 
 
 BLOCK_KIND_COUNT = 6
@@ -176,6 +184,10 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "iron_chain": VirtualKind.IRON_CHAIN,
     # lin-batch 票 03：徐晃移动版【断粮】的产物（单源转化 → 延时锦囊）。
     "supply_shortage": VirtualKind.SUPPLY_SHORTAGE,
+    # qunying 票 01：群英包·「锋势」陆逊【谦逊】——效果①「视为使用一张非装备牌」的牌名池
+    # 含延时类锦囊（用户 Q12 = A）；代价③「当作一张延时类锦囊牌对自己使用」的产物也含它。
+    # 乐 / 兵粮两段是既有 kind（INDULGENCE / SUPPLY_SHORTAGE），本行只补【闪电】。
+    "lightning": VirtualKind.LIGHTNING,
 }
 """目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】；
 M5-05b 加朱雀羽扇的火【杀】产物；M6 票 03 加【奇袭】的【过河拆桥】；M6 票 16 加界【龙胆】

@@ -686,10 +686,68 @@ function renderLobbyHeroPanel() {
   // 手牌上限 = 当前体力（规则恒定，不是第二份数据）。
   if (hand) hand.textContent = version ? `手牌上限 ${hp}` : "手牌上限 —";
   renderLobbySkills(version);
+  // hero-portraits 票 02：立绘与作者页脚跟着同一个 `version` 换（点将关着 ⇒ 都是空位态）。
+  renderLobbyPortrait(version);
+  renderLobbyAuthor(version);
   return null;
 }
 
-/** 右栏下半：技能全文。描述**原样印服务端的文本**（spec §8 R7：前端零正则、零截断）。 */
+/** 右栏下格左侧：立绘。有图 ⇒ 一张 `<img>`；无图 / 缺索引 ⇒ **同一个盒子**的空位态。
+ *
+ * 盒子是 `index.html` 里那个静态的 `#lobby-portrait`（`class="portrait-box"`）；
+ * 「有图 / 空位」的两种形状由 `core.js:fillPortraitBox` 一手落（与详情窗同源；票 08 起
+ * 牌桌不出立绘，不在这条路上）：
+ *  - 有图 ⇒ 一张 `<img>`，`src = /art/<索引里的相对路径>`（原样拼，不猜）；
+ *  - 无图 ⇒ 清空子节点 + `data-empty="1"`——**没有 img 就没有网络请求**。
+ *
+ * 两态共用同一套 class / 同一个盒子（盒子只在 `style.css` 的
+ * `.design-canvas .lobby-row > .portrait-box` 声明一次），所以有图 / 无图两局版式不跳。
+ * 垫片里这是可核的：同一个节点、同一套 class、两次渲染只差 `data-empty` 一个属性。
+ */
+function renderLobbyPortrait(version) {
+  fillPortraitBox($("lobby-portrait"), version && version.name, "portrait-box");
+  return null;
+}
+
+/** 立绘索引里该版本的那一条。键是**显示名称**（与 `/api/heroes` 的 `version.name` 同源）；
+ *  没有版本 / 没有索引 / 索引形状不对 ⇒ `null`（调用方一律当"无图、无作者"）。
+ *
+ *  查表本体在 `core.js:portraitEntryFor`（与详情窗读同一份 `state.portraits`）；
+ *  这里只负责把"版本对象"翻成"显示名称"。 */
+function lobbyPortraitEntry(version) {
+  if (!version || !version.name) return null;
+  return portraitEntryFor(version.name);
+}
+
+/** 技能面板最下方的作者页脚（spec §3.8 / 裁决 §7①）：`#lobby-author` 是 `#lobby-heroskills`
+ *  的**最后一个子节点**。
+ *
+ *  **作者为空 ⇒ 一个节点都不建**（不是渲染一个空 div）：先把旧页脚摘掉，非空才 append——
+ *  于是换人时旧作者的页脚不会留在面板底部（版式回到没有页脚的样子）。
+ *  文本只来自索引里的 `author`，逐字写进 `textContent`（**零正则、零拼接、零截断**）。
+ */
+function renderLobbyAuthor(version) {
+  const panel = $("lobby-heroskills");
+  if (!panel) return null;
+  const previous = Array.from(panel.children).find((child) => child.id === "lobby-author");
+  if (previous) panel.removeChild(previous);
+  const entry = lobbyPortraitEntry(version);
+  const author = entry && typeof entry.author === "string" ? entry.author : "";
+  if (!author) return null;
+  const foot = document.createElement("div");
+  foot.id = "lobby-author";
+  foot.className = "author-foot";
+  foot.textContent = author;
+  panel.appendChild(foot);
+  return null;
+}
+
+/** 右栏下半：技能全文。描述**原样印服务端的文本**（spec §8 R7：前端零正则、零截断）。
+ *
+ * 这里的 `description` 就是服务端 `display_skill_description` 的**裁切版**（「本仓实现 /
+ * 本仓裁定…」及其后全部在服务端被截掉，票 02 的 `## 判据` 点名了这一点）——前端不认得那个
+ * 标记、也不做第二次裁切，与详情页（票 05）读同一份口径。
+ */
 function renderLobbySkills(version) {
   const box = $("lobby-skill-list");
   if (!box) return null;

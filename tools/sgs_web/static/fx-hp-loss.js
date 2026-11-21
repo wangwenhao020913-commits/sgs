@@ -1333,7 +1333,15 @@
       keepOutPx = keepOutRatio * cardH;
       /* 包围盒顶边 = 体力条下沿 + 3% 牌高（余量留给字身与飞白）。 */
       var boxTopRatio = Math.min(0.88, keepOutRatio + NUMBER_GAP_RATIO);
+      /* 票 03：体力条搬进**下边框带**（`.hb-bottom`，不透明纸色）之后，硬线下面没有位置——
+       * 盒子会压进带里、甚至越出块底。带的上沿（`opts.numberKeepOutTop`，量不到是 null）
+       * 在时改放到**带上方**：底边 = 带上沿 − 3% 牌高。旧版式没有这条带 ⇒ 一个数都不变。 */
+      var bandTop = Number(opts.numberKeepOutTop);
       var centerRatio = boxTopRatio + glyph / (2 * cardH);
+      if (isFinite(bandTop) && bandTop > 0 && bandTop < cardH) {
+        var bandBoxTop = Math.max(0, bandTop - NUMBER_GAP_RATIO * cardH - glyph);
+        centerRatio = (bandBoxTop + glyph / 2) / cardH;
+      }
       V.numTo = {
         x: cr.x + cr.w * 0.5 + 4 * scale,
         y: cr.y + cardH * centerRatio

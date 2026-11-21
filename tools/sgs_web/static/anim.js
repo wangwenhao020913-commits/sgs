@@ -625,7 +625,7 @@ function animPhaseAnchor(seat) {
   const judge = animZoneRow(number, "judge");
   if (judge) return { node: judge, source: "judge-row" };
   const equip = animZoneRow(number, "equip");
-  if (equip) return { node: equip, source: "equip-grid" };
+  if (equip) return { node: equip, source: "equip-rows" };
   return null;
 }
 

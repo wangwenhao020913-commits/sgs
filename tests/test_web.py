@@ -781,7 +781,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 106 / 71。
     # bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里：与标准 / 界赵云同真名，
     # 一局只出一个）⇒ 版本 111 → 112、真名分组 75 **不变**。
-    assert len(flat) == 119 and len(catalog) == 78, (
+    assert len(flat) == 120 and len(catalog) == 78, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -4107,6 +4107,9 @@ def test_the_detail_skill_list_puts_hero_skills_before_equipment_and_keeps_virtu
 
     合成局面（`build_state`）里给关羽一张【诸葛连弩】+ 一条虚拟【八阵】授予：
     详情清单必须是「武将技能 → 实体装备技 → 虚拟装备技」，且名字取装备牌名。
+
+    hero-portraits 票 05：描述是**裁切版**（`display_skill_description`）——详情与首页右栏
+    从此同一份口径；`equip.eight_diagrams` 的原文带「本仓实现」注记，正好当取样。
     """
     from types import SimpleNamespace
 
@@ -4137,8 +4140,16 @@ def test_the_detail_skill_list_puts_hero_skills_before_equipment_and_keeps_virtu
     assert by_id["equip.crossbow"]["name"] == "诸葛连弩"
     assert by_id["equip.crossbow"]["locked"] is True
     assert by_id["equip.eight_diagrams"]["name"] == "八卦阵"
-    assert by_id["equip.eight_diagrams"]["description"] == skill_description(
+    from sgs_web.descriptions import display_skill_description
+
+    assert by_id["equip.eight_diagrams"]["description"] == display_skill_description(
         "equip.eight_diagrams"
+    )
+    assert "本仓" in skill_description("equip.eight_diagrams"), (
+        "取样装备技的原文要带实现注记，否则这条裁切判据是空转"
+    )
+    assert "本仓" not in by_id["equip.eight_diagrams"]["description"], (
+        "详情下发的描述不许带实现注记（与首页右栏同一份裁切口径）"
     )
     # 名字 / 锁定 / 载体与可操作清单同源（两张清单允许字段不同，但公开事实不能漂）。
     operable = {
@@ -11431,7 +11442,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（`relic.*`）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（`npc.*`）⇒ 242 → 246。
-    assert len(expected_skills) == 257, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 259, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -11501,7 +11512,11 @@ def test_the_description_lookup_fails_closed_to_the_explicit_placeholder() -> No
 
 
 def test_the_card_and_skill_contracts_carry_the_server_side_description() -> None:
-    """展示契约下发全文：快照 / 候选 / 技能清单都带同一条 description。"""
+    """展示契约下发服务端**展示文案**：快照 / 候选 / 技能清单都带同一条 description。
+
+    hero-portraits 票 05：技能清单的 `description` 是 `display_skill_description` 的裁切版
+    （详情与首页右栏同源）；卡面仍走 `card_description`（卡面没有被裁的「本仓」注记）。
+    """
     from sgs.state import CardRef
 
     from sgs_web.descriptions import card_description, skill_description
@@ -11531,8 +11546,12 @@ def test_the_card_and_skill_contracts_carry_the_server_side_description() -> Non
 
     skills = build_skills(session, session.human_seat)
     assert skills, "人类座位至少有一条武将技能"
+    from sgs_web.descriptions import display_skill_description
+
     for skill in skills:
-        assert skill["description"] == skill_description(skill["skill_id"]), skill
+        assert skill["description"] == display_skill_description(
+            skill["skill_id"]
+        ), skill
         assert skill["description"] != "暂无描述", f"CATALOG 里的技能不该缺条目：{skill['skill_id']}"
 
     pending = session.pending

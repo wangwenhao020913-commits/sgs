@@ -158,13 +158,17 @@ def _css_rules() -> list[tuple[str, str]]:
 
 
 def test_stage_panel_uses_the_u3_design_units() -> None:
-    """舞台 40% / 上限 360 / 中心 64.47% / 两行 253，几何上不压顶座。
+    """舞台 40% / 上限 360 / 中心 67.6% / 两行 253，几何上不压顶座。
 
-    设计舞台 1600×608、环桌圆心 y=370、ry=235、对手卡高 150（`table.js:RING_STAGE`）：
-    顶座（90°）下沿 = 370 − 235 + 150/2 = 210。舞台中心 64.47% × 608 = 392，上限 360
-    ⇒ 顶边 392 − 180 = 212 > 210（D3）。40% 宽 = 640 设计单位，横跨 480–1120，
-    左右座位中心 212 / 1388、卡宽 210，故不压侧座。舞台行限两行卡面（124×2 + 5 = 253），
+    环区 = 1600×579（`table.js:RING_STAGE`；牌桌壳里舞台实际 900 − 55.8 − 265 = 579.2 设计单位，
+    顶栏是 `.table-topbar` 的 6.2%），座位外矩形 263×188、马蹄内边距 16（票 04）：
+    顶排座位中心 y=110 ⇒ **下沿 = 16 + 188 = 204**。舞台中心 67.6% × 579.2 = 391.5，上限 360
+    ⇒ 顶边 391.5 − 180 = 211.5 > 204（D3 的"不压顶座"）。40% 宽 = 640 设计单位，横跨 480–1120，
+    两臂座位占 16…279 / 1321…1584，故不压侧座。舞台行限两行卡面（124×2 + 5 = 253），
     超出纵向滚动。
+
+    64.47%（U3-01 当年按 608 高环区算的数）在新环区上给出 193.3 —— 会压进顶排 10.7 设计单位，
+    票 04 因此把中心下移 2.53 个百分点（不变式不动，动的是那个数）。
     """
     stage = _css_rule(".stage-center")
     assert re.search(r"width:\s*40%", stage), "舞台宽必须是 40%（640 设计单位）"
@@ -173,18 +177,22 @@ def test_stage_panel_uses_the_u3_design_units() -> None:
         f"舞台 max-height 必须是 360 设计单位，实际：{stage}"
     )
     top = re.search(r"top:\s*(\d+(?:\.\d+)?)%", stage)
-    assert top is not None and abs(float(top.group(1)) - 64.47) < 1e-6, (
-        f"舞台中心必须下移到 64.47%，实际：{stage}"
+    assert top is not None and abs(float(top.group(1)) - 67.6) < 1e-6, (
+        f"舞台中心必须下移到 67.6%，实际：{stage}"
     )
     assert re.search(r"overflow:\s*hidden", stage), "舞台面板必须裁掉超出的行"
 
-    center_y = float(top.group(1)) / 100 * 608
-    top_seat_bottom = 370 - 235 + 150 / 2
+    stage_height = 900 - 6.2 / 100 * 900 - 265          # 579.2：900 − 顶栏 6.2% − 底栏 265
+    center_y = float(top.group(1)) / 100 * stage_height
+    top_seat_bottom = 16 + 188                          # 环区内边距 + 座位高（票 04）
     panel_top = center_y - float(width.group(1)) / 2
     assert panel_top > top_seat_bottom, (
-        f"舞台顶边 {panel_top} 压住了顶座下沿 {top_seat_bottom}（D3 的几何判据）"
+        f"舞台顶边 {panel_top:.1f} 压住了顶排座位下沿 {top_seat_bottom}（D3 的几何判据）"
     )
-    assert abs(center_y - 392) < 0.5, f"64.47% × 608 应 ≈ 392，实际 {center_y}"
+    assert center_y + float(width.group(1)) / 2 <= stage_height, (
+        f"舞台底边 {center_y + 180:.1f} 越出环区 {stage_height}（不压底部面板）"
+    )
+    assert abs(center_y - 391.5) < 0.5, f"67.6% × 579.2 应 ≈ 391.5，实际 {center_y:.1f}"
 
     row = _css_rule(".stage-center .processing")
     assert re.search(r"max-height:\s*calc\(253 \* var\(--dsu\)\)", row), (
@@ -357,8 +365,15 @@ def test_ink_table_skin_layers_and_paper_are_wired() -> None:
     assert not re.search(r"background:\s*linear-gradient", bottom), (
         f"底栏的底色已经让给水墨底，不该再留 linear-gradient 底色（注释里提到它不算）：{bottom}"
     )
-    assert re.search(r"flex:\s*0\s+0\s+27\.5%", bottom), (
-        f"底栏高度是 U1-01 的判据，换底色不许动它：{bottom}"
+    # 底栏高度：U1-01 当年钉的是 `flex: 0 0 27.5%`，hero-portraits 票 04 换成 `265 dsu`
+    # （≈29.4%）。换的理由**不是**"内容长了"，是**块长了**：自己的座位 +25% 之后 238 dsu 高，
+    # 27.5% × 900 = 247.5 减掉上下内边距装不下。这条判据仍然钉"底栏高度不许被顺手动"
+    # （换底色 / 换皮肤时高度口径要原样留着），只是数字换成新的那一份。
+    assert re.search(r"flex:\s*0\s+0\s+calc\(265 \* var\(--dsu\)\)", bottom), (
+        f"底栏高度是票 04 的判据（265 dsu / ≈29.4%），换底色不许动它：{bottom}"
+    )
+    assert not re.search(r"flex:\s*0\s+0\s+27\.5%", bottom), (
+        f"旧的 27.5% 已由票 04 替换成 265 dsu：{bottom}"
     )
 
     stage = _CSS_TEXT
@@ -1953,10 +1968,11 @@ def test_discard_panel_uses_the_shared_modal_shell_with_its_own_clickable_backdr
 # U4-06（spec D13）：判定 / 装备槽放得下四字牌名；用户 2026-11-07 起装备槽有牌时不写槽名
 # ---------------------------------------------------------------------------
 # 1258px 视口（--dsu = 0.786）下：对手装备槽内容宽 ≈ 36 设计单位（侧栏 100 的两列），
-# 四字牌名 @10 = 40 ⇒ 必须允许折行（两行 = 22 设计单位，42 高的槽放得下）；判定槽内容宽
-# ≈ 21（侧栏三等分），四字牌名折两行 @9 + 8 的「判定」标记 = ~34 < 36（判定行从 33 放宽到
-# 36，自己的 48 → 52：D13 明确允许「放宽槽」）。槽名与牌名都在 DOM 里
-# （`tests/support/ui_smoke.mjs` 的 U4-06e），这里钉不靠 tooltip 的机械条件。
+# 四字牌名 @10 = 40 ⇒ 必须允许折行（两行 = 22 设计单位）；判定槽内容宽 ≈ 21（侧栏三等分），
+# 四字牌名折两行 @9 + 8 的「判定」标记 = ~34。hero-portraits 票 03 把 7 格改成 3 + 2 + 2
+# 三行铺满之后，槽高不再写死（36 / 42、自己的 52 / 60 都删了），改由行的 flex 均分：
+# 对手每行 ≈ (188 − 10 − 8) / 3 ≈ 56.7、自己 ≈ (238 − 16 − 12) / 3 = 70，都比旧预算宽。
+# 槽名与牌名都在 DOM 里（`tests/support/ui_smoke.mjs` 的 U4-06e），这里钉不靠 tooltip 的机械条件。
 
 
 def test_slot_labels_leave_room_for_four_character_card_names() -> None:
@@ -1979,18 +1995,22 @@ def test_slot_labels_leave_room_for_four_character_card_names() -> None:
         f"装备槽牌名沿用槽字号（10 / 13），靠折行而不是缩字号：{value}"
     )
 
-    assert re.search(r"calc\(36 \* var\(--dsu\)\)", _css_rule(".seat .judge-row")), (
-        "判定行放宽到 36：折两行 + 槽名 + 内边距要真的放得下"
+    # 行高预算（hero-portraits 票 03 起由 flex 均分，不再定宽定高）：侧栏 = 座位高 − 上下
+    # 内边距 ×2 − 行距 ×2，三行均分。座位高是票 04 的 188 / 238（对手 150 → 188、自己 210 → 238，
+    # +25% 那一档）；数字从 CSS 内边距现读，改座位高 / 内边距时这条会跟着红。
+    def _row_budget(seat_height: int, side_selector: str) -> float:
+        side = _css_rule(side_selector)
+        pad = re.search(r"padding:\s*(\d+)px", side)
+        gap = re.search(r"gap:\s*(\d+)px", side)
+        assert pad is not None and gap is not None, side
+        return (seat_height - int(pad.group(1)) * 2 - int(gap.group(1)) * 2) / 3
+
+    assert _row_budget(188, ".seat .side-block") >= 36, (
+        "对手每行 ≥ 36 设计单位（四字牌名折两行 + 槽名 + 内边距的旧预算）"
     )
-    assert re.search(r"height:\s*calc\(36 \* var\(--dsu\)\)", _css_rule(".mini-slot.judge-slot")), (
-        "判定槽本身也要同高，否则行高与槽高对不上"
+    assert _row_budget(238, ".self .side-block") >= 52, (
+        "自己每行 ≥ 52 设计单位（字 13 的两行 + 12 的槽名）"
     )
-    assert re.search(r"calc\(52 \* var\(--dsu\)\)", _css_rule(".self .judge-row")), (
-        "自己判定行 52（原 48）：字 13 的两行 + 12 的槽名才放得下"
-    )
-    assert re.search(
-        r"height:\s*calc\(52 \* var\(--dsu\)\)", _css_rule(".self .mini-slot.judge-slot")
-    ), "自己判定槽同 52"
     judge_label = _css_rule(".mini-slot.judge-slot.filled .slot-k")
     assert re.search(r"font-size:\s*calc\(8 \* var\(--dsu\)\)", judge_label), (
         f"判定槽的「判定」标记要收一档高度（折两行后仍放得下）：{judge_label}"
@@ -2422,6 +2442,264 @@ def test_the_self_panel_ships_the_flipped_layer_node() -> None:
         < html.index('id="t-self-flipped"')
         < html.index('id="t-self-dead"')
     ), "翻面层应排在横置虚线之后、阵亡牌之前（三态 CSS 分层互不遮挡）"
+
+
+def test_the_self_hero_block_paints_name_and_hp_on_the_two_bands() -> None:
+    """hero-portraits 票 03 / 票 08（裁决 §7② / §9）：自己的武将块 = 「名称 / 势力 / 身份画在
+    上边框带 + 体力条画在下边框带 + 读数药丸」，**没有立绘层**（票 08 按用户改判摘掉）。
+
+    静态节点是**稳定读取口**：五个 id 一个都不许变，父节点 / 次序照票 03——
+    `#t-self-kingdom` / `#t-hero` / `#t-self-identity` 进 `.hb-top`、`#t-self-hp` 进
+    `.hb-bottom`、手牌 / 标记读数进 `.hb-chips`。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    block = html[html.index('id="t-self-hero"'):html.index('id="t-self-zones"')]
+    top = block.index('class="hb-frame hb-top"')
+    bottom = block.index('class="hb-frame hb-bottom"')
+    chips = block.index('class="hb-chips"')
+    assert top < bottom < chips, (
+        "块内次序 = 上边框带 → 下边框带 → 读数药丸："
+        f"top={top} bottom={bottom} chips={chips}"
+    )
+    # 结构判据只看**标记**：注释里允许写"这一层已按 §9 删掉"的历史说明。
+    markup = re.sub(r"<!--.*?-->", "", block, flags=re.S)
+    assert 'id="t-self-portrait"' not in markup, (
+        "票 08：牌桌武将块**没有**立绘层（不是空位态——`#t-self-portrait` 整个摘掉）"
+    )
+    assert 'class="portrait"' not in markup, (
+        "票 08：块内不许再有 `.portrait` 盒子（立绘 / 空位两态都不在牌桌上出现）"
+    )
+    top_seg = block[top:bottom]
+    bottom_seg = block[bottom:chips]
+    for name in ("t-self-kingdom", "t-hero", "t-self-identity"):
+        assert f'id="{name}"' in top_seg, f"上边框带里缺 #{name}：{top_seg}"
+    assert top_seg.index('id="t-self-kingdom"') < top_seg.index('id="t-hero"') < (
+        top_seg.index('id="t-self-identity"')
+    ), "上边框带的次序仍是 势力 → 名称 → 身份"
+    assert 'id="t-self-hp"' in bottom_seg, f"下边框带里缺 #t-self-hp：{bottom_seg}"
+    assert "hp-bar" in bottom_seg, "下边框带里的是 .hp-bar（动效的飘字硬线读它）"
+    chips_seg = block[chips:]
+    assert 'id="t-self-hand"' in chips_seg, (
+        f"手牌读数搬进 .hb-chips（浅色药丸压在画上）：{chips_seg}"
+    )
+    assert 'id="t-self-tags"' in chips_seg and 'id="t-self-hero-zones"' in chips_seg, (
+        "高亮文字 / 武将牌上的牌区与标记也压画（同一个 .hb-chips）"
+    )
+    for name in ("t-self-chain", "t-self-flipped", "t-self-dead"):
+        assert block.index(f'id="{name}"') > chips, (
+            f"#{name} 仍是块上的叠加层（排在内容之后，z-index 分层照旧）"
+        )
+
+
+def test_the_hero_block_bands_are_opaque_and_the_chips_sit_above_the_bottom_band() -> None:
+    """票 03 的 CSS 半边（裁决 §7② / §9）：边框带不透明 + 一像素描线、压在块面上的药丸在
+    边框带之下。高度变量走设计单位：对手 22 / 18，自己 30 / 24（只大一档，不用第二套结构）。
+
+    票 08 摘掉立绘层之后，这条里**不再有** `.portrait` / `.portrait img` 的几何断言；
+    外矩形（`.ring .seat` 的宽 / 比例）也不在这里——那是票 04。这里只钉块**内部**的几何。
+    """
+    seat_block = _css_rule(".seat .hero-block")
+    assert re.search(r"position:\s*relative", seat_block), (
+        f"边框带与药丸是块的绝对定位子节点：{seat_block}"
+    )
+    assert re.search(r"overflow:\s*hidden", seat_block), (
+        f"白光 / 铁索的裁切依据（spec §3.4），本票只借不改：{seat_block}"
+    )
+    assert re.search(r"(?:^|;)\s*padding:\s*0(?:;|$)", seat_block), (
+        f"块自己不留内边距（带子要横贯整块）：{seat_block}"
+    )
+    for name, value in (("--hb-top-h", 22), ("--hb-bottom-h", 18)):
+        assert re.search(rf"{name}:\s*calc\({value} \* var\(--dsu\)\)", seat_block), (
+            f"对手的 {name} 必须是 {value} dsu：{seat_block}"
+        )
+    self_block = _css_rule(".self .hero-block")
+    for name, value in (("--hb-top-h", 30), ("--hb-bottom-h", 24)):
+        assert re.search(rf"{name}:\s*calc\({value} \* var\(--dsu\)\)", self_block), (
+            f"自己的座位沿用同一套、只大一档（{name} = {value} dsu）：{self_block}"
+        )
+
+    frame = _css_rule(".hb-frame")
+    for declaration in (r"position:\s*absolute", r"left:\s*0", r"right:\s*0"):
+        assert re.search(declaration, frame), f"边框带是横贯整块的绝对定位条：缺 {declaration}：{frame}"
+    assert re.search(r"background:\s*linear-gradient\(", frame), (
+        f"边框带必须**不透明**（文字不压在画上）：{frame}"
+    )
+    assert not re.search(r"background:\s*rgba\([^)]*,\s*0?\.\d+\s*\)", frame), (
+        f"半透明就不算不透明了：{frame}"
+    )
+    top = _css_rule(".hb-top")
+    assert re.search(r"top:\s*0", top), f"上边框带贴块顶：{top}"
+    assert re.search(r"height:\s*var\(--hb-top-h\)", top), f"上边框带高度读变量：{top}"
+    assert re.search(r"border-bottom:\s*1px solid", top), f"上边框带下沿一像素描线：{top}"
+    bottom = _css_rule(".hb-bottom")
+    assert re.search(r"bottom:\s*0", bottom), f"下边框带贴块底：{bottom}"
+    assert re.search(r"height:\s*var\(--hb-bottom-h\)", bottom), (
+        f"下边框带高度读变量（体力条画在这里）：{bottom}"
+    )
+    assert re.search(r"border-top:\s*1px solid", bottom), f"下边框带上沿一像素描线：{bottom}"
+
+    chips = _css_rule(".hb-chips")
+    assert re.search(r"position:\s*absolute", chips), (
+        f"读数药丸压在块面上（不参与块的流式排版）：{chips}"
+    )
+    assert re.search(r"bottom:\s*calc\(var\(--hb-bottom-h\)", chips), (
+        f"药丸列贴在下边框带**上方**：{chips}"
+    )
+    # 分层：药丸（2）< 边框带（3）。带子在最上，文字永远不会被药丸盖住。
+    assert _layer_z_index(".hb-chips") < _layer_z_index(".hb-frame"), (
+        "z-index 次序必须是 药丸 < 边框带"
+    )
+
+
+def test_the_table_hero_blocks_have_no_portrait_layer() -> None:
+    """hero-portraits 票 08（裁决 §9：用户改判「牌桌不出立绘」）——**减法**。
+
+    判据三条，各自独立可核：
+
+    1. `index.html` 里自己的武将块没有 `#t-self-portrait`（不是空位态：这一层整个不存在）；
+    2. 全前端造图的唯一口 `core.js:fillPortraitBox` 只剩**两个**调用点，且都不是牌桌文件
+       （首页 `lobby.js` 的 `.portrait-box`、详情 `hero-detail.js` 的 `.detail-portrait`）；
+    3. `style.css` 里没有牌桌立绘的整套规则（`.portrait` / `.portrait img` /
+       `.portrait[data-empty="1"]` / `.portrait::after` / `.hero-block.hp-flash .portrait::after`），
+       也没有只为立绘存在的 `--portrait-tint`（首页 `.portrait-box` / 详情 `.detail-portrait`
+       不在这条选择器口径里，它们照旧）。
+
+    立绘索引（`state.portraits` / `/api/portraits`）不在减法范围：首页与详情还要用它。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    markup = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    assert 'id="t-self-portrait"' not in markup, (
+        "票 08：牌桌的立绘层整个摘掉（不是渲染成空位）——`index.html` 里不许再有 #t-self-portrait"
+    )
+    assert 'class="portrait"' not in markup, (
+        "票 08：没有盒子再挂裸 `.portrait` class（首页是 `portrait-box`、详情是 `detail-portrait`）"
+    )
+
+    call_sites: dict[str, int] = {}
+    call_re = re.compile(r"(?<!function )fillPortraitBox\s*\(")
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        count = len(call_re.findall(path.read_text(encoding="utf-8")))
+        if count:
+            call_sites[path.name] = count
+    assert call_sites == {"lobby.js": 1, "hero-detail.js": 1}, (
+        "牌桌不出立绘之后，造图的调用点必须**恰好两处**：首页右栏 + 详情窗："
+        f"{call_sites}"
+    )
+    for name in ("table.js", "seat-view.js"):
+        raw = (STATIC_DIR / name).read_text(encoding="utf-8")
+        # 只看**活代码**：注释里允许写"这一层已按 §9 删掉"的历史说明（含旧 id / 旧类名）。
+        source = re.sub(r"(?m)//.*$", "", re.sub(r"/\*.*?\*/", "", raw, flags=re.S))
+        assert "fillPortraitBox" not in source, f"牌桌文件不许再调立绘渲染口：{name}"
+        for dead in ('"portrait"', "t-self-portrait"):
+            assert dead not in source, (
+                f"牌桌文件不许再引用立绘层（票 08 是减法，不留死引用）：{name} 里的 {dead}"
+            )
+    lobby_source = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    assert (
+        'fillPortraitBox($("lobby-portrait"), version && version.name, "portrait-box")' in lobby_source
+    ), "首页的调用点仍显式给 `portrait-box`（不靠函数默认值）"
+    detail_source = (STATIC_DIR / "hero-detail.js").read_text(encoding="utf-8")
+    assert (
+        'fillPortraitBox(portrait, heroNameOf(player, view), "detail-portrait")' in detail_source
+    ), "详情的调用点仍显式给 `detail-portrait`（不靠函数默认值）"
+    fill_box = _function_source(
+        (STATIC_DIR / "core.js").read_text(encoding="utf-8"), "fillPortraitBox"
+    )
+    assert re.search(r"function\s+fillPortraitBox\s*\(box,\s*name,\s*boxClass\)", fill_box), (
+        f"共用渲染口不再有 `.portrait` 的默认 class（两个落点各自显式给）：{fill_box}"
+    )
+    assert '"portrait"' not in fill_box, (
+        f"共用的盒子渲染口不再硬编码被删掉的 `.portrait` class：{fill_box}"
+    )
+
+    for selector, _body in _css_rules():
+        assert re.search(r"\.portrait(?![\w-])", selector) is None, (
+            f"牌桌立绘的 CSS 规则必须删干净（票 08）：{selector}"
+        )
+    assert "--portrait-tint" not in re.sub(r"/\*.*?\*/", "", _CSS_TEXT, flags=re.S), (
+        "只为牌桌立绘镜像色 cue 存在的 `--portrait-tint` 必须删掉（cue 回到块自己身上）"
+    )
+
+
+def test_the_block_level_colour_cues_survive_the_portrait_removal() -> None:
+    """hero-portraits 票 08（裁决 §9）：两个「整块上色」的 cue 摘掉立绘后必须**仍在块自己身上**。
+
+    - 酒：`.seat.wine .hero-block` 的泛红底（票 03 曾把它复制到立绘上，因为立绘挡住了块底）；
+    - 掉血 / 回复：`.hero-block.hp-flash` 的 0.4s 键帧（`U3-03j/k`、`U-VITAL-21` 钉的是类名，
+      键帧与类名本票一个字不动）。
+
+    这条同时是「立绘上的那份镜像已经删掉」的另一半：镜像（`.portrait::after` /
+    `.hero-block.hp-flash .portrait::after`）由 `test_the_table_hero_blocks_have_no_portrait_layer`
+    按选择器口径判死。
+    """
+    wine = _css_rule(".seat.wine .hero-block")
+    assert re.search(r"background:\s*linear-gradient\(", wine), (
+        f"酒泛红必须画在**块自己**的 background 上（立绘盖不住它了）：{wine}"
+    )
+    assert "#fbe4de" in wine.lower() and "#f6d9d2" in wine.lower(), (
+        f"泛红的两个色档照票 03 不动：{wine}"
+    )
+    flash = _css_rule(".hero-block.hp-flash")
+    assert re.search(r"animation:\s*hp-flash\s+\.4s\s+ease-out\s+1", flash), (
+        f"掉血 / 回复闪仍是块级的 0.4s 键帧：{flash}"
+    )
+    frames = _keyframes("hp-flash")
+    assert re.search(r"background:\s*var\(--flash-bg\)", frames), (
+        f"键帧读的是块上的 `--flash-bg`（不是立绘上的叠色）：{frames}"
+    )
+    assert "--flash-edge" in frames, f"键帧仍读 `--flash-edge` 描边色：{frames}"
+    for selector, colour in ((".hero-block.hp-flash-down", "#b3261e"),
+                             (".hero-block.hp-flash-up", "#2e7d32")):
+        assert colour in _css_rule(selector).lower(), (
+            f"掉血红 / 回复绿两个修饰类只给颜色变量（票 08 不改类名）：{selector}"
+        )
+
+
+def test_the_judge_and_equip_slots_fill_their_area_in_three_rows() -> None:
+    """票 03：判定 / 装备 7 格改成 3 + 2 + 2 三行铺满，槽尺寸由 flex 决定。
+
+    旧口径是定宽定高（判定 36 / 装备 42，自己 52 / 60）——块放大到 263×188 之后那些
+    数字装不满，故删掉，改由行的 flex 均分：判定行 1 份、装备区 2 份、区里两行各 1 份。
+    卡名可读的预算因此仍成立（对手 ≈ 44 / 行 ≥ 36；自己 ≈ 60 / 行 ≥ 52），
+    牌名折行 / balance 那几条判据留在 `test_slot_labels_leave_room_for_four_character_card_names`。
+    """
+    row = _css_rule(".slot-row")
+    assert re.search(r"flex:\s*1 1 0", row), f".slot-row 均分行高：{row}"
+    assert re.search(r"display:\s*flex", row), f".slot-row 是横向一行：{row}"
+    assert not re.search(r"(?:^|;)\s*height\s*:", row), (
+        f".slot-row 不许定高（高度由 flex 分）：{row}"
+    )
+    zone = _css_rule(".equip-rows")
+    assert re.search(r"flex:\s*2 1 0", zone), f".equip-rows 吃掉两行的高度：{zone}"
+    assert re.search(r"flex-direction:\s*column", zone), f".equip-rows 是两行叠起来：{zone}"
+    # 旧的定宽定高必须从判定行上删掉（装备格的容器已换成两行 `.slot-row`）。
+    for selector in (".seat .judge-row", ".self .judge-row"):
+        rule = _css_rule(selector)
+        assert not re.search(r"calc\((?:36|52) \* var\(--dsu\)\)", rule), (
+            f"{selector} 的定高必须删掉（槽尺寸由 flex 决定）：{rule}"
+        )
+    assert not any("equip-grid" in selector for selector, _ in _css_rules()), (
+        "装备格的定宽容器 `.equip-grid` 已被两行 `.slot-row` 取代"
+    )
+    slot = _css_rule(".mini-slot")
+    assert not re.search(r"(?:^|;)\s*height\s*:", slot), (
+        f".mini-slot 不许定高（高度由所在行给）：{slot}"
+    )
+    assert re.search(r"flex:\s*1 1 0", slot), f"槽在同排里均分宽度：{slot}"
+    assert not any(
+        re.search(r"\.mini-slot[^{,]*\{[^}]*\bheight\s*:", body)
+        for selector, body in _css_rules()
+        if ".mini-slot" in selector and ".slot-v" not in selector
+    ), "判定槽 / 装备槽都不许定高（高度由所在行给）"
+    # 行的预算还是从侧栏几何推出来的：对手 188 − 上下 5×2 − 行距 4×2 = 170，三行 ⇒ 56.7/行。
+    side = _css_rule(".seat .side-block")
+    assert re.search(r"padding:\s*5px", side) and re.search(r"gap:\s*4px", side), (
+        f"对手侧栏的内边距 / 行距是行高预算的来源：{side}"
+    )
+    self_side = _css_rule(".self .side-block")
+    assert re.search(r"padding:\s*8px", self_side) and re.search(r"gap:\s*6px", self_side), (
+        f"自己的侧栏同理（238 − 16 − 12 = 210，三行 ⇒ 70/行）：{self_side}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3477,7 +3755,9 @@ _DAMAGE_FX_FUNCTIONS = (
     "damageFxDpr",
     "damageFxView",
     "damageFxBoxOf",
+    "damageFxHpBar",
     "damageFxNumberKeepOut",
+    "damageFxNumberKeepOutTop",
     "damageFxBoxKey",
     "damageFxPlanFor",
     "damageFxStageFor",
@@ -9536,6 +9816,16 @@ def test_the_lobby_page_is_a_one_screen_layout() -> None:
         assert needle in left_html, f"左栏 = 开一局面板 + 将池摘要，缺 {needle}"
     for needle in ('id="lobby-hero"', 'id="lobby-heroskills"'):
         assert needle in right_html, f"右栏 = 我的武将 + 技能全文，缺 {needle}"
+    # hero-portraits 票 02（裁决 §7①）：立绘挂在 `#lobby-heroskills` 的**左边**，下格那两件
+    # 住在 `.lobby-row` 里；上格 `#lobby-hero` 仍在行**之前**（它一个字不动）。
+    hero_at = right_html.index('id="lobby-hero"')
+    row_at = right_html.index('<div class="lobby-row">')
+    portrait_at = right_html.index('id="lobby-portrait"')
+    skills_at = right_html.index('id="lobby-heroskills"')
+    assert hero_at < row_at < portrait_at < skills_at, (
+        "右栏结构必须是「#lobby-hero」→「.lobby-row{ #lobby-portrait → #lobby-heroskills }」："
+        f"hero={hero_at} row={row_at} portrait={portrait_at} skills={skills_at}"
+    )
 
     # 3. 开一局面板：两列固定栅格 + 字段顺序不变 + 开始键与提示同一行
     form_end = html.index("</form>", html.index('id="lobby-form"'))
@@ -9603,6 +9893,242 @@ def test_the_lobby_page_is_a_one_screen_layout() -> None:
         assert moved not in lobby_view, (
             f"旧位置必须清干净：{moved} 已搬进窗口，不许还留在 `#view-lobby` 正文里"
         )
+
+
+_LOBBY_HERO_HTML = """\
+<section id="lobby-hero" class="panel lobby-herohead" aria-label="我的武将">
+        <div class="herocard-head">
+          <span id="lobby-hero-kingdom" class="kingdom"></span>
+          <span id="lobby-hero-name" class="lobby-hero-name">—</span>
+          <span id="lobby-hero-hp-label" class="tag"></span>
+          <span id="lobby-hero-hp" class="lobby-hp" aria-label="体力点"></span>
+        </div>
+        <p id="lobby-hero-hint" class="herocard-sub dim"></p>
+      </section>"""
+"""`#lobby-hero` 的冻结 markup（hero-portraits 票 02 的硬约束：**用户明令一个字不动**）。
+
+它不是"又一个快照"：上格与下格的分工（spec §3.1 / 裁决 §7①）就是「上格原样、布局只在下格
+做」。冻结成字面量之后，谁再顺手重排上格都会红——要改先改这条约束本身。
+"""
+
+
+def _lobby_row_bounds(html: str) -> tuple[int, int]:
+    """`index.html` 里 `<div class="lobby-row">` 的 [start, end) 区间（按 div / section 配平）。"""
+    start = html.index('<div class="lobby-row">')
+    depth = 0
+    for match in re.finditer(r"<(/?)(div|section)\b[^>]*>", html[start:]):
+        depth += -1 if match.group(1) else 1
+        if depth == 0:
+            return start, start + match.end()
+    raise AssertionError("index.html 里的 `.lobby-row` 没有闭合")
+
+
+def test_the_lobby_right_column_shows_a_portrait_and_an_author_footer() -> None:
+    """hero-portraits 票 02（spec §2 目标 3 / §3 硬约束 1·5·6·8·9 / 裁决 §7①）：
+
+    「首页右侧点将」= 上格 `#lobby-hero` **一个字不动**，下格变成
+    「立绘（左）+ 技能全文（右）」。判据分五段：
+
+    1. **上格不动**：`#lobby-hero` 的 markup 与冻结字面量逐字相同（用户明令）；
+    2. **下格结构**：`.lobby-row` 在 `#lobby-right` 里、在 `#lobby-hero` 之后，行内顺序是
+       `#lobby-portrait` → `#lobby-heroskills`；`#lobby-skill-list` 仍在技能面板里、
+       `#lobby-hero-seat` 之前（既有票 03 的判据不挪）；
+    3. **盒子只有一条**：`.design-canvas .lobby-row > .portrait-box` 是
+       `aspect-ratio: 530 / 750` + `height: 100%`，**不设固定宽**；`[data-empty]` 变体只换
+       底纹、**不许改几何**——这是"有图 / 无图两局版式不跳"的声明盒那半边（节点 / class /
+       属性那半边由烟测 `HP2-04` / `HP2-05` 钉，垫片量不了矩形，故这里不假装量几何）；
+    4. **作者页脚**：`.author-foot` 是小字 `--dim` + 上方一条虚线；`index.html` 里**没有**
+       静态占位（空作者时是零节点，不是空 div）；
+    5. **JS 行为口**：全仓只有**一处** `createElement("img")`（在立绘渲染口里）、空位分支在
+       造 `img` **之前**返回；作者只在非空时建节点、`textContent = author` 逐字；
+       `loadPortraitIndex()` 在 `core.js` 里 fail-open、`main.js:wire()` 与
+       `loadHeroCatalog()` 一起调；`renderHeroPool()` 没有长立绘。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    lobby_js = (STATIC_DIR / "lobby.js").read_text(encoding="utf-8")
+    core_js = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    main_js = (STATIC_DIR / "main.js").read_text(encoding="utf-8")
+
+    # 1. 上格一个字不动（用户明令）：从 `<section id="lobby-hero"` 到它的 `</section>`。
+    hero_at = html.index('<section id="lobby-hero"')
+    hero_end = html.index("</section>", hero_at) + len("</section>")
+    assert html[hero_at:hero_end] == _LOBBY_HERO_HTML, (
+        "`#lobby-hero` 是用户明令「一个字不动」的上格，实得：\n"
+        f"{html[hero_at:hero_end]}"
+    )
+
+    # 2. 下格结构：`.lobby-row` 在 `#lobby-right` 里、`#lobby-hero` 之后；行内先立绘后技能。
+    right_at = html.index('id="lobby-right"')
+    right_end = html.index("</main>", right_at)
+    row_start, row_end = _lobby_row_bounds(html)
+    assert right_at < row_start < row_end < right_end, (
+        "`.lobby-row` 必须是 `#lobby-right` 里的那一段（右栏的下格）"
+    )
+    assert hero_end < row_start, "`.lobby-row` 在 `#lobby-hero` 之后（上格不进这一行）"
+    portrait_at = html.index('id="lobby-portrait"')
+    skills_at = html.index('id="lobby-heroskills"')
+    assert row_start < portrait_at < skills_at < row_end, (
+        "行内顺序 = 立绘（左）→ 技能全文（右）："
+        f"row={row_start} portrait={portrait_at} skills={skills_at} row_end={row_end}"
+    )
+    in_row = html[row_start:row_end]
+    assert in_row.count('id="lobby-portrait"') == 1 and in_row.count('id="lobby-heroskills"') == 1, (
+        "下格只有这两件：一个立绘盒子 + 技能面板（不是第二份结构）"
+    )
+    hero_panel = html[skills_at:html.index('id="lobby-hero-seat"')]
+    assert 'id="lobby-skill-list"' in hero_panel, "技能列表槽仍住在技能面板里（`#lobby-hero-seat` 之前）"
+
+    # 3. 盒子：一条规则声明盒子，空位变体只换底纹。
+    row_rule = _css_rule(".design-canvas .lobby-row")
+    assert re.search(r"display:\s*flex", row_rule), f"下格是横向一行：{row_rule}"
+    assert not re.search(r"flex-direction:\s*column", row_rule), f"下格不是上下堆：{row_rule}"
+    assert re.search(r"flex:\s*1 1 auto", row_rule) and re.search(r"min-height:\s*0", row_rule), (
+        f"下格吃掉右栏剩下的高度并允许收缩：{row_rule}"
+    )
+    # 技能面板搬进下格之后不再是右栏的直接子节点：`.panel` 的 12px 流式外边距必须归零，
+    # 否则它比 `height: 100%` 的立绘矮 24px（"齐平"就没了）。
+    assert re.search(r"margin:\s*0", _css_rule(".design-canvas .lobby-row > .panel")), (
+        "下格里的技能面板要把 `.panel` 的流式外边距归零（与立绘齐平）"
+    )
+    box_rule = _css_rule(".design-canvas .lobby-row > .portrait-box")
+    assert re.search(r"aspect-ratio:\s*530\s*/\s*750", box_rule), (
+        f"立绘盒子的宽由 530:750 原图比例反推（不裁）：{box_rule}"
+    )
+    assert re.search(r"height:\s*100%", box_rule), (
+        f"立绘高度跟技能面板齐平（`height: 100%`）：{box_rule}"
+    )
+    assert re.search(r"flex:\s*0 0 auto", box_rule), f"立绘列不参与伸缩：{box_rule}"
+    assert not re.search(r"(?:^|;)\s*width\s*:", box_rule), (
+        f"立绘盒子**不设固定宽**（宽只能由高 × 530/750 得出）：{box_rule}"
+    )
+    base_rule = _css_rule(".design-canvas .portrait-box")
+    assert re.search(r"position:\s*relative", base_rule), f"立绘盒子是图片的定位父级：{base_rule}"
+    assert re.search(r"overflow:\s*hidden", base_rule), f"圆角要裁住图片：{base_rule}"
+    img_rule = _css_rule(".design-canvas .portrait-box img")
+    for declaration in (r"position:\s*absolute", r"inset:\s*0", r"object-fit:\s*cover"):
+        assert re.search(declaration, img_rule), (
+            f"图片铺满盒子、原图比例不裁：缺 {declaration}：{img_rule}"
+        )
+    empty_selectors = [
+        one.strip()
+        for selector, _ in _css_rules()
+        for one in selector.split(",")
+        if "data-empty" in one
+    ]
+    assert any(".portrait-box" in one for one in empty_selectors), (
+        "空位态要有可核的样式（纸色斜纹），否则它与有图态的差别只剩 JS 属性"
+    )
+    geometry = {"width", "height", "min-width", "min-height", "max-width", "max-height",
+                "flex", "flex-basis", "aspect-ratio", "position", "inset",
+                "top", "bottom", "left", "right"}
+    for selector, body in _css_rules():
+        if "data-empty" not in selector:
+            continue
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            prop = declaration.split(":", 1)[0].strip()
+            assert prop not in geometry, (
+                f"`[data-empty]` 变体不许改盒子的几何（改了有图 / 无图就会跳）："
+                f"{selector} 的 `{declaration.strip()}`"
+            )
+
+    # 4. 作者页脚：小字 --dim + 上方虚线；index.html 里没有静态占位。
+    author_rule = _css_rule(".design-canvas .author-foot")
+    assert re.search(r"color:\s*var\(--dim\)", author_rule), f"作者是小字 `--dim`：{author_rule}"
+    assert re.search(r"border-top:\s*1px dashed var\(--line\)", author_rule), (
+        f"作者页脚上方一条虚线：{author_rule}"
+    )
+    assert re.search(r"font-size:\s*var\(--f11\)", author_rule), f"作者是更小的一档字：{author_rule}"
+    assert re.search(r"flex:\s*0 0 auto", author_rule), f"作者页脚不参与伸缩：{author_rule}"
+    assert 'id="lobby-author"' not in html, (
+        "作者页脚**不许**静态占位：作者为空时它必须一个节点都不存在（不是空 div）"
+    )
+
+    # 5. JS 行为口。「有图 / 空位」两态在首页与详情窗**同一份实现**：`core.js:fillPortraitBox`
+    #    （hero-portraits 票 03 把两个落点收成一处，故 img 的创建只在它里面；票 08 起牌桌不出立绘）。
+    render_portrait = _function_source(lobby_js, "renderLobbyPortrait")
+    assert 'fillPortraitBox($("lobby-portrait"), version && version.name, "portrait-box")' in (
+        render_portrait
+    ), f"首页立绘走共用的盒子渲染口：{render_portrait}"
+    fill_box = _function_source(core_js, "fillPortraitBox")
+    assert fill_box.count('createElement("img")') == 1, (
+        f"有图分支只造一张 `<img>`：{fill_box}"
+    )
+    assert "/art/" in fill_box and "encodeURI(" in fill_box, (
+        f"src = `/art/` + 索引里的相对路径：{fill_box}"
+    )
+    assert 'setAttribute("data-empty", "1")' in fill_box, (
+        f"空位节点带 `data-empty=\"1\"`：{fill_box}"
+    )
+    assert fill_box.index('setAttribute("data-empty", "1")') < (
+        fill_box.index('createElement("img")')
+    ), (
+        f"空位分支必须在造 img **之前**返回（空位不发图片请求）：{fill_box}"
+    )
+    entry = _function_source(lobby_js, "lobbyPortraitEntry")
+    assert "portraitEntryFor(" in entry and "version.name" in entry, (
+        f"版本对象翻成显示名称、查表本体在 core.js（一份索引）：{entry}"
+    )
+    core_entry = _function_source(core_js, "portraitEntryFor")
+    assert "state.portraits" in core_entry and "[String(name)]" in core_entry, (
+        f"索引键 = 显示名称（与 `/api/heroes` 的 `version.name` 同源）：{core_entry}"
+    )
+    render_author = _function_source(lobby_js, "renderLobbyAuthor")
+    assert 'foot.id = "lobby-author"' in render_author and "author-foot" in render_author, (
+        f"页脚的 id / class 只在 JS 里挂：{render_author}"
+    )
+    assert "panel.appendChild(foot)" in render_author, (
+        f"页脚 append 到 `#lobby-heroskills` 末尾（它就是最后一个子节点）：{render_author}"
+    )
+    assert "textContent = author" in render_author, (
+        f"作者文本逐字进节点（零正则、零拼接）：{render_author}"
+    )
+    for forbidden in ("replace(", "slice(", "trim("):
+        assert forbidden not in render_author, (
+            f"作者文本不许裁 / 拼（前端零正则、零截断）：`{forbidden}` 出现在 {render_author}"
+        )
+    assert "if (!author) return null;" in render_author, (
+        f"作者为空 ⇒ 一个节点都不建：{render_author}"
+    )
+    assert render_author.index("if (!author) return null;") < render_author.index(
+        'createElement("div")'
+    ), f"空作者的返回要在造节点之前：{render_author}"
+    assert "removeChild(previous)" in render_author, (
+        f"换人时旧页脚要摘掉（否则空作者仍留着上一位的页脚）：{render_author}"
+    )
+    hero_panel_fn = _function_source(lobby_js, "renderLobbyHeroPanel")
+    assert "renderLobbyPortrait(version)" in hero_panel_fn, "右栏重画口要一起换立绘"
+    assert "renderLobbyAuthor(version)" in hero_panel_fn, "右栏重画口要一起换作者页脚"
+    pool_fn = _function_source(lobby_js, "renderHeroPool")
+    assert "img" not in pool_fn and "portrait" not in pool_fn, (
+        f"将池列表**一行都不铺立绘**（一次 119 张 ≈ 28 MB）：{pool_fn}"
+    )
+    img_creations = sum(
+        path.read_text(encoding="utf-8").count('createElement("img")')
+        for path in sorted(STATIC_DIR.glob("*.js"))
+    )
+    assert img_creations == 1 and core_js.count('createElement("img")') == 1, (
+        f"全前端只有立绘渲染口造图（首页 1 张 / 对局 ≤8 张，都走同一个盒子）：{img_creations} 处"
+    )
+    load_index = _function_source(core_js, "loadPortraitIndex")
+    assert 'api("/api/portraits")' in load_index, f"拉的是立绘索引端点：{load_index}"
+    assert "catch (error)" in load_index and "heroes = {}" in load_index, (
+        f"拉失败 ⇒ 空表（fail-open，不抛）：{load_index}"
+    )
+    assert "state.portraits = heroes" in load_index and "renderLobbyHeroPanel()" in load_index, (
+        f"缓存到 `state.portraits` 之后重画右栏（谁后到都重画一次）：{load_index}"
+    )
+    assert "lobby-hint" not in load_index, (
+        f"立绘拉取失败**不写提示**（缺图不是错误态）：{load_index}"
+    )
+    assert re.search(r"portraits:\s*\{\}", core_js), (
+        "`state.portraits` 的初值是空表（出厂无立绘 = 全空位，不报错）"
+    )
+    wire_fn = _function_source(main_js, "wire")
+    assert "loadHeroCatalog()" in wire_fn and "loadPortraitIndex()" in wire_fn, (
+        f"启动时与 `loadHeroCatalog()` 一起拉立绘索引：{wire_fn}"
+    )
 
 
 def test_the_lobby_panels_open_in_the_shared_window_shell() -> None:
@@ -10623,6 +11149,243 @@ def test_the_panel_window_close_key_is_only_for_dismissible_windows() -> None:
     )
 
 
+def test_the_hero_detail_window_is_the_only_widened_modal() -> None:
+    """hero-portraits 票 05（spec §2 目标 3 / §3 硬约束 9 / 裁决 §7③）：
+
+    「右键详情」= **1100×570 dsu** 的窗，而且**只有这一扇**加宽。判据分四段：
+
+    1. `#t-modal .modal-window` 写死字面 dsu 宽高 + `max-height: none`——570 的窗装不进
+       `.modal` 的百分比舞台区（`.modal` 是 `top: 6.2% / bottom: 27.5%`、`padding: 2% 4%`
+       ⇒ 内容盒只有 532.7 dsu 高，`max-height: 96%` 再把它夹到 511）；
+    2. **这扇窗**的底沿钉在底栏高（265 dsu）上：`27.5%` 是底栏 27.5% 时期的数（= 247.5 dsu），
+       照它居中会把 570 高的窗压进底栏。询问弹窗 / 弃牌堆 / 化身窗**不吃**这条覆盖；
+    3. `.modal-window` 的基础规则仍是 `min(680px, 66%)` + `max-height: 96%`（其余窗一个数不动）；
+    4. `.pw` 三档 = `_PANEL_WINDOW_SIZES` 的三个字面数，一个字不动（本票**不许**动那个常量）。
+    """
+    window = _css_rule("#t-modal .modal-window")
+    assert re.search(r"width:\s*calc\(1100 \* var\(--dsu\)\)", window), (
+        f"详情窗宽必须是字面 1100 dsu（裁决 §7③ 的 D3 版式），实际：{window}"
+    )
+    assert re.search(r"height:\s*calc\(570 \* var\(--dsu\)\)", window), (
+        f"详情窗高必须是字面 570 dsu（立绘满高的预算），实际：{window}"
+    )
+    assert re.search(r"max-height:\s*none", window), (
+        f"`max-height: 96%` 会把 570 的窗夹到 511（.modal 的内容盒只有 532.7 dsu）：{window}"
+    )
+
+    # 2. 锚定：底沿 = 底栏高，两个数同源（`.table-bottom` 的 flex 基准）。
+    modal = _css_rule("#t-modal")
+    anchor = re.search(r"bottom:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", modal)
+    bar = re.search(r"flex:\s*0 0 calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", _css_rule(".table-bottom"))
+    assert anchor is not None and bar is not None, (
+        f"详情窗的底沿与底栏高都要写成 dsu 算式：modal={modal} bar={bar and bar.group(0)}"
+    )
+    assert anchor.group(1) == bar.group(1) == "265", (
+        f"详情窗的底沿必须正好落在底栏上沿（{bar.group(1)} dsu），实际：{modal}"
+    )
+    assert "27.5%" not in modal, (
+        f"27.5% 是底栏 27.5% 时期的数（= 247.5 dsu，比 265 少 17.5）：这扇窗不许再吃它：{modal}"
+    )
+    assert re.search(r"padding:\s*0", modal), (
+        f"`.modal` 的 `padding: 2% 4%` 是按百分比算的（上下各 32 dsu）——570 的窗要整块可用：{modal}"
+    )
+
+    # 3. 其余窗一个数不动（询问弹窗 / 弃牌堆 / 化身窗都吃基础 `.modal-window`）。
+    base = _css_rule(".modal-window")
+    assert re.search(r"width:\s*min\(680px, 66%\)", base), (
+        f"基础窗宽仍是 min(680px, 66%)（只有 #t-modal 加宽）：{base}"
+    )
+    assert re.search(r"max-height:\s*96%", base), f"基础窗高上限仍是 96%：{base}"
+    dialog = _css_rule(".dialog-window")
+    assert re.search(r"width:\s*min\(680px, 66%\)", dialog), (
+        f"询问弹窗不吃详情窗的加宽（票面：不动询问弹窗 / 弃牌堆 / 化身）：{dialog}"
+    )
+    for other in (".discard-backdrop", ".pindian-popup"):
+        assert not re.search(r"#t-modal", _css_rule(other)), (
+            f"{other} 不许被本票的详情窗几何污染：{_css_rule(other)}"
+        )
+
+    # 4. 面板窗三档一个字不动。
+    assert _PANEL_WINDOW_SIZES == {"S": (480, 300), "M": (800, 560), "L": (1180, 700)}, (
+        "`_PANEL_WINDOW_SIZES` 是本票的**禁改项**（票面判据）：详情窗不走这三档"
+    )
+    for size in _PANEL_WINDOW_SIZES:
+        body = _css_rule(f'.pw[data-size="{size}"]')
+        assert "1100" not in body and "570" not in body, (
+            f".pw[data-size=\"{size}\"] 不许跟着详情窗改：{body}"
+        )
+
+
+def test_the_hero_detail_body_is_a_text_column_beside_a_full_height_portrait() -> None:
+    """hero-portraits 票 05（裁决 §7③ D3「左文右图」/ spec §3.9）：
+
+    正文两栏，**文字在左、立绘在右**，立绘满高不滚：
+
+    1. `.hero-detail` 是列（两栏在上、作者页脚在下），`.detail-columns` 是行（文左图右）；
+    2. `.detail-text` 是**唯一**滚动容器（`overflow-y: auto` + `scrollbar-gutter: stable` +
+       `min-width/min-height: 0`），且立绘**不在**它里面——"文字栏自己滚、立绘不动"是结构判据；
+    3. `.detail-portrait` `flex: 0 0 auto` + `height: 100%` + `aspect-ratio: 530 / 750`
+       （宽由高反推，不写死像素宽）；图 `object-fit: cover` 在 0.707 的框里等于不裁；
+    4. 空位只换底纹（`[data-empty="1"]` 禁声明几何属性）——有图 / 无图两局版式不跳；
+    5. `#t-modal .modal-body` 不再自己滚（`overflow: hidden` + `padding: 0`），但 `.modal-body`
+       的登记项**保留**（弃牌堆正文仍靠它滚），新的滚动区 `.detail-text` 进 `_SCROLL_CONTAINERS`。
+    """
+    root = _css_rule(".hero-detail")
+    assert re.search(r"display:\s*flex", root) and re.search(r"flex-direction:\s*column", root), (
+        f"`.hero-detail` 是列：两栏一行在上、作者页脚在下：{root}"
+    )
+    assert re.search(r"height:\s*100%", root), f"两栏要吃掉正文槽的整个高度：{root}"
+
+    columns = _css_rule(".hero-detail .detail-columns")
+    assert re.search(r"display:\s*flex", columns) and re.search(r"flex-direction:\s*row", columns), (
+        f"两栏是行：左文右图（DOM 次序 = 视觉次序）：{columns}"
+    )
+    assert re.search(r"flex:\s*1 1 auto", columns) and re.search(r"min-height:\s*0", columns), (
+        f"两栏吃正文槽剩余高度，且能缩到比内容矮（否则文字栏永远不滚）：{columns}"
+    )
+    assert re.search(r"flex-direction:\s*row(?!-reverse)", columns), (
+        f"不许用 `row-reverse` 把视觉次序藏进 CSS：判据要读得到「文左图右」：{columns}"
+    )
+
+    text = _css_rule(".hero-detail .detail-text")
+    assert re.search(r"overflow-y:\s*auto", text), f"文字栏是滚动容器：{text}"
+    assert re.search(r"scrollbar-gutter:\s*stable", text), (
+        f"滚动条常驻留位（裁决 §7③：滚动条出现在右栏内缘、立绘不动）：{text}"
+    )
+    for declaration in (r"flex:\s*1 1 auto", r"min-width:\s*0", r"min-height:\s*0"):
+        assert re.search(declaration, text), (
+            f"文字栏必须能缩（否则长描述把立绘挤出窗）：缺 {declaration}：{text}"
+        )
+
+    portrait = _css_rule(".hero-detail .detail-portrait")
+    assert re.search(r"flex:\s*0 0 auto", portrait), (
+        f"立绘不参与伸缩（裁决 §7③ / 票面：`flex: 0 0 auto`）：{portrait}"
+    )
+    assert re.search(r"height:\s*100%", portrait), f"立绘满高（570 的正文槽）：{portrait}"
+    assert re.search(r"aspect-ratio:\s*530\s*/\s*750", portrait), (
+        f"宽由高 × 530/750 反推（`aspect-ratio`），不写死像素宽：{portrait}"
+    )
+    assert not re.search(r"(?<![-\w])width:", portrait), (
+        f"立绘盒不许写死宽（宽只能由 aspect-ratio 反推）：{portrait}"
+    )
+    assert not re.search(r"overflow-y", portrait), "立绘不滚（滚的是文字栏）"
+    img = _css_rule(".hero-detail .detail-portrait img")
+    for declaration in (r"object-fit:\s*cover", r"position:\s*absolute", r"inset:\s*0",
+                        r"width:\s*100%", r"height:\s*100%"):
+        assert re.search(declaration, img), (
+            f"立绘铺满盒子（0.707 的框里 cover 等于不裁）：缺 {declaration}：{img}"
+        )
+    empty = _css_rule('.hero-detail .detail-portrait[data-empty="1"]')
+    for prop in ("width", "height", "aspect-ratio", "flex", "min-width", "min-height"):
+        assert not re.search(rf"(?<![-\w]){prop}\s*:", empty), (
+            f"空位只换底纹、禁声明几何属性（有图 / 无图两局版式不跳）：{prop} 出现在 {empty}"
+        )
+
+    # 4. 正文槽不再自己滚（文字栏才是），但 `.modal-body` 的登记项保留（弃牌堆正文仍靠它）。
+    body = _css_rule("#t-modal .modal-body")
+    assert re.search(r"overflow:\s*hidden", body), (
+        f"详情窗的正文槽不滚（否则两层滚动、立绘那张也跟着动）：{body}"
+    )
+    assert re.search(r"padding:\s*0", body), f"正文槽的内边距交给两栏自己给：{body}"
+    assert ".modal-body" in _SCROLL_CONTAINERS, (
+        "`.modal-body` 仍是登记项（弃牌堆正文槽用它滚）——本票只让详情窗覆盖 overflow"
+    )
+    assert ".hero-detail .detail-text" in _SCROLL_CONTAINERS, (
+        "新增滚动区必须登记（spec §3.9：未登记即红）"
+    )
+
+    # 5. 作者页脚：`.hero-detail` 的最下方（两栏之后），与首页同一条 `.author-foot`。
+    foot = _css_rule(".hero-detail .author-foot")
+    assert re.search(r"flex:\s*0 0 auto", foot), f"页脚不参与伸缩：{foot}"
+    assert re.search(r"border-top", foot), f"页脚上方一条虚线（与首页同一外观）：{foot}"
+
+    # 6. JS 结构：两栏由 hero-detail.js 造，立绘走**唯一**的立绘渲染口（不另造 img）。
+    detail_js = (STATIC_DIR / "hero-detail.js").read_text(encoding="utf-8")
+    render = _function_source(detail_js, "renderHeroDetailBody")
+    assert "detail-columns" in render and "detail-text" in render and "detail-portrait" in render, (
+        f"正文两栏由 `renderHeroDetailBody` 一处落：{render}"
+    )
+    assert 'fillPortraitBox(' in render, (
+        "立绘复用 `core.js:fillPortraitBox`（有图 / 空位同一份实现，票 03 立的唯一口）"
+    )
+    assert 'createElement("img")' not in detail_js, "详情不另造 img（空位就没请求）"
+    order = [
+        render.index("detail-text"),
+        render.index("detail-portrait"),
+        render.index("author-foot"),
+    ]
+    assert order == sorted(order), (
+        f"DOM 次序 = 文字栏 → 立绘 → 作者页脚（页脚是 `.hero-detail` 的最后一个节点）：{order}"
+    )
+    assert 'portraitEntryFor(' in render, (
+        "作者页脚按座位的显示名称查 `state.portraits`（不另建索引、不改投影层）"
+    )
+    # 7. spec §3.8：作者文件缺**或空白** ⇒ 零节点。静态半边由 `if (author)` 这条守卫钉住
+    #    （缺条目 / 空串两条运行时判据在烟测 HP5-06 / HP5-06b）；`.author-foot` 只许在守卫里造。
+    guard = re.search(r"if \(author\) \{(?P<body>.*?)\n  \}", render, re.S)
+    assert guard is not None, (
+        f"页脚必须由 `if (author)` 守住（空串 ⇒ 一个节点都不建）：{render[-500:]}"
+    )
+    assert 'className = "author-foot"' in guard.group("body"), (
+        f"`.author-foot` 只能建在 `if (author)` 里面：{guard.group('body')}"
+    )
+    assert render.count("author-foot") == 1, (
+        "`author-foot` 全函数只出现一次（守卫外不许另建页脚）"
+    )
+
+
+def test_the_detail_and_the_lobby_show_the_same_trimmed_skill_description() -> None:
+    """hero-portraits 票 05：**消灭**「描述文本两处不同源」（首页裁切 / 详情全文）。
+
+    三段判据，任一段都独立可核：
+
+    1. **服务端只有一个裁切口**：`projection._skill_entry`（详情清单与可操作清单的共同条目）
+       的 `description` 就是 `display_skill_description`——不是原文、也不是前端第二次裁；
+    2. 取样技能（界关羽【武圣】）的原文带「本仓实现」注记，裁完的文本**不含注记**且是原文前缀；
+    3. **前端零正则**：`hero-detail.js` 只用 `skillDescription(skill)` 读载荷，文件里没有
+       「本仓」、没有 `slice` / `replace` / 正则——裁切规则不入前端第二份。
+    """
+    for entry in (REPO_ROOT / "tools", REPO_ROOT / "src"):
+        if str(entry) not in sys.path:
+            sys.path.insert(0, str(entry))
+    from sgs_web.descriptions import (
+        display_skill_description,
+        skill_description,
+        trimmed_description,
+    )
+    from sgs_web.projection import CATALOG, _skill_entry
+
+    skill_id = "hero.jie_guanyu.wusheng"
+    raw = skill_description(skill_id)
+    trimmed = display_skill_description(skill_id)
+    assert "本仓" in raw, f"取样技能 `{skill_id}` 的原文应当带实现注记（裁切口才有读数）"
+    assert trimmed == trimmed_description(raw) and "本仓" not in trimmed, (
+        f"服务端裁切后不许带注记：{trimmed!r}"
+    )
+
+    definition = CATALOG[skill_id]
+    entry = _skill_entry(definition, "武圣")
+    assert entry["description"] == trimmed, (
+        "详情 / 可操作清单共用的 `_skill_entry` 必须下发**裁切版**（这就是「两处同源」的实现）："
+        f"实际 {entry['description']!r}"
+    )
+    assert entry["description"] != raw, "不许再下发全文（首页右栏与详情会再差一次）"
+    assert entry["description"].endswith("你使用方块【杀】无距离限制。"), (
+        f"裁到第一个「本仓」注记处、前文逐字保留：{entry['description']!r}"
+    )
+
+    detail_js = (STATIC_DIR / "hero-detail.js").read_text(encoding="utf-8")
+    assert detail_js.count("skillDescription(skill)") == 1, (
+        "两条技能清单（武将 / 装备）共用同一句 `skillDescription(skill)`（一份实现）"
+    )
+    for banned in ("本仓", ".slice(", ".replace(", ".match("):
+        assert banned not in detail_js, (
+            f"前端不裁技能描述（裁切口只有 `descriptions.py` 一处）：出现 {banned!r}"
+        )
+    core_js = (STATIC_DIR / "core.js").read_text(encoding="utf-8")
+    assert "function skillDescription(skill)" in core_js, "`skillDescription` 仍是唯一读法"
+
+
 _SCROLL_CONTAINERS = {
     ".hero-pool": (
         "将池窗的版本格列表：窗高按 `.pw[data-size=\"L\"]` 写死，版本格多时只有列表滚"
@@ -10630,7 +11393,14 @@ _SCROLL_CONTAINERS = {
     ),
     ".stage-center .processing": "舞台中央处理区：限两行卡面（253dsu），超出的行自己滚、不折叠",
     "#t-skills": "牌桌技能栏：给定高度比例，技能多了在这条竖条里滚，不撑高牌桌",
-    ".modal-body": "武将详情检视窗正文槽：标题 / 底栏固定，只有正文滚",
+    ".modal-body": (
+        "共享模态正文槽：标题 / 底栏固定，只有正文滚（弃牌堆仍靠它；武将详情窗覆盖成 "
+        "`overflow: hidden`，改由 `.hero-detail .detail-text` 滚——票 05）"
+    ),
+    ".hero-detail .detail-text": (
+        "武将详情正文的**文字栏**：立绘满高不滚，技能多 / 描述长时只有这一栏滚（票 05 起，"
+        "登记项 `.modal-body` 保留给弃牌堆）"
+    ),
     ".dialog-body": "询问弹窗正文槽：标题 / 提示条固定，只有正文滚",
     ".avatar-skills": "武将牌面技能栏：牌面高度固定，技能多时在栏内滚",
     ".dialog-reveal": "五谷整段结算的持久展示：询问正文收起，亮牌内容在它自己的槽里滚",
@@ -11957,3 +12727,319 @@ def test_the_display_component_checklist_names_the_refresh_channel() -> None:
     assert "**派生显示字段**：" in glossary, (
         "GLOSSARY 要有「派生显示字段」词条——它是这条路线的领域词（没有 delta、靠事实通道刷新）"
     )
+
+
+# ---------------------------------------------------------------------------
+# hero-portraits 票 06：测试垫片认得 `<img>`（立绘断言的先决条件）
+# ---------------------------------------------------------------------------
+
+_UI_SMOKE = REPO_ROOT / "tests" / "support" / "ui_smoke.mjs"
+"""烟测的 DOM 垫片（`El` / 静态节点 / 读数口都在这一份里；行为面归 `bash tests/smoke-web.sh`）。"""
+
+_SHIM_STATIC_TAGS = re.compile(r"const STATIC_NODE_PATTERN = /<\((?P<tags>[^)]+)\)")
+"""垫片建静态节点的那条正则的标签交替（`STATIC_NODE_PATTERN` 第一组）。"""
+
+
+def _shim_static_tags() -> set[str]:
+    """垫片的静态节点正则认得的标签集合（`index.html` 里带 id 的标签按它建节点）。"""
+    match = _SHIM_STATIC_TAGS.search(_UI_SMOKE.read_text(encoding="utf-8"))
+    assert match is not None, (
+        "ui_smoke.mjs 里找不到 `const STATIC_NODE_PATTERN = /<(input|…)/`——"
+        "垫片的正则被改名 / 改写时，这条登记测试要一起改"
+    )
+    return {tag.strip() for tag in match.group("tags").split("|") if tag.strip()}
+
+
+def test_the_ui_smoke_shim_knows_the_image_tag() -> None:
+    """`<img>` 是仓里首例图片资源（hero-portraits 票 06，spec §3 硬约束 7）：四件登记一个不能少。
+
+    缺陷的形状是**静默失明**，不是报错：垫片不认 `img` 时，静态 `<img id=...>` 根本不会被建，
+    `$()` 命中垫片"缺 id 就造一个空 div"的兜底 ⇒ 立绘断言读到空串、照样报绿。四件登记缺任何
+    一件，同一形状都会从另一条缝里回来：
+
+    1. 静态节点正则认 `img`（`index.html` 的 `<img id=...>` 才会被建出来）；
+    2. `El` 有 `src`（可写）/ `alt` / `complete` / `naturalWidth` / `naturalHeight` 读数件；
+    3. 三处标签白名单（M7-20e / M7-21b / M7-25b）与正则一致——白名单是「新加的静态节点只用
+       垫片认识的标签」的登记。M7-21b / M7-25b 各自还有 `!section.includes("<img")`：棋盘 /
+       编辑器**不许用图**是它们自己的判据，白名单只说明垫片认不认得；
+    4. `SGS_SMOKE_IMG` 读数按 `/art/` 前缀判「这是不是立绘」。
+
+    行为面（`createElement("img")` 的读数三档、静态节点的 `$()` 可达性）由烟测自检
+    `U-IMG-00a..c` 跑**真垫片**钉；这里只钉登记，不重跑 DOM。
+    """
+    text = _UI_SMOKE.read_text(encoding="utf-8")
+    tags = _shim_static_tags()
+    assert "img" in tags, f"垫片的静态节点正则不认 `img`：{sorted(tags)}"
+
+    for member in (
+        "get src()",
+        "set src(",
+        "get alt()",
+        "get complete()",
+        "get naturalWidth()",
+        "get naturalHeight()",
+    ):
+        assert member in text, (
+            f"垫片的 `El` 缺立绘读数件 `{member}`（`src` 必须可写 ⇒ 必须有 getter / setter 一对）"
+        )
+
+    whitelists = re.findall(r"const allowedTags = new Set\(\[(.*?)\]\)", text, re.S)
+    assert len(whitelists) == 3, (
+        f"标签白名单应为 3 处（M7-20e / M7-21b / M7-25b），实际 {len(whitelists)} 处"
+    )
+    for index, body in enumerate(whitelists, start=1):
+        declared = {name.strip().strip('"') for name in body.split(",") if name.strip()}
+        assert declared <= tags, (
+            f"第 {index} 处标签白名单放行了垫片建不出节点的标签：{sorted(declared - tags)}"
+        )
+        assert "img" in declared, (
+            f"第 {index} 处标签白名单没有 `img`（垫片已认得它；白名单是「只用垫片认识的标签」"
+            f"的登记）：{sorted(declared)}"
+        )
+
+    assert "const SGS_SMOKE_IMG = {" in text, (
+        "垫片缺 `SGS_SMOKE_IMG` 读数口（票 06 的可核读数：区分「建出来了没 src」与「src 指向 /art/」）"
+    )
+    assert 'const SMOKE_IMG_ART = "/art/"' in text, (
+        "读数要按 `/art/` 前缀判「这是不是立绘」，否则断言只能读到空串（读数就没意义了）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# hero-portraits 票 04：环桌几何（贴边马蹄 + 块放大 + 底栏）
+#
+# 环区 = 1600 × (900 − 顶栏 − 底栏 265) = **1600×579** 设计单位；座位外矩形 = **263×188**
+# （210×150 的 +25%，裁决 Q16），马蹄内边距 16。这三样数字**只住 `table.js`**：
+# `ringSeatPositions(n)` 用它们算座位中心，`seat-view.js` 用同一份常量把座位盒写成百分比——
+# CSS 里不再有座位尺寸（旧的 `.ring .seat { width: 13.125%; aspect-ratio: 210 / 150 }` 已删）。
+#
+# 探针跑真 `table.js`（node vm，**不建 DOM**）并调用纯函数；缺函数 / 缺常量**不抛**，
+# 让红落在下面的断言上。跑法沿用 damage-fx / thunder / fire 那几支探针的同一套
+# （`shutil.which("node")` + 临时目录 + `json.loads`），没有第二套 runner。
+# ---------------------------------------------------------------------------
+
+_RING_GEOMETRY_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+/* 只载真 `table.js`：环桌排法是纯函数，**没有任何 DOM 依赖**（票面的「不读 DOM」）。
+ * 这个 context 里连 `$` 都没有——函数体若偷偷摸 DOM，探针会当场炸。 */
+const context = vm.createContext({ console });
+context.globalThis = context;
+vm.runInContext(readFileSync("tools/sgs_web/static/table.js", "utf8"), context, {
+  filename: "table.js",
+});
+
+const report = vm.runInContext(`(() => {
+  const defined = (name) => { try { return typeof eval(name) !== "undefined"; } catch { return false; } };
+  const missing = ["ringSeatPositions", "RING_STAGE", "RING_SEAT"].filter((name) => !defined(name));
+  if (missing.length) return JSON.stringify({ missing });
+  const counts = {};
+  for (let count = 2; count <= 8; count += 1) counts[count] = ringSeatPositions(count);
+  return JSON.stringify({
+    missing: [],
+    stage: RING_STAGE,
+    seat: RING_SEAT,
+    counts,
+    degenerate: [0, 1].map((count) => ringSeatPositions(count)),
+  });
+})()`, context);
+process.stdout.write(report);
+"""
+
+
+def _ring_geometry_probe() -> dict:
+    """跑真 `table.js`（node vm，无 DOM），拿回 2~8 人局的座位中心 + 两个几何常量。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / "ring_geometry_probe.mjs"
+        probe.write_text(_RING_GEOMETRY_PROBE, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"环桌几何探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def ring_geometry_probe() -> dict:
+    """2~8 人局一次跑完（node 启动约 100ms，不必逐个人数各跑一遍）。"""
+    return _ring_geometry_probe()
+
+
+def test_the_ring_seats_never_overlap_from_two_to_eight_players(ring_geometry_probe: dict) -> None:
+    """票 04 的判据：2~8 人局逐个人数，任意两席不重叠、每席都在环区内、沿周长等距。
+
+    断的是**几何性质**，不是把期望坐标抄一遍（抄一遍就是同义反复）：
+
+    - 不重叠 = 轴对齐盒的票面原式 `|dx| >= w 或 |dy| >= h`；
+    - 在环区内 = 盒子的四条边都落在 `[内边距, 环区 − 内边距]` 里；
+    - 等距 = 沿周长相邻两席的位移相等（`周长 / 对手数`），第一席在半个档距处；
+    - 8 人局额外钉「横向吃满」：最左 / 最右的盒子边正好压在内边距上（裁决 §4 的 x 16…1584）。
+
+    期望值一律从独立算式（周长、档距）现算，不从被测函数的结果反推。
+    """
+    assert not ring_geometry_probe["missing"], (
+        f"table.js 缺环桌几何的公开口：{ring_geometry_probe['missing']}"
+        "（排法必须是纯函数 ringSeatPositions(n)；尺寸只在 RING_STAGE / RING_SEAT 一处）"
+    )
+    stage = ring_geometry_probe["stage"]
+    seat = ring_geometry_probe["seat"]
+    assert stage == {"width": 1600, "height": 579}, (
+        f"环区 = 1600 × (900 − 顶栏 − 底栏 265) = 1600×579（裁决 §4），实得 {stage}"
+    )
+    assert (seat["width"], seat["height"], seat["margin"]) == (263, 188, 16), (
+        f"座位外矩形 = 263×188（210×150 的 +25%，裁决 Q16）+ 马蹄内边距 16，实得 {seat}"
+    )
+    assert ring_geometry_probe["degenerate"] == [[], []], (
+        f"少于 2 人不排（自己不在环上），实得 {ring_geometry_probe['degenerate']}"
+    )
+
+    w, h, margin = seat["width"], seat["height"], seat["margin"]
+    vertical = stage["height"] - h - margin * 2
+    horizontal = stage["width"] - w - margin * 2
+    perimeter = vertical * 2 + horizontal
+
+    for count in range(2, 9):
+        positions = ring_geometry_probe["counts"][str(count)]
+        opponents = count - 1
+        assert len(positions) == opponents, (
+            f"{count} 人局：环上应有 {opponents} 个对手席，实得 {len(positions)}"
+        )
+        assert [p["seatOffset"] for p in positions] == list(range(1, opponents + 1)), (
+            f"{count} 人局：座号必须是自己 +1、+2 …（实得 {[p['seatOffset'] for p in positions]}）"
+        )
+        for index, first in enumerate(positions):
+            for second in positions[index + 1:]:
+                dx = abs(first["x"] - second["x"])
+                dy = abs(first["y"] - second["y"])
+                assert dx >= w or dy >= h, (
+                    f"{count} 人局：座位 {first['seatOffset']} 与 {second['seatOffset']} 重叠"
+                    f"（dx={dx:.2f} < {w} 且 dy={dy:.2f} < {h}）"
+                )
+        for seat_position in positions:
+            label = f"{count} 人局座位 {seat_position['seatOffset']}"
+            assert seat_position["x"] - w / 2 >= margin - 1e-6, f"{label} 越出环区左沿"
+            assert seat_position["x"] + w / 2 <= stage["width"] - margin + 1e-6, f"{label} 越出右沿"
+            assert seat_position["y"] - h / 2 >= margin - 1e-6, f"{label} 越出上沿"
+            assert seat_position["y"] + h / 2 <= stage["height"] - margin + 1e-6, f"{label} 越出下沿"
+        step = perimeter / opponents
+        gaps = [positions[i + 1]["t"] - positions[i]["t"] for i in range(opponents - 1)]
+        assert all(abs(gap - step) < 1e-6 for gap in gaps), (
+            f"{count} 人局：沿周长必须等距（档距 {step:.3f}，实得 {[round(g, 3) for g in gaps]}）"
+        )
+        assert abs(positions[0]["t"] - step / 2) < 1e-6, (
+            f"{count} 人局：第一席应在半个档距处（{step / 2:.3f}），实得 {positions[0]['t']:.3f}"
+        )
+        # 拐角净空（票 04 对原型算法唯一的一处补丁）：**只有 6 人局**会触发——原型的等距走法
+        # 在 5 个对手时把臂上那一席放在 y=266.7，与顶排最近那席差 dx=247.9 / dy=156.7（都小于
+        # 263×188 ⇒ 重叠，原型自己的 maxScaleFor 在 6 人局也只给 1.18×）。修法是把它往下让到
+        # 顶排 + 一整块高（留 8 dsu 空气），`t` 仍是等距值。其余人数原样照原型走法排。
+        clamped = [p for p in positions if p.get("clamped")]
+        if count == 6:
+            assert len(clamped) == 2, (
+                f"6 人局应有对称的一对被拐角净空推下去，实得 {[(c['x'], c['y']) for c in clamped]}"
+            )
+            assert abs(clamped[0]["x"] + clamped[1]["x"] - stage["width"]) < 1e-6, (
+                "拐角净空只许推 `y`，左右两席必须仍对称"
+            )
+            top_y = min(p["y"] for p in positions if not p.get("clamped"))
+            assert all(c["y"] - top_y > h for c in clamped), (
+                f"被推下去的座位要真的让开顶排一整块高（顶排 y={top_y}，实得 "
+                f"{[c['y'] for c in clamped]}）"
+            )
+        else:
+            assert not clamped, (
+                f"{count} 人局不该触发拐角净空（原型读数在这一档是不重叠的），"
+                f"实得 {[(c['x'], c['y']) for c in clamped]}"
+            )
+        if count == 8:
+            left = min(p["x"] for p in positions) - w / 2
+            right = max(p["x"] for p in positions) + w / 2
+            assert abs(left - margin) < 1e-6 and abs(right - (stage["width"] - margin)) < 1e-6, (
+                f"8 人局：马蹄要横向吃满（x {margin}…{stage['width'] - margin}），"
+                f"实得 x {left:.2f}…{right:.2f}"
+            )
+
+
+def test_the_ring_seat_size_lives_in_one_module_and_the_bottom_bar_grew_with_the_blocks(
+    ring_geometry_probe: dict,
+) -> None:
+    """票 04 的另外三件：一个数只许一处、自己的座位、底栏与底部面板次序。
+
+    - **单一真源**：`.ring .seat` 里不许再写 width / aspect-ratio。旧版 CSS 的 `13.125%`
+      与 JS 的 `210` 是同一个数的两处重复（210/1600），本票把它收进 `table.js:RING_SEAT`。
+    - **自己的座位** 330×238（`264×190` 的 +25%，裁决 Q18）：底栏只有 265 dsu，238 装得下。
+    - **底栏** 27.5%（≈247.5 dsu）→ `calc(265 * var(--dsu))`（≈29.4%）。不是内容长了，
+      是块长了（+25% 之后 238 高的自己块装不进 247 的内容高）。
+    - **底部面板次序 = DOM 次序**（`记录` → 提示 / 手牌 → 技能 → **自己的块在最右**，
+      裁决 §7②）：CSS 里没有 `order:` / `row-reverse` 反着排。
+    """
+    # 注释里可以写"旧版这里是 width: 13.125%"，判据只看**声明**（先剥注释，与 `_css_rules()` 同一口径）。
+    css = re.sub(r"/\*.*?\*/", "", _CSS_TEXT, flags=re.S)
+    ring_seat = re.sub(r"/\*.*?\*/", "", _css_rule(".ring .seat"), flags=re.S)
+    assert not re.search(r"(?:^|;)\s*width\s*:", ring_seat), (
+        f"座位尺寸不许在 CSS 里再写一份（真源是 table.js:RING_SEAT）：{ring_seat}"
+    )
+    assert "aspect-ratio" not in ring_seat, (
+        f"座位尺寸不许在 CSS 里再写一份（真源是 table.js:RING_SEAT）：{ring_seat}"
+    )
+    assert "13.125" not in css, (
+        "13.125%（= 210/1600）是旧座位宽的第二份副本，已随 RING_SEAT 收进 table.js"
+    )
+
+    self_seat = _css_rule(".seat.self")
+    assert re.search(r"flex:\s*0 0 calc\(330 \* var\(--dsu\)\)", self_seat), (
+        f"自己的座位宽 = 330 dsu（264×190 的 +25%），实得：{self_seat}"
+    )
+    assert re.search(r"aspect-ratio:\s*330 / 238", self_seat), (
+        f"自己的座位高 238 dsu（同一份 +25%），实得：{self_seat}"
+    )
+    assert not re.search(r"aspect-ratio:\s*292 / 210", _CSS_TEXT), "旧的 292×210 自己座位已替换"
+
+    bottom = _css_rule(".table-bottom")
+    assert re.search(r"flex:\s*0 0 calc\(265 \* var\(--dsu\)\)", bottom), (
+        f"底栏 = 265 dsu（裁决 Q18；≈29.4%），实得：{bottom}"
+    )
+    assert not re.search(r"flex:\s*0 0 27\.5%", bottom), f"旧的 27.5% 底栏已替换：{bottom}"
+    # 三个数必须闭合：环区高 = 900 − 顶栏 − 底栏。环区高**读产品常量**（`table.js:RING_STAGE`，
+    # 探针现跑真源码），不是把 579 再抄一遍——抄一遍就是同义反复。顶栏 CSS 是
+    # `.table-topbar { flex: 0 0 6.2% }`（壳高 6.2% ⇒ **55.8** dsu），闭合算式按整数 **56** 折算：
+    # 0.2 dsu 看不出来，票 04 的「环区高取 579，不取 579.2」就是这么定的。
+    topbar = _css_rule(".table-topbar")
+    assert re.search(r"flex:\s*0 0 6\.2%", topbar), (
+        f"牌桌顶栏必须是壳高的 6.2%（≈56 dsu，闭合算式的另一项）：{topbar}"
+    )
+    stage_height = ring_geometry_probe["stage"]["height"]
+    assert stage_height + 265 + 56 == 900, (
+        f"环区 {stage_height} + 顶栏 56 + 底栏 265 = 设计画布 900"
+    )
+
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    builder = _TreeBuilder()
+    builder.feed(html)
+    builder.close()
+    bar = _element(builder.root, element_id="table-bottom")
+    assert bar is not None, 'index.html 里找不到 <div id="table-bottom">'
+    order = [
+        child["attrs"].get("id") or (child["attrs"].get("class") or "").split()[0]
+        for child in bar["children"]
+        if child["tag"] in {"button", "div"}
+    ]
+    assert order == ["t-log-toggle", "hand-area", "t-skills", "t-self-seat"], (
+        f"底部面板的次序 = DOM 次序（记录 → 提示 / 手牌 → 技能 → 自己的块在最右），实得 {order}"
+    )
+    assert not re.search(r"(?:^|[;{\s])order\s*:", _CSS_TEXT), (
+        "底部面板的次序不许靠 CSS `order:` 反着排（次序的真源只有 DOM 一处："
+        "`记录` → 提示 / 手牌 → 技能 → 自己的块在最右，裁决 §7②）"
+    )
+    assert "row-reverse" not in _CSS_TEXT, "底部面板不许用 row-reverse 反着排"

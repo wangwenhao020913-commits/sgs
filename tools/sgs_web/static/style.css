@@ -120,6 +120,45 @@ body {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
 }
 
+/* hero-portraits 票 02（裁决 §7①）：上格 `#lobby-hero` 一个字不动，右栏下格 =
+ * 「立绘（左）+ 技能全文（右）」。立绘高度跟技能面板齐平、宽度由 530:750 反推 —— 原图比例、
+ * 不裁。原型 `.lobby-row`（`.scratch/hero-portraits/prototype/style.css`）的 dsu 版。 */
+.design-canvas .lobby-row {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; gap: calc(14 * var(--dsu));
+}
+/* 技能面板不再是 `#lobby-right` 的直接子节点：`.panel` 的流式外边距（12px）要在这里一并
+ * 归零，否则它比立绘矮 24px（`height: 100%` 的立绘就会比技能面板高），"齐平"就没了。 */
+.design-canvas .lobby-row > .panel { margin: 0; }
+.design-canvas .lobby-row > .lobby-heroskills { flex: 1 1 auto; min-width: 0; }
+
+/* 立绘盒子。**有图 / 无图共用这一条**：空位只多一个 `data-empty="1"` 属性，盒子一个字不改
+ * （有图 / 无图两局版式不跳的声明盒那半边；节点 / class / 属性那半边由烟测钉）。
+ * 宽不是字段：`aspect-ratio` + `height: 100%` 反推出宽。 */
+.design-canvas .portrait-box {
+  position: relative; overflow: hidden; flex: 0 0 auto;
+  background: #efe7d6;
+}
+.design-canvas .lobby-row > .portrait-box {
+  flex: 0 0 auto;
+  height: 100%; aspect-ratio: 530 / 750;
+  border-radius: calc(10 * var(--dsu));
+  border: 1px solid var(--line);
+  box-shadow: 0 calc(3 * var(--dsu)) calc(10 * var(--dsu)) rgba(43, 36, 28, .12);
+}
+.design-canvas .portrait-box img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+/* 空位：同尺寸纸色斜纹（不写字、不发请求）。**只换底纹 / 描线样式**——宽高 / flex /
+ * aspect-ratio 一概不许出现在这里，否则有图 / 无图两局会跳。 */
+.design-canvas .lobby-row > .portrait-box[data-empty="1"] {
+  background:
+    repeating-linear-gradient(45deg, #efe7d6 0 calc(6 * var(--dsu)),
+      #e9dfcb calc(6 * var(--dsu)) calc(12 * var(--dsu)));
+  border-style: dashed;
+}
+
 /* 开一局面板：两列固定栅格（`1fr 1fr` + 78 dsu 行高，原型 `.formgrid`）。字段顺序与既有
  * `name` / `id` 全不变——只是排版换成两列。开始键与提示那条是 56 dsu 的固定行；乘法的常量
  * 写在 `var(--dsu)` 右边：烟测 U1-02c3 有一条**全文** absence 判据，扫的是「常量在左边」
@@ -216,6 +255,14 @@ body {
   display: flex; align-items: center; justify-content: space-between;
   margin-top: calc(8 * var(--dsu)); border-top: 1px solid var(--line);
   font-size: var(--f12); color: var(--dim);
+}
+/* 作者页脚（spec §3.8 / 裁决 §7①）：小字 `--dim` + 上方一条虚线，是技能框的**最后一个
+ * 子节点**。作者为空时前端**一个节点都不建**（不是空 div），所以空作者时这条样式无从生效。 */
+.design-canvas .author-foot {
+  flex: 0 0 auto;
+  margin-top: calc(8 * var(--dsu)); padding-top: calc(6 * var(--dsu));
+  border-top: 1px dashed var(--line);
+  font-size: var(--f11); color: var(--dim);
 }
 
 /* 工具行右端两句摘要只是显示：单行省略，长文本不撑高那 52 dsu。 */
@@ -803,14 +850,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .seats.ring { position: absolute; inset: 0; display: block; }
 
 /* ---------- 座位卡（U1-02）：左武将块 + 右判定 / 装备区 ----------
- * 对手 210×150（左 110 / 右 100）；自己 292×210（左 162 / 右 130）。
- * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。
- * U2-02 / D6：对手的 +8%（228×163）在 8 人环上与相邻座位重叠（40° 相邻角的 |dy| ≈ 158.3 < 163），
- * 故对手**外形保持 210×150、只放大内容**（判定 36 / 装备 42 / 槽位字 10 / 标签 9）。 */
+ * **外矩形不在这条规则里**（hero-portraits 票 04）：对手 263×188（210×150 的 +25%，裁决 Q16）
+ * 与马蹄位置一起住 `table.js:RING_SEAT` / `RING_STAGE`，由 `seat-view.js:seatCardNode()` 按环区
+ * 百分比写进 inline style。旧版这里是 `width: 13.125%; aspect-ratio: 210 / 150` —— 与 JS 的 210
+ * 是同一个数的两处重复，本票删掉 CSS 这一份（票 04 的单测钉住"这里不再有 width / aspect-ratio"）。
+ * 内部分隔比例没变：武将块 137.76 / 判定装备 125.24 = 52.38% / 47.62%（票 04 前是 110 / 100）。
+ * 壳随视口缩放，故宽度用环区百分比、槽高用设计像素。 */
 .ring .seat {
   position: absolute;
-  width: 13.125%;                 /* 210 / 1600 设计舞台 */
-  aspect-ratio: 210 / 150;
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: row;
@@ -820,17 +867,58 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   z-index: 3;
 }
 
-/* 左武将块 */
+/* 左武将块（hero-portraits 票 03 / 票 08；裁决 §7② / §9）：块面是**空白纸色**（用户改判
+ * 「牌桌不出立绘」），名称 / 势力 / 身份画在**上边框带**、体力条画在**下边框带**
+ * （带子不透明 + 一像素描线，文字不压在画上）；手牌 / 标记仍是压在块面上的浅色药丸。
+ * 块自己**不留内边距**——带子要横贯整块，内边距会把它缩进一圈。
+ * 高度变量：对手 22 / 18（自己 30 / 24，同一套结构只大一档）。 */
 .seat .hero-block {
   position: relative;
   flex: 1 1 auto; min-width: 0;
-  display: flex; flex-direction: column; gap: 4px;
-  padding: calc(6 * var(--dsu)) calc(7 * var(--dsu));
+  display: block;
+  padding: 0;
+  --hb-top-h: calc(22 * var(--dsu));
+  --hb-bottom-h: calc(18 * var(--dsu));
   background: linear-gradient(180deg, #fffdf7 0%, #f4ead8 100%);
   border-right: 1px solid var(--line);
   overflow: hidden;
 }
-.seat-head { display: flex; align-items: center; gap: calc(3 * var(--dsu)); min-width: 0; }
+/* 两条边框带：横贯整块的绝对定位条，**不透明**（纸色渐变）+ 一像素描线。z-index 3 = 压住
+ * 药丸（2），"文字不压在画上"因此是版面事实，不是巧合。 */
+.hb-frame {
+  position: absolute; left: 0; right: 0; z-index: 3;
+  display: flex; align-items: center; gap: calc(3 * var(--dsu));
+  padding: 0 calc(4 * var(--dsu));
+  background: linear-gradient(180deg, #fffdf7 0%, #f6eddc 100%);
+}
+.hb-top {
+  top: 0; height: var(--hb-top-h);
+  border-bottom: 1px solid #cbb99a;
+  box-shadow: 0 calc(1 * var(--dsu)) calc(3 * var(--dsu)) rgba(43, 36, 28, .18);
+}
+.hb-bottom {
+  bottom: 0; height: var(--hb-bottom-h);
+  border-top: 1px solid #cbb99a;
+  box-shadow: 0 calc(-1 * var(--dsu)) calc(3 * var(--dsu)) rgba(43, 36, 28, .18);
+}
+.hb-bottom .hp-bar { margin-top: 0; flex: 1 1 auto; min-width: 0; }
+/* 压在块面上的浅色药丸列：贴在下边框带**上方**，从下往上长。容器不吃指针（点空处仍是
+ * "点这张座位卡"），真正的药丸各自可交互（悬停要出牌面预览 / 来源说明）。 */
+.hb-chips {
+  position: absolute; left: calc(3 * var(--dsu));
+  bottom: calc(var(--hb-bottom-h) + calc(2 * var(--dsu)));
+  max-width: calc(100% - calc(6 * var(--dsu)));
+  z-index: 2;
+  display: flex; flex-direction: column; gap: calc(2 * var(--dsu));
+  align-items: flex-start;
+  pointer-events: none;
+}
+.hb-chips > * { pointer-events: auto; }
+.hb-chips .seat-tags,
+.hb-chips .hero-zones,
+.hb-chips .hero-tags { margin: 0; flex-direction: column; align-items: flex-start; gap: calc(2 * var(--dsu)); }
+.hb-chips .hero-zone-row,
+.hb-chips .marker-row { border-top: 0; padding-bottom: 0; }
 .kingdom {
   flex: 0 0 auto;
   width: calc(19 * var(--dsu)); height: calc(19 * var(--dsu)); border-radius: 6px;
@@ -882,9 +970,18 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #4a6b8a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
 }
 
+/* 读数药丸（手牌：张数/上限 + 座位号）：压在块面上，浅色底保可读（裁决 §7② 明确"这些没关系"）。
+ * `.seat-foot` 仍是 `anim.js` 的手牌锚点（它取第一个子节点当落点），故两个读数各自一枚药丸、
+ * 保持是它的直接子节点。 */
 .seat .seat-foot {
-  margin-top: auto; display: flex; justify-content: space-between; gap: 6px;
-  font-size: calc(10 * var(--dsu)); color: var(--dim); padding-top: 3px;
+  margin-top: 0; display: flex; justify-content: flex-start; gap: calc(2 * var(--dsu));
+  font-size: calc(9 * var(--dsu)); color: #4a4136; padding-top: 0;
+}
+.seat .seat-foot > span {
+  padding: 0 calc(4 * var(--dsu)); border-radius: 999px; white-space: nowrap;
+  background: rgba(255, 253, 248, .88);
+  border: 1px solid rgba(203, 185, 154, .95);
+  line-height: calc(15 * var(--dsu));
 }
 .seat .seat-foot b { color: var(--ink); font-variant-numeric: tabular-nums; }
 
@@ -920,7 +1017,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
  * 用户口径里"两端探出"是硬要求，这个组合态很罕见，取舍记在票 01 的 `## Answer`。
  * **自己的座位不放开**（原因见下面 `.self .chain-mark` 那条）。 */
 .seat.opponent.chained .hero-block { overflow: visible; }
-.seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
+/* 「整块上色」的两个 cue（酒泛红 / 掉血闪）画在**块自己**身上。票 03 曾把它们镜像到立绘的
+ * 叠色层（`.portrait::after` + `--portrait-tint`），因为立绘盖住了块底；票 08 按裁决 §9 摘掉
+ * 牌桌立绘后块底重新露出来，镜像层随立绘一起删除。
+ * 掉血闪的键帧仍在下面 D13 那一段（`.hero-block.hp-flash`；类名判据 `U3-03j/k`、`U-VITAL-21`
+ * 钉的是类名，本票不改）。 */
+.seat.wine .hero-block {
+  background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%);
+}
 /* 阵亡与翻面**共用同一档置灰**（用户裁定：翻面的置灰程度与阵亡完全一致）。
  * 两者写在同一条规则里，配比因此不会漂：翻面唯一的差别是**没有文字**。
  * 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
@@ -961,19 +1065,20 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .seat[data-death-fx="hold"] .dead-tag { display: none; }
 .seat[data-death-fx="gone"] .hero-block { visibility: hidden; }
 
-/* 右侧判定 / 装备区：判定 3 槽、装备四槽（武器 / 防具 / 攻马 / 防马）。 */
+/* 右侧判定 / 装备区（hero-portraits 票 03；裁决 §7②）：7 格铺满 = **第一行 3（判定）**、
+ * 第二、三行各 2（装备：武 / 防、+1 / −1）。旧口径的定宽定高（判定 36 / 装备 42、自己
+ * 52 / 60）装不满放大后的块，故删掉——行高由 flex 均分：判定行 1 份、装备区 2 份，
+ * 装备区里两行各 1 份。槽宽仍由同一行里的 `flex: 1 1 0` 均分（牌名折行预算不变）。 */
 .seat .side-block {
-  flex: 0 0 47.62%;              /* 100 / 210 */
+  flex: 0 0 47.62%;              /* 125.24 / 263：比例未变，盒子长大了 +25%（票 04） */
   display: flex; flex-direction: column; gap: 4px;
   padding: 5px; background: #fbf6ea; overflow: hidden;
 }
-/* U2-02 / D6：对手内容 +8%（外形回退不变，见座位卡块注释）。 */
-.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(36 * var(--dsu)); }
-.seat .equip-grid {
-  display: grid; grid-template-columns: 1fr 1fr;
-  grid-auto-rows: calc(42 * var(--dsu)); gap: 4px; flex: 1 1 auto;
-  align-content: start;
-}
+.slot-row { display: flex; gap: 4px; flex: 1 1 0; min-height: 0; }
+.seat .judge-row { gap: 3px; }
+/* 装备区仍是一个 `data-zone="equip"` 容器（`anim.js` 按它在里面逐槽找具体槽位），
+   吃两行的高度，里面两行 `.slot-row` 各 `flex: 1`。 */
+.equip-rows { display: flex; flex-direction: column; gap: 4px; flex: 2 1 0; min-height: 0; }
 /* 票 26：净距离读数复用坐骑槽（负 → 攻马 / 正 → 防马），不占新列、不改槽尺寸。
    坐骑槽不画牌名，故槽内有空间：花色点数一行 + 读数一枚小胶囊。 */
 .mini-slot .distance-bonus {
@@ -985,14 +1090,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   pointer-events: none;
 }
 .mini-slot {
-  min-width: 0; height: calc(42 * var(--dsu)); position: relative;
+  /* 票 03：槽尺寸由所在行给（`flex: 1 1 0` 均分宽、行高即槽高），不再定宽定高。 */
+  flex: 1 1 0; min-width: 0; position: relative;
   border: 1px dashed var(--line); border-radius: 5px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; padding: calc(1 * var(--dsu)) calc(1 * var(--dsu)); overflow: hidden;
   font: inherit; font-size: calc(10 * var(--dsu)); line-height: 1.2;
   color: var(--ink); background: rgba(255, 255, 255, .55);
 }
-.mini-slot.judge-slot { height: calc(36 * var(--dsu)); }
 .mini-slot.empty { color: #9b8f7d; background: #e9e2d6; border-color: #d3c8b6; }
 .mini-slot.filled { border-style: solid; border-color: #c8b795; background: #fffdf8; cursor: help; }
 .mini-slot.judge-slot.filled { border-color: #c39a5f; background: #fff8e9; }
@@ -1009,7 +1114,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   font-size: calc(9 * var(--dsu)); line-height: 1.15;
 }
 /* 用户 2026-11-07：简略表现加花色点数；转化牌右上角「转」。两样都在槽**里面**，
-   槽的尺寸（42 / 36，自己的 60 / 52）一字不改。 */
+   槽的尺寸由所在行给（票 03 起不再定宽定高）。 */
 .mini-slot .slot-suit {
   display: block; max-width: 100%; font-size: calc(9 * var(--dsu)); line-height: 1.05;
   color: #7d6f5c; letter-spacing: 0;
@@ -1175,11 +1280,14 @@ button.mini-slot { cursor: pointer; }
 .seat.req { outline: 2px dashed #b8860b; outline-offset: 2px; }
 
 .stage-center {
-  position: absolute; left: 50%; top: 64.47%;
+  position: absolute; left: 50%; top: 67.6%;
   transform: translate(-50%, -50%);
-  /* U3-01 / D3：宽 40%（= 640 设计单位，一行约 6 张）；中心从 370 下移到 392（64.47%
-   * × 608），面板上限 360 ⇒ 顶边 392 − 180 = 212 > 顶座（90°）下沿 210，不压顶座；
-   * 40% 宽横跨 480–1120，左右座位中心 212 / 1388、卡宽 210 ⇒ 也不压侧座。 */
+  /* U3-01 / D3：宽 40%（= 640 设计单位，一行约 6 张）、面板上限 360，**不压顶座**。
+   * hero-portraits 票 04 把中心从 392（64.47% × 608）下移到 **391.5（67.6% × 579.2）**：
+   * 贴边马蹄把顶排座位抬到了环区上沿（中心 110、下沿 16 + 188 = 204），椭圆时代的顶座下沿
+   * 是 210。上限 360 ⇒ 顶边 391.5 − 180 = **211.5 > 204**，这条不压顶座的不变式仍然成立
+   * （64.47% 在新环区上会给出 193.3，压进顶排 10.7 设计单位）。
+   * 40% 宽横跨 480–1120，左右两臂的座位在 16…279 / 1321…1584 ⇒ 不压侧座。 */
   width: 40%; min-height: 22%;
   max-height: calc(360 * var(--dsu));
   overflow: hidden;
@@ -1523,14 +1631,20 @@ button.mini-slot { cursor: pointer; }
 /* ---------- 底部面板：事件流按钮 | 手牌区 | 技能 | 自己的武将块 | 自己的判定 / 装备 ---------- */
 
 .table-bottom {
-  flex: 0 0 27.5%;
+  /* hero-portraits 票 04：底栏 **27.5% → 265 dsu**（≈29.4%，裁决 Q18）。
+   * 换的理由不是"内容长了"，是**块长了**：自己的座位 +25% 之后 238 dsu 高，
+   * 底栏内容高（265 − 上下内边距 8.8 / 10.4）只有 ~246，旧的 27.5% × 900 = 247.5 再减
+   * 内边距就装不下。环区高 = 900 − 顶栏 − 265 = 579，与 `table.js:RING_STAGE` 闭合。
+   * 走 dsu 而不是百分比：底栏跟的是设计画布，不是视口比例。 */
+  flex: 0 0 calc(265 * var(--dsu));
   min-height: 130px;
   display: flex;
   align-items: stretch;
   gap: 0.6%;
   padding: 0.55% 0.9% 0.65%;
-  /* ink-table-skin 票 02：同顶栏，半透宣纸。`flex: 0 0 27.5%` 与 `z-index: 10` 被
-   * 烟测 / 静态形状检查钉着，一个字不动；只换底与上边线。 */
+  /* ink-table-skin 票 02：同顶栏，半透宣纸。`z-index: 10` 被烟测 / 静态形状检查钉着，
+   * 一个字不动；只换底与上边线。`flex` 的高度口径由 hero-portraits 票 04 改成 265 dsu
+   * （票 02 当年写的"27.5% 一个字不动"正是被这一票替换的那条，理由见上）。 */
   background: rgba(var(--paper-rgb), .55);
   border-top: 1px solid rgba(58, 51, 43, .18);
   position: relative;
@@ -1632,7 +1746,7 @@ button.mini-slot { cursor: pointer; }
 @keyframes countdown-blink { 50% { opacity: .3; } }
 
 /* 其他座位的询问：只在**其武将块下方**显示文本，不给按钮、不给倒计时。
- * 座位卡是固定的 210×150，故这条文本压在卡片底部（不挤压武将块 / 判定装备区）。 */
+ * 座位卡是固定的 263×188（票 04），故这条文本压在卡片底部（不挤压武将块 / 判定装备区）。 */
 .seat-prompt {
   margin-top: 2px; padding-top: 4px;
   border-top: 1px dashed var(--line);
@@ -1699,10 +1813,13 @@ button.mini-slot { cursor: pointer; }
   width: calc(11 * var(--dsu)); height: calc(11 * var(--dsu));
 }
 
-/* 自己的座位块（U1-02）：292×210 设计尺寸，左武将块 + 右判定 / 装备区（右块 130）。 */
+/* 自己的座位块（U1-02；hero-portraits 票 04 放大）：**330×238** dsu = 264×190 的 +25%
+ * （裁决 Q18），左武将块 + 右判定 / 装备区。底栏 265 dsu ⇒ 238 装得进（内容高 ~246）；
+ * 旁边那个 +50% 档会撑破底栏，这是 +25% 的另一个理由。
+ * 宽写 dsu 而不是百分比：它是底栏（flex 行）里的一项，百分比会按底栏**内容宽**结算。 */
 .seat.self {
-  flex: 0 0 18.25%;               /* 292 / 1600 设计舞台 */
-  aspect-ratio: 292 / 210;
+  flex: 0 0 calc(330 * var(--dsu));   /* 330 dsu = 264 × 1.25 */
+  aspect-ratio: 330 / 238;
   align-self: flex-end;
   display: flex;
   flex-direction: row;
@@ -1711,11 +1828,16 @@ button.mini-slot { cursor: pointer; }
   background: #fffdf8;
   border-color: #c8a96b;
 }
+/* 自己的武将块（hero-portraits 票 03 / 票 08）：**沿用对手那一套**（空白纸色 + 上下边框带 +
+ * 压块面药丸），只是高度变量大一档（30 / 24）、带内字号大一号。块内不再有流式排版。 */
 .self .hero-block {
   flex: 1 1 auto; min-width: 0;
-  display: flex; flex-direction: column; gap: 5px;
-  padding: 9px 10px;
+  --hb-top-h: calc(30 * var(--dsu));
+  --hb-bottom-h: calc(24 * var(--dsu));
 }
+.self .hb-top { padding: 0 calc(6 * var(--dsu)); gap: calc(5 * var(--dsu)); }
+.self .hb-bottom { padding: 0 calc(6 * var(--dsu)); }
+.self .hb-chips { left: calc(5 * var(--dsu)); bottom: calc(var(--hb-bottom-h) + calc(4 * var(--dsu))); }
 .self .kingdom {
   width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu)); font-size: calc(12 * var(--dsu));
 }
@@ -1724,14 +1846,14 @@ button.mini-slot { cursor: pointer; }
   min-width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu));
   padding: 0 calc(5 * var(--dsu)); font-size: calc(12 * var(--dsu));
 }
-.self .hp-bar { gap: 3px; margin-top: 4px; }
+.self .hp-bar { gap: 3px; margin-top: 0; }
 .self .hp-seg { width: calc(13 * var(--dsu)); height: calc(9 * var(--dsu)); }
 .self .hp-num { margin-left: calc(5 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
 .self .hp-bar.hp-text .hp-num { font-size: calc(15 * var(--dsu)); }
 .self .armor-seg { width: calc(11 * var(--dsu)); height: calc(9 * var(--dsu)); }
-.self .seat-tags { margin-top: 2px; }
+.self .seat-tags { margin-top: 0; }
 .self .seat-flag { font-size: calc(11 * var(--dsu)); padding: 0 calc(7 * var(--dsu)); }
-.self .seat-foot { margin-top: auto; font-size: calc(11 * var(--dsu)); padding-top: 5px; }
+.self .seat-foot { margin-top: 0; font-size: calc(11 * var(--dsu)); padding-top: 0; }
 /* 自己的武将块只有**半个卡宽**（右边是判定 / 装备区）：两端的"探出"在这里没有牌沿可探——
  * 左端会被座位卡（`.seat.self` 的 `overflow: hidden` + 圆角）裁掉，右端会压到装备槽上。
  * 自己这一块因此把贴图收回牌内：整张贴图铺满武将块，链头正好落在块的左右沿（唯一代价是
@@ -1739,19 +1861,19 @@ button.mini-slot { cursor: pointer; }
 .self .chain-mark { left: 0; width: 100%; }
 .self .dead-text { font-size: calc(36 * var(--dsu)); }
 .self .side-block {
-  flex: 0 0 44.52%;              /* 130 / 292 */
+  flex: 0 0 44.52%;              /* 146.9 / 330：分隔比例未变，盒子 +13%（292→330，票 04） */
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px; background: #fbf6ea;
   overflow: hidden;
 }
-/* U2-02 / D6：自己武将块**外形 292×210 不变**、内容放大（判定 52 / 装备 60 / 槽位字 13 / 标签 12）。
+/* 自己的侧栏同样是三行铺满（票 03）：判定行 1 份、装备区 2 份、区里两行各 1 份。
+   行高预算 = 238 − 上下 8×2 − 行距 6×2 = 210，三行 ⇒ ≈ 70/行（票 04 放大后；旧口径的定高 52 / 60 已删）。
    U4-06 / D13：槽内可用宽 ≈ 47 设计单位（装备两列）/ ≈ 28（判定三等分）——牌名折两行
    （balance），四字 / 五字全名放得下；槽名（标签 12 / 判定 12）保留。 */
-.self .judge-row { flex: 0 0 calc(52 * var(--dsu)); gap: 4px; }
-.self .equip-grid { grid-auto-rows: calc(60 * var(--dsu)); gap: 5px; }
+.self .judge-row { gap: 4px; }
+.self .equip-rows { gap: 5px; }
 .self .mini-slot .distance-bonus { font-size: calc(11 * var(--dsu)); }
-.self .mini-slot { height: calc(60 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
-.self .mini-slot.judge-slot { height: calc(52 * var(--dsu)); }
+.self .mini-slot { font-size: calc(13 * var(--dsu)); }
 .self .mini-slot .slot-k { font-size: calc(12 * var(--dsu)); }
 .self .mini-slot.judge-slot.filled .slot-k { font-size: calc(12 * var(--dsu)); line-height: 1.1; }
 .self .mini-slot.judge-slot.filled .slot-v { font-size: calc(13 * var(--dsu)); line-height: 1.15; }
@@ -1849,6 +1971,30 @@ button.mini-slot { cursor: pointer; }
 }
 .modal-body .options { margin: 0; }
 .modal-body .arrange-row + .arrange-row { margin-top: 10px; }
+
+/* ---------- 武将详情窗的**自有**几何（hero-portraits 票 05 / 裁决 §7③ D3）----------
+ * 只有这一扇窗加宽到 1100×570 dsu（裁决的"1100×570 + 立绘 403×570 满高 + 左侧文字栏"）；
+ * 询问弹窗 / 弃牌堆 / 化身窗仍吃上面 `.modal-window` 的 `min(680px, 66%)` / `max-height: 96%`。
+ *
+ * 为什么这扇窗要**自己锚定**（`.modal` 的 `top: 6.2%; bottom: 27.5%` 不够）：
+ * `27.5%` 是底栏 `27.5%` 时期的数（900 × 27.5% = 247.5 dsu），票 04 把底栏改成 **265 dsu**
+ * 之后它就是一条过期值（比底栏上沿低 17.5 dsu）。`.modal` 的内容盒 = 900 − 55.8 − 247.5 −
+ * 2×32（`padding: 2% 4%` 的上下各是**壳宽**的 2% = 32 dsu）= 532.7 dsu，而 570 的窗装不进去。
+ * 故这扇窗把底沿钉在底栏高（265 dsu，与 `.table-bottom` 的 flex 基准同一个数）、去掉百分比
+ * 内边距，让 579.2 dsu 的舞台区整块可用（570 居中 ⇒ 上下各 4.6 dsu，不盖底栏 / 手牌）。
+ * 其余五条 `bottom: 27.5%` 的浮层是**别的票**的事：它们的窗远矮于舞台区，居中时碰不到底栏。 */
+#t-modal {
+  bottom: calc(265 * var(--dsu));
+  padding: 0;
+}
+#t-modal .modal-window {
+  width: calc(1100 * var(--dsu));
+  height: calc(570 * var(--dsu));
+  max-height: none;
+}
+/* 详情窗的正文槽不再自己滚：两栏里只有**文字栏**滚（登记表里的 `.hero-detail .detail-text`）。
+ * `.modal-body` 的通用规则不动——弃牌堆正文仍靠它滚（登记项因此保留）。 */
+#t-modal .modal-body { overflow: hidden; padding: 0; }
 
 /* ---------- 弃牌堆面板（U4-05 / D11）：只读检视窗，自己的遮罩可点关闭 ----------
  * 几何沿用 `.modal` 的舞台区；层级在询问 / 详情窗之上（它是用户主动翻出来的
@@ -2118,9 +2264,59 @@ button.avatar-skill:hover { border-color: var(--accent); }
 .reveal-target.is-current { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
 .reveal-target.is-invalid { color: #fff; background: #b3261e; border-color: #b3261e; }
 
-/* ---------- 武将详情（U1-06）：武将技能在上、分割线、装备技能在下 ---------- */
+/* ---------- 武将详情（U1-06 / hero-portraits 票 05）：左文右图、文字栏自己滚 ----------
+ * 结构（`hero-detail.js:renderHeroDetailBody` 一处落）：
+ *   `.hero-detail`      列：两栏一行 + 作者页脚（作者为空 ⇒ 页脚节点**不存在**）
+ *     `.detail-columns` 行：文字栏（可滚）+ 立绘（满高、不滚）
+ *     `.author-foot`    最下方（与首页同一条外观）
+ *
+ * 立绘 `flex: 0 0 auto` + `height: 100%` + `aspect-ratio: 530 / 750`：宽由**两栏**的高反推
+ * （不写死像素）。两栏高 = 570 − 标题条（≈78 dsu）− 页脚（有作者时 ≈34 dsu）⇒ 实测约
+ * 323×456 dsu（真浏览器读数，见票 05 `## Answer`）；0.707 的框里 `object-fit: cover` 等于不裁。
+ * 页脚是 `.hero-detail` 的最后一行（与首页把页脚挂在技能面板最下方同形）：有作者时两栏矮一截，
+ * 立绘**等比**跟着缩（比例不变、仍不裁），作者空 ⇒ 节点不存在 ⇒ 恢复满高。 */
 
-.hero-detail { display: flex; flex-direction: column; gap: 4px; }
+.hero-detail { height: 100%; display: flex; flex-direction: column; }
+.hero-detail .detail-columns {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: row;
+}
+.hero-detail .detail-text {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  /* **唯一**滚动容器：文字多时只有它滚，立绘不动（登记表里的 `.hero-detail .detail-text`）。 */
+  overflow-y: auto; scrollbar-gutter: stable;
+  padding: calc(14 * var(--dsu)) calc(18 * var(--dsu)) calc(16 * var(--dsu));
+  scrollbar-width: thin; scrollbar-color: #cbb99a transparent;
+}
+.hero-detail .detail-text::-webkit-scrollbar { width: calc(10 * var(--dsu)); }
+.hero-detail .detail-text::-webkit-scrollbar-thumb {
+  background: #cbb99a; border-radius: calc(6 * var(--dsu));
+}
+.hero-detail .detail-text::-webkit-scrollbar-track { background: rgba(0, 0, 0, .04); }
+.hero-detail .detail-portrait {
+  flex: 0 0 auto;
+  position: relative; overflow: hidden;
+  height: 100%; aspect-ratio: 530 / 750;
+  background: #efe7d6;
+  border-left: 1px solid var(--line);
+}
+.hero-detail .detail-portrait img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+/* 空位只换底纹（票 02 立的全局判据：`[data-empty="1"]` 禁声明几何属性 ⇒ 版式不跳）。 */
+.hero-detail .detail-portrait[data-empty="1"] {
+  background: repeating-linear-gradient(
+    45deg, #efe7d6 0 calc(8 * var(--dsu)), #e9dfcb calc(8 * var(--dsu)) calc(16 * var(--dsu)));
+}
+/* 作者页脚（spec §3.8 / 裁决 §7①）：`.hero-detail` 的最后一个节点，外观与首页那条同源。 */
+.hero-detail .author-foot {
+  flex: 0 0 auto;
+  padding: calc(6 * var(--dsu)) calc(18 * var(--dsu)) calc(10 * var(--dsu));
+  border-top: 1px dashed var(--line);
+  font-size: calc(11 * var(--dsu)); color: var(--dim);
+}
 .hero-detail .detail-head {
   display: flex; align-items: center; flex-wrap: wrap; gap: calc(5 * var(--dsu));
   padding-bottom: 7px; border-bottom: 1px solid var(--line);

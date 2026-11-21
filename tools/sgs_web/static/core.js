@@ -300,6 +300,10 @@ const state = {
   runs: [],
   replay: null,
   heroCatalog: [],     // 将池目录：按真名分组的启用版本（`GET /api/heroes`；票 13 起分组）
+  // hero-portraits 票 02：立绘索引 = **显示名称** → `{portrait: <相对路径>|null, author: <str>}`。
+  // 唯一真源是 `GET /api/portraits`（票 01 的服务端口，每次调用现扫盘）；前端只缓存这一份，
+  // 不派生第二份（`author` 逐字、`portrait` 原样拼 `/art/`）。缺表 / 拉失败 = 空表（全空位）。
+  portraits: {},
   heroPools: null,     // 将池预设的本地编辑态 `{slots, active, selected}`（票 13；服务端存档在 runs/）
   deckCatalog: [],     // 牌堆档位列表（`GET /api/decks`）；标签 / 说明也由服务端下发
   // M7 票 20：剧本模式开局页的本地态（`script-lobby.js` 是唯一读写方；票 21 / 22 接着读
@@ -372,6 +376,74 @@ const post = (path, payload) => api(path, {
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(payload || {}),
 });
+
+/** 立绘索引（hero-portraits 票 02）：拉**一次** `GET /api/portraits`，缓存进 `state.portraits`。
+ *
+ * 键 = **显示名称**（与 `/api/heroes` 的 `version.name` 同源），值 = 票 01 那条记录
+ * `{portrait: <相对 portraits 根的路径>|null, author: <str>}`。前端零正则、零拼接：路径原样
+ * 拼 `/art/`、作者原样进节点（票 01 的 `## Answer` 已定"作者非空时逐字节原样返回"）。
+ *
+ * **fail-open 是判据**（spec §3.8 / 票 02）：拉失败 / 回包形状不对 / 出厂就没有 `pic/` 目录
+ * ⇒ 空表，**每一块武将都退回等大空位**；不抛、不写提示。立绘是锦上添花，"没有图"与"没有
+ * 这张表"必须长得一模一样。到货后重画右栏：本请求与 `/api/heroes` 并行，谁后到都要重画
+ * 一次（`main.js:wire()` 在启动时与 `loadHeroCatalog()` 一起调）。
+ */
+async function loadPortraitIndex() {
+  let heroes = {};
+  try {
+    const body = await api("/api/portraits");
+    const table = body && body.heroes;
+    if (table && typeof table === "object" && !Array.isArray(table)) heroes = table;
+  } catch (error) {
+    heroes = {};   // fail-open：立绘缺一张不该让开局页任何一块报错
+  }
+  state.portraits = heroes;
+  renderLobbyHeroPanel();
+  return heroes;
+}
+
+/** 立绘索引里某条记录：键 = **显示名称**（首页 `/api/heroes` 的 `version.name`、座位载荷的
+ *  `player.hero_name` 同源）。缺表 / 名字为空 / 形状不对 ⇒ `null`（调用方一律当"无图"）。
+ *
+ * 首页与详情窗**共用这一份查表**（hero-portraits 票 02 立的 `.portraits` 是唯一索引；
+ * 票 03 只加这一口按名字的读法，不建第二份表）。票 08 起**牌桌不再读它**——裁决 §9
+ * 「牌桌不出立绘」，牌桌那边连立绘层都没有。
+ */
+function portraitEntryFor(name) {
+  if (!name) return null;
+  const table = state.portraits;
+  if (!table || typeof table !== "object") return null;
+  const entry = table[String(name)];
+  return entry && typeof entry === "object" ? entry : null;
+}
+
+/** 立绘盒子：有图 ⇒ 一张 `<img>`；无图 ⇒ **同一个盒子的空位态**。
+ *
+ * 两态共用同一个盒子与同一套 class，只差 `data-empty` 一个属性 ⇒ 有图 / 无图两局版式不跳。
+ * **空位分支在造 `img` 之前返回**：没有 `<img>` 就没有图片请求（行为判据，不是观感）。
+ * 全前端只有这一处造 `<img>`——首页右栏（票 02）与详情窗（票 05）两个落点同源；
+ * 票 08 起牌桌不调它（裁决 §9：牌桌不出立绘）。`boxClass` **由调用方显式给**：两个落点各写
+ * 自己的 class，删掉原来那个只为牌桌 `.portrait` 层存在的默认值。
+ */
+function fillPortraitBox(box, name, boxClass) {
+  if (!box) return null;
+  box.innerHTML = "";
+  box.className = boxClass;
+  const entry = portraitEntryFor(name);
+  const path = entry && entry.portrait;
+  if (!path) {
+    box.setAttribute("data-empty", "1");
+    return null;
+  }
+  box.removeAttribute("data-empty");
+  const img = document.createElement("img");
+  img.src = `/art/${encodeURI(String(path))}`;
+  img.alt = name ? `${name} 立绘` : "立绘";
+  img.loading = "eager";
+  img.decoding = "async";
+  box.appendChild(img);
+  return img;
+}
 
 /* ------------------------------------------------------------------ 视图 */
 

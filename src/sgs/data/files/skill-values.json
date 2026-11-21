@@ -601,6 +601,14 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.qunying_luxun.lianying": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.qunying_luxun.qianxun": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.shen_caocao_mobile.feiying": {
       "enabled": true,
       "rarity": "common"

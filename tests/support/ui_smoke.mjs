@@ -207,6 +207,12 @@ const shimRect = (node) => {
   return rectOfBox(40 + (rectSeq % 12) * 100, 40 + Math.floor(rectSeq / 12) * 90, 100, 40);
 };
 
+/* hero-portraits 票 06：`<img>` 是本仓首例图片资源。垫片不加载图片，"已加载"与"固有尺寸"
+ * 只能用常量表达：有 `src` ⇒ `complete === true` 且 `naturalWidth/naturalHeight` 非零
+ * （只承诺非零，**不承诺真像素**——断言该读"有没有 / 指向哪"，不该读分辨率）。 */
+const SHIM_IMG_NATURAL_WIDTH = 750;
+const SHIM_IMG_NATURAL_HEIGHT = 1000;
+
 class El {
   constructor(tag = "div", id = "") {
     this.tagName = tag.toUpperCase(); this.id = id;
@@ -236,6 +242,24 @@ class El {
    * `$("btn-prompt-edit")` 会再造一个**不同**的空节点，点它什么都不会发生。 */
   get id() { return this._id || ""; }
   set id(v) { this._id = String(v || ""); if (this._id) registerElementId(this); }
+  /* hero-portraits 票 06：`<img>` 的读数件（挂在 `El` 上是垫片"一个类到底"的既有形状；
+   * 只有 `tagName === "IMG"` 的节点会被 `SGS_SMOKE_IMG` 认作立绘）。`src` / `alt` 与
+   * `data-*` 一样住 `attrs`——真 DOM 的属性反射：`img.src = "…"` 之后 `getAttribute("src")`
+   * 读得到同一串。`complete` 恒 true（垫片不加载图片，没有"加载中"这一态）；
+   * `naturalWidth/Height` 有 src 时给非零常量、没有时 0（与真 DOM 的"没 src ⇒ 0"同形）。 */
+  get src() { return this.getAttribute("src") ?? ""; }
+  set src(value) {
+    const text = String(value ?? "");
+    if (text) this.setAttribute("src", text); else this.removeAttribute("src");
+  }
+  get alt() { return this.getAttribute("alt") ?? ""; }
+  set alt(value) {
+    if (value === undefined || value === null) this.removeAttribute("alt");
+    else this.setAttribute("alt", String(value));
+  }
+  get complete() { return true; }
+  get naturalWidth() { return this.src ? SHIM_IMG_NATURAL_WIDTH : 0; }
+  get naturalHeight() { return this.src ? SHIM_IMG_NATURAL_HEIGHT : 0; }
   /** 活的 HTMLCollection 形状视图（真 DOM 的 `element.children`）。 */
   get children() { return this._childrenView; }
   get textContent() { return this._text + this._children.map((c) => c.textContent || c.text()).join(""); }
@@ -414,15 +438,44 @@ function registerElementId(node) {
   if (node && node.id) byId.set(String(node.id), node);
 }
 const el = (tag, id) => { const n = new El(tag, id); if (id) byId.set(id, n); return n; };
-const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
-for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a|canvas)\b[^>]*\bid="([^"]+)"/g)) {
+/* 静态节点 = `index.html` 里带 id 的标签；垫片只按这一条正则建它们（**唯一清单**），
+ * 于是"页面里有哪些静态节点"与"`$()` 能不能取到它"是同一个事实。
+ * hero-portraits 票 06：`img` 入册（本仓首例图片资源，此前静态 `<img>` 根本不会被建，
+ * `$()` 落到下面 `getElementById` 的空 div 兜底 ⇒ 立绘断言静默失明）。 */
+const STATIC_NODE_PATTERN = /<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a|canvas|img)\b([^>]*)>/g;
+const STATIC_ID_ATTR = /\bid="([^"]+)"/;
+/** 造一个静态节点并登记 id。`img` 的属性照真 DOM 反射（`src` / `alt` / `class` / `data-*` /
+ *  `hidden`）；其余标签的初始化仍按标签写在下面的循环里（既有口径一个字不动）。 */
+function buildStaticNode(tag, id, attrsText = "") {
   // chain-death-voices 票 01：`#t-self-chain` 从 `<div class="chain-line">` 换成了常驻的
   // `<canvas class="chain-mark">`——静态节点也要拿到 2D 上下文，否则常态贴图画不进去
   // （垫片的 `getElementById` 兜底只会造一个普通 div）。
-  const node = m[1] === "canvas" ? new CanvasEl() : el(m[1], m[2]);
-  if (m[1] === "canvas") { node.id = m[2]; byId.set(m[2], node); }
-  if (m[1] === "input") node.value = "0";
-  if (m[1] === "main") node.hidden = m[2] !== "view-lobby";
+  const node = tag === "canvas" ? new CanvasEl() : el(tag, id);
+  if (tag === "canvas") { node.id = id; byId.set(id, node); }
+  if (tag === "img") {
+    for (const m of attrsText.matchAll(/([A-Za-z_:][-\w:.]*)(?:="([^"]*)")?/g)) {
+      const name = m[1].toLowerCase();   // HTML 属性名大小写不敏感（真 DOM 同义）
+      if (name === "id") continue;
+      const value = m[2] ?? "";
+      node.setAttribute(name, value);
+      if (name === "class") node.className = value;
+      if (name === "hidden") node.hidden = true;
+    }
+  }
+  return node;
+}
+/** 一段 HTML 里的全部静态节点（`index.html` 与票 06 的垫片自检走**同一条**路径）。 */
+function* staticNodes(source) {
+  for (const m of source.matchAll(STATIC_NODE_PATTERN)) {
+    const idMatch = STATIC_ID_ATTR.exec(m[2]);
+    if (!idMatch) continue;
+    yield buildStaticNode(m[1].toLowerCase(), idMatch[1], m[2]);
+  }
+}
+const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
+for (const node of staticNodes(html)) {
+  if (node.tagName === "INPUT") node.value = "0";
+  if (node.tagName === "MAIN") node.hidden = node.id !== "view-lobby";
 }
 for (const id of ["in-players", "in-ai", "in-seat", "in-timeout", "in-seed"]) if (!byId.has(id)) el("input", id);
 // `<select>` 的初值 = 带 `selected` 的那个 option（真 DOM 语义）；垫片不解析 option 结构，
@@ -434,6 +487,67 @@ Object.assign(byId.get("in-ai"), { value: "heuristic" });
 Object.assign(byId.get("in-seat"), { value: "0" });
 Object.assign(byId.get("in-timeout"), { value: "0" });
 Object.assign(byId.get("in-seed"), { value: "20261012" });
+
+/* ------------- hero-portraits 票 06：`<img>` 的可核读数（`SGS_SMOKE_IMG`） -------------
+ * 立绘是本仓首例图片资源；垫片不加载图片，"有没有图 / 图对不对"只能靠这只读数。它把一次
+ * 立绘断言拆成**三档互不混淆**的答案（02 / 03 / 05 直接把它写进失败消息）：
+ *
+ *   `found: false`                 —— 连 `<img>` 都没有：空位，或 `$()` 落到了兜底的空 div
+ *                                     （那正是"静默失明"的形状，所以**必须**按 tagName 认，
+ *                                     不能只看 `.src` 在不在）；
+ *   `found: true, hasSrc: false`   —— 节点建出来了但**没 src**（"有图"那一档没接上数据）；
+ *   `src: "/art/x.jpg", art: true` —— 真的指向立绘路由。
+ *
+ * `root` 可以是节点（含自身子树）或**垫片已登记的 id**；字符串只查 `byId`，不走
+ * `getElementById` 的"缺 id 就造一个"兜底——读数不生产节点。只读，不改 DOM。
+ *
+ * 选型（票面 bullet 3）：不做"计数口"，做**逐节点读数 + 一行摘要**——立绘的判据是
+ * "这张图指向哪 / 有没有图"，不是一个总数；计数口说不清"哪一个块没图"，也分不开
+ * "没 src" 与 "div 冒充 img" 这两档。 */
+const SMOKE_IMG_ART = "/art/";
+/** 子树里第一个 `<img>`（含自身）；没有 ⇒ `null`。 */
+const smokeImgOf = (root) => {
+  const node = typeof root === "string" ? byId.get(root) || null : root || null;
+  if (!node) return null;
+  if (String(node.tagName || "").toUpperCase() === "IMG") return node;
+  for (const child of node.children || []) {
+    const found = smokeImgOf(child);
+    if (found) return found;
+  }
+  return null;
+};
+/** 一张立绘的可核读数（三档见上）。没有 `<img>` 时给一份"空读数"，断言不用先判空。 */
+const smokeImgRead = (root) => {
+  const node = smokeImgOf(root);
+  if (!node) {
+    return {
+      found: false, id: "", cls: "", src: "", hasSrc: false, art: false, alt: "",
+      complete: false, naturalWidth: 0, naturalHeight: 0,
+    };
+  }
+  const src = String(node.src || "");
+  return {
+    found: true,
+    id: String(node.id || ""),
+    cls: String(node.className || ""),
+    src,
+    hasSrc: src !== "",
+    art: src.startsWith(SMOKE_IMG_ART),
+    alt: String(node.alt || ""),
+    complete: node.complete === true,
+    naturalWidth: Number(node.naturalWidth) || 0,
+    naturalHeight: Number(node.naturalHeight) || 0,
+  };
+};
+/** 一行摘要（失败消息里直接贴）：`无 img` / `img 无 src` / `img src=/art/x.jpg art complete 750x1000 #id`。 */
+const smokeImgLine = (root) => {
+  const read = smokeImgRead(root);
+  if (!read.found) return "无 img";
+  return `img ${read.hasSrc ? `src=${read.src}` : "无 src"}${read.art ? " art" : ""}`
+    + `${read.complete ? " complete" : ""} ${read.naturalWidth}x${read.naturalHeight}`
+    + `${read.id ? ` #${read.id}` : ""}`;
+};
+const SGS_SMOKE_IMG = { find: smokeImgOf, read: smokeImgRead, line: smokeImgLine };
 
 /* damage-fx 票 06：音效开关进 `localStorage['sgs.sfx']`。node 的 vm 里没有 Storage，垫一个
  * 最简实现（初始为空 = 缺省静音）；断言直接读 `storage`（= 浏览器里真存了什么），
@@ -741,6 +855,61 @@ const setEquals = (actual, expected) => {
   const right = new Set((expected || []).map(String));
   return left.size === right.size && [...right].every((value) => left.has(value));
 };
+
+/* ------------- hero-portraits 票 06：`<img>` 的垫片自检（立绘断言的前置条件） -------------
+ * 立绘是本仓首例图片资源。这三条先证明垫片**真认得**它：02 / 03 / 05 之后每一条"有图 ⇒
+ * `img.src` 命中 `/art/`"的断言都长在这份读法上，垫片缺件时它们会静默读空串、报假绿。
+ * ① 动态节点（脚本 `createElement` 造出来的那种）；② 读数口的三档；③ 静态节点——`index.html`
+ * 里现在还没有 `<img>`，故喂一段合成 HTML 给**同一条正则 + 同一个 builder**：02 之后加进去的
+ * 静态立绘走的就是这条路径。 */
+{
+  const made = documentShim.createElement("img");
+  made.src = "/art/caocao.jpg";
+  made.alt = "曹操";
+  made.setAttribute("data-portrait", "caocao");
+  check("U-IMG-00a `createElement(\"img\")` 的 src / alt / complete / naturalWidth 都读得到（不是 undefined）",
+    made.tagName === "IMG" && made.src === "/art/caocao.jpg" && made.alt === "曹操"
+    && made.complete === true && made.naturalWidth > 0 && made.naturalHeight > 0
+    && made.getAttribute("src") === "/art/caocao.jpg"
+    && made.getAttribute("data-portrait") === "caocao",
+    `tag=${made.tagName} src=${made.src} alt=${made.alt} complete=${made.complete}`
+      + ` ${made.naturalWidth}x${made.naturalHeight}`);
+}
+{
+  const blank = documentShim.createElement("img");
+  const other = documentShim.createElement("img");
+  other.src = "data:image/png;base64,AAAA";
+  const art = documentShim.createElement("img");
+  art.src = "/art/guanyu.jpg";
+  const blankRead = SGS_SMOKE_IMG.read(blank);
+  const otherRead = SGS_SMOKE_IMG.read(other);
+  const artRead = SGS_SMOKE_IMG.read(art);
+  const divRead = SGS_SMOKE_IMG.read(documentShim.createElement("div"));
+  check("U-IMG-00b 读数口 `SGS_SMOKE_IMG` 分得开「建出来了没 src」/「src 不在 /art/」/「根本没有 img」",
+    blankRead.found === true && blankRead.hasSrc === false && blankRead.art === false
+    && blankRead.complete === true && blankRead.naturalWidth === 0
+    && otherRead.found === true && otherRead.hasSrc === true && otherRead.art === false
+    && artRead.found === true && artRead.art === true && artRead.src === "/art/guanyu.jpg"
+    && divRead.found === false,
+    `${SGS_SMOKE_IMG.line(blank)} | ${SGS_SMOKE_IMG.line(other)} | ${SGS_SMOKE_IMG.line(art)}`
+      + ` | ${SGS_SMOKE_IMG.line(documentShim.createElement("div"))}`);
+}
+{
+  // 与 `index.html` 同一条路径：同一个 `staticNodes()`、同一张 id 表（`$()` 才取得到同一个节点）。
+  const [probe] = [...staticNodes(
+    '<img id="smoke-img-probe" src="/art/__probe__.jpg" alt="探针" data-portrait="probe">',
+  )];
+  const viaDollar = $("smoke-img-probe");   // `$()` = getElementById（缺 id 时兜底造一个空 div）
+  const read = SGS_SMOKE_IMG.read(viaDollar);
+  check("U-IMG-00c 静态 `<img id=... src=...>` 被同一条静态建节点路径建出来：`$()` 取到同一个节点、src 读得到",
+    viaDollar === probe && read.found === true && read.art === true
+    && read.src === "/art/__probe__.jpg" && read.alt === "探针"
+    && !!probe && probe.getAttribute("data-portrait") === "probe",
+    `same=${viaDollar === probe} ${SGS_SMOKE_IMG.line(viaDollar)}`
+      + ` data-portrait=${probe ? probe.getAttribute("data-portrait") : "?"}`);
+  byId.delete("smoke-img-probe");           // 探针不留在垫片的 id 表里
+}
+
 /** 事件**派发点**：节点自己没有这个事件的处理器时，沿 `parentNode` 向上找最近的挂点。
  *
  *  为什么补这一条（ui-one-screen 票 04）：真浏览器里事件**冒泡** ⇒ 委托式处理器（挂在列表
@@ -822,8 +991,13 @@ const seatBox = (seat) => seatNodes().find(
  * U1-02 起自己的装备区是**固定四槽**（武器 / 防具 / 攻马 / 防马），槽位节点自己带
  * `data-card-id`；这里找"第一个装了牌的槽"，而不是第一个槽（空槽不该被点）。 */
 const selfEquipChip = () => {
-  const row = Array.from($("t-self-zones").children).find((c) => c.getAttribute("data-zone") === "equip");
-  return row ? Array.from(row.children).find((slot) => slot.getAttribute("data-card-id")) || null : null;
+  const zone = Array.from($("t-self-zones").children).find((c) => c.getAttribute("data-zone") === "equip");
+  // 票 03：装备区容器里是两行 `.slot-row`，槽在行里面 ⇒ 按后代找第一个装了牌的槽。
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  return zone ? walk(zone).find((slot) => slot.getAttribute("data-card-id")) || null : null;
 };
 const setSelect = (id, value) => {
   const node = $(id);
@@ -957,7 +1131,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
   // bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里）⇒ 版本 111 → 112、
   // 真名分组 75 不变。
-  ui.state.heroCatalog.length === 78 && catalogVersions.length === 119,
+  ui.state.heroCatalog.length === 78 && catalogVersions.length === 120,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -1266,7 +1440,7 @@ check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放
 // ui-one-screen 票 03 推翻了「三块都排在开局页正文里」这个**前提**：剧本 / 将池 / 录像
 // 搬进了同一扇面板窗（窗没开时住在 `#lobby-window-stash`，所有 `<main>` 之外），工具行三键
 // 各开一扇。判据本身不放宽：三个 id 一个都没删、不插在牌桌与回放视图之间、标签仍是垫片
-// 认识的那 16 种。
+// 认识的那 18 种（`img` 由 hero-portraits 票 06 入册）。
 {
   const lobbyText = html.slice(html.indexOf('id="view-lobby"'), html.indexOf('id="view-table"'));
   const at = (needle) => lobbyText.indexOf(needle);
@@ -1292,11 +1466,12 @@ check("M7-20b 无档：只有「新剧本」可点；「继续」置灰、「放
     `中间出现 script-panel=${between.indexOf("script-panel")}`
       + ` stash=${between.indexOf("lobby-window-stash")}`);
 
-  // 垫片只解析 16 种标签（本文件 `:373` 附近的正则）：新加的静态节点必须落在同一个白名单。
+  // 垫片只解析 18 种标签（本文件 `STATIC_NODE_PATTERN` 那条正则）：新加的静态节点必须落在
+  // 同一个白名单。`img` 由 hero-portraits 票 06 入册——02 的首页立绘就落在下面第二段切片里。
   // 切片改到**窗壳区间**（寄存格 + 窗），另加工具行与两栏里新增的两段（左边表单里有 <option>，
   // 故从将池摘要面板起切，避开下拉选项）。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
-    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas", "img"]);
   const shellAt = html.indexOf('id="lobby-window-stash"');
   const slices = [
     toolrow,
@@ -1585,8 +1760,10 @@ writeFileSync(
     boardStart > replayStart && between.indexOf("script-board") < 0
     && between.indexOf("script-node-card") < 0,
     `board=${boardStart} replay=${replayStart} 中间出现 script-board=${between.indexOf("script-board")}`);
+  // hero-portraits 票 06：`img` 进白名单（垫片认得它了），但棋盘这一段**不许用图**由下一条
+  // `!section.includes("<img")` 自己钉——两条判据分开，失败消息才指得准（"垫片不认"≠"这段不许画图"）。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
-    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas", "img"]);
   const section = html.slice(boardStart, html.indexOf("<script", boardStart));
   const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
     .map((match) => match[1].toLowerCase());
@@ -3409,8 +3586,18 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     const box = Number(seat) === Number(selfSeat) ? $("t-self-zones") : seatBox(seat);
     return box ? findZone(box, zone) : null;
   };
-  const slotsOf = (row) => Array.from((row && row.children) || [])
-    .filter((node) => node.getAttribute && node.getAttribute("data-slot"));
+  // 装备区容器现在是**两行** `.slot-row`（票 03 的 3 + 2 + 2），槽在行里面 ⇒ 按后代找。
+  const slotsOf = (row) => {
+    const out = [];
+    const walkSlots = (node) => {
+      for (const child of (node && node.children) || []) {
+        if (child.getAttribute && child.getAttribute("data-slot")) out.push(child);
+        walkSlots(child);
+      }
+    };
+    walkSlots(row);
+    return out;
+  };
   const slotsWith = (row, name) => slotsOf(row).filter((slot) => slot.classList.contains(name));
   // 该区域节点后代里一共几个禁止角标（角标是槽的子节点，不是新的区块）。
   const bansIn = (node, out = []) => {
@@ -9244,24 +9431,22 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 }
 
 
-/* ============ U1-01 布局壳：2 / 4 / 6 / 8 人环桌几何 ============
+/* ============ U1-01 布局壳：2 / 4 / 6 / 8 人环桌几何（hero-portraits 票 04 改贴边马蹄）============
  *
- * 判据落在 **renderTable 写出的 `data-ring-*` 设计坐标**上（不是另算一份布局）：
- * 座位数 = 总人数 − 1（自己不在环上）、座号 +1 在最右、角度沿上半弧递增、
- * 8 人局 7 个对手在 210×150 下**无正面积重叠**、2 人局只有正上方一个对手。
- * U2-02 / D6：+8% 的 228×163 只在 8 人局破功（U1-01d2 钉住），故实际外形保持 210×150。
+ * 判据落在 **renderTable 写出的 `data-ring-*` 与 inline style** 上（不是另算一份布局）：
+ * 座位数 = 总人数 − 1（自己不在环上）、座号 +1 在最右、`data-ring-t`（沿马蹄周长走过的距离）
+ * 相邻差恒等、8 人局 7 个对手在 263×188 下**无正面积重叠**、2 人局只有正上方一个对手。
+ * 椭圆那套 `data-ring-angle` 已随票 04 删除（这里顺带钉住它没被重新加回来）。
  * 设计坐标无重叠 ⇔ 1920×1080 与 1280×720 都无重叠：座位宽 / 高随壳宽与设计单位同比例缩放。
  */
 {
   const savedView = ui.state.view;
   const savedLog = ui.state.logRecords;
-  const designStage = { width: 1600, height: 608 };
-  // U2-02 / D6：对手「+8%」的 228×163 在 8 人环上会重叠（见 U1-01d2），故取票面允许的回退——
-  // 座位卡**外形保持 210×150**、只放大内容；矩形判据因此按实际外形算。
-  const seatW = 210;
-  const seatH = 150;
-  const grownSeatW = 228;
-  const grownSeatH = 163;
+  const designStage = { width: 1600, height: 579 };   // 900 − 顶栏 55.8 − 底栏 265（票 04）
+  // 座位外矩形 263×188（210×150 的 +25%，裁决 Q16）；尺寸的真源是 `table.js:RING_SEAT`，
+  // 下面 U1-01e3 断的就是它写进 inline style 的那两个百分比。
+  const seatW = 263;
+  const seatH = 188;
   const ringView = (count, selfSeat = 0) => ({
     seed: 1, player_count: count, human_seat: selfSeat, finished: false, timeout_seconds: null,
     // `serve.py` 的响应里 `heroes` 是 list（按座位下标取）；合成视图同形，别用对象冒充。
@@ -9291,7 +9476,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   };
   const ringSeats = () => Array.from($("t-seats").children).map((node) => ({
     seat: Number(node.getAttribute("data-seat")),
-    angle: Number(node.getAttribute("data-ring-angle")),
+    t: Number(node.getAttribute("data-ring-t")),
+    angle: node.getAttribute("data-ring-angle"),
     x: Number(node.getAttribute("data-ring-x")),
     y: Number(node.getAttribute("data-ring-y")),
   }));
@@ -9318,33 +9504,48 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         && $("t-self-seat").getAttribute("data-seat") === "0"
         && $("t-self-seat").classList.contains("me"),
       `环上 ${$("t-seats").children.length} / 座号 ${seats.map((item) => item.seat).join(",")}`);
-    check(`U1-01b ${count} 人：座位号 +1 在自己的右手边（−30° 的右下邻座）`,
+    check(`U1-01b ${count} 人：座位号 +1 在自己的右手边（环上最右那一席）`,
       count === 2
         ? seats[0] && Math.abs(seats[0].x - designStage.width / 2) < 0.01
-        : Math.abs(seats[0].angle + 30) < 0.01
-          && seats[0].x > designStage.width / 2
-          && Math.abs(seats[0].y - Math.max(...seats.map((item) => item.y))) < 0.01
+          && Math.abs(seats[0].y - seatH / 2 - 16) < 0.02   // 2 人局那一席在上横边正中
+        : seats[0].x > designStage.width / 2
+          && Math.abs(seats[0].x - Math.max(...seats.map((item) => item.x))) < 0.01
           && seats[seats.length - 1].x < designStage.width / 2,
-      seats.map((item) => `${item.seat}:${item.angle}° x=${item.x.toFixed(1)}`).join(" "));
-    // "均布"不能只断单调：相邻角差必须相等（票面「按 N 边形均布」）。
-    const gaps = seats.slice(1).map((item, index) => item.angle - seats[index].angle);
-    check(`U1-01c ${count} 人：对手沿上半弧按座号逆时针均布`,
-      seats.every((item, index) => (index === 0 ? true : item.angle > seats[index - 1].angle))
-        && seats.every((item) => item.angle >= -30.01 && item.angle <= 210.01)
-        && (count === 2
-          ? seats[0].angle === 90
-          : Math.abs((seats[seats.length - 1].angle - seats[0].angle) - 240) < 0.01)
-        && (gaps.length === 0 || gaps.every((gap) => Math.abs(gap - gaps[0]) < 0.01)),
-      `${seats.map((item) => `${item.seat}:${item.angle}`).join(" ")} / 间距 ${gaps.map((gap) => gap.toFixed(2)).join(",")}`);
-    check(`U1-01d ${count} 人：对手座位无正面积重叠（210×150 回退外形 / 设计尺寸）`,
+      seats.map((item) => `${item.seat}:x=${item.x.toFixed(1)} t=${item.t.toFixed(1)}`).join(" "));
+    // 椭圆那套角度读数已删（票 04）：环上不许再挂 `data-ring-angle`，否则是两套几何并存。
+    check(`U1-01b2 ${count} 人：` + "`data-ring-angle` 已随椭圆删除，改读沿周长的 `data-ring-t`",
+      seats.every((item) => item.angle === undefined && Number.isFinite(item.t)),
+      seats.map((item) => `${item.seat}:angle=${item.angle} t=${item.t}`).join(" "));
+    // "均布"不能只断相邻差：沿马蹄周长（右竖边 → 上横边 → 左竖边）的位移必须**逐段相等**，
+    // 且第一席在半个档距处。这是纯几何读数，与 `test_web_static.py` 的纯函数单测同一口径。
+    const vertical = designStage.height - seatH - 32;
+    const horizontal = designStage.width - seatW - 32;
+    const perimeter = vertical * 2 + horizontal;
+    const step = perimeter / (count - 1);
+    const gaps = seats.slice(1).map((item, index) => item.t - seats[index].t);
+    check(`U1-01c ${count} 人：对手沿马蹄周长等距（档距 = 周长 ${perimeter} / ${count - 1}）`,
+      gaps.length === 0 || gaps.every((gap) => Math.abs(gap - step) < 0.01),
+      `t=${seats.map((item) => item.t.toFixed(1)).join(",")} / 间距 ${gaps.map((gap) => gap.toFixed(2)).join(",")} 档距=${step.toFixed(2)}`);
+    check(`U1-01d ${count} 人：对手座位无正面积重叠（263×188，裁决 Q16）`,
       overlaps(seats).length === 0, overlaps(seats).join("、") || "无重叠");
     if (count === 8) {
-      // 把票面 D6 的原尺寸跑同一套矩形判据：相邻角 40° ⇒ |dx| = 680·(cos(-30°) − cos 10°) ≈ 80.8、
-      // |dy| = 235·(sin 10° + sin 30°) ≈ 158.3，两者都小于 228×163 → 外形不变的回退有据可依。
-      const grown = overlaps(seats, grownSeatW, grownSeatH);
-      check("U1-01d2 8 人：D6 的 228×163 会与两组相邻座位重叠 → 回退为外形不变的依据",
-        grown.join("、") === "1/2、6/7",
-        grown.join("、") || "（228×163 也不重叠——回退就无从谈起）");
+      // 裁决 §4 的读数是"最近一对中心距 227 dsu"（原型现算）。这里从**真渲染**的坐标现算同一
+      // 读数：它同时是"再放大就顶死"（椭圆 1.00× / 马蹄 1.34×）的余量凭证。
+      let nearest = Infinity;
+      for (let i = 0; i < seats.length; i += 1) {
+        for (let j = i + 1; j < seats.length; j += 1) {
+          nearest = Math.min(nearest, Math.hypot(seats[i].x - seats[j].x, seats[i].y - seats[j].y));
+        }
+      }
+      check("U1-01d2 8 人：最近一对中心距 = 227 dsu（裁决 §4 的读数；7 席在 263×188 下不重叠）",
+        Math.abs(nearest - 227) < 1,
+        `最近一对 ${nearest.toFixed(2)} dsu`);
+      // 横向吃满：最左 / 最右的盒子边正好压在马蹄内边距上（16…1584）。
+      const left = Math.min(...seats.map((item) => item.x)) - seatW / 2;
+      const right = Math.max(...seats.map((item) => item.x)) + seatW / 2;
+      check("U1-01d3 8 人：马蹄横向吃满（座位占用 x 16…1584）",
+        Math.abs(left - 16) < 0.01 && Math.abs(right - (designStage.width - 16)) < 0.01,
+        `x ${left.toFixed(1)}…${right.toFixed(1)}`);
     }
     if (count > 2) {
       const first = seats[0];
@@ -9353,8 +9554,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         Math.abs(first.x + last.x - designStage.width) < 0.01 && Math.abs(first.y - last.y) < 0.01,
         `${first.x.toFixed(1)}+${last.x.toFixed(1)} / y ${first.y.toFixed(1)}、${last.y.toFixed(1)}`);
     }
-    // 渲染路径：`left/top` 百分比必须就是设计坐标 / 1600×608（CSS 的尺寸 / 位移由
-    // 真浏览器截图核，DOM 垫片没有布局引擎）。
+    // 渲染路径：`left/top` 百分比必须就是设计坐标 / 1600×579（CSS 的位移由真浏览器截图核，
+    // DOM 垫片没有布局引擎）。
     const placed = Array.from($("t-seats").children).map((node) => ({
       left: parseFloat(node.style.left),
       top: parseFloat(node.style.top),
@@ -9363,6 +9564,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       placed.every((item, index) => Math.abs(item.left - (seats[index].x / designStage.width) * 100) < 0.01
         && Math.abs(item.top - (seats[index].y / designStage.height) * 100) < 0.01),
       placed.map((item) => `${item.left}%/${item.top}%`).join(" "));
+    // 外矩形也从 `table.js:RING_SEAT` 写进 inline style（CSS 里一个数都不留，票 04 的单一真源）。
+    const boxes = Array.from($("t-seats").children).map((node) => ({
+      width: node.style.width,
+      height: node.style.height,
+    }));
+    check(`U1-01e3 ${count} 人：座位盒 = 263×188 的环区百分比（16.4375% × 32.4698%）`,
+      boxes.every((item) => item.width === "16.4375%" && item.height === "32.4698%"),
+      boxes.map((item) => `${item.width}/${item.height}`).join(" "));
   }
 
   // 自己不是 0 号位时，环从「自己 + 1」开始编号（座位 +1 仍在右手边）。
@@ -9447,11 +9656,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
 /* ============ U1-02 座位卡 / 武将块 / 卡面 ============
  *
- * 票面判据（`issues/02`；U2-02 按 D6 放大）：
- * - 对手**外形** 210×150（D6 的 228×163 在 8 人环上重叠，回退为外形不变、只放大内容）、
- *   自己 292×210；左武将块收窄 30%（右块 100 / 130）；判定行 33 / 48、装备行 42 / 60；
+ * 票面判据（`issues/02`；U2-02 按 D6 放大；hero-portraits 票 04 再放大到 263×188 并改贴边马蹄）：
+ * - 对手**外形** 210×150 → **263×188**（+25%，裁决 Q16；尺寸真源搬进 `table.js:RING_SEAT`，
+ *   CSS 只留外观）、自己 292×210 → **330×238**；分隔比例不变（右块 125.24/263 与 146.9/330 =
+ *   47.62% / 44.52%）；判定行 33 / 48、装备行 42 / 60 已由票 03 的 flex 均分取代；
  * - 处理区 / 舞台卡面与手牌**同一套** 88×124 + 字号 14/11/20/9（不再有第二套小牌面规则）；
- *   舞台面板封顶 300（顶边 220 > 顶座下沿 210）、处理区一行 124 纵向滚动，不盖住环桌顶座；
+ *   舞台面板封顶 360、中心 67.6% × 579.2 = 391.5（顶边 211.5 > 顶排下沿 204）、处理区一行 124
+ *   纵向滚动，不盖住环桌顶排座位；
  * - 体力分段 + current/max，上限 ≥6 只显 x/x；判定 3 槽、装备四槽；手牌数 / 座位号在 footer；
  * - 身份：主公明置、其余暗置 `?`、自己恒可见、阵亡亮明；无身份局不画 `?`；
  * - 横置「-------」虚线 / 酒泛红（无「酒」字）/ 大号「阵亡」叠加不互挡；
@@ -9561,31 +9772,38 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   };
 
   /* ---- CSS：设计尺寸 / 收窄 / 槽高 / 高亮环 ---- */
-  check("U1-02a CSS：对手外形 210×150（D6 的 228×163 回退为外形不变）、自己 292×210（设计比例 + 设计舞台）",
-    /\.ring \.seat\s*\{[^}]*width:\s*13\.125%[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)
-      && !/aspect-ratio:\s*228\s*\/\s*163/.test(css)
-      && /\.seat\.self\s*\{[^}]*flex:\s*0 0 18\.25%[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css),
-    `ring=${/\.ring \.seat\s*\{[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)} grown=${/aspect-ratio:\s*228\s*\/\s*163/.test(css)} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css)}`);
-  check("U1-02b CSS：左武将块收窄 30%（右块 100 / 130 = 47.62% / 44.52%；对手外形回退不变）",
+  // hero-portraits 票 04：对手的外矩形**不在 CSS 里**（真源 `table.js:RING_SEAT`，渲染时写成
+  // inline 百分比，U1-01e3 钉住）。CSS 这条只留外观，并且不许再长出 width / aspect-ratio；
+  // 自己的座位是底栏里的静态节点，仍是 CSS 的 330×238（264×190 的 +25%，裁决 Q18）。
+  check("U1-02a CSS：对手外形不在 CSS（真源 table.js:RING_SEAT）、自己 330×238（+25%）",
+    !/width:/.test((css.match(/\.ring \.seat\s*\{[^}]*\}/s) || [""])[0])
+      && !/aspect-ratio:/.test((css.match(/\.ring \.seat\s*\{[^}]*\}/s) || [""])[0])
+      && !/13\.125%/.test(css.replace(/\/\*[\s\S]*?\*\//g, ""))
+      && /\.seat\.self\s*\{[^}]*flex:\s*0 0 calc\(330 \* var\(--dsu\)\)[^}]*aspect-ratio:\s*330\s*\/\s*238/s.test(css),
+    `ring=${JSON.stringify((css.match(/\.ring \.seat\s*\{[^}]*\}/s) || [""])[0])} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*330\s*\/\s*238/s.test(css)}`);
+  // 分隔比例**没动**：对手 125.24 / 263 = 47.62%（票 04 前是 100 / 210，同一个比例），
+  // 自己 146.9 / 330 = 44.52%（票 04 前是 130 / 292）。盒子长大了，比例照旧。
+  check("U1-02b CSS：左武将块收窄 30%（右块 125.24 / 263 与 146.9 / 330 = 47.62% / 44.52%）",
     /\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)
       && /\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css),
     `ring=${/\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)} self=${/\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css)}`);
-  check("U1-02c CSS：对手内容放大（判定行 36 / 装备行 42、槽位字 10 / 标签 9）——外形仍 210×150",
-    /\.seat \.judge-row\s*\{[^}]*calc\(36 \* var\(--dsu\)\)/s.test(css)
-      && /\.seat \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(42 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot\s*\{[^}]*font-size:\s*calc\(10 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(36 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css),
-    `judge=${/calc\(36 \* var\(--dsu\)\)/.test(css)} equip=${/calc\(42 \* var\(--dsu\)\)/.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} label=${/\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9/s.test(css)}`);
-  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 判定 52 / 装备 60 / 槽位字 13 / 标签 12）",
+  check("U1-02c CSS：判定 / 装备 7 格改成 3 + 2 + 2 三行铺满（槽尺寸由 flex 给，旧的 36 / 42 删掉）",
+    /\.slot-row\s*\{[^}]*display:\s*flex[^}]*flex:\s*1 1 0/s.test(css)
+      && /\.equip-rows\s*\{[^}]*flex-direction:\s*column[^}]*flex:\s*2 1 0/s.test(css)
+      && /\.seat \.side-block\s*\{[^}]*gap:\s*4px[^}]*padding:\s*5px/s.test(css)
+      && /\.mini-slot\s*\{[^}]*flex:\s*1 1 0[^}]*font-size:\s*calc\(10 \* var\(--dsu\)\)/s.test(css)
+      && !/\.mini-slot(?:\.[\w-]+)*\s*\{[^}]*[;\s]height\s*:/s.test(css)
+      && /\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css)
+      && !/grid-auto-rows:\s*calc\(42 \* var\(--dsu\)\)/.test(css),
+    `row=${/\.slot-row\s*\{[^}]*flex:\s*1 1 0/s.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} old=${/calc\(42 \* var\(--dsu\)\)/.test(css)}`);
+  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 槽位字 13 / 标签 12）+ 同一套三行铺满",
     /\.self \.hero-name\s*\{[^}]*font-size:\s*calc\(20 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.hp-num\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.judge-row\s*\{[^}]*calc\(52 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(60 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.side-block\s*\{[^}]*gap:\s*6px[^}]*padding:\s*8px/s.test(css)
       && /\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(52 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css),
-    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} judge=${/\.self \.judge-row\s*\{[^}]*calc\(52/s.test(css)} equip=${/\.self \.equip-grid\s*\{[^}]*calc\(60/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
+      && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css)
+      && !/grid-auto-rows:\s*calc\(60 \* var\(--dsu\)\)/.test(css),
+    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} side=${/\.self \.side-block\s*\{[^}]*padding:\s*8px/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
   check("U1-02c3 CSS：处理区 / 舞台卡面与手牌同一套 88×124 + 字号 14/11/20/9（0.63 版覆盖已删，只有一套卡面规则）",
     /\.card\.face\s*\{[^}]*width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
       && /\.card\.face \.suit\s*\{[^}]*font-size:\s*calc\(14 \* var\(--dsu\)\)/s.test(css)
@@ -9596,26 +9814,31 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !/calc\(56 \* var\(--dsu\)\)/.test(css)
       && !/calc\(79 \* var\(--dsu\)\)/.test(css)
       && /\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)
-      && /\.table-bottom\s*\{[^}]*flex:\s*0 0 27\.5%/s.test(css),
-    `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*27\.5%/s.test(css)}`);
-  // U3-01：舞台面板下移 + 加宽 + 封顶 360（spec D3）：
-  // 圆心 64.47% × 608 = 392；360 上限 ⇒ 顶边 392 − 180 = 212 > 顶座下沿 210；
-  // 40% 宽 = 640 设计单位，横跨 480–1120，不压左右座位（中心 212 / 1388、卡宽 210）；
+      && /\.table-bottom\s*\{[^}]*flex:\s*0 0 calc\(265 \* var\(--dsu\)\)/s.test(css),
+    `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*265/s.test(css)}`);
+  // U3-01：舞台面板下移 + 加宽 + 封顶 360（spec D3）。hero-portraits 票 04 换了环区：
+  // 舞台实际高 900 − 55.8（顶栏 6.2%）− 265（底栏）= 579.2，中心 67.6% × 579.2 = 391.5；
+  // 360 上限 ⇒ 顶边 391.5 − 180 = 211.5 > 顶排座位下沿 204（= 马蹄内边距 16 + 座位高 188）；
+  // 底边 571.5 ≤ 579.2。64.47%（按 608 算的老数）在新环区上给出 193.3，会压进顶排 10.7 dsu。
+  // 40% 宽 = 640 设计单位，横跨 480–1120，两臂座位占 16…279 / 1321…1584，不压侧座；
   // 舞台行限两行卡面（253 = 124×2 + 5）纵向滚动、说明最多 2 行。
   const stageRule = css.match(/\.stage-center\s*\{[^}]*\}/s);
   const stageMax = stageRule && /max-height:\s*calc\((\d+) \* var\(--dsu\)\)/.exec(stageRule[0]);
   const stageTop = stageRule && /top:\s*(\d+(?:\.\d+)?)%/.exec(stageRule[0]);
-  const ringCenterY = (Number(stageTop ? stageTop[1] : 0) / 100) * 608;
-  const topSeatBottom = 370 - 235 + 150 / 2;
+  const stageHeight = 900 - 6.2 / 100 * 900 - 265;      // 579.2
+  const ringCenterY = (Number(stageTop ? stageTop[1] : 0) / 100) * stageHeight;
+  const topSeatBottom = 16 + 188;                        // 顶排座位下沿（票 04 的环区坐标）
   const panelTop = ringCenterY - Number(stageMax ? stageMax[1] : 0) / 2;
-  check("U1-02c4 CSS：舞台宽 40%、面板封顶 360、中心下移到 64.47%（顶边 212 > 顶座下沿 210），舞台行两行卡面（253）纵向滚动、说明最多 2 行",
-    !!stageMax && Math.abs(ringCenterY - 392) < 0.5 && panelTop > topSeatBottom
+  const panelBottom = ringCenterY + Number(stageMax ? stageMax[1] : 0) / 2;
+  check("U1-02c4 CSS：舞台宽 40%、面板封顶 360、中心在 67.6%（顶边 211.5 > 顶排下沿 204、底边 571.5 ≤ 579.2），舞台行两行卡面（253）纵向滚动、说明最多 2 行",
+    !!stageMax && Math.abs(ringCenterY - 391.5) < 0.5 && panelTop > topSeatBottom
+      && panelBottom <= stageHeight + 1e-6
       && /\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)
       && /\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)
       && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(253 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
       && /\.stage-center \.processing\s*\{[^}]*align-content:\s*flex-start/s.test(css)
       && /\.stage-center \.context\s*\{[^}]*-webkit-line-clamp:\s*2/s.test(css),
-    `centerY=${ringCenterY} panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} width=${/\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)} row=${/max-height:\s*calc\(253 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
+    `centerY=${ringCenterY.toFixed(1)} panelTop=${panelTop.toFixed(1)} panelBottom=${panelBottom.toFixed(1)} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} width=${/\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)} row=${/max-height:\s*calc\(253 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
   check("U1-02d CSS：可指定 = 5px 绿外圈、已选 = 4px 绿内圈、悬停浅绿、行动中 = 金框，当前 + 合法有绿角点",
     /\.seat\.targetable:not\(\.tsel\)\s*\{[^}]*0 0 0 5px var\(--ok\)/s.test(css)
       && /\.seat\.tsel::before\s*\{[^}]*inset 0 0 0 4px var\(--ok\)/s.test(css)
@@ -12334,20 +12557,172 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       })(),
     `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
   const ownDetail = $("t-modal-body").children[0];
-  const ownSections = ownDetail ? Array.from(ownDetail.children).map((node) => node.className) : [];
-  check("U1-06k 详情结构：武将技能在上 → 分割线 → 装备技能在下",
-    ownSections.includes("detail-section hero-skills")
+  const ownColumns = ownDetail ? byClass(ownDetail, "detail-columns")[0] || null : null;
+  const ownText = ownColumns ? byClass(ownColumns, "detail-text")[0] || null : null;
+  const ownPortrait = ownColumns ? byClass(ownColumns, "detail-portrait")[0] || null : null;
+  const ownColumnsKids = ownColumns ? Array.from(ownColumns.children) : [];
+  const ownSections = ownText ? Array.from(ownText.children).map((node) => node.className) : [];
+  check("U1-06k 详情结构：两栏（左文右图），技能清单在文字栏里（武将技 → 分割线 → 装备技）",
+    !!ownColumns && !!ownText && !!ownPortrait
+      && ownColumnsKids[0] === ownText && ownColumnsKids[1] === ownPortrait
+      && Array.from(ownDetail.children)[0] === ownColumns
+      && ownSections.includes("detail-section hero-skills")
       && ownSections.includes("detail-divider")
       && ownSections.includes("detail-section equip-skills")
       && ownSections.indexOf("detail-section hero-skills") < ownSections.indexOf("detail-divider")
       && ownSections.indexOf("detail-divider") < ownSections.indexOf("detail-section equip-skills"),
-    ownSections.join(","));
+    `columns=[${ownColumnsKids.map((node) => node.className).join(",")}] sections=${ownSections.join(",")}`);
   check("U1-06l 详情读到该座位的技能与描述（武将技 + 装备技）",
     $("t-modal-body").text().includes("己方技")
       && $("t-modal-body").text().includes("己方技的描述。")
       && $("t-modal-body").text().includes("己方装备")
       && !$("t-modal-body").text().includes("敌方技"),
     $("t-modal-body").text().replace(/\s+/g, " ").slice(0, 120));
+
+  /* ---- hero-portraits 票 05：右栏立绘 / 作者页脚 / 描述同源（两栏的另外三条判据） ----
+   *
+   * 立绘与作者都按座位的**显示名称**（`player.hero_name`）查 `state.portraits`（票 02 的缓存，
+   * 与 `/api/portraits` 同源）；垫片不加载图片，读数走 `SGS_SMOKE_IMG`（三档：无 img / 有 img
+   * 无 src / src 指向 /art/）。几何那半边（`aspect-ratio` / `flex: 0 0 auto` / 文字栏是唯一
+   * 滚动容器）由 `test_web_static.py` 从 `style.css` 读——垫片没有排版引擎，这里只钉结构。
+   */
+  {
+    const root = () => $("t-modal-body").children[0];
+    const textColumn = () => byClass(root() || $("t-modal-body"), "detail-text")[0] || null;
+    const portraitOf = () => byClass(root() || $("t-modal-body"), "detail-portrait")[0] || null;
+    const footNodes = () => byClass(root() || $("t-modal-body"), "author-foot");
+    const versionByName = (name) => ui.state.heroCatalog
+      .flatMap((group) => group.versions)
+      .find((version) => version.name === name) || null;
+    const portraitPath = "关羽/关羽/关羽.jpg";
+    const authorText = "  张三 · 李四　（画） ";
+    const portraitsBefore = ui.state.portraits;   // 端点那份真索引：读完要原样还回去（HP2-01 会核）
+    ui.state.portraits = { "关羽": { portrait: portraitPath, author: authorText } };
+    detailView.snapshot.players[0].hero_name = "关羽";
+    ui.renderPending(detailView);
+
+    // ① 有图 ⇒ 右栏一张 `<img>`，src 指向 `/art/`、路径逐字取自索引。
+    const filled = SGS_SMOKE_IMG.read(portraitOf());
+    check("HP5-01 有图武将 ⇒ 右栏里一张 src 指向 /art/ 的 img（路径取自 /api/portraits 索引）",
+      !!portraitOf() && filled.found && filled.art && filled.hasSrc
+        && decodeURI(filled.src.slice("/art/".length)) === portraitPath,
+      `${SGS_SMOKE_IMG.line(portraitOf())} 索引=${portraitPath}`);
+
+    // ② 立绘不在文字栏里 ⇒ 文字栏自己滚、立绘不动（结构判据；垫片量不了矩形）。
+    check("HP5-02 立绘不在文字栏里（文字栏是唯一滚动容器，立绘不跟着滚）",
+      !!textColumn() && SGS_SMOKE_IMG.find(textColumn()) === null
+        && !!portraitOf() && portraitOf().parentNode === root().children[0]
+        && textColumn() !== portraitOf(),
+      `文字栏里有 img=${SGS_SMOKE_IMG.find(textColumn()) !== null}`
+        + ` 立绘父节点=${portraitOf() && portraitOf().parentNode && portraitOf().parentNode.className}`);
+
+    // ③ 无图（界关羽）⇒ 没有 img、空位节点在、`data-empty="1"`、class 与有图时相同。
+    const filledClass = String(portraitOf().className);
+    detailView.snapshot.players[0].hero_name = "界关羽";
+    ui.renderPending(detailView);
+    const empty = SGS_SMOKE_IMG.read(portraitOf());
+    check("HP5-03 无图（界关羽）⇒ 右栏没有 img、空位节点在、data-empty=\"1\"（同一个盒子）",
+      !!portraitOf() && !empty.found
+        && String(portraitOf().className) === filledClass
+        && portraitOf().getAttribute("data-empty") === "1",
+      `img=${empty.found} class="${portraitOf() && portraitOf().className}"`
+        + ` data-empty=${portraitOf() && portraitOf().getAttribute("data-empty")}`);
+
+    // ④ 描述同源：详情逐字等于首页右栏（同一份 `/api/heroes` 裁切文本），不含实现注记。
+    //    取样「界关羽」= 技能里带「本仓实现」注记的那一版（票 02 的裁切口径第一次有读数）。
+    const version = versionByName("界关羽");
+    const ownSkillsBefore = detailView.snapshot.players[0].skills;
+    detailView.snapshot.players[0].skills = (version ? version.skills : []).map((skill) => ({
+      skill_id: skill.id, name: skill.name, skill_type: "NORMAL", locked: false,
+      carrier: "HERO", description: skill.description, ui: { passive: false },
+    }));
+    ui.renderPending(detailView);
+    const detailTexts = byClass(textColumn(), "detail-skill")
+      .map((row) => (row.children[1] ? row.children[1].textContent : ""));
+    const pointjiangBefore = $("in-pointjiang").checked;
+    $("in-pointjiang").checked = true;
+    $("in-my-hero").value = version ? version.id : "";
+    ui.fillHeroOptions();
+    const lobbyTexts = byClass($("lobby-skill-list"), "sd").map((node) => node.textContent);
+    $("in-pointjiang").checked = pointjiangBefore;
+    check("HP5-04 两处同源：详情描述逐字等于首页右栏（同一份服务端裁切版），不含「本仓实现 / 本仓裁定」",
+      !!version && detailTexts.length > 0 && detailTexts.length === lobbyTexts.length
+        && detailTexts.every((text, at) => text === lobbyTexts[at])
+        && detailTexts.every((text) => !text.includes("本仓实现") && !text.includes("本仓裁定")),
+      `详情 ${detailTexts.length} 条 / 右栏 ${lobbyTexts.length} 条 / 带注记 `
+        + `${detailTexts.filter((text) => text.includes("本仓")).length} 条`);
+    detailView.snapshot.players[0].skills = ownSkillsBefore;
+
+    // ⑤ 作者页脚：非空 ⇒ `.hero-detail` 的最后一个节点、文本逐字；空 ⇒ 一个节点都没有。
+    detailView.snapshot.players[0].hero_name = "关羽";
+    ui.renderPending(detailView);
+    const feet = footNodes();
+    check("HP5-05 author 非空 ⇒ 页脚是 `.hero-detail` 的最后一个节点、文本与索引值逐字相同",
+      feet.length === 1 && feet[0].textContent === authorText
+        && root().lastChild === feet[0],
+      `页脚 ${feet.length} 个 / last=${root().lastChild === feet[0]}`
+        + ` / 文本逐字=${feet.length === 1 && feet[0].textContent === authorText}`);
+    ui.state.portraits = {};
+    ui.renderPending(detailView);
+    check("HP5-06 author 空 ⇒ 一个页脚节点都没有（不是渲染空 div；换人后旧页脚也摘掉）",
+      footNodes().length === 0, `页脚 ${footNodes().length} 个`);
+
+    // ⑥ spec §3.8：作者文件缺 **或空白** 都算没有作者。上一条只钉了"条目缺失"，
+    //    这里给同一个显示名称一条**存在但 author 是空串**的索引记录（`作者.txt` 只有空白
+    //    时服务端就是这样下发的），走真渲染入口 `renderHeroDetailBody()`：页脚仍是零节点，
+    //    正文（头部 / 技能栏 / 立绘）照旧渲染。
+    ui.state.portraits["关羽"] = { portrait: portraitPath, author: "" };
+    vm.runInContext("renderHeroDetailBody()", context);
+    const blankFoots = footNodes();
+    const blankFilled = SGS_SMOKE_IMG.read(portraitOf());
+    check("HP5-06b author 是空串但条目存在 ⇒ 仍一个页脚节点都没有（零节点，不是空 div），正文照旧",
+      blankFoots.length === 0
+        && !!root() && !!textColumn() && !!portraitOf()
+        && blankFilled.found && blankFilled.art
+        && String(root().textContent || "").includes("关羽"),
+      `页脚 ${blankFoots.length} 个 / 正文=${!!root()} 文字栏=${!!textColumn()}`
+        + ` 立绘=${blankFilled.found} ${SGS_SMOKE_IMG.line(portraitOf())}`);
+
+    // 复位：后续用例回到原来的合成载荷（hero_name / 索引都还原；skills 上面已还原）。
+    delete detailView.snapshot.players[0].hero_name;
+    ui.state.portraits = portraitsBefore;
+    ui.renderPending(detailView);
+  }
+
+  // ⑥ 真载荷读数（两处同源的**线上**半边）：开一局真会话，人类座位详情里的每一行描述
+  //    必须逐字等于 `/api/heroes` 里同一个 skill id 的描述——两处都读服务端那一个裁切口。
+  {
+    const liveView = await newSession(31, { player_count: 5 });
+    const humanSeat = Number(liveView.snapshot.seat);
+    fireContext(heroBlockOf(humanSeat));
+    const human = liveView.snapshot.players
+      .find((item) => Number(item.seat) === humanSeat) || null;
+    const version = ui.state.heroCatalog.flatMap((group) => group.versions)
+      .find((item) => item.name === (human && human.hero_name)) || null;
+    const catalog = new Map(((version && version.skills) || [])
+      .map((skill) => [skill.id, skill.description]));
+    const rows = byClass($("t-modal-body"), "detail-skill")
+      .map((row) => ({
+        id: row.getAttribute("data-skill-id"),
+        text: row.children[1] ? row.children[1].textContent : "",
+      }));
+    const shared = rows.filter((row) => catalog.has(row.id));
+    check("HP5-07 真会话：详情每一行描述逐字等于 /api/heroes 同一条（两处同源，线上读数）",
+      !!version && shared.length > 0
+        && shared.every((row) => row.text === catalog.get(row.id))
+        && shared.every((row) => !row.text.includes("本仓实现") && !row.text.includes("本仓裁定")),
+      `武将=${human && human.hero_name} 同源行=${shared.length}/${rows.length}`
+        + ` 带注记=${shared.filter((row) => row.text.includes("本仓")).length} 条`);
+    // 回到"详情开着"的状态：后面的 U1-06m…p 仍在这个合成载荷上读。
+    fireDocument("keydown", { key: "Escape" });
+    ui.state.sessionId = null;
+    ui.state.view = detailView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(detailView);
+    fireContext(heroBlockOf(0));
+  }
+
   const detailRegions = ["table-topbar", "table-stage", "table-bottom", "t-modal"];
   check("U1-06m 详情是检视窗：没有任何区域 inert / aria-hidden；开合不改变只读态（无弹窗 ⇒ 选择仍可用）",
     detailRegions.every((id) => $(id).getAttribute("inert") === undefined
@@ -12366,12 +12741,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     })(),
     `hidden=${$("t-countdown").hidden} phase=${$("t-countdown").getAttribute("data-phase")}`);
 
-  // 正文可滚轮翻阅：同一询问里重画（轮询 / 刷新）不把用户读到的位置拉回顶部。
-  $("t-modal-body").scrollTop = 77;
+  // 文字栏可滚轮翻阅（票 05 起滚动容器 = 左栏；立绘不在里面）：同一询问里重画
+  // （轮询 / 刷新）不把读到的位置拉回顶部，也不许从正文槽里"借"位置。
+  const scrollColumn = () => byClass($("t-modal-body"), "detail-text")[0] || null;
+  scrollColumn().scrollTop = 77;
+  $("t-modal-body").scrollTop = 5;
   ui.renderPending(detailView);
-  check("U1-06n2 详情重画保留滚动位置（可滚轮翻阅不被打断）",
-    $("t-modal").hidden === false && $("t-modal-body").scrollTop === 77,
-    `hidden=${$("t-modal").hidden} scrollTop=${$("t-modal-body").scrollTop}`);
+  check("U1-06n2 详情重画保留**文字栏**的滚动位置（正文槽不再是滚动容器）",
+    $("t-modal").hidden === false && scrollColumn().scrollTop === 77
+      && $("t-modal-body").scrollTop === 5,
+    `hidden=${$("t-modal").hidden} text=${scrollColumn().scrollTop}`
+      + ` body=${$("t-modal-body").scrollTop}`);
 
   const beforeDetailEsc = calls.length;
   fireDocument("keydown", { key: "Escape" });
@@ -12404,7 +12784,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 
   // 换座位：滚动位置不沿用（上一个详情的 offset 不该带到另一个武将身上）。
-  $("t-modal-body").scrollTop = 77;
+  // 上一步 ESC 已把详情关掉 ⇒ 先在同一座位上重新打开，滚动位置才有"上一份"可继承。
+  fireContext(heroBlockOf(0));
+  scrollColumn().scrollTop = 77;
+  const scrollAtOwn = scrollColumn().scrollTop;
   fireContext(heroBlockOf(1));
   const enemyText = $("t-modal-body").text();
   check("U1-06p 右键对手武将块 = 对手详情（读到对手的技能，不串到自己的）",
@@ -12413,8 +12796,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && enemyText.includes("敌方武器")
       && enemyText.includes("八卦阵")
       && !enemyText.includes("己方技")
-      && $("t-modal-body").scrollTop === 0,
-    `${enemyText.replace(/\s+/g, " ").slice(0, 140)} scrollTop=${$("t-modal-body").scrollTop}`);
+      && scrollAtOwn === 77 && scrollColumn().scrollTop === 0,
+    `${enemyText.replace(/\s+/g, " ").slice(0, 140)}`
+      + ` scrollTop=${scrollAtOwn}→${scrollColumn().scrollTop}`);
   const beforeBackdrop = calls.length;
   const detailBackdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
   ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
@@ -12444,10 +12828,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // 右键装备 / 判定 / 手牌不动作；牌桌外壳仍屏蔽浏览器右键菜单。
   {
-    const equipSlot = Array.from($("t-self-zones").children)
-      .find((row) => row.getAttribute("data-zone") === "equip").children[0];
-    const judgeSlot = Array.from($("t-self-zones").children)
-      .find((row) => row.getAttribute("data-zone") === "judge").children[0];
+    const zoneSlot = (zone) => {
+      const box = Array.from($("t-self-zones").children)
+        .find((row) => row.getAttribute("data-zone") === zone);
+      const walk = (node, out = []) => {
+        for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+        return out;
+      };
+      return box ? walk(box).find((node) => node.getAttribute("data-slot")) || null : null;
+    };
+    const equipSlot = zoneSlot("equip");
+    const judgeSlot = zoneSlot("judge");
     const handChip = $("t-hand").children[0];
     fireContext(equipSlot);
     fireContext(judgeSlot);
@@ -23279,18 +23670,18 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     floatNodes().length === 0,
     `floats=${floatNodes().length}`);
 
-  // ---- 判定行缺失时退回装备格（同一块区域上方的空隙） ----
+  // ---- 判定行缺失时退回装备区（同一块区域上方的空隙） ----
   load([timingRecord(110, "PHASE_DRAW_START", 1)]);
   const judge1Node = judgeRow(1);
   if (judge1Node && judge1Node.parentNode) judge1Node.parentNode.removeChild(judge1Node);
   step();
   const equipFallback = floatNodes()[0] || null;
   const equipNode = seatNode(1)
-    ? walk(seatNode(1)).find((node) => hasClass(node, "equip-grid")) : null;
+    ? walk(seatNode(1)).find((node) => hasClass(node, "equip-rows")) : null;
   const equipRect = equipNode ? equipNode.getBoundingClientRect() : null;
-  check("U4-04-n 对手没有判定行时退回 .equip-grid[data-seat]（同一块区域上方）",
+  check("U4-04-n 对手没有判定行时退回 .equip-rows[data-seat]（同一块区域上方）",
     Boolean(equipFallback) && Boolean(equipRect)
-      && attr(equipFallback, "data-anim-phase-anchor") === "equip-grid"
+      && attr(equipFallback, "data-anim-phase-anchor") === "equip-rows"
       && px(equipFallback.style.top) < equipRect.top
       && Math.abs(px(equipFallback.style.left) - (equipRect.left + equipRect.width / 2)) < 1e-6,
     `anchor=${equipFallback && attr(equipFallback, "data-anim-phase-anchor")}`
@@ -31801,8 +32192,10 @@ check("M7-25a 进编辑器 = 一次 GET /api/script-library：整库 / revision 
   const boardStart = html.indexOf('id="view-script-board"');
   const editorStart = html.indexOf('id="view-script-editor"');
   const between = html.slice(tableStart, replayStart);
+  // hero-portraits 票 06：同 M7-21b——`img` 进白名单（垫片认得它了），编辑器这一段**不许用图**
+  // 仍由下面那条 `!section.includes("<img")` 自己钉。
   const allowedTags = new Set(["input", "select", "button", "span", "div", "ol", "section",
-    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas"]);
+    "main", "form", "p", "h1", "h2", "h3", "nav", "code", "a", "canvas", "img"]);
   const section = html.slice(editorStart, html.indexOf("<script", editorStart));
   const tags = [...section.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<([a-zA-Z][\w-]*)/g)]
     .map((match) => match[1].toLowerCase());
@@ -32635,6 +33028,347 @@ $("script-confirm-backdrop").hidden = true;
     `scroll=${scrolls} left=${leftAt} start=${startAt} right=${rightAt} skill=${skillAt}`);
 }
 
+/* ============ hero-portraits 票 02：首页右栏点将（立绘 + 作者页脚）============
+ *
+ * 判据（票面 `## 判据`）：
+ *   ① 有图武将 ⇒ `#lobby-portrait` 里一张 `<img>`，`src` 指向 `/art/`；
+ *   ② 无图武将（界关羽）⇒ **没有 img**、空位节点在、`data-empty="1"`；
+ *   ③ 有图 / 无图两局的外框同口径——垫片**没有排版引擎**，量不了矩形，故这条不假装量几何，
+ *      钉的是"版式不跳"的机械半边：**同一个节点**、**同一套 class**、两次渲染**只差
+ *      `data-empty` 一个属性**；另外半边（声明盒 `aspect-ratio: 530 / 750` + `height: 100%`
+ *      无固定宽）由 `test_web_static.py` 从 `style.css` 的同一条规则读；
+ *   ④ 右栏描述是**裁切版**：`#lobby-skill-list .sd` 不含「本仓实现 / 本仓裁定」，
+ *      且逐条等于 `/api/heroes` 下发的 `description`（服务端 `display_skill_description`）；
+ *   ⑤ 作者页脚：`author` 空 ⇒ `#lobby-author` 一个节点都没有（不是空 div）；非空 ⇒ 文本与
+ *      索引里的值**逐字相同**（不裁不拼）、是 `#lobby-heroskills` 的最后一个子节点；
+ *   ⑥ 启动时真的拉过一次 `GET /api/portraits`（`state.portraits` 与端点回包同键）；
+ *   ⑦ 端点失败 ⇒ fail-open 到全空位：不抛、不写提示、不发图片请求；
+ *   ⑧ 将池列表一行都不铺图（首页同一时刻最多一张图）。
+ *
+ * 资源来源：本机 `pic/portraits/` 有 87 张图，但 `pic/` 是 gitignored——公开仓 / CI 没有它。
+ * 故除 ⑥（真端点）与 ⑦（真断网）外，喂的是**与 `/api/portraits` 同形的索引**（有图一条、
+ * 界关羽删掉、作者一条），渲染走 `lobby.js` 的生产路径，不另写一份实现。
+ */
+{
+  const portraitBox = () => $("lobby-portrait");
+  const portraitRead = () => SGS_SMOKE_IMG.read(portraitBox());
+  const authorNodes = () => Array.from($("lobby-heroskills").children)
+    .filter((child) => child.id === "lobby-author");
+  const versionByName = (name) => ui.state.heroCatalog
+    .flatMap((group) => group.versions)
+    .find((version) => version.name === name) || null;
+  const guanyu = versionByName("关羽");
+  const jieGuanyu = versionByName("界关羽");
+  const skillsPanel = $("lobby-heroskills");
+
+  check("HP2-00 取样齐了：将池目录里有「关羽」与「界关羽」两版（判据的两侧）",
+    !!guanyu && !!jieGuanyu, `关羽=${!!guanyu} 界关羽=${!!jieGuanyu}`);
+
+  // ⑥ main.js:wire() 里与 loadHeroCatalog() 一起拉的那一次（真端点、真回包）。
+  const api = await get("/api/portraits");
+  check("HP2-01 首页启动时拉过一次 /api/portraits，state.portraits 与端点回包同键",
+    !!api.heroes && typeof api.heroes === "object"
+      && setEquals(Object.keys(ui.state.portraits || {}), Object.keys(api.heroes)),
+    `端点 ${Object.keys(api.heroes || {}).length} 条 / 缓存 `
+      + `${Object.keys(ui.state.portraits || {}).length} 条`);
+
+  // 同形索引：有图（本地有真路径就用真的）+ 无图（界关羽 = 33 个空位之一）+ 作者。
+  const apiEntry = (api.heroes || {})["关羽"] || {};
+  const portraitPath = apiEntry.portrait || "关羽/关羽/关羽.jpg";
+  const authorText = "  张三 · 李四　（画） ";
+  const index = Object.assign({}, api.heroes || {}, {
+    "关羽": { portrait: portraitPath, author: authorText },
+  });
+  delete index["界关羽"];
+  ui.state.portraits = index;
+  $("in-pointjiang").checked = true;
+  $("in-my-hero").value = guanyu ? guanyu.id : "";
+  ui.fillHeroOptions();   // 换人 ⇒ 右栏按生产路径重画
+
+  const box = portraitBox();
+  const filled = portraitRead();
+  const filledClass = String(box.className);
+  const filledAttrKeys = Object.keys(box.attrs || {}).sort();
+  const filledFoot = authorNodes();
+  check("HP2-02 有图武将 ⇒ #lobby-portrait 里一张 src 指向 /art/ 的 img（路径取自索引）",
+    !!guanyu && filled.found && filled.art && filled.hasSrc && filled.complete
+      && decodeURI(filled.src.slice("/art/".length)) === portraitPath,
+    `${SGS_SMOKE_IMG.line(box)} 索引=${portraitPath}`);
+
+  check("HP2-03 author 非空 ⇒ #lobby-author 是技能的最后一个子节点、文本与索引值逐字相同",
+    filledFoot.length === 1 && filledFoot[0].classList.contains("author-foot")
+      && skillsPanel.lastChild === filledFoot[0]
+      && filledFoot[0].textContent === authorText,
+    `页脚 ${filledFoot.length} 个 / last=${skillsPanel.lastChild === filledFoot[0]}`
+      + ` / 文本逐字=${filledFoot.length === 1 && filledFoot[0].textContent === authorText}`);
+
+  // ② 无图：同一个节点、同一套 class、只差 data-empty。
+  $("in-my-hero").value = jieGuanyu ? jieGuanyu.id : "";
+  ui.fillHeroOptions();
+  const emptyBox = portraitBox();
+  const empty = portraitRead();
+  const emptyAttrKeys = Object.keys(emptyBox.attrs || {}).sort();
+  const onlyEmptyAttr = emptyAttrKeys.length === filledAttrKeys.length + 1
+    && emptyAttrKeys.filter((key) => key !== "data-empty").join(",") === filledAttrKeys.join(",");
+  check("HP2-04 无图（界关羽）⇒ 没有 img、空位节点在、data-empty=\"1\"",
+    !!jieGuanyu && !empty.found && String(emptyBox.className).trim().length > 0
+      && emptyBox.getAttribute("data-empty") === "1",
+    `img=${empty.found} class="${emptyBox.className}"`
+      + ` data-empty=${emptyBox.getAttribute("data-empty")}`);
+
+  check("HP2-05 有图 / 无图两局的外框同口径：同一个节点、同一套 class、只差 data-empty",
+    emptyBox === box && String(emptyBox.className) === filledClass
+      && filledClass.split(/\s+/).filter(Boolean).join(",") === "portrait-box"
+      && onlyEmptyAttr && emptyBox.getAttribute("data-empty") === "1",
+    `节点相同=${emptyBox === box} class="${filledClass}"→"${emptyBox.className}"`
+      + ` 属性 ${filledAttrKeys.join(",") || "（无）"} / ${emptyAttrKeys.join(",") || "（无）"}`);
+
+  check("HP2-06 author 空 ⇒ #lobby-author 一个节点都没有（换人之后旧页脚也被摘掉）",
+    authorNodes().length === 0, `页脚 ${authorNodes().length} 个`);
+
+  // ④ 描述裁切：挑一个技能最多的版本，逐条对 `/api/heroes` 的 desc。
+  const skillVersion = ui.state.heroCatalog
+    .flatMap((group) => group.versions)
+    .filter((version) => (version.skills || []).length >= 2)
+    .sort((a, b) => b.skills.length - a.skills.length)[0] || guanyu;
+  $("in-my-hero").value = skillVersion ? skillVersion.id : "";
+  ui.fillHeroOptions();
+  const descriptions = byClass($("lobby-skill-list"), "sd").map((node) => node.textContent);
+  const dataDescriptions = ((skillVersion || {}).skills || [])
+    .map((skill) => skill.description);
+  check("HP2-07 右栏描述用裁切版：.sd 不含「本仓实现 / 本仓裁定」，逐条等于 /api/heroes 的 desc",
+    descriptions.length === dataDescriptions.length && descriptions.length > 0
+      && descriptions.every((text) => !text.includes("本仓实现") && !text.includes("本仓裁定"))
+      && descriptions.every((text, at) => text === dataDescriptions[at]),
+    `技能 ${descriptions.length} 条 / 带注记 `
+      + `${descriptions.filter((text) => text.includes("本仓")).length} 条`);
+
+  // ⑧ 将池列表一行都不铺图（首页同一时刻最多一张图）。
+  check("HP2-08 将池列表不铺立绘（renderHeroPool 没长立绘）",
+    SGS_SMOKE_IMG.find($("hero-pool")) === null
+      && SGS_SMOKE_IMG.find($("lobby-skill-list")) === null,
+    `列表=${SGS_SMOKE_IMG.line($("hero-pool"))}`
+      + ` 技能区=${SGS_SMOKE_IMG.line($("lobby-skill-list"))}`);
+
+  // ⑦ 断网 ⇒ fail-open 到全空位（不抛、不写提示）。fetch 临时换成永远 reject 的假实现。
+  const hintBefore = $("lobby-hint").textContent;
+  let loadError = null;
+  vm.runInContext(`
+    globalThis.__hp02Fetch = fetch;
+    fetch = () => Promise.reject(new Error("offline"));
+  `, context);
+  try {
+    await vm.runInContext("loadPortraitIndex()", context);
+  } catch (error) {
+    loadError = error;
+  }
+  vm.runInContext("fetch = globalThis.__hp02Fetch; delete globalThis.__hp02Fetch;", context);
+  const afterFail = portraitRead();
+  check("HP2-09 /api/portraits 失败 ⇒ fail-open 到全空位：不抛、不写提示、不发图片请求",
+    loadError === null && Object.keys(ui.state.portraits || {}).length === 0
+      && !afterFail.found && portraitBox().getAttribute("data-empty") === "1"
+      && authorNodes().length === 0 && $("lobby-hint").textContent === hintBefore,
+    `抛=${loadError ? loadError.message : "无"}`
+      + ` 索引=${Object.keys(ui.state.portraits || {}).length} 条 img=${afterFail.found}`
+      + ` hint 不变=${$("lobby-hint").textContent === hintBefore}`);
+}
+
+/* ============ hero-portraits 票 03：对局武将块（边框带 + 3/2/2 格子）============
+ *
+ * 判据全部是**结构**（父 / 子关系）与 `SGS_SMOKE_IMG` 的读数，**不读坐标**：垫片没有排版
+ * 引擎，几何那半边由 `test_web_static.py` 的声明盒判据（边框带 / 药丸的 CSS）与上一条
+ * fx 夹具用例（`_rect` 钉真矩形）各钉一半。
+ *
+ * 票 08（裁决 §9：用户改判「牌桌不出立绘」）把本块的立绘断言**全部反过来**：
+ * `HP3-04` / `HP3-06` / `HP3-09` / `HP3-10` 现在断言"牌桌块里没有 img"（有图 / 无图两种武将都断言），
+ * `HP3-15` 用真计数（包一层 `document.createElement` 数造出来的 img）证明牌桌侧零 `/art/` 请求。
+ *
+ * 资源来源同 HP2：`pic/` 是 gitignored，公开仓 / CI 没有它 ⇒ 索引由本用例喂一份**与
+ * `/api/portraits` 同形**的表（有图一条、无图一条），渲染走 `seat-view.js` / `table.js`
+ * 的生产路径；真端点的同键那一半由 HP2-01 钉。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const kidsOf = (node) => Array.from((node && node.children) || []);
+  const kids = (node, name) => kidsOf(node).filter((child) => hasClass(child, name));
+  const one = (node, name) => kids(node, name)[0] || null;
+  const seatNode = (seat) => kidsOf($("t-seats"))
+    .find((node) => attr(node, "data-seat") === String(seat)) || null;
+  const blockOf = (seat) => {
+    const box = seatNode(seat);
+    return box ? walk(box).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const sideOf = (seat) => {
+    const box = seatNode(seat);
+    return box ? walk(box).find((node) => hasClass(node, "side-block")) || null : null;
+  };
+  const player = (seat, name, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 3, hand_limit: 5, alive: true,
+    equip: [], judge: [], identity: "rebel", identity_label: "反",
+    kingdom: "shu", kingdom_label: "蜀",
+    hero_name: name, markers: [], hero_zones: [], hero_tags: [], ...extra,
+  });
+  const portraitPath = "关羽/关羽/关羽.jpg";
+  const renderHeroes = (first, second) => {
+    const view = synthView(null);
+    view.snapshot.players = [
+      player(0, first), player(1, first, {
+        markers: [{ name: "护驾", count: 2, source_seat: 0, source_label: "座位 1" }],
+      }), player(2, second),
+    ];
+    view.snapshot.turn_seat = 0;
+    ui.state.sessionId = "hero-portraits-03";
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.state.portraits = { "关羽": { portrait: portraitPath, author: "" } };
+    ui.renderTable();
+  };
+
+  renderHeroes("关羽", "界关羽");
+  const block = blockOf(1);
+  const top = one(block, "hb-top");
+  const bottom = one(block, "hb-bottom");
+  const chips = one(block, "hb-chips");
+  check("HP3-01 对手武将块 = 上边框带 + 下边框带 + 药丸列（三块各一个，次序固定；没有立绘层）",
+    Boolean(block) && Boolean(top) && Boolean(bottom) && Boolean(chips)
+      && one(block, "portrait") === null
+      && kidsOf(block).indexOf(top) < kidsOf(block).indexOf(bottom)
+      && kidsOf(block).indexOf(bottom) < kidsOf(block).indexOf(chips)
+      && kidsOf(block).filter((node) => hasClass(node, "hero-zones")).length === 0,
+    `block=${!!block} portrait=${one(block, "portrait") !== null} top=${!!top}`
+      + ` bottom=${!!bottom} chips=${!!chips}`);
+
+  const topNames = walk(top).map((node) => String(node.className || ""));
+  check("HP3-02 势力 / 名称 / 身份都在 .hb-top 里（势力 → 名称 → 身份的次序不变）",
+    Boolean(top) && one(top, "kingdom") !== null
+      && one(top, "hero-name") !== null && one(top, "hero-name").textContent === "关羽"
+      && one(top, "identity-badge") !== null
+      && topNames.join("|").indexOf("kingdom") < topNames.join("|").indexOf("hero-name")
+      && topNames.join("|").indexOf("hero-name") < topNames.join("|").indexOf("identity-badge"),
+    `top=${JSON.stringify(topNames)}`);
+
+  const hpBar = one(bottom, "hp-bar");
+  check("HP3-03 体力条在 .hb-bottom 里（不再是块的直接子节点：动效仍按 `.hp-bar` 量、父节点换了）",
+    Boolean(bottom) && Boolean(hpBar) && hpBar === walk(bottom).find((n) => hasClass(n, "hp-bar"))
+      && !kidsOf(block).some((node) => hasClass(node, "hp-bar"))
+      && kidsOf(hpBar).filter((node) => hasClass(node, "hp-seg")).length === 4
+      && (hpBar.textContent || "").includes("4/4"),
+    `bar=${!!hpBar} 段=${kidsOf(hpBar).filter((node) => hasClass(node, "hp-seg")).length}`);
+
+  // 票 08：有图武将（关羽在索引里）也不许在牌桌块里画图——索引有记录 = 证明"不是没数据"。
+  const filled = SGS_SMOKE_IMG.read(block);
+  const filledImgs = walk(block).filter((node) => String(node.tagName || "").toUpperCase() === "IMG");
+  check("HP3-04 有图武将（关羽，索引里有 /art/ 路径）⇒ 牌桌块里没有 img、也没有立绘层",
+    Boolean(block) && !filled.found && filledImgs.length === 0
+      && one(block, "portrait") === null
+      && Boolean((ui.state.portraits || {})["关羽"]),
+    `索引=${portraitPath} ⇒ 块里 ${SGS_SMOKE_IMG.line(block)} img=${filledImgs.length}`);
+
+  const chipsText = chips ? chips.textContent || chips.text() : "";
+  check("HP3-05 手牌 / 座位读数与「标记行」都在 .hb-chips 里（浅色药丸压在块面上）",
+    Boolean(chips) && chipsText.includes("手牌：3/5")
+      && chipsText.includes("座位 1") && chipsText.includes("护驾×2")
+      && one(chips, "seat-foot") !== null
+      && one(chips, "hero-zones") !== null && one(chips, "seat-tags") !== null
+      && !walk(top).some((node) => hasClass(node, "seat-foot"))
+      && !walk(bottom).some((node) => hasClass(node, "seat-foot")),
+    `chips="${String(chipsText).replace(/\s+/g, " ").trim().slice(0, 90)}"`);
+
+  // 无图：同样没有 img（不是"换成空位盒子"——牌桌上这一层整个不存在），边框带照旧。
+  const emptyBlock = blockOf(2);
+  const empty = SGS_SMOKE_IMG.read(emptyBlock);
+  check("HP3-06 无图（界关羽）⇒ 同样没有 img、也没有空位盒子（两态都不在牌桌上出现）",
+    Boolean(emptyBlock) && !empty.found && one(emptyBlock, "portrait") === null
+      && Boolean(one(emptyBlock, "hb-top")) && Boolean(one(emptyBlock, "hb-bottom")),
+    `块里 ${SGS_SMOKE_IMG.line(emptyBlock)} portrait=${one(emptyBlock, "portrait") !== null}`
+      + ` 边框带=${Boolean(one(emptyBlock, "hb-top")) && Boolean(one(emptyBlock, "hb-bottom"))}`);
+
+  // 判定 / 装备 7 格 = 3 + 2 + 2（判定行 1 份、装备区 2 份、区里两行各 1 份）。
+  const sideShape = (side) => {
+    const judge = one(side, "judge-row");
+    const equip = one(side, "equip-rows");
+    const rows = equip ? kids(equip, "slot-row") : [];
+    const slotsOf = (node) => walk(node).filter((child) => attr(child, "data-slot") !== undefined);
+    return {
+      children: kidsOf(side).length,
+      judgeZone: attr(judge, "data-zone"),
+      judgeSlots: judge ? slotsOf(judge).length : 0,
+      equipZone: attr(equip, "data-zone"),
+      rows: rows.length,
+      rowSlots: rows.map((row) => slotsOf(row).length).join(","),
+      equipSlots: equip ? slotsOf(equip).length : 0,
+    };
+  };
+  const foeShape = sideShape(sideOf(1));
+  check("HP3-07 对手的判定 / 装备区 = 三行 3 + 2 + 2（第一行判定、装备两行各 2，槽满铺）",
+    foeShape.children === 2 && foeShape.judgeZone === "judge" && foeShape.judgeSlots === 3
+      && foeShape.equipZone === "equip" && foeShape.rows === 2 && foeShape.rowSlots === "2,2"
+      && foeShape.equipSlots === 4,
+    JSON.stringify(foeShape));
+
+  const selfShape = sideShape($("t-self-zones"));
+  check("HP3-08 自己的判定 / 装备区同一套三行（同一份 `sideBlockRows`）",
+    selfShape.children === 2 && selfShape.judgeZone === "judge" && selfShape.judgeSlots === 3
+      && selfShape.equipZone === "equip" && selfShape.rows === 2 && selfShape.rowSlots === "2,2"
+      && selfShape.equipSlots === 4,
+    JSON.stringify(selfShape));
+
+  // 自己的座位：静态节点里**没有**立绘盒子（票 08 把 `#t-self-portrait` 整个摘掉），
+  // 有图武将也不会在牌桌上画出来——索引里仍留着关羽那一条。
+  const selfBlock = $("t-self-hero");
+  const selfFilled = SGS_SMOKE_IMG.read(selfBlock);
+  check("HP3-09 自己的座位：有图武将也不建立绘层（#t-self-portrait 静态节点已摘掉，块里没有 img）",
+    Boolean(selfBlock) && !byId.has("t-self-portrait") && !selfFilled.found
+      && one(selfBlock, "portrait") === null
+      && Boolean((ui.state.portraits || {})["关羽"]),
+    `#t-self-portrait=${byId.has("t-self-portrait")}`
+      + ` 块里 ${SGS_SMOKE_IMG.line(selfBlock)} 索引=${portraitPath}`);
+  renderHeroes("界关羽", "界关羽");
+  const selfEmpty = SGS_SMOKE_IMG.read($("t-self-hero"));
+  check("HP3-10 自己换到无图武将 ⇒ 同一个块仍是空白纸色（无 img、无空位盒子）",
+    !selfEmpty.found && one($("t-self-hero"), "portrait") === null
+      && !byId.has("t-self-portrait"),
+    `块里 ${SGS_SMOKE_IMG.line($("t-self-hero"))}`
+      + ` 空位盒子=${one($("t-self-hero"), "portrait") !== null}`);
+
+  // 牌桌不向 /art/ 发请求：**真计数**，不是 tagName 抽查——把垫片的 `createElement` 包一层，
+  // 数整桌重绘期间造出来的 `<img>`（造出来就一定会发图片请求）。索引里塞**有图**记录
+  // （自己 / 对手都是关羽），空转不可能通过。
+  renderHeroes("关羽", "关羽");
+  const createdTags = [];
+  const realCreateElement = documentShim.createElement;
+  documentShim.createElement = (tag) => {
+    createdTags.push(String(tag).toLowerCase());
+    return realCreateElement(tag);
+  };
+  try {
+    ui.renderTable();
+  } finally {
+    documentShim.createElement = realCreateElement;
+  }
+  // `createdTags` 非空 = 这一层包装**真的**看着整桌重绘（否则"零 img"会是一条空转断言）。
+  const createdImgs = createdTags.filter((tag) => tag === "img");
+  const artOnTable = walk($("t-seats")).concat(walk($("t-self-hero")))
+    .filter((node) => String(node.tagName || "").toUpperCase() === "IMG"
+      && String(node.src || "").startsWith("/art/"));
+  check("HP3-15 牌桌整桌重绘期间一张 img 都没造 ⇒ 牌桌侧零 /art/ 请求（首页 / 详情仍会发，那是它们的）",
+    createdTags.length > 0 && createdImgs.length === 0 && artOnTable.length === 0
+      && Boolean((ui.state.portraits || {})["关羽"]),
+    `重绘期间造节点=${createdTags.length}（其中 img=${createdImgs.length}）`
+      + ` 桌面上指向 /art/ 的节点=${artOnTable.length} 索引=${portraitPath}`);
+
+  ui.state.portraits = {};
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 /* ============ ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）============
  *
  * 判据全部走**真 DOM**：固定的筛选区（搜索框 / 五颗势力复选 / 全开关键 / 读数）+ 委托的
@@ -33408,6 +34142,212 @@ await clickAndWait($("btn-lobby-pool"));
   await discardScriptSave();
   unlinkSync(SCRIPT_LOADOUT_LIBRARY);
   ui.state.script.board = null;
+}
+
+
+/* ============ hero-portraits 票 03：体力条搬进下边框带之后，飘字仍落在块内、不压边框带 ======
+ *
+ * 机制（实测口径，不是百分比猜）：`damageFxNumberKeepOut` / `vitalFxNumberKeepOut` 量的仍是
+ * `.hp-bar` 的**下沿**（相对武将块左上角），fx 侧再按「硬线 + 2~3% 牌高」反推包围盒。
+ * 体力条搬到**下边框带**之后硬线落在 ~98% 牌高处：
+ *   - `damage` 三族（fx-core / fx-fire / fx-thunder）的 `belowCenter` 贴底夹紧会把盒子拉回
+ *     牌内、落在带上方（本用例钉住它，票 03 不改这三族）；
+ *   - `vital` 两族（fx-heal / fx-hp-loss）原来只把顶边放在硬线下方 ⇒ 盒子会压进不透明带、
+ *     甚至越出块底（实测：263×188 的块上 `numberBox` = 165.4…225.4）。票 03 给它们多读一个
+ *     **带的上沿**（`numberKeepOutTop`）并把盒子改到带上方；旧版式没有这条带 ⇒ 行为不变。
+ *
+ * 这里钉**真矩形**：垫片的 `getBoundingClientRect` 读 `_rect` 缓存（与 U4-04 同一套夹具），
+ * 给 263×188 的块 / 18 高的下边框带 / 带里的体力条各钉一块；渲染与开演走真入口
+ * （`fireDamageEventsThrough` / `fireVitalEventsThrough` / `fireHpLossEventsThrough`，与
+ * `stepPlayback` 调的是同一组函数），读数取模块自己写出来的 `metrics` 与层上的 `data-*`。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name) || String(node.className || "").split(/\s+/).includes(name)));
+  /** 垫片矩形 = `getBoundingClientRect` 的 `_rect` 缓存（与 U4-04 的夹具同一套；用完即弃）。 */
+  const pinRect = (node, left, top, width, height) => {
+    if (!node) return null;
+    node._rect = { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
+    return node;
+  };
+  const seatNode = (seat) => Array.from($("t-seats").children)
+    .find((node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockOf = (seat) => {
+    const box = seatNode(seat);
+    return box ? walk(box).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  // 真矩形：块 263×188 @ (100,100)；下边框带贴底 18 高；带里的体力条 10 高。
+  const BLOCK = { left: 100, top: 100, width: 263, height: 188 };
+  const BAND_TOP = 170;        // 270 − 100：不透明带的上沿（相对块顶）
+  const BAR_BOTTOM = 184;      // 284 − 100：体力条下沿 = 动效的硬线
+  const pinHeroGeometry = () => {
+    const block = heroBlockOf(1);
+    const bands = block ? walk(block).filter((node) => hasClass(node, "hb-bottom")) : [];
+    const bars = block ? walk(block).filter((node) => hasClass(node, "hp-bar")) : [];
+    const band = bands[0] || null;
+    const bar = bars[0] || null;
+    pinRect(block, BLOCK.left, BLOCK.top, BLOCK.width, BLOCK.height);
+    pinRect(band, BLOCK.left, BLOCK.top + BAND_TOP, BLOCK.width, 18);
+    pinRect(bar, BLOCK.left + 8, BLOCK.top + 174, 200, 10);
+    return { block, band, bar };
+  };
+  const keepOut = vm.runInContext("damageFxNumberKeepOut", context);
+  const healKeepOut = vm.runInContext("vitalFxNumberKeepOut", context);
+  const healKeepOutTop = vm.runInContext("vitalFxNumberKeepOutTop", context);
+  const layerOf = (id) => $(id);
+  const readNumber = (id) => ({
+    keepOut: Number(attr(layerOf(id), "data-damage-fx-keep-out")),
+    top: Number(attr(layerOf(id), "data-damage-fx-number-top")),
+    height: Number(attr(layerOf(id), "data-damage-fx-number")),
+  });
+  const insideAndAbove = (box) => {
+    const top = Number(box.top);
+    const bottom = Number(box.bottom);
+    return Number.isFinite(top) && Number.isFinite(bottom)
+      && top >= -0.05 && bottom <= BLOCK.height + 0.05
+      && bottom <= BAND_TOP + 0.05
+      && (top + bottom) / 2 > BLOCK.height / 2;
+  };
+  const runTimers = () => {
+    let steps = 0;
+    while (steps < 400 && pendingTimers.size) {
+      const [id, fn] = Array.from(pendingTimers.entries())[0];
+      pendingTimers.delete(id); timerDelays.delete(id); timerDue.delete(id);
+      if (typeof fn === "function") fn();
+      runFrame();
+      steps += 1;
+    }
+    return steps;
+  };
+
+  // 一局两人：座位 0 = 自己（静态块），座位 1 = 对手（环上的块，几何由 `_rect` 钉）。
+  const player = (seat, name) => ({
+    seat, hp: 3, hp_max: 4, hand_count: 2, hand_limit: 4, alive: true,
+    equip: [], judge: [], identity: null, kingdom: "shu", kingdom_label: "蜀",
+    hero_name: name, markers: [], hero_zones: [], hero_tags: [],
+  });
+  const renderTable = () => {
+    const view = synthView(null);
+    view.snapshot.players = [player(0, "郭嘉"), player(1, "周瑜")];
+    view.snapshot.turn_seat = 0;
+    ui.state.sessionId = "hero-portraits-03-fx";
+    ui.state.view = view;
+    ui.state.damageEvents = [];
+    ui.state.lifeLossEvents = [];
+    ui.resetSelection();
+    ui.renderTable();
+  };
+
+  renderTable();
+  const geometry = pinHeroGeometry();
+  check("HP3-11 硬线仍量 `.hp-bar` 的下沿（DOM 真值）：搬进下边框带后 = 184（带的上沿 = 170）",
+    Boolean(geometry.block) && Boolean(geometry.band) && Boolean(geometry.bar)
+      && keepOut(geometry.block, 1) === BAR_BOTTOM
+      && healKeepOut(geometry.block, 1) === BAR_BOTTOM
+      && healKeepOutTop(geometry.block, 1) === BAND_TOP,
+    `damage=${keepOut(geometry.block, 1)} vital=${healKeepOut(geometry.block, 1)}`
+      + ` 带上沿=${healKeepOutTop(geometry.block, 1)}`);
+
+  // ---- 伤害（fx-core 三族）：盒子被贴底夹紧拉回牌内、落在带上方 ----
+  const realDamage = windowShim.SgsDamageFX.create;
+  const damageRuns = [];
+  windowShim.SgsDamageFX.create = (canvas, options) => {
+    const fx = realDamage(canvas, options);
+    damageRuns.push({ fx, options });
+    return fx;
+  };
+  ui.state.damageEvents = [{ seq: 1, source: null, target: 1, amount: 1, nature: "NORMAL" }];
+  vm.runInContext("fireDamageEventsThrough(Infinity)", context);
+  const damageMetrics = damageRuns[0] ? damageRuns[0].fx.metrics : null;
+  const damageBox = damageMetrics ? damageMetrics.numberBox : null;
+  const damageStartBox = damageMetrics ? damageMetrics.numberStartBox : null;
+  const damageRead = readNumber("t-damage-fx");
+  check("HP3-12 伤害飘字：包围盒整个在块内、在边框带上方、落在下半张（读数三层同源）",
+    Boolean(damageBox) && insideAndAbove(damageBox)
+      && Math.abs(Number(damageRead.top) - Number(damageBox.top)) < 0.06
+      && Math.abs(Number(damageRead.height) - Number(damageBox.height)) < 0.06
+      && Math.abs(damageRead.keepOut - BAR_BOTTOM) < 0.06
+      && damageRuns[0].options.numberKeepOut === BAR_BOTTOM,
+    damageBox
+      ? `box=${Number(damageBox.top).toFixed(1)}..${Number(damageBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} 块=${BLOCK.height} 层读数=${JSON.stringify(damageRead)}`
+      : "没有开演");
+  // 票 03 复核：硬线（条下沿 = 184）压在带里，**起飘那一帧**（rise = 0）的盒子也必须整个在
+  // 带上方——把带的上沿交给画面模块（`numberKeepOutTop`），由它反推起飘点。
+  check("HP3-12b 伤害飘字的起飘盒（rise=0，metrics.numberStartBox）也在边框带上方：带上沿已传进画面模块",
+    Boolean(damageStartBox) && insideAndAbove(damageStartBox)
+      && damageRuns[0].options.numberKeepOutTop === BAND_TOP,
+    damageStartBox
+      ? `start=${Number(damageStartBox.top).toFixed(1)}..${Number(damageStartBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} keepOutTop=${damageRuns[0].options.numberKeepOutTop}`
+      : "没有开演");
+  windowShim.SgsDamageFX.create = realDamage;
+  runTimers();
+
+  // ---- 回复（fx-heal）：同一套读数；带的上沿作为「上方放置」的边界传进去 ----
+  const realHeal = windowShim.SgsHealFX.create;
+  const healRuns = [];
+  windowShim.SgsHealFX.create = (canvas, options) => {
+    const fx = realHeal(canvas, options);
+    healRuns.push({ fx, options });
+    return fx;
+  };
+  vm.runInContext(
+    "fireVitalEventsThrough({kind: 'delta', delta_type: 'hp_change', seq: 2,"
+      + " seat: 1, before: 3, after: 4})",
+    context,
+  );
+  const healMetrics = healRuns[0] ? healRuns[0].fx.metrics : null;
+  const healBox = healMetrics ? healMetrics.numberBox : null;
+  check("HP3-13 回复飘字（fx-heal）：在块内、边框带上方、下半张；硬线 184 / 带上沿 170 都是 DOM 真值",
+    Boolean(healBox) && insideAndAbove(healBox)
+      && healRuns[0].options.numberKeepOut === BAR_BOTTOM
+      && healRuns[0].options.numberKeepOutTop === BAND_TOP
+      && Math.abs(Number(healMetrics.keepOut) - BAR_BOTTOM) < 0.06,
+    healBox
+      ? `box=${Number(healBox.top).toFixed(1)}..${Number(healBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} 块=${BLOCK.height}`
+        + ` keepOut=${healRuns[0].options.numberKeepOut}/${healRuns[0].options.numberKeepOutTop}`
+      : "没有开演");
+  windowShim.SgsHealFX.create = realHeal;
+  runTimers();
+
+  // ---- 失去体力（fx-hp-loss）：同一套几何（同一份 `vitalFxPlanFor`） ----
+  renderTable();
+  pinHeroGeometry();
+  const realHpLoss = windowShim.SgsHpLossFX.create;
+  const lossRuns = [];
+  windowShim.SgsHpLossFX.create = (canvas, options) => {
+    const fx = realHpLoss(canvas, options);
+    lossRuns.push({ fx, options });
+    return fx;
+  };
+  ui.state.lifeLossEvents = [{ seq: 3, seat: 1, amount: 2 }];
+  vm.runInContext("fireHpLossEventsThrough(Infinity)", context);
+  // 失去体力这一族带 `stagger`（排播层先排一个错开计时器再开演）⇒ 跑掉那个计时器。
+  runTimers();
+  const lossMetrics = lossRuns[0] ? lossRuns[0].fx.metrics : null;
+  const lossBox = lossMetrics ? lossMetrics.numberBox : null;
+  check("HP3-14 失去体力飘字（fx-hp-loss）：同一套几何，仍在块内、带上方、下半张",
+    Boolean(lossBox) && insideAndAbove(lossBox)
+      && lossRuns[0].options.numberKeepOut === BAR_BOTTOM
+      && lossRuns[0].options.numberKeepOutTop === BAND_TOP,
+    lossBox
+      ? `box=${Number(lossBox.top).toFixed(1)}..${Number(lossBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} 块=${BLOCK.height}`
+      : "没有开演");
+  windowShim.SgsHpLossFX.create = realHpLoss;
+  runTimers();
+
+  ui.state.damageEvents = [];
+  ui.state.lifeLossEvents = [];
+  ui.state.view = null;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

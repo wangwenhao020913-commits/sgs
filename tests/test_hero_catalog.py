@@ -148,6 +148,10 @@ BINGSHI_JIE_HEROES = load_heroes("bingshi_jie")
 """**兵势篇-节包**那一份（bingshi-jie 票 01 起）：独立系列包，版本字段 ``bingshi-jie``、
 显示名用系列前缀「势赵云」（真名赵云，与标准 / 界赵云版本并存）。"""
 
+QUNYING_HEROES = load_heroes("qunying")
+"""**群英包**那一份（qunying 票 01 起）：网友 DIY 系列合包，版本字段 ``qunying``、显示名带
+书名号前缀「「锋势」陆逊」（真名陆逊，与标准 / 界陆逊版本并存；用户 2026-11-21 签 Q1–Q3）。"""
+
 MOU_GONG_TONG_HEROES = load_heroes("mou_gong_tong")
 """**谋攻篇-同包**那一份（mou-gong-tong 票 01 起）：独立系列包，版本字段 ``mou-gong-tong``、
 显示名用系列前缀「谋刘赪」（真名刘赪，本仓首条刘赪）。"""
@@ -250,6 +254,8 @@ JIE_YIJIANG_2011_MOBILE_ENABLED = tuple(
 MOU_GONG_TONG_ENABLED = tuple(
     hero.id for hero in MOU_GONG_TONG_HEROES.heroes if hero.enabled
 )
+
+QUNYING_ENABLED = tuple(hero.id for hero in QUNYING_HEROES.heroes if hero.enabled)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -361,9 +367,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     # 武将技 212 / 装备 22 都不变（NPC 技能只授敌方座位，不在武将那半）。
     # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪两条（掠影 / 莺舞）⇒ 255 → 257、
     # 武将技 219 → 221（装备 22 不变）。
-    assert len(CATALOG) == 257
+    assert len(CATALOG) == 259
     assert len(equipment) == 22, "装备不变：本票加的是武将技"
-    assert len(heroes) == 221
+    assert len(heroes) == 223
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -392,6 +398,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             SHAN_HEROES,
             SHIJI_ZHI_HEROES,
             BINGSHI_JIE_HEROES,
+            QUNYING_HEROES,
             YIJIANG_2011_MOBILE_HEROES,
             JIE_YIJIANG_2011_MOBILE_HEROES,
             MOU_GONG_TONG_HEROES,
@@ -419,7 +426,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     # sp8-liuyan 票 01：刘焉【图射】/【立牧】⇒ 199 → 201。
     # bingshi-jie 票 01：势赵云两条 ⇒ 208 → 210。
     # mou-gong-tong 票 01：谋刘赪两条 ⇒ 219 → 221。
-    assert len(expected) == 221
+    assert len(expected) == 223
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -446,6 +453,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(SHIJI_ZHI_ENABLED)
         | set(BINGSHI_JIE_ENABLED)
         | set(MOU_GONG_TONG_ENABLED)
+        | set(QUNYING_ENABLED)
         | set(YIJIANG_2011_MOBILE_ENABLED)
         | set(JIE_YIJIANG_2011_MOBILE_ENABLED)
     )
@@ -1372,6 +1380,9 @@ SKILL_FILES: dict[str, str] = {
     # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪【掠影】【莺舞】（新包 → 新测试文件）。
     "hero.mou_liucheng.lveying": "test_hero_mou_gong_tong.py",
     "hero.mou_liucheng.yingwu": "test_hero_mou_gong_tong.py",
+    # qunying 票 01：群英包·「锋势」陆逊【谦逊】【连营】（新包 → 新测试文件）。
+    "hero.qunying_luxun.qianxun": "test_hero_qunying.py",
+    "hero.qunying_luxun.lianying": "test_hero_qunying.py",
 }
 """启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
@@ -1395,6 +1406,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
             HUO_HEROES,
             JIE_FENG_MOBILE_HEROES,
             MOU_GONG_TONG_HEROES,
+            QUNYING_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -1497,6 +1509,43 @@ def _probe_state() -> GameState:
     )
     # 【诛害】的判据是座位级"本回合造成过伤害"事实（合成局面直接置位）。
     state.player(OTHER).damage_dealt_this_turn = True
+    return state
+
+
+def _qunying_probe_state() -> GameState:
+    """群英包·「锋势」陆逊【连营】的正面探针局面（qunying 票 01）。
+
+    ME 是「锋势」陆逊，且**手牌 / 体力 / 装备区 / 判定区四者都 = 2**（三条 ``MOVE_AFTER``
+    条件同时成立）；两个「下一张牌」待生效位已置、使用序号已越过置位那一刻（兑现钩子也
+    成立）。三组判据读的是**移动之后**的状态，故合成帧只需把移动载荷指向"我的手牌离开"。
+    """
+    hand = tuple(cards_of_type(PACK, "dodge")[:2])
+    weapon = cards_of_type(PACK, "qinggang_sword")[0]
+    armor = cards_of_type(PACK, "eight_diagrams")[0]
+    judge = (
+        cards_of_type(PACK, "indulgence")[0],
+        cards_of_type(PACK, "lightning")[0],
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(),
+            SeatSpec(
+                hero="qunying_luxun",
+                hp=2,
+                hp_max=4,
+                hand=hand,
+                equip=(weapon, armor),
+                judge=judge,
+            ),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, *hand, weapon, armor, *judge),
+    )
+    player = state.player(ME)
+    player.lianying_unlimited_after = 0
+    player.lianying_chain_after = 0
+    player.used_or_played_ever = 1
     return state
 
 
@@ -2006,6 +2055,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _jie_sidi_probe_state()
     if skill_id in ("hero.mou_liucheng.lveying", "hero.mou_liucheng.yingwu"):
         return _mou_gong_tong_probe_state()
+    if skill_id == "hero.qunying_luxun.lianying":
+        return _qunying_probe_state()
     if skill_id == "hero.jie_wuyi_mobile.benxi":
         return _jie_benxi_probe_state()
     if skill_id == "hero.jie_liubei.jijiang":
@@ -2206,9 +2257,10 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # jie-yijiang-2014-wuyi-caozhen 票 03：界曹真【司敌】的两条钩子——
         # ① 使用非延时锦囊牌结算完毕后（source = 持有者、牌面是普通锦囊）；
         # ② 别人的牌指定目标后（source = 我预测过的那个座位）。
+        # ② 的帧还要带**牌面**：2026-11-21 起条件要求"不是延时锦囊"（延时锦囊不是锚点）。
         "hero.jie_caozhen_mobile.sidi": (
             _HookFrame(source=ME, card=state.card(_PROBE_TRICK_CARD)),
-            _HookFrame(source=0),
+            _HookFrame(source=0, card=state.card(_PROBE_TRICK_CARD)),
         ),
         # mou-gong-tong 票 01：谋刘赪两条（② 指定目标时 / ① 结算结束后）。两帧都是
         # "我使用的牌 + 目标在别人身上"；持有者换成座位 2 后 `source`（= 我）对不上 ⇒ 假。
@@ -2231,6 +2283,16 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         ),
         "hero.jie_luxun.lianying": (
             _HookFrame(**{MOVE_EVENT_KEY: move_lianying_jie}),
+        ),
+        # qunying 票 01：群英包·「锋势」陆逊【连营】——三条 ``MOVE_AFTER`` 条件（我的手牌
+        # 张数变了 + 与体力 / 装备区 / 判定区三组相等判据）+ 一条兑现钩子（`source` = 我，
+        # 且待生效位的序号已越过）。正面帧都指向"我的手牌离开"；持有者换成座位 2 后三组
+        # 判据读的是别人的手牌、兑现钩子的 `source` 也对不上 ⇒ 全部为假。
+        "hero.qunying_luxun.lianying": (
+            _HookFrame(**{MOVE_EVENT_KEY: move_lianying}),
+            _HookFrame(**{MOVE_EVENT_KEY: move_lianying}),
+            _HookFrame(**{MOVE_EVENT_KEY: move_lianying}),
+            _HookFrame(source=ME, targets=(OTHER,)),
         ),
         "hero.caocao.jianxiong": (
             _HookFrame(target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)),
@@ -3007,6 +3069,10 @@ SKILL_SHAPE: dict[str, str] = {
     # 询问）都是主动技能；界流离（钩子 + 两步清单）是触发技能；界救援 / 界国色 / 界枭姬
     # 是零步技能；界诈降是锁定技（两条钩子 + 两个修饰器）。
     "hero.jie_sunquan.zhiheng": "主动技能",
+    # qunying 票 01：群英包·「锋势」陆逊。【谦逊】= A 族 + 一步流水线（选代价）+ 手写段机；
+    # 【连营】= 锁定技 + 三条 MOVE_AFTER 强制钩子 + 兑现钩子 + 两个修饰器（同界【诈降】那格）。
+    "hero.qunying_luxun.qianxun": "主动技能",
+    "hero.qunying_luxun.lianying": "锁定技",
     "hero.jie_sunquan.jiuyuan": "零步技能",
     "hero.jie_huanggai.kurou": "主动技能",
     "hero.jie_huanggai.zhaxiang": "锁定技",
@@ -3413,7 +3479,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # shiji-zhi-luotong-chenzhen 票 02：陈震【歃盟】（A 族 + 三步流水线、无钩子）⇒ 37 → 38。
     # sp8-liuyan 票 04：刘焉【立牧】（一步选牌）/ 界大乔【国色】（三步：选项 → 方块牌 → 目标）
     # 从零步改成有步骤的预发动流水线 ⇒ 38 → 40。
-    "主动技能": 40,
+    # qunying 票 01：群英包·「锋势」陆逊【谦逊】（A 族 + 一步流水线、无钩子）⇒ 40 → 41。
+    "主动技能": 41,
     # yijiang-2014-round2 票 20：标准 / 界【激将】从「候选提供者」移进「触发技能」
     # （声明级 `flow`：出牌阶段主动使用【杀】的入口）⇒ 27 → 29；候选提供者 5 → 3。
     # sp5-mayunlu-panjun 票 01 / 02：凤魄 / 观微（钩子 + 非空流水线）⇒ 29 → 31。
@@ -3493,7 +3560,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # yijiang-2011-xusheng-chunhua 票 02：张春华移动版【绝情】（锁定 + 「伤害结算开始前」
     # 的整段改写段、无流水线）⇒ 60 → 61。
     # feng-guanyu 票 01：锋·关羽【义云】（锁定技 + 零步流水线）⇒ 61 → 62。
-    "锁定技": 62,
+    # qunying 票 01：群英包·「锋势」陆逊【连营】（锁定技 + 三条 MOVE_AFTER 强制钩子 +
+    # 兑现钩子 + 两个修饰器）⇒ 62 → 63。
+    "锁定技": 63,
     "转化技": 20,
     "能力位": 4,
     "候选生成器": 1,
@@ -3714,7 +3783,7 @@ def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（锁定技格）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（全部锁定、无流水线 ⇒ 锁定技格）⇒ 242 → 246。
-    assert len(SKILL_SHAPE) == len(CATALOG) == 257
+    assert len(SKILL_SHAPE) == len(CATALOG) == 259
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -3896,6 +3965,7 @@ def test_the_range_exempt_point_carries_the_six_no_distance_consumers() -> None:
         "hero.shen_guanyu_mobile.wushen",  # 【武神】② 红桃【杀】
         "hero.liuyan.limu",  # 【立牧】② 判定区有牌时对攻击范围内的其他角色无距离（R1）
         "hero.shi_zhaoyun.wuyi",  # 【武翊】③ X ≥ 3 ⇒ 使用基本牌无距离限制（追加全部存活座位）
+        "hero.qunying_luxun.lianying",  # 【连营】① 下一张牌无距离限制（qunying 票 01）
     }
 
 
@@ -3948,8 +4018,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     # 它的归还段（标记载体、手写钩子、无流水线）⇒ 外 108 → 109。票 03：界徐盛版同形一对
     # ⇒ 内 139 → 140、外 109 → 110。
     # mou-gong-tong 票 01：谋刘赪【掠影】【莺舞】（手写段机、无流水线）⇒ 外 112 → 114。
-    assert len(inside) == 143
-    assert len(outside) == 114
+    assert len(inside) == 144
+    assert len(outside) == 115
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

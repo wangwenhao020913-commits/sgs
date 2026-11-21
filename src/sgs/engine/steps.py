@@ -527,6 +527,24 @@ def use_push_resolve(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
+def _equipment_canceled(frame: Frame) -> bool:
+    """这一次**使用装备牌**的唯一目标是否已被判**目标级无效**（【司敌】的「取消之」）。
+
+    "目标级无效"的读取点原本只有 :func:`resolve_start`（RESOLVE 帧的第一孔）。但装备牌
+    **没有 RESOLVE 帧**——它不压栈、置入动作就住在本步（``final_zone = EQUIP``），于是
+    "取消之"对装备牌**完全没效果**：牌照样进了装备区（用户 2026-11-21 报障：移动版界曹真
+    预测"目标为自己"时，取消一张装备牌应该让它不生效）。故这里补同一个判据：被取消 ⇒
+    按"没生效"处理，实体牌照常规落入弃牌堆。
+
+    只在"恰好一个目标"上判（装备牌的 ``self_only`` 恒如此）；多目标牌（今天的装备都不是）
+    不进这条——多目标的取消语义由 ``resolve_start`` 逐目标管。
+    """
+    targets = tuple(frame.data.get("targets") or ())
+    if len(targets) != 1:
+        return False
+    return target_is_ineffective(frame, int(targets[0]))
+
+
 def use_after_end(host: FrameHost, frame: Frame) -> Control:
     """实体牌的最终去向 + "使用结算结束后"。
 
@@ -547,7 +565,7 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
         host.move_used_card_to_judge_zone(frame)
         return None
     if not frame.data.get("after_end_done"):
-        if behavior.final_zone is FinalZone.EQUIP:
+        if behavior.final_zone is FinalZone.EQUIP and not _equipment_canceled(frame):
             equip_control = host.move_used_card_to_equip_zone(frame)
             if equip_control is not None:
                 return equip_control

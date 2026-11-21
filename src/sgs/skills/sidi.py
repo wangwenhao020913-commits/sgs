@@ -185,7 +185,15 @@ def _sidi_predict(host: Any, frame: Frame, answers: Any) -> Any:
 
 
 def _sidi_redeem_condition(host: Any, frame: Frame) -> bool:
-    """② 的条件：**别人的牌**进了 B5，且那个人正在我的预测表里（Q3：任何牌都算锚点）。"""
+    """② 的条件：**别人的牌**进了 B5、那个人的牌**不是延时锦囊**、且他正在我的预测表里。
+
+    **延时锦囊不锚定**（官方现行文本逐字：「其使用的第一张**除延时锦囊以外的牌**仅指定
+    "司敌"目标为唯一目标时（否则清除…）」）⇒ 延时锦囊的那次使用既不判中、也**不**清掉
+    预测。旧实现让任何牌都当锚点：被预测者先贴一张【乐不思蜀】就把预测白清了（用户
+    2026-11-21 报障"司敌偶尔不触发"的一条来源）。
+    """
+    if not _is_non_delayed_card(frame.data.get("card")):
+        return False
     owner = frame.data.get(MATCH_OWNER_KEY)
     if owner is None:
         return False
