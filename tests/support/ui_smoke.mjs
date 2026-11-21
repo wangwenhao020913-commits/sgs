@@ -33001,10 +33001,11 @@ await clickAndWait($("btn-lobby-pool"));
   /** 监听读数：浮层只该在 document 上各有一个（票面「一次委托」）。 */
   const tipListenerCounts = () => ["mouseover", "mousemove", "mouseout"]
     .map((name) => (documentListeners[name] || []).length);
-  /** 在 `root` 子树里数**浮层宿主**（带 `data-skill` 的节点）。 */
-  const tipHostCount = (root) => walkTree(root)
-    .filter((node) => node.getAttribute && node.getAttribute("data-skill") !== undefined)
-    .length;
+  /** `root` 子树里的**浮层宿主**（带 `data-skill` 的节点；票 08：清单行里每个名字一个）。 */
+  const tipHostsIn = (root) => walkTree(root)
+    .filter((node) => node.getAttribute && node.getAttribute("data-skill") !== undefined);
+  /** 在 `root` 子树里数浮层宿主。 */
+  const tipHostCount = (root) => tipHostsIn(root).length;
 
   /** 一处面：宿主带 id ⇒ 浮层显示，正文逐字等于**载荷**里那行的 `desc`。 */
   const tipFace = (label, host, catalog) => {
@@ -33102,6 +33103,42 @@ await clickAndWait($("btn-lobby-pool"));
   const tipShelfRow = byClass($("script-confirm-body"), "script-face-row")
     .find((row) => row.getAttribute("data-item-id") === tipStockId);
   const tipResultFace = tipFace("结算弹窗", tipShelfRow, tipRelicClone.catalog);
+
+  /* ---- ⑤b 结算弹窗的**事件清单行**（票 08：`skills` / `relics` / `lose_equipped` 三类行
+   * 印着技能名，名字自己就得是宿主 —— 一行多个 id 装不进一个属性，故每个名字一个内联
+   * span 各带 `data-skill`；行结构 / 文案不变，也不挂监听）。
+   *
+   * 「获得技能」这一行是**真回包**（刚才买的这一件就是服务端的 `SkillsGained` 事件）；
+   * 另外两类在烟测里没有真路径：`relics` 要买遗物（10 铜钱，这局不够）、`lose_equipped`
+   * 只在 Boss 结算第 1 段出现（烟测不打 Boss 战）。故这两行由**真渲染口**
+   * `scriptSettleShowResult` + 与 `src/sgs/script/settle.py` 同形的事件渲染：断的是
+   * "行怎么画"这一口（引擎会不会发这两类事件由 settle.py 的模型管）。 */
+  const tipSettleSkillRow = resultRow("skills");
+  const tipSettleSkillHost = tipSettleSkillRow ? tipHostsIn(tipSettleSkillRow)[0] : null;
+  const tipSettleSkillFace = tipFace("结算清单·获得技能", tipSettleSkillHost, tipRelicClone.catalog);
+  const tipSettleBoard = JSON.parse(JSON.stringify(tipRelicClone));
+  vm.runInContext(
+    `scriptSettleShowResult(${JSON.stringify({
+      events: [
+        { kind: "relics", relics: [tipRelicId] },
+        { kind: "lose_equipped", skills: [tipStockId] },
+      ],
+      board: tipSettleBoard,
+      outcome: "continue",
+    })}, ${JSON.stringify({ kind: "event", catalog: tipRelicClone.catalog })})`,
+    context,
+  );
+  const tipSettleRelicRow = resultRow("relics");
+  const tipSettleLoseRow = resultRow("lose_equipped");
+  const tipSettleRelicHost = tipSettleRelicRow ? tipHostsIn(tipSettleRelicRow)[0] : null;
+  const tipSettleLoseHost = tipSettleLoseRow ? tipHostsIn(tipSettleLoseRow)[0] : null;
+  const tipSettleRelicFace = tipFace("结算清单·获得遗物", tipSettleRelicHost, tipRelicClone.catalog);
+  const tipSettleLoseFace = tipFace("结算清单·失去出战技能", tipSettleLoseHost, tipRelicClone.catalog);
+  // 行自己的文案一个都没变（拆名字只是把文本换成内联 span，`textContent` 逐字相同）。
+  const tipSettleText = [
+    tipSettleLoseRow,
+    tipSettleRelicRow,
+  ].map((row) => (row ? row.textContent : "缺"));
   await clickAndWait(confirmButtons()[0]);
 
   // ---- ⑥ 三选一（行是宿主；候选 id 在目录里 ⇒ 正文 = 载荷的 desc）----
@@ -33125,15 +33162,53 @@ await clickAndWait($("btn-lobby-pool"));
 
   const tipFaces = [tipBagFace, tipHudFace, tipEventFace, tipShopFace, tipRelicFace,
     tipResultFace, tipPickFace];
-  check("UI1-30 浮层覆盖七处面：宿主都带 data-skill，正文逐字 = 同 id 的载荷 desc（原文里的注记一个字都不出现）",
+  /* 结算清单三行（票 08 补的那三处面）：每个名字自己的 span 都是宿主。 */
+  const tipSettleListFaces = [tipSettleSkillFace, tipSettleRelicFace, tipSettleLoseFace];
+  check("UI1-30 浮层覆盖七处面 + 结算清单三行：宿主都带 data-skill，正文逐字 = 同 id 的载荷 desc（原文里的注记一个字都不出现）",
     tipFaces.length === 7
     && tipFaces.every((face) => face.pass)
     && tipFaces.some((face) => face.rawMarked)
     && tipFaces.every((face) => !face.leaked)
     && tipHudHost !== null && tipEventHost !== null && tipShopFace.id === tipStockId
-    && tipRelicFace.id === tipRelicId && tipPickInWindow,
+    && tipRelicFace.id === tipRelicId && tipPickInWindow
+    && tipSettleListFaces.length === 3
+    && tipSettleListFaces.every((face) => face.pass && !face.leaked)
+    && tipSettleRelicFace.id === tipRelicId && tipSettleLoseFace.id === tipStockId
+    && tipSettleText[0] === `失去出战技能：${tipSettleLoseFace.name}（自动，无需确认）`
+    && tipSettleText[1] === `获得遗物：${tipSettleRelicFace.name}`,
     tipFaces.map((face) => `${face.label}:${face.id ? face.id.split(".").pop() : "缺"}/${face.pass ? "ok" : "红"}`)
-      .join(" "));
+      .join(" ")
+      + " | " + tipSettleListFaces.map(
+        (face) => `${face.label}:${face.id ? face.id.split(".").pop() : "缺"}/${face.pass ? "ok" : "红"}`)
+        .join(" ")
+      + ` 行文案=${JSON.stringify(tipSettleText)}`);
+
+  // ---- UI1-33 没有目录行的宿主不弹浮层（票 08：编辑器页那种只有 `data-skill` 的行）----
+  const tipBareHost = slotOf(0);
+  const tipBareRealId = tipBareHost.getAttribute("data-skill");
+  tipBareHost.setAttribute("data-skill", "hero.nobody.nothere");
+  hoverSkill(tipBareHost);
+  const tipBareHidden = tipHidden() && tipPart("tt-name") === "" && tipPart("tt-desc") === "";
+  // 连棋盘体都没有（编辑器页：`data-skill` 在、目录不在）⇒ 同样不弹，且不抛错。
+  tipBareHost.setAttribute("data-skill", tipBareRealId);
+  const tipBoardBackup = ui.state.script.board;
+  ui.state.script.board = null;
+  const tipNoBoardLeak = (() => {
+    try {
+      hoverSkill(tipBareHost);
+      return tipHidden() && tipPart("tt-desc") === "";
+    } catch (error) {
+      return `抛错：${error && error.message}`;
+    }
+  })();
+  ui.state.script.board = tipBoardBackup;
+  hoverSkill(tipBareHost);
+  const tipBareControlShown = tipShown()
+    && tipPart("tt-desc") === String((tipBoardBackup.catalog[tipBareRealId] || {}).desc || "");
+  leaveSkill(tipBareHost);
+  check("UI1-33 没有目录行的宿主不弹浮层（id 不在目录 / 目录整个没有都一样），有目录行的照旧弹",
+    tipBareHidden && tipNoBoardLeak === true && tipBareControlShown,
+    `无目录行=${tipBareHidden} 无棋盘体=${tipNoBoardLeak} 有目录行=${tipBareControlShown}`);
 
   // ---- UI1-32：收起（离开宿主 / 关窗）----
   leaveSkill(tipPickHost);

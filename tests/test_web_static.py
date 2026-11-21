@@ -11065,11 +11065,11 @@ def test_the_editor_smoke_library_is_a_valid_script_library() -> None:
 # 三层判据，各自落在唯一真源上：
 # 1. **一次委托**：`skill-tip.js` 里对浮层只挂一组 document 级监听（mouseover /
 #    mousemove / mouseout），宿主侧只靠 `data-skill` 属性——没有逐节点监听这回事。
-# 2. **描述只来自载荷**：`desc`（目录行，服务端裁过）优先、`view.skills[].description`
-#    兜底；前端零正则、零 `slice`、零第二份文案。
+# 2. **正文只来自目录行的 `desc`**（spec §8 R7）：真目录行喂进 `skillTipShow`，逐字断言；
+#    没有目录行 ⇒ 这一层不弹（票 08 拍板的读法），前端零正则、零 `slice`、零第二份文案。
 # 3. **翻转判据是纯函数**：`skillTipPlace(...)` 吃数字（设计单位），喂四种情形到 node 里
 #    直接算——右上 / 左下 / 右下角 / **窗内宿主**（bounds = 那扇窗）。
-# 行为（覆盖七处面 / 重绘后仍工作 / 收起）归烟测 `UI1-30..32`。
+# 行为（覆盖七处面 / 重绘后仍工作 / 收起 / 无目录行不弹）归烟测 `UI1-30..33`。
 # ---------------------------------------------------------------------------
 
 _SKILL_TIP_JS = STATIC_DIR / "skill-tip.js"
@@ -11194,29 +11194,192 @@ def test_the_skill_tip_is_one_delegated_overlay() -> None:
     )
 
 
+def _run_skill_tip_probe(source: str, name: str) -> dict:
+    """跑一份 node 探针（`cwd` = 仓根，探针自己 `readFileSync` 真脚本），拿它的 JSON 读数。"""
+    node = shutil.which("node")
+    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
+    with tempfile.TemporaryDirectory() as workdir:
+        probe = Path(workdir) / name
+        probe.write_text(source, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(probe)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    assert result.returncode == 0, (
+        f"{name} 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+_SKILL_TIP_PAYLOAD_PROBE = r"""
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+/* 载荷 = 一份**真目录行**（形状与 `sgs_web/script_runs.py:_catalog_item` 下发的一致），
+ * 外加一份快照：同 id 的技能对象里放的是**未裁**全文（票 08 要断的就是浮层不读它）。 */
+const payload = __PAYLOAD__;
+
+/* 最小 DOM：浮层的形状口只有 `$("skilltip")` 与 `document.createElement`（见 `skillTipLine`）。 */
+const tip = {
+  hidden: true, className: "", textContent: "", children: [], style: {},
+  appendChild(child) { this.children.push(child); return child; },
+  set innerHTML(value) { if (value === "") this.children = []; },
+  get innerHTML() { return ""; },
+};
+const icon = (tag) => ({
+  tag, className: "", textContent: "", children: [], style: {},
+  appendChild(child) { this.children.push(child); return child; },
+});
+const document = { addEventListener() {}, createElement: icon };
+const context = vm.createContext({
+  console, JSON, Object, Array, Number, String, Math,
+  document,
+  $: (id) => (id === "skilltip" ? tip : null),
+  state: payload.state,
+  /* 名字 / 类别的读口是整备面那一份（`scriptItemRow` 真实现读的也是同一个 `catalog`）。 */
+  scriptItemRow: (id) => {
+    const raw = payload.catalog[id];
+    if (!raw) return { id: String(id), name: String(id), kind: "skill", rarity: null, price: null };
+    return {
+      id: String(id),
+      name: String(raw.name || id),
+      kind: raw.kind === "relic" ? "relic" : "skill",
+      rarity: raw.rarity || null,
+      price: Number.isInteger(raw.price) ? raw.price : null,
+    };
+  },
+  scriptPriceText: (row) => (row && row.price ? `${row.price} 铜钱` : ""),
+  SCRIPT_ITEM_KIND_LABELS: { skill: "技能", relic: "遗物" },
+});
+vm.runInContext(readFileSync("tools/sgs_web/static/skill-tip.js", "utf8"), context, {
+  filename: "skill-tip.js",
+});
+
+const flatten = (node, out = []) => {
+  for (const child of node.children) {
+    out.push([child.className, child.textContent]);
+    flatten(child, out);
+  }
+  return out;
+};
+const show = (skillId) => {
+  tip.children = [];
+  tip.hidden = true;
+  const returned = vm.runInContext(`skillTipShow(${JSON.stringify(skillId)}, {})`, context);
+  const parts = flatten(tip);
+  const desc = parts.filter(([className]) => className === "tt-desc");
+  return {
+    returned: returned === null ? null : returned.desc,
+    visible: tip.hidden !== true,
+    desc: desc.length ? desc[0][1] : null,
+    text: parts.map(([, text]) => text).join(" | "),
+  };
+};
+process.stdout.write(JSON.stringify({
+  withRow: show(payload.withRowId),
+  withoutRow: show(payload.withoutRowId),
+  rowWithoutDesc: show(payload.rowWithoutDescId),
+}));
+"""
+
+
+def _skill_tip_payload_probe(payload: dict) -> dict:
+    """把 `payload` 嵌进探针源码跑一遍（同一份脚本，换载荷 = 换读数）。"""
+    source = _SKILL_TIP_PAYLOAD_PROBE.replace(
+        "__PAYLOAD__", json.dumps(payload, ensure_ascii=False)
+    )
+    return _run_skill_tip_probe(source, "skill_tip_payload_probe.mjs")
+
+
 def test_the_skill_tip_reads_the_description_from_the_payload() -> None:
-    """描述只来自载荷（spec §8 R7）：目录行 `desc` 优先，`view.skills[].description` 兜底。
+    """正文只来自目录行的 `desc`（spec §8 R7）——判据走**真载荷路径**，不是 grep 源码。
 
-    判据是**否定式的机械事实**——前端没有裁切、没有第二份文案：
+    喂给 `skillTipShow` 的是一份**真目录行**：`id / name / kind / rarity / price / desc`，
+    其中 `desc` 取自服务端同一条口（`display_skill_description`），同 id 的未裁全文
+    （`skill_description`，带「本仓…：」注记）同时放进快照。四条读数：
 
-    - 源码里有 `desc`（目录行）与 `description`（快照技能对象）两个读口；
-    - 源码里没有 `本仓`（注记标记）、没有 `slice(` / `substr` / `substring(` / `replace(`
-      （裁 / 拼描述），没有正则字面量式的 `match(` / `RegExp`；
-    - `descriptions.json` 里的全文（≥ 20 字的那批）**一句**都不出现在源码里（不抄文案）；
-    - 类别 / 价格文案复用既有的单一真源（`SCRIPT_ITEM_KIND_LABELS` / `scriptPriceText`），
-      浮层里没有第二份中文类别表。
+    1. **有目录行** ⇒ 浮层显示，正文**逐字等于**那条 `desc`，注记一个字都不出现；
+    2. **没有目录行**（但有快照里的未裁全文）⇒ 这一层**不弹**：`skillTipShow` 返回 `null`，
+       `#skilltip` 仍是 hidden，正文一个字都不印（票 08 拍板的读法，见 `## Answer`）；
+    3. **有目录行但 `desc` 空** ⇒ 只印名字 / 类别，不印正文（也不编「暂无描述」）；
+    4. **反证**：只把目录行的 `desc` 换掉，浮层正文必须逐字跟着换——硬编码 / 从别处抄
+       都会让这条红。
+
+    源码侧的否定判据只留"不许裁 / 不许有第二份文案"那一半：没有 `本仓`、没有
+    `slice` / `replace` / 正则、没有「暂无描述」，也不读快照里那条未裁的描述。
     """
-    source = _skill_tip_source()
-    assert ".desc" in source or "desc" in source, "目录行的 `desc` 是描述的主来源"
-    assert re.search(r"\bdesc\b", source), "目录行的 `desc` 是描述的主来源"
-    assert ".description" in source, "拿不到目录行时的兜底是 `view.skills[].description`"
-    assert "state.script.board" in source and "catalog" in source, (
-        "目录行从棋盘体的 `catalog` 读（票 01 的那份载荷）"
+    for entry in (REPO_ROOT / "tools", REPO_ROOT / "src"):
+        if str(entry) not in sys.path:
+            sys.path.insert(0, str(entry))
+    from sgs_web.descriptions import display_skill_description, skill_description
+    from sgs_web.script_runs import _skill_label
+
+    skill_id = "hero.liubei.rende"
+    raw_text = skill_description(skill_id)
+    trimmed = display_skill_description(skill_id)
+    assert "本仓" in raw_text, f"取样技能 `{skill_id}` 的原文应当带实现注记（裁切口才有读数）"
+    assert trimmed and "本仓" not in trimmed, f"服务端裁过的 `desc` 不该带注记：{trimmed!r}"
+
+    row = {
+        "name": _skill_label(skill_id),
+        "kind": "skill",
+        "rarity": "rare",
+        "price": 12,
+        "desc": trimmed,
+    }
+    no_desc_id = "hero.sample.nodesc"
+    bare_id = "hero.sample.norow"
+    no_desc_row = {"name": "只有名字的技能", "kind": "skill", "rarity": "common",
+                   "price": 6, "desc": ""}
+    payload = {
+        "withRowId": skill_id,
+        "withoutRowId": bare_id,
+        "rowWithoutDescId": no_desc_id,
+        "catalog": {skill_id: dict(row), no_desc_id: dict(no_desc_row)},
+        "state": {
+            "script": {"board": {"catalog": {skill_id: dict(row),
+                                             no_desc_id: dict(no_desc_row)}}},
+            "view": {"skills": [
+                {"skill_id": skill_id, "name": row["name"],
+                 "description": raw_text},
+                {"skill_id": bare_id, "name": "没有目录行的技能",
+                 "description": "未裁全文（本仓注记：这一段只能由服务端裁）"},
+            ]},
+        },
+    }
+    first = _skill_tip_payload_probe(payload)
+    assert first["withRow"]["visible"] is True, "有目录行 ⇒ 浮层显示"
+    assert first["withRow"]["desc"] == trimmed, (
+        f"浮层正文必须逐字等于目录行的 `desc`：期望 {trimmed!r}，实得 {first['withRow']['desc']!r}"
     )
-    assert "state.view" in source and "skills" in source, (
-        "兜底那条路读快照的技能清单（`view.skills`）"
+    assert "本仓" not in first["withRow"]["text"], "注记不许印上屏（裁切只在服务端）"
+
+    assert first["withoutRow"]["visible"] is False, (
+        "没有目录行 ⇒ 这一层不弹（票 08 的读法：绝不退回未裁的描述）"
+    )
+    assert first["withoutRow"]["returned"] is None, "`skillTipShow` 无目录行时返回 `null`"
+    assert first["withoutRow"]["desc"] is None, "无目录行时不许印正文"
+    assert "本仓" not in first["withoutRow"]["text"], "无目录行时也不许露出未裁全文"
+
+    assert first["rowWithoutDesc"]["visible"] is True, "目录行在（只是没有 desc）⇒ 名字照印"
+    assert first["rowWithoutDesc"]["desc"] is None, "没有 `desc` 就不印正文"
+
+    # 反证：只换目录行的 `desc`，浮层正文必须逐字跟着换（否则说明它没在读载荷）。
+    changed = "换过的正文，只可能来自载荷"
+    for holder in (payload["catalog"][skill_id], payload["state"]["script"]["board"]["catalog"][skill_id]):
+        holder["desc"] = changed
+    second = _skill_tip_payload_probe(payload)
+    assert second["withRow"]["desc"] == changed != first["withRow"]["desc"], (
+        f"换掉 `desc` 之后浮层正文必须跟着换：{second['withRow']['desc']!r}"
     )
 
+    source = _skill_tip_source()
+    assert re.search(r"\bdesc\b", source), "目录行的 `desc` 是正文的唯一来源"
     assert "本仓" not in source, (
         "前端不许出现注记标记 `本仓`（裁切规则的唯一实现在 `descriptions.py`，浮层不抄）"
     )
@@ -11224,9 +11387,12 @@ def test_the_skill_tip_reads_the_description_from_the_payload() -> None:
         assert banned not in source, (
             f"前端不许裁 / 拼描述：`{banned}` 出现在 skill-tip.js 里"
         )
+    assert "state.view" not in source and ".description" not in source, (
+        "浮层不许读快照里那条未裁的描述（票 08 删掉的兜底）"
+    )
 
-    payload = json.loads(_DESCRIPTIONS_JSON.read_text(encoding="utf-8"))
-    texts = list((payload.get("skills") or {}).values())
+    descriptions = json.loads(_DESCRIPTIONS_JSON.read_text(encoding="utf-8"))
+    texts = list((descriptions.get("skills") or {}).values())
     long_texts = [text for text in texts if isinstance(text, str) and len(text) >= 20]
     assert long_texts, "descriptions.json 里应当有技能全文（票 01 的数据源）"
     copied = [text[:20] for text in long_texts if text[:20] in source]
@@ -11276,24 +11442,7 @@ process.stdout.write(JSON.stringify(out));
 
 def _skill_tip_place_probe() -> dict:
     """跑真 `skill-tip.js`（node vm），拿 `skillTipPlace` 的四种情形读数。"""
-    node = shutil.which("node")
-    assert node is not None, "本测试需要 node（门禁的 ui_smoke 同源依赖）"
-    with tempfile.TemporaryDirectory() as workdir:
-        probe = Path(workdir) / "skill_tip_place_probe.mjs"
-        probe.write_text(_SKILL_TIP_PLACE_PROBE, encoding="utf-8")
-        result = subprocess.run(
-            [node, str(probe)],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-    assert result.returncode == 0, (
-        f"skillTipPlace 探针失败（exit {result.returncode}）：\nstdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
-    )
-    return json.loads(result.stdout)
+    return _run_skill_tip_probe(_SKILL_TIP_PLACE_PROBE, "skill_tip_place_probe.mjs")
 
 
 def test_the_skill_tip_flips_at_the_shell_and_the_window_edge() -> None:

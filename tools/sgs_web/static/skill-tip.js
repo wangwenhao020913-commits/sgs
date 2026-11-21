@@ -6,9 +6,10 @@
  *
  * 三条纪律（评审会按它们读代码）：
  *
- * 1. **描述只来自载荷**（§8 R7）：目录行的 `desc`（票 01 加的字段，服务端
- *    `descriptions.py` 裁过）优先；拿不到目录行、但手上有快照的技能对象时才读它的
- *    `description`；都拿不到就不印正文。本文件**零正则、零截断、零第二份文案**——
+ * 1. **正文只来自目录行**（§8 R7）：正文只认棋盘体目录行（`catalog[id]`）的 `desc`——票 01
+ *    加的字段，服务端 `descriptions.py` 裁过。拿不到目录行 ⇒ **这一层不弹**（票 08 拍板的
+ *    读法：名字 / 正文都不印，绝不退回任何未裁的文案；编辑器页那些只有 `data-skill`、没有
+ *    目录行的行因此也不再弹「裸 id」）。本文件**零正则、零截断、零第二份文案**——
  *    裁切规则只有 `descriptions.py` 一份实现。
  * 2. **一层、不吃鼠标**：`#skilltip` 是静态节点（住在所有 `<main>` 之外），
  *    `pointer-events: none`；宿主侧只有属性，没有任何逐节点监听。
@@ -128,39 +129,37 @@ function skillTipFrame(host) {
 
 /* ---------------------------------------------------------------- 载荷 */
 
-/** 目录行（棋盘体 `catalog[id]`）：`desc` 就是票 01 服务端裁过的那段全文。 */
+/** 目录行（棋盘体 `catalog[id]`）：`desc` 就是票 01 服务端裁过的那段全文。
+ *
+ * **这是正文的唯一来源**：没有目录行 ⇒ 一条描述都拿不到（快照里那份是未裁的，不读）。
+ */
 function skillTipCatalogRow(skillId) {
   const board = state && state.script ? state.script.board : null;
   const catalog = (board && board.catalog) || null;
   return (catalog && catalog[skillId]) || null;
 }
 
-/** 快照里的技能对象（`view.skills`）：**只有**拿不到目录行时才读它的 `description`。 */
-function skillTipSkillObject(skillId) {
-  const skills = (state && state.view && state.view.skills) || [];
-  return skills.find((item) => String((item && item.skill_id) || "") === skillId) || null;
-}
-
 /** 浮层要的四段：名字 / 类别 / 一行元信息（稀有度 · 价，目录行才有）/ 正文。
  *
  * 名字 / 类别 / 稀有度 / 单价全走整备面那一份目录读口（`scriptItemRow` / `scriptPriceText`），
- * 不写第二份中文表；正文的次序是票面写死的：
- *   目录行 `desc` →（拿不到时）`view.skills[].description` →（都没有）不印正文。
+ * 不写第二份中文表；正文只有目录行的 `desc` 一处来源（服务端裁过的全文）。
+ * **拿不到目录行 ⇒ 返回 `null`**（调用方不弹这一层，连名字都不印——那个名字只会是裸 id）；
+ * 目录行在、只是没有 `desc` ⇒ 名字照印，正文不印。
  */
 function skillTipData(skillId) {
   const id = String(skillId || "");
   const raw = skillTipCatalogRow(id);
-  const skill = raw ? null : skillTipSkillObject(id);
+  if (!raw) return null;
   const row = scriptItemRow(id);
   const meta = [];
-  if (raw && raw.rarity) meta.push(SKILL_TIP_RARITY_LABELS[raw.rarity] || String(raw.rarity));
-  if (raw && scriptPriceText(row)) meta.push(scriptPriceText(row));
+  if (raw.rarity) meta.push(SKILL_TIP_RARITY_LABELS[raw.rarity] || String(raw.rarity));
+  if (scriptPriceText(row)) meta.push(scriptPriceText(row));
   return {
     id,
     name: String(row.name || id),
     kind: SCRIPT_ITEM_KIND_LABELS[row.kind] || "",
     meta: meta.join(" · "),
-    desc: String((raw && raw.desc) || (skill && skill.description) || ""),
+    desc: String(raw.desc || ""),
   };
 }
 
@@ -170,12 +169,14 @@ function skillTipData(skillId) {
  *
  * `meta.host` = 宿主节点：只用来定翻转边界（`skillTipFrame`），不读它的文案；
  * `meta.event` = 触发它的那次指针事件（有就顺手摆好落点，避免第一帧闪在 0,0）。
+ * **没有目录行的宿主返回 `null` 并收起浮层**（票 08：无目录行 ⇒ 不弹这一层）。
  */
 function skillTipShow(skillId, meta) {
   const tip = skillTipNode();
   const id = String(skillId || "");
   if (!tip || !id) return null;
   const data = skillTipData(id);
+  if (!data) return skillTipHide();
   SKILL_TIP_HOST = (meta && meta.host) || null;
   tip.innerHTML = "";
   const head = document.createElement("div");

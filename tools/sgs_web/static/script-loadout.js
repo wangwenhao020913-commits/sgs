@@ -992,11 +992,30 @@ function scriptSettleRelicDialog(flow) {
   });
 }
 
+/** 一行里的并列名字（「甲、乙、丙」）：每个名字一个内联 `span`，各自带 `data-skill`。
+ *
+ * 票 08：结算清单（`skills` / `relics` / `lose_equipped`）印着技能名，名字自己就该是浮层
+ * 宿主；一个 `data-skill` 装不下多个 id，故**每个名字一个宿主**。只加属性与内联 span——
+ * 行的标签 / `data-event` / 文案（`textContent`）逐字不变，也不加任何监听（浮层挂在
+ * document 上，宿主侧只认属性）。
+ */
+function scriptFaceNameList(names, catalog) {
+  const nodes = [];
+  (names || []).forEach((itemId, index) => {
+    if (index) nodes.push(scriptNode("span", "", "、"));
+    const node = scriptNode("span", "", scriptItemRow(itemId, catalog).name);
+    node.setAttribute("data-skill", String(itemId));
+    nodes.push(node);
+  });
+  return nodes;
+}
+
 /** 结算结果里一条事件的中文（数字一律是服务端事件里的那个数）。
  *
  * 票 06：**一行只有一个主语**的那几种（pick / relic）带 `data-skill`（浮层宿主）；
- * `skills` / `relics` / `lose_equipped` 这几行是"甲、乙、丙"的并列清单，一个属性装不下
- * 多个 id，而票面明确本票不改行内结构（只加属性）——那几行因此不是宿主。
+ * 票 08：`skills` / `relics` / `lose_equipped` 这三条是"甲、乙、丙"的并列清单，一个属性
+ * 装不下多个 id ⇒ 名字拆进各自的内联 span，每个名字一个宿主（`scriptFaceNameList`）。
+ * 行结构 / 文案不变，也不加监听。
  */
 function scriptSettleEventRow(event, catalog) {
   const kind = event && event.kind;
@@ -1004,9 +1023,13 @@ function scriptSettleEventRow(event, catalog) {
   row.setAttribute("data-event", String(kind || ""));
   if (kind === "lose_equipped") {
     const skills = event.skills || [];
-    row.textContent = `失去出战技能：${skills.length
-      ? skills.map((skillId) => scriptItemRow(skillId, catalog).name).join("、")
-      : "（没有可失去的）"}（自动，无需确认）`;
+    row.appendChild(scriptNode("span", "", "失去出战技能："));
+    if (skills.length) {
+      for (const node of scriptFaceNameList(skills, catalog)) row.appendChild(node);
+    } else {
+      row.appendChild(scriptNode("span", "", "（没有可失去的）"));
+    }
+    row.appendChild(scriptNode("span", "", "（自动，无需确认）"));
     row.setAttribute("data-auto", "1");
     return row;
   }
@@ -1030,11 +1053,13 @@ function scriptSettleEventRow(event, catalog) {
     return row;
   }
   if (kind === "skills") {
-    row.textContent = `获得技能：${(event.skills || []).map((skillId) => scriptItemRow(skillId, catalog).name).join("、")}`;
+    row.appendChild(scriptNode("span", "", "获得技能："));
+    for (const node of scriptFaceNameList(event.skills, catalog)) row.appendChild(node);
     return row;
   }
   if (kind === "relics") {
-    row.textContent = `获得遗物：${(event.relics || []).map((relicId) => scriptItemRow(relicId, catalog).name).join("、")}`;
+    row.appendChild(scriptNode("span", "", "获得遗物："));
+    for (const node of scriptFaceNameList(event.relics, catalog)) row.appendChild(node);
     return row;
   }
   if (kind === "flags") {
