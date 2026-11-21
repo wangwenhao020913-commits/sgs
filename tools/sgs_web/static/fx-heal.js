@@ -1571,9 +1571,26 @@
       keepOutPx = keepOutRatio * cardH;
       /* 包围盒顶边 = 体力条下沿 + 3% 牌高（余量留给字身与描边）。 */
       var boxTop = cr.y + Math.min(0.88, keepOutRatio + NUMBER_GAP_RATIO) * cardH;
+      var numRise = NUM_RISE * scale;
+      numBox = { top: boxTop - cr.y, bottom: boxTop + glyph - cr.y, height: glyph };
+      /* 票 03：体力条搬进**下边框带**（`.hb-bottom`，不透明纸色）之后，硬线下面没有位置——
+       * 盒子会压进带里、甚至越出块底（带子盖不住演出层，是演出盖住体力读数）。带的上沿
+       * （`opts.numberKeepOutTop`，量不到是 null）在时改放到**带上方**：底边 = 带上沿 − 3% 牌高；
+       * 上浮距离也收进同一道余量（起飘点同样不许压带）。`numBox` 因此记**整段上浮的包络**，
+       * 不只是落点。旧版式没有这条带 ⇒ 一个数都不变。 */
+      var bandTop = Number(opts.numberKeepOutTop);
+      if (isFinite(bandTop) && bandTop > 0 && bandTop < cardH) {
+        boxTop = Math.max(cr.y, cr.y + bandTop - NUMBER_GAP_RATIO * cardH - glyph);
+        numRise = Math.min(numRise, NUMBER_GAP_RATIO * cardH);
+        numBox = {
+          top: boxTop - cr.y,
+          bottom: boxTop + numRise + glyph - cr.y,
+          height: glyph,
+        };
+      }
       V.numTo = { x: cr.x + cr.w * 0.5 + 4 * scale, y: boxTop + glyph / 2 };
       /* 从硬线下方浮上来：上浮到顶那一刻包围盒顶边正好落在硬线上 ⇒ 任意时刻都不压体力条。 */
-      V.numFrom = { x: V.numTo.x, y: V.numTo.y + NUM_RISE * scale };
+      V.numFrom = { x: V.numTo.x, y: V.numTo.y + numRise };
       numBox = { top: boxTop - cr.y, bottom: boxTop + glyph - cr.y, height: glyph };
     } else {
       /* 导出档：沿用素材页的落点（牌心上方 10 → 160 设计像素，按舞台映射）。 */

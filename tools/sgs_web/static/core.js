@@ -402,6 +402,46 @@ async function loadPortraitIndex() {
   return heroes;
 }
 
+/** 立绘索引里某条记录：键 = **显示名称**（首页 `/api/heroes` 的 `version.name`、座位载荷的
+ *  `player.hero_name` 同源）。缺表 / 名字为空 / 形状不对 ⇒ `null`（调用方一律当"无图"）。
+ *
+ * 首页与牌桌**共用这一份查表**（hero-portraits 票 02 立的 `.portraits` 是唯一索引；
+ * 票 03 只加这一口按名字的读法，不建第二份表）。
+ */
+function portraitEntryFor(name) {
+  if (!name) return null;
+  const table = state.portraits;
+  if (!table || typeof table !== "object") return null;
+  const entry = table[String(name)];
+  return entry && typeof entry === "object" ? entry : null;
+}
+
+/** 立绘盒子：有图 ⇒ 一张 `<img>`；无图 ⇒ **同一个盒子的空位态**。
+ *
+ * 两态共用同一个盒子与同一套 class，只差 `data-empty` 一个属性 ⇒ 有图 / 无图两局版式不跳。
+ * **空位分支在造 `img` 之前返回**：没有 `<img>` 就没有图片请求（行为判据，不是观感）。
+ * 全前端只有这一处造 `<img>`——首页右栏（票 02）与对局武将块（票 03）同源。
+ */
+function fillPortraitBox(box, name, boxClass = "portrait") {
+  if (!box) return null;
+  box.innerHTML = "";
+  box.className = boxClass;
+  const entry = portraitEntryFor(name);
+  const path = entry && entry.portrait;
+  if (!path) {
+    box.setAttribute("data-empty", "1");
+    return null;
+  }
+  box.removeAttribute("data-empty");
+  const img = document.createElement("img");
+  img.src = `/art/${encodeURI(String(path))}`;
+  img.alt = name ? `${name} 立绘` : "立绘";
+  img.loading = "eager";
+  img.decoding = "async";
+  box.appendChild(img);
+  return img;
+}
+
 /* ------------------------------------------------------------------ 视图 */
 
 /** 页面各有一条顶栏、同一组导航三键（U2-01 / spec D7）。

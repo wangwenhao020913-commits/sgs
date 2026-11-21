@@ -195,6 +195,8 @@ function renderSelfSeat(view, ctx) {
   }
   // 武将名读服务端展示契约（U1-02），旧载荷退回武将 id。
   $("t-hero").textContent = heroNameOf(player, view);
+  // hero-portraits 票 03：立绘与首页右栏**同一个实现**（有图 ⇒ img、无图 ⇒ 同盒空位）。
+  fillPortraitBox($("t-self-portrait"), heroNameOf(player, view));
   const badge = identityBadgeView(player, ctx.identityMode);
   const identity = $("t-self-identity");
   identity.textContent = badge.label;

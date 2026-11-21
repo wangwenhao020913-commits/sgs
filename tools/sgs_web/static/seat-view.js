@@ -549,8 +549,11 @@ function sideBlockRows(player, ctx) {
   // 封印闭集只读服务端下发的 `players[].sealed_zones`（lukang-mobile 票 03 起是**槽 id**：
   // 判定 `judge_1..3` + 装备 `weapon` / `armor` / `horse_offense` / `horse_defense`）。
   const sealedZones = new Set((player && player.sealed_zones) || []);
+  // 票 03：判定 3 格 = 第一行；装备 4 格 = 第二、三行各 2 格（武 / 防、+1 / −1）。
+  // 行高由 flex 均分（`.slot-row { flex: 1 1 0 }`，装备区容器再吃两行），块放大后不许
+  // 退回旧的定宽定高。
   const judge = document.createElement("div");
-  judge.className = "judge-row";
+  judge.className = "slot-row judge-row";
   judge.setAttribute("data-zone", "judge");
   judge.setAttribute("data-seat", String(player.seat));
   for (const layout of judgeSlotLayout(player.judge)) {
@@ -566,8 +569,10 @@ function sideBlockRows(player, ctx) {
     }
     judge.appendChild(slotNode);
   }
+  // 装备区仍是**一个** `data-zone="equip"` 容器（`anim.js` 按它在里面逐槽找具体槽位），
+  // 里面两行 `.slot-row` 各 `flex: 1`。容器自己吃两行的高度（`flex: 2 1 0`）。
   const equip = document.createElement("div");
-  equip.className = "equip-grid";
+  equip.className = "equip-rows";
   equip.setAttribute("data-zone", "equip");
   equip.setAttribute("data-seat", String(player.seat));
   // 票 26（用户 2026-11-17 实机口径）：距离读数**复用坐骑槽**——`attack` 归攻马槽、
@@ -575,7 +580,7 @@ function sideBlockRows(player, ctx) {
   const bonus = (player && player.distance_bonus) || {};
   const attackBonus = Math.min(0, Math.trunc(Number(bonus.attack) || 0));
   const defenseBonus = Math.max(0, Math.trunc(Number(bonus.defense) || 0));
-  for (const layout of equipSlotLayout(player.equip)) {
+  const equipSlotNode = (layout) => {
     const distanceBonus = layout.slot === "horse_offense"
       ? attackBonus
       : (layout.slot === "horse_defense" ? defenseBonus : 0);
@@ -592,7 +597,14 @@ function sideBlockRows(player, ctx) {
     if (sealedZones.has(layout.slot)) {
       markSealedZone(slotNode, `${EQUIP_SLOT_LABELS[layout.slot] || "装备"}槽`);
     }
-    equip.appendChild(slotNode);
+    return slotNode;
+  };
+  const layouts = equipSlotLayout(player.equip);
+  for (const pair of [layouts.slice(0, 2), layouts.slice(2)]) {
+    const row = document.createElement("div");
+    row.className = "slot-row";
+    for (const layout of pair) row.appendChild(equipSlotNode(layout));
+    equip.appendChild(row);
   }
   return [judge, equip];
 }
@@ -604,7 +616,15 @@ function sideBlockNode(player, ctx) {
   return block;
 }
 
-/** 左武将块：势力 / 名称 / 身份 / 体力 / 手牌数 / 座位号 + 横置 / 酒 / 阵亡叠加。
+/** 左武将块：**立绘铺满整块 + 上下两条不透明边框带 + 压在画上的读数药丸**
+ *  （hero-portraits 票 03；裁决 §7② / §8）。
+ *
+ * 块内次序 = 立绘 → 上边框带（势力 / 名称 / 身份）→ 下边框带（体力条）→ `.hb-chips`
+ * （手牌 / 座位读数、高亮文字、武将牌上的牌区与标记、状态标签）→ 横置 / 翻面 / 阵亡叠加。
+ * 带子不透明、立绘上沿 = 名称框下边（`--hb-top-h`），文字不压在画上、头也不被压。
+ *
+ * 立绘的上图 / 空位两态与首页右栏**同一份实现**（`core.js:fillPortraitBox`）：
+ * 无图 ⇒ 同一个盒子 + `data-empty="1"`，没有 `<img>` 也就没有图片请求。
  *
  * ``flags`` 是**这一轮**的完整状态类（含 seatInteraction 给的 targetable / tsel）；
  * 高亮文字必须与座位节点的类同源，不能各自再算一遍。
@@ -612,46 +632,60 @@ function sideBlockNode(player, ctx) {
 function heroBlockNode(player, view, ctx, flags) {
   const block = document.createElement("div");
   block.className = "hero-block";
-  const head = document.createElement("div");
-  head.className = "seat-head";
+  // 立绘铺满整块（上沿由 CSS 的 `top: var(--hb-top-h)` 让给名称带，故不挡头）。
+  const portrait = document.createElement("div");
+  portrait.className = "portrait";
+  fillPortraitBox(portrait, heroNameOf(player, view));
+  block.appendChild(portrait);
+  // 上边框带：势力印 + 显示名 + 身份徽标（画在带上，不压在画上）。
+  const top = document.createElement("div");
+  top.className = "hb-frame hb-top";
   if (player.kingdom_label) {
     const kingdom = document.createElement("span");
     kingdom.className = `kingdom ${player.kingdom || ""}`;
     kingdom.textContent = player.kingdom_label;
     kingdom.setAttribute("title", `势力：${player.kingdom_label}`);
-    head.appendChild(kingdom);
+    top.appendChild(kingdom);
   }
   const name = document.createElement("span");
   name.className = "hero-name";
   name.textContent = heroNameOf(player, view);
-  head.appendChild(name);
+  top.appendChild(name);
   const badge = identityBadgeView(player, ctx.identityMode);
   if (badge.label) {
     const identity = document.createElement("span");
     identity.className = badge.className;
     identity.textContent = badge.label;
     identity.setAttribute("title", badge.title);
-    head.appendChild(identity);
+    top.appendChild(identity);
   }
-  block.appendChild(head);
-  block.appendChild(hpBarNode(player));
+  block.appendChild(top);
+  // 下边框带：体力条（`damage-fx` / `vital-fx` 的飘字硬线仍按 `.hp-bar` 的下沿量，
+  // 父节点换了、测量口不变）。
+  const bottom = document.createElement("div");
+  bottom.className = "hb-frame hb-bottom";
+  bottom.appendChild(hpBarNode(player));
+  block.appendChild(bottom);
+  // 压画的药丸（浅色底，保可读）：裁决明确"手牌 N / 标记 N 这些没关系"。
+  const chips = document.createElement("div");
+  chips.className = "hb-chips";
   const tags = document.createElement("div");
   tags.className = "seat-tags";
   fillSeatTags(tags, flags);
-  block.appendChild(tags);
+  chips.appendChild(tags);
   // M6 票 19：武将牌上的牌区（一个放置区一行；没有区时整块隐藏）。
   const zones = document.createElement("div");
   zones.className = "hero-zones";
   fillHeroZones(zones, player);
-  block.appendChild(zones);
+  chips.appendChild(zones);
   // B：手牌上限 / 裸衣等状态标签（服务端 hero_tags）。
   const heroTags = document.createElement("div");
   heroTags.className = "hero-tags";
   fillHeroTags(heroTags, player);
-  block.appendChild(heroTags);
+  chips.appendChild(heroTags);
   // M7 票 23 的第三处显示：副本全局技能标签（挂到**受影响的座位**上；没有就不画节点）。
   const pve = pveGlobalNode(player);
-  if (pve) block.appendChild(pve);
+  if (pve) chips.appendChild(pve);
   const foot = document.createElement("div");
   foot.className = "seat-foot";
   const hand = document.createElement("span");
@@ -660,7 +694,8 @@ function heroBlockNode(player, view, ctx, flags) {
   seat.innerHTML = `座位 <b>${player.seat}</b>`;
   foot.appendChild(hand);
   foot.appendChild(seat);
-  block.appendChild(foot);
+  chips.appendChild(foot);
+  block.appendChild(chips);
   // 横置 = 武将块上的一条铁索贴图（`fx-chain.js` 画的常态）；酒 = 席位泛红（只上类，无「酒」字
   // 徽章）；阵亡 = 蒙灰 + 大号「阵亡」覆盖中心。三个状态可以同时存在、互不遮挡（CSS 分层）。
   // 贴图本身不在这里画：`table.js:renderTable` 末尾的 `chainFxSync()` 按当前矩形重贴（座位节点

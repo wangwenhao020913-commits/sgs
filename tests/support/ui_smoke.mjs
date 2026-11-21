@@ -991,8 +991,13 @@ const seatBox = (seat) => seatNodes().find(
  * U1-02 起自己的装备区是**固定四槽**（武器 / 防具 / 攻马 / 防马），槽位节点自己带
  * `data-card-id`；这里找"第一个装了牌的槽"，而不是第一个槽（空槽不该被点）。 */
 const selfEquipChip = () => {
-  const row = Array.from($("t-self-zones").children).find((c) => c.getAttribute("data-zone") === "equip");
-  return row ? Array.from(row.children).find((slot) => slot.getAttribute("data-card-id")) || null : null;
+  const zone = Array.from($("t-self-zones").children).find((c) => c.getAttribute("data-zone") === "equip");
+  // 票 03：装备区容器里是两行 `.slot-row`，槽在行里面 ⇒ 按后代找第一个装了牌的槽。
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  return zone ? walk(zone).find((slot) => slot.getAttribute("data-card-id")) || null : null;
 };
 const setSelect = (id, value) => {
   const node = $(id);
@@ -3581,8 +3586,18 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     const box = Number(seat) === Number(selfSeat) ? $("t-self-zones") : seatBox(seat);
     return box ? findZone(box, zone) : null;
   };
-  const slotsOf = (row) => Array.from((row && row.children) || [])
-    .filter((node) => node.getAttribute && node.getAttribute("data-slot"));
+  // 装备区容器现在是**两行** `.slot-row`（票 03 的 3 + 2 + 2），槽在行里面 ⇒ 按后代找。
+  const slotsOf = (row) => {
+    const out = [];
+    const walkSlots = (node) => {
+      for (const child of (node && node.children) || []) {
+        if (child.getAttribute && child.getAttribute("data-slot")) out.push(child);
+        walkSlots(child);
+      }
+    };
+    walkSlots(row);
+    return out;
+  };
   const slotsWith = (row, name) => slotsOf(row).filter((slot) => slot.classList.contains(name));
   // 该区域节点后代里一共几个禁止角标（角标是槽的子节点，不是新的区块）。
   const bansIn = (node, out = []) => {
@@ -9742,22 +9757,23 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     /\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)
       && /\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css),
     `ring=${/\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)} self=${/\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css)}`);
-  check("U1-02c CSS：对手内容放大（判定行 36 / 装备行 42、槽位字 10 / 标签 9）——外形仍 210×150",
-    /\.seat \.judge-row\s*\{[^}]*calc\(36 \* var\(--dsu\)\)/s.test(css)
-      && /\.seat \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(42 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot\s*\{[^}]*font-size:\s*calc\(10 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(36 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css),
-    `judge=${/calc\(36 \* var\(--dsu\)\)/.test(css)} equip=${/calc\(42 \* var\(--dsu\)\)/.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} label=${/\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9/s.test(css)}`);
-  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 判定 52 / 装备 60 / 槽位字 13 / 标签 12）",
+  check("U1-02c CSS：判定 / 装备 7 格改成 3 + 2 + 2 三行铺满（槽尺寸由 flex 给，旧的 36 / 42 删掉）",
+    /\.slot-row\s*\{[^}]*display:\s*flex[^}]*flex:\s*1 1 0/s.test(css)
+      && /\.equip-rows\s*\{[^}]*flex-direction:\s*column[^}]*flex:\s*2 1 0/s.test(css)
+      && /\.seat \.side-block\s*\{[^}]*gap:\s*4px[^}]*padding:\s*5px/s.test(css)
+      && /\.mini-slot\s*\{[^}]*flex:\s*1 1 0[^}]*font-size:\s*calc\(10 \* var\(--dsu\)\)/s.test(css)
+      && !/\.mini-slot(?:\.[\w-]+)*\s*\{[^}]*[;\s]height\s*:/s.test(css)
+      && /\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css)
+      && !/grid-auto-rows:\s*calc\(42 \* var\(--dsu\)\)/.test(css),
+    `row=${/\.slot-row\s*\{[^}]*flex:\s*1 1 0/s.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} old=${/calc\(42 \* var\(--dsu\)\)/.test(css)}`);
+  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 槽位字 13 / 标签 12）+ 同一套三行铺满",
     /\.self \.hero-name\s*\{[^}]*font-size:\s*calc\(20 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.hp-num\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.judge-row\s*\{[^}]*calc\(52 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(60 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.side-block\s*\{[^}]*gap:\s*6px[^}]*padding:\s*8px/s.test(css)
       && /\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(52 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css),
-    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} judge=${/\.self \.judge-row\s*\{[^}]*calc\(52/s.test(css)} equip=${/\.self \.equip-grid\s*\{[^}]*calc\(60/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
+      && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css)
+      && !/grid-auto-rows:\s*calc\(60 \* var\(--dsu\)\)/.test(css),
+    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} side=${/\.self \.side-block\s*\{[^}]*padding:\s*8px/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
   check("U1-02c3 CSS：处理区 / 舞台卡面与手牌同一套 88×124 + 字号 14/11/20/9（0.63 版覆盖已删，只有一套卡面规则）",
     /\.card\.face\s*\{[^}]*width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
       && /\.card\.face \.suit\s*\{[^}]*font-size:\s*calc\(14 \* var\(--dsu\)\)/s.test(css)
@@ -12616,10 +12632,17 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // 右键装备 / 判定 / 手牌不动作；牌桌外壳仍屏蔽浏览器右键菜单。
   {
-    const equipSlot = Array.from($("t-self-zones").children)
-      .find((row) => row.getAttribute("data-zone") === "equip").children[0];
-    const judgeSlot = Array.from($("t-self-zones").children)
-      .find((row) => row.getAttribute("data-zone") === "judge").children[0];
+    const zoneSlot = (zone) => {
+      const box = Array.from($("t-self-zones").children)
+        .find((row) => row.getAttribute("data-zone") === zone);
+      const walk = (node, out = []) => {
+        for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+        return out;
+      };
+      return box ? walk(box).find((node) => node.getAttribute("data-slot")) || null : null;
+    };
+    const equipSlot = zoneSlot("equip");
+    const judgeSlot = zoneSlot("judge");
     const handChip = $("t-hand").children[0];
     fireContext(equipSlot);
     fireContext(judgeSlot);
@@ -23451,18 +23474,18 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     floatNodes().length === 0,
     `floats=${floatNodes().length}`);
 
-  // ---- 判定行缺失时退回装备格（同一块区域上方的空隙） ----
+  // ---- 判定行缺失时退回装备区（同一块区域上方的空隙） ----
   load([timingRecord(110, "PHASE_DRAW_START", 1)]);
   const judge1Node = judgeRow(1);
   if (judge1Node && judge1Node.parentNode) judge1Node.parentNode.removeChild(judge1Node);
   step();
   const equipFallback = floatNodes()[0] || null;
   const equipNode = seatNode(1)
-    ? walk(seatNode(1)).find((node) => hasClass(node, "equip-grid")) : null;
+    ? walk(seatNode(1)).find((node) => hasClass(node, "equip-rows")) : null;
   const equipRect = equipNode ? equipNode.getBoundingClientRect() : null;
-  check("U4-04-n 对手没有判定行时退回 .equip-grid[data-seat]（同一块区域上方）",
+  check("U4-04-n 对手没有判定行时退回 .equip-rows[data-seat]（同一块区域上方）",
     Boolean(equipFallback) && Boolean(equipRect)
-      && attr(equipFallback, "data-anim-phase-anchor") === "equip-grid"
+      && attr(equipFallback, "data-anim-phase-anchor") === "equip-rows"
       && px(equipFallback.style.top) < equipRect.top
       && Math.abs(px(equipFallback.style.left) - (equipRect.left + equipRect.width / 2)) < 1e-6,
     `anchor=${equipFallback && attr(equipFallback, "data-anim-phase-anchor")}`
@@ -32954,6 +32977,174 @@ $("script-confirm-backdrop").hidden = true;
       + ` hint 不变=${$("lobby-hint").textContent === hintBefore}`);
 }
 
+/* ============ hero-portraits 票 03：对局武将块（边框带 + 3/2/2 格子）============
+ *
+ * 判据全部是**结构**（父 / 子关系）与 `SGS_SMOKE_IMG` 的读数，**不读坐标**：垫片没有排版
+ * 引擎，几何那半边由 `test_web_static.py` 的声明盒判据（边框带 / 立绘 / 药丸的 CSS）与上一条
+ * fx 夹具用例（`_rect` 钉真矩形）各钉一半。
+ *
+ * 资源来源同 HP2：`pic/` 是 gitignored，公开仓 / CI 没有它 ⇒ 索引由本用例喂一份**与
+ * `/api/portraits` 同形**的表（有图一条、无图一条），渲染走 `seat-view.js` / `table.js`
+ * 的生产路径；真端点的同键那一半由 HP2-01 钉。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const kidsOf = (node) => Array.from((node && node.children) || []);
+  const kids = (node, name) => kidsOf(node).filter((child) => hasClass(child, name));
+  const one = (node, name) => kids(node, name)[0] || null;
+  const seatNode = (seat) => kidsOf($("t-seats"))
+    .find((node) => attr(node, "data-seat") === String(seat)) || null;
+  const blockOf = (seat) => {
+    const box = seatNode(seat);
+    return box ? walk(box).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const sideOf = (seat) => {
+    const box = seatNode(seat);
+    return box ? walk(box).find((node) => hasClass(node, "side-block")) || null : null;
+  };
+  const player = (seat, name, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 3, hand_limit: 5, alive: true,
+    equip: [], judge: [], identity: "rebel", identity_label: "反",
+    kingdom: "shu", kingdom_label: "蜀",
+    hero_name: name, markers: [], hero_zones: [], hero_tags: [], ...extra,
+  });
+  const portraitPath = "关羽/关羽/关羽.jpg";
+  const renderHeroes = (first, second) => {
+    const view = synthView(null);
+    view.snapshot.players = [
+      player(0, first), player(1, first, {
+        markers: [{ name: "护驾", count: 2, source_seat: 0, source_label: "座位 1" }],
+      }), player(2, second),
+    ];
+    view.snapshot.turn_seat = 0;
+    ui.state.sessionId = "hero-portraits-03";
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.state.portraits = { "关羽": { portrait: portraitPath, author: "" } };
+    ui.renderTable();
+  };
+
+  renderHeroes("关羽", "界关羽");
+  const block = blockOf(1);
+  const top = one(block, "hb-top");
+  const bottom = one(block, "hb-bottom");
+  const chips = one(block, "hb-chips");
+  const portrait = one(block, "portrait");
+  check("HP3-01 对手武将块 = 立绘 + 上边框带 + 下边框带 + 药丸列（四块各一个，次序固定）",
+    Boolean(block) && Boolean(portrait) && Boolean(top) && Boolean(bottom) && Boolean(chips)
+      && kidsOf(block).indexOf(portrait) < kidsOf(block).indexOf(top)
+      && kidsOf(block).indexOf(top) < kidsOf(block).indexOf(bottom)
+      && kidsOf(block).indexOf(bottom) < kidsOf(block).indexOf(chips)
+      && kidsOf(block).filter((node) => hasClass(node, "hero-zones")).length === 0,
+    `block=${!!block} portrait=${!!portrait} top=${!!top} bottom=${!!bottom} chips=${!!chips}`);
+
+  const topNames = walk(top).map((node) => String(node.className || ""));
+  check("HP3-02 势力 / 名称 / 身份都在 .hb-top 里（势力 → 名称 → 身份的次序不变）",
+    Boolean(top) && one(top, "kingdom") !== null
+      && one(top, "hero-name") !== null && one(top, "hero-name").textContent === "关羽"
+      && one(top, "identity-badge") !== null
+      && topNames.join("|").indexOf("kingdom") < topNames.join("|").indexOf("hero-name")
+      && topNames.join("|").indexOf("hero-name") < topNames.join("|").indexOf("identity-badge"),
+    `top=${JSON.stringify(topNames)}`);
+
+  const hpBar = one(bottom, "hp-bar");
+  check("HP3-03 体力条在 .hb-bottom 里（不再是块的直接子节点：动效仍按 `.hp-bar` 量、父节点换了）",
+    Boolean(bottom) && Boolean(hpBar) && hpBar === walk(bottom).find((n) => hasClass(n, "hp-bar"))
+      && !kidsOf(block).some((node) => hasClass(node, "hp-bar"))
+      && kidsOf(hpBar).filter((node) => hasClass(node, "hp-seg")).length === 4
+      && (hpBar.textContent || "").includes("4/4"),
+    `bar=${!!hpBar} 段=${kidsOf(hpBar).filter((node) => hasClass(node, "hp-seg")).length}`);
+
+  const img = SGS_SMOKE_IMG.read(block);
+  check("HP3-04 有图 ⇒ 块里的立绘盒子内一张 src 指向 /art/ 的 img（路径取自索引）",
+    Boolean(portrait) && img.found && img.art && img.hasSrc && img.complete
+      && decodeURI(img.src.slice("/art/".length)) === portraitPath
+      && walk(portrait).some((node) => String(node.tagName || "").toUpperCase() === "IMG"),
+    `${SGS_SMOKE_IMG.line(block)} 索引=${portraitPath}`);
+
+  const chipsText = chips ? chips.textContent || chips.text() : "";
+  check("HP3-05 手牌 / 座位读数与「标记行」都在 .hb-chips 里（浅色药丸压在画上）",
+    Boolean(chips) && chipsText.includes("手牌：3/5")
+      && chipsText.includes("座位 1") && chipsText.includes("护驾×2")
+      && one(chips, "seat-foot") !== null
+      && one(chips, "hero-zones") !== null && one(chips, "seat-tags") !== null
+      && !walk(top).some((node) => hasClass(node, "seat-foot"))
+      && !walk(bottom).some((node) => hasClass(node, "seat-foot")),
+    `chips="${String(chipsText).replace(/\s+/g, " ").trim().slice(0, 90)}"`);
+
+  // 无图：同一个盒子形状（同 class）、只差 data-empty，且**一个 img 都没有**（= 不发请求）。
+  const filledClass = String(portrait && portrait.className);
+  const filledKeys = Object.keys((portrait && portrait.attrs) || {}).sort();
+  const emptyBlock = blockOf(2);
+  const emptyBox = one(emptyBlock, "portrait");
+  const empty = SGS_SMOKE_IMG.read(emptyBlock);
+  const emptyKeys = Object.keys((emptyBox && emptyBox.attrs) || {}).sort();
+  check("HP3-06 无图（界关羽）⇒ 没有 img、空位盒子在、data-empty=\"1\"、class 与有图态同一套",
+    Boolean(emptyBox) && !empty.found && emptyBox.getAttribute("data-empty") === "1"
+      && String(emptyBox.className) === filledClass
+      && emptyKeys.length === filledKeys.length + 1
+      && emptyKeys.filter((key) => key !== "data-empty").join(",") === filledKeys.join(","),
+    `img=${empty.found} class="${emptyBox && emptyBox.className}"`
+      + ` 属性 ${filledKeys.join(",") || "（无）"} / ${emptyKeys.join(",") || "（无）"}`);
+
+  // 判定 / 装备 7 格 = 3 + 2 + 2（判定行 1 份、装备区 2 份、区里两行各 1 份）。
+  const sideShape = (side) => {
+    const judge = one(side, "judge-row");
+    const equip = one(side, "equip-rows");
+    const rows = equip ? kids(equip, "slot-row") : [];
+    const slotsOf = (node) => walk(node).filter((child) => attr(child, "data-slot") !== undefined);
+    return {
+      children: kidsOf(side).length,
+      judgeZone: attr(judge, "data-zone"),
+      judgeSlots: judge ? slotsOf(judge).length : 0,
+      equipZone: attr(equip, "data-zone"),
+      rows: rows.length,
+      rowSlots: rows.map((row) => slotsOf(row).length).join(","),
+      equipSlots: equip ? slotsOf(equip).length : 0,
+    };
+  };
+  const foeShape = sideShape(sideOf(1));
+  check("HP3-07 对手的判定 / 装备区 = 三行 3 + 2 + 2（第一行判定、装备两行各 2，槽满铺）",
+    foeShape.children === 2 && foeShape.judgeZone === "judge" && foeShape.judgeSlots === 3
+      && foeShape.equipZone === "equip" && foeShape.rows === 2 && foeShape.rowSlots === "2,2"
+      && foeShape.equipSlots === 4,
+    JSON.stringify(foeShape));
+
+  const selfShape = sideShape($("t-self-zones"));
+  check("HP3-08 自己的判定 / 装备区同一套三行（同一份 `sideBlockRows`）",
+    selfShape.children === 2 && selfShape.judgeZone === "judge" && selfShape.judgeSlots === 3
+      && selfShape.equipZone === "equip" && selfShape.rows === 2 && selfShape.rowSlots === "2,2"
+      && selfShape.equipSlots === 4,
+    JSON.stringify(selfShape));
+
+  // 自己的座位：静态立绘盒子由 `renderSelfSeat` 用**同一个**渲染口填（不是第二套实现）。
+  const selfPortrait = $("t-self-portrait");
+  const selfFilled = SGS_SMOKE_IMG.read(selfPortrait);
+  check("HP3-09 自己的座位有立绘盒子 #t-self-portrait，有图时同样走 /art/（与首页 / 对手同源）",
+    Boolean(selfPortrait) && selfFilled.found && selfFilled.art
+      && decodeURI(selfFilled.src.slice("/art/".length)) === portraitPath
+      && String(selfPortrait.className) === "portrait"
+      && !selfPortrait.getAttribute("data-empty"),
+    `${SGS_SMOKE_IMG.line(selfPortrait)}`);
+  renderHeroes("界关羽", "界关羽");
+  const selfEmpty = SGS_SMOKE_IMG.read($("t-self-portrait"));
+  check("HP3-10 自己换到无图武将 ⇒ 同一个盒子回到空位态（无 img、data-empty=\"1\"）",
+    !selfEmpty.found && $("t-self-portrait").getAttribute("data-empty") === "1"
+      && String($("t-self-portrait").className) === "portrait",
+    `${SGS_SMOKE_IMG.line($("t-self-portrait"))}`);
+
+  ui.state.portraits = {};
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 /* ============ ui-one-screen 票 04：将池预设窗（spec A6 / A6b、§8 R3–R5）============
  *
  * 判据全部走**真 DOM**：固定的筛选区（搜索框 / 五颗势力复选 / 全开关键 / 读数）+ 委托的
@@ -33727,6 +33918,202 @@ await clickAndWait($("btn-lobby-pool"));
   await discardScriptSave();
   unlinkSync(SCRIPT_LOADOUT_LIBRARY);
   ui.state.script.board = null;
+}
+
+
+/* ============ hero-portraits 票 03：体力条搬进下边框带之后，飘字仍落在块内、不压边框带 ======
+ *
+ * 机制（实测口径，不是百分比猜）：`damageFxNumberKeepOut` / `vitalFxNumberKeepOut` 量的仍是
+ * `.hp-bar` 的**下沿**（相对武将块左上角），fx 侧再按「硬线 + 2~3% 牌高」反推包围盒。
+ * 体力条搬到**下边框带**之后硬线落在 ~98% 牌高处：
+ *   - `damage` 三族（fx-core / fx-fire / fx-thunder）的 `belowCenter` 贴底夹紧会把盒子拉回
+ *     牌内、落在带上方（本用例钉住它，票 03 不改这三族）；
+ *   - `vital` 两族（fx-heal / fx-hp-loss）原来只把顶边放在硬线下方 ⇒ 盒子会压进不透明带、
+ *     甚至越出块底（实测：263×188 的块上 `numberBox` = 165.4…225.4）。票 03 给它们多读一个
+ *     **带的上沿**（`numberKeepOutTop`）并把盒子改到带上方；旧版式没有这条带 ⇒ 行为不变。
+ *
+ * 这里钉**真矩形**：垫片的 `getBoundingClientRect` 读 `_rect` 缓存（与 U4-04 同一套夹具），
+ * 给 263×188 的块 / 18 高的下边框带 / 带里的体力条各钉一块；渲染与开演走真入口
+ * （`fireDamageEventsThrough` / `fireVitalEventsThrough` / `fireHpLossEventsThrough`，与
+ * `stepPlayback` 调的是同一组函数），读数取模块自己写出来的 `metrics` 与层上的 `data-*`。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name) || String(node.className || "").split(/\s+/).includes(name)));
+  /** 垫片矩形 = `getBoundingClientRect` 的 `_rect` 缓存（与 U4-04 的夹具同一套；用完即弃）。 */
+  const pinRect = (node, left, top, width, height) => {
+    if (!node) return null;
+    node._rect = { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
+    return node;
+  };
+  const seatNode = (seat) => Array.from($("t-seats").children)
+    .find((node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockOf = (seat) => {
+    const box = seatNode(seat);
+    return box ? walk(box).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  // 真矩形：块 263×188 @ (100,100)；下边框带贴底 18 高；带里的体力条 10 高。
+  const BLOCK = { left: 100, top: 100, width: 263, height: 188 };
+  const BAND_TOP = 170;        // 270 − 100：不透明带的上沿（相对块顶）
+  const BAR_BOTTOM = 184;      // 284 − 100：体力条下沿 = 动效的硬线
+  const pinHeroGeometry = () => {
+    const block = heroBlockOf(1);
+    const bands = block ? walk(block).filter((node) => hasClass(node, "hb-bottom")) : [];
+    const bars = block ? walk(block).filter((node) => hasClass(node, "hp-bar")) : [];
+    const band = bands[0] || null;
+    const bar = bars[0] || null;
+    pinRect(block, BLOCK.left, BLOCK.top, BLOCK.width, BLOCK.height);
+    pinRect(band, BLOCK.left, BLOCK.top + BAND_TOP, BLOCK.width, 18);
+    pinRect(bar, BLOCK.left + 8, BLOCK.top + 174, 200, 10);
+    return { block, band, bar };
+  };
+  const keepOut = vm.runInContext("damageFxNumberKeepOut", context);
+  const healKeepOut = vm.runInContext("vitalFxNumberKeepOut", context);
+  const healKeepOutTop = vm.runInContext("vitalFxNumberKeepOutTop", context);
+  const layerOf = (id) => $(id);
+  const readNumber = (id) => ({
+    keepOut: Number(attr(layerOf(id), "data-damage-fx-keep-out")),
+    top: Number(attr(layerOf(id), "data-damage-fx-number-top")),
+    height: Number(attr(layerOf(id), "data-damage-fx-number")),
+  });
+  const insideAndAbove = (box) => {
+    const top = Number(box.top);
+    const bottom = Number(box.bottom);
+    return Number.isFinite(top) && Number.isFinite(bottom)
+      && top >= -0.05 && bottom <= BLOCK.height + 0.05
+      && bottom <= BAND_TOP + 0.05
+      && (top + bottom) / 2 > BLOCK.height / 2;
+  };
+  const runTimers = () => {
+    let steps = 0;
+    while (steps < 400 && pendingTimers.size) {
+      const [id, fn] = Array.from(pendingTimers.entries())[0];
+      pendingTimers.delete(id); timerDelays.delete(id); timerDue.delete(id);
+      if (typeof fn === "function") fn();
+      runFrame();
+      steps += 1;
+    }
+    return steps;
+  };
+
+  // 一局两人：座位 0 = 自己（静态块），座位 1 = 对手（环上的块，几何由 `_rect` 钉）。
+  const player = (seat, name) => ({
+    seat, hp: 3, hp_max: 4, hand_count: 2, hand_limit: 4, alive: true,
+    equip: [], judge: [], identity: null, kingdom: "shu", kingdom_label: "蜀",
+    hero_name: name, markers: [], hero_zones: [], hero_tags: [],
+  });
+  const renderTable = () => {
+    const view = synthView(null);
+    view.snapshot.players = [player(0, "郭嘉"), player(1, "周瑜")];
+    view.snapshot.turn_seat = 0;
+    ui.state.sessionId = "hero-portraits-03-fx";
+    ui.state.view = view;
+    ui.state.damageEvents = [];
+    ui.state.lifeLossEvents = [];
+    ui.resetSelection();
+    ui.renderTable();
+  };
+
+  renderTable();
+  const geometry = pinHeroGeometry();
+  check("HP3-11 硬线仍量 `.hp-bar` 的下沿（DOM 真值）：搬进下边框带后 = 184（带的上沿 = 170）",
+    Boolean(geometry.block) && Boolean(geometry.band) && Boolean(geometry.bar)
+      && keepOut(geometry.block, 1) === BAR_BOTTOM
+      && healKeepOut(geometry.block, 1) === BAR_BOTTOM
+      && healKeepOutTop(geometry.block, 1) === BAND_TOP,
+    `damage=${keepOut(geometry.block, 1)} vital=${healKeepOut(geometry.block, 1)}`
+      + ` 带上沿=${healKeepOutTop(geometry.block, 1)}`);
+
+  // ---- 伤害（fx-core 三族）：盒子被贴底夹紧拉回牌内、落在带上方 ----
+  const realDamage = windowShim.SgsDamageFX.create;
+  const damageRuns = [];
+  windowShim.SgsDamageFX.create = (canvas, options) => {
+    const fx = realDamage(canvas, options);
+    damageRuns.push({ fx, options });
+    return fx;
+  };
+  ui.state.damageEvents = [{ seq: 1, source: null, target: 1, amount: 1, nature: "NORMAL" }];
+  vm.runInContext("fireDamageEventsThrough(Infinity)", context);
+  const damageMetrics = damageRuns[0] ? damageRuns[0].fx.metrics : null;
+  const damageBox = damageMetrics ? damageMetrics.numberBox : null;
+  const damageRead = readNumber("t-damage-fx");
+  check("HP3-12 伤害飘字：包围盒整个在块内、在边框带上方、落在下半张（读数三层同源）",
+    Boolean(damageBox) && insideAndAbove(damageBox)
+      && Math.abs(Number(damageRead.top) - Number(damageBox.top)) < 0.06
+      && Math.abs(Number(damageRead.height) - Number(damageBox.height)) < 0.06
+      && Math.abs(damageRead.keepOut - BAR_BOTTOM) < 0.06
+      && damageRuns[0].options.numberKeepOut === BAR_BOTTOM,
+    damageBox
+      ? `box=${Number(damageBox.top).toFixed(1)}..${Number(damageBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} 块=${BLOCK.height} 层读数=${JSON.stringify(damageRead)}`
+      : "没有开演");
+  windowShim.SgsDamageFX.create = realDamage;
+  runTimers();
+
+  // ---- 回复（fx-heal）：同一套读数；带的上沿作为「上方放置」的边界传进去 ----
+  const realHeal = windowShim.SgsHealFX.create;
+  const healRuns = [];
+  windowShim.SgsHealFX.create = (canvas, options) => {
+    const fx = realHeal(canvas, options);
+    healRuns.push({ fx, options });
+    return fx;
+  };
+  vm.runInContext(
+    "fireVitalEventsThrough({kind: 'delta', delta_type: 'hp_change', seq: 2,"
+      + " seat: 1, before: 3, after: 4})",
+    context,
+  );
+  const healMetrics = healRuns[0] ? healRuns[0].fx.metrics : null;
+  const healBox = healMetrics ? healMetrics.numberBox : null;
+  check("HP3-13 回复飘字（fx-heal）：在块内、边框带上方、下半张；硬线 184 / 带上沿 170 都是 DOM 真值",
+    Boolean(healBox) && insideAndAbove(healBox)
+      && healRuns[0].options.numberKeepOut === BAR_BOTTOM
+      && healRuns[0].options.numberKeepOutTop === BAND_TOP
+      && Math.abs(Number(healMetrics.keepOut) - BAR_BOTTOM) < 0.06,
+    healBox
+      ? `box=${Number(healBox.top).toFixed(1)}..${Number(healBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} 块=${BLOCK.height}`
+        + ` keepOut=${healRuns[0].options.numberKeepOut}/${healRuns[0].options.numberKeepOutTop}`
+      : "没有开演");
+  windowShim.SgsHealFX.create = realHeal;
+  runTimers();
+
+  // ---- 失去体力（fx-hp-loss）：同一套几何（同一份 `vitalFxPlanFor`） ----
+  renderTable();
+  pinHeroGeometry();
+  const realHpLoss = windowShim.SgsHpLossFX.create;
+  const lossRuns = [];
+  windowShim.SgsHpLossFX.create = (canvas, options) => {
+    const fx = realHpLoss(canvas, options);
+    lossRuns.push({ fx, options });
+    return fx;
+  };
+  ui.state.lifeLossEvents = [{ seq: 3, seat: 1, amount: 2 }];
+  vm.runInContext("fireHpLossEventsThrough(Infinity)", context);
+  // 失去体力这一族带 `stagger`（排播层先排一个错开计时器再开演）⇒ 跑掉那个计时器。
+  runTimers();
+  const lossMetrics = lossRuns[0] ? lossRuns[0].fx.metrics : null;
+  const lossBox = lossMetrics ? lossMetrics.numberBox : null;
+  check("HP3-14 失去体力飘字（fx-hp-loss）：同一套几何，仍在块内、带上方、下半张",
+    Boolean(lossBox) && insideAndAbove(lossBox)
+      && lossRuns[0].options.numberKeepOut === BAR_BOTTOM
+      && lossRuns[0].options.numberKeepOutTop === BAND_TOP,
+    lossBox
+      ? `box=${Number(lossBox.top).toFixed(1)}..${Number(lossBox.bottom).toFixed(1)}`
+        + ` 带=${BAND_TOP} 块=${BLOCK.height}`
+      : "没有开演");
+  windowShim.SgsHpLossFX.create = realHpLoss;
+  runTimers();
+
+  ui.state.damageEvents = [];
+  ui.state.lifeLossEvents = [];
+  ui.state.view = null;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

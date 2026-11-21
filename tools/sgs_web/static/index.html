@@ -248,34 +248,44 @@
              id 是稳定读取口（烟测 / 回放），故节点常驻、只改内容。
              U1-06：右键这块 = 武将详情（装备 / 判定槽与手牌不响应右键）。 -->
         <div id="t-self-hero" class="hero-block">
-          <div class="seat-head">
+          <!-- hero-portraits 票 03（裁决 §7② / §8）：立绘铺满整块，**名称 / 势力 / 身份画在
+               上边框带、体力条画在下边框带**（带子不透明，文字不压在画上）；手牌 / 标记等读数
+               仍是压在画上的浅色药丸（`.hb-chips`）。五个 id 是稳定读取口（烟测 / 回放 / 动效），
+               父节点换了、id 一个都不变。立绘盒子出厂就是**空位态**（没有 `pic/` 时脚本还没跑，
+               先渲染成空位不会闪一帧有图）。 -->
+          <div id="t-self-portrait" class="portrait" data-empty="1"></div>
+          <div class="hb-frame hb-top">
             <span id="t-self-kingdom" class="kingdom"></span>
             <span id="t-hero" class="hero-name">（无武将）</span>
             <span id="t-self-identity" class="identity-badge"></span>
           </div>
-          <div id="t-self-hp" class="hp-bar"></div>
-          <div id="t-self-tags" class="seat-tags"></div>
-          <!-- M6 票 19：武将牌上的牌区（每个放置区一行；没有区时整块隐藏）。 -->
-          <div id="t-self-hero-zones" class="hero-zones" hidden></div>
-          <!-- B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 -->
-          <div id="t-self-hero-tags" class="hero-tags" hidden></div>
-          <!-- M7 票 23：剧本战斗（PvE）的三处显示里属于自己的那两处 + 只读遗物栏。
-               **数据决定显示**：身份局 / 不带座位表的局这些键全是空值，节点常驻只切
-               `hidden`（`table.js:renderSelfSeat`），牌桌 DOM 与引入前逐字同形。 -->
-          <div id="t-self-global" class="pve-global" hidden></div>
-          <div id="t-self-relics" class="pve-relics" hidden>
-            <span class="pve-relic-label">遗物</span><span id="t-self-relic-list" class="pve-relic-list">无</span>
+          <div class="hb-frame hb-bottom">
+            <div id="t-self-hp" class="hp-bar"></div>
           </div>
-          <!-- 一场剧本战斗打完的出口：回棋盘走既有的结算流程（票 22 的三选一 / 遗物弹窗）。
-               只在"从棋盘进来的那一场"且服务端说终局时出现（`table.js:renderSelfSeat`）。 -->
-          <button id="btn-t-pve-return" type="button" class="ghost pve-return" hidden>回棋盘结算</button>
-          <!-- 战斗中退出（spec 用户故事 17 / "随时可退出"）：只调 `suspend`（这一场作废、
-               棋盘进度已保存），确认框复用票 20 的同一个模态壳与那句文案。判据同样是服务端
-               事实（`state.script.battle` 是"从棋盘进来的那一场"），身份局不出现。 -->
-          <button id="btn-t-pve-exit" type="button" class="ghost pve-return" hidden>退出战斗</button>
-          <div class="seat-foot">
-            <span>手牌：<b id="t-self-hand">0/0</b></span>
-            <span>座位 <b id="t-self-seatno">0</b></span>
+          <div class="hb-chips">
+            <div id="t-self-tags" class="seat-tags"></div>
+            <!-- M6 票 19：武将牌上的牌区（每个放置区一行；没有区时整块隐藏）。 -->
+            <div id="t-self-hero-zones" class="hero-zones" hidden></div>
+            <!-- B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 -->
+            <div id="t-self-hero-tags" class="hero-tags" hidden></div>
+            <!-- M7 票 23：剧本战斗（PvE）的三处显示里属于自己的那两处 + 只读遗物栏。
+                 **数据决定显示**：身份局 / 不带座位表的局这些键全是空值，节点常驻只切
+                 `hidden`（`table.js:renderSelfSeat`），牌桌 DOM 与引入前逐字同形。 -->
+            <div id="t-self-global" class="pve-global" hidden></div>
+            <div id="t-self-relics" class="pve-relics" hidden>
+              <span class="pve-relic-label">遗物</span><span id="t-self-relic-list" class="pve-relic-list">无</span>
+            </div>
+            <!-- 一场剧本战斗打完的出口：回棋盘走既有的结算流程（票 22 的三选一 / 遗物弹窗）。
+                 只在"从棋盘进来的那一场"且服务端说终局时出现（`table.js:renderSelfSeat`）。 -->
+            <button id="btn-t-pve-return" type="button" class="ghost pve-return" hidden>回棋盘结算</button>
+            <!-- 战斗中退出（spec 用户故事 17 / "随时可退出"）：只调 `suspend`（这一场作废、
+                 棋盘进度已保存），确认框复用票 20 的同一个模态壳与那句文案。判据同样是服务端
+                 事实（`state.script.battle` 是"从棋盘进来的那一场"），身份局不出现。 -->
+            <button id="btn-t-pve-exit" type="button" class="ghost pve-return" hidden>退出战斗</button>
+            <div class="seat-foot">
+              <span>手牌：<b id="t-self-hand">0/0</b></span>
+              <span>座位 <b id="t-self-seatno">0</b></span>
+            </div>
           </div>
           <!-- 横置（连环状态）的常态表现 = 一块铁索贴图画布（chain-death-voices 票 01：原先是
                一条虚线）。节点常驻、只切 `hidden`（`table.js:renderSelfSeat`）；贴图由 `fx-chain.js`

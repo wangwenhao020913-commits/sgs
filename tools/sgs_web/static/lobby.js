@@ -694,8 +694,8 @@ function renderLobbyHeroPanel() {
 
 /** 右栏下格左侧：立绘。有图 ⇒ 一张 `<img>`；无图 / 缺索引 ⇒ **同一个盒子**的空位态。
  *
- * 盒子是 `index.html` 里那个静态的 `#lobby-portrait`（`class="portrait-box"`），本函数只改
- * 它的 `data-empty` 与子节点：
+ * 盒子是 `index.html` 里那个静态的 `#lobby-portrait`（`class="portrait-box"`）；
+ * 「有图 / 空位」的两种形状由 `core.js:fillPortraitBox` 一手落（牌桌武将块同源，票 03）：
  *  - 有图 ⇒ 一张 `<img>`，`src = /art/<索引里的相对路径>`（原样拼，不猜）；
  *  - 无图 ⇒ 清空子节点 + `data-empty="1"`——**没有 img 就没有网络请求**。
  *
@@ -704,34 +704,18 @@ function renderLobbyHeroPanel() {
  * 垫片里这是可核的：同一个节点、同一套 class、两次渲染只差 `data-empty` 一个属性。
  */
 function renderLobbyPortrait(version) {
-  const box = $("lobby-portrait");
-  if (!box) return null;
-  box.innerHTML = "";
-  box.className = "portrait-box";
-  const entry = lobbyPortraitEntry(version);
-  const path = entry && entry.portrait;
-  if (!path) {
-    box.setAttribute("data-empty", "1");
-    return null;
-  }
-  box.removeAttribute("data-empty");
-  const img = document.createElement("img");
-  img.src = `/art/${encodeURI(String(path))}`;
-  img.alt = `${version.name} 立绘`;
-  img.loading = "eager";
-  img.decoding = "async";
-  box.appendChild(img);
+  fillPortraitBox($("lobby-portrait"), version && version.name, "portrait-box");
   return null;
 }
 
 /** 立绘索引里该版本的那一条。键是**显示名称**（与 `/api/heroes` 的 `version.name` 同源）；
- *  没有版本 / 没有索引 / 索引形状不对 ⇒ `null`（调用方一律当"无图、无作者"）。 */
+ *  没有版本 / 没有索引 / 索引形状不对 ⇒ `null`（调用方一律当"无图、无作者"）。
+ *
+ *  查表本体在 `core.js:portraitEntryFor`（牌桌武将块读同一份 `state.portraits`）；
+ *  这里只负责把"版本对象"翻成"显示名称"。 */
 function lobbyPortraitEntry(version) {
   if (!version || !version.name) return null;
-  const table = state.portraits;
-  if (!table || typeof table !== "object") return null;
-  const entry = table[version.name];
-  return entry && typeof entry === "object" ? entry : null;
+  return portraitEntryFor(version.name);
 }
 
 /** 技能面板最下方的作者页脚（spec §3.8 / 裁决 §7①）：`#lobby-author` 是 `#lobby-heroskills`
