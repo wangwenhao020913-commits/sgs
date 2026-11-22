@@ -16,7 +16,8 @@
    hook 为准。开跑前先 `git config core.hooksPath` 查一次——本 checkout 应是 `.githooks`
    （`bash tools/install-hooks.sh` 接的）。
    **门禁按风险面分三档**（族表见 `开发文档/05-测试与验证策略.md` §7「门禁与交付标准」）：
-   - **票档**：每次提交由 hook 自动跑，目标 **≤2 分钟**。分级在 `tools/gate-staged.sh`——
+   - **票档**：每次提交由 hook 自动跑，实测 **54–132 s**（engine 132 / web 74 / ui 54 /
+     content 79，含 shell 档；8 核 / 3.8 GB）。分级在 `tools/gate-staged.sh`——
      `src/` / `tests/` 不再是"一律全量"的判据，改按**引擎语义 / 接入层 / 前端静态 / 内容文档**
      四类风险面取族。**未登记的路径一律退回全量档**（fail-closed）：加新顶层目录时先把它登记进去。
    - **全量档 ≈8 分钟**：只在**合并提交**（同源的 `.githooks/pre-merge-commit`；`git merge`
