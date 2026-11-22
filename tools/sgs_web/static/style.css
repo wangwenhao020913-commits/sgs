@@ -540,6 +540,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .unknown-zone .cards { margin: 0; }
 .card.face.kind-virtual { background: linear-gradient(180deg, #fffdf4 0%, #eef3ff 100%); }
 .card.face.kind-transformed { background: linear-gradient(180deg, #fffef9 0%, #efe8f7 100%); }
+/* qunying 票 08：**此刻能点**的牌高亮（用户 2026-11-22 第三轮：「不可选择的卡牌都置灰了，
+ * 同时也让能选择的卡牌绘制高亮（尤其是场上的可选择的卡牌，不做个高亮很容易忽视）」）。
+ * 与 `.dis` 的置灰互补：同一个 `usable`（手牌 = `cardFace().selectable`）的两个结论，互斥。
+ * 描边 + 外晕；`.sel` / `.picked` 住在**后面**，选中 / 已选照旧压过它（同特异度、后者胜）。 */
+.card.face.is-pickable {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 8px rgba(156, 43, 27, .30);
+}
 .card.face.sel {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 3px var(--accent);
@@ -1126,13 +1134,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .mini-slot.judge-slot.filled { border-color: #c39a5f; background: #fff8e9; }
 .mini-slot .slot-k { font-size: calc(9 * var(--dsu)); line-height: 1.1; color: #9b8f7d; }
 /* U4-06 / D13：槽内可用宽 ≈ 36 设计单位（对手装备两列）/ ≈ 21（判定三等分）。
-   牌名**允许折行**（balance 均分两行），四字 / 五字全名放得下；槽名常显在上行，
+   牌名**允许折行**（balance 均分两行），四字 / 五字全名放得下；空槽的槽名占上行，
    不靠 tooltip 兜底。字号仍是继承来的 10 / 13（判定槽折两行后高度要收一点）。 */
 .mini-slot .slot-v {
   display: block; max-width: 100%; font-weight: 600; line-height: 1.1;
   white-space: normal; overflow-wrap: anywhere; text-wrap: balance;
 }
-.mini-slot.judge-slot.filled .slot-k { font-size: calc(8 * var(--dsu)); line-height: 1.1; }
+/* qunying 票 08：判定槽**有牌时不再画**「判定」（`miniSlotNode` 只在空槽挂 `.slot-k`）——
+ * 原来这里给折行后的「判定」收字号的两条规则随之删掉；产物牌名与花色点数照旧。 */
 .mini-slot.judge-slot.filled .slot-v {
   font-size: calc(9 * var(--dsu)); line-height: 1.15;
 }
@@ -1155,6 +1164,13 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   pointer-events: none;
 }
 button.mini-slot { cursor: pointer; }
+/* qunying 票 08：场上**此刻能点**的槽位（任何座位的装备 / 判定槽；判据 = `miniSlotNode`
+ * 里那份 `face.selectable`）画高亮环，与手牌面的 `.is-pickable` 同一个类、同一处样式纪律。
+ * 只加外晕 / 描边，不改 `.filled` / `.judge-slot` 的底色与字号；`.picked` 住在后面，
+ * 已选槽位照旧是绿内圈。 */
+.mini-slot.is-pickable {
+  box-shadow: 0 0 0 2px var(--accent), 0 0 8px rgba(156, 43, 27, .35);
+}
 .mini-slot.sel { border-color: var(--accent); background: var(--accent-soft); }
 .mini-slot.picked { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 2px var(--ok); }
 .mini-slot.dis { opacity: .4; cursor: not-allowed; }
@@ -1899,13 +1915,13 @@ button.mini-slot { cursor: pointer; }
 /* 自己的侧栏同样是三行铺满（票 03）：判定行 1 份、装备区 2 份、区里两行各 1 份。
    行高预算 = 238 − 上下 8×2 − 行距 6×2 = 210，三行 ⇒ ≈ 70/行（票 04 放大后；旧口径的定高 52 / 60 已删）。
    U4-06 / D13：槽内可用宽 ≈ 47 设计单位（装备两列）/ ≈ 28（判定三等分）——牌名折两行
-   （balance），四字 / 五字全名放得下；槽名（标签 12 / 判定 12）保留。 */
+   （balance），四字 / 五字全名放得下；空槽的槽名 12 保留（判定槽有牌时自 qunying 票 08
+   起不写「判定」，原 `.judge-slot.filled .slot-k` 那条 12 与这条重复，一并删掉）。 */
 .self .judge-row { gap: 4px; }
 .self .equip-rows { gap: 5px; }
 .self .mini-slot .distance-bonus { font-size: calc(11 * var(--dsu)); }
 .self .mini-slot { font-size: calc(13 * var(--dsu)); }
 .self .mini-slot .slot-k { font-size: calc(12 * var(--dsu)); }
-.self .mini-slot.judge-slot.filled .slot-k { font-size: calc(12 * var(--dsu)); line-height: 1.1; }
 .self .mini-slot.judge-slot.filled .slot-v { font-size: calc(13 * var(--dsu)); line-height: 1.15; }
 
 /* ---------- 事件流浮层 ---------- */

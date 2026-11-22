@@ -9876,14 +9876,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(seat1, "equip-slot").map((slot) => attr(slot, "data-slot")).join(",")
         === "weapon,armor,horse_offense,horse_defense",
     `judge=${byClass(seat1, "judge-slot").length} equip=${byClass(seat1, "equip-slot").map((s) => attr(s, "data-slot")).join(",")}`);
-  check("U1-02h2 槽里的牌画牌名 + 花色点数；有装备时**不**显示武器/防具/攻马/防马，空槽才显示；判定槽常显；坐骑槽只花色点数（票 26）",
+  check("U1-02h2 槽里的牌画牌名 + 花色点数；有牌时不写槽名（装备自 2026-11-07、判定自 qunying 票 08），空槽才显示；坐骑槽只花色点数（票 26）",
     seat1.text().includes("八卦阵") && seat1.text().includes("闪电")
       && !seat2.text().includes("赤兔")
       && (() => {
         const slots = byClass(seat1, "equip-slot");
         const filled = slots.filter((slot) => hasClass(slot, "filled"));
         const empty = slots.filter((slot) => hasClass(slot, "empty"));
-        const judge = byClass(seat1, "judge-slot")[0];
+        const judgeFilled = byClass(seat1, "judge-slot").find((slot) => hasClass(slot, "filled"));
+        const judgeEmpty = byClass(seat1, "judge-slot").filter((slot) => hasClass(slot, "empty"));
         const horse = byClass(seat2, "equip-slot").find(
           (slot) => attr(slot, "data-slot") === "horse_offense");
         return filled.length === 1
@@ -9893,8 +9894,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
           && empty.length === 3
           && empty.every((slot) => byClass(slot, "slot-k").some(
             (label) => /武器|防具|攻马|防马/.test(label.textContent)))
-          && byClass(judge, "slot-suit").length === 1
-          && byClass(judge, "slot-k").length === 1
+          && byClass(judgeFilled, "slot-suit").length === 1
+          && byClass(judgeFilled, "slot-k").length === 0
+          && !judgeFilled.text().includes("判定")
+          && judgeEmpty.length === 2
+          && judgeEmpty.every((slot) => byClass(slot, "slot-k").some(
+            (label) => label.textContent === "判定"))
           && !!horse && hasClass(horse, "filled")
           && byClass(horse, "slot-suit").length === 1
           && byClass(horse, "slot-v").length === 0
@@ -23994,16 +23999,22 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.renderTable();
   const seat1 = seatBox(1);
   const judgeSlot = byClass(seat1, "judge-slot").find((node) => attr(node, "data-card-id"));
+  const judgeEmptySlots = byClass(seat1, "judge-slot")
+    .filter((node) => node.classList.contains("empty"));
   const equipSlot = byClass(seat1, "equip-slot").find((node) => attr(node, "data-card-id"));
-  check("U4-06e 满槽：牌名 + 花色点数；装备槽有牌时不再写槽名，判定槽仍写「判定」",
+  check("U4-06e 满槽：牌名 + 花色点数；有牌时不再写槽名（装备 / 判定，qunying 票 08），空判定槽仍写「判定」",
     !!judgeSlot && !!equipSlot
-      && judgeSlot.textContent.includes("判定")
+      && !judgeSlot.textContent.includes("判定")
+      && byClass(judgeSlot, "slot-k").length === 0
       && judgeSlot.textContent.includes("兵粮寸断")
+      && judgeEmptySlots.length === 2
+      && judgeEmptySlots.every((slot) => slot.textContent.includes("判定"))
       && equipSlot.textContent.includes("方天画戟")
       && !equipSlot.textContent.includes("武器")
       && byClass(equipSlot, "slot-suit").length === 1,
     `judge="${judgeSlot ? judgeSlot.textContent : ""}"`
-      + ` equip="${equipSlot ? equipSlot.textContent : ""}"`);
+      + ` equip="${equipSlot ? equipSlot.textContent : ""}"`
+      + ` emptyJudge=${judgeEmptySlots.length}`);
 
   // 状态复位：后面的用例不继承这里的合成视图 / 记录。
   ui.state.view = null;
@@ -34954,6 +34965,171 @@ await clickAndWait($("btn-lobby-pool"));
   ui.state.sessionId = null;
   ui.state.view = null;
   ui.state.playback = null;
+  ui.resetSelection();
+}
+
+/* ============ qunying 票 08：判定槽去「判定」+ 可选项高亮（用户 2026-11-22 第三轮） =====
+ *
+ * 两条都是**渲染口径**，直接喂与真会话同形的合成视图（服务端零改动，只读既有键）：
+ *  1. 有牌的判定槽不画「判定」（用户原文：「现在"转"太挤了看不清」）——缩略图只剩产物
+ *     牌名 + 花色点数 + 「转」；空判定槽照旧写「判定」。
+ *  2. 此刻能点的牌高亮 `.is-pickable`：牌桌槽位（跨座位公开区直选面）与自己的手牌
+ *     用**同一个类**（样式只住 `style.css` 一处）；点不动的仍 `.dis`、**不带**高亮；
+ *     无询问 / 回放一律不高亮（[G2] / [G3]）。
+ */
+{
+  const q08Has = (node, name) => hasClassText(node, name);
+  const q08Attr = (node, name) => (node && node.getAttribute ? node.getAttribute(name) : undefined);
+  const q08ZoneBox = (seat) => (Number(seat) === 0 ? $("t-self-zones") : seatBox(seat));
+  const q08HandChip = (cardId) => Array.from($("t-hand").children)
+    .find((chip) => q08Attr(chip, "data-card-id") === String(cardId)) || null;
+  const q08SlotOf = (seat, zone, cardId) => byClass(q08ZoneBox(seat), "mini-slot").find(
+    (slot) => q08Attr(slot, "data-zone") === zone
+      && q08Attr(slot, "data-card-id") === String(cardId)) || null;
+  const q08PickableCount = () => [0, 1, 2].reduce(
+    (total, seat) => total + byClass(q08ZoneBox(seat), "is-pickable").length,
+    0,
+  ) + byClass($("t-hand"), "is-pickable").length;
+
+  /* ---- ① 有牌判定槽不画「判定」；场上可点的槽位高亮、未提供的槽位置灰 ---- */
+  const q08Source = {
+    ...synthCard(4804, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal", display_name: "青釭剑", attribute: "普通",
+    description: "武器，攻击范围 2。", source_cards: [],
+  };
+  // 判定区的**转化牌**（qunying 票 02 的产物面）：用户那条报障就发生在这一格上。
+  const q08Judge = {
+    ...synthCard(4801, "乐不思蜀"), type: "indulgence", kind: "normal",
+    display_name: "乐不思蜀", attribute: "普通", description: "延时类锦囊。",
+    source_cards: [], converted: true, source: q08Source,
+  };
+  const q08Sword = {
+    ...synthCard(4802, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal",
+  };
+  const q08Armor = {
+    ...synthCard(4803, "八卦阵"), type: "eight_diagram", slot: "armor",
+    attack_range: null, kind: "normal",
+  };
+  const q08PubPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 4801,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 4801, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    // 只提供**武器**那一张：同区的防具与判定区的牌照常画出来，但此刻点不动。
+    slots: [{ ref: { seat: 1, zone: "equip" }, card: q08Sword }],
+    spec: { zones: ["equip", "judge"], total: [1, 1], seats: [1] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "谦逊", targets: [0],
+      label: "0号位发动谦逊", requirement: "移动场上一张牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 4801, picks: [0] },
+      default_label: "超时将自动选择第一张牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const q08PubView = synthView(q08PubPending);
+  q08PubView.snapshot.players[1].equip = [q08Sword, q08Armor];
+  q08PubView.snapshot.players[1].judge = [q08Judge];
+  ui.state.view = q08PubView;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(q08PubView);
+
+  const q08JudgeSlot = q08SlotOf(1, "judge", 4801);
+  const q08JudgeEmpty = byClass(seatBox(1), "judge-slot").filter((slot) => q08Has(slot, "empty"));
+  check("Q08-01 有牌判定槽不画「判定」（产物牌名 + 花色点数 + 「转」还在）；空判定槽照旧写「判定」",
+    !!q08JudgeSlot
+      && q08Has(q08JudgeSlot, "filled")
+      && byClass(q08JudgeSlot, "slot-k").length === 0
+      && !q08JudgeSlot.textContent.includes("判定")
+      && byClass(q08JudgeSlot, "slot-v").length === 1
+      && byClass(q08JudgeSlot, "slot-v")[0].textContent === "乐不思蜀"
+      && byClass(q08JudgeSlot, "slot-suit").length === 1
+      && byClass(q08JudgeSlot, "slot-trans").length === 1
+      && q08JudgeEmpty.length === 2
+      && q08JudgeEmpty.every((slot) => byClass(slot, "slot-k")
+        .some((label) => label.textContent === "判定")),
+    `filled="${q08JudgeSlot ? q08JudgeSlot.textContent : "(无)"}"`
+      + ` k=${q08JudgeSlot ? byClass(q08JudgeSlot, "slot-k").length : "-"}`
+      + ` trans=${q08JudgeSlot ? byClass(q08JudgeSlot, "slot-trans").length : "-"}`
+      + ` empty=${q08JudgeEmpty.length}`);
+
+  const q08SwordSlot = q08SlotOf(1, "equip", 4802);
+  const q08ArmorSlot = q08SlotOf(1, "equip", 4803);
+  check("Q08-02 [G2] 场上此刻可点的槽位带 is-pickable；同区没被提供的牌 / 判定区的牌仍 .dis、不带高亮",
+    !!q08SwordSlot && !!q08ArmorSlot
+      && q08SwordSlot.tagName === "BUTTON"
+      && q08Has(q08SwordSlot, "is-pickable")
+      && !q08Has(q08SwordSlot, "dis")
+      && q08Has(q08ArmorSlot, "dis")
+      && !q08Has(q08ArmorSlot, "is-pickable")
+      && q08Has(q08JudgeSlot, "dis")
+      && !q08Has(q08JudgeSlot, "is-pickable"),
+    `sword=${q08SwordSlot ? q08SwordSlot.className : "(无)"}`
+      + ` armor=${q08ArmorSlot ? q08ArmorSlot.className : "(无)"}`
+      + ` judge=${q08JudgeSlot ? q08JudgeSlot.className : "(无)"}`);
+
+  /* ---- ② 自己的手牌面：可选的那张高亮、用不出的那张照旧置灰 ---- */
+  const q08Slash = synthCard(4811, "杀");
+  const q08Dodge = { ...synthCard(4812, "闪"), type: "dodge" };
+  const q08HandPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 4811,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 4811, card: q08Slash, targets: [1] },
+      { kind: "EndPhase", answers_seq: 4811 },
+    ],
+    candidate_index: {
+      "4811": { card: q08Slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context: null,
+  };
+  const q08HandView = synthView(q08HandPending);
+  q08HandView.snapshot.self_hand = [q08Slash, q08Dodge];
+  ui.state.view = q08HandView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(q08HandView);
+  const q08SlashChip = q08HandChip(4811);
+  const q08DodgeChip = q08HandChip(4812);
+  check("Q08-03 自己的手牌：此刻能用的那张带 is-pickable，用不出的那张仍 .dis、不带高亮",
+    !!q08SlashChip && !!q08DodgeChip
+      && q08Has(q08SlashChip, "is-pickable")
+      && !q08Has(q08SlashChip, "dis")
+      && q08Has(q08DodgeChip, "dis")
+      && !q08Has(q08DodgeChip, "is-pickable"),
+    `slash=${q08SlashChip ? q08SlashChip.className : "(无)"}`
+      + ` dodge=${q08DodgeChip ? q08DodgeChip.className : "(无)"}`);
+
+  /* ---- ③ [G3] 没有询问：牌桌 / 手牌一个 is-pickable 都没有 ---- */
+  ui.state.view = synthView(null);
+  ui.resetSelection();
+  ui.renderTable();
+  check("Q08-04 [G3] 无询问（非选择面）不高亮：牌桌与手牌一个 is-pickable 都没有",
+    q08PickableCount() === 0,
+    `is-pickable=${q08PickableCount()}`);
+
+  /* ---- ④ [G3] 回放：pending 收起 + 手牌面恒不可点 ⇒ 同样不高亮 ---- */
+  ui.state.view = q08HandView;
+  ui.state.playback = { records: [], index: 0 };
+  ui.state.liveView = synthView(null);
+  ui.resetSelection();
+  ui.renderTable();
+  check("Q08-05 [G3] 回放里不高亮：pending 与手牌可点态都收起（is-pickable 0 个）",
+    q08PickableCount() === 0,
+    `is-pickable=${q08PickableCount()}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.playback = null;
+  ui.state.liveView = null;
   ui.resetSelection();
 }
 

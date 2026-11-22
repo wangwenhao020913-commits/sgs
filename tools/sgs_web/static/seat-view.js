@@ -322,8 +322,10 @@ function showSlotCardPreview(card, event) {
 /** 一个判定 / 装备槽：空槽画暗色占位；有牌画**简略牌面**（牌名 + 花色点数）+
  *  跟随鼠标的常规卡面预览（用户 2026-11-07）。
  *
- *  - 槽名：判定槽**常显**（窄槽读不出"这是判定区"）；装备槽**只在空槽**显示
- *    （武器 / 防具 / 攻马 / 防马），有装备时让位给牌面；
+ *  - 槽名**只画在空槽**：判定槽写「判定」（窄槽读不出"这是判定区"）、装备槽写
+ *    武器 / 防具 / 攻马 / 防马。有牌时都让位给牌面——判定槽自 qunying 票 08 起也
+ *    不再写「判定」：用户 2026-11-22 第三轮实机口径「已有判定牌的判定槽，不显示
+ *    "判定"二字，现在"转"太挤了看不清」；
  *  - 有牌：牌名（窄槽折行，见 `style.css`）+ 花色点数（单源 / 实体牌才有）；
  *    **两个坐骑槽例外**（票 26，用户 2026-11-17 实机口径）：不画牌名，只画花色点数，
  *    并画出**本侧**的距离读数（攻马槽 = 负向合计 / 防马槽 = 正向合计；两侧不抵消，0 不画）；
@@ -334,6 +336,10 @@ function showSlotCardPreview(card, event) {
  *  ``interactive`` 在三种面里为真：**本人**的"提供一张 B / 预发动"（票 14 / W4-1）、
  *  以及**跨座位公开区直选**（qunying 票 03a——任何座位的装备 / 判定槽都可点，点它 =
  *  点那张牌）。判据全部读载荷形状 / 清单声明，其余窗口保持静态。
+ *
+ *  可点的槽（``face.selectable``）加 ``is-pickable`` 高亮、点不动的照旧 ``dis`` 置灰
+ *  （qunying 票 08，用户 2026-11-22 第三轮：场上能点的牌不做高亮很容易漏看）。两个类
+ *  互斥，判据仍是那份 ``cardFace`` / ``publicZonePickFace`` 的派生——不认技能 id。
  */
 function miniSlotNode(options) {
   const { zone, slot, sealKey, card, interactive, ctx, distanceBonus = 0 } = options;
@@ -349,8 +355,9 @@ function miniSlotNode(options) {
   const label = document.createElement("span");
   label.className = "slot-k";
   label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
-  // 判定槽常显槽名；装备槽只在空槽显示（有装备时不写武器 / 防具 / 攻马 / 防马）。
-  if (judge || !card) node.appendChild(label);
+  // 槽名只画在**空槽**（装备槽历来如此；判定槽自 qunying 票 08 起也如此——有牌时不写
+  // 「判定」，给产物牌名 + 花色点数 + 「转」让出那一格）。
+  if (!card) node.appendChild(label);
   if (!card) {
     // 空坐骑槽也要显示"全局数"：飞影 +1 落防马区、马术 −1 落攻马区（无花色点数）。
     if (mount && distanceBonus) node.appendChild(distanceBonusNode(distanceBonus));
@@ -397,7 +404,11 @@ function miniSlotNode(options) {
       : cardFace(ctx.pendingNow, card);
     if (face.selected) node.classList.add("sel");
     if (face.picked) node.classList.add("picked");
-    if (!face.selectable) node.classList.add("dis");
+    // 「此刻点不点得动」只有这份派生（`cardFace` / `publicZonePickFace`）：可点 ⇒
+    // `.is-pickable`（手牌的面走同一个类，样式只住 `style.css`），点不动 ⇒ `.dis`。
+    // 两个类互斥——置灰项绝不高亮（qunying 票 08 [G2]）。
+    if (face.selectable) node.classList.add("is-pickable");
+    else node.classList.add("dis");
     // 票 12：源牌级置灰要说清"为什么点不动"（槽位的常规悬停是卡面预览，不会读 title，
     // 故只在有说明时补这一格——正常槽位仍不挂原生 title）。
     if (face.note) node.setAttribute("title", face.note);

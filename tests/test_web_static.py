@@ -1965,14 +1965,17 @@ def test_discard_panel_uses_the_shared_modal_shell_with_its_own_clickable_backdr
 
 
 # ---------------------------------------------------------------------------
-# U4-06（spec D13）：判定 / 装备槽放得下四字牌名；用户 2026-11-07 起装备槽有牌时不写槽名
+# U4-06（spec D13）：判定 / 装备槽放得下四字牌名；用户 2026-11-07 起装备槽有牌时不写槽名，
+# qunying 票 08 起**判定槽有牌时也不写「判定」**（用户 2026-11-22 第三轮：「转」与「判定」
+# 挤在一格里看不清）。
 # ---------------------------------------------------------------------------
 # 1258px 视口（--dsu = 0.786）下：对手装备槽内容宽 ≈ 36 设计单位（侧栏 100 的两列），
 # 四字牌名 @10 = 40 ⇒ 必须允许折行（两行 = 22 设计单位）；判定槽内容宽 ≈ 21（侧栏三等分），
-# 四字牌名折两行 @9 + 8 的「判定」标记 = ~34。hero-portraits 票 03 把 7 格改成 3 + 2 + 2
+# 四字牌名折两行 @9。hero-portraits 票 03 把 7 格改成 3 + 2 + 2
 # 三行铺满之后，槽高不再写死（36 / 42、自己的 52 / 60 都删了），改由行的 flex 均分：
 # 对手每行 ≈ (188 − 10 − 8) / 3 ≈ 56.7、自己 ≈ (238 − 16 − 12) / 3 = 70，都比旧预算宽。
-# 槽名与牌名都在 DOM 里（`tests/support/ui_smoke.mjs` 的 U4-06e），这里钉不靠 tooltip 的机械条件。
+# 槽名与牌名都在 DOM 里（`tests/support/ui_smoke.mjs` 的 U1-02h2 / U4-06e / Q08-*），
+# 这里钉不靠 tooltip 的机械条件。
 
 
 def test_slot_labels_leave_room_for_four_character_card_names() -> None:
@@ -2011,37 +2014,47 @@ def test_slot_labels_leave_room_for_four_character_card_names() -> None:
     assert _row_budget(238, ".self .side-block") >= 52, (
         "自己每行 ≥ 52 设计单位（字 13 的两行 + 12 的槽名）"
     )
-    judge_label = _css_rule(".mini-slot.judge-slot.filled .slot-k")
-    assert re.search(r"font-size:\s*calc\(8 \* var\(--dsu\)\)", judge_label), (
-        f"判定槽的「判定」标记要收一档高度（折两行后仍放得下）：{judge_label}"
-    )
-    assert re.search(r"line-height:\s*1\.1\b", judge_label), judge_label
     judge_value = _css_rule(".mini-slot.judge-slot.filled .slot-v")
     assert re.search(r"font-size:\s*calc\(9 \* var\(--dsu\)\)", judge_value), judge_value
     assert re.search(r"line-height:\s*1\.15", judge_value), (
         f"折行的两行要有行距（line-height 1 会叠字）：{judge_value}"
     )
 
-    self_label = _css_rule(".self .mini-slot.judge-slot.filled .slot-k")
-    assert re.search(r"font-size:\s*calc\(12 \* var\(--dsu\)\)", self_label), self_label
-    assert re.search(r"line-height:\s*1\.1\b", self_label), self_label
     self_value = _css_rule(".self .mini-slot.judge-slot.filled .slot-v")
     assert re.search(r"font-size:\s*calc\(13 \* var\(--dsu\)\)", self_value), self_value
     assert re.search(r"line-height:\s*1\.15", self_value), self_value
 
+    # qunying 票 08 §2 [G1]：判定槽有牌时不再画「判定」⇒ 原来给那枚标签收字号的两条规则
+    # 一起删掉（留着就是"给不存在的 DOM 量尺寸"的假断言）。
+    filled_label_rules = [
+        selector for selector, _body in _css_rules()
+        if "judge-slot" in selector and "filled" in selector and ".slot-k" in selector
+    ]
+    assert filled_label_rules == [], (
+        f"有牌判定槽不画「判定」，不该再有给它定字号的规则：{filled_label_rules}"
+    )
 
-def test_mini_slots_show_the_equip_label_only_when_empty() -> None:
-    """用户 2026-11-07：装备槽**有牌时不写**武器 / 防具 / 攻马 / 防马，空槽才写；判定槽常写。
 
-    行为断言在 `tests/support/ui_smoke.mjs` 的 U1-02h2 / U4-06e；这里钉源码里的分支形状，
-    防止"顺手把 label 又挂回满槽"。
+def test_mini_slot_labels_are_drawn_only_on_empty_slots() -> None:
+    """槽名**只画在空槽**：装备槽（用户 2026-11-07）+ 判定槽（qunying 票 08，2026-11-22）。
+
+    装备槽有牌时不写武器 / 防具 / 攻马 / 防马；判定槽有牌时不写「判定」——用户第三轮裁定
+    原文「对于已有判定牌的判定槽，不显示"判定"二字，现在"转"太挤了看不清」。空槽照旧写。
+    行为断言在 `tests/support/ui_smoke.mjs` 的 U1-02h2 / U4-06e / Q08-01；这里钉源码里的
+    分支形状，防止"顺手把 label 又挂回满槽"。
     """
     seat_view = _strip_js_comments((STATIC_DIR / "seat-view.js").read_text(encoding="utf-8"))
     node = re.search(r"function miniSlotNode\(options\) \{(?P<body>.*?)\n\}", seat_view, re.S)
     assert node is not None, "seat-view.js 里找不到 miniSlotNode()"
     body = node.group("body")
-    assert "if (judge || !card) node.appendChild(label);" in body, (
-        "槽名的挂载必须按「判定槽常显 / 装备槽只在空槽」的条件来"
+    assert "if (!card) node.appendChild(label);" in body, (
+        "槽名的挂载条件必须只剩「空槽」（判定槽有牌时也不写「判定」）"
+    )
+    assert "judge || !card" not in body, (
+        "不许退回「判定槽常显」的旧条件（qunying 票 08 [G1]）"
+    )
+    assert body.count("node.appendChild(label)") == 1, (
+        "槽名只能有这一个挂载点（多一处就会在满槽上画出来）"
     )
     empty_branch = body.find("if (!card) {")
     assert empty_branch >= 0, "空槽分支必须存在（票 26 起它还要给坐骑槽补净距离读数）"
@@ -2057,6 +2070,83 @@ def test_mini_slots_show_the_equip_label_only_when_empty() -> None:
     assert 'label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空"' in body, (
         "槽名的文字必须来自「判定」/ 装备槽标签（不新建一份映射）"
     )
+
+
+def test_selectable_cards_share_one_pickable_class_on_the_table_and_in_hand() -> None:
+    """qunying 票 08 [G2] / [G3]：**此刻能点**的牌高亮，一个类管两张面。
+
+    用户 2026-11-22 第三轮：「不可选择的卡牌都置灰了，同时也让能选择的卡牌绘制高亮（尤其是
+    场上的可选择的卡牌…）」。牌桌槽位由 `miniSlotNode` 的 `face.selectable` 给类，手牌面由
+    `interaction.js:cardChip` 的 `usable` 给类（手牌 = `cardFace().selectable`，回放期恒
+    false）——同一个 `.is-pickable`，样式只有 `style.css` 一处。置灰项保持 `.dis`、**不加**
+    这个类；无询问 / 静态牌两边都不算。行为断言：`tests/support/ui_smoke.mjs` 的
+    Q08-02…Q08-05。
+    """
+    seat_view = _strip_js_comments((STATIC_DIR / "seat-view.js").read_text(encoding="utf-8"))
+    node = re.search(r"function miniSlotNode\(options\) \{(?P<body>.*?)\n\}", seat_view, re.S)
+    assert node is not None, "seat-view.js 里找不到 miniSlotNode()"
+    slot_body = node.group("body")
+    assert "if (face.selectable) node.classList.add(\"is-pickable\");" in slot_body, (
+        "牌桌槽位的可点态必须按 face.selectable 给 .is-pickable"
+    )
+    assert "else node.classList.add(\"dis\");" in slot_body, (
+        "点不动的槽位必须照旧置灰（.dis），且与高亮互斥"
+    )
+    assert seat_view.count('"is-pickable"') == 1, (
+        "槽位的高亮类只能有一个挂载点（样式与判据都不许分叉）"
+    )
+
+    # 手牌面：类挂在 `cardChip`（手牌 / 舞台共用那一份卡面工厂），判据是调用方给的
+    # `usable`——**不是** `cardFaceNode` 自己按"非静态"猜一个（那样所有弹窗牌面都会被点亮，
+    # 而它们的可点态各有各的形状，本票不替它们裁决）。
+    interaction = _strip_js_comments((STATIC_DIR / "interaction.js").read_text(encoding="utf-8"))
+    chip = re.search(
+        r"function cardChip\((?P<signature>.*?)\) \{(?P<body>.*?)\n\}", interaction, re.S)
+    assert chip is not None, "interaction.js 里找不到 cardChip()"
+    assert "usable = true" in chip.group("signature"), (
+        "cardChip 的第四个参数必须是 usable（手牌 = cardFace().selectable）"
+    )
+    assert 'if (!isStatic && usable !== false) node.classList.add("is-pickable");' in chip.group("body"), (
+        "手牌面必须按 usable 给同一个 .is-pickable"
+    )
+    assert interaction.count('"is-pickable"') == 1, (
+        "手牌的高亮类只能有一个挂载点"
+    )
+    card_view = _strip_js_comments((STATIC_DIR / "card-view.js").read_text(encoding="utf-8"))
+    assert '"is-pickable"' not in card_view, (
+        "卡面工厂不自己判可点：判据来自调用方的 usable，别在 cardFaceNode 里再猜一份"
+    )
+
+    # 样式住一处：两条规则都给出可见的描边 / 外晕，且与 `.dis` 的置灰相对（不是隐藏）。
+    slot_pickable = _css_rule(".mini-slot.is-pickable")
+    assert re.search(r"box-shadow:[^;]*var\(--accent\)", slot_pickable), (
+        f"场上可点槽位必须有可见的高亮环：{slot_pickable}"
+    )
+    card_pickable = _css_rule(".card.face.is-pickable")
+    assert re.search(r"border-color:\s*var\(--accent\)", card_pickable), card_pickable
+    assert re.search(r"box-shadow:[^;]*var\(--accent\)", card_pickable), (
+        f"可点卡面必须有描边 + 光晕，不能只改底色：{card_pickable}"
+    )
+
+    # 既有置灰原样：不可点仍是降透明度的 `.dis`（用户第三轮的"不可选择的卡牌都置灰了"）。
+    assert re.search(r"opacity:\s*\.4\b", _css_rule(".mini-slot.dis")), (
+        "槽位置灰必须保持 .dis 的降透明度"
+    )
+    assert re.search(r"opacity:\s*\.42\b", _css_rule(".card.face.dis")), (
+        "卡面置灰必须保持 .dis 的降透明度"
+    )
+
+    # 次序：可点态是**常亮底**，选中 / 已选（`.sel` / `.picked`）必须排在它后面压过去。
+    order = [selector for selector, _body in _css_rules()]
+    for highlight, selected in (
+        (".mini-slot.is-pickable", ".mini-slot.sel"),
+        (".mini-slot.is-pickable", ".mini-slot.picked"),
+        (".card.face.is-pickable", ".card.face.sel"),
+        (".card.face.is-pickable", ".card.face.picked"),
+    ):
+        assert order.index(highlight) < order.index(selected), (
+            f"{highlight} 必须排在 {selected} 之前（选中 / 已选的高亮压过可点态）"
+        )
 
 
 def test_the_card_face_name_fits_four_characters_without_an_ellipsis() -> None:
