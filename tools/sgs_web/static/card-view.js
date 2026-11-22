@@ -41,9 +41,14 @@ const CARD_KIND_PRESENTATION = {
 
 /** 一张牌的展示种类：读服务端 `kind`；旧载荷 / 合成载荷退回 `virtual_sources`
  *  （`04` §5 的读取方纪律：实体牌恒空、转化牌恒非空），再缺就是普通牌。不读规则，
- *  也不拿负 id 当第三份判据。 */
+ *  也不拿负 id 当第三份判据。
+ *
+ *  例外是**判定区的转化牌**（qunying 票 02）：那张牌**是实体牌**（`kind` 仍是 normal、
+ *  `card_id` 是实体牌 id），只是此刻**按产物显示**——服务端给 `converted` + 产物牌面 +
+ *  `source`（源牌面）。展示种类因此先读 `converted`（「转」角标），`kind` 不参与这一次判定。 */
 function cardKind(card) {
   if (!card) return "normal";
+  if (card.converted) return "transformed";
   if (card.kind) return card.kind;
   if (card.virtual_sources && card.virtual_sources.length) return "transformed";
   return "normal";

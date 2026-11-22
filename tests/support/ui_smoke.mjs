@@ -34469,6 +34469,142 @@ await clickAndWait($("btn-lobby-pool"));
 }
 
 
+/* ============ qunying 票 02：判定区转化牌**按产物显示**（+ 产物面不破公开区直选） ======
+ *
+ * 合成载荷与 `tests/test_web.py::test_a_converted_judge_card_shows_its_product_face_and_source`
+ * 钉住的服务端形状同形：判定区条目 = **产物面**（`name` / `display_name` / 花色点数）+
+ * `converted: true` + `source`（源实体牌的完整牌面；纯虚拟产物 ⇒ `null`），身份键 `card_id`
+ * 仍是判定区那张实体牌。界面要证明三件事：
+ *  1. 缩略图读产物 + 右上角「转」（`card-view.js:cardKind` 认 `converted`，不加渲染分支）；
+ *  2. 悬停画**源牌**（`#t-card-preview` 里是青釭剑，不是产物乐不思蜀）；
+ *  3. 无源牌 ⇒ 悬停写「无」，不猜一张牌；
+ * ④ 顺带复核 §2.1：快照的判定卡画产物、公开区面里的槽仍是**实体牌面**，点它照样按
+ *    `card_id` 命中面内位置并提交那一条候选（03a 的 `publicZonePickFace` 只读 `card_id`）。
+ * 服务端那一侧（何时补键 / 没有转化牌逐字节不变）由 test_web.py 的真会话断言钉。
+ */
+{
+  const qySource = {
+    ...synthCard(4601, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal", display_name: "青釭剑", attribute: "普通",
+    description: "武器，攻击范围 2。", source_cards: [],
+  };
+  const qyProduct = {
+    ...synthCard(4602, "乐不思蜀"),
+    type: "indulgence", suit: "spade", rank: 6, color: "black", kind: "normal",
+    display_name: "乐不思蜀",
+    attribute: "普通", description: "延时类锦囊。", source_cards: [],
+    converted: true, source: qySource,
+  };
+  // 纯虚拟产物（今天没有生产者，[G3] 的读取方形状）：没有源牌 ⇒ `source: null`。
+  const qyNoSource = {
+    ...synthCard(4603, "闪电"),
+    type: "lightning", suit: null, rank: null, color: null, kind: "normal",
+    display_name: "闪电", attribute: "普通", description: "延时类锦囊。",
+    source_cards: [], converted: true, source: null,
+  };
+  // 公开区面里的槽 = **实体牌面**（引擎按实体牌造 slots）——与快照里那张产物面同 card_id。
+  const qyEntity = { ...qySource, card_id: 4602 };
+  const qyPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2601,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 2601, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 1, zone: "judge" }, card: qyEntity }],
+    spec: { zones: ["equip", "judge"], total: [1, 1], seats: [1] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "谦逊", targets: [0],
+      label: "0号位发动谦逊", requirement: "移动场上一张牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2601, picks: [0] },
+      default_label: "超时将自动选择第一张牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const qySession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261122,
+  });
+  const qyView = synthView(qyPending);
+  qyView.snapshot.players[1].judge = [qyProduct];
+  qyView.snapshot.players[2].judge = [qyNoSource];
+  ui.state.view = qyView;
+  ui.state.sessionId = qySession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(qyView);
+
+  const qyAttr = (node, name) => (node && node.getAttribute
+    ? node.getAttribute(name)
+    : undefined);
+  // 自己的座位块是常驻 `#t-self-zones`（`table.js` 搬过去的），其余座位在 `#t-seats` 里。
+  const qySeatBox = (seat) => (Number(seat) === 0 ? $("t-self-zones") : seatBox(seat));
+  const qyJudgeSlots = (seat) => byClass(qySeatBox(seat), "mini-slot")
+    .filter((node) => qyAttr(node, "data-zone") === "judge" && qyAttr(node, "data-card-id"));
+  const qyFirst = (node, name) => byClass(node, name)[0] || null;
+  const qyHover = (node) => {
+    for (const fn of node.listeners.mouseenter || []) fn({ clientX: 20, clientY: 20 });
+    return $("t-card-preview");
+  };
+  const qyPreviewText = (preview) => (preview && preview.text ? preview.text() : "")
+    .replace(/\s+/g, " ").trim();
+
+  const qySlot = qyJudgeSlots(1)[0];
+  const qyBadge = qyFirst(qySlot, "slot-trans");
+  const qyReading = qySlot
+    ? `${qyFirst(qySlot, "slot-suit") ? qyFirst(qySlot, "slot-suit").textContent : ""}`
+      + `${qyFirst(qySlot, "slot-v") ? qyFirst(qySlot, "slot-v").textContent : ""}`
+    : "(无判定卡)";
+  check("U-QY02-a 判定区转化牌缩略图读**产物**：牌名 + 花色点数 + 「转」角标",
+    Boolean(qySlot) && qyReading === "♠6乐不思蜀"
+      && Boolean(qyBadge) && qyBadge.textContent === "转",
+    `reading="${qyReading}" badge=${qyBadge ? qyBadge.textContent : "(无)"}`);
+
+  const qyPreview = qyHover(qySlot);
+  const qyPreviewName = qyFirst(qyPreview, "cname");
+  check("U-QY02-b 悬停画**源牌**（青釭剑），不是产物（乐不思蜀）",
+    Boolean(qyPreview) && qyPreview.hidden !== true
+      && Boolean(qyPreviewName) && qyPreviewName.textContent === "青釭剑"
+      && !qyPreviewText(qyPreview).includes("乐不思蜀"),
+    `hover="${qyPreviewText(qyPreview)}"`);
+
+  const qyBareSlot = qyJudgeSlots(2)[0];
+  const qyBarePreview = qyHover(qyBareSlot);
+  const qyBareNote = qyFirst(qyBarePreview, "card-preview-note");
+  check("U-QY02-c 无源牌的纯虚拟产物 ⇒ 悬停写「无」，不猜一张牌",
+    Boolean(qyBareSlot)
+      && Boolean(qyBareNote) && qyBareNote.textContent === "源牌：无"
+      && !qyFirst(qyBarePreview, "cname")
+      && qyFirst(qyBareSlot, "slot-v").textContent === "闪电",
+    `note="${qyBareNote ? qyBareNote.textContent : "(无)"}"`
+      + ` name="${qyFirst(qyBareSlot, "slot-v") ? qyFirst(qyBareSlot, "slot-v").textContent : ""}"`);
+
+  // ④ §2.1 复核：快照画产物、槽位是实体牌面 ⇒ 按 card_id 命中同一张，点一下提交面内位置 0。
+  const qyBefore = calls.length;
+  staleAnswerStatus = 400;
+  for (const fn of (qySlot && qySlot.listeners.click) || []) {
+    await fn({ target: qySlot, stopPropagation() {} });
+  }
+  for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const qyAnswers = calls.slice(qyBefore)
+    .filter((call) => call.path.includes("/answer"));
+  check("U-QY02-d 产物面不破公开区直选：点判定槽 = 恰一条 SelectCards（面内位置 0）",
+    qyAnswers.length === 1
+      && JSON.stringify(qyAnswers[0].body.action)
+        === JSON.stringify(qyPending.legal_actions[0]),
+    `answers=${qyAnswers.length}`
+      + ` action=${JSON.stringify(qyAnswers[0] && qyAnswers[0].body.action)}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
 /* ============ qunying 票 03b：预发动清单的**分支步骤**（FlowBranch） ============
  *
  * 合成载荷与 `flow.manifest` 的下发形状同形：选代价 → 选效果 →（**只在效果② 下**）在场上

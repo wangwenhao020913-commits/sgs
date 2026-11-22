@@ -302,6 +302,21 @@ function publicZonePickFace(pending, card) {
   };
 }
 
+/** 判定 / 装备槽的悬停内容：常规牌画自己；**判定区的转化牌**（qunying 票 02）画**源牌**。
+ *
+ * 服务端把判定区条目按产物下发（`name` / 花色点数 = 产物），另一格 `source` 才是源实体牌的
+ * 完整牌面（没有源牌 ⇒ `null`）——缩略图读产物、悬停读源牌。纯虚拟产物没有源牌，写「无」；
+ * 不去猜一张牌出来。`showCardPreviewNote` 与卡面预览共用同一层（`#t-card-preview`）。
+ */
+function showSlotCardPreview(card, event) {
+  if (card && card.converted) {
+    if (card.source) showCardPreview([card.source], event);
+    else showCardPreviewNote("源牌：无", event);
+    return;
+  }
+  showCardPreview([card], event);
+}
+
 /** 一个判定 / 装备槽：空槽画暗色占位；有牌画**简略牌面**（牌名 + 花色点数）+
  *  跟随鼠标的常规卡面预览（用户 2026-11-07）。
  *
@@ -368,7 +383,7 @@ function miniSlotNode(options) {
     node.appendChild(distanceBonusNode(distanceBonus));
   }
   // 悬停 = 常规卡面预览（标签 / 转化 / 虚拟都在 `cardFaceNode` 里画），跟随鼠标。
-  node.addEventListener("mouseenter", (event) => showCardPreview([card], event));
+  node.addEventListener("mouseenter", (event) => showSlotCardPreview(card, event));
   node.addEventListener("mousemove", (event) => moveCardPreview(event));
   node.addEventListener("mouseleave", () => hideCardPreview());
   if (interactive) {

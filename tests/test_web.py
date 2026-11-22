@@ -13204,6 +13204,189 @@ def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> No
     assert other_effect["can_submit"] is True
 
 
+# ---------------------------------------------------------------------------
+# qunying 票 02：判定区里的**转化牌按产物显示**（投影派生 + 悬浮源牌）
+# ---------------------------------------------------------------------------
+
+_JUDGE_CARD_KEYS = (
+    "attack_range",
+    "attribute",
+    "card_id",
+    "color",
+    "description",
+    "display_name",
+    "kind",
+    "name",
+    "rank",
+    "slot",
+    "source_cards",
+    "suit",
+    "type",
+    "virtual_sources",
+)
+"""判定区一张**普通**牌面的键集（引入本票之前的形状，[G1] 的冻结判据）。"""
+
+
+def _judge_session(*, product: str | None = None) -> tuple[Session, int]:
+    """真会话：4 人局，人类 = 座 0 的陆逊，座 1 判定区里躺着 ♠6【青釭剑】（实体牌）。
+
+    ``product`` 决定 ``state.virtual_judge`` 里写什么（这是**判定区转化牌的唯一真源**，
+    写方是引擎的 ``_to_judge``）：
+
+    - ``None`` ⇒ 不写映射（判定区里没有转化牌的常态，[G1]）；
+    - ``"indulgence"`` ⇒ 转化产物【乐不思蜀】（键 = 判定区那张来源实体牌，产物继承花色 / 点数）；
+    - ``"pure"`` ⇒ **纯虚拟**产物（无来源实体牌，[G3]；今天没有生产者，留给将来的纯虚拟延时锦囊）。
+
+    返回 ``(会话, 判定区那张牌的 id)``。
+    """
+    from sgs.skills.virtual import pure_virtual_card, transformed_card
+
+    pack = _context_pack()
+    sword = cards_of_type(pack, "qinggang_sword")[0]
+    hand = (cards_of_type(pack, "slash")[0],)
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="qunying_luxun", hand=hand),
+            SeatSpec(judge=(sword,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(pack, sword, hand[0]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    if product == "indulgence":
+        state.virtual_judge[sword] = transformed_card(state, (sword,), "indulgence")
+    elif product == "pure":
+        state.virtual_judge[sword] = pure_virtual_card(state, "indulgence")
+    session = Session(
+        pack=pack,
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+    assert session.pending is not None and str(session.pending.kind) == "PLAY_PHASE"
+    return session, sword
+
+
+def test_the_judge_payload_is_unchanged_without_converted_cards() -> None:
+    """[G1] 判定区里**没有**转化牌的座位：牌面逐字节不变（旧金录像 / UI 冒烟不受影响）。
+
+    钉法 = 冻结的键集 + 两条新键缺席：``converted`` / ``source`` 只在 ``virtual_judge`` 有
+    映射时才出现，故常态座位拿到的仍是同一份 14 键实体牌面（与引入本票之前逐字相同）。
+    """
+    session, sword = _judge_session()
+    snapshot = visible_snapshot(session)
+    faces = [card for player in snapshot["players"] for card in player["judge"]]
+    assert [card["card_id"] for card in faces] == [sword], "夹具：座 1 判定区那一张"
+    for card in faces:
+        assert tuple(sorted(card)) == _JUDGE_CARD_KEYS, (
+            f"判定区常态牌面的键集变了：{sorted(card)}"
+        )
+        assert "converted" not in card and "source" not in card
+    assert faces[0]["display_name"] == "青釭剑", "没有转化牌 ⇒ 画的仍是实体牌名"
+
+
+def test_a_converted_judge_card_shows_its_product_face_and_source() -> None:
+    """[§2.2] 判定区转化牌：缩略图读**产物**面（牌名 / 花色 / 点数），悬停源牌走 ``source``。
+
+    真会话 + 真投影：``state.virtual_judge`` 的键是判定区里那张实体牌，产物的
+    ``virtual_sources`` 才是源牌 id。身份键 ``card_id`` **不变**（选面 / 标签 / 落位动画按它
+    认牌），牌面字段换成产物，另加 ``converted`` 与 ``source``（源牌完整牌面）。
+    """
+    session, sword = _judge_session(product="indulgence")
+    state = session.engine.state
+    product = state.virtual_judge[sword]
+    assert tuple(product.virtual_sources) == (sword,), "产物记着来源实体牌（引擎的写方形状）"
+    source_ref = state.card(sword)
+
+    snapshot = visible_snapshot(session)
+    entry = next(
+        card for card in snapshot["players"][1]["judge"] if card["card_id"] == sword
+    )
+    assert entry["name"] == "乐不思蜀" and entry["display_name"] == "乐不思蜀", (
+        f"缩略图牌名 = 产物：{entry['name']} / {entry['display_name']}"
+    )
+    assert entry["type"] == "qinggang_sword" and entry["kind"] == "normal", (
+        "只覆盖判定槽真正读的 5 格牌面（name / display_name / suit / rank / color）："
+        f"type / kind 仍是那张**实体牌**的事实（converted 单独说'此槽显示产物'）：{entry}"
+    )
+    assert (entry["suit"], entry["rank"]) == (source_ref.suit, source_ref.rank), (
+        "产物继承来源牌的花色 / 点数（规则 §16.3）"
+    )
+    assert entry["converted"] is True, "新键：这是判定区里的转化牌"
+    source = entry["source"]
+    assert source is not None, "有一张来源实体牌 ⇒ source 是它的牌面（不是 null）"
+    assert (source["name"], source["display_name"]) == ("青釭剑", "青釭剑"), (
+        f"悬停读到的源牌：{source.get('name')}"
+    )
+    assert (source["suit"], source["rank"]) == (source_ref.suit, source_ref.rank)
+    assert source["card_id"] == sword, "源牌 id = 判定区里那张实体牌"
+    assert source["kind"] == "normal", "源牌是实体牌（不是再一次转化）"
+
+
+def test_a_converted_judge_card_without_a_source_card_reports_no_source() -> None:
+    """[G3] 纯虚拟产物（``virtual_sources`` 为空）⇒ ``source: null``，界面显示「无」。
+
+    今天没有生产者（纯虚拟牌置入判定区没有实体牌可放，``_to_judge`` 直接跳过），这里按
+    将来"纯虚拟延时锦囊"的载荷形状钉住读取方：**不猜**一张源牌出来。
+    """
+    session, sword = _judge_session(product="pure")
+    snapshot = visible_snapshot(session)
+    entry = next(
+        card for card in snapshot["players"][1]["judge"] if card["card_id"] == sword
+    )
+    assert entry["converted"] is True
+    assert entry["name"] == "乐不思蜀", "产物面照旧（纯虚拟牌没有花色 / 点数）"
+    assert entry["suit"] is None and entry["rank"] is None
+    assert entry["source"] is None, "没有源牌 ⇒ null（界面写「无」）"
+
+
+def test_a_moved_transformed_judge_card_keeps_its_product() -> None:
+    """[G2] 转化牌被**移动**出判定区之后，新座位仍按产物显示（映射的生死由搬牌原语管）。
+
+    走 03a / 03b 的真会话路径：效果② 把座 1 判定区那张转化牌移到座 2 的判定区。移动**保持**
+    ``virtual_judge`` 映射（进弃牌堆的清理由 ``move_card`` 负责，不在本票），故新座位的载荷
+    仍是【乐不思蜀】+ 源牌面。
+    """
+    session, converted = _session_at_the_qianxun_move_face()
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_CARDS"
+    session.submit_answer(
+        next(action for action in pending.legal_actions if tuple(action.picks) == (1,))
+    )
+    destination = session.pending
+    assert destination is not None and str(destination.kind) == "SELECT_OPTION"
+    session.submit_answer(
+        next(
+            action
+            for action in destination.legal_actions
+            if str(action.choice) == "seat:2"
+        )
+    )
+    state = session.engine.state
+    assert converted in state.player(2).judge, "牌搬到了座 2 的判定区"
+
+    snapshot = visible_snapshot(session)
+    assert all(
+        card["card_id"] != converted for card in snapshot["players"][1]["judge"]
+    ), "源座位的判定区已空"
+    moved = next(
+        card for card in snapshot["players"][2]["judge"] if card["card_id"] == converted
+    )
+    assert moved["name"] == "乐不思蜀" and moved["converted"] is True, (
+        "移动之后仍按产物显示（映射被搬牌原语按同一张实体牌记回）"
+    )
+    assert moved["source"] is not None and moved["source"]["name"] == "闪", (
+        f"源牌跟着走：{moved.get('source')}"
+    )
+
+
 def _two_row_watch_query(pack, *, actor: int = 0, target: int = 1):
     """构造一条**两行观看手牌**形状的 ``SELECT_CARDS`` 询问（票 93 的框架面；本票不带技能）。
 
