@@ -189,11 +189,12 @@ def test_qianxun_declares_two_event_flows_with_their_own_steps() -> None:
     assert card_step.zones == (Zone.EQUIP, Zone.JUDGE)
     assert (card_step.lo, card_step.hi) == (1, 1)
     assert callable(card_step.seats), "整体座位（含自己）的面：`PickCards.seats` 可调用档"
-    assert isinstance(to_step, module.PickOption)
-    assert to_step.key == "to" and to_step.show_disabled is True, (
-        "目的地 = 既有 PickOption（seat 文本）+ 置灰档（用户第二轮裁定；票 09 再换成点将）"
+    assert isinstance(to_step, module.PickSeats), (
+        "目的地 = 座位步（qunying 票 09：牌桌点将；旧的 PickOption + 置灰档退场）"
     )
-    assert callable(to_step.options) and callable(to_step.disabled)
+    assert to_step.key == "to" and (to_step.lo, to_step.hi) == (1, 1)
+    assert to_step.optional is False, "目的地必须选（与旧选项步的 optional=False 同一条）"
+    assert callable(to_step.pool), "池 = 合法目的地（`_qianxun_move_destinations` 唯一一份判据）"
     (type_step,) = effect_branch.branches[module.QIANXUN_EFFECT_GAIN]
     assert isinstance(type_step, module.PickOption)
     assert type_step.key == "type" and callable(type_step.options), (
@@ -713,13 +714,22 @@ def test_qianxun_moving_a_transformed_delayed_trick_keeps_the_product() -> None:
 
 
 def test_qianxun_move_destination_lists_illegal_seats_greyed() -> None:
-    """用户 2026-11-21（第二轮）：「目标该区域已被废除或已有牌，则不能指定为合法目标，**直接置灰**」。
+    """用户 2026-11-22（第三轮）：目的地改成**牌桌点将**——非法目的地不进池，也不再画灰。
 
-    局面：座 0 有一张武器；座 2 的武器槽已被另一张武器占着、座 3 的武器槽被废除 ⇒
-    这两座要出现在**选项**里（画灰），但**不在** `legal_actions` 里（点了必被拒收）。
+    （函数名沿用票 01 的旧标识：03a / 03b / 10 的 ``## Answer`` 与 effort 的验收账本都
+    按这个名字引用，改名会让 ``tools/check_acceptance.py`` 把它们判成缺失引用；语义已按
+    本票**改写**为"非法目的地不出现"，旧口径的"列出来画灰"整条退场。）
+
+    局面：座 0 有一张武器；座 2 的武器槽已被另一张武器占着、座 3 的武器槽被废除。三处读
+    **同一份**真源 :func:`_qianxun_move_destinations`：
+
+    - 清单：``to`` 是**座位步**（``Step.kind == "seat"`` ⇒ 前端走"点场上武将"那条渲染路径），
+      池里只有座 1；
+    - 询问：``SELECT_OPTION`` 的候选 = ``legal_actions`` = 座 1（旧口径的"列出来画灰"退场）；
+    - 校验器（[G3]）：带 ``seat:2`` / ``seat:3`` 的合成复合动作一律拒收。
     """
     from sgs.skills import active as module
-    from sgs.data import load_content_pack
+    from sgs.skills.preactivation import preactivation_for, validate_activation
 
     hand = (cards_of_type(PACK_160, "qinggang_sword")[0],)
     other_weapon = cards_of_type(PACK_160, "green_dragon_blade")[0]
@@ -737,8 +747,43 @@ def test_qianxun_move_destination_lists_illegal_seats_greyed() -> None:
         phase=Phase.PLAY,
     )
     state.player(3).sealed_zones = ("weapon",)
-    engine = Engine.from_state(state, seed=41)
+    sword = state.player(0).equip[0]
 
+    # 效果事件的清单（代价已付 ⇒ 窗口开着，解析器选效果那一份）。
+    module._qianxun_open_window(state, 0)
+    steps = preactivation_for(state, 0, QIANXUN)
+    assert [step.name for step in steps] == ["effect", "card", "to", "type"], (
+        f"效果事件 = 选效果 + ② 的两步 + ③ 的一步：{[step.name for step in steps]}"
+    )
+    to_step = steps[2]
+    assert to_step.kind == "seat", (
+        f"目的地是**座位步**（前端据 Step.kind 走牌桌点将）：{to_step.kind}"
+    )
+    by_card = {row.when[1]: tuple(row.options) for row in to_step.pool}
+    assert by_card[str(sword)] == ("seat:1",), (
+        f"源牌在座 0：座 2 的武器槽已有牌、座 3 被废除 ⇒ 池里只有座 1：{by_card}"
+    )
+    assert "seat:2" not in {seat for seats in by_card.values() for seat in seats}, (
+        "非法目的地不进池（不再列出来画灰）"
+    )
+    assert "seat:3" not in {seat for seats in by_card.values() for seat in seats}
+    assert all(not row.disabled for row in to_step.pool), (
+        "座位步没有置灰项：池外 = 不出现（旧口径的 disabled 已退场）"
+    )
+
+    # [G3] 校验器（引擎的第二道闸）：池内通过、池外拒收。
+    assert validate_activation(
+        state, 0, QIANXUN, (sword,), (module.QIANXUN_EFFECT_MOVE, "seat:1")
+    ) is None
+    for illegal in ("seat:2", "seat:3"):
+        reason = validate_activation(
+            state, 0, QIANXUN, (sword,), (module.QIANXUN_EFFECT_MOVE, illegal)
+        )
+        assert reason is not None, f"池外座位 {illegal} 必须被校验器拒收"
+
+    # 逐步询问也同一份池：候选 = legal_actions = 座 1。
+    module._qianxun_close_window(state, 0)
+    engine = Engine.from_state(state, seed=41)
     seen: dict[str, list[str]] = {}
 
     class _Script(_PlayScript):
@@ -762,13 +807,76 @@ def test_qianxun_move_destination_lists_illegal_seats_greyed() -> None:
          _PlayScript((), skill_id="none")],
         lambda e: bool(seen.get("legal")) and e.pending is not None,
     )
-    assert "seat:2" in seen["options"] and "seat:2" not in seen["legal"], (
-        "武器槽已占 ⇒ 列出来但置灰"
+    assert seen["options"] == ["seat:1"], (
+        f"候选只有合法目的地（座 2 已占 / 座 3 被废除都不出现）：{seen['options']}"
     )
-    assert "seat:3" in seen["options"] and "seat:3" not in seen["legal"], (
-        "武器槽被废除 ⇒ 列出来但置灰"
+    assert seen["legal"] == ["seat:1"], f"候选与 legal_actions 同源：{seen['legal']}"
+
+
+def test_qianxun_empty_destination_pool_cancels_the_effect_without_rolling_back_the_cost() -> None:
+    """[G1] 目的地池为空 ⇒ 这一步没有候选；效果事件**取消**，代价不回退（票 10 的口径）。
+
+    2 人局：座 0 / 座 1 的武器槽都已有武器 ⇒ 无论移动哪一张，另一座的同槽都已占、无目的
+    地。两处读数：
+
+    - 清单：``to`` 仍是座位步，但每一行候选都是空元组（界面因此一个高亮框都不画）；
+    - 引擎：目的地步不发出**没有候选**的询问（``PickSeats`` 的既有纪律），流水线按
+      ``"cancel"`` 收尾 —— ``on_cancel`` 关掉效果窗口，代价位照旧、效果位不记。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.preactivation import preactivation_for
+
+    sword = cards_of_type(PACK_160, "qinggang_sword")[0]
+    other_weapon = cards_of_type(PACK_160, "green_dragon_blade")[0]
+    state = build_state(
+        pack=PACK_160,
+        seats=[SeatSpec(hero=HERO, equip=(sword,)), SeatSpec(equip=(other_weapon,))],
+        deck=deck_excluding(PACK_160, sword, other_weapon),
+        turn_seat=0,
+        phase=Phase.PLAY,
     )
-    assert "seat:1" in seen["legal"], "空槽 ⇒ 合法"
+
+    module._qianxun_open_window(state, 0)
+    steps = preactivation_for(state, 0, QIANXUN)
+    to_step = next(step for step in steps if step.name == "to")
+    assert to_step.kind == "seat", f"目的地是座位步：{to_step.kind}"
+    assert to_step.pool and all(not tuple(row.options) for row in to_step.pool), (
+        f"每一行的候选都是空（两座的同槽都有牌）：{to_step.pool}"
+    )
+    module._qianxun_close_window(state, 0)
+
+    engine = Engine.from_state(state, seed=42)
+
+    class _Recording(_PlayScript):
+        def __init__(self, options: tuple[str, ...]) -> None:
+            super().__init__(options)
+            self.queries: list[Any] = []
+
+        def respond(self, query: Any) -> Any:
+            self.queries.append(query)
+            return super().respond(query)
+
+    script = _Recording((module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE))
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none")],
+        lambda e: bool(module._qianxun_used_costs(e.state, 0))
+        and not module._qianxun_window_open(e.state, 0)
+        and e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
+    )
+    assert not any(
+        str(getattr(query, "skill_id", "") or "").endswith(":to")
+        for query in script.queries
+    ), "目的地池为空 ⇒ 不发没有候选的询问"
+    assert module._qianxun_used_costs(state, 0) == {module.QIANXUN_COST_DAMAGE}, (
+        "代价已付，效果事件取消不回退代价（票 10 的裁定）"
+    )
+    assert module._qianxun_used_effects(state, 0) == frozenset(), "效果位不记"
+    assert state.player(0).hp == 3, "代价② 的 1 点伤害照常发生"
+    assert sword in state.player(0).equip and other_weapon in state.player(1).equip, (
+        "无事发生：两张牌都还在原座位"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1231,9 @@ def test_qianxun_effect_manifest_lists_each_effects_own_steps():
     assert [step.name for step in steps] == ["effect", "card", "to", "type"], (
         f"效果事件 = 选效果 + ② 的两步 + ③ 的一步：{[step.name for step in steps]}"
     )
-    assert [step.kind for step in steps] == ["option", "card", "option", "option"]
+    assert [step.kind for step in steps] == ["option", "card", "seat", "option"], (
+        "目的地是座位步（qunying 票 09：牌桌点将），不是选项列表"
+    )
     card_step, to_step, type_step = steps[1], steps[2], steps[3]
     for branch_step, option in (
         (card_step, module.QIANXUN_EFFECT_MOVE),
@@ -1163,6 +1273,7 @@ def test_qianxun_effect_manifest_lists_each_effects_own_steps():
         steps=steps,
     )
     assert editing_to.name == "to"
+    assert editing_to.kind == "seat", "目的地步的预览形状也是座位步"
     assert editing_to.options == ("seat:0", "seat:2", "seat:3"), (
         "源座位（选中那张牌所在的座 1）不列为目的地"
     )

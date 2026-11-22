@@ -13255,7 +13255,9 @@ def test_the_qianxun_payload_switches_to_the_effect_event_after_the_cost() -> No
     assert [step["name"] for step in steps] == ["effect", "card", "to", "type"], (
         f"效果事件 = 选效果 + ② 的两步 + ③ 的一步：{[s['name'] for s in steps]}"
     )
-    assert [step["kind"] for step in steps] == ["option", "card", "option", "option"]
+    assert [step["kind"] for step in steps] == ["option", "card", "seat", "option"], (
+        "目的地是座位步（qunying 票 09：牌桌点将），不是左下角选项列表"
+    )
     assert steps[1]["wording"] == "在场上（任何角色的装备区 / 判定区）点选要移动的那张牌"
     assert steps[2]["wording"] == "选择目的地角色（该区域已被废除或已有牌的，不能指定）"
     assert steps[3]["wording"] == "选择要获得的牌的类别（基本牌 / 锦囊牌 / 装备牌）"
@@ -13271,8 +13273,15 @@ def test_the_qianxun_payload_switches_to_the_effect_event_after_the_cost() -> No
     assert card_rows[module.QIANXUN_EFFECT_MOVE] == (str(sword), str(converted)), (
         f"选牌步的候选 = 场上两个座位的牌：{card_rows}"
     )
-    assert {tuple(row.get("disabled", ())) for row in steps[2]["pool"]} == {()}, (
-        "这一局面里所有其他座位都是合法目的地"
+    destination_rows = {row["when"][1]: tuple(row["options"]) for row in steps[2]["pool"]}
+    assert destination_rows == {
+        str(sword): ("seat:1", "seat:2", "seat:3"),
+        str(converted): ("seat:0", "seat:2", "seat:3"),
+    }, (
+        f"目的地池按**选中的那张牌**的源座位现算（源座位不出现）：{destination_rows}"
+    )
+    assert all(not row.get("disabled") for row in steps[2]["pool"]), (
+        "座位步没有置灰项：非法目的地不进池（旧口径的 disabled 已退场）"
     )
 
     registry = _registry_with(session)
@@ -13321,7 +13330,7 @@ def test_the_qianxun_payload_switches_to_the_effect_event_after_the_cost() -> No
         },
     )
     assert status == 200, editing_to
-    assert editing_to["cursor"] == 2 and editing_to["kind"] == "option", editing_to
+    assert editing_to["cursor"] == 2 and editing_to["kind"] == "seat", editing_to
     assert set(editing_to["options"]) == {"seat:0", "seat:2", "seat:3"}, editing_to
     assert editing_to["can_submit"] is False
 

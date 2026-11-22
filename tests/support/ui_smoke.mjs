@@ -34619,10 +34619,11 @@ await clickAndWait($("btn-lobby-pool"));
 /* ============ qunying 票 03b：预发动清单的**分支步骤**（FlowBranch） ============
  *
  * 合成载荷与 `flow.manifest` 的下发形状同形：选代价 → 选效果 →（**只在效果② 下**）在场上
- * 点一张牌 → 选目的地（非法目的地列出来、画灰、不接 click）。界面要证明四件事：
+ * 点一张牌 → 在牌桌上点目的地座位（qunying 票 09：非法目的地**不进池** ⇒ 没有高亮、
+ * 点不动，而不是"列出来画灰"）。界面要证明四件事：
  *  1. 清单能**吃下带分支的清单**（行按前序答案给）而不抛错；
  *  2. 选① 时效果② 的行**匹配不到** ⇒ 这一步没有候选（界面不替服务端发明候选）；
- *  3. 选② 后两步依次出现：选牌步的候选只有效果② 那几行、目的地步的置灰项点不动；
+ *  3. 选② 后两步依次出现：选牌步的候选只有效果② 那几行、目的地步只有池内座位可点；
  *  4. 填完拼出的复合动作与逐问同形：`picks` = 牌 id、`choices` = 代价 / 效果 / 目的地。
  * 服务端那一侧（清单怎么渲染、预览怎么跳过分支）由 `tests/test_web.py` 的真会话断言钉。
  */
@@ -34635,6 +34636,9 @@ await clickAndWait($("btn-lobby-pool"));
     ...synthCard(4502, "乐不思蜀"), type: "indulgence", kind: "normal",
   };
   const costWhen = ["qianxun_cost_damage", "qianxun_effect_move"];
+  // qunying 票 09：目的地是**座位步**（牌桌点将）。池 = 合法目的地；池外座位（座 2，
+  // 该槽位已有牌）**不进池** ⇒ 界面不画高亮、也不接 click（旧口径的"列出来画灰"退场）。
+  // 判据仍只读服务端下发的 `Step.kind` / `StepPool.options`，不认技能 id。
   const manifest = [
     { name: "cost", kind: "option", zones: [], min: 1, max: 1, order: 0,
       pool: [{ when: [], options: ["qianxun_cost_damage"] }] },
@@ -34643,8 +34647,9 @@ await clickAndWait($("btn-lobby-pool"));
     // 只有效果② 有分支行：选① 时下面这一步**匹配不到任何行**（= 这一步不存在）。
     { name: "card", kind: "card", zones: ["equip", "judge"], min: 1, max: 1, order: 2,
       pool: [{ when: costWhen, options: ["4501", "4502"] }] },
-    { name: "to", kind: "option", zones: [], min: 1, max: 1, order: 2,
-      pool: [{ when: [...costWhen, "4502"], options: ["seat:1", "seat:2"], disabled: ["seat:2"] }] },
+    // 座 2 的武器槽已有牌 / 座 3 区域被废除：两座都不进池（不是列出来画灰）。
+    { name: "to", kind: "seat", zones: [], min: 1, max: 1, order: 2,
+      pool: [{ when: [...costWhen, "4502"], options: ["seat:1"] }] },
   ];
   const branchPending = {
     kind: "PLAY_PHASE", actor: 0, seq: 2501,
@@ -34721,16 +34726,27 @@ await clickAndWait($("btn-lobby-pool"));
     `cursor=${ui.state.preactivation.cursor}`
       + ` answers=${JSON.stringify(ui.state.preactivation.answers[2])}`);
 
-  const greyedSeat = optionButton("seat:2");
-  const legalSeat = optionButton("seat:1");
-  check("U-BRANCH-06 非法目的地列出来但**画灰且不接 click**",
-    !!greyedSeat && greyedSeat.classList.contains("dis") && greyedSeat.disabled === true
-      && (greyedSeat.listeners.click || []).length === 0
-      && !!legalSeat && !legalSeat.classList.contains("dis")
-      && (legalSeat.listeners.click || []).length > 0,
-    `grey=${!!greyedSeat && greyedSeat.classList.contains("dis")}`
-      + ` legal=${!!legalSeat && !legalSeat.classList.contains("dis")}`);
-  if (legalSeat) clickButton(legalSeat); else ui.selectPreativationOption("seat:1");
+  // 目的地 = 牌桌点将（qunying 票 09）：池内座位 = 高亮 + 可点；池外 = 没有高亮、没有 click。
+  // 高亮类是座位面上既有的 `.targetable`（与手选目标 / 座位多选同一套语言），不新造类。
+  const legalSeatBox = seatBox(1);
+  const illegalSeatBox = seatBox(2);
+  check("U-BRANCH-06 目的地座位步：只有池内座位画高亮、可点；池外座位没有高亮也没有 click",
+    !!legalSeatBox && legalSeatBox.classList.contains("targetable")
+      && (legalSeatBox.listeners.click || []).length > 0
+      && !!illegalSeatBox
+      && !illegalSeatBox.classList.contains("targetable")
+      && !illegalSeatBox.classList.contains("tsel")
+      && !illegalSeatBox.classList.contains("is-selected")
+      && (illegalSeatBox.listeners.click || []).length === 0,
+    `legal=${!!legalSeatBox && legalSeatBox.classList.contains("targetable")}`
+      + ` illegal=${!!illegalSeatBox && illegalSeatBox.className}`
+      + ` illegalClick=${!!illegalSeatBox && (illegalSeatBox.listeners.click || []).length}`);
+  check("U-BRANCH-06b 座位步**不铺**左下角选项列表（目的地不走选项按钮）",
+    $("t-options").children.length === 0,
+    `options=${$("t-options").children.length}`);
+  if (legalSeatBox) {
+    (legalSeatBox.listeners.click || []).forEach((fn) => fn({ target: legalSeatBox }));
+  }
   const branchAction = ui.buildAction();
   check("U-BRANCH-07 填完 = 复合动作（picks = 选中的牌、choices = 代价 / 效果 / 目的地）",
     !!branchAction && branchAction.kind === "ActivateSkill"

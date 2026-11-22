@@ -581,8 +581,9 @@ class FlowBranch:
     步骤的三态执行器（展开规则见 :func:`_branch_steps`，执行器 / 校验器 / 预览读同一份）。
 
     ``branches``：``选项文本 → 子步骤元组``。空元组 = 这个选项后面没有步骤（不是"取消"）。
-    没列出的选项同样 = 没有步骤。子步骤的类型是**闭集**：``PickCards`` / ``PickOption``
-    （首个消费者 =【谦逊】效果②的"选牌 → 目的地"）；要加别的类型时，清单渲染
+    没列出的选项同样 = 没有步骤。子步骤的类型是**闭集**（``_BRANCH_SUBSTEP_TYPES``）：
+    ``PickCards`` / ``PickOption`` / ``PickSeats``（首个消费者 =【谦逊】效果②的"选牌 →
+    目的地座位步"，qunying 票 03b / 09）；要加别的类型时，清单渲染
     （:func:`manifest`）、校验器（:func:`_assign_activation`）与预览（:func:`preview_step`）
     三处要一起加，否则构造期就抛（见 :meth:`SkillFlow.__post_init__`）。
 
@@ -619,11 +620,16 @@ class FlowBranch:
 FlowStep = PickCards | PickSeats | PickOption | PickProvide | Arrange | FlowBranch
 """流水线步骤的闭集（qunying 票 03b 起含组合子 :class:`FlowBranch`）。"""
 
-_BRANCH_SUBSTEP_TYPES: tuple[type, ...] = (PickCards, PickOption)
+_BRANCH_SUBSTEP_TYPES: tuple[type, ...] = (PickCards, PickOption, PickSeats)
 """分支子步**已登记**的类型（清单 / 校验器 / 预览三处都实现了的那几种）。
 
 加类型时三处一起加：清单的逐分支行渲染、``_assign_activation`` 的摊回、预览的候选。
-未登记的类型在 :meth:`SkillFlow.__post_init__` 就抛 —— 不许"清单里没有、校验器却要求"。"""
+未登记的类型在 :meth:`SkillFlow.__post_init__` 就抛 —— 不许"清单里没有、校验器却要求"。
+
+``PickSeats`` 是 qunying 票 09 加的第二档（【谦逊】效果② 的目的地改成牌桌点将）：
+分支展开对类型无感（三个读取方都按 ``_manifest_flow_step`` / ``isinstance`` 走），登记表
+只是"这三处确实都支持"的显式声明，故这里只补登记、不加实现。
+"""
 
 
 @dataclass(frozen=True, slots=True)

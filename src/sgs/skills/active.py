@@ -9697,49 +9697,30 @@ def _qianxun_move_card_id(answers: FlowAnswers) -> int | None:
     return None
 
 
-def _qianxun_move_seat_choices(
-    state: GameState, answers: FlowAnswers
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """效果② 目的地步的 ``(全部候选, 其中不合法而要置灰的那些)``（``seat:N`` 文本）。
+def _qianxun_move_destination_pool(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """效果② 目的地步（``PickSeats``）的池：**合法目的地**，源座位与非法座位都不出现。
 
-    与 :func:`_qianxun_move_destinations` 同源：候选 = **源座位以外的存活角色**（01 票的
-    置灰语义 —— 不合法的目的地列出来、画灰、只从 ``legal_actions`` 剔除）；源座位本身
-    **不是**置灰项而是根本不列出（Q14 的"另一名角色"）。
+    用户 2026-11-22（第三轮）：目的地在牌桌上点将，**不合法的目的地不画高亮、点了不动**
+    ——它们干脆不进池（旧口径「列出来置灰」退场，见 qunying 票 09）。合法性只有一份判据
+    :func:`_qianxun_move_destinations`；这里只负责把"选中的那张牌"喂给它。
+
+    池依赖前序答案 ⇒ 从 :func:`~sgs.skills.flow._with_answers` 挂上的
+    ``frame.data["preactivation_answers"]`` 读（清单渲染 / 预览 / 校验器 / 执行器共用的唯一
+    通道）。没有前序答案（尚未选牌 / 清单退化）⇒ 空池：宁可少给候选，也不把"所有座位"
+    兜底成可点（spec §6 #5）。
     """
-    card_id = _qianxun_move_card_id(answers)
-    if card_id is None:
-        return (), ()
+    del owner, chosen
+    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
+    cards = answers.get("card") or ()
+    if not cards:
+        return ()
+    card_id = int(cards[0])
     source_seat = _qianxun_card_seat(state, card_id)
     if source_seat is None:
-        return (), ()
-    legal = _qianxun_move_destinations(state, source_seat, card_id)
-    options = tuple(
-        _seat_choice(int(player.seat))
-        for player in state.players
-        if player.alive and int(player.seat) != int(source_seat)
-    )
-    disabled = tuple(
-        text
-        for text in options
-        if int(text.split(":", 1)[1]) not in legal
-    )
-    return options, disabled
-
-
-def _qianxun_move_seat_options(
-    state: GameState, frame: Any, owner: int, answers: FlowAnswers
-) -> tuple[str, ...]:
-    """``PickOption(options=…)``：目的地的**全量**候选（含置灰项，与 ``disabled`` 同源）。"""
-    del frame, owner
-    return _qianxun_move_seat_choices(state, answers)[0]
-
-
-def _qianxun_move_seat_disabled(
-    state: GameState, frame: Any, owner: int, answers: FlowAnswers
-) -> tuple[str, ...]:
-    """``PickOption(disabled=…)``：此刻不合法的目的地（列出来但画灰）。"""
-    del frame, owner
-    return _qianxun_move_seat_choices(state, answers)[1]
+        return ()
+    return _qianxun_move_destinations(state, source_seat, card_id)
 
 
 def _qianxun_card_seat(state: GameState, card_id: int) -> int | None:
@@ -9821,9 +9802,11 @@ def _qianxun_move_effect(
     if source_seat is None:
         return None
     destination = answers.get("to")
-    if not isinstance(destination, str):
+    # 座位步的答案是 ``tuple[int, ...]``（票 09：目的地 = 牌桌点将；旧选项步的 ``seat:N``
+    # 文本已退场）。效果体仍只读这一份答案，复核口径不变。
+    if not isinstance(destination, tuple) or not destination:
         return None
-    dest = int(destination.split(":", 1)[1])
+    dest = int(destination[0])
     if dest not in _qianxun_move_destinations(state, int(source_seat), card_id):
         return None
     card = state.card(card_id)
@@ -10025,13 +10008,16 @@ QIANXUN_EFFECT_FLOW = SkillFlow(
                         key="card",
                         seats=_qianxun_field_seats,
                     ),
-                    PickOption(
-                        options=_qianxun_move_seat_options,
-                        disabled=_qianxun_move_seat_disabled,
+                    # 用户 2026-11-22 **第三轮**裁定（qunying 票 09）：目的地 = **牌桌点将**，
+                    # 不是左下角选项列表；不合法的目的地（槽位已有牌 / 区域被废除）**不进池**
+                    # ⇒ 前端只给池内座位画高亮、池外座位点不动（01 票的"列出来置灰"退场）。
+                    # 池 = `_qianxun_move_destinations` 的唯一一份合法性判据。
+                    PickSeats(
+                        lo=1,
+                        hi=1,
+                        pool=_qianxun_move_destination_pool,
                         optional=False,
                         key="to",
-                        # 用户第二轮裁定：不合法的目的地**列出来但置灰**（不是静默消失）。
-                        show_disabled=True,
                     ),
                 ),
                 QIANXUN_EFFECT_GAIN: (

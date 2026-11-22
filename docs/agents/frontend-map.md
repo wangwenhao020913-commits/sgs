@@ -176,6 +176,27 @@
 `test_every_pick_one_face_paints_the_same_selected_class` /
 `test_the_selected_state_is_cleared_on_submit_reject_and_never_on_disabled_or_replay`。
 
+## 「目的地是牌桌点将」（qunying 票 09）
+
+用户 2026-11-22 第三轮：「选择场上卡牌移动时，我选好了要移动的牌，然后应该直接点选场上角色
+（而不是给出选项），如果角色该槽位已有牌无法移动，则不显示高亮框」。落点是【谦逊】效果② 的
+**第二步**，它取代了 01 票"把非法目的地列出来画灰"的旧口径：
+
+| 层 | 落点 | 形状 |
+|---|---|---|
+| 声明 | `active.py:QIANXUN_EFFECT_FLOW` 的 `to` 子步 | `PickSeats(pool=_qianxun_move_destination_pool, lo=hi=1, key="to")` ⇒ 清单下发 `Step.kind == "seat"`；池 = 唯一一份 `_qianxun_move_destinations`（源座位 / 槽位已有牌 / 区域被废除都不进池） |
+| 牌桌 | `table.js:seatInteraction` 的预发动分支 | 座位是不是候选只读 `preactivationOptions`（服务端池 / 预览回包）⇒ 池内 = 既有 `.targetable` 高亮环 + click；池外 = **没有任何状态类、没有 click**（不新造类；`.tsel` / `.is-selected` 仍是选中态） |
+| 点击 | `preactivation.js:selectPreativationSeat` | 点了再复核一次池（`options.includes("seat:N")`），池外用合成事件也写不进答案 |
+| 选项列表 | `preactivation.js:renderPreativation` 的座位步分派 | 座位步 `#t-options` **一个按钮都不铺**：目的地不再出现"选项列表" |
+
+服务端候选 = 校验面 = 执行面（同一个池回调：清单 / `preview_step` / `_assign_activation` /
+`run_flow` 四处读 `frame.data["preactivation_answers"]`）。行为断言：
+`tests/support/ui_smoke.mjs` 的 `U-BRANCH-06` / `U-BRANCH-06b` / `U-BRANCH-07`；
+`tests/test_hero_qunying.py::test_qianxun_move_destination_lists_illegal_seats_greyed`
+（座位步 + 池 + 校验器拒收池外座位）/
+`test_qianxun_effect_manifest_lists_each_effects_own_steps`；真会话载荷
+`tests/test_web.py::test_the_qianxun_payload_switches_to_the_effect_event_after_the_cost`。
+
 ## 「能点的牌」的高亮（qunying 票 08）
 
 用户 2026-11-22 第三轮：「不可选择的卡牌都置灰了，同时也让能选择的卡牌绘制高亮（尤其是场上的

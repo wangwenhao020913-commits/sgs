@@ -74,7 +74,7 @@
 | 多步：座位 → 选项 → 选牌 | 「选择一名男性角色，然后弃置一张手牌或将一张装备牌置入其装备区」 | `hero.jie_sunshangxiang.jieyin` |
 | 选项步（闭集，可动态） | 「选择一项：1… 2…」 | `hero.jie_xushu.jianyan` |
 | 选项步 + **置灰**（`disabled`：列出来但此刻不可选） | 「将此牌当任意一张基本牌或普通锦囊牌」——牌名**列全**，"此刻没有合法目标"的置灰 | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】；`disabled` 见 `src/sgs/skills/flow.py:PickOption`） |
-| **选项 → 依赖该选项的后续步骤**（`FlowBranch`：选了这一项之后才有的几步） | 「选择一项：1… 2…；若选 2，则再在场上点一张牌、然后选一名角色」 | `hero.qunying_luxun.qianxun`（qunying 票 03b/10：代价事件里 **代价③ → 选装备牌 → 选延时锦囊**，效果事件里 **效果② → 场上一张牌 → 目的地（非法置灰）** / **效果③ → 选类型**；`src/sgs/skills/flow.py:FlowBranch`。它是**步骤的组合子**，不是第六种原语） |
+| **选项 → 依赖该选项的后续步骤**（`FlowBranch`：选了这一项之后才有的几步） | 「选择一项：1… 2…；若选 2，则再在场上点一张牌、然后**在牌桌上点**一名角色」 | `hero.qunying_luxun.qianxun`（qunying 票 03b/09/10：代价事件里 **代价③ → 选装备牌 → 选延时锦囊**，效果事件里 **效果② → 场上一张牌 → 目的地座位步（`PickSeats`；非法目的地不进池 ⇒ 不高亮、点不动）** / **效果③ → 选类型**；`src/sgs/skills/flow.py:FlowBranch`。它是**步骤的组合子**，不是第六种原语） |
 | **两段发动面（一个预发动只含一个事件）** | 「出牌阶段各限一次，你可【付代价】，并执行本回合未选过的一项」——**代价结算完技能再次可发动**；效果凑不出候选只作废这个事件、不回退代价 | `hero.qunying_luxun.qianxun`（qunying 票 10：代价事件先结算；效果事件随后由声明上的 `flow_resolver` 现算，`src/sgs/skills/preactivation.py:FLOW_RESOLVERS` 派生、`src/sgs/skills/active.py:_qianxun_flow` 是首个消费者；效果事件空池时 `FlowCancel` 关闭窗口、代价位不回退） |
 | 手写询问（循环/逐点/逐目标） | 「逐点触发、每个伤害点各问一次」「逐个目标」 | `hero.guojia.yiji`、`hero.jie_machao.tieqi` |
 | 手写**主体**（`SkillFlow` 只装前几步，段机住在 `effect` 里） | 「扣置一张手牌…然后其他角色**依次**质疑」——一次发动里有**变长循环**（逐座位问）；或「失去 1 点体力**或**弃一张武器牌，然后…」——两条代价分支的**后续步骤不同**（一条要选牌、一条不要） | `hero.yuji_mobile.guohuo`（前两步是流水线，质疑循环住在提交点；判据见 `src/sgs/skills/flow.py:SkillFlow` 的"本语言没有循环 / 每轮提交步骤"）；**条件步**同形：`hero.dianwei_mobile.qiangxi`（选项步留在流水线，选牌 / 选目标 / 付费住在 `effect`——`steps` 是定长元组，任一步"没有候选"= 取消整条，没有"跳过这一步"） |
