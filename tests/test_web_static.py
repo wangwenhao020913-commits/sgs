@@ -2291,8 +2291,10 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
         row,
         re.S,
     ), f"置灰行**不接** click（可点行才绑处理器）：{row}"
-    assert "submitDialogChoice(pending, index)" in row, (
-        f"可点行 = 选中 legal_actions 里那条候选（一击提交，不手拼 Action）：{row}"
+    # qunying 票 04：一击提交的行要把**被点的节点**一起交出去——选择型弹窗靠它当场画
+    # 统一的 `.is-selected`（请求结束再摘），没有重绘可等。
+    assert "submitDialogChoice(pending, index, node)" in row, (
+        f"可点行 = 选中 legal_actions 里那条候选（一击提交；节点交给选中态）：{row}"
     )
     assert "dialogChoiceIndex(pending, choice)" in row, (
         "候选下标从 legal_actions 里按 choice 找（置灰项不在候选里）；查找口与外观组件的"
@@ -13043,3 +13045,103 @@ def test_the_ring_seat_size_lives_in_one_module_and_the_bottom_bar_grew_with_the
         "`记录` → 提示 / 手牌 → 技能 → 自己的块在最右，裁决 §7②）"
     )
     assert "row-reverse" not in _CSS_TEXT, "底部面板不许用 row-reverse 反着排"
+
+
+# ---------------------------------------------------------------- qunying 票 04
+
+_PICK_ONE_FILES = ("options.js", "pending.js", "modal.js", "table.js", "seat-view.js")
+
+
+def _pick_one_sources() -> dict[str, str]:
+    return {name: (STATIC_DIR / name).read_text(encoding="utf-8") for name in _PICK_ONE_FILES}
+
+
+def test_every_pick_one_face_paints_the_same_selected_class() -> None:
+    """qunying 票 04：五条「选一项」的渲染路径共用**同一个**选中类 `.is-selected`。
+
+    用户 2026-11-21 实机验收：「现在很多选项界面我选择一个选项后没有高亮」。判据是
+    **形状驱动**的（不认技能 id），落点是五处：
+
+    ① 牌桌小选项按钮组（`options.js:renderOptionButtons`）——渲染按 `state.selectedOption`
+       画、点击后重铺同一份状态；
+    ② 选座位（`table.js:seatInteraction` 的 `option_seats` 档）——选中武将带高亮环；
+    ③ 单选项确认（`pending.js:isSingleOptionalOption`）——直提态不需要选中态，但要有
+       "进行中"反馈（下一条测试钉它）；
+    ④ 选择型弹窗（`modal.js:stepDialogKind` 的 `choice`）——一击即提交，点击当场画；
+    ⑤ 多选勾选面（`options.js:renderMultiSelect`）是参考面，**不改**（它仍用 `.sel`）。
+
+    这里钉的是**跨文件接线**（行为归 `tests/support/ui_smoke.mjs` 的 `Q04-*`）：类名只有
+    一份、清点只有一处、每一击即提交的行都把被点的节点交出去。
+    """
+    sources = _pick_one_sources()
+    options = sources["options.js"]
+    # ① 类名的唯一定义处（别处引用常量 / 同一个字面量，不再发明第二个类名）。
+    assert 'const OPTION_SELECTED_CLASS = "is-selected";' in options
+    assert options.count('"is-selected"') == 1, (
+        "选中类的字面量只许出现在 OPTION_SELECTED_CLASS 的定义里（其余走常量）"
+    )
+    # ② 渲染与点击共用同一个画 / 摘口。
+    assert "function paintOptionSelected(" in options
+    assert "function clearOptionSelected(" in options
+    # ③ 一击即提交的面（选择型弹窗 / 激活面 / 武将牌选项行）必须把**被点的节点**交出去：
+    #    没有重绘可等，只能就地画；请求结束再摘（[G3] 的回滚）。
+    assert "paintOptionSelected(node, true);" in options
+    assert "clearOptionSelected();\n}" in options
+    assert "submitDialogChoice(pending, index, node)" in sources["modal.js"]
+    assert "submitDialogChoice(pending, actions.indexOf(action), row)" in sources["pending.js"]
+    # ④ 选座位面：统一类进了座位交互态，也登记进座位状态类全集（否则 applySeatState 不 toggle）。
+    assert 'classes.push("is-selected");' in sources["table.js"]
+    assert '"is-selected",' in sources["seat-view.js"]
+    # ⑤ 清点只有一处实现（`classList.remove("is-selected")` 只该出现在 clearOptionSelected 里）。
+    assert options.count("classList.remove(OPTION_SELECTED_CLASS)") == 1, (
+        "回滚必须只有 clearOptionSelected 一处实现"
+    )
+    # ⑥ 样式只住 style.css：选项按钮与座位各一条。
+    style = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    assert ".opt.is-selected {" in style
+    assert ".seat.is-selected {" in style
+
+
+def test_the_selected_state_is_cleared_on_submit_reject_and_never_on_disabled_or_replay() -> None:
+    """qunying 票 04 §2 的四条边界 → 落到代码里的**那一行**。
+
+    - [G1] 直提态：请求在飞时询问面挂 `is-submitting`（`提交中…`），结束后摘；
+    - [G2] 置灰项：点击前的 `index < 0` 守卫 + 画的条件，两处都不给选中态；
+    - [G3] 提交 / 取消 / 超时 / 服务端拒收后回滚：`submitLeftAction` / `cancelOrClear` 在
+      `await submitAction(...)` **之后**清，一击即提交的面在 `submitDialogChoice` 里清；
+    - [G4] 回放：画的条件带 `!state.playback`，点击口也拒绝。
+
+    行为证据在 `tests/support/ui_smoke.mjs` 的 `Q04-05 / Q04-06 / Q04-10 / Q04-10b / Q04-12`；
+    这里钉住"清点没有被挪走"（重绘式清理在这两条面上不成立：失败时没有新的一面可画）。
+    """
+    sources = _pick_one_sources()
+    options = sources["options.js"]
+    pending = sources["pending.js"]
+    style = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+    # [G2] / [G4]：渲染条件（置灰项 `index < 0` 永不等于选中下标；回放期恒不画）。
+    assert "index >= 0 && !state.playback && state.selectedOption === index" in options
+    # [G2] / [G4]：点击口的同一对守卫。
+    assert "if (index < 0) return;" in options
+    assert "if (state.playback || state.submitBusy) return;" in options
+
+    # [G1]：进行中反馈的判据是 **submitBusy**（请求真的在飞），不是"点了按钮"。
+    assert "function markSubmitInFlight(" in pending
+    assert "if (state.submitBusy) markSubmitInFlight();" in pending
+    assert "function clearSubmitInFlight(" in pending
+    # 提交键路径：请求结束后摘掉旧的选中态（成功时已重铺；失败时这一行就是回滚）。
+    submit_body = pending.split("async function submitLeftAction()", 1)[1].split("\n}", 1)[0]
+    assert "await request;" in submit_body
+    assert "clearOptionSelected();" in submit_body
+    # 取消 / 放弃（送 Pass）那条路同样在请求结束后清。
+    cancel_body = pending.split("async function cancelOrClear()", 1)[1].split("\n}", 1)[0]
+    assert "clearOptionSelected();" in cancel_body
+    # 一击即提交的弹窗：请求一结束就摘（成功 / 400 拒收 / 409 过期都走这一行）。
+    dialog_body = options.split("async function submitDialogChoice(", 1)[1].split("\n}", 1)[0]
+    assert "paintOptionSelected(node, true);" in dialog_body
+    assert "await submitAction(before);" in dialog_body
+    assert "clearOptionSelected();" in dialog_body
+
+    # 换面 / 起播时上一问的"提交中…"不跨问。
+    assert 'options.classList.remove("is-submitting");' in pending
+    assert ".options.is-submitting::after {" in style

@@ -123,7 +123,11 @@ function resetAskSurface({ keepOptions = false } = {}) {
   if (promptSkills) promptSkills.innerHTML = "";
   if (!keepOptions) {
     const options = $("t-options");
-    if (options) options.innerHTML = "";
+    if (options) {
+      options.innerHTML = "";
+      // 上一问的"提交中…"不跨问（qunying 票 04 [G1] 的那一行反馈只属于在飞的那一次）。
+      options.classList.remove("is-submitting");
+    }
   }
   // 弹窗标题条的**镜像**（`modal.js:syncDialogHint` 把 `#t-target-hint` 抄过去）：窗口不关时
   // 没人重算它 ⇒ 上一问的步骤提示会留在标题条上（`keepDialog` 分支的残留）。
@@ -614,6 +618,7 @@ async function cancelOrClear() {
         state.picks = [];
         state.lastRejectReason = "";
         await submitAction(before);
+        clearOptionSelected();
         return;
       }
     }
@@ -636,18 +641,45 @@ async function cancelOrClear() {
   state.preactivation = null;
   state.lastRejectReason = "";
   await submitAction(before);
+  // 取消 / 放弃送出的那条 Pass 结束后，本地的选中态一律摘掉（qunying 票 04 [G3]）。
+  clearOptionSelected();
+}
+
+/** **「进行中」反馈**（qunying 票 04 [G1]）：直提态（只有一条合法候选 / 单选项确认 /
+ *  唯一候选）点「提交」= 当场发请求，中间没有"选中"这一步可看。判据不是"点了按钮"，而是
+ *  **请求真的在飞**（`state.submitBusy`）：`submitAction` 在第一个 `await` 之前就把它置真并
+ *  冻结四键，故调用方拿到控制权之后的同步一刻读它即可。
+ *
+ *  反馈落在询问容器 `#t-options` 的 `is-submitting` 上（`style.css` 给一行「提交中…」），
+ *  与选项选中态同一个容器、同一种姿态；重绘（`resetAskSurface`）与请求结束都会摘掉。 */
+function markSubmitInFlight() {
+  const box = $("t-options");
+  if (box) box.classList.add("is-submitting");
+}
+
+function clearSubmitInFlight() {
+  const box = $("t-options");
+  if (box) box.classList.remove("is-submitting");
 }
 
 /** 底部「提交」键：预发动里它有两档（票 08 / spec §2 Q5）——**中间步**确认这一步
  *  （`min != max` 的步不自动走），**最后一步**才是确认发动 / 确认使用（`submitAction`）。
- *  与 `cancelOrClear` 同姿态：两档都由 `preactivationConfirmable` 一处判。 */
+ *  与 `cancelOrClear` 同姿态：两档都由 `preactivationConfirmable` 一处判。
+ *
+ *  qunying 票 04：请求真的发出去时给 [G1] 的"进行中"反馈；请求结束后摘掉旧的选中态
+ *  （[G3] 的回滚——成功时界面已按新视图重铺，失败时这一行才是唯一清点）。
+ */
 async function submitLeftAction() {
   if (state.playback || state.submitBusy) return;
   if (preactivationConfirmable()) {
     advancePreativation();
     return;
   }
-  await submitAction();
+  const request = submitAction();
+  if (state.submitBusy) markSubmitInFlight();
+  await request;
+  clearSubmitInFlight();
+  clearOptionSelected();
 }
 
 /** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
@@ -793,7 +825,7 @@ function renderActivationFace(pending, actions) {
           );
           return;
         }
-        await submitDialogChoice(pending, actions.indexOf(action));
+        await submitDialogChoice(pending, actions.indexOf(action), row);
       });
       $("t-options").appendChild(row);
     });

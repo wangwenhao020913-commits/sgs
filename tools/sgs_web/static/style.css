@@ -633,6 +633,29 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; cursor: pointer;
 }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
+/* 「选一项」的**统一选中态**（qunying 票 04）：五条渲染路径共用 `.is-selected`。
+ * 选中与置灰是互斥的两档——`disabled` 的项永远不该带这个类（[G2]），故这里只描候选。
+ * 金框 + 浅金底 + 内描边：点下去到提交之前一眼看得出"选的是哪一条"。 */
+.opt.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  font-weight: 600;
+}
+/* 直提态 / 一击即提交的**"进行中"反馈**（[G1]）：`pending.js:markSubmitInFlight` 给询问
+ * 容器挂 `is-submitting`。不占真实 DOM（没有可点节点），只多一行字。 */
+.options.is-submitting::after {
+  content: "提交中…";
+  padding: 4px 2px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  animation: submit-inflight 1s ease-in-out infinite alternate;
+}
+@keyframes submit-inflight {
+  from { opacity: .45; }
+  to { opacity: 1; }
+}
 
 /* 计数式分配（神周瑜移动版【业炎】；huo-shenzhouyu-mobile 票 05）：一行一个座位 + 计数徽标，
  * 底下「重置」。宽度撑满弹窗正文，计数用等宽数字（点几次都看得出）。 */
@@ -1276,6 +1299,13 @@ button.mini-slot { cursor: pointer; }
 }
 .seat.turn.tsel {
   box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b;
+}
+/* 「选一项」的座位面：选中武将加**高亮环**（qunying 票 04；票面原文）。与 `.tsel` 并存——
+ * `.tsel` 是既有底座（绿内圈 + 填充），这里再套一道金环，与选项按钮的 `.is-selected` 同一个类。
+ * 放在 `.seat.turn.tsel` **之后**：行动中的座位同时被选中时也看得到环。 */
+.seat.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 5px var(--accent);
 }
 .seat.req { outline: 2px dashed #b8860b; outline-offset: 2px; }
 

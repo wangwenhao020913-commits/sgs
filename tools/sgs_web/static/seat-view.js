@@ -32,6 +32,8 @@ const SEAT_STATE_CLASSES = [
   "turn",
   "targetable",
   "tsel",
+  // qunying 票 04：五条「选一项」的渲染路径**共用**的选中类（座位面就是它）。
+  "is-selected",
   "req",
   "chained",
   "wine",

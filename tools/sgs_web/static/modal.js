@@ -1094,7 +1094,8 @@ function heroCardRowNode(pending, row) {
     return node;
   }
   node.addEventListener("click", async () => {
-    await submitDialogChoice(pending, index);
+    // qunying 票 04：把被点的行交出去——一击即提交的选择型弹窗靠它当场画 `.is-selected`。
+    await submitDialogChoice(pending, index, node);
   });
   return node;
 }

@@ -34735,4 +34735,226 @@ await clickAndWait($("btn-lobby-pool"));
   ui.resetSelection();
 }
 
+/* ============ qunying 票 04：每个「选一项」的面都要有**可见的选中态** ============
+ *
+ * 用户 2026-11-21 实机验收：「现在很多选项界面我选择一个选项后没有高亮」。判据是
+ * **形状驱动**的（不认技能 id）：凡是 `SELECT_OPTION` 的单选面，点下去给那一条加统一的
+ * `.is-selected`；提交 / 取消 / 超时 / 服务端拒收后摘掉；置灰项点了不变；回放里不出现。
+ * 五条渲染路径逐条过（牌桌小选项按钮组 / 选座位 / 单选项确认 / 选择型弹窗 / 多选参考面）。
+ *
+ * 载荷与真服务端响应同形（判据是界面读法）；服务端那一侧不需要新字段——本段只读既有的
+ * `legal_actions` / `option_seats` / `option_labels` / `options` / `disabled` / `seq`
+ * （"没有新字段"的一半由 `tests/test_web_static.py` 的静态守卫钉住）。
+ */
+{
+  const selectedNodes = () => Array.from($("t-options").children)
+    .filter((node) => node.classList.contains("is-selected"));
+  const tableOptionPending = (seq, choices) => ({
+    kind: "SELECT_OPTION", actor: 0, seq,
+    prompt: "请选择一项。",
+    legal_actions: [
+      ...choices.map((choice) => ({ kind: "SelectOption", choice, answers_seq: seq })),
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  const showAsk = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+
+  /* ---- ① 牌桌小选项按钮组（`renderKind` 的 `options` 档）---- */
+  const optionView = synthView(tableOptionPending(9901, ["discard_one", "draw_one"]));
+  showAsk(optionView);
+  check("Q04-01 牌桌小选项按钮组：没点之前一项都不带选中态",
+    $("t-options").children.length === 2 && selectedNodes().length === 0,
+    `选项=${JSON.stringify(Array.from($("t-options").children).map((n) => n.textContent))}`);
+
+  let optionRows = Array.from($("t-options").children);
+  (optionRows[0].listeners.click || [])[0]({ target: optionRows[0] });
+  optionRows = Array.from($("t-options").children);
+  check("Q04-02 点第一项 ⇒ 它画成 `.is-selected`（同一面只有这一条）",
+    optionRows.length === 2
+      && optionRows[0].classList.contains("is-selected")
+      && !optionRows[1].classList.contains("is-selected"),
+    `类=${optionRows.map((n) => n.className).join(" | ")}`);
+
+  (optionRows[1].listeners.click || [])[0]({ target: optionRows[1] });
+  optionRows = Array.from($("t-options").children);
+  check("Q04-03 换点第二项 ⇒ 选中态跟着走（第一项摘掉、第二项画上）",
+    !optionRows[0].classList.contains("is-selected")
+      && optionRows[1].classList.contains("is-selected"),
+    `类=${optionRows.map((n) => n.className).join(" | ")}`);
+
+  ui.clearSelection();
+  check("Q04-04 取消 / 清空选择 ⇒ 选中态消失（不留在过期的面上）",
+    selectedNodes().length === 0
+      && !Array.from($("t-options").children).some((n) => n.classList.contains("is-selected")),
+    `仍选中=${selectedNodes().length}`);
+
+  /* ---- [G2] 置灰项：不可点、也绝不出现选中态 ----
+   * `discard_one` 属于 `OPTION_PAIRS` 里的一对 ⇒ 另一项 `draw_one` 会被画成置灰（它不在
+   * 候选里）。点它既不改本地选择，也不加类。 */
+  const greyView = synthView(tableOptionPending(9902, ["discard_one", "extra"]));
+  showAsk(greyView);
+  const greyRow = Array.from($("t-options").children).find((node) => node.disabled === true);
+  (greyRow.listeners.click || [])[0]({ target: greyRow });
+  check("Q04-05 [G2] 置灰项点了：不变、不加选中态、不改本地选择",
+    !!greyRow && greyRow.disabled === true
+      && !greyRow.classList.contains("is-selected")
+      && ui.state.selectedOption === null,
+    `置灰项="${greyRow && greyRow.textContent}" disabled=${greyRow && greyRow.disabled} `
+      + `类=${greyRow && greyRow.className} selectedOption=${ui.state.selectedOption}`);
+
+  /* ---- [G3] 超时兜底：服务端代答 ⇒ 新的一视野到达，选中态不跟过来 ---- */
+  const timedOutView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9903,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9903 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  ui.applyViewRaw({ ...timedOutView, cursor: 9903, log_seq: 0, records: [] });
+  ui.flushPlayback();
+  check("Q04-06 [G3] 超时 / 代答后的新一视野 ⇒ 选中态回滚（旧面的选中不跟过来）",
+    selectedNodes().length === 0,
+    `仍选中=${selectedNodes().length}`);
+
+  /* ---- ② 选座位（`renderKind` 的 `seat` 档）：选中武将加高亮环 ---- */
+  const seatAsk = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 9904,
+    prompt: "请选择一名角色。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 9904 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 9904 },
+      { kind: "Pass", answers_seq: 9904 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: null,
+  });
+  showAsk(seatAsk);
+  check("Q04-07 选座位面：未点时没有「已选」高亮（只有可指定态）",
+    ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions) === "seat"
+      && !seatBox(2).classList.contains("is-selected"),
+    `kind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)} 类=${seatBox(2).className}`);
+  (seatBox(2).listeners.click || [])[0]({ target: seatBox(2) });
+  check("Q04-08 点场上武将 ⇒ 该座位带统一的 `.is-selected`（高亮环）",
+    seatBox(2).classList.contains("is-selected")
+      && !seatBox(1).classList.contains("is-selected")
+      && ui.state.selectedOption === 1,
+    `seat2 类=${seatBox(2).className} seat1 类=${seatBox(1).className} selectedOption=${ui.state.selectedOption}`);
+
+  /* ---- ③ 单选项确认（`isSingleOptionalOption` ⇒ `option-confirm`）：[G1] 进行中反馈 ---- */
+  const confirmView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 9905,
+    prompt: "是否继续？",
+    legal_actions: [
+      { kind: "SelectOption", choice: "keep", answers_seq: 9905 },
+      { kind: "Pass", answers_seq: 9905 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  showAsk(confirmView);
+  check("Q04-09 单选项确认是直提态：不铺选项按钮 ⇒ 也不需要选中态",
+    ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions) === "option-confirm"
+      && $("t-options").children.length === 0
+      && selectedNodes().length === 0,
+    `kind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)} 选项=${$("t-options").children.length}`);
+
+  // 直提态点「提交」= 当场发请求：请求在飞期间询问容器挂 `is-submitting`（一行「提交中…」），
+  // 结束后摘掉。服务端拒收（400）顺便验 [G3]：不得停在过期的选择上。
+  ui.state.sessionId = "smoke-qunying-04";
+  const beforeConfirmCalls = calls.length;
+  staleAnswerStatus = 400;
+  const confirmRequest = ui.submitLeftAction();
+  const inFlight = $("t-options").classList.contains("is-submitting");
+  await confirmRequest;
+  staleAnswerStatus = null;
+  const confirmAnswers = calls.slice(beforeConfirmCalls).filter((call) => call.path.includes("/answer"));
+  check("Q04-10 [G1] 直提态点提交：请求在飞时询问面挂上「提交中…」，结束后摘掉",
+    confirmAnswers.length === 1
+      && inFlight === true
+      && !$("t-options").classList.contains("is-submitting"),
+    `answers=${confirmAnswers.length} inFlight=${inFlight} `
+      + `after=${$("t-options").classList.contains("is-submitting")}`);
+  check("Q04-10b [G3] 服务端拒收后：选中态回滚、页脚留下拒绝原因",
+    selectedNodes().length === 0 && /提交被拒/.test($("t-choice").textContent),
+    `仍选中=${selectedNodes().length} 页脚="${$("t-choice").textContent}"`);
+
+  /* ---- ④ 选择型弹窗（花色 / 牌名 / 类型；`modal.js:stepDialogKind` 的 `choice`）----
+   * 一击即提交：点下去要先有**可见**反馈，请求结束再摘（成功 / 拒收都摘）。 */
+  const choiceAsk = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 9906,
+    prompt: "请选择一种牌的类型。",
+    legal_actions: ["basic", "trick", "equip"].map((choice) => ({
+      kind: "SelectOption", choice, answers_seq: 9906,
+    })),
+    option_labels: {
+      basic: { name: "基本牌", symbol: "", color: "black" },
+      trick: { name: "锦囊牌", symbol: "", color: "black" },
+      equip: { name: "装备牌", symbol: "", color: "black" },
+    },
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  ui.state.sessionId = "smoke-qunying-04";
+  showAsk(choiceAsk);
+  const choiceRows = Array.from($("t-options").children);
+  staleAnswerStatus = 400;
+  const beforeChoiceCalls = calls.length;
+  const choiceSettle = (choiceRows[1].listeners.click || [])[0]({ target: choiceRows[1] });
+  const choiceMarked = choiceRows[1].classList.contains("is-selected");
+  await choiceSettle;
+  staleAnswerStatus = null;
+  const choiceAnswers = calls.slice(beforeChoiceCalls).filter((call) => call.path.includes("/answer"));
+  check("Q04-11 选择型弹窗（牌名 / 类型）：点下去立刻画 `.is-selected`，提交结束后摘掉",
+    ui.stepDialogKind(choiceAsk.pending) === "choice"
+      && choiceRows.length === 3
+      && choiceMarked === true
+      && choiceRows[1].classList.contains("is-selected") === false
+      && choiceAnswers.length === 1,
+    `kind=${ui.stepDialogKind(choiceAsk.pending)} marked=${choiceMarked} `
+      + `after=${choiceRows[1].classList.contains("is-selected")} answers=${choiceAnswers.length}`);
+  ui.state.sessionId = null;
+
+  /* ---- [G4] 回放：没有"人在选"的过程 ⇒ 不出现选中态、点了也不发请求 ---- */
+  ui.state.playback = { records: [], index: 0 };
+  ui.state.sessionId = "smoke-qunying-04";
+  const replayAsk = synthView(tableOptionPending(9907, ["discard_one", "draw_one"]));
+  showAsk(replayAsk);
+  const replayRows = Array.from($("t-options").children);
+  const replayBefore = calls.length;
+  (replayRows[0].listeners.click || [])[0]({ target: replayRows[0] });
+  check("Q04-12 [G4] 回放里不出现选中态：不画、点了也不发请求",
+    selectedNodes().length === 0 && calls.length === replayBefore,
+    `仍选中=${selectedNodes().length} calls=${calls.length - replayBefore}`);
+  ui.state.playback = null;
+  ui.state.sessionId = null;
+
+  /* ---- ⑤ 多选参考面：既有勾选态**一个字不改**（本票只借它的做法）---- */
+  const multiAsk = synthView({
+    kind: "SELECT_OPTIONS", actor: 0, seq: 9908,
+    prompt: "请勾选至多两项。", options: ["甲", "乙"], disabled: [], min_selected: 0,
+    max_selected: 2,
+    legal_actions: [{ kind: "SelectOptions", answers_seq: 9908, choices: [] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  showAsk(multiAsk);
+  const multiRow = Array.from($("t-options").children)[0];
+  (multiRow.listeners.click || [])[0]({ target: multiRow });
+  const multiAfter = Array.from($("t-options").children)[0];
+  check("Q04-13 多选勾选面（参考面）仍是 `.sel` + ☑，没有被本票的选中态改掉",
+    multiAfter.classList.contains("sel") && /☑/.test(multiAfter.textContent)
+      && !multiAfter.classList.contains("is-selected"),
+    `类=${multiAfter.className} 文案="${multiAfter.textContent}"`);
+
+  // 收尾：清回"没有会话"。
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.playback = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

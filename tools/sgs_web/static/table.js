@@ -213,8 +213,12 @@ function seatInteraction(player, ctx) {
       // 选座位形态（【遗计】"交给谁"）：座位可点，选中的那座画成确定态。
       const optionSelected = state.selectedOption !== null
         && (pendingNow.legal_actions[state.selectedOption] || {}).choice === optionChoice;
-      if (optionSelected) classes.push("tsel");
-      else classes.push("targetable");
+      if (optionSelected) {
+        // 选中态 = `.tsel`（既有底座）+ 全仓统一的 `.is-selected`（qunying 票 04：五条
+        // 「选一项」的渲染路径共用同一个类，座位面就是"高亮环"那一档）。
+        classes.push("tsel");
+        classes.push("is-selected");
+      } else classes.push("targetable");
       handler = () => selectOptionSeat(player.seat);
     }
   }

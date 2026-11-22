@@ -4,6 +4,41 @@
  */
 "use strict";
 
+/* ------------------------------------------------- 「选一项」的选中态（qunying 票 04） */
+
+/** 选中态的**唯一类名**（qunying 票 04）：五条「选一项」的渲染路径共用**同一个**类，
+ *  判据只看**载荷形状**（`SELECT_OPTION` / `option_seats` / `stepDialogKind(...) === choice`），
+ *  不认技能 id。样式只住 `style.css`（`.opt.is-selected` / `.seat.is-selected`）。
+ *
+ *  生命周期：点击时加上（一击即提交的面没有"重绘"可等，必须就地画）→ 提交 / 取消 /
+ *  超时 / 服务端拒收后摘掉。摘的入口只有 :func:`clearOptionSelected` 一处。 */
+const OPTION_SELECTED_CLASS = "is-selected";
+
+/** 已画成"已选"的节点（只留这一份，供 :func:`clearOptionSelected` 回滚）。
+ *  重铺（`innerHTML = ""`）会把这些节点摘下文档，清类对脱离文档的节点同样安全。 */
+const optionSelectedNodes = new Set();
+
+/** 画 / 摘一个节点的选中态：**唯一**的类切换口（渲染与点击都走这里）。 */
+function paintOptionSelected(node, on) {
+  if (!node || !node.classList) return;
+  node.classList.toggle(OPTION_SELECTED_CLASS, Boolean(on));
+  if (on) optionSelectedNodes.add(node);
+  else optionSelectedNodes.delete(node);
+}
+
+/** 摘掉**全部**已画上的选中态：换一项 / 提交 / 取消 / 超时 / 服务端拒收后都走这里。
+ *
+ *  为什么要显式清而不是"等下一次重绘"：一击即提交的面（选择型弹窗 / 激活面 / 武将牌
+ *  选项行）在请求失败（400 拒收 / 409 过期）时**没有**新的一面可画，旧节点留在原地；
+ *  不清它就会停在一个已经交出去、又没被接受的选择上（票 04 §2 [G3]）。
+ */
+function clearOptionSelected() {
+  for (const node of optionSelectedNodes) {
+    if (node && node.classList) node.classList.remove(OPTION_SELECTED_CLASS);
+  }
+  optionSelectedNodes.clear();
+}
+
 /** `SELECT_OPTION` 的**小选项按钮组 / 选择型弹窗内容**（花色 / 二选一）：一个选项一个按钮。
  *
  * 它是询问控件区左栏的专用面，**不是**旧的候选列表：按钮只写选项本身，不带
@@ -69,6 +104,9 @@ function renderOptionButtons(pending) {
     if (hint) hint.textContent = "点一个选项即提交；这一步不能放弃。";
   }
   const actions = pending.legal_actions || [];
+  // 本面是选项按钮的**唯一**生产者：重铺前先把上一面的标记摘掉，登记表只留当前这一面
+  // （旧节点此时已脱离文档，`classList.remove` 不抛），避免轮询 / 反复重绘把死节点攒下来。
+  clearOptionSelected();
   optionChoices(pending).forEach((choice) => {
     // 候选下标 = 提交时要指过去的那一条；-1 = 引擎没发（画成禁用，点它零提交）。
     const index = actions.findIndex(
@@ -80,7 +118,11 @@ function renderOptionButtons(pending) {
     button.type = "button";
     button.className = "opt";
     button.disabled = index < 0;
-    if (index >= 0 && state.selectedOption === index) button.classList.add("sel");
+    // 选中态只画**候选里真有**的那一项，且回放里不画（[G2] / [G4]）：置灰项 `index < 0`
+    // 永远不等于 `state.selectedOption`，回放期 `state.playback` 恒真。
+    paintOptionSelected(
+      button, index >= 0 && !state.playback && state.selectedOption === index,
+    );
     const label = optionLabel(pending, choice);
     if (label) {
       // 中文名 / 符号 / 红黑全部读服务端 `option_labels`：前端只负责摆版面。
@@ -98,9 +140,13 @@ function renderOptionButtons(pending) {
       button.textContent = optionText(choice, pending);
     }
     button.addEventListener("click", async () => {
-      if (index < 0) return; // 禁用项：不是候选，绝不提交（真 DOM 也不向 disabled 派发 click）
+      // 禁用项：不是候选，绝不提交、也绝不出现选中态（[G2]；真 DOM 也不向 disabled 派发
+      // click，这一行兜住合成的 / 键盘触发）。
+      if (index < 0) return;
+      // 回放里没有"人在选"的过程 ⇒ 点了不给选中态、不发请求（[G4]）。
+      if (state.playback || state.submitBusy) return;
       if (dialog) {
-        await submitDialogChoice(pending, index);
+        await submitDialogChoice(pending, index, button);
         return;
       }
       state.selectedOption = index;
@@ -277,13 +323,17 @@ function optionLabel(pending, choice) {
   return labels && labels[choice] ? labels[choice] : null;
 }
 
-/** 选择型弹窗：点一个选项 = **一次提交**（不经过"选中 → 再点提交"）。
+/** 选择型弹窗：点一个选项 = **一次提交**（不经过"选中 → 再点提交"）——但点下去要先有
+ *  **可见**反馈（qunying 票 04 [G1]）：`node` 就是被点的那一行，加统一的 `.is-selected`。
  *
- * 送出的仍是 `legal_actions` 里那条 `SelectOption`（`buildAction` 原样取），不手拼 Action。
- * 合成载荷 / 尚未建局时只留内部选中态（与右端动作同姿态），不发请求。
+ *  送出的仍是 `legal_actions` 里那条 `SelectOption`（`buildAction` 原样取），不手拼 Action。
+ *  合成载荷 / 尚未建局时只留内部选中态（与右端动作同姿态），不发请求。
+ *  请求结束后（成功 / 400 拒收 / 409 过期）**无条件**摘掉选中态：成功时 `applyView` 已经
+ *  重铺了新的询问（清的是脱离文档的旧节点），失败时它就是 [G3] 的回滚。
  */
-async function submitDialogChoice(pending, index) {
+async function submitDialogChoice(pending, index, node = null) {
   if (state.playback || state.submitBusy) return;
+  paintOptionSelected(node, true);
   const before = selectionSnapshot();
   state.selectedOption = index;
   state.focusCardId = null;
@@ -296,6 +346,7 @@ async function submitDialogChoice(pending, index) {
     return;
   }
   await submitAction(before);
+  clearOptionSelected();
 }
 
 /** 一次性二选一的**中文标签**（U2-04）：雌雄双股剑 / 界许褚【裸衣】。

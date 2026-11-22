@@ -152,6 +152,30 @@
 | `display_fact_values(session, cadence=…)` / `Session.sample_display(cadence=…)` | `projection.py` / `session.py` | 显示事实的采样：`Engine.run` 的 `stop_when`（每 `_step` 一次，票 19 的既有钩子）里采**便宜那一档**（`cadence="step"`），每次响应再采全部（`cadence="view"`，含整桌现算的 `distance_bonus`）。变了才追加 `{seq, scope, seat, key, value}`（`seq` = 那一刻记录流末条）。投递游标是**事实计数**（`display_seq`）。**成本纪律**：这一档是**乘批长度**的——`build_skills`（≈3.3 ms/次）与整桌距离表（≈0.3 ms/次）留在每步一档时，一次操作从 15 ms 变成 1.7 s（实测），故外观组件走定向构造器、`distance_bonus` 声明 `cadence="view"`。只对网页会话采样（`track_display=True`）。 |
 | `openAvatarAppearance(skillId)` / `closeAvatarAppearance()` | `avatar-appearance.js` | **技能外观组件**的只读入口（票 05）：技能按钮的中键（`auxclick` 的 `button === 1`）与按钮区「只查看」（左键 / 中键）都调它——开 `#t-avatar-modal`（自己的遮罩 + 关闭按钮 + ESC 三个出口），**不发动任何东西**、不改选择态、不发请求、不进 `selectionEnabled()`。 |
 
+## 「选一项」的选中态（qunying 票 04）
+
+用户 2026-11-21 实机验收「选择选项后没有高亮」的落点。**一个统一类 `.is-selected`**（定义只在
+`options.js:OPTION_SELECTED_CLASS`，样式只在 `static/style.css`），判据是**形状驱动**的
+（`SELECT_OPTION` / `option_seats` / `stepDialogKind === choice`），不认技能 id：
+
+| 面 | 渲染 / 点击落点 | 选中态怎么来的 |
+|---|---|---|
+| 牌桌小选项按钮组（`renderKind` 的 `options`） | `options.js:renderOptionButtons` | 点击 ⇒ `state.selectedOption` + 重铺；重铺时 `paintOptionSelected` 按状态画 |
+| 选择型弹窗（花色 / 牌名 / 类型，`choice`） | 同上（`dialog` 档）/ `modal.js:renderHeroCardBody` / `pending.js:renderActivationFace` | 一击即提交 ⇒ 点击当场 `paintOptionSelected(node, true)`，请求结束 `clearOptionSelected()` |
+| 选座位（`renderKind` 的 `seat`） | `table.js:seatInteraction` + `interaction.js:selectOptionSeat` | 座位态里同时带 `tsel`（既有底座）与 `is-selected`（高亮环），类全集在 `seat-view.js:SEAT_STATE_CLASSES` |
+| 单选项确认（`option-confirm`） | `options.js:renderOptionConfirm` | **不画选中态**（直提态）；[G1] 的"进行中"反馈 = `#t-options.is-submitting` 的一行「提交中…」 |
+| 多选勾选面（`multi`） | `options.js:renderMultiSelect` | 参考面，**没动**（仍是 `.sel` + ☑） |
+
+**生命周期**：点下来加上 → 提交 / 取消 / 超时 / 服务端拒收后摘掉。摘的入口只有
+`options.js:clearOptionSelected` 一处；由 `pending.js:submitLeftAction`（请求结束后）、
+`cancelOrClear`（送 Pass 之后）与 `options.js:submitDialogChoice`（一击即提交结束后）调。
+边界：置灰项 `index < 0` 既不画也不接点击（[G2]）；回放期 `state.playback` 不画、点了也不发
+请求（[G4]）；超时 / 代答走"新一视野 ⇒ `commitView` 的 `resetSelection()` + 重铺"，旧的选中
+不跟过来（[G3]）。直提态的"进行中"判据是 `state.submitBusy`（请求真的在飞），不是"点了按钮"。
+行为断言：`tests/support/ui_smoke.mjs` 的 `Q04-*`；接线断言：`tests/test_web_static.py` 的
+`test_every_pick_one_face_paints_the_same_selected_class` /
+`test_the_selected_state_is_cleared_on_submit_reject_and_never_on_disabled_or_replay`。
+
 **派生显示字段 = 前端的第四条刷新通道**（ui-live-refresh；根因与取舍见 `.scratch/ui-live-refresh/spec.md`）：
 
 网页载荷里有一批字段是**服务端每帧现算的显示字段**（`sealed_zones` / `hero_tags` / `hand_limit` /
