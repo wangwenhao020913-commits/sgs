@@ -159,7 +159,7 @@ SURFACE_MINIMUMS = {
     "queries": 9,
     "zones": 7,
     "frames": 14,
-    "steps": 5,
+    "steps": 6,
 }
 """各封闭集的下限（绊线）：数量塌下去说明枚举/导入失效，此时"没漏登记"是假绿。"""
 

@@ -12920,6 +12920,636 @@ def test_the_public_processing_slots_survive_foreign_masking_but_watched_faces_d
     assert masked["revealed"] == [], "观看授予照旧不下发"
 
 
+# ---------------------------------------------------------------------------
+# qunying 票 03a：SelectionSpec 的座位维 + 真会话的跨座位公开区面
+# ---------------------------------------------------------------------------
+
+
+def test_the_selection_spec_omits_seats_until_a_face_declares_them() -> None:
+    """票 03a §4 [G1]：``seats is None`` **不进序列化**（与 ``max_per_suit`` 同一姿态）。
+
+    ``SelectionSpec`` 随 ``SelectCardsQuery`` 落记录流；多一个 ``"seats": null`` 会让所有
+    带选牌询问的金录像字节变化。这里把缺省载荷的键集逐字钉住，并断声明了座位维时它才出现。
+    """
+    plain = SelectionSpec(zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1))
+    data = plain.model_dump(mode="json")
+    assert data == {
+        "zones": ["equip", "judge"],
+        "total": [1, 1],
+        "per_zone": [],
+        "optional": False,
+        "sequential": False,
+    }, f"缺省载荷逐字节不变（没有 seats / max_per_suit 这两个键）：{data}"
+
+    cross = SelectionSpec(zones=(Zone.EQUIP, Zone.JUDGE), total=(1, 1), seats=(0, 2))
+    assert cross.model_dump(mode="json")["seats"] == [0, 2], (
+        "声明了座位维才写它（前端 isPublicZonePick 读的就是这一格）"
+    )
+
+
+def _qianxun_play_session() -> tuple[Session, int, int]:
+    """真会话：4 人局，人类座位 = 「锋势」陆逊，停在**出牌阶段**（【谦逊】可发动）。
+
+    局面：座 0 装备区一把武器（自己也在池里）；座 1 判定区一张**转化过的**延时锦囊
+    （产物 = 乐不思蜀）；座 2 / 3 空场。返回 ``(会话, 座 0 的武器, 座 1 的转化牌)``。
+    """
+    from sgs.skills.virtual import transformed_card
+
+    pack = _context_pack()
+    sword = cards_of_type(pack, "qinggang_sword")[0]
+    converted = cards_of_type(pack, "slash")[0]
+    product_source = cards_of_type(pack, "dodge")[0]
+    hand = (cards_of_type(pack, "slash")[1],)
+    used = {sword, converted, product_source, hand[0]}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="qunying_luxun", hand=hand, equip=(sword,)),
+            SeatSpec(judge=(converted,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id not in used
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    state.virtual_judge[converted] = transformed_card(state, (product_source,), "indulgence")
+
+    session = Session(
+        pack=pack,
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", pending
+    return session, sword, converted
+
+
+def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
+    """真会话：**代价事件**（代价②）先结算 → **效果事件** → 效果②，停在 ``SELECT_CARDS``。
+
+    用户 2026-11-22 裁定第 4 条：代价与效果是两个事件 —— 代价结算完技能**再次可发动**，
+    第二次点的技能才进效果清单（两套清单各有自己的步骤）。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+
+    session, _sword, converted = _qianxun_play_session()
+    pending = session.pending
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if getattr(action, "skill_id", None) == QIANXUN
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_OPTION", pending
+    assert str(pending.skill_id).endswith(":cost")
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if action.choice == module.QIANXUN_COST_DAMAGE
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", (
+        f"代价清算之后回到出牌阶段（效果事件窗口）：{getattr(pending, 'kind', None)}"
+    )
+    # 效果事件：技能再次可发动，清单换成"选效果 + 该效果自己的步骤"。
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if getattr(action, "skill_id", None) == QIANXUN
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_OPTION", pending
+    assert str(pending.skill_id).endswith(":effect"), (
+        f"效果事件的第一问是选效果：{pending.skill_id}"
+    )
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if action.choice == module.QIANXUN_EFFECT_MOVE
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_CARDS", pending
+    return session, converted
+
+
+def test_a_real_session_reaches_the_cross_seat_qianxun_field_face() -> None:
+    """票 03a §5 的真会话读数：效果② 下发**一份**跨座位面（``spec.seats`` 非空、槽位跨两座）。
+
+    读取方逐格核：``spec.zones`` = 装备 + 判定、``spec.seats`` = 有牌的存活座位（含自己）、
+    每个槽位的 ``ref`` 带**真实座位**、牌面非空（公开区）；再把**别人座位**的那张牌交上去，
+    目的地池由服务端按反查出来的源座位算（源座位不在池里），搬完产物不丢。
+    """
+    session, converted = _session_at_the_qianxun_move_face()
+    pending = session.pending
+    payload = pending_payload(session)
+
+    assert payload["kind"] == "SELECT_CARDS"
+    spec = payload["spec"]
+    assert spec["zones"] == ["equip", "judge"], (
+        f"面 = 装备区 + 判定区（含被转化的延时锦囊）：{spec}"
+    )
+    assert spec["seats"] == [0, 1], (
+        f"seats = 有牌的存活座位（自己也在池里）：{spec.get('seats')}"
+    )
+    assert "max_per_suit" not in spec, "缺省字段照旧不进载荷"
+    slots = payload["slots"]
+    assert [
+        (slot["ref"]["seat"], slot["ref"]["zone"]) for slot in slots
+    ] == [(0, "equip"), (1, "judge")], (
+        f"槽位覆盖两个座位：{[slot['ref'] for slot in slots]}"
+    )
+    assert all(slot["card"] for slot in slots), (
+        "公开区：应答者的载荷里牌面可见（不是隐藏槽）"
+    )
+
+    # 交上**别人座位**的那张牌（面内位置 1）⇒ 下一个询问是目的地，池里没有座 1。
+    session.submit_answer(
+        next(action for action in pending.legal_actions if tuple(action.picks) == (1,))
+    )
+    destination = session.pending
+    assert destination is not None and str(destination.kind) == "SELECT_OPTION", destination
+    assert str(destination.skill_id).endswith(":to")
+    assert {str(item) for item in destination.options} == {"seat:0", "seat:2", "seat:3"}, (
+        "源座位（座 1）不列为目的地：它不是「另一名角色」"
+    )
+    assert {str(action.choice) for action in destination.legal_actions} == {"seat:0", "seat:2", "seat:3"}, (
+        "源座位由选中的那张牌反查（座 1）⇒ 它不是合法目的地"
+    )
+    session.submit_answer(
+        next(
+            action
+            for action in destination.legal_actions
+            if str(action.choice) == "seat:2"
+        )
+    )
+    state = session.engine.state
+    assert list(state.player(2).judge) == [converted], "牌搬到了座 2 的判定区"
+    assert converted not in state.player(1).judge, "源座位判定区已空"
+    assert state.virtual_judge[converted].type == "indulgence", (
+        "判定区 → 判定区的移动保持产物（乐不思蜀还是乐不思蜀）"
+    )
+
+
+def test_the_qianxun_payload_carries_the_cost_event_manifest_first() -> None:
+    """[C2][G1] 真会话载荷：第一次下发的是**代价事件**清单（选代价 + 代价③ 的两小步）。
+
+    读的是**真实产出路径**（真引擎 → 真 ``pending_payload``；候选 / 池不是手抄的）。
+    效果步骤一条都不在代价清单里；再走**真的预览端点**证明"选③ 之后光标落在选装备牌上、
+    选① 时这两步不存在"。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+
+    session, sword, _converted = _qianxun_play_session()
+    pending = session.pending
+    payload = pending_payload(session)
+    steps = payload["preactivations"][QIANXUN]
+
+    assert [step["name"] for step in steps] == ["cost", "equip", "product"], (
+        f"代价事件 = 选代价 + 代价③ 的两小步：{[s['name'] for s in steps]}"
+    )
+    assert [step["kind"] for step in steps] == ["option", "card", "option"]
+    assert steps[1]["wording"] == "代价③：选择一张装备牌（手牌 / 装备区）当作延时类锦囊的原料"
+    assert steps[2]["wording"] == "代价③：选择当作哪一种延时类锦囊（乐不思蜀 / 兵粮寸断 / 闪电）"
+    for branch_step in steps[1:]:
+        assert branch_step["pool"], f"{branch_step['name']} 应当有候选行"
+        for row in branch_step["pool"]:
+            assert row["when"][0] == module.QIANXUN_COST_EQUIP, (
+                f"分支行只挂在代价③ 上：{row['when']}"
+            )
+    equip_rows = {row["when"][0]: tuple(row["options"]) for row in steps[1]["pool"]}
+    assert equip_rows[module.QIANXUN_COST_EQUIP] == (str(sword),), (
+        f"代价③ 的原料 = 自己的装备牌：{equip_rows}"
+    )
+    assert not {"effect", "card", "to", "type"} & {step["name"] for step in steps}, (
+        "效果事件的步骤一条都不许混进代价清单（[G1] 的前半）"
+    )
+
+    registry = _registry_with(session)
+    seq = pending.seq
+    status, after_three = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_EQUIP]},
+            ],
+        },
+    )
+    assert status == 200, after_three
+    assert after_three["cursor"] == 1 and after_three["kind"] == "card", after_three
+    assert set(after_three["options"]) == {str(sword)}, after_three
+
+    status, after_equip = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_EQUIP]},
+                {"name": "equip", "values": [sword]},
+            ],
+        },
+    )
+    assert status == 200, after_equip
+    assert after_equip["cursor"] == 1 and after_equip["kind"] == "card", after_equip
+    assert after_equip["can_advance"] is True and after_equip["next"] == "product", (
+        f"选牌步填满后停在原地等确认、可以进产物步：{after_equip}"
+    )
+
+    status, editing_product = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_EQUIP]},
+                {"name": "equip", "values": [sword]},
+                {"name": "product", "values": []},
+            ],
+        },
+    )
+    assert status == 200, editing_product
+    assert editing_product["cursor"] == 2 and editing_product["kind"] == "option", (
+        editing_product
+    )
+    assert set(editing_product["options"]) == {
+        "indulgence",
+        "supply_shortage",
+        "lightning",
+    }, editing_product
+
+    status, other_cost = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
+            ],
+        },
+    )
+    assert status == 200, other_cost
+    assert other_cost["cursor"] == len(steps), (
+        f"代价② 后面没有步骤（清单已填完）：{other_cost}"
+    )
+    assert other_cost["can_submit"] is True
+
+
+def test_the_qianxun_payload_switches_to_the_effect_event_after_the_cost() -> None:
+    """[C2][G1] 代价结算完：真会话载荷换成**效果事件**清单（选效果 + 各效果自己的步骤）。
+
+    两件事在这一条里一起钉：① 清单确实换了（不是同一条静态清单变了个皮）；② 效果② 的
+    两步只在"选了②"的行里出现、效果③ 的选类型只在"选了③"的行里出现；③ 真预览端点证明
+    选① 时清单直接可提交、选② 停在选牌、选③ 停在选类型。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+
+    session, sword, converted = _qianxun_play_session()
+    pending = session.pending
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if getattr(action, "skill_id", None) == QIANXUN
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.skill_id).endswith(":cost")
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if action.choice == module.QIANXUN_COST_DAMAGE
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", (
+        f"代价结算完回到出牌阶段：{getattr(pending, 'kind', None)}"
+    )
+    payload = pending_payload(session)
+    steps = payload["preactivations"][QIANXUN]
+    assert [step["name"] for step in steps] == ["effect", "card", "to", "type"], (
+        f"效果事件 = 选效果 + ② 的两步 + ③ 的一步：{[s['name'] for s in steps]}"
+    )
+    assert [step["kind"] for step in steps] == ["option", "card", "seat", "option"], (
+        "目的地是座位步（qunying 票 09：牌桌点将），不是左下角选项列表"
+    )
+    assert steps[1]["wording"] == "在场上（任何角色的装备区 / 判定区）点选要移动的那张牌"
+    assert steps[2]["wording"] == "选择目的地角色（该区域已被废除或已有牌的，不能指定）"
+    assert steps[3]["wording"] == "选择要获得的牌的类别（基本牌 / 锦囊牌 / 装备牌）"
+    for branch_step, option in (
+        (steps[1], module.QIANXUN_EFFECT_MOVE),
+        (steps[2], module.QIANXUN_EFFECT_MOVE),
+        (steps[3], module.QIANXUN_EFFECT_GAIN),
+    ):
+        assert branch_step["pool"], f"{branch_step['name']} 应当有候选行"
+        for row in branch_step["pool"]:
+            assert row["when"][0] == option, f"{branch_step['name']} 的行只挂在 {option} 上"
+    card_rows = {row["when"][0]: tuple(row["options"]) for row in steps[1]["pool"]}
+    assert card_rows[module.QIANXUN_EFFECT_MOVE] == (str(sword), str(converted)), (
+        f"选牌步的候选 = 场上两个座位的牌：{card_rows}"
+    )
+    destination_rows = {row["when"][1]: tuple(row["options"]) for row in steps[2]["pool"]}
+    assert destination_rows == {
+        str(sword): ("seat:1", "seat:2", "seat:3"),
+        str(converted): ("seat:0", "seat:2", "seat:3"),
+    }, (
+        f"目的地池按**选中的那张牌**的源座位现算（源座位不出现）：{destination_rows}"
+    )
+    assert all(not row.get("disabled") for row in steps[2]["pool"]), (
+        "座位步没有置灰项：非法目的地不进池（旧口径的 disabled 已退场）"
+    )
+
+    registry = _registry_with(session)
+    seq = pending.seq
+    status, after_two = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
+            ],
+        },
+    )
+    assert status == 200, after_two
+    assert after_two["cursor"] == 1 and after_two["kind"] == "card", after_two
+    assert set(after_two["options"]) == {str(sword), str(converted)}, after_two
+
+    status, after_card = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
+                {"name": "card", "values": [converted]},
+            ],
+        },
+    )
+    assert status == 200, after_card
+    assert after_card["cursor"] == 1 and after_card["next"] == "to", after_card
+
+    status, editing_to = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
+                {"name": "card", "values": [converted]},
+                {"name": "to", "values": []},
+            ],
+        },
+    )
+    assert status == 200, editing_to
+    assert editing_to["cursor"] == 2 and editing_to["kind"] == "seat", editing_to
+    assert set(editing_to["options"]) == {"seat:0", "seat:2", "seat:3"}, editing_to
+    assert editing_to["can_submit"] is False
+
+    status, after_gain = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_GAIN]},
+            ],
+        },
+    )
+    assert status == 200, after_gain
+    assert after_gain["cursor"] == 3 and after_gain["kind"] == "option", after_gain
+    assert set(after_gain["options"]) == {"basic", "trick", "equipment"}, after_gain
+
+    status, other_effect = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_CARD]},
+            ],
+        },
+    )
+    assert status == 200, other_effect
+    assert other_effect["cursor"] == len(steps), (
+        f"效果① 后面没有步骤（清单已填完）：{other_effect}"
+    )
+    assert other_effect["can_submit"] is True
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 02：判定区里的**转化牌按产物显示**（投影派生 + 悬浮源牌）
+# ---------------------------------------------------------------------------
+
+_JUDGE_CARD_KEYS = (
+    "attack_range",
+    "attribute",
+    "card_id",
+    "color",
+    "description",
+    "display_name",
+    "kind",
+    "name",
+    "rank",
+    "slot",
+    "source_cards",
+    "suit",
+    "type",
+    "virtual_sources",
+)
+"""判定区一张**普通**牌面的键集（引入本票之前的形状，[G1] 的冻结判据）。"""
+
+
+def _judge_session(*, product: str | None = None) -> tuple[Session, int]:
+    """真会话：4 人局，人类 = 座 0 的陆逊，座 1 判定区里躺着 ♠6【青釭剑】（实体牌）。
+
+    ``product`` 决定 ``state.virtual_judge`` 里写什么（这是**判定区转化牌的唯一真源**，
+    写方是引擎的 ``_to_judge``）：
+
+    - ``None`` ⇒ 不写映射（判定区里没有转化牌的常态，[G1]）；
+    - ``"indulgence"`` ⇒ 转化产物【乐不思蜀】（键 = 判定区那张来源实体牌，产物继承花色 / 点数）；
+    - ``"pure"`` ⇒ **纯虚拟**产物（无来源实体牌，[G3]；今天没有生产者，留给将来的纯虚拟延时锦囊）。
+
+    返回 ``(会话, 判定区那张牌的 id)``。
+    """
+    from sgs.skills.virtual import pure_virtual_card, transformed_card
+
+    pack = _context_pack()
+    sword = cards_of_type(pack, "qinggang_sword")[0]
+    hand = (cards_of_type(pack, "slash")[0],)
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="qunying_luxun", hand=hand),
+            SeatSpec(judge=(sword,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(pack, sword, hand[0]),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    if product == "indulgence":
+        state.virtual_judge[sword] = transformed_card(state, (sword,), "indulgence")
+    elif product == "pure":
+        state.virtual_judge[sword] = pure_virtual_card(state, "indulgence")
+    session = Session(
+        pack=pack,
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+    assert session.pending is not None and str(session.pending.kind) == "PLAY_PHASE"
+    return session, sword
+
+
+def test_the_judge_payload_is_unchanged_without_converted_cards() -> None:
+    """[G1] 判定区里**没有**转化牌的座位：牌面逐字节不变（旧金录像 / UI 冒烟不受影响）。
+
+    钉法 = 冻结的键集 + 两条新键缺席：``converted`` / ``source`` 只在 ``virtual_judge`` 有
+    映射时才出现，故常态座位拿到的仍是同一份 14 键实体牌面（与引入本票之前逐字相同）。
+    """
+    session, sword = _judge_session()
+    snapshot = visible_snapshot(session)
+    faces = [card for player in snapshot["players"] for card in player["judge"]]
+    assert [card["card_id"] for card in faces] == [sword], "夹具：座 1 判定区那一张"
+    for card in faces:
+        assert tuple(sorted(card)) == _JUDGE_CARD_KEYS, (
+            f"判定区常态牌面的键集变了：{sorted(card)}"
+        )
+        assert "converted" not in card and "source" not in card
+    assert faces[0]["display_name"] == "青釭剑", "没有转化牌 ⇒ 画的仍是实体牌名"
+
+
+def test_a_converted_judge_card_shows_its_product_face_and_source() -> None:
+    """[§2.2] 判定区转化牌：缩略图读**产物**面（牌名 / 花色 / 点数），悬停源牌走 ``source``。
+
+    真会话 + 真投影：``state.virtual_judge`` 的键是判定区里那张实体牌，产物的
+    ``virtual_sources`` 才是源牌 id。身份键 ``card_id`` **不变**（选面 / 标签 / 落位动画按它
+    认牌），牌面字段换成产物，另加 ``converted`` 与 ``source``（源牌完整牌面）。
+    """
+    session, sword = _judge_session(product="indulgence")
+    state = session.engine.state
+    product = state.virtual_judge[sword]
+    assert tuple(product.virtual_sources) == (sword,), "产物记着来源实体牌（引擎的写方形状）"
+    source_ref = state.card(sword)
+
+    snapshot = visible_snapshot(session)
+    entry = next(
+        card for card in snapshot["players"][1]["judge"] if card["card_id"] == sword
+    )
+    assert entry["name"] == "乐不思蜀" and entry["display_name"] == "乐不思蜀", (
+        f"缩略图牌名 = 产物：{entry['name']} / {entry['display_name']}"
+    )
+    assert entry["type"] == "qinggang_sword" and entry["kind"] == "normal", (
+        "只覆盖判定槽真正读的 5 格牌面（name / display_name / suit / rank / color）："
+        f"type / kind 仍是那张**实体牌**的事实（converted 单独说'此槽显示产物'）：{entry}"
+    )
+    assert (entry["suit"], entry["rank"]) == (source_ref.suit, source_ref.rank), (
+        "产物继承来源牌的花色 / 点数（规则 §16.3）"
+    )
+    assert entry["converted"] is True, "新键：这是判定区里的转化牌"
+    source = entry["source"]
+    assert source is not None, "有一张来源实体牌 ⇒ source 是它的牌面（不是 null）"
+    assert (source["name"], source["display_name"]) == ("青釭剑", "青釭剑"), (
+        f"悬停读到的源牌：{source.get('name')}"
+    )
+    assert (source["suit"], source["rank"]) == (source_ref.suit, source_ref.rank)
+    assert source["card_id"] == sword, "源牌 id = 判定区里那张实体牌"
+    assert source["kind"] == "normal", "源牌是实体牌（不是再一次转化）"
+
+
+def test_a_converted_judge_card_without_a_source_card_reports_no_source() -> None:
+    """[G3] 纯虚拟产物（``virtual_sources`` 为空）⇒ ``source: null``，界面显示「无」。
+
+    今天没有生产者（纯虚拟牌置入判定区没有实体牌可放，``_to_judge`` 直接跳过），这里按
+    将来"纯虚拟延时锦囊"的载荷形状钉住读取方：**不猜**一张源牌出来。
+    """
+    session, sword = _judge_session(product="pure")
+    snapshot = visible_snapshot(session)
+    entry = next(
+        card for card in snapshot["players"][1]["judge"] if card["card_id"] == sword
+    )
+    assert entry["converted"] is True
+    assert entry["name"] == "乐不思蜀", "产物面照旧（纯虚拟牌没有花色 / 点数）"
+    assert entry["suit"] is None and entry["rank"] is None
+    assert entry["source"] is None, "没有源牌 ⇒ null（界面写「无」）"
+
+
+def test_a_moved_transformed_judge_card_keeps_its_product() -> None:
+    """[G2] 转化牌被**移动**出判定区之后，新座位仍按产物显示（映射的生死由搬牌原语管）。
+
+    走 03a / 03b 的真会话路径：效果② 把座 1 判定区那张转化牌移到座 2 的判定区。移动**保持**
+    ``virtual_judge`` 映射（进弃牌堆的清理由 ``move_card`` 负责，不在本票），故新座位的载荷
+    仍是【乐不思蜀】+ 源牌面。
+    """
+    session, converted = _session_at_the_qianxun_move_face()
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "SELECT_CARDS"
+    session.submit_answer(
+        next(action for action in pending.legal_actions if tuple(action.picks) == (1,))
+    )
+    destination = session.pending
+    assert destination is not None and str(destination.kind) == "SELECT_OPTION"
+    session.submit_answer(
+        next(
+            action
+            for action in destination.legal_actions
+            if str(action.choice) == "seat:2"
+        )
+    )
+    state = session.engine.state
+    assert converted in state.player(2).judge, "牌搬到了座 2 的判定区"
+
+    snapshot = visible_snapshot(session)
+    assert all(
+        card["card_id"] != converted for card in snapshot["players"][1]["judge"]
+    ), "源座位的判定区已空"
+    moved = next(
+        card for card in snapshot["players"][2]["judge"] if card["card_id"] == converted
+    )
+    assert moved["name"] == "乐不思蜀" and moved["converted"] is True, (
+        "移动之后仍按产物显示（映射被搬牌原语按同一张实体牌记回）"
+    )
+    assert moved["source"] is not None and moved["source"]["name"] == "闪", (
+        f"源牌跟着走：{moved.get('source')}"
+    )
+
+
 def _two_row_watch_query(pack, *, actor: int = 0, target: int = 1):
     """构造一条**两行观看手牌**形状的 ``SELECT_CARDS`` 询问（票 93 的框架面；本票不带技能）。
 
@@ -16861,3 +17491,98 @@ def test_the_need_card_keys_are_gone_from_a_real_http_payload() -> None:
     assert pending["kind"] == "DODGE", "这条断言必须落在真·需要牌窗口上（否则'没有键'不算证据）"
     assert "need_card_demand" not in pending, "票 05 删的是整键，不是置 None"
     assert "need_card_supplies" not in pending, "供给行表（渲染 + 载荷）按用户裁定一并删除"
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 11：代价事件结算完 ⇒ 效果事件自动弹出（载荷面）
+# ---------------------------------------------------------------------------
+
+
+def _qianxun_play_phase_session(hero: str = "qunying_luxun") -> Session:
+    """真会话 + 真引擎：人类座位 0 的出牌阶段（真 ``pending_payload`` 链路）。
+
+    随机建局走不到【谦逊】的代价 / 效果两个事件，故引擎换成人为局面；会话壳、真引擎、
+    ``pending_payload`` 这条读取方链路一字不换（与 :func:`_yiji_real_session` 同一手法）。
+    """
+    pack = _context_pack()
+    hand = cards_of_type(pack, "slash")[0]
+    # 座 1 装备区留一张武器：代价结算完之后效果② 的选牌步仍有候选，效果清单才存在
+    # （空场时 `manifest` 判"填不出来"、整条不下发，自动展开也就无从谈起）。
+    weapon = cards_of_type(pack, "qinggang_sword")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero=hero, hand=(hand,)), SeatSpec(equip=(weapon,))],
+        deck=deck_excluding(pack, hand, weapon),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+    return session
+
+
+def test_a_real_session_hands_the_effect_event_to_auto_start_after_the_cost() -> None:
+    """[G1][G4] 代价事件提交后，**下一份真 pending** 就带效果事件清单 + `auto_start`。
+
+    读的是生产路径：真 ``Session`` 的挂起 → ``pending_payload``（投影那一份下发载荷）。
+    提交的是客户端会拼的那个复合动作（``buildPreativationAction``：纯选项代价 ⇒
+    ``picks=[]``、``choices=[选项文本]``），不是手抄的引擎内部调用。
+    """
+    from sgs.skills.active import QIANXUN, QIANXUN_COST_DISCARD
+
+    session = _qianxun_play_phase_session()
+    query = session.pending
+    assert query is not None and query.kind == "PLAY_PHASE"
+    before = pending_payload(session)
+    assert before is not None
+    assert "auto_start" not in before, "代价事件这一问还没有要自动展开的东西"
+    cost_steps = before["preactivations"][QIANXUN]
+    assert [step["name"] for step in cost_steps] == ["cost"], (
+        f"这一问是代价事件（手牌里没有装备牌 ⇒ 代价③ 的选牌 / 选产物两步不出现）："
+        f"{[step['name'] for step in cost_steps]}"
+    )
+
+    option = next(
+        option
+        for option in cost_steps[0]["pool"][0]["options"]
+        if option == QIANXUN_COST_DISCARD
+    )
+    assert session.submit_answer(
+        ActivateSkill(
+            skill_id=QIANXUN,
+            picks=(),
+            choices=(option,),
+            answers_seq=query.seq,
+        )
+    ) is False
+
+    next_query = session.pending
+    assert next_query is not None and next_query.kind == "PLAY_PHASE", (
+        f"代价结算完的下一问仍是出牌阶段：{getattr(next_query, 'kind', None)}"
+    )
+    payload = pending_payload(session)
+    assert payload is not None
+    assert payload["auto_start"] == [QIANXUN], (
+        f"下一份载荷点名自动展开【谦逊】的效果事件：{payload.get('auto_start')}"
+    )
+    assert [step["name"] for step in payload["preactivations"][QIANXUN]] == [
+        "effect",
+        "card",
+        "to",
+        "type",
+    ], "载荷里带的是**效果事件**清单（不含代价步骤）"
+
+
+def test_the_auto_start_key_is_absent_for_a_skill_without_a_second_event() -> None:
+    """[G3] 没有第二个事件的 A 族技能：载荷里**没有** `auto_start` 这个键。
+
+    「键的缺席」是其余技能载荷逐字节不变的保证（与 ``preview`` / ``default_choice``
+    同一姿态）；它在真 pending 的真载荷上断言，而不是合成夹具。
+    """
+    session = _qianxun_play_phase_session(hero="huanggai")
+    payload = pending_payload(session)
+    assert payload is not None and payload["kind"] == "PLAY_PHASE"
+    assert "auto_start" not in payload, (
+        f"没有两个事件的技能不带自动展开键：{sorted(payload)}"
+    )

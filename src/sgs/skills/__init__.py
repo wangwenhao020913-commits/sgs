@@ -202,6 +202,7 @@ from .flow import (
     validate_flow_activation,
 )
 from .preactivation import (
+    auto_start_for,
     flow_for,
     preactivation_for,
     preactivated_skill_ids,

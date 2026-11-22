@@ -224,7 +224,12 @@ class FrameHost(StepHost, Protocol):
     def suspended(self, value: Any) -> bool: ...
 
     def selection_face(
-        self, seat: int, zones: tuple[Any, ...], *, reveal_hand: bool = False
+        self,
+        seat: int,
+        zones: tuple[Any, ...],
+        *,
+        reveal_hand: bool = False,
+        seats: tuple[int, ...] | None = None,
     ) -> tuple[tuple[Any, ...], tuple[int, ...]]: ...
 
     def move_in_frame(
@@ -311,7 +316,12 @@ class FrameHost(StepHost, Protocol):
     def suspended(self, value: Any) -> bool: ...
 
     def selection_face(
-        self, seat: int, zones: tuple[Any, ...], *, reveal_hand: bool = False
+        self,
+        seat: int,
+        zones: tuple[Any, ...],
+        *,
+        reveal_hand: bool = False,
+        seats: tuple[int, ...] | None = None,
     ) -> tuple[tuple[Any, ...], tuple[int, ...]]: ...
 
     def accepted_selection(

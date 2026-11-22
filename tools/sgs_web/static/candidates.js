@@ -153,6 +153,39 @@ function isOwnZonePick(pending) {
   return ownZoneSlotsVisible(pending);
 }
 
+/** **从场上任何人的公开区（装备 / 判定）里选牌**的牌桌步（qunying 票 03a）。
+ *
+ * 首个消费者 =【谦逊】效果②「移动场上一张牌」：面 = 有牌座位的装备区 + 判定区，故槽位
+ * 可以属于**任何**座位（含自己）。判据只读载荷形状（与 :func:`isOwnZonePick` 同一姿态：
+ * 只决定渲染路径，不裁决合法性）：
+ *
+ * - `SELECT_CARDS`，不是「提供一张 B」、不是弹窗模板（`stepDialogKind`）；
+ * - `spec.seats` 非空 = 服务端声明的座位维；**前端不解释它的语义**，只用"有没有"区分
+ *   "这是公开区面"与老口径的"应答者本人"；
+ * - 面里每一槽都是装备 / 判定区（任何座位）且牌面可见（公开区没有隐藏槽）。
+ *
+ * **与 :func:`isOwnZonePick` 结构互斥**：对方的形状要求槽位全在**应答者本人**的手牌 /
+ * 装备区，且 `spec.zones ⊆ {hand, equip}`；这里先否决 `ownZoneSlotsVisible` ⇒ 两张判据
+ * 不可能同时为真（渲染路径不会各说一套）。同理，亮牌 / 观看授予面（槽位在手牌区）也不
+ * 命中——牌面可见 ≠ 公开区。
+ */
+function isPublicZonePick(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
+  // 自己区域的直选面（手牌 / 装备）优先走 own-zone-pick：它们的槽位也可能全在自己的装备区。
+  if (ownZoneSlotsVisible(pending)) return false;
+  const seats = (pending.spec && pending.spec.seats) || [];
+  if (!seats.length) return false;
+  const slots = pending.slots || [];
+  if (!slots.length) return false;
+  return slots.every((slot) => {
+    const ref = slot && slot.ref;
+    return Boolean(ref)
+      && (ref.zone === "equip" || ref.zone === "judge")
+      && Boolean(slot.card);
+  });
+}
+
 /** 面里的牌**已经在本人手牌快照里**（= 不是"观看授予"，票 09 ②的对称兜底）。
  *
  * ``revealed`` 的语义是发给应答者的**额外**牌面；自己的手牌在 ``self_hand`` 里本来就有

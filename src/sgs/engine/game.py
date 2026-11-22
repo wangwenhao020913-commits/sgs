@@ -101,6 +101,7 @@ from sgs.skills import (
     SeatModifierKind,
     StateChange,
     advance_provider,
+    auto_start_for,
     awakening_skill_awakened,
     blocked_true_names,
     card_preactivations,
@@ -786,7 +787,12 @@ def _raw_text(response: object) -> str:
 
 
 def _activation_payload(
-    activation: Mapping[str, tuple[Any, ...]], skill_id: str, timing: Timing | None
+    activation: Mapping[str, tuple[Any, ...]],
+    skill_id: str,
+    timing: Timing | None,
+    *,
+    state: GameState | None = None,
+    owner: int | None = None,
 ) -> dict[str, Any]:
     """复合动作的帧私有载荷：``(picks, choices)`` + 归属。
 
@@ -796,9 +802,13 @@ def _activation_payload(
     不再相等；只按短名判归属会让界版的**复合动作不被摊回**、改去逐步重问（M6 票 16
     的界【仁德】第一次撞到）。流水线名在**提交那一刻**按同一份登记表解析，与执行器随后
     读到的是同一个对象。
+
+    ``state`` / ``owner``（qunying 票 10）：声明了 ``flow_resolver`` 的技能按**持有者状态**
+    现算那一份（【谦逊】的代价 / 效果是两个事件）；不传则读静态登记表，与引入本机制之前
+    逐字相同。
     """
     payload: dict[str, Any] = {**activation, "skill_id": skill_id}
-    flow = flow_for(skill_id, timing)
+    flow = flow_for(skill_id, timing, state=state, owner=owner)
     if flow is not None:
         payload["flow"] = flow.name
     return payload
@@ -2316,7 +2326,7 @@ class Engine:
         if activation is not None:
             # 归属随载荷一起走（W4-fix-2 的跨技能泄漏修复：见 `flow._activation_belongs`）。
             data["activation"] = _activation_payload(
-                activation, action.skill_id, None
+                activation, action.skill_id, None, state=self.state, owner=source
             )
         return data
 
@@ -2865,7 +2875,12 @@ class Engine:
         return None
 
     def selection_face(
-        self, seat: int, zones: tuple[Zone | ZoneRef, ...], *, reveal_hand: bool = False
+        self,
+        seat: int,
+        zones: tuple[Zone | ZoneRef, ...],
+        *,
+        reveal_hand: bool = False,
+        seats: tuple[int, ...] | None = None,
     ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
         """按 ``zones`` 给出的区（固定顺序）铺开 ``seat`` 的选择面。
 
@@ -2882,52 +2897,65 @@ class Engine:
         （【反间】把面指向发动者）。武将牌上的牌一律铺**可见槽**：它的牌面对宿主本来就是
         可见的（`PlayerView.hero_zone_cards` 的同一口径），且「星」与【谦逊】是两个互不相干
         的区，由坐标里的实例键区分，不靠调用方自觉。
+
+        ``seats``（qunying 票 03a）：**多座位 × ``zones`` 的乘积**。外层座位、内层 ``zones``
+        依 ``seats`` 的次序铺开，每个槽的 ``ref.seat`` 是自己那一座的真实座位（"从场上任何
+        人的装备区 / 判定区选一张牌"）。缺省 ``None`` = 老口径（只铺 ``seat`` 自己，输出顺序
+        与字节逐字不变）；同一个调用点既有单座位调用者的行为因此不为多座位扩宽。显式带座位
+        的 ``ZoneRef``（【反间】那种坐标）不随 ``seats`` 复制，仍只铺自己那一次——否则同一个
+        坐标会在面里重复出现。
         """
         slots: list[Slot] = []
         card_ids: list[int] = []
-        for item in zones:
-            if isinstance(item, ZoneRef):
-                ref = item if item.seat is not None else ZoneRef(item.zone, seat, item.skill_instance)
-            else:
-                ref = ZoneRef(item, seat)
-            zone = ref.zone
-            holder = ref.seat if ref.seat is not None else seat
-            player = self.state.player(holder)
-            if zone is Zone.HAND:
-                if reveal_hand:
-                    for card_id in player.hand:
+        face_seats = (seat,) if seats is None else tuple(int(item) for item in seats)
+        for index, face_seat in enumerate(face_seats):
+            for item in zones:
+                if isinstance(item, ZoneRef) and item.seat is not None:
+                    if index:
+                        continue
+                    ref = item
+                elif isinstance(item, ZoneRef):
+                    ref = ZoneRef(item.zone, face_seat, item.skill_instance)
+                else:
+                    ref = ZoneRef(item, face_seat)
+                zone = ref.zone
+                holder = ref.seat if ref.seat is not None else face_seat
+                player = self.state.player(holder)
+                if zone is Zone.HAND:
+                    if reveal_hand:
+                        for card_id in player.hand:
+                            slots.append(
+                                Slot(ref=ZoneRef(Zone.HAND, holder), card=self.state.card(card_id))
+                            )
+                            card_ids.append(card_id)
+                        continue
+                    order = list(range(len(player.hand)))
+                    self._select.shuffle(order)
+                    for hand_index in order:
+                        slots.append(Slot(ref=ZoneRef(Zone.HAND, holder), card=None))
+                        card_ids.append(player.hand[hand_index])
+                elif zone is Zone.EQUIP:
+                    for card_id in player.equip:
                         slots.append(
-                            Slot(ref=ZoneRef(Zone.HAND, holder), card=self.state.card(card_id))
+                            Slot(ref=ZoneRef(Zone.EQUIP, holder), card=self.state.card(card_id))
                         )
                         card_ids.append(card_id)
-                    continue
-                order = list(range(len(player.hand)))
-                self._select.shuffle(order)
-                for index in order:
-                    slots.append(Slot(ref=ZoneRef(Zone.HAND, holder), card=None))
-                    card_ids.append(player.hand[index])
-            elif zone is Zone.EQUIP:
-                for card_id in player.equip:
-                    slots.append(
-                        Slot(ref=ZoneRef(Zone.EQUIP, holder), card=self.state.card(card_id))
-                    )
-                    card_ids.append(card_id)
-            elif zone is Zone.JUDGE:
-                for card_id in player.judge:
-                    slots.append(
-                        Slot(ref=ZoneRef(Zone.JUDGE, holder), card=self.state.card(card_id))
-                    )
-                    card_ids.append(card_id)
-            elif zone is Zone.HERO:
-                if ref.skill_instance is None:
-                    raise ValueError("武将牌上的牌区必须给 skill_instance（星 ≠ 谦逊）")
-                # 「区还没建」读成空面（构造局面直接给武将时 `GAME_START` 的扣置没跑过；
-                # 失去技能不影响已有的区，但区本身可以不存在）——空面走既有的取消路径。
-                for card_id in self.state.hero_zone(holder, ref.skill_instance):
-                    slots.append(Slot(ref=ref, card=self.state.card(card_id)))
-                    card_ids.append(card_id)
-            else:  # pragma: no cover - 选择面只对逐座位的四个区有意义
-                raise ValueError(f"{zone.value} 不是可选择的逐座位区域")
+                elif zone is Zone.JUDGE:
+                    for card_id in player.judge:
+                        slots.append(
+                            Slot(ref=ZoneRef(Zone.JUDGE, holder), card=self.state.card(card_id))
+                        )
+                        card_ids.append(card_id)
+                elif zone is Zone.HERO:
+                    if ref.skill_instance is None:
+                        raise ValueError("武将牌上的牌区必须给 skill_instance（星 ≠ 谦逊）")
+                    # 「区还没建」读成空面（构造局面直接给武将时 `GAME_START` 的扣置没跑过；
+                    # 失去技能不影响已有的区，但区本身可以不存在）——空面走既有的取消路径。
+                    for card_id in self.state.hero_zone(holder, ref.skill_instance):
+                        slots.append(Slot(ref=ref, card=self.state.card(card_id)))
+                        card_ids.append(card_id)
+                else:  # pragma: no cover - 选择面只对逐座位的四个区有意义
+                    raise ValueError(f"{zone.value} 不是可选择的逐座位区域")
         return tuple(slots), tuple(card_ids)
 
     def shuffle_positions(self, order: list[int]) -> None:
@@ -3390,7 +3418,7 @@ class Engine:
                 # ``run_flow`` 摊回逐步答案。W4-fix-2：归属随载荷一起走——同一帧上后续
                 # 别的技能的流水线不得读它（`flow._activation_belongs`）。
                 frame.data["activation"] = _activation_payload(
-                    activation, action.skill_id, timing
+                    activation, action.skill_id, timing, state=self.state, owner=seat
                 )
         answers[answer_key] = action
         return action
@@ -6483,6 +6511,7 @@ class Engine:
             self.state, actor, kind, answers_seq=seq, dying=dying, payload=payload
         )
         preactivations: dict[str, tuple[Step, ...]] = {}
+        auto_start: tuple[str, ...] = ()
         designation_actions: tuple[UseCard, ...] = ()
         card_preactivation_manifests: dict[str, tuple[Step, ...]] = {}
         if kind is QueryKind.PLAY_PHASE:
@@ -6496,6 +6525,14 @@ class Engine:
             )
             preactivations = preactivations_for(
                 self.state, actor, offered, timing=timing
+            )
+            # qunying 票 11：前一个事件结算完、下一个事件待选 ⇒ 点名这条技能，界面直接
+            # 摊开它的清单（玩家不再点第二次技能按钮）。判据来自技能声明；**只有真有清单**
+            # 的技能才点名（标了却没有东西可展开 = 不应发生，客户端也就不会开空面）。
+            auto_start = tuple(
+                skill_id
+                for skill_id in auto_start_for(self.state, actor, offered)
+                if skill_id in preactivations
             )
             flagged = preactivated_skill_ids()
             if flagged:
@@ -6553,6 +6590,7 @@ class Engine:
                 transform_actions=internal_transform_actions,
                 designation_actions=designation_actions,
                 card_preactivations=card_preactivation_manifests,
+                auto_start=auto_start,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)

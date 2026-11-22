@@ -251,6 +251,10 @@ const state = {
   // dragNode,nodes,preview,geometry}；后四个是拖拽期的纯 DOM 引用 / 折叠几何，不进载荷。
   arrange: null,
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
+  // qunying 票 11：已经**自动展开**过的那一问（`pending.seq`）。引擎点名（`pending.auto_start`）
+  // 的清单只在第一次渲染时摊开；玩家取消之后同一份询问的轮询重绘不再顶开。换会话作废
+  // （询问序号跨局会重复），见 `session.js:commitView`。
+  preactivationAutoSeq: null,
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
   playback: null,      // 事件回放：{body, records, index, querySeat, live}
   eventDelayMs: 100,   // 回放步长（牌桌按钮切档）；缺省 0.1s **不随档位表首位走**

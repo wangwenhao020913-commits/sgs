@@ -11,12 +11,14 @@ function identityLabel(identity) {
 /** 一张卡片的节点：U1-02 起是**完整卡面**（88×124，`card-view.js` 的 `cardFaceNode`）。
  *
  * 手牌 / 处理区 / 中央舞台 / 回放页共用这一份；`static` 牌不可点（公开信息），但仍带
- * 悬停全文。置灰 / 选中 / 已选只由调用方给（手牌走 `cardFace` 的纯函数结果）。
+ * 悬停全文。置灰 / 选中 / 已选只由调用方给（手牌走 `cardFace` 的纯函数结果）；`usable`
+ * （= `face.selectable`）还决定**可点高亮** `.is-pickable`（qunying 票 08，与牌桌槽位
+ * 同一个类，样式只住 `style.css`）。
  */
 function cardChip(
   card, selected, isStatic, usable = true, onClick = null, picked = false, note = "",
 ) {
-  return cardFaceNode(card, {
+  const node = cardFaceNode(card, {
     selected,
     picked,
     static: isStatic,
@@ -24,6 +26,11 @@ function cardChip(
     note,
     onClick: onClick || (() => toggleFocus(card.card_id)),
   });
+  // qunying 票 08：自己的手牌面上**此刻能用的那张**要高亮（用户 2026-11-22 第三轮：能选择的
+  // 卡牌也要画高亮，尤其场上的）。类名与牌桌槽位的 `.is-pickable` 同一个；`usable` 就是
+  // `cardFace().selectable`，与 `.dis` 的置灰是同一判据的两个结论。置灰项 / 静态牌不加。
+  if (!isStatic && usable !== false) node.classList.add("is-pickable");
+  return node;
 }
 
 /** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；收够 `pending.count` 张后不再多收。

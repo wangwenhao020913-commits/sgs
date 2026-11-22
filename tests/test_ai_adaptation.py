@@ -441,6 +441,7 @@ def test_the_battle_display_fields_added_no_ai_read_point() -> None:
         "ArrangeQuery": ("structural",),
         "DistributeQuery": ("max_total", "per_seat_max", "seats", "skill_id"),
         "PlayPhaseQuery": (
+            "auto_start",
             "card_preactivations",
             "designation_actions",
             "preactivations",
@@ -476,8 +477,12 @@ def test_the_battle_display_fields_added_no_ai_read_point() -> None:
             "structural",
         ),
     }
-    assert sum(len(entries) for entries in table.values()) == 74, (
-        "读点总行数变了：M7 票 23 的三处显示 / 遗物列表是网页载荷字段，不许进 AI 读点表"
+    # 75 = 74 + qunying 票 11 的 ``PlayPhaseQuery.auto_start``：它**不是**网页载荷字段，而是
+    # 新增的询问字段（界面自动展开标记），必须登记（上一条"每个字段都要登记"同理）；
+    # 登记为「不读」——AI 的复合候选仍从同一份 ``preactivations`` 填表。
+    assert sum(len(entries) for entries in table.values()) == 75, (
+        "读点总行数变了：新增询问字段要先登记读点（读 / 不读都要一句理由），"
+        "网页载荷字段不许进 AI 读点表"
     )
 
     # 合成反例：真把显示字段（如 `template_name`）登记进来就必须红——它是网页载荷键，

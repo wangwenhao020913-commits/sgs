@@ -86,6 +86,7 @@ from sgs.timing import Timing
 from .descriptions import display_skill_description, skill_description
 from .display import (
     SUIT_LABELS,
+    card_display,
     card_lookup_from_query,
     card_payload,
     catalog_skill_name,
@@ -457,6 +458,59 @@ def _decorate_snapshot_card_tags(
                 _decorate_card_tags(card, state, viewer)
 
 
+def _decorate_judge_products(
+    payload: dict[str, Any], state: Any, lookup: Mapping[int, Any]
+) -> None:
+    """判定区里的**转化牌按产物显示**（qunying 票 02 §2.2）。
+
+    引擎里 :attr:`~sgs.state.GameState.virtual_judge` 只记"判定区那张实体牌 → 产物"的映射
+    （唯一写方是 :meth:`~sgs.engine.Engine._to_judge`）；产物自己的 ``virtual_sources`` 才是
+    **来源实体牌 id**（纯虚拟产物为空）。故真源就是这个映射：
+
+    - 牌面改成**产物**的：``name`` / ``display_name`` / ``suit`` / ``rank`` / ``color``
+      ——判定槽的缩略图（`seat-view.js:miniSlotNode` 的 `cardName` / `slot-suit`）读的就是
+      这几格；花色 / 点数由 :func:`~sgs.skills.virtual.transformed_card` 继承来源牌（规则
+      §16.3），这里不另算；
+    - ``converted: True``：前端据此画「转」角标（`card-view.js:cardKind`）；
+    - ``source``：**源实体牌的完整牌面**（悬停画它），无源牌 ⇒ ``None``（界面写「无」）。
+
+    **只改网页载荷**（同 ``hero_tags`` / ``hand_limit`` 的口径：整份快照每帧从状态现算，
+    不缓存、不新增 delta / 刷新通道）：不进 ``PlayerView`` / ``PlayerPublic``，``legal_actions``
+    与记录流一个字节都不动。**身份键 ``card_id`` 不变**——选面（``publicZonePickFace`` 按
+    ``card_id`` 找面内位置）、牌标签、落位动画都按它认牌。
+
+    键只在有映射时出现：没有转化牌的判定区载荷**逐字节不变**（[G1]，既有金录像 / UI 冒烟
+    依赖这一点）。``type`` / ``kind`` / ``description`` 等键仍描述那张**实体牌**（它确实是
+    实体牌，"此槽显示的是产物"这一事实由 ``converted`` 单独给）。
+    """
+    virtual = getattr(state, "virtual_judge", None) or {}
+    if not virtual:
+        return
+    for player in payload.get("players") or []:
+        for card in player.get("judge") or []:
+            if not isinstance(card, dict) or card.get("card_id") is None:
+                continue
+            product = virtual.get(int(card["card_id"]))
+            if product is None:
+                continue
+            face = product.model_dump(mode="json")
+            card.update(
+                {
+                    "name": face["name"],
+                    "display_name": card_display(product)["display_name"],
+                    "suit": face["suit"],
+                    "rank": face["rank"],
+                    "color": face["color"],
+                    "converted": True,
+                }
+            )
+            sources = tuple(getattr(product, "virtual_sources", ()) or ())
+            source = lookup.get(int(sources[0])) if sources else None
+            card["source"] = (
+                card_payload(source, lookup=lookup) if source is not None else None
+            )
+
+
 def _decorate_pending_card_tags(
     payload: dict[str, Any], state: Any, viewer: int | None
 ) -> None:
@@ -621,10 +675,11 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     # U1-04 展示契约：牌面色 / 属性 / 种类 / 来源牌 + 座位身份标签。派生在 display.py，
     # 投影只负责"哪些可见"；下发的仍然是**同一份可见快照**，不新增真源。
     # U1-02：武将块要名称 / 势力，引擎只给 id —— 武将表由接入层传进去，界面不自己翻。
+    lookup = _card_lookup(state)
     decorate_snapshot(
         payload,
         view.players,
-        lookup=_card_lookup(state),
+        lookup=lookup,
         heroes=load_hero_tables(session.pack.pack_id),
         virtual_cards=_active_virtual_cards(session.engine),
         # UI1/UI2：验明之前的【蛊惑】扣置牌**不给牌面**（处理区是全局公开区，这里按
@@ -661,6 +716,9 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         # `exclude=True`（不进记录流）⇒ 与 `hero_zones` / `hand_limit` 同姿态在这里补进
         # 网页载荷；值**原样**取自投影（不重算、不另造名单），座位卡据此叠红色禁止角标。
         player_payload["sealed_zones"] = list(player.sealed_zones)
+    # qunying 票 02：判定区里的**转化牌按产物显示**（每帧从 `state.virtual_judge` 现算，
+    # 与 `hero_tags` 同姿态只补进网页载荷；没有转化牌的座位一个键都不加）。
+    _decorate_judge_products(payload, state, lookup)
     # 牌面标签：只给**已下发的牌面**补 tags；隐藏区的牌不在载荷里，故连标签也没有。
     _decorate_snapshot_card_tags(payload, state, session.human_seat)
     # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进
@@ -3389,6 +3447,14 @@ def pending_payload(
     payload["activation_preactivations"] = _preactivation_payload(
         getattr(query, "activation_preactivations", None) or {}
     )
+    # **自动展开**（qunying 票 11）：前一个事件结算完、下一个事件待选时，引擎点名这条技能
+    # （``PlayPhaseQuery.auto_start``，``exclude=True`` 的本地面）⇒ 界面渲染时直接摊开它的
+    # 清单，玩家不必再点一次技能按钮。**键的缺席是保证**：其余技能 / 其余询问的载荷逐字节
+    # 不变（与 ``preview`` / ``default_choice`` / ``structural`` 同一姿态），读取方
+    # = ``preactivation.js:autoStartPreativation``，由 ``pending.js:renderPending`` 调用。
+    auto_start = tuple(getattr(query, "auto_start", ()) or ())
+    if auto_start:
+        payload["auto_start"] = list(auto_start)
     # **步骤预览的可用声明**（table-ux-overhaul 票 11）：这一问有"有流水线的清单"才带
     # ``"preview": true``——即 ``POST …/preview`` 对这一问真能算。前端据此决定"每次选择
     # 变化问一次后端"；**键的缺席是保证**：合成载荷 / 没有流水线的转化清单 / 旧载荷都不带

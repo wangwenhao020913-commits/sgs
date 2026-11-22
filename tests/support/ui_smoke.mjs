@@ -4248,6 +4248,74 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeOk}`);
 }
 
+/* ============ qunying 票 11：代价结算完 ⇒ 效果事件**自动弹出**（合成载荷） ============
+ *
+ * 服务端只在"前一个事件已结算、下一个事件待选"时给 `auto_start`（票价由 `tests/test_web.py`
+ * 在真 pending 上钉）；这里读界面的那一半：**不点技能按钮**，清单在渲染时直接摊开，
+ * 且同一份询问（同一 `seq`）的再次渲染不会把玩家取消掉的清单反复顶开。
+ */
+{
+  const QIANXUN_ID = "hero.qunying_luxun.qianxun";
+  const effectManifest = [
+    { name: "effect", kind: "option", zones: [], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: [
+        "qianxun_effect_card", "qianxun_effect_move", "qianxun_effect_gain",
+      ] }] },
+    { name: "card", kind: "card", zones: ["equip", "judge"], min: 1, max: 1, order: 1,
+      pool: [{ when: ["qianxun_effect_move"], options: ["21"] }], seats: [0, 1] },
+    { name: "to", kind: "seat", zones: [], min: 1, max: 1, order: 2,
+      pool: [{ when: ["qianxun_effect_move", "21"], options: ["seat:1"] }] },
+    { name: "type", kind: "option", zones: [], min: 1, max: 1, order: 3,
+      pool: [{ when: ["qianxun_effect_gain"], options: ["basic", "trick", "equipment"] }] },
+  ];
+  const view = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 977,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: QIANXUN_ID, answers_seq: 977 },
+      { kind: "EndPhase", answers_seq: 977 },
+    ],
+    preactivations: { [QIANXUN_ID]: effectManifest },
+    preactivation: [],
+    // 票 11 的服务端标记：只有窗口开着（代价已结算、效果待选）时出现。
+    auto_start: [QIANXUN_ID],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  view.skills = [{
+    skill_id: QIANXUN_ID, name: "谦逊", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: false,
+    ui: { requirement: "代价事件结算完，效果事件自动进入", convert_sources: [] },
+  }];
+  ui.state.view = view;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.state.preactivationAutoSeq = null;
+  ui.renderTable();
+  ui.renderPending(view);
+  // **一次点击都没有**：清单在渲染那一刻已经摊开（提示行说第 1/4 步、提示条仍是服务端那句）。
+  check("㉿AS1 带 auto_start 的询问**自动进入**效果事件清单（玩家没点技能按钮）",
+    !!ui.state.preactivation && ui.state.preactivation.skillId === QIANXUN_ID
+      && ui.state.preactivation.steps.length === 4
+      && ui.state.preactivation.cursor === 0
+      && /第 1\/4 步/.test($("t-target-hint").textContent)
+      && !/预发动【/.test($("t-prompt").textContent),
+    `pre=${JSON.stringify(ui.state.preactivation && ui.state.preactivation.skillId)}`
+      + ` hint="${$("t-target-hint").textContent}" prompt="${$("t-prompt").textContent}"`);
+  check("㉿AS2 自动展开的是**效果事件**清单（第一步是效果选项，不是代价选项）",
+    ui.preactivationOptions(ui.state.preactivation, 0).join(",")
+      === "qianxun_effect_card,qianxun_effect_move,qianxun_effect_gain",
+    `options=${(ui.preactivationOptions(ui.state.preactivation, 0) || []).join(",")}`);
+  // 取消一次回第一步、再取消退出本地态；随后同一份询问的轮询重绘**不再**顶开。
+  ui.cancelOrClear();
+  ui.cancelOrClear();
+  check("㉿AS3 玩家可以取消（两次取消退出本地态）",
+    ui.state.preactivation === null, `pre=${JSON.stringify(ui.state.preactivation)}`);
+  ui.renderPending(view);
+  check("㉿AS4 同一个 seq 的再次渲染不会把取消掉的清单自动顶开（只自动展开一次）",
+    ui.state.preactivation === null,
+    `pre=${JSON.stringify(ui.state.preactivation)} seq=${ui.state.preactivationAutoSeq}`);
+}
+
 /* ============ 票 17（合成局面）：窗口里的【渐营】② 提供者入口 + **一步清单** ============
  *
  * 票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）之后，② 只在**持有者自己的
@@ -9876,14 +9944,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(seat1, "equip-slot").map((slot) => attr(slot, "data-slot")).join(",")
         === "weapon,armor,horse_offense,horse_defense",
     `judge=${byClass(seat1, "judge-slot").length} equip=${byClass(seat1, "equip-slot").map((s) => attr(s, "data-slot")).join(",")}`);
-  check("U1-02h2 槽里的牌画牌名 + 花色点数；有装备时**不**显示武器/防具/攻马/防马，空槽才显示；判定槽常显；坐骑槽只花色点数（票 26）",
+  check("U1-02h2 槽里的牌画牌名 + 花色点数；有牌时不写槽名（装备自 2026-11-07、判定自 qunying 票 08），空槽才显示；坐骑槽只花色点数（票 26）",
     seat1.text().includes("八卦阵") && seat1.text().includes("闪电")
       && !seat2.text().includes("赤兔")
       && (() => {
         const slots = byClass(seat1, "equip-slot");
         const filled = slots.filter((slot) => hasClass(slot, "filled"));
         const empty = slots.filter((slot) => hasClass(slot, "empty"));
-        const judge = byClass(seat1, "judge-slot")[0];
+        const judgeFilled = byClass(seat1, "judge-slot").find((slot) => hasClass(slot, "filled"));
+        const judgeEmpty = byClass(seat1, "judge-slot").filter((slot) => hasClass(slot, "empty"));
         const horse = byClass(seat2, "equip-slot").find(
           (slot) => attr(slot, "data-slot") === "horse_offense");
         return filled.length === 1
@@ -9893,8 +9962,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
           && empty.length === 3
           && empty.every((slot) => byClass(slot, "slot-k").some(
             (label) => /武器|防具|攻马|防马/.test(label.textContent)))
-          && byClass(judge, "slot-suit").length === 1
-          && byClass(judge, "slot-k").length === 1
+          && byClass(judgeFilled, "slot-suit").length === 1
+          && byClass(judgeFilled, "slot-k").length === 0
+          && !judgeFilled.text().includes("判定")
+          && judgeEmpty.length === 2
+          && judgeEmpty.every((slot) => byClass(slot, "slot-k").some(
+            (label) => label.textContent === "判定"))
           && !!horse && hasClass(horse, "filled")
           && byClass(horse, "slot-suit").length === 1
           && byClass(horse, "slot-v").length === 0
@@ -23994,16 +24067,22 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.renderTable();
   const seat1 = seatBox(1);
   const judgeSlot = byClass(seat1, "judge-slot").find((node) => attr(node, "data-card-id"));
+  const judgeEmptySlots = byClass(seat1, "judge-slot")
+    .filter((node) => node.classList.contains("empty"));
   const equipSlot = byClass(seat1, "equip-slot").find((node) => attr(node, "data-card-id"));
-  check("U4-06e 满槽：牌名 + 花色点数；装备槽有牌时不再写槽名，判定槽仍写「判定」",
+  check("U4-06e 满槽：牌名 + 花色点数；有牌时不再写槽名（装备 / 判定，qunying 票 08），空判定槽仍写「判定」",
     !!judgeSlot && !!equipSlot
-      && judgeSlot.textContent.includes("判定")
+      && !judgeSlot.textContent.includes("判定")
+      && byClass(judgeSlot, "slot-k").length === 0
       && judgeSlot.textContent.includes("兵粮寸断")
+      && judgeEmptySlots.length === 2
+      && judgeEmptySlots.every((slot) => slot.textContent.includes("判定"))
       && equipSlot.textContent.includes("方天画戟")
       && !equipSlot.textContent.includes("武器")
       && byClass(equipSlot, "slot-suit").length === 1,
     `judge="${judgeSlot ? judgeSlot.textContent : ""}"`
-      + ` equip="${equipSlot ? equipSlot.textContent : ""}"`);
+      + ` equip="${equipSlot ? equipSlot.textContent : ""}"`
+      + ` emptyJudge=${judgeEmptySlots.length}`);
 
   // 状态复位：后面的用例不继承这里的合成视图 / 记录。
   ui.state.view = null;
@@ -34347,6 +34426,794 @@ await clickAndWait($("btn-lobby-pool"));
   ui.state.damageEvents = [];
   ui.state.lifeLossEvents = [];
   ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ qunying 票 03a：跨座位公开区选择面（public-zone-pick） ============
+ *
+ * 合成载荷与真会话同形（`Engine.selection_face(..., seats=...)` 的产物；服务端侧由
+ * `tests/test_web.py::test_a_real_session_reaches_the_cross_seat_qianxun_field_face` 钉）：
+ * `spec.seats` 非空、槽位 `ref` 属于**任何**座位的装备 / 判定区、牌面可见。界面要做的只有
+ * 三件事：走 `public-zone-pick` 渲染路径（不铺槽位块、不抢 own-zone）、把**每个座位**的
+ * 槽位接成可点、点一张即提交那一条 `SelectCards`（面内位置）。
+ */
+{
+  const pubSword = {
+    ...synthCard(4401, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal",
+  };
+  const pubArmor = {
+    ...synthCard(4402, "八卦阵"), type: "eight_diagram", slot: "armor",
+    attack_range: null, kind: "normal",
+  };
+  const pubJudge = {
+    ...synthCard(4403, "乐不思蜀"), type: "indulgence", kind: "normal",
+  };
+  const pubPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2401,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2401, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2401, picks: [1] },
+      { kind: "SelectCards", answers_seq: 2401, picks: [2] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "equip" }, card: pubSword },
+      { ref: { seat: 1, zone: "equip" }, card: pubArmor },
+      { ref: { seat: 1, zone: "judge" }, card: pubJudge },
+    ],
+    spec: { zones: ["equip", "judge"], total: [1, 1], seats: [0, 1] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "谦逊", targets: [0],
+      label: "0号位发动谦逊", requirement: "移动场上一张牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2401, picks: [0] },
+      default_label: "超时将自动选择第一张牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const pubSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261018,
+  });
+  const pubView = synthView(pubPending);
+  pubView.snapshot.players[0].equip = [pubSword];
+  pubView.snapshot.players[1].equip = [pubArmor];
+  pubView.snapshot.players[1].judge = [pubJudge];
+  ui.state.view = pubView;
+  ui.state.sessionId = pubSession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pubView);
+
+  const pubAttr = (node, name) => (node && node.getAttribute
+    ? node.getAttribute(name)
+    : undefined);
+  // 自己的座位块是常驻 `#t-self-zones`（`table.js` 搬过去的），其余座位在 `#t-seats` 里。
+  const pubSeatBox = (seat) => (Number(seat) === 0 ? $("t-self-zones") : seatBox(seat));
+  const pubSlotsOf = (seat) => byClass(pubSeatBox(seat), "mini-slot")
+    .filter((node) => pubAttr(node, "data-card-id"));
+  const pubClick = async (node) => {
+    for (const fn of node.listeners.click || []) {
+      await fn({ target: node, stopPropagation() {} });
+    }
+  };
+  const pubSettle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const pubAnswersSince = (mark) => calls.slice(mark)
+    .filter((call) => call.path.includes("/answer"));
+
+  check("U-PUB-01a 跨座位公开区面走 public-zone-pick：不铺槽位块、own-zone 不抢",
+    ui.renderKind(pubPending, pubPending.legal_actions) === "public-zone-pick"
+      && ui.isOwnZonePick(pubPending) === false
+      && $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("移动场上一张牌")
+      && $("btn-submit").disabled === true,
+    `kind=${ui.renderKind(pubPending, pubPending.legal_actions)}`
+      + ` own=${ui.isOwnZonePick(pubPending)} options=${$("t-options").children.length}`
+      + ` hint="${$("t-target-hint").textContent}"`);
+
+  const pubSeat0 = pubSlotsOf(0);
+  const pubSeat1 = pubSlotsOf(1);
+  check("U-PUB-01b 每个座位的槽位都接成可点（自己 + 别人的装备 / 判定区）",
+    pubSeat0.length === 1 && pubSeat1.length === 2
+      && pubSeat0.every((node) => node.tagName === "BUTTON" && !node.classList.contains("dis"))
+      && pubSeat1.every((node) => node.tagName === "BUTTON" && !node.classList.contains("dis")),
+    `seat0=${pubSeat0.map((n) => n.tagName)} seat1=${pubSeat1.map((n) => n.tagName)}`);
+
+  // 点**别人**判定区那张牌（面内位置 2）：恰好一条 SelectCards，原样命中候选。
+  const pubTarget = pubSeat1.find((node) => pubAttr(node, "data-zone") === "judge");
+  const beforePub = calls.length;
+  staleAnswerStatus = 400;
+  await pubClick(pubTarget);
+  await pubSettle();
+  staleAnswerStatus = null;
+  const pubAnswers = pubAnswersSince(beforePub);
+  check("U-PUB-01c 点别人判定区的一张牌 = 恰一条 SelectCards（面内位置 2）即提交",
+    pubAnswers.length === 1
+      && JSON.stringify(pubAnswers[0].body.action)
+        === JSON.stringify(pubPending.legal_actions[2]),
+    `answers=${pubAnswers.length}`
+      + ` action=${JSON.stringify(pubAnswers[0] && pubAnswers[0].body.action)}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
+/* ============ qunying 票 02：判定区转化牌**按产物显示**（+ 产物面不破公开区直选） ======
+ *
+ * 合成载荷与 `tests/test_web.py::test_a_converted_judge_card_shows_its_product_face_and_source`
+ * 钉住的服务端形状同形：判定区条目 = **产物面**（`name` / `display_name` / 花色点数）+
+ * `converted: true` + `source`（源实体牌的完整牌面；纯虚拟产物 ⇒ `null`），身份键 `card_id`
+ * 仍是判定区那张实体牌。界面要证明三件事：
+ *  1. 缩略图读产物 + 右上角「转」（`card-view.js:cardKind` 认 `converted`，不加渲染分支）；
+ *  2. 悬停画**源牌**（`#t-card-preview` 里是青釭剑，不是产物乐不思蜀）；
+ *  3. 无源牌 ⇒ 悬停写「无」，不猜一张牌；
+ * ④ 顺带复核 §2.1：快照的判定卡画产物、公开区面里的槽仍是**实体牌面**，点它照样按
+ *    `card_id` 命中面内位置并提交那一条候选（03a 的 `publicZonePickFace` 只读 `card_id`）。
+ * 服务端那一侧（何时补键 / 没有转化牌逐字节不变）由 test_web.py 的真会话断言钉。
+ */
+{
+  const qySource = {
+    ...synthCard(4601, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal", display_name: "青釭剑", attribute: "普通",
+    description: "武器，攻击范围 2。", source_cards: [],
+  };
+  const qyProduct = {
+    ...synthCard(4602, "乐不思蜀"),
+    type: "indulgence", suit: "spade", rank: 6, color: "black", kind: "normal",
+    display_name: "乐不思蜀",
+    attribute: "普通", description: "延时类锦囊。", source_cards: [],
+    converted: true, source: qySource,
+  };
+  // 纯虚拟产物（今天没有生产者，[G3] 的读取方形状）：没有源牌 ⇒ `source: null`。
+  const qyNoSource = {
+    ...synthCard(4603, "闪电"),
+    type: "lightning", suit: null, rank: null, color: null, kind: "normal",
+    display_name: "闪电", attribute: "普通", description: "延时类锦囊。",
+    source_cards: [], converted: true, source: null,
+  };
+  // 公开区面里的槽 = **实体牌面**（引擎按实体牌造 slots）——与快照里那张产物面同 card_id。
+  const qyEntity = { ...qySource, card_id: 4602 };
+  const qyPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2601,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 2601, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 1, zone: "judge" }, card: qyEntity }],
+    spec: { zones: ["equip", "judge"], total: [1, 1], seats: [1] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "谦逊", targets: [0],
+      label: "0号位发动谦逊", requirement: "移动场上一张牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2601, picks: [0] },
+      default_label: "超时将自动选择第一张牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const qySession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261122,
+  });
+  const qyView = synthView(qyPending);
+  qyView.snapshot.players[1].judge = [qyProduct];
+  qyView.snapshot.players[2].judge = [qyNoSource];
+  ui.state.view = qyView;
+  ui.state.sessionId = qySession.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(qyView);
+
+  const qyAttr = (node, name) => (node && node.getAttribute
+    ? node.getAttribute(name)
+    : undefined);
+  // 自己的座位块是常驻 `#t-self-zones`（`table.js` 搬过去的），其余座位在 `#t-seats` 里。
+  const qySeatBox = (seat) => (Number(seat) === 0 ? $("t-self-zones") : seatBox(seat));
+  const qyJudgeSlots = (seat) => byClass(qySeatBox(seat), "mini-slot")
+    .filter((node) => qyAttr(node, "data-zone") === "judge" && qyAttr(node, "data-card-id"));
+  const qyFirst = (node, name) => byClass(node, name)[0] || null;
+  const qyHover = (node) => {
+    for (const fn of node.listeners.mouseenter || []) fn({ clientX: 20, clientY: 20 });
+    return $("t-card-preview");
+  };
+  const qyPreviewText = (preview) => (preview && preview.text ? preview.text() : "")
+    .replace(/\s+/g, " ").trim();
+
+  const qySlot = qyJudgeSlots(1)[0];
+  const qyBadge = qyFirst(qySlot, "slot-trans");
+  const qyReading = qySlot
+    ? `${qyFirst(qySlot, "slot-suit") ? qyFirst(qySlot, "slot-suit").textContent : ""}`
+      + `${qyFirst(qySlot, "slot-v") ? qyFirst(qySlot, "slot-v").textContent : ""}`
+    : "(无判定卡)";
+  check("U-QY02-a 判定区转化牌缩略图读**产物**：牌名 + 花色点数 + 「转」角标",
+    Boolean(qySlot) && qyReading === "♠6乐不思蜀"
+      && Boolean(qyBadge) && qyBadge.textContent === "转",
+    `reading="${qyReading}" badge=${qyBadge ? qyBadge.textContent : "(无)"}`);
+
+  const qyPreview = qyHover(qySlot);
+  const qyPreviewName = qyFirst(qyPreview, "cname");
+  check("U-QY02-b 悬停画**源牌**（青釭剑），不是产物（乐不思蜀）",
+    Boolean(qyPreview) && qyPreview.hidden !== true
+      && Boolean(qyPreviewName) && qyPreviewName.textContent === "青釭剑"
+      && !qyPreviewText(qyPreview).includes("乐不思蜀"),
+    `hover="${qyPreviewText(qyPreview)}"`);
+
+  const qyBareSlot = qyJudgeSlots(2)[0];
+  const qyBarePreview = qyHover(qyBareSlot);
+  const qyBareNote = qyFirst(qyBarePreview, "card-preview-note");
+  check("U-QY02-c 无源牌的纯虚拟产物 ⇒ 悬停写「无」，不猜一张牌",
+    Boolean(qyBareSlot)
+      && Boolean(qyBareNote) && qyBareNote.textContent === "源牌：无"
+      && !qyFirst(qyBarePreview, "cname")
+      && qyFirst(qyBareSlot, "slot-v").textContent === "闪电",
+    `note="${qyBareNote ? qyBareNote.textContent : "(无)"}"`
+      + ` name="${qyFirst(qyBareSlot, "slot-v") ? qyFirst(qyBareSlot, "slot-v").textContent : ""}"`);
+
+  // ④ §2.1 复核：快照画产物、槽位是实体牌面 ⇒ 按 card_id 命中同一张，点一下提交面内位置 0。
+  const qyBefore = calls.length;
+  staleAnswerStatus = 400;
+  for (const fn of (qySlot && qySlot.listeners.click) || []) {
+    await fn({ target: qySlot, stopPropagation() {} });
+  }
+  for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const qyAnswers = calls.slice(qyBefore)
+    .filter((call) => call.path.includes("/answer"));
+  check("U-QY02-d 产物面不破公开区直选：点判定槽 = 恰一条 SelectCards（面内位置 0）",
+    qyAnswers.length === 1
+      && JSON.stringify(qyAnswers[0].body.action)
+        === JSON.stringify(qyPending.legal_actions[0]),
+    `answers=${qyAnswers.length}`
+      + ` action=${JSON.stringify(qyAnswers[0] && qyAnswers[0].body.action)}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
+/* ============ qunying 票 03b：预发动清单的**分支步骤**（FlowBranch） ============
+ *
+ * 合成载荷与 `flow.manifest` 的下发形状同形：选代价 → 选效果 →（**只在效果② 下**）在场上
+ * 点一张牌 → 在牌桌上点目的地座位（qunying 票 09：非法目的地**不进池** ⇒ 没有高亮、
+ * 点不动，而不是"列出来画灰"）。界面要证明四件事：
+ *  1. 清单能**吃下带分支的清单**（行按前序答案给）而不抛错；
+ *  2. 选① 时效果② 的行**匹配不到** ⇒ 这一步没有候选（界面不替服务端发明候选）；
+ *  3. 选② 后两步依次出现：选牌步的候选只有效果② 那几行、目的地步只有池内座位可点；
+ *  4. 填完拼出的复合动作与逐问同形：`picks` = 牌 id、`choices` = 代价 / 效果 / 目的地。
+ * 服务端那一侧（清单怎么渲染、预览怎么跳过分支）由 `tests/test_web.py` 的真会话断言钉。
+ */
+{
+  const branchSword = {
+    ...synthCard(4501, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal",
+  };
+  const branchJudge = {
+    ...synthCard(4502, "乐不思蜀"), type: "indulgence", kind: "normal",
+  };
+  const costWhen = ["qianxun_cost_damage", "qianxun_effect_move"];
+  // qunying 票 09：目的地是**座位步**（牌桌点将）。池 = 合法目的地；池外座位（座 2，
+  // 该槽位已有牌）**不进池** ⇒ 界面不画高亮、也不接 click（旧口径的"列出来画灰"退场）。
+  // 判据仍只读服务端下发的 `Step.kind` / `StepPool.options`，不认技能 id。
+  const manifest = [
+    { name: "cost", kind: "option", zones: [], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["qianxun_cost_damage"] }] },
+    { name: "effect", kind: "option", zones: [], min: 1, max: 1, order: 1,
+      pool: [{ when: [], options: ["qianxun_effect_card", "qianxun_effect_move"] }] },
+    // 只有效果② 有分支行：选① 时下面这一步**匹配不到任何行**（= 这一步不存在）。
+    { name: "card", kind: "card", zones: ["equip", "judge"], min: 1, max: 1, order: 2,
+      pool: [{ when: costWhen, options: ["4501", "4502"] }] },
+    // 座 2 的武器槽已有牌 / 座 3 区域被废除：两座都不进池（不是列出来画灰）。
+    { name: "to", kind: "seat", zones: [], min: 1, max: 1, order: 2,
+      pool: [{ when: [...costWhen, "4502"], options: ["seat:1"] }] },
+  ];
+  const branchPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 2501,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 2501 }],
+    preactivations: { "hero.demo.flowbranch": manifest },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  };
+  const branchView = synthView(branchPending);
+  branchView.skills = [{
+    skill_id: "hero.demo.flowbranch", name: "分叉", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "分叉演示", convert_sources: [] },
+  }];
+  branchView.snapshot.players[0].equip = [branchSword];
+  branchView.snapshot.players[1].judge = [branchJudge];
+  ui.state.view = branchView;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(branchView);
+
+  const optionButton = (text) => Array.from($("t-options").children)
+    .find((node) => node.textContent === text);
+  // 选项步的中文标签住 `options.js:OPTION_LABELS`（界面只读那一份）。
+  const COST_LABEL = "②受到一点无来源的火焰伤害";
+  const EFFECT_CARD_LABEL = "①视为使用一张基本牌或普通锦囊牌";
+  const EFFECT_MOVE_LABEL = "②移动场上一张牌";
+  const branchSkill = Array.from($("t-skills").children)
+    .find((node) => node.getAttribute("data-skill-id") === "hero.demo.flowbranch");
+  clickButton(branchSkill);
+  check("U-BRANCH-01 带分支的清单能进预发动（4 步；分支行不喂给第一步）",
+    !!ui.state.preactivation && ui.state.preactivation.steps.length === 4
+      && ui.state.preactivation.cursor === 0
+      && (ui.preactivationOptions(ui.state.preactivation, 0) || []).join(",")
+        === "qianxun_cost_damage",
+    `steps=${ui.state.preactivation && ui.state.preactivation.steps.length}`
+      + ` cursor=${ui.state.preactivation && ui.state.preactivation.cursor}`
+      + ` labels=${JSON.stringify(Array.from($("t-options").children).map((n) => n.textContent))}`);
+  check("U-BRANCH-01b 选代价那一步铺成提示区按钮（标签 = `OPTION_LABELS` 的中文）",
+    setEquals(Array.from($("t-options").children).map((n) => n.textContent), [COST_LABEL]),
+    JSON.stringify(Array.from($("t-options").children).map((n) => n.textContent)));
+
+  clickButton(optionButton(COST_LABEL));
+  clickButton(optionButton(EFFECT_CARD_LABEL));
+  check("U-BRANCH-02 选① 时效果② 的分支行**匹配不到** ⇒ 这一步没有候选（不发明候选）",
+    ui.state.preactivation.cursor === 2
+      && ui.preactivationOptions(ui.state.preactivation, 2) === null,
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` options=${JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 2))}`);
+
+  clickButton($("btn-cancel"));  // 取消 = 回第一步（清空答案）
+  clickButton(optionButton(COST_LABEL));
+  clickButton(optionButton(EFFECT_MOVE_LABEL));
+  check("U-BRANCH-03 选② 后出现「在场上选一张牌」：候选只有效果② 那几行",
+    ui.state.preactivation.cursor === 2
+      && setEquals(ui.preactivationOptions(ui.state.preactivation, 2), ["4501", "4502"]),
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` options=${JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 2))}`);
+
+  const branchJudgeSlot = byClass(seatBox(1), "mini-slot")
+    .find((node) => node.getAttribute("data-card-id") === "4502");
+  check("U-BRANCH-04 别人判定区的那张牌接成可点（跨座位直选，不铺左下角面板）",
+    !!branchJudgeSlot && branchJudgeSlot.tagName === "BUTTON"
+      && !branchJudgeSlot.classList.contains("dis")
+      && $("t-options").children.length === 0,
+    `slot=${branchJudgeSlot && branchJudgeSlot.tagName}`
+      + ` options=${$("t-options").children.length}`);
+  clickButton(branchJudgeSlot);
+  check("U-BRANCH-05 点一张 = 写进选牌步的本地答案并进「选目的地」",
+    ui.state.preactivation.cursor === 3
+      && JSON.stringify(ui.state.preactivation.answers[2].values) === "[4502]",
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` answers=${JSON.stringify(ui.state.preactivation.answers[2])}`);
+
+  // 目的地 = 牌桌点将（qunying 票 09）：池内座位 = 高亮 + 可点；池外 = 没有高亮、没有 click。
+  // 高亮类是座位面上既有的 `.targetable`（与手选目标 / 座位多选同一套语言），不新造类。
+  const legalSeatBox = seatBox(1);
+  const illegalSeatBox = seatBox(2);
+  check("U-BRANCH-06 目的地座位步：只有池内座位画高亮、可点；池外座位没有高亮也没有 click",
+    !!legalSeatBox && legalSeatBox.classList.contains("targetable")
+      && (legalSeatBox.listeners.click || []).length > 0
+      && !!illegalSeatBox
+      && !illegalSeatBox.classList.contains("targetable")
+      && !illegalSeatBox.classList.contains("tsel")
+      && !illegalSeatBox.classList.contains("is-selected")
+      && (illegalSeatBox.listeners.click || []).length === 0,
+    `legal=${!!legalSeatBox && legalSeatBox.classList.contains("targetable")}`
+      + ` illegal=${!!illegalSeatBox && illegalSeatBox.className}`
+      + ` illegalClick=${!!illegalSeatBox && (illegalSeatBox.listeners.click || []).length}`);
+  check("U-BRANCH-06b 座位步**不铺**左下角选项列表（目的地不走选项按钮）",
+    $("t-options").children.length === 0,
+    `options=${$("t-options").children.length}`);
+  if (legalSeatBox) {
+    (legalSeatBox.listeners.click || []).forEach((fn) => fn({ target: legalSeatBox }));
+  }
+  const branchAction = ui.buildAction();
+  check("U-BRANCH-07 填完 = 复合动作（picks = 选中的牌、choices = 代价 / 效果 / 目的地）",
+    !!branchAction && branchAction.kind === "ActivateSkill"
+      && branchAction.skill_id === "hero.demo.flowbranch"
+      && JSON.stringify(branchAction.picks) === "[4502]"
+      && JSON.stringify(branchAction.choices)
+        === '["qianxun_cost_damage","qianxun_effect_move","seat:1"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(branchAction));
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ qunying 票 04：每个「选一项」的面都要有**可见的选中态** ============
+ *
+ * 用户 2026-11-21 实机验收：「现在很多选项界面我选择一个选项后没有高亮」。判据是
+ * **形状驱动**的（不认技能 id）：凡是 `SELECT_OPTION` 的单选面，点下去给那一条加统一的
+ * `.is-selected`；提交 / 取消 / 超时 / 服务端拒收后摘掉；置灰项点了不变；回放里不出现。
+ * 五条渲染路径逐条过（牌桌小选项按钮组 / 选座位 / 单选项确认 / 选择型弹窗 / 多选参考面）。
+ *
+ * 载荷与真服务端响应同形（判据是界面读法）；服务端那一侧不需要新字段——本段只读既有的
+ * `legal_actions` / `option_seats` / `option_labels` / `options` / `disabled` / `seq`
+ * （"没有新字段"的一半由 `tests/test_web_static.py` 的静态守卫钉住）。
+ */
+{
+  const selectedNodes = () => Array.from($("t-options").children)
+    .filter((node) => node.classList.contains("is-selected"));
+  const tableOptionPending = (seq, choices) => ({
+    kind: "SELECT_OPTION", actor: 0, seq,
+    prompt: "请选择一项。",
+    legal_actions: [
+      ...choices.map((choice) => ({ kind: "SelectOption", choice, answers_seq: seq })),
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  const showAsk = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+
+  /* ---- ① 牌桌小选项按钮组（`renderKind` 的 `options` 档）---- */
+  const optionView = synthView(tableOptionPending(9901, ["discard_one", "draw_one"]));
+  showAsk(optionView);
+  check("Q04-01 牌桌小选项按钮组：没点之前一项都不带选中态",
+    $("t-options").children.length === 2 && selectedNodes().length === 0,
+    `选项=${JSON.stringify(Array.from($("t-options").children).map((n) => n.textContent))}`);
+
+  let optionRows = Array.from($("t-options").children);
+  (optionRows[0].listeners.click || [])[0]({ target: optionRows[0] });
+  optionRows = Array.from($("t-options").children);
+  check("Q04-02 点第一项 ⇒ 它画成 `.is-selected`（同一面只有这一条）",
+    optionRows.length === 2
+      && optionRows[0].classList.contains("is-selected")
+      && !optionRows[1].classList.contains("is-selected"),
+    `类=${optionRows.map((n) => n.className).join(" | ")}`);
+
+  (optionRows[1].listeners.click || [])[0]({ target: optionRows[1] });
+  optionRows = Array.from($("t-options").children);
+  check("Q04-03 换点第二项 ⇒ 选中态跟着走（第一项摘掉、第二项画上）",
+    !optionRows[0].classList.contains("is-selected")
+      && optionRows[1].classList.contains("is-selected"),
+    `类=${optionRows.map((n) => n.className).join(" | ")}`);
+
+  ui.clearSelection();
+  check("Q04-04 取消 / 清空选择 ⇒ 选中态消失（不留在过期的面上）",
+    selectedNodes().length === 0
+      && !Array.from($("t-options").children).some((n) => n.classList.contains("is-selected")),
+    `仍选中=${selectedNodes().length}`);
+
+  /* ---- [G2] 置灰项：不可点、也绝不出现选中态 ----
+   * `discard_one` 属于 `OPTION_PAIRS` 里的一对 ⇒ 另一项 `draw_one` 会被画成置灰（它不在
+   * 候选里）。点它既不改本地选择，也不加类。 */
+  const greyView = synthView(tableOptionPending(9902, ["discard_one", "extra"]));
+  showAsk(greyView);
+  const greyRow = Array.from($("t-options").children).find((node) => node.disabled === true);
+  (greyRow.listeners.click || [])[0]({ target: greyRow });
+  check("Q04-05 [G2] 置灰项点了：不变、不加选中态、不改本地选择",
+    !!greyRow && greyRow.disabled === true
+      && !greyRow.classList.contains("is-selected")
+      && ui.state.selectedOption === null,
+    `置灰项="${greyRow && greyRow.textContent}" disabled=${greyRow && greyRow.disabled} `
+      + `类=${greyRow && greyRow.className} selectedOption=${ui.state.selectedOption}`);
+
+  /* ---- [G3] 超时兜底：服务端代答 ⇒ 新的一视野到达，选中态不跟过来 ---- */
+  const timedOutView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9903,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9903 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  ui.applyViewRaw({ ...timedOutView, cursor: 9903, log_seq: 0, records: [] });
+  ui.flushPlayback();
+  check("Q04-06 [G3] 超时 / 代答后的新一视野 ⇒ 选中态回滚（旧面的选中不跟过来）",
+    selectedNodes().length === 0,
+    `仍选中=${selectedNodes().length}`);
+
+  /* ---- ② 选座位（`renderKind` 的 `seat` 档）：选中武将加高亮环 ---- */
+  const seatAsk = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 9904,
+    prompt: "请选择一名角色。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 9904 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 9904 },
+      { kind: "Pass", answers_seq: 9904 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: null,
+  });
+  showAsk(seatAsk);
+  check("Q04-07 选座位面：未点时没有「已选」高亮（只有可指定态）",
+    ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions) === "seat"
+      && !seatBox(2).classList.contains("is-selected"),
+    `kind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)} 类=${seatBox(2).className}`);
+  (seatBox(2).listeners.click || [])[0]({ target: seatBox(2) });
+  check("Q04-08 点场上武将 ⇒ 该座位带统一的 `.is-selected`（高亮环）",
+    seatBox(2).classList.contains("is-selected")
+      && !seatBox(1).classList.contains("is-selected")
+      && ui.state.selectedOption === 1,
+    `seat2 类=${seatBox(2).className} seat1 类=${seatBox(1).className} selectedOption=${ui.state.selectedOption}`);
+
+  /* ---- ③ 单选项确认（`isSingleOptionalOption` ⇒ `option-confirm`）：[G1] 进行中反馈 ---- */
+  const confirmView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 9905,
+    prompt: "是否继续？",
+    legal_actions: [
+      { kind: "SelectOption", choice: "keep", answers_seq: 9905 },
+      { kind: "Pass", answers_seq: 9905 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  showAsk(confirmView);
+  check("Q04-09 单选项确认是直提态：不铺选项按钮 ⇒ 也不需要选中态",
+    ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions) === "option-confirm"
+      && $("t-options").children.length === 0
+      && selectedNodes().length === 0,
+    `kind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)} 选项=${$("t-options").children.length}`);
+
+  // 直提态点「提交」= 当场发请求：请求在飞期间询问容器挂 `is-submitting`（一行「提交中…」），
+  // 结束后摘掉。服务端拒收（400）顺便验 [G3]：不得停在过期的选择上。
+  ui.state.sessionId = "smoke-qunying-04";
+  const beforeConfirmCalls = calls.length;
+  staleAnswerStatus = 400;
+  const confirmRequest = ui.submitLeftAction();
+  const inFlight = $("t-options").classList.contains("is-submitting");
+  await confirmRequest;
+  staleAnswerStatus = null;
+  const confirmAnswers = calls.slice(beforeConfirmCalls).filter((call) => call.path.includes("/answer"));
+  check("Q04-10 [G1] 直提态点提交：请求在飞时询问面挂上「提交中…」，结束后摘掉",
+    confirmAnswers.length === 1
+      && inFlight === true
+      && !$("t-options").classList.contains("is-submitting"),
+    `answers=${confirmAnswers.length} inFlight=${inFlight} `
+      + `after=${$("t-options").classList.contains("is-submitting")}`);
+  check("Q04-10b [G3] 服务端拒收后：选中态回滚、页脚留下拒绝原因",
+    selectedNodes().length === 0 && /提交被拒/.test($("t-choice").textContent),
+    `仍选中=${selectedNodes().length} 页脚="${$("t-choice").textContent}"`);
+
+  /* ---- ④ 选择型弹窗（花色 / 牌名 / 类型；`modal.js:stepDialogKind` 的 `choice`）----
+   * 一击即提交：点下去要先有**可见**反馈，请求结束再摘（成功 / 拒收都摘）。 */
+  const choiceAsk = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 9906,
+    prompt: "请选择一种牌的类型。",
+    legal_actions: ["basic", "trick", "equip"].map((choice) => ({
+      kind: "SelectOption", choice, answers_seq: 9906,
+    })),
+    option_labels: {
+      basic: { name: "基本牌", symbol: "", color: "black" },
+      trick: { name: "锦囊牌", symbol: "", color: "black" },
+      equip: { name: "装备牌", symbol: "", color: "black" },
+    },
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  ui.state.sessionId = "smoke-qunying-04";
+  showAsk(choiceAsk);
+  const choiceRows = Array.from($("t-options").children);
+  staleAnswerStatus = 400;
+  const beforeChoiceCalls = calls.length;
+  const choiceSettle = (choiceRows[1].listeners.click || [])[0]({ target: choiceRows[1] });
+  const choiceMarked = choiceRows[1].classList.contains("is-selected");
+  await choiceSettle;
+  staleAnswerStatus = null;
+  const choiceAnswers = calls.slice(beforeChoiceCalls).filter((call) => call.path.includes("/answer"));
+  check("Q04-11 选择型弹窗（牌名 / 类型）：点下去立刻画 `.is-selected`，提交结束后摘掉",
+    ui.stepDialogKind(choiceAsk.pending) === "choice"
+      && choiceRows.length === 3
+      && choiceMarked === true
+      && choiceRows[1].classList.contains("is-selected") === false
+      && choiceAnswers.length === 1,
+    `kind=${ui.stepDialogKind(choiceAsk.pending)} marked=${choiceMarked} `
+      + `after=${choiceRows[1].classList.contains("is-selected")} answers=${choiceAnswers.length}`);
+  ui.state.sessionId = null;
+
+  /* ---- [G4] 回放：没有"人在选"的过程 ⇒ 不出现选中态、点了也不发请求 ---- */
+  ui.state.playback = { records: [], index: 0 };
+  ui.state.sessionId = "smoke-qunying-04";
+  const replayAsk = synthView(tableOptionPending(9907, ["discard_one", "draw_one"]));
+  showAsk(replayAsk);
+  const replayRows = Array.from($("t-options").children);
+  const replayBefore = calls.length;
+  (replayRows[0].listeners.click || [])[0]({ target: replayRows[0] });
+  check("Q04-12 [G4] 回放里不出现选中态：不画、点了也不发请求",
+    selectedNodes().length === 0 && calls.length === replayBefore,
+    `仍选中=${selectedNodes().length} calls=${calls.length - replayBefore}`);
+  ui.state.playback = null;
+  ui.state.sessionId = null;
+
+  /* ---- ⑤ 多选参考面：既有勾选态**一个字不改**（本票只借它的做法）---- */
+  const multiAsk = synthView({
+    kind: "SELECT_OPTIONS", actor: 0, seq: 9908,
+    prompt: "请勾选至多两项。", options: ["甲", "乙"], disabled: [], min_selected: 0,
+    max_selected: 2,
+    legal_actions: [{ kind: "SelectOptions", answers_seq: 9908, choices: [] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  showAsk(multiAsk);
+  const multiRow = Array.from($("t-options").children)[0];
+  (multiRow.listeners.click || [])[0]({ target: multiRow });
+  const multiAfter = Array.from($("t-options").children)[0];
+  check("Q04-13 多选勾选面（参考面）仍是 `.sel` + ☑，没有被本票的选中态改掉",
+    multiAfter.classList.contains("sel") && /☑/.test(multiAfter.textContent)
+      && !multiAfter.classList.contains("is-selected"),
+    `类=${multiAfter.className} 文案="${multiAfter.textContent}"`);
+
+  // 收尾：清回"没有会话"。
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.playback = null;
+  ui.resetSelection();
+}
+
+/* ============ qunying 票 08：判定槽去「判定」+ 可选项高亮（用户 2026-11-22 第三轮） =====
+ *
+ * 两条都是**渲染口径**，直接喂与真会话同形的合成视图（服务端零改动，只读既有键）：
+ *  1. 有牌的判定槽不画「判定」（用户原文：「现在"转"太挤了看不清」）——缩略图只剩产物
+ *     牌名 + 花色点数 + 「转」；空判定槽照旧写「判定」。
+ *  2. 此刻能点的牌高亮 `.is-pickable`：牌桌槽位（跨座位公开区直选面）与自己的手牌
+ *     用**同一个类**（样式只住 `style.css` 一处）；点不动的仍 `.dis`、**不带**高亮；
+ *     无询问 / 回放一律不高亮（[G2] / [G3]）。
+ */
+{
+  const q08Has = (node, name) => hasClassText(node, name);
+  const q08Attr = (node, name) => (node && node.getAttribute ? node.getAttribute(name) : undefined);
+  const q08ZoneBox = (seat) => (Number(seat) === 0 ? $("t-self-zones") : seatBox(seat));
+  const q08HandChip = (cardId) => Array.from($("t-hand").children)
+    .find((chip) => q08Attr(chip, "data-card-id") === String(cardId)) || null;
+  const q08SlotOf = (seat, zone, cardId) => byClass(q08ZoneBox(seat), "mini-slot").find(
+    (slot) => q08Attr(slot, "data-zone") === zone
+      && q08Attr(slot, "data-card-id") === String(cardId)) || null;
+  const q08PickableCount = () => [0, 1, 2].reduce(
+    (total, seat) => total + byClass(q08ZoneBox(seat), "is-pickable").length,
+    0,
+  ) + byClass($("t-hand"), "is-pickable").length;
+
+  /* ---- ① 有牌判定槽不画「判定」；场上可点的槽位高亮、未提供的槽位置灰 ---- */
+  const q08Source = {
+    ...synthCard(4804, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal", display_name: "青釭剑", attribute: "普通",
+    description: "武器，攻击范围 2。", source_cards: [],
+  };
+  // 判定区的**转化牌**（qunying 票 02 的产物面）：用户那条报障就发生在这一格上。
+  const q08Judge = {
+    ...synthCard(4801, "乐不思蜀"), type: "indulgence", kind: "normal",
+    display_name: "乐不思蜀", attribute: "普通", description: "延时类锦囊。",
+    source_cards: [], converted: true, source: q08Source,
+  };
+  const q08Sword = {
+    ...synthCard(4802, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal",
+  };
+  const q08Armor = {
+    ...synthCard(4803, "八卦阵"), type: "eight_diagram", slot: "armor",
+    attack_range: null, kind: "normal",
+  };
+  const q08PubPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 4801,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 4801, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    // 只提供**武器**那一张：同区的防具与判定区的牌照常画出来，但此刻点不动。
+    slots: [{ ref: { seat: 1, zone: "equip" }, card: q08Sword }],
+    spec: { zones: ["equip", "judge"], total: [1, 1], seats: [1] },
+    revealed: null, dialog: null, harvest: null, reveal: null,
+    context: {
+      actor: 0, name: "谦逊", targets: [0],
+      label: "0号位发动谦逊", requirement: "移动场上一张牌", skill_hints: [],
+    },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 4801, picks: [0] },
+      default_label: "超时将自动选择第一张牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const q08PubView = synthView(q08PubPending);
+  q08PubView.snapshot.players[1].equip = [q08Sword, q08Armor];
+  q08PubView.snapshot.players[1].judge = [q08Judge];
+  ui.state.view = q08PubView;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(q08PubView);
+
+  const q08JudgeSlot = q08SlotOf(1, "judge", 4801);
+  const q08JudgeEmpty = byClass(seatBox(1), "judge-slot").filter((slot) => q08Has(slot, "empty"));
+  check("Q08-01 有牌判定槽不画「判定」（产物牌名 + 花色点数 + 「转」还在）；空判定槽照旧写「判定」",
+    !!q08JudgeSlot
+      && q08Has(q08JudgeSlot, "filled")
+      && byClass(q08JudgeSlot, "slot-k").length === 0
+      && !q08JudgeSlot.textContent.includes("判定")
+      && byClass(q08JudgeSlot, "slot-v").length === 1
+      && byClass(q08JudgeSlot, "slot-v")[0].textContent === "乐不思蜀"
+      && byClass(q08JudgeSlot, "slot-suit").length === 1
+      && byClass(q08JudgeSlot, "slot-trans").length === 1
+      && q08JudgeEmpty.length === 2
+      && q08JudgeEmpty.every((slot) => byClass(slot, "slot-k")
+        .some((label) => label.textContent === "判定")),
+    `filled="${q08JudgeSlot ? q08JudgeSlot.textContent : "(无)"}"`
+      + ` k=${q08JudgeSlot ? byClass(q08JudgeSlot, "slot-k").length : "-"}`
+      + ` trans=${q08JudgeSlot ? byClass(q08JudgeSlot, "slot-trans").length : "-"}`
+      + ` empty=${q08JudgeEmpty.length}`);
+
+  const q08SwordSlot = q08SlotOf(1, "equip", 4802);
+  const q08ArmorSlot = q08SlotOf(1, "equip", 4803);
+  check("Q08-02 [G2] 场上此刻可点的槽位带 is-pickable；同区没被提供的牌 / 判定区的牌仍 .dis、不带高亮",
+    !!q08SwordSlot && !!q08ArmorSlot
+      && q08SwordSlot.tagName === "BUTTON"
+      && q08Has(q08SwordSlot, "is-pickable")
+      && !q08Has(q08SwordSlot, "dis")
+      && q08Has(q08ArmorSlot, "dis")
+      && !q08Has(q08ArmorSlot, "is-pickable")
+      && q08Has(q08JudgeSlot, "dis")
+      && !q08Has(q08JudgeSlot, "is-pickable"),
+    `sword=${q08SwordSlot ? q08SwordSlot.className : "(无)"}`
+      + ` armor=${q08ArmorSlot ? q08ArmorSlot.className : "(无)"}`
+      + ` judge=${q08JudgeSlot ? q08JudgeSlot.className : "(无)"}`);
+
+  /* ---- ② 自己的手牌面：可选的那张高亮、用不出的那张照旧置灰 ---- */
+  const q08Slash = synthCard(4811, "杀");
+  const q08Dodge = { ...synthCard(4812, "闪"), type: "dodge" };
+  const q08HandPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 4811,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 4811, card: q08Slash, targets: [1] },
+      { kind: "EndPhase", answers_seq: 4811 },
+    ],
+    candidate_index: {
+      "4811": { card: q08Slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context: null,
+  };
+  const q08HandView = synthView(q08HandPending);
+  q08HandView.snapshot.self_hand = [q08Slash, q08Dodge];
+  ui.state.view = q08HandView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(q08HandView);
+  const q08SlashChip = q08HandChip(4811);
+  const q08DodgeChip = q08HandChip(4812);
+  check("Q08-03 自己的手牌：此刻能用的那张带 is-pickable，用不出的那张仍 .dis、不带高亮",
+    !!q08SlashChip && !!q08DodgeChip
+      && q08Has(q08SlashChip, "is-pickable")
+      && !q08Has(q08SlashChip, "dis")
+      && q08Has(q08DodgeChip, "dis")
+      && !q08Has(q08DodgeChip, "is-pickable"),
+    `slash=${q08SlashChip ? q08SlashChip.className : "(无)"}`
+      + ` dodge=${q08DodgeChip ? q08DodgeChip.className : "(无)"}`);
+
+  /* ---- ③ [G3] 没有询问：牌桌 / 手牌一个 is-pickable 都没有 ---- */
+  ui.state.view = synthView(null);
+  ui.resetSelection();
+  ui.renderTable();
+  check("Q08-04 [G3] 无询问（非选择面）不高亮：牌桌与手牌一个 is-pickable 都没有",
+    q08PickableCount() === 0,
+    `is-pickable=${q08PickableCount()}`);
+
+  /* ---- ④ [G3] 回放：pending 收起 + 手牌面恒不可点 ⇒ 同样不高亮 ---- */
+  ui.state.view = q08HandView;
+  ui.state.playback = { records: [], index: 0 };
+  ui.state.liveView = synthView(null);
+  ui.resetSelection();
+  ui.renderTable();
+  check("Q08-05 [G3] 回放里不高亮：pending 与手牌可点态都收起（is-pickable 0 个）",
+    q08PickableCount() === 0,
+    `is-pickable=${q08PickableCount()}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.playback = null;
+  ui.state.liveView = null;
   ui.resetSelection();
 }
 

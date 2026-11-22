@@ -186,6 +186,13 @@ class SelectionSpec(_FrozenModel):
     组合），不是界面层的灰显——界面读同一个字段把"同花色的其余牌"置灰。缺省 ``None``
     **不进序列化**（与 ``StepPool.max`` 同姿态）：``SelectionSpec`` 随 ``SelectCardsQuery``
     落记录流，多一个 ``"max_per_suit": null`` 会让所有带选牌询问的金录像字节变化。
+
+    ``seats``（qunying 票 03a 的加法）：选择面铺**哪些座位**的区（``None`` = 老口径"应答者
+    本人"）。同一份面可以有多个座位（"从场上任何人的装备区 / 判定区选一张牌"）——槽位自己的
+    ``ref.seat`` 带真实座位，故这个字段只声明**面覆盖了谁**：引擎的铺面口
+    （``Engine.selection_face(..., seats=...)``）与前端"这是公开区直选面"
+    （``candidates.js:isPublicZonePick``）读同一格。与 ``max_per_suit`` 同一姿态，缺省
+    ``None`` **不进序列化**：既有载荷 / 金录像逐字节不变。
     """
 
     zones: tuple[Zone, ...]
@@ -194,12 +201,15 @@ class SelectionSpec(_FrozenModel):
     optional: bool = False
     sequential: bool = False
     max_per_suit: int | None = None
+    seats: tuple[int, ...] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)
         if data.get("max_per_suit") is None:
             data.pop("max_per_suit", None)
+        if data.get("seats") is None:
+            data.pop("seats", None)
         return data
 
 
@@ -1083,6 +1093,19 @@ class PlayPhaseQuery(_QueryBase):
     （``card.type``；同名两张借刀同形），步骤 = 两个 ``name="seat"`` 的选座位步
     （第二步按 ``when="seat:A"`` 分列 Bn 子池）。**不进记录流**（``exclude``），
     02a 只在 query 侧下发；投影载荷在 02b 接。
+    """
+
+    auto_start: tuple[str, ...] = Field(default=(), exclude=True)
+    """**自动展开预发动清单**的技能 id（qunying 票 11）。
+
+    前一个事件已结算、下一个事件待选时（【谦逊】：代价事件结算完、效果事件待选），这条
+    技能此刻的清单应当**直接摊开**、玩家不必再点一次技能按钮。判据来自技能声明
+    （``ActiveSkill.auto_start`` → :func:`sgs.skills.preactivation.auto_start_for`），
+    引擎只在"这条技能确实有清单"时点名它；空元组 = 没有要自动展开的（其余询问 / 其余
+    技能因此一字不改）。**不进记录流**（``exclude``）：清单由状态重新渲染，落盘只是冗余，
+    既有 Golden Replay 逐字节不变；接入层在
+    :func:`sgs_web.projection.pending_payload` 里显式下发 ``auto_start`` 键，**为空时不发**
+    （键的缺席是保证）。
     """
 
 

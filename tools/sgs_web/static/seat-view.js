@@ -32,6 +32,8 @@ const SEAT_STATE_CLASSES = [
   "turn",
   "targetable",
   "tsel",
+  // qunying 票 04：五条「选一项」的渲染路径**共用**的选中类（座位面就是它）。
+  "is-selected",
   "req",
   "chained",
   "wine",
@@ -283,11 +285,47 @@ function equipSlotLayout(cards) {
   return slots;
 }
 
+/** 跨座位公开区面（qunying 票 03a）上这张槽位牌的派生：`{selectable, selected, picked, slotIndex}`。
+ *
+ * 判据只看载荷形状（`candidates.js:isPublicZonePick` 已经判过这一步是公开区面），
+ * 槽位序号 = 这张实体牌在 `pending.slots` 里的位置；点它 = 提交那一条 `SelectCards`。
+ * 不在这里裁决合法性（候选仍由 `legal_actions` 给）。
+ */
+function publicZonePickFace(pending, card) {
+  const slots = (pending && pending.slots) || [];
+  const slotIndex = slots.findIndex(
+    (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
+  );
+  return {
+    selectable: slotIndex >= 0,
+    selected: false,
+    picked: slotIndex >= 0 && state.picks.includes(slotIndex),
+    slotIndex,
+  };
+}
+
+/** 判定 / 装备槽的悬停内容：常规牌画自己；**判定区的转化牌**（qunying 票 02）画**源牌**。
+ *
+ * 服务端把判定区条目按产物下发（`name` / 花色点数 = 产物），另一格 `source` 才是源实体牌的
+ * 完整牌面（没有源牌 ⇒ `null`）——缩略图读产物、悬停读源牌。纯虚拟产物没有源牌，写「无」；
+ * 不去猜一张牌出来。`showCardPreviewNote` 与卡面预览共用同一层（`#t-card-preview`）。
+ */
+function showSlotCardPreview(card, event) {
+  if (card && card.converted) {
+    if (card.source) showCardPreview([card.source], event);
+    else showCardPreviewNote("源牌：无", event);
+    return;
+  }
+  showCardPreview([card], event);
+}
+
 /** 一个判定 / 装备槽：空槽画暗色占位；有牌画**简略牌面**（牌名 + 花色点数）+
  *  跟随鼠标的常规卡面预览（用户 2026-11-07）。
  *
- *  - 槽名：判定槽**常显**（窄槽读不出"这是判定区"）；装备槽**只在空槽**显示
- *    （武器 / 防具 / 攻马 / 防马），有装备时让位给牌面；
+ *  - 槽名**只画在空槽**：判定槽写「判定」（窄槽读不出"这是判定区"）、装备槽写
+ *    武器 / 防具 / 攻马 / 防马。有牌时都让位给牌面——判定槽自 qunying 票 08 起也
+ *    不再写「判定」：用户 2026-11-22 第三轮实机口径「已有判定牌的判定槽，不显示
+ *    "判定"二字，现在"转"太挤了看不清」；
  *  - 有牌：牌名（窄槽折行，见 `style.css`）+ 花色点数（单源 / 实体牌才有）；
  *    **两个坐骑槽例外**（票 26，用户 2026-11-17 实机口径）：不画牌名，只画花色点数，
  *    并画出**本侧**的距离读数（攻马槽 = 负向合计 / 防马槽 = 正向合计；两侧不抵消，0 不画）；
@@ -295,8 +333,13 @@ function equipSlotLayout(cards) {
  *  - 悬停：`#t-card-preview` 里画 `cardFaceNode` 的**常规卡面**并跟随鼠标；原生的
  *    `title` 去掉（同一条信息只留一个读法）。
  *
- *  ``interactive`` 只在**本人**的"提供一张 B / 预发动"面里为真（票 14 / W4-1）：
- *  槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
+ *  ``interactive`` 在三种面里为真：**本人**的"提供一张 B / 预发动"（票 14 / W4-1）、
+ *  以及**跨座位公开区直选**（qunying 票 03a——任何座位的装备 / 判定槽都可点，点它 =
+ *  点那张牌）。判据全部读载荷形状 / 清单声明，其余窗口保持静态。
+ *
+ *  可点的槽（``face.selectable``）加 ``is-pickable`` 高亮、点不动的照旧 ``dis`` 置灰
+ *  （qunying 票 08，用户 2026-11-22 第三轮：场上能点的牌不做高亮很容易漏看）。两个类
+ *  互斥，判据仍是那份 ``cardFace`` / ``publicZonePickFace`` 的派生——不认技能 id。
  */
 function miniSlotNode(options) {
   const { zone, slot, sealKey, card, interactive, ctx, distanceBonus = 0 } = options;
@@ -312,8 +355,9 @@ function miniSlotNode(options) {
   const label = document.createElement("span");
   label.className = "slot-k";
   label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
-  // 判定槽常显槽名；装备槽只在空槽显示（有装备时不写武器 / 防具 / 攻马 / 防马）。
-  if (judge || !card) node.appendChild(label);
+  // 槽名只画在**空槽**（装备槽历来如此；判定槽自 qunying 票 08 起也如此——有牌时不写
+  // 「判定」，给产物牌名 + 花色点数 + 「转」让出那一格）。
+  if (!card) node.appendChild(label);
   if (!card) {
     // 空坐骑槽也要显示"全局数"：飞影 +1 落防马区、马术 −1 落攻马区（无花色点数）。
     if (mount && distanceBonus) node.appendChild(distanceBonusNode(distanceBonus));
@@ -348,19 +392,32 @@ function miniSlotNode(options) {
     node.appendChild(distanceBonusNode(distanceBonus));
   }
   // 悬停 = 常规卡面预览（标签 / 转化 / 虚拟都在 `cardFaceNode` 里画），跟随鼠标。
-  node.addEventListener("mouseenter", (event) => showCardPreview([card], event));
+  node.addEventListener("mouseenter", (event) => showSlotCardPreview(card, event));
   node.addEventListener("mousemove", (event) => moveCardPreview(event));
   node.addEventListener("mouseleave", () => hideCardPreview());
   if (interactive) {
-    const face = cardFace(ctx.pendingNow, card);
+    // 跨座位公开区的面不走 `cardFace`：那张分派表服务的是"自己区域 / 预发动 / 手选"，
+    // 公开区的槽位由面自己的 `slots`（面内位置）回答"点的是哪一张"。
+    const publicPick = isPublicZonePick(ctx.pendingNow);
+    const face = publicPick
+      ? publicZonePickFace(ctx.pendingNow, card)
+      : cardFace(ctx.pendingNow, card);
     if (face.selected) node.classList.add("sel");
     if (face.picked) node.classList.add("picked");
-    if (!face.selectable) node.classList.add("dis");
+    // 「此刻点不点得动」只有这份派生（`cardFace` / `publicZonePickFace`）：可点 ⇒
+    // `.is-pickable`（手牌的面走同一个类，样式只住 `style.css`），点不动 ⇒ `.dis`。
+    // 两个类互斥——置灰项绝不高亮（qunying 票 08 [G2]）。
+    if (face.selectable) node.classList.add("is-pickable");
+    else node.classList.add("dis");
     // 票 12：源牌级置灰要说清"为什么点不动"（槽位的常规悬停是卡面预览，不会读 title，
     // 故只在有说明时补这一格——正常槽位仍不挂原生 title）。
     if (face.note) node.setAttribute("title", face.note);
     node.onclick = (event) => {
       if (event && event.stopPropagation) event.stopPropagation();
+      if (publicPick) {
+        submitPublicZonePick(ctx.pendingNow, face.slotIndex);
+        return;
+      }
       activateCard(ctx.pendingNow, card, face);
     };
   }
@@ -534,8 +591,11 @@ function sideBlockRows(player, ctx) {
     && Boolean(isProvide(ctx.pendingNow) || state.preactivation);
   // 「自己区域内选牌」也把装备区接成可点（铁骑 / 结姻 / 贯石斧等）：手牌本来就是
   // 牌桌表面，装备槽此前只在"提供一张 B / 预发动"时才接点击。判据仍是载荷形状。
+  // qunying 票 03a：跨座位公开区面与 own-zone 面并列——那个面里**任何座位**的装备 / 判定
+  // 槽都要能点（见下面的 `publicPick`），这里的 ownSeat 闸只服务自己的区域。
+  const publicPick = isPublicZonePick(ctx.pendingNow);
   const equipPick = ownSeat
-    && isOwnZonePick(ctx.pendingNow)
+    && (isOwnZonePick(ctx.pendingNow) || publicPick)
     && ownPickHasEquip(ctx.pendingNow);
   // **改判窗口也接装备区**（2026-11-08 实机报障：鬼道 / 鬼才点不了装备区的牌）：
   // 改判窗口是 `RESPOND` 的**手选面**（`isHandPick`），候选区 = 手牌 ∪ 装备区
@@ -564,7 +624,9 @@ function sideBlockRows(player, ctx) {
     const slotNode = miniSlotNode({
       ...layout,
       card: layout.card,
-      interactive: baseInteractive || preactivationPick("judge", layout.card),
+      interactive: baseInteractive
+        || preactivationPick("judge", layout.card)
+        || publicPick,
       ctx,
     });
     // 逐槽一个角标（三个判定槽各画一个；判定行本身不再画）。
@@ -593,7 +655,8 @@ function sideBlockRows(player, ctx) {
       card: layout.card,
       interactive: baseInteractive || equipPick
         || equipCardPick(layout.card)
-        || preactivationPick("equip", layout.card),
+        || preactivationPick("equip", layout.card)
+        || publicPick,
       distanceBonus,
       ctx,
     });

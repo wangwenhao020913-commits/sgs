@@ -32,6 +32,7 @@ from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
 from sgs.skills.flow import (
     Arrange,
     DeckTopArrange,
+    FlowBranch,
     FixedSplit,
     PickCards,
     PickOption,
@@ -50,6 +51,7 @@ from sgs.state import (
     ActivateSkill,
     ArrangeCards,
     ArrangeContext,
+    GameState,
     FrameKind,
     MoveReason,
     Pass,
@@ -1941,3 +1943,533 @@ def test_preview_step_clears_can_advance_and_can_submit_when_the_pool_needs_a_fr
     assert preview.cursor == 0, "光标仍停在这一步（玩家还在它上面）"
     assert preview.can_advance is False, "没有候选却说'能推进'= 自相矛盾"
     assert preview.can_submit is False, "没有候选却说'能提交'= 自相矛盾"
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 03b：按前序选项分叉的步骤（FlowBranch）
+# ---------------------------------------------------------------------------
+#
+# FlowBranch 是**步骤的组合子**：清单渲染时按分支给行（`StepPool.when` 的前缀 = 前序
+# 答案），执行器 / 校验器 / 预览三处按同一条规则（`flow._branch_steps`）展开。本节的
+# 合成流水线刻意长得像【谦逊】——选项步 → 选项步 → 分支（选牌 → 选项）——好让四处读的
+# 是同一份声明。
+#
+# 契约（票面 §2 / §7）：
+#   - 执行器：跑到 FlowBranch 时按**前序答案**展开，子步当作后续步骤继续跑；未选中的分支
+#     一个询问都不发、也不产生"取消"语义；`prefilled` 照常在**子步**上被消费。
+#   - 校验器：分支答案只在该选项被选中时被要求；未选中分支的答案 fail-closed（多余）。
+#   - 清单：分支子步按分支给行，`when` 前缀 = 该选项文本；未选中分支的行不出现。
+#   - 预览：按已选前序答案解析分支；指错分支的子步按"这一步此刻不存在"处理（跳过）。
+
+
+def _branch_flow(*, name: str = "branch_demo") -> SkillFlow:
+    """``choice`` 选 ``"two"`` 时多出两步（选牌 → 目的地），选 ``"one"`` 时到此为止。"""
+    return SkillFlow(
+        name=name,
+        steps=(
+            PickOption(options=("one", "two"), optional=False, key="choice"),
+            FlowBranch(
+                key="choice",
+                branches={
+                    "one": (),
+                    "two": (
+                        PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+                        PickOption(options=("seat:1",), optional=False, key="to"),
+                    ),
+                },
+            ),
+        ),
+        effect=lambda host, frame, answers: None,
+    )
+
+
+def _branch_state() -> tuple[GameState, int, int]:
+    """两座：座 0 一张手牌（分支的选牌面）；座 1 一张手牌（不会被选中）。"""
+    own = _cards("slash")[0]
+    theirs = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(own,)), SeatSpec(hand=(theirs,))],
+        deck=_deck_excluding(own, theirs),
+        turn_seat=0,
+    )
+    return state, own, theirs
+
+
+class _BranchHost:
+    """最小的执行器宿主：选牌 / 选项按脚本答，记录每一次询问（位置 + 名字）。"""
+
+    def __init__(self, state: GameState, *, selections=(), options=()) -> None:
+        self.state = state
+        self._selections = list(selections)
+        self._options = list(options)
+        self.asks: list[tuple[str, object]] = []
+        self.specs: list[object] = []
+
+    @staticmethod
+    def suspended(value) -> bool:
+        return value == "SUSPEND"
+
+    @staticmethod
+    def accepted_selection(frame, *, owner, key):
+        del frame, owner, key
+        return None
+
+    @staticmethod
+    def accepted_option(frame, *, skill_id, actor):
+        del frame, skill_id, actor
+        return None
+
+    def selection_face(self, seat, zones, *, reveal_hand=False, seats=None):
+        del reveal_hand
+        slots, card_ids = [], []
+        for face_seat in ((seat,) if seats is None else tuple(seats)):
+            for zone in zones:
+                for card_id in self.state.zone(ZoneRef(zone, face_seat)):
+                    slots.append(
+                        Slot(ref=ZoneRef(zone, face_seat), card=self.state.card(card_id))
+                    )
+                    card_ids.append(card_id)
+        return tuple(slots), tuple(card_ids)
+
+    def ask_selection(
+        self, frame, *, owner, key, actor, timing, spec, build_face,
+        revealed=(), ask_when_empty=False, face=None, provide_type=None,
+    ):
+        del revealed, ask_when_empty, provide_type
+        slots, card_ids = build_face() if face is None else face
+        self.specs.append(spec)
+        self.asks.append(("selection", owner, key, tuple(spec.seats or ())))
+        picked = self._selections.pop(0)
+        return tuple(card_ids[position] for position in picked)
+
+    def ask_option(self, frame, actor, timing, *, skill_id, options, optional=False, **kwargs):
+        del frame, actor, timing, optional, kwargs
+        self.asks.append(("option", skill_id, tuple(options)))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(choice=self._options.pop(0))
+
+
+def test_a_branch_must_be_the_last_step_and_key_a_prior_option_step():
+    """声明错误在**构造期**炸掉（与"步骤 key 两两不同"同一条纪律）。"""
+    branch = FlowBranch(key="choice", branches={"two": (PickCards(zones=(Zone.HAND,), lo=1, hi=1),)})
+    with pytest.raises(ValueError, match="最后"):
+        SkillFlow(
+            name="branch_not_last",
+            steps=(PickOption(options=("one", "two"), key="choice"), branch,
+                   PickOption(options=("x",), key="after")),
+            effect=lambda host, frame, answers: None,
+        )
+    with pytest.raises(ValueError, match="PickOption"):
+        SkillFlow(
+            name="branch_missing_key",
+            steps=(PickOption(options=("one",), key="other"), FlowBranch(key="choice", branches={"one": ()})),
+            effect=lambda host, frame, answers: None,
+        )
+    with pytest.raises(ValueError, match="嵌套"):
+        SkillFlow(
+            name="branch_nested",
+            steps=(
+                PickOption(options=("one",), key="choice"),
+                FlowBranch(
+                    key="choice",
+                    branches={"one": (FlowBranch(key="choice", branches={"one": ()}),)},
+                ),
+            ),
+            effect=lambda host, frame, answers: None,
+        )
+
+
+def test_a_branch_key_must_be_unique_across_the_whole_flow():
+    """分支子步的 ``key`` 与顶层步共用 ``answers`` 字典 ⇒ 全流水线唯一。"""
+    with pytest.raises(ValueError, match="两两不同"):
+        SkillFlow(
+            name="branch_duplicate_key",
+            steps=(
+                PickOption(options=("one", "two"), key="card"),
+                FlowBranch(
+                    key="card",
+                    branches={"two": (PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),)},
+                ),
+            ),
+            effect=lambda host, frame, answers: None,
+        )
+
+
+def test_the_executor_expands_the_branch_of_the_prior_answer():
+    """选 ``two`` ⇒ 子步的两次询问都发；选 ``one`` ⇒ **一次都不发**（也不取消整条流水线）。"""
+    seen: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        seen["answers"] = dict(answers)
+
+    state, own, _theirs = _branch_state()
+
+    flow = _branch_flow(name="branch_exec_two")
+    flow = SkillFlow(name=flow.name, steps=flow.steps, effect=effect)
+    host = _BranchHost(state, selections=[(0,)], options=["two", "seat:1"])
+    run_flow(host, _Frame(source=0), flow)
+    assert [ask[0] for ask in host.asks] == ["option", "selection", "option"], (
+        f"选项 → 分支选牌 → 分支选项：{[ask[0] for ask in host.asks]}"
+    )
+    assert host.asks[1][3] == (), "单座位面不带 seats（老口径逐字不变）"
+    assert seen["answers"] == {
+        "choice": "two",
+        "card": (own,),
+        "to": "seat:1",
+    }, seen["answers"]
+
+    host = _BranchHost(state, options=["one"])
+    run_flow(host, _Frame(source=0), flow)
+    assert [ask[0] for ask in host.asks] == ["option"], "未选中的分支一个询问都不发"
+    assert seen["answers"] == {"choice": "one"}, seen["answers"]
+
+
+def test_the_executor_consumes_prefilled_branch_answers():
+    """复合动作的 ``picks`` / ``choices`` 摊回**分支子步**（否则清单里选好的两步会被重问）。"""
+    state, own, _theirs = _branch_state()
+    seen: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        seen["answers"] = dict(answers)
+
+    flow = SkillFlow(name="branch_exec_prefilled", steps=_branch_flow().steps, effect=effect)
+    host = _BranchHost(state)
+    frame = _Frame(
+        source=0,
+        activation={"flow": flow.name, "picks": (own,), "choices": ("two", "seat:1")},
+    )
+    run_flow(host, frame, flow)
+    assert host.asks == [], "预填的答案一条询问都不发"
+    assert seen["answers"] == {"choice": "two", "card": (own,), "to": "seat:1"}, seen["answers"]
+
+
+def test_the_validator_requires_only_the_selected_branch_and_rejects_the_other():
+    """分支答案只在该选项被选中时被要求；未选中分支的答案必须 fail-closed。"""
+    state, own, _theirs = _branch_state()
+    flow = _branch_flow(name="branch_validate")
+
+    def check(picks, choices):
+        return validate_flow_activation(
+            flow, state, 0, tuple(picks), tuple(choices), frame=_Frame(source=0)
+        )
+
+    assert check((own,), ("two", "seat:1")) is None
+    assert check((), ("one",)) is None, "未选中分支时不要求分支答案"
+    assert check((own,), ("one",)) is not None, "未选中分支却带了分支的 picks ⇒ 拒收"
+    assert check((), ("two",)) is not None, "选中分支却缺选牌答案 ⇒ 拒收"
+    assert check((), ("two", "seat:1")) is not None, "选中分支却缺 picks ⇒ 拒收"
+    assert check((own,), ("two",)) is not None, "选中分支却缺目的地 ⇒ 拒收"
+
+
+def test_the_manifest_keys_branch_steps_by_the_branch_option():
+    """清单按分支给行：分支子步的 ``when`` 前缀 = 该选项文本；未选中分支的行不出现。"""
+    state, own, _theirs = _branch_state()
+
+    def effect(host, frame, answers):
+        return None
+
+    flow = SkillFlow(name="branch_manifest", steps=_branch_flow().steps, effect=effect)
+    steps = manifest(flow, state, 0)
+
+    assert [step.name for step in steps] == ["choice", "card", "to"], (
+        f"两个顶层步 + 分支的两步：{[step.name for step in steps]}"
+    )
+    assert [step.order for step in steps] == [0, 1, 1], (
+        "分支子步的 order 指回 FlowBranch 那一步（询问位置由它派生）"
+    )
+    card_step, to_step = steps[1], steps[2]
+    assert card_step.kind == "card" and to_step.kind == "option"
+    assert {tuple(row.when) for row in card_step.pool} == {("two",)}, (
+        f"分支行只按 two 给（one 的行不出现）：{[tuple(row.when) for row in card_step.pool]}"
+    )
+    assert {tuple(row.options) for row in card_step.pool} == {(str(own),)}
+    assert {tuple(row.when) for row in to_step.pool} == {("two", str(own))}
+    assert {tuple(row.options) for row in to_step.pool} == {("seat:1",)}
+
+
+def test_the_manifest_skips_a_branch_whose_option_is_not_offered():
+    """分支的选项此刻不可选（``options`` 回调里没有它）⇒ 那个分支的行一步都不出现。"""
+    state, _own, _theirs = _branch_state()
+
+    def effect(host, frame, answers):
+        return None
+
+    flow = SkillFlow(
+        name="branch_manifest_unreachable",
+        steps=(
+            PickOption(options=("one",), optional=False, key="choice"),
+            FlowBranch(
+                key="choice",
+                branches={"two": (PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),)},
+            ),
+        ),
+        effect=effect,
+    )
+    assert [step.name for step in manifest(flow, state, 0)] == ["choice"]
+
+
+def test_the_preview_skips_branch_steps_that_are_not_in_the_selected_branch():
+    """指错分支时按"这一步此刻不存在"处理：光标越过它，``can_submit`` 反映真清单。"""
+    state, own, _theirs = _branch_state()
+
+    def effect(host, frame, answers):
+        return None
+
+    flow = SkillFlow(name="branch_preview", steps=_branch_flow().steps, effect=effect)
+    steps = manifest(flow, state, 0)
+
+    wrong = preview_step(flow, state, 0, [("choice", ("one",))], steps=steps)
+    assert wrong.cursor == len(steps), "one 没有分支步 ⇒ 整条清单已填完"
+    assert wrong.name is None and wrong.next is None
+    assert wrong.can_submit is True
+
+    first = preview_step(flow, state, 0, [("choice", ("two",))], steps=steps)
+    assert first.cursor == 1 and first.name == "card", (
+        f"选 two 后光标停在那一步：cursor={first.cursor} name={first.name}"
+    )
+    assert first.options == (str(own),)
+    assert first.can_advance is False, "选牌步还没填"
+
+    second = preview_step(
+        flow, state, 0, [("choice", ("two",)), ("card", (own,))], steps=steps
+    )
+    assert second.name == "card" and second.can_advance is True, (
+        "选牌步填满后停在原地等确认（既有规则），但可以进下一步"
+    )
+    assert second.next == "to"
+
+    editing = preview_step(
+        flow,
+        state,
+        0,
+        [("choice", ("two",)), ("card", (own,)), ("to", ())],
+        steps=steps,
+    )
+    assert editing.cursor == 2 and editing.name == "to"
+    assert editing.options == ("seat:1",)
+    assert editing.next is None
+    assert editing.can_submit is False
+
+    done = preview_step(
+        flow,
+        state,
+        0,
+        [("choice", ("two",)), ("card", (own,)), ("to", ("seat:1",))],
+        steps=steps,
+    )
+    assert done.cursor == len(steps) and done.can_submit is True
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 03b：``PickCards.seats``（跨座位公开区的选牌步骤）
+# ---------------------------------------------------------------------------
+#
+# 03a 已经把"多座位 × 多个区"落到 `Engine.selection_face(..., seats=...)`；本票把**步骤**
+# 那一侧补上座位维（`PickCards.seats`），并让四个读取方读**同一份**解析结果：
+# 铺面 / 执行器、``hi=None`` 的上限、清单候选（`_card_options`）、校验器与预览。
+# 首个消费者 =【谦逊】效果② 的"在场上直选一张牌"。
+
+
+def _multi_seat_state() -> tuple[GameState, int, int]:
+    """座 0 装备区一把武器、座 1 判定区一张【乐不思蜀】、座 2 空场。"""
+    sword = _cards("qinggang_sword")[0]
+    judge = _cards("indulgence")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(sword,)), SeatSpec(judge=(judge,)), SeatSpec()],
+        deck=_deck_excluding(sword, judge),
+        turn_seat=0,
+    )
+    return state, sword, judge
+
+
+def _multi_seat_flow(*, hi: int | None = 1, name: str = "multi_seat_cards") -> SkillFlow:
+    return SkillFlow(
+        name=name,
+        steps=(
+            PickCards(
+                zones=(Zone.EQUIP, Zone.JUDGE),
+                lo=1,
+                hi=hi,
+                optional=False,
+                key="card",
+                seats=lambda state, frame, owner, answers: (0, 1),
+            ),
+        ),
+        effect=lambda host, frame, answers: None,
+    )
+
+
+def test_a_multi_seat_card_step_asks_for_a_face_across_the_declared_seats():
+    """铺面走 ``selection_face(..., seats=...)``：槽位覆盖两个座位，答案按同一份面解析。"""
+    state, sword, judge = _multi_seat_state()
+    seen: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        seen["card"] = answers["card"]
+
+    flow = SkillFlow(name="multi_seat_face", steps=_multi_seat_flow().steps, effect=effect)
+    host = _BranchHost(state, selections=[(1,)])
+    run_flow(host, _Frame(source=0), flow)
+    assert host.asks == [("selection", (flow.name, 0), "card", (0, 1))], (
+        f"spec.seats 进询问、询问位置仍是 (name, index)：{host.asks}"
+    )
+    assert seen["card"] == (judge,), "点座 1 判定区的那张牌（不是座 0 的武器）"
+
+
+def test_a_multi_seat_hi_none_upper_bound_counts_every_seat():
+    """``hi=None`` 的上限按**全体座位**的过滤后池重算（与铺面同源）。"""
+    state, _sword, _judge = _multi_seat_state()
+    seen: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        seen["card"] = answers["card"]
+
+    flow = SkillFlow(name="multi_seat_hi_none", steps=_multi_seat_flow(hi=None).steps, effect=effect)
+    host = _BranchHost(state, selections=[(0, 1)])
+    run_flow(host, _Frame(source=0), flow)
+    assert tuple(host.specs[0].total) == (1, 2), (
+        f"hi=None 的上限 = 全体座位过滤后的池（2 张）：{host.specs[0].total}"
+    )
+    assert seen["card"] == (state.player(0).equip[0], state.player(1).judge[0])
+
+
+def test_the_multi_seat_step_has_one_candidate_source_for_manifest_validation_and_preview():
+    """清单候选 / 校验器 / 预览读同一份座位解析：跨座位的牌都收，座 2 的牌不收。"""
+    state, sword, judge = _multi_seat_state()
+    flow = _multi_seat_flow(name="multi_seat_readers")
+
+    steps = manifest(flow, state, 0)
+    assert len(steps) == 1 and steps[0].kind == "card"
+    assert {tuple(row.options) for row in steps[0].pool} == {(str(sword), str(judge))}, (
+        f"清单候选跨座位（座 0 装备 + 座 1 判定）：{[row.options for row in steps[0].pool]}"
+    )
+
+    assert validate_flow_activation(flow, state, 0, (judge,), ()) is None
+    assert validate_flow_activation(flow, state, 0, (sword,), ()) is None
+
+    preview = preview_step(flow, state, 0, [("card", ())], steps=steps)
+    assert preview.name == "card"
+    assert set(preview.options) == {str(sword), str(judge)}, preview.options
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 10：**按持有者状态现算的流水线** + 取消的收尾位
+# ---------------------------------------------------------------------------
+#
+# 用户 2026-11-22 实机裁定：**代价与效果是两个事件**，一个预发动只含一个事件。同一条技能
+# 因此要在同一时刻给出两套清单（先代价、结算完再效果），且"效果凑不出候选"只取消**这个
+# 效果**、不回退整个技能。两件机制都落在流水线层，不按技能名特判：
+#
+# - ``SkillFlow.on_cancel``：步骤集合取消时的收尾位（缺省 ``None`` = 既有的"零副作用"）；
+# - 声明上的 ``flow_resolver``：``flow_for(skill_id, state=…, owner=…)`` 按持有者状态现算
+#   流水线，主动技的启动回调读同一份。
+
+
+def test_a_flow_may_consume_a_window_when_its_collection_cancels():
+    """``on_cancel``：取消仍不跑 ``effect``，但可以跑一次**簿记收尾**（关闭效果窗口）。
+
+    这是"代价已付、效果不成立"的唯一出口：步骤集合空池 ⇒ 不发没有候选的询问、``effect``
+    一次都不跑；收尾位只把"这次效果事件已经用掉"记下来（不搬牌、不记效果位）。
+    """
+    engine, frame = _resume_engine(target_hand=())
+    seen: list[str] = []
+
+    def effect(host, frame_, answers):
+        seen.append("effect")
+
+    flow = SkillFlow(
+        name="cancel_consumes",
+        steps=(
+            PickSeats(
+                lo=1,
+                hi=1,
+                pool=lambda state, f, owner, chosen: (),
+                optional=False,
+                key="seat",
+            ),
+        ),
+        effect=effect,
+        on_cancel=lambda host, frame_: seen.append("cancel"),
+    )
+    assert run_flow(engine, frame, flow, owner=0) is None
+    assert seen == ["cancel"], f"取消跑一次收尾、effect 一次都不跑：{seen}"
+    assert engine.pending is None, "空池照旧不发询问（零副作用的那一半不变）"
+
+
+def _resolver_flows():
+    """两条**零询问 / 单步**流水线：足够区分"哪一份被解析出来"。"""
+    static = SkillFlow(name="resolve_static", steps=(), effect=lambda h, f, a: None)
+    dynamic = SkillFlow(
+        name="resolve_dynamic",
+        steps=(PickOption(options=("b",), optional=False, key="b"),),
+        effect=lambda h, f, a: None,
+    )
+    return static, dynamic
+
+
+def test_a_declaration_may_resolve_its_flow_from_the_owner_state(monkeypatch):
+    """``flow_for(..., state=, owner=)`` 读声明上的解析器：清单 / 校验都跟着换那一份。"""
+    from types import MappingProxyType
+
+    from sgs.skills import preactivation as preactivation_module
+
+    skill_id = "hero.fake.resolver"
+    static, dynamic = _resolver_flows()
+
+    def resolver(state, owner):
+        return dynamic if state.player(owner).hp < 4 else static
+
+    monkeypatch.setattr(
+        preactivation_module, "FLOW_RESOLVERS", MappingProxyType({skill_id: resolver})
+    )
+    state, _own, _theirs = _branch_state()
+
+    assert preactivation_module.flow_for(skill_id, state=state, owner=0) is static
+    assert preactivation_module.preactivation_for(state, 0, skill_id) == (), (
+        "静态那一份是零步 ⇒ 没有清单"
+    )
+
+    state.player(0).hp = 3
+    assert preactivation_module.flow_for(skill_id, state=state, owner=0) is dynamic
+    steps = preactivation_module.preactivation_for(state, 0, skill_id)
+    assert [step.name for step in steps] == ["b"], [step.name for step in steps]
+    assert preactivation_module.validate_activation(state, 0, skill_id, (), ("b",)) is None
+
+    state.player(0).hp = 4
+    assert preactivation_module.validate_activation(state, 0, skill_id, (), ("b",)) is not None, (
+        "换回静态那一份之后 'b' 是多余载荷 ⇒ 拒收"
+    )
+    assert preactivation_module.flow_for(skill_id) is None, (
+        "没有 state / owner ⇒ 不猜（解析器只按持有者状态回答）"
+    )
+
+
+def test_the_active_handler_resolves_the_flow_of_the_frame_source():
+    """主动技的启动回调读**同一份**解析：谁声明了解析器，谁就不再烘死 import 期那份 flow。"""
+    from sgs.skills.active import ActiveSkill, _activation_handler
+
+    static, dynamic = _resolver_flows()
+    ran: list[str] = []
+    static = SkillFlow(name="handler_static", steps=(), effect=lambda h, f, a: ran.append("static"), once_per_phase=False)
+    dynamic = SkillFlow(name="handler_dynamic", steps=(), effect=lambda h, f, a: ran.append("dynamic"), once_per_phase=False)
+
+    def resolver(state, owner):
+        return dynamic if state.player(owner).hp < 4 else static
+
+    skill = ActiveSkill(
+        "hero_fake",
+        "resolver",
+        lambda state, ctx, current: current,
+        flow=static,
+        flow_resolver=resolver,
+    )
+    state, _own, _theirs = _branch_state()
+    host = type("Host", (), {"state": state})()
+    handler = _activation_handler(skill)
+    handler(host, _Frame(source=0, skill_id=skill.skill_id))
+    state.player(0).hp = 3
+    handler(host, _Frame(source=0, skill_id=skill.skill_id))
+    assert ran == ["static", "dynamic"], ran
