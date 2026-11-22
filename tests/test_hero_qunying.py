@@ -314,6 +314,30 @@ def test_lianying_flags_do_not_apply_to_the_card_whose_use_triggered_them() -> N
     assert state.player(1).chained is False
 
 
+def test_lianying_settle_tolerates_an_empty_target_table() -> None:
+    """[G4] 空目标表不让兑现抛错，也**不**在钩子里补"自己"（补自己那条口径不在这里）。
+
+    自用牌（【酒】/【桃】/装备）的目标表在**指定目标路径**上就已经是 ``(自己,)``（见下面的
+    端到端用例），故 ``_settle`` 不需要一条"空 ⇒ 全体"的兜底；这里只钉"空表不抛、只消费待
+    生效位、不横置任何人"。
+    """
+    from sgs.skills.hero_qunying import _settle
+
+    state = _state()
+    engine = Engine.from_state(state, seed=53)
+    player = state.player(0)
+    player.lianying_chain_after = 0
+    player.lianying_unlimited_after = 0
+    player.used_or_played_ever = 1
+    frame = _Frame(**{MATCH_OWNER_KEY: 0, "source": 0, "targets": ()})
+    _settle(engine, frame)
+    assert player.lianying_chain_after == -1, "空目标表照样消费 ② 的位"
+    assert player.lianying_unlimited_after == -1, "空目标表照样消费 ① 的位"
+    assert not any(state.player(seat).chained for seat in (0, 1, 2, 3)), (
+        "空目标表 = 没有目标可横置；钩子**不**替牌面补自己"
+    )
+
+
 def test_lianying_unlimited_lets_a_slash_exceed_the_limit_but_still_counts() -> None:
     """**本轮口径（Q4）**：越过上限可用、但照常计入次数；用完那张之后实体【杀】就出不了了。
 
@@ -1167,6 +1191,124 @@ def test_lianying_spends_the_flags_on_equipment_peach_and_wine() -> None:
         assert state.player(0).chained is True, f"用{card_type}指定了自己 ⇒ 自己横置"
         assert player.lianying_chain_after == -1, f"用{card_type}兑现了 ② 的位"
         assert player.lianying_unlimited_after == -1, "两个位共用同一次兑现点"
+
+
+class _SecondSelfUse(_PlayScript):
+    """出牌阶段脚本：先打唯一那张【杀】，再把 ③ 摸到的那张 ``second_type`` 用掉。"""
+
+    def __init__(self, state: GameState, second_type: str) -> None:
+        super().__init__(())
+        self.state = state
+        self.second_type = second_type
+        self.played: list[str] = []
+        self.flags_before_second: tuple[int, int] | None = None
+        self.second_targets: tuple[int, ...] | None = None
+
+    def respond(self, query: Any) -> Any:
+        if query.kind == "PLAY_PHASE" and len(self.played) < 2:
+            from sgs.state import UseCard
+
+            player = self.state.player(0)
+            if len(self.played) == 1:
+                self.flags_before_second = (
+                    int(player.lianying_unlimited_after),
+                    int(player.lianying_chain_after),
+                )
+            wanted = "slash" if not self.played else self.second_type
+            action = next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, UseCard) and action.card.type == wanted
+            )
+            if self.played:
+                self.second_targets = tuple(action.targets)
+            self.played.append(wanted)
+            return action
+        return super().respond(query)
+
+
+def _play_second_self_use(second_type: str) -> tuple[GameState, Any, _SecondSelfUse]:
+    """票 12 的用户局面：手牌 1 + 装备 1 + 判定 0。
+
+    先打掉唯一那张手牌（【杀】）⇒ 手牌 0 == 判定 0 ⇒ ③ 摸一张（牌堆顶 = ``second_type``）⇒
+    手牌 0→1 ⇒ 移动之后手牌数同时等于体力值（1）与装备区张数（1）⇒ ①② 两个位**动态**置位。
+    再在出牌阶段把 ``second_type`` 用掉，返回 ``(state, player, script)``；``script`` 记下
+    第二张牌之前的两个位与它自己的目标表。
+    """
+    hand = (cards_of_type(PACK_160, "slash")[0],)
+    # 第二张是武器时，装备区放另一件装备，免得同名顶替把局面搞乱。
+    equip_type = "renwang_shield" if second_type == "qinggang_sword" else "qinggang_sword"
+    equip = cards_of_type(PACK_160, equip_type)[0]
+    second = cards_of_type(PACK_160, second_type)[0]
+    deck = (second, *deck_excluding(PACK_160, *hand, equip, second))
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hero=HERO, hand=hand, equip=(equip,), hp=1, hp_max=4),
+            SeatSpec(),
+        ],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    player = state.player(0)
+    engine = Engine.from_state(state, seed=52)
+    # ``Engine`` 从局面构造时仍会从**回合起点**跑一遍：把摸牌阶段改摸 0 张，出牌阶段才真是
+    # 「手牌 1 + 装备 1 + 判定 0」这个局面（否则摸牌阶段会先摸两张）。
+    engine.set_draw_phase_count(0, 0)
+    script = _SecondSelfUse(state, second_type)
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none")],
+        lambda e: len(script.played) == 2
+        and e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
+    )
+    return state, player, script
+
+
+def test_lianying_chains_wine_after_the_judge_zone_draw() -> None:
+    """[G1] 用户 2026-11-22 第四轮实机（票 12）：手牌 1 + 装备 1 + 判定 0。
+
+    用掉唯一那张手牌 ⇒ ③ 摸到【酒】（手牌 0→1）⇒ ①② 置位。再在出牌阶段用【酒】（对自己
+    使用、没有选目标那一步）⇒ 「所有目标」= 自己 ⇒ 自己横置、两个位消费。
+    """
+    state, player, script = _play_second_self_use("wine")
+    assert state.phase is Phase.PLAY, "这条路是**出牌阶段**的使用（濒死自救的【酒】不走这里）"
+    assert script.flags_before_second is not None
+    assert all(flag >= 0 for flag in script.flags_before_second), (
+        f"③ 摸牌之后手牌数 == 体力值（1）且 == 装备区张数（1）⇒ ①② 两根位都置位："
+        f"{script.flags_before_second}"
+    )
+    assert script.second_targets == (0,), (
+        f"【酒】的「指定目标」路径**已经**把自己写进目标表（票 12 的怀疑不成立）："
+        f"{script.second_targets}"
+    )
+    assert state.player(0).chained is True, (
+        f"用【酒】指定自己 ⇒ 自己横置（chained={state.player(0).chained}，"
+        f"链位={player.lianying_chain_after}）"
+    )
+    assert player.lianying_chain_after == -1, "用【酒】兑现了 ② 的位"
+    assert player.lianying_unlimited_after == -1, "① ② 共用同一次兑现点"
+
+
+@pytest.mark.parametrize("second_type", ("peach", "qinggang_sword"))
+def test_lianying_chains_peach_and_equipment_on_the_same_auto_self_target_path(
+    second_type: str,
+) -> None:
+    """[G2]【桃】/ 装备牌对自己使用走同一条"自动定目标"路径（用户局面里同样会先 ③ 摸牌）。"""
+    state, player, script = _play_second_self_use(second_type)
+    assert script.flags_before_second is not None and all(
+        flag >= 0 for flag in script.flags_before_second
+    ), f"①② 在第二张牌之前都已置位：{script.flags_before_second}"
+    assert script.second_targets == (0,), (
+        f"{second_type} 的目标 = 自己（不需要玩家选目标）：{script.second_targets}"
+    )
+    assert state.player(0).chained is True, (
+        f"用{second_type}指定自己 ⇒ 自己横置（链位={player.lianying_chain_after}）"
+    )
+    assert player.lianying_chain_after == -1, f"{second_type} 兑现了 ② 的位"
+    assert player.lianying_unlimited_after == -1, "① ② 共用同一次兑现点"
 
 
 # ---------------------------------------------------------------------------
