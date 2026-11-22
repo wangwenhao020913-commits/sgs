@@ -79,6 +79,11 @@ def _registered_flows() -> dict[int, str]:
     for skill in ACTIVE_SKILLS:
         if skill.flow is not None:
             found.setdefault(id(skill.flow), f"ACTIVE_SKILLS[{skill.skill_id}]")
+        # qunying 票 10：可发动的**其余**事件流水线（`flow_resolver` 按状态选哪一份）。
+        for alternate in skill.event_flows:
+            found.setdefault(
+                id(alternate), f"ACTIVE_SKILLS[{skill.skill_id}].event_flows"
+            )
     for skill_id, definition in CATALOG.items():
         if definition.flow is not None:
             # 声明级**发动**流水线（yijiang-2014-round2 票 20）：非 A 族、却在出牌阶段

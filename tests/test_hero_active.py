@@ -461,6 +461,16 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     assert not (catalog_module._QIANXUN_EFFECT_MASK & catalog_module._PHASE_STATE_MASK), (
         "效果位是本回合作用域 ⇒ 不许进阶段掩码"
     )
+    # qunying 票 10：代价 / 效果是**两个事件**，"代价已付、效果待选"的窗口位与效果位同
+    # 作用域（回合末清，额外出牌阶段照样能选效果）⇒ 同样**不**进阶段掩码。
+    assert catalog_module._QIANXUN_WINDOW == 1 << 51, "48..50 代价位、52..54 效果位"
+    assert not (catalog_module._QIANXUN_WINDOW & catalog_module._PHASE_STATE_MASK), (
+        "效果事件的窗口跨出牌阶段保留 ⇒ 不许进阶段掩码"
+    )
+    assert not (
+        catalog_module._QIANXUN_WINDOW
+        & (catalog_module._QIANXUN_COST_MASK | catalog_module._QIANXUN_EFFECT_MASK)
+    ), "窗口位不得与代价 / 效果位重叠"
 
     assert (
         catalog_module._PHASE_STATE_MASK

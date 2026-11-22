@@ -12993,7 +12993,11 @@ def _qianxun_play_session() -> tuple[Session, int, int]:
 
 
 def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
-    """真会话：[前面同上] → 发动【谦逊】→ 代价② → 效果②，停在 ``SELECT_CARDS``。"""
+    """真会话：**代价事件**（代价②）先结算 → **效果事件** → 效果②，停在 ``SELECT_CARDS``。
+
+    用户 2026-11-22 裁定第 4 条：代价与效果是两个事件 —— 代价结算完技能**再次可发动**，
+    第二次点的技能才进效果清单（两套清单各有自己的步骤）。
+    """
     from sgs.skills import active as module
     from sgs.skills.hero_qunying import QIANXUN
 
@@ -13017,9 +13021,21 @@ def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
         )
     )
     pending = session.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", (
+        f"代价清算之后回到出牌阶段（效果事件窗口）：{getattr(pending, 'kind', None)}"
+    )
+    # 效果事件：技能再次可发动，清单换成"选效果 + 该效果自己的步骤"。
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if getattr(action, "skill_id", None) == QIANXUN
+        )
+    )
+    pending = session.pending
     assert pending is not None and str(pending.kind) == "SELECT_OPTION", pending
     assert str(pending.skill_id).endswith(":effect"), (
-        f"效果步之前只剩代价 / 效果两问（没有 :from）：{pending.skill_id}"
+        f"效果事件的第一问是选效果：{pending.skill_id}"
     )
     session.submit_answer(
         next(
@@ -13091,47 +13107,174 @@ def test_a_real_session_reaches_the_cross_seat_qianxun_field_face() -> None:
     )
 
 
-def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> None:
-    """[C2] 真会话载荷：``preactivations`` 里【谦逊】有"在场上选一张牌 / 选目的地"两步。
+def test_the_qianxun_payload_carries_the_cost_event_manifest_first() -> None:
+    """[C2][G1] 真会话载荷：第一次下发的是**代价事件**清单（选代价 + 代价③ 的两小步）。
 
-    读的是**真实产出路径**（真引擎 → 真 ``pending_payload``；候选 / 池不是手抄的）：清单 =
-    选代价 → 选效果 → 效果② 的两个子步。两步的行只在"效果②"下出现（``when`` 的第二格），
-    再走**真的预览端点**证明"选② 之后光标依次落在它们上面、选① 时它们不存在"——`[G1]` 的
-    另一半（未选中分支的行不出现）由「选① 时预览直接越过」回答。
+    读的是**真实产出路径**（真引擎 → 真 ``pending_payload``；候选 / 池不是手抄的）。
+    效果步骤一条都不在代价清单里；再走**真的预览端点**证明"选③ 之后光标落在选装备牌上、
+    选① 时这两步不存在"。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+
+    session, sword, _converted = _qianxun_play_session()
+    pending = session.pending
+    payload = pending_payload(session)
+    steps = payload["preactivations"][QIANXUN]
+
+    assert [step["name"] for step in steps] == ["cost", "equip", "product"], (
+        f"代价事件 = 选代价 + 代价③ 的两小步：{[s['name'] for s in steps]}"
+    )
+    assert [step["kind"] for step in steps] == ["option", "card", "option"]
+    assert steps[1]["wording"] == "代价③：选择一张装备牌（手牌 / 装备区）当作延时类锦囊的原料"
+    assert steps[2]["wording"] == "代价③：选择当作哪一种延时类锦囊（乐不思蜀 / 兵粮寸断 / 闪电）"
+    for branch_step in steps[1:]:
+        assert branch_step["pool"], f"{branch_step['name']} 应当有候选行"
+        for row in branch_step["pool"]:
+            assert row["when"][0] == module.QIANXUN_COST_EQUIP, (
+                f"分支行只挂在代价③ 上：{row['when']}"
+            )
+    equip_rows = {row["when"][0]: tuple(row["options"]) for row in steps[1]["pool"]}
+    assert equip_rows[module.QIANXUN_COST_EQUIP] == (str(sword),), (
+        f"代价③ 的原料 = 自己的装备牌：{equip_rows}"
+    )
+    assert not {"effect", "card", "to", "type"} & {step["name"] for step in steps}, (
+        "效果事件的步骤一条都不许混进代价清单（[G1] 的前半）"
+    )
+
+    registry = _registry_with(session)
+    seq = pending.seq
+    status, after_three = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_EQUIP]},
+            ],
+        },
+    )
+    assert status == 200, after_three
+    assert after_three["cursor"] == 1 and after_three["kind"] == "card", after_three
+    assert set(after_three["options"]) == {str(sword)}, after_three
+
+    status, after_equip = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_EQUIP]},
+                {"name": "equip", "values": [sword]},
+            ],
+        },
+    )
+    assert status == 200, after_equip
+    assert after_equip["cursor"] == 1 and after_equip["kind"] == "card", after_equip
+    assert after_equip["can_advance"] is True and after_equip["next"] == "product", (
+        f"选牌步填满后停在原地等确认、可以进产物步：{after_equip}"
+    )
+
+    status, editing_product = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_EQUIP]},
+                {"name": "equip", "values": [sword]},
+                {"name": "product", "values": []},
+            ],
+        },
+    )
+    assert status == 200, editing_product
+    assert editing_product["cursor"] == 2 and editing_product["kind"] == "option", (
+        editing_product
+    )
+    assert set(editing_product["options"]) == {
+        "indulgence",
+        "supply_shortage",
+        "lightning",
+    }, editing_product
+
+    status, other_cost = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
+            ],
+        },
+    )
+    assert status == 200, other_cost
+    assert other_cost["cursor"] == len(steps), (
+        f"代价② 后面没有步骤（清单已填完）：{other_cost}"
+    )
+    assert other_cost["can_submit"] is True
+
+
+def test_the_qianxun_payload_switches_to_the_effect_event_after_the_cost() -> None:
+    """[C2][G1] 代价结算完：真会话载荷换成**效果事件**清单（选效果 + 各效果自己的步骤）。
+
+    两件事在这一条里一起钉：① 清单确实换了（不是同一条静态清单变了个皮）；② 效果② 的
+    两步只在"选了②"的行里出现、效果③ 的选类型只在"选了③"的行里出现；③ 真预览端点证明
+    选① 时清单直接可提交、选② 停在选牌、选③ 停在选类型。
     """
     from sgs.skills import active as module
     from sgs.skills.hero_qunying import QIANXUN
 
     session, sword, converted = _qianxun_play_session()
     pending = session.pending
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if getattr(action, "skill_id", None) == QIANXUN
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.skill_id).endswith(":cost")
+    session.submit_answer(
+        next(
+            action
+            for action in pending.legal_actions
+            if action.choice == module.QIANXUN_COST_DAMAGE
+        )
+    )
+    pending = session.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", (
+        f"代价结算完回到出牌阶段：{getattr(pending, 'kind', None)}"
+    )
     payload = pending_payload(session)
     steps = payload["preactivations"][QIANXUN]
-
-    assert [step["name"] for step in steps] == ["cost", "effect", "card", "to"], (
-        f"清单 = 选代价 / 选效果 / 在场上选一张牌 / 选目的地：{[s['name'] for s in steps]}"
+    assert [step["name"] for step in steps] == ["effect", "card", "to", "type"], (
+        f"效果事件 = 选效果 + ② 的两步 + ③ 的一步：{[s['name'] for s in steps]}"
     )
-    assert [step["kind"] for step in steps] == ["option", "option", "card", "option"]
-    assert steps[2]["wording"] == "在场上（任何角色的装备区 / 判定区）点选要移动的那张牌"
-    assert steps[3]["wording"] == "选择目的地角色（该区域已被废除或已有牌的，不能指定）"
-    for branch_step in steps[2:]:
+    assert [step["kind"] for step in steps] == ["option", "card", "option", "option"]
+    assert steps[1]["wording"] == "在场上（任何角色的装备区 / 判定区）点选要移动的那张牌"
+    assert steps[2]["wording"] == "选择目的地角色（该区域已被废除或已有牌的，不能指定）"
+    assert steps[3]["wording"] == "选择要获得的牌的类别（基本牌 / 锦囊牌 / 装备牌）"
+    for branch_step, option in (
+        (steps[1], module.QIANXUN_EFFECT_MOVE),
+        (steps[2], module.QIANXUN_EFFECT_MOVE),
+        (steps[3], module.QIANXUN_EFFECT_GAIN),
+    ):
         assert branch_step["pool"], f"{branch_step['name']} 应当有候选行"
         for row in branch_step["pool"]:
-            assert row["when"][1] == module.QIANXUN_EFFECT_MOVE, (
-                f"分支行只挂在效果② 上：{row['when']}"
-            )
-    card_rows = {row["when"][0]: tuple(row["options"]) for row in steps[2]["pool"]}
-    assert card_rows[module.QIANXUN_COST_DAMAGE] == (str(sword), str(converted)), (
+            assert row["when"][0] == option, f"{branch_step['name']} 的行只挂在 {option} 上"
+    card_rows = {row["when"][0]: tuple(row["options"]) for row in steps[1]["pool"]}
+    assert card_rows[module.QIANXUN_EFFECT_MOVE] == (str(sword), str(converted)), (
         f"选牌步的候选 = 场上两个座位的牌：{card_rows}"
     )
-    assert card_rows[module.QIANXUN_COST_DISCARD] == (str(sword), str(converted))
-    assert card_rows[module.QIANXUN_COST_EQUIP] == (str(converted),), (
-        "代价③ 与效果② 不共用同一张装备牌（风险 1：唯一那张被排除出选牌面）"
-    )
-    assert {tuple(row.get("disabled", ())) for row in steps[3]["pool"]} == {()}, (
+    assert {tuple(row.get("disabled", ())) for row in steps[2]["pool"]} == {()}, (
         "这一局面里所有其他座位都是合法目的地"
     )
 
-    # **真预览端点**：选② 之后光标落在"在场上选一张牌"，选① 时两步都不存在（直接可提交）。
     registry = _registry_with(session)
     seq = pending.seq
     status, after_two = _preview(
@@ -13141,13 +13284,12 @@ def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> No
             "answers_seq": seq,
             "skill_id": QIANXUN,
             "answers": [
-                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
                 {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
             ],
         },
     )
     assert status == 200, after_two
-    assert after_two["cursor"] == 2 and after_two["kind"] == "card", after_two
+    assert after_two["cursor"] == 1 and after_two["kind"] == "card", after_two
     assert set(after_two["options"]) == {str(sword), str(converted)}, after_two
 
     status, after_card = _preview(
@@ -13157,14 +13299,13 @@ def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> No
             "answers_seq": seq,
             "skill_id": QIANXUN,
             "answers": [
-                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
                 {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
                 {"name": "card", "values": [converted]},
             ],
         },
     )
     assert status == 200, after_card
-    assert after_card["cursor"] == 2 and after_card["next"] == "to", after_card
+    assert after_card["cursor"] == 1 and after_card["next"] == "to", after_card
 
     status, editing_to = _preview(
         registry,
@@ -13173,7 +13314,6 @@ def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> No
             "answers_seq": seq,
             "skill_id": QIANXUN,
             "answers": [
-                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
                 {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
                 {"name": "card", "values": [converted]},
                 {"name": "to", "values": []},
@@ -13181,9 +13321,24 @@ def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> No
         },
     )
     assert status == 200, editing_to
-    assert editing_to["cursor"] == 3 and editing_to["kind"] == "option", editing_to
+    assert editing_to["cursor"] == 2 and editing_to["kind"] == "option", editing_to
     assert set(editing_to["options"]) == {"seat:0", "seat:2", "seat:3"}, editing_to
     assert editing_to["can_submit"] is False
+
+    status, after_gain = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_GAIN]},
+            ],
+        },
+    )
+    assert status == 200, after_gain
+    assert after_gain["cursor"] == 3 and after_gain["kind"] == "option", after_gain
+    assert set(after_gain["options"]) == {"basic", "trick", "equipment"}, after_gain
 
     status, other_effect = _preview(
         registry,
@@ -13192,7 +13347,6 @@ def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> No
             "answers_seq": seq,
             "skill_id": QIANXUN,
             "answers": [
-                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
                 {"name": "effect", "values": [module.QIANXUN_EFFECT_CARD]},
             ],
         },

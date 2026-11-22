@@ -32,6 +32,7 @@ from sgs.state import (
     MoveReason,
     Phase,
     SelectOption,
+    SlotKind,
     Zone,
     ZoneRef,
     EndPhase,
@@ -132,43 +133,98 @@ def test_lianying_is_one_locked_declaration_with_four_forced_hooks() -> None:
     assert definition.requirement.startswith("锁定技，你的手牌数变化后若与你")
 
 
-def test_qianxun_declares_its_own_text_and_flow() -> None:
-    """声明面（票 03b）：选代价 → 选效果 → ``FlowBranch``（效果② 的两步）；文案显式声明。"""
+def test_qianxun_declares_two_event_flows_with_their_own_steps() -> None:
+    """声明面（票 10）：**代价事件**与**效果事件**各一条流水线，由 ``flow_resolver`` 按状态选。
+
+    用户 2026-11-22 裁定第 4 条：一个预发动只含**一个**事件；多步只是这个事件要多次选择。
+    ⇒ 代价（+ 代价③ 的选装备牌 / 选延时锦囊）一条，效果（+ 该效果自己的步骤）另一条；
+    "此刻是哪一份"不是按技能名特判，而是声明上的解析器读持有者状态（下一用例）。
+    """
     from sgs.skills import active as module
 
     definition = CATALOG[QIANXUN]
     assert definition.locked is False
     assert definition.hooks == ()
     assert definition.requirement.startswith("出牌阶段各限一次")
-    assert set(definition.step_requirements) == {"cost", "effect", "card", "to"}, (
-        f"每一步的文案都显式声明（A4 守卫）：{set(definition.step_requirements)}"
+    assert set(definition.step_requirements) == {
+        "cost",
+        "equip",
+        "product",
+        "effect",
+        "card",
+        "to",
+        "type",
+    }, f"每一步的文案都显式声明（A4 守卫）：{set(definition.step_requirements)}"
+
+    cost_flow = module.QIANXUN_COST_FLOW
+    effect_flow = module.QIANXUN_EFFECT_FLOW
+    assert cost_flow.name != effect_flow.name, "两条流水线的询问位置必须分得开"
+    assert cost_flow.once_per_phase is False and effect_flow.once_per_phase is False, (
+        "次数由三个代价位 / 三个效果位自己数"
     )
-    flow = active_module.QIANXUN_FLOW
-    assert [type(step).__name__ for step in flow.steps] == [
-        "PickOption",
-        "PickOption",
-        "FlowBranch",
-    ], [type(step).__name__ for step in flow.steps]
-    assert flow.once_per_phase is False, "次数由三个代价位自己数"
-    cost_step, effect_step, branch = flow.steps
-    assert (cost_step.key, effect_step.key, branch.key) == ("cost", "effect", "effect")
-    assert set(branch.branches) == {module.QIANXUN_EFFECT_MOVE}, (
-        f"只有效果② 有子步骤（① 的目标是条件式多目标、③ 的类型一问留待下次迁移）："
-        f"{set(branch.branches)}"
+
+    assert [type(step).__name__ for step in cost_flow.steps] == ["PickOption", "FlowBranch"]
+    cost_step, cost_branch = cost_flow.steps
+    assert (cost_step.key, cost_branch.key) == ("cost", "cost")
+    assert set(cost_branch.branches) == {module.QIANXUN_COST_EQUIP}, (
+        f"只有代价③ 有子步骤（选装备牌 / 选产物）：{set(cost_branch.branches)}"
     )
-    card_step, to_step = branch.branches[module.QIANXUN_EFFECT_MOVE]
+    equip_step, product_step = cost_branch.branches[module.QIANXUN_COST_EQUIP]
+    assert isinstance(equip_step, module.PickCards)
+    assert equip_step.zones == (Zone.HAND, Zone.EQUIP)
+    assert tuple(equip_step.slot_kinds) == tuple(SlotKind), "「一张装备牌」= 六个装备槽全收"
+    assert (equip_step.lo, equip_step.hi) == (1, 1)
+    assert isinstance(product_step, module.PickOption)
+    assert product_step.key == "product" and callable(product_step.options)
+
+    assert [type(step).__name__ for step in effect_flow.steps] == ["PickOption", "FlowBranch"]
+    effect_step, effect_branch = effect_flow.steps
+    assert (effect_step.key, effect_branch.key) == ("effect", "effect")
+    assert set(effect_branch.branches) == {
+        module.QIANXUN_EFFECT_MOVE,
+        module.QIANXUN_EFFECT_GAIN,
+    }, f"② / ③ 有子步骤；① 的牌名 / 目标仍是手写询问：{set(effect_branch.branches)}"
+    card_step, to_step = effect_branch.branches[module.QIANXUN_EFFECT_MOVE]
     assert isinstance(card_step, module.PickCards)
     assert card_step.zones == (Zone.EQUIP, Zone.JUDGE)
     assert (card_step.lo, card_step.hi) == (1, 1)
     assert callable(card_step.seats), "整体座位（含自己）的面：`PickCards.seats` 可调用档"
-    assert callable(card_step.exclude_cards), "代价③ 与效果② 互斥的谓词（风险 1）"
     assert isinstance(to_step, module.PickOption)
     assert to_step.key == "to" and to_step.show_disabled is True, (
-        "目的地 = 既有 PickOption（seat 文本）+ 置灰档（用户第二轮裁定）"
+        "目的地 = 既有 PickOption（seat 文本）+ 置灰档（用户第二轮裁定；票 09 再换成点将）"
     )
     assert callable(to_step.options) and callable(to_step.disabled)
+    (type_step,) = effect_branch.branches[module.QIANXUN_EFFECT_GAIN]
+    assert isinstance(type_step, module.PickOption)
+    assert type_step.key == "type" and callable(type_step.options), (
+        "效果③ 的「选类型」也属于**效果事件**自己的步骤（票 10）"
+    )
     for table in (active_module._REQUIREMENTS, active_module._STEP_REQUIREMENTS):
         assert "qianxun" not in table, "不往短 id 表加行（标 / 界陆逊各占一行）"
+
+
+def test_qianxun_resolves_the_cost_event_then_the_effect_event() -> None:
+    """``flow_resolver``：没有窗口 = 代价事件；窗口开着 = 效果事件（同一条技能两套清单）。"""
+    from sgs.skills import active as module
+
+    state = _play_state()
+    assert module._qianxun_flow(state, 0) is module.QIANXUN_COST_FLOW
+    module._qianxun_open_window(state, 0)
+    assert module._qianxun_flow(state, 0) is module.QIANXUN_EFFECT_FLOW
+    module._qianxun_close_window(state, 0)
+    assert module._qianxun_flow(state, 0) is module.QIANXUN_COST_FLOW
+
+
+def test_qianxun_effect_window_lasts_the_turn_but_not_the_play_phase() -> None:
+    """窗口位与效果位同作用域：出牌阶段起点**不**清（额外出牌阶段照样能选效果），回合末清。"""
+    from sgs.skills import active as module
+
+    state = _play_state()
+    module._qianxun_open_window(state, 0)
+    reset_phase_skill_state(state)
+    assert module._qianxun_window_open(state, 0), "复位代价位不清效果窗口"
+    reset_turn_skill_state(state)
+    assert not module._qianxun_window_open(state, 0), "回合末清（效果每回合各一次）"
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +499,11 @@ def test_qianxun_effect_two_move_destinations_follow_the_slot_and_judge_rules() 
 
 
 def test_qianxun_offers_only_with_a_cost_and_an_unused_effect() -> None:
-    """入口：付得起代价 ∧ 还有没用过的效果 ⇒ 一条 ``ActivateSkill``；否则不产出候选。"""
+    """入口：代价事件（付得起的代价 ∧ 还有没用过的效果）或窗口开着的效果事件。
+
+    用户 2026-11-22 裁定第 4/5 条：效果事件**不再要求还有可付的代价**；反过来，三个效果
+    都用过之后两个事件都不给入口。
+    """
     from sgs.skills import active as module
     from sgs.effects import CandidateScope, ModifierContext
 
@@ -453,9 +513,22 @@ def test_qianxun_offers_only_with_a_cost_and_an_unused_effect() -> None:
     state.phase = Phase.PLAY
     offered = module._qianxun_offers(state, ctx, ())
     assert offered and isinstance(offered[-1], ActivateSkill)
+
+    # 付得起的两项代价都付过、代价③ 没有装备牌 ⇒ 代价事件不给入口……
+    for cost in (module.QIANXUN_COST_DISCARD, module.QIANXUN_COST_DAMAGE):
+        module._qianxun_write(
+            state, 0, 1 << (module._QIANXUN_COST_SHIFT + module._QIANXUN_COST_INDEX[cost])
+        )
+    assert module._qianxun_offers(state, ctx, ()) == ()
+    # ……但窗口开着（代价已结算、效果待选）⇒ 效果事件照旧可发动（不再要求还有代价）。
+    module._qianxun_open_window(state, 0)
+    offered = module._qianxun_offers(state, ctx, ())
+    assert offered and isinstance(offered[-1], ActivateSkill)
+
     for index in range(len(module.QIANXUN_EFFECTS)):
         module._qianxun_write(state, 0, 1 << (module._QIANXUN_EFFECT_SHIFT + index))
-    assert module._qianxun_offers(state, ctx, ()) == (), "三个效果都用过 ⇒ 不给入口"
+    assert module._qianxun_offers(state, ctx, ()) == (), "三个效果都用过 ⇒ 两个事件都断开"
+
 
 
 # ---------------------------------------------------------------------------
@@ -568,8 +641,11 @@ def test_qianxun_cost_three_puts_a_lightning_in_own_judge_zone() -> None:
     state = _play_state(hand_types=("qinggang_sword",))
     weapon = state.player(0).hand[0]
     engine = Engine.from_state(state, seed=32)
-    # 票 03b 的采集顺序：选代价 → 选效果 → **付代价**（先挑哪张装备牌，再挑产物）→ 执行。
-    script = _PlayScript((module.QIANXUN_COST_EQUIP, module.QIANXUN_EFFECT_GAIN, "lightning", "equipment"))
+    # 票 10 的采集顺序：**代价事件**（选代价 → 挑哪张装备牌 → 挑产物）先结算，之后技能再
+    # 可发动、进入**效果事件**（选效果 → 选类型）。
+    script = _PlayScript(
+        (module.QIANXUN_COST_EQUIP, "lightning", module.QIANXUN_EFFECT_GAIN, "equipment")
+    )
     run_queries(
         engine,
         [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
@@ -597,7 +673,7 @@ def test_qianxun_uses_a_pure_virtual_card_of_the_chosen_name() -> None:
     run_queries(
         engine,
         [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
-        lambda e: e.state.player(0).hp < 4 and e.state.player(0).hand
+        lambda e: bool(module._qianxun_used_effects(e.state, 0))
         and e.pending is not None
         and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
     )
@@ -890,15 +966,16 @@ def test_qianxun_move_face_candidates_are_the_only_accepted_answers() -> None:
     assert engine.pending is not pending, "候选里那条必须被收下"
 
 
-def test_qianxun_move_effect_without_field_cards_asks_nothing() -> None:
-    """票 03a §4 [G2] + 票 03b：空场 ⇒ 分支的选牌步**空池** ⇒ 整条取消（零副作用）。
+def test_qianxun_invalid_effect_event_consumes_the_window_without_rolling_back_the_cost() -> None:
+    """[G3] 票 10：空场 ⇒ 效果② 的选牌步空池 ⇒ **无事发生**：代价已付、效果位不记、不回退。
 
-    票 03a 时这一条是"效果位仍写入"（效果体在**付代价之后**才走到空源座位）；票 03b 把
-    这两步搬进流水线之后，空池走的是步骤语言既有的取消路径（`PickCards.face` 为空 = 取消
-    整条流水线），于是**代价不付、效果位不写、技能可再发动**——比旧行为更正确（旧行为把
-    一个没执行的效果记成"本回合已选过"）。本测试按新形状钉住它。
+    用户 2026-11-22 裁定第 5 条：代价满足之后，效果无论可不可发动都不导致技能本身无法发动；
+    只是这个效果不成立（这个**效果事件**用掉、效果位不记、没有任何效果副作用）。代价② 的
+    1 点伤害照常发生。裁定原文的"除非还有别的代价可付"⇒ 技能回到**代价事件**（效果② 没有
+    被记成本回合已用）。
     """
     from sgs.skills import active as module
+    from sgs.skills.preactivation import preactivation_for
 
     state = _state(seats=3)
     engine = Engine.from_state(state, seed=63)
@@ -909,19 +986,31 @@ def test_qianxun_move_effect_without_field_cards_asks_nothing() -> None:
     run_queries(
         engine,
         [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
-        lambda e: bool(script.queries)
+        lambda e: bool(module._qianxun_used_costs(e.state, 0))
+        and not module._qianxun_window_open(e.state, 0)
         and e.pending is not None
         and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
     )
     assert not [
         query for query in script.queries
         if str(getattr(query.kind, "value", query.kind)) == "SELECT_CARDS"
-    ], "空场时不发选牌询问"
-    assert module._qianxun_used_effects(state, 0) == frozenset(), (
-        "取消 = 零副作用：效果位不写（技能可再发动）"
+    ], "空场时不发选牌询问（效果② 这一步没有候选）"
+    assert module._qianxun_used_costs(state, 0) == {module.QIANXUN_COST_DAMAGE}, (
+        "代价已付、**不回退**整个技能的发动"
     )
-    assert module._qianxun_used_costs(state, 0) == frozenset(), "取消 = 代价也不付"
-    assert state.player(0).hp == 4, "代价② 的 1 点伤害没有发生"
+    assert module._qianxun_used_effects(state, 0) == frozenset(), (
+        "效果不成立 ⇒ 效果位不记（这个效果下一回合还在）"
+    )
+    assert state.player(0).hp == 3, "代价② 的 1 点伤害照常发生"
+    assert not module._qianxun_window_open(state, 0), "效果事件已经用掉（窗口关闭）"
+    steps = preactivation_for(state, 0, QIANXUN)
+    assert [step.name for step in steps] == ["cost"], (
+        f"还有可付的代价① ⇒ 技能回到代价事件（而不是重复提供那个效果事件）："
+        f"{[step.name for step in steps]}"
+    )
+    assert steps[0].pool and tuple(steps[0].pool[0].options) == (
+        module.QIANXUN_COST_DISCARD,
+    ), f"只剩代价① 可付：{steps[0].pool}"
 
 
 def test_lianying_spends_the_flags_on_equipment_peach_and_wine() -> None:
@@ -977,76 +1066,96 @@ def test_lianying_spends_the_flags_on_equipment_peach_and_wine() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _branch_flow():
+def _effect_flow():
     from sgs.skills import active as module
 
-    return module.QIANXUN_FLOW
+    return module.QIANXUN_EFFECT_FLOW
 
 
-def test_qianxun_manifest_lists_the_effect_two_steps_only_for_that_effect():
-    """[G1]：清单按分支给行 —— 效果② 的两步只在选了 ② 的那几行里出现。
+def _cost_flow():
+    from sgs.skills import active as module
 
-    读的是**真声明**渲染出来的清单（不是手抄）：分支步的每一条 ``when`` 都以
-    ``qianxun_effect_move`` 结尾；效果 ① / ③ 的那几行**一条都没有**。预览按同一份答案
-    解析分支：选 ① 时光标越过这两步，选 ② 时停在"在场上选一张牌"。
-    """
+    return module.QIANXUN_COST_FLOW
+
+
+def test_qianxun_cost_manifest_lists_only_the_cost_event_steps():
+    """[G1] 代价事件的清单 = 选代价 + 代价③ 自己的两步；**看不到**任何效果步骤。"""
+    from sgs.skills.flow import manifest
+    from sgs.skills import active as module
+
+    state, _converted = _cross_seat_move_state()
+    sword = state.player(0).equip[0]
+    steps = manifest(_cost_flow(), state, 0)
+    assert [step.name for step in steps] == ["cost", "equip", "product"], (
+        f"代价事件 = 选代价 + 代价③ 的两小步：{[step.name for step in steps]}"
+    )
+    assert [step.kind for step in steps] == ["option", "card", "option"]
+    for branch_step in steps[1:]:
+        assert branch_step.pool, f"{branch_step.name} 的行不空"
+        for row in branch_step.pool:
+            assert row.when[0] == module.QIANXUN_COST_EQUIP, (
+                f"分支行只挂在代价③ 上：{row.when}"
+            )
+        assert not any(
+            module.QIANXUN_COST_DISCARD in row.when
+            or module.QIANXUN_COST_DAMAGE in row.when
+            for row in branch_step.pool
+        ), "代价 ① / ② 没有子步骤"
+    equip_rows = {row.when[0]: tuple(row.options) for row in steps[1].pool}
+    assert equip_rows[module.QIANXUN_COST_EQUIP] == (str(sword),), (
+        f"代价③ 的原料 = 自己的装备牌（手牌里的非装备牌不进面）：{equip_rows}"
+    )
+    product_rows = {row.when[0]: tuple(row.options) for row in steps[2].pool}
+    assert set(product_rows[module.QIANXUN_COST_EQUIP]) == set(module._qianxun_products(state, 0))
+    assert not {"effect", "card", "to", "type"} & {step.name for step in steps}, (
+        "效果事件的步骤一条都不许混进代价清单"
+    )
+
+
+def test_qianxun_effect_manifest_lists_each_effects_own_steps():
+    """[G1] 效果事件的清单 = 选效果 + ② 的选牌 / 目的地、③ 的选类型（① 没有子步骤）。"""
     from sgs.skills.flow import manifest, preview_step
     from sgs.skills import active as module
 
     state, converted = _cross_seat_move_state()
-    flow = _branch_flow()
+    flow = _effect_flow()
     steps = manifest(flow, state, 0)
-    assert [step.name for step in steps] == ["cost", "effect", "card", "to"], (
-        f"清单 = 选代价 / 选效果 / 选牌 / 选目的地：{[step.name for step in steps]}"
+    assert [step.name for step in steps] == ["effect", "card", "to", "type"], (
+        f"效果事件 = 选效果 + ② 的两步 + ③ 的一步：{[step.name for step in steps]}"
     )
-    assert steps[2].kind == "card" and steps[3].kind == "option"
-    for branch_step in (steps[2], steps[3]):
+    assert [step.kind for step in steps] == ["option", "card", "option", "option"]
+    card_step, to_step, type_step = steps[1], steps[2], steps[3]
+    for branch_step, option in (
+        (card_step, module.QIANXUN_EFFECT_MOVE),
+        (to_step, module.QIANXUN_EFFECT_MOVE),
+        (type_step, module.QIANXUN_EFFECT_GAIN),
+    ):
         assert branch_step.pool, f"{branch_step.name} 的行不空"
         for row in branch_step.pool:
-            # when = (代价文本, 效果文本[, 选中的牌])：效果那一格恒为 ②。
-            assert row.when[1] == module.QIANXUN_EFFECT_MOVE, (
-                f"{branch_step.name} 的行必须钉在效果② 上：{tuple(row.when)}"
+            assert row.when[0] == option, (
+                f"{branch_step.name} 的行必须钉在 {option} 上：{tuple(row.when)}"
             )
-        assert not any(
-            module.QIANXUN_EFFECT_CARD in row.when or module.QIANXUN_EFFECT_GAIN in row.when
-            for row in branch_step.pool
-        ), "效果 ① / ③ 的行一条都不出现"
 
-    # 预览（与校验器同一份池回调）：选 ① 时这两步**不存在**（光标直接越过）。
-    skipped = preview_step(
-        flow, state, 0, [("cost", (module.QIANXUN_COST_DAMAGE,)), ("effect", (module.QIANXUN_EFFECT_CARD,))],
-        steps=steps,
-    )
+    # 预览（与校验器同一份池回调）：① 直接填完；② 停在选牌；③ 停在选类型。
+    skipped = preview_step(flow, state, 0, [("effect", (module.QIANXUN_EFFECT_CARD,))], steps=steps)
     assert skipped.cursor == len(steps), f"效果① 后面没有步骤：cursor={skipped.cursor}"
 
-    after_two = preview_step(
-        flow, state, 0, [("cost", (module.QIANXUN_COST_DAMAGE,)), ("effect", (module.QIANXUN_EFFECT_MOVE,))],
-        steps=steps,
-    )
+    after_two = preview_step(flow, state, 0, [("effect", (module.QIANXUN_EFFECT_MOVE,))], steps=steps)
     assert after_two.name == "card", f"选② 后光标停在选牌步：{after_two.name}"
     assert set(after_two.options) == {
         str(state.player(0).equip[0]),
         str(converted),
     }, f"候选 = 场上所有装备 / 判定牌：{after_two.options}"
 
-    after_card = preview_step(
-        flow,
-        state,
-        0,
-        [
-            ("cost", (module.QIANXUN_COST_DAMAGE,)),
-            ("effect", (module.QIANXUN_EFFECT_MOVE,)),
-            ("card", (converted,)),
-        ],
-        steps=steps,
-    )
-    assert after_card.name == "card" and after_card.next == "to"
+    after_gain = preview_step(flow, state, 0, [("effect", (module.QIANXUN_EFFECT_GAIN,))], steps=steps)
+    assert after_gain.name == "type", f"选③ 后光标停在选类型步：{after_gain.name}"
+    assert set(after_gain.options) == {"basic", "trick", "equipment"}
+
     editing_to = preview_step(
         flow,
         state,
         0,
         [
-            ("cost", (module.QIANXUN_COST_DAMAGE,)),
             ("effect", (module.QIANXUN_EFFECT_MOVE,)),
             ("card", (converted,)),
             ("to", ()),
@@ -1060,41 +1169,59 @@ def test_qianxun_manifest_lists_the_effect_two_steps_only_for_that_effect():
 
 
 def test_qianxun_rejects_branch_answers_of_another_effect():
-    """[G2][G3]：分支答案只属于被选中的效果；未选中分支的答案 fail-closed。
+    """[G2][G3]：分支答案只属于被选中的选项；两个事件各校验自己那一段。
 
     「先选② 再改选①」时，效果② 的 ``card`` / ``to`` 答案**不能被读成** ① 的答案：① 没有
-    分支步骤，故它们落在"多余的载荷"上被拒（与执行器读 ``answers`` 的方式同源——不用手写
-    第二份判据）。构造的就是一条合成的 ``ActivateSkill.picks`` / ``choices``。
+    分支步骤，故它们落在"多余的载荷"上被拒（与执行器读 ``answers`` 的方式同源）。
+    代价事件同理：代价③ 的两步只属于代价③。
     """
     from sgs.skills.flow import validate_flow_activation
     from sgs.skills import active as module
 
     state, converted = _cross_seat_move_state()
-    flow = _branch_flow()
+    flow = _effect_flow()
 
     def verdict(picks, choices):
         return validate_flow_activation(
             flow, state, 0, tuple(picks), tuple(choices), frame=_Frame(source=0)
         )
 
-    assert verdict((), (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_CARD)) is None
-    assert verdict((converted,), (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_CARD)) is not None, (
+    assert verdict((), (module.QIANXUN_EFFECT_CARD,)) is None
+    assert verdict((converted,), (module.QIANXUN_EFFECT_CARD,)) is not None, (
         "改了效果① 之后还带着效果② 的 picks ⇒ 多余载荷（fail-closed）"
     )
-    assert verdict((), (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE)) is not None, (
+    assert verdict((), (module.QIANXUN_EFFECT_MOVE,)) is not None, (
         "选中效果② 却缺选牌答案 ⇒ 拒收"
     )
-    assert verdict(
-        (converted,), (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE)
-    ) is not None, "选中效果② 却缺目的地 ⇒ 拒收"
-    assert verdict(
-        (converted,),
-        (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE, "seat:2"),
-    ) is None
-    assert verdict(
-        (converted,),
-        (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE, "seat:1"),
-    ) is not None, "源座位不是合法目的地（校验器读同一份目的地池）"
+    assert verdict((converted,), (module.QIANXUN_EFFECT_MOVE,)) is not None, (
+        "选中效果② 却缺目的地 ⇒ 拒收"
+    )
+    assert verdict((converted,), (module.QIANXUN_EFFECT_MOVE, "seat:2")) is None
+    assert verdict((converted,), (module.QIANXUN_EFFECT_MOVE, "seat:1")) is not None, (
+        "源座位不是合法目的地（校验器读同一份目的地池）"
+    )
+    assert verdict((), (module.QIANXUN_EFFECT_GAIN, "basic")) is None
+    assert verdict((), (module.QIANXUN_EFFECT_GAIN,)) is not None, "选中效果③ 却缺类型 ⇒ 拒收"
+
+    sword = state.player(0).equip[0]
+    cost_flow = _cost_flow()
+
+    def cost_verdict(picks, choices):
+        return validate_flow_activation(
+            cost_flow, state, 0, tuple(picks), tuple(choices), frame=_Frame(source=0)
+        )
+
+    assert cost_verdict((), (module.QIANXUN_COST_DAMAGE,)) is None
+    assert cost_verdict((sword,), (module.QIANXUN_COST_DAMAGE,)) is not None, (
+        "代价② 没有子步骤：选牌答案多余"
+    )
+    assert cost_verdict((sword,), (module.QIANXUN_COST_EQUIP, "lightning")) is None
+    assert cost_verdict((), (module.QIANXUN_COST_EQUIP, "lightning")) is not None, (
+        "代价③ 缺选牌答案 ⇒ 拒收"
+    )
+    assert cost_verdict((sword,), (module.QIANXUN_COST_EQUIP,)) is not None, (
+        "代价③ 缺产物 ⇒ 拒收"
+    )
 
 
 def _two_equipment_state():
@@ -1112,24 +1239,35 @@ def _two_equipment_state():
 
 
 class _OnceQianxunScript:
-    """发动**一次**【谦逊】的脚本：按给定的代价 / 效果 / 目的地答，其余取第一条候选。"""
+    """发动【谦逊】的脚本：按给定的代价 / 效果 / 目的地答，其余取第一条候选。
+
+    票 10 起一次"发动技能"要走**两次**（代价事件 → 效果事件），故它在每个出牌阶段各点一次
+    技能，直到 ``activations`` 用完。
+    """
 
     def __init__(
-        self, *, cost: str, effect: str, to: str = "seat:1", product: str = "lightning"
+        self,
+        *,
+        cost: str,
+        effect: str,
+        to: str = "seat:1",
+        product: str = "lightning",
+        activations: int = 2,
     ) -> None:
         self.cost = cost
         self.effect = effect
         self.to = to
         self.product = product
-        self.activated = False
+        self.wanted = activations
+        self.activations = 0
         self.queries: list[Any] = []
 
     def respond(self, query: Any) -> Any:
         self.queries.append(query)
         kind = str(getattr(query.kind, "value", query.kind))
         if kind == "PLAY_PHASE":
-            if not self.activated:
-                self.activated = True
+            if self.activations < self.wanted:
+                self.activations += 1
                 return next(
                     action
                     for action in query.legal_actions
@@ -1157,7 +1295,7 @@ class _OnceQianxunScript:
 
 
 def _drive_once(engine, script) -> None:
-    """推进到下一次出牌阶段（一次发动走完 / 被取消）。"""
+    """推进到下一次出牌阶段（两次发动都走完 / 被取消）。"""
     players = [script, _PlayScript((), skill_id="none")]
     for _ in range(400):
         if engine.finished:
@@ -1168,7 +1306,7 @@ def _drive_once(engine, script) -> None:
             continue
         if (
             str(getattr(pending.kind, "value", pending.kind)) == "PLAY_PHASE"
-            and script.activated
+            and script.activations >= script.wanted
             and any(isinstance(action, EndPhase) for action in pending.legal_actions)
         ):
             return
@@ -1176,12 +1314,13 @@ def _drive_once(engine, script) -> None:
     raise AssertionError("步数上限内没有回到出牌阶段")
 
 
-def test_qianxun_cost_three_and_effect_two_never_take_the_same_equipment_card():
-    """风险 1：代价③ 会移走一张装备牌，而效果② 要搬的正是装备区的牌 —— 二者互斥。
+def test_qianxun_cost_three_then_effect_two_both_work_on_the_field():
+    """票 10：代价③ 打出的那张牌**先**进自己的判定区；效果事件随后才在场上选牌。
 
-    局面：座 0 装备区两张武器。选代价③ + 效果② 并点了其中一张当"要搬的牌"之后，
-    代价③ 的**装备池排除那张**（契约：`_qianxun_equipment_face(excluded=...)`），于是同一张
-    牌不可能既当延时锦囊的原料、又被搬走。
+    两个事件是两次发动 ⇒ 03b 的"代价③ 与效果② 不能共用同一张装备牌"（风险 1）不再成立：
+    代价结算完，那张牌**已经是场上的一张牌**，效果② 的选牌面因此包含它。本用例钉住次序：
+    第一问（代价事件的原料面）= 自己的手牌 / 装备区；第二问（效果事件的场上选牌面）=
+    跨座位公开区，且里面同时有"另一张装备"与"刚打出的那张延时锦囊"。
     """
     from sgs.skills import active as module
 
@@ -1197,31 +1336,38 @@ def test_qianxun_cost_three_and_effect_two_never_take_the_same_equipment_card():
         for query in script.queries
         if str(getattr(query.kind, "value", query.kind)) == "SELECT_CARDS"
     ]
-    assert len(faces) >= 2, f"两次选牌：效果② 的跨座位面 + 代价③ 的装备面（{len(faces)}）"
-    move_face, cost_face = faces[0], faces[1]
-    assert move_face.spec.seats, "第一问是效果② 的跨座位面"
-    assert not cost_face.spec.seats, "第二问是代价③ 的装备面（自己手牌 / 装备区）"
-    move_slot_cards = {int(slot.card.card_id) for slot in move_face.slots}
-    picked = int(move_face.slots[0].card.card_id)
-    assert picked in move_slot_cards
-    cost_options = {int(slot.card.card_id) for slot in cost_face.slots}
-    assert picked not in cost_options, (
-        f"被效果② 选中的那张（{picked}）不在代价③ 的装备池里（{cost_options}）"
+    assert len(faces) == 2, (
+        f"两个事件各一次选牌：代价③ 的原料面 + 效果② 的场上选牌面（{len(faces)}）"
     )
+    cost_face, move_face = faces
+    assert not cost_face.spec.seats, "第一问是代价事件：自己的手牌 / 装备区"
+    assert move_face.spec.seats, "第二问是效果事件：跨座位公开区"
+    assert len(cost_face.slots) == 2, "代价③ 的原料 = 两张装备牌"
 
-    player = state.player(0)
+    cost_picked = int(cost_face.slots[0].card.card_id)
+    assert cost_picked in state.player(0).judge, "代价③ 的原料进了自己的判定区"
+    assert state.virtual_judge[cost_picked].type == "lightning", "产物是【闪电】"
+    assert move_face.spec.seats, "效果事件的选牌面跨座位"
+
+    move_slot_cards = {int(slot.card.card_id) for slot in move_face.slots}
+    assert cost_picked in move_slot_cards, (
+        f"刚打出的那张已经是场上的一张牌（效果② 可以移动它）：{move_slot_cards}"
+    )
+    picked = int(move_face.slots[0].card.card_id)
     other = second if picked == first else first
-    assert picked not in player.equip, "被搬走的那张离开了自己的装备区"
+    assert picked not in state.player(0).equip, "被搬走的那张离开了自己的装备区"
     assert picked in state.player(1).equip, "搬到了座 1 的装备区"
-    assert other in player.judge, "另一张被代价③ 当成延时锦囊放进了自己的判定区"
+    assert other in state.player(0).judge, "另一张被代价③ 当成延时锦囊放进了自己的判定区"
     assert state.virtual_judge[other].type == "lightning", "代价③ 的产物是【闪电】"
+    assert module._qianxun_used_costs(state, 0) == {module.QIANXUN_COST_EQUIP}
+    assert module._qianxun_used_effects(state, 0) == {module.QIANXUN_EFFECT_MOVE}
 
 
-def test_qianxun_never_offers_the_only_equipment_card_as_the_effect_two_target():
-    """风险 1 的另一半：**只有一张**装备牌时，它既是代价③ 的唯一原料、又是效果② 的候选。
+def test_qianxun_single_equipment_card_pays_the_cost_and_becomes_a_field_card():
+    """票 10：只有一张装备牌时它照样付得起代价③，结算完就是场上的牌（不再"面被排空"）。
 
-    这一张被 ``PickCards.exclude_cards`` 排除出效果② 的面（否则代价付不起），场上没有别的
-    牌可选 ⇒ 分支步空池 ⇒ 整条发动取消（零副作用）：代价不付、效果位不写、技能可再发动。
+    03b 的"风险 1 另一半"（唯一装备牌被效果② 的面排除 ⇒ 整条发动取消）在事件拆分后消失：
+    代价已经付清，效果事件面对的是**场上**的牌 —— 那张牌正躺在自己的判定区（产物仍在）。
     """
     from sgs.skills import active as module
 
@@ -1239,12 +1385,83 @@ def test_qianxun_never_offers_the_only_equipment_card_as_the_effect_two_target()
     )
     _drive_once(engine, script)
 
-    assert not [
+    faces = [
         query
         for query in script.queries
         if str(getattr(query.kind, "value", query.kind)) == "SELECT_CARDS"
-    ], "效果② 的面被排空 ⇒ 连一次选牌询问都不发"
-    assert module._qianxun_used_costs(state, 0) == frozenset(), "取消 = 代价不付"
-    assert module._qianxun_used_effects(state, 0) == frozenset(), "取消 = 效果位不写"
-    assert sword in state.player(0).equip, "那张装备牌还在原处"
-    assert not state.player(0).judge, "没有变成延时锦囊"
+    ]
+    assert len(faces) == 2, "代价③ 的原料面 + 效果② 的场上选牌面（不再是'取消'）"
+    cost_face, move_face = faces
+    assert [int(slot.card.card_id) for slot in cost_face.slots] == [sword]
+    assert [int(slot.card.card_id) for slot in move_face.slots] == [sword], (
+        "场上只有刚打出的那一张（在自己的判定区）"
+    )
+    assert module._qianxun_used_costs(state, 0) == {module.QIANXUN_COST_EQUIP}
+    assert module._qianxun_used_effects(state, 0) == {module.QIANXUN_EFFECT_MOVE}
+    assert sword in state.player(1).judge, "被效果② 搬到座 1 的判定区"
+    assert state.virtual_judge[sword].type == "lightning", "移动判定区的转化牌保持产物"
+
+
+def test_qianxun_composite_actions_drive_the_two_events() -> None:
+    """预发动确认走的是**复合动作**（``ActivateSkill(picks, choices)``）：两个事件各一份。
+
+    这是界面 / AI 真正走的那条路（`validate_activation` → 帧私有 ``activation`` →
+    ``run_flow`` 摊回逐步答案）。先提交**代价事件**的复合动作（代价②，无 picks）⇒ 结算完、
+    窗口打开；再提交**效果事件**的复合动作（效果② 的选牌 + 目的地）⇒ 搬牌、记效果位。
+    两段的 ``flow`` 名归属按持有者状态现算（`engine._activation_payload`），摊回因此认得出
+    是哪一份流水线。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.preactivation import preactivation_for
+
+    state, converted = _cross_seat_move_state()
+    engine = Engine.from_state(state, seed=73)
+    for _ in range(400):
+        if engine.pending is not None:
+            break
+        engine._step()
+    pending = engine.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", pending
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=QIANXUN,
+            picks=(),
+            choices=(module.QIANXUN_COST_DAMAGE,),
+            answers_seq=pending.seq,
+        )
+    )
+    for _ in range(400):
+        if engine.pending is not None or engine.finished:
+            break
+        engine._step()
+    assert module._qianxun_used_costs(state, 0) == {module.QIANXUN_COST_DAMAGE}, (
+        "代价事件的复合动作被收下并结算：代价位写入"
+    )
+    assert module._qianxun_window_open(state, 0), "结算完打开效果事件窗口"
+    pending = engine.pending
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", pending
+    assert [step.name for step in preactivation_for(state, 0, QIANXUN)] == [
+        "effect",
+        "card",
+        "to",
+        "type",
+    ], "第二次发动发放的是效果事件的清单"
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=QIANXUN,
+            picks=(converted,),
+            choices=(module.QIANXUN_EFFECT_MOVE, "seat:2"),
+            answers_seq=pending.seq,
+        )
+    )
+    for _ in range(400):
+        if engine.pending is not None or engine.finished:
+            break
+        engine._step()
+    assert list(state.player(2).judge) == [converted], "效果事件的复合动作把牌搬到座 2 判定区"
+    assert converted not in state.player(1).judge
+    assert state.virtual_judge[converted].type == "indulgence", "移动判定区的转化牌保持产物"
+    assert module._qianxun_used_effects(state, 0) == {module.QIANXUN_EFFECT_MOVE}
+    assert not module._qianxun_window_open(state, 0), "效果结算完窗口关闭"

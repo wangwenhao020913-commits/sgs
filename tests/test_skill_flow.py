@@ -2353,3 +2353,123 @@ def test_the_multi_seat_step_has_one_candidate_source_for_manifest_validation_an
     preview = preview_step(flow, state, 0, [("card", ())], steps=steps)
     assert preview.name == "card"
     assert set(preview.options) == {str(sword), str(judge)}, preview.options
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 10：**按持有者状态现算的流水线** + 取消的收尾位
+# ---------------------------------------------------------------------------
+#
+# 用户 2026-11-22 实机裁定：**代价与效果是两个事件**，一个预发动只含一个事件。同一条技能
+# 因此要在同一时刻给出两套清单（先代价、结算完再效果），且"效果凑不出候选"只取消**这个
+# 效果**、不回退整个技能。两件机制都落在流水线层，不按技能名特判：
+#
+# - ``SkillFlow.on_cancel``：步骤集合取消时的收尾位（缺省 ``None`` = 既有的"零副作用"）；
+# - 声明上的 ``flow_resolver``：``flow_for(skill_id, state=…, owner=…)`` 按持有者状态现算
+#   流水线，主动技的启动回调读同一份。
+
+
+def test_a_flow_may_consume_a_window_when_its_collection_cancels():
+    """``on_cancel``：取消仍不跑 ``effect``，但可以跑一次**簿记收尾**（关闭效果窗口）。
+
+    这是"代价已付、效果不成立"的唯一出口：步骤集合空池 ⇒ 不发没有候选的询问、``effect``
+    一次都不跑；收尾位只把"这次效果事件已经用掉"记下来（不搬牌、不记效果位）。
+    """
+    engine, frame = _resume_engine(target_hand=())
+    seen: list[str] = []
+
+    def effect(host, frame_, answers):
+        seen.append("effect")
+
+    flow = SkillFlow(
+        name="cancel_consumes",
+        steps=(
+            PickSeats(
+                lo=1,
+                hi=1,
+                pool=lambda state, f, owner, chosen: (),
+                optional=False,
+                key="seat",
+            ),
+        ),
+        effect=effect,
+        on_cancel=lambda host, frame_: seen.append("cancel"),
+    )
+    assert run_flow(engine, frame, flow, owner=0) is None
+    assert seen == ["cancel"], f"取消跑一次收尾、effect 一次都不跑：{seen}"
+    assert engine.pending is None, "空池照旧不发询问（零副作用的那一半不变）"
+
+
+def _resolver_flows():
+    """两条**零询问 / 单步**流水线：足够区分"哪一份被解析出来"。"""
+    static = SkillFlow(name="resolve_static", steps=(), effect=lambda h, f, a: None)
+    dynamic = SkillFlow(
+        name="resolve_dynamic",
+        steps=(PickOption(options=("b",), optional=False, key="b"),),
+        effect=lambda h, f, a: None,
+    )
+    return static, dynamic
+
+
+def test_a_declaration_may_resolve_its_flow_from_the_owner_state(monkeypatch):
+    """``flow_for(..., state=, owner=)`` 读声明上的解析器：清单 / 校验都跟着换那一份。"""
+    from types import MappingProxyType
+
+    from sgs.skills import preactivation as preactivation_module
+
+    skill_id = "hero.fake.resolver"
+    static, dynamic = _resolver_flows()
+
+    def resolver(state, owner):
+        return dynamic if state.player(owner).hp < 4 else static
+
+    monkeypatch.setattr(
+        preactivation_module, "FLOW_RESOLVERS", MappingProxyType({skill_id: resolver})
+    )
+    state, _own, _theirs = _branch_state()
+
+    assert preactivation_module.flow_for(skill_id, state=state, owner=0) is static
+    assert preactivation_module.preactivation_for(state, 0, skill_id) == (), (
+        "静态那一份是零步 ⇒ 没有清单"
+    )
+
+    state.player(0).hp = 3
+    assert preactivation_module.flow_for(skill_id, state=state, owner=0) is dynamic
+    steps = preactivation_module.preactivation_for(state, 0, skill_id)
+    assert [step.name for step in steps] == ["b"], [step.name for step in steps]
+    assert preactivation_module.validate_activation(state, 0, skill_id, (), ("b",)) is None
+
+    state.player(0).hp = 4
+    assert preactivation_module.validate_activation(state, 0, skill_id, (), ("b",)) is not None, (
+        "换回静态那一份之后 'b' 是多余载荷 ⇒ 拒收"
+    )
+    assert preactivation_module.flow_for(skill_id) is None, (
+        "没有 state / owner ⇒ 不猜（解析器只按持有者状态回答）"
+    )
+
+
+def test_the_active_handler_resolves_the_flow_of_the_frame_source():
+    """主动技的启动回调读**同一份**解析：谁声明了解析器，谁就不再烘死 import 期那份 flow。"""
+    from sgs.skills.active import ActiveSkill, _activation_handler
+
+    static, dynamic = _resolver_flows()
+    ran: list[str] = []
+    static = SkillFlow(name="handler_static", steps=(), effect=lambda h, f, a: ran.append("static"), once_per_phase=False)
+    dynamic = SkillFlow(name="handler_dynamic", steps=(), effect=lambda h, f, a: ran.append("dynamic"), once_per_phase=False)
+
+    def resolver(state, owner):
+        return dynamic if state.player(owner).hp < 4 else static
+
+    skill = ActiveSkill(
+        "hero_fake",
+        "resolver",
+        lambda state, ctx, current: current,
+        flow=static,
+        flow_resolver=resolver,
+    )
+    state, _own, _theirs = _branch_state()
+    host = type("Host", (), {"state": state})()
+    handler = _activation_handler(skill)
+    handler(host, _Frame(source=0, skill_id=skill.skill_id))
+    state.player(0).hp = 3
+    handler(host, _Frame(source=0, skill_id=skill.skill_id))
+    assert ran == ["static", "dynamic"], ran

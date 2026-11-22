@@ -74,6 +74,7 @@ __all__ = [
     "FixedSplit",
     "FlowAnswers",
     "FlowBranch",
+    "FlowCancel",
     "FlowEffect",
     "FlowStep",
     "PickCards",
@@ -161,6 +162,13 @@ SeatBound = int | Callable[[GameState, Any, int, FlowAnswers], int]
 
 FlowEffect = Callable[[Any, Any, FlowAnswers], Any]
 """流水线效果：``(host, frame, answers) -> Control``；只在**所有步骤提交后**跑一次。"""
+
+FlowCancel = Callable[[Any, Any], None]
+"""步骤集合**取消**时的收尾：``(host, frame) -> None``（qunying 票 10 的加法）。
+
+缺省（不声明）= 既有的"取消 = 零副作用、技能可再发动"；声明了它的流水线只把取消当成
+**这一次事件**不成立（例：代价已付、效果事件的候选空池 ⇒ 关闭效果窗口，不回退代价）。
+它**不是**第二个 ``effect``：不许在这里搬牌 / 发询问 / 记效果位——只许写簿记位。"""
 
 AskIdentity = str | tuple[str, int]
 """一次询问的**询问位置**（票 22）：:meth:`Engine.ask_selection` 的 ``owner`` 参数。
@@ -657,6 +665,14 @@ class SkillFlow:
     steps: tuple[FlowStep, ...]
     effect: FlowEffect
     once_per_phase: bool = True
+    on_cancel: FlowCancel | None = None
+    """步骤集合取消时的**收尾**（qunying 票 10；缺省 ``None`` = 零副作用）。
+
+    ``run_flow`` 的三态里 ``"cancel"`` 原本恒等于"这次发动没有发生"（不落位、技能可再
+    发动）。一个**事件**的流水线如果需要"取消只作废这个事件、不回退它之前已经结算的事件"
+    （首个消费者 =【谦逊】的效果事件：代价已由上一个事件付清），把收尾写在这里。收尾只许
+    写簿记位（关闭窗口 / 记消耗），**不**搬牌、**不**发询问、**不**记效果位。
+    """
 
     def __post_init__(self) -> None:
         """**同一流程内步骤 ``key`` 两两不同**（票 22）：重复即流程定义写错。
@@ -3115,7 +3131,11 @@ def run_flow(
                     "续跑的步骤必须先采用它已接受的答案（Engine.accepted_selection / "
                     "Engine.accepted_option），不能按活状态重算池。"
                 )
-            # 取消：一个副作用都不产生（提交点不落、``effect`` 不跑），技能可再发动。
+            # 取消：一个副作用都不产生（提交点不落、``effect`` 不跑），技能可再发动；
+            # 声明了 ``on_cancel`` 的流水线额外跑一次**簿记收尾**（qunying 票 10：效果
+            # 事件不成立只作废它自己，不回退上一个事件已经付掉的代价）。
+            if flow.on_cancel is not None:
+                flow.on_cancel(host, frame)
             return None
         answers[step.key] = value
         position += 1

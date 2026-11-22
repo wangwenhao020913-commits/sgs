@@ -786,7 +786,12 @@ def _raw_text(response: object) -> str:
 
 
 def _activation_payload(
-    activation: Mapping[str, tuple[Any, ...]], skill_id: str, timing: Timing | None
+    activation: Mapping[str, tuple[Any, ...]],
+    skill_id: str,
+    timing: Timing | None,
+    *,
+    state: GameState | None = None,
+    owner: int | None = None,
 ) -> dict[str, Any]:
     """复合动作的帧私有载荷：``(picks, choices)`` + 归属。
 
@@ -796,9 +801,13 @@ def _activation_payload(
     不再相等；只按短名判归属会让界版的**复合动作不被摊回**、改去逐步重问（M6 票 16
     的界【仁德】第一次撞到）。流水线名在**提交那一刻**按同一份登记表解析，与执行器随后
     读到的是同一个对象。
+
+    ``state`` / ``owner``（qunying 票 10）：声明了 ``flow_resolver`` 的技能按**持有者状态**
+    现算那一份（【谦逊】的代价 / 效果是两个事件）；不传则读静态登记表，与引入本机制之前
+    逐字相同。
     """
     payload: dict[str, Any] = {**activation, "skill_id": skill_id}
-    flow = flow_for(skill_id, timing)
+    flow = flow_for(skill_id, timing, state=state, owner=owner)
     if flow is not None:
         payload["flow"] = flow.name
     return payload
@@ -2316,7 +2325,7 @@ class Engine:
         if activation is not None:
             # 归属随载荷一起走（W4-fix-2 的跨技能泄漏修复：见 `flow._activation_belongs`）。
             data["activation"] = _activation_payload(
-                activation, action.skill_id, None
+                activation, action.skill_id, None, state=self.state, owner=source
             )
         return data
 
@@ -3408,7 +3417,7 @@ class Engine:
                 # ``run_flow`` 摊回逐步答案。W4-fix-2：归属随载荷一起走——同一帧上后续
                 # 别的技能的流水线不得读它（`flow._activation_belongs`）。
                 frame.data["activation"] = _activation_payload(
-                    activation, action.skill_id, timing
+                    activation, action.skill_id, timing, state=self.state, owner=seat
                 )
         answers[answer_key] = action
         return action

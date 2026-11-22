@@ -42,6 +42,20 @@
 > 是加载期一次性写入的——**运行期登记禁止**（与 `register_provider` 同一条纪律）。A 族仍走
 > `ACTIVE_SKILLS`，钩子侧的流水线仍走 `Hook.flow` / 接缝走 `Seam.flow`，三条登记互不覆盖。
 
+> **按状态现算的流水线（`ActiveSkill.flow_resolver`，qunying 票 10 的加法）**：不是第六种原语，
+> 而是"**这一次发动跑哪一份** `SkillFlow`"的派生。判据：**一个预发动只含一个事件**（用户
+> 2026-11-22 裁定）——多步只表示这个事件要多次选择；同一条技能在同一时刻要给出**两套**发动面
+> （先代价、结算完再效果）时，静态 `flow` 表达不了。声明上给
+> `flow_resolver=(state, owner) -> SkillFlow | None`，`src/sgs/skills/preactivation.py:flow_for` /
+> `preactivation_for` / `validate_activation` / `preview_activation` 与主动技的启动回调读**同一份**
+> 解析（清单 / 校验 / 预览 / 执行不可能各说一套；解析器返回 `None` = 此刻没有可发动的流水线，
+> 不回退静态表）。两份流水线都**登记**在声明上（`flow` = 静态回退那一份 + `event_flows` =
+> 其余几份，`_build_flows` 全写进 `FLOWS`），"定义即死代码"的机械审计因此照旧成立。
+> `FlowBranch` 回答"这个事件要几次选择"，`flow_resolver` 回答"此刻是哪个事件"。
+> 取消**只作废当前事件**、不回退已付代价时，在那一份 `SkillFlow` 上声明
+> `src/sgs/skills/flow.py:FlowCancel`：只许写簿记位（关闭窗口 / 记消耗），**不**搬牌、**不**发
+> 询问、**不**记效果位。
+
 > **「只能」型转化另立一档**：牌面写「**只能**将一张 X 当 Y 使用或打出」（当前只有神关羽
 > 【武神】）时，在 `ConversionSkill` 上声明 `forced=True`。它与 `locked` **正交**：锁定技是
 > 另一条规则类型（失效 / 形态表），`forced` 只回答"源牌还能不能按原用途用"——`forced=True`
@@ -60,7 +74,8 @@
 | 多步：座位 → 选项 → 选牌 | 「选择一名男性角色，然后弃置一张手牌或将一张装备牌置入其装备区」 | `hero.jie_sunshangxiang.jieyin` |
 | 选项步（闭集，可动态） | 「选择一项：1… 2…」 | `hero.jie_xushu.jianyan` |
 | 选项步 + **置灰**（`disabled`：列出来但此刻不可选） | 「将此牌当任意一张基本牌或普通锦囊牌」——牌名**列全**，"此刻没有合法目标"的置灰 | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】；`disabled` 见 `src/sgs/skills/flow.py:PickOption`） |
-| **选项 → 依赖该选项的后续步骤**（`FlowBranch`：选了这一项之后才有的几步） | 「选择一项：1… 2…；若选 2，则再在场上点一张牌、然后选一名角色」 | `hero.qunying_luxun.qianxun`（qunying 票 03b：选代价 → 选效果 → 效果② 的「场上点选一张牌 → 目的地（非法置灰）」；`src/sgs/skills/flow.py:FlowBranch`。它是**步骤的组合子**，不是第六种原语） |
+| **选项 → 依赖该选项的后续步骤**（`FlowBranch`：选了这一项之后才有的几步） | 「选择一项：1… 2…；若选 2，则再在场上点一张牌、然后选一名角色」 | `hero.qunying_luxun.qianxun`（qunying 票 03b/10：代价事件里 **代价③ → 选装备牌 → 选延时锦囊**，效果事件里 **效果② → 场上一张牌 → 目的地（非法置灰）** / **效果③ → 选类型**；`src/sgs/skills/flow.py:FlowBranch`。它是**步骤的组合子**，不是第六种原语） |
+| **两段发动面（一个预发动只含一个事件）** | 「出牌阶段各限一次，你可【付代价】，并执行本回合未选过的一项」——**代价结算完技能再次可发动**；效果凑不出候选只作废这个事件、不回退代价 | `hero.qunying_luxun.qianxun`（qunying 票 10：代价事件先结算；效果事件随后由声明上的 `flow_resolver` 现算，`src/sgs/skills/preactivation.py:FLOW_RESOLVERS` 派生、`src/sgs/skills/active.py:_qianxun_flow` 是首个消费者；效果事件空池时 `FlowCancel` 关闭窗口、代价位不回退） |
 | 手写询问（循环/逐点/逐目标） | 「逐点触发、每个伤害点各问一次」「逐个目标」 | `hero.guojia.yiji`、`hero.jie_machao.tieqi` |
 | 手写**主体**（`SkillFlow` 只装前几步，段机住在 `effect` 里） | 「扣置一张手牌…然后其他角色**依次**质疑」——一次发动里有**变长循环**（逐座位问）；或「失去 1 点体力**或**弃一张武器牌，然后…」——两条代价分支的**后续步骤不同**（一条要选牌、一条不要） | `hero.yuji_mobile.guohuo`（前两步是流水线，质疑循环住在提交点；判据见 `src/sgs/skills/flow.py:SkillFlow` 的"本语言没有循环 / 每轮提交步骤"）；**条件步**同形：`hero.dianwei_mobile.qiangxi`（选项步留在流水线，选牌 / 选目标 / 付费住在 `effect`——`steps` 是定长元组，任一步"没有候选"= 取消整条，没有"跳过这一步"） |
 | 钩子 + 修饰器（触发后改值） | 「当你失去 1 点体力后…本阶段…」 | `hero.jie_huanggai.zhaxiang` |
@@ -251,7 +266,7 @@
 | `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`disabled` = **显示但不可选**的那几项（同形态的可调用档）⇒ 清单的 `StepPool.disabled` 让界面置灰、校验器拒收；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
 | `PickProvide` | `provide` | 选一张用于"提供"的牌（转化 / 提供者） |
 | `Arrange` | `arrange` | 排列（观星）；含它的流水线不下发预发动清单。规格可以是 `DeckTopArrange`（牌堆顶 / 底）或 `TwoRowArrange`（**两行交换**：具名行 + 定切分 + 不枚举候选 + 行内不调序；首个载体 = 神诸葛亮【七星】），后者见 §4.1 |
-| `FlowBranch` | `branch` | **按前序选项分叉的子步骤**（qunying 票 03b）：`key` = 前序 `PickOption` 的步骤键，`branches` = `选项文本 → 子步骤元组`（空元组 / 没列出的选项 = 这项后面没有步骤，**不是取消**）。它是**步骤的组合子**，不是第六种原语：子步仍是 `cards` / `option` 两种（闭集，`tests` 与构造期都核），各处的面 / 池 / 文案 / 置灰规则一条不改。**必须是流水线的最后一步**（子步占据有效序列的尾部，询问位置 `(name, index)` 因此唯一）。子步的 `key` 与顶层步**共用** `answers`，故整条流水线唯一。四个读取方读同一份展开（`src/sgs/skills/flow.py:_branch_steps`）：执行器（就地展开）、校验器（只摊回选中分支的答案、未选中分支的答案判"多余"）、清单（`StepPool.when` 给行，分支行**不许**收成空 `when`）、预览（按已选答案跳过不存在的子步）。首个载体 =【谦逊】效果② |
+| `FlowBranch` | `branch` | **按前序选项分叉的子步骤**（qunying 票 03b）：`key` = 前序 `PickOption` 的步骤键，`branches` = `选项文本 → 子步骤元组`（空元组 / 没列出的选项 = 这项后面没有步骤，**不是取消**）。它是**步骤的组合子**，不是第六种原语：子步仍是 `cards` / `option` 两种（闭集，`tests` 与构造期都核），各处的面 / 池 / 文案 / 置灰规则一条不改。**必须是流水线的最后一步**（子步占据有效序列的尾部，询问位置 `(name, index)` 因此唯一）。子步的 `key` 与顶层步**共用** `answers`，故整条流水线唯一。四个读取方读同一份展开（`src/sgs/skills/flow.py:_branch_steps`）：执行器（就地展开）、校验器（只摊回选中分支的答案、未选中分支的答案判"多余"）、清单（`StepPool.when` 给行，分支行**不许**收成空 `when`）、预览（按已选答案跳过不存在的子步）。首个载体 =【谦逊】（票 03b 的效果② 两步；票 10 起代价 / 效果两个事件各自的子步） |
 
 ### 3.8 要牌窗口登记表 `CARD_REQUEST_WINDOWS`（票 16 / E2）
 

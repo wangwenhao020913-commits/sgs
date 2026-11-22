@@ -1535,11 +1535,23 @@ _QIANXUN_EFFECT_SHIFT = 52
 
 位 52..54 = 效果 ①②③ 各一位，作用域 = **一个游戏回合**（牌面写"本回合未被选择过的一项"）
 ⇒ 不进 `_PHASE_STATE_MASK`，由 :func:`reset_turn_skill_state` 清（与 `_TURN_USED` 同一
-复位点）。52 起：48..50 是代价位，51 留一位余量。
+复位点）。52 起：48..50 是代价位，51 = 效果事件窗口（见下），55 起空闲。
 """
 
 _QIANXUN_EFFECT_MASK = 0b111 << _QIANXUN_EFFECT_SHIFT
 """【谦逊】三个效果的"本回合已选过"位（见上）。"""
+
+_QIANXUN_WINDOW = 1 << 51
+"""【谦逊】**效果事件窗口**位（qunying 票 10）：代价已结算完、效果事件待选。
+
+用户 2026-11-22 裁定"代价与效果是两个事件"：代价事件先结算，之后技能**再次可发动**、
+进入效果事件；两套清单由 `active._qianxun_flow` 按这一位选。作用域 = **本回合**（与效果位
+同一复位点）：效果"每回合各一次" ⇒ 窗口不跨回合；**跨出牌阶段保留**（额外出牌阶段刷新代价、
+但不刷新"代价已付"这一事实）⇒ **不**进 :data:`_PHASE_STATE_MASK`。
+
+效果事件**失败**（候选池空 ⇒ 步骤集合取消）时仍清这一位：用户裁定第 5 条——代价已付之后
+效果不成立只是"无事发生"，不回退技能；这个效果事件已经用掉，不再重复提供。
+"""
 
 _PHASE_STATE_MASK = (
     0b111
@@ -1641,7 +1653,8 @@ def mark_skill_used_this_turn(state: GameState, seat: int, skill_id: str) -> Non
 def reset_turn_skill_state(state: GameState) -> None:
     """清理**本回合**的 per-instance 技能状态（M6 票 08；引擎回合末统一调用）。
 
-    只清 :data:`_TURN_USED` 位：整局位（限定技"已用"）与觉醒位保留，"每回合限一次"的技能
+    只清 :data:`_TURN_USED` 位（以及同作用域的 :data:`_QIANXUN_EFFECT_MASK` /
+    :data:`_QIANXUN_WINDOW`）：整局位（限定技"已用"）与觉醒位保留，"每回合限一次"的技能
     因此每个游戏回合都能重新发动一次。与 :func:`reset_phase_skill_state` 同形（按掩码清、
     键清空即删）。
 
@@ -1650,7 +1663,9 @@ def reset_turn_skill_state(state: GameState) -> None:
     同一牌名时，位图只认**第一次**——见 :func:`skill_used_this_turn`。
     """
     for key in list(state.skill_state):
-        remaining = state.skill_state[key] & ~(_TURN_USED | _QIANXUN_EFFECT_MASK)
+        remaining = state.skill_state[key] & ~(
+            _TURN_USED | _QIANXUN_EFFECT_MASK | _QIANXUN_WINDOW
+        )
         if remaining:
             state.skill_state[key] = remaining
         else:

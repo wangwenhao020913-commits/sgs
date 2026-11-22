@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -34,6 +34,7 @@ from .flow import (
 )
 
 __all__ = [
+    "FLOW_RESOLVERS",
     "FLOWS",
     "flow_for",
     "preactivation_for",
@@ -60,6 +61,10 @@ def _build_flows(
     for skill in active:
         if skill.flow is not None:
             table.setdefault(skill.skill_id, []).append((None, skill.flow))
+        # 按状态切换的**其余**事件流水线（qunying 票 10）：静态读者只取第一条 = ``flow``，
+        # 按状态现算的读者走 ``FLOW_RESOLVERS``；两者都由声明派生，不手抄 id 名单。
+        for alternate in skill.event_flows:
+            table.setdefault(skill.skill_id, []).append((None, alternate))
     for skill_id, definition in catalog.items():
         if definition.flow is not None:
             # 声明级**发动**流水线（yijiang-2014-round2 票 20 的加法）：不是 A 族、却在
@@ -78,13 +83,55 @@ def _build_flows(
 FLOWS = _build_flows()
 """当前声明派生出的登记表（:func:`_build_flows` 的模块级快照）。"""
 
+FlowResolver = Callable[[GameState, int], SkillFlow | None]
+"""按**持有者状态**现算流水线：``(state, owner) -> SkillFlow``（qunying 票 10）。
 
-def flow_for(skill_id: str, timing: Timing | None = None) -> SkillFlow | None:
+声明上的 ``flow_resolver``：同一条技能在同一时刻要给出两套发动面时（【谦逊】的"代价事件"
+与"效果事件"），静态的 ``FLOWS`` 表达不了 ⇒ 由它回答此刻是哪一份。返回 ``None`` = 此刻
+没有可发动的流水线（fail-closed：清单为空、校验直接拒收）。
+"""
+
+
+def _build_resolvers(
+    active: tuple[ActiveSkill, ...] | list[ActiveSkill] = ACTIVE_SKILLS,
+) -> Mapping[str, FlowResolver]:
+    """从**声明**派生"按状态现算"的登记表（与 :func:`_build_flows` 同一姿态）。
+
+    不手抄 id 名单：声明了 :attr:`ActiveSkill.flow_resolver` 的技能自动进表；测试可注入
+    一份声明验"派生"本身。
+    """
+    return MappingProxyType(
+        {
+            skill.skill_id: skill.flow_resolver
+            for skill in active
+            if skill.flow_resolver is not None
+        }
+    )
+
+
+FLOW_RESOLVERS = _build_resolvers()
+"""``skill_id`` → 按持有者状态现算的流水线解析器（:func:`_build_resolvers` 的快照）。"""
+
+
+def flow_for(
+    skill_id: str,
+    timing: Timing | None = None,
+    *,
+    state: GameState | None = None,
+    owner: int | None = None,
+) -> SkillFlow | None:
     """取一条技能的流水线；``timing`` 命中该时机的钩子优先，其次取无时机的条目。
 
     主动技登记为无时机（出牌阶段空闲）；被动技若同一技能在两个时机各有一条流，
     ``timing`` 必须参与选择，否则会拿到另一条时机的步骤声明。
+
+    **按持有者状态现算**（qunying 票 10）：给了 ``state`` 与 ``owner`` 时，声明了
+    ``flow_resolver`` 的技能读解析器的那一份（它返回 ``None`` ⇒ 此刻没有流水线，不回退
+    静态表）；没给（或没有解析器）⇒ 读静态登记表，与引入本机制之前逐字相同。
     """
+    resolver = FLOW_RESOLVERS.get(skill_id)
+    if resolver is not None and state is not None and owner is not None:
+        return resolver(state, int(owner))
     entries = FLOWS.get(skill_id, ())
     if not entries:
         return None
@@ -129,7 +176,7 @@ def preactivation_for(
     （:attr:`SkillDef.step_requirements`），由 :func:`~sgs.skills.flow.manifest` 填进
     ``Step.wording``——声明只有一份，渲染器不 import 声明表。
     """
-    flow = flow_for(skill_id, timing)
+    flow = flow_for(skill_id, timing, state=state, owner=seat)
     if flow is None:
         return ()
     definition = CATALOG.get(skill_id)
@@ -174,7 +221,7 @@ def validate_activation(
     不要求动作出现在 ``legal_actions`` 里——这是"候选 = 接受"唯一让开的地方；校验器
     与候选生成读同一份 ``SkillFlow.steps``（区域 / 牌名 / 张数 / ``check_targets`` 链）。
     """
-    flow = flow_for(skill_id, timing)
+    flow = flow_for(skill_id, timing, state=state, owner=actor)
     if flow is None:
         return f"技能 {skill_id} 没有预发动清单"
     return validate_flow_activation(
@@ -203,7 +250,7 @@ def preview_activation(
     清单、不碰 ``view()`` / 投影 / 快照，只调与校验器同一份派生（:func:`~sgs.skills.flow.preview_step`）。
     技能没有流水线 ⇒ ``ValueError``（HTTP 层映射成 400：这类技能不走清单，也就没有"预览"）。
     """
-    flow = flow_for(skill_id, timing)
+    flow = flow_for(skill_id, timing, state=state, owner=actor)
     if flow is None:
         raise ValueError(f"技能 {skill_id} 没有预发动清单")
     return preview_step(
