@@ -71,7 +71,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 `
 
 ## 自检覆盖了什么、没覆盖什么
 
-`selfcheck.ps1` 无头能证明的（每项一条 `PASS/FAIL`，本机实测 **47 条全过**）：
+`selfcheck.ps1` 无头能证明的（每项一条 `PASS/FAIL`，本机实测 **52 条全过**）：
 
 1. `_internal/` 里真的有 `sgs_web/static/`（含 `voices/` 41 条）、`sgs_web/descriptions.json`、
    `sgs/data/files/*.json`、`python314.dll`、`VCRUNTIME140.dll`、`build-info.json`，且**没有**
@@ -120,10 +120,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 `
 
 | 项 | 值 |
 |---|---|
-| 版本戳 | `f1839c6`（git 短 HEAD，构建时传入） |
-| 构建时刻 | 2026-11-13，Python **3.14.4** / PyInstaller **6.22.3** / pydantic **2.13.5** |
-| 构建机 | Windows 10 22H2 x64；构建区 `C:\Users\asus\sgs-build`（含用户级 Python 3.14.4，未改 PATH、未装给所有用户） |
-| 目录 | **29.4 MB**（`SGS.exe` 5.3 MB），`_internal/` 里 41 条语音 + 17 个数据 JSON |
-| zip | **14.4 MB**，147 条目、顶层 `SGS-win64/`、反斜杠 0 条、CRC 全通过 |
-| 自检 | **47 项 PASS / 0 FAIL** |
-| 端到端 | 起 exe → 8 人 `standard_ex_160` 建局 → 拿到 `RESPOND` 挂起 → 提交一步应答 → 回包 337 条记录 |
+| 版本戳 | `f86d41b`（git 短 HEAD，构建时传入） |
+| 构建时刻 | 2026-11-23 07:40，Python **3.14.4** / PyInstaller **6.22.3** / pydantic **2.13.5** |
+| 构建机 | Windows 10 22H2 x64（DESKTOP-BF5892T）；构建区 **`D:\sgs-build`**（C 盘只剩 1.75 GB，改用 D 盘 + `-PythonExe` 复用 `C:\Users\asus\sgs-build\python3144`） |
+| 目录 | **59.9 MB**（`SGS.exe` 5.8 MB），`_internal/` 里 41 条语音 + 17 个数据 JSON；exe 旁 `pic/portraits/` **122 个文件**（115 张图 + 7 个作者文件） |
+| zip | **44.2 MB**（46,340,536 字节），顶层 `SGS-win64/`；SHA256 `f575afc358f2ba64b0df2b7191def43d7a7b1c26132a6fefef6e788e683ea9ae` |
+| 自检 | **52 项 PASS / 0 FAIL**（含「exe 旁有立绘目录 / ≥100 张图 / `GET /art/` 回真图片字节」） |
+| 端到端 | 起 exe → 8 人 `standard_ex_160` 建局 → 拿到 `RESPOND` 挂起 → 提交一步应答 → 回包带 `records`；单实例第二次启动 0.5 s 自退 |

@@ -138,8 +138,13 @@ do
   fi
 done
 
-# 旧小写 sgs 目录应已迁移并删除
-if [ -d "../sgs" ]; then
+# 旧小写 sgs 目录应已迁移并删除。
+# **判据要排除仓根自己**：GitHub Actions 的 checkout 目录名就是仓库名（`<parent>/sgs`），
+# 于是 `../sgs` 恰好解析到仓根 —— 旧写法 `[ -d ../sgs ]` 在 CI 上恒真，公开仓的 CI 自
+# 2026-11-13 引入起从未绿过（本机仓目录叫 `SGS`，大小写不同才侥幸绿）。只有解析后**不等于
+# 仓根**时才算"旧目录"。
+legacy_sgs="$(cd .. && pwd -P)/sgs"
+if [ -d "$legacy_sgs" ] && [ "$(cd "$legacy_sgs" && pwd -P)" != "$(pwd -P)" ]; then
   echo "FAIL: 旧 sgs 目录仍存在，迁移未完成"
   fail=1
 else
