@@ -11,29 +11,31 @@
    `.scratch/` 是 gitignore 的，门禁不能依赖它。`/implement-spec` 收口另写
    **`.scratch/<effort>/acceptance-map.md`**（spec 验收条目 → 断言），交给 `/code-review` 的
    Spec 轴。
-2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，本机实测 **≈8 分钟**；
-   GitHub Actions 跑**同一条**门禁（`.github/workflows/ci.yml` 只调它，2026-11-13 开源收口引入），
-   本地仍以提交时的 hook 为准；
-   pytest 单跑 356 s）。
-   **验证改动 = 一次提交本身**：先 `git config core.hooksPath` 查一次——本 checkout 是
-   `.githooks`（`bash tools/install-hooks.sh` 接的）：`src/` / `tests/` 改动跑全量，
-   `开发文档/` / `GLOSSARY.md` / `AGENTS.md` / `CODING_STANDARDS.md` / `docs/` 改动跑
-   **快速文档检查**（分级在 `tools/gate-staged.sh`）；**合并提交**由同源的
-   `.githooks/pre-merge-commit` 覆盖（`git merge` 不触发 pre-commit）。hook 失败会拒绝提交、
-   工作树不动，照输出修即可。**手工跑全量只用于"不提交、先看红/绿"**——提交时 hook 一定会
-   再跑一遍，别在提交前手跑（每票白等 ≈8 分钟；**`wip:` 提交同样跑全量 hook**，别把它当免费
-   检查点）。hook 的全量档走 **`tests/run_all.sh --quiet`**：只打每条检查一行 PASS 与最终结果
-   （成功摘要约 **227B**），失败时**只补打失败摘要 + 末 40 行**、完整日志留在 `runs/gate-<时间戳>/`；**人工跑全量用不带参数的
-   `bash tests/run_all.sh`**（全部 PASS 行与 pytest 输出）。`--quiet` 是 hook / agent 的省流
-   档，门禁判据不变。**放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；
-   用后台任务起它，再取输出。迭代期要快就用**单文件子集**：**`.venv/bin/pytest <file>`** ——
-   `python` 不在 PATH，门禁也只认 `$ROOT/.venv/bin/pytest`、不回退系统 pytest —— 或
-   `bash tests/smoke-web.sh`（实测 60–70 s）。**提交前 screen**：`bash tools/precommit-screen.sh`
-   （快档 ≈47 s；`--full` 加 `test_fuzz` ≈2 min，动 AI 随机流 / 共享原语时必跑）——它是门禁的
-   **子集**，只挑历史上真红过的家族（金录像与 PvE 基线 / 剧本内容与出货表 / 文档漂移 / 武将总表 /
-   池计数）。**绿了不代表能提交（它只跑 ≈190/4924），红了一定不能提交。**
-   **全量失败先 `grep -nE 'FAIL|失败' <log>`**
-   看完全部失败，不要只 `tail`。
+2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest）；GitHub Actions 跑
+   **同一条**（`.github/workflows/ci.yml` 只调它，2026-11-13 开源收口引入），本地仍以提交时的
+   hook 为准。开跑前先 `git config core.hooksPath` 查一次——本 checkout 应是 `.githooks`
+   （`bash tools/install-hooks.sh` 接的）。
+   **门禁按风险面分三档**（族表见 `开发文档/05-测试与验证策略.md` §7「门禁与交付标准」）：
+   - **票档**：每次提交由 hook 自动跑，目标 **≤2 分钟**。分级在 `tools/gate-staged.sh`——
+     `src/` / `tests/` 不再是"一律全量"的判据，改按**引擎语义 / 接入层 / 前端静态 / 内容文档**
+     四类风险面取族。**未登记的路径一律退回全量档**（fail-closed）：加新顶层目录时先把它登记进去。
+   - **全量档 ≈8 分钟**：只在**合并提交**（同源的 `.githooks/pre-merge-commit`；`git merge`
+     不触发 pre-commit）与 effort 收口时跑一次。**票档绿了不等于可以合并，全量绿了才算。**
+     hook 走 `tests/run_all.sh --quiet`（每条一行 PASS，成功摘要约 227B）；失败只补打失败摘要 +
+     末 40 行，完整日志留 `runs/gate-<时间戳>/`。人工看全量用不带参数的 `bash tests/run_all.sh`。
+     它超过多数前台工具调用的超时，**放后台任务跑**再取输出。
+   - **人工档**：`docs/agents/manual-checks.md` 的清单 + **实机验收**窗口，**不在门禁内**
+     （`tests/test_dod.py::test_the_gate_is_non_interactive` 要求门禁不向人要输入）。票面
+     `Human:` 行在置 `resolved` 前必须是 `过` 或 `不适用:<理由>`；`待` 不算收口。
+   **统计类**（胜率批 / 多种子整局）在全量档里**独立成片、单测上限 600 s**，不进票档——它们是
+   `test_heuristic_ai.py` / `test_all_ai_games.py`，历史上唯一的挂死点就在第一条上。
+   迭代期要快就用**单文件子集**：**`.venv/bin/pytest <file>`**——`python` 不在 PATH，门禁也只认
+   `$ROOT/.venv/bin/pytest`、不回退系统 pytest——或 `bash tests/smoke-web.sh`（实测 60–70 s）。
+   **提交前 screen**：`bash tools/precommit-screen.sh`（快档 ≈47 s；`--full` 加 `test_fuzz`
+   ≈2 min，动 AI 随机流 / 共享原语时必跑）——它是门禁的**子集**，只挑历史上真红过的家族
+   （金录像与 PvE 基线 / 剧本内容与出货表 / 文档漂移 / 武将总表 / 池计数）。**绿了不代表能合并
+   （它只跑 ≈190/4924），红了一定不能提交。**
+   全量失败先 `grep -nE 'FAIL|失败' <log>` 看完全部失败，不要只 `tail`。
    **新机器 / 换机器**：先跑 **`bash tools/setup-dev.sh`**（幂等：关换行转换、装 hook、建
    `.venv`、环境预检——这三样都不随 clone 走，缺一样就是"门禁静默不跑"或"金录像因 CRLF
    整片变红"）。装完日常换机器只剩 `git pull` / `git push`。换行口径的唯一真源是仓根的
@@ -73,6 +75,8 @@
    验收配方见 `docs/agents/acceptance-web.md`。
    浏览器 / `bsk` 探针读配置只走 **`git config --get`**（或**本地 config 副本**），写共享
    `.git/config`（`core.bare` / probe 身份）会被 `check_env` 判红并挡住全仓 git 命令。
+   **哪些检查已经交还给人和窗口**（以及逃逸后怎么把它放回票档）记在
+   **`docs/agents/manual-checks.md`**；票面 `Human:` 行引用那里的条目。
 5. **派发**：同一 checkout 同时只能有一个实现者。确需并行时，每个实现者只
    `git add <显式路径>`，禁止 `git add -A` 与带 `-am` 的提交；任何人不得对别人未提交的改动做
    `git checkout --` / `git stash` / `git reset`。并行安全的前提是"改的文件不重叠"，而它只能
@@ -80,11 +84,11 @@
    改 `virtual.py`，被迫撤回）。
 6. **长跑检查点**：预计超过约 30 分钟的票，实现者在过半时落一个 `wip:` 提交（交付前 squash
    或 amend 掉）；机器中断时，工作树就是恢复点。本仓丢过一整轮上下文，靠工作树里的半成品
-   才接上。**与第 2 条不矛盾**：`wip:` 也照跑一次全量 hook（≈8 分钟），它是**中断保险**，
-   不是"中途白拿一次检查"——预计 ≤30 分钟的票不要 `wip:`。
+   才接上。**`wip:` 也照跑一次 hook**——它跑的是**票档**（≤2 分钟），不是全量；它是**中断
+   保险**，不是"中途白拿一次检查"——预计 ≤30 分钟的票不要 `wip:`。
 7. **写回 / 验收工具**：改完 `06`（§5「程序化约定与偏离一手」）先跑
-   **`.venv/bin/pytest -q tests/test_writeback_landing.py && bash tests/test_dev_docs.sh`**，
-   再跑全量；找该节裁定行用 **`.venv/bin/python tools/ledger_index.py --grep <票号/关键词>`**；
+   **`.venv/bin/pytest -q tests/test_writeback_landing.py && bash tests/test_dev_docs.sh`**；
+   写回票按**票档**提交，全量只在合并时跑一次。找该节裁定行用 **`.venv/bin/python tools/ledger_index.py --grep <票号/关键词>`**；
    实机验收找种子用 **`.venv/bin/python tools/acceptance_seed.py --players 4 --card <type>`**
    （只读起始手牌；配方写进验收票的 `## 复现配方`）。
 8. **新增检查（M5 retro）**：
