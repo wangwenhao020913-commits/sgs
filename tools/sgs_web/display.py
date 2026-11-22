@@ -56,6 +56,7 @@ __all__ = [
     "CARD_ATTRIBUTES",
     "CARD_KINDS",
     "KINGDOM_LABELS",
+    "RANK_TEXT",
     "SUIT_LABELS",
     "card_display",
     "card_lookup_from_query",
@@ -107,6 +108,28 @@ SUIT_LABELS: dict[str, dict[str, str]] = {
 
 颜色（``red`` / ``black``）与卡面的 ``CardRef.color`` 同一套字符串；中文名与符号只
 在这里写一次，前端的花色按钮**只读**这份下发值，不另抄第二份表。
+"""
+
+RANK_TEXT: dict[int, str] = {
+    1: "A",
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "6",
+    7: "7",
+    8: "8",
+    9: "9",
+    10: "10",
+    11: "J",
+    12: "Q",
+    13: "K",
+}
+"""点数（1–13）→ 牌面文字（qunying 票 05 的加法；首个消费者 =「舌剑」的座位标签）。
+
+规则 §12.2 L1325：A = 1、2–10 按牌面数字、J = 11、Q = 12、K = 13。前端卡面另有一份
+同样的表（``card-view.js:RANK_LABELS``，画卡面角标用）；本表是**服务端文字**那一份
+（座位标签 / 文案要在这里拼成整句，不把卡面渲染搬过来）。两表都只是"牌面文字"，值与规则同源。
 """
 
 

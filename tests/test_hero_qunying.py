@@ -30,6 +30,7 @@ from sgs.state import (
     ActivateSkill,
     GameState,
     MoveReason,
+    Pass,
     Phase,
     SelectOption,
     SlotKind,
@@ -1849,3 +1850,635 @@ def test_qianxun_auto_start_is_derived_from_the_declaration_only() -> None:
     assert engine.pending.auto_start == (), (
         f"【黄盖·苦肉】的出牌阶段不带自动展开：{engine.pending.auto_start}"
     )
+
+
+# ===========================================================================
+# 群英包·「锋势」祢衡（qunying 票 05；用户 2026-11-22 签 Q1–Q5 + 流离口径）
+# ===========================================================================
+
+
+NIHENG = "qunying_niheng"
+
+
+def _ids(type_id: str) -> list[int]:
+    """``standard_ex_160`` 里某牌名的全部实体牌 id（按数据序）。"""
+    return cards_of_type(PACK_160, type_id)
+
+
+def _deck_of(top: int, *, taken: tuple[int, ...] = ()) -> tuple[int, ...]:
+    """``top`` 放在牌堆**第三张**（摸牌阶段会摸走前两张），其余接在后面。"""
+    junk = (_ids("dodge")[3], _ids("peach")[0])
+    kept = {top, *taken, *junk}
+    return (*junk, top, *(card_id for card_id in range(len(PACK_160.deck.cards)) if card_id not in kept))
+
+
+class _Scripted:
+    """按座位应答的脚本参与者（出牌阶段的技能 / 目标 / 选牌 / 【闪】窗口的选择都可配）。"""
+
+    def __init__(
+        self,
+        *,
+        play_skill: str = "",
+        target: str | None = None,
+        options: tuple[str, ...] = (),
+        pick: int | None = None,
+        accept_skill: str = "",
+    ) -> None:
+        self.play_skill = play_skill
+        self.target = target
+        self.options = list(options)
+        self.pick = pick
+        self.accept_skill = accept_skill
+        self.play_queries = 0
+        self.uses = 0
+        self.saw_dodge = False
+        self.dodge_faces: list[list[Any]] = []
+        self.faces: list[Any] = []
+
+    def respond(self, query: Any) -> Any:
+        kind = str(getattr(query.kind, "value", query.kind))
+        skill = getattr(query, "skill_id", None)
+        if kind == "PLAY_PHASE":
+            self.play_queries += 1
+            for action in query.legal_actions:
+                if (
+                    self.play_skill
+                    and self.uses == 0
+                    and isinstance(action, ActivateSkill)
+                    and action.skill_id == self.play_skill
+                ):
+                    self.uses += 1
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if kind == "SKILL_ACTIVATION":
+            for action in query.legal_actions:
+                if (
+                    self.play_skill
+                    and self.uses == 0
+                    and isinstance(action, ActivateSkill)
+                    and action.skill_id == self.play_skill
+                ):
+                    self.uses += 1
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, Pass))
+        if kind in ("DODGE", "RESPOND"):
+            self.saw_dodge = True
+            self.dodge_faces.append(list(query.legal_actions))
+            for action in query.legal_actions:
+                if (
+                    self.accept_skill
+                    and isinstance(action, ActivateSkill)
+                    and action.skill_id == self.accept_skill
+                ):
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, Pass))
+        if kind == "SELECT_CARDS":
+            self.faces.append(query)
+            if self.pick is None:
+                return query.legal_actions[0]
+            for action in query.legal_actions:
+                picks = tuple(getattr(action, "picks", ()))
+                if len(picks) == 1 and query.slots[picks[0]].card.card_id == self.pick:
+                    return action
+            raise AssertionError(f"要选的那张牌不在选择面里：{self.pick}")
+        if kind == "SELECT_OPTION":
+            wanted = self.options.pop(0) if self.options else None
+            if wanted is None and str(skill or "").endswith(":target") and self.target:
+                wanted = self.target
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and (
+                    wanted is None or action.choice == wanted
+                ):
+                    return action
+            raise AssertionError(f"期望的选项 {wanted!r} 不在候选里：{query.legal_actions!r}")
+        if kind == "DISCARD":
+            return query.legal_actions[0]
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _use_over(active: _Scripted, *, dodger: _Scripted | None = None) -> Any:
+    """停止条件：这一次使用已经结算完、回到祢衡的出牌阶段（可选：目标确实被问过【闪】）。"""
+
+    def stop(engine: Any) -> bool:
+        return (
+            active.uses >= 1  # 技能已经点过（下一次出牌阶段询问 = 这次使用结算完之后）
+            and (dodger is None or dodger.saw_dodge)
+            and engine.pending is not None
+            and int(engine.pending.actor) == 0  # 仍回到**祢衡的**出牌阶段（不是下家的）
+            and str(getattr(engine.pending.kind, "value", engine.pending.kind))
+            == "PLAY_PHASE"
+            and not engine.stack.frames
+        )
+
+    return stop
+
+
+def _niheng_state(
+    *,
+    hand: tuple[int, ...],
+    top: int,
+    seat1_hand: tuple[int, ...] = (),
+    seat1_equip: tuple[int, ...] = (),
+    seats: int = 3,
+) -> GameState:
+    """祢衡（座 0）+ 其它座位；``top`` 会被放在摸牌阶段之后的牌堆顶。"""
+    taken = (*hand, *seat1_hand, *seat1_equip, top)
+    specs = [SeatSpec(hero=NIHENG, hand=hand)]
+    specs.append(SeatSpec(hand=seat1_hand, equip=seat1_equip))
+    specs.extend(SeatSpec() for _ in range(seats - 2))
+    return build_state(
+        pack=PACK_160,
+        seats=specs,
+        deck=_deck_of(top, taken=taken),
+        turn_seat=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 数据面 / 声明面
+# ---------------------------------------------------------------------------
+
+
+def test_the_pack_ships_niheng_with_both_skills() -> None:
+    """数据面：群英包装载得出「锋势」祢衡（真名祢衡、群 / 男 / 3 体力），两条技能都在 CATALOG。"""
+    from sgs.skills.hero_qunying import KUANGCAI
+    from sgs.skills.active import SHEJIAN
+
+    hero = hero_by_id(NIHENG)
+    assert hero is not None
+    assert hero.name == "「锋势」祢衡"
+    assert hero.true_name == "祢衡"
+    assert hero.kingdom.value == "qun"
+    assert hero.gender.value == "male"
+    assert hero.hp_max == 3
+    assert hero_skill_ids(NIHENG) == (SHEJIAN, KUANGCAI)
+    assert SHEJIAN in CATALOG and KUANGCAI in CATALOG
+
+
+def test_shejian_is_an_active_declaration_with_two_hooks_and_a_badge() -> None:
+    """声明面：【舌剑】= A 族流水线 + 两条强制钩子（成为目标后 / 结算结束）+ 三条防具旁路
+    + 两条 `CANDIDATES`（借刀乱武的提供者 / 【闪】窗口的跨座位候选）+ 座位标签。"""
+    from sgs.skills.active import SHEJIAN, _SHEJIAN
+    from sgs.skills.catalog import BadgeKind
+    from sgs.skills.lord_request import PROVIDERS
+    from sgs.effects import ModifierPoint
+    from sgs.timing import Timing
+
+    definition = CATALOG[SHEJIAN]
+    assert _SHEJIAN.skill_id == SHEJIAN
+    assert definition.locked is False, "牌面写「可以」⇒ 要问是否发动"
+    assert definition.badge is BadgeKind.WINDOW
+    assert [hook.timing for hook in definition.hooks] == [
+        Timing.USE_AFTER_BECOME_TARGET,
+        Timing.RESOLVE_AFTER_END,
+    ]
+    assert all(hook.forced for hook in definition.hooks), "记账 / 打标签是规则性动作、不问"
+    points = [modifier.point for modifier in definition.modifiers]
+    assert points.count(ModifierPoint.CANDIDATES) == 2, (
+        "A 族的候选入口 + 目标付牌（【闪】窗口）各一条——「自己付牌」那一路**不做**"
+        "（虚拟牌 + 牌面没有「当你需要使用【杀】时」⇒ 只能主动使用）"
+    )
+    for point in (
+        ModifierPoint.EFFECTIVENESS,
+        ModifierPoint.DAMAGE_TAKE_AMOUNT,
+        ModifierPoint.DAMAGE_CAP,
+    ):
+        assert point in points, "「无视防具」要压在三条伤害链上"
+    assert SHEJIAN in PROVIDERS, "提供者回调必须在 catalog 末尾登记"
+    assert int(definition.priority_class) == 0, "武将档 = ①档（用户要求的「①档时机」）"
+
+
+def test_kuangcai_is_a_finish_phase_hook_with_a_two_step_flow() -> None:
+    """声明面：【狂才】= `PHASE_FINISH` 钩子 + 两步选项流水线 + 手写主体。"""
+    from sgs.skills.hero_qunying import KUANGCAI, KUANGCAI_FLOW
+    from sgs.skills.catalog import ACTIVATION_PLANS
+    from sgs.timing import Timing
+
+    definition = CATALOG[KUANGCAI]
+    assert definition.locked is False
+    assert [hook.timing for hook in definition.hooks] == [Timing.PHASE_FINISH]
+    assert definition.hooks[0].flow is KUANGCAI_FLOW
+    assert [type(step).__name__ for step in KUANGCAI_FLOW.steps] == [
+        "PickOption",
+        "PickOption",
+    ]
+    assert KUANGCAI in ACTIVATION_PLANS, "阶段门（自己的结束阶段 / 牌堆 ≥ 3）要登记"
+
+
+def test_shejian_and_kuangcai_declare_their_own_text() -> None:
+    """A4 守卫：两条技能各带自己的 `requirement`（不吃短 id 表的默认文案）。"""
+    from sgs.skills.active import SHEJIAN
+    from sgs.skills.hero_qunying import KUANGCAI
+
+    shejian = CATALOG[SHEJIAN].requirement
+    assert "舌剑" not in shejian
+    assert "牌堆顶" in shejian and "雷【杀】" in shejian
+    kuangcai = CATALOG[KUANGCAI].requirement
+    assert "结束阶段" in kuangcai and "第十三张牌的点数" in kuangcai
+    assert CATALOG[SHEJIAN].step_requirements["cost"] == "将一张点数大于牌堆顶的手牌置于牌堆顶"
+    assert CATALOG[KUANGCAI].step_requirements["declaration"].startswith("声明一项")
+
+
+# ---------------------------------------------------------------------------
+# 【舌剑】判据与边界
+# ---------------------------------------------------------------------------
+
+
+def test_shejian_cost_needs_a_card_above_the_deck_top() -> None:
+    """代价 = 点数**严格大于**牌堆顶：等于牌堆顶的牌也不合格（用户澄清）。"""
+    top = _ids("indulgence")[0]  # 乐不思蜀 rank 6
+    equal = next(card_id for card_id in range(len(PACK_160.deck.cards)) if PACK_160.deck.cards[card_id].rank == PACK_160.deck.cards[top].rank and card_id != top)
+    higher = _ids("slash")[0]  # rank 10
+    lower = _ids("dodge")[0]  # rank 2
+    state = _niheng_state(hand=(equal, higher, lower), top=top)
+    # 摸牌阶段会先摸走两张 —— 这里直接按构造后的牌堆验判据
+    state.player(0).hand = [equal, higher, lower]
+    state.deck = [top, *[card_id for card_id in state.deck if card_id != top]]
+    assert active_module._shejian_qualifying_hand(state, 0) == (higher,)
+    excluded = active_module._shejian_cost_excluded(state, None, 0, {})
+    assert set(excluded) == {equal, lower}, "点数不大于牌堆顶的牌不进选择面"
+
+
+def test_shejian_is_not_offered_without_a_cost_or_a_target() -> None:
+    """候选闸：没有合格手牌 / 牌堆空 / 没有合法目标 ⇒ 一个候选都不造。"""
+    from sgs.effects import CandidateScope, ModifierContext
+    from sgs.skills.active import SHEJIAN
+
+    top = _ids("indulgence")[0]
+    state = _niheng_state(hand=(_ids("dodge")[0],), top=top)
+    state.player(0).hand = [_ids("dodge")[0]]  # rank 2 < 6
+    state.deck = [top, *[card_id for card_id in state.deck if card_id != top]]
+    ctx = ModifierContext(
+        subject=0,
+        owner=0,
+        scope=CandidateScope.PLAY,
+        skill_id=SHEJIAN,
+        answers_seq=0,
+    )
+    assert active_module._shejian_offers(state, ctx, ()) == (), "没有合格手牌"
+
+    state.phase = Phase.PLAY
+    state.player(0).hand = [_ids("slash")[0]]
+    offered = active_module._shejian_offers(state, ctx, ())
+    assert offered and isinstance(offered[-1], ActivateSkill), "有合格手牌 + 有目标"
+
+    saved = state.deck
+    state.deck = []
+    assert active_module._shejian_offers(state, ctx, ()) == (), "牌堆空 ⇒ 没有「牌堆顶」"
+    state.deck = saved
+    # 只剩自己一个存活角色 ⇒ 没有合法目标
+    for player in state.players[1:]:
+        player.alive = False
+    assert active_module._shejian_offers(state, ctx, ()) == (), "没有合法目标"
+
+
+def test_shejian_dodge_offer_needs_the_marked_slash_and_its_target() -> None:
+    """跨座位候选的五道判据（`_shejian_dodge_offer`）：标记 / 目标集合 / 素材 / 档位消耗。"""
+    from sgs.effects import CandidateScope, DODGE_RESPONSE_CARD, ModifierContext
+    from sgs.skills.active import SHEJIAN, _shejian_dodge_offer
+
+    top = _ids("indulgence")[0]
+    big = _ids("dodge")[2]  # rank 13
+    state = _niheng_state(hand=(_ids("slash")[0],), top=top, seat1_hand=(big,))
+    state.deck = [top, *[card_id for card_id in state.deck if card_id != top]]
+    ctx = ModifierContext(
+        subject=1,
+        owner=0,
+        scope=CandidateScope.DODGE,
+        respond_required=DODGE_RESPONSE_CARD,
+        skill_id=SHEJIAN,
+        answers_seq=0,
+    )
+    offered = _shejian_dodge_offer(state, ctx, ())
+    assert offered == (), "没有「正在结算的舌剑之【杀】」标记 ⇒ 不给候选"
+
+    state.player(0).shejian_slash_card = -12345
+    state.player(0).shejian_slash_targets = (1,)
+    offered = _shejian_dodge_offer(state, ctx, ())
+    assert offered and isinstance(offered[-1], ActivateSkill), "标记 + 目标是它 + 有合格牌"
+
+    # 窗口要的是【杀】（借刀 / 乱武）⇒ 一句话都不说（本技能只在【闪】窗口里当提供者）。
+    from sgs.effects import SLASH_FAMILY_KEY
+
+    slash_ctx = ModifierContext(
+        subject=1,
+        owner=0,
+        scope=CandidateScope.RESPOND,
+        respond_required=SLASH_FAMILY_KEY,
+        skill_id=SHEJIAN,
+        answers_seq=0,
+    )
+    assert _shejian_dodge_offer(state, slash_ctx, ()) == (), (
+        "「自己付牌」那一路不做：虚拟牌 + 牌面无「当你需要使用【杀】时」"
+    )
+
+    state.player(0).shejian_slash_targets = (2,)
+    assert _shejian_dodge_offer(state, ctx, ()) == (), "被问的座位不是这张【杀】的目标"
+
+    state.player(0).shejian_slash_targets = (1,)
+    used = ModifierContext(
+        subject=1,
+        owner=0,
+        scope=CandidateScope.DODGE,
+        respond_required=DODGE_RESPONSE_CARD,
+        skill_id=SHEJIAN,
+        answers_seq=0,
+        providers_used=(SHEJIAN,),
+    )
+    assert _shejian_dodge_offer(state, used, ()) == (), "每提供者每扇窗口只问一次"
+
+
+def test_shejian_places_the_cost_on_top_and_uses_an_uncounted_thunder_slash() -> None:
+    """端到端：点技能 → 选一张大于牌堆顶的牌 → 置顶 → 视为使用**不计次数**的雷【杀】。"""
+    from sgs.skills.active import SHEJIAN
+
+    cost = _ids("slash")[0]  # rank 10
+    top = _ids("indulgence")[0]  # rank 6
+    state = _niheng_state(hand=(cost, _ids("dodge")[0]), top=top)
+    engine = Engine.from_state(state, seed=101)
+    me = _Scripted(play_skill=SHEJIAN, target="seat:1", pick=cost)
+    target = _Scripted()
+    run_queries(engine, [me, target, _Scripted()], _use_over(me))
+    assert state.deck[0] == cost, "代价牌落在牌堆顶"
+    assert cost not in state.player(0).hand, "它已经离开手牌"
+    assert cost in state.deck, "置顶不是弃置：它还在牌堆里"
+    assert dict(state.player(0).card_use_counts) == {}, (
+        "「不计次数」⇒ 本阶段【杀】的使用次数不 +1"
+    )
+    assert state.player(1).hp == 3, "目标没有【闪】⇒ 这张雷【杀】造成 1 点伤害"
+    assert state.player(0).shejian_slash_card is None, "使用结算结束后清标记"
+    assert state.player(0).shejian_slash_targets == ()
+    assert me.faces and me.faces[0].skill_id == SHEJIAN, "代价步是这条流水线的 `cost` 步"
+
+
+def test_shejian_target_may_pay_a_larger_card_to_dodge() -> None:
+    """端到端：目标在**真正询问【闪】的窗口**里拿到 ①档 的「舌剑」选项，付牌当【闪】。"""
+    from sgs.skills.active import SHEJIAN
+
+    cost = _ids("slash")[0]  # rank 10 → 置顶后牌堆顶
+    top = _ids("indulgence")[0]  # rank 6
+    big = _ids("dodge")[2]  # rank 13 > 10
+    state = _niheng_state(hand=(cost,), top=top, seat1_hand=(big,))
+    engine = Engine.from_state(state, seed=102)
+    me = _Scripted(play_skill=SHEJIAN, target="seat:1", pick=cost)
+    target = _Scripted(accept_skill=SHEJIAN, pick=big)
+    run_queries(engine, [me, target, _Scripted()], _use_over(me, dodger=target))
+    assert target.dodge_faces, "目标被问过【闪】"
+    first = target.dodge_faces[0]
+    assert any(isinstance(action, ActivateSkill) and action.skill_id == SHEJIAN for action in first), (
+        "①档的面里先给「舌剑」"
+    )
+    assert any(isinstance(action, Pass) for action in first), "用户要求「可以放弃」⇒ 有放弃"
+    assert state.deck[0] == big, "目标付的那张牌成为牌堆顶（新的比较基准）"
+    assert state.player(1).hp == 4, "视为使用【闪】⇒ 这张【杀】被抵消、没有伤害"
+
+
+def test_shejian_ignores_armor_so_the_target_cannot_dodge_with_bagua() -> None:
+    """「无视防具」：目标的【八卦阵】**不能**用来响应这张【杀】（对照：普通【杀】可以）。"""
+    from sgs.skills.active import SHEJIAN
+
+    bagua = _ids("eight_diagrams")[0]
+    top = _ids("indulgence")[0]
+    # 对照：普通【杀】（真牌）⇒ 目标没有手牌、但有【八卦阵】⇒ 照样被问【闪】。
+    normal = _ids("slash")[1]
+    state = _niheng_state(hand=(normal,), top=top, seat1_equip=(bagua,))
+    engine = Engine.from_state(state, seed=103)
+    me = _Scripted(play_skill="", target="seat:1")
+    # 直接出那张【杀】（出牌阶段的 UseCard 候选），目标 = 座 1
+    class _SlashOnly(_Scripted):
+        def respond(self, query: Any) -> Any:
+            if str(getattr(query.kind, "value", query.kind)) == "PLAY_PHASE":
+                for action in query.legal_actions:
+                    if getattr(getattr(action, "card", None), "type", "") == "slash":
+                        return action
+            return super().respond(query)
+
+    me = _SlashOnly(target="seat:1")
+    target = _Scripted()
+    run_queries(engine, [me, target, _Scripted()], _use_over(me, dodger=target))
+    assert any(
+        isinstance(action, ActivateSkill) and action.skill_id == "equip.eight_diagrams"
+        for action in target.dodge_faces[0]
+    ), "对照组：普通【杀】下【八卦阵】是合法响应"
+
+    # 正例：同样没有手牌【闪】的目标，面对**舌剑之【杀】**时连【闪】窗口都不开。
+    state = _niheng_state(hand=(_ids("slash")[0],), top=top, seat1_equip=(bagua,))
+    engine = Engine.from_state(state, seed=104)
+    me = _Scripted(play_skill=SHEJIAN, target="seat:1", pick=_ids("slash")[0])
+    target = _Scripted()
+    run_queries(engine, [me, target, _Scripted()], _use_over(me))
+    assert target.dodge_faces, "【闪】窗口照发（放弃也是应答）"
+    assert not any(
+        isinstance(action, ActivateSkill) for action in target.dodge_faces[0]
+    ), "「无视防具」⇒ 面里只剩放弃：【八卦阵】/【八阵】都不是合法来源"
+    assert state.player(1).hp == 3, "雷【杀】照常造成 1 点伤害"
+
+
+def test_shejian_is_not_a_provider_for_the_forced_slash_windows() -> None:
+    """用户 2026-11-22 第二轮：**虚拟牌 + 牌面没有「当你需要使用【杀】时」⇒ 只能主动使用**。
+
+    借刀（"被迫**使用**【杀】"）的窗口里因此**不出现**【舌剑】——对照：同一张面上的**真【杀】**
+    照常是候选，证明窗口本身开着（不是"窗口没开所以看不到"）。
+    """
+    from sgs.skills.active import SHEJIAN
+    from sgs.state import WindowCause
+
+    borrowed = _ids("borrowed_sword")[0]
+    weapon = _ids("qinggang_sword")[0]
+    real_slash = _ids("slash")[0]  # rank 10（也是合格的【舌剑】代价候选）
+    top = _ids("indulgence")[0]  # rank 6
+    state = build_state(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hero=NIHENG, hand=(real_slash,), equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_of(top, taken=(borrowed, weapon, real_slash)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=107)
+
+    def caster(query: Any) -> Any:
+        if str(getattr(query.kind, "value", query.kind)) == "PLAY_PHASE":
+            for action in getattr(query, "designation_actions", ()):
+                if action.card.card_id == borrowed:
+                    return action
+        return _Scripted().respond(query)
+
+    players = [_Scripted(), _Scripted(), _Scripted()]
+    players[0] = type("_Caster", (_Scripted,), {"respond": lambda self, q: caster(q)})()
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "RESPOND"
+        and getattr(e.pending, "cause", None) is WindowCause.BORROWED_SWORD,
+    )
+    window = engine.pending
+    assert window.actor == 1, "借刀问的是持刀者（祢衡）"
+    assert not any(
+        isinstance(action, ActivateSkill) and action.skill_id == SHEJIAN
+        for action in window.legal_actions
+    ), "虚拟牌 + 没有「需要使用【杀】时」⇒ 借刀窗口里不提供【舌剑】"
+    assert any(
+        getattr(getattr(action, "card", None), "type", "") == "slash"
+        for action in window.legal_actions
+    ), "对照：真【杀】照常是候选（窗口确实开着）"
+
+
+# ---------------------------------------------------------------------------
+# 【狂才】
+# ---------------------------------------------------------------------------
+
+
+def _kuangcai_state() -> tuple[GameState, int, int, int]:
+    """狂才局面：摸牌阶段摸走前两张后，牌堆顶三张 = c1 / c2 / c3（第 3 张是**基本牌**）。"""
+    c1 = _ids("slash")[0]  # rank 10 / 基本牌
+    c2 = _ids("dodge")[0]  # rank 2
+    c3 = _ids("peach")[0]  # rank 3 / 基本牌（第 3 张）
+    junk = (_ids("dodge")[3], _ids("peach")[1])
+    kept = {c1, c2, c3, *junk}
+    deck = (*junk, c1, c2, c3, *(card_id for card_id in range(len(PACK_160.deck.cards)) if card_id not in kept))
+    state = build_state(
+        pack=PACK_160,
+        seats=[SeatSpec(hero=NIHENG, hand=(_ids("dodge")[4],)), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    return state, c1, c2, c3
+
+
+def test_kuangcai_not_offered_below_three_cards() -> None:
+    """牌堆不足 3 张 ⇒ `available=False`（连「是否发动」都不问）。"""
+    from sgs.skills.hero_qunying import _kuangcai_plan
+    from sgs.resolution import Frame
+    from sgs.state import FrameKind
+
+    state, c1, c2, _c3 = _kuangcai_state()
+    frame = Frame(kind=FrameKind.RESOLVE, data={"source": 0, "targets": (), "card": None})
+    instance = type("_Instance", (), {"owner": 0})()
+    assert _kuangcai_plan(state, frame, instance).available is True
+    state.deck = [c1, c2]
+    assert _kuangcai_plan(state, frame, instance).available is False
+    state.deck = [c1, c2, _c3]
+    assert _kuangcai_plan(state, frame, instance).available is True
+
+
+def test_kuangcai_offers_only_the_declarations_the_deck_can_answer() -> None:
+    """3 张 ⇒ 只有「第三张的类别」；4 张 ⇒ 加花色；13 张 ⇒ 三项全在（用户澄清第 1 条）。"""
+    from sgs.skills.hero_qunying import (
+        KUANGCAI_FOURTH_SUIT,
+        KUANGCAI_THIRD_TYPE,
+        KUANGCAI_THIRTEENTH_RANK,
+        _kuangcai_declarations,
+    )
+
+    state, c1, c2, c3 = _kuangcai_state()
+    rest = [card_id for card_id in state.deck if card_id not in (c1, c2, c3)]
+    state.deck = [c1, c2, c3]
+    assert _kuangcai_declarations(state, None, 0, {}) == (KUANGCAI_THIRD_TYPE,)
+    state.deck = [c1, c2, c3, *rest[:1]]
+    assert _kuangcai_declarations(state, None, 0, {}) == (
+        KUANGCAI_THIRD_TYPE,
+        KUANGCAI_FOURTH_SUIT,
+    )
+    state.deck = [c1, c2, c3, *rest[:10]]
+    assert _kuangcai_declarations(state, None, 0, {}) == (
+        KUANGCAI_THIRD_TYPE,
+        KUANGCAI_FOURTH_SUIT,
+        KUANGCAI_THIRTEENTH_RANK,
+    )
+    assert len(state.deck) == 13
+
+
+def test_kuangcai_values_follow_the_declaration() -> None:
+    """第二步的选项集按第一步的答案现算（类别 3 / 花色 4 / 点数 13）。"""
+    from sgs.skills.hero_qunying import (
+        KUANGCAI_FOURTH_SUIT,
+        KUANGCAI_THIRD_TYPE,
+        KUANGCAI_THIRTEENTH_RANK,
+        _kuangcai_values,
+    )
+
+    state, _c1, _c2, _c3 = _kuangcai_state()
+    assert _kuangcai_values(state, None, 0, {"declaration": KUANGCAI_THIRD_TYPE}) == (
+        "basic",
+        "trick",
+        "equipment",
+    )
+    assert _kuangcai_values(state, None, 0, {"declaration": KUANGCAI_FOURTH_SUIT}) == (
+        "spade",
+        "heart",
+        "club",
+        "diamond",
+    )
+    ranks = _kuangcai_values(state, None, 0, {"declaration": KUANGCAI_THIRTEENTH_RANK})
+    assert len(ranks) == 13 and ranks[0] == "kuangcai_rank_1" and ranks[-1] == "kuangcai_rank_13"
+    assert _kuangcai_values(state, None, 0, {}) == ()
+
+
+def test_kuangcai_gains_the_declared_card_and_everything_above_it() -> None:
+    """端到端：声明「第三张是基本牌」→ 亮出第 3 张（公开）→ 获得**第 1 … 3 张**。"""
+    from sgs.skills.hero_qunying import KUANGCAI
+
+    state, c1, c2, c3 = _kuangcai_state()
+    engine = Engine.from_state(state, seed=105)
+    me = _Scripted(play_skill=KUANGCAI, options=("kuangcai:third_type", "basic"))
+    run_queries(
+        engine,
+        [me, _Scripted()],
+        lambda e: all(card_id in e.state.player(0).hand for card_id in (c1, c2, c3)),
+    )
+    assert state.player(0).hand[-3:] == [c1, c2, c3], (
+        "自顶向下第 1 … 3 张全部获得（手牌顺序仍是牌堆序）"
+    )
+    moves = [
+        (record.from_zone.zone.value, record.to_zone.zone.value, [card.card_id for card in record.cards])
+        for record in engine.records
+        if getattr(record, "kind", None) == "delta"
+        and getattr(record, "delta_type", "") == "card_move"
+    ]
+    assert ("deck", "processing", [c3]) in moves, (
+        "「亮出」= 第 3 张**离开牌堆进处理区**（不是『展示』那种只看不移）"
+    )
+    assert ("processing", "hand", [c3]) in moves, "获得：亮出的那张从处理区进手牌"
+    assert ("deck", "hand", [c1, c2]) in moves, "获得：其上两张从牌堆进手牌"
+    assert all(card_id not in state.deck for card_id in (c1, c2, c3)), "牌堆同步变短"
+
+
+def test_kuangcai_gains_nothing_on_a_miss() -> None:
+    """不相符 ⇒ 一张牌都不动（那张牌已亮出、留在牌堆原位）。"""
+    from sgs.skills.hero_qunying import KUANGCAI
+
+    state, c1, c2, c3 = _kuangcai_state()
+    engine = Engine.from_state(state, seed=106)
+    me = _Scripted(play_skill=KUANGCAI, options=("kuangcai:third_type", "trick"))
+    run_queries(
+        engine,
+        [me, _Scripted()],
+        # 停在"亮出的那张置入弃牌堆"之后：这一次结算就此结束（不再有别的搬牌）。
+        lambda e: any(
+            getattr(record, "kind", None) == "delta"
+            and getattr(record, "delta_type", "") == "card_move"
+            and [card.card_id for card in record.cards] == [c3]
+            and record.to_zone.zone.value == "discard"
+            for record in e.records
+        ),
+    )
+    hand = state.player(0).hand
+    assert not any(card_id in hand for card_id in (c1, c2, c3)), "不相符 ⇒ 一张都不进手牌"
+    assert c3 in state.discard, "亮出的那张**置入弃牌堆**（亮出不是展示：它已离开牌堆）"
+    assert [c1, c2] == state.deck[:2], "其上的两张仍在牌堆顶、次序不变（没被亮出、也没动）"
+    moves = [
+        (record.from_zone.zone.value, record.to_zone.zone.value, [card.card_id for card in record.cards])
+        for record in engine.records
+        if getattr(record, "kind", None) == "delta"
+        and getattr(record, "delta_type", "") == "card_move"
+    ]
+    assert ("deck", "processing", [c3]) in moves, "亮出先进处理区（公开可见）"
+    assert ("processing", "discard", [c3]) in moves, "然后置入弃牌堆"

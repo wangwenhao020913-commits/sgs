@@ -85,6 +85,7 @@ from sgs.timing import Timing
 
 from .descriptions import display_skill_description, skill_description
 from .display import (
+    RANK_TEXT,
     SUIT_LABELS,
     card_display,
     card_lookup_from_query,
@@ -1070,6 +1071,43 @@ def _lianying_badge(state: Any, seat: int) -> dict[str, Any] | None:
     }
 
 
+def _shejian_badge(state: Any, seat: int) -> dict[str, Any] | None:
+    """【舌剑】的座位标签 = 「舌剑：点数花色牌名」（qunying 票 05；用户 2026-11-22 签 Q2–Q4）。
+
+    牌面：「**你的出牌阶段内**，牌堆顶的牌对所有角色可见」。用户 2026-11-22 的第二轮裁定：
+    **只在祢衡自己的出牌阶段里画**（"牌堆顶的牌只是在祢衡的出牌阶段公开，所以这个组件在
+    其他阶段都应该不显示"）——故判据 = :func:`~sgs.effects.is_own_play_phase`（回合角色是
+    持有者 ∧ 阶段是出牌阶段，与引擎"自己的出牌阶段"同一份谓词）。`BadgeScope.SELF` 的实例闸
+    另外保证"技能失去 / 失效 ⇒ 构造器不被调用"；牌堆空 ⇒ 也不画（没有"牌堆顶"可画）。
+
+    Q3 裁定带**点数**（"点数严格大于牌堆顶"是代价的判据，看不到点数就没法决定）；Q4 裁定
+    附带**悬浮卡面预览** ⇒ 载荷多带一个 ``card``（与 `heroZoneRows` 的卡面同一份契约，
+    前端 `seat-view.js:fillHeroTags` 见到它就挂 `showCardPreview`）。
+
+    ``parts`` 逐段上色：技能名一段（默认色）+ 点数一段 + 花色符号一段（红 / 黑，取
+    :data:`SUIT_LABELS` 的唯一映射）+ 牌名一段；``parts`` 的文本拼接恒等于 ``label``。
+    """
+    if not is_own_play_phase(state, int(seat)):
+        return None
+    if not state.deck:
+        return None
+    card = state.card(state.deck[0])
+    parts: list[dict[str, Any]] = [{"text": "舌剑："}]
+    if card.rank is not None:
+        parts.append({"text": RANK_TEXT.get(int(card.rank), str(int(card.rank)))})
+    face = SUIT_LABELS.get(card.suit) if card.suit is not None else None
+    if face is not None:
+        parts.append({"text": face["symbol"], "tone": face["color"]})
+    parts.append({"text": card.name})
+    return {
+        "tag": "shejian",
+        "label": "".join(part["text"] for part in parts),
+        "parts": parts,
+        # 悬浮卡面预览（Q4）：与武将牌上的牌区同一条卡面契约（牌名 / 花色点数 / 描述）。
+        "card": card_payload(card, lookup=_card_lookup(state)),
+    }
+
+
 _XIONGLUAN_SKILL_ID = "hero.zhangxiu.xiongluan"
 """张绣【雄乱】的 skill id（skill-display 票 07）：登记表的键与构造器的判据共用这一份。
 
@@ -1270,6 +1308,9 @@ BADGE_PROVIDERS: Mapping[
         ),
         # 群英包·「锋势」陆逊【连营】（qunying 票 01 / Q16）：两条「下一张牌」待生效位。
         _LIANYING_SKILL_ID: ((BadgeScope.SELF, _lianying_badge),),
+        # 群英包·「锋势」祢衡【舌剑】（qunying 票 05 / Q2–Q4）：牌堆顶的牌对所有人可见
+        # （常驻 + 带点数 + 悬浮卡面预览）。
+        "hero.qunying_niheng.shejian": ((BadgeScope.SELF, _shejian_badge),),
     }
 )
 """skill id → ``(落座位档, 数据构造器)``（唯一登记处；skill-display 票 01）。

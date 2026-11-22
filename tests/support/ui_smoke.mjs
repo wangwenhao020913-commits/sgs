@@ -1131,7 +1131,7 @@ check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风�
   // shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 真名 71、版本 106。
   // bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里）⇒ 版本 111 → 112、
   // 真名分组 75 不变。
-  ui.state.heroCatalog.length === 78 && catalogVersions.length === 120,
+  ui.state.heroCatalog.length === 79 && catalogVersions.length === 121,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -13489,7 +13489,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   // 重扫到 seed 52 / 83 / 262 / 263 / 276（探针 `.scratch/sp1-sunshangxiang-maliang/scan_bagua.py`：
   // 起始手牌有【八卦阵】→ 装上 → 对手真的对座位 0 出【杀】→ DODGE 候选里有八卦 →
   // 提交后服务端接受、且视图里还有待答或已终局——最后这一条是 U1-07l2 的判据）。
-  for (const seed of [52, 83, 262, 263, 276, 63, 66, 88, 89, 90, 29, 21, 7, 15, 20, 2, 24, 28, 38]) {
+  // qunying 票 05 换池（启用池 120 → 121：祢衡进池）后原清单只剩 263 命中，按**同一判据**
+  // 重扫（探针 `.scratch/qunying/scan_bagua.py`：起始手牌有【八卦阵】→ 装上 → 对手真的对
+  // 座位 0 出【杀】→ DODGE 候选里有八卦 → 提交后服务端接受）。新命中：88 / 147 / 258 / 263 /
+  // 306 / 329 / 383。
+  for (const seed of [88, 147, 258, 263, 306, 329, 383, 52, 83, 262, 276, 63, 66, 89, 90, 29, 21, 7, 15, 20, 2, 24, 28, 38]) {
     await newSession(seed);
     equippedBagua = false;
     sawBaguaDodge = false;
@@ -21498,6 +21502,49 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && tagParts(botuChip).map(toneClassOf).join(",") === "-,black,red,black",
     `渐营=${tagParts(jianyingChip).map(toneClassOf).join(",")}`
       + ` 博图=${tagParts(botuChip).map(toneClassOf).join(",")}`);
+
+  /* qunying 票 05（用户 2026-11-22 Q4）：`hero_tags[]` 可以**附带一张牌面**（`card`）——
+   * 悬停 = 与武将牌上的牌区**同一个** `showCardPreview`（不另起一套悬停面）；没有 `card`
+   * 的标签不挂任何监听（既有标签零变化）。首个载体 = 祢衡【舌剑】的「牌堆顶的牌」。 */
+  badgeView.snapshot.players[0].hero_tags = [
+    { tag: "luoyi", label: "裸衣" },
+    { tag: "shejian", label: "舌剑：6♥乐不思蜀", parts: [
+      { text: "舌剑：" }, { text: "6" }, { text: "♥", tone: "red" }, { text: "乐不思蜀" },
+    ], card: { ...synthCard(31, "乐不思蜀"), suit: "heart", rank: 6, color: "red", type: "indulgence" } },
+  ];
+  ui.state.view = badgeView;
+  ui.resetSelection();
+  ui.renderTable();
+  const shejianChip = badgeChip("shejian");
+  const plainAgain = badgeChip("luoyi");
+  const badgePreviewFaces = () => Array.from($("t-card-preview").children).filter(
+    (node) => String(node.className || "").split(/\s+/).includes("card"));
+  const hoverChip = (chip) => {
+    if (!chip) return;
+    (chip.listeners.mouseenter || []).forEach(
+      (fn) => fn({ target: chip, clientX: 100, clientY: 120 }));
+  };
+  hoverChip(shejianChip);
+  const shejianPreview = {
+    hidden: $("t-card-preview").hidden,
+    ids: badgePreviewFaces().map((node) => node.getAttribute("data-card-id")),
+  };
+  check("BADGE-01d 带 card 的标签悬停出卡面预览（与七星 / 谦逊同一条 showCardPreview）",
+    !!shejianChip && shejianChip.getAttribute("data-has-card") === "true"
+      && shejianChip.textContent === "舌剑：6♥乐不思蜀"
+      && shejianPreview.hidden === false
+      && shejianPreview.ids.join(",") === "31",
+    shejianChip
+      ? `文本=${JSON.stringify(shejianChip.textContent)}`
+        + ` data-has-card=${shejianChip.getAttribute("data-has-card")}`
+        + ` 预览 hidden=${shejianPreview.hidden} ids=${shejianPreview.ids.join(",")}`
+      : "没有 shejian chip");
+  check("BADGE-01e 没有 card 的标签不挂悬停监听（既有标签零变化）",
+    !!plainAgain && !plainAgain.getAttribute("data-has-card")
+      && !(plainAgain.listeners.mouseenter || []).length,
+    plainAgain
+      ? `裸衣 mouseenter 监听=${(plainAgain.listeners.mouseenter || []).length}`
+      : "没有 luoyi chip");
 
   /* skill-display 票 03：【勤政】的 `勤政 X` 走**同一条** `hero_tags` 通道（本票零前端改动）。
    * 服务端取值由 `tests/test_web.py::test_the_qinzheng_badge_shows_the_game_long_used_or_played_count`

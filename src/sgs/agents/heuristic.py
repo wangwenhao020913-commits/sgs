@@ -2226,6 +2226,13 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         "qianxun_effect_card": 1.2,
         "qianxun_effect_gain": 0.9,
         "qianxun_effect_move": 0.7,
+        # 群英包·「锋势」祢衡【狂才】（qunying 票 05）：三个**声明项**的估值 = 命中概率 ×
+        # 命中时的收益（类别 1/3×3 张、花色 1/4×4 张、点数 1/13×13 张，期望都约 1 张）——
+        # 三档同分，差异只是方差；登记成同一档是**刻意的**（盲猜，AI 看不见牌堆，所有
+        # 具体值等概率，`_OPTION_VALUES` 里不给具体值分档）。
+        "kuangcai:third_type": 1.0,
+        "kuangcai:fourth_suit": 1.0,
+        "kuangcai:thirteenth_rank": 1.0,
     }
 )
 
@@ -2525,6 +2532,9 @@ _HOSTILE_SEAT_STEPS = (
     # 让流水线那一步落回"帮盟友"）。
     "qianxun:",
     "hero.qunying_luxun.qianxun:",
+    # 群英包·「锋势」祢衡【舌剑】（qunying 票 05）：手写询问的**目标步**（虚拟雷【杀】打谁）——
+    # 全限定 id ``hero.qunying_niheng.shejian:target``，不登记会落进"帮盟友"的缺省分支。
+    "hero.qunying_niheng.shejian:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
     # 界沮授移动版【渐营】②（yijiang-2014-round2 票 01 / W3；票 18 迁进流水线）：产物是
@@ -5369,6 +5379,25 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(1.0),
         "代价换一次免费效果（视为使用一张非装备牌 / 移动场上一张牌 / 检索一张牌）；"
         "代价的贵贱在 `_OPTION_VALUES` 里分档 ⇒ 温和正分",
+    ),
+    # 群英包·「锋势」祢衡（qunying 票 05）【舌剑】：**有代价**——要付一张"点数大于牌堆顶"的
+    # 手牌（置于牌堆顶，之后还能被摸到）；换一张不计次数、无视防具的雷【杀】。
+    # 已知局限（AI 适配契约 §1 第 5 条）：每帧现算的**牌堆顶**不在 `PlayerView` 里（它只
+    # 有 `deck_count` / `discard`），故 AI 看不见"该挑哪一张"，只能按 `_score_select_cards`
+    # 的牌价挑一张合格牌；合格性由引擎的**过滤后选择面**保证（不合格的牌不进面）⇒ 合法性
+    # 不受影响。`_constant` 不读任何字段。
+    "hero.qunying_niheng.shejian": (
+        _constant(1.3),
+        "代价 = 一张点数大于牌堆顶的手牌（置顶后仍会被摸到）⇒ 付一张牌换一张无次数限制、"
+        "无视防具的雷【杀】，温和正分；牌堆顶点数不在 `PlayerView` 里 ⇒ 挑哪张牌交给"
+        "`_score_select_cards`（合格性由过滤后的选择面保证）；`_constant` 不读任何字段",
+    ),
+    # 【狂才】= 结束阶段的**盲猜**（类别 1/3、花色 1/4、点数 1/13 命中，命中则获得 3/4/13 张）：
+    # 没有代价、期望收益约等于一张牌 ⇒ 温和正分；声明项的分档在 `_OPTION_VALUES` 里。
+    "hero.qunying_niheng.kuangcai": (
+        _constant(1.0),
+        "没有代价的盲猜（类别 1/3、花色 1/4、点数 1/13），命中即获得 3/4/13 张牌 ⇒ "
+        "期望约一张牌、温和正分；声明项分档在 `_OPTION_VALUES`；`_constant` 不读任何字段",
     ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。

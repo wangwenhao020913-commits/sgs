@@ -704,6 +704,27 @@ class Player(BaseModel):
     读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_RANGE_EXEMPT`` / ``COUNT_LIMIT`` /
     ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
     """
+    shejian_slash_card: int | None = None
+    shejian_slash_targets: tuple[int, ...] = ()
+    """群英包·「锋势」祢衡【舌剑】的「正在结算的舌剑之【杀】」标记（qunying 票 05）。
+
+    ``shejian_slash_card`` = 那一张**纯虚拟雷【杀】**的 ``card_id``（``None`` = 没有在结算的）。
+    ``shejian_slash_targets`` = 它在「成为目标后」定下的目标集合（含被【流离】转来的新目标）。
+
+    两个字段只服务两件事：① 给这张【杀】的每个目标打「无视防具」的逐目标帧标签
+    （``Tag.ARMOR_IGNORED``，技能自己的 ``USE_AFTER_BECOME_TARGET`` 钩子写）；② 在**真正
+    询问【闪】的那个窗口**里，只对"这张【杀】的目标"追加舌剑的 supply 候选
+    （``CANDIDATES`` 回调读它）。
+
+    **不能用 ``-1`` 当哨兵**：纯虚拟牌的 ``card_id`` 是**负数**（`CardRef.is_virtual` 的判据），
+    用负哨兵会把"正在结算的那一张"读成"没有"。
+
+    生命周期是**派生式**的：建卡时写（主动入口在段机里、提供者入口在交付前），
+    ``RESOLVE_AFTER_END`` 的强制钩子清回 ``-1`` / ``()``。**不发 delta、不进投影 / 记录流**
+    （与 ``lianying_*`` 同姿态；回放按同一次使用重建）。纯虚拟牌的 id 由
+    :func:`~sgs.skills.virtual.pure_virtual_card` 按牌堆张数派生，两次使用在牌堆张数相同
+    时会得到同一个 id —— 故标记必须**用完即清**，不能靠"id 唯一"来区分两次使用。
+    """
     lianying_unlimited_after: int = -1
     lianying_chain_after: int = -1
     """群英包·「锋势」陆逊【连营】的两条「本回合使用的下一张牌」待生效位（qunying 票 01）。

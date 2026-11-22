@@ -609,6 +609,14 @@
       "enabled": true,
       "rarity": "common"
     },
+    "hero.qunying_niheng.kuangcai": {
+      "enabled": true,
+      "rarity": "common"
+    },
+    "hero.qunying_niheng.shejian": {
+      "enabled": true,
+      "rarity": "common"
+    },
     "hero.shen_caocao_mobile.feiying": {
       "enabled": true,
       "rarity": "common"

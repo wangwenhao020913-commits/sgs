@@ -518,13 +518,18 @@ function fillHeroZones(box, player) {
   for (const row of rows) box.appendChild(row);
 }
 
-/** B：武将块上的**状态标签**（服务端 `hero_tags`：[{tag,label,parts?}]）。没有标签整块隐藏。
+/** B：武将块上的**状态标签**（服务端 `hero_tags`：[{tag,label,parts?,card?}]）。没有标签整块隐藏。
  *
  * 只渲染服务端下发的 `label` / `tag` / `parts`，前端不按技能 / 牌面计算"该显示什么"。
  * `parts` 是该标签**需要逐段上色**时的分段文本（skill-display 票 02；spec §4）：
  * 出现时只画 parts（`label` 是同一句话的纯文本，再画一遍就重复了），每段一个
  * `span.hero-tag-part`，`tone` 只可能是 `red` / `black`（服务端 `display.py:SUIT_LABELS`）；
  * 没有 `parts` 时照旧一个 `textContent` 文本节点（既有标签一字不变）。
+ *
+ * `card`（qunying 票 05 / 用户 2026-11-22 Q4）：标签**附带一张牌面**时（首个载体 =
+ * 【舌剑】的「牌堆顶的牌」），悬停 = 跟随鼠标的常规卡面预览——与武将牌上的牌区
+ * （`heroZoneRows`）**同一个** `showCardPreview`，不另起一套悬停面。没有 `card` 的标签
+ * 不挂任何监听（既有标签零变化）。
  */
 function fillHeroTags(box, player) {
   if (!box) return;
@@ -546,6 +551,12 @@ function fillHeroTags(box, player) {
       }
     } else {
       chip.textContent = tag.label || tag.tag || "";
+    }
+    if (tag.card) {
+      chip.setAttribute("data-has-card", "true");
+      chip.addEventListener("mouseenter", (event) => showCardPreview([tag.card], event));
+      chip.addEventListener("mousemove", (event) => moveCardPreview(event));
+      chip.addEventListener("mouseleave", () => hideCardPreview());
     }
     box.appendChild(chip);
   }

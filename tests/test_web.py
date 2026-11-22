@@ -781,7 +781,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     # shiji-zhi-luotong-chenzhen 票 01：骆统（新真名）⇒ 106 / 71。
     # bingshi-jie 票 01：兵势篇-节包·势赵云（真名「赵云」已在池里：与标准 / 界赵云同真名，
     # 一局只出一个）⇒ 版本 111 → 112、真名分组 75 **不变**。
-    assert len(flat) == 120 and len(catalog) == 78, (
+    assert len(flat) == 121 and len(catalog) == 79, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -9339,6 +9339,81 @@ def test_a_self_badge_disappears_when_the_skill_stops_resolving() -> None:
     )
 
 
+def test_the_shejian_badge_shows_the_deck_top_with_points_and_a_card_face() -> None:
+    """【舌剑】的座位标签 = 「舌剑：点数花色牌名」（qunying 票 05；用户 2026-11-22 签 Q2–Q4）。
+
+    三条口径各一条判据：
+
+    - **只在祢衡自己的出牌阶段里画**（用户 2026-11-22 第二轮裁定："牌堆顶的牌只是在祢衡的
+      出牌阶段公开，所以这个组件在其他阶段都应该不显示"）：判据 = `is_own_play_phase`；
+      技能失去 / 失效由 `SELF` 档的实例闸挡（派生式，没有清除事件）；
+    - **带点数**（Q3）：「点数严格大于牌堆顶」是代价的判据，看不到点数就没法决定；
+    - **悬浮卡面预览**（Q4）：载荷多带一个 `card`（`display.card_payload` 的形状），前端见到它
+      就挂 `showCardPreview`（界面读法由 `ui_smoke.mjs` 的 `BADGE-01d` 钉）。
+
+    牌堆空 ⇒ 不画（没有"牌堆顶"可画，fail-closed；不画空壳）。
+    """
+    from types import SimpleNamespace
+
+    from sgs_web.display import RANK_TEXT, SUIT_LABELS
+
+    pack = load_content_pack(deck_profile="standard_108")
+    top = cards_of_type(pack, "indulgence")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="qunying_niheng"), SeatSpec()],
+        deck=(top, *deck_excluding(pack, top)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=1, pack=pack)
+
+    def shejian_tags() -> list[dict]:
+        tags = visible_snapshot(session)["players"][0]["hero_tags"]
+        return [tag for tag in tags if tag["tag"] == "shejian"]
+
+    card = state.card(top)
+    face = SUIT_LABELS[card.suit]
+    badge = shejian_tags()
+    assert len(badge) == 1, "牌堆顶可画 ⇒ 恰好一条「舌剑」标签（对每个观战者一致）"
+    expected = f"舌剑：{RANK_TEXT[card.rank]}{face['symbol']}{card.name}"
+    assert badge[0]["label"] == expected, (
+        "Q3：带点数（A/2…10/J/Q/K，与牌面文字同一套）"
+    )
+    assert "".join(part["text"] for part in badge[0]["parts"]) == badge[0]["label"], (
+        "`parts` 的文本拼起来恒等于 `label`（前端有 parts 时只画 parts）"
+    )
+    tones = [part.get("tone") for part in badge[0]["parts"]]
+    assert tones == [None, None, face["color"], None], (
+        "花色符号那一带上红 / 黑（取 `SUIT_LABELS` 的唯一映射），其余段不上色"
+    )
+    assert badge[0]["card"]["card_id"] == top, "Q4：悬浮预览的牌面随载荷下发"
+    assert badge[0]["card"]["display_name"] == card.name
+
+    # 失去 / 失效技能 ⇒ 不画（SELF 档的实例闸，派生式、没有清除事件）。
+    engine.state.player(0).lost_skills.append("hero.qunying_niheng.shejian")
+    assert shejian_tags() == [], "技能失去后标签自动不画"
+    engine.state.player(0).lost_skills.clear()
+    assert shejian_tags(), "恢复后下一次投影里自动回来"
+
+    # 牌堆空 ⇒ 不画（没有「牌堆顶」）。
+    saved = list(state.deck)
+    state.deck.clear()
+    assert shejian_tags() == [], "牌堆空 ⇒ 不画空壳"
+    state.deck.extend(saved)
+    assert shejian_tags(), "牌堆回来 ⇒ 标签也回来"
+
+    # 只在**自己的出牌阶段**里画（用户 2026-11-22 第二轮裁定）：别的阶段 / 别人的回合都不画。
+    state.phase = Phase.FINISH
+    assert shejian_tags() == [], "结束阶段不公开牌堆顶 ⇒ 不画"
+    state.phase = Phase.PLAY
+    state.turn_seat = 1
+    assert shejian_tags() == [], "别人的出牌阶段不画（技能持有者不是回合角色）"
+    state.turn_seat = 0
+    assert shejian_tags(), "回到自己的出牌阶段 ⇒ 标签回来"
+
+
 def test_the_qinzheng_badge_shows_the_game_long_used_or_played_count() -> None:
     """【勤政】的座位标签 = **本局**使用 / 打出张数（skill-display 票 03；spec §5 第 03 行）。
 
@@ -11442,7 +11517,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     # bingshi-jie 票 01：势赵云两条（武翊 / 摧锋）⇒ 232 → 234。
     # m7-script-mode 票 26：遗物六条（`relic.*`）⇒ 236 → 242。
     # m7-script-mode 票 27：NPC 技能四条（`npc.*`）⇒ 242 → 246。
-    assert len(expected_skills) == 259, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 261, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

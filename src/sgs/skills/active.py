@@ -109,6 +109,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .catalog import (
+    MATCH_ACTOR_KEY,
     MATCH_OWNER_KEY,
     SKILL_JUDGMENT_CARD_KEY,
     awakening_skill_awakened,
@@ -156,6 +157,8 @@ __all__ = [
     "ACTIVATIONS",
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
+    "SHEJIAN",
+    "shejian_provider",
     "DIMENG",
     "DIMENG_FLOW",
     "DINGPIN",
@@ -10061,6 +10064,467 @@ QIANXUN_EFFECT_FLOW = SkillFlow(
 """
 
 
+# ---------------------------------------------------------------------------
+# 群英包·「锋势」祢衡【舌剑】（qunying 票 05；用户 2026-11-22 签 Q1–Q5 + 流离口径）
+#
+# 牌面（用户 `技能.txt` 逐字）：
+#
+#     舌剑：你的出牌阶段内，牌堆顶的牌对所有角色可见，且你可以将一张点数大于牌堆顶的手牌
+#           置于牌堆顶，视为使用不计次数、无视防具的雷【杀】。此牌目标也可以使用此法视为
+#           使用【闪】
+#
+# **三个入口共用一份代价**（选一张点数大于牌堆顶的手牌 → 置于牌堆顶）：
+#
+#   ① 出牌阶段主动（A 族：技能按钮 → 一步流水线选代价牌 → 手写段机：置顶 → 选目标 → 使用）
+#      ——**唯一**的"视为使用雷【杀】"入口。牌面没有「当你需要使用【杀】时」这类措辞，而
+#      产物是**虚拟牌** ⇒ 不能被动响应（用户 2026-11-22 第二轮裁定："这是虚拟牌，而且描述
+#      没有『当你需要使用"杀"时』，所以只能主动使用"；账本「视为使用」三行）。
+#   ② 【闪】窗口里由**这张【杀】的目标**付同样的代价（跨座位提供者，档 = 武将 0 = ①档）：
+#      依据是牌面那句「**此牌目标也可以使用此法视为使用【闪】**」——它明确写了"响应这一次
+#      使用时的替代方式"（用户 2026-11-22 追加裁定："在真正询问出闪的窗口给予目标 supply
+#      选择"）；
+#   ③ 牌堆顶可见的**显示组件**（`sgs_web.projection` 的座位标签）——**只在祢衡自己的出牌
+#      阶段里画**（用户 2026-11-22 第二轮裁定："牌堆顶的牌只是在祢衡的出牌阶段公开"）。
+#
+# 判据的唯一落点（不另抄第二份）：
+#
+#   - 「点数大于牌堆顶」= :func:`_shejian_qualifying_hand`（每次现算 `state.deck[0]`；置顶之后
+#     牌堆顶变成刚置顶的那张 ⇒ **下一次**用法的比较对象跟着变）；
+#   - 「这一张是舌剑之【杀】」= 座位标记 :attr:`~sgs.state.Player.shejian_slash_card` /
+#     ``shejian_slash_targets``：建卡时写、``RESOLVE_AFTER_END`` 清；目标集合在
+#     ``USE_AFTER_BECOME_TARGET`` 逐个补齐（它在【流离】之后 ⇒ 集合是最终目标）；
+#   - 「无视防具」= 逐目标 ``Tag.ARMOR_IGNORED``（【闪】窗口的【八卦阵】/【八阵】闭嘴）+
+#     ``EFFECTIVENESS`` / ``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP`` 三条修饰器置
+#     ``ctx.flags["ignore_armor"]``——与【青釭剑】同一套口径，只是判据从"这把武器"换成
+#     "这一张牌"（用户 Q5："只是无次数限制、无视防具"）；
+#   - 「不计次数」= ``start_use(counts=False)``（本技能唯一的"视为使用"入口就是主动那一处）；
+#   - 「**不**豁免距离」= 目标池走普通 :func:`~sgs.effects.check_targets`（用户 Q5："仍然受
+#     距离限制"）。
+# ---------------------------------------------------------------------------
+
+SHEJIAN = hero_skill_id("qunying_niheng", "shejian")
+"""群英包·「锋势」祢衡【舌剑】的全限定技能 id。"""
+
+SHEJIAN_THUNDER_SLASH = "thunder_slash"
+"""「视为使用…雷【杀】」的牌型 id（内容包既有牌名；属【杀】家族，族判据不写它的字面量）。"""
+
+_SHEJIAN_COST_MOVED = "shejian_cost_moved"
+"""帧私有：主动入口的代价已经置顶（搬牌挂起后的续跑不重搬）。"""
+
+_SHEJIAN_TARGET_KEY = "shejian_target"
+"""帧私有：主动入口选定的目标座位。"""
+
+_SHEJIAN_STARTED = "shejian_started"
+"""帧私有：使用链已经开过（重入不重复 ``start_use``）。"""
+
+_SHEJIAN_PROVIDER_STAGE = "shejian_provider_stage"
+"""帧私有：提供者入口的段游标（``card`` → ``place`` → ``deliver``）。"""
+
+_SHEJIAN_PROVIDER_CARD = "shejian_provider_card"
+"""帧私有：提供者入口选中的那张代价牌（挂起续跑沿用它，不重问）。"""
+
+_ASK_SHEJIAN_CARD = "hero.qunying_niheng.shejian.card"
+"""询问位置：提供者入口的"选一张合格手牌"（`SELECT_CARDS` 读 ``step_requirements["card"]``）。"""
+
+_SHEJIAN_ASK_TARGET = "hero.qunying_niheng.shejian:target"
+"""询问位置：主动入口的"选雷【杀】目标"（`SELECT_OPTION` 读 ``step_requirements["target"]``）。"""
+
+
+def _shejian_top_rank(state: GameState) -> int | None:
+    """牌堆顶那张牌的点数；牌堆空 ⇒ ``None``（没有「牌堆顶」可比较）。"""
+    if not state.deck:
+        return None
+    rank = state.card(state.deck[0]).rank
+    return None if rank is None else int(rank)
+
+
+def _shejian_slash(state: GameState) -> CardRef:
+    """「视为使用…雷【杀】」的**纯虚拟**产物（无色 / 无点数 / 无属性，规则 §16.3）。"""
+    return pure_virtual_card(state, SHEJIAN_THUNDER_SLASH)
+
+
+def _shejian_qualifying_hand(state: GameState, seat: int) -> tuple[int, ...]:
+    """``seat`` 手里**点数严格大于牌堆顶**的那些手牌（代价的合法源牌，按手牌序）。"""
+    top = _shejian_top_rank(state)
+    if top is None:
+        return ()
+    return tuple(
+        int(card_id)
+        for card_id in state.player(int(seat)).hand
+        if int(state.card(int(card_id)).rank or 0) > top
+    )
+
+
+def _shejian_can_pay(state: GameState, seat: int) -> bool:
+    """付得起 = 牌堆非空 ∧ 手里有一张点数更大的手牌（"没有牌堆顶"= 付不起）。"""
+    return bool(_shejian_qualifying_hand(state, seat))
+
+
+def _shejian_mark(state: GameState, owner: int, card_id: int) -> None:
+    """写「正在结算的舌剑之【杀】」标记（建卡时写，目标集合由钩子逐个补齐）。"""
+    player = state.player(int(owner))
+    player.shejian_slash_card = int(card_id)
+    player.shejian_slash_targets = ()
+
+
+def _shejian_clear(state: GameState, owner: int) -> None:
+    """清标记（``RESOLVE_AFTER_END``：这一次使用结束）。"""
+    player = state.player(int(owner))
+    player.shejian_slash_card = None
+    player.shejian_slash_targets = ()
+
+
+def _shejian_is_ours(host: Any, frame: Any) -> bool:
+    """这一次使用是不是**持有者刚造出来的那张舌剑之【杀】**（钩子的共同条件）。
+
+    两条正交事实一起判：``MATCH_OWNER_KEY`` 的持有者就是本次使用的来源，且本次的牌 id
+    命中座位标记。纯虚拟牌 id 由牌堆张数派生（两次使用可能重号），故"用完即清"是必要条件。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or int(frame.data.get("source", -1)) != int(owner):
+        return False
+    card = frame.data.get("card")
+    card_id = getattr(card, "card_id", None)
+    if card_id is None:
+        return False
+    marked = host.state.player(int(owner)).shejian_slash_card
+    return marked is not None and int(marked) == int(card_id)
+
+
+def _shejian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """主动入口的候选：出牌阶段 ∧ 本人 ∧ 付得起 ∧ **有合法目标**。
+
+    "没有合法目标"不是"没收益"，是**不合法**的使用（`edge-cases.md` G1）⇒ 入口不出现。
+    目标池与段机读同一个 :func:`~sgs.effects.check_targets`（距离照常，Q5）。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not is_own_play_phase(state, int(ctx.owner)):
+        return current
+    if not _shejian_can_pay(state, int(ctx.owner)):
+        return current
+    if not check_targets(state, int(ctx.owner), _shejian_slash(state)):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _shejian_cost_excluded(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """代价步的黑名单：**不**合格的手牌（点数不大于牌堆顶）从选择面里删掉。
+
+    删而不是置灰：那一张此刻根本不是合法代价（`edge-cases.md` 2.1 C4 的唯一判据）。
+    """
+    del frame, answers
+    keep = _shejian_qualifying_hand(state, int(owner))
+    return tuple(card_id for card_id in state.player(int(owner)).hand if card_id not in keep)
+
+
+def _shejian_ask_seat(host: Any, frame: Any, owner: int, pool: tuple[int, ...]) -> Any:
+    """问一个座位（``seat:N``）；挂起 ⇒ :data:`_ASKING`。与【谦逊】的座位问法同形。"""
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id=_SHEJIAN_ASK_TARGET,
+        options=tuple(_seat_choice(seat) for seat in pool),
+        optional=False,
+    )
+    if host.suspended(answer):
+        return _ASKING
+    return int(str(answer.choice).split(":", 1)[1])
+
+
+def _shejian_active_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """主动入口的提交点：**置顶（付代价）→ 选目标 → 视为使用雷【杀】**。
+
+    次序按牌面"将一张…置于牌堆顶，视为使用…"（用户 Q6 = 建议）：先付代价再选目标，
+    故目标的【闪】代价比较的是"祢衡刚置顶的那一张"。
+
+    三段各一个帧私有游标（G7）：置顶搬牌会内联派发「失去牌后」（【连营】/【枭姬】一类）而
+    可能挂起；目标问是手写询问；``start_use`` 会压整条使用链。重入既不重做也不漏做。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    if not frame.data.get(_SHEJIAN_COST_MOVED):
+        picked = tuple(int(card_id) for card_id in answers["cost"])
+        if not picked:
+            return None
+        control = host.move_in_frame(
+            frame,
+            state.refs((picked[0],)),
+            to_zone=ZoneRef(Zone.DECK),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+            to_top=True,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_SHEJIAN_COST_MOVED] = True
+
+    if _SHEJIAN_TARGET_KEY not in frame.data:
+        card = _shejian_slash(state)
+        pool = check_targets(state, owner, card)
+        if not pool:
+            # 候选闸已经挡过"没有合法目标"，撞到这里只可能是局面在两步之间变了 ⇒
+            # 整段不发生（代价已付，浪费一次；不造一条打向空气的使用）。
+            return None
+        if len(pool) == 1:
+            frame.data[_SHEJIAN_TARGET_KEY] = int(pool[0])
+        else:
+            picked_seat = _shejian_ask_seat(host, frame, owner, pool)
+            if picked_seat is _ASKING:
+                return "stay"
+            if picked_seat is None:
+                return None
+            frame.data[_SHEJIAN_TARGET_KEY] = int(picked_seat)
+
+    if not frame.data.get(_SHEJIAN_STARTED):
+        frame.data[_SHEJIAN_STARTED] = True
+        card = _shejian_slash(state)
+        _shejian_mark(state, owner, int(card.card_id))
+        host.start_use(
+            card,
+            source=owner,
+            targets=(int(frame.data[_SHEJIAN_TARGET_KEY]),),
+            use_timing=Timing.PHASE_PLAY_IDLE,
+            counts=False,
+        )
+    return None
+
+
+SHEJIAN_FLOW = SkillFlow(
+    name="shejian",
+    steps=(
+        # 步 1：付代价——**一张**点数大于牌堆顶的手牌（不合格的从面里删掉）。
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            optional=False,
+            key="cost",
+            exclude_cards=_shejian_cost_excluded,
+        ),
+    ),
+    effect=_shejian_active_effect,
+    # 牌面没有"出牌阶段限一次"⇒ 不落 A 族的"本阶段已用"位（同【仁德】）。
+    once_per_phase=False,
+)
+"""【舌剑】主动入口的一步流水线：选代价牌 → 段机（置顶 → 选目标 → 视为使用雷【杀】）。"""
+
+
+def _shejian_ignores_armor(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """「无视防具」的**伤害链**那一半（三个挂点共用一份判据，同【青釭剑】）。
+
+    只认**来源侧**（``ctx.owner == ctx.subject``：祢衡是造成伤害的人）且渠道牌就是那张
+    舌剑之【杀】；置的是链内旁路标志（``EFFECTIVENESS`` / ``DAMAGE_TAKE_AMOUNT`` /
+    ``DAMAGE_CAP`` 三条链共用同一个可变 ``flags``，只写一次就够）。
+    修饰器管道序 = 解析序 ``(priority_class, skill_id)``：武将档（0）先于装备档（1）⇒ 本回调
+    一定排在【仁王盾】/【藤甲】/【白银狮子】之前，后者读到标志即整条让开。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    marked = state.player(int(ctx.owner)).shejian_slash_card
+    if marked is None or int(marked) != int(ctx.card.card_id):
+        return current
+    ctx.flags["ignore_armor"] = True
+    return current
+
+
+def _shejian_tag_target(host: Any, frame: Any) -> None:
+    """「成为目标后」（逐目标）：打 ``Tag.ARMOR_IGNORED`` + 把本目标记进集合。
+
+    这个时点在【流离】之后 ⇒ 记下的就是**最终**目标集合（被转来的新目标也在这里补上，
+    被转走的那个不会被派发）。标签随本次使用（帧出栈）结构性消失 ⇒【闪】窗口读它。
+    """
+    owner = int(frame.data[MATCH_OWNER_KEY])
+    actor = frame.data.get(MATCH_ACTOR_KEY)
+    if actor is None:
+        return
+    add_tag(frame, Tag.ARMOR_IGNORED, target=int(actor))
+    player = host.state.player(owner)
+    player.shejian_slash_targets = tuple(
+        dict.fromkeys((*player.shejian_slash_targets, int(actor)))
+    )
+
+
+def _shejian_settle_end(host: Any, frame: Any) -> None:
+    """「使用结算结束后」：清掉「正在结算的舌剑之【杀】」标记（下一次使用重新写）。"""
+    _shejian_clear(host.state, int(frame.data[MATCH_OWNER_KEY]))
+
+
+def _shejian_dodge_offer(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """【闪】窗口的**跨座位**候选：由"这张舌剑之【杀】的目标"自己付一张手牌当【闪】。
+
+    这是本票唯一的新组合（登记见 `06`（§5「程序化约定与偏离一手」））：`ProviderWindows.offers`
+    的 ``owner == subject`` 判据只服务"自己付牌"，而这里的付牌人是**目标**、技能持有人是祢衡
+    ⇒ 候选追加自己写。
+    判据三条：这一张【杀】仍在结算（座位标记）∧ 被问的座位是它的目标 ∧ 该座位手里有
+    "点数大于牌堆顶"的牌。档位由载体派生（武将 = 0 = **①档**，用户要求的"①档时机"）。
+    """
+    if ctx.scope is not CandidateScope.DODGE:
+        return current
+    if ctx.respond_required != DODGE_RESPONSE_CARD:
+        return current
+    owner = int(ctx.owner)
+    target = int(ctx.subject)
+    if owner == target:
+        return current
+    if ctx.skill_id in ctx.providers_used:
+        return current
+    player = state.player(owner)
+    if player.shejian_slash_card is None:
+        return current
+    if target not in player.shejian_slash_targets:
+        return current
+    if not _shejian_can_pay(state, target):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _shejian_hand_face(host: Any, seat: int) -> Any:
+    """提供者入口的选择面：**只铺合格的手牌**（点数大于牌堆顶）。
+
+    面 = 自己的手牌（``reveal_hand=True``，与【蛊惑】/【贯石斧】同一姿态）；过滤发生在
+    铺面之前，故"选了也过不了校验"的牌不会出现在面上。
+    """
+    slots, card_ids = host.selection_face(seat, (Zone.HAND,), reveal_hand=True)
+    keep = _shejian_qualifying_hand(host.state, int(seat))
+    return (
+        tuple(slot for slot, card_id in zip(slots, card_ids) if card_id in keep),
+        tuple(card_id for card_id in card_ids if card_id in keep),
+    )
+
+
+def _shejian_pick_card(host: Any, frame: Any, payer: int, timing: Timing) -> Any:
+    """提供者入口段 1：选那张代价牌（牌面直选一张）。
+
+    返回 ``card_id`` / ``None``（放弃 ⇒ 这次响应不发生）/ ``SUSPEND``（挂起）。
+    """
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_SHEJIAN_CARD,
+        key="shejian:card",
+        actor=payer,
+        timing=timing,
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+        build_face=lambda: _shejian_hand_face(host, payer),
+    )
+    if host.suspended(picked):
+        return picked
+    return None if not picked else int(picked[0])
+
+
+def shejian_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Control:
+    """提供者受理：**选牌 → 置顶 → 交付一张纯虚拟【闪】**（【闪】窗口；付牌者是**目标**）。
+
+    只有一扇窗口，判据来自牌面那句「**此牌目标也可以使用此法视为使用【闪】**」：它明确
+    写了"响应这一次使用时的替代方式"，故目标侧可以"视为使用"。**自己付牌的那一路（借刀 /
+    乱武）不做**——牌面没有「当你需要使用【杀】时」，而"视为使用"的**虚拟牌**要被动响应
+    必须由牌面这样声明（用户 2026-11-22 的第二轮裁定；账本「视为使用」三行）⇒ 本技能只能
+    **主动使用**那张雷【杀】。
+
+    ``required`` 由窗口给（与【蛊惑】/【武翊】同一条契约）：不是 ``dodge`` ⇒ 零副作用放弃
+    （fail-closed，本技能不该出现在别的窗口里）。放弃 / 付不起 ⇒ ``provider_give_up``
+    （**零副作用**：牌一张不动），窗口照常继续问真牌。
+    重入纪律（``CODING_STANDARDS.md`` §3）：段游标 + 搬牌幂等（``move_in_frame`` 自己兜）。
+    """
+    # 惰性 import：`lord_request` 反向依赖 `catalog`（本模块由 catalog 末尾导入），
+    # 模块级 import 会成环（与 `guohuo_provider` / `wuyi_provider` 同一理由）。
+    from .lord_request import provider_deliver, provider_give_up, provider_required
+
+    required = str(provider_required(frame))
+    state = host.state
+    payer = int(actor)
+    if required != DODGE_RESPONSE_CARD:
+        provider_give_up(frame)
+        return None
+    stage = str(frame.data.get(_SHEJIAN_PROVIDER_STAGE, "card"))
+
+    if stage == "card":
+        if not _shejian_can_pay(state, payer):
+            # 候选侧已经按同一条判据挡过；走到这里说明窗口硬派发了一次 ⇒ 零副作用放弃。
+            provider_give_up(frame)
+            return None
+        picked = _shejian_pick_card(host, frame, payer, timing)
+        if host.suspended(picked):
+            return "stay"
+        if picked is None:
+            provider_give_up(frame)
+            return None
+        frame.data[_SHEJIAN_PROVIDER_CARD] = int(picked)
+        frame.data[_SHEJIAN_PROVIDER_STAGE] = "place"
+
+    if stage in ("card", "place"):
+        control = host.move_in_frame(
+            frame,
+            state.refs((int(frame.data[_SHEJIAN_PROVIDER_CARD]),)),
+            to_zone=ZoneRef(Zone.DECK),
+            reason=MoveReason.PUT,
+            owner=payer,
+            actor=payer,
+            to_top=True,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_SHEJIAN_PROVIDER_STAGE] = "deliver"
+
+    provider_deliver(frame, virtual_dodge(state))
+    return None
+
+
+_SHEJIAN = ActiveSkill(
+    "qunying_niheng",
+    "shejian",
+    _shejian_offers,
+    flow=SHEJIAN_FLOW,
+    # 首步是手牌直选（`exclude_cards` 已把不合格的删掉）⇒ 清单渲得出；本票取**不翻**
+    # （逐步问），代价是多一次"点技能按钮"的入口（Q16 的建议档）。
+    hooks=(
+        # 「成为目标后」逐目标：打「无视防具」标签 + 记最终目标集合。
+        Hook(
+            Timing.USE_AFTER_BECOME_TARGET,
+            handler=_shejian_tag_target,
+            condition=_shejian_is_ours,
+            forced=True,
+        ),
+        # 「使用结算结束后」：清掉"正在结算的舌剑之杀"标记。
+        Hook(
+            Timing.RESOLVE_AFTER_END,
+            handler=_shejian_settle_end,
+            condition=_shejian_is_ours,
+            forced=True,
+        ),
+    ),
+    extra_modifiers=(
+        # 三条伤害链：无视防具（与【青釭剑】同一套旁路标志）。
+        Modifier(ModifierPoint.EFFECTIVENESS, _shejian_ignores_armor),
+        Modifier(ModifierPoint.DAMAGE_TAKE_AMOUNT, _shejian_ignores_armor),
+        Modifier(ModifierPoint.DAMAGE_CAP, _shejian_ignores_armor),
+        # 唯一的提供者候选：**目标付牌**（【闪】窗口，跨座位）。牌子写「此牌目标也可以使用
+        # 此法视为使用【闪】」⇒ 有"响应时"的文字依据；"自己付牌"那一路（借刀 / 乱武）**没有
+        # 依据**——虚拟牌 + 牌面没有「当你需要使用【杀】时」⇒ 只能主动使用（用户 2026-11-22
+        # 的第二轮裁定 + 账本「视为使用」三行）。
+        Modifier(ModifierPoint.CANDIDATES, _shejian_dodge_offer),
+    ),
+    requirement=(
+        "你的出牌阶段内，牌堆顶的牌对所有角色可见，且你可以将一张点数大于牌堆顶的手牌"
+        "置于牌堆顶，视为使用不计次数、无视防具的雷【杀】。此牌目标也可以使用此法视为"
+        "使用【闪】"
+    ),
+    step_requirements={
+        "cost": "将一张点数大于牌堆顶的手牌置于牌堆顶",
+        # 提供者入口的选牌步（`SELECT_CARDS` 恒读 `card` 键）。
+        "card": "将一张点数大于牌堆顶的手牌置于牌堆顶",
+        "target": "选择雷【杀】的目标（距离照常、无视防具、不计次数）",
+    },
+    # 座位常驻标签（用户 Q2 = 常驻、Q3 = 带点数、Q4 = 带悬浮卡面预览）：
+    # 数据在 `sgs_web.projection.BADGE_PROVIDERS`，本字段只带档位。
+    badge=BadgeKind.WINDOW,
+)
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 群英包·「锋势」陆逊【谦逊】（qunying 票 01；用户 2026-11-21 一次签 Q1–Q16；
     # 票 10 起按用户 2026-11-22 的第三轮裁定拆成**代价 / 效果两个事件**）。
@@ -10092,6 +10556,10 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             "type": "选择要获得的牌的类别（基本牌 / 锦囊牌 / 装备牌）",
         },
     ),
+    # 群英包·「锋势」祢衡【舌剑】（qunying 票 05；用户 2026-11-22 签 Q1–Q5 + 流离口径）：
+    # A 族主动入口 + 提供者（借刀 / 乱武，只在自己出牌阶段内）+ 【闪】窗口的跨座位候选
+    # + 三条防具旁路修饰器 + 两条强制钩子 + 牌堆顶可见标签，见上面那一段注释。
+    _SHEJIAN,
     # 兵势篇-节包·势赵云【武翊】（bingshi-jie 票 01）：四档一张脸（A 族 + 提供者 +
     # 两个修饰器 + 三条钩子 + 座位标签），见 `_WUYI` 的注释。
     _WUYI,

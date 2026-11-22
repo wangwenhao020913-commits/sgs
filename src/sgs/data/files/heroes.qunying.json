@@ -23,6 +23,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "qunying_niheng",
+      "name": "「锋势」祢衡",
+      "true_name": "祢衡",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "qunying",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shejian",
+          "name": "舌剑",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "kuangcai",
+          "name": "狂才",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

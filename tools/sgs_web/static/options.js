@@ -454,6 +454,27 @@ const OPTION_LABELS = Object.freeze({
   "yiyun:recover_one": "乙：回复1点体力",
   "yiyun:suppress": "丙：本回合非锁定技能失效",
   "yiyun:damage_one": "丁：受到你造成的1点伤害",
+  // 群英包·「锋势」祢衡【狂才】（qunying 票 05；用户 2026-11-22 签 Q9–Q14）：
+  // 第 1 步"声明哪一项"的三条（牌堆张数不够的那几项由引擎从候选里删掉，不置灰——
+  // 这一阶段它根本不存在）；第 2 步"声明具体值"的类别复用上面 `basic` / `trick` /
+  // `equipment` 三条、花色走载荷的 `option_labels`（`SUIT_LABELS` 派生），只有**点数**
+  // 13 档要在这里登记（A = 1 … K = 13，与牌面文字一致）。
+  "kuangcai:third_type": "第三张牌的类别",
+  "kuangcai:fourth_suit": "第四张牌的花色",
+  "kuangcai:thirteenth_rank": "第十三张牌的点数",
+  kuangcai_rank_1: "A",
+  kuangcai_rank_2: "2",
+  kuangcai_rank_3: "3",
+  kuangcai_rank_4: "4",
+  kuangcai_rank_5: "5",
+  kuangcai_rank_6: "6",
+  kuangcai_rank_7: "7",
+  kuangcai_rank_8: "8",
+  kuangcai_rank_9: "9",
+  kuangcai_rank_10: "10",
+  kuangcai_rank_11: "J",
+  kuangcai_rank_12: "Q",
+  kuangcai_rank_13: "K",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

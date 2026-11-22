@@ -5077,11 +5077,13 @@ from .heroes import (  # noqa: E402  （末尾 import 是刻意的）
 from .active import (  # noqa: E402  （末尾 import 是刻意的）
     GUOHUO,
     JIE_JIANYING,
+    SHEJIAN,
     active_skill_definitions,
     WUYI,
     guohuo_provider,
     jie_jianying_provider,
     register_activation,
+    shejian_provider,
     wuyi_provider,
 )
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
@@ -5199,6 +5201,7 @@ from .hero_mou_gong import (  # noqa: E402  （末尾 import 是刻意的）
     mou_gong_tong_skill_definitions,
 )
 from .hero_qunying import (  # noqa: E402  （末尾 import 是刻意的）
+    qunying_activation_plans,
     qunying_skill_definitions,
 )
 
@@ -5215,6 +5218,12 @@ register_provider(JIE_JIANYING, jie_jianying_provider)
 # 与【八卦阵】/【八阵】同一条 `dodge` 窗口，产物是纯虚拟【闪】。候选侧由声明上的
 # `ProviderWindows.offers` 追加，这里只登记受理（与【蛊惑】/界【渐营】同一姿态）。
 register_provider(WUYI, wuyi_provider)
+# 群英包·「锋势」祢衡【舌剑】（qunying 票 05）：两条路的提供者共用一份回调——
+# ① 借刀 / 乱武的"被迫**使用**【杀】"（自己付牌，档 = 武将 0）；
+# ② 【闪】窗口里由**这张【杀】的目标**付牌（跨座位，候选追加在 `active._shejian_dodge_offer`，
+#    不经过 `ProviderWindows` 的 `owner == subject` 判据）。`required` 由窗口给出，回调据此
+#    决定产物是纯虚拟雷【杀】还是纯虚拟【闪】。
+register_provider(SHEJIAN, shejian_provider)
 # 【激将】的「出牌阶段主动**使用**【杀】」侧（yijiang-2014-round2 票 20）：它不是 A 族
 # （声明由 `lord_request._lord_request_definition` 造），故发动回调同样只能在**这里**
 # 登记——两个模块都已 import 完之后。标准 / 界两条声明共用同一条流水线。
@@ -5232,6 +5241,7 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             **awakening_activation_plans(),
             **lord_request_activation_plans(),
             **limits_activation_plans(),
+            **qunying_activation_plans(),
         }
     )
 )

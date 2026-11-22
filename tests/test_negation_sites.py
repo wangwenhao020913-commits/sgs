@@ -345,6 +345,18 @@ SITES: dict[Site, Rule] = {
         "（不是新的一层否定，只是第 2 层的既有读取方少了一条判据）",
     ),
     (
+        "src/sgs/skills/active.py",
+        "_SHEJIAN",
+        EFFECTIVENESS_TOKEN,
+        "Modifier(ModifierPoint.EFFECTIVENESS, _shejian_ignores_armor),",
+    ): Rule(
+        "target-level-invalid",
+        1,
+        "群英包·「锋势」祢衡【舌剑】（qunying 票 05）的『无视防具』：与【青釭剑】/ 吴懿【奔袭】② "
+        "同一条**旁路**——置 `ignore_armor` 让防具侧的无效 / 加伤 / 封顶三条链让开。判据从"
+        "「使用者自己的武器」换成「这一张牌是舌剑之【杀】」（座位标记 + 牌 id）",
+    ),
+    (
         "src/sgs/skills/negation.py",
         "_fenwei_handler",
         TARGET_INVALID_WRITE_TOKEN,

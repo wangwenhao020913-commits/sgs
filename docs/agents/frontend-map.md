@@ -232,6 +232,11 @@
 **别再加第五条手写清单**——旧实现有四处（`applyLiveDelta` 的分支 / 指纹字段表 /
 `adoptSkillLists` / `renderTable` 尾巴的 surface 钩子），漏一处就是"要等到下一次询问才更新"。
 
+`hero_tags` 的条目除了 `{tag, label, parts?}` 还可以带 **`card`**（qunying 票 05；首个载体 =
+祢衡【舌剑】的「牌堆顶的牌」）：`seat-view.js:fillHeroTags` 见到它就挂
+`mouseenter/mousemove/mouseleave` → `showCardPreview`（与武将牌上的牌区**同一个**预览函数，
+不另起一套悬停面）。没有 `card` 的标签不挂任何监听，既有标签零变化。
+
 
 ## 表现层自由区（用户可调，门禁只验形状）
 
